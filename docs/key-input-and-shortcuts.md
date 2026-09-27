@@ -887,6 +887,12 @@ Swift의 `keyDown`에서 앱 단위로 끝난다** — 그 시점에는 **어느
 의도를 뒤집지 않는다. 그 설정에서 Option 단독 편집기 기본키는 **없는 것으로 친다** — 커맨드 팔레트와
 **설정 창의 키바인딩 편집**으로 닿는다(그 목록은 커맨드 카탈로그를 그대로 쓰므로 이 액션들이 이미 든다).
 
+**편집기의 `⌥Return` 한자 후보 요청만 예외다(2026-09-27 사용자 결정).** 기본 `input.option-as-meta=true`에서
+선택한 `한`에 이 키를 누르면 입력기를 건너뛰어 선택 글자가 줄바꿈으로 바뀌었다. 편집기의 실제
+`NSTextInputClient` 범위가 있을 때 이 조합만 입력기로 보내고, 후보 탐색·선택 키를 일반 키로 다시
+재생하지 않는다. 따라서 후보 Enter는 `韓`만 확정하고, 그다음 일반 Enter는 정상 개행한다. 터미널·다른
+화면과 편집기의 나머지 Option 조합은 기존 설정을 따른다.
+
 **이 사실을 계약에 적는 이유는 「왜 안 먹지」를 막기 위해서다.** 컨텍스트를 세워도 그 설정에서는 안
 먹는데, 적어 두지 않으면 다음 사람이 컨텍스트의 결함으로 오해하고 같은 자리를 다시 판다.
 
@@ -1168,7 +1174,7 @@ macOS 전역 핫키는 window server와 권한 상태에 영향을 받을 수 �
 
 - Ctrl/Cmd가 눌린 키는 입력기(IME)에 보내지 않고 바로 단축키/인코딩 경로로 간다. 매칭은 글자가 아니라 **물리 키코드** 기준이다: 한글 입력 모드에서 Ctrl+B를 누르면 AppKit 글자는 'ㅂ'이지만 물리 키는 B이므로 0x02(tmux prefix)가 PTY로 간다. Cmd+C/V도 동일하다(kVK_ANSI_C/V).
 - 변환 규칙은 Zig(`src/platform/macos/keycode.zig`)가 소유한다: Ctrl/Cmd 조합에서 현재 레이아웃의 글자가 라틴이 아니면(>= 0x80) 물리 키코드를 US 배열 라틴으로 되돌린다. 라틴 레이아웃(영어/Dvorak)의 결과는 그대로 둔다 — 사용자가 고른 라틴 배열의 글자 배치를 존중한다. Swift는 `NSEvent.keyCode`를 ABI(`raw_key_code`, v18)로 전달만 한다.
-- 수정자 없는 일반 타이핑(Shift 포함)은 `NSTextInputClient`/`interpretKeyEvents`로 입력기를 거친다 — 한글 조합이 여기서 일어난다. **IME 판정은 전부 Zig의 키 트랜잭션이 소유한다**(ABI v20: `ime_begin` → 입력기 콜백이 `ime_insert`(확정 누적)/`ime_marked`(조합 표시)로 쌓음 → `ime_end`가 일괄 판정 — Ghostty의 keyTextAccumulator와 같은 구조). Swift에는 IME 분기 로직이 없다(전달만). 판정 규칙(위에서부터 첫 일치, 전부 unit 검증):
+- 수정자 없는 일반 타이핑(Shift 포함)은 `NSTextInputClient`/`interpretKeyEvents`로 입력기를 거친다 — 한글 조합이 여기서 일어난다. **일반 IME 입력의 판정은 Zig 키 트랜잭션이 소유한다**(ABI v20: `ime_begin` → 입력기 콜백이 `ime_insert`(확정 누적)/`ime_marked`(조합 표시)로 쌓음 → `ime_end`가 일괄 판정 — Ghostty의 keyTextAccumulator와 같은 구조). Swift는 입력을 전달하되, 위 편집기 `⌥Return` 후보 요청과 후보 선택 키의 재생 억제만 예외로 둔다. 판정 규칙(위에서부터 첫 일치, 전부 unit 검증):
   1. 확정 텍스트가 쌓였으면 UTF-8 바이트를 surface별 ordered input queue에 넣는다(LF는 CR로 정규화, bracketed paste는 적용하지 않음). 키 자체는 기본적으로 입력기가 소비하되 `input.ime-enter=newline`이면 Enter를 아래 replay 규칙으로 같은 queue 뒤에 붙인다. 단 조합 중 단일 C0(조합 조작용 Ctrl+H류)는 입력기 소유라 버린다.
   2. 텍스트는 없지만 조합이 변했으면(자모 삭제 등) 키를 보내지 않는다.
   3. 둘 다 아니면 일반 키 — 기존 인코딩 경로(Enter/Backspace/기능키).

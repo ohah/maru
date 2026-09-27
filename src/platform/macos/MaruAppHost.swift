@@ -232,6 +232,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     private var markedSelection = NSRange(location: 0, length: 0)
     private var interpretingIMEKey = false
     private var pendingUnmarkText: String?
+    // 편집기의 ⌥Return 한자 후보가 열렸을 때만 다음 키(후보 탐색/선택)를 IME 소유로
+    // 유지한다. 일반 한글 조합의 Enter는 기존 설정대로 확정 뒤 개행해야 한다.
+    private var editorHanjaCandidateActive = false
     // CR6d의 명시적 test-only 후보 문맥 PoC. 일반 터미널은 편집 문서를 소유하지 않으므로 nil이고,
     // probe의 Option-Return transaction만 원문을 PTY 대신 여기에 잠시 둔다.
     private var sessionHostCandidateDocumentContext: String?
@@ -285,6 +288,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         guard hasMarkedText() else { return }
         controller?.imeCommit()            // Surface preedit 커밋(조합 글자 PTY로)
         markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
+        editorHanjaCandidateActive = false
         markedSelection = NSRange(location: 0, length: 0)
         pendingUnmarkText = nil
         inputContext?.discardMarkedText()  // AppKit 입력기의 marked 상태 정리
@@ -351,7 +355,14 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 기존 meta-ESC 인코딩 유지, false면 Option-단독 키를 입력기 조합 경로로 보내 macOS 특수문자
         // (Option+b=∫ 등)를 조합하게 하고 Cmd/Ctrl 동반 Option만 우회한다(라이브 config 값을 ABI로 읽음).
         let optionAsMeta = controller?.optionAsMeta ?? true
-        let bypassMods: NSEvent.ModifierFlags = optionAsMeta ? [.command, .control, .option] : [.command, .control]
+        // 편집기에서만 ⌥Return을 한국어 입력기에 넘긴다. 기본 option-as-meta가 이 키를 먼저
+        // 가로채면 선택한 한글이 후보 요청 대신 줄바꿈으로 바뀐다. editor IME range가 유효할 때만
+        // 예외를 열어 터미널의 Meta-Return과 다른 화면의 Option 키 계약은 그대로 둔다.
+        let editorHanjaCandidate = exactChord == [.option] && event.keyCode == 36
+            && controller?.imeEditorRanges() != nil
+        let candidateWasActive = editorHanjaCandidateActive
+        let bypassMods: NSEvent.ModifierFlags = optionAsMeta && !editorHanjaCandidate
+            ? [.command, .control, .option] : [.command, .control]
         let chord = event.modifierFlags.intersection(bypassMods)
         // 이 키가 IME를 우회해(단축키 조합 또는 특수키) handleKeyDown으로 직행하는가.
         let bypassesIME = !chord.isEmpty || Self.directEncodeKeyCodes.contains(event.keyCode)
@@ -378,9 +389,11 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 그 외(일반 타이핑·Shift)는 입력기(IME)를 거친다 — 한글 조합이 여기서 일어난다.
         // 판정(확정 전송/조합 조작 무시/일반 키 인코딩)은 전부 Zig의 IME 트랜잭션이 한다:
         // begin -> interpretKeyEvents(입력기 콜백이 insert/marked로 쌓음) -> end(일괄 판정).
-        // Swift에는 IME 분기 로직이 없다 — 입력기의 비동기/다중 콜백에서도 이중 전송이
-        // 구조적으로 불가능하고, 판정 규칙은 Zig unit으로 고정된다.
-        controller?.imeKeyTransaction(event, suppressUnconsumedKey: suppressCandidateProbeKey) {
+        // 일반 입력의 전송 판정은 Swift에 두지 않는다. 편집기 한자 후보의 키 소유권 예외만
+        // 아래에서 넘기며, 입력기의 비동기/다중 콜백은 Zig 트랜잭션이 일괄 처리한다.
+        // 후보창 열기는 insert/marked 콜백 없이 키만 소비할 수 있다. 그때 ime_end가
+        // Option-Return을 일반 Enter로 재생하면 선택 한글이 삭제되므로 키 fallback도 막는다.
+        controller?.imeKeyTransaction(event, suppressUnconsumedKey: suppressCandidateProbeKey || editorHanjaCandidate || candidateWasActive) {
             self.interpretingIMEKey = true
             defer { self.interpretingIMEKey = false }
             self.interpretKeyEvents([event])
@@ -392,6 +405,10 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
                 self.controller?.imeInsert(pending)
             }
         }
+        // 콜백이 후보를 확정·취소하면 아래 플래그가 먼저 지워진다. Option-Return이 실제로
+        // marked text를 시작한 경우에만 다음 키까지 후보 소유권을 이어 간다.
+        if editorHanjaCandidate { editorHanjaCandidateActive = hasMarkedText() }
+        else if !hasMarkedText() { editorHanjaCandidateActive = false }
     }
 
     // 입력기가 텍스트로 만들지 않은 키의 편집 명령. 여기서 아무것도 하지 않는다(시스템 비프
@@ -420,6 +437,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         }
         pendingUnmarkText = nil
         markedTextBuffer = ""
+        editorHanjaCandidateActive = false
         markedSelection = NSRange(location: 0, length: 0)
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         imeLog("insertText", text)
@@ -458,6 +476,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     func unmarkText() {
         imeLog("unmarkText")
+        editorHanjaCandidateActive = false
         let committed = markedTextBuffer
         if sessionHostCandidateDocumentContext != nil {
             if !committed.isEmpty { sessionHostCandidateDocumentContext = committed }
@@ -486,6 +505,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 상태와 화면이 어긋나지 않게).
     func commitComposition() {
         markedTextBuffer = ""
+        editorHanjaCandidateActive = false
         markedSelection = NSRange(location: 0, length: 0)
         pendingUnmarkText = nil
         controller?.imeFocus(false)

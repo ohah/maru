@@ -11,6 +11,8 @@ test "U5 upgrade result stays typed through connect and one-shot AppSession noti
     const allocator = std.testing.allocator;
     const connect = try read(allocator, "src/platform/macos/session_host/host_connect.zig", 256 * 1024);
     defer allocator.free(connect);
+    const poll_owner = try read(allocator, "src/platform/macos/session_host/poll_owner.zig", 1024 * 1024);
+    defer allocator.free(poll_owner);
     const app_session = try read(allocator, "src/platform/macos/app_session.zig", 8 * 1024 * 1024);
     defer allocator.free(app_session);
     const i18n = try read(allocator, "src/i18n.zig", 512 * 1024);
@@ -21,6 +23,14 @@ test "U5 upgrade result stays typed through connect and one-shot AppSession noti
     defer allocator.free(matrix);
     const plan = try read(allocator, "docs/plans/new-window-and-chrome.md", 256 * 1024);
     defer allocator.free(plan);
+
+    // 거절도 결과다. wire 는 `upgrade_busy` 한 단어뿐이라, **왜** 거절했는지는 host 가 이름으로 남겨야
+    // 한다 — 2026-09-27 에 옛 host 하나가 네 번 연속 거절당했고 그 이유를 알려면 소스를 읽어야 했다.
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "pub const PreflightRefusal = enum"));
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "upgrade preflight refused: reason={s}"));
+    // 판정은 순수 함수가 소유한다 — 그래야 실제 host 를 안 띄우고 갈래를 잴 수 있다.
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "pub fn preflightCountsRefusal("));
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "pub fn preflightMembershipRefusal("));
 
     try std.testing.expectEqual(@as(usize, 1), count(connect, "pub const UpgradeNotice = union(enum)"));
     try std.testing.expectEqual(@as(usize, 1), count(connect, "pub const DetailedOutcome = struct"));

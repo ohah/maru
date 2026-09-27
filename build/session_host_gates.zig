@@ -2261,6 +2261,20 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr4a_poll_owner_process_tests.addArg("--maru-expect-tests=1");
         session_host_cr4a_step.dependOn(&run_cr4a_poll_owner_process_tests.step);
 
+        // 승계 거절 사유를 이름으로 가르는 순수 판정. syscall 이 없어 실제 host 를 안 띄운다.
+        const upgrade_refusal_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/poll_owner.zig"),
+                .target = target,
+                .optimize = cr4a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"승계 preflight:"},
+        });
+        const run_upgrade_refusal_tests = b.addRunArtifact(upgrade_refusal_tests);
+        run_upgrade_refusal_tests.addArg("--maru-expect-tests=2");
+        session_host_cr4a_step.dependOn(&run_upgrade_refusal_tests.step);
+
         const cr4a_restore_exec_bootstrap_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/restore_activation.zig"),

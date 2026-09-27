@@ -674,6 +674,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // -> screen으로 변환해 입력기 후보창이 커서 위치에 뜨게 한다.
         imeLog("? firstRect loc=\(range.location) len=\(range.length)")
         guard let (x, y, w, h) = controller?.imeCursorRectPx() else {
+            imeLog("! firstRect missing cursor rect; using view origin")
             return window.convertToScreen(convert(NSRect(x: 0, y: 0, width: 1, height: 16), to: nil))
         }
         let scale = window.backingScaleFactor
@@ -687,7 +688,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             width: viewW,
             height: viewH
         )
-        return window.convertToScreen(convert(local, to: nil))
+        let screen = window.convertToScreen(convert(local, to: nil))
+        imeLog("! firstRect backing=(\(x),\(y),\(w),\(h)) local=\(local) screen=\(screen)")
+        return screen
     }
 
     func characterIndex(for point: NSPoint) -> Int {

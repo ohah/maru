@@ -780,16 +780,23 @@ fn expectPostcommitResidue(
     defer residue_dir.close(std.testing.io);
     var residue_iterator = residue_dir.iterate();
     var count: usize = 0;
+    var unexpected: usize = 0;
     while (try residue_iterator.next(std.testing.io)) |entry| {
         count += 1;
-        if (fault != .rollback_cleanup_activation or
-            !std.mem.eql(u8, entry.name, "rollback-current"))
-            return error.TestUnexpectedResult;
-        std.debug.print("restore_postcommit_residue fault={s} name={s}\n", .{
+        const allowed = fault == .rollback_cleanup_activation and
+            std.mem.eql(u8, entry.name, "rollback-current");
+        // **이름을 먼저 남긴다.** 예전에는 허용되지 않은 leaf 를 만나면 이름을 **버리고** 곧바로
+        // `TestUnexpectedResult` 로 죽어, CI 로그만으로는 「무엇이 남았는지」를 알 수 없었다 —
+        // 2026-09-27 에 main 의 `session host macOS (Debug)` 가 이 줄에서 네 런 연속 죽었는데,
+        // 남은 leaf 의 이름이 어디에도 없어 원인을 소스 추론으로만 좁혀야 했다. 판정은 그대로다.
+        std.debug.print("restore_postcommit_residue fault={s} name={s} allowed={}\n", .{
             @tagName(fault),
             entry.name,
+            allowed,
         });
+        if (!allowed) unexpected += 1;
     }
+    if (unexpected != 0) return error.UnexpectedPostcommitResidueLeaf;
     try std.testing.expectEqual(expected_count, count);
     return count;
 }

@@ -31,6 +31,12 @@ test "U5 upgrade result stays typed through connect and one-shot AppSession noti
     // 판정은 순수 함수가 소유한다 — 그래야 실제 host 를 안 띄우고 갈래를 잴 수 있다.
     try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "pub fn preflightCountsRefusal("));
     try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "pub fn preflightMembershipRefusal("));
+    // 선언만 고정하면 제품이 그 함수를 **안 쓰고 인라인해도** 초록이다(5회차 P1, 6회차 Q4). 그러면
+    // 순수 판정자가 재는 갈래와 실제로 도는 갈래가 갈라져, 테스트가 통과하는 채로 동작이 바뀐다.
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "if (preflightCountsRefusal("));
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "return preflightMembershipRefusal(requester_membership);"));
+    // 포맷만 고정하면 `{s}` 자리에 상수를 넣어도 초록이다(5회차 P2) — 이유 **이름**이 찍혀야 한다.
+    try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "@tagName(refusal),"));
 
     try std.testing.expectEqual(@as(usize, 1), count(connect, "pub const UpgradeNotice = union(enum)"));
     try std.testing.expectEqual(@as(usize, 1), count(connect, "pub const DetailedOutcome = struct"));

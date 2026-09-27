@@ -50,6 +50,25 @@ test "owner.lock 이름 유지: 첫 실행 경로와 승계 경로가 **둘 다*
     try std.testing.expectEqual(@as(usize, 1), count(restore, "auditOwnedPath(retention.owner_path)"));
     try std.testing.expectEqual(@as(usize, 1), count(restore, "healOwnedPath(retention.owner_path)"));
 
+    // **언제** 치유하는지도 고정한다. `healOwnedPath` 를 순수 판정자로 직접 불러 재면 호출부의 조건은
+    // 아무도 안 본다 — `.absent` 를 `.replaced` 로 바꿔도 게이트가 초록이었다(적대적 검증 5회차 P3).
+    // 그러면 이 PR 이 고친 바로 그 상황(이름이 사라진 host)에서만 치유가 안 돈다.
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "if (audit == .absent) lifetime_owner.healOwnedPath(owner_path) else .not_needed;"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore, "if (audit == .absent)"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore, "upgrade_context.lifetime_owner.healOwnedPath(retention.owner_path)"));
+
+    // 감사는 **남의 것**을 내 것으로 오인하면 안 된다. mode/uid 검사를 빼도 `.intact` 가 아니라
+    // `.replaced` 로 갈리는 덕에 순수 판정자는 통과했다(5회차 P4) — 그 갈림의 근거를 여기서 잠근다.
+    try std.testing.expectEqual(@as(usize, 1), count(lease, "if (!metadataIsValid(stat, c.getuid())) return .replaced;"));
+
+    // 주기도 **어느 상수를 넘기는지**까지 본다. `PathWatch.due` 는 순수 함수라 인자를 안 보고,
+    // 갱신 주기(1시간)를 감사 자리에 넘겨도 초록이었다(6회차 Q1·Q3). 그러면 감사가 60배 늦어진다.
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "owner_watch.due(now_ms, owner_lock_audit_interval_ms)"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore, "owner_watch.due(now_ms, tmp_retention.audit_interval_ms)"));
+    // 그 두 이름이 같은 출처를 가리킨다 — 별도 리터럴이 되면 한쪽만 고쳐진다.
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "= tmp_retention.audit_interval_ms;"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, "= tmp_retention.touch_interval_ms;"));
+
     // 계약 문서가 그 사실을 적는다 — 코드만 고치고 문서가 침묵하면 다음 사람이 한쪽을 지운다.
     try std.testing.expectEqual(@as(usize, 1), count(contract, "**승계한 host도 이 일을 한다**"));
 }

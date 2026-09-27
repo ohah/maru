@@ -515,6 +515,10 @@ N5(미니맵 N5a `c0aa24b11` · 막대와 미니맵 N5b `47eecce79`). **「섰�
     보인다(`IME10`·`FOLD-SEL1`). 실제 화면은 [접힌 선택](../images/editor-ime-fold-selection.png) →
     [조합](../images/editor-ime-fold-composition.png) → [확정](../images/editor-ime-fold-committed.png)에서
     숨은 두 줄이 확정 뒤에도 남는 것으로 확인했다.
+    한자 후보창 앵커는 렌더가 확정한 본문·gutter 좌표를 사용한다(`IME5`).
+    기존 좌표는 pane의 본문 오프셋을 중복 적용하고 gutter를 빼서 후보창이 글자보다 왼쪽 아래에 떴다.
+    실제 한국어 입력기의 [수정 전 후보창](../images/editor-ime-hanja-position-before.png)과
+    [수정 후 후보창](../images/editor-ime-hanja-position-after.png)에서 선택한 `한` 바로 아래로 이동한 것을 확인했다.
   **터미널이 쓰는 바로 그 경로라 최대 리스크**이며 헤드리스 판정자에 더해 실제 GUI 검증이 필요하다.
   멀티 커서 × IME 정책은 primary 조합·확정 시 복제로 정했고, 실제 입력기로 검증한다(../native-editor.md §11).
 - **N4 — 토큰과 LSP 표시.** 미니맵이 lexer 층에 의존하므로 N5보다 앞선다. 계약 절과의 대응:

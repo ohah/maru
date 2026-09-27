@@ -4349,17 +4349,16 @@ pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
     if (col < first_col) return null; // 가로로 벗어났다
     const screen_col = col - first_col;
 
-    const body = editorBodyRect(self, .{
-        .x = self.active_pane_rect.x,
-        .y = self.active_pane_rect.y,
-        .w = self.active_pane_rect.w,
-        .h = self.active_pane_rect.h,
-    }, term);
+    // firstRect는 지금 화면에 그린 글자의 자리여야 한다. active_pane_rect는 이미 pane의
+    // terminal grid라 editorBodyRect에 다시 넣으면 tab bar·band가 두 번 더해진다.
+    // 렌더가 굳힌 기하를 쓰면 gutter와 content inset도 같은 프레임의 값이 된다.
+    const geom = term.rt.editor_hit_geom;
+    if (!geom.drawn) return null;
     const cw: i32 = @intCast(self.cell_width_px);
     const ch: i32 = @intCast(self.cell_height_px);
     return .{
-        .x = @as(i32, @intCast(body.x)) + @as(i32, @intCast(screen_col)) * cw,
-        .y = @as(i32, @intCast(body.y)) + @as(i32, @intCast(screen_row)) * ch,
+        .x = geom.body_x + @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast(screen_col)) * cw,
+        .y = geom.body_y + @as(i32, @intCast(screen_row)) * ch,
         .w = @intCast(self.cell_width_px),
         .h = @intCast(self.cell_height_px),
     };
@@ -10237,6 +10236,8 @@ test "IME5 후보창은 조합 글자 아래에 선다 — pane 구석이 아니
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     const term = fx.term;
+    // 제품은 leaf가 아니라 그 안의 terminal grid를 active_pane_rect에 캐시한다.
+    fx.session.active_pane_rect = pane_ops.paneTermRect(fx.session, fx.leaf_rect);
     if (appendPaneFrame(fx.session, fx.leaf_rect, term)) |*d| { // pane 사각을 세운다
         var drawn = d.*;
         drawn.dl.deinit(allocator);
@@ -10247,6 +10248,12 @@ test "IME5 후보창은 조합 글자 아래에 선다 — pane 구석이 아니
     // ⑴ 줄 머리(offset 0)면 본문 왼쪽 끝이다.
     term.rt.editor_selection = editor_selection.Selection.at(0);
     const head = editorImeCaretRect(fx.session, term) orelse return error.NoCaretRect;
+    const geom = term.rt.editor_hit_geom;
+    try testing.expect(geom.drawn);
+    // OS 후보창은 렌더가 실제 글자를 그린 셀에 붙어야 한다. 활성 pane의 terminal grid에
+    // editorBodyRect를 다시 적용하거나 gutter를 빠뜨리면 상대 이동 테스트는 통과해도 여기서 실패한다.
+    try testing.expectEqual(geom.body_x + @as(i32, @intCast(geom.content_left_px)), head.x);
+    try testing.expectEqual(geom.body_y, head.y);
 
     // ⑵ 같은 줄 다섯 글자 뒤면 **다섯 칸 오른쪽**이다 — 구석 고정이면 둘이 같아진다.
     term.rt.editor_selection = editor_selection.Selection.at(5);

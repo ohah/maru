@@ -566,23 +566,66 @@ pub const Owner = struct {
         }
     }
 
-    fn upgradePreflight(ctx: *anyopaque, requester: *connection_turn.Client) bool {
-        const self: *Owner = @ptrCast(@alignCast(ctx));
-        if (self.server.subscriptions.count() != 0 or
-            self.server.registry.attachmentCount() != 0) return false;
+    /// 승계 preflight 가 거절한 **이유**. 이 갈래들이 하나의 `upgrade_busy` 로 접히면, 승계가 왜 안
+    /// 되는지 사람이 소스를 읽어야 알 수 있다 — 2026-09-27 에 실제로 그랬다. 옛 host 하나가 네 번
+    /// 연속 `upgrade_busy` 로 거절당했고, `poll_owner` 의 이 조건을 읽고 나서야 「구독·attachment 가
+    /// 0 이어야 한다」는 것을 알았다. 값 자체는 wire 로 안 나간다(프로토콜을 안 바꾼다) — host 로그에
+    /// 이름으로 남겨 진단이 닿게 한다.
+    pub const PreflightRefusal = enum {
+        subscriptions_live,
+        attachments_live,
+        requester_not_ready,
+        requester_socket_busy,
+        peer_not_idle,
+        peer_socket_busy,
+        requester_not_a_member,
+    };
+
+    /// 숫자 둘만 보는 **순수** 판정. 「구독이 남았다」와 「attachment 가 남았다」는 서로 다른 사실이고,
+    /// 대응도 다르다(화면 구독은 탭을 닫으면 줄고, attachment 는 런타임에서 떨어져야 준다).
+    pub fn preflightCountsRefusal(subscriptions: usize, attachments: usize) ?PreflightRefusal {
+        if (subscriptions != 0) return .subscriptions_live;
+        if (attachments != 0) return .attachments_live;
+        return null;
+    }
+
+    /// 요청자가 이 host 의 클라이언트 목록에 **정확히 한 번** 있어야 한다. 0 이면 남의 요청이고,
+    /// 둘 이상이면 장부가 깨진 것이다 — 둘 다 승계를 걸면 안 되지만 **같은 사실이 아니다**.
+    pub fn preflightMembershipRefusal(membership: usize) ?PreflightRefusal {
+        return if (membership == 1) null else .requester_not_a_member;
+    }
+
+    fn upgradePreflightRefusal(self: *Owner, requester: *connection_turn.Client) ?PreflightRefusal {
+        if (preflightCountsRefusal(
+            self.server.subscriptions.count(),
+            self.server.registry.attachmentCount(),
+        )) |refusal| return refusal;
         var requester_membership: usize = 0;
         for (self.clients) |maybe_client| {
             const client = maybe_client orelse continue;
             if (client == requester) {
                 requester_membership += 1;
-                if (!client.requesterReadyForUpgrade() or
-                    !client.socketQuiescentForUpgrade()) return false;
+                if (!client.requesterReadyForUpgrade()) return .requester_not_ready;
+                if (!client.socketQuiescentForUpgrade()) return .requester_socket_busy;
                 continue;
             }
-            if (!client.idleForUpgrade() or
-                !client.socketQuiescentForUpgrade()) return false;
+            if (!client.idleForUpgrade()) return .peer_not_idle;
+            if (!client.socketQuiescentForUpgrade()) return .peer_socket_busy;
         }
-        return requester_membership == 1;
+        return preflightMembershipRefusal(requester_membership);
+    }
+
+    fn upgradePreflight(ctx: *anyopaque, requester: *connection_turn.Client) bool {
+        const self: *Owner = @ptrCast(@alignCast(ctx));
+        const refusal = self.upgradePreflightRefusal(requester) orelse return true;
+        // 거절은 흔한 일이 아니다(승계 시도 자체가 앱 시작마다 한 번이다) — 한 줄을 남겨도 로그가 안 붇고,
+        // 없으면 「왜 안 되나」가 사후에 재구성되지 않는다.
+        host_log.line("upgrade preflight refused: reason={s} subs={d} attach={d}", .{
+            @tagName(refusal),
+            self.server.subscriptions.count(),
+            self.server.registry.attachmentCount(),
+        });
+        return false;
     }
 
     fn reclaimScreenPressure(
@@ -4776,4 +4819,28 @@ test "poll owner: 애니메이션 전진은 cadence 경계마다 정확히 한 �
     server.runtime_ops = bare_ops;
     owner.scheduleCadence(1_000_000 + 2 * cadence_ns);
     try testing.expectEqual(@as(usize, 0), bare.animation_ticks);
+}
+
+// 터미널에서 왜 중요한가: 승계가 거절되면 그 host 는 옛 빌드에 남고, 사용자는 「업데이트가 안 된다」만
+// 본다. 이유가 이름으로 안 남으면 왜 안 되는지 소스를 읽어야 알 수 있다 — 2026-09-27 에 옛 host 하나가
+// 네 번 연속 `upgrade_busy` 로 거절당했고, 그 이유를 아는 데 소스 독해가 필요했다.
+
+test "승계 preflight: «구독이 남았다» 와 «붙어 있다» 는 다른 사실로 남는다" {
+    const t = std.testing;
+    // 둘 다 0 이어야 통과한다 — 이것이 승계의 전제다.
+    try t.expectEqual(@as(?Owner.PreflightRefusal, null), Owner.preflightCountsRefusal(0, 0));
+    // 구독이 먼저다. 화면 구독은 탭을 닫으면 줄고, attachment 는 런타임에서 떨어져야 준다 — 대응이 다르니
+    // 한 값으로 접지 않는다.
+    try t.expectEqual(Owner.PreflightRefusal.subscriptions_live, Owner.preflightCountsRefusal(1, 0).?);
+    try t.expectEqual(Owner.PreflightRefusal.attachments_live, Owner.preflightCountsRefusal(0, 1).?);
+    // 둘 다 남았으면 구독을 먼저 말한다 — 두 이름이 같은 자리에서 나오지 않게 순서를 고정한다.
+    try t.expectEqual(Owner.PreflightRefusal.subscriptions_live, Owner.preflightCountsRefusal(3, 9).?);
+}
+
+test "승계 preflight: 요청자는 이 host 의 클라이언트 목록에 정확히 한 번 있어야 한다" {
+    const t = std.testing;
+    try t.expectEqual(@as(?Owner.PreflightRefusal, null), Owner.preflightMembershipRefusal(1));
+    // 0 이면 남의 요청이고, 둘 이상이면 장부가 깨진 것이다. 둘 다 승계를 걸면 안 된다.
+    try t.expectEqual(Owner.PreflightRefusal.requester_not_a_member, Owner.preflightMembershipRefusal(0).?);
+    try t.expectEqual(Owner.PreflightRefusal.requester_not_a_member, Owner.preflightMembershipRefusal(2).?);
 }

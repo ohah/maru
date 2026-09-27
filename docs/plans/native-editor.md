@@ -512,7 +512,9 @@ N5(미니맵 N5a `c0aa24b11` · 막대와 미니맵 N5b `47eecce79`). **「섰�
     실제 줄 합치기는 확정 시 일어난다(`IME9` 제품 렌더 판정자). 접을 때 선택 끝이 숨으면
     [시각 매핑 계약](../native-editor-visual-mapping.md)의 VS Code 규칙대로 머리줄 끝으로 옮긴다.
     이 경우 IME는 조정된 보이는 선택만 치환하고, 숨었던 끝줄의 원문은 남으며 조합 미리보기도
-    보인다(`IME10`·`FOLD-SEL1`).
+    보인다(`IME10`·`FOLD-SEL1`). 실제 화면은 [접힌 선택](../images/editor-ime-fold-selection.png) →
+    [조합](../images/editor-ime-fold-composition.png) → [확정](../images/editor-ime-fold-committed.png)에서
+    숨은 두 줄이 확정 뒤에도 남는 것으로 확인했다.
   **터미널이 쓰는 바로 그 경로라 최대 리스크**이며 헤드리스 판정자에 더해 실제 GUI 검증이 필요하다.
   멀티 커서 × IME 정책은 primary 조합·확정 시 복제로 정했고, 실제 입력기로 검증한다(../native-editor.md §11).
 - **N4 — 토큰과 LSP 표시.** 미니맵이 lexer 층에 의존하므로 N5보다 앞선다. 계약 절과의 대응:

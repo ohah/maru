@@ -109,8 +109,10 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     const old_count = countOccurrences(text, "boundary_step.dependOn(&run_");
     const new_count = g.countDependenciesWithPrefix("boundary_step", "run_");
     // +1(2026-09-23): `test-event-enqueue-epoch`(빈 드레인 건너뛰기의 전제를 지키는 경계 판정자).
-    try std.testing.expectEqual(@as(usize, 205), old_count);
-    try std.testing.expectEqual(@as(usize, 206), new_count);
+    // +1(2026-09-27): `session_host_owner_lock_retention_boundary` — 자리 갱신·이름 감사가 첫 실행
+    //  경로와 **승계 경로 둘 다**에 배선됐는지 잰다. 한쪽에만 있던 것이 그 사고였다.
+    try std.testing.expectEqual(@as(usize, 206), old_count);
+    try std.testing.expectEqual(@as(usize, 207), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0

@@ -490,7 +490,23 @@ test "tmp 정리 회피: touch 가 endpoint 와 **owner.lock** 시각을 함께 
     _ = c.close(lock_fd);
     if (c.utimensat(c.AT.FDCWD, fake_lock.ptr, &past, 0) != 0) return error.SkipZigTest;
 
+    // manifest 는 `<dir>/hosts/<32hex>/host.v1.json` 이다 — 갱신 목록이 그 자리도 찍는지 재려면
+    // 실제 모양을 만들어 둬야 한다.
+    var manifest_buf: [640]u8 = undefined;
+    const fake_manifest = host_manifest.manifestPathIn(&manifest_buf, dir, 0xabcd) catch
+        return error.SkipZigTest;
+    host_manifest.prepareHostDirectory(dir, 0xabcd) catch return error.SkipZigTest;
+    defer {
+        _ = c.unlink(fake_manifest.ptr);
+        host_manifest.removeEmptyHostDirectories(dir, 0xabcd);
+    }
+    const manifest_fd = c.open(fake_manifest.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
+    if (manifest_fd < 0) return error.SkipZigTest;
+    _ = c.close(manifest_fd);
+    if (c.utimensat(c.AT.FDCWD, fake_manifest.ptr, &past, 0) != 0) return error.SkipZigTest;
+
     const cwd = std.Io.Dir.cwd();
+    const manifest_before = cwd.statFile(testing.io, fake_manifest, .{}) catch return error.SkipZigTest;
     const before = cwd.statFile(testing.io, fake_socket, .{}) catch return error.SkipZigTest;
     const lock_before = cwd.statFile(testing.io, fake_lock, .{}) catch return error.SkipZigTest;
     touchRuntimeArtifacts(dir, fake_socket, 0xabcd, null, fake_lock);
@@ -501,6 +517,20 @@ test "tmp 정리 회피: touch 가 endpoint 와 **owner.lock** 시각을 함께 
     try testing.expect(after.mtime.nanoseconds > before.mtime.nanoseconds);
     // lock 이름을 잃으면 그 host 는 바깥에서 「주인 없음」으로 보여 승계 대상에서 영구히 빠진다.
     try testing.expect(lock_after.mtime.nanoseconds > lock_before.mtime.nanoseconds);
+    // manifest 도 같은 목록에 있다 — 소켓과 lock 만 재면 목록에서 조용히 빠져도 안 걸린다
+    // (적대적 검증 4회차에서 manifest 갱신을 꺼도 초록이었다).
+    const manifest_after = cwd.statFile(testing.io, fake_manifest, .{}) catch return error.SkipZigTest;
+    try testing.expect(manifest_after.mtime.nanoseconds > manifest_before.mtime.nanoseconds);
+}
+
+test "tmp 정리 회피: 단조 시계가 ms 로 내려와야 주기가 돈다" {
+    // `awakeMs` 가 늘 0 을 내면 첫 갱신만 돌고 그 뒤로 `now -| last` 가 영원히 0 이라 **갱신이 한 번만
+    // 돌고 멈춘다** — 그 host 는 3 일 뒤 자기 자리를 잃는다. 적대적 검증 4회차에서 이 변이가 초록으로
+    // 살아남았다. 절대값을 잠그지 않고 「0 이 아니고 뒤로 안 간다」만 잰다.
+    const a = tmp_retention.awakeMs(testing.io);
+    const b_ms = tmp_retention.awakeMs(testing.io);
+    try testing.expect(a > 0);
+    try testing.expect(b_ms >= a);
 }
 
 test "tmp 정리 회피 주기는 tmp_cleaner의 3일 한계보다 충분히 짧다" {

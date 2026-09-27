@@ -5260,7 +5260,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .filters = &.{"tmp 정리 회피"},
         });
         const run_owner_lock_touch_tests = b.addRunArtifact(owner_lock_touch_tests);
-        run_owner_lock_touch_tests.addArg("--maru-expect-tests=3");
+        run_owner_lock_touch_tests.addArg("--maru-expect-tests=4");
         run_owner_lock_touch_tests.setCwd(b.path("."));
         session_host_owner_lock_heal_step.dependOn(&run_owner_lock_touch_tests.step);
 

@@ -34,6 +34,14 @@ test "owner.lock 이름 유지: 첫 실행 경로와 승계 경로가 **둘 다*
     try std.testing.expectEqual(@as(usize, 1), count(daemon, "tmp_retention.shouldTouch("));
     try std.testing.expectEqual(@as(usize, 1), count(restore, "tmp_retention.shouldTouch("));
 
+    // **무엇을 넘기는지**까지 고정한다. 호출이 있다는 것만 재면, 후계자가 `.owner_path` 에 소켓 경로를
+    // 넣어도 통과한다 — 그러면 lock 은 안 갱신되고 소켓만 두 번 갱신돼 이 PR 이 고친 결함이 조용히
+    // 되살아난다(적대적 검증 4회차에서 실제로 초록으로 살아남았다).
+    // 닻은 **그 자리에만 있는 문법 조각**이어야 한다. `.socket_path = socket_path,` 는 같은 파일의
+    // `upgrade_loop.Context` 에도 있어 둘로 세어진다 — 부분문자열이 아니라 자리를 겨눈다.
+    try std.testing.expectEqual(@as(usize, 1), count(restore, ".owner_path = owner_path,"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, ".owner_path = owner_path,"));
+
     // 감사·치유도 두 루프 모두에 있다.
     try std.testing.expectEqual(@as(usize, 1), count(lease, "pub fn auditOwnedPath("));
     try std.testing.expectEqual(@as(usize, 1), count(lease, "pub fn healOwnedPath("));

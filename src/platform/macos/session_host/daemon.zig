@@ -25,6 +25,7 @@ const notification_os_delivery = @import("notification_os_delivery.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const discovery = @import("discovery.zig");
 const owner_lease = @import("owner_lease.zig");
+const tmp_retention = @import("tmp_retention.zig");
 const host_manifest = @import("host_manifest.zig");
 const agent_hook_logs = @import("agent_hook_logs.zig");
 const screen_stream = @import("maru").session.screen_stream;
@@ -343,7 +344,21 @@ const desired_fd_limit = 8192;
 /// **tick 수가 아니라 벽시계로 잰다.** `pollOnce`는 `poll_timeout_ms`를 보장하지 않는다 — armed upgrade나
 /// 도착한 이벤트가 있으면 즉시 반환하므로, 입력이 활발한 host에서는 tick이 훨씬 빨리 돈다. tick으로 세면
 /// 그런 host가 초당 여러 번 touch하게 되어 의미 없는 syscall을 반복한다.
-const runtime_touch_interval_ms: u64 = 60 * 60 * 1000;
+const runtime_touch_interval_ms: u64 = tmp_retention.touch_interval_ms;
+
+/// `owner.lock` **이름** 감사 주기. 갱신 주기(1시간)보다 촘촘하다 — 이름이 사라진 채로 승계가 걸리면
+/// 후계자가 arm 단계에서 죽으므로(`validateInheritedExact`), 그 창을 짧게 잡는 값이 싸다(2 syscall).
+const owner_lock_audit_interval_ms: u64 = tmp_retention.audit_interval_ms;
+
+fn pathExists(path: [:0]const u8) bool {
+    var stat: posix.Stat = undefined;
+    return c.fstatat(c.AT.FDCWD, path.ptr, &stat, c.AT.SYMLINK_NOFOLLOW) == 0;
+}
+
+/// 진단 전용. 경로를 못 만들면 빈 문자열을 주고, `pathExists` 가 그것을 「없음」으로 읽는다.
+fn manifestPathOrEmpty(dir_path: [:0]const u8, host_id: u128, buf: []u8) [:0]const u8 {
+    return host_manifest.manifestPathIn(buf, dir_path, host_id) catch "";
+}
 
 /// 자연 종료 유예 — `poll_timeout_ms`(200ms) × 이 횟수만큼 **연속으로** 비어 있어야 종료한다(= 5초).
 /// 마지막 runtime이 사라진 직후 곧바로 죽으면, 그 순간 재접속하려던 GUI가 endpoint를 잃고 새 host를 띄우게 된다.
@@ -399,14 +414,14 @@ fn shouldExitNaturally(
 /// 직후에 뜨면 `now_ms` 자체가 작다. `0`을 sentinel로 쓰면 그 host의 첫 touch가 1시간 뒤로 밀려, 그동안
 /// 물려받은 옛 시각이 그대로 남는다.
 fn shouldTouchRuntimeArtifacts(now_ms: u64, last_touch_ms: ?u64) bool {
-    const last = last_touch_ms orelse return true;
-    return now_ms -| last >= runtime_touch_interval_ms;
+    // 판정도 `tmp_retention` 이 소유한다 — 같은 논리를 두 벌 들면 한쪽만 고쳐지고, 실제로 그렇게
+    // 갈라져서 승계한 host 가 갱신을 통째로 놓쳤다.
+    return tmp_retention.shouldTouch(now_ms, last_touch_ms);
 }
 
 /// 단조 시계의 현재 ms. touch 주기를 벽시계로 재기 위한 것이라 절대 시각일 필요는 없다.
 fn awakeMs(io: std.Io) u64 {
-    const now_ns = std.Io.Clock.awake.now(io).nanoseconds;
-    return if (now_ns <= 0) 0 else @intCast(@divFloor(now_ns, std.time.ns_per_ms));
+    return tmp_retention.awakeMs(io);
 }
 
 /// endpoint·manifest·그 부모 디렉터리의 시각을 현재로 갱신해 `tmp_cleaner`의 3일 조건을 깬다.
@@ -419,30 +434,16 @@ fn touchRuntimeArtifacts(
     socket_path: [:0]const u8,
     host_id: u128,
     published_manifest: ?*host_manifest.Published,
+    owner_path: [:0]const u8,
 ) void {
-    // null times = 현재 시각으로 설정(POSIX). AT_SYMLINK_NOFOLLOW를 주지 않아 경로를 그대로 따른다.
-    _ = c.utimensat(c.AT.FDCWD, socket_path.ptr, null, 0);
-    _ = c.utimensat(c.AT.FDCWD, dir_path.ptr, null, 0);
-    if (published_manifest) |published| {
-        _ = published.touchExact() catch {};
-    } else {
-        var manifest_buf: [512]u8 = undefined;
-        if (host_manifest.manifestPathIn(&manifest_buf, dir_path, host_id)) |path| {
-            _ = c.utimensat(c.AT.FDCWD, path.ptr, null, 0);
-        } else |_| {}
-    }
-    // 소켓과 manifest의 부모(`/tmp/maru-<uid>`, `.../sh`)도 함께 찍는다. 자식이 남아 있으면 `-empty` 조건에
-    // 걸리지 않지만, 자식이 먼저 지워진 뒤 빈 디렉터리로 남는 창을 없앤다.
-    // 우리가 **실제로 쓰는** 뿌리를 찍는다. uid 로 다시 계산하면 격리된 실행에서 남의 자리를 건드리면서
-    // 정작 자기 endpoint 는 안 찍어, 살아 있는 host 가 tmp 정리에 지워지는 원래 실패로 되돌아간다.
-    var root_buf: [256]u8 = undefined;
-    if (short_endpoint.currentUserRootPathIn(&root_buf)) |root| {
-        _ = c.utimensat(c.AT.FDCWD, root.ptr, null, 0);
-    } else |_| {}
-    var sock_dir_buf: [272]u8 = undefined;
-    if (short_endpoint.currentSocketDirPathIn(&sock_dir_buf)) |sock_dir| {
-        _ = c.utimensat(c.AT.FDCWD, sock_dir.ptr, null, 0);
-    } else |_| {}
+    // 목록은 `tmp_retention` 이 소유한다 — 여기와 후계자 루프가 각자 목록을 들면 어긋나고, 실제로
+    // 어긋나서 업그레이드한 host 가 보호를 통째로 잃었다.
+    tmp_retention.touchAll(.{
+        .session_dir = dir_path,
+        .socket_path = socket_path,
+        .owner_path = owner_path,
+        .host_id = host_id,
+    }, published_manifest);
 }
 
 test "tmp 정리 회피: 처음엔 즉시, 그 뒤엔 벽시계 주기로만 touch한다" {
@@ -457,7 +458,7 @@ test "tmp 정리 회피: 처음엔 즉시, 그 뒤엔 벽시계 주기로만 tou
     try std.testing.expect(!shouldTouchRuntimeArtifacts(base, base + 5_000));
 }
 
-test "tmp 정리 회피: touch가 실제로 파일 시각을 되돌린다" {
+test "tmp 정리 회피: touch 가 endpoint 와 **owner.lock** 시각을 함께 되돌린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     // 판정 함수만 테스트하면 `utimensat` 호출이 런타임에 무효여도(잘못된 인자·경로) 통과한다. 그러면 host는
     // 매시간 아무 일도 하지 않고 3일 뒤 endpoint를 잃는다 — 정확히 막으려던 그 상태다.
@@ -479,13 +480,27 @@ test "tmp 정리 회피: touch가 실제로 파일 시각을 되돌린다" {
     const past: [2]c.timespec = .{ ancient, ancient };
     if (c.utimensat(c.AT.FDCWD, fake_socket.ptr, &past, 0) != 0) return error.SkipZigTest;
 
+    // `owner.lock` 도 같은 운명이다 — 갱신 목록에서 빠져 있으면 **이것만** tmp 정리에 지워진다
+    // (2026-09-27 실측: 8일 된 host 의 디렉터리에 manifest 만 남고 lock 은 사라졌다).
+    var lock_buf: [512]u8 = undefined;
+    const fake_lock = try std.fmt.bufPrintZ(&lock_buf, "{s}/owner.lock", .{dir});
+    defer _ = c.unlink(fake_lock.ptr);
+    const lock_fd = c.open(fake_lock.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
+    if (lock_fd < 0) return error.SkipZigTest;
+    _ = c.close(lock_fd);
+    if (c.utimensat(c.AT.FDCWD, fake_lock.ptr, &past, 0) != 0) return error.SkipZigTest;
+
     const cwd = std.Io.Dir.cwd();
     const before = cwd.statFile(testing.io, fake_socket, .{}) catch return error.SkipZigTest;
-    touchRuntimeArtifacts(dir, fake_socket, 0xabcd, null);
+    const lock_before = cwd.statFile(testing.io, fake_lock, .{}) catch return error.SkipZigTest;
+    touchRuntimeArtifacts(dir, fake_socket, 0xabcd, null, fake_lock);
     const after = cwd.statFile(testing.io, fake_socket, .{}) catch return error.SkipZigTest;
+    const lock_after = cwd.statFile(testing.io, fake_lock, .{}) catch return error.SkipZigTest;
 
     // 갱신되지 않으면 3일 조건을 못 깨고, host는 살아 있는데도 endpoint를 잃는다.
     try testing.expect(after.mtime.nanoseconds > before.mtime.nanoseconds);
+    // lock 이름을 잃으면 그 host 는 바깥에서 「주인 없음」으로 보여 승계 대상에서 영구히 빠진다.
+    try testing.expect(lock_after.mtime.nanoseconds > lock_before.mtime.nanoseconds);
 }
 
 test "tmp 정리 회피 주기는 tmp_cleaner의 3일 한계보다 충분히 짧다" {
@@ -837,6 +852,8 @@ fn runSessionHostImpl(
     var served_any_client = false;
     var empty_idle_ticks: usize = 0;
     var last_touch_ms: ?u64 = null;
+    var owner_watch: owner_lease.PathWatch = .{};
+    var audit_manifest_buf: [512]u8 = undefined;
     while (true) {
         fd_owner.requireCurrentProcessOrFatal();
         server.tickOwner();
@@ -849,8 +866,27 @@ fn runSessionHostImpl(
                 socket_path,
                 host_id,
                 if (published_manifest) |*published| published else null,
+                owner_path,
             );
             last_touch_ms = now_ms;
+        }
+        // 갱신이 있어도 **이미 지워진 뒤**면 소용이 없고, 지운 주체가 tmp 정리가 아닐 수도 있다(행위자
+        // 미상). 그래서 이름을 주기적으로 감사하고 사라졌으면 그 자리에 다시 세운다 — 읽기 전용 2 syscall.
+        if (owner_watch.due(now_ms, owner_lock_audit_interval_ms)) {
+            const audit = lifetime_owner.auditOwnedPath(owner_path);
+            const heal = if (audit == .absent) lifetime_owner.healOwnedPath(owner_path) else .not_needed;
+            if (owner_watch.report(audit) and audit != .intact)
+                host_log.line(
+                    "owner lock path {s}: pid={d} host={x:0>32} manifest={d} dir={d} heal={s}",
+                    .{
+                        @tagName(audit),
+                        std.c.getpid(),
+                        host_id,
+                        @intFromBool(pathExists(manifestPathOrEmpty(dir_path, host_id, &audit_manifest_buf))),
+                        @intFromBool(pathExists(dir_path)),
+                        @tagName(heal),
+                    },
+                );
         }
         if (registry.count() != 0) served_any_runtime = true;
         if (fd_owner.activeCount() != 0) served_any_client = true;

@@ -473,6 +473,15 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   닫고 원본 fd/reader/admission으로 재개한다.
 - exec 전체 동안 lifetime `owner.lock` slot을 상속하고 discovery entry를 `restoring`으로 유지해 on-demand spawn
   경쟁을 막는다. 같은 major 중복 spawn만 막는 단기 `launch-v<major>.lock`은 상속하지 않는다.
+- **`owner.lock`의 「이름」도 지켜야 한다.** 락은 fd가 쥐므로 pathname이 사라져도 배타성은 그대로지만,
+  후계자가 그 fd를 **경로와 대조해** 채택한다(`owner_lease.validateInheritedExact`). 그 대조는
+  `armRestoreInvocation` 안에서 일어나고 **그 시점에는 롤백이 아직 준비되지 않았다** — 즉 이름이 없으면
+  업그레이드가 arm 단계에서 실패하고 프로세스가 세션째 종료된다. 그래서 host는 자기 자리를 젊게 유지하고
+  (`tmp_retention.touchAll` — 목록에 `owner.lock` 포함), 이름이 사라졌으면 **같은 경로에 다시 세운다**
+  (`owner_lease.healOwnedPath`). 남이 그 이름에 앉았으면(`replaced`) 손대지 않는다.
+  **승계한 host도 이 일을 한다** — 갱신이 첫 실행 경로에만 있던 탓에 한 번이라도 업그레이드한 host가
+  보호를 통째로 잃었다(2026-09-27 실측: `upgrade_epoch=3`인 8일 된 host의 디렉터리에 manifest만 남고
+  `owner.lock`은 사라져, 그 host가 승계 대상에서 영구히 빠졌다).
 - listen/client socket, wake pipe, trace/일반 file descriptor는 상속하지 않는다. exec 직전에는
   **`FD_CLOEXEC`가 꺼진 fd 3 이상 집합**이 allowlist와 정확히 같은지 검증한다(original PTY/owner fd처럼 계속 열린
   CLOEXEC 원본은 이 시점에 존재할 수 있다). target entrypoint 직후에는 **열린 fd 3 이상 집합**이 allowlist와

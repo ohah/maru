@@ -726,8 +726,16 @@ entry는 **반드시 쌓인다**. discovery의 canonical entry cap(16)이 그 �
 16개를 채운 순간 `too_many_hosts`로 열거 전체가 포기되어 **살아 있는 host까지 발견되지 않는다**. 그 상태의 사용자
 증상은 "영속 세션이 조용히 안 되고 새 터미널이 in-process로 떨어지며 `maru host/sessions/runtime` 진단이 전부 막힘"
 이다(실측: 잔여 70개가 산 host 1개를 밀어냄). 그래서 cap은 **owner lease가 `.held`이거나 `.unknown`인 entry에만**
-적용한다 — `.free`(소유 프로세스 없음 = 죽음이 확정)는 세지 않는다. `.unknown`은 fd/권한 실패일 수 있어 죽음의
+적용한다 — `.free`(소유 프로세스 없음)는 세지 않는다. `.unknown`은 fd/권한 실패일 수 있어 죽음의
 증거가 아니므로 그대로 센다(`owner_lease.observe` 계약).
+
+> **`.free`를 「죽음이 확정」으로 읽지 않는다(2026-09-27 정정).** `observe`는 **파일이 없을 때도** `.free`를
+> 낸다. 락은 fd가 쥐는 것이지 pathname이 쥐는 것이 아니라서, 살아 있는 host의 `owner.lock`이 지워지면 그 host가
+> 락을 계속 쥔 채로도 `.free`로 보인다(실측: `upgrade_epoch=3`인 8일 된 host의 lock이 tmp 정리에 사라졌다 —
+> 승계한 host는 자기 자리 시각을 갱신하지 않고 있었고, 갱신 목록에도 `owner.lock`이 빠져 있었다).
+> 여기서 그것을 **세지 않는** 근거는 생존 판정이 아니라 **비대칭**이다: 시체를 세면 산 host가 열거에서 밀려나
+> 영속 세션이 통째로 죽고, 산 host를 빼먹으면 cap이 조금 느슨해질 뿐이다.
+> 이름이 사라지는 것 자체는 `tmp_retention.touchAll`(갱신)과 `owner_lease.healOwnedPath`(되세우기)가 막는다.
 
 **그 상한을 attach 가 다시 뒤집고 있었다(2026-08-29 실측·수정).** discovery 는 위 규칙대로 시체를 안 셌지만,
 attach 의 reducer(`attach_resolver.resolve`)가 **emit 된 줄 전체**를 같은 상한(16)에 다시 댔다. 시체는 지우지

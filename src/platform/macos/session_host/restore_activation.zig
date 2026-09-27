@@ -24,6 +24,7 @@ const runtime_manager = @import("runtime_manager.zig");
 const notification_os_delivery = @import("notification_os_delivery.zig");
 const screen_stream = @import("maru").session.screen_stream;
 const short_endpoint = @import("short_endpoint.zig");
+const tmp_retention = @import("tmp_retention.zig");
 const socket_server = @import("socket_server.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const upgrade_bootstrap = @import("upgrade_bootstrap.zig");
@@ -640,6 +641,11 @@ fn activateValidated(
         .owner_dir = stager.owner_dir,
         .session_dir = session_dir,
         .socket_path = socket_path,
+    }, .{
+        .session_dir = session_dir,
+        .socket_path = socket_path,
+        .owner_path = owner_path,
+        .host_id = invocation.host_id,
     });
 }
 
@@ -736,6 +742,7 @@ fn readerPreparationDeadline(
 fn serveLoop(
     server: *socket_server.SocketServer,
     upgrade_context: upgrade_loop.Context,
+    retention: tmp_retention.Subject,
 ) !void {
     const test_oneshot = if (c.getenv("MARU_SESSION_HOST_TEST_ONESHOT")) |value|
         std.mem.eql(u8, std.mem.span(value), "maru-test-only-v1")
@@ -744,9 +751,34 @@ fn serveLoop(
     var idle_ticks: usize = 0;
     var owner = try poll_owner.Owner.init(upgrade_context.allocator, upgrade_context.io, server);
     defer owner.deinit();
+    // **승계한 host 도 자기 자리를 젊게 유지해야 한다.** 이 루프가 갱신을 안 해서, 한 번이라도
+    // 업그레이드한 host 는 그 시점부터 tmp 정리 보호를 통째로 잃었다(2026-09-27 실측).
+    var last_touch_ms: ?u64 = null;
+    var owner_watch: owner_lease.PathWatch = .{};
     while (true) {
         owner.requireCurrentProcessOrFatal();
         server.tickOwner();
+        const now_ms = tmp_retention.awakeMs(upgrade_context.io);
+        if (tmp_retention.shouldTouch(now_ms, last_touch_ms)) {
+            tmp_retention.touchAll(retention, null);
+            last_touch_ms = now_ms;
+        }
+        // 갱신이 있어도 **이미 지워진 뒤**면 소용없다. 이름이 사라졌으면 그 자리에 다시 세운다 —
+        // 없는 채로 다음 승계가 걸리면 후계자가 arm 단계에서 죽어 세션째 잃는다.
+        if (owner_watch.due(now_ms, tmp_retention.audit_interval_ms)) {
+            const audit = upgrade_context.lifetime_owner.auditOwnedPath(retention.owner_path);
+            const heal = if (audit == .absent)
+                upgrade_context.lifetime_owner.healOwnedPath(retention.owner_path)
+            else
+                owner_lease.OwnerLease.HealOutcome.not_needed;
+            if (owner_watch.report(audit) and audit != .intact)
+                host_log.line("owner lock path {s}: pid={d} host={x:0>32} heal={s}", .{
+                    @tagName(audit),
+                    c.getpid(),
+                    retention.host_id,
+                    @tagName(heal),
+                });
+        }
         switch (try owner.pollOnce(poll_timeout_ms)) {
             .upgrade_ready => {
                 const marker = owner.takeArmedUpgrade() orelse return error.PostCommitFailStop;

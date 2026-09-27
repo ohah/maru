@@ -4193,7 +4193,14 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
     const storage = heap_storage orelse stack_storage[0..iter.count()];
     const ordered = blk: {
         var n: usize = 0;
+        var primary = true;
         while (iter.next()) |sel| {
+            const is_primary = primary;
+            primary = false;
+            // The primary selection has already been replaced in the preedit
+            // projection. Painting its old byte range would highlight the
+            // composing glyph and the suffix now occupying those columns.
+            if (is_primary and term.rt.editor_preedit.len > 0 and sel.start() == term.rt.editor_preedit_at) continue;
             if (sel.len() == 0) continue; // caret뿐 — 그릴 띠가 없다
             storage[n] = sel;
             n += 1;
@@ -4382,16 +4389,28 @@ fn preeditLines(self: *AppSession, term: *Term, base: []const []const u8) ?[][]c
     const off = at - line.start;
     if (off > text.len) return null;
 
-    // A reconversion/selection preedit visually replaces the selected text on
-    // this line while the canonical document remains untouched until commit.
+    // The selected text can cross lines during reconversion. Project the
+    // result onto the first row and leave empty placeholders on covered rows:
+    // their document/scroll/hit-test indices stay stable until the commit
+    // actually changes the canonical document and rebuilds those mappings.
     const selection_end = if (term.rt.editor_selection) |sel|
-        if (sel.start() == at and sel.end() <= line.contentEnd()) sel.end() - line.start else off
+        if (sel.start() == at and sel.end() <= doc.file.content.len) sel.end() else at
     else
-        off;
-    const spliced = self.allocator.alloc(u8, text.len - (selection_end - off) + term.rt.editor_preedit.len) catch return null;
+        at;
+    const end_line_no = doc.file.lines.lineAt(selection_end);
+    const end_line = doc.file.lines.line(end_line_no) orelse return null;
+    const end_row = visibleRowOfDocLine(term, @intCast(end_line_no)) orelse return null;
+    if (end_row < row or end_row >= base.len) return null;
+    const end_text = doc.file.content[end_line.start..end_line.contentEnd()];
+    const end_off = selection_end - end_line.start;
+    if (end_off > end_text.len) return null;
+    const suffix = end_text[end_off..];
+    const prefix_len = std.math.add(usize, off, term.rt.editor_preedit.len) catch return null;
+    const joined_len = std.math.add(usize, prefix_len, suffix.len) catch return null;
+    const spliced = self.allocator.alloc(u8, joined_len) catch return null;
     @memcpy(spliced[0..off], text[0..off]);
     @memcpy(spliced[off..][0..term.rt.editor_preedit.len], term.rt.editor_preedit);
-    @memcpy(spliced[off + term.rt.editor_preedit.len ..], text[selection_end..]);
+    @memcpy(spliced[prefix_len..], suffix);
 
     const rows = self.allocator.alloc([]const u8, base.len) catch {
         self.allocator.free(spliced);
@@ -4399,10 +4418,12 @@ fn preeditLines(self: *AppSession, term: *Term, base: []const []const u8) ?[][]c
     };
     @memcpy(rows, base);
     rows[row] = spliced;
+    for (rows[row + 1 .. end_row + 1]) |*covered| covered.* = "";
     return rows;
 }
 
-/// `preeditLines`가 뜬 사본을 놓는다 — 끼운 줄과 배열 둘 다.
+/// `preeditLines`가 뜬 사본을 놓는다 — 끼운 첫 줄과 배열 둘 다. 여러 줄 선택의
+/// 나머지 줄은 빈 정적 조각을 가리키므로 따로 놓을 것은 없다.
 fn freePreeditLines(self: *AppSession, term: *Term, rows: [][]const u8) void {
     const at = term.rt.editor_preedit_at;
     const doc = term.rt.editor_doc orelse {
@@ -10296,6 +10317,38 @@ test "IME4 조합 자리는 시작할 때 한 번만 잡는다 (N3)" {
     term.rt.editor_selection = editor_selection.Selection.at(9);
     setEditorPreedit(fx.session, term, "\xed\x95\x9c"); // "한"
     try testing.expectEqual(@as(usize, 5), term.rt.editor_preedit_at);
+}
+
+test "IME9 여러 줄 재변환 미리보기는 선택 본문 전부를 숨기고 끝줄 꼬리를 조합 뒤에 잇는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    const original = term.rt.editor_doc.?.file.content;
+    const start = std.mem.indexOf(u8, original, "a = 1").?;
+    const end = std.mem.indexOf(u8, original, "c = 3").?;
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(start, end);
+    setEditorPreedit(fx.session, term, "한");
+
+    const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
+    defer freePreeditLines(fx.session, term, preview);
+    try testing.expectEqualStrings("const 한c = 3;", preview[0]);
+    try testing.expectEqualStrings("", preview[1]);
+    try testing.expectEqualStrings("", preview[2]);
+    try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(buildSelectionMarks(fx.session, term) == null);
+    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.fromPoints(0, 5)});
+    const marks = buildSelectionMarks(fx.session, term) orelse return error.ExtraSelectionMissing;
+    try testing.expectEqual(@as(usize, 1), marks[0].len);
+    try testing.expectEqual(@as(u32, 0), marks[0][0].start);
+    try testing.expectEqual(@as(u32, 5), marks[0][0].len);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(drawnHasCodepoint(drawn.dl, 0xD55C));
+    try testing.expect(!drawnHasText(drawn.dl, "const b = 2;"));
+    try testing.expect(!drawnHasText(drawn.dl, "const c = 3;"));
 }
 
 test "IME7 이어 치는 한글: 조합 글자는 방금 확정한 글자 뒤에 선다" {

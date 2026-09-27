@@ -7273,6 +7273,51 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     term.rt.editor_visible_lines = out_lines;
     term.rt.editor_visible_numbers = out_numbers;
     invalidateFoldDerived(self, term);
+    adjustFoldedSelections(self, term);
+}
+
+/// 숨은 줄의 byte 자리를 **그 줄을 접은 보이는 머리줄 끝**으로 옮긴다(§4). 보이는 번호는
+/// 오름차순이라 직전 번호가 머리줄이다. 접힘 범위를 매 커서마다 다시 훑지 않는다.
+fn visibleSelectionOffset(term: *const Term, doc: Opened, offset: usize) ?usize {
+    if (offset > doc.file.content.len) return null;
+    const numbers = term.rt.editor_visible_numbers;
+    if (numbers.len == 0) return null;
+    const want = doc.file.lines.lineAt(offset) + 1; // visible_numbers는 1-based
+    var lo: usize = 0;
+    var hi: usize = numbers.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (numbers[mid] != null and numbers[mid].? <= want) lo = mid + 1 else hi = mid;
+    }
+    if (lo == 0) return null; // 첫 줄은 숨지 않는다; 손상된 표에서는 원래 자리를 지킨다
+    const preceding = numbers[lo - 1] orelse return null;
+    if (preceding == want) return null; // 이미 보인다
+    const head = doc.file.lines.line(preceding - 1) orelse return null;
+    return head.contentEnd(); // VS Code의 lineMaxColumn과 같은 줄 끝, 개행 앞
+}
+
+fn adjustFoldedSelection(term: *const Term, doc: Opened, sel: *editor_selection.Selection) bool {
+    const anchor_start = visibleSelectionOffset(term, doc, sel.anchor_start);
+    const anchor_end = visibleSelectionOffset(term, doc, sel.anchor_end);
+    const focus = visibleSelectionOffset(term, doc, sel.focus);
+    if (anchor_start == null and anchor_end == null and focus == null) return false;
+
+    // word/line anchor의 일부가 숨으면 그 제스처 원본은 더는 화면의 낱말·줄이 아니다.
+    // 사용자가 보는 고정단과 caret을 각각 보이는 자리로 옮기고 점 anchor로 정규화한다.
+    const fixed = visibleSelectionOffset(term, doc, sel.fixedEnd()) orelse sel.fixedEnd();
+    sel.* = editor_selection.Selection.fromPoints(fixed, focus orelse sel.focus);
+    return true;
+}
+
+/// 접기·구문/LSP 접힘 갱신의 공통 출구. 선택은 뷰 상태이므로 접힌 화면에서 안 보이는
+/// 내용을 계속 선택한 채 IME·복사가 뒤늦게 그 내용을 치환하지 않게 한다.
+fn adjustFoldedSelections(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_visible_numbers.len == 0) return;
+    const doc = term.rt.editor_doc orelse return;
+    var changed = false;
+    if (term.rt.editor_selection) |*sel| changed = adjustFoldedSelection(term, doc, sel) or changed;
+    for (term.rt.editor_extra_selections) |*sel| changed = adjustFoldedSelection(term, doc, sel) or changed;
+    if (changed) mergeCarets(self, term); // 여러 커서가 같은 머리줄 끝으로 모일 수 있다
 }
 
 /// 탭 폭을 바꾸는 **단일 지점**. 필드에 직접 대입하지 말고 여기를 부른다.
@@ -10353,6 +10398,58 @@ test "IME9 여러 줄 재변환 미리보기는 선택 본문 전부를 숨기�
     try testing.expect(drawnHasCodepoint(drawn.dl, 0xD55C));
     try testing.expect(!drawnHasText(drawn.dl, "const b = 2;"));
     try testing.expect(!drawnHasText(drawn.dl, "const c = 3;"));
+}
+
+test "IME10 접힌 선택 끝은 보이는 머리줄 끝으로 옮겨 조합과 확정이 숨은 본문을 건드리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const source = "const Box = struct {\n    const first = 1;\n    const second = 2;\n};\n";
+    const term = try openBracketFixture(&fx, allocator, "ime-fold.zig", source);
+    const start = (std.mem.indexOf(u8, source, "Box") orelse return error.NoStart) + 1;
+    const hidden_end = (std.mem.indexOf(u8, source, "second") orelse return error.NoEnd) + 3;
+    const head_end = (term.rt.editor_doc.?.file.lines.line(0) orelse return error.NoHead).contentEnd();
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(start, hidden_end);
+
+    try testing.expect(toggleFoldHead(fx.session, term, 0));
+    try testing.expect(visibleRowOfDocLine(term, 2) == null);
+    try testing.expectEqual(start, term.rt.editor_selection.?.start());
+    try testing.expectEqual(head_end, term.rt.editor_selection.?.end());
+    setEditorPreedit(fx.session, term, "한");
+    const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
+    defer freePreeditLines(fx.session, term, preview);
+    try testing.expectEqualStrings("const B한", preview[0]);
+    try testing.expectEqualStrings(source, term.rt.editor_doc.?.file.content);
+
+    setEditorPreedit(fx.session, term, "");
+    try testing.expect(insertText(fx.session, term, "한"));
+    try testing.expectEqualStrings("const B한\n    const first = 1;\n    const second = 2;\n};\n", term.rt.editor_doc.?.file.content);
+}
+
+test "FOLD-SEL1 역방향 선택과 보조 caret도 접힘 머리로 옮기고 겹치면 하나로 합친다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const source = "root:\n  child:\n    value\n  tail\nafter\n";
+    const term = try openBracketFixture(&fx, allocator, "fold-select.txt", source);
+    const start = (std.mem.indexOf(u8, source, "root") orelse return error.NoStart) + 2;
+    const hidden_end = (std.mem.indexOf(u8, source, "value") orelse return error.NoEnd) + 2;
+    const root_end = (term.rt.editor_doc.?.file.lines.line(0) orelse return error.NoHead).contentEnd();
+    const child_end = (term.rt.editor_doc.?.file.lines.line(1) orelse return error.NoChild).contentEnd();
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(hidden_end, start);
+    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(hidden_end)});
+
+    try testing.expect(toggleFoldHead(fx.session, term, 1));
+    try testing.expectEqual(child_end, term.rt.editor_selection.?.end());
+    try testing.expect(term.rt.editor_selection.?.isReversed());
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    try testing.expect(toggleFoldHead(fx.session, term, 0));
+    try testing.expectEqual(start, term.rt.editor_selection.?.start());
+    try testing.expectEqual(root_end, term.rt.editor_selection.?.end());
+    try testing.expect(term.rt.editor_selection.?.isReversed());
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
 }
 
 test "IME7 이어 치는 한글: 조합 글자는 방금 확정한 글자 뒤에 선다" {

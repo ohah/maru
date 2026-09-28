@@ -300,6 +300,11 @@ pub const State = struct {
     /// 마지막 스캔이 읽은 바이트와 걸린 시간. 계약 §4.1.1 의 근거가 이 자리에서 나왔다.
     scanned_bytes: u64 = 0,
     scan_ns: u64 = 0,
+    /// **원격 그림 왕복 누적**(RAV6 계측). 지금은 장당 ssh 한 번이고 원본 base64 전체가 선 위로
+    /// 온다. 「느리다」를 고치기 전에 **왕복이 지배하는지 바이트가 지배하는지**를 이 셋이 가른다.
+    remote_fetch_count: u64 = 0,
+    remote_fetch_ns: u64 = 0,
+    remote_fetch_bytes: u64 = 0,
     /// 마지막으로 훑은 **현재 세션 파일**의 자국. 이것과 지금 `stat` 이 다르면 다시 훑는다.
     ///
     /// **머리 파일만 든다.** 체인의 뒤쪽은 이미 끝난 세션이라 자라지 않는다(§3.3) — 지금 대화가
@@ -1697,6 +1702,25 @@ fn harvestOne(self: *AppSession) bool {
     const backend = decodeBackendPtr(self) orelse return false;
     var r = backend.take() orelse return false;
     defer r.deinit(self.allocator); // 아래에서 소유를 옮기면 pixels 를 비워 둔다
+
+    // **원격 왕복을 누적하고 한 줄로 남긴다.** 격자 한 화면이 찰 때까지 몇 번을 돌고 몇 바이트를
+    // 끌어왔는지 — 그 두 수가 없으면 최적화가 추측이 된다. 로컬(0)은 안 찍는다.
+    if (r.remote_ns != 0 or r.remote_bytes != 0) {
+        self.agent_activity.remote_fetch_count += 1;
+        self.agent_activity.remote_fetch_ns += r.remote_ns;
+        self.agent_activity.remote_fetch_bytes += r.remote_bytes;
+        std.log.info(
+            "remote image fetch: idx={d} bytes={d} ms={d} | total n={d} bytes={d} ms={d}",
+            .{
+                r.hit_index,
+                r.remote_bytes,
+                r.remote_ns / std.time.ns_per_ms,
+                self.agent_activity.remote_fetch_count,
+                self.agent_activity.remote_fetch_bytes,
+                self.agent_activity.remote_fetch_ns / std.time.ns_per_ms,
+            },
+        );
+    }
 
     // **마커 프리뷰 것은 갤러리 인덱스와 섞이지 않는다** — 같은 워커를 쓰지만 키가 다르다(MP1).
     // 이 갈림이 없으면 프리뷰 픽셀이 격자 타일 자리에 붙는다.

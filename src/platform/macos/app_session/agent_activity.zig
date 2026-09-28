@@ -428,6 +428,9 @@ pub const State = struct {
         self.activity_partial = false;
         self.scanned_bytes = 0;
         self.scan_ns = 0;
+        // **왕복 장부도 같이 지운다.** 형제들과 달리 남겨 두면 그 값이 「앱 시작 이후 누적」이 되어
+        // 「이 화면을 여는 데 몇 번 돌고 몇 바이트인가」를 못 읽는다 — 그게 이 계측의 존재 이유다.
+        self.remote_fetch = .{};
         self.built = false;
         self.awaiting = 0;
         self.resubmit = false;

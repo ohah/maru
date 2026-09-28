@@ -1,5 +1,5 @@
-//! PCRE2-backed, single-logical-line editor search. The compiled pattern and limits live here;
-//! the ordinary find path remains independent so its literal Unicode matching does not drift.
+//! PCRE2-backed search over one logical line, shared by terminal and editor. The compiled
+//! pattern and limits live in this neutral module; both literal paths remain independent.
 const std = @import("std");
 const c = @cImport({
     @cDefine("PCRE2_CODE_UNIT_WIDTH", "8");

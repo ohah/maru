@@ -12962,7 +12962,9 @@ pub const AppSession = struct {
                 self.remote_find_scroll_pending = false;
                 // 응답은 **pending**으로 먼저 받는다 — 아래 view_offset 대조에서 어긋나면 기존(현재 화면과 정합한)
                 // 하이라이트를 그대로 둬야 하므로, 수신 버퍼가 곧 표시 버퍼면 안 된다.
-                if (rb.findFor(surface.id, self.chrome_host.find.input.query.items, @intCast(self.chrome_host.find.current), do_scroll, &self.remote_find_pending)) |res| {
+                self.chrome_host.find.regex_error = null;
+                if (rb.findForWithMode(surface.id, self.chrome_host.find.input.query.items, @intCast(self.chrome_host.find.current), do_scroll, self.chrome_host.find.regex, &self.remote_find_pending)) |res| {
+                    self.chrome_host.find.regex_error = res.regex_error;
                     self.chrome_host.find.setMatchCount(res.count); // 카운터는 좌표계와 무관 — 즉시 최신으로
                     // host가 span을 계산한 view_offset과 client 화면(delta로 조립한 projection)의 view_offset이 다르면,
                     // 그 스크롤 delta가 아직 안 온 것이다. 지금 그리면 좌표계가 다른 화면에 하이라이트를 찍는다(= 이전
@@ -12980,6 +12982,11 @@ pub const AppSession = struct {
                     std.mem.swap(std.ArrayList(terminal.SelectionSpan), &self.remote_find_spans, &self.remote_find_pending);
                     self.remote_find_current = res.cur;
                     return;
+                } else if (self.chrome_host.find.regex) {
+                    self.chrome_host.find.regex_error = "regex unavailable";
+                    self.chrome_host.find.setMatchCount(0);
+                    self.remote_find_spans.clearRetainingCapacity();
+                    self.remote_find_current = null;
                 }
             }
             self.remote_find_spans.clearRetainingCapacity();
@@ -20226,7 +20233,15 @@ pub const AppSession = struct {
                 defer fa_surface.unlockCore(self.io);
                 if (find_active and output_events > 0) {
                     const now_alt = fa_surface.core.alt_active;
-                    fa_surface.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+                    self.chrome_host.find.regex_error = null;
+                    fa_surface.core.findMatchesWithOptions(self.allocator, self.chrome_host.find.input.query.items, self.chrome_host.find.regex, &self.find_matches) catch |err| {
+                        if (self.chrome_host.find.regex) self.chrome_host.find.regex_error = switch (err) {
+                            error.InvalidPattern, error.InvalidUtf8 => "invalid regex",
+                            error.MatchLimit => "regex limit",
+                            else => "regex error",
+                        };
+                        self.find_matches.clearRetainingCapacity();
+                    };
                     self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
                     // primary<->alt 화면 전환이면 매치 셋의 좌표 도메인이 통째로 바뀌어 이전 current가 무의미하다
                     // (setMatchCount는 clamp만). 첫 매치로 리셋한다 — 같은 화면 내 출력(스크롤백 eviction)이면 유지.
@@ -48376,6 +48391,34 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     // caret이 터미널 커서와 같은 suffix-trim 깜빡임을 탄다. (예전엔 0으로 고정해 정적이었음 — caret 깜빡임 추가로 변경.)
     _ = try session.tick();
     try std.testing.expectEqual(@as(usize, 1), session.metal_buffer.cursor_cells);
+}
+
+test "TFREG scrollback Find switches literal and PCRE2 through the shared chord" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    try term_ops.activeSurface(session).core.write("foo f.o");
+    session.dispatchAppAction(.toggle_find);
+    for ("f.o") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.find_matches.items.len);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'r' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.regex);
+    try std.testing.expectEqual(@as(usize, 2), session.find_matches.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.chrome_host.find.match_count);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'r' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expectEqual(@as(usize, 1), session.find_matches.items.len);
 }
 
 test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {

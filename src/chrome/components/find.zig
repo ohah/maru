@@ -25,7 +25,7 @@ const prompt_cols: u32 = 6;
 /// 구해(caretRect도 씀) 입력 텍스트 영역이 카운터를 침범하지 않게 예약한다(긴 검색어의 caret이 카운터에 안 가려짐).
 fn counterCols(state: *const State) u32 {
     if (state.target == .page) return pageIndicatorCols(state);
-    if (state.target == .editor) if (state.regex_error) |err| {
+    if (state.target != .page) if (state.regex_error) |err| {
         return @intCast(sideFlag(state).len + ruleFlags(state).len + err.len);
     };
     const total = state.match_count;
@@ -103,7 +103,7 @@ fn textCols(state: *const State, panel_cols: u32) u32 {
     const cc = counterCols(state);
     // The editor's regex button sits between query and counter. Reserve its cells
     // in both rendering and caret geometry so long patterns cannot cover it.
-    return if (state.target == .editor and cc + 7 < panel_cols)
+    return if (state.target != .page and cc + 7 < panel_cols)
         panel_cols - cc - 5
     else if (cc + 2 < panel_cols) panel_cols - cc - 1 else panel_cols;
 }
@@ -111,7 +111,7 @@ fn textCols(state: *const State, panel_cols: u32) u32 {
 /// VS Code-style `.*` control, immediately left of the match count. A narrow
 /// pane hides the control rather than overlapping the query or count.
 fn regexButtonRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
-    if (!state.open or state.target != .editor) return null;
+    if (!state.open or state.target == .page) return null;
     const lay = overlay_input.findLayout(p) orelse return null;
     const cc = counterCols(state);
     if (cc + 7 >= lay.panel_cols) return null;
@@ -400,7 +400,7 @@ pub fn view(
 
     // 우측 정렬 카운터. 스크롤백은 "cur/total"(매치 없으면 "0/0", 1-based 현재), 페이지는 찾음/없음(매치 수를
     // 알 수 없다). 패널에 안 들어가면(좁음) 생략. counter_cols는 textCols가 예약한 폭과 같아야 한다(입력 침범 방지).
-    const counter: ?[]const u8 = if (state.target == .page) pageIndicator(state) else if (state.target == .editor and state.regex_error != null)
+    const counter: ?[]const u8 = if (state.target == .page) pageIndicator(state) else if (state.regex_error != null)
         try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ sideFlag(state), ruleFlags(state), state.regex_error.? })
     else blk: {
         const total = state.match_count;
@@ -495,7 +495,7 @@ test "find handle: Enter/Shift+Enter 네비·글자=query_changed·Esc/⌘조합
     try std.testing.expect(!s.open);
 }
 
-test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+counter+caret" {
+test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+regex+counter+caret" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     const p = props.ChromeProps{ .metrics = .{
@@ -520,19 +520,21 @@ test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+counter+caret" {
     s.current = 2; // "3/17" 카운터
     try s.input.appendChar(std.testing.allocator, 'a');
     try view(&s, p, &tk, arena, &out);
-    // panel fill + prompt text + counter text + caret fill = 4 ops(넓은 패널이라 카운터·caret 다 들어감).
-    try std.testing.expectEqual(@as(usize, 4), out.items.len);
+    // The same regex control is present for scrollback and editor Find.
+    try std.testing.expectEqual(@as(usize, 5), out.items.len);
     try std.testing.expect(out.items[0] == .quad); // 패널 배경
     try std.testing.expect(out.items[1] == .text);
     try std.testing.expectEqualStrings("Find: ", out.items[1].text.runs[0].text);
     try std.testing.expectEqualStrings("a", out.items[1].text.runs[1].text);
     try std.testing.expect(out.items[2] == .text);
-    try std.testing.expectEqualStrings("3/17", out.items[2].text.runs[0].text);
+    try std.testing.expectEqualStrings(".*", out.items[2].text.runs[0].text);
+    try std.testing.expect(out.items[3] == .text);
+    try std.testing.expectEqualStrings("3/17", out.items[3].text.runs[0].text);
     // 마지막은 입력 커서(cursor 색 fill 블록), "Find: a" 뒤 col 7(=6 prompt + 1 query), 1칸 폭.
-    try std.testing.expect(out.items[3] == .fill);
-    try std.testing.expect(out.items[3].fill.role == .cursor);
-    try std.testing.expectEqual(out.items[0].quad.rect.x + 7 * 8, out.items[3].fill.rect.x);
-    try std.testing.expectEqual(@as(u32, 8), out.items[3].fill.rect.w); // 1칸
+    try std.testing.expect(out.items[4] == .fill);
+    try std.testing.expect(out.items[4].fill.role == .cursor);
+    try std.testing.expectEqual(out.items[0].quad.rect.x + 7 * 8, out.items[4].fill.rect.x);
+    try std.testing.expectEqual(@as(u32, 8), out.items[4].fill.rect.w); // 1칸
     // 패널은 사이드바 오른쪽(active_pane 미설정 → 창 전체 우상단 폴백).
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
 }
@@ -875,6 +877,8 @@ test "FND33 editor regex button has a separate hit target and reserves query spa
     const caret = caretRect(&s, p) orelse return error.MissingCaret;
     try std.testing.expect(caret.x <= button.x);
     s.target = .scrollback;
+    try std.testing.expect(regexButtonRect(&s, p) != null);
+    s.target = .page;
     try std.testing.expect(regexButtonRect(&s, p) == null);
 }
 

@@ -79,7 +79,7 @@ keybind = F4 = esc:[2J
   (N=절대 pt, 6~72로 클램프 — 예: `Ctrl+Cmd+1 = set_font_size:14`로 크기 프리셋), 그리고 `select_all`·
   `clear_screen`(화면+스크롤백 비우기, 빌트인 ⌘K — alt 화면 무동작, 셸 프롬프트면 ^L로 재그림. 자세히는
   [키 입력과 단축키](key-input-and-shortcuts.md))·`toggle_find`·`toggle_find_replace`
-  ·`toggle_find_match_case`(빌트인 `⌥⌘C`)·`toggle_find_regex`(빌트인 `⌥⌘R`, 편집기 정규식)
+  ·`toggle_find_match_case`(빌트인 `⌥⌘C`)·`toggle_find_regex`(빌트인 `⌥⌘R`, 편집기·터미널 스크롤백 정규식)
   ·`toggle_find_whole_word`(빌트인 `⌥⌘W`)
   ·`toggle_find_in_selection`(빌트인 `⌥⌘L`)·`toggle_find_diff_side`(빌트인 `⌥⌘D` — 비교 뷰에서
   검색할 열을 왼쪽↔오른쪽으로 넘긴다. 비교 Term 이 아니면 무동작이고, 안 넘긴 동안은 「선택이 있는

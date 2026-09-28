@@ -21,6 +21,14 @@ const pane_ops = @import("pane.zig");
 const maru = @import("maru");
 const terminal = maru.terminal;
 
+fn regexErrorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.InvalidPattern, error.InvalidUtf8 => "invalid regex",
+        error.MatchLimit => "regex limit",
+        else => "regex error",
+    };
+}
+
 /// ⌘F가 지금 **무엇을** 검색하는가 — 활성 Term이 네이티브 편집기면 그 Term(아니면 `null`).
 ///
 /// **이 함수가 이 슬라이스의 핵심이다.** 그전까지 ⌘F는 갈래 없이 `activeSurface().core`를 검색했고,
@@ -74,16 +82,12 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
         self.allocator,
         editor_ops.findLines(self, term),
         self.chrome_host.find.input.query.items,
-        // 토글은 **편집기 타깃에만** 산다(§5.1) — 스크롤백·웹은 이 값을 안 읽는다.
+        // 같은 PCRE2 토글을 편집기와 스크롤백이 공유한다. 웹은 이 값을 읽지 않는다.
         .{ .match_case = self.chrome_host.find.match_case, .whole_word = self.chrome_host.find.whole_word, .regex = self.chrome_host.find.regex },
         &self.editor_find_matches,
     ) catch |err| {
         self.editor_find_matches.clearRetainingCapacity();
-        if (self.chrome_host.find.regex) self.chrome_host.find.regex_error = switch (err) {
-            error.InvalidPattern, error.InvalidUtf8 => "invalid regex",
-            error.MatchLimit => "regex limit",
-            else => "regex error",
-        };
+        if (self.chrome_host.find.regex) self.chrome_host.find.regex_error = regexErrorText(err);
     };
     // **매치가 0이어도 출처를 세운다.** 이 값의 뜻은 "몇 개 찾았나"가 아니라 **"이 목록이 어느
     // 문서의 것인가"**다. 0일 때 비워 두면 tick의 대조가 매 프레임 "안 맞는다"고 답해 재검색이
@@ -212,8 +216,20 @@ pub fn toggleFindReplace(self: *AppSession) void {
 ///
 /// 사용자 바인딩을 존중한다 — 빌트인 chord 모양을 직접 보지 않고 `resolve` 가 낸 액션으로 판정한다.
 pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool {
-    if (!isEditorFindTarget(self)) return false;
+    if (!self.chrome_host.find.open) return false;
     var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    if (self.chrome_host.find.target == .scrollback) {
+        // The modal consumes keys before the terminal resolver normally sees them. Resolve the
+        // user's configured binding here, but intercept only the regex toggle for scrollback.
+        const action = switch (self.loaded_config.keyBindingResolver().resolve(event, &buf, .{}) catch return false) {
+            .app_action => |a| a,
+            else => return false,
+        };
+        if (action != .toggle_find_regex) return false;
+        toggleFindRegex(self);
+        return true;
+    }
+    if (!isEditorFindTarget(self)) return false;
     // **편집기 문맥이면 편집기 컨텍스트가 판정한다**(key-input-and-shortcuts.md).
     //
     // **지금은 전역 `resolve` 와 답이 같다** — 이 가로채기가 찾는 다섯 chord(`⌥⌘C`·`⌥⌘R`·`⌥⌘W`·`⌥⌘L`·`⌥⌘D`)는
@@ -223,7 +239,6 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
     // 그럼에도 여기를 컨텍스트로 두는 이유는 **찾기 규칙에 편집기 전용 chord 가 붙는 날** 때문이다.
     // 그때 이 자리만 전역이면 같은 키가 **찾기가 떠 있을 때와 아닐 때 다르게** 풀리고, 그 갈림은
     // 사용자가 설명할 수 없다.
-    _ = &buf;
     // **이 값은 오늘 답을 안 바꾼다**(늘 참으로 줘도 판정자가 안 잡는다 — 그 변이가 살아남는 것이
     // 정상이다). 이 가로채기가 찾는 다섯 chord는 **전역 표**에 있어 `needs_editable` 판정을 안 지나기
     // 때문이다. 그럼에도 제대로 넘기는 이유는 **찾기 규칙에 편집기 전용 chord 가 붙는 날** 때문이고,
@@ -254,11 +269,17 @@ pub fn toggleFindMatchCase(self: *AppSession) void {
     refilterAfterRuleChange(self);
 }
 
-/// ⌥⌘R: switch between literal text and PCRE2 syntax for editor Find.
+/// ⌥⌘R: switch between literal text and PCRE2 syntax for editor or scrollback Find.
 pub fn toggleFindRegex(self: *AppSession) void {
-    if (!isEditorFindTarget(self)) return;
+    if (!self.chrome_host.find.open or self.chrome_host.find.target == .page) return;
     self.chrome_host.find.regex = !self.chrome_host.find.regex;
-    refilterAfterRuleChange(self);
+    if (self.chrome_host.find.target == .editor) {
+        refilterAfterRuleChange(self);
+    } else {
+        recomputeFind(self);
+        self.remote_find_dirty = true;
+        self.metal_dirty = true;
+    }
 }
 
 /// ⌥⌘W: 낱말 단위로만 셀지 토글한다(§5.1). 낱말 판정의 소유자는 `selection.wordRangeAt` 이다.
@@ -404,7 +425,10 @@ pub fn findNavigate(self: *AppSession, forward: bool) void {
         // findMatches는 코어 mutate(스크롤백 rewrap)+읽기 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
         const s = term_ops.activeSurface(self);
         s.lockCore(self.io);
-        s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+        s.core.findMatchesWithOptions(self.allocator, self.chrome_host.find.input.query.items, self.chrome_host.find.regex, &self.find_matches) catch |err| {
+            if (self.chrome_host.find.regex) self.chrome_host.find.regex_error = regexErrorText(err);
+            self.find_matches.clearRetainingCapacity();
+        };
         s.unlockCore(self.io);
         self.chrome_host.find.setMatchCount(self.find_matches.items.len); // current를 범위로 clamp(닫기 전 위치 보존)
     }
@@ -453,7 +477,9 @@ pub fn recomputeFind(self: *AppSession) void {
         const s = term_ops.activeSurface(self);
         s.lockCore(self.io);
         defer s.unlockCore(self.io);
-        s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch {
+        self.chrome_host.find.regex_error = null;
+        s.core.findMatchesWithOptions(self.allocator, self.chrome_host.find.input.query.items, self.chrome_host.find.regex, &self.find_matches) catch |err| {
+            if (self.chrome_host.find.regex) self.chrome_host.find.regex_error = regexErrorText(err);
             self.find_matches.clearRetainingCapacity();
         };
     }

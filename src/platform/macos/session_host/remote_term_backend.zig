@@ -4532,8 +4532,12 @@ pub const RemoteTermBackend = struct {
     /// host-backed Term(handle)에서 검색어 매치를 host가 찾게 하고(§6c — `findMatches` 재사용) 보이는 매치 뷰포트 span을
     /// `out_spans`에 채운다. 전체 매치 수를 돌려준다. 없거나 오류면 null(best-effort). 검색 의미론은 host core 단일 출처.
     pub fn findFor(self: *RemoteTermBackend, handle: RuntimeHandle, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(maru.terminal.SelectionSpan)) ?remote_runtime.RemoteRuntime.FindResult {
+        return self.findForWithMode(handle, query, cur_index, scroll, false, out_spans);
+    }
+
+    pub fn findForWithMode(self: *RemoteTermBackend, handle: RuntimeHandle, query: []const u8, cur_index: u32, scroll: bool, regex: bool, out_spans: *std.ArrayList(maru.terminal.SelectionSpan)) ?remote_runtime.RemoteRuntime.FindResult {
         const entry = self.runtimes.get(handle) orelse return null;
-        return entry.runtime.find(query, cur_index, scroll, out_spans) catch null;
+        return entry.runtime.find(query, cur_index, scroll, regex, out_spans) catch null;
     }
 
     fn spawn(ctx: *anyopaque, params: SpawnParams) anyerror!*Surface {

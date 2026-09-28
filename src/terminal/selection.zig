@@ -1048,6 +1048,49 @@ test "terminal PCRE2 keeps hard breaks separate and maps combining marks to thei
     try std.testing.expectEqual(matches.items[0].start, matches.items[0].end);
 }
 
+test "terminal PCRE2 lookbehind crosses soft wraps but not hard breaks" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 4, .rows = 4 });
+    defer c.deinit();
+    try c.write("abcde\r\nfgh");
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(allocator);
+    try findMatchesWithOptions(&c, allocator, "(?<=d)e", true, &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try std.testing.expectEqual(@as(usize, 1), matches.items[0].start.row);
+    try std.testing.expectEqual(@as(u16, 0), matches.items[0].start.col);
+    try findMatchesWithOptions(&c, allocator, "e(?=f)", true, &matches);
+    try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+}
+
+test "terminal PCRE2 ignores wide-wrap padding through scrollback reflow" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 6, .rows = 3 });
+    defer c.deinit();
+    try c.write("abcde한x\r\none\r\ntwo\r\nthree\r\nfour");
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(allocator);
+    try findMatchesWithOptions(&c, allocator, "e한x", true, &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try c.resize(8, 3);
+    try findMatchesWithOptions(&c, allocator, "e한x", true, &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+}
+
+test "terminal PCRE2 match limit clears earlier results instead of showing a partial count" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 120, .rows = 3 });
+    defer c.deinit();
+    var attack = [_]u8{'a'} ** 80;
+    attack[attack.len - 1] = 'X';
+    try c.write("ok\r\n");
+    try c.write(&attack);
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(allocator);
+    try std.testing.expectError(error.MatchLimit, findMatchesWithOptions(&c, allocator, "ok|(a|aa)+$", true, &matches));
+    try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+}
+
 /// 검색 매치(절대 좌표)를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null) — 선택 하이라이트와 같은 규칙 공유.
 pub fn matchViewportSpan(self: *const TerminalCore, m: types.Match) ?types.SelectionSpan {
     return clipAbsSpanToViewport(self, m.start, m.end, false);

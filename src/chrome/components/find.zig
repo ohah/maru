@@ -882,6 +882,38 @@ test "FND33 editor regex button has a separate hit target and reserves query spa
     try std.testing.expect(regexButtonRect(&s, p) == null);
 }
 
+test "FND34 scrollback regex button hides in narrow pane without stealing caret space" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var out: std.ArrayList(draw.Op) = .empty;
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    s.show();
+    s.target = .scrollback;
+    s.regex = true;
+    for (0..80) |_| try s.input.appendChar(std.testing.allocator, 'x');
+    try std.testing.expect(regexButtonRect(&s, p) != null);
+    p.metrics.backing_width_px = 96;
+    try std.testing.expect(regexButtonRect(&s, p) == null);
+    const lay = overlay_input.findLayout(p) orelse return error.MissingFindLayout;
+    try std.testing.expect(!regexButtonHit(&s, p, @floatFromInt(lay.x + 1), @floatFromInt(lay.y + 1)));
+    try view(&s, p, &tk, arena_state.allocator(), &out);
+    const caret = caretRect(&s, p) orelse return error.MissingCaret;
+    try std.testing.expect(caret.x < lay.x + @as(i32, @intCast(lay.panel_cols * lay.cw)));
+    for (out.items) |op| if (op == .text) {
+        if (std.mem.eql(u8, op.text.runs[0].text, ".*")) return error.HiddenButtonPainted;
+    };
+}
+
 test "FND24 검색 중인 열이 카운터 앞에 뜬다 — 규칙 깃발보다 앞이고 예약 폭도 따라온다 (§5.1)" {
     // **왼쪽은 언제나 옛 판이다.** 이 표시가 없으면 방금 추가한 이름을 찾다 만난 0 을 설명할 길이
     // 없다 — 그 이름은 오른쪽 열에 뻔히 보이는데도. 「못 찾는다」가 아니라 「왜 0인지 모른다」가

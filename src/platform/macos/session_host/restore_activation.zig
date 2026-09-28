@@ -760,7 +760,10 @@ fn serveLoop(
         server.tickOwner();
         const now_ms = tmp_retention.awakeMs(upgrade_context.io);
         if (tmp_retention.shouldTouch(now_ms, last_touch_ms)) {
-            tmp_retention.touchAll(retention, null);
+            // **매니페스트는 안 찍는다.** 이 루프는 `Published` 핸들이 없어 경로로 찍을 수밖에 없는데,
+            // 경로 갱신은 `ctime` 을 바꿔 소유자의 identity 를 깨고 그쪽 `withdraw` 를 영영 막는다
+            // (2026-09-27: `host.v1.json` 이 안 지워져 postcommit 잔재 게이트가 네 런 연속 빨갰다).
+            tmp_retention.touchAll(retention, .skip);
             last_touch_ms = now_ms;
         }
         // 갱신이 있어도 **이미 지워진 뒤**면 소용없다. 이름이 사라졌으면 그 자리에 다시 세운다 —

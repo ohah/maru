@@ -44,21 +44,40 @@ pub fn shouldTouch(now_ms: u64, last_touch_ms: ?u64) bool {
 
 /// 우리가 **실제로 쓰는** 자리를 찍는다. uid 로 다시 계산하면 격리된 실행에서 남의 자리를 건드리면서
 /// 정작 자기 endpoint 는 안 찍어, 살아 있는 host 가 tmp 정리에 지워지는 원래 실패로 되돌아간다.
+/// 매니페스트를 **어떻게** 찍을지. `?*Published` 하나로는 두 사실이 접힌다 — 「핸들이 없다」와
+/// 「건드리면 안 된다」. 그 둘을 같은 `null` 로 두었다가, 승계 루프가 남이 쥔 매니페스트를 경로로
+/// 찍어 그 publication 을 못 거두게 만들었다(2026-09-27 회귀).
+///
+/// **왜 경로 갱신이 위험한가.** `utimensat` 은 `ctime` 을 바꾸는데, `Published.FileIdentity` 는
+/// `dev`·`ino` 와 **`ctime_ns`** 다. 그래서 경로로 한 번 찍으면 소유자의 identity 와 어긋나고,
+/// `withdrawExact` 가 그것을 「다른 세대」로 읽어 **삭제를 거부한다**(`.replaced`). 설계대로다 —
+/// 모르는 세대를 지우지 않는 것이 그 함수의 계약이다. 그 결과가 영영 안 지워지는 `host.v1.json` 이다.
+pub const ManifestTouch = union(enum) {
+    /// 핸들을 쥔 쪽. `touchExact` 가 찍은 **직후 identity 를 다시 읽어 갱신**하므로 안전하다.
+    published: *host_manifest.Published,
+    /// 아무도 안 쥐고 있을 때만 안전하다.
+    by_path,
+    /// **남이 쥐고 있을 수 있다.** 찍지 않는다 — 찍으면 그쪽의 `withdraw` 가 막힌다.
+    skip,
+};
+
 pub fn touchAll(
     subject: Subject,
-    published_manifest: ?*host_manifest.Published,
+    manifest: ManifestTouch,
 ) void {
     // null times = 현재 시각으로 설정(POSIX). AT_SYMLINK_NOFOLLOW 를 주지 않아 경로를 그대로 따른다.
     _ = c.utimensat(c.AT.FDCWD, subject.socket_path.ptr, null, 0);
     _ = c.utimensat(c.AT.FDCWD, subject.session_dir.ptr, null, 0);
     _ = c.utimensat(c.AT.FDCWD, subject.owner_path.ptr, null, 0);
-    if (published_manifest) |published| {
-        _ = published.touchExact() catch {};
-    } else {
-        var manifest_buf: [512]u8 = undefined;
-        if (host_manifest.manifestPathIn(&manifest_buf, subject.session_dir, subject.host_id)) |path| {
-            _ = c.utimensat(c.AT.FDCWD, path.ptr, null, 0);
-        } else |_| {}
+    switch (manifest) {
+        .published => |published| _ = published.touchExact() catch {},
+        .by_path => {
+            var manifest_buf: [512]u8 = undefined;
+            if (host_manifest.manifestPathIn(&manifest_buf, subject.session_dir, subject.host_id)) |path| {
+                _ = c.utimensat(c.AT.FDCWD, path.ptr, null, 0);
+            } else |_| {}
+        },
+        .skip => {},
     }
     // 소켓과 manifest 의 부모(`/tmp/maru-<uid>`, `.../sh`)도 함께 찍는다. 자식이 남아 있으면 `-empty` 조건에
     // 걸리지 않지만, 자식이 먼저 지워진 뒤 빈 디렉터리로 남는 창을 없앤다.
@@ -70,4 +89,59 @@ pub fn touchAll(
     if (short_endpoint.currentSocketDirPathIn(&sock_dir_buf)) |sock_dir| {
         _ = c.utimensat(c.AT.FDCWD, sock_dir.ptr, null, 0);
     } else |_| {}
+}
+
+test "매니페스트 경로 갱신은 ctime 을 바꿔 소유자의 withdraw 를 막는다 — .skip 은 안 바꾼다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    // 이 판정자는 **효과**를 잰다. 「`.skip` 갈래가 있다」가 아니라 「그 갈래를 타면 ctime 이 안 변한다」다.
+    // 글자만 고정하면 `.skip` 이 `.by_path` 와 같은 일을 해도 통과한다.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    var dir_z_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_z = try std.fmt.bufPrintZ(&dir_z_buf, "{s}", .{dir});
+
+    // `validateOwnerDir` 는 group/other 비트가 **하나도** 없어야 통과한다(0700). `testing.tmpDir` 은
+    // umask 를 따라 0755 로 만들므로, 이걸 안 맞추면 아래가 전부 `SkipZigTest` 로 빠져 **조용히
+    // 아무것도 안 재는 판정자**가 된다(실제로 처음 판이 그랬다).
+    if (c.chmod(dir_z.ptr, 0o700) != 0) return error.TestUnexpectedResult;
+
+    const host_id: u128 = 0xabcd;
+    // **`catch SkipZigTest` 를 쓰지 않는다** — 환경 탓이 아니라 계약이 깨진 것이면 그대로 드러나야 한다.
+    try host_manifest.prepareHostDirectory(dir_z, host_id);
+    var manifest_buf: [640]u8 = undefined;
+    const manifest = try host_manifest.manifestPathIn(&manifest_buf, dir_z, host_id);
+    const fd = c.open(manifest.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
+    if (fd < 0) return error.TestUnexpectedResult;
+    _ = c.close(fd);
+
+    var socket_buf: [640]u8 = undefined;
+    const socket_path = try std.fmt.bufPrintZ(&socket_buf, "{s}/sock", .{dir});
+    var lock_buf: [640]u8 = undefined;
+    const lock_path = try std.fmt.bufPrintZ(&lock_buf, "{s}/owner.lock", .{dir});
+    const subject: Subject = .{
+        .session_dir = dir_z,
+        .socket_path = socket_path,
+        .owner_path = lock_path,
+        .host_id = host_id,
+    };
+
+    const before = ctimeNs(manifest) orelse return error.TestUnexpectedResult;
+    touchAll(subject, .skip);
+    const after_skip = ctimeNs(manifest) orelse return error.TestUnexpectedResult;
+    // `.skip` 은 매니페스트에 손대지 않는다 — 소유자의 identity 가 살아 있어야 withdraw 가 돈다.
+    try testing.expectEqual(before, after_skip);
+
+    touchAll(subject, .by_path);
+    const after_path = ctimeNs(manifest) orelse return error.TestUnexpectedResult;
+    // 대비: 경로 갱신은 **실제로** ctime 을 바꾼다. 이 줄이 없으면 위 단언이 「갱신이 원래 안 된다」로도 통과한다.
+    try testing.expect(after_path != before);
+}
+
+fn ctimeNs(path: [:0]const u8) ?i128 {
+    var stat: std.c.Stat = undefined;
+    if (c.fstatat(c.AT.FDCWD, path.ptr, &stat, c.AT.SYMLINK_NOFOLLOW) != 0) return null;
+    return @as(i128, stat.ctime().sec) * std.time.ns_per_s + stat.ctime().nsec;
 }

@@ -8628,8 +8628,9 @@ test "S11-6 runtime.get 의 모양은 그대로다 — adopt 가 필드 수를 �
 
 // ── collect 실패 기록의 제품 경로(E2E, in-process) ──────────────────────────────────────────────
 // `collect_failure.zig` 의 순수 테스트는 줄 모양을, `collect_failure_site_boundary` 는 배선을 글자로
-// 잰다. 여기서는 **실제 `collectOutputForLocalStreamAtEpoch`** 를 돌려, 세 대조 자리가 제품 경로에서
-// 정확히 그 값을 기록하는지 잰다(적대적 검증 4회차의 탐침을 채택). 소켓·host 없음.
+// 잰다. 여기서는 **실제 `collectOutputForLocalStreamAtEpoch`** 를 돌려, 세 대조 자리가 그 값을 정확히
+// 기록하는지 잰다(적대적 검증 4회차의 탐침을 채택). producer 는 `FakeRuntimeOps` 다 — 어긋난 frontier 를
+// 주입해 **진단 배선**을 재는 것이지, 원인(resize)을 재현하는 테스트가 아니다. 소켓·host 없음.
 
 fn collectFailureTestAttach(conn: *Connection) !void {
     const allocator = testing.allocator;
@@ -8653,14 +8654,14 @@ test "collect 실패 기록: gen 만 다른 delta 는 양쪽 값을 싣고, 스�
     conn.runtime_ops = fake.ops();
     try collectFailureTestAttach(&conn);
 
-    // 먼저 delta 하나를 commit 한다 so committed seq=1 (expected next=2) and gen=0
+    // 먼저 delta 하나를 commit 한다 — commit 된 seq=1(다음 기대값 2), gen=0.
     fake.screen_change_token.revision += 1;
     var first = (try conn.collectOutputForLocalStream(1)).?;
     first.commit(&conn);
     try testing.expectEqual(@as(u64, 1), conn.attachments.get(1).?.screen_sequence);
     try testing.expectEqual(@as(u64, 0), conn.attachments.get(1).?.screen_generation);
 
-    // only reachable shape: seq equal, gen differs, is_snapshot=false
+    // 현재 producer 에서 가능한 유일한 모양: seq 같음, gen 다름, is_snapshot=false.
     fake.frontier_generation = 5;
     fake.screen_change_token.revision += 1;
     try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStream(1));
@@ -8681,11 +8682,11 @@ test "collect 실패 기록: gen 만 다른 delta 는 양쪽 값을 싣고, 스�
         "session host collect failed: site=delta_seq_mismatch err=- runtime=000000000000000000000000000000aa seq=2->2 gen=0->5 snapshot=0 send=11",
         line,
     );
-    // failure must not advance the committed frontier
+    // 실패는 commit 된 frontier 를 움직이지 않는다.
     try testing.expectEqual(@as(u64, 1), conn.attachments.get(1).?.screen_sequence);
     try testing.expectEqual(@as(u64, 0), conn.attachments.get(1).?.screen_generation);
 
-    // is_snapshot=true with a gen change is NOT a failure (no false positive), and it commits the new gen
+    // 스냅샷이면 gen 이 바뀌어도 실패가 아니다(오탐 없음). 새 gen 으로 commit 되고 기록은 비워진다.
     fake.delta_is_snapshot = true;
     fake.screen_change_token.revision += 1;
     var snap = (try conn.collectOutputForLocalStream(1)).?;
@@ -8694,7 +8695,6 @@ test "collect 실패 기록: gen 만 다른 delta 는 양쪽 값을 싣고, 스�
     snap.commit(&conn);
     try testing.expectEqual(@as(u64, 5), conn.attachments.get(1).?.screen_generation);
     try testing.expectEqual(@as(u64, 2), conn.attachments.get(1).?.screen_sequence);
-    fake.delta_is_snapshot = false;
 }
 
 test "collect 실패 기록: 빈 delta 에 gen 이 바뀌면 delta_frontier_mismatch 로 양쪽 값을 싣는다" {
@@ -8724,10 +8724,10 @@ test "collect 실패 기록: 빈 delta 에 gen 이 바뀌면 delta_frontier_mism
     );
 }
 
-var collect_failure_test_seq_skew: u64 = 0;
+const collect_failure_test_seq_skew: u64 = 7;
 fn collectFailureTestSkewedSnapshot(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!ProjectedSnapshot {
     var out = try FakeRuntimeOps.snapshotFn(ctx, runtime_id, sequence, allocator);
-    // attach asks for sequence 0 and must see 0; only the resync snapshot is skewed
+    // attach 는 sequence 0 을 요청하고 0 을 받아야 한다 — resync 스냅샷만 비튼다.
     if (sequence != 0) out.frontier.sequence = sequence + collect_failure_test_seq_skew;
     return out;
 }
@@ -8743,8 +8743,6 @@ test "collect 실패 기록: resync 스냅샷의 sequence 가 어긋나면 snaps
     var ops = fake.ops();
     ops.snapshot = collectFailureTestSkewedSnapshot;
     conn.runtime_ops = ops;
-    collect_failure_test_seq_skew = 7;
-    defer collect_failure_test_seq_skew = 0;
     try collectFailureTestAttach(&conn);
     fake.frontier_generation = 9;
     const resync = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":1}}");

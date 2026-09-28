@@ -32,6 +32,8 @@ TerminalInput
 
 평문/IME 확정 텍스트·조합(preedit)을 **어느 입력이 받나**는 `AppSession.inputFocus()`(단일 출처 enum: `terminal`·`confirm`·`notice`·`settings`·`rename`·`sidebar_search`·`find`·`palette`·`addr_edit`)가 판정하고, 그 판정을 **exhaustive switch 여러 곳**(`imeSetPreedit`·`imeComposingActive`·`commitComposition`·`overlayCaretRect`·`routeCommittedText`)이 소비한다. 컴파일러가 케이스 누락을 잡아 **안전**하지만, 새 입력 대상 하나를 추가하면 **각 switch에 케이스**를 넣어야 하고(주소창 7e-2 추가 시 실제로 5곳 — 그 중 `routeCommittedText`를 놓쳐 "조합 아닌 평문이 터미널로 새는" IME 버그가 났었다), 같은 디스패치("활성 입력의 메서드 호출")가 여러 곳에 복제되는 냄새가 있다.
 
+팔레트·찾기·심볼 선택 같은 모달은 뒤에 남아 있는 사이드바·도크 검색이나 인라인 편집보다 먼저 IME를 받는다. 키 라우팅과 `inputFocus()`의 우선순위가 같아야 조합 글자의 표시·필터·확정 대상이 갈라지지 않는다.
+
 **장기 방향(정정 — [text-field-editor.md] 결정 반영)**: 프리미티브는 **둘**이다. ⑴ `OverlayInput` — 끝-caret 검색형(`find`/`palette`/`rename`/`sidebar_search`)의 lean 모델, ⑵ `TextField`(`chrome/components/text_field.zig`) — mid-string caret·선택·마우스 편집이 필요한 곳(현재 소비자는 `addr_edit` 하나). 초판은 "`OverlayInput` 하나로 수렴"이었으나, caret 편집 상태를 검색 모델에 욱여넣으면 추상이 흐려지고 find/palette는 ←/→를 오버레이 닫기에 써 caret 편집을 명시 거부하므로 **이관 0**으로 결정했다([text-field-editor.md] §2.2). 남은 중복은 **`settings`의 고정 버퍼 편집**(현재도 `OverlayInput.displayCols`만 빌려 쓰는 자체 버퍼)이고, 이주 대상은 그 하나다. 두 프리미티브 각각은 동종이므로 `activeTextInput()`류로 뽑아 위 switch들을 접는 방향은 유효하다("누가 활성인가"를 한 곳에서만 판정). **터미널은 정당한 예외**다. 확정 텍스트는 PTY로 보내고 marked text는 각 GUI attachment의 `Surface`가 소유하는 client-local overlay에 둔다. 각 기능(주소창 URL 검증·네비, find 검색 등)의 **행동**은 프리미티브가 아니라 그 위에 얹는다(공유 프리미티브 + 개별 기능 분리).
 
 **순서**: IME·키 경로(민감)를 건드리는 회귀 위험이 있어 Phase 7(인앱 브라우저) 안정 후 **별도 슬라이스**로 한다(주소창 addr_edit 추가가 동기 증거). 지금은 프리미티브를 더 늘리지 않는 것(신규 텍스트 입력은 OverlayInput 재사용)만으로 충분하다.

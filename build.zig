@@ -4242,7 +4242,9 @@ pub fn build(b: *std.Build) void {
             }),
             // `IG1-e` 도 여기 넣는다(2026-09-28): 「못 찾았다」와 「다 못 읽었다」를 가르는 판정자가
             // 전수 스위트에서만 돌면, 그 구분을 되접는 퇴행을 개발 중에 못 본다 — 같은 이유다.
-            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도", "원격 매핑", "RF7", "IG1-e" },
+            // `원격 왕복 장부` 도 같은 이유다(2026-09-28): 실제 ssh 왕복이 있어야 도는 축이라
+            // 전수 스위트에만 두면 개발 중에 한 번도 안 돈다.
+            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도", "원격 매핑", "RF7", "IG1-e", "원격 왕복 장부" },
         });
         remote_activity_vertical_tests.root_module.link_libc = true;
         for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
@@ -4264,7 +4266,7 @@ pub fn build(b: *std.Build) void {
         // 무관하게 컴파일된다). ⚠️ 매핑을 여기 넣은 이유: `agent_image_scan_backend` 는 `maru` 모듈
         // 의존이 있어 **단독 `zig test` 로 안 돌고**, 전체 `zig build test` 는 캐시로 건너뛴다 —
         // 그러면 새 매핑 판정자가 「돌았는지」를 개수로 확인할 데가 아예 없다.
-        run_remote_activity_vertical.addArg("--maru-expect-tests=35"); // +3: RF7 셋을 필터에 넣었다(2026-09-26)
+        run_remote_activity_vertical.addArg("--maru-expect-tests=37"); // +3: RF7 셋(2026-09-26) · +1: IG1-e · +2: 원격 왕복 장부 — 셈과 시계(2026-09-28)
         run_remote_activity_vertical.setCwd(b.path("."));
         b.step("test-remote-activity-vertical", "Run the remote activity view vertical judges only").dependOn(&run_remote_activity_vertical.step);
         // 🔥 **CI 에도 건다**(적대적 E2). 판정자의 **실행**은 `test-macos-app-host-abi` 가 4,781 개를

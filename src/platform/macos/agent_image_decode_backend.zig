@@ -367,10 +367,12 @@ fn worker(job: *Job) void {
         const b64 = if (job.remote) |r| blk_remote: {
             // **왕복을 잰다.** 장당 ssh 한 번이고 원본 base64 전체가 선 위로 온다 — 그 둘 중 무엇이
             // 지배하는지는 숫자로만 갈린다(왕복 수십~수백 ms vs 디코드 4 ms 라는 주석은 근사였다).
-            const started = std.time.nanoTimestamp();
+            // **단조 시계를 `std.c` 로 직접 읽는다** — 여기는 백그라운드 스레드라 `std.Io` 를 못 쓴다
+            // (이 파일 머리말의 규율). 레포의 다른 백그라운드 자리도 같은 호출을 쓴다.
+            const started = monotonicNs();
             const got = fetchRemoteBase64(state.allocator, r, job.path, job.data_offset, job.data_len) orelse break :decode;
-            const ended = std.time.nanoTimestamp();
-            result.remote_ns = if (ended > started) @intCast(ended - started) else 0;
+            const ended = monotonicNs();
+            result.remote_ns = if (ended > started) ended - started else 0;
             result.remote_bytes = got.len;
             break :blk_remote got;
         } else blk: {
@@ -430,6 +432,16 @@ fn worker(job: *Job) void {
 
 /// 원격에서 그 구간(base64 payload)을 당겨온다(RAV6). 못 읽으면 null — **빈 구간과 다른 사실이다**.
 ///
+/// 단조 ns. 실패하면 0 — 그러면 `ended > started` 가 거짓이라 **0 으로 기록된다**(음수나 쓰레기
+/// 값이 총합에 섞이지 않는다).
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    const sec: u64 = if (ts.sec > 0) @intCast(ts.sec) else 0;
+    const nsec: u64 = if (ts.nsec > 0) @intCast(ts.nsec) else 0;
+    return sec *| std.time.ns_per_s +| nsec;
+}
+
 /// **여기는 백그라운드 스레드다** — `std.Io` 도 로컬 파일시스템도 안 만진다(`ssh_upload` 규율 ·
 /// 계약 §2.1). 펼침(RAV5b)이 쓰는 그 문(`activity_read_script`)을 그대로 재사용한다.
 ///

@@ -302,9 +302,7 @@ pub const State = struct {
     scan_ns: u64 = 0,
     /// **원격 그림 왕복 누적**(RAV6 계측). 지금은 장당 ssh 한 번이고 원본 base64 전체가 선 위로
     /// 온다. 「느리다」를 고치기 전에 **왕복이 지배하는지 바이트가 지배하는지**를 이 셋이 가른다.
-    remote_fetch_count: u64 = 0,
-    remote_fetch_ns: u64 = 0,
-    remote_fetch_bytes: u64 = 0,
+    remote_fetch: RemoteFetchTotals = .{},
     /// 마지막으로 훑은 **현재 세션 파일**의 자국. 이것과 지금 `stat` 이 다르면 다시 훑는다.
     ///
     /// **머리 파일만 든다.** 체인의 뒤쪽은 이미 끝난 세션이라 자라지 않는다(§3.3) — 지금 대화가
@@ -1693,6 +1691,54 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
 ///
 /// 예전에는 틱당 하나였다. 워커를 여럿으로 늘려도 여기가 하나면 처리량은 그대로 틱 주기에 묶인다 —
 /// 제출과 수확은 **둘 다** 고쳐야 뜻이 있다(적대적 검증이 짚은 자리).
+/// 원격 그림 왕복의 **누적 장부**. 셈과 갈래를 여기에 두는 이유는 하나다 — 실제 ssh 왕복 없이
+/// 판정할 수 있어야 한다. 왕복은 원격 호스트가 있어야 만들어지므로, 배선 자리에 인라인으로 두면
+/// **아무도 못 재는 코드**가 된다(실제로 처음 판이 그랬다).
+pub const RemoteFetchTotals = struct {
+    count: u64 = 0,
+    ns: u64 = 0,
+    bytes: u64 = 0,
+
+    /// 이 완료본이 **원격 왕복이었나**. 로컬은 둘 다 0 이라 세지 않는다 — 평소 로그를 안 더럽히고,
+    /// 총합이 「원격 왕복 수」라는 뜻을 유지한다.
+    ///
+    /// ⚠️ **둘 중 하나만 0 이어도 원격이다.** 빈 구간(0 바이트)이나 시계가 뒤로 간 왕복(ns 0)도
+    /// **왕복은 일어났다** — `and` 로 묶으면 그런 왕복이 총합에서 사라져 「몇 번 돌았나」가 틀린다.
+    pub fn counts(ns: u64, bytes: u64) bool {
+        return ns != 0 or bytes != 0;
+    }
+
+    /// **넘침을 무시하지 않는다.** 오래 켠 창에서 바이트 합이 `u64` 를 넘을 일은 없지만, 넘으면
+    /// 그 뒤 숫자가 **작아져서** 「빨라졌다」로 읽힌다 — 포화시켜 그 오독을 막는다.
+    pub fn add(self: *RemoteFetchTotals, ns: u64, bytes: u64) void {
+        self.count +|= 1;
+        self.ns +|= ns;
+        self.bytes +|= bytes;
+    }
+};
+
+test "원격 왕복 장부: 로컬은 안 세고, 한쪽만 0 인 왕복도 센다" {
+    // **갈래가 이 판정자의 전부다.** 배선 자리에 인라인으로 두면 실제 ssh 없이는 못 재고, 그러면
+    // 계측을 통째로 지워도 게이트가 초록이다(적대적 검증에서 그 상태였다).
+    try std.testing.expect(!RemoteFetchTotals.counts(0, 0)); // 로컬
+    try std.testing.expect(RemoteFetchTotals.counts(1, 0)); // 빈 구간이라도 왕복은 했다
+    try std.testing.expect(RemoteFetchTotals.counts(0, 1)); // 시계가 안 흘러도 바이트는 왔다
+    try std.testing.expect(RemoteFetchTotals.counts(12, 34));
+
+    var t: RemoteFetchTotals = .{};
+    t.add(10, 100);
+    t.add(5, 7);
+    try std.testing.expectEqual(@as(u64, 2), t.count);
+    try std.testing.expectEqual(@as(u64, 15), t.ns);
+    try std.testing.expectEqual(@as(u64, 107), t.bytes);
+
+    // **넘치면 포화한다** — 줄어들면 「빨라졌다」로 읽힌다.
+    var big: RemoteFetchTotals = .{ .ns = std.math.maxInt(u64) - 1, .bytes = std.math.maxInt(u64) };
+    big.add(10, 10);
+    try std.testing.expectEqual(std.math.maxInt(u64), big.ns);
+    try std.testing.expectEqual(std.math.maxInt(u64), big.bytes);
+}
+
 fn harvestDecoded(self: *AppSession) void {
     while (harvestOne(self)) {}
 }
@@ -1705,19 +1751,20 @@ fn harvestOne(self: *AppSession) bool {
 
     // **원격 왕복을 누적하고 한 줄로 남긴다.** 격자 한 화면이 찰 때까지 몇 번을 돌고 몇 바이트를
     // 끌어왔는지 — 그 두 수가 없으면 최적화가 추측이 된다. 로컬(0)은 안 찍는다.
-    if (r.remote_ns != 0 or r.remote_bytes != 0) {
-        self.agent_activity.remote_fetch_count += 1;
-        self.agent_activity.remote_fetch_ns += r.remote_ns;
-        self.agent_activity.remote_fetch_bytes += r.remote_bytes;
+    //
+    // 셈은 **순수 함수가 소유한다**(`RemoteFetchTotals.add`) — 실제 ssh 왕복 없이 갈래를 재려면
+    // 그래야 한다. 이 자리는 그것을 **부르기만** 한다.
+    if (RemoteFetchTotals.counts(r.remote_ns, r.remote_bytes)) {
+        self.agent_activity.remote_fetch.add(r.remote_ns, r.remote_bytes);
         std.log.info(
             "remote image fetch: idx={d} bytes={d} ms={d} | total n={d} bytes={d} ms={d}",
             .{
                 r.hit_index,
                 r.remote_bytes,
                 r.remote_ns / std.time.ns_per_ms,
-                self.agent_activity.remote_fetch_count,
-                self.agent_activity.remote_fetch_bytes,
-                self.agent_activity.remote_fetch_ns / std.time.ns_per_ms,
+                self.agent_activity.remote_fetch.count,
+                self.agent_activity.remote_fetch.bytes,
+                self.agent_activity.remote_fetch.ns / std.time.ns_per_ms,
             },
         );
     }

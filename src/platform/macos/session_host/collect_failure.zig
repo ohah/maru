@@ -117,6 +117,14 @@ test "frontier 불일치 줄은 양쪽 값을 «기대 -> 실제» 방향으로 
             "runtime=0935886dc61898048f9fd1e194dee150 seq=41->42 gen=7->8 snapshot=0 send=512",
         render(&buf, .{ .site = "delta_seq_mismatch", .frontier = sample }),
     );
+    // 현재 producer 에서 가능한 유일한 모양(§12.7 표 첫 행) — seq 는 같고 gen 만 다르다.
+    var gen_only = sample;
+    gen_only.actual_sequence = gen_only.expected_sequence;
+    try std.testing.expectEqualStrings(
+        "session host collect failed: site=delta_seq_mismatch err=- " ++
+            "runtime=0935886dc61898048f9fd1e194dee150 seq=41->41 gen=7->8 snapshot=0 send=512",
+        render(&buf, .{ .site = "delta_seq_mismatch", .frontier = gen_only }),
+    );
     var snap = sample;
     snap.is_snapshot = true;
     try std.testing.expect(std.mem.endsWith(u8, render(&buf, .{ .site = "x", .frontier = snap }), " snapshot=1 send=512"));
@@ -173,6 +181,7 @@ test "가장 긴 값도 host_log 한 줄에 들고, 넘치면 숫자를 버려�
     try std.testing.expectEqualStrings("session host collect failed: site=" ++ long_site ++ " err=-", clipped);
     // 이름조차 안 들어가면 그렇다고 말한다.
     try std.testing.expectEqualStrings(head_overflow, render(&buf, .{ .site = "s" ** 300 }));
+    try std.testing.expect(std.mem.startsWith(u8, head_overflow, "session host collect failed: site="));
 }
 
 test "기록은 매번 통째로 갈아 끼워 남의 이름·숫자를 물려주지 않는다" {
@@ -180,7 +189,17 @@ test "기록은 매번 통째로 갈아 끼워 남의 이름·숫자를 물려�
     failFrontier("delta_seq_mismatch", sample);
     try std.testing.expectEqualStrings("delta_seq_mismatch", last().site);
     try std.testing.expectEqualStrings("-", last().err);
-    try std.testing.expectEqual(sample, last().frontier.?);
+    try std.testing.expectEqual(sample, last().frontier orelse return error.TestUnexpectedResult);
+
+    // 표본은 둘 이상 — 스냅샷 자리, 그리고 gen 만 다른(현재 가능한 유일한) 모양도 그대로 돌려준다.
+    var snap = sample;
+    snap.is_snapshot = true;
+    failFrontier("snapshot_seq_mismatch", snap);
+    try std.testing.expectEqual(snap, last().frontier orelse return error.TestUnexpectedResult);
+    var gen_only = sample;
+    gen_only.actual_sequence = gen_only.expected_sequence;
+    failFrontier("delta_seq_mismatch", gen_only);
+    try std.testing.expectEqual(gen_only, last().frontier orelse return error.TestUnexpectedResult);
 
     // 이름만 남기는 실패가 뒤따르면 직전 숫자가 **사라진다**.
     fail("delta");

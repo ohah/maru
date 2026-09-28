@@ -27,6 +27,10 @@ const builtin = @import("builtin");
 pub const max_line_bytes = 256;
 
 /// 진단 한 줄을 host 로그(fd 2)에 남긴다. 실패해도 조용히 넘어간다 — 진단이 제품 경로를 바꾸지 않는다.
+///
+/// **본문 네 문장은 `collect_failure_site_boundary` 가 그대로 잰다.** 길이 상한에 기대는 진단
+/// (`collect_failure.render`)이 `formatLine` 으로 그 상한을 재므로, 여기서 접두어를 붙이거나 조기 반환을
+/// 더하면 그 측정이 제품과 갈린다 — 바꾸려면 그쪽 상한도 함께 본다.
 pub fn line(comptime fmt: []const u8, args: anytype) void {
     if (builtin.is_test) return;
     var buf: [max_line_bytes]u8 = undefined;

@@ -7998,6 +7998,47 @@ grep -o 'site=invalidate_[a-z_]*' /tmp/maru-$UID/session-host/host-*.log | sort 
 여기 뭔가 뜨면 그 갈래에 위 표대로 넣는다. 그때는 **빈도와 갈래를 알고** 고치는 것이라 재시도
 동작을 근거 있게 정할 수 있다. 아무것도 안 뜨면 이 절은 그대로 둔다 — 안 나는 것을 고치지 않는다.
 
+### 12.7 `delta_seq_mismatch` 는 어느 쪽이 어긋났나 — 이름 다음은 숫자다 (2026-09-28)
+
+런타임 16 개를 든 host 가 GUI 연결을 통째로 닫았다. 셸은 전부 살아 있었고 앱을 다시 띄우자
+돌아왔지만, 사용자에게는 탭 16 개가 한꺼번에 죽은 것으로 보였다.
+
+```
+session host collect failed: site=delta_seq_mismatch err=-
+session host closed client connection: … why=resource_exhausted site=tick_collect_oom
+```
+
+§12.3 의 자리 이름 덕에 **「메모리 부족이 아니다」까지는 바로 갈렸다.** 그런데 거기서 멈췄다.
+`delta_seq_mismatch` 는 두 조건의 `or` 이고(sequence 가 `+1` 이 아니거나, 스냅샷이 아닌데
+generation 이 바뀌었거나) 로그에는 **어느 쪽인지, 어느 런타임인지, 값이 얼마였는지** 가 하나도
+없었다. 같은 줄이 다시 나와도 똑같이 멈춘다.
+
+**고친 방식.** frontier 를 대조하는 세 자리(`snapshot_seq_mismatch`·`delta_seq_mismatch`·
+`delta_frontier_mismatch`)는 `collectFailFrontier` 로 **양쪽 값**을 싣는다. 같은 줄 뒤에 붙는다:
+
+```
+… site=delta_seq_mismatch err=- runtime=<32 hex> seq=<기대>-><실제> gen=<기대>-><실제> snapshot=<0|1> send=<bytes>
+```
+
+방향은 «기대 -> 실제» 로, 업그레이드 예산 진단(`bytes=예약->실제`)과 같다. frontier 가 없는 자리의 줄은
+예전 그대로다. 오류 집합은 넓히지 않았다(§12.3 과 같은 이유).
+
+**어느 갈래인지는 숫자가 가른다.** 아래는 각 모양이 **먼저 의심할 곳**이지 확인된 원인이 아니다 —
+이 절을 쓸 때 재현은 한 번이었고 그때는 숫자가 없었다.
+
+| 모양 | 먼저 볼 곳 |
+| --- | --- |
+| `seq` 가 기대보다 앞섬, `gen` 같음 | producer 가 이 연결의 commit 과 무관하게 sequence 를 전진시킨 경로 |
+| `seq` 같음, `gen` 다름, `snapshot=0` | 세대가 바뀌었는데 스냅샷이 아니라 delta 로 나온 경로 |
+| `seq` 가 기대보다 뒤 | 이 연결이 commit 한 frontier 보다 오래된 base 로 만든 경로 |
+
+`runtime=` 은 `maru runtime list` 의 id 와 같은 표기라, 어느 탭이었는지 바로 짚힌다.
+
+**한계.** 이것은 **진단**이지 수정이 아니다. 런타임 하나의 어긋남이 여전히 연결 전체를 닫는다 —
+탭 16 개가 한꺼번에 끊기는 피해 범위는 그대로다. 그 스트림만 무효화하고 스냅샷으로 다시 맞추는
+방향은 원인을 숫자로 본 뒤에 정한다. 판정자는 `collect_failure_site_boundary` 의 넷째 축(배선)과
+`connection_turn.zig` 의 포맷 테스트(방향)다.
+
 ### P0 — 문서 결정
 
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.

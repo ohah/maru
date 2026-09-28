@@ -5917,6 +5917,43 @@ pub fn build(b: *std.Build) void {
     }
     boundary_step.dependOn(snapshot_cap_refusal_step);
 
+    // delta 의 base 가 **다른 세대**면 producer 는 스냅샷을 내야 한다. `computeDelta` 는 격자 크기만 보므로
+    // 두 번의 resize 가 격자를 제자리로 돌리면(A→B→A) 세대만 +2 인 delta 가 나가 서버가 연결 전체를 닫았다
+    // (2026-09-28). 순수 판정자(`baseFrame`·그 위험의 존재)와 `deltaOp` 배선을 PR 에서 잰다 — 제품 경로
+    // 회귀 판정자(runtime_manager, 실제 PTY)는 session-host 잡이라 main 에서 돈다.
+    const delta_base_generation_step = b.step(
+        "test-delta-base-generation",
+        "A delta base from an older generation is sent as a snapshot, not a delta",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |base_gen_optimize| {
+        const base_gen_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/screen_snapshot.zig"),
+                .target = target,
+                .optimize = base_gen_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"delta base 세대"},
+        });
+        const run_base_gen_tests = b.addRunArtifact(base_gen_tests);
+        run_base_gen_tests.addArg("--maru-expect-tests=2");
+        run_base_gen_tests.addArg("--maru-expect-passed=2");
+        delta_base_generation_step.dependOn(&run_base_gen_tests.step);
+    }
+    const base_gen_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/delta_base_generation_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_base_gen_wiring = b.addRunArtifact(base_gen_wiring_tests);
+    run_base_gen_wiring.addArg("--maru-expect-tests=1");
+    run_base_gen_wiring.addArg("--maru-expect-passed=1");
+    run_base_gen_wiring.setCwd(b.path("."));
+    delta_base_generation_step.dependOn(&run_base_gen_wiring.step);
+    boundary_step.dependOn(delta_base_generation_step);
+
     const session_host_handoff_exhaustive_step = b.step(
         "test-session-host-handoff-exhaustive",
         "Verify every stable handoff core field with valid non-default canonical round trips",

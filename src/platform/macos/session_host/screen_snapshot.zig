@@ -784,6 +784,23 @@ pub const DeltaError = ProjectError || error{
     SnapshotRequired,
 };
 
+/// delta 의 base 가 **어느 세대·어느 격자**로 만들어졌는가. 첫 record(`screen_meta`)의 머리와 몸만 읽는다.
+/// base 가 비었거나 형식이 다르면 `null` — 그때는 `computeDelta` 가 어차피 `SnapshotRequired` 를 낸다.
+pub const BaseFrame = struct {
+    generation: u64,
+    cols: u16,
+    rows: u16,
+};
+
+pub fn baseFrame(prev_bytes: []const u8) ?BaseFrame {
+    var rs = screen_stream.RecordStream{ .bytes = prev_bytes };
+    const first = (rs.next() catch return null) orelse return null;
+    const fs = screen_stream.RecordStream.split(first) catch return null;
+    if (fs.header.kind != .screen_meta) return null;
+    const meta = screen_stream.decodeScreenMeta(fs.body) catch return null;
+    return .{ .generation = fs.header.generation, .cols = meta.cols, .rows = meta.rows };
+}
+
 pub fn computeDeltaBounded(
     allocator: std.mem.Allocator,
     prev_bytes: []const u8,
@@ -1394,6 +1411,49 @@ test "screen snapshot: computeDelta requires a fresh snapshot when the grid geom
 
     try core.resize(20, 5); // grid가 바뀌면 delta로는 못 잇는다.
     try testing.expectError(error.SnapshotRequired, computeDelta(allocator, a, &core, .{ .generation = 2 }));
+}
+
+test "delta base 세대: baseFrame 은 base 를 만든 세대와 격자를 읽고, 못 읽으면 null 이다" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 3 });
+    defer core.deinit();
+    try core.write("frame");
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 7, .sequence = 4 });
+    defer allocator.free(base);
+    const frame = baseFrame(base) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u64, 7), frame.generation);
+    try testing.expectEqual(@as(u16, 12), frame.cols);
+    try testing.expectEqual(@as(u16, 3), frame.rows);
+    try testing.expect(baseFrame("") == null);
+    try testing.expect(baseFrame("not a record stream") == null);
+}
+
+// **왜 producer 가 세대를 따로 봐야 하는가.** `computeDelta` 는 격자 크기·alt 화면만 비교한다. 두 번의
+// resize 가 격자를 제자리로 돌려놓으면(A→B→A) 세대는 +2 인데 delta 가 **나온다** — 그 delta 를 서버가
+// `delta_seq_mismatch` 로 거절하며 연결 전체를 닫았다(2026-09-28, 런타임 16 개). 이 테스트는 그 위험이
+// 순수 함수 층에 실제로 있음을 고정하고, `baseFrame` 이 그 순간을 가려낸다는 것을 잰다. 제품 경로에서의
+// 판정(`RuntimeManager.deltaOp` 가 스냅샷으로 돌린다)은 runtime_manager 의 회귀 테스트가 잰다.
+test "delta base 세대: 격자가 제자리로 돌아온 두 번의 resize 는 computeDelta 를 통과하지만 세대는 다르다" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    try core.write("before resize");
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1, .sequence = 1 });
+    defer allocator.free(base);
+
+    try core.resize(100, 24);
+    try core.resize(80, 24);
+    try core.write("\r\nafter");
+    // computeDelta 혼자로는 막지 못한다 — 크기가 같으니 delta 가 나온다.
+    const result = try computeDelta(allocator, base, &core, .{ .generation = 3, .sequence = 2 });
+    defer result.deinit(allocator);
+    try testing.expect(result.delta.len > 0);
+    // 그래서 producer 는 base 의 세대를 본다. 격자는 같고 세대만 다르다 — 바로 그 모양이다.
+    const frame = baseFrame(base) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u64, 1), frame.generation);
+    try testing.expect(frame.generation != 3);
+    try testing.expectEqual(core.renderSnapshot().size.cols, frame.cols);
+    try testing.expectEqual(core.renderSnapshot().size.rows, frame.rows);
 }
 
 test "screen snapshot: projection and assembler are inverses on a real screen (snapshot + delta round-trip)" {

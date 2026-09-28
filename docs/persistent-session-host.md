@@ -6819,7 +6819,17 @@ delta 가 먼저 도착하면 base 가 어긋나 `GenerationGap` 이 난다.
    — **이미 기존 기구가 보장한다**(2026-09-02 코드 확인): `screen_snapshot.computeDeltaBounded` 가
    `snap.size.cols != prev_meta.cols …` 이면 `error.SnapshotRequired` 를 내고, `runtime_manager`
    의 delta op 이 그것을 받아 `projectSnapshotBounded` 로 **fresh snapshot** 을 보낸다. 즉 base
-   격자가 다르면 delta 는 원리상 만들어지지 않는다 — 조정 경로가 따로 할 일이 없다.
+   격자가 다르면 delta 는 원리상 만들어지지 않는다.
+
+   **그런데 「격자가 다르면」 만으로는 부족했다(2026-09-28).** 계약은 「generation 이 바뀌면 snapshot」
+   인데 기구는 「격자가 바뀌면 snapshot」 을 쟀다. 둘은 같은 스트림의 두 collect 사이에 resize 가 **격자를
+   제자리로 돌려놓을 때**(A→B→A — 창 드래그, 폰 선언을 reconcile 이 되돌리는 S11-6) 갈린다: 격자는 같아
+   delta 가 나가고 generation 은 +2 다. 서버는 스냅샷이 아닌 delta 의 세대 변화를 `delta_seq_mismatch` 로
+   거절하며 **연결 전체**를 닫았다 — 런타임 16 개가 한꺼번에 끊겼다. 그래서 delta op 이 base 의 세대를
+   직접 본다(`screen_snapshot.baseFrame`): **세대가 다르면 격자와 무관하게 snapshot** 이다. 격자까지 같은
+   그 순간에는 host 로그에 `session host delta base generation stale: … gen=<base>-><지금> grid=… -> snapshot`
+   한 줄을 남긴다 — 예전에 연결을 닫던 바로 그 모양이라, 그 줄이 재발의 증거이자 수정이 막았다는 증거다.
+   판정자는 `test-delta-base-generation`(순수·배선, PR)과 runtime_manager 의 실제 PTY 회귀 테스트(main)다.
 2. **client**: `GenerationGap` 은 **망가진 데이터가 아니다**. 그 delta 하나만 버리고 다음 snapshot 을
    기다린다 — 화면을 끄지 않는다. 끄면 폰이 붙는 것만으로 자기 화면을 날린다.
 
@@ -8065,9 +8075,12 @@ generation 이 바뀌었거나) 로그에는 **어느 쪽인지, 어느 런타�
 
 `runtime=` 은 `maru runtime list` 의 id 와 같은 32 자리 표기라, 어느 탭이었는지 바로 짚힌다.
 
-**수정은 이 절 밖(별도 PR)이다.** generation 이 바뀌면 delta 대신 스냅샷을 내야 한다 — `computeDelta` 에
-generation 비교를 넣으면 재현이 스냅샷 출력으로 바뀌는 것까지 실험으로 확인했지만, 기존 delta 테스트
-일부가 base 와 다른 generation 으로 부르고 있어 자리(`deltaOp` 쪽이 후보)와 판정자를 따로 정한다.
+**수정(2026-09-29, #4001).** `RuntimeManager.deltaOp` 가 core 락 아래에서 base 의 세대
+(`screen_snapshot.baseFrame`)를 지금 세대와 비교해, 다르면 delta 대신 **스냅샷**을 낸다. `computeDelta` 는
+그대로 둔다 — generation 을 임의로 찍는 순수 테스트가 그 함수를 여럿 쓴다. 격자까지 같은 그 순간에는
+`session host delta base generation stale: … -> snapshot` 한 줄이 남는다 — 이 절의 `collect failed … gen=a->b`
+대신 그 줄이 나오면 예전이라면 연결이 끊겼을 순간을 수정이 막은 것이다. 계약과 판정자는 「리사이즈 뒤에는
+snapshot 이 먼저다」 1번 항목이 소유한다.
 
 **한계.** 이것은 **진단**이지 수정이 아니다. 런타임 하나의 어긋남이 여전히 연결 전체를 닫는다 —
 탭 16 개가 한꺼번에 끊기는 피해 범위는 그대로다. 그 스트림만 무효화하는 방향은 재발 숫자로 원인을 확인한

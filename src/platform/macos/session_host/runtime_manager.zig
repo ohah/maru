@@ -703,6 +703,11 @@ pub const RuntimeManager = struct {
 
     pub const UpgradeHandoffPreview = struct {
         encoded_bytes_without_attempt: usize,
+        /// 불일치가 났을 때 **무엇이 자랐는지**를 소거법으로 가르기 위한 섹션 값들.
+        /// 미리보기 쪽 숫자는 여기 실어 나오지 않으면 `freeze` 뒤에 다시 만들 수 없다.
+        next_handle: u64 = 0,
+        notification_bytes: usize = 0,
+        notification_metadata_bytes: usize = 0,
         membership_generation: u64,
         runtime_ids: [upgrade_limits.max_runtime_count]u128 = undefined,
         runtime_count: usize,
@@ -862,6 +867,9 @@ pub const RuntimeManager = struct {
         };
         defer allocator.free(encoded);
         preview.encoded_bytes_without_attempt = encoded.len;
+        preview.next_handle = self.next_handle;
+        preview.notification_bytes = notification_handoff.len;
+        preview.notification_metadata_bytes = notification_metadata_handoff.len;
         return preview;
     }
 

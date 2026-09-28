@@ -494,6 +494,13 @@ fn processArmedWithDeadlineHooks(
         gate_preclosed,
         &budget_reservation,
         &reservation,
+        .{
+            .total_bytes = preview_bytes,
+            .without_attempt = preview.encoded_bytes_without_attempt,
+            .notification = preview.notification_bytes,
+            .metadata = preview.notification_metadata_bytes,
+            .next_handle = preview.next_handle,
+        },
     );
     budget_reservation.cancel() catch return .invariant_violation;
     return outcome;
@@ -509,6 +516,7 @@ fn processBudgetReserved(
     gate_preclosed: bool,
     budget_reservation: *budget_admission.Reservation,
     reservation: *exec_fd_set.SlotReservation,
+    preview_sections: PreviewSections,
 ) Outcome {
     var frozen = (if (gate_preclosed)
         upgrade_attempt.freezePreclosed(ctx.manager, ctx.gate, deadline)
@@ -575,6 +583,7 @@ fn processBudgetReserved(
         // 축 줄이 라벨을 다시 쓰면 2 번이 되어 빨개진다 — 합치지 마라.
         noteUpgradeStage("budget_reservation_mismatch");
         noteUpgradeBudgetMismatch(report);
+        noteUpgradeBudgetSections(mismatch_axis, preview_sections, &capture, handoff_bytes.len);
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
             .reason = .runtime_changed,
@@ -884,6 +893,87 @@ fn noteUpgradeStageErr(stage: []const u8, err: anyerror) void {
 /// **위치 인자로 받지 않는다.** 일곱 값 중 여섯이 같은 정수 타입이라 순서를 바꿔 넣어도
 /// 컴파일되고 단위 판정자도 못 잡는다 — 그러면 로그가 조용히 거짓을 말한다(예약값과 실제값이
 /// 뒤바뀌어 나오면 사람이 정반대로 읽는다). 필드 이름을 요구해 컴파일러가 막는다.
+/// 미리보기 쪽 섹션 값. `freeze` 뒤에는 다시 만들 수 없으므로 `processBudgetReserved` 까지
+/// **실어 나른다.** 인자 넷을 늘어놓지 않는 이유는 형제 보고와 같다 — 같은 타입의 숫자가 이웃하면
+/// 순서가 뒤바뀌어도 컴파일된다.
+const PreviewSections = struct {
+    total_bytes: usize,
+    without_attempt: usize,
+    notification: usize,
+    metadata: usize,
+    next_handle: u64,
+};
+
+/// `axis=bytes` 일 때 **무엇이 자랐는지**를 소거법으로 가른다.
+///
+/// 2026-09-28 실측은 `bytes=13103944->13103947` — 런타임 집합은 그대로인데 3 바이트가 늘었다.
+/// 기전(예약이 freeze 전 미리보기와 같았다)은 확실했지만 **그 3 바이트의 출처는 몰랐다.** 후보가
+/// 넷이었고 보고에는 넷을 가를 값이 하나도 없었다: 화면·스크롤백 델타, 알림 저널, 알림 metadata,
+/// `next_handle` 자리수. 그래서 섹션별 «예약 -> 실제» 를 남긴다 — 앞의 셋이 그대로인데 총합만
+/// 자랐으면 남는 것은 화면 섹션이다.
+///
+/// `attempt` 는 양쪽이 같은 레코드라 한 값이다(`encodedAttemptSectionBytes` 는 고정폭 TLV 헤더).
+const BudgetSectionsReport = struct {
+    attempt: usize,
+    reserved_without_attempt: usize,
+    actual_without_attempt: usize,
+    reserved_notification: usize,
+    actual_notification: usize,
+    reserved_metadata: usize,
+    actual_metadata: usize,
+    reserved_next_handle: u64,
+    actual_next_handle: u64,
+};
+
+fn formatBudgetSections(buf: []u8, report: BudgetSectionsReport) ![]u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "session host upgrade budget sections: attempt={d} without_attempt={d}->{d} " ++
+            "notif={d}->{d} meta={d}->{d} next_handle={d}->{d}",
+        .{
+            report.attempt,
+            report.reserved_without_attempt,
+            report.actual_without_attempt,
+            report.reserved_notification,
+            report.actual_notification,
+            report.reserved_metadata,
+            report.actual_metadata,
+            report.reserved_next_handle,
+            report.actual_next_handle,
+        },
+    );
+}
+
+/// **`bytes` 축일 때만 낸다.** 나머지 셋은 「런타임 집합이 움직였다」로 출처가 이미 분명하다.
+///
+/// 가드를 호출부가 아니라 여기 두는 이유는 둘이다. ① 그것이 지키는 것과 같은 자리에 있어야
+/// 다음 사람이 함께 읽는다. ② 호출부는 `noteUpgradeStage` 와 `.reason = .runtime_changed` 사이에
+/// 있고, 그 둘의 **거리**를 `upgrade_runtime_changed_stage_boundary` 가 잰다 — 여기에 블록을
+/// 펼치면 그 판정자가 「침묵하는 산출 지점」으로 읽고 빨개진다(실제로 그렇게 났다).
+fn noteUpgradeBudgetSections(
+    axis: budget_admission.Reservation.MismatchAxis,
+    preview_sections: PreviewSections,
+    capture: *const runtime_manager.RuntimeManager.QuiescedCapture,
+    actual_total: usize,
+) void {
+    if (axis != .bytes) return;
+    if (builtin.is_test) return;
+    const attempt_section = preview_sections.total_bytes -| preview_sections.without_attempt;
+    var buf: [256]u8 = undefined;
+    const text = formatBudgetSections(&buf, .{
+        .attempt = attempt_section,
+        .reserved_without_attempt = preview_sections.without_attempt,
+        .actual_without_attempt = actual_total -| attempt_section,
+        .reserved_notification = preview_sections.notification,
+        .actual_notification = capture.notification_handoff.len,
+        .reserved_metadata = preview_sections.metadata,
+        .actual_metadata = capture.notification_metadata_handoff.len,
+        .reserved_next_handle = preview_sections.next_handle,
+        .actual_next_handle = capture.next_handle,
+    }) catch return;
+    host_log.line("{s}", .{text});
+}
+
 const BudgetMismatchReport = struct {
     axis: budget_admission.Reservation.MismatchAxis,
     reserved_generation: u64,
@@ -920,6 +1010,28 @@ fn noteUpgradeBudgetMismatch(report: BudgetMismatchReport) void {
     var buf: [256]u8 = undefined;
     const text = formatBudgetMismatch(&buf, report) catch return;
     host_log.line("{s}", .{text});
+}
+
+test "예약 대조 진단은 섹션별로도 «예약 -> 실제» 방향을 지킨다" {
+    // 형제 줄과 **같은 방향**이어야 한다. 한 줄은 예약->실제, 다른 줄은 실제->예약이면 둘을 나란히
+    // 읽는 사람이 정확히 반대로 해석한다 — 그리고 컴파일도 되고 다른 판정자도 통과한다.
+    var buf: [256]u8 = undefined;
+    const text = try formatBudgetSections(&buf, .{
+        .attempt = 64,
+        .reserved_without_attempt = 13_103_880,
+        .actual_without_attempt = 13_103_883,
+        .reserved_notification = 120,
+        .actual_notification = 120,
+        .reserved_metadata = 40,
+        .actual_metadata = 40,
+        .reserved_next_handle = 41,
+        .actual_next_handle = 42,
+    });
+    try std.testing.expectEqualStrings(
+        "session host upgrade budget sections: attempt=64 without_attempt=13103880->13103883 " ++
+            "notif=120->120 meta=40->40 next_handle=41->42",
+        text,
+    );
 }
 
 test "예약 대조 진단은 «예약 -> 실제» 방향으로 적는다" {

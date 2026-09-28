@@ -6255,7 +6255,7 @@ pub fn build(b: *std.Build) void {
             run_session_host_upgrade_budget_product.addArtifactArg(
                 session_host_upgrade_budget_product_compile,
             );
-            run_session_host_upgrade_budget_product.addArg("--maru-expect-tests=2");
+            run_session_host_upgrade_budget_product.addArg("--maru-expect-tests=3");
             run_session_host_upgrade_budget_product.expectExitCode(0);
             run_session_host_upgrade_budget_product.setCwd(b.path("."));
             session_host_upgrade_budget_admission_step.dependOn(

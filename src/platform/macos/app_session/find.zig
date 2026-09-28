@@ -471,6 +471,13 @@ pub fn recomputeFind(self: *AppSession) void {
     // 편집기가 아니면 스크롤백이다. **편집기 매치를 여기서 버린다** — 남겨 두면 pane을 옮긴 뒤에도
     // 옛 문서의 강조가 남고, `isFindTarget`이 id로 막아 주는 것은 *다른* 편집기일 때뿐이다.
     clearEditorFind(self);
+    // A new query or regex mode invalidates the host's previous highlights immediately.
+    // A later response may wait for a matching view_offset, but those old spans belong to
+    // different search semantics and must not be painted while that delta is in flight.
+    if (builtin.os.tag == .macos and term_ops.activeSurface(self).remote != null) {
+        self.remote_find_spans.clearRetainingCapacity();
+        self.remote_find_current = null;
+    }
     {
         // findMatches는 코어 mutate(ensureScrollbackRewrapped로 스크롤백 realloc)+읽기 — 락 아래
         // (docs/io-render-threading.md PR3 — 리더 core.write와 경합 시 UAF/크래시 방지).

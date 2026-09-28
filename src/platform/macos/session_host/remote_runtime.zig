@@ -6772,14 +6772,15 @@ pub const RemoteRuntime = struct {
             .voff = null,
             .regex_error = "regex too long",
         };
-        const qn = @min(query.len, hexbuf.len / 2);
+        const qn: usize = @min(query.len, hexbuf.len / 2);
+        const encoded_len: usize = qn * 2;
         const hex_chars = "0123456789abcdef";
         for (query[0..qn], 0..) |b, i| {
             hexbuf[i * 2] = hex_chars[b >> 4];
             hexbuf[i * 2 + 1] = hex_chars[b & 0xf];
         }
         var buf: [640]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\",\"cur\":{d},\"scroll\":{},\"regex\":{}}}", .{ self.currentGeneration().attachment.streamId(), hexbuf[0 .. qn * 2], cur_index, scroll, regex }) catch return error.OutOfMemory;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\",\"cur\":{d},\"scroll\":{},\"regex\":{}}}", .{ self.currentGeneration().attachment.streamId(), hexbuf[0..encoded_len], cur_index, scroll, regex }) catch return error.OutOfMemory;
         const request = generation_contract.FindRequest.initWithMode(query[0..qn], cur_index, scroll, regex) orelse
             return error.ProtocolError;
         var output: FindDecodeOutput = .{ .spans = out_spans, .requested_regex = regex };
@@ -17304,6 +17305,7 @@ test "old host cannot silently answer a regex request with literal matches" {
     var spans: std.ArrayList(terminal.SelectionSpan) = .empty;
     var output: RemoteRuntime.FindDecodeOutput = .{ .spans = &spans, .requested_regex = true };
     try std.testing.expectError(error.ProtocolError, RemoteRuntime.applyFindResponse(undefined, &output, "{\"count\":1,\"cur\":[],\"spans\":[]}"));
+    try std.testing.expectError(error.ProtocolError, RemoteRuntime.applyFindResponse(undefined, &output, "{\"regex\":false,\"count\":1,\"cur\":[],\"spans\":[]}"));
 }
 
 test "CR2d1 remote input owner는 paste IME OSC52 batch를 epoch sequence golden queue로 소유한다" {
@@ -19951,6 +19953,11 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     const regex_result = try rr.find("x.z", 0, false, true, &spans);
     try testing.expectEqual(@as(usize, 2), regex_result.count);
     try testing.expect(regex_result.regex_error == null);
+    var exact_pattern = [_]u8{' '} ** generation_contract.FindRequest.max_query_bytes;
+    @memcpy(exact_pattern[0..7], "(?x)x.z");
+    const exact_limit = try rr.find(&exact_pattern, 0, false, true, &spans);
+    try testing.expectEqual(@as(usize, 2), exact_limit.count);
+    try testing.expect(exact_limit.regex_error == null);
     const overlong_pattern = [_]u8{'a'} ** (generation_contract.FindRequest.max_query_bytes + 1);
     const too_long = try rr.find(&overlong_pattern, 0, false, true, &spans);
     try testing.expectEqual(@as(usize, 0), too_long.count);

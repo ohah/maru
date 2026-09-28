@@ -1355,7 +1355,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"terminal PCRE2"},
     });
     const run_terminal_regex_core_tests = b.addRunArtifact(terminal_regex_core_tests);
-    run_terminal_regex_core_tests.addArg("--maru-expect-tests=24"); // 3 named judges + 21 root-module anonymous blocks
+    run_terminal_regex_core_tests.addArg("--maru-expect-tests=27"); // 6 named judges + 21 root-module anonymous blocks
     run_terminal_regex_core_tests.setCwd(b.path("."));
     terminal_regex_step.dependOn(&run_terminal_regex_core_tests.step);
 

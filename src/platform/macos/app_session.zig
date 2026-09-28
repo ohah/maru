@@ -74949,6 +74949,14 @@ test "host-backed find: 증분 검색과 네비가 둘 다 host 스크롤을 요
     try std.testing.expect(session.remote_find_dirty);
     try std.testing.expect(session.remote_find_scroll_pending);
 
+    // The next query must not paint the previous query's host spans while its response waits
+    // for the matching viewport delta.
+    try session.remote_find_spans.append(allocator, .{ .start = .{ .row = 0, .col = 0 }, .end = .{ .row = 0, .col = 2 } });
+    session.remote_find_current = .{ .start = .{ .row = 0, .col = 0 }, .end = .{ .row = 0, .col = 2 } };
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'X' }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 0), session.remote_find_spans.items.len);
+    try std.testing.expect(session.remote_find_current == null);
+
     // Enter(네비)도 같은 단일 출처를 거친다.
     session.remote_find_scroll_pending = false;
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });

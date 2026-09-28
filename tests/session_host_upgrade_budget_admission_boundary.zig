@@ -109,11 +109,10 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
     // 되돌아가는 길도 막는다 — 옛 「여유 0」 형태가 다시 나타나면 빨개진다.
     try std.testing.expectEqual(@as(usize, 0), count(admission, "attempt_id, preview.bytes, deadline"));
     try std.testing.expectEqual(@as(usize, 0), count(admission, ".reserved_bytes = preview.bytes,"));
-    // 상한을 넘겨 예약하면 `validateLength` 가 거절해 승계가 시작도 못 한다 — 그 clamp 를 잠근다.
-    try std.testing.expectEqual(@as(usize, 1), count(
-        admission,
-        "    if (preview_bytes >= cap) return cap;",
-    ));
+    // clamp 는 **글자로 잠그지 않는다.** 예전엔 `if (preview_bytes >= cap) return cap;` 를 그대로
+    // 고정했는데, 동작이 같은 `>` 로 바꾸기만 해도 빨개졌다(적대적 검증 H3) — 리터럴을 잠그면
+    // 개선이 CI 에 막힌다. clamp 의 **효과**는 `reservedBytesFor(cap ± 1) == cap` 판정자가
+    // 이미 증명하므로 여기서 중복해 조일 이유가 없다.
     // 판정자가 **실제로 돌아야** 한다. 이름이 게이트 필터와 어긋나면 영영 안 돈다.
     try std.testing.expectEqual(@as(usize, 1), count(
         admission,
@@ -145,6 +144,14 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         store,
         "test \"reserved handoff commits when the handoff exactly fills the reservation\"",
     ));
+    // 이름만 잠그면 **본문을 비워도** 통과한다(적대적 검증 F3). 그 판정자의 전부인 「여유 0 으로
+    // 예약한다」를 함께 잠근다 — 이건 제품 리터럴이 아니라 판정자 자신의 단언이다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        store,
+        "    var reservation = try reserve(dir, 0x21, bytes.len, deadline);\n" ++
+            "    defer reservation.deinit();\n" ++
+            "    try std.testing.expectEqual(bytes.len, reservation.reserved_len);",
+    ));
     // 문서의 여유 정책 절이 조용히 사라지지 않게 한다(적대적 검증 D3). 본문이 아니라 **절의
     // 존재**를 재므로 문장을 다듬는 것은 막지 않는다.
     try std.testing.expect(std.mem.indexOf(
@@ -155,6 +162,30 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
     // 문서가 상수를 «숫자» 로 인용하면 코드와 조용히 갈라진다(적대적 검증 D1·D2). 이름으로만
     // 인용하게 해서 드리프트 면 자체를 없앤다.
     try std.testing.expect(std.mem.indexOf(u8, contract, "max(min_headroom_bytes, preview/headroom_divisor)") != null);
+    // 절 제목만 잠그면 **본문을 비워도** 통과한다(적대적 검증 F2). 그 절이 지고 있는 «보장»
+    // 한 문장을 잠근다 — 여유분이 파일에 남지 않는 근거다. 산문이 아니라 계약이다.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        contract,
+        "`writeReservedFile` 이 쓰기 뒤 `ftruncate(fd, bytes.len)` 으로",
+    ) != null);
+    // ── 상위 소비자(coordinator) — 적대적 검증 G 회차가 셋 다 뚫었다 ─────────────
+    // G2: **`bytes` 축만 조용히 무시**해도 아무도 안 빨개졌다. 이 PR 이 그 축을 「드물게만
+    // 뜨는 것」으로 만들었으므로, 여기서 빠지면 아주 오래 안 들킨다. 분기를 통째로 잠근다.
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "    if (mismatch_axis != .none) {"));
+    // G3: 축 진단 줄을 안 남겨도 통과했다. 스테이지 라벨과 **두 줄이 함께** 나가야 한다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        coordinator,
+        "        noteUpgradeStage(\"budget_reservation_mismatch\");\n" ++
+            "        noteUpgradeBudgetMismatch(report);",
+    ));
+    // G1: 보고의 **방향**을 뒤집어도 통과했다. 기존 판정자는 「예약 -> 실제」 *렌더링* 만 재고
+    // 구조체를 **채우는 쪽**은 안 본다 — 「있다」가 아니라 「무엇이 들어가는가」를 잠근다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        coordinator,
+        "            .reserved_bytes = budget_reservation.reserved_bytes,\n" ++
+            "            .actual_bytes = handoff_bytes.len,",
+    ));
     // 여유가 파일에 패딩으로 새지 않는다는 보장. 이 고침 **전에는** 예약 == 실제라 이 잘라내기가
     // 사실상 no-op 이었고 지워도 아무도 몰랐다 — 이제는 하중을 받는다.
     try std.testing.expectEqual(@as(usize, 1), count(

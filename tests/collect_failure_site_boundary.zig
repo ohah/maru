@@ -20,6 +20,7 @@
 //! 29·18 곳(#3634). 매번 이름을 붙이자 **한 번의 재현으로 끝났다.**
 
 const std = @import("std");
+const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
 const server_path = "src/platform/macos/session_host/server.zig";
 const turn_path = "src/platform/macos/session_host/connection_turn.zig";
@@ -157,6 +158,27 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
     const render_fn = try section(record_raw, "pub fn render(", "\n}\n");
     try std.testing.expect(std.mem.indexOf(u8, render_fn, "site={s}") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_fn, "err={s}") != null);
+}
+
+/// `src/` 아래 모든 `.zig` 에서 `needle` 을 센다(주석 제외). 파일 하나만 보면 남의 파일이 같은 일을
+/// 하는 것을 못 본다.
+fn countProductSources(allocator: std.mem.Allocator, needle: []const u8) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try posixWalk(dir, allocator);
+    defer walker.deinit();
+    var total: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const raw = try read(allocator, path);
+        defer allocator.free(raw);
+        const source = try stripComments(allocator, raw);
+        defer allocator.free(source);
+        total += countAll(source, needle);
+    }
+    return total;
 }
 
 /// `header` 로 시작해 `end` 앞에서 끝나는 구간. 못 찾으면 **실패한다** — 조용히 빈 구간으로
@@ -313,22 +335,130 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
         return error.FrontierEntryResetMissing;
     const first_fail = std.mem.indexOf(u8, body, "collectFail") orelse return error.NoFailSites;
     try std.testing.expect(reset_at < first_fail);
-    // 기록을 **한 곳만** 쓴다. 다른 파일이 몰래 기록을 덮으면 닫기 전 줄이 남의 값을 말한다.
-    try std.testing.expectEqual(@as(usize, 0), countAll(turn, "collect_failure.fail"));
+    // 기록을 **정해진 네 자리만** 쓴다 — 저장소 전체에서 센다. 파일 하나만 보면 남의 파일(또는 같은
+    //    파일의 다른 함수)이 줄을 찍기 직전에 `reset()` 을 불러 로그를 `site=- err=-` 로 만드는 것을
+    //    못 본다(2회차 T01·T03·S10).
+    {
+        const Writer = struct { call: []const u8, allowed: usize };
+        const writers = [_]Writer{
+            .{ .call = "collect_failure.reset(", .allowed = 1 }, // collectOutput 진입
+            .{ .call = "collect_failure.fail(", .allowed = 1 }, // collectFail
+            .{ .call = "collect_failure.failErr(", .allowed = 1 }, // collectFailErr
+            .{ .call = "collect_failure.failFrontier(", .allowed = 1 }, // collectFailFrontier
+        };
+        for (writers) |w| {
+            const n = try countProductSources(a, w.call);
+            const in_server = countAll(server, w.call);
+            if (n != w.allowed or in_server != w.allowed) {
+                std.debug.print("«{s}» 가 저장소에 {d} 곳(server {d}) — {d} 곳이어야 한다\n", .{ w.call, n, in_server, w.allowed });
+                return error.RecordWrittenElsewhere;
+            }
+        }
+        // 기록을 가져다 쓰는 파일도 닫혀 있다 — 둘을 넘으면 새 소비자가 위 규율 밖에서 생긴 것이다.
+        try std.testing.expectEqual(@as(usize, 2), try countProductSources(a, "@import(\"collect_failure.zig\")"));
+    }
 
-    // ③ **로그가 그 렌더를 그대로 낸다.** 렌더를 부르고도 죽은 갈래에 두고 예전 줄을 찍으면(1회차
-    //    M9), 또는 버퍼를 줄여 늘 이름만 나오게 하면(M10) 위 배선이 전부 초록인데 숫자가 사라진다.
-    //    그래서 함수 **전체 모양**을 잰다: 가드 하나, 버퍼는 렌더가 정한 상한, 로그 호출 하나.
-    const note = try section(turn, "fn noteCollectFailure(", "\n}\n");
-    try std.testing.expectEqual(@as(usize, 1), countAll(note, "host_log.line("));
-    try std.testing.expectEqual(@as(usize, 1), countAll(note, "if ("));
-    try std.testing.expect(std.mem.indexOf(u8, note, "if (builtin.is_test) return;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, note, "]u8 = undefined;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, note, "[collect_failure.line_capacity]u8") != null);
-    try std.testing.expect(std.mem.indexOf(u8, note, "host_log.line(\"{s}\", .{collect_failure.render(&") != null);
-    try std.testing.expect(std.mem.indexOf(u8, note, ", collect_failure.last())});") != null);
-    try std.testing.expectEqual(@as(usize, 1), countAll(note, "collect_failure.render("));
-    try std.testing.expectEqual(@as(usize, 1), countAll(note, "collect_failure.last()"));
+    // ③ **로그가 그 렌더를 그대로 낸다 — 함수 전체가 정확히 세 문장이다.** 부분문자열을 재면 렌더를
+    //    `for (0..0)`·`errdefer`·죽은 `if` 안에 두고 예전 줄을 찍어도 초록이다(1회차 M9, 2회차 T02·T11).
+    //    그래서 문장을 센다: 가드, 렌더가 정한 크기의 버퍼, 그 버퍼로 그린 렌더를 그대로 내는 로그.
+    //    버퍼 이름은 의도가 아니므로 잠그지 않는다.
+    {
+        const note = try section(turn, "fn noteCollectFailure(", "\n}\n");
+        var stmts: std.ArrayList([]const u8) = .empty;
+        defer stmts.deinit(a);
+        var it = std.mem.splitScalar(u8, note, '\n');
+        _ = it.next(); // 시그니처 줄
+        while (it.next()) |raw| {
+            const t = std.mem.trim(u8, raw, " \t");
+            if (t.len != 0) try stmts.append(a, t);
+        }
+        if (stmts.items.len != 3) {
+            std.debug.print("noteCollectFailure 가 세 문장이 아니다({d}) — 다른 갈래가 끼었다\n", .{stmts.items.len});
+            return error.NoteShapeChanged;
+        }
+        const guard_ok = std.mem.eql(u8, stmts.items[0], "if (builtin.is_test) return;") or
+            std.mem.eql(u8, stmts.items[0], "if (comptime builtin.is_test) return;");
+        if (!guard_ok) return error.NoteGuardChanged;
+        const decl = stmts.items[1];
+        const decl_suffix = ": [collect_failure.line_capacity]u8 = undefined;";
+        if (!std.mem.startsWith(u8, decl, "var ") or !std.mem.endsWith(u8, decl, decl_suffix))
+            return error.NoteBufferChanged;
+        const buf_name = decl["var ".len .. decl.len - decl_suffix.len];
+        const expected_log = try std.fmt.allocPrint(
+            a,
+            "host_log.line(\"{{s}}\", .{{collect_failure.render(&{s}, collect_failure.last())}});",
+            .{buf_name},
+        );
+        defer a.free(expected_log);
+        if (!std.mem.eql(u8, stmts.items[2], expected_log)) {
+            std.debug.print("로그 문장이 렌더를 그대로 내지 않는다: {s}\n", .{stmts.items[2]});
+            return error.NoteLogChanged;
+        }
+    }
+
+    // ④ **tick 이 그것을 닫기 바로 앞에서 무조건 부른다.** 「호출이 있다」만 재면
+    //    `while (false) noteCollectFailure();` 가 통과한다(2회차 T04). 두 문장을 짝으로 잰다.
+    {
+        try std.testing.expectEqual(@as(usize, 1), countAll(turn, "noteCollectFailure();"));
+        const call_at = std.mem.indexOf(u8, turn, "noteCollectFailure();").?;
+        const line_start = (std.mem.lastIndexOfScalar(u8, turn[0..call_at], '\n') orelse 0) + 1;
+        if (std.mem.trim(u8, turn[line_start..call_at], " \t").len != 0) {
+            std.debug.print("noteCollectFailure 호출 앞에 조건이 붙었다\n", .{});
+            return error.NoteCallGuarded;
+        }
+        const after = std.mem.trimStart(u8, turn[call_at + "noteCollectFailure();".len ..], " \t\n");
+        try std.testing.expect(std.mem.startsWith(u8, after, "self.beginCloseAt(\"tick_collect_oom\", .resource_exhausted);"));
+    }
+
+    // ⑤ **host_log.line 이 순수 포맷을 그대로 쓴다.** 렌더의 상한은 `host_log.formatLine` 으로 재는데,
+    //    `line` 이 앞에 접두어를 붙이거나 제 포맷을 따로 쓰면 그 측정이 제품과 갈린다(2회차 L22).
+    {
+        const host_log_raw = try read(a, "src/platform/macos/session_host/host_log.zig");
+        defer a.free(host_log_raw);
+        const host_log_src = try stripComments(a, host_log_raw);
+        defer a.free(host_log_src);
+        const line_fn = try section(host_log_src, "pub fn line(", "\n}\n");
+        // 문장 전체를 잰다 — 부분문자열이면 `if (text.len > 128) return;` 같은 조용한 조기 반환이
+        // 끼어도 초록이다(2회차 재검에서 실측).
+        const want = [_][]const u8{
+            "if (builtin.is_test) return;",
+            "var buf: [max_line_bytes]u8 = undefined;",
+            "const text = formatLine(&buf, fmt, args) orelse return;",
+            "_ = std.c.write(2, text.ptr, text.len);",
+        };
+        var it = std.mem.splitScalar(u8, line_fn, '\n');
+        _ = it.next(); // 시그니처 줄
+        var i: usize = 0;
+        while (it.next()) |raw| {
+            const t = std.mem.trim(u8, raw, " \t");
+            if (t.len == 0) continue;
+            if (i >= want.len or !std.mem.eql(u8, t, want[i])) {
+                std.debug.print("host_log.line 의 문장이 달라졌다: {s}\n", .{t});
+                return error.HostLogLineChanged;
+            }
+            i += 1;
+        }
+        try std.testing.expectEqual(want.len, i);
+    }
+
+    // ⑥ **값 판정자가 PR 게이트에 걸려 있다.** leaf 의 순수 테스트가 떨어져 나가면 위 배선은 초록인데
+    //    값은 아무도 안 잰다 — 그게 1회차의 출발점이었다(2회차 B03·B05).
+    {
+        const build_raw = try read(a, "build.zig");
+        defer a.free(build_raw);
+        for ([_][]const u8{
+            ".root_source_file = b.path(\"src/platform/macos/session_host/collect_failure.zig\"),",
+            "run_collect_fail_line.addArg(\"--maru-expect-tests=",
+            "run_collect_fail_line.addArg(\"--maru-expect-passed=",
+            "collect_fail_step.dependOn(&run_collect_fail_line.step);",
+            "boundary_step.dependOn(&run_collect_fail_line.step);",
+        }) |needle| {
+            if (countAll(build_raw, needle) != 1) {
+                std.debug.print("build.zig 에 «{s}» 가 정확히 한 번 있지 않다\n", .{needle});
+                return error.LeafGateUnregistered;
+            }
+        }
+    }
 }
 
 // `tick` 안의 `partial_timeout` 이 **익명으로 닫지 않는다.**

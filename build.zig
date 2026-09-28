@@ -6759,9 +6759,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_collect_fail_line = b.addRunArtifact(collect_fail_line_tests);
-    // 넷은 이 파일의 것, 하나는 import 한 `host_log.zig` 의 것이다(가져온 파일의 test 도 함께 컴파일된다).
-    run_collect_fail_line.addArg("--maru-expect-tests=5");
-    run_collect_fail_line.addArg("--maru-expect-passed=5");
+    // 넷은 이 파일의 것, 둘은 import 한 `host_log.zig` 의 것이다(가져온 파일의 test 도 함께 컴파일된다).
+    // host_log 의 한 줄 상한 판정자가 여기서 도는 것은 덤이 아니다 — 렌더의 상한이 그 계약에 기댄다.
+    run_collect_fail_line.addArg("--maru-expect-tests=6");
+    run_collect_fail_line.addArg("--maru-expect-passed=6");
     collect_fail_step.dependOn(&run_collect_fail_line.step);
     boundary_step.dependOn(&run_collect_fail_line.step);
 

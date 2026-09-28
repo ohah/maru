@@ -4,7 +4,7 @@
 //!
 //! `server.Connection.collectOutputForLocalStreamAtEpoch` 는 스물넷 넘는 실패를 `error.OutOfMemory`
 //! 하나로 접는다(오류 집합을 넓히면 호출자 전수가 흔들린다). 그래서 곁다리 기록으로 «어느 자리였는지»
-//! 를 남겨 왔다(§12.3, `collect_failure_site_boundary`).
+//! 를 남겨 왔다(#3634, `collect_failure_site_boundary`).
 //!
 //! 2026-09-28 에 그 이름이 `site=delta_seq_mismatch` 까지 데려왔는데 **거기서 멈췄다** — 숫자가
 //! 없었다. 이 파일은 frontier 대조 자리의 양쪽 값을 함께 싣는다.
@@ -153,6 +153,19 @@ test "가장 긴 값도 host_log 한 줄에 들고, 넘치면 숫자를 버려�
     // 숫자로 끝난다 = 이름만 남기는 갈래로 떨어지지 않았다.
     try std.testing.expect(std.mem.endsWith(u8, widest, " snapshot=1 send=18446744073709551615"));
     try std.testing.expect(widest.len + 1 <= host_log.max_line_bytes);
+
+    // **상한 자체를 잰다.** 가장 긴 실제 줄(235 B)만 재면 상한을 256 이나 300 으로 올려도 초록이다
+    // (적대적 검증 2회차 L09·L10). 렌더가 딱 `line_capacity` 를 채우는 줄을 만들어, 그것이
+    // `host_log` 가 **실제로 쓰는 모양**(`formatLine`)을 통과하는지 본다. 1 B 더 길면 숫자를 버린다.
+    const prefix = "session host collect failed: site=";
+    const tail = " err=- runtime=0935886dc61898048f9fd1e194dee150 seq=41->42 gen=7->8 snapshot=0 send=512";
+    const exact_site = "s" ** (line_capacity - prefix.len - tail.len);
+    const exact = render(&buf, .{ .site = exact_site, .frontier = sample });
+    try std.testing.expectEqualStrings(prefix ++ exact_site ++ tail, exact);
+    var log_buf: [host_log.max_line_bytes]u8 = undefined;
+    try std.testing.expect(host_log.formatLine(&log_buf, "{s}", .{exact}) != null);
+    const over = render(&buf, .{ .site = exact_site ++ "s", .frontier = sample });
+    try std.testing.expectEqualStrings(prefix ++ exact_site ++ "s err=-", over);
 
     // 숫자가 안 들어갈 만큼 이름이 길면 **이름만** — 줄 전체를 잃지 않는다.
     const long_site = "s" ** 200;

@@ -30,8 +30,15 @@ pub const max_line_bytes = 256;
 pub fn line(comptime fmt: []const u8, args: anytype) void {
     if (builtin.is_test) return;
     var buf: [max_line_bytes]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch return;
+    const text = formatLine(&buf, fmt, args) orelse return;
     _ = std.c.write(2, text.ptr, text.len);
+}
+
+/// `line` 이 실제로 쓰는 바이트. 순수 함수로 떼어 둔 이유는 하나다 — `line` 은 테스트에서 아무것도 안
+/// 하므로, **길이 상한에 기대는 진단**(`collect_failure.render`)이 그 상한을 실제 모양으로 잴 길이
+/// 이것뿐이다. 넘치면 `null` — 잘라 쓰지 않고 줄을 통째로 버린다.
+pub fn formatLine(buf: *[max_line_bytes]u8, comptime fmt: []const u8, args: anytype) ?[]const u8 {
+    return std.fmt.bufPrint(buf, fmt ++ "\n", args) catch null;
 }
 
 test "host log formats within the fixed buffer and stays test-silent" {
@@ -39,4 +46,13 @@ test "host log formats within the fixed buffer and stays test-silent" {
     line("session host started: pid={d} diagnostics=v1", .{@as(i32, 12345)});
     // 버퍼를 넘기는 인자도 프로세스를 죽이지 않고 조용히 버려진다.
     line("{s}", .{"x" ** 512});
+}
+
+test "한 줄은 개행까지 max_line_bytes 안에 들어야 하고, 넘치면 통째로 버려진다" {
+    var buf: [max_line_bytes]u8 = undefined;
+    const fits = "x" ** (max_line_bytes - 1);
+    const written = formatLine(&buf, "{s}", .{fits}) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, max_line_bytes), written.len);
+    try std.testing.expect(std.mem.endsWith(u8, written, "x\n"));
+    try std.testing.expect(formatLine(&buf, "{s}", .{fits ++ "x"}) == null);
 }

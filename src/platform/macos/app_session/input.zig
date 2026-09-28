@@ -629,6 +629,9 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         .ignore => traceCandidateIME(event, "ignore", false, false),
         .encode_key => if (event) |ev| {
             traceCandidateIME(event, "encode_key", false, false);
+            // 입력기가 이 keyDown에서 콜백을 내지 않아도 기존 조합은 살아 있다.
+            // 팔레트 Enter를 일반 키로 흘리면 조합 확정 전의 검색 결과를 실행한다.
+            if (composing and ev.key == .enter and self.inputFocus() == .palette) return;
             // A surviving pin can outlive a focus change between AppKit
             // callbacks. The ordinary key router has no pinned-target input.
             if (!imePinnedTargetIsActive(self)) return;

@@ -15664,8 +15664,9 @@ pub const AppSession = struct {
         self.metal_buffer.setCursorFadeMilli(1000);
     }
 
-    /// 입력(키·IME)이 지금 어디로 가는가 — **단일 출처**. 모달은 배타적(show가 서로 닫는다 — showNotice/toggleFind/
-    /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
+    /// 입력(키·IME)이 지금 어디로 가는가 — **단일 출처**. 모달끼리는 배타적(show가 서로 닫는다 — showNotice/toggleFind/
+    /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이고, 상주 검색은 뒤에 남을 수 있어 모달이 앞선다.
+    /// notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
     pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, addr_edit, scm_commit };
@@ -15676,15 +15677,17 @@ pub const AppSession = struct {
         // 입력을 IME(NSTextInputClient) 확정 텍스트로 처리하므로, 여기 없으면 검색어가 뒤의 터미널로 새 검색이 안 됐다
         // (find/palette가 되던 것과 달리 settings만 누락돼 있던 버그). 검색 중이 아니어도 모달이라 뒤 터미널로 안 흘린다.
         if (self.chrome_host.settings.open) return .settings;
+        // 모달은 뒤에 남아 있는 상주 검색·인라인 편집보다 먼저 키를 받는다(handleKeyEvent와 같은 순서).
+        // 팔레트가 보이는데 사이드바 검색으로 IME 조합이 새면 표시·필터·확정 대상이 갈라진다.
+        if (self.chrome_host.find.open) return .find;
+        if (self.chrome_host.palette.open) return .palette;
+        if (self.chrome_host.symbol_picker.open) return .symbol_picker;
+        if (self.chrome_host.reference_picker.open) return .reference_picker; // §8.2l
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
         if (self.agentSessionSearchOwnsInput()) return .agent_session_search;
         // 갤러리 검색줄. 아카이브 검색과 같은 자리(도크 상주 입력)이고, 둘은 뷰가 달라 배타적이다.
         if (agent_activity_ops.searchOwnsInput(self)) return .agent_activity_search;
-        if (self.chrome_host.find.open) return .find;
-        if (self.chrome_host.palette.open) return .palette;
-        if (self.chrome_host.symbol_picker.open) return .symbol_picker;
-        if (self.chrome_host.reference_picker.open) return .reference_picker; // §8.2l
         // Phase 7e-2b 수정: browser 주소창 편집이 활성이면 확정 텍스트/조합이 터미널로 새지 않고 주소창 편집으로 간다
         // (평문 타이핑이 IME→routeCommittedText 경로라 handleKeyEvent 인터셉트만으론 안 잡혔던 버그). 모달·rename·find·
         // palette·sidebar_search가 없을 때만(그것들이 열리면 addr_edit보다 우선 — 위 조기 반환). routeCommittedText가
@@ -48487,6 +48490,40 @@ test "command palette does not accept Enter while IME preedit survives without c
     try std.testing.expect(session.chrome_host.palette.open);
     try std.testing.expectEqual(before, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqualStrings("새 터미널", session.chrome_host.palette.input.preedit.items);
+}
+
+test "command palette IME owns input over an active sidebar search" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.sidebar_search_active = true;
+    try std.testing.expectEqual(AppSession.InputFocus.sidebar_search, session.inputFocus());
+    session.dispatchAppAction(.toggle_command_palette);
+    try std.testing.expect(session.chrome_host.palette.open);
+    try std.testing.expectEqual(AppSession.InputFocus.palette, session.inputFocus());
+    input_ops.imeMarked(session, "새 터미널");
+    try std.testing.expectEqualStrings("새 터미널", session.chrome_host.palette.input.preedit.items);
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_search_input.preedit.items.len);
+    try std.testing.expectEqual(maru.config.Action.new_term, command_palette.actionAt(session.palette_filtered.items, 0).?);
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "");
+    input_ops.imeInsert(session, "새 터미널");
+    input_ops.imeEnd(session, .{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.chrome_host.palette.open);
+    try std.testing.expectEqualStrings("새 터미널", session.chrome_host.palette.input.query.items);
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_search_input.query.items.len);
+    session.dispatchAppAction(.toggle_command_palette);
+    try std.testing.expectEqual(AppSession.InputFocus.sidebar_search, session.inputFocus());
 }
 
 test "TFREG scrollback Find switches literal and PCRE2 through the shared chord" {

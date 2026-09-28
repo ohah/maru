@@ -131,6 +131,7 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 
 ## 빌드와 테스트
 
+- 터미널 스크롤백 PCRE2 검색의 soft-wrap·UTF-8 셀 좌표를 집중 검증: `zig build test-terminal-regex`. 코어 테스트 3개를 개수로 고정한다(`test-editor`는 터미널 코어 테스트를 포함하지 않는다). macOS 찾기 UI·실제 원격 호스트 테스트는 기존 `test-macos-app-host-abi` 스위트가 소유한다.
 - 에이전트 턴 캡처 **배선**(AT3·AT4·AT3b — 어느 훅 이벤트가 어느 게이트에서 사본·셸 수·셸 구간을 트리거하나)만 잰다: `zig build test-agent-turn-capture` (app_session 그래프에 «훅»·«턴 스냅샷»·«턴 파일 배지» 필터 — 훅 설치·모드·캡처 배선·배지 join·원격 읽기 대상 55개(하네스 env 없이는 원격 스냅샷 1개 skip), ~15초). 원격 턴 스냅샷의 실물(loopback sshd)은 `zig build test-remote-scm`(7개) 에 든다. 에이전트 턴 축 전체(원격 훅 설치 → 스트리머 → 스냅샷 → 에이전트 탭)의 **실기 e2e** 는 `sh tools/remote-scm/agent_turn_e2e.sh <out.png>` — 게이트가 아니라 수동 검증 도구다(사용자 `claude` 로그인·`~/.local/bin/maru` 가 이 빌드·`~/.claude/settings.json` 을 실제로 고친다는 전제, 머리말 참조). 순수 층은 `zig test src/session/turn_capture.zig`·`zig test src/session/shell_bracket.zig` 로 단독 확인이 된다. 훅 커맨드 자체는 `zig build check-agent-hook-command`(실제 `/bin/sh`, 계약 20 — 로컬·원격 두 자리와 경로 탈출 없음까지).
 - Notification Center release 앱 경로의 closed mode, 격리 root, 실제 delegate→attach 결과 결속과 상속 socket receipt/cleanup을 검증: `zig build test-session-host-notification-app-scenario`.
 - Notification Center release callback/attach pure owner의 exact request/route/time 결속을 검증: `zig build test-session-host-notification-scenario-receipt`.

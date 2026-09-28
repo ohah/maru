@@ -627,14 +627,15 @@ pub const SelectedTextRequest = struct {
 
 pub const LinkAtRequest = extern struct { row: u16, col: u16, scopes: u8 };
 pub const FindRequest = struct {
-    query: [256]u8 = [_]u8{0} ** 256,
+    pub const max_query_bytes: usize = 256;
+    query: [max_query_bytes]u8 = [_]u8{0} ** max_query_bytes,
     query_len: u16 = 0,
     current: u32,
     scroll: bool,
     regex: bool = false,
 
     pub fn init(text: []const u8, current: u32, scroll: bool) ?FindRequest {
-        if (text.len > 256) return null;
+        if (text.len > max_query_bytes) return null;
         var result: FindRequest = .{ .current = current, .scroll = scroll };
         @memcpy(result.query[0..text.len], text);
         result.query_len = @intCast(text.len);
@@ -698,7 +699,7 @@ const RawSelectedTextRequest = extern struct {
     authoritative: u8,
 };
 const RawFindRequest = extern struct {
-    query: [256]u8,
+    query: [FindRequest.max_query_bytes]u8,
     query_len: u16,
     current: u32,
     scroll: u8,

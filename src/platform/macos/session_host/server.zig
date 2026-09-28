@@ -24,6 +24,7 @@ const upgrade_wire = @import("upgrade_wire.zig");
 const connection_slot = @import("connection_slot.zig");
 const subscription_identity = @import("subscription_identity.zig");
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
+const collect_failure = @import("collect_failure.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 
 pub const HostStatus = struct {
@@ -2955,57 +2956,26 @@ pub const Connection = struct {
     /// 오늘 같은 모양을 세 번 풀었다(attach 자리 → 오류 이름 → 닫힘 자리). 매번 **이름을 붙이자 한 번의
     /// 재현으로 끝났다.** 오류 집합은 넓히지 않는다 — 호출자 전수가 흔들리고, 지금 필요한 것은 «무엇이
     /// 접혔는지» 뿐이다.
-    var collect_fail_site: []const u8 = "-";
-    var collect_fail_error: []const u8 = "-";
-    var collect_fail_frontier: ?FrontierMismatch = null;
-
-    /// frontier 대조가 어긋났을 때의 **양쪽 값**.
-    ///
-    /// 2026-09-28 실측: 런타임 16 개를 든 host 가 `site=delta_seq_mismatch` 로 GUI 연결을 통째로
-    /// 닫았다. 자리 이름은 있었지만 **숫자가 없어** 원인을 못 갈랐다 — sequence 가 건너뛰었는지
-    /// (producer 가 한 번 더 전진), generation 이 바뀌었는지(`is_snapshot` 이 아닌데 세대 교체),
-    /// 어느 런타임이었는지 모두 로그에 없었다. 자리 이름만으로는 다음 재현도 같은 줄 하나로 끝난다.
-    ///
-    /// `expected` 는 이 연결이 commit 한 frontier 에서 **기대한** 값, `actual` 은 producer 가 낸 값이다.
-    pub const FrontierMismatch = struct {
-        runtime_id: u128,
-        expected: catchup_barrier_contract.ScreenFrontier,
-        actual: catchup_barrier_contract.ScreenFrontier,
-        is_snapshot: bool,
-        send_bytes: usize,
-    };
-
+    /// 기록과 렌더는 `collect_failure.zig` 가 소유한다 — 그 순수 테스트가 PR 에서 돌아야 해서다.
+    /// 여기 셋은 `error.OutOfMemory` 로 접는 자리마다 **이름을 남기고** 접는 얇은 문이다.
     fn collectFail(site: []const u8) error{OutOfMemory} {
-        collect_fail_site = site;
-        collect_fail_error = "-";
-        collect_fail_frontier = null;
+        collect_failure.fail(site);
         return error.OutOfMemory;
     }
 
     fn collectFailErr(site: []const u8, err: anyerror) error{OutOfMemory} {
-        collect_fail_site = site;
-        collect_fail_error = @errorName(err);
-        collect_fail_frontier = null;
+        collect_failure.failErr(site, @errorName(err));
         return error.OutOfMemory;
     }
 
     /// frontier 대조 자리 전용. 이름만 남기는 `collectFail` 과 달리 **양쪽 값**을 함께 싣는다.
-    fn collectFailFrontier(site: []const u8, mismatch: FrontierMismatch) error{OutOfMemory} {
-        collect_fail_site = site;
-        collect_fail_error = "-";
-        collect_fail_frontier = mismatch;
+    ///
+    /// 2026-09-28 실측: 런타임 16 개를 든 host 가 `site=delta_seq_mismatch` 로 GUI 연결을 통째로
+    /// 닫았다. 자리 이름은 있었지만 **숫자가 없어** 원인을 못 갈랐다 — 어느 런타임에서 sequence 와
+    /// generation 중 무엇이 얼마나 어긋났는지 로그에 하나도 없었다.
+    fn collectFailFrontier(site: []const u8, mismatch: collect_failure.FrontierMismatch) error{OutOfMemory} {
+        collect_failure.failFrontier(site, mismatch);
         return error.OutOfMemory;
-    }
-
-    pub const CollectFailure = struct {
-        site: []const u8,
-        err: []const u8,
-        frontier: ?FrontierMismatch,
-    };
-
-    /// 접힌 자리와 원래 오류. 닫기 직전에 읽는다 — 다음 실패가 덮어쓰기 전이다.
-    pub fn lastCollectFailure() CollectFailure {
-        return .{ .site = collect_fail_site, .err = collect_fail_error, .frontier = collect_fail_frontier };
     }
 
     pub fn collectOutputForLocalStreamAtEpoch(
@@ -3017,9 +2987,7 @@ pub const Connection = struct {
         // **이름을 먼저 지운다.** 헬퍼를 안 거치고 `try` 로 새는 경로가 있으면, 지우지 않으면
         // «직전 실패의 이름» 이 그대로 찍혀 로그가 거짓말을 한다 — 거짓 이름은 없는 것보다 나쁘다
         // (적대적 검증 2026-09-13: `appendChunks` 가 정확히 그 경로였다).
-        collect_fail_site = "-";
-        collect_fail_error = "-";
-        collect_fail_frontier = null;
+        collect_failure.reset();
         const ops = self.runtime_ops orelse return null;
         const sub = self.attachments.getPtr(stream) orelse return null;
         var list: std.ArrayListUnmanaged([]u8) = .empty;
@@ -3221,8 +3189,10 @@ pub const Connection = struct {
             if (projected.frontier.sequence != next_sequence)
                 return collectFailFrontier("snapshot_seq_mismatch", .{
                     .runtime_id = sub.runtime_id,
-                    .expected = .{ .generation = sub.screen_generation, .sequence = next_sequence },
-                    .actual = projected.frontier,
+                    .expected_sequence = next_sequence,
+                    .actual_sequence = projected.frontier.sequence,
+                    .committed_generation = sub.screen_generation,
+                    .actual_generation = projected.frontier.generation,
                     .is_snapshot = true,
                     .send_bytes = projected.bytes.len,
                 });
@@ -3273,8 +3243,10 @@ pub const Connection = struct {
                     (!update.is_snapshot and update.frontier.generation != sub.screen_generation))
                     return collectFailFrontier("delta_seq_mismatch", .{
                         .runtime_id = sub.runtime_id,
-                        .expected = .{ .generation = sub.screen_generation, .sequence = next_sequence },
-                        .actual = update.frontier,
+                        .expected_sequence = next_sequence,
+                        .actual_sequence = update.frontier.sequence,
+                        .committed_generation = sub.screen_generation,
+                        .actual_generation = update.frontier.generation,
                         .is_snapshot = update.is_snapshot,
                         .send_bytes = update.send.len,
                     });
@@ -3285,8 +3257,10 @@ pub const Connection = struct {
             {
                 return collectFailFrontier("delta_frontier_mismatch", .{
                     .runtime_id = sub.runtime_id,
-                    .expected = .{ .generation = sub.screen_generation, .sequence = sub.screen_sequence },
-                    .actual = update.frontier,
+                    .expected_sequence = sub.screen_sequence,
+                    .actual_sequence = update.frontier.sequence,
+                    .committed_generation = sub.screen_generation,
+                    .actual_generation = update.frontier.generation,
                     .is_snapshot = update.is_snapshot,
                     .send_bytes = update.send.len,
                 });

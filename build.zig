@@ -6749,6 +6749,21 @@ pub fn build(b: *std.Build) void {
     run_collect_fail.setCwd(b.path("."));
     collect_fail_step.dependOn(&run_collect_fail.step);
     boundary_step.dependOn(&run_collect_fail.step);
+    // 그 한 줄의 **값**(방향·길이 상한·기록 교체)은 글자로는 못 잰다 — leaf 의 순수 테스트가 잰다.
+    // session-host 잡은 PR 에서 안 돌므로 여기(check-boundaries)에 건다. std·host_log 만 쓰는 leaf 라 싸다.
+    const collect_fail_line_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/collect_failure.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_collect_fail_line = b.addRunArtifact(collect_fail_line_tests);
+    // 넷은 이 파일의 것, 하나는 import 한 `host_log.zig` 의 것이다(가져온 파일의 test 도 함께 컴파일된다).
+    run_collect_fail_line.addArg("--maru-expect-tests=5");
+    run_collect_fail_line.addArg("--maru-expect-passed=5");
+    collect_fail_step.dependOn(&run_collect_fail_line.step);
+    boundary_step.dependOn(&run_collect_fail_line.step);
 
     // 닫는 자리가 «그 자리를 만든 오류»까지 남기는가. Stale 과 PartialFrame 은 고칠 곳이 정반대다.
     const close_error_step = b.step(

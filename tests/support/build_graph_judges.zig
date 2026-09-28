@@ -114,8 +114,10 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     // +1(2026-09-28): `remote_image_fetch_metrics_boundary` — 원격 그림 왕복 계측이 **배선됐는지**
     //  잰다. 순수 판정자는 셈을 재지만 「워커가 값을 싣고 수확이 그 값 그대로 누적하는가」는
     //  실제 ssh 왕복이 있어야 도는 축이라 글자로 고정한다.
-    try std.testing.expectEqual(@as(usize, 207), old_count);
-    try std.testing.expectEqual(@as(usize, 208), new_count);
+    // +1(2026-09-29): `collect_failure.zig` 의 순수 테스트 — collect 실패 줄의 **값**(방향·host_log
+    //  상한·기록 교체)을 잰다. session-host 잡은 PR 에서 안 돌아 여기(check-boundaries)에 건다.
+    try std.testing.expectEqual(@as(usize, 208), old_count);
+    try std.testing.expectEqual(@as(usize, 209), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0

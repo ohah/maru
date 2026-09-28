@@ -81,7 +81,10 @@ const inventory = [_]Entry{
     //     바로 위 `shell_integration` 과 같은 성격(파일 포맷의 일부)이지 doc 주석이 아니다 — 새 스캐너는
     //     doc 주석을 애초에 토큰으로 세지 않으므로 그 근거는 성립할 수 없었다.
     //   · `remote_runtime.zig` 3 — 진단 문자열.
+    //   · `command_catalog.zig` 114 — search_ko 는 팔레트 매칭 전용 메타데이터다.
+    //     결과 제목·메뉴에는 표시되지 않고 영어 title 만 그린다(docs/i18n.md §7.1).
     .{ .path = "src/platform/macos/shell_integration.zig", .count = 48 },
+    .{ .path = "src/platform/macos/command_catalog.zig", .count = 114 },
     // `components/settings.zig`(8) 은 **0 이 되어 빠졌다.** 키 힌트·색 선택기·단축키 녹음 문구가
     // comptime `const` 라 언어를 못 탔다 — 값이 컴파일 시점에 박히므로 `t()` 를 넣어도 안 바뀐다.
     // 상수를 **함수로** 바꿔야 언어 전환이 다음 프레임에 따라온다. 폭 계산과 그리기가 같은 문자열을
@@ -313,7 +316,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 259; // +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
+const header_total = 373; // +114: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
 const header_config_total = 54;
 
 comptime {

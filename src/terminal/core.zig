@@ -1399,6 +1399,10 @@ pub const TerminalCore = struct {
     pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, out: *std.ArrayList(types.Match)) !void {
         return selection.findMatches(self, allocator, needle_utf8, out);
     }
+
+    pub fn findMatchesWithOptions(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, regex: bool, out: *std.ArrayList(types.Match)) !void {
+        return selection.findMatchesWithOptions(self, allocator, needle_utf8, regex, out);
+    }
     /// 검색 매치를 뷰포트 좌표로 클립. 본문: selection.matchViewportSpan.
     pub fn matchViewportSpan(self: *const TerminalCore, m: types.Match) ?types.SelectionSpan {
         return selection.matchViewportSpan(self, m);

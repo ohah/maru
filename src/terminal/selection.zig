@@ -879,7 +879,7 @@ pub fn collectViewportLinks(
 /// 스크롤백 + 화면에서 needle을 찾아 절대 좌표 매치를 out에 채운다(out은 호출자 소유). 논리 줄(soft-wrap 이음)
 /// 단위로 스캔해 wrap 경계를 넘는 매치도 잡고, 같은 줄 안에선 비겹침(매치 뒤로 needle 길이만큼 건너뜀). needle이
 /// 비면 무동작. 대소문자 무시는 foldCase(ASCII + Latin-1·Greek·Cyrillic 깔끔한 오프셋 블록 — Latin Ext-A 등은 후속).
-/// 스크롤백 Find의 단일 출처(코어 상태) — UI 상태머신(find_overlay)은 이 결과를 받기만 한다. regex/fuzzy는 후속.
+/// 스크롤백 Find의 기본 평문 경로 — 정규식 opt-in은 findMatchesWithOptions가 맡고 fuzzy는 후속이다.
 /// 베이스: alt에선 active area(현재 화면)만 검색(Ghostty ActiveSearch와 동작 일치 — alt는 sb.count==0이라 자연히).
 pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, out: *std.ArrayList(types.Match)) !void {
     out.clearRetainingCapacity();
@@ -939,6 +939,97 @@ pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf
         }
         abs = line_abs + 1;
     }
+}
+
+/// PCRE2 uses the same logical-line boundary as literal search: soft wraps join, hard breaks do
+/// not. Terminal matches are inclusive cell spans, so zero-width assertions cannot be painted;
+/// retry a consuming alternative at that offset and otherwise advance one UTF-8 scalar.
+pub fn findMatchesWithOptions(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, regex: bool, out: *std.ArrayList(types.Match)) !void {
+    if (!regex) return findMatches(self, allocator, needle_utf8, out);
+    out.clearRetainingCapacity();
+    if (needle_utf8.len == 0) return;
+    var pattern = try @import("../regex.zig").Pattern.init(needle_utf8, false);
+    defer pattern.deinit();
+    screen.ensureScrollbackRewrapped(self);
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    // Every UTF-8 byte points back to the owning screen cell. This also covers combining marks
+    // stored in grapheme_store and matches crossing a soft-wrap boundary.
+    var cells: std.ArrayList(types.SelectionPoint) = .empty;
+    defer cells.deinit(allocator);
+    const total = self.screen.sb.count + self.size.rows;
+    var abs: usize = 0;
+    errdefer out.clearRetainingCapacity();
+    while (abs < total) {
+        bytes.clearRetainingCapacity();
+        cells.clearRetainingCapacity();
+        var line_abs = abs;
+        while (true) {
+            const row = screen.absRow(self, line_abs) orelse break;
+            const wrapped = screen.absRowWrapped(self, line_abs);
+            const limit: usize = if (wrapped) screen.textLen(row) else screen.trimmedLen(row);
+            for (row[0..limit], 0..) |cell, col| {
+                if (cell.continuation) continue;
+                const before = bytes.items.len;
+                try appendRowUtf8(&bytes, allocator, row, self.grapheme_store.items, col, col + 1);
+                for (before..bytes.items.len) |_| try cells.append(allocator, .{ .row = line_abs, .col = @intCast(col) });
+            }
+            if (!wrapped) break;
+            line_abs += 1;
+            if (line_abs >= total) break;
+        }
+        var from: usize = 0;
+        while (from < bytes.items.len) {
+            var span = (try pattern.matchValidated(bytes.items, from, false)) orelse break;
+            if (span.start == span.end) {
+                if (try pattern.matchNonEmptyAtStart(bytes.items, span.start)) |consuming| {
+                    span = consuming;
+                } else {
+                    from = span.end + 1;
+                    while (from < bytes.items.len and bytes.items[from] & 0xc0 == 0x80) : (from += 1) {}
+                    continue;
+                }
+            }
+            try out.append(allocator, .{ .start = cells.items[span.start], .end = cells.items[span.end - 1] });
+            from = span.end;
+        }
+        abs = line_abs + 1;
+    }
+}
+
+test "terminal PCRE2 maps soft wraps and UTF-8 captures to screen cells" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 6, .rows = 4 });
+    defer c.deinit();
+    try c.write("ab한cdEF");
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(allocator);
+    try findMatchesWithOptions(&c, allocator, "한cdE", true, &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), matches.items[0].start.row);
+    try std.testing.expectEqual(@as(u16, 2), matches.items[0].start.col);
+    try std.testing.expectEqual(@as(usize, 1), matches.items[0].end.row);
+    try std.testing.expectEqual(@as(u16, 0), matches.items[0].end.col);
+}
+
+test "terminal PCRE2 leaves literal defaults and skips unpaintable empty matches" {
+    const allocator = std.testing.allocator;
+    var c = try core.TerminalCore.init(allocator, .{ .cols = 12, .rows = 3 });
+    defer c.deinit();
+    try c.write("foo f.o");
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(allocator);
+    try findMatchesWithOptions(&c, allocator, "f.o", false, &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try findMatchesWithOptions(&c, allocator, "f.o", true, &matches);
+    try std.testing.expectEqual(@as(usize, 2), matches.items.len);
+    try findMatchesWithOptions(&c, allocator, "^|foo", true, &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try std.testing.expectEqual(@as(u16, 0), matches.items[0].start.col);
+    try std.testing.expectEqual(@as(u16, 2), matches.items[0].end.col);
+    try std.testing.expectError(error.InvalidPattern, findMatchesWithOptions(&c, allocator, "[", true, &matches));
+    try std.testing.expectEqual(@as(usize, 0), matches.items.len);
 }
 
 /// 검색 매치(절대 좌표)를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null) — 선택 하이라이트와 같은 규칙 공유.

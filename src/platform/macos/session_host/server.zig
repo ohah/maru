@@ -321,7 +321,7 @@ pub const RuntimeOps = struct {
     /// `findMatches`(로컬과 같은 함수)로 매치를 찾고, 보이는 매치를 `matchViewportSpan`으로 클립해 JSON `{count, cur:[...], spans:[...]}`로
     /// 준다. count=전체 매치 수, spans=보이는 **비현재** 매치의 flat 좌표, cur=현재 매치(index `cur_index`)의 뷰포트 span(안 보이면 `[]`).
     /// §6c-2 네비: `scroll`이면 host가 현재 매치의 abs 위치로 `scrollToAbs`해 화면을 이동한다(client가 그 매치를 보게).
-    find: *const fn (ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, cur_index: u32, scroll: bool, allocator: std.mem.Allocator) anyerror![]u8,
+    find: *const fn (ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, cur_index: u32, scroll: bool, regex: bool, allocator: std.mem.Allocator) anyerror![]u8,
     /// host 실제 core/PTY의 cwd/title/semantic/OSC5379/foreground를 한 번에 owned copy한다. screen snapshot과 분리된
     /// attach/event full-state이며 public runtime.list/get에는 노출하지 않는다.
     observation: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!RuntimeObservation,
@@ -2619,6 +2619,7 @@ pub const Connection = struct {
         const query_hex = strField(p, "q") orelse "";
         const cur_index: u32 = @intCast(intFieldU64(p, "cur") orelse 0);
         const scroll = boolField(p, "scroll");
+        const regex = boolField(p, "regex");
         const attachment = self.attachments.get(stream) orelse
             return self.replyError(request_id, .invalid_request);
         const runtime_id = attachment.runtime_id;
@@ -2630,7 +2631,7 @@ pub const Connection = struct {
             reg.Capability.input,
         )) return self.replyError(request_id, .unauthorized);
         const body = if (self.runtime_ops) |ops|
-            ops.find(ops.ctx, runtime_id, query_hex, cur_index, scroll, self.allocator) catch return self.replyError(request_id, .internal)
+            ops.find(ops.ctx, runtime_id, query_hex, cur_index, scroll, regex, self.allocator) catch return self.replyError(request_id, .internal)
         else
             (self.allocator.dupe(u8, "{\"count\":0,\"cur\":[],\"spans\":[]}") catch return error.OutOfMemory);
         defer self.allocator.free(body);
@@ -5156,6 +5157,7 @@ pub const FakeRuntimeOps = struct {
     last_find_query_hex_len: usize = 0,
     last_find_cur: u32 = 0,
     last_find_scroll: bool = false,
+    last_find_regex: bool = false,
     observation_version: u8 = 0,
     observation_invalid: InvalidObservation = .none,
     snapshot_len: ?usize = null,
@@ -5404,7 +5406,7 @@ pub const FakeRuntimeOps = struct {
         return allocator.dupe(u8, "{\"sel\":true,\"sr\":0,\"sc\":1,\"er\":0,\"ec\":3,\"block\":false}");
     }
     /// 받은 검색어(hex)/cur/scroll을 기록하고 고정 결과(2 매치, cur span 1 + 비현재 span 1)를 준다 — server 라우팅·파싱 검증.
-    fn findFn(ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, cur_index: u32, scroll: bool, allocator: std.mem.Allocator) anyerror![]u8 {
+    fn findFn(ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, cur_index: u32, scroll: bool, regex: bool, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
         const n = @min(query_hex.len, self.last_find_query_hex.len);
@@ -5412,6 +5414,7 @@ pub const FakeRuntimeOps = struct {
         self.last_find_query_hex_len = n;
         self.last_find_cur = cur_index;
         self.last_find_scroll = scroll;
+        self.last_find_regex = regex;
         return allocator.dupe(u8, "{\"count\":2,\"cur\":[0,0,0,2],\"spans\":[1,2,1,5]}");
     }
     fn observationFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!RuntimeObservation {
@@ -8305,7 +8308,7 @@ test "server: runtime.find routes query(hex) to RuntimeOps and returns {count,sp
     }
     // 검색어 "hi" = hex "6869", cur=1, scroll=true → RuntimeOps.find로 라우팅 + fake {count,cur,spans}를 응답에 담는다.
     {
-        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.find\",\"params\":{\"stream_id\":1,\"q\":\"6869\",\"cur\":1,\"scroll\":true}}");
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.find\",\"params\":{\"stream_id\":1,\"q\":\"6869\",\"cur\":1,\"scroll\":true,\"regex\":true}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"count\":2") != null);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"cur\":[0,0,0,2]") != null); // 현재 매치 span
@@ -8314,6 +8317,7 @@ test "server: runtime.find routes query(hex) to RuntimeOps and returns {count,sp
     try testing.expectEqualStrings("6869", fake.last_find_query_hex[0..fake.last_find_query_hex_len]);
     try testing.expectEqual(@as(u32, 1), fake.last_find_cur); // cur 라우팅
     try testing.expect(fake.last_find_scroll); // scroll 라우팅
+    try testing.expect(fake.last_find_regex); // PCRE2 모드도 host 연산까지 전달
 
     // 모르는 stream_id → invalid_request.
     {

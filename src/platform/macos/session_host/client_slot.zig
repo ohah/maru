@@ -5112,6 +5112,7 @@ fn encodeGenerationRequestParamsWithCapabilities(
                 .q = hex[0 .. query.len * 2],
                 .cur = v.current,
                 .scroll = v.scroll,
+                .regex = v.regex,
             });
         },
         .select_op => |v| stringifyGenerationParams(out, .{

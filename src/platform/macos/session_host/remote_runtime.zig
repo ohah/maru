@@ -6744,14 +6744,15 @@ pub const RemoteRuntime = struct {
     /// 그 스크롤 delta를 못 받은 화면과 좌표계가 어긋나기 때문이다. host가 이 필드를 안 보내면(앱보다 오래 사는
     /// 구 host 데몬) null이고, 그 연결에서는 종전대로 즉시 적용한다 — 새 필드가 없다는 사실 자체가 구 host의
     /// 유일한 신호라 별도 capability 비트를 두지 않는다(find 응답은 count/cur도 같은 관대한 파싱 규율이다).
-    pub const FindResult = struct { count: usize, cur: ?terminal.SelectionSpan, voff: ?u64 };
+    pub const FindResult = struct { count: usize, cur: ?terminal.SelectionSpan, voff: ?u64, regex_error: ?[]const u8 = null };
 
     const FindDecodeOutput = struct {
         spans: *std.ArrayList(terminal.SelectionSpan),
+        requested_regex: bool = false,
         result: FindResult = .{ .count = 0, .cur = null, .voff = null },
     };
 
-    pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
+    pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, regex: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
         try self.admitRuntimeOperation();
         if (scroll and !self.mutationAllowed()) return error.Unauthorized;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
@@ -6770,10 +6771,10 @@ pub const RemoteRuntime = struct {
             hexbuf[i * 2 + 1] = hex_chars[b & 0xf];
         }
         var buf: [640]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\",\"cur\":{d},\"scroll\":{}}}", .{ self.currentGeneration().attachment.streamId(), hexbuf[0 .. qn * 2], cur_index, scroll }) catch return error.OutOfMemory;
-        const request = generation_contract.FindRequest.init(query[0..qn], cur_index, scroll) orelse
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"q\":\"{s}\",\"cur\":{d},\"scroll\":{},\"regex\":{}}}", .{ self.currentGeneration().attachment.streamId(), hexbuf[0 .. qn * 2], cur_index, scroll, regex }) catch return error.OutOfMemory;
+        const request = generation_contract.FindRequest.initWithMode(query[0..qn], cur_index, scroll, regex) orelse
             return error.ProtocolError;
-        var output: FindDecodeOutput = .{ .spans = out_spans };
+        var output: FindDecodeOutput = .{ .spans = out_spans, .requested_regex = regex };
         try self.callDecoded(
             generation_contract.RuntimeRequest.find(request),
             "runtime.find",
@@ -6786,11 +6787,15 @@ pub const RemoteRuntime = struct {
 
     fn applyFindResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
         const output: *FindDecodeOutput = @ptrCast(@alignCast(raw_output));
+        // An old host silently ignores an unknown request field. Never present its literal
+        // results as regex results: require an explicit mode acknowledgement from the host.
+        if (output.requested_regex and std.mem.indexOf(u8, bytes, "\"regex\":true") == null) return error.ProtocolError;
         const count = client_mod.extractU64Field(bytes, "\"count\":") orelse 0;
         output.result = .{
             .count = @intCast(count),
             .cur = parseFirstSpan(bytes, "\"cur\":["),
             .voff = client_mod.extractU64Field(bytes, "\"voff\":"),
+            .regex_error = if (std.mem.indexOf(u8, bytes, "\"error\":\"invalid regex\"") != null) "invalid regex" else if (std.mem.indexOf(u8, bytes, "\"error\":\"regex limit\"") != null) "regex limit" else if (std.mem.indexOf(u8, bytes, "\"error\":\"regex error\"") != null) "regex error" else null,
         };
         parseSpansInto(bytes, output.spans, runtime.allocator);
     }
@@ -15696,7 +15701,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
         .find => {
             var spans: std.ArrayList(terminal.SelectionSpan) = .empty;
             defer spans.deinit(runtime.allocator);
-            _ = try runtime.find("x", 0, false, &spans);
+            _ = try runtime.find("x", 0, false, false, &spans);
         },
         .select_op => _ = try runtime.selectContentAware("word", 0, 0, ""),
         .core_command => try runtime.sendCoreCommandBlocking(.scroll_to_bottom),
@@ -17285,6 +17290,12 @@ test "managed observation probe stays nonblocking on an actual stalled socket an
     try testing.expectError(error.ProtocolError, rr.requestObservationProbe(failed_nonce));
     try testing.expectEqual(@as(u64, 0), rr.currentGeneration().observation_probe_active);
     try testing.expectEqual(failed_nonce, rr.currentGeneration().observation_probe_abandoned);
+}
+
+test "old host cannot silently answer a regex request with literal matches" {
+    var spans: std.ArrayList(terminal.SelectionSpan) = .empty;
+    var output: RemoteRuntime.FindDecodeOutput = .{ .spans = &spans, .requested_regex = true };
+    try std.testing.expectError(error.ProtocolError, RemoteRuntime.applyFindResponse(undefined, &output, "{\"count\":1,\"cur\":[],\"spans\":[]}"));
 }
 
 test "CR2d1 remote input owner는 paste IME OSC52 batch를 epoch sequence golden queue로 소유한다" {
@@ -19922,7 +19933,7 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     // "xyz" 검색(현재 매치=index 0) → host가 2개(에코 줄=row0 + cat 줄=row1) 찾고, cur=현재(row0)·spans=비현재(row1).
     var spans: std.ArrayList(terminal.SelectionSpan) = .empty;
     defer spans.deinit(allocator);
-    const r0 = try rr.find("xyz", 0, false, &spans);
+    const r0 = try rr.find("xyz", 0, false, false, &spans);
     try testing.expectEqual(@as(usize, 2), r0.count); // 전체 매치 수
     try testing.expect(r0.cur != null); // 현재 매치(index0) 뷰포트 span
     try testing.expectEqual(@as(u16, 0), r0.cur.?.start.row); // 현재 매치는 row0
@@ -19930,18 +19941,18 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     try testing.expectEqual(@as(u16, 1), spans.items[0].start.row);
 
     // §6c-2 네비: 현재 매치를 index 1로 → cur=row1, 비현재=row0. (host가 cur_index로 현재 매치를 가른다)
-    const r1 = try rr.find("xyz", 1, false, &spans);
+    const r1 = try rr.find("xyz", 1, false, false, &spans);
     try testing.expectEqual(@as(usize, 2), r1.count);
     try testing.expect(r1.cur != null);
     try testing.expectEqual(@as(u16, 1), r1.cur.?.start.row); // 현재 매치가 row1로 바뀜
     try testing.expectEqual(@as(u16, 0), spans.items[0].start.row); // 비현재 = row0
 
     // scroll=true(⌘G 네비)도 크래시 없이 현재 매치를 준다(내용이 다 보여 scrollToAbs는 사실상 무이동).
-    const rs = try rr.find("xyz", 0, true, &spans);
+    const rs = try rr.find("xyz", 0, true, false, &spans);
     try testing.expectEqual(@as(usize, 2), rs.count);
 
     // 없는 검색어 → 0.
-    const zero = try rr.find("zzz", 0, false, &spans);
+    const zero = try rr.find("zzz", 0, false, false, &spans);
     try testing.expectEqual(@as(usize, 0), zero.count);
     try testing.expect(zero.cur == null);
     try testing.expectEqual(@as(usize, 0), spans.items.len);

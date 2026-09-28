@@ -2908,7 +2908,7 @@ pub const RuntimeManager = struct {
     /// 함수)로 매치를 찾고, 보이는 매치를 `matchViewportSpan`으로 클립해 `{count, spans:[sr,sc,er,ec,...]}`로 준다(선택과 같이
     /// 검색 의미론 host 단일 출처). count=전체 매치 수, spans=현재 뷰포트에 보이는 매치의 flat 좌표. core lock 아래(findMatches가
     /// 스크롤백 rewrap으로 core mutate).
-    fn findOp(ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, cur_index: u32, scroll: bool, allocator: std.mem.Allocator) anyerror![]u8 {
+    fn findOp(ctx: *anyopaque, runtime_id: u128, query_hex: []const u8, cur_index: u32, scroll: bool, regex: bool, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
@@ -2919,7 +2919,15 @@ pub const RuntimeManager = struct {
         defer surface.unlockCore(self.io);
         var matches: std.ArrayList(terminal.Match) = .empty;
         defer matches.deinit(allocator);
-        surface.core.findMatches(allocator, query, &matches) catch {}; // 실패 시 빈 매치(best-effort).
+        var regex_error: []const u8 = "";
+        surface.core.findMatchesWithOptions(allocator, query, regex, &matches) catch |err| {
+            if (regex) regex_error = switch (err) {
+                error.InvalidPattern, error.InvalidUtf8 => "invalid regex",
+                error.MatchLimit => "regex limit",
+                else => "regex error",
+            };
+            matches.clearRetainingCapacity();
+        };
         // §6c-2 네비: scroll이면 현재 매치(cur_index)의 abs 위치로 host 화면을 이동한다 — client가 그 매치를 보게(view_offset
         // 변화 → 다음 delta로 스크롤 화면 투영). 그 뒤 클립하므로 현재 매치가 보이게 된다.
         if (scroll and cur_index < matches.items.len) {
@@ -2936,7 +2944,7 @@ pub const RuntimeManager = struct {
         // **아직 delta로 못 받은 상태**라, 응답 span을 그대로 그리면 좌표계가 다른 화면에 하이라이트를 찍는다
         // (= 이전 하이라이트가 남아 보이는 증상). client가 자기 화면과 이 값을 대조해 정합할 때만 적용한다.
         // cur=현재 매치의 뷰포트 span(보이면 4정수, 안 보이면 빈 배열).
-        try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{{\"count\":{d},\"voff\":{d},\"cur\":[", .{ matches.items.len, surface.core.viewOffset() }));
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{{\"count\":{d},\"voff\":{d},\"regex\":{},\"error\":\"{s}\",\"cur\":[", .{ matches.items.len, surface.core.viewOffset(), regex, regex_error }));
         if (cur_index < matches.items.len) {
             if (surface.core.matchViewportSpan(matches.items[cur_index])) |cs| {
                 try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d},{d},{d},{d}", .{ cs.start.row, cs.start.col, cs.end.row, cs.end.col }));

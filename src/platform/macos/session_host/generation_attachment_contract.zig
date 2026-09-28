@@ -631,6 +631,7 @@ pub const FindRequest = struct {
     query_len: u16 = 0,
     current: u32,
     scroll: bool,
+    regex: bool = false,
 
     pub fn init(text: []const u8, current: u32, scroll: bool) ?FindRequest {
         if (text.len > 256) return null;
@@ -640,11 +641,24 @@ pub const FindRequest = struct {
         return result;
     }
 
+    pub fn initWithMode(text: []const u8, current: u32, scroll: bool, regex: bool) ?FindRequest {
+        var result = init(text, current, scroll) orelse return null;
+        result.regex = regex;
+        return result;
+    }
+
     pub fn bytes(self: *const FindRequest) ?[]const u8 {
         if (self.query_len > self.query.len) return null;
         return self.query[0..self.query_len];
     }
 };
+
+test "regex find mode survives typed request and rejects a malformed wire flag" {
+    var request = RuntimeRequest.find(FindRequest.initWithMode("f.o", 1, false, true).?);
+    try std.testing.expect(request.decode().?.find.regex);
+    request.payload.find.regex = 2;
+    try std.testing.expect(request.decode() == null);
+}
 pub const SelectKind = enum(u8) { word, line, all };
 pub const SelectRequest = struct {
     kind: SelectKind,
@@ -688,6 +702,7 @@ const RawFindRequest = extern struct {
     query_len: u16,
     current: u32,
     scroll: u8,
+    regex: u8,
 };
 const RawSelectRequest = extern struct { kind: u8, row: u16, col: u16, separators: [64]u8, separators_len: u8 };
 const RawMouseReportRequest = extern struct {
@@ -804,6 +819,7 @@ pub const RuntimeRequest = extern struct {
             .query_len = value.query_len,
             .current = value.current,
             .scroll = @intFromBool(value.scroll),
+            .regex = @intFromBool(value.regex),
         } } };
     }
     pub fn selectOp(value: SelectRequest) RuntimeRequest {
@@ -882,12 +898,13 @@ pub const RuntimeRequest = extern struct {
             @intFromEnum(RuntimeRequestTag.clipboard_write) => .clipboard_write,
             @intFromEnum(RuntimeRequestTag.find) => blk: {
                 const value = self.payload.find;
-                if (value.scroll > 1 or value.query_len > value.query.len) break :blk null;
+                if (value.scroll > 1 or value.regex > 1 or value.query_len > value.query.len) break :blk null;
                 break :blk .{ .find = .{
                     .query = value.query,
                     .query_len = value.query_len,
                     .current = value.current,
                     .scroll = value.scroll == 1,
+                    .regex = value.regex == 1,
                 } };
             },
             @intFromEnum(RuntimeRequestTag.select_op) => blk: {

@@ -125,7 +125,7 @@ pub const Action = union(enum) {
     /// 찾기의 대소문자 토글(§5.1 — VSCode `⌥⌘C`). **편집기 문서에서만** 뜻이 있다:
     /// 스크롤백·웹은 이 값을 안 읽는다(웹은 WebKit 에 낱말 경계가 없어 짝이 안 맞는다).
     toggle_find_match_case,
-    /// ⌥⌘R: editor Find regular expression mode (PCRE2).
+    /// ⌥⌘R: editor and terminal scrollback Find regular expression mode (PCRE2).
     toggle_find_regex,
     /// 찾기의 낱말 단위 토글(§5.1 — VSCode `⌥⌘W`). 낱말 판정은
     /// `session/editor/selection.zig` 의 `wordRangeAt` 이 소유한다(더블클릭이 잡는 그 범위).

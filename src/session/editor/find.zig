@@ -24,7 +24,7 @@ const std = @import("std");
 const terminal = @import("../../terminal.zig");
 /// 낱말 경계의 단일 출처(§3.2) — 더블클릭이 잡는 범위와 같은 것을 쓴다.
 const editor_selection = @import("selection.zig");
-pub const regex = @import("regex.zig");
+pub const regex = @import("../../regex.zig");
 
 /// 한 매치 — **줄 안의 byte 범위**다. 렌더가 요구하는 축이 그것이고(`frame.Mark`), §3.1의 문서
 /// offset은 `line_index`가 줄 시작을 알므로 언제든 더해 얻는다.

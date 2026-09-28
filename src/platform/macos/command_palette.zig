@@ -10,36 +10,74 @@ const command_catalog = @import("command_catalog.zig");
 
 const Action = maru.config.Action;
 
+// 검색 대상은 정적 카탈로그뿐이다. 최대 바이트 길이를 테이블에서 유도해 점수 계산 중
+// 할당하지 않고, 명령 제목이나 별칭이 늘어나도 버퍼 상한이 함께 늘게 한다.
+const max_catalog_text_bytes: usize = blk: {
+    var maximum: usize = 0;
+    for (command_catalog.entries) |entry| {
+        maximum = @max(maximum, entry.title.len);
+        maximum = @max(maximum, entry.search_ko.len);
+    }
+    break :blk maximum;
+};
+
 /// 제목의 문자들이 쿼리 순서대로 나타나면 후보가 된다. 글자 단위로 걸어 UTF-8 한글의 바이트를
 /// 섞어 가짜 일치를 만들지 않는다. 연속·앞쪽·단어 시작을 우대하되 빈 쿼리는 카탈로그 순서를 유지한다.
 fn fuzzyScore(haystack: []const u8, needle: []const u8) ?i64 {
     if (needle.len == 0) return 0;
+    std.debug.assert(haystack.len <= max_catalog_text_bytes);
     var h = (std.unicode.Utf8View.init(haystack) catch return null).iterator();
     var n = (std.unicode.Utf8View.init(needle) catch return null).iterator();
-    var want = n.nextCodepoint() orelse return 0;
-    var score: i64 = 0;
-    var pos: i64 = 0;
-    var previous: ?i64 = null;
-    var previous_cp: u21 = 0;
-    while (h.nextCodepoint()) |cp| : (pos += 1) {
-        const equal = if (cp < 128 and want < 128)
-            std.ascii.toLower(@intCast(cp)) == std.ascii.toLower(@intCast(want))
-        else
-            cp == want;
-        if (equal) {
-            score += 10;
-            if (pos == 0) score += 80;
-            if (previous) |p| {
-                if (pos == p + 1) score += 30 else score -= @min(pos - p - 1, 20);
-            }
-            if (pos > 0 and (previous_cp == ' ' or previous_cp == ':' or previous_cp == '_' or previous_cp == '-' or
-                (previous_cp >= 'a' and previous_cp <= 'z' and cp >= 'A' and cp <= 'Z'))) score += 20;
-            previous = pos;
-            want = n.nextCodepoint() orelse return score - pos + @as(i64, if (haystack.len == needle.len) 100 else 0);
-        }
-        previous_cp = cp;
+    var codepoints: [max_catalog_text_bytes]u21 = undefined;
+    var count: usize = 0;
+    while (h.nextCodepoint()) |cp| {
+        codepoints[count] = cp;
+        count += 1;
     }
-    return null;
+
+    // 같은 글자가 여러 번 나올 때 첫 일치만 잡으면 뒤쪽의 연속 구간을 놓친다.
+    // 각 쿼리 글자에 대해 제목의 모든 위치에서 가능한 최고 점수를 남긴다.
+    const no_match: i64 = std.math.minInt(i64);
+    var previous: [max_catalog_text_bytes]i64 = undefined;
+    var current: [max_catalog_text_bytes]i64 = undefined;
+    var matched: usize = 0;
+    while (n.nextCodepoint()) |want| {
+        if (matched >= count) return null;
+        @memset(current[0..count], no_match);
+        for (codepoints[0..count], 0..) |cp, pos| {
+            const equal = if (cp < 128 and want < 128)
+                std.ascii.toLower(@intCast(cp)) == std.ascii.toLower(@intCast(want))
+            else
+                cp == want;
+            if (!equal) continue;
+            var score: i64 = 10;
+            if (pos == 0) score += 80;
+            if (pos > 0) {
+                const before = codepoints[pos - 1];
+                if (before == ' ' or before == ':' or before == '_' or before == '-' or
+                    (before >= 'a' and before <= 'z' and cp >= 'A' and cp <= 'Z')) score += 20;
+            }
+            if (matched > 0) {
+                var best = no_match;
+                for (previous[0..pos], 0..) |prior, earlier| {
+                    if (prior == no_match) continue;
+                    const gap: i64 = @intCast(pos - earlier - 1);
+                    best = @max(best, prior + (if (gap == 0) @as(i64, 30) else -@min(gap, 20)));
+                }
+                if (best == no_match) continue;
+                score += best;
+            }
+            current[pos] = score;
+        }
+        previous = current;
+        matched += 1;
+    }
+    var best = no_match;
+    for (previous[0..count], 0..) |score, pos| {
+        if (score != no_match) best = @max(best, score - @as(i64, @intCast(pos)));
+    }
+    if (best == no_match) return null;
+    return best + @as(i64, if (haystack.len == needle.len) 100 else 0);
 }
 
 fn entryScore(entry: command_catalog.Entry, query: []const u8) ?i64 {
@@ -86,6 +124,8 @@ test "fuzzyScore: 부분열·대소문자·연속·UTF-8 코드포인트" {
     try std.testing.expect(fuzzyScore("ab", "abc") == null);
     try std.testing.expect(fuzzyScore("새 터미널", "새터") != null);
     try std.testing.expect(fuzzyScore("새 터미널", "새틀") == null);
+    // 'Editor'의 이른 O 대신 'Occurrence'의 연속 Oc를 택해야 한다.
+    try std.testing.expect(fuzzyScore("Editor: Add Next Occurrence", "Oc").? > fuzzyScore("Focus Pane Up", "Oc").?);
 }
 
 test "filter: 빈 쿼리=전부·fuzzy 순위·actionAt 해석" {
@@ -154,4 +194,17 @@ test "한국어 검색 별칭: 모든 명령을 영어 제목 그대로 표시�
     try std.testing.expectEqual(Action.split_horizontal, actionAt(out.items, 0).?);
     try filter(allocator, "빠른 수정", &out);
     try std.testing.expectEqual(Action.quick_fix, actionAt(out.items, 0).?);
+}
+
+test "모든 명령의 완전한 영어 제목과 한국어 별칭은 자기 명령을 첫 결과로 돌려준다" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(usize) = .empty;
+    defer out.deinit(allocator);
+    for (command_catalog.entries) |entry| {
+        for ([_][]const u8{ entry.title, entry.search_ko }) |query| {
+            try filter(allocator, query, &out);
+            try std.testing.expect(out.items.len > 0);
+            try std.testing.expect(std.meta.eql(entry.action, actionAt(out.items, 0).?));
+        }
+    }
 }

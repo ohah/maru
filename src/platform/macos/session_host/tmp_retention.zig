@@ -128,11 +128,31 @@ test "매니페스트 경로 갱신은 ctime 을 바꿔 소유자의 withdraw �
         .host_id = host_id,
     };
 
+    // `.skip` 의 계약은 「매니페스트 **만** 건너뛴다」다. 그 「만」을 재지 않으면, `.skip` 이 갱신을
+    // 통째로 건너뛰어도 통과한다 — 그러면 승계한 host 가 tmp 정리에 자기 자리를 잃는 원래 결함이
+    // 조용히 되살아나고, **3 일이 지나야 드러난다**(적대적 검증 2회차 F1 이 초록으로 살아남았다).
+    // 그래서 옆 항목 둘의 시각을 옛날로 돌려 두고, `.skip` 이 그것들은 **갱신하는지** 함께 잰다.
+    const sock_fd = c.open(socket_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
+    if (sock_fd < 0) return error.TestUnexpectedResult;
+    _ = c.close(sock_fd);
+    const lock_fd = c.open(lock_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
+    if (lock_fd < 0) return error.TestUnexpectedResult;
+    _ = c.close(lock_fd);
+    const ancient: c.timespec = .{ .sec = 1, .nsec = 0 };
+    const past: [2]c.timespec = .{ ancient, ancient };
+    if (c.utimensat(c.AT.FDCWD, socket_path.ptr, &past, 0) != 0) return error.TestUnexpectedResult;
+    if (c.utimensat(c.AT.FDCWD, lock_path.ptr, &past, 0) != 0) return error.TestUnexpectedResult;
+    const sock_before = mtimeNs(socket_path) orelse return error.TestUnexpectedResult;
+    const lock_before = mtimeNs(lock_path) orelse return error.TestUnexpectedResult;
+
     const before = ctimeNs(manifest) orelse return error.TestUnexpectedResult;
     touchAll(subject, .skip);
     const after_skip = ctimeNs(manifest) orelse return error.TestUnexpectedResult;
     // `.skip` 은 매니페스트에 손대지 않는다 — 소유자의 identity 가 살아 있어야 withdraw 가 돈다.
     try testing.expectEqual(before, after_skip);
+    // 그러나 **나머지는 찍는다.** 이 둘이 없으면 위 단언은 「아무것도 안 한다」로도 만족된다.
+    try testing.expect((mtimeNs(socket_path) orelse return error.TestUnexpectedResult) > sock_before);
+    try testing.expect((mtimeNs(lock_path) orelse return error.TestUnexpectedResult) > lock_before);
 
     touchAll(subject, .by_path);
     const after_path = ctimeNs(manifest) orelse return error.TestUnexpectedResult;
@@ -144,4 +164,10 @@ fn ctimeNs(path: [:0]const u8) ?i128 {
     var stat: std.c.Stat = undefined;
     if (c.fstatat(c.AT.FDCWD, path.ptr, &stat, c.AT.SYMLINK_NOFOLLOW) != 0) return null;
     return @as(i128, stat.ctime().sec) * std.time.ns_per_s + stat.ctime().nsec;
+}
+
+fn mtimeNs(path: [:0]const u8) ?i128 {
+    var stat: std.c.Stat = undefined;
+    if (c.fstatat(c.AT.FDCWD, path.ptr, &stat, c.AT.SYMLINK_NOFOLLOW) != 0) return null;
+    return @as(i128, stat.mtime().sec) * std.time.ns_per_s + stat.mtime().nsec;
 }

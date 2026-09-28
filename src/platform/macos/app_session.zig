@@ -84918,8 +84918,20 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     try std.testing.expect(session.agent_activity.partial);
     {
         var buf: [64]u8 = undefined;
-        try std.testing.expectEqualStrings(
+        // **「못 찾았다」와 「다 못 읽었다」는 다른 사실이다.** 여기는 파일이 아예 없는 자리라
+        // 한 바이트도 못 읽었다(`scanned_bytes == 0`). 예전에는 이것도 「세션을 다 읽지
+        // 못했습니다」로 나와, 워크트리 pane 에서 갤러리가 빈 채 그 문구만 본 사용자가
+        // 「상한에 잘렸나 보다」로 읽고 넘어갔다(2026-09-28 보고).
+        try std.testing.expectEqual(@as(usize, 0), session.agent_activity.scanned_bytes);
+        // **두 문구가 서로 달라야 이 갈래가 뜻을 갖는다.** 값이 같아지면 아래 두 단언이 **둘 다**
+        // 만족돼 갈래가 있으나 마나가 된다 — 적대적 검증 G2 가 그렇게 초록으로 살아남았다.
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            maru.i18n.t(.agent_activity_unread),
             maru.i18n.t(.agent_activity_partial),
+        ));
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.agent_activity_unread),
             agent_activity_ops.noticeText(session, &buf),
         );
     }
@@ -84931,6 +84943,21 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     agent_activity_ops.refresh(session, false);
     try Wait.until(session);
     try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
+
+    {
+        // **대비 — 읽은 바이트가 있고 걸린 것도 있는 `partial` 은 「다 못 읽었다」다.**
+        // 이 짝이 없으면 위 단언이 「두 문구가 같아도」 통과한다(둘을 한 이름으로 되접는 퇴행).
+        // 실제 스캔 상태(2 건·읽은 바이트 > 0) 위에 `partial` 만 세워 갈래를 가른다.
+        var buf: [64]u8 = undefined;
+        try std.testing.expect(session.agent_activity.scanned_bytes > 0);
+        const saved_partial = session.agent_activity.partial;
+        session.agent_activity.partial = true;
+        defer session.agent_activity.partial = saved_partial;
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.agent_activity_partial),
+            agent_activity_ops.noticeText(session, &buf),
+        );
+    }
 }
 
 test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드한다 (IG3-b)" {

@@ -295,9 +295,14 @@ test "예약 여유: prepare 가 그 여유를 실제로 쓴다 — 3 바이트 
     try std.testing.expect(reservation.reserved_bytes > preview_bytes);
 
     // 실측 사건의 모양: 런타임 집합은 그대로인데 크기만 3 바이트 늘었다. 고치기 전에는 `.bytes`.
+    const grown = preview_bytes + 3;
+    // **전제를 스스로 지킨다.** 누가 이 증가분을 0 으로 줄이면 아래는 「미리보기와 같은 값」을
+    // 재게 되어 아무것도 증명하지 못한다 — 그때 판정자가 조용히 초록이 되지 않고 여기서 빨개진다.
+    try std.testing.expect(grown > preview_bytes);
+    try std.testing.expect(grown <= reservation.reserved_bytes);
     try std.testing.expectEqual(
         Reservation.MismatchAxis.none,
-        reservation.mismatchAxis(35, &.{ 2, 9 }, preview_bytes + 3),
+        reservation.mismatchAxis(35, &.{ 2, 9 }, grown),
     );
 
     // **양쪽을 다 잰다.** 「3 바이트를 봐준다」만 재면 가드를 통째로 없애도 통과한다 —
@@ -311,16 +316,43 @@ test "예약 여유: prepare 가 그 여유를 실제로 쓴다 — 3 바이트 
     // 움직였으면 그대로 잡혀야 한다.
     try std.testing.expectEqual(
         Reservation.MismatchAxis.membership,
-        reservation.mismatchAxis(36, &.{ 2, 9 }, preview_bytes + 3),
+        reservation.mismatchAxis(36, &.{ 2, 9 }, grown),
     );
     try std.testing.expectEqual(
         Reservation.MismatchAxis.count,
-        reservation.mismatchAxis(35, &.{2}, preview_bytes + 3),
+        reservation.mismatchAxis(35, &.{2}, grown),
     );
     try std.testing.expectEqual(
         Reservation.MismatchAxis.ids,
-        reservation.mismatchAxis(35, &.{ 2, 10 }, preview_bytes + 3),
+        reservation.mismatchAxis(35, &.{ 2, 10 }, grown),
     );
+}
+
+test "예약 여유: 상한을 넘는 미리보기는 여유가 가려주지 않는다 — 디스크를 만지기 전에 거절한다" {
+    // `reservedBytesFor` 는 상한에서 clamp 한다. 그래서 `prepare` 의 **사전검사가 사라지면**
+    // 상한을 넘는 미리보기가 조용히 cap 으로 깎여 예약에 성공하고, 실패는 freeze **뒤** 커밋에서
+    // 터진다 — 세션을 멈춘 다음이라 가장 비싼 자리다. 그 가드에 그물이 없었다(2026-09-28 적대적
+    // 검증 C4). 거절은 디스크를 만지기 전에 일어나므로 실재하는 디렉터리도 필요 없다.
+    const deadline = try upgrade_deadline.Deadline.after(std.testing.io, 5 * std.time.ns_per_s);
+    try std.testing.expectError(error.LimitExceeded, prepare(
+        std.testing.allocator,
+        "/nonexistent-on-purpose",
+        0xD1,
+        .{
+            .bytes = upgrade_limits.max_handoff_commit_bytes + 1,
+            .membership_generation = 1,
+            .runtime_ids = &.{1},
+        },
+        deadline,
+    ));
+    // 같은 가드의 나머지 절반 — 빈 미리보기도 여기서 걸러진다.
+    try std.testing.expectError(error.LimitExceeded, prepare(
+        std.testing.allocator,
+        "/nonexistent-on-purpose",
+        0xD2,
+        .{ .bytes = 0, .membership_generation = 1, .runtime_ids = &.{1} },
+        deadline,
+    ));
 }
 
 test "예약 대조는 어긋난 축을 가린다 — 넷이 한 이름으로 뭉치지 않는다" {

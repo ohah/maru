@@ -6169,7 +6169,7 @@ pub fn build(b: *std.Build) void {
             });
             const run_session_host_upgrade_budget_admission_tests =
                 b.addRunArtifact(session_host_upgrade_budget_admission_tests);
-            run_session_host_upgrade_budget_admission_tests.addArg("--maru-expect-tests=6");
+            run_session_host_upgrade_budget_admission_tests.addArg("--maru-expect-tests=7");
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_admission_tests.step,
             );

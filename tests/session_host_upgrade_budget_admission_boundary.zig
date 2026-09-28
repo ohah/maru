@@ -124,6 +124,13 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         "test \"예약 여유: 미리보기보다 크게 잡고, 상한에서 멈춘다\"",
     ));
     try std.testing.expect(std.mem.indexOf(u8, build, "\"예약 여유:\"") != null);
+    // **「테스트일 때만 여유를 준다」를 막는다.** 판정자는 전부 테스트 안에서 돌기 때문에 그
+    // 변이는 *행동으로는 구별할 수 없다* — 모든 게이트가 초록인 채 제품만 고장 난다(2026-09-28
+    // 적대적 검증 A2 에서 실제로 통과했다). 그래서 구조로 막는다: 이 모듈은 크기를 계산하는
+    // 순수 경로라 빌드 모드를 알 이유가 없다. 대가를 알고 감수한다 — 언젠가 이 모듈에
+    // `builtin` 이 정말 필요해지면 이 줄을 먼저 지우고 «왜 안전한지» 적어야 한다.
+    try std.testing.expectEqual(@as(usize, 0), count(admission, "@import(\"builtin\")"));
+    try std.testing.expectEqual(@as(usize, 0), count(admission, "builtin.is_test"));
     // 여유가 파일에 패딩으로 새지 않는다는 보장. 이 고침 **전에는** 예약 == 실제라 이 잘라내기가
     // 사실상 no-op 이었고 지워도 아무도 몰랐다 — 이제는 하중을 받는다.
     try std.testing.expectEqual(@as(usize, 1), count(

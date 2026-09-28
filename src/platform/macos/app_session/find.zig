@@ -69,14 +69,22 @@ pub fn wantedEditorFindSource(self: *AppSession) u64 {
 /// 편집기 문서를 다시 검색한다. 매치가 **어느 Term의 것인지** 함께 싣는다(`editor_find_source`) —
 /// 그 표식이 없으면 pane을 바꾼 다음 프레임이 남의 좌표를 이 문서에 칠한다.
 fn recomputeEditorFind(self: *AppSession, term: *Term) void {
+    self.chrome_host.find.regex_error = null;
     maru.session.editor.find.findMatches(
         self.allocator,
         editor_ops.findLines(self, term),
         self.chrome_host.find.input.query.items,
         // 토글은 **편집기 타깃에만** 산다(§5.1) — 스크롤백·웹은 이 값을 안 읽는다.
-        .{ .match_case = self.chrome_host.find.match_case, .whole_word = self.chrome_host.find.whole_word },
+        .{ .match_case = self.chrome_host.find.match_case, .whole_word = self.chrome_host.find.whole_word, .regex = self.chrome_host.find.regex },
         &self.editor_find_matches,
-    ) catch self.editor_find_matches.clearRetainingCapacity();
+    ) catch |err| {
+        self.editor_find_matches.clearRetainingCapacity();
+        if (self.chrome_host.find.regex) self.chrome_host.find.regex_error = switch (err) {
+            error.InvalidPattern, error.InvalidUtf8 => "invalid regex",
+            error.MatchLimit => "regex limit",
+            else => "regex error",
+        };
+    };
     // **매치가 0이어도 출처를 세운다.** 이 값의 뜻은 "몇 개 찾았나"가 아니라 **"이 목록이 어느
     // 문서의 것인가"**다. 0일 때 비워 두면 tick의 대조가 매 프레임 "안 맞는다"고 답해 재검색이
     // 무한히 돈다. 매치가 없으면 `buildFindMarks`가 `null`을 주므로 강조는 어차피 안 그려진다.
@@ -198,7 +206,7 @@ pub fn toggleFindReplace(self: *AppSession) void {
 ///
 /// **왜 사전 가로채기가 필요한가.** 오버레이가 열리면 `handleKeyEvent` 가 *"모든 키를 소비한다
 /// (모달이라 터미널엔 안 내려간다)"* 로 라우팅해 `chrome_host.handleInput` 에 넘긴다 — 그래서
-/// 키바인딩 해석에 **도달하지 못한다**. 그런데 이 두 토글은 **찾기가 떠 있을 때 쓰는 것**이라
+/// 키바인딩 해석에 **도달하지 못한다**. 그런데 이 규칙 토글은 **찾기가 떠 있을 때 쓰는 것**이라
 /// 닫고 눌러야 한다면 있으나 마나다. 설정 팔레트의 ←→ 가 같은 이유로 같은 자리를 쓴다
 /// (`settingsPaletteArrowIntercept`).
 ///
@@ -208,7 +216,7 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
     var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     // **편집기 문맥이면 편집기 컨텍스트가 판정한다**(key-input-and-shortcuts.md).
     //
-    // **지금은 전역 `resolve` 와 답이 같다** — 이 가로채기가 찾는 chord 넷(`⌥⌘C`·`⌥⌘W`·`⌥⌘L`·`⌥⌘D`)은
+    // **지금은 전역 `resolve` 와 답이 같다** — 이 가로채기가 찾는 다섯 chord(`⌥⌘C`·`⌥⌘R`·`⌥⌘W`·`⌥⌘L`·`⌥⌘D`)는
     // 전부 **전역 표**에 있어 두 resolver 가 같은 값을 낸다. 그래서 「전역으로 되돌리는」 변이는
     // 판정자로 못 잡는다(변이 E10 이 살아남는 것이 정상이다).
     //
@@ -217,7 +225,7 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
     // 사용자가 설명할 수 없다.
     _ = &buf;
     // **이 값은 오늘 답을 안 바꾼다**(늘 참으로 줘도 판정자가 안 잡는다 — 그 변이가 살아남는 것이
-    // 정상이다). 이 가로채기가 찾는 chord 넷은 **전역 표**에 있어 `needs_editable` 판정을 안 지나기
+    // 정상이다). 이 가로채기가 찾는 다섯 chord는 **전역 표**에 있어 `needs_editable` 판정을 안 지나기
     // 때문이다. 그럼에도 제대로 넘기는 이유는 **찾기 규칙에 편집기 전용 chord 가 붙는 날** 때문이고,
     // 그때 이 인자가 거짓으로 박혀 있으면 비교 뷰에서 조용히 다른 답이 나온다.
     const is_diff = if (activeEditorTerm(self)) |t| t.rt.editor_diff != null else false;
@@ -227,6 +235,7 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
     };
     switch (action) {
         .toggle_find_match_case => toggleFindMatchCase(self),
+        .toggle_find_regex => toggleFindRegex(self),
         .toggle_find_whole_word => toggleFindWholeWord(self),
         .toggle_find_in_selection => toggleFindInSelection(self),
         .toggle_find_diff_side => toggleFindDiffSide(self),
@@ -242,6 +251,13 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
 pub fn toggleFindMatchCase(self: *AppSession) void {
     if (!isEditorFindTarget(self)) return;
     self.chrome_host.find.match_case = !self.chrome_host.find.match_case;
+    refilterAfterRuleChange(self);
+}
+
+/// ⌥⌘R: switch between literal text and PCRE2 syntax for editor Find.
+pub fn toggleFindRegex(self: *AppSession) void {
+    if (!isEditorFindTarget(self)) return;
+    self.chrome_host.find.regex = !self.chrome_host.find.regex;
     refilterAfterRuleChange(self);
 }
 

@@ -11090,6 +11090,7 @@ pub const AppSession = struct {
             .toggle_find_replace => find_ops.toggleFindReplace(self),
             // 편집기 문서가 아니면 무동작 — 액션 쪽이 게이트를 갖는다(§5.1).
             .toggle_find_match_case => find_ops.toggleFindMatchCase(self),
+            .toggle_find_regex => find_ops.toggleFindRegex(self),
             .toggle_find_whole_word => find_ops.toggleFindWholeWord(self),
             .toggle_find_in_selection => find_ops.toggleFindInSelection(self),
             .toggle_find_diff_side => find_ops.toggleFindDiffSide(self),
@@ -12790,7 +12791,11 @@ pub const AppSession = struct {
                 self.recomputeFind(),
             // **바꿀 문자열은 검색을 다시 돌리지 않는다** — 검색어가 그대로이기 때문이다. 다시 돌리면
             // 타이핑마다 `current`가 0으로 리셋돼(증분 검색 규칙) 사용자가 고른 매치를 잃는다.
-            .find_replace_text_changed, .find_focus_moved => self.metal_dirty = true,
+            .find_replace_text_changed => {
+                self.chrome_host.find.regex_error = null;
+                self.metal_dirty = true;
+            },
+            .find_focus_moved => self.metal_dirty = true,
             .find_replace_one => find_ops.replaceOne(self),
             .find_replace_all => find_ops.replaceAll(self),
             .palette_close => {}, // palette.hide는 컴포넌트가 이미 — platform 부수효과 없음
@@ -49902,6 +49907,49 @@ test "EF16 전부 바꾸기는 되돌리기 하나다 (§5.1·§3.3)" {
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(editor_ops.undoEdit(session, term));
     try std.testing.expectEqualStrings("x1\nAB y AB\nz AB\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EF30 regex mode searches and replaces named captures with one undo" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "foo-42 bar-7\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+    session.dispatchAppAction(.toggle_find_replace);
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'r' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.regex);
+    for ("(?<name>[a-z]+)-(\\d+)") |ch| {
+        _ = try session.handleKeyEvent(.{ .key = .{ .char = ch }, .modifiers = .{} });
+    }
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    for ("$2:${name}") |ch| {
+        _ = try session.handleKeyEvent(.{ .key = .{ .char = ch }, .modifiers = .{} });
+    }
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    try std.testing.expectEqualStrings("42:foo 7:bar\n", term.rt.editor_doc.?.file.content);
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(editor_ops.undoEdit(session, term));
+    try std.testing.expectEqualStrings("foo-42 bar-7\n", term.rt.editor_doc.?.file.content);
 }
 
 test "EF17 바꿀 문자열이 검색어를 품어도 되풀이하지 않는다 (§5.1)" {

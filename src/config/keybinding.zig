@@ -338,6 +338,7 @@ pub const default_app_bindings = [_]AppBinding{
     // 기본 표 어디에도 없어 `.ignored` 였고, 컨텍스트 게이트는 액션 쪽이 갖는다(편집기 타깃이
     // 아니면 무동작). `⌘C` 는 터미널 선택이 쓰지만 `⌥⌘C` 는 비어 있어 뺏는 것이 없다.
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'C' } }, .action = .toggle_find_match_case }, // Cmd+Opt+C
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'R' } }, .action = .toggle_find_regex }, // Cmd+Opt+R
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'W' } }, .action = .toggle_find_whole_word }, // Cmd+Opt+W
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'L' } }, .action = .toggle_find_in_selection }, // Cmd+Opt+L
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'D' } }, .action = .toggle_find_diff_side }, // Cmd+Opt+D: 비교 뷰에서 검색할 열 넘기기

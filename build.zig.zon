@@ -88,6 +88,10 @@
             .url = "https://github.com/google/wuffs/archive/refs/tags/v0.4.0-alpha.10.tar.gz",
             .hash = "N-V-__8AABIA4AF2JRGKJvP_rNz61IYJiWeHLsermvYzO6cR",
         },
+        .pcre2 = .{
+            .url = "https://github.com/PCRE2Project/pcre2/archive/refs/tags/pcre2-10.48.tar.gz",
+            .hash = "pcre2-10.48.0-IZ6r6xbVXgDEFDNJ-plJuG66pvQJIDeYdflXi2zQHoET",
+        },
     },
     .paths = .{
         "build.zig",

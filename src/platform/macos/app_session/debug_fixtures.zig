@@ -1890,7 +1890,7 @@ pub fn reapplyForcedTabHover(self: *AppSession) void {
 /// **사용자와 같은 경로를 태운다**(`toggleSymbolPicker`) — 상태를 심지 않으므로 저하 판정
 /// (편집기 아님·심볼 없음·파싱 미완)도 제품이 정한 대로 돈다.
 /// MARU_OPEN_FIND=<검색어> — 편집기 찾기를 그 검색어로 연다.
-/// MARU_FIND_RULES=case,word,sel — 규칙 토글을 켠 상태로 만든다(§5.1 표시 검증).
+/// MARU_FIND_RULES=case,word,sel,regex — 규칙 토글을 켠 상태로 만든다(§5.1 표시 검증).
 /// MARU_FIND_SELECTION=<시작>-<끝> — 찾기를 **열기 전에** 그 범위를 골라 둔다(§5.1 — 범위는
 /// 여는 순간 뜨므로 그 전이어야 한다).
 ///
@@ -1929,6 +1929,7 @@ pub fn maybeDebugOpenFind(self: *AppSession) void {
         const rules = std.mem.span(rv);
         self.chrome_host.find.match_case = std.mem.indexOf(u8, rules, "case") != null;
         self.chrome_host.find.whole_word = std.mem.indexOf(u8, rules, "word") != null;
+        self.chrome_host.find.regex = std.mem.indexOf(u8, rules, "regex") != null;
         if (std.mem.indexOf(u8, rules, "sel") != null) find_ops.toggleFindInSelection(self);
         // **비교 뷰의 열도 캡처로 갈라 본다**(§5.1). `L`·`R` 표시는 화면에서만 드러나고, 단위
         // 판정자는 문자열만 재지 카운터 옆에 실제로 서는지는 못 본다.

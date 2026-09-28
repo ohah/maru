@@ -45,7 +45,12 @@ test "원격 그림 계측: 워커가 값을 싣고 수확이 그 값 그대로 
     try std.testing.expectEqual(@as(usize, 1), count(decode, "remote_bytes: u64 = 0,"));
 
     // **누적은 소스가 갈릴 때 지워진다.** 안 지우면 「앱 시작 이후 누적」이라 화면 비용을 못 읽는다.
-    try std.testing.expectEqual(@as(usize, 1), count(activity, "self.remote_fetch = .{};"));
+    // **그 자리에서 돈다**까지 잰다. 개수만 세면 그 줄을 **안 도는 조건 안**으로 옮겨도 1 건이라
+    // 통과한다(적대적 검증 N2) — 그러면 리셋이 사라진 채 「있다」로 읽힌다. 형제 리셋과 **같은
+    // 줄묶음**에 있는지를 겨눈다.
+    try std.testing.expectEqual(@as(usize, 1), count(activity, "self.scan_ns = 0;\n        // **왕복 장부도 같이 지운다.**"));
+    try std.testing.expectEqual(@as(usize, 1), count(activity, "        self.remote_fetch = .{};"));
+    try std.testing.expectEqual(@as(usize, 0), count(activity, ") self.remote_fetch = .{};"));
 
     // **실패 갈래 열하나가 각자 자기 이름을 세운다.** 하나라도 다른 이름을 재사용하면 로그가
     // 두 원인을 못 가르고, 그러면 「될 때도 있고 안 될 때도 있다」가 다시 침묵한다.

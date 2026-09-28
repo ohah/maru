@@ -440,6 +440,10 @@ const Table = struct {
     /// 펼침의 「결과」 머리에 붙는 종료 코드 — `{0}` 하나를 받는다.
     agent_activity_detail_exit: [:0]const u8,
     agent_activity_partial: [:0]const u8,
+    /// **「한 바이트도 못 읽었다」는 「다 못 읽었다」와 다른 사실이다.** 앞의 것은 그 pane 의 훅
+    /// 이벤트 파일이 없거나 안 열리는 것이고(설정·권한·아직 한 턴도 안 돎), 뒤의 것은 상한에 잘린
+    /// 정상 스캔이다. 한 문구로 뭉개면 전자를 만난 사용자가 「잘렸나 보다」로 읽고 넘어간다.
+    agent_activity_unread: [:0]const u8,
     /// 워커가 아직 훑는 중. 3.6초 동안 「없습니다」라고 거짓말하지 않기 위해 따로 든다.
     agent_activity_scanning: [:0]const u8,
     /// 개수 뒤에 붙는 단위. 「12장」처럼 숫자와 이어 붙인다.
@@ -1670,6 +1674,7 @@ const en: Table = .{
     .agent_activity_empty = "No images in this session",
     .agent_activity_none_of_kind = "Nothing of this kind in this session",
     .agent_activity_partial = "Could not read the whole session",
+    .agent_activity_unread = "No session record found to read",
     .agent_activity_scanning = "Scanning…",
     .agent_activity_count_suffix = " images",
     .agent_activity_activity_count_suffix = " actions",
@@ -2432,6 +2437,7 @@ const ko: Table = .{
     .agent_activity_empty = "이 세션에는 이미지가 없습니다",
     .agent_activity_none_of_kind = "이 세션에는 이 종류가 없습니다",
     .agent_activity_partial = "세션을 다 읽지 못했습니다",
+    .agent_activity_unread = "세션 기록을 찾지 못했습니다",
     .agent_activity_scanning = "세는 중…",
     .agent_activity_count_suffix = "장",
     .agent_activity_activity_count_suffix = "개",
@@ -3068,4 +3074,20 @@ test "applyPreference: 전역 로케일을 거쳐 현재 언어를 바꾼다" {
 
     applyPreference(.en); // 명시값은 로케일을 덮는다
     try testing.expectEqual(Lang.en, lang());
+}
+
+test "활동 문구: 「못 찾았다」와 「다 못 읽었다」는 로케일마다 달라야 한다" {
+    // **두 갈래를 코드에서 갈라 놔도, 문구가 같으면 사용자에게는 안 갈린다.** 적대적 검증에서
+    // 두 문자열을 같은 글자로 만들었더니 화면 판정자가 **초록이었다**(G2) — 그 판정자는
+    // `noticeText == t(.unread)` 와 `noticeText == t(.partial)` 를 각각 재는데, 둘이 같으면
+    // 양쪽이 자동으로 참이 되기 때문이다. 구분은 **여기서** 잠근다.
+    for ([_]Table{ en, ko }) |table| {
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            table.agent_activity_unread,
+            table.agent_activity_partial,
+        ));
+        // 빈 문구로 「구분」을 만족시키지 않는다.
+        try std.testing.expect(table.agent_activity_unread.len > 0);
+    }
 }

@@ -4043,12 +4043,14 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         }),
-        .filters = &.{ "MP1", "CSP1", "context_menu", "dropdown" },
+        // `로케일마다 달라야` 는 i18n 테이블 판정자다 — `maru` 루트라야 컴파일에 들어온다
+        // (`app_session` 은 maru 를 **모듈**로 임포트해 그쪽 test 가 안 딸려온다).
+        .filters = &.{ "MP1", "CSP1", "context_menu", "dropdown", "로케일마다 달라야" },
     });
     attachPngCodec(b, marker_preview_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다(위 주석)
     marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
-    run_marker_preview_tests.addArg("--maru-expect-tests=89"); // MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+    run_marker_preview_tests.addArg("--maru-expect-tests=90"); // MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
     b.step("test-marker-preview", "Run the terminal image-marker preview core judges only (MP1 filter)").dependOn(&run_marker_preview_tests.step);
 
     // 색 구성 통지(DECSET 2031 / DSR 996)의 코어 판정자만 — 위 `test-marker-preview` 와 같은 이유(변이 한 개에 전체 test 6 분을 안 쓴다).
@@ -4238,7 +4240,9 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
-            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도", "원격 매핑", "RF7" },
+            // `IG1-e` 도 여기 넣는다(2026-09-28): 「못 찾았다」와 「다 못 읽었다」를 가르는 판정자가
+            // 전수 스위트에서만 돌면, 그 구분을 되접는 퇴행을 개발 중에 못 본다 — 같은 이유다.
+            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도", "원격 매핑", "RF7", "IG1-e" },
         });
         remote_activity_vertical_tests.root_module.link_libc = true;
         for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
@@ -4260,7 +4264,7 @@ pub fn build(b: *std.Build) void {
         // 무관하게 컴파일된다). ⚠️ 매핑을 여기 넣은 이유: `agent_image_scan_backend` 는 `maru` 모듈
         // 의존이 있어 **단독 `zig test` 로 안 돌고**, 전체 `zig build test` 는 캐시로 건너뛴다 —
         // 그러면 새 매핑 판정자가 「돌았는지」를 개수로 확인할 데가 아예 없다.
-        run_remote_activity_vertical.addArg("--maru-expect-tests=34"); // +3: RF7 셋을 필터에 넣었다(2026-09-26)
+        run_remote_activity_vertical.addArg("--maru-expect-tests=35"); // +3: RF7 셋을 필터에 넣었다(2026-09-26)
         run_remote_activity_vertical.setCwd(b.path("."));
         b.step("test-remote-activity-vertical", "Run the remote activity view vertical judges only").dependOn(&run_remote_activity_vertical.step);
         // 🔥 **CI 에도 건다**(적대적 E2). 판정자의 **실행**은 `test-macos-app-host-abi` 가 4,781 개를

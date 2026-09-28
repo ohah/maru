@@ -2957,22 +2957,55 @@ pub const Connection = struct {
     /// 접혔는지» 뿐이다.
     var collect_fail_site: []const u8 = "-";
     var collect_fail_error: []const u8 = "-";
+    var collect_fail_frontier: ?FrontierMismatch = null;
+
+    /// frontier 대조가 어긋났을 때의 **양쪽 값**.
+    ///
+    /// 2026-09-28 실측: 런타임 16 개를 든 host 가 `site=delta_seq_mismatch` 로 GUI 연결을 통째로
+    /// 닫았다. 자리 이름은 있었지만 **숫자가 없어** 원인을 못 갈랐다 — sequence 가 건너뛰었는지
+    /// (producer 가 한 번 더 전진), generation 이 바뀌었는지(`is_snapshot` 이 아닌데 세대 교체),
+    /// 어느 런타임이었는지 모두 로그에 없었다. 자리 이름만으로는 다음 재현도 같은 줄 하나로 끝난다.
+    ///
+    /// `expected` 는 이 연결이 commit 한 frontier 에서 **기대한** 값, `actual` 은 producer 가 낸 값이다.
+    pub const FrontierMismatch = struct {
+        runtime_id: u128,
+        expected: catchup_barrier_contract.ScreenFrontier,
+        actual: catchup_barrier_contract.ScreenFrontier,
+        is_snapshot: bool,
+        send_bytes: usize,
+    };
 
     fn collectFail(site: []const u8) error{OutOfMemory} {
         collect_fail_site = site;
         collect_fail_error = "-";
+        collect_fail_frontier = null;
         return error.OutOfMemory;
     }
 
     fn collectFailErr(site: []const u8, err: anyerror) error{OutOfMemory} {
         collect_fail_site = site;
         collect_fail_error = @errorName(err);
+        collect_fail_frontier = null;
         return error.OutOfMemory;
     }
 
+    /// frontier 대조 자리 전용. 이름만 남기는 `collectFail` 과 달리 **양쪽 값**을 함께 싣는다.
+    fn collectFailFrontier(site: []const u8, mismatch: FrontierMismatch) error{OutOfMemory} {
+        collect_fail_site = site;
+        collect_fail_error = "-";
+        collect_fail_frontier = mismatch;
+        return error.OutOfMemory;
+    }
+
+    pub const CollectFailure = struct {
+        site: []const u8,
+        err: []const u8,
+        frontier: ?FrontierMismatch,
+    };
+
     /// 접힌 자리와 원래 오류. 닫기 직전에 읽는다 — 다음 실패가 덮어쓰기 전이다.
-    pub fn lastCollectFailure() struct { site: []const u8, err: []const u8 } {
-        return .{ .site = collect_fail_site, .err = collect_fail_error };
+    pub fn lastCollectFailure() CollectFailure {
+        return .{ .site = collect_fail_site, .err = collect_fail_error, .frontier = collect_fail_frontier };
     }
 
     pub fn collectOutputForLocalStreamAtEpoch(
@@ -2986,6 +3019,7 @@ pub const Connection = struct {
         // (적대적 검증 2026-09-13: `appendChunks` 가 정확히 그 경로였다).
         collect_fail_site = "-";
         collect_fail_error = "-";
+        collect_fail_frontier = null;
         const ops = self.runtime_ops orelse return null;
         const sub = self.attachments.getPtr(stream) orelse return null;
         var list: std.ArrayListUnmanaged([]u8) = .empty;
@@ -3185,7 +3219,13 @@ pub const Connection = struct {
             if (projected.bytes.len > protocol.max_viewport_snapshot)
                 return collectFail("snapshot_oversize");
             if (projected.frontier.sequence != next_sequence)
-                return collectFail("snapshot_seq_mismatch");
+                return collectFailFrontier("snapshot_seq_mismatch", .{
+                    .runtime_id = sub.runtime_id,
+                    .expected = .{ .generation = sub.screen_generation, .sequence = next_sequence },
+                    .actual = projected.frontier,
+                    .is_snapshot = true,
+                    .send_bytes = projected.bytes.len,
+                });
             output.next_base = self.allocator.dupe(u8, projected.bytes) catch return collectFail("snapshot_base_dupe");
             output.replace_base = true;
             output.clear_resync = sub.resync_pending;
@@ -3231,13 +3271,25 @@ pub const Connection = struct {
                     return collectFailErr("delta_chunks", err);
                 if (update.frontier.sequence != next_sequence or
                     (!update.is_snapshot and update.frontier.generation != sub.screen_generation))
-                    return collectFail("delta_seq_mismatch");
+                    return collectFailFrontier("delta_seq_mismatch", .{
+                        .runtime_id = sub.runtime_id,
+                        .expected = .{ .generation = sub.screen_generation, .sequence = next_sequence },
+                        .actual = update.frontier,
+                        .is_snapshot = update.is_snapshot,
+                        .send_bytes = update.send.len,
+                    });
                 output.next_screen_sequence = update.frontier.sequence;
                 output.next_screen_generation = update.frontier.generation;
             } else if (update.frontier.sequence != sub.screen_sequence or
                 update.frontier.generation != sub.screen_generation)
             {
-                return collectFail("delta_frontier_mismatch");
+                return collectFailFrontier("delta_frontier_mismatch", .{
+                    .runtime_id = sub.runtime_id,
+                    .expected = .{ .generation = sub.screen_generation, .sequence = sub.screen_sequence },
+                    .actual = update.frontier,
+                    .is_snapshot = update.is_snapshot,
+                    .send_bytes = update.send.len,
+                });
             }
         };
 

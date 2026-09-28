@@ -74,7 +74,8 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
 
     // ② **접히는 자리마다 헬퍼를 거친다.** 자리 수는 구현이 바뀌면 달라지므로 값이 아니라
     //    「전부 거친다」를 잰다.
-    const via = countAll(body, "collectFail(") + countAll(body, "collectFailErr(");
+    const via = countAll(body, "collectFail(") + countAll(body, "collectFailErr(") +
+        countAll(body, "collectFailFrontier(");
     if (via < 20) {
         std.debug.print("헬퍼를 거치는 자리가 {d} 곳뿐이다 — 스물넷이 접히던 자리다\n", .{via});
         return error.TooFewLabelled;
@@ -155,6 +156,148 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
     const log = turn[log_at..log_end];
     try std.testing.expect(std.mem.indexOf(u8, log, "site={s}") != null);
     try std.testing.expect(std.mem.indexOf(u8, log, "err={s}") != null);
+}
+
+/// `header` 로 시작해 `end` 앞에서 끝나는 구간. 못 찾으면 **실패한다** — 조용히 빈 구간으로
+/// 지나가면 그 뒤의 모든 「없다」 단언이 공짜로 참이 된다.
+fn section(src: []const u8, header: []const u8, end: []const u8) ![]const u8 {
+    const at = std.mem.indexOf(u8, src, header) orelse return error.SectionMissing;
+    const stop = std.mem.indexOfPos(u8, src, at + header.len, end) orelse return error.SectionUnterminated;
+    return src[at..stop];
+}
+
+// frontier 대조가 어긋난 자리는 **양쪽 값**까지 남긴다.
+//
+// ## 무엇이 있었나
+//
+// 2026-09-28 실측 — 런타임 16 개를 든 host 가 GUI 연결을 통째로 닫았다.
+//
+// ```
+// session host collect failed: site=delta_seq_mismatch err=-
+// session host closed client connection: … why=resource_exhausted site=tick_collect_oom
+// ```
+//
+// 자리 이름 덕에 「메모리가 아니다」까지는 바로 갈렸다. 그런데 **거기서 멈췄다** — sequence 가
+// 건너뛰었는지, generation 이 바뀌었는지, 어느 런타임이었는지 로그에 숫자가 하나도 없었다.
+// 같은 줄이 한 번 더 나와도 똑같이 멈춘다. 그래서 이 축은 「자리마다 양쪽 값이 실린다」를 잰다.
+//
+// 순수 판정자(`connection_turn.zig` 의 포맷 테스트)는 **방향**을 재지만, 그 테스트는 PR 에서 안 도는
+// session-host 잡에 있다. 그리고 그것은 **배선**(어느 자리가 무엇을 넘기는가)을 못 본다 — 여기서 잰다.
+test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴다" {
+    const a = std.testing.allocator;
+    const server_raw = try read(a, server_path);
+    defer a.free(server_raw);
+    const server = try stripComments(a, server_raw);
+    defer a.free(server);
+    const turn_raw = try read(a, turn_path);
+    defer a.free(turn_raw);
+    const turn = try stripComments(a, turn_raw);
+    defer a.free(turn);
+
+    const body = try section(server, "pub fn collectOutputForLocalStreamAtEpoch(", "\n    pub fn ");
+
+    // ① **세 대조 자리가 값을 싣는 헬퍼를 거친다** — 조건과 호출을 한 덩어리로, 넘기는 값까지.
+    //    `.actual` 자리에 기대값을 넣으면 줄은 나오지만 늘 「같다」고 말한다. 그래서 무엇을 넘기는지를
+    //    잰다(예: `.actual = update.frontier`). 이름만 옮기고 값을 안 넘기는 «정리» 도 여기서 걸린다.
+    const Site = struct { name: []const u8, guard: []const u8, expected: []const u8, actual: []const u8 };
+    const sites = [_]Site{
+        .{
+            .name = "snapshot_seq_mismatch",
+            .guard = "if (projected.frontier.sequence != next_sequence)",
+            .expected = ".expected = .{ .generation = sub.screen_generation, .sequence = next_sequence },",
+            .actual = ".actual = projected.frontier,",
+        },
+        .{
+            .name = "delta_seq_mismatch",
+            .guard = "if (update.frontier.sequence != next_sequence or\n" ++
+                "                    (!update.is_snapshot and update.frontier.generation != sub.screen_generation))",
+            .expected = ".expected = .{ .generation = sub.screen_generation, .sequence = next_sequence },",
+            .actual = ".actual = update.frontier,",
+        },
+        .{
+            .name = "delta_frontier_mismatch",
+            .guard = "} else if (update.frontier.sequence != sub.screen_sequence or\n" ++
+                "                update.frontier.generation != sub.screen_generation)\n            {",
+            .expected = ".expected = .{ .generation = sub.screen_generation, .sequence = sub.screen_sequence },",
+            .actual = ".actual = update.frontier,",
+        },
+    };
+    for (sites) |site| {
+        const call = try std.fmt.allocPrint(a, "return collectFailFrontier(\"{s}\", .{{", .{site.name});
+        defer a.free(call);
+        const bare = try std.fmt.allocPrint(a, "collectFail(\"{s}\")", .{site.name});
+        defer a.free(bare);
+        if (std.mem.indexOf(u8, body, bare) != null) {
+            std.debug.print("«{s}» 가 다시 이름만 남긴다 — 숫자가 빠졌다\n", .{site.name});
+            return error.FrontierSiteLostValues;
+        }
+        if (countAll(body, call) != 1) {
+            std.debug.print("«{s}» 가 값을 싣는 호출로 정확히 한 번 나오지 않는다\n", .{site.name});
+            return error.FrontierSiteMissing;
+        }
+        const call_at = std.mem.indexOf(u8, body, call).?;
+        // 조건 바로 뒤에 온다 — 조건을 뒤집거나 다른 갈래로 옮기면 그 줄은 엉뚱한 때 나온다.
+        const guard_at = std.mem.lastIndexOf(u8, body[0..call_at], site.guard) orelse {
+            std.debug.print("«{s}» 앞의 조건이 달라졌다\n", .{site.name});
+            return error.FrontierGuardMoved;
+        };
+        const between = std.mem.trim(u8, body[guard_at + site.guard.len .. call_at], " \t\n");
+        if (between.len != 0) {
+            std.debug.print("«{s}» 조건과 호출 사이에 다른 코드가 끼었다: {s}\n", .{ site.name, between });
+            return error.FrontierGuardDetached;
+        }
+        const args = try section(body[call_at..], call, "});");
+        for ([_][]const u8{ site.expected, site.actual, ".runtime_id = sub.runtime_id," }) |needle| {
+            if (std.mem.indexOf(u8, args, needle) == null) {
+                std.debug.print("«{s}» 가 «{s}» 를 넘기지 않는다\n", .{ site.name, needle });
+                return error.FrontierArgumentMissing;
+            }
+        }
+    }
+
+    // ② **남의 숫자를 물려주지 않는다.** 이름만 남기는 헬퍼 둘과 진입이 frontier 를 비운다 — 안 비우면
+    //    다음에 `delta` 로 접혀도 직전 불일치의 숫자가 붙어 나와, 로그가 **거짓 숫자**를 말한다.
+    for ([_][]const u8{ "fn collectFail(", "fn collectFailErr(" }) |header| {
+        const helper = try section(server, header, "\n    }\n");
+        if (std.mem.indexOf(u8, helper, "collect_fail_frontier = null;") == null) {
+            std.debug.print("«{s}» 가 frontier 를 비우지 않는다\n", .{header});
+            return error.StaleFrontierInherited;
+        }
+    }
+    const reset_at = std.mem.indexOf(u8, body, "collect_fail_frontier = null;") orelse
+        return error.FrontierEntryResetMissing;
+    const first_fail = std.mem.indexOf(u8, body, "collectFail") orelse return error.NoFailSites;
+    try std.testing.expect(reset_at < first_fail);
+    // 값을 싣는 헬퍼는 **정말로 싣는다.**
+    const frontier_helper = try section(server, "fn collectFailFrontier(", "\n    }\n");
+    try std.testing.expect(std.mem.indexOf(u8, frontier_helper, "collect_fail_frontier = mismatch;") != null);
+    const accessor = try section(server, "pub fn lastCollectFailure(", "\n    }\n");
+    try std.testing.expect(std.mem.indexOf(u8, accessor, ".frontier = collect_fail_frontier") != null);
+
+    // ③ **로그가 그 값을 실제로 쓴다.** 닫기 전 한 줄이 포맷 함수를 거쳐 나가야 숫자가 산다 —
+    //    예전 줄을 그대로 찍으면 위 배선이 전부 초록인데 로그에는 아무것도 안 붙는다.
+    const note = try section(turn, "fn noteCollectFailure(", "\n}\n");
+    try std.testing.expect(std.mem.indexOf(u8, note, "formatCollectFailure(&buf, last)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, note, "host_log.line(\"{s}\", .{text});") != null);
+
+    // ④ **방향은 «기대 -> 실제»** — 형제 진단(`bytes=예약->실제`)과 같다. 인자 순서가 뒤집혀도
+    //    컴파일되므로 순서를 잰다. 순수 판정자가 같은 것을 재지만 PR 에서는 안 돈다.
+    const fmt_fn = try section(turn, "fn formatCollectFailure(", "\n}\n");
+    try std.testing.expect(std.mem.indexOf(u8, fmt_fn, "site={s}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fmt_fn, "err={s}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fmt_fn, "seq={d}->{d} gen={d}->{d}") != null);
+    const exp_seq = std.mem.indexOf(u8, fmt_fn, ".expected.sequence,") orelse return error.ExpectedSeqMissing;
+    const act_seq = std.mem.indexOf(u8, fmt_fn, ".actual.sequence,") orelse return error.ActualSeqMissing;
+    const exp_gen = std.mem.indexOf(u8, fmt_fn, ".expected.generation,") orelse return error.ExpectedGenMissing;
+    const act_gen = std.mem.indexOf(u8, fmt_fn, ".actual.generation,") orelse return error.ActualGenMissing;
+    try std.testing.expect(exp_seq < act_seq and act_seq < exp_gen and exp_gen < act_gen);
+
+    // ⑤ 순수 판정자가 **있다**. 방향을 값으로 못 박는 것은 그쪽이다.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        turn_raw,
+        "test \"collect 실패 줄은 frontier 불일치의 양쪽 값을 «기대 -> 실제» 방향으로 싣는다\"",
+    ) != null);
 }
 
 // `tick` 안의 `partial_timeout` 이 **익명으로 닫지 않는다.**

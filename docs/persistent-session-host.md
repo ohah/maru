@@ -8008,7 +8008,7 @@ session host collect failed: site=delta_seq_mismatch err=-
 session host closed client connection: … why=resource_exhausted site=tick_collect_oom
 ```
 
-§12.3 의 자리 이름 덕에 **「메모리 부족이 아니다」까지는 바로 갈렸다.** 그런데 거기서 멈췄다.
+`collectOutput` 의 자리 이름(#3634 — `server.zig` 의 `collectFail` 주석, `collect_failure_site_boundary`) 덕에 **「메모리 부족이 아니다」까지는 바로 갈렸다.** 그런데 거기서 멈췄다.
 `delta_seq_mismatch` 는 두 조건의 `or` 이고(sequence 가 `+1` 이 아니거나, 스냅샷이 아닌데
 generation 이 바뀌었거나) 로그에는 **어느 쪽인지, 어느 런타임인지, 값이 얼마였는지** 가 하나도
 없었다. 같은 줄이 다시 나와도 똑같이 멈춘다.
@@ -8022,7 +8022,7 @@ generation 이 바뀌었거나) 로그에는 **어느 쪽인지, 어느 런타�
 
 방향은 «기대 -> 실제» 로, 업그레이드 예산 진단(`bytes=예약->실제`)과 같다. `gen` 의 왼쪽은 이 연결이
 마지막으로 commit 한 세대다. frontier 가 없는 자리의 줄은 예전 그대로다. 오류 집합은 넓히지 않았다
-(§12.3 과 같은 이유).
+(그 이유 — 넓히면 호출자 전수가 흔들린다 — 는 `server.zig` 의 `collectFail` 주석이 소유한다).
 
 기록과 렌더는 leaf `session_host/collect_failure.zig` 가 소유한다. 거기 두는 이유는 하나다 — 그 순수
 테스트가 **PR 에서 돌아야** 한다(session-host 잡은 PR 에서 안 돈다). 렌더는 `host_log.max_line_bytes`

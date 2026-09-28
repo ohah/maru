@@ -362,7 +362,14 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         // (적대적 검증 2026-08-27이 계약 문장을 근거로 잡았다).
         .find => self.chrome_host.find.focused().setPreedit(self.allocator, bytes) catch {},
         .palette => {
-            self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch return;
+            self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {
+                // setPreedit는 실패 전에 기존 조합을 비운다. 오래된 검색 결과를 남기면
+                // 화면의 빈 입력과 다른 명령을 Enter로 실행할 수 있으므로 함께 비운다.
+                self.palette_filtered.clearRetainingCapacity();
+                self.chrome_host.palette.selected = 0;
+                self.chrome_host.palette.setResultCount(0);
+                return;
+            };
             // 조합 중에도 후보를 좁힌다. 확정 뒤에만 필터하면 한글 입력 중 목록이 이전 검색어에 머문다.
             self.recomputePalette();
         },

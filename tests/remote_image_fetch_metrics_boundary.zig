@@ -64,6 +64,13 @@ test "원격 그림 계측: 워커가 값을 싣고 수확이 그 값 그대로 
     // 여는 중괄호까지 넣어 **그 자리**를 잠근다.
     try std.testing.expectEqual(@as(usize, 1), count(activity, "if (r.remote_failure != .none) {"));
     try std.testing.expectEqual(@as(usize, 1), count(activity, "@tagName(r.remote_failure),"));
+    // **어느 칸이 실패했는지**도 고정한다. 이유만 잠그면 `idx` 자리에 상수를 넣어도 통과해서
+    // 「무엇이 실패했나」를 못 가린다(적대적 검증 K3) — 인자 중 하나만 잠그는 실수를 오늘 두 번 했다.
+    try std.testing.expectEqual(@as(usize, 1), count(activity, "            r.hit_index,\n            @tagName(r.remote_failure),"));
+    // **원격 갈래에서만 이름을 세운다.** 로컬 완료본에 심으면 원격이 아닌데 실패로 찍혀 진단이
+    // 통째로 오염된다(K2). 그 자리는 `job.remote` 가 있을 때뿐이라, `failure.*` 대입이 전부
+    // `fetchRemoteBase64` 안에만 있는지를 잰다 — 워커 본문에는 하나도 없어야 한다.
+    try std.testing.expectEqual(@as(usize, 0), count(decode, "result.remote_failure = ."));
     try std.testing.expectEqual(@as(usize, 1), count(activity, "remote image fetch failed: idx={d} reason={s}"));
 
     // 셈은 순수 타입이 소유한다 — 인라인으로 되돌리면 실제 ssh 없이 못 재는 상태로 돌아간다.

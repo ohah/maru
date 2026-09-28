@@ -2572,6 +2572,15 @@ pub const RuntimeManager = struct {
         return .{ .bytes = bytes, .frontier = .{ .generation = generation, .sequence = sequence } };
     }
 
+    /// base 세대가 낡았는데 격자는 같은 순간. 예전에는 이 delta 가 연결 전체를 닫았다(`deltaOp` 주석).
+    /// 방향은 «base -> 지금» — 형제 진단(`bytes=예약->실제`, collect 실패 줄의 «기대 -> 실제»)과 같다.
+    fn noteStaleBaseGeneration(runtime_id: u128, frame: screen_snapshot.BaseFrame, generation: u64) void {
+        host_log.line(
+            "session host delta base generation stale: runtime={x:0>32} gen={d}->{d} grid={d}x{d} -> snapshot",
+            .{ runtime_id, frame.generation, generation, frame.cols, frame.rows },
+        );
+    }
+
     /// `base`(client가 마지막으로 받은 full snapshot) 대비 현재 화면 변화를 계산한다(§9 delta). core lock 아래에서 현재
     /// full snapshot(다음 base)과 delta를 함께 만든다. grid/alt-screen 변화면 delta 대신 fresh snapshot을 보낸다(client가
     /// 화면 교체). `send`와 `new_base`는 항상 별개 버퍼다(caller가 둘 다 free해도 안전).
@@ -2591,16 +2600,35 @@ pub const RuntimeManager = struct {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
 
+        // **base 가 다른 세대면 delta 로 잇지 않는다.** `computeDelta` 는 격자 크기·alt 화면만 비교하므로,
+        // collect 사이에 resize 가 격자를 제자리로 돌려놓으면(A→B→A) 세대만 +2 인 delta 가 나간다. 서버는
+        // 스냅샷이 아닌 delta 의 세대 변화를 `delta_seq_mismatch` 로 거절하고 **연결 전체**를 닫는다 —
+        // 2026-09-28 에 런타임 16 개가 한꺼번에 끊겼다. 세대가 바뀌었으면 스냅샷이 계약이다(resize 한 번이
+        // 이미 그 길로 간다). 격자까지 같은 경우만 한 줄 남긴다 — 예전에 연결을 닫던 바로 그 모양이라,
+        // 그 줄이 곧 원인의 증거이고 수정이 막았다는 증거다. 크기가 다르면 원래 스냅샷이라 소음이 된다.
+        const base_generation_stale = if (screen_snapshot.baseFrame(base)) |frame| stale: {
+            if (frame.generation == generation) break :stale false;
+            const size = surface.core.size;
+            if (frame.cols == size.cols and frame.rows == size.rows)
+                noteStaleBaseGeneration(runtime_id, frame, generation);
+            break :stale true;
+        } else false;
+
         // computeDelta가 delta와 새 base(현재 full snapshot)를 **한 번의 row build로** 함께 준다(재투영 없음).
-        const result = screen_snapshot.computeDeltaBounded(
-            allocator,
-            base,
-            &surface.core,
-            opts,
-            protocol.max_viewport_snapshot,
-        ) catch |e| switch (e) {
+        const delta_or_snapshot: screen_snapshot.DeltaError!screen_snapshot.DeltaResult = if (base_generation_stale)
+            error.SnapshotRequired
+        else
+            screen_snapshot.computeDeltaBounded(
+                allocator,
+                base,
+                &surface.core,
+                opts,
+                protocol.max_viewport_snapshot,
+            );
+        const result = delta_or_snapshot catch |e| switch (e) {
             error.SnapshotRequired => {
-                // grid/alt 변화 → delta 불가, fresh snapshot을 보낸다. send는 new_base와 별개 버퍼여야 하므로 복사한다.
+                // grid/alt 변화 또는 base 세대 교체 → delta 불가, fresh snapshot을 보낸다. send는 new_base와
+                // 별개 버퍼여야 하므로 복사한다.
                 const snap = try screen_snapshot.projectSnapshotBounded(
                     allocator,
                     &surface.core,
@@ -5831,4 +5859,56 @@ test "runtime manager: 계측은 «만든» 바이트를 센다 — 폐기돼도
     allocator.free(snap.bytes); // 곧바로 버린다(= 폐기된 셈)
     try std.testing.expect(mgr.screen_made_bytes > 0); // 그래도 세어져 있어야 한다
     try std.testing.expectEqual(@as(u64, 1), mgr.screen_sends);
+}
+
+// **제품 producer 가 세대 교체를 스냅샷으로 돌리는가**(2026-09-28 연결 전멸의 회귀 판정자).
+//
+// 실제 PTY(`/bin/cat`)·실제 core·실제 registry 세대로 A→B→A 를 만든다. 고치기 전에는 여기서
+// `is_snapshot=false` 에 세대만 +2 인 delta 가 나왔고, 서버가 그것을 `delta_seq_mismatch` 로 거절하며
+// 그 연결의 탭 전부를 닫았다. 대조군(resize 없음)이 여전히 delta 로 나가는지도 함께 잰다 — 모든 것을
+// 스냅샷으로 보내 「통과」하는 수정은 대역폭을 태운다. host 를 띄우지 않는다.
+test "delta base 세대: 격자가 제자리로 돌아온 두 번의 resize 뒤 deltaOp 는 스냅샷을 낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.initWithHostId(allocator, std.testing.io, &host_registry, 0x2244, null);
+    defer manager.deinit();
+    const ops = manager.runtimeOps();
+    const runtime_id = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cols = 80, .rows = 24 });
+    defer ops.terminate(ops.ctx, runtime_id);
+
+    const initial = try ops.snapshot(ops.ctx, runtime_id, 0, allocator);
+    defer allocator.free(initial.bytes);
+    const base_generation = initial.frontier.generation;
+
+    // 대조군: resize 가 없으면 delta 다(스냅샷 아님), 세대 그대로.
+    {
+        const update = try ops.delta(ops.ctx, runtime_id, initial.bytes, 1, allocator);
+        defer allocator.free(update.send);
+        defer allocator.free(update.new_base);
+        try std.testing.expect(!update.is_snapshot);
+        try std.testing.expectEqual(base_generation, update.frontier.generation);
+    }
+
+    // A→B→A — 서버가 하는 순서 그대로(core 를 먼저, registry 세대를 뒤에).
+    try ops.resize(ops.ctx, runtime_id, 100, 24);
+    _ = try host_registry.applyViewportCols(runtime_id, 100);
+    try ops.resize(ops.ctx, runtime_id, 80, 24);
+    _ = try host_registry.applyViewportCols(runtime_id, 80);
+
+    const update = try ops.delta(ops.ctx, runtime_id, initial.bytes, 1, allocator);
+    defer allocator.free(update.send);
+    defer allocator.free(update.new_base);
+    try std.testing.expect(update.is_snapshot);
+    try std.testing.expectEqual(base_generation + 2, update.frontier.generation);
+    try std.testing.expectEqual(@as(u64, 1), update.frontier.sequence);
+    // 스냅샷은 새 세대로 찍혀 다음 delta 의 base 가 된다 — 그다음은 다시 delta 로 이어져야 한다.
+    const next_base = screen_snapshot.baseFrame(update.new_base) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(base_generation + 2, next_base.generation);
+    const after = try ops.delta(ops.ctx, runtime_id, update.new_base, 2, allocator);
+    defer allocator.free(after.send);
+    defer allocator.free(after.new_base);
+    try std.testing.expect(!after.is_snapshot);
 }

@@ -4299,7 +4299,9 @@ fn adoptTurnLikeProduct(
     }
 }
 
-// 닫기 «전» 한 줄이 제품 경로에서 정확히 그 값을 말하는지(적대적 검증 4회차 탐침 채택). socketpair 만, host 없음.
+// tick 이 `tick_collect_oom` 으로 닫힐 때 기록이 그 frontier 값을 정확히 말하는지(적대적 검증 4회차 탐침 채택).
+// 테스트에서는 `noteCollectFailure` 가 아무것도 안 찍으므로 닫힌 뒤의 기록을 본다 — `beginCloseAt` 은 기록을
+// 건드리지 않아 닫기 직전 한 줄과 같은 값이다. producer 는 가짜, socketpair 만, host 없음.
 test "tick 이 tick_collect_oom 으로 닫을 때 기록은 그 frontier 값을 말한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const testing = std.testing;

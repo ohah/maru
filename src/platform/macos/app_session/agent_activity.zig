@@ -1752,6 +1752,16 @@ fn harvestOne(self: *AppSession) bool {
     var r = backend.take() orelse return false;
     defer r.deinit(self.allocator); // 아래에서 소유를 옮기면 pixels 를 비워 둔다
 
+    // **실패도 결과다.** 예전에는 열 갈래가 전부 `null` 이라 실패하면 계측조차 안 실려 로그에
+    // 줄이 **아예 안 남았다** — 「될 때도 있고 안 될 때도 있다」를 만나도 제품이 침묵했다.
+    // 성공 줄과 **같은 자리**에서 같은 결로 남긴다.
+    if (r.remote_failure != .none) {
+        std.log.info("remote image fetch failed: idx={d} reason={s}", .{
+            r.hit_index,
+            @tagName(r.remote_failure),
+        });
+    }
+
     // **원격 왕복을 누적하고 한 줄로 남긴다.** 격자 한 화면이 찰 때까지 몇 번을 돌고 몇 바이트를
     // 끌어왔는지 — 그 두 수가 없으면 최적화가 추측이 된다. 로컬(0)은 안 찍는다.
     //

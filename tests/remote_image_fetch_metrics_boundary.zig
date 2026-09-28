@@ -45,6 +45,27 @@ test "원격 그림 계측: 워커가 값을 싣고 수확이 그 값 그대로 
     // **누적은 소스가 갈릴 때 지워진다.** 안 지우면 「앱 시작 이후 누적」이라 화면 비용을 못 읽는다.
     try std.testing.expectEqual(@as(usize, 1), count(activity, "self.remote_fetch = .{};"));
 
+    // **실패 갈래 열하나가 각자 자기 이름을 세운다.** 하나라도 다른 이름을 재사용하면 로그가
+    // 두 원인을 못 가르고, 그러면 「될 때도 있고 안 될 때도 있다」가 다시 침묵한다.
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .length_out_of_range;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .offset_format_failed;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .length_format_failed;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .spawn_failed;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .exit_nonzero;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .wire_malformed;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .remote_reported_error;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .truncated;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .no_bytes_record;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .length_mismatch;"));
+    try std.testing.expectEqual(@as(usize, 1), count(decode, "failure.* = .out_of_memory;"));
+    // 그 이름이 **화면까지** 간다 — 워커가 세우기만 하고 아무도 안 읽으면 없는 것과 같다.
+    // **조건을 통째로 겨눈다.** `r.remote_failure != .none` 만 세면 뒤에 `and false` 를 덧붙여
+    // 기록을 통째로 꺼도 그 부분문자열이 남아 통과한다(적대적 검증 J2 가 그렇게 살아남았다).
+    // 여는 중괄호까지 넣어 **그 자리**를 잠근다.
+    try std.testing.expectEqual(@as(usize, 1), count(activity, "if (r.remote_failure != .none) {"));
+    try std.testing.expectEqual(@as(usize, 1), count(activity, "@tagName(r.remote_failure),"));
+    try std.testing.expectEqual(@as(usize, 1), count(activity, "remote image fetch failed: idx={d} reason={s}"));
+
     // 셈은 순수 타입이 소유한다 — 인라인으로 되돌리면 실제 ssh 없이 못 재는 상태로 돌아간다.
     try std.testing.expectEqual(@as(usize, 1), count(activity, "pub fn counts(ns: u64, bytes: u64) bool"));
     try std.testing.expectEqual(@as(usize, 1), count(activity, "pub fn add(self: *RemoteFetchTotals, ns: u64, bytes: u64) void"));

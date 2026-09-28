@@ -36,6 +36,23 @@ pub const max_inflight: usize = 4;
 /// 수십~수백 ms 라 어차피 전송이 지배한다), 지키는 것은 **남의 서버의 연결 예산**이다.
 pub const max_remote_inflight: usize = 1;
 
+/// 원격 그림 한 장을 못 가져온 **이유**. 열 갈래가 전부 `null` 이라 「안 될 때」가 왜 안 되는지
+/// 제품이 말하지 않았다. 이름이 있으면 다음 발생이 스스로 답한다.
+pub const RemoteFetchFailure = enum {
+    none,
+    length_out_of_range,
+    offset_format_failed,
+    length_format_failed,
+    spawn_failed,
+    exit_nonzero,
+    wire_malformed,
+    remote_reported_error,
+    truncated,
+    no_bytes_record,
+    length_mismatch,
+    out_of_memory,
+};
+
 /// worker 가 main actor 로 넘기는 완료본. **픽셀 소유가 통째로 이동한다** — 받은 쪽이 푼다.
 pub const Result = struct {
     /// 인덱스의 몇 번째 이미지인가. 격자 자리와 잇는 유일한 키다.
@@ -53,6 +70,8 @@ pub const Result = struct {
     /// 어디를 깎아야 하는지 못 정한다(왕복이 지배하는가, 바이트가 지배하는가).
     remote_ns: u64 = 0,
     remote_bytes: u64 = 0,
+    /// 못 가져왔으면 **왜** 인가. `.none` 이면 성공이거나 로컬이다.
+    remote_failure: RemoteFetchFailure = .none,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         allocator.free(self.pixels);
@@ -370,7 +389,7 @@ fn worker(job: *Job) void {
             // **단조 시계를 `std.c` 로 직접 읽는다** — 여기는 백그라운드 스레드라 `std.Io` 를 못 쓴다
             // (이 파일 머리말의 규율). 레포의 다른 백그라운드 자리도 같은 호출을 쓴다.
             const started = monotonicNs();
-            const got = fetchRemoteBase64(state.allocator, r, job.path, job.data_offset, job.data_len) orelse break :decode;
+            const got = fetchRemoteBase64(state.allocator, r, job.path, job.data_offset, job.data_len, &result.remote_failure) orelse break :decode;
             const ended = monotonicNs();
             result.remote_ns = if (ended > started) ended - started else 0;
             result.remote_bytes = got.len;
@@ -442,6 +461,30 @@ fn monotonicNs() u64 {
     return sec *| std.time.ns_per_s +| nsec;
 }
 
+test "원격 왕복 장부: 실패 갈래마다 이름이 다르다 — 하나로 접히면 「왜」를 못 가른다" {
+    // **이름이 겹치면 갈래를 나눈 뜻이 사라진다.** 열 곳에서 서로 다른 값을 세우는지는 글자
+    // 판정자가 보고(각 이름 1 건), 여기서는 **이름 자체가 서로 구별되는지**와 기본값이 `.none`
+    // 인지를 잰다 — 기본값이 다른 것이면 성공한 장까지 실패로 기록된다.
+    const fields = @typeInfo(RemoteFetchFailure).@"enum".fields;
+    try std.testing.expect(fields.len >= 11); // none + 열 갈래
+    try std.testing.expectEqualStrings("none", @tagName(RemoteFetchFailure.none));
+    try std.testing.expectEqual(RemoteFetchFailure.none, (Result{}).remote_failure);
+
+    // 서로 다른 이름인가 — 두 갈래가 같은 글자면 로그가 둘을 못 가른다.
+    // `@typeInfo` 필드는 comptime 이라 `inline for` 로 돈다.
+    inline for (fields, 0..) |a, i| {
+        inline for (fields, 0..) |b, j| {
+            if (i != j) try std.testing.expect(!std.mem.eql(u8, a.name, b.name));
+        }
+    }
+    // 성공 갈래만 `.none` 이다 — 나머지가 「없음」으로 접히면 실패가 조용해진다.
+    comptime var none_count: usize = 0;
+    inline for (fields) |f| {
+        if (comptime std.mem.eql(u8, f.name, "none")) none_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), none_count);
+}
+
 test "원격 왕복 장부: 단조 시계가 0 이 아니고 뒤로 안 간다 — ms 가 영영 0 이면 계측이 거짓말을 한다" {
     // **`counts` 는 바이트로도 참이다.** 그래서 시계가 늘 0 이어도 줄은 계속 찍히고 `ms` 만 0 인
     // 채로 남는다 — 로그가 멀쩡해 보여서 알아채기 어렵고, 「왕복 지배냐 전송 지배냐」라는 이 계측의
@@ -465,12 +508,25 @@ fn fetchRemoteBase64(
     path: []const u8,
     offset: u64,
     len: u32,
+    failure: *RemoteFetchFailure,
 ) ?[]u8 {
-    if (len == 0 or len > wire.max_range_bytes) return null;
+    // **열 갈래가 전부 `null` 이었다.** 그래서 「될 때도 있고 안 될 때도 있다」를 만나도 제품이
+    // 아무 말을 안 했다(2026-09-28 사용자 보고 · 앱 로그에 실패 신호 0 건). 갈래마다 이름을 준다 —
+    // 고치는 것은 그 다음이다. 원인을 모른 채 짐작으로 고치면 엉뚱한 데를 깎는다.
+    if (len == 0 or len > wire.max_range_bytes) {
+        failure.* = .length_out_of_range;
+        return null;
+    }
     var off_buf: [24]u8 = undefined;
     var len_buf: [24]u8 = undefined;
-    const off_text = std.fmt.bufPrint(&off_buf, "{d}", .{offset}) catch return null;
-    const len_text = std.fmt.bufPrint(&len_buf, "{d}", .{len}) catch return null;
+    const off_text = std.fmt.bufPrint(&off_buf, "{d}", .{offset}) catch {
+        failure.* = .offset_format_failed;
+        return null;
+    };
+    const len_text = std.fmt.bufPrint(&len_buf, "{d}", .{len}) catch {
+        failure.* = .length_format_failed;
+        return null;
+    };
 
     var out: []u8 = &.{};
     const code = ssh_upload.runRemoteCapped(
@@ -481,20 +537,48 @@ fn fetchRemoteBase64(
         &.{ path, off_text, len_text },
         wire.max_range_wire_bytes,
         &out,
-    ) catch return null;
+    ) catch {
+        failure.* = .spawn_failed;
+        return null;
+    };
     defer allocator.free(out);
-    if (code != 0) return null;
+    if (code != 0) {
+        failure.* = .exit_nonzero;
+        return null;
+    }
 
     var parser = wire.RangeParser.init(out);
     var got: ?[]const u8 = null;
-    while (parser.next() catch return null) |ev| switch (ev) {
+    while (parser.next() catch {
+        failure.* = .wire_malformed;
+        return null;
+    }) |ev| switch (ev) {
         .bytes => |b| got = b,
-        .remote_error => return null,
+        .remote_error => {
+            failure.* = .remote_reported_error;
+            return null;
+        },
     };
     // **꼬리를 못 봤으면 잘린 것이다**(§6.1) — 잘린 base64 를 디코드하면 깨진 그림이 뜬다.
-    if (!parser.complete()) return null;
-    const bytes = got orelse return null;
+    if (!parser.complete()) {
+        failure.* = .truncated;
+        return null;
+    }
+    const bytes = got orelse {
+        failure.* = .no_bytes_record;
+        return null;
+    };
     // **짧게 온 것도 안 푼다.** 그 자리가 그새 잘렸다는 뜻이고, 잘린 payload 는 온전한 그림이 아니다.
-    if (bytes.len != len) return null;
-    return allocator.dupe(u8, bytes) catch null;
+    //
+    // ⚠️ **이 갈래가 유력한 간헐 실패 후보다.** 살아 있는 세션의 전사는 계속 덧붙여지므로, 스캔 때
+    // 잡은 오프셋이 낡으면 그 자리가 밀린다 — 그때 짧게 오거나 길이가 안 맞는다. 이름을 붙였으니
+    // 다음 발생이 스스로 답한다(가설이지 증명이 아니다).
+    if (bytes.len != len) {
+        failure.* = .length_mismatch;
+        return null;
+    }
+    return allocator.dupe(u8, bytes) catch {
+        failure.* = .out_of_memory;
+        return null;
+    };
 }

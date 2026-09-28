@@ -1255,14 +1255,71 @@ fn pollBodySearch(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
+/// 도는 스캔이 **왜** 끊겼는지.
+///
+/// 2026-09-28 실측: 원격 갤러리에서 16 장 중 8 장을 받은 시점에 `refresh` 가 이 길로 들어와 나머지
+/// 8 장이 사라졌다. 그 8 장은 **실패한 것이 아니라 시도조차 안 됐다** — 그래서
+/// `remote image fetch failed` 가 한 줄도 안 남고 갤러리만 빈다. 사용자에게는 「그림이 안 떴다」
+/// 하나로 보이지만 *취소*와 *실패*는 고칠 곳이 완전히 다르다.
+pub const ScanCancelReason = enum {
+    /// 다른 파일이 됐다 — pane 이동, 또는 `/clear` 가 새 전사 파일을 만들었다.
+    source_changed,
+    /// 경로는 같은데 이쪽/저쪽이 갈렸다. 같은 문자열이 같은 소스를 뜻하지 않는 유일한 자리다.
+    remote_changed,
+    /// 볼 소스가 아예 사라졌다.
+    source_gone,
+    /// 같은 소스인데 다시 걸었다 — 신선도 폴링(`force`)이 도는 스캔을 갈아치운다.
+    refresh_forced,
+};
+
+/// 세 갈래를 **순수하게** 가른다 — 판정자가 syscall 없이 잰다. 소스가 없을 때는 호출자가
+/// `.source_gone` 을 직접 쓴다(여기 인자로는 그 상태를 표현할 수 없다).
+pub fn scanCancelReason(same: bool, remote_changed: bool) ScanCancelReason {
+    if (!same) return .source_changed;
+    if (remote_changed) return .remote_changed;
+    return .refresh_forced;
+}
+
+test "원격 왕복 장부: 스캔 취소는 세 갈래로 갈린다 — 이름 없이 사라지지 않는다" {
+    // 사용자에게는 「그림이 안 떴다」 하나로 보이지만 *취소*와 *실패*는 고칠 곳이 다르다.
+    // 그리고 취소 안에서도 셋은 원인이 다르다 — pane 이동, 이쪽/저쪽 전환, 신선도 재요청.
+    try std.testing.expectEqual(ScanCancelReason.source_changed, scanCancelReason(false, false));
+    // **경로가 갈리면 그게 먼저다.** 둘이 동시에 참일 때 뒤엣것이 나오면 원인이 뒤바뀐다.
+    try std.testing.expectEqual(ScanCancelReason.source_changed, scanCancelReason(false, true));
+    try std.testing.expectEqual(ScanCancelReason.remote_changed, scanCancelReason(true, true));
+    // 같은 소스인데 끊겼다 = 신선도 폴링이 갈아치웠다. 이 갈래가 **가장 조용한** 원인이다.
+    try std.testing.expectEqual(ScanCancelReason.refresh_forced, scanCancelReason(true, false));
+}
+
 /// 갤러리 인덱스를 활성 pane 에 맞춘다. **파일을 여기서 읽지 않는다** — 워커에 요청만 건다.
 ///
 /// 호출자는 둘이다: 뷰에 들어올 때(`setDockView`)와 소스가 바뀐 것을 훅이 알려 줬을 때.
+/// 스캔이 돌던 중일 때만 남긴다 — 평소 `refresh` 는 조용하다.
+///
+/// **반드시 `clear` 보다 먼저 부른다.** `clear` 가 `remote_fetch` 를 0 으로 되돌리므로, 뒤에서
+/// 부르면 「그때까지 몇 장을 받았는지」가 영영 0 으로 찍힌다 — 이 줄의 존재 이유가 그 숫자다.
+fn noteScanCancelled(self: *AppSession, reason: ScanCancelReason) void {
+    if (!self.agent_activity.scanning()) return;
+    const rf = self.agent_activity.remote_fetch;
+    std.log.info(
+        "agent activity scan cancelled: reason={s} hits={d} awaiting={d} remote_n={d} remote_bytes={d} remote_ms={d}",
+        .{
+            @tagName(reason),
+            self.agent_activity.all_hits.items.len,
+            self.agent_activity.awaiting,
+            rf.count,
+            rf.bytes,
+            rf.ns / std.time.ns_per_ms,
+        },
+    );
+}
+
 pub fn refresh(self: *AppSession, force: bool) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
     const path = activeSourcePath(self) orelse {
         if (self.agent_activity.built or self.agent_activity.scanning() or !self.agent_activity.chain.isEmpty()) {
+            noteScanCancelled(self, .source_gone);
             backend.cancel();
             if (decodeBackendPtr(self)) |d| d.cancel();
             self.agent_activity.clear(self.allocator);
@@ -1285,6 +1342,7 @@ pub fn refresh(self: *AppSession, force: bool) void {
 
     // 소스가 갈렸다 = 다른 세션이다(`/clear` 는 새 파일을 만든다). 옛 파일의 오프셋은 새 파일에서
     // 아무 뜻이 없으므로 통째로 버리고 다시 건다. 도는 스캔도 취소한다.
+    noteScanCancelled(self, scanCancelReason(same, remote_changed));
     backend.cancel();
     if (decodeBackendPtr(self)) |d| d.cancel(); // 옛 파일의 오프셋으로 도는 디코드를 버린다
     // **취소하면 함께 비운다.** 취소된 워커는 결과를 내놓지 않으므로 `pendingTake` 가 영영 안 불리고,

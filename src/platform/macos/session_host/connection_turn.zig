@@ -4298,3 +4298,60 @@ fn adoptTurnLikeProduct(
         .deferred_global_pressure, .deferred_resync => return error.NotTheProductPath,
     }
 }
+
+// 닫기 «전» 한 줄이 제품 경로에서 정확히 그 값을 말하는지(적대적 검증 4회차 탐침 채택). socketpair 만, host 없음.
+test "tick 이 tick_collect_oom 으로 닫을 때 기록은 그 frontier 값을 말한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    _ = try registry_value.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    var runtime_ops: server.FakeRuntimeOps = .{};
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        83,
+        &registry_value,
+        &subscriptions,
+        .{ .runtime_ops = runtime_ops.ops() },
+    );
+    defer client.destroy();
+    try sendTestFrame(fds[1], .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    client.readReady(1);
+    try sendTestFrame(fds[1], .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+    client.readReady(2);
+    const slot = try reactor.get(client.admission);
+    try slot.consumeWritten(slot.pending_bytes);
+    try testing.expect(!client.isClosing());
+
+    // 먼저 정상 tick 하나: seq 1 gen 0 을 commit 한다
+    runtime_ops.screen_change_token.revision += 1;
+    _ = client.beginProducerSweep(10);
+    client.tick(10);
+    try testing.expect(!client.isClosing());
+    try testing.expectEqualStrings("-", collect_failure.last().site);
+    try testing.expectEqual(@as(u64, 1), client.connection.attachments.get(1).?.screen_sequence);
+    try slot.consumeWritten(slot.pending_bytes);
+
+    // gen 만 다른 delta — 현재 producer 에서 가능한 모양
+    runtime_ops.frontier_generation = 4;
+    runtime_ops.screen_change_token.revision += 1;
+    _ = client.beginProducerSweep(20);
+    client.tick(20);
+    try testing.expect(client.isClosing());
+    try testing.expectEqualStrings("tick_collect_oom", client.closeSite());
+    var buf: [collect_failure.line_capacity]u8 = undefined;
+    const line = collect_failure.render(&buf, collect_failure.last());
+    try testing.expectEqualStrings(
+        "session host collect failed: site=delta_seq_mismatch err=- runtime=000000000000000000000000000000aa seq=2->2 gen=0->4 snapshot=0 send=11",
+        line,
+    );
+}

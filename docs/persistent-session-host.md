@@ -8032,23 +8032,43 @@ generation 이 바뀌었거나) 로그에는 **어느 쪽인지, 어느 런타�
 **어느 갈래가 가능한가 — 현재 producer 기준.** 제품 producer(`RuntimeManager.deltaOp`·`snapshotOp`)는
 요청받은 `sequence` 를 **그대로** 돌려준다(빈 delta 만 `sequence - 1` 이고, 그건 서버가 기대하는 값과
 같다). 그래서 지금 코드에서는 `seq` 가 어긋날 길이 없고, **어긋날 수 있는 것은 `gen` 뿐이다.** 그
-`gen` 은 `host_registry` 의 `resize_generation` 이고 `lockCore` **전에** 읽는다.
+`gen` 은 `host_registry` 의 `resize_generation` 이다.
 
-| 모양 | 먼저 볼 곳 |
+**원인(in-process 재현, 2026-09-29 적대적 검증 4회차).** 실제 registry·실제 `TerminalCore`·실제
+`computeDelta` 로 재현했다.
+
+- `computeDelta` 는 **cols·rows·alt 화면이 바뀔 때만** `SnapshotRequired` 를 낸다(`screen_snapshot.zig`).
+  base 의 generation 은 보지 않는다.
+- registry 는 크기가 바뀌는 resize **한 번마다** `resize_generation` 을 1 올린다(`registry.zig` 의 두 자리).
+- 그래서 **같은 스트림의 두 collect 사이에 resize 가 두 번 이상 일어나 격자가 원래 크기로 돌아오면**
+  (A→B→A), 크기는 같아 delta 로 나가는데 generation 은 +2 다. 서버의 `delta_seq_mismatch` 대조가 이를
+  잡고 **연결 전체**를 닫는다. 재현: `seq=2->2 gen=1->3 snapshot=0`. 내용이 안 바뀌었으면 빈 delta 라
+  같은 원인이 `delta_frontier_mismatch gen=0->2` 로 나온다. 대조군(resize 1 회)은 스냅샷으로 정상 commit 된다.
+- 폰이 선언한 크기로 viewport reconcile 이 맥 controller 의 resize 를 되돌리는 경로(S11-6)도 같은 모양
+  (`gen=1->3`)으로 재현됐다.
+
+**가설(확인 안 됨) — 왜 16 런타임에서.** tick 은 owner 턴마다 스트림 **하나**만 collect 하므로 스트림이
+많을수록 같은 스트림의 collect 간격이 벌어지고, 그 사이 창 드래그·전체화면 토글 같은 흔들림이 A→B→A 를
+만들 여지가 커진다. 재발 시 예측: `seq` 같음, **`gen` 차이 2 이상**, `snapshot=0`.
+
+| 모양 | 뜻 |
 | --- | --- |
-| `seq` 같음, `gen` 다름, `snapshot=0` | 세대가 바뀌었는데 화면은 delta 로 나온 경로. 가설: registry 는 크기를 바꾸며 세대를 올렸는데 core grid 는 아직 그대로라 `computeDelta` 가 `SnapshotRequired` 없이 delta 를 냈다(확인 안 됨) |
+| `seq` 같음, `gen` 차이 ≥ 2, `snapshot=0` | 위 원인 — collect 사이에 되돌아온 resize |
 | `snapshot=1` | 스냅샷은 세대를 새로 정하므로 `gen` 차이는 **정상**이다 — 이때는 `seq` 만 본다 |
 | `seq` 가 다름 | 현재 producer 로는 불가능하다. 나온다면 producer 계약이 바뀐 것이니 그 변경부터 본다 |
 
-위 표는 **먼저 의심할 곳**이지 확인된 원인이 아니다 — 이 절을 쓸 때 재현은 한 번이었고 그때는 숫자가
-없었다. `runtime=` 은 `maru runtime list` 의 id 와 같은 32 자리 표기라, 어느 탭이었는지 바로 짚힌다.
+`runtime=` 은 `maru runtime list` 의 id 와 같은 32 자리 표기라, 어느 탭이었는지 바로 짚힌다.
+
+**수정은 이 절 밖(별도 PR)이다.** generation 이 바뀌면 delta 대신 스냅샷을 내야 한다 — `computeDelta` 에
+generation 비교를 넣으면 재현이 스냅샷 출력으로 바뀌는 것까지 실험으로 확인했지만, 기존 delta 테스트
+일부가 base 와 다른 generation 으로 부르고 있어 자리(`deltaOp` 쪽이 후보)와 판정자를 따로 정한다.
 
 **한계.** 이것은 **진단**이지 수정이 아니다. 런타임 하나의 어긋남이 여전히 연결 전체를 닫는다 —
 탭 16 개가 한꺼번에 끊기는 피해 범위는 그대로다. 그 스트림만 무효화하고 스냅샷으로 다시 맞추는
 방향은 원인을 숫자로 본 뒤에 정한다. 판정자는 둘이다 — 값(방향·상한·기록 교체)은
 `collect_failure.zig` 의 순수 테스트, 배선(어느 자리가 무엇을 넘기는가·로그가 렌더를 그대로 내는가)은
 `collect_failure_site_boundary` 의 「frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴다」다.
-둘 다 `check-boundaries` 에서 돈다.
+둘 다 `check-boundaries` 에서 돈다. 제품 경로를 실제로 돌리는 E2E(in-process)는 `server.zig`·`connection_turn.zig` 의 「collect 실패 기록」·「tick 이 tick_collect_oom 으로 닫을 때」 테스트다 — session-host 잡이라 main 에서만 돈다.
 
 ### P0 — 문서 결정
 

@@ -60,16 +60,6 @@ fn sideFlag(state: *const State) []const u8 {
 /// `W` 는 낱말 단위. VSCode 의 `Aa`·`ab|` 버튼과 같은 뜻이다.
 fn ruleFlags(state: *const State) []const u8 {
     if (state.target != .editor) return "";
-    if (state.regex) {
-        if (state.match_case and state.whole_word and state.in_selection != null) return "Aa W .* Sel ";
-        if (state.match_case and state.whole_word) return "Aa W .* ";
-        if (state.match_case and state.in_selection != null) return "Aa .* Sel ";
-        if (state.whole_word and state.in_selection != null) return "W .* Sel ";
-        if (state.match_case) return "Aa .* ";
-        if (state.whole_word) return "W .* ";
-        if (state.in_selection != null) return ".* Sel ";
-        return ".* ";
-    }
     // 켠 순서가 아니라 **고정된 순서**로 적는다 — 토글 순서에 따라 문구가 흔들리면 눈이 그 자리를 잃는다.
     if (state.match_case and state.whole_word and state.in_selection != null) return "Aa W Sel ";
     if (state.match_case and state.whole_word) return "Aa W ";
@@ -111,7 +101,32 @@ fn numDigits(n: usize) u32 {
 /// 조건 `counter_cols + 2 < panel_cols`와 동일). view·caretRect가 tail 창 계산에 공유해 그림과 caret이 일치한다.
 fn textCols(state: *const State, panel_cols: u32) u32 {
     const cc = counterCols(state);
-    return if (cc + 2 < panel_cols) panel_cols - cc - 1 else panel_cols;
+    // The editor's regex button sits between query and counter. Reserve its cells
+    // in both rendering and caret geometry so long patterns cannot cover it.
+    return if (state.target == .editor and cc + 7 < panel_cols)
+        panel_cols - cc - 5
+    else if (cc + 2 < panel_cols) panel_cols - cc - 1 else panel_cols;
+}
+
+/// VS Code-style `.*` control, immediately left of the match count. A narrow
+/// pane hides the control rather than overlapping the query or count.
+fn regexButtonRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
+    if (!state.open or state.target != .editor) return null;
+    const lay = overlay_input.findLayout(p) orelse return null;
+    const cc = counterCols(state);
+    if (cc + 7 >= lay.panel_cols) return null;
+    return .{
+        .x = lay.x + @as(i32, @intCast((lay.panel_cols - cc - 5) * lay.cw)),
+        .y = lay.y,
+        .w = 3 * lay.cw,
+        .h = lay.ch,
+    };
+}
+
+pub fn regexButtonHit(state: *const State, p: props.ChromeProps, x: f64, y: f64) bool {
+    const rect = regexButtonRect(state, p) orelse return false;
+    return x >= @as(f64, @floatFromInt(rect.x)) and x < @as(f64, @floatFromInt(rect.x + @as(i32, @intCast(rect.w)))) and
+        y >= @as(f64, @floatFromInt(rect.y)) and y < @as(f64, @floatFromInt(rect.y + @as(i32, @intCast(rect.h))));
 }
 
 /// 순수 UI 상태. input=검색어 query·IME 조합 preedit(overlay_input 공유 모델), current=네비게이션 인덱스,
@@ -376,6 +391,12 @@ pub fn view(
     const line = overlay_input.inputLineView(&state.input, prompt_cols, textCols(state, lay.panel_cols));
     const prompt_runs = try overlay_input.promptRuns(arena, "Find: ", line); // 프롬프트+(…?)+query+preedit run 조립(palette와 공유)
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
+
+    if (regexButtonRect(state, p)) |button| {
+        const button_runs = try arena.alloc(draw.Run, 1);
+        button_runs[0] = .{ .text = ".*" };
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = button.x, .y = button.y }, .runs = button_runs, .role = if (state.regex) .accent_bar else .surface_fg } });
+    }
 
     // 우측 정렬 카운터. 스크롤백은 "cur/total"(매치 없으면 "0/0", 1-based 현재), 페이지는 찾음/없음(매치 수를
     // 알 수 없다). 패널에 안 들어가면(좁음) 생략. counter_cols는 textCols가 예약한 폭과 같아야 한다(입력 침범 방지).
@@ -776,10 +797,10 @@ test "FND23 켜 둔 규칙이 카운터 앞에 뜬다 — 예약 폭도 따라�
     try std.testing.expectEqualStrings("", ruleFlags(&s)); // 기본은 아무것도 안 그린다
     const plain_cols = counterCols(&s);
     s.regex = true;
-    try std.testing.expectEqualStrings(".* ", ruleFlags(&s));
-    try std.testing.expectEqual(plain_cols + 3, counterCols(&s));
+    try std.testing.expectEqualStrings("", ruleFlags(&s)); // 정규식은 별도 버튼이 표시한다.
+    try std.testing.expectEqual(plain_cols, counterCols(&s));
     s.regex_error = "invalid regex";
-    try std.testing.expectEqual(@as(u32, 3 + "invalid regex".len), counterCols(&s));
+    try std.testing.expectEqual(@as(u32, "invalid regex".len), counterCols(&s));
     s.regex_error = null;
     s.regex = false;
 
@@ -821,6 +842,40 @@ test "FND23 켜 둔 규칙이 카운터 앞에 뜬다 — 예약 폭도 따라�
     try std.testing.expectEqual(plain_cols, counterCols(&s));
     s.target = .page;
     try std.testing.expectEqualStrings("", ruleFlags(&s));
+}
+
+test "FND33 editor regex button has a separate hit target and reserves query space" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var out: std.ArrayList(draw.Op) = .empty;
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    s.show();
+    s.target = .editor;
+    const button = regexButtonRect(&s, p) orelse return error.MissingRegexButton;
+    try std.testing.expect(regexButtonHit(&s, p, @floatFromInt(button.x + 1), @floatFromInt(button.y + 1)));
+    try std.testing.expect(!regexButtonHit(&s, p, @floatFromInt(button.x - 1), @floatFromInt(button.y + 1)));
+    try view(&s, p, &tk, arena_state.allocator(), &out);
+    var saw_button = false;
+    for (out.items) |op| if (op == .text) {
+        if (op.text.origin.x == button.x and std.mem.eql(u8, op.text.runs[0].text, ".*")) saw_button = true;
+    };
+    try std.testing.expect(saw_button);
+    s.regex = true;
+    for (0..80) |_| try s.input.appendChar(std.testing.allocator, 'x');
+    const caret = caretRect(&s, p) orelse return error.MissingCaret;
+    try std.testing.expect(caret.x <= button.x);
+    s.target = .scrollback;
+    try std.testing.expect(regexButtonRect(&s, p) == null);
 }
 
 test "FND24 검색 중인 열이 카운터 앞에 뜬다 — 규칙 깃발보다 앞이고 예약 폭도 따라온다 (§5.1)" {

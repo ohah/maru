@@ -442,6 +442,16 @@ fn monotonicNs() u64 {
     return sec *| std.time.ns_per_s +| nsec;
 }
 
+test "원격 왕복 장부: 단조 시계가 0 이 아니고 뒤로 안 간다 — ms 가 영영 0 이면 계측이 거짓말을 한다" {
+    // **`counts` 는 바이트로도 참이다.** 그래서 시계가 늘 0 이어도 줄은 계속 찍히고 `ms` 만 0 인
+    // 채로 남는다 — 로그가 멀쩡해 보여서 알아채기 어렵고, 「왕복 지배냐 전송 지배냐」라는 이 계측의
+    // 존재 이유가 조용히 무너진다(적대적 검증 2회차 I3 이 초록으로 살아남았다).
+    const a = monotonicNs();
+    const b = monotonicNs();
+    try std.testing.expect(a > 0);
+    try std.testing.expect(b >= a);
+}
+
 /// **여기는 백그라운드 스레드다** — `std.Io` 도 로컬 파일시스템도 안 만진다(`ssh_upload` 규율 ·
 /// 계약 §2.1). 펼침(RAV5b)이 쓰는 그 문(`activity_read_script`)을 그대로 재사용한다.
 ///

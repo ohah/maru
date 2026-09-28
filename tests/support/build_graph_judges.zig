@@ -111,8 +111,11 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     // +1(2026-09-23): `test-event-enqueue-epoch`(빈 드레인 건너뛰기의 전제를 지키는 경계 판정자).
     // +1(2026-09-27): `session_host_owner_lock_retention_boundary` — 자리 갱신·이름 감사가 첫 실행
     //  경로와 **승계 경로 둘 다**에 배선됐는지 잰다. 한쪽에만 있던 것이 그 사고였다.
-    try std.testing.expectEqual(@as(usize, 206), old_count);
-    try std.testing.expectEqual(@as(usize, 207), new_count);
+    // +1(2026-09-28): `remote_image_fetch_metrics_boundary` — 원격 그림 왕복 계측이 **배선됐는지**
+    //  잰다. 순수 판정자는 셈을 재지만 「워커가 값을 싣고 수확이 그 값 그대로 누적하는가」는
+    //  실제 ssh 왕복이 있어야 도는 축이라 글자로 고정한다.
+    try std.testing.expectEqual(@as(usize, 207), old_count);
+    try std.testing.expectEqual(@as(usize, 208), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0

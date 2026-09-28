@@ -29,7 +29,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
         loaded += 1;
     }
 
-    try std.testing.expectEqual(@as(usize, 9), testCount(sources[0]));
+    try std.testing.expectEqual(@as(usize, 10), testCount(sources[0]));
     try std.testing.expectEqual(@as(usize, 6), testCount(sources[1]));
     try std.testing.expectEqual(@as(usize, 3), testCount(sources[2]));
     try std.testing.expectEqual(@as(usize, 5), testCount(sources[3]));
@@ -37,6 +37,9 @@ test "U5 second failure matrix keeps the exact component inventory" {
     const required = [_]struct { source: usize, title: []const u8 }{
         .{ .source = 0, .title = "handoff store commits identical primary backup and unlinks secret paths before exec" },
         .{ .source = 0, .title = "reserved handoff commits into pre-quiesce files and cleans the private attempt" },
+        // 2026-09-28: 예약에 여유가 생기면서 «예약 == 실제» 가 정상 경로에서 벗어났다
+        // (`upgrade_budget_admission.reservedBytesFor`). 그 경계 한 칸을 따로 붙잡는다.
+        .{ .source = 0, .title = "reserved handoff commits when the handoff exactly fills the reservation" },
         .{ .source = 0, .title = "partial reservation failure removes the first copy and private attempt" },
         .{ .source = 0, .title = "handoff store rejects malformed or divergent state and removes attempt residue" },
         .{ .source = 0, .title = "handoff store directory fd stays on the approved generation after path replacement" },

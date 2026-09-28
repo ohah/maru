@@ -48,6 +48,11 @@ pub const Result = struct {
     /// 풀 여지가 있나」를 이 값으로 판정한다(원본 크기를 따로 들고 다니지 않아도 된다).
     subsample: u8 = 1,
     generation: u64 = 0,
+    /// **원격 왕복 계측**(0 이면 로컬이라 잰 것이 없다). 지금은 **장당 ssh 한 번**이고 그 왕복이
+    /// **원본 base64 전체**를 실어 온다 — 축소는 받은 뒤 로컬에서 한다. 그 대가를 숫자로 보기 전에는
+    /// 어디를 깎아야 하는지 못 정한다(왕복이 지배하는가, 바이트가 지배하는가).
+    remote_ns: u64 = 0,
+    remote_bytes: u64 = 0,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         allocator.free(self.pixels);
@@ -359,9 +364,16 @@ fn worker(job: *Job) void {
 
         // **원격이면 구간을 당겨온다**(RAV6 — 계약 §2.4). 저쪽 오프셋을 이쪽 `openFile` 에 넘기면
         // 같은 모양의 로컬 경로가 열려 **남의 그림**이 뜬다(§13.6 N1 이 잡은 그 사고).
-        const b64 = if (job.remote) |r|
-            (fetchRemoteBase64(state.allocator, r, job.path, job.data_offset, job.data_len) orelse break :decode)
-        else blk: {
+        const b64 = if (job.remote) |r| blk_remote: {
+            // **왕복을 잰다.** 장당 ssh 한 번이고 원본 base64 전체가 선 위로 온다 — 그 둘 중 무엇이
+            // 지배하는지는 숫자로만 갈린다(왕복 수십~수백 ms vs 디코드 4 ms 라는 주석은 근사였다).
+            const started = std.time.nanoTimestamp();
+            const got = fetchRemoteBase64(state.allocator, r, job.path, job.data_offset, job.data_len) orelse break :decode;
+            const ended = std.time.nanoTimestamp();
+            result.remote_ns = if (ended > started) @intCast(ended - started) else 0;
+            result.remote_bytes = got.len;
+            break :blk_remote got;
+        } else blk: {
             const file = std.Io.Dir.cwd().openFile(io, job.path, .{
                 .mode = .read_only,
                 .follow_symlinks = false,

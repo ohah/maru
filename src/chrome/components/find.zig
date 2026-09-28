@@ -25,6 +25,9 @@ const prompt_cols: u32 = 6;
 /// 구해(caretRect도 씀) 입력 텍스트 영역이 카운터를 침범하지 않게 예약한다(긴 검색어의 caret이 카운터에 안 가려짐).
 fn counterCols(state: *const State) u32 {
     if (state.target == .page) return pageIndicatorCols(state);
+    if (state.target == .editor) if (state.regex_error) |err| {
+        return @intCast(sideFlag(state).len + ruleFlags(state).len + err.len);
+    };
     const total = state.match_count;
     const cur: usize = if (total == 0) 0 else state.current + 1;
     // ASCII 라 `len` 이 곧 칸 수다. 이 값이 view 가 그리는 문자열과 어긋나면 입력이 카운터를 침범한다.
@@ -57,6 +60,16 @@ fn sideFlag(state: *const State) []const u8 {
 /// `W` 는 낱말 단위. VSCode 의 `Aa`·`ab|` 버튼과 같은 뜻이다.
 fn ruleFlags(state: *const State) []const u8 {
     if (state.target != .editor) return "";
+    if (state.regex) {
+        if (state.match_case and state.whole_word and state.in_selection != null) return "Aa W .* Sel ";
+        if (state.match_case and state.whole_word) return "Aa W .* ";
+        if (state.match_case and state.in_selection != null) return "Aa .* Sel ";
+        if (state.whole_word and state.in_selection != null) return "W .* Sel ";
+        if (state.match_case) return "Aa .* ";
+        if (state.whole_word) return "W .* ";
+        if (state.in_selection != null) return ".* Sel ";
+        return ".* ";
+    }
     // 켠 순서가 아니라 **고정된 순서**로 적는다 — 토글 순서에 따라 문구가 흔들리면 눈이 그 자리를 잃는다.
     if (state.match_case and state.whole_word and state.in_selection != null) return "Aa W Sel ";
     if (state.match_case and state.whole_word) return "Aa W ";
@@ -142,6 +155,10 @@ pub const State = struct {
     match_case: bool = false,
     /// 낱말 단위로만 세는가(§5.1). 판정은 `session/editor/selection.zig` 의 `wordRangeAt` 이 소유한다.
     whole_word: bool = false,
+    /// PCRE2 syntax is opt-in; the default keeps literal search semantics.
+    regex: bool = false,
+    /// A malformed or over-budget regex is shown explicitly, never as a misleading 0/0.
+    regex_error: ?[]const u8 = null,
     /// 「선택 영역 내에서만」의 범위 — **켤 때 뜬 사본**이다(§5.1). 문서 offset `[start, end)`.
     ///
     /// **살아 있는 선택을 읽지 않는 이유**: 위 §5.1 이 *"현재 일치는 primary selection 을 옮긴다"* 로
@@ -196,6 +213,7 @@ pub const State = struct {
         self.current = 0;
         self.match_count = 0;
         self.page_found = null; // 지난 검색의 찾음/없음이 새로 연 창에 남지 않게(target은 session이 tick에 세운다)
+        self.regex_error = null;
         // **고른 열도 여기서 버린다**(§5.1 — *"찾기를 닫으면 사라진다"*). 닫는 자리가 아니라 **여는
         // 자리**에서 버리는 이유는 두 가지다: 닫는 경로가 여럿이라 한 곳만 빠뜨려도 지난 선택이
         // 남고(이 파일의 `clearAllFindMatches` 주석이 그 부류를 이름으로 든다), 오버레이가 닫힌 뒤에도
@@ -361,7 +379,9 @@ pub fn view(
 
     // 우측 정렬 카운터. 스크롤백은 "cur/total"(매치 없으면 "0/0", 1-based 현재), 페이지는 찾음/없음(매치 수를
     // 알 수 없다). 패널에 안 들어가면(좁음) 생략. counter_cols는 textCols가 예약한 폭과 같아야 한다(입력 침범 방지).
-    const counter: ?[]const u8 = if (state.target == .page) pageIndicator(state) else blk: {
+    const counter: ?[]const u8 = if (state.target == .page) pageIndicator(state) else if (state.target == .editor and state.regex_error != null)
+        try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ sideFlag(state), ruleFlags(state), state.regex_error.? })
+    else blk: {
         const total = state.match_count;
         const cur: usize = if (total == 0) 0 else state.current + 1;
         break :blk try std.fmt.allocPrint(arena, "{s}{s}{d}/{d}", .{ sideFlag(state), ruleFlags(state), cur, total });
@@ -755,6 +775,13 @@ test "FND23 켜 둔 규칙이 카운터 앞에 뜬다 — 예약 폭도 따라�
 
     try std.testing.expectEqualStrings("", ruleFlags(&s)); // 기본은 아무것도 안 그린다
     const plain_cols = counterCols(&s);
+    s.regex = true;
+    try std.testing.expectEqualStrings(".* ", ruleFlags(&s));
+    try std.testing.expectEqual(plain_cols + 3, counterCols(&s));
+    s.regex_error = "invalid regex";
+    try std.testing.expectEqual(@as(u32, 3 + "invalid regex".len), counterCols(&s));
+    s.regex_error = null;
+    s.regex = false;
 
     s.match_case = true;
     try std.testing.expectEqualStrings("Aa ", ruleFlags(&s));

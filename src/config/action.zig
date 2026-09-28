@@ -125,6 +125,8 @@ pub const Action = union(enum) {
     /// 찾기의 대소문자 토글(§5.1 — VSCode `⌥⌘C`). **편집기 문서에서만** 뜻이 있다:
     /// 스크롤백·웹은 이 값을 안 읽는다(웹은 WebKit 에 낱말 경계가 없어 짝이 안 맞는다).
     toggle_find_match_case,
+    /// ⌥⌘R: editor Find regular expression mode (PCRE2).
+    toggle_find_regex,
     /// 찾기의 낱말 단위 토글(§5.1 — VSCode `⌥⌘W`). 낱말 판정은
     /// `session/editor/selection.zig` 의 `wordRangeAt` 이 소유한다(더블클릭이 잡는 그 범위).
     toggle_find_whole_word,
@@ -316,6 +318,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_find")) return .toggle_find;
     if (std.mem.eql(u8, value, "toggle_find_replace")) return .toggle_find_replace;
     if (std.mem.eql(u8, value, "toggle_find_match_case")) return .toggle_find_match_case;
+    if (std.mem.eql(u8, value, "toggle_find_regex")) return .toggle_find_regex;
     if (std.mem.eql(u8, value, "toggle_find_whole_word")) return .toggle_find_whole_word;
     if (std.mem.eql(u8, value, "toggle_find_in_selection")) return .toggle_find_in_selection;
     if (std.mem.eql(u8, value, "toggle_find_diff_side")) return .toggle_find_diff_side;

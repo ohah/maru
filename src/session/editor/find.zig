@@ -24,6 +24,7 @@ const std = @import("std");
 const terminal = @import("../../terminal.zig");
 /// 낱말 경계의 단일 출처(§3.2) — 더블클릭이 잡는 범위와 같은 것을 쓴다.
 const editor_selection = @import("selection.zig");
+pub const regex = @import("regex.zig");
 
 /// 한 매치 — **줄 안의 byte 범위**다. 렌더가 요구하는 축이 그것이고(`frame.Mark`), §3.1의 문서
 /// offset은 `line_index`가 줄 시작을 알므로 언제든 더해 얻는다.
@@ -128,6 +129,8 @@ pub const Options = struct {
     /// 켜면 매치가 **낱말 하나와 정확히 같을 때만** 센다. 판정은 `selection.wordRangeAt` 이
     /// 소유한다 — 더블클릭이 잡는 그 범위와 **같은 것**이어야 앱 안에 낱말 규칙이 둘 안 생긴다.
     whole_word: bool = false,
+    /// Explicit opt-in. Plain search keeps its existing literal and case-folding contract.
+    regex: bool = false,
 };
 
 pub fn findMatches(
@@ -139,6 +142,35 @@ pub fn findMatches(
 ) !void {
     out.clearRetainingCapacity();
     if (needle_utf8.len == 0) return;
+    if (opts.regex) {
+        var pattern = try regex.Pattern.init(needle_utf8, opts.match_case);
+        defer pattern.deinit();
+        for (lines, 0..) |line, li| {
+            if (!std.unicode.utf8ValidateSlice(line)) return error.InvalidUtf8;
+            var from: usize = 0;
+            while (from <= line.len) {
+                var span = (try pattern.matchValidated(line, from, false)) orelse break;
+                if (span.start == span.end) {
+                    span = (try pattern.matchNonEmptyAtStart(line, span.start)) orelse span;
+                }
+                if (!opts.whole_word or isWholeWord(line, span.start, span.end)) {
+                    try out.append(allocator, .{
+                        .line = @intCast(li),
+                        .start = @intCast(span.start),
+                        .len = @intCast(span.end - span.start),
+                    });
+                }
+                if (span.end > span.start) {
+                    from = span.end;
+                } else if (span.end == line.len) {
+                    break;
+                } else {
+                    from = span.end + stepBytes(line, span.end);
+                }
+            }
+        }
+        return;
+    }
     // **깨진 검색어는 매치 0이다.** 여기서 한 번 보면 아래 훑기가 needle 쪽 디코드 실패를
     // "이 자리 불일치"로만 다뤄도 된다 — 줄마다 같은 판정을 되풀이하지 않는다.
     _ = std.unicode.Utf8View.init(needle_utf8) catch return;
@@ -165,6 +197,47 @@ pub fn findMatches(
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "FND30 regex is opt-in; lookaround, backreference and whole-word use line byte spans" {
+    const lines = [_][]const u8{ "a.b ab aab", "한글 한글" };
+    var plain = try collectOpts(&lines, "a.b", .{});
+    defer plain.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), plain.items.len);
+    var regex_matches = try collectOpts(&lines, "(?<=a)\\w+(?=b)|(?<pair>한글)\\s+\\k<pair>", .{ .regex = true });
+    defer regex_matches.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), regex_matches.items.len);
+    try testing.expectEqual(@as(u32, 8), regex_matches.items[0].start);
+    try testing.expectEqual(@as(u32, 1), regex_matches.items[0].len);
+    try testing.expectEqual(@as(u32, 1), regex_matches.items[1].line);
+    var whole = try collectOpts(&[_][]const u8{"foo foobar foo"}, "foo", .{ .regex = true, .whole_word = true });
+    defer whole.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), whole.items.len);
+}
+
+test "FND31 regex zero-width advances at UTF-8 boundaries and invalid patterns report errors" {
+    const lines = [_][]const u8{"가나"};
+    var matches = try collectOpts(&lines, "(?=나)|$", .{ .regex = true });
+    defer matches.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), matches.items.len);
+    try testing.expectEqual(@as(u32, 3), matches.items[0].start);
+    try testing.expectEqual(@as(u32, 6), matches.items[1].start);
+    var alternative = try collectOpts(&[_][]const u8{"foo"}, "^|foo", .{ .regex = true });
+    defer alternative.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), alternative.items.len);
+    try testing.expectEqual(@as(u32, 3), alternative.items[0].len);
+    try testing.expectError(error.InvalidPattern, findMatches(testing.allocator, &lines, "[", .{ .regex = true }, &matches));
+    try testing.expectEqual(@as(usize, 0), matches.items.len);
+}
+
+test "FND32 regex replacement expands captures and literal dollar" {
+    var pattern = try regex.Pattern.init("(?<name>foo)-(\\d+)", true);
+    defer pattern.deinit();
+    const line = "x foo-42 y";
+    const span = (try pattern.match(line, 0, false)).?;
+    const output = try pattern.expand(testing.allocator, line, span, "${name}:$2:$$");
+    defer testing.allocator.free(output);
+    try testing.expectEqualStrings("foo:42:$", output);
+}
 
 fn collect(lines: []const []const u8, needle: []const u8) !std.ArrayList(Match) {
     return collectOpts(lines, needle, .{});

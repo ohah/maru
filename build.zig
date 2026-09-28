@@ -321,6 +321,8 @@ pub fn build(b: *std.Build) void {
     // `LICENSE` 한 파일에 MIT·Apache-2.0 전문이 둘 다 들어 있어 그것만 동봉하면 의무가 끝난다.
     const wuffs_license: ?std.Build.LazyPath =
         if (b.lazyDependency("wuffs", .{})) |dep| dep.path("LICENSE") else null;
+    const pcre2_license: ?std.Build.LazyPath =
+        if (b.lazyDependency("pcre2", .{})) |dep| dep.path("LICENCE.md") else null;
     var ts_core_license: ?std.Build.LazyPath = null;
     const GrammarLicense = struct { dep: []const u8, file: []const u8, path: std.Build.LazyPath };
     var grammar_licenses: std.ArrayList(GrammarLicense) = .empty;
@@ -458,6 +460,12 @@ pub fn build(b: *std.Build) void {
     // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
     // (maru ssh 자기완결성 — 로컬 설치 없이 원격 전파). 파일을 옮기지 않아 참조 중복이 없다.
     attachPngCodec(b, maru_mod);
+    const pcre2_dep = b.lazyDependency("pcre2", .{ .target = target, .optimize = optimize, .linkage = .static, .support_jit = false });
+    const pcre2_lib: ?*std.Build.Step.Compile = if (pcre2_dep) |dep| dep.artifact("pcre2-8") else null;
+    if (pcre2_dep) |dep| {
+        maru_mod.addIncludePath(dep.path("src"));
+        maru_mod.linkLibrary(pcre2_lib.?);
+    }
     maru_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
 
     // docs/configuration.md도 src/ 밖이라 @embedFile이 직접 못 읽는다. config 스키마 doc-drift 가드(CS-3,
@@ -1363,6 +1371,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         });
         attachPngCodec(b, cross_mod);
+        if (b.lazyDependency("pcre2", .{})) |dep| cross_mod.addIncludePath(dep.path("src"));
         cross_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
         cross_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
         const cross_tests = addProjectTest(b, .{ .root_module = cross_mod });
@@ -1387,6 +1396,7 @@ pub fn build(b: *std.Build) void {
         // `maru.zig` 는 아니지만 **같은 그래프를 자기 루트로 다시 세운다** — 그래서 PNG 코덱도
         // 여기 있어야 `@import("png_codec")` 이 풀린다(실측: 안 주면 세 타깃이 다 빨개진다).
         attachPngCodec(b, surface_mod);
+        if (b.lazyDependency("pcre2", .{})) |dep| surface_mod.addIncludePath(dep.path("src"));
         surface_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
         surface_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
         const surface_tests = addProjectTest(b, .{ .root_module = surface_mod });
@@ -2083,6 +2093,8 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+        // swiftc is the final linker; a Zig static archive does not absorb its dependent archive.
+        macos_app_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
         macos_app_compile.addArgs(&.{
             "-framework",
             "AppKit",
@@ -2178,6 +2190,7 @@ pub fn build(b: *std.Build) void {
         macos_mermaid_helper_compile.addFileArg(mermaid_digest_swift);
         macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MaruMermaidRenderer.swift"));
         macos_mermaid_helper_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+        macos_mermaid_helper_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
         macos_mermaid_helper_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
@@ -2249,6 +2262,7 @@ pub fn build(b: *std.Build) void {
         macos_mermaid_smoke_compile.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
         macos_mermaid_smoke_compile.addFileArg(b.path("tests/macos_mermaid_helper_smoke.swift"));
         macos_mermaid_smoke_compile.addFileArg(macos_mermaid_smoke_abi_lib.getEmittedBin());
+        macos_mermaid_smoke_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
         macos_mermaid_smoke_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
@@ -2320,6 +2334,7 @@ pub fn build(b: *std.Build) void {
         macos_editor_smoke_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_editor_smoke_compile.addFileArg(b.path("tests/macos_editor_smoke.swift"));
         macos_editor_smoke_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+        macos_editor_smoke_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
         macos_editor_smoke_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
@@ -2416,9 +2431,14 @@ pub fn build(b: *std.Build) void {
         notification_release_helper_binary = notification_release_helper_bin;
         const notification_helper_arg = grammar_licenses.items.len + 3;
         const wuffs_license_arg = grammar_licenses.items.len + 4;
+        const pcre2_license_arg = grammar_licenses.items.len + 5;
         const wuffs_license_cp = b.fmt(
             "cp \"${{{d}}}\" zig-out/Maru.app/Contents/Resources/Licenses/wuffs-LICENSE; ",
             .{wuffs_license_arg},
+        );
+        const pcre2_license_cp = b.fmt(
+            "cp \"${{{d}}}\" zig-out/Maru.app/Contents/Resources/Licenses/pcre2-LICENCE.md; ",
+            .{pcre2_license_arg},
         );
         const notification_helper_cp = b.fmt(
             "cp \"${{{d}}}\" zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; ",
@@ -2427,7 +2447,7 @@ pub fn build(b: *std.Build) void {
 
         const macos_app_bundle = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
-            b.fmt("{s}{s}{s}{s}{s}{s}{s}", .{
+            b.fmt("{s}{s}{s}{s}{s}{s}{s}{s}", .{
                 // ⑴ 번들 앞부분(정적)
                 // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
                 // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
@@ -2467,9 +2487,10 @@ pub fn build(b: *std.Build) void {
                 //    늘릴 때 여기만 빠지고, 그 누락은 아무 테스트도 안 깨뜨린다.
                 notification_helper_cp,
                 wuffs_license_cp,
+                pcre2_license_cp,
                 grammar_license_cp,
                 // ⑶ 확인 목록도 같은 표에서 — 복사와 검사가 갈리면 검사가 헛돈다.
-                "for lic in tree-sitter-LICENSE wuffs-LICENSE ",
+                "for lic in tree-sitter-LICENSE wuffs-LICENSE pcre2-LICENCE.md ",
                 grammar_license_names,
                 // ⑷ 나머지(정적)
                 "; do " ++
@@ -2528,6 +2549,7 @@ pub fn build(b: *std.Build) void {
         // **`$<grammar+4>`** — 위 `wuffs_license_arg` 와 같은 자리여야 한다. 없으면 조용히 빼지
         // 않고 죽는다(재배포 의무는 빠뜨려도 아무 테스트가 안 깨지는 부류다 — 폰트·tree-sitter 와 같다).
         macos_app_bundle.addFileArg(wuffs_license orelse @panic("wuffs LICENSE missing"));
+        macos_app_bundle.addFileArg(pcre2_license orelse @panic("pcre2 LICENCE.md missing"));
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
         macos_app_bundle.step.dependOn(remote_watch_step); // 번들이 싣는 것을 먼저 만든다(RW2b)

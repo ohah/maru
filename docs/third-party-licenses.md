@@ -12,6 +12,7 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 | --- | --- | --- | --- |
 | tree-sitter (core) v0.26.13 | 편집기 syntax 1층 — 증분 파싱 런타임([native-editor-visual-mapping.md](native-editor-visual-mapping.md) §5.3) | MIT (© 2018 Max Brunsfeld) | <https://github.com/tree-sitter/tree-sitter> — 받는 것은 **crates.io 소스 배포본**이다(아래) |
 | wuffs v0.4.0-alpha.10 | kitty graphics `f=100` PNG 디코드와 `window.background-image`([terminal-input-and-protocols.md](plans/terminal-input-and-protocols.md) §kitty graphics PNG) | MIT **또는** Apache-2.0 (© 2023 The Wuffs Authors) | <https://github.com/google/wuffs> — `release/c/wuffs-v0.4.c` 한 파일만 컴파일한다 |
+| PCRE2 v10.48 (8-bit) | 편집기 정규식 찾기·바꾸기 | BSD 3-Clause (© University of Cambridge 및 기여자) | <https://github.com/PCRE2Project/pcre2> — 정적 링크, JIT 비활성. 앱 번들 `Resources/Licenses/pcre2-LICENCE.md`에 원문을 동봉한다 |
 | tree-sitter grammar (언어별) | 각 언어의 생성 파서(`parser.c`) | **개별 확인** — permissive(MIT·Apache-2.0·BSD·ISC)만 채택하고 copyleft는 받지 않는다 | 언어별 저장소 |
 | └ tree-sitter-zig v1.1.2 | `.zig` 파일의 생성 파서와 `queries/highlights.scm` | MIT (© 2024 Amaan Qureshi) | <https://github.com/tree-sitter-grammars/tree-sitter-zig> |
 | └ tree-sitter-json v0.24.8 | `.json` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-json> |
@@ -38,7 +39,7 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 - **목록을 손으로 적지 않는다.** `build.zig`의 grammar 표가 복사 명령과 **확인 목록을 함께** 만든다 — 손으로 적으면 언어를 늘릴 때 한쪽만 빠지고, 그 누락은 아무 테스트도 안 깨뜨린다(재배포 의무의 성질이다). 빠지면 번들이 `error: bundled code library license missing or empty: … — 재배포 의무`로 **소리 내어 죽는다**.
 - **한 저장소가 두 grammar 를 내면 라이선스는 하나다**(TypeScript/TSX). 표가 dep 단위로 중복을 걷는다.
 - **wuffs 는 `.app` 뿐 아니라 wasm 배포물에도 들어간다.** `packages/core/wasm/maru-vt.wasm` 이 PNG 디코더를 품는다(실측 brotli 53 KB → 88 KB) — 그 배포 경로의 attribution 은 웹 패키지 쪽 라이선스 표기가 함께 진다. 동봉 파일은 `Resources/Licenses/wuffs-LICENSE` 하나이고, 그 한 파일에 MIT·Apache-2.0 **전문이 둘 다** 들어 있어 어느 쪽을 택하든 의무가 끝난다.
-- 이것들이 [project-rules.md](project-rules.md) §의존성의 "런타임 의존성 기본 0"에 대한 **예외 두 건**이며, 각각 그 문서가 요구한 사용자 논의를 거쳤다(tree-sitter 2026-08-09, wuffs 2026-09-14).
+- 이것들이 [project-rules.md](project-rules.md) §의존성의 "런타임 의존성 기본 0"에 대한 **예외 세 건**이며, 각각 그 문서가 요구한 사용자 논의를 거쳤다(tree-sitter 2026-08-09, wuffs 2026-09-14, PCRE2 2026-09-28).
 
 ## 번들 폰트
 

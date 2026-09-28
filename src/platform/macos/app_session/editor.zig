@@ -4509,9 +4509,22 @@ pub fn replaceCurrentMatch(self: *AppSession, term: *Term) bool {
 
     const idx = self.chrome_host.find.current;
     if (idx >= self.editor_find_matches.items.len) return false;
-    const r = matchRange(doc, self.editor_find_matches.items[idx]) orelse return false;
+    const match = self.editor_find_matches.items[idx];
+    const r = matchRange(doc, match) orelse return false;
 
-    const text = self.chrome_host.find.replace.query.items;
+    var expanded: ?[]u8 = null;
+    defer if (expanded) |owned| self.allocator.free(owned);
+    if (self.chrome_host.find.regex) {
+        var pattern = maru.session.editor.find.regex.Pattern.init(self.chrome_host.find.input.query.items, self.chrome_host.find.match_case) catch return false;
+        defer pattern.deinit();
+        const line = term.rt.editor_lines[match.line];
+        expanded = pattern.expand(self.allocator, line, .{ .start = match.start, .end = match.start + match.len }, self.chrome_host.find.replace.query.items) catch {
+            self.chrome_host.find.regex_error = "invalid replace";
+            self.metal_dirty = true;
+            return false;
+        };
+    }
+    const text = expanded orelse self.chrome_host.find.replace.query.items;
     var changes = [_]maru.session.editor.delta.Change{.{ .start = r.start, .end = r.end, .text = text }};
 
     if (!applyEditAsOne(self, term, &changes)) return false;
@@ -4535,11 +4548,34 @@ pub fn replaceAllMatches(self: *AppSession, term: *Term) bool {
     if (!isFindTarget(self, term)) return false;
     if (self.editor_find_matches.items.len == 0) return false;
 
-    const text = self.chrome_host.find.replace.query.items;
+    var pattern: ?maru.session.editor.find.regex.Pattern = if (self.chrome_host.find.regex)
+        maru.session.editor.find.regex.Pattern.init(self.chrome_host.find.input.query.items, self.chrome_host.find.match_case) catch return false
+    else
+        null;
+    defer if (pattern) |*p| p.deinit();
+    var expansions: std.ArrayList([]u8) = .empty;
+    defer {
+        for (expansions.items) |owned| self.allocator.free(owned);
+        expansions.deinit(self.allocator);
+    }
     var changes: std.ArrayList(maru.session.editor.delta.Change) = .empty;
     defer changes.deinit(self.allocator);
     for (self.editor_find_matches.items) |m| {
         const r = matchRange(doc, m) orelse continue;
+        var text: []const u8 = self.chrome_host.find.replace.query.items;
+        if (pattern) |*p| {
+            const line = term.rt.editor_lines[m.line];
+            const owned = p.expand(self.allocator, line, .{ .start = m.start, .end = m.start + m.len }, text) catch {
+                self.chrome_host.find.regex_error = "invalid replace";
+                self.metal_dirty = true;
+                return false;
+            };
+            expansions.append(self.allocator, owned) catch {
+                self.allocator.free(owned);
+                return false;
+            };
+            text = owned;
+        }
         changes.append(self.allocator, .{ .start = r.start, .end = r.end, .text = text }) catch return false;
     }
     if (changes.items.len == 0) return false;

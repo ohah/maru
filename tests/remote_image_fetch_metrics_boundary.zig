@@ -88,6 +88,33 @@ test "원격 그림 계측: 워커가 값을 싣고 수확이 그 값 그대로 
     // 셈은 순수 타입이 소유한다 — 인라인으로 되돌리면 실제 ssh 없이 못 재는 상태로 돌아간다.
     try std.testing.expectEqual(@as(usize, 1), count(activity, "pub fn counts(ns: u64, bytes: u64) bool"));
     try std.testing.expectEqual(@as(usize, 1), count(activity, "pub fn add(self: *RemoteFetchTotals, ns: u64, bytes: u64) void"));
+
+    // ── 스캔 취소에 이름을 붙인다(2026-09-28 실측) ────────────────────────────
+    // 16 장 중 8 장을 받은 시점에 `refresh` 가 취소 길로 들어와 나머지 8 장이 **시도조차 안 됐다**.
+    // 실패가 아니므로 `remote image fetch failed` 는 한 줄도 안 남고 갤러리만 빈다.
+    //
+    // **`clear` 보다 «먼저» 불러야 한다.** `clear` 가 `remote_fetch` 를 0 으로 되돌리므로 뒤에서
+    // 부르면 「그때까지 몇 장을 받았는지」가 영영 0 이다 — 그 숫자가 이 줄의 존재 이유다.
+    const cancel_at = std.mem.indexOf(u8, activity, "noteScanCancelled(self, scanCancelReason(same, remote_changed));") orelse
+        return error.MissingScanCancelNotice;
+    const clear_at = std.mem.indexOf(u8, activity, "if (!same or remote_changed) self.agent_activity.clear(self.allocator);") orelse
+        return error.MissingClearCall;
+    try std.testing.expect(cancel_at < clear_at);
+    // 소스가 사라진 길도 이름을 받는다 — 거기도 도는 스캔을 취소한다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        activity,
+        "            noteScanCancelled(self, .source_gone);\n            backend.cancel();",
+    ));
+    // 평소에는 조용해야 한다. 가드를 빼면 `refresh` 가 뜰 때마다 줄이 쌓여 진짜 취소가 묻힌다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        activity,
+        "    if (!self.agent_activity.scanning()) return;",
+    ));
+    // 숫자가 실제로 실려야 한다 — 이름만 찍으면 「얼마나 잃었는지」를 여전히 모른다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        activity,
+        "            rf.count,\n            rf.bytes,\n            rf.ns / std.time.ns_per_ms,",
+    ));
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {

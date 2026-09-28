@@ -439,6 +439,21 @@ U5 제품 admission은 accepted reply를 flush하고 reader를 멈추기 **전**
    이 고침 전에는 예약 == 실제라 그 잘라내기가 사실상 no-op 이었으므로, 이제 그것이 하중을 받는다는 사실을
    경계 판정자가 함께 못 박는다.
 
+   **그리고 무엇이 자랐는지를 한 줄 더 남긴다 (2026-09-28).** `axis=bytes` 는 「예약분을 넘었다」만
+   말하고 **출처는 말하지 않는다** — 실측에서 3 바이트의 출처를 못 짚었다. 후보가 넷이다: 화면·
+   스크롤백 델타, 알림 저널, 알림 metadata, `next_handle` 자리수. 그래서 `bytes` 축일 때만 섹션별
+   «예약 -> 실제» 를 남긴다:
+
+   ```
+   session host upgrade budget sections: attempt=64 without_attempt=13103880->13103883 notif=120->120 meta=40->40 next_handle=41->42
+   ```
+
+   앞의 셋이 그대로인데 `without_attempt` 만 자랐으면 남는 것은 화면 섹션이다(소거법). `attempt` 는
+   양쪽이 같은 레코드라 한 값이다 — `encodedAttemptSectionBytes` 는 고정폭 TLV 헤더 + 레코드 길이이고
+   인코더 자신이 같은 함수를 부르므로 네 번째 후보(회계 오차)는 사실상 배제된다. 추가 인코딩 비용은
+   없다: 미리보기가 이미 계산한 값을 `UpgradeHandoffPreview` 에 실어 나를 뿐이다(freeze 뒤에는 다시
+   만들 수 없다).
+
    **여유는 이 축을 없애지 않는다.** 미리보기와 freeze 사이가 길거나 출력이 폭발하면 여유마저 넘길 수 있다.
    그때는 여전히 `bytes` 로 취소된다 — 아래 «실패한 host 의 재교체 정책» 이 그 잔여 확률을 받는다.
 

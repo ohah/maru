@@ -1235,3 +1235,104 @@ fn countManifestTempsForTest(session_dir: [:0]const u8, host_id: u128) !usize {
     }
     return count;
 }
+
+test "PROBE 경로 갱신 뒤 withdraw 는 무엇을 내는가" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "probe-withdraw");
+    defer test_scratch.close(std.testing.io, dir);
+    var endpoint_buf: [128]u8 = undefined;
+    const host_id: u128 = 0xBEEF;
+    const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
+    const exact: Descriptor = .{
+        .host_id = host_id,
+        .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .protocol_major = 2,
+        .screen_codec_version = 2,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = endpoint,
+    };
+    var published = try publish(std.testing.allocator, dir, exact);
+    defer published.deinitMemory();
+
+    // ① 손 안 대고 거두면?
+    var untouched = try publish(std.testing.allocator, dir, .{
+        .host_id = 0xBEE2,
+        .build_id = exact.build_id,
+        .protocol_major = 2,
+        .screen_codec_version = 2,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, 0xBEE2),
+    });
+    defer untouched.deinitMemory();
+    std.debug.print("PROBE 손 안 댐 withdraw = {s}\n", .{@tagName(try untouched.withdraw())});
+
+    // ② 경로로 utimensat 한 뒤 거두면?
+    var mpath_buf: [832]u8 = undefined;
+    const mpath = try manifestPathIn(&mpath_buf, dir, host_id);
+    if (c.utimensat(c.AT.FDCWD, mpath.ptr, null, 0) != 0) return error.TestUnexpectedResult;
+    const outcome = try published.withdraw();
+    std.debug.print("PROBE 경로 갱신 뒤 withdraw = {s}\n", .{@tagName(outcome)});
+    var stat: StatInfo = undefined;
+    const still = statAtNoFollow(posix.AT.FDCWD, mpath, &stat) == .SUCCESS;
+    std.debug.print("PROBE 파일이 남았나 = {}\n", .{still});
+}
+
+test "경로로 시각을 찍으면 withdraw 가 그 세대를 «남의 것» 으로 보고 거부한다" {
+    // **이 위험은 여기서 태어난다.** `FileIdentity` 가 `ctime_ns` 를 담으므로, 우리 매니페스트를
+    // `utimensat` 으로 한 번만 찍어도 identity 가 어긋나고 `withdrawExact` 가 `.replaced` 로 물러난다
+    // (모르는 세대를 지우지 않는 것이 그 함수의 계약이다 — 옳다). 결과는 **영영 안 지워지는 파일**이다.
+    //
+    // 2026-09-27: 승계 루프가 그렇게 찍어 `host.v1.json` 이 남았고, main 의 `session host macOS (Debug)`
+    // 가 네 런 연속 빨갰다(`#3986`). 그 수정은 호출부에 있고, 이 판정자는 **왜 그 수정이 필요한지**를
+    // 발원지에 고정한다 — 다음 사람이 「경로로 한 번 찍는 게 뭐가 문제냐」고 묻지 않게.
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "withdraw-ctime");
+    defer test_scratch.close(std.testing.io, dir);
+    var endpoint_buf: [128]u8 = undefined;
+
+    const template: Descriptor = .{
+        .host_id = 0,
+        .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .protocol_major = 2,
+        .screen_codec_version = 2,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = "",
+    };
+
+    // 대조군 먼저 — 손 안 대면 거둬진다. 이 줄이 없으면 아래 단언이 「withdraw 가 원래 안 된다」로도
+    // 통과한다.
+    var clean = template;
+    clean.host_id = 0xBEE2;
+    clean.endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, clean.host_id);
+    var untouched = try publish(std.testing.allocator, dir, clean);
+    defer untouched.deinitMemory();
+    try std.testing.expectEqual(Published.WithdrawOutcome.removed, try untouched.withdraw());
+
+    // 본론 — 경로로 한 번 찍고 거두면 거부하고, 파일이 남는다.
+    var exact = template;
+    exact.host_id = 0xBEEF;
+    exact.endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, exact.host_id);
+    var published = try publish(std.testing.allocator, dir, exact);
+    defer published.deinitMemory();
+    var manifest_buf: [832]u8 = undefined;
+    const manifest_path = try manifestPathIn(&manifest_buf, dir, exact.host_id);
+    if (c.utimensat(c.AT.FDCWD, manifest_path.ptr, null, 0) != 0)
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(Published.WithdrawOutcome.replaced, try published.withdraw());
+    // 거부는 곧 잔재다 — 이 줄이 「거부했다」를 「그래서 무슨 일이 나나」로 잇는다.
+    var stat: StatInfo = undefined;
+    try std.testing.expectEqual(posix.E.SUCCESS, statAtNoFollow(posix.AT.FDCWD, manifest_path, &stat));
+
+    // 반대로 **핸들로** 찍으면(`touchExact`) identity 가 함께 갱신되므로 그 뒤에도 거둬진다.
+    // 이것이 `#3986` 이 `.published` 갈래를 남겨 둔 이유다.
+    var healthy = template;
+    healthy.host_id = 0xBEE3;
+    healthy.endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, healthy.host_id);
+    var handled = try publish(std.testing.allocator, dir, healthy);
+    defer handled.deinitMemory();
+    try handled.touchExact();
+    try std.testing.expectEqual(Published.WithdrawOutcome.removed, try handled.withdraw());
+}

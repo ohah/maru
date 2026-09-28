@@ -5282,6 +5282,24 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_manifest_touch_tests.setCwd(b.path("."));
         session_host_owner_lock_heal_step.dependOn(&run_manifest_touch_tests.step);
 
+        // 발원지 축 — 호출부를 고쳐도 **왜** 그래야 하는지는 `host_manifest` 가 알아야 한다.
+        // `utimensat` 이 ctime 을 바꿔 `withdraw` 가 자기 세대를 거부하는 그 위험을 그 파일에 고정한다.
+        const withdraw_ctime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/host_manifest.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            // 이 루트는 판정자가 많다 — **이 한 줄만** 통과시킨다.
+            .filters = &.{"남의 것» 으로 보고 거부한다"},
+        });
+        const run_withdraw_ctime_tests = b.addRunArtifact(withdraw_ctime_tests);
+        run_withdraw_ctime_tests.addArg("--maru-expect-tests=1");
+        run_withdraw_ctime_tests.setCwd(b.path("."));
+        session_host_owner_lock_heal_step.dependOn(&run_withdraw_ctime_tests.step);
+
         // 배선 축: 순수 판정자는 계약을 재고, 이것은 그 계약이 **두 루프 모두에서 불리는가**를 잰다.
         // `boundary` 잡도 같은 파일을 돌리지만(build.zig), 이 게이트만 돌려도 배선이 빠진 것을 잡게 둔다.
         const owner_lock_retention_boundary_tests = addProjectTest(b, .{

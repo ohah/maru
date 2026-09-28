@@ -6174,11 +6174,13 @@ pub fn build(b: *std.Build) void {
                 }),
                 // 네 번째: 예약 대조가 «어느 축» 에서 어긋났는지 가리는지. 이름 하나로 뭉치면
                 // 2026-09-18 처럼 사람이 추측하게 된다.
-                .filters = &.{ "budget projection", "budget admission durable probe", "reservation membership", "예약 대조는 어긋난 축을" },
+                // 다섯·여섯: 예약 여유. 미리보기는 freeze 전에 잡히므로 실제 handoff 가 더 클 수
+                // 있는데, 2026-09-28 이전에는 여유가 0 이라 3 바이트에 승계가 취소됐다.
+                .filters = &.{ "budget projection", "budget admission durable probe", "reservation membership", "예약 대조는 어긋난 축을", "예약 여유:" },
             });
             const run_session_host_upgrade_budget_admission_tests =
                 b.addRunArtifact(session_host_upgrade_budget_admission_tests);
-            run_session_host_upgrade_budget_admission_tests.addArg("--maru-expect-tests=4");
+            run_session_host_upgrade_budget_admission_tests.addArg("--maru-expect-tests=6");
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_admission_tests.step,
             );

@@ -326,8 +326,9 @@ Debug assert나 ReleaseFast no-op에 의존하지 않고 두 최적화 모드에
 
 **문제.** 위 규칙은 「`upgrade_busy`면 … 마지막 attachment가 떨어진 뒤 다시 시도한다」인데, 코드는 교체를 앱이 host 에
 처음 연결할 때 한 번만 시도하고, 같은 빌드 host 가 이미 있으면 스캔 자체를 건너뛴다(`host_connect.zig` 의
-「current-build host found — upgrade scan skipped」). 그래서 교체가 한 번 실패하면(§7 예약 초과는 활성 세션이 많을수록
-잦은 정상 실패다) 새 host 가 옆에 서고, 옛 host 는 **셸이 모두 닫힐 때까지** 옛 이미지로 남는다. 그동안 새 앱은 옛
+「current-build host found — upgrade scan skipped」). 그래서 교체가 한 번 실패하면(§7 예약 초과. 2026-09-28 부터
+예약에 여유를 두어 드물어졌지만 없어지지는 않았다) 새 host 가 옆에 서고, 옛 host 는 **셸이 모두 닫힐 때까지**
+옛 이미지로 남는다. 그동안 새 앱은 옛
 host 에 붙는다(2026-09-05 실측: 셸 12 개를 쥔 host 가 이 경로로 굳었다). 세션 도중의 재교체는 위 조건(모든 runtime 의
 controller·observer 0, 사용자 입력을 끊지 않는다)상 불가능하다.
 
@@ -340,7 +341,7 @@ controller·observer 0, 사용자 입력을 끊지 않는다)상 불가능하다
 - **시점 — 앱 시작 시, 복원한 셸을 붙이기 전.** 같은 빌드 host 가 이미 있어도 대상 host 를 찾아 교체를 시도한다. 이
   시점에는 아직 GUI attachment 가 없어 위 preflight 조건과 맞는다. 세션 도중에는 시도하지 않는다.
 - **실패 — 다음 시작에 계속 시도, 알림은 host 마다 한 번.** 실패 원인(교체 준비 중 출력으로 상태가 예약보다 커짐)은
-  일시적이라 횟수 상한을 두지 않는다. 같은 host 에 대한 실패 알림은 처음 한 번만 띄운다(host 와 대상 빌드 단위로 기록).
+  일시적이라 횟수 상한을 두지 않는다. 2026-09-28 의 예약 여유(§7)가 이 원인의 빈도를 낮추지만 제거하지는 않는다. 같은 host 에 대한 실패 알림은 처음 한 번만 띄운다(host 와 대상 빌드 단위로 기록).
 - **시작 지연 — UI 먼저, 교체 중인 host 의 셸은 자리표시자.** 창과 다른 host 의 탭은 바로 띄우고, 교체 중인 host 의
   셸 탭만 「이어 붙이는 중」으로 두었다가 교체가 끝나면(성공이든 실패든) 붙인다.
 
@@ -419,9 +420,26 @@ U5 제품 admission은 accepted reply를 flush하고 reader를 멈추기 **전**
    둘 다 근거가 없었다. wire `reason`이 네 축 모두 `.runtime_changed`라 이름이 오히려 오해를 부른다.
    지금은 스테이지 줄 **바로 다음 줄**에 `session host upgrade budget mismatch: axis=…` 로
    세 쌍의 숫자(`gen=N->M count=N->M bytes=N->M`, 모두 `예약 -> 실제` 방향)를 남긴다.
-   줄을 나눈 것은 일곱 갈래가 스테이지 라벨을 같은 어휘로 써야 하기 때문이다(라벨 유일성은 경계 판정자가 지킨다). `bytes` 축은 위 문단이
-   인정한 정상 실패이고(예약은 preview 길이로 여유 없이 잡힌다), `membership`·`count`·`ids`는 런타임 집합이
-   실제로 움직인 것이다 — 고칠 곳이 완전히 다르다.
+   줄을 나눈 것은 일곱 갈래가 스테이지 라벨을 같은 어휘로 써야 하기 때문이다(라벨 유일성은 경계 판정자가 지킨다).
+   `bytes` 축은 **예약분을 넘었다**는 뜻이고, `membership`·`count`·`ids`는 런타임 집합이 실제로 움직인 것이다 —
+   고칠 곳이 완전히 다르다.
+
+   **예약에는 여유를 둔다 (2026-09-28 결정).** 이전에는 예약을 preview 길이로 **여유 없이** 잡았고, 그래서
+   `bytes` 축은 「1 바이트라도 크면 실패」를 뜻했다 — 이 문서는 그것을 「인정한 정상 실패」로 적고 있었다.
+   실측이 그 판단을 뒤집었다: 셸 17 개가 붙은 host 가
+   `axis=bytes gen=35->35 count=20->20 bytes=13103944->13103947` 로 실패했다. 런타임 집합은 멀쩡한데
+   **3 바이트** 때문에 승계가 통째로 취소됐고, 앱은 새 host 를 띄웠다(host 누적). 13MB 짜리 상태에서
+   3 바이트를 두고 승계를 버리는 것은 균형이 맞지 않는다.
+
+   이제 `upgrade_budget_admission.reservedBytesFor` 가 `max(64KiB, preview/16)` 만큼 여유를 얹어 예약하고,
+   `max_handoff_commit_bytes` 상한에서는 여유를 포기한다(넘겨 잡으면 `validateLength` 가 거절해 승계가 시작도
+   못 한다). 여유분은 **파일에 남지 않는다** — `writeReservedFile` 이 쓰기 뒤 `ftruncate(fd, bytes.len)` 으로
+   실제 길이에 맞춰 자른다. 늘어나는 것은 시도 중에만 잡히는 디스크뿐이다(primary·backup 두 벌).
+   이 고침 전에는 예약 == 실제라 그 잘라내기가 사실상 no-op 이었으므로, 이제 그것이 하중을 받는다는 사실을
+   경계 판정자가 함께 못 박는다.
+
+   **여유는 이 축을 없애지 않는다.** 미리보기와 freeze 사이가 길거나 출력이 폭발하면 여유마저 넘길 수 있다.
+   그때는 여전히 `bytes` 로 취소된다 — 아래 «실패한 host 의 재교체 정책» 이 그 잔여 확률을 받는다.
 
 예약 owner는 attempt 하나이며 성공 commit, 모든 in-process retryable rollback과 deadline 경로에서 primary/backup
 pathname과 fd를 exact-once 정리한다. 정리가 실패하면 정상 재개로 축소하지 않고 invariant violation으로 fail-stop한다.

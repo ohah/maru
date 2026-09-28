@@ -3902,7 +3902,10 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // 실패」를 만난 사용자가 「상한에 잘렸나 보다」로 읽고 넘어갔다(2026-09-28 사용자 보고: 워크트리
     // pane 에서 갤러리가 빈 채로 「다 읽지 못했습니다」만 떴다 — 실제로는 그 pane 의 훅 이벤트 파일이
     // 아예 없었다). 판정 조건은 한 톨도 안 바꾸고 **이름만** 가른다.
-    if (kind_partial and (n > 0 or self.agent_activity.scanned_bytes == 0)) {
+    if (kind_partial and self.agent_activity.scanned_bytes == 0) {
+        return maru.i18n.t(.agent_activity_unread);
+    }
+    if (kind_partial and n > 0) {
         return maru.i18n.t(.agent_activity_partial);
     }
     // **「본문을 다 못 봤다」가 「없다」보다 먼저다**(적대적 9회차). 0 건일 때야말로 그 구분이

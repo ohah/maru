@@ -11215,13 +11215,29 @@ pub const AppSession = struct {
         }
     }
 
-    /// 현재 쿼리로 카탈로그를 다시 필터해 palette_filtered를 채우고, 컴포넌트의 result_count를 동기화한다(selected는
-    /// 맨 위로 — 증분 검색 관용). 타이핑·Backspace·초기 열기마다. OOM이면 목록을 비워 안전하게 둔다. find의
+    /// 현재 쿼리와 IME 조합 중 글자로 카탈로그를 다시 필터해 palette_filtered를 채우고, 컴포넌트의
+    /// result_count를 동기화한다(selected는 맨 위로 — 증분 검색 관용). OOM이면 목록을 비워 안전하게 둔다. find의
     /// recomputeFind에 대응(검색은 platform이, UI 동기화는 컴포넌트가).
     /// 캡처 훅이 쿼리를 넣은 뒤 다시 필터하려면 이 자리가 필요하다(`recomputeSymbolPicker` 와 같은 결로 공개).
     /// `palette.show()` 가 입력을 비우므로 **여는 것보다 먼저** 쿼리를 넣어 둘 수는 없다.
     pub fn recomputePalette(self: *AppSession) void {
-        command_palette.filter(self.allocator, self.chrome_host.palette.input.query.items, &self.palette_filtered) catch {
+        const input = &self.chrome_host.palette.input;
+        var pending: std.ArrayList(u8) = .empty;
+        defer pending.deinit(self.allocator);
+        const query = if (input.preedit.items.len == 0) input.query.items else blk: {
+            pending.appendSlice(self.allocator, input.query.items) catch {
+                self.palette_filtered.clearRetainingCapacity();
+                self.chrome_host.palette.setResultCount(0);
+                return;
+            };
+            pending.appendSlice(self.allocator, input.preedit.items) catch {
+                self.palette_filtered.clearRetainingCapacity();
+                self.chrome_host.palette.setResultCount(0);
+                return;
+            };
+            break :blk pending.items;
+        };
+        command_palette.filter(self.allocator, query, &self.palette_filtered) catch {
             self.palette_filtered.clearRetainingCapacity();
         };
         self.chrome_host.palette.selected = 0; // 쿼리 변경 시 선택 맨 위(레거시 동작 보존)
@@ -48357,9 +48373,36 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     try std.testing.expect(!term_ops.activeSurface(session).preedit.active()); // 터미널 Surface overlay로 안 샌다
     input_ops.imeMarked(session, ""); // 조합 해제(확정 직전)
 
-    // "new t" 타이핑(chrome 라우팅 → palette.handle → query_changed → recomputePalette) → "New Terminal"만 남는다.
+    // 한글 marked text로도 결과를 즉시 좁힌다. 원본 query에는 확정 전까지 쓰지 않는다.
+    input_ops.imeMarked(session, "새 터미널");
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.palette.input.query.items.len);
+    try std.testing.expect(command_palette.actionAt(session.palette_filtered.items, 0).? == .new_term);
+    input_ops.imeMarked(session, "");
+    try std.testing.expectEqual(command_catalog.entries.len, session.palette_filtered.items.len);
+
+    // 확정 Enter는 목록의 명령을 실행하지 않는다. 조합 글자만 query에 옮기고 팝업을 유지한다.
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "새 터미널");
+    input_ops.imeMarked(session, "");
+    input_ops.imeInsert(session, "새 터미널");
+    const terms_before_ime_enter = pane_ops.activePane(session).terms.items.len;
+    input_ops.imeEnd(session, .{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.chrome_host.palette.open);
+    try std.testing.expectEqualStrings("새 터미널", session.chrome_host.palette.input.query.items);
+    try std.testing.expectEqual(terms_before_ime_enter, pane_ops.activePane(session).terms.items.len);
+    try std.testing.expect(command_palette.actionAt(session.palette_filtered.items, 0).? == .new_term);
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.palette.open);
+    try std.testing.expectEqual(terms_before_ime_enter + 1, pane_ops.activePane(session).terms.items.len);
+    session.dispatchAppAction(.toggle_command_palette);
+    try std.testing.expect(session.chrome_host.palette.open);
+    session.chrome_host.palette.input.clear();
+    session.recomputePalette();
+
+    // "new t" 타이핑(chrome 라우팅 → palette.handle → query_changed → recomputePalette). fuzzy는
+    // "New Editor Tab"도 후보로 남기지만 더 연속된 "New Terminal"이 맨 위여야 Enter가 기대한 것을 실행한다.
     for ("new t") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 1), session.palette_filtered.items.len);
+    try std.testing.expect(session.palette_filtered.items.len > 1);
     try std.testing.expect(command_palette.actionAt(session.palette_filtered.items, session.chrome_host.palette.selected).? == .new_term);
 
     // Enter → accept → acceptPalette가 new_term 실행(full이라 게이트 없음) 후 닫힘. 활성 pane Term +1.

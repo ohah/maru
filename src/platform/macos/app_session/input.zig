@@ -361,7 +361,11 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         // 검색어 칸에 고정하면 바꿀 문자열을 한글로 치는 동안 조합 글자가 **위 줄에 쌓인다**
         // (적대적 검증 2026-08-27이 계약 문장을 근거로 잡았다).
         .find => self.chrome_host.find.focused().setPreedit(self.allocator, bytes) catch {},
-        .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
+        .palette => {
+            self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch return;
+            // 조합 중에도 후보를 좁힌다. 확정 뒤에만 필터하면 한글 입력 중 목록이 이전 검색어에 머문다.
+            self.recomputePalette();
+        },
         // 심볼 피커도 팔레트와 같은 입력 모델(overlay_input)이라 조합 표시가 같은 자리에서 온다(§7.5).
         .symbol_picker => self.chrome_host.symbol_picker.input.setPreedit(self.allocator, bytes) catch {},
         .reference_picker => self.chrome_host.reference_picker.input.setPreedit(self.allocator, bytes) catch {},
@@ -561,7 +565,14 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
                 else
                     null;
             const replay_event: ?terminal.KeyEvent = if (event) |ev|
-                if (shouldReplayAfterCommit(ev, self.ime_enter_newline)) ev else null
+                // 팔레트의 Enter는 명령 실행이다. 한글 조합을 확정한 바로 그 Enter를 다시 보내면
+                // 검색어가 보일 틈도 없이 선택된 명령이 실행되고 팝업이 닫힌다.
+                if (composing and ev.key == .enter and self.inputFocus() == .palette)
+                    null
+                else if (shouldReplayAfterCommit(ev, self.ime_enter_newline))
+                    ev
+                else
+                    null
             else
                 null;
             const preedit_commit_base = if (terminal_target) |target_id|

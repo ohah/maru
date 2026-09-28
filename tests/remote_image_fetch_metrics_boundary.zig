@@ -68,9 +68,14 @@ test "원격 그림 계측: 워커가 값을 싣고 수확이 그 값 그대로 
     // 「무엇이 실패했나」를 못 가린다(적대적 검증 K3) — 인자 중 하나만 잠그는 실수를 오늘 두 번 했다.
     try std.testing.expectEqual(@as(usize, 1), count(activity, "            r.hit_index,\n            @tagName(r.remote_failure),"));
     // **원격 갈래에서만 이름을 세운다.** 로컬 완료본에 심으면 원격이 아닌데 실패로 찍혀 진단이
-    // 통째로 오염된다(K2). 그 자리는 `job.remote` 가 있을 때뿐이라, `failure.*` 대입이 전부
-    // `fetchRemoteBase64` 안에만 있는지를 잰다 — 워커 본문에는 하나도 없어야 한다.
-    try std.testing.expectEqual(@as(usize, 0), count(decode, "result.remote_failure = ."));
+    // 통째로 오염된다(적대적 검증 K2). 그 자리는 `job.remote` 가 있을 때뿐이라, `failure.*` 대입이
+    // 전부 `fetchRemoteBase64` 안에만 있는지를 잰다 — 워커 본문에는 하나도 없어야 한다.
+    //
+    // ⚠️ **공백에 기대지 않는다.** 처음엔 `"result.remote_failure = ."` 로 셌는데, `=.` 로 붙여
+    // 쓰면 그냥 지나간다(L1 이 그렇게 살아남았다). 이름 뒤 **구두점 두 가지**를 각각 0 으로 잠근다 —
+    // 읽기(`r.remote_failure`)와 대입을 가르는 것은 뒤에 오는 `=` 이지 공백이 아니다.
+    try std.testing.expectEqual(@as(usize, 0), count(decode, "result.remote_failure ="));
+    try std.testing.expectEqual(@as(usize, 0), count(decode, "result.remote_failure="));
     try std.testing.expectEqual(@as(usize, 1), count(activity, "remote image fetch failed: idx={d} reason={s}"));
 
     // 셈은 순수 타입이 소유한다 — 인라인으로 되돌리면 실제 ssh 없이 못 재는 상태로 돌아간다.

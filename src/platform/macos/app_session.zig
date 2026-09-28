@@ -14557,6 +14557,10 @@ pub const AppSession = struct {
         // confirm/context_menu/notice는 위에서 전용 처리(notice는 닫고 소비)하므로, 여기 도달하는 열린 모달은 전용 마우스
         // 처리가 없는 인터랙티브 오버레이(find/palette)뿐이다 — 클릭이 뒤(터미널·divider/탭 드래그·사이드바)로 새지 않게
         // 막는다(키가 모달에서 소비되는 것과 같은 규율). 포인터를 실제로 쓰는 모달 위젯(슬라이더·토글·색)은 CS-4-1+에서 이 경로에 붙는다.
+        if (kind == 1 and button == 0 and chrome.components.find.regexButtonHit(&self.chrome_host.find, self.buildChromeProps(), x_px, y_px)) {
+            find_ops.toggleFindRegex(self);
+            return;
+        }
         if (self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
         // **편집기 선택 헬퍼**(NSH — docs/send-selection-to-agent.md §6.2). 모달 분기를 전부 지난
         // 자리다: 헬퍼는 모달이 아니므로 위 오버레이들이 먼저 가져가고, 여기부터가 본문 좌표다.
@@ -49935,6 +49939,23 @@ test "EF30 regex mode searches and replaces named captures with one undo" {
     _ = try session.tick();
     session.dispatchAppAction(.toggle_find_replace);
     _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    // The visible button and keyboard chord must enter the same mode. Use the
+    // component's hit target, since a second copy of panel arithmetic would
+    // let the test pass with a button drawn somewhere else.
+    const find_props = session.buildChromeProps();
+    const find_layout = chrome.components.overlay_input.findLayout(find_props) orelse return error.MissingFindLayout;
+    var regex_button_x: ?usize = null;
+    for (0..800) |x| {
+        if (chrome.components.find.regexButtonHit(&session.chrome_host.find, find_props, @floatFromInt(x), @floatFromInt(find_layout.y + 1))) {
+            regex_button_x = x;
+            break;
+        }
+    }
+    const button_x = regex_button_x orelse return error.MissingRegexButton;
+    session.mouse(1, @floatFromInt(button_x), @floatFromInt(find_layout.y + 1), 0, 0);
+    try std.testing.expect(session.chrome_host.find.regex);
+    session.mouse(1, @floatFromInt(button_x), @floatFromInt(find_layout.y + 1), 0, 0);
+    try std.testing.expect(!session.chrome_host.find.regex);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'r' }, .modifiers = .{ .command = true, .option = true } });
     try std.testing.expect(session.chrome_host.find.regex);
     for ("(?<name>[a-z]+)-(\\d+)") |ch| {

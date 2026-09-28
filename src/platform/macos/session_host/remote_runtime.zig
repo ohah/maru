@@ -6763,7 +6763,15 @@ pub const RemoteRuntime = struct {
         }
         defer if (mutation_active) self.finishStableMutation(&mutation_lease);
         out_spans.clearRetainingCapacity();
-        var hexbuf: [512]u8 = undefined;
+        var hexbuf: [generation_contract.FindRequest.max_query_bytes * 2]u8 = undefined;
+        // A truncated pattern can be syntactically valid but mean something entirely different.
+        // The legacy literal path keeps its existing 256-byte behavior; regex fails visibly.
+        if (regex and query.len > generation_contract.FindRequest.max_query_bytes) return .{
+            .count = 0,
+            .cur = null,
+            .voff = null,
+            .regex_error = "regex too long",
+        };
         const qn = @min(query.len, hexbuf.len / 2);
         const hex_chars = "0123456789abcdef";
         for (query[0..qn], 0..) |b, i| {
@@ -19939,6 +19947,19 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     try testing.expectEqual(@as(u16, 0), r0.cur.?.start.row); // 현재 매치는 row0
     try testing.expectEqual(@as(usize, 1), spans.items.len); // 비현재 보이는 매치 = row1 1개
     try testing.expectEqual(@as(u16, 1), spans.items[0].start.row);
+
+    const regex_result = try rr.find("x.z", 0, false, true, &spans);
+    try testing.expectEqual(@as(usize, 2), regex_result.count);
+    try testing.expect(regex_result.regex_error == null);
+    const overlong_pattern = [_]u8{'a'} ** (generation_contract.FindRequest.max_query_bytes + 1);
+    const too_long = try rr.find(&overlong_pattern, 0, false, true, &spans);
+    try testing.expectEqual(@as(usize, 0), too_long.count);
+    try testing.expectEqualStrings("regex too long", too_long.regex_error orelse return error.MissingRegexError);
+    try testing.expectEqual(@as(usize, 0), spans.items.len);
+    const invalid_regex = try rr.find("[", 0, false, true, &spans);
+    try testing.expectEqual(@as(usize, 0), invalid_regex.count);
+    try testing.expectEqualStrings("invalid regex", invalid_regex.regex_error orelse return error.MissingRegexError);
+    try testing.expectEqual(@as(usize, 0), spans.items.len);
 
     // §6c-2 네비: 현재 매치를 index 1로 → cur=row1, 비현재=row0. (host가 cur_index로 현재 매치를 가른다)
     const r1 = try rr.find("xyz", 1, false, false, &spans);

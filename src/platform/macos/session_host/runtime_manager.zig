@@ -5200,7 +5200,7 @@ test "runtime manager: find는 span을 계산한 기준 view_offset을 응답에
 
     // scroll=false: host 화면이 그대로(바닥)라 voff=0이고, 뷰포트 밖 매치라 그릴 span도 없다.
     {
-        const body = try ops.find(ops.ctx, rid, query_hex, 0, false, allocator);
+        const body = try ops.find(ops.ctx, rid, query_hex, 0, false, false, allocator);
         defer allocator.free(body);
         try std.testing.expect(std.mem.indexOf(u8, body, "\"count\":1") != null);
         try std.testing.expect(std.mem.indexOf(u8, body, "\"voff\":0") != null);
@@ -5210,7 +5210,7 @@ test "runtime manager: find는 span을 계산한 기준 view_offset을 응답에
     // scroll=true: host가 매치로 스크롤한 뒤 **그 화면 기준**으로 span을 낸다 — voff가 0이 아니게 되고, 그 값이
     // 곧 client가 자기 화면과 대조해야 할 기준이다(같아지기 전에 그리면 엉뚱한 줄이 하이라이트된다).
     {
-        const body = try ops.find(ops.ctx, rid, query_hex, 0, true, allocator);
+        const body = try ops.find(ops.ctx, rid, query_hex, 0, true, false, allocator);
         defer allocator.free(body);
         try std.testing.expect(std.mem.indexOf(u8, body, "\"voff\":0") == null);
         try std.testing.expect(std.mem.indexOf(u8, body, "\"cur\":[]") == null); // 스크롤 후엔 현재 매치가 보인다

@@ -1347,6 +1347,17 @@ pub fn build(b: *std.Build) void {
         .root_module = maru_mod,
     });
     const run_core_tests = b.addRunArtifact(core_tests);
+    // The editor-only fast suite does not import terminal.selection tests. Keep an explicit,
+    // counted path for the regex cell-mapping judges instead of assuming test-editor ran them.
+    const terminal_regex_step = b.step("test-terminal-regex", "Run terminal regex core tests");
+    const terminal_regex_core_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{"terminal PCRE2"},
+    });
+    const run_terminal_regex_core_tests = b.addRunArtifact(terminal_regex_core_tests);
+    run_terminal_regex_core_tests.addArg("--maru-expect-tests=24"); // 3 named judges + 21 root-module anonymous blocks
+    run_terminal_regex_core_tests.setCwd(b.path("."));
+    terminal_regex_step.dependOn(&run_terminal_regex_core_tests.step);
 
     // ── 크로스 타깃 **컴파일 전용** 게이트 (`zig build check-targets`) ──────────────────────────
     //

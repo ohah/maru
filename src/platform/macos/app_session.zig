@@ -48419,6 +48419,24 @@ test "TFREG scrollback Find switches literal and PCRE2 through the shared chord"
     try std.testing.expectEqual(@as(usize, 2), session.chrome_host.find.match_count);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'r' }, .modifiers = .{ .command = true, .option = true } });
     try std.testing.expectEqual(@as(usize, 1), session.find_matches.items.len);
+    const find_props = session.buildChromeProps();
+    const find_layout = chrome.components.overlay_input.findLayout(find_props) orelse return error.MissingFindLayout;
+    var button_x: ?usize = null;
+    for (0..800) |x| {
+        if (chrome.components.find.regexButtonHit(&session.chrome_host.find, find_props, @floatFromInt(x), @floatFromInt(find_layout.y + 1))) {
+            button_x = x;
+            break;
+        }
+    }
+    session.mouse(1, @floatFromInt(button_x orelse return error.MissingRegexButton), @floatFromInt(find_layout.y + 1), 0, 0);
+    try std.testing.expect(session.chrome_host.find.regex);
+    try std.testing.expectEqual(@as(usize, 2), session.find_matches.items.len);
+    session.chrome_host.find.input.query.clearRetainingCapacity();
+    try session.chrome_host.find.input.query.appendSlice(allocator, "[");
+    find_ops.recomputeFind(session);
+    try std.testing.expectEqualStrings("invalid regex", session.chrome_host.find.regex_error orelse return error.MissingRegexError);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'r' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.regex_error == null);
 }
 
 test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {

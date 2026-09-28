@@ -91,6 +91,47 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
     try std.testing.expect(std.mem.indexOf(u8, admission, "pub fn cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, admission, "pub fn deinit(") != null);
     try std.testing.expect(std.mem.indexOf(u8, admission, "safety_factor") != null);
+    // ── 예약 여유(2026-09-28) ────────────────────────────────────────────────────────
+    // 미리보기는 freeze **전**에 잡힌다(바로 위에서 그 순서를 못 박았다). 그래서 실제 handoff 는
+    // 미리보기보다 커질 수 있는데, 예약을 미리보기와 똑같이 잡으면 그 증가분이 곧바로
+    // `MismatchAxis.bytes` 가 되어 승계가 통째로 취소된다 — 실측으로 **3 바이트** 때문에 그랬다.
+    //
+    // **「함수가 있다」가 아니라 「prepare 가 그 값을 쓴다」를 잰다.** 계산이 옳아도 호출부가
+    // `preview.bytes` 를 그대로 넘기면 아무것도 안 고쳐지고, 그때 순수 판정자는 초록이다.
+    // 세 사실(미리보기에서 계산 · reserve 로 전달 · reserved_bytes 에 보관)을 닻 하나로 묶는다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        admission,
+        "const reserved_bytes = reservedBytesFor(preview.bytes);\n" ++
+            "    var reservation: Reservation = .{\n" ++
+            "        .store = try handoff_store.reserve(owner_dir, attempt_id, reserved_bytes, deadline),\n" ++
+            "        .reserved_bytes = reserved_bytes,",
+    ));
+    // 되돌아가는 길도 막는다 — 옛 「여유 0」 형태가 다시 나타나면 빨개진다.
+    try std.testing.expectEqual(@as(usize, 0), count(admission, "attempt_id, preview.bytes, deadline"));
+    try std.testing.expectEqual(@as(usize, 0), count(admission, ".reserved_bytes = preview.bytes,"));
+    // 상한을 넘겨 예약하면 `validateLength` 가 거절해 승계가 시작도 못 한다 — 그 clamp 를 잠근다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        admission,
+        "    if (preview_bytes >= cap) return cap;",
+    ));
+    // 판정자가 **실제로 돌아야** 한다. 이름이 게이트 필터와 어긋나면 영영 안 돈다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        admission,
+        "test \"예약 여유: prepare 가 그 여유를 실제로 쓴다",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        admission,
+        "test \"예약 여유: 미리보기보다 크게 잡고, 상한에서 멈춘다\"",
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, build, "\"예약 여유:\"") != null);
+    // 여유가 파일에 패딩으로 새지 않는다는 보장. 이 고침 **전에는** 예약 == 실제라 이 잘라내기가
+    // 사실상 no-op 이었고 지워도 아무도 몰랐다 — 이제는 하중을 받는다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        store,
+        "    const exact = std.math.cast(i64, bytes.len) orelse return error.LimitExceeded;\n" ++
+            "    if (c.ftruncate(fd, exact) != 0) return error.WriteFailed;",
+    ));
+
     try std.testing.expect(std.mem.indexOf(u8, admission, "probe") != null);
     try std.testing.expect(std.mem.indexOf(u8, store, "pub fn commitReserved(") != null);
     try std.testing.expect(std.mem.indexOf(u8, store, "pub fn cancel(") != null);

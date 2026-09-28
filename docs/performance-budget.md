@@ -391,7 +391,7 @@ runtime 의 generation 번호를 함께 기억해, 둘 다 그대로이고 준�
 상태값(개수)이어야 여러 건 적체·`notifications.osc` 꺼짐·훅 모드에서 비우기도 같은 조건으로 풀린다. ② metadata 는
 모르는 스칼라를 흘려보내므로(`drainUnknownScalar`, [session-host-upgrade.md](session-host-upgrade.md) §3) major 는 안 올린다.
 그러나 신 앱 ↔ 구 host 에서 키가 없으면 0 이 남고, 개수 0 은 «없음» 이라 **pull 이 멈춰 그 세션의 OSC 알림이 조용히
-사라진다**. 이 조합은 exec 업그레이드가 실패하거나(§7 예약 초과는 문서가 인정한 정상 실패, 활성 세션이 많을수록 잦다)
+사라진다**. 이 조합은 exec 업그레이드가 실패하거나(§7 예약 초과. 2026-09-28 부터 예약에 여유를 두어 드물어졌지만 없어지지는 않았다)
 현재 빌드 host 가 이미 있어 스캔을 건너뛸 때(`host_connect.zig` 2026-09-05 기록) 복원이 옛 host 의 runtime 을 다시 붙이며
 생긴다. 착수하면 present 구분(키 없음 → 지금의 힌트·바닥 폴링 유지)과 그 판정자를 넣는다. ③ 이득은 위 11.5 % 가 상한이고
 8쌍+ A/B 와 알림 지연(metadata 주기 안인가)을 함께 재야 말할 수 있다. 같은 표본에서 `baseValid`(RPC 권위 자기검증)

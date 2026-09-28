@@ -169,6 +169,45 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         contract,
         "`writeReservedFile` 이 쓰기 뒤 `ftruncate(fd, bytes.len)` 으로",
     ) != null);
+    // ── 섹션 진단(2026-09-28) ─────────────────────────────────────────────────
+    // `axis=bytes` 는 **무엇이 자랐는지**를 말하지 않아 실측에서 3 바이트의 출처를 못 짚었다.
+    // 섹션별 «예약 -> 실제» 를 한 줄 더 남긴다 — 알림·메타·next_handle 이 그대로인데 총합만
+    // 자랐으면 남는 것은 화면 섹션이다(소거법).
+    //
+    // **「함수가 있다」가 아니라 「그 축에서만 불린다」를 잰다.** 조건 없이 부르면 런타임 집합이
+    // 움직인 경우에도 의미 없는 줄이 붙고, 조건을 빼도 순수 포맷 판정자는 초록이다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        coordinator,
+        "    if (axis != .bytes) return;\n    if (builtin.is_test) return;",
+    ));
+    // 호출부는 **한 줄**이어야 한다 — `noteUpgradeStage` 와 `.reason = .runtime_changed` 의 거리를
+    // `upgrade_runtime_changed_stage_boundary` 가 재기 때문이다. 여기 블록을 펼치면 그쪽이 빨개진다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        coordinator,
+        "        noteUpgradeBudgetSections(mismatch_axis, preview_sections, &capture, handoff_bytes.len);",
+    ));
+    // 미리보기 쪽 값은 freeze 뒤에 다시 만들 수 없다 — **실어 나르는 배선**이 실제로 있어야 한다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        coordinator,
+        "            .total_bytes = preview_bytes,\n" ++
+            "            .without_attempt = preview.encoded_bytes_without_attempt,\n" ++
+            "            .notification = preview.notification_bytes,\n" ++
+            "            .metadata = preview.notification_metadata_bytes,\n" ++
+            "            .next_handle = preview.next_handle,",
+    ));
+    // 그 값들이 미리보기에서 **채워지는지**. 선언만 있고 안 채우면 전부 0 이 찍혀 소거법이 죽는다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        manager,
+        "        preview.next_handle = self.next_handle;\n" ++
+            "        preview.notification_bytes = notification_handoff.len;\n" ++
+            "        preview.notification_metadata_bytes = notification_metadata_handoff.len;",
+    ));
+    // 형제 줄과 **같은 방향**임을 문자열로 못 박는 판정자가 있어야 한다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        coordinator,
+        "test \"예약 대조 진단은 섹션별로도 «예약 -> 실제» 방향을 지킨다\"",
+    ));
+
     // ── 상위 소비자(coordinator) — 적대적 검증 G 회차가 셋 다 뚫었다 ─────────────
     // G2: **`bytes` 축만 조용히 무시**해도 아무도 안 빨개졌다. 이 PR 이 그 축을 「드물게만
     // 뜨는 것」으로 만들었으므로, 여기서 빠지면 아주 오래 안 들킨다. 분기를 통째로 잠근다.

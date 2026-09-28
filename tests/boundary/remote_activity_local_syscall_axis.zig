@@ -352,8 +352,19 @@ test "RAV6 §6.3: 원격 그림도 로컬 파일을 안 연다" {
     }
 
     // **잘린 payload 를 디코드하지 않는다.** 잘린 base64 는 깨진 그림이거나 더 나쁘게는 다른 그림이다.
-    if (std.mem.indexOf(u8, decode_src, "if (bytes.len != len) return null;") == null) {
+    //
+    // 닻이 한 줄짜리 `return null;` 이었는데, 실패 갈래에 **이름**이 붙으면서 블록으로 펼쳐졌다
+    // (2026-09-28). 가드는 그대로 살아 있었는데 판정자가 못 알아봐 CI 가 빨개졌다 — 그래서
+    // **조건과 그 조건이 내는 결과를 한 덩어리로** 겨눈다. 조건만 세면 본문을 비워도 통과한다.
+    if (std.mem.indexOf(u8, decode_src, "if (bytes.len != len) {\n        failure.* = .length_mismatch;\n        return null;\n    }") == null) {
         std.debug.print("🔥 짧게 온 그림 payload 를 그대로 디코드한다(RF4 의 「잘린 내용이 온전한 척」 규율 위반).\n", .{});
+        return error.TestUnexpectedResult;
+    }
+
+    // **꼬리를 못 본 답도 디코드하지 않는다.** 같은 규율의 나머지 절반인데 여태 그물이 없었다 —
+    // 적대적 검증 M3 에서 이 가드를 무력화해도 아무 게이트가 안 빨개졌다(2026-09-28).
+    if (std.mem.indexOf(u8, decode_src, "if (!parser.complete()) {\n        failure.* = .truncated;\n        return null;\n    }") == null) {
+        std.debug.print("🔥 꼬리를 못 본(잘린) 답을 그대로 디코드한다 — 잘린 base64 는 다른 그림일 수 있다.\n", .{});
         return error.TestUnexpectedResult;
     }
 

@@ -25,7 +25,9 @@ test "원격 그림 계측: 워커가 값을 싣고 수확이 그 값 그대로 
     try std.testing.expectEqual(@as(usize, 1), count(decode, "result.remote_bytes = got.len;"));
 
     // 수확은 **그 두 값을 그대로** 넘긴다 — 한쪽을 0 으로 접으면 그 축만 조용히 사라진다.
-    try std.testing.expectEqual(@as(usize, 1), count(activity, "RemoteFetchTotals.counts(r.remote_ns, r.remote_bytes)"));
+    // **조건을 통째로 겨눈다.** 이름만 세면 뒤에 조건을 덧붙여 **한 종류만** 계측에서 뺄 수 있고
+    // (적대적 검증 M1: 마커 프리뷰 왕복만 제외), 그러면 총합이 조용히 일부만 센다.
+    try std.testing.expectEqual(@as(usize, 1), count(activity, "if (RemoteFetchTotals.counts(r.remote_ns, r.remote_bytes)) {"));
     try std.testing.expectEqual(@as(usize, 1), count(activity, "remote_fetch.add(r.remote_ns, r.remote_bytes);"));
 
     // **로그가 찍는 값**도 고정한다. 포맷만 잠그면 `{d}` 자리에 상수를 넣어도 통과한다 — 그러면

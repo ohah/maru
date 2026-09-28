@@ -21,11 +21,14 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_graph = @import("support/build_graph.zig");
 
 const server_path = "src/platform/macos/session_host/server.zig";
 const turn_path = "src/platform/macos/session_host/connection_turn.zig";
 const record_path = "src/platform/macos/session_host/collect_failure.zig";
-const max_source_bytes = 8 * 1024 * 1024;
+// 저장소 전체를 훑으므로 가장 큰 파일이 기준이다 — `app_session.zig` 가 2026-09 에 6 MB 이고 한 달에
+// 1 MB 넘게 큰다. 무관한 이유로 `StreamTooLong` 이 나지 않게 넉넉히 둔다.
+const max_source_bytes = 64 * 1024 * 1024;
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(max_source_bytes));
@@ -39,6 +42,22 @@ fn stripComments(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
         const keep = if (std.mem.indexOf(u8, line, "//")) |at| line[0..at] else line;
         try out.appendSlice(allocator, keep);
         try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn normalizeWs(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var in_ws = false;
+    for (src) |ch| {
+        if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
+            in_ws = true;
+            continue;
+        }
+        if (in_ws and out.items.len != 0) try out.append(allocator, ' ');
+        in_ws = false;
+        try out.append(allocator, ch);
     }
     return out.toOwnedSlice(allocator);
 }
@@ -116,8 +135,8 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
         std.mem.indexOf(u8, server[err_fn_at..err_fn_end], "@errorName(err)") != null,
     );
 
-    // ⑤ **헬퍼를 안 거치고 새는 길이 없다.** `try` 로 빠져나가면 `collect_fail_site` 는 «직전
-    //    실패의 이름» 을 그대로 들고 있어 로그가 거짓말을 한다 — 적대적 검증에서 `appendChunks`
+    // ⑤ **헬퍼를 안 거치고 새는 길이 없다.** `try` 로 빠져나가면 `collect_failure` 의 기록은 «직전
+    //    실패의 이름과 숫자» 를 그대로 들고 있어 로그가 거짓말을 한다 — 적대적 검증에서 `appendChunks`
     //    (큰 이미지가 실제로 지나가는 경로)가 정확히 그랬다.
     {
         var it = std.mem.splitScalar(u8, body, '\n');
@@ -162,12 +181,13 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
 
 /// `src/` 아래 모든 `.zig` 에서 `needle` 을 센다(주석 제외). 파일 하나만 보면 남의 파일이 같은 일을
 /// 하는 것을 못 본다.
-fn countProductSources(allocator: std.mem.Allocator, needle: []const u8) !usize {
+fn countProductSources(allocator: std.mem.Allocator, needles: []const []const u8, out: []usize) !void {
+    // needle 마다 따로 훑으면 src 전체(900 여 파일)를 여러 번 읽어 이 게이트가 11 초가 된다 — 한 번에 센다.
+    @memset(out, 0);
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
     var walker = try posixWalk(dir, allocator);
     defer walker.deinit();
-    var total: usize = 0;
     while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
         const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
@@ -176,9 +196,8 @@ fn countProductSources(allocator: std.mem.Allocator, needle: []const u8) !usize 
         defer allocator.free(raw);
         const source = try stripComments(allocator, raw);
         defer allocator.free(source);
-        total += countAll(source, needle);
+        for (needles, out) |needle, *n| n.* += countAll(source, needle);
     }
-    return total;
 }
 
 /// `header` 로 시작해 `end` 앞에서 끝나는 구간. 못 찾으면 **실패한다** — 조용히 빈 구간으로
@@ -223,6 +242,8 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
     defer a.free(turn);
 
     const body = try section(server, "pub fn collectOutputForLocalStreamAtEpoch(", "\n    pub fn ");
+    const body_n = try normalizeWs(a, body);
+    defer a.free(body_n);
 
     // ① **세 대조 자리가 값을 싣는 헬퍼를 거친다** — 조건과 호출을 한 덩어리로, 넘기는 값까지.
     //    필드마다 따로 찾는다 — 필드 순서는 의도가 아니므로 잠그지 않는다. 대신 **무엇을** 넘기는지는
@@ -244,8 +265,7 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
         },
         .{
             .name = "delta_seq_mismatch",
-            .guard = "if (update.frontier.sequence != next_sequence or\n" ++
-                "                    (!update.is_snapshot and update.frontier.generation != sub.screen_generation))",
+            .guard = "if (update.frontier.sequence != next_sequence or (!update.is_snapshot and update.frontier.generation != sub.screen_generation))",
             .fields = &.{
                 ".expected_sequence = next_sequence,",
                 ".actual_sequence = update.frontier.sequence,",
@@ -257,8 +277,7 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
         },
         .{
             .name = "delta_frontier_mismatch",
-            .guard = "} else if (update.frontier.sequence != sub.screen_sequence or\n" ++
-                "                update.frontier.generation != sub.screen_generation)\n            {",
+            .guard = "} else if (update.frontier.sequence != sub.screen_sequence or update.frontier.generation != sub.screen_generation) {",
             .fields = &.{
                 ".expected_sequence = sub.screen_sequence,",
                 ".actual_sequence = update.frontier.sequence,",
@@ -274,26 +293,26 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
         defer a.free(call);
         const bare = try std.fmt.allocPrint(a, "collectFail(\"{s}\")", .{site.name});
         defer a.free(bare);
-        if (std.mem.indexOf(u8, body, bare) != null) {
+        if (std.mem.indexOf(u8, body_n, bare) != null) {
             std.debug.print("«{s}» 가 다시 이름만 남긴다 — 숫자가 빠졌다\n", .{site.name});
             return error.FrontierSiteLostValues;
         }
-        if (countAll(body, call) != 1) {
+        if (countAll(body_n, call) != 1) {
             std.debug.print("«{s}» 가 값을 싣는 호출로 정확히 한 번 나오지 않는다\n", .{site.name});
             return error.FrontierSiteMissing;
         }
-        const call_at = std.mem.indexOf(u8, body, call).?;
+        const call_at = std.mem.indexOf(u8, body_n, call).?;
         // 조건 바로 뒤에 온다 — 조건을 뒤집거나 다른 갈래로 옮기면 그 줄은 엉뚱한 때 나온다.
-        const guard_at = std.mem.lastIndexOf(u8, body[0..call_at], site.guard) orelse {
+        const guard_at = std.mem.lastIndexOf(u8, body_n[0..call_at], site.guard) orelse {
             std.debug.print("«{s}» 앞의 조건이 달라졌다\n", .{site.name});
             return error.FrontierGuardMoved;
         };
-        const between = std.mem.trim(u8, body[guard_at + site.guard.len .. call_at], " \t\n");
+        const between = std.mem.trim(u8, body_n[guard_at + site.guard.len .. call_at], " \t\n");
         if (between.len != 0) {
             std.debug.print("«{s}» 조건과 호출 사이에 다른 코드가 끼었다: {s}\n", .{ site.name, between });
             return error.FrontierGuardDetached;
         }
-        const args = try section(body[call_at..], call, "});");
+        const args = try section(body_n[call_at..], call, "});");
         // 필드 수도 잰다 — 같은 필드를 두 번 쓰면 컴파일이 막지만, 새 필드가 생겼는데 여기서
         // 안 재면 그 값은 아무도 안 본다.
         if (countAll(args, " = ") != site.fields.len + 1) {
@@ -346,16 +365,19 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
             .{ .call = "collect_failure.failErr(", .allowed = 1 }, // collectFailErr
             .{ .call = "collect_failure.failFrontier(", .allowed = 1 }, // collectFailFrontier
         };
-        for (writers) |w| {
-            const n = try countProductSources(a, w.call);
+        var needles: [writers.len][]const u8 = undefined;
+        for (writers, &needles) |w, *n| n.* = w.call;
+        var counts: [writers.len]usize = undefined;
+        try countProductSources(a, &needles, &counts);
+        for (writers, counts) |w, n| {
             const in_server = countAll(server, w.call);
             if (n != w.allowed or in_server != w.allowed) {
                 std.debug.print("«{s}» 가 저장소에 {d} 곳(server {d}) — {d} 곳이어야 한다\n", .{ w.call, n, in_server, w.allowed });
                 return error.RecordWrittenElsewhere;
             }
         }
-        // 기록을 가져다 쓰는 파일도 닫혀 있다 — 둘을 넘으면 새 소비자가 위 규율 밖에서 생긴 것이다.
-        try std.testing.expectEqual(@as(usize, 2), try countProductSources(a, "@import(\"collect_failure.zig\")"));
+        // 가져다 **읽기만** 하는 파일 수는 세지 않는다. 새 소비자가 읽는 것은 해가 없고, 쓰는 것은 위
+        // 네 자리 수가 잡는다 — import 수를 잠그면 정당한 읽기 소비자만 막힌다(3회차 C3).
     }
 
     // ③ **로그가 그 렌더를 그대로 낸다 — 함수 전체가 정확히 세 문장이다.** 부분문자열을 재면 렌더를
@@ -444,20 +466,21 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
     // ⑥ **값 판정자가 PR 게이트에 걸려 있다.** leaf 의 순수 테스트가 떨어져 나가면 위 배선은 초록인데
     //    값은 아무도 안 잰다 — 그게 1회차의 출발점이었다(2회차 B03·B05).
     {
-        const build_raw = try read(a, "build.zig");
-        defer a.free(build_raw);
-        for ([_][]const u8{
-            ".root_source_file = b.path(\"src/platform/macos/session_host/collect_failure.zig\"),",
-            "run_collect_fail_line.addArg(\"--maru-expect-tests=",
-            "run_collect_fail_line.addArg(\"--maru-expect-passed=",
-            "collect_fail_step.dependOn(&run_collect_fail_line.step);",
-            "boundary_step.dependOn(&run_collect_fail_line.step);",
-        }) |needle| {
-            if (countAll(build_raw, needle) != 1) {
-                std.debug.print("build.zig 에 «{s}» 가 정확히 한 번 있지 않다\n", .{needle});
-                return error.LeafGateUnregistered;
-            }
+        var g = try build_graph.parse(a);
+        defer g.deinit();
+        const leaf = "src/platform/macos/session_host/collect_failure.zig";
+        if (g.countRegistrationsWithRoot(leaf) < 1) return error.LeafGateUnregistered;
+        const run_var = "run_collect_fail_line";
+        if (!g.dependsOn("boundary_step", run_var) or !g.dependsOn("collect_fail_step", run_var))
+            return error.LeafGateUnregistered;
+        const v = g.varCalls(run_var) orelse return error.LeafGateUnregistered;
+        var has_tests = false;
+        var has_passed = false;
+        for (v.args) |arg| {
+            if (std.mem.startsWith(u8, arg, "--maru-expect-tests=")) has_tests = true;
+            if (std.mem.startsWith(u8, arg, "--maru-expect-passed=")) has_passed = true;
         }
+        if (!has_tests or !has_passed) return error.LeafGateUnregistered;
     }
 }
 

@@ -207,6 +207,20 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         coordinator,
         "test \"예약 대조 진단은 섹션별로도 «예약 -> 실제» 방향을 지킨다\"",
     ));
+    // 그리고 **짝짓기 자체**를 행동으로 재는 판정자도 있어야 한다. 포맷만 재면 보고를 직접 만들어
+    // 비교하므로 `reserved`/`actual` 을 맞바꿔도 초록이다(적대적 S3 — 형제 판정자가 앓던 그 병).
+    try std.testing.expectEqual(@as(usize, 1), count(
+        coordinator,
+        "test \"섹션 보고는 미리보기를 예약 자리에, 실제를 실제 자리에 넣는다\"",
+    ));
+    // capture 에서 실제 값을 **세 필드만** 옮기는 자리. 여기가 어긋나면 순수 판정자는 못 잡는다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        coordinator,
+        "        .total = actual_total,\n" ++
+            "        .notification = capture.notification_handoff.len,\n" ++
+            "        .metadata = capture.notification_metadata_handoff.len,\n" ++
+            "        .next_handle = capture.next_handle,",
+    ));
 
     // ── 상위 소비자(coordinator) — 적대적 검증 G 회차가 셋 다 뚫었다 ─────────────
     // G2: **`bytes` 축만 조용히 무시**해도 아무도 안 빨개졌다. 이 PR 이 그 축을 「드물게만

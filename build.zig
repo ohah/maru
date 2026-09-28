@@ -6245,7 +6245,7 @@ pub fn build(b: *std.Build) void {
                     .imports = &.{.{ .name = "maru", .module = maru_mod }},
                 }),
                 // 두 번째: 진단 문자열의 **방향**(예약 -> 실제). 뒤집히면 사람이 원인을 정반대로 읽는다.
-                .filters = &.{ "product coordinator uses one graph capture", "예약 대조 진단은" },
+                .filters = &.{ "product coordinator uses one graph capture", "예약 대조 진단은", "섹션 보고는" },
             });
             const run_session_host_upgrade_budget_product = b.addSystemCommand(&.{"/usr/bin/env"});
             run_session_host_upgrade_budget_product.addPrefixedArtifactArg(
@@ -6255,7 +6255,7 @@ pub fn build(b: *std.Build) void {
             run_session_host_upgrade_budget_product.addArtifactArg(
                 session_host_upgrade_budget_product_compile,
             );
-            run_session_host_upgrade_budget_product.addArg("--maru-expect-tests=3");
+            run_session_host_upgrade_budget_product.addArg("--maru-expect-tests=4");
             run_session_host_upgrade_budget_product.expectExitCode(0);
             run_session_host_upgrade_budget_product.setCwd(b.path("."));
             session_host_upgrade_budget_admission_step.dependOn(

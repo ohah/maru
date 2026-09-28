@@ -925,6 +925,35 @@ const BudgetSectionsReport = struct {
     actual_next_handle: u64,
 };
 
+/// 실제(frozen) 쪽 섹션 값. `QuiescedCapture` 에서 **세 필드만** 읽어 옮긴다.
+const ActualSections = struct {
+    total: usize,
+    notification: usize,
+    metadata: usize,
+    next_handle: u64,
+};
+
+/// 미리보기와 실제를 **보고로 짝짓는** 순수 함수.
+///
+/// 이 매핑을 `noteUpgradeBudgetSections` 안에 두었더니, 포맷 판정자가 보고를 **직접 만들어** 재는
+/// 바람에 `reserved`/`actual` 을 맞바꿔도 초록이었다(2026-09-28 적대적 검증 S3). 같은 병을 바로
+/// 옆의 형제 판정자에서 지적해 놓고 새 판정자에서 반복했다 — 「형식이 맞다」가 아니라 「무엇이
+/// 들어가는가」를 재야 한다. 그래서 짝짓는 일을 여기로 빼 **행동으로** 잰다.
+fn sectionsReport(preview_sections: PreviewSections, actual: ActualSections) BudgetSectionsReport {
+    const attempt_section = preview_sections.total_bytes -| preview_sections.without_attempt;
+    return .{
+        .attempt = attempt_section,
+        .reserved_without_attempt = preview_sections.without_attempt,
+        .actual_without_attempt = actual.total -| attempt_section,
+        .reserved_notification = preview_sections.notification,
+        .actual_notification = actual.notification,
+        .reserved_metadata = preview_sections.metadata,
+        .actual_metadata = actual.metadata,
+        .reserved_next_handle = preview_sections.next_handle,
+        .actual_next_handle = actual.next_handle,
+    };
+}
+
 fn formatBudgetSections(buf: []u8, report: BudgetSectionsReport) ![]u8 {
     return std.fmt.bufPrint(
         buf,
@@ -958,19 +987,14 @@ fn noteUpgradeBudgetSections(
 ) void {
     if (axis != .bytes) return;
     if (builtin.is_test) return;
-    const attempt_section = preview_sections.total_bytes -| preview_sections.without_attempt;
+    const report = sectionsReport(preview_sections, .{
+        .total = actual_total,
+        .notification = capture.notification_handoff.len,
+        .metadata = capture.notification_metadata_handoff.len,
+        .next_handle = capture.next_handle,
+    });
     var buf: [256]u8 = undefined;
-    const text = formatBudgetSections(&buf, .{
-        .attempt = attempt_section,
-        .reserved_without_attempt = preview_sections.without_attempt,
-        .actual_without_attempt = actual_total -| attempt_section,
-        .reserved_notification = preview_sections.notification,
-        .actual_notification = capture.notification_handoff.len,
-        .reserved_metadata = preview_sections.metadata,
-        .actual_metadata = capture.notification_metadata_handoff.len,
-        .reserved_next_handle = preview_sections.next_handle,
-        .actual_next_handle = capture.next_handle,
-    }) catch return;
+    const text = formatBudgetSections(&buf, report) catch return;
     host_log.line("{s}", .{text});
 }
 
@@ -1010,6 +1034,35 @@ fn noteUpgradeBudgetMismatch(report: BudgetMismatchReport) void {
     var buf: [256]u8 = undefined;
     const text = formatBudgetMismatch(&buf, report) catch return;
     host_log.line("{s}", .{text});
+}
+
+test "섹션 보고는 미리보기를 예약 자리에, 실제를 실제 자리에 넣는다" {
+    // **「형식이 맞다」가 아니라 「무엇이 들어가는가」를 잰다.** 포맷 판정자는 보고를 직접 만들어
+    // 재므로 짝짓기가 뒤바뀌어도 초록이다 — 바로 옆 형제 판정자가 앓던 그 병이다(적대적 S3).
+    const report = sectionsReport(.{
+        .total_bytes = 1064,
+        .without_attempt = 1000,
+        .notification = 120,
+        .metadata = 40,
+        .next_handle = 41,
+    }, .{
+        .total = 1067,
+        .notification = 121,
+        .metadata = 41,
+        .next_handle = 42,
+    });
+    // attempt 는 양쪽이 같은 레코드라 한 값 — 미리보기 총합에서 본문을 뺀 값이다.
+    try std.testing.expectEqual(@as(usize, 64), report.attempt);
+    // 예약 자리에는 **미리보기** 값이, 실제 자리에는 **실제** 값이 들어간다. 넷 다 서로 다른 수라
+    // 하나라도 맞바뀌면 잡힌다.
+    try std.testing.expectEqual(@as(usize, 1000), report.reserved_without_attempt);
+    try std.testing.expectEqual(@as(usize, 1003), report.actual_without_attempt);
+    try std.testing.expectEqual(@as(usize, 120), report.reserved_notification);
+    try std.testing.expectEqual(@as(usize, 121), report.actual_notification);
+    try std.testing.expectEqual(@as(usize, 40), report.reserved_metadata);
+    try std.testing.expectEqual(@as(usize, 41), report.actual_metadata);
+    try std.testing.expectEqual(@as(u64, 41), report.reserved_next_handle);
+    try std.testing.expectEqual(@as(u64, 42), report.actual_next_handle);
 }
 
 test "예약 대조 진단은 섹션별로도 «예약 -> 실제» 방향을 지킨다" {

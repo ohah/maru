@@ -493,6 +493,15 @@ test "원격 왕복 장부: 단조 시계가 0 이 아니고 뒤로 안 간다 �
     const b = monotonicNs();
     try std.testing.expect(a > 0);
     try std.testing.expect(b >= a);
+
+    // **«0 이 아니다» 로는 부족하다.** 상수를 돌려줘도 `a > 0` 과 `b >= a` 를 둘 다 만족하는데,
+    // 그러면 `ended > started` 가 거짓이라 `remote_ns` 는 영영 0 이다 — 「늘 0」을 막은 것과
+    // **같은 피해를 다른 경로로** 낸다(적대적 검증 N1 이 그렇게 살아남았다).
+    // 그래서 **실제로 흐르는지**를 잰다: 조금 자고 나면 값이 커져야 한다.
+    var slept: [1]std.c.timespec = .{.{ .sec = 0, .nsec = 2_000_000 }}; // 2 ms
+    _ = std.c.nanosleep(&slept[0], null);
+    const c_after = monotonicNs();
+    try std.testing.expect(c_after > a);
 }
 
 /// **여기는 백그라운드 스레드다** — `std.Io` 도 로컬 파일시스템도 안 만진다(`ssh_upload` 규율 ·

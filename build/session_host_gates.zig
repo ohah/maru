@@ -5264,6 +5264,24 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_owner_lock_touch_tests.setCwd(b.path("."));
         session_host_owner_lock_heal_step.dependOn(&run_owner_lock_touch_tests.step);
 
+        // 갱신 목록 자신의 판정자 — 매니페스트를 **어떻게** 찍는지의 효과를 잰다(`.skip` 은 ctime 을
+        // 안 바꾸고 `.by_path` 는 바꾼다). 이 자리가 없으면 그 구분이 판정자 없이 산다.
+        const manifest_touch_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/tmp_retention.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            // 이 루트는 import 를 통해 남의 판정자까지 끌어온다(14개). **이 한 줄만** 통과시킨다.
+            .filters = &.{"매니페스트 경로 갱신은"},
+        });
+        const run_manifest_touch_tests = b.addRunArtifact(manifest_touch_tests);
+        run_manifest_touch_tests.addArg("--maru-expect-tests=1");
+        run_manifest_touch_tests.setCwd(b.path("."));
+        session_host_owner_lock_heal_step.dependOn(&run_manifest_touch_tests.step);
+
         // 배선 축: 순수 판정자는 계약을 재고, 이것은 그 계약이 **두 루프 모두에서 불리는가**를 잰다.
         // `boundary` 잡도 같은 파일을 돌리지만(build.zig), 이 게이트만 돌려도 배선이 빠진 것을 잡게 둔다.
         const owner_lock_retention_boundary_tests = addProjectTest(b, .{

@@ -69,6 +69,15 @@ test "owner.lock 이름 유지: 첫 실행 경로와 승계 경로가 **둘 다*
     try std.testing.expectEqual(@as(usize, 1), count(daemon, "= tmp_retention.audit_interval_ms;"));
     try std.testing.expectEqual(@as(usize, 1), count(daemon, "= tmp_retention.touch_interval_ms;"));
 
+    // **매니페스트를 어떻게 찍는지**가 배선이다. `?*Published` 의 `null` 이 「핸들이 없다」와
+    // 「건드리면 안 된다」를 접고 있어서, 승계 루프가 남이 쥔 매니페스트를 경로로 찍어 그 publication 을
+    // 영영 못 거두게 만들었다(2026-09-27: `host.v1.json` 잔재로 postcommit 게이트가 네 런 연속 빨강).
+    // 순수 판정자는 「`.skip` 이 ctime 을 안 바꾼다」를 재고, 여기서는 **호출부가 그것을 넘기는지**를 잰다.
+    try std.testing.expectEqual(@as(usize, 1), count(retention, "pub const ManifestTouch = union(enum)"));
+    try std.testing.expectEqual(@as(usize, 1), count(restore, "tmp_retention.touchAll(retention, .skip)"));
+    // daemon 은 핸들을 쥐므로 `touchExact` 갈래를 타야 한다 — 그쪽이 찍은 뒤 identity 를 갱신한다.
+    try std.testing.expectEqual(@as(usize, 1), count(retention, ".published => |published| _ = published.touchExact()"));
+
     // 계약 문서가 그 사실을 적는다 — 코드만 고치고 문서가 침묵하면 다음 사람이 한쪽을 지운다.
     try std.testing.expectEqual(@as(usize, 1), count(contract, "**승계한 host도 이 일을 한다**"));
 }

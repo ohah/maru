@@ -443,7 +443,10 @@ fn touchRuntimeArtifacts(
         .socket_path = socket_path,
         .owner_path = owner_path,
         .host_id = host_id,
-    }, published_manifest);
+    }, if (published_manifest) |published|
+        .{ .published = published }
+    else
+        .by_path);
 }
 
 test "tmp 정리 회피: 처음엔 즉시, 그 뒤엔 벽시계 주기로만 touch한다" {

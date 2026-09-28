@@ -48465,6 +48465,30 @@ test "command palette IME preedit allocation failure does not retain stale comma
     try std.testing.expectEqual(@as(usize, 0), session.chrome_host.palette.result_count);
 }
 
+test "command palette does not accept Enter while IME preedit survives without callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.dispatchAppAction(.toggle_command_palette);
+    input_ops.imeMarked(session, "새 터미널");
+    const before = pane_ops.activePane(session).terms.items.len;
+    input_ops.imeBegin(session);
+    input_ops.imeEnd(session, .{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.chrome_host.palette.open);
+    try std.testing.expectEqual(before, pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqualStrings("새 터미널", session.chrome_host.palette.input.preedit.items);
+}
+
 test "TFREG scrollback Find switches literal and PCRE2 through the shared chord" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

@@ -997,6 +997,42 @@ test "reserved handoff commits into pre-quiesce files and cleans the private att
     try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
 }
 
+test "reserved handoff commits when the handoff exactly fills the reservation" {
+    // 2026-09-28 이전에는 예약 == 실제가 **정상 경로**였다. 그 뒤 예약에 여유가 생겨
+    // (`upgrade_budget_admission.reservedBytesFor`) 이 경계를 밟는 커밋이 드물어졌고, 그래서
+    // `bytes.len > reservation.reserved_len` 의 `>` 를 `>=` 로 바꿔도 어떤 판정자도 빨개지지
+    // 않았다(적대적 검증 E1). 여유를 둔 대가로 **경계 한 칸이 시험을 벗어난 것**이라, 정확히
+    // 가득 채우는 커밋을 여기서 따로 붙잡는다.
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store-exact-fill");
+    defer test_scratch.close(std.testing.io, dir);
+    const record = try testAttemptRecord(std.testing.allocator, 0xAC, 0x21);
+    defer std.testing.allocator.free(record);
+    const bytes = try handoff.encodeHost(std.testing.allocator, .{
+        .host_id = 0xAC,
+        .upgrade_epoch = 3,
+        .next_handle = 4,
+        .runtimes = &.{},
+        .attempt_record = record,
+    });
+    defer std.testing.allocator.free(bytes);
+    const deadline = try upgrade_deadline.Deadline.after(std.testing.io, 5 * std.time.ns_per_s);
+    // **여유 0 으로 예약한다** — 이 테스트의 전부가 그 한 칸이다.
+    var reservation = try reserve(dir, 0x21, bytes.len, deadline);
+    defer reservation.deinit();
+    try std.testing.expectEqual(bytes.len, reservation.reserved_len);
+    var pair = try commitReserved(
+        std.testing.allocator,
+        &reservation,
+        testExpected(0xAC, 0x21, 4),
+        bytes,
+        .{ .deadline = deadline },
+    );
+    defer pair.deinit();
+    try readbackEqual(pair.primary_fd, bytes, .{ .deadline = deadline });
+    try readbackEqual(pair.backup_fd, bytes, .{ .deadline = deadline });
+}
+
 test "reserved handoff syscall failures publish no pair and leave no attempt residue" {
     var dir_buf: [192]u8 = undefined;
     const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store-reserved-failures");

@@ -131,6 +131,30 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
     // `builtin` 이 정말 필요해지면 이 줄을 먼저 지우고 «왜 안전한지» 적어야 한다.
     try std.testing.expectEqual(@as(usize, 0), count(admission, "@import(\"builtin\")"));
     try std.testing.expectEqual(@as(usize, 0), count(admission, "builtin.is_test"));
+    // **일시정지 예산은 «미리보기» 기준을 유지한다.** 커밋이 실제로 쓰는 양은 예약분이 아니라
+    // 실제 handoff 크기이기 때문이다. 예약분으로 바꾸면 더 보수적이 되어 오늘 통과하던 승계가
+    // `InsufficientIoBudget` 으로 **새로 막힌다** — PR 에 적은 결정인데 그물이 없었다(적대적
+    // 검증 E3). 바꾸려면 이 줄을 먼저 지우고 왜 더 조이는지 적어야 한다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        admission,
+        "if (!fitsPauseBudget(preview.bytes, sample_len, elapsed_ns, deadline.remainingNs())) {",
+    ));
+    // 여유를 둔 대가로 «예약 == 실제» 경계가 정상 경로에서 벗어났다. 그 한 칸을 따로 붙잡는
+    // 판정자가 실제로 있어야 한다(적대적 검증 E1).
+    try std.testing.expectEqual(@as(usize, 1), count(
+        store,
+        "test \"reserved handoff commits when the handoff exactly fills the reservation\"",
+    ));
+    // 문서의 여유 정책 절이 조용히 사라지지 않게 한다(적대적 검증 D3). 본문이 아니라 **절의
+    // 존재**를 재므로 문장을 다듬는 것은 막지 않는다.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        contract,
+        "**예약에는 여유를 둔다 (2026-09-28 결정).**",
+    ) != null);
+    // 문서가 상수를 «숫자» 로 인용하면 코드와 조용히 갈라진다(적대적 검증 D1·D2). 이름으로만
+    // 인용하게 해서 드리프트 면 자체를 없앤다.
+    try std.testing.expect(std.mem.indexOf(u8, contract, "max(min_headroom_bytes, preview/headroom_divisor)") != null);
     // 여유가 파일에 패딩으로 새지 않는다는 보장. 이 고침 **전에는** 예약 == 실제라 이 잘라내기가
     // 사실상 no-op 이었고 지워도 아무도 몰랐다 — 이제는 하중을 받는다.
     try std.testing.expectEqual(@as(usize, 1), count(

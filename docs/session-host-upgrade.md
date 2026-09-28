@@ -431,7 +431,8 @@ U5 제품 admission은 accepted reply를 flush하고 reader를 멈추기 **전**
    **3 바이트** 때문에 승계가 통째로 취소됐고, 앱은 새 host 를 띄웠다(host 누적). 13MB 짜리 상태에서
    3 바이트를 두고 승계를 버리는 것은 균형이 맞지 않는다.
 
-   이제 `upgrade_budget_admission.reservedBytesFor` 가 `max(64KiB, preview/16)` 만큼 여유를 얹어 예약하고,
+   이제 `upgrade_budget_admission.reservedBytesFor` 가
+   `max(min_headroom_bytes, preview/headroom_divisor)` 만큼 여유를 얹어 예약하고,
    `max_handoff_commit_bytes` 상한에서는 여유를 포기한다(넘겨 잡으면 `validateLength` 가 거절해 승계가 시작도
    못 한다). 여유분은 **파일에 남지 않는다** — `writeReservedFile` 이 쓰기 뒤 `ftruncate(fd, bytes.len)` 으로
    실제 길이에 맞춰 자른다. 늘어나는 것은 시도 중에만 잡히는 디스크뿐이다(primary·backup 두 벌).

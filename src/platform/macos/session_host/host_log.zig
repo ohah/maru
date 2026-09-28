@@ -22,10 +22,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// 한 줄(개행 포함)의 상한. 넘치면 `line` 은 그 줄을 **통째로** 버린다 — 길이가 가변인 진단은
+/// 이 값을 보고 스스로 줄여야 한다(`collect_failure.line_capacity`).
+pub const max_line_bytes = 256;
+
 /// 진단 한 줄을 host 로그(fd 2)에 남긴다. 실패해도 조용히 넘어간다 — 진단이 제품 경로를 바꾸지 않는다.
 pub fn line(comptime fmt: []const u8, args: anytype) void {
     if (builtin.is_test) return;
-    var buf: [256]u8 = undefined;
+    var buf: [max_line_bytes]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch return;
     _ = std.c.write(2, text.ptr, text.len);
 }

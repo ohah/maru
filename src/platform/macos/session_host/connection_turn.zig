@@ -19,6 +19,7 @@ const upgrade = @import("upgrade_coordinator.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
+const collect_failure = @import("collect_failure.zig");
 
 pub const CloseReason = enum {
     eof,
@@ -205,42 +206,10 @@ var last_sweep_block: ?ResyncSweepBlock = null;
 /// `collectOutput` 이 접힌 자리와 **원래 오류**를 남긴다. 닫기 직전 한 번뿐이라 소음이 아니다.
 fn noteCollectFailure() void {
     if (builtin.is_test) return;
-    const last = server.Connection.lastCollectFailure();
-    var buf: [384]u8 = undefined;
-    // 버퍼가 모자라도 **자리 이름은 잃지 않는다** — 숫자는 덤이고, 이름이 없던 시절로 돌아가면 안 된다.
-    const text = formatCollectFailure(&buf, last) catch return host_log.line(
-        "session host collect failed: site={s} err={s}",
-        .{ last.site, last.err },
-    );
-    host_log.line("{s}", .{text});
-}
-
-/// frontier 대조 자리에서 접혔으면 **양쪽 값**을 같은 줄에 덧붙인다.
-///
-/// 방향은 «기대 -> 실제» 다. 형제 진단(`budget mismatch … bytes=예약->실제`)과 같은 방향이어야 두 줄을
-/// 나란히 읽는 사람이 헷갈리지 않는다 — 뒤집혀도 컴파일되고, 뒤집힌 줄은 원인을 정반대로 가리킨다.
-/// frontier 가 없는 자리(할당 실패·ops 오류)는 예전 줄 그대로다.
-fn formatCollectFailure(buf: []u8, last: server.Connection.CollectFailure) ![]u8 {
-    const head = try std.fmt.bufPrint(
-        buf,
-        "session host collect failed: site={s} err={s}",
-        .{ last.site, last.err },
-    );
-    const m = last.frontier orelse return head;
-    const tail = try std.fmt.bufPrint(
-        buf[head.len..],
-        " runtime={x:0>32} seq={d}->{d} gen={d}->{d} snapshot={d} send={d}",
-        .{
-            m.runtime_id,
-            m.expected.sequence,
-            m.actual.sequence,
-            m.expected.generation,
-            m.actual.generation,
-            @intFromBool(m.is_snapshot),
-            m.send_bytes,
-        },
-    );
-    return buf[0 .. head.len + tail.len];
+    // 줄 모양·길이 상한·방향은 `collect_failure.render` 가 소유하고 PR 에서 도는 순수 테스트가 잰다.
+    // 여기서는 **그 렌더를 그대로** 한 줄로 낸다 — 다른 줄을 찍는 갈래를 두지 않는다.
+    var buf: [collect_failure.line_capacity]u8 = undefined;
+    host_log.line("{s}", .{collect_failure.render(&buf, collect_failure.last())});
 }
 
 fn noteResyncSweepBlocked(now: ResyncSweepBlock) void {
@@ -4328,44 +4297,4 @@ fn adoptTurnLikeProduct(
         },
         .deferred_global_pressure, .deferred_resync => return error.NotTheProductPath,
     }
-}
-
-test "collect 실패 줄은 frontier 불일치의 양쪽 값을 «기대 -> 실제» 방향으로 싣는다" {
-    // 2026-09-28 에 `site=delta_seq_mismatch` 한 줄만 남아 원인을 못 갈랐다. 숫자가 붙어야 하고,
-    // 그 숫자의 **방향**이 형제 진단과 같아야 한다 — 뒤집혀도 컴파일되고 다른 판정자도 통과한다.
-    var buf: [384]u8 = undefined;
-    const text = try formatCollectFailure(&buf, .{
-        .site = "delta_seq_mismatch",
-        .err = "-",
-        .frontier = .{
-            .runtime_id = 0x0935886dc61898048f9fd1e194dee150,
-            .expected = .{ .generation = 7, .sequence = 41 },
-            .actual = .{ .generation = 8, .sequence = 42 },
-            .is_snapshot = false,
-            .send_bytes = 512,
-        },
-    });
-    try std.testing.expectEqualStrings(
-        "session host collect failed: site=delta_seq_mismatch err=- " ++
-            "runtime=0935886dc61898048f9fd1e194dee150 seq=41->42 gen=7->8 snapshot=0 send=512",
-        text,
-    );
-
-    // frontier 가 없는 자리는 **예전 줄 그대로**다. 로그를 읽는 도구·사람이 기대하는 모양을 안 바꾼다.
-    const plain = try formatCollectFailure(&buf, .{ .site = "delta", .err = "ProjectionTooLarge", .frontier = null });
-    try std.testing.expectEqualStrings("session host collect failed: site=delta err=ProjectionTooLarge", plain);
-
-    // 가장 긴 값으로도 버퍼 안에 든다 — 넘치면 제품은 숫자 없는 줄로 떨어진다(이름은 지킨다).
-    const widest = try formatCollectFailure(&buf, .{
-        .site = "delta_frontier_mismatch",
-        .err = "-",
-        .frontier = .{
-            .runtime_id = std.math.maxInt(u128),
-            .expected = .{ .generation = std.math.maxInt(u64), .sequence = std.math.maxInt(u64) },
-            .actual = .{ .generation = std.math.maxInt(u64), .sequence = std.math.maxInt(u64) },
-            .is_snapshot = true,
-            .send_bytes = std.math.maxInt(usize),
-        },
-    });
-    try std.testing.expect(std.mem.endsWith(u8, widest, " snapshot=1 send=18446744073709551615"));
 }

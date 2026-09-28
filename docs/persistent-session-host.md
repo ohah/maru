@@ -8017,27 +8017,38 @@ generation 이 바뀌었거나) 로그에는 **어느 쪽인지, 어느 런타�
 `delta_frontier_mismatch`)는 `collectFailFrontier` 로 **양쪽 값**을 싣는다. 같은 줄 뒤에 붙는다:
 
 ```
-… site=delta_seq_mismatch err=- runtime=<32 hex> seq=<기대>-><실제> gen=<기대>-><실제> snapshot=<0|1> send=<bytes>
+… site=delta_seq_mismatch err=- runtime=<32 hex> seq=<기대>-><실제> gen=<commit>-><실제> snapshot=<0|1> send=<bytes>
 ```
 
-방향은 «기대 -> 실제» 로, 업그레이드 예산 진단(`bytes=예약->실제`)과 같다. frontier 가 없는 자리의 줄은
-예전 그대로다. 오류 집합은 넓히지 않았다(§12.3 과 같은 이유).
+방향은 «기대 -> 실제» 로, 업그레이드 예산 진단(`bytes=예약->실제`)과 같다. `gen` 의 왼쪽은 이 연결이
+마지막으로 commit 한 세대다. frontier 가 없는 자리의 줄은 예전 그대로다. 오류 집합은 넓히지 않았다
+(§12.3 과 같은 이유).
 
-**어느 갈래인지는 숫자가 가른다.** 아래는 각 모양이 **먼저 의심할 곳**이지 확인된 원인이 아니다 —
-이 절을 쓸 때 재현은 한 번이었고 그때는 숫자가 없었다.
+기록과 렌더는 leaf `session_host/collect_failure.zig` 가 소유한다. 거기 두는 이유는 하나다 — 그 순수
+테스트가 **PR 에서 돌아야** 한다(session-host 잡은 PR 에서 안 돈다). 렌더는 `host_log.max_line_bytes`
+안에서 끝난다. `host_log.line` 은 상한을 넘는 줄을 **통째로 버리므로**, 숫자가 안 들어가면 숫자만 버리고
+자리 이름은 남긴다.
+
+**어느 갈래가 가능한가 — 현재 producer 기준.** 제품 producer(`RuntimeManager.deltaOp`·`snapshotOp`)는
+요청받은 `sequence` 를 **그대로** 돌려준다(빈 delta 만 `sequence - 1` 이고, 그건 서버가 기대하는 값과
+같다). 그래서 지금 코드에서는 `seq` 가 어긋날 길이 없고, **어긋날 수 있는 것은 `gen` 뿐이다.** 그
+`gen` 은 `host_registry` 의 `resize_generation` 이고 `lockCore` **전에** 읽는다.
 
 | 모양 | 먼저 볼 곳 |
 | --- | --- |
-| `seq` 가 기대보다 앞섬, `gen` 같음 | producer 가 이 연결의 commit 과 무관하게 sequence 를 전진시킨 경로 |
-| `seq` 같음, `gen` 다름, `snapshot=0` | 세대가 바뀌었는데 스냅샷이 아니라 delta 로 나온 경로 |
-| `seq` 가 기대보다 뒤 | 이 연결이 commit 한 frontier 보다 오래된 base 로 만든 경로 |
+| `seq` 같음, `gen` 다름, `snapshot=0` | 세대가 바뀌었는데 화면은 delta 로 나온 경로. 가설: registry 는 크기를 바꾸며 세대를 올렸는데 core grid 는 아직 그대로라 `computeDelta` 가 `SnapshotRequired` 없이 delta 를 냈다(확인 안 됨) |
+| `snapshot=1` | 스냅샷은 세대를 새로 정하므로 `gen` 차이는 **정상**이다 — 이때는 `seq` 만 본다 |
+| `seq` 가 다름 | 현재 producer 로는 불가능하다. 나온다면 producer 계약이 바뀐 것이니 그 변경부터 본다 |
 
-`runtime=` 은 `maru runtime list` 의 id 와 같은 표기라, 어느 탭이었는지 바로 짚힌다.
+위 표는 **먼저 의심할 곳**이지 확인된 원인이 아니다 — 이 절을 쓸 때 재현은 한 번이었고 그때는 숫자가
+없었다. `runtime=` 은 `maru runtime list` 의 id 와 같은 32 자리 표기라, 어느 탭이었는지 바로 짚힌다.
 
 **한계.** 이것은 **진단**이지 수정이 아니다. 런타임 하나의 어긋남이 여전히 연결 전체를 닫는다 —
 탭 16 개가 한꺼번에 끊기는 피해 범위는 그대로다. 그 스트림만 무효화하고 스냅샷으로 다시 맞추는
-방향은 원인을 숫자로 본 뒤에 정한다. 판정자는 `collect_failure_site_boundary` 의 넷째 축(배선)과
-`connection_turn.zig` 의 포맷 테스트(방향)다.
+방향은 원인을 숫자로 본 뒤에 정한다. 판정자는 둘이다 — 값(방향·상한·기록 교체)은
+`collect_failure.zig` 의 순수 테스트, 배선(어느 자리가 무엇을 넘기는가·로그가 렌더를 그대로 내는가)은
+`collect_failure_site_boundary` 의 「frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴다」다.
+둘 다 `check-boundaries` 에서 돈다.
 
 ### P0 — 문서 결정
 

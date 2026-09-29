@@ -109,8 +109,8 @@ flowchart TD
   probe로 검증한다. CI 실패 artifact와 수동 PR 비교용 screenshot은 같은 frame을
   사용한다.
 - visual output을 바꾸는 chrome PR은 이 artifact의 대표 **PNG** scenario capture를
-  `gh attach <image> --markdown -R ohah/maru`로 GitHub user-attachment에 올리고,
-  출력 Markdown image reference를 PR의 `UI 시각 검증` 절에 포함한다. artifact path만
+  gh 내장 `--attach`(`gh pr create`/`gh pr edit --attach <image>`)로 GitHub user-attachment에 올려
+  PR의 `UI 시각 검증` 절에 포함한다(방법은 [PR 체크리스트](pr-checklist.md)가 단일 출처). artifact path만
   쓰는 것은 증거가 아니다. before/after가 있는 변경은 두 capture를 포함하고, 순수
   layout refactor처럼 pixel output이 불변이면 그 이유와 scenario를 PR에 명시한다.
 - 이 fixture는 제품 E2E의 한 단계다. 실제 production host/Metal lowering은

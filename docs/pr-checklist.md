@@ -291,8 +291,11 @@ PR 본문은 **최대한 자세히** 적는다. 리뷰어가 변경 코드를 �
 - 동작을 바꿨다면 **Before → After**를 대비해 적는다. 근거가 캡처/실측이면 그 값(시퀀스 바이트, 메트릭, PTY 캡처 등)을 그대로 인용한다("추측 말고 캡처").
 - **디자인 시스템/chrome의 시각 결과를 바꾸는 PR**은 Chrome Lab 또는 같은 제품 Metal
   경로에서 만든 **PNG screenshot**을 PR 본문에 반드시 포함한다. artifact 파일 경로만 적거나
-  로컬 이미지를 설명으로 대체하지 않는다. `gh attach <image> --markdown -R ohah/maru`가
-  출력한 Markdown image reference를 `## UI 시각 검증` 절에 붙이고, scenario·viewport·theme·
+  로컬 이미지를 설명으로 대체하지 않는다. 올리는 것은 **gh 내장 `--attach` 플래그**다
+  (`gh pr create --attach <image>` · 이미 있는 PR 은 `gh pr edit <번호> --attach <image>` — gh 2.99+,
+  한 번에 50개). `## UI 시각 검증` 절에 `![설명](./image.png)`처럼 그 파일을 가리키는 참조를
+  두면 업로드된 `user-attachments` 주소로 바뀐다(참조가 없으면 본문 끝에 붙는다 — 경로는 명령을
+  실행한 디렉터리 기준). 별도 확장(`gh attach`)은 설치하지 않는다. scenario·viewport·theme·
   capture 명령을 함께 적는다. before/after가 의미 있는 변경이면 두 캡처를 함께 둔다.
   화면을 그리지 않는 순수 layout/토큰 refactor는 왜 visual output이 변하지 않는지 그 절에
   명시한다. capture가 불가능하면 UI 완료·시각 회귀 방지 주장을 할 수 없으며, 원인과

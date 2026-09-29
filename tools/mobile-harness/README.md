@@ -72,7 +72,7 @@ slower_than_free=1`, 실측 free 16.67ms vs throttled 33.33ms).
 `out/` 은 통째로 gitignore 이고, PR 에 붙일 그림은 이렇게 올린다:
 
 ```sh
-gh attach out/maru-chrome-android-app.png --markdown   # user-attachments URL 을 준다
+gh pr edit <PR 번호> --attach out/maru-chrome-android-app.png   # gh 내장 — user-attachments 로 올라가 본문에 붙는다
 ```
 
 그 URL 은 리포·브랜치와 무관하게 살아 있어, 브랜치 경로(`raw.githubusercontent.com/.../<branch>/...`)

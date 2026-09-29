@@ -3165,7 +3165,7 @@ fn b2MonotonicNs() u64 {
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
-test "[측정] B2 같은 밀집 화면의 충분한 버퍼 한 번과 절단 뒤 재그리기" {
+test "[측정] B2 밀집 화면의 한 번 그리기·절단 뒤 재그리기·가변 목록 복사 프록시" {
     // 비교 대상은 같은 frame.build 입력이다. 충분한 버퍼 한 번은 가변 목록의
     // 하한 비용이다(실제 growable writer의 증가/복사 비용은 이 테스트가 재지 않는다).
     const a = testing.allocator;
@@ -3206,12 +3206,27 @@ test "[측정] B2 같은 밀집 화면의 충분한 버퍼 한 번과 절단 뒤
         _ = build(props, full.scratch(runs, text_bytes));
     }
     const t2 = b2MonotonicNs();
-    std.debug.print("[B2] ops={d} one_pass_us={d} clipped_then_redraw_us={d} full_bytes={d} old_bytes={d}\n", .{
+    // 실제 writer 이관 전의 별도 복사 프록시다. 이미 그린 op을 2560개로 시작하는
+    // ArrayList에 옮겨, 증가 시 allocator가 잡는 용량과 추가 복사 비용만 잰다.
+    // 생성 경로 안의 append 호출 비용과 RowCache 변화는 포함하지 않는다.
+    var grown_capacity: usize = 0;
+    for (0..samples) |_| {
+        var grown: std.ArrayList(draw.Op) = .empty;
+        defer grown.deinit(a);
+        try grown.ensureTotalCapacity(a, old_ops.len);
+        try grown.appendSlice(a, full_ops[0..old_ops.len]);
+        try grown.appendSlice(a, full_ops[old_ops.len..warm.ops]);
+        grown_capacity = grown.capacity;
+    }
+    const t3 = b2MonotonicNs();
+    std.debug.print("[B2] ops={d} one_pass_us={d} clipped_then_redraw_us={d} grow_copy_us={d} full_bytes={d} old_bytes={d} grown_bytes={d}\n", .{
         warm.ops,
         (t1 - t0) / samples / std.time.ns_per_us,
         (t2 - t1) / samples / std.time.ns_per_us,
+        (t3 - t2) / samples / std.time.ns_per_us,
         full_ops.len * @sizeOf(draw.Op),
         old_ops.len * @sizeOf(draw.Op),
+        grown_capacity * @sizeOf(draw.Op),
     });
 }
 

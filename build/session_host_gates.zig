@@ -1663,10 +1663,10 @@ pub fn register(b: *std.Build, ctx: Context) void {
             }),
             .filters = &.{"CR6e-c3b2c host charge"},
         });
-        // backend 5개(N=7·8·13, 예산 대기, anchor 이탈) + 이 root 가 끌어오는 remote_runtime 의 executor
-        // 2개(identity-only abort, charge 이전) = 7.
+        // backend 6개(N=7·8·13, 예산 대기, 제품 close 경로의 anchor 이탈, 정산 없는 teardown) + 이 root 가 끌어오는 remote_runtime 의 executor
+        // 2개(identity-only abort, charge 이전) = 8.
         const run_host_charge_tests = b.addRunArtifact(host_charge_tests);
-        run_host_charge_tests.addArg("--maru-expect-tests=7");
+        run_host_charge_tests.addArg("--maru-expect-tests=8");
         run_host_charge_tests.setCwd(b.path("."));
         session_host_reconnect_host_charge_step.dependOn(&run_host_charge_tests.step);
         if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);

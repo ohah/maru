@@ -567,7 +567,7 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 - 영속 세션 호스트 CR6e-c3b2c host 단위 resident charge gate: `zig build test-session-host-reconnect-host-charge`. e3b 체인을
   상속하지 않는 독립 step이다(in-process socketpair fixture만 써서 실제 host를 띄우지 않는다). host admission 하나가 charge
   하나만 잡아 runtime 8개 이상인 host도 재접속을 시작하는지 N=7·8·13, 예산 대기, anchor 이탈, identity-only executor로
-  Debug·ReleaseFast에서 7개를 exact-count하고 경계 1개를 함께 돈다. Debug는 PR의 `test-macos-only`에, 경계는 check-boundaries에 걸린다.
+  정산 없는 teardown까지 Debug·ReleaseFast에서 8개를 exact-count하고 경계 1개를 함께 돈다. Debug는 PR의 `test-macos-only`에, 경계는 check-boundaries에 걸린다.
 - 영속 세션 호스트 CR2e-e3c1 coordinator ingress gate: `zig build test-session-host-cr2e-e3c1`. e3b2를 상속하고
   final-address reconnect-only `SessionHostCoordinator`가 AppSession frame의 sole drain을 소유하는지 Debug·ReleaseFast로
   exact-count한다. queue/budget은 `AppProcessIncidentOwner`, runtime map은 `RemoteTermBackend`에 그대로 남고 coordinator는

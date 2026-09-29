@@ -99,7 +99,9 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
         "\"invalidate_notice_adopt\"",
         "\"tick_begin_dispatch\"",
         "\"tick_collect_oom\"",
+        "\"tick_frontier_resync_failed\"",
         "\"tick_connection_self_closed\"",
+        "\"invalidate_frontier_mismatch\"",
     };
     // **제품 구간만 센다.** 이 축이 재는 것은 「제품의 닫는 자리마다 이름이 다르다」이고, 판정자
     // 픽스처가 같은 이름을 쓰는 것은 그 성질을 깨지 않는다. 2026-09-21 에 죽은 코드를 지우면서

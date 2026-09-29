@@ -212,6 +212,14 @@ fn noteCollectFailure() void {
     host_log.line("{s}", .{collect_failure.render(&buf, collect_failure.last())});
 }
 
+/// frontier 가 어긋난 스트림을 **닫지 않고** resync 로 돌렸다는 한 줄. 바로 앞의 `collect failed` 줄이 무엇이
+/// 얼마나 어긋났는지를 말하고, 이 줄은 그 뒤 연결이 살아 있다는 것을 말한다 — 없으면 「닫힘 줄이 안 보인다」로만
+/// 추론해야 한다(로그 0건 ≠ 안 일어남).
+fn noteStreamFrontierResync(stream: subscription_identity.LocalStreamId) void {
+    if (builtin.is_test) return;
+    host_log.line("session host stream resync after frontier mismatch: stream={d} -> snapshot.invalidated", .{stream});
+}
+
 fn noteResyncSweepBlocked(now: ResyncSweepBlock) void {
     if (builtin.is_test) return;
     if (last_sweep_block) |prev| if (std.meta.eql(prev, now)) return;
@@ -838,6 +846,23 @@ pub const Client = struct {
                     // 「메모리가 모자랐다」는 뜻이 아닐 수 있다 — 닫기 «전» 에 그 자리를 남긴다.
                     noteCollectFailure();
                     self.beginCloseAt("tick_collect_oom", .resource_exhausted);
+                    return;
+                },
+                error.StreamFrontierDiverged => {
+                    // **스트림 하나의 실패다 — 연결을 닫지 않는다.** 예전에는 이것도 `OutOfMemory` 로 접혀
+                    // 연결 전체가 닫혔고, 한 탭의 어긋남이 그 창의 탭 전부(2026-09-28, 16 개)를 끊었다. 전송은
+                    // 멀쩡하고 `collectOutput` 이 준비물을 되돌렸으므로, 그 스트림만 무효화해 클라이언트가
+                    // `runtime.resync` 로 새 스냅샷을 받게 한다 — 예산 부족(`invalidate_projection_budget`)·
+                    // prepared attach 가 이미 타는 복구 경로다. 숫자는 닫힘과 같은 줄로 남긴다.
+                    noteCollectFailure();
+                    if (tracker_state == .valid) {
+                        noteStreamFrontierResync(stream);
+                        self.invalidateSubscriptionOutput("invalidate_frontier_mismatch", stream, tracker);
+                        return;
+                    }
+                    // resync 스냅샷 **자체**가 어긋났다(`.invalidated` 에서 resync 를 시도하던 중). 스냅샷으로도
+                    // 못 맞추는 스트림을 다시 무효화하면 같은 자리를 돈다 — 무한 재시도 대신 예전처럼 닫는다.
+                    self.beginCloseAt("tick_frontier_resync_failed", .resource_exhausted);
                     return;
                 },
             }
@@ -4299,61 +4324,139 @@ fn adoptTurnLikeProduct(
     }
 }
 
-// tick 이 `tick_collect_oom` 으로 닫힐 때 기록이 그 frontier 값을 정확히 말하는지(적대적 검증 4회차 탐침 채택).
-// 테스트에서는 `noteCollectFailure` 가 아무것도 안 찍으므로 닫힌 뒤의 기록을 본다 — `beginCloseAt` 은 기록을
-// 건드리지 않아 닫기 직전 한 줄과 같은 값이다. producer 는 가짜, socketpair 만, host 없음.
-test "tick 이 tick_collect_oom 으로 닫을 때 기록은 그 frontier 값을 말한다" {
+/// 가짜 producer 위에 GUI 연결 하나를 세우고 stream 1 을 observer 로 붙인다(socketpair 만, host 없음).
+const FrontierTickHarness = struct {
+    fds: [2]c_int,
+    registry_value: registry.TerminalRuntimeRegistry,
+    subscriptions: subscription_identity.Table,
+    reactor: *slot_mod.ReactorCore,
+    runtime_ops: server.FakeRuntimeOps,
+    client: *Client,
+
+    fn init(h: *FrontierTickHarness, skew_resync_snapshot: bool) !void {
+        const testing = std.testing;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &h.fds));
+        h.registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+        _ = try h.registry_value.register(0xAA, 80, 24);
+        h.subscriptions = subscription_identity.Table.init(testing.allocator);
+        h.reactor = try slot_mod.ReactorCore.create(testing.allocator);
+        h.runtime_ops = .{};
+        var ops = h.runtime_ops.ops();
+        if (skew_resync_snapshot) {
+            frontier_resync_skew_inner = ops.snapshot;
+            ops.snapshot = frontierResyncSkewedSnapshot;
+        }
+        h.client = try Client.create(
+            testing.allocator,
+            h.fds[0],
+            h.reactor,
+            83,
+            &h.registry_value,
+            &h.subscriptions,
+            .{ .runtime_ops = ops },
+        );
+        try sendTestFrame(h.fds[1], .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+        h.client.readReady(1);
+        try sendTestFrame(h.fds[1], .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+        h.client.readReady(2);
+        try h.drain();
+        try testing.expect(!h.client.isClosing());
+    }
+
+    fn deinit(h: *FrontierTickHarness) void {
+        h.client.destroy();
+        h.reactor.destroy();
+        h.subscriptions.deinit();
+        h.registry_value.deinit();
+        _ = c.close(h.fds[1]);
+    }
+
+    fn drain(h: *FrontierTickHarness) !void {
+        const slot = try h.reactor.get(h.client.admission);
+        try slot.consumeWritten(slot.pending_bytes);
+    }
+
+    fn changeAndTick(h: *FrontierTickHarness, now: u64) void {
+        h.runtime_ops.screen_change_token.revision += 1;
+        _ = h.client.beginProducerSweep(now);
+        h.client.tick(now);
+    }
+
+    fn trackerState(h: *FrontierTickHarness) !slot_mod.ScreenState {
+        const slot = try h.reactor.get(h.client.admission);
+        return slot.screenState(h.client.trackers.get(1) orelse return error.TestUnexpectedResult);
+    }
+};
+
+// 한 스트림의 frontier 가 어긋나도 **연결은 산다**(2026-09-28 — 한 탭의 어긋남이 창의 탭 16 개를 끊었다).
+// 그 스트림만 무효화되고, 클라이언트가 `runtime.resync` 로 되묻자 새 세대 스냅샷으로 다시 맞춰진다. 진단 줄의
+// 값도 그대로 남는다(닫힘과 같은 한 줄). producer 는 가짜, socketpair 만, host 없음.
+test "tick 은 frontier 가 어긋난 스트림만 무효화하고 연결을 살려 resync 로 복구한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const testing = std.testing;
-    var fds: [2]c_int = undefined;
-    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
-    defer _ = c.close(fds[1]);
-    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
-    defer registry_value.deinit();
-    _ = try registry_value.register(0xAA, 80, 24);
-    var subscriptions = subscription_identity.Table.init(testing.allocator);
-    defer subscriptions.deinit();
-    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
-    defer reactor.destroy();
-    var runtime_ops: server.FakeRuntimeOps = .{};
-    const client = try Client.create(
-        testing.allocator,
-        fds[0],
-        reactor,
-        83,
-        &registry_value,
-        &subscriptions,
-        .{ .runtime_ops = runtime_ops.ops() },
-    );
-    defer client.destroy();
-    try sendTestFrame(fds[1], .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
-    client.readReady(1);
-    try sendTestFrame(fds[1], .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
-    client.readReady(2);
-    const slot = try reactor.get(client.admission);
-    try slot.consumeWritten(slot.pending_bytes);
-    try testing.expect(!client.isClosing());
+    var h: FrontierTickHarness = undefined;
+    try h.init(false);
+    defer h.deinit();
 
-    // 먼저 정상 tick 하나: seq 1 gen 0 을 commit 한다
-    runtime_ops.screen_change_token.revision += 1;
-    _ = client.beginProducerSweep(10);
-    client.tick(10);
-    try testing.expect(!client.isClosing());
-    try testing.expectEqualStrings("-", collect_failure.last().site);
-    try testing.expectEqual(@as(u64, 1), client.connection.attachments.get(1).?.screen_sequence);
-    try slot.consumeWritten(slot.pending_bytes);
+    // 정상 tick: seq 1 gen 0 commit.
+    h.changeAndTick(10);
+    try testing.expect(!h.client.isClosing());
+    try testing.expectEqual(@as(u64, 1), h.client.connection.attachments.get(1).?.screen_sequence);
+    try h.drain();
 
-    // gen 만 다른 delta — 현재 producer 에서 가능한 모양
-    runtime_ops.frontier_generation = 4;
-    runtime_ops.screen_change_token.revision += 1;
-    _ = client.beginProducerSweep(20);
-    client.tick(20);
-    try testing.expect(client.isClosing());
-    try testing.expectEqualStrings("tick_collect_oom", client.closeSite());
+    // gen 만 다른 delta — **닫지 않는다.** 기록은 그 값을 말하고, 그 스트림만 무효화된다.
+    h.runtime_ops.frontier_generation = 4;
+    h.changeAndTick(20);
+    try testing.expect(!h.client.isClosing());
     var buf: [collect_failure.line_capacity]u8 = undefined;
-    const line = collect_failure.render(&buf, collect_failure.last());
     try testing.expectEqualStrings(
         "session host collect failed: site=delta_seq_mismatch err=- runtime=000000000000000000000000000000aa seq=2->2 gen=0->4 snapshot=0 send=11",
-        line,
+        collect_failure.render(&buf, collect_failure.last()),
     );
+    try testing.expectEqual(slot_mod.ScreenState.invalidated, try h.trackerState());
+    // 실패는 commit 된 frontier 를 안 옮긴다.
+    try testing.expectEqual(@as(u64, 1), h.client.connection.attachments.get(1).?.screen_sequence);
+    try testing.expectEqual(@as(u64, 0), h.client.connection.attachments.get(1).?.screen_generation);
+    try h.drain();
+
+    // 클라이언트가 무효화 알림을 받고 되묻는다 → 다음 tick 이 새 세대 스냅샷으로 다시 맞춘다.
+    try sendTestFrame(h.fds[1], .request, 3, "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":1}}");
+    h.client.readReady(30);
+    try h.drain();
+    try testing.expect(h.client.connection.resyncPending(1));
+    h.changeAndTick(40);
+    try testing.expect(!h.client.isClosing());
+    try testing.expectEqualStrings("-", collect_failure.last().site);
+    try testing.expectEqual(@as(u64, 4), h.client.connection.attachments.get(1).?.screen_generation);
+    try testing.expectEqual(@as(u64, 2), h.client.connection.attachments.get(1).?.screen_sequence);
+}
+
+var frontier_resync_skew_inner: ?*const fn (ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!server.ProjectedSnapshot = null;
+fn frontierResyncSkewedSnapshot(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!server.ProjectedSnapshot {
+    var out = try frontier_resync_skew_inner.?(ctx, runtime_id, sequence, allocator);
+    if (sequence != 0) out.frontier.sequence = sequence + 7; // attach(0)은 두고 resync 스냅샷만 비튼다
+    return out;
+}
+
+// **resync 스냅샷 자체가 어긋나면 닫는다.** 스냅샷으로도 못 맞추는 스트림을 다시 무효화하면 같은 자리를 돈다 —
+// 무한 재시도 대신 예전처럼 닫되, 이름이 따로 있어 「resync 도 실패했다」로 읽힌다.
+test "tick 은 resync 스냅샷까지 frontier 가 어긋나면 무한 재시도 대신 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var h: FrontierTickHarness = undefined;
+    try h.init(true); // 하네스의 가짜 producer 스냅샷을 감싸 resync 스냅샷만 sequence 를 비튼다
+    defer h.deinit();
+    defer frontier_resync_skew_inner = null;
+
+    // 무효화 → resync 요청 → 스냅샷이 어긋난다.
+    h.runtime_ops.frontier_generation = 4;
+    h.changeAndTick(10); // 첫 delta 에서 gen 이 어긋나거나(무효화) 정상 — 어느 쪽이든 다음이 resync 다
+    try h.drain();
+    try sendTestFrame(h.fds[1], .request, 3, "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":1}}");
+    h.client.readReady(20);
+    try h.drain();
+    h.changeAndTick(30);
+    try testing.expect(h.client.isClosing());
+    try testing.expectEqualStrings("tick_frontier_resync_failed", h.client.closeSite());
+    try testing.expectEqualStrings("snapshot_seq_mismatch", collect_failure.last().site);
 }

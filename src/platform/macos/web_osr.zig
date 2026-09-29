@@ -47,7 +47,7 @@ const FailureCode = ws.message.FailureCode;
 pub const State = enum { off, starting, running, failed };
 
 /// 창이 사용자에게 보일 안내. 표시 문구는 창이 i18n 으로 만든다(여기는 코드만).
-pub const Notice = enum { gpu_unavailable, profile_in_use, start_failed, crashed_repeatedly };
+pub const Notice = enum { gpu_unavailable, profile_in_use, start_failed, crashed_repeatedly, version_mismatch };
 
 pub const NavUpdate = struct {
     surface_id: u64,
@@ -394,6 +394,46 @@ test "the engine is latched by the first decision (restart-only)" {
     try std.testing.expect(!requested_chromium);
 }
 
+test "a sidecar of another control-channel version stops with a version notice instead of a restart loop" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    const saved_failures = .{ failures, failure_head };
+    defer {
+        failures = saved_failures[0];
+        failure_head = saved_failures[1];
+        inbox.deinit(gpa);
+        inbox = .empty;
+        notice_queue.deinit(gpa);
+        notice_queue = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        decoder = .init(.to_maru);
+        latched = null;
+        state = .off;
+    }
+    // 따로 설치된 sidecar 가 제 버전으로 보낸 hello_ack(머리만 다르다). handshake 전에 쥔 명령도 있다.
+    try outbox_pending.appendSlice(gpa, "queued");
+    var frame: [64]u8 = undefined;
+    const len = try ws.codec.encode(.{ .hello_ack = .{ .instance = 0, .nonce = 0 } }, &frame);
+    std.mem.writeInt(u16, frame[ws.wire.prefix_len + ws.wire.magic.len ..][0..2], ws.wire.version + 1, .big);
+    state = .starting;
+    try inbox.appendSlice(gpa, frame[0..len]);
+    drainInbox(gpa, 0);
+    try std.testing.expectEqual(State.failed, state);
+    try std.testing.expectEqual(@as(?Notice, .version_mismatch), latched);
+    try std.testing.expectEqual(@as(?Notice, .version_mismatch), takeNotice());
+    try std.testing.expectEqual(@as(usize, 0), outbox_pending.items.len); // 보낼 곳이 없다 — 버린다
+    // handshake 뒤의 버전 위반은 규칙 위반(죽이고 다시 띄우는 쪽) — 버전 안내가 아니다.
+    decoder = .init(.to_maru);
+    inbox.clearRetainingCapacity();
+    latched = null;
+    state = .running;
+    try inbox.appendSlice(gpa, frame[0..len]);
+    drainInbox(gpa, 0);
+    try std.testing.expect(latched != Notice.version_mismatch);
+    try std.testing.expectEqual(@as(?Notice, null), takeNotice());
+}
+
 test "engine change notice fires once per new value and resets when the setting returns" {
     const saved_decided = decided;
     const saved_requested = requested_chromium;
@@ -616,7 +656,14 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     // 비우는 사이 sidecar 가 끝났거나(`profile_in_use` 로 멈춤) 다시 떴다 — 위의 `read`·`p` 는 옛 프로세스의 것이다.
     // 처음엔 그대로 이어가 옛 EOF 로 새 sidecar 를 또 죽은 것으로 세거나, 비운 optional 을 읽었다(적대 점검).
     if (process == null or process_generation != generation) return;
-    if (read == .eof or lsp_process.reapIfExited(&process.?)) return crashed(gpa, now_ms);
+    if (read == .eof or lsp_process.reapIfExited(&process.?)) {
+        // 읽기와 거두기 사이에 끝났을 수 있다 — 끝나기 직전에 쓴 frame(버전 불일치의 `hello_ack` 등)을 마저 읽고 적용한 뒤
+        // 판정한다. 안 읽으면 버전 불일치가 크래시로 세어져 재시작 셋 뒤 「거듭 멈춤」으로 잘못 안내된다(W7a1 적대 검증).
+        if (lsp_process.readInto(&process.?, gpa, &inbox, 256 * 1024)) |_| {} else |_| {}
+        drainInbox(gpa, now_ms);
+        if (process == null or process_generation != generation) return;
+        return crashed(gpa, now_ms);
+    }
     if (state == .starting and now_ms - started_ms > handshake_timeout_ms) {
         lsp_process.kill(&process.?, .KILL);
         return crashed(gpa, now_ms);
@@ -1157,16 +1204,35 @@ fn drainInbox(gpa: std.mem.Allocator, now_ms: i64) void {
     const generation = process_generation;
     var consumed: usize = 0;
     while (true) {
-        while (decoder.next() catch return protocolBroken(gpa, now_ms)) |message| {
+        while (decoder.next() catch |err| return decodeFailed(gpa, now_ms, err)) |message| {
             apply(gpa, message, now_ms);
             if (process == null or process_generation != generation) return;
         }
         if (consumed == inbox.items.len) break;
-        const fed = decoder.feed(inbox.items[consumed..]) catch return protocolBroken(gpa, now_ms);
+        const fed = decoder.feed(inbox.items[consumed..]) catch |err| return decodeFailed(gpa, now_ms, err);
         if (fed == 0) return protocolBroken(gpa, now_ms); // frame 을 비웠는데 한 바이트도 못 넣는다 — 불변식이 깨졌다
         consumed += fed;
     }
     inbox.clearRetainingCapacity();
+}
+
+/// 받은 바이트가 frame 으로 풀리지 않는다. handshake 중에 버전이 다르면(따로 설치된 `maru-chromium` 이 이 maru 와 다른
+/// 제어 채널 버전 — `wire.version`) 다시 띄워도 같으므로 멈추고 안내한다. 그 밖은 규칙 위반이라 죽인다.
+fn decodeFailed(gpa: std.mem.Allocator, now_ms: i64, err: ws.wire.Error) void {
+    if (err == error.UnsupportedVersion and state == .starting) return stopWith(gpa, .version_mismatch);
+    protocolBroken(gpa, now_ms);
+}
+
+/// 다시 띄워도 같은 실패 — sidecar 를 끝내고 멈춘 뒤 안내한다. handshake 전에 쥔 명령도 버린다(보낼 곳이 없다).
+fn stopWith(gpa: std.mem.Allocator, notice: Notice) void {
+    if (process) |*p| {
+        lsp_process.kill(p, .KILL);
+        lsp_process.reapBlocking(p);
+        p.deinit(gpa);
+    }
+    process = null;
+    outbox_pending.clearRetainingCapacity();
+    fail(notice);
 }
 
 fn protocolBroken(gpa: std.mem.Allocator, now_ms: i64) void {
@@ -1210,16 +1276,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             .gpu_unavailable => if (surfaces.getPtr(f.browser)) |s| {
                 s.gpu_notice_pending = true;
             },
-            .profile_in_use => {
-                // 다른 maru 가 같은 프로필을 쓴다 — 다시 띄워도 같다. 멈추고 안내한다.
-                if (process) |*p| {
-                    lsp_process.kill(p, .KILL);
-                    lsp_process.reapBlocking(p);
-                    p.deinit(gpa);
-                }
-                process = null;
-                fail(.profile_in_use);
-            },
+            // 다른 maru 가 같은 프로필을 쓴다 — 다시 띄워도 같다. 멈추고 안내한다.
+            .profile_in_use => stopWith(gpa, .profile_in_use),
             .cef_initialize_failed, .protocol_violation => protocolBroken(gpa, now_ms),
             .browser_create_failed, .unknown_browser, .duplicate_browser, .frame_channel_failed => {},
         },

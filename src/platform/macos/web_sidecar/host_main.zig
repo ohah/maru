@@ -38,6 +38,9 @@ pub const ExitCode = enum(u8) {
     profile_in_use = 16,
     /// 종료를 시작하고 `watchdog.deadline_ms` 안에 못 끝냈다 — 감시견이 끝냈다.
     shutdown_stuck = watchdog.exit_code,
+    /// maru 의 hello 가 다른 제어 채널 버전이다(따로 설치된 maru 와 `maru-chromium`) — 제 버전으로 `hello_ack` 하나를 보낸
+    /// 뒤 끝낸다. maru 는 그 머리의 버전으로 「버전 불일치」를 알아본다(`wire.version`).
+    version_mismatch = 18,
 };
 
 // CEF 콜백·읽기 스레드가 닿아야 해서 전역이다(프로세스에 하나).
@@ -65,7 +68,11 @@ fn run(init: std.process.Init) ExitCode {
     g_writer = .{ .fd = channels.events };
     g_dispatcher = .{ .writer = &g_writer, .handler = browsers.handler() };
 
-    const hello = g_dispatcher.readHello(channels.commands) catch return .handshake_failed;
+    const hello = g_dispatcher.readHello(channels.commands) catch |err| {
+        if (err != error.UnsupportedVersion) return .handshake_failed;
+        g_writer.send(.{ .hello_ack = .{ .instance = 0, .nonce = 0 } }) catch {};
+        return .version_mismatch;
+    };
     g_writer.send(.{ .hello_ack = hello }) catch return .handshake_failed;
 
     const argv = init.minimal.args.vector;

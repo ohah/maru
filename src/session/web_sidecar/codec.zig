@@ -493,7 +493,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  1,  0, // v1, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  2,  0, // v2, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -513,6 +513,22 @@ test "create_browser byte golden lays out id, size, hidden and url in order" {
     try std.testing.expectEqual(@as(u8, 1), body[20]);
     try std.testing.expectEqual(@as(u32, 11), std.mem.readInt(u32, body[21..25], .big));
     try std.testing.expectEqualStrings("about:blank", body[25..]);
+}
+
+test "another version is recognised from the head alone, whatever its tag and body" {
+    var encoded: [64]u8 = undefined;
+    const len = try encode(.{ .hello_ack = .{ .instance = 0, .nonce = 0 } }, &encoded);
+    // 머리의 버전만 다르다 — tag·본문을 보기 전에 버전으로 거절된다(`wire.version` 의 불변식).
+    std.mem.writeInt(u16, encoded[prefix_len + magic.len ..][0..2], version + 1, .big);
+    try std.testing.expectError(error.UnsupportedVersion, decodeExact(encoded[0..len]));
+    // 다음 버전이 모르는 tag·다른 본문 길이를 써도 같다.
+    encoded[prefix_len + magic.len + 2] = 0xff;
+    try std.testing.expectError(error.UnsupportedVersion, decodeExact(encoded[0..len]));
+    var longer: [80]u8 = undefined;
+    @memcpy(longer[0..len], encoded[0..len]);
+    @memset(longer[len..], 0);
+    std.mem.writeInt(u32, longer[0..4], @intCast(longer.len - prefix_len), .big);
+    try std.testing.expectError(error.UnsupportedVersion, decodeExact(&longer));
 }
 
 test "every message round trips" {
@@ -555,7 +571,7 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     bad[4] = 'X';
     try std.testing.expectError(error.InvalidMagic, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[9] = 2;
+    std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
     bad[10] = 31; // 방향 범위 안이지만 정의되지 않은 tag

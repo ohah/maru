@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 릴리스 서명(hardened runtime)의 Maru.app. 없으면 macOS 가 묻지 않고 거절할 수 있다 — Chromium 탭의
+	     카메라·마이크 권한(W5b1)과 CoreLocation 위치(W5b2). TCC 는 sidecar 가 띄운 자식의 요청도 Maru 앱에 묻는다. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
+</dict>
+</plist>

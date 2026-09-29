@@ -11,8 +11,10 @@
 //! 다시 띄우지 않는다. **메인 스레드 전용**(창 tick 과 ABI 가 모두 메인).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 const lsp_process = @import("lsp_process.zig");
+const install = @import("web_osr_install.zig");
 const ring_receiver = @import("web_sidecar/ring_receiver.zig");
 const iosurface = @import("web_sidecar/iosurface.zig");
 
@@ -312,6 +314,9 @@ var process: ?lsp_process.Process = null;
 /// 메인 스레드를 막지 않는다(처음엔 최대 3 초 막았다 — 적대 검증).
 var retiring: ?lsp_process.Process = null;
 var retiring_since_ms: i64 = 0;
+/// 그 sidecar 들이 도는 실행 사본(W7a2) — 프로세스를 거둔 뒤에 놓는다(물러나는 sidecar 의 사본을 새 sidecar 가 지우지 않게).
+var run_copy: ?install.RunCopy = null;
+var retiring_copy: ?install.RunCopy = null;
 var decoder: ws.stream.StreamingDecoder = .init(.to_maru);
 var inbox: std.ArrayList(u8) = .empty;
 var outbox_pending: std.ArrayList(u8) = .empty; // handshake 전 명령(인코딩된 frame)
@@ -337,6 +342,9 @@ var last_change_notice: ?bool = null;
 var install_notice_pending = false;
 var install_buf: [512]u8 = undefined;
 var install_len: usize = 0;
+/// `findInstall` 이 찾은 설치의 brew prefix.
+var install_prefix_buf: [512]u8 = undefined;
+var install_prefix_len: usize = 0;
 
 /// `maru-chromium` formula 설치 위치 후보(`$(brew --prefix)/opt/maru-chromium/libexec` — 계획 문서 「배포·배치」).
 /// `HOMEBREW_PREFIX` 가 있으면 그 prefix 를 먼저 본다(brew shellenv 가 세운다 — 스모크도 이것으로 가짜 설치를 가리킨다).
@@ -369,6 +377,11 @@ pub fn decide(config_wants_chromium: bool) void {
     const log = std.log.scoped(.web_osr);
     if (d.not_installed) log.warn("browser.engine = chromium but maru-chromium is not installed — using WebKit", .{});
     if (d.chromium) log.info("browser engine: chromium ({s})", .{installDir() orelse "?"});
+    // 지난 실행이 남긴 사본을 지운다 — WebKit 으로 돌아갔어도(W7a2 적대 검증 1 차: 청소할 기회가 영영 없었다).
+    if (!builtin.is_test) {
+        var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (install.runCacheRoot(&cache_buf, install.hardenedRuntime())) |root| install.sweepRunCopies(root);
+    }
 }
 
 test "engine decision: env first, then an installed maru-chromium, else WebKit with a notice" {
@@ -379,6 +392,157 @@ test "engine decision: env first, then an installed maru-chromium, else WebKit w
     try std.testing.expectEqualStrings("/opt/homebrew/opt/maru-chromium/libexec", installed.dir.?);
     try std.testing.expectEqual(Decision{ .chromium = false, .not_installed = true }, decideFrom(true, null, null));
 }
+
+test "a hardened (release) build ignores the development env overrides" {
+    const allocator = std.testing.allocator;
+    const Saved = struct {
+        name: [:0]const u8,
+        value: ?[:0]u8,
+    };
+    var saved = [_]Saved{ .{ .name = "MARU_WEB_OSR_DIR", .value = null }, .{ .name = "HOMEBREW_PREFIX", .value = null } };
+    for (&saved) |*e| e.value = if (std.c.getenv(e.name)) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    defer for (saved) |e| {
+        if (e.value) |v| {
+            _ = setenv(e.name, v, 1);
+            allocator.free(v);
+        } else _ = unsetenv(e.name);
+    };
+    // 가짜 prefix 에 실행 파일이 있는 설치(모양만 — 검사는 `start` 에서).
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_base = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
+    const template = try std.fmt.bufPrintZ(&tmp_buf, "{s}/maru-prefix-{d}-XXXXXX", .{ if (tmp_base.len > 0 and tmp_base[0] == '/') tmp_base else "/tmp", std.c.getpid() });
+    const made = std.mem.span(mkdtemp(template.ptr) orelse return error.NoTemp);
+    defer {
+        var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (std.fmt.bufPrintZ(&rm_buf, "{s}/opt/maru-chromium/libexec/maru-web-host", .{made})) |f| _ = std.c.unlink(f) else |_| {}
+        for ([_][]const u8{ "/opt/maru-chromium/libexec", "/opt/maru-chromium", "/opt", "" }) |rel| {
+            if (std.fmt.bufPrintZ(&rm_buf, "{s}{s}", .{ made, rel })) |d| _ = std.c.rmdir(d) else |_| {}
+        }
+    }
+    var host_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const libexec = try std.fmt.bufPrint(&host_buf, "{s}/opt/maru-chromium/libexec", .{made});
+    try std.testing.expect(mkdirs(libexec));
+    var host_z_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const host = try std.fmt.bufPrintZ(&host_z_buf, "{s}/maru-web-host", .{libexec});
+    const fd = std.c.open(host, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o755));
+    try std.testing.expect(fd >= 0);
+    _ = std.c.close(fd);
+    const made_z = try allocator.dupeZ(u8, made);
+    defer allocator.free(made_z);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_WEB_OSR_DIR", "/dev/build", 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOMEBREW_PREFIX", made_z, 1));
+    try std.testing.expectEqualStrings("/dev/build", envDirFor(false).?);
+    try std.testing.expect(envDirFor(true) == null);
+    try std.testing.expectEqualStrings(libexec, findInstallFor(false).?);
+    if (findInstallFor(true)) |dir| try std.testing.expect(!std.mem.startsWith(u8, dir, made)); // 실제 설치가 있으면 그것
+}
+
+test "a rejected install shows a version notice only for a control-channel mismatch" {
+    try std.testing.expectEqual(Notice.version_mismatch, rejectedNotice(.version_mismatch));
+    try std.testing.expectEqual(Notice.start_failed, rejectedNotice(.bad_manifest));
+    try std.testing.expectEqual(Notice.start_failed, rejectedNotice(.not_owned));
+    try std.testing.expectEqual(Notice.start_failed, rejectedNotice(.clone_failed));
+}
+
+/// 시험용 실행 사본 — 임시 디렉터리(파일 하나)를 그 아래 `cache` 로 복제한다.
+const TestCopy = struct {
+    root_buf: [std.fs.max_path_bytes]u8 = undefined,
+    root: []const u8 = "",
+
+    fn make(self: *TestCopy) !install.RunCopy {
+        const tmp_base = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
+        var template_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const template = try std.fmt.bufPrintZ(&template_buf, "{s}/maru-runcopy-{d}-XXXXXX", .{ if (tmp_base.len > 0 and tmp_base[0] == '/') tmp_base else "/tmp", std.c.getpid() });
+        const made = mkdtemp(template.ptr) orelse return error.NoTemp;
+        self.root = std.mem.span(std.c.realpath(made, &self.root_buf) orelse return error.NoTemp);
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{self.root});
+        try std.testing.expect(mkdirs(src));
+        const fd = install.openDevSource(src) orelse return error.NoSource;
+        defer _ = std.c.close(fd);
+        var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cache = try std.fmt.bufPrint(&cache_buf, "{s}/cache", .{self.root});
+        return switch (install.cloneForRun(fd, cache)) {
+            .ok => |c| c,
+            .bad => error.CloneFailed,
+        };
+    }
+
+    fn exists(path: []const u8) bool {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+        return std.c.access(z, std.c.F_OK) == 0;
+    }
+
+    fn cleanup(self: *const TestCopy) void {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        for ([_][]const u8{ "/src", "/cache", "" }) |rel| {
+            if (std.fmt.bufPrintZ(&buf, "{s}{s}", .{ self.root, rel })) |d| _ = std.c.rmdir(d) else |_| {}
+        }
+    }
+};
+
+test "a run copy lives as long as its sidecar: kept while it retires, removed once it is reaped or stopped for good" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count());
+    var tc: TestCopy = .{};
+    defer tc.cleanup();
+    defer {
+        latched = null;
+        state = .off;
+    }
+    // 마지막 탭을 닫았다 — 물러나는 동안 사본은 남고, 기한 뒤 거두면 지워진다.
+    run_copy = try tc.make();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const first = try std.fmt.bufPrint(&dir_buf, "{s}", .{run_copy.?.dir()});
+    process = try lsp_process.spawn(gpa, "/bin/sleep", &.{"30"}, "/");
+    retire(gpa, 1_000);
+    try std.testing.expect(run_copy == null and retiring_copy != null);
+    try std.testing.expect(TestCopy.exists(first));
+    reapRetiring(gpa, 1_000 + shutdown_wait_ms);
+    try std.testing.expect(retiring == null and retiring_copy == null);
+    try std.testing.expect(!TestCopy.exists(first));
+    // 다시 띄워도 같은 불일치 — 멈출 때도 지운다.
+    run_copy = try tc.make();
+    var second_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const second = try std.fmt.bufPrint(&second_buf, "{s}", .{run_copy.?.dir()});
+    process = try lsp_process.spawn(gpa, "/bin/sleep", &.{"30"}, "/");
+    stopWith(gpa, .version_mismatch);
+    try std.testing.expect(process == null and run_copy == null);
+    try std.testing.expect(!TestCopy.exists(second));
+    // 띄우지 못한 채 남은 사본도 멈출 때 지운다.
+    run_copy = try tc.make();
+    var third_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const third = try std.fmt.bufPrint(&third_buf, "{s}", .{run_copy.?.dir()});
+    stop(gpa);
+    try std.testing.expect(run_copy == null and !TestCopy.exists(third));
+}
+
+test "a sidecar whose channel ended but which is still alive is killed and reaped, not left a zombie" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count()); // 크래시 경로가 실제 sidecar 를 띄우지 않게
+    const saved_failures = .{ failures, failure_head };
+    defer {
+        failures = saved_failures[0];
+        failure_head = saved_failures[1];
+        latched = null;
+        state = .off;
+    }
+    process = try lsp_process.spawn(gpa, "/bin/sleep", &.{"30"}, "/");
+    const pid = process.?.pid;
+    crashed(gpa, 1_000);
+    try std.testing.expect(process == null);
+    // 거뒀다 — 그 pid 는 이제 이 프로세스의 자식이 아니다(좀비면 waitpid 가 거둘 수 있다).
+    var status: c_int = 0;
+    try std.testing.expectEqual(@as(std.c.pid_t, -1), std.c.waitpid(pid, &status, std.c.W.NOHANG));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(std.c.E.CHILD)), std.c._errno().*);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 
 test "the engine is latched by the first decision (restart-only)" {
     const saved = .{ decided, requested_chromium, install_notice_pending };
@@ -607,24 +771,40 @@ pub fn enabled() bool {
 }
 
 fn envDir() ?[]const u8 {
+    return envDirFor(install.hardenedRuntime());
+}
+
+/// 릴리스 판(hardened runtime)은 환경변수로 실행 파일을 고르지 않는다(W7a2 — `web_osr_install.zig`).
+fn envDirFor(hardened: bool) ?[]const u8 {
+    if (hardened) return null;
     const dir = std.c.getenv("MARU_WEB_OSR_DIR") orelse return null;
     const s = std.mem.span(dir);
     return if (s.len == 0) null else s;
 }
 
 fn findInstall() ?[]const u8 {
+    return findInstallFor(install.hardenedRuntime());
+}
+
+fn findInstallFor(hardened: bool) ?[]const u8 {
     const S = struct {
         var dir_buf: [512]u8 = undefined;
     };
     var path_buf: [600]u8 = undefined;
-    const env_prefix: ?[]const u8 = if (std.c.getenv("HOMEBREW_PREFIX")) |p| std.mem.span(p) else null;
+    const env_prefix: ?[]const u8 = if (hardened) null else if (std.c.getenv("HOMEBREW_PREFIX")) |p| std.mem.span(p) else null;
     const prefixes = [_]?[]const u8{ env_prefix, install_candidates[0], install_candidates[1] };
     for (prefixes) |maybe| {
         const prefix = maybe orelse continue;
         if (prefix.len == 0) continue;
         const dir = std.fmt.bufPrint(&S.dir_buf, "{s}/opt/maru-chromium/libexec", .{prefix}) catch continue;
         const host = std.fmt.bufPrintZ(&path_buf, "{s}/maru-web-host", .{dir}) catch continue;
-        if (std.c.access(host, std.c.X_OK) == 0) return dir;
+        if (std.c.access(host, std.c.X_OK) == 0) {
+            // 띄울 때 그 prefix 의 keg 인지 본다(`start` → `install.openBrewSource`).
+            const n = @min(prefix.len, install_prefix_buf.len);
+            @memcpy(install_prefix_buf[0..n], prefix[0..n]);
+            install_prefix_len = n;
+            return dir;
+        }
     }
     return null;
 }
@@ -862,6 +1042,7 @@ pub fn shutdownForExit() void {
         old.deinit(gpa);
         retiring = null;
     }
+    releaseRunCopy(&retiring_copy);
     var it = surfaces.iterator();
     while (it.next()) |entry| {
         for (entry.value_ptr.view.clear()) |ring| if (ring) |r| r.release();
@@ -1102,10 +1283,11 @@ fn installDir() ?[]const u8 {
 
 /// `~/Library/Application Support/maru/web/<번들 ID>/profile` — 개발 빌드와 설치본이 갈리게(C7).
 fn profileDir(buf: []u8) ?[]const u8 {
-    const home = std.c.getenv("HOME") orelse return null;
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = install.homeDir(&home_buf, install.hardenedRuntime()) orelse return null; // 실행 사본과 같은 홈(W7a2)
     var id_buf: [256]u8 = undefined;
     const bundle = bundleIdentifier(&id_buf) orelse "dev.maru.unbundled";
-    return std.fmt.bufPrint(buf, "{s}/Library/Application Support/maru/web/{s}/profile", .{ std.mem.span(home), bundle }) catch null;
+    return std.fmt.bufPrint(buf, "{s}/Library/Application Support/maru/web/{s}/profile", .{ home, bundle }) catch null;
 }
 
 extern "c" fn CFBundleGetMainBundle() ?*anyopaque;
@@ -1138,16 +1320,47 @@ fn mkdirs(path: []const u8) bool {
 }
 
 fn start(gpa: std.mem.Allocator, now_ms: i64) void {
-    const dir = installDir() orelse return fail(.start_failed);
+    const log = std.log.scoped(.web_osr);
+    const source = installDir() orelse return fail(.start_failed);
+    // W7a2: brew 설치는 그 prefix 의 keg 이고 믿을 만할 때만 — 검사한 keg 를 fd 로 쥐고 그 fd 에서 복제한다. 개발용
+    // `MARU_WEB_OSR_DIR` 은 빌드 디렉터리라 이 검사를 건너뛴다(릴리스 판에서는 그 환경변수 자체를 안 본다).
+    const dev = install_len == 0;
+    const hardened = install.hardenedRuntime();
+    const source_fd: c_int = if (dev) install.openDevSource(source) orelse return fail(.start_failed) else switch (install.openBrewSource(source, install_prefix_buf[0..install_prefix_len])) {
+        .ok => |fd| fd,
+        .bad => |problem| {
+            log.warn("maru-chromium install rejected before start: {s}", .{@tagName(problem)});
+            return fail(rejectedNotice(problem));
+        },
+    };
+    defer _ = std.c.close(source_fd);
+    // 실행 사본 — 도는 동안 `brew upgrade` 가 설치를 지워도 새 렌더러가 뜨게. brew 설치는 복제가 안 되면 띄우지 않는다(설치에서
+    // 바로 띄우면 CEF 가 helper 를 경로로 다시 띄워 검사가 무력해진다). 개발 디렉터리는 그 자리에서.
+    std.debug.assert(run_copy == null);
+    var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (install.runCacheRoot(&cache_buf, hardened)) |root| switch (install.cloneForRun(source_fd, root)) {
+        .ok => |copy| run_copy = copy,
+        .bad => |problem| {
+            log.warn("could not make the maru-chromium run copy: {s}", .{@tagName(problem)});
+            if (!dev) return fail(.start_failed);
+        },
+    } else if (!dev) return fail(.start_failed);
+    const dir = if (run_copy) |*copy| copy.dir() else source;
+    if (install.verifyRunDir(dir, !dev)) |problem| {
+        log.warn("maru-chromium install rejected before start: {s}", .{@tagName(problem)});
+        releaseRunCopy(&run_copy);
+        return fail(rejectedNotice(problem));
+    }
     var host_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const host_path = std.fmt.bufPrint(&host_buf, "{s}/maru-web-host", .{dir}) catch return fail(.start_failed);
+    // 여기부터 실패하면 만든 사본도 놓는다(W7a2 적대 검증 2 차 — 그 세션 내내 사본과 잠금이 남았다).
+    const host_path = std.fmt.bufPrint(&host_buf, "{s}/maru-web-host", .{dir}) catch return startFailedAfterCopy();
     var profile_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const profile = profileDir(&profile_buf) orelse return fail(.start_failed);
-    if (!mkdirs(profile)) return fail(.start_failed);
+    const profile = profileDir(&profile_buf) orelse return startFailedAfterCopy();
+    if (!mkdirs(profile)) return startFailedAfterCopy();
     var arg_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
-    const arg = std.fmt.bufPrint(&arg_buf, "--profile-dir={s}", .{profile}) catch return fail(.start_failed);
-    if (receiver == null) receiver = ring_receiver.Receiver.open() catch return fail(.start_failed);
-    const spawned = lsp_process.spawn(gpa, host_path, &.{arg}, dir) catch return fail(.start_failed);
+    const arg = std.fmt.bufPrint(&arg_buf, "--profile-dir={s}", .{profile}) catch return startFailedAfterCopy();
+    if (receiver == null) receiver = ring_receiver.Receiver.open() catch return startFailedAfterCopy();
+    const spawned = lsp_process.spawn(gpa, host_path, &.{arg}, dir) catch return startFailedAfterCopy();
     process = spawned;
     // 새 sidecar 의 pid 만 받는다. pid 버전은 그 첫 알림에서 다시 고정한다(옛 sidecar 의 고정값은 버린다).
     receiver.?.expected_pid = spawned.pid;
@@ -1161,6 +1374,21 @@ fn start(gpa: std.mem.Allocator, now_ms: i64) void {
     var frame: [ws.wire.max_frame_bytes]u8 = undefined;
     const len = ws.codec.encode(.{ .hello = .{ .instance = @intCast(std.c.getpid()), .nonce = hello_nonce } }, &frame) catch return fail(.start_failed);
     if (!(lsp_process.write(&process.?, gpa, frame[0..len]) catch false)) return crashed(gpa, now_ms);
+}
+
+/// 띄우기 전 검사가 거절한 이유를 안내로 — 제어 채널 버전이 다르면 버전 불일치, 그 밖은 시작 실패.
+fn rejectedNotice(problem: install.Problem) Notice {
+    return if (problem == .version_mismatch) .version_mismatch else .start_failed;
+}
+
+fn startFailedAfterCopy() void {
+    releaseRunCopy(&run_copy);
+    fail(.start_failed);
+}
+
+fn releaseRunCopy(copy: *?install.RunCopy) void {
+    if (copy.*) |*c| c.release();
+    copy.* = null;
 }
 
 fn monotonicNow() i64 {
@@ -1181,12 +1409,15 @@ fn retire(gpa: std.mem.Allocator, now_ms: i64) void {
         lsp_process.reapBlocking(old);
         old.deinit(gpa);
     }
+    releaseRunCopy(&retiring_copy);
     var frame: [64]u8 = undefined;
     if (ws.codec.encode(.shutdown, &frame)) |len| {
         _ = lsp_process.write(&p, gpa, frame[0..len]) catch false;
     } else |_| {}
     retiring = p;
     retiring_since_ms = now_ms;
+    retiring_copy = run_copy;
+    run_copy = null;
     process = null;
     state = .off;
     outbox_pending.clearRetainingCapacity();
@@ -1202,10 +1433,12 @@ fn reapRetiring(gpa: std.mem.Allocator, now_ms: i64) void {
     }
     p.deinit(gpa);
     retiring = null;
+    releaseRunCopy(&retiring_copy);
 }
 
 fn stop(gpa: std.mem.Allocator) void {
     var p = process orelse {
+        releaseRunCopy(&run_copy); // 띄우지 못한 사본이 남았더라도
         state = .off;
         return;
     };
@@ -1223,6 +1456,7 @@ fn stop(gpa: std.mem.Allocator) void {
     }
     p.deinit(gpa);
     process = null;
+    releaseRunCopy(&run_copy);
     state = .off;
     outbox_pending.clearRetainingCapacity();
     var it = surfaces.iterator();
@@ -1257,10 +1491,15 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
 /// sidecar 가 죽었다 — 예산 안이면 다시 띄워 살아 있던 브라우저를 되살린다.
 fn crashed(gpa: std.mem.Allocator, now_ms: i64) void {
     if (process) |*p| {
-        _ = lsp_process.reapIfExited(p);
+        // 채널이 끝났어도 프로세스는 아직 살아 있을 수 있다 — 끝내고 거둔다(안 거두면 좀비로 남는다 — W7a1 적대 검증 5 차).
+        if (!lsp_process.reapIfExited(p)) {
+            lsp_process.kill(p, .KILL);
+            lsp_process.reapBlocking(p);
+        }
         p.deinit(gpa);
     }
     process = null;
+    releaseRunCopy(&run_copy);
     state = .off;
     outbox_pending.clearRetainingCapacity();
     failures[failure_head] = now_ms;
@@ -1358,6 +1597,7 @@ fn stopWith(gpa: std.mem.Allocator, notice: Notice) void {
         p.deinit(gpa);
     }
     process = null;
+    releaseRunCopy(&run_copy);
     outbox_pending.clearRetainingCapacity();
     forgetSidecar(gpa);
     fail(notice);

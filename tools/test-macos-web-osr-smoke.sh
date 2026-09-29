@@ -94,6 +94,12 @@ for _ in $(seq 1 100); do
 done
 [ -n "$host_pid" ] || fail "no maru-web-host child of the app"
 echo "sidecar pid $host_pid (parent $app_pid)"
+# W7a2: sidecar 는 설치(여기선 개발 디렉터리)가 아니라 그 실행 사본에서 돈다.
+run_root="$root/home/Library/Caches/maru/web-osr-run"
+case "$(ps -o command= -p "$host_pid")" in
+    "$run_root"/run-*/maru-web-host*) echo "the sidecar runs from its run copy" ;;
+    *) fail "the sidecar does not run from a run copy under $run_root ($(ps -o command= -p "$host_pid"))" ;;
+esac
 
 # 2) sidecar 가 시험 주소를 요청한다(띄우기·handshake·생성·이동이 모두 됐다).
 for _ in $(seq 1 150); do
@@ -129,6 +135,9 @@ sleep 3
 latched=$(pgrep -P "$app_pid" -f maru-web-host || true)
 [ -z "$latched" ] || fail "restarted again after three crashes in a minute ($latched)"
 echo "third crash within a minute: no restart (budget)"
+# 죽은 sidecar 의 사본은 거둘 때 지운다 — 멈춘 뒤 남은 사본이 없다.
+left=$(find "$run_root" -mindepth 1 -maxdepth 1 -name 'run-*' 2>/dev/null)
+[ -z "$left" ] || fail "run copies left after the crashed sidecars were reaped: $left"
 host_pid=$third
 
 # 3) 프로필은 번들 ID 별 경로에 0700 으로.
@@ -428,8 +437,13 @@ PY
 
 # ── W4d①: 설정 `browser.engine` ─────────────────────────────────────────────────────────────────────────────
 # 개발용 환경변수 없이 설정으로 켠다. 설치 위치는 `$HOMEBREW_PREFIX/opt/maru-chromium/libexec` 를 먼저 본다 — 가짜 prefix 에
-# sidecar 빌드를 링크해 「설치됨」을, 빈 prefix 로 「설치 없음」을 만든다(실제 /opt/homebrew 에 없을 때만 믿을 수 있다).
+# brew 와 같은 모양(`Cellar/maru-chromium/<버전>/libexec` 실제 파일 + `opt/maru-chromium` 링크)으로 설치물을 두어 「설치됨」을,
+# 빈 prefix 로 「설치 없음」을 만든다(실제 /opt/homebrew 에 없을 때만 믿을 수 있다). W7a2 부터 maru 는 그 keg 의 모양·소유·
+# 서명·manifest 를 보고 띄우므로 개발 디렉터리를 링크하면 거절한다.
 printf 'browser.engine = chromium\n' > "$root/engine.conf"
+host_under() { # $1 = 띄운 pid — 그것이나 그 자식(앱)의 자식 maru-web-host(다른 앱 프로세스를 잡지 않게)
+    for p in "$1" $(pgrep -P "$1" 2>/dev/null); do pgrep -P "$p" -f maru-web-host 2>/dev/null; done
+}
 engine_app() { # $1=HOMEBREW_PREFIX $2=로그 이름
     rm -rf "$root/home" && mkdir -p "$root/home"
     env -u MARU_WEB_OSR_DIR HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
@@ -442,15 +456,27 @@ if [ -x /opt/homebrew/opt/maru-chromium/libexec/maru-web-host ] || [ -x /usr/loc
 else
     real_install=0
 fi
-mkdir -p "$root/prefix/opt/maru-chromium" && ln -s "$sidecar_dir" "$root/prefix/opt/maru-chromium/libexec"
+dist_dir="$PWD/zig-out/maru-chromium"
+test -x "$dist_dir/maru-web-host" || fail "build the install tree first (mise run web-sidecar builds zig-out/maru-chromium)"
+mkdir -p "$root/prefix/Cellar/maru-chromium/0.0.0" "$root/prefix/opt"
+cp -Rc "$dist_dir" "$root/prefix/Cellar/maru-chromium/0.0.0/libexec"
+chmod -R go-w "$root/prefix/Cellar/maru-chromium"
+ln -s ../Cellar/maru-chromium/0.0.0 "$root/prefix/opt/maru-chromium"
 : > "$root/requests.log"
 engine_app "$root/prefix" engine-on &
 on_pid=$!
 sleep 8
 # 양성 대조 — 아래 「설치 없음」 판정이 쓰는 같은 방법으로 자식 sidecar 가 보여야 한다.
-on_child=$(pgrep -P "$(pgrep -n -f "$app" || echo 0)" -f maru-web-host 2>/dev/null || true)
+on_child=$(host_under "$on_pid" || true)
+on_command=$(ps -o command= -p "${on_child:-0}" 2>/dev/null || true)
 wait "$on_pid" || true
 [ -n "$on_child" ] || fail "the child-sidecar probe did not see the Chromium sidecar of an installed engine"
+case "$on_command" in
+    "$run_root"/run-*/maru-web-host*) ;;
+    *) fail "the brew install was not started from a run copy ($on_command)" ;;
+esac
+left=$(find "$run_root" -mindepth 1 -maxdepth 1 -name 'run-*' 2>/dev/null)
+[ -z "$left" ] || fail "the run copy was left after the app quit: $left"
 grep -q '^/osr-smoke' "$root/requests.log" || fail "browser.engine = chromium with maru-chromium installed did not open the tab in Chromium"
 grep -q 'browser engine: chromium' "$root/engine-on.log" || fail "the chromium engine decision was not logged"
 grep -q '^web_panel_count=0$' "$root/engine-on.log" || fail "the Chromium engine still made a WKWebView for the browser tab"
@@ -462,7 +488,7 @@ if [ "$real_install" = 0 ]; then
     engine_app "$root/empty-prefix" engine-missing &
     missing_pid=$!
     sleep 8
-    missing_child=$(pgrep -P "$(pgrep -n -f "$app" || echo 0)" -f maru-web-host 2>/dev/null || true)
+    missing_child=$(host_under "$missing_pid" || true)
     wait "$missing_pid" || true
     [ -z "$missing_child" ] || fail "browser.engine = chromium without maru-chromium still started the Chromium sidecar"
     ! grep -q '^/osr-smoke' "$root/requests.log" || fail "browser.engine = chromium without maru-chromium still used Chromium"
@@ -471,4 +497,75 @@ if [ "$real_install" = 0 ]; then
     grep -Eq '^web_panel_count=[1-9]' "$root/engine-missing.log" || fail "without maru-chromium the browser tab did not open in WebKit"
 fi
 echo "browser.engine: installed → Chromium, missing → WebKit with a notice"
+
+# W7a2: 설치 안이 믿을 수 없으면(그룹이 쓸 수 있는 파일) 띄우지 않고 이유를 남긴다.
+chmod g+w "$root/prefix/Cellar/maru-chromium/0.0.0/libexec/maru-web-helper"
+: > "$root/requests.log"
+engine_app "$root/prefix" engine-tampered &
+tampered_pid=$!
+sleep 8
+tampered_child=$(host_under "$tampered_pid" || true)
+wait "$tampered_pid" || true
+[ -z "$tampered_child" ] || fail "a group-writable maru-chromium install was still started"
+! grep -q '^/osr-smoke' "$root/requests.log" || fail "a group-writable maru-chromium install still opened the page"
+grep -q 'rejected before start: writable_by_others' "$root/engine-tampered.log" || fail "no rejection reason for a group-writable install"
+echo "a group-writable install is refused before start (writable_by_others)"
+chmod g-w "$root/prefix/Cellar/maru-chromium/0.0.0/libexec/maru-web-helper"
+
+# W7a2: 실행 사본을 둘 캐시 뿌리가 남이 들어올 수 있으면(0755) 복제하지 않고, brew 설치는 설치에서 바로 띄우지도 않는다.
+rm -rf "$root/home" && mkdir -p "$root/home/Library/Caches/maru/web-osr-run" && chmod 755 "$root/home/Library/Caches/maru/web-osr-run"
+: > "$root/requests.log"
+env -u MARU_WEB_OSR_DIR HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+    MARU_WEB_PANEL=1 MARU_CONFIG="$root/engine.conf" HOMEBREW_PREFIX="$root/prefix" \
+    MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/osr-smoke" MARU_MACOS_APP_SMOKE_MS=12000 "$app" > "$root/engine-opencache.log" 2>&1 &
+opencache_pid=$!
+sleep 8
+opencache_child=$(host_under "$opencache_pid" || true)
+wait "$opencache_pid" || true
+[ -z "$opencache_child" ] || fail "the brew install was started without a run copy ($opencache_child)"
+grep -q 'could not make the maru-chromium run copy: writable_by_others' "$root/engine-opencache.log" || fail "no reason logged when the run cache is open to others"
+echo "no run copy (open cache root) → the brew install is not started"
+
+# W7a2: 사본을 만든 뒤 띄우기가 실패하면(여기선 프로필 자리에 파일) 그 사본도 지운다.
+rm -rf "$root/home" && mkdir -p "$root/home/Library/Application Support/maru" && : > "$root/home/Library/Application Support/maru/web"
+env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" MARU_WEB_PANEL=1 \
+    MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/osr-smoke" MARU_MACOS_APP_SMOKE_MS=8000 \
+    "$app" > "$root/profile-blocked.log" 2>&1 &
+blocked_pid=$!
+sleep 5
+[ -d "$run_root" ] || fail "no run cache when the profile could not be made — the start did not get as far as the copy"
+left=$(find "$run_root" -mindepth 1 -maxdepth 1 -name 'run-*' 2>/dev/null)
+wait "$blocked_pid" || true
+[ -z "$left" ] || fail "a run copy was left after the start failed on the profile: $left"
+echo "a start that fails after the copy removes the copy"
+
+# W7a2: 릴리스 판(hardened runtime)은 개발용 환경변수로 실행 파일을 고르지 않는다 — 같은 앱을 ad-hoc 으로 hardened runtime
+# 서명해 본다(판정은 빌드 플래그가 아니라 실행 중 서명 상태 `csops`).
+# 릴리스 판은 `HOME` 대신 계정 홈을 쓴다 — 엔진을 정할 때 그 홈의 캐시를 청소하므로 실제 홈을 건드리지 않았는지 전후로 본다.
+real_run_root="$(eval echo "~$(id -un)")/Library/Caches/maru/web-osr-run"
+real_before=$(ls -1a "$real_run_root" 2>&1 || true)
+cp "$app" "$root/maru-hardened"
+codesign --force --sign - --options runtime "$root/maru-hardened" 2> "$root/hardened-sign.log" || fail "could not sign the hardened copy ($(cat "$root/hardened-sign.log"))"
+hardened_app() { # $1=로그 이름, 나머지는 추가 환경
+    name=$1; shift
+    rm -rf "$root/home" && mkdir -p "$root/home"
+    : > "$root/requests.log"
+    env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" MARU_WEB_PANEL=1 \
+        MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/osr-smoke" MARU_MACOS_APP_SMOKE_MS=10000 "$@" "$root/maru-hardened" > "$root/$name.log" 2>&1 &
+    hardened_pid=$!
+    sleep 7
+    hardened_child=$(pgrep -P "$hardened_pid" -f maru-web-host 2>/dev/null || true)
+    wait "$hardened_pid" || true
+    [ -z "$hardened_child" ] || fail "the hardened build started a sidecar chosen by the environment ($name)"
+    ! grep -q '^/osr-smoke' "$root/requests.log" || fail "the hardened build opened the page in Chromium ($name)"
+    grep -Eq '^web_panel_count=[1-9]' "$root/$name.log" || fail "the hardened build did not fall back to WebKit ($name)"
+}
+hardened_app hardened-envdir MARU_WEB_OSR_DIR="$sidecar_dir"
+if [ "$real_install" = 0 ]; then
+    hardened_app hardened-prefix MARU_CONFIG="$root/engine.conf" HOMEBREW_PREFIX="$root/prefix"
+    grep -q 'maru-chromium is not installed' "$root/hardened-prefix.log" || fail "the hardened build did not ignore HOMEBREW_PREFIX"
+fi
+real_after=$(ls -1a "$real_run_root" 2>&1 || true)
+[ "$real_before" = "$real_after" ] || fail "the hardened run changed the real $real_run_root"
+echo "hardened runtime: MARU_WEB_OSR_DIR and HOMEBREW_PREFIX are ignored"
 echo "web-osr smoke passed"

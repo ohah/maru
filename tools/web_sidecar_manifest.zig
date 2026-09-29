@@ -1,5 +1,5 @@
 //! `maru-chromium` 설치물의 manifest(W7a1, docs/plans/web-osr-backend.md C9)를 만든다 — 빌드 스텝(`web-sidecar-dist`)이
-//! 부른다. maru 는 sidecar 를 띄우기 전에 이 파일로 제어 채널 버전이 맞는지 본다(W7a2). CEF·Chromium 버전은 SDK 의
+//! 부른다. W7a2 에서 maru 가 sidecar 를 띄우기 전에 이 파일로 제어 채널 버전이 맞는지 볼 것이다 — 지금 maru 는 읽지 않는다. CEF·Chromium 버전은 SDK 의
 //! `include/cef_version.h` 에서 읽는다(디렉터리 이름에 기대지 않는다 — formula 가 다른 이름으로 풀 수 있다). arch 는 실제
 //! 프레임워크 바이너리의 Mach-O 머리에서 읽고, 빌드 대상과 다르면 멈춘다(arm64 SDK 로 x86_64 를 만들면 틀린 설치물이다).
 //!

@@ -385,3 +385,47 @@ pub fn reapBlocking(p: *Process) void {
     while (std.c.waitpid(p.pid, &status, 0) == -1 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) {}
     p.reaped = true;
 }
+
+extern "c" fn waitid(idtype: c_int, id: c_uint, info: *[128]u8, options: c_int) c_int;
+
+test "a reaped child is never signalled or waited for again (its pid may belong to someone else by then)" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    var p = try spawn(std.testing.allocator, "/usr/bin/true", &.{}, "/", null);
+    defer p.deinit(std.testing.allocator);
+    var waited: usize = 0;
+    while (!reapIfExited(&p)) : (waited += 1) {
+        if (waited > 500) return error.ChildDidNotExit;
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+    try std.testing.expect(p.reaped);
+    // 그 pid 를 커널이 다른 자식에게 다시 준 것처럼 한다 — 끝났지만 아직 안 거둔 자식(거두면 안 된다)과 살아 있는 자식(죽이면
+    // 안 된다). 가드가 없으면 앞의 것은 거둬지고 뒤의 것은 SIGKILL 로 끝난다.
+    var zombie = try spawn(std.testing.allocator, "/usr/bin/true", &.{}, "/", null);
+    defer {
+        var st: c_int = 0;
+        _ = std.c.waitpid(zombie.pid, &st, 0);
+        zombie.deinit(std.testing.allocator);
+    }
+    var sleeper = try spawn(std.testing.allocator, "/bin/sleep", &.{"5"}, "/", null);
+    defer {
+        var st: c_int = 0;
+        _ = std.c.kill(sleeper.pid, .KILL);
+        _ = std.c.waitpid(sleeper.pid, &st, 0);
+        sleeper.deinit(std.testing.allocator);
+    }
+    var status: c_int = 0;
+    var info: [128]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), waitid(1, @intCast(zombie.pid), &info, 0x4 | 0x20)); // P_PID · WEXITED|WNOWAIT
+    p.pid = zombie.pid;
+    try std.testing.expect(reapIfExited(&p));
+    reapBlocking(&p);
+    try std.testing.expectEqual(zombie.pid, std.c.waitpid(zombie.pid, &status, std.c.W.NOHANG)); // 아직 우리가 거둘 수 있었다
+    p.pid = sleeper.pid;
+    kill(&p, .KILL);
+    reapBlocking(&p);
+    // SIGKILL 은 곧바로 드러나지 않는다 — 잠시 지켜봐도 끝나지 않는다.
+    for (0..20) |_| {
+        try std.testing.expectEqual(@as(std.c.pid_t, 0), std.c.waitpid(sleeper.pid, &status, std.c.W.NOHANG));
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+}

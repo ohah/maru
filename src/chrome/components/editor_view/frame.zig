@@ -6426,7 +6426,8 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
     //    `all` 은 「줄 처음부터 인레이까지 세어 낸 열이 든 행의 그 칸」과 **같아야** 하고, 다른 모드는 그 부분집합이어야 한다.
     var prng = std.Random.DefaultPrng.init(0x5f1e_07);
     const rnd = prng.random();
-    const pieces = [_][]const u8{ " ", "\t", "a", "\u{D55C}" };
+    // §3.8 표기(`\u{202E}` — 8칸, 경계에 걸치면 잘려 두 행에 걸친다: 탭이 아닌 「머묾」)와 결합 문자(`e` + U+0301 — 여러 byte 한 칸)도 섞는다(적대적 7회차).
+    const pieces = [_][]const u8{ " ", "\t", "a", "\u{D55C}", "\u{202E}", "e\u{301}" };
     const hint_text = "xxxxxx";
     const modes = [_]whitespace.Mode{ .all, .boundary, .selection, .trailing };
     var compared: usize = 0;

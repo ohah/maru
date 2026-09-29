@@ -3207,10 +3207,40 @@ extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 /// 실제 경로(realpath)를 돌려준다. 처음엔 `<cwd>/.zig-cache/<고정 이름>` 이었다 — 같은 워크트리에서 시험이 겹치면 한쪽의
 /// `rm -rf` 가 다른 쪽 저장소의 `.git` 을 지우는 사이 `git -C` 가 위로 올라가 **개발자의 워크트리**에서
 /// `checkout -q -b other` 를 실행했다(2026-09-29 실측 — 커밋이 그 브랜치에 쌓여 PR 에서 빠졌다, W7a1 적대 검증 8 차).
+/// `TMPDIR` 이 비었거나 상대 경로면 믿지 않는다 — 상대 경로면 임시 저장소가 다시 워크트리 안에 생긴다(W7a1 적대 검증 9 차).
+fn tmpBase(env: ?[]const u8) []const u8 {
+    const trimmed = std.mem.trimEnd(u8, env orelse "", "/");
+    return if (trimmed.len > 0 and trimmed[0] == '/') trimmed else "/tmp";
+}
+
+test "test repos go under an absolute TMPDIR only — an empty, root or relative one falls back to /tmp" {
+    try testing.expectEqualStrings("/var/folders/x/T", tmpBase("/var/folders/x/T/"));
+    try testing.expectEqualStrings("/tmp", tmpBase(null));
+    try testing.expectEqualStrings("/tmp", tmpBase(""));
+    try testing.expectEqualStrings("/tmp", tmpBase("/"));
+    try testing.expectEqualStrings("/tmp", tmpBase("relative/dir"));
+}
+
+test "a test `git -C` on a directory without its own .git fails instead of walking up to an enclosing repository" {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = tmpRepoPath(&repo_buf, "tmp-no-walk-up") orelse return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    if (!runQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
+    var sub_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sub = std.fmt.bufPrintZ(&sub_buf, "{s}/sub", .{repo}) catch return error.SkipZigTest;
+    try testing.expect(runQuiet(&.{ "/bin/mkdir", sub }));
+    // 저장소 안의 하위 디렉터리 — 그냥 `git -C` 면 위의 저장소를 찾아 성공한다. 시험의 `git -C` 는 실패해야 한다
+    // (겹친 시험이 지운 임시 저장소 자리에서 개발자 워크트리를 건드리지 않게).
+    try testing.expect(runQuiet(&.{ exe, "-C", repo, "rev-parse", "--git-dir" }));
+    try testing.expect(!runQuiet(&.{ exe, "-C", sub, "rev-parse", "--git-dir" }));
+}
+
 fn tmpRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
-    // `TMPDIR` 이 비었거나 상대 경로면 믿지 않는다 — 상대 경로면 임시 저장소가 다시 워크트리 안에 생긴다(W7a1 적대 검증 9 차).
-    const env_tmp: []const u8 = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "";
-    const tmp = if (env_tmp.len > 0 and env_tmp[0] == '/') env_tmp else "/tmp";
+    const tmp = tmpBase(if (std.c.getenv("TMPDIR")) |t| std.mem.span(t) else null);
     var template_buf: [std.fs.max_path_bytes]u8 = undefined;
     // 이름에 pid 를 넣는다 — `tools/clean-tmp-fixtures.sh` 는 이름 속 pid 가 살아 있으면 남긴다(`$TMPDIR` 이 `/tmp` 일 때 도는 중인
     // 시험의 자리를 지우지 않게).

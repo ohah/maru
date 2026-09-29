@@ -353,6 +353,11 @@ GUI 0 host-backed 알림은 host가 bounded journal과 stable route를 소유하
 - **임의 바이트는 JSON 문자열로 싣지 않는다.** client의 strict 응답 디코더는 UTF-8을 검증하므로 non-UTF-8이 오면
   connection을 fail-close한다 — 복사 한 번에 앱 전역 host 연결이 끊긴다. OSC 52 데이터는 base64로 싣는다
   (`runtime.find`의 검색어 hex와 같은 규율).
+- **`runtime.find` 는 모드(`regex`, bool)를 늘 싣는다** — `{stream_id, q(hex), cur, scroll, regex}`, 리터럴이면 `false`.
+  호환은 두 방향이 다 닫혀 있다: host 는 params 를 **이름으로만** 읽고 필드 수를 안 세므로(`server.dispatchFind`) 이 필드를
+  모르는 옛 host 도 리터럴 찾기를 그대로 답하고, `regex:true` 를 모르는 옛 host 가 리터럴로 답하면 client 가 응답에 `regex`
+  회신이 없다고 거절한다(PCRE2 매치를 리터럴 매치로 조용히 바꿔 보여 주지 않는다). 요청 모양은 `client_slot` 의
+  `CR3a-2c3b typed request encoder…` 가 두 모드 다 골든으로 고정한다.
 - **OSC 52 클립보드**(P3-e4c-9). host는 요청을 drain해 관측에 누적 seq(`clipboard_write_seq`·
   `clipboard_read_seq`)와 read target(Pc)만 싣고, **정책 판정(`osc52.read`)과 OS 클립보드 접근은 client**가 한다.
   write 텍스트는 커서 관측 full-state에 실을 수 없어 `runtime.clipboard_write` RPC로 따로 가져간다(seq가 증가했을

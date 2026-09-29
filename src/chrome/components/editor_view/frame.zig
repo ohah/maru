@@ -3272,6 +3272,98 @@ test "[측정] B2 붙은 검색 표식과 흩어진 표식의 op 수요" {
     }
 }
 
+test "B2 인접 검색 병합은 가로 스크롤과 랩의 전체 프레임을 바꾸지 않는다" {
+    // 같은 24칸을 1칸짜리 매치 24개 또는 긴 매치 하나로 표현한다.
+    // 검색 표시 외에 본문·gutter·막대·시각 행까지 전체 결과를 비교한다.
+    const line = "abcdefghijklmnopqrstuvwx";
+    const lines = [_][]const u8{line};
+    var singles: [24]Mark = undefined;
+    for (&singles, 0..) |*mark, i| mark.* = .{ .start = @intCast(i), .len = 1 };
+    const long = [_]Mark{.{ .start = 0, .len = 24 }};
+    const cases = [_]struct { wrap: bool, first_col: u32, first_piece: u32 }{
+        .{ .wrap = false, .first_col = 3, .first_piece = 0 },
+        .{ .wrap = false, .first_col = 19, .first_piece = 0 },
+        .{ .wrap = true, .first_col = 0, .first_piece = 0 },
+        .{ .wrap = true, .first_col = 0, .first_piece = 1 },
+    };
+    for (cases) |case| {
+        var left_ops: [256]draw.Op = undefined;
+        var right_ops: [256]draw.Op = undefined;
+        var left_runs: [256]draw.Run = undefined;
+        var right_runs: [256]draw.Run = undefined;
+        var left_text: [4096]u8 = undefined;
+        var right_text: [4096]u8 = undefined;
+        var left: WideBuffers = .{ .ops = &left_ops };
+        var right: WideBuffers = .{ .ops = &right_ops };
+        var props = testProps(&lines, case.wrap);
+        props.visible_rows = 4;
+        props.total_cols = 16;
+        props.rect = .{ .x = 37, .y = 19, .w = 16 * 8, .h = 4 * 16 };
+        props.first_col = case.first_col;
+        props.first_piece = case.first_piece;
+        props.content_max_cols = 24;
+        const single_rows = [_][]const Mark{&singles};
+        const long_rows = [_][]const Mark{&long};
+        props.search_marks = &single_rows;
+        const a = build(props, left.scratch(&left_runs, &left_text));
+        props.search_marks = &long_rows;
+        const b = build(props, right.scratch(&right_runs, &right_text));
+        try testing.expect(!a.truncated and !b.truncated);
+        try testing.expect(std.meta.eql(a, b));
+        try testing.expect(sameOpContent(left_ops[0..a.ops], right_ops[0..b.ops]));
+        for (left.visual_rows[0..a.visual_rows], right.visual_rows[0..b.visual_rows]) |lv, rv| {
+            try testing.expect(std.meta.eql(lv, rv));
+        }
+        var search_ops: usize = 0;
+        for (left_ops[0..a.ops]) |op| {
+            if (op == .quad and op.quad.fill_role == .search_match) search_ops += 1;
+        }
+        try testing.expect(search_ops > 0);
+    }
+}
+
+test "B2 인접한 현재 매치는 일반 검색 강조에 흡수되지 않는다" {
+    const lines = [_][]const u8{"xxxx"};
+    const marks = [_]Mark{
+        .{ .start = 0, .len = 1 }, .{ .start = 1, .len = 1 },
+        .{ .start = 2, .len = 1 }, .{ .start = 3, .len = 1 },
+    };
+    const rows = [_][]const Mark{&marks};
+    var props = testProps(&lines, false);
+    props.search_marks = &rows;
+    props.search_current = .{ .line = 0, .start = 1 };
+    var ops: [256]draw.Op = undefined;
+    var runs: [256]draw.Run = undefined;
+    var text_bytes: [4096]u8 = undefined;
+    var bufs: WideBuffers = .{ .ops = &ops };
+    const written = build(props, bufs.scratch(&runs, &text_bytes));
+    try testing.expect(!written.truncated);
+    const x = props.rect.x + @as(i32, @intCast(@as(u32, layoutOf(props).contentLeft()) * props.cell_w_px));
+    var normal: [2]draw.Op.Quad = undefined;
+    var normal_n: usize = 0;
+    var current: ?draw.Op.Quad = null;
+    for (ops[0..written.ops]) |op| {
+        if (op != .quad) continue;
+        if (op.quad.fill_role == .search_match) {
+            try testing.expect(normal_n < normal.len);
+            normal[normal_n] = op.quad;
+            normal_n += 1;
+        } else if (op.quad.fill_role == .search_match_current) {
+            try testing.expect(current == null);
+            current = op.quad;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), normal_n);
+    try testing.expectEqual(x, normal[0].rect.x);
+    try testing.expectEqual(props.cell_w_px, normal[0].rect.w);
+    try testing.expectEqual(x + @as(i32, @intCast(2 * props.cell_w_px)), normal[1].rect.x);
+    try testing.expectEqual(2 * props.cell_w_px, normal[1].rect.w);
+    const highlighted = current orelse return error.CurrentMatchNotPainted;
+    try testing.expectEqual(x + @as(i32, @intCast(props.cell_w_px)), highlighted.rect.x);
+    try testing.expectEqual(props.cell_w_px, highlighted.rect.w);
+    try testing.expectEqual(search_current_alpha, highlighted.alpha);
+}
+
 test "B2 재그리기 반례 — 첫 절단 호출이 RowCache 계수를 전진시킨다" {
     // 2048줄만 한 프레임에 센다. 절단 후 같은 props로 다시 build하면 마지막
     // 줄까지 세어 버려, 충분한 op으로 한 번만 그린 프레임과 scrollbar 축이 달라진다.

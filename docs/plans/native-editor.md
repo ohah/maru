@@ -10,7 +10,7 @@
 뜬다 · 2026-08-14), N1.5(비교 본문 b·c·e), N2(버퍼·편집·검색·멀티커서), N3(조합 글자 표시 · 2026-08-27), N4(구문 색 2층·LSP 표시),
 N5(미니맵 N5a `c0aa24b11` · 막대와 미니맵 N5b `47eecce79`). **「섰다」는 「끝났다」가 아니다** — 단계마다 본문의 「남은 것」이 아직 열린 것을
 적는다. **N3의 범위·멀티 커서 구현도 섰다(2026-09-26)** — 편집기의 `replacementRange`와
-`markedRange`/`selectedRange`는 실제 문서 UTF-16 위치를 쓴다. 2026-09-29 사용자 요청으로 멀티 커서 조합 표시는 모든 커서에 비추고 확정 시 한 편집으로 넣도록 정책을 바꿨다. 여러 줄 선택의 조합 미리보기·확정, Backspace, 조합 중 Enter와 자동완성 목록의 Enter는 2026-09-27 제품 화면에서 각각 확인했다. PR #3981에서 한자 후보창 선택·취소와 접힌 선택의 실제 2벌식 조합·확정을 화면으로 확인했고, 랩된 줄의 후보창 좌표는 렌더 좌표를 대조하는 `IME5` 판정자로 확인했다. 2026-09-29 실제 두벌식·두 커서 제품 화면에서 **이전 정책**인 primary만 조합 표시와 두 커서 확정·Undo를 확인했다. 새 정책의 제품 화면 검증은 별도로 필요하다. 헤드리스 판정과 제품 화면 확인의 범위는 [검증 매트릭스](../verification-matrix.md)의 IME 행이 소유한다. 단계 뒤의 일은 아래 「네이티브 편집기 후속」 표가 소유한다.
+`markedRange`/`selectedRange`는 실제 문서 UTF-16 위치를 쓴다. 2026-09-29 사용자 요청으로 멀티 커서 조합 표시는 모든 커서에 비추고 확정 시 한 편집으로 넣도록 정책을 바꿨다. 여러 줄 선택의 조합 미리보기·확정, Backspace, 조합 중 Enter와 자동완성 목록의 Enter는 2026-09-27 제품 화면에서 각각 확인했다. PR #3981에서 한자 후보창 선택·취소와 접힌 선택의 실제 2벌식 조합·확정을 화면으로 확인했고, 랩된 줄의 후보창 좌표는 렌더 좌표를 대조하는 `IME5` 판정자로 확인했다. 2026-09-29 실제 두벌식·두 커서 제품 화면에서 **이전 정책**인 primary만 조합 표시와 두 커서 확정·Undo를 확인했다. 새 정책도 같은 날 실제 두벌식·두 커서 제품 화면에서 `ㅎ → 하 → 한` 동시 표시, Enter 확정·개행, Undo 한 번의 원복을 확인했다. 헤드리스 판정과 제품 화면 확인의 범위는 [검증 매트릭스](../verification-matrix.md)의 IME 행이 소유한다. 단계 뒤의 일은 아래 「네이티브 편집기 후속」 표가 소유한다.
 2026-08-09 사용자 결정으로 `text` kind와 diff 본문을 CM6에서 Zig+Metal로 이관하며, 마크다운 렌더는 웹에 남는다.
 
 **대표적인 열린 편집기 작업(2026-09-29, 전수 목록 아님).** 같은 파일을 두 pane에서 공유 편집하는 경로는 §2.4와 [여러 뷰 축](native-editor-multi-view.md)의 미결 계약을 먼저 닫아야 한다. 그 경로를 기다리는 심볼 미리보기는 아래 후속 표가 소유한다. 비교 뷰의 좌우 독립 찾기 상자도 아래 N2 §5.1의 예약 후속이며, 현재는 상자 하나에서 검색 열을 표시·전환한다. draw 저장소의 B2(op 몫)는 아래 표에서 구현 전이고, 호버·시그니처 내용 정책도 후속 표가 소유한다. 이들은 PCRE2 검색이나 커맨드 팝업 fuzzy/한글 검색의 잔여가 아니다. 커맨드 팝업 상태는 [전체 구현 계획](../implementation-plan.md)이 소유한다.
@@ -522,7 +522,7 @@ N5(미니맵 N5a `c0aa24b11` · 막대와 미니맵 N5b `47eecce79`). **「섰�
     후보창 앵커가 x=1616으로 밀렸다. 이제 렌더가 남긴 시각 행·열을 역으로 찾아 랩·세로 스크롤·
     가로 스크롤에서도 같은 글자 위치를 가리킨다(`IME5` 독립 그리기 오라클).
   **터미널이 쓰는 바로 그 경로라 최대 리스크**이며 헤드리스 판정자에 더해 실제 GUI 검증이 필요하다.
-  2026-09-29 실제 두벌식·두 커서 제품 화면에서 [조합](../images/editor-ime-multicursor-preedit.png) → [확정](../images/editor-ime-multicursor-committed.png) → [Undo](../images/editor-ime-multicursor-undone.png)를 확인했다. 이 캡처는 **이전의 primary만 조합 표시** 정책을 증명한다. 현재의 모든 커서 조합 투영 정책은 헤드리스 판정자를 거쳤고 실제 GUI 검증이 남았다(../native-editor.md §11).
+  2026-09-29 실제 두벌식·두 커서 제품 화면에서 [조합](../images/editor-ime-multicursor-preedit.png) → [확정](../images/editor-ime-multicursor-committed.png) → [Undo](../images/editor-ime-multicursor-undone.png)를 확인했다. 이 캡처는 **이전의 primary만 조합 표시** 정책을 증명한다. 현재의 모든 커서 조합 투영 정책은 헤드리스 판정자에 더해 실제 두벌식 화면에서 [동시 조합](../images/editor-ime-multicursor-live-preedit.png) → [Enter 확정](../images/editor-ime-multicursor-live-committed.png) → [Undo](../images/editor-ime-multicursor-live-undone.png)로 확인했다(../native-editor.md §11).
 - **N4 — 토큰과 LSP 표시.** 미니맵이 lexer 층에 의존하므로 N5보다 앞선다. 계약 절과의 대응:
   - **토큰**(§5·§5.3): **tree-sitter 1층**(런타임 배선 + `init`/`onEdit`/`spansForRange` provider) → LSP semantic
     tokens 층(보이는 범위 요청, 부분 덮기). N1.5에서 이미 뜬 diff 본문에 syntax 색이 여기서 얹힌다. 트리가 서면

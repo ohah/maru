@@ -2,6 +2,8 @@
 //!
 //! 실제 `maru-web-host` 를 maru 처럼 띄워 docs/plans/web-osr-backend.md 「W1b」 완료 판정을 잰다:
 //!   handshake        hello → 같은 instance·nonce 의 hello_ack
+//!   version-mismatch 다른 제어 채널 버전의 hello → 제 버전의 hello_ack(0·0) 하나와 exit 18(W7a1 —
+//!                    따로 설치된 maru 와 `maru-chromium` 이 어긋나면 maru 는 이 머리로 「버전 불일치」를 알아본다)
 //!   helper-sandbox   host 의 자식이 모두 `maru-web-helper` 이고 `sandbox_check` 1(host 자신은 샌드박스 밖)
 //!   shutdown-clean   shutdown → 알림이 끝까지 frame 으로만 풀리고(stdout 오염 없음) exit 0, helper 도 사라진다
 //!   parent-death     maru 역할 프로세스를 SIGKILL 하면 host 와 helper 가 모두 사라진다(고아 Chromium 없음) — 명령 pipe 의
@@ -88,6 +90,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const profile_b = std.fmt.bufPrintZ(&profile_b_buf, "--profile-dir={s}/b", .{profile_root}) catch return 2;
 
     sessionChecks(host_path, profile_a) catch |err| report(false, "session", "{s}", .{@errorName(err)});
+    versionMismatch(host_path, profile_a) catch |err| report(false, "version-mismatch", "{s}", .{@errorName(err)});
     var profile_c_dir_buf: [1024]u8 = undefined;
     const profile_c_dir = std.fmt.bufPrintZ(&profile_c_dir_buf, "{s}/c", .{profile_root}) catch return 2;
     var profile_c_buf: [1024]u8 = undefined;
@@ -122,6 +125,23 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     std.debug.print("{s}: 틀림 {d} 건\n", .{ if (failures == 0) "통과" else "실패", failures });
     return if (failures == 0) 0 else 1;
+}
+
+fn versionMismatch(host_path: [:0]const u8, profile: [:0]const u8) !void {
+    var host = try Host.spawn(host_path, profile);
+    defer {
+        _ = std.c.close(host.commands);
+        _ = std.c.close(host.events);
+    }
+    // 머리의 버전만 다른 hello(다음 버전의 maru 흉내).
+    var buf: [64]u8 = undefined;
+    const len = try protocol.codec.encode(.{ .hello = .{ .instance = 7, .nonce = 9 } }, &buf);
+    std.mem.writeInt(u16, buf[protocol.wire.prefix_len + protocol.wire.magic.len ..][0..2], protocol.wire.version + 1, .big);
+    if (std.c.write(host.commands, &buf, len) != @as(isize, @intCast(len))) return error.WriteFailed;
+    const reply = host.next(reply_wait_ms) catch null;
+    const acked = reply != null and reply.? == .hello_ack and reply.?.hello_ack.instance == 0 and reply.?.hello_ack.nonce == 0;
+    const code = host.wait(exit_wait_ms);
+    report(acked and code == 18, "version-mismatch", "제 버전 hello_ack(0·0) {} · exit {?d}(18 이어야)", .{ acked, code });
 }
 
 fn handshake(host: *Host) !void {

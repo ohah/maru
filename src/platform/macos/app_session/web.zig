@@ -440,6 +440,7 @@ pub fn tickWebOsr(self: *AppSession) void {
         .profile_in_use => .web_osr_profile_in_use,
         .start_failed => .web_osr_start_failed,
         .crashed_repeatedly => .web_osr_crashed,
+        .version_mismatch => .web_osr_version_mismatch,
     });
     tickOsrDialog(self);
 }

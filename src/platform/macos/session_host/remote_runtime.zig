@@ -8007,10 +8007,24 @@ pub const testing_api = if (builtin.is_test) struct {
         };
     }
 
-    pub fn hasBoundReconnectAdmission(runtime: *RemoteRuntime) bool {
+    /// host admission 의 resident charge 를 쥔 결속인가(anchor). CR6e-c3b2c 이전 이름은
+    /// `hasBoundReconnectAdmission` 이었다 — 그때는 결속 = charge 였다.
+    pub fn hasChargedReconnectAdmission(runtime: *RemoteRuntime) bool {
         return runtime.reconnect_executor.admission != null and
             runtime.reconnect_executor.resident_budget_addr != 0 and
             runtime.reconnect_executor.resident_lease.active;
+    }
+
+    /// 결속된 admission projection(charged·identity-only 공통). 결속이 없으면 null.
+    pub fn boundReconnectProjection(runtime: *RemoteRuntime) ?reconnect_admission_owner.Projection {
+        return runtime.reconnect_executor.admission;
+    }
+
+    /// lease 없이 admission identity 만 쥔 형제 결속인가.
+    pub fn hasIdentityOnlyReconnectAdmission(runtime: *RemoteRuntime) bool {
+        return runtime.reconnect_executor.admission != null and
+            runtime.reconnect_executor.resident_budget_addr != 0 and
+            std.meta.eql(runtime.reconnect_executor.resident_lease, reconnect_resident_budget.Lease{});
     }
 
     pub fn releaseBoundReconnectAdmission(

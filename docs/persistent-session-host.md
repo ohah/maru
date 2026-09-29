@@ -6280,7 +6280,7 @@ base뿐이며 runtime/backend/pool/admission owner 주소를 받지 않는다.
 frame owner는 한 turn에 completion을 먼저 exact claim·settle한 뒤 새 admission을 최대 하나만 c1에 넣고 idle worker에
 최대 하나만 dispatch한다. connected completion은 c3a revalidation 뒤 기존 CR5 host-wide transaction을 시작하고, 이후
 CR5 단계는 job의 closed state에 따라 전진한다. 성공·stale·typed failure·terminal host-wide failure는 모두 같은 bound
-incident identity를 재검증한 제품 release leaf로 runtime별 reconnect resident lease와 admission mirror를 exact once
+incident identity를 재검증한 제품 release leaf로 host admission당 하나인 reconnect resident lease(CR6e-c3b2c)와 admission mirror를 exact once
 정산한다. 새 connection publication 뒤 old connection generation이 더는 current와 일치하지 않는다는 이유로 이 정산을
 생략하거나 test-only release를 호출하면 안 된다. `retry_later`만 fresh incident publication 권위를 만들지 않고 기존
 bound admission을 유지한 채 동일 sealed c1 snapshot을 queued로 되돌려 후속 frame이 같은 요청을 재시도한다.
@@ -6382,7 +6382,7 @@ completion claim·c1 settle, admission 한 건, idle worker dispatch 한 건을 
 
 **c3b2b**에서 main coordinator는 connected completion을 c3a로 adopt한 뒤 CR5 host transaction을 closed state별로
 한 단계씩 전진시킨다. 성공·stale·typed failure·host-wide terminal failure의 모든 끝점은 c1 completion의 최초
-snapshot 및 runtime별 bound projection을 다시 확인하는 제품 release leaf를 통과한다. 이 leaf만 resident lease와
+snapshot 및 runtime별 bound projection을 다시 확인하는 제품 release leaf를 통과한다. 이 leaf만 host당 하나인 resident lease와
 admission mirror를 exact once 해제한다. 정상·stale·비-terminal 실패 job은 terminal summary를 확인한 뒤 storage를
 회수한다. CR5c `host_failure_complete`는 예외가 아니라 별도 소유권이다. 이 상태는 terminal generation과 retired Client를
 retry job에 유지한다는 CR5c 계약대로 runtime-first backend teardown 또는 후속 retry owner까지 보존하며 c3b2b가 임의로

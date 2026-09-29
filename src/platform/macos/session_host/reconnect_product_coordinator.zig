@@ -649,7 +649,7 @@ test "CR6e-c3b2b failed completion releases every bound admission before logical
         try coordinator.settleLogicalCompletion(&backend, &budget),
     );
     try std.testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
-    try std.testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+    try std.testing.expect(!remote_runtime.testing_api.hasChargedReconnectAdmission(&fixture.runtime));
     try std.testing.expectError(error.NotFound, coordinator.logicalCompletion());
 }
 
@@ -704,7 +704,16 @@ fn actualReconnectCoordinatorHook(
         ConnectedSettlement.adopted,
         try coordinator.settleConnectedCompletion(backend, &budget),
     );
-    try std.testing.expectEqual(@as(usize, 3), (try budget.snapshot()).live_entries);
+    // CR6e-c3b2c: host admission 하나 = resident charge 하나. fixture 는 한 host 에 runtime 셋(handle 1·2·3)을
+    // spawn 하므로 anchor(handle 최솟값 1)만 charge 를 쥐고 2·3 은 identity-only 다(예전에는 3).
+    const remote_runtime = @import("remote_runtime.zig");
+    try std.testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
+    try std.testing.expect(remote_runtime.testing_api.hasChargedReconnectAdmission(backend.runtimes.get(1).?.runtime));
+    for ([_]u64{ 2, 3 }) |sibling| {
+        const runtime = backend.runtimes.get(sibling).?.runtime;
+        try std.testing.expect(!remote_runtime.testing_api.hasChargedReconnectAdmission(runtime));
+        try std.testing.expect(remote_runtime.testing_api.hasIdentityOnlyReconnectAdmission(runtime));
+    }
     var terminal: ?ConnectedProgress = null;
     for (0..100_000) |_| {
         const progress = try coordinator.progressConnectedOne(backend, &budget);

@@ -186,7 +186,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    process-global admission inventory 64개를 sealed 대기열 상한으로 유지하면서 active reconnect resident entry는 8개,
    GUI reconnect 전용 resident byte 상한은 128 MiB로 둔다. 이 byte 상한은 daemon `ConnectionSlot`의 128 MiB와 값을
    맞추지만 서로 다른 process·owner의 독립 정책이며 budget을 공유하지 않는다. 작은 generation도 동시에 최대 8개만
-   실행하고, `base_update_max_bytes`를 모두 쓰는 generation은 byte cap 때문에 7개까지만 admit된다. 각 cap의 다음 budget
+   실행하고, `base_update_max_bytes`를 모두 쓰는 generation은 byte cap 때문에 7개까지만 admit된다(CR6e-c3b2c부터 charge
+   하나는 host admission 하나다 — 직렬 host job의 in-flight candidate 하나만 잡으므로 host의 runtime 수와 무관하게 진행한다,
+   [영속 세션 호스트](persistent-session-host.md)의 CR6e-c3b2c 절). 각 cap의 다음 budget
    reserve는 allocation·lease·role mutation 0으로 거부된다. Budget·entry·lease는 final address, OS PID, canonical process
    nonce, monotonic owner incarnation과 policy domain을 공유해 fork 및 same-address 재사용 권위를 거부한다. **e3b2**는 이 typed 거부를 actual sealed admission queue와
    결속해 요청을 잃지 않고 후속 drain에서 다시 시도한다. Candidate lease는 final-address stable executor가 mutation seal·authority commit retain 구간부터

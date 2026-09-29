@@ -2004,7 +2004,15 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   `RemoteTermBackend` runtime row를 조합함을 검증한다. max charge 7개가 resident한 동안 다음 sealed row는
   `retry_later`로 동일 projection을 보존하고, 한 lease를 release한 다음 drain에서 actual stable executor로 이전된다.
   executor의 candidate lease는 reducer retain 구간 뒤 generation publish에서 current로 전환되고 terminal reclaim 뒤 0이 된다.
-  Debug·ReleaseFast drain 1개+executor 1개+boundary 1개를 exact-count한다.
+  Debug·ReleaseFast drain 1개+executor 1개+boundary 1개를 exact-count한다. 제품 host 전체 경로는 publishSwap 없이 terminal
+  settle까지 candidate로 유지한다.
+  **CR6e-c3b2c host 단위 charge**(`test-session-host-reconnect-host-charge`, Debug는 PR의 `test-macos-only`): 한 host의 runtime
+  N=7·8·13이 빈 예산에서 첫 drain에 `.started`하고 live entry가 1이며 anchor(handle 최솟값) 하나만 charged임을, byte cap이
+  찬 동안 N=13도 `.retry_later`로 admission을 보존하다 한 lease release 뒤 시작함을, anchor가 떠나면 charge가 남은 형제
+  최솟값에게 넘어가 하나로 남고 settle 뒤 0이 됨을 잰다. executor 판정자는 identity-only abort가 lease 없이 결속만 풀고
+  anchor charge를 건드리지 않음과, 다른 incident·charged·자기 자신으로의 이전을 거부함을 잰다. 수정 전 코드에서 N=8·13은
+  `.retry_later`로 red, N=7은 green(대조군)이었다. 경계 `CR6e-c3b2c 경계는`(check-boundaries)이 batch charge 부재, anchor
+  bind, 직렬 job 전제, charged==1 검사 두 자리, teardown 직전 이전 네 자리를 고정한다.
   e3c1은 reconnect-only `SessionHostCoordinator`의 final address·PID·process nonce·owner thread와 one-turn backend
   singleton projection을 결속하고, AppSession의 기존 direct drain caller를 0으로 내린다. queue/budget/backend owner를
   이동하지 않은 sole coordinator drain과 copied/stale/reinstalled-backend mutation 0을 product-type gate로 검증한다.

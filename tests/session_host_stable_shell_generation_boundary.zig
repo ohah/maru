@@ -1108,6 +1108,54 @@ test "CR2e-e3b2 경계는 sealed queue drain과 stable executor lease의 sole pr
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
 }
 
+test "CR6e-c3b2c 경계는 host admission 하나에 resident charge 하나만 잡고 anchor 가 떠나기 전에 넘긴다" {
+    // 2026-09-29 실측: runtime 13개 host 가 poison 뒤 3분간 재접속 0회였다. bind 가 runtime 전부에
+    // 최악치를 잡아 빈 예산으로도 7개까지만 들어갔기 때문이다. 동작 판정자는
+    // `test-session-host-reconnect-host-charge`(PR 의 `test-macos-only`)가 N=7·8·13 으로 재고,
+    // 여기서는 그 판정이 기대는 배선이 사라지지 않았는지를 잰다.
+    const allocator = std.testing.allocator;
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
+    const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime);
+    const build = try build_source.read(allocator);
+    defer allocator.free(build);
+
+    // runtime 수만큼 잡던 batch 는 돌아오면 안 된다 — host 하나에 charge 하나.
+    try std.testing.expectEqual(@as(usize, 0), count(backend, "canReserveBatch(selected_count"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "canReserveBatch(1, reconnect_resident_budget.max_entry_bytes)"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "RemoteRuntime.backend_api.bindReconnectAdmission(\n            selected[0].runtime,"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "for (selected[1..selected_count]) |row| {\n            RemoteRuntime.backend_api.bindReconnectAdmissionIdentity("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "std.mem.sort(SelectedReconnectRuntime, selected[0..selected_count]"));
+    // charge 하나가 옳은 근거는 host 재접속 job 이 candidate 를 하나만 갖는 직렬 구조다. 그 전제가 바뀌면
+    // (job 에 candidate 가 둘, 또는 job 이 동시에 둘) 이 판정도 다시 재야 한다.
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "    reconnect: remote_runtime.PreparedReconnect = .{},"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "    host_reconnect_job: ?*HostReconnectJob = null,"));
+    // 결속 검증과 정산은 «같은 host 에 charge 정확히 하나» 를 요구한다.
+    try std.testing.expectEqual(@as(usize, 2), count(backend, "if (charged != 1) return error.InvalidAuthority;"));
+    // anchor 가 떠나는 네 자리는 teardown/결속 해제 **직전**에 charge 를 넘긴다.
+    try std.testing.expectEqual(@as(usize, 4), count(backend, "self.handOffReconnectChargeBeforeLeaveNoFail("));
+    inline for (.{
+        "self.handOffReconnectChargeBeforeLeaveNoFail(removed.value.runtime, removed.value.host_id);\n        self.destroyRuntimeEntry(handle, removed.value, .terminate);",
+        "self.handOffReconnectChargeBeforeLeaveNoFail(removed.value.runtime, removed.value.host_id);\n        removed.value.runtime.detachClientSide();",
+        "self.handOffReconnectChargeBeforeLeaveNoFail(entry.runtime, entry.host_id);\n        if (self.app_quit_connections_terminalized) {",
+        "self.handOffReconnectChargeBeforeLeaveNoFail(entry.runtime, entry.host_id);\n        try RemoteRuntime.backend_api.applyCloseTransitionProjection(",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(backend, phrase));
+    // identity-only 는 `Lease{}` 라 role 기본값이 `.candidate` 다 — role 만 보고 budget 을 고르는 옛 모양은
+    // 빈 lease 를 검증하다 죽는다. charged 판정은 `active` 하나에서만 나온다.
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "self.resident_budget_addr != 0 and self.resident_lease.role == .candidate"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "if (self.resident_budget_addr == 0 or !self.resident_lease.active) return null;"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn bindAdmissionIdentity("));
+    inline for (.{
+        "const session_host_reconnect_host_charge_step = b.step(",
+        "run_host_charge_tests.addArg(\"--maru-expect-tests=7\")",
+        "if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);",
+        ".filters = &.{\"CR6e-c3b2c host charge\"},",
+        "run_host_charge_boundary_tests.addArg(\"--maru-expect-tests=1\")",
+        "if (host_charge_optimize == .Debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);",
+    }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
+}
+
 test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고정한다" {
     const allocator = std.testing.allocator;
     const app = try readSource(allocator, "src/platform/macos/app_session.zig");

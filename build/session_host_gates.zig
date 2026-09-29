@@ -30,6 +30,7 @@ pub const Context = struct {
     run_session_host_slow_observer_validator_tests: *std.Build.Step.Run,
     macos_host_tests: bool,
     test_step: *std.Build.Step,
+    macos_only_test_step: *std.Build.Step,
     boundary_step: *std.Build.Step,
     session_host_step: *std.Build.Step,
 };
@@ -51,6 +52,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     const run_session_host_slow_observer_validator_tests = ctx.run_session_host_slow_observer_validator_tests;
     const macos_host_tests = ctx.macos_host_tests;
     const test_step = ctx.test_step;
+    const macos_only_test_step = ctx.macos_only_test_step;
     const boundary_step = ctx.boundary_step;
     const session_host_step = ctx.session_host_step;
 
@@ -1642,6 +1644,46 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e3b2_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3b2_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
         if (cr2e_e3b2_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
+    }
+    // 🔥 **host 단위 resident charge — runtime 8개 이상인 host 가 재접속을 영영 못 하던 것**(2026-09-29).
+    // e3b2 체인과 따로 둔다: 이 판정자는 in-process socketpair fixture 만 써서 실제 host 를 띄우지 않고,
+    // `test-session-host*` 체인은 PR 에서 안 돈다. Debug 를 `test-macos-only`(PR 의 macOS job)에 건다.
+    const session_host_reconnect_host_charge_step = b.step(
+        "test-session-host-reconnect-host-charge",
+        "Reconnect admission charges one resident lease per host, so hosts with more than seven runtimes still reconnect",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |host_charge_optimize| {
+        const host_charge_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = host_charge_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6e-c3b2c host charge"},
+        });
+        // backend 5개(N=7·8·13, 예산 대기, anchor 이탈) + 이 root 가 끌어오는 remote_runtime 의 executor
+        // 2개(identity-only abort, charge 이전) = 7.
+        const run_host_charge_tests = b.addRunArtifact(host_charge_tests);
+        run_host_charge_tests.addArg("--maru-expect-tests=7");
+        run_host_charge_tests.setCwd(b.path("."));
+        session_host_reconnect_host_charge_step.dependOn(&run_host_charge_tests.step);
+        if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);
+
+        const host_charge_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
+                .target = target,
+                .optimize = host_charge_optimize,
+            }),
+            .filters = &.{"CR6e-c3b2c 경계는"},
+        });
+        const run_host_charge_boundary_tests = b.addRunArtifact(host_charge_boundary_tests);
+        run_host_charge_boundary_tests.addArg("--maru-expect-tests=1");
+        run_host_charge_boundary_tests.setCwd(b.path("."));
+        session_host_reconnect_host_charge_step.dependOn(&run_host_charge_boundary_tests.step);
+        if (host_charge_optimize == .Debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);
     }
     const session_host_cr2e_e3c1_step = b.step(
         "test-session-host-cr2e-e3c1",

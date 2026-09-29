@@ -936,7 +936,20 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   동시 실행 목표가 아니다. 작은 generation도 active 8개까지만 실행하며 byte cap은 최악 generation 7개를 허용한다.
   각 cap의 다음 budget reserve는 allocation·lease·role mutation 없이 typed 거부된다. Budget·entry·lease는 final address,
   PID, canonical process nonce, monotonic owner incarnation과 policy domain을 함께 검증해 fork splice와 same-address ABA를 거부한다. daemon `ConnectionSlot`의 128 MiB와 숫자만 맞추며 process·owner·회계는 공유하지 않는다.
-  e3b2는 그 typed 거부를 sealed admission queue의 보존·후속 drain 재시도와 결속하고, budget lease를 actual stable executor의 mutation seal·authority commit retain, generation publish, terminal reclaim에 결속한다. e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.
+  e3b2는 그 typed 거부를 sealed admission queue의 보존·후속 drain 재시도와 결속하고, budget lease를 actual stable executor의 mutation seal·authority commit retain, generation publish, terminal reclaim에 결속한다.
+  **CR6e-c3b2c(2026-09-29): resident charge 하나 = host admission 하나다(runtime 하나가 아니다).** host 전체 재접속 job은
+  runtime을 직렬로 처리해(`HostReconnectJob`의 `PreparedReconnect` 하나, backend의 `host_reconnect_job` 하나, coordinator의
+  completion receipt 하나) 동시에 살아 있는 candidate가 process 전체에서 하나뿐이고, 각 runtime의 retiring은 그 runtime의
+  publish에서 회수된다. 그래서 bind는 같은 host runtime 중 handle 최솟값(anchor) 하나에만 `base_update_max_bytes` charge를
+  잡고 나머지는 lease 없는 identity-only로 결속하며, 결속 검증과 정산은 같은 host에 charged가 **정확히 하나**임을 요구한다.
+  anchor가 재접속 도중 떠나면(close remove·Window abandon detach·app-quit detach·결속을 푸는 abort 계열 close 전이) 떠나기
+  직전에 charge를 같은 admission의 identity-only 형제 중 handle 최솟값에게 넘기고, 형제가 없으면 anchor가 직접 돌려준다.
+  위의 byte cap 「최악 generation 7개」는 이제 **동시에 결속된 host 7개**를 뜻하고 host 하나의 runtime 수(최대
+  `max_remote_backend_runtimes`)와 무관하다. 예전 bind는 runtime마다 charge를 잡아(`canReserveBatch(runtime 수)`) 빈 예산으로도
+  7개까지만 들어갔고, runtime 8개 이상인 host는 `.retry_later`를 영원히 반복했다 — coordinator가 그것을 진행으로 세어 idle
+  진단도 없이 세션이 굳었다(실측: 13개 host가 read_timeout poison 뒤 3분간 재접속 0회, 앱 재시작으로만 복구). 예산 대기는 이제
+  값이 바뀔 때만 `reconnect admission waiting for resident budget` 한 줄을 남긴다. 판정자는 `test-session-host-reconnect-host-charge`다.
+  e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,
   외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는
   제품 reconnect 완료로 보지 않는다.

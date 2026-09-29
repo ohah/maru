@@ -750,6 +750,10 @@ const ReconnectProductExecutor = struct {
         };
     }
 
+    /// admission 결속에는 세 모양이 있다 — 미결속, **charged**(admission + resident lease),
+    /// **identity-only**(admission 만, lease 는 `Lease{}`). host 전체 재접속은 runtime 을 **직렬로**
+    /// 처리해 동시에 살아 있는 candidate 가 하나뿐이므로, 한 host admission 은 anchor runtime 하나만
+    /// charged 로 결속하고 형제는 identity-only 로 결속한다(`bindPreparedReconnectAdmission`).
     fn bindAdmission(
         self: *ReconnectProductExecutor,
         owner: *ReconnectGenerationOwner,
@@ -777,6 +781,82 @@ const ReconnectProductExecutor = struct {
         );
     }
 
+    fn bindAdmissionIdentity(
+        self: *ReconnectProductExecutor,
+        owner: *ReconnectGenerationOwner,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+        admission: reconnect_admission_owner.Projection,
+    ) !void {
+        try self.validate(owner);
+        if (self.admission != null or self.resident_budget_addr != 0 or
+            !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
+            return error.Busy;
+        const shell_generation = try owner.currentGeneration();
+        _ = try budget.snapshot();
+        const seal = try self.sealAdmission(budget, admission);
+        self.admission = admission;
+        self.admission_seal = seal;
+        self.resident_budget_addr = @intFromPtr(budget);
+        self.state = reconnect_reducer.State.initial(
+            admission.incident_id.sequence,
+            shell_generation,
+        );
+    }
+
+    /// charged 결속의 budget. identity-only(`resident_lease.active == false`)는 null 이다 —
+    /// `Lease{}.role` 기본값이 `.candidate` 라 role 만 보고 고르면 빈 lease 를 검증하다 죽는다.
+    fn chargedBudget(self: *const ReconnectProductExecutor) ?*reconnect_resident_budget.ReconnectAdmissionBudget {
+        if (self.resident_budget_addr == 0 or !self.resident_lease.active) return null;
+        return @ptrFromInt(self.resident_budget_addr);
+    }
+
+    fn clearAdmissionBinding(self: *ReconnectProductExecutor) void {
+        self.resident_budget_addr = 0;
+        self.admission = null;
+        self.admission_seal = [_]u8{0} ** 32;
+    }
+
+    fn preflightChargeHandOff(
+        from: *ReconnectProductExecutor,
+        from_owner: *ReconnectGenerationOwner,
+        to: *ReconnectProductExecutor,
+        to_owner: *ReconnectGenerationOwner,
+    ) !void {
+        if (from == to) return error.InvalidAuthority;
+        try from.validate(from_owner);
+        try to.validate(to_owner);
+        const budget = from.chargedBudget() orelse return error.InvalidAuthority;
+        if (from.resident_lease.role != .candidate or
+            to.resident_budget_addr != from.resident_budget_addr or to.resident_lease.active or
+            to.admission == null or !std.meta.eql(to.admission.?, from.admission.?))
+            return error.InvalidAuthority;
+        try budget.validateLeaseRole(&from.resident_lease, .candidate);
+    }
+
+    /// 같은 host admission 의 charge 를 anchor 에서 identity-only 형제로 옮긴다. 방금 비운 entry 하나와
+    /// 같은 byte 를 다시 잡으므로 cap 에 걸릴 수 없고, preflight 뒤의 실패는 권위 상실이다.
+    fn handOffChargeNoFail(
+        from: *ReconnectProductExecutor,
+        from_owner: *ReconnectGenerationOwner,
+        to: *ReconnectProductExecutor,
+        to_owner: *ReconnectGenerationOwner,
+    ) void {
+        preflightChargeHandOff(from, from_owner, to, to_owner) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        const budget = from.chargedBudget().?;
+        const bytes = from.resident_lease.bytes;
+        budget.release(&from.resident_lease, .candidate) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        from.admission_seal = from.sealAdmission(budget, from.admission.?) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        budget.reserve(&to.resident_lease, bytes, .candidate) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        to.admission_seal = to.sealAdmission(budget, to.admission.?) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        from.validate(from_owner) catch process_seal_service.fatalIntegrity(.proof_loss);
+        to.validate(to_owner) catch process_seal_service.fatalIntegrity(.proof_loss);
+    }
+
     fn apply(
         self: *ReconnectProductExecutor,
         owner: *ReconnectGenerationOwner,
@@ -800,27 +880,10 @@ const ReconnectProductExecutor = struct {
         const result = try reconnect_reducer.reduce(self.state.?, try event.reducerEvent());
         switch (reconnectGenerationEffect(result.decision)) {
             .retain => {},
-            .abort_candidate_if_present => {
-                const budget = if (self.resident_budget_addr != 0 and self.resident_lease.role == .candidate)
-                    @as(*reconnect_resident_budget.ReconnectAdmissionBudget, @ptrFromInt(self.resident_budget_addr))
-                else
-                    null;
-                if (budget) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
-                if (!std.meta.eql(self.prepared, PreparedReconnect{})) try owner.abort(&self.prepared);
-                if (budget) |value| {
-                    value.release(&self.resident_lease, .candidate) catch
-                        process_seal_service.fatalIntegrity(.proof_loss);
-                    self.resident_budget_addr = 0;
-                    self.admission = null;
-                    self.admission_seal = [_]u8{0} ** 32;
-                }
-            },
+            .abort_candidate_if_present => try self.abortCandidateIfPresent(owner),
             .publish_candidate => {
                 if (std.meta.eql(self.prepared, PreparedReconnect{})) return error.InvalidAuthority;
-                const budget = if (self.resident_budget_addr != 0)
-                    @as(*reconnect_resident_budget.ReconnectAdmissionBudget, @ptrFromInt(self.resident_budget_addr))
-                else
-                    null;
+                const budget = self.chargedBudget();
                 if (budget) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
                 try owner.publish(&self.prepared);
                 if (budget) |value| value.publishSwap(null, &self.resident_lease) catch
@@ -844,23 +907,10 @@ const ReconnectProductExecutor = struct {
         const has_retiring = try owner.slot.hasRetiring();
         if (!reconnectRetiringMatchesLocal(self.state.?.local, has_retiring))
             return error.InvalidAuthority;
-        if (self.resident_budget_addr != 0) {
-            const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
-                self.resident_budget_addr,
-            );
+        if (self.chargedBudget()) |budget|
             try budget.validateLeaseRole(&self.resident_lease, self.resident_lease.role);
-        }
         if (has_retiring) try owner.reclaimRetiringAtTickEnd();
-        if (self.resident_budget_addr != 0) {
-            const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
-                self.resident_budget_addr,
-            );
-            budget.release(&self.resident_lease, self.resident_lease.role) catch
-                process_seal_service.fatalIntegrity(.proof_loss);
-            self.resident_budget_addr = 0;
-            self.admission = null;
-            self.admission_seal = [_]u8{0} ** 32;
-        }
+        self.releaseAdmissionBindingNoFail();
         self.state = result.state;
     }
 
@@ -872,17 +922,9 @@ const ReconnectProductExecutor = struct {
         try self.validate(owner);
         if (!std.meta.eql(self.prepared, PreparedReconnect{}) or self.state.?.phaseTag() != .healthy)
             return error.Busy;
-        if (self.resident_budget_addr != 0) {
-            const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
-                self.resident_budget_addr,
-            );
+        if (self.chargedBudget()) |budget|
             try budget.validateLeaseRole(&self.resident_lease, self.resident_lease.role);
-            budget.release(&self.resident_lease, self.resident_lease.role) catch
-                process_seal_service.fatalIntegrity(.proof_loss);
-            self.resident_budget_addr = 0;
-            self.admission = null;
-            self.admission_seal = [_]u8{0} ** 32;
-        }
+        self.releaseAdmissionBindingNoFail();
         if (self.admission != null or
             !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
             return error.InvalidAuthority;
@@ -922,6 +964,32 @@ const ReconnectProductExecutor = struct {
         self.state = reconnect_reducer.State.initial(next_job_generation, next_shell_generation);
     }
 
+    /// abort 는 결속을 푼다. charged 는 `.candidate` lease 일 때만 release 하고(예전과 같다 —
+    /// publishSwap 뒤 `.current` 인 lease 는 abort 가 건드리지 않는다), identity-only 는 풀 lease 가 없다.
+    fn abortCandidateIfPresent(self: *ReconnectProductExecutor, owner: *ReconnectGenerationOwner) !void {
+        const charged = if (self.chargedBudget()) |value|
+            (if (self.resident_lease.role == .candidate) value else null)
+        else
+            null;
+        const identity_only = self.resident_budget_addr != 0 and !self.resident_lease.active;
+        if (charged) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
+        if (!std.meta.eql(self.prepared, PreparedReconnect{})) try owner.abort(&self.prepared);
+        if (charged) |value| {
+            value.release(&self.resident_lease, .candidate) catch
+                process_seal_service.fatalIntegrity(.proof_loss);
+            self.clearAdmissionBinding();
+        } else if (identity_only) self.clearAdmissionBinding();
+    }
+
+    /// 결속을 끝낸다. charged 면 lease 를 돌려주고, identity-only 면 돌려줄 lease 가 없다.
+    /// caller 가 `validate` 로 모양을 이미 인증했다.
+    fn releaseAdmissionBindingNoFail(self: *ReconnectProductExecutor) void {
+        if (self.resident_budget_addr == 0) return;
+        if (self.chargedBudget()) |budget| budget.release(&self.resident_lease, self.resident_lease.role) catch
+            process_seal_service.fatalIntegrity(.proof_loss);
+        self.clearAdmissionBinding();
+    }
+
     fn executeEffect(
         self: *ReconnectProductExecutor,
         owner: *ReconnectGenerationOwner,
@@ -936,29 +1004,11 @@ const ReconnectProductExecutor = struct {
                     return error.InvalidAuthority;
                 try owner.prepare(&self.prepared, args, initializer);
             },
-            .abort_candidate_if_present => {
-                const budget = if (self.resident_budget_addr != 0 and self.resident_lease.role == .candidate)
-                    @as(*reconnect_resident_budget.ReconnectAdmissionBudget, @ptrFromInt(self.resident_budget_addr))
-                else
-                    null;
-                if (budget) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
-                if (!std.meta.eql(self.prepared, PreparedReconnect{}))
-                    try owner.abort(&self.prepared);
-                if (budget) |value| {
-                    value.release(&self.resident_lease, .candidate) catch
-                        process_seal_service.fatalIntegrity(.proof_loss);
-                    self.resident_budget_addr = 0;
-                    self.admission = null;
-                    self.admission_seal = [_]u8{0} ** 32;
-                }
-            },
+            .abort_candidate_if_present => try self.abortCandidateIfPresent(owner),
             .publish_candidate => {
                 if (std.meta.eql(self.prepared, PreparedReconnect{}))
                     return error.InvalidAuthority;
-                const budget = if (self.resident_budget_addr != 0)
-                    @as(*reconnect_resident_budget.ReconnectAdmissionBudget, @ptrFromInt(self.resident_budget_addr))
-                else
-                    null;
+                const budget = self.chargedBudget();
                 if (budget) |value| try value.validateLeaseRole(&self.resident_lease, .candidate);
                 try owner.publish(&self.prepared);
                 if (budget) |value| value.publishSwap(null, &self.resident_lease) catch
@@ -985,14 +1035,17 @@ const ReconnectProductExecutor = struct {
                 !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
                 return error.InvalidAuthority;
         } else {
-            if (self.admission == null or !self.resident_lease.active or
-                self.resident_lease.owner_addr != self.resident_budget_addr)
-                return error.InvalidAuthority;
+            if (self.admission == null) return error.InvalidAuthority;
             const budget: *reconnect_resident_budget.ReconnectAdmissionBudget = @ptrFromInt(
                 self.resident_budget_addr,
             );
             _ = try budget.snapshot();
-            try budget.validateLeaseRole(&self.resident_lease, self.resident_lease.role);
+            if (self.resident_lease.active) {
+                if (self.resident_lease.owner_addr != self.resident_budget_addr) return error.InvalidAuthority;
+                try budget.validateLeaseRole(&self.resident_lease, self.resident_lease.role);
+            } else if (!std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{})) {
+                return error.InvalidAuthority;
+            }
             const expected = try self.sealAdmission(budget, self.admission.?);
             if (!std.crypto.timing_safe.eql(
                 process_seal_service.CleanupSeal,
@@ -1009,15 +1062,18 @@ const ReconnectProductExecutor = struct {
         budget: *const reconnect_resident_budget.ReconnectAdmissionBudget,
         admission: reconnect_admission_owner.Projection,
     ) !process_seal_service.CleanupSeal {
+        // identity-only 는 lease 가 없으므로 lease 자리를 0 으로 봉인한다. charged 의 lease nonce 는
+        // `validateLeaseRole` 이 budget nonce 와 같음을 이미 인증하므로 nonce 는 budget 에서 읽는다.
+        const charged = self.resident_lease.active;
         return process_seal_service.reconnectExecutorAdmissionSeal(
             self.owner_pid,
-            self.resident_lease.process_nonce,
+            budget.process_nonce,
             .{
                 .executor_addr = @intFromPtr(self),
                 .generation_owner_addr = self.generation_owner_addr,
                 .budget_addr = @intFromPtr(budget),
-                .lease_addr = @intFromPtr(&self.resident_lease),
-                .lease_generation = self.resident_lease.generation,
+                .lease_addr = if (charged) @intFromPtr(&self.resident_lease) else 0,
+                .lease_generation = if (charged) self.resident_lease.generation else 0,
                 .slot_index = admission.slot_index,
                 .slot_generation = admission.slot_generation,
                 .host_id = admission.host_id,
@@ -3423,7 +3479,8 @@ pub const RemoteRuntime = struct {
                 admission.incident_id.app_instance_nonce != incident_app_instance_nonce or
                 admission.incident_id.sequence != incident_sequence)
                 return error.InvalidAuthority;
-            try budget.validateLeaseRole(
+            // identity-only 형제는 돌려줄 lease 가 없다 — `validate` 가 그 모양(`Lease{}`)을 이미 인증했다.
+            if (runtime.reconnect_executor.resident_lease.active) try budget.validateLeaseRole(
                 &runtime.reconnect_executor.resident_lease,
                 runtime.reconnect_executor.resident_lease.role,
             );
@@ -3433,13 +3490,55 @@ pub const RemoteRuntime = struct {
             runtime: *RemoteRuntime,
             budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
         ) void {
-            budget.release(
-                &runtime.reconnect_executor.resident_lease,
-                runtime.reconnect_executor.resident_lease.role,
-            ) catch process_seal_service.fatalIntegrity(.proof_loss);
-            runtime.reconnect_executor.resident_budget_addr = 0;
-            runtime.reconnect_executor.admission = null;
-            runtime.reconnect_executor.admission_seal = [_]u8{0} ** 32;
+            if (runtime.reconnect_executor.resident_budget_addr != @intFromPtr(budget))
+                process_seal_service.fatalIntegrity(.proof_loss);
+            runtime.reconnect_executor.releaseAdmissionBindingNoFail();
+        }
+
+        /// 같은 host admission 에서 resident charge 를 쥔 runtime 인가(정확히 하나여야 한다).
+        pub fn boundReconnectCharged(runtime: *RemoteRuntime) bool {
+            runtime.reconnect_executor.validate(&runtime.generation_owner) catch return false;
+            return runtime.reconnect_executor.admission != null and
+                runtime.reconnect_executor.resident_lease.active;
+        }
+
+        /// anchor 가 떠나기 전에 charge 를 같은 admission 의 identity-only 형제에게 넘긴다.
+        pub fn preflightReconnectResidentChargeHandOff(from: *RemoteRuntime, to: *RemoteRuntime) !void {
+            try ReconnectProductExecutor.preflightChargeHandOff(
+                &from.reconnect_executor,
+                &from.generation_owner,
+                &to.reconnect_executor,
+                &to.generation_owner,
+            );
+        }
+
+        pub fn handOffReconnectResidentChargeNoFail(from: *RemoteRuntime, to: *RemoteRuntime) void {
+            ReconnectProductExecutor.handOffChargeNoFail(
+                &from.reconnect_executor,
+                &from.generation_owner,
+                &to.reconnect_executor,
+                &to.generation_owner,
+            );
+        }
+
+        /// 이 close 전이가 runtime 의 admission 결속을 푸는가(abort 계열 effect).
+        pub fn closeTransitionClearsBinding(projection: CloseTransitionProjection) bool {
+            const decision = std.enums.fromInt(reconnect_reducer.Decision, projection.decision_raw) orelse return false;
+            return reconnectGenerationEffect(decision) == .abort_candidate_if_present;
+        }
+
+        /// host admission 의 anchor 가 아닌 형제는 lease 없이 identity 만 결속한다.
+        pub fn bindReconnectAdmissionIdentity(
+            runtime: *RemoteRuntime,
+            budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+            admission: reconnect_admission_owner.Projection,
+        ) !void {
+            try preflightReconnectAdmission(runtime, admission);
+            try runtime.reconnect_executor.bindAdmissionIdentity(
+                &runtime.generation_owner,
+                budget,
+                admission,
+            );
         }
 
         pub fn bindReconnectAdmission(
@@ -7921,13 +8020,11 @@ pub const testing_api = if (builtin.is_test) struct {
         try runtime.reconnect_executor.validate(&runtime.generation_owner);
         if (runtime.reconnect_executor.resident_budget_addr != @intFromPtr(budget))
             return error.InvalidAuthority;
-        try budget.release(
+        if (runtime.reconnect_executor.resident_lease.active) try budget.release(
             &runtime.reconnect_executor.resident_lease,
             runtime.reconnect_executor.resident_lease.role,
         );
-        runtime.reconnect_executor.resident_budget_addr = 0;
-        runtime.reconnect_executor.admission = null;
-        runtime.reconnect_executor.admission_seal = [_]u8{0} ** 32;
+        runtime.reconnect_executor.clearAdmissionBinding();
     }
 
     pub fn armDirectReleaseWait(
@@ -20337,6 +20434,160 @@ test "CR2e-e3b2 actual stable executor는 resident lease 아래 retain publish r
     try executor.deinit(&owner);
     try budget.deinit();
     deinitReconnectTestOwner(&owner, &proxy);
+}
+
+test "CR6e-c3b2c host charge: identity-only executor 는 abort 에서 lease 없이 결속만 풀고 charge 는 anchor 에 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var budget: reconnect_resident_budget.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    const admission: reconnect_admission_owner.Projection = .{
+        .slot_index = 0,
+        .slot_generation = 1,
+        .host_id = 0xC3,
+        .host_adapter_generation = 1,
+        .connection_generation = 2,
+        .incident_id = .{ .app_instance_nonce = 1, .sequence = 3 },
+    };
+    var proxies: [2]stable_screen_source.StableScreenSource = undefined;
+    var owners: [2]ReconnectGenerationOwner = .{ .{}, .{} };
+    var executors: [2]ReconnectProductExecutor = .{ .{}, .{} };
+    for (&proxies, &owners, &executors, 0..) |*proxy, *owner, *executor, index| {
+        try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+        try owner.initInPlace(
+            testing.allocator,
+            proxy,
+            2,
+            ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0xC300 + @as(u64, index) },
+            initReconnectTestGeneration,
+        );
+        try executor.initInPlace(owner, 3);
+    }
+    const anchor = &executors[0];
+    const sibling = &executors[1];
+    try anchor.bindAdmission(&owners[0], &budget, admission, reconnect_resident_budget.max_entry_bytes);
+    try sibling.bindAdmissionIdentity(&owners[1], &budget, admission);
+    try testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
+    try testing.expect(anchor.resident_lease.active);
+    try testing.expect(!sibling.resident_lease.active);
+    try sibling.validate(&owners[1]);
+
+    // identity-only 의 seal 은 lease 자리를 0 으로 봉인한다 — lease 를 심으면 인증이 깨진다.
+    const sibling_before = sibling.*;
+    sibling.resident_lease.generation = 1;
+    try testing.expectError(error.InvalidAuthority, sibling.validate(&owners[1]));
+    sibling.* = sibling_before;
+    try sibling.validate(&owners[1]);
+
+    // abort 계열 effect(precommit_failed_clean → abort_candidate_restore_old)를 형제에게 일으킨다.
+    const args = ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0xC3F0 };
+    _ = try sibling.apply(&owners[1], .{ .begin_prepare = reconnectTestWork(2) }, args, initReconnectTestGeneration);
+    inline for (.{
+        reconnect_reducer.Event.observer_staged,
+        reconnect_reducer.Event.begin_mutation_seal,
+        reconnect_reducer.Event.seal_clean,
+    }) |event| _ = try sibling.apply(&owners[1], event, args, initReconnectTestGeneration);
+    try testing.expectEqual(
+        reconnect_reducer.Decision.abort_candidate_restore_old,
+        try sibling.apply(&owners[1], .precommit_failed_clean, args, initReconnectTestGeneration),
+    );
+    try testing.expect(sibling.admission == null);
+    try testing.expectEqual(@as(usize, 0), sibling.resident_budget_addr);
+    // anchor 의 charge 는 형제의 abort 로 사라지지 않는다.
+    try testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
+    try anchor.validate(&owners[0]);
+
+    // 대조군: 같은 abort 를 anchor 에 일으키면 예전처럼 lease 를 돌려준다.
+    _ = try anchor.apply(&owners[0], .{ .begin_prepare = reconnectTestWork(2) }, args, initReconnectTestGeneration);
+    inline for (.{
+        reconnect_reducer.Event.observer_staged,
+        reconnect_reducer.Event.begin_mutation_seal,
+        reconnect_reducer.Event.seal_clean,
+        reconnect_reducer.Event.precommit_failed_clean,
+    }) |event| _ = try anchor.apply(&owners[0], event, args, initReconnectTestGeneration);
+    try testing.expect(anchor.admission == null);
+    try testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
+
+    // backend 는 이 판정으로 «결속을 푸는 close» 앞에서만 charge 를 넘긴다.
+    try testing.expect(RemoteRuntime.backend_api.closeTransitionClearsBinding(.{
+        .decision_raw = @intFromEnum(reconnect_reducer.Decision.close_preserve_old),
+    }));
+    try testing.expect(!RemoteRuntime.backend_api.closeTransitionClearsBinding(.{
+        .decision_raw = @intFromEnum(reconnect_reducer.Decision.publish_termination_pending),
+    }));
+
+    for (&proxies, &owners, &executors) |*proxy, *owner, *executor| {
+        try executor.deinit(owner);
+        deinitReconnectTestOwner(owner, proxy);
+    }
+    try budget.deinit();
+}
+
+test "CR6e-c3b2c host charge: charge 는 identity-only 형제에게만 넘어가고 넘긴 뒤에도 host 에 하나다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var budget: reconnect_resident_budget.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    const admission: reconnect_admission_owner.Projection = .{
+        .slot_index = 0,
+        .slot_generation = 1,
+        .host_id = 0xC4,
+        .host_adapter_generation = 1,
+        .connection_generation = 2,
+        .incident_id = .{ .app_instance_nonce = 1, .sequence = 3 },
+    };
+    var other = admission;
+    other.incident_id.sequence = 4;
+    var proxies: [3]stable_screen_source.StableScreenSource = undefined;
+    var owners: [3]ReconnectGenerationOwner = .{ .{}, .{}, .{} };
+    var executors: [3]ReconnectProductExecutor = .{ .{}, .{}, .{} };
+    for (&proxies, &owners, &executors, 0..) |*proxy, *owner, *executor, index| {
+        try proxy.initUnavailableInPlace(testing.allocator, testing.io, .{ .cols = 4, .rows = 2 });
+        try owner.initInPlace(
+            testing.allocator,
+            proxy,
+            2,
+            ReconnectGenerationTestArgs{ .allocator = testing.allocator, .stream_id = 0xC400 + @as(u64, index) },
+            initReconnectTestGeneration,
+        );
+        try executor.initInPlace(owner, 3);
+    }
+    try executors[0].bindAdmission(&owners[0], &budget, admission, reconnect_resident_budget.max_entry_bytes);
+    try executors[1].bindAdmissionIdentity(&owners[1], &budget, admission);
+    // 다른 incident 의 identity 는 상속자가 될 수 없다.
+    try executors[2].bindAdmissionIdentity(&owners[2], &budget, other);
+    try testing.expectError(
+        error.InvalidAuthority,
+        ReconnectProductExecutor.preflightChargeHandOff(&executors[0], &owners[0], &executors[2], &owners[2]),
+    );
+    // charged 에서 charged 로도, 자기 자신에게도 넘길 수 없다.
+    try testing.expectError(
+        error.InvalidAuthority,
+        ReconnectProductExecutor.preflightChargeHandOff(&executors[0], &owners[0], &executors[0], &owners[0]),
+    );
+    try testing.expectError(
+        error.InvalidAuthority,
+        ReconnectProductExecutor.preflightChargeHandOff(&executors[1], &owners[1], &executors[0], &owners[0]),
+    );
+    ReconnectProductExecutor.handOffChargeNoFail(&executors[0], &owners[0], &executors[1], &owners[1]);
+    try testing.expect(!executors[0].resident_lease.active);
+    try testing.expect(executors[1].resident_lease.active);
+    try testing.expect(executors[0].admission != null);
+    try testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
+    try testing.expectEqual(reconnect_resident_budget.max_entry_bytes, (try budget.snapshot()).live_bytes);
+    try executors[0].validate(&owners[0]);
+    try executors[1].validate(&owners[1]);
+
+    for (&proxies, &owners, &executors) |*proxy, *owner, *executor| {
+        try executor.deinit(owner);
+        deinitReconnectTestOwner(owner, proxy);
+    }
+    try testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
+    try budget.deinit();
 }
 
 test "CR2e-e2b 제품 executor는 abort와 effect 실패에서 reducer state와 current를 보존한다" {

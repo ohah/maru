@@ -108,6 +108,7 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_typescript,
         .editor_minimap,
         .editor_selection,
+        .editor_whitespace_inlay,
         .editor_find,
         .editor_diagnostics,
         .editor_caret_bar,
@@ -771,7 +772,7 @@ pub fn main(init: std.process.Init) !void {
         const rect = (switch (scenario_id) {
             .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
-            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diagnostics, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
+            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diagnostics, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
@@ -1020,6 +1021,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-typescript")) return .editor_typescript;
     if (std.mem.eql(u8, raw, "editor-minimap")) return .editor_minimap;
     if (std.mem.eql(u8, raw, "editor-selection")) return .editor_selection;
+    if (std.mem.eql(u8, raw, "editor-whitespace-inlay")) return .editor_whitespace_inlay;
     if (std.mem.eql(u8, raw, "editor-caret-bar")) return .editor_caret_bar;
     if (std.mem.eql(u8, raw, "editor-caret-block")) return .editor_caret_block;
     if (std.mem.eql(u8, raw, "editor-caret-underline")) return .editor_caret_underline;
@@ -1119,6 +1121,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_typescript => "editor-typescript",
         .editor_minimap => "editor-minimap",
         .editor_selection => "editor-selection",
+        .editor_whitespace_inlay => "editor-whitespace-inlay",
         .editor_caret_bar => "editor-caret-bar",
         .editor_caret_block => "editor-caret-block",
         .editor_caret_underline => "editor-caret-underline",

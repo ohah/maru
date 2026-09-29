@@ -296,6 +296,10 @@ pub const ScenarioId = enum {
     /// gutter를 침범하지 않는지가 단위 테스트로 안 보이는 부분이다 — 열을 셀 폭으로 환산해 놓는
     /// 일이라 한 칸 어긋나도 테스트는 통과하고 화면만 틀린다(강조가 7칸 밀린 §4.1c 전례).
     editor_selection,
+    /// §5.1e · §4.1h — **공백 표시(`all`) + 인레이 힌트 + 랩.** 힌트 뒤의 공백·탭이 랩된 둘째 행에 올 때 기호가 **공백 칸에만** 서는지
+    /// 픽셀로 본다. 예전에는 행 창을 힌트 폭 없이 걸어 debug 빌드가 죽었고(`columnsAtOffsetsWith` 단언), 릴리스 빌드는 둘째 행의
+    /// 기호가 힌트 폭만큼 왼쪽 글자 위로 밀렸다(2026-09-29 — 헤드리스 판정은 `WSF7`).
+    editor_whitespace_inlay,
     /// **caret 모양**(`editor.cursor-shape`). 세 값이 각각 어떤 사각을 그리는지 픽셀로 본다 —
     /// 헤드리스 단언은 사각의 `w`·`h`·`y`까지만 답하고, **그 사각이 글자와 맞는 자리에 서는지**와
     /// **`block` 아래 글자가 읽히는지**는 픽셀만이 답한다. 후자가 이 시나리오의 요점이다: quad는
@@ -433,7 +437,7 @@ pub fn buildFrame(
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         .editor_merge_panes, .editor_merge_narrow, .editor_merge_caret => buildEditorMergeFrame(scenario, buffers),
         .editor_merge_scrolled, .editor_merge_hscrolled => buildEditorMergeScrolledFrame(scenario, buffers),
@@ -735,6 +739,24 @@ const editor_folded_numbers = [_]?u32{ 1, 8, 15, 16 };
 /// (▾ — 그래서 바로 다음 줄 16이 이어진다), 넷째는 접을 자리가 아니다.
 const editor_folded_marks = [_]chrome.components.editor_view.gutter.Fold{ .collapsed, .collapsed, .open, .none };
 
+/// `editor_whitespace_inlay` 픽스처(§5.1e · §4.1h). 줄이 셋이라 gutter 가 좁아 본문 48열에서 접힌다.
+///
+/// - 첫 줄이 **결함을 밟는다** — 탭 열넷, byte 1 앞에 힌트 `: Vec<u8>`(9칸). 힌트 뒤의 탭은 13..16 · 16..20 · … 이라 둘째 행은 탭 10
+///   (48열)부터다. 창을 힌트 폭 없이 걸으면 첫 행 창이 byte 12 까지 넓어져 둘째 행(byte 10 부터)과 **두 자리가 겹치고**, 이은 자리가
+///   오름차순이 아니게 된다 — debug 빌드는 `columnsAtOffsetsWith` 단언에서 죽고, 릴리스 빌드는 둘째 행 0열의 `→` 가 빠지고 4열에 두 번
+///   선다(2026-09-29 실측). 힌트가 5칸(`: u32`)이면 겹침이 같은 값 하나라 이 폭에서는 안 드러났다 — 처음 픽스처가 그랬다.
+/// - 둘째·셋째 줄은 타입 힌트가 선 코드다 — 힌트 뒤의 공백·탭이 랩된 둘째 행에 온다.
+const editor_whitespace_lines = [_][]const u8{
+    "\t" ** 14 ++ "x",
+    "    let total = items.iter().map(|item| item.price * item.qty).sum();",
+    "\tfor (index, row) in rows.iter().enumerate() {\tprint(index,\trow);\t}",
+};
+const editor_whitespace_inlays = [_][]const chrome.components.editor_view.content.Inlay{
+    &.{.{ .at = 1, .text = ": Vec<u8>" }},
+    &.{.{ .at = 13, .text = ": u64" }},
+    &.{ .{ .at = 11, .text = ": usize" }, .{ .at = 16, .text = ": &Row" } },
+};
+
 const editor_wrap_lines = [_][]const u8{
     // **자.** 랩이 몇 열에서 접히는지 캡처에서 **읽을 수 있게** 한다 — 글자가 화면 오른쪽에 닿아
     // 끝나면 "폭에 맞게 접혔는지"와 "넘쳐서 잘렸는지"가 그림상 같아 보인다. 이어지는 행의 첫 숫자가
@@ -923,6 +945,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .editor_folded => &editor_folded_lines,
         .editor_conflict => &editor_conflict_lines,
         .editor_selection => &editor_selection_lines,
+        .editor_whitespace_inlay => &editor_whitespace_lines,
         .editor_find => &editor_find_lines,
         .editor_diagnostics => &editor_diagnostics_lines,
         else => &editor_fixture_lines,
@@ -967,7 +990,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // 논리 줄 단위로는 그 줄 머리에서만 멈출 수 있어 **아래를 볼 방법이 없다** — `RowIndex`가
     // 시각 행을 논리 줄+조각으로 풀고, 그 조각부터 그린다.
     const wrap_on = scenario.id == .editor_wrap or scenario.id == .editor_wrap_scrolled or
-        scenario.id == .editor_wrap_stale_scroll;
+        scenario.id == .editor_wrap_stale_scroll or scenario.id == .editor_whitespace_inlay;
     var first_line: usize = vp.first_row;
     var first_piece: u32 = 0;
     if (scenario.id == .editor_wrap_stale_scroll) {
@@ -1050,7 +1073,11 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     //
     // **색 계약은 다른 골든이 지킨다**(`editor-real-file`·`editor-content-text` 등). 여기서
     // 재는 것은 폭이지 색이 아니다.
-    const paints_syntax = scenario.id != .editor_wide_glyph;
+    //
+    // **공백 + 인레이 장면도 색을 안 입힌다.** Lab 의 색 구간은 힌트를 모르는 열에서 뜬다 — 제품은 호스트가 그 구간을 글리프 열(힌트 뒤)로
+    // 옮기는데(§4.1h), Lab 은 그 단계가 없어 힌트 뒤 글자의 색이 힌트 폭만큼 밀린 그림이 된다(처음 캡처가 그랬다). 이 장면이 재는 것은
+    // 공백 기호의 자리다.
+    const paints_syntax = scenario.id != .editor_wide_glyph and scenario.id != .editor_whitespace_inlay;
     // **장면이 언어를 정한다.** 예전엔 `.zig`가 박혀 있었는데, grammar가 열여덟이 된 뒤로는 그러면
     // 다른 언어의 색이 **캡처에 영원히 안 나타난다** — 골든이 지키는 것이 zig 하나뿐이 된다.
     const scenario_grammar: maru.session.editor.language.Grammar = switch (scenario.id) {
@@ -1083,6 +1110,8 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         },
         .row_bands = if (scenario.id == .editor_conflict) &editor_conflict_bands else null,
         .selection_marks = if (scenario.id == .editor_selection) &editor_selection_marks else null,
+        .render_whitespace = if (scenario.id == .editor_whitespace_inlay) .all else .none,
+        .line_inlays = if (scenario.id == .editor_whitespace_inlay) .{ .rows = &editor_whitespace_inlays, .generation = 1 } else .{},
         .search_marks = if (scenario.id == .editor_find) &editor_find_marks else null,
         .search_current = if (scenario.id == .editor_find) editor_find_current else null,
         // 진단 층(§5.4) — 표는 리터럴. 제품은 트리에서 같은 표를 만든다(`editor_diagnostics.buildViews`).
@@ -1631,7 +1660,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

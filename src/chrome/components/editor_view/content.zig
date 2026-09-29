@@ -1039,9 +1039,11 @@ pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) c
 /// **힌트 폭을 빼고 걸으면 안 된다** — 열이 덜 늘어 창이 다음 행의 byte 까지 넓어지고, 행마다 모은 자리를 이으면 오름차순이 깨진다
 /// (공백 표시가 `columnsAtOffsetsWith` 의 단언에서 죽었다 — §5.1e).
 pub fn rowEndByte(bytes: []const u8, tab_width: u16, start_byte: usize, start_byte_col: u32, row_end_col: u32, inlays: []const Inlay) usize {
-    var i = @min(start_byte, bytes.len);
+    var i = start_byte;
     var col = start_byte_col;
     var next_inlay: usize = 0;
+    // 시작 byte 앞의 힌트는 지나간다(폭은 `start_byte_col` 에 이미 들어 있다 — `walkPoint` 와 같은 모양). **등가 변이**다(적대적 6회차):
+    // 지워도 `inlayColsAt` 이 `at < i` 인 힌트를 폭 없이 지나간다. 뜻으로 둔다 — 「시작 byte 의 힌트부터 먹는다」.
     while (next_inlay < inlays.len and inlays[next_inlay].at < i) next_inlay += 1;
     while (i < bytes.len) {
         col += inlayColsAt(inlays, &next_inlay, i);
@@ -1725,6 +1727,26 @@ test "INL14 가상 텍스트 — 랩 행의 start_byte_col 은 늘 「시작 byt
         }
     }
     try testing.expect(checked_rows > 3000);
+}
+
+test "INL16 행 시작 열 — seek 체크포인트가 가로 창의 첫 열에 정확히 떨어져 걸음이 한 번도 안 돌아도 start_byte_col 은 그 byte 의 열이다 (§4.1h · §4.1g)" {
+    // 랩이 꺼지고 힌트가 없으면 행 시작 걸음이 `Row.seek` 에서 출발한다. 체크포인트가 `first_col` 에 **정확히** 있으면 걸음 루프가 한 번도
+    // 안 돈다 — 그때 행에 싣는 열(`src_byte_col`)은 seek 에서 받은 값뿐이다. 그 대입이 빠지면 0 이 실려 가로로 민 줄의 클릭·공백 기호가 통째로
+    // 틀린다(적대적 6회차: 그 줄을 지운 변이가 판정자 전부를 통과했다 — 탭 줄에서 `first_col` 8 · seek {8, 8}).
+    const layout = geometry.compute(80, 10, .{});
+    const line = "\t\tab\tcd\t\tef";
+    const rows = [_]Row{.{ .bytes = line, .seek = .{ .byte = 2, .col = 8 } }};
+    var p = testProps(layout, &rows);
+    p.first_col = 8;
+    var ops: [4]draw.Op = undefined;
+    var scratch: [256]u8 = undefined;
+    var runs: [16]draw.Run = undefined;
+    _ = build(p, &ops, &scratch, &runs, &test_visual);
+    try testing.expectEqual(@as(u32, 2), test_visual[0].start_byte);
+    try testing.expectEqual(@as(u32, 8), test_visual[0].start_byte_col);
+    try testing.expectEqual(@as(u32, 8), test_visual[0].start_col);
+    // 화면 칸 3 = 절대 11 = `ab` 뒤 탭(byte 4, 10..12)의 둘째 칸 — 글자(cluster) 모드는 그 탭.
+    try testing.expectEqual(@as(usize, 4), clusterAtPointWith(line, 4, test_visual[0].start_byte, test_visual[0].start_byte_col, 8, 20, 3 * 8 + 1, 8, &.{}));
 }
 
 test "expandTabs: 탭이 없으면 원본을 그대로 빌려준다" {

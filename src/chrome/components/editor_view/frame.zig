@@ -6402,7 +6402,8 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
         // 첫 행: 탭0 열 0 · 탭1 열 9(걸친 탭은 첫 칸이 있는 행에만). 둘째 행: 탭2 절대 12 → 1 · 탭3 16 → 5.
         try testing.expectEqualSlices([3]u32, &.{ .{ 0, 0, 0x2192 }, .{ 9, 0, 0x2192 }, .{ 1, 1, 0x2192 }, .{ 5, 1, 0x2192 } }, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
     }
-    // ⑵ **무작위 대조** — 공백·탭·`a`·`한` 과 힌트(글자 앞 · 줄 끝)를 섞은 두 줄을 랩으로 접고, 맨 위 줄을 몇 행 스크롤한다(`first_piece`).
+    // ⑵ **무작위 대조** — 공백·탭·`a`·`한` 과 힌트(글자 앞 · 줄 끝)를 섞은 두 줄을 랩으로 접고 맨 위 줄을 몇 행 스크롤하거나(`first_piece`),
+    //    랩을 끄고 가로로 민다(`first_col` — 창이 머문 탭·걸쳐 버려진 넓은 글자에서 시작하는 갈래).
     //    `all` 은 「줄 처음부터 인레이까지 세어 낸 열이 든 행의 그 칸」과 **같아야** 하고, 다른 모드는 그 부분집합이어야 한다.
     var prng = std.Random.DefaultPrng.init(0x5f1e_07);
     const rnd = prng.random();
@@ -6435,10 +6436,11 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
             for (inl_bufs[li][0..n_inl], ats[0..n_inl]) |*in, a| in.* = .{ .at = a, .text = hint_text[0 .. 1 + rnd.uintLessThan(usize, hint_text.len)] };
             inl_store[li] = inl_bufs[li][0..n_inl];
         }
-        var props = testProps(&line_store, true);
+        const wrap = rnd.uintLessThan(u32, 3) != 0;
+        var props = testProps(&line_store, wrap);
         props.line_inlays = .{ .rows = &inl_store, .generation = @intCast(iter + 1) };
         props.total_cols = @intCast(12 + rnd.uintAtMost(usize, 12));
-        props.first_piece = rnd.uintAtMost(u32, 3);
+        if (wrap) props.first_piece = rnd.uintAtMost(u32, 3) else props.first_col = rnd.uintAtMost(u32, 40);
         const mode = modes[rnd.uintLessThan(usize, modes.len)];
         props.render_whitespace = mode;
         const sel_rows = [_][]const Mark{ &.{.{ .start = 0, .len = 96 }}, &.{.{ .start = 0, .len = 96 }} };

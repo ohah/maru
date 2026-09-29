@@ -3231,6 +3231,219 @@ test "B2 재그리기 반례 — 첫 절단 호출이 RowCache 계수를 전진�
     try testing.expect(sameOpContent(one_buf.ops[0..one.ops], rollback_buf.ops[0..rolled.ops]));
 }
 
+/// B2 실험 전용: 호출자가 op 저장소를 유지하고, 부족하면 캐시를 원상복구한 뒤
+/// 큰 저장소로 프레임을 다시 만든다. 제품 경로의 writer나 저장소 정책은 바꾸지 않는다.
+fn b2BuildWithGrowingOps(allocator: std.mem.Allocator, props: Props, base: Scratch, list: *std.ArrayList(draw.Op), max_ops: usize) !struct { written: Written, attempts: usize, allocation_failed: bool } {
+    const cache_before = if (props.row_cache) |c| c.* else null;
+    const prefix_before = if (props.row_cache) |c| try testing.allocator.dupe(u32, c.prefix) else &.{};
+    defer if (props.row_cache != null) testing.allocator.free(prefix_before);
+
+    var attempts: usize = 0;
+    while (true) {
+        if (attempts != 0) {
+            if (props.row_cache) |c| {
+                c.* = cache_before.?;
+                @memcpy(c.prefix, prefix_before);
+            }
+        }
+        attempts += 1;
+        var s = base;
+        s.ops = list.allocatedSlice();
+        const w = build(props, s);
+        if (!w.truncated or list.capacity >= max_ops) return .{ .written = w, .attempts = attempts, .allocation_failed = false };
+        const wanted = @min(max_ops, @max(list.capacity +| list.capacity / 2, list.capacity +| 1));
+        // 일반 ensureTotalCapacity는 요청보다 크게 예약할 수 있다. 실험의
+        // `max_ops`가 실제 상한이 되도록 정확한 용량으로만 늘린다.
+        list.ensureTotalCapacityPrecise(allocator, wanted) catch return .{ .written = w, .attempts = attempts, .allocation_failed = true };
+    }
+}
+
+test "B2 전체 프레임 재시도 — 저장소 성장과 RowCache 복원이 한 번 그리기와 같다" {
+    const a = testing.allocator;
+    const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 1);
+    const row_marks = blk: {
+        var result: [120]Mark = undefined;
+        for (&result, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+        break :blk result;
+    };
+    const marks = [_][]const Mark{&row_marks} ** (count_chunk_lines + 1);
+    var baseline_prefix = [_]u32{0} ** (count_chunk_lines + 2);
+    var retry_prefix = [_]u32{0} ** (count_chunk_lines + 2);
+    var baseline_cache: RowCache = .{ .prefix = &baseline_prefix };
+    var retry_cache: RowCache = .{ .prefix = &retry_prefix };
+    var props = testProps(&lines, true);
+    props.total_cols = 160;
+    props.visible_rows = 80;
+    props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    props.search_marks = &marks;
+    const ops = try a.alloc(draw.Op, 16000);
+    defer a.free(ops);
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const bytes = try a.alloc(u8, 200000);
+    defer a.free(bytes);
+    var baseline: WideBuffers = .{ .ops = ops };
+    props.row_cache = &baseline_cache;
+    const expected = build(props, baseline.scratch(runs, bytes));
+    try testing.expect(!expected.truncated);
+
+    var reusable: std.ArrayList(draw.Op) = .empty;
+    defer reusable.deinit(a);
+    try reusable.ensureTotalCapacity(a, 2560);
+    var retry: WideBuffers = .{ .ops = &.{} };
+    props.row_cache = &retry_cache;
+    const result = try b2BuildWithGrowingOps(a, props, retry.scratch(runs, bytes), &reusable, 16000);
+    try testing.expect(!result.written.truncated and !result.allocation_failed);
+    try testing.expect(result.attempts > 1);
+    try testing.expectEqual(expected.total_visual_rows, result.written.total_visual_rows);
+    try testing.expectEqual(baseline_cache.filled_upto, retry_cache.filled_upto);
+    try testing.expect(sameOpContent(ops[0..expected.ops], reusable.allocatedSlice()[0..result.written.ops]));
+
+    // 같은 화면의 다음 프레임은 이미 확보한 저장소를 한 번만 지난다.
+    const warm = try b2BuildWithGrowingOps(a, props, retry.scratch(runs, bytes), &reusable, 16000);
+    try testing.expectEqual(@as(usize, 1), warm.attempts);
+    try testing.expect(!warm.written.truncated);
+}
+
+test "B2 전체 프레임 상한과 할당 실패는 절단을 보고하며 부분 출력을 남긴다" {
+    const a = testing.allocator;
+    const marks = blk: {
+        var result: [120]Mark = undefined;
+        for (&result, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+        break :blk result;
+    };
+    const lines = [_][]const u8{"x" ** 120} ** 80;
+    const all_marks = [_][]const Mark{&marks} ** 80;
+    var props = testProps(&lines, false);
+    props.search_marks = &all_marks;
+    props.visible_rows = 80;
+    props.total_cols = 160;
+    props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const bytes = try a.alloc(u8, 200000);
+    defer a.free(bytes);
+    var base: WideBuffers = .{ .ops = &.{} };
+    var capped: std.ArrayList(draw.Op) = .empty;
+    defer capped.deinit(a);
+    try capped.ensureTotalCapacityPrecise(a, 2560);
+    const limit = try b2BuildWithGrowingOps(a, props, base.scratch(runs, bytes), &capped, 2560);
+    try testing.expect(limit.written.truncated and limit.written.ops > 0);
+    try testing.expectEqual(@as(usize, 1), limit.attempts);
+
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const failed = try b2BuildWithGrowingOps(failing.allocator(), props, base.scratch(runs, bytes), &capped, 16000);
+    try testing.expect(failed.allocation_failed and failed.written.truncated);
+    try testing.expectEqual(@as(usize, 1), failed.attempts);
+    try testing.expect(failed.written.ops > 0);
+}
+
+test "B2 상한의 우선순위 반례 — 밀집 검색이 caret 저장소를 굶긴다" {
+    const a = testing.allocator;
+    var row_marks: [120]Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    const lines = [_][]const u8{"x" ** 120} ** 80;
+    const marks = [_][]const Mark{&row_marks} ** 80;
+    const caret_rows = [_][]const u32{&.{1}} ** 80;
+    var props = testProps(&lines, false);
+    props.search_marks = &marks;
+    props.carets = &caret_rows;
+    props.visible_rows = 80;
+    props.total_cols = 160;
+    props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    const ops = try a.alloc(draw.Op, 16000);
+    defer a.free(ops);
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const bytes = try a.alloc(u8, 200000);
+    defer a.free(bytes);
+    var buffers: WideBuffers = .{ .ops = ops };
+    const full = build(props, buffers.scratch(runs, bytes));
+    try testing.expect(!full.truncated);
+    var full_carets: usize = 0;
+    for (ops[0..full.ops]) |op| if (op == .quad and op.quad.fill_role == .cursor) {
+        full_carets += 1;
+    };
+    try testing.expectEqual(@as(usize, 80), full_carets);
+    buffers.ops = ops[0..2560];
+    const clipped = build(props, buffers.scratch(runs, bytes));
+    try testing.expect(clipped.truncated);
+    var clipped_carets: usize = 0;
+    for (ops[0..clipped.ops]) |op| if (op == .quad and op.quad.fill_role == .cursor) {
+        clipped_carets += 1;
+    };
+    try testing.expectEqual(@as(usize, 0), clipped_carets);
+}
+
+test "B2 재시도 신호의 반례 — run 부족도 op 저장소만 반복해서 키운다" {
+    const a = testing.allocator;
+    const lines = [_][]const u8{ "alpha", "beta" };
+    var props = testProps(&lines, false);
+    props.visible_rows = 2;
+    var base: TestBuffers = .{};
+    var s = base.scratch();
+    s.runs = s.runs[0..0];
+    var reusable: std.ArrayList(draw.Op) = .empty;
+    defer reusable.deinit(a);
+    try reusable.ensureTotalCapacityPrecise(a, 256);
+    const result = try b2BuildWithGrowingOps(a, props, s, &reusable, 1024);
+    try testing.expect(result.written.truncated);
+    try testing.expect(result.attempts > 1);
+    try testing.expect(reusable.capacity >= 1024);
+    // 마지막 프레임의 op 사용량은 처음 저장소에도 들어간다. 늘린 축이 틀렸다.
+    try testing.expect(result.written.ops < 256);
+}
+
+test "[측정] B2 전체 프레임 재사용 op 저장소와 성장 재시도의 비용" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var row_marks: [120]Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    const lines = [_][]const u8{"x" ** 120} ** 80;
+    const marks = [_][]const Mark{&row_marks} ** 80;
+    var props = testProps(&lines, false);
+    props.search_marks = &marks;
+    props.visible_rows = 80;
+    props.total_cols = 160;
+    props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const bytes = try a.alloc(u8, 200000);
+    defer a.free(bytes);
+    var base: WideBuffers = .{ .ops = &.{} };
+    var reusable: std.ArrayList(draw.Op) = .empty;
+    defer reusable.deinit(a);
+    try reusable.ensureTotalCapacityPrecise(a, 2560);
+    const warmup = try b2BuildWithGrowingOps(a, props, base.scratch(runs, bytes), &reusable, 16000);
+    try testing.expect(!warmup.written.truncated);
+    const samples: u64 = 40;
+    const t0 = b2MonotonicNs();
+    for (0..samples) |_| {
+        const w = try b2BuildWithGrowingOps(a, props, base.scratch(runs, bytes), &reusable, 16000);
+        try testing.expectEqual(@as(usize, 1), w.attempts);
+        std.mem.doNotOptimizeAway(reusable.allocatedSlice()[0..w.written.ops]);
+    }
+    const t1 = b2MonotonicNs();
+    var cold_attempts: usize = 0;
+    for (0..samples) |_| {
+        var cold: std.ArrayList(draw.Op) = .empty;
+        defer cold.deinit(a);
+        try cold.ensureTotalCapacityPrecise(a, 2560);
+        const w = try b2BuildWithGrowingOps(a, props, base.scratch(runs, bytes), &cold, 16000);
+        try testing.expect(!w.written.truncated);
+        cold_attempts = w.attempts;
+        std.mem.doNotOptimizeAway(cold.allocatedSlice()[0..w.written.ops]);
+    }
+    const t2 = b2MonotonicNs();
+    std.debug.print("[B2 adaptive full] ops={d} warm_us={d} cold_us={d} cold_attempts={d} reserved_bytes={d}\n", .{
+        warmup.written.ops,
+        (t1 - t0) / samples / std.time.ns_per_us,
+        (t2 - t1) / samples / std.time.ns_per_us,
+        cold_attempts,
+        reusable.capacity * @sizeOf(draw.Op),
+    });
+}
+
 test "[측정] B2 큰 화면의 겹친 검색·진단은 op 메모리를 함께 요구한다" {
     if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
     const a = testing.allocator;

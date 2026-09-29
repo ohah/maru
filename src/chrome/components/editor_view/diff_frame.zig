@@ -864,6 +864,43 @@ const RbBuffers = struct {
     }
 };
 
+test "B2 비교 뷰 op 분할 — 총량이 충분해도 한쪽 밀집이면 절단된다" {
+    // 현행 op은 좌우 반반이다. 한쪽만 밀집한 화면에서는 전체 op 수보다
+    // 더 큰 공용 저장소가 필요하므로 B2 메모리 정책에 분할 비용을 포함해야 한다.
+    const a = testing.allocator;
+    var row_marks: [120]frame.Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    const lines = [_][]const u8{"x" ** 120} ** 80;
+    const marks = [_][]const frame.Mark{&row_marks} ** 80;
+    const props: Props = .{
+        .left = .{ .lines = &lines, .search_marks = &marks },
+        .right = .{ .lines = &lines },
+        .caret_visible = false,
+        .caret_shape = .bar,
+        .tab_width = frame.default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = 2560, .h = 1280 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 13,
+    };
+    const ops = try a.alloc(draw.Op, 32000);
+    defer a.free(ops);
+    const runs = try a.alloc(draw.Run, 32000);
+    defer a.free(runs);
+    const bytes = try a.alloc(u8, 400000);
+    defer a.free(bytes);
+    var buffers: RbBuffers = .{};
+    var s = buffers.scratch(runs, bytes);
+    s.ops = ops;
+    const full = build(props, s);
+    try testing.expect(!full.truncated);
+    try testing.expect(full.ops < 16000);
+    s.ops = ops[0..16000];
+    const clipped = build(props, s);
+    try testing.expect(clipped.truncated);
+    std.debug.print("[B2 diff split] full_ops={d} global_cap={d} left_cap={d} clipped_ops={d}\n", .{ full.ops, s.ops.len, s.ops.len / 2, clipped.ops });
+}
+
 test "RB3 제보 재현 — 비교 뷰 68행·촘촘한 색에 옛 제품 저장소(run 1280·글자 16384)를 줘도 좌우 번호가 다 선다; bufferSizes 만큼이면 절단이 없다" {
     // 2026-09-24 제보: `splitScratch` 가 run 을 반반(640)으로 나눠, 68행 Zig 화면이 한 열에 649개를 요구하자 본문이
     // 다 쓰고 gutter 가 0개를 받아 **첫 줄부터 번호가 전부 사라졌다**. 여기서는 열마다 번갈아 색을 줘 한 행이

@@ -888,7 +888,8 @@ fn replaceAll(
 
 /// upgrade 가 **어느 단계에서** 되돌려졌는지 남긴다.
 ///
-/// `handoff_failed` 하나가 이 파일에서 12 곳에 쓰인다. 그래서 `logUpgradeRollback` 이 사유를 남겨도
+/// `handoff_failed` 하나가 이 파일의 여러 곳(개수는 판정자 `session_host_silent_diagnostics_boundary` 가
+/// 센다)에서 쓰인다. 그래서 `logUpgradeRollback` 이 사유를 남겨도
 /// 「exec 준비 중 어딘가」까지만 좁혀지고, rollback 이미지 검증인지 fd 슬롯 확보인지 상속 fd 검사인지는
 /// 갈리지 않는다. 2026-08-30 실측: 사용자 PTY 25 개를 쥔 host 가 업그레이드에 반복 실패해 빌드마다 새
 /// host 가 뜨고 세션이 고아가 됐는데, 이 구분이 없어 원인을 특정하지 못했다.

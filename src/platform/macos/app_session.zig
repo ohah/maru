@@ -8901,10 +8901,11 @@ pub const AppSession = struct {
     }
 
     /// `ensureRemoteBackend` 와 같되 **retry 게이트를 무시**한다. 원격 spawn 이 `ConnectionClosed` 로 죽은 직후
-    /// 한 번 다시 붙어 보는 자리(`term.zig` createTerm)가 쓴다 — 실패 래치를 세운 직후라 게이트가 30 s 를
-    /// 막는데, 그 30 s 동안 연 Term 이 전부 in-process 로 떨어져 keep-alive 가 조용히 꺼졌다(2026-09-22 실측:
-    /// 복원할 runtime 이 없어 host 가 unattached idle 로 내려간 뒤 연 세션 10개 전부). 실패는 여기서도
-    /// 그대로 기록되고 게이트를 다시 민다.
+    /// 한 번 다시 붙어 보는 자리(`term.zig` createTerm)가 쓴다. 그 자리는 이제 재시도 **뒤에만** 실패를
+    /// 기록하므로 보통은 래치가 서 있지 않지만, 게이트가 다른 경로의 이전 실패로 30 s 를 막고 있을 수 있다 —
+    /// 2026-09-22 실측: 그 30 s 동안 연 Term 이 전부 in-process 로 떨어져 keep-alive 가 조용히 꺼졌다(복원할
+    /// runtime 이 없어 host 가 unattached idle 로 내려간 뒤 연 세션 10개 전부). 실패는 여기서도 그대로 기록되고
+    /// 게이트를 다시 민다.
     pub fn ensureRemoteBackendNow(self: *AppSession) void {
         self.ensureRemoteBackendImpl(true);
     }

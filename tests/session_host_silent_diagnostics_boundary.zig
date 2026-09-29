@@ -18,8 +18,15 @@
 //!
 //! ## 이 판정자가 고정하는 것
 //!
-//! 문자열 목록이 아니라 **문법 자리**를 본다 — 주석을 걷고, 테스트 블록을 빼고, 산출 지점·분기 블록에 닻을
-//! 내린다. 나중에 조용한 산출 지점이 새로 늘거나 로그를 주석으로 가려도 빨개진다.
+//! 글자가 **있는지**가 아니라 **그 자리에서 효과를 내는지**를 본다. 주석을 걷고 테스트 블록을 뺀 뒤,
+//! 중괄호 블록과 문장(statement) 경계를 따라 읽는다.
+//!
+//! - 단계 기록은 `handoff_failed` 를 내는 문장의 **바로 앞 문장**이고, 같은 블록 안에 있으며, 문자열 첫 인자를
+//!   받는 **호출문**이어야 한다. 「N 줄 안 어딘가」로 재던 첫 판은 이웃 switch arm 으로 옮긴 기록(X1b)이나
+//!   `_ = .{ "noteUpgradeStage", … }` 같은 가짜(X6)를 통과시켰다.
+//! - `createTerm` 재시도 앞 구간은 호출 **철자**가 아니라 `runtime_death` **토큰**을 센다 — 별칭으로 부른
+//!   기록(X4)도 잡는다. 래치 검사는 `ensureRemoteBackendNow();` **바로 다음 문장**이어야 하고 다른 `if` 아래에
+//!   들어가면 안 된다(X5).
 
 const std = @import("std");
 
@@ -28,38 +35,48 @@ const daemon_path = "src/platform/macos/session_host/daemon.zig";
 const term_path = "src/platform/macos/app_session/term.zig";
 const max_source_bytes = 8 * 1024 * 1024;
 
-/// 산출 지점과 그 앞 단계 기록 사이에 허용하는 줄 간격. 실측 최대는 3 줄이다(`finishBeforeFreeze(…, .{`
-/// 여러 줄 구조체). 「같은 함수 어딘가」로 늘어나 판정이 무의미해지지 않게 좁게 둔다.
-const max_lines_back: usize = 4;
-
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(max_source_bytes));
 }
 
-/// 줄 주석을 걷는다. 문자열 안의 `//` 는 주석이 아니므로 건드리지 않는다. 주석을 남기면 「설명하는 주석」이
-/// 「쓰는 코드」로 세어지고, 로그 호출을 `//` 로 가려도 판정이 통과한다.
+/// 코드 문자만 훑는 커서. 문자열·문자 리터럴 안의 괄호와 `//` 는 코드가 아니다.
+const Cursor = struct {
+    src: []const u8,
+    i: usize,
+
+    /// `i` 가 리터럴 시작이면 그 끝 다음으로 건너뛰고 true.
+    fn skipLiteral(self: *Cursor) bool {
+        const ch = self.src[self.i];
+        if (ch != '"' and ch != '\'') return false;
+        var j = self.i + 1;
+        while (j < self.src.len) : (j += 1) {
+            if (self.src[j] == '\\') {
+                j += 1;
+                continue;
+            }
+            if (self.src[j] == ch or self.src[j] == '\n') break;
+        }
+        self.i = @min(j + 1, self.src.len);
+        return true;
+    }
+};
+
+/// 줄 주석을 걷는다(문자열 안의 `//` 는 보존). 주석을 남기면 「설명하는 주석」이 「쓰는 코드」로 세어지고,
+/// 로그 호출을 `//` 로 가려도 판정이 통과한다.
 fn stripComments(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     var it = std.mem.splitScalar(u8, src, '\n');
     while (it.next()) |line| {
-        var in_string = false;
+        var cur: Cursor = .{ .src = line, .i = 0 };
         var cut: usize = line.len;
-        var i: usize = 0;
-        while (i < line.len) : (i += 1) {
-            const ch = line[i];
-            if (in_string) {
-                if (ch == '\\') {
-                    i += 1;
-                } else if (ch == '"') in_string = false;
-                continue;
-            }
-            if (ch == '"') {
-                in_string = true;
-            } else if (ch == '/' and i + 1 < line.len and line[i + 1] == '/') {
-                cut = i;
+        while (cur.i < line.len) {
+            if (cur.skipLiteral()) continue;
+            if (line[cur.i] == '/' and cur.i + 1 < line.len and line[cur.i + 1] == '/') {
+                cut = cur.i;
                 break;
             }
+            cur.i += 1;
         }
         try out.appendSlice(allocator, line[0..cut]);
         try out.append(allocator, '\n');
@@ -90,67 +107,113 @@ fn productSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return blankTopLevelTests(allocator, stripped);
 }
 
-/// `open` 이 `{` 를 가리킬 때 짝이 맞는 `}` 까지의 블록(양끝 포함)을 돌려준다. 문자열 안의 괄호는 센다
-/// 대상이 아니다(`"{s}"` 같은 포맷 문자열).
-fn braceBlock(src: []const u8, open: usize) ?[]const u8 {
+fn isSpace(ch: u8) bool {
+    return ch == ' ' or ch == '\n' or ch == '\t' or ch == '\r';
+}
+
+/// `{` 가 구조체·배열 리터럴(`.{`)인가 — 블록이 아니다.
+fn isLiteralBrace(src: []const u8, at: usize) bool {
+    var j = at;
+    while (j > 0) {
+        j -= 1;
+        if (isSpace(src[j])) continue;
+        return src[j] == '.';
+    }
+    return false;
+}
+
+/// `pos` 를 감싸는 가장 안쪽 **블록** `{` 의 위치(리터럴 `.{` 는 건너뛴다).
+fn enclosingBlockOpen(src: []const u8, pos: usize) ?usize {
+    var stack: [256]struct { at: usize, literal: bool } = undefined;
+    var depth: usize = 0;
+    var cur: Cursor = .{ .src = src, .i = 0 };
+    while (cur.i < pos) {
+        if (cur.skipLiteral()) continue;
+        switch (src[cur.i]) {
+            '{' => {
+                if (depth == stack.len) return null;
+                stack[depth] = .{ .at = cur.i, .literal = isLiteralBrace(src, cur.i) };
+                depth += 1;
+            },
+            '}' => depth -|= 1,
+            else => {},
+        }
+        cur.i += 1;
+    }
+    while (depth > 0) {
+        depth -= 1;
+        if (!stack[depth].literal) return stack[depth].at;
+    }
+    return null;
+}
+
+/// `open` 이 `{` 를 가리킬 때 짝 `}` 의 위치.
+fn matchingClose(src: []const u8, open: usize) ?usize {
     if (open >= src.len or src[open] != '{') return null;
     var depth: usize = 0;
-    var in_string = false;
-    var i = open;
-    while (i < src.len) : (i += 1) {
-        const ch = src[i];
-        if (in_string) {
-            if (ch == '\\') {
-                i += 1;
-            } else if (ch == '"') in_string = false;
-            continue;
-        }
-        switch (ch) {
-            '"' => in_string = true,
+    var cur: Cursor = .{ .src = src, .i = open };
+    while (cur.i < src.len) {
+        if (cur.skipLiteral()) continue;
+        switch (src[cur.i]) {
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
-                if (depth == 0) return src[open .. i + 1];
+                if (depth == 0) return cur.i;
             },
             else => {},
         }
+        cur.i += 1;
     }
     return null;
 }
 
-/// `anchor` 바로 뒤(공백만 건너뛰고)에 `{` 가 와야 한다 — 한 줄짜리 `)) break;` 같은 옛 모양이면 null.
-fn blockRightAfter(src: []const u8, anchor_end: usize) ?[]const u8 {
-    var i = anchor_end;
-    while (i < src.len and (src[i] == ' ' or src[i] == '\n')) : (i += 1) {}
-    return braceBlock(src, i);
+/// `open` 블록의 **속**(양끝 괄호 제외).
+fn blockInner(src: []const u8, open: usize) ?[]const u8 {
+    const close = matchingClose(src, open) orelse return null;
+    return src[open + 1 .. close];
 }
 
-/// `start` 가 `(` 를 가리킬 때 짝 괄호 바로 뒤 위치.
-fn afterMatchingParen(src: []const u8, start: usize) ?usize {
-    if (src[start] != '(') return null;
+/// 블록 속을 깊이 0 문장들로 나눈다. 경계는 깊이 0 의 `;`, 그리고 깊이 0 으로 돌아오는 `}` 중 뒤에 `;`·`else`
+/// 가 오지 않는 것(`if (…) { … }` 처럼 세미콜론 없이 끝나는 문장). 빈 문장은 버린다.
+fn statements(allocator: std.mem.Allocator, inner: []const u8) ![]Statement {
+    var list: std.ArrayList(Statement) = .empty;
+    errdefer list.deinit(allocator);
     var depth: usize = 0;
-    var in_string = false;
-    var i = start;
-    while (i < src.len) : (i += 1) {
-        const ch = src[i];
-        if (in_string) {
-            if (ch == '\\') {
-                i += 1;
-            } else if (ch == '"') in_string = false;
-            continue;
-        }
+    var start: usize = 0;
+    var cur: Cursor = .{ .src = inner, .i = 0 };
+    while (cur.i < inner.len) {
+        if (cur.skipLiteral()) continue;
+        const ch = inner[cur.i];
+        var boundary = false;
         switch (ch) {
-            '"' => in_string = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if (depth == 0) return i + 1;
+            '(', '[', '{' => depth += 1,
+            ')', ']' => depth -|= 1,
+            '}' => {
+                depth -|= 1;
+                if (depth == 0) {
+                    var j = cur.i + 1;
+                    while (j < inner.len and isSpace(inner[j])) : (j += 1) {}
+                    const rest = inner[j..];
+                    boundary = !(std.mem.startsWith(u8, rest, ";") or std.mem.startsWith(u8, rest, "else"));
+                }
             },
+            ';' => boundary = depth == 0,
             else => {},
         }
+        cur.i += 1;
+        if (boundary) {
+            const text = std.mem.trim(u8, inner[start..cur.i], " \n\t\r");
+            if (text.len > 0 and !std.mem.eql(u8, text, ";"))
+                try list.append(allocator, .{ .text = text, .begin = start, .end = cur.i });
+            start = cur.i;
+        }
     }
-    return null;
+    const tail = std.mem.trim(u8, inner[start..], " \n\t\r");
+    if (tail.len > 0) try list.append(allocator, .{ .text = tail, .begin = start, .end = inner.len });
+    return list.toOwnedSlice(allocator);
 }
+
+const Statement = struct { text: []const u8, begin: usize, end: usize };
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var n: usize = 0;
@@ -159,31 +222,44 @@ fn count(haystack: []const u8, needle: []const u8) usize {
     return n;
 }
 
+/// 단계 기록 **호출문**인가 — 문자열 첫 인자를 받는 `noteUpgradeStage(`/`noteUpgradeStageErr(` 로 시작한다.
+fn isStageNoteStatement(text: []const u8) bool {
+    return std.mem.startsWith(u8, text, "noteUpgradeStage(\"") or
+        std.mem.startsWith(u8, text, "noteUpgradeStageErr(\"");
+}
+
+fn lineOf(src: []const u8, pos: usize) usize {
+    return std.mem.count(u8, src[0..pos], "\n") + 1;
+}
+
 test "업그레이드의 모든 handoff_failed 산출 지점은 어느 단계였는지 남긴다" {
     const a = std.testing.allocator;
     const src = try productSource(a, coordinator_path);
     defer a.free(src);
-    var lines: std.ArrayList([]const u8) = .empty;
-    defer lines.deinit(a);
-    var it = std.mem.splitScalar(u8, src, '\n');
-    while (it.next()) |line| try lines.append(a, line);
 
-    // ① 본체: 제품 코드에서 `handoff_failed` 를 내는 줄마다 직전 몇 줄 안에 단계 기록이 있다. 산출 지점을
-    //    목록으로 적지 않고 **그 이름이 나오는 모든 줄**을 산출 지점으로 본다 — 새 모양(헬퍼 반환·switch arm)이
-    //    늘어도 잡힌다. 테스트 헬퍼의 단언(`std.testing`)만 뺀다.
+    // ① 본체: 제품 코드에서 `handoff_failed` 가 나오는 **모든 자리**를 산출 지점으로 본다(목록을 적지 않는다 —
+    //    새 모양이 늘어도 잡힌다). 그 자리를 품은 가장 안쪽 블록을 문장으로 나눠, 산출 문장의 **바로 앞 문장**이
+    //    단계 기록 호출문인지 본다.
     var producers: usize = 0;
-    for (lines.items, 0..) |line, i| {
-        if (std.mem.indexOf(u8, line, "handoff_failed") == null) continue;
-        if (std.mem.indexOf(u8, line, "std.testing") != null) continue;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, src, at, "handoff_failed")) |pos| : (at = pos + "handoff_failed".len) {
+        const open = enclosingBlockOpen(src, pos) orelse return error.NoEnclosingBlock;
+        const inner = blockInner(src, open) orelse return error.UnbalancedBlock;
+        const rel = pos - (open + 1);
+        const stmts = try statements(a, inner);
+        defer a.free(stmts);
+        const idx = for (stmts, 0..) |s, k| {
+            if (rel >= s.begin and rel < s.end) break k;
+        } else return error.ProducerOutsideStatement;
+        // 테스트 헬퍼 함수(최상위 `test` 블록 밖)의 **단언** 문장은 산출이 아니라 관측이다. 줄이 아니라
+        // 문장 단위로 가른다 — 같은 줄에 단언과 산출이 섞여도 산출 쪽이 빠지지 않는다.
+        if (std.mem.startsWith(u8, stmts[idx].text, "try std.testing.")) continue;
         producers += 1;
-        var back: usize = 0;
-        const found = while (back < max_lines_back and back <= i) : (back += 1) {
-            if (std.mem.indexOf(u8, lines.items[i - back], "noteUpgradeStage") != null) break true;
-        } else false;
-        if (!found) {
+        const ok = idx > 0 and isStageNoteStatement(stmts[idx - 1].text);
+        if (!ok) {
             std.debug.print(
-                "침묵하는 handoff_failed 산출 지점 — {s}:{d}: {s}\n",
-                .{ coordinator_path, i + 1, std.mem.trim(u8, line, " ") },
+                "침묵하는 handoff_failed 산출 지점 — {s}:{d}: 바로 앞 문장이 단계 기록 호출이 아니다: «{s}»\n",
+                .{ coordinator_path, lineOf(src, pos), if (idx > 0) stmts[idx - 1].text[0..@min(stmts[idx - 1].text.len, 80)] else "(블록 첫 문장)" },
             );
             return error.SilentHandoffFailedSite;
         }
@@ -191,27 +267,31 @@ test "업그레이드의 모든 handoff_failed 산출 지점은 어느 단계였
     // ② 빈 진공 통과 방지 — 산출 지점이 사라지면 ①이 공회전한다(2026-09-29 기준 14 곳).
     try std.testing.expect(producers >= 14);
 
-    // ③ 단계 이름이 **서로 다르다**. 같은 이름으로 뭉치면 로그가 있어도 갈리지 않는다. 따옴표째 세어
-    //    `.exec_failed` 같은 wire reason 과 헷갈리지 않는다.
+    // ③ 단계 이름이 **서로 다르다**. 같은 이름으로 뭉치면 로그가 있어도 갈리지 않는다. 호출 첫 인자 모양으로
+    //    센다 — 두 헬퍼 중 어느 쪽이든 합쳐 정확히 1 번.
     for ([_][]const u8{
-        "\"unexpected_inherited_fd\"",
-        "\"fd_slot_reserve\"",
-        "\"rollback_image_revalidate_pre_freeze\"",
-        "\"attempt_record_build\"",
-        "\"handoff_encode\"",
-        "\"rollback_image_revalidate_post_freeze\"",
-        "\"authority_begin_restoring\"",
-        "\"replace_all\"",
-        "\"non_cloexec_assert\"",
-        "\"rollback_image_revalidate_pre_exec\"",
-        "\"exec_prepare_out_of_memory\"",
-        "\"handoff_store_commit\"",
-        "\"budget_prepare\"",
-        "\"exec_failed\"",
+        "unexpected_inherited_fd",
+        "fd_slot_reserve",
+        "rollback_image_revalidate_pre_freeze",
+        "attempt_record_build",
+        "handoff_encode",
+        "rollback_image_revalidate_post_freeze",
+        "authority_begin_restoring",
+        "replace_all",
+        "non_cloexec_assert",
+        "rollback_image_revalidate_pre_exec",
+        "exec_prepare_out_of_memory",
+        "handoff_store_commit",
+        "budget_prepare",
+        "exec_failed",
     }) |label| {
-        const seen = count(src, label);
+        var buf_a: [96]u8 = undefined;
+        var buf_b: [96]u8 = undefined;
+        const as_note = try std.fmt.bufPrint(&buf_a, "noteUpgradeStage(\"{s}\"", .{label});
+        const as_err = try std.fmt.bufPrint(&buf_b, "noteUpgradeStageErr(\"{s}\"", .{label});
+        const seen = count(src, as_note) + count(src, as_err);
         if (seen != 1) {
-            std.debug.print("단계 라벨 {s} 이 {d} 번 — 정확히 1 번이어야 한다\n", .{ label, seen });
+            std.debug.print("단계 라벨 «{s}» 기록 호출이 {d} 번 — 정확히 1 번이어야 한다\n", .{ label, seen });
             return error.StageLabelNotUnique;
         }
     }
@@ -232,31 +312,58 @@ test "host 가 스스로 내려갈 때 그 사실을 남긴다" {
     const src = try productSource(a, daemon_path);
     defer a.free(src);
 
-    // ① 자연 종료 판정의 **then 블록**에 로그와 break 가 함께 있다. 판정 호출의 짝 괄호 바로 뒤가 `{` 여야
-    //    한다 — 옛 한 줄 모양 `)) break;` 이면 블록이 없어 빨개진다.
+    // ① 자연 종료 판정 `if` 의 then 이 **블록**이고, 그 블록 문장 중 로그 호출문과 `break;` 가 있다. 옛 한 줄
+    //    모양 `)) break;` 이면 블록이 없어 빨개진다.
     const call = "if (shouldExitNaturally(";
     try std.testing.expectEqual(@as(usize, 1), count(src, call));
     const call_at = std.mem.indexOf(u8, src, call).?;
-    const after_if = afterMatchingParen(src, call_at + "if ".len) orelse return error.UnbalancedCall;
-    const then_block = blockRightAfter(src, after_if) orelse {
+    var paren_depth: usize = 0;
+    var cur: Cursor = .{ .src = src, .i = call_at + "if ".len };
+    const after_cond = while (cur.i < src.len) {
+        if (cur.skipLiteral()) continue;
+        switch (src[cur.i]) {
+            '(' => paren_depth += 1,
+            ')' => {
+                paren_depth -= 1;
+                if (paren_depth == 0) break cur.i + 1;
+            },
+            else => {},
+        }
+        cur.i += 1;
+    } else return error.UnbalancedCall;
+    var j = after_cond;
+    while (j < src.len and isSpace(src[j])) : (j += 1) {}
+    if (src[j] != '{') {
         std.debug.print("shouldExitNaturally 의 then 이 블록이 아니다 — 종료가 로그 없이 break 한다\n", .{});
         return error.SilentNaturalExit;
-    };
-    // 호출 자리와 메시지 머리를 따로 본다 — zig fmt 가 인자를 다음 줄로 내리면 한 덩어리 글자로는 안 맞는다.
-    try std.testing.expectEqual(@as(usize, 1), count(then_block, "host_log.line("));
-    try std.testing.expectEqual(@as(usize, 1), count(then_block, "\"session host exiting naturally:"));
-    try std.testing.expect(std.mem.indexOf(u8, then_block, "break;") != null);
+    }
+    try expectLogThenBreak(a, src, j, "\"session host exiting naturally:");
 
     // ② listener 가 깨져 나가는 갈래도 같은 규칙이다.
     const arm = ".listener_broken =>";
     try std.testing.expectEqual(@as(usize, 1), count(src, arm));
-    const arm_at = std.mem.indexOf(u8, src, arm).?;
-    const arm_block = blockRightAfter(src, arm_at + arm.len) orelse {
+    var k = std.mem.indexOf(u8, src, arm).? + arm.len;
+    while (k < src.len and isSpace(src[k])) : (k += 1) {}
+    if (src[k] != '{') {
         std.debug.print(".listener_broken 갈래가 블록이 아니다 — 종료가 로그 없이 break 한다\n", .{});
         return error.SilentListenerExit;
-    };
-    try std.testing.expect(std.mem.indexOf(u8, arm_block, "host_log.line(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, arm_block, "break;") != null);
+    }
+    try expectLogThenBreak(a, src, k, "\"session host exiting");
+}
+
+/// 블록의 깊이 0 문장 중 `host_log.line(` 으로 **시작하는** 호출문(메시지 머리 포함)이 하나 있고, 마지막 문장이
+/// `break;` 다. 로그를 `if (false)` 아래에 숨기거나 주석으로 가리면 문장 머리가 달라져 빨개진다.
+fn expectLogThenBreak(a: std.mem.Allocator, src: []const u8, open: usize, head: []const u8) !void {
+    const inner = blockInner(src, open) orelse return error.UnbalancedBlock;
+    const stmts = try statements(a, inner);
+    defer a.free(stmts);
+    var logs: usize = 0;
+    for (stmts) |s| {
+        if (std.mem.startsWith(u8, s.text, "host_log.line(") and std.mem.indexOf(u8, s.text, head) != null) logs += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), logs);
+    try std.testing.expect(stmts.len >= 2);
+    try std.testing.expectEqualStrings("break;", stmts[stmts.len - 1].text);
 }
 
 test "죽은 spawn host 재시작이 성공하면 폴백 실패를 기록하지 않는다" {
@@ -264,8 +371,8 @@ test "죽은 spawn host 재시작이 성공하면 폴백 실패를 기록하지 
     const src = try productSource(a, term_path);
     defer a.free(src);
 
-    // ① 첫 실패와 재시도 블록 사이: 실패 기록 0, info 한 줄 1. 재시도 **전에** `runtime_death` 를 찍으면
-    //    재시작이 성공해도 error 「in-process 로 폴백」이 남는다 — 그게 고친 병이다.
+    // ① 첫 실패와 재시도 블록 사이: `runtime_death` **토큰** 0 — 호출 철자가 아니라 단계 값을 센다(별칭으로
+    //    부른 `mark(self, .runtime_death, err)` 도 잡는다). 대신 벽시계를 실은 info 한 줄이 있다.
     const gate = "if (!remote_dead) return err;";
     const block_anchor = "relaunch: {";
     try std.testing.expectEqual(@as(usize, 1), count(src, gate));
@@ -274,28 +381,53 @@ test "죽은 spawn host 재시작이 성공하면 폴백 실패를 기록하지 
     const block_at = std.mem.indexOf(u8, src, block_anchor).?;
     try std.testing.expect(gate_at < block_at);
     const before_retry = src[gate_at..block_at];
-    try std.testing.expectEqual(@as(usize, 0), count(before_retry, "markHostConnectFailedError("));
+    try std.testing.expectEqual(@as(usize, 0), count(before_retry, "runtime_death"));
+    try std.testing.expectEqual(@as(usize, 0), count(before_retry, "markHostConnectFailed"));
     try std.testing.expectEqual(@as(usize, 1), count(before_retry, "std.log.info("));
+    try std.testing.expectEqual(@as(usize, 1), count(before_retry, "at_unix={d}"));
 
-    const relaunch = braceBlock(src, block_at + "relaunch: ".len) orelse return error.UnbalancedBlock;
+    // ② 재시도 블록의 **문장 순서**를 고정한다. 순서가 곧 의미다 — evict → ensure → 래치 검사 → backend → spawn.
+    const open = block_at + "relaunch: ".len;
+    const inner = blockInner(src, open) orelse return error.UnbalancedBlock;
+    const stmts = try statements(a, inner);
+    defer a.free(stmts);
+    // 블록 안 `runtime_death` 는 정확히 셋(evict 실패·backend 없음·재spawn 실패). 넷이면 누가 재시도 전에 또 찍었다.
+    try std.testing.expectEqual(@as(usize, 3), count(inner, "runtime_death"));
+    try std.testing.expectEqual(@as(usize, 6), stmts.len);
 
-    // ② 재spawn 성공 갈래에는 실패 기록이 없다.
+    // evict 실패 갈래: 원래 에러로 기록하고 빠진다.
+    try std.testing.expect(std.mem.startsWith(u8, stmts[0].text, "if (!app_session_mod.AppSession.evictDeadSpawnHost()) {"));
+    try std.testing.expectEqual(@as(usize, 1), count(stmts[0].text, "self.markHostConnectFailedError(.runtime_death, err);"));
+    try std.testing.expectEqual(@as(usize, 1), count(stmts[0].text, "break :relaunch;"));
+
+    // ensure 바로 다음 문장이 래치 검사이고, **다른 `if` 아래에 있지 않다**(문장 머리가 정확히 이것이어야 한다).
+    try std.testing.expectEqualStrings("self.ensureRemoteBackendNow();", stmts[1].text);
+    try std.testing.expectEqualStrings("if (app_session_mod.host_connect_failed) break :relaunch;", stmts[2].text);
+
+    // backend 가 없으면 원래 에러로 기록한다.
+    try std.testing.expect(std.mem.startsWith(u8, stmts[3].text, "const rb = if (app_session_mod.app_remote_backend)"));
+    try std.testing.expectEqual(@as(usize, 1), count(stmts[3].text, "self.markHostConnectFailedError(.runtime_death, err);"));
+    try std.testing.expectEqualStrings("be = rb.backend();", stmts[4].text);
+
+    // ③ 재spawn: 성공 갈래에는 실패 기록이 없고, 실패 갈래는 **재시도의** 에러로 기록한다.
+    const spawn = stmts[5].text;
+    try std.testing.expect(std.mem.startsWith(u8, spawn, "if (be.spawn("));
     const ok_anchor = "|respawned| {";
-    try std.testing.expectEqual(@as(usize, 1), count(relaunch, ok_anchor));
-    const ok_at = std.mem.indexOf(u8, relaunch, ok_anchor).?;
-    const ok_arm = braceBlock(relaunch, ok_at + ok_anchor.len - 1) orelse return error.UnbalancedBlock;
-    try std.testing.expectEqual(@as(usize, 0), count(ok_arm, "markHostConnectFailedError("));
-    try std.testing.expectEqual(@as(usize, 1), count(ok_arm, "break :surface respawned;"));
-
-    // ③ 재spawn 실패 갈래에는 그 **재시도의** 에러로 실패를 기록한다 — 이것이 없으면 진짜 폴백이 조용해진다.
     const fail_anchor = "|retry_err| {";
-    try std.testing.expectEqual(@as(usize, 1), count(relaunch, fail_anchor));
-    const fail_at = std.mem.indexOf(u8, relaunch, fail_anchor).?;
-    const fail_arm = braceBlock(relaunch, fail_at + fail_anchor.len - 1) orelse return error.UnbalancedBlock;
-    try std.testing.expectEqual(@as(usize, 1), count(fail_arm, "self.markHostConnectFailedError(.runtime_death, retry_err);"));
-
-    // ④ 재시도조차 못 한 두 갈래(evict 실패·backend 없음)는 원래 에러로 기록한다. ensure 실패는 ensure 가
-    //    자기 단계로 이미 기록했으므로 덮지 않는다(`host_connect_failed` 로 곧장 빠진다).
-    try std.testing.expectEqual(@as(usize, 2), count(relaunch, "self.markHostConnectFailedError(.runtime_death, err);"));
-    try std.testing.expectEqual(@as(usize, 1), count(relaunch, "if (app_session_mod.host_connect_failed) break :relaunch;"));
+    try std.testing.expectEqual(@as(usize, 1), count(spawn, ok_anchor));
+    try std.testing.expectEqual(@as(usize, 1), count(spawn, fail_anchor));
+    const ok_open = std.mem.indexOf(u8, spawn, ok_anchor).? + ok_anchor.len - 1;
+    const fail_open = std.mem.indexOf(u8, spawn, fail_anchor).? + fail_anchor.len - 1;
+    const ok_arm = blockInner(spawn, ok_open) orelse return error.UnbalancedBlock;
+    const fail_arm = blockInner(spawn, fail_open) orelse return error.UnbalancedBlock;
+    try std.testing.expectEqual(@as(usize, 0), count(ok_arm, "runtime_death"));
+    try std.testing.expectEqual(@as(usize, 0), count(ok_arm, "markHostConnectFailed"));
+    const ok_stmts = try statements(a, ok_arm);
+    defer a.free(ok_stmts);
+    try std.testing.expectEqual(@as(usize, 1), ok_stmts.len);
+    try std.testing.expectEqualStrings("break :surface respawned;", ok_stmts[0].text);
+    const fail_stmts = try statements(a, fail_arm);
+    defer a.free(fail_stmts);
+    try std.testing.expectEqual(@as(usize, 1), fail_stmts.len);
+    try std.testing.expectEqualStrings("self.markHostConnectFailedError(.runtime_death, retry_err);", fail_stmts[0].text);
 }

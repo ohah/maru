@@ -605,7 +605,15 @@ pub fn createTerm(
             // 곧바로 성공하는 정상 회수에도 error 두 줄(「in-process 로 폴백」·link state)이 남았다 — 실제로는
             // 폴백하지 않았는데 로그는 폴백했다고 말해, host 가 12 분마다 «조용히 죽는» 사고로 오인됐다
             // (2026-09-29 실측: 두 번 모두 재spawn 성공, 셸 유실 0). 첫 실패는 info 한 줄로 남긴다.
-            std.log.info("spawn host gone ({s}) — evicting it and relaunching once before in-process", .{@errorName(err)});
+            // **벽시계와 pool 크기를 싣는다** — 예전 link state 줄이 주던 `at_unix` 가 이 경로에서 사라지면 앱
+            // 로그를 host 로그(`exiting naturally` 등)와 시각으로 맞출 수 없다.
+            var gone_wall: std.c.timespec = undefined;
+            const gone_at: i64 = if (std.c.clock_gettime(.REALTIME, &gone_wall) == 0) gone_wall.sec else 0;
+            const gone_pool_hosts: usize = if (app_session_mod.app_remote_host_pool) |*pool| pool.entries.count() else 0;
+            std.log.info(
+                "spawn host gone ({s}) at_unix={d} pool_hosts={d} — evicting it and relaunching once before in-process",
+                .{ @errorName(err), gone_at, gone_pool_hosts },
+            );
             relaunch: {
                 if (!app_session_mod.AppSession.evictDeadSpawnHost()) {
                     self.markHostConnectFailedError(.runtime_death, err);

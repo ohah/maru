@@ -61007,19 +61007,17 @@ test "collector: 원격 cwd는 그대로 싣고 maru ssh 세션은 낡은 로컬
     {
         // 원격이 보고한 경로와 **같은 경로가 로컬에도 저장소로 존재**하는 배치를 만든다. 이게 브랜치 누출의
         // 실제 조건이다 — 같은 프로젝트를 로컬과 원격에 두면 흔히 경로까지 같다.
-        // `std.testing.tmpDir`는 0.16에서 realpath를 안 주므로 경로를 직접 만든다(git_backend.zig와 같은 관용구).
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
-        const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+        // 워크트리 밖의 유일한 임시 디렉터리(`git_backend.tmpRepoPath` — 겹친 시험이 서로의 자리를 지우지 않게).
         var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const repo = try std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-collector-remote-repo", .{cwd});
+        const repo = git_backend_mod.testTmpRepoPath(&repo_buf, "tmp-collector-remote-repo") orelse return error.SkipZigTest;
         const io = std.testing.io;
         const here = std.Io.Dir.cwd();
-        here.deleteTree(io, ".zig-cache/tmp-collector-remote-repo") catch {};
-        defer here.deleteTree(io, ".zig-cache/tmp-collector-remote-repo") catch {};
-        try here.createDirPath(io, ".zig-cache/tmp-collector-remote-repo/.git");
+        defer here.deleteTree(io, repo) catch {};
+        var git_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        try here.createDirPath(io, try std.fmt.bufPrint(&git_dir_buf, "{s}/.git", .{repo}));
+        var head_buf: [std.fs.max_path_bytes]u8 = undefined;
         try here.writeFile(io, .{
-            .sub_path = ".zig-cache/tmp-collector-remote-repo/.git/HEAD",
+            .sub_path = try std.fmt.bufPrint(&head_buf, "{s}/.git/HEAD", .{repo}),
             .data = "ref: refs/heads/local-branch-must-not-leak\n",
         });
 
@@ -76149,7 +76147,7 @@ test "소스 컨트롤: 대상 저장소는 활성 터미널 cwd가 먼저다(�
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
     var other_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const other = git_backend_mod.testTempRepoPath(&other_buf, "tmp-scm-priority") orelse return error.SkipZigTest;
+    const other = git_backend_mod.testTmpRepoPath(&other_buf, "tmp-scm-priority") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{other}) catch return error.SkipZigTest;
     _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
@@ -81895,7 +81893,7 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
 
     // 워크트리 밖의 유일한 임시 디렉터리(`git_backend.tmpRepoPath` — 겹친 시험이 개발자 워크트리를 건드리지 않게).
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = git_backend_mod.testTempRepoPath(&repo_buf, "tmp-session-turn") orelse return error.SkipZigTest;
+    const repo = git_backend_mod.testTmpRepoPath(&repo_buf, "tmp-session-turn") orelse return error.SkipZigTest;
     if (!git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo })) return error.SkipZigTest;
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
     if (!git_backend_mod.testRunQuiet(&.{ git_exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
@@ -82286,7 +82284,7 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
 
     // 워크트리 밖의 유일한 임시 디렉터리(`git_backend.tmpRepoPath` — 겹친 시험이 개발자 워크트리를 건드리지 않게).
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = git_backend_mod.testTempRepoPath(&repo_buf, "tmp-session-turn-trigger") orelse return error.SkipZigTest;
+    const repo = git_backend_mod.testTmpRepoPath(&repo_buf, "tmp-session-turn-trigger") orelse return error.SkipZigTest;
     if (!git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo })) return error.SkipZigTest;
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
     if (!git_backend_mod.testRunQuiet(&.{ git_exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;

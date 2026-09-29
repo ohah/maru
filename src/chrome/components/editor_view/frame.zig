@@ -705,10 +705,12 @@ fn rowsOfLine(props: Props, layout: geometry.Layout, line: usize, scratch: []u8)
 
 pub fn build(props: Props, scratch: Scratch) Written {
     const layout = layoutOf(props);
+    var op_truncated = false;
 
     // ── 1) 배경 ────────────────────────────────────────────────────────────────
     // **맨 앞이어야 한다**(painter). 뒤로 가면 글자를 덮는다(§4.1b).
     const bg = surface.build(.{ .rect = props.background_rect orelse props.rect }, scratch.ops);
+    if (bg.ops == 0 and (props.background_rect orelse props.rect).w > 0 and (props.background_rect orelse props.rect).h > 0) op_truncated = true;
 
     // ── 2) 본문 ────────────────────────────────────────────────────────────────
     // **gutter보다 먼저 돈다.** 랩이 켜지면 어느 논리 줄이 몇 행으로 접히는지는 전개해 나눠 본
@@ -923,7 +925,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         break :blk .{ .line = 0, .piece = 0 };
     };
 
-    const band_ops = paintBands(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..], scratch.count_scratch);
+    const band_ops = paintBands(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..], scratch.count_scratch, &op_truncated);
     // **선택은 밴드 뒤에 얹는다** — diff 줄 배경 위에 선택이 보여야지 그 반대면 선택한 줄이
     // 어느 것인지 흐려진다. 글자보다도 뒤라 알파로 얹어도 내용이 읽힌다.
     // **같은 낱말 강조가 먼저다**(§5.1a 우선순위 — 가장 약하다). 선택·검색이 그 위에 얹힌다. (선택과의 순서는 오늘 관측되지 않는다 —
@@ -934,9 +936,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 그리고, 그 묶음을 이 자리로 **회전**해 옮긴다(`std.mem.rotate` — 그리는 순서는 그대로). 모자라면 잘리는 것은 안내선이다.
     const ig_base = bg.ops + cw.ops + gw.ops + band_ops;
     // **현재 줄 상자는 밴드 뒤·다른 강조 앞이다**(§5.1b) — 테두리뿐이라 무엇도 가리지 않고, 강조들이 그 안에 얹힌다.
-    const lh_ops = paintLineHighlight(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base..]);
-    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + lh_ops ..], scratch.count_scratch);
-    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + lh_ops + occ_ops ..], scratch.count_scratch);
+    const lh_ops = paintLineHighlight(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base..], &op_truncated);
+    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + lh_ops ..], scratch.count_scratch, &op_truncated);
+    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + lh_ops + occ_ops ..], scratch.count_scratch, &op_truncated);
     // **검색 결과는 선택 위에 얹는다.** 선택 안에서 검색하는 경우가 있고(§5.1의 "선택 영역 내에서만"이
     // 그 자리다), 그때 매치가 선택에 묻히면 검색이 아무 일도 안 한 것처럼 보인다.
     // **막대 몫을 남겨 둔다.** 검색 강조는 **줄당 개수에 상한이 없는 유일한 층**이고(선택은
@@ -968,7 +970,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 누구도 굶기지 않는다 — 위 `ig_base`).
     const find_base = ig_base + lh_ops + occ_ops + sel_ops;
     const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
-    const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch);
+    const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch, &op_truncated);
 
     // **커서는 검색 위, 막대 앞이다.** 위 예약과 같은 이유로 막대 몫을 남기고, 커서도 줄당 개수에
     // 상한이 없으므로(만 개까지) 남은 자리 안에서만 그린다 — `paintCarets`가 넘으면 자른다.
@@ -976,15 +978,15 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **짝 괄호 상자는 검색 위·진단 아래**(§5.1b) — caret 이 선 자리의 상태라 검색 강조에 묻히면 안 된다. 같은 예약 규칙(막대 몫을 남긴다).
     const brk_base = find_base + find_ops;
     const brk_room = (scratch.ops.len -| brk_base) -| scrollbar_reserve_ops;
-    const brk_ops = paintBrackets(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[brk_base..][0..brk_room], scratch.count_scratch);
+    const brk_ops = paintBrackets(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[brk_base..][0..brk_room], scratch.count_scratch, &op_truncated);
 
     const diag_base = brk_base + brk_ops;
     const diag_room = (scratch.ops.len -| diag_base) -| scrollbar_reserve_ops;
-    const diag_ops = paintDiagnostics(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[diag_base..][0..diag_room], scratch.count_scratch);
+    const diag_ops = paintDiagnostics(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[diag_base..][0..diag_room], scratch.count_scratch, &op_truncated);
 
     const caret_base = diag_base + diag_ops;
     const caret_room = (scratch.ops.len -| caret_base) -| scrollbar_reserve_ops;
-    const caret_ops = paintCarets(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[caret_base..][0..caret_room]);
+    const caret_ops = paintCarets(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[caret_base..][0..caret_room], &op_truncated);
 
     // **줄 → 시각 행.** thumb 과 같은 `RowCache` 를 읽어 축을 하나로 묶는다(§4.1a).
     // 캐시가 없으면(랩 꺼짐·아직 안 셈) 줄 인덱스가 곧 시각 행이다 — `total_visual` 도 같은 근사를 쓴다.
@@ -1033,6 +1035,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             .mark_current = props.search_marker_current,
             .diag_lines = props.diag_lines,
         }, scratch.ops[mm_base..]);
+        op_truncated = op_truncated or mw.truncated;
         break :blk mw.ops;
     } else 0;
 
@@ -1077,29 +1080,32 @@ pub fn build(props: Props, scratch: Scratch) Written {
         }, scratch.ops[mm_base + mm_ops + sw.ops ..])
     else
         scrollbar.HorizontalWritten{ .ops = 0 };
+    op_truncated = op_truncated or sw.truncated;
+    if (hw.geometry != null and hw.ops == 0) op_truncated = true;
 
     // **안내선 — 남은 자리에 그리고 밴드 뒤로 옮긴다**(위 `ig_base` 의 주석). 뒤 층이 막대까지 다 받은 다음이라 막대 몫을 따로 남길 것이 없다.
     const tail_end = mm_base + mm_ops + sw.ops + hw.ops;
-    const ig_ops = paintIndentGuides(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[tail_end..]);
+    const ig_ops = paintIndentGuides(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[tail_end..], &op_truncated);
     std.mem.rotate(draw.Op, scratch.ops[ig_base .. tail_end + ig_ops], tail_end - ig_base);
     // **공백 표시 — 같은 규율로 맨 나중에 받고 선택 층 바로 뒤로 옮긴다**(§5.1e). 선택 배경 위에 서고 검색·괄호 상자·진단·caret 아래다. 전체를
     // 고르면 기호가 수천이라 먼저 받으면 caret 을 굶긴다(안내선에서 배운 것 — §5.1c `IGF4`).
     const ws_base = ig_base + ig_ops + lh_ops + occ_ops + sel_ops;
     const ws_tail = tail_end + ig_ops;
-    const ws_ops = paintWhitespace(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ws_tail..], scratch.count_scratch);
+    const ws_ops = paintWhitespace(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ws_tail..], scratch.count_scratch, &op_truncated);
     std.mem.rotate(draw.Op, scratch.ops[ws_base .. ws_tail + ws_ops], ws_tail - ws_base);
 
     // **`occ_ops` 를 빼면 안 된다**(§5.1a — `OCH5`): 뒤 층의 자리(`find_base`)가 이미 그 몫을 세므로, 여기서 빠지면 강조 수만큼
     // 끝 op(막대·미니맵)가 잘린다 — 강조가 선 동안 막대가 사라졌다(2026-09-23 발견).
     // 현재 줄(`lh_ops`)·짝 괄호(`brk_ops`)도 같은 이유로 빠지면 안 된다(`LHL5`).
     const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + ig_ops + lh_ops + occ_ops + sel_ops + ws_ops + find_ops + brk_ops + diag_ops + caret_ops + mm_ops + hw.ops;
+    const final_ops = paintSticky(props, layout, scratch, bg.ops, body_ops, visual_budget, cw.bytes + gw.bytes, cw.runs + gw.runs, &op_truncated);
     return .{
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
         .max_top_piece = max_top.piece,
-        .ops = paintSticky(props, layout, scratch, bg.ops, body_ops, visual_budget, cw.bytes + gw.bytes, cw.runs + gw.runs),
+        .ops = final_ops,
         .visual_rows = cw.visual_rows,
-        .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
+        .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0 or op_truncated,
         .scrollbar = sw.geometry,
         .horizontal_scrollbar = hw.geometry,
     };
@@ -1114,7 +1120,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
 /// (글자는 버리고, 사각은 영역 아래로 자르고, 세로 규칙선도 자른다) ② 머리줄을 본문과 같은 함수(`content`·`gutter`)로 그 자리에 그린다
 /// — 줄바꿈 없이, 가로 스크롤은 본문을 따른다 ③ 마지막 행 아래에 경계선. 막대·미니맵은 본문 폭 밖이라 그대로 남는다.
 /// 돌려주는 값은 **전체 op 수**다.
-fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_from: usize, end: usize, visual_budget: usize, bytes_used: usize, runs_used: usize) usize {
+fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_from: usize, end: usize, visual_budget: usize, bytes_used: usize, runs_used: usize, op_truncated: *bool) usize {
     const n: usize = @min(props.sticky.len, @min(visual_budget, sticky_max_rows));
     if (n == 0) return end;
     const ch: i32 = @intCast(props.cell_h_px);
@@ -1149,6 +1155,7 @@ fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_fro
         .origin_px = .{ .x = props.rect.x, .y = props.rect.y },
         .font_px = props.font_px,
     }, scratch.ops[w..], scratch.text_bytes[bytes_used..], scratch.runs[runs_used..], vis[0..n]);
+    op_truncated.* = op_truncated.* or cwr.truncated_rows > 0;
     w += cwr.ops;
     var grows: [sticky_max_rows]gutter.Row = undefined;
     const vn = @min(cwr.visual_rows, n);
@@ -1161,6 +1168,7 @@ fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_fro
         .origin_px = .{ .x = props.rect.x, .y = props.rect.y },
         .font_px = props.font_px,
     }, scratch.ops[w..], scratch.text_bytes[bytes_used + cwr.bytes ..], scratch.runs[runs_used + cwr.runs ..]);
+    op_truncated.* = op_truncated.* or gw.dropped_rows > 0;
     w += gw.ops;
     // sticky 몫(`bufferSizes`)을 넘으면 불변식이 깨졌다 — 머리줄은 한 행이고 번호만 붙는다.
     std.debug.assert(cwr.runs + gw.runs <= n * (@as(usize, layout.content.width) + gutter.runsPerRow(false, false)));
@@ -1168,9 +1176,11 @@ fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_fro
     // ③ 경계선 — 마지막 고정 행의 아래 가장자리 **2px**. **quad 로 낸다** — 편집기 pane 의 lowering 은 `rule` 을 안 그린다(캡처에서
     //    픽셀로 쟀다: 경계 열이 전부 바탕색이었다). 그리고 **1px 은 안 보인다** — quad 셰이더의 SDF 가장자리 AA(`maru_metal_shader.h`
     //    `1 − smoothstep(−aa, aa, d)`)가 높이 1px 사각을 지웠다(1px 캡처: 선 없음 · 2px: 두 행이 `divider` 색).
-    if (w < scratch.ops.len and x1 > props.rect.x) {
-        scratch.ops[w] = .{ .quad = .{ .rect = .{ .x = props.rect.x, .y = y1 - 2, .w = @intCast(x1 - props.rect.x), .h = 2 }, .fill_role = .divider } };
-        w += 1;
+    if (x1 > props.rect.x) {
+        if (w < scratch.ops.len) {
+            scratch.ops[w] = .{ .quad = .{ .rect = .{ .x = props.rect.x, .y = y1 - 2, .w = @intCast(x1 - props.rect.x), .h = 2 }, .fill_role = .divider } };
+            w += 1;
+        } else op_truncated.* = true;
     }
     return w;
 }
@@ -1223,11 +1233,10 @@ fn clipBelow(r: draw.Rect, y0: i32, y1: i32, x1: i32) ?draw.Rect {
     return .{ .x = r.x, .y = y1, .w = r.w, .h = @intCast(bottom - y1) };
 }
 
-fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
     const bands = props.row_bands orelse return 0;
     var n: usize = 0;
     for (visual, 0..) |v, i| {
-        if (n + 2 > out.len) break; // 줄 배경 + 띠 = 둘씩 든다
         // **위젯 행에는 아무것도 안 얹는다**(S1.5) — 문서 줄이 아니므로 그 줄의 강조·선택·검색
         // 표식을 여기 그리면 **없는 글자 위에** 색을 칠한다. 행마다 이 한 줄이 필요한 이유는
         // 위젯 행이 앵커 줄의 `line` 을 들고 있기 때문이다(그 값이 유효한 것이 이 설계의 값이다).
@@ -1240,6 +1249,10 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
             .removed => .diff_removed_bg,
             .conflict_marker => .danger_bg,
         };
+        if (n + 2 > out.len) {
+            op_truncated.* = true;
+            break;
+        }
         const y = props.rect.y + @as(i32, @intCast(i * props.cell_h_px));
         out[n] = .{ .quad = .{
             .rect = .{ .x = props.rect.x, .y = y, .w = props.rect.w, .h = props.cell_h_px },
@@ -1277,7 +1290,7 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
             .marks = row_marks,
             .role = role,
             .alpha = mark_alpha,
-        }, out[n..], scratch_cols);
+        }, out[n..], scratch_cols, op_truncated);
     }
     return n;
 }
@@ -1304,7 +1317,7 @@ const RowMarkPaint = struct {
 /// 지그재그 밑줄 한 셀의 조각 수 — 반 셀 폭 조각 둘이 위·아래로 번갈아 선다(§5.4).
 pub const zigzag_pieces_per_cell: u32 = 2;
 
-fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []draw.Op, scratch_cols: []u8) usize {
+fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
     var n: usize = 0;
     // **줄을 한 번만 지난다.** 위치마다 앞부분을 다시 펴면 마크가 많은 줄에서 비용이 곱으로 붙는다
     // (200자 줄에 마크 100개 = 한 행에 4만 스텝, 화면 50행이면 프레임당 수백만). 물어볼 위치를
@@ -1319,7 +1332,6 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
     // 화면 오른쪽 끝을 넘으면 멈춘다 — 그 뒤 마크는 어차피 아래에서 잘린다.
     content.columnsAtOffsetsWith(p.line, props.tab_width, offsets, offsets, p.row_start_col + layout.content.width, p.inlays); // 제자리 채우기
     for (p.marks[0..max_pairs], 0..) |_, k| {
-        if (n >= out.len) break;
         const start_col = offsets[k * 2];
         const end_col = offsets[k * 2 + 1];
         if (end_col <= start_col) continue;
@@ -1329,6 +1341,10 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
         const from = @max(start_col, p.row_start_col);
         const to = @min(end_col, p.row_start_col + layout.content.width);
         if (to <= from) continue;
+        if (n >= out.len) {
+            op_truncated.* = true;
+            break;
+        }
         // **본문은 gutter 뒤에서 시작한다.** pane 원점부터 세면 강조가 줄 번호 위에 선다
         // (첫 캡처가 정확히 그랬다) — 본문 시작 열(`contentLeft`)을 더한다.
         const col_on_screen: u32 = @as(u32, layout.contentLeft()) + (from - p.row_start_col);
@@ -1353,7 +1369,10 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
                 const pieces = (to - from) * zigzag_pieces_per_cell;
                 var j: u32 = 0;
                 while (j < pieces) : (j += 1) {
-                    if (n >= out.len) break;
+                    if (n >= out.len) {
+                        op_truncated.* = true;
+                        break;
+                    }
                     const up = (j % 2) == 1;
                     out[n] = .{ .quad = .{
                         .rect = .{
@@ -1375,16 +1394,14 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
 
 /// **진단 밑줄**을 그린다(§5.4). 줄마다 조각을 받고(`diag_marks`, 검색과 같은 축) severity 색의 지그재그로 낸다. severity 마다 role 이
 /// 다르므로 조각을 하나씩 `paintRowMarks` 에 넘긴다 — 열 계산은 그 한 곳이다(§4.1c).
-fn paintDiagnostics(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+fn paintDiagnostics(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
     const rows = props.diag_marks orelse return 0;
     var n: usize = 0;
     for (visual, 0..) |v, i| {
-        if (n >= out.len) break;
         if (v.kind != .text) continue;
         const idx = v.docIndex(props.first_line);
         if (idx >= rows.len or idx >= props.lines.len) continue;
         for (rows[idx]) |dm| {
-            if (n >= out.len) break;
             const one = [_]Mark{.{ .start = dm.start, .len = dm.len }};
             n += paintRowMarks(props, layout, .{
                 .line = props.lines[idx],
@@ -1395,7 +1412,7 @@ fn paintDiagnostics(props: Props, layout: geometry.Layout, visual: []const visua
                 .role = dm.level.role(),
                 .alpha = 0xFF,
                 .shape = .zigzag,
-            }, out[n..], scratch_cols);
+            }, out[n..], scratch_cols, op_truncated);
         }
     }
     return n;
@@ -1405,11 +1422,10 @@ fn paintDiagnostics(props: Props, layout: geometry.Layout, visual: []const visua
 ///
 /// 줄별 byte 범위를 받는다 — 선택은 문서 전체 offset이지만 그것을 줄로 자르는 것은 **제품의 일**이다
 /// (컴포넌트는 어느 줄이 문서 몇 번째 byte에서 시작하는지 모른다). `row_marks`와 같은 축이다.
-fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
     const sel = props.selection_marks orelse return 0;
     var n: usize = 0;
     for (visual, 0..) |v, i| {
-        if (n >= out.len) break;
         // **위젯 행에는 아무것도 안 얹는다**(S1.5) — 문서 줄이 아니므로 그 줄의 강조·선택·검색
         // 표식을 여기 그리면 **없는 글자 위에** 색을 칠한다. 행마다 이 한 줄이 필요한 이유는
         // 위젯 행이 앵커 줄의 `line` 을 들고 있기 때문이다(그 값이 유효한 것이 이 설계의 값이다).
@@ -1425,7 +1441,7 @@ fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_
             .marks = sel[idx],
             .role = .selection,
             .alpha = selection_alpha,
-        }, out[n..], scratch_cols);
+        }, out[n..], scratch_cols, op_truncated);
     }
     return n;
 }
@@ -1447,7 +1463,7 @@ fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_
 /// **`scratch_cols`를 받지 않는다.** 띠·검색은 한 줄에서 여러 offset을 한꺼번에 열로 옮기느라
 /// 임시 배열이 필요하지만, 커서는 한 자리씩이라 그럴 것이 없다 — 안 쓰는 인자를 "대칭이니까"
 /// 받아 두면 읽는 사람이 그것이 쓰인다고 믿는다.
-fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
+fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, op_truncated: *bool) usize {
     if (!props.caret_visible) return 0;
     const rows = props.carets orelse return 0;
 
@@ -1471,8 +1487,11 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
         // `row.screen_row`가 아닌 이유는 그 값이 이 배열의 인덱스와 다를 수 있어서다.
         const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
         for (offsets) |off| {
-            if (n >= out.len) return n; // 예산 끝 — 막대 몫을 지킨다
             const at = caretOnRow(props, layout, row, idx, line, off) orelse continue;
+            if (n >= out.len) {
+                op_truncated.* = true;
+                return n;
+            }
             const col = at.col;
             const on_screen = at.on_screen;
             const x = props.rect.x +
@@ -1527,7 +1546,7 @@ fn caretOnRow(props: Props, layout: geometry.Layout, row: visual_map.VisualRow, 
 /// **어느 행인가**: 랩이면 caret 을 그리는 그 조각(`caretOnRow` — 같은 함수), 랩이 아니면 그 줄의 행 — 가로로 굴려 caret 이 화면 밖이어도
 /// 줄은 강조된다(VS Code 는 가로 위치와 무관하게 커서의 줄을 칠한다). **본문 상자의 좌·우 변**: 가로로 굴렸으면 왼쪽 변은 화면 밖이고, 가장 긴
 /// 줄이 화면을 넘는데 끝까지 안 굴렸으면 오른쪽 변도 밖이다(VS Code 상자 폭 `max(scrollWidth, contentWidth)`).
-fn paintLineHighlight(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
+fn paintLineHighlight(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, op_truncated: *bool) usize {
     const content_box = (props.line_highlight == .line or props.line_highlight == .all) and props.selection_empty;
     const gutter_box = props.line_highlight == .gutter or props.line_highlight == .all;
     if (!content_box and !gutter_box) return 0;
@@ -1539,7 +1558,6 @@ fn paintLineHighlight(props: Props, layout: geometry.Layout, visual: []const vis
     const cw: u32 = props.cell_w_px;
     var n: usize = 0;
     for (visual, 0..) |row, i| {
-        if (n + 2 > out.len) break; // 상자 둘(gutter·본문)이 한 행의 최대다
         if (row.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
         const idx = row.docIndex(props.first_line);
         if (idx >= rows.len or idx >= props.lines.len) continue;
@@ -1552,6 +1570,10 @@ fn paintLineHighlight(props: Props, layout: geometry.Layout, visual: []const vis
             break :blk false;
         };
         if (!here) continue;
+        if (n + 2 > out.len) { // 기존의 두 상자 예약 규칙을 유지한다.
+            op_truncated.* = true;
+            break;
+        }
         const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
         if (gutter_box) {
             out[n] = .{ .quad = .{
@@ -1581,7 +1603,7 @@ fn paintLineHighlight(props: Props, layout: geometry.Layout, visual: []const vis
 
 /// **들여쓰기 안내선**(§5.1c) — 줄의 **첫 조각**에만(우리 랩은 이어짐 행을 0 열에서 시작한다 — VS Code 의 `'none'` 과 같은 경우), 단계 `k` 마다
 /// 표시 열 `(k−1) × 간격` 칸의 왼쪽 끝에 1px 세로선. 가로로 굴려 그 열이 화면 밖이면 안 긋고, 본문 폭을 넘으면 거기서 멈춘다. 활성 단계는 다른 색.
-fn paintIndentGuides(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
+fn paintIndentGuides(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, op_truncated: *bool) usize {
     if (props.guide_unit == 0 or props.indent_guides.rows.len == 0) return 0;
     const unit: u32 = props.guide_unit;
     var n: usize = 0;
@@ -1596,7 +1618,10 @@ fn paintIndentGuides(props: Props, layout: geometry.Layout, visual: []const visu
             if (col < v.start_col) continue; // 가로로 굴려 화면 왼쪽 밖
             const on_screen = col - v.start_col;
             if (on_screen >= layout.content.width) break;
-            if (n >= out.len) return n; // 예산 끝 — 뒤 층은 이미 다 받았다(저장소를 맨 나중에 받는다)
+            if (n >= out.len) {
+                op_truncated.* = true;
+                return n;
+            }
             out[n] = .{ .quad = .{
                 .rect = .{
                     .x = props.rect.x + @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px)),
@@ -1632,7 +1657,7 @@ const WhitespaceRow = struct { visual: u32, begin: u32, start_col: u32, row_end:
 /// **같은 줄의 이어진 행을 묶어 열을 한 번만 걷는다.** 그 함수는 줄 처음부터 걸으므로 행마다 부르면 깊이 스크롤한 긴 랩 줄에서 행 수만큼
 /// 곱해진다(실측 ReleaseFast · 99,000 열 한 줄 · 40 행: 행마다 +8.6 ms, 묶으면 — §5.1e 적대적 기록). 작업 칸이 모자라면 묶음을 끊고
 /// 거기서 다시 시작한다.
-fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch: []u8) usize {
+fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch: []u8, op_truncated: *bool) usize {
     const mode = props.render_whitespace;
     if (mode == .none) return 0;
     // 작업 칸 — 자리(offsets)와 열(cols) 둘.
@@ -1645,7 +1670,7 @@ fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual
     var sel_buf: [256]whitespace.Range = undefined;
     var n: usize = 0;
     var i: usize = 0;
-    while (i < visual.len and n < out.len) {
+    while (i < visual.len) {
         const v0 = visual[i];
         // 위젯 행은 문서 줄이 아니다
         const idx = v0.docIndex(props.first_line);
@@ -1717,7 +1742,7 @@ fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual
                 if (col < r.start_col or col >= r.row_end) continue; // 이 조각(가로로 민 창) 밖
                 while (ci < block_carets.len and block_carets[ci] < off) ci += 1;
                 if (ci < block_carets.len and block_carets[ci] == off) {
-                    if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n);
+                    if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n, op_truncated);
                     run_n = 0;
                     continue;
                 }
@@ -1727,24 +1752,27 @@ fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual
                     run_n += 1;
                     continue;
                 }
-                if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n);
+                if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n, op_truncated);
                 run_n = 0;
                 if (is_tab) {
-                    n += emitWhitespace(props, out[n..], on_screen, y, &whitespace_arrow, 1);
+                    n += emitWhitespace(props, out[n..], on_screen, y, &whitespace_arrow, 1, op_truncated);
                 } else {
                     run_col = on_screen;
                     run_n = 1;
                 }
             }
-            if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n);
+            if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n, op_truncated);
         }
     }
     return n;
 }
 
 /// 공백 기호 op 하나 — 화면 열 `col` 부터 `cols` 칸. 자리가 없으면 0.
-fn emitWhitespace(props: Props, out: []draw.Op, col: u32, y: i32, runs: []const draw.Run, cols: usize) usize {
-    if (out.len == 0) return 0;
+fn emitWhitespace(props: Props, out: []draw.Op, col: u32, y: i32, runs: []const draw.Run, cols: usize, op_truncated: *bool) usize {
+    if (out.len == 0) {
+        op_truncated.* = true;
+        return 0;
+    }
     out[0] = .{ .text = .{
         .origin = .{ .x = props.rect.x + @as(i32, @intCast(col * props.cell_w_px)), .y = y },
         .runs = runs,
@@ -1758,11 +1786,10 @@ fn emitWhitespace(props: Props, out: []draw.Op, col: u32, y: i32, runs: []const 
 }
 
 /// **짝 괄호 상자**(§5.1b) — 괄호 글자 칸마다 10% 채움 + 1px 테두리. 열 계산은 선택·검색과 같은 `paintRowMarks` 한 곳이다(§4.1c).
-fn paintBrackets(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+fn paintBrackets(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
     const rows = props.bracket_marks orelse return 0;
     var n: usize = 0;
     for (visual, 0..) |v, i| {
-        if (n >= out.len) break;
         if (v.kind != .text) continue;
         const idx = v.docIndex(props.first_line);
         if (idx >= rows.len or idx >= props.lines.len) continue;
@@ -1776,7 +1803,7 @@ fn paintBrackets(props: Props, layout: geometry.Layout, visual: []const visual_m
             .role = .bracket_match,
             .alpha = bracket_match_alpha,
             .border_role = .bracket_match_border,
-        }, out[n..], scratch_cols);
+        }, out[n..], scratch_cols, op_truncated);
     }
     return n;
 }
@@ -1857,11 +1884,10 @@ fn columnOfOffset(line: []const u8, tab_width: u16, offset: u32, stop_col: u32, 
 /// 둘이면 한쪽에만 있는 매치(색이 없다)나 양쪽에 있는 매치(두 번 칠해 더 진하다)가 날 수 있고,
 /// 둘 다 "검색이 이상하다"로 보인다. 하나에서 골라내면 그 상태가 표현 불가능하다.
 /// 같은 낱말 강조(§5.1a) — 검색과 같은 걸음이되 **한 색**이고 현재 항목 개념이 없다(caret 이 이미 그 자리를 말한다).
-fn paintOccurrences(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+fn paintOccurrences(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
     const rows = props.occurrence_marks orelse return 0;
     var n: usize = 0;
     for (visual, 0..) |v, i| {
-        if (n >= out.len) break;
         if (v.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
         const idx = v.docIndex(props.first_line);
         if (idx >= rows.len or idx >= props.lines.len) continue;
@@ -1875,12 +1901,12 @@ fn paintOccurrences(props: Props, layout: geometry.Layout, visual: []const visua
             .marks = marks,
             .role = .occurrence,
             .alpha = occurrence_alpha,
-        }, out[n..], scratch_cols);
+        }, out[n..], scratch_cols, op_truncated);
     }
     return n;
 }
 
-fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
     const rows = props.search_marks orelse return 0;
     var n: usize = 0;
 
@@ -1900,7 +1926,6 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
     // 틀린 것은 그 주석이 옆의 예산 계산 근거를 오도했다는 점이다.
     if (props.search_current) |cur| {
         for (visual, 0..) |v, i| {
-            if (n >= out.len) break;
             if (v.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
             const idx = v.docIndex(props.first_line);
             if (idx != cur.line or idx >= rows.len or idx >= props.lines.len) continue;
@@ -1916,7 +1941,7 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
                 .marks = marks[k .. k + 1],
                 .role = .search_match_current,
                 .alpha = search_current_alpha,
-            }, out[n..], scratch_cols);
+            }, out[n..], scratch_cols, op_truncated);
         }
     }
 
@@ -1925,7 +1950,6 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
     // **셋으로 나눠 같은 함수를 부른다.** 열 계산이 한 곳에 있어야 한다는 규칙(§4.1c)이 여기서도
     // 그대로다 — 현재 매치만 따로 계산하면 그 하나가 7칸 밀리는 전례를 반복한다.
     for (visual, 0..) |v, i| {
-        if (n >= out.len) break;
         if (v.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
         const idx = v.docIndex(props.first_line);
         if (idx >= rows.len or idx >= props.lines.len) continue;
@@ -1954,18 +1978,18 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
             break :blk null;
         };
         const k = cur orelse {
-            n += paintRowMarks(props, layout, paint, out[n..], scratch_cols);
+            n += paintRowMarks(props, layout, paint, out[n..], scratch_cols, op_truncated);
             continue;
         };
 
         // 그 하나는 위에서 이미 그렸다 — 앞뒤만 채운다.
         var p_before = paint;
         p_before.marks = marks[0..k];
-        if (p_before.marks.len > 0) n += paintRowMarks(props, layout, p_before, out[n..], scratch_cols);
+        if (p_before.marks.len > 0) n += paintRowMarks(props, layout, p_before, out[n..], scratch_cols, op_truncated);
 
         var p_after = paint;
         p_after.marks = marks[k + 1 ..];
-        if (p_after.marks.len > 0 and n < out.len) n += paintRowMarks(props, layout, p_after, out[n..], scratch_cols);
+        if (p_after.marks.len > 0) n += paintRowMarks(props, layout, p_after, out[n..], scratch_cols, op_truncated);
     }
     return n;
 }
@@ -3075,6 +3099,120 @@ test "저장소가 좁아도 죽지 않는다 — 잘린 사실을 알린다" {
     const w = build(testProps(&.{ long, long }, true), s);
     try testing.expect(w.ops >= 1); // 배경은 나온다
     try testing.expect(w.truncated);
+}
+
+test "B2 op 저장소가 모자라 실제 op이 빠지면 truncated가 선다" {
+    // run·글자는 넉넉히 두고 op 길이만 줄인다. 출력이 기준과 다르면
+    // 조용히 정상이라고 말해서는 안 된다.
+    var wide: TestBuffers = .{};
+    var narrow: TestBuffers = .{};
+    var props = testProps(&.{ "alpha", "beta", "gamma", "delta" }, false);
+    props.visible_rows = 2;
+    props.carets = &.{ &.{5}, &.{4} };
+    const full = build(props, wide.scratch());
+    try testing.expect(!full.truncated);
+    var found = false;
+    for (1..full.ops) |cap| {
+        var s = narrow.scratch();
+        s.ops = s.ops[0..cap];
+        const got = build(props, s);
+        if (!sameOpContent(narrow.ops[0..got.ops], wide.ops[0..full.ops])) {
+            try testing.expect(got.truncated);
+            found = true;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "B2 제품 재현 — 2560 op 고정 저장소에서 촘촘한 검색 화면은 절단을 보고한다" {
+    // 기존 제품 고정 크기(2560)와 같은 저장소를 준다. 검색은 화면의 빈칸마다
+    // 매치가 생길 수 있어, 본문·gutter 뒤에 남은 op 수보다 훨씬 많이 요구한다.
+    const a = testing.allocator;
+    var lines: [100][]const u8 = undefined;
+    var marks: [100][]const Mark = undefined;
+    var row_marks: [120]Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    for (&lines, &marks) |*line, *line_marks| {
+        line.* = "x" ** 120;
+        line_marks.* = &row_marks;
+    }
+    var props = testProps(&lines, false);
+    props.search_marks = &marks;
+    props.visible_rows = 80;
+    props.total_cols = 160;
+    props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    const wide_ops = try a.alloc(draw.Op, 16000);
+    defer a.free(wide_ops);
+    const old_ops = try a.alloc(draw.Op, 2560);
+    defer a.free(old_ops);
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const text_bytes = try a.alloc(u8, 200000);
+    defer a.free(text_bytes);
+    var wide: WideBuffers = .{ .ops = wide_ops };
+    var old: WideBuffers = .{ .ops = old_ops };
+    const complete = build(props, wide.scratch(runs, text_bytes));
+    const clipped = build(props, old.scratch(runs, text_bytes));
+    try testing.expect(complete.ops > old_ops.len);
+    try testing.expect(!complete.truncated);
+    try testing.expect(clipped.truncated);
+    try testing.expect(clipped.ops < complete.ops);
+}
+
+fn b2MonotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+test "[측정] B2 같은 밀집 화면의 충분한 버퍼 한 번과 절단 뒤 재그리기" {
+    // 비교 대상은 같은 frame.build 입력이다. 충분한 버퍼 한 번은 가변 목록의
+    // 하한 비용이다(실제 growable writer의 증가/복사 비용은 이 테스트가 재지 않는다).
+    const a = testing.allocator;
+    var lines: [100][]const u8 = undefined;
+    var marks: [100][]const Mark = undefined;
+    var row_marks: [120]Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    for (&lines, &marks) |*line, *line_marks| {
+        line.* = "x" ** 120;
+        line_marks.* = &row_marks;
+    }
+    var props = testProps(&lines, false);
+    props.search_marks = &marks;
+    props.visible_rows = 80;
+    props.total_cols = 160;
+    props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    const full_ops = try a.alloc(draw.Op, 16000);
+    defer a.free(full_ops);
+    const old_ops = try a.alloc(draw.Op, 2560);
+    defer a.free(old_ops);
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const text_bytes = try a.alloc(u8, 200000);
+    defer a.free(text_bytes);
+    var full: WideBuffers = .{ .ops = full_ops };
+    var old: WideBuffers = .{ .ops = old_ops };
+    const warm = build(props, full.scratch(runs, text_bytes));
+    try testing.expect(!warm.truncated);
+    try testing.expect(warm.ops > old_ops.len);
+    _ = build(props, old.scratch(runs, text_bytes));
+
+    const samples: u64 = 40;
+    const t0 = b2MonotonicNs();
+    for (0..samples) |_| _ = build(props, full.scratch(runs, text_bytes));
+    const t1 = b2MonotonicNs();
+    for (0..samples) |_| {
+        _ = build(props, old.scratch(runs, text_bytes));
+        _ = build(props, full.scratch(runs, text_bytes));
+    }
+    const t2 = b2MonotonicNs();
+    std.debug.print("[B2] ops={d} one_pass_us={d} clipped_then_redraw_us={d} full_bytes={d} old_bytes={d}\n", .{
+        warm.ops,
+        (t1 - t0) / samples / std.time.ns_per_us,
+        (t2 - t1) / samples / std.time.ns_per_us,
+        full_ops.len * @sizeOf(draw.Op),
+        old_ops.len * @sizeOf(draw.Op),
+    });
 }
 
 test "row_counts가 문서보다 짧아도 나머지를 논리 줄로 친다" {

@@ -83,6 +83,8 @@ pub const marker_budget: usize = 256;
 
 pub const Written = struct {
     ops: usize,
+    /// 마커나 thumb을 op 저장소가 모자라 생략했는가.
+    truncated: bool = false,
     /// 그린 막대의 기하. 드래그·클릭을 붙일 때 호출자가 쓴다(`offsetForPointer`). 스크롤이 필요
     /// 없으면 `null`이고, 그때는 op도 0이다.
     geometry: ?scroll_area.ScrollbarGeometry = null,
@@ -105,7 +107,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
         props.metrics,
     ) orelse return .{ .ops = 0 };
 
-    if (out.len == 0) return .{ .ops = 0, .geometry = bar };
+    if (out.len == 0) return .{ .ops = 0, .geometry = bar, .truncated = true };
 
     // **마커를 thumb 보다 먼저 깐다.** thumb 이 반투명이라 아래에 깔면 겹쳐도 비쳐 보인다(§4.1a) —
     // 위에 그리면 thumb 이 지나갈 때 마커가 그것을 가려 막대가 어디 있는지 알 수 없다.
@@ -114,6 +116,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
     // 찍혀 아래쪽이 비고, 그것은 「거기엔 매치가 없다」는 거짓말이 된다. 막대를 `marker_budget` 칸으로
     // 나눠 표시하면 매치가 몇 개든 **전 구간이 고르게** 덮인다(§4.1a 「같은 픽셀 행은 하나로 합친다」).
     var n: usize = 0;
+    var truncated = false;
     // 목록이 비면 아래 순회가 아무것도 표시하지 않아 op 도 0 이다 — 앞질러 막지 않는다
     // (막아 봐야 뜻이 같아 판정자가 그 줄을 못 지킨다). `total_visual_rows` 는 나눗셈의 분모라 필요하다.
     if (props.total_visual_rows > 0) {
@@ -159,7 +162,10 @@ pub fn build(props: Props, out: []draw.Op) Written {
             // `slots <= marker_budget` 이므로 상한은 슬롯 수가 이미 지킨다 — 여기서는
             // **op 자리**만 본다. thumb 자리를 남긴다(`n + 1`): 마커가 버퍼를 다 먹으면 막대가
             // 안 그려져 스크롤할 것이 있는지조차 화면이 말하지 못한다.
-            if (n + 1 >= out.len) break;
+            if (n + 1 >= out.len) {
+                truncated = true;
+                break;
+            }
             out[n] = .{ .quad = .{
                 .rect = .{
                     .x = @intFromFloat(@round(bar.track_x)),
@@ -196,7 +202,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
             .corner_radii = .{ 4, 4, 4, 4 },
         },
     };
-    return .{ .ops = n + 1, .geometry = bar };
+    return .{ .ops = n + 1, .geometry = bar, .truncated = truncated };
 }
 
 /// **가로 막대의 기하.** 세로(`scroll_area.ScrollbarGeometry`)와 축이 뒤집혀 있어 이름을 따로 둔다 —
@@ -523,6 +529,7 @@ test "SBM6 자리가 모자라면 마커를 줄이고 thumb 을 지킨다 (§4.1
     const w1 = build(p, &one);
     try testing.expectEqual(@as(usize, 1), w1.ops);
     try testing.expectEqual(thumb_role, one[0].quad.fill_role);
+    try testing.expect(w1.truncated); // 표시할 마커가 실제로 빠졌다.
 }
 
 test "SBM8 변경 위치 마커 — kind 인 줄만, 본문 띠의 role, 검색 마커가 같은 슬롯에서 이긴다 (§4.1a N5b)" {
@@ -674,6 +681,7 @@ test "op 저장소가 없어도 기하는 돌려준다 — 호출자가 잡는 �
     const w = build(testProps(20, 0), &none);
     try testing.expectEqual(@as(usize, 0), w.ops);
     try testing.expect(w.geometry != null);
+    try testing.expect(w.truncated);
 }
 
 fn testHProps(total_cols: u32, first_col: u32) HorizontalProps {

@@ -215,6 +215,8 @@ pub const PaneFrame = struct {
     /// 배경·스크롤바 quad와 텍스트 op. 호출자가 lowering으로 내린다.
     ops: []const chrome_draw.Op,
     ops_len: usize,
+    /// 고정 draw 저장소가 모자라 표시가 빠졌는가(본문·장식·막대 포함).
+    truncated: bool = false,
     /// 그린 시각 행 수(스크롤 clamp용).
     visual_rows: usize,
     /// 비교 뷰에서 **각 열이 채운 행 수**(단일 편집기면 0). 좌우 행 배열을 따로 굳히는 데 쓴다 —
@@ -365,6 +367,7 @@ fn buildMergePaneOps(
     return .{
         .ops = scratch.ops[0..w.ops],
         .ops_len = w.ops,
+        .truncated = w.truncated,
         .visual_rows = w.result_visual_rows,
         .merge_current_visual_rows = w.current_visual_rows,
         .merge_incoming_visual_rows = w.incoming_visual_rows,
@@ -1072,7 +1075,7 @@ pub fn buildPaneOps(
     // **몫을 재는 쪽과 그리는 쪽이 같은 `side`·`shared`·사각을 쓴다**(visual-mapping §4).
     const s = PoolRef.scratchFor(pool, diff_frame.sideBufferSizes(side, shared, inner, bg), scratch);
     const w = diff_frame.buildSide(side, shared, inner, bg, s);
-    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece, .scrollbar = w.scrollbar, .horizontal_scrollbar = w.horizontal_scrollbar };
+    return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .truncated = w.truncated, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece, .scrollbar = w.scrollbar, .horizontal_scrollbar = w.horizontal_scrollbar };
 }
 
 /// 편집기 본문의 화면 좌표를 **문서 offset**으로 옮긴다 — §4.1g의 다섯 단계.
@@ -1760,6 +1763,7 @@ pub fn buildDiffPaneOps(
     return .{
         .ops = scratch.ops[0..w.ops],
         .ops_len = w.ops,
+        .truncated = w.truncated,
         .visual_rows = w.visual_rows,
         .left_visual_rows = w.left_visual_rows,
         .right_visual_rows = w.right_visual_rows,
@@ -2148,8 +2152,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         return null;
     };
     if (diag_gate.maruDebugEnabled()) editor_diag.debug(
-        "pane rect=({d},{d} {d}x{d}) lines={d} ops={d} visual_rows={d} cells_grid={d}x{d} cells={d}",
-        .{ rect.x, rect.y, rect.w, rect.h, lines.len, pf.ops_len, pf.visual_rows, cols, rows, dl.cells.len },
+        "pane rect=({d},{d} {d}x{d}) lines={d} ops={d} truncated={} visual_rows={d} cells_grid={d}x{d} cells={d}",
+        .{ rect.x, rect.y, rect.w, rect.h, lines.len, pf.ops_len, pf.truncated, pf.visual_rows, cols, rows, dl.cells.len },
     );
     return .{ .rect = inner, .dl = dl }; // 원점 = 여백 안쪽(배경은 op이 음수로 덮는다)
 }

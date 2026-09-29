@@ -5582,7 +5582,7 @@ test "CR2e-e3b2 admission drain은 resident cap에서 sealed row를 보존하고
     try testing.expectEqual(@as(u8, 1), admissions.count);
     try testing.expectEqual(@as(usize, 7), (try budget.snapshot()).live_entries);
     for (&fixtures) |*fixture| {
-        try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+        try testing.expect(!remote_runtime.testing_api.hasChargedReconnectAdmission(&fixture.runtime));
     }
     try budget.release(&incumbents[0], .candidate);
     try budget.release(&incumbents[1], .candidate);
@@ -5594,8 +5594,8 @@ test "CR2e-e3b2 admission drain은 resident cap에서 sealed row를 보존하고
     // host admission 하나는 charge 하나다(CR6e-c3b2c) — incumbent 5 + host 1.
     try testing.expectEqual(@as(usize, 6), (try budget.snapshot()).live_entries);
     // anchor 는 handle 최솟값(1 = fixtures[0])이고 형제는 identity-only 다.
-    try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[0].runtime));
-    try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[1].runtime));
+    try testing.expect(remote_runtime.testing_api.hasChargedReconnectAdmission(&fixtures[0].runtime));
+    try testing.expect(!remote_runtime.testing_api.hasChargedReconnectAdmission(&fixtures[1].runtime));
     for (&fixtures) |*fixture| {
         try testing.expect(RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
             &fixture.runtime,
@@ -5636,6 +5636,8 @@ const HostChargeScenario = enum {
     /// backend `deinit` 처럼 정산 없이 모든 runtime 을 teardown 해도(anchor 먼저) charge 는 정확히 0 으로
     /// 돌아온다 — 살아남는 형제가 없으므로 이전이 필요 없다.
     teardown_without_settle,
+    /// 같은 host 에 charged 가 0개·2개인 결속은 결속 검증과 정산 preflight 둘 다 InvalidAuthority 로 거부된다.
+    charge_count_violation,
 };
 
 fn runHostChargeScenario(comptime runtime_count: usize, comptime scenario: HostChargeScenario) !void {
@@ -5756,12 +5758,49 @@ fn runHostChargeScenario(comptime runtime_count: usize, comptime scenario: HostC
     ));
     // host 하나 = charge 하나. anchor 는 handle 최솟값(1 = fixtures[0])이고 형제는 identity-only 다.
     try testing.expectEqual(live_before + 1, (try budget.snapshot()).live_entries);
-    try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[0].runtime));
+    try testing.expect(remote_runtime.testing_api.hasChargedReconnectAdmission(&fixtures[0].runtime));
     for (fixtures[1..]) |*fixture|
-        try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+        try testing.expect(!remote_runtime.testing_api.hasChargedReconnectAdmission(&fixture.runtime));
     try backend_value.validateBoundReconnectSnapshot(snapshot);
 
     var settled_from: usize = 0;
+    if (scenario == .charge_count_violation) {
+        const projection = remote_runtime.testing_api.boundReconnectProjection(&fixtures[1].runtime) orelse
+            return error.TestUnexpectedResult;
+        // charged 2개: 형제 하나를 lease 포함 결속으로 바꾼다.
+        try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixtures[1].runtime, &budget);
+        try RemoteRuntime.backend_api.bindReconnectAdmission(
+            &fixtures[1].runtime,
+            &budget,
+            projection,
+            reconnect_resident_budget.max_entry_bytes,
+        );
+        try testing.expectError(error.InvalidAuthority, backend_value.validateBoundReconnectSnapshot(snapshot));
+        try testing.expectError(
+            error.InvalidAuthority,
+            backend_value.preflightBoundReconnectSnapshotSettlement(snapshot, &budget),
+        );
+        // charged 0개: 형제를 identity-only 로 되돌리고 anchor 의 charge 도 뺀다.
+        try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixtures[1].runtime, &budget);
+        try RemoteRuntime.backend_api.bindReconnectAdmissionIdentity(&fixtures[1].runtime, &budget, projection);
+        try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixtures[0].runtime, &budget);
+        try RemoteRuntime.backend_api.bindReconnectAdmissionIdentity(&fixtures[0].runtime, &budget, projection);
+        try testing.expectEqual(live_before, (try budget.snapshot()).live_entries);
+        try testing.expectError(error.InvalidAuthority, backend_value.validateBoundReconnectSnapshot(snapshot));
+        try testing.expectError(
+            error.InvalidAuthority,
+            backend_value.preflightBoundReconnectSnapshotSettlement(snapshot, &budget),
+        );
+        // 대조군: charge 하나로 되돌리면 다시 통과하고 정상 정산된다.
+        try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixtures[0].runtime, &budget);
+        try RemoteRuntime.backend_api.bindReconnectAdmission(
+            &fixtures[0].runtime,
+            &budget,
+            projection,
+            reconnect_resident_budget.max_entry_bytes,
+        );
+        try backend_value.validateBoundReconnectSnapshot(snapshot);
+    }
     if (scenario == .teardown_without_settle) {
         // backend `deinit` 의 destroy 루프는 runtime 마다 `executor.deinit` 을 부른다. 순서는 map 순서라
         // anchor 가 먼저 갈 수 있다 — 그 최악 순서로 teardown 한다(fixture 의 deinit 이 그 leaf 를 부른다).
@@ -5794,11 +5833,11 @@ fn runHostChargeScenario(comptime runtime_count: usize, comptime scenario: HostC
         try testing.expectEqual(term_backend.RemoveProgress.removed, RemoteTermBackend.remove(&backend_value, 1));
         try testing.expect(!backend_value.runtimes.contains(1));
         try testing.expectEqual(live_before + 1, (try budget.snapshot()).live_entries);
-        try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[0].runtime));
+        try testing.expect(!remote_runtime.testing_api.hasChargedReconnectAdmission(&fixtures[0].runtime));
         // 다음 상속자는 남은 것 중 handle 최솟값(2 = fixtures[1])이다.
-        try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[1].runtime));
+        try testing.expect(remote_runtime.testing_api.hasChargedReconnectAdmission(&fixtures[1].runtime));
         for (fixtures[2..]) |*fixture|
-            try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+            try testing.expect(!remote_runtime.testing_api.hasChargedReconnectAdmission(&fixture.runtime));
         try backend_value.validateBoundReconnectSnapshot(snapshot);
         // 떠난 anchor 는 identity-only 로 남아 자기 teardown 이 lease 없이 결속만 푼다.
         try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixtures[0].runtime, &budget);
@@ -5839,6 +5878,10 @@ test "CR6e-c3b2c host charge: anchor 가 떠나면 charge 는 남은 형제에�
 
 test "CR6e-c3b2c host charge: 정산 없이 anchor 부터 teardown 해도 charge 는 0 으로 돌아온다" {
     try runHostChargeScenario(8, .teardown_without_settle);
+}
+
+test "CR6e-c3b2c host charge: 같은 host 에 charged 가 0개나 2개면 결속 검증과 정산이 거부한다" {
+    try runHostChargeScenario(8, .charge_count_violation);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

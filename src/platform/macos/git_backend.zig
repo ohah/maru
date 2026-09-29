@@ -3208,7 +3208,9 @@ extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 /// `rm -rf` 가 다른 쪽 저장소의 `.git` 을 지우는 사이 `git -C` 가 위로 올라가 **개발자의 워크트리**에서
 /// `checkout -q -b other` 를 실행했다(2026-09-29 실측 — 커밋이 그 브랜치에 쌓여 PR 에서 빠졌다, W7a1 적대 검증 8 차).
 fn tmpRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
-    const tmp = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
+    // `TMPDIR` 이 비었거나 상대 경로면 믿지 않는다 — 상대 경로면 임시 저장소가 다시 워크트리 안에 생긴다(W7a1 적대 검증 9 차).
+    const env_tmp: []const u8 = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "";
+    const tmp = if (env_tmp.len > 0 and env_tmp[0] == '/') env_tmp else "/tmp";
     var template_buf: [std.fs.max_path_bytes]u8 = undefined;
     // 이름에 pid 를 넣는다 — `tools/clean-tmp-fixtures.sh` 는 이름 속 pid 가 살아 있으면 남긴다(`$TMPDIR` 이 `/tmp` 일 때 도는 중인
     // 시험의 자리를 지우지 않게).
@@ -3220,11 +3222,6 @@ fn tmpRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
     if (path.len > buf.len) return null;
     @memcpy(buf[0..path.len], path);
     return buf[0..path.len];
-}
-
-/// app_session 시험도 같은 자리를 쓴다.
-pub fn testTempRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
-    return tmpRepoPath(buf, name);
 }
 
 test "진짜 충돌에서 세 판을 읽는다 — :1:·:2:·:3: (S3a end-to-end)" {

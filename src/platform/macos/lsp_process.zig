@@ -249,6 +249,12 @@ const p_pid: c_int = 1;
 const w_exited: c_int = 0x04;
 const w_nowait: c_int = 0x20;
 
+/// 시험 전용: 자식이 끝날 때까지 기다리되 **거두지 않는다**(`waitid(WNOWAIT)` — 「끝났지만 안 거둔 자식」을 만든다).
+pub fn testWaitExitedNoReap(pid: std.c.pid_t) bool {
+    var info: [128]u8 = undefined;
+    return waitid(p_pid, @intCast(pid), &info, w_exited | w_nowait) == 0;
+}
+
 test "a reaped child is never signalled or waited for again (its pid may belong to someone else by then)" {
     if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
     var p = try spawn(std.testing.allocator, "/usr/bin/true", &.{}, "/");
@@ -275,8 +281,7 @@ test "a reaped child is never signalled or waited for again (its pid may belong 
         sleeper.deinit(std.testing.allocator);
     }
     var status: c_int = 0;
-    var info: [128]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), waitid(p_pid, @intCast(zombie.pid), &info, w_exited | w_nowait));
+    try std.testing.expect(testWaitExitedNoReap(zombie.pid));
     p.pid = zombie.pid;
     try std.testing.expect(reapIfExited(&p));
     reapBlocking(&p);

@@ -14,6 +14,7 @@ pub const kitty_image_ids = @import("renderer/kitty_image_ids.zig"); // kitty �
 pub const font_identity = @import("renderer/font_identity.zig");
 pub const glyph_atlas = @import("renderer/glyph_atlas.zig");
 pub const glyph_frame = @import("renderer/glyph_frame.zig");
+pub const glyph_placement = @import("renderer/glyph_placement.zig"); // 배치 트랜잭션 — 백엔드로 안 넘어간 배치를 아틀라스가 잊게 한다. 중립.
 pub const glyph_layout = @import("renderer/glyph_layout.zig");
 pub const glyph_quads = @import("renderer/glyph_quads.zig");
 pub const glyph_raster = @import("renderer/glyph_raster.zig");

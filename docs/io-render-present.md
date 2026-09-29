@@ -297,6 +297,32 @@ continuation·atlas slot 재사용)는 그대로이고 수치만 「글자 수�
 4. **사이드바 전용 빌드 분기**: `buildSidebarTitleDrawList` → `collectShaped(.sidebar)` → `placeAndDistribute`(사이드바만, 나머지 out은 throwaway) → `replaceSidebar`. grid shapeOnly/core 재읽기는 건너뛴다.
 5. **atlas.generation 폴백**: 사이드바 place 전후 `renderer_state.atlas.generation` 변화(grow **또는** clean-repack)를 감지해 변했으면 부분 swap을 버리고 `metal_dirty=true`로 다음 tick 전체 재투영(모든 pane+사이드바를 한 세대로 재정규화). 스피너 글리프 resident라 드묾.
 
+   **정정(2026-09-29): 「버리고 다음 tick 에 재투영」 만으로는 GPU 가 안 맞는다.** 버린 사이드바 배치의 글리프는 아틀라스에
+   「올라감」으로 남는데, 그 업로드는 버려졌다. 다음 전체 투영은 그 글리프를 hit 로 처리해 **올리지 않고**, 텍스처의 그
+   좌표에 남아 있던 다른 글리프의 픽셀을 샘플한다(`uploads` 는 miss 만 싣는 delta 다 — 위 11.2). 몇 시간 켜 둔 앱에서
+   한글 여러 자가 엉뚱한 글리프로 그려졌다 — 사이드바와 터미널은 한 아틀라스를 써서 본문도 같이 깨졌다. 또 「스피너
+   글리프 resident라 드묾」 전제도 낡았다: 안 보이는 탭 출력이 이 부분 경로로 오면서 사이드바 글리프가 계속 바뀐다.
+
+   그래서 배치에 **트랜잭션**을 둔다(`renderer.glyph_placement.PlacementTransaction`, `AppSession.glyph_placement`).
+   배치는 `placeAndDistribute` 한 입구에서만 일어나고, 시작할 때 직전 배치가 커밋되지 않았으면 아틀라스를 무효화한다
+   (`AtlasInvalidationReason.placement_discarded` — 다음 프레임이 모든 글리프를 다시 올린다). 커밋은 결과가 `metal_buffer`
+   로 넘어간 자리(`replace`·`replaceSidebar` 성공)에서만 한다. 배치의 **일부**가 못 가면(pane 하나의 조립 실패·OOM,
+   복구 선택 화면이 검색 줄 프레임을 안 싣는 것) `taint` 로 표시해 그 배치를 커밋하지 않는다. 버리는 길(이 폴백, 활성
+   프레임 실패로 교체 스킵, 교체 실패)을 하나하나 막지 않아도 다음 `begin` 이 무효화한다. 무효화가 나면 `.glyph_atlas`
+   스코프에 한 줄이 남는다.
+
+   **이 규칙이 호출자에게 요구하는 것.** 배치 **뒤에서** 아틀라스 세대 변화를 보고 재시도하는 호출자는 `begin` 의
+   무효화도 세대 변화로 읽는다 — 그 재시도가 커밋 없이 끝나면 다음 `begin` 이 또 무효화해 영영 못 그린다. 복구 선택
+   화면(`projectDeferredRecoverySidebar`)이 정확히 그랬어서(적대적 검증 실측 livelock) 그 경로의 세대 검사를 지웠다 —
+   retained 셀이 없는 full replace 라 필요 없었다. 이 폴백(부분 투영)은 세대 변화 뒤 **전체 투영**으로 넘어가고 그 경로는
+   세대를 보지 않으므로 순환하지 않는다. 또 무효화는 비용이다 — 매 프레임 커밋 없이 끝나는 길이 생기면 매 프레임 전부
+   다시 래스터한다.
+
+   **래스터 실패도 같은 모양이었다.** `glyph_raster` 가 한 글리프의 래스터에 실패하면 업로드를 빼고 건너뛰었는데,
+   아틀라스는 그 글리프를 이미 「올라감」으로 기록했다 — GPU 텍스처의 그 좌표에 남은 다른 글리프를 샘플했다. 이제 실패해도
+   **빈 비트맵**을 올린다(엉뚱한 글자 대신 빈 칸). 실패는 여전히 `rasterizer_failed` skip 으로 관측된다. 판정자: `renderer/glyph_placement.zig`(실제 아틀라스·가짜 텍스처, `test`),
+   `tests/glyph_placement_wiring_boundary.zig`(배선, `check-boundaries`).
+
 렌더러(`maru_metal_renderer.m`)·Swift(`MaruAppHost.swift`)·ABI **무변경**(whole-frame 재draw + generation 게이트가 그대로 동작, retained `self.cells`가 byte-identical로 다시 그려져 tearing 없음).
 
 **대안 옵션 B(사이드바 전용 atlas)**는 grow/repack 간섭을 원천 차단하나 침습이 크다(UV 재정규화 완전 분리). 스피너 글리프가 소수라 generation 폴백으로 충분 — B는 chrome이 대량 글리프를 쓰게 되면 재검토.

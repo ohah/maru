@@ -196,10 +196,25 @@ pub fn buildGlyphRasterFrame(
             .bytes_per_row = shape.bytes_per_row,
         }) catch {
             // 실제 CoreText rasterizer가 붙으면 한 glyph만 실패할 수 있다. 그때 frame 전체를
-            // 버리면 다른 glyph까지 사라지므로, 이미 예약한 byte range를 되돌리고 skip으로
-            // 관측한다. allocator/slot 불일치 같은 구조적 오류는 rasterizer 호출 전 검증한다.
-            pixels.items.len = offset;
+            // 버리면 다른 glyph까지 사라지므로 skip으로 관측한다. allocator/slot 불일치 같은 구조적
+            // 오류는 rasterizer 호출 전 검증한다.
+            //
+            // **그래도 그 슬롯은 올린다 — 빈 비트맵으로.** 아틀라스는 이 글리프를 이미 「올라감」으로
+            // 기록했다(`ensureGlyph`). 예약한 byte range를 되돌리고 업로드를 빼면 GPU 텍스처의 그 좌표에
+            // 이전 세대의 **다른 글리프 픽셀**이 남아, 이 글리프를 쓰는 셀이 엉뚱한 글자를 그린다
+            // (2026-09-29 적대적 검증 실측 — 'x' 자리에 'm'). 빈 칸이 엉뚱한 글자보다 낫다.
+            @memset(pixel_slice, 0); // rasterizer가 실패 전에 일부를 칠했을 수 있다
             try recordSkip(&skips, &stats, upload_index, upload, .rasterizer_failed);
+            uploads.appendAssumeCapacity(.{
+                .upload_index = upload_index,
+                .glyph_index = upload.glyph_index,
+                .slot = upload.slot,
+                .evicted = upload.evicted,
+                .bytes_offset = offset,
+                .byte_count = shape.byte_count,
+                .bytes_per_row = shape.bytes_per_row,
+                .non_clear_pixels = 0,
+            });
             continue;
         };
         if (result.non_clear_pixels > shape.pixel_count) {
@@ -432,8 +447,17 @@ test "glyph raster frame skips one rasterizer failure without aborting the frame
     try std.testing.expectEqual(@as(usize, 1), raster.stats.rasterized_count);
     try std.testing.expectEqual(@as(usize, 1), raster.stats.skipped_count);
     try std.testing.expectEqual(@as(usize, 1), raster.stats.rasterizer_error_skip_count);
-    try std.testing.expectEqual(@as(usize, 1), raster.uploads.len);
     try std.testing.expectEqual(@as(usize, 1), raster.skips.len);
     try std.testing.expectEqual(GlyphRasterSkipReason.rasterizer_failed, raster.skips[0].reason);
     try std.testing.expectEqual(@as(usize, 1), raster.skips[0].upload_index);
+    // 실패한 'B' 도 **빈 비트맵으로 올라간다** — 안 올리면 GPU 텍스처의 그 좌표에 남은 다른 글리프의 픽셀을
+    // 샘플한다(아틀라스는 이미 「올라감」으로 기록했다). 그 업로드의 픽셀은 전부 0 이다.
+    try std.testing.expectEqual(@as(usize, 2), raster.uploads.len);
+    var blank: ?GlyphRasterUpload = null;
+    for (raster.uploads) |u| {
+        if (u.upload_index == 1) blank = u;
+    }
+    const b = blank orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), b.non_clear_pixels);
+    for (raster.pixels[b.bytes_offset..][0..b.byte_count]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }

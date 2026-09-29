@@ -5954,6 +5954,27 @@ pub fn build(b: *std.Build) void {
     delta_base_generation_step.dependOn(&run_base_gen_wiring.step);
     boundary_step.dependOn(delta_base_generation_step);
 
+    // 앱 세션의 글리프 배치가 **배치 트랜잭션을 지나는지**(한 입구·배치 앞 begin·교체 성공 뒤에만 commit). 규칙 자체는
+    // `renderer.glyph_placement` 의 순수 판정자가 실제 아틀라스·가짜 텍스처로 잰다(`test`). app_session 테스트는
+    // macOS 잡에서만 돌아, 배선을 PR 에서 보는 것은 이 글자 판정자다(2026-09-29 — 버린 배치로 한글이 엉뚱한 글리프로).
+    const glyph_placement_wiring_step = b.step(
+        "test-glyph-placement-wiring",
+        "App-session glyph placement goes through the placement transaction",
+    );
+    const glyph_placement_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/glyph_placement_wiring_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_glyph_placement_wiring = b.addRunArtifact(glyph_placement_wiring_tests);
+    run_glyph_placement_wiring.addArg("--maru-expect-tests=1");
+    run_glyph_placement_wiring.addArg("--maru-expect-passed=1");
+    run_glyph_placement_wiring.setCwd(b.path("."));
+    glyph_placement_wiring_step.dependOn(&run_glyph_placement_wiring.step);
+    boundary_step.dependOn(glyph_placement_wiring_step);
+
     const session_host_handoff_exhaustive_step = b.step(
         "test-session-host-handoff-exhaustive",
         "Verify every stable handoff core field with valid non-default canonical round trips",

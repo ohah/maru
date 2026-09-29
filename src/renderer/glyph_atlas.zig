@@ -30,6 +30,9 @@ pub const AtlasInvalidationReason = enum {
     // clean repack으로도 한 프레임이 안 들어가면 prepareGlyphFrame이 grow()로 텍스처를 키운 뒤
     // 다시 재배치한다 — 좌표 부족으로 두 글리프가 같은 자리에 겹치는 일(─가 ? 비트맵을 샘플)을 막는다.
     atlas_full,
+    // 배치했지만 그 결과(업로드 포함)가 백엔드로 안 넘어갔다 — 아틀라스는 그 글리프를 「올라감」으로 기억하면
+    // 안 된다(`glyph_placement.PlacementTransaction`). 다음 프레임이 모든 글리프를 다시 올린다.
+    placement_discarded,
     manual,
 };
 

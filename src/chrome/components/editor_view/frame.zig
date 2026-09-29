@@ -6402,8 +6402,10 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
         // 첫 행: 탭0 열 0 · 탭1 열 9(걸친 탭은 첫 칸이 있는 행에만). 둘째 행: 탭2 절대 12 → 1 · 탭3 16 → 5.
         try testing.expectEqualSlices([3]u32, &.{ .{ 0, 0, 0x2192 }, .{ 9, 0, 0x2192 }, .{ 1, 1, 0x2192 }, .{ 5, 1, 0x2192 } }, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
     }
-    // ⑵ **무작위 대조** — 공백·탭·`a`·`한` 과 힌트(글자 앞 · 줄 끝)를 섞은 두 줄을 랩으로 접고 맨 위 줄을 몇 행 스크롤하거나(`first_piece`),
-    //    랩을 끄고 가로로 민다(`first_col` — 창이 머문 탭·걸쳐 버려진 넓은 글자에서 시작하는 갈래).
+    // ⑵ **무작위 대조** — 공백·탭·`a`·`한` 과 힌트(글자 앞 · 줄 끝)를 섞은 세 줄을 랩으로 접고 맨 위 줄을 몇 행 스크롤하거나(`first_piece`),
+    //    랩을 끄고 가로로 민다(`first_col` — 창이 머문 탭·걸쳐 버려진 넓은 글자에서 시작하는 갈래). **좌표는 제품 모양이다** — 첫 줄이
+    //    문서 중간(`first_line`)이고 힌트 창은 그보다 앞에서 시작한다(`InlayWindow.first` — 제품은 보이는 줄 ± 20). 둘 다 0 이면 창을
+    //    화면 상대 줄로 찾는 변이가 산다(적대적 3회차).
     //    `all` 은 「줄 처음부터 인레이까지 세어 낸 열이 든 행의 그 칸」과 **같아야** 하고, 다른 모드는 그 부분집합이어야 한다.
     var prng = std.Random.DefaultPrng.init(0x5f1e_07);
     const rnd = prng.random();
@@ -6412,11 +6414,11 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
     const modes = [_]whitespace.Mode{ .all, .boundary, .selection, .trailing };
     var compared: usize = 0;
     for (0..1500) |iter| {
-        var line_bufs: [2][96]u8 = undefined;
-        var line_store: [2][]const u8 = undefined;
-        var inl_bufs: [2][3]content.Inlay = undefined;
-        var inl_store: [2][]const content.Inlay = undefined;
-        for (0..2) |li| {
+        var line_bufs: [3][96]u8 = undefined;
+        var line_store: [3][]const u8 = undefined;
+        var inl_bufs: [3][3]content.Inlay = undefined;
+        var inl_store: [3][]const content.Inlay = undefined;
+        for (0..3) |li| {
             var starts: [25]u32 = undefined;
             var len: usize = 0;
             var nchars: usize = 0;
@@ -6438,12 +6440,14 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
         }
         const wrap = rnd.uintLessThan(u32, 3) != 0;
         var props = testProps(&line_store, wrap);
-        props.line_inlays = .{ .rows = &inl_store, .generation = @intCast(iter + 1) };
+        props.first_line = rnd.uintAtMost(usize, 1);
+        const window_first = rnd.uintAtMost(usize, props.first_line);
+        props.line_inlays = .{ .first = window_first, .rows = inl_store[window_first..], .generation = @intCast(iter + 1) };
         props.total_cols = @intCast(12 + rnd.uintAtMost(usize, 12));
         if (wrap) props.first_piece = rnd.uintAtMost(u32, 3) else props.first_col = rnd.uintAtMost(u32, 40);
         const mode = modes[rnd.uintLessThan(usize, modes.len)];
         props.render_whitespace = mode;
-        const sel_rows = [_][]const Mark{ &.{.{ .start = 0, .len = 96 }}, &.{.{ .start = 0, .len = 96 }} };
+        const sel_rows = [_][]const Mark{&.{.{ .start = 0, .len = 96 }}} ** 3;
         props.selection_marks = &sel_rows;
         var b: TestBuffers = .{};
         const w = build(props, b.scratch());

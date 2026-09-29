@@ -869,8 +869,8 @@ test "B2 비교 뷰 op 분할 — 총량이 충분해도 한쪽 밀집이면 절
     // 더 큰 공용 저장소가 필요하므로 B2 메모리 정책에 분할 비용을 포함해야 한다.
     const a = testing.allocator;
     var row_marks: [120]frame.Mark = undefined;
-    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
-    const lines = [_][]const u8{"x" ** 120} ** 80;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
+    const lines = [_][]const u8{"x" ** 240} ** 80;
     const marks = [_][]const frame.Mark{&row_marks} ** 80;
     const props: Props = .{
         .left = .{ .lines = &lines, .search_marks = &marks },
@@ -878,7 +878,7 @@ test "B2 비교 뷰 op 분할 — 총량이 충분해도 한쪽 밀집이면 절
         .caret_visible = false,
         .caret_shape = .bar,
         .tab_width = frame.default_tab_width,
-        .rect = .{ .x = 0, .y = 0, .w = 2560, .h = 1280 },
+        .rect = .{ .x = 0, .y = 0, .w = 5120, .h = 1280 },
         .cell_w_px = 8,
         .cell_h_px = 16,
         .font_px = 13,

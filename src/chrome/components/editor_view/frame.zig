@@ -1353,6 +1353,9 @@ fn paintRowMarksInto(props: Props, layout: geometry.Layout, p: RowMarkPaint, scr
     }
     // 화면 오른쪽 끝을 넘으면 멈춘다 — 그 뒤 마크는 어차피 아래에서 잘린다.
     content.columnsAtOffsetsWith(p.line, props.tab_width, offsets, offsets, p.row_start_col + layout.content.width, p.inlays); // 제자리 채우기
+    // 검색 결과의 논리적 경계는 그대로 두고, 같은 행에서 맞닿은 평범한
+    // 강조 사각형만 한 draw op으로 낸다. 현재 매치·테두리·진단은 별도 층이다.
+    var pending_search: ?draw.Op = null;
     for (p.marks[0..max_pairs], 0..) |_, k| {
         const start_col = offsets[k * 2];
         const end_col = offsets[k * 2 + 1];
@@ -1369,14 +1372,24 @@ fn paintRowMarksInto(props: Props, layout: geometry.Layout, p: RowMarkPaint, scr
         const x = props.rect.x + @as(i32, @intCast(col_on_screen * props.cell_w_px));
         switch (p.shape) {
             .fill => {
-                if (!sink.emit(.{ .quad = .{
+                const op: draw.Op = .{ .quad = .{
                     .rect = .{ .x = x, .y = p.y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
                     .fill_role = p.role,
                     .alpha = p.alpha,
                     .border_role = p.border_role,
                     .border_alpha = if (p.border_role != null) 0xFF else null,
                     .border_widths = if (p.border_role != null) .{ bracket_match_border_px, bracket_match_border_px, bracket_match_border_px, bracket_match_border_px } else .{ 0, 0, 0, 0 },
-                } })) return;
+                } };
+                if (p.role == .search_match and p.border_role == null) {
+                    if (pending_search) |*pending| {
+                        if (pending.quad.rect.x + @as(i32, @intCast(pending.quad.rect.w)) == x) {
+                            pending.quad.rect.w += op.quad.rect.w;
+                            continue;
+                        }
+                        if (!sink.emit(pending.*)) return;
+                    }
+                    pending_search = op;
+                } else if (!sink.emit(op)) return;
             },
             .zigzag => {
                 // 셀마다 반 셀 폭 조각 둘: 아래·위(두께만큼 올린 자리)를 번갈아. 두께는 caret 과 같다(선 하나의 두께는 한 값).
@@ -1401,6 +1414,7 @@ fn paintRowMarksInto(props: Props, layout: geometry.Layout, p: RowMarkPaint, scr
             },
         }
     }
+    if (pending_search) |op| _ = sink.emit(op);
 }
 
 /// **진단 밑줄**을 그린다(§5.4). 줄마다 조각을 받고(`diag_marks`, 검색과 같은 축) severity 색의 지그재그로 낸다. severity 마다 role 이
@@ -3131,14 +3145,14 @@ test "B2 op 저장소가 모자라 실제 op이 빠지면 truncated가 선다" {
     try testing.expect(found);
 }
 
-test "B2 제품 재현 — 2560 op 고정 저장소에서 촘촘한 검색 화면은 절단을 보고한다" {
+test "B2 제품 재현 — 떨어진 검색 표식은 2560 op 저장소를 넘는다" {
     // 기존 제품 고정 크기(2560)와 같은 저장소를 준다. 검색은 화면의 빈칸마다
     // 매치가 생길 수 있어, 본문·gutter 뒤에 남은 op 수보다 훨씬 많이 요구한다.
     const a = testing.allocator;
     var lines: [100][]const u8 = undefined;
     var marks: [100][]const Mark = undefined;
-    var row_marks: [120]Mark = undefined;
-    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    var row_marks: [60]Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
     for (&lines, &marks) |*line, *line_marks| {
         line.* = "x" ** 120;
         line_marks.* = &row_marks;
@@ -3180,6 +3194,82 @@ test "B2 제품 재현 — 2560 op 고정 저장소에서 촘촘한 검색 화�
         old_ops.len - other_ops,
         search_ops - (old_ops.len - other_ops),
     });
+}
+
+test "[측정] B2 붙은 검색 표식과 흩어진 표식의 op 수요" {
+    const a = testing.allocator;
+    const lines = [_][]const u8{"x" ** 120} ** 80;
+    var dense: [120]Mark = undefined;
+    var spaced: [60]Mark = undefined;
+    var groups: [96]Mark = undefined;
+    for (&dense, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    for (&spaced, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
+    for (&groups, 0..) |*m, i| m.* = .{ .start = @intCast((i / 4) * 5 + i % 4), .len = 1 };
+    const variants = [_]struct { name: []const u8, marks: []const Mark, ideal_runs: usize }{
+        .{ .name = "adjacent", .marks = &dense, .ideal_runs = 80 },
+        .{ .name = "spaced", .marks = &spaced, .ideal_runs = 4800 },
+        .{ .name = "groups-of-four", .marks = &groups, .ideal_runs = 1920 },
+    };
+    const ops = try a.alloc(draw.Op, 16000);
+    defer a.free(ops);
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const text_bytes = try a.alloc(u8, 200000);
+    defer a.free(text_bytes);
+    var bufs: WideBuffers = .{ .ops = ops };
+    var props = testProps(&lines, false);
+    props.visible_rows = 80;
+    props.total_cols = 160;
+    props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    var per_line: [80][]const Mark = undefined;
+    props.search_marks = &per_line;
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    const content_x = props.rect.x + @as(i32, @intCast(@as(u32, layout.contentLeft()) * props.cell_w_px));
+    for (variants) |variant| {
+        for (&per_line) |*slot| slot.* = variant.marks;
+        const written = build(props, bufs.scratch(runs, text_bytes));
+        try testing.expect(!written.truncated);
+        var search_ops: usize = 0;
+        var covered = [_]bool{false} ** (80 * 120);
+        for (ops[0..written.ops]) |op| {
+            if (op != .quad or op.quad.fill_role != .search_match) continue;
+            search_ops += 1;
+            const r = op.quad.rect;
+            try testing.expectEqual(@as(u32, 16), r.h);
+            try testing.expect(r.y >= props.rect.y and @mod(r.y - props.rect.y, 16) == 0);
+            try testing.expect(r.x >= content_x and @mod(r.x - content_x, 8) == 0);
+            try testing.expect(r.w > 0 and r.w % 8 == 0);
+            const row: usize = @intCast(@divTrunc(r.y - props.rect.y, 16));
+            const first: usize = @intCast(@divTrunc(r.x - content_x, 8));
+            const width: usize = r.w / 8;
+            try testing.expect(row < 80 and first + width <= 120);
+            for (first..first + width) |col| {
+                try testing.expect(!covered[row * 120 + col]);
+                covered[row * 120 + col] = true;
+            }
+        }
+        for (0..80) |row| for (0..120) |col| {
+            var expected = false;
+            for (variant.marks) |mark| {
+                if (col >= mark.start and col < mark.start + mark.len) expected = true;
+            }
+            try testing.expectEqual(expected, covered[row * 120 + col]);
+        };
+        try testing.expectEqual(variant.ideal_runs, search_ops);
+        std.debug.print("[B2 stress search] {s} all={d} search={d} adjacent_merge_floor={d}\n", .{
+            variant.name, written.ops, search_ops, variant.ideal_runs,
+        });
+        if (comptime @import("builtin").os.tag == .macos) {
+            const samples: u64 = 40;
+            const t0 = b2MonotonicNs();
+            for (0..samples) |_| {
+                const sample = build(props, bufs.scratch(runs, text_bytes));
+                std.mem.doNotOptimizeAway(ops[0..sample.ops]);
+            }
+            const t1 = b2MonotonicNs();
+            std.debug.print("[B2 stress search time] {s} avg_us={d}\n", .{ variant.name, (t1 - t0) / samples / 1000 });
+        }
+    }
 }
 
 test "B2 재그리기 반례 — 첫 절단 호출이 RowCache 계수를 전진시킨다" {
@@ -3275,8 +3365,8 @@ test "B2 전체 프레임 재시도 — 저장소 성장과 RowCache 복원이 �
     const a = testing.allocator;
     const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 1);
     const row_marks = blk: {
-        var result: [120]Mark = undefined;
-        for (&result, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+        var result: [60]Mark = undefined;
+        for (&result, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
         break :blk result;
     };
     const marks = [_][]const Mark{&row_marks} ** (count_chunk_lines + 1);
@@ -3391,8 +3481,8 @@ test "B2 재시도 — 이미 일부 채운 RowCache의 다음 계수 구간도 
 test "B2 전체 프레임 상한과 할당 실패는 절단을 보고하며 부분 출력을 남긴다" {
     const a = testing.allocator;
     const marks = blk: {
-        var result: [120]Mark = undefined;
-        for (&result, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+        var result: [60]Mark = undefined;
+        for (&result, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
         break :blk result;
     };
     const lines = [_][]const u8{"x" ** 120} ** 80;
@@ -3438,8 +3528,8 @@ test "B2 전체 프레임 상한과 할당 실패는 절단을 보고하며 부�
 
 test "B2 상한의 우선순위 반례 — 밀집 검색이 caret 저장소를 굶긴다" {
     const a = testing.allocator;
-    var row_marks: [120]Mark = undefined;
-    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    var row_marks: [60]Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
     const lines = [_][]const u8{"x" ** 120} ** 80;
     const marks = [_][]const Mark{&row_marks} ** 80;
     const caret_rows = [_][]const u32{&.{1}} ** 80;
@@ -3495,8 +3585,8 @@ test "B2 재시도 신호의 반례 — run 부족도 op 저장소만 반복해�
 test "[측정] B2 전체 프레임 재사용 op 저장소와 성장 재시도의 비용" {
     if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
     const a = testing.allocator;
-    var row_marks: [120]Mark = undefined;
-    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    var row_marks: [60]Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
     const lines = [_][]const u8{"x" ** 120} ** 80;
     const marks = [_][]const Mark{&row_marks} ** 80;
     var props = testProps(&lines, false);
@@ -3655,13 +3745,13 @@ test "B2 가변 writer의 할당 실패는 부분 결과와 실패 신호를 남
     var sink: GrowMarkSink = .{ .allocator = failing.allocator() };
     defer sink.list.deinit(sink.allocator);
     try sink.list.ensureTotalCapacityPrecise(sink.allocator, 1);
-    const props = testProps(&.{"xx"}, false);
+    const props = testProps(&.{"x x"}, false);
     var columns: [32]u8 = undefined;
     paintRowMarksInto(props, layoutOf(props), .{
-        .line = "xx",
+        .line = "x x",
         .row_start_col = 0,
         .y = 0,
-        .marks = &.{ .{ .start = 0, .len = 1 }, .{ .start = 1, .len = 1 } },
+        .marks = &.{ .{ .start = 0, .len = 1 }, .{ .start = 2, .len = 1 } },
         .role = .search_match,
         .alpha = search_alpha,
     }, &columns, &sink);
@@ -3696,7 +3786,7 @@ test "[측정] B2 검색 표식의 실제 고정·가변 writer가 같은 op을 
         paintRowMarksInto(props, layout, p, &columns, &grow);
     }
     try testing.expect(!truncated and !grow.oom);
-    try testing.expectEqual(@as(usize, 120 * 80), fixed.n);
+    try testing.expectEqual(@as(usize, 80), fixed.n);
     try testing.expect(sameOpContent(fixed_ops[0..fixed.n], grow.list.items));
 
     const samples: u64 = 40;
@@ -3763,8 +3853,8 @@ test "[측정] B2 밀집 화면의 한 번 그리기·절단 뒤 재그리기·�
     const a = testing.allocator;
     var lines: [100][]const u8 = undefined;
     var marks: [100][]const Mark = undefined;
-    var row_marks: [120]Mark = undefined;
-    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    var row_marks: [60]Mark = undefined;
+    for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
     for (&lines, &marks) |*line, *line_marks| {
         line.* = "x" ** 120;
         line_marks.* = &row_marks;

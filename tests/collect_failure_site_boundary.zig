@@ -337,7 +337,9 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
     const gates = [_]struct { header: []const u8, call: []const u8 }{
         .{ .header = "fn collectFail(", .call = "collect_failure.fail(site);\n        return error.OutOfMemory;" },
         .{ .header = "fn collectFailErr(", .call = "collect_failure.failErr(site, @errorName(err));\n        return error.OutOfMemory;" },
-        .{ .header = "fn collectFailFrontier(", .call = "collect_failure.failFrontier(site, mismatch);\n        return error.OutOfMemory;" },
+        // frontier 어긋남은 연결이 아니라 스트림의 실패다 — `OutOfMemory` 가 아니라 제 이름으로 돌아가야 tick 이 그
+        // 스트림만 무효화한다(2026-09-29). `OutOfMemory` 로 되돌리면 한 탭의 어긋남이 다시 창 전체를 끊는다.
+        .{ .header = "fn collectFailFrontier(", .call = "collect_failure.failFrontier(site, mismatch);\n        return error.StreamFrontierDiverged;" },
     };
     for (gates) |g| {
         const helper_all = try section(server, g.header, "\n    }\n");
@@ -418,18 +420,31 @@ test "frontier 가 어긋나 접히면 기대값과 실제값을 함께 남긴�
         }
     }
 
-    // ④ **tick 이 그것을 닫기 바로 앞에서 무조건 부른다.** 「호출이 있다」만 재면
-    //    `while (false) noteCollectFailure();` 가 통과한다(2회차 T04). 두 문장을 짝으로 잰다.
+    // ④ **tick 이 갈래마다 먼저 무조건 기록하고, 그다음 제 처리를 한다.** 「호출이 있다」만 재면
+    //    `while (false) noteCollectFailure();` 가 통과한다(2회차 T04). 그래서 갈래마다 기록과 처리를 한 덩어리로 잰다.
+    //    갈래는 둘이다(2026-09-29): 할당 실패·ops 오류(`OutOfMemory`)는 닫고, 스트림 하나의 frontier 어긋남
+    //    (`StreamFrontierDiverged`)은 그 스트림만 무효화해 연결을 살린다 — resync 스냅샷까지 어긋나면(트래커가
+    //    이미 `.invalidated`) 그때만 닫는다. 조건을 뒤집으면 정상 스트림이 닫히고, 무효화를 빼면 스트림이 멎는다.
     {
-        try std.testing.expectEqual(@as(usize, 1), countAll(turn, "noteCollectFailure();"));
-        const call_at = std.mem.indexOf(u8, turn, "noteCollectFailure();").?;
-        const line_start = (std.mem.lastIndexOfScalar(u8, turn[0..call_at], '\n') orelse 0) + 1;
-        if (std.mem.trim(u8, turn[line_start..call_at], " \t").len != 0) {
-            std.debug.print("noteCollectFailure 호출 앞에 조건이 붙었다\n", .{});
-            return error.NoteCallGuarded;
+        try std.testing.expectEqual(@as(usize, 2), countAll(turn, "noteCollectFailure();"));
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, turn, at, "noteCollectFailure();")) |call_at| : (at = call_at + 1) {
+            const line_start = (std.mem.lastIndexOfScalar(u8, turn[0..call_at], '\n') orelse 0) + 1;
+            if (std.mem.trim(u8, turn[line_start..call_at], " \t").len != 0) {
+                std.debug.print("noteCollectFailure 호출 앞에 조건이 붙었다\n", .{});
+                return error.NoteCallGuarded;
+            }
         }
-        const after = std.mem.trimStart(u8, turn[call_at + "noteCollectFailure();".len ..], " \t\n");
-        try std.testing.expect(std.mem.startsWith(u8, after, "self.beginCloseAt(\"tick_collect_oom\", .resource_exhausted);"));
+        const turn_n = try normalizeWs(a, turn);
+        defer a.free(turn_n);
+        const oom_arm = "error.OutOfMemory => { noteCollectFailure(); self.beginCloseAt(\"tick_collect_oom\", .resource_exhausted); return; },";
+        const frontier_arm = "error.StreamFrontierDiverged => { noteCollectFailure(); if (tracker_state == .valid) { noteStreamFrontierResync(stream); self.invalidateSubscriptionOutput(\"invalidate_frontier_mismatch\", stream, tracker); return; } self.beginCloseAt(\"tick_frontier_resync_failed\", .resource_exhausted); return; },";
+        for ([_][]const u8{ oom_arm, frontier_arm }) |arm| {
+            if (countAll(turn_n, arm) != 1) {
+                std.debug.print("collect 실패 갈래의 모양이 달라졌다: {s}\n", .{arm});
+                return error.CollectArmChanged;
+            }
+        }
     }
 
     // ⑤ **host_log.line 이 순수 포맷을 그대로 쓴다.** 렌더의 상한은 `host_log.formatLine` 으로 재는데,

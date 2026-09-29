@@ -8082,16 +8082,27 @@ generation 이 바뀌었거나) 로그에는 **어느 쪽인지, 어느 런타�
 대신 그 줄이 나오면 예전이라면 연결이 끊겼을 순간을 수정이 막은 것이다. 계약과 판정자는 「리사이즈 뒤에는
 snapshot 이 먼저다」 1번 항목이 소유한다.
 
-**한계.** 이것은 **진단**이지 수정이 아니다. 런타임 하나의 어긋남이 여전히 연결 전체를 닫는다 —
-탭 16 개가 한꺼번에 끊기는 피해 범위는 그대로다. 그 스트림만 무효화하는 방향은 재발 숫자로 원인을 확인한
-뒤에 정한다.
+**피해 범위 — 스트림 하나로 가둔다(2026-09-29).** 진단만 넣었을 때는 런타임 하나의 어긋남이 여전히 **연결
+전체**를 닫았다 — 그 창의 탭 16 개가 한꺼번에 끊긴 이유다. frontier 대조 세 자리는 이제 `OutOfMemory` 가 아니라
+`StreamFrontierDiverged` 로 접히고(`Connection.CollectError`), `Client.tick` 은 그 갈래를 이렇게 다룬다:
+
+| 트래커 상태 | 동작 | 로그 |
+| --- | --- | --- |
+| `.valid`(평상시 delta) | **그 스트림만 무효화**(`invalidateSubscriptionOutput("invalidate_frontier_mismatch")`) — 연결 유지. 클라이언트가 `snapshot.invalidated` 를 받고 `runtime.resync` 로 새 스냅샷을 받는다 | `collect failed …` + `stream resync after frontier mismatch: stream=N` |
+| `.invalidated`(resync 스냅샷 시도 중) | 닫는다(`tick_frontier_resync_failed`) — 스냅샷으로도 못 맞추는 스트림을 다시 무효화하면 같은 자리를 돈다 | `collect failed …` + 닫힘 줄 |
+
+이 복구 경로는 새로 만든 것이 아니다 — 투영 예산 부족(`invalidate_projection_budget`)과 prepared attach 가 이미
+타는 「스트림 무효화 → 클라이언트 resync」 경로다. `collectOutput` 은 `errdefer output.rollback` 으로 그 호출의
+준비물을 되돌리므로 commit 된 frontier 는 실패 전 그대로다. 진짜 할당 실패·ops 오류(`OutOfMemory`)는 base 를 어디까지
+믿을지 몰라 여전히 연결을 닫는다(`tick_collect_oom`).
 
 **판정자.** 값(방향·상한·기록 교체)은 `collect_failure.zig` 의 순수 테스트, 배선(어느 자리가 무엇을
 넘기는가·로그가 렌더를 그대로 내는가)은 `collect_failure_site_boundary` 의 「frontier 가 어긋나 접히면
 기대값과 실제값을 함께 남긴다」다 — 둘 다 `check-boundaries` 에서 돈다. 여기에 **진단 배선의 E2E**
 (in-process)가 더해진다: `server.zig` 의 「collect 실패 기록」 셋과 `connection_turn.zig` 의 「tick 이
 tick_collect_oom 으로 닫을 때」. 이것들은 실제 collect·tick 을 돌리지만 producer 는 가짜(`FakeRuntimeOps`)
-라 원인을 재현하지 않고, session-host 잡이라 main 에서만 돈다.
+라 원인을 재현하지 않고, session-host 잡이라 main 에서만 돈다. 스트림 격리는 `connection_turn.zig` 의 「tick 은 frontier 가 어긋난 스트림만 무효화하고 연결을 살려 resync 로
+복구한다」·「tick 은 resync 스냅샷까지 frontier 가 어긋나면 무한 재시도 대신 닫는다」가 잰다(in-process, main 잡).
 
 ### P0 — 문서 결정
 

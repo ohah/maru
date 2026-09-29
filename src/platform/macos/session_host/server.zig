@@ -2907,7 +2907,7 @@ pub const Connection = struct {
         }
         for (streams) |stream| {
             var output = self.collectOutputForLocalStream(stream) catch |err| switch (err) {
-                error.ProjectionBudgetUnavailable => return error.OutOfMemory,
+                error.ProjectionBudgetUnavailable, error.StreamFrontierDiverged => return error.OutOfMemory,
                 else => |other| return other,
             } orelse continue;
             const frames = output.takeFrames();
@@ -2927,13 +2927,19 @@ pub const Connection = struct {
         return all.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
     }
 
+    /// `collectOutput` 의 오류. `StreamFrontierDiverged` 는 **이 스트림 하나**의 frontier 대조가 어긋났다는 뜻이다 —
+    /// 전송도 연결도 멀쩡하므로, 호출자(`Client.tick`)는 연결을 닫지 않고 그 스트림만 무효화해 resync 스냅샷으로
+    /// 다시 맞춘다. 예전에는 이 실패도 `OutOfMemory` 로 접혀 연결 전체(그 창의 탭 전부)가 닫혔다(2026-09-28, 런타임
+    /// 16 개). 진짜 할당 실패·ops 오류는 여전히 `OutOfMemory` 다 — 그쪽은 base 가 어디까지 믿을 만한지 모른다.
+    pub const CollectError = HandleError || error{ ProjectionBudgetUnavailable, StreamFrontierDiverged };
+
     /// Readiness adapters call this with one local stream so a noisy subscription cannot make one
     /// turn materialize every attachment's metadata and screen output outside the charged queue.
     /// The returned state does not mutate base/revision until queue admission calls `commit`.
     pub fn collectOutputForLocalStream(
         self: *Connection,
         stream: subscription_identity.LocalStreamId,
-    ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
+    ) CollectError!?CollectedOutput {
         return self.collectOutputForLocalStreamAt(stream, 0);
     }
 
@@ -2941,7 +2947,7 @@ pub const Connection = struct {
         self: *Connection,
         stream: subscription_identity.LocalStreamId,
         now_ns: u64,
-    ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
+    ) CollectError!?CollectedOutput {
         return self.collectOutputForLocalStreamAtEpoch(stream, now_ns, now_ns);
     }
 
@@ -2973,9 +2979,12 @@ pub const Connection = struct {
     /// 2026-09-28 실측: 런타임 16 개를 든 host 가 `site=delta_seq_mismatch` 로 GUI 연결을 통째로
     /// 닫았다. 자리 이름은 있었지만 **숫자가 없어** 원인을 못 갈랐다 — 어느 런타임에서 sequence 와
     /// generation 중 무엇이 얼마나 어긋났는지 로그에 하나도 없었다.
-    fn collectFailFrontier(site: []const u8, mismatch: collect_failure.FrontierMismatch) error{OutOfMemory} {
+    ///
+    /// **연결이 아니라 스트림의 실패다.** 그래서 `OutOfMemory` 가 아니라 `StreamFrontierDiverged` 로 돌려준다 —
+    /// `errdefer output.rollback` 이 이 호출의 준비물을 되돌리므로 연결 상태는 호출 전 그대로다.
+    fn collectFailFrontier(site: []const u8, mismatch: collect_failure.FrontierMismatch) error{StreamFrontierDiverged} {
         collect_failure.failFrontier(site, mismatch);
-        return error.OutOfMemory;
+        return error.StreamFrontierDiverged;
     }
 
     pub fn collectOutputForLocalStreamAtEpoch(
@@ -2983,7 +2992,7 @@ pub const Connection = struct {
         stream: subscription_identity.LocalStreamId,
         now_ns: u64,
         observation_epoch_ns: u64,
-    ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
+    ) CollectError!?CollectedOutput {
         // **이름을 먼저 지운다.** 헬퍼를 안 거치고 `try` 로 새는 경로가 있으면, 지우지 않으면
         // «직전 실패의 이름» 이 그대로 찍혀 로그가 거짓말을 한다 — 거짓 이름은 없는 것보다 나쁘다
         // (적대적 검증 2026-09-13: `appendChunks` 가 정확히 그 경로였다).
@@ -6305,12 +6314,14 @@ test "CR4a frontier는 output admission commit 뒤에만 subscription sequence�
     try testing.expectEqualDeep(pending_before_barrier, conn.attachments.get(1).?.catchup);
     try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
 
+    // frontier 대조가 어긋나면 **이 스트림 하나**의 실패다(`StreamFrontierDiverged` — 연결을 닫지 않고 그 스트림만
+    // 무효화한다). 어느 쪽이든 준비물은 되돌려져 commit 된 frontier·catchup 은 그대로여야 한다.
     fake.frontier_generation = 1;
-    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStreamAt(1, 12));
+    try testing.expectError(error.StreamFrontierDiverged, conn.collectOutputForLocalStreamAt(1, 12));
     try testing.expectEqualDeep(pending_before_barrier, conn.attachments.get(1).?.catchup);
     try testing.expectEqual(@as(u64, 0), conn.attachments.get(1).?.screen_generation);
     fake.delta_send_len = null;
-    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStreamAt(1, 12));
+    try testing.expectError(error.StreamFrontierDiverged, conn.collectOutputForLocalStreamAt(1, 12));
     try testing.expectEqualDeep(pending_before_barrier, conn.attachments.get(1).?.catchup);
     try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
     fake.frontier_generation = 0;
@@ -6335,7 +6346,7 @@ test "CR4a frontier는 output admission commit 뒤에만 subscription sequence�
             break;
         } else |err| switch (err) {
             error.OutOfMemory => saw_barrier_oom = true,
-            error.ProjectionBudgetUnavailable => return error.TestUnexpectedResult,
+            error.ProjectionBudgetUnavailable, error.StreamFrontierDiverged => return error.TestUnexpectedResult,
         }
         try testing.expectEqualDeep(pending_before_barrier, conn.attachments.get(1).?.catchup);
         try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.screen_sequence);
@@ -8664,7 +8675,7 @@ test "collect 실패 기록: gen 만 다른 delta 는 양쪽 값을 싣고, 스�
     // 현재 producer 에서 가능한 유일한 모양: seq 같음, gen 다름, is_snapshot=false.
     fake.frontier_generation = 5;
     fake.screen_change_token.revision += 1;
-    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStream(1));
+    try testing.expectError(error.StreamFrontierDiverged, conn.collectOutputForLocalStream(1));
     const rec = collect_failure.last();
     try testing.expectEqualStrings("delta_seq_mismatch", rec.site);
     try testing.expectEqualStrings("-", rec.err);
@@ -8714,7 +8725,7 @@ test "collect 실패 기록: 빈 delta 에 gen 이 바뀌면 delta_frontier_mism
     fake.delta_send_len = 0;
     fake.frontier_generation = 3;
     fake.screen_change_token.revision += 1;
-    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStream(1));
+    try testing.expectError(error.StreamFrontierDiverged, conn.collectOutputForLocalStream(1));
     const rec = collect_failure.last();
     var buf: [collect_failure.line_capacity]u8 = undefined;
     const line = collect_failure.render(&buf, rec);
@@ -8748,7 +8759,7 @@ test "collect 실패 기록: resync 스냅샷의 sequence 가 어긋나면 snaps
     const resync = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":1}}");
     if (resync.frame) |frame| frame.deinit(allocator);
     try testing.expect(conn.attachments.get(1).?.resync_pending);
-    try testing.expectError(error.OutOfMemory, conn.collectOutputForLocalStream(1));
+    try testing.expectError(error.StreamFrontierDiverged, conn.collectOutputForLocalStream(1));
     var buf: [collect_failure.line_capacity]u8 = undefined;
     const line = collect_failure.render(&buf, collect_failure.last());
     try testing.expectEqualStrings(

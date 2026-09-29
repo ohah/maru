@@ -99,9 +99,29 @@ const workspaceHasStatusLine = @import("workspace.zig").workspaceHasStatusLine;
 /// **폭은 항상 +1로 고정**(renameDisplayWidth와 일치)이라 깜빡여도 텍스트/세그먼트 폭이 안 흔들린다. 토글은
 /// updateCursorBlink가 rename 중 metal_dirty로 rebuild를 일으켜 보인다(터미널 커서 suffix-trim과 달리 인라인
 /// caret은 셀 스트림의 글자라 full rebuild 필요 — text-blink와 같은 경로). 호출자(allocator) 소유.
+///
+/// **caret 은 편집 위치에 그린다**(2026-09-29 — 사용자 제보: 이름 변경 중 커서가 왔다갔다 안 된다). 예전에는
+/// 편집기가 끝-caret 전용(`OverlayInput`)이라 `query ++ preedit ++ "|"` 로 늘 끝에 붙였다. 이제 `TextField` 의
+/// caret 에서 글을 둘로 나눠 그 사이에 조합 글자와 caret 을 끼운다 — 조합은 caret 자리에서 일어나므로 같은 자리다.
 pub fn renameEditText(self: *AppSession, allocator: std.mem.Allocator) ![]const u8 {
-    const caret: []const u8 = if (self.blink_visible) "|" else " ";
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ self.rename_input.query.items, self.rename_input.preedit.items, caret });
+    return chrome.components.inline_edit.composeLine(allocator, &self.rename_input, if (self.blink_visible) "|" else " ");
+}
+
+/// `renameEditText` 를 폭 `avail_cols` 칸 줄에 그릴 때 **caret 이 보이게** 한다. 사이드바는 편집 줄을 tail
+/// 앵커로 그린다(긴 이름은 앞을 자르고 끝을 보인다 — `cell_text` 의 `editing_row`). caret 이 끝에 있으면 그걸로
+/// 맞지만, caret 을 앞으로 옮기면 잘린 앞부분에 숨는다. 그때는 caret 뒤 글을 창의 절반까지만 남겨 tail 창이
+/// caret 을 담게 한다 — 가로 스크롤과 같은 효과다. 안 넘치면 `renameEditText` 그대로다.
+pub fn renameEditTextFit(self: *AppSession, allocator: std.mem.Allocator, avail_cols: usize) ![]const u8 {
+    return chrome.components.inline_edit.composeLineFit(allocator, &self.rename_input, if (self.blink_visible) "|" else " ", avail_cols);
+}
+
+/// 사이드바 rename 줄(카드 이름줄·그룹 헤더)을 자를 폭 — 그리는 쪽(`sidebar.zig`)과 IME 열(`renameCaretRect`)이
+/// **같은 값**을 써야 후보창이 그려진 caret 아래에 온다. `lead_cols` 는 편집 글 앞 같은 줄의 접두(그룹 헤더의
+/// 들여쓰기·삼각·공백) 폭이다. 여백은 우측 여백·말줄임표 몫이고 **작게 잡는 쪽이 안전하다** — 넓게 잡으면 넘치는
+/// 줄을 안 넘친다고 보고 caret 이 잘린 앞부분에 숨는다.
+pub fn sidebarRenameFitCols(sidebar_cols: usize, lead_cols: usize) usize {
+    const margin_cols: usize = 6;
+    return sidebar_cols -| (lead_cols + margin_cols);
 }
 
 /// rename 편집 텍스트(query)의 표시 칸 수 — **방출자와 같은 단위**여야 한다.
@@ -115,33 +135,38 @@ pub fn renameEditText(self: *AppSession, allocator: std.mem.Allocator) ![]const 
 /// `overlay_input.displayCols`는 폐기 대상이 아니다 — find·palette·context menu·모달은 `placeText`(오버레이
 /// raster)가 **코드포인트 단위로** 그리므로 그쪽 폭 모델과 짝이 맞다. 두 폭 함수는 각자의 방출자를 따라간다.
 pub fn renameQueryCols(self: *const AppSession) u32 {
-    return @intCast(chrome.text_layout.displayCols(self.rename_input.query.items, null));
+    return @intCast(chrome.text_layout.displayCols(self.rename_input.text.items, null));
+}
+
+/// caret **앞** 글의 표시 칸 수 — caret 과 IME 후보창의 열. 편집 폭(세그먼트 크기)은 여전히 글 전체
+/// (`renameQueryCols`)가 정한다. 둘을 섞으면 caret 을 앞으로 옮길 때 탭 라벨이 줄어든다.
+pub fn renameCaretCols(self: *const AppSession) u32 {
+    return @intCast(chrome.components.inline_edit.caretCols(&self.rename_input));
 }
 
 /// rename 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect)에 쓴다. 대상별 편집기
-/// 텍스트 origin + caret 컬럼(prefix + query 폭)을 잡는다. preedit는 안 더한다(조합 글자는 query 끝 caret에 겹쳐
-/// 그려짐 — 단일 줄 append라 뒤 텍스트 없음, find.caretRect와 동일). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
+/// 텍스트 origin + caret 컬럼(prefix + **caret 앞** 글 폭, `renameCaretCols`)을 잡는다. preedit는 안 더한다(조합
+/// 글자는 caret 자리에서 시작해 그려지므로 후보창은 조합 시작점에 둔다 — find.caretRect와 같은 기준). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
 /// 구하면 null(터미널 커서로 폴백). 렌더 geometry(paneBar·barMetrics·segOf, 사이드바 indent/slot)와 같은 셈법.
 pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
     const target = self.rename orelse return null;
     const cw = self.cell_width_px;
     const ch = self.cell_height_px;
     if (cw == 0 or ch == 0) return null;
-    const qcols: u32 = renameQueryCols(self); // 방출자(appendEllipsizedTitle)와 같은 cluster 단위
+    const qcols: u32 = renameCaretCols(self); // caret 앞 폭 — 방출자(appendEllipsizedTitle)와 같은 cluster 단위
     switch (target) {
         .workspace => |tab| {
             const idx = for (self.tabs.items, 0..) |t, i| {
                 if (t == tab) break i;
             } else return null;
             // 사이드바 이름줄(line 0) 좌단 indent(buildSidebarTitleFrame와 같은 ceil(card_gap+accent_bar)/cw).
-            // 번호 prefix는 제거됐으므로(이름줄에 번호 없음) caret = indent + query 폭.
-            const sp = self.buildChromeTokens().space;
-            const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
-            // 이름줄이 사이드바 폭을 넘치면 렌더(buildSidebarDrawList editing_row)가 tail 앵커로 caret을 이름영역 **우경계**에
-            // 두므로, caret_col도 거기로 clamp해야 IME 후보창이 잘린 caret 아래(사이드바 안)에 온다 — 안 그러면 head-anchored
-            // 열이 사이드바 밖 터미널 위로 떠 조합창이 caret과 분리된다(.pane/.term의 세그먼트 우경계 clamp와 같은 규율).
-            const full_cols: u32 = self.sidebar_width_px / cw;
-            const caret_col = @min(indent_cols + qcols, full_cols -| 2);
+            // 번호 prefix는 제거됐으므로(이름줄에 번호 없음) caret = indent + caret 앞 글 폭.
+            // 이름줄은 tail 앵커로 [0, cols-1) 칸에 `renameEditTextFit` 결과를 그린다 — 넘치면 앞이 "…"로 잘리고
+            // caret 을 앞으로 옮겼으면 뒤도 잘린다. 따로 셈하면 그 두 경우에 후보창이 수 칸씩 어긋났다(적대적 검증
+            // 2026-09-29) — 렌더와 **같은 계획**(`inline_edit.drawnCaretCol`)으로 caret 열을 잰다.
+            const cl = sidebar_ops.sidebarColumns(self) orelse return null;
+            const edit_col = chrome.components.inline_edit.drawnCaretCol(self.allocator, "", &self.rename_input, "|", sidebarRenameFitCols(cl.cols, 0), cl.cols -| 1) catch return null;
+            const caret_col: u32 = @as(u32, cl.indent_cols) + edit_col;
             // 리네임 카드 줄 수: 이름줄(항상) + 상태줄(running·idle 에이전트면). 리네임 중 branch/path 보조줄은
             // buildSidebarTitleDrawList가 항상 숨겨 줄 수에 안 든다. 렌더러(maru_metal_renderer.m)가 n줄 블록을 슬롯
             // 세로 중앙 정렬하므로, 상태줄이 생기면 이름줄이 위로 (ch/2) 올라간다 — caret y도 같은 n을 써야 IME
@@ -190,7 +215,9 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
             const pb = pane_ops.paneBarForLeaf(self, pane) orelse return null;
             // buildPaneLabelDrawList: 이름이 col 1부터(좌패딩 1). 긴 이름은 말줄임되므로 caret을 라벨 세그먼트
             // 우경계(label_cols-1, 마지막 칸은 탭과의 간격)로 clamp해 후보창이 라벨 밖(탭 위)으로 새지 않게.
-            const caret_col = @min(1 + qcols, if (pb.label_cols > 1) pb.label_cols - 1 else 1);
+            // 라벨 글은 [1, label_cols-1) 칸에 tail 앵커로 그려진다(buildPaneLabelDrawList) — 렌더와 같은 계획으로 잰다.
+            const label_window: u16 = @intCast(@min(pb.label_cols -| 2, std.math.maxInt(u16)));
+            const caret_col: u32 = 1 + (chrome.components.inline_edit.drawnCaretCol(self.allocator, "", &self.rename_input, "|", label_window, label_window) catch return null);
             const text_offset_y = self.chromeBarTextOffsetY(pb.full.h); // 렌더 text_origin_y와 같은 식
             return .{
                 .x = @intCast(pb.full.x + (pb.grip_cols + caret_col) * cw), // 이름은 grip 핸들 뒤에서 시작
@@ -206,7 +233,9 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
             // 탭 텍스트: 세그먼트 start_col + 1(좌패딩) 뒤(번호 prefix 제거 — U-tab2). **그 탭 세그먼트 우경계(seg.end_col)**로
             // clamp해 caret/후보창이 인접 탭 위로 새지 않게 한다(end_col<=start_col인 overflow 탭이면 m.cols 폴백).
             const seg_end = if (seg.end_col > seg.start_col) seg.end_col else m.cols;
-            const caret_col = @min(seg.start_col + 1 + qcols, seg_end);
+            // 탭 글은 tail 앵커로 그려진다 — 넘치면 앞이 잘리므로 렌더와 같은 계획으로 잰다(Term 탭은 fit 안 함).
+            const tab_window: u16 = @intCast(@min(seg_end -| (seg.start_col + 1), std.math.maxInt(u16)));
+            const caret_col: u32 = seg.start_col + 1 + (chrome.components.inline_edit.drawnCaretCol(self.allocator, "", &self.rename_input, "|", 0, tab_window) catch return null);
             const text_offset_y = self.chromeBarTextOffsetY(loc.pb.tabs.h); // 렌더 text_origin_y와 같은 식
             return .{
                 .x = @intCast(loc.pb.tabs.x + caret_col * cw),
@@ -239,17 +268,19 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
             // accent_bar)/cw))만큼 우측으로 민다(13936). .workspace caret(2053)이 그 항을 더하듯 헤더 caret도 더해야
             // 삼각/이름과 정렬된다 — 옛 코드는 이 항이 없어 캐럿·IME 후보창이 indent_cols만큼 왼쪽으로 어긋났다(code-review #5).
             const sp = self.buildChromeTokens().space;
-            const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
             // 중첩 헤더(SG5-3)는 (depth-1)*group_indent 만큼 더 들여써 있으므로 caret도 그만큼 우측으로. 최상위(depth 1)=0이라
             // 비중첩 caret은 그대로. group_indent_cols = ceil(group_indent_px / cw)(buildSidebarTitleDrawList와 단일 출처).
             const gindent_px = sp.group_indent_px;
             const gindent_cols: u32 = if (gindent_px > 0) (@as(u32, gindent_px) + cw - 1) / cw else 0;
             const hindent_cols: u32 = (if (hdr_depth > 0) hdr_depth - 1 else 0) * gindent_cols;
-            // head 위치 = 사이드바 indent + 중첩 들여쓰기 + 삼각 + 공백 + 편집 폭. 헤더 이름이 사이드바 폭을 넘치면
-            // 렌더가 tail 앵커(editing_row)로 caret을 이름영역 우경계에 두므로, 여기도 full_cols-2로 clamp해 IME 후보창이
-            // 사이드바 밖 터미널 위로 안 뜨게 한다(.workspace와 같은 규율 + main #5의 indent_cols 항 보존).
-            const full_cols: u32 = self.sidebar_width_px / cw;
-            const caret_col: u32 = @min(indent_cols + hindent_cols + 2 + qcols, full_cols -| 2);
+            // 헤더 줄 전체("{들여쓰기}{삼각} {편집}")가 tail 앵커로 그려진다 — 접두까지 같은 줄로 넣어 렌더와 같은
+            // 계획(`inline_edit.drawnCaretCol`)으로 caret 열을 잰다. 접두는 폭만 같으면 된다(삼각은 1칸).
+            const cl = sidebar_ops.sidebarColumns(self) orelse return null;
+            var lead_buf: [256]u8 = undefined;
+            const lead_cols: usize = @min(@as(usize, hindent_cols) + 2, lead_buf.len);
+            @memset(lead_buf[0..lead_cols], ' ');
+            const header_col = chrome.components.inline_edit.drawnCaretCol(self.allocator, lead_buf[0..lead_cols], &self.rename_input, "|", sidebarRenameFitCols(cl.cols, lead_cols), cl.cols -| 1) catch return null;
+            const caret_col: u32 = @as(u32, cl.indent_cols) + header_col;
             const slot_top = chrome.components.sidebar.rowTop(rrows, sr, self.sidebar_header_height_px, sidebar_ops.sidebarMetrics(self), self.sidebar_scroll_offset_px);
             const block_off: i64 = @intCast((self.sidebar_header_row_h_px -| ch) / 2); // 헤더 1줄 세로 중앙
             const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
@@ -273,13 +304,19 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
                 .h = @intCast(ch),
             };
         },
-        // 심볼 상자(§8.2f)와 **이름 없는 문서의 저장 상자**(U2) — 상자 rect 의 좌패딩 1칸 + query 폭이
-        // caret(`input_box` 의 끝 caret 규약). 같은 컴포넌트라 caret 규약도 같다.
+        // 심볼 상자(§8.2f)와 **이름 없는 문서의 저장 상자**(U2) — 상자 rect 의 좌패딩 1칸 + 상자 안 caret 칸.
+        // 상자가 그리는 것과 같은 함수(`rename_box.shownCaretCols`)로 잰다 — 앞이 잘린 긴 이름에서도 같은 칸이다.
+        // 조합 시작점이 기준이라 조합 폭은 안 더한다(caret 앞 글 폭만).
         .symbol, .untitled_save => {
             const st = &self.chrome_host.rename_box;
             if (!st.open) return null;
-            const rect = chrome.components.rename_box.boxRect(st, self.rename_input.query.items, self.buildChromeProps()) orelse return null;
-            return .{ .x = rect.x + @as(i32, @intCast(cw)) + @as(i32, @intCast(qcols * cw)), .y = rect.y, .w = @intCast(cw), .h = @intCast(ch) };
+            const box_text = editor_ops.rename_client.boxText(self, self.allocator) catch return null;
+            defer if (box_text.ptr != self.rename_input.text.items.ptr) self.allocator.free(box_text);
+            const rect = chrome.components.rename_box.boxRect(st, box_text, self.buildChromeProps()) orelse return null;
+            const text = self.rename_input.text.items;
+            const before: u32 = chrome.components.overlay_input.displayCols(text[0..@min(self.rename_input.caret, text.len)]);
+            const col = chrome.components.rename_box.shownCaretCols(box_text, before);
+            return .{ .x = rect.x + @as(i32, @intCast(cw)) + @as(i32, @intCast(col * cw)), .y = rect.y, .w = @intCast(cw), .h = @intCast(ch) };
         },
     }
 }
@@ -1187,7 +1224,7 @@ pub fn startRename(self: *AppSession, target: RenameTarget) void {
         // 파일명을 지어 주면 사용자가 안 정한 이름이 저장 위치가 된다.
         .untitled_save => null,
     };
-    if (seed) |s| self.rename_input.query.appendSlice(self.allocator, s) catch {};
+    if (seed) |s| self.rename_input.setText(self.allocator, s) catch {}; // caret 은 끝 — 이어 쓰기가 기본
     self.rename = target;
     self.resetCursorBlink();
     self.metal_dirty = true;
@@ -1198,8 +1235,8 @@ pub fn startRename(self: *AppSession, target: RenameTarget) void {
 /// 하고 새 owned 문자열로 교체. 그 뒤 편집기를 닫는다.
 pub fn commitRename(self: *AppSession) void {
     const target = self.rename orelse return;
-    _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 query로
-    const text = self.rename_input.query.items;
+    _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 caret 자리에
+    const text = self.rename_input.text.items;
     if (target == .file_tree) {
         if (file_panel_ops.enqueueFileTreeEdit(self, target.file_tree, text)) closeRename(self);
         return;
@@ -1285,26 +1322,21 @@ pub fn closeRename(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
-/// rename 활성 중 키 처리(모달 가드가 호출). Enter=확정·Esc=취소·Backspace=삭제·평문 글자=추가. 모디파이어
-/// 글자·기타 키(↑↓ 등)는 무시해 편집기를 유지한다(텍스트 필드라 단축키를 뒤로 안 흘린다). IME 조합은
+/// rename 활성 중 키 처리(모달 가드가 호출). 모든 키를 소비한다(텍스트 필드라 단축키를 뒤로 안 흘린다).
+/// 키 → 편집 규칙(caret 이동·caret 기준 삽입/삭제, 선택 없음)은 `chrome.components.inline_edit.applyKey` 가
+/// 소유한다 — AppSession 없이 재기 위해서다. 여기는 결과를 대상에 잇는다: Enter=확정·Esc=취소, 글이 바뀌었거나
+/// caret 이 움직였으면 깜빡임을 켠 상태로 되돌려(caret 이 바로 보이게) 다시 그린다. IME 조합은
 /// imeSetPreedit/imeEnd가 rename_input에 직접 넣는다(find/palette와 같은 경로).
 pub fn handleRenameKey(self: *AppSession, ev: chrome.input.InputEvent) void {
     switch (ev) {
-        .key => |k| switch (k.key) {
-            .escape => closeRename(self),
-            .enter => commitRename(self),
-            .backspace => {
-                self.rename_input.backspace();
+        .key => |k| switch (chrome.components.inline_edit.applyKey(&self.rename_input, self.allocator, k)) {
+            .cancel => closeRename(self),
+            .commit => commitRename(self),
+            .edited, .moved => {
                 self.resetCursorBlink();
                 self.metal_dirty = true;
             },
-            .char => {
-                if (k.mods.command or k.mods.control or k.mods.option) return; // 단축키 조합은 편집기에 안 쌓음
-                self.rename_input.appendChar(self.allocator, k.codepoint) catch {};
-                self.resetCursorBlink();
-                self.metal_dirty = true;
-            },
-            else => {}, // up/down/other — 무시(편집기 유지)
+            .ignored => {}, // up/down/other·단축키 조합 — 무시(편집기 유지)
         },
         .pointer => {}, // rename 텍스트 편집기는 포인터를 안 받는다(CS-4-0 — 모달 위젯 포인터는 chrome_host 경로).
     }

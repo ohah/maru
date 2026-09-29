@@ -247,13 +247,14 @@ pub const ChromeHost = struct {
     pub fn collectRenameBoxDraws(
         self: *ChromeHost,
         text: []const u8,
+        caret_cols: u32,
         p: props.ChromeProps,
         tk: *const tokens.Tokens,
         arena: std.mem.Allocator,
         out: *std.ArrayList(draw.ChromeDraw),
     ) !void {
         var ops: std.ArrayList(draw.Op) = .empty;
-        try rename_box.view(&self.rename_box, text, p, tk, arena, &ops);
+        try rename_box.view(&self.rename_box, text, caret_cols, p, tk, arena, &ops);
         if (ops.items.len > 0) try out.append(arena, .{ .layer = rename_box.layer, .ops = ops.items });
     }
 

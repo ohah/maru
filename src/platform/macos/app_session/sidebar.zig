@@ -2221,7 +2221,9 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 const header_text = if (gtab != null and self.renamingGroup(gtab.?)) blk: {
                     // 이 그룹 이름 rename 중 → 삼각 뒤에 편집 텍스트(+caret). 접힘 배지는 편집 집중 위해 숨긴다.
                     editing_row = row_i; // 이 헤더 이름줄을 tail 앵커로(긴 이름 caret 유지)
-                    const edit = try settings_ops.renameEditText(self, self.allocator);
+                    // 넘치면 caret 이 보이게 자른다 — 폭은 헤더 접두(들여쓰기·삼각·공백)와 우측 여백을 뺀 보수적 추정.
+                    const avail = settings_ops.sidebarRenameFitCols(sidebar_cols, hindent_n + 2);
+                    const edit = try settings_ops.renameEditTextFit(self, self.allocator, avail);
                     defer self.allocator.free(edit);
                     break :blk try std.fmt.allocPrint(self.allocator, "{s}{s} {s}", .{ hindent, tri, edit });
                 } else blk: {
@@ -2279,7 +2281,9 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         if (renaming) {
             // rename 중엔 마커·핀을 안 붙인다 — 마커 prefix를 붙이면 편집 텍스트가 2칸 밀려 renameCaretRect(이름줄
             // 좌단=indent 가정)의 caret/IME 후보창과 어긋나고, 핀은 편집 폭을 잡아먹는다. 편집 동안만 전체 폭 사용.
-            try names.append(self.allocator, try settings_ops.renameEditText(self, self.allocator)); // owned → names가 소유
+            // 넘치면 caret 이 보이게 자른다(`renameEditTextFit`) — tail 앵커는 끝만 보이므로 caret 을 앞으로 옮기면 숨는다.
+            const avail = settings_ops.sidebarRenameFitCols(sidebar_cols, 0);
+            try names.append(self.allocator, try settings_ops.renameEditTextFit(self, self.allocator, avail)); // owned → names가 소유
             try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
             try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
             // **상태줄은 rename 중에도 표시** — 편집하는 워크스페이스가 running이면 파형 스피너를 보여준다(사용자 요청:

@@ -6433,11 +6433,12 @@ pub const AppSession = struct {
     // 채운다 — imeCursorRect가 매 IME 갱신마다 필드 목록을 다시 빌드하지 않게 캐시한다(notif_panel_rect 선례).
     settings_search_caret: ?chrome.draw.Rect = null,
     // 인라인 rename 상태(없으면 null=비활성). 활성이면 키/IME가 rename_input으로 라우팅되고(모달), 렌더가 대상
-    // 슬롯/탭/라벨에 편집 텍스트+caret을 그린다. rename_input은 find/palette와 같은 OverlayInput(IME preedit·EAW·
-    // UTF-8 경계 공유). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
+    // 슬롯/탭/라벨에 편집 텍스트+caret을 그린다. rename_input은 주소창과 같은 `TextField`(caret·그래핌 경계·IME
+    // preedit-at-caret) — 예전 끝-caret 전용 `OverlayInput` 이라 ←/→ 로 커서를 못 옮겼다(2026-09-29 사용자 제보,
+    // docs/text-field-editor.md §2.2). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
     rename: ?RenameTarget = null,
-    rename_input: chrome.components.overlay_input.OverlayInput = .{},
-    /// 사이드바 헤더 검색바 입력(query+preedit, IME·EAW 폭). rename_input과 같은 OverlayInput 모델이지만 모달이
+    rename_input: chrome.components.text_field.TextField = .{},
+    /// 사이드바 헤더 검색바 입력(query+preedit, IME·EAW 폭). find/palette와 같은 끝-caret OverlayInput 모델이지만 모달이
     /// 아니라 사이드바 상주 — sidebar_search_active일 때 키/IME가 여기로 라우팅되고, 카드 목록을 이름·브랜치·폴더로
     /// 필터링한다(visible_slots). Esc로 종료, Enter로 첫 매칭 세션 이동. P3.
     sidebar_search_input: chrome.components.overlay_input.OverlayInput = .{},
@@ -21130,7 +21131,10 @@ pub const AppSession = struct {
                         // running이면(편집 중 아님) 이름 앞에 1칸 정적 플래그 "● " prefix(owned) — ● 셀은 아래 recolor로 브랜드색.
                         const pane_running = !renaming_pane and pane_ops.paneHasRunningAgent(lr.leaf);
                         const name = if (renaming_pane) blk: {
-                            const e = settings_ops.renameEditText(self, self.allocator) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
+                            // 세그먼트보다 길면 caret 이 보이게 자른다(tail 앵커는 끝만 보인다 — caret 을 앞으로 옮기면 숨는다).
+                            // 글이 그려지는 창은 [1, label_cols-1) = label_cols-2 칸이다(buildPaneLabelDrawList) — 한 칸 넓게 잡으면
+                            // 안 넘친다고 보고 안 잘라, tail 앵커가 caret 을 잘라 낸다(적대적 검증 2026-09-29 실측).
+                            const e = settings_ops.renameEditTextFit(self, self.allocator, pb.label_cols -| 2) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
                             name_buf = e;
                             break :blk e;
                         } else if (pane_running) blk: {
@@ -23272,12 +23276,12 @@ pub const AppSession = struct {
         try marker_view_ops.collectMarkerPreviewDraws(self, arena, &draws);
         // 심볼 이름 바꾸기 상자(tooling §8.2f) — 인라인 rename 의 심볼 대상일 때. 앵커는 프레임마다 다시 잰다(그 문서가 안 그려졌으면 이 프레임엔 없다).
         if (self.rename) |rt| if (rt == .symbol and editor_ops.rename_client.refreshAnchor(self, rt.symbol)) {
-            try self.chrome_host.collectRenameBoxDraws(try editor_ops.rename_client.boxText(self, arena), props, &tokens, arena, &draws);
+            try self.chrome_host.collectRenameBoxDraws(try editor_ops.rename_client.boxText(self, arena), editor_ops.rename_client.boxCaretCols(self), props, &tokens, arena, &draws);
         };
         // 이름 없는 문서의 저장 이름 상자(U2 — §3.11). **같은 컴포넌트·같은 규율**이고 앵커만 caret 이다
         // (심볼은 낱말 첫 글자). 앵커를 프레임마다 다시 재는 이유도 같다 — 스크롤·랩이 자리를 옮긴다.
         if (self.rename) |rt| if (rt == .untitled_save and editor_ops.rename_client.refreshCaretAnchor(self, rt.untitled_save)) {
-            try self.chrome_host.collectRenameBoxDraws(try editor_ops.rename_client.boxText(self, arena), props, &tokens, arena, &draws);
+            try self.chrome_host.collectRenameBoxDraws(try editor_ops.rename_client.boxText(self, arena), editor_ops.rename_client.boxCaretCols(self), props, &tokens, arena, &draws);
         };
         // **리셋은 설정보다 앞이다.** 처음에 세팅 리셋 옆에 뒀다가 방금 넣은 값을 그 자리에서 지워
         // 막대가 화면에서 사라졌다(실측) — 세팅은 설정이 리셋 뒤라 살아남았고 알림만 순서가 반대였다.
@@ -34312,8 +34316,7 @@ test "rename caret 폭은 방출자와 같은 cluster 단위다(NFD 이름에서
     defer session.deinit();
 
     const nfd = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}"; // NFD "한글"
-    session.rename_input.query.clearRetainingCapacity();
-    try session.rename_input.query.appendSlice(allocator, nfd);
+    try session.rename_input.setText(allocator, nfd);
 
     // 방출자(appendEllipsizedTitle)가 쓰는 폭 = 음절당 2칸.
     const emitted_cols = chrome.text_layout.displayCols(nfd, null);
@@ -45541,7 +45544,7 @@ fn initRenameCaretTestSession(allocator: std.mem.Allocator) !*AppSession {
     return session;
 }
 
-test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret x를 우경계로 clamp(넘침 아니면 head)" {
+test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret x는 그려진 caret 자리(이름영역 우경계)다(넘침 아니면 head)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initRenameCaretTestSession(allocator);
@@ -45553,19 +45556,23 @@ test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret
     session.rename = .{ .workspace = tab };
 
     const cw = session.cell_width_px;
-    const full_cols = session.sidebar_width_px / cw; // 10
-    const clamp_x: i32 = @intCast((full_cols - 2) * cw); // 8*8 = 64 (이름영역 우경계)
+    // 기준선(2026-09-29 정정): 예전에는 `(sidebar_width/cw - 2)` 로 clamp 했다 — 스크롤 gutter·우측 inset 을 안 빼
+    // 글이 그려지지 않는 여백 위였고, 그려진 caret 과 후보창이 칸 단위로 갈렸다. 렌더는 rename 중 카드 이름줄을
+    // `sidebarColumns()` 의 [indent, indent + cols - 1) 에 tail 앵커로 그리므로 넘친 줄 끝 caret 은 indent+cols-2 열이다.
+    const cl = sidebar_ops.sidebarColumns(session) orelse return error.NoColumns;
+    const clamp_x: i32 = @intCast((@as(u32, cl.indent_cols) + cl.cols - 2) * cw);
 
-    // 넘침: 긴 이름(20칸) → head(indent+20) > 우경계 → x는 clamp(64)로 잘려 사이드바 안에 머문다.
-    for (0..20) |_| try session.rename_input.appendChar(allocator, 'a');
+    // 넘침: 긴 이름(20칸) → tail 앵커로 끝이 보이고 caret 은 이름영역 우경계 — 사이드바 안에 머문다.
+    for (0..20) |_| try session.rename_input.insertCp(allocator, 'a');
     {
         const r = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
         try std.testing.expectEqual(clamp_x, r.x);
+        try std.testing.expect(r.x + @as(i32, @intCast(cw)) <= @as(i32, @intCast(session.sidebar_width_px)));
     }
 
     // 비넘침: 짧은 이름 → clamp 안 하고 head 위치(indent + qcols). (clamp 회귀가 짧은 이름까지 당기지 않음을 확인.)
     session.rename_input.clear();
-    for ("ab") |c| try session.rename_input.appendChar(allocator, c);
+    for ("ab") |c| try session.rename_input.insertCp(allocator, c);
     {
         const sp = session.buildChromeTokens().space;
         const indent_cols = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
@@ -45590,13 +45597,15 @@ test "renameCaretRect(.group): 헤더 이름이 넘치면 caret x를 사이드�
     session.rename = .{ .group = tab };
 
     const cw = session.cell_width_px;
-    const full_cols = session.sidebar_width_px / cw;
-    const clamp_x: i32 = @intCast((full_cols - 2) * cw); // 64
+    // 헤더 줄도 카드와 같은 열 배치([indent, indent + cols - 1), tail 앵커)로 그려진다 — .workspace 판정자의 기준선 정정과 같다.
+    const cl = sidebar_ops.sidebarColumns(session) orelse return error.NoColumns;
+    const clamp_x: i32 = @intCast((@as(u32, cl.indent_cols) + cl.cols - 2) * cw);
 
-    // 넘침: 긴 헤더 이름 → x clamp(우경계).
-    for (0..20) |_| try session.rename_input.appendChar(allocator, 'a');
+    // 넘침: 긴 헤더 이름 → caret 은 그려진 자리(우경계), 사이드바 안.
+    for (0..20) |_| try session.rename_input.insertCp(allocator, 'a');
     const r = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
     try std.testing.expectEqual(clamp_x, r.x);
+    try std.testing.expect(r.x + @as(i32, @intCast(cw)) <= @as(i32, @intCast(session.sidebar_width_px)));
 }
 
 // (P3-4) 위임 핸들러(scroll/선택/reportMouse)를 호출하는 단위 테스트용 헬퍼. 메인 mutate가 runtime을 거쳐
@@ -47525,7 +47534,7 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
 
     // 2) 취소: 시작 시 현재 이름으로 시드 → 'x' 추가 → Esc → custom_name 그대로("hi").
     settings_ops.startRename(session, .{ .workspace = tab });
-    try std.testing.expectEqualStrings("hi", session.rename_input.query.items);
+    try std.testing.expectEqualStrings("hi", session.rename_input.text.items);
     settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = 'x' } });
     settings_ops.handleRenameKey(session, .{ .key = .{ .key = .escape } });
     try std.testing.expect(session.rename == null);
@@ -47547,6 +47556,57 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
     try std.testing.expect(session.rename != null);
     pane_ops.closeActiveTermOrPane(session); // 활성(term0) 닫힘 → destroyTerm(term0) → rename null
     try std.testing.expect(session.rename == null);
+}
+
+// 사이드바 워크스페이스 이름 변경에서 ←/→ 로 caret 을 옮기고 그 자리에 쓴다(2026-09-29 사용자 제보 — 「커서
+// 왔다갔다가 안 된다」). 예전 편집기는 끝-caret 전용이라 ←/→ 를 버렸고 글은 끝에만 붙었다. 키 → 편집 규칙 자체는
+// `chrome.components.inline_edit` 의 순수 판정자가 재고, 여기서는 **제품 배선**을 잰다: 모달 라우터 → handleRenameKey
+// → rename_input, 사이드바가 그리는 편집 줄(renameEditText)의 caret 자리, IME caret 열, 확정된 이름.
+test "rename: ←/→ 로 caret 을 옮겨 가운데에 쓰고, 편집 줄과 IME 열이 그 자리를 따른다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 풀 세션(실 PTY/CoreText) 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const tab = tab_ops.activeTab(session);
+    settings_ops.startRename(session, .{ .workspace = tab });
+    for ("abc") |ch| settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = ch } });
+    try std.testing.expectEqual(@as(u32, 3), settings_ops.renameCaretCols(session)); // 시작은 끝
+
+    // ← 두 번 → 'a' 뒤. 그 자리에 'X'.
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .left } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .left } });
+    try std.testing.expectEqual(@as(u32, 1), settings_ops.renameCaretCols(session));
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .char, .codepoint = 'X' } });
+    try std.testing.expectEqualStrings("aXbc", session.rename_input.text.items);
+
+    // 사이드바가 그리는 편집 줄은 caret 을 편집 위치에 둔다(끝이 아니다).
+    session.blink_visible = true;
+    const line = try settings_ops.renameEditText(session, allocator);
+    defer allocator.free(line);
+    try std.testing.expectEqualStrings("aX|bc", line);
+    // 폭 계산(탭 라벨 세그먼트)은 여전히 글 전체다 — caret 을 앞으로 옮겨도 라벨이 줄지 않는다.
+    try std.testing.expectEqual(@as(u32, 4), settings_ops.renameQueryCols(session));
+
+    // ⌘→ 로 끝, ⌫ 는 끝 글자. 확정된 이름은 편집 결과 그대로.
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .right, .mods = .{ .command = true } } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .backspace } });
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .enter } });
+    try std.testing.expect(session.rename == null);
+    try std.testing.expectEqualStrings("aXb", tab.custom_name.?);
+
+    // 다시 열면 caret 은 끝이다(이어 쓰기가 기본).
+    settings_ops.startRename(session, .{ .workspace = tab });
+    try std.testing.expectEqual(session.rename_input.text.items.len, session.rename_input.caret);
+    settings_ops.handleRenameKey(session, .{ .key = .{ .key = .escape } });
 }
 
 // 더블클릭(kind 4) 트리거(PR4): Term 탭·사이드바 슬롯을 더블클릭하면 그 대상 rename이 시작되는지 — 실 init/
@@ -55478,7 +55538,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     // create opens in the focused dock group without synchronous frame-tick stat/root discovery.
     session.dispatchAppAction(.new_file);
     try std.testing.expect(session.rename != null and session.rename.? == .file_tree);
-    try session.rename_input.query.appendSlice(allocator, ".new.md");
+    try session.rename_input.setText(allocator, ".new.md");
     settings_ops.commitRename(session);
     try std.testing.expect(session.rename == null);
     var attempts: usize = 0;
@@ -55503,7 +55563,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     file_panel_ops.handleFileTreeDefaultKey(session, .{ .key = .{ .function = 2 } });
     try std.testing.expect(session.rename != null and session.rename.? == .file_tree);
     session.rename_input.clear();
-    try session.rename_input.query.appendSlice(allocator, "renamed.md");
+    try session.rename_input.setText(allocator, "renamed.md");
     settings_ops.commitRename(session);
     // Clean source-edit is not trusted from native state alone. The worker remains unsubmitted until the
     // request-scoped CM6 lock reports its latest revision as clean.
@@ -67672,7 +67732,7 @@ test "U2A 저장 뒤 컨트롤 플레인·사이드바가 같은 사실을 말�
     const t = try editor_ops.openUntitledInActivePane(session);
     try std.testing.expect(editor_ops.insertText(session, t, "saved body\n"));
     try std.testing.expectError(error.AskName, editor_ops.saveDocument(session, t));
-    try session.rename_input.query.appendSlice(allocator, "outward.txt");
+    try session.rename_input.setText(allocator, "outward.txt");
     settings_ops.commitRename(session);
     try std.testing.expect(t.rt.editor_path != null);
 

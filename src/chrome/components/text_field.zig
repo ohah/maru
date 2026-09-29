@@ -3,7 +3,7 @@
 //! 되게 하는 편집 상태와 순수 ops, 그리고 **draw와 hit-test가 공유하는 단일 레이아웃 소스**(`fieldLayout`)와 그
 //! 역함수(`caretAtColumn`)를 둔다. 설계 단일 출처: docs/text-field-editor.md.
 //!
-//! **왜 새 컴포넌트인가**(§2.2): 공유 `overlay_input.OverlayInput`(find·palette·rename·사이드바검색)은 **끝-caret
+//! **왜 새 컴포넌트인가**(§2.2): 공유 `overlay_input.OverlayInput`(find·palette·사이드바검색)은 **끝-caret
 //! 전용**(appendChar/backspace가 문자열 끝 고정)이라 mid-string caret·선택·가로 스크롤을 소유하지 않는다. 그 lean한
 //! 검색 모델을 흐리지 않도록 편집기를 분리하되, EAW 폭 수학은 복제하지 않고 `overlay_input.displayCols`를 재사용한다.
 //!

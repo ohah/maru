@@ -3166,6 +3166,9 @@ fn b2MonotonicNs() u64 {
 }
 
 test "[측정] B2 밀집 화면의 한 번 그리기·절단 뒤 재그리기·가변 목록 복사 프록시" {
+    // 계측은 macOS 전용이다. 이 컴포넌트 자체는 libc 없는 Linux와 Windows에도
+    // 컴파일되므로 std.c 시계를 다른 타깃의 테스트 본문에 들이지 않는다.
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
     // 비교 대상은 같은 frame.build 입력이다. 충분한 버퍼 한 번은 가변 목록의
     // 하한 비용이다(실제 growable writer의 증가/복사 비용은 이 테스트가 재지 않는다).
     const a = testing.allocator;

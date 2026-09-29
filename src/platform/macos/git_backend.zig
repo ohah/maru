@@ -3201,13 +3201,30 @@ fn makeStageRepo(exe: []const u8, repo: []const u8, fixture: StageFixture) bool 
     return !runQuiet(&.{ exe, "-C", repo, "merge", "other" });
 }
 
-/// 판정자 전용: `.zig-cache` 밑 임시 저장소 경로. `std.testing.tmpDir` 는 0.16 에서 realpath 를 안 주므로
-/// (이 파일의 앞선 판정자가 이미 그렇게 적어 두었다) 경로를 직접 만든다.
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+/// 시험 전용: 임시 저장소 자리 — **워크트리 밖**(`$TMPDIR`, 없으면 `/tmp`)에 이름이 겹치지 않는 빈 디렉터리(`maru-<이름>-<pid>-XXXXXX`)를 만들어
+/// 실제 경로(realpath)를 돌려준다. 처음엔 `<cwd>/.zig-cache/<고정 이름>` 이었다 — 같은 워크트리에서 시험이 겹치면 한쪽의
+/// `rm -rf` 가 다른 쪽 저장소의 `.git` 을 지우는 사이 `git -C` 가 위로 올라가 **개발자의 워크트리**에서
+/// `checkout -q -b other` 를 실행했다(2026-09-29 실측 — 커밋이 그 브랜치에 쌓여 PR 에서 빠졌다, W7a1 적대 검증 8 차).
 fn tmpRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return null;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
-    return std.fmt.bufPrint(buf, "{s}/.zig-cache/{s}", .{ cwd, name }) catch null;
+    const tmp = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
+    var template_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 이름에 pid 를 넣는다 — `tools/clean-tmp-fixtures.sh` 는 이름 속 pid 가 살아 있으면 남긴다(`$TMPDIR` 이 `/tmp` 일 때 도는 중인
+    // 시험의 자리를 지우지 않게).
+    const template = std.fmt.bufPrintZ(&template_buf, "{s}/maru-{s}-{d}-XXXXXX", .{ tmp, name, std.c.getpid() }) catch return null;
+    const made = mkdtemp(template.ptr) orelse return null;
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real = std.c.realpath(made, &real_buf) orelse return null;
+    const path = std.mem.span(real);
+    if (path.len > buf.len) return null;
+    @memcpy(buf[0..path.len], path);
+    return buf[0..path.len];
+}
+
+/// app_session 시험도 같은 자리를 쓴다.
+pub fn testTempRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
+    return tmpRepoPath(buf, name);
 }
 
 test "진짜 충돌에서 세 판을 읽는다 — :1:·:2:·:3: (S3a end-to-end)" {
@@ -3523,13 +3540,8 @@ test "충돌 파일도 diff가 열린다(HEAD ↔ 작업트리)" {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = locate(&exe_buf) orelse return error.SkipZigTest;
 
-    // 저장소를 만들 자리: 현재 작업 디렉터리 밑의 임시 경로(테스트가 끝나면 지운다). `std.testing.tmpDir`는
-    // 0.16에서 realpath를 안 줘서 경로를 직접 만든다.
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-diff", .{cwd}) catch return error.SkipZigTest;
+    const repo = tmpRepoPath(&repo_buf, "tmp-conflict-diff") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
@@ -3554,11 +3566,8 @@ test "실제 충돌 저장소: 마커가 남은 동안은 «남음», 지우면 
     // 「판정을 했다」 표시, 그리고 이 조각의 전제 — 해결해도 상태 문자가 안 바뀐다 — 를 한 저장소에서 잰다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = locate(&exe_buf) orelse return error.SkipZigTest;
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers", .{cwd}) catch return error.SkipZigTest;
+    const repo = tmpRepoPath(&repo_buf, "tmp-conflict-markers") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
@@ -3604,11 +3613,8 @@ test "실제 충돌 저장소: 배치보다 많은 충돌 파일 — 한 배치�
     // 그 파일들은 「마커 없음」으로 읽혀 **마커가 남은 파일에 `+` 가 선다** — 이 조각이 막아야 하는 바로 그 사고다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = locate(&exe_buf) orelse return error.SkipZigTest;
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers-many", .{cwd}) catch return error.SkipZigTest;
+    const repo = tmpRepoPath(&repo_buf, "tmp-conflict-markers-many") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
@@ -3654,11 +3660,8 @@ test "실제 충돌 저장소: grep 이 실패하면 «판정 못 함» — 충�
     // 못 갈렸다). `grep` 만 실패시키고 나머지는 진짜 git 에 위임하는 래퍼로 그 갈래를 연다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = locate(&exe_buf) orelse return error.SkipZigTest;
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers-fail", .{cwd}) catch return error.SkipZigTest;
+    const repo = tmpRepoPath(&repo_buf, "tmp-conflict-markers-fail") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
@@ -3819,15 +3822,23 @@ pub const testTmpRepoPath = tmpRepoPath;
 pub const TestStageFixture = StageFixture;
 
 fn runQuiet(argv: []const []const u8) bool {
-    var store: [8][:0]u8 = undefined;
-    var c_argv: [9:null]?[*:0]const u8 = undefined;
+    var store: [12][:0]u8 = undefined;
+    var c_argv: [13:null]?[*:0]const u8 = undefined;
     var built: usize = 0;
     defer for (store[0..built]) |a| testing.allocator.free(a);
-    for (argv) |a| {
+    for (argv, 0..) |a, i| {
         if (built >= store.len) return false;
         store[built] = testing.allocator.dupeZ(u8, a) catch return false;
         c_argv[built] = store[built].ptr;
         built += 1;
+        // `git -C <저장소>` 는 그 저장소의 `.git` 만 쓴다 — 없으면 위로 찾아 올라가지 않고 실패한다(겹친 시험이 지운
+        // 저장소 대신 개발자 워크트리를 건드리지 않게 — `tmpRepoPath`).
+        if (i == 2 and std.mem.eql(u8, argv[1], "-C") and std.mem.endsWith(u8, argv[0], "git")) {
+            if (built >= store.len) return false;
+            store[built] = testing.allocator.dupeZ(u8, "--git-dir=.git") catch return false;
+            c_argv[built] = store[built].ptr;
+            built += 1;
+        }
     }
     c_argv[built] = null;
 
@@ -3852,11 +3863,8 @@ test "저장소 밖을 가리키는 symlink는 읽지 않는다" {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = locate(&exe_buf) orelse return error.SkipZigTest;
 
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-symlink-escape", .{cwd}) catch return error.SkipZigTest;
+    const repo = tmpRepoPath(&repo_buf, "tmp-symlink-escape") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
@@ -3892,11 +3900,8 @@ test "턴 스냅샷은 진짜 index와 작업트리를 건드리지 않는다(en
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = locate(&exe_buf) orelse return error.SkipZigTest;
 
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-turn-snapshot", .{cwd}) catch return error.SkipZigTest;
+    const repo = tmpRepoPath(&repo_buf, "tmp-turn-snapshot") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
@@ -3915,7 +3920,7 @@ test "턴 스냅샷은 진짜 index와 작업트리를 건드리지 않는다(en
 
     // 임시 index는 **저장소 밖**에 둔다(안에 두면 자기가 스냅샷에 잡힌다).
     var index_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const index_file = std.fmt.bufPrint(&index_buf, "{s}/.zig-cache/tmp-turn-index", .{cwd}) catch return error.SkipZigTest;
+    const index_file = std.fmt.bufPrint(&index_buf, "{s}-index", .{repo}) catch return error.SkipZigTest;
     var idx_rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const idx_rm = std.fmt.bufPrintZ(&idx_rm_buf, "{s}", .{index_file}) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-f", idx_rm });

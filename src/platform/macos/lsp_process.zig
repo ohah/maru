@@ -18,6 +18,9 @@ pub const Process = struct {
     out_fd: c_int,
     /// 아직 못 쓴 바이트(파이프가 찼을 때) — 다음 tick 에 이어 쓴다.
     pending_out: std.ArrayList(u8) = .empty,
+    /// 이미 거뒀다 — 그 pid 는 커널이 다른 프로세스에 다시 줄 수 있으므로 더는 `kill`·`waitpid` 하지 않는다(W7a1 적대 검증 —
+    /// 거둔 뒤의 SIGKILL·막힘 waitpid 가 재사용된 pid 의 다른 자식을 죽이고 메인 스레드를 묶을 수 있었다).
+    reaped: bool = false,
 
     pub fn deinit(self: *Process, allocator: std.mem.Allocator) void {
         self.pending_out.deinit(allocator);
@@ -219,17 +222,67 @@ pub fn readInto(p: *Process, allocator: std.mem.Allocator, into: *std.ArrayList(
 
 /// 자식이 끝났는지 비차단으로 본다. 끝났으면 `true`(거두었다).
 pub fn reapIfExited(p: *Process) bool {
+    if (p.reaped) return true;
     var status: c_int = 0;
     const r = std.c.waitpid(p.pid, &status, std.c.W.NOHANG);
-    return r == p.pid;
+    if (r == p.pid) p.reaped = true;
+    return p.reaped;
 }
 
 /// 죽인다(SIGTERM → 잠시 뒤 SIGKILL 은 호출자가 tick 으로) 하고 거둔다.
 pub fn kill(p: *Process, sig: std.c.SIG) void {
+    if (p.reaped) return;
     _ = std.c.kill(p.pid, sig);
 }
 
 pub fn reapBlocking(p: *Process) void {
+    if (p.reaped) return;
     var status: c_int = 0;
-    _ = std.c.waitpid(p.pid, &status, 0);
+    // 신호로 끊기면(EINTR) 다시 기다린다 — 거두지 못했는데 거둔 것으로 적지 않게.
+    while (std.c.waitpid(p.pid, &status, 0) == -1 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) {}
+    p.reaped = true;
+}
+
+extern "c" fn waitid(idtype: c_int, id: c_uint, info: *[128]u8, options: c_int) c_int;
+
+test "a reaped child is never signalled or waited for again (its pid may belong to someone else by then)" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    var p = try spawn(std.testing.allocator, "/usr/bin/true", &.{}, "/");
+    defer p.deinit(std.testing.allocator);
+    var waited: usize = 0;
+    while (!reapIfExited(&p)) : (waited += 1) {
+        if (waited > 500) return error.ChildDidNotExit;
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+    try std.testing.expect(p.reaped);
+    // 그 pid 를 커널이 다른 자식에게 다시 준 것처럼 한다 — 끝났지만 아직 안 거둔 자식(거두면 안 된다)과 살아 있는 자식(죽이면
+    // 안 된다). 가드가 없으면 앞의 것은 거둬지고 뒤의 것은 SIGKILL 로 끝난다.
+    var zombie = try spawn(std.testing.allocator, "/usr/bin/true", &.{}, "/");
+    defer {
+        var st: c_int = 0;
+        _ = std.c.waitpid(zombie.pid, &st, 0);
+        zombie.deinit(std.testing.allocator);
+    }
+    var sleeper = try spawn(std.testing.allocator, "/bin/sleep", &.{"5"}, "/");
+    defer {
+        var st: c_int = 0;
+        _ = std.c.kill(sleeper.pid, .KILL);
+        _ = std.c.waitpid(sleeper.pid, &st, 0);
+        sleeper.deinit(std.testing.allocator);
+    }
+    var status: c_int = 0;
+    var info: [128]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), waitid(1, @intCast(zombie.pid), &info, 0x4 | 0x20)); // P_PID · WEXITED|WNOWAIT
+    p.pid = zombie.pid;
+    try std.testing.expect(reapIfExited(&p));
+    reapBlocking(&p);
+    try std.testing.expectEqual(zombie.pid, std.c.waitpid(zombie.pid, &status, std.c.W.NOHANG)); // 아직 우리가 거둘 수 있었다
+    p.pid = sleeper.pid;
+    kill(&p, .KILL);
+    reapBlocking(&p);
+    // SIGKILL 은 곧바로 드러나지 않는다 — 잠시 지켜봐도 끝나지 않는다.
+    for (0..20) |_| {
+        try std.testing.expectEqual(@as(std.c.pid_t, 0), std.c.waitpid(sleeper.pid, &status, std.c.W.NOHANG));
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
 }

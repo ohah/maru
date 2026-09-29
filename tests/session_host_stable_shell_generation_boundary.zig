@@ -1148,7 +1148,7 @@ test "CR6e-c3b2c 경계는 host admission 하나에 resident charge 하나만 �
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn bindAdmissionIdentity("));
     inline for (.{
         "const session_host_reconnect_host_charge_step = b.step(",
-        "run_host_charge_tests.addArg(\"--maru-expect-tests=7\")",
+        "run_host_charge_tests.addArg(\"--maru-expect-tests=8\")",
         "if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);",
         ".filters = &.{\"CR6e-c3b2c host charge\"},",
         "run_host_charge_boundary_tests.addArg(\"--maru-expect-tests=1\")",

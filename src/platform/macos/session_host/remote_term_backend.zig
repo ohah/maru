@@ -5631,7 +5631,11 @@ const HostChargeScenario = enum {
     /// 다른 host 들의 charge 가 byte cap 을 채우고 있으면 기다렸다가, 하나가 풀리면 시작한다(gate 는 살아 있다).
     wait_then_release,
     /// anchor 가 재접속 도중 떠나도 host 의 charge 는 남은 형제 중 handle 최솟값에게 넘어가 하나로 남는다.
+    /// 제품 close 경로(`remove` vtable: ready_remove → fetchRemove → 이전 → destroy)를 그대로 탄다.
     anchor_teardown,
+    /// backend `deinit` 처럼 정산 없이 모든 runtime 을 teardown 해도(anchor 먼저) charge 는 정확히 0 으로
+    /// 돌아온다 — 살아남는 형제가 없으므로 이전이 필요 없다.
+    teardown_without_settle,
 };
 
 fn runHostChargeScenario(comptime runtime_count: usize, comptime scenario: HostChargeScenario) !void {
@@ -5758,10 +5762,37 @@ fn runHostChargeScenario(comptime runtime_count: usize, comptime scenario: HostC
     try backend_value.validateBoundReconnectSnapshot(snapshot);
 
     var settled_from: usize = 0;
+    if (scenario == .teardown_without_settle) {
+        // backend `deinit` 의 destroy 루프는 runtime 마다 `executor.deinit` 을 부른다. 순서는 map 순서라
+        // anchor 가 먼저 갈 수 있다 — 그 최악 순서로 teardown 한다(fixture 의 deinit 이 그 leaf 를 부른다).
+        for (fixtures) |*fixture| fixture.deinit();
+        initialized = 0;
+        backend_value.runtimes.clearRetainingCapacity();
+        try testing.expectEqual(live_before, (try budget.snapshot()).live_entries);
+        try testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_bytes);
+        return;
+    }
     if (scenario == .anchor_teardown) {
-        // anchor(handle 1)가 떠난다 — 제품 close/detach 경로가 teardown 직전에 부르는 그 hand-off.
-        backend_value.handOffReconnectChargeBeforeLeaveNoFail(&fixtures[0].runtime, 1);
-        _ = backend_value.runtimes.remove(1);
+        // anchor(handle 1)를 제품 close 경로로 뗀다: close authority 를 ready_remove 까지 올리고 vtable
+        // `remove` 를 부른다. `skip_destroy` 는 fixture 가 소유한 runtime 의 free 만 막는다 — 이전은 그 앞이다.
+        const anchor = &fixtures[0].runtime;
+        try close_authority.prepareCurrent(&anchor.close_authority, .{
+            .runtime_addr = @intFromPtr(anchor),
+            .handle = 1,
+            .runtime_generation = 1,
+            .host_id = 1,
+            .close_request_generation = 1,
+            .close_schedule_ticket = 1,
+            .request_kind = .finish_after_termination,
+            .disposition = .terminate_host,
+        });
+        try close_authority.advance(&anchor.close_authority, .open, .routing_tombstoned);
+        try close_authority.advance(&anchor.close_authority, .routing_tombstoned, .settling);
+        try testing.expect(try close_authority.publishReadyRemove(&anchor.close_authority, true));
+        B5TestState.skip_destroy = true;
+        defer B5TestState.skip_destroy = false;
+        try testing.expectEqual(term_backend.RemoveProgress.removed, RemoteTermBackend.remove(&backend_value, 1));
+        try testing.expect(!backend_value.runtimes.contains(1));
         try testing.expectEqual(live_before + 1, (try budget.snapshot()).live_entries);
         try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[0].runtime));
         // 다음 상속자는 남은 것 중 handle 최솟값(2 = fixtures[1])이다.
@@ -5804,6 +5835,10 @@ test "CR6e-c3b2c host charge: 예산이 차 있으면 13개 host 도 기다렸�
 
 test "CR6e-c3b2c host charge: anchor 가 떠나면 charge 는 남은 형제에게 넘어가 하나로 남는다" {
     try runHostChargeScenario(8, .anchor_teardown);
+}
+
+test "CR6e-c3b2c host charge: 정산 없이 anchor 부터 teardown 해도 charge 는 0 으로 돌아온다" {
+    try runHostChargeScenario(8, .teardown_without_settle);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

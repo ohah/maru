@@ -14077,6 +14077,47 @@ test "INL11 인레이 힌트 — 서버의 `workspace/inlayHint/refresh` 는 거
     }
 }
 
+test "INL15 인레이 힌트 — 랩 경계에 딱 맞게 끝난 힌트 뒤 행을 누르면 누른 글자가 잡힌다(행 시작 열은 힌트 넣기 전 — 힌트를 두 번 세지 않는다) (제품 경계, §4.1h)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // `int a_hv = 1;` + byte 8 앞 `: int`(5) → `int a_hv: int = 1;`. 본문 13열이면 첫 행이 힌트 끝(13열)에서 정확히 끝나고, 둘째 행은
+    // byte 8(` `)부터다. 예전에는 그 행의 `start_byte_col` 이 힌트 **뒤**(13)라 hit 가 힌트를 한 번 더 먹어 둘째 행 칸 0..4 가 「힌트 칸」
+    // 으로 읽혔다 — `=`(byte 9, 칸 1)를 눌러도 앵커 byte 8 이 잡혔다(적대적 5회차 — content 판정은 `INL14`).
+    var f = (try SmtFixture.open(allocator, "fit.c", "int a_hv = 1;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    term.rt.editor_wrap = true;
+    term.rt.editor_first_line = 0;
+    var d0 = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+    try testing.expect(inlayApplied(&f, 1));
+    // 본문이 정확히 13열이 되는 pane 폭을 찾는다 — gutter·여백 폭을 손으로 적지 않는다(`geometry` 가 바뀌면 조용히 낡는다).
+    var found = false;
+    var cells: u32 = 14;
+    while (cells < 40) : (cells += 1) {
+        const pane: maru.session.SplitRect = .{ .x = f.leaf.x, .y = f.leaf.y, .w = @intCast(s.cell_width_px * cells), .h = f.leaf.h };
+        var d = appendPaneFrame(s, pane, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        if (term.rt.editor_hit_geom.content_width == 13) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_hit_rows_len); // 첫 줄 2행 + 끝 줄바꿈 뒤 빈 줄 1행
+    const geom = term.rt.editor_hit_geom;
+    const cw: f64 = @floatFromInt(geom.cell_w_px);
+    const left: f64 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)));
+    const row2: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast(geom.cell_h_px)));
+    // 둘째 행: 칸 0 = ` `(byte 8), 칸 1 = `=`(byte 9), 칸 3 = `1`(byte 11). 왼쪽 반을 누르면 그 글자 앞 byte.
+    try testing.expectEqual(@as(?usize, 9), hitTestBody(term, left + 1 * cw + 1, row2 + 2));
+    try testing.expectEqual(@as(?usize, 11), hitTestBody(term, left + 3 * cw + 1, row2 + 2));
+    // 첫 행 힌트 칸(열 10)은 여전히 앵커 byte 8 — 힌트는 첫 행에 다 그려졌다.
+    try testing.expectEqual(@as(?usize, 8), hitTestBody(term, left + 10 * cw + 3, @as(f64, @floatFromInt(geom.body_y)) + 2));
+}
+
 test "INL13 인레이 힌트 — 창(보이는 줄 ± 20)이 덮이지 않은 곳으로 스크롤하면 version 이 같아도 다시 묻고, 덮인 안에서는 안 묻는다 (제품 경계, §8.2n 적대적 C2)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

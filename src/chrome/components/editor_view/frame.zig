@@ -3235,15 +3235,32 @@ test "B2 재그리기 반례 — 첫 절단 호출이 RowCache 계수를 전진�
 /// 큰 저장소로 프레임을 다시 만든다. 제품 경로의 writer나 저장소 정책은 바꾸지 않는다.
 fn b2BuildWithGrowingOps(allocator: std.mem.Allocator, props: Props, base: Scratch, list: *std.ArrayList(draw.Op), max_ops: usize) !struct { written: Written, attempts: usize, allocation_failed: bool } {
     const cache_before = if (props.row_cache) |c| c.* else null;
-    const prefix_before = if (props.row_cache) |c| try testing.allocator.dupe(u32, c.prefix) else &.{};
-    defer if (props.row_cache != null) testing.allocator.free(prefix_before);
+    // `frame.build`는 많아야 이번 계수 몫(2,048줄)의 접두합만 덮는다.
+    // 전부 복사하면 이미 계수가 끝난 10만 줄 문서도 프레임마다 400KB를 복사한다.
+    var saved_start: usize = 0;
+    const prefix_before = if (props.row_cache) |c| blk: {
+        if (c.prefix.len <= props.lines.len) break :blk &.{};
+        const hit = c.hits(props.lines, props.line_widgets, layoutOf(props).content.width, props.wrap, props.tab_width, props.line_inlays.generation);
+        saved_start = if (hit) @min(c.filled_upto +| 1, c.prefix.len) else 0;
+        const last = if (hit) @min(props.lines.len, c.filled_upto +| count_chunk_lines) else @min(props.lines.len, count_chunk_lines);
+        const end = @min(c.prefix.len, last +| 1);
+        if (saved_start >= end) break :blk &.{};
+        break :blk allocator.dupe(u32, c.prefix[saved_start..end]) catch {
+            // 복원용 메모리가 없으면 재시도를 시도하지 않는다. 원래 버퍼로
+            // 한 번 그린 결과를 내면 캐시는 정확히 한 프레임만 전진한다.
+            var s = base;
+            s.ops = list.allocatedSlice();
+            return .{ .written = build(props, s), .attempts = 1, .allocation_failed = true };
+        };
+    } else &.{};
+    defer if (prefix_before.len > 0) allocator.free(prefix_before);
 
     var attempts: usize = 0;
     while (true) {
         if (attempts != 0) {
             if (props.row_cache) |c| {
                 c.* = cache_before.?;
-                @memcpy(c.prefix, prefix_before);
+                if (prefix_before.len > 0) @memcpy(c.prefix[saved_start .. saved_start + prefix_before.len], prefix_before);
             }
         }
         attempts += 1;
@@ -3278,13 +3295,17 @@ test "B2 전체 프레임 재시도 — 저장소 성장과 RowCache 복원이 �
     props.search_marks = &marks;
     const ops = try a.alloc(draw.Op, 16000);
     defer a.free(ops);
-    const runs = try a.alloc(draw.Run, 16000);
-    defer a.free(runs);
-    const bytes = try a.alloc(u8, 200000);
-    defer a.free(bytes);
+    const baseline_runs = try a.alloc(draw.Run, 16000);
+    defer a.free(baseline_runs);
+    const baseline_bytes = try a.alloc(u8, 200000);
+    defer a.free(baseline_bytes);
+    const retry_runs = try a.alloc(draw.Run, 16000);
+    defer a.free(retry_runs);
+    const retry_bytes = try a.alloc(u8, 200000);
+    defer a.free(retry_bytes);
     var baseline: WideBuffers = .{ .ops = ops };
     props.row_cache = &baseline_cache;
-    const expected = build(props, baseline.scratch(runs, bytes));
+    const expected = build(props, baseline.scratch(baseline_runs, baseline_bytes));
     try testing.expect(!expected.truncated);
 
     var reusable: std.ArrayList(draw.Op) = .empty;
@@ -3292,17 +3313,83 @@ test "B2 전체 프레임 재시도 — 저장소 성장과 RowCache 복원이 �
     try reusable.ensureTotalCapacity(a, 2560);
     var retry: WideBuffers = .{ .ops = &.{} };
     props.row_cache = &retry_cache;
-    const result = try b2BuildWithGrowingOps(a, props, retry.scratch(runs, bytes), &reusable, 16000);
+    const result = try b2BuildWithGrowingOps(a, props, retry.scratch(retry_runs, retry_bytes), &reusable, 16000);
     try testing.expect(!result.written.truncated and !result.allocation_failed);
     try testing.expect(result.attempts > 1);
     try testing.expectEqual(expected.total_visual_rows, result.written.total_visual_rows);
     try testing.expectEqual(baseline_cache.filled_upto, retry_cache.filled_upto);
+    try testing.expectEqualSlices(u32, baseline_prefix[0 .. baseline_cache.filled_upto + 1], retry_prefix[0 .. retry_cache.filled_upto + 1]);
+    try testing.expect(std.meta.eql(expected.scrollbar, result.written.scrollbar));
     try testing.expect(sameOpContent(ops[0..expected.ops], reusable.allocatedSlice()[0..result.written.ops]));
+    // 기준과 결과가 같은 글자 저장소를 빌리면 재시도가 기준을 덮어써
+    // 텍스트 차이를 숨길 수 있다. 실제 텍스트를 뒤집으면 비교가 반드시 깨진다.
+    var comparator_checked = false;
+    for (reusable.allocatedSlice()[0..result.written.ops]) |op| {
+        if (op != .text or op.text.runs.len == 0 or op.text.runs[0].text.len == 0) continue;
+        const first_text = op.text.runs[0].text;
+        const text_ptr = @intFromPtr(first_text.ptr);
+        const buffer_ptr = @intFromPtr(retry_bytes.ptr);
+        if (text_ptr < buffer_ptr or text_ptr >= buffer_ptr + retry_bytes.len) continue;
+        const first = @constCast(&op.text.runs[0].text[0]);
+        const saved = first.*;
+        first.* = if (saved == 'X') 'Y' else 'X';
+        try testing.expect(!sameOpContent(ops[0..expected.ops], reusable.allocatedSlice()[0..result.written.ops]));
+        first.* = saved;
+        comparator_checked = true;
+        break;
+    }
+    try testing.expect(comparator_checked);
 
     // 같은 화면의 다음 프레임은 이미 확보한 저장소를 한 번만 지난다.
-    const warm = try b2BuildWithGrowingOps(a, props, retry.scratch(runs, bytes), &reusable, 16000);
+    const warm = try b2BuildWithGrowingOps(a, props, retry.scratch(retry_runs, retry_bytes), &reusable, 16000);
     try testing.expectEqual(@as(usize, 1), warm.attempts);
     try testing.expect(!warm.written.truncated);
+}
+
+test "B2 재시도 — 이미 일부 채운 RowCache의 다음 계수 구간도 복원한다" {
+    const a = testing.allocator;
+    const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 101);
+    var baseline_prefix = [_]u32{0} ** (count_chunk_lines + 102);
+    var retry_prefix = [_]u32{0} ** (count_chunk_lines + 102);
+    var props = testProps(&lines, true);
+    props.total_cols = 20;
+    props.visible_rows = 10;
+    props.rect = .{ .x = 0, .y = 0, .w = 160, .h = 160 };
+    var count_scratch: [content.count_scratch_bytes]u8 = undefined;
+    for (0..100) |i| baseline_prefix[i + 1] = baseline_prefix[i] + rowsOfLine(props, layoutOf(props), i, &count_scratch).rows;
+    @memcpy(&retry_prefix, &baseline_prefix);
+    const initial: RowCache = .{
+        .prefix = &baseline_prefix,
+        .lines_ptr = @intFromPtr(lines[0..].ptr),
+        .lines_len = lines.len,
+        .widgets_ptr = @intFromPtr(props.line_widgets.ptr),
+        .widgets_len = props.line_widgets.len,
+        .content_width = layoutOf(props).content.width,
+        .wrap = props.wrap,
+        .tab_width = props.tab_width,
+        .inlay_generation = props.line_inlays.generation,
+        .filled = true,
+        .filled_upto = 100,
+    };
+    var baseline_cache = initial;
+    var retry_cache = initial;
+    retry_cache.prefix = &retry_prefix;
+    var baseline: TestBuffers = .{};
+    var retry: TestBuffers = .{};
+    props.row_cache = &baseline_cache;
+    try testing.expect(baseline_cache.hits(props.lines, props.line_widgets, layoutOf(props).content.width, props.wrap, props.tab_width, props.line_inlays.generation));
+    const expected = build(props, baseline.scratch());
+    try testing.expect(!expected.truncated);
+    props.row_cache = &retry_cache;
+    var reusable: std.ArrayList(draw.Op) = .empty;
+    defer reusable.deinit(a);
+    try reusable.ensureTotalCapacityPrecise(a, 1);
+    const result = try b2BuildWithGrowingOps(a, props, retry.scratch(), &reusable, 256);
+    try testing.expect(!result.written.truncated and result.attempts > 1);
+    try testing.expectEqual(@as(usize, 100 + count_chunk_lines), retry_cache.filled_upto);
+    try testing.expectEqualSlices(u32, baseline_prefix[0 .. baseline_cache.filled_upto + 1], retry_prefix[0 .. retry_cache.filled_upto + 1]);
+    try testing.expectEqual(expected.total_visual_rows, result.written.total_visual_rows);
+    try testing.expect(sameOpContent(baseline.ops[0..expected.ops], reusable.allocatedSlice()[0..result.written.ops]));
 }
 
 test "B2 전체 프레임 상한과 할당 실패는 절단을 보고하며 부분 출력을 남긴다" {
@@ -3336,6 +3423,19 @@ test "B2 전체 프레임 상한과 할당 실패는 절단을 보고하며 부�
     try testing.expect(failed.allocation_failed and failed.written.truncated);
     try testing.expectEqual(@as(usize, 1), failed.attempts);
     try testing.expect(failed.written.ops > 0);
+
+    // 캐시 체크포인트 할당 실패도 프레임을 아예 잃지 않아야 한다.
+    const prefix = try a.alloc(u32, lines.len + 1);
+    defer a.free(prefix);
+    @memset(prefix, 0);
+    var cache: RowCache = .{ .prefix = prefix };
+    props.row_cache = &cache;
+    var checkpoint_failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const without_checkpoint = try b2BuildWithGrowingOps(checkpoint_failing.allocator(), props, base.scratch(runs, bytes), &capped, 16000);
+    try testing.expect(without_checkpoint.allocation_failed);
+    try testing.expect(without_checkpoint.written.truncated and without_checkpoint.written.ops > 0);
+    try testing.expectEqual(@as(usize, 1), without_checkpoint.attempts);
+    try testing.expectEqual(lines.len, cache.filled_upto);
 }
 
 test "B2 상한의 우선순위 반례 — 밀집 검색이 caret 저장소를 굶긴다" {
@@ -3441,6 +3541,61 @@ test "[측정] B2 전체 프레임 재사용 op 저장소와 성장 재시도의
         (t2 - t1) / samples / std.time.ns_per_us,
         cold_attempts,
         reusable.capacity * @sizeOf(draw.Op),
+    });
+}
+
+test "[측정] B2 캐시가 완성된 큰 문서는 접두합 복사를 건너뛴다" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const count: usize = 100_000;
+    const lines = try a.alloc([]const u8, count);
+    defer a.free(lines);
+    @memset(lines, "x");
+    const prefix = try a.alloc(u32, count + 1);
+    defer a.free(prefix);
+    for (prefix, 0..) |*slot, i| slot.* = @intCast(i);
+    var props = testProps(lines, false);
+    var cache: RowCache = .{
+        .prefix = prefix,
+        .lines_ptr = @intFromPtr(lines.ptr),
+        .lines_len = lines.len,
+        .widgets_ptr = @intFromPtr(props.line_widgets.ptr),
+        .widgets_len = props.line_widgets.len,
+        .content_width = layoutOf(props).content.width,
+        .wrap = props.wrap,
+        .tab_width = props.tab_width,
+        .inlay_generation = props.line_inlays.generation,
+        .filled = true,
+        .filled_upto = count,
+    };
+    props.row_cache = &cache;
+    var buffers: TestBuffers = .{};
+    var reusable: std.ArrayList(draw.Op) = .empty;
+    defer reusable.deinit(a);
+    try reusable.ensureTotalCapacityPrecise(a, 256);
+    const first = build(props, buffers.scratch());
+    try testing.expect(!first.truncated);
+    const wrapped = try b2BuildWithGrowingOps(a, props, buffers.scratch(), &reusable, 256);
+    try testing.expect(!wrapped.written.truncated);
+    try testing.expectEqual(@as(usize, 1), wrapped.attempts);
+
+    const samples: u64 = 1000;
+    const t0 = b2MonotonicNs();
+    for (0..samples) |_| {
+        const w = build(props, buffers.scratch());
+        std.mem.doNotOptimizeAway(buffers.ops[0..w.ops]);
+    }
+    const t1 = b2MonotonicNs();
+    for (0..samples) |_| {
+        const w = try b2BuildWithGrowingOps(a, props, buffers.scratch(), &reusable, 256);
+        std.mem.doNotOptimizeAway(reusable.allocatedSlice()[0..w.written.ops]);
+    }
+    const t2 = b2MonotonicNs();
+    std.debug.print("[B2 cache snapshot] lines={d} prefix_bytes={d} direct_ns={d} wrapper_ns={d}\n", .{
+        count,
+        prefix.len * @sizeOf(u32),
+        (t1 - t0) / samples,
+        (t2 - t1) / samples,
     });
 }
 
@@ -3638,11 +3793,16 @@ test "[측정] B2 밀집 화면의 한 번 그리기·절단 뒤 재그리기·�
 
     const samples: u64 = 40;
     const t0 = b2MonotonicNs();
-    for (0..samples) |_| _ = build(props, full.scratch(runs, text_bytes));
+    for (0..samples) |_| {
+        const w = build(props, full.scratch(runs, text_bytes));
+        std.mem.doNotOptimizeAway(full_ops[0..w.ops]);
+    }
     const t1 = b2MonotonicNs();
     for (0..samples) |_| {
-        _ = build(props, old.scratch(runs, text_bytes));
-        _ = build(props, full.scratch(runs, text_bytes));
+        const clipped = build(props, old.scratch(runs, text_bytes));
+        std.mem.doNotOptimizeAway(old_ops[0..clipped.ops]);
+        const redrawn = build(props, full.scratch(runs, text_bytes));
+        std.mem.doNotOptimizeAway(full_ops[0..redrawn.ops]);
     }
     const t2 = b2MonotonicNs();
     // 실제 writer 이관 전의 별도 복사 프록시다. 이미 그린 op을 2560개로 시작하는
@@ -3655,6 +3815,7 @@ test "[측정] B2 밀집 화면의 한 번 그리기·절단 뒤 재그리기·�
         try grown.ensureTotalCapacity(a, old_ops.len);
         try grown.appendSlice(a, full_ops[0..old_ops.len]);
         try grown.appendSlice(a, full_ops[old_ops.len..warm.ops]);
+        std.mem.doNotOptimizeAway(grown.items);
         grown_capacity = grown.capacity;
     }
     const t3 = b2MonotonicNs();

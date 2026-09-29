@@ -107,7 +107,9 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
     // W7a1: `maru-chromium` 설치물 — host·helper·프레임워크에 CEF·Chromium 라이선스와 manifest 를 더한다(판정자는 뺀다).
     // formula 는 이 디렉터리를 그대로 `libexec` 에 둔다(maru 는 `opt/maru-chromium/libexec/maru-web-host` 를 찾는다).
-    const dist_step = b.step("web-sidecar-dist", "Build the maru-chromium install tree into zig-out/maru-chromium (needs -Dcef-sdk)");
+    // formula 는 기본 prefix 로 빌드해 `zig-out/maru-chromium/*` 를 `libexec` 로 옮기고 `-Doptimize=ReleaseFast` 를 준다
+    // (`--prefix libexec` 면 `libexec/maru-chromium/` 이 되어 maru 가 못 찾는다 — W7a1 적대 검증).
+    const dist_step = b.step("web-sidecar-dist", "Build the maru-chromium install tree into zig-out/maru-chromium (needs -Dcef-sdk; formulas add -Doptimize=ReleaseFast)");
     const dist: std.Build.InstallDir = .{ .custom = "maru-chromium" };
     // 옛 빌드가 남긴 파일(이름이 바뀐 것 등)이 설치물에 섞이지 않게 먼저 비운다 — 아래 설치는 모두 이 뒤에 온다.
     const clean_dist = b.addSystemCommand(&.{ "/bin/rm", "-rf" });

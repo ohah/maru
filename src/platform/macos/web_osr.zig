@@ -397,6 +397,7 @@ test "the engine is latched by the first decision (restart-only)" {
 test "a sidecar of another control-channel version stops with a version notice instead of a restart loop" {
     const gpa = std.testing.allocator;
     gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count()); // 크래시 경로가 실제 sidecar 를 띄우지 않게
     const saved_failures = .{ failures, failure_head };
     defer {
         failures = saved_failures[0];
@@ -423,7 +424,19 @@ test "a sidecar of another control-channel version stops with a version notice i
     try std.testing.expectEqual(@as(?Notice, .version_mismatch), latched);
     try std.testing.expectEqual(@as(?Notice, .version_mismatch), takeNotice());
     try std.testing.expectEqual(@as(usize, 0), outbox_pending.items.len); // 보낼 곳이 없다 — 버린다
-    // handshake 뒤의 버전 위반은 규칙 위반(죽이고 다시 띄우는 쪽) — 버전 안내가 아니다.
+    // handshake 중이라도 버전이 아닌 위반(깨진 magic)은 규칙 위반(죽이고 다시 띄우는 쪽) — 버전 안내가 아니다.
+    decoder = .init(.to_maru);
+    inbox.clearRetainingCapacity();
+    latched = null;
+    state = .starting;
+    var broken = frame;
+    std.mem.writeInt(u16, broken[ws.wire.prefix_len + ws.wire.magic.len ..][0..2], ws.wire.version, .big);
+    broken[ws.wire.prefix_len] = 'X';
+    try inbox.appendSlice(gpa, broken[0..len]);
+    drainInbox(gpa, 0);
+    try std.testing.expect(latched != Notice.version_mismatch);
+    try std.testing.expectEqual(@as(?Notice, null), takeNotice());
+    // handshake 뒤의 버전 위반도 규칙 위반 — 버전 안내가 아니다.
     decoder = .init(.to_maru);
     inbox.clearRetainingCapacity();
     latched = null;
@@ -432,6 +445,72 @@ test "a sidecar of another control-channel version stops with a version notice i
     drainInbox(gpa, 0);
     try std.testing.expect(latched != Notice.version_mismatch);
     try std.testing.expectEqual(@as(?Notice, null), takeNotice());
+}
+
+extern "c" fn waitid(idtype: c_int, id: c_uint, info: *[128]u8, options: c_int) c_int;
+
+test "an exit seen before the last frame is read still reads it, so a version mismatch is not counted as a crash" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count()); // 크래시 경로가 실제 sidecar 를 띄우지 않게
+    const saved_failures = .{ failures, failure_head };
+    defer {
+        failures = saved_failures[0];
+        failure_head = saved_failures[1];
+        if (process) |*p| {
+            lsp_process.kill(p, .KILL);
+            lsp_process.reapBlocking(p);
+            p.deinit(gpa);
+        }
+        process = null;
+        inbox.deinit(gpa);
+        inbox = .empty;
+        notice_queue.deinit(gpa);
+        notice_queue = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        decoder = .init(.to_maru);
+        latched = null;
+        state = .off;
+    }
+    // 이미 끝났지만 아직 거두지 않은 자식(`waitid` 의 WNOWAIT — 거두지 않고 끝나기만 기다린다).
+    var child = try lsp_process.spawn(gpa, "/usr/bin/true", &.{}, "/");
+    var handed_over = false;
+    defer if (!handed_over) {
+        lsp_process.reapBlocking(&child);
+        child.deinit(gpa);
+    };
+    var info: [128]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), waitid(1, @intCast(child.pid), &info, 0x4 | 0x20)); // P_PID · WEXITED|WNOWAIT
+    // 그 자식이 끝나기 직전에 쓴 것처럼, 아직 안 읽은 버전이 다른 `hello_ack` 가 파이프에 있다.
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    var fds_owned = true; // `child` 에 넘기기 전에 실패하면 닫는다
+    defer if (fds_owned) {
+        _ = std.c.close(fds[0]);
+        _ = std.c.close(fds[1]);
+    };
+    // 운영의 `out_fd` 처럼 비차단·exec 에 안 넘김 — 다른 시험이 띄운 자식이 쓰기 끝을 물려받으면 EOF 가 영영 안 와 샤드가
+    // 멈춘다(W7a1 5 차 적대 검증).
+    for (fds) |fd| _ = std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, @as(c_int, @bitCast(std.c.O{ .NONBLOCK = true })));
+    var frame: [64]u8 = undefined;
+    const len = try ws.codec.encode(.{ .hello_ack = .{ .instance = 0, .nonce = 0 } }, &frame);
+    std.mem.writeInt(u16, frame[ws.wire.prefix_len + ws.wire.magic.len ..][0..2], ws.wire.version + 1, .big);
+    try std.testing.expectEqual(@as(isize, @intCast(len)), std.c.write(fds[1], &frame, len));
+    _ = std.c.close(fds[1]);
+    _ = std.c.close(child.out_fd);
+    child.out_fd = fds[0];
+    fds_owned = false;
+    // 실제 순서처럼 먼저 거둔다(`pump` 의 `reapIfExited`) — 그 뒤 멈출 때 거둔 pid 를 다시 죽이거나 기다리지 않는다.
+    try std.testing.expect(lsp_process.reapIfExited(&child));
+    process = child;
+    handed_over = true;
+    state = .starting;
+    onExited(gpa, 0, process_generation);
+    try std.testing.expectEqual(@as(?Notice, .version_mismatch), latched);
+    try std.testing.expect(process == null); // 멈췄다 — 다시 띄우지 않는다
+    try std.testing.expectEqual(saved_failures[1], failure_head); // 크래시로 세지 않았다
 }
 
 test "engine change notice fires once per new value and resets when the setting returns" {
@@ -656,18 +735,21 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     // 비우는 사이 sidecar 가 끝났거나(`profile_in_use` 로 멈춤) 다시 떴다 — 위의 `read`·`p` 는 옛 프로세스의 것이다.
     // 처음엔 그대로 이어가 옛 EOF 로 새 sidecar 를 또 죽은 것으로 세거나, 비운 optional 을 읽었다(적대 점검).
     if (process == null or process_generation != generation) return;
-    if (read == .eof or lsp_process.reapIfExited(&process.?)) {
-        // 읽기와 거두기 사이에 끝났을 수 있다 — 끝나기 직전에 쓴 frame(버전 불일치의 `hello_ack` 등)을 마저 읽고 적용한 뒤
-        // 판정한다. 안 읽으면 버전 불일치가 크래시로 세어져 재시작 셋 뒤 「거듭 멈춤」으로 잘못 안내된다(W7a1 적대 검증).
-        if (lsp_process.readInto(&process.?, gpa, &inbox, 256 * 1024)) |_| {} else |_| {}
-        drainInbox(gpa, now_ms);
-        if (process == null or process_generation != generation) return;
-        return crashed(gpa, now_ms);
-    }
+    if (read == .eof or lsp_process.reapIfExited(&process.?)) return onExited(gpa, now_ms, generation);
     if (state == .starting and now_ms - started_ms > handshake_timeout_ms) {
         lsp_process.kill(&process.?, .KILL);
         return crashed(gpa, now_ms);
     }
+}
+
+/// sidecar 가 끝났다(EOF 또는 거둠). 읽기와 거두기 사이에 끝났을 수 있다 — 끝나기 직전에 쓴 frame(버전 불일치의 `hello_ack`
+/// 등)을 마저 읽고 적용한 뒤 판정한다. 안 읽으면 버전 불일치가 크래시로 세어져 재시작 셋 뒤 「거듭 멈춤」으로 잘못 안내된다
+/// (W7a1 적대 검증).
+fn onExited(gpa: std.mem.Allocator, now_ms: i64, generation: u64) void {
+    if (lsp_process.readInto(&process.?, gpa, &inbox, 256 * 1024)) |_| {} else |_| {}
+    drainInbox(gpa, now_ms);
+    if (process == null or process_generation != generation) return;
+    crashed(gpa, now_ms);
 }
 
 /// 이 surface 에 새 프레임이 있으면 front 로 삼는다(W3c). `completed_generation` 은 그 창에서 GPU 가 끝낸 마지막

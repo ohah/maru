@@ -75645,7 +75645,7 @@ test "소스 컨트롤: 대상 저장소는 활성 터미널 cwd가 먼저다(�
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
     var other_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const other = std.fmt.bufPrint(&other_buf, "{s}/.zig-cache/tmp-scm-priority", .{expected}) catch return error.SkipZigTest;
+    const other = git_backend_mod.testTempRepoPath(&other_buf, "tmp-scm-priority") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{other}) catch return error.SkipZigTest;
     _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
@@ -81389,11 +81389,9 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
 
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.SkipZigTest;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    // 워크트리 밖의 유일한 임시 디렉터리(`git_backend.tmpRepoPath` — 겹친 시험이 개발자 워크트리를 건드리지 않게).
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-session-turn", .{cwd}) catch return error.SkipZigTest;
+    const repo = git_backend_mod.testTempRepoPath(&repo_buf, "tmp-session-turn") orelse return error.SkipZigTest;
     if (!git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo })) return error.SkipZigTest;
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
     if (!git_backend_mod.testRunQuiet(&.{ git_exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
@@ -81782,11 +81780,9 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
 
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.SkipZigTest;
-    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    // 워크트리 밖의 유일한 임시 디렉터리(`git_backend.tmpRepoPath` — 겹친 시험이 개발자 워크트리를 건드리지 않게).
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-session-turn-trigger", .{cwd}) catch return error.SkipZigTest;
+    const repo = git_backend_mod.testTempRepoPath(&repo_buf, "tmp-session-turn-trigger") orelse return error.SkipZigTest;
     if (!git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo })) return error.SkipZigTest;
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
     if (!git_backend_mod.testRunQuiet(&.{ git_exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;

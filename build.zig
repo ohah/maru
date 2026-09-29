@@ -2679,8 +2679,10 @@ pub fn build(b: *std.Build) void {
                 "codesign --force --options runtime --timestamp --entitlements src/platform/macos/MaruMermaidRenderer.entitlements --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/MacOS/maru; " ++
-                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app; " ++
+                // Maru.app 의 entitlements(카메라·마이크·위치 — W7a1) — 번들 서명이 main executable 을 다시 서명한다.
+                "codesign --force --options runtime --timestamp --entitlements src/platform/macos/MaruApp.entitlements --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app; " ++
                 "codesign --verify --strict --deep zig-out/Maru.app; " ++
+                "sh tools/check-macos-app-entitlements.sh zig-out/Maru.app; " ++
                 "version=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" zig-out/Maru.app/Contents/Info.plist); " ++
                 "rm -rf dist/dmg-staging; mkdir -p dist/dmg-staging; " ++
                 // .app 자체를 먼저 공증 + staple한다 — dmg에만 staple하면 .app엔 티켓이 없어, 다른 맥(특히 오프라인·
@@ -9137,7 +9139,7 @@ pub fn build(b: *std.Build) void {
 
     // 웹 OSR sidecar(W1b) 등록은 `build/web_sidecar.zig` 가 소유한다 — CEF 없는 시험은 기본 test 에,
     // sidecar 실행 파일은 `-Dcef-sdk` 가 있을 때만 `web-sidecar` 스텝에.
-    web_sidecar_build.register(b, .{ .target = target, .optimize = optimize, .test_step = test_step, .macos_sdk = macos_sdk });
+    web_sidecar_build.register(b, .{ .target = target, .optimize = optimize, .test_step = test_step, .macos_sdk = macos_sdk, .maru_version = build_zig_zon.version });
 
     // Opt-in external oracle: validates committed goldens against system libvterm.
     // Intentionally NOT wired into the default `test` step or `mise run check` so

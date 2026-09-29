@@ -1069,6 +1069,7 @@ const Table = struct {
     web_osr_profile_in_use: [:0]const u8,
     web_osr_start_failed: [:0]const u8,
     web_osr_crashed: [:0]const u8,
+    web_osr_version_mismatch: [:0]const u8,
     web_osr_not_installed: [:0]const u8,
     set_browser_engine_restart: [:0]const u8,
     /// Chromium 탭의 JS 대화상자(W5a — maru 창에 붙는 경고창). `{0}` 은 요청한 사이트의 출처(위장 방지 — Chrome 과 같다).
@@ -1688,6 +1689,7 @@ const en: Table = .{
     .web_osr_profile_in_use = "Another maru is using the Chromium browser profile. Chromium tabs stay empty in this window.",
     .web_osr_start_failed = "The Chromium engine could not start. Reinstall it with brew reinstall maru-chromium.",
     .web_osr_crashed = "The Chromium engine stopped repeatedly and will not restart. Restart maru to try again.",
+    .web_osr_version_mismatch = "The installed Chromium engine (maru-chromium) does not match this maru. Update maru and maru-chromium to their latest versions, then restart maru.",
     .web_osr_not_installed = "The Chromium engine is not installed (brew install maru-chromium). Browser tabs use WebKit.",
     .set_browser_engine_restart = "The browser engine changes after you restart maru.",
     .web_dialog_title = "{0} says",
@@ -2518,6 +2520,7 @@ const ko: Table = .{
     .web_osr_profile_in_use = "다른 maru 가 Chromium 브라우저 프로필을 쓰고 있습니다. 이 창의 Chromium 탭은 비어 있습니다.",
     .web_osr_start_failed = "Chromium 엔진을 시작하지 못했습니다. brew reinstall maru-chromium 으로 다시 설치해 보세요.",
     .web_osr_crashed = "Chromium 엔진이 거듭 멈춰 다시 시작하지 않습니다. maru 를 다시 켜 보세요.",
+    .web_osr_version_mismatch = "설치된 Chromium 엔진(maru-chromium)이 이 maru 와 맞지 않습니다. maru 와 maru-chromium 을 모두 최신으로 올린 뒤 maru 를 다시 켜 주세요.",
     .web_osr_not_installed = "Chromium 엔진이 설치되어 있지 않습니다(brew install maru-chromium). 브라우저 탭은 WebKit 으로 엽니다.",
     .set_browser_engine_restart = "브라우저 엔진은 maru 를 다시 시작하면 바뀝니다.",
     .web_dialog_title = "{0}의 메시지",

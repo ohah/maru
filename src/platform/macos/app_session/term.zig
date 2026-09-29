@@ -596,31 +596,42 @@ pub fn createTerm(
             const remote_dead = is_macos and !reconnected and app_session_mod.app_remote_backend != null and !app_session_mod.host_connect_failed and
                 (err == error.ConnectionClosed or err == error.WriteFailed or err == error.UnsupportedSpawnContract);
             if (!remote_dead) return err;
-            self.markHostConnectFailedError(.runtime_death, err);
             // **in-process 로 가기 전에 한 번 다시 붙는다.** host 가 죽는 흔한 이유는 사고가 아니라 «붙은 게
-            // 없어 30 s 뒤 스스로 내려감»(복원할 runtime 이 없던 첫 실행)이고, 그 뒤 새 Term 은 host 를 다시
-            // 띄우면 keep-alive 그대로다. 죽은 spawn host 를 pool 에서 치워야 `ensureRemoteBackend` 의
-            // «이미 붙어 있음» 조기 반환을 지나 launch/connect 로 간다. 그것도 실패하면 아래 폴백 그대로.
-            if (app_session_mod.AppSession.evictDeadSpawnHost()) {
+            // 없어 30 s 뒤 스스로 내려감»(복원할 runtime 이 없던 첫 실행, 또는 마지막 pane 을 닫은 host 의
+            // 자연 종료)이고, 그 뒤 새 Term 은 host 를 다시 띄우면 keep-alive 그대로다. 죽은 spawn host 를
+            // pool 에서 치워야 `ensureRemoteBackend` 의 «이미 붙어 있음» 조기 반환을 지나 launch/connect 로 간다.
+            //
+            // **실패 기록(`runtime_death`)은 재시도가 실패한 뒤에만 남긴다.** 예전엔 여기서 먼저 기록해, 재시작이
+            // 곧바로 성공하는 정상 회수에도 error 두 줄(「in-process 로 폴백」·link state)이 남았다 — 실제로는
+            // 폴백하지 않았는데 로그는 폴백했다고 말해, host 가 12 분마다 «조용히 죽는» 사고로 오인됐다
+            // (2026-09-29 실측: 두 번 모두 재spawn 성공, 셸 유실 0). 첫 실패는 info 한 줄로 남긴다.
+            std.log.info("spawn host gone ({s}) — evicting it and relaunching once before in-process", .{@errorName(err)});
+            relaunch: {
+                if (!app_session_mod.AppSession.evictDeadSpawnHost()) {
+                    self.markHostConnectFailedError(.runtime_death, err);
+                    break :relaunch;
+                }
+                // ensure 가 실패하면 **자기 단계**(launch/connect/adapter)를 이미 기록했다 — 그것이 더 정확한
+                // 원인이므로 `runtime_death` 로 덮지 않는다(예전에도 ensure 의 기록이 마지막이었다).
                 self.ensureRemoteBackendNow();
-                if (!app_session_mod.host_connect_failed) {
-                    if (app_session_mod.app_remote_backend) |*rb| {
-                        be = rb.backend();
-                        if (be.spawn(.{
-                            .handle = id,
-                            .request = req,
-                            .size = size,
-                            .queue_capacity = queue_capacity,
-                            .initial_config = runtime_config,
-                        })) |respawned| {
-                            // 죽음 → 재시작 → 성공이 한 createTerm 안에서 끝났다. 위 mark 가 걸어 둔
-                            // «host 연결 실패» notice 는 이제 거짓이라 내린다(래치는 ensure 가 이미 풀었다).
-                            self.host_connect_notice_pending = false;
-                            break :surface respawned;
-                        } else |retry_err| {
-                            self.markHostConnectFailedError(.runtime_death, retry_err);
-                        }
-                    }
+                if (app_session_mod.host_connect_failed) break :relaunch;
+                const rb = if (app_session_mod.app_remote_backend) |*value| value else {
+                    self.markHostConnectFailedError(.runtime_death, err);
+                    break :relaunch;
+                };
+                be = rb.backend();
+                if (be.spawn(.{
+                    .handle = id,
+                    .request = req,
+                    .size = size,
+                    .queue_capacity = queue_capacity,
+                    .initial_config = runtime_config,
+                })) |respawned| {
+                    // 죽음 → 재시작 → 성공이 한 createTerm 안에서 끝났다. 실패를 기록한 적이 없으니 내릴
+                    // notice 도 없다 — 이 경로는 사용자에게 보이는 흔적 없이 keep-alive 로 이어진다.
+                    break :surface respawned;
+                } else |retry_err| {
+                    self.markHostConnectFailedError(.runtime_death, retry_err);
                 }
             }
             be = termBackend(self); // errdefer·이후 단계가 in-process backend를 쓰도록 갱신.

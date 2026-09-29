@@ -568,6 +568,10 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
   상속하지 않는 독립 step이다(in-process socketpair fixture만 써서 실제 host를 띄우지 않는다). host admission 하나가 charge
   하나만 잡아 runtime 8개 이상인 host도 재접속을 시작하는지 N=7·8·13, 예산 대기, anchor 이탈, identity-only executor로
   정산 없는 teardown까지 Debug·ReleaseFast에서 8개를 exact-count하고 경계 1개를 함께 돈다. Debug는 PR의 `test-macos-only`에, 경계는 check-boundaries에 걸린다.
+- 영속 세션 호스트 무로그 종료 경계: `zig build test-session-host-silent-diagnostics`. 업그레이드 coordinator 의 모든
+  `handoff_failed` 산출 줄이 4 줄 안에 단계 기록을 두는지(라벨 유일성·authority 전이 에러 이름 포함), host 자연 종료와
+  listener 깨짐이 로그 한 줄을 남기고 나가는지, `createTerm` 이 죽은 spawn host 재시작 **전에** `runtime_death` 를 기록하지
+  않는지를 주석을 걷은 문법 자리로 잰다. 실행 없이 소스만 읽고 check-boundaries 에 걸린다.
 - 영속 세션 호스트 CR2e-e3c1 coordinator ingress gate: `zig build test-session-host-cr2e-e3c1`. e3b2를 상속하고
   final-address reconnect-only `SessionHostCoordinator`가 AppSession frame의 sole drain을 소유하는지 Debug·ReleaseFast로
   exact-count한다. queue/budget은 `AppProcessIncidentOwner`, runtime map은 `RemoteTermBackend`에 그대로 남고 coordinator는

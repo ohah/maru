@@ -547,11 +547,13 @@ fn processBudgetReserved(
     var runtime_id_buf: [upgrade_limits.max_runtime_count]u128 = undefined;
     const runtime_ids = capture.sortedRuntimeIds(&runtime_id_buf);
     const next_handle = capture.next_handle;
-    const handoff_bytes = capture.encode(record) catch
+    const handoff_bytes = capture.encode(record) catch |err| {
+        noteUpgradeStageErr("handoff_encode", err);
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
             .reason = .handoff_failed,
         }, deadline);
+    };
     defer ctx.allocator.free(handoff_bytes);
     if (deadline.expired())
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
@@ -647,10 +649,15 @@ fn processBudgetReserved(
 
     switch (ctx.authority.begin_restoring(ctx.authority.ctx, ready_authority)) {
         .applied => {},
-        .unchanged_retryable => return resumeAndFinish(ctx, &frozen, attempt_id, .{
-            .status = .resumed,
-            .reason = .handoff_failed,
-        }, deadline),
+        // 2026-09-29 실측: 승계 루프가 manifest 를 경로로 찍어 ctime 이 바뀐 host 는 여기서 **매번** 접혔는데
+        // 한 줄도 남지 않아, 세 번의 실패를 로그로 가르지 못했다. 에러 이름은 authority 쪽이 남긴다.
+        .unchanged_retryable => {
+            noteUpgradeStage("authority_begin_restoring");
+            return resumeAndFinish(ctx, &frozen, attempt_id, .{
+                .status = .resumed,
+                .reason = .handoff_failed,
+            }, deadline);
+        },
         .indeterminate_poisoned => {
             frozen.active = false;
             return finish(ctx.owner, attempt_id, .{
@@ -681,10 +688,16 @@ fn processBudgetReserved(
             .reason = .authority_poisoned,
         });
     }
-    if (!replaceAll(reservation, capture.resources, pair, ctx.lifetime_owner, ctx.layout))
+    // 아래 셋은 모두 `rollbackAuthority(…, .handoff_failed)` 로 접혀 `upgrade rolled back … reason=handoff_failed`
+    // 한 줄로는 서로 갈리지 않는다 — 각자 단계 이름을 먼저 남긴다.
+    if (!replaceAll(reservation, capture.resources, pair, ctx.lifetime_owner, ctx.layout)) {
+        noteUpgradeStage("replace_all");
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);
-    reservation.assertExactNonCloexec(&.{}) catch
+    }
+    reservation.assertExactNonCloexec(&.{}) catch |err| {
+        noteUpgradeStageErr("non_cloexec_assert", err);
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);
+    };
     if (deadline.expired())
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .deadline_exceeded, deadline);
     // Manifest republish와 FD replacement 사이에도 child/fd graph는 변할 수 있다. pathname exec 바로 전 같은 capture를
@@ -693,8 +706,10 @@ fn processBudgetReserved(
         noteUpgradeStageErr("capture_revalidate_pre_exec", err);
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .runtime_changed, deadline);
     };
-    if (!ctx.rollback_image.revalidate())
+    if (!ctx.rollback_image.revalidate()) {
+        noteUpgradeStage("rollback_image_revalidate_pre_exec");
         return rollbackAuthority(ctx, &frozen, restoring_authority, attempt_id, .handoff_failed, deadline);
+    }
 
     ctx.executor.execute(ctx.executor.ctx, .{
         .target_path = execution.target.artifact.path,
@@ -886,6 +901,18 @@ fn noteUpgradeStage(stage: []const u8) void {
 fn noteUpgradeStageErr(stage: []const u8, err: anyerror) void {
     if (builtin.is_test) return;
     host_log.line("session host upgrade stage failed: stage={s} err={s}", .{ stage, @errorName(err) });
+}
+
+/// authority 전이(`begin_restoring`·`rollback_ready`·`fail_stop`)가 wire 결과(`unchanged_retryable` 등)로 접히기
+/// **전의 에러 이름**을 남긴다. authority 쪽(`host_authority.zig`)은 host_log 로 가는 import 가 없으므로 이미
+/// import 하고 있는 이 모듈을 거쳐 남긴다 — 새 import edge 를 만들지 않는다.
+///
+/// 2026-09-29 실측: 9/27 빌드의 승계 루프가 manifest 를 경로로 찍어(`utimensat`) ctime 이 바뀐 host 는
+/// `begin_restoring` → `republish` 가 identity 불일치로 실패했는데, 그 에러가 `else => .unchanged_retryable` 로
+/// 삼켜져 업그레이드 세 번이 모두 **한 줄도 없이** `handoff_failed` 로 끝났다. 이 줄 하나면 즉시 갈렸다.
+pub fn noteAuthorityTransitionErr(transition: []const u8, err: anyerror) void {
+    if (builtin.is_test) return;
+    host_log.line("session host upgrade authority transition failed: transition={s} err={s}", .{ transition, @errorName(err) });
 }
 
 /// 예약 대조가 어긋난 **축과 숫자**를 남긴다. `stage=budget_reservation_mismatch` 만으로는
@@ -1292,7 +1319,10 @@ fn reportForStoreError(err: handoff_store.Error) upgrade_wire.AttemptReport {
     return switch (err) {
         error.DeadlineExceeded => .{ .status = .resumed, .reason = .deadline_exceeded },
         error.LimitExceeded, error.InsufficientSpace => .{ .status = .resumed, .reason = .state_too_large },
-        else => .{ .status = .resumed, .reason = .handoff_failed },
+        else => blk: {
+            noteUpgradeStageErr("handoff_store_commit", err);
+            break :blk .{ .status = .resumed, .reason = .handoff_failed };
+        },
     };
 }
 
@@ -1300,7 +1330,10 @@ fn reportForBudgetError(err: budget_admission.Error) upgrade_wire.AttemptReport 
     return switch (err) {
         error.DeadlineExceeded => .{ .status = .resumed, .reason = .deadline_exceeded },
         error.LimitExceeded, error.InsufficientSpace, error.InsufficientIoBudget => .{ .status = .resumed, .reason = .state_too_large },
-        else => .{ .status = .resumed, .reason = .handoff_failed },
+        else => blk: {
+            noteUpgradeStageErr("budget_prepare", err);
+            break :blk .{ .status = .resumed, .reason = .handoff_failed };
+        },
     };
 }
 

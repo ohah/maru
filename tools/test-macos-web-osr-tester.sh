@@ -621,9 +621,10 @@ sheet
 mark end
 SCRIPT
 : > "$root/report"
-# sidecar 를 죽여 떠 있던 sheet 가 답 없이 닫히는지 본다(`mark crash` 를 보고 죽인다).
+# sidecar 를 죽여 떠 있던 sheet 가 답 없이 닫히는지 본다(`mark crash` 를 보고 죽인다). sidecar 는 임시 홈 아래 실행 사본에서
+# 돈다(W7a2 — `~/Library/Caches/maru/web-osr-run/run-*`).
 ( while ! grep -q '^mark crash' "$root/report" 2>/dev/null; do sleep 0.2; done
-  pkill -KILL -f "$sidecar_dir/maru-web-host" 2>/dev/null || true ) &
+  pkill -KILL -f "$root/home/Library/Caches/maru/web-osr-run/run-[^/]*/maru-web-host" 2>/dev/null || true ) &
 crash_pid=$!
 page_path=/dialogs run_app "$root/dialogs.txt" 100000
 kill "$crash_pid" 2>/dev/null || true

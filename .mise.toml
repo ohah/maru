@@ -169,8 +169,8 @@ description = "Fetch and verify the pinned CEF SDK for the web OSR sidecar (opt-
 run = "sh tools/cef-sdk-fetch.sh"
 
 [tasks.web-sidecar]
-description = "Build maru-web-host/helper and the W1b judge into zig-out/web-sidecar (opt-in; fetches the CEF SDK)"
-run = 'sdk=$(sh tools/cef-sdk-fetch.sh) && zig build web-sidecar -Dcef-sdk="$sdk"'
+description = "Build maru-web-host/helper and the W1b judge into zig-out/web-sidecar, and the maru-chromium install tree into zig-out/maru-chromium (opt-in; fetches the CEF SDK)"
+run = 'sdk=$(sh tools/cef-sdk-fetch.sh) && zig build web-sidecar web-sidecar-dist -Dcef-sdk="$sdk"'
 
 [tasks.web-osr-smoke]
 description = "Run the local W3b smoke: the app spawns the Chromium sidecar, restarts it, and leaves no orphan"

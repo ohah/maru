@@ -25,7 +25,19 @@
 > 0이 된 뒤에만** 자연 종료하고 새 host를 시작한다. capability 없는 host를 죽여 migration처럼 보이게 하지 않는다.
 > 자연 종료는 세 조건(runtime을 한 번이라도 서빙했음 · 지금 runtime 0 · 붙은 client 0)을 모두 만족한 채 유예가
 > 지나야 성립한다(`daemon.shouldExitNaturally`). 신생 host가 첫 spawn 전에 스스로 물러나면 그 host를 띄운 GUI가
-> endpoint를 잃기 때문이다.
+> endpoint를 잃기 때문이다. 자연 종료는 `session host exiting naturally: served_runtime=… served_client=…
+> idle_ticks=…` 한 줄을 host 로그에 남기고 나간다(listener 가 깨져 나가는 갈래도 `session host exiting: listener
+> broken`). 이 줄이 없던 때는 소켓·manifest 까지 정상 정리된 자연 종료가 「로그 없이 사라진 host」로 보여 사고로
+> 오인됐다(2026-09-29).
+>
+> **`handoff_failed` 로 접히는 모든 자리는 단계 이름을 남긴다.** 이 wire reason 은 coordinator 에서 열네 곳이
+> 쓰는데, 그중 일곱(`handoff_encode`·`handoff_store_commit`·`budget_prepare`·`authority_begin_restoring`·
+> `replace_all`·`non_cloexec_assert`·`rollback_image_revalidate_pre_exec`)이 한 줄도 남기지 않았다. authority 전이는
+> 에러를 `else => .unchanged_retryable` 로 삼켰으므로 접기 **전에** `session host upgrade authority transition failed:
+> transition=… err=…` 를 남긴다. 2026-09-29 실측: 9/27 빌드의 승계 루프가 manifest 를 경로로 찍어 ctime 이 바뀐 host 는
+> `begin_restoring` 의 identity 대조에서 매번 접혔는데, 세 번의 실패가 모두 무로그라 원인을 파일 시각으로 추론해야
+> 했다. 경계 판정자 `test-session-host-silent-diagnostics` 가 「제품 코드의 `handoff_failed` 줄마다 4 줄 안에 단계
+> 기록」과 라벨 유일성을 잰다.
 >
 > **fd 상한 제약**: exec layout은 fd 40부터 `exec_fd_set.max_slots`(= `max_runtime_count` + 3 = 259)개의 **연속 빈
 > 슬롯**을 요구한다(`findAvailableLayout`). launchd가 GUI에 주는 기본 soft limit은 256이고 host가 그대로 상속하므로,

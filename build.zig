@@ -6732,6 +6732,26 @@ pub fn build(b: *std.Build) void {
     upgrade_runtime_changed_stage_step.dependOn(&run_upgrade_runtime_changed_stage.step);
     boundary_step.dependOn(&run_upgrade_runtime_changed_stage.step);
 
+    // 로그 없이 끝나던 세 자리 — 업그레이드 `handoff_failed` 산출 지점·host 자연 종료·spawn 재시도의 거짓
+    // 폴백 줄 — 가 다시 조용해지지 않는가. 셋 다 동작은 맞고 로그가 틀려 진단을 엉뚱한 곳으로 보냈다.
+    const session_host_silent_diagnostics_step = b.step(
+        "test-session-host-silent-diagnostics",
+        "Upgrade handoff_failed sites, host natural exit and spawn relaunch never end without naming what happened",
+    );
+    const session_host_silent_diagnostics_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_silent_diagnostics_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_silent_diagnostics = b.addRunArtifact(session_host_silent_diagnostics_tests);
+    run_session_host_silent_diagnostics.addArg("--maru-expect-tests=3");
+    run_session_host_silent_diagnostics.addArg("--maru-expect-passed=3");
+    run_session_host_silent_diagnostics.setCwd(b.path("."));
+    session_host_silent_diagnostics_step.dependOn(&run_session_host_silent_diagnostics.step);
+    boundary_step.dependOn(&run_session_host_silent_diagnostics.step);
+
     // 관측 이벤트당 비용을 **줄일 수 있는지** 판단할 두 비(events/drain, digests/event)가 계속
     // 나오는가. 이 계측이 사라지면 최적화 판단이 다시 추측이 된다.
     const observation_event_cost_step = b.step(

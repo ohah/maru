@@ -977,10 +977,22 @@ fn runSessionHostImpl(
                     registry.count(),
                     fd_owner.activeCount(),
                     empty_idle_ticks,
-                )) break;
+                )) {
+                    // **스스로 내려가는 것을 남긴다.** 이 줄이 없던 때 host 로그는 시작 줄과 idle close 줄로
+                    // 끝났고, 소켓·manifest 까지 정상 정리돼 「종료 로그 없이 사라진 host」가 사고로 읽혔다
+                    // (2026-09-29: 새 빌드 host 셋이 12 분 간격으로 «조용히» 사라진 것 — 전부 이 자연 종료였다).
+                    host_log.line(
+                        "session host exiting naturally: served_runtime={} served_client={} idle_ticks={d}",
+                        .{ served_any_runtime, served_any_client, empty_idle_ticks },
+                    );
+                    break;
+                }
             },
             .progress => {},
-            .listener_broken => break,
+            .listener_broken => {
+                host_log.line("session host exiting: listener broken", .{});
+                break;
+            },
             // A fork child must not run any inherited owner/path cleanup defer. The common fatal
             // leaf exits immediately with proof-loss provenance instead of unwinding this loop.
             .authority_lost => fd_owner.requireCurrentProcessOrFatal(),

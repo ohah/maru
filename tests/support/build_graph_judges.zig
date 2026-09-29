@@ -118,8 +118,10 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     //  상한·기록 교체)을 잰다. session-host 잡은 PR 에서 안 돌아 여기(check-boundaries)에 건다.
     // +1(2026-09-29): `CR6e-c3b2c 경계는` — host 재접속 admission 이 charge 하나만 잡고 anchor 가 떠나기
     //  전에 넘기는 배선을 잰다. 동작 판정자는 PR 의 `test-macos-only` 가 N=7·8·13 으로 잰다.
-    try std.testing.expectEqual(@as(usize, 209), old_count);
-    try std.testing.expectEqual(@as(usize, 210), new_count);
+    // +1(2026-09-29): `session_host_silent_diagnostics_boundary` — 업그레이드 `handoff_failed` 산출 지점·host
+    //  자연 종료·spawn 재시도가 로그 없이(또는 거짓 폴백 줄로) 끝나지 않는지 문법 자리로 잰다.
+    try std.testing.expectEqual(@as(usize, 210), old_count);
+    try std.testing.expectEqual(@as(usize, 211), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0

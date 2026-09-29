@@ -508,6 +508,13 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" ru
   다. 위 두 이유와 충돌하지 않는다: 새 Term 의 fresh spawn 은 이중 attach 를 만들 수 없고(⑴), 오히려 in-process 와
   원격이 섞이는 폭을 줄인다(⑵). 판정자 `R3 #3b`(pool 모드, 실제 host 를 죽인 뒤 spawn host 가 치워지고 실패 단계가
   `runtime_death` 너머로 옮겨 감) · 실제 앱에서 ⌘T 로 새 host 가 뜨고 새 셸이 그 host 의 자식임을 확인했다.
+  **`runtime_death` 는 재시도가 실패한 뒤에만 기록한다**(2026-09-29). 첫 쓰기 실패는 info 한 줄
+  (`spawn host gone (<err>) — evicting it and relaunching once before in-process`)만 남기고, ① evict 실패·backend 없음은
+  원래 에러로, ③ 재spawn 실패는 재시도의 에러로 `runtime_death` 를 기록한다. ② ensure 실패는 ensure 가 자기 단계
+  (`connect`·`adapter` 등)로 이미 기록했으므로 덮지 않는다. 예전엔 재시도 **전에** 기록해, 재시작이 곧바로 성공하는
+  정상 회수(마지막 pane 을 닫은 host 의 자연 종료 뒤 새 탭)에도 error 로 「in-process 로 폴백」·link state 두 줄이
+  남았다 — 실측에서 새 빌드 host 셋이 12 분 간격으로 «조용히 죽는» 사고로 오인됐다(셸 유실 0, 재spawn 전부 성공).
+  경계 판정자 `test-session-host-silent-diagnostics` 가 첫 실패 구간의 기록 0·재시도 실패 갈래의 기록 1을 잰다.
 - Window를 닫거나 Workspace/Term을 다른 Window로 옮기는 것은 먼저 하나의 layout transaction으로 source/target을 검증한
   뒤 manifest 위치만 바꾼다. 성공한 이동은 `runtime-handle`, child pid, scrollback을 바꾸지 않는다.
 - app-wide Quit은 모든 Window의 GUI subscription을 끊는 detach다. 비마지막 Window/Workspace/Term의 명시적 close는 기존

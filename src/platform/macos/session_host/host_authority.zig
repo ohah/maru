@@ -240,7 +240,7 @@ pub const HostAuthority = struct {
     ) upgrade_product.AuthorityTransition {
         const self: *HostAuthority = @ptrCast(@alignCast(ctx));
         if (!sameSnapshot(self.snapshot(), expected)) return .indeterminate_poisoned;
-        self.beginRestoring() catch |err| return transitionForError(err);
+        self.beginRestoring() catch |err| return transitionForErrorNoted("begin_restoring", err);
         return .applied;
     }
 
@@ -250,7 +250,7 @@ pub const HostAuthority = struct {
     ) upgrade_product.AuthorityTransition {
         const self: *HostAuthority = @ptrCast(@alignCast(ctx));
         if (!sameSnapshot(self.snapshot(), expected)) return .indeterminate_poisoned;
-        self.rollbackReady() catch |err| return transitionForError(err);
+        self.rollbackReady() catch |err| return transitionForErrorNoted("rollback_ready", err);
         return .applied;
     }
 
@@ -260,7 +260,7 @@ pub const HostAuthority = struct {
     ) upgrade_product.AuthorityTransition {
         const self: *HostAuthority = @ptrCast(@alignCast(ctx));
         if (!sameSnapshot(self.snapshot(), expected)) return .indeterminate_poisoned;
-        self.markDraining() catch |err| return transitionForError(err);
+        self.markDraining() catch |err| return transitionForErrorNoted("fail_stop", err);
         return .applied;
     }
 };
@@ -273,6 +273,13 @@ fn sameSnapshot(
         actual.upgrade_epoch == expected.upgrade_epoch and
         actual.authority_generation == expected.authority_generation and
         actual.lifecycle == expected.lifecycle;
+}
+
+/// 전이 에러를 wire 결과로 접기 **전에** 이름을 남긴다. 접힌 뒤에는 `InvalidManifest`(identity 불일치)와
+/// 디스크 I/O 실패가 같은 `unchanged_retryable` 이 되어 로그로 갈리지 않는다.
+fn transitionForErrorNoted(transition: []const u8, err: Error) upgrade_product.AuthorityTransition {
+    upgrade_product.noteAuthorityTransitionErr(transition, err);
+    return transitionForError(err);
 }
 
 fn transitionForError(err: Error) upgrade_product.AuthorityTransition {

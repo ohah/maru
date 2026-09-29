@@ -1942,6 +1942,14 @@ const sync_diag = std.log.scoped(.sync);
 // 줄이려 느린 tick(총>frametime_slow_ns)은 즉시 한 줄, 약 1초 창마다 실효 rate·mean/max·단계 비중을 요약한다.
 // 게이트는 diag.zig 단일 출처(관측 가능성 원칙, sync_diag와 동형).
 const frametime_diag = std.log.scoped(.frametime);
+const glyph_atlas_diag = std.log.scoped(.glyph_atlas);
+
+/// 버린 배치 때문에 아틀라스를 무효화했다는 한 줄. 드물어야 한다 — 자주 보이면 배치를 버리는 길(세대 변경·교체
+/// 실패)이 잦다는 뜻이고, 그때마다 모든 글리프를 다시 올린다.
+fn noteGlyphPlacementDiscarded(count: usize) void {
+    if (builtin.is_test) return;
+    glyph_atlas_diag.info("placement discarded before commit -> atlas invalidated (full re-upload next frame) count={d}", .{count});
+}
 
 /// 렌더러(metal_frame)에 꽂아 줄 진단용 시계. `std.Io` 는 platform 이 소유하므로 렌더러가 직접 못 읽는다.
 /// MARU_DEBUG 일 때 tick 이 자기 io 를 여기 걸어 두고, 아래 함수 포인터를 metal_frame 에 주입한다.
@@ -5839,6 +5847,11 @@ pub const AppSession = struct {
     trace_buf: []u8 = &.{},
     trace_path: ?[]const u8 = null,
     renderer_state: renderer.RendererState = undefined,
+    /// 글리프 배치 트랜잭션. 배치는 `placeAndDistribute` 한 입구에서만 일어나고, 그 결과가 `metal_buffer` 로
+    /// 넘어간 자리(`replace`·`replaceSidebar` 성공)에서만 커밋한다. 커밋되지 않은 배치가 있으면 다음 배치가
+    /// 아틀라스를 무효화한다 — 버린 배치의 글리프를 아틀라스가 「올라감」으로 기억하면 GPU 텍스처의 남의 픽셀을
+    /// 샘플한다(2026-09-29, 한글이 엉뚱한 글리프로 그려졌다). `renderer.glyph_placement` 참고.
+    glyph_placement: renderer.glyph_placement.PlacementTransaction = .{},
     frame_loop: app.AppFrameLoop = undefined,
     // 제품 app shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
     // appearance(폰트/색)는 init에서 한 번 resolve해 매 tick의 CoreTextFrameBuilder에 쓴다. 런타임 폰트
@@ -21580,7 +21593,7 @@ pub const AppSession = struct {
                     .origin_x = active_origin_x,
                     .origin_y = active_origin_y,
                     .colors = cell_colors,
-                }) catch {};
+                }) catch self.glyph_placement.taint(); // 활성 프레임의 업로드가 교체에 안 실린다
             } else if (tick_result) |*t| {
                 pane_frames.append(self.allocator, .{
                     .frame = t.frame.render_frame,
@@ -21591,7 +21604,7 @@ pub const AppSession = struct {
             }
             // sticky 배너는 활성 터미널 '위'(스크롤된 콘텐츠를 가린다)이되 floating 드래그 ghost '아래'에 둔다.
             if (sticky_pf) |pf| {
-                pane_frames.append(self.allocator, pf) catch {};
+                pane_frames.append(self.allocator, pf) catch self.glyph_placement.taint(); // sticky 업로드가 교체에 안 실린다
                 // 배너 하단 구분선(스크롤된 콘텐츠와 시각 분리) — 배너 한 줄 '아래' 경계(origin_y+ch)에 그어 배너
                 // 텍스트(active_term_rect.y..+ch)와 y가 겹치지 않는다. layer 3(over)라 셀 위에 또렷이.
                 const dch = self.cell_height_px;
@@ -21752,6 +21765,7 @@ pub const AppSession = struct {
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (ft_on) ft_rep = std.Io.Clock.awake.now(self.io).nanoseconds; // 조립 끝 = replace(투영) 시작
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                    self.glyph_placement.commit(); // 이번 배치의 업로드가 metal_buffer 로 넘어갔다
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
                     // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
                     self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
@@ -21855,10 +21869,12 @@ pub const AppSession = struct {
                         // 사이드바 place가 shared atlas를 grow/repack했다(code-review [0]): retained self.cells의 UV가
                         // stale이 됐고 repack된 좌표는 GPU 텍스처에 아직 안 쓰였다. 부분 swap을 버리고 전체 재투영을
                         // 예약하되 — sync hold가 metal_dirty를 막으므로 그것만으론 timeout(1초)까지 stale이 지속된다 —
-                        // force_reproject로 sync 게이트를 우회해 다음 tick에 반드시 full 투영(모든 글리프 재등록 + upload로
-                        // GPU 정합 + self.cells UV 재정규화)하게 한다. hold 중 full 투영이라 한 프레임 tearing 가능하나
-                        // atlas 손상(수백 ms stale)보다 낫다(view_offset/esu 강제 투영과 동형). repack은 스피너 글리프
-                        // (블록 8종) resident라 드물다.
+                        // force_reproject로 sync 게이트를 우회해 다음 tick에 반드시 full 투영(self.cells UV 재정규화)하게 한다.
+                        // **이 배치는 커밋하지 않는다** — 그 업로드는 버려지므로, 다음 배치의 `glyph_placement.begin` 이
+                        // 아틀라스를 무효화해 모든 글리프를 다시 올린다. (예전 주석은 「full 투영이 모든 글리프를 재등록·
+                        // upload 한다」고 했지만 hit 글리프는 안 올라가 텍스처의 남의 픽셀을 샘플했다 — 2026-09-29.) hold 중 full 투영이라 한 프레임 tearing 가능하나
+                        // atlas 손상(수백 ms stale)보다 낫다(view_offset/esu 강제 투영과 동형). 안 보이는 탭 출력이 이 부분
+                        // 경로로 오면서 사이드바 글리프가 계속 바뀌므로 repack 이 드물다는 전제는 더 이상 믿지 않는다.
                         self.metal_dirty = true;
                         self.force_reproject = true;
                         self.chrome_dirty = false;
@@ -21867,6 +21883,7 @@ pub const AppSession = struct {
                         // 스탬프는 **부분 swap이 실제로 성공했을 때만** 올린다(full 경로와 같은 트랜잭션 규칙) —
                         // `catch {}`로 삼킨 실패에서 기하만 전진하면 옛 사이드바 셀과 새 헤더/슬롯 높이가 갈린다.
                         const sidebar_replaced = if (self.metal_buffer.replaceSidebar(self.allocator, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config)) |_| blk: {
+                            self.glyph_placement.commit(); // 사이드바 배치의 업로드가 metal_buffer 로 넘어갔다
                             self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                             break :blk true;
                         } else |_| false;
@@ -21934,7 +21951,6 @@ pub const AppSession = struct {
                 .colors = .{ .default_fg = self.appearance.theme.foreground },
             } });
         sidebar_ops.collectSidebarSearchText(self, &collected, pane_ops.paneFrameBuilder(self));
-        const atlas_generation_before = self.renderer_state.atlas.generation;
         var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
         defer pane_frames.deinit(self.allocator);
         var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
@@ -21964,12 +21980,10 @@ pub const AppSession = struct {
             &sticky,
             &active,
         );
-        if (self.renderer_state.atlas.generation != atlas_generation_before) {
-            // The first placement may grow the shared atlas. Retry next tick with stable UVs,
-            // exactly like the normal chrome-only path.
-            self.metal_dirty = true;
-            return;
-        }
+        // **세대 검사를 하지 않는다**(2026-09-29). 예전에는 배치 중 아틀라스가 grow/repack 되면 다음 tick 에 다시 했지만,
+        // 이 경로는 retained 셀이 없는 **full replace** 이고 한 번의 배치는 스스로 한 세대로 끝난다(`prepareMultiPaneGlyphFrame`
+        // 의 재시작) — 다시 할 이유가 없다. 게다가 `glyph_placement.begin` 의 무효화도 세대를 바꾸므로, 검사를 두면 한 번
+        // 미커밋이 된 뒤로는 매번 무효화 → 포기를 되풀이해 선택 화면이 영영 안 그려진다(적대적 검증 실측 — livelock).
         if (sidebar_frame == null) return;
         const colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
         // replaceSidebar는 이미 존재하는 full frame을 보존하는 부분 갱신이다. 0-tab 선택기는 retained
@@ -21997,6 +22011,10 @@ pub const AppSession = struct {
             &.{},
             &.{},
         ) catch return;
+        // 검색 줄 등 pane 프레임은 이 full replace 에 안 실린다(0-tab 선택기는 빈 pane 목록 경로) — 그 업로드는 버려지므로
+        // 이 배치를 커밋하지 않는다. 이 경로는 dirty 일 때만 돌아, 다음 투영이 한 번 더 전부 올리는 비용뿐이다.
+        if (pane_frames.items.len > 0) self.glyph_placement.taint();
+        self.glyph_placement.commit(); // 복구 선택 화면 사이드바의 업로드가 metal_buffer 로 넘어갔다
         self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
         sidebar_ops.applySidebarGlyphPyTop(self);
         self.metal_dirty = false;
@@ -22811,6 +22829,9 @@ pub const AppSession = struct {
         defer self.allocator.free(lists);
         for (collected.items, lists) |c, *l| l.* = c.pane.shaped.runs;
 
+        // 직전 배치가 커밋되지 않았으면(부분 투영이 세대 변경으로 결과를 버렸거나, 교체가 실패·스킵됐다) 그 글리프는
+        // GPU 로 안 갔다 — 아틀라스가 잊게 무효화한다. 이번 배치는 `metal_buffer` 교체가 성공해야 커밋된다.
+        if (self.glyph_placement.begin(&self.renderer_state.atlas)) noteGlyphPlacementDiscarded(self.glyph_placement.discarded);
         const frames = self.renderer_state.placeMultiPane(self.allocator, lists) catch {
             for (collected.items) |*c| c.deinit(self.allocator);
             self.placement_failed = true; // 사이드바·헤더·오버레이·도크 frame이 **전부** null이 된다
@@ -22820,6 +22841,7 @@ pub const AppSession = struct {
 
         for (collected.items, frames) |*c, frame| {
             const rf = c.builder.finishPane(self.allocator, &c.pane, frame, &self.renderer_state) catch {
+                self.glyph_placement.taint(); // 이 pane 의 업로드는 버려진다 — 같은 배치를 커밋하지 않는다
                 // finishPane 실패: frame은 buildQuadRaster가 정리, pane은 미consume → deinit. 그 페인만 skip.
                 c.deinit(self.allocator);
                 continue;
@@ -22893,8 +22915,10 @@ pub const AppSession = struct {
                             // back too; otherwise a failed pane would leave orphan text at its
                             // old pixel coordinates for this frame.
                             if (rich_glyph_start) |start| self.gpu_glyphs.items.len = start;
+                            self.glyph_placement.taint(); // 이 pane 의 업로드는 버려진다
                         };
                     } else |_| {
+                        self.glyph_placement.taint(); // 이 pane 의 업로드는 버려진다
                         var v = rf;
                         v.deinit(self.allocator);
                     }
@@ -22903,6 +22927,7 @@ pub const AppSession = struct {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         floating_pf.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect };
                     } else |_| {
+                        self.glyph_placement.taint(); // 이 pane 의 업로드는 버려진다
                         var v = rf;
                         v.deinit(self.allocator);
                     }
@@ -22911,6 +22936,7 @@ pub const AppSession = struct {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         sticky_pf.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect };
                     } else |_| {
+                        self.glyph_placement.taint(); // 이 pane 의 업로드는 버려진다
                         var v = rf;
                         v.deinit(self.allocator);
                     }
@@ -22921,6 +22947,7 @@ pub const AppSession = struct {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         active_out.* = .{ .rf = rf };
                     } else |_| {
+                        self.glyph_placement.taint(); // 이 pane 의 업로드는 버려진다
                         var v = rf;
                         v.deinit(self.allocator);
                     }

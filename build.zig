@@ -4179,7 +4179,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "S3a end-to-end", "S4 end-to-end" },
     });
     const run_merge_stage_e2e = b.addRunArtifact(merge_stage_e2e_tests);
-    run_merge_stage_e2e.setCwd(b.path(".")); // 임시 저장소를 `.zig-cache` 밑에 만든다
+    run_merge_stage_e2e.setCwd(b.path(".")); // 임시 저장소는 워크트리 밖 `$TMPDIR` 에 만든다(`git_backend.tmpRepoPath`)
     run_merge_stage_e2e.addArg("--maru-expect-tests=9");
     // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 git 이 없으면 `SkipZigTest` 로 나간다 — 컴파일 수만
     // 세면 하네스가 조용히 안 서도 초록이다(이 저장소가 가장 나쁘다고 적어 둔 실패 모드).

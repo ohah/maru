@@ -7704,6 +7704,8 @@ test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다
     var paired: usize = 0;
     var unpaired: usize = 0;
     var pending_pair = false;
+    // 중괄호 없이 다음 줄이 본문인 macOS `if (…)` — 그 본문 줄이 `test_step` 에 붙이면 짝을 붙일 수 없는 모양이다.
+    var bare_if_body = false;
     var it = std.mem.splitScalar(u8, source, '\n');
     while (it.next()) |line| {
         // 🔥 **두 조건을 다 본다**(RAV7b 적대적 E2). macOS 전용 블록은 `target.result`(만들 대상)로도
@@ -7722,6 +7724,23 @@ test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다
         }
         if (in_macos != 0 and depth < in_macos) in_macos = 0;
 
+        if (bare_if_body) {
+            bare_if_body = false;
+            if (std.mem.indexOf(u8, line, "test_step.dependOn(") != null and
+                std.mem.indexOf(u8, line, "macos_only_test_step") == null)
+            {
+                std.debug.print("🔥 중괄호 없는 macOS if 의 본문이 test_step 에만 붙었다 — 블록으로 바꿔 macos_only_test_step 에도 붙여라: {s}\n", .{line});
+                unpaired += 1;
+            }
+        }
+        if ((std.mem.indexOf(u8, line, "target.result.os.tag == .macos") != null or
+            std.mem.indexOf(u8, line, "builtin.os.tag == .macos") != null) and
+            std.mem.indexOf(u8, line, "if (") != null and
+            std.mem.indexOfScalar(u8, line, '{') == null and
+            !std.mem.endsWith(u8, std.mem.trimEnd(u8, line, " \t\r"), ";"))
+        {
+            bare_if_body = true; // 두 줄 모양(W7a1 적대 검증 9 차)
+        }
         // 한 줄 `if (…macos…) x.test_step.dependOn(…);` 는 중괄호가 없어 아래 블록 추적에 안 잡힌다 — 짝을 붙일 수 없는 모양이라
         // 그 자체로 짝 없음이다(W7a1 적대 검증 8 차: 웹 sidecar 순수 시험이 이 모양으로 CI 어디에서도 안 돌았다).
         if ((std.mem.indexOf(u8, line, "target.result.os.tag == .macos") != null or

@@ -453,10 +453,14 @@ pub fn build(
         var src_i: usize = 0;
         var src_col: u32 = 0;
         var src_inlay: usize = 0;
+        // `src_i` 의 열 — **그 byte 앞 힌트를 넣기 전**. 행에 싣는 것은 이것이다(`start_byte_col`): `src_col` 은 그 힌트를 이미 먹었을
+        // 수도 있어(경계에 딱 맞은 힌트 · 힌트 뒤에 걸쳐 머문 탭) 읽는 쪽이 같은 힌트를 한 번 더 센다(INL14).
+        var src_byte_col: u32 = 0;
         if (seek) |sk| {
             if (sk.byte <= row.bytes.len) {
                 src_i = sk.byte;
                 src_col = sk.col;
+                src_byte_col = sk.col;
             }
         }
 
@@ -476,8 +480,8 @@ pub fn build(
             // 하면 한글 straddle은 19% → 0%로 낫지만 **랩+탭이 0% → 26.4%로 깨지고**, 머물기만 하면
             // 그 반대다.
             //
-            // 머무는 경우 `src_col`이 `start_col`보다 작게 남는데, 그 값이 `start_byte_col`로 실려
-            // **탭스톱 계산의 시작점**이 된다(탭 폭은 줄 절대 열로 정해진다).
+            // 머무는 경우 그 byte 의 열이 `start_col`보다 작게 남는데, 그 값(`src_byte_col` — 힌트를 넣기 전)이
+            // `start_byte_col`로 실려 **탭스톱 계산의 시작점**이 된다(탭 폭은 줄 절대 열로 정해진다).
             while (src_i < row.bytes.len and src_col < start_col) {
                 // **byte 앞의 힌트를 먼저 지난다**(§4.1h). 걸치면 **머문다**(표기처럼 잘라 그리는 부류) — `start_byte_col` 이 힌트 앞 열로 남고,
                 // hit 의 걸음이 같은 자리에서 같은 힌트를 다시 먹는다.
@@ -499,11 +503,13 @@ pub fn build(
                     if (!splits) {
                         src_i = st.next_byte;
                         src_col = st.next_col;
+                        src_byte_col = src_col;
                     }
                     break;
                 }
                 src_i = st.next_byte;
                 src_col = st.next_col;
+                src_byte_col = src_col;
             }
             // **첫 줄의 앞 조각들은 화면 위로 지나간 부분이다.** 행을 세지도 배치를 채우지도
             // 않는다 — 그 조각들은 화면에 없다.
@@ -520,10 +526,11 @@ pub fn build(
                 .line = @intCast(line_idx),
                 .piece = piece_idx,
                 // **화면 0열의 열**과 **시작 byte의 열**을 따로 싣는다. 걸친 것을 지나갔으면 둘이
-                // 같고(`src_col`), 머물렀으면 byte 쪽이 더 작다(위 루프 주석).
+                // 같고(`src_col`), 머물렀으면 byte 쪽이 더 작다(위 루프 주석). byte 쪽은 늘 **그 byte 앞 힌트를
+                // 넣기 전** 열이다 — 읽는 쪽(hit · 공백 표시)이 거기서 힌트를 먹고 걷는다(§4.1h · INL14).
                 .start_col = @max(src_col, start_col),
                 .start_byte = @intCast(src_i),
-                .start_byte_col = src_col,
+                .start_byte_col = src_byte_col,
             };
             const text = piece.slice(expanded);
             defer visual_row += 1;
@@ -1022,6 +1029,28 @@ pub fn lineColumnsUpTo(bytes: []const u8, tab_width: u16, limit: u32) u32 {
 /// 문장이 앞 계약을 뒤집는 것처럼 읽혔다.
 pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32, stop_col: u32) void {
     columnsAtOffsetsWith(bytes, tab_width, offsets, out, stop_col, &.{});
+}
+
+/// 한 행이 덮는 byte 의 끝 — `start_byte`(열 `start_byte_col`, 그 앞 힌트를 넣기 전 — `VisualRow.start_byte_col`)에서 힌트와 글자를
+/// 걸어 열이 `row_end_col` 에 닿는 첫 byte. 경계에 걸친 cluster 는 이 행에 넣고 걸친 힌트는 다음 행에 둔다 — 그래서 다음 행의 `start_byte` 는
+/// 이 값이거나, **경계에 걸친 cluster 하나** 앞이다(탭 · §3.8 표기는 잘려 두 행에 걸쳐 그려지고, 넓은 글자는 랩에서 통째로 다음 행에 내려간다).
+/// 겹치는 것은 그 cluster 하나뿐이다.
+///
+/// **힌트 폭을 빼고 걸으면 안 된다** — 열이 덜 늘어 창이 다음 행의 byte 까지 넓어지고, 행마다 모은 자리를 이으면 오름차순이 깨진다
+/// (공백 표시가 `columnsAtOffsetsWith` 의 단언에서 죽었다 — §5.1e).
+pub fn rowEndByte(bytes: []const u8, tab_width: u16, start_byte: usize, start_byte_col: u32, row_end_col: u32, inlays: []const Inlay) usize {
+    var i = @min(start_byte, bytes.len);
+    var col = start_byte_col;
+    var next_inlay: usize = 0;
+    while (next_inlay < inlays.len and inlays[next_inlay].at < i) next_inlay += 1;
+    while (i < bytes.len) {
+        col += inlayColsAt(inlays, &next_inlay, i);
+        if (col >= row_end_col) break;
+        const st = stepColumn(bytes, i, col, tab_width);
+        i = st.next_byte;
+        col = st.next_col;
+    }
+    return i;
 }
 
 /// `columnsAtOffsets` + 가상 텍스트(§4.1h): byte b 의 열은 b 앞에 선 힌트 **뒤**(글리프 열)다. `inlays` 가 비면 옛 길과 같다.
@@ -1577,6 +1606,125 @@ test "INL12 가상 텍스트 — 랩 경계에 걸친 힌트: 행 시작 걸음�
     columnsAtOffsetsWith("a\xed\x95\x9cb", 4, &offs, &cols, std.math.maxInt(u32), &mid);
     try testing.expectEqual(@as(u32, 3), cols[0]); // a 1 + 한 2
     try testing.expectEqual(@as(usize, 4), byteAtPointWith("a\xed\x95\x9cb", 4, 0, 0, 0, 80, 3 * 10 + 2, 10, &mid)); // 열 3 의 왼쪽 반 → b
+}
+
+test "INL14 가상 텍스트 — 랩 행의 start_byte_col 은 늘 「시작 byte 앞 힌트를 넣기 전」 열이다: 경계에 딱 맞은 힌트 · 힌트 뒤에 걸친 탭도; 그 행의 hit 는 글리프 자리에서 답한다 (§4.1h)" {
+    const layout = geometry.compute(80, 10, .{});
+    var ops: [64]draw.Op = undefined;
+    var scratch: [1024]u8 = undefined;
+    var runs: [256]draw.Run = undefined;
+    // ⑴ **힌트 뒤의 탭이 경계에 걸쳤다**(머문다): `\t` + byte 1 앞 `: u32`(5) + `\t\t\t`, 11열 랩. 열: 탭0 0..4 · 힌트 4..9 · 탭1 9..12(걸침)
+    //    · 탭2 12..16 · 탭3 16..20. 둘째 행은 탭1(byte 1)에 머물고, 그 열은 힌트 **앞** 4 다(힌트 뒤 9 를 실으면 읽는 쪽이 힌트를 두 번 센다).
+    {
+        const inl = [_]Inlay{.{ .at = 1, .text = ": u32" }};
+        const rows = [_]Row{.{ .bytes = "\t\t\t\t", .inlays = &inl }};
+        var p = testProps(geometry.compute(@intCast(layout.contentLeft() + 11), 10, .{}), &rows);
+        p.wrap = true;
+        _ = build(p, &ops, &scratch, &runs, &test_visual);
+        try testing.expectEqual(@as(u32, 1), test_visual[1].start_byte);
+        try testing.expectEqual(@as(u32, 4), test_visual[1].start_byte_col);
+        try testing.expectEqual(@as(u32, 11), test_visual[1].start_col);
+        // 둘째 행 화면 1열 = 절대 12 = 탭2(byte 2)의 첫 칸.
+        try testing.expectEqual(@as(usize, 2), clusterAtPointWith("\t\t\t\t", 4, 1, test_visual[1].start_byte_col, 11, 11, 1 * 8 + 1, 8, &inl));
+    }
+    // ⑵ **힌트가 경계에 딱 맞게 끝난다**: `abcdefgh` + byte 4 앞 `: `(2), 6열 랩 → `abcd: ` | `efgh`. 둘째 행 byte 4 의 열은 힌트 앞 4 다.
+    {
+        const inl = [_]Inlay{.{ .at = 4, .text = ": " }};
+        const rows = [_]Row{.{ .bytes = "abcdefgh", .inlays = &inl }};
+        var p = testProps(geometry.compute(@intCast(layout.contentLeft() + 6), 10, .{}), &rows);
+        p.wrap = true;
+        _ = build(p, &ops, &scratch, &runs, &test_visual);
+        try testing.expectEqual(@as(u32, 4), test_visual[1].start_byte);
+        try testing.expectEqual(@as(u32, 4), test_visual[1].start_byte_col);
+        try testing.expectEqual(@as(u32, 6), test_visual[1].start_col);
+        // 둘째 행 화면 1열은 `f`(byte 5).
+        try testing.expectEqual(@as(usize, 5), clusterAtPointWith("abcdefgh", 4, 4, test_visual[1].start_byte_col, 6, 6, 1 * 8 + 1, 8, &inl));
+    }
+    // ⑶ **무작위 대조** — 공백·탭·`a`·`한` 과 힌트(글자 앞 · 줄 끝, 같은 자리 여럿)를 섞은 줄을 3..12 열로 접거나(랩) 가로로 민다(`first_col`
+    //    — 넓은 글자가 걸쳐 버려지는 갈래는 여기서만 난다). 모든 행에서 ① start_byte_col 이 「줄 처음부터 센 그 byte 의 글리프 열 − 그 byte 앞
+    //    힌트 폭」과 같고, ② 행의 모든 칸을 누른 답이 「줄 처음부터 센 열 → byte」 지도와 같다(힌트 칸은 앵커 byte, 줄 끝 너머는 줄 길이),
+    //    ③ 랩의 이웃 행에서 `rowEndByte` 가 다음 행의 시작 byte 이거나, 다음 행 첫 cluster 가 경계에 걸쳤으면(잘려 머묾 · 통째로 내려옴)
+    //    그 cluster 하나 뒤다.
+    var prng = std.Random.DefaultPrng.init(0x1a7_13);
+    const rnd = prng.random();
+    const pieces = [_][]const u8{ " ", "\t", "a", "\u{D55C}" };
+    const hint_text = "xxxxxx";
+    var checked_rows: usize = 0;
+    for (0..3000) |_| {
+        var line_buf: [96]u8 = undefined;
+        var starts: [25]u32 = undefined;
+        var len: usize = 0;
+        var nchars: usize = 0;
+        for (0..rnd.uintAtMost(usize, 24)) |_| {
+            const s = pieces[rnd.uintLessThan(usize, pieces.len)];
+            starts[nchars] = @intCast(len);
+            nchars += 1;
+            @memcpy(line_buf[len..][0..s.len], s);
+            len += s.len;
+        }
+        starts[nchars] = @intCast(len); // 줄 끝 힌트 자리
+        const line = line_buf[0..len];
+        var inl_buf: [3]Inlay = undefined;
+        const n_inl = rnd.uintAtMost(usize, 3);
+        var ats: [3]u32 = undefined;
+        for (ats[0..n_inl]) |*a| a.* = starts[rnd.uintAtMost(usize, nchars)];
+        std.mem.sort(u32, ats[0..n_inl], {}, std.sort.asc(u32));
+        for (inl_buf[0..n_inl], ats[0..n_inl]) |*in, a| in.* = .{ .at = a, .text = hint_text[0 .. 1 + rnd.uintLessThan(usize, hint_text.len)] };
+        const inl = inl_buf[0..n_inl];
+        // 지도 — 절대 열마다 그 칸의 byte. 규칙(`stepColumn`)은 한 곳이고, 여기서 독립인 것은 「줄 처음부터 한 번에 걷는다」는 것이다.
+        var map: [256]u32 = undefined;
+        var map_len: u32 = 0;
+        var before_col: [97]u32 = undefined; // byte → 그 앞 힌트를 넣기 전 열(글자 시작 자리만)
+        {
+            var i: usize = 0;
+            var col: u32 = 0;
+            var k: usize = 0;
+            while (true) {
+                before_col[i] = col;
+                while (k < inl.len and inl[k].at == i) : (k += 1) {
+                    for (0..inl[k].text.len) |_| {
+                        map[map_len] = @intCast(i);
+                        map_len += 1;
+                    }
+                    col += @intCast(inl[k].text.len);
+                }
+                if (i >= line.len) break;
+                const st = stepColumn(line, i, col, 4);
+                while (map_len < st.next_col) : (map_len += 1) map[map_len] = @intCast(i);
+                i = st.next_byte;
+                col = st.next_col;
+            }
+        }
+        const width: u32 = 3 + rnd.uintAtMost(u32, 9);
+        const rows = [_]Row{.{ .bytes = line, .inlays = inl }};
+        var p = testProps(geometry.compute(@intCast(layout.contentLeft() + width), 64, .{}), &rows);
+        p.wrap = rnd.uintLessThan(u32, 4) != 0;
+        if (!p.wrap) p.first_col = rnd.uintAtMost(u32, map_len);
+        const w = build(p, &ops, &scratch, &runs, &test_visual);
+        for (test_visual[0..w.visual_rows], 0..) |v, ri| {
+            checked_rows += 1;
+            try testing.expectEqual(before_col[v.start_byte], v.start_byte_col);
+            if (p.wrap and ri + 1 < w.visual_rows) {
+                const nx = test_visual[ri + 1];
+                const e = rowEndByte(line, 4, v.start_byte, v.start_byte_col, v.start_col + width, inl);
+                var hint_w: u32 = 0;
+                for (inl) |in| hint_w += if (in.at == nx.start_byte) @intCast(in.text.len) else 0;
+                if (e != nx.start_byte) {
+                    const glyph = nx.start_byte_col + hint_w;
+                    const st = stepColumn(line, nx.start_byte, glyph, 4);
+                    try testing.expectEqual(st.next_byte, e);
+                    try testing.expect(glyph < v.start_col + width and v.start_col + width < st.next_col);
+                }
+            }
+            for (0..width) |x| {
+                const abs = v.start_col + @as(u32, @intCast(x));
+                const want: usize = if (abs < map_len) map[abs] else line.len;
+                const got = clusterAtPointWith(line, 4, v.start_byte, v.start_byte_col, v.start_col, width, @as(i32, @intCast(x)) * 8 + 1, 8, inl);
+                try testing.expectEqual(want, got);
+            }
+        }
+    }
+    try testing.expect(checked_rows > 3000);
 }
 
 test "expandTabs: 탭이 없으면 원본을 그대로 빌려준다" {

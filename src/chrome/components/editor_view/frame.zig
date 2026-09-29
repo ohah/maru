@@ -1700,15 +1700,9 @@ fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual
             const v = visual[j];
             if (v.kind != .text or v.docIndex(props.first_line) != idx) break;
             const row_end = v.start_col + width;
-            // **이 행의 byte 창**(WSF3) — 조각 시작 byte 에서 행 오른쪽 끝 열까지 걷는다. 인레이 폭은 빼고 걷는다 — 열이 덜 늘어 창이 넓어질
-            // 뿐(더 모으고 아래에서 자른다)이다.
-            var end_byte: usize = v.start_byte;
-            var end_col: u32 = v.start_byte_col;
-            while (end_byte < line.len and end_col < row_end) {
-                const st = content.stepColumn(line, end_byte, end_col, props.tab_width);
-                end_byte = st.next_byte;
-                end_col = st.next_col;
-            }
+            // **이 행의 byte 창**(WSF3) — 조각 시작 byte 에서 행 오른쪽 끝 열까지 **인레이까지 세어** 걷는다(WSF7). 빼고 걸으면 창이 다음
+            // 행의 byte 까지 넓어져, 행마다 모은 자리를 이은 것이 오름차순이 아니게 된다(아래 한 번 걷기의 전제).
+            const end_byte = content.rowEndByte(line, props.tab_width, v.start_byte, v.start_byte_col, row_end, props.line_inlays.at(idx));
             // 이 행이 낼 수 있는 기호는 창의 byte 수를 넘지 않는다 — 안 들어가면 묶음을 여기서 끊는다(첫 행이면 담을 만큼만).
             if (rn > 0 and got + (end_byte - v.start_byte) > pairs) break;
             const window: whitespace.Range = .{ .start = v.start_byte, .end = @intCast(end_byte) };
@@ -1750,7 +1744,9 @@ fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual
             var run_n: usize = 0;
             var ci: usize = 0; // 블록 caret 자리(오름차순)
             for (offsets[r.begin..stop], cols[r.begin..stop]) |off, col| {
-                if (col < r.start_col or col >= r.row_end) continue; // 이 조각(가로로 민 창) 밖
+                // 이 조각(가로로 민 창) 밖. 왼쪽은 앞 행에서 걸쳐 머문 탭이다. 오른쪽은 **등가 변이**다(WSF7 뒤 — 창 끝을 인레이까지 세어
+                // 걸으므로 행 끝을 넘는 자리는 모이지 않는다). 뜻으로 둔다 — 「기호는 제 행 칸에만」.
+                if (col < r.start_col or col >= r.row_end) continue;
                 while (ci < block_carets.len and block_carets[ci] < off) ci += 1;
                 if (ci < block_carets.len and block_carets[ci] == off) {
                     if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n, op_truncated);
@@ -6273,7 +6269,7 @@ test "WSF4 공백 표시의 열 — 스크롤한 줄 · 탭 폭 · 인레이 · 
         var b: TestBuffers = .{};
         const w = build(props, b.scratch());
         try testing.expectEqualSlices([3]u32, &.{.{ 4, 0, 0xB7 }}, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
-        // **인레이가 공백을 화면 오른쪽 밖으로 민다** — 창 끝은 인레이 없이 걸어 더 넓으므로, 행 끝 열 거르기만이 막는다. `a` + 공백 10 에
+        // **인레이가 공백을 화면 오른쪽 밖으로 민다** — 창 끝을 인레이까지 세어 걸으므로(`WSF7`) 밖의 공백은 모으지도 않는다. `a` + 공백 10 에
         // 힌트 45 칸: 공백은 46..55 열, 폭 49 라 46·47·48 셋만.
         const long_hint = [_]content.Inlay{.{ .at = 1, .text = "x" ** 45 }};
         const rows2 = [_][]const content.Inlay{&long_hint};
@@ -6386,6 +6382,105 @@ test "WSF6 블록 caret 이 선 공백에는 기호가 없다 — 막대 caret �
     props.caret_shape = .bar;
     w = build(props, b.scratch());
     try testing.expectEqual(@as(usize, 4), whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf).len);
+}
+
+test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 행마다 모은 자리가 오름차순이고 기호가 제 행 · 제 열에 선다; 무작위 대조 (§5.1e · §4.1h)" {
+    var got_buf: [256][3]u32 = undefined;
+    // ⑴ **최소 재현** — `\t\t\t\t` + byte 1 앞 `: u32`(5), 11열 랩. 열: 탭0 0..4 · 힌트 4..9 · 탭1 9..12(경계에 걸침) · 탭2 12..16 · 탭3 16..20.
+    //    예전에는 창을 인레이 없이 걸어 첫 행이 byte 0·1·2 를, 둘째 행이 1·2·3 을 모아 `0 1 2 1 2 3` 이 한 번 걷기에 들어갔다(단언에서 죽음).
+    {
+        const lines = [_][]const u8{"\t\t\t\t"};
+        const hints = [_]content.Inlay{.{ .at = 1, .text = ": u32" }};
+        const rows = [_][]const content.Inlay{&hints};
+        var props = testProps(&lines, true);
+        props.render_whitespace = .all;
+        props.line_inlays = .{ .rows = &rows, .generation = 1 };
+        props.total_cols = 20;
+        var b: TestBuffers = .{};
+        const w = build(props, b.scratch());
+        try testing.expectEqual(@as(u32, 11), geometry.compute(props.total_cols, props.total_lines, .{}).content.width);
+        // 첫 행: 탭0 열 0 · 탭1 열 9(걸친 탭은 첫 칸이 있는 행에만). 둘째 행: 탭2 절대 12 → 1 · 탭3 16 → 5.
+        try testing.expectEqualSlices([3]u32, &.{ .{ 0, 0, 0x2192 }, .{ 9, 0, 0x2192 }, .{ 1, 1, 0x2192 }, .{ 5, 1, 0x2192 } }, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+    }
+    // ⑵ **무작위 대조** — 공백·탭·`a`·`한` 과 힌트(글자 앞 · 줄 끝)를 섞은 두 줄을 랩으로 접고, 맨 위 줄을 몇 행 스크롤한다(`first_piece`).
+    //    `all` 은 「줄 처음부터 인레이까지 세어 낸 열이 든 행의 그 칸」과 **같아야** 하고, 다른 모드는 그 부분집합이어야 한다.
+    var prng = std.Random.DefaultPrng.init(0x5f1e_07);
+    const rnd = prng.random();
+    const pieces = [_][]const u8{ " ", "\t", "a", "\u{D55C}" };
+    const hint_text = "xxxxxx";
+    const modes = [_]whitespace.Mode{ .all, .boundary, .selection, .trailing };
+    var compared: usize = 0;
+    for (0..1500) |iter| {
+        var line_bufs: [2][96]u8 = undefined;
+        var line_store: [2][]const u8 = undefined;
+        var inl_bufs: [2][3]content.Inlay = undefined;
+        var inl_store: [2][]const content.Inlay = undefined;
+        for (0..2) |li| {
+            var starts: [25]u32 = undefined;
+            var len: usize = 0;
+            var nchars: usize = 0;
+            for (0..rnd.uintAtMost(usize, 24)) |_| {
+                const s = pieces[rnd.uintLessThan(usize, pieces.len)];
+                starts[nchars] = @intCast(len);
+                nchars += 1;
+                @memcpy(line_bufs[li][len..][0..s.len], s);
+                len += s.len;
+            }
+            starts[nchars] = @intCast(len);
+            line_store[li] = line_bufs[li][0..len];
+            const n_inl = rnd.uintAtMost(usize, 3);
+            var ats: [3]u32 = undefined;
+            for (ats[0..n_inl]) |*a| a.* = starts[rnd.uintAtMost(usize, nchars)];
+            std.mem.sort(u32, ats[0..n_inl], {}, std.sort.asc(u32));
+            for (inl_bufs[li][0..n_inl], ats[0..n_inl]) |*in, a| in.* = .{ .at = a, .text = hint_text[0 .. 1 + rnd.uintLessThan(usize, hint_text.len)] };
+            inl_store[li] = inl_bufs[li][0..n_inl];
+        }
+        var props = testProps(&line_store, true);
+        props.line_inlays = .{ .rows = &inl_store, .generation = @intCast(iter + 1) };
+        props.total_cols = @intCast(12 + rnd.uintAtMost(usize, 12));
+        props.first_piece = rnd.uintAtMost(u32, 3);
+        const mode = modes[rnd.uintLessThan(usize, modes.len)];
+        props.render_whitespace = mode;
+        const sel_rows = [_][]const Mark{ &.{.{ .start = 0, .len = 96 }}, &.{.{ .start = 0, .len = 96 }} };
+        props.selection_marks = &sel_rows;
+        var b: TestBuffers = .{};
+        const w = build(props, b.scratch());
+        const width = geometry.compute(props.total_cols, props.total_lines, .{}).content.width;
+        // 오라클 — 공백·탭마다 줄 처음부터 센 글리프 열, 그 열을 덮는 보이는 행의 칸.
+        var want: [256][3]u32 = undefined;
+        var wn: usize = 0;
+        for (b.visual_rows[0..w.visual_rows], 0..) |v, ri| {
+            if (v.kind != .text) continue;
+            const li = v.docIndex(props.first_line);
+            const line = line_store[li];
+            for (line, 0..) |ch, off| {
+                if (ch != ' ' and ch != '\t') continue;
+                const offs = [_]u32{@intCast(off)};
+                var col = [_]u32{0};
+                content.columnsAtOffsetsWith(line, props.tab_width, &offs, &col, std.math.maxInt(u32), inl_store[li]);
+                if (col[0] < v.start_col or col[0] >= v.start_col + width) continue;
+                want[wn] = .{ col[0] - v.start_col, @intCast(ri), if (ch == '\t') 0x2192 else 0xB7 };
+                wn += 1;
+            }
+        }
+        const got = whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf);
+        const lessThan = struct {
+            fn f(_: void, a: [3]u32, c: [3]u32) bool {
+                return if (a[1] != c[1]) a[1] < c[1] else a[0] < c[0];
+            }
+        }.f;
+        std.mem.sort([3]u32, want[0..wn], {}, lessThan);
+        std.mem.sort([3]u32, got, {}, lessThan);
+        if (mode == .all) {
+            try testing.expectEqualSlices([3]u32, want[0..wn], got);
+            compared += wn;
+        } else for (got) |g| {
+            var found = false;
+            for (want[0..wn]) |x| found = found or std.mem.eql(u32, &x, &g);
+            try testing.expect(found);
+        }
+    }
+    try testing.expect(compared > 1000);
 }
 
 test "WSF5 공백 기호의 층 — 선택 배경 위, 검색 강조·caret 아래 (§5.1e)" {
@@ -6737,10 +6832,13 @@ test "RB8 공백 표시는 run·글자 몫을 쓰지 않는다 — 본문 위에
     // 텍스트 op 은 셀을 겹쳐 쓰지 않는다」)가 성립하는 근거는 그 기호가 **정적 run** 을 가리킨다는 것이다. 그것이 저장소 run 으로
     // 바뀌면 이 판정이 빨개진다(`bufferSizes` 만큼만 준 저장소에서 절단이 난다).
     //
-    // 인레이 힌트는 넣지 않는다 — 인레이 + 랩 + 공백 표시 조합은 `paintWhitespace` 가 `columnsAtOffsetsWith` 에 오름차순이 아닌
-    // 자리를 넘겨 debug assert 에 걸린다(2026-09-26 이 판정자를 세우다 찾았다 — 이 몫 계산과 무관한 공백 표시 층의 결함이라 따로 다룬다).
+    // 인레이 힌트도 섞는다 — 힌트 칸은 본문 run 을 쓰고, 탭 뒤 힌트가 랩 경계에 탭을 걸치게 한다(이 판정자를 세우다 찾은 공백 표시 결함의
+    // 모양 — `WSF7`).
     const a = testing.allocator;
     const lines = [_][]const u8{ " \t a  \t  b\t\t c   d", "\t\t\t\t", "   x   y   z   ", "a\tb\tc\td\te" } ** 10;
+    const hints = [_]content.Inlay{ .{ .at = 1, .text = ": u32" }, .{ .at = 3, .text = ": T" } };
+    var hint_rows: [lines.len][]const content.Inlay = undefined;
+    for (&hint_rows, 0..) |*h, i| h.* = if (i % 2 == 1) &hints else &.{};
     const ops_e = try a.alloc(draw.Op, 4000);
     defer a.free(ops_e);
     const ops_w = try a.alloc(draw.Op, 4000);
@@ -6751,6 +6849,7 @@ test "RB8 공백 표시는 run·글자 몫을 쓰지 않는다 — 본문 위에
         var props = testProps(&lines, wrap);
         props.render_whitespace = .all;
         props.visible_rows = 30;
+        props.line_inlays = .{ .rows = &hint_rows, .generation = 1 };
         const sizes = bufferSizes(props);
         const runs = try a.alloc(draw.Run, sizes.runs);
         defer a.free(runs);

@@ -373,11 +373,13 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
 - **Pane 이름 표시 자리**: Pane은 라벨 자리가 없었으므로 **pane 탭바 좌측에 pane 라벨 세그먼트**를 새로 둔다(좌측
   세그먼트 | Term 탭들 | ‹› | +). `tabbar` 메트릭(segOf/tabIndex)이 라벨 폭만큼 offset해 "보이는 탭 == 클릭되는 탭"을
   유지한다. custom_name이 없으면 세그먼트는 비운다(중복 라벨 방지).
-- **편집 UX(인라인)**: 별도 팝업이 아니라 기존 라벨 자리에서 바로 편집한다 — find·palette 오버레이와 같은 입력 모델
-  (`OverlayInput`: IME 조합 preedit·UTF-8 경계·EAW caret)을 재사용하고, 키 라우팅도 같은 모달 가드 + `inputFocus()`
-  IME 분기를 탄다. `Enter`=확정, `Esc`=취소, 포커스 상실=확정.
-- **긴 이름 편집(scroll-to-caret)**: 편집 텍스트는 `이름 + caret`으로 caret이 늘 문자열 끝에 온다(`handleRenameKey`는
-  끝에서 append/backspace만, 중간 커서 이동 없음). 평소 라벨은 넘치면 **선두 고정 + 뒤를 "…"로**(이름 앞부분 표시)이지만,
+- **편집 UX(인라인)**: 별도 팝업이 아니라 기존 라벨 자리에서 바로 편집한다 — 주소창과 같은 입력 모델
+  (`TextField`: caret·그래핌 경계·IME preedit-at-caret — [text-field-editor.md] §2.2)을 쓰고, 키 라우팅은 모달 가드 +
+  `inputFocus()` IME 분기를 탄다. `Enter`=확정, `Esc`=취소, 포커스 상실=확정.
+- **긴 이름 편집(scroll-to-caret)**: 편집 텍스트는 caret 자리에 `|` 를 끼운 한 줄이다(`inline_edit.composeLine` —
+  ←/→·⌥←/→·⌘←/→·⌃A/⌃E 로 caret 을 옮기고 그 자리에 쓰고 지운다, 2026-09-29 — [text-field-editor.md] §2.2). 시작 caret 은
+  끝이다. caret 을 앞으로 옮긴 채 줄이 넘치면 사이드바 카드·그룹 헤더·pane 라벨은 `inline_edit.composeLineFit` 이 caret
+  뒤 글을 창 절반까지만 남겨 아래 tail 앵커가 caret 을 담게 한다(Term 탭은 세그먼트 폭이 뒤에서 정해져 아직 안 한다). 평소 라벨은 넘치면 **선두 고정 + 뒤를 "…"로**(이름 앞부분 표시)이지만,
   편집 중 라벨/탭 세그먼트가 이름보다 좁으면 **말미 고정(tail 앵커)** 으로 전환해 선두를 "…"로 자르고 **끝(caret)** 을
   보여준다 — 단일 줄 입력창이 caret를 따라 가로 스크롤하는 것과 같다. 이렇게 안 하면 세그먼트를 채우는 순간 caret과 방금
   친 글자가 오른쪽으로 잘려 무엇을 입력 중인지 안 보였다(사용자 제보). 잘림 규칙 단일 출처는 `coretext_frame_builder.appendEllipsizedTitle`

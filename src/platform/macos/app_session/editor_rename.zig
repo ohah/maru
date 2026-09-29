@@ -130,15 +130,17 @@ fn notifyRefusal(self: *AppSession, r: editor_wse.Refusal) void {
     }
 }
 
-/// 상자에 보일 글(query + 조합 중 글자) — 오버레이 프레임이 부른다.
+/// 상자에 보일 글 — 조합 중 글자는 **caret 자리**에 끼운다(조합은 caret 에서 일어난다). 오버레이 프레임이 부른다.
 pub fn boxText(self: *AppSession, arena: std.mem.Allocator) ![]const u8 {
-    const q = self.rename_input.query.items;
-    const p = self.rename_input.preedit.items;
-    if (p.len == 0) return q;
-    const out = try arena.alloc(u8, q.len + p.len);
-    @memcpy(out[0..q.len], q);
-    @memcpy(out[q.len..], p);
-    return out;
+    if (self.rename_input.preedit.items.len == 0) return self.rename_input.text.items;
+    return chrome.components.inline_edit.composeLine(arena, &self.rename_input, ""); // caret 은 상자가 따로 그린다
+}
+
+/// 상자 안 caret 칸 — caret 앞 글 + 조합 중 글자의 표시폭(상자는 코드포인트 폭 모델로 그린다 — `rename_box`).
+pub fn boxCaretCols(self: *const AppSession) u32 {
+    const q = self.rename_input.text.items;
+    const at = @min(self.rename_input.caret, q.len);
+    return chrome.components.overlay_input.displayCols(q[0..at]) + chrome.components.overlay_input.displayCols(self.rename_input.preedit.items);
 }
 
 /// 상자의 앵커(낱말 첫 글자 셀) — 프레임마다 다시 잰다(스크롤·랩이 바뀌면 자리가 바뀐다). 그 문서가 그려져 있지 않으면 null(상자는 그 프레임에 없다).

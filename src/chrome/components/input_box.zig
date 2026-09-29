@@ -32,6 +32,24 @@ pub fn view(
     arena: std.mem.Allocator,
     out: *std.ArrayList(draw.Op),
 ) !void {
+    return viewCaretAt(rect, text, editing, disabled, overlay_input.displayCols(text), cw, ch, corner_radius_px, border_width_px, arena, out);
+}
+
+/// `view` 와 같되 caret 을 **글 안의 칸**(`caret_cols` — 좌패딩 뒤 표시폭 기준)에 그린다. 끝-caret 전용이던 이
+/// 위젯을 caret 을 옮길 수 있는 편집기(인라인 rename 상자 — `rename_box`)가 쓰기 위한 자리다. 글보다 뒤면 끝에 둔다.
+pub fn viewCaretAt(
+    rect: draw.Rect,
+    text: []const u8,
+    editing: bool,
+    disabled: bool,
+    caret_cols: u32,
+    cw: u32,
+    ch: u32,
+    corner_radius_px: u16,
+    border_width_px: u16,
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(draw.Op),
+) !void {
     if (rect.w == 0 or rect.h == 0) return;
     // 테두리 박스(rich) — 편집 중이면 focus_accent로 강조해 "지금 입력 중"을 보인다. tui(border 0)는 텍스트만.
     if (border_width_px > 0) {
@@ -51,9 +69,9 @@ pub fn view(
         runs[0] = .{ .text = text };
         try out.append(arena, .{ .text = .{ .origin = .{ .x = tx, .y = rect.y }, .runs = runs, .role = role } });
     }
-    // 편집 중이면 표시폭 끝 셀에 caret(cursor fill 1칸) — 인라인 편집(end-caret) 규약과 동일.
+    // 편집 중이면 caret 칸에 cursor fill 1칸(`view` 는 표시폭 끝 — 인라인 편집 end-caret 규약).
     if (editing) {
-        const caret_x = tx + @as(i32, @intCast(overlay_input.displayCols(text) * cw));
+        const caret_x = tx + @as(i32, @intCast(@min(caret_cols, overlay_input.displayCols(text)) * cw));
         try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = rect.y, .w = cw, .h = ch }, .role = .cursor } });
     }
 }
@@ -144,4 +162,17 @@ test "input_box hitTest: 박스 안=true, 밖/비유한/0폭=false" {
     try std.testing.expect(!hitTest(test_rect, 150, 80));
     try std.testing.expect(!hitTest(test_rect, std.math.inf(f64), 60));
     try std.testing.expect(!hitTest(.{ .x = 0, .y = 0, .w = 0, .h = 20 }, 0, 0));
+}
+
+test "input_box viewCaretAt: caret 을 글 안의 칸에 그린다(끝보다 뒤면 끝)" {
+    // 증명: caret 을 옮길 수 있는 편집기(rename 상자)가 쓰는 변형이다. caret x = 좌패딩 + caret_cols×cw.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+    try viewCaretAt(test_rect, "abcd", true, false, 1, 8, 16, 4, 1, arena, &out);
+    try std.testing.expectEqual(@as(i32, 100 + 8 + 8), out.items[2].fill.rect.x); // 'a' 뒤
+    out.clearRetainingCapacity();
+    try viewCaretAt(test_rect, "abcd", true, false, 99, 8, 16, 4, 1, arena, &out);
+    try std.testing.expectEqual(@as(i32, 100 + 8 + 32), out.items[2].fill.rect.x); // 글 끝으로 clamp
 }

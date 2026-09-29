@@ -1448,7 +1448,7 @@ pub fn applyForcedRename(self: *AppSession) void {
     if (open_only) return;
     const name = std.mem.span(name_raw.?);
     self.rename_input.clear();
-    self.rename_input.query.appendSlice(self.allocator, name) catch return;
+    self.rename_input.setText(self.allocator, name) catch return;
     settings_ops.commitRename(self);
 }
 

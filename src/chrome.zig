@@ -43,6 +43,7 @@ pub const Tokens = tokens.Tokens;
 pub const components = struct {
     pub const overlay_input = @import("chrome/components/overlay_input.zig"); // find·palette 공유 기반(컴포넌트 아님)
     pub const text_field = @import("chrome/components/text_field.zig");
+    pub const inline_edit = @import("chrome/components/inline_edit.zig"); // 인라인 이름 편집의 순수 규칙(키→편집·caret 자리 한 줄·넘칠 때 caret 보이기) — TextField 위
     pub const text_area = @import("chrome/components/text_area.zig"); // 멀티라인 세로 축(커밋 메시지 상자 — text-field-editor.md §12) // 주소창 omnibox 인라인 편집(caret·선택·마우스) — docs/text-field-editor.md
     pub const modal_box = @import("chrome/components/modal_box.zig"); // notice·confirm 공유 박스 레이아웃/렌더(컴포넌트 아님)
     pub const popup_box = @import("chrome/components/popup_box.zig"); // **앵커에 붙는** 팝업의 공유 기하(컴포넌트 아님) — modal_box 의 앵커판

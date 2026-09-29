@@ -15845,7 +15845,7 @@ const RenameFx = struct {
         self.term.rt.editor_selection = .{ .anchor_start = caret, .anchor_end = caret, .focus = caret };
         try pressKey(&self.fx, .{ .function = 2 }, .{});
         try testing.expect(self.fx.session.rename != null and self.fx.session.rename.? == .symbol);
-        while (self.fx.session.rename_input.query.items.len > 0) try pressKey(&self.fx, .backspace, .{});
+        while (self.fx.session.rename_input.text.items.len > 0) try pressKey(&self.fx, .backspace, .{});
         for (new_name) |ch| try pressKey(&self.fx, .{ .char = ch }, .{});
         try pressKey(&self.fx, .enter, .{});
         try testing.expect(self.fx.session.rename == null);
@@ -15868,7 +15868,7 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
     try pressKey(&h.fx, .{ .function = 2 }, .{});
     try testing.expect(s.rename != null and s.rename.? == .symbol);
-    try testing.expectEqualStrings("add", s.rename_input.query.items);
+    try testing.expectEqualStrings("add", s.rename_input.text.items);
     try testing.expectEqual(@as(usize, 4), s.rename.?.symbol.start);
     try testing.expectEqual(@as(u64, 1), s.editor_rename.opened_count);
     {
@@ -15886,7 +15886,7 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     }
     // 이름을 `add2` 로 — `2` 를 치고 Enter → 요청 하나.
     try pressKey(&h.fx, .{ .char = '2' }, .{});
-    try testing.expectEqualStrings("add2", s.rename_input.query.items);
+    try testing.expectEqualStrings("add2", s.rename_input.text.items);
     try pressKey(&h.fx, .enter, .{});
     try testing.expect(s.rename == null and !s.chrome_host.rename_box.open);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_renames);
@@ -15963,7 +15963,7 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     try pressKey(&h.fx, .enter, .{});
     try testing.expect(s.rename == null);
     try pressKey(&h.fx, .{ .function = 2 }, .{});
-    while (s.rename_input.query.items.len > 0) try pressKey(&h.fx, .backspace, .{});
+    while (s.rename_input.text.items.len > 0) try pressKey(&h.fx, .backspace, .{});
     try pressKey(&h.fx, .enter, .{});
     try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
     // 낱말이 없는 자리(공백)에서는 상자가 안 열린다 · 마우스 down 은 취소다.
@@ -38944,7 +38944,7 @@ test "U2a ⌘S 는 이름 상자를 연다 — 저장은 아직 아니다" {
     try testing.expect(fx.session.rename.? == .untitled_save);
     try testing.expectEqual(t.surface.id, fx.session.rename.?.untitled_save);
     // **빈 편집기로 시작한다** — 계약이 자동 이름 추론을 금지했다(첫 줄이 "body" 인데 시드가 없어야 한다).
-    try testing.expectEqualStrings("", fx.session.rename_input.query.items);
+    try testing.expectEqualStrings("", fx.session.rename_input.text.items);
 }
 
 test "U2b 이름을 주면 파일이 생기고 보통 문서가 된다 — 경로·색·도크 entry·clean" {
@@ -38972,7 +38972,7 @@ test "U2b 이름을 주면 파일이 생기고 보통 문서가 된다 — 경�
     try testing.expect(insertText(fx.session, t, "const a = 1;\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t)); // 상자가 열린다
 
-    try fx.session.rename_input.query.appendSlice(allocator, "new.zig");
+    try fx.session.rename_input.setText(allocator, "new.zig");
     settings_ops.commitRename(fx.session);
 
     // ⑴ 파일이 디스크에 있고 내용이 맞다.
@@ -39019,7 +39019,7 @@ test "U2c 취소는 무상태다 — 이름 없는 dirty 그대로" {
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "x"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "cancelled.txt");
+    try fx.session.rename_input.setText(allocator, "cancelled.txt");
     settings_ops.closeRename(fx.session); // Esc
 
     try testing.expect(fx.session.rename == null);
@@ -39050,7 +39050,7 @@ test "U2d 같은 이름이 이미 있으면 덮어쓸지 묻고, 수락하면 �
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "new\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "taken.txt");
+    try fx.session.rename_input.setText(allocator, "taken.txt");
     settings_ops.commitRename(fx.session);
 
     // **묻는다** — 그리고 아직 안 썼다(파일은 옛 내용 그대로).
@@ -39096,7 +39096,7 @@ test "U2e 덮어쓰기를 취소하면 아무 일도 없고 들고 있던 경로
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "new\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "taken.txt");
+    try fx.session.rename_input.setText(allocator, "taken.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(fx.session.pending_untitled_save.path_len > 0);
 
@@ -39130,7 +39130,7 @@ test "U2f 그 경로로 이미 열린 Term 이 있으면 저장하지 않는다 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "z\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "open.txt");
+    try fx.session.rename_input.setText(allocator, "open.txt");
     settings_ops.commitRename(fx.session);
 
     // **확인이 뜨지 않는다** — 디스크를 덮어쓸지와 다른 질문이라 거절하고 말한다.
@@ -39167,7 +39167,7 @@ test "U2g base 밖 이름은 거절한다 — 절대 경로도 «갈아입은 ..
         fx.session.chrome_host.notice.dismiss();
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
         fx.session.rename_input.clear();
-        try fx.session.rename_input.query.appendSlice(allocator, bad);
+        try fx.session.rename_input.setText(allocator, bad);
         settings_ops.commitRename(fx.session);
         try testing.expect(fx.session.chrome_host.notice.open);
         try testing.expect(t.rt.editor_path == null); // 이름이 안 붙었다
@@ -39222,7 +39222,7 @@ test "U2i 저장하면 workspace 저장 시퀀스에 든다 — 다음 실행에
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "kept\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "kept.txt");
+    try fx.session.rename_input.setText(allocator, "kept.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(t.rt.editor_path != null);
 
@@ -39265,7 +39265,7 @@ test "U2j 저장 뒤에는 보통 문서의 저장 경로를 탄다 — 두 번�
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "one\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "twice.txt");
+    try fx.session.rename_input.setText(allocator, "twice.txt");
     settings_ops.commitRename(fx.session);
 
     // 더 고치고 다시 저장 — **상자가 뜨지 않고** 그 파일에 바로 쓴다(이름이 이미 있다).
@@ -39296,7 +39296,7 @@ test "U2k 저장 뒤 닫기 확인은 «공용» 문구다 — 더 이상 사라
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "a\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "closed.txt");
+    try fx.session.rename_input.setText(allocator, "closed.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(insertText(fx.session, t, "b\n")); // 다시 dirty
 
@@ -39381,7 +39381,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         var name_buf: [32]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "m{d}.txt", .{i});
         fx.session.rename_input.clear();
-        try fx.session.rename_input.query.appendSlice(allocator, name);
+        try fx.session.rename_input.setText(allocator, name);
         settings_ops.commitRename(fx.session);
         try testing.expect(t.rt.editor_path != null);
         try testing.expect(t.file_entry != null);
@@ -39394,7 +39394,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         for ([_][]const u8{ "../out.txt", "/abs.txt", "" }) |bad| {
             try testing.expectError(error.AskName, saveDocument(fx.session, t));
             fx.session.rename_input.clear();
-            try fx.session.rename_input.query.appendSlice(allocator, bad);
+            try fx.session.rename_input.setText(allocator, bad);
             settings_ops.commitRename(fx.session);
             try testing.expect(t.rt.editor_path == null);
             try testing.expect(t.file_entry == null);
@@ -39402,7 +39402,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         // 그 뒤에 성공해도 정상이다.
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
         fx.session.rename_input.clear();
-        try fx.session.rename_input.query.appendSlice(allocator, "after-bad.txt");
+        try fx.session.rename_input.setText(allocator, "after-bad.txt");
         settings_ops.commitRename(fx.session);
         try testing.expect(t.rt.editor_path != null);
     }
@@ -39414,14 +39414,14 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         try testing.expect(insertText(fx.session, t, "z\n"));
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
         fx.session.rename_input.clear();
-        try fx.session.rename_input.query.appendSlice(allocator, "over.txt");
+        try fx.session.rename_input.setText(allocator, "over.txt");
         settings_ops.commitRename(fx.session);
         fx.session.dispatchChromeAction(.confirm_cancel);
         try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len);
         // 다른 이름으로 저장 — **취소한 경로에 쓰이면 안 된다**.
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
         fx.session.rename_input.clear();
-        try fx.session.rename_input.query.appendSlice(allocator, "other.txt");
+        try fx.session.rename_input.setText(allocator, "other.txt");
         settings_ops.commitRename(fx.session);
         try testing.expect(std.mem.endsWith(u8, t.rt.editor_path.?, "/other.txt"));
         const untouched = try dir.dir.readFileAlloc(io, "over.txt", allocator, .limited(64));
@@ -39453,7 +39453,7 @@ test "U2n 쓰기는 됐는데 entry 를 못 붙이면 — 새지 않고, 이름�
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "written\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "orphan.txt");
+    try fx.session.rename_input.setText(allocator, "orphan.txt");
     settings_ops.commitRename(fx.session);
 
     // ⚠️ **파일은 이미 있다** — 쓰기가 먼저이기 때문이다(그 순서의 근거는 그 함수 주석에 있다:
@@ -39566,7 +39566,7 @@ test "U2p 이름 상자가 떠 있는 동안 그 Term 이 닫히면 — 확정�
     try testing.expect(!fx.session.chrome_host.rename_box.open);
 
     // 확정해도 **아무 일도 안 일어난다**(파일도 안 생긴다) — 낡은 포인터를 만지지 않는다.
-    try fx.session.rename_input.query.appendSlice(allocator, "ghost.txt");
+    try fx.session.rename_input.setText(allocator, "ghost.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(fx.session.rename == null);
     try testing.expectError(error.FileNotFound, dir.dir.access(io, "ghost.txt", .{}));
@@ -39598,7 +39598,7 @@ test "U2u 재진입: 상자가 떠 있는데 또 ⌘S · 확인 중에 또 저�
     try testing.expectError(error.AskName, saveDocument(fx.session, a));
     try testing.expectEqual(a.surface.id, fx.session.rename.?.untitled_save);
     // 입력한 글자가 상자 열기로 지워졌다면 사용자는 다시 쳐야 한다 — 그 사실을 값으로 둔다.
-    try fx.session.rename_input.query.appendSlice(allocator, "exists.txt");
+    try fx.session.rename_input.setText(allocator, "exists.txt");
 
     // ⑵ 확정 → **덮어쓰기 확인**이 뜨고 경로를 들고 있다.
     settings_ops.commitRename(fx.session);
@@ -39741,7 +39741,7 @@ test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이�
         fn f(s: *AppSession, a: std.mem.Allocator, t: *Term, name: []const u8) !void {
             try testing.expectError(error.AskName, saveDocument(s, t));
             s.rename_input.clear();
-            try s.rename_input.query.appendSlice(a, name);
+            try s.rename_input.setText(a, name);
             settings_ops.commitRename(s);
         }
     }.f;
@@ -39852,7 +39852,7 @@ test "U2y 「이미 열림」은 이 창만 본다 — 다른 창은 검사 범�
     const t = try openUntitledInActivePane(w2);
     try testing.expect(insertText(w2, t, "b\n"));
     try testing.expectError(error.AskName, saveDocument(w2, t));
-    try w2.rename_input.query.appendSlice(allocator, "shared.txt");
+    try w2.rename_input.setText(allocator, "shared.txt");
     settings_ops.commitRename(w2);
     try testing.expect(w2.pending_confirm == .untitled_overwrite); // 확인은 뜬다(디스크에 있다)
     try testing.expect(t.rt.editor_path == null); // 아직 안 썼다
@@ -39882,7 +39882,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
     try testing.expectEqual(cap + 1, t.rt.editor_doc.?.file.content.len);
 
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "big.txt");
+    try fx.session.rename_input.setText(allocator, "big.txt");
     settings_ops.commitRename(fx.session);
 
     // **파일이 안 생겼다** — 그리고 그 이유를 말한다.
@@ -39900,7 +39900,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
     try testing.expect(insertText(fx.session, ok_doc, "small\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, ok_doc));
     fx.session.rename_input.clear();
-    try fx.session.rename_input.query.appendSlice(allocator, "small.txt");
+    try fx.session.rename_input.setText(allocator, "small.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(ok_doc.rt.editor_path != null);
 }
@@ -39922,7 +39922,7 @@ test "U2B 덮어쓰기 확인이 떠 있는데 그 문서를 닫으면 — 확�
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "new\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "target.txt");
+    try fx.session.rename_input.setText(allocator, "target.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(fx.session.pending_confirm == .untitled_overwrite);
     try testing.expect(fx.session.chrome_host.confirm.open);
@@ -39972,7 +39972,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
         try testing.expect(insertText(fx.session, t, "one\n"));
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
         typeName(fx.session, "k1.txt");
-        try testing.expectEqualStrings("k1.txt", fx.session.rename_input.query.items);
+        try testing.expectEqualStrings("k1.txt", fx.session.rename_input.text.items);
         settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .enter } });
         try testing.expect(t.rt.editor_path != null);
         const got = try dir.dir.readFileAlloc(io, "k1.txt", allocator, .limited(64));
@@ -41314,7 +41314,7 @@ test "C0c 디스크 지문의 수명 — 두 번째 저장이 자기가 쓴 것�
     try testing.expect(u.rt.editor_doc.?.disk_hash == null);
     try testing.expect(insertText(fx.session, u, "fresh\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, u));
-    try fx.session.rename_input.query.appendSlice(allocator, "fresh.txt");
+    try fx.session.rename_input.setText(allocator, "fresh.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(u.rt.editor_path != null);
     // 이름이 붙은 뒤에는 **지문이 선다** — 안 서면 그 문서는 영영 충돌을 못 본다.
@@ -41516,7 +41516,7 @@ test "U4a-6 이름이 붙으면 옛 신원의 백업이 사라진다" {
     try testing.expect(backupExists(root, .{ .untitled = n }));
 
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
-    try fx.session.rename_input.query.appendSlice(allocator, "named.txt");
+    try fx.session.rename_input.setText(allocator, "named.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(t.rt.editor_path != null);
     // **옛 이름의 파일이 남으면** 다음 실행이 이미 저장된 문서를 「이름 없는 dirty」로 되살린다.
@@ -43040,7 +43040,7 @@ test "IGP7 다시 추정 — 설정 탭 폭이 바뀌면 지금 내용으로(최
         try testing.expectEqual(@as(usize, 2), countHits(try guideHitsIn(fx.session, untitled_leaf, t, &buf), 2));
         try testing.expectEqual(@as(u64, 1), t.rt.editor_guides.guessed);
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
-        try fx.session.rename_input.query.appendSlice(allocator, "t.go");
+        try fx.session.rename_input.setText(allocator, "t.go");
         settings_ops.commitRename(fx.session);
         try testing.expectEqual(maru.session.editor.language.Grammar.go, t.rt.editor_grammar);
         try testing.expectEqual(@as(usize, 1), countHits(try guideHitsIn(fx.session, untitled_leaf, t, &buf), 2));
@@ -43060,7 +43060,7 @@ test "IGP7 다시 추정 — 설정 탭 폭이 바뀌면 지금 내용으로(최
         var buf: [64]GuideHit = undefined;
         _ = try guideHitsIn(fx.session, untitled_leaf, t, &buf);
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
-        try fx.session.rename_input.query.appendSlice(allocator, "t.ts");
+        try fx.session.rename_input.setText(allocator, "t.ts");
         settings_ops.commitRename(fx.session);
         try testing.expectEqual(maru.session.editor.language.Grammar.typescript, t.rt.editor_grammar);
         try testing.expectEqual(@as(usize, 2), countHits(try guideHitsIn(fx.session, untitled_leaf, t, &buf), 2));

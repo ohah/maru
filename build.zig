@@ -8879,6 +8879,7 @@ pub fn build(b: *std.Build) void {
         .run_session_host_slow_observer_validator_tests = run_session_host_slow_observer_validator_tests,
         .macos_host_tests = macos_host_tests,
         .test_step = test_step,
+        .macos_only_test_step = macos_only_test_step,
         .boundary_step = boundary_step,
         .session_host_step = session_host_step,
     });

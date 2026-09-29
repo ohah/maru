@@ -2996,6 +2996,9 @@ pub const RemoteTermBackend = struct {
         if (entry.runtime_generation != target.runtime_generation or
             !std.mem.eql(u8, &runtime_id, &target.runtime_id))
             return error.StaleExternalEvent;
+        // abort 계열 close 는 이 runtime 의 결속을 푼다. host 의 charge 를 쥔 anchor 라면 풀기 전에 형제에게 넘긴다.
+        if (RemoteRuntime.backend_api.closeTransitionClearsBinding(target.projection))
+            self.handOffReconnectChargeBeforeLeaveNoFail(entry.runtime, entry.host_id);
         try RemoteRuntime.backend_api.applyCloseTransitionProjection(entry.runtime, target.projection);
     }
 
@@ -3141,6 +3144,7 @@ pub const RemoteTermBackend = struct {
         if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
         // Only resource callbacks remain. The authoritative job/map projection above is already
         // fully committed, so reentry cannot observe a half-removed runtime row.
+        self.handOffReconnectChargeBeforeLeaveNoFail(removed.value.runtime, removed.value.host_id);
         removed.value.runtime.detachClientSide();
         self.allocator.destroy(removed.value.runtime);
         if (self.host_pool) |pool| pool.release(removed.value.host_id);
@@ -3226,6 +3230,26 @@ pub const RemoteTermBackend = struct {
     }
 
     const DestroyMode = enum { terminate, detach };
+
+    /// 떠나는 runtime 이 host admission 의 resident charge 를 쥐고 있으면, 떠나기 **전에** 같은 admission 의
+    /// identity-only 형제(handle 최솟값)에게 넘긴다. 형제가 없으면 떠나는 runtime 의 teardown 이 직접
+    /// 돌려준다. 이것이 없으면 anchor 탭을 닫은 뒤 남은 형제가 charge 0 으로 재접속을 계속한다.
+    ///
+    /// `leaving` 은 map 에 남아 있어도 되고(detach 경로) 이미 빠져 있어도 된다(close 경로) — 형제 후보에서
+    /// 포인터로 제외한다. backend `deinit` 루프는 앞서 파괴한 항목이 map 에 남아 있으므로 부르지 않는다.
+    fn handOffReconnectChargeBeforeLeaveNoFail(self: *RemoteTermBackend, leaving: *RemoteRuntime, host_id: u128) void {
+        if (!RemoteRuntime.backend_api.boundReconnectCharged(leaving)) return;
+        var heir: ?SelectedReconnectRuntime = null;
+        var iterator = self.runtimes.iterator();
+        while (iterator.next()) |row| {
+            if (row.value_ptr.host_id != host_id or row.value_ptr.runtime == leaving) continue;
+            RemoteRuntime.backend_api.preflightReconnectResidentChargeHandOff(leaving, row.value_ptr.runtime) catch continue;
+            if (heir == null or row.key_ptr.* < heir.?.handle)
+                heir = .{ .handle = row.key_ptr.*, .runtime = row.value_ptr.runtime };
+        }
+        const target = heir orelse return;
+        RemoteRuntime.backend_api.handOffReconnectResidentChargeNoFail(leaving, target.runtime);
+    }
 
     fn destroyRuntimeEntry(self: *RemoteTermBackend, handle: RuntimeHandle, entry: RuntimeEntry, mode: DestroyMode) void {
         if (builtin.is_test and B5TestState.skip_destroy) return;
@@ -3549,7 +3573,7 @@ pub const RemoteTermBackend = struct {
         defer if (!dispatch_settled) admissions.settleDispatch(dispatch, .retry_later) catch
             process_seal.fatalIntegrity(.incident_authority);
         const projection = try admissions.preparedProjection(dispatch);
-        var selected: [max_remote_backend_runtimes]*RemoteRuntime = undefined;
+        var selected: [max_remote_backend_runtimes]SelectedReconnectRuntime = undefined;
         var selected_count: usize = 0;
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
@@ -3562,17 +3586,19 @@ pub const RemoteTermBackend = struct {
                 dispatch_settled = true;
                 return .discarded_stale;
             }
-            selected[selected_count] = row.value_ptr.runtime;
+            selected[selected_count] = .{ .handle = row.key_ptr.*, .runtime = row.value_ptr.runtime };
             selected_count += 1;
         }
+        // HashMap 순회 순서는 결정적이지 않다 — anchor 를 handle 최솟값으로 고정한다.
+        std.mem.sort(SelectedReconnectRuntime, selected[0..selected_count], {}, SelectedReconnectRuntime.lessThan);
         if (selected_count == 0) {
             admissions.settleDispatch(dispatch, .discarded_stale) catch
                 process_seal.fatalIntegrity(.incident_authority);
             dispatch_settled = true;
             return .discarded_stale;
         }
-        for (selected[0..selected_count]) |runtime|
-            RemoteRuntime.backend_api.preflightReconnectAdmission(runtime, projection) catch |err| switch (err) {
+        for (selected[0..selected_count]) |row|
+            RemoteRuntime.backend_api.preflightReconnectAdmission(row.runtime, projection) catch |err| switch (err) {
                 error.Busy => {
                     admissions.settleDispatch(dispatch, .retry_later) catch
                         process_seal.fatalIntegrity(.incident_authority);
@@ -3587,18 +3613,29 @@ pub const RemoteTermBackend = struct {
                 },
                 else => return err,
             };
-        if (!try budget.canReserveBatch(selected_count, reconnect_resident_budget.max_entry_bytes)) {
+        // 🔥 **host admission 하나 = resident charge 하나.** host 전체 재접속 job 은 runtime 을 직렬로
+        // 처리해(`HostReconnectJob.reconnect` 하나, backend 의 `host_reconnect_job` 하나) 동시에 살아 있는
+        // candidate 가 하나뿐이다. 예전에는 runtime 마다 최악치를 batch 로 잡아(runtime 수 × `max_entry_bytes`)
+        // 빈 예산으로도 7개까지만 들어갔고, runtime 8개 이상인 host 는 `.retry_later` 를 영원히 반복했다
+        // (2026-09-29 실측: 13개 host 가 poison 뒤 3분간 재접속 0회, 앱 재시작으로만 복구).
+        if (!try budget.canReserveBatch(1, reconnect_resident_budget.max_entry_bytes)) {
+            noteReconnectBudgetWait(projection.host_id, selected_count, try budget.snapshot());
             admissions.settleDispatch(dispatch, .retry_later) catch
                 process_seal.fatalIntegrity(.incident_authority);
             dispatch_settled = true;
             return .retry_later;
         }
-        for (selected[0..selected_count]) |runtime| {
-            RemoteRuntime.backend_api.bindReconnectAdmission(
-                runtime,
+        RemoteRuntime.backend_api.bindReconnectAdmission(
+            selected[0].runtime,
+            budget,
+            projection,
+            reconnect_resident_budget.max_entry_bytes,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        for (selected[1..selected_count]) |row| {
+            RemoteRuntime.backend_api.bindReconnectAdmissionIdentity(
+                row.runtime,
                 budget,
                 projection,
-                reconnect_resident_budget.max_entry_bytes,
             ) catch process_seal.fatalIntegrity(.proof_loss);
         }
         admissions.settleDispatch(dispatch, .scheduled) catch
@@ -3607,14 +3644,50 @@ pub const RemoteTermBackend = struct {
         return .started;
     }
 
+    const SelectedReconnectRuntime = struct {
+        handle: RuntimeHandle,
+        runtime: *RemoteRuntime,
+
+        fn lessThan(_: void, a: SelectedReconnectRuntime, b: SelectedReconnectRuntime) bool {
+            return a.handle < b.handle;
+        }
+    };
+
+    comptime {
+        // 빈 예산에는 charge 하나가 **항상** 들어가야 한다 — 아니면 어떤 host 도 재접속을 시작하지 못한다.
+        if (reconnect_resident_budget.max_entry_bytes > reconnect_resident_budget.max_policy_bytes or
+            reconnect_resident_budget.max_active_entries < 1)
+            @compileError("reconnect admission budget must always fit one host charge");
+    }
+
+    /// 예산이 다른 host 의 재접속으로 차서 기다리는 중임을 **값이 바뀔 때만** 한 줄 남긴다. `turnOne` 은
+    /// `.retry_later` 를 진행으로 세어 idle 진단(`reconnect turn idle`)도 찍히지 않으므로, 이 줄이 없으면
+    /// 기다리는 것과 멈춘 것을 로그로 가를 수 없다(2026-09-29 실측: 3분간 재접속 흔적 0줄).
+    fn noteReconnectBudgetWait(host_id: u128, runtime_count: usize, snapshot: reconnect_resident_budget.Snapshot) void {
+        if (builtin.is_test) return;
+        const Last = struct {
+            var host: u128 = 0;
+            var live_entries: usize = std.math.maxInt(usize);
+        };
+        if (Last.host == host_id and Last.live_entries == snapshot.live_entries) return;
+        Last.host = host_id;
+        Last.live_entries = snapshot.live_entries;
+        std.log.warn(
+            "reconnect admission waiting for resident budget: host={x:0>32} runtimes={d} live_entries={d} live_bytes={d}",
+            .{ host_id, runtime_count, snapshot.live_entries, snapshot.live_bytes },
+        );
+    }
+
     /// Coalescing never binds a second resident lease. It is legal only while every same-host
-    /// runtime still carries the first c1 snapshot's exact admission identity.
+    /// runtime still carries the first c1 snapshot's exact admission identity, and exactly one of
+    /// them carries the host's single resident charge.
     pub fn validateBoundReconnectSnapshot(
         self: *RemoteTermBackend,
         snapshot: reconnect_worker_owner.Snapshot,
     ) !void {
         try self.validateReconnectCoordinatorTarget();
         var count: usize = 0;
+        var charged: usize = 0;
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
             if (row.value_ptr.host_id != snapshot.host_id) continue;
@@ -3628,9 +3701,11 @@ pub const RemoteTermBackend = struct {
                     snapshot.incident_sequence,
                 ))
                 return error.StaleAdmission;
+            if (RemoteRuntime.backend_api.boundReconnectCharged(row.value_ptr.runtime)) charged += 1;
             count += 1;
         }
         if (count == 0) return error.StaleAdmission;
+        if (charged != 1) return error.InvalidAuthority;
     }
 
     /// Preflight every same-host resident admission before the first lease release. This remains
@@ -3643,6 +3718,7 @@ pub const RemoteTermBackend = struct {
     ) !void {
         try self.validateReconnectCoordinatorTarget();
         var count: usize = 0;
+        var charged: usize = 0;
         var preflight = self.runtimes.iterator();
         while (preflight.next()) |row| {
             if (row.value_ptr.host_id != snapshot.host_id) continue;
@@ -3657,9 +3733,11 @@ pub const RemoteTermBackend = struct {
                 snapshot.incident_app_instance_nonce,
                 snapshot.incident_sequence,
             );
+            if (RemoteRuntime.backend_api.boundReconnectCharged(row.value_ptr.runtime)) charged += 1;
             count += 1;
         }
         if (count == 0) return error.StaleAdmission;
+        if (charged != 1) return error.InvalidAuthority;
     }
 
     pub fn settleBoundReconnectSnapshotNoFail(
@@ -4857,6 +4935,7 @@ pub const RemoteTermBackend = struct {
             process_seal.fatalIntegrity(.close_runtime_absent);
         if (!close_contract.consumeClosingReceipt(&closing_receipt, closing_receipt.scan, self.runtimes.contains(handle)))
             process_seal.fatalIntegrity(.proof_loss);
+        self.handOffReconnectChargeBeforeLeaveNoFail(removed.value.runtime, removed.value.host_id);
         self.destroyRuntimeEntry(handle, removed.value, .terminate);
         return .removed;
     }
@@ -5051,6 +5130,7 @@ pub const RemoteTermBackend = struct {
         else
             null;
         self.surface_runtime.detachSurface(handle);
+        self.handOffReconnectChargeBeforeLeaveNoFail(entry.runtime, entry.host_id);
         if (self.app_quit_connections_terminalized) {
             if (!self.app_quit_owner_graphs_settled) process_seal.fatalIntegrity(.proof_loss);
             entry.runtime.detachClientSideAfterSharedConnectionTerminalized();
@@ -5511,9 +5591,12 @@ test "CR2e-e3b2 admission drain은 resident cap에서 sealed row를 보존하고
         try backend_value.drainReconnectAdmission(&admissions, &budget),
     );
     try testing.expectEqual(@as(u8, 0), admissions.count);
-    try testing.expectEqual(@as(usize, 7), (try budget.snapshot()).live_entries);
+    // host admission 하나는 charge 하나다(CR6e-c3b2c) — incumbent 5 + host 1.
+    try testing.expectEqual(@as(usize, 6), (try budget.snapshot()).live_entries);
+    // anchor 는 handle 최솟값(1 = fixtures[0])이고 형제는 identity-only 다.
+    try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[0].runtime));
+    try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[1].runtime));
     for (&fixtures) |*fixture| {
-        try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
         try testing.expect(RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
             &fixture.runtime,
             1,
@@ -5534,6 +5617,193 @@ test "CR2e-e3b2 admission drain은 resident cap에서 sealed row를 보존하고
     }
     for (incumbents[2..]) |*lease| try budget.release(lease, .candidate);
     try budget.deinit();
+}
+
+/// CR6e-c3b2c host 단위 resident charge 판정자들이 공유하는 한 host·N runtime 무대.
+///
+/// **왜 N 을 바꿔 가며 재는가**(2026-09-29 실측): runtime 13개 host 가 read_timeout 으로 poison 된 뒤
+/// admission 은 게시됐지만 재접속 job 이 3분 동안 한 번도 시작되지 않았다. 예전 bind 는 host 의 runtime
+/// **전부**에 최악치 charge(`max_entry_bytes`)를 한꺼번에 잡아서, 빈 예산으로도 7개까지만 들어갔다 —
+/// 8개 이상인 host 는 `.retry_later` 를 영원히 반복했다. 7(예전에도 통과하던 대조군)·8(첫 실패)·13(실측)을 잰다.
+const HostChargeScenario = enum {
+    /// 빈 예산 — N 과 무관하게 첫 drain 에 시작하고 charge 는 하나다.
+    empty_budget,
+    /// 다른 host 들의 charge 가 byte cap 을 채우고 있으면 기다렸다가, 하나가 풀리면 시작한다(gate 는 살아 있다).
+    wait_then_release,
+    /// anchor 가 재접속 도중 떠나도 host 의 charge 는 남은 형제 중 handle 최솟값에게 넘어가 하나로 남는다.
+    anchor_teardown,
+};
+
+fn runHostChargeScenario(comptime runtime_count: usize, comptime scenario: HostChargeScenario) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
+    const identity = HostAdapter.publicationProcessIdentity() orelse return error.TestUnexpectedResult;
+    var budget: reconnect_resident_budget.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    defer budget.deinit() catch {};
+    const fixtures = try testing.allocator.alloc(remote_runtime.testing_api.SemanticFixture, runtime_count);
+    defer testing.allocator.free(fixtures);
+    var initialized: usize = 0;
+    defer for (fixtures[0..initialized]) |*fixture| fixture.deinit();
+    for (fixtures) |*fixture| {
+        try fixture.initInPlace();
+        initialized += 1;
+    }
+    var backend_value = b5TestBackend(testing.allocator);
+    try backend_value.claimProductSingleton();
+    defer {
+        backend_value.runtimes.clearRetainingCapacity();
+        backend_value.deinit();
+    }
+    // HashMap 순회 순서는 삽입 순서가 아니다 — handle 을 거꾸로 넣어 «첫 순회 = anchor» 우연을 막는다.
+    var reverse = runtime_count;
+    while (reverse > 0) : (reverse -= 1) {
+        try backend_value.runtimes.put(testing.allocator, reverse, .{
+            .runtime = &fixtures[reverse - 1].runtime,
+            .host_id = 1,
+            .host_adapter_generation = 3,
+            .runtime_generation = 1,
+        });
+    }
+    var admissions: reconnect_admission_owner.Owner = .{};
+    try admissions.initInPlace(identity.process_nonce);
+    const publication = @import("maru").observability.incident_publication_contract;
+    const incident = @import("maru").observability.connection_incident;
+    const input: publication.IncidentInput = .{
+        .timestamp_ns = 1,
+        .host_id = 1,
+        .host_adapter_generation = 3,
+        .connection_generation = fixtures[0].adapter.connectionGeneration(),
+        .wire_major = 1,
+        .reason_raw = @intFromEnum(incident.ConnectionReason.read_timeout),
+        .scope_raw = @intFromEnum(incident.Scope.connection),
+        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
+        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+        .host_class_raw = @intFromEnum(incident.HostClass.current),
+        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
+        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+    };
+    const incident_nonce: u128 = (@as(u128, 1) << 96) | 1;
+    try admissions.admit(.{
+        .publication = .{
+            .incident_id = .{ .app_instance_nonce = incident_nonce, .sequence = 1 },
+            .detail_present = true,
+            .detail_slot = 0,
+            .aggregate_slot = 0,
+            .aggregate_generation = 1,
+        },
+        .wake = .queued,
+        .kind_raw = @intFromEnum(publication.PublicationKind.first),
+    }, input);
+    const snapshot: reconnect_worker_owner.Snapshot = .{
+        .host_id = 1,
+        .pool_membership_generation = 3,
+        .connection_generation = input.connection_generation,
+        .incident_app_instance_nonce = incident_nonce,
+        .incident_sequence = 1,
+        .absolute_deadline_ns = 1,
+    };
+
+    // 다른 host 들의 재접속이 byte cap 을 채운 상태(최악치 7개 = 7 × 16.25 MiB, 하나 더면 128 MiB 초과).
+    var incumbents: [7]reconnect_resident_budget.Lease = @splat(.{});
+    var incumbent_count: usize = 0;
+    defer for (incumbents[0..incumbent_count]) |*lease| {
+        if (lease.active) budget.release(lease, .candidate) catch {};
+    };
+    if (scenario == .wait_then_release) {
+        for (&incumbents) |*lease| {
+            try budget.reserve(lease, reconnect_resident_budget.max_entry_bytes, .candidate);
+            incumbent_count += 1;
+        }
+        for (0..3) |_| try testing.expectEqual(
+            ReconnectDrainResult.retry_later,
+            try backend_value.drainReconnectAdmission(&admissions, &budget),
+        );
+        // 기다리는 동안 admission 은 보존되고 어떤 runtime 도 결속되지 않는다.
+        try testing.expectEqual(@as(u8, 1), admissions.count);
+        for (fixtures) |*fixture| try testing.expect(!RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
+            &fixture.runtime,
+            1,
+            3,
+            input.connection_generation,
+            incident_nonce,
+            1,
+        ));
+        try budget.release(&incumbents[0], .candidate);
+    }
+    const live_before = (try budget.snapshot()).live_entries;
+
+    // 한 frame 에 한 번 drain 한다. 예전 결함은 «잠깐 기다리면 풀리는» 것이 아니라 영원히 안 풀렸으므로
+    // 여러 번 돌려도 `.started` 가 안 나오면 livelock 이다.
+    var result: ReconnectDrainResult = .idle;
+    for (0..3) |_| {
+        result = try backend_value.drainReconnectAdmission(&admissions, &budget);
+        if (result == .started) break;
+    }
+    try testing.expectEqual(ReconnectDrainResult.started, result);
+    try testing.expectEqual(@as(u8, 0), admissions.count);
+    for (fixtures) |*fixture| try testing.expect(RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
+        &fixture.runtime,
+        1,
+        3,
+        input.connection_generation,
+        incident_nonce,
+        1,
+    ));
+    // host 하나 = charge 하나. anchor 는 handle 최솟값(1 = fixtures[0])이고 형제는 identity-only 다.
+    try testing.expectEqual(live_before + 1, (try budget.snapshot()).live_entries);
+    try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[0].runtime));
+    for (fixtures[1..]) |*fixture|
+        try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+    try backend_value.validateBoundReconnectSnapshot(snapshot);
+
+    var settled_from: usize = 0;
+    if (scenario == .anchor_teardown) {
+        // anchor(handle 1)가 떠난다 — 제품 close/detach 경로가 teardown 직전에 부르는 그 hand-off.
+        backend_value.handOffReconnectChargeBeforeLeaveNoFail(&fixtures[0].runtime, 1);
+        _ = backend_value.runtimes.remove(1);
+        try testing.expectEqual(live_before + 1, (try budget.snapshot()).live_entries);
+        try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[0].runtime));
+        // 다음 상속자는 남은 것 중 handle 최솟값(2 = fixtures[1])이다.
+        try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixtures[1].runtime));
+        for (fixtures[2..]) |*fixture|
+            try testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+        try backend_value.validateBoundReconnectSnapshot(snapshot);
+        // 떠난 anchor 는 identity-only 로 남아 자기 teardown 이 lease 없이 결속만 푼다.
+        try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixtures[0].runtime, &budget);
+        try testing.expectEqual(live_before + 1, (try budget.snapshot()).live_entries);
+        settled_from = 1;
+    }
+    try backend_value.settleBoundReconnectSnapshot(snapshot, &budget);
+    try testing.expectEqual(live_before, (try budget.snapshot()).live_entries);
+    for (fixtures[settled_from..]) |*fixture| try testing.expect(!RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
+        &fixture.runtime,
+        1,
+        3,
+        input.connection_generation,
+        incident_nonce,
+        1,
+    ));
+}
+
+test "CR6e-c3b2c host charge: runtime 7개 host 는 빈 예산에서 재접속을 시작한다" {
+    try runHostChargeScenario(7, .empty_budget);
+}
+
+test "CR6e-c3b2c host charge: runtime 8개 host 도 빈 예산에서 재접속을 시작한다" {
+    try runHostChargeScenario(8, .empty_budget);
+}
+
+test "CR6e-c3b2c host charge: runtime 13개 host 도 빈 예산에서 재접속을 시작한다" {
+    try runHostChargeScenario(13, .empty_budget);
+}
+
+test "CR6e-c3b2c host charge: 예산이 차 있으면 13개 host 도 기다렸다가 하나가 풀리면 시작한다" {
+    try runHostChargeScenario(13, .wait_then_release);
+}
+
+test "CR6e-c3b2c host charge: anchor 가 떠나면 charge 는 남은 형제에게 넘어가 하나로 남는다" {
+    try runHostChargeScenario(8, .anchor_teardown);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

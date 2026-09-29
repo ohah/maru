@@ -48928,6 +48928,13 @@ test "EF3 편집기에서 편집기로 옮기면 대상이 따라온다 — targ
     // 검증. **이 커밋이 잡았다고 자랑한 바로 그 형태가 새 판정자에 그대로 있었다**).
     // 대신 **프레임 세대**를 두 tick 비교한다 — 재검색이 돌면 `metal_dirty`가 서고 그 tick이
     // 프레임을 새로 만들어 세대가 는다.
+    //
+    // **깜빡임 위상을 고정한다.** 찾기 상자가 열려 있으면 입력칸 caret 이 **벽시계**로 깜빡여
+    // (`updateCursorBlink` — 기본 500 ms) 두 tick 이 그 경계를 가로지르면 재검색 없이도 세대가 는다.
+    // 2026-09-29 main 의 `editor macOS (ReleaseFast)` 가 그렇게 `expected 2, found 3` 으로 빨갰고,
+    // 두 tick 사이에 510 ms 를 두면 로컬에서도 늘 재현된다(`expected 2, found 4`). 이 판정이 재는 것은
+    // 재검색이지 깜빡임이 아니다 — 간격을 사실상 무한으로 두어 시간과 떼어 낸다.
+    session.appearance.cursor.blink_interval_ms = std.math.maxInt(u32);
     const gen_before = (try session.tick()).metal_generation;
     const gen_after = (try session.tick()).metal_generation;
     try std.testing.expectEqual(gen_before, gen_after);

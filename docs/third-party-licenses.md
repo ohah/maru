@@ -108,12 +108,12 @@ FP14b(2026-07-28)에서 image가 격리 `loadFileURL`(WebKit image document + �
 
 ## Chromium 엔진 (`maru-chromium` — 선택 설치)
 
-`.browser` 탭의 Chromium 엔진(CEF 오프스크린 sidecar, [web-osr-backend.md](plans/web-osr-backend.md))은 Maru.app·dmg 에 **들어가지 않는다**. 사용자가 따로 설치하는 `maru-chromium` formula 가 설치 디렉터리(`libexec`)에 둔다 — 그래서 위 「배포물」 규칙과 별도로 여기 적는다.
+`.browser` 탭의 Chromium 엔진(CEF 오프스크린 sidecar, [web-osr-backend.md](plans/web-osr-backend.md))은 Maru.app·dmg 에 **들어가지 않는다**. 사용자가 따로 설치하는 `maru-chromium` formula 가 설치 디렉터리(`libexec`)에 둔다 — 그래서 위 「번들 코드 라이브러리」와 별도로 여기 적는다(Maru.app·dmg 에 동봉하는 자산의 규칙은 아래 「동봉 자산 추가 규칙」).
 
 | 자산 | 라이선스 | 설치물 안의 전문 |
 | --- | --- | --- |
 | CEF(Chromium Embedded Framework) 154.0.23 — `Chromium Embedded Framework.framework` | BSD 3-Clause (© Marshall A. Greenblatt, Google Inc.) | `licenses/CEF-LICENSE.txt`(SDK 의 `LICENSE.txt`) |
-| Chromium 154.0.8037.17 과 그 제3자 구성요소(프레임워크에 들어 있다) | 구성요소별 — 766 개, BSD·MIT·Apache-2.0 가 대부분이고 LGPL 54 건(FFmpeg 등) | `licenses/CHROMIUM-CREDITS.html`(SDK 의 `CREDITS.html` — 구성요소마다 전문) |
+| Chromium 154.0.8037.17 과 그 제3자 구성요소 | 구성요소별 — `CREDITS.html` 에 766 개, BSD·MIT·Apache-2.0 가 대부분이고 라이선스 글에 LGPL 이 나오는 것이 34 개(FFmpeg·WebKit 등 — 이중 라이선스 포함). **Chromium 전체 목록이라 mac 빌드에 들어가지 않는 것(Android NDK·gtk·libsecret 등)도 섞여 있다** | `licenses/CHROMIUM-CREDITS.html`(SDK 의 `CREDITS.html` — 구성요소마다 전문) |
 
 - 둘 다 `zig build web-sidecar-dist` 가 SDK 에서 그대로 복사한다 — CEF 를 올리면 전문도 함께 바뀐다.
 - `maru-chromium` 의 formula 는 CEF 공식 배포본(`cef-builds.spotifycdn.com`, sha256 고정 — `tools/cef-sdk-fetch.sh`)을 사용자 맥에서 받아 쓴다. 프레임워크 바이너리를 Maru 가 다시 올려 배포하지 않는다.

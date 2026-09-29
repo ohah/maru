@@ -1317,13 +1317,35 @@ const RowMarkPaint = struct {
 /// 지그재그 밑줄 한 셀의 조각 수 — 반 셀 폭 조각 둘이 위·아래로 번갈아 선다(§5.4).
 pub const zigzag_pieces_per_cell: u32 = 2;
 
+const FixedMarkSink = struct {
+    out: []draw.Op,
+    truncated: *bool,
+    n: usize = 0,
+
+    fn emit(self: *FixedMarkSink, op: draw.Op) bool {
+        if (self.n >= self.out.len) {
+            self.truncated.* = true;
+            return false;
+        }
+        self.out[self.n] = op;
+        self.n += 1;
+        return true;
+    }
+};
+
 fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
-    var n: usize = 0;
+    var sink: FixedMarkSink = .{ .out = out, .truncated = op_truncated };
+    paintRowMarksInto(props, layout, p, scratch_cols, &sink);
+    return sink.n;
+}
+
+/// 판정용 가변 writer와 제품의 고정 writer가 같은 열·좌표 판정을 지나게 한다.
+fn paintRowMarksInto(props: Props, layout: geometry.Layout, p: RowMarkPaint, scratch_cols: []u8, sink: anytype) void {
     // **줄을 한 번만 지난다.** 위치마다 앞부분을 다시 펴면 마크가 많은 줄에서 비용이 곱으로 붙는다
     // (200자 줄에 마크 100개 = 한 행에 4만 스텝, 화면 50행이면 프레임당 수백만). 물어볼 위치를
     // 모아 한 번에 채운다 — 저장소가 모자라면 앞에서부터 담을 수 있는 만큼만 그린다.
     const max_pairs = @min(p.marks.len, scratch_cols.len / (2 * @sizeOf(u32)));
-    if (max_pairs == 0) return 0;
+    if (max_pairs == 0) return;
     const offsets = std.mem.bytesAsSlice(u32, scratch_cols[0 .. max_pairs * 2 * @sizeOf(u32)]);
     for (p.marks[0..max_pairs], 0..) |m, k| {
         offsets[k * 2] = m.start;
@@ -1341,25 +1363,20 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
         const from = @max(start_col, p.row_start_col);
         const to = @min(end_col, p.row_start_col + layout.content.width);
         if (to <= from) continue;
-        if (n >= out.len) {
-            op_truncated.* = true;
-            break;
-        }
         // **본문은 gutter 뒤에서 시작한다.** pane 원점부터 세면 강조가 줄 번호 위에 선다
         // (첫 캡처가 정확히 그랬다) — 본문 시작 열(`contentLeft`)을 더한다.
         const col_on_screen: u32 = @as(u32, layout.contentLeft()) + (from - p.row_start_col);
         const x = props.rect.x + @as(i32, @intCast(col_on_screen * props.cell_w_px));
         switch (p.shape) {
             .fill => {
-                out[n] = .{ .quad = .{
+                if (!sink.emit(.{ .quad = .{
                     .rect = .{ .x = x, .y = p.y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
                     .fill_role = p.role,
                     .alpha = p.alpha,
                     .border_role = p.border_role,
                     .border_alpha = if (p.border_role != null) 0xFF else null,
                     .border_widths = if (p.border_role != null) .{ bracket_match_border_px, bracket_match_border_px, bracket_match_border_px, bracket_match_border_px } else .{ 0, 0, 0, 0 },
-                } };
-                n += 1;
+                } })) return;
             },
             .zigzag => {
                 // 셀마다 반 셀 폭 조각 둘: 아래·위(두께만큼 올린 자리)를 번갈아. 두께는 caret 과 같다(선 하나의 두께는 한 값).
@@ -1369,12 +1386,8 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
                 const pieces = (to - from) * zigzag_pieces_per_cell;
                 var j: u32 = 0;
                 while (j < pieces) : (j += 1) {
-                    if (n >= out.len) {
-                        op_truncated.* = true;
-                        break;
-                    }
                     const up = (j % 2) == 1;
-                    out[n] = .{ .quad = .{
+                    if (!sink.emit(.{ .quad = .{
                         .rect = .{
                             .x = x + @as(i32, @intCast(j * half)),
                             .y = if (up) bottom - @as(i32, @intCast(thick)) else bottom,
@@ -1383,13 +1396,11 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
                         },
                         .fill_role = p.role,
                         .alpha = p.alpha,
-                    } };
-                    n += 1;
+                    } })) return;
                 }
             },
         }
     }
-    return n;
 }
 
 /// **진단 밑줄**을 그린다(§5.4). 줄마다 조각을 받고(`diag_marks`, 검색과 같은 축) severity 색의 지그재그로 낸다. severity 마다 role 이
@@ -3157,12 +3168,224 @@ test "B2 제품 재현 — 2560 op 고정 저장소에서 촘촘한 검색 화�
     try testing.expect(!complete.truncated);
     try testing.expect(clipped.truncated);
     try testing.expect(clipped.ops < complete.ops);
+    var search_ops: usize = 0;
+    for (wide_ops[0..complete.ops]) |op| {
+        if (op == .quad and op.quad.fill_role == .search_match) search_ops += 1;
+    }
+    const other_ops = complete.ops - search_ops;
+    // 층별 상한을 두어 다른 층을 전부 보존해도, 2560칸 안에서 검색 op은
+    // 이 수만 남는다. 우선순위는 바꿀 수 있지만 화면의 모든 매치를 복원하지 못한다.
+    try testing.expect(other_ops < old_ops.len);
+    try testing.expect(search_ops > old_ops.len - other_ops);
+    std.debug.print("[B2 quotas] all={d} search={d} other={d} search_if_other_preserved={d} omitted={d}\n", .{
+        complete.ops,
+        search_ops,
+        other_ops,
+        old_ops.len - other_ops,
+        search_ops - (old_ops.len - other_ops),
+    });
+}
+
+test "B2 재그리기 반례 — 첫 절단 호출이 RowCache 계수를 전진시킨다" {
+    // 2048줄만 한 프레임에 센다. 절단 후 같은 props로 다시 build하면 마지막
+    // 줄까지 세어 버려, 충분한 op으로 한 번만 그린 프레임과 scrollbar 축이 달라진다.
+    const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 1);
+    var one_prefix = [_]u32{0} ** (count_chunk_lines + 2);
+    var retry_prefix = [_]u32{0} ** (count_chunk_lines + 2);
+    var rollback_prefix = [_]u32{0} ** (count_chunk_lines + 2);
+    var one_cache: RowCache = .{ .prefix = &one_prefix };
+    var retry_cache: RowCache = .{ .prefix = &retry_prefix };
+    var rollback_cache: RowCache = .{ .prefix = &rollback_prefix };
+    var one_buf: TestBuffers = .{};
+    var retry_buf: TestBuffers = .{};
+    var rollback_buf: TestBuffers = .{};
+    var props = testProps(&lines, true);
+    props.total_cols = 20;
+    props.visible_rows = 10;
+    props.rect = .{ .x = 0, .y = 0, .w = 160, .h = 160 };
+    props.row_cache = &one_cache;
+    const one = build(props, one_buf.scratch());
+    try testing.expectEqual(count_chunk_lines, one_cache.filled_upto);
+
+    props.row_cache = &retry_cache;
+    var narrow = retry_buf.scratch();
+    narrow.ops = narrow.ops[0..1];
+    const clipped = build(props, narrow);
+    try testing.expect(clipped.truncated);
+    const retry = build(props, retry_buf.scratch());
+    try testing.expectEqual(lines.len, retry_cache.filled_upto);
+    try testing.expect(one.total_visual_rows != retry.total_visual_rows);
+
+    // 재시도가 꼭 필요하다면 캐시 메타데이터와 이번 호출이 덮을 접두합을
+    // 트랜잭션처럼 되돌려야 한다. 그러면 첫 호출은 버리고 한 번 그리기와 같다.
+    props.row_cache = &rollback_cache;
+    const saved_cache = rollback_cache;
+    const saved_prefix = rollback_prefix;
+    var rollback_narrow = rollback_buf.scratch();
+    rollback_narrow.ops = rollback_narrow.ops[0..1];
+    _ = build(props, rollback_narrow);
+    rollback_cache = saved_cache;
+    rollback_prefix = saved_prefix;
+    const rolled = build(props, rollback_buf.scratch());
+    try testing.expectEqual(one.total_visual_rows, rolled.total_visual_rows);
+    try testing.expect(sameOpContent(one_buf.ops[0..one.ops], rollback_buf.ops[0..rolled.ops]));
+}
+
+test "[측정] B2 큰 화면의 겹친 검색·진단은 op 메모리를 함께 요구한다" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const lines = [_][]const u8{"x" ** 300} ** 200;
+    var find_row: [300]Mark = undefined;
+    for (&find_row, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
+    const diag_row = [_]diagnostic.Mark{.{ .start = 0, .len = 300, .level = .err }};
+    const find_rows = [_][]const Mark{&find_row} ** 200;
+    const diag_rows = [_][]const diagnostic.Mark{&diag_row} ** 200;
+    var props = testProps(&lines, false);
+    props.visible_rows = 200;
+    props.total_cols = 300;
+    props.rect = .{ .x = 0, .y = 0, .w = 2400, .h = 3200 };
+    props.search_marks = &find_rows;
+    props.diag_marks = &diag_rows;
+    const ops = try a.alloc(draw.Op, 200000);
+    defer a.free(ops);
+    const runs = try a.alloc(draw.Run, 2000);
+    defer a.free(runs);
+    const bytes = try a.alloc(u8, 20000);
+    defer a.free(bytes);
+    var buffers: WideBuffers = .{ .ops = ops };
+    const w = build(props, buffers.scratch(runs, bytes));
+    try testing.expect(!w.truncated);
+    try testing.expect(w.ops > 100000);
+    var grown: std.ArrayList(draw.Op) = .empty;
+    defer grown.deinit(a);
+    try grown.ensureTotalCapacity(a, 2560);
+    for (ops[0..w.ops]) |op| try grown.append(a, op);
+    try testing.expectEqual(w.ops, grown.items.len);
+    std.debug.print("[B2 large] ops={d} used_bytes={d} grown_bytes={d}\n", .{ w.ops, w.ops * @sizeOf(draw.Op), grown.capacity * @sizeOf(draw.Op) });
 }
 
 fn b2MonotonicNs() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+const GrowMarkSink = struct {
+    list: std.ArrayList(draw.Op) = .empty,
+    allocator: std.mem.Allocator,
+    oom: bool = false,
+
+    fn emit(self: *GrowMarkSink, op: draw.Op) bool {
+        self.list.append(self.allocator, op) catch {
+            self.oom = true;
+            return false;
+        };
+        return true;
+    }
+};
+
+test "B2 가변 writer의 할당 실패는 부분 결과와 실패 신호를 남긴다" {
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var sink: GrowMarkSink = .{ .allocator = failing.allocator() };
+    defer sink.list.deinit(sink.allocator);
+    try sink.list.ensureTotalCapacityPrecise(sink.allocator, 1);
+    const props = testProps(&.{"xx"}, false);
+    var columns: [32]u8 = undefined;
+    paintRowMarksInto(props, layoutOf(props), .{
+        .line = "xx",
+        .row_start_col = 0,
+        .y = 0,
+        .marks = &.{ .{ .start = 0, .len = 1 }, .{ .start = 1, .len = 1 } },
+        .role = .search_match,
+        .alpha = search_alpha,
+    }, &columns, &sink);
+    try testing.expect(sink.oom);
+    try testing.expectEqual(@as(usize, 1), sink.list.items.len);
+}
+
+test "[측정] B2 검색 표식의 실제 고정·가변 writer가 같은 op을 낸다" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const marks = blk: {
+        var m: [120]Mark = undefined;
+        for (&m, 0..) |*slot, i| slot.* = .{ .start = @intCast(i), .len = 1 };
+        break :blk m;
+    };
+    var props = testProps(&.{"x" ** 120}, false);
+    props.total_cols = 160;
+    props.visible_rows = 80;
+    props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    const layout = layoutOf(props);
+    const fixed_ops = try a.alloc(draw.Op, 120 * 80);
+    defer a.free(fixed_ops);
+    var truncated = false;
+    var fixed: FixedMarkSink = .{ .out = fixed_ops, .truncated = &truncated };
+    var grow: GrowMarkSink = .{ .allocator = a };
+    defer grow.list.deinit(a);
+    try grow.list.ensureTotalCapacity(a, 2560);
+    var columns: [4096]u8 = undefined;
+    for (0..80) |row| {
+        const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+        paintRowMarksInto(props, layout, p, &columns, &fixed);
+        paintRowMarksInto(props, layout, p, &columns, &grow);
+    }
+    try testing.expect(!truncated and !grow.oom);
+    try testing.expectEqual(@as(usize, 120 * 80), fixed.n);
+    try testing.expect(sameOpContent(fixed_ops[0..fixed.n], grow.list.items));
+
+    const samples: u64 = 40;
+    const t0 = b2MonotonicNs();
+    for (0..samples) |_| {
+        var sink: FixedMarkSink = .{ .out = fixed_ops, .truncated = &truncated };
+        for (0..80) |row| {
+            const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+            paintRowMarksInto(props, layout, p, &columns, &sink);
+        }
+        try testing.expectEqual(fixed.n, sink.n);
+        std.mem.doNotOptimizeAway(fixed_ops[0..sink.n]);
+    }
+    const t1 = b2MonotonicNs();
+    var grown_capacity: usize = 0;
+    for (0..samples) |_| {
+        var sink: GrowMarkSink = .{ .allocator = a };
+        defer sink.list.deinit(a);
+        try sink.list.ensureTotalCapacity(a, 2560);
+        for (0..80) |row| {
+            const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+            paintRowMarksInto(props, layout, p, &columns, &sink);
+        }
+        try testing.expect(!sink.oom);
+        try testing.expectEqual(fixed.n, sink.list.items.len);
+        std.mem.doNotOptimizeAway(sink.list.items);
+        grown_capacity = sink.list.capacity;
+    }
+    const t2 = b2MonotonicNs();
+    var reused: GrowMarkSink = .{ .allocator = a };
+    defer reused.list.deinit(a);
+    try reused.list.ensureTotalCapacity(a, 2560);
+    for (0..80) |row| {
+        const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+        paintRowMarksInto(props, layout, p, &columns, &reused);
+    }
+    const warm_capacity = reused.list.capacity;
+    for (0..samples) |_| {
+        reused.list.clearRetainingCapacity();
+        for (0..80) |row| {
+            const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+            paintRowMarksInto(props, layout, p, &columns, &reused);
+        }
+        try testing.expectEqual(fixed.n, reused.list.items.len);
+        std.mem.doNotOptimizeAway(reused.list.items);
+    }
+    const t3 = b2MonotonicNs();
+    std.debug.print("[B2 writers] ops={d} fixed_us={d} grow_cold_us={d} grow_reused_us={d} grown_bytes={d} reused_bytes={d}\n", .{
+        fixed.n,
+        (t1 - t0) / samples / std.time.ns_per_us,
+        (t2 - t1) / samples / std.time.ns_per_us,
+        (t3 - t2) / samples / std.time.ns_per_us,
+        grown_capacity * @sizeOf(draw.Op),
+        warm_capacity * @sizeOf(draw.Op),
+    });
 }
 
 test "[측정] B2 밀집 화면의 한 번 그리기·절단 뒤 재그리기·가변 목록 복사 프록시" {

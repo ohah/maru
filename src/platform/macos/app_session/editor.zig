@@ -1967,8 +1967,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
 
     // **조합 중이면 그 글자를 끼운 사본을 그린다**(N3). 문서는 그대로다 — 조합은 확정이 아니다.
     const preedit_rows = preeditLines(self, term, lines);
-    defer if (preedit_rows) |rows| freePreeditLines(self, term, rows);
-    const draw_lines: []const []const u8 = if (preedit_rows) |rows| rows else lines;
+    defer if (preedit_rows) |projection| freePreeditLines(self, projection);
+    const draw_lines: []const []const u8 = if (preedit_rows) |projection| projection.rows else lines;
 
     var mm_drawn: ?usize = null; // 이 프레임이 그린 미니맵 창의 첫 줄(없으면 null) — 히트 기하가 같은 값을 굳힌다
     const pf = if (diff_state_opt) |st| blk: {
@@ -4162,7 +4162,7 @@ pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
 /// **보이는 줄만 채운다.** 저장소는 문서 줄 수만큼 한 번 잡고 재사용한다 — 화면 밖 줄은 빈 슬라이스라
 /// 렌더가 건너뛴다. 못 잡으면 선택이 안 그려질 뿐 다른 것은 그대로다(그리는 것은 곁가지이고, 선택
 /// 자체는 `editor_selection`이 들고 있다).
-fn buildSelectionMarks(self: *AppSession, term: *Term, primary_projected: bool) ?[]const []const chrome_editor.frame.Mark {
+fn buildSelectionMarks(self: *AppSession, term: *Term, preedit_projected: bool) ?[]const []const chrome_editor.frame.Mark {
     var iter = selections(term);
     if (iter.count() == 0) return null;
     const doc = term.rt.editor_doc orelse return null;
@@ -4197,10 +4197,13 @@ fn buildSelectionMarks(self: *AppSession, term: *Term, primary_projected: bool) 
         while (iter.next()) |sel| {
             const is_primary = primary;
             primary = false;
-            // The primary selection has already been replaced in the preedit
-            // projection. Painting its old byte range would highlight the
-            // composing glyph and the suffix now occupying those columns.
-            if (is_primary and primary_projected and term.rt.editor_preedit.len > 0 and sel.start() == term.rt.editor_preedit_at) continue;
+            // Every projected selection has already been replaced in the
+            // drawing copy. Its old byte range would highlight the composing
+            // glyph or the suffix now occupying those columns.
+            if (preedit_projected and term.rt.editor_preedit.len > 0 and
+                (!is_primary or sel.start() == term.rt.editor_preedit_at) and
+                visibleRowOfDocLine(term, @intCast(doc.file.lines.lineAt(sel.start()))) != null and
+                visibleRowOfDocLine(term, @intCast(doc.file.lines.lineAt(sel.end()))) != null) continue;
             if (sel.len() == 0) continue; // caret뿐 — 그릴 띠가 없다
             storage[n] = sel;
             n += 1;
@@ -4369,72 +4372,98 @@ pub fn editorImeCaretRect(_: *AppSession, term: *Term) ?chrome_draw.Rect {
 /// 화면 밖(접힘에 숨음)이면 `null` — 그때는 원래 배열을 그대로 그린다.
 ///
 /// **버퍼가 아니라 화면만 바꾸는 이유**는 `setEditorPreedit`가 적어 두었다. 여기서 사본을 뜨는
-/// 것은 그 판단의 대가다 — 조합 중에만, 프레임마다 줄 **포인터** 배열 하나를 복사한다(2만 줄이면
-/// 160KB). 조합이 없으면 이 함수는 즉시 `null`이라 **평소에는 비용이 0**이다.
+/// 것은 그 판단의 대가다 — 조합 중에만, 프레임마다 줄 포인터 배열과 바뀐 줄만 복사한다.
+/// 조합이 없으면 즉시 `null`이라 평소에는 비용이 0이다.
 ///
 /// 제자리에서 바꿔치기하고 되돌리는 방법도 있었지만, 그러면 그 배열을 읽는 다른 것들(검색·클릭
 /// 좌표)이 **그리는 도중의 값**을 볼 수 있는 창이 생긴다. 조합 중에만 드는 사본이 그 창보다 싸다.
-fn preeditLines(self: *AppSession, term: *Term, base: []const []const u8) ?[][]const u8 {
+const PreeditProjection = struct {
+    rows: [][]const u8,
+    owned: []bool,
+};
+
+fn preeditLines(self: *AppSession, term: *Term, base: []const []const u8) ?PreeditProjection {
     if (term.rt.editor_preedit.len == 0) return null;
     const doc = term.rt.editor_doc orelse return null;
-    const at = term.rt.editor_preedit_at;
-    if (at > doc.file.content.len) return null;
-
-    const doc_line = doc.file.lines.lineAt(at);
-    const row = visibleRowOfDocLine(term, @intCast(doc_line)) orelse return null; // 접혀 숨었다
-    if (row >= base.len) return null;
-
-    const line = doc.file.lines.line(doc_line) orelse return null;
-    const text = doc.file.content[line.start..line.contentEnd()];
-    const off = at - line.start;
-    if (off > text.len) return null;
-
-    // The selected text can cross lines during reconversion. Project the
-    // result onto the first row and leave empty placeholders on covered rows:
-    // their document/scroll/hit-test indices stay stable until the commit
-    // actually changes the canonical document and rebuilds those mappings.
-    const selection_end = if (term.rt.editor_selection) |sel|
-        if (sel.start() == at and sel.end() <= doc.file.content.len) sel.end() else at
-    else
-        at;
-    const end_line_no = doc.file.lines.lineAt(selection_end);
-    const end_line = doc.file.lines.line(end_line_no) orelse return null;
-    const end_row = visibleRowOfDocLine(term, @intCast(end_line_no)) orelse return null;
-    if (end_row < row or end_row >= base.len) return null;
-    const end_text = doc.file.content[end_line.start..end_line.contentEnd()];
-    const end_off = selection_end - end_line.start;
-    if (end_off > end_text.len) return null;
-    const suffix = end_text[end_off..];
-    const prefix_len = std.math.add(usize, off, term.rt.editor_preedit.len) catch return null;
-    const joined_len = std.math.add(usize, prefix_len, suffix.len) catch return null;
-    const spliced = self.allocator.alloc(u8, joined_len) catch return null;
-    @memcpy(spliced[0..off], text[0..off]);
-    @memcpy(spliced[off..][0..term.rt.editor_preedit.len], term.rt.editor_preedit);
-    @memcpy(spliced[prefix_len..], suffix);
-
-    const rows = self.allocator.alloc([]const u8, base.len) catch {
-        self.allocator.free(spliced);
+    const rows = self.allocator.alloc([]const u8, base.len) catch return null;
+    @memcpy(rows, base);
+    const owned = self.allocator.alloc(bool, base.len) catch {
+        self.allocator.free(rows);
         return null;
     };
-    @memcpy(rows, base);
-    rows[row] = spliced;
-    for (rows[row + 1 .. end_row + 1]) |*covered| covered.* = "";
-    return rows;
+    @memset(owned, false);
+    const projection: PreeditProjection = .{ .rows = rows, .owned = owned };
+    var success = false;
+    defer if (!success) freePreeditLines(self, projection);
+
+    // 뒤쪽 선택부터 투영하면 같은 줄의 원본 byte offset을 유지할 수 있다.
+    // IME가 소유하는 marked range는 primary 하나뿐이다. 나머지 위치에는
+    // 동일한 미확정 글자를 화면에만 비추고 문서 편집은 insertText가 맡는다.
+    var iter = selections(term);
+    var stack_positions: [8]editor_selection.Selection = undefined;
+    const heap_positions: ?[]editor_selection.Selection = if (iter.count() <= stack_positions.len)
+        null
+    else
+        self.allocator.alloc(editor_selection.Selection, iter.count()) catch return null;
+    defer if (heap_positions) |allocated| self.allocator.free(allocated);
+    const positions = heap_positions orelse stack_positions[0..iter.count()];
+    var n: usize = 0;
+    while (iter.next()) |sel| {
+        positions[n] = if (n == 0 and sel.start() != term.rt.editor_preedit_at)
+            editor_selection.Selection.at(term.rt.editor_preedit_at)
+        else
+            sel;
+        n += 1;
+    }
+    std.mem.sort(editor_selection.Selection, positions, {}, struct {
+        fn lessThan(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
+            return a.start() > b.start();
+        }
+    }.lessThan);
+    var previous_start: ?usize = null;
+    for (positions) |sel| {
+        const at = sel.start();
+        // 선택 정규화가 늦은 프레임에도 같은 자리를 두 번 조합하지 않는다.
+        if (previous_start == at) continue;
+        previous_start = at;
+        if (at > doc.file.content.len or sel.end() > doc.file.content.len) continue;
+        const doc_line = doc.file.lines.lineAt(at);
+        const end_line_no = doc.file.lines.lineAt(sel.end());
+        const row = visibleRowOfDocLine(term, @intCast(doc_line)) orelse continue;
+        const end_row = visibleRowOfDocLine(term, @intCast(end_line_no)) orelse continue;
+        if (row >= rows.len or end_row >= rows.len or end_row < row) continue;
+        const line = doc.file.lines.line(doc_line) orelse continue;
+        const end_line = doc.file.lines.line(end_line_no) orelse continue;
+        const off = at - line.start;
+        const end_off = sel.end() - end_line.start;
+        if (off > rows[row].len or end_off > rows[end_row].len) continue;
+        const suffix = rows[end_row][end_off..];
+        const prefix_len = std.math.add(usize, off, term.rt.editor_preedit.len) catch return null;
+        const joined_len = std.math.add(usize, prefix_len, suffix.len) catch return null;
+        const spliced = self.allocator.alloc(u8, joined_len) catch return null;
+        @memcpy(spliced[0..off], rows[row][0..off]);
+        @memcpy(spliced[off..][0..term.rt.editor_preedit.len], term.rt.editor_preedit);
+        @memcpy(spliced[prefix_len..], suffix);
+        if (owned[row]) self.allocator.free(rows[row]);
+        rows[row] = spliced;
+        owned[row] = true;
+        // 여러 줄 재변환은 원본의 행·스크롤·히트 테스트 축을 유지한다.
+        for (row + 1..end_row + 1) |covered| {
+            if (owned[covered]) self.allocator.free(rows[covered]);
+            rows[covered] = "";
+            owned[covered] = false;
+        }
+    }
+    success = true;
+    return projection;
 }
 
-/// `preeditLines`가 뜬 사본을 놓는다 — 끼운 첫 줄과 배열 둘 다. 여러 줄 선택의
-/// 나머지 줄은 빈 정적 조각을 가리키므로 따로 놓을 것은 없다.
-fn freePreeditLines(self: *AppSession, term: *Term, rows: [][]const u8) void {
-    const at = term.rt.editor_preedit_at;
-    const doc = term.rt.editor_doc orelse {
-        self.allocator.free(rows);
-        return;
-    };
-    const doc_line = doc.file.lines.lineAt(@min(at, doc.file.content.len));
-    if (visibleRowOfDocLine(term, @intCast(doc_line))) |row| {
-        if (row < rows.len) self.allocator.free(rows[row]);
+fn freePreeditLines(self: *AppSession, projection: PreeditProjection) void {
+    for (projection.rows, projection.owned) |row, owned| {
+        if (owned) self.allocator.free(row);
     }
-    self.allocator.free(rows);
+    self.allocator.free(projection.owned);
+    self.allocator.free(projection.rows);
 }
 
 /// **IME 조합 중 글자를 갈아 끼운다**(N3 — native-editor.md §11). 빈 문자열이면 조합을 끝낸다.
@@ -10477,10 +10506,10 @@ test "IME9 여러 줄 재변환 미리보기는 선택 본문 전부를 숨기�
     setEditorPreedit(fx.session, term, "한");
 
     const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
-    defer freePreeditLines(fx.session, term, preview);
-    try testing.expectEqualStrings("const 한c = 3;", preview[0]);
-    try testing.expectEqualStrings("", preview[1]);
-    try testing.expectEqualStrings("", preview[2]);
+    defer freePreeditLines(fx.session, preview);
+    try testing.expectEqualStrings("const 한c = 3;", preview.rows[0]);
+    try testing.expectEqualStrings("", preview.rows[1]);
+    try testing.expectEqualStrings("", preview.rows[2]);
     try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", term.rt.editor_doc.?.file.content);
     // If the preview cannot be built (for example, the end line is folded),
     // the unchanged source remains visible and must keep its selection mark.
@@ -10488,16 +10517,70 @@ test "IME9 여러 줄 재변환 미리보기는 선택 본문 전부를 숨기�
     try testing.expectEqual(@as(usize, 1), original_marks[0].len);
     try testing.expect(buildSelectionMarks(fx.session, term, true) == null);
     term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.fromPoints(0, 5)});
-    const marks = buildSelectionMarks(fx.session, term, true) orelse return error.ExtraSelectionMissing;
-    try testing.expectEqual(@as(usize, 1), marks[0].len);
-    try testing.expectEqual(@as(u32, 0), marks[0][0].start);
-    try testing.expectEqual(@as(u32, 5), marks[0][0].len);
+    // 보조 선택에도 조합 글자가 비치므로 원본 선택 띠를 중복해서 칠하지 않는다.
+    try testing.expect(buildSelectionMarks(fx.session, term, true) == null);
 
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
     try testing.expect(drawnHasCodepoint(drawn.dl, 0xD55C));
     try testing.expect(!drawnHasText(drawn.dl, "const b = 2;"));
     try testing.expect(!drawnHasText(drawn.dl, "const c = 3;"));
+}
+
+test "IME-MC-LIVE 조합 갱신은 모든 커서에 비치고 확정·Undo는 한 편집이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    const source = try allocator.dupe(u8, term.rt.editor_doc.?.file.content);
+    defer allocator.free(source);
+    const a = std.mem.indexOf(u8, source, "a = 1") orelse return error.NoFirstCaret;
+    const b = std.mem.indexOf(u8, source, "b = 2") orelse return error.NoSecondCaret;
+    term.rt.editor_selection = editor_selection.Selection.at(a);
+    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(b)});
+
+    for ([_][]const u8{ "ㅎ", "하", "한" }) |preedit| {
+        setEditorPreedit(fx.session, term, preedit);
+        const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
+        defer freePreeditLines(fx.session, preview);
+        const first = try std.fmt.allocPrint(allocator, "const {s}a = 1;", .{preedit});
+        defer allocator.free(first);
+        const second = try std.fmt.allocPrint(allocator, "const {s}b = 2;", .{preedit});
+        defer allocator.free(second);
+        try testing.expectEqualStrings(first, preview.rows[0]);
+        try testing.expectEqualStrings(second, preview.rows[1]);
+        try testing.expectEqualStrings(source, term.rt.editor_doc.?.file.content);
+    }
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    var visible_han: usize = 0;
+    for (drawn.dl.cells) |cell| {
+        if (cell.codepoint == 0xD55C) visible_han += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), visible_han);
+
+    setEditorPreedit(fx.session, term, "");
+    try testing.expect(insertText(fx.session, term, "한"));
+    try testing.expectEqualStrings("const 한a = 1;\nconst 한b = 2;\nconst c = 3;\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings(source, term.rt.editor_doc.?.file.content);
+}
+
+test "IME-MC-LIVE 같은 줄의 두 커서는 원본 위치에 각각 조합을 비춘다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(6)});
+    setEditorPreedit(fx.session, term, "한");
+    const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
+    defer freePreeditLines(fx.session, preview);
+    try testing.expectEqualStrings("한const 한a = 1;", preview.rows[0]);
+    try testing.expectEqualStrings("const b = 2;", preview.rows[1]);
 }
 
 test "IME10 접힌 선택 끝은 보이는 머리줄 끝으로 옮겨 조합과 확정이 숨은 본문을 건드리지 않는다" {
@@ -10518,8 +10601,8 @@ test "IME10 접힌 선택 끝은 보이는 머리줄 끝으로 옮겨 조합과 
     try testing.expectEqual(head_end, term.rt.editor_selection.?.end());
     setEditorPreedit(fx.session, term, "한");
     const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
-    defer freePreeditLines(fx.session, term, preview);
-    try testing.expectEqualStrings("const B한", preview[0]);
+    defer freePreeditLines(fx.session, preview);
+    try testing.expectEqualStrings("const B한", preview.rows[0]);
     try testing.expectEqualStrings(source, term.rt.editor_doc.?.file.content);
 
     setEditorPreedit(fx.session, term, "");

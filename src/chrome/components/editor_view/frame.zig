@@ -6451,7 +6451,8 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
             line_store[li] = line_bufs[li][0..len];
             const n_inl = rnd.uintAtMost(usize, 3);
             var ats: [3]u32 = undefined;
-            for (ats[0..n_inl]) |*a| a.* = starts[rnd.uintAtMost(usize, nchars)];
+            // 셋 중 하나는 아무 byte(cluster 가운데 포함 — 편집 직후 밀린 힌트, 적대적 9회차).
+            for (ats[0..n_inl]) |*a| a.* = if (rnd.uintLessThan(u32, 3) == 0) @intCast(rnd.uintAtMost(usize, len)) else starts[rnd.uintAtMost(usize, nchars)];
             std.mem.sort(u32, ats[0..n_inl], {}, std.sort.asc(u32));
             for (inl_bufs[li][0..n_inl], ats[0..n_inl]) |*in, a| in.* = .{ .at = a, .text = hint_text[0 .. 1 + rnd.uintLessThan(usize, hint_text.len)] };
             inl_store[li] = inl_bufs[li][0..n_inl];
@@ -6468,7 +6469,12 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
         const sel_rows = [_][]const Mark{&.{.{ .start = 0, .len = 96 }}} ** 3;
         props.selection_marks = &sel_rows;
         var b: TestBuffers = .{};
-        const w = build(props, b.scratch());
+        var sc = b.scratch();
+        // 넷 중 하나는 **작업 칸을 작게**(8..64 쌍) — 묶음이 끊기고 첫 행은 담을 만큼만 모으는 갈래(WSF3 은 힌트 없이만 밟았다 — 적대적 9회차).
+        // 그 판에서는 기호가 빠지는 것이 설계라 「죽지 않고 선 것은 오라클의 부분집합」만 본다.
+        const small = rnd.uintLessThan(u32, 4) == 0;
+        if (small) sc.count_scratch = sc.count_scratch[0 .. 2 * @sizeOf(u32) * (8 + 8 * rnd.uintLessThan(usize, 8))];
+        const w = build(props, sc);
         const width = geometry.compute(props.total_cols, props.total_lines, .{}).content.width;
         // 오라클 — 공백·탭마다 줄 처음부터 센 글리프 열, 그 열을 덮는 보이는 행의 칸.
         var want: [256][3]u32 = undefined;
@@ -6495,7 +6501,7 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
         }.f;
         std.mem.sort([3]u32, want[0..wn], {}, lessThan);
         std.mem.sort([3]u32, got, {}, lessThan);
-        if (mode == .all) {
+        if (mode == .all and !small) {
             try testing.expectEqualSlices([3]u32, want[0..wn], got);
             compared += wn;
         } else for (got) |g| {

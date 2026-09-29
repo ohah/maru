@@ -1670,7 +1670,9 @@ test "INL14 가상 텍스트 — 랩 행의 start_byte_col 은 늘 「시작 byt
         var inl_buf: [3]Inlay = undefined;
         const n_inl = rnd.uintAtMost(usize, 3);
         var ats: [3]u32 = undefined;
-        for (ats[0..n_inl]) |*a| a.* = starts[rnd.uintAtMost(usize, nchars)];
+        // 셋 중 하나는 **아무 byte** 에 앵커한다 — 편집 직후 밀린 힌트는 cluster 가운데를 가리킬 수 있고, 전개·열·hit·행 끝이 모두 그 힌트를
+        // 버려야 한다(§4.1h 「cluster 안 앵커」 — 적대적 9회차).
+        for (ats[0..n_inl]) |*a| a.* = if (rnd.uintLessThan(u32, 3) == 0) @intCast(rnd.uintAtMost(usize, len)) else starts[rnd.uintAtMost(usize, nchars)];
         std.mem.sort(u32, ats[0..n_inl], {}, std.sort.asc(u32));
         for (inl_buf[0..n_inl], ats[0..n_inl]) |*in, a| in.* = .{ .at = a, .text = hint_text[0 .. 1 + rnd.uintLessThan(usize, hint_text.len)] };
         const inl = inl_buf[0..n_inl];
@@ -1684,6 +1686,7 @@ test "INL14 가상 텍스트 — 랩 행의 start_byte_col 은 늘 「시작 byt
             var k: usize = 0;
             while (true) {
                 before_col[i] = col;
+                while (k < inl.len and inl[k].at < i) k += 1; // 지나간 cluster 가운데의 힌트 — 폭이 없다
                 while (k < inl.len and inl[k].at == i) : (k += 1) {
                     for (0..inl[k].text.len) |_| {
                         map[map_len] = @intCast(i);

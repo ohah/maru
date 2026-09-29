@@ -444,6 +444,31 @@ test "a sidecar of another control-channel version stops with a version notice i
     try std.testing.expect(latched != Notice.version_mismatch);
 }
 
+test "stopping for good also drops what the dead sidecar held — dialogs, queued notifications, clickable records" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count());
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        latched = null;
+        state = .off;
+    }
+    state = .running;
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "" } }, 0);
+    apply(gpa, .{ .web_notification = .{ .browser = 7, .notification = 2, .origin = "https://a.b", .title = "t" } }, 0);
+    try std.testing.expect(nextDialog(7) != null);
+    // 실행 중에 온 `profile_in_use` 처럼 — 다시 띄우지 않는 멈춤. 답할 콜백이 사라졌으니 요청·알림을 남기지 않는다.
+    stopWith(gpa, .profile_in_use);
+    try std.testing.expect(nextDialog(7) == null);
+    try std.testing.expect(takeWebNotification(7) == null);
+    try std.testing.expectEqual(@as(?Notice, .profile_in_use), takeStoppedNotice(7));
+}
+
 test "a stopped engine is announced once in every Chromium tab's window, including tabs opened after it stopped" {
     const gpa = std.testing.allocator;
     gpa_ref = gpa;

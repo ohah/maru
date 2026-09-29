@@ -1649,7 +1649,8 @@ test "INL14 가상 텍스트 — 랩 행의 start_byte_col 은 늘 「시작 byt
     //    그 cluster 하나 뒤다.
     var prng = std.Random.DefaultPrng.init(0x1a7_13);
     const rnd = prng.random();
-    const pieces = [_][]const u8{ " ", "\t", "a", "\u{D55C}" };
+    // §3.8 표기(`\u{202E}` — 8칸, 경계에 걸치면 잘려 두 행에 걸친다: 탭이 아닌 「머묾」)와 결합 문자(`e` + U+0301 — 여러 byte 한 칸)도 섞는다(적대적 7회차).
+    const pieces = [_][]const u8{ " ", "\t", "a", "\u{D55C}", "\u{202E}", "e\u{301}" };
     const hint_text = "xxxxxx";
     var checked_rows: usize = 0;
     for (0..3000) |_| {

@@ -5411,10 +5411,19 @@ test "CR3a-2c3b typed request encoder injects only canonical binding identities"
         .attach_controller,
     ) == null);
     identity.role = .controller;
+    // 찾기는 모드(`regex`)를 **늘** 싣는다 — 리터럴이면 `false`. host 는 필드를 이름으로만 읽어(`server.dispatchFind` · 필드 수를
+    // 안 센다) 이 필드를 모르는 옛 host 도 리터럴 찾기를 그대로 답하고, `true` 를 모르는 옛 host 의 리터럴 답은 client 가 응답의
+    // `regex` 회신이 없다고 거절한다(`old host cannot silently answer a regex request with literal matches`).
     try std.testing.expectEqualStrings(
-        "{\"stream_id\":77,\"q\":\"61ed959c\",\"cur\":2,\"scroll\":true}",
+        "{\"stream_id\":77,\"q\":\"61ed959c\",\"cur\":2,\"scroll\":true,\"regex\":false}",
         encodeGenerationRequestParams(&buffer, identity, 77, .{
             .find = contract.FindRequest.init("a한", 2, true).?,
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"stream_id\":77,\"q\":\"662e6f\",\"cur\":1,\"scroll\":false,\"regex\":true}",
+        encodeGenerationRequestParams(&buffer, identity, 77, .{
+            .find = contract.FindRequest.initWithMode("f.o", 1, false, true).?,
         }).?,
     );
     try std.testing.expectEqualStrings(

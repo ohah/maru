@@ -244,6 +244,10 @@ pub fn reapBlocking(p: *Process) void {
 }
 
 extern "c" fn waitid(idtype: c_int, id: c_uint, info: *[128]u8, options: c_int) c_int;
+// macOS `<sys/wait.h>` — std 에 darwin 값이 없다. 끝나기만 기다리고 거두지는 않는다(WNOWAIT).
+const p_pid: c_int = 1;
+const w_exited: c_int = 0x04;
+const w_nowait: c_int = 0x20;
 
 test "a reaped child is never signalled or waited for again (its pid may belong to someone else by then)" {
     if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
@@ -272,7 +276,7 @@ test "a reaped child is never signalled or waited for again (its pid may belong 
     }
     var status: c_int = 0;
     var info: [128]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), waitid(1, @intCast(zombie.pid), &info, 0x4 | 0x20)); // P_PID · WEXITED|WNOWAIT
+    try std.testing.expectEqual(@as(c_int, 0), waitid(p_pid, @intCast(zombie.pid), &info, w_exited | w_nowait));
     p.pid = zombie.pid;
     try std.testing.expect(reapIfExited(&p));
     reapBlocking(&p);

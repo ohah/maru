@@ -72,6 +72,9 @@ const Surface = struct {
     can_go_forward: bool = false,
     nav_dirty: bool = false,
     gpu_notice_pending: bool = false,
+    /// 엔진이 멈췄다는 안내(`latched`)를 이 탭의 창이 아직 안 보였다 — 멈출 때 열려 있던 탭과 멈춘 뒤 새로 연 탭에 한 번씩
+    /// 건다(W7a1 7 차 적대 검증 — 앱 전체 안내 하나는 Chromium 탭과 무관한 창에 한 번만 떴고, 새 탭은 빈 채 단서가 없었다).
+    stopped_notice_pending: bool = false,
     /// 보일 링 고르기(W3c) — 새 링의 첫 프레임까지 옛 장, GPU 소비자 규칙.
     view: RingView = .{},
     /// 마지막으로 이 front 를 그린 창(AppSession 주소). 프레임 세대는 창마다 따로 세므로 다른 창의 세대와 비교하지 않는다.
@@ -319,7 +322,6 @@ var failures: [restart_budget]?i64 = @splat(null);
 /// 띄울 때마다 오른다 — 파이프를 비우는 도중 sidecar 가 죽어 다시 띄우면(받은 바이트를 지운다) 비우던 쪽이 멈춘다.
 var process_generation: u64 = 0;
 var failure_head: usize = 0;
-var notice_queue: std.ArrayList(Notice) = .empty;
 /// 픽셀 링을 받는 mach port(W3c). sidecar 가 바뀌어도 하나를 계속 쓴다 — 기대 pid 와 pid 버전 고정만 새로 한다.
 var receiver: ?ring_receiver.Receiver = null;
 /// 받은 링 알림 중 거절한 수(관측점 — 이름은 비밀이 아니라 아무나 넣을 수 있다).
@@ -404,8 +406,6 @@ test "a sidecar of another control-channel version stops with a version notice i
         failure_head = saved_failures[1];
         inbox.deinit(gpa);
         inbox = .empty;
-        notice_queue.deinit(gpa);
-        notice_queue = .empty;
         outbox_pending.deinit(gpa);
         outbox_pending = .empty;
         decoder = .init(.to_maru);
@@ -422,7 +422,6 @@ test "a sidecar of another control-channel version stops with a version notice i
     drainInbox(gpa, 0);
     try std.testing.expectEqual(State.failed, state);
     try std.testing.expectEqual(@as(?Notice, .version_mismatch), latched);
-    try std.testing.expectEqual(@as(?Notice, .version_mismatch), takeNotice());
     try std.testing.expectEqual(@as(usize, 0), outbox_pending.items.len); // 보낼 곳이 없다 — 버린다
     // handshake 중이라도 버전이 아닌 위반(깨진 magic)은 규칙 위반(죽이고 다시 띄우는 쪽) — 버전 안내가 아니다.
     decoder = .init(.to_maru);
@@ -435,7 +434,6 @@ test "a sidecar of another control-channel version stops with a version notice i
     try inbox.appendSlice(gpa, broken[0..len]);
     drainInbox(gpa, 0);
     try std.testing.expect(latched != Notice.version_mismatch);
-    try std.testing.expectEqual(@as(?Notice, null), takeNotice());
     // handshake 뒤의 버전 위반도 규칙 위반 — 버전 안내가 아니다.
     decoder = .init(.to_maru);
     inbox.clearRetainingCapacity();
@@ -444,10 +442,40 @@ test "a sidecar of another control-channel version stops with a version notice i
     try inbox.appendSlice(gpa, frame[0..len]);
     drainInbox(gpa, 0);
     try std.testing.expect(latched != Notice.version_mismatch);
-    try std.testing.expectEqual(@as(?Notice, null), takeNotice());
+}
+
+test "a stopped engine is announced once in every Chromium tab's window, including tabs opened after it stopped" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count());
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        latched = null;
+        state = .off;
+    }
+    const size: ws.message.ViewSize = .{ .width = 10, .height = 10, .scale = 1 };
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = size, .hidden = false } });
+    try surfaces.put(gpa, 8, .{ .record = .{ .surface_id = 8, .size = size, .hidden = true } });
+    fail(.version_mismatch);
+    // 열려 있던 두 탭 모두 — 각자 한 번.
+    try std.testing.expectEqual(@as(?Notice, .version_mismatch), takeStoppedNotice(7));
+    try std.testing.expectEqual(@as(?Notice, null), takeStoppedNotice(7));
+    try std.testing.expectEqual(@as(?Notice, .version_mismatch), takeStoppedNotice(8));
+    // 멈춘 뒤 새로 연 탭도 안내를 받는다(엔진은 띄우지 않는다).
+    ensure(gpa, .{ .surface_id = 9, .width_px = 10, .height_px = 10, .visible = true }, 1000, 0);
+    try std.testing.expectEqual(State.failed, state);
+    try std.testing.expect(process == null);
+    try std.testing.expectEqual(@as(?Notice, .version_mismatch), takeStoppedNotice(9));
+    try std.testing.expectEqual(@as(?Notice, null), takeStoppedNotice(9));
 }
 
 extern "c" fn waitid(idtype: c_int, id: c_uint, info: *[128]u8, options: c_int) c_int;
+// macOS `<sys/wait.h>` — std 에 darwin 값이 없다. 끝나기만 기다리고 거두지는 않는다(WNOWAIT).
+const p_pid: c_int = 1;
+const w_exited: c_int = 0x04;
+const w_nowait: c_int = 0x20;
 
 test "an exit seen before the last frame is read still reads it, so a version mismatch is not counted as a crash" {
     const gpa = std.testing.allocator;
@@ -465,8 +493,6 @@ test "an exit seen before the last frame is read still reads it, so a version mi
         process = null;
         inbox.deinit(gpa);
         inbox = .empty;
-        notice_queue.deinit(gpa);
-        notice_queue = .empty;
         outbox_pending.deinit(gpa);
         outbox_pending = .empty;
         decoder = .init(.to_maru);
@@ -481,7 +507,7 @@ test "an exit seen before the last frame is read still reads it, so a version mi
         child.deinit(gpa);
     };
     var info: [128]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), waitid(1, @intCast(child.pid), &info, 0x4 | 0x20)); // P_PID · WEXITED|WNOWAIT
+    try std.testing.expectEqual(@as(c_int, 0), waitid(p_pid, @intCast(child.pid), &info, w_exited | w_nowait));
     // 그 자식이 끝나기 직전에 쓴 것처럼, 아직 안 읽은 버전이 다른 `hello_ack` 가 파이프에 있다.
     var fds: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
@@ -608,7 +634,7 @@ pub fn ensure(gpa: std.mem.Allocator, layout: plan.Layout, scale_milli: u32, now
     const existing = surfaces.getPtr(layout.surface_id);
     const fresh = (plan.reconcile(if (existing) |s| &s.record else null, layout, scale_milli, &commands, gpa) catch return) orelse null;
     if (fresh) |record| {
-        surfaces.put(gpa, layout.surface_id, .{ .record = record }) catch return;
+        surfaces.put(gpa, layout.surface_id, .{ .record = record, .stopped_notice_pending = latched != null }) catch return;
         // 판정자 전용(`MARU_WEB_OSR_TEST_URL`): 새 탭을 이 주소로 연다 — 스모크가 sidecar 까지의 경로(띄우기·handshake·
         // 생성·이동)를 시험 서버가 받은 요청으로 확인한다. 제품 사용자가 켤 이유는 없다.
         if (std.c.getenv("MARU_WEB_OSR_TEST_URL")) |test_url| navigate(gpa, layout.surface_id, std.mem.span(test_url));
@@ -795,10 +821,12 @@ pub fn takeGpuNotice(surface_id: u64) bool {
     return s.gpu_notice_pending;
 }
 
-/// 앱 전체 안내(한 창이 한 번 보인다).
-pub fn takeNotice() ?Notice {
-    if (notice_queue.items.len == 0) return null;
-    return notice_queue.orderedRemove(0);
+/// 이 탭에 걸린 「엔진이 멈췄다」 안내(탭마다 한 번 — 그 탭의 창이 보인다).
+pub fn takeStoppedNotice(surface_id: u64) ?Notice {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (!s.stopped_notice_pending) return null;
+    s.stopped_notice_pending = false;
+    return latched;
 }
 
 /// 앱 종료 — shutdown 을 보내고 잠시 기다린 뒤 남았으면 죽인다. sidecar 는 부모(maru)가 사라지면 스스로도 끝난다.
@@ -829,8 +857,6 @@ pub fn shutdownForExit() void {
     inbox = .empty;
     outbox_pending.deinit(gpa);
     outbox_pending = .empty;
-    notice_queue.deinit(gpa);
-    notice_queue = .empty;
 }
 
 // ── 대화상자·파일 선택(W5a) ────────────────────────────────────────────────────────────────────────────
@@ -1196,7 +1222,7 @@ fn sleepMs(ms: i64) void {
 fn fail(notice: Notice) void {
     state = .failed;
     latched = notice;
-    notice_queue.append(gpa_ref orelse return, notice) catch {};
+    for (surfaces.values()) |*s| s.stopped_notice_pending = true;
 }
 
 /// 죽은 sidecar 가 쥐던 것을 버린다. 대화상자 콜백은 사라졌다 — 기다리던 요청을 버린다(떠 있는 창은 그 창이 닫는다). 알림
@@ -1305,7 +1331,8 @@ fn decodeFailed(gpa: std.mem.Allocator, now_ms: i64, err: ws.wire.Error) void {
     protocolBroken(gpa, now_ms);
 }
 
-/// 다시 띄워도 같은 실패 — sidecar 를 끝내고 멈춘 뒤 안내한다. handshake 전에 쥔 명령도 버린다(보낼 곳이 없다).
+/// 다시 띄워도 같은 실패 — sidecar 를 끝내고 멈춘 뒤 안내한다. handshake 전에 쥔 명령도, 죽은 sidecar 가 쥐던 대화상자·알림
+/// 기록도 버린다(보낼 곳·답할 곳이 없다 — 크래시 경로와 같게, W7a1 7 차 적대 검증).
 fn stopWith(gpa: std.mem.Allocator, notice: Notice) void {
     if (process) |*p| {
         lsp_process.kill(p, .KILL);
@@ -1314,6 +1341,7 @@ fn stopWith(gpa: std.mem.Allocator, notice: Notice) void {
     }
     process = null;
     outbox_pending.clearRetainingCapacity();
+    forgetSidecar(gpa);
     fail(notice);
 }
 

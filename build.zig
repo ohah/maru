@@ -897,6 +897,14 @@ pub fn build(b: *std.Build) void {
         test_macos_window_smoke_step.dependOn(&run_macos_window_smoke_tests.step);
         macos_only_test_step.dependOn(&run_macos_window_smoke_tests.step);
 
+        // W7a1: 릴리스 서명 뒤의 Maru.app entitlements 검사(`tools/check-macos-app-entitlements.sh`)는 태그 릴리스에서만 돈다 —
+        // 가짜 번들을 ad-hoc 서명해 그 검사 자체를 macOS CI 에서 시험한다(W7a1 적대 검증 8 차).
+        const test_entitlements_check_step = b.step("test-macos-app-entitlements-check", "Self-test tools/check-macos-app-entitlements.sh with ad-hoc signed fake bundles");
+        const run_entitlements_check = b.addSystemCommand(&.{ "/bin/sh", "tools/test-check-macos-app-entitlements.sh" });
+        run_entitlements_check.setCwd(b.path("."));
+        test_entitlements_check_step.dependOn(&run_entitlements_check.step);
+        macos_only_test_step.dependOn(&run_entitlements_check.step);
+
         // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하고,
         // RendererState/GlyphFrame에서 온 atlas slot/UV/raster bytes를 제품 atlas texture
         // shader sampling까지 연결한다. 현재 입력은 실제 TerminalCore text가 아니라 CoreText
@@ -9239,7 +9247,7 @@ pub fn build(b: *std.Build) void {
 
     // 웹 OSR sidecar(W1b) 등록은 `build/web_sidecar.zig` 가 소유한다 — CEF 없는 시험은 기본 test 에,
     // sidecar 실행 파일은 `-Dcef-sdk` 가 있을 때만 `web-sidecar` 스텝에.
-    web_sidecar_build.register(b, .{ .target = target, .optimize = optimize, .test_step = test_step, .macos_sdk = macos_sdk, .maru_version = build_zig_zon.version });
+    web_sidecar_build.register(b, .{ .target = target, .optimize = optimize, .test_step = test_step, .macos_only_test_step = macos_only_test_step, .macos_sdk = macos_sdk, .maru_version = build_zig_zon.version });
 
     // Opt-in external oracle: validates committed goldens against system libvterm.
     // Intentionally NOT wired into the default `test` step or `mise run check` so

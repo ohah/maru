@@ -434,7 +434,7 @@ CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(
 - Chrome Lab readback. 현재 `macos-chrome-lab-smoke`가 받는 축은 scenario와 font뿐이고 render
   scale 축은 없다. `macos-chrome-lab-font-review`의 `-review-2x.png`는 ffmpeg nearest-neighbor로
   키운 **리뷰용 확대본**이지 2× backing scale 렌더가 아니다. 따라서 이관 PR의 기본 gate는 제품
-  Metal PNG + JSON readback 하나이며, 시각 변화 PR은 그 PNG를 PR 본문에 `gh attach`한다. render
+  Metal PNG + JSON readback 하나이며, 시각 변화 PR은 그 PNG를 gh 내장 `--attach`로 PR 본문에 첨부한다. render
   scale 1×/2×가 실제로 필요한 consumer는 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)의
   scale-normalized rect gate를 쓰고, Chrome Lab에 scale 축을 추가하려면 그 PR이 도구 확장을
   자기 범위로 선언한다.

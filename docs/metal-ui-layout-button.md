@@ -152,7 +152,7 @@ artifact 입력으로 system UI primary와 bundled Jetendard primary를 각각 c
 fallback face 목록이 실제로 다른지 기록한다. primary face가 바뀌지 않았거나 모든 role의
 font identity가 같지 않으면 "font별 capture"라고 주장하지 않는다. 두 capture 모두 GPU rich
 glyph readback과 actual AppKit path를 통과해야 하며, PR에는 원본과 2× 확인용 확대 PNG를
-`gh attach`로 함께 넣는다.
+gh 내장 `--attach`로 함께 넣는다.
 
 다음 B1의 제안 API는 semantic component만 공개한다. `Row`/`Column`/`Flex`나 callback closure를
 Button API로 올리지 않는다. 제품 component는 내부 layout node를 조합하고, action은 기존처럼
@@ -246,7 +246,7 @@ Session Dock은 자기 `ButtonMetrics`(`components/session_dock/types.zig`)로 a
 
 진행 상태 자체는 `implementation-plan.md`와 `verification-matrix.md`가 소유한다.
 
-각 구현 PR은 `mise run macos-chrome-lab-smoke`의 제품 Metal PNG와 `gh attach` 본문 이미지를
+각 구현 PR은 `mise run macos-chrome-lab-smoke`의 제품 Metal PNG를 gh 내장 `--attach`로 올린 본문 이미지를
 포함한다. B1-text/B1-button은 `zig build test-chrome-ui`, `zig build check-boundaries`, `mise run check`,
 그리고 capture가 실제 rich GPU glyph path인지 확인하는 readback artifact를 함께 통과해야 한다.
 폰트 선택을 사람이 검토하는 PR은 일반 `retained-list`만 여러 font로 찍어서는 안 된다. 그 fixture는

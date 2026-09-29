@@ -6402,6 +6402,23 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
         // 첫 행: 탭0 열 0 · 탭1 열 9(걸친 탭은 첫 칸이 있는 행에만). 둘째 행: 탭2 절대 12 → 1 · 탭3 16 → 5.
         try testing.expectEqualSlices([3]u32, &.{ .{ 0, 0, 0x2192 }, .{ 9, 0, 0x2192 }, .{ 1, 1, 0x2192 }, .{ 5, 1, 0x2192 } }, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
     }
+    // ⑴' **`boundary` 의 랩 행 끝** — VS Code 는 랩 행 하나를 view line 하나로 본다(§5.1e 「랩된 줄」). `ab c  d` + byte 1 앞 `::`, 7열:
+    //    첫 행 `a::b c ` 의 끝 공백(byte 4)은 그 행 안에서 홀로 섰고(뒤는 다음 행이다) 이어지는 행 끝이라 빠지고, 둘째 행 머리 공백(byte 5)만
+    //    선다. 창을 힌트 폭 없이 걸던 때는 첫 행 창이 줄 끝까지 넓어져 byte 4 뒤에 공백이 이어진다고 보고 첫 행 6열에 `·` 를 더 세웠다 —
+    //    자리가 오름차순이라 **죽지 않고 조용히** 틀렸다(적대적 4회차).
+    {
+        const lines = [_][]const u8{"ab c  d"};
+        const hints = [_]content.Inlay{.{ .at = 1, .text = "::" }};
+        const rows = [_][]const content.Inlay{&hints};
+        var props = testProps(&lines, true);
+        props.render_whitespace = .boundary;
+        props.line_inlays = .{ .rows = &rows, .generation = 1 };
+        props.total_cols = 16;
+        var b: TestBuffers = .{};
+        const w = build(props, b.scratch());
+        try testing.expectEqual(@as(u32, 7), geometry.compute(props.total_cols, props.total_lines, .{}).content.width);
+        try testing.expectEqualSlices([3]u32, &.{.{ 0, 1, 0xB7 }}, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+    }
     // ⑵ **무작위 대조** — 공백·탭·`a`·`한` 과 힌트(글자 앞 · 줄 끝)를 섞은 세 줄을 랩으로 접고 맨 위 줄을 몇 행 스크롤하거나(`first_piece`),
     //    랩을 끄고 가로로 민다(`first_col` — 창이 머문 탭·걸쳐 버려진 넓은 글자에서 시작하는 갈래). **좌표는 제품 모양이다** — 첫 줄이
     //    문서 중간(`first_line`)이고 힌트 창은 그보다 앞에서 시작한다(`InlayWindow.first` — 제품은 보이는 줄 ± 20). 둘 다 0 이면 창을

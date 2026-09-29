@@ -105,6 +105,20 @@ FP14b(2026-07-28)에서 image가 격리 `loadFileURL`(WebKit image document + �
 - 새 runtime package의 manifest·license 판정·전문이 없으면 build가 실패한다. npm workspace 배포본에 전문이 없는 `rehype-katex@7.0.1`·`remark-math@6.0.0`은 해당 remark-math 릴리스의 MIT 전문을 `web/licenses/remark-math-MIT.txt`에 고정한 exact-version fallback만 사용한다.
 - `web:licenses`는 설치된 전체 lock graph의 SPDX allowlist를 별도로 감사하고 GPL/LGPL/AGPL 계열을 허용하지 않는다. runtime notice test는 production 포함/dev 제외와 전문 누락 fail-closed를 고정한다.
 
+## Chromium 엔진 (`maru-chromium` — 선택 설치)
+
+`.browser` 탭의 Chromium 엔진(CEF 오프스크린 sidecar, [web-osr-backend.md](plans/web-osr-backend.md))은 Maru.app·dmg 에 **들어가지 않는다**. 사용자가 따로 설치하는 `maru-chromium` formula 가 설치 디렉터리(`libexec`)에 둔다 — 그래서 위 「배포물」 규칙과 별도로 여기 적는다.
+
+| 자산 | 라이선스 | 설치물 안의 전문 |
+| --- | --- | --- |
+| CEF(Chromium Embedded Framework) 154.0.23 — `Chromium Embedded Framework.framework` | BSD 3-Clause (© Marshall A. Greenblatt, Google Inc.) | `licenses/CEF-LICENSE.txt`(SDK 의 `LICENSE.txt`) |
+| Chromium 154.0.8037.17 과 그 제3자 구성요소(프레임워크에 들어 있다) | 구성요소별 — 766 개, BSD·MIT·Apache-2.0 가 대부분이고 LGPL 54 건(FFmpeg 등) | `licenses/CHROMIUM-CREDITS.html`(SDK 의 `CREDITS.html` — 구성요소마다 전문) |
+
+- 둘 다 `zig build web-sidecar-dist` 가 SDK 에서 그대로 복사한다 — CEF 를 올리면 전문도 함께 바뀐다.
+- `maru-chromium` 의 formula 는 CEF 공식 배포본(`cef-builds.spotifycdn.com`, sha256 고정 — `tools/cef-sdk-fetch.sh`)을 사용자 맥에서 받아 쓴다. 프레임워크 바이너리를 Maru 가 다시 올려 배포하지 않는다.
+- **LGPL 구성요소**: 프레임워크 바이너리를 Maru 가 직접 배포하게 되면(bottle·dmg 동봉·앱 내려받기 — 지금은 하지 않는다, D8) 그 소스 제공 의무를 따로 검토한다.
+- About 화면 attribution(아래 권장)에 Chromium 을 넣는 것은 Chromium 엔진을 쓸 때만 해당한다(후속).
+
 ## 라이선스별 의무와 충족 방법
 
 ### SIL Open Font License 1.1 (OFL) — JetBrains Mono · Fira Code · Cascadia Code · Jetendard

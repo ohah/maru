@@ -91,7 +91,8 @@ codesign --force --options runtime --timestamp \
     --sign "$SIGN_ID" "$app/$helper_rel"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/$notification_helper_rel"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru"
-codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru-macos-app"
+# Maru.app 의 entitlements(카메라·마이크·위치 — W7a1)는 번들 서명에도 준다 — 번들 서명이 main executable 을 다시 서명한다.
+codesign --force --options runtime --timestamp --entitlements src/platform/macos/MaruApp.entitlements --sign "$SIGN_ID" "$app/Contents/MacOS/maru-macos-app"
 # RW2b 감시자(Resources/remote-watch/<variant>/maru-remote-watch). **번들 서명은 이들을 봉인만 하고
 # 서명하지 않는다** — `codesign "$app"` 은 Resources 안의 Mach-O 를 seal 에 넣을 뿐이라 각 실행파일은
 # 서명도, hardened runtime 도, secure timestamp 도 없는 채로 남는다. `--verify --strict --deep` 은
@@ -102,8 +103,9 @@ for watcher in "$app"/Contents/Resources/remote-watch/macos-*/maru-remote-watch;
     [ -f "$watcher" ] || continue
     codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$watcher"
 done
-codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app"
+codesign --force --options runtime --timestamp --entitlements src/platform/macos/MaruApp.entitlements --sign "$SIGN_ID" "$app"
 codesign --verify --strict --deep "$app"
+sh tools/check-macos-app-entitlements.sh "$app"
 
 echo "==> P5d signed artifact PATH + localhost SSH gate"
 MARU_P5D_REQUIRE_DEVELOPER_ID=1 \

@@ -3418,7 +3418,9 @@ test "B2 전체 프레임 상한과 할당 실패는 절단을 보고하며 부�
     try testing.expect(limit.written.truncated and limit.written.ops > 0);
     try testing.expectEqual(@as(usize, 1), limit.attempts);
 
-    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    // 저장소 성장은 OS에 따라 제자리 resize로 끝날 수도 있다. 두 경로를
+    // 모두 막아야 실제 성장 실패를 플랫폼과 무관하게 주입할 수 있다.
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
     const failed = try b2BuildWithGrowingOps(failing.allocator(), props, base.scratch(runs, bytes), &capped, 16000);
     try testing.expect(failed.allocation_failed and failed.written.truncated);
     try testing.expectEqual(@as(usize, 1), failed.attempts);

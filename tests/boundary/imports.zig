@@ -7724,6 +7724,17 @@ test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다
         }
         if (in_macos != 0 and depth < in_macos) in_macos = 0;
 
+        // 한 줄 `if (…macos…) x.test_step.dependOn(…);` 는 중괄호가 없어 아래 블록 추적에 안 잡힌다 — 짝을 붙일 수 없는 모양이라
+        // 그 자체로 짝 없음이다(W7a1 적대 검증 8 차: 웹 sidecar 순수 시험이 이 모양으로 CI 어디에서도 안 돌았다).
+        if ((std.mem.indexOf(u8, line, "target.result.os.tag == .macos") != null or
+            std.mem.indexOf(u8, line, "builtin.os.tag == .macos") != null) and
+            std.mem.indexOf(u8, line, "if (") != null and
+            std.mem.indexOf(u8, line, "test_step.dependOn(") != null and
+            std.mem.indexOf(u8, line, "macos_only_test_step") == null)
+        {
+            std.debug.print("🔥 한 줄 macOS if 로 test_step 에만 붙었다 — 블록으로 바꿔 macos_only_test_step 에도 붙여라: {s}\n", .{line});
+            unpaired += 1;
+        }
         if (pending_pair) {
             if (std.mem.indexOf(u8, line, "macos_only_test_step.dependOn(") != null) {
                 paired += 1;

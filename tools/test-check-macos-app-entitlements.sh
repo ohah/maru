@@ -36,6 +36,15 @@ sed 's#</dict>#	<key>com.apple.security.cs.disable-library-validation</key>\
 	<true/>\
 </dict>#' "$ent" > "$extra"
 
+# 서명이 실패하면 이유를 보이고 멈춘다(`set -e` 로 말없이 끝나지 않게 — W7a1 적대 검증 9 차).
+sign() {
+    if ! codesign "$@" 2> "$root/codesign.txt"; then
+        echo "codesign 실패: $*" >&2
+        cat "$root/codesign.txt" >&2
+        exit 1
+    fi
+}
+
 failures=0
 expect() {
     want=$1
@@ -53,32 +62,32 @@ expect() {
 
 # ① 릴리스와 같은 모양: CLI 는 entitlements 없이, 번들(main executable)은 셋.
 app=$(make_app good)
-codesign --force --sign - "$app/Contents/MacOS/maru" 2>/dev/null
-codesign --force --options runtime --sign - --entitlements "$ent" "$app" 2>/dev/null
+sign --force --sign - "$app/Contents/MacOS/maru"
+sign --force --options runtime --sign - --entitlements "$ent" "$app"
 expect pass "entitlements 셋이 main executable 에만" "$app"
 
 # ② main executable 에 키가 하나 더.
 app=$(make_app extra)
-codesign --force --sign - "$app/Contents/MacOS/maru" 2>/dev/null
-codesign --force --options runtime --sign - --entitlements "$extra" "$app" 2>/dev/null
+sign --force --sign - "$app/Contents/MacOS/maru"
+sign --force --options runtime --sign - --entitlements "$extra" "$app"
 expect fail "main executable 에 넷째 키" "$app"
 
 # ③ 번들 서명에 entitlements 가 빠짐.
 app=$(make_app none)
-codesign --force --sign - "$app/Contents/MacOS/maru" 2>/dev/null
-codesign --force --options runtime --sign - "$app" 2>/dev/null
+sign --force --sign - "$app/Contents/MacOS/maru"
+sign --force --options runtime --sign - "$app"
 expect fail "main executable 에 entitlements 없음" "$app"
 
 # ④ CLI 에도 entitlements 가 붙음.
 app=$(make_app cli)
-codesign --force --sign - --entitlements "$ent" "$app/Contents/MacOS/maru" 2>/dev/null
-codesign --force --options runtime --sign - --entitlements "$ent" "$app" 2>/dev/null
+sign --force --sign - --entitlements "$ent" "$app/Contents/MacOS/maru"
+sign --force --options runtime --sign - --entitlements "$ent" "$app"
 expect fail "CLI 에 entitlements" "$app"
 
 # ⑤ CLI 서명이 없음(읽지 못하면 실패).
 app=$(make_app unsigned)
-codesign --force --options runtime --sign - --entitlements "$ent" "$app" 2>/dev/null
-codesign --remove-signature "$app/Contents/MacOS/maru"
+sign --force --options runtime --sign - --entitlements "$ent" "$app"
+sign --remove-signature "$app/Contents/MacOS/maru"
 expect fail "CLI 서명 없음" "$app"
 
 if [ "$failures" != 0 ]; then

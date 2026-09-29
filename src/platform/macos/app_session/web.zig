@@ -409,6 +409,8 @@ pub fn tickWebOsr(self: *AppSession) void {
                 const sid = term.surfaceId();
                 if (web_osr.takeNavUpdate(sid)) |nav| setWebNavState(self, sid, nav.can_go_back, nav.can_go_forward, nav.url);
                 if (web_osr.takeGpuNotice(sid)) self.showNoticeKey(.web_osr_gpu_unavailable);
+                // 엔진이 멈췄다 — 이 탭이 있는 창이 한 번 보인다(멈춘 뒤 새로 연 탭도).
+                if (web_osr.takeStoppedNotice(sid)) |notice| self.showNoticeKey(osrNoticeKey(notice));
                 // W3c: 새 웹 프레임이면 이 창을 다시 그린다 — 재투영 없이 세대만 올린다(커서 페이드와 같은 길).
                 // 숨은 탭도 front 는 갱신한다(다시 보일 때 옛 장이 한 프레임 비치지 않게) — CEF 가 숨은 탭은 거의
                 // 안 그린다.
@@ -435,14 +437,17 @@ pub fn tickWebOsr(self: *AppSession) void {
             self.osr_cursor_pending = cursorKindOf(c.cursor);
         };
     }
-    if (web_osr.takeNotice()) |notice| self.showNoticeKey(switch (notice) {
+    tickOsrDialog(self);
+}
+
+fn osrNoticeKey(notice: web_osr.Notice) maru.i18n.Key {
+    return switch (notice) {
         .gpu_unavailable => .web_osr_gpu_unavailable,
         .profile_in_use => .web_osr_profile_in_use,
         .start_failed => .web_osr_start_failed,
         .crashed_repeatedly => .web_osr_crashed,
         .version_mismatch => .web_osr_version_mismatch,
-    });
-    tickOsrDialog(self);
+    };
 }
 
 // ── W5a: 대화상자·파일 선택 · W5b: 권한 ──────────────────────────────────────────────────────────────────────────────

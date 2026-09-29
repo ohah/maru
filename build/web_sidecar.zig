@@ -13,6 +13,8 @@ pub const Context = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     test_step: *std.Build.Step,
+    /// macOS CI 잡이 도는 `test-macos-only` — macOS 전용 시험은 여기에도 짝으로 붙인다(ubuntu `check` 는 못 만든다).
+    macos_only_test_step: *std.Build.Step,
     /// macOS SDK 경로(build.zig 가 구한 것). host 는 `maru` 모듈을 안 받으므로 프레임워크 경로를 직접 붙인다.
     macos_sdk: ?[]const u8,
     /// maru 버전(`build.zig.zon`) — `maru-chromium` manifest 에 적는다.
@@ -61,8 +63,12 @@ pub fn register(b: *std.Build, ctx: Context) void {
     const run_manifest_tests = b.addRunArtifact(manifest_tests);
     run_manifest_tests.addArg("--maru-expect-tests=1");
     pure_step.dependOn(&run_manifest_tests.step);
-    // kqueue·mach·IOSurface 를 쓰는 macOS 전용 시험이다 — 다른 대상의 기본 test 에는 걸지 않는다.
-    if (ctx.target.result.os.tag == .macos) ctx.test_step.dependOn(&run_pure_tests.step);
+    // kqueue·mach·IOSurface 를 쓰는 macOS 전용 시험이다 — 다른 대상의 기본 test 에는 걸지 않는다. macOS CI 잡은
+    // `test-macos-only` 만 돌리므로 거기에도 짝으로 붙인다(한 줄 `if` 로 두었을 때 CI 어디에서도 안 돌았다 — W7a1 적대 검증 8 차).
+    if (ctx.target.result.os.tag == .macos) {
+        ctx.test_step.dependOn(&run_pure_tests.step);
+        ctx.macos_only_test_step.dependOn(&run_pure_tests.step);
+    }
     ctx.test_step.dependOn(&run_manifest_tests.step); // manifest 생성기는 순수 Zig — 어느 대상에서나 돈다
 
     const sidecar_step = b.step("web-sidecar", "Build maru-web-host/helper and the W1b judge into zig-out/web-sidecar (needs -Dcef-sdk)");

@@ -471,12 +471,6 @@ test "a stopped engine is announced once in every Chromium tab's window, includi
     try std.testing.expectEqual(@as(?Notice, null), takeStoppedNotice(9));
 }
 
-extern "c" fn waitid(idtype: c_int, id: c_uint, info: *[128]u8, options: c_int) c_int;
-// macOS `<sys/wait.h>` — std 에 darwin 값이 없다. 끝나기만 기다리고 거두지는 않는다(WNOWAIT).
-const p_pid: c_int = 1;
-const w_exited: c_int = 0x04;
-const w_nowait: c_int = 0x20;
-
 test "an exit seen before the last frame is read still reads it, so a version mismatch is not counted as a crash" {
     const gpa = std.testing.allocator;
     gpa_ref = gpa;
@@ -506,8 +500,7 @@ test "an exit seen before the last frame is read still reads it, so a version mi
         lsp_process.reapBlocking(&child);
         child.deinit(gpa);
     };
-    var info: [128]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), waitid(p_pid, @intCast(child.pid), &info, w_exited | w_nowait));
+    try std.testing.expect(lsp_process.testWaitExitedNoReap(child.pid)); // 거두지 않고 끝나기만 기다린다
     // 그 자식이 끝나기 직전에 쓴 것처럼, 아직 안 읽은 버전이 다른 `hello_ack` 가 파이프에 있다.
     var fds: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));

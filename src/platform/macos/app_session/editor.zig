@@ -1589,6 +1589,8 @@ fn storeDiffHitRows(
     const m = chrome_editor.diff_frame.sideMetrics(@intCast(cols.left.w), inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
     const lay = chrome_editor.geometry.compute(m.total_cols, diffRowCount(term), .{});
     const origin_x: i32 = @intCast(body_outer.x + inset);
+    term.rt.editor_diff_find_left = .{ .x = @intCast(origin_x + cols.left.x), .y = body_outer.y + inset, .w = cols.left.w, .h = inner_h };
+    term.rt.editor_diff_find_right = .{ .x = @intCast(origin_x + cols.right.x), .y = body_outer.y + inset, .w = cols.right.w, .h = inner_h };
     term.rt.editor_diff_hit_geom = .{
         .left_x = origin_x + cols.left.x,
         .right_x = origin_x + cols.right.x,
@@ -1974,6 +1976,24 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     defer if (preedit_rows) |projection| freePreeditLines(self, projection);
     const draw_lines: []const []const u8 = if (preedit_rows) |projection| projection.rows else lines;
 
+    var secondary_marker_buf: [chrome_editor.scrollbar.marker_budget]u32 = undefined;
+    var secondary_markers: []const u32 = &.{};
+    var secondary_marker_current: ?usize = null;
+    var secondary_marks: ?[]const []const chrome_editor.frame.Mark = null;
+    var secondary_current: ?chrome_editor.frame.CurrentMatch = null;
+    const secondary = &self.chrome_host.find_secondary;
+    const paired_find = self.chrome_host.diff_find_source == term.surfaceId();
+    if (paired_find and secondary.open) {
+        const matches = term.rt.editor_diff_find_matches.items;
+        secondary_marks = buildFindMarksInto(self, term, matches, &term.rt.editor_diff_find_marks, &term.rt.editor_diff_find_mark_buf);
+        if (secondary_marks != null and secondary.current < matches.len) {
+            const m = matches[secondary.current];
+            secondary_current = .{ .line = m.line, .start = m.start };
+        }
+        const n = markerRows(term, matches, secondary.current, &secondary_marker_buf, &secondary_marker_current);
+        secondary_markers = secondary_marker_buf[0..n];
+    }
+
     var mm_drawn: ?usize = null; // 이 프레임이 그린 미니맵 창의 첫 줄(없으면 null) — 히트 기하가 같은 값을 굳힌다
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
@@ -1983,10 +2003,9 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
         break :blk buildDiffPaneOps(
-            // **검색 강조는 검색 중인 열에만 간다**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
-            // 양쪽에 칠하면 카운터가 세지 않은 자리에 색이 남아, Enter 가 어디로 갈지 화면이 거짓말한다.
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(self, term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .render_whitespace = whitespaceModeFor(self), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left), .line_colors = editor_diff_ops.sideColors(self, term, .left) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(self, term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .render_whitespace = whitespaceModeFor(self), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right), .line_colors = editor_diff_ops.sideColors(self, term, .right) },
+            // 각 열은 자신이 센 결과만 그린다. 비활성 열의 결과는 별도 저장소를 사용한다.
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(self, term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .render_whitespace = whitespaceModeFor(self), .search_marks = if (paired_find and secondary.diff_side == .left) secondary_marks else diffSearchMarksFor(self, term, .left, find_marks), .search_current = if (paired_find and secondary.diff_side == .left) secondary_current else diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = if (paired_find and secondary.diff_side == .left) secondary_markers else diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = if (paired_find and secondary.diff_side == .left) secondary_marker_current else diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left), .line_colors = editor_diff_ops.sideColors(self, term, .left) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(self, term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .render_whitespace = whitespaceModeFor(self), .search_marks = if (paired_find and secondary.diff_side == .right) secondary_marks else diffSearchMarksFor(self, term, .right, find_marks), .search_current = if (paired_find and secondary.diff_side == .right) secondary_current else diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = if (paired_find and secondary.diff_side == .right) secondary_markers else diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = if (paired_find and secondary.diff_side == .right) secondary_marker_current else diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right), .line_colors = editor_diff_ops.sideColors(self, term, .right) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             self.blink_visible,
@@ -2861,7 +2880,7 @@ pub fn diffSearchSide(self: *const AppSession, term: *const Term) DiffSide {
     return sel.side;
 }
 
-/// 검색 강조를 **이 열에 그릴 것인가**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
+/// 활성 찾기 소유자의 검색 강조를 이 열에 그릴 것인가. 반대 소유자는 별도 저장소로 렌더한다.
 ///
 /// **호출 인자 안에 묻어 두면 잴 수 없다.** 양쪽에 칠하든 반대 열에 칠하든 화면만 다르고
 /// 판정자는 전부 초록이었다(변이 D7·D8·D9). 그래서 결정을 여기 하나로 꺼낸다.
@@ -4963,25 +4982,29 @@ pub fn currentVisibleMatch(self: *AppSession, term: *Term) ?VisibleMatch {
 /// (스크롤백 쪽이 `if (find.open)`으로 나머지를 빼는 그 규칙), 목록을 통째로 읽으면 그 구분을
 /// 이 함수 안에서 또 해야 한다 — 부르는 쪽이 슬라이스를 좁히면 규칙이 한 곳에만 남는다.
 fn buildFindMarks(self: *AppSession, term: *Term, matches: []const maru.session.editor.find.Match) ?[]const []const chrome_editor.frame.Mark {
+    return buildFindMarksInto(self, term, matches, &term.rt.editor_find_marks, &term.rt.editor_find_mark_buf);
+}
+
+fn buildFindMarksInto(self: *AppSession, term: *Term, matches: []const maru.session.editor.find.Match, row_storage: *[][]const chrome_editor.frame.Mark, mark_storage: *[]chrome_editor.frame.Mark) ?[]const []const chrome_editor.frame.Mark {
     if (matches.len == 0) return null;
     const numbers = term.rt.editor_visible_numbers;
     const visible = term.rt.editor_visible_lines;
     const folded = visible.len > 0 and numbers.len > 0;
-    const lines_len = if (visible.len > 0) visible.len else term.rt.editor_lines.len;
+    const lines_len = if (term.rt.editor_diff) |st| st.left_texts.len else if (visible.len > 0) visible.len else term.rt.editor_lines.len;
     if (lines_len == 0) return null;
 
-    if (term.rt.editor_find_marks.len < lines_len) {
+    if (row_storage.*.len < lines_len) {
         const grown = self.allocator.alloc([]const chrome_editor.frame.Mark, lines_len) catch return null;
-        if (term.rt.editor_find_marks.len > 0) self.allocator.free(term.rt.editor_find_marks);
-        term.rt.editor_find_marks = grown;
+        if (row_storage.*.len > 0) self.allocator.free(row_storage.*);
+        row_storage.* = grown;
     }
-    if (term.rt.editor_find_mark_buf.len < matches.len) {
+    if (mark_storage.*.len < matches.len) {
         const grown = self.allocator.alloc(chrome_editor.frame.Mark, matches.len) catch return null;
-        if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
-        term.rt.editor_find_mark_buf = grown;
+        if (mark_storage.*.len > 0) self.allocator.free(mark_storage.*);
+        mark_storage.* = grown;
     }
-    const rows = term.rt.editor_find_marks[0..lines_len];
-    const buf = term.rt.editor_find_mark_buf;
+    const rows = row_storage.*[0..lines_len];
+    const buf = mark_storage.*;
     @memset(rows, &.{});
 
     // 보이는 줄을 문서 순서로 훑으며 매치 커서를 민다. 접힘이 켜져 있어도 보이는 줄의 문서 번호는
@@ -9888,6 +9911,8 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     term.rt.editor_diff_hit_len_left = 0;
     term.rt.editor_diff_hit_len_right = 0;
     term.rt.editor_diff_selection = null;
+    term.rt.editor_diff_find_left = .{};
+    term.rt.editor_diff_find_right = .{};
     term.rt.editor_diff_hit_geom = .{};
 
     if (term.rt.editor_selection_marks.len > 0) self.allocator.free(term.rt.editor_selection_marks);
@@ -9906,6 +9931,12 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
 
     if (term.rt.editor_find_marks.len > 0) self.allocator.free(term.rt.editor_find_marks);
     if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
+    term.rt.editor_diff_find_matches.deinit(self.allocator);
+    term.rt.editor_diff_find_matches = .empty;
+    self.allocator.free(term.rt.editor_diff_find_marks);
+    self.allocator.free(term.rt.editor_diff_find_mark_buf);
+    term.rt.editor_diff_find_marks = &.{};
+    term.rt.editor_diff_find_mark_buf = &.{};
     term.rt.editor_find_marks = &.{};
     term.rt.editor_find_mark_buf = &.{};
     // 같은 낱말 강조의 마크도 **같은 단위**다(§8.2p — 문서와 함께 산다).
@@ -36541,9 +36572,8 @@ test "DFF2 비교가 아닌 문서는 문서 줄을 본다 — 축이 안 섞인
     defer fx.term.rt.editor_diff = null;
     try testing.expectEqual(@as(usize, 0), findLines(fx.session, fx.term).len);
 
-    // **빈 열은 검색 대상이 아니다.** 그대로 두면 `findMatches` 가 빈 배열을 훑어 매치 0 을 내는데,
-    // 그것은 「없다」가 아니라 「아직 안 열렸다」다 — 두 상태를 같은 화면으로 답하면 안 된다.
-    try testing.expect(!find_ops.activeTermIsEditor(fx.session));
+    // A loading or empty diff retains its editor target; never search the sentinel terminal.
+    try testing.expect(find_ops.activeTermIsEditor(fx.session));
 }
 
 test "SP17 체인 마디의 열 범위를 렌더가 굳힌다 — 클릭이 그것을 읽는다 (§7.5)" {

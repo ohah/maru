@@ -91,6 +91,9 @@ pub const ChromeHost = struct {
     notice: notice.State = .{},
     confirm: confirm.State = .{},
     find: find.State = .{},
+    // The active widget stays in `find`, so existing text/IME dispatch has one owner.
+    find_secondary: find.State = .{},
+    diff_find_source: u64 = 0,
     palette: palette.State = .{},
     /// 심볼 피커(native-editor-ui.md §7.5 「피커는 팔레트를 다시 쓴다」). **팔레트와 같은 컴포넌트를
     /// 쓰되 State 는 따로 둔다** — 명령 카탈로그 필터와 심볼 필터는 무관한 책임이라 모드 플래그로
@@ -123,6 +126,7 @@ pub const ChromeHost = struct {
     /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. AppSession.deinit가 부른다.
     pub fn deinit(self: *ChromeHost, allocator: std.mem.Allocator) void {
         self.find.deinit(allocator);
+        self.find_secondary.deinit(allocator);
         self.palette.deinit(allocator);
         self.symbol_picker.deinit(allocator);
         self.reference_picker.deinit(allocator);
@@ -151,7 +155,12 @@ pub const ChromeHost = struct {
         {
             var ops: std.ArrayList(draw.Op) = .empty;
             try find.view(&self.find, p, tk, arena, &ops);
-            if (ops.items.len > 0) try out.append(arena, .{ .layer = find.layer, .ops = ops.items });
+            if (ops.items.len > 0) try out.append(arena, .{ .layer = find.layer, .ops = ops.items, .independent_panel = self.diff_find_source != 0 });
+            if (self.diff_find_source != 0) {
+                var secondary_ops: std.ArrayList(draw.Op) = .empty;
+                try find.view(&self.find_secondary, p, tk, arena, &secondary_ops);
+                if (secondary_ops.items.len > 0) try out.append(arena, .{ .layer = find.layer, .ops = secondary_ops.items, .independent_panel = true });
+            }
         }
     }
 
@@ -313,7 +322,7 @@ pub const ChromeHost = struct {
     /// 단일 출처 — 모달이 열렸으면 거기 타이핑 중이라 Cmd-홀드 힌트는 무의미하고, 동시 오버레이 frame도 피한다.
     pub fn anyModalOpen(self: *const ChromeHost) bool {
         return self.confirm.open or self.notice.open or self.context_menu.open or
-            self.notifications.open or self.find.open or self.palette.open or self.settings.open;
+            self.notifications.open or (self.find.open and self.find.input_focused) or self.palette.open or self.settings.open;
     }
 
     /// 단축키 힌트 배지 draws. platform이 요소 레이아웃에서 badges(요소 rect + chord)를 빌드해 부른다(palette의 row
@@ -369,7 +378,7 @@ pub const ChromeHost = struct {
                         .delete_selected => .notifications_delete,
                     };
                 }
-                if (self.find.open) {
+                if (self.find.open and self.find.input_focused) {
                     return switch (find.handle(allocator, k, &self.find)) {
                         .close => .find_close,
                         .navigated => .find_navigated,

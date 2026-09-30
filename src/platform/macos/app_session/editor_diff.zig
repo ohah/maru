@@ -237,10 +237,21 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     // **죽었다**(파일 감시가 `requestDiffContent`를 걸면 제품에서 그 경로가 열린다). 위 일곱 축과
     // 같은 이유·같은 자리다.
     term.rt.editor_diff_selection = null;
+    find_ops.refreshDiffFind(self, term);
 }
 
 /// Term이 죽을 때. `releaseEditorTerm`이 부른다.
 pub fn release(self: *AppSession, term: *Term) void {
+    // AppSession teardown may already have freed its active match list. End the
+    // pair before invalidating rows, so release never initiates a fresh search.
+    if (self.chrome_host.diff_find_source == term.surfaceId()) {
+        self.chrome_host.diff_find_source = 0;
+        self.chrome_host.find.hide();
+        self.chrome_host.find.scope = null;
+        self.chrome_host.find_secondary.hide();
+        self.chrome_host.find_secondary.scope = null;
+        self.find_nav = false;
+    }
     invalidate(self, term);
     term.rt.editor_diff = null;
 }
@@ -275,6 +286,7 @@ pub fn poll(self: *AppSession, term: *Term) void {
         },
         .compare => computeRows(self, term, entry, st),
     }
+    find_ops.refreshDiffFind(self, term);
     st.settled_on = flags;
     self.metal_dirty = true;
 }
@@ -3639,168 +3651,148 @@ test "DCOL7: 왕복은 ASCII 에서 제자리이고, 어디서나 **한 번 뒤�
     }
 }
 
-test "DCOL8: 열을 넘기면 검색 목록도 그 열의 것이 된다 (§5.1 비교 뷰 검색)" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit(testing.allocator);
-    // **찾는 낱말이 좌우에 다른 수만큼 있다** — 같은 수면 목록이 안 바뀐 것을 못 가른다.
-    var entry = testEntry("aa\nbb\n", "aa\naa\n");
-    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+fn findPairFixture(fx: *Fixture, entry: *dock_panel.Entry) !void {
+    try diffCaretFixture(fx, entry, .{ .x = 0, .y = 0, .w = 1000, .h = 500 });
     const pane = pane_ops.activePane(fx.session);
-    for (pane.terms.items, 0..) |t, k| {
-        if (t == fx.term) pane.active_term = k;
-    }
-
+    for (pane.terms.items, 0..) |t, k| if (t == fx.term) {
+        pane.active_term = k;
+    };
     find_ops.toggleFind(fx.session);
-    // **target 은 프레임 루프가 세운다** — 픽스처는 그 자리를 안 지나므로 손으로 세운다
-    //    (`editor.zig` 의 기존 검색 판정자와 같은 관례다).
-    fx.session.chrome_host.find.target = .editor;
-    try fx.session.chrome_host.find.input.query.appendSlice(fx.session.allocator, "aa");
-    find_ops.recomputeEditorFindPublic(fx.session, fx.term);
-
-    // 씨앗이 오른쪽이므로 오른쪽에서 찾는다.
-    try testing.expectEqual(editor_ops.DiffSide.right, editor_ops.diffSearchSide(fx.session, fx.term));
-    const right_count = fx.session.chrome_host.find.match_count;
-    try testing.expect(right_count >= 2); // 픽스처 자기 검증 — 오른쪽에 "aa" 가 둘이다
-
-    // **열을 넘기면 목록이 그 열의 것이어야 한다.** §5.1 이 이미 경고한 자리다 — 「셋이 같은 답을
-    //    읽는다: 줄 배열·강조·막대 마커. 한 곳에서만 반영하면 **화면은 왼쪽인데 결과는 오른쪽
-    //    것**이 된다」. 강조는 live `diffSearchSide` 를 보는데 목록은 캐시라, 다시 세지 않으면
-    //    정확히 그 상태가 된다.
-    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
-    try testing.expectEqual(editor_ops.DiffSide.left, editor_ops.diffSearchSide(fx.session, fx.term));
-    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.match_count); // 왼쪽에는 하나다
-
-    // **되돌아와도 따라온다** — 한 방향만 고치면 반쪽이다.
-    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
-    try testing.expectEqual(right_count, fx.session.chrome_host.find.match_count);
 }
 
-test "DCOL9: 같은 열을 다시 고르면 검색 자리를 안 잃는다 (§5.1 비교 뷰 검색)" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit(testing.allocator);
-    // **넘어갈 열에도 매치가 둘 이상이어야 한다.** 한 개뿐이면 `setMatchCount` 의 clamp 가
-    //    `current` 를 0 으로 끌어내려, 「첫 매치로 되돌린다」를 지웠는데도 답이 같다(14회차 T6).
-    var entry = testEntry("aa\naa\ncc\n", "aa\naa\naa\n");
-    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
-    const pane = pane_ops.activePane(fx.session);
-    for (pane.terms.items, 0..) |t, k| {
-        if (t == fx.term) pane.active_term = k;
-    }
-
-    find_ops.toggleFind(fx.session);
-    fx.session.chrome_host.find.target = .editor;
-    try fx.session.chrome_host.find.input.query.appendSlice(fx.session.allocator, "aa");
+fn findQuery(fx: *Fixture, query: []const u8) !void {
+    fx.session.chrome_host.find.input.query.clearRetainingCapacity();
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, query);
     find_ops.recomputeEditorFindPublic(fx.session, fx.term);
-    try testing.expect(fx.session.chrome_host.find.match_count >= 3);
-
-    // 사용자가 두 번째 매치를 보고 있다.
-    fx.session.chrome_host.find.current = 1;
-
-    // **같은 열 안에서 caret 을 옮겨도 그 자리를 안 잃는다.** 열이 안 바뀌었으므로 목록도 그대로다
-    //    — 클릭마다 다시 세면 `current` 가 0 으로 튀어 보던 매치를 잃는다.
-    try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_down, false));
-    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.current);
-
-    // **열을 넘기면 그때는 첫 매치로 되돌린다** — 목록이 통째로 달라지는 사건이다.
-    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
-    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.current);
-    try testing.expectEqual(@as(usize, 2), fx.session.chrome_host.find.match_count);
-
-    // **명시로 고른 열이 있으면 caret 이 옮겨져도 검색은 안 흔들린다.**
-    fx.session.chrome_host.find.diff_side = .right;
-    find_ops.recomputeEditorFindPublic(fx.session, fx.term);
-    fx.session.chrome_host.find.current = 1;
-    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
-    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.current);
-    fx.session.chrome_host.find.diff_side = null;
 }
 
-test "DCOL10: 마우스로 열을 바꿔도 검색이 따라오고, 검색 대상이 아니면 안 건드린다" {
+test "DCOL8: 두 검색어·옵션·현재 결과를 열마다 보존하고 Cmd F는 포커스만 준다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
-    var entry = testEntry("aa\nbb\n", "aa\naa\n");
-    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
-    try diffCaretFixture(&fx, &entry, leaf);
-    const pane = pane_ops.activePane(fx.session);
-    for (pane.terms.items, 0..) |t, k| {
-        if (t == fx.term) pane.active_term = k;
-    }
-
+    var entry = testEntry("left left\nRIGHT\n", "right right right\nleft\n");
+    try findPairFixture(&fx, &entry);
+    const h = &fx.session.chrome_host;
+    try testing.expect(h.find.open and !h.find_secondary.open);
+    try testing.expectEqual(editor_ops.DiffSide.right, h.find.diff_side.?);
+    try findQuery(&fx, "right");
+    try testing.expectEqual(@as(usize, 3), h.find.match_count);
+    h.find.current = 2;
     find_ops.toggleFind(fx.session);
-    fx.session.chrome_host.find.target = .editor;
-    try fx.session.chrome_host.find.input.query.appendSlice(fx.session.allocator, "aa");
-    find_ops.recomputeEditorFindPublic(fx.session, fx.term);
-    const right_count = fx.session.chrome_host.find.match_count;
-    try testing.expect(right_count >= 2);
+    try testing.expectEqualStrings("right", h.find.input.query.items);
+    try testing.expectEqual(@as(usize, 2), h.find.current);
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expect(!h.find.open and h.find_secondary.open);
+    try testing.expectEqual(@as(usize, 0), h.find.match_count);
+    find_ops.toggleFind(fx.session);
+    try findQuery(&fx, "left");
+    h.find.match_case = true;
+    h.find.current = 1;
+    try testing.expectEqual(@as(usize, 2), h.find.match_count);
+    try testing.expect(h.find.open and h.find_secondary.open);
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expectEqualStrings("right", h.find.input.query.items);
+    try testing.expectEqualStrings("left", h.find_secondary.input.query.items);
+    try testing.expectEqual(@as(usize, 2), h.find.current);
+    try testing.expect(!h.find.match_case and h.find_secondary.match_case);
+    try testing.expect(!h.find.input_focused and !h.find_secondary.input_focused);
+    try testing.expect(!fx.session.anyModalOverlayOpen());
+    try testing.expect(fx.session.overlayFrameNeeded());
+}
 
-    // **마우스도 같은 자리를 지나야 한다.** 열이 바뀌는 길이 셋인데(마우스 둘·`⌃⇧Tab`) 키 경로만
-    //    재면 마우스 쪽 배선이 죽어도 초록이다(14회차 T2).
+test "DCOL9: 양쪽 검색 강조 저장소가 독립이며 오류·Esc는 다른 열을 지우지 않는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("left left\n", "right right right\n");
+    try findPairFixture(&fx, &entry);
+    try findQuery(&fx, "right");
+    find_ops.toggleFindDiffSide(fx.session);
+    try findQuery(&fx, "left");
+    var frame = editor_ops.appendPaneFrame(fx.session, .{ .x = 0, .y = 0, .w = 1000, .h = 500 }, fx.term) orelse return error.NoFrame;
+    defer frame.dl.deinit(testing.allocator);
+    try testing.expect(fx.term.rt.editor_find_mark_buf.len >= 2);
+    try testing.expect(fx.term.rt.editor_diff_find_mark_buf.len >= 3);
+    try testing.expect(fx.term.rt.editor_find_mark_buf.ptr != fx.term.rt.editor_diff_find_mark_buf.ptr);
+    try testing.expectEqual(@as(u32, 4), fx.term.rt.editor_find_mark_buf[0].len);
+    try testing.expectEqual(@as(u32, 5), fx.term.rt.editor_diff_find_mark_buf[0].len);
+    fx.session.chrome_host.find.regex = true;
+    try findQuery(&fx, "[");
+    try testing.expect(fx.session.chrome_host.find.regex_error != null);
+    try testing.expectEqual(@as(usize, 3), fx.session.chrome_host.find_secondary.match_count);
+    try testing.expect(fx.session.chrome_host.find_secondary.regex_error == null);
+    fx.session.chrome_host.find.hide();
+    fx.session.dispatchChromeAction(.find_close);
+    try testing.expect(fx.session.chrome_host.find_secondary.open);
+    try testing.expectEqual(@as(usize, 3), fx.term.rt.editor_diff_find_matches.items.len);
+    find_ops.toggleFindDiffSide(fx.session);
+    try testing.expectEqualStrings("right", fx.session.chrome_host.find.input.query.items);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_find_matches.items.len);
+    fx.session.dismissMessageOverlays();
+    try testing.expect(!fx.session.chrome_host.find.open and !fx.session.chrome_host.find_secondary.open);
+    try testing.expectEqual(@as(u64, 0), fx.session.chrome_host.diff_find_source);
+}
+
+test "DCOL10: 열 클릭은 검색 포커스를 분리하고 조합을 원래 검색어에 확정한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("왼쪽\n", "오른쪽 한\n");
+    try findPairFixture(&fx, &entry);
+    try findQuery(&fx, "오른쪽 ");
+    try fx.session.chrome_host.find.input.setPreedit(testing.allocator, "한");
     const g = fx.term.rt.editor_diff_hit_geom;
-    try testing.expect(g.right_x > g.left_x); // 픽스처 자기 검증
-    const y0: f64 = @floatFromInt(g.body_y + 1);
-    const left_x: f64 = @floatFromInt(g.left_x + @as(i32, @intCast(g.content_left_px)) + 1);
-    try testing.expect(editor_ops.beginDiffBodySelection(fx.session, pane, left_x, y0));
-    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
-    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.match_count);
+    const x: f64 = @floatFromInt(g.left_x + @as(i32, @intCast(g.content_left_px)) + 1);
+    const y: f64 = @floatFromInt(g.body_y + 1);
+    try testing.expectEqual(find_ops.DiffPointer.body, find_ops.diffFindPointer(fx.session, 1, 0, x, y));
+    try testing.expect(editor_ops.beginDiffBodySelection(fx.session, pane_ops.activePane(fx.session), x, y));
     fx.session.clearPointerGesture();
-
-    // **더블클릭도 같은 자리를 지난다.** 열이 바뀌는 마우스 길이 **둘**이라(누름·더블/트리플),
-    //    한쪽만 재면 나머지 배선이 죽어도 초록이다(15회차 T2 가 그 자리였다).
-    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term)); // 오른쪽으로 돌려 놓는다
-    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
-    try testing.expectEqual(right_count, fx.session.chrome_host.find.match_count);
-    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, false, left_x, y0, 0));
-    try testing.expectEqual(editor_ops.DiffSide.left, fx.term.rt.editor_diff_selection.?.side);
-    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.match_count);
-    fx.session.clearPointerGesture();
-
-    // **검색 대상이 편집기가 아니면 안 건드린다.** 터미널을 검색하는 중에 비교 뷰를 클릭했다고
-    //    편집기 매치를 다시 세면, 사용자가 보던 터미널 검색 결과가 통째로 갈린다.
-    fx.session.chrome_host.find.target = .scrollback;
-    const before = fx.session.chrome_host.find.match_count;
-    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
-    try testing.expectEqual(editor_ops.DiffSide.right, fx.term.rt.editor_diff_selection.?.side);
-    try testing.expectEqual(before, fx.session.chrome_host.find.match_count);
-    fx.session.chrome_host.find.target = .editor;
+    try testing.expectEqualStrings("오른쪽 한", fx.session.chrome_host.find_secondary.input.query.items);
+    try testing.expectEqualStrings("", fx.session.chrome_host.find.input.query.items);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find_secondary.input.preedit.items.len);
+    find_ops.toggleFind(fx.session);
+    try findQuery(&fx, "왼쪽");
+    find_ops.syncDiffFind(fx.session);
+    const rect = @import("maru").chrome.components.find.caretRect(&fx.session.chrome_host.find_secondary, fx.session.buildChromeProps());
+    try testing.expect(rect == null);
+    const right = fx.session.chrome_host.find_secondary.scope.?;
+    // Hit the query area, outside the regex control, using the same component layout.
+    const px: f64 = @floatFromInt(right.x + right.w - 80);
+    const py: f64 = @floatFromInt(right.y + 17);
+    try testing.expectEqual(find_ops.DiffPointer.consumed, find_ops.diffFindPointer(fx.session, 1, 0, px, py));
+    try testing.expectEqual(editor_ops.DiffSide.right, fx.session.chrome_host.find.diff_side.?);
+    try testing.expect(fx.session.chrome_host.find.input_focused);
+    try testing.expectEqualStrings("오른쪽 한", fx.session.chrome_host.find.input.query.items);
 }
 
-test "DCOL11: 오버레이를 닫아도(⌘G 항해 중) 열을 넘기면 목록이 따라온다 (§5.1)" {
+test "DCOL11: 비교 재계산·빈 열·Term 전환에서도 검색 출처와 결과를 정산한다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
-    var entry = testEntry("aa\nbb\n", "aa\naa\n");
-    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    var entry = testEntry("aa aa\n", "bb bb bb\n");
+    try findPairFixture(&fx, &entry);
+    try findQuery(&fx, "bb");
+    find_ops.toggleFindDiffSide(fx.session);
+    try findQuery(&fx, "aa");
+    fx.session.chrome_host.find.current = 1;
+    entry.diff_original = @constCast("");
+    entry.diff_modified = @constCast("bb\n");
+    invalidate(fx.session, fx.term);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_find_matches.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diff_find_matches.items.len);
+    poll(fx.session, fx.term);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.match_count);
+    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find_secondary.match_count);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.current);
+    try testing.expect(find_ops.activeTermIsEditor(fx.session));
+    find_ops.toggleFindReplace(fx.session);
+    try testing.expect(!fx.session.chrome_host.find.replaceActive());
+    try testing.expectEqual(@import("maru").chrome.components.find.Target.editor, fx.session.chrome_host.find.target);
     const pane = pane_ops.activePane(fx.session);
-    for (pane.terms.items, 0..) |t, k| {
-        if (t == fx.term) pane.active_term = k;
-    }
-
-    find_ops.toggleFind(fx.session);
-    fx.session.chrome_host.find.target = .editor;
-    try fx.session.chrome_host.find.input.query.appendSlice(fx.session.allocator, "aa");
-    find_ops.recomputeEditorFindPublic(fx.session, fx.term);
-    try testing.expect(fx.session.chrome_host.find.match_count >= 2);
-
-    // **오버레이를 닫아도 항해는 살아 있다.** `find_nav` 가 참이면 하이라이트와 `⌘G` 가 그대로
-    //    매치 목록을 쓴다 — 그 상태에서 열을 넘기면 같은 어긋남이 난다. 가드를 `find.open` 으로만
-    //    쓰면 이 자리를 놓친다(17회차가 그 자리를 열었다).
-    find_ops.toggleFind(fx.session); // 닫는다
-    fx.session.find_nav = true;
-    try testing.expect(!fx.session.chrome_host.find.open);
-    try testing.expect(fx.session.chrome_host.find.match_count >= 2);
-
-    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
-    try testing.expectEqual(editor_ops.DiffSide.left, editor_ops.diffSearchSide(fx.session, fx.term));
-    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.match_count);
-
-    // **대조군** — 항해도 아니고 오버레이도 닫혔으면 아무 일도 안 한다(쓰는 사람이 없다).
-    fx.session.find_nav = false;
-    const idle = fx.session.chrome_host.find.match_count;
-    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
-    try testing.expectEqual(idle, fx.session.chrome_host.find.match_count);
+    pane.active_term = 0; // the fixture's original controlled terminal
+    find_ops.syncDiffFind(fx.session);
+    try testing.expectEqual(@as(u64, 0), fx.session.chrome_host.diff_find_source);
+    try testing.expect(!fx.session.chrome_host.find.open and !fx.session.chrome_host.find_secondary.open);
 }
 
 // ── DSB: 비교 뷰의 상태바 커서 위치 ────────────────────────────────────────────

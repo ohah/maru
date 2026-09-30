@@ -1899,6 +1899,8 @@ pub fn reapplyForcedTabHover(self: *AppSession) void {
 pub fn maybeDebugOpenFind(self: *AppSession) void {
     const q = std.c.getenv("MARU_OPEN_FIND") orelse return;
     if (self.debug_find_opened) return;
+    // The app may tick while cold startup is still waiting for its first surface.
+    if (!self.surface_initialized or self.tabs.items.len == 0) return;
     self.debug_find_tries +%= 1;
     if (self.debug_find_tries > 240) {
         std.debug.print("MARU_OPEN_FIND: gave up; target={s} open={}\n", .{
@@ -1919,10 +1921,15 @@ pub fn maybeDebugOpenFind(self: *AppSession) void {
             if (lo < hi) term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(lo, hi);
         }
     }
+    if (std.c.getenv("MARU_OPEN_DIFF_FIND_LEFT") != null) {
+        const diff = term.rt.editor_diff orelse return;
+        if (diff.view != .compare) return;
+    }
     if (!self.chrome_host.find.open) find_ops.toggleFind(self);
     if (!self.chrome_host.find.open) return;
     if (self.chrome_host.find.target != .editor) return; // tick 이 타깃을 세울 때까지 기다린다
 
+    if (std.c.getenv("MARU_OPEN_DIFF_FIND_LEFT") != null and self.chrome_host.diff_find_source != 0 and self.chrome_host.find.diff_side != .right) find_ops.toggleFindDiffSide(self);
     self.chrome_host.find.input.query.clearRetainingCapacity();
     self.chrome_host.find.input.query.appendSlice(self.allocator, std.mem.span(q)) catch {};
     if (std.c.getenv("MARU_FIND_RULES")) |rv| {
@@ -1936,6 +1943,16 @@ pub fn maybeDebugOpenFind(self: *AppSession) void {
         if (std.mem.indexOf(u8, rules, "right") != null) find_ops.toggleFindDiffSide(self);
     }
     find_ops.recomputeFind(self);
+    // Repeatable two-column product screenshot: use the same focus/open action
+    // as the keyboard, then provide the independently owned left query.
+    if (std.c.getenv("MARU_OPEN_DIFF_FIND_LEFT")) |left_query| {
+        if (term.rt.editor_diff != null and self.chrome_host.diff_find_source != 0) {
+            if (self.chrome_host.find.diff_side != .left) find_ops.toggleFindDiffSide(self);
+            self.chrome_host.find.input.query.clearRetainingCapacity();
+            self.chrome_host.find.input.query.appendSlice(self.allocator, std.mem.span(left_query)) catch {};
+            find_ops.recomputeFind(self);
+        }
+    }
     self.debug_find_opened = true;
     self.metal_dirty = true;
 }

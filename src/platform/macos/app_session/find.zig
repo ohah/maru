@@ -12,6 +12,8 @@
 //! 방식과 동형(docs/terminal-core-decomposition.md). 그룹 내부 상호 호출은 free 함수 직접.
 
 const builtin = @import("builtin");
+const std = @import("std");
+const find_ui = @import("maru").chrome.components.find;
 
 const AppSession = @import("../app_session.zig").AppSession;
 const Term = @import("../app_session.zig").Term;
@@ -45,7 +47,7 @@ fn activeEditorTerm(self: *AppSession) ?*Term {
     if (term.kind != .editor) return null;
     // **비교 뷰도 검색한다**(§5.1 「비교 뷰 검색」 — 2026-09-01). 어느 열인지는
     // `editor_diff.diffSearchSide` 가 답한다(선택이 있는 열, 없으면 왼쪽).
-    if (editor_ops.findLines(self, term).len == 0) return null; // 아직 안 열렸다(비교면 그 열이 비었다)
+    if (term.rt.editor_diff == null and editor_ops.findLines(self, term).len == 0) return null; // 아직 안 열렸다(비교면 그 열이 비었다)
     return term;
 }
 
@@ -143,6 +145,12 @@ pub fn recomputeEditorFindPublic(self: *AppSession, term: *Term) void {
 /// **명시값이 있으면 아무 일도 안 한다** — 그때는 caret 이 옮겨져도 검색 열이 안 바뀐다.
 /// **첫 매치로 되돌린다** — 목록이 통째로 달라지는 사건이라 `current` 를 들고 있으면 엉뚱한 자리다.
 pub fn diffCaretSideChanged(self: *AppSession, term: *Term, was: editor_ops.DiffSide) void {
+    if (self.chrome_host.diff_find_source == term.surfaceId()) {
+        const side = if (term.rt.editor_diff_selection) |s| s.side else find_ui.DiffSide.left;
+        if (side != self.chrome_host.find.diff_side) activateDiffSide(self, term, side);
+        self.chrome_host.find.input_focused = false;
+        return;
+    }
     if (self.chrome_host.find.diff_side != null) return;
     // **오버레이가 닫혀도 `find_nav` 면 매치를 쓴다** — 하이라이트와 `⌘G` 가 목록을 그대로 읽는다
     // (`wantedEditorFindSource` 가 그 둘을 함께 본다). `isEditorFindTarget` 만 쓰면 그 상태를
@@ -189,6 +197,11 @@ pub fn clearEditorFind(self: *AppSession) void {
 /// 검색 상자에 옛 강조가 그대로 칠해져 있었다**(카운터는 0을 말하면서). 편집기와 터미널 양쪽에서
 /// 같은 모양이었다.
 pub fn clearAllFindMatches(self: *AppSession) void {
+    // Exclusive overlays end the whole pair. Esc uses closeCurrentFind instead.
+    self.chrome_host.find_secondary.hide();
+    self.chrome_host.find_secondary.scope = null;
+    self.chrome_host.find.scope = null;
+    self.chrome_host.diff_find_source = 0;
     self.find_matches.clearRetainingCapacity();
     clearEditorFind(self);
     self.find_nav = false;
@@ -199,6 +212,12 @@ pub fn clearAllFindMatches(self: *AppSession) void {
 /// **이미 열려 있으면 닫지 않고 바꾸기 줄만 켠다.** ⌘F로 검색어를 친 뒤 "바꿔야겠다"고 생각하는
 /// 것이 흔한 순서인데, 여기서 닫아 버리면 방금 친 검색어가 사라진다.
 pub fn toggleFindReplace(self: *AppSession) void {
+    if (activeEditorTerm(self)) |term| {
+        if (term.rt.editor_diff != null) {
+            toggleFind(self);
+            return;
+        }
+    }
     if (!self.chrome_host.find.open) toggleFind(self);
     if (!self.chrome_host.find.open) return; // 토글이 닫는 쪽이었다면 그대로 둔다
     self.chrome_host.find.replace_open = true;
@@ -216,7 +235,7 @@ pub fn toggleFindReplace(self: *AppSession) void {
 ///
 /// 사용자 바인딩을 존중한다 — 빌트인 chord 모양을 직접 보지 않고 `resolve` 가 낸 액션으로 판정한다.
 pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool {
-    if (!self.chrome_host.find.open) return false;
+    if (!self.chrome_host.find.open or !self.chrome_host.find.input_focused) return false;
     var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     if (self.chrome_host.find.target == .scrollback) {
         // The modal consumes keys before the terminal resolver normally sees them. Resolve the
@@ -249,6 +268,7 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
         else => return false,
     };
     switch (action) {
+        .toggle_find => if (self.chrome_host.diff_find_source != 0) toggleFind(self) else return false,
         .toggle_find_match_case => toggleFindMatchCase(self),
         .toggle_find_regex => toggleFindRegex(self),
         .toggle_find_whole_word => toggleFindWholeWord(self),
@@ -298,6 +318,12 @@ pub fn toggleFindWholeWord(self: *AppSession) void {
 /// `null` 이라 그것을 기준으로 삼으면 첫 누름이 늘 같은 쪽으로 가고, 폴백이 이미 그 쪽이면
 /// **화면이 한 번 안 바뀐다** — 사용자는 눌렀는데 아무 일도 안 일어난 것으로 본다.
 pub fn toggleFindDiffSide(self: *AppSession) void {
+    if (self.chrome_host.diff_find_source != 0) {
+        const term = activeEditorTerm(self) orelse return;
+        activateDiffSide(self, term, if (self.chrome_host.find.diff_side == .left) .right else .left);
+        openDiffFind(self, term);
+        return;
+    }
     if (!isEditorFindTarget(self)) return;
     const term = activeEditorTerm(self) orelse return;
     if (term.rt.editor_diff == null) return;
@@ -367,6 +393,12 @@ fn refilterAfterRuleChange(self: *AppSession) void {
 /// ⌘F: Find 오버레이를 토글한다. 열려 있으면 닫고(매치 하이라이트·⌘G 닫힘-네비 세션 종료),
 /// 닫혀 있으면 다른 배타 오버레이(notice·palette)를 먼저 닫고 연다(검색어 초기화는 컴포넌트의 show가).
 pub fn toggleFind(self: *AppSession) void {
+    if (activeEditorTerm(self)) |term| {
+        if (term.rt.editor_diff != null) {
+            openDiffFind(self, term);
+            return;
+        }
+    }
     if (self.chrome_host.find.open) {
         self.chrome_host.find.hide();
         self.chrome_host.find.in_selection = null;
@@ -518,4 +550,122 @@ pub fn scrollToCurrentMatch(self: *AppSession) void {
     const surface = term_ops.activeSurface(self);
     // scrollToAbs는 코어 mutate라 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
     self.enqueueCoreCommandForSurface(surface.id, .{ .scroll_to_abs = self.find_matches.items[cur].start.row }) catch {};
+}
+
+fn activateDiffSide(self: *AppSession, term: *Term, side: find_ui.DiffSide) void {
+    const h = &self.chrome_host;
+    if (h.find.diff_side == side) return;
+    // Complete composition in its original owner before changing the active slot.
+    if (h.find.input_focused and h.find.input.commitPreedit(self.allocator)) recomputeEditorFind(self, term);
+    h.find.input_focused = false;
+    std.mem.swap(find_ui.State, &h.find, &h.find_secondary);
+    std.mem.swap(std.ArrayList(maru.session.editor.find.Match), &self.editor_find_matches, &term.rt.editor_diff_find_matches);
+    self.editor_find_source = term.surfaceId();
+    self.find_nav = false;
+    self.metal_dirty = true;
+}
+
+fn openDiffFind(self: *AppSession, term: *Term) void {
+    const h = &self.chrome_host;
+    if (h.diff_find_source != term.surfaceId()) {
+        clearAllFindMatches(self);
+        h.find.show();
+        h.find_secondary.input.clear();
+        h.find_secondary.replace.clear();
+        h.find_secondary.current = 0;
+        h.find_secondary.setMatchCount(0);
+        h.find_secondary.regex_error = null;
+        h.find_secondary.in_selection = null;
+        h.find_secondary.replace_open = false;
+        const side = if (term.rt.editor_diff_selection) |s| s.side else find_ui.DiffSide.left;
+        h.find.diff_side = side;
+        h.find_secondary.diff_side = if (side == .left) .right else .left;
+        h.find.target = .editor;
+        h.find_secondary.target = .editor;
+        term.rt.editor_diff_find_matches.clearRetainingCapacity();
+        h.diff_find_source = term.surfaceId();
+    }
+    h.notice.dismiss();
+    h.palette.hide();
+    // Reopening a column focuses its retained query; Cmd+F never toggles it shut.
+    h.find.open = true;
+    h.find.input_focused = true;
+    h.find_secondary.input_focused = false;
+    h.find.replace_open = false;
+    h.find.in_selection = null;
+    self.find_selection_at_open = null;
+    syncDiffFind(self);
+    recomputeEditorFind(self, term);
+    self.metal_dirty = true;
+}
+
+pub fn closeCurrentFind(self: *AppSession) void {
+    if (self.chrome_host.diff_find_source != 0) {
+        self.chrome_host.find.input.preedit.clearRetainingCapacity();
+        self.editor_find_matches.clearRetainingCapacity();
+        self.find_nav = false;
+    } else clearAllFindMatches(self);
+}
+
+/// Source and geometry are synchronized even when the visible widgets have body focus.
+pub fn syncDiffFind(self: *AppSession) void {
+    const h = &self.chrome_host;
+    if (h.diff_find_source == 0) return;
+    const term = activeEditorTerm(self) orelse {
+        h.find.hide();
+        clearAllFindMatches(self);
+        return;
+    };
+    if (term.surfaceId() != h.diff_find_source or term.rt.editor_diff == null) {
+        h.find.hide();
+        clearAllFindMatches(self);
+        return;
+    }
+    h.find.scope = if (h.find.diff_side == .right) term.rt.editor_diff_find_right else term.rt.editor_diff_find_left;
+    h.find_secondary.scope = if (h.find_secondary.diff_side == .right) term.rt.editor_diff_find_right else term.rt.editor_diff_find_left;
+    h.find.diff_side_shown = h.find.diff_side;
+    h.find_secondary.diff_side_shown = h.find_secondary.diff_side;
+    if (h.find.scope) |scope| {
+        if (scope.w < @max(self.cell_width_px, 1) or scope.h < 2 * @max(self.cell_height_px, 1)) h.find.input_focused = false;
+    }
+}
+
+pub const DiffPointer = enum { none, body, consumed };
+
+pub fn diffFindPointer(self: *AppSession, kind: i32, button: i32, x: f64, y: f64) DiffPointer {
+    const h = &self.chrome_host;
+    if (h.diff_find_source == 0) return .none;
+    const term = activeEditorTerm(self) orelse return .none;
+    if (term.surfaceId() != h.diff_find_source) return .none;
+    syncDiffFind(self);
+    const p = self.buildChromeProps();
+    const secondary_hit = find_ui.contains(&h.find_secondary, p, x, y);
+    if (secondary_hit or find_ui.contains(&h.find, p, x, y)) {
+        if (kind == 1 and button == 0) {
+            if (secondary_hit) activateDiffSide(self, term, h.find_secondary.diff_side.?);
+            h.find.input_focused = true;
+            if (find_ui.regexButtonHit(&h.find, p, x, y)) toggleFindRegex(self);
+            self.metal_dirty = true;
+        }
+        return .consumed;
+    }
+    if (kind == 1) {
+        if (h.find.input_focused and h.find.input.commitPreedit(self.allocator)) recomputeEditorFind(self, term);
+        h.find.input_focused = false;
+        self.metal_dirty = true;
+    }
+    return .body;
+}
+
+/// Row arrays were replaced. Rebuild both owners before any navigation can use them.
+pub fn refreshDiffFind(self: *AppSession, term: *Term) void {
+    if (self.chrome_host.diff_find_source != term.surfaceId()) return;
+    recomputeEditorFind(self, term);
+    const focused = self.chrome_host.find.input_focused;
+    std.mem.swap(find_ui.State, &self.chrome_host.find, &self.chrome_host.find_secondary);
+    std.mem.swap(std.ArrayList(maru.session.editor.find.Match), &self.editor_find_matches, &term.rt.editor_diff_find_matches);
+    recomputeEditorFind(self, term);
+    std.mem.swap(find_ui.State, &self.chrome_host.find, &self.chrome_host.find_secondary);
+    std.mem.swap(std.ArrayList(maru.session.editor.find.Match), &self.editor_find_matches, &term.rt.editor_diff_find_matches);
+    self.chrome_host.find.input_focused = focused;
 }

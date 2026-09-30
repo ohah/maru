@@ -110,9 +110,31 @@ fn textCols(state: *const State, panel_cols: u32) u32 {
 
 /// VS Code-style `.*` control, immediately left of the match count. A narrow
 /// pane hides the control rather than overlapping the query or count.
+fn scopedProps(state: *const State, p: props.ChromeProps) props.ChromeProps {
+    var scoped = p;
+    if (state.scope) |rect| scoped.active_pane = rect;
+    return scoped;
+}
+
+fn layout(state: *const State, p: props.ChromeProps) ?overlay_input.PanelLayout {
+    // A zero-width column is absent; never fall back to the whole workspace.
+    if (state.scope) |scope| {
+        if (scope.w < @max(p.metrics.cell_width_px, 1) or scope.h < 2 * @max(p.metrics.cell_height_px, 1)) return null;
+    }
+    return overlay_input.findLayout(scopedProps(state, p));
+}
+
+/// Drawing, pointer routing and IME use the same layout within the owning column.
+pub fn contains(state: *const State, p: props.ChromeProps, x: f64, y: f64) bool {
+    if (!state.open) return false;
+    const lay = layout(state, p) orelse return false;
+    return x >= @as(f64, @floatFromInt(lay.x)) and x < @as(f64, @floatFromInt(lay.x + @as(i32, @intCast(lay.panel_cols * lay.cw)))) and
+        y >= @as(f64, @floatFromInt(lay.y)) and y < @as(f64, @floatFromInt(lay.y + @as(i32, @intCast(lay.ch * @as(u32, if (state.replaceActive()) 2 else 1)))));
+}
+
 fn regexButtonRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open or state.target == .page) return null;
-    const lay = overlay_input.findLayout(p) orelse return null;
+    const lay = layout(state, p) orelse return null;
     const cc = counterCols(state);
     if (cc + 7 >= lay.panel_cols) return null;
     return .{
@@ -151,6 +173,9 @@ pub const Focus = enum { find, replace };
 
 pub const State = struct {
     open: bool = false,
+    // A visible diff widget may retain results while keyboard focus is in the body.
+    input_focused: bool = true,
+    scope: ?props.PaneRect = null,
     input: overlay_input.OverlayInput = .{},
     /// **바꿀 문자열**(§5.1 — "입력 필드가 하나 더 필요하다"). 별도 `OverlayInput`이라 조합(IME)이
     /// 검색어와 **독립**이다 — 하나를 공유하면 한글을 조합하다 Tab을 누를 때 조합 중인 글자가
@@ -209,7 +234,7 @@ pub const State = struct {
     /// 편집기에서 열어 둔 채 pane을 옮겨도 그 칸이 따라간다. 그 자리에서 Enter를 누르면 조용히
     /// 아무 일도 일어나지 않는다 — §5.1이 피하려는 부류다(적대적 검증 2026-08-27).
     pub fn replaceActive(self: *const State) bool {
-        return self.replace_open and self.target == .editor;
+        return self.replace_open and self.target == .editor and self.scope == null;
     }
 
     /// 지금 키를 받는 입력줄.
@@ -235,10 +260,12 @@ pub const State = struct {
         // **⌘G 네비는 살아 있어** 그 동안에는 고른 열이 유지되는 것이 맞기 때문이다.
         self.diff_side = null;
         self.open = true;
+        self.input_focused = true;
     }
 
     pub fn hide(self: *State) void {
         self.open = false;
+        self.input_focused = false;
     }
 
     /// 다음 매치로(wrap). 매치 없으면 무동작. wrap은 match_count(session이 setMatchCount로 동기화) 기준.
@@ -342,8 +369,8 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
 /// 입력이라 caret 뒤에 텍스트가 없어, 터미널 grid의 삽입형 미리보기(뒤 글자 밀기) vs 오버레이 구분이 무관하다(조합
 /// 글자는 늘 query 끝에 붙는다). 조합이 없으면 query 끝(다음 입력 위치)이 곧 그 자리다. 표시 폭은 EAW(input.queryCols).
 pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
-    if (!state.open) return null;
-    const lay = overlay_input.findLayout(p) orelse return null;
+    if (!state.open or !state.input_focused) return null;
+    const lay = layout(state, p) orelse return null;
     // caret 위치는 view의 tail 창 배치와 **같은 단일 출처**(inputLineView)에서 얻는다 — 검색어가 텍스트 영역을 넘치면
     // caret은 창 오른쪽 끝(= query 끝)으로 오고, 넘치지 않으면 prompt_cols+queryCols(기존과 동일). 조합 글자는 그 위에 겹친다.
     // **caret은 포커스를 따라간다.** 안 따라가면 바꿀 문자열을 치는 동안 커서가 위 줄에서 깜빡이고,
@@ -370,7 +397,7 @@ pub fn view(
 ) !void {
     _ = tk;
     if (!state.open) return;
-    const lay = overlay_input.findLayout(p) orelse return; // 활성 pane 영역이 0칸이면 생략(≥1칸이면 작아도 그려 soft-lock 회피)
+    const lay = layout(state, p) orelse return; // 활성 pane 영역이 0칸이면 생략(≥1칸이면 작아도 그려 soft-lock 회피)
     const cw = lay.cw;
     const panel_w = lay.panel_cols * cw;
     const x = lay.x;
@@ -981,4 +1008,39 @@ test "find 카운터의 예약 폭은 실제 글자 폭과 같다 (계약 §6.1)
     const found_cols = pageIndicatorCols(&s);
     s.page_found = false;
     try std.testing.expect(found_cols != pageIndicatorCols(&s));
+}
+
+test "find paired scope: draw·hit·caret 모두 자기 열을 쓰고 비활성 입력은 caret이 없다" {
+    const allocator = std.testing.allocator;
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 600 }, .active_pane = .{ .x = 20, .y = 30, .w = 900, .h = 500 } };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var s: State = .{};
+    defer s.deinit(allocator);
+    s.show();
+    s.target = .editor;
+    s.replace_open = true;
+    try s.input.query.appendSlice(allocator, "한글");
+    for ([_]props.PaneRect{ .{ .x = 20, .y = 30, .w = 440, .h = 500 }, .{ .x = 480, .y = 30, .w = 440, .h = 500 }, .{ .x = 20, .y = 30, .w = 32, .h = 500 } }) |scope| {
+        s.scope = scope;
+        s.input_focused = true;
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try view(&s, p, &tk, arena.allocator(), &ops);
+        const panel = ops.items[0].quad.rect;
+        try std.testing.expect(panel.x >= scope.x);
+        try std.testing.expect(panel.x + @as(i32, @intCast(panel.w)) <= scope.x + scope.w);
+        try std.testing.expectEqual(@as(u32, 16), panel.h); // diff is read-only, even with stale replace_open
+        try std.testing.expect(contains(&s, p, @floatFromInt(panel.x), @floatFromInt(panel.y)));
+        try std.testing.expect(!contains(&s, p, @floatFromInt(panel.x - 1), @floatFromInt(panel.y)));
+        if (caretRect(&s, p)) |caret| try std.testing.expect(caret.x >= panel.x and caret.x < panel.x + @as(i32, @intCast(panel.w)));
+        s.input_focused = false;
+        try std.testing.expect(caretRect(&s, p) == null);
+    }
+    s.scope = .{ .x = 480, .y = 30, .w = 0, .h = 500 };
+    var ops: std.ArrayList(draw.Op) = .empty;
+    try view(&s, p, &tk, arena.allocator(), &ops);
+    try std.testing.expectEqual(@as(usize, 0), ops.items.len);
+    try std.testing.expect(!contains(&s, p, 800, 46));
 }

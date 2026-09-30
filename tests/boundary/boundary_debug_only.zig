@@ -4,13 +4,20 @@
 //! 소스를 문자열로 읽어 수를 세므로 최적화 모드가 답을 바꿀 수 없고, ReleaseFast 사본은 같은 답을 내려고
 //! 바이너리를 한 번 더 링크하는 비용일 뿐이다 — 그때 `check` job 14분이 사실상 이 비용이었다.
 //! 그런데 규칙만 적혀 있어서 **루프 안 등록 38 개가 두 모드로 붙어 있었다**(2026-09-25 실측 — 소스를 세는 판정자
-//! 20 개는 다시 걸렀고, 나머지 18 개는 아래 동작 테스트다). 이 판정자가
+//! 20 개는 다시 걸렀고, 나머지 18 개는 동작 테스트였다 — 그중 macOS 전용 17 개도 뒤에 걸렀다, 아래). 이 판정자가
 //! 그 되돌아감을 실패로 만든다.
 //!
 //! **규칙**: `for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |x| { … }` 안의
-//! `boundary_step.dependOn(&run.step)` 은 `if (x == .Debug)` 로 걸러야 한다. 예외는 아래 `behavior_runs` —
-//! 소스를 세는 판정자가 아니라 제품 모듈을 import 해 **동작을 돌리는** 테스트라, ReleaseFast 에서만 드러나는
-//! 결함을 잡을 수 있다(`session host macOS (ReleaseFast)` 잡은 수동 실행 전용이다). 그 목록은 **줄어들기만** 한다.
+//! `boundary_step.dependOn(&run.step)` 은 `if (x == .Debug)` 로 걸러야 한다. 예외는 아래 `behavior_runs` 하나 —
+//! 소스를 세는 판정자가 아니라 제품 모듈을 import 해 **동작을 돌리는** 테스트이고, **모든 OS 에 등록돼** CI 의
+//! check-boundaries(ubuntu)에서 실제로 ReleaseFast 로 돈다. `session host macOS (ReleaseFast)` 잡은 수동 실행 전용이라
+//! PR 에서 그 사본이 도는 자리는 여기뿐이다. 목록은 **줄어들기만** 한다.
+//!
+//! **macOS 전용 동작 테스트는 예외가 아니다(2026-09-30 정정).** 처음(#3943)엔 release adapter 동작 테스트 18 개를 같은
+//! 이유로 예외에 뒀는데, 그중 17 개는 `if (target.result.os.tag == .macos)` 안에서만 등록된다 — CI 의 check-boundaries 는
+//! ubuntu 라 **거기에 아예 없었고**, 두 모드 사본은 개발자 로컬 macOS 에서만 돌았다(로컬 실측 ReleaseFast 컴파일 합 120초).
+//! 그래서 17 개도 Debug 로 걸렀다. ReleaseFast 사본은 각자의 전용 스텝(`test-session-host-release-adapter-…`)과
+//! 수동 ReleaseFast 잡의 `test-session-host` 에 그대로 있다.
 //!
 //! **조용히 초록이 되지 않게**: 루프도, 거른 등록도 하나도 못 찾으면 실패한다 — 서식이 바뀌어 스캐너가
 //! 아무것도 못 보면 「위반 0」과 구별되지 않기 때문이다.
@@ -19,25 +26,9 @@ const std = @import("std");
 const build_source = @import("build_graph").source;
 
 /// 두 모드로 check-boundaries 에 붙는 **동작 테스트**. 이름은 run 변수. 줄어들기만 한다.
+/// 모든 OS 에 등록되는 것만 둔다 — macOS 전용이면 CI(ubuntu)의 check-boundaries 에 없어 ReleaseFast 사본이 PR 을 지키지 않는다.
 const behavior_runs = [_][]const u8{
     "run_live_workflow_aggregate_event_tests",
-    "run_live_timing_artifact_tests",
-    "run_live_timing_record_tests",
-    "run_live_timing_transport_tests",
-    "run_live_timing_verifier_tests",
-    "run_remote_release_assets_tests",
-    "run_remote_release_fence_tests",
-    "run_remote_release_metadata_tests",
-    "run_remote_release_observation_tests",
-    "run_remote_release_pass_artifact_tests",
-    "run_remote_release_pass_auditor_tests",
-    "run_remote_release_pass_file_tests",
-    "run_remote_release_pass_record_tests",
-    "run_remote_release_pass_transport_tests",
-    "run_remote_release_semantic_files_tests",
-    "run_remote_release_semantics_tests",
-    "run_remote_release_verdict_tests",
-    "run_remote_release_verifier_tests",
 };
 
 const loop_prefix = "for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |";

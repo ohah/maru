@@ -5315,8 +5315,11 @@ pub fn build(b: *std.Build) void {
     //
     // **적어만 둔 규칙은 샜다.** 2026-09-25 에 세어 보니 루프 안 등록 38 개가 두 모드로 붙어 있었고, 그중
     // 소스를 세는 판정자 20 개를 다시 걸렀다. 이제 `tests/boundary/boundary_debug_only.zig` 가 세어
-    // 되돌아가면 실패한다. 예외는 제품을 import 해 **동작을 돌리는** release adapter 테스트 18 개 —
-    // ReleaseFast 에서만 드러나는 결함을 잡을 수 있어 두 모드를 유지하고, 그 판정자의 목록에 이름이 있다.
+    // 되돌아가면 실패한다. 예외는 제품을 import 해 **동작을 돌리고 모든 OS 에 등록되는** release adapter
+    // 테스트 하나(`live_workflow_aggregate_event`) — CI 의 이 step(ubuntu)에서 실제로 ReleaseFast 로 돌아, PR 에서
+    // 그 사본이 도는 유일한 자리다. **macOS 전용 동작 테스트 17 개는 예외가 아니다**(2026-09-30 정정): CI 의 이
+    // step 은 ubuntu 라 거기엔 처음부터 없었고, 두 모드 사본은 로컬 macOS 에서만 돌았다 — 그래서 Debug 로 걸렀다.
+    // ReleaseFast 사본은 각자의 전용 스텝과 수동 ReleaseFast 잡의 `test-session-host` 에 남아 있다.
 
     // 이름 → 모듈. 표의 `deps` 가 **이 목록으로만** 풀린다. 그래서 같은 파일로 모듈을 두 번
     // 만드는 일이 없다 — 표가 되기 전에는 `tests/support/build_source.zig` 모듈이 셋이었다.

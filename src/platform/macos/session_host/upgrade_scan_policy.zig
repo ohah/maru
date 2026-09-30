@@ -9,8 +9,14 @@
 //! 교체 시도를 받지 못했고, 설치마다 새 host 가 하나씩 늘어 넷이 됐다.
 //!
 //! 그래서 **결과를 보고** 가른다. host 가 exec 전에 되돌아가 옛 이미지로 다시 serving 중임이 확정된 경우
-//! (`resumed`)와, prepare 가 부수효과 없이 거절된 경우(`rejected`)만 다음 후보로 간다. 교체 중이거나 상태가
-//! 불확실한 경우는 예전처럼 멈춘다. 이 파일은 std 와 `upgrade_wire` 만 쓴다 — PR 필수 check-boundaries 에서 돈다.
+//! (`resumed`)와, prepare 가 부수효과 없이 거절된 경우(진행 중인 다른 attempt 때문이 아닌 `rejected`)만 다음
+//! 후보로 간다. 교체 중이거나 상태가 불확실한 경우는 예전처럼 멈춘다.
+//!
+//! 또 **공정한 순서**로 시도한다(`orderByPublication`). 스캔은 교체 하나에 성공하면 멈추므로, 순서가 고정이면
+//! 매 설치가 같은 host 를 바꾸고 뒤의 host 는 영영 옛 이미지로 남는다. 매니페스트가 **마지막으로 게시된** 때가
+//! 오래된 host 부터 시도하면, 방금 교체된 host 는 새로 게시돼 맨 뒤로 가 설치마다 다른 host 가 교체된다.
+//!
+//! 이 파일은 std 와 `upgrade_wire`·`upgrade_limits` 만 쓴다 — PR 필수 check-boundaries 에서 돈다.
 
 const std = @import("std");
 const upgrade_wire = @import("upgrade_wire.zig");
@@ -29,8 +35,12 @@ pub const continue_budget_ms: u64 = upgrade_limits.pause_budget_ms;
 pub const Resolution = union(enum) {
     /// prepare 응답을 받지 못했다 — host 가 accepted 를 썼는지 모른다(느린 디스크에서 응답보다 exec 가 먼저일 수 있다).
     prepare_transport_error,
-    /// host 가 prepare 를 거절했다(다른 attachment 가 남아 있음). accepted 의 linearization 전이라 host 상태 불변.
-    rejected,
+    /// host 가 prepare 를 `upgrade_busy` 로 거절했다(attachment 가 남아 있음). accepted 전이라 host 상태 불변.
+    rejected_busy,
+    /// host 가 `attempt_conflict` 로 거절했다 — **다른 attempt 가 그 host 에서 진행 중**이다. 교체 도중인 host 다.
+    rejected_conflict,
+    /// 그 밖의 typed 거절(`upgrade_unsupported`·`invalid_target`·`resource_exhausted` 등). accepted 전이라 상태 불변.
+    rejected_other,
     /// prepare 가 이미 끝난 attempt 를 보고했다.
     completed: upgrade_wire.AttemptStatus,
     /// accepted → 같은 host_id 로 재연결했고 새 이미지임을 build_id 로 확인했다.
@@ -50,7 +60,9 @@ pub fn afterPrepare(resolution: Resolution) Next {
         .upgraded => .stop,
         // 확정된 부수효과 없음: host 는 accepted 전에 거절했다. 이 host 에 대한 "지금은 안 된다"일 뿐 다른 host 와
         // 무관하고, 아무 client 도 떨어뜨리지 않았으므로 연쇄 피해가 없다.
-        .rejected => .next_candidate,
+        .rejected_busy, .rejected_other => .next_candidate,
+        // 그 host 에서 **다른 attempt 가 진행 중**이다 — 교체 도중인 host 를 두고 다른 host 를 흔들지 않는다.
+        .rejected_conflict => .stop,
         .completed, .reconnected_old_image => |status| afterStatus(status),
         // 불확실: accepted 여부를 모르거나(transport), 재연결·조회로 상태를 확정하지 못했다. 다른 host 를 흔들기 전에
         // 멈춘다 — 이 host 가 아직 교체 중일 수 있다.
@@ -116,13 +128,39 @@ pub fn Scan(comptime Notice: type) type {
     };
 }
 
+/// 공정 순서의 입력: host 와 그 매니페스트가 **마지막으로 게시된** 시각. 호출자는 매니페스트 파일의 birth time 을
+/// 준다 — 게시(`publish`·`republish`)는 언제나 새 파일을 만들어 rename 하므로 birth time 이 바뀌고, tmp 정리를
+/// 피하려는 주기적 touch(`utimensat`·`futimens`)는 mtime·ctime 만 바꾸고 birth time 은 두지 않는다. mtime 은
+/// 이 목적에 쓸 수 없다 — 교체된 적 없는 host 는 한 시간마다 자기 매니페스트를 찍어 mtime 이 늘 새것이고,
+/// 교체된 host 는 찍지 않아 mtime 이 교체 시각에 머문다. mtime 순이면 방금 교체한 host 가 다음 설치에서 오히려
+/// **맨 앞**으로 와 같은 host 만 매번 교체된다. 시각을 못 읽으면 `null` — 맨 앞에 둬 차례를 잃지 않게 한다.
+pub const Candidate = struct {
+    host_id: u128,
+    published_ns: ?i128,
+
+    fn lessThan(_: void, a: Candidate, b: Candidate) bool {
+        const a_ns = a.published_ns orelse std.math.minInt(i128);
+        const b_ns = b.published_ns orelse std.math.minInt(i128);
+        if (a_ns != b_ns) return a_ns < b_ns;
+        return a.host_id < b.host_id; // 같은 시각이면 host_id 로 결정적으로
+    }
+};
+
+/// 마지막 게시가 오래된 host 부터. 스캔은 교체 하나에 성공하면 멈추므로 이 순서가 곧 공정성이다 — 한 설치에
+/// 옛 host 하나씩 돌아가며 교체되고, 늘 실패하는 host 는 `resumed` 로 지나친다.
+pub fn orderByPublication(candidates: []Candidate) void {
+    std.mem.sort(Candidate, candidates, {}, Candidate.lessThan);
+}
+
 const testing = std.testing;
 
-test "업그레이드 스캔 판정 — resumed·rejected 만 다음 후보로, 교체 중·불확실은 멈춘다" {
+test "업그레이드 스캔 판정 — resumed·거절(conflict 제외)만 다음 후보로, 교체 중·불확실은 멈춘다" {
     const Case = struct { resolution: Resolution, expected: Next };
     const cases = [_]Case{
         .{ .resolution = .upgraded, .expected = .stop },
-        .{ .resolution = .rejected, .expected = .next_candidate },
+        .{ .resolution = .rejected_busy, .expected = .next_candidate },
+        .{ .resolution = .rejected_conflict, .expected = .stop },
+        .{ .resolution = .rejected_other, .expected = .next_candidate },
         .{ .resolution = .prepare_transport_error, .expected = .stop },
         .{ .resolution = .unresolved, .expected = .stop },
         .{ .resolution = .{ .completed = .resumed }, .expected = .next_candidate },
@@ -187,7 +225,7 @@ test "업그레이드 스캔 — 첫 후보가 resumed 로 실패해도 둘째 �
     try testing.expectEqual(@as(?usize, null), simulateScan(&post_exec, 1_000).adopted);
 
     // 끝내 못 바꾸면 **첫** 실패가 알림으로 나간다(다음 후보로 넘어가며 버려지지 않는다).
-    const busy_then_resumed = [_]Resolution{ .rejected, .{ .completed = .resumed } };
+    const busy_then_resumed = [_]Resolution{ .rejected_busy, .{ .completed = .resumed } };
     const none = simulateScan(&busy_then_resumed, 1_000);
     try testing.expectEqual(@as(?usize, null), none.adopted);
     try testing.expectEqual(@as(?usize, 0), none.shown);
@@ -206,4 +244,67 @@ test "업그레이드 스캔 — 첫 후보가 resumed 로 실패해도 둘째 �
     try testing.expect(blind.mayPrepareNow(null));
     blind.notePrepared();
     try testing.expect(!blind.mayPrepareNow(123));
+}
+
+/// 여러 번의 설치를 모형으로 돌린다: 설치마다 후보를 `orderByPublication` 순(또는 `ordered=false` 면 readdir 순)
+/// 으로 시도하고, 교체된 host 는 새로 게시돼 birth time 이 그 설치 시각이 된다. `always_fails` 는 늘 `resumed`
+/// 로 끝나고 매니페스트를 다시 쓰지 않는 host(2026-09-30 의 9/27 host 와 같은 모양).
+fn simulateInstalls(
+    readdir_order: []const u128,
+    births: []i128,
+    always_fails: u128,
+    installs: usize,
+    ordered: bool,
+    upgraded_out: []u128,
+) !void {
+    var install: usize = 0;
+    while (install < installs) : (install += 1) {
+        var candidates: [8]Candidate = undefined;
+        for (readdir_order, 0..) |host_id, i| candidates[i] = .{ .host_id = host_id, .published_ns = births[i] };
+        const list = candidates[0..readdir_order.len];
+        if (ordered) orderByPublication(list);
+        var scan: Scan(u128) = .{ .started_ms = 0 };
+        upgraded_out[install] = 0;
+        for (list) |candidate| {
+            if (!scan.mayPrepareNow(0)) break;
+            scan.notePrepared();
+            if (candidate.host_id == always_fails) {
+                if (scan.settle(.{ .reconnected_old_image = .resumed }, candidate.host_id) == .stop) break;
+                continue;
+            }
+            upgraded_out[install] = candidate.host_id;
+            const at = std.mem.indexOfScalar(u128, readdir_order, candidate.host_id).?;
+            births[at] = @as(i128, @intCast(100 + install)); // 교체 = 새 게시
+            break;
+        }
+    }
+}
+
+test "업그레이드 스캔 — 공정 순서라 설치마다 다른 옛 host 가 교체되고, 늘 실패하는 host 는 지나친다" {
+    // readdir 순서는 고정이고, 늘 실패하는 host(0xA)가 가장 오래됐다 — 2026-09-30 과 같은 모양.
+    const readdir_order = [_]u128{ 0xD, 0xC, 0xB, 0xA };
+    var births = [_]i128{ 4, 3, 2, 1 };
+    var upgraded: [3]u128 = undefined;
+    try simulateInstalls(&readdir_order, &births, 0xA, 3, true, &upgraded);
+    try testing.expectEqual(@as(u128, 0xB), upgraded[0]);
+    try testing.expectEqual(@as(u128, 0xC), upgraded[1]);
+    try testing.expectEqual(@as(u128, 0xD), upgraded[2]);
+
+    // 대조: readdir 순서 그대로면 매 설치가 같은 host(0xD)만 바꾼다 — 수렴하지 않는다.
+    var births_fixed = [_]i128{ 4, 3, 2, 1 };
+    var fixed: [3]u128 = undefined;
+    try simulateInstalls(&readdir_order, &births_fixed, 0xA, 3, false, &fixed);
+    try testing.expectEqual(@as(u128, 0xD), fixed[0]);
+    try testing.expectEqual(@as(u128, 0xD), fixed[2]);
+
+    // 시각을 못 읽은 host 는 맨 앞, 같은 시각은 host_id 순.
+    var mixed = [_]Candidate{
+        .{ .host_id = 3, .published_ns = 10 },
+        .{ .host_id = 2, .published_ns = null },
+        .{ .host_id = 1, .published_ns = 10 },
+    };
+    orderByPublication(&mixed);
+    try testing.expectEqual(@as(u128, 2), mixed[0].host_id);
+    try testing.expectEqual(@as(u128, 1), mixed[1].host_id);
+    try testing.expectEqual(@as(u128, 3), mixed[2].host_id);
 }

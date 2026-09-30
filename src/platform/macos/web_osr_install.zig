@@ -12,12 +12,12 @@
 //!   환경변수로 고른 실행 파일을 띄우면 hardened runtime 의 `DYLD_*` 차단을 우회한다(W7 착수 전 공격). 판정은 빌드 플래그가
 //!   아니라 실행 중인 이 프로세스의 서명 상태(`csops` 의 `CS_RUNTIME`)로 한다 — 빠뜨릴 수 없게. 같은 사용자 권한의 공격자에게는
 //!   경계가 아니라 심층 방어다(keg 와 사본은 그 사용자가 쓸 수 있다).
-//! - **실행 사본**: 검증한 설치를 `~/Library/Caches/maru/web-osr-run/run-<pid>-<무작위>` 로 APFS 복제(`fclonefileat` — 330MB 에
-//!   14ms·추가 용량 0, 실측)해 거기서 띄운다. 도는 동안 `brew upgrade` 가 옛 keg 를 지워도 새 렌더러가 뜬다(W7 착수 전 실측:
+//! - **실행 사본**: 검증한 설치를 `~/Library/Caches/maru/web-osr-run/run-<pid>-<무작위>` 로 APFS 복제(`fclonefileat` — 333MB·
+//!   461 항목에 첫 회 약 9ms·이후 2~7ms, 원본 keg 가 남아 있는 동안 추가 용량 0 — 실측)해 거기서 띄운다. 도는 동안 `brew upgrade` 가 옛 keg 를 지워도 새 렌더러가 뜬다(W7 착수 전 실측:
 //!   설치가 지워지면 새 사이트·새 탭이 영영 로딩). 사본마다 옆의 `.lock` 을 공유 잠금으로 **그 sidecar 가 끝날 때까지** 쥐고
 //!   (`RunCopy` — 거둘 때 지운다), 띄울 때와 엔진을 정할 때 잠기지 않은 옛 사본을 지운다(다른 maru 인스턴스가 쓰는 사본은
-//!   잠겨 있어 남는다). 릴리스 판은 복제가 안 되면 띄우지 않는다(설치에서 바로 띄우면 CEF 가 helper 를 경로로 다시 띄워 검사가
-//!   무력해진다). 개발 디렉터리는 복제가 안 되면 그 자리에서 띄운다.
+//!   잠겨 있어 남는다). brew 설치는 복제가 안 되면 띄우지 않는다(설치에서 바로 띄우면 CEF 가 helper 를 경로로 다시 띄워 검사가
+//!   무력해진다 — 사용자 확인 2026-09-30). 개발 디렉터리(`MARU_WEB_OSR_DIR`)는 복제가 안 되면 그 자리에서 띄운다.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -53,8 +53,9 @@ const s_ifmt: u32 = 0o170000;
 const s_ifdir: u32 = 0o040000;
 const s_ifreg: u32 = 0o100000;
 const s_iflnk: u32 = 0o120000;
-/// codesign 한 번의 기한(보통 약 10ms — 실측). 넘으면 죽이고 「확인 못 함」.
-const codesign_timeout_ms: u32 = 10_000;
+/// codesign 한 번의 기한 — 보통 10~13ms, 과부하에서도 최대 약 25ms(실측)라 약 80 배 여유. 넘으면 죽이고 「확인 못 함」.
+/// 메인 스레드에서 기다리므로 짧게 둔다(처음 10 초였고 5ms 폴링을 횟수로 세 실제로는 약 13 초 — W7a2 4 차 적대 검증).
+const codesign_timeout_ms: u32 = 2_000;
 
 /// 이 프로세스가 hardened runtime 으로 도는가(서명된 dmg 판). 알 수 없으면 도는 것으로 본다(닫혀 실패 — 환경변수를 안 믿는다).
 pub fn hardenedRuntime() bool {
@@ -162,7 +163,7 @@ const Entries = struct {
     }
 };
 
-/// 연 디렉터리 아래 전체의 소유·권한·종류. 항목 수·깊이에 상한을 둔다(설치물은 459 개·깊이 6 — 실측). 하위 디렉터리는
+/// 연 디렉터리 아래 전체의 소유·권한·종류. 항목 수·깊이에 상한을 둔다(설치물은 461 항목·libexec 아래 깊이 4 — 실측). 하위 디렉터리는
 /// 방금 본 그것인지(장치·inode) 확인하고 들어간다.
 fn treeProblemAt(dir_fd: c_int, my_uid: u32, depth: u32, budget: *u32) ?Problem {
     if (depth > 16) return .too_large;
@@ -311,22 +312,100 @@ fn signature(path: [*:0]const u8) Signature {
     }
     var pid: std.c.pid_t = 0;
     if (posix_spawn(&pid, "/usr/bin/codesign", &actions, &attr, &argv, &envp) != 0) return .unknown;
-    var status: c_int = 0;
-    var waited: u32 = 0;
-    while (true) {
-        const r = std.c.waitpid(pid, &status, std.c.W.NOHANG);
-        if (r == pid) break;
-        if (r == -1 and std.c._errno().* != @intFromEnum(std.c.E.INTR)) return .unknown;
-        if (waited >= codesign_timeout_ms) {
-            _ = std.c.kill(pid, .KILL);
-            while (std.c.waitpid(pid, &status, 0) == -1 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) {}
-            return .unknown;
-        }
-        sleepMs(5);
-        waited += 5;
-    }
+    const status = waitWithin(pid, codesign_timeout_ms) orelse return .unknown;
     const s: u32 = @bitCast(status);
     return if (s & 0x7f == 0 and (s >> 8) & 0xff == 0) .valid else .invalid;
+}
+
+/// 자식 `pid` 가 끝나기를 `timeout_ms` 까지 기다려 거두고 종료 상태를 준다. 기한을 넘기면 죽이고 거둔 뒤 null. 이미 남이
+/// 거둔 pid(우리 자식이 아님)면 죽이지 않고 null — 종료 상태를 모르면 「확인 못 함」이다(0 을 돌려주면 서명 검사가 통과한다 —
+/// W7a2 후속 적대 검증). 끝나는 즉시 깨어나게 kqueue 의 `EVFILT_PROC`/`NOTE_EXIT` 로 기다린다(폴링은 한 번에 최대 5ms 를
+/// 더했다). 기한은 잠자는 동안 흐르지 않는 `CLOCK_UPTIME_RAW` 로 잰다 — kevent 가 시간이 다 됐다고 돌아와도 이 시계로 다시 본다.
+fn waitWithin(pid: std.c.pid_t, timeout_ms: u32) ?c_int {
+    const deadline = uptimeMs() + timeout_ms;
+    const state: ChildState = state: {
+        const kq = std.c.kqueue();
+        if (kq < 0) break :state pollChild(pid, deadline);
+        defer closeFd(kq);
+        var change: std.c.Kevent = .{ .ident = @intCast(pid), .filter = std.c.EVFILT.PROC, .flags = std.c.EV.ADD | std.c.EV.ONESHOT, .fflags = std.c.NOTE.EXIT, .data = 0, .udata = 0 };
+        var registered = false;
+        while (true) {
+            const now = uptimeMs();
+            if (now >= deadline) break :state peekChild(pid);
+            const left = deadline - now;
+            var ts: std.c.timespec = .{ .sec = @intCast(left / 1000), .nsec = @intCast((left % 1000) * std.time.ns_per_ms) };
+            var event: std.c.Kevent = undefined;
+            const changes: []const std.c.Kevent = if (registered) &.{} else (&change)[0..1];
+            const n = std.c.kevent(kq, changes.ptr, @intCast(changes.len), @ptrCast(&event), 1, &ts);
+            if (n < 0) {
+                if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+                break :state pollChild(pid, deadline);
+            }
+            registered = true;
+            if (n == 0) continue; // 기한은 위에서 UPTIME_RAW 로 다시 본다
+            if (event.flags & std.c.EV.ERROR != 0) {
+                // 등록 전에 이미 끝난 자식(좀비)이면 ESRCH(실측) — 다만 남이 거둔 pid 도 ESRCH 라 엿봐서 가른다.
+                if (event.data == @intFromEnum(std.c.E.SRCH)) break :state peekChild(pid);
+                break :state pollChild(pid, deadline);
+            }
+            break :state .exited;
+        }
+    };
+    switch (state) {
+        .not_child => return null,
+        .running => {
+            std.log.scoped(.web_osr).warn("codesign did not finish within {d} ms — killed", .{timeout_ms});
+            _ = std.c.kill(pid, .KILL);
+            _ = reap(pid);
+            return null;
+        },
+        .exited => return reap(pid),
+    }
+}
+
+const ChildState = enum { exited, running, not_child };
+
+/// 거두고 종료 상태를 준다 — 거둔 것이 이 pid 가 아니면(ECHILD 등) null.
+fn reap(pid: std.c.pid_t) ?c_int {
+    var status: c_int = 0;
+    while (true) {
+        const r = std.c.waitpid(pid, &status, 0);
+        if (r == pid) return status;
+        if (r == -1 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+        return null;
+    }
+}
+
+/// kqueue 를 못 쓸 때의 대비 — 5ms 마다 엿본다(거두지는 않는다). 기한은 부른 쪽의 것을 그대로 쓴다(새로 시작하지 않는다).
+fn pollChild(pid: std.c.pid_t, deadline: u64) ChildState {
+    while (true) {
+        const state = peekChild(pid);
+        if (state != .running or uptimeMs() >= deadline) return state;
+        sleepMs(5);
+    }
+}
+
+/// 거두지 않고 엿본다(`waitid(P_PID, WEXITED|WNOHANG|WNOWAIT)`) — 끝났나, 아직 도나, 우리 자식이 아닌가(ECHILD).
+fn peekChild(pid: std.c.pid_t) ChildState {
+    while (true) {
+        var info = std.mem.zeroes(std.c.siginfo_t);
+        const rc = waitid(waitid_pid, @intCast(pid), &info, waitid_exited | waitid_nohang | waitid_nowait);
+        if (rc == 0) return if (info.pid == pid) .exited else .running;
+        if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+        return .not_child;
+    }
+}
+
+extern "c" fn waitid(idtype: c_int, id: c_uint, info: *std.c.siginfo_t, options: c_int) c_int;
+const waitid_pid: c_int = 1;
+const waitid_nohang: c_int = 0x01;
+const waitid_exited: c_int = 0x04;
+const waitid_nowait: c_int = 0x20;
+
+fn uptimeMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.UPTIME_RAW, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
 }
 
 fn sleepMs(ms: u32) void {
@@ -590,6 +669,59 @@ test "the manifest's control-channel version is read strictly" {
     try std.testing.expect(manifestWireVersion("{\"wire_version\":70000}") == .bad);
     try std.testing.expect(manifestWireVersion("[2]") == .bad);
     try std.testing.expect(manifestWireVersion("not json") == .bad);
+}
+
+test "waiting for a child: its exit status as soon as it ends, killed and reaped past the deadline, never a guess for a pid we do not own" {
+    const argv_false = [_:null]?[*:0]const u8{"/usr/bin/false"};
+    const argv_sleep = [_:null]?[*:0]const u8{ "/bin/sleep", "5" };
+    const envp = [_:null]?[*:0]const u8{};
+    var attr: ?*anyopaque = null;
+    var actions: ?*anyopaque = null;
+    _ = posix_spawnattr_init(&attr);
+    defer _ = posix_spawnattr_destroy(&attr);
+    _ = posix_spawn_file_actions_init(&actions);
+    defer _ = posix_spawn_file_actions_destroy(&actions);
+    // 곧 끝나는 자식 — 종료 상태를 그대로 준다(`false` 는 1).
+    var pid: std.c.pid_t = 0;
+    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/usr/bin/false", &actions, &attr, &argv_false, &envp));
+    const status = waitWithin(pid, 2_000) orelse return error.TimedOut;
+    try std.testing.expectEqual(@as(u32, 1), (@as(u32, @bitCast(status)) >> 8) & 0xff);
+    // 기다리기 전에 이미 끝난 자식(좀비) — kqueue 등록이 ESRCH 여도 끝난 것이고 종료 상태를 준다.
+    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/usr/bin/false", &actions, &attr, &argv_false, &envp));
+    const peek_deadline = uptimeMs() + 2_000;
+    while (peekChild(pid) != .exited and uptimeMs() < peek_deadline) sleepMs(1);
+    try std.testing.expectEqual(ChildState.exited, peekChild(pid));
+    try std.testing.expectEqual(ChildState.exited, peekChild(pid)); // 엿보기는 거두지 않는다
+    const zombie_status = waitWithin(pid, 2_000) orelse return error.TimedOut;
+    try std.testing.expectEqual(@as(u32, 1), (@as(u32, @bitCast(zombie_status)) >> 8) & 0xff);
+    // 남이 이미 거둔 pid — 종료 상태를 모르니 null(0 이면 서명 검사가 통과한다).
+    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/usr/bin/false", &actions, &attr, &argv_false, &envp));
+    var taken: c_int = 0;
+    try std.testing.expectEqual(pid, std.c.waitpid(pid, &taken, 0));
+    try std.testing.expectEqual(ChildState.not_child, peekChild(pid));
+    try std.testing.expect(waitWithin(pid, 2_000) == null);
+    try std.testing.expect(reap(pid) == null); // 거두기도 추측하지 않는다(두 겹 방어의 다른 쪽)
+    // 기한을 넘는 자식 — 기한 안에 돌아오고, 죽여 거둔다(좀비를 남기지 않는다).
+    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/bin/sleep", &actions, &attr, &argv_sleep, &envp));
+    try std.testing.expectEqual(ChildState.running, peekChild(pid));
+    const started = uptimeMs();
+    try std.testing.expect(waitWithin(pid, 150) == null);
+    const took = uptimeMs() - started;
+    try std.testing.expect(took >= 150 and took < 1_500);
+    try std.testing.expectEqual(ChildState.not_child, peekChild(pid));
+    // kqueue 가 없을 때의 대비 — 도는 자식은 기한에 `running`, 끝나면 `exited`(거두지 않는다).
+    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/bin/sleep", &actions, &attr, &argv_sleep, &envp));
+    const poll_started = uptimeMs();
+    try std.testing.expectEqual(ChildState.running, pollChild(pid, uptimeMs() + 60));
+    try std.testing.expect(uptimeMs() - poll_started >= 60);
+    _ = std.c.kill(pid, .KILL);
+    try std.testing.expectEqual(ChildState.exited, pollChild(pid, uptimeMs() + 2_000));
+    try std.testing.expect(reap(pid) != null);
+}
+
+// 서명 확인의 기한 — 메인 스레드를 오래 막지 않게 짧게(과부하 최대 약 25ms 의 약 80 배).
+test "the codesign deadline stays short" {
+    try std.testing.expectEqual(@as(u32, 2_000), codesign_timeout_ms);
 }
 
 test "this test binary is not a hardened-runtime build (development env overrides stay allowed)" {

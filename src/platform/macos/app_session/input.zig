@@ -433,6 +433,8 @@ pub fn imeComposingActive(self: *AppSession) bool {
 /// 텍스트/조합 변화를 모으기 시작한다.
 pub fn imeBegin(self: *AppSession) void {
     if (!self.surface_initialized) return;
+    // 입력 대상 고정과 스크롤 준비도 지난 비교 상자를 참조하면 안 된다.
+    find_ops.syncDiffFind(self);
     // missing pin에서도 transaction은 반드시 열린 뒤 imeEnd에서 닫혀야 한다. 예전 조기 반환은
     // ime_active=false를 남겨 imeMarked 변화가 기록되지 않았고, imeEnd가 다음 active terminal로
     // 물리 키를 encode/replay했다.

@@ -4562,3 +4562,18 @@ test "DCOL15: 좁아져 숨은 비교 찾기는 보이지 않는 키와 IME 포�
     try testing.expect(fx.session.chrome_host.find.input_focused);
     try testing.expectEqualStrings("bb", fx.session.chrome_host.find.input.query.items);
 }
+
+test "DCOL16: Term 전환 직후 실제 IME 트랜잭션 시작이 새 Surface를 pin한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("aa\n", "bb\n");
+    try findPairFixture(&fx, &entry);
+    term_ops.focusTerm(fx.session, 0);
+    fx.session.imeBegin();
+    try testing.expectEqual(@as(?u64, pane_ops.activePane(fx.session).activeTerm().surfaceId()), fx.session.ime_terminal_target_id);
+    try testing.expectEqual(@as(u64, 0), fx.session.chrome_host.diff_find_source);
+    try testing.expect(!fx.session.chrome_host.find.open);
+    fx.session.imeMarked("한");
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.input.preedit.items.len);
+}

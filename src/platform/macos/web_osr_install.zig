@@ -56,6 +56,10 @@ const s_iflnk: u32 = 0o120000;
 /// codesign 한 번의 기한 — 보통 10~13ms, 과부하에서도 최대 약 25ms(실측)라 약 80 배 여유. 넘으면 죽이고 「확인 못 함」.
 /// 메인 스레드에서 기다리므로 짧게 둔다(처음 10 초였고 5ms 폴링을 횟수로 세 실제로는 약 13 초 — W7a2 4 차 적대 검증).
 const codesign_timeout_ms: u32 = 2_000;
+/// SIGKILL 뒤 끝나기를 기다리는 기한 — 보통 즉시 끝난다(기한 초과 시험의 `sleep` 은 죽이고 1ms 안에 거둬졌다 — 실측).
+/// 이것까지 합쳐 메인 스레드 최악은 약 4.5 초다 — 첫 바이너리가 기한 직전에 통과하고 둘째가 기한을 넘겨 죽이는 경우
+/// (`verifyRunDir` 는 첫 「확인 못 함」에서 멈추므로 둘 다 죽이는 일은 없다). 상한으로는 5 초.
+const reap_after_kill_ms: u32 = 500;
 
 /// 이 프로세스가 hardened runtime 으로 도는가(서명된 dmg 판). 알 수 없으면 도는 것으로 본다(닫혀 실패 — 환경변수를 안 믿는다).
 pub fn hardenedRuntime() bool {
@@ -77,6 +81,8 @@ pub const Problem = enum {
     version_mismatch,
     unreadable,
     clone_failed,
+    /// 서명을 확인하지 못했다(codesign 을 못 띄움·기한 초과·신호로 죽음) — 깨졌다는 뜻이 아니다.
+    signature_unverified,
 };
 
 /// `real` 이 `<prefix_real>/Cellar/maru-chromium/<버전>/libexec` 이면 그 `<버전>`(순수 — 시험한다).
@@ -254,11 +260,7 @@ pub fn verifyRunDir(dir: []const u8, require_manifest: bool) ?Problem {
         const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return .too_large;
         const st = statNoFollow(path) orelse return .unreadable;
         if (st.mode & s_ifmt != s_ifreg) return .not_regular;
-        switch (signature(path)) {
-            .valid => {},
-            .invalid => return .bad_signature,
-            .unknown => return .unreadable,
-        }
+        if (signatureProblem(signature(path))) |p| return p;
     }
     return manifestProblem(dir, require_manifest);
 }
@@ -313,11 +315,33 @@ fn signature(path: [*:0]const u8) Signature {
     var pid: std.c.pid_t = 0;
     if (posix_spawn(&pid, "/usr/bin/codesign", &actions, &attr, &argv, &envp) != 0) return .unknown;
     const status = waitWithin(pid, codesign_timeout_ms) orelse return .unknown;
-    const s: u32 = @bitCast(status);
-    return if (s & 0x7f == 0 and (s >> 8) & 0xff == 0) .valid else .invalid;
+    return signatureFromStatus(status);
 }
 
-/// 자식 `pid` 가 끝나기를 `timeout_ms` 까지 기다려 거두고 종료 상태를 준다. 기한을 넘기면 죽이고 거둔 뒤 null. 이미 남이
+/// 서명 판정 → 띄우기 전 거절 이유(순수 — 시험한다). 확인 못 함은 깨짐이 아니다.
+fn signatureProblem(sig: Signature) ?Problem {
+    return switch (sig) {
+        .valid => null,
+        .invalid => .bad_signature,
+        .unknown => .signature_unverified,
+    };
+}
+
+/// codesign 의 종료 상태 → 판정(순수 — 시험한다). 0 이면 온전, 1 이면 깨짐(서명 없음·변조·못 읽음이 모두 1 이라 더
+/// 가를 수 없다 — 실측), 그 밖의 종료 코드(2 = 인자 오류 등)나 신호로 죽은 것(메모리 압박 등)은 「확인 못 함」 — 서명이
+/// 멀쩡한데 「깨짐」으로 적지 않게(W7a2 후속 적대 검증).
+fn signatureFromStatus(status: c_int) Signature {
+    const s: u32 = @bitCast(status);
+    if (s & 0x7f != 0) return .unknown; // 신호로 끝남
+    return switch ((s >> 8) & 0xff) {
+        0 => .valid,
+        1 => .invalid,
+        else => .unknown,
+    };
+}
+
+/// 자식 `pid` 가 끝나기를 `timeout_ms` 까지 기다려 거두고 종료 상태를 준다. 기한을 넘기면 죽이고(0.5 초 안에 끝나면
+/// 거두고, 아니면 그대로 두고) null. 이미 남이
 /// 거둔 pid(우리 자식이 아님)면 죽이지 않고 null — 종료 상태를 모르면 「확인 못 함」이다(0 을 돌려주면 서명 검사가 통과한다 —
 /// W7a2 후속 적대 검증). 끝나는 즉시 깨어나게 kqueue 의 `EVFILT_PROC`/`NOTE_EXIT` 로 기다린다(폴링은 한 번에 최대 5ms 를
 /// 더했다). 기한은 잠자는 동안 흐르지 않는 `CLOCK_UPTIME_RAW` 로 잰다 — kevent 가 시간이 다 됐다고 돌아와도 이 시계로 다시 본다.
@@ -356,7 +380,13 @@ fn waitWithin(pid: std.c.pid_t, timeout_ms: u32) ?c_int {
         .running => {
             std.log.scoped(.web_osr).warn("codesign did not finish within {d} ms — killed", .{timeout_ms});
             _ = std.c.kill(pid, .KILL);
-            _ = reap(pid);
+            // 죽인 뒤 거두기도 기한 안에서만 — 끊을 수 없는 대기에 갇힌 자식이면 SIGKILL 이 안 먹어 막는 waitpid 가 메인
+            // 스레드를 무한히 멈춘다(`src/pty/macos.zig` 가 겪은 22 분). 못 거두면 좀비로 두고 넘어간다.
+            switch (pollChild(pid, uptimeMs() + reap_after_kill_ms)) {
+                .exited => _ = reap(pid),
+                .running => std.log.scoped(.web_osr).warn("codesign did not exit after SIGKILL — left unreaped", .{}),
+                .not_child => {},
+            }
             return null;
         },
         .exited => return reap(pid),
@@ -719,9 +749,38 @@ test "waiting for a child: its exit status as soon as it ends, killed and reaped
     try std.testing.expect(reap(pid) != null);
 }
 
-// 서명 확인의 기한 — 메인 스레드를 오래 막지 않게 짧게(과부하 최대 약 25ms 의 약 80 배).
-test "the codesign deadline stays short" {
+test "the codesign wait stays short: 2 s to finish, 0.5 s to reap after the kill" {
     try std.testing.expectEqual(@as(u32, 2_000), codesign_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 500), reap_after_kill_ms);
+}
+
+test "a signature that could not be checked is its own rejection, not a broken signature" {
+    try std.testing.expectEqual(@as(?Problem, null), signatureProblem(.valid));
+    try std.testing.expectEqual(@as(?Problem, .bad_signature), signatureProblem(.invalid));
+    try std.testing.expectEqual(@as(?Problem, .signature_unverified), signatureProblem(.unknown));
+}
+
+test "a codesign exit status maps to intact, broken, or could not tell — never broken for a crash" {
+    try std.testing.expectEqual(Signature.valid, signatureFromStatus(0));
+    try std.testing.expectEqual(Signature.invalid, signatureFromStatus(1 << 8));
+    try std.testing.expectEqual(Signature.unknown, signatureFromStatus(2 << 8)); // 인자 오류
+    try std.testing.expectEqual(Signature.unknown, signatureFromStatus(11)); // SIGSEGV
+    try std.testing.expectEqual(Signature.unknown, signatureFromStatus(9)); // SIGKILL
+    try std.testing.expectEqual(Signature.unknown, signatureFromStatus(11 | 0x80)); // 코어 덤프
+    // 신호로 죽은 실제 종료 상태 — `sleep` 을 SIGTERM 으로 죽여 거둔 값(SEGV 면 코어 파일이 생길 수 있다).
+    const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "5" };
+    const envp = [_:null]?[*:0]const u8{};
+    var attr: ?*anyopaque = null;
+    var actions: ?*anyopaque = null;
+    _ = posix_spawnattr_init(&attr);
+    defer _ = posix_spawnattr_destroy(&attr);
+    _ = posix_spawn_file_actions_init(&actions);
+    defer _ = posix_spawn_file_actions_destroy(&actions);
+    var pid: std.c.pid_t = 0;
+    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/bin/sleep", &actions, &attr, &argv, &envp));
+    _ = std.c.kill(pid, .TERM);
+    const status = waitWithin(pid, 2_000) orelse return error.TimedOut;
+    try std.testing.expectEqual(Signature.unknown, signatureFromStatus(status));
 }
 
 test "this test binary is not a hardened-runtime build (development env overrides stay allowed)" {

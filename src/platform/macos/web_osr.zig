@@ -443,6 +443,7 @@ test "a rejected install shows a version notice only for a control-channel misma
     try std.testing.expectEqual(Notice.start_failed, rejectedNotice(.bad_manifest));
     try std.testing.expectEqual(Notice.start_failed, rejectedNotice(.not_owned));
     try std.testing.expectEqual(Notice.start_failed, rejectedNotice(.clone_failed));
+    try std.testing.expectEqual(Notice.start_failed, rejectedNotice(.signature_unverified)); // 사용자에게는 같은 「시작 실패」(기록만)
 }
 
 /// 시험용 실행 사본 — 임시 디렉터리(빈 `src`)를 그 아래 `cache` 로 복제한다. 뿌리는 처음 한 번만 만든다(부를 때마다 만들면

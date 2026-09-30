@@ -89,6 +89,35 @@ fn expectedPassedCount(args: std.process.Args) ?usize {
     return optionValue(args, "--maru-expect-passed=");
 }
 
+/// **셸이 무시(`SIG_IGN`)로 물려준 SIGINT·SIGQUIT 를 기본 처분으로 되돌린다** — 테스트를 하나도 돌리기 전에.
+///
+/// 비대화형 `sh` 의 비동기 목록(`… &`)은 자식을 SIGINT·SIGQUIT 무시 상태로 띄운다(POSIX — 잡 제어가 없을 때).
+/// `tools/run-test-shards.sh` 가 샤드를 그렇게 띄우고, `mise run check &` 같은 백그라운드 실행도 같다. 셸 쪽에서는
+/// 못 고친다 — 비대화형 셸은 **들어올 때 이미 무시된 신호를 `trap` 으로 되돌리지 못한다**(macOS `/bin/sh` = bash 3.2
+/// 로 실측: `( trap - INT QUIT; … ) &` 도 무시 그대로). 그래서 테스트 프로세스인 여기서 되돌린다.
+///
+/// 무시 상태가 남으면 `external_tty` 가 설계대로 raw 진입을 거부해(`UnsupportedSignalDisposition` — 종료 신호가
+/// 기본 처분이어야 raw 를 되돌릴 수 있다) 그 부류 판정자 19개가 `RawEnterFailed` 등으로 죽고, `fork` 자식도 그
+/// 상태를 물려받았다(2026-09-30 — 러너 계측으로 네 샤드 모두 첫 테스트 전부터 `SIG_IGN` 이었다). 되돌리면 19개가
+/// 다 산다. 기본 처분이면 Ctrl-C 가 테스트 프로세스를 끝내는 것도 사람의 기대와 같다.
+fn restoreInheritedIgnoredSignals() void {
+    switch (builtin.os.tag) {
+        .macos, .linux => {},
+        else => return,
+    }
+    const default_action: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    for ([_]std.posix.SIG{ .INT, .QUIT }) |sig| {
+        var current: std.posix.Sigaction = undefined;
+        std.posix.sigaction(sig, null, &current);
+        // 무시로 물려받은 것만 되돌린다 — 다른 처리기는 누군가의 의도라 건드리지 않는다.
+        if (current.handler.handler == std.posix.SIG.IGN) std.posix.sigaction(sig, &default_action, null);
+    }
+}
+
 /// skip/keep prefix 는 **env 로** 받는다(argv 아님). **왜 argv 가 아닌가**: 일부 판정자가
 /// `_NSGetArgc() >= 3` 으로 「fixture 게이트인가」를 판단해 fixture 없으면 SkipZigTest 한다. skip 설정을
 /// argv 로 넘기면 argc 가 늘어 그 판정자들이 fixture 가 있다고 오판하고 돌다 죽는다(실측 2026-09-06,
@@ -164,6 +193,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         .estimated_total_items = test_functions.len,
     });
     const have_tty = Io.File.stderr().isTty(runner_io) catch unreachable;
+    restoreInheritedIgnoredSignals();
 
     // **컴파일은 됐지만 여기서는 안 돌린다** — `--maru-skip-prefix` 로 시작하는 이름은 다른 잡이 이미 도는
     // 것(예: `session_host.` 는 `test-session-host` 가 모듈 그래프째 돈다). `--maru-keep-prefix` 는 그 예외다

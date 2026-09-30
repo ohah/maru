@@ -14923,6 +14923,17 @@ pub const ClientSlot = struct {
             return error.InvalidUsableConnection;
     }
 
+    /// 이 연결로 **새 runtime 을 띄울 수 있는가** — admission 이 열려 있고 연결이 poison·미전송 없이 쓸 수 있다.
+    /// 호스트는 살아 있는데 이 연결만 닫힌 adapter 를 spawn host 로 세우면 spawn 이 `AdminBusy` 로 실패한다
+    /// (`mapCurrentBorrowError`). 읽기만 하며 상태를 바꾸지 않는다.
+    pub fn spawnConnectionUsable(self: *const ClientSlot) bool {
+        if (!self.valid()) return false;
+        if (!admissionLifecycleRawValid(&self.current.admission_lifecycle)) return false;
+        if (self.current.admission_lifecycle != .open) return false;
+        self.preflightAttachmentConnectionUsable() catch return false;
+        return true;
+    }
+
     pub fn attachmentConnectionFailureReason(
         self: *const ClientSlot,
     ) ?@import("client_poison.zig").ConnectionReason {

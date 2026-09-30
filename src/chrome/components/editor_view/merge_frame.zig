@@ -582,3 +582,45 @@ test "RB4 병합 — run·글자를 pane 몫대로 나눈다: base 없는 3-up·
         try testing.expectEqual(want, digitOps(bufs.ops[0..exact.ops]));
     }
 }
+
+test "B2FW5 병합 pane — Result 만 밀집한 합성 입력을 세션 writer 하나로 순서대로 소비한다" {
+    const a = testing.allocator;
+    const lines = [_][]const u8{"x" ** 240} ** 80;
+    const props: Props = .{
+        .current = .{ .lines = &lines },
+        .result = .{ .lines = &lines },
+        .incoming = .{ .lines = &lines },
+        .base = .{ .lines = &lines },
+        .rect = .{ .x = 0, .y = 0, .w = 7680, .h = 2560 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 13,
+        .wrap = false,
+        .caret_visible = false,
+        .caret_shape = .bar,
+        .tab_width = frame.default_tab_width,
+    };
+    const lay = layout(props.rect, props.cell_w_px, props.cell_h_px, true);
+    const pane = props.result;
+    const rects = [_]draw.Rect{ lay.current.?, lay.result, lay.incoming.?, lay.base.? };
+    var panes: [4]frame.Props = undefined;
+    for (rects, 0..) |rect, i| panes[i] = paneProps(pane, props, rect, backgroundFor(i, rect, lay, props.rect));
+    var singles: [120]frame.Mark = undefined;
+    for (&singles, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
+    const marks = [_][]const frame.Mark{&singles} ** 80;
+    // 제품 merge Pane 에 검색 API 는 아직 없다. 기존 paneProps 의 실제 좌표에 합성 밀집 층을 넣는다.
+    panes[1].search_marks = &marks;
+    const complete = try frame.B2Experiment.checkPanes(&panes, 16000);
+    const ops = try a.alloc(draw.Op, 4000);
+    defer a.free(ops);
+    const runs = try a.alloc(draw.Run, 32000);
+    defer a.free(runs);
+    const text = try a.alloc(u8, 400000);
+    defer a.free(text);
+    var buffers: RbBuffers = .{};
+    var scratch = buffers.scratch(runs, text);
+    scratch.ops = ops;
+    const equal_share = frame.build(panes[1], scratch);
+    try testing.expect(equal_share.truncated);
+    std.debug.print("[B2FW merge] full_ops={d} shared_writer_bytes={d} equal_share_ops={d} panes=4\n", .{ complete.total, complete.peak_capacity * @sizeOf(draw.Op), equal_share.ops });
+}

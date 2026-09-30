@@ -704,6 +704,21 @@ fn rowsOfLine(props: Props, layout: geometry.Layout, line: usize, scratch: []u8)
 }
 
 pub fn build(props: Props, scratch: Scratch) Written {
+    return buildStaged(props, scratch, null);
+}
+
+// B2 실험은 검색·진단 없이 기본 층을 한 번 만들고, 같은 시각 행에 밀집 층을
+// 직접 방출한다. sticky 는 최종 painter 순서가 완성된 뒤 한 번만 적용한다.
+const B2Stages = struct {
+    search: usize = 0,
+    diagnostic: usize = 0,
+    background: usize = 0,
+    bytes: usize = 0,
+    runs: usize = 0,
+    visual_budget: usize = 0,
+};
+
+fn buildStaged(props: Props, scratch: Scratch, stages: ?*B2Stages) Written {
     const layout = layoutOf(props);
     var op_truncated = false;
 
@@ -1098,7 +1113,17 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 끝 op(막대·미니맵)가 잘린다 — 강조가 선 동안 막대가 사라졌다(2026-09-23 발견).
     // 현재 줄(`lh_ops`)·짝 괄호(`brk_ops`)도 같은 이유로 빠지면 안 된다(`LHL5`).
     const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + ig_ops + lh_ops + occ_ops + sel_ops + ws_ops + find_ops + brk_ops + diag_ops + caret_ops + mm_ops + hw.ops;
-    const final_ops = paintSticky(props, layout, scratch, bg.ops, body_ops, visual_budget, cw.bytes + gw.bytes, cw.runs + gw.runs, &op_truncated);
+    const final_ops = if (stages) |stage| blk: {
+        stage.* = .{
+            .search = find_base + ig_ops + ws_ops,
+            .diagnostic = diag_base + ig_ops + ws_ops,
+            .background = bg.ops,
+            .bytes = cw.bytes + gw.bytes,
+            .runs = cw.runs + gw.runs,
+            .visual_budget = visual_budget,
+        };
+        break :blk body_ops;
+    } else paintSticky(props, layout, scratch, bg.ops, body_ops, visual_budget, cw.bytes + gw.bytes, cw.runs + gw.runs, &op_truncated);
     return .{
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
@@ -1420,15 +1445,20 @@ fn paintRowMarksInto(props: Props, layout: geometry.Layout, p: RowMarkPaint, scr
 /// **진단 밑줄**을 그린다(§5.4). 줄마다 조각을 받고(`diag_marks`, 검색과 같은 축) severity 색의 지그재그로 낸다. severity 마다 role 이
 /// 다르므로 조각을 하나씩 `paintRowMarks` 에 넘긴다 — 열 계산은 그 한 곳이다(§4.1c).
 fn paintDiagnostics(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
-    const rows = props.diag_marks orelse return 0;
-    var n: usize = 0;
+    var sink: FixedMarkSink = .{ .out = out, .truncated = op_truncated };
+    paintDiagnosticsInto(props, layout, visual, scratch_cols, &sink);
+    return sink.n;
+}
+
+fn paintDiagnosticsInto(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, scratch_cols: []u8, sink: anytype) void {
+    const rows = props.diag_marks orelse return;
     for (visual, 0..) |v, i| {
         if (v.kind != .text) continue;
         const idx = v.docIndex(props.first_line);
         if (idx >= rows.len or idx >= props.lines.len) continue;
         for (rows[idx]) |dm| {
             const one = [_]Mark{.{ .start = dm.start, .len = dm.len }};
-            n += paintRowMarks(props, layout, .{
+            paintRowMarksInto(props, layout, .{
                 .line = props.lines[idx],
                 .inlays = props.line_inlays.at(idx),
                 .row_start_col = v.start_col,
@@ -1437,10 +1467,9 @@ fn paintDiagnostics(props: Props, layout: geometry.Layout, visual: []const visua
                 .role = dm.level.role(),
                 .alpha = 0xFF,
                 .shape = .zigzag,
-            }, out[n..], scratch_cols, op_truncated);
+            }, scratch_cols, sink);
         }
     }
-    return n;
 }
 
 /// 본문 **텍스트 선택**을 그린다(§4.1g 배선). `row_bands`와 달리 diff가 아니어도 선다.
@@ -1928,8 +1957,13 @@ fn paintOccurrences(props: Props, layout: geometry.Layout, visual: []const visua
 }
 
 fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
-    const rows = props.search_marks orelse return 0;
-    var n: usize = 0;
+    var sink: FixedMarkSink = .{ .out = out, .truncated = op_truncated };
+    paintSearchInto(props, layout, visual, scratch_cols, &sink);
+    return sink.n;
+}
+
+fn paintSearchInto(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, scratch_cols: []u8, sink: anytype) void {
+    const rows = props.search_marks orelse return;
 
     // ── 1) 현재 매치 먼저 ────────────────────────────────────────────────────
     //
@@ -1954,7 +1988,7 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
             const k = for (marks, 0..) |m, mi| {
                 if (m.start == cur.start) break mi;
             } else continue;
-            n += paintRowMarks(props, layout, .{
+            paintRowMarksInto(props, layout, .{
                 .line = props.lines[idx],
                 .inlays = props.line_inlays.at(idx),
                 .row_start_col = v.start_col,
@@ -1962,7 +1996,7 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
                 .marks = marks[k .. k + 1],
                 .role = .search_match_current,
                 .alpha = search_current_alpha,
-            }, out[n..], scratch_cols, op_truncated);
+            }, scratch_cols, sink);
         }
     }
 
@@ -1999,20 +2033,19 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
             break :blk null;
         };
         const k = cur orelse {
-            n += paintRowMarks(props, layout, paint, out[n..], scratch_cols, op_truncated);
+            paintRowMarksInto(props, layout, paint, scratch_cols, sink);
             continue;
         };
 
         // 그 하나는 위에서 이미 그렸다 — 앞뒤만 채운다.
         var p_before = paint;
         p_before.marks = marks[0..k];
-        if (p_before.marks.len > 0) n += paintRowMarks(props, layout, p_before, out[n..], scratch_cols, op_truncated);
+        if (p_before.marks.len > 0) paintRowMarksInto(props, layout, p_before, scratch_cols, sink);
 
         var p_after = paint;
         p_after.marks = marks[k + 1 ..];
-        if (p_after.marks.len > 0) n += paintRowMarks(props, layout, p_after, out[n..], scratch_cols, op_truncated);
+        if (p_after.marks.len > 0) paintRowMarksInto(props, layout, p_after, scratch_cols, sink);
     }
-    return n;
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -3409,6 +3442,94 @@ test "B2 재그리기 반례 — 첫 절단 호출이 RowCache 계수를 전진�
     try testing.expect(sameOpContent(one_buf.ops[0..one.ops], rollback_buf.ops[0..rolled.ops]));
 }
 
+// 전체 프레임 실험 전용. 제품 호출자는 여전히 build 를 쓴다.
+// 기본 층은 호출자의 기존 scratch 에 남고, 밀집 검색·진단만 직접 append 한다.
+// 매 append 때 기본 층과 sticky 몫을 함께 예약해, 실패해도 caret·막대가 밀집 층에 굶지 않는다.
+const B2FrameSink = struct {
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(draw.Op),
+    max_ops: usize,
+    reserve: usize,
+    limited: bool = false,
+    allocation_failed: bool = false,
+    growths: usize = 0,
+
+    fn room(self: *B2FrameSink, required: usize) bool {
+        if (required > self.max_ops) {
+            self.limited = true;
+            return false;
+        }
+        if (required <= self.list.capacity) return true;
+        // 정확한 용량 요청으로 ArrayList 자신의 추가 성장 여유가 상한을 넘지 못하게 한다.
+        const next = @min(self.max_ops, @max(required, self.list.capacity +| @max(self.list.capacity / 2, 1)));
+        self.list.ensureTotalCapacityPrecise(self.allocator, next) catch {
+            self.allocation_failed = true;
+            return false;
+        };
+        self.growths += 1;
+        return true;
+    }
+
+    fn emit(self: *B2FrameSink, op: draw.Op) bool {
+        if (self.limited or self.allocation_failed) return false;
+        if (!self.room(self.list.items.len + self.reserve + 1)) return false;
+        self.list.appendAssumeCapacity(op);
+        return true;
+    }
+};
+
+const B2FrameResult = struct {
+    written: Written,
+    ops: []const draw.Op,
+    op_limited: bool,
+    allocation_failed: bool,
+    base_truncated: bool,
+    growths: usize,
+};
+
+fn b2BuildStagedWriter(allocator: std.mem.Allocator, props: Props, scratch: Scratch, list: *std.ArrayList(draw.Op), max_ops: usize) !B2FrameResult {
+    if (list.capacity > max_ops) return error.RetainedCapacityExceedsLimit;
+    var base_props = props;
+    base_props.search_marks = null;
+    base_props.diag_marks = null;
+    var stages: B2Stages = .{};
+    var written = buildStaged(base_props, scratch, &stages);
+    const base_truncated = written.truncated;
+    const base_n = written.ops;
+    // @min 의 좁은 정수 추론을 usize 로 넓힌다. 8개 이상일 때 2*n+1 이 넘치던 실험 결함을 고정한다.
+    const sticky_rows: usize = @min(props.sticky.len, @min(stages.visual_budget, sticky_max_rows));
+    const sticky_room: usize = if (sticky_rows == 0) 0 else 2 * sticky_rows + 1;
+    const reserve = base_n + sticky_room;
+    // 상한이 기본 층조차 못 담는 입력은 이 후보의 적용 범위 밖이다. 숨겨서 성공시키지 않는다.
+    if (reserve > max_ops) return error.BaseExceedsLimit;
+    list.clearRetainingCapacity();
+    var sink: B2FrameSink = .{ .allocator = allocator, .list = list, .max_ops = max_ops, .reserve = reserve };
+    if (!sink.room(reserve)) {
+        var truncated = written.truncated;
+        written.ops = paintSticky(props, layoutOf(props), scratch, stages.background, base_n, stages.visual_budget, stages.bytes, stages.runs, &truncated);
+        written.truncated = true;
+        return .{ .written = written, .ops = scratch.ops[0..written.ops], .op_limited = false, .allocation_failed = true, .base_truncated = truncated, .growths = sink.growths };
+    }
+    const visual = scratch.visual_rows[0..written.visual_rows];
+    paintSearchInto(props, layoutOf(props), visual, scratch.count_scratch, &sink);
+    const search_n = list.items.len;
+    paintDiagnosticsInto(props, layoutOf(props), visual, scratch.count_scratch, &sink);
+    const dense_n = list.items.len;
+    // 기본 층의 자리를 이미 예약했으므로 합류할 때 추가 할당이나 실패가 없다.
+    list.appendSliceAssumeCapacity(scratch.ops[0..base_n]);
+    // [search, diagnostic, base] 를 원래 painter 순서로 옮긴다. 가리키는 run/text 는 옮기지 않는다.
+    std.mem.rotate(draw.Op, list.items, dense_n);
+    std.mem.rotate(draw.Op, list.items[stages.search .. base_n + search_n], base_n - stages.search);
+    std.mem.rotate(draw.Op, list.items[stages.diagnostic + search_n ..], base_n - stages.diagnostic);
+    var final_scratch = scratch;
+    final_scratch.ops = list.allocatedSlice()[0..@min(list.capacity, max_ops)];
+    var sticky_truncated = false;
+    written.ops = paintSticky(props, layoutOf(props), final_scratch, stages.background, list.items.len, stages.visual_budget, stages.bytes, stages.runs, &sticky_truncated);
+    list.items.len = written.ops;
+    written.truncated = base_truncated or sticky_truncated or sink.limited or sink.allocation_failed;
+    return .{ .written = written, .ops = list.items, .op_limited = sink.limited, .allocation_failed = sink.allocation_failed, .base_truncated = base_truncated or sticky_truncated, .growths = sink.growths };
+}
+
 /// B2 실험 전용: 호출자가 op 저장소를 유지하고, 부족하면 캐시를 원상복구한 뒤
 /// 큰 저장소로 프레임을 다시 만든다. 제품 경로의 writer나 저장소 정책은 바꾸지 않는다.
 fn b2BuildWithGrowingOps(allocator: std.mem.Allocator, props: Props, base: Scratch, list: *std.ArrayList(draw.Op), max_ops: usize) !struct { written: Written, attempts: usize, allocation_failed: bool } {
@@ -3451,6 +3572,316 @@ fn b2BuildWithGrowingOps(allocator: std.mem.Allocator, props: Props, base: Scrat
         // `max_ops`가 실제 상한이 되도록 정확한 용량으로만 늘린다.
         list.ensureTotalCapacityPrecise(allocator, wanted) catch return .{ .written = w, .attempts = attempts, .allocation_failed = true };
     }
+}
+
+// 각 프레임이 독립 run/text 저장소를 빌려야 출력 비교가 덮어쓰기를 놓치지 않는다.
+fn b2CheckStagedFrame(props_arg: Props) !void {
+    const a = testing.allocator;
+    const expected_ops = try a.alloc(draw.Op, 200000);
+    defer a.free(expected_ops);
+    const stage_ops = try a.alloc(draw.Op, 2560);
+    defer a.free(stage_ops);
+    const expected_runs = try a.alloc(draw.Run, 50000);
+    defer a.free(expected_runs);
+    const actual_runs = try a.alloc(draw.Run, 50000);
+    defer a.free(actual_runs);
+    const expected_text = try a.alloc(u8, 1000000);
+    defer a.free(expected_text);
+    const actual_text = try a.alloc(u8, 1000000);
+    defer a.free(actual_text);
+    const expected_prefix = try a.alloc(u32, props_arg.lines.len + 1);
+    defer a.free(expected_prefix);
+    const actual_prefix = try a.alloc(u32, props_arg.lines.len + 1);
+    defer a.free(actual_prefix);
+    @memset(expected_prefix, 0);
+    @memset(actual_prefix, 0);
+    var expected_cache: RowCache = .{ .prefix = expected_prefix };
+    var actual_cache: RowCache = .{ .prefix = actual_prefix };
+    var expected_buffers: WideBuffers = .{ .ops = expected_ops };
+    var actual_buffers: WideBuffers = .{ .ops = stage_ops };
+    var list: std.ArrayList(draw.Op) = .empty;
+    defer list.deinit(a);
+    var props = props_arg;
+    // cold 와 warm 을 각각 한 번만 진행한다. 캐시를 두 번 걷는 결함을 숨기지 않는다.
+    for (0..2) |iteration| {
+        props.row_cache = &expected_cache;
+        const expected = build(props, expected_buffers.scratch(expected_runs, expected_text));
+        props.row_cache = &actual_cache;
+        const actual = try b2BuildStagedWriter(a, props, actual_buffers.scratch(actual_runs, actual_text), &list, 200000);
+        try testing.expect(!expected.truncated and !actual.written.truncated);
+        try testing.expect(!actual.op_limited and !actual.allocation_failed and !actual.base_truncated);
+        try testing.expect(std.meta.eql(expected, actual.written));
+        try testing.expect(sameOpContent(expected_ops[0..expected.ops], actual.ops));
+        try testing.expectEqual(expected_cache.filled_upto, actual_cache.filled_upto);
+        try testing.expectEqualSlices(u32, expected_prefix[0 .. expected_cache.filled_upto + 1], actual_prefix[0 .. actual_cache.filled_upto + 1]);
+        for (expected_buffers.visual_rows[0..expected.visual_rows], actual_buffers.visual_rows[0..actual.written.visual_rows]) |left, right| try testing.expect(std.meta.eql(left, right));
+        if (iteration == 1) try testing.expectEqual(@as(usize, 0), actual.growths);
+        // 음성 대조군: quad 좌표 한 픽셀도 비교가 잡아야 한다.
+        for (list.items) |*op| {
+            if (op.* != .quad) continue;
+            op.quad.rect.x += 1;
+            try testing.expect(!sameOpContent(expected_ops[0..expected.ops], actual.ops));
+            op.quad.rect.x -= 1;
+            break;
+        }
+    }
+}
+
+test "B2FW1 staged writer 전체 출력 — 랩·가로 이동·sticky·계수 캐시를 한 번만 지난다" {
+    const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 2);
+    var singles: [60]Mark = undefined;
+    for (&singles, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
+    const search = [_][]const Mark{&singles} ** lines.len;
+    const diagnostics = [_]diagnostic.Mark{.{ .start = 0, .len = 120, .level = .err }};
+    const diag_rows = [_][]const diagnostic.Mark{&diagnostics} ** lines.len;
+    const caret = [_]u32{1};
+    const carets = [_][]const u32{&caret} ** lines.len;
+    const selection = [_]Mark{.{ .start = 3, .len = 12 }};
+    const selections = [_][]const Mark{&selection} ** lines.len;
+    const sticky = [_]StickyLine{.{ .number = 1, .bytes = "sticky" }} ** 8;
+    for (0..4) |case| {
+        var props = testProps(&lines, case >= 2);
+        props.search_marks = &search;
+        props.search_current = .{ .line = 3, .start = 4 };
+        props.diag_marks = &diag_rows;
+        props.carets = &carets;
+        props.caret_visible = true;
+        props.selection_marks = &selections;
+        props.visible_rows = 80;
+        props.total_cols = if (case >= 2) 40 else 160;
+        props.rect = .{ .x = 37, .y = 19, .w = @as(u32, props.total_cols) * 8, .h = 80 * 16 };
+        props.content_max_cols = 120;
+        props.first_col = if (case == 1) 21 else 0;
+        props.first_piece = if (case == 3) 1 else 0;
+        if (case == 3) props.sticky = &sticky;
+        try b2CheckStagedFrame(props);
+    }
+}
+
+test "B2FW6 무작위 기본 층 — 유니코드·인레이·위젯·공백·sticky 와 밀집 층의 순서" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0xB2F006);
+    for (0..16) |_| {
+        var props = try budgetDoc(a, prng.random(), false);
+        props.visible_rows = @min(props.visible_rows, 8);
+        props.rect.h = @as(u32, props.visible_rows) * props.cell_h_px;
+        const search = try a.alloc([]const Mark, props.lines.len);
+        const diagnostics = try a.alloc([]const diagnostic.Mark, props.lines.len);
+        for (props.lines, search, diagnostics) |line, *srow, *drow| {
+            const sm = try a.alloc(Mark, 1);
+            sm[0] = .{ .start = 0, .len = @intCast(line.len) };
+            srow.* = sm;
+            const dm = try a.alloc(diagnostic.Mark, 1);
+            dm[0] = .{ .start = 0, .len = @intCast(line.len), .level = .err };
+            drow.* = dm;
+        }
+        props.search_marks = search;
+        props.diag_marks = diagnostics;
+        try b2CheckStagedFrame(props);
+    }
+}
+
+fn b2RoleCount(ops: []const draw.Op, role: tokens.ColorRole) usize {
+    var n: usize = 0;
+    for (ops) |op| if (op == .quad and op.quad.fill_role == role) {
+        n += 1;
+    };
+    return n;
+}
+
+test "B2FW2 상한·성장 OOM — 밀집 검색보다 모든 caret·막대·현재 검색을 먼저 보존한다" {
+    const a = testing.allocator;
+    const lines = [_][]const u8{"x" ** 120} ** 100;
+    var singles: [60]Mark = undefined;
+    for (&singles, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
+    const search = [_][]const Mark{&singles} ** lines.len;
+    const caret = [_]u32{0};
+    const carets = [_][]const u32{&caret} ** lines.len;
+    var props = testProps(&lines, false);
+    props.search_marks = &search;
+    props.search_current = .{ .line = 79, .start = 0 };
+    props.carets = &carets;
+    props.caret_visible = true;
+    props.visible_rows = 80;
+    props.total_cols = 100;
+    props.rect = .{ .x = 0, .y = 0, .w = 800, .h = 1280 };
+    props.content_max_cols = 120;
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const bytes = try a.alloc(u8, 200000);
+    defer a.free(bytes);
+    var ops: [2560]draw.Op = undefined;
+    var base: WideBuffers = .{ .ops = &ops };
+    var list: std.ArrayList(draw.Op) = .empty;
+    defer list.deinit(a);
+    const capped = try b2BuildStagedWriter(a, props, base.scratch(runs, bytes), &list, 2560);
+    try testing.expect(capped.op_limited and capped.written.truncated and !capped.base_truncated);
+    try testing.expectEqual(@as(usize, 80), b2RoleCount(capped.ops, .cursor));
+    try testing.expectEqual(@as(usize, 1), b2RoleCount(capped.ops, .search_match_current));
+    try testing.expect(capped.written.scrollbar != null and capped.written.horizontal_scrollbar != null);
+    try testing.expectEqual(@as(usize, 2), b2RoleCount(capped.ops, scrollbar.thumb_role));
+    try testing.expect(capped.ops.len <= 2560 and list.capacity <= 2560);
+    const held_capacity = list.capacity;
+    var failing = testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const failed = try b2BuildStagedWriter(failing.allocator(), props, base.scratch(runs, bytes), &list, 16000);
+    try testing.expect(failed.allocation_failed and failed.written.truncated and !failed.op_limited);
+    try testing.expectEqual(held_capacity, list.capacity);
+    try testing.expectEqual(@as(usize, 80), b2RoleCount(failed.ops, .cursor));
+    try testing.expectEqual(@as(usize, 1), b2RoleCount(failed.ops, .search_match_current));
+    try testing.expectEqual(@as(usize, 2), b2RoleCount(failed.ops, scrollbar.thumb_role));
+    var empty: std.ArrayList(draw.Op) = .empty;
+    defer empty.deinit(a);
+    var initial_fail = testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const fallback = try b2BuildStagedWriter(initial_fail.allocator(), props, base.scratch(runs, bytes), &empty, 16000);
+    try testing.expect(fallback.allocation_failed and fallback.written.truncated);
+    try testing.expectEqual(@as(usize, 80), b2RoleCount(fallback.ops, .cursor));
+    try testing.expectEqual(@as(usize, 2), b2RoleCount(fallback.ops, scrollbar.thumb_role));
+    try testing.expectError(error.BaseExceedsLimit, b2BuildStagedWriter(a, props, base.scratch(runs, bytes), &empty, 1));
+    try testing.expectError(error.RetainedCapacityExceedsLimit, b2BuildStagedWriter(a, props, base.scratch(runs, bytes), &list, 1));
+    // run 부족은 기본 층의 부족이다. op 전용 상한 신호와 섞이지 않고 재그리기도 없다.
+    var short = base.scratch(runs, bytes);
+    short.runs = short.runs[0..0];
+    const missing_runs = try b2BuildStagedWriter(a, props, short, &list, 16000);
+    try testing.expect(missing_runs.base_truncated and !missing_runs.op_limited and !missing_runs.allocation_failed);
+}
+
+// 프레임 테스트에서만 보이는 실험 창구. 제품 facade 에 새 저장소 API 를 싣지 않는다.
+pub const B2Experiment = if (@import("builtin").is_test) struct {
+    pub const build = b2BuildStagedWriter;
+    pub const sameContent = sameOpContent;
+    pub const checkPanes = b2CheckPanes;
+} else struct {};
+
+fn b2CheckPanes(panes: []const Props, max_ops: usize) !struct { total: usize, peak_capacity: usize } {
+    const a = testing.allocator;
+    const fixed = try a.alloc(draw.Op, max_ops);
+    defer a.free(fixed);
+    const stage = try a.alloc(draw.Op, 2560);
+    defer a.free(stage);
+    const left_runs = try a.alloc(draw.Run, 50000);
+    defer a.free(left_runs);
+    const right_runs = try a.alloc(draw.Run, 50000);
+    defer a.free(right_runs);
+    const left_text = try a.alloc(u8, 1000000);
+    defer a.free(left_text);
+    const right_text = try a.alloc(u8, 1000000);
+    defer a.free(right_text);
+    var expected_buf: WideBuffers = .{ .ops = fixed };
+    var actual_buf: WideBuffers = .{ .ops = stage };
+    var shared: std.ArrayList(draw.Op) = .empty;
+    defer shared.deinit(a);
+    var total: usize = 0;
+    // 세션 공유 후보를 가정해 한 pane 을 소비한 뒤 다음 pane 에 재사용한다. 제품 배선은 아니다.
+    for (panes) |props| {
+        const expected = build(props, expected_buf.scratch(left_runs, left_text));
+        const actual = try b2BuildStagedWriter(a, props, actual_buf.scratch(right_runs, right_text), &shared, max_ops);
+        try testing.expect(!expected.truncated and !actual.written.truncated);
+        try testing.expect(std.meta.eql(expected, actual.written));
+        try testing.expect(sameOpContent(fixed[0..expected.ops], actual.ops));
+        total += actual.ops.len;
+    }
+    try testing.expect(total <= max_ops);
+    return .{ .total = total, .peak_capacity = shared.capacity };
+}
+
+fn b2MeasureStaged(name: []const u8, props: Props) !void {
+    const a = testing.allocator;
+    const fixed = try a.alloc(draw.Op, 200000);
+    defer a.free(fixed);
+    const stage = try a.alloc(draw.Op, 2560);
+    defer a.free(stage);
+    const fixed_runs = try a.alloc(draw.Run, 50000);
+    defer a.free(fixed_runs);
+    const writer_runs = try a.alloc(draw.Run, 50000);
+    defer a.free(writer_runs);
+    const fixed_text = try a.alloc(u8, 1000000);
+    defer a.free(fixed_text);
+    const writer_text = try a.alloc(u8, 1000000);
+    defer a.free(writer_text);
+    var left: WideBuffers = .{ .ops = fixed };
+    var right: WideBuffers = .{ .ops = stage };
+    const baseline = build(props, left.scratch(fixed_runs, fixed_text));
+    var writer: std.ArrayList(draw.Op) = .empty;
+    defer writer.deinit(a);
+    const first = try b2BuildStagedWriter(a, props, right.scratch(writer_runs, writer_text), &writer, 200000);
+    try testing.expect(!baseline.truncated and !first.written.truncated);
+    try testing.expect(std.meta.eql(baseline, first.written));
+    try testing.expect(sameOpContent(fixed[0..baseline.ops], first.ops));
+    var retry: std.ArrayList(draw.Op) = .empty;
+    defer retry.deinit(a);
+    const retry_first = try b2BuildWithGrowingOps(a, props, right.scratch(writer_runs, writer_text), &retry, 200000);
+    try testing.expect(!retry_first.written.truncated);
+    const samples: u64 = 20;
+    var elapsed = [_]u64{0} ** 5;
+    var cold_growths: usize = 0;
+    var cold_attempts: usize = 0;
+    for (0..5) |variant| {
+        const start = b2MonotonicNs();
+        for (0..samples) |_| {
+            switch (variant) {
+                0 => {
+                    const w = build(props, left.scratch(fixed_runs, fixed_text));
+                    std.mem.doNotOptimizeAway(fixed[0..w.ops]);
+                },
+                1 => {
+                    const w = try b2BuildStagedWriter(a, props, right.scratch(writer_runs, writer_text), &writer, 200000);
+                    std.mem.doNotOptimizeAway(w.ops);
+                    try testing.expectEqual(@as(usize, 0), w.growths);
+                },
+                2 => {
+                    var cold: std.ArrayList(draw.Op) = .empty;
+                    defer cold.deinit(a);
+                    const w = try b2BuildStagedWriter(a, props, right.scratch(writer_runs, writer_text), &cold, 200000);
+                    std.mem.doNotOptimizeAway(w.ops);
+                    cold_growths = w.growths;
+                },
+                3 => {
+                    const w = try b2BuildWithGrowingOps(a, props, right.scratch(writer_runs, writer_text), &retry, 200000);
+                    std.mem.doNotOptimizeAway(retry.allocatedSlice()[0..w.written.ops]);
+                },
+                4 => {
+                    var cold: std.ArrayList(draw.Op) = .empty;
+                    defer cold.deinit(a);
+                    try cold.ensureTotalCapacityPrecise(a, 2560);
+                    const w = try b2BuildWithGrowingOps(a, props, right.scratch(writer_runs, writer_text), &cold, 200000);
+                    std.mem.doNotOptimizeAway(cold.allocatedSlice()[0..w.written.ops]);
+                    cold_attempts = w.attempts;
+                },
+                else => unreachable,
+            }
+        }
+        elapsed[variant] = (b2MonotonicNs() - start) / samples / 1000;
+    }
+    std.debug.print("[B2FW full] {s} ops={d} fixed_us={d} staged_warm_us={d} staged_cold_us={d} retry_warm_us={d} retry_cold_us={d} writer_bytes={d} stage_bytes={d} cold_growths={d} retry_calls={d}\n", .{ name, baseline.ops, elapsed[0], elapsed[1], elapsed[2], elapsed[3], elapsed[4], writer.capacity * @sizeOf(draw.Op), stage.len * @sizeOf(draw.Op), cold_growths, cold_attempts });
+}
+
+test "[측정] B2FW3 실제 전체 프레임 — 소형·흩어진 검색·검색과 진단의 cold warm 비교" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const small_lines = [_][]const u8{"ordinary code"} ** 20;
+    var small = testProps(&small_lines, false);
+    small.visible_rows = 20;
+    try b2MeasureStaged("small", small);
+    var marks: [150]Mark = undefined;
+    for (&marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
+    const lines = [_][]const u8{"x" ** 300} ** 200;
+    const search = [_][]const Mark{marks[0..60]} ** 200;
+    var spaced = testProps(&lines, false);
+    spaced.search_marks = &search;
+    spaced.visible_rows = 80;
+    spaced.total_cols = 160;
+    spaced.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
+    try b2MeasureStaged("spaced", spaced);
+    const dense_search = [_][]const Mark{&marks} ** 200;
+    const diag = [_]diagnostic.Mark{.{ .start = 0, .len = 300, .level = .err }};
+    const diag_rows = [_][]const diagnostic.Mark{&diag} ** 200;
+    spaced.search_marks = &dense_search;
+    spaced.diag_marks = &diag_rows;
+    spaced.visible_rows = 200;
+    spaced.total_cols = 320;
+    spaced.rect = .{ .x = 0, .y = 0, .w = 2560, .h = 3200 };
+    try b2MeasureStaged("search+diag", spaced);
 }
 
 test "B2 전체 프레임 재시도 — 저장소 성장과 RowCache 복원이 한 번 그리기와 같다" {

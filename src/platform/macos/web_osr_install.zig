@@ -6,8 +6,9 @@
 //!   그룹·남이 쓸 수 없으며 일반 파일·디렉터리뿐이다(링크·FIFO 없음). 그 위 `Cellar`·rack 은 Homebrew 모델대로 admin 그룹이
 //!   쓸 수 있다(실측) — 그래서 검사와 복제를 **같은 fd** 로 한다: prefix 부터 한 단계씩 열어 쥔 keg 를 검사하고 그 fd 에서
 //!   복제한다(검사 뒤 admin 그룹의 다른 계정이 rack 을 바꿔치기해도 복제는 검사한 것에서 — W7a2 적대 검증 1 차).
-//!   서명은 host·helper 만 `codesign --verify --strict` 로 본다(깨짐을 거른다) — CEF 프레임워크는 배포본 그대로도 strict 검증에
-//!   실패한다(실측 — 사용자 결정 2026-09-29: 프레임워크는 경로·소유권으로만).
+//!   서명은 host·helper 만 `codesign --verify --strict` 로 본다(깨짐을 거른다) — CEF 프레임워크는 배포본 그대로면 strict 검증에
+//!   실패했다(실측 — 사용자 결정 2026-09-29: 프레임워크는 경로·소유권으로만). W7b 부터 brew 설치물은 재서명돼 strict 를
+//!   통과하지만(0.11 초) 이 결정은 그대로다.
 //! - **릴리스 판**: hardened runtime 으로 도는 maru(서명된 dmg)는 `MARU_WEB_OSR_DIR`·`HOMEBREW_PREFIX`·`HOME` 을 무시한다 —
 //!   환경변수로 고른 실행 파일을 띄우면 hardened runtime 의 `DYLD_*` 차단을 우회한다(W7 착수 전 공격). 판정은 빌드 플래그가
 //!   아니라 실행 중인 이 프로세스의 서명 상태(`csops` 의 `CS_RUNTIME`)로 한다 — 빠뜨릴 수 없게. 같은 사용자 권한의 공격자에게는

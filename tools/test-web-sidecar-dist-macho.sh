@@ -1,6 +1,6 @@
 #!/bin/sh
 # `tools/web-sidecar-dist-macho.sh` 자체 시험(W7b) — 그 스크립트는 CEF SDK 가 있어야 도는 `web-sidecar-dist` 안에서만
-# 돌아, 결함이 formula 설치에서야 드러난다. 가짜 설치물(작은 dylib 과 `/usr/bin/true` 사본)로 열한 경우를 본다.
+# 돌아, 결함이 formula 설치에서야 드러난다. 가짜 설치물(작은 dylib 과 `/usr/bin/true` 사본)로 열두 경우를 본다.
 # `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 부른다.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -129,8 +129,15 @@ cc -dynamiclib -o "$root/loader-rpath/Chromium Embedded Framework.framework/Libr
     -install_name ./libvulkan.dylib -Wl,-rpath,@loader_path/../lib -Wl,-rpath,@loader_path/../lib/
 expect fail "풀면 겹치는 @loader_path rpath" "$root/loader-rpath" "libvulkan.dylib 에 rpath 가 있다"
 
+# ⑫ dylib 이 @loader_path 로 다른 dylib 에 링크 — rpath 없는 설치물에서 @ 링크는 모두 멈춘다(자기 ID 만 예외).
+make_dist "$root/at-link"
+fwa="$root/at-link/Chromium Embedded Framework.framework/Libraries"
+cc -dynamiclib -o "$fwa/libvulkan.dylib" "$root/probe.c" "$fwa/libcef_sandbox.dylib" -install_name ./libvulkan.dylib
+install_name_tool -change ./libcef_sandbox.dylib @loader_path/libcef_sandbox.dylib "$fwa/libvulkan.dylib"
+expect fail "dylib 의 @loader_path 링크" "$root/at-link" "시스템 밖 경로 라이브러리 @loader_path/libcef_sandbox.dylib"
+
 if [ "$failures" != 0 ]; then
     echo "web-sidecar-dist-macho 자체 시험: 틀림 $failures 건" >&2
     exit 1
 fi
-echo "web-sidecar-dist-macho 자체 시험: 열한 경우 모두 맞음"
+echo "web-sidecar-dist-macho 자체 시험: 열두 경우 모두 맞음"

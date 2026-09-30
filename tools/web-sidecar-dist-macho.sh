@@ -66,12 +66,14 @@ while IFS= read -r f; do
     # 절대 경로 rpath 를 지우고, `@loader_path`·`@executable_path` 를 풀어 **같은 곳을 가리키는** rpath 도 지운다
     # (`@loader_path/../lib` 와 `@loader_path/../lib/`) — 지우면 그 파일이 고쳐져 번들 봉인이 깨진다(W7b 3 차 적대 검증 실측).
     if otool -l "$f" | grep -q 'cmd LC_RPATH'; then problem "$f 에 rpath 가 있다(설치물은 rpath 없이 경로로 불러온다)"; fi
-    # 링크는 자기 ID 말고 모두 @·/System/·/usr/lib/ 여야 한다(이름만 쓴 링크는 Homebrew 가 @loader_path 로 고친다).
+    # 링크는 자기 ID 말고 모두 /System/·/usr/lib/ 여야 한다 — 이름만 쓴 링크는 Homebrew 가 @loader_path 로 고치고, rpath 가
+    # 없으니 @rpath 링크는 풀리지 않는다(`brew linkage` 도 「rpath 없음」으로 센다). @loader_path·@executable_path 링크도
+    # 지금 설치물에 없다 — 생기면 빌드를 멈춰 다시 본다(W7b 4 차 적대 검증).
     # 탭으로 시작하는 줄만 — universal 이면 아키텍처마다 `경로 (architecture …):` 머리 줄이 끼어든다.
     otool -L "$f" | awk -F'\t' '/^\t/{sub(/ \(compatibility.*/, "", $2); print $2}' | while IFS= read -r dep; do
         [ "$dep" = "$id" ] && continue
         case "$dep" in
-            @* | /System/* | /usr/lib/*) ;;
+            /System/* | /usr/lib/*) ;;
             *) echo "web-sidecar-dist-macho: $f 가 시스템 밖 경로 라이브러리 $dep 에 링크한다" >&2; exit 1 ;;
         esac
     done || fail=1

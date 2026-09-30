@@ -460,7 +460,7 @@ test "modal_box wrap: a short message stays one line; a long one wraps at spaces
     const short = try wrapCols("file corrupt", 40, 10, arena);
     try std.testing.expectEqual(@as(usize, 1), short.len);
     try std.testing.expectEqualStrings("file corrupt", short[0]);
-    const msg = "The Chromium engine could not start. Reinstall it with brew reinstall maru-chromium, then restart maru.";
+    const msg = "The Chromium engine could not start. Reinstall it with brew reinstall ohah/maru/maru-chromium, then restart maru.";
     const lines = try wrapCols(msg, 40, 10, arena);
     try std.testing.expect(lines.len >= 3);
     var joined: std.ArrayList(u8) = .empty;

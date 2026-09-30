@@ -707,7 +707,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     return buildStaged(props, scratch, null);
 }
 
-// B2 실험은 검색·진단 없이 기본 층을 한 번 만들고, 같은 시각 행에 밀집 층을
+// B2 실험은 현재 검색을 포함한 기본 층을 한 번 만들고, 같은 시각 행에 밀집 층을
 // 직접 방출한다. sticky 는 최종 painter 순서가 완성된 뒤 한 번만 적용한다.
 const B2Stages = struct {
     search: usize = 0,
@@ -985,7 +985,12 @@ fn buildStaged(props: Props, scratch: Scratch, stages: ?*B2Stages) Written {
     // 누구도 굶기지 않는다 — 위 `ig_base`).
     const find_base = ig_base + lh_ops + occ_ops + sel_ops;
     const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
-    const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch, &op_truncated);
+    // 실험 staged 경로는 현재 매치를 기본 층에 둔다. 목록 성장에 실패해도
+    // 이미 확보한 scratch 에 현재 검색이 남고, 제품 경로는 기존 두 단계 순서를 유지한다.
+    const find_ops = if (stages != null)
+        paintCurrentSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch, &op_truncated)
+    else
+        paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch, &op_truncated);
 
     // **커서는 검색 위, 막대 앞이다.** 위 예약과 같은 이유로 막대 몫을 남기고, 커서도 줄당 개수에
     // 상한이 없으므로(만 개까지) 남은 자리 안에서만 그린다 — `paintCarets`가 넘으면 자른다.
@@ -1115,7 +1120,7 @@ fn buildStaged(props: Props, scratch: Scratch, stages: ?*B2Stages) Written {
     const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + ig_ops + lh_ops + occ_ops + sel_ops + ws_ops + find_ops + brk_ops + diag_ops + caret_ops + mm_ops + hw.ops;
     const final_ops = if (stages) |stage| blk: {
         stage.* = .{
-            .search = find_base + ig_ops + ws_ops,
+            .search = find_base + ig_ops + ws_ops + find_ops,
             .diagnostic = diag_base + ig_ops + ws_ops,
             .background = bg.ops,
             .bytes = cw.bytes + gw.bytes,
@@ -1962,7 +1967,19 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
     return sink.n;
 }
 
+// 현재 매치를 따로 방출해, 실험 writer 의 기본 층에도 같은 좌표 계산을 쓴다.
+fn paintCurrentSearch(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8, op_truncated: *bool) usize {
+    var sink: FixedMarkSink = .{ .out = out, .truncated = op_truncated };
+    paintCurrentSearchInto(props, layout, visual, scratch_cols, &sink);
+    return sink.n;
+}
+
 fn paintSearchInto(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, scratch_cols: []u8, sink: anytype) void {
+    paintCurrentSearchInto(props, layout, visual, scratch_cols, sink);
+    paintOtherSearchInto(props, layout, visual, scratch_cols, sink);
+}
+
+fn paintCurrentSearchInto(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, scratch_cols: []u8, sink: anytype) void {
     const rows = props.search_marks orelse return;
 
     // ── 1) 현재 매치 먼저 ────────────────────────────────────────────────────
@@ -1999,6 +2016,10 @@ fn paintSearchInto(props: Props, layout: geometry.Layout, visual: []const visual
             }, scratch_cols, sink);
         }
     }
+}
+
+fn paintOtherSearchInto(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, scratch_cols: []u8, sink: anytype) void {
+    const rows = props.search_marks orelse return;
 
     // ── 2) 나머지 ────────────────────────────────────────────────────────────
     //
@@ -3443,7 +3464,7 @@ test "B2 재그리기 반례 — 첫 절단 호출이 RowCache 계수를 전진�
 }
 
 // 전체 프레임 실험 전용. 제품 호출자는 여전히 build 를 쓴다.
-// 기본 층은 호출자의 기존 scratch 에 남고, 밀집 검색·진단만 직접 append 한다.
+// 기본 층은 호출자의 기존 scratch 에 남고, 일반 검색·진단만 직접 append 한다.
 // 매 append 때 기본 층과 sticky 몫을 함께 예약해, 실패해도 caret·막대가 밀집 층에 굶지 않는다.
 const B2FrameSink = struct {
     allocator: std.mem.Allocator,
@@ -3490,7 +3511,6 @@ const B2FrameResult = struct {
 fn b2BuildStagedWriter(allocator: std.mem.Allocator, props: Props, scratch: Scratch, list: *std.ArrayList(draw.Op), max_ops: usize) !B2FrameResult {
     if (list.capacity > max_ops) return error.RetainedCapacityExceedsLimit;
     var base_props = props;
-    base_props.search_marks = null;
     base_props.diag_marks = null;
     var stages: B2Stages = .{};
     var written = buildStaged(base_props, scratch, &stages);
@@ -3511,7 +3531,7 @@ fn b2BuildStagedWriter(allocator: std.mem.Allocator, props: Props, scratch: Scra
         return .{ .written = written, .ops = scratch.ops[0..written.ops], .op_limited = false, .allocation_failed = true, .base_truncated = truncated, .growths = sink.growths };
     }
     const visual = scratch.visual_rows[0..written.visual_rows];
-    paintSearchInto(props, layoutOf(props), visual, scratch.count_scratch, &sink);
+    paintOtherSearchInto(props, layoutOf(props), visual, scratch.count_scratch, &sink);
     const search_n = list.items.len;
     paintDiagnosticsInto(props, layoutOf(props), visual, scratch.count_scratch, &sink);
     const dense_n = list.items.len;
@@ -3743,14 +3763,15 @@ test "B2FW2 상한·OOM — 기본 표시 보존과 현재 검색 보장의 경�
     try testing.expect(fallback.allocation_failed and fallback.written.truncated);
     try testing.expectEqual(@as(usize, 80), b2RoleCount(fallback.ops, .cursor));
     try testing.expectEqual(@as(usize, 2), b2RoleCount(fallback.ops, scrollbar.thumb_role));
-    // 빈 목록의 두 번째 할당(기본 층 예약 직후)이 실패하면 현재 매치도 못 넣는다.
-    // 성장 OOM 전체에 현재 매치 보장을 일반화하지 않고 이 반례를 고정한다.
+    try testing.expectEqual(@as(usize, 1), b2RoleCount(fallback.ops, .search_match_current));
+    // 재현된 반례: 기본 예약 직후 두 번째 할당 실패가 현재 매치를 지웠다.
+    // 현재 매치를 기본 층에서 만들면 이 성장 실패에서도 정확히 한 개가 남는다.
     var second_empty: std.ArrayList(draw.Op) = .empty;
     defer second_empty.deinit(a);
     var second_fail = testing.FailingAllocator.init(a, .{ .fail_index = 1, .resize_fail_index = 0 });
     const before_current = try b2BuildStagedWriter(second_fail.allocator(), props, base.scratch(runs, bytes), &second_empty, 16000);
     try testing.expect(before_current.allocation_failed and before_current.written.truncated);
-    try testing.expectEqual(@as(usize, 0), b2RoleCount(before_current.ops, .search_match_current));
+    try testing.expectEqual(@as(usize, 1), b2RoleCount(before_current.ops, .search_match_current));
     try testing.expectEqual(@as(usize, 80), b2RoleCount(before_current.ops, .cursor));
     try testing.expectEqual(@as(usize, 2), b2RoleCount(before_current.ops, scrollbar.thumb_role));
     try testing.expectError(error.BaseExceedsLimit, b2BuildStagedWriter(a, props, base.scratch(runs, bytes), &empty, 1));
@@ -3760,6 +3781,62 @@ test "B2FW2 상한·OOM — 기본 표시 보존과 현재 검색 보장의 경�
     short.runs = short.runs[0..0];
     const missing_runs = try b2BuildStagedWriter(a, props, short, &list, 16000);
     try testing.expect(missing_runs.base_truncated and !missing_runs.op_limited and !missing_runs.allocation_failed);
+}
+
+test "B2FW8 두 번째 성장 실패 — 랩된 현재 검색의 모든 조각을 기본 층에서 보존한다" {
+    const a = testing.allocator;
+    const lines = [_][]const u8{"x" ** 120} ** 100;
+    const mark = [_]Mark{.{ .start = 0, .len = 120 }};
+    const marks = [_][]const Mark{&mark} ** 100;
+    const caret = [_]u32{0};
+    const carets = [_][]const u32{&caret} ** 100;
+    var props = testProps(&lines, true);
+    props.visible_rows = 80;
+    props.total_cols = 40;
+    props.rect = .{ .x = 0, .y = 0, .w = 320, .h = 1280 };
+    props.search_marks = &marks;
+    props.search_current = .{ .line = 0, .start = 0 };
+    props.carets = &carets;
+    props.caret_visible = true;
+    const fixed_ops = try a.alloc(draw.Op, 16000);
+    defer a.free(fixed_ops);
+    const runs = try a.alloc(draw.Run, 16000);
+    defer a.free(runs);
+    const bytes = try a.alloc(u8, 200000);
+    defer a.free(bytes);
+    const actual_runs = try a.alloc(draw.Run, 16000);
+    defer a.free(actual_runs);
+    const actual_bytes = try a.alloc(u8, 200000);
+    defer a.free(actual_bytes);
+    var expected: WideBuffers = .{ .ops = fixed_ops };
+    const full = build(props, expected.scratch(runs, bytes));
+    try testing.expect(!full.truncated);
+    const expected_current = b2RoleCount(fixed_ops[0..full.ops], .search_match_current);
+    try testing.expectEqual(@as(usize, 4), expected_current);
+    var stage_ops: [2560]draw.Op = undefined;
+    var base: WideBuffers = .{ .ops = &stage_ops };
+    var list: std.ArrayList(draw.Op) = .empty;
+    defer list.deinit(a);
+    var failure = testing.FailingAllocator.init(a, .{ .fail_index = 1, .resize_fail_index = 0 });
+    const partial = try b2BuildStagedWriter(failure.allocator(), props, base.scratch(actual_runs, actual_bytes), &list, 16000);
+    try testing.expect(partial.allocation_failed and partial.written.truncated and !partial.base_truncated);
+    try testing.expectEqual(@as(usize, 1), partial.growths);
+    try testing.expectEqual(expected_current, b2RoleCount(partial.ops, .search_match_current));
+    try testing.expectEqual(b2RoleCount(fixed_ops[0..full.ops], .cursor), b2RoleCount(partial.ops, .cursor));
+    try testing.expectEqual(b2RoleCount(fixed_ops[0..full.ops], scrollbar.thumb_role), b2RoleCount(partial.ops, scrollbar.thumb_role));
+    // 개수만 같고 좌표가 틀린 결과를 막는다. 각 랩 조각의 위치·크기·색도 비교한다.
+    var actual_index: usize = 0;
+    for (fixed_ops[0..full.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .search_match_current) continue;
+        while (actual_index < partial.ops.len) : (actual_index += 1) {
+            const candidate = partial.ops[actual_index];
+            if (candidate == .quad and candidate.quad.fill_role == .search_match_current) break;
+        }
+        try testing.expect(actual_index < partial.ops.len);
+        try testing.expect(std.meta.eql(op.quad, partial.ops[actual_index].quad));
+        actual_index += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), b2RoleCount(partial.ops, .search_match));
 }
 
 // 프레임 테스트에서만 보이는 실험 창구. 제품 facade 에 새 저장소 API 를 싣지 않는다.

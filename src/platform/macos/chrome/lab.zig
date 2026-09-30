@@ -260,6 +260,10 @@ pub const ScenarioId = enum {
     /// 앵커를 모서리 **밖**이 아니라 안쪽 가까이 두는 이유: 밖이면 `anchored_below_workspace` 갈래로
     /// 빠져 다른 계약을 재게 된다. 여기서 재려는 것은 평범한 clamp 다.
     context_menu_bottom_right,
+    /// **한 줄에 안 들어가는 안내(notice).** 제품의 가장 긴 안내(Chromium 엔진 「버전 불일치」)를 기본 폭(480px — 60 칸)
+    /// 창에 띄운다. 한 줄로만 그리던 때는 글자가 박스 오른쪽 밖으로 넘쳐 끝이 안 보였다 — 여기서 재는 것은 「안내가
+    /// 박스 안에서 여러 줄로 나뉘는가, 박스가 그 줄 수만큼 높아지는가」다. 제품과 같은 `notice.view` 를 부른다.
+    notice_wrap,
     /// **설정 드롭다운이 펼쳐진 모습.** 이 컴포넌트에는 Lab 시나리오가 **하나도 없었다** — 같은
     /// `popup_box.place` 를 쓰면서도 세로 정책이 `context_menu` 와 **다른데**(아래 참조) 그 차이를
     /// 보는 그림이 없었다. 여기서 재는 것은 「목록이 control 아래에 차례로 서는가」다.
@@ -436,6 +440,7 @@ pub fn buildFrame(
         .scm_turn_badges => buildScmTurnBadgesFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
+        .notice_wrap => buildNoticeFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
@@ -1660,7 +1665,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .notice_wrap, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1804,6 +1809,31 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
         // 메뉴는 자기 hit-test 를 `itemAt` 으로 한다(트리를 안 쓴다) — 빈 트리를 낸다.
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
         .draws = .{ .layer = chrome.components.context_menu.layer, .ops = ops.items },
+    };
+}
+
+/// 안내(notice) 한 프레임 — 제품과 같은 `notice.view`. 문구는 **제품이 쓰는 그 i18n 키**를 읽는다(Lab 은 `.ko` 고정 —
+/// 리터럴을 새로 지으면 문구가 바뀔 때 캡처만 옛 폭에 머문다).
+fn buildNoticeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    const arena = buffers.arena orelse return .{
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..0] },
+    };
+    var state: chrome.components.notice.State = .{};
+    state.show(maru.i18n.t(.web_osr_version_mismatch));
+    const p: chrome.props.ChromeProps = .{ .metrics = .{
+        .cell_width_px = scenario.cell_w_px,
+        .cell_height_px = scenario.cell_h_px,
+        .sidebar_width_px = 0,
+        .backing_width_px = @intFromFloat(scenario.viewport_px.width),
+        .backing_height_px = @intFromFloat(scenario.viewport_px.height),
+    } };
+    var ops: std.ArrayList(chrome.draw.Op) = .empty;
+    try chrome.components.notice.view(&state, p, tokens, arena, &ops);
+    return .{
+        // 안내는 hit-test 가 없다(키보드 전용) — 빈 트리를 낸다.
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = chrome.components.notice.layer, .ops = ops.items },
     };
 }
 

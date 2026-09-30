@@ -7,6 +7,8 @@
 # **tap 으로만 설치한다** — Homebrew 는 relocation 때 formula 를 짧은 이름으로 다시 불러와 `preserve_rpath` 를 읽는다. 이
 # 파일을 경로로 설치하면(`HOMEBREW_DEVELOPER=1 brew install ….rb`) 못 불러와 `preserve_rpath` 가 조용히 꺼지고, 같은 이름의
 # formula 가 두 tap 에 있으면 relocation 이 멈춘다(W7b 3 차 적대 검증).
+# `--debug-symbols` 로 설치하지 않는다 — Homebrew 가 keg 안 모든 Mach-O 옆에 `dsymutil` 로 `.dSYM` 을 만들어 프레임워크 봉인이
+# 깨지고(test 실패), umask 002 면 그 디렉터리가 g+w 라 maru 가 설치를 거절한다(W7b 4 차 적대 검증 실측).
 #
 # 지키는 것(어기면 maru 가 설치를 거절하거나 엔진이 뜨지 않는다 — W7a2 「sidecar 실행 전 검증」·W7b 실측):
 # - `zig-out/maru-chromium/*` 를 **그대로** `libexec` 에 둔다(maru 는 `opt/maru-chromium/libexec/maru-web-host` 를 찾는다).
@@ -25,7 +27,7 @@ class MaruChromium < Formula
   license all_of: ["MIT", "BSD-3-Clause", "LGPL-2.1-or-later"]
 
   # zig 는 minor 마다 빌드 API 가 깨진다 — maru 가 쓰는 판에 고정한다(0.17 이 나오면 `zig@0.16` 이 따로 남는다). 지금은
-  # `zig` 의 별칭이라 `brew audit` 가 정식 이름을 쓰라고 경고한다 — 고정을 위해 받아들인다.
+  # `zig` 의 별칭이다 — `brew audit` 의 별칭 검사는 homebrew/core 에만 걸려 이 tap 에서는 조용하다(`--strict` 실측).
   depends_on "zig@0.16" => :build
   # CEF 154 프레임워크의 최소 macOS 가 13.0 이다(Mach-O minos 실측) — 더 낮으면 설치는 돼도 엔진이 뜨지 않는다.
   depends_on macos: :ventura

@@ -347,7 +347,8 @@ var install_prefix_buf: [512]u8 = undefined;
 var install_prefix_len: usize = 0;
 
 /// `maru-chromium` formula 설치 위치 후보(`$(brew --prefix)/opt/maru-chromium/libexec` — 계획 문서 「배포·배치」).
-/// `HOMEBREW_PREFIX` 가 있으면 그 prefix 를 먼저 본다(brew shellenv 가 세운다 — 스모크도 이것으로 가짜 설치를 가리킨다).
+/// 개발 판은 `HOMEBREW_PREFIX` 가 있으면 그 prefix 를 먼저 본다(brew shellenv 가 세운다 — 스모크도 이것으로 가짜 설치를 가리킨다).
+/// 릴리스 판(hardened runtime)은 이 두 후보만 본다(W7a2 — `findInstallFor`).
 const install_candidates = [_][]const u8{
     "/opt/homebrew",
     "/usr/local",
@@ -444,17 +445,20 @@ test "a rejected install shows a version notice only for a control-channel misma
     try std.testing.expectEqual(Notice.start_failed, rejectedNotice(.clone_failed));
 }
 
-/// 시험용 실행 사본 — 임시 디렉터리(파일 하나)를 그 아래 `cache` 로 복제한다.
+/// 시험용 실행 사본 — 임시 디렉터리(빈 `src`)를 그 아래 `cache` 로 복제한다. 뿌리는 처음 한 번만 만든다(부를 때마다 만들면
+/// `cleanup` 이 마지막 것만 지워 남았다 — W7a2 4 차 적대 검증).
 const TestCopy = struct {
     root_buf: [std.fs.max_path_bytes]u8 = undefined,
     root: []const u8 = "",
 
     fn make(self: *TestCopy) !install.RunCopy {
-        const tmp_base = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
-        var template_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const template = try std.fmt.bufPrintZ(&template_buf, "{s}/maru-runcopy-{d}-XXXXXX", .{ if (tmp_base.len > 0 and tmp_base[0] == '/') tmp_base else "/tmp", std.c.getpid() });
-        const made = mkdtemp(template.ptr) orelse return error.NoTemp;
-        self.root = std.mem.span(std.c.realpath(made, &self.root_buf) orelse return error.NoTemp);
+        if (self.root.len == 0) {
+            const tmp_base = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
+            var template_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const template = try std.fmt.bufPrintZ(&template_buf, "{s}/maru-runcopy-{d}-XXXXXX", .{ if (tmp_base.len > 0 and tmp_base[0] == '/') tmp_base else "/tmp", std.c.getpid() });
+            const made = mkdtemp(template.ptr) orelse return error.NoTemp;
+            self.root = std.mem.span(std.c.realpath(made, &self.root_buf) orelse return error.NoTemp);
+        }
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
         const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{self.root});
         try std.testing.expect(mkdirs(src));
@@ -475,6 +479,7 @@ const TestCopy = struct {
     }
 
     fn cleanup(self: *const TestCopy) void {
+        if (self.root.len == 0) return;
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         for ([_][]const u8{ "/src", "/cache", "" }) |rel| {
             if (std.fmt.bufPrintZ(&buf, "{s}{s}", .{ self.root, rel })) |d| _ = std.c.rmdir(d) else |_| {}

@@ -4543,3 +4543,22 @@ test "DCOL14: tick 전 IME marked와 직접 commit도 지난 비교 상자를 �
         try testing.expect(!fx.session.chrome_host.find.open);
     }
 }
+
+test "DCOL15: 좁아져 숨은 비교 찾기는 보이지 않는 키와 IME 포커스를 잡지 않는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("aa\n", "bb\n");
+    try findPairFixture(&fx, &entry);
+    try findQuery(&fx, "bb");
+    const right = &fx.term.rt.editor_diff_find_right;
+    right.w = 32;
+    find_ops.syncDiffFind(fx.session);
+    try testing.expect(!fx.session.chrome_host.find.input_focused);
+    try testing.expect(!fx.session.anyModalOverlayOpen());
+    try testing.expectEqualStrings("bb", fx.session.chrome_host.find.input.query.items);
+    right.w = 440;
+    find_ops.toggleFind(fx.session);
+    try testing.expect(fx.session.chrome_host.find.input_focused);
+    try testing.expectEqualStrings("bb", fx.session.chrome_host.find.input.query.items);
+}

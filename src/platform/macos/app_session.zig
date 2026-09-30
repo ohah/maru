@@ -10950,6 +10950,7 @@ pub const AppSession = struct {
     }
 
     pub fn dispatchAppAction(self: *AppSession, action: config_mod.Action) void {
+        find_ops.syncDiffFind(self);
         switch (action) {
             .new_tab => if (!self.tabsBlocked()) {
                 _ = tab_ops.newTab(self) catch return;
@@ -13311,6 +13312,8 @@ pub const AppSession = struct {
     }
 
     pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
+        // 탭 전환과 다음 tick 사이에도 입력은 들어온다. 지난 비교 상자가 새 입력을 잡지 않게 한다.
+        find_ops.syncDiffFind(self);
         // Swift/AppKit는 normalized key event만 전달한다. app-vs-terminal 판정과 PTY
         // write는 기존 FrameLoop 경계를 통과해야 smoke와 제품 app이 같은 shortcut 정책을 쓴다.
         self.total_key_events += 1;
@@ -14415,6 +14418,7 @@ pub const AppSession = struct {
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (sidebar_ops.activateRecoveredRowBeforeInitialSurface(self, kind, x_px, y_px, button)) return;
         if (!self.surface_initialized) return;
+        find_ops.syncDiffFind(self);
         // 호버 박스(tooling §8.2b): 상자 밖 눌림은 닫고 **흘려보낸다**, 상자 안은 삼킨다. 모달 게이트보다 앞이어도 무해하다 —
         // 모달이 열리는 순간 `refresh` 가 상자를 내리므로 둘이 함께 있는 프레임이 없다.
         if (kind == 1 and editor_ops.completion_client.mouseDown(self, x_px, y_px)) return; // §8.2g — 상자 안 클릭은 그 행을 고르고, 밖은 닫는다

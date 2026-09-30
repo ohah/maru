@@ -32,6 +32,7 @@ const term_ops = @import("term.zig");
 const barMetrics = app_session_mod.barMetrics;
 const pane_ops = @import("pane.zig");
 const editor_ops = @import("editor.zig");
+const find_ops = @import("find.zig");
 const editor_completion = @import("editor_completion.zig");
 const settings_ops = @import("settings.zig");
 const shouldReplayAfterCommit = AppSession.shouldReplayAfterCommit;
@@ -320,6 +321,8 @@ pub fn keyHintCancel(self: *AppSession) keyhint_hold.Action {
 /// 활성 입력 대상의 IME 조합(marked) 텍스트를 교체한다(빈 bytes=해제). inputFocus 단일 출처로 분기 — exhaustive
 /// switch라 입력 대상 추가 시 컴파일러가 누락을 막는다.
 pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
+    // marked/commit은 keyDown 없이도 도착한다. tick보다 먼저 입력 소유자를 정산한다.
+    find_ops.syncDiffFind(self);
     // 이미 terminal composition이 시작됐으면 current UI focus보다 pin이 우선한다. palette/settings 등
     // 다른 owner가 먼저 열려도 AppKit의 후속 clear/commit이 새 owner로 새지 않게 원 Surface에서 끝낸다.
     if (self.ime_terminal_target_id != null or self.inputFocus() == .terminal) {
@@ -765,6 +768,7 @@ pub fn routeCommittedText(self: *AppSession, bytes: []const u8) void {
 /// routeCommittedText와 같은 부작용을 수행하되, 터미널 ordered queue가 bytes를 실제로
 /// 수락했는지를 돌려준다. imeEnd는 false일 때 replay key까지 억제해 반쪽 transaction을 막는다.
 pub fn routeCommittedTextAccepted(self: *AppSession, bytes: []const u8) bool {
+    find_ops.syncDiffFind(self);
     // 진행 중 terminal transaction의 insertText는 UI focus가 먼저 바뀌었어도 pin된 원 target으로 간다.
     const focus: InputFocus = if (self.ime_terminal_target_id != null) .terminal else self.inputFocus();
     if (focus == .file_tree) return true; // tree focus에서 평문/IME가 뒤 PTY로 새지 않는다.

@@ -11302,7 +11302,9 @@ pub const Client = struct {
         /// Host가 accepted response를 전량 보낸 뒤 이 connection을 닫는다. 이후 status/attach는 새 connection이어야 한다.
         accepted_reconnect_required,
         completed: upgrade_wire.AttemptReport,
-        rejected,
+        /// typed 오류로 거절했다. 코드를 버리면 `upgrade_busy`(attachment 가 남음)와 `attempt_conflict`(다른
+        /// attempt 가 진행 중)가 한 이름이 되고, 뒤쪽은 교체 도중인 host 라 호출자의 다음 행동이 달라야 한다.
+        rejected: protocol.ErrorCode,
     };
 
     pub fn prepareUpgrade(self: *Client, request: upgrade_wire.PrepareRequest) ClientError!PrepareUpgradeOutcome {
@@ -11332,7 +11334,7 @@ pub const Client = struct {
                 return .accepted_reconnect_required;
             },
             .completed => |report| .{ .completed = report },
-            .rejected => .rejected,
+            .rejected => |code| .{ .rejected = code },
             .malformed => {
                 self.poison(.peer_contract_violation);
                 return error.ProtocolError;
@@ -21636,7 +21638,7 @@ fn parseStringFieldAlloc(
 const PrepareResponse = union(enum) {
     accepted,
     completed: upgrade_wire.AttemptReport,
-    rejected,
+    rejected: protocol.ErrorCode,
     malformed,
 };
 
@@ -21647,7 +21649,13 @@ fn parsePrepareUpgradeResponse(payload: []const u8, expected_attempt_id: u128) P
         .object => |value| value,
         else => return .malformed,
     };
-    if (root.get("error") != null) return if (responseObjectHasTypedError(root)) .rejected else .malformed;
+    if (root.get("error")) |error_value| {
+        const error_name = switch (error_value) {
+            .string => |value| value,
+            else => return .malformed,
+        };
+        return if (protocol.ErrorCode.fromWireName(error_name)) |code| .{ .rejected = code } else .malformed;
+    }
     const result = switch (root.get("result") orelse return .malformed) {
         .object => |value| value,
         else => return .malformed,

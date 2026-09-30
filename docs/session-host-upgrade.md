@@ -17,11 +17,12 @@
 > **스캔은 결과를 보고 다음 후보로 간다(2026-09-30).** 예전엔 prepare를 한 번 보내면 결과와 무관하게 끝냈는데,
 > 9/27 빌드 host가 매니페스트 ctime 결함으로 교체가 매번 `resumed/handoff_failed`로 끝나면서 readdir 순서상 늘 첫
 > 후보였다 — 스캔이 거기서 끝나 9/28·9/29 빌드 host 둘은 한 번도 시도받지 못했고, 설치마다 새 host가 하나씩 늘어
-> 넷이 됐다. 이제 `resumed`(exec 전에 되돌아가 옛 이미지로 serving 재개)와 `rejected`(accepted 전 거절, 부수효과
-> 없음)만 다음 후보로 넘어가고, 교체 중·상태 불확실(`pending`·exec 뒤 `rolled_back`·`failed_nonretryable`·transport
-> 오류·재연결/조회 실패)은 예전처럼 멈춘다. 한 시작에서 prepare는 최대 3개, 둘째부터는 스캔 경과가 pause 예산(5 s)
-> 미만일 때만 보낸다 — 늘어나는 시작 지연은 최악이어도 느린 시도 하나분이다. 판정은 `upgrade_scan_policy.zig`(PR의
-> check-boundaries에서 도는 std-only leaf)가, 루프 배선은 `tests/upgrade_scan_policy_wiring_boundary.zig`가 잰다.
+> 넷이 됐다. 이제 `resumed`(exec 전에 되돌아가 옛 이미지로 serving 재개)와 accepted 전 typed 거절(부수효과 없음,
+> 단 `attempt_conflict` 제외)만 다음 후보로 넘어가고, 교체 중·상태 불확실(`attempt_conflict`·`pending`·exec 뒤
+> `rolled_back`·`failed_nonretryable`·transport 오류·재연결/조회 실패)은 예전처럼 멈춘다. 후보는 매니페스트가
+> **마지막으로 게시된** 때(birth time)가 오래된 순으로 시도해, 설치마다 옛 host 하나씩 돌아가며 교체된다. 한 시작에서
+> prepare는 최대 3개, 둘째부터는 스캔 경과가 pause 예산(5 s) 미만일 때만 보낸다. 판정·순서는 `upgrade_scan_policy.zig`
+> (PR의 check-boundaries에서 도는 std-only leaf)가, 루프 배선은 `tests/upgrade_scan_policy_wiring_boundary.zig`가 잰다.
 > **재연결 성공만으로 채택하지 않는다** — host가 accepted를 보내고도 exec에 실패해 rollback하면 같은 `host_id`로
 > 재연결은 성공하지만 이미지는 옛것 그대로다. 그 연결을 채택하면 GUI가 host-backed로 믿고 `runtime.spawn`을 걸었다가
 > 옛 host가 모르는 capability(`runtime_core_command_v1`)로 실패해 모든 터미널이 in-process로 떨어진다 —
@@ -310,7 +311,9 @@ adapter로 정상 attach하고, 마지막 attachment가 떨어진 뒤 다시 시
 | prepare 결과 | 다음 | 이유 |
 |---|---|---|
 | accepted → 재연결 → target build 확인(`upgraded`) | 멈춤(채택) | 교체 성공 |
-| `rejected`(`upgrade_busy`) | 다음 후보 | accepted 전 거절 — host 상태 불변, client 영향 없음 |
+| `rejected`: `upgrade_busy` | 다음 후보 | accepted 전 거절(attachment 남음) — host 상태 불변, client 영향 없음 |
+| `rejected`: `attempt_conflict` | 멈춤 | **다른 attempt 가 그 host 에서 진행 중** — 교체 도중인 host 다 |
+| `rejected`: 그 밖(`upgrade_unsupported`·`invalid_target`·`resource_exhausted` 등) | 다음 후보 | accepted 전 거절 — host 상태 불변 |
 | completed·재연결 보고 `resumed` | 다음 후보 | exec 전에 되돌아가 옛 이미지로 serving 재개 |
 | completed·재연결 보고 `committed` | 멈춤 | 성공 경로(재연결로 채택) |
 | `pending` | 멈춤 | 아직 진행 중 |
@@ -321,8 +324,25 @@ adapter로 정상 attach하고, 마지막 attachment가 떨어진 뒤 다시 시
 
 상한: prepare는 한 시작에 최대 3개(실측된 구 host 수), 첫 prepare는 항상 보내고 둘째부터는 스캔 경과가 pause 예산
 (5 s) 미만일 때만 보낸다. `resumed`로 끝나는 보통 실패는 약 1 s라 이 안에 들고, 한 시도가 pause 예산을 다 쓰거나
-재연결이 길어지면(최대 약 10 s) 그 뒤로는 멈추므로 늘어나는 시작 지연은 최악이어도 느린 시도 하나분이다. 여러 시작에
-걸쳐 확정 실패 host를 뒤로 미루는 우선순위는 두지 않았다 — 실패 기록을 디스크에 둬야 해서 이 수정의 범위 밖이다.
+재연결이 길어지면(최대 약 10 s) 그 뒤로는 멈추므로 늘어나는 시작 지연은 최악이어도 느린 시도 하나분이다. 상한에 걸려
+스캔을 끝내면 `session host upgrade scan bound reached: tried= skipped= next_host=` 를 남긴다.
+
+**메인 스레드 정지 상한.** 스캔은 `AppSession.init` → `ensureRemoteBackend` 에서 동기로 돈다(창이 뜨기 전). 느린 시도
+하나는 hello 5 s + prepare 응답 5 s + 재연결 최대 10 s + status 조회 5 s ≈ 25 s 다. 예전(prepare 하나)의 최악이 약
+25 s 였고, 이제는 「둘째부터는 경과 5 s 미만일 때만」이라 최악이 5 s + 느린 시도 하나 ≈ 30 s 다. 보통의 `resumed`
+실패는 약 1 s 라 옛 host 둘셋을 지나쳐도 몇 초에 그친다.
+
+**수렴 — 공정 순서.** 스캔은 교체 하나에 성공하면 멈춘다(연쇄 exec 방지). 그래서 시도 순서가 고정이면 매 설치가
+같은 host 만 바꾸고 나머지는 영영 옛 이미지로 남는다. 후보는 매니페스트 파일의 **birth time 이 오래된 순**(같으면
+`host_id`, 못 읽으면 맨 앞)으로 시도한다(`upgrade_scan_policy.orderByPublication`). 게시(`publish`·`republish` 의
+`writeAtomic`)는 언제나 새 파일을 만들어 rename 하므로 birth time 이 게시 시각이 되고, tmp 정리를 피하는 주기적
+touch(`futimens`·`utimensat`)는 mtime·ctime 만 바꾼다. **mtime 은 이 목적에 쓸 수 없다** — 교체된 적 없는 host 는
+한 시간마다 자기 매니페스트를 찍어 mtime 이 늘 새것이고, 교체된 host(승계 루프는 찍지 않는다)는 mtime 이 교체
+시각에 머물러, mtime 순이면 방금 교체한 host 가 다음 설치에서 오히려 맨 앞에 와 같은 host 만 반복된다. birth time
+순이면 교체된 host 가 맨 뒤로 가 **설치마다 옛 host 하나씩 돌아가며** 교체되고, 늘 실패하는 host(2026-09-30 의 9/27
+host 는 게시 전에 실패해 birth time 이 그대로라 늘 맨 앞이다)는 `resumed` 로 지나친다 — 그 비용은 설치마다 약 1 s
+와 prepare 한 칸이다. 같은 빌드 host 가 이미 있으면 스캔 자체를 건너뛰므로(§상태 블록) 교체는 설치(새 빌드)마다
+한 번 일어난다.
 
 connect-or-launch 결과는 최종 `Client`와 별개인 bounded `UpgradeNotice`를 함께 돌려준다. 알림 칸은 하나다. 스캔이
 어떤 host를 교체했으면 그 `upgraded`가, 멈춘 host가 있으면 그 host의 결과가, 다음 후보로 넘어가기만 하다 끝났으면
@@ -331,6 +351,8 @@ connect-or-launch 결과는 최종 `Client`와 별개인 bounded `UpgradeNotice`
 
 - `upgraded`: accepted 뒤 same `host_id`, target build와 증가한 epoch를 재검증한 연결을 채택했다.
 - `upgrade_busy`: prepare가 attachment/connection 권위 때문에 rejected되어 side-by-side current host를 사용한다.
+- `upgrade_rejected`: `upgrade_busy` 가 아닌 typed 오류(`attempt_conflict`·`upgrade_unsupported`·`invalid_target`·
+  `resource_exhausted` 등)로 rejected됐다. 오류 이름을 그대로 남겨(`error=`) 모두 `upgrade_busy` 로 뭉개지 않는다.
 - `legacy_unavailable`: 호환 host가 `host_exec_upgrade_v1`을 광고하지 않아 기존 host를 건드리지 않고 side-by-side current
   host를 사용한다.
 - `upgrade_failed`: accepted/completed 뒤 rollback·resume·nonretryable status, status 조회 실패 또는 bounded reconnect 실패로

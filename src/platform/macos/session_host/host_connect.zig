@@ -91,6 +91,11 @@ pub const UpgradeFailure = union(enum) {
 pub const UpgradeNotice = union(enum) {
     upgraded: u128,
     upgrade_busy: u128,
+    /// `upgrade_busy` 가 아닌 typed 거절(`attempt_conflict`·`upgrade_unsupported`·`invalid_target` 등).
+    upgrade_rejected: struct {
+        host_id: u128,
+        code: protocol.ErrorCode,
+    },
     legacy_unavailable: u128,
     upgrade_failed: struct {
         host_id: u128,
@@ -101,6 +106,11 @@ pub const UpgradeNotice = union(enum) {
         return switch (self) {
             .upgraded => |host_id| std.fmt.bufPrint(buf, "result=upgraded host={x:0>32}", .{host_id}),
             .upgrade_busy => |host_id| std.fmt.bufPrint(buf, "result=upgrade_busy host={x:0>32}", .{host_id}),
+            .upgrade_rejected => |rejected| std.fmt.bufPrint(
+                buf,
+                "result=upgrade_rejected host={x:0>32} error={s}",
+                .{ rejected.host_id, rejected.code.wireName() },
+            ),
             .legacy_unavailable => |host_id| std.fmt.bufPrint(buf, "result=legacy_unavailable host={x:0>32}", .{host_id}),
             .upgrade_failed => |failed| switch (failed.failure) {
                 .report => |report| std.fmt.bufPrint(
@@ -454,10 +464,10 @@ fn tryUpgradeExistingHost(
     const directory = c.opendir(hosts_root.ptr) orelse return .none;
     defer _ = c.closedir(directory);
     var legacy_notice: ?UpgradeNotice = null;
-    // 결과를 보고 다음 후보로 넘어갈지 가른다(`upgrade_scan_policy`). 예전엔 prepare 를 한 번 보내면 결과와 무관하게
-    // 끝냈는데, 확정적으로 실패하는 host 하나가 readdir 순서상 늘 먼저 걸려 나머지 host 전부를 영구히 막았다
-    // (2026-09-30 실측: 9/27 host 가 매번 resumed/handoff_failed → 9/28·9/29 host 는 한 번도 시도받지 못함).
-    var scan: UpgradeScan = .{ .started_ms = monotonicMsForMeasure() };
+    // 1) 후보를 먼저 모은다. 스캔은 교체 하나에 성공하면 멈추므로 **시도 순서가 곧 공정성**이다 — readdir 순서
+    //    그대로면 매 설치가 같은 host 만 바꾸고 뒤의 host 는 영영 옛 이미지로 남는다(`upgrade_scan_policy`).
+    var candidates: [max_upgrade_scan_candidates]upgrade_scan_policy.Candidate = undefined;
+    var candidate_count: usize = 0;
     while (c.readdir(directory)) |entry| {
         const name = std.mem.sliceTo(entry.name[0..], 0);
         if (name.len != 32) continue;
@@ -481,8 +491,34 @@ fn tryUpgradeExistingHost(
                 });
             continue;
         }
+        if (candidate_count == candidates.len) {
+            if (!builtin.is_test)
+                std.log.info("session host upgrade candidate dropped: host={x:0>32} (scan holds {d})", .{ host_id, candidates.len });
+            continue;
+        }
+        candidates[candidate_count] = .{ .host_id = host_id, .published_ns = manifestPublishedNs(session_dir, host_id) };
+        candidate_count += 1;
+    }
+    // 2) 마지막 게시가 오래된 host 부터(매니페스트 birth time — 게시는 새 파일을 rename 하고, tmp 정리용 touch 는
+    //    birth time 을 두지 않는다). 방금 교체된 host 는 새로 게시돼 맨 뒤로 가므로 설치마다 다른 host 가 교체된다.
+    upgrade_scan_policy.orderByPublication(candidates[0..candidate_count]);
+
+    // 3) 결과를 보고 다음 후보로 넘어갈지 가른다. 예전엔 prepare 를 한 번 보내면 결과와 무관하게 끝냈는데, 확정적으로
+    //    실패하는 host 하나가 늘 먼저 걸려 나머지 host 전부를 영구히 막았다(2026-09-30 실측: 9/27 host 가 매번
+    //    resumed/handoff_failed → 9/28·9/29 host 는 한 번도 시도받지 못함).
+    var scan: UpgradeScan = .{ .started_ms = monotonicMsForMeasure() };
+    for (candidates[0..candidate_count], 0..) |candidate, candidate_index| {
+        const host_id = candidate.host_id;
         // 첫 prepare 는 예전처럼 항상 보낸다. 그 뒤는 횟수·경과 상한 안에서만 — 시작 지연을 느린 시도 하나분으로 묶는다.
-        if (!scan.mayPrepareNow(monotonicMsForMeasure())) break;
+        if (!scan.mayPrepareNow(monotonicMsForMeasure())) {
+            if (!builtin.is_test)
+                std.log.info("session host upgrade scan bound reached: tried={d} skipped={d} next_host={x:0>32}", .{
+                    scan.sent,
+                    candidate_count - candidate_index,
+                    host_id,
+                });
+            break;
+        }
 
         var client = switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
             .connected => |connected| connected,
@@ -545,25 +581,53 @@ fn tryUpgradeExistingHost(
                 logUpgradeNotice(notice);
                 if (settleUpgrade(&scan, .{ .completed = report.status }, .{ .failed = notice })) |done| return done;
             },
-            // 거절에는 이유가 실려 오지 않는다(문서 §240: 다른 attachment가 남아 있으면 거절). 적어도 "거절당했다"는
-            // 사실은 남겨, 조용한 폴백과 구분되게 한다. accepted 전의 거절이라 이 host 는 손대지 않은 그대로다.
-            .rejected => {
-                const notice: UpgradeNotice = .{ .upgrade_busy = host_id };
+            // typed 거절 — accepted 전이라 이 host 는 손대지 않은 그대로다. 단 `attempt_conflict` 는 **다른 attempt 가
+            // 그 host 에서 진행 중**이라는 뜻이라 멈춘다. 코드를 이름에 남겨 `upgrade_busy` 하나로 뭉개지 않는다.
+            .rejected => |code| {
+                const notice: UpgradeNotice = if (code == .upgrade_busy)
+                    .{ .upgrade_busy = host_id }
+                else
+                    .{ .upgrade_rejected = .{ .host_id = host_id, .code = code } };
                 logUpgradeNotice(notice);
-                if (settleUpgrade(&scan, .rejected, .{ .failed = notice })) |done| return done;
+                if (settleUpgrade(&scan, rejectedResolution(code), .{ .failed = notice })) |done| return done;
             },
         }
     }
+    // capability 없는 host 는 알림 칸을 넘긴 실패에 내주더라도 로그에는 언제나 남긴다.
+    if (legacy_notice) |notice| logUpgradeNotice(notice);
     // 다음 후보로 넘어가며 기억한 첫 실패 — 로그는 이미 남았고, UI 알림으로 돌려준다.
     if (scan.skipped) |notice| return .{ .fallback = notice };
-    if (legacy_notice) |notice| {
-        logUpgradeNotice(notice);
-        return .{ .fallback = notice };
-    }
+    if (legacy_notice) |notice| return .{ .fallback = notice };
     return .none;
 }
 
 const UpgradeScan = upgrade_scan_policy.Scan(UpgradeNotice);
+
+/// 한 번의 스캔이 붙드는 후보 수. 실측된 host 는 넷이고, 넘치면 그 host 는 이번 스캔에서 빠진다(로그로 남긴다).
+const max_upgrade_scan_candidates: usize = 64;
+
+/// 매니페스트가 **마지막으로 게시된** 시각(birth time, ns). 게시는 새 파일을 만들어 rename 하므로 birth time 이
+/// 바뀌고, tmp 정리용 주기 touch 는 mtime·ctime 만 바꾼다. 못 읽으면 `null`(공정 순서에서 맨 앞).
+fn manifestPublishedNs(session_dir: [:0]const u8, host_id: u128) ?i128 {
+    var path_buf: [832]u8 = undefined;
+    const path = host_manifest.manifestPathIn(&path_buf, session_dir, host_id) catch return null;
+    const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (fd < 0) return null;
+    defer _ = c.close(fd);
+    var stat: posix.Stat = undefined;
+    if (c.fstat(fd, &stat) != 0) return null;
+    const birth = stat.birthtime();
+    return @as(i128, birth.sec) * std.time.ns_per_s + birth.nsec;
+}
+
+/// typed 거절 코드 → 스캔 판정 입력. `attempt_conflict` 만 「교체 도중인 host」다.
+fn rejectedResolution(code: protocol.ErrorCode) upgrade_scan_policy.Resolution {
+    return switch (code) {
+        .upgrade_busy => .rejected_busy,
+        .attempt_conflict => .rejected_conflict,
+        else => .rejected_other,
+    };
+}
 
 /// 한 후보의 prepare 결과를 정산한다. 교체 성공이면 그 연결을, 멈춰야 하면 그 실패 알림을 돌려주고, 다음 후보로
 /// 가도 되면 `null`(첫 실패는 `scan.skipped` 에 남는다).
@@ -587,7 +651,7 @@ fn resolutionAfterReconnect(result: UpgradeReconnect) upgrade_scan_policy.Resolu
                 .report => |report| .{ .reconnected_old_image = report.status },
                 .reconnect, .local => .unresolved,
             },
-            .upgraded, .upgrade_busy, .legacy_unavailable => .unresolved,
+            .upgraded, .upgrade_busy, .upgrade_rejected, .legacy_unavailable => .unresolved,
         },
     };
 }

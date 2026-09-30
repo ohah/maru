@@ -5974,8 +5974,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"업그레이드 스캔"},
         });
         const run_scan_policy_tests = b.addRunArtifact(scan_policy_tests);
-        run_scan_policy_tests.addArg("--maru-expect-tests=3");
-        run_scan_policy_tests.addArg("--maru-expect-passed=3");
+        run_scan_policy_tests.addArg("--maru-expect-tests=4");
+        run_scan_policy_tests.addArg("--maru-expect-passed=4");
         upgrade_scan_policy_step.dependOn(&run_scan_policy_tests.step);
     }
     const scan_policy_wiring_tests = addProjectTest(b, .{

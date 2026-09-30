@@ -892,6 +892,14 @@ pub fn build(b: *std.Build) void {
         test_entitlements_check_step.dependOn(&run_entitlements_check.step);
         macos_only_test_step.dependOn(&run_entitlements_check.step);
 
+        // W7b: `maru-chromium` 설치물의 Mach-O 를 Homebrew 가 고칠 것이 없는 모양으로 맞추는 스크립트(`web-sidecar-dist` 안 —
+        // CEF SDK 가 있어야 돈다)를 가짜 dylib 으로 macOS CI 에서 시험한다.
+        const test_dist_macho_step = b.step("test-web-sidecar-dist-macho", "Self-test tools/web-sidecar-dist-macho.sh with small fake dylibs");
+        const run_dist_macho = b.addSystemCommand(&.{ "/bin/sh", "tools/test-web-sidecar-dist-macho.sh" });
+        run_dist_macho.setCwd(b.path("."));
+        test_dist_macho_step.dependOn(&run_dist_macho.step);
+        macos_only_test_step.dependOn(&run_dist_macho.step);
+
         // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하고,
         // RendererState/GlyphFrame에서 온 atlas slot/UV/raster bytes를 제품 atlas texture
         // shader sampling까지 연결한다. 현재 입력은 실제 TerminalCore text가 아니라 CoreText

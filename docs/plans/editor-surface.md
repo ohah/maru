@@ -4,6 +4,11 @@ E0.5A~E4 단계와 각 단계의 종료 gate다. 계약은 [에디터 Surface](.
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§3.5`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1·§2·§4·§5·§10·§11 [editor-surface.md](../editor-surface.md) · §3~§3.4 [권장 구조](../editor-surface-structure.md) · §3.5 [도크 소스 컨트롤 뷰](../editor-surface-dock.md) · §6~§8 [diff·빌드·LSP](../editor-surface-tooling.md) · §9 이 문서
 
+**현재 읽는 법(2026-09-30).** E0.5/E1의 CM6·WebKit 기록과 E2~E4의 종료 조건을 보존한 문서다.
+현재 네이티브 제품 구현은 [N1~N5 계획](native-editor.md), 기능별 LSP 계약은 [tooling §8.2](../editor-surface-tooling.md)가 소유한다.
+아래 미완료 표기만으로 편집·저장·호버·참조 등이 제품에 없다고 판단하지 않는다.
+현재 코드 대조와 종료 gate 잔여는 [전체 잔여 점검](editor-remaining-work.md)을 본다.
+
 ## 9. 단계 계획과 종료 gate
 
 기존 [control-plane.md](../control-plane.md)의 Phase 7 웹 toolchain/markdown 계획과 번호가 충돌하지 않도록 editor는 `E` prefix를 쓴다. 구현 PR 하나가 단계 전체를 끝내는 것을 기본값으로 보지 않는다.

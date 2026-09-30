@@ -907,9 +907,10 @@ pub fn build(b: *std.Build) void {
 
         // W7b: `maru-chromium` 설치물의 Mach-O 를 Homebrew 가 고칠 것이 없는 모양으로 맞추는 스크립트(`web-sidecar-dist` 안 —
         // CEF SDK 가 있어야 돈다)를 가짜 dylib 으로 macOS CI 에서 시험한다.
-        const test_dist_macho_step = b.step("test-web-sidecar-dist-macho", "Self-test tools/web-sidecar-dist-macho.sh with small fake dylibs");
+        const test_dist_macho_step = b.step("test-web-sidecar-dist-macho", "Self-test tools/web-sidecar-dist-macho.sh with small fake dylibs and zig-built x86_64 executables");
         const run_dist_macho = b.addSystemCommand(&.{ "/bin/sh", "tools/test-web-sidecar-dist-macho.sh" });
         run_dist_macho.setCwd(b.path("."));
+        run_dist_macho.addArg(b.graph.zig_exe); // zig 가 만든 x86_64 실행 파일(머리 여유 8 바이트) 경우에 쓴다
         test_dist_macho_step.dependOn(&run_dist_macho.step);
         macos_only_test_step.dependOn(&run_dist_macho.step);
 

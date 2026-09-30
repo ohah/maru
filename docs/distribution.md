@@ -32,6 +32,7 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 - CLI 진입은 이미 있는 `maru install-cli`(self-exe를 `~/.local/bin/maru`에 symlink)와 같은 위치에
   brew가 심볼릭 링크를 건다(`macos-app-host-boundary.md` 참고).
 - 의존: zig 0.16.0(빌드 시). 빌드 시간(수 분)을 사용자가 감수한다.
+- **Chromium 엔진 `maru-chromium`(W7b)**: 별도 formula(원본 `packaging/homebrew/maru-chromium.rb`, tap 게시는 첫 출시 때). 설치는 `brew install ohah/maru/maru-chromium`(전체 이름 — Homebrew 7 은 신뢰하지 않은 tap 의 formula 를 짧은 이름으로 불러오지 않는다), macOS 13 이상(CEF 154). CEF SDK 를 `resource` 로 받아 `zig build web-sidecar-dist` 로 만든 설치물을 `libexec` 에 둔다. 설치물의 dylib·프레임워크 ID 는 `@rpath/…` 로 미리 바꿔 재서명돼 있고 formula 는 `preserve_rpath` 로 이를 지킨다(Homebrew 가 formula 를 이름으로 다시 불러와야 읽히므로 **tap 으로만** 설치한다 — 파일 경로 설치는 이것이 꺼진다) — Homebrew 의 소스 설치 relocation 이 CEF dylib 을 고쳐 쓰다 중간에 멈춰 프레임워크 서명을 깨뜨리기 때문이다([web-osr-backend.md](plans/web-osr-backend.md) W7 행). 설치 뒤 `libexec` 권한을 `go-w` 로 정리한다(umask 002 사용자도 maru 의 실행 전 검사를 통과하게). 이 맥에서 실제 설치로 확인했다(Homebrew 가 아무 파일도 고치지 않음·판정자 92/92·hardened 앱이 설치를 찾아 띄움).
 
 ### 2) universal `.dmg` — 서명+공증, 직접 다운로드용
 

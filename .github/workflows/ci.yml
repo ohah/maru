@@ -323,6 +323,9 @@ jobs:
     # 40 → 50. 2026-09-04 PR #3208 콜드 러너에서 AppSession 전수 스위트와 macOS 전용
     # 게이트가 모두 성공한 뒤 정적 라이브러리 빌드 시작 직후 40분 제한에 걸렸다. 마지막
     # 빌드·artifact 정리와 콜드 러너 편차를 수용하되 hang은 계속 유한하게 차단한다.
+    #
+    # 2026-09-30: macOS 전용 게이트(`test-macos-only`)와 원격 SCM 은 `macOS-only gates` 잡으로 떼어 냈다 —
+    # 이 잡이 PR 벽시계를 정했고 그 둘이 AppSession 스위트와 직렬로 돌았다. 상한은 실측이 모이면 줄인다.
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -408,35 +411,6 @@ jobs:
       # socket/WebKit flaky에 묻히지 않게 격리하는 전용 게이트이고(위 주석), 이 스텝은 전수 그물이다.
       - name: Run the macOS AppSession test suite
         run: mise run test-macos-app-host-abi
-      # **`mise run check` 를 도는 위 `check` job 은 ubuntu 다.** 그래서 `build.zig` 의
-      # `if (target.result.os.tag == .macos)` 안에서 만들어지는 게이트 열셋은 **컴파일조차 되지 않아**
-      # CI 어디에서도 안 돌았다 — `zig build test` 에 붙는 스텝 65개 중 20%가 개발자 로컬에만 있었다.
-      #
-      # **그 공백이 실제로 결함을 통과시켰다**(2026-08-31): `retention_app_tests` 의 `"G2"` 필터가
-      # 이미지 갤러리 판정자 아홉 개를 함께 끌어와 `--maru-expect-tests=6` 이 `compiled 15` 로
-      # 깨졌는데도 CI 는 계속 초록이었고, 로컬에서 `mise run check` 를 돌린 사람만 봤다.
-      #
-      # `test` 전체를 여기서 다시 돌리지 않는다 — 나머지 52개는 ubuntu `check` 가 이미 돌고, 겹쳐
-      # 돌리면 macOS 러너 시간만 먹는다. 등록 누락은 `tests/boundary/imports.zig` 가 센다.
-      # 🔥 **집계에 새로 붙인 `test-macos-editor-smoke` 가 웹 번들을 만든다**
-      # (`bun run --cwd web scripts/build-editor-smoke.ts`). 이 잡은 지금까지 웹 의존성을 안 깔았고,
-      # 그래서 그 스텝이 콜드 러너에서 exit 1 로 죽었다 — 로컬은 이미 깔려 있어 초록이었다.
-      # `session host bundled CLI macOS` 가 같은 이유로 이미 이 스텝을 든다.
-      - name: Install web bundle dependencies for the editor smoke
-        run: bun install --cwd web --frozen-lockfile
-      - name: Run the gates that only exist on macOS
-        run: zig build test-macos-only
-      # **원격 SCM 을 실물 SSH 위에서 돈다.** 그 판정자들은 control socket 이 없으면 `SkipZigTest` 라,
-      # 이 스텝이 없으면 RS1~RS4 는 CI 에서 **한 줄도 안 돈다** — 실제로 그 축의 결함 여섯이 사람이
-      # 손으로 잰 뒤에야 나왔다(docs/plans/remote-scm.md §7·§8·§9.2).
-      #
-      # 하네스가 키·sshd·저장소를 전부 소유한다(`tools/remote-scm/ssh_harness.sh`) — 러너의 `~/.ssh`
-      # 도 agent 도 안 건드린다. `--maru-expect-passed` 로 **건너뛰기가 초록으로 새는 것**을 막는다.
-      #
-      # p5d 에 얹지 않은 이유: 그쪽은 서명된 앱 번들을 요구하는 릴리스급 게이트라, 그 게이트가 빨간
-      # 동안 이 축도 못 돈다 — 원격 SCM 은 argv 와 파이프의 문제지 번들의 문제가 아니다.
-      - name: Run the remote SCM judges against a harness-owned sshd
-        run: zig build test-remote-scm
       # Swift 앱 호스트가 링크하는 **바로 그 정적 라이브러리**를 컴파일한다. 위 스텝이 이걸 대신하지
       # 못한다 — `build.zig` 에서 테스트 바이너리(1139행)와 이 라이브러리(1399행)는 각자 `imports` 를
       # 가진 별개 모듈이라, 라이브러리 쪽 배선만 빠지면 테스트 빌드는 초록인 채 앱만 안 빌드된다.
@@ -468,6 +442,80 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+  macos-only-gates:
+    name: macOS-only gates
+    needs: changes
+    # **`file explorer macOS product path` 에서 떼어 낸 잡이다(2026-09-30).** 그 잡이 PR 벽시계를 정했다 —
+    # #3901 이 macOS 러너 대기를 없앤 뒤(대기 중앙값 15.0 → 0.1분, PR 47 회) PR 벽시계 중앙값 17.9분 중 16.2분이
+    # 그 잡 하나였고, 그 안에서 AppSession 전수 스위트(약 6분)와 아래 `test-macos-only`(약 7분)가 **직렬**로 돌았다.
+    # 둘을 두 잡으로 나눠 병렬로 돌린다 — 대가는 PR 당 macOS 잡이 2 → 3(동시 5개 한도 안).
+    # 필수 체크다(branch protection) — 떼어 내기 전에도 필수 잡 안에 있었으므로 강제력을 그대로 유지한다.
+    #
+    # 캐시는 자기 그룹(`macos-only`)을 쓴다. file explorer 캐시를 빌려 읽기만 하면, 그쪽이 더는 이 바이너리들을
+    # 컴파일하지 않으므로 여기가 영영 콜드가 된다.
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    runs-on: macos-15
+    # 떼어 내기 전 잡(50분)의 이 부분 실측은 웜 약 7분 — 콜드 러너 편차와 첫 캐시 없는 실행을 수용한다.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-macos-only-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          restore-keys: |
+            zig-v2-${{ runner.os }}-macos-only-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-macos-only-
+      # **`mise run check` 를 도는 위 `check` job 은 ubuntu 다.** 그래서 `build.zig` 의
+      # `if (target.result.os.tag == .macos)` 안에서 만들어지는 게이트 열셋은 **컴파일조차 되지 않아**
+      # CI 어디에서도 안 돌았다 — `zig build test` 에 붙는 스텝 65개 중 20%가 개발자 로컬에만 있었다.
+      #
+      # **그 공백이 실제로 결함을 통과시켰다**(2026-08-31): `retention_app_tests` 의 `"G2"` 필터가
+      # 이미지 갤러리 판정자 아홉 개를 함께 끌어와 `--maru-expect-tests=6` 이 `compiled 15` 로
+      # 깨졌는데도 CI 는 계속 초록이었고, 로컬에서 `mise run check` 를 돌린 사람만 봤다.
+      #
+      # `test` 전체를 여기서 다시 돌리지 않는다 — 나머지 52개는 ubuntu `check` 가 이미 돌고, 겹쳐
+      # 돌리면 macOS 러너 시간만 먹는다. 등록 누락은 `tests/boundary/imports.zig` 가 센다.
+      # 🔥 **집계에 새로 붙인 `test-macos-editor-smoke` 가 웹 번들을 만든다**
+      # (`bun run --cwd web scripts/build-editor-smoke.ts`). 이 잡은 지금까지 웹 의존성을 안 깔았고,
+      # 그래서 그 스텝이 콜드 러너에서 exit 1 로 죽었다 — 로컬은 이미 깔려 있어 초록이었다.
+      # `session host bundled CLI macOS` 가 같은 이유로 이미 이 스텝을 든다.
+      - name: Install web bundle dependencies for the editor smoke
+        run: bun install --cwd web --frozen-lockfile
+      - name: Run the gates that only exist on macOS
+        run: zig build test-macos-only
+      # **원격 SCM 을 실물 SSH 위에서 돈다.** 그 판정자들은 control socket 이 없으면 `SkipZigTest` 라,
+      # 이 스텝이 없으면 RS1~RS4 는 CI 에서 **한 줄도 안 돈다** — 실제로 그 축의 결함 여섯이 사람이
+      # 손으로 잰 뒤에야 나왔다(docs/plans/remote-scm.md §7·§8·§9.2).
+      #
+      # 하네스가 키·sshd·저장소를 전부 소유한다(`tools/remote-scm/ssh_harness.sh`) — 러너의 `~/.ssh`
+      # 도 agent 도 안 건드린다. `--maru-expect-passed` 로 **건너뛰기가 초록으로 새는 것**을 막는다.
+      #
+      # p5d 에 얹지 않은 이유: 그쪽은 서명된 앱 번들을 요구하는 릴리스급 게이트라, 그 게이트가 빨간
+      # 동안 이 축도 못 돈다 — 원격 SCM 은 argv 와 파이프의 문제지 번들의 문제가 아니다.
+      - name: Run the remote SCM judges against a harness-owned sshd
+        run: zig build test-remote-scm
+      - name: 저장 전에 캐시를 예산 안으로 줄인다
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: sh tools/ci/prune-zig-cache.sh 3072
+      - name: Save build cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-macos-only-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+
   session-host-macos-debug:
     name: session host macOS (Debug)
     needs: changes

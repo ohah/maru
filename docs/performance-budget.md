@@ -95,7 +95,8 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | `check-boundaries` | ci.yml `check-boundaries` | 매 PR(ubuntu). `check` 에서 갈라낸 경계 게이트 — `code`면 `mise run check-boundaries`, 아니면 검사 없음. 자기 러너를 쓰는 이유는 .mise.toml `check-without-boundaries` 주석. |
 | `require label and assignee=ohah` | pr-metadata.yml `require-label-and-assignee` | 매 PR. 라벨 1개 이상 + assignee=ohah. |
 | `core performance budget` | performance.yml `core-performance-budget` | `code` 변경 PR(+main push·수동·주간). core perf guardrail. |
-| `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
+| `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact · AppSession 전수 스위트 · Swift 앱 호스트 정적 라이브러리. |
+| `macOS-only gates` | ci.yml `macos-only-gates` | `code` 변경 PR(macos-15). `zig build test-macos-only`(ubuntu `check` 가 컴파일조차 못 하는 macOS 전용 게이트) · `zig build test-remote-scm`(실물 sshd). 2026-09-30 에 `file explorer` 에서 떼어 냈다 — 그 잡이 PR 벽시계를 정했고 두 묶음이 직렬로 돌았다. 떼어 내기 전에도 필수 잡 안에 있었으므로 필수로 둔다. |
 | `session host macOS (Debug)` | ci.yml `session-host-macos-debug` | `code` 변경 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. **job 상한은 35분**이다. 2026-08-31 PR #2938의 콜드 러너에서 출력된 모든 테스트가 통과한 뒤 기존 20분 상한에 도달해 `The operation was canceled`로 잘렸으므로, 성공 경로를 취소하지 않되 실제 hang도 유한하게 닫는 값으로 bundled CLI와 같은 35분을 쓴다. |
 | `session host bundled CLI macOS` | ci.yml `session-host-bundled-cli-macos` | `code` 변경 PR(macos-15). ReleaseFast 앱 번들/PATH와 harness-owned localhost OpenSSH의 public `maru attach` 제품 E2E. Debug 전수 스위트와 병렬 실행하고 **각각 35분 상한**으로 독립 판정한다. |
 | `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | `code` 변경 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation·host-PID RSS와 generation-backed GUI client idle-pump artifact. |

@@ -1,0 +1,46 @@
+name: Main health
+
+# main CI 가 빨개지면 **이슈 하나로 알린다** — 실패했던 잡이 다시 성공하면 자동으로 닫는다.
+#
+# **왜 필요한가.** `session host macOS (Debug)` 처럼 main push 에서만 도는 잡은 PR 에서 돌지 않아 머지를
+# 막지 못하고, 필수 체크도 아니다. 2026-09-27 ~ 09-30 main push 51 번 중 22 번(43%)이 그 잡에서 빨갰는데
+# 전부 결정적 결함 하나씩이 만든 **연속 구간**이었다(8 · 17 · 5 연속, 가장 긴 것은 약 22시간 — 터미널
+# PCRE2 변경이 session host 구조체 판정자를 깼다). 아무도 제때 알지 못했다. 막지는 못해도 **바로 알게** 한다.
+#
+# 로직은 `tools/ci/main_health.py` 가 소유한다 — 이슈 하나(라벨 `ci`, 본문 끝 상태 줄)를 열고/댓글/닫는다.
+# **건너뛴 잡은 회복으로 치지 않는다**: 문서만 바꾼 push 는 session host 잡을 건너뛰어 CI 전체가 초록이 된다.
+# 로컬에서 과거 실행에 대고 시험: `REPO=ohah/maru python3 tools/ci/main_health.py --run-id <id> --dry-run`.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read # 실패 잡 로그를 읽는다
+  issues: write # 이슈를 열고·댓글·닫는다
+
+concurrency:
+  group: main-health
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: report main CI failures as an issue
+    # main push 와 수동 실행(ReleaseFast 잡이 도는 유일한 자리)만 본다. 취소된 실행은 잡 결론이
+    # `cancelled` 라 스크립트가 아무것도 하지 않는다.
+    if: ${{ github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: python3 tools/ci/main_health.py --run-id "$RUN_ID"

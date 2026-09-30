@@ -1122,6 +1122,16 @@ pub const GenerationAttachment = struct {
         );
     }
 
+    /// `allowsMutation` 이 false 인 이유의 이름(null = 허용). transport 쪽은 관문 자체(`mutationAllowedOwned` 가
+    /// `mutationDenialOwned == null` 로 정의된다)에서 나온다 — 진단 전용 복제 판정을 두지 않는다.
+    pub fn mutationDenial(self: *const GenerationAttachment) ?[]const u8 {
+        if (!self.payloadConst().allowsMutation()) return "observer";
+        return generation_transport_mod.mutationDenialOwned(
+            @constCast(&self.transport),
+            @intFromPtr(self),
+        );
+    }
+
     pub fn hasBufferedControllerRevoke(self: *const GenerationAttachment) bool {
         return generation_transport_mod.bufferedControllerRevokeOwned(
             @constCast(&self.transport),

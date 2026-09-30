@@ -1591,12 +1591,20 @@ pub fn finishControllerRevokeOwned(
 /// GenerationAttachment's read-only UI admission query. It keeps the stream-local revoke lookup
 /// behind the sealed transport without expanding the planned 2c4 exact facade or exposing Client.
 pub fn mutationAllowedOwned(transport: *GenerationTransport, owner_addr: usize) bool {
-    if (transport.owner_addr != owner_addr) return false;
-    const client = transport.borrowClient() orelse return false;
-    if (!transport.controllerBindingValid()) return false;
+    return mutationDenialOwned(transport, owner_addr) == null;
+}
+
+/// 위 관문이 false 인 **이유의 이름**. 관문이 조용히 닫히면 넷 중 무엇인지 로그로 못 가른다
+/// (2026-09-29: 재연결 뒤 한 host 의 runtime 셋이 resize·input 을 흔적 없이 버렸다). 판정 순서와 조건은
+/// 관문 자체이므로 한 곳에만 둔다 — allowed 는 이 함수가 null 인 것이다.
+pub fn mutationDenialOwned(transport: *GenerationTransport, owner_addr: usize) ?[]const u8 {
+    if (transport.owner_addr != owner_addr) return "transport_owner_moved";
+    const client = transport.borrowClient() orelse return "client_unavailable";
+    if (!transport.controllerBindingValid()) return "controller_binding_invalid";
     const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
-    return slot.streamOperationPermitIdle() and
-        !client.hasBufferedControllerRevokeForStream(transport.bound_stream_id);
+    if (!slot.streamOperationPermitIdle()) return "stream_operation_busy";
+    if (client.hasBufferedControllerRevokeForStream(transport.bound_stream_id)) return "controller_revoke_buffered";
+    return null;
 }
 
 /// Connection-wide revoke ordering query for the final-address GenerationAttachment owner.

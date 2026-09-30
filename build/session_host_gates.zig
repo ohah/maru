@@ -1650,7 +1650,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     // `test-session-host*` 체인은 PR 에서 안 돈다. Debug 를 `test-macos-only`(PR 의 macOS job)에 건다.
     const session_host_reconnect_host_charge_step = b.step(
         "test-session-host-reconnect-host-charge",
-        "Reconnect admission charges one resident lease per host, so hosts with more than seven runtimes still reconnect",
+        "Reconnect admission charges one resident lease per host, and reconnect publication re-applies the layout viewport",
     );
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |host_charge_optimize| {
         const host_charge_tests = addProjectTest(b, .{
@@ -1661,12 +1661,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"CR6e-c3b2c host charge"},
+            // CR6e-c3b2d: 재연결 게시의 강제 resize 가 관문에서 버려진 레이아웃 크기를 쓴다 — 같은 재연결
+            // 게시 경로의 판정자라 새 컴파일 없이 이 step 의 필터에 얹는다(remote_runtime 1개).
+            .filters = &.{ "CR6e-c3b2c host charge", "CR6e-c3b2d reconnect viewport" },
         });
         // backend 7개(N=7·8·13, 예산 대기, 제품 close 경로의 anchor 이탈, 정산 없는 teardown, charged 0·2 거부) + 이 root 가 끌어오는 remote_runtime 의 executor
-        // 2개(identity-only abort, charge 이전) = 9.
+        // 2개(identity-only abort, charge 이전) + reconnect viewport 1개 = 10.
         const run_host_charge_tests = b.addRunArtifact(host_charge_tests);
-        run_host_charge_tests.addArg("--maru-expect-tests=9");
+        run_host_charge_tests.addArg("--maru-expect-tests=10");
         run_host_charge_tests.setCwd(b.path("."));
         session_host_reconnect_host_charge_step.dependOn(&run_host_charge_tests.step);
         if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);
@@ -1677,10 +1679,10 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .target = target,
                 .optimize = host_charge_optimize,
             }),
-            .filters = &.{"CR6e-c3b2c 경계는"},
+            .filters = &.{ "CR6e-c3b2c 경계는", "CR6e-c3b2d 경계는" },
         });
         const run_host_charge_boundary_tests = b.addRunArtifact(host_charge_boundary_tests);
-        run_host_charge_boundary_tests.addArg("--maru-expect-tests=1");
+        run_host_charge_boundary_tests.addArg("--maru-expect-tests=2");
         run_host_charge_boundary_tests.setCwd(b.path("."));
         session_host_reconnect_host_charge_step.dependOn(&run_host_charge_boundary_tests.step);
         if (host_charge_optimize == .Debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);

@@ -8491,6 +8491,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             .{ .name = "beginControllerRevokeOwned", .transport_count = 1, .attachment_count = 2 },
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1, .attachment_count = 2 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },
+            // 관문(`mutationAllowedOwned`)이 이것의 null 로 정의되고, attachment 의 진단 이름 하나만 읽는다.
+            .{ .name = "mutationDenialOwned", .transport_count = 2 },
             .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
             // 기존 두 제품 경로, CR4b test-only readiness와 CR5 host-wide retirement가 preflight한다.
             .{ .name = "preflightTerminalizeOwned", .transport_count = 3, .attachment_count = 4 },

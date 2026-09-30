@@ -51787,6 +51787,73 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
     }
 }
 
+test "notice through the product overlay painter: a long NFD/emoji message wraps with every code point drawn inside the box's margins" {
+    // Lab `notice-wrap` 캡처는 CoreText 측정 경로로 그린다 — 제품의 모달 painter(`rasterizeOverlayCells` →
+    // `metal_lowering.placeText`, 코드포인트마다 max(1, EAW) 칸)를 지나는 것은 이 시험이다(적대 검증 4 차).
+    // 격자는 박스 quad 크기라 격자 밖 글자는 painter 가 스스로 버린다 — 그래서 「모든 코드포인트가 그려짐」이 박스 밖
+    // 넘침을, 「좌우 여백 안」이 여백 침범을 잡는다(적대 검증 5 차). tui·rich(둥근 모서리·패딩 12px) 두 모양을 다 돈다.
+    const allocator = std.testing.allocator;
+    const theme: chrome.tokens.ThemeColors = .{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 1, .g = 1, .b = 1 },
+        .sidebar_background = .{ .r = 2, .g = 2, .b = 2 },
+        .sidebar_foreground = .{ .r = 3, .g = 3, .b = 3 },
+        .sidebar_active = .{ .r = 4, .g = 4, .b = 4 },
+        .search_match = .{ .r = 5, .g = 5, .b = 5 },
+        .search_match_current = .{ .r = 6, .g = 6, .b = 6 },
+        .selection = .{ .r = 7, .g = 7, .b = 7 },
+        .cursor = .{ .r = 8, .g = 8, .b = 8 },
+        .terminal_background = .{ .r = 8, .g = 8, .b = 8 },
+        .accent = .{ .r = 9, .g = 9, .b = 9 },
+    };
+    const cw: u32 = 8;
+    const ch: u32 = 16;
+    const message = "설치된 Chromium 엔진(maru-chromium)이 이 maru 와 맞지 않습니다. maru 와 maru-chromium 을 모두 최신으로 올린 뒤 maru 를 다시 켜 주세요." ++ " /Users/x/" ++ "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}" ** 6 ++ " " ++ "\u{2764}\u{FE0F}" ** 12;
+    for ([_]chrome.tokens.Tokens{ chrome.tokens.Tokens.base(theme), chrome.tokens.Tokens.rich(theme) }) |tk| {
+        const p = chrome.props.ChromeProps{
+            .metrics = .{ .cell_width_px = cw, .cell_height_px = ch, .sidebar_width_px = 0, .backing_width_px = 480, .backing_height_px = 400 },
+            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px },
+        };
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var state: chrome.components.notice.State = .{};
+        state.show(message);
+        var ops: std.ArrayList(chrome.draw.Op) = .empty;
+        try chrome.components.notice.view(&state, p, &tk, arena, &ops);
+        try std.testing.expect(ops.items.len >= 4); // 박스 + 세 줄 이상
+        const box = ops.items[0].quad.rect;
+        const margin: u32 = tk.space.modal_margin_cells * cw;
+        const inner_left: u32 = @as(u32, @intCast(box.x)) + margin;
+        const inner_right: u32 = @as(u32, @intCast(box.x)) + box.w - margin;
+        const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = ops.items }};
+        var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, cw, ch, false);
+        defer raster.cells.deinit(allocator);
+        defer raster.gpu_quads.deinit(allocator);
+        defer raster.gpu_shadows.deinit(allocator);
+        var drawn = std.AutoHashMap(u21, u32).init(allocator);
+        defer drawn.deinit();
+        for (raster.cells.items) |cell| {
+            if (cell.codepoint == 0 or cell.codepoint == ' ') continue;
+            const left = raster.origin_x + @as(u32, cell.col) * cw;
+            const right = left + @as(u32, cell.width) * cw;
+            try std.testing.expect(left >= inner_left and right <= inner_right); // 좌우 여백 안
+            (try drawn.getOrPutValue(cell.codepoint, 0)).value_ptr.* += 1;
+        }
+        // 메시지의 코드포인트는 (공백 말고) 하나도 빠지지 않고 그려진다 — 박스 밖으로 넘친 글자는 격자에서 버려져 여기서 걸린다.
+        var want = std.AutoHashMap(u21, u32).init(allocator);
+        defer want.deinit();
+        var it = (try std.unicode.Utf8View.init(message)).iterator();
+        while (it.nextCodepoint()) |cp| if (cp != ' ') {
+            (try want.getOrPutValue(cp, 0)).value_ptr.* += 1;
+        };
+        var wit = want.iterator();
+        while (wit.next()) |e| try std.testing.expectEqual(e.value_ptr.*, drawn.get(e.key_ptr.*) orelse 0);
+        try std.testing.expectEqual(want.count(), drawn.count()); // 메시지에 없는 글자(`…`·U+FFFD 등)도 그려지지 않았다
+    }
+}
+
 test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → 셀 그리드(헤드리스)" {
     const allocator = std.testing.allocator;
     const c = struct {

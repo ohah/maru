@@ -97,15 +97,19 @@ fn numDigits(n: usize) u32 {
     return d;
 }
 
-/// 입력 텍스트 영역의 우측 경계 칸 — 패널 폭에서 우측 카운터 예약을 뺀다(카운터가 실제로 표시될 때만; view의 표시
-/// 조건 `counter_cols + 2 < panel_cols`와 동일). view·caretRect가 tail 창 계산에 공유해 그림과 caret이 일치한다.
+/// 좁은 비교 열은 접두와 최소 한 입력 칸을 먼저 확보하고 보조 표시를 생략한다.
+/// 렌더와 caret/hit이 같은 표시 판정을 써야 숫자나 버튼이 검색어 위에 겹치지 않는다.
+fn counterFits(state: *const State, panel_cols: u32) bool {
+    return counterCols(state) + @as(u32, if (state.scope != null) prompt_cols + 2 else 2) < panel_cols;
+}
+
+fn regexFits(state: *const State, panel_cols: u32) bool {
+    return state.target != .page and counterCols(state) + @as(u32, if (state.scope != null) prompt_cols + 6 else 7) < panel_cols;
+}
+
 fn textCols(state: *const State, panel_cols: u32) u32 {
     const cc = counterCols(state);
-    // The editor's regex button sits between query and counter. Reserve its cells
-    // in both rendering and caret geometry so long patterns cannot cover it.
-    return if (state.target != .page and cc + 7 < panel_cols)
-        panel_cols - cc - 5
-    else if (cc + 2 < panel_cols) panel_cols - cc - 1 else panel_cols;
+    return if (regexFits(state, panel_cols)) panel_cols - cc - 5 else if (counterFits(state, panel_cols)) panel_cols - cc - 1 else panel_cols;
 }
 
 /// VS Code-style `.*` control, immediately left of the match count. A narrow
@@ -121,7 +125,17 @@ fn layout(state: *const State, p: props.ChromeProps) ?overlay_input.PanelLayout 
     if (state.scope) |scope| {
         if (scope.w < @max(p.metrics.cell_width_px, 1) or scope.h < 2 * @max(p.metrics.cell_height_px, 1)) return null;
     }
-    return overlay_input.findLayout(scopedProps(state, p));
+    var lay = overlay_input.findLayout(scopedProps(state, p)) orelse return null;
+    if (state.scope) |scope| {
+        // 두 패널의 raster 영역은 합쳐진다. 잘리지 않는 Find: 접두가 자기 열을 넘지 않게,
+        // 최소 한 입력 칸과 GPU 배경 패딩까지 들어갈 때만 상자를 보여 준다.
+        if (lay.panel_cols < prompt_cols + 2) return null;
+        const pad: u32 = p.shape.modal_padding_px;
+        const top = @max(lay.ch, pad);
+        if (scope.h < top + lay.ch + pad) return null;
+        lay.y = @as(i32, @intCast(scope.y + top));
+    }
+    return lay;
 }
 
 /// Drawing, pointer routing and IME use the same layout within the owning column.
@@ -136,7 +150,7 @@ fn regexButtonRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open or state.target == .page) return null;
     const lay = layout(state, p) orelse return null;
     const cc = counterCols(state);
-    if (cc + 7 >= lay.panel_cols) return null;
+    if (!regexFits(state, lay.panel_cols)) return null;
     return .{
         .x = lay.x + @as(i32, @intCast((lay.panel_cols - cc - 5) * lay.cw)),
         .y = lay.y,
@@ -432,7 +446,7 @@ pub fn view(
     };
     if (counter) |counter_text| {
         const counter_cols: u32 = counterCols(state);
-        if (counter_cols + 2 < lay.panel_cols) {
+        if (counterFits(state, lay.panel_cols)) {
             const counter_runs = try arena.alloc(draw.Run, 1);
             counter_runs[0] = .{ .text = counter_text };
             const cx = x + @as(i32, @intCast((lay.panel_cols - counter_cols - 1) * cw));
@@ -1019,7 +1033,7 @@ test "find paired scope: draw·hit·caret 모두 자기 열을 쓰고 비활성 
     s.target = .editor;
     s.replace_open = true;
     try s.input.query.appendSlice(allocator, "한글");
-    for ([_]props.PaneRect{ .{ .x = 20, .y = 30, .w = 440, .h = 500 }, .{ .x = 480, .y = 30, .w = 440, .h = 500 }, .{ .x = 20, .y = 30, .w = 32, .h = 500 } }) |scope| {
+    for ([_]props.PaneRect{ .{ .x = 20, .y = 30, .w = 440, .h = 500 }, .{ .x = 480, .y = 30, .w = 440, .h = 500 }, .{ .x = 20, .y = 30, .w = 96, .h = 500 } }) |scope| {
         s.scope = scope;
         s.input_focused = true;
         var ops: std.ArrayList(draw.Op) = .empty;
@@ -1039,4 +1053,64 @@ test "find paired scope: draw·hit·caret 모두 자기 열을 쓰고 비활성 
     try view(&s, p, &tk, arena.allocator(), &ops);
     try std.testing.expectEqual(@as(usize, 0), ops.items.len);
     try std.testing.expect(!contains(&s, p, 800, 46));
+}
+
+test "find paired scope: rich 패딩과 프롬프트가 못 들어가면 draw hit caret 모두 숨긴다" {
+    const allocator = std.testing.allocator;
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 600 }, .shape = .{ .modal_padding_px = 12, .corner_radius_px = 8 } };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var s: State = .{};
+    defer s.deinit(allocator);
+    s.show();
+    s.target = .editor;
+    try s.input.query.appendSlice(allocator, "한글");
+    for ([_]props.PaneRect{ .{ .x = 20, .y = 30, .w = 32, .h = 500 }, .{ .x = 20, .y = 30, .w = 440, .h = 32 } }) |scope| {
+        s.scope = scope;
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try view(&s, p, &tk, arena.allocator(), &ops);
+        try std.testing.expectEqual(@as(usize, 0), ops.items.len);
+        try std.testing.expect(caretRect(&s, p) == null);
+        try std.testing.expect(!contains(&s, p, scope.x + 1, scope.y + 17));
+    }
+}
+
+test "find paired scope: 중간 폭에서도 입력·정규식 버튼·카운터가 겹치지 않는다" {
+    const allocator = std.testing.allocator;
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 600 }, .shape = .{ .modal_padding_px = 12, .corner_radius_px = 8 } };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var s: State = .{};
+    defer s.deinit(allocator);
+    s.show();
+    s.target = .editor;
+    s.diff_side_shown = .right;
+    s.setMatchCount(100);
+    try s.input.query.appendSlice(allocator, "abcdefghijklmnopqrstuvwxyz");
+    for (120..257) |w| {
+        s.scope = .{ .x = 20, .y = 30, .w = @intCast(w), .h = 100 };
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try view(&s, p, &tk, arena.allocator(), &ops);
+        const panel = ops.items[0].quad.rect;
+        const padded = panel.outset(.{ .left = 12, .right = 12, .top = 12, .bottom = 12 });
+        try std.testing.expect(padded.x >= 20 and padded.x + @as(i32, @intCast(padded.w)) <= 20 + w);
+        try std.testing.expect(padded.y >= 30 and padded.y + @as(i32, @intCast(padded.h)) <= 130);
+        var previous_end = panel.x;
+        for (ops.items) |op| if (op == .text) {
+            var cols: u32 = 0;
+            for (op.text.runs) |run| {
+                var it = (try std.unicode.Utf8View.init(run.text)).iterator();
+                while (it.nextCodepoint()) |cp| cols += @import("../../width.zig").cellWidth(cp);
+            }
+            try std.testing.expect(op.text.origin.x >= previous_end);
+            previous_end = op.text.origin.x + @as(i32, @intCast(cols * 8));
+            try std.testing.expect(previous_end <= panel.x + @as(i32, @intCast(panel.w)));
+        };
+        const caret = caretRect(&s, p).?;
+        try std.testing.expect(caret.x >= panel.x and caret.x < panel.x + @as(i32, @intCast(panel.w)));
+    }
 }

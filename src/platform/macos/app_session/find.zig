@@ -626,9 +626,8 @@ pub fn syncDiffFind(self: *AppSession) void {
     h.find_secondary.scope = if (h.find_secondary.diff_side == .right) term.rt.editor_diff_find_right else term.rt.editor_diff_find_left;
     h.find.diff_side_shown = h.find.diff_side;
     h.find_secondary.diff_side_shown = h.find_secondary.diff_side;
-    if (h.find.scope) |scope| {
-        if (scope.w < @max(self.cell_width_px, 1) or scope.h < 2 * @max(self.cell_height_px, 1)) h.find.input_focused = false;
-    }
+    // draw·hit·IME가 공유하는 판정으로 보이지 않는 입력 포커스를 해제한다.
+    if (h.find.input_focused and find_ui.caretRect(&h.find, self.buildChromeProps()) == null) h.find.input_focused = false;
 }
 
 pub const DiffPointer = enum { none, body, consumed };

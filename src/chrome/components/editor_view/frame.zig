@@ -3647,6 +3647,10 @@ test "B2FW1 staged writer 전체 출력 — 랩·가로 이동·sticky·계수 �
         props.carets = &carets;
         props.caret_visible = true;
         props.selection_marks = &selections;
+        // 검색과 진단 사이에 실제 괄호 op 을 둬 합류 오프셋 오류를 숨기지 않는다.
+        props.bracket_marks = &selections;
+        props.occurrence_marks = &selections;
+        props.line_highlight = .all;
         props.visible_rows = 80;
         props.total_cols = if (case >= 2) 40 else 160;
         props.rect = .{ .x = 37, .y = 19, .w = @as(u32, props.total_cols) * 8, .h = 80 * 16 };
@@ -3691,7 +3695,7 @@ fn b2RoleCount(ops: []const draw.Op, role: tokens.ColorRole) usize {
     return n;
 }
 
-test "B2FW2 상한·성장 OOM — 밀집 검색보다 모든 caret·막대·현재 검색을 먼저 보존한다" {
+test "B2FW2 상한·OOM — 기본 표시 보존과 현재 검색 보장의 경계를 구분한다" {
     const a = testing.allocator;
     const lines = [_][]const u8{"x" ** 120} ** 100;
     var singles: [60]Mark = undefined;
@@ -3738,6 +3742,16 @@ test "B2FW2 상한·성장 OOM — 밀집 검색보다 모든 caret·막대·현
     try testing.expect(fallback.allocation_failed and fallback.written.truncated);
     try testing.expectEqual(@as(usize, 80), b2RoleCount(fallback.ops, .cursor));
     try testing.expectEqual(@as(usize, 2), b2RoleCount(fallback.ops, scrollbar.thumb_role));
+    // 빈 목록의 두 번째 할당(기본 층 예약 직후)이 실패하면 현재 매치도 못 넣는다.
+    // 성장 OOM 전체에 현재 매치 보장을 일반화하지 않고 이 반례를 고정한다.
+    var second_empty: std.ArrayList(draw.Op) = .empty;
+    defer second_empty.deinit(a);
+    var second_fail = testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    const before_current = try b2BuildStagedWriter(second_fail.allocator(), props, base.scratch(runs, bytes), &second_empty, 16000);
+    try testing.expect(before_current.allocation_failed and before_current.written.truncated);
+    try testing.expectEqual(@as(usize, 0), b2RoleCount(before_current.ops, .search_match_current));
+    try testing.expectEqual(@as(usize, 80), b2RoleCount(before_current.ops, .cursor));
+    try testing.expectEqual(@as(usize, 2), b2RoleCount(before_current.ops, scrollbar.thumb_role));
     try testing.expectError(error.BaseExceedsLimit, b2BuildStagedWriter(a, props, base.scratch(runs, bytes), &empty, 1));
     try testing.expectError(error.RetainedCapacityExceedsLimit, b2BuildStagedWriter(a, props, base.scratch(runs, bytes), &list, 1));
     // run 부족은 기본 층의 부족이다. op 전용 상한 신호와 섞이지 않고 재그리기도 없다.

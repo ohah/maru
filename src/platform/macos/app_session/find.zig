@@ -393,6 +393,7 @@ fn refilterAfterRuleChange(self: *AppSession) void {
 /// ⌘F: 비교 뷰는 활성 열을 열거나 포커스하고, 일반 Find는 토글한다. 일반 Find가 열려 있으면 닫고,
 /// 닫혀 있으면 다른 배타 오버레이(notice·palette)를 먼저 닫고 연다(검색어 초기화는 컴포넌트의 show가).
 pub fn toggleFind(self: *AppSession) void {
+    syncDiffFind(self);
     if (activeEditorTerm(self)) |term| {
         if (term.rt.editor_diff != null) {
             openDiffFind(self, term);

@@ -4496,3 +4496,50 @@ test "DRB1 제품 경로 — 촘촘한 zig 비교 뷰 68행에서 좌우 줄 번
     try testing.expect(left_rows + 4 >= rows);
     try testing.expect(right_rows + 4 >= rows);
 }
+
+test "DCOL12: Term 전환 직후 tick 전 입력은 지난 비교 찾기로 들어가지 않는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("aa\n", "bb\n");
+    try findPairFixture(&fx, &entry);
+    try findQuery(&fx, "bb");
+    find_ops.toggleFindDiffSide(fx.session);
+    try findQuery(&fx, "aa");
+    term_ops.focusTerm(fx.session, 0);
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("aa", fx.session.chrome_host.find.input.query.items);
+    try testing.expectEqual(@as(u64, 0), fx.session.chrome_host.diff_find_source);
+    try testing.expect(!fx.session.chrome_host.find_secondary.open);
+}
+
+test "DCOL13: Term 전환 직후 Cmd F는 새 터미널 찾기를 첫 누름에 연다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("aa\n", "bb\n");
+    try findPairFixture(&fx, &entry);
+    try findQuery(&fx, "bb");
+    term_ops.focusTerm(fx.session, 0);
+    find_ops.toggleFind(fx.session);
+    try testing.expect(fx.session.chrome_host.find.open);
+    try testing.expectEqual(@as(u64, 0), fx.session.chrome_host.diff_find_source);
+    try testing.expect(fx.session.chrome_host.find.scope == null);
+}
+
+test "DCOL14: tick 전 IME marked와 직접 commit도 지난 비교 상자를 수정하지 않는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |marked| {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        var entry = testEntry("aa\n", "bb\n");
+        try findPairFixture(&fx, &entry);
+        try findQuery(&fx, "bb");
+        term_ops.focusTerm(fx.session, 0);
+        if (marked) fx.session.imeMarked("한") else fx.session.imeInsert("한");
+        try testing.expectEqualStrings("bb", fx.session.chrome_host.find.input.query.items);
+        try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.input.preedit.items.len);
+        try testing.expectEqual(@as(u64, 0), fx.session.chrome_host.diff_find_source);
+        try testing.expect(!fx.session.chrome_host.find.open);
+    }
+}

@@ -34,8 +34,17 @@ install_name_tool -id "@rpath/$fw_name/Chromium Embedded Framework" "$fw_bin" ||
 #    서명이 아예 없어 W7a2 가 거절하고 Intel 설치가 막혔다, W7b 2 차 적대 검증 실측). **서명이 없을 때만** 붙인다 —
 #    깨진 서명을 다시 붙이면 바꿔치기된 파일을 온전하다고 만들어 버린다(깨진 것은 아래 확인에서 걸린다).
 #    CEF 는 안쪽(dylib)을 먼저, 프레임워크를 마지막에(번들 서명이 안쪽 파일을 봉인하므로 순서가 바뀌면 봉인이 깨진다).
+#    서명을 붙이기 전에 머리 여유를 본다 — codesign 은 `LC_CODE_SIGNATURE`(16 바이트)를 넣을 자리가 모자라도 멈추지 않고
+#    첫 섹션(`__text`)을 덮어쓴다(zig 의 x86_64 출력은 여유가 8 바이트였다 — 서명 뒤 host 가 뜨자마자 SIGSEGV, W7b 5 차 실측).
+header_room() { # 64 비트 Mach-O: 첫 섹션 오프셋 − (머리 32 + load command 크기)
+    cmds=$(otool -h "$1" | awk 'NR==4{print $7}')
+    first=$(otool -l "$1" | awk '/^ *offset [0-9]/ && $2 > 0 && (m == "" || $2 < m) {m = $2} END {print m}')
+    echo $((first - 32 - cmds))
+}
 for exe in "$dist/maru-web-host" "$dist/maru-web-helper"; do
     if ! codesign --display "$exe" > /dev/null 2>&1; then
+        room=$(header_room "$exe")
+        [ "$room" -ge 16 ] || die "$exe 의 머리 여유가 ${room} 바이트라 서명을 붙이면 코드를 덮어쓴다(-headerpad_max_install_names 로 빌드)"
         codesign --sign - "$exe" 2>/dev/null || die "codesign 실패: $exe"
     fi
 done
@@ -67,12 +76,14 @@ while IFS= read -r f; do
     # (`@loader_path/../lib` 와 `@loader_path/../lib/`) — 지우면 그 파일이 고쳐져 번들 봉인이 깨진다(W7b 3 차 적대 검증 실측).
     if otool -l "$f" | grep -q 'cmd LC_RPATH'; then problem "$f 에 rpath 가 있다(설치물은 rpath 없이 경로로 불러온다)"; fi
     # 링크는 자기 ID 말고 모두 /System/·/usr/lib/ 여야 한다 — 이름만 쓴 링크는 Homebrew 가 @loader_path 로 고치고, rpath 가
-    # 없으니 @rpath 링크는 풀리지 않는다(`brew linkage` 도 「rpath 없음」으로 센다). @loader_path·@executable_path 링크도
-    # 지금 설치물에 없다 — 생기면 빌드를 멈춰 다시 본다(W7b 4 차 적대 검증).
+    # 없으니 @rpath 링크는 그 ID 의 파일이 먼저 불려 있을 때만 풀린다(불러오는 순서에 달림 — `brew linkage` 도 「rpath 없음」
+    # 으로 센다). @loader_path·@executable_path 링크도 지금 설치물에 없다 — 생기면 빌드를 멈춰 다시 본다(W7b 4 차 적대 검증).
+    # `..` 가 든 경로와 `/System/Volumes/`(데이터 볼륨 — 그 아래 /opt/homebrew 가 있다)는 앞머리만 맞춰 빠져나가므로 막는다(5 차).
     # 탭으로 시작하는 줄만 — universal 이면 아키텍처마다 `경로 (architecture …):` 머리 줄이 끼어든다.
     otool -L "$f" | awk -F'\t' '/^\t/{sub(/ \(compatibility.*/, "", $2); print $2}' | while IFS= read -r dep; do
         [ "$dep" = "$id" ] && continue
         case "$dep" in
+            */../* | /System/Volumes/*) echo "web-sidecar-dist-macho: $f 가 시스템 밖으로 빠지는 경로 $dep 에 링크한다" >&2; exit 1 ;;
             /System/* | /usr/lib/*) ;;
             *) echo "web-sidecar-dist-macho: $f 가 시스템 밖 경로 라이브러리 $dep 에 링크한다" >&2; exit 1 ;;
         esac

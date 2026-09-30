@@ -184,6 +184,10 @@ fn sidecarExe(
     // 헤더만 쓴다 — 함수는 실행 중에 dlopen 한 프레임워크에서 찾으므로 프레임워크를 링크하지 않는다.
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk });
     exe.root_module.addIncludePath(b.path("src/platform/macos/web_sidecar/shim"));
+    // 머리(load command) 뒤에 여유를 둔다 — zig 는 x86_64 대상에 서명을 붙이지 않고 머리 여유도 8 바이트뿐이라, 설치물 단계
+    // (`tools/web-sidecar-dist-macho.sh`)가 `codesign` 으로 서명을 붙이면 16 바이트 `LC_CODE_SIGNATURE` 가 `__text` 첫 바이트를
+    // 덮어써 host 가 뜨자마자 죽었다(W7b 5 차 적대 검증 — Rosetta 로 실측).
+    exe.headerpad_max_install_names = true;
     return exe;
 }
 

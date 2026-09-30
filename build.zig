@@ -1716,6 +1716,29 @@ pub fn build(b: *std.Build) void {
     run_macos_attach_resolver_fresh_tests.addArg("--maru-expect-tests=1");
     run_macos_attach_resolver_fresh_tests.setCwd(b.path("."));
 
+    // **exec 업그레이드의 목표 이미지는 ReleaseFast 제품이다.** 이 테스트는 옛 host 가 같은 PID 로 목표 이미지를
+    // exec 하고 그 이미지가 복원을 마쳐 다시 listen 하는지 본다. 그 복원은 제품의 pause budget
+    // (`upgrade_limits.pause_budget_ms` = 5초, 출하본 ReleaseFast 기준 SLO) 안에 끝나야 하고, 넘으면 롤백한다.
+    // 목표를 이 스텝의 `exe`(Debug, 46MB)로 두면 exec·복원만 로컬 무부하 약 3초, 8중 병렬 최대 5.3초로 예산을
+    // 넘겨 12~17% 가 롤백됐고(2026-09-30 실측 · CI 의 file explorer 에서도 한 번), 이 테스트의 옛 이미지는
+    // 테스트 바이너리라 롤백 exec 가 테스트 러너를 다시 돌려 아무도 listen 하지 않는다. ReleaseFast 목표는 같은
+    // 조건에서 순차 약 1초 · 8중 병렬 최대 2.4초 · 0/24 였다. `maru_mod` 는 optimize 를 안 정해 이 루트를 따른다.
+    // 설치하지 않는다 — 이 테스트만 쓴다(샤드가 도는 동안 병렬로 컴파일된다).
+    const upgrade_target_release_exe = b.addExecutable(.{
+        .name = "maru",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
+                .{ .name = "session_host_build_options", .module = session_host_build_options_mod },
+            },
+        }),
+    });
+    if (target.result.os.tag == .macos) linkSessionHostNotificationAdapter(b, upgrade_target_release_exe);
+
     const macos_upgrade_multifd_fresh_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
@@ -1732,7 +1755,7 @@ pub fn build(b: *std.Build) void {
     );
     run_macos_upgrade_multifd_fresh_tests.addPrefixedArtifactArg(
         "MARU_SESSION_HOST_PRODUCT_EXE=",
-        exe,
+        upgrade_target_release_exe,
     );
     run_macos_upgrade_multifd_fresh_tests.addArtifactArg(macos_upgrade_multifd_fresh_tests);
     run_macos_upgrade_multifd_fresh_tests.addArg("--maru-expect-tests=1");
@@ -1744,7 +1767,7 @@ pub fn build(b: *std.Build) void {
     );
     run_macos_upgrade_multifd_standalone.addPrefixedArtifactArg(
         "MARU_SESSION_HOST_PRODUCT_EXE=",
-        exe,
+        upgrade_target_release_exe,
     );
     run_macos_upgrade_multifd_standalone.addArtifactArg(macos_upgrade_multifd_fresh_tests);
     run_macos_upgrade_multifd_standalone.addArg("--maru-expect-tests=1");

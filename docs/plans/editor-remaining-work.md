@@ -19,6 +19,7 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 - **검증·범위 한계**: 구현이 있어도 특정 실패 조건·호스트·수명은 별도 확인해야 한다.
 - **문서 낙후**: 구현된 기능이 미구현처럼 적혀 있다. 신규 개발로 다시 세지 않는다.
 
+이 원장은 확인한 기능과 주요 잔여의 목록이며, 에디터 모든 종료 조건의 전수 완료 판정은 아니다.
 이번 점검은 소스 대조다. 새 GUI/IME 실측이나 전체 런타임 테스트는 실행하지 않았다.
 과거 제품 화면 증거는 매트릭스의 날짜·범위로만 읽고, 이번 시점의 새 실행 결과로 주장하지 않는다.
 
@@ -33,6 +34,7 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 | 구문 색·괄호·접힘·안내선·공백 표시·sticky·미니맵 | 네이티브 계획 N1/N4/N5, [frame](../../src/chrome/components/editor_view/frame.zig) | B2 draw 저장소 결정과 모든 부족 조건의 표시 보장은 남았다 |
 | LSP 호버·시그니처·정의·포맷·이름 바꾸기·자동완성·code action | [도구 계약 §8.2b~h](../editor-surface-tooling.md), 대응 `editor_*` host 모듈, [LSP 응답 라우터](../../src/platform/macos/app_session/editor_lsp.zig) | 기능이 있다는 것과 E3 도구 실행 계약 전체 완료는 다르다 |
 | semantic tokens·접힘·didSave·참조/구현/타입 정의/선언·inlay·심볼·낱말 강조·선택 확장 | 도구 계약 §8.2i~q와 대응 host 모듈 | 참조 피커와 문서 심볼 목록은 영구 도크 아웃라인이 아니다 |
+| 비교 본문 선택·복사·랩된 이어진 조각의 글자 강조 | [diff host](../../src/platform/macos/app_session/editor_diff.zig)의 DSEL2·DSEL4·DSEL5, `frame`의 바뀐 글자 painter와 이어진 조각 회귀 판정자 | 좌우 wrap 높이 정렬 제한과는 다른 기능이다 |
 | 3-way 병합 기본 기능 | [병합 계약 S1~S6](../editor-merge-conflicts.md), [merge host](../../src/platform/macos/app_session/editor_merge.zig) | 고르기 토글/스마트 결합 상태 모델은 별도 보류다 |
 
 호버·시그니처는 `editor_lsp.zig`의 응답 처리와 `app_session.zig`의 명령·tick·박스 렌더에 연결된다.
@@ -62,13 +64,16 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 같은 이름의 선언 유무만으로 판단하지 않았다. 외부 감시/자동 reload나 접근성 전체의 완전한 미구현 판정은
 이 점검만으로 내리지 않는다. E2/E3의 세부 종료 gate는 다음 절처럼 별도 추적한다.
 
-## 검증이 남았다고 해야 하는 영역
+## 종료 gate 전수 대조와 실제 검증을 구분할 영역
 
-- **E2 종료 gate 전수**: 저장·충돌·백업 코드가 있어도 동일 파일 owner transfer, 공유 뷰,
+- **E2 종료 gate 전수 대조 미실시**: 저장·충돌·백업 코드가 있어도 동일 파일 owner transfer, 공유 뷰,
   외부 atomic replace·symlink/hard-link·mode/ownership/xattr·실제 crash 복원 전체를 닫았다고 주장하지 않는다.
   현재 구현·판정자·제품 artifact를 항목별로 매핑해야 한다.
-- **E3/E4 계약**: 외부 도구 정책과 LSP transport·동기화·stale/restart/cancel/backpressure/revoke는
+- **E3/E4 종료 gate 전수 대조 미실시**: 외부 도구 정책과 LSP transport·동기화·stale/restart/cancel/backpressure/revoke는
   개별 기능의 존재와 독립된 종료 조건이다. 도구 계약 §8.2의 기존 판정자를 먼저 재사용한다.
+- **편집기 뷰 상태의 앱 재시작 복원**: 네이티브 후속의 연결 문서 표는 커서·스크롤·접힘 복원 범위를
+  workspace restore 소유로 둔다. 탭/파일 재열기·미저장 내용 복원을 뷰 상태 복원 전체의 완료로 세지 않는다.
+  `app_session/tab.zig`의 persisted snapshot과 복원 소비처를 상태별로 대조해야 하며, 이번에는 완료/미구현을 확정하지 않았다.
 - **호스트/IME**: 실제 입력기·후보창 증거는 검증 매트릭스 범위다. 이번 문서 점검으로 새 GUI 통과를 추가하지 않는다.
 - **ReleaseFast**: CI의 `editor macOS (ReleaseFast)`는 main용이며 PR에서 skipped될 수 있다.
   PR의 skip을 검증 공백으로 단정하거나, Debug 통과를 ReleaseFast 통과로 바꾸어 쓰지 않는다.

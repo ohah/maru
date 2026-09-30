@@ -2013,6 +2013,14 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   anchor charge를 건드리지 않음과, 다른 incident·charged·자기 자신으로의 이전을 거부함을 잰다. 수정 전 코드에서 N=8·13은
   `.retry_later`로 red, N=7은 green(대조군)이었다. 경계 `CR6e-c3b2c 경계는`(check-boundaries)이 batch charge 부재, anchor
   bind, 직렬 job 전제, charged==1 검사 두 자리, teardown 직전 이전 네 자리를 고정한다.
+  **CR6e-c3b2d 재연결 viewport**(같은 step 필터 `CR6e-c3b2d reconnect viewport`, 경계 `CR6e-c3b2d 경계는`): 관문이 닫힌
+  동안(observer) 들어온 `resize`가 host 로는 안 가도 `layout_size`에 남아, 재연결 강제 resize 의 크기가 host 옛 격자가
+  아니라 마지막 레이아웃 요청이 됨을, 요청 전에는 snapshot 크기로 물러남을, 버린 resize·input 이 상태당 한 번만
+  적힘을 잰다. 경계는 제품 강제 resize 자리가 `reconnectViewportSize(`를 거침, `resize`가 관문보다 먼저 의도를 적음,
+  버림 기록 일곱 자리, 이유 이름이 관문 판정 자체(`allowed = denial == null`)에서 나옴을 고정한다. 옛 동작(snapshot
+  크기 + 관문 뒤 기록)으로 되돌리면 red 다. 2026-09-29 실측(재연결 뒤 한 host 의 runtime 셋이 resize·input 을
+  흔적 없이 버림)의 **관문이 왜 닫혔는지**는 로컬에서 실제 host 다중 runtime 재연결을 돌릴 수 없어 확정하지 못했다 —
+  다음 발생은 `remote mutation dropped: … reason=` 한 줄이 관문 이름으로 가른다.
   e3c1은 reconnect-only `SessionHostCoordinator`의 final address·PID·process nonce·owner thread와 one-turn backend
   singleton projection을 결속하고, AppSession의 기존 direct drain caller를 0으로 내린다. queue/budget/backend owner를
   이동하지 않은 sole coordinator drain과 copied/stale/reinstalled-backend mutation 0을 product-type gate로 검증한다.

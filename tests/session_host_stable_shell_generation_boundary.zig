@@ -1157,12 +1157,64 @@ test "CR6e-c3b2c 경계는 host admission 하나에 resident charge 하나만 �
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn bindAdmissionIdentity("));
     inline for (.{
         "const session_host_reconnect_host_charge_step = b.step(",
-        "run_host_charge_tests.addArg(\"--maru-expect-tests=9\")",
+        "run_host_charge_tests.addArg(\"--maru-expect-tests=10\")",
         "if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);",
-        ".filters = &.{\"CR6e-c3b2c host charge\"},",
-        "run_host_charge_boundary_tests.addArg(\"--maru-expect-tests=1\")",
+        ".filters = &.{ \"CR6e-c3b2c host charge\", \"CR6e-c3b2d reconnect viewport\" },",
+        "run_host_charge_boundary_tests.addArg(\"--maru-expect-tests=2\")",
         "if (host_charge_optimize == .Debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);",
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
+}
+
+test "CR6e-c3b2d 경계는 재연결 강제 resize 가 레이아웃이 원한 크기를 쓰고 관문 버림을 남긴다" {
+    // 2026-09-29 실측: 재연결 도중 도착한 창 크기 변경이 관문(`mutationAllowed`)에서 조용히 버려지고,
+    // 게시 직전 강제 resize 가 host 의 옛 격자를 다시 박아 host 가 72행에 남았다(창은 60행). 동작은
+    // `CR6e-c3b2d reconnect viewport` 가 재고, 여기서는 그 판정이 기대는 제품 배선을 잰다.
+    const allocator = std.testing.allocator;
+    const runtime_raw = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
+    defer allocator.free(runtime_raw);
+    const runtime = try withoutLineComments(allocator, runtime_raw);
+    defer allocator.free(runtime);
+
+    // 강제 resize 의 크기는 레이아웃 의도를 거친다 — snapshot 을 그대로 쓰던 옛 모양은 0.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        runtime,
+        "\n            const size = runtime.reconnectViewportSize(runtime.surface.renderSnapshot().size);\n",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), count(runtime, "const size = runtime.surface.renderSnapshot().size;"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "return self.layout_size orelse snapshot_size;"));
+
+    // resize 는 관문보다 **먼저** 의도를 적는다 — 뒤에 적으면 버려진 크기가 사라진다.
+    const resize_fn = between(runtime, "pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16)", "const ResizeDecodeContext = struct {") orelse
+        return error.MissingResize;
+    const recorded = std.mem.indexOf(u8, resize_fn, "\n        self.layout_size = .{ .cols = cols, .rows = rows };\n");
+    const gated = std.mem.indexOf(u8, resize_fn, "\n        if (!self.mutationAllowed()) {\n            self.noteMutationDropped(\"resize\", self.mutationDenialName());\n            return;\n        }\n");
+    try std.testing.expect(recorded != null and gated != null and recorded.? < gated.?);
+
+    // 관문이 버린 mutation 은 상태가 바뀔 때 한 번 app.log 에 남는다 — 관문(resize·input 둘·select·mouse)
+    // 다섯과, 관문을 지난 뒤 stable mutation owner 가 닫혀 돌아가는 resize·input 둘.
+    try std.testing.expectEqual(@as(usize, 7), count(runtime, "\n            self.noteMutationDropped(\""));
+    try std.testing.expectEqual(@as(usize, 5), count(runtime, ", self.mutationDenialName());\n"));
+    // 이유 이름은 관문 자체에서 나온다 — allowed 는 denial 이 null 인 것이다(진단 전용 복제 0).
+    const transport_raw = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
+    defer allocator.free(transport_raw);
+    // 본문 **전체**를 잰다 — 한 줄만 재면 그 앞에 별도 조건을 끼워 관문과 이유가 갈라져도 초록이다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        transport_raw,
+        "pub fn mutationAllowedOwned(transport: *GenerationTransport, owner_addr: usize) bool {\n" ++
+            "    return mutationDenialOwned(transport, owner_addr) == null;\n}\n",
+    ));
+    const attachment_raw = try readSource(allocator, "src/platform/macos/session_host/generation_attachment.zig");
+    defer allocator.free(attachment_raw);
+    // attachment 의 이유 이름은 같은 순서(payload role → transport 관문)로 transport 의 denial 을 그대로 읽는다.
+    try std.testing.expectEqual(@as(usize, 1), count(
+        attachment_raw,
+        "        if (!self.payloadConst().allowsMutation()) return \"observer\";\n" ++
+            "        return generation_transport_mod.mutationDenialOwned(\n",
+    ));
+    const note_fn = between(runtime, "fn noteMutationDropped(", "fn mutationDenialName(") orelse
+        return error.MissingDropNote;
+    try std.testing.expectEqual(@as(usize, 1), count(note_fn, "if (self.mutation_drop_noted) return;"));
+    try std.testing.expectEqual(@as(usize, 1), count(note_fn, "\"remote mutation dropped: runtime={s} op={s} reason={s}"));
 }
 
 test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고정한다" {

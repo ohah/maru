@@ -8775,3 +8775,18 @@ test "TIG5 활성 Term 질의 ABI 가 Term 종류를 그대로 전한다 (선-�
     try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_session_active_term_is_terminal(session));
     term.kind = saved;
 }
+
+test "테스트 러너는 셸이 무시로 물려준 SIGINT·SIGQUIT 를 기본 처분으로 되돌린다 — 샤드 래퍼 아래에서도" {
+    // 이 집계 바이너리는 `tools/run-test-shards.sh` 가 샤드마다 `… &` 로 띄운다. 비대화형 `sh` 의 비동기 목록은 자식을
+    // SIGINT·SIGQUIT **무시** 상태로 띄우고, 셸에서는 그것을 되돌릴 수 없다(`trap -` 도 안 먹는다). 그래서 러너
+    // (`simple_test_runner.restoreInheritedIgnoredSignals`)가 첫 테스트 전에 되돌린다. 이 판정자는 그 결합을 **샤드
+    // 래퍼 아래에서** 잰다 — 러너의 복원이 빠지면 여기서 빨갛다(2026-09-30: 그 상태로 `external_tty` 부류 19개가
+    // `RawEnterFailed` 로 죽었다). 바이너리를 직접 돌리면 셸이 무시를 안 물려주므로 늘 초록이다 — 판정력은 CI 의
+    // 래퍼 실행에 있다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]std.posix.SIG{ .INT, .QUIT }) |sig| {
+        var current: std.posix.Sigaction = undefined;
+        std.posix.sigaction(sig, null, &current);
+        try std.testing.expect(current.handler.handler != std.posix.SIG.IGN);
+    }
+}

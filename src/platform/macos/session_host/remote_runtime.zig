@@ -16006,6 +16006,14 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
     const Peer = struct {
         fn run(fd: c.fd_t, expected_method: []const u8, response_payload: []const u8, state: *PeerState) void {
             defer _ = c.close(fd);
+            // **요청을 기한 없이 기다리지 않는다.** 메인이 요청을 보내기 전에 실패하면(예: 픽스처 초기화가
+            // `ProcessDomainMismatch`) 메인은 이 peer 를 `join` 하고 peer 는 오지 않을 요청을 `read` 에서 기다려 **실패가
+            // 영원한 멈춤이 된다**(2026-09-30 실측: 샤드 실행에서 메인 `Thread.join` · peer `readPeerFrame` 의 `read` 로 한 시간).
+            // 메인 쪽 fd 를 끊는 길은 안 된다 — 픽스처가 그 fd 를 어댑터로 옮겨 가 언제 닫힐지 모르고, 먼저 닫힌 번호가
+            // 재사용되면 엉뚱한 소켓을 끊는다. 그래서 peer 가 **자기 fd** 에 상한을 건다(이 파일의 다른 peer 와 같은 60초).
+            // 요청이 오면 곧바로 읽으므로 성공 경로의 판정에는 닿지 않는다.
+            var read_timeout = posix.timeval{ .sec = 60, .usec = 0 };
+            if (c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, &read_timeout, @sizeOf(posix.timeval)) != 0) return;
             const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
             defer std.heap.page_allocator.free(request.payload);
             state.method_matches = std.mem.indexOf(u8, request.payload, expected_method) != null;

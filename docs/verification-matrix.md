@@ -1035,6 +1035,10 @@ listener 재접속은 actual product exec와 MRSH client gate로 검증했다. n
 product exec와 real PTY/MRSH client gate로 검증했다. restore activation precommit 11행과 postcommit 4행도 actual same-PID process와 real PTY로 검증했다. 1개·최대치 근처 multi-runtime 제품 restore 하네스와 앱 재실행 orchestration은 구현됐지만,
 immutable frozen release를 사용한 실제 통과, 앱 재실행 화면의 notice와 soak가 남아 있으므로 U5 완료나 검증된
 제품 migration을 주장하지 않는다. 자동 upgrade 시도가 기본 connect 경로에 연결된 사실과 완료 증거를 섞지 않는다.
+업그레이드 스캔의 「결과를 보고 다음 후보로」 규칙(2026-09-30, [session-host-upgrade](session-host-upgrade.md) 표)은
+`test-upgrade-scan-policy`(check-boundaries)가 잰다 — std-only 판정 표(`AttemptStatus` 전 변형)와 사고 순서 모형
+(첫 후보 `resumed` → 둘째 후보 채택, 불확실·exec 뒤 멈춤, 상한 3·경과 5 s, 넘긴 첫 실패 알림), 그리고 스캔 루프가
+그 판정을 제자리에서 부르는지 보는 wiring 경계. 실제 host 여럿을 둔 스캔 E2E는 없다.
 
 | 단계 | 목표 종료 gate | 현재 증거만으로 완료로 보지 않는 것 |
 | --- | --- | --- |

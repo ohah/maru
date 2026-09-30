@@ -5957,6 +5957,41 @@ pub fn build(b: *std.Build) void {
     delta_base_generation_step.dependOn(&run_base_gen_wiring.step);
     boundary_step.dependOn(delta_base_generation_step);
 
+    // 업그레이드 스캔이 **결과를 보고** 다음 후보로 넘어가는가(2026-09-30: 확정적으로 실패하는 host 하나가
+    // readdir 순서상 늘 먼저 걸려 나머지 host 의 교체를 영구히 막았다). 판정은 std-only leaf 라 PR 에서 돌고,
+    // 스캔 루프(readdir·소켓)가 그 판정을 제자리에서 부르는지는 wiring 경계가 잰다.
+    const upgrade_scan_policy_step = b.step(
+        "test-upgrade-scan-policy",
+        "The upgrade scan continues past a resumed failure and stops on uncertain or in-flight hosts",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |scan_policy_optimize| {
+        const scan_policy_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/upgrade_scan_policy.zig"),
+                .target = target,
+                .optimize = scan_policy_optimize,
+            }),
+            .filters = &.{"업그레이드 스캔"},
+        });
+        const run_scan_policy_tests = b.addRunArtifact(scan_policy_tests);
+        run_scan_policy_tests.addArg("--maru-expect-tests=3");
+        run_scan_policy_tests.addArg("--maru-expect-passed=3");
+        upgrade_scan_policy_step.dependOn(&run_scan_policy_tests.step);
+    }
+    const scan_policy_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/upgrade_scan_policy_wiring_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_scan_policy_wiring = b.addRunArtifact(scan_policy_wiring_tests);
+    run_scan_policy_wiring.addArg("--maru-expect-tests=1");
+    run_scan_policy_wiring.addArg("--maru-expect-passed=1");
+    run_scan_policy_wiring.setCwd(b.path("."));
+    upgrade_scan_policy_step.dependOn(&run_scan_policy_wiring.step);
+    boundary_step.dependOn(upgrade_scan_policy_step);
+
     // 앱 세션의 글리프 배치가 **배치 트랜잭션을 지나는지**(한 입구·배치 앞 begin·교체 성공 뒤에만 commit). 규칙 자체는
     // `renderer.glyph_placement` 의 순수 판정자가 실제 아틀라스·가짜 텍스처로 잰다(`test`). app_session 테스트는
     // macOS 잡에서만 돌아, 배선을 PR 에서 보는 것은 이 글자 판정자다(2026-09-29 — 버린 배치로 한글이 엉뚱한 글리프로).

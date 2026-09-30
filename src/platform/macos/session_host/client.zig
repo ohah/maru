@@ -25592,10 +25592,14 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
         ) catch {};
         std.c._exit(0);
     }
+    // 실패 진단이 자식을 먼저 거두면(`waitpid`) 그 PID 는 재사용될 수 있다 — 거둔 뒤엔 신호를 보내지 않는다.
+    var child_reaped = false;
     defer {
-        _ = c.kill(child, posix.SIG.TERM);
-        var status: c_int = undefined;
-        _ = c.waitpid(child, &status, 0);
+        if (!child_reaped) {
+            _ = c.kill(child, posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = c.waitpid(child, &status, 0);
+        }
         _ = c.unlink(socket_path.ptr);
         var manifest_buf: [832]u8 = undefined;
         if (host_manifest_mod.manifestPathIn(&manifest_buf, dir_path, host_id)) |path|
@@ -25684,21 +25688,41 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
             else |_|
                 _ = usleepMs(20);
         }
-        const child_alive = c.kill(child, @enumFromInt(0)) == 0;
+        // **`kill(pid, 0)` 은 좀비에게도 성공한다** — 예전 진단은 이미 끝난 host 를 `child_alive=true` 로
+        // 찍었다(2026-09-30, `ps` 로 보니 `Z <defunct>`). `WNOHANG` 으로 거둬 끝났는지와 그 상태를 본다.
+        var wait_status: c_int = 0;
+        const reaped = c.waitpid(child, &wait_status, 1) == child; // 1 = WNOHANG
+        if (reaped) child_reaped = true;
+        const raw_status: u32 = @bitCast(wait_status);
+        const child_state: []const u8 = if (!reaped)
+            "running"
+        else if (raw_status & 0x7f == 0)
+            "exited"
+        else
+            "signaled";
         const socket_alive = c.access(socket_path.ptr, c.F_OK) == 0;
         if (host_manifest_mod.load(allocator, dir_path, host_id)) |loaded_manifest| {
             var manifest = loaded_manifest;
             defer manifest.deinit();
             std.debug.print(
-                "업그레이드 재연결 실패: child_alive={} socket_alive={} lifecycle={s} epoch={}\n",
-                .{ child_alive, socket_alive, @tagName(manifest.lifecycle), manifest.upgrade_epoch },
+                "업그레이드 재연결 실패: child={s} exit_code={d} signal={d} socket_alive={} lifecycle={s} epoch={}\n",
+                .{ child_state, (raw_status >> 8) & 0xff, raw_status & 0x7f, socket_alive, @tagName(manifest.lifecycle), manifest.upgrade_epoch },
             );
         } else |err| {
             std.debug.print(
-                "업그레이드 재연결 실패: child_alive={} socket_alive={} manifest={s}\n",
-                .{ child_alive, socket_alive, @errorName(err) },
+                "업그레이드 재연결 실패: child={s} exit_code={d} signal={d} socket_alive={} manifest={s}\n",
+                .{ child_state, (raw_status >> 8) & 0xff, raw_status & 0x7f, socket_alive, @errorName(err) },
             );
         }
+        // host 로그가 **원인**을 적는다(예: `restore stage failed: stage=activate err=DeadlineExceeded
+        // rollback=armed`). 아래 `defer` 가 디렉터리를 지우므로 그 전에 찍는다 — CI 에서는 이것이 유일한 단서다.
+        var log_buf: [832]u8 = undefined;
+        if (@import("dead_host_residue.zig").logPathIn(&log_buf, dir_path, host_id)) |log_path| {
+            if (std.Io.Dir.cwd().readFileAlloc(testing.io, log_path, allocator, .limited(16 * 1024))) |log_bytes| {
+                defer allocator.free(log_bytes);
+                std.debug.print("host 로그({s}):\n{s}\n", .{ log_path, log_bytes });
+            } else |err| std.debug.print("host 로그 없음({s}): {s}\n", .{ log_path, @errorName(err) });
+        } else |_| {}
         return error.TestUnexpectedResult;
     };
     defer restored.deinit();

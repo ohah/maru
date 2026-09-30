@@ -899,6 +899,14 @@ test "B2 비교 뷰 op 분할 — 총량이 충분해도 한쪽 밀집이면 절
     const clipped = build(props, s);
     try testing.expect(clipped.truncated);
     std.debug.print("[B2 diff split] full_ops={d} global_cap={d} left_cap={d} clipped_ops={d}\n", .{ full.ops, s.ops.len, s.ops.len / 2, clipped.ops });
+    const p = plan(props);
+    const panes = [_]frame.Props{
+        sideProps(p.left, p.shared, p.cols.left, p.left_bg),
+        sideProps(p.right, p.shared, p.cols.right, p.right_bg),
+    };
+    const streaming = try frame.B2Experiment.checkPanes(&panes, 16000);
+    try testing.expectEqual(full.ops, streaming.total);
+    std.debug.print("[B2FW diff] full_ops={d} shared_writer_bytes={d} panes=2\n", .{ streaming.total, streaming.peak_capacity * @sizeOf(draw.Op) });
 }
 
 test "RB3 제보 재현 — 비교 뷰 68행·촘촘한 색에 옛 제품 저장소(run 1280·글자 16384)를 줘도 좌우 번호가 다 선다; bufferSizes 만큼이면 절단이 없다" {

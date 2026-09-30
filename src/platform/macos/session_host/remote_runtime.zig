@@ -16770,9 +16770,12 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // `zig build test` 의 이 판정자가 `expected 11664, found 11680` 으로 잡았다. ⚠️ **그 PR 은 초록이었다** —
             // 이 pin 을 도는 것은 `zig build test` 뿐이고, PR 의 session-host 잡은 바뀐 파일이 `editor` 축이라
             // 영역 게이팅으로 스킵됐다. 로컬 `mise run check` 도 그 artifact 를 ReleaseFast 로 돌지 않아 초록이었다.
-            .Debug => 11744,
+            // 2026-09-30 #4017(재연결 강제 resize 의 `layout_size` + op 별 mutation-drop 이유 슬롯): Debug **+96**
+            // · ReleaseFast **+80** — main push 의 `session host macOS (Debug)` 잡이 `expected 11744, found 11840` /
+            // `expected 11696, found 11776` 으로 실측했다. ⚠️ **그 PR 도 초록이었다** — 이 pin 은 PR 에서 돌지 않는다.
+            .Debug => 11840,
             // 2026-09-23 빈 드레인 건너뛰기(`idle_drain_epoch`·`idle_drain_generation`, u64 둘): Debug +16 · ReleaseFast +16(실측).
-            .ReleaseFast => 11696,
+            .ReleaseFast => 11776,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -16787,8 +16790,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9008, // 2026-09-23 빈 드레인 건너뛰기 +16(위 표와 같은 델타 — 실측)
-            .ReleaseFast => 8960, // 2026-09-23 빈 드레인 건너뛰기 +16(위 표와 같은 델타 — 실측)
+            .Debug => 9104, // 2026-09-30 #4017 +96(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .ReleaseFast => 9040, // 2026-09-30 #4017 +80(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.

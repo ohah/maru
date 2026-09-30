@@ -3728,7 +3728,8 @@ test "B2FW2 상한·OOM — 기본 표시 보존과 현재 검색 보장의 경�
     try testing.expectEqual(@as(usize, 2), b2RoleCount(capped.ops, scrollbar.thumb_role));
     try testing.expect(capped.ops.len <= 2560 and list.capacity <= 2560);
     const held_capacity = list.capacity;
-    var failing = testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    // alloc 만 막으면 Linux 에서는 remap 으로 성장이 성공할 수 있다. 두 경로 모두 실패시킨다.
+    var failing = testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
     const failed = try b2BuildStagedWriter(failing.allocator(), props, base.scratch(runs, bytes), &list, 16000);
     try testing.expect(failed.allocation_failed and failed.written.truncated and !failed.op_limited);
     try testing.expectEqual(held_capacity, list.capacity);
@@ -3737,7 +3738,7 @@ test "B2FW2 상한·OOM — 기본 표시 보존과 현재 검색 보장의 경�
     try testing.expectEqual(@as(usize, 2), b2RoleCount(failed.ops, scrollbar.thumb_role));
     var empty: std.ArrayList(draw.Op) = .empty;
     defer empty.deinit(a);
-    var initial_fail = testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var initial_fail = testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
     const fallback = try b2BuildStagedWriter(initial_fail.allocator(), props, base.scratch(runs, bytes), &empty, 16000);
     try testing.expect(fallback.allocation_failed and fallback.written.truncated);
     try testing.expectEqual(@as(usize, 80), b2RoleCount(fallback.ops, .cursor));
@@ -3746,7 +3747,7 @@ test "B2FW2 상한·OOM — 기본 표시 보존과 현재 검색 보장의 경�
     // 성장 OOM 전체에 현재 매치 보장을 일반화하지 않고 이 반례를 고정한다.
     var second_empty: std.ArrayList(draw.Op) = .empty;
     defer second_empty.deinit(a);
-    var second_fail = testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    var second_fail = testing.FailingAllocator.init(a, .{ .fail_index = 1, .resize_fail_index = 0 });
     const before_current = try b2BuildStagedWriter(second_fail.allocator(), props, base.scratch(runs, bytes), &second_empty, 16000);
     try testing.expect(before_current.allocation_failed and before_current.written.truncated);
     try testing.expectEqual(@as(usize, 0), b2RoleCount(before_current.ops, .search_match_current));

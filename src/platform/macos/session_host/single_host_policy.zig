@@ -39,6 +39,26 @@ pub const Observation = struct {
     current_build: bool,
     /// 매니페스트가 마지막으로 게시된 시각(birth time, ns). 못 읽으면 `null`.
     published_ns: ?i128,
+    /// 이번 실행의 업그레이드 스캔이 이 host 에 붙지 못했거나 응답·재연결이 시간 초과로 끝났다(`HostSet`). 다시 붙어
+    /// 보면 같은 대기(최악 수십 초)를 **메인 스레드에서 한 번 더** 치르므로 붙어 보지 않고 뺀다.
+    unreachable_this_launch: bool = false,
+};
+
+/// 이번 실행에서 붙지 못한 host 의 유한 집합. 업그레이드 스캔이 채우고 재사용 판정이 읽는다. 넘치면 더 담지 않는다 —
+/// 그 host 는 다시 붙어 볼 뿐이다(느려질 수는 있어도 틀리지는 않는다).
+pub const HostSet = struct {
+    ids: [max_candidates]u128 = undefined,
+    len: usize = 0,
+
+    pub fn add(self: *HostSet, host_id: u128) void {
+        if (self.contains(host_id) or self.len == self.ids.len) return;
+        self.ids[self.len] = host_id;
+        self.len += 1;
+    }
+
+    pub fn contains(self: *const HostSet, host_id: u128) bool {
+        return std.mem.indexOfScalar(u128, self.ids[0..self.len], host_id) != null;
+    }
 };
 
 /// 새 host 를 띄우는 이유. **뒤에 올수록 재사용에 가까웠다** — 여러 후보가 서로 다른 이유로 빠지면 가장 가까웠던
@@ -77,6 +97,7 @@ pub fn exclusionFor(observation: Observation) ?SpawnReason {
     // 살아 있다는 **긍정적 증거**(`held`)가 있을 때만 쓴다. `unknown` 에 새 탭을 걸면 우리 쪽 사정으로 죽은 host 에
     // 붙으려 하는 것이고, 그 오판 비용이 host 하나를 더 띄우는 것보다 크다(`findCurrentManifestHost` 와 같은 규율).
     if (observation.lease != .held) return .no_live_host;
+    if (observation.unreachable_this_launch) return .connect_failed;
     if (!observation.same_wire) return .incompatible_wire;
     if (!observation.ready) return .host_not_ready;
     return null;
@@ -86,6 +107,14 @@ pub fn exclusionFor(observation: Observation) ?SpawnReason {
 /// 싣고 `runtime.spawn_full` 을 부르므로, 두 capability 를 모두 광고해야 한다(`remote_runtime.spawnWithConnection`).
 pub fn spawnContractSatisfied(runtime_core_command: bool, notification_delivery: bool) bool {
     return runtime_core_command and notification_delivery;
+}
+
+/// 재사용한 host 가 이 GUI 와 **다른** build 인가 — UI 가 「새 탭도 옛 이미지에서 돈다」 를 알릴지 가른다. 둘 다 알 때만
+/// 같다고 말한다. 어느 쪽이든 모르면 다르다고 본다(알리지 않고 옛 이미지를 쓰는 쪽이 더 나쁘다).
+pub fn reusedPreviousBuild(reused_build_id: ?[]const u8, current_build_id: ?[]const u8) bool {
+    const reused = reused_build_id orelse return true;
+    const current = current_build_id orelse return true;
+    return !std.mem.eql(u8, reused, current);
 }
 
 fn stronger(a: SpawnReason, b: SpawnReason) SpawnReason {
@@ -226,9 +255,32 @@ test "세션 호스트 하나 — 매니페스트 판정과 spawn 계약" {
     o = live(1, 1);
     o.ready = false;
     try testing.expectEqual(@as(?SpawnReason, .host_not_ready), exclusionFor(o));
+    // 이번 실행의 스캔이 붙지 못한 host 는 다시 붙어 보지 않는다(같은 대기를 메인 스레드에서 두 번 치르지 않게).
+    o = live(1, 1);
+    o.unreachable_this_launch = true;
+    try testing.expectEqual(@as(?SpawnReason, .connect_failed), exclusionFor(o));
+    var never: FakeProber = .{ .results = &.{.{ .host_id = 1, .probe = .reusable }} };
+    try testing.expectEqualDeep(Decision{ .spawn = .connect_failed }, choose(&.{o}, &never));
+    try testing.expectEqual(@as(usize, 0), never.probed_count);
+
+    var set: HostSet = .{};
+    try testing.expect(!set.contains(7));
+    set.add(7);
+    set.add(7);
+    try testing.expect(set.contains(7));
+    try testing.expectEqual(@as(usize, 1), set.len);
+    for (0..max_candidates + 4) |i| set.add(@as(u128, i) + 100);
+    try testing.expectEqual(max_candidates, set.len);
 
     try testing.expect(spawnContractSatisfied(true, true));
     try testing.expect(!spawnContractSatisfied(false, true));
     try testing.expect(!spawnContractSatisfied(true, false));
     try testing.expect(!spawnContractSatisfied(false, false));
+
+    // 알림 판정: 둘 다 알고 같을 때만 「같은 build」.
+    try testing.expect(!reusedPreviousBuild("sha256:aa", "sha256:aa"));
+    try testing.expect(reusedPreviousBuild("sha256:aa", "sha256:bb"));
+    try testing.expect(reusedPreviousBuild(null, "sha256:aa"));
+    try testing.expect(reusedPreviousBuild("sha256:aa", null));
+    try testing.expect(reusedPreviousBuild(null, null));
 }

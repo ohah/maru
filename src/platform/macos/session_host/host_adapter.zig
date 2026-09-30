@@ -414,6 +414,11 @@ pub const HostAdapter = struct {
         return self.slot.preflightAttachmentConnectionUsable();
     }
 
+    /// 이 adapter 로 새 runtime 을 띄울 수 있는가(`ClientSlot.spawnConnectionUsable`).
+    pub fn spawnConnectionUsable(self: *const HostAdapter) bool {
+        return self.slot.spawnConnectionUsable();
+    }
+
     pub fn prepareRetiredClientReclaim(
         self: *HostAdapter,
         out: *client_slot_mod.PreparedRetiredClientReclaim,

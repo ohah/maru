@@ -228,11 +228,17 @@ pub fn connectOrLaunchDetailed(
         .failed => |reason| return plain(.{ .failed = reason }),
         .absent => {},
     }
+    // 다른 GUI 가 시작 책임을 쥐고 있으면 그 결과를 기다린다. 그 GUI 가 업그레이드에 실패해 살아 있는 host 를
+    // 재사용했다면 같은 build host 는 **영영 게시되지 않으므로**, 게시만 기다리면 예산을 다 태우고 끝난다. lock 이
+    // 풀리는 순간(그 GUI 의 판정이 끝났다) 곧바로 lock 을 쥐고 재사용 판정으로 간다 — 업그레이드는 방금 그 GUI 가
+    // 시도했으므로 다시 하지 않는다. publish 전에 실패한 winner 뒤에서도 같은 길로 launch owner 가 된다.
+    var waited_for_launch_owner = false;
     if (lock_probe == .contended) {
-        if (connectManifestRegistryWithBackoff(allocator, exe_path, base_cache_dir, dir, opts)) |outcome|
-            return plain(outcome);
-        // 이전 winner가 publish 전에 실패했으면 loser가 영구 fallback하지 않고 lock을 한 번 재획득해 launch owner가 된다.
-        if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) return plain(.{ .failed = .startup_timeout });
+        switch (waitForLaunchOwner(allocator, exe_path, base_cache_dir, dir, lock_fd, opts)) {
+            .outcome => |outcome| return plain(outcome),
+            .lock_acquired => waited_for_launch_owner = true,
+            .timed_out => return plain(.{ .failed = .startup_timeout }),
+        }
     }
 
     // Lock 취득 뒤 registry도 다시 읽는다. 다른 process가 manifest를 publish한 직후 fixed endpoint가 비어 있는
@@ -243,7 +249,9 @@ pub fn connectOrLaunchDetailed(
     // 이어받는다. 여기(start lock 획득 뒤)에서 하는 이유: lock이 동시 시작자를 직렬화하므로 두 GUI가 같은 host에
     // 동시에 upgrade를 걸지 않는다. 실패하면 아래에서 살아 있는 host 를 재사용하고, 그런 host 가 없을 때만 새로 띄운다.
     var upgrade_notice: ?UpgradeNotice = null;
-    switch (tryUpgradeExistingHost(allocator, exe_path, base_cache_dir, dir)) {
+    // 이번 스캔이 붙지 못했거나 시간 초과로 끝난 host — 재사용 판정이 같은 대기를 다시 치르지 않게 넘긴다.
+    var unreachable_hosts: single_host_policy.HostSet = .{};
+    if (!waited_for_launch_owner) switch (tryUpgradeExistingHost(allocator, exe_path, base_cache_dir, dir, &unreachable_hosts)) {
         .none => {},
         .connected => |client| {
             const upgraded_host_id = client.host_id;
@@ -251,13 +259,13 @@ pub fn connectOrLaunchDetailed(
         },
         .fallback => |notice| upgrade_notice = notice,
         .failed => |reason| return plain(.{ .failed = reason }),
-    }
+    };
 
     // 교체가 아무 host 도 못 바꿨어도 **살아 있고 새 탭을 받을 수 있는 host 가 있으면 그 host 를 쓴다** — 「한 로그인
     // 세션에 host 하나」(docs/persistent-session-host.md). 예전엔 여기서 곧장 새 host 를 띄웠고, 교체가 늘 실패하는
     // host 하나 때문에 설치마다 host 가 하나씩 늘었다(2026-09-30 실측: 넷). 이미 생긴 host 는 셸 PTY 를 쥐고 있어
     // 합칠 수 없으므로 늘지 않게 막는 것이 할 수 있는 전부다. 새 host 는 그런 host 가 하나도 없을 때만 띄운다.
-    switch (reuseLiveHost(allocator, exe_path, base_cache_dir, dir)) {
+    switch (reuseLiveHost(allocator, exe_path, base_cache_dir, dir, &unreachable_hosts)) {
         .reuse => |reused| return .{
             .outcome = .{ .connected = reused.client },
             .upgrade_notice = upgrade_notice,
@@ -291,6 +299,17 @@ fn findCurrentManifestHost(
 ) ?Outcome {
     const build_id = host_manifest.buildIdForExecutable(allocator, exe_path) catch return null;
     defer allocator.free(build_id);
+    return findManifestHostForBuild(allocator, build_id, base_cache_dir, session_dir);
+}
+
+/// `findCurrentManifestHost` 의 본체. build id 는 실행 파일(수십 MB)을 SHA-256 해 얻으므로, 같은 값을 여러 번 보는
+/// 대기 루프는 한 번 구해 이 함수에 넘긴다.
+fn findManifestHostForBuild(
+    allocator: std.mem.Allocator,
+    build_id: []const u8,
+    base_cache_dir: []const u8,
+    session_dir: [:0]const u8,
+) ?Outcome {
     var hosts_buf: [640]u8 = undefined;
     const hosts_root = host_manifest.hostsRootPathIn(&hosts_buf, session_dir) catch return .{ .failed = .invalid_endpoint };
     const directory = c.opendir(hosts_root.ptr) orelse return null;
@@ -469,6 +488,7 @@ fn tryUpgradeExistingHost(
     exe_path: [:0]const u8,
     base_cache_dir: []const u8,
     session_dir: [:0]const u8,
+    unreachable_hosts: *single_host_policy.HostSet,
 ) UpgradeSearch {
     const target_identity = staged_image.inspect(exe_path) catch return .none;
     // build id를 **같은 inspect 결과에서** 유도한다(`buildIdForExecutable`은 경로를 한 번 더 읽는다). 두 번 읽으면
@@ -545,8 +565,10 @@ fn tryUpgradeExistingHost(
             // 프로세스만 하나 더 늘린다 — 형제 스캔(`findCurrentManifestHost`)과 같은 규율로 즉시 올린다.
             .failed => |reason| if (reason == .out_of_memory)
                 return .{ .failed = reason }
-            else
-                continue,
+            else {
+                unreachable_hosts.add(host_id);
+                continue;
+            },
         };
         // capability를 광고하지 않는 구 host는 exec 교체를 모른다. **죽이지 않고** 그대로 둔다 — 그 아래 runtime이
         // 살아 있고, capability 없는 host를 종료해 migration처럼 보이게 하지 않는다(session-host-upgrade.md).
@@ -571,6 +593,7 @@ fn tryUpgradeExistingHost(
             // exec한다. 그때 다른 host로 스캔을 이어 가면 이미 교체 중인 host를 두고 또 다른 host를 흔든다 —
             // 재연결로 결과를 확인하고, 아니면 여기서 끝낸다(`prepare_transport_error` 는 언제나 멈춤).
             client.deinit();
+            unreachable_hosts.add(host_id);
             const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
             if (settleUpgrade(&scan, .prepare_transport_error, reconnected)) |done| return done;
             continue;
@@ -583,6 +606,7 @@ fn tryUpgradeExistingHost(
             // host가 응답을 전량 보낸 뒤 이 connection을 닫고 exec한다 — 같은 host_id로 다시 붙어 결과를 확정한다.
             .accepted_reconnect_required => {
                 const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
+                if (reconnectTimedOut(reconnected)) unreachable_hosts.add(host_id);
                 if (settleUpgrade(&scan, resolutionAfterReconnect(reconnected), reconnected)) |done| return done;
             },
             // host가 이미 끝난 attempt를 보고했다 — `AttemptReason`이 왜 못 바꿨는지 말해 준다. 이 값을 버리면
@@ -590,6 +614,7 @@ fn tryUpgradeExistingHost(
             .completed => |report| {
                 if (report.status == .committed) {
                     const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
+                    if (reconnectTimedOut(reconnected)) unreachable_hosts.add(host_id);
                     if (settleUpgrade(&scan, .{ .completed = .committed }, reconnected)) |done| return done;
                     continue;
                 }
@@ -622,6 +647,17 @@ fn tryUpgradeExistingHost(
 
 const UpgradeScan = upgrade_scan_policy.Scan(UpgradeNotice);
 
+/// exec 뒤 재연결이 **붙지 못하고** 끝났는가(최대 10 s 를 이미 기다렸다). 재사용 판정이 이 host 에 다시 붙어 보지 않게 한다.
+fn reconnectTimedOut(result: UpgradeReconnect) bool {
+    return switch (result) {
+        .connected => false,
+        .failed => |notice| switch (notice) {
+            .upgrade_failed => |failed| failed.failure == .reconnect,
+            .upgraded, .upgrade_busy, .upgrade_rejected, .legacy_unavailable => false,
+        },
+    };
+}
+
 const LiveHostReuse = union(enum) {
     reuse: struct { client: client_mod.Client, previous_build: bool },
     spawn: single_host_policy.SpawnReason,
@@ -635,6 +671,7 @@ fn reuseLiveHost(
     exe_path: [:0]const u8,
     base_cache_dir: []const u8,
     session_dir: [:0]const u8,
+    unreachable_hosts: *const single_host_policy.HostSet,
 ) LiveHostReuse {
     // build 를 못 읽으면 모든 후보를 옛 build 로 본다 — 순서만 달라지고, UI 는 보수적으로 「옛 build」 를 알린다.
     const current_build_id: ?[]const u8 = host_manifest.buildIdForExecutable(allocator, exe_path) catch null;
@@ -670,6 +707,7 @@ fn reuseLiveHost(
                     },
                     .current_build = if (current_build_id) |id| std.mem.eql(u8, manifest.build_id, id) else false,
                     .published_ns = manifestPublishedNs(session_dir, host_id),
+                    .unreachable_this_launch = unreachable_hosts.contains(host_id),
                 };
                 observation_count += 1;
             }
@@ -680,7 +718,7 @@ fn reuseLiveHost(
     return switch (single_host_policy.choose(observations[0..observation_count], &prober)) {
         .reuse => |host_id| reuse: {
             const client = prober.client orelse unreachable; // `reusable` 은 연결을 쥔 채로만 나온다.
-            const previous_build = if (current_build_id) |id| !upgradedHostMatches(client.build_id, id) else true;
+            const previous_build = single_host_policy.reusedPreviousBuild(client.build_id, current_build_id);
             if (!builtin.is_test)
                 std.log.info("session host: reusing live host={x:0>32} previous_build={} — no new host", .{ host_id, previous_build });
             break :reuse .{ .reuse = .{ .client = client, .previous_build = previous_build } };
@@ -818,20 +856,38 @@ fn connectNewHostWithBackoff(
     return .{ .failed = .startup_timeout };
 }
 
-fn connectManifestRegistryWithBackoff(
+const LaunchOwnerWait = union(enum) {
+    outcome: Outcome,
+    /// 시작 책임자가 같은 build host 를 게시하지 않고 lock 을 놓았다 — 이제 우리가 lock 을 쥐었다.
+    lock_acquired,
+    timed_out,
+};
+
+/// start lock 을 쥔 다른 GUI 를 기다린다. 매 폴에서 ① 같은 build host 가 게시됐으면 붙고 ② lock 이 풀렸으면 쥐고
+/// 돌아온다. build id 는 **한 번만** 구한다 — 폴마다 실행 파일을 해시하면 150 폴이 메인 스레드에서 십수 초가 된다.
+fn waitForLaunchOwner(
     allocator: std.mem.Allocator,
     exe_path: [:0]const u8,
     base_cache_dir: []const u8,
     session_dir: [:0]const u8,
+    lock_fd: c.fd_t,
     opts: Options,
-) ?Outcome {
+) LaunchOwnerWait {
+    const build_id: ?[]const u8 = host_manifest.buildIdForExecutable(allocator, exe_path) catch null;
+    defer if (build_id) |id| allocator.free(id);
     var attempts: usize = 0;
     while (attempts < opts.connect_attempts) : (attempts += 1) {
-        if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, session_dir)) |outcome|
-            return outcome;
+        if (build_id) |id| if (findManifestHostForBuild(allocator, id, base_cache_dir, session_dir)) |outcome|
+            return .{ .outcome = outcome };
+        if (flock(lock_fd, LOCK_EX | LOCK_NB) == 0) {
+            // 풀리기 직전에 게시했을 수 있다 — lock 을 쥔 채 한 번 더 본다.
+            if (build_id) |id| if (findManifestHostForBuild(allocator, id, base_cache_dir, session_dir)) |outcome|
+                return .{ .outcome = outcome };
+            return .lock_acquired;
+        }
         _ = usleep(opts.connect_delay_ms * 1000);
     }
-    return null;
+    return .timed_out;
 }
 
 /// 이미 존재하는 특정 major host만 찾는다. 조회/restore 경로라 spawn하지 않으며 versioned endpoint를 먼저,

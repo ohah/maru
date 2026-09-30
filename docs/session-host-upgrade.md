@@ -25,6 +25,21 @@
 > 생기지 않으므로 다음 앱 실행도 스캔을 다시 돌려 교체를 계속 시도한다. 이미 여럿인 host를 하나로 합치지는 못한다
 > (host 간 runtime 이관 기능이 없다). 판정은 `single_host_policy.zig`(std-only leaf), 배선은
 > `tests/single_host_policy_wiring_boundary.zig`가 잰다(`test-single-host-policy`, check-boundaries).
+> **살아 있는 host가 있는데도 새 host가 뜨는 예외는 남는다** — 메인 스레드에 대기를 더하지 않기로 했기 때문이다.
+> ① `host_not_ready`: 유일한 host가 `restoring`·`draining`이다. 교체 재연결이 10 s 예산 안에 확정되지 않은
+> (`unresolved`) host도 여기 든다 — restoring host를 기다리는 유한 대기는 메인 스레드 비용 때문에 두지 않는다.
+> ② `connect_failed`: 붙지 못했다. 이번 실행의 업그레이드 스캔이 붙지 못했거나 prepare 응답·재연결이 시간 초과로 끝난
+> host는 재사용 판정이 **다시 붙어 보지 않고** 이 이유로 뺀다(같은 수십 초 대기를 두 번 치르지 않게).
+> ③ owner lease `unknown`(`no_live_host`로 센다): 우리가 lease를 못 봤다. 살아 있다는 증거 없이 새 탭을 걸지 않는다.
+> 그 밖에 N-1 host뿐(`incompatible_wire`)이거나 전부 spawn 계약을 모르는(`spawn_contract_missing`) 경우도 새 host를
+> 띄운다. 이유는 모두 `session host: spawning new host because <reason>` 한 줄에 남는다.
+> **교체가 계속 실패하는 동안의 비용**: 같은 build의 host가 생기지 않으므로 앱을 켤 때마다 스캔과 prepare가 다시
+> 돈다 — 보통의 `resumed` 실패는 실행마다 약 1 s다. **영영 교체되지 않는 host에서 벗어나는 법**: 그 host의 탭을 모두
+> 닫는다. runtime이 0이 되면 host는 스스로 종료하고(§자연 종료), 다음 탭은 남은 host를 쓰거나 host가 하나도 없으면
+> 새 build host를 띄운다.
+> 다른 GUI가 start lock을 쥐고 있으면 그 결과를 기다리되, 같은 build host가 게시되지 않은 채 lock이 풀리면 곧바로
+> lock을 쥐고 재사용 판정으로 간다(업그레이드는 방금 그 GUI가 시도했으므로 다시 하지 않는다). build id는 대기 전에
+> 한 번만 구한다 — 폴마다 실행 파일을 해시하면 메인 스레드가 십수 초 멈춘다.
 > **스캔은 결과를 보고 다음 후보로 간다(2026-09-30).** 예전엔 prepare를 한 번 보내면 결과와 무관하게 끝냈는데,
 > 9/27 빌드 host가 매니페스트 ctime 결함으로 교체가 매번 `resumed/handoff_failed`로 끝나면서 readdir 순서상 늘 첫
 > 후보였다 — 스캔이 거기서 끝나 9/28·9/29 빌드 host 둘은 한 번도 시도받지 못했고, 설치마다 새 host가 하나씩 늘어

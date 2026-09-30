@@ -9002,8 +9002,17 @@ pub const AppSession = struct {
             // 재사용된 host(`single_host_policy`)가 이미 복원 adapter 로 pool 에 있으면 다시 게시하지 않고 **그 adapter 를
             // spawn host 로 세운다.** 같은 host 를 두 번 게시하면 `DuplicateHost` 로 실패해 새 탭이 in-process 로 떨어진다 —
             // 죽은 spawn host 를 치운 뒤 다시 붙는 자리(`term.zig` createTerm)가 남은 host 를 고르면 늘 이 모양이다.
-            if (app_remote_backend) |*backend| if (app_remote_host_pool) |*pool| if (pool.get(host_id) != null) {
+            //
+            // **그 adapter 의 연결이 살아 있을 때만.** host 는 살아 있는데 우리 연결만 닫혀 `evictDeadSpawnHost` 가
+            // 항목을 못 지운(HostInUse) 경우, 채택하면 spawn 이 `AdminBusy` 로 실패해 탭이 안 열리고, spawn host 가 서
+            // 있으니 30 s 재시도도 조기 반환에 막힌다. 그때는 spawn host 를 세우지 않고 재시도 가능한 실패로 남긴다
+            // (예전 `DuplicateHost` 갈래와 같은 결과 — 새 탭은 in-process, 래치가 다음 시도를 연다).
+            if (app_remote_backend) |*backend| if (app_remote_host_pool) |*pool| if (pool.get(host_id)) |existing| {
                 client.deinit();
+                if (!existing.spawnConnectionUsable()) {
+                    self.markHostConnectFailedReason(.adapter, .resource_exhausted);
+                    return;
+                }
                 pool.setSpawnHost(host_id) catch unreachable;
                 backend.promoteToSpawnAndAttach(pool) catch {
                     pool.clearSpawnHost();
@@ -9587,12 +9596,14 @@ pub const AppSession = struct {
         self.session_host_reuse_notice_pending = false;
         if (!is_macos) return;
         var detail_buf: [256]u8 = undefined;
-        const detail = if (notice) |value| value.detail(&detail_buf) else "-";
-        // 재사용이면 그 사실이 먼저다 — 업그레이드 결과는 그 이유로 같은 줄에 싣는다(알림 칸은 하나다).
-        if (reused)
-            self.showNoticeFmt(.app_session_host_reused_previous_build, &.{.{ .s = detail }})
-        else
-            self.showNoticeFmt(.app_session_host_upgrade_result, &.{.{ .s = detail }});
+        // 재사용이면 그 사실이 먼저다 — 업그레이드 결과가 있으면 그 이유로 같은 줄에 싣는다(알림 칸은 하나다).
+        if (notice) |value| {
+            const detail = value.detail(&detail_buf);
+            if (reused)
+                self.showNoticeFmt(.app_session_host_reused_previous_build_detail, &.{.{ .s = detail }})
+            else
+                self.showNoticeFmt(.app_session_host_upgrade_result, &.{.{ .s = detail }});
+        } else self.showNoticeFmt(.app_session_host_reused_previous_build, &.{});
     }
 
     /// codex 훅의 신뢰 값이 낡아 **그 훅이 돌지 않는** 상태를 첫 tick에 한 번 알린다(계약 §2.1).

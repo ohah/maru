@@ -20405,8 +20405,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // 2026-09-19 `48f89bc10`(한국어 preedit 앵커) 뒤 둘 다 +16 — 위 `C3-3b2b3` 의 표와 함께 움직인다(경계 판정자가 둘을 센다).
             // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
-            .Debug => 11744,
-            .ReleaseFast => 11696, // 2026-09-23 빈 드레인 건너뛰기 +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
+            // 2026-09-30 #4017 Debug +96 · ReleaseFast +80 — 위 `C3-3b2b3` 표와 같은 CI 실측.
+            .Debug => 11840,
+            .ReleaseFast => 11776, // 2026-09-23 빈 드레인 건너뛰기 +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서

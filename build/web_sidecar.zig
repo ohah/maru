@@ -140,10 +140,17 @@ pub fn register(b: *std.Build, ctx: Context) void {
     });
     make_manifest.addArg(ctx.maru_version);
     const install_manifest = &b.addInstallFileWithDir(manifest_file, dist, "maru-chromium.json").step;
+    // W7b: 다 깐 뒤 Mach-O 를 Homebrew 가 고칠 것이 없는 모양(dylib·프레임워크 ID 를 `@rpath/…`)으로 맞추고 재서명·확인한다
+    // — Homebrew 의 소스 설치 relocation 이 CEF dylib 에서 중간에 실패해 프레임워크 서명을 깨뜨렸다(9 차 적대 검증 실측).
+    const fix_macho = b.addSystemCommand(&.{ "/bin/sh", "tools/web-sidecar-dist-macho.sh" });
+    fix_macho.setCwd(b.path("."));
+    fix_macho.addArg(b.getInstallPath(dist, ""));
+    fix_macho.has_side_effects = true;
     for (dist_installs ++ [_]*std.Build.Step{install_manifest}) |install| {
         install.dependOn(&clean_dist.step);
-        dist_step.dependOn(install);
+        fix_macho.step.dependOn(install);
     }
+    dist_step.dependOn(&fix_macho.step);
 }
 
 /// 프레임워크는 실행 파일 옆에 **실제 파일**로 둔다 — 샌드박스는 링크를 실제 경로로 풀어 그 밖을 못 읽는다(C1 실측).

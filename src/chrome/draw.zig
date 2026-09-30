@@ -211,4 +211,9 @@ pub const Op = union(enum) {
 
 /// 한 컴포넌트가 한 프레임에 내는 출력 = (레이어, 그 레이어에 그릴 ops). ops 슬라이스 수명은 호출자
 /// (host)가 프레임 arena로 소유한다.
-pub const ChromeDraw = struct { layer: Layer, ops: []const Op };
+pub const ChromeDraw = struct {
+    layer: Layer,
+    ops: []const Op,
+    /// 각 열의 찾기처럼 독립된 최상위 패널은 자신의 배경·그림자를 가진다.
+    independent_panel: bool = false,
+};

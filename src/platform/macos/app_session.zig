@@ -2566,6 +2566,11 @@ const TermRuntime = struct {
     /// 한다** — 안 그러면 랩을 켠 직후 첫 Enter가 매치를 화면에 못 올려 **두 번 눌러야 보인다**
     /// (적대적 검증 2026-08-24 실측). 원격 find가 `remote_find_scroll_pending`으로 쓰는 그 패턴이다.
     editor_find_reveal_pending: bool = false,
+    editor_diff_find_matches: std.ArrayList(maru.session.editor.find.Match) = .empty,
+    editor_diff_find_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
+    editor_diff_find_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
+    editor_diff_find_left: chrome.props.PaneRect = .{},
+    editor_diff_find_right: chrome.props.PaneRect = .{},
     editor_find_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
     /// 위 배열이 가리키는 실제 저장소 — **매치 수만큼** 잡는다.
     ///
@@ -2857,7 +2862,7 @@ const ModalInputRole = union(enum) {
 /// "존재하지만 엉뚱한 값을 적는 것"뿐이고, 그건 아래 실행 테스트가 실제 `inputFocus()`와 대조해 잡는다.
 fn modalInputRole(field: ChromeHostField) ModalInputRole {
     return switch (field) {
-        .interaction, .key_hints => .not_an_overlay,
+        .interaction, .key_hints, .find_secondary, .diff_find_source => .not_an_overlay,
         .confirm => .{ .routes_text = .confirm },
         .find => .{ .routes_text = .find },
         .palette => .{ .routes_text = .palette },
@@ -12808,7 +12813,7 @@ pub const AppSession = struct {
             .none => {}, // notice dismiss 등 — session 부수효과 없음(컴포넌트가 닫음)
             // find.hide는 컴포넌트가 이미 — 하이라이트만 정리. **목록이 둘이라 둘 다 비운다**:
             // 편집기 쪽을 남기면 Esc로 닫아도 문서에 강조가 남는다(`toggleFind`와 같은 짝).
-            .find_close => find_ops.clearAllFindMatches(self),
+            .find_close => find_ops.closeCurrentFind(self),
             // 웹 탭이면 페이지의 다음/이전 매치로(같은 조작, 다른 대상). 방향은 컴포넌트가 기록한 nav_forward —
             // 페이지 모드는 매치 리스트가 없어 `current`가 안 움직이므로 그것으로는 방향을 알 수 없다.
             .find_navigated => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0)
@@ -13929,7 +13934,7 @@ pub const AppSession = struct {
     /// 자동 닫힘 타이머가 없어 아무 입력으로나 닫지 않으면 토스트 동안 입력이 영구히 막히기 때문이다.
     pub fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
-        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.symbol_picker.open or h.reference_picker.open or h.settings.open;
+        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or (h.find.open and h.find.input_focused) or h.palette.open or h.symbol_picker.open or h.reference_picker.open or h.settings.open;
     }
 
     /// 오버레이 frame 을 **그려야** 하는가. `anyOverlayOpen` 과 갈리는 이유는 **패시브 표면**이다 —
@@ -13941,7 +13946,7 @@ pub const AppSession = struct {
     /// 직접 불러 이 게이트를 건너뛰었기 때문이다(제품에서는 상자가 영영 안 뜬다). 이름이 생기면
     /// 판정자가 **제품이 묻는 그 질문**을 그대로 물을 수 있다.
     pub fn overlayFrameNeeded(self: *const AppSession) bool {
-        return self.anyOverlayOpen() or self.chrome_host.key_hints.visible or
+        return self.anyOverlayOpen() or self.chrome_host.find.open or self.chrome_host.find_secondary.open or self.chrome_host.key_hints.visible or
             self.chrome_host.send_helper.open or self.chrome_host.hover_box.open or
             (self.rename != null and self.rename.? == .symbol) or // 심볼 상자(§8.2f)는 프레임이 앵커를 세워야 열린다 — 상태로 묻는다
             self.editor_completion.active; // 완성 팝업(§8.2g)도 같다
@@ -13956,7 +13961,11 @@ pub const AppSession = struct {
     pub fn anyModalOverlayOpen(self: *const AppSession) bool {
         inline for (std.meta.fields(ChromeHostField)) |field| {
             switch (comptime modalInputRole(@as(ChromeHostField, @enumFromInt(field.value)))) {
-                .routes_text, .blocks_without_text => if (@field(self.chrome_host, field.name).open) return true,
+                .routes_text, .blocks_without_text => {
+                    if (comptime std.mem.eql(u8, field.name, "find")) {
+                        if (self.chrome_host.find.open and self.chrome_host.find.input_focused) return true;
+                    } else if (@field(self.chrome_host, field.name).open) return true;
+                },
                 .not_an_overlay, .transient_toast => {},
             }
         }
@@ -14595,11 +14604,13 @@ pub const AppSession = struct {
         // confirm/context_menu/notice는 위에서 전용 처리(notice는 닫고 소비)하므로, 여기 도달하는 열린 모달은 전용 마우스
         // 처리가 없는 인터랙티브 오버레이(find/palette)뿐이다 — 클릭이 뒤(터미널·divider/탭 드래그·사이드바)로 새지 않게
         // 막는다(키가 모달에서 소비되는 것과 같은 규율). 포인터를 실제로 쓰는 모달 위젯(슬라이더·토글·색)은 CS-4-1+에서 이 경로에 붙는다.
+        const diff_find_pointer = find_ops.diffFindPointer(self, kind, button, x_px, y_px);
+        if (diff_find_pointer == .consumed) return;
         if (kind == 1 and button == 0 and chrome.components.find.regexButtonHit(&self.chrome_host.find, self.buildChromeProps(), x_px, y_px)) {
             find_ops.toggleFindRegex(self);
             return;
         }
-        if (self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
+        if (diff_find_pointer != .body and self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
         // **편집기 선택 헬퍼**(NSH — docs/send-selection-to-agent.md §6.2). 모달 분기를 전부 지난
         // 자리다: 헬퍼는 모달이 아니므로 위 오버레이들이 먼저 가져가고, 여기부터가 본문 좌표다.
         //
@@ -15694,7 +15705,7 @@ pub const AppSession = struct {
         if (self.chrome_host.settings.open) return .settings;
         // 모달은 뒤에 남아 있는 상주 검색·인라인 편집보다 먼저 키를 받는다(handleKeyEvent와 같은 순서).
         // 팔레트가 보이는데 사이드바 검색으로 IME 조합이 새면 표시·필터·확정 대상이 갈라진다.
-        if (self.chrome_host.find.open) return .find;
+        if (self.chrome_host.find.open and self.chrome_host.find.input_focused) return .find;
         if (self.chrome_host.palette.open) return .palette;
         if (self.chrome_host.symbol_picker.open) return .symbol_picker;
         if (self.chrome_host.reference_picker.open) return .reference_picker; // §8.2l
@@ -20103,6 +20114,7 @@ pub const AppSession = struct {
             //
             // **열림 여부로 게이트하지 않는다**: 닫힌 동안 탭이 바뀌면 대상이 굳어, 다시 열자마자 그리는 첫
             // 프레임이 지난 탭의 모드로 나간다(R6 실측 — 터미널인데 카운터가 통째로 비었다).
+            find_ops.syncDiffFind(self);
             const web_target = web_ops.activeWebSurfaceIdAnyKind(self) != 0;
             // **셋으로 갈린다**(§5.1). 편집기는 매치 리스트가 있으므로 카운터는 스크롤백과 같지만,
             // 검색하는 **자리**가 다르다 — 편집기 Term의 코어는 1×1 sentinel이라 그쪽으로 보내면
@@ -23281,6 +23293,7 @@ pub const AppSession = struct {
         const tokens = self.buildChromeTokens();
         const props = self.buildChromeProps();
         var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        find_ops.syncDiffFind(self);
         try self.chrome_host.collectDraws(props, &tokens, arena, &draws); // Notice·Find
         if (self.chrome_host.palette.open) {
             self.followPaletteSelection(); // 선택이 바뀌었으면 창을 당긴다(값 비교 — 위 필드 주석)
@@ -49897,7 +49910,7 @@ test "CS6 팔레트가 대문자·소문자를 갈라 부른다 — 디스패치
     try std.testing.expectEqualStrings("ab\n", term.rt.editor_doc.?.file.content);
 }
 
-test "EF30 열 넘기기는 지금 보는 열에서 뒤집는다 — 첫 누름이 반드시 화면을 바꾼다 (§5.1)" {
+test "EF30 좌우 찾기는 실제 Cmd F·옵션 D·Enter·Esc·Cmd G 경로에서 독립적이다" {
     // **명시값에서 뒤집으면 첫 누름이 죽는다.** 아직 안 골랐으면 명시값은 `null` 이라 그것을
     // 기준 삼으면 늘 같은 쪽으로 가고, 폴백이 이미 그 쪽이면 화면이 한 번 안 바뀐다 — 사용자는
     // 눌렀는데 아무 일도 안 일어난 것으로 본다. 그래서 **폴백이 답한 열**에서 뒤집는다.
@@ -49927,59 +49940,47 @@ test "EF30 열 넘기기는 지금 보는 열에서 뒤집는다 — 첫 누름�
     _ = try session.tick();
 
     const left_rows = [_][]const u8{ "aa", "aa" };
-    const right_rows = [_][]const u8{"aa aa aa"};
+    const right_rows = [_][]const u8{ "aa aa aa", "" };
     term.rt.editor_diff = .{ .requested_ms = 0 };
     defer term.rt.editor_diff = null;
     term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
     term.rt.editor_diff.?.left_texts = &left_rows;
     term.rt.editor_diff.?.right_texts = &right_rows;
 
+    var draw = editor_ops.appendPaneFrame(session, .{ .x = 0, .y = 0, .w = 800, .h = 600 }, term) orelse return error.NoFrame;
+    draw.dl.deinit(allocator);
     session.dispatchAppAction(.toggle_find);
-    for ("aa") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-
-    // **폴백은 왼쪽이고, 화면도 왼쪽이라 적는다.**
+    for ("aa") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c } });
     _ = try session.tick();
-    try std.testing.expect(session.chrome_host.find.diff_side == null);
-    try std.testing.expect(session.chrome_host.find.diff_side_shown.? == .left);
-    const left_count = session.chrome_host.find.match_count;
+    try std.testing.expectEqual(chrome.components.find.DiffSide.left, session.chrome_host.find.diff_side.?);
+    try std.testing.expectEqual(@as(usize, 2), session.chrome_host.find.match_count);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expectEqualStrings("aa", session.chrome_host.find.input.query.items);
 
-    // ⌥⌘D — 오른쪽으로 넘어가고, **센 수도 그 열의 것**이어야 한다.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } });
-    try std.testing.expect(session.chrome_host.find.diff_side.? == .right);
-    try std.testing.expect(session.chrome_host.find.match_count != left_count);
-    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
-    _ = try session.tick();
-    try std.testing.expect(session.chrome_host.find.diff_side_shown.? == .right);
-
-    // 다시 누르면 되돌아온다.
+    try std.testing.expectEqual(chrome.components.find.DiffSide.right, session.chrome_host.find.diff_side.?);
+    try std.testing.expect(session.chrome_host.find.open and session.chrome_host.find_secondary.open);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.match_count);
+    for ("aa") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c } });
+    try std.testing.expectEqual(@as(usize, 3), session.chrome_host.find.match_count);
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.current);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } });
-    try std.testing.expect(session.chrome_host.find.diff_side.? == .left);
-    try std.testing.expectEqual(left_count, session.chrome_host.find.match_count);
-
-    // **여기서 두 개념을 가른다 — 폴백을 오른쪽으로 세운다.** 위 구간만으로는 「폴백에서 뒤집는다」와
-    // 「명시값에서 뒤집는다」가 **같은 답을 낸다**(둘 다 왼쪽에서 시작하니 첫 누름이 오른쪽이다).
-    // 겹친 채로 두면 명시값에서 뒤집는 변이가 살아남고(M6 이 실제로 살았다), 그 코드는 사용자가
-    // 오른쪽 열을 클릭해 둔 상태에서 ⌥⌘D 를 눌렀을 때 **화면이 안 바뀐다**.
-    session.chrome_host.find.diff_side = null;
-    term.rt.editor_diff_selection = .{
-        .side = .right,
-        .sel = maru.session.editor.selection.RowSelection.at(.{ .row = 0, .byte = 0 }),
-    };
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } });
-    try std.testing.expect(session.chrome_host.find.diff_side.? == .left);
-    term.rt.editor_diff_selection = null;
-    session.chrome_host.find.diff_side = null;
-
-    // **비교가 아니면 무동작이다** — 단일 편집기에는 열이 없다. 팔레트 경로도 같은 게이트를 지난다.
+    try std.testing.expectEqual(chrome.components.find.DiffSide.left, session.chrome_host.find.diff_side.?);
+    try std.testing.expectEqual(@as(usize, 2), session.chrome_host.find.match_count);
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find_secondary.current);
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expect(!session.chrome_host.find.open and session.chrome_host.find_secondary.open);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'g' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.current);
+    try std.testing.expect(session.find_nav);
+    try std.testing.expect(!session.chrome_host.find.open);
+    // Losing diff identity closes the pair before another kind can read these rows.
     term.rt.editor_diff = null;
-    session.chrome_host.find.diff_side = null;
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true, .option = true } });
-    try std.testing.expect(session.chrome_host.find.diff_side == null);
-    session.dispatchAppAction(.toggle_find_diff_side);
-    try std.testing.expect(session.chrome_host.find.diff_side == null);
-    // 비교가 아니면 **적을 열도 없다** — 남겨 두면 단일 편집기 카운터에 `L` 이 붙는다.
-    // **재검색이 아니라 tick 이 지운다**: 비교가 아니게 되는 사건에 재검색이 늘 따라오지 않는다.
     _ = try session.tick();
+    try std.testing.expectEqual(@as(u64, 0), session.chrome_host.diff_find_source);
+    try std.testing.expect(!session.chrome_host.find_secondary.open);
     try std.testing.expect(session.chrome_host.find.diff_side_shown == null);
 }
 

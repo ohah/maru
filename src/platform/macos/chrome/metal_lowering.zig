@@ -90,47 +90,52 @@ pub fn lower(
     var cursor: ?terminal.Cursor = null;
     var clip_rect: ?chrome.draw.Rect = null;
     var modal_bg_quad = false;
-    for (draws) |d| for (d.ops) |op| switch (op) {
-        .fill => |f| {
-            if (f.role == .cursor) {
-                const col = @divTrunc(f.rect.x - @as(i32, @intCast(origin_x)), @as(i32, @intCast(cw)));
-                const row = @divTrunc(f.rect.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
-                if (col >= 0 and col < cols and row >= 0 and row < rows)
-                    cursor = .{ .row = @intCast(row), .col = @intCast(col), .visible = true };
-            } else if (isHairline(f.rect, cw, ch)) {
-                // 셀보다 얇은 fill(구분선 등)은 **셀 격자로 표현할 수 없다.** paintRectBg는 픽셀 rect를
-                // `trunc(y/ch) .. trunc((y+h)/ch)` 행 범위로 내리므로, 1px이 행 마지막 픽셀에 걸리면 그 행이
-                // **통째로** 칠해지고(알림 카드 구분선이 18px 회색 밴드로 보이던 결함) 행 중간에 걸리면
-                // r0==r1이라 **아예 안 보인다**. 위치에 따라 둘 중 하나라 규율로 피할 수도 없다.
-                //
-                // 그래서 헤어라인만 GPU quad로 내린다 — `.swatch`/`.quad`가 "둥근 모서리는 셀로 못 그리니
-                // quad로"와 같은 규칙이고, 여기서는 '두께'가 그 이유다. 모달 배경 quad보다 **뒤에** append돼
-                // 같은 over 버킷 안에서 위에 그려진다(배경이 먼저 나오는 것은 lowerer의 painter 규칙).
-                appendHairline(&gpu_quads, allocator, f.rect, f.role, tk);
-            } else paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
-        },
-        .border => |b| if (!modal_bg_quad) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
-        .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, tk),
-        .swatch => |sw| {
-            const rounded = sw.corner_radii[0] != 0 or sw.corner_radii[1] != 0 or sw.corner_radii[2] != 0 or sw.corner_radii[3] != 0;
-            if (!rounded) {
-                paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null);
-            } else appendSwatch(&gpu_quads, allocator, sw);
-        },
-        .rule => {},
-        .clip => |rect| clip_rect = rect,
-        .quad => |q| {
-            const rounded = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
-            if (!rounded) {
-                paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
-            } else if (modal_bg_quad) {
-                appendWidgetQuad(&gpu_quads, allocator, q, tk);
-            } else {
-                appendModalQuad(&gpu_quads, &gpu_shadows, allocator, q, tk);
-                modal_bg_quad = true;
-            }
-        },
-    };
+    for (draws) |d| {
+        var panel_bg_quad = false;
+        const background_seen = if (d.independent_panel) &panel_bg_quad else &modal_bg_quad;
+        for (d.ops) |op| switch (op) {
+            .fill => |f| {
+                if (f.role == .cursor) {
+                    const col = @divTrunc(f.rect.x - @as(i32, @intCast(origin_x)), @as(i32, @intCast(cw)));
+                    const row = @divTrunc(f.rect.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
+                    if (col >= 0 and col < cols and row >= 0 and row < rows)
+                        cursor = .{ .row = @intCast(row), .col = @intCast(col), .visible = true };
+                } else if (isHairline(f.rect, cw, ch)) {
+                    // 셀보다 얇은 fill(구분선 등)은 **셀 격자로 표현할 수 없다.** paintRectBg는 픽셀 rect를
+                    // `trunc(y/ch) .. trunc((y+h)/ch)` 행 범위로 내리므로, 1px이 행 마지막 픽셀에 걸리면 그 행이
+                    // **통째로** 칠해지고(알림 카드 구분선이 18px 회색 밴드로 보이던 결함) 행 중간에 걸리면
+                    // r0==r1이라 **아예 안 보인다**. 위치에 따라 둘 중 하나라 규율로 피할 수도 없다.
+                    //
+                    // 그래서 헤어라인만 GPU quad로 내린다 — `.swatch`/`.quad`가 "둥근 모서리는 셀로 못 그리니
+                    // quad로"와 같은 규칙이고, 여기서는 '두께'가 그 이유다. 모달 배경 quad보다 **뒤에** append돼
+                    // 같은 over 버킷 안에서 위에 그려진다(배경이 먼저 나오는 것은 lowerer의 painter 규칙).
+                    appendHairline(&gpu_quads, allocator, f.rect, f.role, tk);
+                } else paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
+            },
+            .border => |b| if (!background_seen.*) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
+            .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, tk),
+            .swatch => |sw| {
+                const rounded = sw.corner_radii[0] != 0 or sw.corner_radii[1] != 0 or sw.corner_radii[2] != 0 or sw.corner_radii[3] != 0;
+                if (!rounded) {
+                    paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null);
+                } else appendSwatch(&gpu_quads, allocator, sw);
+            },
+            .rule => {},
+            .clip => |rect| clip_rect = rect,
+            .quad => |q| {
+                const rounded = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
+                if (!rounded and (!d.independent_panel or background_seen.*)) {
+                    paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
+                } else if (background_seen.*) {
+                    appendWidgetQuad(&gpu_quads, allocator, q, tk);
+                } else {
+                    appendModalQuad(&gpu_quads, &gpu_shadows, allocator, q, tk);
+                    background_seen.* = true;
+                    modal_bg_quad = true;
+                }
+            },
+        };
+    }
 
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -304,4 +309,26 @@ test "Lab lowering carries the component clip and drops a quad whose clip has ze
     const widget = raster.gpu_quads.items[1];
     try std.testing.expectEqual(@as(f32, 160), widget.clip_w);
     try std.testing.expectEqual(@as(f32, 24), widget.clip_h);
+}
+
+test "EF31 independent find panels each retain their background and shadow" {
+    const tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 9, .g = 9, .b = 9 }) };
+    for ([_]u16{ 0, 8 }) |radius| {
+        const left = [_]chrome.draw.Op{.{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 160, .h = 64 }, .fill_role = .surface_bg, .corner_radii = .{ radius, radius, radius, radius } } }};
+        const right = [_]chrome.draw.Op{.{ .quad = .{ .rect = .{ .x = 320, .y = 0, .w = 160, .h = 64 }, .fill_role = .surface_bg, .corner_radii = .{ radius, radius, radius, radius } } }};
+        var raster = try lower(std.testing.allocator, &.{
+            .{ .layer = .modal, .ops = &left, .independent_panel = true },
+            .{ .layer = .modal, .ops = &right, .independent_panel = true },
+        }, &tk, 8, 16, false);
+        defer {
+            raster.cells.deinit(std.testing.allocator);
+            raster.gpu_quads.deinit(std.testing.allocator);
+            raster.gpu_shadows.deinit(std.testing.allocator);
+        }
+        try std.testing.expectEqual(@as(usize, 2), raster.gpu_quads.items.len);
+        try std.testing.expectEqual(@as(usize, 2), raster.gpu_shadows.items.len);
+        try std.testing.expectEqual(raster.gpu_quads.items[0].w, raster.gpu_quads.items[1].w);
+        try std.testing.expectEqual(raster.gpu_quads.items[0].h, raster.gpu_quads.items[1].h);
+        try std.testing.expectEqual(@as(usize, 0), raster.cells.items.len);
+    }
 }

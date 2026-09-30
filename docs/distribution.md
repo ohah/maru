@@ -24,7 +24,7 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 
 ### 1) Homebrew tap — formula(소스 빌드), 주력
 
-- 사용자: `brew install ohah/maru/maru` — **전체 이름으로**. Homebrew 7 은 신뢰하지 않은 tap 의 formula 를 짧은 이름으로 불러오지 않고, `brew tap` 은 신뢰를 주지 않는다. 전체 이름으로 설치하면 tap 을 받고 그 formula 를 신뢰 목록(`~/.homebrew/trust.json`)에 올려, 뒤의 `brew upgrade`(인자 없이)·`brew upgrade maru` 는 짧은 이름으로 된다(Homebrew 7.0.1 `cmd/install.rb` 실측)
+- 사용자: `brew install ohah/maru/maru` — **전체 이름으로**. Homebrew 7 은 신뢰하지 않은 tap 의 formula 를 짧은 이름으로 불러오지 않고, `brew tap` 은 신뢰를 주지 않는다. 전체 이름으로 설치하면 tap 을 받고 그 formula 를 **설치한 사용자의** 신뢰 목록(`$XDG_CONFIG_HOME/homebrew/trust.json`, 없으면 `~/.homebrew/trust.json`)에 올려, 뒤의 `brew upgrade`(인자 없이)·`brew upgrade maru` 는 짧은 이름으로 된다(Homebrew 7.0.1 `cmd/install.rb` 실측). 신뢰는 이름 붙은 formula 만이고(같은 tap 의 의존은 따로 이름을 줘야 한다), `brew uninstall` 이 그 항목을 지운다 — 다른 계정이 같은 prefix 에서 인자 없이 `brew upgrade` 하면 건너뛴다
 - formula가 `zig build`로 사용자 맥에서 직접 빌드한다. 따라서:
   - **인증서/공증 불필요**: 로컬 빌드 산출물엔 quarantine이 안 붙어 Gatekeeper가 검사하지 않는다.
     arm64 실행에 필요한 ad-hoc 서명은 `zig build`가 자동으로 한다.

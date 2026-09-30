@@ -1,8 +1,9 @@
 #!/bin/sh
 # `tools/web-sidecar-dist-macho.sh` 자체 시험(W7b) — 그 스크립트는 CEF SDK 가 있어야 도는 `web-sidecar-dist` 안에서만
-# 돌아, 결함이 formula 설치에서야 드러난다. 가짜 설치물(작은 dylib 과 `/usr/bin/true` 사본)로 열두 경우를 본다.
-# `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 부른다.
+# 돌아, 결함이 formula 설치에서야 드러난다. 가짜 설치물(작은 dylib 과 `/usr/bin/true` 사본, zig 로 만든 x86_64 실행 파일)로
+# 열여덟 경우를 본다. `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 zig 경로를 인자로 주고 부른다.
 set -eu
+zig=${1:?사용: test-web-sidecar-dist-macho.sh <zig 경로>}
 here=$(cd "$(dirname "$0")/.." && pwd)
 fix="$here/tools/web-sidecar-dist-macho.sh"
 root=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/maru-distmacho.XXXXXX")" && pwd -P)
@@ -136,8 +137,64 @@ cc -dynamiclib -o "$fwa/libvulkan.dylib" "$root/probe.c" "$fwa/libcef_sandbox.dy
 install_name_tool -change ./libcef_sandbox.dylib @loader_path/libcef_sandbox.dylib "$fwa/libvulkan.dylib"
 expect fail "dylib 의 @loader_path 링크" "$root/at-link" "시스템 밖 경로 라이브러리 @loader_path/libcef_sandbox.dylib"
 
+# ⑫b dylib 이 @rpath 로 다른 dylib 에 링크 — rpath 가 없어 불러오는 순서에 달린다(4 차 변이가 놓친 모양 — 5 차).
+make_dist "$root/rpath-link"
+fwr="$root/rpath-link/Chromium Embedded Framework.framework/Libraries"
+cc -dynamiclib -o "$fwr/libvulkan.dylib" "$root/probe.c" "$fwr/libcef_sandbox.dylib" -install_name ./libvulkan.dylib
+install_name_tool -change ./libcef_sandbox.dylib @rpath/libcef_sandbox.dylib "$fwr/libvulkan.dylib"
+expect fail "dylib 의 @rpath 링크" "$root/rpath-link" "시스템 밖 경로 라이브러리 @rpath/libcef_sandbox.dylib"
+
+# ⑫c host 가 @executable_path 로 옆 dylib 에 링크 — rpath 가 없는 설치물의 @ 링크는 모두 멈춘다(5 차 변이가 살아남은 자리).
+make_dist "$root/exec-link"
+cc -dynamiclib -o "$root/exec-link/libside.dylib" "$root/probe.c" -install_name @executable_path/libside.dylib
+cc -o "$root/exec-link/maru-web-host" "$root/probe.c" "$root/exec-link/libside.dylib" -Wl,-undefined,dynamic_lookup -e _maru_dist_macho_probe
+expect fail "host 의 @executable_path 링크" "$root/exec-link" "maru-web-host 가 시스템 밖 경로 라이브러리 @executable_path/libside.dylib"
+
+# ⑬ host 가 `/usr/lib/../..` 로 시스템 밖에 링크 — 앞머리만 맞추는 확인을 빠져나간다(5 차).
+make_dist "$root/dotdot"
+cc -dynamiclib -o "$root/libesc.dylib" "$root/probe.c" -install_name "/usr/lib/../..$root/libesc.dylib"
+cc -o "$root/dotdot/maru-web-host" "$root/probe.c" "$root/libesc.dylib" -Wl,-undefined,dynamic_lookup -e _maru_dist_macho_probe
+expect fail "host 의 .. 로 빠지는 링크" "$root/dotdot" "시스템 밖으로 빠지는 경로"
+
+# ⑬b helper 가 `/System/Volumes/Data/…`(데이터 볼륨 — /opt/homebrew·/private 가 그 아래)로 링크 — `/System/` 앞머리로 빠져나간다.
+make_dist "$root/volumes"
+cc -dynamiclib -o "$root/libvol.dylib" "$root/probe.c" -install_name "/System/Volumes/Data$root/libvol.dylib"
+cc -o "$root/volumes/maru-web-helper" "$root/probe.c" "$root/libvol.dylib" -Wl,-undefined,dynamic_lookup -e _maru_dist_macho_probe
+expect fail "helper 의 /System/Volumes 링크" "$root/volumes" "시스템 밖으로 빠지는 경로 /System/Volumes/Data"
+
+# ⑭ zig 가 만든 x86_64 host — 서명이 없고 머리 여유가 8 바이트다. 서명을 붙이면 코드를 덮어쓰므로 멈춰야 한다(5 차 실측:
+#    서명 뒤 뜨자마자 SIGSEGV).
+printf 'pub fn main() u8 {\n    return 7;\n}\n' > "$root/seven.zig"
+(cd "$root" && "$zig" build-exe seven.zig -target x86_64-macos -O ReleaseFast -femit-bin=seven-nopad)
+(cd "$root" && "$zig" build-exe seven.zig -target x86_64-macos -O ReleaseFast -headerpad_max_install_names -femit-bin=seven-pad)
+make_dist "$root/nopad"
+cp "$root/seven-nopad" "$root/nopad/maru-web-host"
+expect fail "머리 여유 없는 x86_64 host" "$root/nopad" "머리 여유가 8 바이트라"
+
+# ⑮ 같은 host 를 여유를 두고 빌드하면 서명이 붙고 코드는 그대로다(Rosetta 가 있으면 실행해 7 을 받는다).
+make_dist "$root/pad"
+cp "$root/seven-pad" "$root/pad/maru-web-host"
+expect pass "머리 여유를 둔 x86_64 host 에 서명" "$root/pad"
+text_bytes() { off=$(otool -l "$1" | awk '/sectname __text/{t=1} t&&/^ *offset /{print $2; exit}'); od -A n -t x1 -j "$off" -N 32 "$1"; }
+if [ "$(text_bytes "$root/seven-pad")" != "$(text_bytes "$root/pad/maru-web-host")" ]; then
+    echo "FAIL 서명이 x86_64 host 의 __text 를 바꿨다" >&2
+    failures=$((failures + 1))
+fi
+if arch -x86_64 /usr/bin/true 2> /dev/null; then
+    set +e
+    "$root/pad/maru-web-host"
+    rc=$?
+    set -e
+    if [ "$rc" != 7 ]; then
+        echo "FAIL 서명한 x86_64 host 가 $rc 로 끝났다 — 7 이어야" >&2
+        failures=$((failures + 1))
+    fi
+else
+    echo "(Rosetta 없음 — ⑮ 의 실행은 건너뜀)"
+fi
+
 if [ "$failures" != 0 ]; then
     echo "web-sidecar-dist-macho 자체 시험: 틀림 $failures 건" >&2
     exit 1
 fi
-echo "web-sidecar-dist-macho 자체 시험: 열두 경우 모두 맞음"
+echo "web-sidecar-dist-macho 자체 시험: 열여덟 경우 모두 맞음"

@@ -459,7 +459,7 @@ fi
 dist_dir="$PWD/zig-out/maru-chromium"
 test -x "$dist_dir/maru-web-host" || fail "build the install tree first (mise run web-sidecar builds zig-out/maru-chromium)"
 mkdir -p "$root/prefix/Cellar/maru-chromium/0.0.0" "$root/prefix/opt"
-cp -Rc "$dist_dir" "$root/prefix/Cellar/maru-chromium/0.0.0/libexec"
+cp -Rc "$dist_dir" "$root/prefix/Cellar/maru-chromium/0.0.0/libexec" # `-c` 는 복제가 안 되면 스스로 보통 복사로 대신한다(man cp)
 chmod -R go-w "$root/prefix/Cellar/maru-chromium"
 ln -s ../Cellar/maru-chromium/0.0.0 "$root/prefix/opt/maru-chromium"
 : > "$root/requests.log"
@@ -523,6 +523,7 @@ sleep 8
 opencache_child=$(host_under "$opencache_pid" || true)
 wait "$opencache_pid" || true
 [ -z "$opencache_child" ] || fail "the brew install was started without a run copy ($opencache_child)"
+! grep -q '^/osr-smoke' "$root/requests.log" || fail "the brew install opened the page without a run copy"
 grep -q 'could not make the maru-chromium run copy: writable_by_others' "$root/engine-opencache.log" || fail "no reason logged when the run cache is open to others"
 echo "no run copy (open cache root) → the brew install is not started"
 
@@ -564,8 +565,14 @@ hardened_app hardened-envdir MARU_WEB_OSR_DIR="$sidecar_dir"
 if [ "$real_install" = 0 ]; then
     hardened_app hardened-prefix MARU_CONFIG="$root/engine.conf" HOMEBREW_PREFIX="$root/prefix"
     grep -q 'maru-chromium is not installed' "$root/hardened-prefix.log" || fail "the hardened build did not ignore HOMEBREW_PREFIX"
+else
+    echo "hardened runtime: maru-chromium is really installed — skipping the HOMEBREW_PREFIX case"
 fi
 real_after=$(ls -1a "$real_run_root" 2>&1 || true)
 [ "$real_before" = "$real_after" ] || fail "the hardened run changed the real $real_run_root"
-echo "hardened runtime: MARU_WEB_OSR_DIR and HOMEBREW_PREFIX are ignored"
+if [ "$real_install" = 0 ]; then
+    echo "hardened runtime: MARU_WEB_OSR_DIR and HOMEBREW_PREFIX are ignored"
+else
+    echo "hardened runtime: MARU_WEB_OSR_DIR is ignored"
+fi
 echo "web-osr smoke passed"

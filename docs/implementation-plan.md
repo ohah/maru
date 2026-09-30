@@ -47,6 +47,7 @@ macOS 로컬 shell 1개 surface
 - [`app_session.zig` 분해 실행 계획·완료 이력](plans/app-session-decomposition.md)
 - [세션 컨트롤 플레인 Phase·검증·코드 위치](plans/control-plane.md)
 - [네이티브 편집기 구현 계획](plans/native-editor.md) — [여러 뷰 축 실측·선례 원장](plans/native-editor-multi-view.md)(같은 파일 두 곳 보기·병합 편집기·Split in Group) · [B2 op 저장소 후보 실험](plans/editor-op-b2-evaluation.md)
+- [에디터 전체 잔여 작업 점검](plans/editor-remaining-work.md) — 기능·제품 연결·미결 계약·검증 한계의 현재 코드 대조
 - [에디터 Surface 단계 계획](plans/editor-surface.md)
 - [이름 없는 문서(untitled) 구현 계획](plans/editor-untitled.md) — **끝났다(2026-09-23)**. 파일 없이 여는 편집기(U1~U3)·미저장 편집의 백업과 복원(U4a~U4d)·저장 실패 이유와 충돌 선택(C0·C1a·C1b). 계약은 문서 모델 §3.10·§3.11 과 editor-surface §4, 포맷은 workspace-restore 가 소유한다
 - [소스 컨트롤 도크 2판 단계 계획](plans/scm-dock.md)

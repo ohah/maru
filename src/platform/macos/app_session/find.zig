@@ -47,7 +47,7 @@ fn activeEditorTerm(self: *AppSession) ?*Term {
     if (term.kind != .editor) return null;
     // **비교 뷰도 검색한다**(§5.1 「비교 뷰 검색」 — 2026-09-01). 어느 열인지는
     // `editor_diff.diffSearchSide` 가 답한다(선택이 있는 열, 없으면 왼쪽).
-    if (term.rt.editor_diff == null and editor_ops.findLines(self, term).len == 0) return null; // 아직 안 열렸다(비교면 그 열이 비었다)
+    if (term.rt.editor_diff == null and editor_ops.findLines(self, term).len == 0) return null; // 일반 문서는 아직 안 열렸다. 비교의 빈/로딩 열은 검색 대상이다.
     return term;
 }
 
@@ -390,7 +390,7 @@ fn refilterAfterRuleChange(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
-/// ⌘F: Find 오버레이를 토글한다. 열려 있으면 닫고(매치 하이라이트·⌘G 닫힘-네비 세션 종료),
+/// ⌘F: 비교 뷰는 활성 열을 열거나 포커스하고, 일반 Find는 토글한다. 일반 Find가 열려 있으면 닫고,
 /// 닫혀 있으면 다른 배타 오버레이(notice·palette)를 먼저 닫고 연다(검색어 초기화는 컴포넌트의 show가).
 pub fn toggleFind(self: *AppSession) void {
     if (activeEditorTerm(self)) |term| {

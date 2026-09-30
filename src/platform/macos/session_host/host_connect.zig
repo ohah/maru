@@ -25,6 +25,7 @@ const client_deadline = @import("client_deadline.zig");
 const staged_image = @import("staged_image.zig");
 const compatibility = @import("compatibility.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
+const upgrade_scan_policy = @import("upgrade_scan_policy.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -453,6 +454,10 @@ fn tryUpgradeExistingHost(
     const directory = c.opendir(hosts_root.ptr) orelse return .none;
     defer _ = c.closedir(directory);
     var legacy_notice: ?UpgradeNotice = null;
+    // 결과를 보고 다음 후보로 넘어갈지 가른다(`upgrade_scan_policy`). 예전엔 prepare 를 한 번 보내면 결과와 무관하게
+    // 끝냈는데, 확정적으로 실패하는 host 하나가 readdir 순서상 늘 먼저 걸려 나머지 host 전부를 영구히 막았다
+    // (2026-09-30 실측: 9/27 host 가 매번 resumed/handoff_failed → 9/28·9/29 host 는 한 번도 시도받지 못함).
+    var scan: UpgradeScan = .{ .started_ms = monotonicMsForMeasure() };
     while (c.readdir(directory)) |entry| {
         const name = std.mem.sliceTo(entry.name[0..], 0);
         if (name.len != 32) continue;
@@ -476,6 +481,8 @@ fn tryUpgradeExistingHost(
                 });
             continue;
         }
+        // 첫 prepare 는 예전처럼 항상 보낸다. 그 뒤는 횟수·경과 상한 안에서만 — 시작 지연을 느린 시도 하나분으로 묶는다.
+        if (!scan.mayPrepareNow(monotonicMsForMeasure())) break;
 
         var client = switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
             .connected => |connected| connected,
@@ -495,6 +502,7 @@ fn tryUpgradeExistingHost(
         }
         var attempt_id: u128 = 0;
         while (attempt_id == 0) arc4random_buf(std.mem.asBytes(&attempt_id).ptr, @sizeOf(u128));
+        scan.notePrepared();
         const outcome = client.prepareUpgrade(.{
             .attempt_id = attempt_id,
             .target_path = exe_path,
@@ -506,66 +514,82 @@ fn tryUpgradeExistingHost(
             // 응답을 못 받았다고 host가 아무것도 안 한 것은 아니다. server는 target 이미지를 복사·fsync·해시한
             // **뒤에** accepted를 쓰므로, 느린 디스크에서는 우리 recv 타임아웃이 먼저 만료되고 host는 그대로
             // exec한다. 그때 다른 host로 스캔을 이어 가면 이미 교체 중인 host를 두고 또 다른 host를 흔든다 —
-            // 재연결로 결과를 확인하고, 아니면 여기서 끝낸다.
+            // 재연결로 결과를 확인하고, 아니면 여기서 끝낸다(`prepare_transport_error` 는 언제나 멈춤).
             client.deinit();
-            return switch (reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id)) {
-                .connected => |connected| .{ .connected = connected },
-                .failed => |notice| .{ .fallback = notice },
-            };
+            const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
+            if (settleUpgrade(&scan, .prepare_transport_error, reconnected)) |done| return done;
+            continue;
         };
         client.deinit();
-        // **prepare를 한 번 보낸 뒤에는 결과와 무관하게 스캔을 끝낸다.** 한 번의 GUI 실행이 여러 host에 연쇄로
-        // upgrade를 걸면 각 host가 클라이언트를 떨어뜨리며 재시작하는데, 그 피해는 새 host 하나를 더 띄우는
-        // 것보다 훨씬 크다. 거절(`rejected`)도 마찬가지다 — host는 다른 attachment가 남아 있으면 거절하며,
-        // 그건 "지금은 안 된다"이지 "이 host는 못 쓴다"가 아니다.
+        // 결과마다 `upgrade_scan_policy.afterPrepare` 가 가른다. 교체 중이거나 상태가 불확실하면 예전처럼 멈추고
+        // (한 번의 GUI 실행이 여러 host 에 연쇄로 exec 를 걸어 client 를 떨어뜨리지 않게), host 가 exec 전에
+        // 되돌아가 옛 이미지로 serving 중임이 확정된 `resumed` 와 부수효과 없는 거절만 다음 후보로 간다.
         switch (outcome) {
-            // host가 응답을 전량 보낸 뒤 이 connection을 닫고 exec한다 — 같은 host_id로 다시 붙는다.
-            .accepted_reconnect_required => return switch (reconnectUpgradedHost(
-                allocator,
-                base_cache_dir,
-                host_id,
-                target_build_id,
-                attempt_id,
-            )) {
-                .connected => |connected| .{ .connected = connected },
-                .failed => |notice| .{ .fallback = notice },
+            // host가 응답을 전량 보낸 뒤 이 connection을 닫고 exec한다 — 같은 host_id로 다시 붙어 결과를 확정한다.
+            .accepted_reconnect_required => {
+                const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
+                if (settleUpgrade(&scan, resolutionAfterReconnect(reconnected), reconnected)) |done| return done;
             },
             // host가 이미 끝난 attempt를 보고했다 — `AttemptReason`이 왜 못 바꿨는지 말해 준다. 이 값을 버리면
             // 사용자는 "업데이트했는데 세션이 안 이어진다"만 겪고 우리는 이유를 못 본다.
             .completed => |report| {
                 if (report.status == .committed) {
-                    return switch (reconnectUpgradedHost(
-                        allocator,
-                        base_cache_dir,
-                        host_id,
-                        target_build_id,
-                        attempt_id,
-                    )) {
-                        .connected => |connected| .{ .connected = connected },
-                        .failed => |notice| .{ .fallback = notice },
-                    };
+                    const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
+                    if (settleUpgrade(&scan, .{ .completed = .committed }, reconnected)) |done| return done;
+                    continue;
                 }
                 const notice: UpgradeNotice = .{ .upgrade_failed = .{
                     .host_id = host_id,
                     .failure = .{ .report = report },
                 } };
                 logUpgradeNotice(notice);
-                return .{ .fallback = notice };
+                if (settleUpgrade(&scan, .{ .completed = report.status }, .{ .failed = notice })) |done| return done;
             },
             // 거절에는 이유가 실려 오지 않는다(문서 §240: 다른 attachment가 남아 있으면 거절). 적어도 "거절당했다"는
-            // 사실은 남겨, 조용한 폴백과 구분되게 한다.
+            // 사실은 남겨, 조용한 폴백과 구분되게 한다. accepted 전의 거절이라 이 host 는 손대지 않은 그대로다.
             .rejected => {
                 const notice: UpgradeNotice = .{ .upgrade_busy = host_id };
                 logUpgradeNotice(notice);
-                return .{ .fallback = notice };
+                if (settleUpgrade(&scan, .rejected, .{ .failed = notice })) |done| return done;
             },
         }
     }
+    // 다음 후보로 넘어가며 기억한 첫 실패 — 로그는 이미 남았고, UI 알림으로 돌려준다.
+    if (scan.skipped) |notice| return .{ .fallback = notice };
     if (legacy_notice) |notice| {
         logUpgradeNotice(notice);
         return .{ .fallback = notice };
     }
     return .none;
+}
+
+const UpgradeScan = upgrade_scan_policy.Scan(UpgradeNotice);
+
+/// 한 후보의 prepare 결과를 정산한다. 교체 성공이면 그 연결을, 멈춰야 하면 그 실패 알림을 돌려주고, 다음 후보로
+/// 가도 되면 `null`(첫 실패는 `scan.skipped` 에 남는다).
+fn settleUpgrade(scan: *UpgradeScan, resolution: upgrade_scan_policy.Resolution, result: UpgradeReconnect) ?UpgradeSearch {
+    return switch (result) {
+        .connected => |client| .{ .connected = client },
+        .failed => |notice| switch (scan.settle(resolution, notice)) {
+            .stop => .{ .fallback = notice },
+            .next_candidate => null,
+        },
+    };
+}
+
+/// accepted 뒤 재연결 결과를 판정 입력으로 바꾼다. host 가 attempt status 를 보고했을 때만 그 status 를 쓰고,
+/// 재연결 실패·조회 실패·기록 없음은 상태를 확정하지 못한 것이다(`unresolved` — 멈춤).
+fn resolutionAfterReconnect(result: UpgradeReconnect) upgrade_scan_policy.Resolution {
+    return switch (result) {
+        .connected => .upgraded,
+        .failed => |notice| switch (notice) {
+            .upgrade_failed => |failed| switch (failed.failure) {
+                .report => |report| .{ .reconnected_old_image = report.status },
+                .reconnect, .local => .unresolved,
+            },
+            .upgraded, .upgrade_busy, .legacy_unavailable => .unresolved,
+        },
+    };
 }
 
 /// owner lease 관측 결과. bool로 뭉개면 **"lease가 없다"(host가 죽었다는 증거)** 와 **"우리가 볼 수 없었다"**(fd 고갈·

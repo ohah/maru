@@ -14,6 +14,14 @@
 > host를 찾아 자동으로 exec 교체를 시도한다(`host_connect.tryUpgradeExistingHost`). 이 시도는 **best-effort**다:
 > 후보가 없거나 capability 미광고·prepare 거부·재연결 실패면 조용히 기존 spawn 경로로 떨어져 새 host를 띄운다.
 > 업그레이드 실패가 곧 "터미널을 못 여는 실패"가 되어서는 안 되기 때문이다.
+> **스캔은 결과를 보고 다음 후보로 간다(2026-09-30).** 예전엔 prepare를 한 번 보내면 결과와 무관하게 끝냈는데,
+> 9/27 빌드 host가 매니페스트 ctime 결함으로 교체가 매번 `resumed/handoff_failed`로 끝나면서 readdir 순서상 늘 첫
+> 후보였다 — 스캔이 거기서 끝나 9/28·9/29 빌드 host 둘은 한 번도 시도받지 못했고, 설치마다 새 host가 하나씩 늘어
+> 넷이 됐다. 이제 `resumed`(exec 전에 되돌아가 옛 이미지로 serving 재개)와 `rejected`(accepted 전 거절, 부수효과
+> 없음)만 다음 후보로 넘어가고, 교체 중·상태 불확실(`pending`·exec 뒤 `rolled_back`·`failed_nonretryable`·transport
+> 오류·재연결/조회 실패)은 예전처럼 멈춘다. 한 시작에서 prepare는 최대 3개, 둘째부터는 스캔 경과가 pause 예산(5 s)
+> 미만일 때만 보낸다 — 늘어나는 시작 지연은 최악이어도 느린 시도 하나분이다. 판정은 `upgrade_scan_policy.zig`(PR의
+> check-boundaries에서 도는 std-only leaf)가, 루프 배선은 `tests/upgrade_scan_policy_wiring_boundary.zig`가 잰다.
 > **재연결 성공만으로 채택하지 않는다** — host가 accepted를 보내고도 exec에 실패해 rollback하면 같은 `host_id`로
 > 재연결은 성공하지만 이미지는 옛것 그대로다. 그 연결을 채택하면 GUI가 host-backed로 믿고 `runtime.spawn`을 걸었다가
 > 옛 host가 모르는 capability(`runtime_core_command_v1`)로 실패해 모든 터미널이 in-process로 떨어진다 —
@@ -295,8 +303,31 @@ host crash 비목표다.
 GUI 재실행이 업그레이드를 유발할 때는 runtime attach보다 upgrade preflight를 먼저 한다. `upgrade_busy`면 current/N-1
 adapter로 정상 attach하고, 마지막 attachment가 떨어진 뒤 다시 시도한다. 사용자 입력을 끊어서 업그레이드를 강행하지 않는다.
 
-connect-or-launch 결과는 최종 `Client`와 별개인 bounded `UpgradeNotice`를 함께 돌려준다. 이 값은 같은 앱 실행에서
-실제로 선택한 기존 host 하나에 대한 결정만 담고, host scan 중 지나친 후보들의 진단을 합치지 않는다. 분류는 다음과 같다.
+한 번의 시작에서 스캔은 **결과를 보고** 다음 후보로 넘어갈지 가른다(`upgrade_scan_policy.afterPrepare`). 연쇄 교체가
+여러 host의 client를 떨어뜨리지 않도록, host가 교체 중이거나 상태를 확정할 수 없으면 멈춘다. 확정적으로 실패한 host
+하나가 나머지를 영구히 막지 않도록, 그 host가 멀쩡히 옛 이미지로 돌아와 있음이 확정된 경우만 계속한다.
+
+| prepare 결과 | 다음 | 이유 |
+|---|---|---|
+| accepted → 재연결 → target build 확인(`upgraded`) | 멈춤(채택) | 교체 성공 |
+| `rejected`(`upgrade_busy`) | 다음 후보 | accepted 전 거절 — host 상태 불변, client 영향 없음 |
+| completed·재연결 보고 `resumed` | 다음 후보 | exec 전에 되돌아가 옛 이미지로 serving 재개 |
+| completed·재연결 보고 `committed` | 멈춤 | 성공 경로(재연결로 채택) |
+| `pending` | 멈춤 | 아직 진행 중 |
+| `rolled_back` | 멈춤 | exec 뒤 복원까지 거친 host — 같은 시작에서 다른 host의 exec를 겹치지 않는다 |
+| `failed_nonretryable` | 멈춤 | 권위가 망가졌다는 보고 — 상태 신뢰 불가 |
+| prepare transport 오류 | 멈춤 | accepted를 썼는지 모른다(느린 디스크에서 exec가 응답보다 먼저일 수 있다) |
+| 재연결 실패·status 조회 실패·기록 없음 | 멈춤 | 상태 미확정 |
+
+상한: prepare는 한 시작에 최대 3개(실측된 구 host 수), 첫 prepare는 항상 보내고 둘째부터는 스캔 경과가 pause 예산
+(5 s) 미만일 때만 보낸다. `resumed`로 끝나는 보통 실패는 약 1 s라 이 안에 들고, 한 시도가 pause 예산을 다 쓰거나
+재연결이 길어지면(최대 약 10 s) 그 뒤로는 멈추므로 늘어나는 시작 지연은 최악이어도 느린 시도 하나분이다. 여러 시작에
+걸쳐 확정 실패 host를 뒤로 미루는 우선순위는 두지 않았다 — 실패 기록을 디스크에 둬야 해서 이 수정의 범위 밖이다.
+
+connect-or-launch 결과는 최종 `Client`와 별개인 bounded `UpgradeNotice`를 함께 돌려준다. 알림 칸은 하나다. 스캔이
+어떤 host를 교체했으면 그 `upgraded`가, 멈춘 host가 있으면 그 host의 결과가, 다음 후보로 넘어가기만 하다 끝났으면
+**넘어간 실패 중 첫 번째**가 담긴다. 지나친 후보들의 실패는 알림에 합치지 않지만 각각 `session host upgrade result:`
+로그로 남는다. 분류는 다음과 같다.
 
 - `upgraded`: accepted 뒤 same `host_id`, target build와 증가한 epoch를 재검증한 연결을 채택했다.
 - `upgrade_busy`: prepare가 attachment/connection 권위 때문에 rejected되어 side-by-side current host를 사용한다.

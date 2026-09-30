@@ -69,6 +69,11 @@ class MaruChromium < Formula
     [host, libexec/"maru-web-helper", framework].each do |file|
       system "/usr/bin/codesign", "--verify", "--strict", file
     end
+    # 실제로 뜨는지 — strict 서명 확인은 서명이 코드를 덮어쓴 파일도 통과시킨다(W7b 5·6 차). host 는 제어 채널(stdin)이
+    # 닫혀 있으면 handshake_failed(11)로 끝난다. helper 는 libcef_sandbox 를 올린 뒤 샌드박스 밖이면 1, 이미 샌드박스
+    # 안이면(`brew test` 가 그렇다 — 실측) 프레임워크까지 올리고 0 으로 끝난다. 시작하다 죽으면 신호(128 이상)다.
+    shell_output("#{host} </dev/null", 11)
+    assert_match(/^exit=[01]$/, shell_output("#{libexec}/maru-web-helper </dev/null >/dev/null 2>&1; echo exit=$?"))
     assert_match "@rpath/", shell_output("/usr/bin/otool -D '#{framework}'")
     manifest = JSON.parse((libexec/"maru-chromium.json").read)
     assert_equal Hardware::CPU.arm? ? "arm64" : "x86_64", manifest["arch"]

@@ -26,6 +26,7 @@ const staged_image = @import("staged_image.zig");
 const compatibility = @import("compatibility.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 const upgrade_scan_policy = @import("upgrade_scan_policy.zig");
+const single_host_policy = @import("single_host_policy.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -136,6 +137,9 @@ pub const UpgradeNotice = union(enum) {
 pub const DetailedOutcome = struct {
     outcome: Outcome,
     upgrade_notice: ?UpgradeNotice = null,
+    /// 새 host 를 띄우지 않고 **다른 build 의** 살아 있는 host 를 spawn host 로 재사용했다(`single_host_policy`).
+    /// 교체가 성공할 때까지 새 탭도 그 옛 이미지에서 돈다는 사실을 UI 가 한 번 알린다.
+    reused_previous_build: bool = false,
 };
 
 fn plain(outcome: Outcome) DetailedOutcome {
@@ -237,7 +241,7 @@ pub fn connectOrLaunchDetailed(
 
     // 같은 build의 host가 없다면, **다른 build의 살아 있는 host**를 새 이미지로 exec 교체해 그 runtime을 그대로
     // 이어받는다. 여기(start lock 획득 뒤)에서 하는 이유: lock이 동시 시작자를 직렬화하므로 두 GUI가 같은 host에
-    // 동시에 upgrade를 걸지 않는다. 실패하면 아래 spawn 경로가 그대로 새 host를 띄운다(회귀 없음).
+    // 동시에 upgrade를 걸지 않는다. 실패하면 아래에서 살아 있는 host 를 재사용하고, 그런 host 가 없을 때만 새로 띄운다.
     var upgrade_notice: ?UpgradeNotice = null;
     switch (tryUpgradeExistingHost(allocator, exe_path, base_cache_dir, dir)) {
         .none => {},
@@ -247,6 +251,21 @@ pub fn connectOrLaunchDetailed(
         },
         .fallback => |notice| upgrade_notice = notice,
         .failed => |reason| return plain(.{ .failed = reason }),
+    }
+
+    // 교체가 아무 host 도 못 바꿨어도 **살아 있고 새 탭을 받을 수 있는 host 가 있으면 그 host 를 쓴다** — 「한 로그인
+    // 세션에 host 하나」(docs/persistent-session-host.md). 예전엔 여기서 곧장 새 host 를 띄웠고, 교체가 늘 실패하는
+    // host 하나 때문에 설치마다 host 가 하나씩 늘었다(2026-09-30 실측: 넷). 이미 생긴 host 는 셸 PTY 를 쥐고 있어
+    // 합칠 수 없으므로 늘지 않게 막는 것이 할 수 있는 전부다. 새 host 는 그런 host 가 하나도 없을 때만 띄운다.
+    switch (reuseLiveHost(allocator, exe_path, base_cache_dir, dir)) {
+        .reuse => |reused| return .{
+            .outcome = .{ .connected = reused.client },
+            .upgrade_notice = upgrade_notice,
+            .reused_previous_build = reused.previous_build,
+        },
+        .spawn => |reason| if (!builtin.is_test)
+            std.log.info("session host: spawning new host because {s}", .{@tagName(reason)}),
+        .out_of_memory => return plain(.{ .failed = .out_of_memory }),
     }
 
     short_endpoint.prepareCurrentUserNamespace() catch return plain(.{ .failed = .endpoint_denied });
@@ -349,8 +368,8 @@ pub fn upgradedHostMatches(restored_build_id: ?[]const u8, target_build_id: []co
     return std.mem.eql(u8, restored, target_build_id);
 }
 
-/// exec 뒤 같은 host_id로 다시 붙되, **정말 새 이미지로 바뀌었는지 확인한다.** 실패하면 `null` — 호출자가
-/// 기존대로 새 host를 spawn한다.
+/// exec 뒤 같은 host_id로 다시 붙되, **정말 새 이미지로 바뀌었는지 확인한다.** 실패하면 `.failed` — 호출자는
+/// 살아 있는 host 를 재사용하고(`reuseLiveHost`), 그런 host 가 없을 때만 새 host 를 spawn한다.
 ///
 /// 재연결 성공만으로는 부족하다. host가 accepted를 보내고도 exec에 실패해 rollback하면 **같은 host_id로 다시
 /// 붙지만 이미지는 옛것 그대로**다. 그 연결을 그대로 채택하면 GUI는 host-backed라고 믿고 `runtime.spawn`을
@@ -436,8 +455,8 @@ pub fn isUpgradeCandidate(
 /// 이 경로가 없으면 새 빌드는 매번 새 host를 띄우고 이전 host의 runtime은 GUI에서 도달할 수 없는 고아가 된다
 /// (실측: build_id별로 host가 4개까지 쌓이고 그 아래 셸이 접근 불가 상태로 남았다).
 ///
-/// 실패는 전부 조용히 `null`이다 — 업그레이드는 **최적화**이고, 안 되면 호출자가 기존대로 새 host를 spawn하면
-/// 된다. 여기서 오류를 올리면 "업그레이드 불가"가 곧 "터미널을 못 엶"이 되어 회귀가 된다.
+/// 실패는 전부 조용히 `.fallback`/`.none`이다 — 업그레이드는 **최적화**이고, 안 되면 호출자가 살아 있는 host 를
+/// 재사용하거나(`reuseLiveHost`) 그런 host 가 없을 때만 새 host 를 spawn한다. 여기서 오류를 올리면 "업그레이드 불가"가 곧 "터미널을 못 엶"이 되어 회귀가 된다.
 const UpgradeSearch = union(enum) {
     none,
     connected: client_mod.Client,
@@ -602,6 +621,102 @@ fn tryUpgradeExistingHost(
 }
 
 const UpgradeScan = upgrade_scan_policy.Scan(UpgradeNotice);
+
+const LiveHostReuse = union(enum) {
+    reuse: struct { client: client_mod.Client, previous_build: bool },
+    spawn: single_host_policy.SpawnReason,
+    out_of_memory,
+};
+
+/// 업그레이드가 아무 host 도 못 바꿨을 때 새 탭을 받을 **살아 있는 host** 를 고른다(`single_host_policy.choose`).
+/// 판정은 순수 leaf 가 하고, 여기는 매니페스트를 관측으로 옮기고 후보에 붙어 보는 일만 한다.
+fn reuseLiveHost(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    base_cache_dir: []const u8,
+    session_dir: [:0]const u8,
+) LiveHostReuse {
+    // build 를 못 읽으면 모든 후보를 옛 build 로 본다 — 순서만 달라지고, UI 는 보수적으로 「옛 build」 를 알린다.
+    const current_build_id: ?[]const u8 = host_manifest.buildIdForExecutable(allocator, exe_path) catch null;
+    defer if (current_build_id) |id| allocator.free(id);
+
+    var observations: [single_host_policy.max_candidates]single_host_policy.Observation = undefined;
+    var observation_count: usize = 0;
+    var hosts_buf: [640]u8 = undefined;
+    if (host_manifest.hostsRootPathIn(&hosts_buf, session_dir)) |hosts_root| {
+        if (c.opendir(hosts_root.ptr)) |directory| {
+            defer _ = c.closedir(directory);
+            while (c.readdir(directory)) |entry| {
+                const name = std.mem.sliceTo(entry.name[0..], 0);
+                if (name.len != 32) continue;
+                const host_id = std.fmt.parseInt(u128, name, 16) catch continue;
+                if (host_id == 0) continue;
+                var manifest = host_manifest.load(allocator, session_dir, host_id) catch continue;
+                defer manifest.deinit();
+                if (observation_count == observations.len) {
+                    if (!builtin.is_test)
+                        std.log.info("session host reuse candidate dropped: host={x:0>32} (holds {d})", .{ host_id, observations.len });
+                    continue;
+                }
+                observations[observation_count] = .{
+                    .host_id = host_id,
+                    .same_wire = manifest.protocol_major == protocol.version_major and
+                        manifest.screen_codec_version == screen_stream.codec_version,
+                    .ready = manifest.lifecycle == .ready,
+                    .lease = switch (ownerLeaseState(session_dir, host_id)) {
+                        .held => .held,
+                        .free => .free,
+                        .unknown => .unknown,
+                    },
+                    .current_build = if (current_build_id) |id| std.mem.eql(u8, manifest.build_id, id) else false,
+                    .published_ns = manifestPublishedNs(session_dir, host_id),
+                };
+                observation_count += 1;
+            }
+        }
+    } else |_| {}
+
+    var prober: LiveHostProber = .{ .allocator = allocator, .base_cache_dir = base_cache_dir };
+    return switch (single_host_policy.choose(observations[0..observation_count], &prober)) {
+        .reuse => |host_id| reuse: {
+            const client = prober.client orelse unreachable; // `reusable` 은 연결을 쥔 채로만 나온다.
+            const previous_build = if (current_build_id) |id| !upgradedHostMatches(client.build_id, id) else true;
+            if (!builtin.is_test)
+                std.log.info("session host: reusing live host={x:0>32} previous_build={} — no new host", .{ host_id, previous_build });
+            break :reuse .{ .reuse = .{ .client = client, .previous_build = previous_build } };
+        },
+        .spawn => |reason| .{ .spawn = reason },
+        .out_of_memory => .out_of_memory,
+    };
+}
+
+/// `single_host_policy.choose` 가 후보마다 부른다. 붙고, GUI 의 spawn 계약을 아는 host 일 때만 연결을 쥔다.
+const LiveHostProber = struct {
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    client: ?client_mod.Client = null,
+
+    pub fn probe(self: *LiveHostProber, host_id: u128) single_host_policy.Probe {
+        var client = switch (connectExistingHost(self.allocator, self.base_cache_dir, host_id)) {
+            .connected => |connected| connected,
+            .failed => |reason| {
+                if (reason == .out_of_memory) return .out_of_memory;
+                if (!builtin.is_test)
+                    std.log.info("session host reuse candidate unreachable: host={x:0>32} reason={s}", .{ host_id, @tagName(reason) });
+                return .connect_failed;
+            },
+        };
+        // 새 탭을 못 받는 host 에 spawn host 를 맡기면 첫 탭이 `UnsupportedSpawnContract` 로 in-process 로 떨어진다.
+        if (!single_host_policy.spawnContractSatisfied(client.runtime_core_command_v1, client.notification_delivery_v1)) {
+            if (!builtin.is_test)
+                std.log.info("session host reuse candidate lacks spawn contract: host={x:0>32}", .{host_id});
+            client.deinit();
+            return .spawn_contract_missing;
+        }
+        self.client = client;
+        return .reusable;
+    }
+};
 
 /// 한 번의 스캔이 붙드는 후보 수. 실측된 host 는 넷이고, 넘치면 그 host 는 이번 스캔에서 빠진다(로그로 남긴다).
 const max_upgrade_scan_candidates: usize = 64;

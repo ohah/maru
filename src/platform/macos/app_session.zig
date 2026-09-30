@@ -5805,6 +5805,9 @@ pub const AppSession = struct {
     /// A successful current-host connection can still mean that an older host was not migrated.
     /// Keep that independent result as a bounded value until a modal-free frame presents it once.
     session_host_upgrade_notice_pending: ?SessionHostUpgradeNotice = null,
+    /// 새 host 를 띄우지 않고 다른 build 의 살아 있는 host 를 spawn host 로 재사용했다(`single_host_policy`). 위 업그레이드
+    /// 결과와 **같은 알림 한 번**으로 싣는다 — 교체가 성공할 때까지 새 탭도 옛 이미지에서 돈다는 사실이다.
+    session_host_reuse_notice_pending: bool = false,
     /// attach가 controller를 못 얻고 observer로 강등된 Term이 있다(§9). 다음 tick에 한 번 알린다 — 알리지
     /// 않으면 사용자는 화면만 갱신되고 입력이 전부 무시되는 터미널을 이유도 모른 채 쓰게 된다.
     observer_attach_notice_pending: bool = false,
@@ -8996,6 +8999,22 @@ pub const AppSession = struct {
                 },
             };
             const host_id = client.host_id;
+            // 재사용된 host(`single_host_policy`)가 이미 복원 adapter 로 pool 에 있으면 다시 게시하지 않고 **그 adapter 를
+            // spawn host 로 세운다.** 같은 host 를 두 번 게시하면 `DuplicateHost` 로 실패해 새 탭이 in-process 로 떨어진다 —
+            // 죽은 spawn host 를 치운 뒤 다시 붙는 자리(`term.zig` createTerm)가 남은 host 를 고르면 늘 이 모양이다.
+            if (app_remote_backend) |*backend| if (app_remote_host_pool) |*pool| if (pool.get(host_id) != null) {
+                client.deinit();
+                pool.setSpawnHost(host_id) catch unreachable;
+                backend.promoteToSpawnAndAttach(pool) catch {
+                    pool.clearSpawnHost();
+                    self.markHostConnectFailedReason(.adapter, .resource_exhausted);
+                    return;
+                };
+                self.session_host_upgrade_notice_pending = connect_result.upgrade_notice;
+                self.session_host_reuse_notice_pending = connect_result.reused_previous_build;
+                clearHostConnectFailure();
+                return;
+            };
             const owned_adapter = alloc.create(RemoteSessionAdapter) catch {
                 client.deinit();
                 self.markHostConnectFailedReason(.adapter, .out_of_memory);
@@ -9041,6 +9060,7 @@ pub const AppSession = struct {
                     return;
                 };
                 self.session_host_upgrade_notice_pending = connect_result.upgrade_notice;
+                self.session_host_reuse_notice_pending = connect_result.reused_previous_build;
                 // 승격도 성공이다 — 아래 신규 backend 경로와 똑같이 래치를 푼다. 안 풀면 `backendForNew` 가
                 // 이번 Term 을 in-process 로 열고 다음 Term 에서야 조기 반환이 푼다(한 Term 어긋남).
                 clearHostConnectFailure();
@@ -9071,6 +9091,7 @@ pub const AppSession = struct {
             // 첫 spawn의 PTY reader publication 전에 같은 값이 들어가야 한다.
             app_remote_backend.?.configureNotifications(self.loaded_config.config.notifications.osc) catch {};
             self.session_host_upgrade_notice_pending = connect_result.upgrade_notice;
+            self.session_host_reuse_notice_pending = connect_result.reused_previous_build;
             // **붙었으면 래치를 푼다.** 안 풀면 `backendForNew` 가 계속 in-process 를 고르고, 그 앱 세션은
             // **재시작 전까지 원격으로 못 돌아온다** — host 가 멀쩡히 떠 있어도 그렇다.
             //
@@ -9449,6 +9470,7 @@ pub const AppSession = struct {
         // A final current-host failure is stronger than an earlier migration result: the session is
         // not persistent at all. Do not let a stale upgrade notice overwrite that user-visible fact.
         self.session_host_upgrade_notice_pending = null;
+        self.session_host_reuse_notice_pending = false;
         if (!builtin.is_test) {
             // **언제 죽었는지를 같이 남긴다.** 2026-09-09 실측: `stage=runtime_death
             // error=ConnectionClosed` 한 줄이 나왔는데, 그 앞 16 시간 동안 host 관련 로그가 **한 줄도**
@@ -9552,16 +9574,25 @@ pub const AppSession = struct {
     }
 
     fn showPendingSessionHostUpgradeNotice(self: *AppSession) void {
-        const notice = self.session_host_upgrade_notice_pending orelse return;
+        const notice = self.session_host_upgrade_notice_pending;
+        const reused = self.session_host_reuse_notice_pending;
+        if (notice == null and !reused) return;
         if (self.host_connect_notice_pending or host_connect_failed) {
             self.session_host_upgrade_notice_pending = null;
+            self.session_host_reuse_notice_pending = false;
             return;
         }
         if (self.anyModalOverlayOpen()) return;
         self.session_host_upgrade_notice_pending = null;
+        self.session_host_reuse_notice_pending = false;
         if (!is_macos) return;
         var detail_buf: [256]u8 = undefined;
-        self.showNoticeFmt(.app_session_host_upgrade_result, &.{.{ .s = notice.detail(&detail_buf) }});
+        const detail = if (notice) |value| value.detail(&detail_buf) else "-";
+        // 재사용이면 그 사실이 먼저다 — 업그레이드 결과는 그 이유로 같은 줄에 싣는다(알림 칸은 하나다).
+        if (reused)
+            self.showNoticeFmt(.app_session_host_reused_previous_build, &.{.{ .s = detail }})
+        else
+            self.showNoticeFmt(.app_session_host_upgrade_result, &.{.{ .s = detail }});
     }
 
     /// codex 훅의 신뢰 값이 낡아 **그 훅이 돌지 않는** 상태를 첫 tick에 한 번 알린다(계약 §2.1).

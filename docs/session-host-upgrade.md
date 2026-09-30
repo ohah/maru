@@ -12,8 +12,19 @@
 > multi-runtime migration·앱 재실행 notice·장시간 soak는 계속 외부 release gate로 남는다.
 > **앱 재실행 orchestration은 연결됐다** — GUI는 시작할 때 같은 build의 host가 없으면, build_id만 다른 살아 있는
 > host를 찾아 자동으로 exec 교체를 시도한다(`host_connect.tryUpgradeExistingHost`). 이 시도는 **best-effort**다:
-> 후보가 없거나 capability 미광고·prepare 거부·재연결 실패면 조용히 기존 spawn 경로로 떨어져 새 host를 띄운다.
-> 업그레이드 실패가 곧 "터미널을 못 여는 실패"가 되어서는 안 되기 때문이다.
+> 후보가 없거나 capability 미광고·prepare 거부·재연결 실패여도 터미널은 연다. 업그레이드 실패가 곧 "터미널을 못
+> 여는 실패"가 되어서는 안 되기 때문이다.
+> **다만 실패했다고 새 host를 띄우지 않는다(2026-09-30).** 설계는 「한 로그인 세션에 host 하나」인데
+> ([persistent-session-host](persistent-session-host.md)), 예전엔 교체가 실패하면 곧장 새 host를 띄웠고 그 폴백이
+> 불변식을 깨는 유일한 경로였다 — 교체가 늘 실패하는 host 하나 때문에 설치마다 host가 늘어 넷이 됐다. 이제 살아 있고
+> (owner lease `held`) wire가 같고 `ready`이며 GUI의 spawn 계약(`runtime_core_command_v1`·`notification_delivery_v1`)을
+> 광고하는 host가 있으면 그 host를 새 탭의 spawn host로 재사용한다(같은 build 먼저, 그다음 매니페스트 게시가 최신인
+> host). 새 host는 새 탭을 받을 host가 하나도 없을 때만(첫 실행·재부팅 뒤·N-1 host뿐·전부 spawn 계약을 모름) 띄우고
+> `session host: spawning new host because <reason>` 한 줄을 남긴다. 대가는 교체가 성공할 때까지 새 탭도 옛
+> 이미지에서 돈다는 것이라 UI 알림(`app_session_host_reused_previous_build`)으로 한 번 알린다. 같은 build의 host가
+> 생기지 않으므로 다음 앱 실행도 스캔을 다시 돌려 교체를 계속 시도한다. 이미 여럿인 host를 하나로 합치지는 못한다
+> (host 간 runtime 이관 기능이 없다). 판정은 `single_host_policy.zig`(std-only leaf), 배선은
+> `tests/single_host_policy_wiring_boundary.zig`가 잰다(`test-single-host-policy`, check-boundaries).
 > **스캔은 결과를 보고 다음 후보로 간다(2026-09-30).** 예전엔 prepare를 한 번 보내면 결과와 무관하게 끝냈는데,
 > 9/27 빌드 host가 매니페스트 ctime 결함으로 교체가 매번 `resumed/handoff_failed`로 끝나면서 readdir 순서상 늘 첫
 > 후보였다 — 스캔이 거기서 끝나 9/28·9/29 빌드 host 둘은 한 번도 시도받지 못했고, 설치마다 새 host가 하나씩 늘어
@@ -27,7 +38,8 @@
 > 재연결은 성공하지만 이미지는 옛것 그대로다. 그 연결을 채택하면 GUI가 host-backed로 믿고 `runtime.spawn`을 걸었다가
 > 옛 host가 모르는 capability(`runtime_core_command_v1`)로 실패해 모든 터미널이 in-process로 떨어진다 —
 > `build_id` 게이팅이 막아 주던 상황을 업그레이드 경로가 우회해 만드는 셈이다. 그래서 재연결 뒤 hello ack의
-> `build_id`가 target과 정확히 같을 때만 채택하고, 다르거나 광고하지 않으면(fail-closed) 연결을 버려 spawn으로 간다.
+> `build_id`가 target과 정확히 같을 때만 채택하고, 다르거나 광고하지 않으면(fail-closed) 연결을 버리고 위 재사용
+> 판정으로 간다(그 host가 spawn 계약을 광고하면 옛 이미지 그대로 spawn host가 된다 — 이번엔 **알고** 쓰는 것이다).
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가
@@ -342,7 +354,8 @@ touch(`futimens`·`utimensat`)는 mtime·ctime 만 바꾼다. **mtime 은 이 �
 순이면 교체된 host 가 맨 뒤로 가 **설치마다 옛 host 하나씩 돌아가며** 교체되고, 늘 실패하는 host(2026-09-30 의 9/27
 host 는 게시 전에 실패해 birth time 이 그대로라 늘 맨 앞이다)는 `resumed` 로 지나친다 — 그 비용은 설치마다 약 1 s
 와 prepare 한 칸이다. 같은 빌드 host 가 이미 있으면 스캔 자체를 건너뛰므로(§상태 블록) 교체는 설치(새 빌드)마다
-한 번 일어난다.
+한 번 일어난다. 교체가 모두 실패하면 이제 새 host를 띄우지 않으므로(§상태 블록, `single_host_policy`) 같은 빌드
+host가 생기지 않고, 다음 앱 실행도 스캔을 다시 돈다 — 교체될 때까지 **실행마다** 한 번 시도한다.
 
 connect-or-launch 결과는 최종 `Client`와 별개인 bounded `UpgradeNotice`를 함께 돌려준다. 알림 칸은 하나다. 스캔이
 어떤 host를 교체했으면 그 `upgraded`가, 멈춘 host가 있으면 그 host의 결과가, 다음 후보로 넘어가기만 하다 끝났으면
@@ -392,7 +405,8 @@ Debug assert나 ReleaseFast no-op에 의존하지 않고 두 최적화 모드에
 **문제.** 위 규칙은 「`upgrade_busy`면 … 마지막 attachment가 떨어진 뒤 다시 시도한다」인데, 코드는 교체를 앱이 host 에
 처음 연결할 때 한 번만 시도하고, 같은 빌드 host 가 이미 있으면 스캔 자체를 건너뛴다(`host_connect.zig` 의
 「current-build host found — upgrade scan skipped」). 그래서 교체가 한 번 실패하면(§7 예약 초과. 2026-09-28 부터
-예약에 여유를 두어 드물어졌지만 없어지지는 않았다) 새 host 가 옆에 서고, 옛 host 는 **셸이 모두 닫힐 때까지**
+예약에 여유를 두어 드물어졌지만 없어지지는 않았다) 새 host 가 옆에 서고(2026-09-30 부터는 옆에 세우지 않고 그 옛
+host 를 재사용한다 — §상태 블록), 옛 host 는 **셸이 모두 닫힐 때까지**
 옛 이미지로 남는다. 그동안 새 앱은 옛
 host 에 붙는다(2026-09-05 실측: 셸 12 개를 쥔 host 가 이 경로로 굳었다). 세션 도중의 재교체는 위 조건(모든 runtime 의
 controller·observer 0, 사용자 입력을 끊지 않는다)상 불가능하다.

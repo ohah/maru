@@ -1042,6 +1042,10 @@ immutable frozen release를 사용한 실제 통과, 앱 재실행 화면의 not
 5 s, 넘긴 첫 실패 알림), 공정 순서 모형(매니페스트 birth time 순 — 고정 readdir 순서에서 설치 셋이 서로 다른 host
 셋을 교체, readdir 순서 그대로면 같은 host 만 반복), 그리고 스캔 루프가 그 판정·순서를 제자리에서 부르는지 보는
 wiring 경계. 실제 host 여럿을 둔 스캔 E2E는 없다.
+교체가 아무 host 도 못 바꿨을 때 새 host 를 띄우지 않고 살아 있는 호환 host 를 재사용하는 규칙(2026-09-30, 「host
+하나」 불변식)은 `test-single-host-policy`(check-boundaries)가 잰다 — std-only 판정 표(lease·wire·lifecycle 제외
+이유와 spawn 이유, spawn 계약 capability, 같은 build → 최신 게시 순, 첫 성공에서 멈춤)와, connect 경로의 재사용
+판정·앱 pool 의 기존 adapter 채택·알림이 spawn 앞 제자리에 있는지 보는 wiring 경계. 실제 host 를 둔 E2E 는 없다.
 
 | 단계 | 목표 종료 gate | 현재 증거만으로 완료로 보지 않는 것 |
 | --- | --- | --- |

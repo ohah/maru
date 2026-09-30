@@ -2013,12 +2013,15 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   anchor charge를 건드리지 않음과, 다른 incident·charged·자기 자신으로의 이전을 거부함을 잰다. 수정 전 코드에서 N=8·13은
   `.retry_later`로 red, N=7은 green(대조군)이었다. 경계 `CR6e-c3b2c 경계는`(check-boundaries)이 batch charge 부재, anchor
   bind, 직렬 job 전제, charged==1 검사 두 자리, teardown 직전 이전 네 자리를 고정한다.
-  **CR6e-c3b2d 재연결 viewport**(같은 step 필터 `CR6e-c3b2d reconnect viewport`, 경계 `CR6e-c3b2d 경계는`): 관문이 닫힌
-  동안(observer) 들어온 `resize`가 host 로는 안 가도 `layout_size`에 남아, 재연결 강제 resize 의 크기가 host 옛 격자가
-  아니라 마지막 레이아웃 요청이 됨을, 요청 전에는 snapshot 크기로 물러남을, 버린 resize·input 이 상태당 한 번만
-  적힘을 잰다. 경계는 제품 강제 resize 자리가 `reconnectViewportSize(`를 거침, `resize`가 관문보다 먼저 의도를 적음,
-  버림 기록 일곱 자리, 이유 이름이 관문 판정 자체(`allowed = denial == null`)에서 나옴을 고정한다. 옛 동작(snapshot
-  크기 + 관문 뒤 기록)으로 되돌리면 red 다. 2026-09-29 실측(재연결 뒤 한 host 의 runtime 셋이 resize·input 을
+  **CR6e-c3b2d 재연결 viewport**(같은 step 필터 `CR6e-c3b2d reconnect viewport`·`CR6e-c3b2d mutation denial`, 경계
+  `CR6e-c3b2d 경계는`): 관문이 닫힌 동안(observer) 들어온 `resize`가 `layout_size`에 남아 재연결 강제 resize 의 크기가
+  되되, host 가 거절할 수 있는 크기(cell 상한 초과·최소 열 미만·cell 증가)는 snapshot 으로 물러남을 잰다. 진단은 같은
+  op·같은 이유 반복이 한 줄, op 가 다르면 따로, 이유가 바뀌면 새 줄, stable mutation 을 얻으면 그 op 만 비워짐, 재연결
+  게시가 전부 비움, owner 거절 이름이 서로·`AdminBusy` 와 갈림을 행동으로 잰다. denial 표는 실제 socketpair
+  transport 에서 관문 조건 다섯(owner 주소·Client 차용·controller 결속·operation permit·buffered revoke)을 하나씩
+  깨뜨려 자기 이름이 나오고 되돌리면 다시 열림을 잰다. 경계는 사용자 mutation 열한 자리가 기록 경로를 지남, 기록 없는
+  관문은 자동 경로 넷뿐, 기록을 비우는 자리가 stable mutation 획득 뒤 하나, 게시 reset, 관문과 이유 이름의 단일
+  판정을 고정한다. 옛 동작(snapshot 크기 + 관문 뒤 기록)으로 되돌리면 red 다. 2026-09-29 실측(재연결 뒤 한 host 의 runtime 셋이 resize·input 을
   흔적 없이 버림)의 **관문이 왜 닫혔는지**는 로컬에서 실제 host 다중 runtime 재연결을 돌릴 수 없어 확정하지 못했다 —
   다음 발생은 `remote mutation dropped: … reason=` 한 줄이 관문 이름으로 가른다.
   e3c1은 reconnect-only `SessionHostCoordinator`의 final address·PID·process nonce·owner thread와 one-turn backend

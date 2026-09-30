@@ -568,7 +568,7 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
   상속하지 않는 독립 step이다(in-process socketpair fixture만 써서 실제 host를 띄우지 않는다). host admission 하나가 charge
   하나만 잡아 runtime 8개 이상인 host도 재접속을 시작하는지 N=7·8·13, 예산 대기, anchor 이탈, identity-only executor로
   정산 없는 teardown까지 Debug·ReleaseFast에서 8개를 exact-count하고 경계 1개를 함께 돈다. Debug는 PR의 `test-macos-only`에, 경계는 check-boundaries에 걸린다.
-  같은 step 이 CR6e-c3b2d(재연결 강제 resize 의 viewport 출처) 판정자 1개와 경계 1개를 필터로 함께 돌아 합계 10+2다.
+  같은 step 이 CR6e-c3b2d(재연결 강제 resize 의 viewport 출처·관문 버림 진단) 판정자 3개와 경계 1개를 필터로 함께 돌아 합계 12+2다.
 - 영속 세션 호스트 무로그 종료 경계: `zig build test-session-host-silent-diagnostics`. 업그레이드 coordinator 의 모든
   `handoff_failed` 산출 줄이 4 줄 안에 단계 기록을 두는지(라벨 유일성·authority 전이 에러 이름 포함), host 자연 종료와
   listener 깨짐이 로그 한 줄을 남기고 나가는지, `createTerm` 이 죽은 spawn host 재시작 **전에** `runtime_death` 를 기록하지

@@ -4864,6 +4864,92 @@ test "C3-3a3 product generation transport aggregate blocks every mutation facade
     binding.lifecycle = .terminal;
 }
 
+// 관문(`mutationAllowedOwned`)과 그 이유 이름(`mutationDenialOwned`)은 한 판정이다. 조건을 하나씩만 깨뜨려
+// 그 조건의 이름이 나오고, 되돌리면 다시 열리는지를 표로 잰다 — 조건 하나를 빼면(관문 동작이 바뀐다)
+// 그 행이 빨개진다. 2026-09-29 재연결 뒤 관문이 흔적 없이 닫혔던 사고의 다음 발생을 이 이름이 가른다.
+test "CR6e-c3b2d mutation denial 표는 관문의 조건마다 자기 이름을 내고 되돌리면 다시 연다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xC6E3D001,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xC6E3D001);
+    defer slot.deinit();
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        event: EventOwner = .{},
+    };
+    var owner: Owner = .{};
+    const transport = &owner.transport;
+    const owner_addr = @intFromPtr(&owner);
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(transport));
+    try mintInPlace(transport, &slot, owner_addr, @sizeOf(Owner), reservation);
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 74);
+    try reserveEventOwnerInPlace(transport, &owner.event);
+    try bindCommittedStreamOwned(transport, owner_addr, 74);
+
+    // 기준: 전부 열려 있다.
+    try std.testing.expectEqual(@as(?[]const u8, null), mutationDenialOwned(transport, owner_addr));
+    try std.testing.expect(mutationAllowedOwned(transport, owner_addr));
+
+    // 1) 다른 owner 주소.
+    try std.testing.expectEqualStrings("transport_owner_moved", (mutationDenialOwned(transport, owner_addr + 1) orelse "allowed"));
+    try std.testing.expect(!mutationAllowedOwned(transport, owner_addr + 1));
+
+    // 2) Client 를 못 빌린다(연결 세대가 slot 과 어긋남).
+    transport.connection_generation +%= 1;
+    try std.testing.expectEqualStrings("client_unavailable", (mutationDenialOwned(transport, owner_addr) orelse "allowed"));
+    try std.testing.expect(!mutationAllowedOwned(transport, owner_addr));
+    transport.connection_generation -%= 1;
+    try std.testing.expect(mutationAllowedOwned(transport, owner_addr));
+
+    // 3) controller 결속이 없다(결속 stream 이 0).
+    const bound_stream = transport.bound_stream_id;
+    transport.bound_stream_id = 0;
+    try std.testing.expectEqualStrings("controller_binding_invalid", (mutationDenialOwned(transport, owner_addr) orelse "allowed"));
+    try std.testing.expect(!mutationAllowedOwned(transport, owner_addr));
+    transport.bound_stream_id = bound_stream;
+    try std.testing.expect(mutationAllowedOwned(transport, owner_addr));
+
+    // 4) slot 의 stream operation permit 이 바쁘다.
+    slot.current.active_operation_kind = .event;
+    try std.testing.expectEqualStrings("stream_operation_busy", (mutationDenialOwned(transport, owner_addr) orelse "allowed"));
+    try std.testing.expect(!mutationAllowedOwned(transport, owner_addr));
+    slot.current.active_operation_kind = .none;
+    try std.testing.expect(mutationAllowedOwned(transport, owner_addr));
+
+    // 5) 이 stream 의 controller.revoked 가 버퍼에 있다.
+    try slot.current.client.bufferGenerationEventForTest(
+        74,
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"00000000000000000000000000000074\",\"stream_id\":74,\"controller_generation\":1,\"reason\":\"takeover\"}}",
+    );
+    try std.testing.expectEqualStrings("controller_revoke_buffered", (mutationDenialOwned(transport, owner_addr) orelse "allowed"));
+    try std.testing.expect(!mutationAllowedOwned(transport, owner_addr));
+    try std.testing.expectEqual(
+        EventTakeOutcome.taken,
+        (try takeEventProjected(transport, &owner.event)).outcome,
+    );
+    try transport.releaseEvent(&owner.event);
+
+    try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 74);
+    try terminalizeOwned(transport, owner_addr);
+    try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 74);
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
+}
+
 test "C3-3b1 actual socket benign and unknown events block TX while RX demux advances" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const RxDemuxReentryAllocator = struct {

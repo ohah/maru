@@ -1157,18 +1157,18 @@ test "CR6e-c3b2c 경계는 host admission 하나에 resident charge 하나만 �
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn bindAdmissionIdentity("));
     inline for (.{
         "const session_host_reconnect_host_charge_step = b.step(",
-        "run_host_charge_tests.addArg(\"--maru-expect-tests=10\")",
+        "run_host_charge_tests.addArg(\"--maru-expect-tests=12\")",
         "if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);",
-        ".filters = &.{ \"CR6e-c3b2c host charge\", \"CR6e-c3b2d reconnect viewport\" },",
+        ".filters = &.{ \"CR6e-c3b2c host charge\", \"CR6e-c3b2d reconnect viewport\", \"CR6e-c3b2d mutation denial\" },",
         "run_host_charge_boundary_tests.addArg(\"--maru-expect-tests=2\")",
         "if (host_charge_optimize == .Debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);",
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
 }
 
 test "CR6e-c3b2d 경계는 재연결 강제 resize 가 레이아웃이 원한 크기를 쓰고 관문 버림을 남긴다" {
-    // 2026-09-29 실측: 재연결 도중 도착한 창 크기 변경이 관문(`mutationAllowed`)에서 조용히 버려지고,
-    // 게시 직전 강제 resize 가 host 의 옛 격자를 다시 박아 host 가 72행에 남았다(창은 60행). 동작은
-    // `CR6e-c3b2d reconnect viewport` 가 재고, 여기서는 그 판정이 기대는 제품 배선을 잰다.
+    // 2026-09-29: 재연결 뒤 한 host 의 runtime 셋이 resize·input 을 흔적 없이 버렸다. 관문이 왜 닫혔는지는
+    // 아직 모른다. 동작은 `CR6e-c3b2d reconnect viewport`·`CR6e-c3b2d mutation denial` 이 재고, 여기서는
+    // 그 판정이 기대는 제품 배선을 잰다.
     const allocator = std.testing.allocator;
     const runtime_raw = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(runtime_raw);
@@ -1181,23 +1181,74 @@ test "CR6e-c3b2d 경계는 재연결 강제 resize 가 레이아웃이 원한 �
         "\n            const size = runtime.reconnectViewportSize(runtime.surface.renderSnapshot().size);\n",
     ));
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "const size = runtime.surface.renderSnapshot().size;"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, "return self.layout_size orelse snapshot_size;"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "!registry_mod.gridSizeAllowed(layout.cols, layout.rows))"));
 
     // resize 는 관문보다 **먼저** 의도를 적는다 — 뒤에 적으면 버려진 크기가 사라진다.
     const resize_fn = between(runtime, "pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16)", "const ResizeDecodeContext = struct {") orelse
         return error.MissingResize;
     const recorded = std.mem.indexOf(u8, resize_fn, "\n        self.layout_size = .{ .cols = cols, .rows = rows };\n");
-    const gated = std.mem.indexOf(u8, resize_fn, "\n        if (!self.mutationAllowed()) {\n            self.noteMutationDropped(\"resize\", self.mutationDenialName());\n            return;\n        }\n");
+    const gated = std.mem.indexOf(u8, resize_fn, "\n        if (!self.gateMutation(.resize)) return;\n");
     try std.testing.expect(recorded != null and gated != null and recorded.? < gated.?);
 
-    // 관문이 버린 mutation 은 상태가 바뀔 때 한 번 app.log 에 남는다 — 관문(resize·input 둘·select·mouse)
-    // 다섯과, 관문을 지난 뒤 stable mutation owner 가 닫혀 돌아가는 resize·input 둘.
-    try std.testing.expectEqual(@as(usize, 7), count(runtime, "\n            self.noteMutationDropped(\""));
-    try std.testing.expectEqual(@as(usize, 5), count(runtime, ", self.mutationDenialName());\n"));
-    // 이유 이름은 관문 자체에서 나온다 — allowed 는 denial 이 null 인 것이다(진단 전용 복제 0).
+    // 사용자 mutation 은 관문과 stable owner 둘 다 **기록하는** 경로로 지난다. op 마다 관문 한 자리·owner 한 자리.
+    inline for (.{
+        .{ "pub fn sendInput(self: *RemoteRuntime, bytes: []const u8)", "input" },
+        .{ "pub fn sendInputNonBlocking(self: *RemoteRuntime", "input" },
+        .{ "pub fn enqueueInputBatch(self: *RemoteRuntime", "input_batch" },
+        .{ "pub fn requestScrollToBottom(self: *RemoteRuntime)", "scroll" },
+        .{ "pub fn queueCoreCommand(self: *RemoteRuntime", "core_command" },
+        .{ "pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16)", "resize" },
+        .{ "pub fn find(self: *RemoteRuntime", "find_scroll" },
+        .{ "pub fn selectContentAware(self: *RemoteRuntime", "select" },
+        .{ "pub fn sendCoreCommandBlocking(self: *RemoteRuntime", "core_command" },
+        .{ "pub fn sendMouseReport(self: *RemoteRuntime", "mouse" },
+        .{ "pub fn updateNotificationConfig(", "notification_config" },
+    }) |site| {
+        const body = memberBody(runtime, site[0]) orelse return error.MissingMutationSite;
+        try std.testing.expectEqual(@as(usize, 1), count(body, "self.gateMutation(." ++ site[1] ++ ")"));
+        try std.testing.expectEqual(@as(usize, 1), count(body, "try self.beginNotedMutation(." ++ site[1] ++ ", &mutation_lease);"));
+        // 기록 없는 옛 모양이 남으면 owner 쪽 버림이 안 적히고 그 op 의 기록도 안 비워진다.
+        try std.testing.expectEqual(@as(usize, 0), count(body, "self.mutationAllowed()"));
+        try std.testing.expectEqual(@as(usize, 0), count(body, "try self.beginStableMutation(&mutation_lease);"));
+    }
+    // 기록하지 않고 막는 관문은 틱마다 도는 자동 경로 넷뿐이다(관측 probe·큐 dequeue·clipboard/알림 poll) —
+    // 사용자 의도가 아니고 앞단 enqueue 가 이미 적는다. 새 관문이 생기면 여기서 어느 쪽인지 정해야 한다.
+    try std.testing.expectEqual(@as(usize, 4), count(runtime, "if (!self.mutationAllowed()) return error.Unauthorized;"));
+    inline for (.{
+        "pub fn requestObservationProbe(",
+        "fn admitControl(self: *RemoteRuntime",
+        "pub fn clipboardWrite(self: *RemoteRuntime)",
+        "pub fn takeNotification(self: *RemoteRuntime)",
+    }) |header| {
+        const body = memberBody(runtime, header) orelse return error.MissingPollSite;
+        try std.testing.expectEqual(@as(usize, 1), count(body, "if (!self.mutationAllowed()) return error.Unauthorized;"));
+    }
+
+    // 기록을 비우는 자리는 stable mutation 을 얻은 **뒤** 하나뿐이고, 재연결 게시가 전부 비운다.
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.clearMutationDropNote(op);"));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        runtime,
+        "        self.beginStableMutationDetailed(out) catch |err| {\n" ++
+            "            self.noteMutationDropped(op, stableMutationDenialName(err));\n" ++
+            "            return mapStableMutationError(err);\n" ++
+            "        };\n" ++
+            "        self.clearMutationDropNote(op);\n",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        runtime,
+        "            runtime.mutation_owner.reopenNoFail(next_shell_generation, next_input_epoch);\n" ++
+            "            runtime.resetMutationDropNotesNoFail();\n",
+    ));
+    // 같은 op·같은 이유는 한 번, 이유가 바뀌면 다시 — 한 비트 래치로 돌아가면 일시적 이유가 진짜 이유를 가린다.
+    const note_fn = between(runtime, "fn noteMutationDropped(", "fn clearMutationDropNote(") orelse
+        return error.MissingDropNote;
+    try std.testing.expectEqual(@as(usize, 1), count(note_fn, "if (slot.* == reason.ptr) return;"));
+    try std.testing.expectEqual(@as(usize, 1), count(note_fn, "\"remote mutation dropped: runtime={s} op={s} reason={s}"));
+
+    // 이유 이름은 관문 자체에서 나온다 — allowed 는 denial 이 null 인 것이다(진단 전용 복제 0). 본문 **전체**를
+    // 잰다 — 한 줄만 재면 그 앞에 별도 조건을 끼워 관문과 이유가 갈라져도 초록이다.
     const transport_raw = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
     defer allocator.free(transport_raw);
-    // 본문 **전체**를 잰다 — 한 줄만 재면 그 앞에 별도 조건을 끼워 관문과 이유가 갈라져도 초록이다.
     try std.testing.expectEqual(@as(usize, 1), count(
         transport_raw,
         "pub fn mutationAllowedOwned(transport: *GenerationTransport, owner_addr: usize) bool {\n" ++
@@ -1211,10 +1262,21 @@ test "CR6e-c3b2d 경계는 재연결 강제 resize 가 레이아웃이 원한 �
         "        if (!self.payloadConst().allowsMutation()) return \"observer\";\n" ++
             "        return generation_transport_mod.mutationDenialOwned(\n",
     ));
-    const note_fn = between(runtime, "fn noteMutationDropped(", "fn mutationDenialName(") orelse
-        return error.MissingDropNote;
-    try std.testing.expectEqual(@as(usize, 1), count(note_fn, "if (self.mutation_drop_noted) return;"));
-    try std.testing.expectEqual(@as(usize, 1), count(note_fn, "\"remote mutation dropped: runtime={s} op={s} reason={s}"));
+}
+
+/// `RemoteRuntime` 의 멤버 함수 하나(들여쓰기 4칸 `fn` 부터 다음 멤버 `fn` 직전까지).
+fn memberBody(source: []const u8, header: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, source, header) orelse return null;
+    const after = at + header.len;
+    var cursor = after;
+    while (std.mem.indexOfPos(u8, source, cursor, "\n    ")) |nl| {
+        const rest = source[nl + 5 ..];
+        if (std.mem.startsWith(u8, rest, "pub fn ") or std.mem.startsWith(u8, rest, "fn ") or
+            std.mem.startsWith(u8, rest, "const ") or std.mem.startsWith(u8, rest, "pub const "))
+            return source[at..nl];
+        cursor = nl + 1;
+    }
+    return null;
 }
 
 test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고정한다" {

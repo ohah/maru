@@ -515,13 +515,16 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     // singleton rollback의 created/sibling/rejected 세 row, R3 #3b(죽은 spawn host 치우기) fixture 하나뿐이고,
     // managed 제품 entrypoint는 공용 transaction만 쓴다.
     try std.testing.expectEqual(@as(usize, 7), count(app_session, ".addOwned("));
-    // current 제품 1, 기존 fixture 2, singleton rollback의 rejected row 1, R3 #3b fixture 1만 spawn host를 직접 선택한다.
-    try std.testing.expectEqual(@as(usize, 5), count(app_session, ".setSpawnHost("));
+    // current 제품 1, 재사용된 host 가 이미 pool 에 있을 때의 채택 1(single_host_policy), 기존 fixture 2, singleton
+    // rollback의 rejected row 1, R3 #3b fixture 1만 spawn host를 직접 선택한다.
+    try std.testing.expectEqual(@as(usize, 6), count(app_session, ".setSpawnHost("));
     // bootstrap5 readiness 1 + R3 #3b 의 «치워졌다» 단언 1.
     try std.testing.expectEqual(@as(usize, 2), count(app_session, "app_remote_host_pool.?.spawnHostId() == null"));
     // current promotion 1과 bootstrap5 settlement readiness의 backend-present conjunction 1이다.
     try std.testing.expectEqual(@as(usize, 2), count(app_session, "if (app_remote_backend != null and"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "backend.promoteToSpawnAndAttach(&app_remote_host_pool.?)"));
+    // 재사용 host 채택도 새 adapter 를 게시하지 않고 같은 승격 한 번만 거친다.
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "backend.promoteToSpawnAndAttach(pool)"));
     try std.testing.expectEqual(@as(usize, 11), count(incident, "test \"CR0b writer"));
     try std.testing.expectEqual(@as(usize, 6), count(storage, "test \"CR0b 저장소"));
     try std.testing.expectEqual(@as(usize, 7), count(runtime, "test \"CR0b 기록기 수명은"));

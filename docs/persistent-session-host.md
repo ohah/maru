@@ -433,6 +433,10 @@ Window 2
 
 한 user login session의 host 하나가 모든 Window/Workspace의 terminal runtime을 관리한다. workspace 이동·pane split·Term 탭
 재배치는 runtime을 재시작하지 않고 manifest binding 위치만 바꾼다. cross-window 이동도 동일하다.
+「host 하나」는 불변식이다. 새 빌드 설치 때 exec 교체가 실패해도 앱은 새 host를 띄우지 않고 살아 있는 호환 host를
+새 탭의 spawn host로 재사용하며, 새 탭을 받을 host가 하나도 없을 때만 새 host를 띄운다(2026-09-30,
+[session-host-upgrade](session-host-upgrade.md) 상태 블록, `single_host_policy.zig`). 이미 여럿인 host를 하나로
+합치는 host 간 runtime 이관은 없다 — 옛 host는 셸이 모두 닫혀 자연 종료할 때 사라진다.
 
 현재 `maru.workspace.v1`에서 `Window`는 OS 창, `Tab`은 Workspace, `Pane`과 `Surface`는 각각 split leaf와 Term이다.
 별도 session DB나 창별 workspace 파일을 만들지 않고 기존 단일
@@ -504,7 +508,9 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" ru
   죽은 spawn host id 를 계속 들고 있어 `ensureRemoteBackend` 가 «backend 있음 + spawn host 있음» 을 «이미 붙어 있음»
   으로 읽고 조기 반환한 것 — 위 30 s 재시도도 이 조기 반환에 막혀 **한 번도 launch 로 가지 않았다**. 그래서
   `createTerm` 의 `runtime_death` 폴백은 ① `evictDeadSpawnHost`(참조가 남으면 `clearSpawnHost` 로 지정만 풂) ②
-  `ensureRemoteBackendNow`(retry 게이트 무시, 실패는 그대로 기록) ③ 새 host 에 다시 spawn, 그것도 실패해야 in-process
+  `ensureRemoteBackendNow`(retry 게이트 무시, 실패는 그대로 기록) ③ 다시 connect-or-launch 해 spawn — 살아 있는 다른
+  호환 host 가 있으면 그 host(이미 pool 에 복원 adapter 로 있으면 그 adapter 를 spawn host 로 세운다, 2026-09-30),
+  없을 때만 새 host 다. 그것도 실패해야 in-process
   다. 위 두 이유와 충돌하지 않는다: 새 Term 의 fresh spawn 은 이중 attach 를 만들 수 없고(⑴), 오히려 in-process 와
   원격이 섞이는 폭을 줄인다(⑵). 판정자 `R3 #3b`(pool 모드, 실제 host 를 죽인 뒤 spawn host 가 치워지고 실패 단계가
   `runtime_death` 너머로 옮겨 감) · 실제 앱에서 ⌘T 로 새 host 가 뜨고 새 셸이 그 host 의 자식임을 확인했다.

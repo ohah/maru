@@ -1,7 +1,7 @@
 #!/bin/sh
 # `tools/web-sidecar-dist-macho.sh` 자체 시험(W7b) — 그 스크립트는 CEF SDK 가 있어야 도는 `web-sidecar-dist` 안에서만
 # 돌아, 결함이 formula 설치에서야 드러난다. 가짜 설치물(작은 dylib 과 `/usr/bin/true` 사본, zig 로 만든 x86_64 실행 파일)로
-# 열여덟 경우를 본다. `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 zig 경로를 인자로 주고 부른다.
+# 스물두 경우를 본다. `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 zig 경로를 인자로 주고 부른다.
 set -eu
 zig=${1:?사용: test-web-sidecar-dist-macho.sh <zig 경로>}
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -112,6 +112,12 @@ expect fail "프레임워크 안 실행 파일의 절대 경로 rpath" "$root/in
 
 # ⑨ host·helper 에 서명이 없다(x86_64 대상 zig 빌드) — 서명을 붙여 통과해야 한다.
 make_dist "$root/unsigned"
+# 실제 host·helper 처럼 한 아키텍처만 — `/usr/bin/true` 는 x86_64·arm64e 를 묶은 파일이라 여러 아키텍처 확인에 걸린다.
+slice=$(uname -m)
+[ "$slice" = arm64 ] && slice=arm64e
+for exe in maru-web-host maru-web-helper; do
+    lipo -thin "$slice" /usr/bin/true -output "$root/unsigned/$exe"
+done
 codesign --remove-signature "$root/unsigned/maru-web-host" "$root/unsigned/maru-web-helper"
 expect pass "서명 없는 host·helper 에 서명을 붙임" "$root/unsigned"
 for exe in maru-web-host maru-web-helper; do
@@ -160,7 +166,19 @@ expect fail "host 의 .. 로 빠지는 링크" "$root/dotdot" "시스템 밖으�
 make_dist "$root/volumes"
 cc -dynamiclib -o "$root/libvol.dylib" "$root/probe.c" -install_name "/System/Volumes/Data$root/libvol.dylib"
 cc -o "$root/volumes/maru-web-helper" "$root/probe.c" "$root/libvol.dylib" -Wl,-undefined,dynamic_lookup -e _maru_dist_macho_probe
-expect fail "helper 의 /System/Volumes 링크" "$root/volumes" "시스템 밖으로 빠지는 경로 /System/Volumes/Data"
+expect fail "helper 의 /System/Volumes 링크" "$root/volumes" "시스템 밖 경로 라이브러리 /System/Volumes/Data"
+
+# ⑬c·⑬d·⑬e 같은 데이터 볼륨을 `.`·빈 조각·대문자로 가리키는 링크 — 앞머리·대소문자 확인을 빠져나갔다(6 차 — dyld 가 불렀다).
+esc_case() { # $1=이름 $2=링크 경로 $3=기대 문구
+    make_dist "$root/$1"
+    cc -o "$root/$1/maru-web-helper" "$root/probe.c" "$root/libvol.dylib" -Wl,-undefined,dynamic_lookup -e _maru_dist_macho_probe
+    install_name_tool -change "/System/Volumes/Data$root/libvol.dylib" "$2" "$root/$1/maru-web-helper" 2>/dev/null
+    codesign --force --sign - "$root/$1/maru-web-helper" 2>/dev/null
+    expect fail "helper 의 $1 링크" "$root/$1" "$3"
+}
+esc_case dot "/System/./Volumes/Data$root/libvol.dylib" "시스템 밖으로 빠지는 경로 /System/./Volumes"
+esc_case slashes "/System//Volumes/Data$root/libvol.dylib" "시스템 밖으로 빠지는 경로 /System//Volumes"
+esc_case upper "/System/VOLUMES/Data$root/libvol.dylib" "시스템 밖 경로 라이브러리 /System/VOLUMES"
 
 # ⑭ zig 가 만든 x86_64 host — 서명이 없고 머리 여유가 8 바이트다. 서명을 붙이면 코드를 덮어쓰므로 멈춰야 한다(5 차 실측:
 #    서명 뒤 뜨자마자 SIGSEGV).
@@ -170,6 +188,14 @@ printf 'pub fn main() u8 {\n    return 7;\n}\n' > "$root/seven.zig"
 make_dist "$root/nopad"
 cp "$root/seven-nopad" "$root/nopad/maru-web-host"
 expect fail "머리 여유 없는 x86_64 host" "$root/nopad" "머리 여유가 8 바이트라"
+
+# ⑭b 서명 없는 host 가 여러 아키텍처를 묶은 파일 — 머리 여유를 조각마다 볼 수 없으니 멈춘다(6 차).
+cc -arch arm64 -o "$root/fat-arm" "$root/probe.c" -Wl,-undefined,dynamic_lookup -e _maru_dist_macho_probe
+codesign --remove-signature "$root/fat-arm"
+lipo -create "$root/fat-arm" "$root/seven-pad" -output "$root/fat-host"
+make_dist "$root/fat"
+cp "$root/fat-host" "$root/fat/maru-web-host"
+expect fail "여러 아키텍처를 묶은 서명 없는 host" "$root/fat" "여러 아키텍처를 묶은 파일"
 
 # ⑮ 같은 host 를 여유를 두고 빌드하면 서명이 붙고 코드는 그대로다(Rosetta 가 있으면 실행해 7 을 받는다).
 make_dist "$root/pad"
@@ -197,4 +223,4 @@ if [ "$failures" != 0 ]; then
     echo "web-sidecar-dist-macho 자체 시험: 틀림 $failures 건" >&2
     exit 1
 fi
-echo "web-sidecar-dist-macho 자체 시험: 열여덟 경우 모두 맞음"
+echo "web-sidecar-dist-macho 자체 시험: 스물두 경우 모두 맞음"

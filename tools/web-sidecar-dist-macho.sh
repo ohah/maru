@@ -4,7 +4,7 @@
 #
 # 왜: Homebrew 는 소스 설치 뒤 `fix_dynamic_linkage` 로 keg 안 모든 dylib 의 ID 를 `opt/<formula>/…` 절대 경로로 고쳐
 # 쓰고(빌드 디렉터리 rpath 는 지우고, 이름만 쓴 링크는 `@loader_path/…` 로 바꾸고), 파일을 다 고친 **뒤에** 한꺼번에
-# 재서명한다. CEF 의 `libcef_sandbox.dylib`·`libvulkan.dylib` 는 Mach-O 머리 여유가 32·48 바이트뿐이라 고쳐 쓰다
+# 재서명한다. CEF 의 `libcef_sandbox.dylib`·`libvulkan.dylib` 는 Mach-O 머리 여유가 32·48 바이트(arm64 — x86_64 는 32·32)뿐이라 고쳐 쓰다
 # 실패하고, 그 전에 고친 프레임워크 본체는 서명이 깨진 채 남아 엔진이 뜨자마자 죽는다(9 차 적대 검증 실측). 그래서
 # 설치물을 만들 때 ID 를 `@rpath/…` 로 바꿔 두고(formula 는 `preserve_rpath` 로 이 ID 를 그대로 둔다) 재서명한 뒤,
 # 설치물 안 **모든** Mach-O 가 Homebrew 가 고칠 것 없는 모양인지 확인한다. host·helper 는 프레임워크와 dylib 을 경로로
@@ -43,6 +43,8 @@ header_room() { # 64 비트 Mach-O: 첫 섹션 오프셋 − (머리 32 + load c
 }
 for exe in "$dist/maru-web-host" "$dist/maru-web-helper"; do
     if ! codesign --display "$exe" > /dev/null 2>&1; then
+        # 여유 계산은 얇은(thin) 64 비트 Mach-O 만 맞다 — 여러 아키텍처를 묶은 파일은 조각마다 다르다(6 차).
+        [ "$(lipo -archs "$exe" | wc -w)" -eq 1 ] || die "$exe 는 여러 아키텍처를 묶은 파일이다 — 조각마다 머리 여유를 볼 수 없다"
         room=$(header_room "$exe")
         [ "$room" -ge 16 ] || die "$exe 의 머리 여유가 ${room} 바이트라 서명을 붙이면 코드를 덮어쓴다(-headerpad_max_install_names 로 빌드)"
         codesign --sign - "$exe" 2>/dev/null || die "codesign 실패: $exe"
@@ -78,13 +80,15 @@ while IFS= read -r f; do
     # 링크는 자기 ID 말고 모두 /System/·/usr/lib/ 여야 한다 — 이름만 쓴 링크는 Homebrew 가 @loader_path 로 고치고, rpath 가
     # 없으니 @rpath 링크는 그 ID 의 파일이 먼저 불려 있을 때만 풀린다(불러오는 순서에 달림 — `brew linkage` 도 「rpath 없음」
     # 으로 센다). @loader_path·@executable_path 링크도 지금 설치물에 없다 — 생기면 빌드를 멈춰 다시 본다(W7b 4 차 적대 검증).
-    # `..` 가 든 경로와 `/System/Volumes/`(데이터 볼륨 — 그 아래 /opt/homebrew 가 있다)는 앞머리만 맞춰 빠져나가므로 막는다(5 차).
+    # `.`·`..`·빈 조각(`//`)이 든 경로는 앞머리만 맞춰 빠져나가므로 막고(5·6 차 — `/System/./Volumes/Data/…` 로 dyld 가
+    # 데이터 볼륨의 dylib 을 불렀다), 시스템 쪽은 `/System/Library/` 만 받는다(`/System/Volumes/` 아래에 /opt/homebrew 가 있고,
+    # APFS 는 대소문자를 가리지 않아 `/System/VOLUMES/` 도 같은 곳이다 — 허용 목록 밖은 모두 막아 대소문자에 기대지 않는다).
     # 탭으로 시작하는 줄만 — universal 이면 아키텍처마다 `경로 (architecture …):` 머리 줄이 끼어든다.
     otool -L "$f" | awk -F'\t' '/^\t/{sub(/ \(compatibility.*/, "", $2); print $2}' | while IFS= read -r dep; do
         [ "$dep" = "$id" ] && continue
         case "$dep" in
-            */../* | /System/Volumes/*) echo "web-sidecar-dist-macho: $f 가 시스템 밖으로 빠지는 경로 $dep 에 링크한다" >&2; exit 1 ;;
-            /System/* | /usr/lib/*) ;;
+            *//* | */./* | */../* | */. | */..) echo "web-sidecar-dist-macho: $f 가 시스템 밖으로 빠지는 경로 $dep 에 링크한다" >&2; exit 1 ;;
+            /System/Library/* | /usr/lib/*) ;;
             *) echo "web-sidecar-dist-macho: $f 가 시스템 밖 경로 라이브러리 $dep 에 링크한다" >&2; exit 1 ;;
         esac
     done || fail=1

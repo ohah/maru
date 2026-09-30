@@ -66,7 +66,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         // P5b2b3 releases the test-only invalidation owner; product ownership remains singular.
         .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 2 },
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 4, .top_level_test = 14 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 6, .top_level_test = 14 },
+        // CR6e-c3b2d mutation denial 표가 buffered revoke 행을 정리하며 test 에서 한 번 더 놓는다.
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 6, .top_level_test = 15 },
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 3 },
     });
     try expectSourceIdentifierInventory(allocator, "EventOwner", &.{
@@ -74,7 +75,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         // C3-3b3 source tombstone과 phase receipt projection이 canonical EventOwner 참조 3개를 추가한다.
         .{ .path = "platform/macos/session_host/generation_event_contract.zig", .product = 39, .top_level_test = 1 },
         // C3-3b3 tombstone owner API의 mutable owner 인자와 final validation의 const owner 인자가 각각 하나씩 추가된다.
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 28, .top_level_test = 17 },
+        // CR6e-c3b2d mutation denial 표의 socketpair fixture owner 하나.
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 28, .top_level_test = 18 },
         .{ .path = "platform/macos/session_host/pending_event_preparation.zig", .product = 2, .top_level_test = 2 },
         // b2b3's dormant RemoteRuntime orchestration names the canonical source owner once.
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 0 },
@@ -89,7 +91,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
     });
     try expectSourceIdentifierInventory(allocator, "takeEventProjected", &.{
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 1, .top_level_test = 0 },
-        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 2, .top_level_test = 5 },
+        // CR6e-c3b2d mutation denial 표가 buffered revoke 행을 받아 정리한다.
+        .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 2, .top_level_test = 6 },
     });
     try expectSourceIdentifierInventory(allocator, "eventReadinessOwned", &.{
         // The lexical product bucket includes the builtin.is_test CR4b teardown projection and

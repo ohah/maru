@@ -30,6 +30,8 @@ const screen_assembler = @import("maru").session.screen_assembler;
 const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const resize_wire = @import("resize_wire.zig");
+// host 의 grid 규칙(최소 크기·runtime 당 cell 상한). 재연결 강제 resize 가 host 에서 실패할 수 없는 크기만 고른다.
+const registry_mod = @import("registry.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const runtime_pending_control = @import("runtime_pending_control.zig");
 const pending_event_owner_mod = @import("pending_event_owner.zig");
@@ -2821,13 +2823,20 @@ pub const RemoteRuntime = struct {
     /// 재연결 게시 직전의 강제 resize(`reconnectViewportSize` 를 거친다)가 이 값을 쓴다. 예전엔
     /// 그 자리가 `surface.renderSnapshot().size` 였는데, 원격 Surface 의 snapshot 은 **host 의 옛 격자**라
     /// 재연결 동안(runtime 이 얼어 `mutationAllowed` 가 false 인 구간) 들어온 창 크기 변경이 조용히
-    /// 버려진 뒤 강제 resize 가 옛 크기를 다시 박았다. 창은 그 뒤 안 바뀌니 host 는 영영 옛 크기다
-    /// (2026-09-29 실측: 22:57:16 디스플레이 재구성이 재연결 도중 도착 → host 세 runtime 이 72행에
-    /// 남고 창은 60행, 입력줄·상태줄이 창 밖으로 잘려 「끊긴」 것처럼 보였다). null 이면 아직 한 번도
-    /// 레이아웃이 크기를 요청하지 않았다 — 그때만 snapshot 크기로 물러난다.
+    /// 버려진 뒤 강제 resize 가 옛 크기를 다시 박았다. null 이면 아직 한 번도 레이아웃이 크기를 요청하지
+    /// 않았다 — 그때만 snapshot 크기로 물러난다.
+    ///
+    /// **이것은 2026-09-29 사고의 원인이 아니라 잠복한 공범이다.** 그 사고에서는 게시 **뒤**의 탭 전환
+    /// resize 도 버려졌고 input 도 Unauthorized 였다 — 게시 뒤에도 관문이 닫혀 있었다는 뜻이고, 왜 닫혔는지는
+    /// 아직 모른다. 이 값은 관문이 제대로 열린 재연결에서 옛 크기가 되박히지 않게 할 뿐이다.
     layout_size: ?terminal.Size = null,
-    /// 권위 관문에서 버린 resize/input 을 **상태가 바뀔 때 한 번만** 적었는가. 통과하면 다시 false.
-    mutation_drop_noted: bool = false,
+    /// 관문이 버린 mutation 을 op 마다 **마지막으로 적은 이유**. 같은 op·같은 이유는 다시 적지 않고, 이유가
+    /// 바뀌면 다시 적는다 — 재연결 중 일시적 이유(예: `attachment_not_live`) 하나가 뒤따르는 진짜 이유를
+    /// 가리면 로그가 엉뚱한 원인을 가리킨다. 그 op 가 stable mutation 을 얻으면 비우고, 재연결 게시가
+    /// 전부 비운다. 이유는 정적 문자열이라 포인터로 비교한다.
+    mutation_drop_reasons: [mutation_drop_op_count]?[*]const u8 = @splat(null),
+    /// 실제로 한 줄을 낸 횟수(테스트 빌드에서도 센다) — 판정자가 «같은 이유는 한 번» 을 행동으로 잰다.
+    mutation_drop_lines: u32 = 0,
     // blocking `SurfaceRuntime.writeInput`의 key bytes와 그 사이 core command를 한 시간축으로 보존한다.
     // control.barrier는 그 명령보다 먼저 host에 도착해야 하는 direct_input byte prefix 끝이다.
     direct_input: std.ArrayListUnmanaged(u8),
@@ -3332,6 +3341,7 @@ pub const RemoteRuntime = struct {
             runtime.input_batches.epoch = next_input_epoch;
             runtime.input_batches.next_sequence = 0;
             runtime.mutation_owner.reopenNoFail(next_shell_generation, next_input_epoch);
+            runtime.resetMutationDropNotesNoFail();
             runtime.reconnect_executor.publishExternalNoFail(
                 next_executor_job_generation,
                 next_shell_generation,
@@ -4163,7 +4173,8 @@ pub const RemoteRuntime = struct {
         self.io = io;
         // in-place(`undefined`) 생성이라 필드 기본값이 안 먹는다 — 모든 constructor 가 지나는 여기서 적는다.
         self.layout_size = null;
-        self.mutation_drop_noted = false;
+        self.mutation_drop_reasons = @splat(null);
+        self.mutation_drop_lines = 0;
         self.generation_owner = .{};
         self.reconnect_executor = .{};
         self.screen_source = try allocator.create(stable_screen_source.StableScreenSource);
@@ -4663,28 +4674,90 @@ pub const RemoteRuntime = struct {
         };
     }
 
-    /// 재연결 강제 resize 가 host 에 박을 크기. 레이아웃이 원한 값이 있으면 그것, 없으면 `snapshot_size`.
+    /// 재연결 강제 resize 가 host 에 박을 크기.
+    ///
+    /// 강제 resize 는 strict 하다 — host 가 요청과 다른 크기를 적용하거나 거절하면 connection 을 poison 하고
+    /// candidate 가 실패한다(`forcePromotedControllerResizeUntil`). snapshot 크기는 host 가 **이미 받아들인**
+    /// 값이라 그 위험이 없었다. 그래서 레이아웃 크기는 host 규칙(`registry.resizePrepare`)으로 **실패할 수
+    /// 없는** 경우에만 쓴다: 최소 열·행을 만족하고, runtime 당 cell 상한 안이며, cell 수가 snapshot 이하다.
+    /// 마지막 조건은 daemon 전역 상한(`AggregateGridLimitReached`)을 client 가 모르기 때문이다 — cell 이
+    /// 늘지 않으면 전역 원장도 늘지 않는다. 늘어나는 레이아웃은 snapshot 으로 물러나고, 게시 뒤 다음 레이아웃
+    /// resize(탭 전환·창 크기 변경)가 비엄격 경로로 적용한다.
     fn reconnectViewportSize(self: *const RemoteRuntime, snapshot_size: terminal.Size) terminal.Size {
-        return self.layout_size orelse snapshot_size;
+        const layout = self.layout_size orelse return snapshot_size;
+        if (layout.cols < registry_mod.min_cols or layout.rows < registry_mod.min_rows or
+            !registry_mod.gridSizeAllowed(layout.cols, layout.rows))
+            return snapshot_size;
+        const layout_cells = @as(usize, layout.cols) * @as(usize, layout.rows);
+        const snapshot_cells = @as(usize, snapshot_size.cols) * @as(usize, snapshot_size.rows);
+        return if (layout_cells <= snapshot_cells) layout else snapshot_size;
     }
 
-    /// 권위 관문(`mutationAllowed`)이 resize/input 을 버렸다. **상태가 바뀔 때 한 번만** 남긴다 — 키마다
-    /// 적으면 로그가 넘친다. 예전엔 둘 다 흔적 없이 사라져, 재연결 뒤 host 크기가 옛 값에 남은 사고를
-    /// 로그로는 볼 수 없었다(`layout_size` 주석의 2026-09-29).
-    fn noteMutationDropped(self: *RemoteRuntime, op: []const u8, reason: []const u8) void {
-        if (self.mutation_drop_noted) return;
-        self.mutation_drop_noted = true;
+    const MutationDropOp = enum(u8) {
+        input,
+        input_batch,
+        resize,
+        select,
+        mouse,
+        scroll,
+        core_command,
+        find_scroll,
+        notification_config,
+    };
+    const mutation_drop_op_count = @typeInfo(MutationDropOp).@"enum".fields.len;
+
+    /// 관문(`mutationAllowed`)이나 stable mutation owner 가 mutation 을 버렸다. op 마다 **이유가 바뀔 때만**
+    /// 한 줄 남긴다 — 키마다 적으면 넘치고, 한 번만 적으면 일시적 이유가 진짜 이유를 가린다
+    /// (`mutation_drop_reasons` 주석). 예전엔 전부 흔적 없이 사라져, 2026-09-29 재연결 뒤 한 host 의
+    /// runtime 셋이 resize·input 을 버린 이유를 로그로 볼 수 없었다.
+    fn noteMutationDropped(self: *RemoteRuntime, op: MutationDropOp, reason: []const u8) void {
+        const slot = &self.mutation_drop_reasons[@intFromEnum(op)];
+        if (slot.* == reason.ptr) return;
+        slot.* = reason.ptr;
+        self.mutation_drop_lines +|= 1;
         if (builtin.is_test) return;
         std.log.scoped(.session_host).info(
-            "remote mutation dropped: runtime={s} op={s} reason={s} layout={d}x{d} (re-applied at next controller publication)",
+            "remote mutation dropped: runtime={s} op={s} reason={s} layout={d}x{d}",
             .{
                 &self.runtime_id_hex,
-                op,
+                @tagName(op),
                 reason,
                 if (self.layout_size) |size| size.cols else 0,
                 if (self.layout_size) |size| size.rows else 0,
             },
         );
+    }
+
+    /// 그 op 가 stable mutation 을 얻었다 — 다음 버림은 이유가 같아도 새 사건이다.
+    fn clearMutationDropNote(self: *RemoteRuntime, op: MutationDropOp) void {
+        self.mutation_drop_reasons[@intFromEnum(op)] = null;
+    }
+
+    /// 재연결 게시가 새 generation 을 연다 — 옛 generation 에서 적은 이유는 모두 지난 일이다.
+    fn resetMutationDropNotesNoFail(self: *RemoteRuntime) void {
+        self.mutation_drop_reasons = @splat(null);
+    }
+
+    /// 관문을 연다. 닫혀 있으면 그 이유를 op 에 적고 false.
+    fn gateMutation(self: *RemoteRuntime, op: MutationDropOp) bool {
+        if (self.mutationAllowed()) return true;
+        self.noteMutationDropped(op, self.mutationDenialName());
+        return false;
+    }
+
+    /// stable mutation 을 얻는다. 실패하면 그 이유(`stableMutationDenialName`)를 op 에 적고, 성공하면 그 op 의
+    /// 기록을 비운다 — **비우는 자리는 여기 하나다**. 관문만 지나고 owner 에서 돌아간 요청이 기록을 지우면
+    /// owner 쪽 버림이 영영 안 적히고, 틱마다 도는 비차단 input 이 기록을 계속 지워 창 드래그가 로그를 쏟는다.
+    fn beginNotedMutation(
+        self: *RemoteRuntime,
+        op: MutationDropOp,
+        out: *reconnect_mutation_seal.MutationLease,
+    ) client_mod.ClientError!void {
+        self.beginStableMutationDetailed(out) catch |err| {
+            self.noteMutationDropped(op, stableMutationDenialName(err));
+            return mapStableMutationError(err);
+        };
+        self.clearMutationDropNote(op);
     }
 
     /// 관문이 닫힌 이유의 이름 — 관문과 같은 판정(`GenerationAttachment.mutationDenial`)에서 나온다.
@@ -4702,23 +4775,51 @@ pub const RemoteRuntime = struct {
         self: *RemoteRuntime,
         out: *reconnect_mutation_seal.MutationLease,
     ) client_mod.ClientError!void {
+        self.beginStableMutationDetailed(out) catch |err| return mapStableMutationError(err);
+    }
+
+    const StableMutationError = error{ ShellGenerationUnavailable, OwnerSealed, OwnerBusy, OwnerInvalid };
+
+    /// stable mutation owner 가 돌려보낸 이유를 **갈라서** 낸다. 호출자 쪽 오류(`AdminBusy`)는 봉인과 동시 lease 를
+    /// 한 이름으로 접고, 그 이름은 `admitRuntimeOperation` 의 거절과도 같아 로그로는 셋을 못 가른다.
+    fn beginStableMutationDetailed(
+        self: *RemoteRuntime,
+        out: *reconnect_mutation_seal.MutationLease,
+    ) StableMutationError!void {
         const shell_generation = self.generation_owner.currentGeneration() catch blk: {
-            if (!builtin.is_test) return error.ProtocolError;
+            if (!builtin.is_test) return error.ShellGenerationUnavailable;
             break :blk self.generation_owner.slot.currentGeneration() catch @as(u64, 1);
         };
         if (builtin.is_test and self.mutation_owner.lifecycle == .pristine) {
             self.mutation_owner.initInPlace(
                 shell_generation,
                 self.input_batches.epoch,
-            ) catch return error.ProtocolError;
+            ) catch return error.OwnerInvalid;
         }
         self.mutation_owner.beginMutation(
             shell_generation,
             self.input_batches.epoch,
             out,
         ) catch |err| return switch (err) {
-            error.ReconnectBusy, error.Busy => error.AdminBusy,
-            else => error.ProtocolError,
+            error.ReconnectBusy => error.OwnerSealed,
+            error.Busy => error.OwnerBusy,
+            else => error.OwnerInvalid,
+        };
+    }
+
+    fn mapStableMutationError(err: StableMutationError) client_mod.ClientError {
+        return switch (err) {
+            error.OwnerSealed, error.OwnerBusy => error.AdminBusy,
+            error.ShellGenerationUnavailable, error.OwnerInvalid => error.ProtocolError,
+        };
+    }
+
+    fn stableMutationDenialName(err: StableMutationError) []const u8 {
+        return switch (err) {
+            error.ShellGenerationUnavailable => "shell_generation_unavailable",
+            error.OwnerSealed => "mutation_owner_sealed",
+            error.OwnerBusy => "mutation_owner_busy",
+            error.OwnerInvalid => "mutation_owner_invalid",
         };
     }
 
@@ -4907,18 +5008,10 @@ pub const RemoteRuntime = struct {
         if (bytes.len == 0) return;
         // SurfaceRuntime가 이 권위 거부를 InputSuppressed로 바꿔 trace 0과 paste 영구 폐기를
         // 함께 보장한다. 성공으로 숨기면 실제 PTY에 안 간 입력이 trace에 기록된다.
-        if (!self.mutationAllowed()) {
-            self.noteMutationDropped("input", self.mutationDenialName());
-            return error.Unauthorized;
-        }
+        if (!self.gateMutation(.input)) return error.Unauthorized;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        // 관문을 지나도 stable mutation owner 가 닫혀 있으면(재연결 봉인 등) 여기서 돌아간다 — 같은 한 줄로 남긴다.
-        self.beginStableMutation(&mutation_lease) catch |err| {
-            self.noteMutationDropped("input", @errorName(err));
-            return err;
-        };
+        try self.beginNotedMutation(.input, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
-        self.mutation_drop_noted = false;
         const pending = self.direct_input.items.len - self.direct_input_offset;
         if (bytes.len > max_direct_input_bytes -| pending) return error.OutOfMemory;
         const sequence = try self.nextInputSequence();
@@ -4943,13 +5036,9 @@ pub const RemoteRuntime = struct {
     /// 인수한 payload 길이라 caller가 partial socket write를 같은 입력으로 재시도하지 않는다.
     pub fn sendInputNonBlocking(self: *RemoteRuntime, bytes: []const u8) client_mod.ClientError!usize {
         try self.admitRuntimeOperation();
-        if (!self.mutationAllowed()) {
-            self.noteMutationDropped("input", self.mutationDenialName());
-            return error.Unauthorized;
-        }
-        self.mutation_drop_noted = false;
+        if (!self.gateMutation(.input)) return error.Unauthorized;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        try self.beginStableMutation(&mutation_lease);
+        try self.beginNotedMutation(.input, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         if (!(try self.pumpQueuedInput())) return 0;
         return switch (self.currentGeneration().connection) {
@@ -4963,11 +5052,11 @@ pub const RemoteRuntime = struct {
     /// reserve가 모두 끝난 뒤에만 bytes/record/sequence를 게시하므로 실패는 mutation 0이다.
     pub fn enqueueInputBatch(self: *RemoteRuntime, batch: input_owner_mod.InputBatch) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
-        if (!self.mutationAllowed()) return error.Unauthorized;
+        if (!self.gateMutation(.input_batch)) return error.Unauthorized;
         const total = std.math.add(usize, batch.first.len, batch.second.len) catch return error.OutOfMemory;
         if (total == 0) return;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        try self.beginStableMutation(&mutation_lease);
+        try self.beginNotedMutation(.input_batch, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         const pending = self.direct_input.items.len - self.direct_input_offset;
         if (total > max_direct_input_bytes -| pending) return error.OutOfMemory;
@@ -5003,13 +5092,13 @@ pub const RemoteRuntime = struct {
     /// coalesce하고, 슬롯이 다른 frame으로 막혔으면 tick/input 경로가 다시 시도한다.
     pub fn requestScrollToBottom(self: *RemoteRuntime) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
-        if (!self.mutationAllowed()) return error.Unauthorized;
+        if (!self.gateMutation(.scroll)) return error.Unauthorized;
         switch (self.currentGeneration().attachment) {
             .legacy => if (!self.legacyConnection().async_scroll_to_bottom_v1) return,
             .generation => {},
         }
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        try self.beginStableMutation(&mutation_lease);
+        try self.beginNotedMutation(.scroll, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         const barrier = self.direct_input.items.len;
         if (self.pending_controls.items.len > 0) {
@@ -5041,7 +5130,7 @@ pub const RemoteRuntime = struct {
     /// socket backpressure가 생겨도 다음 frame tick이 재시도하며, bounded cap을 넘으면 명시적으로 실패한다.
     pub fn queueCoreCommand(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
-        if (!self.mutationAllowed()) return error.Unauthorized;
+        if (!self.gateMutation(.core_command)) return error.Unauthorized;
         // core-command v1은 이미 배포된 닫힌 집합이다. clear를 그 bit 아래 암묵 확장하면 current GUI가 N-1 host에
         // unknown op를 보내 연결을 fail-close한다. 전용 capability가 없으면 안전한 degraded no-op이다.
         if (command == .clear_screen and !self.connectionSupportsClearScreen()) return;
@@ -5053,7 +5142,7 @@ pub const RemoteRuntime = struct {
             .generation => {},
         }
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        try self.beginStableMutation(&mutation_lease);
+        try self.beginNotedMutation(.core_command, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         if (self.pending_controls.items.len >= max_pending_controls) return self.failControlAdmission();
         const sequence = try self.nextInputSequence();
@@ -5686,17 +5775,10 @@ pub const RemoteRuntime = struct {
         self.layout_size = .{ .cols = cols, .rows = rows };
         // Observer viewport follows the controller's canonical runtime size; local window changes
         // are acknowledged as a no-op instead of becoming an infinite GUI retry.
-        if (!self.mutationAllowed()) {
-            self.noteMutationDropped("resize", self.mutationDenialName());
-            return;
-        }
+        if (!self.gateMutation(.resize)) return;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        self.beginStableMutation(&mutation_lease) catch |err| {
-            self.noteMutationDropped("resize", @errorName(err));
-            return err;
-        };
+        try self.beginNotedMutation(.resize, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
-        self.mutation_drop_noted = false;
         if (self.currentGeneration().resize_seq == resize_wire.max_counter)
             return error.SequenceExhausted;
         self.currentGeneration().resize_seq += 1;
@@ -6926,11 +7008,11 @@ pub const RemoteRuntime = struct {
 
     pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, regex: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
         try self.admitRuntimeOperation();
-        if (scroll and !self.mutationAllowed()) return error.Unauthorized;
+        if (scroll and !self.gateMutation(.find_scroll)) return error.Unauthorized;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
         var mutation_active = false;
         if (scroll) {
-            try self.beginStableMutation(&mutation_lease);
+            try self.beginNotedMutation(.find_scroll, &mutation_lease);
             mutation_active = true;
         }
         defer if (mutation_active) self.finishStableMutation(&mutation_lease);
@@ -6986,13 +7068,9 @@ pub const RemoteRuntime = struct {
     /// 하이라이트한다(복사는 #6b-1 selectedText가 그 span으로 host 추출). `op`는 고정 리터럴("word"/"line"). 선택 없으면 null.
     pub fn selectContentAware(self: *RemoteRuntime, op: []const u8, row: u16, col: u16, separators: []const u8) client_mod.ClientError!?terminal.SelectionSpan {
         try self.admitRuntimeOperation();
-        if (!self.mutationAllowed()) {
-            self.noteMutationDropped("select", self.mutationDenialName());
-            return error.Unauthorized;
-        }
-        self.mutation_drop_noted = false;
+        if (!self.gateMutation(.select)) return error.Unauthorized;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        try self.beginStableMutation(&mutation_lease);
+        try self.beginNotedMutation(.select, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         if (separators.len > 64 or !std.unicode.utf8ValidateSlice(separators)) return error.ProtocolError;
         var separators_hex: [128]u8 = undefined;
@@ -7123,14 +7201,14 @@ pub const RemoteRuntime = struct {
     /// 없는 연결에는 그 legacy subset만 보내고 focus/config/prompt는 unknown RPC를 시험하지 않고 degraded no-op으로 둔다.
     pub fn sendCoreCommandBlocking(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
-        if (!self.mutationAllowed()) return error.Unauthorized;
+        if (!self.gateMutation(.core_command)) return error.Unauthorized;
         if (!shouldSendCoreCommand(
             self.connectionCapabilities().runtime_core_command,
             self.connectionSupportsClearScreen(),
             command,
         )) return;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        try self.beginStableMutation(&mutation_lease);
+        try self.beginNotedMutation(.core_command, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         const params = core_command_wire.encodeParams(self.allocator, self.currentGeneration().attachment.streamId(), command) catch return error.OutOfMemory;
         defer self.allocator.free(params);
@@ -7148,13 +7226,9 @@ pub const RemoteRuntime = struct {
     /// SGR 리포트를 인코딩·PTY 주입하게 한다. 인코딩 모드가 host에만 있어 client는 raw 이벤트만 전달한다(방식 B).
     pub fn sendMouseReport(self: *RemoteRuntime, m: maru.session.core_command.MouseReport) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
-        if (!self.mutationAllowed()) {
-            self.noteMutationDropped("mouse", self.mutationDenialName());
-            return error.Unauthorized;
-        }
-        self.mutation_drop_noted = false;
+        if (!self.gateMutation(.mouse)) return error.Unauthorized;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        try self.beginStableMutation(&mutation_lease);
+        try self.beginNotedMutation(.mouse, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         var buf: [192]u8 = undefined;
         const params = std.fmt.bufPrint(
@@ -7200,10 +7274,10 @@ pub const RemoteRuntime = struct {
         display_label: []const u8,
     ) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
-        if (!self.mutationAllowed()) return error.Unauthorized;
+        if (!self.gateMutation(.notification_config)) return error.Unauthorized;
         if (!self.connectionCapabilities().notification_delivery) return;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
-        try self.beginStableMutation(&mutation_lease);
+        try self.beginNotedMutation(.notification_config, &mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         var attempt: u8 = 0;
         while (true) : (attempt += 1) {
@@ -8403,7 +8477,8 @@ pub const testing_api = if (builtin.is_test) struct {
         // 이후 input epoch가 정해진 첫 mutation에서 final-address 초기화할 수 있게 한다.
         runtime.mutation_owner = .{};
         runtime.layout_size = null;
-        runtime.mutation_drop_noted = false;
+        runtime.mutation_drop_reasons = @splat(null);
+        runtime.mutation_drop_lines = 0;
         runtime.generation_owner = .{};
         try runtime.generation_owner.slot.initInPlace(
             allocator,
@@ -14950,15 +15025,20 @@ test "remote runtime observer locally consumes input and sends no resize mutatio
     try runtime.resize(80, 24);
 }
 
-// 🔥 2026-09-29: 재연결 도중(runtime 이 얼어 관문이 닫힌 구간) 도착한 창 크기 변경이 조용히 버려지고,
-// 게시 직전 강제 resize 가 host 의 옛 격자(`surface.renderSnapshot().size`)를 다시 박아 host 세 runtime 이
-// 72행에 남았다(창은 60행). 판정자는 «의도»를 잰다: 관문에서 버려진 크기도 강제 resize 의 크기가 된다.
-test "CR6e-c3b2d reconnect viewport 는 관문에서 버려진 레이아웃 크기를 강제 resize 에 쓴다" {
-    var runtime: RemoteRuntime = undefined;
-    try testing_api.initializeDetachedGeneration(&runtime, testing.allocator);
+// 2026-09-29: 재연결 뒤 한 host 의 runtime 셋이 resize·input 을 흔적 없이 버렸다. 관문이 **왜** 닫혔는지는
+// 아직 모른다 — 이 판정자들은 그 원인이 아니라 (1) 잠복한 공범(강제 resize 가 host 의 옛 격자를 되박음)과
+// (2) 다음 발생 때 원인을 한 줄로 남길 진단을 잰다.
+fn initObserverViewportFixture(runtime: *RemoteRuntime) !void {
+    try testing_api.initializeDetachedGeneration(runtime, testing.allocator);
     runtime.pending_event_owner = .{};
     runtime.runtime_lifetime = .{};
     try runtime.initializePendingEventOwner();
+    // stable mutation owner 가 input epoch 로 초기화되므로 queue 상태를 정해 둔다(`undefined` 에서 선다).
+    runtime.input_batches = .{};
+    runtime.direct_input = .empty;
+    runtime.direct_input_offset = 0;
+    runtime.pending_controls = .empty;
+    runtime.blocking_flush_active = false;
     runtime.currentGeneration().attachment = .init(testing.allocator, .{
         .runtime_id = 0xaa,
         .stream_id = 7,
@@ -14966,6 +15046,11 @@ test "CR6e-c3b2d reconnect viewport 는 관문에서 버려진 레이아웃 크�
         .controller_generation = 3,
     });
     runtime.currentGeneration().event_generation_tracking = .tracked;
+}
+
+test "CR6e-c3b2d reconnect viewport 는 관문에서 버려진 레이아웃 크기를 host 가 거절할 수 없을 때만 쓴다" {
+    var runtime: RemoteRuntime = undefined;
+    try initObserverViewportFixture(&runtime);
     defer runtime.currentGeneration().attachment.deinit();
 
     // 레이아웃이 아직 크기를 요청한 적 없으면 host 격자(snapshot)로 물러난다 — 옛 동작과 같다.
@@ -14976,21 +15061,79 @@ test "CR6e-c3b2d reconnect viewport 는 관문에서 버려진 레이아웃 크�
     try testing.expect(!runtime.mutationAllowed());
     try testing.expectEqualStrings("observer", runtime.mutationDenialName());
     try runtime.resize(205, 60);
-    try testing.expect(runtime.mutation_drop_noted);
     // 그 크기가 재연결 강제 resize 의 크기다 — host 의 옛 72행이 아니라.
-    try testing.expectEqual(
-        terminal.Size{ .cols = 205, .rows = 60 },
-        runtime.reconnectViewportSize(host_grid),
-    );
+    try testing.expectEqual(terminal.Size{ .cols = 205, .rows = 60 }, runtime.reconnectViewportSize(host_grid));
     // 마지막 요청이 이긴다(중간 크기가 박히지 않는다).
     try runtime.resize(180, 50);
-    try testing.expectEqual(
-        terminal.Size{ .cols = 180, .rows = 50 },
-        runtime.reconnectViewportSize(host_grid),
-    );
-    // 버린 input 도 같은 상태 안에서 한 번만 적는다(로그 폭주 방지) — 이미 noted 이므로 그대로다.
+    try testing.expectEqual(terminal.Size{ .cols = 180, .rows = 50 }, runtime.reconnectViewportSize(host_grid));
+
+    // host 가 거절할 수 있는 크기는 strict 강제 resize 에 싣지 않는다(poison → candidate 실패). snapshot 으로.
+    // runtime 당 cell 상한 초과:
+    try runtime.resize(2048, 1024);
+    try testing.expectEqual(host_grid, runtime.reconnectViewportSize(host_grid));
+    // 최소 열 미만(host 가 2 로 올려 적용 → strict 불일치):
+    try runtime.resize(1, 40);
+    try testing.expectEqual(host_grid, runtime.reconnectViewportSize(host_grid));
+    // cell 이 느는 크기 — daemon 전역 상한은 client 가 모르므로 snapshot 으로 물러난다:
+    try runtime.resize(300, 80);
+    try testing.expectEqual(host_grid, runtime.reconnectViewportSize(host_grid));
+    // 같은 cell 수는 전역 원장을 늘리지 않는다 — 쓴다:
+    try runtime.resize(138, 144);
+    try testing.expectEqual(terminal.Size{ .cols = 138, .rows = 144 }, runtime.reconnectViewportSize(host_grid));
+}
+
+test "CR6e-c3b2d reconnect viewport 진단은 op 마다 이유가 바뀔 때만 한 줄을 남긴다" {
+    var runtime: RemoteRuntime = undefined;
+    try initObserverViewportFixture(&runtime);
+    defer runtime.currentGeneration().attachment.deinit();
+
+    // 같은 이유로 몇 번을 버려도 op 당 한 줄 — 관문을 실제로 지나는 경로로 잰다.
+    for (0..5) |_| try runtime.resize(100, 30);
+    try testing.expectEqual(@as(u32, 1), runtime.mutation_drop_lines);
+    for (0..5) |_| try testing.expectError(error.Unauthorized, runtime.sendInput("x"));
+    try testing.expectEqual(@as(u32, 2), runtime.mutation_drop_lines); // op 가 다르면 따로 센다
+    for (0..5) |_| try testing.expectError(error.Unauthorized, runtime.sendInputNonBlocking("y"));
+    try testing.expectEqual(@as(u32, 2), runtime.mutation_drop_lines); // 같은 op(input)·같은 이유
+
+    // 이유가 바뀌면 다시 적는다 — 일시적 이유가 진짜 이유를 가리지 않게.
+    const transient: []const u8 = "attachment_not_live";
+    const real: []const u8 = "controller_binding_invalid";
+    runtime.noteMutationDropped(.scroll, transient);
+    runtime.noteMutationDropped(.scroll, transient);
+    try testing.expectEqual(@as(u32, 3), runtime.mutation_drop_lines);
+    runtime.noteMutationDropped(.scroll, real);
+    try testing.expectEqual(@as(u32, 4), runtime.mutation_drop_lines);
+    runtime.noteMutationDropped(.scroll, real);
+    try testing.expectEqual(@as(u32, 4), runtime.mutation_drop_lines);
+
+    // 그 op 가 stable mutation 을 얻으면 기록이 비워진다 — 다음 버림은 같은 이유라도 새 사건이다.
+    var lease: reconnect_mutation_seal.MutationLease = .{};
+    try runtime.beginNotedMutation(.resize, &lease);
+    runtime.finishStableMutation(&lease);
+    try runtime.resize(100, 30);
+    try testing.expectEqual(@as(u32, 5), runtime.mutation_drop_lines);
+    // 다른 op 의 기록은 건드리지 않는다.
     try testing.expectError(error.Unauthorized, runtime.sendInput("x"));
-    try testing.expect(runtime.mutation_drop_noted);
+    try testing.expectEqual(@as(u32, 5), runtime.mutation_drop_lines);
+
+    // 재연결 게시가 모두 비운다.
+    runtime.resetMutationDropNotesNoFail();
+    try testing.expectError(error.Unauthorized, runtime.sendInput("x"));
+    try runtime.resize(100, 30);
+    try testing.expectEqual(@as(u32, 7), runtime.mutation_drop_lines);
+
+    // stable owner 의 거절 이유는 서로도, 관문 밖 거절(`AdminBusy`)과도 갈린다.
+    const names = [_][]const u8{
+        RemoteRuntime.stableMutationDenialName(error.ShellGenerationUnavailable),
+        RemoteRuntime.stableMutationDenialName(error.OwnerSealed),
+        RemoteRuntime.stableMutationDenialName(error.OwnerBusy),
+        RemoteRuntime.stableMutationDenialName(error.OwnerInvalid),
+    };
+    for (names, 0..) |a, i| {
+        try testing.expect(!std.mem.eql(u8, a, "AdminBusy"));
+        for (names[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a, b));
+    }
+    try testing.expectEqualStrings("mutation_owner_sealed", names[1]);
 }
 
 test "remote runtime revoke demotes authority and cancels queued mutation before write" {

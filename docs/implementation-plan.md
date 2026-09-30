@@ -1209,8 +1209,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    authority가 cleanup binding, transport binding과 candidate `RemoteAttachment.State`를 같은
    observer identity에서 같은 controller generation으로 승격할 수 있는지 allocation 없이 preflight한다.
    이 승격 뒤에도 stable shell과 mutation owner는 unavailable/sealed 상태를 유지한다. candidate 전용
-   forced-first-resize가 레이아웃이 마지막으로 요청한 크기(`RemoteRuntime.layout_size`, 관문에서 버려진 요청 포함 —
-   원격 `Surface` snapshot은 host의 옛 격자라 없을 때만 쓴다)를 같은 stream/controller generation으로 host에 적용하고
+   forced-first-resize가 레이아웃이 마지막으로 요청한 크기(`RemoteRuntime.layout_size`, 관문에서 버려진 요청 포함)를
+   host 규칙상 거절될 수 없을 때만(최소 크기·runtime 당 cell 상한·cell 수 ≤ snapshot), 아니면 host가 이미 받아들인
+   `Surface` snapshot 크기를 같은 stream/controller generation으로 host에 적용하고
    strict response를 확인한 뒤에만 CR3c `publishAfterClientReplacement`를 호출한다. 마지막 suffix는
    RemoteGeneration+stable screen publication, mutation owner의 새 shell generation/open 전환, staged/controller
    evidence consume, retiring RemoteGeneration-first/Client-second ordered reclaim과 host job 정산을 한 owner turn에서

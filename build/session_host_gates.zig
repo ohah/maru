@@ -1661,14 +1661,15 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            // CR6e-c3b2d: 재연결 게시의 강제 resize 가 관문에서 버려진 레이아웃 크기를 쓴다 — 같은 재연결
-            // 게시 경로의 판정자라 새 컴파일 없이 이 step 의 필터에 얹는다(remote_runtime 1개).
-            .filters = &.{ "CR6e-c3b2c host charge", "CR6e-c3b2d reconnect viewport" },
+            // CR6e-c3b2d: 재연결 게시의 강제 resize 가 관문에서 버려진 레이아웃 크기를 쓰고, 관문 버림을 이유와 함께
+            // 남긴다 — 같은 재연결 경로의 판정자라 새 컴파일 없이 이 step 의 필터에 얹는다(remote_runtime 2개·
+            // generation_transport denial 표 1개).
+            .filters = &.{ "CR6e-c3b2c host charge", "CR6e-c3b2d reconnect viewport", "CR6e-c3b2d mutation denial" },
         });
         // backend 7개(N=7·8·13, 예산 대기, 제품 close 경로의 anchor 이탈, 정산 없는 teardown, charged 0·2 거부) + 이 root 가 끌어오는 remote_runtime 의 executor
-        // 2개(identity-only abort, charge 이전) + reconnect viewport 1개 = 10.
+        // 2개(identity-only abort, charge 이전) + reconnect viewport 2개 + mutation denial 표 1개 = 12.
         const run_host_charge_tests = b.addRunArtifact(host_charge_tests);
-        run_host_charge_tests.addArg("--maru-expect-tests=10");
+        run_host_charge_tests.addArg("--maru-expect-tests=12");
         run_host_charge_tests.setCwd(b.path("."));
         session_host_reconnect_host_charge_step.dependOn(&run_host_charge_tests.step);
         if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);

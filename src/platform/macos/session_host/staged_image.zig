@@ -70,6 +70,20 @@ pub fn stageExclusive(
     return stageImpl(allocator, source_path, owner_dir, final_name, true, max_staged_image_bytes);
 }
 
+/// 호출자가 이미 고정한 source identity(`inspect` 결과)와 **복사하는 바로 그 fd** 를 대조하며 stage 한다 — source 를
+/// 따로 한 번 더 해시하지 않는다. dev/inode/size 는 연 fd 의 `fstat` 으로, 내용은 복사하며 계산한 SHA-256 으로
+/// rename **전에** 대조하고, 어긋나면 임시 파일을 지우고 `HashMismatch` 다. 별도 재검사(`inspect` 뒤 `stage`)는
+/// 두 번 연 사이의 창이 있지만 이 대조는 복사한 바이트 자체를 본다. 대가는 없다 — 복사 중 해시는 원래 하던 일이다.
+pub fn stageVerifiedSource(
+    allocator: std.mem.Allocator,
+    source_path: [:0]const u8,
+    owner_dir: [:0]const u8,
+    final_name: []const u8,
+    expected_source: Identity,
+) Error!StagedImage {
+    return stageImplWithSource(allocator, source_path, owner_dir, final_name, false, max_staged_image_bytes, expected_source);
+}
+
 fn stageImpl(
     allocator: std.mem.Allocator,
     source_path: [:0]const u8,
@@ -77,6 +91,18 @@ fn stageImpl(
     final_name: []const u8,
     exclusive: bool,
     max_bytes: u64,
+) Error!StagedImage {
+    return stageImplWithSource(allocator, source_path, owner_dir, final_name, exclusive, max_bytes, null);
+}
+
+fn stageImplWithSource(
+    allocator: std.mem.Allocator,
+    source_path: [:0]const u8,
+    owner_dir: [:0]const u8,
+    final_name: []const u8,
+    exclusive: bool,
+    max_bytes: u64,
+    expected_source: ?Identity,
 ) Error!StagedImage {
     try validateLeaf(final_name);
     const dir_fd = try openOwnerDir(owner_dir);
@@ -86,6 +112,11 @@ fn stageImpl(
     defer _ = c.close(source_fd);
     const source_size = try validateRegular(source_fd);
     if (source_size > max_bytes) return error.InvalidSource;
+    if (expected_source) |expected| {
+        const source_object = try objectForFd(source_fd);
+        if (source_object.dev != expected.dev or source_object.ino != expected.ino or source_size != expected.size)
+            return error.HashMismatch;
+    }
 
     const final_path = std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ owner_dir, final_name }, 0) catch return error.OutOfMemory;
     errdefer allocator.free(final_path);
@@ -130,6 +161,11 @@ fn stageImpl(
         if (total > max_bytes) return error.InvalidSource;
         writeAll(out_fd, chunk) catch return error.StorageUnavailable;
     }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    if (expected_source) |expected| {
+        if (total != expected.size or !std.mem.eql(u8, &digest, &expected.sha256)) return error.HashMismatch;
+    }
     if (c.fsync(out_fd) != 0) return error.StorageUnavailable;
     const staged_object = try objectForFd(out_fd);
     _ = c.close(out_fd);
@@ -142,8 +178,6 @@ fn stageImpl(
     if (exclusive) exclusive_object = staged_object;
     if (c.fsync(dir_fd) != 0) return error.StorageUnavailable;
 
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
     const identity = inspect(final_path) catch return error.StorageUnavailable;
     if (identity.size != total or !std.mem.eql(u8, &identity.sha256, &digest)) return error.StorageUnavailable;
     exclusive_object = null;
@@ -435,4 +469,39 @@ test "staged image cleanup removes corrupted owned inode but preserves replaceme
     try writeFixture(replaced_path, "replacement");
     replaced.deinit();
     try std.testing.expect(c.access(replaced_path.ptr, c.F_OK) == 0);
+}
+
+test "verified-source stage 는 복사하는 fd 와 복사한 바이트로 대조하고, 어긋나면 아무것도 남기지 않는다" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-stage-verified-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    defer _ = c.rmdir(dir.ptr);
+    var source_buf: [224]u8 = undefined;
+    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    var final_buf: [224]u8 = undefined;
+    const final = try std.fmt.bufPrintZ(&final_buf, "{s}/rollback-current", .{dir});
+    var tmp_buf: [256]u8 = undefined;
+    const tmp = try std.fmt.bufPrintZ(&tmp_buf, "{s}/.rollback-current.tmp-{d}", .{ dir, c.getpid() });
+    defer {
+        _ = c.unlink(source.ptr);
+        _ = c.unlink(final.ptr);
+    }
+    try writeFixture(source, "running-image");
+    const pinned = try inspect(source);
+
+    // ① fd 신원(dev/inode/size)이 다르면 복사 전에 거절한다 — 같은 내용이라도 다른 inode 면 고정한 대상이 아니다.
+    var other_inode = pinned;
+    other_inode.ino +%= 1;
+    try std.testing.expectError(error.HashMismatch, stageVerifiedSource(std.testing.allocator, source, dir, "rollback-current", other_inode));
+    // ② 내용(SHA-256)이 다르면 복사한 뒤 rename **전에** 거절한다 — 임시 파일도 지운다.
+    var other_bytes = pinned;
+    other_bytes.sha256[0] ^= 1;
+    try std.testing.expectError(error.HashMismatch, stageVerifiedSource(std.testing.allocator, source, dir, "rollback-current", other_bytes));
+    for ([_][:0]const u8{ final, tmp }) |path| try std.testing.expect(c.access(path.ptr, c.F_OK) != 0);
+
+    // ③ 고정한 그대로면 stage 하고, 사본의 크기·해시가 고정값과 같다.
+    var staged = try stageVerifiedSource(std.testing.allocator, source, dir, "rollback-current", pinned);
+    defer staged.deinit();
+    try std.testing.expectEqual(pinned.size, staged.identity.size);
+    try std.testing.expect(std.mem.eql(u8, &pinned.sha256, &staged.identity.sha256));
 }

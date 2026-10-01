@@ -348,6 +348,13 @@ pub fn removeEmptyHostDirectories(session_dir: [:0]const u8, host_id: u128) void
 /// body 의미를 추측하지 않기 위한 exact fingerprint이며, updater의 마케팅 버전과는 별개다.
 pub fn buildIdForExecutable(allocator: std.mem.Allocator, executable_path: [:0]const u8) Error![]u8 {
     const identity = staged_image.inspect(executable_path) catch return error.InvalidManifest;
+    return buildIdForIdentity(allocator, identity);
+}
+
+/// 이미 `inspect` 한 identity 에서 build id 를 만든다 — 같은 실행 파일을 다른 용도로도 쓰는 호출자(host 시작의 rollback
+/// self-image 등)가 경로를 한 번 더 읽지 않게. 두 번 읽으면 그 사이 번들이 교체될 때 build id 와 다른 용도의 identity 가
+/// 서로 다른 바이트를 가리킨다(`host_connect` 의 upgrade 탐색이 같은 이유로 한 번만 읽는다).
+pub fn buildIdForIdentity(allocator: std.mem.Allocator, identity: staged_image.Identity) Error![]u8 {
     const hex = std.fmt.bytesToHex(identity.sha256, .lower);
     return std.fmt.allocPrint(allocator, "sha256:{s}", .{&hex}) catch return error.OutOfMemory;
 }

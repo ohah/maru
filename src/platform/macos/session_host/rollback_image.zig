@@ -20,14 +20,16 @@ pub const Authority = struct {
         expected_running_identity: staged_image.Identity,
         owner_dir: [:0]const u8,
     ) staged_image.Error!Authority {
-        const source = try staged_image.inspect(executable_path);
-        if (!staged_image.identityEqual(source, expected_running_identity))
-            return error.HashMismatch;
-        var image = try staged_image.stage(
+        // pinned running identity 와의 대조는 **복사하는 fd 에서** 한다(`stageVerifiedSource`) — 예전에는 여기서
+        // `inspect` 로 source 를 통째로 한 번 더 해시한 뒤 stage 가 또 읽었다. host 시작마다 실행 파일 전체를 읽는
+        // 횟수가 그만큼 늘었고(2026-10-01 실측: 시작 한 번에 다섯 번), 그 재검사와 복사 사이의 창은 어차피 아래
+        // 대조가 막았다.
+        var image = try staged_image.stageVerifiedSource(
             allocator,
             executable_path,
             owner_dir,
             current_leaf,
+            expected_running_identity,
         );
         errdefer image.deinit();
         if (image.identity.size != expected_running_identity.size or

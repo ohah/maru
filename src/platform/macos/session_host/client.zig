@@ -13956,8 +13956,20 @@ pub const Client = struct {
                             self.poison(.peer_contract_violation);
                             return error.ProtocolError;
                         }
-                        buffered.deinit(allocator);
-                        return;
+                        // **probe 응답 표식은 상태가 아니다.** `metadataSemanticEqlExact` 는 nonce 를 안 본다 —
+                        // 상태가 같다는 이유로 nonce 를 실은 새 이벤트를 버리면 그 probe 는 영원히 안 끝나고,
+                        // 사용자 동작이 5 초 뒤 `active_expired` 로 죽는다. 같은 상태이니 새 것으로 바꿔 끼운다.
+                        if (next_value.observation_probe_nonce == null or
+                            old_value.observation_probe_nonce != null)
+                        {
+                            buffered.deinit(allocator);
+                            return;
+                        }
+                    } else if (old_value.observation_probe_nonce != null) {
+                        // 더 새 상태라도 **probe 응답을 덮지 않는다** — 덮으면 nonce 가 사라진다. 이 이벤트는
+                        // 그대로 두고 뒤에 줄 세운다(같은 stream 의 더 뒤 이벤트가 있으면 그쪽과 합친다).
+                        // runtime 당 in-flight probe 는 하나라 큐에 더 서는 것은 stream 당 하나뿐이다.
+                        continue;
                     }
                     const replaced = self.pending_events.items[i];
                     const next_bytes = self.pending_event_bytes - replaced.payload.len +|
@@ -19333,6 +19345,51 @@ test "client metadata coalescing rejects same-revision equivocation and stale pr
             .payload = try allocator.dupe(u8, equivocation),
         }));
         try std.testing.expect(client.unusable);
+    }
+}
+
+test "client metadata coalescing never drops an observation probe nonce" {
+    // P3-e4d-3/4 가 부하에서 `active_expired` 로 빨갰던 자리(2026-10-01). host 는 probe 응답을 5 ms 안에
+    // 냈는데, 큐에 먼저 와 있던 같은 stream 의 메타데이터와 합쳐지며 nonce 가 사라졌다 — 같은 revision 이면
+    // 새 것(nonce)을 버렸고, 더 새 revision 이면 옛 것(nonce)을 덮었다.
+    const allocator = std.testing.allocator;
+    const body =
+        \\"metadata":{"cwd":"/one","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    const plain_rev2 = "{\"event\":\"runtime.metadata\",\"metadata_revision\":2," ++ body;
+    const probe_rev2 = "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"observation_probe_nonce\":77," ++ body;
+    const plain_rev3 = "{\"event\":\"runtime.metadata\",\"metadata_revision\":3," ++ body;
+    const plain_rev4 = "{\"event\":\"runtime.metadata\",\"metadata_revision\":4," ++ body;
+    const Case = struct { sequence: []const []const u8, expected: []const []const u8 };
+    const cases = [_]Case{
+        // 같은 상태 뒤에 온 probe 응답은 버려지지 않고 그 자리를 차지한다.
+        .{ .sequence = &.{ plain_rev2, probe_rev2 }, .expected = &.{probe_rev2} },
+        // probe 응답 뒤의 같은 상태는 여전히 접힌다.
+        .{ .sequence = &.{ probe_rev2, plain_rev2 }, .expected = &.{probe_rev2} },
+        // 더 새 상태는 probe 응답을 덮지 않고 뒤에 서며, 그 뒤의 더 새 상태는 뒤엣것과 합쳐진다.
+        .{ .sequence = &.{ probe_rev2, plain_rev3, plain_rev4 }, .expected = &.{ probe_rev2, plain_rev4 } },
+    };
+    for (cases) |case| {
+        var client = Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0,
+            .metadata_support = .supported,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        for (case.sequence) |payload| try client.bufferLegacyEventForTest(.{
+            .header = .{ .kind = .event, .stream_id = 7 },
+            .payload = try allocator.dupe(u8, payload),
+        });
+        try std.testing.expect(!client.unusable);
+        try std.testing.expectEqual(case.expected.len, client.pending_events.items.len);
+        for (case.expected) |expected| {
+            const taken = (try client.takeEventForStream(7)) orelse return error.TestUnexpectedResult;
+            defer taken.deinit(allocator);
+            try std.testing.expectEqualStrings(expected, taken.payload);
+        }
+        try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
     }
 }
 

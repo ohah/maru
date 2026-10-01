@@ -8075,7 +8075,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown, 5=openHand,
-    // v192 Chromium 탭 페이지 커서 6~13) → NSCursor.
+    // v194 Chromium 탭 페이지 커서 6~13) → NSCursor.
     private static func cursor(for kind: Int32) -> NSCursor {
         switch kind {
         case 0: return .arrow

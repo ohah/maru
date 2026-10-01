@@ -51,6 +51,8 @@ jobs:
         with:
           # web.yml 과 같은 캐시 정책 — PR 에서는 저장하지 않는다(ref 스코프라 죽은 캐시가 쌓인다).
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       - uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache

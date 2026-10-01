@@ -5540,6 +5540,18 @@ pub fn build(b: *std.Build) void {
     run_ci_cache_generations_boundary_tests.addArg("--maru-expect-tests=1");
     run_ci_cache_generations_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_ci_cache_generations_boundary_tests.step);
+    // CI 의 Zig 의존성은 저장소 사본(vendor/zig-packages)에서만 온다 — 채우기 스텝 배선과 사본 집합을 센다.
+    const ci_zig_package_prime_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/ci_zig_package_prime_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ci_zig_package_prime_boundary_tests = b.addRunArtifact(ci_zig_package_prime_boundary_tests);
+    run_ci_zig_package_prime_boundary_tests.addArg("--maru-expect-tests=2");
+    run_ci_zig_package_prime_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_ci_zig_package_prime_boundary_tests.step);
     const perf_gate_mode_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/perf_gate_mode_boundary.zig"),

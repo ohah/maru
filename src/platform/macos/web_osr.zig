@@ -102,8 +102,17 @@ const Surface = struct {
     /// 링 크기가 사각형 × scale(±1)인지도 본다 — 열린 A 위로 B 가 열릴 때 A 의 늦은 그림이 B 의 첫 세대로 실려도 A 와 B 의
     /// 크기가 다르면 걸러진다(같은 크기는 못 거른다 — CEF 154 에서 관측되지 않았다. sidecar 의 `popup_open` 은 A 의 닫힘과 B 의
     /// 열림 사이에 온 그림만 막는다. W6a① 적대 검증 5~7 차 — 판정 `popup-frame` 이 쓰는 조건). 브라우저가 닫혀도(`browser_closed`)
-    /// 닫힘 알림은 오지 않는다 — W6a② 는 그때도 `popup_bounds` 를 지운다.
+    /// 닫힘 알림은 오지 않는다 — 그때도 지운다(`dropPopup`).
     popup_first_generation: u32 = 0,
+    /// 팝업 링의 보일 장 고르기(W6a②) — 본 화면과 같은 규칙(GPU 소비자 규칙·기대 크기 = 사각형 × scale). 닫혀도 링은
+    /// 남긴다(다음 팝업의 첫 장이 꺼낼 때·브라우저가 사라질 때 놓는다 — 많아야 둘): A 닫힘 알림을 처리하기 전에 B 의 링이 먼저
+    /// 와 있을 수 있어, 닫힐 때 놓으면 다시 알리지 않는 B 의 링을 잃는다(W6a② 적대 검증 1 차).
+    popup_view: RingView = .{},
+    /// 팝업 front 를 마지막으로 그린 창(본문의 `drawn_by` 와 따로 — 본문만 그린 다른 창의 세대와 비교하지 않게).
+    popup_drawn_by: usize = 0,
+    /// 팝업이 열리거나 닫혔다 — 새 프레임이 없어도 창을 다시 그린다(정적 페이지에서 닫힌 목록이 남거나, 링이 알림보다 먼저
+    /// 와 첫 장을 이미 꺼낸 뒤 열린 목록이 안 보이지 않게 — W6a② 적대 검증 1 차). `pollFrame` 이 소비한다.
+    popup_redraw: bool = false,
     /// 답을 기다리는 대화상자·파일 선택(W5a)·권한 요청(W5b) — 온 차례대로.
     dialogs: std.ArrayList(Dialog) = .empty,
     /// 아직 maru 알림으로 내보내지 않은 웹 알림(W5c) — 온 차례대로, 탭마다 `max_notes_per_surface` 까지(넘치면 오래된 것부터 버린다).
@@ -956,6 +965,7 @@ pub fn destroy(gpa: std.mem.Allocator, surface_id: u64) void {
     // Term 이 사라졌다 — 다음 프레임부터 그리지 않는다. 이미 GPU 에 올라간 장은 renderer 캐시의 텍스처가 IOSurface 를
     // 쥐고 있어 여기서 놓아도 안전하다.
     for (kv.value.view.clear()) |ring| if (ring) |r| r.release();
+    for (kv.value.popup_view.clear()) |ring| if (ring) |r| r.release();
     freeSurface(gpa, &kv.value);
     if (state == .running or state == .starting) send(gpa, .{ .destroy_browser = surface_id });
     if (surfaces.count() == 0) retire(gpa, monotonicNow());
@@ -1001,7 +1011,13 @@ pub fn pollFrame(surface_id: u64, completed_generation: u64, window: usize) bool
     const polled = s.view.poll(completed);
     for (polled.retired) |ring| if (ring) |r| r.release();
     if (polled.corrupt) rejected_rings += 1;
-    return polled.new_frame;
+    const popup_completed = if (s.popup_drawn_by == 0 or s.popup_drawn_by == window) completed_generation else std.math.maxInt(u64);
+    const popup = s.popup_view.poll(popup_completed);
+    for (popup.retired) |ring| if (ring) |r| r.release();
+    if (popup.corrupt) rejected_rings += 1;
+    const redraw = s.popup_redraw;
+    s.popup_redraw = false;
+    return polled.new_frame or (popup.new_frame and s.popup_bounds != null) or redraw;
 }
 
 /// 지금 그릴 front(첫 프레임 전이면 null).
@@ -1010,6 +1026,48 @@ pub fn front(surface_id: u64) ?Front {
     if (!s.view.has_frame) return null;
     const shown = s.view.shown orelse return null;
     return .{ .surface = shown.ring.surfaces[s.view.front], .width = shown.ring.width, .height = shown.ring.height };
+}
+
+/// 그릴 팝업 위젯(W6a②) — 열려 있고, 그 팝업의 첫 세대 이상인 링의 실제 프레임이 있을 때만. 링은 보임 알림보다 먼저 올
+/// 수 있고 닫히기 직전 팝업의 링이 늦게 올 수도 있어 **그릴 때** 첫 세대로 거른다(받을 때 거르면 다시 알리지 않는 첫 링을
+/// 잃는다). 크기는 `popup_view.expect`(사각형 × scale ±1)가 거른다.
+pub const PopupFront = struct { front: Front, bounds: ws.message.Rect };
+
+pub fn popupFront(surface_id: u64) ?PopupFront {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    const bounds = s.popup_bounds orelse return null;
+    if (!s.popup_view.has_frame) return null;
+    const shown = s.popup_view.shown orelse return null;
+    if (shown.generation < s.popup_first_generation) return null;
+    return .{ .front = .{ .surface = shown.ring.surfaces[s.popup_view.front], .width = shown.ring.width, .height = shown.ring.height }, .bounds = bounds };
+}
+
+/// 이 프레임(세대)이 그 surface 의 팝업 front 를 그렸다(GPU 소비자 규칙).
+pub fn drewPopup(surface_id: u64, frame_generation: u64, window: usize) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    s.popup_view.drew(frame_generation);
+    s.popup_drawn_by = window;
+}
+
+/// 키 대상 탭에 팝업이 열려 있는가(W6a② — 열린 목록의 키는 입력기를 거치지 않는다).
+pub fn popupOpen(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.popup_bounds != null;
+}
+
+/// 팝업이 닫혔다 — 그리지 않는다(다시 그려 지운다). 링은 남긴다(`popup_view` 주석).
+fn hidePopup(s: *Surface) void {
+    s.popup_bounds = null;
+    s.popup_first_generation = 0;
+    s.popup_redraw = true;
+}
+
+/// 브라우저·sidecar 가 사라졌다 — 링까지 곧바로 놓는다. 생산자는 이미 없고(더 덮어쓰지 않는다), GPU 가 읽던 장은 renderer
+/// 캐시의 텍스처가 IOSurface 를 쥐고 있어 놓아도 안전하다(`destroy` 와 같은 근거). 새 sidecar·새 브라우저는 세대를 1 부터
+/// 세므로 옛 링을 남기면 첫 세대 거르기를 지나 옛 목록이 비친다.
+fn dropPopup(s: *Surface) void {
+    hidePopup(s);
+    for (s.popup_view.clear()) |ring| if (ring) |r| r.release();
 }
 
 /// 이 프레임(세대)이 그 surface 의 front 를 그렸다.
@@ -1061,6 +1119,7 @@ pub fn shutdownForExit() void {
     var it = surfaces.iterator();
     while (it.next()) |entry| {
         for (entry.value_ptr.view.clear()) |ring| if (ring) |r| r.release();
+        for (entry.value_ptr.popup_view.clear()) |ring| if (ring) |r| r.release();
         freeSurface(gpa, entry.value_ptr);
     }
     surfaces.deinit(gpa);
@@ -1499,8 +1558,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
     for (surfaces.values()) |*s| {
         dropDialogs(gpa, s);
         dropNotes(gpa, s);
-        s.popup_bounds = null; // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게(W6a① 적대 검증)
-        s.popup_first_generation = 0; // 새 sidecar 는 세대를 1 부터 센다
+        dropPopup(s); // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게. 새 sidecar 는 세대를 1 부터 세므로 옛 링도 놓는다
     }
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
@@ -1548,17 +1606,15 @@ fn receiveRings() void {
         switch (received) {
             .rejected => rejected_rings += 1,
             .ring => |ring| {
-                // 팝업 위젯의 링(W6a) — 그리기는 W6a②. 그때까지 받은 권리를 바로 놓는다(새지 않게).
-                if (ring.popup) {
-                    ring.release();
-                    continue;
-                }
                 const app_ring: AppRing = .{ .generation = ring.generation, .control = @ptrFromInt(ring.control_address), .width = ring.width, .height = ring.height, .ring = ring };
                 const s = surfaces.getPtr(ring.browser) orelse {
                     app_ring.release();
                     continue;
                 };
-                if (s.view.adopt(app_ring)) |never_drawn| never_drawn.release();
+                // 팝업 위젯의 링(W6a②)은 따로 고른다. 닫혀 있어도 받아 둔다 — 링(mach)이 보임 알림(파이프)보다 먼저 올 수 있고,
+                // 옛 팝업의 늦은 링은 그릴 때 첫 세대로 거른다(`popupFront`).
+                const view = if (ring.popup) &s.popup_view else &s.view;
+                if (view.adopt(app_ring)) |never_drawn| never_drawn.release();
             },
         }
     }
@@ -1642,13 +1698,12 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .browser_created => |id| if (surfaces.getPtr(id)) |s| {
             s.created = true;
-            s.popup_bounds = null;
-            s.popup_first_generation = 0;
+            dropPopup(s);
             if (s.last_url) |u| send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
             if (s.focused) send(gpa, .{ .set_focus = .{ .browser = id, .value = true } });
             s.composing = false;
         },
-        .browser_closed => {},
+        .browser_closed => |id| if (surfaces.getPtr(id)) |s| dropPopup(s), // 닫힘 알림 없이 사라진다(W6a②)
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
             if (s.url) |old| gpa.free(old);
@@ -1682,8 +1737,12 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.ime_bounds = v.bounds;
         },
         .popup_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
-            s.popup_bounds = if (v.visible) v.bounds else null;
-            s.popup_first_generation = v.first_generation;
+            if (v.visible) {
+                s.popup_bounds = v.bounds;
+                s.popup_first_generation = v.first_generation;
+                s.popup_view.expect(pixels(v.bounds.width, s.record.size.scale), pixels(v.bounds.height, s.record.size.scale));
+                s.popup_redraw = true;
+            } else hidePopup(s);
         },
         .js_dialog => |v| {
             const kind: DialogKind = switch (v.kind) {

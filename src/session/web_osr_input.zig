@@ -58,6 +58,40 @@ pub fn hit(targets: []const Target, x_px: f64, y_px: f64) ?Target {
     return null;
 }
 
+/// 팝업 위젯 한 장을 본문 위에 붙일 자리(W6a② — D4). 창 backing px 좌상단.
+pub const PopupQuad = struct { x: f32, y: f32, w: f32, h: f32, u0: f32, v0: f32, u1: f32, v1: f32 };
+
+/// 팝업 장(`tex_w`×`tex_h` px)을 본문 `rect`(backing px)의 view DIP `bounds` 자리에 1:1 로 붙인다 — 본문 밖으로 나간 부분은
+/// UV 로 잘라 그리지 않는다(팝업이 다른 pane·탭 막대를 덮지 않게). 다 잘리면 null. sidecar 의 `get_screen_info` 가 화면
+/// 사각형을 비워 둔다(배율만) — 그러면 CEF 는 view 사각형을 화면으로 쓰는 것으로 보이고(CEF 소스로는 확인하지 않았다), 맨
+/// 아래 select 의 목록은 위로 뒤집혀 view 안에 들어왔다(앱 실측). 그래도 자르는 것은 maru 가 지킨다.
+pub fn popupQuad(rect: Rect, bounds: message.Rect, scale: f64, tex_w: u32, tex_h: u32) ?PopupQuad {
+    if (tex_w == 0 or tex_h == 0 or !std.math.isFinite(scale) or scale <= 0) return null;
+    const rx0: f64 = @floatFromInt(rect.x);
+    const ry0: f64 = @floatFromInt(rect.y);
+    const rx1 = rx0 + @as(f64, @floatFromInt(rect.w));
+    const ry1 = ry0 + @as(f64, @floatFromInt(rect.h));
+    const tw: f64 = @floatFromInt(tex_w);
+    const th: f64 = @floatFromInt(tex_h);
+    const x0 = rx0 + @round(@as(f64, @floatFromInt(bounds.x)) * scale);
+    const y0 = ry0 + @round(@as(f64, @floatFromInt(bounds.y)) * scale);
+    const cx0 = @max(x0, rx0);
+    const cy0 = @max(y0, ry0);
+    const cx1 = @min(x0 + tw, rx1);
+    const cy1 = @min(y0 + th, ry1);
+    if (cx1 <= cx0 or cy1 <= cy0) return null;
+    return .{
+        .x = @floatCast(cx0),
+        .y = @floatCast(cy0),
+        .w = @floatCast(cx1 - cx0),
+        .h = @floatCast(cy1 - cy0),
+        .u0 = @floatCast((cx0 - x0) / tw),
+        .v0 = @floatCast((cy0 - y0) / th),
+        .u1 = @floatCast((cx1 - x0) / tw),
+        .v1 = @floatCast((cy1 - y0) / th),
+    };
+}
+
 pub fn find(targets: []const Target, surface_id: u64) ?Target {
     for (targets) |t| if (t.surface_id == surface_id) return t;
     return null;
@@ -325,4 +359,32 @@ test "ime outcome with a composition: last jamo Backspace, empty commit and Esc 
     try testing.expectEqual(ImeOutcome{ .raw_down = true }, imeOutcome(.{ .key_code = 123, .had_composition = true, .command = true }));
     // 조합 중 아무 일도 없음 → 입력기가 삼킴.
     try testing.expectEqual(ImeOutcome{}, imeOutcome(.{ .key_code = 7, .had_composition = true }));
+}
+
+test "popup quad: 1:1 at the view DIP spot, clipped to the body with matching UV, null when fully outside" {
+    const body: Rect = .{ .x = 100, .y = 40, .w = 800, .h = 600 };
+    // 실측한 목록 크기(view DIP 382x157, scale 2 → 장 764x314)를 아래로 넘치게 둔다.
+    const seen = popupQuad(body, .{ .x = 0, .y = 183, .width = 382, .height = 157 }, 2, 764, 314).?;
+    try testing.expectEqual(@as(f32, 100), seen.x);
+    try testing.expectEqual(@as(f32, 406), seen.y);
+    try testing.expectEqual(@as(f32, 764), seen.w);
+    try testing.expectEqual(@as(f32, 234), seen.h); // 본문 아래 끝(640)에서 잘린다
+    try testing.expectEqual(@as(f32, 1), seen.u1);
+    try testing.expectApproxEqAbs(@as(f32, 234.0 / 314.0), seen.v1, 1e-6);
+    // 오른쪽·아래로 넘치면 넘친 만큼 UV 를 줄인다.
+    const q = popupQuad(body, .{ .x = 300, .y = 250, .width = 200, .height = 134 }, 2, 400, 268).?;
+    try testing.expectEqual(@as(f32, 700), q.x);
+    try testing.expectEqual(@as(f32, 200), q.w);
+    try testing.expectEqual(@as(f32, 0.5), q.u1);
+    try testing.expectEqual(@as(f32, 100), q.h); // y 40 + 250×2 = 540 에서 본문 끝 640 까지
+    try testing.expectApproxEqAbs(@as(f32, 100.0 / 268.0), q.v1, 1e-6);
+    // 왼쪽·위로 나가면(음수 DIP) 시작 UV 가 0 보다 크다.
+    const left = popupQuad(body, .{ .x = -10, .y = -5, .width = 100, .height = 50 }, 1, 100, 50).?;
+    try testing.expectEqual(@as(f32, 100), left.x);
+    try testing.expectApproxEqAbs(@as(f32, 0.1), left.u0, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.1), left.v0, 1e-6);
+    // 완전히 밖·빈 장·이상한 배율은 그리지 않는다.
+    try testing.expect(popupQuad(body, .{ .x = 900, .y = 0, .width = 10, .height = 10 }, 1, 10, 10) == null);
+    try testing.expect(popupQuad(body, .{ .x = 0, .y = 0, .width = 10, .height = 10 }, 1, 0, 10) == null);
+    try testing.expect(popupQuad(body, .{ .x = 0, .y = 0, .width = 10, .height = 10 }, std.math.nan(f64), 10, 10) == null);
 }

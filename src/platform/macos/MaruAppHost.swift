@@ -407,9 +407,18 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // W4c: 키 대상이 Chromium 탭이면 그 탭으로. ⌘·⌃ chord 와 기능키는 입력기를 거치지 않고 곧바로 키 누름을 보낸다
         // (Option 은 메타로 쓰지 않는다 — 웹에서는 ⌥ 조합 글자·⌥⌫ 단어 지우기다). 그 밖은 입력기 트랜잭션을 거쳐 Zig 가
         // 조합·확정 결과를 보고 키 이벤트를 정한다.
-        if controller?.osrKeyboardActive == true {
+        let osrKeyboardState = controller?.osrKeyboardState ?? 0
+        if osrKeyboardState != 0 {
             // 키 대상을 맞추며 Zig 가 조합을 끝냈으면(tick 을 기다리지 않고) 입력기 세션의 조합을 이 키 전에 버린다.
             controller?.drainOsrDiscardMarked()
+            // W6a②: 열린 팝업 위젯(`<select>` 목록)의 키는 입력기를 거치지 않는다 — 목록은 편집할 수 없어 조합이 갈 곳이 없고,
+            // 조합이 서면 그 뒤의 Esc 가 「조합 취소」로 먹혀 목록이 한 번에 안 닫혔다(실측). Chrome 의 목록은 네이티브 메뉴다.
+            // 남은 조합은 chord 갈래처럼 확정한다(Zig 의 조합 상태도 함께 끝난다).
+            if osrKeyboardState == 2 {
+                guard commitMarkedTextIfComposing() else { return }
+                _ = controller?.osrKey(event, phase: 3)
+                return
+            }
             let osrChord = event.modifierFlags.intersection([.command, .control])
             if !osrChord.isEmpty || Self.directEncodeKeyCodes.contains(event.keyCode) {
                 guard commitMarkedTextIfComposing() else { return }
@@ -8686,7 +8695,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return maru_macos_app_session_osr_keyboard_active(session) != 0
     }
 
-    /// phase 0 = 지금 키 누름(chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠, 2 = 뗌. 키 대상이 Chromium 탭이면 true.
+    /// W6a②: osr_keyboard_active 그대로 — 0 = 키 대상이 Chromium 탭이 아님, 1 = 그 탭, 2 = 그 탭에 팝업 위젯이 열려 있음.
+    var osrKeyboardState: Int32 {
+        guard let session = appSession else { return 0 }
+        return maru_macos_app_session_osr_keyboard_active(session)
+    }
+
+    /// phase 0 = 지금 키 누름(chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠, 2 = 뗌, 3 = 열린 팝업 위젯의 키(누름 + 글자).
+    /// 키 대상이 Chromium 탭이면 true.
     @discardableResult
     func osrKey(_ event: NSEvent, phase: Int32) -> Bool {
         guard let session = appSession else { return false }

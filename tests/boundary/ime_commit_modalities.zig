@@ -22,10 +22,10 @@ test "IME 조합 확정은 키보드·포인터·메뉴·드롭 네 모달리티
     const swift = try readSource(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(swift);
 
-    // 선언 1 + 호출 4. 이 숫자가 이 게이트의 전부다 — 늘거나 줄면 목록이 바뀐 것이고, 그때 아래 네
+    // 선언 1 + 호출 6(keyEquivalent의 두 직접 dispatch 포함). 이 숫자가 이 게이트의 전부다 — 늘거나 줄면 목록이 바뀐 것이고, 그때 아래 네
     // 문맥 단언도 함께 갱신해야 한다.
     try std.testing.expectEqual(@as(usize, 1), count(swift, "func commitMarkedTextIfComposing()"));
-    try std.testing.expectEqual(@as(usize, 4), count(swift, "commitMarkedTextIfComposing()") - 1);
+    try std.testing.expectEqual(@as(usize, 6), count(swift, "commitMarkedTextIfComposing()") - 1);
 
     // 네 모달리티 각각이 **자기 함수 안에서** 부르는지 본다. 총 개수만 세면 한 경로에서 두 번 부르고
     // 다른 경로가 빠진 상태도 통과한다.
@@ -35,10 +35,14 @@ test "IME 조합 확정은 키보드·포인터·메뉴·드롭 네 모달리티
     try std.testing.expect(callsWithin(swift, "override func performDragOperation(", "controller?.handleDrop("));
     // ② 키보드(keyDown) — 단축키·특수키가 조합을 지나쳐 가는 경로.
     try std.testing.expect(callsWithin(swift, "override func keyDown(", "handleKeyDown("));
-    // ③ 포인터(kind == 1) — 사이드바 카드·탭 바 클릭의 탭/Term 전환.
-    try std.testing.expect(count(swift, "if kind == 1 { (view as? MaruMetalTerminalView)?.commitMarkedTextIfComposing() }") == 1);
-    // ④ 메뉴(runCatalogAction) — 키 단축키로 와도 keyDown을 안 거친다.
-    try std.testing.expect(count(swift, "activeSurface?.view?.commitMarkedTextIfComposing()") == 1);
+    // ③ 포인터: 더블/트리플 클릭도 확정 실패 뒤 선택을 움직이면 안 된다.
+    try std.testing.expect(count(swift, "if [1, 4, 5].contains(kind), let terminalView") == 1);
+    try std.testing.expect(callsWithin(swift, "func handleMouse(", "maru_macos_app_session_mouse("));
+    // ④ 메뉴: 호출뿐 아니라 승인 실패 시 dispatch 중단이 필요하다.
+    try std.testing.expect(count(swift, "if let terminalView = activeSurface?.view, !terminalView.commitMarkedTextIfComposing() { return }") == 1);
+    try std.testing.expect(count(swift, "guard commitMarkedTextIfComposing() else { return true }") == 2);
+    try std.testing.expect(count(swift, "guard commitMarkedTextIfComposing() else { return false }") == 1);
+    try std.testing.expect(count(swift, "if bypassesIME && !commitMarkedTextIfComposing() { return }") == 1);
 
     // 확정은 **커밋 + AppKit 세션 종료 + 로컬 상태 비우기** 셋이 함께여야 한다. 하나라도 빠지면 잔상의
     // 출처가 그쪽으로 옮겨 간다(Zig만 비우면 AppKit marked 세션이 살아 다음 입력이 조합에 이어 붙는다).
@@ -47,7 +51,12 @@ test "IME 조합 확정은 키보드·포인터·메뉴·드롭 네 모달리티
     try std.testing.expect(count(body, "controller?.imeCommit()") == 1);
     try std.testing.expect(count(body, "inputContext?.discardMarkedText()") == 1);
     try std.testing.expect(count(body, "markedTextBuffer = \"\"") == 1);
-    try std.testing.expect(count(body, "guard hasMarkedText() else { return }") == 1);
+    const admission = std.mem.indexOf(u8, body, "guard controller?.imeCommit() == true else { return false }") orelse return error.TestUnexpectedResult;
+    const clear = std.mem.indexOf(u8, body, "markedTextBuffer =") orelse return error.TestUnexpectedResult;
+    const discard = std.mem.indexOf(u8, body, "inputContext?.discardMarkedText()") orelse return error.TestUnexpectedResult;
+    const no_marked = std.mem.indexOf(u8, body, "guard hadMarkedText else { return true }") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(admission < no_marked and admission < clear and clear < discard);
+    try std.testing.expect(count(swift, "guard commitComposition() else { return false }") == 1);
 }
 
 /// `open` 으로 시작하는 함수 본문에서 `marker` 보다 **앞서** 확정 호출이 있는지. 드롭·키보드처럼 "삽입

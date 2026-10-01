@@ -1,6 +1,6 @@
 # 공유 문서와 독립 편집기 뷰 — 설계 제안
 
-상태: VS Code 기준 공유 뷰 UX 승인, 단일 뷰 본문·이력 소유 분리 및 중립 참조 수명 골격 구현. 공유 뷰 제품 미구현. 2026-10-01 main `bb0ef4948`의 코드와 기존 계약을 대조했다.
+상태: VS Code 기준 공유 뷰 UX 승인. 정본·이력·안정 handle, 내부 공유 편집·문서 통지와 IME 확정 승인 첫 슬라이스 구현. 사용자용 공유 분할 UI, 반대 뷰 조합 projection과 실제 공유 OS 입력 검증은 미완료다. 아래 초기 대조와 구현 기록은 작성 당시 main을 각각 명시한다.
 사용자는 설계 정리·단계 분해에 이어 2026-10-01 VS Code 기준 UX 채택을 승인했다.
 목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰의 내부 제품 경로는 구현했고, 사용자용 분할 UI와 실제 OS 공유 입력 검증은 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
 [Surface 문서 identity](../editor-surface.md), [탭·split 배치](../tabs-splits-layout.md)가 소유한다.
@@ -682,3 +682,33 @@ WorkspaceEdit 단일 적용과 공유 Undo를 판정한다. 실제 split UI·공
 서버 시작 상태는 실제 fake 서버 연결에 phase를 주입해 재현한 상태 전이 검증이다.
 실제 서버 프로세스를 강제 종료·재시작한 OS E2E 증거와 구분한다. 제품 split과 공유 OS IME
 화면 검증은 이 검증에 포함하지 않는다.
+
+
+## 공유 IME 첫 슬라이스 — 확정 승인과 host 정산
+
+`tryCommitComposition`/`trySetFocused`는 terminal/editor의 queue·document admission 결과를
+host까지 전달한다. 기존 내부 `commitComposition`/`setFocused` 호출자는 void wrapper를 유지한다.
+ABI의 `commit_composition`과 `set_focus(false)`는 거절 시 기존 `Status.key_failed`(7)를 반환한다.
+서명·ABI 버전은 바뀌지 않는다. chrome 입력의 기존 changed/no-preedit Bool 계약은 변경하지 않는다.
+
+Swift는 비가시 pending commit도 확인하고 승인 뒤에만 marked buffer/선택/Hanja 상태와
+AppKit marked session을 정산한다. 실패한 키 우회·keyEquivalent·메뉴·drop·마우스 down
+(단일/더블/트리플)은 실행하지 않고, `resignFirstResponder`는 false를 반환한다.
+이미 발생한 window key 상실을 취소했다고 주장하지 않는다. 그 콜백 실패는 원 조합을 보존한다.
+직접 backend의 `focusTerm`/`focusPane`/`switchTab`도 실패 시 입력 owner를 바꾸지 않는다.
+`tryFocusTerm`/`tryFocusPane`과 pointer 기반 helper는 승인 bool을 전파하며,
+`activateSurfaceById`/`activateExistingFileTerm`은 첫 거절에서 멈춘다. 다른 tab/pane의
+인덱스를 원래 pane에 적용하는 후속 단계를 실행하지 않는다. 읽기 전용과 단일 전환 시도에 주입한 OOM의
+실제 공유 뷰·다른 tab 재현 fixture로 실패 불변과 재시도 exact-once를 판정한다.
+구조 이동 전체의 거래 원자성을 이번 확정 승인 gate의 완료로 해석하지 않는다.
+
+`test-macos-ime-ack`는 실제 AppSession/editor의 읽기 전용 실패와 pending commit 재시도,
+중복 확정 no-op를 ABI에서 판정한다. 기존 성공 반환 구현으로 되돌린 대조군은 expected 7,
+found 0으로 실패했다. `test-editor-shared`는 두 연결 뷰의 실패 불변과 24개 allocation 실패
+지점의 거절/승인·재시도 exact-once를 판정한다. 독립 Swift 원문 추출 하네스 `tools/test-macos-ime-ack-host.py`는 stub status로
+marked/discard/전환 gate를 실행하므로 실제 AppKit/HID 증거와 구분한다.
+이 하네스도 `test-macos-ime-ack`와 macOS ABI 기본 테스트에 포함한다.
+
+반대 뷰 조합 projection, OS callback owner 세대, 늦은 callback 격리와 실제 한국어 HID·한자 후보창은
+이 슬라이스의 완료 범위가 아니다. 기존 preedit는 overlay이며 검색·저장·LSP의 정본 관측을
+조합 표시 승인만으로 변경하지 않는다. 사용자 권한이 등록된 staged 앱은 이 변경의 빌드와 별개다.

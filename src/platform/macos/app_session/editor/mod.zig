@@ -46267,3 +46267,129 @@ test "SHVIEW18 LSP WorkspaceEdit는 같은 정본에 한 번 적용하고 두 �
     try testing.expectEqual(version, state.notifications.lsp_version);
     try testing.expectEqualStrings("xconst a = 1;", peer.rt.editor_lines[0]);
 }
+
+test "shared editor IME admission preserves owner and both views on failed focus commit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    const doc = fx.term.rt.editorDocument();
+    const before = try testing.allocator.dupe(u8, doc.opened.?.file.content);
+    defer testing.allocator.free(before);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    peer.rt.editor_selection = editor_selection.Selection.fromPoints(12, 6);
+    const peer_before = peer.rt.editor_selection.?;
+    const notifications = doc.notifications;
+    const pane = pane_ops.activePane(fx.session);
+    const source_index: usize = for (pane.terms.items, 0..) |member, i| {
+        if (member == fx.term) break i;
+    } else return error.MissingSource;
+    const peer_index: usize = for (pane.terms.items, 0..) |member, i| {
+        if (member == peer) break i;
+    } else return error.MissingPeer;
+    fx.session.focusTerm(source_index);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    doc.opened.?.file.read_only = true;
+    try testing.expect(!fx.session.trySetFocused(false));
+    try testing.expect(!fx.session.tryCommitComposition());
+    fx.session.focusTerm(peer_index);
+    try testing.expect(!fx.session.activateSurfaceById(peer.surface.id));
+    _ = fx.session.activateExistingFileTerm(peer);
+    try testing.expect(fx.session.app_window.active().? == fx.term.surface);
+    try testing.expectEqualStrings(before, doc.opened.?.file.content);
+    try testing.expectEqualDeep(notifications, doc.notifications);
+    try testing.expectEqualDeep(peer_before, peer.rt.editor_selection.?);
+    try testing.expectEqualStrings("한", fx.term.rt.editor_preedit);
+    try testing.expectEqual(@as(?u64, fx.term.surface.id), fx.session.ime_terminal_target_id);
+    doc.opened.?.file.read_only = false;
+    try testing.expect(fx.session.trySetFocused(false));
+    try testing.expect(fx.session.tryCommitComposition());
+    try testing.expect(std.mem.startsWith(u8, doc.opened.?.file.content, "한const"));
+    try testing.expectEqualStrings(fx.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
+    try testing.expectEqual(@as(usize, 9), peer.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 15), peer.rt.editor_selection.?.fixedEnd());
+}
+
+test "shared editor IME focus admission OOM preserves transaction or commits exactly once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var rejected: usize = 0;
+    var admitted: usize = 0;
+    for (0..24) |failure| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const peer = try sharedViewFixturePeer(&fx);
+        const doc = fx.term.rt.editorDocument();
+        const before = try testing.allocator.dupe(u8, doc.opened.?.file.content);
+        defer testing.allocator.free(before);
+        fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+        peer.rt.editor_selection = editor_selection.Selection.at(10);
+        setEditorPreedit(fx.session, fx.term, "한");
+        fx.session.ime_terminal_target_id = fx.term.surface.id;
+        const revision = doc.opened.?.file.revision;
+        const notifications = doc.notifications;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        fx.session.allocator = failing.allocator();
+        const accepted = fx.session.trySetFocused(false);
+        fx.session.allocator = testing.allocator;
+        if (!accepted) {
+            rejected += 1;
+            try testing.expectEqualStrings(before, doc.opened.?.file.content);
+            try testing.expectEqual(revision, doc.opened.?.file.revision);
+            try testing.expectEqualDeep(notifications, doc.notifications);
+            try testing.expectEqual(@as(usize, 10), peer.rt.editor_selection.?.focus);
+            try testing.expectEqualStrings("한", fx.term.rt.editor_preedit);
+            try testing.expectEqual(@as(?u64, fx.term.surface.id), fx.session.ime_terminal_target_id);
+            try testing.expect(fx.session.trySetFocused(false));
+        } else admitted += 1;
+        try testing.expect(fx.session.trySetFocused(false));
+        try testing.expectEqual(revision + 1, doc.opened.?.file.revision);
+        try testing.expect(std.mem.startsWith(u8, doc.opened.?.file.content, "한const"));
+        try testing.expectEqualStrings(fx.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
+        try testing.expectEqual(@as(usize, 13), peer.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_preedit.len);
+        try testing.expectEqual(@as(?u64, null), fx.session.ime_terminal_target_id);
+    }
+    try testing.expect(rejected > 0 and admitted > 0);
+}
+
+test "shared editor composite activation stops on rejected tab admission before using destination indices" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    for ([_]bool{ false, true }) |oom| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const source_tab = tab_ops.activeTab(fx.session);
+        const peer = try sharedViewFixturePeer(&fx);
+        _ = try tab_ops.newTab(fx.session);
+        const destination = fx.session.app_window.active().?.id;
+        const source_tab_index: usize = for (fx.session.tabs.items, 0..) |tab, i| {
+            if (tab == source_tab) break i;
+        } else return error.MissingSourceTab;
+        try testing.expect(tab_ops.switchTab(fx.session, source_tab_index));
+        focusTermForNav(fx.session, fx.term);
+        fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+        peer.rt.editor_selection = editor_selection.Selection.at(10);
+        try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+        const doc = fx.term.rt.editorDocument();
+        const revision = doc.opened.?.file.revision;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        if (oom) fx.session.allocator = failing.allocator() else doc.opened.?.file.read_only = true;
+        const activated = fx.session.activateSurfaceById(destination);
+        fx.session.allocator = testing.allocator;
+        doc.opened.?.file.read_only = false;
+        try testing.expect(!activated);
+        try testing.expectEqual(source_tab_index, fx.session.app_window.active_tab);
+        try testing.expect(fx.session.app_window.active().? == fx.term.surface);
+        try testing.expectEqual(revision, doc.opened.?.file.revision);
+        try testing.expectEqualStrings("한", fx.term.rt.editor_preedit);
+        try testing.expectEqual(@as(usize, 10), peer.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(?u64, fx.term.surface.id), fx.session.ime_terminal_target_id);
+        try testing.expect(fx.session.activateSurfaceById(destination));
+        try testing.expectEqual(destination, fx.session.app_window.active().?.id);
+        try testing.expectEqual(revision + 1, doc.opened.?.file.revision);
+        try testing.expectEqual(@as(usize, 13), peer.rt.editor_selection.?.focus);
+        try testing.expect(fx.session.activateSurfaceById(destination));
+        try testing.expectEqual(revision + 1, doc.opened.?.file.revision);
+    }
+}

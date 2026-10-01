@@ -217,9 +217,15 @@ pub fn ensureActiveTermVisible(self: *AppSession, pane: *Pane) void {
 }
 
 pub fn focusTerm(self: *AppSession, term_index: usize) void {
+    _ = tryFocusTerm(self, term_index);
+}
+
+/// Composite activation must stop rather than use a destination index in the previous pane.
+pub fn tryFocusTerm(self: *AppSession, term_index: usize) bool {
     const pane = pane_ops.activePane(self);
-    if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
-    self.commitComposition(); // 새 Term으로 확정 바이트/preedit이 넘어가지 않게 target pin을 먼저 비운다.
+    if (term_index >= pane.terms.items.len) return false;
+    if (pane.active_term == term_index) return true;
+    if (!self.tryCommitComposition()) return false; // Rejected admission must not publish a new input owner.
     self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 Term 이동 → 보류 무효화(stale 대상 close 방지)
     pane.active_term = term_index;
     self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
@@ -232,6 +238,7 @@ pub fn focusTerm(self: *AppSession, term_index: usize) void {
     pane_ops.recomputeActivePaneRect(self);
     self.metal_dirty = true;
     self.workspaceChanged(.selection);
+    return true;
 }
 
 /// 활성 pane의 Term을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘⌥]/⌘⌥[). Term이 1개면 무동작.
@@ -919,10 +926,9 @@ pub fn activateSurfaceById(self: *AppSession, id: u64) bool {
     }.pred) orelse return false; // 못 찾음(닫힌 Term) → 무동작
     // 순서가 핵심(위 doc): switchTab으로 대상 탭을 활성으로 만든 뒤라야 focusPaneByPtr가 그 탭의 panes에서
     // loc.pane을 찾고, 그 뒤라야 focusTerm이 올바른 활성 pane을 만진다.
-    _ = tab_ops.switchTab(self, loc.tab_index);
-    _ = pane_ops.focusPaneByPtr(self, loc.pane);
-    focusTerm(self, loc.term_index);
-    return true;
+    if (!tab_ops.switchTab(self, loc.tab_index)) return false;
+    if (!pane_ops.focusPaneByPtr(self, loc.pane)) return false;
+    return tryFocusTerm(self, loc.term_index);
 }
 
 /// Term 배열 mutation 직전의 위치 기반 gesture barrier. 같은 pane의 terminal-tab index는 어느 항목 제거에서도

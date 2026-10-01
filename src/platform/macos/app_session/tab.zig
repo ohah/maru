@@ -442,7 +442,7 @@ pub fn createTab(
 pub fn switchTab(self: *AppSession, index: usize) bool {
     const prev_tab = self.app_window.active_tab;
     if (index >= self.app_window.tabs.len) return false;
-    if (index != prev_tab) self.commitComposition();
+    if (index != prev_tab and !self.tryCommitComposition()) return false;
     if (!self.app_window.selectTab(index)) return false;
     // 실제 탭이 바뀔 때만 보류 닫기 무효화 — selectTab은 index<len이면 같은 탭 재선택에도 true를 돌려주므로
     // (window.zig), 알림 클릭이 이미 활성인 탭의 Term을 activateSurfaceById→switchTab(same)로 지날 때 유효한

@@ -12058,9 +12058,12 @@ pub const AppSession = struct {
                     if (term != target) continue;
                     const previous_active_term: ?*Term =
                         if (pane.terms.items.len > 0) pane.activeTerm() else null;
-                    if (self.app_window.active_tab != tab_index) _ = tab_ops.switchTab(self, tab_index);
-                    if (tab_ops.activeTab(self).active_pane != pane_index) pane_ops.focusPane(self, pane_index);
-                    term_ops.focusTerm(self, term_index);
+                    // Stop the composite operation at its first rejected admission. Otherwise the
+                    // destination indices could select unrelated views in the previous tab/pane.
+                    if (!tab_ops.switchTab(self, tab_index) or
+                        !pane_ops.tryFocusPane(self, pane_index) or
+                        !term_ops.tryFocusTerm(self, term_index))
+                        return .{ .term = target, .created = false, .previous_active_term = previous_active_term };
                     return .{ .term = target, .created = false, .previous_active_term = previous_active_term };
                 }
             }
@@ -15807,12 +15810,17 @@ pub const AppSession = struct {
     /// (setFocused)과, IME를 우회하는 특수키/단축키(PageUp 등) '직전'에 호출해 Swift marked text와 화면이 어긋나지
     /// 않게 한다. 활성 입력 대상(inputFocus 단일 출처)으로 분기 — 터미널은 PTY로, find/palette는 검색어/명령어로 확정.
     pub fn commitComposition(self: *AppSession) void {
-        if (!self.surface_initialized) return;
+        _ = self.tryCommitComposition();
+    }
+
+    /// The host may discard its OS marked session only after terminal/editor admission.
+    /// Keep the legacy chrome commit contract (its Bool means changed, not admitted).
+    pub fn tryCommitComposition(self: *AppSession) bool {
+        if (!self.surface_initialized) return true;
         // terminal 조합이 이미 pin됐으면 현재 열린 palette/settings/file tree보다 먼저 끝낸다. UI focus가
         // 바뀐 뒤 들어온 windowLostKey/imeCommit도 원 terminal target에만 적용돼야 한다.
         if (self.ime_terminal_target_id != null) {
-            _ = self.commitTerminalComposition();
-            return;
+            return self.commitTerminalComposition();
         }
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_pending => {}, // 구조 input owner는 확정할 조합이 없다.
@@ -15846,7 +15854,7 @@ pub const AppSession = struct {
             },
             .scm_commit => scm_dock_ops.commitCommitPreedit(self),
             .terminal => {
-                _ = self.commitTerminalComposition();
+                return self.commitTerminalComposition();
             },
             // **확정도 포커스를 따라간다.** 그리고 **바꿀 문자열은 재검색을 부르지 않는다** —
             // 검색어가 그대로이므로 다시 돌리면 `current`가 0으로 리셋돼 고른 매치를 잃는다.
@@ -15871,6 +15879,7 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
         }
+        return true;
     }
 
     /// 구조 이동 전 terminal composition queue admission의 2-phase ticket. `reserve`는 map/buffer
@@ -15994,16 +16003,22 @@ pub const AppSession = struct {
     /// 사라졌다가 재포커스 후 입력 위치가 어긋나는 사용감(라이브 제보)이 된다.
     /// Terminal.app/Ghostty와 같은 의미론.
     pub fn setFocused(self: *AppSession, focused: bool) void {
-        if (!self.surface_initialized) return;
-        if (focused) return;
+        _ = self.trySetFocused(focused);
+    }
+
+    /// Failed editor admission keeps the original input owner and marked transaction.
+    pub fn trySetFocused(self: *AppSession, focused: bool) bool {
+        if (!self.surface_initialized or focused) return true;
+        // A retained terminal/editor transaction precedes a newer chrome focus (including rename).
+        if (self.ime_terminal_target_id != null) return self.tryCommitComposition();
         // 인라인 rename 중 포커스 상실 = 확정(docs/tabs-splits-layout.md "포커스 상실=확정"). 앱-내 클릭은 mouse()
         // down이 이미 commit하지만, 앱-간 전환(window resign)은 이 경로뿐이라 여기서 확정한다. commitRename이 조합
         // preedit도 먼저 query로 확정하므로 commitComposition을 따로 부를 필요 없다(rename은 find/palette와 배타적).
         if (self.rename != null) {
             settings_ops.commitRename(self);
-            return;
+            return true;
         }
-        self.commitComposition();
+        return self.tryCommitComposition();
     }
 
     /// 셸 메타문자 — 셸이 공백/특수문자에서 단어를 쪼개거나 글롭·치환으로 해석하지 않게 앞에

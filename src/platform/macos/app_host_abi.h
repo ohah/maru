@@ -1096,6 +1096,7 @@ int32_t maru_macos_app_session_ime_cursor_rect(
 /* IME deleteBackward 편집 명령. 한글 마지막 자모 백스페이스(insertText+deleteBackward 상쇄)에 쓴다. */
 int32_t maru_macos_app_session_ime_delete_backward(MaruAppHostSession *session);
 /* 포커스 변화. 잃으면(0) 조합 중 텍스트를 확정 커밋한다. */
+// Returns 7 (key_failed) if terminal/editor composition admission failed; preserve OS marked state.
 int32_t maru_macos_app_session_set_focus(MaruAppHostSession *session, int32_t focused);
 /* 세팅 등 chrome 오버레이/keybind 녹음 열림(1) — Swift performKeyEquivalent가 메뉴바 keyEquivalent를 양보할지 판정
    (1이면 ⌘조합을 keyDown 경로로 보내 모달 입력 차단·chord 녹음이 동작). */
@@ -1118,6 +1119,7 @@ uint32_t maru_macos_app_session_web_key_route(MaruAppHostSession *session, uint6
    PTY write 없이 직접 dispatch한다. route 뒤 상태가 달라졌으면 실행하지 않고 0. 성공=1. v132. */
 uint32_t maru_macos_app_session_dispatch_web_app_action(MaruAppHostSession *session, uint64_t surface_id, const MaruAppHostKeyEvent *event);
 /* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
+// Returns 7 (key_failed) on rejected terminal/editor admission; retry keeps the original target.
 int32_t maru_macos_app_session_commit_composition(MaruAppHostSession *session);
 /* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,
    2=pointingHand/URL hover, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider, 5=openHand/pane grip 호버).

@@ -1280,8 +1280,7 @@ pub fn focusPaneByPtr(self: *AppSession, pane: *Pane) bool {
     const tab = tab_ops.activeTab(self);
     for (tab.panes.items, 0..) |p, i| {
         if (p == pane) {
-            focusPane(self, i);
-            return true;
+            return tryFocusPane(self, i);
         }
     }
     return false;
@@ -1291,9 +1290,15 @@ pub fn focusPaneByPtr(self: *AppSession, pane: *Pane) bool {
 /// 탭 대표(`surface_ptrs[active_tab]` = `app_window.active()`)와 `frame_loop.pump`에 재바인딩하고
 /// 활성 panel rect를 다시 계산한다. 같은 panel이거나 범위 밖이면 무동작. 탭 자체는 안 바꾼다.
 pub fn focusPane(self: *AppSession, pane_index: usize) void {
+    _ = tryFocusPane(self, pane_index);
+}
+
+/// Pointer-based composite activation needs admission, not just membership.
+pub fn tryFocusPane(self: *AppSession, pane_index: usize) bool {
     const tab = tab_ops.activeTab(self);
-    if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
-    self.commitComposition(); // input owner를 바꾸기 전에 원 surface의 marked text를 확정한다.
+    if (pane_index >= tab.panes.items.len) return false;
+    if (tab.active_pane == pane_index) return true;
+    if (!self.tryCommitComposition()) return false; // Retain the original input owner on rejected admission.
     self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 pane 이동 → 보류 무효화(stale 대상 close 방지)
     tab.active_pane = pane_index;
     self.surface_ptrs.items[self.app_window.active_tab] = tab.activeTerm().surface;
@@ -1301,6 +1306,7 @@ pub fn focusPane(self: *AppSession, pane_index: usize) void {
     recomputeActivePaneRect(self);
     self.metal_dirty = true;
     self.workspaceChanged(.selection);
+    return true;
 }
 
 /// new_workspace 드롭 하이라이트 표시 슬롯 — promotePaneToNewWorkspace가 새(비고정) 탭을 **비고정 리전의 첫 group_start

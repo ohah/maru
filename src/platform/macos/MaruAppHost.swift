@@ -162,7 +162,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 끌어다 놓으면 AppKit marked 세션과 Zig preedit가 살아남아 조합 글자가 화면에 잔상으로 남고, 그
         // 뒤 입력이 stale한 조합에 이어 붙는다(사용자 제보 2026-08-17). 키보드·포인터·메뉴가 이미 공유하는
         // 그 규칙에 드롭을 합류시킨다 — 확정은 삽입 **전**에 하므로 조합 글자가 드롭 내용보다 앞에 온다.
-        commitMarkedTextIfComposing()
+        guard commitMarkedTextIfComposing() else { return false }
         // 내용 추출·삽입은 paste 로직을 가진 controller에 위임한다(클립보드 paste와 같은 경로 재사용 — keyDown이
         // handleKeyDown에 위임하는 것과 동형). 세션/PTY 접근은 controller가 소유한다. 드롭 지점(창 좌표)과 **이 뷰**를
         // 함께 넘긴다 — controller가 그 뷰의 창 surface로 스코프해 pane 라우팅(v115)까지 한 곳에서 처리한다.
@@ -284,14 +284,18 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 왜 Zig switchTab/focusTerm(전환의 단일 chokepoint)이 아니라 Swift 입력 경계에서 하나 — AppKit 입력기
     // 세션 종료(inputContext.discardMarkedText)는 NSView만 할 수 있다. Zig가 preedit를 커밋해도 그걸 못 부르면
     // marked 세션이 살아 다음 입력이 'ㅈ'부터 이어진다(누수의 실제 출처가 AppKit 세션이라 Zig만으론 못 막는다).
-    func commitMarkedTextIfComposing() {
-        guard hasMarkedText() else { return }
-        controller?.imeCommit()            // Surface preedit 커밋(조합 글자 PTY로)
+    @discardableResult
+    func commitMarkedTextIfComposing() -> Bool {
+        // Query admission even without visible marked text: Zig may retain a rejected commit.
+        let hadMarkedText = hasMarkedText() || !markedTextBuffer.isEmpty || pendingUnmarkText != nil
+        guard controller?.imeCommit() == true else { return false }
+        guard hadMarkedText else { return true }
         markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
         editorHanjaCandidateActive = false
         markedSelection = NSRange(location: 0, length: 0)
         pendingUnmarkText = nil
-        inputContext?.discardMarkedText()  // AppKit 입력기의 marked 상태 정리
+        inputContext?.discardMarkedText()  // Only discard after admission, never after a failed commit.
+        return true
     }
 
     // 세팅 등 오버레이/keybind 녹음 중이면 메뉴바 keyEquivalent(⌘T 등)를 가로채지 않고 keyDown 경로로 보낸다 —
@@ -305,10 +309,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 거기 있다) 여기서는 그 답만 따른다. 오버레이 갈래가 **먼저**여야 모달 중 chord 녹음이 안 샌다.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if controller?.anyOverlayOpen == true {
+            guard commitMarkedTextIfComposing() else { return true }
             controller?.handleKeyDown(event)
             return true
         }
         if controller?.editorOwnsChord(event) == true {
+            guard commitMarkedTextIfComposing() else { return true }
             controller?.handleKeyDown(event)
             return true
         }
@@ -369,9 +375,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 조합(marked text) 중에 우회 키가 오면 '먼저 조합을 확정'한다 — 안 그러면 Swift의 marked
         // text(hasMarkedText)와 Zig의 preedit가 안 비워진 채 PageUp이 화면을 옮겨, 이후 입력이 stale한
         // marked range에 박혀 위치가 어긋나거나 안 먹거나 안 지워진다(특수키 우회의 누락된 처리).
-        if bypassesIME {
-            commitMarkedTextIfComposing()
-        }
+        if bypassesIME && !commitMarkedTextIfComposing() { return }
         if !chord.isEmpty {
             controller?.handleKeyDown(event)
             return
@@ -492,17 +496,19 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 포커스 변화는 Zig에 전달만 한다 — 조합 중 텍스트의 확정(커밋)은 Zig setFocused가 소유
     // (Terminal.app/Ghostty 의미론, unit 검증). 여기선 입력기 세션 정리만(재포커스 후 입력기
     // 상태와 화면이 어긋나지 않게).
-    func commitComposition() {
+    @discardableResult
+    func commitComposition() -> Bool {
+        guard controller?.imeFocus(false) == true else { return false }
         markedTextBuffer = ""
         editorHanjaCandidateActive = false
         markedSelection = NSRange(location: 0, length: 0)
         pendingUnmarkText = nil
-        controller?.imeFocus(false)
         inputContext?.discardMarkedText()
+        return true
     }
 
     override func resignFirstResponder() -> Bool {
-        commitComposition()
+        guard commitComposition() else { return false }
         return super.resignFirstResponder()
     }
 
@@ -7707,10 +7713,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).
     func handleMouse(_ event: NSEvent, kind: Int32, in view: NSView) {
         guard let session = appSession else { return }
-        // 마우스 다운(kind==1)은 텍스트 입력이 아니다 — 조합 중이면 Zig로 넘기기 '전'에 확정한다. 좌·중·우
+        // 마우스 다운(kind 1/4/5: 단일·더블·트리플)은 텍스트 입력이 아니다 — 조합 중이면 Zig로 넘기기 '전'에 확정한다. 좌·중·우
         // 다운이 모두 여기로 모이고(rightMouseDown/otherMouseDown 포함), 사이드바 카드·탭 바의 탭/Term 전환은
-        // 버튼이 아니라 kind==1로만 게이트되므로(app_session.zig mouse) 중간 클릭 전환도 이 한 곳에서 덮인다.
-        if kind == 1 { (view as? MaruMetalTerminalView)?.commitMarkedTextIfComposing() }
+        // 버튼이 아니라 down kind로 게이트되므로(app_session.zig mouse) 중간 클릭 전환도 이 한 곳에서 덮인다.
+        if [1, 4, 5].contains(kind), let terminalView = view as? MaruMetalTerminalView,
+           !terminalView.commitMarkedTextIfComposing() { return }
         let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
         // macOS buttonNumber(0=L,1=R,2=M) → xterm(0=L,1=M,2=R).
         let button: Int32 = event.buttonNumber == 1 ? 2 : (event.buttonNumber == 2 ? 1 : 0)
@@ -9602,7 +9609,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // 메뉴 액션은 keyDown을 안 거친다 — next/previous_tab은 keyEquivalent가 달려 키 단축키로 와도
         // 메뉴가 가로채 여기로 온다. 조합 중이면 먼저 확정해, 탭 전환으로 입력기 세션이 새 탭으로 새지 않게 한다.
-        activeSurface?.view?.commitMarkedTextIfComposing()
+        if let terminalView = activeSurface?.view, !terminalView.commitMarkedTextIfComposing() { return }
         let bytes = Array(key.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_run_action(session, buf.baseAddress, buf.count)
@@ -12331,15 +12338,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_app_session_ime_delete_backward(session)
     }
 
-    func imeFocus(_ focused: Bool) {
-        guard let session = appSession else { return }
-        _ = maru_macos_app_session_set_focus(session, focused ? 1 : 0)
+    @discardableResult
+    func imeFocus(_ focused: Bool) -> Bool {
+        guard let session = appSession else { return false }
+        return maru_macos_app_session_set_focus(session, focused ? 1 : 0) == Self.statusOK
     }
 
     // 진행 중 IME 조합을 확정한다(IME 우회 특수키/단축키 직전). Surface preedit를 커밋·비운다.
-    func imeCommit() {
-        guard let session = appSession else { return }
-        _ = maru_macos_app_session_commit_composition(session)
+    func imeCommit() -> Bool {
+        guard let session = appSession else { return false }
+        return maru_macos_app_session_commit_composition(session) == Self.statusOK
     }
 
     // IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점). 화면 좌표 변환은 view가 한다.

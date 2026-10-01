@@ -31,15 +31,24 @@ pub fn alive(pid: c_int) bool {
     return std.c.kill(pid, @enumFromInt(0)) == 0;
 }
 
-/// `pid` 의 실행 인자에 `needle` 이 그대로 든 것이 있는가(`KERN_PROCARGS2` — argc, 실행 경로, 인자들이 NUL 로 이어진다).
-/// 못 읽으면 false.
+/// `pid` 의 실행 인자(argv — 환경 변수는 보지 않는다)에 `needle` 이 그대로 든 것이 있는가. `KERN_PROCARGS2` 는 argc(int),
+/// 실행 경로, NUL 채움, argv argc 개, 환경 변수 순이다. 못 읽거나 잘렸으면(버퍼를 꽉 채움) false.
 pub fn argsContain(pid: c_int, needle: []const u8) bool {
     var buf: [65536]u8 = undefined;
     var len: usize = buf.len;
     const mib = [_]c_int{ 1, 49, pid }; // CTL_KERN, KERN_PROCARGS2
-    if (std.c.sysctl(&mib, mib.len, &buf, &len, null, 0) != 0 or len <= @sizeOf(c_int)) return false;
-    var parts = std.mem.splitScalar(u8, buf[@sizeOf(c_int)..len], 0);
-    while (parts.next()) |part| if (std.mem.eql(u8, part, needle)) return true;
+    if (std.c.sysctl(&mib, mib.len, &buf, &len, null, 0) != 0 or len <= @sizeOf(c_int) or len >= buf.len) return false;
+    const argc = std.mem.readInt(i32, buf[0..4], .little);
+    if (argc <= 0) return false;
+    var i: usize = @sizeOf(c_int);
+    while (i < len and buf[i] != 0) i += 1; // 실행 경로
+    while (i < len and buf[i] == 0) i += 1; // 채움
+    var seen: i32 = 0;
+    while (i < len and seen < argc) : (seen += 1) {
+        const end = std.mem.indexOfScalarPos(u8, buf[0..len], i, 0) orelse len;
+        if (std.mem.eql(u8, buf[i..end], needle)) return true;
+        i = end + 1;
+    }
     return false;
 }
 

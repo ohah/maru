@@ -256,6 +256,9 @@ fn permissionChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var profile_buf: [1024]u8 = undefined;
     const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/g", .{profile_root}) catch return report(false, "permissions", "프로필 경로가 길다", .{});
     permissions_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "permissions", "{s}", .{@errorName(err)});
+    var orphan_buf: [1024]u8 = undefined;
+    const orphan_profile = std.fmt.bufPrintZ(&orphan_buf, "--profile-dir={s}/h", .{profile_root}) catch return report(false, "perm-camera-orphan", "프로필 경로가 길다", .{});
+    permissions_check.cameraOrphan(&reportText, host_path, orphan_profile, server.port) catch |err| report(false, "perm-camera-orphan", "{s}", .{@errorName(err)});
 }
 
 /// 입력 판정(W4). HTTP 서버는 판정마다 새로 연다(입력만 돌 때도 같은 페이지를 쓴다).

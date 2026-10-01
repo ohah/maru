@@ -25,6 +25,7 @@ const frames_check = @import("frames_check.zig");
 const input_check = @import("input_check.zig");
 const dialogs_check = @import("dialogs_check.zig");
 const permissions_check = @import("permissions_check.zig");
+const popup_check = @import("popup_check.zig");
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -63,6 +64,13 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         var host_buf: [1024]u8 = undefined;
         const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
         dialogChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--popup")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        popupChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--permissions")) {
@@ -108,6 +116,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     inputChecks(host_path, profile_e);
     dialogChecks(host_path, profile_root);
     permissionChecks(host_path, profile_root);
+    popupChecks(host_path, profile_root);
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
 
     // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
@@ -250,6 +259,14 @@ fn permissionChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var orphan_buf: [1024]u8 = undefined;
     const orphan_profile = std.fmt.bufPrintZ(&orphan_buf, "--profile-dir={s}/h", .{profile_root}) catch return report(false, "perm-camera-orphan", "프로필 경로가 길다", .{});
     permissions_check.cameraOrphan(&reportText, host_path, orphan_profile, server.port) catch |err| report(false, "perm-camera-orphan", "{s}", .{@errorName(err)});
+}
+
+/// 팝업 판정(W6a) — 프로필은 `<뿌리>/i`.
+fn popupChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "popup", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/i", .{profile_root}) catch return report(false, "popup", "프로필 경로가 길다", .{});
+    popup_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "popup", "{s}", .{@errorName(err)});
 }
 
 /// 입력 판정(W4). HTTP 서버는 판정마다 새로 연다(입력만 돌 때도 같은 페이지를 쓴다).

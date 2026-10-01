@@ -2277,6 +2277,15 @@ pub fn nativeTextFromEnv() bool {
     return editor_diff_ops.valueEnables(std.mem.span(raw));
 }
 
+const SharedSeed = struct {
+    selection: ?editor_selection.Selection,
+    extras: []editor_selection.Selection,
+    first_line: usize,
+    first_piece: u32,
+    first_col: u32,
+    wrap: ?bool,
+};
+
 /// 문서를 Term에 붙이기 직전까지 준비한 앱 전역 문서 참조와 뷰 줄 배열.
 ///
 /// **왜 중간 상태에 이름을 줬나.** 파일 Term을 여는 경로(`pane.openFileTermInActivePane`)는 Term을
@@ -2285,10 +2294,13 @@ pub fn nativeTextFromEnv() bool {
 pub const Prepared = struct {
     lease: editor.document_registry.Lease,
     lines: [][]const u8,
+    shared: bool = false,
+    seed: ?SharedSeed = null,
 
     /// 아직 뷰에 넘기지 않은 참조와 줄 배열을 되돌린다. registry는 문서를 한 번만 정산한다.
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
         allocator.free(self.lines);
+        if (self.seed) |seed| if (seed.extras.len > 0) allocator.free(seed.extras);
         _ = @constCast(self.lease.owner).release(self.lease) catch unreachable;
         self.* = undefined;
     }
@@ -2314,6 +2326,50 @@ pub fn preparePath(self: *AppSession, path: []const u8) OpenFileError!Prepared {
     var state: editor.document_state.State = .{ .opened = opened, .path = path_copy };
     const lease = self.editor_documents.create(&state, self.allocator) catch return error.OutOfMemory;
     return .{ .lease = lease, .lines = lines };
+}
+
+// A handle may be app-global; connection authority still belongs to its actual window.
+fn ownsEditorView(self: *AppSession, source: *Term) bool {
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |view| {
+        if (view == source) return true;
+    };
+    return false;
+}
+
+/// Another ordinary local view of an already-authorized document handle.
+/// Path alias policy and user-facing split commands are separate gates.
+pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || error{UnsupportedSharedDocument})!Prepared {
+    if (source.kind != .editor or source.rt.editor_diff != null or source.rt.editor_merge != null or source.rt.editorDocument().remote != null or source.rt.editorDocument().untitled != null or source.rt.editorDocument().path == null) return error.UnsupportedSharedDocument;
+    const source_lease = source.rt.editor_document_lease orelse return error.UnsupportedSharedDocument;
+    if (source_lease.owner != self.editor_documents or !ownsEditorView(self, source)) return error.UnsupportedSharedDocument;
+    const doc = source.rt.editorDocument().opened orelse return error.UnsupportedSharedDocument;
+    const lines = try self.allocator.alloc([]const u8, doc.file.lineCount());
+    errdefer self.allocator.free(lines);
+    for (lines, 0..) |*line, i| line.* = doc.file.lineText(i) orelse "";
+    const extras = try self.allocator.dupe(editor_selection.Selection, source.rt.editor_extra_selections);
+    errdefer self.allocator.free(extras);
+    const lease = self.editor_documents.retain(source_lease, .view) catch return error.OutOfMemory;
+    return .{ .lease = lease, .lines = lines, .shared = true, .seed = .{
+        .selection = source.rt.editor_selection,
+        .extras = extras,
+        .first_line = source.rt.editor_first_line,
+        .first_piece = source.rt.editor_first_piece,
+        .first_col = source.rt.editor_first_col,
+        .wrap = source.rt.editor_wrap,
+    } };
+}
+
+pub fn openSharedViewInActivePane(self: *AppSession, source: *Term) (OpenFileError || error{UnsupportedSharedDocument})!*Term {
+    var prepared = try prepareSharedView(self, source);
+    errdefer prepared.deinit(self.allocator);
+    const term = createEditorTerm(self) catch return error.OutOfMemory;
+    errdefer term_ops.destroyTerm(self, term);
+    const pane = pane_ops.activePane(self);
+    pane.terms.append(self.allocator, term) catch return error.OutOfMemory;
+    finishAttach(self, term, prepared);
+    self.focusTerm(pane.terms.items.len - 1);
+    self.metal_dirty = true;
+    return term;
 }
 
 /// **빈 문서**를 부착 직전까지 만든다 — 이름 없는 문서(§3.11)의 `preparePath` 짝이다. 디스크를
@@ -2356,7 +2412,7 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     std.debug.assert(term.rt.editor_unattached_document.opened == null);
     std.debug.assert(term.rt.editor_unattached_document.path == null and term.rt.editor_unattached_document.remote == null);
     std.debug.assert(term.rt.editor_unattached_document.history.undo.len == 0 and term.rt.editor_unattached_document.history.redo.len == 0);
-    prepared.lease.owner.get(prepared.lease).?.untitled = term.rt.editor_unattached_document.untitled;
+    if (!prepared.shared) prepared.lease.owner.get(prepared.lease).?.untitled = term.rt.editor_unattached_document.untitled;
     term.rt.editor_unattached_document = .{};
     term.rt.editor_document_lease = prepared.lease;
     term.rt.editor_lines = prepared.lines;
@@ -2405,7 +2461,15 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // ⑴ 제품이 문서를 붙이는 자리가 **여기 하나**다(파일 entry · `MARU_NATIVE_EDITOR` 훅 · 이름 없는
     // 문서가 모두 지난다) ⑵ 되살리는 것을 **한 편집**으로 넣으려면 줄 인덱스·문법이 이미 서 있어야
     // 한다(위 전부). 이름 없는 문서는 그 안에서 걸러진다(경로가 없으면 이 슬라이스의 대상이 아니다).
-    app_session_mod.editor_backup_ops.restoreIfAny(self, term);
+    if (!prepared.shared) app_session_mod.editor_backup_ops.restoreIfAny(self, term);
+    if (prepared.seed) |seed| {
+        term.rt.editor_selection = seed.selection;
+        term.rt.editor_extra_selections = seed.extras;
+        term.rt.editor_first_line = seed.first_line;
+        term.rt.editor_first_piece = seed.first_piece;
+        term.rt.editor_first_col = seed.first_col;
+        term.rt.editor_wrap = seed.wrap;
+    }
 }
 
 /// config가 정한 탭 폭(§9 — `editor.tab-width`).
@@ -7748,6 +7812,11 @@ pub fn breakUndoGroup(term: *Term) void {
 fn sameUndoGroup(term: *Term, kind: EditKind, now_ms: u64) bool {
     if (term.rt.editorDocument().history.last_edit_kind != kind) return false;
     if (kind == .none) return false;
+    const history = &term.rt.editorDocument().history;
+    if (history.undo_len > 0) {
+        const previous = history.undo[history.undo_len - 1].view_id;
+        if (previous != 0 and previous != term.surface.id) return false;
+    }
     return now_ms -| term.rt.editorDocument().history.last_edit_ms <= undo_group_gap_ms;
 }
 
@@ -7760,6 +7829,7 @@ fn pushUndo(
     primary_before: usize,
     kind: EditKind,
 ) void {
+    var owned_inverse = inverse;
     const now_ms = self.awakeMs();
     if (!sameUndoGroup(term, kind, now_ms)) term.rt.editorDocument().history.edit_group +%= 1;
     term.rt.editorDocument().history.last_edit_kind = kind;
@@ -7769,23 +7839,28 @@ fn pushUndo(
     dropRedo(self, term);
 
     const entry: UndoEntry = .{
-        .inverse = inverse,
+        .inverse = owned_inverse,
         .sels_before = sels_before,
         .primary_before = primary_before,
         .group = term.rt.editorDocument().history.edit_group,
+        .view_id = term.surface.id,
     };
-    // applyDocumentEdit가 본문 변경 전에 capacity를 준비했다. 게시 이후에는 할당하지 않는다.
-    pushPreparedEntry(self, &term.rt.editorDocument().history.undo, &term.rt.editorDocument().history.undo_len, entry);
+    if (!pushEntry(self, &term.rt.editorDocument().history.undo, &term.rt.editorDocument().history.undo_len, entry)) {
+        // 못 쌓으면 **되돌릴 수 없는 편집**이 된다. 그래도 편집 자체는 성사시킨다 —
+        // 여기서 편집을 취소하면 할당 실패 하나가 타이핑을 먹는다.
+        var e = entry;
+        e.deinit(self.allocator);
+        owned_inverse = undefined;
+        term.rt.editorDocument().history.clear(self.allocator);
+    }
 }
 
-pub fn prepareEntry(self: *AppSession, stack: *[]UndoEntry, len: usize) error{OutOfMemory}!void {
-    if (len < stack.len) return;
-    const next_cap = if (stack.len == 0) 16 else stack.len * 2;
-    stack.* = try self.allocator.realloc(stack.*, next_cap);
-}
-
-fn pushPreparedEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry: UndoEntry) void {
-    std.debug.assert(len.* < stack.len);
+fn pushEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry: UndoEntry) bool {
+    if (len.* == stack.len) {
+        const next_cap = if (stack.len == 0) 16 else stack.len * 2;
+        const grown = self.allocator.realloc(stack.*, next_cap) catch return false;
+        stack.* = grown;
+    }
     stack.*[len.*] = entry;
     len.* += 1;
 
@@ -7796,6 +7871,7 @@ fn pushPreparedEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry:
         std.mem.copyForwards(UndoEntry, stack.*[0 .. len.* - drop], stack.*[drop..len.*]);
         len.* -= drop;
     }
+    return true;
 }
 
 fn dropRedo(self: *AppSession, term: *Term) void {
@@ -7898,11 +7974,6 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
             break;
         };
         const mirror_primary = if (restored) |r| r.primary else sels.primary;
-        prepareEntry(self, to, to_len.*) catch {
-            self.allocator.free(mirror_items);
-            self.allocator.free(sels.items);
-            break;
-        };
         const back = applyDocumentEditPrepared(self, term, entry.inverse.delta(), &sels, entry.sels_before.len) catch {
             self.allocator.free(mirror_items);
             self.allocator.free(sels.items);
@@ -7932,8 +8003,13 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
             .sels_before = mirror_items,
             .primary_before = mirror_primary,
             .group = group,
+            .view_id = term.surface.id,
         };
-        pushPreparedEntry(self, to, to_len, mirror);
+        if (!pushEntry(self, to, to_len, mirror)) {
+            var m = mirror;
+            m.deinit(self.allocator);
+            term.rt.editorDocument().history.clear(self.allocator);
+        }
         entry.inverse.deinit(); // `sels_before`는 위에서 `restored`가 가져갔다
     }
 
@@ -8445,7 +8521,6 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     }
 
     // pushUndo owns the inverse and may release it if its own allocation fails.
-    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     if (track_direct) {
         for (next_direct, inverse.changes, sels.items, 0..) |*item, change, selection, index| {
             item.* = .{ .span = .{ .start = change.start, .end = change.end }, .selection = selection, .is_primary = index == sels.primary };
@@ -8477,6 +8552,7 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         term.rt.editor_ime_direct.revision = null;
         writeBackSelections(self, term, sels);
     }
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .insert);
     // **조합 중이면 조합 자리도 함께 옮긴다.** 자리는 조합을 시작할 때 한 번만 잡는데(IME4), 이어
     // 치는 한글에서는 그 "시작"이 **키 트랜잭션 한가운데**다 — `insertText`(확정)는 `ime_inserted`에
@@ -45203,7 +45279,7 @@ test "SHVIEW6 Undo 준비 실패는 본문과 이력을 유지하고 재시도�
     try testing.expectEqualStrings("const a = 1;", fx.term.rt.editor_lines[0]);
 }
 
-test "SHVIEW7 Undo 스택 성장 실패는 새 편집을 게시하지 않고 기존 Undo를 보존한다" {
+test "SHVIEW7 공유 게시 준비 실패는 새 편집을 게시하지 않고 기존 Undo를 보존한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fx = try PaneFixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
@@ -45373,7 +45449,19 @@ test "SHVIEW12 묶음 Undo 중간 실패도 남은 이력 재시도와 Redo를 �
         fx.session.allocator = testing.allocator;
         state.opened.?.file.allocator = testing.allocator;
         state.opened.?.file.buf.allocator = testing.allocator;
-        const applied = 2 - state.history.undo_len;
+        const applied = state.opened.?.file.revision - revision;
+        if (applied > 0 and state.history.undo_len == 0 and state.history.redo_len == 0) {
+            try testing.expect(applied <= 2);
+            if (applied == 1) {
+                const partial = try std.fmt.allocPrint(testing.allocator, "x{s}", .{original});
+                defer testing.allocator.free(partial);
+                try testing.expectEqualStrings(partial, state.opened.?.file.content);
+            } else try testing.expectEqualStrings(original, state.opened.?.file.content);
+            try testing.expectEqual(@as(usize, 20) - applied, fx.term.rt.editor_selection.?.focus);
+            try testing.expectEqualStrings(fx.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
+            try testing.expect(!undoEdit(fx.session, peer) and !redoEdit(fx.session, peer));
+            continue;
+        }
         try testing.expectEqual(applied, state.history.redo_len);
         try testing.expectEqual(revision + applied, state.opened.?.file.revision);
         try testing.expectEqualStrings(fx.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
@@ -45460,4 +45548,306 @@ test "SHVIEW14 잘못된 delta와 누락된 뷰는 부분 게시하지 않고 �
     try testing.expectEqualStrings("xconst a = 1;", peer.rt.editor_lines[0]);
     try testing.expect(undoEdit(fx.session, peer));
     try testing.expectEqualStrings("const a = 1;", fx.term.rt.editor_lines[0]);
+}
+
+fn applySharedDelta(self: *AppSession, term: *Term, d: editor.delta.Delta, sels: *editor_selection.Selections, expected_revision: u64) !editor.delta.Inverse {
+    return applyDocumentEditAtRevision(self, term, d, sels, expected_revision);
+}
+// Shared edits must update the other real Term, including UTF-8 selections and borrowed rows.
+test "shared editor edit maps inactive reverse selection and Undo across views" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = fx.term;
+    try pane_ops.splitActivePane(fx.session, .horizontal);
+    const b = try openSharedViewInActivePane(fx.session, a);
+    b.rt.editor_selection = editor_selection.Selection.fromPoints(9, 6);
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, a, "한"));
+    try testing.expectEqual(@as(usize, 12), b.rt.editor_selection.?.anchor_start);
+    try testing.expectEqual(@as(usize, 9), b.rt.editor_selection.?.focus);
+    try testing.expect(a.rt.editorDocument() == b.rt.editorDocument());
+    try testing.expectEqualStrings(a.rt.editor_lines[0], b.rt.editor_lines[0]);
+    try testing.expect(undoEdit(fx.session, b));
+    try testing.expectEqualStrings("const a = 1;", a.rt.editor_lines[0]);
+    try testing.expectEqual(@as(usize, 0), b.rt.editor_selection.?.focus);
+}
+
+const SharedEditFixture = struct {
+    base: PaneFixture,
+    other: *Term,
+    source_pane: *Pane,
+    fn init() !SharedEditFixture {
+        var fx = try PaneFixture.init(testing.allocator);
+        errdefer fx.deinit(testing.allocator);
+        try testing.expect(selectAll(fx.session, fx.term));
+        try testing.expect(insertText(fx.session, fx.term, "aa\nbb\ncc\n"));
+        dropUndoState(fx.session, fx.term);
+        const source_pane = pane_ops.activePane(fx.session);
+        try pane_ops.splitActivePane(fx.session, .horizontal);
+        const other = try openSharedViewInActivePane(fx.session, fx.term);
+        return .{ .base = fx, .other = other, .source_pane = source_pane };
+    }
+    fn deinit(self: *SharedEditFixture) void {
+        self.base.deinit(testing.allocator);
+    }
+};
+
+test "shared editor edits preserve peer scroll wrap reverse selection and exact insertion affinity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    b.rt.editor_selection = editor_selection.Selection.fromPoints(8, 4);
+    b.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(0)});
+    b.rt.editor_first_line = 2;
+    b.rt.editor_first_col = 7;
+    b.rt.editor_wrap = true;
+    b.rt.editor_first_piece = 1;
+    try testing.expect(insertText(s, a, "X\n"));
+    try testing.expectEqualStrings("X\naa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 10), b.rt.editor_selection.?.anchor_start);
+    try testing.expectEqual(@as(usize, 6), b.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 2), b.rt.editor_extra_selections[0].focus);
+    try testing.expectEqual(@as(usize, 3), b.rt.editor_first_line);
+    try testing.expectEqual(@as(u32, 7), b.rt.editor_first_col);
+    try testing.expectEqual(@as(u32, 1), b.rt.editor_first_piece);
+    try testing.expectEqual(true, b.rt.editor_wrap.?);
+    try testing.expectEqual(@as(usize, 2), a.rt.editor_selection.?.focus);
+    try testing.expectEqualStrings(a.rt.editor_lines[3], b.rt.editor_lines[3]);
+}
+
+test "shared editor alternating writers have shared Undo Redo and retain snapshots after source close" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    b.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(s, a, "한"));
+    try testing.expect(insertText(s, b, "X"));
+    try testing.expectEqualStrings("한aa\nXbb\ncc\n", a.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(s, a));
+    try testing.expectEqualStrings("한aa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
+    try testing.expect(redoEdit(s, b));
+    try testing.expectEqualStrings("한aa\nXbb\ncc\n", a.rt.editorDocument().opened.?.file.content);
+    // Close the original editor while a second real pane keeps its document and history alive.
+    for (fx.source_pane.terms.items, 0..) |term, index| if (term == a) {
+        term_ops.closeTermAt(s, s.app_window.active_tab, fx.source_pane, index);
+        break;
+    };
+    try testing.expect(undoEdit(s, b));
+    try testing.expect(undoEdit(s, b));
+    try testing.expectEqualStrings("aa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), b.rt.editor_selection.?.focus);
+    try testing.expect(redoEdit(s, b));
+    try testing.expectEqualStrings("한aa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
+}
+
+test "shared editor allocation failures preserve all views or commit with a safe history boundary" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var saw_precommit_failure = false;
+    var saw_history_failure = false;
+    for (0..32) |failure| {
+        var fx = try SharedEditFixture.init();
+        defer fx.deinit();
+        const s = fx.base.session;
+        const a = fx.base.term;
+        const b = fx.other;
+        a.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(s, a, "Z"));
+        breakUndoGroup(a);
+        const history = &a.rt.editorDocument().history;
+        history.undo = try testing.allocator.realloc(history.undo, history.undo_len);
+        const before = try testing.allocator.dupe(u8, a.rt.editorDocument().opened.?.file.content);
+        defer testing.allocator.free(before);
+        const revision = a.rt.editorDocument().opened.?.file.revision;
+        const selection = b.rt.editor_selection.?;
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        s.allocator = failing.allocator();
+        const accepted = insertText(s, a, "한\n");
+        s.allocator = testing.allocator;
+        if (!accepted) {
+            saw_precommit_failure = true;
+            try testing.expectEqualStrings(before, a.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(revision, a.rt.editorDocument().opened.?.file.revision);
+            try testing.expectEqualDeep(selection, b.rt.editor_selection.?);
+            try testing.expectEqual(@as(usize, 1), history.undo_len);
+        } else {
+            try testing.expectEqual(revision + 1, b.rt.editorDocument().opened.?.file.revision);
+            try testing.expectEqualStrings(a.rt.editor_lines[0], b.rt.editor_lines[0]);
+            if (history.undo_len == 0) {
+                saw_history_failure = true;
+                try testing.expect(!undoEdit(s, b));
+                try testing.expectEqual(@as(usize, 0), history.redo_len);
+                try testing.expectEqualStrings("Z한\naa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
+            }
+        }
+    }
+    try testing.expect(saw_precommit_failure);
+    try testing.expect(saw_history_failure);
+}
+
+test "shared editor stale revision and outstanding peer composition reject without consuming Undo" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(s, a, "X"));
+    const revision = a.rt.editorDocument().opened.?.file.revision;
+    var items = [_]editor_selection.Selection{editor_selection.Selection.at(0)};
+    var sels = editor_selection.Selections.init(&items, 0);
+    const changes = [_]editor.delta.Change{.{ .start = 0, .end = 0, .text = "late" }};
+    try testing.expectError(error.StaleRevision, applySharedDelta(s, a, .{ .changes = &changes }, &sels, revision - 1));
+    setEditorPreedit(s, b, "한");
+    try testing.expect(!undoEdit(s, a));
+    try testing.expectEqual(@as(usize, 1), a.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(revision, a.rt.editorDocument().opened.?.file.revision);
+    try testing.expectEqualStrings("한", b.rt.editor_preedit);
+    setEditorPreedit(s, b, "");
+    try testing.expect(undoEdit(s, a));
+    try testing.expectEqualStrings("aa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
+}
+
+test "shared editor connection copies view state without sharing selection storage or replaying backup" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const a = fx.base.term;
+    const s = fx.base.session;
+    a.rt.editor_selection = editor_selection.Selection.fromPoints(8, 3);
+    a.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(1)});
+    a.rt.editor_first_line = 1;
+    a.rt.editor_first_piece = 2;
+    a.rt.editor_first_col = 4;
+    a.rt.editor_wrap = true;
+    const revision = a.rt.editorDocument().opened.?.file.revision;
+    const c = try openSharedViewInActivePane(s, a);
+    try testing.expect(c.rt.editorDocument() == a.rt.editorDocument());
+    try testing.expectEqual(revision, c.rt.editorDocument().opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 3), s.editor_documents.viewCount(a.rt.editor_document_lease.?).?);
+    try testing.expectEqualDeep(a.rt.editor_selection.?, c.rt.editor_selection.?);
+    try testing.expect(a.rt.editor_extra_selections.ptr != c.rt.editor_extra_selections.ptr);
+    c.rt.editor_extra_selections[0] = editor_selection.Selection.at(5);
+    try testing.expectEqual(@as(usize, 1), a.rt.editor_extra_selections[0].focus);
+    try testing.expectEqual(@as(usize, 1), c.rt.editor_first_line);
+    try testing.expectEqual(@as(u32, 2), c.rt.editor_first_piece);
+    try testing.expectEqual(@as(u32, 4), c.rt.editor_first_col);
+    try testing.expect(c.rt.editor_wrap.?);
+}
+
+test "shared editor deletion and simultaneous replacements refresh every peer and map UTF8 boundaries" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const a = fx.base.term;
+    const b = fx.other;
+    const s = fx.base.session;
+    a.rt.editor_selection = editor_selection.Selection.at(8);
+    b.rt.editor_selection = editor_selection.Selection.fromPoints(1, 6);
+    try testing.expect(deleteText(s, b, true));
+    try testing.expectEqualStrings("acc\n", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 3), a.rt.editor_selection.?.focus);
+    try testing.expectEqualStrings("acc", a.rt.editor_lines[0]);
+    try testing.expect(undoEdit(s, a));
+    try testing.expectEqualStrings("aa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
+    a.rt.editor_selection = editor_selection.Selection.at(4);
+    b.rt.editor_selection = editor_selection.Selection.fromPoints(7, 1);
+    var changes = [_]editor.delta.Change{
+        .{ .start = 0, .end = 1, .text = "한" },
+        .{ .start = 6, .end = 8, .text = "다" },
+    };
+    try testing.expect(applyEditAsOne(s, a, &changes));
+    try testing.expectEqualStrings("한a\nbb\n다\n", b.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 8), b.rt.editor_selection.?.anchor_start);
+    try testing.expectEqual(@as(usize, 3), b.rt.editor_selection.?.focus);
+    try testing.expectEqualStrings("다", b.rt.editor_lines[2]);
+    try testing.expectEqual(@as(usize, 6), a.rt.editor_selection.?.focus);
+}
+
+test "shared editor failed connection leaves panes document refs and existing coordinates intact" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var saw_failure = false;
+    var saw_success = false;
+    for (0..24) |failure| {
+        var fx = try SharedEditFixture.init();
+        defer fx.deinit();
+        const s = fx.base.session;
+        const a = fx.base.term;
+        const pane = pane_ops.activePane(s);
+        const before_len = pane.terms.items.len;
+        const before_active = pane.active_term;
+        const before_refs = s.editor_documents.viewCount(a.rt.editor_document_lease.?).?;
+        const before_selection = a.rt.editor_selection;
+        const revision = a.rt.editorDocument().opened.?.file.revision;
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        s.allocator = failing.allocator();
+        const result = openSharedViewInActivePane(s, a);
+        s.allocator = testing.allocator;
+        if (result) |created| {
+            saw_success = true;
+            try testing.expect(created.rt.editorDocument() == a.rt.editorDocument());
+            try testing.expectEqual(before_refs + 1, s.editor_documents.viewCount(a.rt.editor_document_lease.?).?);
+        } else |err| {
+            saw_failure = true;
+            try testing.expect(err == error.OutOfMemory);
+            try testing.expectEqual(before_refs, s.editor_documents.viewCount(a.rt.editor_document_lease.?).?);
+            try testing.expectEqual(before_len, pane.terms.items.len);
+            try testing.expectEqual(before_active, pane.active_term);
+            try testing.expectEqualDeep(before_selection, a.rt.editor_selection);
+            try testing.expectEqual(revision, a.rt.editorDocument().opened.?.file.revision);
+        }
+    }
+    try testing.expect(saw_failure);
+    try testing.expect(saw_success);
+}
+
+test "shared editor middle view removal keeps its siblings linked and excludes another document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    const pane = pane_ops.activePane(s);
+    const c = try openSharedViewInActivePane(s, a);
+    const path = a.rt.editorDocument().path.?;
+    const unrelated = try openPathInActivePane(s, path);
+    try testing.expect(unrelated.rt.editorDocument() != a.rt.editorDocument());
+    for (pane.terms.items, 0..) |term, index| if (term == b) {
+        term_ops.closeTermAt(s, s.app_window.active_tab, pane, index);
+        break;
+    };
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(s, a, "shared"));
+    try testing.expectEqualStrings("sharedaa\nbb\ncc\n", c.rt.editorDocument().opened.?.file.content);
+    // Ordinary open retains its existing policy; explicit shared handles alone establish this circle.
+    try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", unrelated.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 2), s.editor_documents.viewCount(a.rt.editor_document_lease.?).?);
+    try testing.expectEqualStrings("sharedaa", c.rt.editor_lines[0]);
+}
+
+test "shared editor peer deletion collapses overlapping cursors before subsequent typing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    a.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
+    b.rt.editor_selection = editor_selection.Selection.at(1);
+    b.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(2)});
+    try testing.expect(deleteText(s, a, true));
+    try testing.expectEqual(@as(usize, 0), b.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 0), b.rt.editor_selection.?.focus);
+    try testing.expect(insertText(s, b, "한"));
+    try testing.expectEqualStrings("한bb\ncc\n", a.rt.editorDocument().opened.?.file.content);
 }

@@ -80,14 +80,9 @@ flowchart LR
 않으며, 다시 표시할 때 최신 revision으로 캐시를 재구성한다. 프레임 안 텍스트와 좌표의 revision은 같아야 한다. 수정 가능한 버퍼를
 렌더 스레드가 무보호로 읽지 않도록 기존 스레딩 계약과 맞춘 읽기 수명/게시 방식을 정한다.
 버퍼 변경과 뷰 좌표의 준비 실패에서 부분 적용을 게시하지 않는 경계를 검증한다.
-Undo 기록 실패 정책은 2026-10-01 사용자 승인으로 정했다. 본문 변경 전에 역연산·선택 snapshot과
-Undo 스택 capacity를 준비하고, 준비 실패는 해당 편집을 적용하지 않는다. 기존 본문·선택·live 이력은
-유지한다. `pushUndo`의 append는 준비된 capacity에만 쓰며 게시 뒤에 할당하지 않는다. 이는 과거의
-「입력은 유지하고 기록만 버린다」 정책을 바꾼다. VS Code도 정상 경로에서는 편집 전에 항목을
-확보하지만, 같은 allocator 실패 복구를 보장한다고 해석하지 않는다.
-Undo/Redo도 반대 스택 capacity·선택 snapshot을 역연산 적용 전에 준비하고, 성공한 항목만
-스택에서 이동한다. 여러 항목의 기존 Undo 묶음은 순차 delta다. 중간 적용 실패 시 앞서 적용한
-delta는 유지하고 미적용 항목은 남겨 재시도한다. 묶음 전체 rollback 계약을 새로 추가하지 않는다.
+Undo 기록 할당 실패는 별도 정책이다. 현재 `editor/mod.zig`의 `pushUndo`는 편집을 유지하고 기록을
+버리므로, Undo까지 모두 준비해야 편집하는 방식으로 바꾸려면 기존 동작 변경 승인이 필요하다.
+2026-10-01 사용자는 **편집은 유지하고 Undo/Redo 이력은 초기화**하는 정책을 승인했다. 이력 기록 실패가 이전 entry의 낡은 offset으로 이어지지 않도록 양쪽 이력을 정리하고 실패 주입으로 판정한다.
 
 문서마다 편집·Undo·Redo·재로드의 writer 순서를 하나로 정한다. 요청은 기준 revision을 포함한다.
 두 뷰가 같은 revision에서 교체를 준비한 경우 먼저 적용된 변경 뒤의 두 번째 요청을 그대로
@@ -559,3 +554,61 @@ marker 처리 전체와 동일하다는 주장은 하지 않는다. 삭제 겹�
 
 세 검증에서 추가 제품 결함은 발견하지 않았다. 회귀 판정자를 전체 에디터 집계와 전용 gate에
 남긴다. 실제 공유 IME와 제품 split 화면 검증의 미완료 범위는 그대로다.
+
+
+## 명시적 공유 연결과 편집·Undo 게시 — 통합 전 구현 기록
+
+2026-10-01 `d02f4dec8` 기반 구현이다. `prepareSharedView`는 같은 창의 기존 일반 로컬 편집기
+lease를 retain하며 `openSharedViewInActivePane`가 기존 pane에 붙인다. 읽기·본문 복사·백업 복원은
+반복하지 않는다. 초기 primary/secondary 선택과 스크롤·wrap 값을 독립 소유로 복사한다.
+`shared.zig`는 stable Term의 연결을 빌려 문서별 circle을 관리하고 해제 전에 링크를 제거한다.
+편집 hot path는 다른 문서의 뷰를 순회하지 않는다. 같은 경로 문자열을 비교해 정본을 합치지 않는다.
+일반 경로 열기·MRU·alias/권한 정책과 cross-window 연결은 후속이며 기존 동작을 유지한다.
+
+삽입·삭제·여러 범위 교체·줄 조작과 Undo/Redo는 하나의 delta admission을 지난다. peer의 새 행 배열과
+매핑·병합된 선택 저장소, writer의 행 저장소를 문서 변경 전에 준비한다. 실패하면 문서 revision,
+peer 선택/스크롤과 연결 수는 유지한다. 성공하면 동일 정본의 revision을 한 번 올리고 각 peer를
+같은 delta로 갱신한다. inactive의 동일 위치 삽입은 기존 `delta.mapOffset`의 앞쪽 affinity를 따른다.
+역방향·word/line anchor kind를 보존하고 목표 열과 열 선택 제스처·자동 닫기/직접 IME 추적은
+재검증을 위해 정리한다. 삭제로 겹친 커서는 게시 전에 병합해 다음 입력을 중복 삽입하지 않는다.
+스크롤 top anchor를 매핑하고 가로 위치·wrap 이어진 조각을 보존하며 inactive caret을 따라가지 않는다.
+구문/접힘 파생 캐시는 기존 재구축 경로를 따른다. 독립 접힘 상태 유지·뷰별 검색은 다음 단계다.
+
+실제 편집을 한 뷰가 바뀌면 Undo 묶음을 새로 시작한다. 단순 포커스 setter에 Undo stop을 추가하지
+않는다. Undo 호출 뷰는 entry의 owned 선택 snapshot을 복원하고 다른 뷰는 delta로 좌표를 추종한다.
+원래 뷰가 닫혀도 다른 뷰의 본문과 이력은 유지된다. Undo 적용 전 준비가 실패하면 기존 entry를
+소비하지 않아 재시도할 수 있다. Undo/Redo 반대편 기록이 실패할 때도 성공한 본문 편집을 유지하고
+양쪽 이력을 초기화한다. 역연산 소유를 이력으로 넘기기 전에 render edit span을 계산한다.
+
+다른 뷰의 미확정 조합 또는 확정 재시도가 남아 있으면 이 단계의 writer는 변경 없이 거절한다.
+이는 공유 IME의 완료 정책이 아니다. 공유 조합 표시·OS focus/callback owner·LSP/provider 통지·
+저장/마지막 dirty 닫기·외부 변경·복원은 단계 3~5에서 닫는다. ABI·단축키·제품 분할 UI는 추가하지
+않았으며 원격/이름 없는/비교/병합 및 다른 창의 공유 연결을 허용하지 않는다.
+
+`zig build test-editor-shared`는 두 실제 pane의 Term으로 입력/삭제/동시 교체·좌표·Undo/Redo,
+원래/중간 뷰 종료, 연결과 편집 할당 실패, stale revision과 peer 조합 보존을 판정한다.
+기본 `test-editor` 및 전체 검사에도 포함된다. OS HID/GUI나 사용자 split 기능 완료로 해석하지 않는다.
+
+최종 검증: Debug/ReleaseFast의 `test-editor-shared`는 각각 14/14(공유 회귀 10개와 import
+sentinel 4개), `test-editor test-editor-document-runtime`, `macos-app-build macos-app-host-swift-check`,
+전체 `mise run -j 2 -c check`가 통과했다. 새 앱의 기존 native editor IME callback fixture(mode 0)는
+`failure_count=0`이다. 권한 등록된 staged 앱은 교체하지 않았으며 이 결과는 공유 OS HID/GUI
+증거가 아니다.
+
+## main 공유 게시 구현과 통합
+
+`87064232a`의 기존 `platform/macos/app_session/editor/shared_edit.zig` coordinator 하나를
+사용한다. 별도의 `shared.zig` circle/coordinator와 pending rows는 남기지 않는다. 명시적 연결은
+registry lease와 현재 AppSession의 Term 소속을 검증하고 retain한다. 현재 창의 연결 뷰는 기존
+coordinator가 pane/Term 목록에서 찾으며 준비한 원본 selection snapshot으로 적용 실패를 복구한다.
+writer의 secondary 저장소와 모든 연결 뷰의 줄 배열은 변경 전에 준비한다. source/peer 게시의
+기존 main 경계를 유지하며 다른 창의 미등록 뷰는 `SharedViewCountMismatch`로 거절한다.
+
+비활성 삽입 affinity와 자동 닫기 표식은 main의 L2 `session/editor/shared_edit.zig` 규칙을 유지한다.
+같은 위치의 접힌 caret는 삽입 뒤, 범위 시작은 앞/끝은 뒤다. 앞선 통합 전 기록의 동일 위치 삽입
+앞쪽 affinity가 현재 계약이라는 의미는 아니다. peer의 wrap 조각은 scroll anchor 복원 후 유지한다.
+Undo 기록 capacity는 본문 변경 이후 확보하여 이 대화에서 승인된 편집 유지·양쪽 이력 초기화를
+따른다. main의 과거 준비 실패 미게시 판정은 일반 게시 저장소 준비 실패로 구분하고, 묶음 Undo
+할당 실패 판정은 이미 적용된 delta와 이력 초기화도 허용된 결과로 검증한다. 기존 SHVIEW1~14와
+명시적 두 pane 연결 회귀를 함께 유지한다. provider/backup 통지는 아직 기존 뷰별 경로이므로
+문서마다 한 번 통지한다고 주장하지 않는다. 사용자 분할 UI와 실제 공유 OS 입력 검증은 남았다.

@@ -1,5 +1,5 @@
 //! 문서 Undo/Redo의 소유 자원. 입력·시계·뷰 선택은 platform이 정산한다.
-//! 단일 뷰 이관의 첫 단계이며 공유 registry나 뷰 연결은 아직 제공하지 않는다.
+//! 문서가 이력을 공유하며 entry는 원래 뷰의 선택 snapshot을 독립 소유한다. 뷰 연결은 platform coordinator가 소유한다.
 const std = @import("std");
 const delta = @import("delta.zig");
 const selection = @import("selection.zig");
@@ -12,6 +12,7 @@ pub const Entry = struct {
     primary_before: usize,
     /// 묶음 번호. **같은 번호는 한 번의 undo로 함께 돌아간다.**
     group: u32,
+    view_id: u64 = 0,
 
     pub fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         self.inverse.deinit();

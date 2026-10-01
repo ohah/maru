@@ -3835,3 +3835,13 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
 - **제품 증거:** signed/notarized A와 B, clean/explicit/malformed config matrix, 2 Window+3 Workspace, PID·runtime·input/output/
   copy/resize, tombstone relaunch, Quit 취소, Notification cold/live click을 같은 test UUID의 구조화 artifact로 묶는다. 결과가
   없거나 manifest/summary가 한 필드라도 다르면 B publish를 실패시킨다. G3 source merge는 출하 완료 증거가 아니다.
+
+## 공유 네이티브 편집 문서 — 내부 편집 게시
+
+`zig build test-editor-shared`(Debug/ReleaseFast)의 실제 두 pane fixture는 기존 registry lease의
+동일 정본과 독립 뷰 선택/스크롤, 삽입·삭제·동시 범위 교체·Undo/Redo, 원래/중간 뷰 닫기를 검증한다.
+연결·peer 좌표/행 준비 실패의 문서/뷰 보존, 이력 OOM 시 편집 유지·Undo/Redo 초기화,
+stale revision 거절과 다른 뷰의 미확정 IME 보존도 판정한다. 이력 초기화 정책은 2026-10-01
+사용자 승인이다. [공유 문서 계획](plans/editor-shared-document.md)이 지원 범위와 나머지 gate를 소유한다.
+이 행은 내부 로컬·단일 창 편집 경로다. 경로 정본 통합·원격/untitled/diff/merge·공유 IME·provider·
+저장/외부 변경/복원·사용자 분할 명령·실제 HID/화면은 아직 종료 gate가 남았다.

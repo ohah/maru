@@ -943,3 +943,9 @@ import sentinel 4개를 실행한다. 단일 뷰의 등록 준비 실패와 창/
 재검증한다. 전체 `test-editor`에도 포함한다. 공유 연결은 내부 fixture이며 사용자용 split 명령이나
 OS 한국어 IME 화면 검증을 의미하지 않는다. 범위와 남은 작업은
 [공유 문서 계획](plans/editor-shared-document.md)을 참조한다.
+
+
+`mise exec -- zig build test-editor-shared`는 같은 창의 실제 두 pane에서 내부 공유 연결,
+편집/Undo/Redo 게시·독립 선택/스크롤·원래 뷰 닫기와 할당 실패를 검증한다.
+`-Doptimize=ReleaseFast`로도 실행한다. 전체 `test-editor`와 `check`에도 포함되며
+공유 IME·LSP·저장·사용자 split UI 완료 또는 실제 OS 입력 증거를 대신하지 않는다.

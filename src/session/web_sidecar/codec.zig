@@ -157,6 +157,12 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeBrowser(&cursor, value.browser);
             try writeRect(&cursor, value.bounds);
         },
+        .popup_changed => |value| {
+            if (!value.visible and !std.meta.eql(value.bounds, message_mod.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 })) return error.InvalidPopup;
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromBool(value.visible));
+            try writeRect(&cursor, value.bounds);
+        },
         .dialog_reply => |value| {
             try writeRequest(&cursor, value.browser, value.request);
             try cursor.writeByte(@intFromBool(value.accept));
@@ -349,6 +355,11 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             .cursor = std.enums.fromInt(WebCursor, try cursor.readByte()) orelse return error.UnknownCursor,
         } },
         .ime_range => .{ .ime_range = .{ .browser = try readBrowser(&cursor), .bounds = try readRect(&cursor) } },
+        .popup_changed => blk: {
+            const value: message_mod.PopupChanged = .{ .browser = try readBrowser(&cursor), .visible = try readBool(&cursor), .bounds = try readRect(&cursor) };
+            if (!value.visible and !std.meta.eql(value.bounds, message_mod.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 })) return error.InvalidPopup;
+            break :blk .{ .popup_changed = value };
+        },
         .dialog_reply => blk: {
             const request = try readRequest(&cursor);
             break :blk .{ .dialog_reply = .{
@@ -493,7 +504,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  2,  0, // v2, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  3,  0, // v3, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -810,6 +821,22 @@ test "input messages round trip" {
     try std.testing.expectEqual(range, (try roundTrip(.{ .ime_range = range })).ime_range);
 }
 
+test "popup_changed round-trips, flows to maru, and a hidden popup must carry an all-zero rect" {
+    const shown: message_mod.PopupChanged = .{ .browser = 7, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 } };
+    try std.testing.expectEqual(shown, (try roundTrip(.{ .popup_changed = shown })).popup_changed);
+    const hidden: message_mod.PopupChanged = .{ .browser = 7, .visible = false };
+    try std.testing.expectEqual(hidden, (try roundTrip(.{ .popup_changed = hidden })).popup_changed);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.popup_changed.direction());
+
+    // 닫힌 팝업에 사각형이 실리면 보내지도 받지도 않는다(닫힌 필드).
+    var buf: [128]u8 = undefined;
+    try std.testing.expectError(error.InvalidPopup, encode(.{ .popup_changed = .{ .browser = 7, .visible = false, .bounds = .{ .x = 0, .y = 0, .width = 1, .height = 0 } } }, &buf));
+    const len = try encode(.{ .popup_changed = shown }, &buf);
+    // 보임 바이트(브라우저 8 바이트 뒤)를 0 으로 — 사각형은 그대로인 닫힌 팝업이 된다.
+    buf[prefix_len + common_len + 8] = 0;
+    try std.testing.expectError(error.InvalidPopup, decodeExact(buf[0..len]));
+}
+
 test "input directions: commands go to the sidecar, cursor and ime range come back" {
     inline for (.{ Tag.mouse, Tag.wheel, Tag.key, Tag.ime_set_composition, Tag.ime_commit_text, Tag.ime_finish_composing, Tag.ime_cancel_composition, Tag.edit_command, Tag.capture_lost }) |tag|
         try std.testing.expectEqual(message_mod.Direction.to_sidecar, tag.direction());
@@ -921,6 +948,9 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         // W5b2 위치.
         .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "", .kinds = 0x100, .remembered = true } },
         .{ .geolocation = .{ .browser = 3, .request = 2, .available = true, .latitude = 37.5, .longitude = 127, .accuracy = 30 } },
+        // W6a 팝업.
+        .{ .popup_changed = .{ .browser = 3, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 } } },
+        .{ .popup_changed = .{ .browser = 3, .visible = false } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;

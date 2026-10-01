@@ -87,7 +87,24 @@ pub const Counters = struct {
     }
 };
 
+pub const AppCapture = struct {
+    window_id: u32,
+    capture_basename: []const u8,
+    sha256: []const u8,
+    width: u32,
+    height: u32,
+    hanja_rows: u32,
+
+    fn valid(self: AppCapture) bool {
+        if (self.width < 32 or self.width > 2048 or self.height < 64 or self.height > 2048 or self.hanja_rows < 3 or self.hanja_rows > 32 or self.sha256.len != 64) return false;
+        for (self.sha256) |c| if (!std.ascii.isHex(c)) return false;
+        if (!std.mem.startsWith(u8, self.capture_basename, "candidate-") or !std.mem.endsWith(u8, self.capture_basename, ".png")) return false;
+        return self.capture_basename.len < 96 and std.mem.indexOfScalar(u8, self.capture_basename, '/') == null and std.mem.indexOf(u8, self.capture_basename, "..") == null;
+    }
+};
+
 pub const Triplet = struct {
+    app_captures: []const AppCapture = &.{},
     before: []const Window,
     opened: []const Window,
     closed: []const Window,
@@ -97,6 +114,7 @@ pub const Triplet = struct {
 };
 
 pub const Candidate = struct {
+    app_capture: ?AppCapture = null,
     window_id: u32,
     owner: OwnerIdentity,
     layer: i32,
@@ -131,16 +149,22 @@ pub fn reduceTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
 
     var selected: ?Window = null;
     for (triplet.opened) |window| {
-        if (!window.on_screen or !window.bounds.valid() or window.owner.pid == app_pid or
+        if (!window.on_screen or !window.bounds.valid() or (window.owner.pid == app_pid and triplet.app_captures.len == 0) or
             containsId(triplet.before, window.id)) continue;
         if (selected != null) return error.CandidateAmbiguous;
         selected = window;
     }
     const candidate = selected orelse return error.CandidateMissing;
-    if (!candidate.owner.valid()) return error.CandidateOwnerInvalid;
+    var app_capture: ?AppCapture = null;
+    if (candidate.owner.pid == app_pid) {
+        if (candidate.layer != 20 or !std.mem.eql(u8, candidate.owner.bundle_id, "dev.maru.apphost") or !std.mem.eql(u8, candidate.owner.signing_id, "dev.maru.apphost") or triplet.app_captures.len != 1) return error.CandidateOwnerInvalid;
+        const proof = triplet.app_captures[0];
+        if (proof.window_id != candidate.id or !proof.valid()) return error.CandidateOwnerInvalid;
+        app_capture = proof;
+    } else if (!candidate.owner.valid() or triplet.app_captures.len != 0) return error.CandidateOwnerInvalid;
     if (findById(triplet.closed, candidate.id) != null) return error.CandidateNotClosed;
     for (triplet.closed) |window| {
-        if (!window.on_screen or !window.bounds.valid() or window.owner.pid == app_pid or
+        if (!window.on_screen or !window.bounds.valid() or (window.owner.pid == app_pid and triplet.app_captures.len == 0) or
             containsId(triplet.before, window.id)) continue;
         return error.CandidateNotClosed;
     }
@@ -149,6 +173,7 @@ pub fn reduceTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
     if (!Counters.eql(triplet.before_counters, triplet.opened_counters) or
         !Counters.eql(triplet.before_counters, triplet.closed_counters)) return error.CounterMutation;
     return .{
+        .app_capture = app_capture,
         .window_id = candidate.id,
         .owner = candidate.owner,
         .layer = candidate.layer,
@@ -162,9 +187,9 @@ pub fn validateSeries(candidates: []const Candidate) Error!Candidate {
     if (candidates.len != required_observations) return error.CandidateMissing;
     const first = candidates[0];
     for (candidates, 0..) |candidate, index| {
-        if (candidate.window_id == 0 or !candidate.owner.valid()) return error.CandidateOwnerInvalid;
+        if (candidate.window_id == 0 or (!candidate.owner.valid() and candidate.app_capture == null)) return error.CandidateOwnerInvalid;
         if (!candidate.bounds.valid()) return error.CandidateGeometryDrift;
-        if (!OwnerIdentity.eql(first.owner, candidate.owner)) return error.CandidateIdentityDrift;
+        if ((first.app_capture == null) != (candidate.app_capture == null) or !OwnerIdentity.eql(first.owner, candidate.owner)) return error.CandidateIdentityDrift;
         if (candidate.layer != first.layer or !std.meta.eql(candidate.bounds, first.bounds))
             return error.CandidateGeometryDrift;
         for (candidates[0..index]) |prior| if (prior.window_id == candidate.window_id)
@@ -234,6 +259,7 @@ fn findById(windows: []const Window, id: u32) ?Window {
 }
 
 const RawSnapshot = struct {
+    app_captures: []const AppCapture = &.{},
     windows: []const Window,
     counters: Counters,
     anchor_appkit: Rect,
@@ -254,6 +280,7 @@ const RawTranscript = struct {
 };
 
 const ArtifactRow = struct {
+    app_capture: ?AppCapture = null,
     window_id: u32,
     owner_pid: i32,
     bundle_id: []const u8,
@@ -299,7 +326,9 @@ pub fn publishObservation(
     var rows: [required_observations]ArtifactRow = undefined;
     var series_anchor: ?ConvertedRect = null;
     for (raw.rows, 0..) |row, index| {
+        if (row.before.app_captures.len != 0 or row.closed.app_captures.len != 0) return error.InvalidTranscript;
         const candidate = reduceTriplet(raw.app_pid, .{
+            .app_captures = row.opened.app_captures,
             .before = row.before.windows,
             .opened = row.opened.windows,
             .closed = row.closed.windows,
@@ -316,6 +345,7 @@ pub fn publishObservation(
             }
             return err;
         };
+        if (candidate.app_capture != null and !std.mem.eql(u8, raw.source_id, "com.apple.inputmethod.Korean.2SetKorean")) return error.InvalidTranscript;
         candidates[index] = candidate;
         const before_anchor = try appKitToQuartz(row.before.anchor_appkit, row.before.displays);
         const opened_anchor = try appKitToQuartz(row.opened.anchor_appkit, row.opened.displays);
@@ -326,6 +356,7 @@ pub fn publishObservation(
             if (!std.meta.eql(prior, before_anchor)) return error.AnchorDrift;
         } else series_anchor = before_anchor;
         rows[index] = .{
+            .app_capture = candidate.app_capture,
             .window_id = candidate.window_id,
             .owner_pid = candidate.owner.pid,
             .bundle_id = candidate.owner.bundle_id,
@@ -343,7 +374,7 @@ pub fn publishObservation(
     var output: std.Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
     var json: std.json.Stringify = .{ .writer = &output.writer, .options = .{} };
-    try json.write(Artifact{ .source_id = raw.source_id, .rows = &rows });
+    try json.write(Artifact{ .schema = if (candidates[0].app_capture != null) "maru.session-host-cr6d-ime-candidate-observation.v2" else "maru.session-host-cr6d-ime-candidate-observation.v1", .source_id = raw.source_id, .rows = &rows });
     try output.writer.writeByte('\n');
     if (output.written().len > max_artifact_bytes) return error.ArtifactTooLarge;
 
@@ -588,6 +619,29 @@ test "v2b0b publisher reduces five complete triplets and refuses overwrite" {
     var drift_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const drift_path = try std.fmt.bufPrintZ(&drift_path_buf, "{s}/drift.json", .{root_buf[0..root_len]});
     try testing.expectError(error.AnchorDrift, publishObservation(testing.allocator, drifted.written(), drift_path));
+
+    // Exercise the published app-hosted schema as well as the pure reducer. A capture cannot
+    // turn an existing external schema into an implicit app-owned approval.
+    raw_rows[4].opened.anchor_appkit.x -= 1;
+    var proofs: [required_observations]AppCapture = undefined;
+    var names: [required_observations][64]u8 = undefined;
+    for (&raw_rows, 0..) |*row, index| {
+        candidate_windows[index][1].owner = .{ .pid = 999, .bundle_id = "dev.maru.apphost", .signing_id = "dev.maru.apphost", .apple_signed = false };
+        candidate_windows[index][1].layer = 20;
+        proofs[index] = .{ .window_id = @intCast(100 + index), .capture_basename = try std.fmt.bufPrint(&names[index], "candidate-{d}-{d}.png", .{ index, 100 + index }), .sha256 = "a" ** 64, .width = 204, .height = 590, .hanja_rows = 6 };
+        row.opened.app_captures = proofs[index .. index + 1];
+    }
+    var hosted: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer hosted.deinit();
+    var hosted_json: std.json.Stringify = .{ .writer = &hosted.writer, .options = .{} };
+    try hosted_json.write(RawTranscript{ .schema = "maru.session-host-cr6d-ime-candidate-transcript.v1", .app_pid = 999, .source_id = "com.apple.inputmethod.Korean.2SetKorean", .rows = &raw_rows });
+    var hosted_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const hosted_path = try std.fmt.bufPrintZ(&hosted_path_buf, "{s}/hosted.json", .{root_buf[0..root_len]});
+    try publishObservation(testing.allocator, hosted.written(), hosted_path);
+    const hosted_artifact = try tmp.dir.readFileAlloc(testing.io, "hosted.json", testing.allocator, .limited(max_artifact_bytes));
+    defer testing.allocator.free(hosted_artifact);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hosted_artifact, "maru.session-host-cr6d-ime-candidate-observation.v2"));
+    try testing.expectEqual(required_observations, std.mem.count(u8, hosted_artifact, "\"sha256\""));
 }
 
 test "v2b0b publisher rejects unknown schema and transcript cap before publication" {
@@ -609,4 +663,36 @@ test "v2b0b publisher rejects unknown schema and transcript cap before publicati
         publishObservation(std.testing.allocator, too_large, path),
     );
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "absent.json", .{}));
+}
+
+test "v2b0 app hosted path requires bound capture and rejects unrelated popup ambiguity" {
+    var own = candidate_fixture;
+    own.owner = .{ .pid = 999, .bundle_id = "dev.maru.apphost", .signing_id = "dev.maru.apphost", .apple_signed = false };
+    own.layer = 20;
+    var proof: AppCapture = .{ .window_id = own.id, .capture_basename = "candidate-0-100.png", .sha256 = "a" ** 64, .width = 204, .height = 590, .hanja_rows = 6 };
+    var t = validTriplet();
+    t.opened = &.{ stable, own };
+    try std.testing.expectError(error.CandidateMissing, reduceTriplet(999, t));
+    t.app_captures = (&proof)[0..1];
+    const got = try reduceTriplet(999, t);
+    try std.testing.expect(got.app_capture != null);
+    proof.window_id += 1;
+    try std.testing.expectError(error.CandidateOwnerInvalid, reduceTriplet(999, t));
+    proof.window_id = own.id;
+    proof.hanja_rows = 1;
+    try std.testing.expectError(error.CandidateOwnerInvalid, reduceTriplet(999, t));
+    proof.hanja_rows = 6;
+    proof.capture_basename = "../candidate.png";
+    try std.testing.expectError(error.CandidateOwnerInvalid, reduceTriplet(999, t));
+    proof.capture_basename = "candidate-0-100.png";
+    var extra = own;
+    extra.id += 1;
+    t.opened = &.{ stable, own, extra };
+    try std.testing.expectError(error.CandidateAmbiguous, reduceTriplet(999, t));
+    t.opened = &.{ stable, own };
+    t.closed = &.{ stable, own };
+    try std.testing.expectError(error.CandidateNotClosed, reduceTriplet(999, t));
+    t.closed = &.{stable};
+    t.closed_counters.pty_input_bytes += 1;
+    try std.testing.expectError(error.CounterMutation, reduceTriplet(999, t));
 }

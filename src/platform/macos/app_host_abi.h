@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 189u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 190u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1055,6 +1055,31 @@ int32_t maru_macos_app_session_ime_editor_substring(
     uint8_t *out_bytes,
     size_t cap,
     size_t *out_len
+);
+/* Editor ranges use document UTF-16 offsets; UINT64_MAX means no explicit replacement.
+   Terminal/chrome targets retain the original transaction semantics. (v190) */
+int32_t maru_macos_app_session_ime_insert_with_range(
+    MaruAppHostSession *session, const uint8_t *bytes, size_t len,
+    uint64_t replacement_location, uint64_t replacement_length
+);
+int32_t maru_macos_app_session_ime_marked_with_ranges(
+    MaruAppHostSession *session, const uint8_t *bytes, size_t len,
+    uint64_t selected_location, uint64_t selected_length,
+    uint64_t replacement_location, uint64_t replacement_length
+);
+/* 1 = editor context (including no selection), 0 = terminal/chrome. Missing ranges use
+   UINT64_MAX. Selected range inside marked text is projected into document coordinates. */
+int32_t maru_macos_app_session_editor_ime_state(
+    MaruAppHostSession *session,
+    uint64_t *out_selected_location, uint64_t *out_selected_length,
+    uint64_t *out_marked_location, uint64_t *out_marked_length
+);
+/* 1 = available virtual document substring, 0 = unavailable. A null bytes/capacity=0 query
+   reports the required UTF-8 byte count. actual_* are the returned UTF-16 range. */
+int32_t maru_macos_app_session_editor_ime_substring(
+    MaruAppHostSession *session, uint64_t location, uint64_t length,
+    uint8_t *bytes, size_t capacity, size_t *written,
+    uint64_t *actual_location, uint64_t *actual_length
 );
 int32_t maru_macos_app_session_ime_end(
     MaruAppHostSession *session,

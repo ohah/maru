@@ -281,7 +281,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 189;
+pub const abi_version: u32 = 190;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2409,6 +2409,10 @@ const TermRuntime = struct {
     /// (창이 작아져도 재할당하지 않는다) 유효 구간을 이 값이 정한다. `0`이면 클릭을 받지 않는다 —
     /// 아직 안 그렸거나 저장소를 못 잡은 프레임이다.
     editor_hit_rows_len: usize = 0,
+    /// Composition bytes/range used by the painted hit rows; zero denotes canonical rows.
+    editor_hit_preedit_stamp: u64 = 0,
+    editor_hit_preedit_first: usize = 0,
+    editor_hit_capacity_rows: u16 = 0,
     /// **마지막으로 그린 화면의 문서 줄 수**. `editor_hit_rows_len` 과 달리 **편집이 비우지 않는다**.
     ///
     /// 왜 따로 드는가: 편집은 렌더 스냅숏을 비우고(`refreshAfterEdit`), 그러면 `drawnDocLines` 가 0 을
@@ -2470,6 +2474,15 @@ const TermRuntime = struct {
     editor_preedit: []u8 = &.{},
     /// 조합이 시작된 **문서 offset**. 확정 텍스트가 갈 자리이자 조합 글자를 끼울 자리다.
     editor_preedit_at: usize = 0,
+    /// Canonical bytes covered by the marked text. AppKit ranges are UTF-16; conversion happens at the input boundary.
+    editor_preedit_end: usize = 0,
+    editor_preedit_selected: maru.session.editor.text_input.Utf16Range = .{ .location = 0, .length = 0 },
+    /// A commit waits for imeEnd (last-jamo Backspace can still cancel it). Keep its range until then.
+    editor_ime_replacement: ?maru.session.editor.text_input.ByteRange = null,
+    /// Selection in the projected document. It may sit outside this key's queued replacement.
+    editor_ime_commit_selection: ?maru.session.editor.text_input.ByteRange = null,
+    /// The input source may revise a committed syllable without ever publishing marked text.
+    editor_ime_direct: editor_ops.DirectIMEState = .{},
     /// **자동으로 넣은 닫는 문자**가 서 있는 offset(§3.7). Backspace가 그것만 함께 지운다.
     ///
     /// **사용자가 직접 친 것은 안 지운다** — 그러려면 "자동 삽입된 것"을 표시해 둬야 하고,
@@ -7730,6 +7743,13 @@ pub const AppSession = struct {
     // 실제 발생했던 클래스). 판정 로직이 Zig에 있어 전부 unit으로 고정된다.
     ime_active: bool = false,
     ime_inserted: std.ArrayList(u8) = .empty,
+    /// An editor rejected this key's already-owned commit. Keep its bytes, range and target until
+    /// retry succeeds; a later key must not clear them or apply them to a different document.
+    ime_editor_commit_pending: bool = false,
+    /// A menu/LSP/undo edit invalidates retained byte ranges even when the same Term remains alive.
+    ime_editor_commit_revision: u64 = 0,
+    /// Return/arrow belonged to the retained commit too; replay it once after successful admission.
+    ime_editor_commit_replay: ?terminal.KeyEvent = null,
     // 터미널 marked text가 시작된 surface. 조합 중 pane/tab이 바뀌어도 preedit clear와
     // 확정 바이트를 새 active가 아니라 원래 surface로 보내기 위한 client-local pin이다.
     ime_terminal_target_id: ?u64 = null,
@@ -15908,22 +15928,16 @@ pub const AppSession = struct {
     }
 
     fn commitTerminalCompositionWithFlush(self: *AppSession, flush: bool) bool {
+        if (!input_ops.retryEditorCommit(self)) return false;
         // **편집기 조합은 코어에 없다**(N3). 아래는 sentinel 코어의 preedit를 읽는데 편집기는 늘
         // 비어 있어 *"확정할 것이 없다"*고 답하고 고정만 푼다 — 그러면 화면에 그려지던 조합 글자가
         // **영영 남는다**(적대적 검증 2026-08-27). 포커스를 잃으면 확정한다: Terminal.app·Ghostty
         // 의미론이고, 이 파일의 `setFocused`가 이미 그것을 소유한다고 적어 두었다.
         if (self.ime_terminal_target_id) |target_id| {
             if (input_ops.editorTermForIme(self, target_id)) |editor_term| {
-                const bytes = editor_term.rt.editor_preedit;
-                if (bytes.len > 0) {
-                    // 조합을 시작한 자리에 넣는다 — 확정 텍스트가 따르는 그 규칙 그대로다.
-                    if (editor_term.rt.editor_selection) |sel| {
-                        if (sel.start() != editor_term.rt.editor_preedit_at)
-                            editor_term.rt.editor_selection = maru.session.editor.selection.Selection.at(editor_term.rt.editor_preedit_at);
-                    }
-                    _ = editor_ops.insertText(self, editor_term, bytes);
-                }
-                editor_ops.setEditorPreedit(self, editor_term, "");
+                // 일반 확정과 같은 편집 owner 가 조합 범위와 나머지 커서를 함께 적용한다.
+                // 실패한 확정은 조합과 pin 을 보존해 다음 포커스 콜백에서 다시 시도한다.
+                if (!editor_ops.commitEditorPreedit(self, editor_term)) return false;
                 self.ime_terminal_target_id = null;
                 self.metal_dirty = true;
                 return true;
@@ -50768,6 +50782,72 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     try std.testing.expectEqualStrings("a다😀b다\n", term.rt.editorDocument().opened.?.file.content);
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(input_ops.editorImeRanges(session) == null);
+}
+
+test "IME_MULTI2 포커스를 잃어 확정해도 모든 선택을 대체하고 커서와 undo 를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "ime-multi.txt", .data = "aa bb aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "ime-multi.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+    const Selection = maru.session.editor.selection.Selection;
+    const primary = Selection.fromAnchorRange(0, 2, 2, .word);
+    const extra = Selection.fromAnchorRange(6, 8, 8, .word);
+    term.rt.editor_selection = primary;
+    term.rt.editor_extra_selections = try allocator.dupe(Selection, &.{extra});
+
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "한");
+    input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("aa bb aa\n", term.rt.editorDocument().opened.?.file.content);
+    session.setFocused(false);
+
+    try std.testing.expectEqualStrings("한 bb 한\n", term.rt.editorDocument().opened.?.file.content);
+    try std.testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try std.testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus);
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    // 중복 blur 는 다시 확정하지 않는다.
+    session.setFocused(false);
+    try std.testing.expectEqualStrings("한 bb 한\n", term.rt.editorDocument().opened.?.file.content);
+    try std.testing.expect(editor_ops.undoEdit(session, term));
+    try std.testing.expectEqualStrings("aa bb aa\n", term.rt.editorDocument().opened.?.file.content);
+    try std.testing.expectEqualDeep(primary, term.rt.editor_selection.?);
+    try std.testing.expectEqualDeep(extra, term.rt.editor_extra_selections[0]);
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+
+    // 확정이 거절되면 조합과 pin, 두 선택을 버리지 않는다. 다시 가능해지면 정확히 한 번 확정한다.
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "글");
+    input_ops.imeEnd(session, null);
+    term.rt.editorDocument().opened.?.file.read_only = true;
+    session.setFocused(false);
+    try std.testing.expectEqualStrings("aa bb aa\n", term.rt.editorDocument().opened.?.file.content);
+    try std.testing.expectEqualStrings("글", term.rt.editor_preedit);
+    try std.testing.expectEqual(@as(?u64, term.surface.id), session.ime_terminal_target_id);
+    try std.testing.expectEqualDeep(primary, term.rt.editor_selection.?);
+    try std.testing.expectEqualDeep(extra, term.rt.editor_extra_selections[0]);
+    term.rt.editorDocument().opened.?.file.read_only = false;
+    session.setFocused(false);
+    try std.testing.expectEqualStrings("글 bb 글\n", term.rt.editorDocument().opened.?.file.content);
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    try std.testing.expectEqual(@as(?u64, null), session.ime_terminal_target_id);
 }
 
 test "EF10 모달이 강조를 멎게 해도 ⌘G는 이어진다 — `find_nav`를 내리는 대가의 크기" {

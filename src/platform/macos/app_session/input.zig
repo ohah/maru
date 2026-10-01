@@ -435,6 +435,13 @@ pub fn imeBegin(self: *AppSession) void {
     if (!self.surface_initialized) return;
     // 입력 대상 고정과 스크롤 준비도 지난 비교 상자를 참조하면 안 된다.
     find_ops.syncDiffFind(self);
+    if (!retryEditorCommit(self)) {
+        // The old key still owns this buffer. Consume this new key without overwriting its bytes,
+        // replacement, next marked text or target; a subsequent key/focus callback can retry again.
+        self.ime_active = true;
+        self.ime_insert_failed = true;
+        return;
+    }
     // missing pin에서도 transaction은 반드시 열린 뒤 imeEnd에서 닫혀야 한다. 예전 조기 반환은
     // ime_active=false를 남겨 imeMarked 변화가 기록되지 않았고, imeEnd가 다음 active terminal로
     // 물리 키를 encode/replay했다.
@@ -488,6 +495,7 @@ pub fn imeBegin(self: *AppSession) void {
 /// 커밋 — 포커스 전환 등)이면 그대로 확정 전송한다.
 pub fn imeInsert(self: *AppSession, bytes: []const u8) void {
     if (!self.surface_initialized) return;
+    if (self.ime_editor_commit_pending) return;
     if (!self.ime_active) {
         // 트랜잭션 밖 직접 커밋(입력기가 keyDown 없이 직접 — 포커스 전환 등 windowLostKey와 같은
         // AppKit 동기 콜백 클래스)도 현재 입력 대상으로 라우팅한다(#10 후속) — 터미널이면 non-blocking
@@ -504,6 +512,7 @@ pub fn imeInsert(self: *AppSession, bytes: []const u8) void {
 /// find/palette 열림이면 그 입력에, 아니면 터미널 core. 조합 상태가 그 자리에 즉시 보이고 뒤로 새지 않는다.
 pub fn imeMarked(self: *AppSession, bytes: []const u8) void {
     if (!self.surface_initialized) return;
+    if (self.ime_editor_commit_pending) return;
     imeSetPreedit(self, bytes);
     self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
     if (self.ime_active) {
@@ -540,8 +549,17 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
     }
     const composing = imeComposingActive(self) or self.ime_had_marked; // 단일 출처(find/palette도) — core만 보던 누락 수정
     defer {
+        if (!self.ime_editor_commit_pending) {
+            if (self.ime_terminal_target_id) |target_id| {
+                if (editorTermBySurfaceId(self, target_id)) |term| {
+                    term.rt.editor_ime_replacement = null;
+                    term.rt.editor_ime_commit_selection = null;
+                }
+            }
+            self.ime_inserted.clearRetainingCapacity();
+            self.ime_editor_commit_replay = null;
+        }
         self.ime_active = false;
-        self.ime_inserted.clearRetainingCapacity();
         self.ime_marked_changed = false;
         self.ime_did_delete = false;
         self.ime_insert_failed = false;
@@ -554,15 +572,33 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
                 defer surface.unlockCore(self.io);
                 break :active surface.preeditActiveLocked();
             } else false;
-            if (!still_composing) self.ime_terminal_target_id = null;
+            if (!still_composing and !self.ime_editor_commit_pending) self.ime_terminal_target_id = null;
         }
     }
+    if (self.ime_editor_commit_pending) return;
     // 사라진 pinned target의 AppKit transaction은 소비하되 어떤 payload/key도 현재 active로
     // 재지정하지 않는다. defer가 tombstone pin과 transaction state를 함께 정리한다.
     if (self.ime_terminal_target_tombstoned) return;
     // OOM으로 누적이 잘렸으면 통째로 버린다 — 반쪽 문자열을 PTY에 보내지 않는다(#14).
     if (self.ime_insert_failed) return;
-    switch (imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed, self.ime_did_delete)) {
+    var decision = imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed, self.ime_did_delete);
+    if (decision == .ignore) {
+        if (self.ime_terminal_target_id) |target_id| {
+            if (editorTermBySurfaceId(self, target_id)) |term| {
+                if (term.rt.editor_ime_replacement) |replacement| {
+                    // The Korean source can replace an already committed jamo, then delete it in
+                    // this same key. Cancelling its bytes still leaves a canonical range to delete.
+                    // A zero-byte retry owns that same edit; ordinary marked insertion replaces no canonical bytes.
+                    const cancelled_text = self.ime_did_delete and
+                        imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed, false) == .commit_text;
+                    if (replacement.start != replacement.end and (self.ime_inserted.items.len == 0 or cancelled_text)) {
+                        decision = .{ .commit_text = self.ime_inserted.items[0..0] };
+                    }
+                }
+            }
+        }
+    }
+    switch (decision) {
         .commit_text => |text| {
             // #10 후속: 확정 텍스트를 현재 입력 대상으로 라우팅한다 — imeEnd는 keyDown(interpretKeyEvents
             // 직후) 동기 콜백이라, 터미널 PTY로 blocking enqueue하면 write_queue 포화 시 tick을 멈춰
@@ -576,7 +612,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
                     (if (self.app_window.active()) |surface| surface.id else null)
                 else
                     null;
-            const replay_event: ?terminal.KeyEvent = if (event) |ev|
+            const replay_event: ?terminal.KeyEvent = self.ime_editor_commit_replay orelse if (event) |ev|
                 // 팔레트의 Enter는 명령 실행이다. 한글 조합을 확정한 바로 그 Enter를 다시 보내면
                 // 검색어가 보일 틈도 없이 선택된 명령이 실행되고 팝업이 닫힌다.
                 if (composing and ev.key == .enter and self.inputFocus() == .palette)
@@ -591,17 +627,38 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
                 capturePreeditCommitBase(self, target_id)
             else
                 null;
-            // An editor uses the same pinned surface identity as a terminal, but its
-            // committed text belongs in the document. The terminal's paired PTY
-            // enqueue cannot write an editor document (and silently loses the text).
-            const editor_target = if (terminal_target) |target_id| editorTermBySurfaceId(self, target_id) != null else false;
+            const editor_target = if (terminal_target) |target_id| editorTermBySurfaceId(self, target_id) else null;
+            if (editor_target) |term| {
+                // A last-jamo delete can shorten the queued commit. Its selection used the old
+                // virtual document, so move it through that deletion before admission or retry.
+                if (text.len < self.ime_inserted.items.len) {
+                    if (term.rt.editor_ime_replacement) |replacement| {
+                        if (term.rt.editor_ime_commit_selection) |selected| {
+                            const start = replacement.start + text.len;
+                            const end = replacement.start + self.ime_inserted.items.len;
+                            term.rt.editor_ime_commit_selection = .{
+                                .start = if (selected.start <= start) selected.start else if (selected.start < end) start else selected.start - (end - start),
+                                .end = if (selected.end <= start) selected.end else if (selected.end < end) start else selected.end - (end - start),
+                            };
+                        }
+                    }
+                }
+            }
             const admitted = if (terminal_target) |target_id|
-                if (replay_event != null and !editor_target)
+                if (replay_event != null and editor_target == null)
                     routeTerminalCommittedWithReplay(self, target_id, text, replay_event.?)
                 else
                     routeCommittedTextAccepted(self, text)
             else
                 routeCommittedTextAccepted(self, text);
+            if (!admitted and editor_target != null) {
+                // The document did not accept this edit. The queue is its sole owner after
+                // insertText cleared the previous overlay, so keep it across the next imeBegin.
+                self.ime_editor_commit_pending = true;
+                self.ime_editor_commit_revision = editor_target.?.rt.editorDocument().opened.?.file.revision;
+                self.ime_editor_commit_replay = replay_event;
+                self.ime_inserted.items.len = text.len;
+            }
             if (admitted) {
                 if (terminal_target) |target_id| {
                     if (preedit_commit_base) |base| noteCommittedPreeditAdvance(self, target_id, base, text);
@@ -618,15 +675,20 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
             // 터미널 replay도 확정 텍스트와 **같은 surface FIFO** 뒤에 append한다. socket/PTY가
             // 막혀도 Enter/화살표가 텍스트를 추월하지 않고 AppKit callback도 block하지 않는다.
             // 텍스트 admission이 OOM이면 replay만 보내는 반쪽 transaction도 만들지 않는다.
-            if (admitted and (terminal_target == null or editor_target)) {
+            // The commit remains bound to its original editor. A focus change during callbacks must
+            // not replay Return/arrow into a different pane or a newly opened chrome input field.
+            const editor_replay_here = if (editor_target) |term|
+                self.inputFocus() == .terminal and self.app_window.active() != null and self.app_window.active().?.id == term.surface.id
+            else
+                false;
+            if (admitted and (terminal_target == null or editor_replay_here)) {
                 if (replay_event) |ev| {
                     // handleKeyEvent reads the *current* pane. A delayed editor
                     // callback still commits to its pinned document, but its
                     // replay key must never edit the pane that replaced it.
-                    if (editor_target and !imePinnedTargetIsActive(self)) return;
                     // This Enter confirmed an IME composition. An open completion
                     // popup must not reinterpret it as acceptance of a stale item.
-                    if (editor_target and composing) editor_completion.hide(self);
+                    if (editor_target != null and composing) editor_completion.hide(self);
                     _ = self.handleKeyEvent(ev) catch {};
                 }
             }
@@ -645,10 +707,83 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
     }
 }
 
-fn imePinnedTargetIsActive(self: *AppSession) bool {
-    const pinned = self.ime_terminal_target_id orelse return true;
-    if (self.inputFocus() != .terminal or !self.surface_initialized or self.tabs.items.len == 0) return false;
-    return pane_ops.activePane(self).activeTerm().surface.id == pinned;
+/// Retry only the editor that owned the rejected commit. No allocation is needed to keep a failure;
+/// success uses the normal edit path so the next marked range moves with the real multi-cursor delta.
+pub fn retryEditorCommit(self: *AppSession) bool {
+    _ = validateEditorCommit(self);
+    if (!self.ime_editor_commit_pending) return true;
+    const target_id = self.ime_terminal_target_id orelse {
+        self.ime_editor_commit_pending = false;
+        self.ime_editor_commit_replay = null;
+        self.ime_inserted.clearRetainingCapacity();
+        return true;
+    };
+    const term = editorTermBySurfaceId(self, target_id) orelse {
+        cancelEditorCommit(self, target_id);
+        return true;
+    };
+    if (!sendCommittedText(self, self.ime_inserted.items)) return false;
+    self.ime_editor_commit_pending = false;
+    self.ime_inserted.clearRetainingCapacity();
+    const replay = self.ime_editor_commit_replay;
+    self.ime_editor_commit_replay = null;
+    const replay_here = self.inputFocus() == .terminal and self.app_window.active() != null and self.app_window.active().?.id == target_id;
+    if (replay_here) if (replay) |event| {
+        _ = self.handleKeyEvent(event) catch {};
+    };
+    if (term.rt.editor_preedit.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
+    return true;
+}
+
+/// Direct AppKit callbacks have no surrounding keyDown. Resume the retained virtual document in a
+/// short transaction so their explicit ranges are interpreted before any secondary edits move it.
+/// The callback ends this transaction with imeEnd(null), which either commits or retains it again.
+pub fn resumeEditorCommitForCallback(self: *AppSession) bool {
+    if (!self.ime_editor_commit_pending or self.ime_active) return false;
+    self.ime_editor_commit_pending = false;
+    self.ime_active = true;
+    self.ime_had_marked = imeComposingActive(self);
+    self.ime_marked_changed = false;
+    self.ime_did_delete = false;
+    self.ime_insert_failed = false;
+    return true;
+}
+
+/// Byte ranges belong to the document revision that rejected the commit. An independent edit
+/// cancels that old input state; it must not rewrite the new document or move its new selection.
+/// False tells a direct callback that it belongs to an invalidated composition and is consumed.
+pub fn validateEditorCommit(self: *AppSession) bool {
+    if (!self.ime_editor_commit_pending) return true;
+    const target_id = self.ime_terminal_target_id orelse {
+        self.ime_editor_commit_pending = false;
+        self.ime_editor_commit_replay = null;
+        self.ime_inserted.clearRetainingCapacity();
+        return false;
+    };
+    const term = editorTermBySurfaceId(self, target_id) orelse {
+        cancelEditorCommit(self, target_id);
+        return false;
+    };
+    if (term.rt.editorDocument().opened) |doc| {
+        if (doc.file.revision == self.ime_editor_commit_revision) return true;
+    }
+    cancelEditorCommit(self, target_id);
+    return false;
+}
+
+/// Reset/close must cancel the old document's queue before a Term or its selection can be reused.
+pub fn cancelEditorCommit(self: *AppSession, target_id: u64) void {
+    if (self.ime_terminal_target_id != target_id or !self.ime_editor_commit_pending) return;
+    if (editorTermBySurfaceId(self, target_id)) |term| {
+        editor_ops.setEditorPreedit(self, term, "");
+        term.rt.editor_ime_replacement = null;
+        term.rt.editor_ime_commit_selection = null;
+        self.metal_dirty = true;
+    }
+    self.ime_editor_commit_pending = false;
+    self.ime_editor_commit_replay = null;
+    self.ime_inserted.clearRetainingCapacity();
+    if (self.ime_active) self.ime_terminal_target_tombstoned = true else self.ime_terminal_target_id = null;
 }
 
 fn capturePreeditCommitBase(self: *AppSession, target_id: u64) ?terminal.preedit.CommitBase {
@@ -717,7 +852,8 @@ pub fn sendTextAsKeys(self: *AppSession, bytes: []const u8) void {
 /// paste 전용이라 IME 확정엔 안 쓴다). 큐는 **surface별**이라 paste와 같은 큐를 공유해 그 surface 안에서 전송
 /// 순서를 지킨다(다른 surface의 잔여와는 애초에 안 섞인다 — 옛 단일 FIFO는 서로 막고 섞였다).
 pub fn sendCommittedText(self: *AppSession, bytes: []const u8) bool {
-    if (!self.surface_initialized or bytes.len == 0) return true;
+    if (!self.surface_initialized) return true;
+    if (bytes.len == 0 and self.ime_terminal_target_id == null) return true;
 
     // imeBegin/첫 marked update가 고정한 대상이 있으면 그 surface로 보낸다. AppKit 콜백 사이에
     // 활성 pane/tab이 바뀌어도 확정 바이트가 새 터미널로 새지 않는다.
@@ -734,9 +870,15 @@ pub fn sendCommittedText(self: *AppSession, bytes: []const u8) bool {
     // 시작한 뒤 pane이 편집기로 바뀌면 **그 글자가 문서에 들어간다.** 고정의 요점은 "확정은 조합을
     // 시작한 곳으로 간다"이고, 편집기도 그 규칙 안에 있어야 한다(적대적 검증 2026-08-25).
     if (editorTermBySurfaceId(self, target_id)) |editor_term| {
-        const inserted = editor_ops.insertText(self, editor_term, bytes);
+        // An empty payload can still delete an explicit replacement, including a retained retry.
+        if (bytes.len == 0 and editor_term.rt.editor_ime_replacement == null) return true;
+        const accepted = editor_ops.insertDirectIMETextAtSelection(self, editor_term, bytes, editor_term.rt.editor_ime_replacement, editor_term.rt.editor_ime_commit_selection);
+        if (accepted) {
+            editor_term.rt.editor_ime_replacement = null;
+            editor_term.rt.editor_ime_commit_selection = null;
+        }
         self.metal_dirty = true;
-        return inserted; // 실패 시 Enter replay도 막는다. PTY로는 흘리지 않는다.
+        return accepted; // 편집기가 삼켰다 — PTY로 흘리지 않는다
     }
     return sendCommittedTextTo(self, target_id, bytes);
 }
@@ -857,7 +999,9 @@ pub fn encodeImeReplayKeyTo(
 /// 이쪽은 "편집기만"이다. 둘을 한 함수로 합치면 호출자가 kind를 다시 물어야 하고, 그 물음이
 /// 빠지는 날 확정 바이트가 엉뚱한 Term으로 간다.
 /// 조합이 향하는 편집기 Term — 고정(pin)이 있으면 그것, 없으면 활성 Term.
-fn activeEditorTermForIme(self: *AppSession) ?*Term {
+pub fn activeEditorTermForIme(self: *AppSession) ?*Term {
+    if (!self.surface_initialized) return null;
+    if (self.ime_terminal_target_id == null and self.inputFocus() != .terminal) return null;
     if (self.ime_terminal_target_id) |target_id| return editorTermBySurfaceId(self, target_id);
     if (!self.surface_initialized or self.tabs.items.len == 0) return null;
     const term = pane_ops.activePane(self).activeTerm();
@@ -1275,4 +1419,10 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
         .w = cw,
         .h = ch,
     };
+}
+
+fn imePinnedTargetIsActive(self: *AppSession) bool {
+    const pinned = self.ime_terminal_target_id orelse return true;
+    if (self.inputFocus() != .terminal or !self.surface_initialized or self.tabs.items.len == 0) return false;
+    return pane_ops.activePane(self).activeTerm().surface.id == pinned;
 }

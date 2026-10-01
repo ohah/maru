@@ -1163,6 +1163,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/EditorSaveConflictSmokeDriver.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/EditorIMESmokeDriver.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostIMECandidateObservation.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
@@ -2120,6 +2121,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/EditorSaveConflictSmokeDriver.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/EditorIMESmokeDriver.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostIMECandidateObservation.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
@@ -3452,7 +3454,7 @@ pub fn build(b: *std.Build) void {
                 "candidate=/tmp/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-candidate-observation.json; " ++
                 "test -f \"$summary\"; " ++
                 "test -f \"$candidate\"; " ++
-                "/usr/bin/grep -Eq '\"schema\":\"maru.session-host-cr6d-ime-candidate-observation.v1\"' \"$candidate\"; " ++
+                "/usr/bin/grep -Eq '\"schema\":\"maru.session-host-cr6d-ime-candidate-observation.v[12]\"' \"$candidate\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_stage=2$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_input_smoke_stage=4$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_input_smoke_historical_count=1$' \"$summary\"; " ++
@@ -3471,6 +3473,10 @@ pub fn build(b: *std.Build) void {
         session_host_cr6d_assert.setCwd(b.path("."));
         session_host_cr6d_assert.step.dependOn(&run_session_host_cr6d_appkit.step);
         session_host_cr6d_assert.step.dependOn(&run_session_host_cr6d_pixel_verify.step);
+        const candidate_capture_verify = b.addSystemCommand(&.{ "xcrun", "swift", "tools/verify-ime-candidate-captures.swift", "/tmp/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-candidate-observation.json" });
+        candidate_capture_verify.setCwd(b.path("."));
+        candidate_capture_verify.step.dependOn(&run_session_host_cr6d_appkit.step);
+        session_host_cr6d_assert.step.dependOn(&candidate_capture_verify.step);
         session_host_cr6d_appkit_step.dependOn(&session_host_cr6d_assert.step);
 
         const session_host_cr6e_recovery_step = b.step(
@@ -3991,6 +3997,17 @@ pub fn build(b: *std.Build) void {
         macos_editor_save_conflict_smoke.has_side_effects = true;
         macos_editor_save_conflict_smoke.step.dependOn(&macos_app_bundle.step);
         macos_editor_save_conflict_smoke_step.dependOn(&macos_editor_save_conflict_smoke.step);
+
+        // Range callbacks and real input-source events prove different boundaries. The live gate
+        // activates a window and temporarily changes the input source, so both remain opt-in.
+        inline for (.{ .{ "macos-editor-ime-smoke", "0" }, .{ "macos-editor-ime-live-smoke", "1" }, .{ "macos-editor-ime-wrapped-candidate-smoke", "2" } }) |row| {
+            const ime_smoke_step = b.step(row[0], "Run the native-editor NSTextInputClient fixture");
+            const ime_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-editor-ime.sh", "./zig-out/Maru.app/Contents/MacOS/maru-macos-app", row[1] });
+            ime_smoke.setCwd(b.path("."));
+            ime_smoke.has_side_effects = true;
+            ime_smoke.step.dependOn(&macos_app_bundle.step);
+            ime_smoke_step.dependOn(&ime_smoke.step);
+        }
 
         const macos_browser_bounded_smoke_step = b.step("macos-browser-bounded-smoke", "Run and assert the bounded browser.executeScript WKWebView/socket smoke");
         const macos_browser_bounded_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-browser-bounded-smoke.sh" });
@@ -4724,7 +4741,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_candidate_debug = b.addRunArtifact(session_host_cr6d_candidate_debug);
-    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=10");
+    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=11");
     const session_host_cr6d_candidate_release = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
@@ -4734,7 +4751,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_candidate_release = b.addRunArtifact(session_host_cr6d_candidate_release);
-    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=10");
+    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=11");
     test_step.dependOn(&run_session_host_cr6d_candidate_debug.step);
     test_step.dependOn(&run_session_host_cr6d_candidate_release.step);
     const session_host_cr6d_candidate_step = b.step(

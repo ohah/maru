@@ -36,6 +36,19 @@ enum SessionHostInputSourcePolicy {
         return Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
     }
 
+    /// Restoring an AppKit view can itself publish a global source change. Check both owners
+    /// before touching the view, otherwise that change could conceal a user's third source
+    /// from restore(recordURL:)'s superseded guard.
+    static func permitsViewRestoration(
+        currentGlobal: String?, originalGlobal: String,
+        currentView: String?, originalView: String?
+    ) -> Bool {
+        guard let currentGlobal,
+              currentGlobal == korean2SetSourceID || currentGlobal == originalGlobal else { return false }
+        guard let currentView else { return originalView == nil }
+        return currentView == korean2SetSourceID || currentView == originalView
+    }
+
     static func prepareKoreanSelection(recordURL: URL) throws -> String {
         guard let original = currentSourceID() else { throw PrepareError.currentUnavailable }
         guard validSourceID(original), validSourceID(korean2SetSourceID) else {

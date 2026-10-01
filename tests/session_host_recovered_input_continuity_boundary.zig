@@ -66,9 +66,9 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
 
     // The read-only record exposes five scalar observations and no
     // input handle, runtime pointer, or action token that Swift could use to bypass NSEvent.
-    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 189;"));
-    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 189), abi_version)"));
-    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 189u"));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 190;"));
+    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 190), abi_version)"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 190u"));
     const probe_record = between(
         abi,
         "pub const SessionHostInputSmokeProbe = extern struct {",
@@ -306,7 +306,11 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
     try std.testing.expectEqual(@as(usize, 1), count(abi, "session_host_ime_candidate_publish_error={s}"));
     try std.testing.expectEqual(@as(usize, 1), count(producer, "requiredObservationCount = 5"));
     try std.testing.expectEqual(@as(usize, 1), count(producer, "maximumWindowCount = 256"));
-    try std.testing.expectEqual(@as(usize, 0), count(producer, ".write(to:"));
+    // Only the bounded rejected transcript may be written by Swift. Accepted evidence still
+    // crosses the Zig reducer and exclusive publisher; diagnostics cannot publish success.
+    try std.testing.expectEqual(@as(usize, 1), count(producer, ".write(to:"));
+    try std.testing.expectEqual(@as(usize, 1), count(producer, "data.write(to: rejectedURL, options: .withoutOverwriting)"));
+    try std.testing.expectEqual(@as(usize, 0), count(producer, "write(to: outputURL"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_failure="));
     var graph = try build_graph.parse(allocator);
     defer graph.deinit();
@@ -327,7 +331,9 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
     try std.testing.expectEqual(@as(usize, 1), count(swift, "private var inputVisualTickPending = false"));
     const marked_bridge = between(swift, "    func imeMarked(_ text: String) {", "    func imeDeleteBackward() {") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 2), count(marked_bridge, "requestInputVisualTick()"));
+    // Both the legacy clear and the ranged NSTextInputClient callback request a visual tick;
+    // the third occurrence is the shared helper declaration.
+    try std.testing.expectEqual(@as(usize, 3), count(marked_bridge, "requestInputVisualTick()"));
     try std.testing.expectEqual(@as(usize, 1), count(marked_bridge, "self.tickAppSession()"));
     const candidate_failure = between(
         swift,

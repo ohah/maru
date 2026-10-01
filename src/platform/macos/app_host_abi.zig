@@ -3,6 +3,7 @@ const diag_gate = @import("diag.zig"); // MARU_DEBUG 게이트(진단 로그 단
 const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
+const editor_ime_ops = @import("app_session/editor_ime.zig");
 const session_host = @import("session_host.zig");
 const ime_candidate_evidence = @import("session_host/ime_candidate_evidence.zig");
 const keycode = @import("keycode.zig");
@@ -172,8 +173,8 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
     try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
-test "ABI v189 editor IME document range exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 189), abi_version);
+test "ABI v190 editor IME document range exports match the C header" {
+    try std.testing.expectEqual(@as(u32, 190), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1948,6 +1949,83 @@ pub export fn maru_macos_app_session_ime_insert(
     const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     app_session.imeInsert(slice);
     return @intFromEnum(Status.ok);
+}
+
+/// NSTextInputClient ranges are UTF-16, with UINT64_MAX denoting NSNotFound.
+/// Legacy terminal and chrome-field input retain their existing transaction and preedit semantics.
+pub export fn maru_macos_app_session_ime_insert_with_range(session: ?*AppSession, bytes: ?[*]const u8, len: usize, location: u64, length: u64) c_int {
+    const self = session orelse return @intFromEnum(Status.null_out);
+    const text: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
+    const replacement: ?editor_ime_ops.Range = if (location == std.math.maxInt(u64)) null else .{ .location = location, .length = length };
+    if (!editor_ime_ops.insert(self, text, replacement)) {
+        self.imeMarked("");
+        self.imeInsert(text);
+    }
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn maru_macos_app_session_ime_marked_with_ranges(session: ?*AppSession, bytes: ?[*]const u8, len: usize, selected_location: u64, selected_length: u64, replacement_location: u64, replacement_length: u64) c_int {
+    const self = session orelse return @intFromEnum(Status.null_out);
+    const text: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
+    const replacement: ?editor_ime_ops.Range = if (replacement_location == std.math.maxInt(u64)) null else .{ .location = replacement_location, .length = replacement_length };
+    if (!editor_ime_ops.marked(self, text, .{ .location = selected_location, .length = selected_length }, replacement)) self.imeMarked(text);
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn maru_macos_app_session_editor_ime_state(session: ?*AppSession, selected_location: ?*u64, selected_length: ?*u64, marked_location: ?*u64, marked_length: ?*u64) c_int {
+    const self = session orelse return 0;
+    const selected_at = selected_location orelse return 0;
+    const selected_len = selected_length orelse return 0;
+    const marked_at = marked_location orelse return 0;
+    const marked_len = marked_length orelse return 0;
+    const snapshot = editor_ime_ops.state(self) orelse return 0;
+    selected_at.* = snapshot.selected.location;
+    selected_len.* = snapshot.selected.length;
+    marked_at.* = snapshot.marked.location;
+    marked_len.* = snapshot.marked.length;
+    return 1;
+}
+
+/// Copy only the requested part of the virtual input document. A size query does not allocate or
+/// expose the whole file to Swift, and the next copy observes the same main-thread input state.
+pub export fn maru_macos_app_session_editor_ime_substring(session: ?*AppSession, location: u64, length: u64, bytes: ?[*]u8, capacity: usize, written: ?*usize, actual_location: ?*u64, actual_length: ?*u64) c_int {
+    const self = session orelse return 0;
+    const count = written orelse return 0;
+    const actual_at = actual_location orelse return 0;
+    const actual_len = actual_length orelse return 0;
+    const view = editor_ime_ops.projection(self) orelse return 0;
+    const ranges = maru.session.editor.text_input;
+    var total: u64 = 0;
+    var sizes: [view.segments.len]u64 = undefined;
+    for (view.segments, 0..) |part, i| {
+        sizes[i] = ranges.utf16Length(part) orelse return 0;
+        total += sizes[i];
+    }
+    if (location > total) return 0;
+    const end = @min(total, location +| length);
+    var offsets: [view.segments.len]ranges.ByteRange = undefined;
+    var unit_at: u64 = 0;
+    var needed: usize = 0;
+    for (view.segments, sizes, 0..) |part, units, i| {
+        const lo = @min(units, location -| unit_at);
+        const hi = @min(units, end -| unit_at);
+        offsets[i] = ranges.byteRange(part, .{ .location = lo, .length = hi - lo }) orelse return 0;
+        needed += offsets[i].end - offsets[i].start;
+        unit_at += units;
+    }
+    count.* = needed;
+    actual_at.* = location;
+    actual_len.* = end - location;
+    if (bytes) |out| {
+        if (capacity < needed) return 0;
+        var dest: usize = 0;
+        for (view.segments, offsets) |part, span| {
+            const slice = part[span.start..span.end];
+            @memcpy(out[dest..][0..slice.len], slice);
+            dest += slice.len;
+        }
+    }
+    return 1;
 }
 
 // 입력기의 조합 중(marked) 텍스트(UTF-8). len 0 = 조합 해제. 커서 위치에 반전 합성 표시된다.

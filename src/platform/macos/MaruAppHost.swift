@@ -359,7 +359,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 가로채면 선택한 한글이 후보 요청 대신 줄바꿈으로 바뀐다. editor IME range가 유효할 때만
         // 예외를 열어 터미널의 Meta-Return과 다른 화면의 Option 키 계약은 그대로 둔다.
         let editorHanjaCandidate = exactChord == [.option] && event.keyCode == 36
-            && controller?.imeEditorRanges() != nil
+            && controller?.editorIMEState() != nil
         let candidateWasActive = editorHanjaCandidateActive
         let bypassMods: NSEvent.ModifierFlags = optionAsMeta && !editorHanjaCandidate
             ? [.command, .control, .option] : [.command, .control]
@@ -429,54 +429,43 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
-        guard acceptsEditorReplacement(replacementRange) else {
-            // A malformed explicit range must not redirect text to the old
-            // caret. Mark this key as consumed without editing the document.
-            controller?.imeMarked("")
-            return
-        }
         pendingUnmarkText = nil
         markedTextBuffer = ""
         editorHanjaCandidateActive = false
         markedSelection = NSRange(location: 0, length: 0)
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
-        imeLog("insertText", text)
-        controller?.imeMarked("") // 조합 표시 제거(전송 판정은 Zig ime_end가)
+        imeLog("insertText replacement=\(replacementRange)", text)
         if sessionHostCandidateDocumentContext != nil {
             // 후보창 PoC는 AppKit이 방금 확정한 원문을 editable context로 되묻게 하되 PTY에는
             // admission하지 않는다. 문자열은 로그·artifact·controller counter 경계를 넘지 않는다.
             sessionHostCandidateDocumentContext = text
+            controller?.imeMarked("")
             return
         }
-        controller?.imeInsert(text)
+        // The editor needs the old marked replacement until the commit consumes it. Clearing
+        // preedit here would turn reconversion into insertion; the Zig target owns that order.
+        controller?.imeInsert(text, replacementRange: replacementRange)
         controller?.recordSessionHostInputSmokeInsert()
     }
 
     // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 표시는 Zig가 커서 위치에 합성한다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        guard acceptsEditorReplacement(replacementRange) else {
-            controller?.imeMarked("")
-            return
-        }
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
-        markedSelection = selectedRange
-        imeLog("setMarkedText", markedTextBuffer)
-        controller?.imeMarked(markedTextBuffer)
+        imeLog("setMarkedText selected=\(selectedRange) replacement=\(replacementRange)", markedTextBuffer)
+        controller?.imeMarked(markedTextBuffer, selectedRange: selectedRange, replacementRange: replacementRange)
         controller?.recordSessionHostInputSmokeMarked()
-    }
-
-    private func acceptsEditorReplacement(_ range: NSRange) -> Bool {
-        // Once AppKit has marked text, replacementRange names its virtual
-        // string. The canonical document selection was pinned at composition
-        // start and must not be moved again by this callback.
-        if !markedTextBuffer.isEmpty || pendingUnmarkText != nil { return true }
-        guard range.location != NSNotFound, controller?.imeEditorRanges() != nil else { return true }
-        return controller?.imeEditorReplacement(range) == true
     }
 
     func unmarkText() {
         imeLog("unmarkText")
         editorHanjaCandidateActive = false
+        if let state = controller?.editorIMEState() {
+            if state.marked.length > 0, let text = controller?.editorIMESubstring(state.marked)?.text {
+                controller?.imeInsert(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            }
+            markedTextBuffer = ""
+            return
+        }
         let committed = markedTextBuffer
         if sessionHostCandidateDocumentContext != nil {
             if !committed.isEmpty { sessionHostCandidateDocumentContext = committed }
@@ -544,6 +533,11 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func hasMarkedText() -> Bool {
+        if let state = controller?.editorIMEState() {
+            let has = state.marked.location != NSNotFound && state.marked.length > 0
+            imeLog("? hasMarkedText editor -> \(has)")
+            return has
+        }
         let has = !markedTextBuffer.isEmpty
         imeLog("? hasMarkedText -> \(has)")
         return has
@@ -560,17 +554,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 마지막 자모에서 Backspace가 자모 삭제 대신 확정(insertText)으로 처리돼 삭제에 키가 한 번
     // 더 들었다(라이브: 가ㄴ -> BS -> 가ㄴ -> BS -> 가).
     func markedRange() -> NSRange {
-        let r: NSRange
-        if let editor = controller?.imeEditorRanges() {
-            r = markedTextBuffer.isEmpty
-                ? NSRange(location: NSNotFound, length: 0)
-                : NSRange(location: editor.markedStart, length: markedTextBuffer.utf16.count)
-        } else {
-            // Terminal keeps its established zero-based marked-range behavior.
-            r = markedTextBuffer.isEmpty
-                ? NSRange()
-                : NSRange(location: 0, length: markedTextBuffer.utf16.count)
+        if let state = controller?.editorIMEState() {
+            imeLog("? markedRange editor -> loc=\(state.marked.location) len=\(state.marked.length)")
+            return state.marked
         }
+        let r = markedTextBuffer.isEmpty
+            ? NSRange()
+            : NSRange(location: 0, length: markedTextBuffer.utf16.count)
         imeLog("? markedRange -> loc=\(r.location) len=\(r.length)")
         return r
     }
@@ -579,14 +569,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         if let context = sessionHostCandidateDocumentContext {
             return NSRange(location: context.utf16.count, length: 0)
         }
-        if let editor = controller?.imeEditorRanges() {
-            if !markedTextBuffer.isEmpty {
-                let count = markedTextBuffer.utf16.count
-                let offset = min(markedSelection.location, count)
-                return NSRange(location: editor.markedStart + offset,
-                               length: min(markedSelection.length, count - offset))
-            }
-            return NSRange(location: editor.selectedStart, length: editor.selectedLength)
+        if let state = controller?.editorIMEState() {
+            imeLog("? selectedRange editor -> loc=\(state.selected.location) len=\(state.selected.length)")
+            return state.selected
         }
         imeLog("? selectedRange -> (빈 NSRange — 터미널 구현)")
         return NSRange()
@@ -598,69 +583,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             actualRange?.pointee = full
             return NSAttributedString(string: context)
         }
-        if let editor = controller?.imeEditorRanges() {
-            if let text = editorSubstring(range, ranges: editor) {
-                actualRange?.pointee = range
-                return NSAttributedString(string: text)
-            }
+        if let result = controller?.editorIMESubstring(range) {
+            actualRange?.pointee = result.range
+            imeLog("? attributedSubstring editor loc=\(result.range.location) len=\(result.range.length)")
+            return NSAttributedString(string: result.text)
         }
         imeLog("? attributedSubstring loc=\(range.location) len=\(range.length) -> nil")
         return nil
-    }
-
-    // During composition AppKit queries a virtual document: the selected
-    // canonical span is replaced by marked text. A query may cross either
-    // seam, so reading only the marked buffer or only the document gives the
-    // wrong context to reconversion input methods.
-    private func editorSubstring(_ range: NSRange, ranges: (selectedStart: Int, selectedLength: Int, markedStart: Int)) -> String? {
-        guard let controller, range.location >= 0, range.length >= 0, range.location != NSNotFound else { return nil }
-        let (end, endOverflow) = range.location.addingReportingOverflow(range.length)
-        guard !endOverflow else { return nil }
-        if markedTextBuffer.isEmpty { return controller.imeEditorSubstring(range) }
-        let markedCount = markedTextBuffer.utf16.count
-        let (markedEnd, markOverflow) = ranges.markedStart.addingReportingOverflow(markedCount)
-        let (selectedEnd, selectOverflow) = ranges.selectedStart.addingReportingOverflow(ranges.selectedLength)
-        guard !markOverflow, !selectOverflow, ranges.markedStart == ranges.selectedStart else { return nil }
-        // A zero-length query never enters the slice below. Reject a caret in
-        // the middle of a surrogate pair just as the document ABI does.
-        if range.location >= ranges.markedStart, range.location <= markedEnd,
-           !isMarkedScalarBoundary(range.location - ranges.markedStart) { return nil }
-        if end >= ranges.markedStart, end <= markedEnd,
-           !isMarkedScalarBoundary(end - ranges.markedStart) { return nil }
-        var parts = ""
-        if range.location < ranges.markedStart {
-            let prefixEnd = min(end, ranges.markedStart)
-            guard let prefix = controller.imeEditorSubstring(NSRange(location: range.location, length: prefixEnd - range.location)) else { return nil }
-            parts += prefix
-        }
-        let markFrom = max(range.location, ranges.markedStart)
-        let markTo = min(end, markedEnd)
-        if markFrom < markTo {
-            let markedSlice = NSRange(location: markFrom - ranges.markedStart, length: markTo - markFrom)
-            guard let textRange = Range(markedSlice, in: markedTextBuffer) else { return nil }
-            let markedPart = markedTextBuffer[textRange]
-            // Foundation can map a half-surrogate NSRange to an empty String
-            // range. Keep the same strict UTF-16 boundary rule as the Zig ABI.
-            guard markedPart.utf16.count == markedSlice.length else { return nil }
-            parts += markedPart
-        }
-        if end > markedEnd {
-            let suffixFrom = max(range.location, markedEnd)
-            let (documentFrom, offsetOverflow) = selectedEnd.addingReportingOverflow(suffixFrom - markedEnd)
-            guard !offsetOverflow,
-                  let suffix = controller.imeEditorSubstring(NSRange(location: documentFrom, length: end - suffixFrom)) else { return nil }
-            parts += suffix
-        }
-        return parts
-    }
-
-    private func isMarkedScalarBoundary(_ offset: Int) -> Bool {
-        let text = markedTextBuffer as NSString
-        guard offset >= 0, offset <= text.length else { return false }
-        guard offset > 0, offset < text.length else { return true }
-        let left = text.character(at: offset - 1)
-        let right = text.character(at: offset)
-        return !(0xD800...0xDBFF).contains(left) || !(0xDC00...0xDFFF).contains(right)
     }
 
     func validAttributesForMarkedText() -> [NSAttributedString.Key] {
@@ -4447,7 +4376,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostCandidateBefore: SessionHostIMECandidateObservation.Snapshot?
     private var sessionHostCandidateOpened: SessionHostIMECandidateObservation.Snapshot?
     private var sessionHostCandidatePhase: UInt32 = 0
-    private var sessionHostCandidateWaitTicks: UInt32 = 0
+    private var sessionHostCandidateNotBefore: TimeInterval = 0
+    private var sessionHostCandidatePrimed = false
     private var sessionHostCandidateFailure = ""
     private var sessionHostCandidateAdmissionValidated = false
     private var sessionHostCandidateComposeKeyIndex = 0
@@ -4528,7 +4458,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
            (sessionHostCandidatePhase == 1 && event.keyCode == 36 && chord == [.option] ||
             sessionHostCandidatePhase == 2 && event.keyCode == 53 && chord.isEmpty) {
             sessionHostManualCandidateKey = event.keyCode
-            sessionHostCandidateWaitTicks = 3
+            sessionHostCandidateNotBefore = ProcessInfo.processInfo.systemUptime + 0.25
         }
     }
 
@@ -4615,6 +4545,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 보낸다 — Zig 디스패치를 직접 부르면 정작 검증 대상인 `keyDown` chord 우회를 건너뛴다.
     /// 아카이브 fixture와 같은 이유로 자기 env 게이트를 따로 둔다: 일반 PTY smoke가 이 문서 열기와
     /// 합성 저장을 얻으면 안 된다.
+    private var editorIMESmokeDriver: EditorIMESmokeDriver?
+    private var isEditorIMESmokeMode: Bool {
+        smokeMode && ProcessInfo.processInfo.environment["MARU_EDITOR_IME_SMOKE"] == "1"
+    }
     private var editorSaveConflictSmokeDriver: EditorSaveConflictSmokeDriver?
     /// `quit-backup` 시나리오의 종료 요청은 **한 번만** 나간다(재진입 terminate 금지).
     private var editorSaveConflictSmokeQuitRequested = false
@@ -5041,7 +4975,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 한 번 맞춘다(80×24 기본에서 실제 창 grid로). 일반 smoke는 자체 scripted resize를 쓰지만,
         // archive fixture는 첫 published pointer rect가 실제 view backing 좌표여야 하므로 같은 제품 resize를
         // 명시적으로 한 번 통과시킨다.
-        if !smokeMode || isAgentSessionArchiveSmokeMode || isEditorSaveConflictSmokeMode {
+        if !smokeMode || isAgentSessionArchiveSmokeMode || isEditorSaveConflictSmokeMode || isEditorIMESmokeMode {
             resizeAppSessionFromWindow()
         }
         if !smokeMode {
@@ -5061,6 +4995,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // N1 훅(`MARU_NATIVE_EDITOR`)이 첫 프레임에 이미 문서를 열 수 있으니 루프 전에 설치한다 —
         // 늦게 붙으면 「열리기 전 dirty」 검사가 그 프레임을 못 본다.
+        if isEditorIMESmokeMode {
+            guard let driver = EditorIMESmokeDriver() else {
+                exitCode = 1
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+                return
+            }
+            editorIMESmokeDriver = driver
+        }
         if isEditorSaveConflictSmokeMode {
             guard let driver = EditorSaveConflictSmokeDriver() else {
                 exitCode = 1
@@ -5112,7 +5054,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         // 이 모드에 dev 입력(`a\n`)이 가면 활성 pane이 편집기라 **그 글자가 문서에 들어간다** — 우리가
         // 넣은 표식과 남의 입력을 못 가르게 되고, controlled PTY가 먼저 끝나 앱이 스모크 중간에 죽는다.
-        if smokeMode && !isAgentSessionArchiveSmokeMode && !isEditorSaveConflictSmokeMode && !recoverySmoke && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
+        if smokeMode && !isAgentSessionArchiveSmokeMode && !isEditorSaveConflictSmokeMode && !isEditorIMESmokeMode && !recoverySmoke && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
             if filePanelHookEnabled {
                 // FP11f cold helper/WKWebView Mermaid와 iframe→read→render→edit→save가 끝나기 전에 controlled
                 // PTY가 `a\n`을 받아 종료하지 않게 입력을 늦춘다. 일반 smoke는 기존 즉시 입력 동작을 유지한다.
@@ -5217,6 +5159,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func applicationWillTerminate(_ notification: Notification) {
         _ = notification
         terminationStartNs = DispatchTime.now().uptimeNanoseconds
+        editorIMESmokeDriver?.restoreInputSource(view: primary?.view)
         _ = restoreSessionHostInputSmokeInputSource()
         restoreSessionHostInputSmokePasteboard()
         tickTimer?.invalidate()
@@ -6177,7 +6120,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Ordinary controlled smoke intentionally starts at 80×24 and scripts its own resize.  The
         // archive fixture instead needs the real Metal view geometry before its first published
         // probe: a zero backing size has no clickable titlebar launcher or dock view slot.
-        let m = (smokeMode && !isAgentSessionArchiveSmokeMode && !isEditorSaveConflictSmokeMode)
+        let m = (smokeMode && !isAgentSessionArchiveSmokeMode && !isEditorSaveConflictSmokeMode && !isEditorIMESmokeMode)
             ? (widthPx: UInt32(0), heightPx: UInt32(0), scaleMilli: UInt32(0))
             : spawnMetricsForCurrentWindow()
         var config = MaruAppHostSessionConfig(
@@ -6886,6 +6829,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         for surface in toClose { closeWindowOrQuit(surface) }
         maybeRunAgentSessionArchiveSmoke()
         maybeRunEditorSaveConflictSmoke()
+        maybeRunEditorIMESmoke()
         maybeRunDividerSmoke()
         maybeRunScrollbarSmokeEntry()
         maybeRunTabDragSmokeEntry()
@@ -11211,10 +11155,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
         let anchor = view.firstRect(forCharacterRange: NSRange(), actualRange: nil)
         do {
-            if sessionHostCandidateWaitTicks > 0 {
-                sessionHostCandidateWaitTicks -= 1
-                return false
-            }
+            // Owner ticks can run several times before WindowServer presents a new popup.
+            // Wait in elapsed time so Escape cannot overtake the candidate opening.
+            if ProcessInfo.processInfo.systemUptime < sessionHostCandidateNotBefore { return false }
             switch sessionHostCandidatePhase {
             case 0:
                 // Meta mode deliberately bypasses the IME. Refuse a misconfigured fixture rather
@@ -11256,12 +11199,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     keyCode: 36, view: view, flags: .maskAlternate
                 ) else { throw SessionHostIMECandidateObservation.Failure.windowServerUnavailable }
                 sessionHostCandidatePhase = 1
-                sessionHostCandidateWaitTicks = 3
+                sessionHostCandidateNotBefore = ProcessInfo.processInfo.systemUptime + 0.25
             case 1:
                 if isSessionHostManualInputSmokeMode {
                     guard sessionHostManualCandidateKey == 36 else { return false }
                 }
-                sessionHostCandidateOpened = try observation.capture(counters: counters, anchor: anchor)
+                let opened = try observation.capture(counters: counters, anchor: anchor)
+                guard let before = sessionHostCandidateBefore else { throw SessionHostIMECandidateObservation.Failure.invalidOutput }
+                sessionHostCandidateOpened = sessionHostCandidatePrimed
+                    ? try observation.captureAppCandidate(before: before, opened: opened) : opened
                 if isSessionHostManualInputSmokeMode {
                     sessionHostManualCandidateKey = nil
                     sessionHostCandidatePhase = 2
@@ -11272,7 +11218,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     throw SessionHostIMECandidateObservation.Failure.windowServerUnavailable
                 }
                 sessionHostCandidatePhase = 2
-                sessionHostCandidateWaitTicks = 3
+                sessionHostCandidateNotBefore = ProcessInfo.processInfo.systemUptime + 0.25
             case 2:
                 if isSessionHostManualInputSmokeMode {
                     guard sessionHostManualCandidateKey == 53 else { return false }
@@ -11283,6 +11229,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
                 let closed = try observation.capture(counters: counters, anchor: anchor)
                 view.endSessionHostCandidateDocumentContextProbe()
+                if !sessionHostCandidatePrimed {
+                    // The first IME request lazily initialises and sizes its popup. Exclude the
+                    // explicitly marked warm-up from the five strict geometry observations.
+                    sessionHostCandidatePrimed = true
+                    sessionHostCandidateBefore = nil
+                    sessionHostCandidateOpened = nil
+                    sessionHostCandidatePhase = 0
+                    sessionHostCandidateComposeKeyIndex = 0
+                    sessionHostCandidateNotBefore = ProcessInfo.processInfo.systemUptime + 0.12
+                    return false
+                }
                 try observation.append(before: before, opened: opened, closed: closed)
                 sessionHostCandidateBefore = nil
                 sessionHostCandidateOpened = nil
@@ -11290,7 +11247,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     sessionHostCandidatePhase = 0
                     sessionHostCandidateComposeKeyIndex = 0
                     sessionHostCandidateComposePrompted = false
-                    sessionHostCandidateWaitTicks = 1
+                    sessionHostCandidateNotBefore = ProcessInfo.processInfo.systemUptime + 0.12
                     return false
                 }
                 guard let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else {
@@ -11668,6 +11625,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// Drives the archive fixture through `MaruMetalTerminalView.mouseDown/up`, never by calling
     /// a Zig domain method directly. The only ABI reads are read-only published probes and the
     /// gate is one-way worker synchronization; opening the dock/disclosure remains normal pointer input.
+    private func maybeRunEditorIMESmoke() {
+        guard let driver = editorIMESmokeDriver, !driver.finished,
+              let surface = primary, let session = surface.appSession,
+              let view = surface.view, let window = surface.window else { return }
+        withSurface(surface) {
+            var probe = MaruAppHostEditorSaveConflictSmokeProbe()
+            let ok = maru_macos_app_session_editor_save_conflict_smoke_probe(session, &probe) == Self.statusOK
+            driver.tick(editorPresent: ok && probe.editor_present != 0, view: view, window: window)
+        }
+        if driver.finished {
+            if !driver.failures.isEmpty { exitCode = 1 }
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
+
     private func maybeRunEditorSaveConflictSmoke() {
         guard let driver = editorSaveConflictSmokeDriver, let surface = primary,
               let session = surface.appSession, let view = surface.view,
@@ -12273,14 +12245,56 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    func imeInsert(_ text: String) {
+    /// NSNotFound is Int.max on this host; the ABI uses a fixed-width sentinel so Zig never
+    /// confuses a missing range with a huge document position.
+    private func imeRangeLocation(_ range: NSRange) -> UInt64 {
+        range.location == NSNotFound ? UInt64.max : UInt64(range.location)
+    }
+
+    func editorIMEState() -> (selected: NSRange, marked: NSRange)? {
+        guard let session = appSession else { return nil }
+        var selectedLocation: UInt64 = 0, selectedLength: UInt64 = 0
+        var markedLocation: UInt64 = 0, markedLength: UInt64 = 0
+        guard maru_macos_app_session_editor_ime_state(
+            session, &selectedLocation, &selectedLength, &markedLocation, &markedLength
+        ) == 1 else { return nil }
+        func range(_ location: UInt64, _ length: UInt64) -> NSRange {
+            NSRange(location: location == UInt64.max ? NSNotFound : Int(clamping: location), length: Int(clamping: length))
+        }
+        return (range(selectedLocation, selectedLength), range(markedLocation, markedLength))
+    }
+
+    func imeInsert(_ text: String, replacementRange: NSRange = NSRange(location: NSNotFound, length: 0)) {
         guard let session = appSession else { return }
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_session_ime_insert(session, buf.baseAddress, buf.count)
+            maru_macos_app_session_ime_insert_with_range(
+                session, buf.baseAddress, buf.count, imeRangeLocation(replacementRange), UInt64(replacementRange.length)
+            )
         }
     }
 
+    func editorIMESubstring(_ proposed: NSRange) -> (text: String, range: NSRange)? {
+        guard let session = appSession, proposed.location != NSNotFound else { return nil }
+        var count = 0
+        var location: UInt64 = 0, length: UInt64 = 0
+        guard maru_macos_app_session_editor_ime_substring(
+            session, UInt64(proposed.location), UInt64(proposed.length), nil, 0, &count, &location, &length
+        ) == 1 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: count)
+        let copied = bytes.withUnsafeMutableBufferPointer { buffer in
+            maru_macos_app_session_editor_ime_substring(
+                session, UInt64(proposed.location), UInt64(proposed.length), buffer.baseAddress, buffer.count,
+                &count, &location, &length
+            )
+        }
+        guard copied == 1, count <= bytes.count else { return nil }
+        return (String(decoding: bytes.prefix(count), as: UTF8.self),
+                NSRange(location: Int(clamping: location), length: Int(clamping: length)))
+    }
+
+    /// Internal overlay clearing is not an NSTextInputClient replacement. Keeping this
+    /// separate prevents a cancel from deleting the editor's selected document text.
     func imeMarked(_ text: String) {
         guard let session = appSession else { return }
         let bytes = Array(text.utf8)
@@ -12290,37 +12304,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         requestInputVisualTick()
     }
 
-    func imeEditorRanges() -> (selectedStart: Int, selectedLength: Int, markedStart: Int)? {
-        guard let session = appSession else { return nil }
-        var selectedStart = 0
-        var selectedLength = 0
-        var markedStart = 0
-        guard maru_macos_app_session_ime_editor_ranges(
-            session, &selectedStart, &selectedLength, &markedStart
-        ) == Self.statusOK else { return nil }
-        return (selectedStart, selectedLength, markedStart)
-    }
-
-    func imeEditorReplacement(_ range: NSRange) -> Bool {
-        guard let session = appSession, range.location >= 0, range.length >= 0,
-              range.location != NSNotFound else { return false }
-        return maru_macos_app_session_ime_editor_replacement(session, range.location, range.length) == Self.statusOK
-    }
-
-    func imeEditorSubstring(_ range: NSRange) -> String? {
-        guard let session = appSession, range.location != NSNotFound else { return nil }
-        var count = 0
-        guard maru_macos_app_session_ime_editor_substring(
-            session, range.location, range.length, nil, 0, &count
-        ) == Self.statusOK, count <= 1_048_576 else { return nil }
-        var bytes = [UInt8](repeating: 0, count: count)
-        let status = bytes.withUnsafeMutableBufferPointer { buf in
-            maru_macos_app_session_ime_editor_substring(
-                session, range.location, range.length, buf.baseAddress, buf.count, &count
+    func imeMarked(_ text: String, selectedRange: NSRange, replacementRange: NSRange) {
+        guard let session = appSession else { return }
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_ime_marked_with_ranges(
+                session, buf.baseAddress, buf.count, imeRangeLocation(selectedRange), UInt64(selectedRange.length),
+                imeRangeLocation(replacementRange), UInt64(replacementRange.length)
             )
         }
-        guard status == Self.statusOK else { return nil }
-        return String(bytes: bytes, encoding: .utf8)
+        requestInputVisualTick()
     }
 
     private func requestInputVisualTick() {

@@ -256,6 +256,18 @@ run = "zig build macos-agent-session-archive-smoke"
 description = "Run the AppKit native-editor save-conflict fixture"
 run = "zig build macos-editor-save-conflict-smoke"
 
+[tasks.macos-editor-ime-smoke]
+description = "Run native-editor input-method range and multicursor callbacks in the product app"
+run = "zig build macos-editor-ime-smoke"
+
+[tasks.macos-editor-ime-live-smoke]
+description = "Run actual Korean input-source events in the native editor (activates a window)"
+run = "zig build macos-editor-ime-live-smoke"
+
+[tasks.macos-editor-ime-wrapped-candidate-smoke]
+description = "Verify wrapped editor Hanja candidates with actual HID and single-window OCR"
+run = "zig build macos-editor-ime-wrapped-candidate-smoke"
+
 [tasks.test-dock-visual-golden]
 description = "Compare Session Dock smoke captures against committed golden images"
 run = "zig build test-dock-visual-golden"

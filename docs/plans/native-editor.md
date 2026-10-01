@@ -9,8 +9,10 @@
 **지금 자리(2026-09-29 확인).** 이 절의 제목은 오래 「N1 진행 중」이었는데, 본문과 이력은 다섯 단계가 모두 제품에 선 것을 적는다 — N1(파일이
 뜬다 · 2026-08-14), N1.5(비교 본문 b·c·e), N2(버퍼·편집·검색·멀티커서), N3(조합 글자 표시 · 2026-08-27), N4(구문 색 2층·LSP 표시),
 N5(미니맵 N5a `c0aa24b11` · 막대와 미니맵 N5b `47eecce79`). **「섰다」는 「끝났다」가 아니다** — 단계마다 본문의 「남은 것」이 아직 열린 것을
-적는다. **N3의 범위·멀티 커서 구현도 섰다(2026-09-26)** — 편집기의 `replacementRange`와
-`markedRange`/`selectedRange`는 실제 문서 UTF-16 위치를 쓴다. 2026-09-29 사용자 요청으로 멀티 커서 조합 표시는 모든 커서에 비추고 확정 시 한 편집으로 넣도록 정책을 바꿨다. 여러 줄 선택의 조합 미리보기·확정, Backspace, 조합 중 Enter와 자동완성 목록의 Enter는 2026-09-27 제품 화면에서 각각 확인했다. PR #3981에서 한자 후보창 선택·취소와 접힌 선택의 실제 2벌식 조합·확정을 화면으로 확인했고, 랩된 줄의 후보창 좌표는 렌더 좌표를 대조하는 `IME5` 판정자로 확인했다. 2026-09-29 실제 두벌식·두 커서 제품 화면에서 **이전 정책**인 primary만 조합 표시와 두 커서 확정·Undo를 확인했다. 새 정책도 같은 날 실제 두벌식·두 커서 제품 화면에서 `ㅎ → 하 → 한` 동시 표시, Enter 확정·개행, Undo 한 번의 원복을 확인했다. 헤드리스 판정과 제품 화면 확인의 범위는 [검증 매트릭스](../verification-matrix.md)의 IME 행이 소유한다. 단계 뒤의 일은 아래 「네이티브 편집기 후속」 표가 소유한다.
+적는다. **N3 범위 배선과 멀티 커서 회귀는 구현됐다**(`replacementRange` · 실제 문서의 UTF-16 `markedRange`/`selectedRange` ·
+primary/포커스 상실/겹친 선택의 확정과 undo/redo). 콜백을 직접 부르는 제품 스모크도 통과했지만, **실제 한국어 입력 소스의 GUI 회차는
+아직 남고 여러 줄 조합의 시각 투영도 미완료**다 — 아래 N3와 [검증 매트릭스](../verification-matrix.md)가 그 경계를 구분한다.
+단계 뒤의 일은 아래 「네이티브 편집기 후속」 표가 소유한다.
 2026-08-09 사용자 결정으로 `text` kind와 diff 본문을 CM6에서 Zig+Metal로 이관하며, 마크다운 렌더는 웹에 남는다.
 
 **대표적인 열린 편집기 작업(2026-09-29, 전수 목록 아님).** 같은 파일을 두 pane에서 공유 편집하는 경로는 §2.4와 [여러 뷰 축](native-editor-multi-view.md)의 미결 계약을 먼저 닫아야 한다. 그 경로를 기다리는 심볼 미리보기는 아래 후속 표가 소유한다. 비교 뷰의 좌우 독립 찾기 상자도 아래 N2 §5.1의 예약 후속이며, 현재는 상자 하나에서 검색 열을 표시·전환한다. draw 저장소의 B2(op 몫)는 아래 표에서 누락 보고·실측까지 진행했고 저장소 방식은 아직 결정하지 않았다. 호버·시그니처는 이미 구현됐으며 내용 정책의 소유처는 후속 표에서 tooling §8.2b·d로 연결한다. 이들은 PCRE2 검색이나 커맨드 팝업 fuzzy/한글 검색의 잔여가 아니다. 커맨드 팝업 상태는 [전체 구현 계획](../implementation-plan.md)이 소유한다.
@@ -474,38 +476,115 @@ N5(미니맵 N5a `c0aa24b11` · 막대와 미니맵 N5b `47eecce79`). **「섰�
       떨어지고 있었다 — 한글은 후보창을 보며 고르는 입력이라 그 어긋남이 곧바로 걸린다.
     - **포커스를 잃으면 확정한다.** 확정 경로가 sentinel 코어만 봐서 *"확정할 것 없음"*으로 답하고
       고정만 풀었고, 그리던 조합 글자가 **영영 남았다**.
-  - **2026-09-26 구현**: 편집기에서 `replacementRange`는 UTF-16 문서 위치를 UTF-8 byte 범위로 검증·변환해
-    primary 선택에 반영한다. `markedRange`/`selectedRange`는 문서의 실제 UTF-16 위치를 답하고, 조합 내부
-    선택은 입력기가 준 상대 위치를 쓴다. `attributedSubstring`은 조합 문자열이 선택 영역을 대체한
-    가상 문서 기준으로 경계를 가로지르는 문맥도 제공한다. 겹친 보조 커서를 병합해도 입력기가 명시한
-    primary 교체 범위는 넓히지 않는다. 새 조합의 명시 범위가 잘못되면 원래 caret에 대신 삽입하지
-    않고 그 입력을 거절한다. 이미 조합 중인 입력기가 보내는 가상 marked 범위는 문서 선택을
-    다시 놓지 않고 수락한다. 길이 0인 문맥 질의도 surrogate 쌍의 중간이면 거절한다.
-    조합은 모든 커서에 화면 투영만 하고 포커스 확정 시 추가 커서로 최종 글자를 복제한다. Enter 확정은 편집기
-    문서에 먼저 넣고 자동완성 목록의 낡은 Enter 수락을 막는다. 콜백 사이 활성 화면이 바뀌면 확정은
-    고정된 편집기로 보내되 Enter/화살표 재생은 다른 화면으로 보내지 않는다. AppKit의 `unmarkText` 단독 확정도 수락한다.
-    UTF-16 경계·교체·Enter·포커스 멀티 커서의 헤드리스 판정자가 있다. 실제 한국어 2벌식에서
-    `한` 조합과 Enter 확정 뒤 글자·개행 보존은 2026-09-27 제품 캡처로 확인했다(PR #3968).
-    2026-09-27 실제 한국어 2벌식에서 Backspace, 여러 줄 선택의 조합 미리보기·확정을 확인했다. 자동완성 목록과 한국어 조합이 동시에 열린 상태의 Enter도 확인했다: `한`이 확정되고 개행되며 낡은 목록 항목은 수락되지 않았다. 편집기의 `⌥Return` 예외로 선택한 `한`의 한자 후보창을 열어 `韓` 확정·Escape 취소·다음 일반 Enter 개행까지 확인했다([키 입력 계약](../key-input-and-shortcuts.md)).
-    여러 줄 선택의 조합 미리보기는 선택한 내용을 모두 가리고, 끝줄의 남은 내용을 첫 줄의 조합 뒤에
-    잇고 미리보기가 실제로 만들어진 경우에만 기존 선택 강조를 지운다(다른 커서의 선택 강조는 유지).
-    문서·줄 번호·클릭 좌표가
-    확정 전까지 기존 줄 축을 쓰므로, 뒤쪽 행은 빈 자리로 남고
-    실제 줄 합치기는 확정 시 일어난다(`IME9` 제품 렌더 판정자). 접을 때 선택 끝이 숨으면
-    [시각 매핑 계약](../native-editor-visual-mapping.md)의 VS Code 규칙대로 머리줄 끝으로 옮긴다.
-    이 경우 IME는 조정된 보이는 선택만 치환하고, 숨었던 끝줄의 원문은 남으며 조합 미리보기도
-    보인다(`IME10`·`FOLD-SEL1`). 실제 화면은 [접힌 선택](../images/editor-ime-fold-selection.png) →
-    [조합](../images/editor-ime-fold-composition.png) → [확정](../images/editor-ime-fold-committed.png)에서
-    숨은 두 줄이 확정 뒤에도 남는 것으로 확인했다.
-    한자 후보창 앵커는 렌더가 확정한 본문·gutter 좌표를 사용한다(`IME5`).
-    기존 좌표는 pane의 본문 오프셋을 중복 적용하고 gutter를 빼서 후보창이 글자보다 왼쪽 아래에 떴다.
-    실제 한국어 입력기의 [수정 전 후보창](../images/editor-ime-hanja-position-before.png)과
-    [수정 후 후보창](../images/editor-ime-hanja-position-after.png)에서 선택한 `한` 바로 아래로 이동한 것을 확인했다.
-    적대적 검증에서 화면 안 랩 조각도 확인했다: 문서 절대 열로 계산하면 그린 `Z`의 x=448 대신
-    후보창 앵커가 x=1616으로 밀렸다. 이제 렌더가 남긴 시각 행·열을 역으로 찾아 랩·세로 스크롤·
-    가로 스크롤에서도 같은 글자 위치를 가리킨다(`IME5` 독립 그리기 오라클).
-  **터미널이 쓰는 바로 그 경로라 최대 리스크**이며 헤드리스 판정자에 더해 실제 GUI 검증이 필요하다.
-  2026-09-29 실제 두벌식·두 커서 제품 화면에서 [조합](../images/editor-ime-multicursor-preedit.png) → [확정](../images/editor-ime-multicursor-committed.png) → [Undo](../images/editor-ime-multicursor-undone.png)를 확인했다. 이 캡처는 **이전의 primary만 조합 표시** 정책을 증명한다. 현재의 모든 커서 조합 투영 정책은 헤드리스 판정자에 더해 실제 두벌식 화면에서 [동시 조합](../images/editor-ime-multicursor-live-preedit.png) → [Enter 확정](../images/editor-ime-multicursor-live-committed.png) → [Undo](../images/editor-ime-multicursor-live-undone.png)로 확인했다(../native-editor.md §11).
+  - **범위 배선과 회귀를 고정했다(2026-09-26).** `insertText`·`setMarkedText`가 명시한 `replacementRange`를
+    문서 UTF-16 위치에서 UTF-8 byte 범위로 바꾸며, surrogate·continuation 중간이나 범위 초과·overflow는 거부한다.
+    `markedRange`·`selectedRange`·주변 문자열 질의는 문서 중간의 실제 위치와 같은 키 트랜잭션의 미반영 확정 텍스트까지 본다.
+    조합 자체는 계속 문서 밖에 둔다. 부분 재조합은 `NSTextView` 대조대로 새 marked 밖의 기존 조합만 확정한다
+    (`a😀b`의 `😀`를 marked `X`로 바꾸면 `a`·`b`는 확정되고 `X`만 조합이다).
+  - **멀티 커서의 일반 확정 복제는 이미 있었다.** 이번에 닫은 것은 앞쪽 primary의 정체성 보존, 포커스 상실 시 같은 확정 경로 사용,
+    재변환 범위와 겹친 커서의 병합, undo/redo의 원래 선택·primary 복원이다. 확정이 실패하면 조합·대상 pin·선택을 보존한다.
+    키 종료 시 확정이 거절돼도 대기 텍스트·범위·선택·Enter/화살표 재실행을 남겨 다음 키·직접 콜백·포커스 상실에서 재시도한다.
+    **재시도도 실패하는 동안 새 키는 소비한다** — 새 입력을 별도 보관하지 않고 원래 대기를 지킨다. 보존된 확정은 질의에 반영되지만
+    실패 중 문서 화면에 별도로 그리는 경로는 없으며, 문서를 닫거나 선택 상태를 폐기하면 그 문서의 대기도 취소한다.
+    메뉴 편집·undo 등으로 문서 revision이 바뀐 경우도 재시도·콜백·질의 전에 이전 대기와 조합을 취소한다. 새 문서 내용과
+    새 선택은 보존하며, 읽기 전용 상태만 풀린 경우처럼 revision이 같으면 정상 재시도한다.
+    정책은 §11에 이미 확정된 **primary만 조합하고 확정 시 나머지 커서에 복제**를 따른다.
+  - **실제 입력기의 직접 범위 교체 회귀를 수정했다(2026-09-29).** 한국어 두벌식은 marked 없이 문서의 `ㄱ`을 `가`·`간`으로
+    다시 바꾸기도 한다. 이 경로에서 마지막 자모 Backspace의 빈 확정이 삭제 범위를 잃는 문제와, 나머지 커서에 중간 글자가
+    누적되는 문제를 재현했다. 빈 확정도 삭제 편집으로 보존하고, 직전 직접 확정의 삽입 범위·selection·primary·revision이
+    일치할 때만 secondary의 대응 부분을 다시 교체한다. 일반 재변환은 기존 범위 계약을 유지한다.
+  - **자동 검증과 실제 입력기 검증을 구분한다.** `zig build test`의 `ETI*`·`IME_RANGE*`·`IME_PARTIAL*`·`IME_CARET*`·
+    `IME_MULTI*`·`IME_DIRECT_MULTI*`·`IME_DELETE*`·`IME_RETRY*`가 변환·재변환·pending commit·마지막 자모 Backspace·Enter·부분 교체·선택 이동·멀티커서·실패 보존을 고정한다
+    (편집기/L2 빠른 고리는 `zig build test-editor`). opt-in **`mise run macos-editor-ime-smoke`**는 제품 앱의
+    `NSTextInputClient` 콜백과 저장 결과·한 번의 undo를 검증한다. 2026-09-29 제품 회차도 `failure_count=0`으로 통과했다.
+  - **실제 한국어 입력기 검증(2026-09-29)**: opt-in **`mise run macos-editor-ime-live-smoke`**가 잠금 해제 상태에서
+    `failure_count=0`으로 통과했다. 문장 중간 `ㄱ→가→간→가나`, 두 커서의 같은 입력, 단일·멀티커서 마지막 자모
+    Backspace를 실제 HID로 보내고 매 키의 문자열·UTF-16 caret·marked 정합성·콜백 및 최종 저장을 확인했다.
+    관측 프로토콜은 `setMarkedText` 0회·`insertText` 14회·명시 범위 교체 8회였고 입력 소스 복원도 통과했다.
+    2026-09-26 `loginwindow` 회차는 키·입력 소스 변경 0인 전제조건 실패 기록이다.
+  - **남은 GUI 검증**: 한자 후보창 위치·픽셀, 실제 입력기의 Enter 확정·터미널 입력 무회귀는 이번 스모크 범위 밖이다.
+    fixture 준비와 저장 단축키는 직접 콜백/NSEvent를 쓰며 실제 HID 게이트와 구분한다.
+    **콜백 스모크 통과나 이 입력 시퀀스의 성공을 N3 전체 완료로 읽지 않는다.**
+  - **여러 줄 시각 투영을 구현했다(2026-09-30).** `editor_preedit_view.zig`가 교체 범위의 경계 줄만 복사해
+    원문 접두·조합·원문 접미를 새 줄 목록으로 만들고, 문서·line index·접힘 상태는 보존한다. CRLF와 여러 줄 범위를
+    별도로 평탄화한 문자열/line-index 모델과 비교한다. 선택·검색·syntax·진단·인레이·나머지 caret·접힘 번호와 충돌 UI를
+    같은 표시 축으로 옮기며, 병합 Result도 이 투영을 사용한다. 새 marked 위에 기존 색과 힌트를 겹치지 않는다.
+    조합 갱신·확정 뒤 낡은 클릭 좌표를 거절하고, 긴 조합의 caret은 임시 뷰포트 안에 둔다.
+    후보창 anchor는 실제 랩 행과 gutter·inset을 따르며, paint 이전 질의도 렌더의 `content.build`로 배치한다.
+    `IME_VIEW*`가 표시·클릭·undo·실제 caret quad·랩 anchor·긴 조합을, `IME_VIEW_MODEL*`가 범위와 annotation 이동을 고정한다.
+  - **2026-09-30 실행 환경의 GUI 게이트**: Enter의 실제 HID·저장 확인을 live smoke에 추가했으나 실행 앱은
+    입력 전에 `NSApplication.sharedApplication` → `_RegisterApplication`에서 `SIGABRT`로 종료됐다.
+    이번 회차의 실제 Enter·한자 후보창 픽셀·터미널 IME 확인은 미검증이다. 이전 9/29의 입력 시퀀스 통과와 구분한다.
+    후속 조사에서는 Maru 코드가 없는 최소 AppKit 예제를 서명된 `.app`으로 실행해 같은 등록 단계 종료(exit 134)를 재현했다.
+    제품 앱과 최소 앱의 서명 검사는 통과했다. 번들 밖 실행은 종료하지 않았지만 활성화가 실패했고 CGSession도 조회되지 않아 GUI 통과 근거가 아니다.
+    이 회차에서는 제품 초기화 코드를 변경하지 않는다. 정상 GUI·Unix 소켓 접근이 가능한 환경에서 아래 순서로 재개한다.
+    1. `mise run macos-editor-ime-smoke` 후 `mise run macos-editor-ime-live-smoke`로 콜백과 실제 Enter·저장·입력 소스 복원을 확인한다.
+    2. `mise run macos-editor-ime-wrapped-candidate-smoke`로 줄바꿈된 조합의 한자 후보창 위치·PNG·독립 OCR·Enter 확정·저장을 확인한다. 자동 경로는 구현했으며 실제 실행 통과는 아직 대기 중이다. 위 일반 live smoke는 한자 후보창을 검증하지 않는다.
+    3. 전용 fixture와 TCC 권한을 확인하고 `mise run macos-session-host-input-continuity-smoke`로 터미널 IME·후보창·복원을 확인한다.
+    4. `mise exec -- zig build test-editor`와 `mise run -j2 -c check`를 다시 통과시킨 뒤 PR 준비를 판단한다.
+  - **2026-09-30 최종 자동 검증**: IME·선택 보내기 인접 회귀 84개가 통과했고, 전체 `test-editor`는 2,633개 통과·1개 실패다.
+    실패는 `CR4b actual host job`의 실제 소켓 생성 대기이며, 별도 Unix socket bind도 이 샌드박스에서 errno 1
+    (`Operation not permitted`)로 거부됐다. 앱/Swift 빌드·경계·포맷·문서 검사는 통과했다. 전체 `check`는 소켓·프로세스·
+    디스크 이미지 접근 실패를 포함해 미통과다. 그 회차에서 발견한 조합 중 선택 보내기 상자 회귀는 수정하고 위 두 테스트 고리로 재검증했다.
+  - **2026-09-30 실행 제한 해제 후 재검증**: Unix 소켓 생성과 제품 앱 실행이 성공했고, 제품 콜백 스모크는
+    `failure_count=0`으로 통과했다. `test-editor`는 2,634개 모두 통과했으며 이전에 실패한 `CR4b actual host job`도 통과했다.
+    전체 `mise run -j2 -c check`도 exit 0으로 통과했다. 앞선 제한 환경의 미통과 기록과 구분한다.
+    실제 입력 smoke는 전면 앱이 `loginwindow`인 상태에서 `editor_timeout`으로 끝났다. 입력 콜백은 0회였고
+    입력 소스 변경 전 포커스 게이트에서 대기했으므로 실제 Enter·한자 후보창·터미널 IME 통과 근거가 아니다.
+  - **2026-09-30 잠금 해제 후 실제 편집기 입력**: Enter fixture의 직접 `doCommand(moveRight:)`가 caret을
+    이동시키지 않는 재현을 확인하고 실제 HID 방향키 준비로 고쳤다. 수정 후 live smoke는 `failure_count=0`이며
+    단일·멀티커서 조합, 마지막 자모 삭제, Enter의 확정·줄바꿈, 저장 바이트와 입력 소스 복원을 통과했다.
+    관측 프로토콜은 marked 0회·insert 17회·명시 범위 교체 10회였다. 앞선 포커스 조건 실패 회차는 통과에서 제외한다.
+    이 결과는 편집기의 한자 후보창 픽셀이나 터미널 IME 통과를 뜻하지 않는다.
+    터미널 continuity smoke는 실제 복구와 클립보드 관측 뒤 `accessibility-unavailable`로 IME 입력 전에 중단됐다.
+    staging 앱 `/private/tmp/maru-macos-app/Maru.app`의 TCC 권한이 필요하다. 후보창은 관측되지 않았으며
+    뒤따르는 pixel verifier의 `FileNotFound`는 입력 전 실패로 artifact가 생성되지 않은 결과다.
+    허용 스위치를 다시 켠 뒤에도 실패한 회차는 TCC의 허용 기록에 묶인 이전 ad-hoc 서명 해시와 현재 앱 해시가
+    다른 것을 읽기 전용 조회로 확인했다. 해당 앱 항목을 제거·재등록하고 현재 staging 앱을 재검증해야 한다.
+  - **2026-09-30 TCC 재등록 후 터미널 실측**: 제품 앱을 재빌드하지 않고 현재 서명에 손쉬운 사용·화면 기록
+    허용이 연결된 것을 확인했다. 실제 터미널 입력 회차에서 historical·한글 확정·클립보드 관측은 각각 1회였고,
+    marked 48회·insert 2회, 입력 소스 복원과 복원 기록 제거가 확인됐다. 별도 strict pixel verifier는 조합 전/첫 marked
+    화면과 receipt를 받아 exit 0으로 통과했다. 앞선 첫 입력 대기 timeout 회차는 성공에서 제외한다.
+    한자 후보창 관측은 5개 triplet을 수집했으나 제품 reducer가 `CandidateMissing`으로 게시를 거절했다.
+    summary는 `candidate-observation-failed`·`rejected-1`이며 후보창 artifact가 없어 전체 continuity gate는 미통과다.
+    하니스 프로세스 exit 0을 전체 게이트 성공으로 읽지 않는다. 편집기 한자 후보창 픽셀도 여전히 별도 미검증이다.
+  - **후보창 실패 외부 재현**: 현재 승인된 앱 그대로 외부 WindowServer 목록을 수집해 `CandidateMissing`을
+    재현했다. 요청 구간에 Maru 소유의 새 layer 20 창(102×295)이 관측됐다. reducer는 app PID 소유 창을 제외한다.
+    외부 캡처 명령은 이미지 저장에 실패했으므로 그 창의 후보창 정체는 아직 확정하지 않는다.
+    제품 producer는 게시 거절 시 bounded 원본을 별도 `*.rejected-transcript.json`에 배타 생성하도록 보강했다.
+    정식 성공 artifact와 판정 규칙은 그대로이며, 새 producer의 GUI 재검증은 재빌드·서명·TCC 갱신 이후 필요하다.
+  - **진단 앱의 거절 원본 확보**: 다섯 triplet 모두 opened snapshot에 before에 없던 창 ID가 없었다.
+    이번 원본에서는 app-owner 제외가 아니라 새 창 미관측이 직접 실패 조건이다. 후보창 대기가 owner tick 3회에
+    의존해 Escape가 WindowServer 표시보다 먼저 도착할 가능성이 있어, open/close 이후 대기를 monotonic 250ms로
+    바꿨다. 판정 규칙은 유지한다. 빌드·Swift 검사는 통과했고 새 앱을 staging했으나, 수정 효과의 GUI 검증은
+    새 서명에 대한 TCC 재등록 이후 남아 있다. 대기 수정만으로 원인이 확정됐거나 gate가 통과했다고 주장하지 않는다.
+  - **250ms 대기 적용 후 원본 실측**: 새 서명의 두 TCC 허용을 확인하고 재실행했다. 5회 모두 요청 후 새
+    layer 20 창이 관측됐지만 owner PID는 앱 자신이고 signing ID는 `dev.maru.apphost`, `apple_signed=false`였다.
+    따라서 앱 PID 제외 조건에서 `CandidateMissing`이 발생한다. 시간 대기는 새 창 미관측을 해결했으나
+    Apple 서명·외부 PID 기반 기존 신뢰 조건은 이 앱 소유 창을 인정하지 않는다. 성공 판정을 위해 이 조건을
+    임의로 완화하지 않으며, 앱 소유 후보 UI의 별도 캡처·수명·배제 증거 경로는 사용자 설계 논의가 필요하다.
+
+  - **앱 소유 후보창 자동 검증 확장(2026-09-30 사용자 승인)**: 별도 app-owned 경로에서 새 창 하나·앱 PID/서명·layer 20, single-window PNG와 한자 행 OCR을 요구한다. v2 artifact는 창 ID·PNG SHA-256·크기·행 수를 결속하고, 별도 Swift verifier가 저장 이미지를 재읽어 OCR/digest를 확인한다. 준비 요청 1회 뒤 5회에는 fresh ID·geometry·소멸·counter 불변을 그대로 적용한다. Debug/ReleaseFast 각 11개 및 Swift/앱 빌드는 통과했다. 새 앱 서명의 TCC 갱신 후 실제 gate 통과는 아직 남아 있다.
+    독립 verifier는 일반 터미널 이미지·변조 SHA-256·다른 window ID를 각각 거부했다. 전체 `check`는 605.58초 뒤
+    이전의 Swift 파일 쓰기 전제를 둔 경계 테스트 1개로 실패했다. 성공 artifact는 계속 Zig가 게시하도록 유지하고
+    실패 원본의 배타 저장만 허용하도록 경계를 수정한 뒤 해당 경계 4개는 모두 통과했다. 전체 `check` 재통과와
+    새 앱의 실제 후보 PNG/OCR 통과는 아직 주장하지 않는다.
+  - **2026-10-01 실제 후보 PNG 확보와 OCR 회귀 수정**: 승인된 앱의 단일 창 캡처는 성공했고 실제 `韓·寒·恨·汗·漢`
+    후보 목록을 이미지에서 확인했다. 한국어 우선 OCR이 한자를 Hangul로 오인해 자동 검증을 거절한 것을 동일 PNG의
+    언어별 비교로 재현했다. 생산자·독립 verifier를 한자 검사 목적의 `zh-Hant` 인식으로 맞췄다. 해당 실제 PNG를
+    사용하는 합성 OCR fixture는 통과하고 변조 digest는 거절했다. 이 fixture는 실제 5회 GUI 관측을 대체하지 않는다.
+    수정 앱/Swift 빌드·서명 검사는 통과했고 staging했다. 새 서명 TCC 갱신 후 실제 5회 gate 통과는 아직 남아 있다.
+  - **2026-10-01 실제 자동 검증 통과**: `b31d358f…` 앱의 두 TCC 권한을 확인하고 재빌드 없이 실행했다.
+    준비 요청 이후 5회 후보창의 fresh ID·동일 geometry·Escape 소멸·PTY/commit/screen 불변 판정과 v2 게시가 통과했다.
+    독립 verifier가 5개 단일 창 PNG의 SHA-256·크기·한자 OCR을 재확인했고, 조합 전/첫 marked 화면의 strict pixel
+    verifier도 통과했다. historical·한글 확정·클립보드는 각 1회, marked 56회·insert 2회였으며 view/global source
+    복원·복원 기록 제거와 두 failure 필드가 빈 값임을 확인했다. 터미널 후보창 자동 gate는 통과했지만,
+    편집기의 줄바꿈된 한자 후보창 실측이나 앞서 수정한 경계 이후 전체 `check` 재통과로 확대하지 않는다.
+
+  - **2026-10-01 줄바꿈 후보창 자동 경로와 전체 검사**: opt-in `macos-editor-ime-wrapped-candidate-smoke`는 실제 한국어 HID 조합, 시각 행 아래 5곳의 후보창 단일 PNG·SHA-256·독립 한자 OCR·caret 인접 위치, Enter 확정과 저장을 검사한다. 앱/Swift 빌드와 셸 검사는 통과했다. 독립 verifier의 정상 합성 표본은 통과하고 줄바꿈 기하 변조는 거절했다. `mise run -j 2 -c check`는 564.24초, 종료 코드 0으로 완료했다. 새 서명 `f8290f63…` 앱의 TCC 등록 후 실제 5회 검증은 `failure_count=0`과 독립 verifier 통과로 완료했다. 초기 fixture의 창 너비·Option-as-Meta·Enter 정책 불일치는 640×700 창, `input.option-as-meta=false`, `input.ime-enter=commit-only`로 맞췄다. 제품 기본 정책은 유지한다. 입력 소스 복원도 확인했다. 합성 표본은 실제 GUI 통과 근거와 구분한다.
+
+  - **2026-10-01 main 통합 검증**: `b57847b15` 기반 새 브랜치에 잔여 변경을 통합했다. `editor_document`/history owner, 편집기 후보 키 소유권, 팔레트 Enter 및 diff 검색 동작을 유지하며 새 범위 API의 ABI를 v190으로 올렸다(기존 v189 export 유지). 최신 반열린 선택 규칙에 따라 맞닿는 두 범위는 별개인 회귀 표본을 확인했다. 전용 로컬 캐시의 전체 `mise run -j 2 -c check`는 553.35초, 종료 코드 0으로 통과했고 앱 빌드·Swift 검사도 통과했다. 공유 캐시 누락 회차와 통합 중 발견한 낡은 테스트 필드/ABI 기대값 실패는 최종 통과와 구분한다. `b44d0747…` 앱을 staging했으며 통합 후 실제 HID/후보창 검증은 이 서명의 TCC 등록을 기다린다. 앞의 `f8290f63…` GUI 통과를 새 앱의 증거로 대신하지 않는다.
+
 - **N4 — 토큰과 LSP 표시.** 미니맵이 lexer 층에 의존하므로 N5보다 앞선다. 계약 절과의 대응:
   - **토큰**(§5·§5.3): **tree-sitter 1층**(런타임 배선 + `init`/`onEdit`/`spansForRange` provider) → LSP semantic
     tokens 층(보이는 범위 요청, 부분 덮기). N1.5에서 이미 뜬 diff 본문에 syntax 색이 여기서 얹힌다. 트리가 서면

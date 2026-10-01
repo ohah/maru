@@ -742,7 +742,11 @@ fn runSessionHostImpl(
     defer allocator.free(executable_path_raw);
     const executable_path = allocator.dupeZ(u8, executable_path_raw) catch return error.OutOfMemory;
     defer allocator.free(executable_path);
-    const build_id = host_manifest.buildIdForExecutable(allocator, executable_path) catch return error.ManifestFailed;
+    // 실행 파일은 **한 번만** 읽는다 — build id 와 아래 rollback self-image 가 같은 identity 를 쓴다. 예전에는
+    // build id 계산·rollback 전 재검사·`prepare` 안 재검사가 각자 경로를 다시 열어 해시했고(시작 한 번에 source 네 번),
+    // 그 사이 번들이 교체되면 build id 와 rollback identity 가 서로 다른 바이트를 가리킬 수 있었다.
+    const launch_identity = staged_image.inspect(executable_path) catch return error.ManifestFailed;
+    const build_id = host_manifest.buildIdForIdentity(allocator, launch_identity) catch return error.ManifestFailed;
     defer allocator.free(build_id);
     var host_dir_buf: [768]u8 = undefined;
     const host_dir = if (exact_host_id) |exact|
@@ -784,40 +788,36 @@ fn runSessionHostImpl(
         .allocator = allocator,
     };
     if (exact_host_id != null and upgrade_residue_clean) {
-        if (staged_image.inspect(executable_path)) |running_identity| {
-            if (rollback_image.Authority.prepare(
+        if (rollback_image.Authority.prepare(
+            allocator,
+            executable_path,
+            launch_identity,
+            host_dir,
+        )) |prepared_rollback| {
+            rollback_authority = prepared_rollback;
+            // The app/updater pathname can be replaced while this daemon
+            // lives. The canonical self-image is owner-only and promotion
+            // rotates its contents while keeping this path stable.
+            signature_authorizer.current_executable =
+                rollback_authority.?.image.path;
+            upgrade_attempt_owner = upgrade_owner.UpgradeOwner.init(
                 allocator,
-                executable_path,
-                running_identity,
-                host_dir,
-            )) |prepared_rollback| {
-                rollback_authority = prepared_rollback;
-                // The app/updater pathname can be replaced while this daemon
-                // lives. The canonical self-image is owner-only and promotion
-                // rotates its contents while keeping this path stable.
-                signature_authorizer.current_executable =
-                    rollback_authority.?.image.path;
-                upgrade_attempt_owner = upgrade_owner.UpgradeOwner.init(
-                    allocator,
-                    target_stager.ops(),
-                    .{
-                        .ctx = &registry,
-                        .is_busy = struct {
-                            fn busy(ctx: *anyopaque) bool {
-                                const runtime_registry: *reg.TerminalRuntimeRegistry =
-                                    @ptrCast(@alignCast(ctx));
-                                return runtime_registry.attachmentCount() != 0;
-                            }
-                        }.busy,
-                    },
-                );
-            } else |_| {
-                // Keep-alive is the primary service. If live-upgrade staging
-                // cannot be prepared, serve normally without advertising it.
-            }
+                target_stager.ops(),
+                .{
+                    .ctx = &registry,
+                    .is_busy = struct {
+                        fn busy(ctx: *anyopaque) bool {
+                            const runtime_registry: *reg.TerminalRuntimeRegistry =
+                                @ptrCast(@alignCast(ctx));
+                            return runtime_registry.attachmentCount() != 0;
+                        }
+                    }.busy,
+                },
+            );
         } else |_| {
-            // buildIdForExecutable already validated launch identity, but an
-            // exact reinspection race only disables upgrade capability.
+            // Keep-alive is the primary service. If live-upgrade staging
+            // cannot be prepared — including the executable having changed
+            // since launch_identity — serve normally without advertising it.
         }
     }
     var published_manifest: ?host_manifest.Published = null;

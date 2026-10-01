@@ -2480,7 +2480,10 @@ flowchart TD
   entrypoint 성공, rollback role의 target-image 오용 거부, primary-corrupt/backup-valid rollback 성공을 process
   test로 검증한다. 이때 primary를 zero-byte로 truncate해도 rollback은 그 fd의 owner-only/unlinked provenance만
   확인하고 backup을 독립 decode한다. `rollback_image.Authority`는 caller가 준 pinned running identity와 source를 대조한 뒤 owner-only
-  current leaf에 copy/hash/sync한다. Promotion은 `promoted`, `unchanged_failure`, swap은 됐지만 capability 철회가
+  current leaf에 copy/hash/sync한다. 대조는 **복사하는 그 fd에서** 한다(`staged_image.stageVerifiedSource` — dev/inode/size는 그
+  fd의 `fstat`, 내용은 복사하며 계산한 SHA-256을 rename 전에) — source를 따로 다시 해시하지 않는다. 제품 daemon은 시작 때
+  실행 파일을 **한 번** `inspect`해 그 identity로 build id와 rollback self-image를 함께 만든다(예전에는 시작 한 번에 source를
+  네 번 읽었고, 그 사이 번들이 교체되면 build id와 rollback identity가 서로 다른 바이트를 가리킬 수 있었다). Promotion은 `promoted`, `unchanged_failure`, swap은 됐지만 capability 철회가
   필요한 `promoted_needs_poison`, `indeterminate`를 구분하고 post-swap failure에서 disk identity를 reconcile한다.
   swap 뒤 실패로 old executable이 target leaf에 남으면 `Authority`가 exact dev/inode cleanup handle을 인수해
   deinit 때 replacement를 건드리지 않고 residue만 회수한다. 제품 main은 `RestoreArmed→RestoreValidated` typestate,

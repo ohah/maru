@@ -1,6 +1,6 @@
 # 공유 문서와 독립 편집기 뷰 — 설계 제안
 
-상태: VS Code 기준 공유 뷰 UX 승인, 단일 뷰 이력 소유 분리 착수. 공유 뷰 제품 미구현. 2026-10-01 main `bb0ef4948`의 코드와 기존 계약을 대조했다.
+상태: VS Code 기준 공유 뷰 UX 승인, 단일 뷰 본문·이력 소유 분리 및 중립 참조 수명 골격 구현. 공유 뷰 제품 미구현. 2026-10-01 main `bb0ef4948`의 코드와 기존 계약을 대조했다.
 사용자는 설계 정리·단계 분해에 이어 2026-10-01 VS Code 기준 UX 채택을 승인했다.
 목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰 제품 구현과 실제 OS 입력 검증은 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
 [Surface 문서 identity](../editor-surface.md), [탭·split 배치](../tabs-splits-layout.md)가 소유한다.
@@ -23,7 +23,8 @@ IME 조합의 모델 반영은 현재 Maru preedit 계약과 달라 표시 목�
 묶었지만 여전히 단일 Term이 그 객체를 소유한다. `editor.zig`가 편집·저장·해제를
 Term 기준으로 수행한다. `src/session/editor/delta.zig`는 변경·역연산·offset 매핑을 제공하지만
 여러 뷰에 대한 게시·Undo 그룹·IME 소유자 전환까지 제공하지 않는다.
-`DocumentRegistry`는 기존 설계의 이름이며 제품 구현이 이미 있다는 뜻이 아니다.
+`document_registry.Registry`는 안정 슬롯과 참조 수명을 제공하는 중립 골격이다.
+현재 제품 `TermRuntime`은 아직 값을 소유하며 app-global registry 배선이 있다는 뜻은 아니다.
 첫 split 대상은 기존 일반 네이티브 편집 문서다. 같은 경로를 보더라도 read-only diff의
 base/modified snapshot과 3-way merge의 각 입력은 정본 편집 뷰로 합치지 않는다.
 비교·병합의 결과 문서를 연결할지, 이름 없는 문서·원격 문서의 split을 언제 노출할지는
@@ -433,3 +434,37 @@ Ready 이벤트를 다시 발생시켜 실제 제품 CI를 실행하자 기존 �
 빈/재해제·이력 capacity·본문을 빌린 상태의 신원 해제를 중립 테스트로 검사한다.
 안정 핸들·app-global registry·참조 카운트·마지막 연결 해제 및 공유 입력은 다음
 슬라이스에 남는다. 이 PR은 단일 뷰의 소유 경계 이관이며 공유 문서 완료가 아니다.
+
+
+## 안정 문서 핸들과 참조 수명 골격
+
+`session.editor.document_registry.Registry`는 `document_state.State`를 개별 heap 슬롯에
+소유한다. 목록 증가는 슬롯 포인터만 옮기며 문서 주소는 움직이지 않는다. `Handle`은
+slot/generation을 구분하고 `Lease`는 registry owner·참조 id·kind를 검증한다. lease는
+복사한다고 새 참조가 되지 않는다. 새 뷰/읽기/요청 수명은 `retain`으로 발급한다.
+Registry 자체는 참조가 살아 있는 동안 메인 스레드의 같은 주소에 있어야 한다.
+
+`create`는 슬롯·문서·첫 view 참조를 모두 준비한 뒤 caller State를 소비한다. 할당 실패는
+caller의 본문·경로·이력을 유지한다. `retain` 실패도 기존 참조 수를 바꾸지 않는다.
+`get`의 빌린 State 포인터는 해당 lease를 놓기 전까지 유효하며 다른 슬롯 증가는 영향을
+주지 않는다. 빌린 State의 clear/이동은 registry만 수행한다. 참조 pin은 immutable snapshot이나
+동시 읽기 락을 제공하지 않으며 renderer/worker 읽기 계약은 제품 배선 전에 별도로 닫는다.
+마지막 view를 놓아도 read/request 참조가 있으면 문서는 남는다. 모든 참조가
+사라질 때만 `release`가 State를 정산한다. State resource allocator와 registry bookkeeping
+allocator는 별도로 저장한다. 제공한 resource allocator는 기존 경로/이력의 할당 짝이며
+마지막 참조 해제까지 살아 있어야 한다. pin이 allocator 소유자의 수명을 늘려 주지는 않는다.
+`resourceAllocator`는 살아 있는 lease의 문서 allocator를
+돌려주며 경로·이력의 새 할당도 그 allocator를 사용해야 한다. 세대/참조 id는 되감지 않으며
+상한 세대 슬롯은 재사용하지 않는다.
+
+Dirty 확인·OS 조합 정산·provider 취소·렌더 참조 종료는 coordinator 책임이다. 각 lease의
+`release`는 해당 정산 뒤에만 호출한다. 살아 있는 문서를 강제로 버리는 종료 API는 없고
+`deinit`은 Busy로 거절한다. recovery 삭제·경로별 alias 통합·LSP didClose를 이 골격에서
+수행하지 않는다. 마지막 뷰 개수만 0이면 문서를 즉시 버리는 정책도 아니다.
+
+`DREG1`~`DREG6`는 실제 본문 소유, 두 view와 read/request pin, 마지막 참조 해제,
+100개 슬롯 증가의 주소 안정성, 슬롯 재사용/이전 세대/중복/다른 owner/잘못된 kind 거절,
+모든 준비/retain 할당 실패, 세대/id 상한 및 allocator 분리를 판정한다. 제품 split/IME를
+실행한 결과와 구분한다. 현재는 중립 모듈과 실제 L2 테스트 집계에 배선했으며 AppRuntime
+및 Term의 handle 이관은 아직 없다. 다음은 열린 문서의 준비→등록→뷰 연결과 기존 두
+teardown 호출자를 이 수명으로 배선하되 provider/렌더/입력 정산을 먼저 확정하는 단계다.

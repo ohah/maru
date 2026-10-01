@@ -29,7 +29,7 @@ Maru 설계는 [공유 문서 제안](plans/editor-shared-document.md), 계약�
 | Save As 기존 대상 | 기존 target model이 있으면 그 모델을 사용하고 source snapshot으로 내용을 갱신·저장하는 경로가 있다. 대상 선택/overwrite 확인 경로는 따로 있다 [S14] | 두 정본·Undo를 합치지 않음. dirty 대상 덮어쓰기의 모든 확인 조건은 이번 소스 경로만으로 보장하지 못했으므로 Maru 충돌 선택 정책을 별도 확정 |
 | 이름 없는/원격 문서 | 공식 설명은 untitled 미저장 복원을 포함하며 모델/저장 API는 URI를 사용한다 [D3][S2][S14] | 지원 표에 별도 항목으로 추가, 기존 untitled/원격 저장·백업 gate를 통과해야 split 노출. 모든 remote provider가 같은 정책이라는 추론은 하지 않음 |
 | 재시작·Hot Exit | 공식 문서는 종료 시 미저장 복원과 Hot Exit 설정·window restore 설정을 구분한다. backup 서비스는 URI/type과 checkpoint version을 다룬다 [D3][S15] | 문서 백업 하나·뷰 상태 각각. runtime generation을 영속 identity로 쓰지 않고 기존 별도 backup/schema 정책 유지 |
-| 할당 실패·Undo 유실 | 읽은 JS/TS 소스에서 Maru의 allocator 실패 주입과 동등한 정상 복구 계약은 확인하지 못했다 | VS Code도 같다고 가정하지 않음. 현행 pushUndo의 기록 실패 뒤 이력 정책은 Maru 독립 반례·실패 주입으로 결정 |
+| 할당 실패·Undo 유실 | 읽은 JS/TS 소스에서 Maru의 allocator 실패 주입과 동등한 정상 복구 계약은 확인하지 못했다 | VS Code도 같다고 가정하지 않음. 2026-10-01 승인: Undo 공간을 편집 전에 준비하고 실패 시 해당 편집을 적용하지 않으며 기존 이력을 보존. VS Code의 OOM 복구 보장과 구분 |
 | stale 편집·비동기 종료·권한 | model 편집과 save 순서는 참고 가능하지만 Maru의 L4/AppRuntime·grant·AppKit 수명에 그대로 대응하지 않는다 | 기존 writer/revision/handle generation과 자원 scope 계약 유지. VS Code 참고만으로 미결 구현 경계를 완료 처리하지 않음 |
 
 ## 무엇을 결정할 수 있고 무엇을 더 검증해야 하나
@@ -92,3 +92,16 @@ VS Code와 런타임이 달라 Maru 판정자로 닫는다. 이번에는 소스/
 
 표의 권장안은 위 계약의 채택 전 비교 기록이다. 현재 승인된 UX와 남은 구현 gate는 §2.4a와
 공유 문서 계획을 읽는다. VS Code 코드 표현은 계속 복사하지 않는다.
+
+
+2026-10-01 실패 정책 재대조: [EditStack.pushEditOperation](https://github.com/microsoft/vscode/blob/main/src/vs/editor/common/model/editStack.ts#L381-L407)은
+항목 확보→applyEdits→역연산 append 순서이며 이 경로에 allocator 실패 복구 분기는 없다.
+[V8 FatalProcessOutOfMemory](https://github.com/v8/v8/blob/main/src/api/api.cc#L239-L256)는 치명적 OOM에서
+실행을 중단하는 경로다. 이를 모든 예외나 VS Code의 모든 OOM 증상에 일반화하지 않는다.
+Maru의 재현 가능한 할당 실패 보존 정책은 위 사용자 승인과 독립 fail-index 판정에 따른다.
+
+같은 창 공유 게시의 삽입 경계는 [oneCursor의 tracked range](https://github.com/microsoft/vscode/blob/main/src/vs/editor/common/cursor/oneCursor.ts#L44-L67)의
+AlwaysGrowsWhenTypingAtEdges와 빈 선택의 collapseToEnd를 근거로, caret는 뒤·범위 시작은 앞·끝은 뒤를 채택한다.
+이는 소스에서 도출한 동작이며 실제 VS Code GUI 비교를 수행한 증거는 아니다. 삭제·교체 내부
+좌표는 Maru의 기존 UTF-8 delta 시작점 clamp를 유지한다. VS Code의 UTF-16 marker replacement
+처리 전체가 같다고 해석하지 않는다. `SHVIEW10`은 실제 두 Term의 양 경계 삽입과 역방향 선택을 판정한다.

@@ -2202,6 +2202,10 @@ const TermRuntime = struct {
 
     /// 문서 버퍼를 빌린 논리 줄 배열. 뷰의 파생 상태이므로 본문 수명 안에서만 읽는다.
     editor_lines: []const []const u8 = &.{},
+    /// 공유 편집이 미리 준비한 줄 배열. refreshAfterEdit가 재할당 없이 한 번 소비한다.
+    editor_shared_lines_ready: bool = false,
+    /// 공유 편집 전에 확보한 호출 뷰의 결과 커서 저장소. writeBack/Undo 복원이 소비한다.
+    editor_shared_selection_buf: ?[]maru.session.editor.selection.Selection = null,
     /// **미저장 편집의 백업 시계**(§3.10) — 편집이 있었고 아직 안 쓴 상태이면 `dirty`, 그 만기가
     /// `due_ns` 다. 정책(주기·임계)은 L2 `session.editor.backup` 이 알고, 이 셋은 그 시계의 자리다.
     editor_backup_dirty: bool = false,

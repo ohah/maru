@@ -80,10 +80,14 @@ flowchart LR
 않으며, 다시 표시할 때 최신 revision으로 캐시를 재구성한다. 프레임 안 텍스트와 좌표의 revision은 같아야 한다. 수정 가능한 버퍼를
 렌더 스레드가 무보호로 읽지 않도록 기존 스레딩 계약과 맞춘 읽기 수명/게시 방식을 정한다.
 버퍼 변경과 뷰 좌표의 준비 실패에서 부분 적용을 게시하지 않는 경계를 검증한다.
-Undo 기록 할당 실패는 별도 정책이다. 현재 `editor/mod.zig`의 `pushUndo`는 편집을 유지하고 기록을
-버리므로, Undo까지 모두 준비해야 편집하는 방식으로 바꾸려면 기존 동작 변경 승인이 필요하다.
-현행 정책을 유지할 경우 이전 Undo/Redo가 기록되지 않은 변경을 넘어서 낡은 offset을 적용하지
-않도록 안전한 이력 경계를 별도로 정하고 실패 주입으로 판정한다. 이력 보존/초기화 정책은 아직 미결이다.
+Undo 기록 실패 정책은 2026-10-01 사용자 승인으로 정했다. 본문 변경 전에 역연산·선택 snapshot과
+Undo 스택 capacity를 준비하고, 준비 실패는 해당 편집을 적용하지 않는다. 기존 본문·선택·live 이력은
+유지한다. `pushUndo`의 append는 준비된 capacity에만 쓰며 게시 뒤에 할당하지 않는다. 이는 과거의
+「입력은 유지하고 기록만 버린다」 정책을 바꾼다. VS Code도 정상 경로에서는 편집 전에 항목을
+확보하지만, 같은 allocator 실패 복구를 보장한다고 해석하지 않는다.
+Undo/Redo도 반대 스택 capacity·선택 snapshot을 역연산 적용 전에 준비하고, 성공한 항목만
+스택에서 이동한다. 여러 항목의 기존 Undo 묶음은 순차 delta다. 중간 적용 실패 시 앞서 적용한
+delta는 유지하고 미적용 항목은 남겨 재시도한다. 묶음 전체 rollback 계약을 새로 추가하지 않는다.
 
 문서마다 편집·Undo·Redo·재로드의 writer 순서를 하나로 정한다. 요청은 기준 revision을 포함한다.
 두 뷰가 같은 revision에서 교체를 준비한 경우 먼저 적용된 변경 뒤의 두 번째 요청을 그대로
@@ -174,7 +178,7 @@ snapshot으로 보존한다. 현재 동기 `saveDocumentGuarded`의 빌린 `save
 |---|---|---|
 | 0 | 현재 owner·호출·스레드·저장/백업/LSP 경계 조사, 미결 정책 확정 | 필드별 문서/뷰 분류와 소비처 목록, 실패/종료 순서, 계약 수정안 리뷰 |
 | 1 | 정본 owner와 안정된 handle 도입, 기존 단일 뷰 이관 | 기존 편집·Undo·저장·IME 회귀 통과, 연결 실패/늦은 콜백/마지막 해제 판정, 새 split 아직 미노출 |
-| 2 | 같은 문서 두 뷰의 delta 게시·좌표·Undo | 실제 두 뷰 fixture로 입력/삭제/교체/멀티커서/Undo와 양쪽 revision·내용·좌표 일치, 버퍼/뷰 좌표 준비 실패 시 기존 상태 보존, Undo 기록 실패 정책 별도 판정 |
+| 2 | 같은 문서 두 뷰의 delta 게시·좌표·Undo | 실제 두 뷰 fixture로 입력/삭제/교체/멀티커서/Undo와 양쪽 revision·내용·좌표 일치, 버퍼/뷰 좌표 준비 실패 시 기존 상태 보존, Undo 기록 준비 실패 시 해당 편집 미적용과 기존 이력 보존 |
 | 3 | IME·LSP·저장·외부 변경을 공유 owner에 연결 | 실제 두벌식 포커스 전환, stale 응답, 저장 중 편집, 한 뷰 닫기, dirty 마지막 닫기 취소 판정 |
 | 4 | 명시적 pane 분할과 MRU·닫기 UI, 내부 fixture에서 검증 | 기존 split 배치 재사용, 양쪽 독립 스크롤/선택, 경로로 열기는 MRU 뷰 활성화, 실패 시 레이아웃 보존·실제 화면 증거, 단계 5 전 일반 사용자 노출 금지 |
 | 5 | 복원·rename·창 이동·성능/장시간 정산 | 새로 열기/재시작/이동 중 문서 유일성·데이터 보존, 단일/다중 뷰 메모리·프레임 비용 비교, 통과 후 분할 UI 노출 |
@@ -199,7 +203,7 @@ snapshot으로 보존한다. 현재 동기 `saveDocumentGuarded`의 빌린 `save
   스코프이며 웹 브리지의 page 방어 토큰과 구분한다. 새 토큰/권한 UI를 이 설계만으로 도입하지
   않고 기존 scope·외부 CLI·tool_execute의 소비처와 revoke 규칙을 조사한다. 문서 해제와
   스코프 폐기가 같은 사건인지도 기존 계약에서 구분한다.
-- Undo 기록 실패 시 편집/이력 보존 정책, stale 편집의 재시도·매핑, 마지막 닫기 확인 중 변경 처리.
+- stale 편집의 재시도·매핑, 마지막 닫기 확인 중 변경 처리. Undo 기록 준비 실패는 위 승인된 보존 정책을 따른다.
 
 이 항목은 승인된 UX와 이를 실현할 구현 조건을 구분하기 위한 목록이다. 구현 전 리뷰에서
 실제 코드와 계약의 차이를 보고하고 필요한 결정만 확정한다. 프로젝트 검색·도크 아웃라인,
@@ -237,7 +241,7 @@ Undo 항목은 현재 `UndoEntry.sels_before`와 `primary_before`를 소유한�
 | 사건 순서 | 누락/모순 | 추가 완료 조건 |
 |---|---|---|
 | A와 B가 revision r에서 교체 준비 → A 적용 → B 적용 | 변경 순서만으로 B의 오래된 range를 막지 못함 | 문서별 writer·기준 revision·선택 거래 검증. stale 거절/매핑과 입력 보존 정책 확정 |
-| 버퍼 편집 성공 → `pushUndo` 기록 할당 실패 → 이전 Undo 실행 | 초안의 전부 준비 정책은 기존 편집 유지 동작과 다름 | 기존 정책 변경을 미결로 표시. 기록 없는 변경 뒤 이력의 안전 경계와 실패 주입 판정 |
+| 버퍼 편집 성공 → `pushUndo` 기록 할당 실패 → 이전 Undo 실행 | 초안의 전부 준비 정책은 기존 편집 유지 동작과 다름 | 2026-10-01 사용자 승인으로 기록 공간을 편집 전에 준비하는 정책으로 확정. SHVIEW7로 미게시와 기존 이력 보존 판정 |
 | 마지막 닫기 확인 → 다른 창 편집/뷰 추가 → 승인 | 확인 당시의 마지막 뷰·dirty 판정이 더 이상 유효하지 않음 | 승인 시 연결 수·최신 내용 재검증, 저장 중 새 편집 보존, 동시 닫기·앱 종료 중복 정산 |
 | 조합 확정 실패 → 포커스 이동 → commit 중복 또는 재시도 | id 제안만으로 실패 텍스트·OS callback owner를 보존하지 못함 | 원래 조합 거래 보존, 어댑터 owner 세대, 성공/취소/재시도 한 번만 반영 |
 
@@ -378,12 +382,12 @@ live entry만 정산하고 retained capacity도 해제한다. 기존 reset처럼
 1. 소유/해제: 양쪽 스택의 live entry·비활성 alias 슬롯·retained capacity·해제 후 재사용을
    함께 검사하도록 기존 판정자의 누락을 보완했다. redo 해제 누락과 비활성 capacity 해제
    오류를 격리 사본에 넣으면 실제 테스트 실행이 실패한다.
-2. Undo 의미: `breakUndoGroup`, `sameUndoGroup`, `pushUndo`, `pushEntry`, `dropRedo`,
-   `stepHistory`는 필드 경로 치환 후 기존 main 함수와 정확히 같다. Entry의 역연산/선택
+2. Undo 의미: `breakUndoGroup`, `sameUndoGroup`, `pushUndo`, 당시 `pushEntry`, `dropRedo`,
+   `stepHistory`는 필드 경로 치환 후 그 단계 main 함수와 정확히 같았다. Entry의 역연산/선택
    snapshot 표현도 동일하다. 이는 코드 대조이며 실행 검증의 대체물이 아니다.
 3. 실패/재사용: 준비 과정의 모든 allocation fail-index에서 정산을 검사하고 Debug와
    ReleaseFast로 실행했다. 기존 reset이 보존하는 group 번호를 0으로 바꾸는 변이도 잡았다.
-   제품의 Undo 기록 실패 정책은 바꾸지 않았다.
+   이 소유 이관 당시에는 제품의 Undo 기록 실패 정책을 바꾸지 않았다. 아래 공유 게시 단계에서 승인된 준비 정책으로 변경한다.
 4. 입력/저장 회귀: 기존 에디터 집계로 멀티커서·조합 callback/렌더·Undo·저장/backup 회귀를
    다시 실행한다. 실제 macOS 한국어 OS 입력기 화면은 이번 검증에 포함하지 않는다.
 5. 문서/PR/CI: 첫 슬라이스와 공유 owner 미구현 상태를 대조하고 누락된 editor 영역 라벨을
@@ -428,7 +432,7 @@ registry가 같은 값을 소유한다. 기존 platform
 `EditableFile`이 기억하고, 경로·원격 정보·이력은 기존 session allocator로 정산한다.
 
 기존 열기 준비→부착, 로컬·원격·untitled 저장, 충돌 가드, dirty 해시, Undo 묶음과
-기록 할당 실패 정책은 그대로다. 로컬/원격 준비의 모든 allocation fail-index와
+기록 할당 실패 정책은 이 본문 소유 이관 당시 유지했다. 아래 공유 게시에서 별도 승인으로 바꾼다. 로컬/원격 준비의 모든 allocation fail-index와
 빈/재해제·이력 capacity·본문을 빌린 상태의 신원 해제를 중립 테스트로 검사한다.
 안정 핸들·app-global registry·참조 카운트·마지막 연결 해제 및 공유 입력은 다음
 슬라이스에 남는다. 이 PR은 단일 뷰의 소유 경계 이관이며 공유 문서 완료가 아니다.
@@ -500,3 +504,44 @@ read/request의 본문·신원·Undo 보존, 개별 탭 닫기와 재열기의 �
 읽는 경로는 메인 스레드의 frame/hit-test다. 렌더용 op/글자 배열은 기존 뷰별 저장소에서
 준비하며 이 이관으로 worker가 mutable State를 읽게 하지 않는다. read/request pin은 수명
 판정에만 사용했고 실제 비동기 provider 작업에 registry pin을 새로 배선하지 않았다.
+
+
+## 같은 창의 연결된 두 뷰: 편집 게시 기반
+
+일반 분할 명령은 아직 노출하지 않는다. `SHVIEW` fixture는 실제 AppSession의 Term 두 개를
+registry의 서로 다른 view lease로 같은 State에 연결하고 기존 제품 입력·삭제·Undo/Redo를 호출한다.
+같은 경로를 새로 열 때 identity를 합치는 동작은 이 fixture와 구분한다.
+
+좌표/표식 규칙은 `session/editor/shared_edit.zig`, 같은 창 연결/준비/게시 coordinator는
+`platform/macos/app_session/editor/shared_edit.zig`에 둔다. `editor/mod.zig`의
+`applyDocumentEdit`는 기존 일반 편집 경로 여섯 곳의 공통 진입이다. Undo는
+`applyDocumentEditPrepared`로 같은 게시 경계를 사용한다. 한 delta의 연결 뷰 줄 배열과 결과 선택
+저장소를 먼저 준비하고, 정본에 한 번 적용한 뒤 준비된 줄·좌표를 할당 없이 게시한다. 파일의 내부
+rollback이 범위 안 selection을 원래 위치로 복구하지 못할 수 있어, 공유 경로는 입력 selection의
+정확한 snapshot도 준비해 실패 시 복구한다. 파생 접힘/구문/행 캐시는 기존 저하 동작으로 정산하며
+본문을 빌린 낡은 줄과 hit geometry를 남기지 않는다.
+
+호출 뷰는 기존 연산 결과 선택을 쓰고 다른 뷰는 delta로 매핑한다. 같은 위치 삽입의 접힌 caret는
+삽입 뒤로 이동하며, 범위 시작의 삽입은 시작 앞·범위 끝의 삽입은 끝 뒤로 매핑해 선택 방향을 유지한다.
+삭제·교체 내부 좌표는 기존 delta의 시작점 clamp를 유지한다. VS Code의 UTF-16 replacement
+marker 처리 전체와 동일하다는 주장은 하지 않는다. 삭제 겹침으로 합쳐진
+다른 뷰의 커서는 primary를 유지해 정본 변경 전에 합친다. 열 선택의 진행 중 원본과 목표 열은
+폐기하고 자동 닫기 위치는 매핑하되 쌍 교체/삭제·쌍 안 삽입으로 소유 근거가 깨진 표식은 버린다. 다른 뷰의 스크롤은 원래 텍스트의
+앵커를 유지하며 입력 위치를 따라가지 않는다.
+
+`applyDocumentEditAtRevision`는 준비한 요청의 기준 revision이 다르면 `StaleRevision`으로
+거절한다. 현재 일반 타이핑은 하나의 메인 스레드 사건 안에서 최신 기준을 즉시 넘기므로 별도
+비동기 재시도/입력 큐를 도입하지 않는다. 비동기 provider 요청에 이 진입을 배선하는 것은 후속이다.
+
+`SHVIEW1`~`SHVIEW11`은 양방향 입력·한글과 개행·독립 좌표/가로 위치·다른 뷰 Undo/Redo·
+역방향 선택/교체/삭제·멀티커서와 스크롤 앵커·모든 준비 allocation fail-index·삭제 겹침 정규화·
+실패한 Undo 재시도·Undo 성장 실패의 미게시·stale 준비 거절·반대 뷰의 쌍 교체 후 Backspace·
+선택 양 경계 삽입·Undo 준비의 allocation fail-index와 재시도를 판정한다.
+`test-editor-shared-view`는 이 제품 판정자와 import sentinel만 선택하고, 전체 `test-editor`에도
+같은 판정자가 들어간다.
+
+남은 경계는 명시적 제품 연결·경로 identity, 공유 IME 표시와 입력 거래, 문서/provider별 통지
+한 번과 provider 수명, 뷰별 검색, 다른 창 연결·복원이다. 현재 refresh는 기존 뷰별 provider/백업
+통지를 유지하므로 공유 provider 통지 완료로 해석하지 않는다. 같은 문서의 lease가 현재 창 밖에
+있으면 `SharedViewCountMismatch`로 부분 게시를 거절한다. 일반 UI에서 공유 view를 만들지 않아
+이 내부 제약이 새 사용자 동작으로 노출되지는 않는다. 단계 2 전체와 분할 기능 완료로 표기하지 않는다.

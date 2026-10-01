@@ -57,7 +57,7 @@ pub fn compute(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect,
     // 비교 뷰·병합 판(§4.1i). **오늘 등가다**(적대적 1회차 P3) — 이 함수를 부르는 자리(`appendPaneFrame` 의 단일 편집기 갈래)가 그 뷰에서는
     // 안 돈다. 그래서 `drawn_len` 이 남는 문제는 `rowAt` 이 따로 막는다.
     if (term.rt.editor_diff != null or term.rt.editor_merge != null) return &.{};
-    const doc = term.rt.editor_doc orelse return &.{};
+    const doc = term.rt.editor_document.opened orelse return &.{};
     const ch: u32 = @max(self.cell_height_px, 1);
     const visible_rows: usize = pane_rect.h / ch;
     const max = sticky.maxLines(cfg.sticky_scroll_max_lines, visible_rows);
@@ -115,7 +115,7 @@ pub fn compute(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect,
 /// 스코프 출처를 고르고(키가 바뀌었을 때만) 목록을 다시 만든다.
 fn refreshScopes(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     const st = &term.rt.editor_sticky;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const version = term.rt.editor_lsp_version;
     // ① 심볼 2층.
     if (editor_ops.symbols_client.list(term)) |l| {
@@ -286,7 +286,7 @@ pub fn rowAt(term: *Term, y_px: f64) ?usize {
 pub fn click(self: *AppSession, term: *Term, x_px: f64, y_px: f64) bool {
     const row = rowAt(term, y_px) orelse return false;
     const st = &term.rt.editor_sticky;
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     const line_no = st.drawn[row];
     const line = doc.file.lines.line(line_no) orelse return false;
     const text = doc.file.content[line.start..line.contentEnd()];

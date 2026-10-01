@@ -139,7 +139,7 @@ pub fn tick(self: *AppSession) void {
 pub fn showAtCaret(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     const sel = term.rt.editor_selection orelse return false;
     if (self.anyOverlayOpen()) return false;
     hide(self);
@@ -178,7 +178,7 @@ const RangeIn = struct { range: lsp.rpc.Range, enc: lsp.rpc.PositionEncoding };
 fn openWith(self: *AppSession, surface_id: u64, offset: u32, markdown: ?[]const u8, range: ?RangeIn, from_pointer: bool) void {
     const st = &self.editor_hover;
     const term = visibleEditorTerm(self, surface_id) orelse return;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const content = doc.file.content;
     if (offset >= content.len) return;
     // 포인터에서 왔으면 포인터가 아직 그 자리인지 본다 — 기다리는 동안 딴 데로 갔으면 열지 않는다.
@@ -309,7 +309,7 @@ pub fn pointerOffset(term: *Term, x_px: f64, y_px: f64) ?usize {
     // 고정 행 위에서는 안 뜬다(§4.1i) — 히트 스냅숏은 그 아래 가려진 본문 줄을 가리킨다.
     if (editor_ops.sticky_client.rowAt(term, y_px) != null) return null;
     const off = editor_ops.hitTestBodyMode(.cluster, term, x_px, y_px) orelse return null;
-    const doc = term.rt.editor_doc orelse return null;
+    const doc = term.rt.editor_document.opened orelse return null;
     if (!charAt(doc.file.content, off)) return null;
     return off;
 }
@@ -329,7 +329,7 @@ pub const Anchor = struct { x: i32, y: i32, h: u32 };
 pub fn anchorFor(term: *Term, offset: usize) ?Anchor {
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
-    const doc = term.rt.editor_doc orelse return null;
+    const doc = term.rt.editor_document.opened orelse return null;
     const geom = term.rt.editor_hit_geom;
     const off = @min(offset, doc.file.content.len);
     const line_idx = doc.file.lines.lineAt(off);

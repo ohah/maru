@@ -38,11 +38,11 @@ pub fn setDirForTest(path: ?[]const u8) void {
 pub fn identity(term: *const Term) ?backup.Doc {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 편집이 아니다
-    const doc = term.rt.editor_doc orelse return null;
+    const doc = term.rt.editor_document.opened orelse return null;
     // **순서가 계약이다**: 저쪽 신원이 있으면 그 문서는 저쪽 파일이고(U3) 로컬 경로가 없다.
-    if (term.rt.editor_remote) |r| return .{ .remote = .{ .dest = r.dest, .path = r.path } };
-    if (term.rt.editor_path) |p| return .{ .path = .{ .path = p, .disk_hash = doc.disk_hash } };
-    if (term.rt.editor_untitled) |u| return .{ .untitled = u.n };
+    if (term.rt.editor_document.remote) |r| return .{ .remote = .{ .dest = r.dest, .path = r.path } };
+    if (term.rt.editor_document.path) |p| return .{ .path = .{ .path = p, .disk_hash = doc.disk_hash } };
+    if (term.rt.editor_document.untitled) |u| return .{ .untitled = u.n };
     return null;
 }
 
@@ -118,14 +118,14 @@ pub fn markClean(self: *AppSession, term: *Term, content: []const u8, previous_i
     //
     // ⚠️ **`&(… orelse …)` 로 잡지 않는다** — 그 형태는 optional 의 «사본»에 포인터를 주므로
     // 저장 해시가 임시 값에 쓰이고 문서는 영원히 dirty 로 남는다(적대적 1회차에서 그 형태를 지웠다).
-    term.rt.editor_doc.?.saved_hash = editor_ops.contentHash(content);
+    term.rt.editor_document.opened.?.saved_hash = editor_ops.contentHash(content);
     if (previous_identity) |prev| {
         if (term.rt.editor_backup_on_disk) {
             term.rt.editor_backup_on_disk = false;
             dropDoc(self, prev);
         }
     }
-    if (term.rt.editor_doc.?.isDirty()) {
+    if (term.rt.editor_document.opened.?.isDirty()) {
         noteEdit(self, term);
         return;
     }
@@ -161,7 +161,7 @@ pub fn dropDoc(self: *AppSession, doc: backup.Doc) void {
 fn settle(self: *AppSession, term: *Term) void {
     term.rt.editor_backup_dirty = false;
     const doc = identity(term) orelse return;
-    const opened = term.rt.editor_doc orelse return;
+    const opened = term.rt.editor_document.opened orelse return;
     if (!opened.isDirty()) {
         if (term.rt.editor_backup_on_disk) {
             term.rt.editor_backup_on_disk = false;
@@ -253,20 +253,20 @@ pub fn restoreIfAny(self: *AppSession, term: *Term) void {
     // 레코드를 조용히 삼킨다(번호는 재시작마다 1 부터 다시 난다 — U4b-7 이 그 사고를 못 박는다).
     // 그래서 이름 없는 문서는 **되살리는 자리 하나**(`restoreUntitled` — workspace 가 번호를 실어 온
     // 그 자리)에서만 복원한다. 저쪽 신원 문서는 아직 대상이 아니다(U4d).
-    if (term.rt.editor_remote != null) return;
-    const path = term.rt.editor_path orelse return;
+    if (term.rt.editor_document.remote != null) return;
+    const path = term.rt.editor_document.path orelse return;
     restoreFromRecord(self, term, .{ .path = .{ .path = path } });
 }
 
 /// **되살린 이름 없는 문서의 내용을 넣는다**(U4c). 부르는 자리는 `createRestoredUntitledTerm` 하나 —
 /// workspace 가 실어 온 번호가 곧 그 문서의 신원이고, **새로 만든 문서는 이 길로 오지 않는다**.
 pub fn restoreUntitled(self: *AppSession, term: *Term) void {
-    const name = term.rt.editor_untitled orelse return;
+    const name = term.rt.editor_document.untitled orelse return;
     restoreFromRecord(self, term, .{ .untitled = name.n });
 }
 
 fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
 
     const record = read(self, want) orelse return;
     defer self.allocator.free(record.bytes);
@@ -318,7 +318,7 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
     // 이름 없는 문서에는 볼 디스크가 없어 지문도 없다(`null` 그대로 — U2 가 이름이 붙는 순간 세운다).
     switch (parsed.doc) {
         .path => |p| {
-            if (p.disk_hash) |h| term.rt.editor_doc.?.disk_hash = h;
+            if (p.disk_hash) |h| term.rt.editor_document.opened.?.disk_hash = h;
         },
         else => {},
     }

@@ -79,7 +79,7 @@ pub fn triggerManual(self: *AppSession) bool {
 
 fn ask(self: *AppSession, term: *Term, kind: lsp.rpc.SignatureTriggerKind, trigger_char: ?u8, is_retrigger: bool) bool {
     const st = &self.editor_signature;
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     const sel = term.rt.editor_selection orelse return false;
     const focus = @min(sel.focus, doc.file.content.len);
     if (st.waiting) {
@@ -181,7 +181,7 @@ const Anchor = struct { x: i32, y: i32, h: u32 };
 fn caretAnchor(term: *Term) ?Anchor {
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
-    const doc = term.rt.editor_doc orelse return null;
+    const doc = term.rt.editor_document.opened orelse return null;
     const sel = term.rt.editor_selection orelse return null;
     const geom = term.rt.editor_hit_geom;
     const off = @min(sel.focus, doc.file.content.len);
@@ -232,7 +232,7 @@ pub fn refresh(self: *AppSession) bool {
         hide(self);
         return false;
     }
-    const doc = term.rt.editor_doc orelse {
+    const doc = term.rt.editor_document.opened orelse {
         hide(self);
         return false;
     };

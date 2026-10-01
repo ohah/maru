@@ -562,7 +562,7 @@ fn displayText(text: []const u8) []const u8 {
 
 /// 이 편집기 Term이 컨트롤 플레인에 말할 것(`EditorMeta`, docs/control-plane.md §3).
 ///
-/// **비교 Term이 여기서 갈린다.** 문서를 여는 편집기는 `rt.editor_path`·`rt.editor_doc`에서 나오지만,
+/// **비교 Term이 여기서 갈린다.** 문서를 여는 편집기는 `rt.editor_document.path`·`rt.editor_document.opened`에서 나오지만,
 /// 비교는 그 둘이 비어 있고 파일은 dock entry가 안다 — 그대로 두면 밖에서 보기에 *"파일이 안 붙은,
 /// 편집 가능한 편집기"*가 된다(둘 다 사실이 아니다).
 ///
@@ -576,9 +576,9 @@ pub fn editorMeta(term: *const Term) struct { path: ?[]const u8, read_only: bool
         return .{ .path = if (entry.path.len == 0) null else entry.path, .read_only = true, .dirty = false };
     }
     return .{
-        .path = if (term.rt.editor_path) |p| p else null,
-        .read_only = if (term.rt.editor_doc) |d| d.file.read_only else false,
-        .dirty = if (term.rt.editor_doc) |d| d.isDirty() else false,
+        .path = if (term.rt.editor_document.path) |p| p else null,
+        .read_only = if (term.rt.editor_document.opened) |d| d.file.read_only else false,
+        .dirty = if (term.rt.editor_document.opened) |d| d.isDirty() else false,
     };
 }
 

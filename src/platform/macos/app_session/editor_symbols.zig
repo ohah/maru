@@ -61,7 +61,7 @@ pub fn list(term: *Term) ?[]const syntax.Provider.Symbol {
 pub fn tick(self: *AppSession, term: *Term) void {
     const st = &term.rt.editor_symbols;
     if (st.waiting) return;
-    if (term.rt.editor_doc == null) return;
+    if (term.rt.editor_document.opened == null) return;
     const version = term.rt.editor_lsp_version;
     if (version == 0) return; // 아직 서버에 안 열었다
     if (st.version == version and !st.dirty) return;
@@ -91,7 +91,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.dirty = true;
         return;
     }
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     symbols.decode(self.allocator, result, doc.file.content, doc.file.lines, enc, &st.decoded) catch {
         st.dirty = true;
         return;

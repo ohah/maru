@@ -1477,10 +1477,10 @@ VSCode 의 macOS 기본이 `⇧⌘\` 다. 표에는 `\` 와 `|` **둘 다** 넣�
   - **창 단위가 아니다**(적대 검증에서 정정). 이 앱은 탭을 **다른 창으로 옮길 수 있어**
     ([window-surface-mobility.md](window-surface-mobility.md)) 창마다 세면 옮긴 순간 같은 이름이 둘이
     된다. 레퍼런스도 카운터를 앱 인스턴스 하나로 둔다(실측 — 동작만 읽었다).
-- **「경로가 없다」는 `term.rt.editor_path == null` 이다 — 빈 슬라이스가 아니다**(적대 검증에서 정정).
+- **「경로가 없다」는 `term.rt.editor_document.path == null` 이다 — 빈 슬라이스가 아니다**(적대 검증에서 정정).
   편집기 문서는 **pane 의 Term** 이고(`createEditorTerm` → `pane.terms.append`) 도크 `Entry` 를 갖지
   않으므로, 경로의 자리는 `Entry.path` 가 아니라 이 필드다. 그리고 **이미 그 값을 묻는 가드가 둘 있다**
-  (`const path = term.rt.editor_path orelse return false` — `saveDocument` 와 열려 있지 않은 파일
+  (`const path = term.rt.editor_document.path orelse return false` — `saveDocument` 와 열려 있지 않은 파일
   쓰기). 빈 슬라이스로 두면 **그 가드가 안 걸려 빈 경로에 쓰려 든다** — 「없음」을 두 가지로 적는 순간
   한쪽이 낡는다.
 - ⚠️ **[editor-surface.md](editor-surface.md) §4 의 `document_id`·`disk_fingerprint` 는 웹 브리지(CM6)
@@ -1636,7 +1636,7 @@ base 를 정한다 — 이름을 먼저 받으면 **무엇을 기준으로 검�
   - ⚠️ **읽기 전용 미러의 그 필드가 아니다.** `remote_origin_dest`/`remote_origin_label` 은 **표시용**
     이고(그 주석이 「저쪽 순수 경로가 필요해지면 그때 더한다」고 적어 두었다) 미러는 읽기 전용이다.
     U3 의 신원은 **저장 대상**이라 다른 값이고, 그래서 필드를 더한다.
-  - ⚠️ **로컬 경로와 배타다.** `editor_path`(이쪽)와 원격 신원(저쪽)이 함께 있으면 **어디에 쓸지가
+  - ⚠️ **로컬 경로와 배타다.** `editor_document.path`(이쪽)와 원격 신원(저쪽)이 함께 있으면 **어디에 쓸지가
     둘**이 된다 — U1 이 「이름과 경로는 배타」로 닫은 그 부류다. 배타를 타입으로 세우고 판정자가 센다.
   - **그래서 「되는 원격 문서」와 「안 되는 원격 문서」가 공존한다**: 미러로 **열어서** 본 파일은 여전히
     읽기 전용이고, U3 로 **저장해서** 만든 문서는 쓰기 가능하다. 두 상태의 근거가 다르므로(미러는 경로

@@ -77,7 +77,7 @@ pub fn deinit(self: *AppSession) void {
 pub fn quickFix(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     if (doc.file.read_only) return false;
     const sel = term.rt.editor_selection orelse return false;
     const st = &self.editor_code_action;
@@ -130,7 +130,7 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, is_error
     // 메뉴 — caret 셀 **아래**(`at_anchor` 는 앵커에서 시작하므로 한 셀 내리고, 모달 quad 의 padding 이 caret 줄을 덮지 않게 그만큼 더 띄운다 —
     // 호버 상자와 같은 간격, 캡처 실측). 앵커가 없으면(아직 안 그려짐) 화면 원점 근처.
     const sel = term.rt.editor_selection orelse return;
-    const a = editor_rename.anchorAt(term, @min(sel.focus, term.rt.editor_doc.?.file.content.len)) orelse editor_rename.Anchor{ .x = 0, .y = 0, .h = 0 };
+    const a = editor_rename.anchorAt(term, @min(sel.focus, term.rt.editor_document.opened.?.file.content.len)) orelse editor_rename.Anchor{ .x = 0, .y = 0, .h = 0 };
     const gap: i32 = @intCast(self.buildChromeProps().shape.modal_padding_px);
     settings_ops.closeContextMenu(self);
     for (st.items.items, 0..) |it, i| self.context_menu_items_buf[i] = it.title;
@@ -226,7 +226,7 @@ fn snapshotVersions(self: *AppSession) void {
     const st = &self.editor_code_action;
     st.snaps_len = 0;
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
-        if (t.kind != .editor or t.rt.editor_doc == null) continue;
+        if (t.kind != .editor or t.rt.editor_document.opened == null) continue;
         if (st.snaps_len >= st.snaps.len) return;
         st.snaps[st.snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editor_lsp_version };
         st.snaps_len += 1;

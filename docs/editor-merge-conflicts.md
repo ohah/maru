@@ -97,7 +97,7 @@ Base pane 을 비우고 **2-way 로 저하한다** — 없는 것을 지어내�
 | **종류는 `.text`로 못박는다** | 확장자 분류를 그대로 쓰면 `.md`·`.svg`가 기본 모드 `.read`(렌더된 화면)로 열리는데 **거기에는 마커가 안 보인다**(실측 2026-09-12) — 고치러 연 화면이 고칠 것을 감춘다. 이미지·미디어·PDF·이진 확장자는 글로 못 고치므로 **열지 않고 말한다** |
 | `git_conflict_not_editable`·`git_conflict_open_failed` | 이진 파일이라 편집기가 없는 경우와 못 연 경우를 **가른다**(§3.8 — 저하는 말한다) |
 
-**관측점**: 그 길로 연 Term 이 `kind == .editor` 이고 `editor_doc.file.read_only == false` 다
+**관측점**: 그 길로 연 Term 이 `kind == .editor` 이고 `editor_document.opened.file.read_only == false` 다
 (읽을 수 없는 파일 — UTF-8 아님·상한 초과 — 만 CM6 텍스트 편집기로 떨어지고, 그쪽도 편집 가능하다).
 판정자 `SCMC1`(published tree의 버튼 rect에 포인터 → intent → 제품 핸들러 → 편집기 Term)과
 `SCMC2`(같은 행의 두 길이 서로를 안 뺏는다), `SCMC3`(거부하는 넷 + 마크다운이 원문으로 열린다),

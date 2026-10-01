@@ -86,7 +86,7 @@ pub const Pending = struct {
 
 /// 이름 없는 문서의 `⌘S` — 이름을 묻는다(§3.11). 물을 수 없으면 **그 이유를 말하고** 거짓을 준다.
 pub fn begin(self: *AppSession, term: *Term) bool {
-    if (term.rt.editor_untitled == null) return false;
+    if (term.rt.editor_document.untitled == null) return false;
     // ⚠️ **저쪽 왕복이 도는 동안에는 다시 시작하지 않는다**(U3 적대적 6회차). 이 함수는 보류를
     // **세우는** 자리라, 첫 요청이 결말을 기다리는 사이에 들어오면 그 경로를 지운다 — 그러면 결말이
     // 왔을 때 **빈 경로**를 그 문서의 신원으로 붙인다.
@@ -139,7 +139,7 @@ pub fn chooseThere(self: *AppSession, surface_id: u64) void {
     const p = self.pending_untitled_save;
     if (p.surface_id != surface_id or p.remote == null) return;
     const term = termFor(self, surface_id) orelse return;
-    if (term.rt.editor_untitled == null) return;
+    if (term.rt.editor_document.untitled == null) return;
     settings_ops.startRename(self, .{ .untitled_save = surface_id });
 }
 
@@ -149,7 +149,7 @@ pub fn chooseHere(self: *AppSession, surface_id: u64) void {
     if (p.surface_id != surface_id) return;
     self.pending_untitled_save = .{};
     const term = termFor(self, surface_id) orelse return;
-    if (term.rt.editor_untitled == null) return;
+    if (term.rt.editor_document.untitled == null) return;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     if (baseDir(self, &buf) == null) {
         self.showNoticeKey(.editor_untitled_no_base);
@@ -249,7 +249,7 @@ fn normalize(path: []const u8, out: []u8) ?[]const u8 {
 pub fn commit(self: *AppSession, surface_id: u64, text: []const u8) void {
     defer settings_ops.closeRename(self);
     const term = termFor(self, surface_id) orelse return;
-    if (term.rt.editor_untitled == null) return; // 그 사이 이름이 붙었다
+    if (term.rt.editor_document.untitled == null) return; // 그 사이 이름이 붙었다
 
     // **저쪽이면 base 가 그 호스트의 cwd 다**(U3). 이름 규칙은 **같은 순수 함수**가 판정한다 —
     // `resolve` 는 파일시스템을 만지지 않으므로(어휘적 정규화 + `underRoot`) 저쪽 경로에도 그대로 선다.
@@ -314,7 +314,7 @@ fn enqueueRemoteWrite(self: *AppSession, term: *Term, overwrite: bool) void {
     const pin = self.pending_untitled_save.remote orelse return;
     const p = self.pending_untitled_save;
     if (p.path_len == 0) return;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const bytes = doc.file.saveBytes(self.allocator) catch {
         self.showNoticeKey(.app_save_failed);
         return;
@@ -385,7 +385,7 @@ pub fn finishRemoteWrite(self: *AppSession, outcome: maru.session.remote_file_mu
 /// **보류를 그 값으로 세운다**: 결말 소비처가 같은 자리를 읽으므로(`finishRemoteWrite`) 첫 저장과
 /// 이후 저장이 **같은 길**을 쓴다 — 두 길이면 한쪽이 낡는다.
 pub fn saveRemoteAgain(self: *AppSession, term: *Term) bool {
-    const r = term.rt.editor_remote orelse return false;
+    const r = term.rt.editor_document.remote orelse return false;
     if (r.path.len == 0 or r.path.len > std.fs.max_path_bytes) return false;
     var pin: RemotePin = .{};
     if (r.dest.len > pin.dest_buf.len) return false;
@@ -432,7 +432,7 @@ pub fn confirmRemoteOverwrite(self: *AppSession, surface_id: u64) void {
 
 /// 그 문서를 **저쪽의 그 파일**로 만든다. 이름(untitled)을 버리고 신원을 들고 clean 이 된다.
 fn adoptRemote(self: *AppSession, term: *Term, dest: []const u8, path: []const u8) void {
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     // **신원이 바뀌기 «전에» 떠 둔다**(§3.10) — 아래에서 이름을 버리면 옛 백업 파일의 이름을 더는
     // 만들 수 없다. 그러면 저쪽에 저장한 뒤에도 `untitled-N` 백업이 남아 다음 실행에서 되살아난다.
     const prev_backup = app_session_mod.editor_backup_ops.identity(term);
@@ -445,10 +445,10 @@ fn adoptRemote(self: *AppSession, term: *Term, dest: []const u8, path: []const u
         self.showNoticeKey(.editor_untitled_written_not_adopted);
         return;
     };
-    if (term.rt.editor_remote) |*old| old.deinit(self.allocator);
-    term.rt.editor_remote = .{ .dest = owned_dest, .path = owned_path };
+    if (term.rt.editor_document.remote) |*old| old.deinit(self.allocator);
+    term.rt.editor_document.remote = .{ .dest = owned_dest, .path = owned_path };
     // **이름과 배타다** — 이 순서(신원을 세운 뒤 이름을 버린다)여야 중간 프레임에 둘 다 없는 문서가 없다.
-    term.rt.editor_untitled = null;
+    term.rt.editor_document.untitled = null;
     // **clean 이다** — 저쪽이 `ok` 를 줬고 그 내용이 곧 저쪽 파일이다. 「그 사이 더 친 것」은 dirty 로
     // 남는 것이 맞다(§1 의 「저장 중 재편집」과 같은 규칙). 백업은 **옛 신원으로** 지운다.
     app_session_mod.editor_backup_ops.markClean(self, term, doc.file.content, prev_backup);
@@ -461,14 +461,14 @@ pub fn confirmOverwrite(self: *AppSession) void {
     self.pending_untitled_save = .{};
     if (p.path_len == 0) return;
     const term = termFor(self, p.surface_id) orelse return;
-    if (term.rt.editor_untitled == null) return;
+    if (term.rt.editor_document.untitled == null) return;
     writeAndAdopt(self, term, p.path(), true);
 }
 
 /// 쓰고, 성공하면 **보통 문서로 옮겨 간다**(§3.11). 실패하면 **이름도 안 붙인다** — 「이름은 정해졌는데
 /// 내용은 없는」 중간 상태를 만들지 않는다.
 fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: bool) void {
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const bytes = doc.file.saveBytes(self.allocator) catch {
         self.showNoticeKey(.app_save_failed);
         return;
@@ -507,7 +507,7 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
     // 쓰기 **앞에** 둘 수 없다: 그것이 성공하고 쓰기가 실패하면 「경로는 붙었는데 파일이 없는」
     // 중간 상태가 된다. 순서를 뒤집는 대가는 아래 OOM 갈래가 **파일은 남기고 표식만 못 옮기는** 것이고,
     // 그때는 그 사실을 말한다(다시 `⌘S` 하면 같은 이름으로 이어진다).
-    // ⚠️ **경로를 두 벌 소유한다.** `editor_path` 는 `releaseEditorTerm` 이 놓고 `entry.path` 는 세션이
+    // ⚠️ **경로를 두 벌 소유한다.** `editor_document.path` 는 `releaseEditorTerm` 이 놓고 `entry.path` 는 세션이
     // 놓는다 — 하나를 둘이 가리키면 **이중 해제**다(파일을 여는 길도 그래서 각자 dupe 한다).
     // ⚠️ **여기부터의 실패는 「저장하지 못했다」가 아니다 — 파일은 이미 있다.** 같은 문구를 쓰면
     // 사용자는 아무 일도 없었다고 읽고, 디스크에는 자기 내용이 담긴 파일이 남는다(적대적 17회차).
@@ -529,14 +529,14 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
     };
 
     const prev_backup = app_session_mod.editor_backup_ops.identity(term); // 이름이 붙기 «전»의 신원
-    term.rt.editor_path = owned;
-    term.rt.editor_untitled = null; // **배타다**(§3.11) — 안 지우면 영원히 「저장 안 한 문서」다
+    term.rt.editor_document.path = owned;
+    term.rt.editor_document.untitled = null; // **배타다**(§3.11) — 안 지우면 영원히 「저장 안 한 문서」다
     app_session_mod.editor_backup_ops.markClean(self, term, saved_content, prev_backup);
     // ⚠️ **디스크 지문도 여기서 처음 선다**(§3.9d). 이름 없는 문서는 볼 디스크가 없어 `null` 이었고,
     // 이름이 붙는 이 순간이 그 값을 얻는 유일한 자리다 — 안 세우면 **그 문서는 영영 외부 변경을 못
     // 본다**(저장할 때 비교할 과거가 없다). 적대적 3회차에서 잡았다: U2 로 만든 문서만 C0·C1 의
     // 보호 밖에 남는다.
-    term.rt.editor_doc.?.disk_hash = editor_ops.contentHash(bytes);
+    term.rt.editor_document.opened.?.disk_hash = editor_ops.contentHash(bytes);
 
     // **문법을 다시 판정한다**(§3.11 — 경로가 생겼다). 옛 상태는 grammar 가 없어 비어 있지만
     // 그래도 같은 자리에서 놓는다(두 벌이 되면 한쪽이 새는 길이 생긴다).
@@ -546,7 +546,7 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
     // 들여쓰기 안내선의 간격 추정 — 언어별 기본이 달라졌으면 다시 한다(§5.1c, VS Code `_onDidChangeLanguage`).
     editor_ops.guides_client.onGrammarChanged(term, prev_grammar);
     term.rt.editor_syntax = editor_ops.syntax_color.open(
-        term.rt.editor_doc.?.file.content,
+        term.rt.editor_document.opened.?.file.content,
         term.rt.editor_grammar,
     );
     self.metal_dirty = true;

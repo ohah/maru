@@ -76,7 +76,7 @@ pub fn runActive(self: *AppSession, forward: bool) bool {
 pub fn run(self: *AppSession, term: *Term, forward: bool) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(visual-mapping §4.1g) — 이 기능 밖
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     // 병합 판에 초점이 있으면 Result 에 선택이 없다(`editor_merge.focusedSide` 의 규칙) — 여기서 멈춘다.
     const primary = term.rt.editor_selection orelse return false;
     const st = &term.rt.editor_smart_select;
@@ -126,7 +126,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
     const st = &term.rt.editor_smart_select;
     if (!st.waiting or seq != st.waiting_seq) return; // 시간 초과로 이미 1층을 세웠거나 다른 요청의 답
     st.waiting = false;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     var cur: std.ArrayList(Selection) = .empty;
     defer cur.deinit(self.allocator);
     const primary = term.rt.editor_selection orelse return;
@@ -197,7 +197,7 @@ fn touchingWord(content: []const u8, focus: u32) ?Range {
 /// 커서 전부의 사슬을 새로 세운다. `server` 가 있으면 커서마다 그 범위를 쓰되, **기준보다 넓은 것이 하나도 없으면 그 커서는 1층**.
 fn buildAll(self: *AppSession, term: *Term, cur: []const Selection, server: ?*const lsp.selection_range.Decoded) error{OutOfMemory}!void {
     const st = &term.rt.editor_smart_select;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const content = doc.file.content;
     st.ranges.clearRetainingCapacity();
     st.starts.clearRetainingCapacity();

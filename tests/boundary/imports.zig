@@ -12701,7 +12701,7 @@ test "이름 없는 문서: 이름을 붙이는 자리는 하나, workspace 제�
         defer allocator.free(editor);
         var set: usize = 0;
         var i: usize = 0;
-        const needle = "term.rt.editor_untitled = maru.session.editor.untitled.Name.init(";
+        const needle = "term.rt.editor_document.untitled = maru.session.editor.untitled.Name.init(";
         while (std.mem.indexOfPos(u8, editor, i, needle)) |at| : (i = at + needle.len) set += 1;
         try std.testing.expectEqual(@as(usize, 2), set);
         var issued: usize = 0;
@@ -12771,10 +12771,10 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
     try std.testing.expectEqual(@as(usize, 1), countOf(save, "editor_ops.writeDocumentBytes(self, abs, bytes, null)"));
 
     // ⑵ **이름을 지우는 자리는 「경로·신원이 붙는 그 순간」뿐이고, 지금 둘이다**(U3 로 하나 늘었다):
-    //    이쪽 채택(`editor_path` 를 세운다)과 저쪽 채택(`editor_remote` 를 세운다). 그 둘은 **배타**이고
+    //    이쪽 채택(`editor_document.path` 를 세운다)과 저쪽 채택(`editor_document.remote` 를 세운다). 그 둘은 **배타**이고
     //    각자 자기 값을 세운 뒤 이름을 버린다 — 자리가 그 둘 말고 늘면 한쪽이 낡아 문서가 영원히
     //    「저장 안 한 문서」로 남거나 반대로 이름 없는 문서가 이름을 잃는다.
-    try std.testing.expectEqual(@as(usize, 2), countOf(save, "term.rt.editor_untitled = null"));
+    try std.testing.expectEqual(@as(usize, 2), countOf(save, "term.rt.editor_document.untitled = null"));
 
     // ⑶ **들고 있던 경로는 그 물음이 끝나면 비어 있다.** 수락(그 함수 머리)과 취소
     //    (`cancelPendingConfirm`)가 그 둘이고, 수락 쪽만 비우면 취소한 경로가 남아 다음 저장을
@@ -12928,13 +12928,13 @@ test "저쪽 저장: 쓰는 종류 하나 · 일괄은 건너뛴다 · 신원은
     // ⑵ **일괄 저장은 저쪽 문서를 건너뛴다** — 왕복은 in-flight 가 하나뿐이라 걸면 파일마다 「바쁘다」가
     //    뜬다(§3.9d 가 그 경로에서 막으려던 것). 런타임으로 몰려면 LSP workspace edit 한 벌이 필요해
     //    **그 줄의 존재와 근거**를 센다.
-    try std.testing.expectEqual(@as(usize, 1), countOf4(bulk, "if (o.term.rt.editor_remote != null) continue;"));
+    try std.testing.expectEqual(@as(usize, 1), countOf4(bulk, "if (o.term.rt.editor_document.remote != null) continue;"));
     try std.testing.expect(std.mem.indexOf(u8, bulk, "in-flight 가 하나뿐이라") != null);
     // ⑶ **저쪽 신원은 로컬 경로와 배타다** — 배타는 타입이 못 세우므로(둘 다 optional) 해제 자리와
     //    세우는 자리를 센다: 세우는 곳은 채택 하나, 놓는 곳은 `releaseEditorTerm` 하나.
-    try std.testing.expectEqual(@as(usize, 1), countOf4(save, "term.rt.editor_remote = .{ .dest = owned_dest, .path = owned_path }"));
-    try std.testing.expectEqual(@as(usize, 1), countOf4(editor, "if (term.rt.editor_remote) |*r| r.deinit(self.allocator);"));
-    try std.testing.expect(std.mem.indexOf(u8, save, "term.rt.editor_untitled = null") != null);
+    try std.testing.expectEqual(@as(usize, 1), countOf4(save, "term.rt.editor_document.remote = .{ .dest = owned_dest, .path = owned_path }"));
+    try std.testing.expectEqual(@as(usize, 1), countOf4(editor, "term.rt.editor_document.clearIdentity(self.allocator);"));
+    try std.testing.expect(std.mem.indexOf(u8, save, "term.rt.editor_document.untitled = null") != null);
     // ⑷ **헬퍼는 「신원이 없으면」 stale 로 접지 않는다** — 문서 저장은 목록을 거치지 않아 비교할 과거가
     //    없다(이름 없는 문서의 디스크 지문과 같은 자리·같은 이유). 그 관문이 사라지면 **모든 저쪽 저장이
     //    stale** 이 된다.
@@ -12987,9 +12987,9 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     // ⑴ **clean 이 되는 자리는 `markClean` 하나다.** 저장 해시를 직접 대입하는 제품 코드가 다시 생기면
     //    그 문서는 「저장했는데 백업이 남는다」 — 그 백업이 다음 실행에서 되살아난다. 넷은 각각
     //    보통 저장 · 다시 읽기 · 저쪽 채택 · 이름이 붙는 저장이다(둘이 한 파일에 있다).
-    try std.testing.expectEqual(@as(usize, 0), countOfB(editor, "editor_doc.?.saved_hash = "));
-    try std.testing.expectEqual(@as(usize, 0), countOfB(conflict, "editor_doc.?.saved_hash = "));
-    try std.testing.expectEqual(@as(usize, 0), countOfB(save, "editor_doc.?.saved_hash = "));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(editor, "editor_document.opened.?.saved_hash = "));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(conflict, "editor_document.opened.?.saved_hash = "));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(save, "editor_document.opened.?.saved_hash = "));
     try std.testing.expectEqual(@as(usize, 1), countOfB(editor, "editor_backup_ops.markClean(self, term, saved_content, null)"));
     try std.testing.expectEqual(@as(usize, 1), countOfB(conflict, "editor_backup_ops.markClean(self, term, fresh.file.content, null)"));
     try std.testing.expectEqual(@as(usize, 2), countOfB(save, "editor_backup_ops.markClean(self, term, "));
@@ -13048,7 +13048,7 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     //    자리는 여전히 하나**이고, 이름 없는 문서에는 볼 디스크가 없어 지문도 없다.
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOfB(backup_mod, "if (p.disk_hash) |h| term.rt.editor_doc.?.disk_hash = h;"),
+        countOfB(backup_mod, "if (p.disk_hash) |h| term.rt.editor_document.opened.?.disk_hash = h;"),
     );
     try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "disk_hash = editor_ops.contentHash("));
     // ⑼ **지우는 자리는 둘뿐이다**(신원으로 · 이름으로). 읽다가 손상을 만난 자리는 **지우지 않는다** —
@@ -13068,7 +13068,7 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "orderedRemove(0)"));
     // **되살린 문서는 새 이름 없는 문서다** — 옛 신원을 다시 세우지 않는다(그 신원은 지금 못 세운다).
     try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "editor_ops.openUntitledInActivePane(self)"));
-    try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "editor_remote = "));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "editor_document.remote = "));
     // **알리고 소비한다** — 조용히 되살리면 「왜 이 탭이 생겼지」가 되고, 안 지우면 매 실행마다 또 생긴다.
     try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "showNoticeKey(.editor_backup_revived)"));
 

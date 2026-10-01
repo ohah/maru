@@ -74,6 +74,8 @@ expect fail "Libraries 밖의 @rpath 아닌 dylib" "$root/stray" "libextra.dylib
 #    확인만 잡는다(번들 봉인은 재서명한 프레임워크가 지금 상태로 다시 봉인한다 — 8 차 변이 「dylib 서명 확인 건너뜀」이 살아남았다).
 make_dist "$root/stray-bad"
 cc -dynamiclib -o "$root/stray-bad/Chromium Embedded Framework.framework/Resources/libextra.dylib" "$root/probe.c" -install_name @rpath/libextra.dylib
+# 서명을 먼저 붙인다 — x86_64 의 cc 출력은 서명이 없어, 고치기 전부터 「서명 없음」으로 걸려 다른 것을 시험하게 된다(9 차).
+codesign --force --sign - "$root/stray-bad/Chromium Embedded Framework.framework/Resources/libextra.dylib" 2>/dev/null
 extra_off=$(otool -l "$root/stray-bad/Chromium Embedded Framework.framework/Resources/libextra.dylib" | awk '/sectname __text/{t=1} t&&/^ *offset /{print $2; exit}')
 printf '\000\000\000\000' | dd of="$root/stray-bad/Chromium Embedded Framework.framework/Resources/libextra.dylib" bs=1 seek="$extra_off" conv=notrunc 2>/dev/null
 expect fail "Libraries 밖 dylib 의 깨진 서명" "$root/stray-bad" "libextra.dylib 의 서명이 온전하지 않다"
@@ -81,6 +83,8 @@ expect fail "Libraries 밖 dylib 의 깨진 서명" "$root/stray-bad" "libextra.
 # ②c Libraries 밖 dylib 의 ID 가 @loader_path — Homebrew 는 @rpath 로 시작하지 않는 ID 를 고쳐 쓴다(`@*` 로 넓히는 8 차 변이가 살아남았다).
 make_dist "$root/stray-loader"
 cc -dynamiclib -o "$root/stray-loader/Chromium Embedded Framework.framework/Resources/libextra.dylib" "$root/probe.c" -install_name @loader_path/libextra.dylib
+# 실행 비트 없이 — Mach-O 는 권한이 아니라 내용으로 찾아야 한다(실행 파일만 고르는 9 차 변이가 살아남았다).
+chmod a-x "$root/stray-loader/Chromium Embedded Framework.framework/Resources/libextra.dylib"
 expect fail "Libraries 밖 dylib 의 @loader_path ID" "$root/stray-loader" "libextra.dylib 의 ID 가 @rpath 가 아니다"
 
 # ③ host 에 설치 경로 rpath 가 붙었다 — Homebrew 가 고쳐 쓰다 서명을 깬다.

@@ -273,7 +273,7 @@ fn specialKeys(report: Report, host: *Host, port: u16, detail_buf: []u8) !void {
     try host.send(.{ .create_browser = .{ .browser = t_id, .size = size, .hidden = false, .url = browsers_check.url(&u, port, "/keys?t") } });
     if (!waitFor(host, .{ .title = .{ .browser = t_id, .text = "keys-ready" } })) return error.KeysPageNotReady;
     try host.send(.{ .set_focus = .{ .browser = t_id, .value = true } });
-    const t_clicks = try focusByClick(host, t_id, .{ .x = 150, .y = 50 }, "focus=t val= caret=0");
+    const t_focus = try focusWhenReady(host, t_id, .{ .x = 150, .y = 50 }, "focus=t val= caret=0");
     try typeOn(host, t_id, 0, 'a');
     try typeOn(host, t_id, 11, 'b');
     try typeOn(host, t_id, 8, 'c');
@@ -293,41 +293,29 @@ fn specialKeys(report: Report, host: *Host, port: u16, detail_buf: []u8) !void {
     try host.send(.{ .create_browser = .{ .browser = j_id, .size = size, .hidden = false, .url = browsers_check.url(&u, port, "/keys?j") } });
     if (!waitFor(host, .{ .title = .{ .browser = j_id, .text = "keys-ready" } })) return error.KeysPageNotReady;
     try host.send(.{ .set_focus = .{ .browser = j_id, .value = true } });
-    const j_clicks = try focusByClick(host, j_id, .{ .x = 150, .y = 135 }, "focus=j val= caret=0");
+    const j_focus = try focusWhenReady(host, j_id, .{ .x = 150, .y = 135 }, "focus=j val= caret=0");
     try rawOn(host, j_id, 48, 9, false); // Tab — raw_down 만으로 다음 칸
     const tabbed = waitFor(host, .{ .title = .{ .browser = j_id, .text = "focus=k val= caret=0" } });
     try host.send(.{ .destroy_browser = j_id });
-    // 네이티브 host 는 첫 클릭에 초점이 와야 한다 — 다시 누름은 번역(Rosetta)일 때만 받는다.
-    const translated = hostTranslated(host.pid);
-    const max_clicks: u8 = if (translated) 5 else 1;
-    const clicks_ok = t_clicks != 0 and j_clicks != 0 and t_clicks <= max_clicks and j_clicks <= max_clicks;
-    report(clicks_ok and typed and deleted and moved and newline and tabbed, "input-special-keys", std.fmt.bufPrint(detail_buf, "클릭 초점(몇 번째, 번역 {}) t {d}·j {d} · 타이핑 {} · Backspace raw {} · ← raw {} · Enter 두 번(raw 만·raw+char) 뒤 줄바꿈 하나 {} · Tab raw 초점 이동 {}", .{ translated, t_clicks, j_clicks, typed, deleted, moved, newline, tabbed }) catch "");
+    report(t_focus.focused and j_focus.focused and typed and deleted and moved and newline and tabbed, "input-special-keys", std.fmt.bufPrint(detail_buf, "입력 준비(몇 번째 이동) t {d}·j {d} · 첫 클릭 초점 t {}·j {} · 타이핑 {} · Backspace raw {} · ← raw {} · Enter 두 번(raw 만·raw+char) 뒤 줄바꿈 하나 {} · Tab raw 초점 이동 {}", .{ t_focus.moves, j_focus.moves, t_focus.focused, j_focus.focused, typed, deleted, moved, newline, tabbed }) catch "");
 }
 
-/// 칸을 누르고 그 칸의 초점 제목(`focus=… val= caret=0`)이 올 때까지 — 오지 않으면 다시 누른다. 몇 번째에 됐는지(0 = 안 됨).
-/// 느린 환경에서는 `keys-ready`(두 번의 rAF) 직후의 클릭이 페이지에 닿지 않는다(x86_64 설치물을 Rosetta 로 — 페이지의
-/// `mousedown` 도 6 초 동안 오지 않았고, 준비 뒤 0.3 초를 두면 `set_focus` 앞이든 뒤든 첫 클릭에 됨, W7b 7·8 차 실측).
-/// 키 판정이 클릭 유실을 키 유실로 잘못 읽지 않게 한다. 다시 누름은 host 가 번역돼 돌 때만 받는다(`hostTranslated`) —
-/// 네이티브에서도 받으면 「새 브라우저의 첫 클릭이 사라지는」 퇴행을 가린다(8 차).
-fn focusByClick(host: *Host, browser: protocol.message.BrowserId, point: Point, focus_title: []const u8) !u8 {
-    var attempt: u8 = 1;
-    while (attempt <= 5) : (attempt += 1) {
-        try host.send(.{ .mouse = .{ .browser = browser, .kind = .down, .point = point, .click_count = 1 } });
-        try host.send(.{ .mouse = .{ .browser = browser, .kind = .up, .point = point, .click_count = 1 } });
-        if (waitAllWithin(host, &.{.{ .title = .{ .browser = browser, .text = focus_title } }}, 2_000)) return attempt;
-    }
-    return 0;
-}
+/// 칸이 입력을 받을 준비가 된 뒤 한 번만 누른다 — 준비는 「칸 위로 옮긴 포인터에 ibeam 커서가 돌아옴」(브라우저가 그 자리를
+/// 맞힘 판정했다는 증거)으로 본다. `keys-ready`(두 번의 rAF)는 그보다 이를 수 있다: x86_64 설치물을 Rosetta 로 돌리면 준비 직후
+/// 0 ms 의 클릭은 페이지에 닿지 않았고(`mousedown` 도 6 초 동안 없음) 50 ms 뒤면 닿았다 — `/keys` 는 불러오기 시작부터 준비까지
+/// 약 110 ms, `/input` 은 145 ms 라 `/input` 의 즉시 클릭은 닿는다(W7b 7~9 차 실측). 다시 누르지 않는다 — 다시 누름은 「새
+/// 브라우저의 첫 클릭이 사라지는」 퇴행을 가렸다(8 차). 몇 번째 이동에서 준비됐는지(0 = 안 됨)와 첫 클릭의 초점을 돌려준다.
+const FocusResult = struct { moves: u8, focused: bool };
 
-/// host 가 Rosetta 로 번역돼 도는지 — 커널의 프로세스 정보(`kinfo_proc.kp_proc.p_flag` 의 `P_TRANSLATED`). 크기 648·오프셋
-/// 32 는 arm64·x86_64 에서 같다(`<sys/sysctl.h>`·`<sys/proc.h>` 를 C 로 재 확인). 못 읽으면 번역 아님으로 본다(엄격한 쪽).
-fn hostTranslated(pid: c_int) bool {
-    var info: [648]u8 align(8) = undefined;
-    var len: usize = info.len;
-    const mib = [_]c_int{ 1, 14, 1, pid }; // CTL_KERN, KERN_PROC, KERN_PROC_PID
-    if (std.c.sysctl(&mib, mib.len, &info, &len, null, 0) != 0 or len != info.len) return false;
-    const p_flag = std.mem.readInt(i32, info[32..36], .little);
-    return p_flag & 0x20000 != 0; // P_TRANSLATED
+fn focusWhenReady(host: *Host, browser: protocol.message.BrowserId, point: Point, focus_title: []const u8) !FocusResult {
+    var moves: u8 = 1;
+    while (moves <= 20) : (moves += 1) {
+        try host.send(.{ .mouse = .{ .browser = browser, .kind = .move, .point = point } });
+        if (waitAllWithin(host, &.{.{ .cursor = .{ .browser = browser, .cursor = .ibeam } }}, 250)) break;
+    } else return .{ .moves = 0, .focused = false };
+    try host.send(.{ .mouse = .{ .browser = browser, .kind = .down, .point = point, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = browser, .kind = .up, .point = point, .click_count = 1 } });
+    return .{ .moves = moves, .focused = waitFor(host, .{ .title = .{ .browser = browser, .text = focus_title } }) };
 }
 
 fn typeOn(host: *Host, browser: protocol.message.BrowserId, native: u8, ch: u16) !void {

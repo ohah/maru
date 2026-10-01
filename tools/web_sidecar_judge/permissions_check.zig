@@ -19,10 +19,10 @@
 //!   perm-media-helpers 카메라를 청한 뒤 helper 가 다시 뜨기를 되풀이하지 않는다 — 2 초 동안 host 의 자식 pid 가 거의 그대로이고
 //!                      샌드박스 밖 helper 는 많아야 하나이며 그것이 카메라 utility 다(실행 인자로 — Chromium 이 일부러 샌드박스
 //!                      없이 띄운다, W7b 10~13 차)
-//!   perm-camera-gone   그 샌드박스 밖 카메라 utility 가 host 를 끝낸 뒤 남지 않는다(고아 아님 — W1b 불변식에서 빠진 하나라서).
-//!                      정상 종료에서는 host 가 자식을 직접 끝낸다 — 멈춰 둔(SIGSTOP) utility 도 사라졌다(14 차 실측)
-//!   perm-camera-orphan host 가 **갑자기 죽어도**(SIGKILL) 카메라 utility 가 남지 않는다 — 이때는 자식이 IPC 가 끊긴 것을 보고
-//!                      스스로 끝나야 한다(Chromium `child_thread_impl.cc`). 따로 깨끗한 프로필로 잰다
+//!   perm-camera-gone   정상 종료 직전의 샌드박스 밖 helper(카메라 utility 가 그 안에 있어야 한다)가 모두 host 를 끝낸 뒤
+//!                      사라진다(고아 아님 — W1b 불변식에서 빠진 하나라서). 정상 종료에서는 host 가 자식을 직접 끝낸다
+//!   perm-camera-orphan host 가 **갑자기 죽어도**(SIGKILL) 그 직전의 자식(렌더러·GPU·카메라 utility)이 모두 남지 않는다 — 이때는
+//!                      자식이 IPC 가 끊긴 것을 보고 스스로 끝나야 한다(Chromium `child_thread_impl.cc`). 따로 깨끗한 프로필로 잰다
 //!   perm-display       화면 공유(`getDisplayMedia`)는 미디어 요청(화면 비트)으로 온다 — 거부하면 `NotAllowedError`. 미디어 요청의
 //!                      답은 Chromium 이 기억하지 않는다 — 다시 청하면 또 묻는다(W5b 실측). 허용하면 청한 비트를 그대로 돌려준다
 //!                      (거부와 다른 결과 — 이 기계는 화면 기록 권한이 없어 `NotReadableError`)
@@ -129,17 +129,16 @@ fn waitTitle(host: *Host, text: []const u8) bool {
     return false;
 }
 
-/// host 의 자식을 `ms` 동안 50 ms 마다 본다 — 나타난 서로 다른 helper pid 수(처음 본 수와 견준다)와, 한 번에 본 「계속
-/// 샌드박스 밖인」 helper 의 최대 수. 카메라 utility 를 helper 가 끝내던 때는 초당 580~1090 번 다시 떠 이 2 초에 1,000 개
-/// 넘게 떴을 것이고, 50 ms 표본으로 43 개를 봤다(처음 7 — 실측). 경로가 `maru-web-helper` 인 자식만 센다 — exec 전의 fork 와
-/// 이미 죽은 pid 는 경로가 비어 빠진다(죽은 pid 도 `sandbox_check` 가 1 을 준다 — W7b 12 차 리뷰 실측). 새 helper 는 자기
-/// 샌드박스를 켜기 전 잠깐 밖이므로, 세 표본(약 100 ms) 잇달아 밖인 것만 「샌드박스 밖」으로 센다. 그렇게 남은 것의 pid 와,
-/// 그런 것이 **모두** 카메라 utility 였는지(실행 인자 — 못 읽으면 다음 표본에서 다시 읽는다)도 돌려준다. 50 ms 표본은 그
-/// 순간 살아 있는 것만 본다 — 옛 동작은 2 초에 약 1,240 번 다시 떴는데 30 개만 봤다(약 2.4 %, W7b 14 차 리뷰 셈).
 const Churn = struct { first: usize, distinct: usize, max_unsandboxed: usize, outside_pid: c_int = 0, outside_all_camera: bool = true };
 
 const camera_sub_type_arg = "--utility-sub-type=video_capture.mojom.VideoCaptureService";
 
+/// host 의 자식을 `ms` 동안 50 ms 마다 본다 — 나타난 서로 다른 helper pid 수(처음 본 수와 견준다)와, 한 번에 본 「계속
+/// 샌드박스 밖인」 helper 의 최대 수. `maru-web-helper` 경로인 자식만 센다(`os.unsandboxedHelper` 와 같은 거름). 새 helper 는
+/// 자기 샌드박스를 켜기 전 잠깐 밖이므로, 세 표본(약 100 ms) 잇달아 밖인 것만 「샌드박스 밖」으로 센다. 그렇게 남은 것의
+/// pid 와, 그런 것이 **모두** 카메라 utility 였는지(실행 인자 — 살아 있는 동안 못 읽으면 다음 표본에서 다시 읽고, 확인되지
+/// 않은 채 사라지면 아닌 것으로 친다)도 돌려준다. 50 ms 표본은 그 순간 살아 있는 것만 본다 — 몇 ms 만에 끝나는 다시 뜨기는
+/// 대부분 놓친다(표본 한계와 그 셈은 docs/plans/web-osr-backend.md C1).
 fn helperChurn(host_pid: c_int, ms: u32) Churn {
     var buf: [64]c_int = undefined;
     var path_buf: [4096]u8 = undefined;
@@ -180,6 +179,10 @@ fn helperChurn(host_pid: c_int, ms: u32) Churn {
                 } else if (next_len[next_n] >= 6) churn.outside_all_camera = false;
             }
             next_n += 1;
+        }
+        // 확인되지 않은 채 사라진 「계속 샌드박스 밖」 helper 는 카메라 utility 가 아니다(그것은 host 가 끝날 때까지 산다).
+        for (streak_pid[0..streaks], streak_len[0..streaks], streak_ok[0..streaks]) |pid, len, ok| {
+            if (len >= 3 and !ok and std.mem.indexOfScalar(c_int, next_pid[0..next_n], pid) == null) churn.outside_all_camera = false;
         }
         if (first) churn.first = named;
         first = false;
@@ -606,27 +609,17 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
         var kid_buf: [64]c_int = undefined;
         var path_buf: [4096]u8 = undefined;
         for (os.children(host.pid, &kid_buf)) |pid| {
-            if (!std.mem.endsWith(u8, os.executablePath(pid, &path_buf), "/maru-web-helper")) continue;
-            if (os.sandbox_check(pid, null, 0) == 1) continue;
+            if (!os.unsandboxedHelper(pid, &path_buf)) continue;
             outside_buf[outside_n] = pid;
             outside_n += 1;
         }
     }
     try host.send(.shutdown);
     _ = host.wait(wait_ms);
-    var survivors: usize = outside_n;
-    var waited: u32 = 0;
-    while (waited <= 3_000 and survivors != 0) : (waited += 100) {
-        survivors = 0;
-        for (outside_buf[0..outside_n]) |pid| {
-            if (os.alive(pid)) survivors += 1;
-        }
-        if (survivors != 0) os.sleepMs(100);
-    }
-    if (survivors != 0) for (outside_buf[0..outside_n]) |pid| {
-        if (os.alive(pid)) _ = std.c.kill(pid, .KILL);
-    };
-    report(churn.outside_pid != 0 and survivors == 0, "perm-camera-gone", std.fmt.bufPrint(&detail_buf, "카메라 utility 를 봤다 {} · 끝내기 직전 샌드박스 밖 helper {d} 개 중 host 를 끝내고 3 초 뒤 남은 것 {d}", .{ churn.outside_pid != 0, outside_n, survivors }) catch "");
+    const remaining = os.survivors(outside_buf[0..outside_n], 3_000);
+    os.killAlive(outside_buf[0..outside_n]);
+    const camera_listed = churn.outside_pid != 0 and std.mem.indexOfScalar(c_int, outside_buf[0..outside_n], churn.outside_pid) != null;
+    report(camera_listed and remaining == 0, "perm-camera-gone", std.fmt.bufPrint(&detail_buf, "카메라 utility 가 끝내기 직전 샌드박스 밖 helper {d} 개 안에 있음 {} · host 를 끝내고 3 초 뒤 남은 것 {d}", .{ outside_n, camera_listed, remaining }) catch "");
     host = try start(host_path, profile_arg, &u, port);
     defer {
         host.send(.shutdown) catch {};
@@ -657,18 +650,8 @@ pub fn cameraOrphan(report: Report, host_path: [:0]const u8, profile_arg: [:0]co
     @memcpy(watched[0..kids.len], kids);
     _ = std.c.kill(host.pid, .KILL);
     _ = host.wait(wait_ms);
-    var survivors: usize = kids.len;
-    var waited: u32 = 0;
-    while (waited <= 3_000 and survivors != 0) : (waited += 100) {
-        survivors = 0;
-        for (watched[0..kids.len]) |pid| {
-            if (os.alive(pid)) survivors += 1;
-        }
-        if (survivors != 0) os.sleepMs(100);
-    }
-    if (survivors != 0) for (watched[0..kids.len]) |pid| {
-        if (os.alive(pid)) _ = std.c.kill(pid, .KILL);
-    };
+    const survivors = os.survivors(watched[0..kids.len], 3_000);
+    os.killAlive(watched[0..kids.len]);
     const camera_listed = churn.outside_pid != 0 and std.mem.indexOfScalar(c_int, watched[0..kids.len], churn.outside_pid) != null;
     report(camera_listed and survivors == 0, "perm-camera-orphan", std.fmt.bufPrint(&detail_buf, "카메라 utility 가 죽이기 직전 자식에 있음 {} · host SIGKILL 직전 자식 {d} 개 중 3 초 뒤 남은 것 {d}", .{ camera_listed, kids.len, survivors }) catch "");
 }

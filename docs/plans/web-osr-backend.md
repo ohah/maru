@@ -77,32 +77,35 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
   배치만 쟀고 각각 단독은 재지 않았다).
 - 서명은 ad-hoc, hardened runtime 없음. formula 산출물에는 quarantine 이 붙지 않는다(§13.1 「이 축이 뒤집은 것」).
 - **판정자**: helper 의 모든 프로세스가 `sandbox_check` 1(아래 카메라 utility 를 띄우기 전 — 띄운 뒤에는 그 하나만 밖이다). 샌드박스를 끈 빌드는 이 판정자에서 실패한다.
-- **예외 하나 — 카메라 utility(사용자 결정 2026-10-01, W7b 10·11 차에서 발견)**: Chromium 은 macOS 에서 카메라 담당 utility
-  (`video_capture.mojom.VideoCaptureService`)를 **일부러 샌드박스 없이** 띄운다(mojom `ServiceSandbox` 가 Fuchsia 밖에서
-  `kNoSandbox` → `--service-sandbox-type=none`, `--seatbelt-client` 없음 — Chromium 154 소스·실행 인자 실측). helper 가 이것을
-  끝내면 Chromium 이 곧바로 다시 띄워 초당 580~1090 번 되풀이했고(그 host 가 끝날 때까지, 코어 하나 가까이), 카메라도
-  동작할 수 없었을 것이다(추론 — 카메라가 있는 기계는 실측 못 함, 고친 뒤 카메라가 되는지·TCC 묻기도 미실측). 페이지가 장치
-  목록만 물어도(`enumerateDevices()`, 묻지 않음) 시작된다(실측 — 판정 페이지의 카메라 요청을 장치 목록 묻기로 바꾸자 옛 동작에서
-  8,547 번 다시 떴다). 고친 뒤에는 그 utility 하나가 떠서 그 host 가 끝날 때까지 살아 있었다(실측 약 13.6 초 — Chromium 은 5 초
-  놀면 연결을 놓을 뿐 스스로 다시 띄우지 않는다, 소스). 그러니 어떤 페이지든 묻지 않고 샌드박스 없는 프로세스 하나를 띄울 수
-  있다 — 실제 Chrome 도 같다. 그래서 helper 는 **정확히 이 utility 만** 샌드박스 밖에서 계속 간다
-  (`unsandboxed_policy.zig` — `type=utility`·`utility-sub-type`·`service-sandbox-type=none` 이 각각 한 번, `no-sandbox`·
-  `seatbelt-client` 없음, Chromium 의 명령줄 해석과 같은 규칙: `--`·`-` 접두사·단독 `--` 뒤 무시·공백 떼기, 겹치면 거절).
-  실제 Chrome 도 이 utility 를 샌드박스 없이 돌린다 — 인자는 브라우저 프로세스(host)가 만들고 웹 페이지가 정할 수 없다.
-  렌더러·GPU·다른 utility 는 그대로 샌드박스 밖이면 끝낸다. 알림 utility(`mac_notifications…`, 역시 `kNoSandbox`)는
-  그대로 끝낸다(판정 한 번에 수십 번 — 허용하면 maru 의 알림 중계와 겹칠 수 있다, 후속). 다른 길(카메라 서비스를 host
-  안으로 — `RunVideoCaptureServiceInBrowserProcess`)은 반복은 없앴지만 이 맥에서 카메라 요청이 답 없이 멈춰 버렸다(실측).
-  판정자 `perm-media-helpers` 가 카메라 뒤 2 초 동안 helper pid 가 거의 그대로(처음 +5 안)이고 세 표본(약 100 ms) 잇달아
-  샌드박스 밖인 helper 가 많아야 하나이며 그것이 실행 인자로 카메라 utility 인지 본다(옛 동작에서 pid 34~43·처음 7~8 로 실패,
-  고친 뒤 7·7). 이 utility 는 W1b 의 「모두 샌드박스 안」에서 빠진 하나라 고아가 되지 않는지를 따로 잰다: `perm-camera-gone` 은 정상
-  종료 직전의 샌드박스 밖 helper 가 모두 3 초 안에 사라지는지(정상 종료에서는 host 가 자식을 직접 끝낸다 — 멈춰 둔 utility 도
-  사라졌다, 14 차 실측), `perm-camera-orphan` 은 깨끗한 프로필에서 host 를 **SIGKILL** 해도 죽이기 직전의 자식이 모두(렌더러·GPU·카메라
-  utility — 6~7 개) 3 초 안에 스스로 끝나는지(Chromium 의 자식은 IPC 가 끊기면 스스로 끝난다 — `child_thread_impl.cc`;
-  utility 를 멈춰 두는 변이로 FAIL 을 확인했다, 남은 것은 판정이 끝낸다).
-  50 ms 표본은 그 순간 살아 있는 것만 본다 — 옛 동작은 2 초에 약 1,240 번 다시 떴는데 30 개만 봤다(약 2.4 %). 그러니 몇 ms 만에
-  끝나는 다시 뜨기는 초당 약 125 번 아래면 잡는 것보다 놓치는 일이 많고 약 200 번 위에서야 믿을 만하다(15 차 리뷰의 포아송
-  셈 — 「처음 +5」를 넘을 확률, 옛 동작처럼 짧게 사는 다시 뜨기를 가정; Chromium 154 는 늦춤 없이 곧바로 다시 띄운다, 소스). 알림 utility 의 다시 뜨기는 이 판정이
-  보지 않는다(후속).
+- **예외 하나 — 카메라 utility(사용자 결정 2026-10-01, W7b 10·11 차에서 발견)**
+  - **결정·원인**:
+    - Chromium 은 macOS 에서 카메라 담당 utility(`video_capture.mojom.VideoCaptureService`)를 **일부러 샌드박스 없이** 띄운다. mojom `ServiceSandbox` 가 Fuchsia 밖에서 `kNoSandbox` 이고, 그래서 `--service-sandbox-type=none` 이 붙고 `--seatbelt-client` 는 없다(Chromium 154 소스, 실행 인자 실측).
+    - helper 가 이것을 끝내면 Chromium 이 곧바로 다시 띄워 초당 580~1090 번 되풀이했다. 그 host 가 끝날 때까지 이어졌고, 코어 하나 가까이를 썼다.
+    - 카메라도 동작할 수 없었을 것이다. 추론이다 — 카메라가 있는 기계는 실측하지 못했고, 고친 뒤 카메라가 되는지와 TCC 묻기도 재지 않았다.
+    - 페이지가 장치 목록만 물어도(`enumerateDevices()`, 묻지 않음) 시작된다(W7b 13 차 실측 — 판정 페이지의 카메라 요청을 장치 목록 묻기로 바꾸자 옛 동작에서 8,547 번 다시 떴다).
+    - 다른 길도 재 봤다. 카메라 서비스를 host 안으로 옮기는 `RunVideoCaptureServiceInBrowserProcess` 는 반복은 없앴지만, 이 맥에서 카메라 요청이 답 없이 멈춰 버렸다(실측).
+  - **허용 규칙**:
+    - helper 는 **정확히 이 utility 만** 샌드박스 밖에서 계속 간다(`unsandboxed_policy.zig`). `type=utility`·`utility-sub-type`·`service-sandbox-type=none` 이 각각 한 번 있어야 하고, `no-sandbox`·`seatbelt-client` 는 없어야 한다.
+    - 인자는 Chromium 의 명령줄 해석과 같은 규칙으로 읽는다. `--`·`-` 접두사를 받고, 단독 `--` 뒤는 무시하며, 공백을 떼고, 스위치가 겹치면 거절한다.
+    - 인자는 브라우저 프로세스(host)가 만들고, 웹 페이지가 정할 수 없다.
+    - 샌드박스 종류는 Chrome 과 같다(`kNoSandbox`). 다만 Chrome 과 달리 maru 의 helper 는 ad-hoc 서명이라 hardened runtime·라이브러리 검증이 없다. 이 PR 전에는 샌드박스 밖 helper 가 프레임워크를 올리는 일이 없었고, 이제는 이 하나가 올린다.
+    - 고친 뒤에는 그 utility 하나가 떠서 그 host 가 끝날 때까지 살아 있었다(실측 약 13.6 초). Chromium 에 5 초 놀면 연결을 놓는 코드는 있지만, 판정 페이지에서는 host 가 끝날 때까지 살아 있었다. 스스로 다시 띄우는 반복은 없다(소스).
+    - 그러니 어떤 페이지든 묻지 않고 샌드박스 없는 프로세스 하나를 띄울 수 있다.
+    - 렌더러·GPU·다른 utility 는 그대로 샌드박스 밖이면 끝낸다.
+    - 알림 utility(`mac_notifications…`, 역시 `kNoSandbox`)도 그대로 끝낸다. 판정 한 번에 수십 번이고, 알림을 띄우려 할 때만 몰려서 반복 루프는 아니다(W7b 14 차 실측). 허용하면 maru 의 알림 중계와 겹칠 수 있어 후속으로 둔다.
+  - **판정자**:
+    - `perm-media-helpers`: 카메라 뒤 2 초 동안 다음을 본다(옛 동작에서 pid 34~43·처음 7~8 로 실패, 고친 뒤 7·7).
+      - helper pid 가 거의 그대로(처음 +5 안)
+      - 세 표본(약 100 ms) 잇달아 샌드박스 밖인 helper 가 많아야 하나
+      - 그것이 모두 실행 인자로 카메라 utility
+    - 이 utility 는 W1b 의 「모두 샌드박스 안」에서 빠진 하나라, 고아가 되지 않는지를 따로 잰다.
+      - `perm-camera-gone`: 정상 종료 직전의 샌드박스 밖 helper(카메라 utility 가 그 안에 있어야 한다)가 모두 3 초 안에 사라져야 한다. 정상 종료에서는 host 가 자식을 직접 끝낸다 — 멈춰 둔 utility 도 사라졌다(W7b 14·15 차 실측).
+      - `perm-camera-orphan`: 깨끗한 프로필에서 host 를 **SIGKILL** 해도, 죽이기 직전의 자식(렌더러·GPU·카메라 utility — 6~7 개)이 모두 3 초 안에 스스로 끝나야 한다. Chromium 의 자식은 IPC 가 끊기면 스스로 끝난다(`child_thread_impl.cc`). utility 를 멈춰 두는 변이로 FAIL 을 확인했고, 남은 것은 판정이 끝낸다.
+  - **표본 한계**:
+    - 50 ms 표본은 그 순간 살아 있는 것만 본다. 옛 동작은 2 초에 약 1,240 번 다시 떴는데 30 개만 봤다(약 2.4 %).
+    - 그러니 몇 ms 만에 끝나는 다시 뜨기는 초당 약 125 번 아래면 잡는 것보다 놓치는 일이 많고, 약 200 번 위에서야 믿을 만하다. 「처음 +5」를 넘을 확률로 셈한 값이다(W7b 15 차 리뷰의 포아송 셈, 옛 동작처럼 짧게 사는 다시 뜨기를 가정).
+    - Chromium 154 는 늦춤 없이 곧바로 다시 띄운다(소스).
+    - 알림 utility 의 다시 뜨기는 이 판정이 보지 않는다.
 
 ### C2. 제어 채널
 

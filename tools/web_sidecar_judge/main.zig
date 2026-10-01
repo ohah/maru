@@ -230,16 +230,7 @@ fn parentDeath(host_path: [:0]const u8, profile_arg: [:0]const u8) !void {
 }
 
 fn allGone(pids: []const c_int, timeout_ms: u32) bool {
-    var waited: u32 = 0;
-    while (waited <= timeout_ms) : (waited += 100) {
-        var any = false;
-        for (pids) |pid| {
-            if (os.alive(pid)) any = true;
-        }
-        if (!any) return true;
-        os.sleepMs(100);
-    }
-    return false;
+    return os.survivors(pids, timeout_ms) == 0;
 }
 
 /// 대화상자·파일 선택 판정(W5a) — 프로필은 `<뿌리>/f`, 고를 파일은 뿌리 아래에 만든다.

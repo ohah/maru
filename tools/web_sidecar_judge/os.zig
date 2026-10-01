@@ -31,8 +31,9 @@ pub fn alive(pid: c_int) bool {
     return std.c.kill(pid, @enumFromInt(0)) == 0;
 }
 
-/// `pid` 의 실행 인자(argv — 환경 변수는 보지 않는다)에 `needle` 이 그대로 든 것이 있는가. `KERN_PROCARGS2` 는 argc(int),
-/// 실행 경로, NUL 채움, argv argc 개, 환경 변수 순이다. 못 읽거나 잘렸으면(버퍼를 꽉 채움) false.
+/// `pid` 의 실행 인자(argv)에 `needle` 이 그대로 든 것이 있는가. `KERN_PROCARGS2` 는 argc(int), 실행 경로, NUL 채움, argv argc
+/// 개, 환경 변수 순이다 — 채움과 빈 글 argv 는 둘 다 NUL 이라 가를 수 없어, 앞쪽 argv 가 빈 글이면 그만큼 환경 변수까지 본다
+/// (helper 의 argv[0] 은 늘 경로라 판정에는 상관없다, 판정자는 host 를 빈 환경으로 띄운다). 못 읽거나 잘렸으면(버퍼를 꽉 채움) false.
 pub fn argsContain(pid: c_int, needle: []const u8) bool {
     var buf: [65536]u8 = undefined;
     var len: usize = buf.len;

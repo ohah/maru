@@ -125,5 +125,17 @@ test "불완전 복원 래치는 저장을 막되 종료는 막지 않는다" {
 
     // ── ④ 옆에 있던 같은 규칙을 지운 게 아니다 ──────────────────────────────────────────────
     //    복원을 «끈» 경우의 가드는 그대로 남아야 한다. 한쪽을 켜려고 다른 쪽을 끄면 구멍이 자리만 옮긴다.
-    try std.testing.expect(std.mem.indexOf(u8, capture, "MARU_NO_WORKSPACE_RESTORE") != null);
+    //    주석을 지운 소스에서 **가드 줄 자체**를 찾는다 — 이름만 찾으면 주석 한 줄로도 초록이다.
+    try std.testing.expect(std.mem.indexOf(u8, capture, "guard workspaceRestoreEnabled else { return nil }") != null);
+
+    // ── ⑤ 「끔」 결정 하나가 config 와 테스트용 env 를 **둘 다** 본다(2026-10-01 `workspace.restore`) ────
+    //    한쪽만 보면: config 로 끈 사용자의 저장 파일이 종료 때 덮이거나, 스모크가 사용자 파일을 쓴다.
+    const decl = "private lazy var workspaceRestoreEnabled: Bool =";
+    const decl_at = std.mem.indexOf(u8, src, decl) orelse return error.RestoreDecisionMissing;
+    const decl_end = std.mem.indexOfPos(u8, src, decl_at, "\n\n") orelse src.len;
+    const decision = src[decl_at..decl_end];
+    try std.testing.expect(std.mem.indexOf(u8, decision, "MARU_NO_WORKSPACE_RESTORE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, decision, "maru_macos_workspace_restore_enabled()") != null);
+    //    env 를 직접 읽는 자리가 선언 밖에 다시 생기면 그 자리는 config 를 모른다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "environment[\"MARU_NO_WORKSPACE_RESTORE\"]"));
 }

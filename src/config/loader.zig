@@ -1178,6 +1178,23 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 
+test "parse: workspace.restore defaults on and can be turned off" {
+    var defaults = try parse(std.testing.allocator, "font.size = 14");
+    defer defaults.deinit();
+    try std.testing.expectEqual(true, defaults.config.workspace.restore);
+
+    var off = try parse(std.testing.allocator, "workspace.restore = false");
+    defer off.deinit();
+    try std.testing.expectEqual(false, off.config.workspace.restore);
+    try std.testing.expectEqual(@as(usize, 0), off.diagnostics.len);
+
+    // 잘못된 값은 진단을 남기고 기본(복원)을 지킨다 — 오타 하나로 사용자의 레이아웃 저장이 꺼지면 안 된다.
+    var invalid = try parse(std.testing.allocator, "workspace.restore = nope");
+    defer invalid.deinit();
+    try std.testing.expectEqual(true, invalid.config.workspace.restore);
+    try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
+}
+
 test "parse: removed compatibility settings use the generic unknown-key diagnostic" {
     const text =
         \\workspace.restore-claude = true

@@ -120,7 +120,7 @@ pub fn editorImeRanges(self: *AppSession) ?EditorImeRanges {
     if (self.ime_terminal_target_id == null and self.inputFocus() != .terminal) return null;
     const term = activeEditorTermForIme(self) orelse return null;
     if (term.rt.editor_diff != null) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const sel = term.rt.editor_selection orelse return null;
     const content = doc.file.content;
     const start = utf16AtByte(content, sel.start()) orelse return null;
@@ -142,7 +142,7 @@ pub fn editorImeReplacement(self: *AppSession, start_utf16: usize, len_utf16: us
     // A rejected callback marks the key as consumed with imeMarked(""). That
     // is not evidence that a virtual marked string ever existed.
     if (self.ime_marked_changed) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only or term.rt.editor_selection == null) return false;
     const end_utf16 = std.math.add(usize, start_utf16, len_utf16) catch return false;
     const start = byteAtUtf16(doc.file.content, start_utf16) orelse return false;
@@ -170,7 +170,7 @@ pub fn editorImeSubstring(self: *AppSession, start_utf16: usize, len_utf16: usiz
     if (self.ime_terminal_target_id == null and self.inputFocus() != .terminal) return null;
     const term = activeEditorTermForIme(self) orelse return null;
     if (term.rt.editor_diff != null) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const end_utf16 = std.math.add(usize, start_utf16, len_utf16) catch return null;
     const start = byteAtUtf16(doc.file.content, start_utf16) orelse return null;
     const end = byteAtUtf16(doc.file.content, end_utf16) orelse return null;

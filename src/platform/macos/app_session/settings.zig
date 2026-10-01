@@ -1580,7 +1580,7 @@ pub fn sendSelectionHeader(
 pub fn showEditorContextMenu(self: *AppSession, term: *app_session_mod.Term, x_px: f64, y_px: f64) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 이 메뉴의 대상이 아니다(§8.1 대상 판정)
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
 
     var buf: [maru.session.content_menu.max_items]maru.session.content_menu.Item = undefined;
     const built = maru.session.content_menu.build(

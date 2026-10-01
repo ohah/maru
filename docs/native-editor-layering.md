@@ -18,7 +18,7 @@ L2  src/session/editor/          문서 모델 — chrome·OS를 모름
       document.zig               파일 → 문서 해석(BOM·줄바꿈·파일 끝 개행 보존, §3.5)
       hazard.zig                 적대적 입력 판정(BiDi·제어·폭 0·비표준 공백, §3.8)
       span.zig                   Span/role + SpanProvider 주입점
-      document_registry.zig      안정 문서 슬롯·세대 핸들·뷰/읽기/요청 참조 수명
+      document_registry.zig      안정 문서 슬롯·세대 핸들·뷰/읽기/요청 참조 수명(AppRuntime 소유)
       (기존 계약) protocol.zig · grant.zig · diff_model.zig
 
 L3  src/chrome/components/editor_view/    표시 — 모델을 props로 읽음

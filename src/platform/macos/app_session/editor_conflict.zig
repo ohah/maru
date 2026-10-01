@@ -31,7 +31,7 @@ pub fn ask(self: *AppSession, term: *Term) void {
     // 편집기 문서가 아니면 물을 것이 없다 — 이 자리에 오는 길은 `saveDocument` 의 `ExternalConflict`
     // 하나뿐이고 그것은 문서가 있을 때만 난다. 그래도 확인해 둔다: 상자가 뜨면 **키를 먹으므로**
     // 대상 없는 상자는 입력을 삼키는 빈 모달이 된다.
-    if (term.kind != .editor or term.rt.editor_document.opened == null) return;
+    if (term.kind != .editor or term.rt.editorDocument().opened == null) return;
     self.showConfirmChoiceKeys(
         .{ .save_conflict = term.surface.id },
         .editor_save_conflict_choose,
@@ -52,8 +52,8 @@ pub fn ask(self: *AppSession, term: *Term) void {
 pub fn confirmCompare(self: *AppSession, surface_id: u64) void {
     const term = term_ops.termBySurfaceId(self, surface_id) orelse return;
     if (term.kind != .editor) return;
-    if (term.rt.editor_document.opened == null) return;
-    const path = term.rt.editor_document.path orelse return;
+    if (term.rt.editorDocument().opened == null) return;
+    const path = term.rt.editorDocument().path orelse return;
     openCompare(self, term, path) catch {
         // 탭을 못 열었으면 **그 사실을 말한다** — 조용히 아무 일도 안 하면 사용자는 버튼이 죽은 줄 안다.
         self.showNoticeKey(.editor_compare_failed);
@@ -105,7 +105,7 @@ pub fn fillCompare(self: *AppSession, entry: *dock_panel.Entry) void {
         entry.diff_failed = true;
         return;
     };
-    const doc = owner.rt.editor_document.opened orelse {
+    const doc = owner.rt.editorDocument().opened orelse {
         entry.diff_failed = true;
         return;
     };
@@ -192,8 +192,8 @@ pub fn confirmOverwrite(self: *AppSession, surface_id: u64) void {
 pub fn confirmReload(self: *AppSession, surface_id: u64) void {
     const term = term_ops.termBySurfaceId(self, surface_id) orelse return;
     if (term.kind != .editor) return;
-    const doc = term.rt.editor_document.opened orelse return;
-    const path = term.rt.editor_document.path orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
+    const path = term.rt.editorDocument().path orelse return;
 
     var fresh = editor_ops.openPath(self.io, self.allocator, path) catch |e| {
         self.showNoticeKey(reloadFailureNoticeKey(e));
@@ -218,11 +218,11 @@ pub fn confirmReload(self: *AppSession, surface_id: u64) void {
     }
 
     // **형식도 새로 읽은 것을 따른다** — 안 따르면 다음 저장이 낡은 관례(BOM·개행)로 쓴다.
-    term.rt.editor_document.opened.?.file.format = fresh.file.format;
+    term.rt.editorDocument().opened.?.file.format = fresh.file.format;
     // **이제 clean 이다.** 사용자가 「디스크를 받아들였다」고 답했고 내용이 그것과 같다 — 편집으로
     // 넣었다는 이유로 dirty 로 남으면 화면이 그 답과 어긋난다.
     app_session_mod.editor_backup_ops.markClean(self, term, fresh.file.content, null);
-    term.rt.editor_document.opened.?.disk_hash = fresh.disk_hash;
+    term.rt.editorDocument().opened.?.disk_hash = fresh.disk_hash;
     // 구문 트리·LSP 통지·줄 인덱스는 **편집 경로가 이미 한다** — `applyEditAsOne` 이 `refreshAfterEdit`
     // 를 지나므로(그 함수 주석: 「제품의 편집 경로 여섯이 전부 이 함수를 지난다」) 여기서 다시 부르면
     // 그 통지가 두 번 간다.

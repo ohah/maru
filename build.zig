@@ -4849,6 +4849,15 @@ pub fn build(b: *std.Build) void {
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
         .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.", "app_session.editor_diff.", "session.editor." },
     });
+    // 문서 핸들의 제품 수명과 등록 실패를 빠르게 재현한다. 전체 test-editor에도 같은 판정자가 실린다.
+    const document_runtime_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{"EDOCREG"},
+    });
+    const run_document_runtime_tests = b.addRunArtifact(document_runtime_tests);
+    run_document_runtime_tests.setCwd(b.path("."));
+    run_document_runtime_tests.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-document-runtime", "Run editor document registration and release judges").dependOn(&run_document_runtime_tests.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);

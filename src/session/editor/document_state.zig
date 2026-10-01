@@ -1,5 +1,5 @@
 //! 문서 본문·저장 정보·편집 이력의 소유 경계. 파일 I/O와 뷰 상태는 platform에 남는다.
-//! 지금은 TermRuntime에 값으로 보유한다. 공유 registry나 연결 수명을 제공하지 않는다.
+//! 일반 텍스트는 앱 전역 registry가 소유하며 TermRuntime은 view lease로 빌린다. State 자체는 연결 정책을 제공하지 않는다.
 const std = @import("std");
 const edit_doc = @import("edit_doc.zig");
 const history = @import("history.zig");

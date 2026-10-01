@@ -18,13 +18,10 @@ IME 조합의 모델 반영은 현재 Maru preedit 계약과 달라 표시 목�
 한 파일의 위아래를 나란히 보고 어느 쪽에서든 편집한다. 내용·Undo/Redo·저장 상태는 공유하고,
 커서·선택·스크롤·접힘·랩은 뷰마다 독립이다. 두 개의 텍스트 복사본을 서로 동기화하지 않는다.
 
-`src/platform/macos/app_session.zig`의 `TermRuntime`은 `editor_document`,
-`editor_selection`, `editor_preedit`을 가진다. 단일 뷰 이관으로 본문·저장 정보·Undo/Redo의 자원은 `editor_document`에
-묶었지만 여전히 단일 Term이 그 객체를 소유한다. `editor.zig`가 편집·저장·해제를
-Term 기준으로 수행한다. `src/session/editor/delta.zig`는 변경·역연산·offset 매핑을 제공하지만
-여러 뷰에 대한 게시·Undo 그룹·IME 소유자 전환까지 제공하지 않는다.
-`document_registry.Registry`는 안정 슬롯과 참조 수명을 제공하는 중립 골격이다.
-현재 제품 `TermRuntime`은 아직 값을 소유하며 app-global registry 배선이 있다는 뜻은 아니다.
+일반 텍스트 문서는 `AppRuntime.editor_documents`가 소유하고 `TermRuntime`은 view lease로
+본문·저장 정보·Undo/Redo를 빌린다. 선택·조합·줄 배열과 provider 상태는 아직 뷰별이다.
+단일 뷰 열기/해제는 핸들에 배선했지만 경로별 정본 통합과 두 뷰의 편집 게시·좌표 매핑·IME
+소유자 전환은 아직 구현하지 않았다. 아래 이관 기록에서 중립 골격과 제품 배선 결과를 구분한다.
 첫 split 대상은 기존 일반 네이티브 편집 문서다. 같은 경로를 보더라도 read-only diff의
 base/modified snapshot과 3-way merge의 각 입력은 정본 편집 뷰로 합치지 않는다.
 비교·병합의 결과 문서를 연결할지, 이름 없는 문서·원격 문서의 split을 언제 노출할지는
@@ -419,7 +416,8 @@ Ready 이벤트를 다시 발생시켜 실제 제품 CI를 실행하자 기존 �
 
 `session.editor.document_state.State`가 `Opened`의 편집 버퍼·저장 해시·디스크 지문,
 로컬 경로·원격 목적지/경로·untitled 이름과 `history.State`를 묶는다.
-`TermRuntime.editor_document`는 이 값을 단일 뷰에서 보유한다. 기존 platform
+당시 `TermRuntime.editor_document`가 이 값을 보유했다. 아래 제품 핸들 이관 뒤에는
+registry가 같은 값을 소유한다. 기존 platform
 `Opened`/`RemoteDoc`/`contentHash`는 facade로 유지한다. 파일 I/O, 저장 가드,
 백업 시계·삭제, provider 통지와 선택·스크롤·접힘·IME 조합은 기존 배선에 남는다.
 
@@ -467,6 +465,38 @@ Dirty 확인·OS 조합 정산·provider 취소·렌더 참조 종료는 coordin
 100개 슬롯 증가의 주소 안정성, 슬롯 재사용/이전 세대/중복/다른 owner/잘못된 kind 거절,
 모든 준비/retain 할당 실패와 id/슬롯 게시 보존, 세대/id 상한 및 allocator 분리를 판정한다.
 DREG7은 pin-only 재연결, 해제된 lease 복사본과 위조 id/슬롯/kind 거절, Busy 뒤 owner
-보존을 확인한다. 제품 split/IME를 실행한 결과와 구분한다. 현재는 중립 모듈과 실제 L2 테스트 집계에 배선했으며 AppRuntime
-및 Term의 handle 이관은 아직 없다. 다음은 열린 문서의 준비→등록→뷰 연결과 기존 두
-teardown 호출자를 이 수명으로 배선하되 provider/렌더/입력 정산을 먼저 확정하는 단계다.
+보존을 확인한다. 제품 split/IME를 실행한 결과와 구분한다. 이 골격 단계에서는 중립 모듈과 L2 테스트 집계만 배선했다. 제품 이관은 아래 절에서 구분한다.
+
+
+## 단일 뷰 제품의 문서 핸들 이관
+
+`AppRuntime.editor_documents`는 창보다 오래 사는 registry다. `preparePath`와
+`prepareUntitled`가 읽기·본문·뷰 줄 배열·신원과 registry 등록을 모두 준비한 뒤 `Prepared`를
+돌려준다. 준비 실패는 기존 pane/활성 인덱스/본문을 변경하지 않는다. `Prepared.deinit`은
+부착 전 참조와 뷰 배열을 되돌리고, `finishAttach`는 추가 할당 없이 view lease를 넘긴다.
+이름 없는 문서는 기존 발급 번호를 등록 문서에 넣은 뒤 백업 복원을 수행한다.
+
+`TermRuntime.editorDocument()`로 편집·저장·Undo·백업·LSP·frame/hit-test 소비처가 같은
+주소를 조회한다. 본문이 없는 비교/터미널과 부착 전 untitled 번호만
+`editor_unattached_document`에 둔다. 열린 일반 텍스트의 본문은 그 값에 복사하지 않는다.
+Registry bookkeeping은 앱 수명의 `smp_allocator`다. 문서 자원의 실제 allocator는 준비 때
+전달한 allocator를 registry가 기억한다. 생산 `app_host_abi`도 앱 수명의 `smp_allocator`를
+사용하므로 창 종료 뒤 pin이 남아도 유효하다. 주입한 테스트 allocator는 마지막 pin보다
+오래 살아야 한다. pin이 allocator 소유자의 수명까지 연장하는 계약은 추가하지 않았다.
+
+개별 닫기의 `destroyTerm`과 창 종료의 `AppSession.deinit`은 기존 provider 취소/닫기 경로를
+유지한다. `releaseEditorTerm`은 비교·병합·구문/provider 캐시·줄/hit 배열·조합·선택을
+정산한 뒤 view lease를 놓는다. 뷰 선택 해제는 문서 Undo를 지우지 않는다. 다른 read/request
+참조가 있으면 본문·신원·이력은 유지하고, registry가 마지막 참조에서 한 번만 해제한다.
+registry 자체는 창 종료에서 deinit하지 않는다. 저장/버리기/복구 백업 삭제 정책은 바꾸지 않는다.
+
+`test-editor-document-runtime`의 EDOCREG1~3(실제 제품 판정자 3개)은 창 종료 뒤
+read/request의 본문·신원·Undo 보존, 개별 탭 닫기와 재열기의 다른 handle, 읽기·본문·줄·경로·
+등록 준비 전체 할당 실패에서 기존 pane/본문 보존을 검증한다. 같은 판정자는 전체
+`test-editor`에도 포함한다. OS 한국어 HID/GUI 검증이나 실제 두 뷰 공유 성공으로 해석하지 않는다.
+
+이 단계는 문서 수명 이관이다. 경로 alias/권한을 포함한 identity 통합, 다중 뷰 provider 통지,
+편집 게시·독립 좌표, renderer/worker 읽기 계약과 공유 IME는 남아 있다. 현재 renderer가 본문을
+읽는 경로는 메인 스레드의 frame/hit-test다. 렌더용 op/글자 배열은 기존 뷰별 저장소에서
+준비하며 이 이관으로 worker가 mutable State를 읽게 하지 않는다. read/request pin은 수명
+판정에만 사용했고 실제 비동기 provider 작업에 registry pin을 새로 배선하지 않았다.

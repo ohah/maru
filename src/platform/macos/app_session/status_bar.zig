@@ -749,7 +749,7 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
             //
             // **판정자가 아니라 캡처가 잡았다** — 상태바 판정자는 항목이 **있는지**만 재고 그것이
             // **참인지**는 안 쟀다(#3126·#3143 의 화면을 찍고서야 dirty 점과 나란히 뜬 것이 보였다).
-            const doc_read_only = if (active_term.rt.editor_document.opened) |*d| d.file.read_only else false;
+            const doc_read_only = if (active_term.rt.editorDocument().opened) |*d| d.file.read_only else false;
             if (doc_read_only and rn < max_status_bar_right_items) {
                 if (buildStatusBarItem(self, null, maru.i18n.t(.editor_readonly), bar_cols, fg, icon_fg, .plain)) |dl| {
                     right_frames[rn] = dl;
@@ -784,7 +784,7 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
             }
             // **인코딩은 넣지 않는다**: 이 편집기는 UTF-8만 열므로(같은 절) 그 자리는 늘 같은 값이고,
             // 폭을 다투는 띠에서 변하지 않는 값은 자리만 먹는다. 다른 인코딩이 열리는 날 함께 넣는다.
-            if (active_term.rt.editor_document.opened) |*doc| {
+            if (active_term.rt.editorDocument().opened) |*doc| {
                 if (rn < max_status_bar_right_items) {
                     // `none`(줄바꿈이 하나도 없는 파일)은 **말하지 않는다** — 그때 "LF"라고 적으면
                     // 파일에 없는 사실을 단정하는 것이고, 저장이 되돌릴 값도 없다.

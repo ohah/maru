@@ -42,6 +42,9 @@ pub const AppRuntime = struct {
     /// 규칙 자체는 화면도 OS 도 몰라야 해서 L2(`session.editor.untitled`)가 안다.
     untitled_docs: editor_untitled.Counter = .{},
 
+    /// 문서 주소·참조는 창보다 오래 산다. 각 창은 view lease만 정산한다.
+    editor_documents: @import("../session/editor/document_registry.zig").Registry = .{ .allocator = std.heap.smp_allocator },
+
     /// 파일 도크 entry의 앱 전역 opaque identity 발급기. path rename과 WKWebView eviction을 넘어 같은 entry를
     /// 추적하며 모든 AppSession이 공유한다. surface_id와 의미/수명은 달라 별도 typed allocator로 둔다.
     entry_ids: dock_panel.EntryIdAllocator = .{},

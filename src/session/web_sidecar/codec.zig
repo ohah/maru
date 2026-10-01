@@ -158,10 +158,11 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeRect(&cursor, value.bounds);
         },
         .popup_changed => |value| {
-            if (!value.visible and !std.meta.eql(value.bounds, message_mod.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 })) return error.InvalidPopup;
+            if (!popupConsistent(value)) return error.InvalidPopup;
             try writeBrowser(&cursor, value.browser);
             try cursor.writeByte(@intFromBool(value.visible));
             try writeRect(&cursor, value.bounds);
+            try cursor.writeU32(value.first_generation);
         },
         .dialog_reply => |value| {
             try writeRequest(&cursor, value.browser, value.request);
@@ -356,8 +357,8 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         } },
         .ime_range => .{ .ime_range = .{ .browser = try readBrowser(&cursor), .bounds = try readRect(&cursor) } },
         .popup_changed => blk: {
-            const value: message_mod.PopupChanged = .{ .browser = try readBrowser(&cursor), .visible = try readBool(&cursor), .bounds = try readRect(&cursor) };
-            if (!value.visible and !std.meta.eql(value.bounds, message_mod.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 })) return error.InvalidPopup;
+            const value: message_mod.PopupChanged = .{ .browser = try readBrowser(&cursor), .visible = try readBool(&cursor), .bounds = try readRect(&cursor), .first_generation = try cursor.readU32() };
+            if (!popupConsistent(value)) return error.InvalidPopup;
             break :blk .{ .popup_changed = value };
         },
         .dialog_reply => blk: {
@@ -491,6 +492,12 @@ comptime {
 }
 
 const test_size: ViewSize = .{ .width = 760, .height = 486, .scale = 2.0 };
+
+/// 닫힌 팝업은 0 사각형·0 세대, 열린 팝업은 세대 1 이상·크기 0 아님(닫힌 필드).
+fn popupConsistent(value: message_mod.PopupChanged) bool {
+    if (value.visible) return value.first_generation != 0 and value.bounds.width != 0 and value.bounds.height != 0;
+    return value.first_generation == 0 and std.meta.eql(value.bounds, message_mod.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 });
+}
 
 fn roundTrip(message: Message) !Message {
     const State = struct {
@@ -821,8 +828,8 @@ test "input messages round trip" {
     try std.testing.expectEqual(range, (try roundTrip(.{ .ime_range = range })).ime_range);
 }
 
-test "popup_changed round-trips, flows to maru, and a hidden popup must carry an all-zero rect" {
-    const shown: message_mod.PopupChanged = .{ .browser = 7, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 } };
+test "popup_changed round-trips, flows to maru, a hidden popup carries an all-zero rect and generation, a shown one a generation" {
+    const shown: message_mod.PopupChanged = .{ .browser = 7, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 }, .first_generation = 3 };
     try std.testing.expectEqual(shown, (try roundTrip(.{ .popup_changed = shown })).popup_changed);
     const hidden: message_mod.PopupChanged = .{ .browser = 7, .visible = false };
     try std.testing.expectEqual(hidden, (try roundTrip(.{ .popup_changed = hidden })).popup_changed);
@@ -831,6 +838,9 @@ test "popup_changed round-trips, flows to maru, and a hidden popup must carry an
     // 닫힌 팝업에 사각형이 실리면 보내지도 받지도 않는다(닫힌 필드).
     var buf: [128]u8 = undefined;
     try std.testing.expectError(error.InvalidPopup, encode(.{ .popup_changed = .{ .browser = 7, .visible = false, .bounds = .{ .x = 0, .y = 0, .width = 1, .height = 0 } } }, &buf));
+    try std.testing.expectError(error.InvalidPopup, encode(.{ .popup_changed = .{ .browser = 7, .visible = false, .first_generation = 1 } }, &buf));
+    try std.testing.expectError(error.InvalidPopup, encode(.{ .popup_changed = .{ .browser = 7, .visible = true, .bounds = shown.bounds } }, &buf));
+    try std.testing.expectError(error.InvalidPopup, encode(.{ .popup_changed = .{ .browser = 7, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 0, .height = 134 }, .first_generation = 1 } }, &buf));
     const len = try encode(.{ .popup_changed = shown }, &buf);
     // 보임 바이트(브라우저 8 바이트 뒤)를 0 으로 — 사각형은 그대로인 닫힌 팝업이 된다.
     buf[prefix_len + common_len + 8] = 0;
@@ -949,7 +959,7 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "", .kinds = 0x100, .remembered = true } },
         .{ .geolocation = .{ .browser = 3, .request = 2, .available = true, .latitude = 37.5, .longitude = 127, .accuracy = 30 } },
         // W6a 팝업.
-        .{ .popup_changed = .{ .browser = 3, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 } } },
+        .{ .popup_changed = .{ .browser = 3, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 }, .first_generation = 2 } },
         .{ .popup_changed = .{ .browser = 3, .visible = false } },
     };
     var encoded: [256]u8 = undefined;

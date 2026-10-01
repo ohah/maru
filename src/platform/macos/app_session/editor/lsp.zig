@@ -778,6 +778,8 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
                 const root = rootFor(self, term) orelse continue;
                 const c = ensureClient(self, root, server, term.rt.editor_grammar) orelse continue;
                 seen.put(self.allocator, term.surfaceId(), {}) catch return;
+                // 시작/재연결·크기 제한 중에도 살아 있는 뷰가 연결의 수명을 유지한다.
+                if (c.findDoc(term)) |doc| doc.surface_id = term.surfaceId();
                 if (c.docs.items.len == 0 and c.idle_since_ms != 0) c.idle_since_ms = 0;
                 if (c.retry_at_ms == std.math.maxInt(u64)) c.retry_at_ms = 0; // 잠들어 있던 서버를 깨운다
                 gateTrust(self, c);

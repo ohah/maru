@@ -665,3 +665,20 @@ SHVIEW15는 동일 revision 반복 갱신의 version/백업 만기 불변, SHVIE
 판정한다. SHVIEW17은 실제 백업 기록과 수락한 부분 닫기/마지막 닫기, SHVIEW18은 같은 State의
 WorkspaceEdit 단일 적용과 공유 Undo를 판정한다. 실제 split UI·공유 OS IME·뷰별 검색과
 다른 창의 연결은 남아 있다. 경로 alias/권한 identity 통합도 별도다.
+
+### 문서 통지 분리의 적대적 검증 5회
+
+1. 통지 중복: 동일 revision의 반복 refresh와 공유 Undo/Redo의 version 증가를 확인했다.
+2. LSP 수명: 시작/재연결 중 대표 뷰를 닫으면 생존 뷰가 있어도 OpenDoc가 제거되는 결함을
+   SHVIEW16으로 재현했다. 전송 준비 여부·크기 제한 판정보다 앞에서 대표를 생존 뷰로
+   갱신해 연결과 read pin을 보존한다. 마지막 뷰가 사라지면 기존 정산을 수행한다.
+3. 백업 수명: SHVIEW17은 쓰기 실패 뒤 dirty 재시도, 실제 파일 기록, 부분 닫기 보존과
+   마지막 닫기 삭제를 확인한다.
+4. WorkspaceEdit/Undo: SHVIEW18은 단일 적용, 반대 뷰 Undo, 원래 뷰 Redo와 각 version 증가,
+   낡은 version 응답 거부 뒤 revision·version·본문 보존을 확인한다.
+5. 실패와 계약: SHVIEW11의 할당 실패 sweep은 본문·선택·이력뿐 아니라 Notifications 전체의
+   불변을 확인한다. URI/pin 준비 실패 정산과 문서의 완료/미완료 범위를 코드와 대조한다.
+
+서버 시작 상태는 실제 fake 서버 연결에 phase를 주입해 재현한 상태 전이 검증이다.
+실제 서버 프로세스를 강제 종료·재시작한 OS E2E 증거와 구분한다. 제품 split과 공유 OS IME
+화면 검증은 이 검증에 포함하지 않는다.

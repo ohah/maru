@@ -45407,6 +45407,7 @@ test "SHVIEW11 Undo의 모든 준비 할당 실패는 두 뷰와 기존 이력�
         const before = try testing.allocator.dupe(u8, state.opened.?.file.content);
         defer testing.allocator.free(before);
         const revision = state.opened.?.file.revision;
+        const notifications = state.notifications;
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
         fx.session.allocator = failing.allocator();
         state.opened.?.file.allocator = failing.allocator();
@@ -45420,6 +45421,7 @@ test "SHVIEW11 Undo의 모든 준비 할당 실패는 두 뷰와 기존 이력�
             try testing.expect(failing.has_induced_failure);
             try testing.expectEqualStrings(before, state.opened.?.file.content);
             try testing.expectEqual(revision, state.opened.?.file.revision);
+            try testing.expectEqualDeep(notifications, state.notifications);
             try testing.expectEqual(@as(usize, 1), state.history.undo_len);
             try testing.expectEqual(@as(usize, 0), state.history.redo_len);
             try testing.expectEqual(@as(usize, 3), peer.rt.editor_selection.?.focus);
@@ -46159,12 +46161,15 @@ test "SHVIEW16 실제 LSP 서버는 공유 문서를 한 번 열고 한 번 변�
         }
     }.f));
     try testing.expectEqual(changes + 1, fx.session.editor_lsp.sent_changes);
+    // 서버가 시작/재연결 중이어도 대표 뷰의 닫기가 살아 있는 문서를 닫아서는 안 된다.
+    fx.session.editor_lsp.clients.items[0].phase = .starting;
     const peer_surface = peer.surfaceId();
     const pane = pane_ops.activePane(fx.session);
     term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, pane.active_term);
     try testing.expect(term_ops.termBySurfaceId(fx.session, peer_surface) == null);
     lsp_client.pump(fx.session);
     try testing.expectEqual(@as(usize, 1), fx.session.editor_lsp.clients.items[0].docs.items.len);
+    fx.session.editor_lsp.clients.items[0].phase = .ready;
     try testing.expectEqual(@as(u64, 2), fx.term.rt.editorDocument().notifications.lsp_version);
     const after = fx.session.editor_lsp.sent_changes;
     try testing.expect(insertText(fx.session, fx.term, "z"));
@@ -46200,6 +46205,12 @@ test "SHVIEW17 수락한 한 뷰 닫기는 살아 있는 문서 백업을 지우
     const identity = app_session_mod.editor_backup_ops.identity(fx.term).?;
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, fx.term, "x"));
+    // 쓰기 실패도 문서 시계를 포기하지 않는다. 같은 정본의 다음 flush가 재시도한다.
+    app_session_mod.editor_backup_ops.setDirForTest("");
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    try testing.expect(state.notifications.backup_dirty);
+    try testing.expect(!state.notifications.backup_on_disk);
+    app_session_mod.editor_backup_ops.setDirForTest(root);
     app_session_mod.editor_backup_ops.flushAll(fx.session);
     try testing.expect(backupExists(root, identity));
     try testing.expect(!state.notifications.backup_dirty);
@@ -46240,6 +46251,19 @@ test "SHVIEW18 LSP WorkspaceEdit는 같은 정본에 한 번 적용하고 두 �
     try testing.expectEqualStrings("xconst a = 1;", peer.rt.editor_lines[0]);
     try testing.expectEqual(@as(usize, 1), state.history.undo_len);
     try testing.expectEqual(@as(u64, 1), fx.session.editor_workspace_edit.applied_edits);
+    const edited_version = state.notifications.lsp_version;
     try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqual(edited_version + 1, state.notifications.lsp_version);
     try testing.expectEqualStrings("const a = 1;", fx.term.rt.editor_lines[0]);
+    try testing.expect(redoEdit(fx.session, fx.term));
+    try testing.expectEqual(edited_version + 2, state.notifications.lsp_version);
+    try testing.expectEqualStrings("xconst a = 1;", peer.rt.editor_lines[0]);
+    const revision = state.opened.?.file.revision;
+    const version = state.notifications.lsp_version;
+    files[0].version = @intCast(version - 1);
+    const stale = workspace_edit_client.apply(fx.session, .{ .files = &files }, .utf16, &.{});
+    try testing.expect(stale == .refused and stale.refused == .stale);
+    try testing.expectEqual(revision, state.opened.?.file.revision);
+    try testing.expectEqual(version, state.notifications.lsp_version);
+    try testing.expectEqualStrings("xconst a = 1;", peer.rt.editor_lines[0]);
 }

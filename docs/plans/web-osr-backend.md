@@ -18,7 +18,7 @@
 | 의존성 예외 | CEF 는 [프로젝트 규칙](../project-rules.md) 「의존성」의 **예외 ③** 이다(사용자 결정 2026-09-24) — 앱에 링크하지 않는 sidecar 전용, 빌드 opt-in, 헤더 비반입 | 런타임 의존성 기본 0 규율 |
 | CEF 버전 | **154.0.23 / Chromium 154** 에 고정한다. 올릴 때는 아래 회귀 시험을 다시 돈다 | 최신 안정판(2026-09-23 인덱스). `<select>` 가 146 과 154 에서 달랐다 — 버전마다 동작이 바뀐다 |
 | 배포·배치 | **별도 Homebrew formula `maru-chromium`**(사용자 결정 2026-09-24, 이름은 2026-09-25 — `brew install ohah/maru/maru-chromium`(전체 이름 — W7b). maru formula 와 따로, OSR 을 쓰는 사용자만 설치한다. OSR 은 선택형이라(D2) 안 쓰는 사용자가 CEF 약 323MB 를 받을 이유가 없다), `.app` 번들 없이 `libexec/` 에 sidecar·helper·프레임워크를 **실제 파일로** 함께 둔다 | 번들 없는 배치로 154 의 모든 실측이 섰다. 샌드박스는 **별도 helper + 프레임워크를 실행 파일 아래에 둔** 배치에서만 동작했고(§13.1 「남은 미해결」 1), PoC 의 메모리·N 개·링 실측은 샌드박스 없이 잰 값이다 — N 개는 W1c 가 샌드박스를 켠 채 다시 쟀고(렌더러 포함 helper 모두 샌드박스), 메모리·링은 W2 이후 다시 잰다 |
-| 샌드박스 | helper(렌더러·GPU·유틸리티)는 **반드시 샌드박스 안**. PoC 의 `no_sandbox` 는 쓰지 않는다 | `.browser` 는 신뢰할 수 없는 웹을 띄운다. PoC 실측은 샌드박스 없이 했다 |
+| 샌드박스 | helper(렌더러·GPU·유틸리티)는 **반드시 샌드박스 안**(예외 하나 — Chromium 이 일부러 샌드박스 없이 띄우는 카메라 utility, C1). PoC 의 `no_sandbox` 는 쓰지 않는다 | `.browser` 는 신뢰할 수 없는 웹을 띄운다. PoC 실측은 샌드박스 없이 했다 |
 | 제품 모양 | OSR 은 **`.web` Term 의 백엔드**로 둔다. 터미널 surface 에 kitty 이미지를 붙이는 실험 모양은 쓰지 않는다 | 「웹이 포커스인가」 판정 하나에 백엔드(WKWebView / CEF)만 갈리게 해야 분기가 둘로 늘지 않는다(§13.1 「분업」) |
 | 분업 | `.markdown`(신뢰 — 파일 패널·CM6)은 **WKWebView 유지**. OSR 후보는 `.browser` 뿐 | §13.1 「분업」 — WKWebView 는 OSR 을 주지 않아 공존이 구조상 강제다 |
 | **D1 브라우저 위치** | 브라우저 sidecar 는 **항상 maru 앱이 도는 기계**에서 돈다 — 터미널 세션이 SSH 너머 원격이어도 마찬가지다(사용자 결정 2026-09-23) | 화면이 같은 기계 안에서 IOSurface 로 넘어와 지금까지의 실측(CEF 그리기 60fps·헤드리스 수신 60.1/s·찢어짐 0, pane 에 보인 빈도는 seed 확인으로 ~53/s)이 그대로 성립하고, 서버에 CEF 를 깔 필요가 없다. 원격에서 돌리면 매 프레임 네트워크 전송이 필요해 설계가 달라진다. 대가: 원격 `localhost` 는 D3(포트 전달), 다른 기기(모바일 등) 표시는 범위 밖. 지금의 WKWebView 도 같은 모양이라 퇴행은 없다 |
@@ -48,7 +48,7 @@
 
 ```
 Maru.app ─ spawn ─▶ libexec/maru-web-host                 (CEF 브라우저 프로세스, 샌드박스 밖, 브라우저 N 개)
-   │                     └─ spawn ─▶ maru-web-helper       (렌더러·GPU·유틸리티, 샌드박스 안)
+   │                     └─ spawn ─▶ maru-web-helper       (렌더러·GPU·유틸리티, 샌드박스 안 — 카메라 utility 만 밖, C1)
    │                                   └─ dlopen ─▶ Chromium Embedded Framework.framework (같은 디렉터리 아래)
    │
    ├─ 제어   : spawn 때 상속한 socketpair — 생성·파괴·이동·크기·가시성·포커스·입력·IME·편집 명령·대화상자 응답
@@ -82,16 +82,22 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
   `kNoSandbox` → `--service-sandbox-type=none`, `--seatbelt-client` 없음 — Chromium 154 소스·실행 인자 실측). helper 가 이것을
   끝내면 Chromium 이 곧바로 다시 띄워 초당 580~1090 번 되풀이했고(그 host 가 끝날 때까지, 코어 하나 가까이), 카메라도
   동작할 수 없었을 것이다(추론 — 카메라가 있는 기계는 실측 못 함, 고친 뒤 카메라가 되는지·TCC 묻기도 미실측). 페이지가 장치
-  목록만 물어도(`enumerateDevices()`, 묻지 않음) 시작되고, Chromium 은 5 초 놀면 내렸다가 다시 띄운다(Chromium 소스 —
-  실측 안 함). 그러니 어떤 페이지든 묻지 않고 샌드박스 없는 프로세스 하나를 띄울 수 있다 — 실제 Chrome 도 같다. 그래서 helper 는 **정확히 이 utility 만** 샌드박스 밖에서 계속 간다
+  목록만 물어도(`enumerateDevices()`, 묻지 않음) 시작된다(실측 — 판정 페이지의 카메라 요청을 장치 목록 묻기로 바꾸자 옛 동작에서
+  8,547 번 다시 떴다). 고친 뒤에는 그 utility 하나가 떠서 그 host 가 끝날 때까지 살아 있었다(실측 약 13.6 초 — Chromium 은 5 초
+  놀면 연결을 놓을 뿐 스스로 다시 띄우지 않는다, 소스). 그러니 어떤 페이지든 묻지 않고 샌드박스 없는 프로세스 하나를 띄울 수
+  있다 — 실제 Chrome 도 같다. 그래서 helper 는 **정확히 이 utility 만** 샌드박스 밖에서 계속 간다
   (`unsandboxed_policy.zig` — `type=utility`·`utility-sub-type`·`service-sandbox-type=none` 이 각각 한 번, `no-sandbox`·
   `seatbelt-client` 없음, Chromium 의 명령줄 해석과 같은 규칙: `--`·`-` 접두사·단독 `--` 뒤 무시·공백 떼기, 겹치면 거절).
   실제 Chrome 도 이 utility 를 샌드박스 없이 돌린다 — 인자는 브라우저 프로세스(host)가 만들고 웹 페이지가 정할 수 없다.
   렌더러·GPU·다른 utility 는 그대로 샌드박스 밖이면 끝낸다. 알림 utility(`mac_notifications…`, 역시 `kNoSandbox`)는
   그대로 끝낸다(판정 한 번에 수십 번 — 허용하면 maru 의 알림 중계와 겹칠 수 있다, 후속). 다른 길(카메라 서비스를 host
   안으로 — `RunVideoCaptureServiceInBrowserProcess`)은 반복은 없앴지만 이 맥에서 카메라 요청이 답 없이 멈춰 버렸다(실측).
-  판정자 `perm-media-helpers` 가 카메라 뒤 2 초 동안 helper pid 가 거의 그대로(처음 +5 안)이고 150 ms 넘게 샌드박스 밖인
-  helper 가 많아야 하나인지 본다(옛 동작에서 pid 43·처음 7 로 실패, 고친 뒤 7·7). 알림 utility 의 다시 뜨기는 이 판정이
+  판정자 `perm-media-helpers` 가 카메라 뒤 2 초 동안 helper pid 가 거의 그대로(처음 +5 안)이고 세 표본(약 100 ms) 잇달아
+  샌드박스 밖인 helper 가 많아야 하나이며 그것이 실행 인자로 카메라 utility 인지 본다(옛 동작에서 pid 34~43·처음 7~8 로 실패,
+  고친 뒤 7·7). `perm-camera-gone` 은 그 utility 가 host 를 끝낸 뒤 3 초 안에 사라지는지 본다 — 이 utility 는 W1b 의
+  「모두 샌드박스 안」에서 빠진 하나라 고아가 되지 않는지를 따로 잰다(Chromium 의 자식은 IPC 가 끊기면 스스로 끝난다 —
+  `child_thread_impl.cc`, maru host 는 자식을 직접 죽이지 않는다). 다시 뜨기가 초당 둘 아래로 느려지면 이 판정은 놓친다
+  (Chromium 154 는 늦춤 없이 곧바로 다시 띄운다 — 소스). 알림 utility 의 다시 뜨기는 이 판정이
   보지 않는다(후속).
 
 ### C2. 제어 채널

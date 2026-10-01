@@ -308,3 +308,46 @@ callback을 실행한 결과가 아니므로, 미결 정책과 단계별 제품 
 다음 실행은 단계 0의 owner/호출/renderer 수명 조사와 fixture 계약이다. 단계 1은 단일 뷰
 정본 소유자부터 이관한다. shared IME 표시 목표를 승인했다고 현재 `setMarkedText`를 즉시
 정본 편집으로 바꾸지는 않는다. §11과 모든 소비자의 정합성을 닫은 뒤 제품 입력을 배선한다.
+
+
+## 단계 0 첫 조사 — 실제 소유와 이관 경계 (2026-10-01)
+
+기준 main은 `37e087dba`다. 아래는 코드 열람으로 확인한 첫 소비처 목록이며,
+단계 0 전체 완료나 제품 공유 구현 완료를 뜻하지 않는다.
+
+| 현재 소유/소비처 | 확인한 경계 | 이관할 책임 |
+|---|---|---|
+| `src/platform/macos/app_session.zig`의 `TermRuntime` | `editor_doc`, Undo/Redo, 선택, preedit가 같은 runtime에 있다 | 문서·이력과 뷰·입력 상태를 분리 |
+| `src/app/app_runtime.zig`의 `AppRuntime` | 앱 인스턴스 전역 수명, 현재 필드는 메인 스레드 전용; L4 핸들 수명과 L2 정책을 구분 | 창보다 오래 사는 연결 owner의 기존 seam. PTY core 락을 문서 락으로 간주하지 않음 |
+| `src/platform/macos/app_session/editor.zig`의 `refreshAfterEdit` | LSP·백업·구문 통지와 뷰 행/검색/스크롤 갱신이 섞여 있다 | 문서/provider 통지는 한 번, 연결 뷰 파생 갱신은 각각 |
+| 같은 파일의 `pushUndo` | 편집 후 이력 증가가 실패하면 편집을 유지하고 해당 entry를 해제한다 | 공유 이관과 실패 정책 변경을 구분; 기존 이력의 안전한 경계는 실패 주입으로 판정 |
+| 같은 파일의 `saveDocumentGuarded` | 로컬 저장은 동기; 원격·untitled는 별도 저장 경로로 분기 | 단일 뷰 이관에서 동기 저장 계약 유지. 미래 비동기 저장에는 별도 요청 소유 snapshot 필요 |
+| 같은 파일의 `releaseEditorTerm` | 문서·구문·뷰 캐시·경로·조합을 함께 해제하며 현재 멱등 함수가 아니다 | 뷰 분리와 마지막 문서 해제를 별도 책임으로 만들고 allocator 짝을 보존 |
+| `src/platform/macos/app_session/term.zig`의 `destroyTerm`, `app_session.zig`의 세션 teardown | 두 경로가 편집 자원 해제를 호출한다 | 개별 닫기뿐 아니라 창/앱 종료 경로도 같은 연결 정산으로 이관 |
+| `src/platform/macos/app_session/editor_backup.zig`의 `identity`, `noteEdit`, `tick`, `flushAll` | path/disk hash·remote dest/path·untitled 번호 기반 identity, Term별 debounce와 순회 | runtime handle과 영속 identity를 구분; 마지막 해제와 recovery 삭제를 분리 |
+| `src/platform/macos/app_session/editor_lsp.zig`의 연결 문서 목록 | `surface_id`, URI, `sent_version` 및 닫힌 surface 검사 | URI/연결별 문서 수명과 요청 뷰 수명을 분리; 한 뷰 닫기로 didClose하지 않음 |
+| `app_session.zig`의 frame 조립 → `editor.zig`의 `appendPaneFrame` 및 hit-test | 본문/행 배열을 live 문서에서 읽는 소비처가 있다 | 뷰 좌표와 본문 revision을 함께 고정; 전체 렌더 읽기 수명 조사 없이 워커 공유 허용 금지 |
+
+### 다음 코드 이관을 위한 판정 순서
+
+1. 단일 뷰의 열기→편집→Undo/Redo→저장→닫기/세션 해제를 기존 제품 fixture로 고정한다.
+   준비 실패 시 기존 문서·선택·pane이 유지되는 판정자도 포함한다.
+2. 문서 객체가 소유할 자원과 연결 뷰가 빌릴 자원의 allocator·해제 짝을 확정한다.
+   grow 가능한 registry 배열의 주소를 안정 handle로 노출하지 않는다.
+3. 문서/provider 통지와 뷰 갱신을 분리한 뒤 단일 뷰 회귀로 기존 횟수·순서·내용을 비교한다.
+4. 창별 저장·닫기·백업·LSP 및 frame/hit-test 소비처의 전체 호출 목록을 완성한다.
+   main-thread 소유 주석은 renderer/비동기 callback의 안전성을 증명하는 대체물이 아니다.
+5. identity 별칭·grant와 OS 조합 정산의 미결 구현 조건을 닫는다. 이 조사만으로 새 공유
+   문서 API나 저장/Undo 실패 정책을 확정하거나 split 명령을 노출하지 않는다.
+
+### 첫 조사 적대적 대조
+
+- 한 뷰 해제 후 다른 뷰 렌더: 현재 해제 함수를 그대로 공유 연결에 사용하면 문서 수명이
+  맞지 않는다. 이관 목록에 두 teardown 호출자와 frame/hit-test를 함께 넣었다.
+- 단일 창 allocator로 만든 문서를 다른 창에 연결: 전역 registry의 allocator만 보고 내부
+  자원 allocator까지 같다고 가정하지 않는다. 실제 할당/해제 짝 검증은 다음 단계에 남긴다.
+- 저장 후 앱 종료: recovery 삭제를 일반 자원 teardown에 넣지 않고 기존 명시적 저장/버리기와
+  앱 종료의 구분을 유지한다.
+- provider 중복: Term마다 기존 `refreshAfterEdit`를 반복하는 방식은 이관 방법으로 채택하지 않는다.
+
+새 제품 코드·실패 주입·실제 IME 실행은 이번 조사에서 수행하지 않았다.

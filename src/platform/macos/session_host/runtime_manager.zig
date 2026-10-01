@@ -4942,17 +4942,20 @@ test "runtime manager: host selection scroll-and-extend is fenced before authori
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
-    const script = "i=0; while [ $i -lt 30 ]; do printf 'L%02d\\n' $i; i=$((i+1)); done; exec cat";
+    const script = "i=0; while [ $i -lt 30 ]; do if [ $i -eq 25 ]; then sleep 0.1; fi; printf 'L%02d\\n' $i; i=$((i+1)); done; exec cat";
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 20, .rows = 5 });
     defer ops.terminate(ops.ctx, rid);
     const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
     const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
 
+    // 30줄의 마지막 개행까지 처리하면 5행 viewport 바깥에 26행이 있다.
+    // 20행만 기다리면 출력이 두 구간으로 도착할 때 아직 L29를 받기 전에 선택을 시작한다.
+    const complete_scrollback = 30 + 1 - 5;
     var ready = false;
     var attempts: usize = 0;
     while (attempts < 300 and !ready) : (attempts += 1) {
         surface.lockCore(std.testing.io);
-        ready = surface.core.scrollbackLen() >= 20;
+        ready = surface.core.scrollbackLen() >= complete_scrollback;
         surface.unlockCore(std.testing.io);
         if (!ready) _ = usleep(10 * 1000);
     }

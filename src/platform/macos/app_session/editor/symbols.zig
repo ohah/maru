@@ -1,5 +1,5 @@
 //! 심볼 2층 — 제품 배선(docs/editor-surface-tooling.md §8.2o · native-editor-ui.md §7.5). 접힘 3층(`editor_fold_lsp`)과 같은 시계·같은 대조:
-//! 문서 단위로 한 번 묻고, 응답은 요청 때의 `editor_lsp_version` 과 같을 때만 든다.
+//! 문서 단위로 한 번 묻고, 응답은 요청 때의 `notifications.lsp_version` 과 같을 때만 든다.
 //!
 //! **편집이 나면 버린다.** 2층 범위는 응답 시점의 것이라 편집 뒤엔 낡는데, 심볼 체인은 「지금 어디 있나」를 말하는 자리라 낡은 값이 곧
 //! 거짓말이다(색과 갈리는 자리 — semantic 2층은 민다). 1층(tree-sitter)은 증분 파싱이라 즉시 옳으므로 **그 사이는 1층**이다.
@@ -48,7 +48,7 @@ pub const State = struct {
 /// version 이 낡은」 상태가 오늘은 못 생긴다. 뜻으로 둔다 — 이 함수 하나만 읽고도 「지금 문서의 것인가」를 알 수 있어야 한다.)
 pub fn fresh(term: *Term) bool {
     const st = &term.rt.editor_symbols;
-    return st.list.items.len > 0 and st.version != 0 and st.version == term.rt.editor_lsp_version;
+    return st.list.items.len > 0 and st.version != 0 and st.version == term.rt.editorDocument().notifications.lsp_version;
 }
 
 /// 지금 쓸 심볼 목록 — 2층이 유효하면 그것, 아니면 `null`(호출자가 1층을 만든다).
@@ -62,7 +62,7 @@ pub fn tick(self: *AppSession, term: *Term) void {
     const st = &term.rt.editor_symbols;
     if (st.waiting) return;
     if (term.rt.editorDocument().opened == null) return;
-    const version = term.rt.editor_lsp_version;
+    const version = term.rt.editorDocument().notifications.lsp_version;
     if (version == 0) return; // 아직 서버에 안 열었다
     if (st.version == version and !st.dirty) return;
     const now = self.awakeMs();
@@ -86,7 +86,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.last_edit_ms = self.awakeMs(); // 곧바로 되묻지 않는다(조용 뒤)
         return;
     }
-    if (st.waiting_version != term.rt.editor_lsp_version) {
+    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
         st.dropped_stale += 1;
         st.dirty = true;
         return;

@@ -10207,10 +10207,22 @@ pub fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.Edit
     // 직접 IME 커서 정산처럼 별도 준비 저장소를 소비한 경로의 여분 준비를 정산한다.
     if (term.rt.editor_shared_selection_buf) |buf| self.allocator.free(buf);
     term.rt.editor_shared_selection_buf = null;
-    lsp_client.noteEdited(term); // §8.2a: version 이 오르면 다음 tick 이 didChange 를 보낸다
-    // §3.10: 백업 시계를 되감는다. **여기가 유일한 자리다** — 아래 주석이 적듯 제품의 편집 경로
-    // 여섯이 전부 이 함수를 지나므로, 통지도 한 곳이면 된다.
+    notifyDocumentEdit(self, term);
+    try refreshViewAfterEdit(self, term, edit);
+}
+
+/// 같은 revision의 문서 통지는 한 번이다. 공유 게시가 다른 뷰를 갱신하기 전에 호출한다.
+pub fn notifyDocumentEdit(self: *AppSession, term: *Term) void {
+    const state = term.rt.editorDocument();
+    const opened = state.opened orelse return;
+    if (state.notifications.last_revision == opened.file.revision) return;
+    state.notifications.last_revision = opened.file.revision;
+    lsp_client.noteEdited(term);
     app_session_mod.editor_backup_ops.noteEdit(self, term);
+}
+
+/// 문서 부수효과 없이 이 뷰가 소유한 provider·줄·접힘·hit cache만 갱신한다.
+pub fn refreshViewAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
     // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
     // 늦다: `rebuildVisible` 이 같은 폐기를 **먼저** 불러 그때는 이미 0 이다(실측으로 걸렸다).
     const kept_col = term.rt.editor_first_col;
@@ -10230,7 +10242,7 @@ pub fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.Edit
     // 맞는 자리인 이유는 위 주석 그대로다: **편집 경로 여섯이 전부 이 함수를 지난다.**
     find_ops.dropFindSelectionRange(self);
 
-    // **구문 트리에 편집을 알린다 — 여기가 유일한 자리다**(§5.3 `onEdit`). 제품의 편집 경로
+    // **이 뷰의 구문 provider에 편집을 알린다 — 뷰 갱신의 한 자리다**(§5.3 `onEdit`). 제품의 편집 경로
     // 여섯이 전부 이 함수를 지나므로 통지도 한 곳이면 된다. 알리지 않으면 §5.3이 적었듯
     // *"매번 전체 재파싱"*이 되고, 실측으로 그 차이가 81배다(154KB에서 5.3ms 대 65µs).
     //
@@ -10399,7 +10411,7 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     term.rt.editor_diagnostics.deinit(self.allocator); // 진단 층(§5.4)도 같은 단위다
     if (term.rt.editor_lsp_root) |r| self.allocator.free(r); // LSP root(§8.2a)
     term.rt.editor_lsp_root = null;
-    term.rt.editor_lsp_version = 0;
+    // 문서 version은 뷰 종료에서 되감지 않는다. 마지막 lease가 State를 정산한다.
     // **예약도 Term과 함께 사라진다.** `drawn` 필드 doc이 적은 규율("한 단위로 세우고 한 단위로
     // 지운다")의 예외를 그 규율을 적은 커밋이 만들어 두었다(적대적 검증 2026-08-24).
     term.rt.editor_find_reveal_pending = false;
@@ -10608,7 +10620,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_highlight.deinit(self.allocator); // 같은 낱말 강조도(§8.2p)
     term.rt.editor_smart_select.deinit(self.allocator); // 선택 확장 사슬도(§8.2q)
     term.rt.editor_sticky.deinit(self.allocator); // sticky scroll 도(§4.1i)
-    term.rt.editor_fold_lsp = .{}; // 3층 대기 상태도 문서와 함께(`editor_lsp_version = 0` 과 같은 자리) — 두 호출자 모두 곧 Term 을 부수므로 관측되지 않는다(적대적 C8: 등가), 규율로 둔다
+    term.rt.editor_fold_lsp = .{}; // 3층 대기 상태도 문서와 함께(뷰별 provider 정산과 같은 자리) — 두 호출자 모두 곧 Term 을 부수므로 관측되지 않는다(적대적 C8: 등가), 규율로 둔다
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
     dropLineCols(self, term); // 체크포인트도 함께 놓는다
@@ -14018,7 +14030,7 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     // ⑶ **편집 → didChange(version 2) → 새 진단(message 가 version 을 든다)**. `WARN` 을 넣으면 경고가 하나 더.
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
     try testing.expect(insertText(fx.session, term, "WARN "));
-    const v_after = term.rt.editor_lsp_version;
+    const v_after = term.rt.editorDocument().notifications.lsp_version;
     try testing.expect(v_after >= 2);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
@@ -14061,7 +14073,7 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     const diagsForCurrentVersion = struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.fx.session.editor_lsp.clients.items[c.cidx].phase == .ready and c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f;
@@ -14556,7 +14568,7 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -14590,7 +14602,7 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len == 2 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -14913,7 +14925,7 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -14938,7 +14950,7 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -14956,7 +14968,7 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -14970,7 +14982,7 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -15008,7 +15020,7 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
             try testing.expect(pumpLspUntil(fxp, 3000, c, struct {
                 fn g(cc: Ctx) bool {
                     var b: [32]u8 = undefined;
-                    const want = std.fmt.bufPrint(&b, "fake: {d}", .{cc.term.rt.editor_lsp_version}) catch return false;
+                    const want = std.fmt.bufPrint(&b, "fake: {d}", .{cc.term.rt.editorDocument().notifications.lsp_version}) catch return false;
                     return cc.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, cc.term.rt.editor_diagnostics.lsp.items[0].message, want);
                 }
             }.g));
@@ -15162,7 +15174,7 @@ test "REF2 구현·타입 정의·선언 — 팔레트 명령이 같은 피커�
     try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
         fn g(t: *Term) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{t.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{t.rt.editorDocument().notifications.lsp_version}) catch return false;
             return t.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, t.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.g));
@@ -15183,7 +15195,7 @@ test "REF2 구현·타입 정의·선언 — 팔레트 명령이 같은 피커�
     try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
         fn g(t: *Term) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{t.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{t.rt.editorDocument().notifications.lsp_version}) catch return false;
             return t.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, t.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.g));
@@ -15323,7 +15335,7 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     try testing.expectEqualStrings("p: ", hints[1].text);
     try testing.expectEqual(@as(u32, 14 + 14), hints[2].offset);
     try testing.expectEqualStrings(" -> void", hints[2].text);
-    try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_inlay.version);
+    try testing.expectEqual(term.rt.editorDocument().notifications.lsp_version, term.rt.editor_inlay.version);
     try testing.expectEqual(@as(u64, 1), term.rt.editor_inlay.generation);
     // 줄 예산(§4.1h 「화면 폭의 절반」): 16열 창이면 예산 8 — 둘째 줄은 `p: `(3) 만 들고 ` -> void`(8) 는 뺀다(렌더·hit·L3 폭 셋이 같은 예산).
     try testing.expectEqual(@as(u32, 3), inlay_client.lineExtraCols(term, 1, 16));
@@ -15693,7 +15705,7 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
     try testing.expectEqualStrings("alpha", f.term.rt.editorDocument().opened.?.file.content[syms[0].name_start..syms[0].name_end]);
     try testing.expectEqualStrings("beta", f.term.rt.editorDocument().opened.?.file.content[syms[1].name_start..syms[1].name_end]);
     try testing.expectEqualStrings("function", syms[0].kind); // SymbolKind 12 → 우리 어휘
-    try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_symbols.version);
+    try testing.expectEqual(term.rt.editorDocument().notifications.lsp_version, term.rt.editor_symbols.version);
     try testing.expect(symbols_client.list(term) != null);
     // ⑶ 밴드 체인이 **2층으로** 선다. 두 층이 다른 답을 내는 자리를 고른다: 가짜의 범위는 **그 줄**이고 1층(C)의 함수 범위는 **본문 전체**라,
     //    caret 을 본문 줄에 두면 2층은 체인이 없고(경로만) 1층은 함수 이름을 붙인다. 선언 줄에서는 2층도 이름을 붙인다 — 둘 다 잰다.
@@ -16717,7 +16729,7 @@ test "DSY9 심볼 2층 — 한 서버에 문서가 둘이면 응답은 «그 seq
     const Ctx = struct { fx: *PaneFixture, t: *Term };
     try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .fx = &f.fx, .t = term_b }, struct {
         fn g(c: Ctx) bool {
-            return c.t.rt.editor_lsp_version != 0;
+            return c.t.rt.editorDocument().notifications.lsp_version != 0;
         }
     }.g));
     _ = frameSyntaxColors(s, term_b);
@@ -16851,7 +16863,7 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -16873,7 +16885,7 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -16890,7 +16902,7 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             var b: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editorDocument().notifications.lsp_version}) catch return false;
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     }.f));
@@ -17203,7 +17215,7 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     const asked = fx.session.editor_format.asked_version;
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
     try testing.expect(insertText(fx.session, term, "Z"));
-    try testing.expect(term.rt.editor_lsp_version != asked);
+    try testing.expect(term.rt.editorDocument().notifications.lsp_version != asked);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expectEqual(@as(u64, 1), fx.session.editor_format.stale);
     try testing.expectEqual(@as(u64, 1), fx.session.editor_format.applied); // 적용되지 않았다
@@ -17530,9 +17542,9 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     try pressKey(&h.fx, .{ .function = 2 }, .{});
     try testing.expect(s.rename != null);
     try pressKey(&h.fx, .{ .char = 'Y' }, .{});
-    const ver_open = term.rt.editor_lsp_version;
+    const ver_open = term.rt.editorDocument().notifications.lsp_version;
     s.dispatchAppAction(.editor_undo); // 앞의 ⑶ 정리 뒤 남은 undo(마지막 `Q` 삽입 삭제 등)가 문서를 되돌린다
-    try testing.expect(term.rt.editor_lsp_version != ver_open);
+    try testing.expect(term.rt.editorDocument().notifications.lsp_version != ver_open);
     try pressKey(&h.fx, .enter, .{});
     try testing.expect(s.rename == null);
     try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
@@ -18520,7 +18532,7 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
     // ⑵ 응답 — `a_ty`(type) 가 2층 색(number → type_name), `my_fn`(function) 은 1층과 같은 색, `int`(variable → 무색)은 1층 그대로.
     try testing.expect(f.applied(1));
     try testing.expectEqual(@as(usize, 3), term.rt.editor_semantic.spans.items.len); // my_fn·a_ty·a_ty — 범위 밖 `tail_fn` 과 무색 `int`·`return` 은 없다
-    try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_semantic.version);
+    try testing.expectEqual(term.rt.editorDocument().notifications.lsp_version, term.rt.editor_semantic.version);
     const c1 = frameSyntaxColors(s, term);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c1, 0, 14, 18).?);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c1, 1, 9, 13).?);
@@ -18721,7 +18733,7 @@ test "FLD1 foldingRange 3층 — 색 만들기 자리가 문서 전체를 묻고
     // ⑶ 응답 — 서버 범위(`}` 앞 줄까지)가 구문 층을 덮는다. 더러운 항목(중복·문서 밖·한 줄)은 걸러졌다.
     try testing.expect(fldApplied(&f, 1));
     try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
-    try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_fold_lsp.version);
+    try testing.expectEqual(term.rt.editorDocument().notifications.lsp_version, term.rt.editor_fold_lsp.version);
     try testing.expectEqual(@as(usize, 3), term.rt.editor_fold_ranges.len);
     try testing.expectEqual(@as(u32, 0), term.rt.editor_fold_ranges[0].head);
     try testing.expectEqual(@as(u32, 4), term.rt.editor_fold_ranges[0].last_hidden);
@@ -18894,7 +18906,7 @@ test "FLD3 foldingRange 3층 — 갈아 끼우기가 어느 할당에서 실패�
     const term = try undoFixture(&fx, allocator, "fld3.c", fld_src);
     const s = fx.session;
     // 서버 없이 상태만 세운다 — 응답 경로는 `waiting`·seq·version 만 본다.
-    term.rt.editor_lsp_version = 1;
+    term.rt.editorDocument().notifications.lsp_version = 1;
     var p = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"startLine\":0,\"endLine\":4},{\"startLine\":7,\"endLine\":8}]", .{});
     defer p.deinit();
     // ⑴ 먼저 실패 없이 돌려 할당 수를 센다.
@@ -42915,7 +42927,7 @@ fn readBackup(allocator: std.mem.Allocator, root: []const u8, doc: backup_rules.
 
 /// 만기를 **지금**으로 돌린다 — 제품이 세운 시계를 벽시계 없이 만기시키는 유일한 손잡이다.
 fn expireBackupClock(term: *Term) void {
-    term.rt.editor_backup_due_ns = 0;
+    term.rt.editorDocument().notifications.backup_due_ns = 0;
 }
 
 test "U4a-1 편집은 곧 백업이 아니다 — 만기 전에는 없고, 만기 뒤에 생긴다" {
@@ -42933,17 +42945,17 @@ test "U4a-1 편집은 곧 백업이 아니다 — 만기 전에는 없고, 만�
     const doc: backup_rules.Doc = .{ .untitled = t.rt.editorDocument().untitled.?.n };
     try testing.expect(insertText(fx.session, t, "hello"));
     // 편집 통지가 시계를 **미래로** 세웠다 — debounce 가 그것이다.
-    try testing.expect(t.rt.editor_backup_dirty);
-    try testing.expect(t.rt.editor_backup_due_ns > 0);
+    try testing.expect(t.rt.editorDocument().notifications.backup_dirty);
+    try testing.expect(t.rt.editorDocument().notifications.backup_due_ns > 0);
     app_session_mod.editor_backup_ops.tick(fx.session);
     try testing.expect(!backupExists(root, doc)); // 아직 아니다
-    try testing.expect(t.rt.editor_backup_dirty); // 그리고 잊지도 않았다
+    try testing.expect(t.rt.editorDocument().notifications.backup_dirty); // 그리고 잊지도 않았다
 
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
     try testing.expect(backupExists(root, doc));
-    try testing.expect(!t.rt.editor_backup_dirty);
-    try testing.expect(t.rt.editor_backup_on_disk);
+    try testing.expect(!t.rt.editorDocument().notifications.backup_dirty);
+    try testing.expect(t.rt.editorDocument().notifications.backup_on_disk);
 }
 
 test "U4a-2 레코드는 그 문서다 — 신원과 내용이 되읽힌다" {
@@ -42994,7 +43006,7 @@ test "U4a-3 저장하면 사라진다 — 미저장 편집이 없으니 백업�
 
     try saveDocument(fx.session, t);
     try testing.expect(!backupExists(root, .{ .path = .{ .path = path } }));
-    try testing.expect(!t.rt.editor_backup_on_disk);
+    try testing.expect(!t.rt.editorDocument().notifications.backup_on_disk);
 }
 
 test "U4a-4 undo 로 clean 이 되면 지운다 — 디스크와 같은 내용을 dirty 로 되살리지 않는다" {
@@ -43051,7 +43063,7 @@ test "U4a-5 큰 문서는 백업하지 않고 그 사실을 남긴다 — 조용
     app_session_mod.editor_backup_ops.tick(fx.session);
     try testing.expect(!backupExists(root, .{ .path = .{ .path = path } }));
     // **화면에 남는다** — 상태바 저하 칸이 이 값을 읽는다.
-    try testing.expect(t.rt.editor_backup_paused);
+    try testing.expect(t.rt.editorDocument().notifications.backup_paused);
 }
 
 test "U4a-6 이름이 붙으면 옛 신원의 백업이 사라진다" {
@@ -43143,7 +43155,7 @@ test "U4a-9 저장이 끝나도 여전히 dirty 면 보호를 놓지 않는다" 
     app_session_mod.editor_backup_ops.markClean(fx.session, t, "first", null);
     try testing.expect(isDirty(t));
     // 지우고 끝내지 않고 **다음 만기를 세운다** — 방금 친 것이 보호 밖으로 나가지 않는다.
-    try testing.expect(t.rt.editor_backup_dirty);
+    try testing.expect(t.rt.editorDocument().notifications.backup_dirty);
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
     try testing.expect(backupExists(root, .{ .untitled = n }));
@@ -43169,10 +43181,10 @@ test "U4a-10 쓸 수 없으면 다음 만기에 다시 시도한다 — 한 번 
     try testing.expect(insertText(fx.session, t, "x"));
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
-    try testing.expect(!t.rt.editor_backup_on_disk);
+    try testing.expect(!t.rt.editorDocument().notifications.backup_on_disk);
     // **다시 시도한다** — dirty 가 서 있고 만기가 미래다(같은 프레임에 무한 재시도하지 않는다).
-    try testing.expect(t.rt.editor_backup_dirty);
-    try testing.expect(t.rt.editor_backup_due_ns > 0);
+    try testing.expect(t.rt.editorDocument().notifications.backup_dirty);
+    try testing.expect(t.rt.editorDocument().notifications.backup_due_ns > 0);
 }
 
 test "U4a-11 백업 파일은 소유자만 읽는다" {
@@ -43508,7 +43520,7 @@ test "U4b-8 되살린 문서는 다시 보호된다 — 시계가 서고 다음 
     const t = try openRestored(&fx, path);
     try testing.expect(!backupExists(root, doc)); // 소비됐다
     // 되살린 편집도 **미저장 편집**이다 — 다시 크래시가 와도 잃지 않아야 한다.
-    try testing.expect(t.rt.editor_backup_dirty);
+    try testing.expect(t.rt.editorDocument().notifications.backup_dirty);
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
     try testing.expect(backupExists(root, doc));
@@ -43589,7 +43601,7 @@ test "U4c-1 이름 없는 문서가 번호와 내용으로 돌아온다 — dirt
     try testing.expectEqualStrings("unsaved draft\n", doc.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(doc));
     // ⑷ **소비한 레코드는 사라진다**(다음 실행이 또 되살리지 않게) — 그리고 되살린 편집이 다시 보호된다.
-    try testing.expect(doc.rt.editor_backup_dirty);
+    try testing.expect(doc.rt.editorDocument().notifications.backup_dirty);
 }
 
 test "U4c-2 복원이 번호 발급기를 그 위로 올린다 — 새 문서가 겹치지 않는다" {
@@ -45114,7 +45126,7 @@ fn sharedViewFixturePeer(fx: *PaneFixture) !*Term {
     _ = try @constCast(old.owner).release(old);
     const lease = fx.term.rt.editor_document_lease.?;
     peer.rt.editor_document_lease = try @constCast(lease.owner).retain(lease, .view);
-    try refreshAfterEdit(fx.session, peer, null);
+    try refreshViewAfterEdit(fx.session, peer, null);
     return peer;
 }
 
@@ -46072,4 +46084,162 @@ test "shared editor adversarial R5 document rollback read only and malformed ran
         try testing.expect(a.rt.editor_shared_selection_buf == null and b.rt.editor_shared_selection_buf == null);
     }
     try testing.expect(saw_failure and saw_success);
+}
+
+test "SHVIEW15 문서 통지는 한 번이고 뷰 갱신은 백업 시계와 version을 되감지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    const state = fx.term.rt.editorDocument();
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    try testing.expectEqual(@as(u64, 2), state.notifications.lsp_version);
+    try testing.expect(state.notifications.backup_dirty);
+    const due = state.notifications.backup_due_ns;
+    try refreshAfterEdit(fx.session, peer, null);
+    try testing.expectEqual(@as(u64, 2), state.notifications.lsp_version);
+    try testing.expectEqual(due, state.notifications.backup_due_ns);
+    try testing.expect(insertText(fx.session, peer, "y"));
+    try testing.expectEqual(@as(u64, 3), state.notifications.lsp_version);
+    try testing.expectEqualStrings(fx.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
+}
+
+test "SHVIEW16 실제 LSP 서버는 공유 문서를 한 번 열고 한 번 변경하며 양쪽 진단을 게시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.MissingFakeServer;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| testing.allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    const peer = try sharedViewFixturePeer(&fx);
+    peer.rt.editor_grammar = fx.term.rt.editor_grammar;
+    const Ctx = struct { session: *AppSession, source: *Term, peer: *Term };
+    const ctx: Ctx = .{ .session = fx.session, .source = fx.term, .peer = peer };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.source.rt.editor_diagnostics.lsp.items.len > 0;
+        }
+    }.f));
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_lsp.clients.items.len);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_lsp.clients.items[0].docs.items.len);
+    // 대표는 peer지만 provider 요청은 source다. 응답은 실제 요청한 뷰에 돌아와야 한다.
+    fx.term.rt.editor_symbols.last_edit_ms = 0;
+    symbols_client.tick(fx.session, fx.term);
+    try testing.expect(fx.term.rt.editor_symbols.waiting);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.source.rt.editor_symbols.waiting and c.source.rt.editor_symbols.version == c.source.rt.editorDocument().notifications.lsp_version;
+        }
+    }.f));
+    const changes = fx.session.editor_lsp.sent_changes;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var buf: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&buf, "fake: {d}", .{c.source.rt.editorDocument().notifications.lsp_version}) catch return false;
+            for ([_]*Term{ c.source, c.peer }) |t| {
+                if (t.rt.editor_diagnostics.lsp.items.len == 0) return false;
+                if (!std.mem.eql(u8, want, t.rt.editor_diagnostics.lsp.items[0].message)) return false;
+            }
+            return true;
+        }
+    }.f));
+    try testing.expectEqual(changes + 1, fx.session.editor_lsp.sent_changes);
+    const peer_surface = peer.surfaceId();
+    const pane = pane_ops.activePane(fx.session);
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, pane.active_term);
+    try testing.expect(term_ops.termBySurfaceId(fx.session, peer_surface) == null);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_lsp.clients.items[0].docs.items.len);
+    try testing.expectEqual(@as(u64, 2), fx.term.rt.editorDocument().notifications.lsp_version);
+    const after = fx.session.editor_lsp.sent_changes;
+    try testing.expect(insertText(fx.session, fx.term, "z"));
+    const Source = struct { session: *AppSession, term: *Term, sent: u64 };
+    try testing.expect(pumpLspUntil(&fx, 3000, Source{ .session = fx.session, .term = fx.term, .sent = after }, struct {
+        fn f(c: Source) bool {
+            return c.session.editor_lsp.sent_changes == c.sent + 1;
+        }
+    }.f));
+    // 마지막 뷰 종료 직후에는 서버 pin이 정본을 보존한다. 다음 pump가 연결과 pin을 정산한다.
+    const pin = fx.session.editor_lsp.clients.items[0].docs.items[0].document.?;
+    const current = pane_ops.activePane(fx.session);
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, current, current.active_term);
+    try testing.expect(pin.owner.get(pin) != null);
+    try testing.expectEqual(@as(usize, 0), pin.owner.viewCount(pin).?);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_lsp.clients.items[0].docs.items.len);
+    try testing.expect(pin.owner.get(pin) == null);
+}
+
+test "SHVIEW17 수락한 한 뷰 닫기는 살아 있는 문서 백업을 지우지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    const peer = try sharedViewFixturePeer(&fx);
+    const peer_surface = peer.surfaceId();
+    const state = fx.term.rt.editorDocument();
+    const identity = app_session_mod.editor_backup_ops.identity(fx.term).?;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    try testing.expect(backupExists(root, identity));
+    try testing.expect(!state.notifications.backup_dirty);
+    try testing.expect(state.notifications.backup_on_disk);
+    fx.session.executeClose(.term_or_pane);
+    try testing.expect(term_ops.termBySurfaceId(fx.session, peer_surface) == null);
+    try testing.expect(backupExists(root, identity));
+    try testing.expect(state.notifications.backup_on_disk);
+    try testing.expect(insertText(fx.session, fx.term, "y"));
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    const bytes = try readBackup(testing.allocator, root, identity);
+    defer testing.allocator.free(bytes);
+    var record = try backup_rules.parse(testing.allocator, bytes);
+    defer record.deinit(testing.allocator);
+    try testing.expectEqualStrings(state.opened.?.file.content, record.content);
+    var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
+    const name = backup_rules.fileName(&name_buf, identity);
+    fx.session.executeClose(.term_or_pane);
+    try testing.expectError(error.FileNotFound, dir.dir.statFile(testing.io, name, .{}));
+}
+
+test "SHVIEW18 LSP WorkspaceEdit는 같은 정본에 한 번 적용하고 두 뷰를 갱신한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    const state = fx.term.rt.editorDocument();
+    const uri = try maru.session.editor.lsp.rpc.fileUri(testing.allocator, state.path.?);
+    defer testing.allocator.free(uri);
+    var json = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"x\"}]", .{});
+    defer json.deinit();
+    var files = [_]maru.session.editor.lsp.workspace_edit.FileEdits{.{ .uri = uri, .edits = json.value.array.items }};
+    const outcome = workspace_edit_client.apply(fx.session, .{ .files = &files }, .utf16, &.{});
+    try testing.expect(outcome == .applied);
+    try testing.expectEqual(@as(usize, 1), outcome.applied);
+    try testing.expectEqualStrings("xconst a = 1;", peer.rt.editor_lines[0]);
+    try testing.expectEqual(@as(usize, 1), state.history.undo_len);
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_workspace_edit.applied_edits);
+    try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqualStrings("const a = 1;", fx.term.rt.editor_lines[0]);
 }

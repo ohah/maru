@@ -94,12 +94,13 @@ Undo 기록 할당 실패는 별도 정책이다. 현재 `editor/mod.zig`의 `pu
 매핑하고 삭제된 위치는 유효한 위치로 정산한다. 같은 offset 삽입의 affinity, 역방향 선택,
 열 선택과 자동 닫기 추적의 매핑은 명시적 판정자로 고정한다. 단순히 양쪽 커서를 같게 만들지 않는다.
 다른 뷰의 화면은 스크롤 anchor를 매핑해 위치를 유지하고 자동으로 현재 편집 위치로 따라가지 않는다.
-현재 `refreshAfterEdit`는 문서 통지와 뷰 파생 갱신을 함께 수행한다. 공유 이관에서는 LSP
+`refreshAfterEdit`는 `notifyDocumentEdit`와 `refreshViewAfterEdit`를 조합한다. 공유 이관에서는 LSP
 version·백업 debounce·구문 provider 편집 통지는 문서/해당 provider마다 한 번, 선택·스크롤·
 행 배열·접힘·검색 범위 폐기는 연결 뷰마다 수행하도록 나눈다. Term마다 기존 함수를 반복 호출해
 문서 통지를 중복하거나 활성 뷰만 호출해 다른 뷰의 낡은 행 배열을 남기지 않는다.
 접힘 범위와 행별 캐시는 revision 변경으로 재검증한다. 찾기는 각 뷰의 검색어·옵션으로 다시 센다.
-이는 목표 소유권이며 현재 구현 상태가 아니다. 현재 `AppSession.editor_find_matches`와
+문서 LSP version·서버 연결과 백업 시계는 아래 문서 통지 분리에서 이관했다. 찾기의 뷰별
+소유는 아직 목표 계약이다. 현재 `AppSession.editor_find_matches`와
 `editor_find_source`, Chrome find 입력은 세션의 활성 검색 owner를 따른다. 두 pane의 찾기
 이력/결과를 유지하려면 뷰별 상태 이관과 단일 키/IME owner를 구분해야 한다. #4027의 diff
 좌우 두 슬롯을 일반 pane 뷰 저장소로 그대로 사용하지 않는다. 두 pane 검색→본문 편집→
@@ -535,9 +536,9 @@ marker 처리 전체와 동일하다는 주장은 하지 않는다. 삭제 겹�
 `test-editor-shared-view`는 이 제품 판정자와 import sentinel만 선택하고, 전체 `test-editor`에도
 같은 판정자가 들어간다.
 
-남은 경계는 명시적 제품 연결·경로 identity, 공유 IME 표시와 입력 거래, 문서/provider별 통지
-한 번과 provider 수명, 뷰별 검색, 다른 창 연결·복원이다. 현재 refresh는 기존 뷰별 provider/백업
-통지를 유지하므로 공유 provider 통지 완료로 해석하지 않는다. 같은 문서의 lease가 현재 창 밖에
+남은 경계는 명시적 제품 연결·경로 identity, 공유 IME 표시와 입력 거래, provider 결과 캐시
+공유와 비동기 요청 수명, 뷰별 검색, 다른 창 연결·복원이다. 이 편집 게시 기반 당시 refresh는 뷰별 provider/백업
+통지를 유지했다. 아래 문서 통지 분리에서 LSP version/서버 연결과 백업 시계를 이관한다. 같은 문서의 lease가 현재 창 밖에
 있으면 `SharedViewCountMismatch`로 부분 게시를 거절한다. 일반 UI에서 공유 view를 만들지 않아
 이 내부 제약이 새 사용자 동작으로 노출되지는 않는다. 단계 2 전체와 분할 기능 완료로 표기하지 않는다.
 
@@ -644,3 +645,23 @@ AppSession 전수 shard에서도 R1~R5가 통과했다. 재검증 로그는
 `test-editor-shared-view` 18/18과 `check-boundaries`가 모두 통과했다. 최종 커밋의 추가 R1~R5는
 같은 main coordinator를 호출하며 미소비 writer 선택 저장소와 registry view 참조를 판정한다.
 통합 전 기록의 circle/pending rows를 현재 구현에 추가하지 않는다.
+
+
+## 문서 통지와 뷰 갱신 분리
+
+문서 version과 백업 상태를 State.notifications로 이관하고, 새 revision마다 한 번의
+notifyDocumentEdit와 뷰별 refreshViewAfterEdit로 분리했다. 공유 게시가 수동 뷰의 provider를
+갱신하기 전에 문서 통지를 완료한다. 호출 뷰의 후속 refresh는 같은 revision 통지를 반복하지 않는다.
+현재 구문 트리와 semantic/inlay/symbol/fold 캐시는 뷰별 provider이므로 각 뷰에서 한 번 갱신한다.
+파싱된 트리와 provider 결과를 하나의 문서 캐시로 합쳤다고 해석하지 않는다.
+
+LSP Client의 OpenDoc는 안정 문서 handle과 독립 read pin으로 합친다. 마지막 뷰 종료 뒤
+didClose/클라이언트 정산까지 State 수명을 보존한다. 진단은 모든 연결 뷰로 게시하며 provider
+응답은 대표 뷰와 무관하게 실제 요청 seq의 뷰를 찾는다. WorkspaceEdit도 공유 State별 한 번 적용한다.
+백업은 하나의 시계를 쓰고, 닫기 범위 밖의 연결 뷰가 있으면 수락한 닫기에서도 레코드를 보존한다.
+
+SHVIEW15는 동일 revision 반복 갱신의 version/백업 만기 불변, SHVIEW16은 실제 fake LSP
+프로세스의 단일 didOpen/didChange와 양쪽 진단, 대표 아닌 뷰의 응답, 한 뷰 종료 뒤 재편집을
+판정한다. SHVIEW17은 실제 백업 기록과 수락한 부분 닫기/마지막 닫기, SHVIEW18은 같은 State의
+WorkspaceEdit 단일 적용과 공유 Undo를 판정한다. 실제 split UI·공유 OS IME·뷰별 검색과
+다른 창의 연결은 남아 있다. 경로 alias/권한 identity 통합도 별도다.

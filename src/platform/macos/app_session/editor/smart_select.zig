@@ -4,7 +4,7 @@
 //! 오류거나, 500 ms 안에 안 오거나, 그 커서에 기준보다 넓은 범위를 안 주면 **1층**(tree-sitter — 트리가 있고 이어 파는 중이
 //! 아닐 때만)으로 채운다. 낱말·줄·문서 단계는 늘 붙는다(`session.editor.smart_select`).
 //!
-//! **상태는 `Selection` 밖**(native-editor §12)이다 — 커서마다 사슬 + 인덱스, 그리고 **세운 뒤의 (`editor_lsp_version`, 선택들)**.
+//! **상태는 `Selection` 밖**(native-editor §12)이다 — 커서마다 사슬 + 인덱스, 그리고 **세운 뒤의 (`notifications.lsp_version`, 선택들)**.
 //! 다음 키에서 그 둘이 지금과 같을 때만 잇고, 아니면 지금 선택에서 새로 세운다. 그 한 대조가 「커서가 움직였다」와 「caret 을 안
 //! 옮기는 편집」을 함께 잡는다 — `refreshAfterEdit` 가 version 을 조건 없이 올리기 때문이다.
 const std = @import("std");
@@ -91,7 +91,7 @@ pub fn run(self: *AppSession, term: *Term, forward: bool) bool {
     defer cur.deinit(self.allocator);
     const primary_pos = canonical(self.allocator, primary, term.rt.editor_extra_selections, &cur) catch return true;
 
-    if (st.has_state and st.key_version == term.rt.editor_lsp_version and st.chainCount() == cur.items.len and sameSelections(st.key_sels.items, cur.items)) {
+    if (st.has_state and st.key_version == term.rt.editorDocument().notifications.lsp_version and st.chainCount() == cur.items.len and sameSelections(st.key_sels.items, cur.items)) {
         step(self, term, primary_pos, delta);
         return true;
     }
@@ -106,7 +106,7 @@ pub fn run(self: *AppSession, term: *Term, forward: bool) bool {
         st.waiting = true;
         st.waiting_seq = seq;
         st.waiting_since_ms = self.awakeMs();
-        st.waiting_version = term.rt.editor_lsp_version;
+        st.waiting_version = term.rt.editorDocument().notifications.lsp_version;
         st.waiting_sels.clearRetainingCapacity();
         st.waiting_sels.appendSlice(self.allocator, cur.items) catch {
             st.waiting = false;
@@ -131,7 +131,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
     defer cur.deinit(self.allocator);
     const primary = term.rt.editor_selection orelse return;
     const primary_pos = canonical(self.allocator, primary, term.rt.editor_extra_selections, &cur) catch return;
-    if (st.waiting_version != term.rt.editor_lsp_version or !sameSelections(st.waiting_sels.items, cur.items)) {
+    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version or !sameSelections(st.waiting_sels.items, cur.items)) {
         // 그사이 caret 이 움직였거나 문서가 바뀌었다 — 이 답은 지금 선택을 말하지 않는다.
         st.dropped_stale += 1;
         st.pending_steps = 0;
@@ -158,7 +158,7 @@ pub fn tick(self: *AppSession, term: *Term) void {
     var cur: std.ArrayList(Selection) = .empty;
     defer cur.deinit(self.allocator);
     const primary_pos = canonical(self.allocator, primary, term.rt.editor_extra_selections, &cur) catch return;
-    if (st.waiting_version != term.rt.editor_lsp_version or !sameSelections(st.waiting_sels.items, cur.items)) {
+    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version or !sameSelections(st.waiting_sels.items, cur.items)) {
         st.dropped_stale += 1;
         st.pending_steps = 0;
         return;
@@ -275,7 +275,7 @@ fn step(self: *AppSession, term: *Term, primary_pos: usize, delta: i32) void {
     term.rt.editor_selection = items[merged.primary];
 
     // 세운 뒤의 키 — 합쳐져 수가 줄었으면 사슬과 커서가 짝을 잃었다: 다음 키가 합친 선택에서 새로 세운다.
-    st.key_version = term.rt.editor_lsp_version;
+    st.key_version = term.rt.editorDocument().notifications.lsp_version;
     st.key_sels.clearRetainingCapacity();
     st.key_sels.appendSlice(self.allocator, items) catch {
         st.has_state = false;

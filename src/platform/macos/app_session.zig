@@ -2206,17 +2206,7 @@ const TermRuntime = struct {
     editor_shared_lines_ready: bool = false,
     /// 공유 편집 전에 확보한 호출 뷰의 결과 커서 저장소. writeBack/Undo 복원이 소비한다.
     editor_shared_selection_buf: ?[]maru.session.editor.selection.Selection = null,
-    /// **미저장 편집의 백업 시계**(§3.10) — 편집이 있었고 아직 안 쓴 상태이면 `dirty`, 그 만기가
-    /// `due_ns` 다. 정책(주기·임계)은 L2 `session.editor.backup` 이 알고, 이 셋은 그 시계의 자리다.
-    editor_backup_dirty: bool = false,
-    editor_backup_due_ns: i128 = 0,
-    /// **지금 디스크에 이 문서의 백업이 있다.** 지우는 자리가 「있는 것만 지우도록」 이 값을 본다 —
-    /// 없는 파일을 지우려 드는 syscall 을 프레임마다 내지 않는다.
-    editor_backup_on_disk: bool = false,
-    /// **백업을 멈췄다**(문서가 저장 상한보다 크다 — §3.10). 상태바 저하 칸이 이 값을 읽는다:
-    /// 조용히 멈추면 사용자는 보호받고 있다고 오해한다.
-    editor_backup_paused: bool = false,
-    /// **구문 강조 상태**(§5.3 1층 — tree-sitter 트리와 그 파생 색). 위 셋과 **같은 묶음**이라
+    /// **구문 강조 상태**(§5.3 1층 — tree-sitter 트리와 그 파생 색). 뷰별 provider와 **같은 묶음**이라
     /// 함께 살고 함께 죽는다(`releaseEditorTerm`). grammar가 없으면 안이 비어 있고, 그러면 그
     /// 문서는 끝까지 무색이다 — 실패가 아니라 저하다(§5).
     editor_syntax: editor_ops.syntax_color.State = .{},
@@ -2243,8 +2233,6 @@ const TermRuntime = struct {
     editor_highlight_mark_buf: []maru.chrome.components.editor_view.frame.Mark = &.{},
     /// 진단 층(§5.4) — 목록(첫 출처: 구문 오류)과 렌더 표. `editor_syntax` 와 같은 단위로 산다.
     editor_diagnostics: editor_ops.diagnostics.State = .{},
-    /// LSP 문서 version(§8.2a) — 편집마다 오른다. 0 은 「아직 서버에 안 열었다」.
-    editor_lsp_version: u64 = 0,
     /// 이 문서의 워크스페이스 root(§8.2a — 파일 트리와 같은 규칙: 가장 가까운 `.git` 의 디렉터리, 없으면 파일의 디렉터리).
     /// 처음 물을 때 한 번 정해 굳힌다(owned — `releaseEditorTerm` 이 푼다).
     editor_lsp_root: ?[]u8 = null,
@@ -10026,6 +10014,21 @@ pub const AppSession = struct {
     /// 남은 백업은 다음 실행의 복원 후보일 뿐이고, 반대로 안 닫힌 문서의 백업을 지우면 그것이 손실이다.
     const max_close_backup_drops = 64;
 
+    /// 백업은 뷰가 아니라 문서 소유다. 닫기 범위 밖에 뷰가 남으면 삭제하지 않는다.
+    pub fn closesAllEditorDocumentViews(self: *AppSession, scope: CloseScope, term: *Term) bool {
+        if (term.kind != .editor) return false;
+        const lease = term.rt.editor_document_lease orelse return true;
+        const total = lease.owner.viewCount(lease) orelse return false;
+        const Count = struct { state: *maru.session.editor.document_state.State, n: usize = 0 };
+        var count: Count = .{ .state = term.rt.editorDocument() };
+        forEachTermInScope(self, scope, &count, struct {
+            fn f(c: *Count, t: *Term) void {
+                if (t.kind == .editor and t.rt.editorDocument() == c.state) c.n += 1;
+            }
+        }.f);
+        return count.n == total;
+    }
+
     /// 보류한 닫기를 실제 실행 — confirm_accept(확정)와 requestClose의 "명령 없음" 즉시 경로가 공유한다.
     /// resolveCloseScope(cascade 단일 출처)로 범위를 풀어 그 범위의 leaf teardown으로 디스패치한다 — 판정
     /// (closeTargetHasRunningJob)과 정확히 같은 cascade를 타므로 "묻고 닫는 대상"이 항상 일치한다.
@@ -10044,8 +10047,10 @@ pub const AppSession = struct {
             names: *[max_close_backup_drops][maru.session.editor.backup.max_file_name_len]u8,
             lens: *[max_close_backup_drops]u8,
             count: *usize,
+            session: *AppSession,
+            scope: CloseScope = .none,
         };
-        var capture = Capture{ .names = &drop_names, .lens = &drop_lens, .count = &drop_count };
+        var capture = Capture{ .names = &drop_names, .lens = &drop_lens, .count = &drop_count, .session = self };
         // ⚠️ **에이전트 행 ✕의 좁은 두 범위는 건너뛴다.** `CloseScope` 는 인덱스를 안 실으므로
         // `.term`·`.pane` 은 **활성** pane 기준으로 풀리는데, 그 ✕ 가 닫는 것은 활성과 무관한 Term 이다
         // (아래 인덱스 경로가 그래서 따로 있다). 그 범위를 활성 기준으로 훑으면 **닫지도 않은 문서의
@@ -10059,10 +10064,15 @@ pub const AppSession = struct {
             },
             else => self.resolveCloseScope(target),
         };
+        capture.scope = drop_scope;
         forEachTermInScope(self, drop_scope, &capture, struct {
             fn f(c: *Capture, t: *Term) void {
                 if (c.count.* >= max_close_backup_drops) return;
+                if (!c.session.closesAllEditorDocumentViews(c.scope, t)) return;
                 const name = editor_backup_ops.fileNameIfOnDisk(t, &c.names[c.count.*]) orelse return;
+                for (0..c.count.*) |i| {
+                    if (std.mem.eql(u8, name, c.names[i][0..c.lens[i]])) return;
+                }
                 c.lens[c.count.*] = @intCast(name.len);
                 c.count.* += 1;
             }

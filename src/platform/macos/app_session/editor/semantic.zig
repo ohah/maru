@@ -1,6 +1,6 @@
 //! semantic tokens 2층 — 제품 배선(docs/editor-surface-tooling.md §8.2i · visual-mapping §5). 프레임마다 `tick` 이 「물을 때인가」를 판정해
 //! `semanticTokens/range`(보이는 원본 줄 ± `range_pad_lines`) 또는 `full`(범위를 못 하는 서버 — clangd)을 보내고, 응답은 요청 때의
-//! `editor_lsp_version` 과 같을 때만 받아 byte 스팬으로 든다. 편집 통지는 스팬을 밀어(§8.2i 「편집 중」) 새 응답까지 옛 색을 유지한다.
+//! `notifications.lsp_version` 과 같을 때만 받아 byte 스팬으로 든다. 편집 통지는 스팬을 밀어(§8.2i 「편집 중」) 새 응답까지 옛 색을 유지한다.
 //! 렌더는 `editor_syntax.lineColorsWith` 가 1층 스팬 뒤에 이 스팬을 문서 순서로 섞는다 — 「마지막이 이긴다」로 겹친 자리만 2층.
 //!
 //! 요청은 `10e8+seq`(§8.2a id 표). 서버가 없거나 provider 가 없으면 아무것도 안 한다 — 1층만(저하, 실패 아님).
@@ -60,14 +60,14 @@ pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) v
     const line_count = doc.file.lines.lineCount();
     const lo = first_src -| range_pad_lines;
     const hi = @min(last_src + range_pad_lines, line_count -| 1);
-    const version_ok = st.version == term.rt.editor_lsp_version and term.rt.editor_lsp_version != 0;
+    const version_ok = st.version == term.rt.editorDocument().notifications.lsp_version and term.rt.editorDocument().notifications.lsp_version != 0;
     const covered = lo >= st.covered_lo and hi <= st.covered_hi;
     if (version_ok and covered and !st.dirty) return;
     const use_full = !c.semantic_caps.range; // provider 가 없으면 `range` 도 false 지만 아래 요청이 `null` 로 막는다
     const seq = editor_lsp.requestSemanticTokens(self, term, use_full, lo, hi) orelse return;
     st.waiting = true;
     st.waiting_seq = seq;
-    st.waiting_version = term.rt.editor_lsp_version;
+    st.waiting_version = term.rt.editorDocument().notifications.lsp_version;
     st.waiting_lo = if (use_full) 0 else lo;
     st.waiting_hi = if (use_full) std.math.maxInt(usize) else hi;
     st.waiting_full = use_full;
@@ -86,7 +86,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.last_edit_ms = self.awakeMs(); // 곧바로 되묻지 않는다(quiet 뒤)
         return;
     }
-    if (st.waiting_version != term.rt.editor_lsp_version) {
+    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
         st.dropped_stale += 1;
         st.dirty = true;
         return;
@@ -112,7 +112,7 @@ pub fn onEdit(self: *AppSession, term: *Term, start: ?u32, old_end: u32, new_end
         semantic.shift(&st.spans, s, old_end, new_end);
         st.shifted += 1;
     } else st.spans.clearRetainingCapacity();
-    // `dirty` 는 안 세운다 — 편집이 `editor_lsp_version` 을 올려 `tick` 의 version 비교가 이미 다시 묻는다(적대적 2회차 B15: 등가).
+    // `dirty` 는 안 세운다 — 편집이 `notifications.lsp_version` 을 올려 `tick` 의 version 비교가 이미 다시 묻는다(적대적 2회차 B15: 등가).
 }
 
 /// 렌더가 섞을 스팬(문서 순서).

@@ -75,7 +75,7 @@ pub const Outcome = union(enum) {
 /// 계획 항목 — 검증을 지나 적용을 기다리는 파일 하나. 열린 Term 들(같은 경로를 든 것 전부) 또는 디스크의 문서.
 const Item = struct {
     path: []u8,
-    /// 열린 Term 마다 그 Term 의 본문으로 만든 변경.
+    /// 서로 다른 정본마다 본문으로 만든 변경. 같은 State의 연결 뷰는 중복하지 않는다.
     open: []OpenItem = &.{},
     disk: ?DiskItem = null,
 
@@ -129,7 +129,7 @@ pub fn apply(self: *AppSession, parsed: lsp.workspace_edit.Parsed, enc: lsp.rpc.
                 return .{ .refused = .{ .rejected = keepPath(path) } };
             }
             // §3.6 revision — 요청 때의 version 그대로여야 하고(요청 뒤에 연 문서는 아직 편집 전이어야), 응답이 version 을 들면 그것도 같아야 한다.
-            const now = term.rt.editor_lsp_version;
+            const now = term.rt.editorDocument().notifications.lsp_version;
             const snap: ?u64 = for (expected) |e| {
                 if (e.surface_id == term.surface.id) break e.version;
             } else null;
@@ -139,6 +139,11 @@ pub fn apply(self: *AppSession, parsed: lsp.workspace_edit.Parsed, enc: lsp.rpc.
                 st.refused_stale += 1;
                 return .{ .refused = .stale };
             }
+            // 연결된 뷰는 모두 stale 검증하지만 정본에는 한 번만 적용한다.
+            const already_prepared = for (opens.items) |open| {
+                if (open.term.rt.editorDocument() == term.rt.editorDocument()) break true;
+            } else false;
+            if (already_prepared) continue;
             const changes = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = f.edits, .capacity = f.edits.len, .allocator = self.allocator } }, doc.file.content, doc.file.lines, enc) catch |err| {
                 item.deinit(self.allocator);
                 if (err == error.OutOfMemory) return .{ .refused = .out_of_memory };

@@ -2,7 +2,7 @@
 //! 적용한다: `text_edits.toChanges`(정렬·겹침 거부) → `applyEditAsOne`(되돌리기 하나·selection 은 delta 가 민다·스크롤 앵커).
 //! 트리거는 `⇧⌥F`·팔레트. 서버가 없거나 `documentFormattingProvider` 가 없으면 무동작.
 //!
-//! 요청은 `4e8+seq`(§8.2e) — 응답은 **지금 기다리는 seq** 일 때만 적용하고 낡은 것은 버린다. 요청 때의 `editor_lsp_version`
+//! 요청은 `4e8+seq`(§8.2e) — 응답은 **지금 기다리는 seq** 일 때만 적용하고 낡은 것은 버린다. 요청 때의 `notifications.lsp_version`
 //! 을 기억해 응답 때 다르면 버리고 알린다(§3.6 「revision 이 어긋나면 버린다」 — 서버 응답에는 version 이 없으므로 클라이언트가 잰다).
 //! 겹치거나 모양이 틀린 결과는 **아무것도 적용하지 않고** 알린다(반만 적용된 문서를 만들지 않는다).
 
@@ -44,7 +44,7 @@ pub fn formatDocument(self: *AppSession) bool {
     st.waiting = true;
     st.waiting_seq = seq;
     st.waiting_surface = term.surface.id;
-    st.asked_version = term.rt.editor_lsp_version;
+    st.asked_version = term.rt.editorDocument().notifications.lsp_version;
     return true;
 }
 
@@ -56,7 +56,7 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
     const term = editorTerm(self, st.waiting_surface) orelse return;
     const doc = term.rt.editorDocument().opened orelse return;
     // §3.6 revision 검증 — 요청 뒤 문서가 바뀌었으면 결과가 그 문서의 것이 아니다.
-    if (term.rt.editor_lsp_version != st.asked_version) {
+    if (term.rt.editorDocument().notifications.lsp_version != st.asked_version) {
         st.stale += 1;
         self.showNoticeKey(.fmt_stale);
         return;

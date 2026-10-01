@@ -72,7 +72,7 @@ pub fn wordAtCaret(term: *Term) ?struct { start: u32, end: u32 } {
 pub fn spans(term: *Term) []const highlight.Span {
     const st = &term.rt.editor_highlight;
     if (st.spans.items.items.len == 0) return &.{};
-    if (st.version != term.rt.editor_lsp_version) return &.{};
+    if (st.version != term.rt.editorDocument().notifications.lsp_version) return &.{};
     const w = wordAtCaret(term) orelse return &.{};
     if (w.start != st.word_start or w.end != st.word_end) return &.{};
     return st.spans.items.items;
@@ -85,12 +85,12 @@ pub fn tick(self: *AppSession, term: *Term) void {
     // 비교 뷰는 축이 다르다(§5.1a). **이중 방어다** — `editor_lsp.readyClientFor` 도 비교 뷰를 거절하므로 이 줄이 없어도 요청은 안 나간다
     // (적대적 B10: 등가). 둔 이유는 뜻이다 — 이 함수만 읽고도 「비교 뷰에서는 안 한다」를 알 수 있어야 한다.
     if (term.rt.editor_diff != null) return;
-    if (term.rt.editor_lsp_version == 0) return;
+    if (term.rt.editorDocument().notifications.lsp_version == 0) return;
     // **낱말 밖(또는 선택 중)에서는 비우지 않는다.** 그리기는 `spans()` 의 낱말 대조가 이미 가리고, 캐시를 남겨 두면 같은 낱말로
     // 돌아왔을 때 **요청 없이** 곧바로 다시 선다. 처음엔 여기서 비웠는데, 그러면 `version`·`word_*` 키가 남아 `fresh` 가 참이라
     // **다시 묻지도 않고 목록은 빈** 상태가 되어 그 낱말의 강조가 영영 안 떴다(적대적 B9 가 드러냈다).
     const w = wordAtCaret(term) orelse return;
-    const fresh = st.version == term.rt.editor_lsp_version and st.word_start == w.start and st.word_end == w.end;
+    const fresh = st.version == term.rt.editorDocument().notifications.lsp_version and st.word_start == w.start and st.word_end == w.end;
     if (fresh) return; // 이 낱말의 답을 이미 들고 있다
     const now = self.awakeMs();
     if (st.last_move_ms != 0 and now -| st.last_move_ms < quiet_ms) return;
@@ -100,7 +100,7 @@ pub fn tick(self: *AppSession, term: *Term) void {
     const seq = editor_lsp.requestDocumentHighlight(self, term, @intCast(line), @intCast(w.start - ln.start)) orelse return;
     st.waiting = true;
     st.waiting_seq = seq;
-    st.waiting_version = term.rt.editor_lsp_version;
+    st.waiting_version = term.rt.editorDocument().notifications.lsp_version;
     st.waiting_word_start = w.start;
     st.waiting_word_end = w.end;
     st.sent += 1;
@@ -116,7 +116,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.last_move_ms = self.awakeMs(); // 곧바로 되묻지 않는다
         return;
     }
-    if (st.waiting_version != term.rt.editor_lsp_version) {
+    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
         st.dropped_stale += 1;
         return;
     }

@@ -288,7 +288,7 @@ fn installItems(self: *AppSession, term: *Term, lsp_items: []const completion.It
     st.surface_id = term.surface.id;
     st.word_start = st.asked_word_start;
     st.opened_by_trigger = st.asked_by_trigger;
-    st.response_version = term.rt.editor_lsp_version;
+    st.response_version = term.rt.editorDocument().notifications.lsp_version;
     st.incomplete = incomplete;
     st.resolve_waiting = false;
     st.pending_accept = false;
@@ -705,7 +705,7 @@ pub fn accept(self: *AppSession) void {
         start = es;
     };
     // 응답 뒤 문서가 바뀌었으면 additional 은 전부 낱말 앞에서 끝날 때만.
-    var allow = term.rt.editor_lsp_version == st.response_version;
+    var allow = term.rt.editorDocument().notifications.lsp_version == st.response_version;
     if (!allow) {
         allow = true;
         for (item.additional.items) |c| if (c.end > start) {

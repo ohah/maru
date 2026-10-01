@@ -79,12 +79,12 @@ test "IME backup smoke root requires an absolute path and never truncates into a
     try std.testing.expect(explicitRoot(buf[0..4], "/tmp/maru-ime/backups") == null);
 }
 
-/// 편집 통지 — **시계만 되감는다**(§3.10 「편집 후 debounce」). 부르는 자리는 `refreshAfterEdit`
-/// 하나다: 제품의 편집 경로 여섯이 전부 그 함수를 지난다(그 함수의 주석이 그 사실을 소유한다).
+/// 문서 편집의 debounce. notifyDocumentEdit가 revision마다 한 번 호출한다.
+/// 저장 중 재편집은 markClean이 별도로 다음 만기를 준비한다.
 pub fn noteEdit(self: *AppSession, term: *Term) void {
     if (identity(term) == null) return;
-    term.rt.editor_backup_dirty = true;
-    term.rt.editor_backup_due_ns = std.Io.Clock.awake.now(self.io).nanoseconds + backup.debounce_ns;
+    term.rt.editorDocument().notifications.backup_dirty = true;
+    term.rt.editorDocument().notifications.backup_due_ns = std.Io.Clock.awake.now(self.io).nanoseconds + backup.debounce_ns;
 }
 
 /// 만기가 된 문서를 쓴다 — 프레임 tick 이 부른다.
@@ -98,8 +98,8 @@ pub fn tick(self: *AppSession) void {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                if (!term.rt.editor_backup_dirty) continue;
-                if (now_ns < term.rt.editor_backup_due_ns) continue;
+                if (!term.rt.editorDocument().notifications.backup_dirty) continue;
+                if (now_ns < term.rt.editorDocument().notifications.backup_due_ns) continue;
                 settle(self, term);
                 return;
             }
@@ -113,7 +113,7 @@ pub fn flushAll(self: *AppSession) void {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                if (!term.rt.editor_backup_dirty) continue;
+                if (!term.rt.editorDocument().notifications.backup_dirty) continue;
                 settle(self, term);
             }
         }
@@ -138,8 +138,8 @@ pub fn markClean(self: *AppSession, term: *Term, content: []const u8, previous_i
     // 저장 해시가 임시 값에 쓰이고 문서는 영원히 dirty 로 남는다(적대적 1회차에서 그 형태를 지웠다).
     term.rt.editorDocument().opened.?.saved_hash = editor_ops.contentHash(content);
     if (previous_identity) |prev| {
-        if (term.rt.editor_backup_on_disk) {
-            term.rt.editor_backup_on_disk = false;
+        if (term.rt.editorDocument().notifications.backup_on_disk) {
+            term.rt.editorDocument().notifications.backup_on_disk = false;
             dropDoc(self, prev);
         }
     }
@@ -152,10 +152,10 @@ pub fn markClean(self: *AppSession, term: *Term, content: []const u8, previous_i
 
 /// 이 문서의 백업을 **없는 상태로 만든다** — 저장 성공과 수락된 닫기가 부른다.
 pub fn drop(self: *AppSession, term: *Term) void {
-    term.rt.editor_backup_dirty = false;
-    term.rt.editor_backup_paused = false;
-    if (!term.rt.editor_backup_on_disk) return;
-    term.rt.editor_backup_on_disk = false;
+    term.rt.editorDocument().notifications.backup_dirty = false;
+    term.rt.editorDocument().notifications.backup_paused = false;
+    if (!term.rt.editorDocument().notifications.backup_on_disk) return;
+    term.rt.editorDocument().notifications.backup_on_disk = false;
     const doc = identity(term) orelse return; // 신원이 이미 바뀌었으면 그 경로가 옛 신원으로 지운다
     dropDoc(self, doc);
 }
@@ -177,32 +177,32 @@ pub fn dropDoc(self: *AppSession, doc: backup.Doc) void {
 /// 없다(§3.10 이 기대는 dirty 계약). 남겨 두면 다음 실행이 「디스크와 같은 내용」을 dirty 로
 /// 되살려, 사용자는 **바꾼 것이 없는데 저장하라는 표시**를 본다.
 fn settle(self: *AppSession, term: *Term) void {
-    term.rt.editor_backup_dirty = false;
+    term.rt.editorDocument().notifications.backup_dirty = false;
     const doc = identity(term) orelse return;
     const opened = term.rt.editorDocument().opened orelse return;
     if (!opened.isDirty()) {
-        if (term.rt.editor_backup_on_disk) {
-            term.rt.editor_backup_on_disk = false;
+        if (term.rt.editorDocument().notifications.backup_on_disk) {
+            term.rt.editorDocument().notifications.backup_on_disk = false;
             dropDoc(self, doc);
         }
-        term.rt.editor_backup_paused = false;
+        term.rt.editorDocument().notifications.backup_paused = false;
         return;
     }
     // **상한을 넘는 문서는 백업하지 않고 그 사실을 화면에 남긴다**(§3.10 — 조용히 멈추면 사용자는
     // 보호받고 있다고 오해한다). 상태바 저하 칸이 그 자리다.
     if (opened.file.content.len > backup.pause_bytes) {
-        if (!term.rt.editor_backup_paused) self.metal_dirty = true;
-        term.rt.editor_backup_paused = true;
+        if (!term.rt.editorDocument().notifications.backup_paused) self.metal_dirty = true;
+        term.rt.editorDocument().notifications.backup_paused = true;
         return;
     }
-    term.rt.editor_backup_paused = false;
+    term.rt.editorDocument().notifications.backup_paused = false;
     if (write(self, doc, opened.file.content)) {
-        term.rt.editor_backup_on_disk = true;
+        term.rt.editorDocument().notifications.backup_on_disk = true;
     } else {
         // 쓰지 못했으면 **다음 만기에 다시 시도한다** — 한 번 실패로 보호를 놓지 않는다(디스크가
         // 잠시 찼거나 자리를 못 만든 경우가 영구 포기일 이유가 없다).
-        term.rt.editor_backup_dirty = true;
-        term.rt.editor_backup_due_ns = std.Io.Clock.awake.now(self.io).nanoseconds + backup.debounce_ns;
+        term.rt.editorDocument().notifications.backup_dirty = true;
+        term.rt.editorDocument().notifications.backup_due_ns = std.Io.Clock.awake.now(self.io).nanoseconds + backup.debounce_ns;
     }
 }
 
@@ -244,7 +244,7 @@ fn write(self: *AppSession, doc: backup.Doc, content: []const u8) bool {
 /// Term 이 소유하므로 teardown 이 해제해 버리고, 그 뒤에는 `dropDoc` 로 이름을 만들 수 없다
 /// (해제된 메모리를 읽는다). 이름은 값이라 살아남는다.
 pub fn fileNameIfOnDisk(term: *const Term, buf: *[backup.max_file_name_len]u8) ?[]const u8 {
-    if (!term.rt.editor_backup_on_disk) return null;
+    if (!term.rt.editorDocument().notifications.backup_on_disk) return null;
     const doc = identity(term) orelse return null;
     return backup.fileName(buf, doc);
 }
@@ -341,7 +341,7 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
         else => {},
     }
     dropDoc(self, parsed.doc);
-    term.rt.editor_backup_on_disk = false;
+    term.rt.editorDocument().notifications.backup_on_disk = false;
     // **알림 한 줄**(모달이 아니다) — 크래시를 몰랐던 사용자는 dirty 를 버그로 읽는다.
     self.showNoticeKey(.editor_backup_restored);
 }

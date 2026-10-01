@@ -50,6 +50,13 @@ KEYS = ("<!doctype html><title>keys</title><style>html,body{margin:0;height:100%
     "t.addEventListener('focus',function(){ping('e=focus')});t.addEventListener('blur',function(){ping('e=blur')});"
     "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
     "</script>").encode()
+# W6a②: 팝업 위젯 — 빨간 select(왼쪽 위 절반) 하나와 초록 바탕. 초점을 `/ev` 로 알린다.
+SEL = ("<!doctype html><title>sel</title><style>html,body{margin:0;height:100%;background:#20a060}"
+    "select{position:fixed;left:0;top:0;width:50%;height:40%;border:0;background:#ff0000;font:20px sans-serif}</style><body>"
+    "<select id=a><option>apple<option>banana<option>cherry<option>date<option>elder</select><script>"
+    "var a=document.getElementById('a');a.addEventListener('focus',function(){new Image().src='/ev?e=focus&id=a&t='+Date.now()});"
+    "a.addEventListener('change',function(){new Image().src='/ev?e=change&v='+a.value+'&t='+Date.now()});"
+    "</script>").encode()
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -64,6 +71,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = INPUT
         elif self.path == "/keys-app":
             body = KEYS
+        elif self.path == "/sel":
+            body = SEL
         elif self.path == "/nav-a":
             body = b"<!doctype html><title>a</title><style>html,body{margin:0;height:100%}a{display:block;height:100%}</style><body><a href='/nav-b'>b</a><script>addEventListener('pageshow',function(){new Image().src='/ev?e=shown-a&t='+Date.now()})</script>"
         elif self.path == "/nav-b":
@@ -86,9 +95,11 @@ app_pid=$!
 fail() { echo "web-osr smoke failed: $1" >&2; exit 1; }
 
 # 1) 앱의 자식으로 sidecar 가 뜬다.
+# sidecar 만 고른다 — 앱은 띄우기 전에 `codesign --verify --strict <…/maru-web-host>` 를 자식으로 돌려(W7a2) `-f maru-web-host`
+# 가 그 잠깐 사는 프로세스를 잡으면 곧 사라져 명령줄이 비었다(W6a② 때 연달아 실측).
 host_pid=""
 for _ in $(seq 1 100); do
-    host_pid=$(pgrep -P "$app_pid" -f maru-web-host || true)
+    host_pid=$(pgrep -P "$app_pid" -f 'maru-web-host --profile-dir' || true)
     [ -n "$host_pid" ] && break
     sleep 0.1
 done
@@ -112,7 +123,7 @@ echo "test page requested by the sidecar"
 # 2b) sidecar 가 죽으면 다시 띄워 열린 탭을 같은 주소로 되살린다. 60 초 안에 세 번 죽으면 더 띄우지 않는다.
 wait_new_child() { # $1 = 이전 pid — 새 자식 pid 를 찍는다(없으면 빈 줄)
     for _ in $(seq 1 100); do
-        pid=$(pgrep -P "$app_pid" -f maru-web-host || true)
+        pid=$(pgrep -P "$app_pid" -f 'maru-web-host --profile-dir' || true)
         if [ -n "$pid" ] && [ "$pid" != "$1" ]; then echo "$pid"; return; fi
         sleep 0.1
     done
@@ -132,7 +143,7 @@ third=$(wait_new_child "$second")
 [ -n "$third" ] || fail "no restart after the second crash"
 kill -KILL "$third"
 sleep 3
-latched=$(pgrep -P "$app_pid" -f maru-web-host || true)
+latched=$(pgrep -P "$app_pid" -f 'maru-web-host --profile-dir' || true)
 [ -z "$latched" ] || fail "restarted again after three crashes in a minute ($latched)"
 echo "third crash within a minute: no restart (budget)"
 # 죽은 sidecar 의 사본은 거둘 때 지운다 — 멈춘 뒤 남은 사본이 없다.
@@ -442,6 +453,90 @@ check(any(v.endswith('漢aㄱ ') for v in allv), 'text typed right before a new 
 sys.exit(0 if ok else 1)
 PY
 
+# ── W6a②: 팝업 위젯(`<select>` 목록)을 그린다 ───────────────────────────────────────────────────────────────
+# 빨간 select 를 눌러 목록을 연 뒤 찍는다 — 목록은 select 바로 아래에 열린다(view DIP — 앱 안 실측). 그 띠가 초록 바탕이 아니라
+# 항목 글자(어두운 픽셀)가 있으면 그려진 것이다(W6a① 까지는 목록이 보이지 않는 채 열려 띠가 초록이었다). Esc 로 닫으면 다시
+# 초록이다. 목록 바탕은 select 배경색이라 select 자리는 닫힌 장에서 잰다.
+# 스크린샷 하니스는 찍은 뒤 앱을 끝내므로 두 번 띄운다.
+cat > "$root/popup.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.33 0 0 0
+mouse 3 0.40 0.33 0 0 0
+SCRIPT
+cat > "$root/popup-esc.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.33 0 0 0
+mouse 3 0.40 0.33 0 0 0
+sleep 1000
+key 53 U+1B
+SCRIPT
+: > "$root/requests.log"
+run_app /sel 30000 "$root/popup.summary" MARU_WEB_OSR_TEST_INPUT="$root/popup.txt" MARU_SCREENSHOT="$root/popup.ppm" MARU_SCREENSHOT_DELAY_MS=9000
+grep -q 'e=focus&id=a' "$root/requests.log" || fail "the click did not reach the select"
+: > "$root/requests.log"
+run_app /sel 30000 "$root/popup-esc.summary" MARU_WEB_OSR_TEST_INPUT="$root/popup-esc.txt" MARU_SCREENSHOT="$root/popup-esc.ppm" MARU_SCREENSHOT_DELAY_MS=10000
+grep -q 'e=focus&id=a' "$root/requests.log" || fail "the click did not reach the select (Esc run)"
+python3 - "$root/popup.ppm" "$root/popup-esc.ppm" <<'PY' || fail "the opened <select> list was not drawn (or stayed after Esc)"
+import sys
+def load(path):
+    d = open(path, 'rb').read()
+    _, dims, _, px = d.split(b'\n', 3)
+    w, h = map(int, dims.split())
+    return w, h, px
+def red_box(img):
+    w, h, px = img
+    red = bytes.fromhex('ff0000')
+    xs, ys = [], []
+    for y in range(0, h, 2):
+        row = px[y * w * 3:(y + 1) * w * 3]
+        i = row.find(red)
+        while i != -1:
+            if i % 3 == 0: xs.append(i // 3); ys.append(y)
+            i = row.find(red, i + 3)
+    return (min(xs) + 4, max(xs) - 4, max(ys), min(ys)) if xs else None
+def band(img, box):
+    w, h, px = img
+    x0, x1, y1, top = box
+    green = dark = total = 0
+    # 띠 높이는 select 높이의 1/4 — 목록(항목 다섯)보다 짧아야 목록 아래 초록이 섞이지 않는다(배율·창 크기에 따라).
+    for y in range(y1 + 6, min(h, y1 + 6 + max(4, (y1 - top) // 4))):
+        for x in range(x0, x1):
+            r, g, b = px[(y * w + x) * 3:(y * w + x) * 3 + 3]
+            total += 1
+            if (r, g, b) == (0x20, 0xa0, 0x60): green += 1
+            # 글자만 센다 — 목록 바탕은 select 배경색(빨강)이라 밝기 식으로는 바탕도 「어둡다」로 셌다(W6a② 적대 검증 3 차).
+            if max(r, g, b) < 0x60: dark += 1
+    return green / total, dark
+opened, closed = load(sys.argv[1]), load(sys.argv[2])
+# select 자리는 닫힌 장의 빨간 영역이다 — 목록은 select 배경색(빨강)으로 칠해져 열린 장에서는 빨간 영역이 목록까지 늘어난다.
+box = red_box(closed)
+if box is None: print('FAIL no red select in the closed screenshot'); sys.exit(1)
+(og, od), (cg, cd) = band(opened, box), band(closed, box)
+print(f'below the select — opened: green {og:.2f} dark px {od} · after Esc: green {cg:.2f} dark px {cd}')
+ok = og < 0.2 and od > 20 and cg > 0.95
+print(('PASS ' if ok else 'FAIL ') + 'the opened <select> list is drawn under the select and gone after Esc')
+sys.exit(0 if ok else 1)
+PY
+# 열린 목록의 키(W6a②): 「c」 → Enter 로 cherry 가 골라진다 — 키 대상 탭에 팝업이 열려 있으면 Swift 는 입력기를 거치지 않고
+# 누름·글자를 보낸다(osr_key phase 3). 대본은 글자 「c」를 직접 실은 NSEvent 를 넣는다 — 그래서 이 판정은 phase 3 이 목록의
+# 글자 찾기까지 닿는지를 본다. 입력기 우회 자체는 가르지 못한다 — 셸에서 띄운 앱은 맨 앞이 아니라 한글 입력 소스여도 macOS
+# 입력기가 조합하지 않는다(W4d② 실측 — 2벌식에서 우회를 끈 변이도 통과했다). 진짜 입력기에서의 우회·키 이벤트 글자가 자모로
+# 오는지는 자리 비움 모드(`web-osr-tester-live`) 몫이다.
+cat > "$root/popup-type.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.33 0 0 0
+mouse 3 0.40 0.33 0 0 0
+sleep 1000
+key 8 U+63
+sleep 500
+key 36 U+D
+sleep 1500
+SCRIPT
+: > "$root/requests.log"
+run_app /sel 14000 "$root/popup-type.summary" MARU_WEB_OSR_TEST_INPUT="$root/popup-type.txt"
+grep -q 'e=change&v=cherry' "$root/requests.log" || fail "typing c then Enter in the open <select> list did not pick cherry ($(grep '^/ev' "$root/requests.log" | tr '\n' ' '))"
+echo "PASS typing in the open <select> list picks the item (c → cherry)"
+
 # ── W4d①: 설정 `browser.engine` ─────────────────────────────────────────────────────────────────────────────
 # 개발용 환경변수 없이 설정으로 켠다. 설치 위치는 `$HOMEBREW_PREFIX/opt/maru-chromium/libexec` 를 먼저 본다 — 가짜 prefix 에
 # brew 와 같은 모양(`Cellar/maru-chromium/<버전>/libexec` 실제 파일 + `opt/maru-chromium` 링크)으로 설치물을 두어 「설치됨」을,
@@ -449,7 +544,7 @@ PY
 # 서명·manifest 를 보고 띄우므로 개발 디렉터리를 링크하면 거절한다.
 printf 'browser.engine = chromium\n' > "$root/engine.conf"
 host_under() { # $1 = 띄운 pid — 그것이나 그 자식(앱)의 자식 maru-web-host(다른 앱 프로세스를 잡지 않게)
-    for p in "$1" $(pgrep -P "$1" 2>/dev/null); do pgrep -P "$p" -f maru-web-host 2>/dev/null; done
+    for p in "$1" $(pgrep -P "$1" 2>/dev/null); do pgrep -P "$p" -f 'maru-web-host --profile-dir' 2>/dev/null; done
 }
 engine_app() { # $1=HOMEBREW_PREFIX $2=로그 이름
     rm -rf "$root/home" && mkdir -p "$root/home"
@@ -562,7 +657,7 @@ hardened_app() { # $1=로그 이름, 나머지는 추가 환경
         MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/osr-smoke" MARU_MACOS_APP_SMOKE_MS=10000 "$@" "$root/maru-hardened" > "$root/$name.log" 2>&1 &
     hardened_pid=$!
     sleep 7
-    hardened_child=$(pgrep -P "$hardened_pid" -f maru-web-host 2>/dev/null || true)
+    hardened_child=$(pgrep -P "$hardened_pid" -f 'maru-web-host --profile-dir' 2>/dev/null || true)
     wait "$hardened_pid" || true
     [ -z "$hardened_child" ] || fail "the hardened build started a sidecar chosen by the environment ($name)"
     ! grep -q '^/osr-smoke' "$root/requests.log" || fail "the hardened build opened the page in Chromium ($name)"

@@ -1341,12 +1341,12 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
                 // 있고(`u-<번호>.bak`), 같은 바이트를 두 곳에 두면 한쪽이 낡는다. 인덱스 공간은
                 // 브라우저와 같은 이유로 건드리지 않는다(`insert_after` — 건드리면 구버전이 창을 통째로
                 // 폴백한다). **저쪽 신원 문서는 여기 안 든다**(번호가 없다 — 그 갈래는 U4d 다).
-                if (term.rt.editor_untitled) |u| {
+                if (term.rt.editor_document.untitled) |u| {
                     try untitled_terms.append(arena, .{
                         .insert_after = persisted_index,
                         .number = u.n,
                     });
-                } else if (term.rt.editor_remote) |r| {
+                } else if (term.rt.editor_document.remote) |r| {
                     // **U4d: 저쪽에 저장한 문서는 «호스트와 원격 경로»가 신원이다.** 그것을 안 실으면
                     // 그 탭이 사라지고 백업 레코드를 **아무도 소비하지 않는다**. 되살리면 신원을 다시
                     // 세울 수 없어(재시작엔 control socket 이 없다) **새 번호를 받는 이름 없는 문서**가 된다.

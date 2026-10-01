@@ -45,7 +45,7 @@ pub const State = struct {
 pub fn startAtCaret(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     if (doc.file.read_only) return false;
     if (!editor_lsp.renameSupportedFor(self, term)) return false; // 서버가 없거나 rename 을 못 하면 상자도 없다
     const sel = term.rt.editor_selection orelse return false;
@@ -59,7 +59,7 @@ pub fn startAtCaret(self: *AppSession) bool {
 /// `startRename` 의 씨앗 — 낱말 그대로.
 pub fn seedFor(self: *AppSession, t: Target) ?[]const u8 {
     const term = termFor(self, t.surface_id) orelse return null;
-    const doc = term.rt.editor_doc orelse return null;
+    const doc = term.rt.editor_document.opened orelse return null;
     if (t.end > doc.file.content.len or t.start > t.end) return null;
     return doc.file.content[t.start..t.end];
 }
@@ -70,7 +70,7 @@ pub fn commit(self: *AppSession, t: Target, new_name: []const u8) void {
     defer settings_ops.closeRename(self);
     if (new_name.len == 0) return;
     const term = termFor(self, t.surface_id) orelse return;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     if (term.rt.editor_lsp_version != t.version) return; // 모달 동안 바뀔 수 없지만, 바뀌었다면 이 자리는 그 낱말이 아니다
     const old = seedFor(self, t) orelse return;
     if (std.mem.eql(u8, old, new_name)) return;
@@ -179,7 +179,7 @@ pub const Anchor = struct { x: i32, y: i32, h: u32 };
 pub fn anchorAt(term: *Term, offset: usize) ?Anchor {
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
-    const doc = term.rt.editor_doc orelse return null;
+    const doc = term.rt.editor_document.opened orelse return null;
     const geom = term.rt.editor_hit_geom;
     const off = @min(offset, doc.file.content.len);
     const line_idx = doc.file.lines.lineAt(off);
@@ -209,7 +209,7 @@ fn snapshotVersions(self: *AppSession) void {
     const st = &self.editor_rename;
     st.snaps_len = 0;
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
-        if (t.kind != .editor or t.rt.editor_doc == null) continue;
+        if (t.kind != .editor or t.rt.editor_document.opened == null) continue;
         if (st.snaps_len >= st.snaps.len) return;
         st.snaps[st.snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editor_lsp_version };
         st.snaps_len += 1;

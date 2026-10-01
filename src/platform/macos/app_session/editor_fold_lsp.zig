@@ -48,7 +48,7 @@ fn quietFor(st: *const State) u64 {
 pub fn tick(self: *AppSession, term: *Term) void {
     const st = &term.rt.editor_fold_lsp;
     if (st.waiting) return;
-    if (term.rt.editor_doc == null) return;
+    if (term.rt.editor_document.opened == null) return;
     const version = term.rt.editor_lsp_version;
     if (version == 0) return; // 아직 서버에 안 열었다
     if (st.version == version and !st.dirty) return;
@@ -77,7 +77,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.dirty = true;
         return;
     }
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const lines = editor.foldSourceLines(term);
     // **범위는 화면에 그리는 줄과 같은 문서에서 나와야 한다**(승격과 같은 방어) — 갈린 상태면 버리고 다음 프레임이 다시 묻는다.
     if (lines.len == 0 or lines.len != doc.file.lineCount()) {

@@ -1728,7 +1728,7 @@ CRLF가 보존되고, 그러면 같은 `copy_editor_selection` 명령이 뷰에 
   규칙만 남긴다: **`rt`의 편집기 필드 중 렌더가 굳힌 스냅숏(`editor_hit_*`)이 아닌 것은 전부 live이고,
   그것을 읽는 것을 막는 장치는 없다.** 지금 판정자가 있는 축은 탭 폭 하나뿐이다(ADV3-H).
 
-- **문서 내용만 일부러 `Term`에서 live로 읽는다**(`editor_lines`·`editor_doc`). 편집은 곧 렌더이므로
+- **문서 내용만 일부러 `Term`에서 live로 읽는다**(`editor_lines`·`editor_document.opened`). 편집은 곧 렌더이므로
   배열과 함께 갱신된다.
 
 **그래서 ②~④가 배열 하나에서 나온다.** 그 배열에 조각 시작의 `(열, 원본 byte)`를 더하면(6·8회차),
@@ -2721,7 +2721,7 @@ JSDoc 태그로 봄 · CSS `foo`→`url` 이름 바꾸기에서 증분이 틀림
 | **미니맵** | 진단 줄을 severity 색으로 행 전체(§6.2 의 검색 행과 같은 방식, 검색 행이 위) | VS Code 미니맵의 `minimapError`/`minimapWarning` |
 | **이동** | `next_diagnostic`(`F8`) · `prev_diagnostic`(`⇧F8`): caret 줄 기준 뒤/앞의 첫 진단, 없으면 감김. caret 은 시작 offset 에 서고 `navigateTo` 가 드러낸다(되돌아가기 표식까지 — §5.2). 없으면 무동작 | VS Code `editor.action.marker.next/prev`. 병합 S5 의 F7 과 같은 경로 |
 | **메시지** | ~~이 슬라이스에는 **표시 자리가 없다**(§8.3 호버 박스 미착수)~~ → **호버 박스가 낸다**(2026-09-17, [tooling §8.2b](editor-surface-tooling.md)): 포인터가 머문 offset 을 덮는 진단을 **평문 메시지 + 아래 줄 흐린 `출처(코드)`**(VS Code 마커 호버의 모양 — 아이콘·색은 gutter 가 이미 든다)로 — 구문 오류는 i18n 「구문 오류」·「빠짐: ‹토큰›」(출처 줄 없음), 서버 진단은 message 첫 줄 + `‹서버›(code)`. 이동(`F8`)은 자리만 옮긴다 | 구문 오류의 메시지는 어차피 둘뿐이라 잃는 것이 적었고, 호버 박스가 이 목록의 `message` 를 낸다 |
-| **비교·병합** | 비교 뷰의 열에는 없다(읽기 전용 두 문서 — 트리도 없다). 병합 Result 는 단일 편집기와 같다 | 비교 뷰의 열은 `editor_doc` 이 아니라 텍스트 배열이다 |
+| **비교·병합** | 비교 뷰의 열에는 없다(읽기 전용 두 문서 — 트리도 없다). 병합 Result 는 단일 편집기와 같다 | 비교 뷰의 열은 `editor_document.opened` 이 아니라 텍스트 배열이다 |
 | **켜고 끄기** | `editor.diagnostics` 토글(기본 켬). 끄면 네 자리 전부 사라진다 | 구문 오류 밑줄이 거슬리는 사용자를 위해 — JetBrains 도 검사 수준을 낮출 수 있다 |
 
 **관측점**: 골든 `editor-diagnostics`(오류 줄에 gutter `✖`·`⚠`·지그재그 밑줄·미니맵 행 — 1200×160, 막대는 문서가 안 넘쳐 없다) ·

@@ -54,7 +54,7 @@ pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) v
     if (st.waiting) return;
     const c = editor_lsp.readyClientFor(self, term) orelse return;
     // provider 검사는 `requestSemanticTokens` 가 한다(여기서 또 보면 등가 — 적대적 2회차 B2).
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const now = self.awakeMs();
     if (st.last_edit_ms != 0 and now -| st.last_edit_ms < quiet_ms) return; // 0 = 아직 편집이 없었다
     const line_count = doc.file.lines.lineCount();
@@ -91,7 +91,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.dirty = true;
         return;
     }
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const c = editor_lsp.readyClientFor(self, term) orelse return;
     const decoded = semantic.decode(self.allocator, result, c.semantic_caps.roles, doc.file.content, doc.file.lines, enc) catch return;
     defer self.allocator.free(decoded);

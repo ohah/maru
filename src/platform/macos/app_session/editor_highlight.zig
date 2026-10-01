@@ -48,7 +48,7 @@ pub const State = struct {
 
 /// caret 아래 **낱말** 범위 — 선택이 있거나 낱말이 아니면 `null`. 낱말 규칙은 §5.1 이 정한 소유자(`selection.wordRangeAt`)가 준다.
 pub fn wordAtCaret(term: *Term) ?struct { start: u32, end: u32 } {
-    const doc = term.rt.editor_doc orelse return null;
+    const doc = term.rt.editor_document.opened orelse return null;
     const sel = term.rt.editor_selection orelse return null;
     if (sel.anchor_start != sel.anchor_end) return null; // 선택이 있다 — 그 칸은 선택이 이긴다
     if (term.rt.editor_extra_selections.len > 0) return null; // 멀티커서도 같은 이유(§9.1)
@@ -94,7 +94,7 @@ pub fn tick(self: *AppSession, term: *Term) void {
     if (fresh) return; // 이 낱말의 답을 이미 들고 있다
     const now = self.awakeMs();
     if (st.last_move_ms != 0 and now -| st.last_move_ms < quiet_ms) return;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     const line = doc.file.lines.lineAt(w.start);
     const ln = doc.file.lines.line(line) orelse return;
     const seq = editor_lsp.requestDocumentHighlight(self, term, @intCast(line), @intCast(w.start - ln.start)) orelse return;
@@ -129,7 +129,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.dropped_word += 1;
         return;
     }
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     highlight.decode(self.allocator, result, doc.file.content, doc.file.lines, enc, &st.spans) catch {
         st.spans.clear();
         return;

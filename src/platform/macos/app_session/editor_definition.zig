@@ -28,7 +28,7 @@ pub const State = struct {
 pub fn gotoDefinitionAtCaret(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     const sel = term.rt.editor_selection orelse return false;
     return gotoDefinitionAt(self, term, @min(sel.focus, doc.file.content.len));
 }
@@ -38,7 +38,7 @@ pub fn gotoDefinitionAtPointer(self: *AppSession, term: *Term, x_px: f64, y_px: 
     // 고정 행(§4.1i)은 본문이 아니다 — 흘려보내면 보통 클릭이 그 머리줄로 간다(가려진 본문 글자의 정의로 가지 않는다).
     if (editor_ops.sticky_client.rowAt(term, y_px) != null) return false;
     const off = editor_ops.hitTestBodyMode(.cluster, term, x_px, y_px) orelse return false;
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     if (off >= doc.file.content.len) return false;
     return gotoDefinitionAt(self, term, off);
 }

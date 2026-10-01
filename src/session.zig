@@ -160,6 +160,7 @@ pub const editor = struct {
     pub const line_index = @import("session/editor/line_index.zig");
     pub const selection = @import("session/editor/selection.zig");
     pub const history = @import("session/editor/history.zig");
+    pub const document_state = @import("session/editor/document_state.zig");
     /// N2: 열/블록 선택의 **파생**(§3.2a — 사각형 하나를 줄마다 selection 으로 푼다). `selection` 이
     /// 원본(`ColumnAnchor`)을 들고 이쪽이 그것을 배열로 편다. `ColumnMap` 을 주입받아 **chrome 을
     /// 모른다**.

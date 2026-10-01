@@ -120,8 +120,8 @@ pub fn apply(self: *AppSession, parsed: lsp.workspace_edit.Parsed, enc: lsp.rpc.
         var it = TermIter{ .self = self };
         while (it.next()) |term| {
             if (term.kind != .editor or term.rt.editor_diff != null) continue;
-            const doc = term.rt.editor_doc orelse continue;
-            const tpath = term.rt.editor_path orelse continue;
+            const doc = term.rt.editor_document.opened orelse continue;
+            const tpath = term.rt.editor_document.path orelse continue;
             if (!std.mem.eql(u8, tpath, path)) continue;
             if (doc.file.read_only) {
                 item.deinit(self.allocator);
@@ -209,7 +209,7 @@ fn applyPlan(self: *AppSession, items: []Item) Outcome {
         var after_hash: u64 = 0;
         for (item.open) |o| {
             if (o.changes.items.len == 0) continue;
-            const doc = o.term.rt.editor_doc.?;
+            const doc = o.term.rt.editor_document.opened.?;
             const inv = lsp.text_edits.inverseOf(self.allocator, doc.file.content, o.changes.items) catch return .{ .refused = .out_of_memory };
             if (!editor_ops.applyEditAsOne(self, o.term, o.changes.items)) {
                 var i = inv;
@@ -223,7 +223,7 @@ fn applyPlan(self: *AppSession, items: []Item) Outcome {
                 old.deinit(self.allocator);
             }
             inverse = inv;
-            after_hash = editor_ops.contentHash(o.term.rt.editor_doc.?.file.content);
+            after_hash = editor_ops.contentHash(o.term.rt.editor_document.opened.?.file.content);
         }
         if (item.disk) |*d| {
             if (d.changes.items.len > 0) {
@@ -272,7 +272,7 @@ fn applyPlan(self: *AppSession, items: []Item) Outcome {
                 // ⚠️ **저쪽 문서는 건너뛴다**(U3). 그 저장은 **왕복**이고 in-flight 가 하나뿐이라, 여기서
                 // 걸면 첫 파일만 나가고 나머지는 「바쁘다」 알림을 **파일마다** 띄운다 — §3.9d 가 이
                 // 경로에서 막으려던 바로 그것이다. 저장이 안 된 문서는 **dirty 로 남아** 표식이 말한다.
-                if (o.term.rt.editor_remote != null) continue;
+                if (o.term.rt.editor_document.remote != null) continue;
                 if (editor_ops.isDirty(o.term)) {
                     if (editor_ops.saveDocument(self, o.term)) |_| {
                         st.saved_files += 1;
@@ -316,8 +316,8 @@ pub fn undoLast(self: *AppSession) UndoOutcome {
         var it = TermIter{ .self = self };
         while (it.next()) |term| {
             if (term.kind != .editor or term.rt.editor_diff != null) continue;
-            const doc = term.rt.editor_doc orelse continue;
-            const tpath = term.rt.editor_path orelse continue;
+            const doc = term.rt.editor_document.opened orelse continue;
+            const tpath = term.rt.editor_document.path orelse continue;
             if (!std.mem.eql(u8, tpath, f.path)) continue;
             if (doc.file.read_only or editor_ops.contentHash(doc.file.content) != f.after_hash) {
                 item.deinit(self.allocator);

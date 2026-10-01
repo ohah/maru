@@ -235,9 +235,9 @@ fn rootFor(self: *AppSession, term: *Term) ?[]const u8 {
     return root;
 }
 
-/// 문서의 절대 경로 — 편집기 Term 이 여는 순간 굳힌 `editor_path`(탭 라벨·컨트롤 플레인이 읽는 그것).
+/// 문서의 절대 경로 — 편집기 Term 이 여는 순간 굳힌 `editor_document.path`(탭 라벨·컨트롤 플레인이 읽는 그것).
 fn termPath(term: *const Term) ?[]const u8 {
-    return term.rt.editor_path;
+    return term.rt.editor_document.path;
 }
 
 // ── 신뢰 ──────────────────────────────────────────────────────────────────────
@@ -728,7 +728,7 @@ fn onPublishDiagnostics(self: *AppSession, c: *Client, params: ?std.json.Value) 
         if (std.mem.eql(u8, d.uri, uri)) break d;
     } else return; // 모르는 문서(root 밖·닫힌 것) — 무시(§8.2a)
     const term = term_ops.termBySurfaceId(self, doc.surface_id) orelse return;
-    const opened = term.rt.editor_doc orelse return;
+    const opened = term.rt.editor_document.opened orelse return;
     // version 이 오면 지금 것과 같아야 한다(§5 「revision 으로 폐기」).
     if (obj.get("version")) |v| switch (v) {
         .integer => |n| if (n != @as(i64, @intCast(term.rt.editor_lsp_version))) return,
@@ -752,7 +752,7 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                if (term.kind != .editor or term.rt.editor_doc == null or term.rt.editor_diff != null) continue;
+                if (term.kind != .editor or term.rt.editor_document.opened == null or term.rt.editor_diff != null) continue;
                 const server = serverFor(self, term.rt.editor_grammar) orelse continue;
                 const root = rootFor(self, term) orelse continue;
                 const c = ensureClient(self, root, server, term.rt.editor_grammar) orelse continue;
@@ -832,7 +832,7 @@ fn gateTrust(self: *AppSession, c: *Client) void {
 }
 
 fn syncOne(self: *AppSession, c: *Client, term: *Term) void {
-    const opened = term.rt.editor_doc orelse return;
+    const opened = term.rt.editor_document.opened orelse return;
     if (opened.file.content.len > max_sync_bytes) return; // §8.2a: 상한 넘는 문서는 안 보낸다
     const version: u64 = term.rt.editor_lsp_version;
     if (c.findDoc(term.surfaceId())) |d| {
@@ -913,7 +913,7 @@ pub const StatusView = struct { phase: Phase, exe: []const u8 };
 /// 활성 편집기 Term 의 서버 상태(상태바 항목 — §8.2a). 서버 이름표가 없거나 root 밖이면 `null`(항목 없음).
 pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {
     if (!self.loaded_config.config.lsp.enabled) return null;
-    if (term.kind != .editor or term.rt.editor_doc == null or term.rt.editor_diff != null) return null;
+    if (term.kind != .editor or term.rt.editor_document.opened == null or term.rt.editor_diff != null) return null;
     const server = serverFor(self, term.rt.editor_grammar) orelse return null;
     const root = rootFor(self, term) orelse return null;
     const c = clientFor(self, root, server) orelse return .{ .phase = .missing, .exe = server.exe };
@@ -933,7 +933,7 @@ fn flushDocument(self: *AppSession, c: *Client, term: *Term) void {
 /// 그 Term 의 문서를 연 **ready** 클라이언트(있으면). 호버(§8.2b)가 「서버가 있는가」를 이것으로 묻는다.
 pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
     if (!self.loaded_config.config.lsp.enabled) return null;
-    if (term.kind != .editor or term.rt.editor_doc == null or term.rt.editor_diff != null) return null;
+    if (term.kind != .editor or term.rt.editor_document.opened == null or term.rt.editor_diff != null) return null;
     const server = serverFor(self, term.rt.editor_grammar) orelse return null;
     const root = rootFor(self, term) orelse return null;
     const c = clientFor(self, root, server) orelse return null;
@@ -969,7 +969,7 @@ pub fn requestSignatureHelp(self: *AppSession, term: *Term, offset: usize, kind:
     flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
     if (!c.signature_triggers.supported) return null;
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
     const line_idx = opened.file.lines.lineAt(off);
@@ -989,7 +989,7 @@ pub fn requestDefinition(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
     const line_idx = opened.file.lines.lineAt(off);
@@ -1025,7 +1025,7 @@ pub fn requestLocations(self: *AppSession, term: *Term, kind: lsp.rpc.LocationKi
     const c = readyClientFor(self, term) orelse return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
     const line_idx = opened.file.lines.lineAt(off);
@@ -1054,7 +1054,7 @@ pub fn requestRename(self: *AppSession, term: *Term, offset: usize, new_name: []
     if (!c.rename_supported) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
     const line_idx = opened.file.lines.lineAt(off);
@@ -1075,7 +1075,7 @@ pub fn requestCompletion(self: *AppSession, term: *Term, offset: usize, trigger_
     if (!c.completion_triggers.supported) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
     const line_idx = opened.file.lines.lineAt(off);
@@ -1097,7 +1097,7 @@ pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usiz
     if (!c.code_action_caps.supported) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const content = opened.file.content;
     const s = @min(start, content.len);
     const e = @min(@max(end, s), content.len);
@@ -1151,7 +1151,7 @@ pub fn requestInlayHints(self: *AppSession, term: *Term, lo: usize, hi: usize) ?
     if (!c.inlay_supported) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const line_count = opened.file.lines.lineCount();
     const end_line: u32 = @intCast(@min(hi + 1, line_count -| 1)); // 반열림이되 줄 수를 안 넘긴다(rust-analyzer 는 넘기면 -32603)
     const end_char: u32 = if (hi + 1 < line_count) 0 else blk: {
@@ -1198,7 +1198,7 @@ pub fn requestDocumentHighlight(self: *AppSession, term: *Term, line: u32, chara
     if (!c.highlight_supported) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const ln = opened.file.lines.line(line) orelse return null;
     const text = opened.file.content[ln.start..ln.contentEnd()];
     const character = lsp.position.characterOf(text, character_byte, c.encoding);
@@ -1230,7 +1230,7 @@ pub fn requestSelectionRange(self: *AppSession, term: *Term, queries: []const u3
     if (queries.len == 0) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const positions = self.allocator.alloc(lsp.rpc.Position, queries.len) catch return null;
     defer self.allocator.free(positions);
     for (queries, positions) |q, *p| {
@@ -1400,7 +1400,7 @@ pub fn requestHover(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    const opened = term.rt.editor_doc orelse return null;
+    const opened = term.rt.editor_document.opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
     const line_idx = opened.file.lines.lineAt(off);

@@ -92,7 +92,7 @@ pub fn window(self: *AppSession, term: *Term) Window {
     // 비교 뷰 — 축이 둘이다(§5.1c). **이중 방어다**(적대적 1회차 P11: 등가) — 이 함수를 부르는 `paneDecorations` 는 단일 편집기 경로에서만
     // 불린다(§5.1b 의 괄호 가드와 같다).
     if (term.rt.editor_diff != null) return none;
-    const doc = term.rt.editor_doc orelse return none;
+    const doc = term.rt.editor_document.opened orelse return none;
     const st = &term.rt.editor_guides;
     const src: DocLines = .{ .lines = doc.file.lines, .content = doc.file.content };
     const tab_width = term.rt.editor_tab_width;

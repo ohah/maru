@@ -12,7 +12,8 @@
 L2  src/session/editor/          문서 모델 — chrome·OS를 모름
       buffer.zig                 텍스트 저장 + 편집 연산 + undo (표현은 §3.0 실측 후 결정, N2)
       line_index.zig             byte offset ↔ 논리행 (N1 — buffer 도입 시 흡수 여부를 함께 정한다)
-      history.zig                Undo/Redo 소유 저장소·선택 snapshot (단일 뷰 이관 첫 단계)
+      history.zig                Undo/Redo 소유 저장소·선택 snapshot
+      document_state.zig         본문·저장 해시·로컬/원격/untitled 신원·이력 소유 경계
       selection.zig              multi-selection(byte range 배열) + goal column
       document.zig               파일 → 문서 해석(BOM·줄바꿈·파일 끝 개행 보존, §3.5)
       hazard.zig                 적대적 입력 판정(BiDi·제어·폭 0·비표준 공백, §3.8)

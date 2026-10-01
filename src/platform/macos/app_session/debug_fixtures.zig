@@ -1220,7 +1220,7 @@ pub fn applyForcedEditorCaret(self: *AppSession) void {
     const pane = pane_ops.activePane(self);
     const term = pane.activeTerm();
     if (term.kind != .editor) return;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     // **`<줄>:<열>-<줄>:<열>` 이면 선택이다**(앞이 anchor · 뒤가 focus) — 선택 안에서만 서는 장식(공백 표시 §5.1e)을 찍으려면 선택이 있어야 한다.
     if (std.mem.indexOfScalar(u8, spec, '-')) |dash| {
         const anchor = forcedOffset(doc, spec[0..dash]) orelse return;
@@ -1258,7 +1258,7 @@ pub fn applyForcedEditorTop(self: *AppSession) void {
     const want = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch return;
     if (want == 0) return;
     const term = pane_ops.activePane(self).activeTerm();
-    if (term.kind != .editor or term.rt.editor_doc == null) return;
+    if (term.kind != .editor or term.rt.editor_document.opened == null) return;
     if (term.rt.editor_first_line == want - 1) return;
     editor_ops.setEditorTop(self, term, want - 1, "debug-force-top");
 }
@@ -1391,7 +1391,7 @@ pub fn applyForcedFoldAll(self: *AppSession) void {
     const want = std.meta.stringToEnum(editor_ops.FoldSource, std.mem.span(raw)) orelse return;
     if (!self.surface_initialized or self.tabs.items.len == 0) return;
     const term = pane_ops.activePane(self).activeTerm();
-    if (term.kind != .editor or term.rt.editor_doc == null) return;
+    if (term.kind != .editor or term.rt.editor_document.opened == null) return;
     if (term.rt.editor_fold_source != want) return;
     if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
     if (editor_ops.foldAll(self)) self.debug_fold_all_done = true;
@@ -1409,7 +1409,7 @@ pub fn applyForcedReplaceSave(self: *AppSession) void {
     if (!self.surface_initialized or self.tabs.items.len == 0) return;
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     if (term.rt.editor_diagnostics.lsp.items.len == 0) return; // 서버 진단이 먼저 와야 「지워지는가」를 볼 수 있다
     if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
     const at: u32 = @intCast(std.mem.indexOf(u8, doc.file.content, needle) orelse return);
@@ -1987,7 +1987,7 @@ pub fn maybeDebugDiffCaretKeys(self: *AppSession) void {
     // 있는 것도 있다(비교는 읽기 전용이라 타이핑이 안 들어간다).
     if (term.rt.editor_diff) |st| {
         if (st.view != .compare) return;
-    } else if (term.rt.editor_doc == null) return
+    } else if (term.rt.editor_document.opened == null) return
     // **caret 이 설 때까지 기다린다.** 단일 편집기는 클릭 전에 선택이 없고, 그것을 세우는
     // `applyForcedEditorCaret` 은 **프레임 경로**에서 돈다 — 먼저 돌고 래치하면 키가 허공에 간다
     // (`MARU_OPEN_SCM_DIFF` 이 목록이 찰 때까지 기다리는 것과 같은 규율이다).
@@ -2057,7 +2057,7 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
     }
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return; // 아직 파일이 안 열렸다 — 다음 tick 에 다시 본다
-    if (term.rt.editor_doc == null) return;
+    if (term.rt.editor_document.opened == null) return;
 
     if (std.c.getenv("MARU_EDIT_SELECT")) |sv| {
         const spec = std.mem.span(sv);

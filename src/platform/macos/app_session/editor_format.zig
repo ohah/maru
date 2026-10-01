@@ -37,7 +37,7 @@ pub fn formatDocument(self: *AppSession) bool {
     // 비교 뷰 거절은 `readyClientFor` 가 먼저 한다(비교 뷰는 서버에 동기화되지 않는다) — 여기 것은 정의·호버·시그니처와 같은 싼 조기
     // 반환이지 둘째 방어가 아니다(적대적 3회차 C7 등가).
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_doc orelse return false;
+    const doc = term.rt.editor_document.opened orelse return false;
     if (doc.file.read_only) return false; // 싼 조기 반환 — 실제 방어는 `EditableFile.apply` 의 `error.ReadOnly`(§3.5)
     const st = &self.editor_format;
     const seq = editor_lsp.requestFormatting(self, term) orelse return false;
@@ -54,7 +54,7 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
     if (!st.waiting or seq != st.waiting_seq) return;
     st.waiting = false;
     const term = editorTerm(self, st.waiting_surface) orelse return;
-    const doc = term.rt.editor_doc orelse return;
+    const doc = term.rt.editor_document.opened orelse return;
     // §3.6 revision 검증 — 요청 뒤 문서가 바뀌었으면 결과가 그 문서의 것이 아니다.
     if (term.rt.editor_lsp_version != st.asked_version) {
         st.stale += 1;

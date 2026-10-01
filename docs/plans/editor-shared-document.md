@@ -18,8 +18,8 @@ IME 조합의 모델 반영은 현재 Maru preedit 계약과 달라 표시 목�
 한 파일의 위아래를 나란히 보고 어느 쪽에서든 편집한다. 내용·Undo/Redo·저장 상태는 공유하고,
 커서·선택·스크롤·접힘·랩은 뷰마다 독립이다. 두 개의 텍스트 복사본을 서로 동기화하지 않는다.
 
-`src/platform/macos/app_session.zig`의 `TermRuntime`은 `editor_doc`, `editor_history`,
-`editor_selection`, `editor_preedit`을 가진다. 첫 이관으로 Undo/Redo의 자원은 `editor_history`에
+`src/platform/macos/app_session.zig`의 `TermRuntime`은 `editor_document`,
+`editor_selection`, `editor_preedit`을 가진다. 단일 뷰 이관으로 본문·저장 정보·Undo/Redo의 자원은 `editor_document`에
 묶었지만 여전히 단일 Term이 그 객체를 소유한다. `editor.zig`가 편집·저장·해제를
 Term 기준으로 수행한다. `src/session/editor/delta.zig`는 변경·역연산·offset 매핑을 제공하지만
 여러 뷰에 대한 게시·Undo 그룹·IME 소유자 전환까지 제공하지 않는다.
@@ -313,7 +313,7 @@ callback을 실행한 결과가 아니므로, 미결 정책과 단계별 제품 
 
 ## 단계 0 첫 조사 — 실제 소유와 이관 경계 (2026-10-01)
 
-기준 main은 `37e087dba`다. 아래는 코드 열람으로 확인한 첫 소비처 목록이며,
+기준 main은 `37e087dba`다. 아래는 당시 코드 열람으로 확인한 첫 소비처 목록이며,
 단계 0 전체 완료나 제품 공유 구현 완료를 뜻하지 않는다.
 
 | 현재 소유/소비처 | 확인한 경계 | 이관할 책임 |
@@ -357,8 +357,8 @@ callback을 실행한 결과가 아니므로, 미결 정책과 단계별 제품 
 ## 단일 뷰 이관 첫 슬라이스 — 이력 소유 분리
 
 `src/session/editor/history.zig`가 역연산·선택 snapshot의 `Entry`와 Undo/Redo 저장소·
-묶음 번호·마지막 편집 종류/시각의 `State`를 소유한다. `TermRuntime.editor_history`가
-현재 이 객체를 값으로 보유한다. 문서 버퍼·저장 identity·provider는 아직 기존 Term 소유이며,
+묶음 번호·마지막 편집 종류/시각의 `State`를 소유한다. 첫 이관 당시 `TermRuntime.editor_history`가
+이 객체를 값으로 보유했다. 다음 슬라이스는 아래 본문·저장 정보 소유 분리를 참조한다.
 app-global 공유 문서와 안정 handle 이관 완료를 뜻하지 않는다.
 
 기존 platform `UndoEntry`/`EditKind` 이름은 facade alias로 유지한다. 편집의 적용·push·
@@ -412,3 +412,24 @@ Ready 이벤트를 다시 발생시켜 실제 제품 CI를 실행하자 기존 �
 수정은 테스트의 준비 조건이며 갤러리·PTY 제품 경로와 Undo 정책은 변경하지 않는다.
 임시 집중 build target은 조사 도구로만 사용하고 저장소에 추가하지 않는다. CI 실패 로그와
 수정 전/후 집중 실행 결과 및 독립 프로세스 20회 반복 결과는 PR 본문에 기록한다.
+
+
+## 단일 뷰 이관 두 번째 슬라이스 — 본문·저장 정보 소유 분리
+
+`session.editor.document_state.State`가 `Opened`의 편집 버퍼·저장 해시·디스크 지문,
+로컬 경로·원격 목적지/경로·untitled 이름과 `history.State`를 묶는다.
+`TermRuntime.editor_document`는 이 값을 단일 뷰에서 보유한다. 기존 platform
+`Opened`/`RemoteDoc`/`contentHash`는 facade로 유지한다. 파일 I/O, 저장 가드,
+백업 시계·삭제, provider 통지와 선택·스크롤·접힘·IME 조합은 기존 배선에 남는다.
+
+본문을 빌리는 논리 줄/렌더 캐시는 문서 상태에 넣지 않는다. `clearOpened`와
+`clearIdentity`로 기존 `releaseEditorTerm`의 본문·뷰·경로 정산 순서를 유지한다.
+`clear`는 독립 소유자의 준비 실패·재해제를 검사하는 진입점이며, 제품의 뷰 해제
+함수 전체가 멱등하거나 공유 연결에 안전하다는 뜻은 아니다. 본문 내부 allocator는
+`EditableFile`이 기억하고, 경로·원격 정보·이력은 기존 session allocator로 정산한다.
+
+기존 열기 준비→부착, 로컬·원격·untitled 저장, 충돌 가드, dirty 해시, Undo 묶음과
+기록 할당 실패 정책은 그대로다. 로컬/원격 준비의 모든 allocation fail-index와
+빈/재해제·이력 capacity·본문을 빌린 상태의 신원 해제를 중립 테스트로 검사한다.
+안정 핸들·app-global registry·참조 카운트·마지막 연결 해제 및 공유 입력은 다음
+슬라이스에 남는다. 이 PR은 단일 뷰의 소유 경계 이관이며 공유 문서 완료가 아니다.

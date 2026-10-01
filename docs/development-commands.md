@@ -938,7 +938,7 @@ import sentinel 4개를 실행한다. 단일 뷰의 등록 준비 실패와 창/
 
 ### 연결된 두 에디터 뷰의 내부 편집 게시
 
-`mise exec -- zig build test-editor-shared-view`는 `SHVIEW1`~`SHVIEW11`의 실제 두 Term 제품
+`mise exec -- zig build test-editor-shared-view`는 `SHVIEW1`~`SHVIEW14`의 실제 두 Term 제품
 판정자와 import sentinel을 실행한다. `-Doptimize=ReleaseFast`로 같은 판정자를 최적화 모드에서
 재검증한다. 전체 `test-editor`에도 포함한다. 공유 연결은 내부 fixture이며 사용자용 split 명령이나
 OS 한국어 IME 화면 검증을 의미하지 않는다. 범위와 남은 작업은

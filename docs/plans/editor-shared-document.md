@@ -533,7 +533,7 @@ marker 처리 전체와 동일하다는 주장은 하지 않는다. 삭제 겹�
 거절한다. 현재 일반 타이핑은 하나의 메인 스레드 사건 안에서 최신 기준을 즉시 넘기므로 별도
 비동기 재시도/입력 큐를 도입하지 않는다. 비동기 provider 요청에 이 진입을 배선하는 것은 후속이다.
 
-`SHVIEW1`~`SHVIEW11`은 양방향 입력·한글과 개행·독립 좌표/가로 위치·다른 뷰 Undo/Redo·
+`SHVIEW1`~`SHVIEW14`은 양방향 입력·한글과 개행·독립 좌표/가로 위치·다른 뷰 Undo/Redo·
 역방향 선택/교체/삭제·멀티커서와 스크롤 앵커·모든 준비 allocation fail-index·삭제 겹침 정규화·
 실패한 Undo 재시도·Undo 성장 실패의 미게시·stale 준비 거절·반대 뷰의 쌍 교체 후 Backspace·
 선택 양 경계 삽입·Undo 준비의 allocation fail-index와 재시도를 판정한다.
@@ -545,3 +545,17 @@ marker 처리 전체와 동일하다는 주장은 하지 않는다. 삭제 겹�
 통지를 유지하므로 공유 provider 통지 완료로 해석하지 않는다. 같은 문서의 lease가 현재 창 밖에
 있으면 `SharedViewCountMismatch`로 부분 게시를 거절한다. 일반 UI에서 공유 view를 만들지 않아
 이 내부 제약이 새 사용자 동작으로 노출되지는 않는다. 단계 2 전체와 분할 기능 완료로 표기하지 않는다.
+
+### 추가 적대적 검증 3회
+
+1. `SHVIEW12`: 같은 Undo 묶음에 allocation fail-index를 첫 실패 없는 성공까지 주입한다.
+   중간 delta만 성공한 사례도 관측하고 남은 이력 재시도와 전체 Redo에서 본문, 양쪽 줄,
+   수동 뷰 caret, revision과 이력 길이를 판정한다. 묶음 전체 rollback과 구분한다.
+2. `SHVIEW13`: 입력한 뷰를 실제 `closeTermAt`으로 닫아 view count가 하나로 줄어든 뒤,
+   남은 뷰의 공유 이력 Undo/Redo와 단일 뷰 새 입력과 Undo를 판정한다. 해제한 Term을 재사용하지 않는다.
+3. `SHVIEW14`: malformed/out-of-range delta, 읽기 전용, 현재 창에서 찾지 못한 view lease를
+   각각 거절하고 정본 revision, 줄 배열, 입력 선택과 live 이력 보존을 확인한다. 누락 lease 해제 후
+   정상 입력과 반대 뷰 Undo를 양성 대조로 실행한다. 다른 창 공유 지원의 증거는 아니다.
+
+세 검증에서 추가 제품 결함은 발견하지 않았다. 회귀 판정자를 전체 에디터 집계와 전용 gate에
+남긴다. 실제 공유 IME와 제품 split 화면 검증의 미완료 범위는 그대로다.

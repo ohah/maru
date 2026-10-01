@@ -38,6 +38,7 @@ const occurrence = maru.session.editor.occurrence;
 const chrome_editor = maru.chrome.components.editor_view;
 const settings_ops = @import("../settings.zig");
 const input_ops = @import("../input.zig");
+const preedit_view = @import("../editor_preedit_view.zig");
 const chrome_scroll_area = maru.chrome.ui.scroll_area;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const renderer = app_session_mod.renderer;
@@ -229,6 +230,8 @@ fn buildMergePaneOps(
     term: *Term,
     st: editor_merge_ops.State,
     result_lines: []const []const u8,
+    projection: ?preedit_view.View,
+    allocator: std.mem.Allocator,
     wrap: bool,
     pane_rect: chrome_draw.Rect,
     scratch: FrameScratch,
@@ -273,6 +276,21 @@ fn buildMergePaneOps(
     };
     const pre = chrome_editor.merge_frame.layout(inner_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), st.stages.has_base);
     const collapsed = pre.current == null;
+    const canonical_inlays = inlayWindow(self, term);
+    const hints = chrome_editor.content.InlayWindow{}; // Merge panes paint no inlay text.
+    const colors = if (projection) |v| preedit_view.colors(v, allocator, term.rt.editor_visible_numbers, syntaxColors(self, term), term.rt.editor_tab_width, canonical_inlays, hints) catch &.{} else syntaxColors(self, term);
+    const widgets = if (projection) |v| preedit_view.rowValues(?chrome_editor.content.Widget, v, allocator, term.rt.editor_visible_numbers, result_widgets_all, null) catch &.{} else result_widgets_all;
+    const bands = if (projection) |v| blk: {
+        const original = conflictBands(term) orelse break :blk null;
+        break :blk preedit_view.rowValues(chrome_editor.frame.RowBand, v, allocator, term.rt.editor_visible_numbers, original, .none) catch null;
+    } else conflictBands(term);
+    const carets = if (projection) |v| blk: {
+        const offsets = allocator.alloc(usize, term.rt.editor_extra_selections.len + 1) catch break :blk null;
+        const selected = preeditSelected(term);
+        offsets[0] = if (selected) |selection| selection.end else term.rt.editor_preedit_at + term.rt.editor_preedit.len;
+        for (term.rt.editor_extra_selections, 0..) |selection, i| offsets[i + 1] = v.forward(selection.focus);
+        break :blk preedit_view.carets(v, allocator, offsets) catch null;
+    } else buildCaretRows(self, term);
     const props: chrome_editor.merge_frame.Props = .{
         .rect = inner_rect,
         // 배경만 뒤로 물려 뷰 전체를 덮는다(§4.1b — 평범한 편집기와 같은 모양).
@@ -283,16 +301,16 @@ fn buildMergePaneOps(
         .current = .{ .lines = st.ours_lines, .first_line = current_top, .first_col = pane_first_col(self, term, wrap, .current), .widgets = st_now.ours_hit.widgets, .carets = editor_merge_ops.buildPaneCarets(self, term, .current) },
         .result = .{
             .lines = result_lines,
-            .line_colors = syntaxColors(self, term),
-            .first_line = term.rt.editor_first_line,
-            .first_piece = effectiveFirstPiece(wrap, term),
+            .line_colors = colors,
+            .first_line = if (projection) |v| preeditTopRow(v, term) else term.rt.editor_first_line,
+            .first_piece = if (projection) |v| preeditPiece(v, term, wrap) else effectiveFirstPiece(wrap, term),
             .first_col = effectiveFirstCol(wrap, term, false),
             .content_max_cols = maxColsForRender(self, term, false),
-            .carets = buildCaretRows(self, term),
+            .carets = carets,
             // **S2 의 해결 UI 를 여기서도 그린다**(S3b-3a) — 다만 판이 접혔을 때만(위). 안 넘기면
             // 좁은 창에서 「현재 것 / 들어온 것 / 둘 다」에 닿을 길이 없다.
-            .widgets = if (collapsed) result_widgets_all else &.{},
-            .bands = conflictBands(term),
+            .widgets = if (collapsed) widgets else &.{},
+            .bands = bands,
         },
         .incoming = .{ .lines = st.theirs_lines, .first_line = incoming_top, .first_col = pane_first_col(self, term, wrap, .incoming), .widgets = st_now.theirs_hit.widgets, .carets = editor_merge_ops.buildPaneCarets(self, term, .incoming) },
         // **`null` 이면 조상이 «없다»** — 빈 조상은 어엿한 조상이라 띠가 선다(그 판정은 S3a 의
@@ -1073,7 +1091,7 @@ pub fn buildPaneOps(
 /// 두 벌이면 진단이 제품과 다른 것을 재게 된다.
 pub fn hitSnapshotStale(self: *AppSession, term: *Term) bool {
     const geom = term.rt.editor_hit_geom;
-    return geom.top_line != term.rt.editor_first_line or
+    return term.rt.editor_hit_preedit_stamp != preeditStamp(term) or geom.top_line != term.rt.editor_first_line or
         geom.top_piece != term.rt.editor_first_piece or
         geom.visible_len != editorLines(term).len or
         geom.wrap != (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) or
@@ -1114,6 +1132,7 @@ pub fn conflictActionAtPoint(term: *Term, x_px: f64, y_px: f64) ?AppSession.Conf
     }
     const spans = term.rt.editor_conflict_actions;
     if (spans.len == 0) return null;
+    if (term.rt.editor_hit_preedit_stamp != preeditStamp(term)) return null;
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
     const geom = term.rt.editor_hit_geom;
@@ -1135,7 +1154,15 @@ pub fn conflictActionAtPoint(term: *Term, x_px: f64, y_px: f64) ?AppSession.Conf
     // **`v.line` 은 뷰포트 첫 줄로부터의 «상대» 값이고 표는 «절대» 축이다**(S1.5 가 `VisualRow.line`
     // 을 그렇게 정의했고, `storeHitRows` 가 같은 자리에 같은 문장을 적어 두었다). 더하지 않으면
     // **스크롤한 화면에서 누르는 자리가 통째로 밀린다** — 적대적 검증 3회차가 이 자리를 열었다.
-    const visible_line: usize = @as(usize, v.line) + term.rt.editor_first_line;
+    const visible_line: usize = if (term.rt.editor_preedit.len > 0) blk: {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const projection = makePreeditView(arena.allocator(), term) orelse return null;
+        const projected_row = term.rt.editor_hit_preedit_first + v.line;
+        if (projected_row >= projection.sources.len) return null;
+        const source = projection.sources[projected_row] orelse return null;
+        break :blk visibleRowOfDocLine(term, @intCast(source)) orelse return null;
+    } else @as(usize, v.line) + term.rt.editor_first_line;
     for (spans) |sp| {
         if (sp.visible_line != visible_line) continue;
         // **닫힌-열린 구간이다** — 이름 사이의 공백을 어느 쪽도 안 가져간다(겹치면 한 클릭이 둘이 된다).
@@ -1168,6 +1195,7 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
 /// `hitTestBody` 의 뜻 고르기 — `.cluster` 는 포인터 아래의 **글자** offset(호버, tooling §8.2b). caret 반올림이 없다.
 pub fn hitTestBodyMode(comptime mode: chrome_editor.content.PointMode, term: *Term, x_px: f64, y_px: f64) ?usize {
     if (term.kind != .editor) return null;
+    if (term.rt.editor_hit_preedit_stamp != preeditStamp(term)) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 범위 밖
     // **병합 모드에서는 Result pane 만 입력을 받는다**(계약 §5 S3b-2). 이 가드가 없으면 Base pane 을
     // 눌렀을 때 **Result 문서의 caret 이 움직인다** — 좌표가 같은 Term 의 하나뿐인 히트 기하를
@@ -1186,6 +1214,7 @@ pub fn hitTestBodyMode(comptime mode: chrome_editor.content.PointMode, term: *Te
     // **이 함수가 남기는 것은 두 가지뿐이다**: ⒜ 굳힌 값을 모아 넘기고 ⒝ 줄 안 byte 를 **문서
     // offset** 으로 바꾼다. ⒝ 는 문서 모델(session)을 알아야 해서 chrome 이 못 한다.
     const geom = term.rt.editor_hit_geom;
+    if (term.rt.editor_preedit.len > 0) return hitPreeditBody(mode, term, x_px, y_px);
     // **힌트 칸을 누르면 앵커 byte**(§4.1h) — 줄별 힌트는 렌더와 같은 예산으로(`inlaysForLine`). `editor_hit_lines` 는 원본 줄 번호다.
     const InlayCtx = struct { t: *Term, cols: u32 };
     const p = chrome_editor.hit.bodyPointModeWith(
@@ -1376,6 +1405,7 @@ pub const max_status_column: usize = chrome_editor.frame.default_max_columns;
 pub fn hitTestFoldMark(term: *Term, x_px: f64, y_px: f64) ?u32 {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 접힘 자체가 없다(`foldsUnavailable`)
+    if (term.rt.editor_hit_preedit_stamp != preeditStamp(term)) return null;
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
 
@@ -1409,7 +1439,15 @@ pub fn hitTestFoldMark(term: *Term, x_px: f64, y_px: f64) ?u32 {
     // 접힌 줄 수를 오해한다). 그린 것과 눌리는 것이 같아야 하므로 여기서도 거절한다.
     if (!term.rt.editor_hit_rows[row_i].showsLineNumber()) return null;
 
-    const source_line = term.rt.editor_hit_lines[row_i];
+    var source_line = term.rt.editor_hit_lines[row_i];
+    if (term.rt.editor_preedit.len > 0) {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const projected = makePreeditView(arena.allocator(), term) orelse return null;
+        const projected_row = term.rt.editor_hit_preedit_first + term.rt.editor_hit_rows[row_i].line;
+        if (projected_row >= projected.sources.len or projected.folds[projected_row] == .none) return null;
+        source_line = @intCast(projected.sources[projected_row] orelse return null);
+    }
     if (source_line >= term.rt.editor_lines.len) return null;
     return source_line;
 }
@@ -1624,7 +1662,11 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
     const inner_h = body_outer.h -| inset * 2;
     // **미니맵이 가져간 폭을 뺀다**(§6.1) — 렌더가 그 폭에서 열 수를 쟀다.
     const m = chrome_editor.diff_frame.sideMetrics(inner_w -| minimapPxFor(self, term, inner_w), inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
-    const lay = chrome_editor.geometry.compute(m.total_cols, term.rt.editor_lines.len, .{});
+    var geometry_arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer geometry_arena.deinit();
+    const geometry_view = makePreeditView(geometry_arena.allocator(), term);
+    term.rt.editor_hit_capacity_rows = m.visible_rows -| 1;
+    const lay = chrome_editor.geometry.compute(m.total_cols, if (geometry_view) |v| v.total_lines else term.rt.editor_lines.len, .{});
     term.rt.editor_hit_geom = .{
         .body_x = @intCast(body_outer.x + inset),
         .body_y = @intCast(body_outer.y + inset),
@@ -1919,10 +1961,11 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     }
 
     // **조합 중이면 그 글자를 끼운 사본을 그린다**(N3). 문서는 그대로다 — 조합은 확정이 아니다.
-    const preedit_rows = preeditLines(self, term, lines);
-    defer if (preedit_rows) |projection| freePreeditLines(self, projection);
-    const draw_lines: []const []const u8 = if (preedit_rows) |projection| projection.rows else lines;
-
+    var preedit_arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer preedit_arena.deinit();
+    const projected = makePreeditView(preedit_arena.allocator(), term);
+    const draw_lines: []const []const u8 = if (projected) |v| v.lines else lines;
+    const draw_first = if (projected) |v| preeditTopRow(v, term) else term.rt.editor_first_line;
     var secondary_marker_buf: [chrome_editor.scrollbar.marker_budget]u32 = undefined;
     var secondary_markers: []const u32 = &.{};
     var secondary_marker_current: ?usize = null;
@@ -1976,7 +2019,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 maru.i18n.t(.diff_loading);
             break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{}, pool);
         }
-        break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
+        break :blk buildMergePaneOps(self, term, st, draw_lines, projected, preedit_arena.allocator(), wrap, pane_rect, scratch);
     } else blk: {
         // **가로로 민 만큼 전개가 앞을 다시 걷지 않게 한다**(§4.1c). 안 밀었으면 `buildLineSeeks` 가
         // 곧바로 0 을 내므로 이 배열은 비고, 그때 렌더는 예전과 **같은 길**로 간다.
@@ -1989,7 +2032,62 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         mm_drawn = if (mm) |m| m.input.top else null;
         // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
         const diag = diagnosticViews(self, term, draw_lines.len);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term, preedit_rows != null), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
+        if (projected) |v| {
+            const a = preedit_arena.allocator();
+            const selected = preeditSelected(term);
+            const selection_marks = preedit_view.marks(v, a, term.rt.editor_visible_numbers, buildSelectionMarks(self, term, false), selected) catch null;
+            const search_marks = preedit_view.marks(v, a, term.rt.editor_visible_numbers, find_marks, null) catch null;
+            const occurrence_marks = preedit_view.marks(v, a, term.rt.editor_visible_numbers, buildOccurrenceMarks(self, term), null) catch null;
+            const canonical_inlays = inlayWindow(self, term);
+            const projected_inlays = preedit_view.inlays(v, a, term.rt.editor_visible_numbers, canonical_inlays) catch chrome_editor.content.InlayWindow{};
+            const colors = preedit_view.colors(v, a, term.rt.editor_visible_numbers, syntaxColors(self, term), term.rt.editor_tab_width, canonical_inlays, projected_inlays) catch &.{};
+            const offsets = a.alloc(usize, term.rt.editor_extra_selections.len + 1) catch return null;
+            offsets[0] = if (selected) |selection| selection.end else term.rt.editor_preedit_at + term.rt.editor_preedit.len;
+            for (term.rt.editor_extra_selections, 0..) |selection, i| offsets[i + 1] = v.forward(selection.focus);
+            const carets = preedit_view.carets(v, a, offsets) catch null;
+            const deco = projectedDecorations(self, term, v, a, offsets[0]);
+            const projected_diag = if (diag) |d| projectDiagnostics(v, a, term.rt.editor_visible_numbers, d) else null;
+            var projected_mm = mm;
+            if (projected_mm) |*m| {
+                m.input.slider_first = draw_first;
+                const original = a.alloc([]const chrome_editor.content.ColorSpan, m.input.top + m.input.window_colors.len) catch return null;
+                @memset(original, &.{});
+                @memcpy(original[m.input.top..], m.input.window_colors);
+                const mapped = preedit_view.colors(v, a, term.rt.editor_visible_numbers, original, term.rt.editor_tab_width, .{}, .{}) catch &.{};
+                m.input.window_colors = if (m.input.top < mapped.len) mapped[m.input.top..] else &.{};
+            }
+            var marker_rows: std.ArrayList(u32) = .empty;
+            var projected_marker_current: ?usize = null;
+            for (marker_lines, 0..) |row, marker_i| if (preedit_view.sourceVisible(v, term.rt.editor_visible_numbers, row)) |mapped| {
+                if (marker_current == marker_i) projected_marker_current = marker_rows.items.len;
+                marker_rows.append(a, @intCast(mapped)) catch {};
+            };
+            const projected_current: ?chrome_editor.frame.CurrentMatch = if (find_current) |m| blk_current: {
+                const source = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, m.line) orelse break :blk_current null;
+                const line = v.source_index.line(source) orelse break :blk_current null;
+                const at = line.start + m.start;
+                if (at >= v.replacement.start and at < v.replacement.end) break :blk_current null;
+                const p = v.point(v.forward(at)) orelse break :blk_current null;
+                break :blk_current .{ .line = @intCast(p.row), .start = @intCast(p.byte) };
+            } else null;
+            const sticky = projectSticky(v, a, sticky_client.compute(self, term, pane_rect, wrap));
+            const widgets = preedit_view.rowValues(?chrome_editor.content.Widget, v, a, term.rt.editor_visible_numbers, conflictWidgets(self, term), null) catch &.{};
+            const bands = if (conflictBands(term)) |b| preedit_view.rowValues(chrome_editor.frame.RowBand, v, a, term.rt.editor_visible_numbers, b, .none) catch null else null;
+            var max_cols = maxColsForRender(self, term, false) orelse 0;
+            for (draw_lines, 0..) |text, row| {
+                if (v.sources[row]) |source| {
+                    if (source < v.source_index.lineAt(v.replacement.start) or source > v.source_index.lineAt(v.replacement.end)) continue;
+                }
+                const ends = [_]u32{@intCast(text.len)};
+                var cols: [1]u32 = undefined;
+                chrome_editor.content.columnsAtOffsets(text, term.rt.editor_tab_width, &ends, &cols, std.math.maxInt(u32));
+                max_cols = @max(max_cols, cols[0]);
+            }
+            // The canonical wrap cache and seek hints describe different bytes. Recount this
+            // transient view, then leave the canonical cache available for the commit frame.
+            break :blk buildPaneOps(draw_lines, v.numbers, v.folds, v.total_lines, draw_first, preeditPiece(v, term, wrap), fc, max_cols, null, selection_marks, search_marks, occurrence_marks, projected_current, marker_rows.items, projected_marker_current, colors, &.{}, projected_inlays, carets, widgets, bands, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, projected_mm, projected_diag, sticky, deco, pool);
+        }
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term, false), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -2038,10 +2136,23 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     } else {
         storeHitRows(self, term, leaf_rect, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
     }
+    if (projected) |v| {
+        term.rt.editor_hit_preedit_first = draw_first;
+        for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], 0..) |row, i| {
+            const projected_row = draw_first + row.line;
+            term.rt.editor_hit_lines[i] = @intCast(v.source_index.lineAt(v.sourcePoint(projected_row, 0)));
+        }
+    }
+    term.rt.editor_hit_preedit_stamp = if (projected != null) preeditStamp(term) else 0;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
     // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
-    term.rt.editor_max_top_line = pf.max_top_line;
+    term.rt.editor_max_top_line = if (projected) |v| blk: {
+        if (v.lines.len == 0) break :blk 0;
+        const offset = v.sourcePoint(@min(pf.max_top_line, v.lines.len - 1), 0);
+        const source = v.source_index.lineAt(offset);
+        break :blk visibleRowOfDocLine(term, @intCast(source)) orelse term.rt.editor_first_line;
+    } else pf.max_top_line;
     term.rt.editor_max_top_piece = pf.max_top_piece;
 
     // **낡은 스냅숏으로 놓았던 검색 자리를 여기서 다시 잡는다**(그 필드 doc). 이 시점이면
@@ -4302,7 +4413,7 @@ fn markRangeInLine(
 ///
 /// **열은 `columnsAtOffsets`로 센다**(§5.4 MUST — 픽셀 배치의 단일 출처). 여기서 따로 세면
 /// 렌더와 갈리는 두 번째 출처가 생긴다.
-pub fn editorImeCaretRect(_: *AppSession, term: *Term) ?chrome_draw.Rect {
+pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null;
     const doc = term.rt.editorDocument().opened orelse return null;
@@ -4313,131 +4424,195 @@ pub fn editorImeCaretRect(_: *AppSession, term: *Term) ?chrome_draw.Rect {
     else if (term.rt.editor_selection) |sel| sel.start() else return null;
     if (at > doc.file.content.len) return null;
 
-    const geom = term.rt.editor_hit_geom;
-    if (!geom.drawn) return null;
-    const doc_line = doc.file.lines.lineAt(at);
-    const line = doc.file.lines.line(doc_line) orelse return null;
-    const text = doc.file.content[line.start..line.contentEnd()];
-    var map: ProductColumnMap = .{ .tab_width = geom.tab_width };
-    const col = ProductColumnMap.columnOf(&map, text, at - line.start);
-
-    // firstRect는 지금 화면에 그린 글자의 자리여야 한다. active_pane_rect는 이미 pane의
-    // terminal grid라 editorBodyRect에 다시 넣으면 tab bar·band가 두 번 더해진다.
-    // 렌더가 굳힌 기하·시각 행을 쓰면 gutter, 가로 스크롤, 랩 조각까지 같은 프레임의 값이 된다.
-    // 경계 열은 뒤 조각의 시작일 수 있으므로 마지막으로 일치한 행을 고른다.
-    var found: ?chrome_draw.Rect = null;
-    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], 0..) |visual, screen_row| {
-        if (visual.kind != .text or term.rt.editor_hit_lines[screen_row] != doc_line) continue;
-        if (col < visual.start_col or col - visual.start_col > geom.content_width) continue;
-        const screen_col = col - visual.start_col;
-        const cw: i32 = @intCast(geom.cell_w_px);
-        const ch: i32 = @intCast(geom.cell_h_px);
-        found = .{
-            .x = geom.body_x + @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast(screen_col)) * cw,
-            .y = geom.body_y + @as(i32, @intCast(screen_row)) * ch,
-            .w = @intCast(geom.cell_w_px),
-            .h = @intCast(geom.cell_h_px),
+    // Use the rows actually painted, including wraps, inset and gutter. A logical line
+    // is not a screen row; the old arithmetic put wrapped candidates on the first row.
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const projected = makePreeditView(arena.allocator(), term);
+    const source_line = doc.file.lines.lineAt(at);
+    const target_row: usize, const byte: usize, const preview_text: []const u8 = if (projected) |v| blk: {
+        const point = v.point(at) orelse return null;
+        break :blk .{ point.row, point.byte, v.lines[point.row] };
+    } else blk: {
+        const line = doc.file.lines.line(source_line) orelse return null;
+        break :blk .{ source_line, at - line.start, doc.file.content[line.start..line.contentEnd()] };
+    };
+    const canonical_inlays = inlayWindow(self, term);
+    const projected_hints = if (projected) |v| preedit_view.inlays(v, arena.allocator(), term.rt.editor_visible_numbers, canonical_inlays) catch chrome_editor.content.InlayWindow{} else chrome_editor.content.InlayWindow{};
+    const hints = if (projected != null) projected_hints.at(target_row) else inlay_client.inlaysForLine(term, source_line, inlayViewCols(term));
+    const offsets = [_]u32{@intCast(@min(byte, preview_text.len))};
+    var column: [1]u32 = undefined;
+    chrome_editor.content.columnsAtOffsetsWith(preview_text, term.rt.editor_tab_width, &offsets, &column, std.math.maxInt(u32), hints);
+    var g = term.rt.editor_hit_geom;
+    if (g.cell_w_px == 0 or g.cell_h_px == 0 or g.content_width == 0) {
+        // A direct insert invalidates hit rows before TSM asks for firstRect. The pane's
+        // current geometry remains available even though the painted snapshot is gone.
+        const body = if (term.rt.editor_merge_layout) |layout| maru.session.SplitRect{ .x = @intCast(@max(layout.result.x, 0)), .y = @intCast(@max(layout.result.y, 0)), .w = layout.result.w, .h = layout.result.h } else editorInnerRect(self, .{ .x = self.active_pane_rect.x, .y = self.active_pane_rect.y, .w = self.active_pane_rect.w, .h = self.active_pane_rect.h }, term);
+        const m = chrome_editor.diff_frame.sideMetrics(body.w -| minimapPxFor(self, term, body.w), body.h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+        const layout = chrome_editor.geometry.compute(m.total_cols, if (projected) |v| v.total_lines else doc.file.lines.lines.len, .{});
+        g.body_x = @intCast(body.x);
+        g.body_y = @intCast(body.y);
+        g.cell_w_px = @intCast(self.cell_width_px);
+        g.cell_h_px = @intCast(self.cell_height_px);
+        g.tab_width = term.rt.editor_tab_width;
+        g.content_left_px = @as(u32, layout.contentLeft()) * g.cell_w_px;
+        g.content_width = layout.content.width;
+    }
+    if (g.cell_w_px == 0 or g.cell_h_px == 0 or g.content_width == 0) return null;
+    var rows: []const chrome_editor.visual_map.VisualRow = term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len];
+    const fresh = term.rt.editor_hit_preedit_stamp != preeditStamp(term) or rows.len == 0;
+    const first = if (projected) |v| preeditTopRow(v, term) else term.rt.editor_first_line;
+    if (fresh) {
+        // Input methods ask before the next paint. Reuse the renderer's layout routine so
+        // that this synchronous query still includes CJK wrap, tabs, widgets and inlays.
+        const a = arena.allocator();
+        const texts = if (projected) |v| v.lines else editorLines(term);
+        if (first >= texts.len) return null;
+        const height = @max(@as(usize, 1), term.rt.editor_hit_capacity_rows);
+        const count = @min(height, texts.len - first);
+        const content_rows = a.alloc(chrome_editor.content.Row, count) catch return null;
+        const widgets = conflictWidgets(self, term);
+        for (content_rows, 0..) |*r, i| {
+            const axis = first + i;
+            const source = if (projected) |v| v.sources[axis] else syntax_color.sourceLineFor(term.rt.editor_visible_numbers, axis);
+            const old_axis = if (source) |source_row| visibleRowOfDocLine(term, @intCast(source_row)) else null;
+            r.* = .{ .bytes = texts[axis], .inlays = if (projected != null) projected_hints.at(axis) else if (source) |source_row| inlay_client.inlaysForLine(term, source_row, inlayViewCols(term)) else &.{}, .widget = if (old_axis) |j| if (j < widgets.len) widgets[j] else null else null };
+        }
+        const visual = a.alloc(chrome_editor.visual_map.VisualRow, @max(height, term.rt.editor_hit_rows_len)) catch return null;
+        const ops = a.alloc(chrome_draw.Op, visual.len * 2) catch return null;
+        const runs = a.alloc(chrome_draw.Run, visual.len * 2) catch return null;
+        const bytes = a.alloc(u8, visual.len * @as(usize, g.content_width) * 32 + 256) catch return null;
+        const layout = chrome_editor.geometry.compute(@intCast(g.content_width + g.content_left_px / g.cell_w_px), if (projected) |v| v.total_lines else doc.file.lines.lines.len, .{});
+        const wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
+        const written = chrome_editor.content.build(.{ .layout = layout, .rows = content_rows, .wrap = wrap, .first_col = effectiveFirstCol(wrap, term, false), .first_piece = if (projected) |v| preeditPiece(v, term, wrap) else effectiveFirstPiece(wrap, term), .cell_w_px = g.cell_w_px, .cell_h_px = g.cell_h_px, .font_px = g.cell_h_px, .origin_px = .{ .x = 0, .y = 0 }, .tab_width = g.tab_width }, ops, bytes, runs, visual);
+        rows = visual[0..written.visual_rows];
+    }
+    var screen: ?usize = null;
+    for (rows, 0..) |row, i| {
+        const row_id = if (fresh) blk: {
+            const axis = first + row.line;
+            break :blk if (projected != null) axis else syntax_color.sourceLineFor(term.rt.editor_visible_numbers, axis) orelse continue;
+        } else if (projected != null) term.rt.editor_hit_preedit_first + row.line else term.rt.editor_hit_lines[i];
+        if (row.kind == .text and row_id == target_row and row.start_col <= column[0]) screen = i;
+    }
+    if (screen) |i| {
+        const row = rows[i];
+        const col = column[0] - row.start_col;
+        if (col < g.content_width) return .{
+            .x = g.body_x + @as(i32, @intCast(g.content_left_px + col * g.cell_w_px)),
+            .y = g.body_y + @as(i32, @intCast(i * g.cell_h_px)),
+            .w = g.cell_w_px,
+            .h = g.cell_h_px,
         };
     }
-    return found;
+    return null;
 }
 
-/// 조합 중 글자를 **그리는 줄 배열에만** 끼운 사본을 만든다(N3). 조합이 없거나 끼울 자리가
-/// 화면 밖(접힘에 숨음)이면 `null` — 그때는 원래 배열을 그대로 그린다.
-///
-/// **버퍼가 아니라 화면만 바꾸는 이유**는 `setEditorPreedit`가 적어 두었다. 여기서 사본을 뜨는
-/// 것은 그 판단의 대가다 — 조합 중에만, 프레임마다 줄 포인터 배열과 바뀐 줄만 복사한다.
-/// 조합이 없으면 즉시 `null`이라 평소에는 비용이 0이다.
-///
-/// 제자리에서 바꿔치기하고 되돌리는 방법도 있었지만, 그러면 그 배열을 읽는 다른 것들(검색·클릭
-/// 좌표)이 **그리는 도중의 값**을 볼 수 있는 창이 생긴다. 조합 중에만 드는 사본이 그 창보다 싸다.
-const PreeditProjection = struct {
-    rows: [][]const u8,
-    owned: []bool,
-};
-
-fn preeditLines(self: *AppSession, term: *Term, base: []const []const u8) ?PreeditProjection {
-    if (term.rt.editor_preedit.len == 0) return null;
-    const doc = term.rt.editorDocument().opened orelse return null;
-    const rows = self.allocator.alloc([]const u8, base.len) catch return null;
-    @memcpy(rows, base);
-    const owned = self.allocator.alloc(bool, base.len) catch {
-        self.allocator.free(rows);
-        return null;
+fn projectedDecorations(self: *AppSession, term: *Term, v: preedit_view.View, a: std.mem.Allocator, caret: usize) Decorations {
+    var deco = paneDecorations(self, term);
+    deco.active_line = if (v.point(caret)) |p| p.row else null;
+    deco.selection_empty = if (preeditSelected(term)) |selection| selection.start == selection.end else true;
+    deco.bracket_marks = preedit_view.marks(v, a, term.rt.editor_visible_numbers, deco.bracket_marks, null) catch null;
+    const old = deco.indent_guides;
+    const guide_type = chrome_editor.frame.GuideLine;
+    const full = a.alloc(guide_type, old.first + old.rows.len) catch return deco;
+    @memset(full, .{});
+    @memcpy(full[old.first..], old.rows);
+    deco.indent_guides = .{ .rows = preedit_view.rowValues(guide_type, v, a, term.rt.editor_visible_numbers, full, .{}) catch &.{} };
+    return deco;
+}
+fn projectDiagnostics(v: preedit_view.View, a: std.mem.Allocator, numbers: []const ?u32, old: diagnostics.Views) ?diagnostics.Views {
+    const d = chrome_editor.diagnostic;
+    const marks = preedit_view.taggedMarks(d.Mark, v, a, numbers, old.marks) catch return null;
+    const markers = preedit_view.rowValues(?d.Level, v, a, numbers, old.markers, null) catch return null;
+    var lines: std.ArrayList(d.LineMark) = .empty;
+    for (old.lines) |line| if (preedit_view.sourceVisible(v, numbers, line.line)) |row| {
+        lines.append(a, .{ .line = @intCast(row), .level = line.level }) catch return null;
     };
-    @memset(owned, false);
-    const projection: PreeditProjection = .{ .rows = rows, .owned = owned };
-    var success = false;
-    defer if (!success) freePreeditLines(self, projection);
-
-    // 뒤쪽 선택부터 투영하면 같은 줄의 원본 byte offset을 유지할 수 있다.
-    // IME가 소유하는 marked range는 primary 하나뿐이다. 나머지 위치에는
-    // 동일한 미확정 글자를 화면에만 비추고 문서 편집은 insertText가 맡는다.
-    var iter = selections(term);
-    var stack_positions: [8]editor_selection.Selection = undefined;
-    const heap_positions: ?[]editor_selection.Selection = if (iter.count() <= stack_positions.len)
-        null
-    else
-        self.allocator.alloc(editor_selection.Selection, iter.count()) catch return null;
-    defer if (heap_positions) |allocated| self.allocator.free(allocated);
-    const positions = heap_positions orelse stack_positions[0..iter.count()];
-    var n: usize = 0;
-    while (iter.next()) |sel| {
-        positions[n] = if (n == 0 and sel.start() != term.rt.editor_preedit_at)
-            editor_selection.Selection.at(term.rt.editor_preedit_at)
-        else
-            sel;
-        n += 1;
+    return .{ .marks = marks, .markers = markers, .lines = lines.items };
+}
+fn projectSticky(v: preedit_view.View, a: std.mem.Allocator, old: []const chrome_editor.frame.StickyLine) []const chrome_editor.frame.StickyLine {
+    var rows: std.ArrayList(chrome_editor.frame.StickyLine) = .empty;
+    for (old) |line| {
+        const source = v.source_index.line(line.number - 1) orelse continue;
+        if (source.start <= v.replacement.end and source.contentEnd() >= v.replacement.start) continue;
+        const p = v.point(v.forward(source.start)) orelse continue;
+        var mapped = line;
+        mapped.number = v.numbers[p.row] orelse continue;
+        rows.append(a, mapped) catch return &.{};
     }
-    std.mem.sort(editor_selection.Selection, positions, {}, struct {
-        fn lessThan(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
-            return a.start() > b.start();
-        }
-    }.lessThan);
-    var previous_start: ?usize = null;
-    for (positions) |sel| {
-        const at = sel.start();
-        // 선택 정규화가 늦은 프레임에도 같은 자리를 두 번 조합하지 않는다.
-        if (previous_start == at) continue;
-        previous_start = at;
-        if (at > doc.file.content.len or sel.end() > doc.file.content.len) continue;
-        const doc_line = doc.file.lines.lineAt(at);
-        const end_line_no = doc.file.lines.lineAt(sel.end());
-        const row = visibleRowOfDocLine(term, @intCast(doc_line)) orelse continue;
-        const end_row = visibleRowOfDocLine(term, @intCast(end_line_no)) orelse continue;
-        if (row >= rows.len or end_row >= rows.len or end_row < row) continue;
-        const line = doc.file.lines.line(doc_line) orelse continue;
-        const end_line = doc.file.lines.line(end_line_no) orelse continue;
-        const off = at - line.start;
-        const end_off = sel.end() - end_line.start;
-        if (off > rows[row].len or end_off > rows[end_row].len) continue;
-        const suffix = rows[end_row][end_off..];
-        const prefix_len = std.math.add(usize, off, term.rt.editor_preedit.len) catch return null;
-        const joined_len = std.math.add(usize, prefix_len, suffix.len) catch return null;
-        const spliced = self.allocator.alloc(u8, joined_len) catch return null;
-        @memcpy(spliced[0..off], rows[row][0..off]);
-        @memcpy(spliced[off..][0..term.rt.editor_preedit.len], term.rt.editor_preedit);
-        @memcpy(spliced[prefix_len..], suffix);
-        if (owned[row]) self.allocator.free(rows[row]);
-        rows[row] = spliced;
-        owned[row] = true;
-        // 여러 줄 재변환은 원본의 행·스크롤·히트 테스트 축을 유지한다.
-        for (row + 1..end_row + 1) |covered| {
-            if (owned[covered]) self.allocator.free(rows[covered]);
-            rows[covered] = "";
-            owned[covered] = false;
-        }
-    }
-    success = true;
-    return projection;
+    return rows.items;
 }
 
-fn freePreeditLines(self: *AppSession, projection: PreeditProjection) void {
-    for (projection.rows, projection.owned) |row, owned| {
-        if (owned) self.allocator.free(row);
+fn preeditStamp(term: *Term) u64 {
+    if (term.rt.editor_preedit.len == 0) return 0;
+    var hash = std.hash.Wyhash.init(0);
+    hash.update(term.rt.editor_preedit);
+    hash.update(std.mem.asBytes(&term.rt.editor_preedit_at));
+    hash.update(std.mem.asBytes(&term.rt.editor_preedit_end));
+    if (term.rt.editorDocument().opened) |doc| hash.update(std.mem.asBytes(&doc.file.revision));
+    return hash.final() | 1;
+}
+
+fn makePreeditView(allocator: std.mem.Allocator, term: *Term) ?preedit_view.View {
+    if (term.rt.editor_preedit.len == 0 or term.rt.editor_diff != null) return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
+    return preedit_view.build(allocator, doc.file.content, doc.file.lines, term.rt.editor_visible_numbers, foldMarks(term) orelse &.{}, .{ .start = term.rt.editor_preedit_at, .end = term.rt.editor_preedit_end }, term.rt.editor_preedit) catch null;
+}
+fn preeditSelected(term: *Term) ?maru.session.editor.text_input.ByteRange {
+    const local = maru.session.editor.text_input.byteRange(term.rt.editor_preedit, term.rt.editor_preedit_selected) orelse return null;
+    return .{ .start = term.rt.editor_preedit_at + local.start, .end = term.rt.editor_preedit_at + local.end };
+}
+fn preeditTopRow(v: preedit_view.View, term: *Term) usize {
+    const old_top = term.rt.editor_first_line;
+    const numbers = term.rt.editor_visible_numbers;
+    const source = if (numbers.len > 0 and old_top < numbers.len) @as(usize, (numbers[old_top] orelse 1) - 1) else old_top;
+    const top = v.rowForSource(source);
+    if (term.rt.editor_hit_capacity_rows == 0) return top;
+    const selected = preeditSelected(term) orelse return top;
+    const caret = v.point(selected.end) orelse return top;
+    const capacity = @max(@as(usize, 1), term.rt.editor_hit_capacity_rows);
+    if (caret.row >= top + capacity) return caret.row - capacity + 1;
+    return top;
+}
+fn preeditPiece(v: preedit_view.View, term: *Term, wrap: bool) u32 {
+    if (!wrap) return 0;
+    const selected = preeditSelected(term) orelse return effectiveFirstPiece(wrap, term);
+    const caret = v.point(selected.end) orelse return effectiveFirstPiece(wrap, term);
+    const first = preeditTopRow(v, term);
+    if (caret.row != first or term.rt.editor_hit_geom.content_width == 0) return if (first == term.rt.editor_first_line) effectiveFirstPiece(wrap, term) else 0;
+    var scratch: [chrome_editor.content.count_scratch_bytes]u8 = undefined;
+    const prefix = v.lines[caret.row][0..caret.byte];
+    const count = chrome_editor.content.rowCount(prefix, term.rt.editor_tab_width, term.rt.editor_hit_geom.content_width, true, 0, &scratch);
+    const capacity: u32 = @max(@as(u32, 1), term.rt.editor_hit_capacity_rows);
+    return @max(effectiveFirstPiece(wrap, term), count.rows -| capacity);
+}
+fn hitPreeditBody(comptime mode: chrome_editor.content.PointMode, term: *Term, x: f64, y: f64) ?usize {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const v = makePreeditView(arena.allocator(), term) orelse return null;
+    const g = term.rt.editor_hit_geom;
+    const a = arena.allocator();
+    const first = term.rt.editor_first_line;
+    const count = @min(@as(usize, 256), editorLines(term).len -| first);
+    const original_rows = a.alloc([]const chrome_editor.content.Inlay, count) catch return null;
+    for (original_rows, 0..) |*row, i| {
+        const source = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first + i) orelse {
+            row.* = &.{};
+            continue;
+        };
+        row.* = inlay_client.inlaysForLine(term, source, inlayViewCols(term));
     }
-    self.allocator.free(projection.owned);
-    self.allocator.free(projection.rows);
+    const hints = preedit_view.inlays(v, a, term.rt.editor_visible_numbers, .{ .first = first, .rows = original_rows, .generation = term.rt.editor_inlay.generation }) catch return null;
+    const HintContext = struct {
+        fn f(window: chrome_editor.content.InlayWindow, row: usize) []const chrome_editor.content.Inlay {
+            return window.at(row);
+        }
+    };
+    const projected_rows = a.alloc(u32, term.rt.editor_hit_rows_len) catch return null;
+    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], 0..) |row, i| projected_rows[i] = @intCast(term.rt.editor_hit_preedit_first + row.line);
+    const p = chrome_editor.hit.bodyPointModeWith(mode, .{ .body_x = g.body_x, .body_y = g.body_y, .content_left_px = g.content_left_px, .content_width = g.content_width, .cell_w_px = g.cell_w_px, .cell_h_px = g.cell_h_px, .tab_width = g.tab_width }, term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], projected_rows, v.lines, x, y, hints, HintContext.f) orelse return null;
+    return v.sourcePoint(p.line, p.byte_in_line);
 }
 
 /// **IME 조합 중 글자를 갈아 끼운다**(N3 — native-editor.md §11). 빈 문자열이면 조합을 끝낸다.
@@ -4474,9 +4649,81 @@ pub fn setEditorPreedit(self: *AppSession, term: *Term, bytes: []const u8) void 
         // 조합의 **시작**이다 — 이 자리에 확정 텍스트가 온다. 범위 선택이면 그 **시작**(확정이 선택을
         // 대체하는 자리 — 끝이 아니다). `count() > 0` 이면 primary 가 있다.
         term.rt.editor_preedit_at = term.rt.editor_selection.?.start();
+        term.rt.editor_preedit_end = term.rt.editor_selection.?.end();
     }
     if (term.rt.editor_preedit.len > 0) self.allocator.free(term.rt.editor_preedit);
     term.rt.editor_preedit = next;
+    term.rt.editor_preedit_selected = .{ .location = maru.session.editor.text_input.utf16Length(bytes) orelse 0, .length = 0 };
+}
+
+/// Focus changes commit the same primary range and secondary selections as an input-method callback.
+/// A failed edit keeps the overlay and its target alive so a later focus callback can retry it.
+pub fn commitEditorPreedit(self: *AppSession, term: *Term) bool {
+    if (term.rt.editor_preedit.len == 0) return true;
+    const range: maru.session.editor.text_input.ByteRange = .{ .start = term.rt.editor_preedit_at, .end = term.rt.editor_preedit_end };
+    if (!insertIMEText(self, term, term.rt.editor_preedit, range)) return false;
+    setEditorPreedit(self, term, "");
+    return true;
+}
+
+/// Explicit IME replacement changes the primary edit range without overwriting the user's undo selection.
+pub fn insertIMEText(self: *AppSession, term: *Term, text: []const u8, replacement: ?maru.session.editor.text_input.ByteRange) bool {
+    return insertTextWithRange(self, term, text, replacement, null, null, false);
+}
+
+pub const DirectIMEState = struct {
+    const Item = struct {
+        span: maru.session.editor.text_input.ByteRange,
+        selection: editor_selection.Selection,
+        is_primary: bool,
+    };
+    items: []Item = &.{},
+    revision: ?u64 = null,
+    primary: usize = 0,
+};
+
+const IMESelection = union(enum) {
+    inserted: maru.session.editor.text_input.ByteRange,
+    preserve_primary,
+};
+
+/// A follow-up callback queries the primary-only pending projection; admission also replicates
+/// edits at secondary carets. Return that range in the actual committed document using this delta.
+pub const IMECommitQuery = struct {
+    before: maru.session.editor.text_input.ByteRange,
+    after: maru.session.editor.text_input.ByteRange = .{ .start = 0, .end = 0 },
+};
+
+/// AppKit can preserve a selection inside committed text. Apply it as part of the edit so the
+/// following preedit, viewport and redo all observe the same position, including secondary carets.
+pub fn insertIMETextAtSelection(self: *AppSession, term: *Term, text: []const u8, replacement: ?maru.session.editor.text_input.ByteRange, selected: ?maru.session.editor.text_input.ByteRange) bool {
+    return insertIMETextAndMapRange(self, term, text, replacement, selected, null);
+}
+
+pub fn insertIMETextAndMapRange(self: *AppSession, term: *Term, text: []const u8, replacement: ?maru.session.editor.text_input.ByteRange, selected: ?maru.session.editor.text_input.ByteRange, query: ?*IMECommitQuery) bool {
+    return insertIMETextMapped(self, term, text, replacement, selected, query, false);
+}
+
+/// Track only input-method commits. A later canonical replacement may revise the same inserted
+/// slice at every cursor; arbitrary reconversion and ordinary editor commands keep their contract.
+pub fn insertDirectIMETextAtSelection(self: *AppSession, term: *Term, text: []const u8, replacement: ?maru.session.editor.text_input.ByteRange, selected: ?maru.session.editor.text_input.ByteRange) bool {
+    return insertIMETextMapped(self, term, text, replacement, selected, null, true);
+}
+
+pub fn insertDirectIMETextAndMapRange(self: *AppSession, term: *Term, text: []const u8, replacement: ?maru.session.editor.text_input.ByteRange, selected: ?maru.session.editor.text_input.ByteRange, query: ?*IMECommitQuery) bool {
+    return insertIMETextMapped(self, term, text, replacement, selected, query, true);
+}
+
+fn insertIMETextMapped(self: *AppSession, term: *Term, text: []const u8, replacement: ?maru.session.editor.text_input.ByteRange, selected: ?maru.session.editor.text_input.ByteRange, query: ?*IMECommitQuery, direct: bool) bool {
+    const base = if (replacement) |range| range.start else if (term.rt.editor_selection) |selection| selection.start() else return false;
+    const mapped: ?IMESelection = if (selected) |selection|
+        if (selection.start >= base and selection.end <= base + text.len)
+            .{ .inserted = .{ .start = selection.start - base, .end = selection.end - base } }
+        else
+            .preserve_primary
+    else
+        null;
+    return insertTextWithRange(self, term, text, replacement, mapped, query, direct);
 }
 
 /// 검색 매치들을 문서 offset 범위로 편다. 매치는 `(줄, 줄 안 offset)`이고 편집은 문서 offset을
@@ -5062,6 +5309,8 @@ fn buildOccurrenceMarks(self: *AppSession, term: *Term) ?[]const []const chrome_
 /// 자리를 잡는다(§4.1g). 행은 **문서 기준**이라야 자동 스크롤 중에도 안 미끄러진다: `editor_hit_rows`
 /// 의 첨자는 뷰포트 상대이므로 **`editor_first_line` 을 더해** 문서 축으로 올린다.
 fn visualRowColAt(term: *Term, x_px: f64, y_px: f64) ?struct { row: u32, col: u32 } {
+    if (term.rt.editor_preedit.len > 0) return null;
+    if (term.rt.editor_hit_preedit_stamp != preeditStamp(term)) return null;
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
     const geom = term.rt.editor_hit_geom;
@@ -7486,6 +7735,7 @@ const undo_stack_limit: usize = 2048;
 /// 둘 다 사라진다 — 사용자가 예측할 수 없다.
 pub fn breakUndoGroup(term: *Term) void {
     term.rt.editorDocument().history.last_edit_kind = .none;
+    term.rt.editor_ime_direct.revision = null;
     // **자동 닫기 표시도 여기서 버린다**(§3.7 — "그 표시는 그 caret이 떠나면 버린다").
     //
     // 이 함수는 *"커서가 편집 아닌 이유로 움직였다"*의 단일 자리다(클릭·⌘⌃D·이동 일습·붙여넣기).
@@ -7560,6 +7810,8 @@ fn dropRedo(self: *AppSession, term: *Term) void {
 
 /// undo·redo 스택을 통째로 놓는다(Term이 죽거나 문서를 다시 열 때).
 pub fn dropUndoState(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_ime_direct.items.len > 0) self.allocator.free(term.rt.editor_ime_direct.items);
+    term.rt.editor_ime_direct = .{};
     term.rt.editorDocument().history.clear(self.allocator);
 }
 
@@ -7644,7 +7896,13 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
             entry.deinit(self.allocator);
             continue;
         };
+        // 반대편 이력은 이번 역연산 직전의 커서를 되살린다. 원래 entry 의 before 를 다시
+        // 복사하면 redo 가 편집 전 커서를 복원해, IME 로 합친 secondary 까지 되살린다.
+        // 묶음 중간에는 화면 상태를 아직 게시하지 않았으므로 직전 항목이 복원한 값을 쓴다.
+        const mirror_items: []editor_selection.Selection = self.allocator.dupe(editor_selection.Selection, if (restored) |r| r.items else sels.items) catch &.{};
+        const mirror_primary = if (restored) |r| r.primary else sels.primary;
         const back = term.rt.editorDocument().opened.?.file.apply(entry.inverse.delta(), &sels) catch {
+            self.allocator.free(mirror_items);
             self.allocator.free(sels.items);
             entry.deinit(self.allocator);
             continue;
@@ -7663,14 +7921,14 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
         }
 
         // 반대편 스택에 **같은 묶음 번호로** 쌓는다 — redo도 한 번에 돌아간다.
-        // 그때의 "편집 전 커서"는 지금 항목이 든 것이다.
+        // 원래 항목은 이번 복원의 결과를, mirror 는 복원 전 상태를 각각 소유한다.
         if (restored) |r| self.allocator.free(r.items);
         restored = .{ .items = entry.sels_before, .primary = entry.primary_before };
 
         const mirror: UndoEntry = .{
             .inverse = back,
-            .sels_before = self.allocator.dupe(editor_selection.Selection, entry.sels_before) catch &.{},
-            .primary_before = entry.primary_before,
+            .sels_before = mirror_items,
+            .primary_before = mirror_primary,
             .group = group,
         };
         if (!pushEntry(self, to, to_len, mirror)) {
@@ -7937,18 +8195,58 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
 ///
 /// **역연산을 아직 어디에도 안 쌓는다** — undo 스택은 다음 조각이다. 지금은 받아서 버린다.
 pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
+    return insertTextWithRange(self, term, text, null, null, null, false);
+}
+
+fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replacement: ?maru.session.editor.text_input.ByteRange, ime_selection: ?IMESelection, ime_query: ?*IMECommitQuery, direct: bool) bool {
+    if (ime_selection) |selected| switch (selected) {
+        .inserted => |range| if (range.start > range.end or range.end > text.len) return false,
+        .preserve_primary => {},
+    };
+    if (ime_query != null and replacement == null) return false;
+    if (ime_query) |query| {
+        if (query.before.start > query.before.end) return false;
+    }
     if (diag_gate.maruDebugEnabled()) {
         if (cursorPosition(term)) |cp| {
             editor_diag.debug("insert at line={d} col={d} bytes={d} extras={d} preedit={d}@{d} top={d}", .{ cp.line, cp.column, text.len, term.rt.editor_extra_selections.len, term.rt.editor_preedit.len, term.rt.editor_preedit_at, term.rt.editor_first_line });
         }
     }
-    if (term.kind != .editor or text.len == 0) return false;
+    if (term.kind != .editor or (text.len == 0 and replacement == null)) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 원본이 없다
     const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
 
     var iter = selections(term);
     if (iter.count() == 0) return false;
+
+    // 재변환은 primary 의 편집 범위를 다른 커서 너머로 옮기거나 그 커서와 겹치게 한다.
+    // 실제 선택은 undo 용으로 그대로 두고, 편집할 선택만 기존 정규화(owner·primary 승계)로
+    // 합친다. 이 배열이 delta 와 결과 caret 둘의 순서를 정해야 인덱스가 어긋나지 않는다.
+    var effective_storage: []editor_selection.Selection = &.{};
+    defer if (effective_storage.len > 0) self.allocator.free(effective_storage);
+    var effective_selections: ?editor_selection.Selections = null;
+    if (replacement) |r| {
+        if (r.start > r.end or r.end > doc.file.content.len) return false;
+        const effective = selectionsForEdit(self, term) orelse return false;
+        effective_storage = effective.items;
+        // Korean input sources also compose by replacing canonical text (ㄱ → 가 → 간). Only
+        // a range inside the previous actual IME insertion has matching secondary text. Applying
+        // a general caret-relative range here would delete unrelated text during reconversion.
+        if (direct and directIMEReplacement(term, effective, r)) {
+            const previous = term.rt.editor_ime_direct;
+            const primary_span = previous.items[previous.primary].span;
+            for (effective.items, previous.items) |*selection, old| {
+                selection.* = editor_selection.Selection.fromPoints(
+                    old.span.start + (r.start - primary_span.start),
+                    old.span.start + (r.end - primary_span.start),
+                );
+            }
+        }
+        effective.items[effective.primary] = editor_selection.Selection.fromPoints(r.start, r.end);
+        const merged = editor_selection.mergeOverlapping(effective.items, effective.primary);
+        effective_selections = editor_selection.Selections.init(effective.items[0..merged.len], merged.primary);
+    }
 
     // 커서를 문서 순서로 모은다 — delta가 정렬·비겹침을 요구한다.
     var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
@@ -7965,10 +8263,12 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
 
     // **타이핑 보조는 한 글자 입력일 때만 본다**(§3.7). 붙여넣기·IME 확정은 여러 글자가 한 번에
     // 오는데 그때 괄호를 닫으면 **사용자가 넣지 않은 문자**가 문서에 들어간다.
-    const aid: ?u8 = if (text.len == 1) text[0] else null;
+    const aid: ?u8 = if (text.len == 1 and replacement == null) text[0] else null;
     const content_now = doc.file.content;
 
-    while (iter.next()) |sel| {
+    const edit_count = if (effective_selections) |effective| effective.items.len else iter.count();
+    for (0..edit_count) |index| {
+        const sel = if (effective_selections) |effective| effective.items[index] else iter.next().?;
         const lo = @min(sel.start(), doc.file.content.len);
         const hi = @min(sel.end(), doc.file.content.len);
 
@@ -8044,12 +8344,35 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     }
 
     var sels = selectionsForEdit(self, term) orelse return false;
-    defer self.allocator.free(sels.items);
+    const sels_storage = sels.items;
+    defer self.allocator.free(sels_storage);
 
     // **`term.rt`를 통해 부른다** — 위 `doc`은 값 복사라 그것에 대고 고치면 사본만 바뀐다.
     // **편집 전 커서를 떠 둔다** — undo가 그것을 되살린다(§3.3).
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
     const before_primary = sels.primary;
+    if (effective_selections) |effective| {
+        @memcpy(sels_storage[0..effective.items.len], effective.items);
+        sels = editor_selection.Selections.init(sels_storage[0..effective.items.len], effective.primary);
+    }
+
+    // Reserve the provenance and resulting secondary selections before changing the document.
+    // Losing only this record on OOM would make the next syllable append duplicates again.
+    const track_direct = direct and directIMEChanges(ranges.items, sels.items.len, text);
+    var next_direct: []DirectIMEState.Item = &.{};
+    defer if (next_direct.len > 0) self.allocator.free(next_direct);
+    var next_extras: []editor_selection.Selection = &.{};
+    defer if (next_extras.len > 0) self.allocator.free(next_extras);
+    if (track_direct) {
+        next_direct = self.allocator.alloc(DirectIMEState.Item, sels.items.len) catch {
+            self.allocator.free(before);
+            return false;
+        };
+        if (sels.items.len > 1) next_extras = self.allocator.alloc(editor_selection.Selection, sels.items.len - 1) catch {
+            self.allocator.free(before);
+            return false;
+        };
+    }
 
     // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
     const scroll_anchor = captureScrollAnchor(term);
@@ -8085,6 +8408,24 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
             skip_at += 1;
         }
         sels.items[i] = editor_selection.Selection.at(at);
+        if (ime_selection) |selected| switch (selected) {
+            .inserted => |range| sels.items[i] = editor_selection.Selection.fromPoints(ic.start + range.start, ic.start + range.end),
+            .preserve_primary => if (i == sels.primary) {
+                const original = before[before_primary];
+                const delta: maru.session.editor.delta.Delta = .{ .changes = ranges.items };
+                sels.items[i] = original;
+                sels.items[i].anchor_start = maru.session.editor.delta.mapOffset(delta, original.anchor_start);
+                sels.items[i].anchor_end = maru.session.editor.delta.mapOffset(delta, original.anchor_end);
+                sels.items[i].focus = maru.session.editor.delta.mapOffset(delta, original.focus);
+            },
+        };
+    }
+
+    if (ime_query) |query| {
+        query.after = .{
+            .start = mapIMEProjectionOffset(query.before.start, replacement.?, text.len, ranges.items, inverse.changes, sels.primary),
+            .end = mapIMEProjectionOffset(query.before.end, replacement.?, text.len, ranges.items, inverse.changes, sels.primary),
+        };
     }
 
     // **자동으로 닫은 쌍은 caret이 가운데다**(§3.7). 위 규칙은 "넣은 것 뒤"라 `()`에서 닫는 괄호
@@ -8094,7 +8435,7 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     // 살아 있고, caret은 그 끝에 서는 것이 맞다.
     for (ranges.items, 0..) |r, i| {
         if (i >= sels.items.len) break;
-        if (r.text.len == 2 and r.start == r.end) {
+        if (replacement == null and r.text.len == 2 and r.start == r.end) {
             const p = editor_pairs.pairFor(r.text[0]) orelse continue;
             if (p.close != r.text[1]) continue;
             sels.items[i] = editor_selection.Selection.at(sels.items[i].focus -| 1);
@@ -8103,9 +8444,40 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
         }
     }
 
+    // pushUndo owns the inverse and may release it if its own allocation fails.
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
+    if (track_direct) {
+        for (next_direct, inverse.changes, sels.items, 0..) |*item, change, selection, index| {
+            item.* = .{ .span = .{ .start = change.start, .end = change.end }, .selection = selection, .is_primary = index == sels.primary };
+        }
+        std.mem.sort(DirectIMEState.Item, next_direct, {}, struct {
+            fn lessThan(_: void, a: DirectIMEState.Item, b: DirectIMEState.Item) bool {
+                return a.selection.start() < b.selection.start();
+            }
+        }.lessThan);
+        var primary: usize = 0;
+        for (next_direct, 0..) |item, index| if (item.is_primary) {
+            primary = index;
+            break;
+        };
+        var extra_index: usize = 0;
+        for (sels.items, 0..) |selection, index| {
+            if (index == sels.primary) continue;
+            next_extras[extra_index] = selection;
+            extra_index += 1;
+        }
+        term.rt.editor_selection = sels.primarySelection();
+        if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
+        term.rt.editor_extra_selections = next_extras;
+        next_extras = &.{};
+        if (term.rt.editor_ime_direct.items.len > 0) self.allocator.free(term.rt.editor_ime_direct.items);
+        term.rt.editor_ime_direct = .{ .items = next_direct, .revision = term.rt.editorDocument().opened.?.file.revision, .primary = primary };
+        next_direct = &.{};
+    } else {
+        term.rt.editor_ime_direct.revision = null;
+        writeBackSelections(self, term, sels);
+    }
     pushUndo(self, term, inverse, before, before_primary, .insert);
-
-    writeBackSelections(self, term, sels);
     // **조합 중이면 조합 자리도 함께 옮긴다.** 자리는 조합을 시작할 때 한 번만 잡는데(IME4), 이어
     // 치는 한글에서는 그 "시작"이 **키 트랜잭션 한가운데**다 — `insertText`(확정)는 `ime_inserted`에
     // 쌓였다가 `imeEnd`에서야 문서에 들어가므로, 그 사이에 오는 `setMarkedText`는 **확정이 아직
@@ -8115,9 +8487,11 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     // 자리를 여기서 다시 잡는다. **어디로 들어갔는지는 이 편집이 안다** — caret을 다시 읽는 것이
     // 아니라 편집이 정한 결과를 그대로 쓴다(위 "커서는 넣은 글자 뒤로 간다"와 같은 출처).
     if (term.rt.editor_preedit.len > 0) {
-        if (term.rt.editor_selection) |sel| term.rt.editor_preedit_at = sel.start();
+        if (term.rt.editor_selection) |sel| {
+            term.rt.editor_preedit_at = sel.start();
+            term.rt.editor_preedit_end = sel.end();
+        }
     }
-    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     // **편집한 자리를 보여 준다**(§5.2 줄 축). 앵커 보정 **뒤**여야 한다 — 보정은 "화면을 제자리에"
@@ -8132,6 +8506,34 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     return true;
 }
 
+fn directIMEChanges(changes: []const maru.session.editor.delta.Change, count: usize, text: []const u8) bool {
+    if (changes.len != count) return false;
+    for (changes) |change| if (!std.mem.eql(u8, change.text, text)) return false;
+    return true;
+}
+
+fn directIMEReplacement(term: *Term, current: editor_selection.Selections, requested: maru.session.editor.text_input.ByteRange) bool {
+    const previous = term.rt.editor_ime_direct;
+    if (previous.revision == null or previous.revision.? != term.rt.editorDocument().opened.?.file.revision) return false;
+    if (previous.items.len != current.items.len or previous.primary != current.primary) return false;
+    for (previous.items, current.items) |item, selection| {
+        if (!std.meta.eql(item.selection, selection)) return false;
+    }
+    const primary = previous.items[previous.primary].span;
+    if (requested.start < primary.start or requested.end > primary.end) return false;
+    const local_end = requested.end - primary.start;
+    for (previous.items) |item| if (local_end > item.span.end - item.span.start) return false;
+    return true;
+}
+
+fn mapIMEProjectionOffset(offset: usize, replacement: maru.session.editor.text_input.ByteRange, text_len: usize, changes: []const maru.session.editor.delta.Change, inverse: []const maru.session.editor.delta.Change, primary: usize) usize {
+    if (offset >= replacement.start and offset <= replacement.start + text_len) {
+        return inverse[primary].start + offset - replacement.start;
+    }
+    const canonical = if (offset < replacement.start) offset else replacement.end + offset - replacement.start - text_len;
+    return maru.session.editor.delta.mapOffset(.{ .changes = changes }, canonical);
+}
+
 /// 제품의 커서들을 `Selections`(L2가 요구하는 모양)로 옮긴다. **문서 순서로 정렬해서** 준다 —
 /// `Selections.init`이 그것을 불변식으로 강제한다(편집을 뒤에서부터 적용하는 전제, §3.2).
 fn selectionsForEdit(self: *AppSession, term: *Term) ?maru.session.editor.selection.Selections {
@@ -8144,14 +8546,18 @@ fn selectionsForEdit(self: *AppSession, term: *Term) ?maru.session.editor.select
         items[i] = sel;
         i += 1;
     }
+    const primary = items[0];
     std.mem.sort(editor_selection.Selection, items, {}, struct {
         fn lessThan(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
             return a.start() < b.start();
         }
     }.lessThan);
-    // primary는 **문서 순서에서 마지막**으로 둔다 — 타이핑 뒤 화면이 따라갈 기준이고, 그 자리가
-    // 사용자가 마지막으로 친 곳이다.
-    return editor_selection.Selections.init(items, n - 1);
+    // 문서 순서는 delta 의 계약이고 primary 는 사용자가 고른 커서다. 둘은 독립이다 — 마지막
+    // 커서로 바꾸면 앞쪽에서 시작한 IME 조합과 화면 추종이 첫 확정 뒤 뒤쪽으로 튄다.
+    for (items, 0..) |sel, index| {
+        if (std.meta.eql(sel, primary)) return editor_selection.Selections.init(items, index);
+    }
+    unreachable; // 정렬은 primary 를 없애지 않는다.
 }
 
 /// 밀린 커서들을 제품 저장소로 되돌린다. **primary와 나머지를 다시 가른다.**
@@ -9818,6 +10224,9 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
 }
 
 fn dropSelectionState(self: *AppSession, term: *Term) void {
+    @import("../input.zig").cancelEditorCommit(self, term.surface.id);
+    term.rt.editor_ime_replacement = null;
+    term.rt.editor_ime_commit_selection = null;
     // 비교 뷰 선택도 함께 놓는다 — 같은 부류이고 같은 수명이다.
     if (term.rt.editor_diff_hit_rows_left.len > 0) self.allocator.free(term.rt.editor_diff_hit_rows_left);
     if (term.rt.editor_diff_hit_rows_right.len > 0) self.allocator.free(term.rt.editor_diff_hit_rows_right);
@@ -10296,6 +10705,8 @@ test "IME5 후보창은 조합 글자 아래에 선다 — pane 구석이 아니
     term.rt.editor_selection = editor_selection.Selection.at(5);
     setEditorPreedit(fx.session, term, "\xed\x95\x9c");
     term.rt.editor_selection = editor_selection.Selection.at(0);
+    var composition_frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    composition_frame.dl.deinit(allocator);
     const while_composing = editorImeCaretRect(fx.session, term) orelse return error.NoCaretRect;
     try testing.expectEqual(mid.x, while_composing.x);
 
@@ -10386,6 +10797,1059 @@ test "IME1 조합 중 글자는 화면에 뜨고 문서에는 안 들어간다 (
     try testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content); // 문서는 그대로다
 }
 
+test "IME_VIEW1 multiline preedit replaces complete rows and paints its selected caret" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "ab😀\r\nold\n끝cd\ntail"));
+    const ime = @import("../editor_ime.zig");
+    try testing.expect(ime.marked(fx.session, "한\n나", .{ .location = 3, .length = 0 }, .{ .location = 2, .length = 9 }));
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    defer painted.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasCodepoint(painted.dl, 0xD55C));
+    try testing.expect(drawnHasCodepoint(painted.dl, 0xB098));
+    try testing.expect(!drawnHasCodepoint(painted.dl, 0xB05D));
+    try testing.expectEqualStrings("ab😀\r\nold\n끝cd\ntail", term.rt.editorDocument().opened.?.file.content);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const projected = makePreeditView(arena.allocator(), term) orelse return error.MissingProjection;
+    try testing.expectEqualStrings("ab한", projected.lines[0]);
+    try testing.expectEqualStrings("나cd", projected.lines[1]);
+    try testing.expectEqualStrings("tail", projected.lines[2]);
+    fx.session.loaded_config.config.editor.cursor_shape = .bar;
+    fx.session.blink_visible = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var base_frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    base_frame.dl.deinit(testing.allocator);
+    const base = try quadSnapshot(testing.allocator, fx.session);
+    defer testing.allocator.free(base);
+    fx.session.blink_visible = true;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var caret_frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    caret_frame.dl.deinit(testing.allocator);
+    const caret_quads = try quadsAddedSince(testing.allocator, base, fx.session);
+    defer testing.allocator.free(caret_quads);
+    try testing.expectEqual(@as(usize, 1), caret_quads.len);
+    const geometry = term.rt.editor_hit_geom;
+    try testing.expectEqual(@as(f32, @floatFromInt(geometry.body_y + geometry.cell_h_px)), caret_quads[0].y);
+    try testing.expectEqual(@as(f32, @floatFromInt(geometry.body_x + @as(i32, @intCast(geometry.content_left_px + 2 * geometry.cell_w_px)))), caret_quads[0].x);
+}
+
+test "IME_VIEW2 projected suffix clicks and stale composition snapshots" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "ab😀\r\nold\n끝cd\ntail"));
+    breakUndoGroup(term);
+    const ime = @import("../editor_ime.zig");
+    try testing.expect(ime.marked(fx.session, "한\n나", .{ .location = 3, .length = 0 }, .{ .location = 2, .length = 9 }));
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    painted.dl.deinit(testing.allocator);
+    const g = term.rt.editor_hit_geom;
+    const x: f64 = @floatFromInt(g.body_x + @as(i32, @intCast(g.content_left_px + 3 * g.cell_w_px)));
+    const y: f64 = @floatFromInt(g.body_y + @as(i32, @intCast(g.cell_h_px)));
+    try testing.expectEqual(@as(?usize, 16), hitTestBodyMode(.caret, term, x, y));
+    try testing.expect(ime.marked(fx.session, "한\n나\n다", .{ .location = 5, .length = 0 }, null));
+    try testing.expectEqual(@as(?usize, null), hitTestBodyMode(.caret, term, x, y));
+    try testing.expect(hitSnapshotStale(fx.session, term));
+    try testing.expect(ime.insert(fx.session, "漢\n字", null));
+    try testing.expectEqualStrings("ab漢\n字cd\ntail", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(?usize, null), hitTestBodyMode(.caret, term, x, y));
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("ab😀\r\nold\n끝cd\ntail", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "IME_VIEW3 candidate anchor follows the painted wrapped row" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    const source = try testing.allocator.alloc(u8, 300);
+    defer testing.allocator.free(source);
+    @memset(source, 'a');
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, source));
+    term.rt.editor_wrap = true;
+    term.rt.editor_selection = editor_selection.Selection.at(120);
+    setEditorPreedit(fx.session, term, "한");
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    painted.dl.deinit(testing.allocator);
+    const g = term.rt.editor_hit_geom;
+    var actual_row: ?usize = null;
+    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], 0..) |row, i|
+        if (row.kind == .text and term.rt.editor_hit_lines[i] == 0 and row.start_col <= 120) {
+            actual_row = i;
+        };
+    const i = actual_row orelse return error.NoWrappedRow;
+    try testing.expect(i > 0);
+    const anchor = editorImeCaretRect(fx.session, term) orelse return error.NoAnchor;
+    const row = term.rt.editor_hit_rows[i];
+    try testing.expectEqual(g.body_y + @as(i32, @intCast(i * g.cell_h_px)), anchor.y);
+    try testing.expectEqual(g.body_x + @as(i32, @intCast(g.content_left_px + (120 - row.start_col) * g.cell_w_px)), anchor.x);
+    setEditorPreedit(fx.session, term, "한국");
+    const before_paint = editorImeCaretRect(fx.session, term) orelse return error.NoSynchronousAnchor;
+    try testing.expectEqual(anchor, before_paint);
+}
+
+test "IME_VIEW4 long marked text keeps its painted caret inside the viewport" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = fx.term;
+    fx.session.loaded_config.config.editor.cursor_shape = .bar;
+    term.rt.editor_wrap = true;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    var initial = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    initial.dl.deinit(a);
+    const ime = @import("../editor_ime.zig");
+    const long = try a.alloc(u8, 6001);
+    defer a.free(long);
+    @memset(long, 'a');
+    for ([_][]const u8{ "a\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na", long }) |text| {
+        try testing.expect(ime.marked(fx.session, text, .{ .location = text.len, .length = 0 }, null));
+        fx.session.blink_visible = false;
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var base_frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+        base_frame.dl.deinit(a);
+        const base = try quadSnapshot(a, fx.session);
+        defer a.free(base);
+        fx.session.blink_visible = true;
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var caret_frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+        caret_frame.dl.deinit(a);
+        const added = try quadsAddedSince(a, base, fx.session);
+        defer a.free(added);
+        try testing.expectEqual(@as(usize, 1), added.len);
+        const g = term.rt.editor_hit_geom;
+        try testing.expect(added[0].y >= @as(f32, @floatFromInt(g.body_y)));
+        try testing.expect(added[0].y < @as(f32, @floatFromInt(g.body_y + @as(i32, @intCast(term.rt.editor_hit_capacity_rows * g.cell_h_px)))));
+        try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "IME_VIEW5 direct insert firstRect before painting matches the fresh wrapped frame" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = fx.term;
+    fx.session.active_pane_rect = fx.leaf_rect;
+    const source = try a.alloc(u8, 300);
+    defer a.free(source);
+    @memset(source, 'a');
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, source));
+    term.rt.editor_selection = editor_selection.Selection.at(120);
+    term.rt.editor_wrap = true;
+    var initial = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    initial.dl.deinit(a);
+    const ime = @import("../editor_ime.zig");
+    try testing.expect(ime.insert(fx.session, "한", .{ .location = 120, .length = 0 }));
+    const synchronous = editorImeCaretRect(fx.session, term) orelse return error.NoSynchronousAnchor;
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    painted.dl.deinit(a);
+    const anchor = editorImeCaretRect(fx.session, term) orelse return error.NoPaintedAnchor;
+    try testing.expectEqual(anchor, synchronous);
+}
+
+test "IME_VIEW6 merge Result projects multiline composition and maps suffix clicks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const term = try mergeCaretFixture(&fx, &dir, "ime-merge.txt", a);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    const before = try a.dupe(u8, term.rt.editorDocument().opened.?.file.content);
+    defer a.free(before);
+    const ime = @import("../editor_ime.zig");
+    try testing.expect(ime.marked(fx.session, "한\n나", .{ .location = 3, .length = 0 }, .{ .location = 0, .length = 34 }));
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    defer painted.dl.deinit(a);
+    try testing.expect(term.rt.editor_merge_layout != null);
+    try testing.expect(drawnHasCodepoint(painted.dl, 0xD55C));
+    try testing.expect(drawnHasCodepoint(painted.dl, 0xB098));
+    try testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content);
+    const g = term.rt.editor_hit_geom;
+    const x: f64 = @floatFromInt(g.body_x + @as(i32, @intCast(g.content_left_px + 2 * g.cell_w_px)));
+    const y: f64 = @floatFromInt(g.body_y + @as(i32, @intCast(g.cell_h_px)));
+    try testing.expectEqual(@as(?usize, 34), hitTestBodyMode(.caret, term, x, y));
+}
+
+test "IME_RANGE1 document UTF16 selection and reconversion replace the requested text" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "ab😀한cd"));
+    breakUndoGroup(term);
+    const before_selection = term.rt.editor_selection.?;
+    try testing.expectEqual(ime.Range{ .location = 7, .length = 0 }, ime.state(fx.session).?.selected);
+    try testing.expect(ime.marked(fx.session, "가", .{ .location = 1, .length = 0 }, .{ .location = 4, .length = 1 }));
+    try testing.expectEqual(ime.Range{ .location = 4, .length = 1 }, ime.state(fx.session).?.marked);
+    try testing.expectEqual(ime.Range{ .location = 5, .length = 0 }, ime.state(fx.session).?.selected);
+    try testing.expectEqualStrings("ab😀한cd", term.rt.editorDocument().opened.?.file.content);
+    var preview_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer preview_arena.deinit();
+    const preview = makePreeditView(preview_arena.allocator(), term) orelse return error.MissingPreedit;
+    try testing.expectEqualStrings("ab😀가cd", preview.lines[0]);
+    try testing.expect(ime.marked(fx.session, "나", .{ .location = 0, .length = 1 }, null));
+    try testing.expectEqual(ime.Range{ .location = 4, .length = 1 }, ime.state(fx.session).?.selected);
+    try testing.expect(ime.insert(fx.session, "漢", null));
+    try testing.expectEqualStrings("ab😀漢cd", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("ab😀한cd", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(before_selection, term.rt.editor_selection.?);
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 2, .length = 2 }));
+    try testing.expectEqualStrings("abX한cd", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "IME_RANGE2 invalid UTF16 boundaries do not edit a different caret" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "a😀b"));
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 2, .length = 1 }));
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 100, .length = 1 }));
+    try testing.expect(ime.marked(fx.session, "😀", .{ .location = 1, .length = 0 }, null));
+    try testing.expectEqualStrings("a😀b", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    // Rejection still consumes the input-method callback. Replaying the physical Backspace
+    // would otherwise delete unrelated text at the current caret after refusing its range.
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 2, .length = 1 }));
+    input.imeEnd(fx.session, .{ .key = .backspace, .modifiers = .{} });
+    try testing.expectEqualStrings("a😀b", term.rt.editorDocument().opened.?.file.content);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.marked(fx.session, "😀", .{ .location = 1, .length = 0 }, null));
+    input.imeEnd(fx.session, .{ .key = .backspace, .modifiers = .{} });
+    try testing.expectEqualStrings("a😀b", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "IME_RANGE3 queued syllables have current ranges and last-jamo Backspace does not commit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "ab"));
+    input.imeBegin(fx.session);
+    try testing.expect(ime.marked(fx.session, "가", .{ .location = 1, .length = 0 }, null));
+    input.imeEnd(fx.session, null);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "가", null));
+    try testing.expectEqual(ime.Range{ .location = 3, .length = 0 }, ime.state(fx.session).?.selected);
+    try testing.expect(ime.marked(fx.session, "나", .{ .location = 1, .length = 0 }, null));
+    try testing.expectEqual(ime.Range{ .location = 3, .length = 1 }, ime.state(fx.session).?.marked);
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("ab가", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(ime.Range{ .location = 3, .length = 1 }, ime.state(fx.session).?.marked);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.marked(fx.session, "ㄴ", .{ .location = 1, .length = 0 }, null));
+    try testing.expect(ime.insert(fx.session, "ㄴ", null));
+    input.imeDeleteBackward(fx.session);
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("ab가", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "x", null));
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("ab가x", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "IME_DELETE1 Korean direct replacement plus deleteBackward removes the canonical last jamo" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "left right"));
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "ㄱ", null));
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("left ㄱright", term.rt.editorDocument().opened.?.file.content);
+    breakUndoGroup(term);
+    const before_selection = term.rt.editor_selection.?;
+
+    // Actual Korean-source callback order: no marked text, replace the existing jamo,
+    // then deleteBackward in the same key. Empty replacement still has a document edit.
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "ㄱ", .{ .location = 5, .length = 1 }));
+    input.imeDeleteBackward(fx.session);
+    input.imeEnd(fx.session, .{ .key = .backspace, .modifiers = .{} });
+    try testing.expectEqualStrings("left right", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(ime.Range{ .location = 5, .length = 0 }, ime.state(fx.session).?.selected);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("left ㄱright", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(before_selection, term.rt.editor_selection.?);
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("left right", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+}
+
+test "IME_DELETE2 a rejected empty replacement retains its range and retries exactly once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |oom| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "left ㄱright"));
+        term.rt.editor_selection = editor_selection.Selection.at(8);
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "ㄱ", .{ .location = 5, .length = 1 }));
+        input.imeDeleteBackward(fx.session);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        if (oom) fx.session.allocator = failing.allocator() else term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeEnd(fx.session, .{ .key = .backspace, .modifiers = .{} });
+        fx.session.allocator = testing.allocator;
+        try testing.expect(fx.session.ime_editor_commit_pending);
+        try testing.expectEqual(@as(usize, 0), fx.session.ime_inserted.items.len);
+        try testing.expectEqualStrings("left ㄱright", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(ime.Range{ .location = 5, .length = 0 }, ime.state(fx.session).?.selected);
+        const visible = ime.projection(fx.session).?;
+        try testing.expect(visible.has_splice);
+        try testing.expectEqualStrings("left ", visible.segments[0]);
+        try testing.expectEqualStrings("right", visible.segments[4]);
+
+        // A second failed key must retain even a zero-byte payload; its range owns the deletion.
+        term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "Y", null));
+        input.imeEnd(fx.session, null);
+        try testing.expect(fx.session.ime_editor_commit_pending);
+        term.rt.editorDocument().opened.?.file.read_only = false;
+        input.imeBegin(fx.session);
+        try testing.expectEqualStrings("left right", term.rt.editorDocument().opened.?.file.content);
+        try testing.expect(ime.insert(fx.session, "X", null));
+        input.imeEnd(fx.session, null);
+        try testing.expectEqualStrings("left Xright", term.rt.editorDocument().opened.?.file.content);
+        try testing.expect(!fx.session.ime_editor_commit_pending);
+        try testing.expect(input.retryEditorCommit(fx.session));
+        try testing.expectEqualStrings("left Xright", term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "IME_DELETE3 a direct callback resumes an empty pending replacement in virtual coordinates" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for (0..3) |callback| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "left ㄱright"));
+        term.rt.editor_selection = editor_selection.Selection.at(8);
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "ㄱ", .{ .location = 5, .length = 1 }));
+        input.imeDeleteBackward(fx.session);
+        term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeEnd(fx.session, null);
+        try testing.expect(ime.insert(fx.session, "Y", null)); // a direct callback can fail again
+        try testing.expect(fx.session.ime_editor_commit_pending);
+        term.rt.editorDocument().opened.?.file.read_only = false;
+        if (callback == 0) {
+            try testing.expect(ime.insert(fx.session, "X", .{ .location = 5, .length = 0 }));
+        } else if (callback == 1) {
+            try testing.expect(ime.marked(fx.session, "", .{ .location = 0, .length = 0 }, null));
+        } else {
+            try testing.expect(ime.marked(fx.session, "X", .{ .location = 1, .length = 0 }, null));
+            try testing.expectEqualStrings("left right", term.rt.editorDocument().opened.?.file.content);
+            try testing.expect(ime.insert(fx.session, "X", null));
+        }
+        try testing.expectEqualStrings(if (callback == 1) "left right" else "left Xright", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(ime.Range{ .location = if (callback == 1) 5 else 6, .length = 0 }, ime.state(fx.session).?.selected);
+        try testing.expect(!fx.session.ime_editor_commit_pending);
+    }
+}
+
+test "IME_RANGE4 Return commits into the editor before replaying the newline" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "ab"));
+    input.imeBegin(fx.session);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    input.imeEnd(fx.session, null);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "한", null));
+    input.imeEnd(fx.session, .{ .key = .enter, .modifiers = .{} });
+    try testing.expectEqualStrings("ab한\n", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "IME_PARTIAL1 partial marking commits its surrounding context and restores all undo selections" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "L R"));
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(3)});
+    breakUndoGroup(term);
+    try testing.expect(ime.marked(fx.session, "a😀b", .{ .location = 4, .length = 0 }, null));
+    try testing.expect(ime.marked(fx.session, "X", .{ .location = 1, .length = 0 }, .{ .location = 2, .length = 2 }));
+    try testing.expectEqualStrings("Lab Rab", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("X", term.rt.editor_preedit);
+    try testing.expectEqual(ime.Range{ .location = 2, .length = 1 }, ime.state(fx.session).?.marked);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_extra_selections[0].focus);
+    try testing.expect(ime.insert(fx.session, "Y", null));
+    try testing.expectEqualStrings("LaYb RaYb", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("L R", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_extra_selections[0].focus);
+}
+
+test "IME_PARTIAL2 partial insert commits the whole marked result with the caret at its end" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "prefix suffix"));
+    term.rt.editor_selection = editor_selection.Selection.at(6);
+    try testing.expect(ime.marked(fx.session, "a😀b", .{ .location = 4, .length = 0 }, null));
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 7, .length = 2 }));
+    try testing.expectEqualStrings("prefixaXb suffix", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    try testing.expectEqual(ime.Range{ .location = 9, .length = 0 }, ime.state(fx.session).?.selected);
+}
+
+test "IME_PARTIAL3 ordinary queued typing is visible and an explicit range can replace its non-BMP scalar" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "ab"));
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "a😀b", null));
+    try testing.expectEqual(ime.Range{ .location = 6, .length = 0 }, ime.state(fx.session).?.selected);
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 3, .length = 2 }));
+    try testing.expectEqualStrings("aXb", fx.session.ime_inserted.items);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    try testing.expectEqual(ime.Range{ .location = 5, .length = 1 }, ime.state(fx.session).?.marked);
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("abaXb", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("한", term.rt.editor_preedit);
+    try testing.expectEqual(ime.Range{ .location = 5, .length = 1 }, ime.state(fx.session).?.marked);
+}
+
+test "IME_DIRECT_MULTI1 direct Korean replacements revise the previous syllable at every cursor" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |last| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "L R"));
+        breakUndoGroup(term);
+        term.rt.editor_selection = editor_selection.Selection.at(if (last) 3 else 1);
+        term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(if (last) 1 else 3)});
+        for ([_][]const u8{ "ㄱ", "가", "간", "가" }, 0..) |text, index| {
+            input.imeBegin(fx.session);
+            const replacement: ?ime.Range = if (index == 0) null else .{ .location = ime.state(fx.session).?.selected.location - 1, .length = 1 };
+            try testing.expect(ime.insert(fx.session, text, replacement));
+            if (index == 3) try testing.expect(ime.insert(fx.session, "나", null));
+            input.imeEnd(fx.session, null);
+        }
+        try testing.expectEqualStrings("L가나 R가나", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, if (last) 15 else 7), term.rt.editor_selection.?.focus);
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings("L R", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, if (last) 3 else 1), term.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(usize, if (last) 1 else 3), term.rt.editor_extra_selections[0].focus);
+        try testing.expect(redoEdit(fx.session, term));
+        try testing.expectEqualStrings("L가나 R가나", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, if (last) 15 else 7), term.rt.editor_selection.?.focus);
+    }
+}
+
+test "IME_DIRECT_MULTI2 non-BMP replacement maps corresponding spans around a middle primary" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "A B C"));
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{ editor_selection.Selection.at(1), editor_selection.Selection.at(5) });
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "😀", null));
+    input.imeEnd(fx.session, null);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "가", .{ .location = ime.state(fx.session).?.selected.location - 2, .length = 2 }));
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("A가 B가 C가", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 9), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_extra_selections[0].focus);
+    try testing.expectEqual(@as(usize, 14), term.rt.editor_extra_selections[1].focus);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "가나", .{ .location = ime.state(fx.session).?.selected.location - 1, .length = 1 }));
+    input.imeEnd(fx.session, null);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "난", .{ .location = ime.state(fx.session).?.selected.location - 1, .length = 1 }));
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("A가난 B가난 C가난", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 15), term.rt.editor_selection.?.focus);
+}
+
+test "IME_DIRECT_MULTI3 failed last-jamo deletion retains all spans until one successful retry" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |oom| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "L R"));
+        term.rt.editor_selection = editor_selection.Selection.at(1);
+        term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(3)});
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "ㄱ", null));
+        input.imeEnd(fx.session, null);
+        const previous_revision = term.rt.editor_ime_direct.revision;
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "ㄱ", .{ .location = 1, .length = 1 }));
+        input.imeDeleteBackward(fx.session);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        if (oom) fx.session.allocator = failing.allocator() else term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeEnd(fx.session, .{ .key = .backspace, .modifiers = .{} });
+        fx.session.allocator = testing.allocator;
+        term.rt.editorDocument().opened.?.file.read_only = false;
+        try testing.expect(fx.session.ime_editor_commit_pending);
+        try testing.expectEqualStrings("Lㄱ Rㄱ", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(previous_revision, term.rt.editor_ime_direct.revision);
+        try testing.expect(input.retryEditorCommit(fx.session));
+        try testing.expectEqualStrings("L R", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(usize, 3), term.rt.editor_extra_selections[0].focus);
+        try testing.expect(input.retryEditorCommit(fx.session));
+        try testing.expectEqualStrings("L R", term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "IME_DIRECT_MULTI4 allocation failures preserve either the old edit or its complete new provenance" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..16) |failure| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "L R"));
+        term.rt.editor_selection = editor_selection.Selection.at(1);
+        term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(3)});
+        try testing.expect(insertDirectIMETextAtSelection(fx.session, term, "ㄱ", null, null));
+        const old_revision = term.rt.editor_ime_direct.revision;
+        const old_primary = term.rt.editor_selection.?;
+        const old_extra = term.rt.editor_extra_selections[0];
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        fx.session.allocator = failing.allocator();
+        const accepted = insertDirectIMETextAtSelection(fx.session, term, "가", .{ .start = 1, .end = 4 }, .{ .start = 4, .end = 4 });
+        fx.session.allocator = testing.allocator;
+        if (!accepted) {
+            try testing.expectEqualStrings("Lㄱ Rㄱ", term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(old_revision, term.rt.editor_ime_direct.revision);
+            try testing.expectEqual(old_primary, term.rt.editor_selection.?);
+            try testing.expectEqual(old_extra, term.rt.editor_extra_selections[0]);
+            try testing.expect(insertDirectIMETextAtSelection(fx.session, term, "가", .{ .start = 1, .end = 4 }, .{ .start = 4, .end = 4 }));
+        }
+        try testing.expectEqualStrings("L가 R가", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 2), term.rt.editor_ime_direct.items.len);
+        try testing.expectEqual(@as(?u64, term.rt.editorDocument().opened.?.file.revision), term.rt.editor_ime_direct.revision);
+        try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+        try testing.expect(insertDirectIMETextAtSelection(fx.session, term, "간", .{ .start = 1, .end = 4 }, .{ .start = 4, .end = 4 }));
+        try testing.expectEqualStrings("L간 R간", term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "IME_DIRECT_MULTI5 cursor changes history and reset invalidate direct replacement provenance" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..5) |change| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "L R"));
+        breakUndoGroup(term);
+        term.rt.editor_selection = editor_selection.Selection.at(1);
+        term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(3)});
+        try testing.expect(insertDirectIMETextAtSelection(fx.session, term, "ㄱ", null, null));
+        switch (change) {
+            0 => breakUndoGroup(term),
+            1 => {
+                try testing.expect(undoEdit(fx.session, term));
+                try testing.expect(redoEdit(fx.session, term));
+            },
+            2 => dropUndoState(fx.session, term),
+            3 => term.rt.editor_extra_selections[0] = editor_selection.Selection.at(6),
+            4 => try testing.expect(insertText(fx.session, term, "X")),
+            else => unreachable,
+        }
+        try testing.expect(insertDirectIMETextAtSelection(fx.session, term, "가", .{ .start = 1, .end = 4 }, .{ .start = 4, .end = 4 }));
+        try testing.expectEqualStrings(switch (change) {
+            3 => "L가 R가ㄱ",
+            4 => "L가X RㄱX가",
+            else => "L가 Rㄱ가",
+        }, term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "IME_CARET1 explicit insert preserves the marked selection through an outside replacement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    for ([_]usize{ 0, 1, 6 }) |selected_byte| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "0123456789"));
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        const selected_units = maru.session.editor.text_input.utf16Offset("a😀b", selected_byte).?;
+        try testing.expect(ime.marked(fx.session, "a😀b", .{ .location = selected_units, .length = 0 }, null));
+        try testing.expect(ime.insert(fx.session, "X", .{ .location = 11, .length = 1 }));
+        try testing.expectEqualStrings("012a😀b3456X89", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 3) + selected_byte, term.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    }
+}
+
+test "IME_CARET2 a pending interior caret places the next mark before the queued suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "0123456789"));
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(ime.marked(fx.session, "a😀b", .{ .location = 1, .length = 0 }, null));
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 11, .length = 1 }));
+    try testing.expectEqual(ime.Range{ .location = 4, .length = 0 }, ime.state(fx.session).?.selected);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    try testing.expectEqual(ime.Range{ .location = 4, .length = 1 }, ime.state(fx.session).?.marked);
+    const projected = try std.mem.concat(testing.allocator, u8, &ime.projection(fx.session).?.segments);
+    defer testing.allocator.free(projected);
+    try testing.expectEqualStrings("012a한😀b3456X89", projected);
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("012a😀b3456X89", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(ime.Range{ .location = 4, .length = 1 }, ime.state(fx.session).?.marked);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+    try testing.expect(ime.insert(fx.session, "한", null));
+    try testing.expectEqualStrings("012a한😀b3456X89", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 7), term.rt.editor_selection.?.focus);
+}
+
+test "IME_CARET3 canonical explicit replacements preserve disjoint selections" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "0123456789"));
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(1, 3);
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 8, .length = 1 }));
+    try testing.expectEqualStrings("01234567X9", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(ime.Range{ .location = 1, .length = 2 }, ime.state(fx.session).?.selected);
+}
+
+test "IME_CARET4 a new mark replaces the preserved pending selection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "0123456789"));
+    breakUndoGroup(term);
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(1, 3);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 8, .length = 1 }));
+    try testing.expectEqual(ime.Range{ .location = 1, .length = 2 }, ime.state(fx.session).?.selected);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    try testing.expectEqualStrings("01234567X9", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(ime.Range{ .location = 1, .length = 1 }, ime.state(fx.session).?.marked);
+    const projected = try std.mem.concat(testing.allocator, u8, &ime.projection(fx.session).?.segments);
+    defer testing.allocator.free(projected);
+    try testing.expectEqualStrings("0한34567X9", projected);
+    input.imeEnd(fx.session, null);
+    try testing.expect(ime.insert(fx.session, "한", null));
+    try testing.expectEqualStrings("0한34567X9", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("0123456789", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(ime.Range{ .location = 1, .length = 2 }, ime.state(fx.session).?.selected);
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("0한34567X9", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+}
+
+test "IME_CARET5 interior committed carets are replicated and retained by redo" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "L R"));
+    breakUndoGroup(term);
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(3)});
+    try testing.expect(ime.marked(fx.session, "a😀b", .{ .location = 0, .length = 0 }, null));
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 2, .length = 2 }));
+    try testing.expectEqualStrings("LaXb RaXb", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_extra_selections[0].focus);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("L R", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_extra_selections[0].focus);
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("LaXb RaXb", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_extra_selections[0].focus);
+}
+
+test "IME_CARET6 preserving a disjoint caret does not expand the explicit edit across another cursor" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "0123456789abcdefghij"));
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(10)});
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "X", .{ .location = 15, .length = 1 }));
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("0123456789XabcdeXghij", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_extra_selections[0].focus);
+}
+
+test "IME_CARET7 marking outside a pending edit retains the intervening secondary cursor" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |explicit| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "0123456789abcdefghij"));
+        term.rt.editor_selection = editor_selection.Selection.at(5);
+        term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(10)});
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "X", .{ .location = 15, .length = 1 }));
+        try testing.expect(ime.marked(fx.session, "Y", .{ .location = 1, .length = 0 }, if (explicit) .{ .location = 18, .length = 1 } else null));
+        input.imeEnd(fx.session, null);
+        try testing.expectEqualStrings("0123456789XabcdeXghij", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+        try testing.expectEqual(@as(usize, 11), term.rt.editor_extra_selections[0].focus);
+        try testing.expectEqual(ime.Range{ .location = if (explicit) 19 else 5, .length = 1 }, ime.state(fx.session).?.marked);
+        try testing.expect(ime.insert(fx.session, "Y", null));
+        try testing.expectEqualStrings(if (explicit) "0123456789XYabcdeXghYj" else "01234Y56789XYabcdeXghij", term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "IME_CARET8 another insert outside a pending edit keeps each multicursor edit local" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |explicit| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "0123456789abcdefghij"));
+        term.rt.editor_selection = editor_selection.Selection.at(5);
+        term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(10)});
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "X", .{ .location = 15, .length = 1 }));
+        try testing.expect(ime.insert(fx.session, "Y", if (explicit) .{ .location = 18, .length = 1 } else null));
+        input.imeEnd(fx.session, null);
+        try testing.expectEqualStrings(if (explicit) "0123456789XYabcdeXghYj" else "01234Y56789XYabcdeXghij", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    }
+}
+
+test "IME_PARTIAL4 a failed partial update preserves the original overlay selection and canonical text" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    for (0..3) |failure| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "ab"));
+        try testing.expect(ime.marked(fx.session, "a😀b", .{ .location = 4, .length = 0 }, null));
+        const before_selection = term.rt.editor_selection.?;
+        const before_pin = fx.session.ime_terminal_target_id;
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        fx.session.allocator = failing.allocator();
+        const handled = ime.marked(fx.session, "X", .{ .location = 1, .length = 0 }, .{ .location = 3, .length = 2 });
+        fx.session.allocator = testing.allocator;
+        try testing.expect(handled);
+        try testing.expectEqualStrings("ab", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("a😀b", term.rt.editor_preedit);
+        try testing.expectEqual(before_selection, term.rt.editor_selection.?);
+        try testing.expectEqual(before_pin, fx.session.ime_terminal_target_id);
+    }
+}
+
+test "IME_RETRY1 rejected end keeps pending text next marked range and target through the next key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |oom| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "ab"));
+        try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "한", null));
+        try testing.expect(ime.marked(fx.session, "글", .{ .location = 0, .length = 1 }, null));
+        const before_range = term.rt.editor_ime_replacement;
+        const before_selected = term.rt.editor_ime_commit_selection;
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        if (oom) fx.session.allocator = failing.allocator() else term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeEnd(fx.session, null);
+        fx.session.allocator = testing.allocator;
+        try testing.expect(fx.session.ime_editor_commit_pending);
+        try testing.expect(!fx.session.ime_active);
+        try testing.expectEqualStrings("ab", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("한", fx.session.ime_inserted.items);
+        try testing.expectEqualStrings("글", term.rt.editor_preedit);
+        try testing.expectEqual(before_range, term.rt.editor_ime_replacement);
+        try testing.expectEqual(before_selected, term.rt.editor_ime_commit_selection);
+        try testing.expectEqual(ime.Range{ .location = 3, .length = 1 }, ime.state(fx.session).?.marked);
+        try testing.expectEqual(ime.Range{ .location = 3, .length = 1 }, ime.state(fx.session).?.selected);
+        try testing.expectEqual(@as(?u64, term.surface.id), fx.session.ime_terminal_target_id);
+
+        // Another failing begin consumes its callbacks and physical key without erasing the old key.
+        term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "X", null));
+        try testing.expect(ime.marked(fx.session, "Y", .{ .location = 1, .length = 0 }, null));
+        input.imeEnd(fx.session, .{ .key = .backspace, .modifiers = .{} });
+        try testing.expectEqualStrings("한", fx.session.ime_inserted.items);
+        try testing.expectEqualStrings("글", term.rt.editor_preedit);
+        try testing.expectEqualStrings("ab", term.rt.editorDocument().opened.?.file.content);
+
+        term.rt.editorDocument().opened.?.file.read_only = false;
+        input.imeBegin(fx.session); // old commit succeeds before accepting this new key
+        try testing.expect(!fx.session.ime_editor_commit_pending);
+        try testing.expectEqualStrings("ab한", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(ime.Range{ .location = 3, .length = 1 }, ime.state(fx.session).?.marked);
+        try testing.expect(ime.insert(fx.session, "글", null));
+        input.imeEnd(fx.session, null);
+        try testing.expectEqualStrings("ab한글", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(?u64, null), fx.session.ime_terminal_target_id);
+    }
+}
+
+test "IME_RETRY2 direct unmark style commit and focus loss retry retained text exactly once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |focus_loss| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "ab"));
+        try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "한", null));
+        try testing.expect(ime.marked(fx.session, "글", .{ .location = 1, .length = 0 }, null));
+        term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeEnd(fx.session, null);
+        try testing.expect(fx.session.ime_editor_commit_pending);
+        term.rt.editorDocument().opened.?.file.read_only = false;
+        if (focus_loss) {
+            fx.session.setFocused(false);
+            fx.session.setFocused(false);
+        } else {
+            // Swift unmarkText sends the queried marked text through this callback outside a key.
+            try testing.expect(ime.insert(fx.session, "글", null));
+        }
+        try testing.expectEqualStrings("ab한글", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+        try testing.expectEqual(@as(usize, 0), fx.session.ime_inserted.items.len);
+        try testing.expect(!fx.session.ime_editor_commit_pending);
+        try testing.expect(!fx.session.ime_active);
+        try testing.expectEqual(@as(?u64, null), fx.session.ime_terminal_target_id);
+    }
+}
+
+test "IME_RETRY3 selection reset cancels retained bytes instead of applying them to a reused document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    try testing.expect(selectAll(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "ab"));
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "한", null));
+    term.rt.editorDocument().opened.?.file.read_only = true;
+    input.imeEnd(fx.session, null);
+    try testing.expect(fx.session.ime_editor_commit_pending);
+    dropSelectionState(fx.session, term);
+    try testing.expect(!fx.session.ime_editor_commit_pending);
+    try testing.expectEqual(@as(usize, 0), fx.session.ime_inserted.items.len);
+    try testing.expectEqual(@as(?u64, null), fx.session.ime_terminal_target_id);
+    term.rt.editorDocument().opened.?.file.read_only = false;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "X", null));
+    input.imeEnd(fx.session, null);
+    try testing.expectEqualStrings("Xab", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "IME_RETRY4 a retained Return replays once after admission and never into another input owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |other_owner| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "ab"));
+        try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "한", null));
+        term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeEnd(fx.session, .{ .key = .enter, .modifiers = .{} });
+        try testing.expect(fx.session.ime_editor_commit_pending);
+        try testing.expect(fx.session.ime_editor_commit_replay != null);
+        term.rt.editorDocument().opened.?.file.read_only = false;
+        if (other_owner) {
+            fx.session.chrome_host.find.open = true;
+            try testing.expect(input.retryEditorCommit(fx.session));
+            try testing.expectEqualStrings("ab한", term.rt.editorDocument().opened.?.file.content);
+        } else {
+            input.imeBegin(fx.session);
+            try testing.expectEqualStrings("ab한\n", term.rt.editorDocument().opened.?.file.content);
+            try testing.expect(ime.insert(fx.session, "X", null));
+            input.imeEnd(fx.session, null);
+            try testing.expectEqualStrings("ab한\nX", term.rt.editorDocument().opened.?.file.content);
+        }
+        try testing.expect(input.retryEditorCommit(fx.session));
+        try testing.expect(!fx.session.ime_editor_commit_pending);
+        try testing.expect(fx.session.ime_editor_commit_replay == null);
+    }
+}
+
+test "IME_RETRY5 an independent insert or undo invalidates stale pending ranges without rewriting the new document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    for ([_]bool{ false, true }) |undo| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = fx.term;
+        try testing.expect(selectAll(fx.session, term));
+        try testing.expect(insertText(fx.session, term, "ab"));
+        breakUndoGroup(term);
+        if (undo) try testing.expect(insertText(fx.session, term, "X"));
+        try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+        input.imeBegin(fx.session);
+        try testing.expect(ime.insert(fx.session, "한", null));
+        try testing.expect(ime.marked(fx.session, "글", .{ .location = 1, .length = 0 }, null));
+        term.rt.editorDocument().opened.?.file.read_only = true;
+        input.imeEnd(fx.session, .{ .key = .enter, .modifiers = .{} });
+        try testing.expect(fx.session.ime_editor_commit_pending);
+        const retained_revision = fx.session.ime_editor_commit_revision;
+        term.rt.editorDocument().opened.?.file.read_only = false;
+
+        // These are the real edit/undo owners used by menu and non-IME commands.
+        if (undo) try testing.expect(undoEdit(fx.session, term)) else try testing.expect(insertText(fx.session, term, "X"));
+        const expected = if (undo) "ab" else "abX";
+        const new_selection = term.rt.editor_selection.?;
+        try testing.expect(term.rt.editorDocument().opened.?.file.revision != retained_revision);
+        if (undo) {
+            // A late callback from the old composition is consumed, not applied to the new revision.
+            try testing.expect(ime.insert(fx.session, "한글", null));
+        } else {
+            _ = ime.state(fx.session); // queries invalidate stale preedit and pending text as well
+            _ = ime.projection(fx.session);
+        }
+        try testing.expect(input.retryEditorCommit(fx.session));
+        try testing.expectEqualStrings(expected, term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(new_selection, term.rt.editor_selection.?);
+        try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+        try testing.expectEqual(@as(usize, 0), fx.session.ime_inserted.items.len);
+        try testing.expect(!fx.session.ime_editor_commit_pending);
+        try testing.expect(fx.session.ime_editor_commit_replay == null);
+        try testing.expect(term.rt.editor_ime_replacement == null);
+        try testing.expect(term.rt.editor_ime_commit_selection == null);
+        try testing.expect(fx.session.ime_terminal_target_id == null);
+    }
+}
+
+test "IME_PARTIAL5 read-only callbacks report ranges but create neither a composition nor a pin" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = fx.term;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    term.rt.editorDocument().opened.?.file.read_only = true;
+    const before_pin = fx.session.ime_terminal_target_id;
+    try testing.expectEqual(ime.Range{ .location = 3, .length = 0 }, ime.state(fx.session).?.selected);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    try testing.expect(ime.insert(fx.session, "한", null));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    try testing.expectEqual(before_pin, fx.session.ime_terminal_target_id);
+}
+
 test "IME2 조합은 조합을 시작한 자리에 그려진다 (N3 §11)" {
     // 줄 머리에 그리면 caret이 중간일 때 **글자가 딴 데 뜬다**. 확정 텍스트가 이미 "조합을 시작한
     // 곳"으로 가는 규칙을 지키므로(§3.3 IME 고정), 조합 글자도 같은 자리여야 둘이 안 갈린다.
@@ -10452,146 +11916,117 @@ test "IME4 조합 자리는 시작할 때 한 번만 잡는다 (N3)" {
     try testing.expectEqual(@as(usize, 5), term.rt.editor_preedit_at);
 }
 
-test "IME9 여러 줄 재변환 미리보기는 선택 본문 전부를 숨기고 끝줄 꼬리를 조합 뒤에 잇는다" {
+test "IME_MULTI1 앞쪽 primary 에서 시작한 조합은 멀티커서 확정과 undo 뒤에도 그 자리에 남는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const term = fx.term;
-    const original = term.rt.editorDocument().opened.?.file.content;
-    const start = std.mem.indexOf(u8, original, "a = 1").?;
-    const end = std.mem.indexOf(u8, original, "c = 3").?;
-    term.rt.editor_selection = editor_selection.Selection.fromPoints(start, end);
-    setEditorPreedit(fx.session, term, "한");
+    const term = try undoFixture(&fx, allocator, "ime-primary.txt", "aa bb aa\n");
+    const primary = editor_selection.Selection.fromAnchorRange(0, 2, 2, .word);
+    const extra = editor_selection.Selection.fromAnchorRange(6, 8, 8, .word);
+    term.rt.editor_selection = primary;
+    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{extra});
 
-    const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
-    defer freePreeditLines(fx.session, preview);
-    try testing.expectEqualStrings("const 한c = 3;", preview.rows[0]);
-    try testing.expectEqualStrings("", preview.rows[1]);
-    try testing.expectEqualStrings("", preview.rows[2]);
-    try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", term.rt.editorDocument().opened.?.file.content);
-    // If the preview cannot be built (for example, the end line is folded),
-    // the unchanged source remains visible and must keep its selection mark.
-    const original_marks = buildSelectionMarks(fx.session, term, false) orelse return error.SourceSelectionMissing;
-    try testing.expectEqual(@as(usize, 1), original_marks[0].len);
-    try testing.expect(buildSelectionMarks(fx.session, term, true) == null);
-    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.fromPoints(0, 5)});
-    // 보조 선택에도 조합 글자가 비치므로 원본 선택 띠를 중복해서 칠하지 않는다.
-    try testing.expect(buildSelectionMarks(fx.session, term, true) == null);
-
-    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
-    defer drawn.dl.deinit(allocator);
-    try testing.expect(drawnHasCodepoint(drawn.dl, 0xD55C));
-    try testing.expect(!drawnHasText(drawn.dl, "const b = 2;"));
-    try testing.expect(!drawnHasText(drawn.dl, "const c = 3;"));
-}
-
-test "IME-MC-LIVE 조합 갱신은 모든 커서에 비치고 확정·Undo는 한 편집이다" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = testing.allocator;
-    var fx = try PaneFixture.init(allocator);
-    defer fx.deinit(allocator);
-    const term = fx.term;
-    const source = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content);
-    defer allocator.free(source);
-    const a = std.mem.indexOf(u8, source, "a = 1") orelse return error.NoFirstCaret;
-    const b = std.mem.indexOf(u8, source, "b = 2") orelse return error.NoSecondCaret;
-    term.rt.editor_selection = editor_selection.Selection.at(a);
-    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(b)});
-
-    for ([_][]const u8{ "ㅎ", "하", "한" }) |preedit| {
-        setEditorPreedit(fx.session, term, preedit);
-        const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
-        defer freePreeditLines(fx.session, preview);
-        const first = try std.fmt.allocPrint(allocator, "const {s}a = 1;", .{preedit});
-        defer allocator.free(first);
-        const second = try std.fmt.allocPrint(allocator, "const {s}b = 2;", .{preedit});
-        defer allocator.free(second);
-        try testing.expectEqualStrings(first, preview.rows[0]);
-        try testing.expectEqualStrings(second, preview.rows[1]);
-        try testing.expectEqualStrings(source, term.rt.editorDocument().opened.?.file.content);
-    }
-
-    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
-    defer drawn.dl.deinit(allocator);
-    var visible_han: usize = 0;
-    for (drawn.dl.cells) |cell| {
-        if (cell.codepoint == 0xD55C) visible_han += 1;
-    }
-    try testing.expectEqual(@as(usize, 2), visible_han);
-
+    // 한 이벤트에서 앞 음절을 확정하고 다음 조합을 먼저 받은 순서다(IME7).
+    setEditorPreedit(fx.session, term, "가");
     setEditorPreedit(fx.session, term, "");
-    try testing.expect(insertText(fx.session, term, "한"));
-    try testing.expectEqualStrings("const 한a = 1;\nconst 한b = 2;\nconst c = 3;\n", term.rt.editorDocument().opened.?.file.content);
+    setEditorPreedit(fx.session, term, "나");
+    try testing.expect(insertText(fx.session, term, "가"));
+    try testing.expectEqualStrings("가 bb 가\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 10), term.rt.editor_extra_selections[0].focus);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_preedit_at);
+    // 확정된 두 자리 전체가 undo 하나이고 원래 primary 와 두 선택 범위도 돌아온다.
+    setEditorPreedit(fx.session, term, "");
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings(source, term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("aa bb aa\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualDeep(primary, term.rt.editor_selection.?);
+    try testing.expectEqualDeep(extra, term.rt.editor_extra_selections[0]);
+    try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
 }
 
-test "IME-MC-LIVE 같은 줄의 두 커서는 원본 위치에 각각 조합을 비춘다" {
+test "IME_MULTI3 재변환 범위가 다른 커서를 넘어가도 primary 는 자기 확정 뒤에 남는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const term = fx.term;
-    term.rt.editor_selection = editor_selection.Selection.at(0);
-    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(6)});
-    setEditorPreedit(fx.session, term, "한");
-    const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
-    defer freePreeditLines(fx.session, preview);
-    try testing.expectEqualStrings("한const 한a = 1;", preview.rows[0]);
-    try testing.expectEqualStrings("const b = 2;", preview.rows[1]);
+    const cases = [_]struct {
+        name: []const u8,
+        primary: usize,
+        extra: usize,
+        range: maru.session.editor.text_input.ByteRange,
+        text: []const u8 = "한",
+        expected: []const u8,
+        primary_after: usize,
+        extra_after: usize,
+    }{
+        .{ .name = "ime-primary-right.txt", .primary = 2, .extra = 8, .range = .{ .start = 9, .end = 10 }, .expected = "abcdefgh한i한", .primary_after = 15, .extra_after = 11 },
+        .{ .name = "ime-primary-left.txt", .primary = 8, .extra = 2, .range = .{ .start = 0, .end = 1 }, .expected = "한b한cdefghij", .primary_after = 3, .extra_after = 7 },
+        .{ .name = "ime-literal-pair.txt", .primary = 8, .extra = 2, .range = .{ .start = 0, .end = 0 }, .text = "()", .expected = "()ab()cdefghij", .primary_after = 2, .extra_after = 6 },
+    };
+    for (cases) |case| {
+        const term = try undoFixture(&fx, allocator, case.name, "abcdefghij");
+        const primary = editor_selection.Selection.at(case.primary);
+        const extra = editor_selection.Selection.at(case.extra);
+        term.rt.editor_selection = primary;
+        term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{extra});
+        try testing.expect(insertIMEText(fx.session, term, case.text, case.range));
+        try testing.expectEqualStrings(case.expected, term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+        try testing.expectEqual(case.primary_after, term.rt.editor_selection.?.focus);
+        try testing.expectEqual(case.extra_after, term.rt.editor_extra_selections[0].focus);
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings("abcdefghij", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(primary, term.rt.editor_selection.?);
+        try testing.expectEqualDeep(extra, term.rt.editor_extra_selections[0]);
+        try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+    }
 }
 
-test "IME10 접힌 선택 끝은 보이는 머리줄 끝으로 옮겨 조합과 확정이 숨은 본문을 건드리지 않는다" {
+test "IME_MULTI4 재변환이 겹친 커서를 합쳐 한 번 넣되 undo 는 원래 선택과 primary 를 되살린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const source = "const Box = struct {\n    const first = 1;\n    const second = 2;\n};\n";
-    const term = try openBracketFixture(&fx, allocator, "ime-fold.zig", source);
-    const start = (std.mem.indexOf(u8, source, "Box") orelse return error.NoStart) + 1;
-    const hidden_end = (std.mem.indexOf(u8, source, "second") orelse return error.NoEnd) + 3;
-    const head_end = (term.rt.editorDocument().opened.?.file.lines.line(0) orelse return error.NoHead).contentEnd();
-    term.rt.editor_selection = editor_selection.Selection.fromPoints(start, hidden_end);
-
-    try testing.expect(toggleFoldHead(fx.session, term, 0));
-    try testing.expect(visibleRowOfDocLine(term, 2) == null);
-    try testing.expectEqual(start, term.rt.editor_selection.?.start());
-    try testing.expectEqual(head_end, term.rt.editor_selection.?.end());
-    setEditorPreedit(fx.session, term, "한");
-    const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
-    defer freePreeditLines(fx.session, preview);
-    try testing.expectEqualStrings("const B한", preview.rows[0]);
-    try testing.expectEqualStrings(source, term.rt.editorDocument().opened.?.file.content);
-
-    setEditorPreedit(fx.session, term, "");
-    try testing.expect(insertText(fx.session, term, "한"));
-    try testing.expectEqualStrings("const B한\n    const first = 1;\n    const second = 2;\n};\n", term.rt.editorDocument().opened.?.file.content);
-}
-
-test "FOLD-SEL1 역방향 선택과 보조 caret도 접힘 머리로 옮기고 겹치면 하나로 합친다" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = testing.allocator;
-    var fx = try PaneFixture.init(allocator);
-    defer fx.deinit(allocator);
-    const source = "root:\n  child:\n    value\n  tail\nafter\n";
-    const term = try openBracketFixture(&fx, allocator, "fold-select.txt", source);
-    const start = (std.mem.indexOf(u8, source, "root") orelse return error.NoStart) + 2;
-    const hidden_end = (std.mem.indexOf(u8, source, "value") orelse return error.NoEnd) + 2;
-    const root_end = (term.rt.editorDocument().opened.?.file.lines.line(0) orelse return error.NoHead).contentEnd();
-    const child_end = (term.rt.editorDocument().opened.?.file.lines.line(1) orelse return error.NoChild).contentEnd();
-    term.rt.editor_selection = editor_selection.Selection.fromPoints(hidden_end, start);
-    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(hidden_end)});
-
-    try testing.expect(toggleFoldHead(fx.session, term, 1));
-    try testing.expectEqual(child_end, term.rt.editor_selection.?.end());
-    try testing.expect(term.rt.editor_selection.?.isReversed());
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
-    try testing.expect(toggleFoldHead(fx.session, term, 0));
-    try testing.expectEqual(start, term.rt.editor_selection.?.start());
-    try testing.expectEqual(root_end, term.rt.editor_selection.?.end());
-    try testing.expect(term.rt.editor_selection.?.isReversed());
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    const cases = [_]struct {
+        name: []const u8,
+        extra: editor_selection.Selection,
+        range: maru.session.editor.text_input.ByteRange,
+        expected: []const u8,
+        caret: usize,
+        extras: usize = 0,
+    }{
+        .{ .name = "ime-same-caret.txt", .extra = editor_selection.Selection.at(8), .range = .{ .start = 8, .end = 8 }, .expected = "abcdefgh한ij", .caret = 11 },
+        .{ .name = "ime-overlap-range.txt", .extra = editor_selection.Selection.fromPoints(6, 9), .range = .{ .start = 4, .end = 7 }, .expected = "abcd한j", .caret = 7 },
+        // Current half-open range selections remain separate when only their boundaries touch.
+        .{ .name = "ime-touch-range.txt", .extra = editor_selection.Selection.fromPoints(6, 9), .range = .{ .start = 3, .end = 6 }, .expected = "abc한한j", .caret = 6, .extras = 1 },
+    };
+    for (cases) |case| {
+        const term = try undoFixture(&fx, allocator, case.name, "abcdefghij");
+        const primary = editor_selection.Selection.at(1);
+        term.rt.editor_selection = primary;
+        term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{case.extra});
+        try testing.expect(insertIMEText(fx.session, term, "한", case.range));
+        try testing.expectEqualStrings(case.expected, term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(case.extras, term.rt.editor_extra_selections.len);
+        try testing.expectEqual(case.caret, term.rt.editor_selection.?.focus);
+        if (case.extras > 0) try testing.expectEqual(@as(usize, 9), term.rt.editor_extra_selections[0].focus);
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings("abcdefghij", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(primary, term.rt.editor_selection.?);
+        try testing.expectEqualDeep(case.extra, term.rt.editor_extra_selections[0]);
+        try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+        try testing.expect(redoEdit(fx.session, term));
+        try testing.expectEqualStrings(case.expected, term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(case.extras, term.rt.editor_extra_selections.len);
+        try testing.expectEqual(case.caret, term.rt.editor_selection.?.focus);
+        if (case.extras > 0) try testing.expectEqual(@as(usize, 9), term.rt.editor_extra_selections[0].focus);
+        // 다시 undo 해도 재변환 전의 원래 두 커서가 돌아와야 한다.
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings("abcdefghij", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(primary, term.rt.editor_selection.?);
+        try testing.expectEqualDeep(case.extra, term.rt.editor_extra_selections[0]);
+    }
 }
 
 test "IME7 이어 치는 한글: 조합 글자는 방금 확정한 글자 뒤에 선다" {

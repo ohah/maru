@@ -53,12 +53,30 @@ fn dirPath(buf: []u8) ?[]const u8 {
         @memcpy(buf[0..d.len], d);
         return buf[0..d.len];
     }
+    // Product-process smoke cannot use the in-process test override. An explicit absolute
+    // root isolates fixture recovery records without changing HOME or touching user backups.
+    // A malformed override disables backup access; falling back would defeat that isolation.
+    if (std.c.getenv("MARU_EDITOR_BACKUP_ROOT")) |raw| return explicitRoot(buf, std.mem.span(raw));
     const home_z = std.c.getenv("HOME") orelse return null;
     const home = std.mem.span(home_z);
     if (home.len == 0) return null;
     return std.fmt.bufPrint(buf, "{s}/Library/Application Support/maru/editor-backups", .{
         std.mem.trimEnd(u8, home, "/"),
     }) catch null;
+}
+
+fn explicitRoot(buf: []u8, path: []const u8) ?[]const u8 {
+    if (!std.fs.path.isAbsolute(path) or path.len > buf.len) return null;
+    @memcpy(buf[0..path.len], path);
+    return buf[0..path.len];
+}
+
+test "IME backup smoke root requires an absolute path and never truncates into a user directory" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/tmp/maru-ime/backups", explicitRoot(&buf, "/tmp/maru-ime/backups").?);
+    try std.testing.expect(explicitRoot(&buf, "relative/backups") == null);
+    try std.testing.expect(explicitRoot(&buf, "") == null);
+    try std.testing.expect(explicitRoot(buf[0..4], "/tmp/maru-ime/backups") == null);
 }
 
 /// 편집 통지 — **시계만 되감는다**(§3.10 「편집 후 debounce」). 부르는 자리는 `refreshAfterEdit`

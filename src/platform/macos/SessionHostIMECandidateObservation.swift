@@ -2,6 +2,9 @@ import AppKit
 import CoreGraphics
 import Foundation
 import Security
+import CryptoKit
+import Vision
+import ImageIO
 
 /// CR6d-v2b0b의 WindowServer 생산자다. 창을 고르는 판단은 Zig reducer만 소유하고,
 /// 이 타입은 title 없는 bounded inventory를 한 실행의 메모리에만 보존한다.
@@ -44,7 +47,17 @@ final class SessionHostIMECandidateObservation {
         let quartz_bounds: Bounds
     }
 
+    struct AppCapture: Codable {
+        let window_id: UInt32
+        let capture_basename: String
+        let sha256: String
+        let width: UInt32
+        let height: UInt32
+        let hanja_rows: UInt32
+    }
+
     struct Snapshot: Codable {
+        var app_captures: [AppCapture] = []
         let windows: [Window]
         let counters: Counters
         let anchor_appkit: Bounds
@@ -135,6 +148,53 @@ final class SessionHostIMECandidateObservation {
         )
     }
 
+    /// Capture only a new app-owned window from the complete inventory. The reducer still
+    /// rejects ambiguity; no title, favourable geometry, or producer prefilter chooses a winner.
+    func captureAppCandidate(before: Snapshot, opened: Snapshot) throws -> Snapshot {
+        let oldIDs = Set(before.windows.map { $0.id })
+        let fresh = opened.windows.filter { !oldIDs.contains($0.id) }
+        guard fresh.count == 1, let window = fresh.first, window.owner.pid == getpid() else { return opened }
+        guard window.layer == 20, CGPreflightScreenCaptureAccess(),
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { throw Failure.invalidOutput }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        let name = "candidate-\(rows.count)-\(window.id).png"
+        let url = root.appendingPathComponent(name)
+        guard !FileManager.default.fileExists(atPath: url.path) else { throw Failure.invalidOutput }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x", "-o", "-l", String(window.id), url.path]
+        try process.run()
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while process.isRunning, ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.01) }
+        if process.isRunning { kill(process.processIdentifier, SIGKILL); throw Failure.invalidOutput }
+        guard process.terminationStatus == 0 else { throw Failure.invalidOutput }
+        let data = try Data(contentsOf: url)
+        guard data.count <= 8 * 1024 * 1024,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw Failure.invalidOutput }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        // Classify the Hanja column; Korean-first OCR misreads these glyphs as Hangul.
+        request.recognitionLanguages = ["zh-Hant"]
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        let rowsWithHanja = (request.results ?? []).filter { observation in
+            guard let candidate = observation.topCandidates(1).first, candidate.confidence >= 0.3 else { return false }
+            return candidate.string.unicodeScalars.contains { (0x3400...0x9FFF).contains($0.value) }
+        }
+        // Three separately recognised rows reject blank windows and ordinary one-line tooltips.
+        let expected = Set("韓漢寒汗翰恨閑限罕邯".unicodeScalars)
+        let recognised = rowsWithHanja.compactMap { $0.topCandidates(1).first?.string }.joined()
+        let distinctRows = Set(rowsWithHanja.map { Int($0.boundingBox.midY * 100) })
+        guard rowsWithHanja.count >= 3, distinctRows.count >= 3,
+              recognised.unicodeScalars.contains(where: { expected.contains($0) }) else { throw Failure.invalidOutput }
+        var result = opened
+        result.app_captures = [AppCapture(window_id: window.id, capture_basename: name,
+            sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+            width: UInt32(image.width), height: UInt32(image.height), hanja_rows: UInt32(rowsWithHanja.count))]
+        return result
+    }
+
     func append(before: Snapshot, opened: Snapshot, closed: Snapshot) throws {
         guard rows.count < Self.requiredObservationCount else { throw Failure.inventoryTooLarge }
         rows.append(Row(before: before, opened: opened, closed: closed))
@@ -158,7 +218,18 @@ final class SessionHostIMECandidateObservation {
                 )
             }
         }
-        guard status == 0 else { throw Failure.rejected(status) }
+        guard status == 0 else {
+            // Keep rejected evidence separate from the accepted artifact. Without the original
+            // bounded snapshots, an ownership exclusion and a missing window look identical.
+            // Exclusive creation also preserves the first failure instead of replacing it.
+            let rejectedURL = outputURL.deletingPathExtension()
+                .appendingPathExtension("rejected-transcript.json")
+            do { try data.write(to: rejectedURL, options: .withoutOverwriting) }
+            catch {
+                FileHandle.standardError.write(Data("session_host_ime_candidate_rejected_transcript_write_failed=true\n".utf8))
+            }
+            throw Failure.rejected(status)
+        }
     }
 
     private static func ownerIdentity(pid: Int32) -> (bundleID: String, signingID: String, appleSigned: Bool) {

@@ -17,15 +17,15 @@
 const std = @import("std");
 const max_source_bytes = 16 * 1024 * 1024;
 
-test "IME 조합 확정은 키보드·포인터·메뉴·드롭·외부 URL 경계와 Chromium 탭 세 갈래가 공유한다" {
+test "IME 조합 확정은 키보드·포인터·메뉴·드롭·외부 URL 경계와 Chromium 탭 네 갈래가 공유한다" {
     const allocator = std.testing.allocator;
     const swift = try readSource(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(swift);
 
-    // 선언 1 + 호출 10(keyEquivalent의 두 직접 dispatch, 외부 URL, Chromium 탭 세 갈래 포함). 늘거나 줄면 목록이 바뀐 것이고, 그때 아래
+    // 선언 1 + 호출 11(keyEquivalent의 두 직접 dispatch, 외부 URL, Chromium 탭 네 갈래 포함). 늘거나 줄면 목록이 바뀐 것이고, 그때 아래
     // 문맥 단언도 함께 갱신해야 한다.
     try std.testing.expectEqual(@as(usize, 1), count(swift, "func commitMarkedTextIfComposing()"));
-    try std.testing.expectEqual(@as(usize, 10), count(swift, "commitMarkedTextIfComposing()") - 1);
+    try std.testing.expectEqual(@as(usize, 11), count(swift, "commitMarkedTextIfComposing()") - 1);
     // URL's actual host body is also executed against scoped admission stubs by
     // tools/test-editor-app-url-host.py; this inventory is not its effect oracle.
     try std.testing.expect(callsWithin(swift, "private func drainEditorURLs()", "maru_macos_editor_url_drain("));
@@ -56,6 +56,9 @@ test "IME 조합 확정은 키보드·포인터·메뉴·드롭·외부 URL 경�
     // ⑦ Chromium 탭 메뉴 편집 명령(잘라내기·복사·붙여넣기·전체 선택) — 붙여넣기가 페이지 조합을 끝내면 입력기 세션의
     //    조합이 남아 글자가 겹친다(W4c 적대 검증). 거절되면 명령을 보내지 않는다.
     try std.testing.expect(count(swift, "        guard metalTerminalView?.commitMarkedTextIfComposing() != false else { return true }\n        return maru_macos_app_session_osr_edit(") == 1);
+    // ⑧ Chromium 탭에 팝업 위젯(`<select>` 목록)이 열려 있을 때의 키 — 입력기를 거치지 않고 페이지로 가기 **전**(W6a②).
+    //    목록은 편집할 수 없어 조합이 갈 곳이 없고, 조합이 남으면 그 뒤 Esc 가 「조합 취소」로 먹혔다. 거절되면 키를 보내지 않는다.
+    try std.testing.expect(count(swift, "                guard commitMarkedTextIfComposing() else { return }\n                _ = controller?.osrKey(event, phase: 3)") == 1);
 
     // 확정은 **커밋 + AppKit 세션 종료 + 로컬 상태 비우기** 셋이 함께여야 한다. 하나라도 빠지면 잔상의
     // 출처가 그쪽으로 옮겨 간다(Zig만 비우면 AppKit marked 세션이 살아 다음 입력이 조합에 이어 붙는다).

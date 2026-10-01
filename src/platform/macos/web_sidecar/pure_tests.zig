@@ -10,4 +10,5 @@ test {
     _ = @import("ring_producer.zig");
     _ = @import("input_map.zig");
     _ = @import("dialog_table.zig");
+    _ = @import("unsandboxed_policy.zig");
 }

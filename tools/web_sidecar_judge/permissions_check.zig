@@ -16,6 +16,8 @@
 //!   geo-watch          `watchPosition` 은 좌표 하나를 받는다(갱신하지 않는다 — 사용자 결정 2026-09-26)
 //!   geo-block          차단하면 다음 요청은 묻지 않고 거절된다(기억)
 //!   perm-media         카메라: 장치가 있으면 미디어 요청(카메라 비트)이 와서 거부가 닿고, 없으면 요청 전에 `NotFoundError`(이 기계)
+//!   perm-media-helpers 카메라를 청한 뒤 helper 가 다시 뜨기를 되풀이하지 않는다 — 2 초 동안 host 의 자식 pid 가 거의 그대로이고
+//!                      샌드박스 밖 helper 는 많아야 하나(카메라 utility — Chromium 이 일부러 샌드박스 없이 띄운다, W7b 10·11 차)
 //!   perm-display       화면 공유(`getDisplayMedia`)는 미디어 요청(화면 비트)으로 온다 — 거부하면 `NotAllowedError`. 미디어 요청의
 //!                      답은 Chromium 이 기억하지 않는다 — 다시 청하면 또 묻는다(W5b 실측). 허용하면 청한 비트를 그대로 돌려준다
 //!                      (거부와 다른 결과 — 이 기계는 화면 기록 권한이 없어 `NotReadableError`)
@@ -120,6 +122,55 @@ fn waitTitle(host: *Host, text: []const u8) bool {
         if (next == .title_changed and next.title_changed.browser == id and std.mem.eql(u8, next.title_changed.text, text)) return true;
     }
     return false;
+}
+
+/// host 의 자식을 `ms` 동안 50 ms 마다 본다 — 나타난 서로 다른 helper pid 수(처음 본 수와 견준다)와, 한 번에 본 「계속
+/// 샌드박스 밖인」 helper 의 최대 수. 카메라 utility 를 helper 가 끝내던 때는 초당 580~1090 번 다시 떠 이 2 초에 1,000 개
+/// 넘게 떴을 것이고, 50 ms 표본으로 43 개를 봤다(처음 7 — 실측). 경로가 `maru-web-helper` 인 자식만 센다 — exec 전의 fork 와
+/// 이미 죽은 pid 는 경로가 비어 빠진다(죽은 pid 도 `sandbox_check` 가 1 을 준다 — W7b 12 차 리뷰 실측). 새 helper 는 자기
+/// 샌드박스를 켜기 전 잠깐 밖이므로, 세 표본(150 ms) 넘게 잇달아 밖인 것만 「샌드박스 밖」으로 센다.
+const Churn = struct { first: usize, distinct: usize, max_unsandboxed: usize };
+
+fn helperChurn(host_pid: c_int, ms: u32) Churn {
+    var buf: [64]c_int = undefined;
+    var path_buf: [4096]u8 = undefined;
+    var seen: [512]c_int = undefined;
+    var streak_pid: [64]c_int = undefined;
+    var streak_len: [64]u8 = undefined;
+    var streaks: usize = 0;
+    var churn: Churn = .{ .first = 0, .distinct = 0, .max_unsandboxed = 0 };
+    const deadline = os.nowMs() + ms;
+    var first = true;
+    while (os.nowMs() < deadline) {
+        const kids = os.children(host_pid, &buf);
+        var next_pid: [64]c_int = undefined;
+        var next_len: [64]u8 = undefined;
+        var next_n: usize = 0;
+        var named: usize = 0;
+        var persistent: usize = 0;
+        for (kids) |pid| {
+            if (!std.mem.endsWith(u8, os.executablePath(pid, &path_buf), "/maru-web-helper")) continue;
+            named += 1;
+            if (std.mem.indexOfScalar(c_int, seen[0..@min(churn.distinct, seen.len)], pid) == null) {
+                if (churn.distinct < seen.len) seen[churn.distinct] = pid;
+                churn.distinct += 1;
+            }
+            if (os.sandbox_check(pid, null, 0) == 1) continue;
+            const before: u8 = if (std.mem.indexOfScalar(c_int, streak_pid[0..streaks], pid)) |i| streak_len[i] else 0;
+            next_pid[next_n] = pid;
+            next_len[next_n] = before +| 1;
+            if (next_len[next_n] >= 3) persistent += 1;
+            next_n += 1;
+        }
+        if (first) churn.first = named;
+        first = false;
+        @memcpy(streak_pid[0..next_n], next_pid[0..next_n]);
+        @memcpy(streak_len[0..next_n], next_len[0..next_n]);
+        streaks = next_n;
+        churn.max_unsandboxed = @max(churn.max_unsandboxed, persistent);
+        os.sleepMs(50);
+    }
+    return churn;
 }
 
 /// `/perm?a=<action>` 을 열고 눌러 청한다. 요청이 오면 거기서 멈춘다(답은 호출자가).
@@ -473,6 +524,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     } else {
         report(endsWith(&cam, ":err-NotFoundError"), "perm-media", std.fmt.bufPrint(&detail_buf, "이 기계에 카메라가 없다 — 요청 전에 {s}", .{cam.title()}) catch "");
     }
+    const churn = helperChurn(host.pid, 2_000);
+    report(churn.distinct <= churn.first + 5 and churn.max_unsandboxed <= 1, "perm-media-helpers", std.fmt.bufPrint(&detail_buf, "카메라 뒤 2 초 동안 helper pid {d} 개(처음 {d}) · 150 ms 넘게 샌드박스 밖 최대 {d}", .{ churn.distinct, churn.first, churn.max_unsandboxed }) catch "");
 
     // ── 화면 공유 ──
     const display = try ask(&host, &u, port, "display");

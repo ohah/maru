@@ -197,7 +197,7 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 
 ## 13. Chromium 백엔드 (OSR sidecar — 실측 2026-09-23, 선택형 백엔드로 도입 결정 D2)
 
-WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromium 호환·CDP 생태계 검증이 제약된다. Chromium은 **선택형 백엔드**로 둔다(사용자 결정 2026-09-24 — [구현 계획](plans/web-osr-backend.md) D2) — 기본은 WKWebView이고, 기본 앱은 CEF를 링크하지 않는다([프로젝트 규칙](project-rules.md) 「의존성」 예외 ③ — sidecar 전용·opt-in 빌드).
+WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromium 호환·CDP 생태계 검증이 제약된다. Chromium은 **선택형 백엔드**로 둔다(사용자 결정 2026-09-24 — [구현 계획](plans/web-osr-backend.md) D2) — 기본은 WKWebView이고, 기본 앱은 CEF를 링크하지 않는다([프로젝트 규칙](project-rules.md) 「의존성」 예외 ④ — sidecar 전용·opt-in 빌드).
 
 > **이 절은 두 층으로 읽는다.** §13.1 은 **OSR(off-screen rendering) + sidecar** 축이고 PoC 로 실측한 것이다. §13.2 이후(옛 서술)는 **on-screen CEF**(child NSWindow / 앱에 링크하는 plugin ABI)를 전제로 쓰였고, 그 전제에서만 유효한 제약이 섞여 있다. **둘을 섞어 읽으면 막힌 길로 읽힌다** — §13.1 이 뒤집은 것을 그 절이 명시한다. 엔진 중립 계약(`browser.*` wire·불투명 `ref`·host-mediated MCP 분기)은 두 축 모두에서 그대로다.
 

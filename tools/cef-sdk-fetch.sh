@@ -2,7 +2,7 @@
 # 웹 OSR sidecar 의 CEF SDK 를 받아 해시를 확인하고 캐시에 푼다(W1b, docs/plans/web-osr-backend.md).
 #
 # `zig fetch` 는 CEF 배포 형식인 .tar.bz2 를 못 푼다(실측 — `unknown file type`) — 그래서 스크립트다.
-# CEF 는 프로젝트 규칙 「의존성」 예외 ③ 이라 이 스크립트는 opt-in 경로(`mise run web-sidecar*`)에서만 돈다.
+# CEF 는 프로젝트 규칙 「의존성」 예외 ④ 이라 이 스크립트는 opt-in 경로(`mise run web-sidecar*`)에서만 돈다.
 #
 # 사용: tools/cef-sdk-fetch.sh           마지막 줄에 SDK 디렉터리 경로를 찍는다
 # 환경: MARU_CEF_CACHE    캐시 뿌리(기본 ~/Library/Caches/maru/cef)

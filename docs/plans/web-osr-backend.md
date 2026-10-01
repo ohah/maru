@@ -94,10 +94,13 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
   안으로 — `RunVideoCaptureServiceInBrowserProcess`)은 반복은 없앴지만 이 맥에서 카메라 요청이 답 없이 멈춰 버렸다(실측).
   판정자 `perm-media-helpers` 가 카메라 뒤 2 초 동안 helper pid 가 거의 그대로(처음 +5 안)이고 세 표본(약 100 ms) 잇달아
   샌드박스 밖인 helper 가 많아야 하나이며 그것이 실행 인자로 카메라 utility 인지 본다(옛 동작에서 pid 34~43·처음 7~8 로 실패,
-  고친 뒤 7·7). `perm-camera-gone` 은 그 utility 가 host 를 끝낸 뒤 3 초 안에 사라지는지 본다 — 이 utility 는 W1b 의
-  「모두 샌드박스 안」에서 빠진 하나라 고아가 되지 않는지를 따로 잰다(Chromium 의 자식은 IPC 가 끊기면 스스로 끝난다 —
-  `child_thread_impl.cc`, maru host 는 자식을 직접 죽이지 않는다). 다시 뜨기가 초당 둘 아래로 느려지면 이 판정은 놓친다
-  (Chromium 154 는 늦춤 없이 곧바로 다시 띄운다 — 소스). 알림 utility 의 다시 뜨기는 이 판정이
+  고친 뒤 7·7). 이 utility 는 W1b 의 「모두 샌드박스 안」에서 빠진 하나라 고아가 되지 않는지를 따로 잰다: `perm-camera-gone` 은 정상
+  종료 직전의 샌드박스 밖 helper 가 모두 3 초 안에 사라지는지(정상 종료에서는 host 가 자식을 직접 끝낸다 — 멈춰 둔 utility 도
+  사라졌다, 14 차 실측), `perm-camera-orphan` 은 깨끗한 프로필에서 host 를 **SIGKILL** 해도 utility 가 3 초 안에 스스로 끝나는지
+  (Chromium 의 자식은 IPC 가 끊기면 스스로 끝난다 — `child_thread_impl.cc`; utility 를 멈춰 두는 변이로 FAIL 을 확인했다).
+  50 ms 표본은 그 순간 살아 있는 것만 본다 — 옛 동작은 2 초에 약 1,240 번 다시 떴는데 30 개만 봤다(약 2.4 %). 그러니 몇 ms 만에
+  끝나는 다시 뜨기는 초당 약 100 번 아래로 느려지면 「처음 +5」를 넘지 못해 놓칠 수 있다(추산 — Chromium 154 는 늦춤 없이
+  곧바로 다시 띄운다, 소스). 알림 utility 의 다시 뜨기는 이 판정이
   보지 않는다(후속).
 
 ### C2. 제어 채널

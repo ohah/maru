@@ -7669,6 +7669,11 @@ pub const AppSession = struct {
     user_actions: [session_host.user_action_queue.max_actions]?OwnedUserAction =
         [_]?OwnedUserAction{null} ** session_host.user_action_queue.max_actions,
     next_user_action_id: u64 = 1,
+    /// 마지막 사용자 동작 실패의 진단 한 줄(`formatUserActionFailure`). 아래 `failUserAction` 은 테스트 빌드에서
+    /// `std.log` 를 끄므로, E2E 가 「세션 정보를 동기화하지 못했다」로 실패하면 **아홉 사유 중 어느 것인지**가
+    /// 사라졌다 — P3-e4d-3 이 CI 에서 그렇게 네 번 빨갰다(2026-09-28 ~ 30). 여기 남겨 E2E 가 실패 출력에 싣는다.
+    user_action_last_failure_buf: [320]u8 = undefined,
+    user_action_last_failure_len: usize = 0,
     // 드롭 파일 업로드(maru ssh 원격) 백그라운드 스레드 ↔ 메인 tick 통신. 업로드는 ssh 자식 프로세스라
     // 느릴 수 있어 별도 스레드에서 하고(UI 안 멈춤), 완료된 원격 절대경로를 mutex 하에 upload_results에
     // push한다. 메인 tick(drainUploadResults)이 빼서 pasteText로 흘려보낸다 — core 접근은 메인 전용이라
@@ -16437,21 +16442,22 @@ pub const AppSession = struct {
     /// 앱 안의 대기 수일 뿐이다. host 의 부하를 같이 보려면 별도 경로가 필요하다.
     fn failUserAction(self: *AppSession, id: u64, why: []const u8) void {
         const slot = self.userActionSlot(id) orelse return;
-        if (!builtin.is_test) {
-            var wall: std.c.timespec = undefined;
-            const at: i64 = if (std.c.clock_gettime(.REALTIME, &wall) == 0) wall.sec else 0;
-            var buf: [320]u8 = undefined;
-            const report = userActionFailureReport(
-                at,
-                why,
-                &slot.*.?,
-                self.awakeMs(),
-                host_connect_failed,
-                self.user_action_queue.len,
-            );
-            if (formatUserActionFailure(&buf, report)) |text| {
-                std.log.warn("{s}", .{text});
-            } else |_| {}
+        var wall: std.c.timespec = undefined;
+        const at: i64 = if (std.c.clock_gettime(.REALTIME, &wall) == 0) wall.sec else 0;
+        const report = userActionFailureReport(
+            at,
+            why,
+            &slot.*.?,
+            self.awakeMs(),
+            host_connect_failed,
+            self.user_action_queue.len,
+        );
+        // 테스트 빌드도 줄을 **남긴다**(로그로 내보내지 않을 뿐) — E2E 실패 출력이 이 줄로 사유를 보인다.
+        if (formatUserActionFailure(&self.user_action_last_failure_buf, report)) |text| {
+            self.user_action_last_failure_len = text.len;
+            if (!builtin.is_test) std.log.warn("{s}", .{text});
+        } else |_| {
+            self.user_action_last_failure_len = 0;
         }
         self.showUserActionFailure(&slot.*.?);
         self.freeUserAction(id);
@@ -41028,7 +41034,8 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
         const results = session.upload_results.items.len;
         session.upload_mutex.unlock(io);
         std.debug.print(
-            "P3-e4d-3 file terminal state remote_bytes={any} screen_path={any} queue_active={any} inflight={d} results={d} notice={any}:{s}\n",
+            "P3-e4d-3 file terminal state remote_bytes={any} screen_path={any} queue_active={any} inflight={d} results={d} notice={any}:{s}\n" ++
+                "P3-e4d-3 last user action failure: {s}\n",
             .{
                 e4d3FileEquals(io, allocator, remote_file, file_bytes),
                 e4d3SurfaceContains(term, io, "host-file-proof.bin"),
@@ -41037,6 +41044,10 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
                 results,
                 session.chrome_host.notice.open,
                 session.chrome_host.notice.message,
+                if (session.user_action_last_failure_len == 0)
+                    "(없음 — 큐 실패 경로가 아니다)"
+                else
+                    session.user_action_last_failure_buf[0..session.user_action_last_failure_len],
             },
         );
     }
@@ -41152,7 +41163,10 @@ fn e4d4SpawnDetachedRuntime(
     for (0..e4d_metadata_wait_ticks) |_| {
         const delta = try runtime.pumpDelta();
         seen[@intFromEnum(delta)] += 1;
-        observed = delta == .metadata;
+        // 결과 종류(`.metadata`)가 아니라 적용된 상태로 본다. 메타데이터가 OSC 에코의 화면 배치와 같은
+        // 턴에 오면 `pumpDelta` 는 `.screen` 하나만 돌려준다 — 그 뒤로는 `.idle` 뿐이라 결과만 기다리면
+        // 이미 적용된 dest 를 끝내 못 본다(부하에서 ~3 %, 실패 순간 클라이언트 revision 2·dest 일치를 실측).
+        observed = if (runtime.appliedSshRemoteDest()) |applied| std.mem.eql(u8, applied, dest) else false;
         if (observed) break;
         _ = usleep(20 * 1000);
     }
@@ -41160,10 +41174,11 @@ fn e4d4SpawnDetachedRuntime(
         // **말없이 죽지 않는다.** 예전에는 `MetadataNotObserved` 한 줄이 전부라, 시한이 모자랐는지
         // 델타가 아예 안 왔는지 구분할 수 없었다 — CI 가 빨개져도 쫓을 것이 없었다(2026-09-14).
         std.debug.print(
-            "E4D4: {d}초 동안 원격 메타데이터가 안 왔다 — dest «{s}» · 본 델타: idle {d} · event_pending {d} · screen {d} · ended {d}\n",
+            "E4D4: {d}초 동안 원격 메타데이터가 안 왔다 — dest «{s}» · 적용된 dest «{s}» · 본 델타: idle {d} · event_pending {d} · screen {d} · ended {d}\n",
             .{
                 e4d_metadata_wait_ticks * 20 / 1000,
                 dest,
+                runtime.appliedSshRemoteDest() orelse "(none)",
                 seen[@intFromEnum(Pump.idle)],
                 seen[@intFromEnum(Pump.event_pending)],
                 seen[@intFromEnum(Pump.screen)],

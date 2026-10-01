@@ -36,7 +36,8 @@ Maru 설계는 [공유 문서 제안](plans/editor-shared-document.md), 계약�
 
 VS Code를 기본 UX 근거로 삼을 권장안은 공유 Undo, 포커스 뷰의 Undo 선택 복원, 다른 뷰의
 marker 대응 좌표 매핑, 초기 view state 복사, 뷰별 접힘/검색, 일반 공유 뷰의 마지막 닫기 확인,
-저장 직렬화·중복 합류다. 이는 참고 결과를 반영한 제안이며 제품 구현 승인을 추가로 주장하지 않는다.
+저장 직렬화·중복 합류다. 2026-10-01 사용자가 VS Code 기준 UX 채택을 승인했다. 목표 계약은
+[레이어 배치 §2.4a](native-editor-layering.md)에 반영했다. 제품 구현/실제 OS 검증 완료는 아니다.
 
 IME는 중요한 차이가 있다. VS Code의 확인한 textarea 경로는 조합 중에도 모델을 고친다.
 Maru는 현재 preedit를 확정 문서와 분리한다. 표시 경험을 맞추려면 반대 뷰에 같은 조합 projection을
@@ -71,3 +72,23 @@ VS Code와 런타임이 달라 Maru 판정자로 닫는다. 이번에는 소스/
 
 근거는 각 링크의 공개 동작/책임만 참고했다. 자료구조 레이아웃·함수 분해·control-flow를 Maru로
 옮기지 않는다. 소스 버전이 달라지면 관찰도 달라질 수 있어 commit permalink를 사용한다.
+
+## 추가 재조사 (2026-10-01)
+
+최신 main `14b9d22f9a980b451aacff4b0ed3864ca2a1b7c4`의 기존 23개 파일은 위 commit의
+내용과 같았다. 추가로 `cursorTypeOperations.ts`, `cursorTypeEditOperations.ts`,
+`textFileService.test.ts`, `textFileEditorModel.test.ts`를 읽었다. 소스 총 27개이며 테스트 실행은 아니다.
+
+- [타이핑 경계 규칙](https://github.com/microsoft/vscode/blob/14b9d22f9a980b451aacff4b0ed3864ca2a1b7c4/src/vs/editor/common/cursor/cursorTypeEditOperations.ts#L965-L994)과
+  [cursor의 모델 변경 처리](https://github.com/microsoft/vscode/blob/14b9d22f9a980b451aacff4b0ed3864ca2a1b7c4/src/vs/editor/common/cursor/cursor.ts#L249-L274)를 함께 보면,
+  비활성 뷰의 입력 종류가 Other로 정산된 뒤 다음 일반 타이핑에서 경계가 생기는 것으로 추론할 수 있다.
+  단순 focus 전환 자체에 항상 stop이 있는 것과 다르며 교차 뷰 실제 입력을 fixture/GUI로 재확인한다.
+- [Save As 동일 대상과 경로 identity](https://github.com/microsoft/vscode/blob/14b9d22f9a980b451aacff4b0ed3864ca2a1b7c4/src/vs/workbench/services/textfile/browser/textFileService.ts#L407-L432)는
+  동일 대상 저장과 같은 identity의 이동을 분리한다. 기존 대상은 target model 재사용 경로로 연결한다.
+  모든 dirty 대상 확인 조건을 코드 일부만으로 일반화하지 않고 기존 Maru 충돌 선택을 유지한다.
+- [저장 테스트](https://github.com/microsoft/vscode/blob/14b9d22f9a980b451aacff4b0ed3864ca2a1b7c4/src/vs/workbench/services/textfile/test/browser/textFileService.test.ts#L76-L91)는
+  Save As 동일 대상에서 dirty가 정산되는 사례를 포함한다. 두 dirty 모델 대상 충돌·실제 파일 대화상자의
+  overwrite 조건까지 이 테스트가 증명하는 것은 아니다.
+
+표의 권장안은 위 계약의 채택 전 비교 기록이다. 현재 승인된 UX와 남은 구현 gate는 §2.4a와
+공유 문서 계획을 읽는다. VS Code 코드 표현은 계속 복사하지 않는다.

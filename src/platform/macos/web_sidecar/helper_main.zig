@@ -3,13 +3,15 @@
 //! 순서가 계약이다: ① `libcef_sandbox.dylib` 를 올려 `cef_sandbox_initialize` 로 샌드박스를 켠다 ② **그 뒤에**
 //! 프레임워크를 dlopen 한다 ③ `cef_execute_process` 로 자식 역할을 한다. 프레임워크를 먼저 올리면(링크 시점 포함)
 //! GPU 프로세스가 죽는다(§13.1 「남은 미해결」 1 — 실측). 샌드박스를 못 켜면 **샌드박스 없이 돌지 않고** 끝낸다 —
-//! 이 프로세스는 신뢰할 수 없는 웹을 그린다.
+//! 이 프로세스는 신뢰할 수 없는 웹을 그린다. 예외는 Chromium 이 일부러 샌드박스 없이 띄우는 카메라 utility 하나다
+//! (`unsandboxed_policy.zig`, docs/plans/web-osr-backend.md C1 「예외 하나」).
 
 const std = @import("std");
 const cef = @import("cef.zig");
 const library = @import("library.zig");
 const layout = @import("layout.zig");
 const renderer = @import("renderer.zig");
+const unsandboxed_policy = @import("unsandboxed_policy.zig");
 
 const SandboxInitialize = *const fn (argc: c_int, argv: [*c][*c]u8) callconv(.c) ?*anyopaque;
 extern "c" fn sandbox_check(pid: c_int, operation: ?[*:0]const u8, kind: c_int) c_int;
@@ -32,7 +34,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (sandbox_initialize(argc, argv_c) == null) return fail("sandbox initialization failed");
     // `cef_sandbox_initialize` 는 샌드박스를 요청받지 않은(브라우저가 `--seatbelt-client` 를 안 준) helper 에게도 성공을
     // 돌려준다(적대 검증 실측) — 그러면 샌드박스 없이 프레임워크를 올린다. 실제로 샌드박스 안인지 확인하고, 아니면 끝낸다.
-    if (sandbox_check(std.c.getpid(), null, 0) != 1) {
+    // 예외는 Chromium 이 일부러 샌드박스 없이 띄우는 카메라 utility 하나다(`unsandboxed_policy.zig` — 끝내면 Chromium 이
+    // 초당 수백 번 다시 띄운다, W7b 10·11 차 실측).
+    if (sandbox_check(std.c.getpid(), null, 0) != 1 and !unsandboxedAllowed(argv)) {
         std.debug.print("maru-web-helper: sandbox is not active after initialization ({s} {s})\n", .{ argValue(argv, "--type="), argValue(argv, "--utility-sub-type=") });
         return 1;
     }
@@ -57,6 +61,14 @@ var api_storage: library.Api = undefined;
 fn fail(reason: []const u8) u8 {
     std.debug.print("maru-web-helper: {s}\n", .{reason});
     return 1;
+}
+
+/// 샌드박스 밖이어도 되는 helper 인가 — 인자가 너무 많으면 보지 않고 거절한다.
+fn unsandboxedAllowed(argv: []const [*:0]const u8) bool {
+    var slices: [64][]const u8 = undefined;
+    if (argv.len > slices.len) return false;
+    for (argv, 0..) |raw, i| slices[i] = std.mem.span(raw);
+    return unsandboxed_policy.allowsUnsandboxed(slices[0..argv.len]);
 }
 
 /// 진단용 — `--type=` 같은 인자의 값(없으면 빈 글).

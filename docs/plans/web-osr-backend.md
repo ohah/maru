@@ -76,7 +76,23 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
   로 겸용하면 GPU 프로세스가 죽는다(§13.1 「남은 미해결」 1 — 세 가지 배치를 실측으로 갈랐다. 두 조건을 **함께** 건
   배치만 쟀고 각각 단독은 재지 않았다).
 - 서명은 ad-hoc, hardened runtime 없음. formula 산출물에는 quarantine 이 붙지 않는다(§13.1 「이 축이 뒤집은 것」).
-- **판정자**: helper 의 모든 프로세스가 `sandbox_check` 1. 샌드박스를 끈 빌드는 이 판정자에서 실패한다.
+- **판정자**: helper 의 모든 프로세스가 `sandbox_check` 1(아래 카메라 utility 를 띄우기 전 — 띄운 뒤에는 그 하나만 밖이다). 샌드박스를 끈 빌드는 이 판정자에서 실패한다.
+- **예외 하나 — 카메라 utility(사용자 결정 2026-10-01, W7b 10·11 차에서 발견)**: Chromium 은 macOS 에서 카메라 담당 utility
+  (`video_capture.mojom.VideoCaptureService`)를 **일부러 샌드박스 없이** 띄운다(mojom `ServiceSandbox` 가 Fuchsia 밖에서
+  `kNoSandbox` → `--service-sandbox-type=none`, `--seatbelt-client` 없음 — Chromium 154 소스·실행 인자 실측). helper 가 이것을
+  끝내면 Chromium 이 곧바로 다시 띄워 초당 580~1090 번 되풀이했고(그 host 가 끝날 때까지, 코어 하나 가까이), 카메라도
+  동작할 수 없었을 것이다(추론 — 카메라가 있는 기계는 실측 못 함, 고친 뒤 카메라가 되는지·TCC 묻기도 미실측). 페이지가 장치
+  목록만 물어도(`enumerateDevices()`, 묻지 않음) 시작되고, Chromium 은 5 초 놀면 내렸다가 다시 띄운다(Chromium 소스 —
+  실측 안 함). 그러니 어떤 페이지든 묻지 않고 샌드박스 없는 프로세스 하나를 띄울 수 있다 — 실제 Chrome 도 같다. 그래서 helper 는 **정확히 이 utility 만** 샌드박스 밖에서 계속 간다
+  (`unsandboxed_policy.zig` — `type=utility`·`utility-sub-type`·`service-sandbox-type=none` 이 각각 한 번, `no-sandbox`·
+  `seatbelt-client` 없음, Chromium 의 명령줄 해석과 같은 규칙: `--`·`-` 접두사·단독 `--` 뒤 무시·공백 떼기, 겹치면 거절).
+  실제 Chrome 도 이 utility 를 샌드박스 없이 돌린다 — 인자는 브라우저 프로세스(host)가 만들고 웹 페이지가 정할 수 없다.
+  렌더러·GPU·다른 utility 는 그대로 샌드박스 밖이면 끝낸다. 알림 utility(`mac_notifications…`, 역시 `kNoSandbox`)는
+  그대로 끝낸다(판정 한 번에 수십 번 — 허용하면 maru 의 알림 중계와 겹칠 수 있다, 후속). 다른 길(카메라 서비스를 host
+  안으로 — `RunVideoCaptureServiceInBrowserProcess`)은 반복은 없앴지만 이 맥에서 카메라 요청이 답 없이 멈춰 버렸다(실측).
+  판정자 `perm-media-helpers` 가 카메라 뒤 2 초 동안 helper pid 가 거의 그대로(처음 +5 안)이고 150 ms 넘게 샌드박스 밖인
+  helper 가 많아야 하나인지 본다(옛 동작에서 pid 43·처음 7 로 실패, 고친 뒤 7·7). 알림 utility 의 다시 뜨기는 이 판정이
+  보지 않는다(후속).
 
 ### C2. 제어 채널
 

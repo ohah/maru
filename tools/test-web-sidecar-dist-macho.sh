@@ -1,7 +1,7 @@
 #!/bin/sh
 # `tools/web-sidecar-dist-macho.sh` 자체 시험(W7b) — 그 스크립트는 CEF SDK 가 있어야 도는 `web-sidecar-dist` 안에서만
 # 돌아, 결함이 formula 설치에서야 드러난다. 가짜 설치물(작은 dylib 과 `/usr/bin/true` 사본, zig 로 만든 x86_64 실행 파일)로
-# 스물두 경우를 본다. `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 zig 경로를 인자로 주고 부른다.
+# 스물세 경우를 본다. `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 zig 경로를 인자로 주고 부른다.
 set -eu
 zig=${1:?사용: test-web-sidecar-dist-macho.sh <zig 경로>}
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -197,6 +197,12 @@ make_dist "$root/fat"
 cp "$root/fat-host" "$root/fat/maru-web-host"
 expect fail "여러 아키텍처를 묶은 서명 없는 host" "$root/fat" "여러 아키텍처를 묶은 파일"
 
+# ⑭c host 자리에 Mach-O 가 아닌 파일(셸 스크립트) — 「여러 아키텍처」가 아니라 무엇이 틀렸는지 알린다(7 차).
+make_dist "$root/script-host"
+printf '#!/bin/sh\nexit 0\n' > "$root/script-host/maru-web-host"
+chmod +x "$root/script-host/maru-web-host"
+expect fail "Mach-O 가 아닌 host" "$root/script-host" "maru-web-host 가 없거나 Mach-O 실행 파일이 아니다"
+
 # ⑮ 같은 host 를 여유를 두고 빌드하면 서명이 붙고 코드는 그대로다(Rosetta 가 있으면 실행해 7 을 받는다).
 make_dist "$root/pad"
 cp "$root/seven-pad" "$root/pad/maru-web-host"
@@ -223,4 +229,4 @@ if [ "$failures" != 0 ]; then
     echo "web-sidecar-dist-macho 자체 시험: 틀림 $failures 건" >&2
     exit 1
 fi
-echo "web-sidecar-dist-macho 자체 시험: 스물두 경우 모두 맞음"
+echo "web-sidecar-dist-macho 자체 시험: 스물세 경우 모두 맞음"

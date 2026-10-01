@@ -62,9 +62,13 @@ fn count(message: Message) void {
 
 /// 기대한 알림이 모두 올 때까지 읽는다 — 그 사이 둘째 브라우저의 제목은 모두 샌 것으로 센다.
 fn waitAll(host: *Host, wants: []const Want) bool {
+    return waitAllWithin(host, wants, wait_ms);
+}
+
+fn waitAllWithin(host: *Host, wants: []const Want, ms: u32) bool {
     var got: [8]bool = @splat(false);
     var n: usize = 0;
-    const deadline = os.nowMs() + wait_ms;
+    const deadline = os.nowMs() + ms;
     while (n < wants.len and os.nowMs() < deadline) {
         const message = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return false) orelse return false;
         count(message);
@@ -269,8 +273,7 @@ fn specialKeys(report: Report, host: *Host, port: u16, detail_buf: []u8) !void {
     try host.send(.{ .create_browser = .{ .browser = t_id, .size = size, .hidden = false, .url = browsers_check.url(&u, port, "/keys?t") } });
     if (!waitFor(host, .{ .title = .{ .browser = t_id, .text = "keys-ready" } })) return error.KeysPageNotReady;
     try host.send(.{ .set_focus = .{ .browser = t_id, .value = true } });
-    try host.send(.{ .mouse = .{ .browser = t_id, .kind = .down, .point = .{ .x = 150, .y = 50 }, .click_count = 1 } });
-    try host.send(.{ .mouse = .{ .browser = t_id, .kind = .up, .point = .{ .x = 150, .y = 50 }, .click_count = 1 } });
+    const t_clicks = try focusByClick(host, t_id, .{ .x = 150, .y = 50 }, "focus=t val= caret=0");
     try typeOn(host, t_id, 0, 'a');
     try typeOn(host, t_id, 11, 'b');
     try typeOn(host, t_id, 8, 'c');
@@ -290,13 +293,24 @@ fn specialKeys(report: Report, host: *Host, port: u16, detail_buf: []u8) !void {
     try host.send(.{ .create_browser = .{ .browser = j_id, .size = size, .hidden = false, .url = browsers_check.url(&u, port, "/keys?j") } });
     if (!waitFor(host, .{ .title = .{ .browser = j_id, .text = "keys-ready" } })) return error.KeysPageNotReady;
     try host.send(.{ .set_focus = .{ .browser = j_id, .value = true } });
-    try host.send(.{ .mouse = .{ .browser = j_id, .kind = .down, .point = .{ .x = 150, .y = 135 }, .click_count = 1 } });
-    try host.send(.{ .mouse = .{ .browser = j_id, .kind = .up, .point = .{ .x = 150, .y = 135 }, .click_count = 1 } });
-    _ = waitFor(host, .{ .title = .{ .browser = j_id, .text = "focus=j val= caret=0" } });
+    const j_clicks = try focusByClick(host, j_id, .{ .x = 150, .y = 135 }, "focus=j val= caret=0");
     try rawOn(host, j_id, 48, 9, false); // Tab — raw_down 만으로 다음 칸
     const tabbed = waitFor(host, .{ .title = .{ .browser = j_id, .text = "focus=k val= caret=0" } });
     try host.send(.{ .destroy_browser = j_id });
-    report(typed and deleted and moved and newline and tabbed, "input-special-keys", std.fmt.bufPrint(detail_buf, "타이핑 {} · Backspace raw {} · ← raw {} · Enter 두 번(raw 만·raw+char) 뒤 줄바꿈 하나 {} · Tab raw 초점 이동 {}", .{ typed, deleted, moved, newline, tabbed }) catch "");
+    report(t_clicks != 0 and j_clicks != 0 and typed and deleted and moved and newline and tabbed, "input-special-keys", std.fmt.bufPrint(detail_buf, "클릭 초점(몇 번째) t {d}·j {d} · 타이핑 {} · Backspace raw {} · ← raw {} · Enter 두 번(raw 만·raw+char) 뒤 줄바꿈 하나 {} · Tab raw 초점 이동 {}", .{ t_clicks, j_clicks, typed, deleted, moved, newline, tabbed }) catch "");
+}
+
+/// 칸을 누르고 그 칸의 초점 제목(`focus=… val= caret=0`)이 올 때까지 — 오지 않으면 다시 누른다. 몇 번째에 됐는지(0 = 안 됨).
+/// 느린 환경에서는 `keys-ready`(두 번의 rAF) 직후의 클릭을 렌더러가 버린다(x86_64 설치물을 Rosetta 로 — 클릭 뒤 15 초를 기다려도
+/// 초점 0, 1.5 초 뒤에 누르면 됨, W7b 7 차 실측). 키 판정이 클릭 유실을 키 유실로 잘못 읽지 않게 한다.
+fn focusByClick(host: *Host, browser: protocol.message.BrowserId, point: Point, focus_title: []const u8) !u8 {
+    var attempt: u8 = 1;
+    while (attempt <= 5) : (attempt += 1) {
+        try host.send(.{ .mouse = .{ .browser = browser, .kind = .down, .point = point, .click_count = 1 } });
+        try host.send(.{ .mouse = .{ .browser = browser, .kind = .up, .point = point, .click_count = 1 } });
+        if (waitAllWithin(host, &.{.{ .title = .{ .browser = browser, .text = focus_title } }}, 2_000)) return attempt;
+    }
+    return 0;
 }
 
 fn typeOn(host: *Host, browser: protocol.message.BrowserId, native: u8, ch: u16) !void {

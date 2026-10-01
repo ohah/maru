@@ -44,7 +44,8 @@ header_room() { # 64 비트 Mach-O: 첫 섹션 오프셋 − (머리 32 + load c
 for exe in "$dist/maru-web-host" "$dist/maru-web-helper"; do
     if ! codesign --display "$exe" > /dev/null 2>&1; then
         # 여유 계산은 얇은(thin) 64 비트 Mach-O 만 맞다 — 여러 아키텍처를 묶은 파일은 조각마다 다르다(6 차).
-        [ "$(lipo -archs "$exe" | wc -w)" -eq 1 ] || die "$exe 는 여러 아키텍처를 묶은 파일이다 — 조각마다 머리 여유를 볼 수 없다"
+        archs=$(lipo -archs "$exe" 2>/dev/null) || die "$exe 가 없거나 Mach-O 실행 파일이 아니다"
+        [ "$(echo "$archs" | wc -w)" -eq 1 ] || die "$exe 는 여러 아키텍처를 묶은 파일이다($archs) — 조각마다 머리 여유를 볼 수 없다"
         room=$(header_room "$exe")
         [ "$room" -ge 16 ] || die "$exe 의 머리 여유가 ${room} 바이트라 서명을 붙이면 코드를 덮어쓴다(-headerpad_max_install_names 로 빌드)"
         codesign --sign - "$exe" 2>/dev/null || die "codesign 실패: $exe"
@@ -77,7 +78,7 @@ while IFS= read -r f; do
     # 절대 경로 rpath 를 지우고, `@loader_path`·`@executable_path` 를 풀어 **같은 곳을 가리키는** rpath 도 지운다
     # (`@loader_path/../lib` 와 `@loader_path/../lib/`) — 지우면 그 파일이 고쳐져 번들 봉인이 깨진다(W7b 3 차 적대 검증 실측).
     if otool -l "$f" | grep -q 'cmd LC_RPATH'; then problem "$f 에 rpath 가 있다(설치물은 rpath 없이 경로로 불러온다)"; fi
-    # 링크는 자기 ID 말고 모두 /System/·/usr/lib/ 여야 한다 — 이름만 쓴 링크는 Homebrew 가 @loader_path 로 고치고, rpath 가
+    # 링크는 자기 ID 말고 모두 /System/Library/·/usr/lib/ 여야 한다 — 이름만 쓴 링크는 Homebrew 가 @loader_path 로 고치고, rpath 가
     # 없으니 @rpath 링크는 그 ID 의 파일이 먼저 불려 있을 때만 풀린다(불러오는 순서에 달림 — `brew linkage` 도 「rpath 없음」
     # 으로 센다). @loader_path·@executable_path 링크도 지금 설치물에 없다 — 생기면 빌드를 멈춰 다시 본다(W7b 4 차 적대 검증).
     # `.`·`..`·빈 조각(`//`)이 든 경로는 앞머리만 맞춰 빠져나가므로 막고(5·6 차 — `/System/./Volumes/Data/…` 로 dyld 가

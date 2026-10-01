@@ -17,6 +17,7 @@ const client = @import("client.zig");
 const watchdog = @import("watchdog.zig");
 const ring_producer = @import("ring_producer.zig");
 const iosurface = @import("iosurface.zig");
+const ring_message = @import("ring_message.zig");
 const input = @import("input.zig");
 const dialogs = @import("dialogs.zig");
 const notifications = @import("notifications.zig");
@@ -207,6 +208,8 @@ pub fn onClosed(cef_id: c_int) void {
             producer.deinit();
             std.heap.c_allocator.destroy(producer);
         }
+        var closing = entry;
+        dropPopup(&closing);
         state.writer.send(.{ .browser_closed = entry.id }) catch {};
     }
     if (state.shutting_down and state.registry.count() == 0) quit();
@@ -227,6 +230,35 @@ fn producerOf(entry: *registry_mod.Entry) *ring_producer.Producer {
     return @ptrCast(@alignCast(entry.frames.?));
 }
 
+fn popupProducerOf(entry: *registry_mod.Entry) ?*ring_producer.Producer {
+    return @ptrCast(@alignCast(entry.popup_frames orelse return null));
+}
+
+/// 팝업이 닫혔다 — 그 링을 버린다(다음에 열리면 새 세대 — 옛 목록이 비치지 않게, W6a 착수 전 실측: 다시 열 때마다 새로 그린다).
+pub fn dropPopup(entry: *registry_mod.Entry) void {
+    const popup = popupProducerOf(entry) orelse return;
+    popup.deinit();
+    std.heap.c_allocator.destroy(popup);
+    entry.popup_frames = null;
+}
+
+/// 그리기 콜백에서 부른다 — 팝업 위젯 픽셀을 이 브라우저의 팝업 링에 넣는다(W6a — D4). 팝업 링은 처음 그릴 때 만든다.
+pub fn deliverPopupFrame(entry: *registry_mod.Entry, source: iosurface.Ref) void {
+    const popup = popupProducerOf(entry) orelse blk: {
+        const made = std.heap.c_allocator.create(ring_producer.Producer) catch return;
+        made.* = .{ .browser = entry.id, .scale = entry.size.scale, .message_id = ring_message.popup_message_id };
+        entry.popup_frames = made;
+        break :blk made;
+    };
+    const channel: ?*const ring_producer.Channel = if (state.channel) |*channel| channel else null;
+    const now = client.nowMs();
+    const painted = popup.paint(channel, source, now) catch |err| {
+        std.debug.print("maru-web-host: popup frame for browser {d} dropped: {s}\n", .{ entry.id, @errorName(err) });
+        return;
+    };
+    if (painted == .pending) if (popup.retryAt()) |at| postRingRetry(at -| now);
+}
+
 /// 받는 port 를 (다시) 정한다. 두 번째면 옛 권리를 놓고, 이미 있는 링을 새 받는 쪽에 다시 알린다 — 그리기가 멈춘 정적
 /// 페이지도 받는 port 가 늦게 오거나 바뀐 뒤 링을 받는다.
 fn frameChannel(value: protocol.message.FrameChannel, writer: *events.Writer) void {
@@ -234,7 +266,10 @@ fn frameChannel(value: protocol.message.FrameChannel, writer: *events.Writer) vo
     if (state.channel) |old| {
         old.close();
         for (&state.registry.slots) |*slot| {
-            if (slot.*) |*entry| producerOf(entry).reannounce();
+            if (slot.*) |*entry| {
+                producerOf(entry).reannounce();
+                if (popupProducerOf(entry)) |popup| popup.reannounce();
+            }
         }
     }
     state.channel = fresh;
@@ -270,6 +305,9 @@ fn retryRings(_: [*c]c.cef_task_t) callconv(.c) void {
             if (producer.flush(channel, now) == .pending) {
                 if (producer.retryAt()) |at| next = @min(next orelse at, at);
             }
+            if (popupProducerOf(entry)) |popup| if (popup.flush(channel, now) == .pending) {
+                if (popup.retryAt()) |at| next = @min(next orelse at, at);
+            };
         }
     }
     if (next) |at| postRingRetry(at -| now);

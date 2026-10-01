@@ -1063,7 +1063,8 @@ pub fn popupOpen(surface_id: u64) bool {
     return s.popup_bounds != null;
 }
 
-/// 팝업이 닫혔다 — 그리지 않는다(다시 그려 지운다). 링은 남긴다(`popup_view` 주석).
+/// 팝업이 닫혔다 — 그리지 않는다(다시 그려 지운다). 그때 보이던 링은 GPU 가 끝난 뒤 놓는다(`popup_release_generation` —
+/// 기다리는 다음 팝업의 링은 남긴다, `popup_view` 주석).
 fn hidePopup(s: *Surface) void {
     s.popup_bounds = null;
     s.popup_first_generation = 0;
@@ -1752,7 +1753,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 s.popup_first_generation = v.first_generation;
                 s.popup_view.expect(pixels(v.bounds.width, s.record.size.scale), pixels(v.bounds.height, s.record.size.scale));
                 s.popup_redraw = true;
-                s.popup_release_generation = 0; // 남은 옛 링은 이 팝업의 첫 장이 꺼낼 때 놓인다(poll 의 retire)
+                s.popup_release_generation = 0; // 남은 옛 링은 이 팝업의 첫 장이 꺼낼 때(poll 의 retire), 장 없이 닫히면 그 닫힘이 놓는다
             } else hidePopup(s);
         },
         .js_dialog => |v| {

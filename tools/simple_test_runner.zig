@@ -20,6 +20,39 @@ pub const std_options: std.Options = .{
     .logFn = log,
 };
 
+/// **fork 된 판정자 자식이 panic 하면 DWARF 를 읽지 않는다** — 함수 이름 수준의 스택만 찍고 끝낸다.
+///
+/// fail-stop 판정자는 일부러 panic 하는 자식을 fork 하고, 부모는 그 자식의 종료 상태와 stderr 의 **panic 메시지
+/// 일부**만 본다(스택 내용·`thread N panic:` 접두를 대조하는 판정자는 0 — 2026-10-01 전수 확인). 그런데 기본 처리기는
+/// 소스 위치를 붙이려고 바이너리의 DWARF line table 을 통째로 파싱한다 — 147 MB Debug 집계 바이너리에서 자식 하나에
+/// 2~3 초였고(`sample`: `debug.Dwarf.runLineNumberProgram`·`SrcLocCache`), 자식 셋을 띄우는 판정자 하나가 9.9 초였다.
+///
+/// 러너가 띄운 프로세스 **자신**의 panic 은 기본 그대로다(전체 트레이스). 자식에서도 메시지는 그대로 쓰고, 스택은
+/// libc `backtrace_symbols_fd`(심볼 테이블 — DWARF 없음)로 함수 이름까지 남기며, 끝은 기본과 같은 `abort()`(SIGABRT)다.
+/// 전체 트레이스가 필요하면 `MARU_TEST_CHILD_PANIC_TRACE=1`. macOS 전용 — `getpid`·`getenv` 를 다른 판정자와 같은
+/// 규칙으로 macOS 에서만 참조한다(`envPrefix` 주석).
+pub const panic = std.debug.FullPanic(testRunnerPanic);
+var runner_pid: std.c.pid_t = 0;
+extern "c" fn backtrace(buffer: [*]?*anyopaque, size: c_int) c_int;
+extern "c" fn backtrace_symbols_fd(buffer: [*]const ?*anyopaque, size: c_int, fd: c_int) void;
+
+fn testRunnerPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    if (builtin.os.tag == .macos and runner_pid != 0 and std.c.getpid() != runner_pid and
+        getenv("MARU_TEST_CHILD_PANIC_TRACE") == null)
+    {
+        const prefix = "panic: ";
+        _ = std.c.write(2, prefix.ptr, prefix.len);
+        if (msg.len != 0) _ = std.c.write(2, msg.ptr, msg.len);
+        const note = "\n(forked test child: symbol-only stack, MARU_TEST_CHILD_PANIC_TRACE=1 for the full trace)\n";
+        _ = std.c.write(2, note.ptr, note.len);
+        var frames: [64]?*anyopaque = undefined;
+        const count = backtrace(&frames, @intCast(frames.len));
+        if (count > 0) backtrace_symbols_fd(&frames, count, 2);
+        std.c.abort();
+    }
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
+
 var log_err_count: std.atomic.Value(usize) = .init(0);
 var is_fuzz_test: bool = false;
 const runner_io: Io = Io.Threaded.global_single_threaded.io();
@@ -194,6 +227,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     });
     const have_tty = Io.File.stderr().isTty(runner_io) catch unreachable;
     restoreInheritedIgnoredSignals();
+    if (builtin.os.tag == .macos) runner_pid = std.c.getpid();
 
     // **컴파일은 됐지만 여기서는 안 돌린다** — `--maru-skip-prefix` 로 시작하는 이름은 다른 잡이 이미 도는
     // 것(예: `session_host.` 는 `test-session-host` 가 모듈 그래프째 돈다). `--maru-keep-prefix` 는 그 예외다

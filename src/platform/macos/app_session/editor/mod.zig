@@ -45346,3 +45346,118 @@ test "SHVIEW11 Undo의 모든 준비 할당 실패는 두 뷰와 기존 이력�
     try testing.expect(saw_success);
     try testing.expect(failures >= 5);
 }
+
+test "SHVIEW12 묶음 Undo 중간 실패도 남은 이력 재시도와 Redo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var completed = false;
+    var saw_partial = false;
+    for (0..120) |failure| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const peer = try sharedViewFixturePeer(&fx);
+        const state = fx.term.rt.editorDocument();
+        const original = try testing.allocator.dupe(u8, state.opened.?.file.content);
+        defer testing.allocator.free(original);
+        fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(fx.session, fx.term, "x"));
+        try testing.expect(insertText(fx.session, fx.term, "y"));
+        try testing.expectEqual(@as(usize, 2), state.history.undo_len);
+        try testing.expectEqual(state.history.undo[0].group, state.history.undo[1].group);
+        fx.term.rt.editor_selection = editor_selection.Selection.at(20);
+        const revision = state.opened.?.file.revision;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        fx.session.allocator = failing.allocator();
+        state.opened.?.file.allocator = failing.allocator();
+        state.opened.?.file.buf.allocator = failing.allocator();
+        _ = undoEdit(fx.session, peer);
+        fx.session.allocator = testing.allocator;
+        state.opened.?.file.allocator = testing.allocator;
+        state.opened.?.file.buf.allocator = testing.allocator;
+        const applied = 2 - state.history.undo_len;
+        try testing.expectEqual(applied, state.history.redo_len);
+        try testing.expectEqual(revision + applied, state.opened.?.file.revision);
+        try testing.expectEqualStrings(fx.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
+        if (applied == 1) saw_partial = true;
+        if (state.history.undo_len > 0) try testing.expect(undoEdit(fx.session, peer));
+        try testing.expectEqualStrings(original, state.opened.?.file.content);
+        try testing.expectEqual(@as(usize, 18), fx.term.rt.editor_selection.?.focus);
+        try testing.expect(redoEdit(fx.session, peer));
+        try testing.expect(std.mem.startsWith(u8, state.opened.?.file.content, "xyconst"));
+        try testing.expectEqual(@as(usize, 20), fx.term.rt.editor_selection.?.focus);
+        if (!failing.has_induced_failure) {
+            completed = true;
+            break;
+        }
+    }
+    try testing.expect(completed);
+    try testing.expect(saw_partial);
+}
+
+test "SHVIEW13 입력한 뷰를 닫아도 남은 뷰의 공유 Undo와 새 입력은 유효하다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    const state = fx.term.rt.editorDocument();
+    const source_surface = fx.term.surface.id;
+    const lease = peer.rt.editor_document_lease.?;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "한\n"));
+    const pane = pane_ops.activePane(fx.session);
+    var source_index: usize = 0;
+    for (pane.terms.items, 0..) |view, i| {
+        if (view == fx.term) source_index = i;
+    }
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, source_index);
+    try testing.expect(term_ops.termBySurfaceId(fx.session, source_surface) == null);
+    try testing.expectEqual(@as(usize, 1), lease.owner.viewCount(lease).?);
+    try testing.expect(state == peer.rt.editorDocument());
+    try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqualStrings("const a = 1;", peer.rt.editor_lines[0]);
+    try testing.expect(redoEdit(fx.session, peer));
+    try testing.expectEqualStrings("한", peer.rt.editor_lines[0]);
+    breakUndoGroup(peer);
+    peer.rt.editor_selection = editor_selection.Selection.at(4);
+    try testing.expect(insertText(fx.session, peer, "z"));
+    try testing.expectEqualStrings("zconst a = 1;", peer.rt.editor_lines[1]);
+    try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqualStrings("const a = 1;", peer.rt.editor_lines[1]);
+}
+
+test "SHVIEW14 잘못된 delta와 누락된 뷰는 부분 게시하지 않고 정상 입력은 계속된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    const state = fx.term.rt.editorDocument();
+    const revision = state.opened.?.file.revision;
+    const source_lines = fx.term.rt.editor_lines.ptr;
+    const peer_lines = peer.rt.editor_lines.ptr;
+    var items = [_]editor_selection.Selection{editor_selection.Selection.at(0)};
+    var sels = editor_selection.Selections.init(&items, 0);
+    const malformed = [_]maru.session.editor.delta.Change{.{ .start = 2, .end = 1, .text = "x" }};
+    try testing.expectError(error.MalformedDelta, applyDocumentEdit(fx.session, fx.term, .{ .changes = &malformed }, &sels));
+    const outside = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = state.opened.?.file.content.len + 1, .text = "x" }};
+    try testing.expectError(error.OutOfRange, applyDocumentEdit(fx.session, fx.term, .{ .changes = &outside }, &sels));
+    const valid = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = "x" }};
+    state.opened.?.file.read_only = true;
+    try testing.expectError(error.ReadOnly, applyDocumentEdit(fx.session, fx.term, .{ .changes = &valid }, &sels));
+    state.opened.?.file.read_only = false;
+    const lease = peer.rt.editor_document_lease.?;
+    const registry = @constCast(lease.owner);
+    const missing = try registry.retain(lease, .view);
+    defer _ = registry.release(missing) catch false;
+    try testing.expectError(error.SharedViewCountMismatch, applyDocumentEdit(fx.session, fx.term, .{ .changes = &valid }, &sels));
+    try testing.expectEqual(revision, state.opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 0), state.history.undo_len);
+    try testing.expectEqual(source_lines, fx.term.rt.editor_lines.ptr);
+    try testing.expectEqual(peer_lines, peer.rt.editor_lines.ptr);
+    try testing.expectEqual(@as(usize, 0), sels.items[0].focus);
+    try testing.expectEqualStrings("const a = 1;", peer.rt.editor_lines[0]);
+    _ = try registry.release(missing);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    try testing.expectEqualStrings("xconst a = 1;", peer.rt.editor_lines[0]);
+    try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqualStrings("const a = 1;", fx.term.rt.editor_lines[0]);
+}

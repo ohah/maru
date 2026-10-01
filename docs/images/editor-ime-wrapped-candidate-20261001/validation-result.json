@@ -1,0 +1,10 @@
+{
+  "gui": "passed",
+  "failure_count": 0,
+  "candidate_capture_verifier": "passed",
+  "source_restored": true,
+  "app_cdhash": "b44d074767df4c4bf2d3e67f7371fb30ecbbd955",
+  "head": "eed5fba7c93777d2cedb77006ef294eb9644ee1a",
+  "policy": "product defaults / wrap=true",
+  "metal_capture": "ime-pr-editor-default-metal.png"
+}

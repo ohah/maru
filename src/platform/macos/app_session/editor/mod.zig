@@ -2340,6 +2340,9 @@ fn ownsEditorView(self: *AppSession, source: *Term) bool {
 /// Path alias policy and user-facing split commands are separate gates.
 pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || error{UnsupportedSharedDocument})!Prepared {
     if (source.kind != .editor or source.rt.editor_diff != null or source.rt.editor_merge != null or source.rt.editorDocument().remote != null or source.rt.editorDocument().untitled != null or source.rt.editorDocument().path == null) return error.UnsupportedSharedDocument;
+    // Reopen/restore may lack transport state; the existing cache-path policy still
+    // identifies a remote mirror. It cannot join this local-only sharing phase.
+    if (file_panel_ops.remoteViewPathIsReadOnly(source.rt.editorDocument().path.?)) return error.UnsupportedSharedDocument;
     const source_lease = source.rt.editor_document_lease orelse return error.UnsupportedSharedDocument;
     if (source_lease.owner != self.editor_documents or !ownsEditorView(self, source)) return error.UnsupportedSharedDocument;
     const doc = source.rt.editorDocument().opened orelse return error.UnsupportedSharedDocument;
@@ -45850,4 +45853,223 @@ test "shared editor peer deletion collapses overlapping cursors before subsequen
     try testing.expectEqual(@as(usize, 0), b.rt.editor_selection.?.focus);
     try testing.expect(insertText(s, b, "한"));
     try testing.expectEqualStrings("한bb\ncc\n", a.rt.editorDocument().opened.?.file.content);
+}
+
+// Adversarial round 1: several deltas in a single Undo group must publish rows between
+// applications, while the caller's restored multicursor snapshot remains independently owned.
+test "shared editor adversarial R1 grouped multicursor Undo Redo publishes every intermediate delta" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    a.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(3)});
+    b.rt.editor_selection = editor_selection.Selection.fromPoints(8, 6);
+    try testing.expect(insertText(s, a, "X"));
+    try testing.expect(insertText(s, a, "Y"));
+    try testing.expect(insertText(s, a, "Z"));
+    const history = &a.rt.editorDocument().history;
+    try testing.expectEqual(@as(usize, 3), history.undo_len);
+    try testing.expectEqual(history.undo[0].group, history.undo[2].group);
+    try testing.expectEqualStrings("XYZaa\nXYZbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
+    const caller_before_undo = b.rt.editor_selection.?;
+    try testing.expect(undoEdit(s, b));
+    try testing.expectEqualStrings("aa\nbb\ncc\n", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), b.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 3), b.rt.editor_extra_selections[0].focus);
+    try testing.expectEqual(@as(usize, 0), history.undo_len);
+    try testing.expectEqual(@as(usize, 3), history.redo_len);
+    try testing.expect(redoEdit(s, b));
+    try testing.expectEqualStrings("XYZaa\nXYZbb\ncc\n", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("XYZbb", a.rt.editor_lines[1]);
+    try testing.expectEqualDeep(caller_before_undo, b.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), b.rt.editor_extra_selections.len);
+    try testing.expect(a.rt.editor_shared_selection_buf == null and b.rt.editor_shared_selection_buf == null);
+}
+
+// Adversarial round 2: failure before inverse application keeps the source entry;
+// failure recording its mirror keeps the edit and invalidates both history stacks.
+test "shared editor adversarial R2 Undo and Redo OOM either preserve entries or clear both stacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ true, false }) |is_undo| {
+        var saw_rejection = false;
+        var saw_clear = false;
+        var saw_success = false;
+        for (0..48) |failure| {
+            var fx = try SharedEditFixture.init();
+            defer fx.deinit();
+            const s = fx.base.session;
+            const a = fx.base.term;
+            const b = fx.other;
+            a.rt.editor_selection = editor_selection.Selection.at(0);
+            try testing.expect(insertText(s, a, "한\n"));
+            const history = &a.rt.editorDocument().history;
+            if (!is_undo) {
+                try testing.expect(undoEdit(s, b));
+                testing.allocator.free(history.undo);
+                history.undo = &.{};
+            }
+            const revision = a.rt.editorDocument().opened.?.file.revision;
+            const prior_selection = a.rt.editor_selection.?;
+            var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+            s.allocator = failing.allocator();
+            const accepted = if (is_undo) undoEdit(s, b) else redoEdit(s, b);
+            s.allocator = testing.allocator;
+            if (!accepted) {
+                saw_rejection = true;
+                try testing.expectEqual(revision, a.rt.editorDocument().opened.?.file.revision);
+                try testing.expectEqualDeep(prior_selection, a.rt.editor_selection.?);
+                try testing.expectEqual(@as(usize, 1), if (is_undo) history.undo_len else history.redo_len);
+                try testing.expect(if (is_undo) undoEdit(s, b) else redoEdit(s, b));
+            } else {
+                saw_success = true;
+                try testing.expectEqual(revision + 1, a.rt.editorDocument().opened.?.file.revision);
+                if (history.undo_len == 0 and history.redo_len == 0) {
+                    saw_clear = true;
+                    try testing.expect(!undoEdit(s, a) and !redoEdit(s, a));
+                }
+            }
+            try testing.expectEqualStrings(if (is_undo) "aa\nbb\ncc\n" else "한\naa\nbb\ncc\n", a.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualStrings(a.rt.editor_lines[0], b.rt.editor_lines[0]);
+            try testing.expect(a.rt.editor_shared_selection_buf == null and b.rt.editor_shared_selection_buf == null);
+        }
+        try testing.expect(saw_rejection and saw_clear and saw_success);
+    }
+}
+
+// Adversarial round 3: repeatedly reduce the document to one view, edit through
+// its fast path, and reconnect. A freed Term must never remain in the next publication.
+test "shared editor adversarial R3 repeated detach singleton edits and reconnect preserve identity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    var peer = fx.other;
+    const lease = a.rt.editor_document_lease.?;
+    var oracle: std.ArrayList(u8) = .empty;
+    defer oracle.deinit(testing.allocator);
+    try oracle.appendSlice(testing.allocator, "aa\nbb\ncc\n");
+    for (0..24) |_| {
+        const pane = pane_ops.activePane(s);
+        for (pane.terms.items, 0..) |term, i| if (term == peer) {
+            term_ops.closeTermAt(s, s.app_window.active_tab, pane, i);
+            break;
+        };
+        try testing.expectEqual(@as(usize, 1), s.editor_documents.viewCount(lease).?);
+        try testing.expect(ownsEditorView(s, a));
+        a.rt.editor_selection = editor_selection.Selection.at(oracle.items.len);
+        try testing.expect(insertText(s, a, "S"));
+        try oracle.appendSlice(testing.allocator, "S");
+        try testing.expect(a.rt.editor_shared_selection_buf == null);
+        peer = try openSharedViewInActivePane(s, a);
+        try testing.expectEqual(@as(usize, 2), s.editor_documents.viewCount(lease).?);
+        peer.rt.editor_selection = editor_selection.Selection.at(oracle.items.len);
+        try testing.expect(insertText(s, peer, "한\n"));
+        try oracle.appendSlice(testing.allocator, "한\n");
+        try testing.expectEqualStrings(oracle.items, a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(lease.document, peer.rt.editor_document_lease.?.document);
+        try testing.expectEqual(a.rt.editor_lines.len, peer.rt.editor_lines.len);
+        for (a.rt.editor_lines, peer.rt.editor_lines) |left, right| try testing.expectEqualStrings(left, right);
+        try testing.expect(ownsEditorView(s, peer));
+        try testing.expect(a.rt.editor_shared_selection_buf == null and peer.rt.editor_shared_selection_buf == null);
+    }
+}
+
+// Adversarial round 4: a remote-view cache path is a remote document even when its
+// optional transport state is absent (ordinary reopen/restore). It must not gain sharing.
+test "shared editor adversarial R4 admission rejects another session remote mirror and pending peer commit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    var other = try PaneFixture.init(testing.allocator);
+    defer other.deinit(testing.allocator);
+    const refs = s.editor_documents.viewCount(a.rt.editor_document_lease.?).?;
+    try testing.expectError(error.UnsupportedSharedDocument, prepareSharedView(other.session, a));
+    const revision = a.rt.editorDocument().opened.?.file.revision;
+    const before = a.rt.editor_selection;
+    s.ime_editor_commit_pending = true;
+    s.ime_terminal_target_id = b.surface.id;
+    try testing.expect(!insertText(s, a, "X"));
+    try testing.expectEqual(revision, a.rt.editorDocument().opened.?.file.revision);
+    try testing.expectEqualDeep(before, a.rt.editor_selection);
+    try testing.expect(s.ime_editor_commit_pending);
+    s.ime_editor_commit_pending = false;
+    try testing.expect(insertText(s, a, "X"));
+
+    const state = a.rt.editorDocument();
+    const old_path = state.path.?;
+    const home = std.mem.trimEnd(u8, std.mem.span(std.c.getenv("HOME") orelse return error.SkipZigTest), "/");
+    const mirror_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}/fixture/file.zig", .{ home, file_panel_ops.remote_view_subdir });
+    defer testing.allocator.free(mirror_path);
+    state.path = mirror_path;
+    defer state.path = old_path;
+    try testing.expect(state.remote == null);
+    try testing.expect(file_panel_ops.remoteViewPathIsReadOnly(mirror_path));
+    try testing.expectError(error.UnsupportedSharedDocument, prepareSharedView(s, a));
+    try testing.expectEqual(refs, s.editor_documents.viewCount(a.rt.editor_document_lease.?).?);
+}
+
+// Adversarial round 5: failures inside EditableFile.apply occur after all peers are
+// prepared. Rollback must preserve the actual borrowed buffer, not merely equal text.
+test "shared editor adversarial R5 document rollback read only and malformed ranges publish no peer changes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var saw_failure = false;
+    var saw_success = false;
+    for (0..40) |failure| {
+        var fx = try SharedEditFixture.init();
+        defer fx.deinit();
+        const s = fx.base.session;
+        const a = fx.base.term;
+        const b = fx.other;
+        const doc = &a.rt.editorDocument().opened.?.file;
+        a.rt.editor_selection = editor_selection.Selection.at(0);
+        b.rt.editor_selection = editor_selection.Selection.fromPoints(8, 3);
+        const peer_before = b.rt.editor_selection.?;
+        const revision = doc.revision;
+        const content_ptr = doc.content.ptr;
+        const peer_rows_ptr = b.rt.editor_lines.ptr;
+        const empty_primary = editor_selection.Selection.at(0);
+        var items = [_]editor_selection.Selection{empty_primary};
+        var sels = editor_selection.Selections.init(&items, 0);
+        const malformed = [_]editor.delta.Change{.{ .start = 2, .end = 1, .text = "" }};
+        try testing.expectError(error.MalformedDelta, applySharedDelta(s, a, .{ .changes = &malformed }, &sels, revision));
+        const out_of_range = [_]editor.delta.Change{.{ .start = doc.content.len + 1, .end = doc.content.len + 1, .text = "" }};
+        try testing.expectError(error.OutOfRange, applySharedDelta(s, a, .{ .changes = &out_of_range }, &sels, revision));
+        doc.read_only = true;
+        try testing.expect(!insertText(s, a, "readonly"));
+        doc.read_only = false;
+        try testing.expectEqualDeep(peer_before, b.rt.editor_selection.?);
+        try testing.expectEqual(revision, doc.revision);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        const old_allocator = doc.allocator;
+        doc.allocator = failing.allocator();
+        const accepted = insertText(s, a, "한\n");
+        doc.allocator = old_allocator;
+        if (!accepted) {
+            saw_failure = true;
+            try testing.expect(doc.content.ptr == content_ptr);
+            try testing.expect(b.rt.editor_lines.ptr == peer_rows_ptr);
+            try testing.expectEqualDeep(peer_before, b.rt.editor_selection.?);
+            try testing.expectEqual(revision, doc.revision);
+            try testing.expectEqualStrings("aa\nbb\ncc\n", doc.content);
+            try testing.expectEqualStrings("aa", b.rt.editor_lines[0]);
+            try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.undo_len);
+            try testing.expect(insertText(s, a, "한\n"));
+        } else {
+            saw_success = true;
+        }
+        try testing.expectEqualStrings("한\naa\nbb\ncc\n", doc.content);
+        try testing.expectEqualStrings("한", b.rt.editor_lines[0]);
+        try testing.expect(undoEdit(s, b));
+        try testing.expectEqualStrings("aa\nbb\ncc\n", doc.content);
+        try testing.expectEqualStrings("aa", a.rt.editor_lines[0]);
+        try testing.expect(a.rt.editor_shared_selection_buf == null and b.rt.editor_shared_selection_buf == null);
+    }
+    try testing.expect(saw_failure and saw_success);
 }

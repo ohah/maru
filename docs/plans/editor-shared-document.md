@@ -2,7 +2,7 @@
 
 상태: VS Code 기준 공유 뷰 UX 승인, 단일 뷰 본문·이력 소유 분리 및 중립 참조 수명 골격 구현. 공유 뷰 제품 미구현. 2026-10-01 main `bb0ef4948`의 코드와 기존 계약을 대조했다.
 사용자는 설계 정리·단계 분해에 이어 2026-10-01 VS Code 기준 UX 채택을 승인했다.
-목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰 제품 구현과 실제 OS 입력 검증은 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
+목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰의 내부 제품 경로는 구현했고, 사용자용 분할 UI와 실제 OS 공유 입력 검증은 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
 [Surface 문서 identity](../editor-surface.md), [탭·split 배치](../tabs-splits-layout.md)가 소유한다.
 
 ## VS Code 정책 대조
@@ -501,7 +501,7 @@ read/request의 본문·신원·Undo 보존, 개별 탭 닫기와 재열기의 �
 판정에만 사용했고 실제 비동기 provider 작업에 registry pin을 새로 배선하지 않았다.
 
 
-## 같은 창의 연결된 두 뷰: 편집 게시 기반
+## 같은 창의 연결된 두 뷰: 편집 게시 기반 — main 통합 전 기록
 
 일반 분할 명령은 아직 노출하지 않는다. `SHVIEW` fixture는 실제 AppSession의 Term 두 개를
 registry의 서로 다른 view lease로 같은 State에 연결하고 기존 제품 입력·삭제·Undo/Redo를 호출한다.
@@ -589,7 +589,7 @@ peer 선택/스크롤과 연결 수는 유지한다. 성공하면 동일 정본�
 원래/중간 뷰 종료, 연결과 편집 할당 실패, stale revision과 peer 조합 보존을 판정한다.
 기본 `test-editor` 및 전체 검사에도 포함된다. OS HID/GUI나 사용자 split 기능 완료로 해석하지 않는다.
 
-최종 검증: Debug/ReleaseFast의 `test-editor-shared`는 각각 14/14(공유 회귀 10개와 import
+초기 내부 슬라이스 검증: Debug/ReleaseFast의 `test-editor-shared`는 각각 14/14(공유 회귀 10개와 import
 sentinel 4개), `test-editor test-editor-document-runtime`, `macos-app-build macos-app-host-swift-check`,
 전체 `mise run -j 2 -c check`가 통과했다. 새 앱의 기존 native editor IME callback fixture(mode 0)는
 `failure_count=0`이다. 권한 등록된 staged 앱은 교체하지 않았으며 이 결과는 공유 OS HID/GUI
@@ -612,3 +612,35 @@ Undo 기록 capacity는 본문 변경 이후 확보하여 이 대화에서 승�
 할당 실패 판정은 이미 적용된 delta와 이력 초기화도 허용된 결과로 검증한다. 기존 SHVIEW1~14와
 명시적 두 pane 연결 회귀를 함께 유지한다. provider/backup 통지는 아직 기존 뷰별 경로이므로
 문서마다 한 번 통지한다고 주장하지 않는다. 사용자 분할 UI와 실제 공유 OS 입력 검증은 남았다.
+
+## 공유 편집 내부 경로 — 추가 적대적 검증 5회 (2026-10-01)
+
+PR #4054의 `974d59241`에 대해 서로 다른 경계를 추가 판정했다. 회차별 `shared editor
+adversarial R1`~`R5` 제품 회귀를 기본/집중 검사에 포함한다.
+
+| 회차 | 반례와 검사 | 결과 |
+|---|---|---|
+| 1 | 여러 멀티커서 입력의 단일 묶음 교차 Undo/Redo, 중간 delta 행 게시와 caller 선택 복원 | 통과. 최초 기대값은 writer의 커서였으나 계약 대조 후 Undo 직전 caller의 선택을 복원하는 기대값으로 정정했다. 제품 결함으로 세지 않는다. |
+| 2 | Undo/Redo 각각 48개 할당 실패 지점, entry 소비 전 실패 재시도와 반대편 기록 실패 | 적용 전 거절은 entry·revision·peer 선택 보존, 적용 후 기록 OOM은 편집 유지·양쪽 이력 초기화. 모두 판정했다. |
+| 3 | 24회 peer 닫기→singleton fast path 편집→재연결→UTF-8 입력 | 같은 handle/참조 수·본문·모든 줄 일치, 한 번의 peer 순회 종료, 미소비 pending rows 없음. |
+| 4 | 다른 AppSession 연결, peer pending commit, 전송 상태 없는 원격 미러 cache 경로 | 원격 미러가 공유 연결에 허용되는 반례를 재현했다. 기존 `remoteViewPathIsReadOnly` 판정을 `prepareSharedView`에 추가하여 거절하고 retain 전에 종료한다. 다른 세션과 pending commit 거절/재시도도 통과했다. |
+| 5 | peer 준비 후 EditableFile 내부 할당 40개 실패 지점, read-only·malformed·OutOfRange | 롤백 시 원본 content pointer·peer 행 pointer·선택·revision 보존, 재시도/교차 Undo 성공. 모두 판정했다. |
+
+4회차 누락은 지원 밖 문서를 허용한 admission 문제다. 기존 원격 미러의 읽기 전용 보호는 유지되며
+원격 쓰기 허용 문제로 해석하지 않는다. 준비 성공을 예상 오류로 판정한 최초 red 검사의 미정산
+반환값은 테스트 실패 부산물이며 제품의 정상 해제 누수로 보고하지 않는다. 수정 후 Debug의
+`test-editor-shared`는 19/19(공유 회귀 15개와 import sentinel 4개) 통과했다.
+회차별 로그는 `/private/tmp/shared-editor-adversarial-r1.log`~`r5.log`이며, 4회차 최초 실패는
+`/private/tmp/shared-editor-adversarial-r4-red.log`에 남는다. R1 최초 로그는 기대값 정정 전 기록이고,
+최종 R5 로그가 전체 회차 통과를 함께 기록한다. OS HID/GUI 공유 검증은 이 기록에 포함하지 않는다.
+
+추가 수정 후 최종 재검증: Debug/ReleaseFast `test-editor-shared` 각각 19/19, 전체
+`mise run -j 2 -c check` exit 0(629.13초), `git diff --check` 통과. 전체 검사의 경계 검사와
+AppSession 전수 shard에서도 R1~R5가 통과했다. 재검증 로그는
+`/private/tmp/shared-editor-adversarial-release.log`와
+`/private/tmp/shared-editor-adversarial-full-check.log`다.
+
+리베이스 검증: 첫 커밋 `4bb720d34`에서 `test-editor-shared` 14/14,
+`test-editor-shared-view` 18/18과 `check-boundaries`가 모두 통과했다. 최종 커밋의 추가 R1~R5는
+같은 main coordinator를 호출하며 미소비 writer 선택 저장소와 registry view 참조를 판정한다.
+통합 전 기록의 circle/pending rows를 현재 구현에 추가하지 않는다.

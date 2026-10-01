@@ -26,6 +26,9 @@ pub const Entry = struct {
     gpu_unavailable_sent: bool = false,
     /// 이 브라우저의 픽셀 링 생산자(W2 — `ring_producer.Producer`). 목록은 CEF·mach 를 몰라 불투명하게 든다.
     frames: ?*anyopaque = null,
+    /// 열린 팝업 위젯의 링 생산자(W6a). 팝업이 열려 처음 그릴 때 만들고 닫히면 버린다 — 다시 열면 새 세대로 시작해 옛 목록이
+    /// 비치지 않는다.
+    popup_frames: ?*anyopaque = null,
     /// 마지막으로 알린 커서(W4 — 같은 것은 다시 안 보낸다).
     cursor: ?protocol.message.WebCursor = null,
     /// 마지막으로 알린 IME 조합 사각형(W4 — 같은 것은 다시 안 보낸다).

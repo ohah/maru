@@ -16,6 +16,8 @@ const ring_message = @import("ring_message.zig");
 
 pub const Ring = struct {
     browser: u64,
+    /// 팝업 위젯의 링인가(`ring_message.popup_message_id` — W6a). 아니면 본 화면 링.
+    popup: bool = false,
     generation: u32,
     width: u32,
     height: u32,
@@ -118,7 +120,7 @@ pub const Receiver = struct {
 /// 답장 port·voucher 가 없어야 한다 — 받아들인 메시지는 디스크립터만 풀므로, 답장 권리가 실려 오면 알림마다 이름 하나가
 /// 샌다(적대 검증).
 fn wellFormed(message: *const ring_message.Message) bool {
-    if (message.header.id != ring_message.message_id) return false;
+    if (message.header.id != ring_message.message_id and message.header.id != ring_message.popup_message_id) return false;
     if (message.header.bits & mach.bits_complex == 0) return false;
     if (message.header.bits & ~(mach.bits_complex | mach.bits_local_mask) != 0) return false;
     if (message.header.remote != mach.null_port or message.header.voucher != mach.null_port) return false;
@@ -148,6 +150,7 @@ fn adopt(message: *const ring_message.Message) error{Malformed}!Ring {
     dropPorts(message);
     return .{
         .browser = payload.browser(),
+        .popup = message.header.id == ring_message.popup_message_id,
         .generation = payload.generation,
         .width = payload.width,
         .height = payload.height,

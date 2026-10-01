@@ -33,6 +33,7 @@
 //!                 (`click:x,y,button,detail` · `dbl:2` · `val:` · `comp-val:` · `end:조합:값` · `key:e:ctrl:KeyE` · `blur` ·
 //!                 `ctx:x,y` · `aux:1` · `sel:yes|no` · `leave` · `scroll:down`). 제목은 조절돼 마지막 것만 오므로 한 입력이
 //!                 제목을 둘 바꾸지 않게 이벤트를 골랐다
+//!   /sel          팝업 판정(W6a) — `<select>` 하나. 고르면 `sel:<값>` 제목, 첫 프레임 뒤 `sel-ready`
 //!   /keys?칸      특수 키 판정(W4c) — textarea(t)·폼 입력칸 둘(j·k). 칸(`t`·`j`)을 누르면 준비. 초점 칸·값(줄바꿈은 `NL`)·
 //!                 캐럿을 제목으로(`focus=… val=… caret=…`)
 
@@ -134,6 +135,7 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     }
     if (std.mem.eql(u8, path, "/input")) return input_page;
     if (std.mem.eql(u8, path, "/keys")) return keys_page;
+    if (std.mem.eql(u8, path, "/sel")) return select_page;
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
     }
@@ -236,6 +238,13 @@ const input_page =
     \\document.documentElement.addEventListener('mouseleave',function(){t('leave')});
     \\requestAnimationFrame(function(){requestAnimationFrame(function(){t('input-ready')})});
     \\</script>
+;
+
+/// W6a 팝업 판정(`popup_check.zig`) — `<select>` 하나(view 10,10 200×30). 고르면 `sel:<값>` 제목, 첫 프레임 뒤 `sel-ready`.
+const select_page =
+    \\<!doctype html><title>loading</title><style>body{margin:0}#s{position:absolute;left:10px;top:10px;width:200px;height:30px;font-size:16px}</style>
+    \\<select id=s><option value=a>alpha</option><option value=b>bravo</option><option value=c>charlie</option><option value=d>delta</option><option value=e>echo</option></select>
+    \\<script>var s=document.getElementById('s');s.addEventListener('change',function(){document.title='sel:'+s.value});requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='sel-ready'})});</script>
 ;
 
 const keys_page =

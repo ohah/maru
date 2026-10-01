@@ -70,6 +70,9 @@ pub const Tag = enum(u8) {
     /// 페이지가 웹 알림을 띄웠다(W5c — C6). Chromium 은 웹 알림을 OS 로 보내지 않으므로(실측) sidecar 의 대리 스크립트가 받아
     /// 넘긴다 — 그 출처가 알림을 허용했을 때만.
     web_notification = 47,
+    /// 페이지의 팝업 위젯(`<select>` 목록 등)이 열렸다·옮겨졌다·닫혔다(W6a — D4). 열리면 view DIP 사각형, 닫히면 0 사각형.
+    /// 팝업의 픽셀은 본 화면과 다른 링으로 온다(`ring_message.popup_message_id`).
+    popup_changed = 48,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -468,6 +471,13 @@ pub const Rect = struct {
     height: u32,
 };
 
+pub const PopupChanged = struct {
+    browser: BrowserId,
+    visible: bool,
+    /// view 좌상단 기준 DIP. 닫혔으면(`visible = false`) 모두 0 이다(닫힌 필드 — 다른 값은 거절).
+    bounds: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+};
+
 pub const ImeRange = struct {
     browser: BrowserId,
     /// 조합 글자들의 사각형을 모두 합친 것.
@@ -590,6 +600,7 @@ pub const Message = union(Tag) {
     dialog_closed: Request,
     permission_request: PermissionRequest,
     web_notification: WebNotification,
+    popup_changed: PopupChanged,
 };
 
 test "tags split by direction at 32" {

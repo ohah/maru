@@ -85,6 +85,8 @@ pub fn get() *c.cef_client_t {
         render.get_screen_info = &getScreenInfo;
         render.on_paint = &onPaint;
         render.on_accelerated_paint = &onAcceleratedPaint;
+        render.on_popup_show = &onPopupShow;
+        render.on_popup_size = &onPopupSize;
         render.on_ime_composition_range_changed = &input.onImeCompositionRangeChanged;
         display.on_title_change = &onTitleChange;
         display.on_address_change = &onAddressChange;
@@ -135,7 +137,8 @@ fn getPermission(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_permission_handle
     return &permission;
 }
 
-/// 항목을 비우면 CEF 는 메뉴를 띄우지 않는다(헤더 — 「The |model| can be cleared to show no context menu」).
+/// 항목을 비우면 CEF 는 메뉴를 띄우지 않는다(헤더 — 「The |model| can be cleared to show no context menu」). 비우지 않아도 창 없는
+/// 모드에서 부모 view 가 없으면 CEF 의 Mac 메뉴는 뜨지 않는다(`menu_runner_mac.mm` — W6 착수 전 조사). 메뉴는 W6c(D5 — NSMenu).
 fn onBeforeContextMenu(
     _: [*c]c.cef_context_menu_handler_t,
     browser: [*c]c.cef_browser_t,
@@ -191,11 +194,34 @@ fn onPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, kind: c.
 fn onAcceleratedPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, kind: c.cef_paint_element_type_t, _: usize, _: [*c]const c.cef_rect_t, info: [*c]const c.cef_accelerated_paint_info_t) callconv(.c) void {
     defer object.releaseArg(browser);
     countPaint(browser);
-    // 팝업(PET_POPUP)은 W6 — 본 화면만 링에 넣는다. CEF surface 는 이 콜백 안에서만 유효하다(C3).
-    if (kind != c.PET_VIEW or info == null) return;
+    // 본 화면(PET_VIEW)과 팝업 위젯(PET_POPUP — W6a)은 따로 그려져 링도 따로다. CEF surface 는 이 콜백 안에서만 유효하다(C3).
+    if (info == null) return;
     const surface = info.*.shared_texture_io_surface orelse return;
     const entry = entryOf(browser) orelse return;
-    browsers.deliverFrame(entry, @ptrCast(surface));
+    switch (kind) {
+        c.PET_VIEW => browsers.deliverFrame(entry, @ptrCast(surface)),
+        c.PET_POPUP => browsers.deliverPopupFrame(entry, @ptrCast(surface)),
+        else => {},
+    }
+}
+
+/// 팝업 위젯(`<select>` 목록 등)이 열리거나 닫혔다(W6a). 열림은 바로 뒤의 `on_popup_size` 가 사각형과 함께 알린다(CEF 는 같은
+/// 자리에서 둘을 잇달아 부른다 — 착수 전 실측). 닫힘은 여기서 알리고 팝업 링을 버린다.
+fn onPopupShow(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, show: c_int) callconv(.c) void {
+    defer object.releaseArg(browser);
+    if (show != 0) return;
+    const entry = entryOf(browser) orelse return;
+    browsers.dropPopup(entry);
+    browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = false } }) catch {};
+}
+
+/// 팝업 위젯의 사각형(view DIP). 열릴 때와 옮겨질 때 온다.
+fn onPopupSize(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, rect: [*c]const c.cef_rect_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    const entry = entryOf(browser) orelse return;
+    if (rect == null or rect.*.width <= 0 or rect.*.height <= 0) return;
+    const bounds: protocol.message.Rect = .{ .x = rect.*.x, .y = rect.*.y, .width = @intCast(rect.*.width), .height = @intCast(rect.*.height) };
+    browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = true, .bounds = bounds } }) catch {};
 }
 
 fn onTitleChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t, title: [*c]const c.cef_string_t) callconv(.c) void {

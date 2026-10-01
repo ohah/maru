@@ -31,6 +31,32 @@ pub fn alive(pid: c_int) bool {
     return std.c.kill(pid, @enumFromInt(0)) == 0;
 }
 
+/// `pids` 가 사라지기를 `timeout_ms` 까지 100 ms 마다 기다린다 — 끝에 아직 살아 있는 수(0 이면 모두 사라짐).
+pub fn survivors(pids: []const c_int, timeout_ms: u32) usize {
+    var waited: u32 = 0;
+    while (true) : (waited += 100) {
+        var left: usize = 0;
+        for (pids) |pid| {
+            if (alive(pid)) left += 1;
+        }
+        if (left == 0 or waited >= timeout_ms) return left;
+        sleepMs(100);
+    }
+}
+
+/// 아직 살아 있는 것을 SIGKILL — 판정이 실패해도 판정자 뒤에 남기지 않는다.
+pub fn killAlive(pids: []const c_int) void {
+    for (pids) |pid| {
+        if (alive(pid)) _ = std.c.kill(pid, .KILL);
+    }
+}
+
+/// 경로가 `maru-web-helper` 이고 샌드박스 밖인 자식인가. exec 전의 fork 와 이미 죽은 pid 는 경로가 비어 빠진다(죽은 pid 도
+/// `sandbox_check` 가 1 을 준다 — W7b 12 차 리뷰 실측).
+pub fn unsandboxedHelper(pid: c_int, path_buf: []u8) bool {
+    return std.mem.endsWith(u8, executablePath(pid, path_buf), "/maru-web-helper") and sandbox_check(pid, null, 0) != 1;
+}
+
 /// `pid` 의 실행 인자(argv)에 `needle` 이 그대로 든 것이 있는가. `KERN_PROCARGS2` 는 argc(int), 실행 경로, NUL 채움, argv argc
 /// 개, 환경 변수 순이다 — 채움과 빈 글 argv 는 둘 다 NUL 이라 가를 수 없어, 앞쪽 argv 가 빈 글이면 그만큼 환경 변수까지 본다
 /// (helper 의 argv[0] 은 늘 경로라 판정에는 상관없다, 판정자는 host 를 빈 환경으로 띄운다). 못 읽거나 잘렸으면(버퍼를 꽉 채움) false.

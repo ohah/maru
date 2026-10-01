@@ -56,6 +56,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
         var profile_buf: [1024]u8 = undefined;
         const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/e", .{std.mem.span(argv[3])}) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
         inputChecks(host, profile);
         return if (failures == 0) 0 else 1;
     }
@@ -63,6 +64,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
         const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
         dialogChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
@@ -70,6 +72,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
         const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
         popupChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
@@ -77,6 +80,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
         const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
         permissionChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
@@ -259,6 +263,34 @@ fn permissionChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var orphan_buf: [1024]u8 = undefined;
     const orphan_profile = std.fmt.bufPrintZ(&orphan_buf, "--profile-dir={s}/h", .{profile_root}) catch return report(false, "perm-camera-orphan", "프로필 경로가 길다", .{});
     permissions_check.cameraOrphan(&reportText, host_path, orphan_profile, server.port) catch |err| report(false, "perm-camera-orphan", "{s}", .{@errorName(err)});
+}
+
+/// 단독 모드의 첫 판정 전에 host 를 한 번 띄워 빈 브라우저를 만들고 끝낸다(프로필 `<뿌리>/w`) — 판정이 아니다. 새로 빌드한
+/// x86_64 설치물의 첫 실행은 Rosetta 번역으로 느려 첫 페이지 준비가 15 초를 넘겼다(W6a① 실측 27 초, 다음부터 6~7 초).
+/// 전체 판정은 앞의 판정들이 이 비용을 치른다. 걸린 시간을 출력해 정말 느려진 것은 보이게 한다(W6a① 적대 검증 5 차).
+fn warmUp(host_path: [:0]const u8, profile_root: []const u8) void {
+    const started = os.nowMs();
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/w", .{profile_root}) catch return;
+    var host = Host.spawn(host_path, profile) catch return;
+    var created = false;
+    if (browsers_check.handshake(&host)) |_| {
+        if (host.send(.{ .create_browser = .{ .browser = 1, .size = .{ .width = 64, .height = 64, .scale = 1 }, .hidden = false, .url = "about:blank" } })) |_| {
+            const deadline = os.nowMs() + 120_000;
+            while (!created and os.nowMs() < deadline) {
+                const message = (host.next(1_000) catch |err| if (err == error.Timeout) continue else break) orelse break;
+                if (message == .load_finished) created = true;
+            }
+        } else |_| {}
+    } else |_| {}
+    host.send(.shutdown) catch {};
+    if (host.wait(15_000) == null) {
+        _ = std.c.kill(host.pid, .KILL);
+        _ = host.wait(15_000);
+    }
+    _ = std.c.close(host.commands);
+    _ = std.c.close(host.events);
+    std.debug.print("warm-up: host 첫 실행과 빈 페이지 {d} ms(판정 아님 — 불러옴 {})\n", .{ os.nowMs() - started, created });
 }
 
 /// 팝업 판정(W6a) — 프로필은 `<뿌리>/i`.

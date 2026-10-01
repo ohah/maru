@@ -70,7 +70,8 @@ pub const Tag = enum(u8) {
     /// 페이지가 웹 알림을 띄웠다(W5c — C6). Chromium 은 웹 알림을 OS 로 보내지 않으므로(실측) sidecar 의 대리 스크립트가 받아
     /// 넘긴다 — 그 출처가 알림을 허용했을 때만.
     web_notification = 47,
-    /// 페이지의 팝업 위젯(`<select>` 목록 등)이 열렸다·옮겨졌다·닫혔다(W6a — D4). 열리면 view DIP 사각형, 닫히면 0 사각형.
+    /// 페이지의 팝업 위젯(`<select>` 목록·색 선택기 등)이 열렸다·닫혔다(W6a — D4). CEF 154 구현에서는 사각형을 열릴 때 한 번만
+    /// 알린다(`InitAsPopup` — 헤더는 옮기거나 크기를 바꿀 때도 부른다고 적는다, 다시 와도 같은 첫 세대를 보낸다). 열리면 view DIP 사각형과 그 팝업 링의 첫 세대, 닫히면 0 사각형·0 세대.
     /// 팝업의 픽셀은 본 화면과 다른 링으로 온다(`ring_message.popup_message_id`).
     popup_changed = 48,
 
@@ -476,6 +477,9 @@ pub const PopupChanged = struct {
     visible: bool,
     /// view 좌상단 기준 DIP. 닫혔으면(`visible = false`) 모두 0 이다(닫힌 필드 — 다른 값은 거절).
     bounds: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    /// 이 팝업의 링 세대는 이 값 이상이다(열렸을 때 1 이상, 닫혔으면 0). maru 는 알림(파이프)과 링(mach)이 따로 와 순서가
+    /// 섞일 수 있다 — 이보다 작은 세대의 팝업 링은 닫히기 직전 팝업의 것이니 그리지 않는다(W6a① 적대 검증 2 차).
+    first_generation: u32 = 0,
 };
 
 pub const ImeRange = struct {

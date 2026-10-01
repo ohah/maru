@@ -144,6 +144,8 @@ fn resize(value: protocol.message.Resize, writer: *events.Writer) void {
     const scale_changed = entry.size.scale != value.size.scale;
     entry.size = value.size;
     producerOf(entry).scale = value.size.scale;
+    // 배율이 바뀌면 CEF 가 열린 팝업을 닫는다(W6a① 적대 검증 4 차 실측) — 그래도 남은 팝업 링이 옛 배율을 싣지 않게.
+    if (popupProducerOf(entry)) |popup| popup.scale = value.size.scale;
     const browser = browserOf(entry);
     const host = browser.*.get_host.?(browser);
     defer object.release(host);
@@ -237,6 +239,7 @@ fn popupProducerOf(entry: *registry_mod.Entry) ?*ring_producer.Producer {
 /// 팝업이 닫혔다 — 그 링을 버린다(다음에 열리면 새 세대 — 옛 목록이 비치지 않게, W6a 착수 전 실측: 다시 열 때마다 새로 그린다).
 pub fn dropPopup(entry: *registry_mod.Entry) void {
     const popup = popupProducerOf(entry) orelse return;
+    entry.popup_generation = popup.next_generation;
     popup.deinit();
     std.heap.c_allocator.destroy(popup);
     entry.popup_frames = null;
@@ -244,9 +247,10 @@ pub fn dropPopup(entry: *registry_mod.Entry) void {
 
 /// 그리기 콜백에서 부른다 — 팝업 위젯 픽셀을 이 브라우저의 팝업 링에 넣는다(W6a — D4). 팝업 링은 처음 그릴 때 만든다.
 pub fn deliverPopupFrame(entry: *registry_mod.Entry, source: iosurface.Ref) void {
+    if (!entry.popup_open) return; // 닫힌 뒤 늦게 온 그림(W6a① 적대 검증 4 차)
     const popup = popupProducerOf(entry) orelse blk: {
         const made = std.heap.c_allocator.create(ring_producer.Producer) catch return;
-        made.* = .{ .browser = entry.id, .scale = entry.size.scale, .message_id = ring_message.popup_message_id };
+        made.* = .{ .browser = entry.id, .scale = entry.size.scale, .message_id = ring_message.popup_message_id, .next_generation = entry.popup_generation };
         entry.popup_frames = made;
         break :blk made;
     };

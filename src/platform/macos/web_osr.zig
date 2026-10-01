@@ -97,6 +97,13 @@ const Surface = struct {
     ime_bounds: ?ws.message.Rect = null,
     /// 열린 팝업 위젯(`<select>` 목록 등)의 view DIP 사각형(W6a — D4). 닫혔으면 null. 그리기는 W6a②.
     popup_bounds: ?ws.message.Rect = null,
+    /// 열린 팝업의 링 첫 세대 — 이보다 작은 세대의 팝업 링은 닫히기 직전 팝업의 것이다(W6a②). **그릴 때** 거른다 — 링(mach)이
+    /// 보임 알림(파이프)보다 한 tick 먼저 올 수 있어, 받을 때 거르면 다시 알리지 않는 첫 링을 잃는다(W6a① 적대 검증 3 차).
+    /// 링 크기가 사각형 × scale(±1)인지도 본다 — 열린 A 위로 B 가 열릴 때 A 의 늦은 그림이 B 의 첫 세대로 실려도 A 와 B 의
+    /// 크기가 다르면 걸러진다(같은 크기는 못 거른다 — CEF 154 에서 관측되지 않았다. sidecar 의 `popup_open` 은 A 의 닫힘과 B 의
+    /// 열림 사이에 온 그림만 막는다. W6a① 적대 검증 5~7 차 — 판정 `popup-frame` 이 쓰는 조건). 브라우저가 닫혀도(`browser_closed`)
+    /// 닫힘 알림은 오지 않는다 — W6a② 는 그때도 `popup_bounds` 를 지운다.
+    popup_first_generation: u32 = 0,
     /// 답을 기다리는 대화상자·파일 선택(W5a)·권한 요청(W5b) — 온 차례대로.
     dialogs: std.ArrayList(Dialog) = .empty,
     /// 아직 maru 알림으로 내보내지 않은 웹 알림(W5c) — 온 차례대로, 탭마다 `max_notes_per_surface` 까지(넘치면 오래된 것부터 버린다).
@@ -1492,6 +1499,8 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
     for (surfaces.values()) |*s| {
         dropDialogs(gpa, s);
         dropNotes(gpa, s);
+        s.popup_bounds = null; // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게(W6a① 적대 검증)
+        s.popup_first_generation = 0; // 새 sidecar 는 세대를 1 부터 센다
     }
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
@@ -1633,6 +1642,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .browser_created => |id| if (surfaces.getPtr(id)) |s| {
             s.created = true;
+            s.popup_bounds = null;
+            s.popup_first_generation = 0;
             if (s.last_url) |u| send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
             if (s.focused) send(gpa, .{ .set_focus = .{ .browser = id, .value = true } });
             s.composing = false;
@@ -1672,6 +1683,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .popup_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.popup_bounds = if (v.visible) v.bounds else null;
+            s.popup_first_generation = v.first_generation;
         },
         .js_dialog => |v| {
             const kind: DialogKind = switch (v.kind) {

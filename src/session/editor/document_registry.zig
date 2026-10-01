@@ -26,7 +26,8 @@ pub const Registry = struct {
     slots: std.ArrayList(Slot) = .empty,
     last_reference: u64 = 0,
 
-    /// 준비된 상태를 성공할 때만 소비한다. 실패하면 호출자의 본문·신원·이력은 그대로다.
+    /// 호출자가 독립 소유한 준비 상태를 성공할 때만 소비한다. get으로 빌린 State를 넘기지 않는다.
+    /// 실패하면 호출자의 본문·신원·이력은 그대로다.
     /// resource allocator는 기존 경로/이력의 할당 짝이며 마지막 참조 해제까지 살아 있어야 한다.
     pub fn create(self: *Registry, prepared: *document_state.State, resource_allocator: std.mem.Allocator) Error!Lease {
         const id = try self.nextId();
@@ -192,6 +193,8 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
     state.opened = .{ .file = file, .saved_hash = document_state.contentHash(file.content) };
     state.history.undo = try allocator.alloc(@import("history.zig").Entry, 2);
     const first = registry.create(&state, allocator) catch |err| {
+        try testing.expectEqual(@as(u64, 0), registry.last_reference);
+        try testing.expectEqual(@as(usize, 0), registry.slots.items.len);
         try testing.expectEqualStrings("/owned/file", state.path.?);
         try testing.expectEqualStrings("body\n", state.opened.?.file.content);
         try testing.expectEqual(@as(usize, 2), state.history.undo.len);
@@ -206,8 +209,10 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
     };
     for (&leases) |*lease| {
         const before = registry.viewCount(first).?;
+        const before_id = registry.last_reference;
         lease.* = registry.retain(first, .view) catch |err| {
             try testing.expectEqual(before, registry.viewCount(first).?);
+            try testing.expectEqual(before_id, registry.last_reference);
             try testing.expectEqualStrings("/owned/file", registry.get(first).?.path.?);
             try testing.expectEqualStrings("body\n", registry.get(first).?.opened.?.file.content);
             return err;
@@ -217,7 +222,11 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
     var next: document_state.State = .{};
     defer next.clear(allocator);
     next.path = try allocator.dupe(u8, "/next/file");
+    const before_id = registry.last_reference;
+    const before_slots = registry.slots.items.len;
     const second = registry.create(&next, allocator) catch |err| {
+        try testing.expectEqual(before_id, registry.last_reference);
+        try testing.expectEqual(before_slots, registry.slots.items.len);
         try testing.expectEqualStrings("/next/file", next.path.?);
         try testing.expectEqualStrings("body\n", registry.get(first).?.opened.?.file.content);
         try testing.expectEqual(@as(usize, 33), registry.viewCount(first).?);
@@ -284,4 +293,45 @@ test "DREG6 registry bookkeeping and document resources use their own allocators
     try testing.expect(resources.ptr == testing.allocator.ptr);
     try testing.expect(resources.vtable == testing.allocator.vtable);
     try testing.expect(try registry.release(lease));
+}
+
+test "DREG7 released aliases and forged references cannot access a pinned document" {
+    var registry: Registry = .{ .allocator = testing.allocator };
+    defer registry.deinit() catch unreachable;
+    var state: document_state.State = .{};
+    state.untitled = @import("untitled.zig").Name.init(23);
+    const view = try registry.create(&state, testing.allocator);
+    const pin = try registry.retain(view, .read);
+    defer _ = registry.release(pin) catch false;
+    const pointer = registry.get(pin).?;
+    try testing.expect(!(try registry.release(view)));
+    // 문서가 살아 있어도 놓은 view의 복사본은 별도 수명이 아니다.
+    try testing.expect(registry.get(view) == null);
+    try testing.expect(registry.resourceAllocator(view) == null);
+    try testing.expect(registry.viewCount(view) == null);
+    try testing.expectError(error.StaleReference, registry.retain(view, .view));
+    try testing.expectError(error.StaleReference, registry.release(view));
+    var forged = pin;
+    forged.id = 0;
+    try testing.expect(registry.get(forged) == null);
+    try testing.expectError(error.StaleReference, registry.release(forged));
+    forged = pin;
+    forged.document.slot = std.math.maxInt(usize);
+    try testing.expect(registry.get(forged) == null);
+    try testing.expectError(error.StaleReference, registry.retain(forged, .request));
+    forged = pin;
+    forged.kind = .request;
+    try testing.expect(registry.get(forged) == null);
+    try testing.expectError(error.StaleReference, registry.release(forged));
+    try testing.expectEqual(@as(usize, 0), registry.viewCount(pin).?);
+    try testing.expectEqual(@as(u32, 23), registry.get(pin).?.untitled.?.n);
+    try testing.expectError(error.Busy, registry.deinit());
+    // Busy는 기존 owner를 훼손하지 않고 pin-only 문서에 뷰를 다시 붙일 수 있다.
+    const reopened = try registry.retain(pin, .view);
+    defer _ = registry.release(reopened) catch false;
+    try testing.expect(pointer == registry.get(reopened).?);
+    try testing.expectEqual(@as(usize, 1), registry.viewCount(pin).?);
+    try testing.expect(!(try registry.release(pin)));
+    try testing.expect(registry.get(pin) == null);
+    try testing.expect(try registry.release(reopened));
 }

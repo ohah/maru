@@ -444,7 +444,8 @@ slot/generation을 구분하고 `Lease`는 registry owner·참조 id·kind를 �
 복사한다고 새 참조가 되지 않는다. 새 뷰/읽기/요청 수명은 `retain`으로 발급한다.
 Registry 자체는 참조가 살아 있는 동안 메인 스레드의 같은 주소에 있어야 한다.
 
-`create`는 슬롯·문서·첫 view 참조를 모두 준비한 뒤 caller State를 소비한다. 할당 실패는
+`create`는 슬롯·문서·첫 view 참조를 모두 준비한 뒤 caller가 독립 소유한 State를 소비한다.
+`get`으로 빌린 State를 다시 `create`에 넘기는 소유권 이동은 허용하지 않는다. 할당 실패는
 caller의 본문·경로·이력을 유지한다. `retain` 실패도 기존 참조 수를 바꾸지 않는다.
 `get`의 빌린 State 포인터는 해당 lease를 놓기 전까지 유효하며 다른 슬롯 증가는 영향을
 주지 않는다. 빌린 State의 clear/이동은 registry만 수행한다. 참조 pin은 immutable snapshot이나
@@ -462,9 +463,10 @@ Dirty 확인·OS 조합 정산·provider 취소·렌더 참조 종료는 coordin
 `deinit`은 Busy로 거절한다. recovery 삭제·경로별 alias 통합·LSP didClose를 이 골격에서
 수행하지 않는다. 마지막 뷰 개수만 0이면 문서를 즉시 버리는 정책도 아니다.
 
-`DREG1`~`DREG6`는 실제 본문 소유, 두 view와 read/request pin, 마지막 참조 해제,
+`DREG1`~`DREG7`는 실제 본문 소유, 두 view와 read/request pin, 마지막 참조 해제,
 100개 슬롯 증가의 주소 안정성, 슬롯 재사용/이전 세대/중복/다른 owner/잘못된 kind 거절,
-모든 준비/retain 할당 실패, 세대/id 상한 및 allocator 분리를 판정한다. 제품 split/IME를
-실행한 결과와 구분한다. 현재는 중립 모듈과 실제 L2 테스트 집계에 배선했으며 AppRuntime
+모든 준비/retain 할당 실패와 id/슬롯 게시 보존, 세대/id 상한 및 allocator 분리를 판정한다.
+DREG7은 pin-only 재연결, 해제된 lease 복사본과 위조 id/슬롯/kind 거절, Busy 뒤 owner
+보존을 확인한다. 제품 split/IME를 실행한 결과와 구분한다. 현재는 중립 모듈과 실제 L2 테스트 집계에 배선했으며 AppRuntime
 및 Term의 handle 이관은 아직 없다. 다음은 열린 문서의 준비→등록→뷰 연결과 기존 두
 teardown 호출자를 이 수명으로 배선하되 provider/렌더/입력 정산을 먼저 확정하는 단계다.

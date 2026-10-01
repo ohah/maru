@@ -391,7 +391,7 @@ pub fn navigateTo(self: *AppSession, target: NavTarget) NavError!void {
     } else pane_ops.activePane(self).activeTerm();
 
     if (term.kind != .editor) return error.NoDocument;
-    const doc = term.rt.editor_document.opened orelse return error.NoDocument;
+    const doc = term.rt.editorDocument().opened orelse return error.NoDocument;
     // ⑵ʹ 풀기 — `(line, character)` 는 **이 문서**의 줄 표로 byte 가 된다(§8.2c).
     const raw_offset: usize = if (target.pos) |p|
         maru.session.editor.lsp.position.offsetOf(doc.file.content, doc.file.lines, p.line, p.character, p.enc)
@@ -431,7 +431,7 @@ pub fn gotoConflictActive(self: *AppSession, which: maru.session.dock_layout.Con
 /// 아무 일도 안 한다. 판에 초점이 있어도 Result 로 돌아온다(selection 이 서는 순간 초점이 Result 다 — S3b-3b).
 pub fn gotoConflict(self: *AppSession, term: *Term, which: maru.session.dock_layout.ConflictNav) bool {
     if (term.kind != .editor) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     ensureConflicts(self, term);
     const regions = term.rt.editor_conflicts;
     if (regions.len == 0) return false;
@@ -493,7 +493,7 @@ fn placeCaretAndReveal(self: *AppSession, term: *Term, offset: usize) void {
 fn currentNavMark(self: *AppSession) ?NavMark {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return null;
-    _ = term.rt.editor_document.opened orelse return null;
+    _ = term.rt.editorDocument().opened orelse return null;
     const sel = term.rt.editor_selection orelse return null;
     return .{ .surface_id = term.surfaceId(), .offset = sel.focus };
 }
@@ -539,7 +539,7 @@ fn navigateStep(
         const mark = from_stack.pop().?;
         const term = term_ops.termBySurfaceId(self, mark.surface_id) orelse continue; // 닫혔다 — 버린다
         if (term.kind != .editor) continue;
-        const doc = term.rt.editor_document.opened orelse continue;
+        const doc = term.rt.editorDocument().opened orelse continue;
 
         // **반대쪽에 지금 자리를 남긴다** — 그러지 않으면 한 번 뒤로 간 뒤 돌아올 수 없다.
         if (currentNavMark(self)) |here| to_stack.append(self.allocator, here) catch {};
@@ -566,7 +566,7 @@ fn focusTermForNav(self: *AppSession, term: *Term) void {
 /// 그 문장이 성립하지 않는다.
 pub fn headerBreadcrumb(self: *AppSession, term: *Term, path: []const u8) []const u8 {
     if (term.rt.editor_diff != null) return path;
-    const doc = term.rt.editor_document.opened orelse return path;
+    const doc = term.rt.editorDocument().opened orelse return path;
     const sel = term.rt.editor_selection orelse return path;
     const focus = @min(sel.focus, doc.file.content.len);
     // **2층이 유효하면 그것**(§8.2o) — 편집이 나면 2층이 비고 1층으로 돌아간다.
@@ -605,7 +605,7 @@ fn inlayWindow(self: *AppSession, term: *Term) chrome_editor.content.InlayWindow
 /// (적대적 검증 2026-09-24: 들여쓰기 범위로 접은 채 파싱이 끝나는 프레임, Debug 에서 `0xaaaa…` 주소 segfault).
 fn advanceSyntax(self: *AppSession, term: *Term) void {
     if (term.rt.editor_diff != null) return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
 
     // **끊긴 파싱을 이 프레임 몫만큼 이어 판다**(§2.1a). 여는 파싱이 한 프레임에 안 끝나는 문서가
     // 있으므로(`build.zig` 675KB 가 `ReleaseFast` 에서 22.5ms — §2.1a 실측, 4ms 로 여섯 라운드) 프레임마다 예산만큼만 판다. 아직 남았으면 **다음 프레임을
@@ -645,7 +645,7 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
 /// 보이는 창의 구문 색. **상태를 밀지 않는다** — 그것은 `advanceSyntax` 가 줄 배열을 잡기 전에 한다(그 함수의 doc).
 fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
     if (term.rt.editor_diff != null) return &.{};
-    const doc = term.rt.editor_document.opened orelse return &.{};
+    const doc = term.rt.editorDocument().opened orelse return &.{};
 
     const first = term.rt.editor_first_line;
     // **길이 판정도 렌더 축이다.** 접히면 보이는 줄이 문서 줄보다 적어, 문서 수로 재면 화면 끝
@@ -719,7 +719,7 @@ fn minimapPxFor(self: *AppSession, term: *Term, inner_w: u32) u32 {
 fn minimapSide(self: *AppSession, term: *Term, pane_rect: chrome_draw.Rect, draw_lines: []const []const u8) ?chrome_editor.diff_frame.MinimapSide {
     const cols = minimapCols(self);
     if (cols == 0 or term.rt.editor_diff != null or term.rt.editor_merge != null) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const inset = chrome_editor.frame.content_inset_px;
     const inner_w = pane_rect.w -| inset * 2;
     const inner_h = pane_rect.h -| inset * 2;
@@ -846,7 +846,7 @@ fn minimapScrollTo(self: *AppSession, term: *Term, y_px: f64) void {
 /// 없음). 파싱이 끊긴 프레임은 직전 목록을 유지한다. 설정으로 껐거나 문서가 없으면 `null`.
 fn diagnosticViews(self: *AppSession, term: *Term, visible_len: usize) ?diagnostics.Views {
     if (!self.loaded_config.config.editor.diagnostics) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const st = &term.rt.editor_diagnostics;
     const prov: ?*syntax_color.syntax.Provider = if (term.rt.editor_syntax.provider) |*p| p else null;
     _ = diagnostics.refreshFromSyntax(st, self.allocator, prov);
@@ -860,7 +860,7 @@ pub fn gotoDiagnostic(self: *AppSession, term: *Term, dir: maru.session.editor.d
     if (term.kind != .editor) return false; // 등가(적대적 6회차 F8): 편집기가 아니면 `editor_document.opened` 도 없다 — 뜻을 먼저 적는 가드
 
     if (!self.loaded_config.config.editor.diagnostics) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const sorted = term.rt.editor_diagnostics.list.items;
     if (sorted.len == 0) return false;
     const focus: usize = if (term.rt.editor_selection) |sel| @min(sel.focus, doc.file.content.len) else 0;
@@ -927,7 +927,7 @@ fn paneDecorations(self: *AppSession, term: *Term) Decorations {
         }
     }
     const active: ?usize = blk: {
-        const doc = term.rt.editor_document.opened orelse break :blk null;
+        const doc = term.rt.editorDocument().opened orelse break :blk null;
         const sel = term.rt.editor_selection orelse break :blk null;
         const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len)));
         const axis_len = if (term.rt.editor_visible_lines.len > 0) term.rt.editor_visible_lines.len else term.rt.editor_lines.len;
@@ -1213,7 +1213,7 @@ pub fn hitTestBodyMode(comptime mode: chrome_editor.content.PointMode, term: *Te
     ) orelse return null;
 
     // ⑤ 줄 안 byte → 문서 offset. `Selection`이 문서 전체 offset을 요구한다.
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const line = doc.file.lines.line(p.line) orelse return null;
     // **묶지 않고 단언한다.** `editor_lines[i]`는 `lineText(i) = bytes[start..contentEnd()]`이므로
     // `text.len == contentEnd() - start`가 항등이고, `byteAtPoint`의 모든 반환 경로가 `≤ text.len`
@@ -1236,7 +1236,7 @@ pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, t
     // 비교 뷰는 축이 다르다(행 배열이고 문서가 둘이다) — 그 자리는 §4.1g "비교 뷰"가 따로 정한다.
     if (term.rt.editor_diff != null) return null;
     const sel = term.rt.editor_selection orelse return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     // **`clampOffset` 이 그 모듈이 정한 관용구다**(적대적 11 회차). `lineAt` 은
     // `offset <= byteLen()` 을 **assert 로 전제**하고("문서 끝을 넘는 offset 은 정상이 아니다"),
     // 그 doc 이 *"Release 에서는 `clampOffset` 을 거치도록 소비처를 유도한다"* 고 적어 두었다.
@@ -2166,26 +2166,20 @@ pub fn nativeTextFromEnv() bool {
     return editor_diff_ops.valueEnables(std.mem.span(raw));
 }
 
-/// 문서를 Term에 붙이기 **직전까지** 만들어 둔 것 — 문서·줄 배열·경로 복사 셋.
+/// 문서를 Term에 붙이기 직전까지 준비한 앱 전역 문서 참조와 뷰 줄 배열.
 ///
 /// **왜 중간 상태에 이름을 줬나.** 파일 Term을 여는 경로(`pane.openFileTermInActivePane`)는 Term을
 /// 만드는 **분기 전에** 이 파일을 네이티브로 열 수 있는지 알아야 한다 — 못 읽으면 CM6로 열어야
 /// 하는데, 읽기와 부착이 한 함수에 붙어 있으면 그 판정을 할 수 없다(Term이 이미 만들어진 뒤다).
 pub const Prepared = struct {
-    opened: Opened,
+    lease: editor.document_registry.Lease,
     lines: [][]const u8,
-    /// **없을 수 있다** — 이름 없는 문서(§3.11)는 경로가 아직 없다. 그 「없음」은 이 앱에서
-    /// `editor_document.path == null` 이 유일한 표현이고(빈 슬라이스가 아니다), 기존 저장 가드가 그 값을
-    /// 묻는다(`const path = term.rt.editor_document.path orelse …`) — 빈 슬라이스로 두면 그 가드가 안 걸려
-    /// **빈 경로에 쓰려 든다**.
-    path: ?[]u8,
 
-    /// 아직 Term에 넘기지 않은 것을 되돌린다. **부착 뒤에는 부르지 않는다** — 그때부터 소유는
-    /// Term이고 `destroyTerm`이 같은 것을 푼다(이중 해제).
+    /// 아직 뷰에 넘기지 않은 참조와 줄 배열을 되돌린다. registry는 문서를 한 번만 정산한다.
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
-        self.opened.deinit(allocator);
         allocator.free(self.lines);
-        if (self.path) |p| allocator.free(p);
+        _ = @constCast(self.lease.owner).release(self.lease) catch unreachable;
+        self.* = undefined;
     }
 };
 
@@ -2205,7 +2199,10 @@ pub fn preparePath(self: *AppSession, path: []const u8) OpenFileError!Prepared {
     for (0..n) |i| lines[i] = opened.file.lineText(i) orelse "";
 
     const path_copy = self.allocator.dupe(u8, path) catch return error.OutOfMemory;
-    return .{ .opened = opened, .lines = lines, .path = path_copy };
+    errdefer self.allocator.free(path_copy);
+    var state: editor.document_state.State = .{ .opened = opened, .path = path_copy };
+    const lease = self.editor_documents.create(&state, self.allocator) catch return error.OutOfMemory;
+    return .{ .lease = lease, .lines = lines };
 }
 
 /// **빈 문서**를 부착 직전까지 만든다 — 이름 없는 문서(§3.11)의 `preparePath` 짝이다. 디스크를
@@ -2231,7 +2228,9 @@ pub fn prepareUntitled(self: *AppSession) OpenFileError!Prepared {
     errdefer self.allocator.free(lines);
     for (0..n) |i| lines[i] = opened.file.lineText(i) orelse "";
 
-    return .{ .opened = opened, .lines = lines, .path = null };
+    var state: editor.document_state.State = .{ .opened = opened };
+    const lease = self.editor_documents.create(&state, self.allocator) catch return error.OutOfMemory;
+    return .{ .lease = lease, .lines = lines };
 }
 
 /// 준비한 문서를 Term에 넘긴다. **실패하지 않는다** — 호출자는 이 앞에서 실패할 수 있는 일을 모두
@@ -2242,9 +2241,14 @@ pub fn prepareUntitled(self: *AppSession) OpenFileError!Prepared {
 /// 해제다. 같은 모양을 `materialize`와 `computeMarks`에서 이미 두 번 잡았고, 이 자리가 세 번째다.
 /// 넘긴 뒤에는 실패 지점이 없으므로 errdefer가 겹칠 여지 자체가 사라진다.
 pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
-    term.rt.editor_document.opened = prepared.opened;
+    std.debug.assert(term.rt.editor_document_lease == null);
+    std.debug.assert(term.rt.editor_unattached_document.opened == null);
+    std.debug.assert(term.rt.editor_unattached_document.path == null and term.rt.editor_unattached_document.remote == null);
+    std.debug.assert(term.rt.editor_unattached_document.history.undo.len == 0 and term.rt.editor_unattached_document.history.redo.len == 0);
+    prepared.lease.owner.get(prepared.lease).?.untitled = term.rt.editor_unattached_document.untitled;
+    term.rt.editor_unattached_document = .{};
+    term.rt.editor_document_lease = prepared.lease;
     term.rt.editor_lines = prepared.lines;
-    term.rt.editor_document.path = prepared.path;
 
     // **구문 트리를 여기서 연다**(§5.3). 문서와 수명이 같으므로 `releaseEditorTerm`이 함께 놓는다.
     // grammar가 없는 언어면 `provider`가 `null`이고 그 문서는 끝까지 무색이다 — 실패가 아니라
@@ -2254,9 +2258,9 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // 「언어 항목」). 상태바가 경로에서 다시 판정하면 출처가 둘이 된다.
     // **경로가 없으면 문법도 없다**(§3.11 — 문법은 경로에서 나온다). 그 문서는 끝까지 무색이고
     // 그것은 실패가 아니라 §5 의 **저하**다. 이름이 붙는 순간(U2) 다시 판정한다.
-    term.rt.editor_grammar = if (prepared.path) |p| maru.session.editor.language.grammarForPath(p) else .none;
+    term.rt.editor_grammar = if (term.rt.editorDocument().path) |p| maru.session.editor.language.grammarForPath(p) else .none;
     term.rt.editor_syntax = syntax_color.open(
-        term.rt.editor_document.opened.?.file.content,
+        term.rt.editorDocument().opened.?.file.content,
         term.rt.editor_grammar,
     );
 
@@ -2399,7 +2403,7 @@ pub fn createRestoredUntitledTerm(self: *AppSession, number: u32) OpenFileError!
 
     // **이름을 먼저 세운다** — `finishAttach` 의 꼬리가 복원을 부를 때 그 신원이 있어야 한다
     // (없으면 그 문서는 백업을 못 찾는다).
-    term.rt.editor_document.untitled = maru.session.editor.untitled.Name.init(number);
+    term.rt.editorDocument().untitled = maru.session.editor.untitled.Name.init(number);
     finishAttach(self, term, prepared);
     term.rt.editor_selection = editor_selection.Selection.at(0);
     // **내용은 여기서 넣는다** — `finishAttach` 의 꼬리(경로 문서의 그 자리)가 아니다: 그쪽으로 보내면
@@ -2435,7 +2439,7 @@ pub fn openUntitledInActivePane(self: *AppSession) (OpenFileError || error{Untit
     pane.terms.append(self.allocator, term) catch return error.OutOfMemory;
 
     // 여기부터 실패 지점이 없다 — 소유가 Term으로 넘어간다.
-    term.rt.editor_document.untitled = maru.session.editor.untitled.Name.init(n);
+    term.rt.editorDocument().untitled = maru.session.editor.untitled.Name.init(n);
     finishAttach(self, term, prepared);
     term.rt.editor_selection = editor_selection.Selection.at(0);
     self.focusTerm(pane.terms.items.len - 1);
@@ -2998,7 +3002,7 @@ fn widthDragActive(self: *const AppSession) bool {
 pub fn copySelection(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const bytes = doc.file.content;
 
     // **커서가 여럿이면 조각도 여럿이다**(§3.4). 시스템 클립보드에는 **문서 순서로 줄바꿈 연결**해
@@ -3084,7 +3088,7 @@ fn buildCaretRows(self: *AppSession, term: *Term) ?[]const []const u32 {
     var iter = selections(term);
     const cursor_count = iter.count();
     if (cursor_count == 0) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
 
     const numbers = term.rt.editor_visible_numbers;
     const visible = term.rt.editor_visible_lines;
@@ -3337,7 +3341,7 @@ fn pageRows(term: *Term) usize {
 const ScrollAnchor = struct { off: usize };
 
 fn captureScrollAnchor(term: *Term) ?ScrollAnchor {
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const top: u32 = @intCast(term.rt.editor_first_line);
     if (top == 0) return null; // 맨 위다 — 밀릴 것이 없다
     const doc_line = docLineOfVisibleRow(term, top) orelse return null;
@@ -3351,7 +3355,7 @@ fn captureScrollAnchor(term: *Term) ?ScrollAnchor {
 /// 답할 수 있다.
 fn restoreScrollAnchor(self: *AppSession, term: *Term, saved: ?ScrollAnchor, d: maru.session.editor.delta.Delta) void {
     const a = saved orelse return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const moved = maru.session.editor.delta.mapOffset(d, a.off);
     const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(moved, doc.file.content.len)));
     const row = visibleRowOfDocLine(term, doc_line) orelse return;
@@ -3384,7 +3388,7 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_se
     if (!wrap) return null;
     const rows = term.rt.editor_hit_rows_len;
     if (rows == 0) return null; // 아직 안 그렸다 — 논리 줄로 떨어진다
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
 
     const lines = doc.file.lines;
     const doc_line = lines.lineAt(focus);
@@ -3474,7 +3478,7 @@ fn visualRowSpan(self: *AppSession, term: *Term, focus: usize, seam: SeamSide) ?
     if (!wrap) return null;
     const rows = term.rt.editor_hit_rows_len;
     if (rows == 0) return null; // 아직 안 그렸다
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
 
     const lines = doc.file.lines;
     const doc_line = lines.lineAt(focus);
@@ -3708,7 +3712,7 @@ pub fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
 /// 값이 나온다. 아직 한 프레임도 안 그렸으면(`content_width == 0`) 아무 일도 안 한다: 그때는
 /// 「밖이다」를 판정할 기준이 없고, 다음 프레임이 그리고 나면 다음 이동이 잡는다.
 fn revealPrimaryCaretCols(self: *AppSession, term: *Term, fallback_cols: u16, fallback_max: u32) void {
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
     const off = @min(sel.focus, doc.file.content.len);
     const line_idx = doc.file.lines.lineAt(off);
@@ -3781,7 +3785,7 @@ fn revealCaretColumn(self: *AppSession, term: *Term, right: bool, col: u32, visi
 /// 줄을 **맨 위에 두므로**, 그대로 두면 **한 글자 칠 때마다 화면이 그 줄을 천장으로 끌어올린다**
 /// (적대적 검증 2026-08-26이 잡았다). 편집 전 화면이 몇 줄이었는지는 그 순간에도 알 수 있다.
 fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) void {
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
     const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len)));
 
@@ -3887,7 +3891,7 @@ fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) 
 pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const primary = term.rt.editor_selection orelse return false;
 
     // **괄호 점프는 커서 전부를 한 번에 판정한다**(§3.9c) — 커서마다 따로 물으면 같은 부모의 형제를 커서 수만큼 다시 짝지어 곱으로 붙는다.
@@ -3974,7 +3978,7 @@ fn jumpOrStart(doc: Opened, sel: editor_selection.Selection, target: ?usize, goa
 pub fn addCursorVertically(self: *AppSession, term: *Term, down: bool) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const primary = term.rt.editor_selection orelse return false; // 씨앗이 없다(§3.2b)
 
     var buf: std.ArrayList(editor_selection.Selection) = .empty;
@@ -4052,7 +4056,7 @@ pub fn addCursorVertically(self: *AppSession, term: *Term, down: bool) bool {
 pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g) — 이 슬라이스 밖
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
 
     var buf: std.ArrayList(editor_selection.Selection) = .empty;
     defer buf.deinit(self.allocator);
@@ -4135,7 +4139,7 @@ pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
 fn buildSelectionMarks(self: *AppSession, term: *Term, preedit_projected: bool) ?[]const []const chrome_editor.frame.Mark {
     var iter = selections(term);
     if (iter.count() == 0) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     // **렌더가 보는 축으로 만든다.** 접혀 있으면 렌더가 받는 배열은 `editor_visible_lines`(보이는 줄)
     // 이고 `paintSelection`은 그 축의 인덱스로 읽는다 — 문서 줄 축으로 만들면 접힘이 켜지는 순간
     // **화면이 조용히 거짓말한다**: 실측으로 보이는 줄의 띠가 사라지고(1→0), 숨긴 줄을 고르면
@@ -4301,7 +4305,7 @@ fn markRangeInLine(
 pub fn editorImeCaretRect(_: *AppSession, term: *Term) ?chrome_draw.Rect {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
 
     // 조합 중이면 **조합을 시작한 자리**, 아니면 primary caret.
     const at = if (term.rt.editor_preedit.len > 0)
@@ -4354,7 +4358,7 @@ const PreeditProjection = struct {
 
 fn preeditLines(self: *AppSession, term: *Term, base: []const []const u8) ?PreeditProjection {
     if (term.rt.editor_preedit.len == 0) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const rows = self.allocator.alloc([]const u8, base.len) catch return null;
     @memcpy(rows, base);
     const owned = self.allocator.alloc(bool, base.len) catch {
@@ -4502,7 +4506,7 @@ fn matchRange(doc: Opened, m: maru.session.editor.find.Match) ?DocRange {
 pub fn replaceCurrentMatch(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
     if (!isFindTarget(self, term)) return false; // 남의 문서 좌표로 이 문서를 고치지 않는다
 
@@ -4542,7 +4546,7 @@ pub fn replaceCurrentMatch(self: *AppSession, term: *Term) bool {
 pub fn replaceAllMatches(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
     if (!isFindTarget(self, term)) return false;
     if (self.editor_find_matches.items.len == 0) return false;
@@ -4589,7 +4593,7 @@ pub fn replaceAllMatches(self: *AppSession, term: *Term) bool {
 
 /// 문서 offset `at` **이상**에서 시작하는 첫 매치를 현재로 삼는다. 없으면 첫 매치로 돌아간다(wrap).
 fn selectNextMatchAtOrAfter(self: *AppSession, term: *Term, at: usize) void {
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     for (self.editor_find_matches.items, 0..) |m, i| {
         const r = matchRange(doc, m) orelse continue;
         if (r.start >= at) {
@@ -4620,7 +4624,7 @@ pub fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.ed
     const rows_before = drawnDocLines(term);
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editor_document.opened.?.file.apply(.{ .changes = changes }, &sels) catch {
+    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = changes }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -4643,7 +4647,7 @@ pub fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.ed
 /// 무엇을 찾았는지 화면이 말하지 않고, 바꾸기가 "지금 것"을 집을 근거도 사라진다.
 fn selectFindMatch(self: *AppSession, term: *Term, match: maru.session.editor.find.Match) void {
     if (term.rt.editor_diff != null) return; // 비교 뷰는 축이 둘이다(§4.1g) — 검색 대상도 아직 아니다
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const line = doc.file.lines.line(match.line) orelse return;
 
     // 매치는 **줄 안 offset**이고 selection은 **문서 offset**이다(§3.1 단일 위치 축).
@@ -4983,7 +4987,7 @@ fn buildFindMarksInto(self: *AppSession, term: *Term, matches: []const maru.sess
 /// 같은 낱말 강조(§5.1a·§8.2p)의 **렌더 축 마크** — `buildFindMarks` 와 같은 걸음이고 저장소만 다르다. 강조가 없으면 `null`.
 fn buildOccurrenceMarks(self: *AppSession, term: *Term) ?[]const []const chrome_editor.frame.Mark {
     if (term.rt.editor_diff != null) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const spans = highlight_client.spans(term);
     if (spans.len == 0) return null;
     const numbers = term.rt.editor_visible_numbers;
@@ -5162,7 +5166,7 @@ fn logHitSnapshotDiag(self: *AppSession, term: *Term, y_px: f64, off: usize) voi
     if (!diag_gate.maruDebugEnabled()) return;
     const geom = term.rt.editor_hit_geom;
     const stale = hitSnapshotStale(self, term);
-    const doc = term.rt.editor_document.opened;
+    const doc = term.rt.editorDocument().opened;
     const line = if (doc) |d| d.file.lines.lineAt(@min(off, d.file.content.len)) else 0;
     const row: i64 = if (geom.cell_h_px == 0) -1 else blk: {
         const rel = @as(i64, @intFromFloat(@max(-1e9, @min(1e9, y_px)))) - @as(i64, geom.body_y);
@@ -5800,7 +5804,7 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     // 고정 행의 더블·세 번 클릭도 그 머리줄로 간다(가려진 본문 줄의 낱말을 고르지 않는다 — §4.1i).
     if (sticky_client.click(self, term, x_px, y_px)) return true;
     const off = hitTestBody(term, x_px, y_px) orelse return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
 
     const range: struct { lo: usize, hi: usize, kind: editor_selection.AnchorKind } = if (whole_line) blk: {
         // **줄 전체.** 개행은 뺀다 — 붙여넣기가 줄바꿈을 하나 더 만들지 않게 한다(트리플클릭이
@@ -5895,7 +5899,7 @@ pub const ColumnStep = enum { up, down, left, right };
 pub fn columnSelectStep(self: *AppSession, term: *Term, step: ColumnStep) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
 
     if (term.rt.editor_column_anchor == null) {
         const sel = term.rt.editor_selection orelse return false;
@@ -5947,7 +5951,7 @@ pub fn columnSelectStep(self: *AppSession, term: *Term, step: ColumnStep) bool {
 fn toggleCursorAt(self: *AppSession, term: *Term, off: usize) void {
     if (term.kind != .editor) return;
     if (term.rt.editor_diff != null) return; // 비교 뷰는 축이 둘이다(§4.1g)
-    if (term.rt.editor_document.opened == null) return;
+    if (term.rt.editorDocument().opened == null) return;
 
     var buf: std.ArrayList(editor_selection.Selection) = .empty;
     defer buf.deinit(self.allocator);
@@ -6029,7 +6033,7 @@ fn writeCursors(self: *AppSession, term: *Term, items: []const editor_selection.
 /// 풀려도 복구된다("누적되지 않고 대체된다").
 fn applyColumnSelection(self: *AppSession, term: *Term) void {
     const anchor = term.rt.editor_column_anchor orelse return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     // **랩이 꺼졌으면 스냅숏을 안 쓴다.** 그때 시각 행은 논리 줄과 1:1 이라 두 경로가 **같은 답**을
     // 내는데, 스냅숏에 기대면 **화면 밖 줄에 커서가 안 선다** — 키보드로 넓히거나 자동 스크롤이
     // 따라오기 전에는 그 행이 스냅숏에 없기 때문이다. `movedVisualRow` 가 같은 이유로 랩이 꺼지면
@@ -6109,7 +6113,7 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
                 // **잡은 단위로 늘어난다**(`AnchorKind` doc). 더블클릭 뒤 끌면 지나가는 단어가
                 // 통째로, 트리플클릭 뒤 끌면 줄이 통째로 들어온다 — 글자 단위로 늘면 잡은 단어의
                 // 반쪽이 남아 사용자가 본 것과 어긋난다.
-                sel.focus = if (owner.term.rt.editor_document.opened) |*doc|
+                sel.focus = if (owner.term.rt.editorDocument().opened) |*doc|
                     widenedFocus(&doc.file, sel.*, off)
                 else
                     off;
@@ -6904,7 +6908,7 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
 /// 다른 범위가 된다. 파싱은 여는 직후에 끝나므로 그 사이에 접어 둔 것이 있을 확률은 낮고, 있어도
 /// **틀린 곳이 접힌 채로 남는 것보다 펼쳐지는 편이 낫다**.
 fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const st = &term.rt.editor_syntax;
     if (st.pending) return; // 아직 파는 중이다 — 다음 프레임에 다시 본다
     if (term.rt.editor_syntax_folds_applied) return;
@@ -7352,7 +7356,7 @@ fn adjustFoldedSelection(term: *const Term, doc: Opened, sel: *editor_selection.
 /// 내용을 계속 선택한 채 IME·복사가 뒤늦게 그 내용을 치환하지 않게 한다.
 fn adjustFoldedSelections(self: *AppSession, term: *Term) void {
     if (term.rt.editor_visible_numbers.len == 0) return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     var changed = false;
     if (term.rt.editor_selection) |*sel| changed = adjustFoldedSelection(term, doc, sel) or changed;
     for (term.rt.editor_extra_selections) |*sel| changed = adjustFoldedSelection(term, doc, sel) or changed;
@@ -7481,7 +7485,7 @@ const undo_stack_limit: usize = 2048;
 /// 안 끊으면 "클릭해서 다른 곳에 커서를 두고 친 글자"가 앞의 타이핑과 한 묶음이 되어 undo 한 번에
 /// 둘 다 사라진다 — 사용자가 예측할 수 없다.
 pub fn breakUndoGroup(term: *Term) void {
-    term.rt.editor_document.history.last_edit_kind = .none;
+    term.rt.editorDocument().history.last_edit_kind = .none;
     // **자동 닫기 표시도 여기서 버린다**(§3.7 — "그 표시는 그 caret이 떠나면 버린다").
     //
     // 이 함수는 *"커서가 편집 아닌 이유로 움직였다"*의 단일 자리다(클릭·⌘⌃D·이동 일습·붙여넣기).
@@ -7492,9 +7496,9 @@ pub fn breakUndoGroup(term: *Term) void {
 
 /// 이번 편집이 앞의 것과 같은 묶음인가.
 fn sameUndoGroup(term: *Term, kind: EditKind, now_ms: u64) bool {
-    if (term.rt.editor_document.history.last_edit_kind != kind) return false;
+    if (term.rt.editorDocument().history.last_edit_kind != kind) return false;
     if (kind == .none) return false;
-    return now_ms -| term.rt.editor_document.history.last_edit_ms <= undo_group_gap_ms;
+    return now_ms -| term.rt.editorDocument().history.last_edit_ms <= undo_group_gap_ms;
 }
 
 /// 편집 하나를 undo 스택에 쌓는다. **`inverse`의 소유가 여기로 넘어온다.**
@@ -7508,9 +7512,9 @@ fn pushUndo(
 ) void {
     var owned_inverse = inverse;
     const now_ms = self.awakeMs();
-    if (!sameUndoGroup(term, kind, now_ms)) term.rt.editor_document.history.edit_group +%= 1;
-    term.rt.editor_document.history.last_edit_kind = kind;
-    term.rt.editor_document.history.last_edit_ms = now_ms;
+    if (!sameUndoGroup(term, kind, now_ms)) term.rt.editorDocument().history.edit_group +%= 1;
+    term.rt.editorDocument().history.last_edit_kind = kind;
+    term.rt.editorDocument().history.last_edit_ms = now_ms;
 
     // **새 편집은 redo를 버린다**(§3.3).
     dropRedo(self, term);
@@ -7519,9 +7523,9 @@ fn pushUndo(
         .inverse = owned_inverse,
         .sels_before = sels_before,
         .primary_before = primary_before,
-        .group = term.rt.editor_document.history.edit_group,
+        .group = term.rt.editorDocument().history.edit_group,
     };
-    if (!pushEntry(self, &term.rt.editor_document.history.undo, &term.rt.editor_document.history.undo_len, entry)) {
+    if (!pushEntry(self, &term.rt.editorDocument().history.undo, &term.rt.editorDocument().history.undo_len, entry)) {
         // 못 쌓으면 **되돌릴 수 없는 편집**이 된다. 그래도 편집 자체는 성사시킨다 —
         // 여기서 편집을 취소하면 할당 실패 하나가 타이핑을 먹는다.
         var e = entry;
@@ -7550,13 +7554,13 @@ fn pushEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry: UndoEnt
 }
 
 fn dropRedo(self: *AppSession, term: *Term) void {
-    for (term.rt.editor_document.history.redo[0..term.rt.editor_document.history.redo_len]) |*e| e.deinit(self.allocator);
-    term.rt.editor_document.history.redo_len = 0;
+    for (term.rt.editorDocument().history.redo[0..term.rt.editorDocument().history.redo_len]) |*e| e.deinit(self.allocator);
+    term.rt.editorDocument().history.redo_len = 0;
 }
 
 /// undo·redo 스택을 통째로 놓는다(Term이 죽거나 문서를 다시 열 때).
 pub fn dropUndoState(self: *AppSession, term: *Term) void {
-    term.rt.editor_document.history.clear(self.allocator);
+    term.rt.editorDocument().history.clear(self.allocator);
 }
 
 /// **되돌린다**(§3.3). 같은 묶음은 함께 돌아간다.
@@ -7582,7 +7586,7 @@ fn undoGroupSpan(term: *Term, len_before: usize, lo: usize, suffix: usize, known
     // `u32` 를 넘을 때다. `file.apply` 가 성공한 되돌리기에서 그 셋 중 어느 것도 오늘 오지 않는다.
     // 그래도 두는 이유는 **뜻**이고, 오면 「전체를 다시 판다」로 떨어져 답이 같다(비용만 다르다).
     if (!known or lo == std.math.maxInt(usize)) return null;
-    const len_after = (term.rt.editor_document.opened orelse return null).file.content.len;
+    const len_after = (term.rt.editorDocument().opened orelse return null).file.content.len;
     if (suffix > len_before or suffix > len_after) return null; // 꼬리가 양쪽에 다 있어야 한다
     const old_end = len_before - suffix;
     const new_end = len_after - suffix;
@@ -7597,13 +7601,13 @@ fn undoGroupSpan(term: *Term, len_before: usize, lo: usize, suffix: usize, known
 fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
-    if (term.rt.editor_document.opened == null) return false;
+    if (term.rt.editorDocument().opened == null) return false;
 
-    const from_len = if (is_undo) &term.rt.editor_document.history.undo_len else &term.rt.editor_document.history.redo_len;
+    const from_len = if (is_undo) &term.rt.editorDocument().history.undo_len else &term.rt.editorDocument().history.redo_len;
     if (from_len.* == 0) return false;
-    const from = if (is_undo) &term.rt.editor_document.history.undo else &term.rt.editor_document.history.redo;
-    const to = if (is_undo) &term.rt.editor_document.history.redo else &term.rt.editor_document.history.undo;
-    const to_len = if (is_undo) &term.rt.editor_document.history.redo_len else &term.rt.editor_document.history.undo_len;
+    const from = if (is_undo) &term.rt.editorDocument().history.undo else &term.rt.editorDocument().history.redo;
+    const to = if (is_undo) &term.rt.editorDocument().history.redo else &term.rt.editorDocument().history.undo;
+    const to_len = if (is_undo) &term.rt.editorDocument().history.redo_len else &term.rt.editorDocument().history.undo_len;
 
     const group = from.*[from_len.* - 1].group;
     var restored: ?struct { items: []editor_selection.Selection, primary: usize } = null;
@@ -7625,7 +7629,7 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
     //
     // **하나라도 범위를 모르면 통째로 포기한다** — 넓게 잡는 것은 비용이지만 **틀리게 잡는 것은
     // 오답**이다(`spanFromInverse` 가 `null` 을 내는 갈래가 그것이다).
-    const len_before_group = term.rt.editor_document.opened.?.file.content.len;
+    const len_before_group = term.rt.editorDocument().opened.?.file.content.len;
     var span_lo: usize = std.math.maxInt(usize);
     var span_suffix: usize = std.math.maxInt(usize);
     var span_known = true;
@@ -7640,7 +7644,7 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
             entry.deinit(self.allocator);
             continue;
         };
-        const back = term.rt.editor_document.opened.?.file.apply(entry.inverse.delta(), &sels) catch {
+        const back = term.rt.editorDocument().opened.?.file.apply(entry.inverse.delta(), &sels) catch {
             self.allocator.free(sels.items);
             entry.deinit(self.allocator);
             continue;
@@ -7652,7 +7656,7 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
         // `spanFromInverse` 가 **적용 «뒤»** 문서의 span 을 낸다 — 위 주석의 그 좌표계다.
         if (span_known) {
             if (syntax_color.spanFromInverse(back.changes)) |sp| {
-                const len_now = term.rt.editor_document.opened.?.file.content.len;
+                const len_now = term.rt.editorDocument().opened.?.file.content.len;
                 span_lo = @min(span_lo, @as(usize, sp.start));
                 span_suffix = @min(span_suffix, len_now -| @as(usize, sp.new_end));
             } else span_known = false;
@@ -7729,7 +7733,7 @@ pub fn isDirty(term: *const Term) bool {
     // 사용자는 "이 비교를 저장해야 하나?"로 읽는다(적대적 검증 2026-08-26).
     // `editorMeta`는 같은 갈래를 이미 갖고 있었는데 여기만 빠져 있었다.
     if (term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     return doc.isDirty();
 }
 
@@ -7851,7 +7855,7 @@ pub fn overwriteDocument(self: *AppSession, term: *Term) SaveError!void {
 fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveError!void {
     if (term.kind != .editor) return error.NotAnEditor;
     if (term.rt.editor_diff != null) return error.NotAnEditor; // 비교 뷰는 저장할 축이 없다(§7)
-    const doc = term.rt.editor_document.opened orelse return error.NotAnEditor;
+    const doc = term.rt.editorDocument().opened orelse return error.NotAnEditor;
     if (doc.file.read_only) return error.ReadOnly;
     // **이름 없는 문서는 조용히 실패하지 않는다**(§3.11). 그대로 `orelse return false` 로 떨어지면
     // 사용자는 저장한 줄 알고 잃는다 — 디스패치가 이 함수의 반환값을 버리기 때문이다
@@ -7863,17 +7867,17 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
     // 말하고 어떤 실패는 안 한다」가 규칙처럼 굳는다.
     // **저쪽 파일이면 저쪽으로 간다**(U3 — §3.11 「저장한 뒤 그 문서는 저쪽의 그 파일이다」).
     // 사용자가 이미 그 자리를 골랐으므로 **다시 묻지 않고** 덮어쓴다.
-    if (term.rt.editor_document.remote != null) {
+    if (term.rt.editorDocument().remote != null) {
         _ = app_session_mod.editor_untitled_save_ops.saveRemoteAgain(self, term);
         return error.Handled;
     }
-    if (term.rt.editor_document.untitled != null) {
+    if (term.rt.editorDocument().untitled != null) {
         // **이름을 묻는다**(U2 — §3.11). 저장은 그 상자를 확정한 뒤에 일어나므로 여기서는 거짓이다 —
         // 「지금 저장했다」가 아니다. 물을 수 없으면 그쪽이 이유를 말한다.
         _ = app_session_mod.editor_untitled_save_ops.begin(self, term);
         return error.AskName;
     }
-    const path = term.rt.editor_document.path orelse return error.NotAnEditor;
+    const path = term.rt.editorDocument().path orelse return error.NotAnEditor;
 
     const bytes = doc.file.saveBytes(self.allocator) catch return error.WriteFailed;
     // **쓴 내용이 무엇이었는지** 기억해 둔다 — 아래에서 clean 판정에 쓴다.
@@ -7902,7 +7906,7 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
     app_session_mod.editor_backup_ops.markClean(self, term, saved_content, null);
     // **디스크 지문도 갱신한다** — 방금 쓴 것이 곧 파일 내용이다. 안 갱신하면 두 번째 저장이 자기가
     // 쓴 것을 「남이 바꿨다」로 읽는다.
-    term.rt.editor_document.opened.?.disk_hash = contentHash(bytes);
+    term.rt.editorDocument().opened.?.disk_hash = contentHash(bytes);
     self.metal_dirty = true;
     // **서버에 저장을 알린다**(§8.2k) — rustc 진단은 저장에만 다시 돌므로, 안 알리면 고친 오류가 다시 열 때까지 남는다. 디스크 쓰기가
     // 성공한 뒤이고, 실은 본문은 **방금 쓴 것**(`saved_content` — 쓰는 동안 더 친 것은 아직 저장이 아니다; 쓰기가 동기라 오늘은
@@ -7940,7 +7944,7 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     }
     if (term.kind != .editor or text.len == 0) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 원본이 없다
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
 
     var iter = selections(term);
@@ -8052,7 +8056,7 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editor_document.opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -8208,7 +8212,7 @@ fn writeBackSelections(self: *AppSession, term: *Term, sels: maru.session.editor
 pub fn selectAll(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 문서가 둘이라 "전체" 가 안 정해진다
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     clearExtraSelections(self, term);
     term.rt.editor_selection = .{
         .anchor_start = 0,
@@ -8255,8 +8259,8 @@ pub fn buildSelectionPayload(
 ) ?[]const u8 {
     if (source.kind != .editor) return null;
     if (source.rt.editor_diff != null) return null; // 비교 뷰는 "그 파일의 그 줄" 이 하나로 안 정해진다(§3)
-    const doc = source.rt.editor_document.opened orelse return null;
-    const path = source.rt.editor_document.path orelse return null; // 핀된 경로가 없으면 참조를 못 만든다
+    const doc = source.rt.editorDocument().opened orelse return null;
+    const path = source.rt.editorDocument().path orelse return null; // 핀된 경로가 없으면 참조를 못 만든다
     const bytes = doc.file.content;
 
     // **주 선택 하나만 보낸다**(§3). 멀티 커서면 나머지는 안 간다 — 조용히 첫 조각만 보내면
@@ -8299,8 +8303,8 @@ pub fn buildSelectionPayload(
 fn sendHelperEligible(term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 "그 파일의 그 줄" 이 안 정해진다(§3)
-    if (term.rt.editor_document.opened == null) return false;
-    if (term.rt.editor_document.path == null) return false; // 핀된 경로가 없으면 참조를 못 만든다
+    if (term.rt.editorDocument().opened == null) return false;
+    if (term.rt.editorDocument().path == null) return false; // 핀된 경로가 없으면 참조를 못 만든다
     const sel = term.rt.editor_selection orelse return false;
     return !sel.isEmpty();
 }
@@ -8316,7 +8320,7 @@ fn sendHelperEligible(term: *Term) bool {
 /// 그때 억지로 띄우면 상자가 엉뚱한 줄 옆에 선다.
 pub fn showSendHelper(self: *AppSession, term: *Term) void {
     if (!sendHelperEligible(term)) return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
 
     // **보낼 곳이 없으면 안 띄운다**(§5 — 후보 0 이면 메뉴 항목도 비활성이다). 눌러도 아무 일
@@ -8438,7 +8442,7 @@ pub fn refreshSendHelper(self: *AppSession) bool {
         hideSendHelper(self);
         return false;
     }
-    const doc = term.rt.editor_document.opened orelse {
+    const doc = term.rt.editorDocument().opened orelse {
         hideSendHelper(self);
         return false;
     };
@@ -8506,7 +8510,7 @@ pub fn sendHelperClick(self: *AppSession, x_px: f64, y_px: f64) bool {
 pub fn cutSelection(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
     if (!copySelection(self)) return false;
 
@@ -8547,7 +8551,7 @@ pub fn cutSelection(self: *AppSession, term: *Term) bool {
 /// 개가 된다(4,000개에서 비교 800만 번을 실측했다). 한 줄에 커서가 여럿이어도 **한 번만** 세야 —
 /// 두 번 세면 주석은 `////` 가 되고 줄 이동은 **두 칸** 움직인다.
 fn selectedLineNumbers(self: *AppSession, term: *Term, out: *std.ArrayList(usize)) bool {
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const content = doc.file.content;
     const lines = doc.file.lines;
     var iter = selections(term);
@@ -8582,10 +8586,10 @@ fn selectedLineNumbers(self: *AppSession, term: *Term, out: *std.ArrayList(usize
 pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
 
-    const path = term.rt.editor_document.path orelse return false;
+    const path = term.rt.editorDocument().path orelse return false;
     const lang = maru.session.editor.language.forPath(path);
     const marker = lang.lineComment() orelse return false; // 모르는 언어 — no-op(§3.7)
 
@@ -8654,7 +8658,7 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
     const rows_before = drawnDocLines(term);
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editor_document.opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -8688,7 +8692,7 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
     const rows_before = drawnDocLines(term);
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editor_document.opened.?.file.apply(.{ .changes = ranges }, &sels) catch {
+    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = ranges }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -8709,7 +8713,7 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
 fn lineOpDoc(term: *Term) ?Opened {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 축이 둘이다(§4.1g)
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     // **읽기 전용은 심층 방어다**(§6). `edit_doc.apply` 가 같은 판정을 하므로 이 줄을 지워도 문서는
     // 안 바뀌고 `applyLineEdit` 이 거짓을 낸다 — 그래서 **판정자로 잡히지 않는다**(변이 L21 이
     // 살아남는 것이 정상이다). 그럼에도 두는 이유는 여기서 막으면 `selectedLineNumbers` 부터의
@@ -8930,7 +8934,7 @@ pub fn indentLines(self: *AppSession, term: *Term, outdent: bool) bool {
 /// 여러 줄에 걸치면 참이다 — 섞였을 때 일부만 들여쓰면 나머지 커서는 탭 문자를 받아 한 연산이
 /// 두 뜻이 된다.
 pub fn selectionSpansLines(term: *Term) bool {
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const lines = doc.file.lines;
     const content = doc.file.content;
     var iter = selections(term);
@@ -9091,7 +9095,7 @@ pub fn transformCase(self: *AppSession, term: *Term, upper: bool) bool {
 pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
     if (clipboard.len == 0) return false;
 
@@ -9164,7 +9168,7 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editor_document.opened.?.file.apply(.{ .changes = dedup.items }, &sels) catch {
+    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = dedup.items }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -9205,7 +9209,7 @@ pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
 pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
 
     var iter = selections(term);
@@ -9306,7 +9310,7 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editor_document.opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -9407,7 +9411,7 @@ fn nextCharBoundary(bytes: []const u8, at: usize) usize {
 fn maxColsAfterEdit(term: *Term, kept: u32) u32 {
     if (maxColsFromCache(term)) |exact| return exact;
     if (kept == 0) return 0;
-    const doc = term.rt.editor_document.opened orelse return kept;
+    const doc = term.rt.editorDocument().opened orelse return kept;
     const limit = term.rt.editor_max_columns;
     const tab_width = term.rt.editor_tab_width; // 렌더가 쓰는 그 값(`ensureMaxCols` 와 같은 출처)
     var max = kept;
@@ -9504,7 +9508,7 @@ fn buildConflictLabel(self: *AppSession, out_spans: *[3]ConflictLabelSpan) ?[]u8
 /// 다른 줄에 얹으면 **엉뚱한 줄 위에** 뜬다.
 fn ensureConflicts(self: *AppSession, term: *Term) void {
     if (term.kind != .editor) return;
-    if (term.rt.editor_document.opened == null) return; // 문서가 없으면 훑을 것이 없다
+    if (term.rt.editorDocument().opened == null) return; // 문서가 없으면 훑을 것이 없다
     // **비교 뷰에는 안 붙인다** — 읽기 전용이고 좌우 두 문서라 「고르기」가 무엇을 고칠지 말할 수 없다.
     if (term.rt.editor_diff != null) return;
     const axis = editorLines(term);
@@ -9610,7 +9614,7 @@ fn visibleIndexOf(term: *Term, doc_line: u32, axis_len: usize) ?usize {
 /// 빼면 고른 뒤 빈 줄이 하나 남고, 더 먹으면 다음 줄이 붙어 올라온다.
 pub fn acceptConflict(self: *AppSession, term: *Term, region_index: usize, choice: AppSession.ConflictChoice) bool {
     if (term.kind != .editor) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     // 정직하게: 이 줄을 지운 변이는 **등가**다(적대적 8회차 L1 실측) — 모델 층(`EditableFile.apply`)이
     // `error.ReadOnly` 로 다시 막는다. 여기 두는 이유는 그 실패를 **표를 훑기 전에** 싸게 끝내고,
     // 「읽기 전용은 안 고친다」를 이 함수만 읽어도 알게 하기 위해서다.
@@ -9707,7 +9711,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     // 캡처가 그 둘을 한 화면에서 보여 줬다(2026-09-08 — 415열 줄 끝에서 한 글자를 쳤더니 상태바는
     // `2:417` 인데 뷰는 1열이었다).
     const kept_max = term.rt.editor_max_cols;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
 
     // **문서가 바뀌면 「선택 영역 내에서만」의 범위를 버린다**(§5.1). 굳혀 둔 offset 이 이제 다른
     // 글자를 가리킨다 — 따라가게 만들면 마커·매치·범위 셋이 각각 다른 시점을 말한다. 여기가
@@ -9846,7 +9850,7 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     // **나머지 커서도 같은 단위다.** 여기 빼먹으면 문서가 바뀐 뒤에도 옛 offset을 든 커서가 남아
     // 렌더가 없는 줄을 집는다 — 비교 뷰 선택이 `invalidate` 목록에서 빠져 패닉했던 그 자리다.
     clearExtraSelections(self, term);
-    dropUndoState(self, term);
+    // Undo는 뷰 선택이 아니라 문서 자원이다. 마지막 문서 참조가 history를 정산한다.
     if (term.rt.editor_caret_rows.len > 0) self.allocator.free(term.rt.editor_caret_rows);
     if (term.rt.editor_caret_buf.len > 0) self.allocator.free(term.rt.editor_caret_buf);
     term.rt.editor_caret_rows = &.{};
@@ -10071,7 +10075,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     // S3b-1 병합 판(`:1:`·`:2:`·`:3:`)도 **문서와 같은 단위로** 놓는다 — 그 판은 이 문서를 고치려고
     // 읽은 것이라 문서보다 오래 살 이유가 없다. 안 놓으면 워커 allocator 쪽에 세 조각이 남는다.
     editor_merge_ops.clear(self, term);
-    term.rt.editor_document.clearOpened(self.allocator);
+    // 본문은 모든 뷰 파생 자원과 조합 정산 뒤 마지막 lease에서만 놓는다.
     // **구문 트리도 문서와 함께 죽는다.** tree-sitter의 파서·트리는 자기 `malloc`에서 오므로
     // 여기서 안 놓으면 `std.testing.allocator`가 못 보는 누수가 된다(`SYN10`이 그 자리를 잰다).
     term.rt.editor_syntax.deinit(self.allocator);
@@ -10107,13 +10111,17 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     // 뒷날 Term 이 문서를 **갈아 끼우게** 되면 이 줄이 비로소 일을 하고, 그때 판정자가 설 수 있다.
     term.rt.editor_drawn_doc_lines = 0;
     term.rt.editor_drawn_content_cols = 0;
-    term.rt.editor_document.clearPath(self.allocator);
     setEditorPreedit(self, term, ""); // 조합 중이던 글자(N3)
     dropFoldState(self, term); // 접힘 층을 통째로 놓는다(그 함수 doc)
     dropSelectionState(self, term);
     if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
     term.rt.editor_row_cache = .{ .prefix = &.{} };
-    term.rt.editor_document.clearIdentity(self.allocator);
+    if (term.rt.editor_document_lease) |lease| {
+        term.rt.editor_document_lease = null;
+        _ = @constCast(lease.owner).release(lease) catch unreachable;
+    } else {
+        term.rt.editor_unattached_document.clear(self.allocator);
+    }
 }
 
 const testing = std.testing;
@@ -10366,7 +10374,7 @@ test "IME1 조합 중 글자는 화면에 뜨고 문서에는 안 들어간다 (
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     const term = fx.term;
-    const before = try allocator.dupe(u8, term.rt.editor_document.opened.?.file.content);
+    const before = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(before);
 
     term.rt.editor_selection = editor_selection.Selection.at(0);
@@ -10375,7 +10383,7 @@ test "IME1 조합 중 글자는 화면에 뜨고 문서에는 안 들어간다 (
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
     try testing.expect(drawnHasCodepoint(drawn.dl, 0xD55C)); // 화면에 있다
-    try testing.expectEqualStrings(before, term.rt.editor_document.opened.?.file.content); // 문서는 그대로다
+    try testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content); // 문서는 그대로다
 }
 
 test "IME2 조합은 조합을 시작한 자리에 그려진다 (N3 §11)" {
@@ -10450,7 +10458,7 @@ test "IME9 여러 줄 재변환 미리보기는 선택 본문 전부를 숨기�
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     const term = fx.term;
-    const original = term.rt.editor_document.opened.?.file.content;
+    const original = term.rt.editorDocument().opened.?.file.content;
     const start = std.mem.indexOf(u8, original, "a = 1").?;
     const end = std.mem.indexOf(u8, original, "c = 3").?;
     term.rt.editor_selection = editor_selection.Selection.fromPoints(start, end);
@@ -10461,7 +10469,7 @@ test "IME9 여러 줄 재변환 미리보기는 선택 본문 전부를 숨기�
     try testing.expectEqualStrings("const 한c = 3;", preview.rows[0]);
     try testing.expectEqualStrings("", preview.rows[1]);
     try testing.expectEqualStrings("", preview.rows[2]);
-    try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", term.rt.editorDocument().opened.?.file.content);
     // If the preview cannot be built (for example, the end line is folded),
     // the unchanged source remains visible and must keep its selection mark.
     const original_marks = buildSelectionMarks(fx.session, term, false) orelse return error.SourceSelectionMissing;
@@ -10484,7 +10492,7 @@ test "IME-MC-LIVE 조합 갱신은 모든 커서에 비치고 확정·Undo는 �
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     const term = fx.term;
-    const source = try allocator.dupe(u8, term.rt.editor_document.opened.?.file.content);
+    const source = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(source);
     const a = std.mem.indexOf(u8, source, "a = 1") orelse return error.NoFirstCaret;
     const b = std.mem.indexOf(u8, source, "b = 2") orelse return error.NoSecondCaret;
@@ -10501,7 +10509,7 @@ test "IME-MC-LIVE 조합 갱신은 모든 커서에 비치고 확정·Undo는 �
         defer allocator.free(second);
         try testing.expectEqualStrings(first, preview.rows[0]);
         try testing.expectEqualStrings(second, preview.rows[1]);
-        try testing.expectEqualStrings(source, term.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings(source, term.rt.editorDocument().opened.?.file.content);
     }
 
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
@@ -10514,9 +10522,9 @@ test "IME-MC-LIVE 조합 갱신은 모든 커서에 비치고 확정·Undo는 �
 
     setEditorPreedit(fx.session, term, "");
     try testing.expect(insertText(fx.session, term, "한"));
-    try testing.expectEqualStrings("const 한a = 1;\nconst 한b = 2;\nconst c = 3;\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("const 한a = 1;\nconst 한b = 2;\nconst c = 3;\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings(source, term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(source, term.rt.editorDocument().opened.?.file.content);
 }
 
 test "IME-MC-LIVE 같은 줄의 두 커서는 원본 위치에 각각 조합을 비춘다" {
@@ -10543,7 +10551,7 @@ test "IME10 접힌 선택 끝은 보이는 머리줄 끝으로 옮겨 조합과 
     const term = try openBracketFixture(&fx, allocator, "ime-fold.zig", source);
     const start = (std.mem.indexOf(u8, source, "Box") orelse return error.NoStart) + 1;
     const hidden_end = (std.mem.indexOf(u8, source, "second") orelse return error.NoEnd) + 3;
-    const head_end = (term.rt.editor_document.opened.?.file.lines.line(0) orelse return error.NoHead).contentEnd();
+    const head_end = (term.rt.editorDocument().opened.?.file.lines.line(0) orelse return error.NoHead).contentEnd();
     term.rt.editor_selection = editor_selection.Selection.fromPoints(start, hidden_end);
 
     try testing.expect(toggleFoldHead(fx.session, term, 0));
@@ -10554,11 +10562,11 @@ test "IME10 접힌 선택 끝은 보이는 머리줄 끝으로 옮겨 조합과 
     const preview = preeditLines(fx.session, term, editorLines(term)) orelse return error.PreviewMissing;
     defer freePreeditLines(fx.session, preview);
     try testing.expectEqualStrings("const B한", preview.rows[0]);
-    try testing.expectEqualStrings(source, term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(source, term.rt.editorDocument().opened.?.file.content);
 
     setEditorPreedit(fx.session, term, "");
     try testing.expect(insertText(fx.session, term, "한"));
-    try testing.expectEqualStrings("const B한\n    const first = 1;\n    const second = 2;\n};\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("const B한\n    const first = 1;\n    const second = 2;\n};\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "FOLD-SEL1 역방향 선택과 보조 caret도 접힘 머리로 옮기고 겹치면 하나로 합친다" {
@@ -10570,8 +10578,8 @@ test "FOLD-SEL1 역방향 선택과 보조 caret도 접힘 머리로 옮기고 �
     const term = try openBracketFixture(&fx, allocator, "fold-select.txt", source);
     const start = (std.mem.indexOf(u8, source, "root") orelse return error.NoStart) + 2;
     const hidden_end = (std.mem.indexOf(u8, source, "value") orelse return error.NoEnd) + 2;
-    const root_end = (term.rt.editor_document.opened.?.file.lines.line(0) orelse return error.NoHead).contentEnd();
-    const child_end = (term.rt.editor_document.opened.?.file.lines.line(1) orelse return error.NoChild).contentEnd();
+    const root_end = (term.rt.editorDocument().opened.?.file.lines.line(0) orelse return error.NoHead).contentEnd();
+    const child_end = (term.rt.editorDocument().opened.?.file.lines.line(1) orelse return error.NoChild).contentEnd();
     term.rt.editor_selection = editor_selection.Selection.fromPoints(hidden_end, start);
     term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(hidden_end)});
 
@@ -11067,7 +11075,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
     try testing.expectEqual(AppSession.ConflictChoice.current, hit.choice);
     try testing.expect(conflictActionAtPoint(term, p_cur.x, p_cur.y) == null); // Result 의 것이 아니다
     try testing.expect(acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), p_cur.x, p_cur.y));
-    const after = term.rt.editor_document.opened.?.file.content;
+    const after = term.rt.editorDocument().opened.?.file.content;
     try testing.expect(std.mem.indexOf(u8, after, "<<<<<<<") == null);
     try testing.expect(std.mem.indexOf(u8, after, "ours line") != null);
     try testing.expect(std.mem.indexOf(u8, after, "theirs line") == null);
@@ -11084,18 +11092,18 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
     defer drawn3.dl.deinit(allocator);
     const p_both = paneActionPoint(term3.rt.editor_merge.?.theirs_hit, .both_incoming_first, cw, chh) orelse return error.NoBothAction;
     try testing.expect(acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), p_both.x, p_both.y));
-    try testing.expect(std.mem.indexOf(u8, term3.rt.editor_document.opened.?.file.content, "head\ntheirs line\nours line\ntail\n") != null);
+    try testing.expect(std.mem.indexOf(u8, term3.rt.editorDocument().opened.?.file.content, "head\ntheirs line\nours line\ntail\n") != null);
 
     // ⑷ **읽기 전용이면 안 고친다** — 판의 버튼도 마찬가지다(적대적 5회차 I6 의 축).
     const ro = try mpn11Open(&fx, &dir, "ro.txt", allocator);
     defer editor_merge_ops.clear(fx.session, ro);
-    ro.rt.editor_document.opened.?.file.read_only = true;
+    ro.rt.editorDocument().opened.?.file.read_only = true;
     var drawn_ro = appendPaneFrame(fx.session, wide, ro) orelse return error.EditorPaneDidNotDraw;
     defer drawn_ro.dl.deinit(allocator);
     const p_ro = paneActionPoint(ro.rt.editor_merge.?.ours_hit, .current, cw, chh) orelse return error.NoCurrentAction;
     try testing.expect(editor_merge_ops.paneActionAtPoint(ro, p_ro.x, p_ro.y) != null); // 버튼은 보인다
     try testing.expect(!acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), p_ro.x, p_ro.y));
-    try testing.expect(std.mem.indexOf(u8, ro.rt.editor_document.opened.?.file.content, "<<<<<<<") != null);
+    try testing.expect(std.mem.indexOf(u8, ro.rt.editorDocument().opened.?.file.content, "<<<<<<<") != null);
 
     // ⑸ **Result 안의 같은 상대 지점은 아무 일도 안 한다**(위젯 행이 없다). 그리고 판의 **글자 행**도.
     const term5 = try mpn11Open(&fx, &dir, "c5.txt", allocator);
@@ -11108,7 +11116,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
     try testing.expect(conflictActionAtPoint(term5, in_result_x, p5.y) == null);
     try testing.expect(!acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), in_result_x, p5.y));
     try testing.expect(editor_merge_ops.paneActionAtPoint(term5, p5.x, p5.y + chh) == null); // 한 행 아래 = 본문 줄
-    try testing.expect(std.mem.indexOf(u8, term5.rt.editor_document.opened.?.file.content, "<<<<<<<") != null);
+    try testing.expect(std.mem.indexOf(u8, term5.rt.editorDocument().opened.?.file.content, "<<<<<<<") != null);
 
     // ⑹ **접힌 배치**(좁은 창): Result 에 S2 의 세 버튼이 돌아오고 거기서 고른다 — 아니면 좁은 창에서
     //    고르기에 닿을 길이 없다.
@@ -11135,7 +11143,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
     const x6 = @as(f64, @floatFromInt(geom6.body_x)) + @as(f64, @floatFromInt(geom6.content_left_px)) + cw * (@as(f64, @floatFromInt(span6.from_col + span6.to_col)) / 2.0);
     const y6 = @as(f64, @floatFromInt(geom6.body_y)) + chh * (@as(f64, @floatFromInt(r6)) + 0.5);
     try testing.expect(acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), x6, y6));
-    try testing.expect(std.mem.indexOf(u8, term6.rt.editor_document.opened.?.file.content, "head\ntheirs line\ntail\n") != null);
+    try testing.expect(std.mem.indexOf(u8, term6.rt.editorDocument().opened.?.file.content, "head\ntheirs line\ntail\n") != null);
 
     // ⑺ **굴린 화면에서, 판마다 다른 행에서, 경계 픽셀을 누른다.** 위까지는 첫 줄이 0 이고 두 판의 행
     //    구조가 같아서(따라 굴리기가 블록 머리를 맞춘다) 여럿이 살았다(적대적 2~4회차 B2·B4·C2·C5·D9·
@@ -11246,7 +11254,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
         const hit8 = editor_merge_ops.paneActionAtPoint(term7, x8, y8) orelse return error.LastRowNotHit;
         try testing.expectEqual(AppSession.ConflictChoice.incoming, hit8.choice);
         try testing.expect(acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), x8, y8));
-        const c7 = term7.rt.editor_document.opened.?.file.content;
+        const c7 = term7.rt.editorDocument().opened.?.file.content;
         try testing.expect(std.mem.indexOf(u8, c7, "<<<<<<<") == null);
         try testing.expect(std.mem.indexOf(u8, c7, "prefix 59\ntheirs line\ntail 00\n") != null);
     }
@@ -11387,10 +11395,10 @@ test "MPN15 판을 누르면 caret 이 그 판 그 자리에 서고 Result 의 s
     try testing.expect(buildCaretRows(fx.session, term) == null);
 
     // ⑶ 글자를 쳐도 Result 는 그대로다 — selection 이 없으니 편집 경로가 아무 일도 안 한다.
-    const before = try allocator.dupe(u8, term.rt.editor_document.opened.?.file.content);
+    const before = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(before);
     try testing.expect(!insertText(fx.session, term, "x"));
-    try testing.expectEqualStrings(before, term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content);
 
     // ⑷ 키는 판에서 움직인다 — 제품 입구로. ↓ 한 번, → 한 번, End, ⌘↑.
     _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
@@ -11412,7 +11420,7 @@ test "MPN15 판을 누르면 caret 이 그 판 그 자리에 서고 Result 의 s
     try testing.expectEqual(term.rt.editor_merge.?.ours_lines[0].len, term.rt.editor_merge.?.pane_caret.?.sel.focus.byte);
     // 그리고 그 키는 **앱이 소비했다** — 안 소비하면 Result 의 이동 갈래로 흘러 (selection 이 없어) 죽은 키가 된다.
     try testing.expectEqual(consumed_before + 1, fx.session.total_app_key_events);
-    try testing.expectEqualStrings(before, term.rt.editor_document.opened.?.file.content); // 이동은 편집이 아니다
+    try testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content); // 이동은 편집이 아니다
 
     // ⑸ Incoming 을 누르면 초점이 옮겨 간다 — Current 의 표는 비고 Incoming 의 표가 찬다.
     const inc = lay.incoming.?;
@@ -11572,7 +11580,7 @@ test "MPN17 판에 초점이 있으면 조합(IME)도 Result 에 안 그려진�
     try testing.expect(!drawnHasCodepoint(d2.dl, 0xD55C));
     // 판 caret 은 그대로 판에 있고, 문서도 그대로다.
     try testing.expectEqual(editor_merge_ops.MergeSide.current, editor_merge_ops.focusedSide(term).?);
-    try testing.expect(std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "\xed\x95\x9c") == null);
+    try testing.expect(std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "\xed\x95\x9c") == null);
 
     // ⑵′ **조합 중에 초점이 판으로 가면 조합은 내려간다** — Result 에 selection 을 두고 조합을 시작한 뒤 판을
     //    누르면(placePaneCaret 이 selection 을 비운다) 다음 갱신은 거절되고 보이던 것도 사라진다(3회차 C5).
@@ -11603,7 +11611,7 @@ test "MPN17 판에 초점이 있으면 조합(IME)도 Result 에 안 그려진�
     setEditorPreedit(fx.session, fresh, "\xed\x95\x9c");
     try testing.expectEqual(@as(usize, 0), fresh.rt.editor_preedit.len);
     try testing.expect(!insertText(fx.session, fresh, "x")); // 확정도 같은 술어로 안 된다
-    try testing.expectEqualStrings("abc\n", fresh.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("abc\n", fresh.rt.editorDocument().opened.?.file.content);
     clearExtraSelections(fx.session, fresh);
 
     // ⑸ **범위 선택 중의 조합 자리는 선택의 시작**이다 — 확정이 선택을 대체하는 자리(2회차 B2: 끝으로 잡아도 초록이었다).
@@ -11763,16 +11771,16 @@ test "MPN19 헤더 밴드의 ↓·↑ 와 F7/⇧F7 이 다음/이전 충돌 구�
     try testing.expectEqual(fx.session.cell_width_px, next_rect.w);
     const nx = @as(f64, @floatFromInt(next_rect.x)) + @as(f64, @floatFromInt(next_rect.w)) / 2.0;
     const ny = @as(f64, @floatFromInt(next_rect.y)) + @as(f64, @floatFromInt(next_rect.h)) / 2.0;
-    // 문서는 **매번 새로 읽는다**(`term.rt.editor_document.opened`) — 편집(⑷ʹ)이 문서 값을 바꾸므로 복사해 두면 옛 줄 표로 잰다.
+    // 문서는 **매번 새로 읽는다**(`term.rt.editorDocument().opened`) — 편집(⑷ʹ)이 문서 값을 바꾸므로 복사해 두면 옛 줄 표로 잰다.
     const lineOf = struct {
         fn f(t: *Term, off: usize) u32 {
-            return @intCast(t.rt.editor_document.opened.?.file.lines.lineAt(off));
+            return @intCast(t.rt.editorDocument().opened.?.file.lines.lineAt(off));
         }
     }.f;
     fx.session.mouse(1, nx, ny, 0, 0);
     try testing.expectEqual(starts[0], lineOf(term, term.rt.editor_selection.?.focus));
     // 구간 **머리**(`<<<<<<<` 줄의 첫 byte)에 선다 — 줄만 재면 한 byte 옆에 놓는 변이가 산다.
-    try testing.expectEqual(term.rt.editor_document.opened.?.file.lines.line(starts[0]).?.start, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(term.rt.editorDocument().opened.?.file.lines.line(starts[0]).?.start, term.rt.editor_selection.?.focus);
     fx.session.mouse(1, nx, ny, 0, 0);
     try testing.expectEqual(starts[1], lineOf(term, term.rt.editor_selection.?.focus));
     fx.session.mouse(1, nx, ny, 0, 0);
@@ -11819,8 +11827,8 @@ test "MPN19 헤더 밴드의 ↓·↑ 와 F7/⇧F7 이 다음/이전 충돌 구�
     try testing.expectEqual(starts[0] + 1, lineOf(term, term.rt.editor_selection.?.focus));
     // 되돌린다 — 아래 단계는 원래 줄 번호로 잰다(caret 은 다시 둘째 구간 머리에).
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqual(@as(usize, buf.items.len), term.rt.editor_document.opened.?.file.content.len);
-    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.lines.line(starts[1]).?.start);
+    try testing.expectEqual(@as(usize, buf.items.len), term.rt.editorDocument().opened.?.file.content.len);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(starts[1]).?.start);
     // 편집이 히트 기하를 버렸다 — 아래 판 클릭은 **그린 뒤**의 기하로 잰다(제품도 프레임마다 다시 세운다).
     var d3 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
     defer d3.dl.deinit(allocator);
@@ -12186,7 +12194,7 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
     const cw: u32 = fx.session.cell_width_px;
     var rounds: usize = 0;
-    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
 
     const Found = struct { zigzag: usize, zig_color: u32, bar: usize, mm: usize, glyph: bool };
     const scan = struct {
@@ -12273,7 +12281,7 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     // caret 줄의 **개행 byte 에서 시작하는** 진단은 「같은 줄」이라 건너뛴다 — 줄 끝을 개행 제외로 재면 그것이 「다음」이 된다
     // (적대적 6회차 F7). 합성 진단을 목록에 끼워 본다(다음 프레임이 트리에서 다시 채운다).
     {
-        const doc = term.rt.editor_document.opened.?;
+        const doc = term.rt.editorDocument().opened.?;
         const cur = doc.file.lines.lineAt(first.start);
         const ln = doc.file.lines.line(cur).?;
         const nl: u32 = @intCast(ln.end_with_ending - 1);
@@ -12286,11 +12294,11 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     }
 
     // ⑶ 고치면 사라진다 — 닫는 괄호를 넣고 다음 프레임.
-    const fix_at = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "2;") orelse return error.NoAnchor;
+    const fix_at = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "2;") orelse return error.NoAnchor;
     term.rt.editor_selection = .{ .anchor_start = fix_at + 1, .anchor_end = fix_at + 1, .focus = fix_at + 1 };
     try testing.expect(insertText(fx.session, term, ")"));
     rounds = 0;
-    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
     fx.session.gpu_quads.clearRetainingCapacity();
     var d1 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
     const f1 = scan(fx.session, d1.dl, term, cw);
@@ -12303,7 +12311,7 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     // ⑷ 다시 깨뜨리고 끄면 넷 다 없다(목록은 비고, 이동도 무동작).
     try testing.expect(insertText(fx.session, term, "@@@"));
     rounds = 0;
-    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
     fx.session.gpu_quads.clearRetainingCapacity();
     var d2 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
     const f2 = scan(fx.session, d2.dl, term, cw);
@@ -12312,11 +12320,11 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     // 이동의 기준은 **focus** 다(선택이 걸쳐 있을 때 anchor 가 아니라) — 오류를 하나 더 만들어(뒤쪽 줄) anchor 는 문서 앞, focus 는
     // 뒤 오류에 두고 ⇧F8: focus 기준이면 앞 오류로, anchor 기준이면 감겨 뒤 오류 그대로다(적대적 6회차 F6).
     {
-        const k5 = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "const k5 ") orelse return error.NoAnchor;
+        const k5 = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "const k5 ") orelse return error.NoAnchor;
         term.rt.editor_selection = .{ .anchor_start = k5, .anchor_end = k5, .focus = k5 };
         try testing.expect(insertText(fx.session, term, "@@@ "));
         rounds = 0;
-        while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+        while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
         var d2b = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
         d2b.dl.deinit(allocator);
         const items = term.rt.editor_diagnostics.list.items;
@@ -12494,10 +12502,10 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     // 참이라 — 크래시 루프를 「복구」로 읽었다. 이제 복구는 「그 version 의 진단이 왔다」로 잰다).
     const removeMarker = struct {
         fn f(session: *AppSession, t: *Term, marker: []const u8) !void {
-            const at: u32 = @intCast(std.mem.indexOf(u8, t.rt.editor_document.opened.?.file.content, marker) orelse return error.NoMarker);
+            const at: u32 = @intCast(std.mem.indexOf(u8, t.rt.editorDocument().opened.?.file.content, marker) orelse return error.NoMarker);
             t.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at + @as(u32, @intCast(marker.len)), .focus = at + @as(u32, @intCast(marker.len)) };
             try testing.expect(deleteText(session, t, false));
-            try testing.expect(std.mem.indexOf(u8, t.rt.editor_document.opened.?.file.content, marker) == null);
+            try testing.expect(std.mem.indexOf(u8, t.rt.editorDocument().opened.?.file.content, marker) == null);
         }
     }.f;
     const diagsForCurrentVersion = struct {
@@ -12772,7 +12780,7 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
 fn pointerAtOffset(term: *Term, offset: usize) ?struct { x: f64, y: f64 } {
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const geom = term.rt.editor_hit_geom;
     const line_idx = doc.file.lines.lineAt(offset);
     const line = doc.file.lines.line(line_idx) orelse return null;
@@ -12789,7 +12797,7 @@ fn pointerAtOffset(term: *Term, offset: usize) ?struct { x: f64, y: f64 } {
 
 /// 표식 하나를 문서에서 찾아 지운다(HOVB — LSPB1 의 `removeMarker` 와 같은 규율: 자리를 찾아 지운다).
 fn removeMarkerHover(session: *AppSession, t: *Term, marker: []const u8) !void {
-    const at: u32 = @intCast(std.mem.indexOf(u8, t.rt.editor_document.opened.?.file.content, marker) orelse return error.NoMarker);
+    const at: u32 = @intCast(std.mem.indexOf(u8, t.rt.editorDocument().opened.?.file.content, marker) orelse return error.NoMarker);
     t.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at + @as(u32, @intCast(marker.len)), .focus = at + @as(u32, @intCast(marker.len)) };
     try testing.expect(deleteText(session, t, false));
 }
@@ -12982,7 +12990,7 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
     try testing.expect(std.mem.indexOf(u8, hover_client.lines(fx.session)[0].text, "fake") != null);
     // ⑼ 상자 밖 클릭은 닫고 **흘려보낸다** — 제품 진입점(`mouse`)으로 누른다: 둘째 줄을 눌렀으니 caret 이 거기 선다(변이 C6 — 직접 호출은
     //    배선을 안 지났다).
-    const line1 = term.rt.editor_document.opened.?.file.lines.line(1).?;
+    const line1 = term.rt.editorDocument().opened.?.file.lines.line(1).?;
     const pc_base = pointerAtOffset(term, line1.start + 2) orelse return error.NoPointer;
     const pc: struct { x: f64, y: f64 } = .{ .x = pc_base.x + 400, .y = pc_base.y }; // 둘째 줄, 상자 오른쪽 너머(본문 안 — 줄 끝으로 clamp 된다)
     try testing.expect(!maru.chrome.components.hover_box.contains(&fx.session.chrome_host.hover_box, hover_client.lines(fx.session), fx.session.buildChromeProps(), pc.x, pc.y)); // 전제: 상자 밖
@@ -13121,7 +13129,7 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     }
     hover_client.hide(fx.session);
     // ⑵ 글자 없는 자리(둘째 줄 끝 뒤)는 안 연다 — 진단도 없는 자리(`ok`)도 안 연다(서버가 없다).
-    const line2 = term.rt.editor_document.opened.?.file.lines.line(1).?;
+    const line2 = term.rt.editorDocument().opened.?.file.lines.line(1).?;
     const pe = pointerAtOffset(term, line2.contentEnd()) orelse return error.NoPointer;
     _ = fx.session.hoverCursor(pe.x + 300, pe.y, 0);
     try testing.expect(!pumpHoverUntil(&fx, 600, ctx, struct {
@@ -13133,7 +13141,7 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     const uncovered: ?usize = blk: {
         var o: usize = line2.start;
         while (o < line2.contentEnd()) : (o += 1) {
-            const content = term.rt.editor_document.opened.?.file.content;
+            const content = term.rt.editorDocument().opened.?.file.content;
             if (content[o] == ' ') continue;
             var covered = false;
             for (term.rt.editor_diagnostics.list.items) |d| {
@@ -13169,7 +13177,7 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     try pressKey(&fx, .escape, .{});
     try testing.expect(!fx.session.chrome_host.hover_box.open);
     // ⑷ caret 이 글자 없는 자리(문서 끝)면 명령도 안 연다.
-    const end = term.rt.editor_document.opened.?.file.content.len;
+    const end = term.rt.editorDocument().opened.?.file.content.len;
     term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
     fx.session.dispatchAppAction(.show_hover);
     try testing.expect(!fx.session.chrome_host.hover_box.open);
@@ -13345,7 +13353,7 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     const other = pane_ops.activePane(s).activeTerm();
     try testing.expect(other != term);
     try testing.expectEqual(terms_before + 1, pane_ops.activePane(s).terms.items.len);
-    try testing.expect(std.mem.endsWith(u8, other.rt.editor_document.path orelse "", "other.c"));
+    try testing.expect(std.mem.endsWith(u8, other.rt.editorDocument().path orelse "", "other.c"));
     try testing.expectEqual(@as(usize, 9 + 8), other.rt.editor_selection.?.focus); // "// other\n"=9, `int q = zz;` 의 8
     try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
     try testing.expect(pane_ops.activePane(s).activeTerm() == term);
@@ -13866,7 +13874,7 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     s.dispatchAppAction(.editor_undo);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_inlay.hints.items.items.len);
     try testing.expectEqual(@as(u32, 14 + 4), term.rt.editor_inlay.hints.items.items[0].offset); // `xy` 가 함께 빠졌다(§3.3 묶음)
-    try testing.expectEqual(@as(usize, 13 + 1 + 14 + 1), (term.rt.editor_document.opened orelse return error.NoDoc).file.content.len); // 원문 그대로(끝 개행 포함)
+    try testing.expectEqual(@as(usize, 13 + 1 + 14 + 1), (term.rt.editorDocument().opened orelse return error.NoDoc).file.content.len); // 원문 그대로(끝 개행 포함)
     try testing.expect(term.rt.editor_inlay.generation > gen_before_undo);
     {
         const t0 = s.awakeMs();
@@ -14132,17 +14140,17 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
     const syms = term.rt.editor_symbols.list.items;
     try testing.expectEqual(@as(usize, 2), syms.len);
     try testing.expect(syms[0].start < syms[1].start);
-    try testing.expectEqualStrings("alpha", f.term.rt.editor_document.opened.?.file.content[syms[0].name_start..syms[0].name_end]);
-    try testing.expectEqualStrings("beta", f.term.rt.editor_document.opened.?.file.content[syms[1].name_start..syms[1].name_end]);
+    try testing.expectEqualStrings("alpha", f.term.rt.editorDocument().opened.?.file.content[syms[0].name_start..syms[0].name_end]);
+    try testing.expectEqualStrings("beta", f.term.rt.editorDocument().opened.?.file.content[syms[1].name_start..syms[1].name_end]);
     try testing.expectEqualStrings("function", syms[0].kind); // SymbolKind 12 → 우리 어휘
     try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_symbols.version);
     try testing.expect(symbols_client.list(term) != null);
     // ⑶ 밴드 체인이 **2층으로** 선다. 두 층이 다른 답을 내는 자리를 고른다: 가짜의 범위는 **그 줄**이고 1층(C)의 함수 범위는 **본문 전체**라,
     //    caret 을 본문 줄에 두면 2층은 체인이 없고(경로만) 1층은 함수 이름을 붙인다. 선언 줄에서는 2층도 이름을 붙인다 — 둘 다 잰다.
-    const body = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "return b").?;
+    const body = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "return b").?;
     term.rt.editor_selection = .{ .anchor_start = body, .anchor_end = body, .focus = body };
     try testing.expectEqualStrings("sy.c", headerBreadcrumb(s, term, "sy.c")); // 2층: 그 줄 밖이라 체인 없음
-    const decl = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "int b").?;
+    const decl = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "int b").?;
     term.rt.editor_selection = .{ .anchor_start = decl, .anchor_end = decl, .focus = decl };
     try testing.expect(std.mem.endsWith(u8, headerBreadcrumb(s, term, "sy.c"), "beta"));
     // ⑷ 편집 — **버린다**(§8.2o). 그 프레임의 체인은 1층이 답하고, 2층 목록은 비어 있다.
@@ -14285,7 +14293,7 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     const s = f.fx.session;
     const term = f.term;
     try testing.expect(f.ready());
-    const content = term.rt.editor_document.opened.?.file.content;
+    const content = term.rt.editorDocument().opened.?.file.content;
     const first = std.mem.indexOf(u8, content, "alpha").?;
     // ⑴ caret 이 낱말 위 — 조용해지면 한 번 묻는다(그 전엔 안 묻는다).
     term.rt.editor_selection = .{ .anchor_start = first + 1, .anchor_end = first + 1, .focus = first + 1 };
@@ -14393,7 +14401,7 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
 /// 선택 확장 판정자(§8.2q)의 공통 — 지금 primary 가 고른 글자.
 fn smartSelected(term: *Term) []const u8 {
     const sel = term.rt.editor_selection orelse return "";
-    const c = term.rt.editor_document.opened.?.file.content;
+    const c = term.rt.editorDocument().opened.?.file.content;
     return c[sel.start()..sel.end()];
 }
 fn smartApplied(f: *SmtFixture, want: u64) bool {
@@ -14430,7 +14438,7 @@ test "SSEL9 선택 확장 — ⌃⇧⌘→ 가 키 경로로 서버에 한 번 �
     const s = f.fx.session;
     const term = f.term;
     try testing.expect(f.ready());
-    const content = term.rt.editor_document.opened.?.file.content;
+    const content = term.rt.editorDocument().opened.?.file.content;
     const at = std.mem.indexOf(u8, content, "alpha").? + 2;
     smartCaret(term, at);
     // **메뉴 keyEquivalent 층보다 먼저 편집기가 가진다** — Swift `performKeyEquivalent` 가 이 답을 따른다.
@@ -14478,19 +14486,19 @@ test "SSEL10 선택 확장 — caret 을 안 옮기는 편집도 사슬을 버�
     const s = f.fx.session;
     const term = f.term;
     try testing.expect(f.ready());
-    const at = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "alpha").? + 2;
+    const at = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "alpha").? + 2;
     smartCaret(term, at);
     try pressKey(&f.fx, .arrow_right, smart_mods);
     try testing.expect(smartApplied(&f, 1));
     try pressKey(&f.fx, .arrow_right, smart_mods);
     try testing.expectEqualStrings("alpha + beta;", smartSelected(term));
     // caret **뒤**에 줄을 넣는다 — 선택은 그대로 서 있다(편집기 이동·포맷이 caret 을 안 옮기는 경우와 같은 꼴). 통지는 편집 초크 포인트로.
-    const len_before = term.rt.editor_document.opened.?.file.content.len;
+    const len_before = term.rt.editorDocument().opened.?.file.content.len;
     var sels = maru.session.editor.selection.Selections.init((try allocator.alloc(editor_selection.Selection, 1))[0..1], 0);
     sels.items[0] = editor_selection.Selection.at(0);
     defer allocator.free(sels.items);
     const changes = [_]maru.session.editor.delta.Change{.{ .start = len_before, .end = len_before, .text = "int g;\n" }};
-    var inv = try term.rt.editor_document.opened.?.file.apply(.{ .changes = &changes }, &sels);
+    var inv = try term.rt.editorDocument().opened.?.file.apply(.{ .changes = &changes }, &sels);
     inv.deinit();
     refreshAfterEdit(s, term, null) catch {};
     try testing.expectEqualStrings("alpha + beta;", smartSelected(term)); // 선택은 제자리
@@ -14526,7 +14534,7 @@ test "SSEL11 선택 확장의 1층 — provider 없음 · 빈 범위(clangd 주�
         const s = f.fx.session;
         const term = f.term;
         try testing.expect(f.ready());
-        const at = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "alpha").? + 2;
+        const at = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "alpha").? + 2;
         smartCaret(term, at);
         try pressKey(&f.fx, .arrow_right, smart_mods);
         try testing.expectEqual(cs.want_sent, s.editor_lsp.sent_selection_range);
@@ -14563,7 +14571,7 @@ test "SSEL15 선택 확장의 1층은 여는 파싱이 끊긴 동안 트리를 �
     defer f.close(allocator);
     const term = f.term;
     try testing.expect(f.ready());
-    const doc = term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = term.rt.editorDocument().opened orelse return error.NoDoc;
     term.rt.editor_syntax.deinit(allocator);
     term.rt.editor_syntax = syntax_color.openBudgeted(doc.file.content, .c, 1);
     try testing.expect(term.rt.editor_syntax.pending); // 끊겼다 — 아니면 이 판정자가 잴 것이 없다
@@ -14583,7 +14591,7 @@ test "SSEL12 선택 확장의 대기 — 기다리는 동안 누른 키는 순 �
     const s = f.fx.session;
     const term = f.term;
     try testing.expect(f.ready());
-    const content = term.rt.editor_document.opened.?.file.content;
+    const content = term.rt.editorDocument().opened.?.file.content;
     const at = std.mem.indexOf(u8, content, "alpha").? + 2;
     // ⑴ 확장 · 확장 · 확장 · 축소 = 순 두 걸음 — 답이 오기 전에 다 누른다.
     smartCaret(term, at);
@@ -14614,7 +14622,7 @@ test "SSEL13 선택 확장의 멀티 커서 — 커서마다 사슬로 넓히고
     const s = f.fx.session;
     const term = f.term;
     try testing.expect(f.ready());
-    const content = term.rt.editor_document.opened.?.file.content;
+    const content = term.rt.editorDocument().opened.?.file.content;
     const a = std.mem.indexOf(u8, content, "alpha").? + 2;
     const b = std.mem.indexOf(u8, content, "beta").? + 1;
     smartCaret(term, a);
@@ -14660,7 +14668,7 @@ test "SSEL16 선택 확장 — 빈 caret 이 낱말 끝 바로 뒤(`alpha|`)면 
     defer f.close(allocator);
     const term = f.term;
     try testing.expect(f.ready());
-    const at = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "alpha").? + "alpha".len; // `alpha|`
+    const at = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "alpha").? + "alpha".len; // `alpha|`
     smartCaret(term, at);
     try pressKey(&f.fx, .arrow_right, smart_mods);
     try testing.expect(smartApplied(&f, 1));
@@ -14680,7 +14688,7 @@ test "SSEL17 선택 확장 — utf-16 을 협상한 서버에 비ASCII 뒤 낱�
     defer f.close(allocator);
     const term = f.term;
     try testing.expect(f.ready());
-    const at = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "alpha").? + 2;
+    const at = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "alpha").? + 2;
     smartCaret(term, at);
     try pressKey(&f.fx, .arrow_right, smart_mods);
     try testing.expect(smartApplied(&f, 1));
@@ -14699,13 +14707,13 @@ test "SSEL18 선택 확장 뒤 타이핑은 새 undo 묶음이다 — 되돌리�
     try testing.expect(insertText(fx.session, term, "alpha beta")); // 타이핑 묶음 하나
     // caret 은 `beta|` — 확장하면 `beta` 가 선다(서버 없음 → 낱말 단계).
     try pressKey(&fx, .arrow_right, smart_mods);
-    const c = term.rt.editor_document.opened.?.file.content;
+    const c = term.rt.editorDocument().opened.?.file.content;
     const sel = term.rt.editor_selection.?;
     try testing.expectEqualStrings("beta", c[sel.start()..sel.end()]);
     try testing.expect(insertText(fx.session, term, "X")); // 선택을 갈아 끼운다
-    try testing.expectEqualStrings("alpha X\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("alpha X\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("alpha beta\n", term.rt.editor_document.opened.?.file.content); // 확장 전 타이핑은 남는다
+    try testing.expectEqualStrings("alpha beta\n", term.rt.editorDocument().opened.?.file.content); // 확장 전 타이핑은 남는다
 }
 
 test "SSEL19 선택 확장은 primary caret 을 드러낸다 — 화면 밖 줄에서 넓히면 그 줄로 스크롤한다 (제품 경계, §8.2q)" {
@@ -14722,11 +14730,11 @@ test "SSEL19 선택 확장은 primary caret 을 드러낸다 — 화면 밖 줄�
     d.dl.deinit(allocator);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
     // 250 번째 줄의 `beta` 안에 caret 을 **드러내지 않고** 세운다(클릭이 아닌 경로 — 화면 밖).
-    const line = term.rt.editor_document.opened.?.file.lines.line(250) orelse return error.NoLine;
+    const line = term.rt.editorDocument().opened.?.file.lines.line(250) orelse return error.NoLine;
     term.rt.editor_selection = editor_selection.Selection.at(line.start + 7);
     try pressKey(&fx, .arrow_right, smart_mods);
     const sel = term.rt.editor_selection.?;
-    try testing.expectEqualStrings("beta", term.rt.editor_document.opened.?.file.content[sel.start()..sel.end()]);
+    try testing.expectEqualStrings("beta", term.rt.editorDocument().opened.?.file.content[sel.start()..sel.end()]);
     try testing.expect(term.rt.editor_first_line > 200); // 250 줄이 보이도록 내려갔다
 }
 
@@ -14804,7 +14812,7 @@ test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실�
     _ = try paneRowText(fx.session, term, 0, &buf); // 기하를 굳힌다
     // 맨 위가 10 번째 줄(`_ = 1;`)이고 caret 은 화면 아래쪽.
     setEditorTop(fx.session, term, 10, "test");
-    const line20 = term.rt.editor_document.opened.?.file.lines.line(20).?;
+    const line20 = term.rt.editorDocument().opened.?.file.lines.line(20).?;
     term.rt.editor_selection = editor_selection.Selection.at(line20.start);
     const r0 = try paneRowText(fx.session, term, 0, &buf);
     try testing.expectEqual(@as(usize, 10), term.rt.editor_first_line); // 스크롤이 섰다(0·1 행이 본문 1·2 줄이 아니다)
@@ -14858,7 +14866,7 @@ test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실�
     try testing.expect(!definition_client.gotoDefinitionAtPointer(fx.session, term, x_word, y_row(geom, 1)));
 
     // caret 을 덮지 않는다 — caret 이 칸 1(줄 11)에 오면 칸 1 부터 걷힌다.
-    const line11 = term.rt.editor_document.opened.?.file.lines.line(11).?;
+    const line11 = term.rt.editorDocument().opened.?.file.lines.line(11).?;
     term.rt.editor_selection = editor_selection.Selection.at(line11.start);
     _ = try paneRowText(fx.session, term, 0, &buf);
     try testing.expectEqual(@as(usize, 1), term.rt.editor_sticky.drawn_len);
@@ -14873,12 +14881,12 @@ test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실�
     try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
     {
         const extras = try allocator.alloc(editor_selection.Selection, 1);
-        extras[0] = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.lines.line(30).?.start);
+        extras[0] = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(30).?.start);
         term.rt.editor_extra_selections = extras;
     }
     const x_col8: f64 = @floatFromInt(@as(i64, geom.body_x) + @as(i64, geom.content_left_px) + @as(i64, geom.cell_w_px) * 8 + 1);
     try testing.expect(beginBodySelection(fx.session, pane_ops.activePane(fx.session), x_col8, y_row(geom, 1), 0));
-    const line1 = term.rt.editor_document.opened.?.file.lines.line(1).?;
+    const line1 = term.rt.editorDocument().opened.?.file.lines.line(1).?;
     try testing.expectEqual(line1.start + 8, term.rt.editor_selection.?.focus); // `    pub ` 다음 — `fn` 앞
     try testing.expect(term.rt.editor_selection.?.isEmpty());
     try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line); // 줄 1 이 행 1 에
@@ -14886,8 +14894,8 @@ test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실�
     // 클릭 뒤 타이핑은 새 undo 묶음이다 — 되돌리면 클릭 전의 `Q` 는 남는다.
     try testing.expect(insertText(fx.session, term, "Z"));
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expect(std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "Q") != null);
-    try testing.expect(std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "Z") == null);
+    try testing.expect(std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "Q") != null);
+    try testing.expect(std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "Z") == null);
 
     // **더블클릭도 머리줄로 간다** — 가려진 본문 줄의 낱말을 고르지 않는다(적대적 1회차 P17).
     setEditorTop(fx.session, term, 10, "test");
@@ -14896,7 +14904,7 @@ test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실�
     try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
     try testing.expect(selectWordOrLineAt(fx.session, pane_ops.activePane(fx.session), false, x_col8, y_row(geom, 0), 0));
     try testing.expect(term.rt.editor_selection.?.isEmpty());
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_document.opened.?.file.lines.lineAt(term.rt.editor_selection.?.focus));
+    try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().opened.?.file.lines.lineAt(term.rt.editor_selection.?.focus));
 
     // 설정으로 끈다.
     setEditorTop(fx.session, term, 10, "test");
@@ -14922,7 +14930,7 @@ test "STK8 sticky scroll — 심볼이 없으면 접힘 범위(들여쓰기)로 
     _ = try paneRowText(fx.session, term, 0, &buf);
     try testing.expect(term.rt.editor_fold_ranges.len > 0); // 들여쓰기 접힘이 섰다(픽스처가 뜻을 가진다)
     setEditorTop(fx.session, term, 5, "test");
-    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.lines.line(20).?.start);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(20).?.start);
     const r0 = try paneRowText(fx.session, term, 0, &buf);
     try testing.expect(std.mem.indexOf(u8, r0, "section:") != null);
     try testing.expectEqual(@as(usize, 1), term.rt.editor_sticky.drawn_len); // 실제로 그렸다(본문 첫 줄이 우연히 같은 글자가 아니다)
@@ -14930,7 +14938,7 @@ test "STK8 sticky scroll — 심볼이 없으면 접힘 범위(들여쓰기)로 
     try testing.expectEqual(sticky_client.Source.fold, term.rt.editor_sticky.source);
     // **끝 경계** — 마지막 본문 줄(100)이 맨 위에 있으면 아직 선다; 한 줄 더 굴리면(맨 위가 `end`) 떨어진다. 끝을 `last_hidden` 으로 잡으면
     // (닫는 줄을 빼면) 한 줄 먼저 떨어진다.
-    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.lines.line(150).?.start);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(150).?.start);
     setEditorTop(fx.session, term, 100, "test");
     _ = try paneRowText(fx.session, term, 0, &buf);
     try testing.expectEqual(@as(usize, 100), term.rt.editor_first_line);
@@ -14972,7 +14980,7 @@ test "STK11 비교 뷰로 바꾸면 고정 행 판정이 사라진다 — 마지
     var buf: [256]u8 = undefined;
     _ = try paneRowText(fx.session, term, 0, &buf);
     setEditorTop(fx.session, term, 10, "test");
-    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.lines.line(20).?.start);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(20).?.start);
     _ = try paneRowText(fx.session, term, 0, &buf);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
     const geom = term.rt.editor_hit_geom;
@@ -14998,7 +15006,7 @@ test "STK14 ⌘클릭은 고정 행에서 정의로 가지 않는다 — 흘려�
     var buf: [256]u8 = undefined;
     _ = try paneRowText(s, term, 0, &buf);
     setEditorTop(s, term, 10, "test");
-    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.lines.line(60).?.start);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(60).?.start);
     const r0 = try paneRowText(s, term, 0, &buf);
     try testing.expect(std.mem.indexOf(u8, r0, "int f(int a) {") != null);
     try testing.expectEqual(@as(usize, 1), term.rt.editor_sticky.drawn_len);
@@ -15021,7 +15029,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         defer f.close(allocator);
         const s = f.fx.session;
         try testing.expect(f.ready());
-        const at = std.mem.indexOf(u8, f.term.rt.editor_document.opened.?.file.content, "alpha").? + 1;
+        const at = std.mem.indexOf(u8, f.term.rt.editorDocument().opened.?.file.content, "alpha").? + 1;
         f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
@@ -15035,7 +15043,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         defer f.close(allocator);
         const s = f.fx.session;
         try testing.expect(f.ready());
-        const at = std.mem.indexOf(u8, f.term.rt.editor_document.opened.?.file.content, "alpha").? + 1;
+        const at = std.mem.indexOf(u8, f.term.rt.editorDocument().opened.?.file.content, "alpha").? + 1;
         f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
@@ -15054,7 +15062,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         defer f.close(allocator);
         const s = f.fx.session;
         try testing.expect(f.ready());
-        const at = std.mem.indexOf(u8, f.term.rt.editor_document.opened.?.file.content, "alpha").? + 1;
+        const at = std.mem.indexOf(u8, f.term.rt.editorDocument().opened.?.file.content, "alpha").? + 1;
         f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
         {
             const t0 = s.awakeMs();
@@ -15075,7 +15083,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         defer f.close(allocator);
         const s = f.fx.session;
         try testing.expect(f.ready());
-        const at = std.mem.indexOf(u8, f.term.rt.editor_document.opened.?.file.content, "alpha").? + 1;
+        const at = std.mem.indexOf(u8, f.term.rt.editorDocument().opened.?.file.content, "alpha").? + 1;
         f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
         f.term.rt.editor_diff = .{}; // 비교 상태만 세운다 — 이 가드를 지나기에 충분하다
         defer f.term.rt.editor_diff = null;
@@ -15098,7 +15106,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         const s = f.fx.session;
         const term = f.term;
         try testing.expect(f.ready());
-        const content = term.rt.editor_document.opened.?.file.content;
+        const content = term.rt.editorDocument().opened.?.file.content;
         const at = std.mem.indexOf(u8, content, "alpha").? + 1; // 첫 줄의 `alpha` 안 — 앞에 비ASCII 12 byte(=utf-16 4 글자)라 byte 29 · 글자 21 로 갈린다
         term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
         {
@@ -15119,7 +15127,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         const s = f.fx.session;
         const term = f.term;
         try testing.expect(f.ready());
-        const content = term.rt.editor_document.opened.?.file.content;
+        const content = term.rt.editorDocument().opened.?.file.content;
         const at = std.mem.indexOf(u8, content, "alpha").? + 1;
         term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
         {
@@ -15303,7 +15311,7 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     const other = pane_ops.activePane(fx.session).activeTerm();
     try testing.expect(other != term);
     try testing.expectEqual(terms_before + 1, pane_ops.activePane(fx.session).terms.items.len);
-    try testing.expect(std.mem.endsWith(u8, other.rt.editor_document.path orelse "", "other.c"));
+    try testing.expect(std.mem.endsWith(u8, other.rt.editorDocument().path orelse "", "other.c"));
     try testing.expectEqual(@as(usize, 9 + 6), other.rt.editor_selection.?.focus); // "// other\n" = 9, 글자 = 요청한 6(`XFILE ` 뒤 caret) — `int z;` 는 6 글자라 줄 끝
     try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
     try testing.expect(pane_ops.activePane(fx.session).activeTerm() == term);
@@ -15613,7 +15621,7 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     }.f));
     const content = struct {
         fn f(t: *Term) []const u8 {
-            return t.rt.editor_document.opened.?.file.content;
+            return t.rt.editorDocument().opened.?.file.content;
         }
     }.f;
     const settled = struct {
@@ -15624,7 +15632,7 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
 
     // ⑴ caret 을 둘째 줄 `y`(offset 14) 에 두고 `⇧⌥F` — 요청 하나 → 두 줄이 한 응답으로 바뀐다. caret 은 여전히 `y` 를 가리킨다(offset 11).
     term.rt.editor_selection = .{ .anchor_start = 14, .anchor_end = 14, .focus = 14 };
-    const undo_before = term.rt.editor_document.history.undo_len;
+    const undo_before = term.rt.editorDocument().history.undo_len;
     try pressKey(&fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_formattings);
     try testing.expect(fx.session.editor_format.waiting);
@@ -15633,12 +15641,12 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     try testing.expectEqualStrings("int x;\nint y;\n", content(term));
     try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(u8, 'y'), content(term)[term.rt.editor_selection.?.focus]);
-    try testing.expectEqual(undo_before + 1, term.rt.editor_document.history.undo_len); // 되돌리기 **하나**
+    try testing.expectEqual(undo_before + 1, term.rt.editorDocument().history.undo_len); // 되돌리기 **하나**
     // 되돌리기 하나로 두 줄이 다 돌아오고 caret 도 원래 글자(offset 14 의 `y`)로.
     fx.session.dispatchAppAction(.editor_undo);
     try testing.expectEqualStrings("int  x;\nint   y;\n", content(term));
     try testing.expectEqual(@as(usize, 14), term.rt.editor_selection.?.focus);
-    try testing.expectEqual(undo_before, term.rt.editor_document.history.undo_len);
+    try testing.expectEqual(undo_before, term.rt.editorDocument().history.undo_len);
     // ⑵ **낡은 revision 은 버리고 알린다** — 요청을 보낸 뒤 응답 전에 문서를 고치면 그 결과는 이 문서의 것이 아니다.
     fx.session.dispatchAppAction(.format_document); // 팔레트 명령 경로
     try testing.expectEqual(@as(u64, 2), fx.session.editor_lsp.sent_formattings);
@@ -15664,24 +15672,24 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expectEqual(@as(u64, 2), fx.session.editor_format.applied);
     try testing.expectEqualStrings("int x;\nint y;\n", content(term));
-    const undo_clean = term.rt.editor_document.history.undo_len;
+    const undo_clean = term.rt.editorDocument().history.undo_len;
     fx.session.dispatchAppAction(.format_document);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expectEqual(@as(u64, 1), fx.session.editor_format.noop);
     try testing.expectEqual(@as(u64, 2), fx.session.editor_format.applied);
-    try testing.expectEqual(undo_clean, term.rt.editor_document.history.undo_len);
+    try testing.expectEqual(undo_clean, term.rt.editorDocument().history.undo_len);
     try testing.expect(!fx.session.chrome_host.notice.open);
     // ⑷ **겹치는 edit 은 전부 거부** — 문서는 그대로, 알림. (`BADFMT` 는 겹치는 edit 둘을 낸다.)
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
     try testing.expect(insertText(fx.session, term, "BADFMT "));
     const before_bad = try allocator.dupe(u8, content(term));
     defer allocator.free(before_bad);
-    const undo_bad = term.rt.editor_document.history.undo_len;
+    const undo_bad = term.rt.editorDocument().history.undo_len;
     fx.session.dispatchAppAction(.format_document);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expectEqual(@as(u64, 1), fx.session.editor_format.rejected);
     try testing.expectEqualStrings(before_bad, content(term));
-    try testing.expectEqual(undo_bad, term.rt.editor_document.history.undo_len);
+    try testing.expectEqual(undo_bad, term.rt.editorDocument().history.undo_len);
     try testing.expect(fx.session.chrome_host.notice.open);
     try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.fmt_rejected)));
     fx.session.chrome_host.notice.dismiss();
@@ -15694,10 +15702,10 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     try testing.expectEqual(sent_before, fx.session.editor_lsp.sent_formattings);
     try testing.expect(!fx.session.editor_format.waiting);
     client.formatting_supported = true;
-    term.rt.editor_document.opened.?.file.read_only = true;
+    term.rt.editorDocument().opened.?.file.read_only = true;
     try pressKey(&fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expectEqual(sent_before, fx.session.editor_lsp.sent_formattings);
-    term.rt.editor_document.opened.?.file.read_only = false;
+    term.rt.editorDocument().opened.?.file.read_only = false;
     // ⑹ 낡은 seq 는 버린다 — 기다리는 seq 가 아니면 상태도 문서도 안 건드린다.
     fx.session.editor_format.waiting = true;
     fx.session.editor_format.waiting_seq = 99;
@@ -15761,7 +15769,7 @@ test "FMT2 문서 포맷 — 서버가 documentFormattingProvider 를 안 내면
     try pressKey(&fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_formattings);
     try testing.expect(!fx.session.editor_format.waiting);
-    try testing.expectEqualStrings("int  x;\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("int  x;\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 /// RNM* 공용 픽스처 — 가짜 서버 + root 에 `r.c`(열린다)·`other.c`(열지 않는다 — 디스크의 관측점).
@@ -15816,7 +15824,7 @@ const RenameFx = struct {
     }
 
     fn content(self: *RenameFx) []const u8 {
-        return self.term.rt.editor_document.opened.?.file.content;
+        return self.term.rt.editorDocument().opened.?.file.content;
     }
 
     fn otherOnDisk(self: *RenameFx, allocator: std.mem.Allocator) ![]u8 {
@@ -15883,11 +15891,11 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     try testing.expect(s.rename == null and !s.chrome_host.rename_box.open);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_renames);
     try testing.expect(s.editor_rename.waiting);
-    const undo_before = term.rt.editor_document.history.undo_len;
+    const undo_before = term.rt.editorDocument().history.undo_len;
     try testing.expect(h.settled());
     // 열린 문서: 세 자리가 한 응답으로 바뀌고 undo 하나 · 열려 있지 않은 other.c: 디스크가 바뀌었고(add_x 는 안 건드린다) · 두 파일이라 r.c 도 저장됐다.
     try testing.expectEqualStrings("int add2(int a) { return add2(a); }\nint y = add2(1);\n", h.content());
-    try testing.expectEqual(undo_before + 1, term.rt.editor_document.history.undo_len);
+    try testing.expectEqual(undo_before + 1, term.rt.editorDocument().history.undo_len);
     {
         const od = try h.otherOnDisk(allocator);
         defer allocator.free(od);
@@ -16108,7 +16116,7 @@ test "RNM3 심볼 이름 바꾸기 — documentChanges 응답(version 포함)도
     // 관련 파일 중 **읽기 전용으로 열린** 문서가 있으면 전체 거부 — other.c 를 열어 읽기 전용으로 표시하고 rename.
     {
         const other_term = (try pane_ops.openFileTermInActivePane(s, h.other, .text)).term;
-        other_term.rt.editor_document.opened.?.file.read_only = true;
+        other_term.rt.editorDocument().opened.?.file.read_only = true;
         const Ctx = struct { t: *Term };
         try testing.expect(pumpLspUntil(&h.fx, 3000, Ctx{ .t = other_term }, struct {
             fn f(c: Ctx) bool {
@@ -16127,8 +16135,8 @@ test "RNM3 심볼 이름 바꾸기 — documentChanges 응답(version 포함)도
         try testing.expect(h.settled());
         try testing.expectEqual(@as(u64, 1), s.editor_workspace_edit.refused_rejected);
         try testing.expectEqualStrings(before, h.content());
-        try testing.expect(std.mem.indexOf(u8, other_term.rt.editor_document.opened.?.file.content, "add5") == null);
-        other_term.rt.editor_document.opened.?.file.read_only = false;
+        try testing.expect(std.mem.indexOf(u8, other_term.rt.editorDocument().opened.?.file.content, "add5") == null);
+        other_term.rt.editorDocument().opened.?.file.read_only = false;
     }
 }
 
@@ -16179,7 +16187,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     }.f;
     const content = struct {
         fn f(t: *Term) []const u8 {
-            return t.rt.editor_document.opened.?.file.content;
+            return t.rt.editorDocument().opened.?.file.content;
         }
     }.f;
     const frame = struct {
@@ -16233,7 +16241,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try testing.expect(s.editor_completion.active and !s.editor_completion.incomplete);
     try testing.expectEqualStrings("printf", completion_client.rows(s)[0].label);
     // ⑶ `↓`·`↓`(wrap)·`Enter` → `pr` 가 `printf` 로, caret 은 끝, undo 하나, 팝업 닫힘.
-    const undo_before = term.rt.editor_document.history.undo_len;
+    const undo_before = term.rt.editorDocument().history.undo_len;
     try testing.expectEqual(@as(usize, 4), completion_client.rows(s).len); // printf · pr · lazy_import · fake_import(부분열, preselect)
     try testing.expectEqual(@as(usize, 3), s.chrome_host.suggest_box.selected); // preselect 가 처음 선택
     try pressKey(&fx, .arrow_down, .{});
@@ -16254,7 +16262,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try testing.expect(!s.editor_completion.active and !s.chrome_host.suggest_box.open);
     try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  printf\n}\n", content(term));
     try testing.expectEqual(line3 + 6, term.rt.editor_selection.?.focus);
-    try testing.expectEqual(undo_before + 1, term.rt.editor_document.history.undo_len);
+    try testing.expectEqual(undo_before + 1, term.rt.editorDocument().history.undo_len);
     try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted);
     s.dispatchAppAction(.editor_undo);
     try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  pr\n}\n", content(term));
@@ -16269,11 +16277,11 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try frame(s, leaf, term);
     try testing.expect(s.editor_completion.active);
     try testing.expectEqualStrings("fake_import", completion_client.rows(s)[s.chrome_host.suggest_box.selected].label);
-    const undo_fa = term.rt.editor_document.history.undo_len;
+    const undo_fa = term.rt.editorDocument().history.undo_len;
     try pressKey(&fx, .tab, .{});
     try testing.expectEqualStrings("#include \"fake.h\"\nint printf(int x);\nint add(int a);\nint main() {\n  fake_import\n}\n", content(term));
     try testing.expectEqual(@as(usize, 18 + line3 + 11), term.rt.editor_selection.?.focus);
-    try testing.expectEqual(undo_fa + 1, term.rt.editor_document.history.undo_len);
+    try testing.expectEqual(undo_fa + 1, term.rt.editorDocument().history.undo_len);
     try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_with_additional);
     s.dispatchAppAction(.editor_undo);
     try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  fa\n}\n", content(term));
@@ -16565,10 +16573,10 @@ test "CMP3 자동완성 ①-b — 서버 없는 파일(markdown)에서도 타이
     try testing.expectEqualStrings("words", completion_client.rows(s)[0].label);
     try pressKey(&fx, .enter, .{});
     try testing.expect(!s.editor_completion.active);
-    try testing.expectEqualStrings("# wonderful world\nworkspace words matter\nwords\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("# wonderful world\nworkspace words matter\nwords\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_completions);
     // ⌃Space 도 서버 없이 연다 — 빈 접두사(문서 끝)면 단어 다섯 전부.
-    const doc_end = term.rt.editor_document.opened.?.file.content.len;
+    const doc_end = term.rt.editorDocument().opened.?.file.content.len;
     term.rt.editor_selection = .{ .anchor_start = doc_end, .anchor_end = doc_end, .focus = doc_end };
     try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
     try testing.expect(s.editor_completion.active and s.editor_completion.words_only);
@@ -16624,7 +16632,7 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
     }.f;
     const content = struct {
         fn f(t: *Term) []const u8 {
-            return t.rt.editor_document.opened.?.file.content;
+            return t.rt.editorDocument().opened.?.file.content;
         }
     }.f;
     const frame = struct {
@@ -16699,11 +16707,11 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
         try testing.expectEqual(n, s.editor_lsp.sent_completion_resolves);
         try testing.expect(!s.editor_completion.resolve_waiting);
     }
-    const undo_before = term.rt.editor_document.history.undo_len;
+    const undo_before = term.rt.editorDocument().history.undo_len;
     try pressKey(&fx, .enter, .{});
     try testing.expect(!s.editor_completion.active); // 이미 풀려 있어 기다리지 않는다
     try testing.expectEqualStrings("#include \"lazy.h\"\nint printf(int x);\nint main() {\n  lazy_import\n}\n", content(term));
-    try testing.expectEqual(undo_before + 1, term.rt.editor_document.history.undo_len);
+    try testing.expectEqual(undo_before + 1, term.rt.editorDocument().history.undo_len);
     s.dispatchAppAction(.editor_undo);
     try testing.expectEqualStrings("int printf(int x);\nint main() {\n  lazy\n}\n", content(term));
     try clearRange(s, term, line3, 4);
@@ -17021,7 +17029,7 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_function, roleAt(c4, 299, 4, 11).?); // 색 배열은 렌더 축(앞은 빈 줄)
     try testing.expect(term.rt.editor_semantic.covered_lo <= 270 and term.rt.editor_semantic.covered_hi == 299); // 마지막 줄까지
     // 1층도 선언의 `tail_fn` 을 함수로 칠하므로 색만으론 못 가른다 — 2층 스팬이 **마지막 줄**의 토큰을 실제로 들었는지 본다(적대적 3회차 C6: 범위 끝이 반열림이 아니면 그 줄이 빠진다).
-    const tail_at: u32 = @intCast(std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "tail_fn").?);
+    const tail_at: u32 = @intCast(std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "tail_fn").?);
     var has_tail = false;
     for (term.rt.editor_semantic.spans.items) |sp| if (sp.start == tail_at) {
         has_tail = true;
@@ -17190,7 +17198,7 @@ test "FLD1 foldingRange 3층 — 색 만들기 자리가 문서 전체를 묻고
     try testing.expectEqual(@as(usize, 6), term.rt.editor_visible_numbers.len);
     try testing.expectEqual(@as(?u32, 6), term.rt.editor_visible_numbers[1]); // 줄 6(1-based) = `}` 가 보인다
     // ⑹ 편집 — 접힘을 통째로 놓고(들여쓰기 → 승격) 120 ms 안엔 안 묻는다; 조용해지면 묻는다. 빈 줄(6)에 주석을 넣는다 — 구조는 그대로.
-    const blank: u32 = @intCast((std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "\n\n") orelse return error.NoBlankLine) + 1);
+    const blank: u32 = @intCast((std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "\n\n") orelse return error.NoBlankLine) + 1);
     term.rt.editor_selection = .{ .anchor_start = blank, .anchor_end = blank, .focus = blank };
     const edited_at = s.awakeMs();
     try testing.expect(insertText(s, term, "//"));
@@ -17659,7 +17667,7 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     try pressKey(&fx, .escape, .{});
     try clearRange(s, term, line2, 2);
     {
-        const e = term.rt.editor_document.opened.?.file.content.len;
+        const e = term.rt.editorDocument().opened.?.file.content.len;
         term.rt.editor_selection = .{ .anchor_start = e, .anchor_end = e, .focus = e };
         try testing.expect(insertText(s, term, "// RESOLVESTALL\n"));
         try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
@@ -17755,7 +17763,7 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     }.f;
     const content = struct {
         fn f(t: *Term) []const u8 {
-            return t.rt.editor_document.opened.?.file.content;
+            return t.rt.editorDocument().opened.?.file.content;
         }
     }.f;
     const menuTitles = struct {
@@ -17782,11 +17790,11 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     const a = pointerAtOffset(term, 1).?;
     try testing.expect(s.chrome_host.context_menu.anchor_y > @as(i32, @intFromFloat(a.y)));
     // fix 를 고르면(Enter) 진단 범위 0..3 → FIXED, undo 하나, 기록이 선다, 알림.
-    const undo_before = term.rt.editor_document.history.undo_len;
+    const undo_before = term.rt.editorDocument().history.undo_len;
     try pressKey(&fx, .enter, .{});
     try testing.expect(!s.chrome_host.context_menu.open and !s.code_action_menu);
     try testing.expectEqualStrings("FIXED x;\nint y;\n", content(term));
-    try testing.expectEqual(undo_before + 1, term.rt.editor_document.history.undo_len);
+    try testing.expectEqual(undo_before + 1, term.rt.editorDocument().history.undo_len);
     try testing.expectEqual(@as(u64, 1), s.editor_code_action.applied);
     try testing.expect(s.editor_workspace_edit.last != null);
     try testing.expect(s.chrome_host.notice.open);
@@ -18406,7 +18414,7 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     term2.rt.editor_wrap = false;
     // 파싱을 끝낸다(예산에 끊기면 무색이다 — 색을 재는 판정이라 기다린다).
     var rounds: usize = 0;
-    while (term2.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term2.rt.editor_syntax, term2.rt.editor_document.opened.?.file.content);
+    while (term2.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term2.rt.editor_syntax, term2.rt.editorDocument().opened.?.file.content);
     term2.rt.editor_first_line = 200;
     // 첫 프레임은 스크롤 상한을 아직 몰라 창이 0 에서 시작한다 — 한 프레임 더 그려 **창이 밀린 상태**(top > 0)에서 잰다.
     // 창이 0 이면 절대 첨자로 넘기는 변이와 본문 창을 겹쳐 쓰는 변이가 우연히 맞는다(7회차 G1·G2).
@@ -19807,7 +19815,7 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
         };
         if (opened) |term| {
             // 성공했으면 세션 해체가 그 Term을 정리한다(그 경로도 함께 확인된다).
-            try testing.expect(term.rt.editor_document.path != null);
+            try testing.expect(term.rt.editorDocument().path != null);
             ok_steps += 1;
         } else failed_steps += 1;
         if (step < ledger.len) ledger[step] = .{ .allocs = failing.allocations - init_allocs, .induced = failing.has_induced_failure, .ok = opened != null, .err = open_err };
@@ -22789,7 +22797,7 @@ test "텍스트 파일이 편집기 Term으로 열린다 — 되돌리면 지금
     try testing.expectEqual(maru.session.control_surface.SurfaceKind.editor, on.term.kind);
     try testing.expectEqual(@as(usize, 3), on.term.rt.editor_lines.len);
     try testing.expectEqualStrings("two", on.term.rt.editor_lines[1]);
-    try testing.expectEqualStrings(on_path, on.term.rt.editor_document.path.?);
+    try testing.expectEqualStrings(on_path, on.term.rt.editorDocument().path.?);
     try testing.expect(on.term.file_entry.?.native_editor);
     try testing.expectEqual(on.term.surfaceId(), on.term.file_entry.?.surface_id);
 
@@ -23226,7 +23234,7 @@ test "ADV3-A 그려진 글자가 곧 클릭이 답한 글자다 (랩이 실제�
 
             // 오라클 ②: 그 offset이 gutter가 말한 줄 안에 있는가.
             const want_line = line_of_row[c.row] orelse continue;
-            const doc = term.rt.editor_document.opened.?;
+            const doc = term.rt.editorDocument().opened.?;
             const li = doc.file.lines.line(want_line - 1) orelse continue;
             if (off < li.start or off > li.contentEnd()) {
                 line_mismatch += 1;
@@ -23307,7 +23315,7 @@ test "ADV3-B 접힘을 켜도 클릭이 gutter가 그린 줄을 답한다" {
             bad += 1;
             continue;
         };
-        const doc = term.rt.editor_document.opened.?;
+        const doc = term.rt.editorDocument().opened.?;
         const li = doc.file.lines.line(want - 1).?;
         judged += 1;
         if (off != li.start) {
@@ -23382,7 +23390,7 @@ test "ADV3-C 랩된 행의 오른쪽 끝 너머는 그 행의 끝이다 (다음 
         if (b.piece != a.piece + 1) continue; // 같은 줄의 다음 조각만 본다
         if (term.rt.editor_hit_lines[r] != term.rt.editor_hit_lines[r + 1]) continue;
         const src = term.rt.editor_hit_lines[r];
-        const li = term.rt.editor_document.opened.?.file.lines.line(src).?;
+        const li = term.rt.editorDocument().opened.?.file.lines.line(src).?;
         // **오라클이 순환이다** — 기대값을 검증 대상 배열(`editor_hit_rows`)에서 만든다. §4.1g가
         // *"구현과 같은 식으로 좌표를 만들면 어긋남을 못 잡는다"*고 경고한 형태이고, 실제로 `build`와
         // `byteAtPoint`가 **함께 움직이는** 뮤턴트를 통과시킨다.
@@ -23518,7 +23526,7 @@ test "ADV3-E 가로 스크롤 + 탭: 그려진 글자 = 클릭이 답한 글자"
             if (c.codepoint == ' ') continue; // 탭이 편 공백 — 원본 글자와 대조할 수 없다
             const want_line = nums_buf[c.row] orelse continue;
             const off = hitTestBody(term, ox + @as(f64, @floatFromInt(c.col)) * cw + 1, oy + @as(f64, @floatFromInt(c.row)) * ch + 1) orelse continue;
-            const li = term.rt.editor_document.opened.?.file.lines.line(want_line - 1) orelse continue;
+            const li = term.rt.editorDocument().opened.?.file.lines.line(want_line - 1) orelse continue;
             const lt = term.rt.editor_lines[want_line - 1];
             if (off < li.start or off > li.contentEnd()) {
                 mismatch += 1;
@@ -23603,7 +23611,7 @@ test "[주 판정] cluster 경계 · 단조성 · 행 경계 부등식 (§4.1g)"
             const src = term.rt.editor_hit_lines[r];
             if (src >= term.rt.editor_lines.len) continue;
             const lt = term.rt.editor_lines[src];
-            const li = term.rt.editor_document.opened.?.file.lines.line(src) orelse continue;
+            const li = term.rt.editorDocument().opened.?.file.lines.line(src) orelse continue;
 
             var last: ?usize = null;
             var first: ?usize = null;
@@ -24533,7 +24541,7 @@ test "EDIT1 타이핑이 문서에 들어간다 — 파생 상태까지 따라�
     try testing.expect(insertText(fx.session, term, "!"));
 
     // ⑴ 문서가 바뀌었다.
-    try testing.expectEqualStrings("alpha!\nbeta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("alpha!\nbeta\n", term.rt.editorDocument().opened.?.file.content);
     // ⑵ **줄 배열이 따라왔다** — 안 따라오면 렌더가 옛 슬라이스를 그린다.
     try testing.expectEqualStrings("alpha!", term.rt.editor_lines[0]);
     // ⑶ 커서가 삽입 뒤로 밀렸다.
@@ -24577,7 +24585,7 @@ test "EDIT2 커서가 여럿이면 모든 자리에 들어가고 뒤 커서가 �
 
     // 셋을 한꺼번에 바꾼다 — **선택이 있으면 타이핑이 그것을 대체한다.**
     try testing.expect(insertText(fx.session, term, "XY"));
-    try testing.expectEqualStrings("XY bb XY cc XY\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("XY bb XY cc XY\n", term.rt.editorDocument().opened.?.file.content);
 
     // 커서 셋이 각자 삽입 뒤에 선다.
     var iter = selections(term);
@@ -24637,7 +24645,7 @@ test "EDIT9 방향키로 커서가 한 자리에 몰리면 합쳐진다 — 안 
 
     // ⑵ 그래서 타이핑이 **한 번만** 들어간다 — 이것이 사용자가 본 증상의 반대편이다.
     try testing.expect(insertText(fx.session, term, "Z"));
-    try testing.expectEqualStrings("Zaa bb aa cc aa\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("Zaa bb aa cc aa\n", term.rt.editorDocument().opened.?.file.content);
 
     // ⑶ **특수 모션에서도 같다** — `⌘↓`(doc_end) 로 몰아도 합쳐진다. 두 경로가 같은 자리를 쓰므로
     //    한쪽만 재면 다른 쪽이 조용히 갈릴 수 있다.
@@ -24677,7 +24685,7 @@ test "EDIT9b 안 겹치는 커서는 이동해도 그대로다 — 병합이 과
     // 그리고 타이핑이 세 자리에 들어간다. **셋째는 개행 «뒤» 다** — focus 가 `\n`(14)에 있었고
     // 오른쪽 한 칸이 문서 끝(15)이다. 처음에 `...aa Z\n` 으로 적었다가 이 판정자에 걸렸다.
     try testing.expect(insertText(fx.session, term, "Z"));
-    try testing.expectEqualStrings("aa Zbb aa Zcc aa\nZ", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aa Zbb aa Zcc aa\nZ", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EDIT9c 셋 중 둘만 합쳐지면 남은 것과 primary 가 제자리다 — 승계가 틀리면 화면이 엉뚱한 곳을 따라간다 (§3.2)" {
@@ -24719,7 +24727,7 @@ test "EDIT9c 셋 중 둘만 합쳐지면 남은 것과 primary 가 제자리다 
 
     // ⑶ 타이핑이 **두 자리**에 들어간다.
     try testing.expect(insertText(fx.session, term, "Z"));
-    try testing.expectEqualStrings("Zaa bb aaZ cc aa\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("Zaa bb aaZ cc aa\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EDIT9d Shift+방향키로 겹친 «범위» 둘이 합쳐지면 넓어진 범위가 primary 에 실린다 (§3.2)" {
@@ -24760,7 +24768,7 @@ test "EDIT9d Shift+방향키로 겹친 «범위» 둘이 합쳐지면 넓어진 
     // 그 선택([4,8) = "b aa")을 타이핑이 통째로 대체한다. 좁아진 채였다면([4,6) = "b ")
     // `"aa bZaa cc aa\n"` 이 되어 **"aa" 가 살아남는다** — 사용자가 고른 것보다 적게 지운 것이다.
     try testing.expect(insertText(fx.session, term, "Z"));
-    try testing.expectEqualStrings("aa bZ cc aa\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aa bZ cc aa\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EDIT4 Backspace·Delete가 글자 단위로 지운다 — 깨진 UTF-8을 만들지 않는다 (§3.2)" {
@@ -24782,12 +24790,12 @@ test "EDIT4 Backspace·Delete가 글자 단위로 지운다 — 깨진 UTF-8을 
     // "한"(3 byte) 뒤에 caret을 두고 Backspace — **3 byte가 통째로** 빠져야 한다.
     term.rt.editor_selection = editor_selection.Selection.at(4);
     try testing.expect(deleteText(fx.session, term, true));
-    try testing.expectEqualStrings("ab\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("ab\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
 
     // Delete(앞으로)도 같은 규칙이다.
     try testing.expect(deleteText(fx.session, term, false));
-    try testing.expectEqualStrings("a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
 
     // **위 Delete는 ASCII라 byte 하나와 결과가 같다.** 앞으로 지우기를 byte 단위로 바꾼 뮤턴트가
     // 그래서 살아남았다(적대적 검증 2026-08-26) — 지워질 글자가 **여러 byte인 경우**를 따로 잰다.
@@ -24795,19 +24803,19 @@ test "EDIT4 Backspace·Delete가 글자 단위로 지운다 — 깨진 UTF-8을 
         const wide = try undoFixture(&fx, allocator, "e4b.txt", "a한b\n");
         wide.rt.editor_selection = editor_selection.Selection.at(1); // "한" 바로 앞
         try testing.expect(deleteText(fx.session, wide, false));
-        try testing.expectEqualStrings("ab\n", wide.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings("ab\n", wide.rt.editorDocument().opened.?.file.content);
         try testing.expectEqual(@as(usize, 1), wide.rt.editor_selection.?.focus);
     }
 
     // **문서 처음에서 Backspace는 아무 일도 안 한다** — 빈 편집이 쌓이면 undo가 헛돈다.
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(!deleteText(fx.session, term, true));
-    try testing.expectEqualStrings("a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
 
     // 선택이 있으면 **방향과 무관하게** 그 선택을 지운다.
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 1);
     try testing.expect(deleteText(fx.session, term, false));
-    try testing.expectEqualStrings("\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EDIT5 Enter가 줄을 나누고 줄 배열이 따라온다 (§3.3)" {
@@ -24828,7 +24836,7 @@ test "EDIT5 Enter가 줄을 나누고 줄 배열이 따라온다 (§3.3)" {
     term.rt.editor_selection = editor_selection.Selection.at(3);
     try testing.expect(insertText(fx.session, term, "\n"));
 
-    try testing.expectEqualStrings("abc\ndef\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("abc\ndef\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(before_lines + 1, term.rt.editor_lines.len);
     try testing.expectEqualStrings("abc", term.rt.editor_lines[0]);
     try testing.expectEqualStrings("def", term.rt.editor_lines[1]);
@@ -24866,7 +24874,7 @@ test "EDIT6 파생 상태 갱신이 중간에 실패해도 렌더 스냅숏은 �
         // 실제로 하나 접어 둔다 — 접힌 것이 있어야 보이는 줄 배열이 생긴다.
         _ = toggleFoldHead(fx.session, term, 0);
 
-        const before = try backing.dupe(u8, term.rt.editor_document.opened.?.file.content);
+        const before = try backing.dupe(u8, term.rt.editorDocument().opened.?.file.content);
         defer backing.free(before);
 
         // 렌더가 굳혀 둔 상태를 흉내 낸다 — 지워지는지 보려면 0이 아니어야 한다.
@@ -24885,7 +24893,7 @@ test "EDIT6 파생 상태 갱신이 중간에 실패해도 렌더 스냅숏은 �
         term.rt.editor_selection = editor_selection.Selection.at(0);
         _ = insertText(fx.session, term, "z");
 
-        const content = term.rt.editor_document.opened.?.file.content;
+        const content = term.rt.editorDocument().opened.?.file.content;
         const changed = !std.mem.eql(u8, before, content);
         if (changed) {
             reached += 1;
@@ -25040,14 +25048,14 @@ test "CFL2 고르기는 «편집 하나»다 — 되돌리기 한 번에 마커�
         const term = try undoFixture(&fx, allocator, "conflict.txt", conflict_fixture);
 
         try testing.expect(acceptConflict(fx.session, term, 0, case.choice));
-        const doc = term.rt.editor_document.opened.?;
+        const doc = term.rt.editorDocument().opened.?;
         try testing.expectEqualStrings(case.want, doc.file.content);
         // **마커가 사라졌다** — 구간을 다시 훑으면 없다.
         try testing.expect(!maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines));
 
         // **되돌리기 한 번**에 통째로 돌아온다. 여러 편집으로 쪼갰다면 여기서 반쪽이 남는다.
         try testing.expect(undoEdit(fx.session, term));
-        try testing.expectEqualStrings(conflict_fixture, term.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings(conflict_fixture, term.rt.editorDocument().opened.?.file.content);
         try testing.expect(maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines));
     }
 }
@@ -25073,7 +25081,7 @@ test "CFL3 diff3 — «현재 것»이 base 를 안 데려온다 (제품 경계)
     try testing.expectEqual(@as(?u32, 2), term.rt.editor_conflicts[0].base);
 
     try testing.expect(acceptConflict(fx.session, term, 0, .current));
-    try testing.expectEqualStrings("ours\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("ours\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CFL4 마커가 «아닌» 줄에는 고르기가 안 붙는다 — 멀쩡한 파일이 충돌로 보이면 안 된다" {
@@ -25129,7 +25137,7 @@ test "CFL5 고르기 줄을 «실제로 눌러» 고친다 — 세 이름이 각
         // **제품 핸들러를 지난다** — `acceptConflict` 를 직접 부르면 그 위 층(좌표 → 어느 이름)이
         // 죽어 있어도 초록이다.
         try testing.expect(acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), x, y));
-        try testing.expectEqualStrings(case.want, term.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings(case.want, term.rt.editorDocument().opened.?.file.content);
     }
 }
 
@@ -25192,9 +25200,9 @@ test "CFL6 이름 «사이»와 글자 행은 고르기가 아니다 — 한 클
     const text_y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast((widget_row + 1) * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2)));
     try testing.expectEqual(@as(?AppSession.ConflictActionSpan, null), conflictActionAtPoint(term, xOf(geom, spans[0].from_col + 1), text_y));
     // 그리고 그 클릭으로는 문서가 안 바뀐다.
-    const before = term.rt.editor_document.opened.?.file.content.len;
+    const before = term.rt.editorDocument().opened.?.file.content.len;
     try testing.expect(!acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), xOf(geom, spans[0].from_col + 1), text_y));
-    try testing.expectEqual(before, term.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqual(before, term.rt.editorDocument().opened.?.file.content.len);
 }
 
 test "CFL7 마커 줄에만 밴드가 깔린다 — 어느 쪽도 편들지 않는다" {
@@ -25293,7 +25301,7 @@ test "CFL10 표가 «낡지 않는다» — 편집·같은 길이 편집·접힘
         defer fx.deinit(allocator);
         const term = try undoFixture(&fx, allocator, "c.txt", conflict_fixture);
         try testing.expectEqual(@as(usize, 1), conflictRegionCount(fx.session, term));
-        const at = std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "=======").?;
+        const at = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "=======").?;
         term.rt.editor_selection = editor_selection.Selection.at(at + 6);
         var changes = [_]maru.session.editor.delta.Change{.{ .start = at + 6, .end = at + 7, .text = "x" }};
         try testing.expect(applyEditAsOne(fx.session, term, &changes));
@@ -25360,7 +25368,7 @@ test "CFL13 구간이 여럿이면 «각각» 고르기가 서고, 고른 것만
     // **둘째만 고른다** — 첫째는 그대로 남아야 한다(인덱스가 밀리면 엉뚱한 것이 사라진다).
     try testing.expect(acceptConflict(fx.session, term, 1, .incoming));
     try testing.expectEqual(@as(usize, 1), conflictRegionCount(fx.session, term));
-    const after = term.rt.editor_document.opened.?.file.content;
+    const after = term.rt.editorDocument().opened.?.file.content;
     try testing.expect(std.mem.indexOf(u8, after, "a1") != null); // 첫 구간은 그대로
     try testing.expect(std.mem.indexOf(u8, after, "b2") != null); // 둘째는 들어온 것만
     try testing.expect(std.mem.indexOf(u8, after, "a2") == null);
@@ -25375,17 +25383,17 @@ test "CFL11 고를 수 «없는» 자리에서는 안 고친다 — 읽기 전�
     try testing.expectEqual(@as(usize, 1), conflictRegionCount(fx.session, term));
 
     // **읽기 전용이면 안 고친다.** 여기서 고치면 「못 고치는 파일」이라 적어 둔 그 계약이 깨진다.
-    term.rt.editor_document.opened.?.file.read_only = true;
-    const before = term.rt.editor_document.opened.?.file.content.len;
+    term.rt.editorDocument().opened.?.file.read_only = true;
+    const before = term.rt.editorDocument().opened.?.file.content.len;
     try testing.expect(!acceptConflict(fx.session, term, 0, .current));
-    try testing.expectEqual(before, term.rt.editor_document.opened.?.file.content.len);
-    term.rt.editor_document.opened.?.file.read_only = false;
+    try testing.expectEqual(before, term.rt.editorDocument().opened.?.file.content.len);
+    term.rt.editorDocument().opened.?.file.read_only = false;
 
     // **없는 구간 번호**도 안 고친다(늦은 클릭이 그 상태를 만든다). **바로 한 칸 넘는 값**으로 본다 —
     // 99 처럼 멀리 있는 값은 상한을 느슨하게 바꾼 변이도 그대로 걸러 낸다(적대적 검증 8회차).
     try testing.expect(!acceptConflict(fx.session, term, term.rt.editor_conflicts.len, .current));
     try testing.expect(!acceptConflict(fx.session, term, 99, .current));
-    try testing.expectEqual(before, term.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqual(before, term.rt.editorDocument().opened.?.file.content.len);
 
     // **비교 뷰에는 아예 안 붙는다.** 읽기 전용이고 좌우 두 문서라 「고르기」가 무엇을 고칠지 말할 수
     // 없다 — 붙으면 **고칠 수 있다고 거짓말하는 줄**이 뜬다. 표를 버리고 비교 상태를 세운 뒤 다시
@@ -25409,9 +25417,9 @@ test "CFL12 이미 있는 커서를 «안 뺏는다» — 누르는 것은 CodeL
 
     // 커서를 **구간 뒤**(마지막 줄)에 놓는다 — 편집이 그 자리를 앞으로 당기지만, 구간 머리로
     // **점프하지는 않아야** 한다.
-    const content_len = term.rt.editor_document.opened.?.file.content.len;
+    const content_len = term.rt.editorDocument().opened.?.file.content.len;
     term.rt.editor_selection = editor_selection.Selection.at(content_len - 1);
-    const region_start = term.rt.editor_document.opened.?.file.lines.line(term.rt.editor_conflicts[0].start).?.start;
+    const region_start = term.rt.editorDocument().opened.?.file.lines.line(term.rt.editor_conflicts[0].start).?.start;
 
     try testing.expect(acceptConflict(fx.session, term, 0, .current));
     const after = term.rt.editor_selection.?.start();
@@ -25425,7 +25433,7 @@ test "CFL12 이미 있는 커서를 «안 뺏는다» — 누르는 것은 CodeL
     defer fresh.deinit(allocator);
     const t2 = try undoFixture(&fresh, allocator, "c2.txt", conflict_fixture);
     ensureConflicts(fresh.session, t2);
-    const head = t2.rt.editor_document.opened.?.file.lines.line(t2.rt.editor_conflicts[0].start).?.start;
+    const head = t2.rt.editorDocument().opened.?.file.lines.line(t2.rt.editor_conflicts[0].start).?.start;
     try testing.expect(head > 0); // 공허 방지 — 구간이 첫 줄이면 0 과 구별이 안 된다
     t2.rt.editor_selection = null;
     try testing.expect(acceptConflict(fresh.session, t2, 0, .current));
@@ -25449,14 +25457,14 @@ test "CFL14 한쪽이 «빈» 충돌 — 고르면 그쪽이 통째로 사라진
         defer fx.deinit(allocator);
         const term = try undoFixture(&fx, allocator, "e.txt", empty_ours);
         try testing.expect(acceptConflict(fx.session, term, 0, .current)); // 빈 쪽을 고른다
-        try testing.expectEqualStrings("head\ntail\n", term.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings("head\ntail\n", term.rt.editorDocument().opened.?.file.content);
     }
     {
         var fx = try PaneFixture.init(allocator);
         defer fx.deinit(allocator);
         const term = try undoFixture(&fx, allocator, "e.txt", empty_ours);
         try testing.expect(acceptConflict(fx.session, term, 0, .both));
-        try testing.expectEqualStrings("head\ntheirs\ntail\n", term.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings("head\ntheirs\ntail\n", term.rt.editorDocument().opened.?.file.content);
     }
 }
 
@@ -25584,7 +25592,7 @@ test "CFL17 «진짜 마우스»로 눌러 고친다 — 본문 선택보다 먼
     const y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast(row * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2)));
 
     fx.session.mouse(1, x, y, 0, 0); // 왼쪽 버튼 down — 제품 경로 그대로
-    try testing.expectEqualStrings("fn greet() {\n  return \"theirs\";\n}\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("fn greet() {\n  return \"theirs\";\n}\n", term.rt.editorDocument().opened.?.file.content);
     // **선택이 시작되지 않았다** — 고르기가 먼저 가져갔다는 뜻이다(순서가 뒤집히면 드래그가 시작된다).
     try testing.expect(!fx.session.mouse_drag_selecting);
 }
@@ -25655,7 +25663,7 @@ test "CFL9 «진짜 git 이 낸» 파일 — 두 스타일 그대로 (재현 202
         try testing.expectEqual(@as(usize, 1), term.rt.editor_conflicts.len);
         // **두 스타일이 같은 답을 낸다** — diff3 의 원본 줄이 「현재 것」에 안 섞인다.
         try testing.expect(acceptConflict(fx.session, term, 0, .current));
-        try testing.expectEqualStrings(resolved, term.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings(resolved, term.rt.editorDocument().opened.?.file.content);
     }
 }
 
@@ -25688,7 +25696,7 @@ test "UNDO8 편집·되돌리기·다시하기를 섞어도 문서가 모델과 
 
     var step: usize = 0;
     while (step < 300) : (step += 1) {
-        const before = try allocator.dupe(u8, term.rt.editor_document.opened.?.file.content);
+        const before = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content);
         var keep_before = true;
         defer if (keep_before) allocator.free(before);
 
@@ -25696,7 +25704,7 @@ test "UNDO8 편집·되돌리기·다시하기를 섞어도 문서가 모델과 
             0...4 => { // 타이핑
                 // **묶음을 매번 끊는다** — 안 끊으면 모델이 "편집 하나 = 스택 하나"를 못 맞춘다.
                 breakUndoGroup(term);
-                const at = rand.uintAtMost(usize, term.rt.editor_document.opened.?.file.content.len);
+                const at = rand.uintAtMost(usize, term.rt.editorDocument().opened.?.file.content.len);
                 term.rt.editor_selection = editor_selection.Selection.at(at);
                 const texts = [_][]const u8{ "a", "bb", "\n", "한" };
                 if (insertText(fx.session, term, texts[rand.uintLessThan(usize, texts.len)])) {
@@ -25708,7 +25716,7 @@ test "UNDO8 편집·되돌리기·다시하기를 섞어도 문서가 모델과 
             },
             5, 6 => { // 지우기
                 breakUndoGroup(term);
-                const len = term.rt.editor_document.opened.?.file.content.len;
+                const len = term.rt.editorDocument().opened.?.file.content.len;
                 if (len > 0) {
                     const at = 1 + rand.uintLessThan(usize, len);
                     term.rt.editor_selection = editor_selection.Selection.at(at);
@@ -25726,7 +25734,7 @@ test "UNDO8 편집·되돌리기·다시하기를 섞어도 문서가 모델과 
                 if (ok) {
                     const want = undo_model.pop().?;
                     defer allocator.free(want);
-                    try testing.expectEqualStrings(want, term.rt.editor_document.opened.?.file.content);
+                    try testing.expectEqualStrings(want, term.rt.editorDocument().opened.?.file.content);
                     try redo_model.append(allocator, before);
                     keep_before = false;
                 }
@@ -25737,7 +25745,7 @@ test "UNDO8 편집·되돌리기·다시하기를 섞어도 문서가 모델과 
                 if (ok) {
                     const want = redo_model.pop().?;
                     defer allocator.free(want);
-                    try testing.expectEqualStrings(want, term.rt.editor_document.opened.?.file.content);
+                    try testing.expectEqualStrings(want, term.rt.editorDocument().opened.?.file.content);
                     try undo_model.append(allocator, before);
                     keep_before = false;
                 }
@@ -25745,7 +25753,7 @@ test "UNDO8 편집·되돌리기·다시하기를 섞어도 문서가 모델과 
         }
 
         // 매 걸음 파생 상태가 성립한다 — 줄 배열이 문서와 같은 줄 수인가.
-        const doc = term.rt.editor_document.opened.?;
+        const doc = term.rt.editorDocument().opened.?;
         try testing.expectEqual(doc.file.lineCount(), term.rt.editor_lines.len);
     }
 }
@@ -25771,7 +25779,7 @@ test "SAVE1 편집한 내용이 디스크에 실제로 남는다 (§3.5)" {
     try testing.expectEqualStrings("alpha EDITED\nbeta\n", on_disk);
 
     // 저장 뒤에도 문서가 그대로다 — 다시 읽지 않으므로 외부 변경을 조용히 삼키지 않는다.
-    try testing.expectEqualStrings("alpha EDITED\nbeta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("alpha EDITED\nbeta\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "SAVE2 연 그대로의 파일 속성이 디스크에 되돌아간다 (§3.5)" {
@@ -25825,7 +25833,7 @@ test "SAVE3 읽기 전용은 저장을 거절하고 파일을 건드리지 않�
     // 편집을 먼저 하고(쓸 내용이 있게) 읽기 전용으로 만든다.
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "Z"));
-    term.rt.editor_document.opened.?.file.read_only = true;
+    term.rt.editorDocument().opened.?.file.read_only = true;
 
     try testing.expectError(error.ReadOnly, saveDocument(fx.session, term));
     const on_disk = try fx.dir.dir.readFileAlloc(io, "save4.txt", allocator, .limited(4096));
@@ -25844,10 +25852,10 @@ test "UNDO1 되돌리면 문서와 커서가 편집 전으로 간다 (§3.3)" {
 
     term.rt.editor_selection = editor_selection.Selection.at(5);
     try testing.expect(insertText(fx.session, term, " world"));
-    try testing.expectEqualStrings("hello world\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("hello world\n", term.rt.editorDocument().opened.?.file.content);
 
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("hello\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("hello\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
     // 줄 배열도 따라왔다 — 안 따라오면 렌더가 없는 글자를 그린다.
     try testing.expectEqualStrings("hello", term.rt.editor_lines[0]);
@@ -25869,11 +25877,11 @@ test "UNDO2 연속 타이핑은 한 묶음이라 undo 한 번에 함께 돌아�
     try testing.expect(insertText(fx.session, term, "a"));
     try testing.expect(insertText(fx.session, term, "b"));
     try testing.expect(insertText(fx.session, term, "c"));
-    try testing.expectEqualStrings("xabc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("xabc\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 번**에 셋 다 돌아간다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("x\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("x\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "UNDO9 타이핑하다 지우면 묶음이 끊긴다 — 연산 종류 변경 (§3.3)" {
@@ -25891,16 +25899,16 @@ test "UNDO9 타이핑하다 지우면 묶음이 끊긴다 — 연산 종류 변�
 
     term.rt.editor_selection = editor_selection.Selection.at(2);
     try testing.expect(insertText(fx.session, term, "12"));
-    try testing.expectEqualStrings("AB12\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("AB12\n", term.rt.editorDocument().opened.?.file.content);
 
     // 종류가 바뀐다 — 여기서 묶음이 끊겨야 한다.
     try testing.expect(deleteText(fx.session, term, true));
-    try testing.expectEqualStrings("AB1\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("AB1\n", term.rt.editorDocument().opened.?.file.content);
 
     // **끊겼으면** undo 한 번이 지우기만 되돌린다. 안 끊겼으면 삽입까지 함께 돌아가 "AB\n"이 된다 —
     // 길이가 셋으로 갈리므로 애매하지 않다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("AB12\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("AB12\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "UNDO10 손을 뗐다 다시 치면 묶음이 끊긴다 — 시간 경과 (§3.3)" {
@@ -25916,13 +25924,13 @@ test "UNDO10 손을 뗐다 다시 치면 묶음이 끊긴다 — 시간 경과 (
     try testing.expect(insertText(fx.session, term, "1"));
 
     // 간격을 넘긴다(경계보다 확실히 크게).
-    term.rt.editor_document.history.last_edit_ms -|= undo_group_gap_ms + 50;
+    term.rt.editorDocument().history.last_edit_ms -|= undo_group_gap_ms + 50;
     try testing.expect(insertText(fx.session, term, "2"));
-    try testing.expectEqualStrings("AB12\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("AB12\n", term.rt.editorDocument().opened.?.file.content);
 
     // 끊겼으므로 뒤에 친 것만 돌아간다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("AB1\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("AB1\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "UNDO3 커서가 움직이면 묶음이 끊긴다 — 클릭 전 타이핑은 남는다 (§3.3)" {
@@ -25941,14 +25949,14 @@ test "UNDO3 커서가 움직이면 묶음이 끊긴다 — 클릭 전 타이핑�
     breakUndoGroup(term);
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "2"));
-    try testing.expectEqualStrings("2A1B\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("2A1B\n", term.rt.editorDocument().opened.?.file.content);
 
     // 첫 undo는 **뒤엣것만** 되돌린다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("A1B\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("A1B\n", term.rt.editorDocument().opened.?.file.content);
     // 두 번째가 앞엣것을 되돌린다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("AB\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("AB\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "UNDO4 되돌린 것을 다시 할 수 있다 (§3.3)" {
@@ -25961,10 +25969,10 @@ test "UNDO4 되돌린 것을 다시 할 수 있다 (§3.3)" {
     term.rt.editor_selection = editor_selection.Selection.at(4);
     try testing.expect(insertText(fx.session, term, "!"));
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("base\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("base\n", term.rt.editorDocument().opened.?.file.content);
 
     try testing.expect(redoEdit(fx.session, term));
-    try testing.expectEqualStrings("base!\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("base!\n", term.rt.editorDocument().opened.?.file.content);
     // 더 다시 할 것이 없으면 거절한다.
     try testing.expect(!redoEdit(fx.session, term));
 }
@@ -25984,11 +25992,11 @@ test "UNDO5 되돌린 뒤 새로 편집하면 redo가 버려진다 (§3.3)" {
 
     breakUndoGroup(term);
     try testing.expect(insertText(fx.session, term, "B"));
-    try testing.expectEqualStrings("seedB\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("seedB\n", term.rt.editorDocument().opened.?.file.content);
 
     // redo 스택이 비었다.
     try testing.expect(!redoEdit(fx.session, term));
-    try testing.expectEqualStrings("seedB\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("seedB\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "UNDO6 멀티커서 편집은 undo 한 번에 전부 돌아간다 (§3.3)" {
@@ -26006,11 +26014,11 @@ test "UNDO6 멀티커서 편집은 undo 한 번에 전부 돌아간다 (§3.3)" 
     try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
 
     try testing.expect(insertText(fx.session, term, "ZZ"));
-    try testing.expectEqualStrings("ZZ bb ZZ cc ZZ\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("ZZ bb ZZ cc ZZ\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 번**에 셋 다 돌아간다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("aa bb aa cc aa\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aa bb aa cc aa\n", term.rt.editorDocument().opened.?.file.content);
 
     // 커서도 셋 그대로 돌아온다 — 편집 전 배열을 통째로 되살리는 것이 §3.3의 계약이다.
     var iter = selections(term);
@@ -26018,7 +26026,7 @@ test "UNDO6 멀티커서 편집은 undo 한 번에 전부 돌아간다 (§3.3)" 
 
     // redo도 한 번에 간다.
     try testing.expect(redoEdit(fx.session, term));
-    try testing.expectEqualStrings("ZZ bb ZZ cc ZZ\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("ZZ bb ZZ cc ZZ\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "UNDO7 스택 상한을 넘겨도 죽지 않고 새지 않는다 (§3.3)" {
@@ -26036,7 +26044,7 @@ test "UNDO7 스택 상한을 넘겨도 죽지 않고 새지 않는다 (§3.3)" {
         breakUndoGroup(term); // 항목마다 따로 쌓이게 한다
         _ = insertText(fx.session, term, "z");
     }
-    try testing.expect(term.rt.editor_document.history.undo_len <= 2048);
+    try testing.expect(term.rt.editorDocument().history.undo_len <= 2048);
     // 남은 것으로 되돌릴 수 있다(잘린 뒤에도 스택이 성립한다).
     try testing.expect(undoEdit(fx.session, term));
 }
@@ -26059,16 +26067,16 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     term.rt.editor_selection = editor_selection.Selection.at(0);
 
     // 문서를 읽기 전용으로 만든다(권한 대신 상태를 직접 세운다 — 권한은 OS에 달렸다).
-    term.rt.editor_document.opened.?.file.read_only = true;
+    term.rt.editorDocument().opened.?.file.read_only = true;
     try testing.expect(!insertText(fx.session, term, "x"));
-    try testing.expectEqualStrings("locked\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("locked\n", term.rt.editorDocument().opened.?.file.content);
 
     // **비교 뷰 축은 이름만 있고 재지 않았다**(적대적 검증 2026-08-26 — 이 판정자의 이름이
     // "읽기 전용 문서와 **비교 뷰**는"인데 비교 뷰 분기를 지운 뮤턴트가 살아남았다).
     //
     // 비교 뷰는 좌우 **두 축**이라 커서 offset 하나로는 어디를 가리키는지 정해지지 않는다(§4.1g).
     // 편집을 받으면 왼쪽 문서에 들어가고 화면은 오른쪽을 그리는 식으로 어긋난다.
-    term.rt.editor_document.opened.?.file.read_only = false;
+    term.rt.editorDocument().opened.?.file.read_only = false;
     // **caret을 지울 것이 있는 자리에 둔다.** 문서 처음에 두면 `deleteText`가 비교 뷰 때문이
     // 아니라 "지울 것이 없어서" false를 내고, 그러면 이 판정자가 비교 뷰를 재는 척만 한다
     // (적대적 검증 2026-08-26 — 그 상태로 뮤턴트가 살아남았다).
@@ -26078,7 +26086,7 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     // 없어서" false를 내고, 그러면 그 축을 재는 척만 한다(적대적 검증 2026-08-26 — 그 상태로
     // 뮤턴트가 두 번 살아남았다).
     try testing.expect(insertText(fx.session, term, "Q"));
-    const after_edit = try allocator.dupe(u8, term.rt.editor_document.opened.?.file.content);
+    const after_edit = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(after_edit);
 
     term.rt.editor_diff = .{}; // 네 상태 중 `loading` — 문서는 그대로 열려 있다
@@ -26096,7 +26104,7 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     // 옮기면 화면은 오른쪽을 그리는데 왼쪽 문서 기준으로 움직인다.
     try testing.expect(!moveCarets(fx.session, term, .char_right, false));
     try testing.expect(!moveCarets(fx.session, term, .line_down, false));
-    try testing.expectEqualStrings(after_edit, term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(after_edit, term.rt.editorDocument().opened.?.file.content);
 }
 
 test "OPT1 ⌥클릭은 토글이다 — 더하고, 다시 찍으면 지운다 (§3.2c)" {
@@ -26201,9 +26209,9 @@ test "OPT2 primary 를 지우면 앞의 것이 잇는다 — 제품은 primary �
 
     // **undo 묶음을 끊는다**(§3.3) — 커서가 편집 아닌 이유로 움직였다. 안 끊으면 클릭 뒤 친 글자를
     // 되돌릴 때 클릭 **전** 타이핑까지 함께 사라진다(변이 O14).
-    term.rt.editor_document.history.last_edit_kind = .insert;
+    term.rt.editorDocument().history.last_edit_kind = .insert;
     toggleCursorAt(fx.session, term, 15);
-    try testing.expectEqual(@as(@TypeOf(term.rt.editor_document.history.last_edit_kind), .none), term.rt.editor_document.history.last_edit_kind);
+    try testing.expectEqual(@as(@TypeOf(term.rt.editorDocument().history.last_edit_kind), .none), term.rt.editorDocument().history.last_edit_kind);
 }
 
 test "OPT3 게이트 — 비교 뷰·읽기 전용·커서 없음 (§3.2c)" {
@@ -26229,10 +26237,10 @@ test "OPT3 게이트 — 비교 뷰·읽기 전용·커서 없음 (§3.2c)" {
     term.rt.editor_diff = null;
 
     // ⑵ **읽기 전용에서는 선다** — 고르는 것은 문서를 안 바꾸고 복사가 주된 쓰임이다(§3.4).
-    term.rt.editor_document.opened.?.file.read_only = true;
+    term.rt.editorDocument().opened.?.file.read_only = true;
     toggleCursorAt(fx.session, term, 4);
     try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
-    term.rt.editor_document.opened.?.file.read_only = false;
+    term.rt.editorDocument().opened.?.file.read_only = false;
 
     // ⑶ **커서가 아예 없으면 하나 세운다** — 지울 것이 없다.
     clearExtraSelections(fx.session, term);
@@ -26445,7 +26453,7 @@ test "COL7 키보드 확장 — from 은 고정이고 오른쪽 상한은 가장
     // ⑸ **문서 끝에서 멈춘다.** 마지막 개행 뒤 빈 줄도 한 줄이라 `lineCount() - 1` 이 끝이다.
     guard = 0;
     while (guard < 20) : (guard += 1) _ = columnSelectStep(fx.session, term, .down);
-    const doc = term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = term.rt.editorDocument().opened orelse return error.NoDoc;
     try testing.expectEqual(@as(u32, @intCast(doc.file.lines.lineCount() - 1)), term.rt.editor_column_anchor.?.to_row);
 }
 
@@ -26595,7 +26603,7 @@ test "AC1 위/아래로 커서가 늘고 원본이 남는다 — 선택 모양�
 
     // ③ **문서 끝에서는 안 는다** — clamp 하면 원본과 겹쳐 병합이 지운다(§3.2b).
     clearExtraSelections(fx.session, term);
-    const content_len = term.rt.editor_document.opened.?.file.content.len;
+    const content_len = term.rt.editorDocument().opened.?.file.content.len;
     term.rt.editor_selection = editor_selection.Selection.at(content_len);
     try testing.expect(!addCursorVertically(fx.session, term, true));
     try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
@@ -26671,8 +26679,8 @@ test "AC2 게이트 넷 — 편집기 아님·비교 뷰·문서 없음·커서 
 
     // ④ **읽기 전용에서는 선다** — 문서를 안 바꾸고 멀티 커서 복사는 뜻이 있다(§3.4)
     term.rt.editor_selection = editor_selection.Selection.at(0);
-    term.rt.editor_document.opened.?.file.read_only = true;
-    defer term.rt.editor_document.opened.?.file.read_only = false;
+    term.rt.editorDocument().opened.?.file.read_only = true;
+    defer term.rt.editorDocument().opened.?.file.read_only = false;
     try testing.expect(addCursorVertically(fx.session, term, true));
 }
 
@@ -27095,14 +27103,14 @@ test "DHS8 편집 뒤 프레임을 그려도 가로가 안 되감긴다 — 상�
     // 내려간다 — 첫 줄에 두면 편집 뒤 primary 가 긴 줄 쪽이 되어 「primary 만 센다」 변이가 산다
     // (실측: 변이 K4 가 1회차에서 그렇게 살았다. 픽스처가 두 뜻을 안 가른 자리다).
     const long_line = doc_lines: {
-        const idx = term.rt.editor_document.opened.?.file.lines.lineAt(6);
-        break :doc_lines term.rt.editor_document.opened.?.file.lines.line(idx).?;
+        const idx = term.rt.editorDocument().opened.?.file.lines.lineAt(6);
+        break :doc_lines term.rt.editorDocument().opened.?.file.lines.line(idx).?;
     };
     const extras = try allocator.alloc(editor_selection.Selection, 1);
     extras[0] = editor_selection.Selection.at(long_line.contentEnd()); // 긴 줄 끝 → 나머지가 된다
     clearExtraSelections(fx.session, term); // 있던 것부터 거둔다(빈 슬라이스면 무동작)
     term.rt.editor_extra_selections = extras; // 세션이 자기 allocator 로 거둔다(픽스처와 같은 것)
-    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.content.len); // 문서 끝(짧은 줄)
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.content.len); // 문서 끝(짧은 줄)
     const before_multi = term.rt.editor_max_cols;
     if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
     if (term.rt.editor_selection.?.focus <= long_line.contentEnd()) return error.PrimaryLandedOnLongLine;
@@ -27135,7 +27143,7 @@ test "DHS8 편집 뒤 프레임을 그려도 가로가 안 되감긴다 — 상�
     setEditorTop(fx.session, term, 20, "test");
     const kept_line = term.rt.editor_first_line;
     if (kept_line == 0) return error.VerticalDidNotScroll;
-    const visible_line = term.rt.editor_document.opened.?.file.lines.line(kept_line + 1).?;
+    const visible_line = term.rt.editorDocument().opened.?.file.lines.line(kept_line + 1).?;
     term.rt.editor_selection = editor_selection.Selection.at(visible_line.start);
     if (!insertText(fx.session, term, "Z")) return error.InsertRejected;
     try testing.expectEqual(kept_line, term.rt.editor_first_line);
@@ -27145,7 +27153,7 @@ test "DHS8 편집 뒤 프레임을 그려도 가로가 안 되감긴다 — 상�
     clearExtraSelections(fx.session, term);
     term.rt.editor_tab_width = 8;
     term.rt.editor_max_cols = 5; // 탭 한 칸(8열)보다 작게 — 그래야 답이 탭 폭으로 갈린다
-    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.content.len);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.content.len);
     if (!insertText(fx.session, term, "\t")) return error.InsertRejected;
     try testing.expectEqual(@as(u32, 8), term.rt.editor_max_cols);
 
@@ -27282,7 +27290,7 @@ test "PROMO1 승격이 어느 할당에서 실패해도 뷰가 성하다 — 그
     }
     const term = try undoFixture(&fx, allocator, "promo1.zig", doc.items);
     term.rt.editor_wrap = false;
-    const d = term.rt.editor_document.opened orelse return error.NoDoc;
+    const d = term.rt.editorDocument().opened orelse return error.NoDoc;
     term.rt.editor_syntax.deinit(allocator);
     term.rt.editor_semantic.deinit(allocator);
     term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
@@ -27557,7 +27565,7 @@ test "L2C7 편집 뒤 첫 접힘도 문서를 다시 «훑지 않는다» (제�
 
     // **상한을 정하는 그 줄의 끝에 한 글자**를 친다. 짧은 줄을 고치면 상한이 안 바뀌어 「캐시가
     // 산다」와 「값이 맞다」가 겹친다 — 여기서는 **편집한 값이 접힘 왕복을 건너오는지**를 본다.
-    const content = term.rt.editor_document.opened.?.file.content;
+    const content = term.rt.editorDocument().opened.?.file.content;
     const xs = std.mem.indexOf(u8, content, "xxxxxxxxxx") orelse return error.FixtureMissingLongLine;
     var at = xs;
     while (at < content.len and content[at] == 'x') at += 1;
@@ -27626,16 +27634,16 @@ test "L2C9 되돌리기도 «범위를 안다» — 한 묶음의 앞끝과 꼬�
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
     const lines_before = term.rt.editor_lines.len;
-    const undo_before = term.rt.editor_document.history.undo_len;
+    const undo_before = term.rt.editorDocument().history.undo_len;
 
     // **한 묶음 안에 항목 여럿** — 묶음을 안 끊고 문서의 **서로 다른 자리**를 친다. 그래야 각
     // 적용이 그 뒤를 밀고, 나이브한 합치기가 어긋난다.
-    const content_len = term.rt.editor_document.opened.?.file.content.len;
+    const content_len = term.rt.editorDocument().opened.?.file.content.len;
     term.rt.editor_selection = editor_selection.Selection.at(content_len - 2);
     if (!insertText(fx.session, term, "WWWW")) return error.InsertRejected;
     term.rt.editor_selection = editor_selection.Selection.at(0);
     if (!insertText(fx.session, term, "VVV")) return error.InsertRejected;
-    if (term.rt.editor_document.history.undo_len < undo_before + 2) return error.FixtureNotOneGroup; // 항목이 여럿이어야 한다
+    if (term.rt.editorDocument().history.undo_len < undo_before + 2) return error.FixtureNotOneGroup; // 항목이 여럿이어야 한다
     const typed_first = term.rt.editor_line_cols[0];
 
     // 되돌린다 — 한 번에 그 묶음 전부.
@@ -27710,7 +27718,7 @@ test "SYNU1 되돌리기의 «증분» 통지가 전체 재파싱과 같은 색�
     // 트리를 거의 안 흔들어, `old_end` 를 틀리게 준 변이도 **같은 색을 낸다**(적대적 검증 Z4 가 그렇게
     // 살아남았다). 그래서 **짝이 안 맞는 따옴표**를 넣는다 — 그 뒤가 통째로 문자열로 읽히므로,
     // 되돌릴 때 무효화 범위가 조금만 좁아도 옛 해석이 남는다.
-    const len0 = term.rt.editor_document.opened.?.file.content.len;
+    const len0 = term.rt.editorDocument().opened.?.file.content.len;
     term.rt.editor_selection = editor_selection.Selection.at(len0 - 1);
     if (!insertText(fx.session, term, "\n// 꼬리 주석\n")) return error.InsertRejected;
     term.rt.editor_selection = editor_selection.Selection.at(0);
@@ -27732,7 +27740,7 @@ test "SYNU1 되돌리기의 «증분» 통지가 전체 재파싱과 같은 색�
     try colorDigest(fx.session, term, &after, allocator);
 
     // **기준: 같은 문서를 통째로 다시 판 것.**
-    syntax_color.reparse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+    syntax_color.reparse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
     try colorDigest(fx.session, term, &truth, allocator);
 
     try testing.expectEqualStrings(truth.items, after.items);
@@ -27743,7 +27751,7 @@ test "SYNU1 되돌리기의 «증분» 통지가 전체 재파싱과 같은 색�
     // 다시 하기도 같은 자리를 지난다.
     if (!redoEdit(fx.session, term)) return error.RedoRejected;
     try colorDigest(fx.session, term, &after, allocator);
-    syntax_color.reparse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+    syntax_color.reparse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
     try colorDigest(fx.session, term, &truth, allocator);
     try testing.expectEqualStrings(truth.items, after.items);
 }
@@ -27786,14 +27794,14 @@ test "SYNU2 되돌리기를 섞어도 색이 전체 재파싱과 같다 (상태 
 
     var step: usize = 0;
     while (step < 120) : (step += 1) {
-        const len = term.rt.editor_document.opened.?.file.content.len;
+        const len = term.rt.editorDocument().opened.?.file.content.len;
         switch (rand.uintLessThan(u8, 10)) {
             // **구조를 흔드는 글자를 넣는다** — 짝이 안 맞는 따옴표·괄호·주석 여는 표시는 그 뒤를
             // 통째로 다르게 읽게 만든다. 평범한 글자만 넣으면 트리가 거의 안 흔들려 못 가른다.
             0...5 => {
                 breakUndoGroup(term);
                 for (0..1 + rand.uintLessThan(usize, 3)) |_| {
-                    const at = rand.uintAtMost(usize, term.rt.editor_document.opened.?.file.content.len);
+                    const at = rand.uintAtMost(usize, term.rt.editorDocument().opened.?.file.content.len);
                     term.rt.editor_selection = editor_selection.Selection.at(at);
                     const texts = [_][]const u8{ "\"", "'", "//", "{", "}", "x", "\n", ")" };
                     _ = insertText(fx.session, term, texts[rand.uintLessThan(usize, texts.len)]);
@@ -27815,10 +27823,10 @@ test "SYNU2 되돌리기를 섞어도 색이 전체 재파싱과 같다 (상태 
         }
 
         // **매 단계 대조한다.** 증분으로 온 색과, 같은 문서를 통째로 다시 판 색.
-        while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+        while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
         try colorDigest(fx.session, term, &got, allocator);
-        syntax_color.reparse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
-        while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+        syntax_color.reparse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
+        while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
         try colorDigest(fx.session, term, &truth, allocator);
         if (!std.mem.eql(u8, truth.items, got.items)) {
             std.debug.print("SYNU2 step {d}: 증분과 재파싱의 색이 갈린다\n", .{step});
@@ -27860,7 +27868,7 @@ test "L2C10 편집을 섞어도 폭 캐시가 전체 재훑기와 같다 (상태
 
     var step: usize = 0;
     while (step < 400) : (step += 1) {
-        const len = term.rt.editor_document.opened.?.file.content.len;
+        const len = term.rt.editorDocument().opened.?.file.content.len;
         const rows_before = term.rt.editor_lines.len;
         const was_fresh = lineColsFresh(term);
         breakUndoGroup(term);
@@ -27940,7 +27948,7 @@ test "L2C11 «여러 줄» 을 한 번에 고쳐도 그 줄이 전부 다시 세
     const last_before = term.rt.editor_line_cols[lines_before - 1];
 
     // 문서 전체를 선택해 한 번에 토글한다 — **줄 수는 안 바뀐다**.
-    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, term.rt.editor_document.opened.?.file.content.len);
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, term.rt.editorDocument().opened.?.file.content.len);
     if (!toggleLineComment(fx.session, term)) return error.ToggleRejected;
     try testing.expectEqual(lines_before, term.rt.editor_lines.len);
     try testing.expect(lineColsFresh(term)); // 캐시가 살았고
@@ -27968,7 +27976,7 @@ test "MAXC1 가장 긴 줄이 «짧아지면» 상한도 준다 — 같은 프�
     if (before < 600) return error.FixtureNotWide;
 
     // **가장 긴 줄의 끝에서 지운다** — 그 줄이 상한을 정하므로 값이 실제로 줄어야 한다.
-    const content = term.rt.editor_document.opened.?.file.content;
+    const content = term.rt.editorDocument().opened.?.file.content;
     const xs = std.mem.indexOf(u8, content, "xxxxxxxxxx") orelse return error.FixtureMissingLongLine;
     var at = xs;
     while (at < content.len and content[at] == 'x') at += 1;
@@ -28621,7 +28629,7 @@ test "PROMO2 접을 것이 없는 문서는 «한 번만» 센다 — 표식이 
     }
     const term = try undoFixture(&fx, allocator, "promo2.zig", doc.items);
     term.rt.editor_wrap = false;
-    const d = term.rt.editor_document.opened orelse return error.NoDoc;
+    const d = term.rt.editorDocument().opened orelse return error.NoDoc;
     term.rt.editor_syntax.deinit(allocator);
     term.rt.editor_semantic.deinit(allocator);
     term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
@@ -28679,7 +28687,7 @@ test "PROMO3 승격하는 프레임은 방금 놓은 보이는 줄 표를 그리
     }
     const term = try undoFixture(&fx, allocator, "promo3.zig", doc.items);
     term.rt.editor_wrap = false;
-    const d = term.rt.editor_document.opened orelse return error.NoDoc;
+    const d = term.rt.editorDocument().opened orelse return error.NoDoc;
     term.rt.editor_syntax.deinit(allocator);
     term.rt.editor_semantic.deinit(allocator);
     term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
@@ -28742,7 +28750,7 @@ test "DHS16 구문 접힘 승격도 가로 상한·위치를 안 버린다 — �
     }
     const term = try undoFixture(&fx, allocator, "dhs16.zig", doc.items);
     term.rt.editor_wrap = false;
-    const d = term.rt.editor_document.opened orelse return error.NoDoc;
+    const d = term.rt.editorDocument().opened orelse return error.NoDoc;
     term.rt.editor_syntax.deinit(allocator);
     term.rt.editor_semantic.deinit(allocator);
     term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
@@ -28806,7 +28814,7 @@ fn marginFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u
 }
 
 fn lineStart(term: *Term, idx: usize) usize {
-    return term.rt.editor_document.opened.?.file.lines.line(idx).?.start;
+    return term.rt.editorDocument().opened.?.file.lines.line(idx).?.start;
 }
 
 test "SOFF1 세로 여백이 실제로 남는다 — caret 이 바닥에 붙기 전에 굴러간다 (제품 경계)" {
@@ -28839,7 +28847,7 @@ test "SOFF1 세로 여백이 실제로 남는다 — caret 이 바닥에 붙기 
 
     // **그리고 caret 아래로 정확히 `m` 줄이 남는다.** 굴러간 사실만 재면 「한 줄 더 굴렸다」 같은
     // 변이가 산다.
-    const row = visibleRowOfDocLine(term, @intCast(term.rt.editor_document.opened.?.file.lines.lineAt(term.rt.editor_selection.?.focus))) orelse return error.NoRow;
+    const row = visibleRowOfDocLine(term, @intCast(term.rt.editorDocument().opened.?.file.lines.lineAt(term.rt.editor_selection.?.focus))) orelse return error.NoRow;
     const last_visible = term.rt.editor_first_line + drawnDocLines(term) - 1;
     try testing.expectEqual(m, last_visible - row);
 }
@@ -29010,7 +29018,7 @@ test "SOFF6 가로 여백은 기본이 0 이고, 켜면 열이 남는다 (제품
         const before_left = term.rt.editor_first_col;
         if (before_left == 0) return error.FixtureNotScrolledRight;
         // 줄 머리보다 여백만큼 **뒤**에 caret 을 두면, 왼쪽 여백을 만들려고 그만큼 더 민다.
-        const long_line = term.rt.editor_document.opened.?.file.lines.line(1).?;
+        const long_line = term.rt.editorDocument().opened.?.file.lines.line(1).?;
         term.rt.editor_selection = editor_selection.Selection.at(long_line.start + 40);
         if (!moveCarets(fx.session, term, .char_left, false)) return error.MoveRejected;
         // caret 열은 39 다(0-based) — 여백 8 이면 31 열이 왼쪽 끝이 된다.
@@ -29035,7 +29043,7 @@ test "SOFF6 가로 여백은 기본이 0 이고, 켜면 열이 남는다 (제품
         // **왼쪽 가지도 같은 clamp 을 받는다.** 오른쪽에서만 재면 왼쪽이 설정값을 날것으로 쓰는
         // 변이가 산다(적대적 검증 9회차 V4) — 그러면 좁은 화면에서 왼쪽으로 갈 때마다 맨 앞으로
         // 튄다. 여백 8·화면 88 열에서는 `min(8, 43) = 8` 이라 두 답이 같아 안 갈린다.
-        const long_line2 = term.rt.editor_document.opened.?.file.lines.line(1).?;
+        const long_line2 = term.rt.editorDocument().opened.?.file.lines.line(1).?;
         term.rt.editor_selection = editor_selection.Selection.at(long_line2.start + 400);
         if (!moveCarets(fx.session, term, .char_left, false)) return error.MoveRejected;
         try testing.expectEqual(@as(u16, @intCast(399 - half)), term.rt.editor_first_col);
@@ -29131,7 +29139,7 @@ test "SOFF9 편집 경로도 여백을 지킨다 — 스냅숏이 비어 있는 
         term.rt.editor_selection = editor_selection.Selection.at(lineStart(term, term.rt.editor_first_line + rows_before - 2));
         if (!insertText(fx.session, term, "\n\n\n")) return error.InsertRejected;
         // **caret 행은 세지 말고 읽는다** — 다시 세면 그것이 판정자의 두 번째 출처가 된다.
-        const dl: u32 = @intCast(term.rt.editor_document.opened.?.file.lines.lineAt(term.rt.editor_selection.?.focus));
+        const dl: u32 = @intCast(term.rt.editorDocument().opened.?.file.lines.lineAt(term.rt.editor_selection.?.focus));
         const row = visibleRowOfDocLine(term, dl) orelse return error.NoRow;
         const want = @min((@as(usize, row) + 1 + half) -| rows_before, maxFirstLine(editorLines(term).len, rows_before, term));
         try testing.expectEqual(want, term.rt.editor_first_line);
@@ -29740,11 +29748,11 @@ test "MOV5 이동이 undo 묶음을 끊는다 — 옮겨서 친 글자는 따로
     try testing.expect(insertText(fx.session, term, "1"));
     try pressKey(&fx, .arrow_right, .{}); // 커서를 옮긴다 → 묶음이 끊긴다
     try testing.expect(insertText(fx.session, term, "2"));
-    try testing.expectEqualStrings("1A2B\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("1A2B\n", term.rt.editorDocument().opened.?.file.content);
 
     // undo 한 번은 **뒤에 친 것만** 되돌린다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("1AB\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("1AB\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "MOV7 수정자가 이동 단위를 가른다 — ⌥는 낱말, ⌘는 줄·문서 (§3.2)" {
@@ -29779,7 +29787,7 @@ test "MOV7 수정자가 이동 단위를 가른다 — ⌥는 낱말, ⌘는 줄
 
     // ⌘↓ 는 문서 끝, ⌘↑ 는 문서 처음이다 — 한 줄 이동이 아니다.
     try pressKey(&fx, .arrow_down, .{ .command = true });
-    try testing.expectEqual(term.rt.editor_document.opened.?.file.content.len, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(term.rt.editorDocument().opened.?.file.content.len, term.rt.editor_selection.?.focus);
     try pressKey(&fx, .arrow_up, .{ .command = true });
     try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
 
@@ -29804,28 +29812,28 @@ test "DIRTY1 저장과 다르면 dirty, undo로 같은 내용에 돌아오면 cl
     const term = try undoFixture(&fx, allocator, "dirty1.txt", "hello\n");
 
     // 여는 순간은 clean이다.
-    try testing.expect(!term.rt.editor_document.opened.?.isDirty());
-    const rev0 = term.rt.editor_document.opened.?.file.revision;
+    try testing.expect(!term.rt.editorDocument().opened.?.isDirty());
+    const rev0 = term.rt.editorDocument().opened.?.file.revision;
 
     term.rt.editor_selection = editor_selection.Selection.at(5);
     try testing.expect(insertText(fx.session, term, "!"));
-    try testing.expect(term.rt.editor_document.opened.?.isDirty());
+    try testing.expect(term.rt.editorDocument().opened.?.isDirty());
 
     // **되돌리면 clean이다 — 개정 번호는 더 높다.**
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("hello\n", term.rt.editor_document.opened.?.file.content);
-    try testing.expect(term.rt.editor_document.opened.?.file.revision > rev0); // 되감지 않는다
-    try testing.expect(!term.rt.editor_document.opened.?.isDirty()); // **그래도 clean**
+    try testing.expectEqualStrings("hello\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(term.rt.editorDocument().opened.?.file.revision > rev0); // 되감지 않는다
+    try testing.expect(!term.rt.editorDocument().opened.?.isDirty()); // **그래도 clean**
 
     // 다시 고치면 dirty, 저장하면 clean.
     try testing.expect(insertText(fx.session, term, "?"));
-    try testing.expect(term.rt.editor_document.opened.?.isDirty());
+    try testing.expect(term.rt.editorDocument().opened.?.isDirty());
     try saveDocument(fx.session, term);
-    try testing.expect(!term.rt.editor_document.opened.?.isDirty());
+    try testing.expect(!term.rt.editorDocument().opened.?.isDirty());
 
     // **저장 뒤 되돌리면 다시 dirty다** — 이제 디스크와 다르다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expect(term.rt.editor_document.opened.?.isDirty());
+    try testing.expect(term.rt.editorDocument().opened.?.isDirty());
 }
 
 test "CUT1 ⌘X가 잘라내고, 선택이 없으면 줄 전체다 (§3.4)" {
@@ -29841,18 +29849,18 @@ test "CUT1 ⌘X가 잘라내고, 선택이 없으면 줄 전체다 (§3.4)" {
     // ⑴ 선택이 있으면 그것만 잘라낸다.
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // "alpha"
     try pressKey(&fx, .{ .char = 'x' }, .{ .command = true });
-    try testing.expectEqualStrings("\nbeta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\nbeta\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqualStrings("alpha", fx.session.chrome_clipboard_write);
 
     // **한 묶음이라 undo 한 번에 돌아온다.**
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("alpha\nbeta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("alpha\nbeta\n", term.rt.editorDocument().opened.?.file.content);
 
     // ⑵ **선택이 없으면 줄 전체다** — 복사가 줄을 담으므로 지우는 것도 같은 범위여야
     //    "복사한 것이 사라졌다"가 성립한다.
     term.rt.editor_selection = editor_selection.Selection.at(2); // "alpha" 가운데
     try pressKey(&fx, .{ .char = 'x' }, .{ .command = true });
-    try testing.expectEqualStrings("beta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("beta\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqualStrings("alpha\n", fx.session.chrome_clipboard_write);
 
     // ⑶ **복사가 실패하면 지우지 않는다.** 지우고 나서 복사가 실패하면 사용자는 **클립보드에도
@@ -29876,7 +29884,7 @@ test "CUT1 ⌘X가 잘라내고, 선택이 없으면 줄 전체다 (§3.4)" {
             defer fx2.deinit(alloc);
             const t2 = undoFixture(&fx2, alloc, "cutfail.txt", "alpha\nbeta\n") catch continue;
             t2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
-            const before2 = allocator.dupe(u8, t2.rt.editor_document.opened.?.file.content) catch continue;
+            const before2 = allocator.dupe(u8, t2.rt.editorDocument().opened.?.file.content) catch continue;
             defer allocator.free(before2);
 
             defer if (!failing.has_induced_failure) {
@@ -29888,17 +29896,17 @@ test "CUT1 ⌘X가 잘라내고, 선택이 없으면 줄 전체다 (§3.4)" {
                 reached += 1;
                 // **실패했으면 문서가 그대로다** — 복사가 실패했는데 지우면 클립보드에도 없고
                 // 문서에도 없는 상태가 된다.
-                try testing.expectEqualStrings(before2, t2.rt.editor_document.opened.?.file.content);
+                try testing.expectEqualStrings(before2, t2.rt.editorDocument().opened.?.file.content);
             }
         }
         try testing.expect(reached > 0); // 한 번도 실패 안 했으면 이 갈래를 안 잰 것이다
     }
 
     // ⑷ 읽기 전용은 거절한다 — 복사만 하고 지우지 않는 것도 아니다(아예 무동작).
-    term.rt.editor_document.opened.?.file.read_only = true;
-    const before = term.rt.editor_document.opened.?.file.content;
+    term.rt.editorDocument().opened.?.file.read_only = true;
+    const before = term.rt.editorDocument().opened.?.file.content;
     try testing.expect(!cutSelection(fx.session, term));
-    try testing.expectEqualStrings(before, term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content);
 }
 
 test "COPY4 복사 기억은 세션과 함께 사라진다 — 새지 않는다 (§3.4)" {
@@ -29963,11 +29971,11 @@ test "PASTE6 ⌘V가 편집기 문서에 들어간다 — 배선 전체를 통�
 
     term.rt.editor_selection = editor_selection.Selection.at(1);
     fx.session.pasteText("XY", false); // ← Swift ⌘V가 부르는 자리
-    try testing.expectEqualStrings("aXYb\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aXYb\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 묶음이라 undo 한 번에 돌아간다**(§3.3).
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("ab\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("ab\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "PASTE1 조각 수가 커서 수와 같으면 하나씩 분배한다 (§3.4)" {
@@ -29989,11 +29997,11 @@ test "PASTE1 조각 수가 커서 수와 같으면 하나씩 분배한다 (§3.4
 
     // 같은 세 자리에 붙여넣으면 **제자리로 돌아온다**(왕복).
     try testing.expect(pasteText(fx.session, term, fx.session.chrome_clipboard_write));
-    try testing.expectEqualStrings("aa bb cc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aa bb cc\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 번의 붙여넣기는 undo 하나다**(§3.3) — 커서가 셋이어도.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("aa bb cc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aa bb cc\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "PASTE2 개수가 다르면 전부에 통짜로 넣는다 (§3.4)" {
@@ -30015,7 +30023,7 @@ test "PASTE2 개수가 다르면 전부에 통짜로 넣는다 (§3.4)" {
     clearExtraSelections(fx.session, term);
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(pasteText(fx.session, term, fx.session.chrome_clipboard_write));
-    try testing.expectEqualStrings("xx\nyyxx yy\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("xx\nyyxx yy\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "PASTE3 외부 클립보드는 항상 통짜다 (§3.4)" {
@@ -30035,7 +30043,7 @@ test "PASTE3 외부 클립보드는 항상 통짜다 (§3.4)" {
 
     // **다른 앱이 복사한 것**을 붙여넣는다 — 조각 수가 둘로 맞아 보여도 통짜여야 한다.
     try testing.expect(pasteText(fx.session, term, "PP\nQQ"));
-    try testing.expectEqualStrings("PP\nQQ PP\nQQ\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("PP\nQQ PP\nQQ\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "PASTE4 선택 없이 복사한 것은 줄 단위로 넣는다 (§3.4)" {
@@ -30055,7 +30063,7 @@ test "PASTE4 선택 없이 복사한 것은 줄 단위로 넣는다 (§3.4)" {
     // 둘째 줄 **가운데**에 caret을 두고 붙여넣는다 — 줄 중간이 아니라 **그 줄 앞**에 들어간다.
     term.rt.editor_selection = editor_selection.Selection.at(8); // "beta"의 't' 앞
     try testing.expect(pasteText(fx.session, term, fx.session.chrome_clipboard_write));
-    try testing.expectEqualStrings("alpha\nalpha\nbeta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("alpha\nalpha\nbeta\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "PASTE8 붙여넣기는 타이핑과 다른 묶음이고, 문서를 dirty로 만든다 (§3.3·file-panel.md §1)" {
@@ -30073,14 +30081,14 @@ test "PASTE8 붙여넣기는 타이핑과 다른 묶음이고, 문서를 dirty�
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "1"));
     try testing.expect(pasteText(fx.session, term, "X"));
-    try testing.expectEqualStrings("1XAB\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("1XAB\n", term.rt.editorDocument().opened.?.file.content);
 
     // **붙여넣기도 편집이라 dirty다.**
     try testing.expect(isDirty(term));
 
     // undo 한 번은 **붙여넣기만** 되돌린다 — 안 끊으면 "AB\n"까지 간다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("1AB\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("1AB\n", term.rt.editorDocument().opened.?.file.content);
 
     // **붙여넣기 뒤에 친 것도 새 묶음이다** — 끊기는 양쪽이다.
     //
@@ -30088,11 +30096,11 @@ test "PASTE8 붙여넣기는 타이핑과 다른 묶음이고, 문서를 dirty�
     // 그 배치에서 살아남았다(적대적 검증 2026-08-26). 붙여넣기 **바로 뒤에** 쳐야 갈린다.
     try testing.expect(pasteText(fx.session, term, "Y"));
     try testing.expect(insertText(fx.session, term, "2"));
-    const after_typing = term.rt.editor_document.opened.?.file.content;
+    const after_typing = term.rt.editorDocument().opened.?.file.content;
     try testing.expect(std.mem.indexOf(u8, after_typing, "Y2") != null);
     // undo 한 번은 **친 것만** 되돌린다 — 안 끊으면 붙여넣은 "Y"까지 함께 사라진다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expect(std.mem.indexOf(u8, term.rt.editor_document.opened.?.file.content, "Y") != null);
+    try testing.expect(std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "Y") != null);
 }
 
 test "PASTE7 줄 단위 붙여넣기에서 같은 줄 커서 여럿은 한 번만 넣는다 (§3.4)" {
@@ -30120,7 +30128,7 @@ test "PASTE7 줄 단위 붙여넣기에서 같은 줄 커서 여럿은 한 번�
 
     try testing.expect(pasteText(fx.session, term, fx.session.chrome_clipboard_write));
     // **한 번만** 들어간다 — 두 번이면 "alpha\nalpha\nalpha\nbeta\n"이 된다.
-    try testing.expectEqualStrings("alpha\nalpha\nbeta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("alpha\nalpha\nbeta\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "PASTE5 읽기 전용·비교 뷰는 붙여넣기를 거절한다 (§3.5·§4.1g)" {
@@ -30131,15 +30139,15 @@ test "PASTE5 읽기 전용·비교 뷰는 붙여넣기를 거절한다 (§3.5·�
     const term = try undoFixture(&fx, allocator, "paste5.txt", "locked\n");
     term.rt.editor_selection = editor_selection.Selection.at(0);
 
-    term.rt.editor_document.opened.?.file.read_only = true;
+    term.rt.editorDocument().opened.?.file.read_only = true;
     try testing.expect(!pasteText(fx.session, term, "x"));
-    term.rt.editor_document.opened.?.file.read_only = false;
+    term.rt.editorDocument().opened.?.file.read_only = false;
 
     term.rt.editor_diff = .{};
     try testing.expect(!pasteText(fx.session, term, "x"));
     term.rt.editor_diff = null;
 
-    try testing.expectEqualStrings("locked\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("locked\n", term.rt.editorDocument().opened.?.file.content);
     // 빈 클립보드도 무동작이다 — 빈 편집을 undo 스택에 쌓으면 undo가 헛돈다.
     try testing.expect(!pasteText(fx.session, term, ""));
 }
@@ -30213,12 +30221,12 @@ test "DIRTY7 빈 파일과 읽기 전용도 계약을 지킨다 (file-panel.md �
     try testing.expect(isDirty(empty));
     // 지워서 **다시 빈 내용**이 되면 clean이다 — 내용 동등성이므로.
     try testing.expect(deleteText(fx.session, empty, true));
-    try testing.expectEqualStrings("", empty.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("", empty.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(empty));
 
     // ⑵ 읽기 전용.
     const ro = try undoFixture(&fx, allocator, "ro2.txt", "locked\n");
-    ro.rt.editor_document.opened.?.file.read_only = true;
+    ro.rt.editorDocument().opened.?.file.read_only = true;
     ro.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(!insertText(fx.session, ro, "x")); // 편집이 거절된다
     try testing.expect(!isDirty(ro)); // **그래서 영원히 clean**
@@ -30384,14 +30392,14 @@ test "DIRTY4 저장이 실패하면 dirty가 남는다 — 실패를 성공으�
 
         try testing.expectError(error.WriteFailed, saveDocument(fx.session, term)); // 실패를 실패로 보고한다
         try testing.expect(isDirty(term)); // **dirty가 남는다**
-        try testing.expectEqualStrings("hello!\n", term.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings("hello!\n", term.rt.editorDocument().opened.?.file.content);
     }
 
     // ⑵ **파일이 사라진 경우**도 같다 — 열기에서 실패하는 다른 갈래다.
     try fx.dir.dir.deleteFile(io, "dirty4.txt");
     try testing.expectError(error.NotFound, saveDocument(fx.session, term));
     try testing.expect(isDirty(term));
-    try testing.expectEqualStrings("hello!\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("hello!\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "DIRTY3 dirty면 제목에 점이 붙고, 저장하면 사라진다 (file-panel.md §1)" {
@@ -30481,13 +30489,13 @@ test "DIRTY2 BOM이 있는 파일도 저장 직후 clean이다 (§3.5)" {
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     const term = try undoFixture(&fx, allocator, "dirty2.txt", "\xEF\xBB\xBFhi\n");
-    try testing.expect(term.rt.editor_document.opened.?.file.format.has_bom); // 전제: 실제로 BOM 문서다
+    try testing.expect(term.rt.editorDocument().opened.?.file.format.has_bom); // 전제: 실제로 BOM 문서다
 
     term.rt.editor_selection = editor_selection.Selection.at(2);
     try testing.expect(insertText(fx.session, term, "!"));
-    try testing.expect(term.rt.editor_document.opened.?.isDirty());
+    try testing.expect(term.rt.editorDocument().opened.?.isDirty());
     try saveDocument(fx.session, term);
-    try testing.expect(!term.rt.editor_document.opened.?.isDirty());
+    try testing.expect(!term.rt.editorDocument().opened.?.isDirty());
 }
 
 test "MOV10 제품 열 변환이 L2 대역과 같은 계약을 쓴다 — 탭 안쪽 (§5.4)" {
@@ -30505,8 +30513,8 @@ test "MOV10 제품 열 변환이 L2 대역과 같은 계약을 쓴다 — 탭 �
 
     var pcm = productColumnMap(term);
     const map = pcm.map();
-    const line = term.rt.editor_document.opened.?.file.lines.line(0).?;
-    const text = term.rt.editor_document.opened.?.file.content[line.start..line.contentEnd()];
+    const line = term.rt.editorDocument().opened.?.file.lines.line(0).?;
+    const text = term.rt.editorDocument().opened.?.file.content[line.start..line.contentEnd()];
 
     // `MOT8`과 **같은 표**다 — 둘이 갈리면 여기서 잡힌다.
     try testing.expectEqual(@as(usize, 0), map.offsetOf(map.ctx, text, 0));
@@ -30544,7 +30552,7 @@ test "DEL1 ⌥⌫·⌘⌫가 낱말·줄 단위로 지운다 — 이동과 같�
     // ⑴ **⌥⌫ = 낱말 뒤로.** "bar" 끝(11)에서 누르면 "bar"가 사라진다.
     term.rt.editor_selection = editor_selection.Selection.at(11);
     try pressKey(&fx, .backspace, .{ .option = true });
-    try testing.expectEqualStrings("    foo \nnext\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("    foo \nnext\n", term.rt.editorDocument().opened.?.file.content);
 
     // **이동과 같은 자리인가** — 같은 시작점에서 `⌥←`가 가는 곳이 지운 범위의 시작이어야 한다.
     {
@@ -30562,7 +30570,7 @@ test "DEL1 ⌥⌫·⌘⌫가 낱말·줄 단위로 지운다 — 이동과 같�
     const t3 = try undoFixture(&fx, allocator, "del1c.txt", "    foo bar\nnext\n");
     t3.rt.editor_selection = editor_selection.Selection.at(7); // "foo" 뒤
     try pressKey(&fx, .backspace, .{ .command = true });
-    try testing.expectEqualStrings(" bar\nnext\n", t3.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(" bar\nnext\n", t3.rt.editorDocument().opened.?.file.content);
 
     // ⑵″ **이동과 갈린다** — 같은 자리에서 `⌘←` 는 smart home 이라 **첫 글자**(4)로 간다.
     // 이 단언이 없으면 「이동을 0열로 바꾸는」 변이가 살아남아 둘이 조용히 다시 붙는다.
@@ -30580,7 +30588,7 @@ test "DEL1 ⌥⌫·⌘⌫가 낱말·줄 단위로 지운다 — 이동과 같�
         const t = try undoFixture(&fx, allocator, "del1h.txt", "    foo bar\nnext\n");
         t.rt.editor_selection = editor_selection.Selection.at(2); // 들여쓰기 한가운데
         try pressKey(&fx, .backspace, .{ .command = true });
-        try testing.expectEqualStrings("  foo bar\nnext\n", t.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings("  foo bar\nnext\n", t.rt.editorDocument().opened.?.file.content);
     }
 
     // ⑵′ **줄 머리에서 ⌘⌫는 앞 줄과 합친다** — 안 그러면 죽은 키다(`⌘⌦`가 줄 끝에서 겪던 것과
@@ -30589,22 +30597,22 @@ test "DEL1 ⌥⌫·⌘⌫가 낱말·줄 단위로 지운다 — 이동과 같�
         const t = try undoFixture(&fx, allocator, "del1f.txt", "aa\nbb\n");
         t.rt.editor_selection = editor_selection.Selection.at(3); // "bb" 줄 머리
         try pressKey(&fx, .backspace, .{ .command = true });
-        try testing.expectEqualStrings("aabb\n", t.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings("aabb\n", t.rt.editorDocument().opened.?.file.content);
     }
 
     // ⑶ **⌥⌦ = 낱말 앞으로.**
     const t4 = try undoFixture(&fx, allocator, "del1d.txt", "foo bar\n");
     t4.rt.editor_selection = editor_selection.Selection.at(0);
     try pressKey(&fx, .delete, .{ .option = true });
-    try testing.expectEqualStrings("bar\n", t4.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("bar\n", t4.rt.editorDocument().opened.?.file.content);
 
     // ⑷ **⌘⌦ = 줄 끝까지.** 이미 줄 끝이면 개행을 먹는다(안 그러면 죽은 키다).
     const t5 = try undoFixture(&fx, allocator, "del1e.txt", "foo bar\nnext\n");
     t5.rt.editor_selection = editor_selection.Selection.at(4); // "bar" 앞
     try pressKey(&fx, .delete, .{ .command = true });
-    try testing.expectEqualStrings("foo \nnext\n", t5.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("foo \nnext\n", t5.rt.editorDocument().opened.?.file.content);
     try pressKey(&fx, .delete, .{ .command = true }); // 이미 줄 끝 → 개행을 먹는다
-    try testing.expectEqualStrings("foo next\n", t5.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("foo next\n", t5.rt.editorDocument().opened.?.file.content);
 }
 
 test "DEL2 선택이 있으면 단위와 무관하게 그 선택을 지운다 (§3.2)" {
@@ -30618,7 +30626,7 @@ test "DEL2 선택이 있으면 단위와 무관하게 그 선택을 지운다 (�
 
     term.rt.editor_selection = editor_selection.Selection.fromPoints(6, 10); // "beta"
     try pressKey(&fx, .backspace, .{ .option = true });
-    try testing.expectEqualStrings("alpha  gamma\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("alpha  gamma\n", term.rt.editorDocument().opened.?.file.content);
 
     // 커서가 여럿이어도 각자 자기 단위로 지운다.
     const t2 = try undoFixture(&fx, allocator, "del2b.txt", "aa bb cc\n");
@@ -30628,7 +30636,7 @@ test "DEL2 선택이 있으면 단위와 무관하게 그 선택을 지운다 (�
     t2.rt.editor_extra_selections = extras;
     try testing.expect(deleteBy(fx.session, t2, true, .word));
     // "bb"와 "cc"가 각자 사라지고 **앞 공백은 남는다** — 가 낱말 앞에서 멈추기 때문이다.
-    try testing.expectEqualStrings("aa  \n", t2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aa  \n", t2.rt.editorDocument().opened.?.file.content);
 }
 
 test "DEL3 문서 밖 커서는 문서 끝으로 접히고, 빈 문서는 무동작이다 (§3.2)" {
@@ -30645,7 +30653,7 @@ test "DEL3 문서 밖 커서는 문서 끝으로 접히고, 빈 문서는 무동
     const term = try undoFixture(&fx, allocator, "del3.txt", "ab\n");
 
     // **문서 밖**을 가리키게 만든다.
-    const len = term.rt.editor_document.opened.?.file.content.len;
+    const len = term.rt.editorDocument().opened.?.file.content.len;
     term.rt.editor_selection = editor_selection.Selection.fromPoints(len + 10, len + 20);
 
     // **문서 끝으로 접힌다.** `@min`이 양끝을 clamp하므로 caret이 문서 끝에 있는 것과 같아진다 —
@@ -30656,12 +30664,12 @@ test "DEL3 문서 밖 커서는 문서 끝으로 접히고, 빈 문서는 무동
     // 이유도 없다** — 중요한 것은 **죽지 않고 문서를 망가뜨리지 않는 것**이다.
     try testing.expect(!deleteBy(fx.session, term, false, .char)); // 문서 끝: 앞으로 지울 것이 없다
     try testing.expect(deleteBy(fx.session, term, true, .char)); // 뒤로: 마지막 글자
-    try testing.expectEqualStrings("ab", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("ab", term.rt.editorDocument().opened.?.file.content);
 
     // 낱말·줄 단위도 같은 축이다 — 죽지 않고, 남은 것을 정확히 지운다.
     term.rt.editor_selection = editor_selection.Selection.at(999);
     try testing.expect(deleteBy(fx.session, term, true, .word));
-    try testing.expectEqualStrings("", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("", term.rt.editorDocument().opened.?.file.content);
 
     // 빈 문서에서는 어느 단위로도 아무 일이 없다 — 빈 편집이 쌓이면 undo가 헛돈다.
     for ([_]DeleteUnit{ .char, .word, .line_edge }) |unit| {
@@ -30684,11 +30692,11 @@ test "DEL4 연속 낱말 삭제는 한 묶음이고, 타이핑이 끼면 끊긴�
     try testing.expect(deleteBy(fx.session, term, true, .word));
     try testing.expect(deleteBy(fx.session, term, true, .word));
     try testing.expect(deleteBy(fx.session, term, true, .word));
-    try testing.expectEqualStrings("\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 번**에 셋 다 돌아온다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("one two three\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("one two three\n", term.rt.editorDocument().opened.?.file.content);
 
     // **타이핑이 끼면 끊긴다** — 종류가 바뀌기 때문이다.
     term.rt.editor_selection = editor_selection.Selection.at(13);
@@ -30696,7 +30704,7 @@ test "DEL4 연속 낱말 삭제는 한 묶음이고, 타이핑이 끼면 끊긴�
     try testing.expect(insertText(fx.session, term, "X"));
     try testing.expect(deleteBy(fx.session, term, true, .word));
     try testing.expect(undoEdit(fx.session, term)); // 마지막 낱말 삭제만
-    try testing.expectEqualStrings("one two X\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("one two X\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "DEL5 한글·탭이 섞여도 단위 삭제가 깨진 UTF-8을 만들지 않는다 (§3.2·§3.8)" {
@@ -30710,12 +30718,12 @@ test "DEL5 한글·탭이 섞여도 단위 삭제가 깨진 UTF-8을 만들지 �
     const term = try undoFixture(&fx, allocator, "del5.txt", "\t한글 영어\n다음\n");
 
     // ⑴ 낱말 뒤로 — "영어"(6 byte)가 통째로 사라진다.
-    const content0 = term.rt.editor_document.opened.?.file.content;
+    const content0 = term.rt.editorDocument().opened.?.file.content;
     const nl = std.mem.indexOfScalar(u8, content0, '\n').?;
     term.rt.editor_selection = editor_selection.Selection.at(nl);
     try testing.expect(deleteBy(fx.session, term, true, .word));
-    try testing.expectEqualStrings("\t한글 \n다음\n", term.rt.editor_document.opened.?.file.content);
-    try testing.expect(std.unicode.utf8ValidateSlice(term.rt.editor_document.opened.?.file.content));
+    try testing.expectEqualStrings("\t한글 \n다음\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(std.unicode.utf8ValidateSlice(term.rt.editorDocument().opened.?.file.content));
 
     // ⑵ 줄 머리까지 — **탭(들여쓰기)도 함께** 지운다(0열, §3.2 — 2026-09-26).
     //
@@ -30723,18 +30731,18 @@ test "DEL5 한글·탭이 섞여도 단위 삭제가 깨진 UTF-8을 만들지 �
     // 0열이다. 탭은 **한 글자**라 UTF-8 경계와도 무관하고, 이 판정자가 재는 「깨진 UTF-8 을 안
     // 만든다」는 그대로 산다.
     const t2 = try undoFixture(&fx, allocator, "del5b.txt", "\t한글 영어\n");
-    const c2 = t2.rt.editor_document.opened.?.file.content;
+    const c2 = t2.rt.editorDocument().opened.?.file.content;
     t2.rt.editor_selection = editor_selection.Selection.at(std.mem.indexOfScalar(u8, c2, '\n').?);
     try testing.expect(deleteBy(fx.session, t2, true, .line_edge));
-    try testing.expectEqualStrings("\n", t2.rt.editor_document.opened.?.file.content);
-    try testing.expect(std.unicode.utf8ValidateSlice(t2.rt.editor_document.opened.?.file.content));
+    try testing.expectEqualStrings("\n", t2.rt.editorDocument().opened.?.file.content);
+    try testing.expect(std.unicode.utf8ValidateSlice(t2.rt.editorDocument().opened.?.file.content));
 
     // ⑶ 낱말 앞으로 — 한글 낱말 머리에서 눌러도 반쪽이 안 남는다.
     const t3 = try undoFixture(&fx, allocator, "del5c.txt", "한글 영어\n");
     t3.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(deleteBy(fx.session, t3, false, .word));
-    try testing.expectEqualStrings("영어\n", t3.rt.editor_document.opened.?.file.content);
-    try testing.expect(std.unicode.utf8ValidateSlice(t3.rt.editor_document.opened.?.file.content));
+    try testing.expectEqualStrings("영어\n", t3.rt.editorDocument().opened.?.file.content);
+    try testing.expect(std.unicode.utf8ValidateSlice(t3.rt.editorDocument().opened.?.file.content));
 }
 
 test "AID1 괄호를 치면 닫히고 caret이 가운데 선다 (§3.7)" {
@@ -30748,12 +30756,12 @@ test "AID1 괄호를 치면 닫히고 caret이 가운데 선다 (§3.7)" {
 
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "("));
-    try testing.expectEqualStrings("()\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("()\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus); // **가운데**
 
     // 이어서 치면 안에 들어간다.
     try testing.expect(insertText(fx.session, term, "x"));
-    try testing.expectEqualStrings("(x)\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("(x)\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "AID2 닫는 괄호를 다시 치면 지나간다 — 겹쳐 쓰지 않는다 (type-over §3.7)" {
@@ -30766,13 +30774,13 @@ test "AID2 닫는 괄호를 다시 치면 지나간다 — 겹쳐 쓰지 않는�
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "("));
     // `()`의 가운데에서 `)`를 치면 **하나 더 넣지 않고** caret만 넘어간다.
-    const undo_before = term.rt.editor_document.history.undo_len;
+    const undo_before = term.rt.editorDocument().history.undo_len;
     try testing.expect(insertText(fx.session, term, ")"));
     // **undo 스택이 안 늘었다.** 문서가 안 바뀐 편집을 쌓으면 되돌리기 한 번이 아무것도 안 하는
     // 것처럼 보인다 — 묶음이 그것을 가리므로(같은 종류·500ms 안이면 앞 편집과 한 묶음이 된다)
     // **문서 상태만으로는 안 드러난다**(적대적 검증 2026-08-27).
-    try testing.expectEqual(undo_before, term.rt.editor_document.history.undo_len);
-    try testing.expectEqualStrings("()\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqual(undo_before, term.rt.editorDocument().history.undo_len);
+    try testing.expectEqualStrings("()\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
 
     // **빈 편집이 쌓이지 않았다** — undo가 헛돌면 사용자가 되돌리기를 믿지 못한다.
@@ -30781,7 +30789,7 @@ test "AID2 닫는 괄호를 다시 치면 지나간다 — 겹쳐 쓰지 않는�
     // 아무것도 안 바꾸는 것처럼 보인다(적대적 검증 2026-08-27 — 그 갈래를 지운 뮤턴트가 살아남아
     // 여기까지 재게 됐다). 그래서 **문서 상태만이 아니라 되돌리기 횟수**를 잰다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("\n", term.rt.editor_document.opened.?.file.content); // **한 번**에 원래대로
+    try testing.expectEqualStrings("\n", term.rt.editorDocument().opened.?.file.content); // **한 번**에 원래대로
     try testing.expect(!undoEdit(fx.session, term)); // 더 되돌릴 것이 없다
 }
 
@@ -30794,11 +30802,11 @@ test "AID3 선택이 있으면 감싼다 — 고른 것을 지우지 않는다 (
 
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // "alpha"
     try testing.expect(insertText(fx.session, term, "\""));
-    try testing.expectEqualStrings("\"alpha\" beta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\"alpha\" beta\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 번의 감싸기는 undo 하나다** — 앞뒤 두 변경이지만 `delta.apply` 한 번이다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("alpha beta\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("alpha beta\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "AID4 붙여넣기·IME 확정은 보조를 타지 않는다 (§3.7)" {
@@ -30812,13 +30820,13 @@ test "AID4 붙여넣기·IME 확정은 보조를 타지 않는다 (§3.7)" {
 
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "((")); // 두 글자 = 보조 없음
-    try testing.expectEqualStrings("((\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("((\n", term.rt.editorDocument().opened.?.file.content);
 
     // 붙여넣기도 마찬가지다.
     const t2 = try undoFixture(&fx, allocator, "aid4b.txt", "\n");
     t2.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(pasteText(fx.session, t2, "("));
-    try testing.expectEqualStrings("(\n", t2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("(\n", t2.rt.editorDocument().opened.?.file.content);
 }
 
 test "AID6 커서마다 판단이 달라도 각자 제자리에 선다 (§3.7 × §9.1)" {
@@ -30841,7 +30849,7 @@ test "AID6 커서마다 판단이 달라도 각자 제자리에 선다 (§3.7 ×
     term.rt.editor_extra_selections = extras;
 
     try testing.expect(insertText(fx.session, term, ")"));
-    try testing.expectEqualStrings("a) b)\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a) b)\n", term.rt.editorDocument().opened.?.file.content);
 
     // 각자 제자리다 — 지나간 커서는 `)` **뒤**(2), 넣은 커서는 넣은 것 뒤(5).
     const a = term.rt.editor_selection.?.focus;
@@ -30868,17 +30876,17 @@ test "AID7 감싸기가 커서 여럿·역방향 선택에서도 맞는다 (§3.
     extras[0] = editor_selection.Selection.fromPoints(3, 5);
     term.rt.editor_extra_selections = extras;
     try testing.expect(insertText(fx.session, term, "("));
-    try testing.expectEqualStrings("(aa) (bb)\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("(aa) (bb)\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 번의 감싸기는 undo 하나다** — 커서가 둘이어도(§3.3).
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("aa bb\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aa bb\n", term.rt.editorDocument().opened.?.file.content);
 
     // ⑵ 역방향 선택도 같다.
     const t2 = try undoFixture(&fx, allocator, "aid7b.txt", "xyz\n");
     t2.rt.editor_selection = editor_selection.Selection.fromPoints(3, 0); // 뒤에서 앞으로
     try testing.expect(insertText(fx.session, t2, "["));
-    try testing.expectEqualStrings("[xyz]\n", t2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("[xyz]\n", t2.rt.editorDocument().opened.?.file.content);
 }
 
 test "AID8 다른 편집이 끼면 자동 닫기 표식이 낡지 않는다 (§3.7)" {
@@ -30897,17 +30905,17 @@ test "AID8 다른 편집이 끼면 자동 닫기 표식이 낡지 않는다 (§3
 
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "("));
-    try testing.expectEqualStrings("()\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("()\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(term.rt.editor_auto_closed_at != null);
 
     // **붙여넣기가 사이에 낀다** — 표식이 버려져야 한다.
     try testing.expect(pasteText(fx.session, term, "XY"));
-    try testing.expectEqualStrings("(XY)\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("(XY)\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(term.rt.editor_auto_closed_at == null);
 
     // Backspace는 **"Y"만** 지운다 — 표식이 남아 있었으면 ")"까지 함께 갔을 것이다.
     try testing.expect(deleteText(fx.session, term, true));
-    try testing.expectEqualStrings("(X)\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("(X)\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "AID9 문맥을 못 물어 생기는 한계를 못 박는다 (§3.7 저하 동작)" {
@@ -30925,16 +30933,16 @@ test "AID9 문맥을 못 물어 생기는 한계를 못 박는다 (§3.7 저하 
     // 문자열 **안**(따옴표 사이)에서 `(`를 친다 — 문맥을 알면 안 닫는 쪽이 낫지만 지금은 닫는다.
     term.rt.editor_selection = editor_selection.Selection.at(5);
     try testing.expect(insertText(fx.session, term, "("));
-    try testing.expectEqualStrings("s = \"()\"\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("s = \"()\"\n", term.rt.editorDocument().opened.?.file.content);
 
     // **읽기 전용·비교 뷰에서는 보조 이전에 편집 자체가 막힌다** — 보조가 그 문을 우회하지 않는다.
-    term.rt.editor_document.opened.?.file.read_only = true;
+    term.rt.editorDocument().opened.?.file.read_only = true;
     try testing.expect(!insertText(fx.session, term, "("));
-    term.rt.editor_document.opened.?.file.read_only = false;
+    term.rt.editorDocument().opened.?.file.read_only = false;
     term.rt.editor_diff = .{};
     try testing.expect(!insertText(fx.session, term, "("));
     term.rt.editor_diff = null;
-    try testing.expectEqualStrings("s = \"()\"\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("s = \"()\"\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "AID10 한글 주변과 Enter에서도 규칙이 그대로다 (§3.7 × §3.2)" {
@@ -30949,13 +30957,13 @@ test "AID10 한글 주변과 Enter에서도 규칙이 그대로다 (§3.7 × §3
     const t1 = try undoFixture(&fx, allocator, "aid10.txt", "한글\n");
     t1.rt.editor_selection = editor_selection.Selection.at(6);
     try testing.expect(insertText(fx.session, t1, "("));
-    try testing.expectEqualStrings("한글()\n", t1.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("한글()\n", t1.rt.editorDocument().opened.?.file.content);
 
     // ⑵ 한글 **앞**에서는 안 닫는다 — `(한글`을 의도한 것이지 `()한글`이 아니다.
     const t2 = try undoFixture(&fx, allocator, "aid10b.txt", "한글\n");
     t2.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, t2, "("));
-    try testing.expectEqualStrings("(한글\n", t2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("(한글\n", t2.rt.editorDocument().opened.?.file.content);
 
     // ⑶ `()` 사이 Enter는 **줄만 나눈다** — 자동 들여쓰기는 언어 판정(§5)이 서야 하고
     //    그때까지 계약 밖이다(§3.7이 문맥을 요구하는 자리와 같은 이유).
@@ -30963,7 +30971,7 @@ test "AID10 한글 주변과 Enter에서도 규칙이 그대로다 (§3.7 × §3
     t3.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, t3, "("));
     try testing.expect(insertText(fx.session, t3, "\n"));
-    try testing.expectEqualStrings("(\n)\n", t3.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("(\n)\n", t3.rt.editorDocument().opened.?.file.content);
 }
 
 test "AID11 커서가 많아도 재배치가 곱해지지 않는다 (§9.1 — 실측)" {
@@ -30992,9 +31000,9 @@ test "AID11 커서가 많아도 재배치가 곱해지지 않는다 (§9.1 — �
     term.rt.editor_extra_selections = extras;
 
     // **전부 지나간다** — 문서는 안 바뀌고 커서만 한 칸씩 간다.
-    const before_len = term.rt.editor_document.opened.?.file.content.len;
+    const before_len = term.rt.editorDocument().opened.?.file.content.len;
     try testing.expect(insertText(fx.session, term, ")"));
-    try testing.expectEqual(before_len, term.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqual(before_len, term.rt.editorDocument().opened.?.file.content.len);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(usize, n * 2), term.rt.editor_extra_selections[n - 2].focus);
 
@@ -31007,7 +31015,7 @@ test "AID11 커서가 많아도 재배치가 곱해지지 않는다 (§9.1 — �
     t2.rt.editor_extra_selections = ex2;
     try testing.expect(insertText(fx.session, t2, ")"));
     // 첫·셋째는 지나가고 둘째만 넣었다 — 길이가 정확히 1 늘었다.
-    try testing.expectEqual(before_len + 1, t2.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqual(before_len + 1, t2.rt.editorDocument().opened.?.file.content.len);
 }
 
 test "LN1 줄 삭제 — 마지막 줄은 앞 개행을 먹어 빈 줄을 안 남긴다 (§3.9a)" {
@@ -31019,12 +31027,12 @@ test "LN1 줄 삭제 — 마지막 줄은 앞 개행을 먹어 빈 줄을 안 �
     const term = try undoFixture(&fx, allocator, "ln1.zig", "a\nb\nc");
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(deleteLines(fx.session, term));
-    try testing.expectEqualStrings("b\nc", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b\nc", term.rt.editorDocument().opened.?.file.content);
 
     // **마지막 줄** — 앞 개행까지 먹는다.
-    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_document.opened.?.file.content.len);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.content.len);
     try testing.expect(deleteLines(fx.session, term));
-    try testing.expectEqualStrings("b", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "LN2 줄 조작은 선택이 걸친 줄만 건드린다 — 다음 줄 머리는 뺀다 (§3.9a)" {
@@ -31036,7 +31044,7 @@ test "LN2 줄 조작은 선택이 걸친 줄만 건드린다 — 다음 줄 머�
     const term = try undoFixture(&fx, allocator, "ln2.zig", "aa\nbb\ncc\n");
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3); // "aa\n" — 둘째 줄 머리
     try testing.expect(deleteLines(fx.session, term));
-    try testing.expectEqualStrings("bb\ncc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("bb\ncc\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "LN3 줄 복제 — 연속한 줄은 한 덩어리다 (§3.9a)" {
@@ -31048,7 +31056,7 @@ test "LN3 줄 복제 — 연속한 줄은 한 덩어리다 (§3.9a)" {
     const term = try undoFixture(&fx, allocator, "ln3.zig", "a\nb\nc\n");
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3); // a, b
     try testing.expect(duplicateLines(fx.session, term));
-    try testing.expectEqualStrings("a\nb\na\nb\nc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\nb\na\nb\nc\n", term.rt.editorDocument().opened.?.file.content);
 
     // **선택이 복사본으로 옮겨져야 한다.** 원본에 남으면 다시 눌렀을 때 **같은 줄이 또 복제되어**
     // 사용자가 만든 복사본이 아니라 원본만 늘어난다(변이 L16).
@@ -31059,7 +31067,7 @@ test "LN3 줄 복제 — 연속한 줄은 한 덩어리다 (§3.9a)" {
     try testing.expectEqual(@as(usize, 7), term.rt.editor_selection.?.end());
 
     try testing.expect(duplicateLines(fx.session, term));
-    try testing.expectEqualStrings("a\nb\na\nb\na\nb\nc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\nb\na\nb\na\nb\nc\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.start());
 }
 
@@ -31073,21 +31081,21 @@ test "LN4 줄 이동 — 맞바꾸고, 문서 끝에서는 무동작이다 (§3.
 
     term.rt.editor_selection = editor_selection.Selection.at(0); // 첫 줄
     try testing.expect(!moveLines(fx.session, term, false)); // 위로 — 무동작
-    try testing.expectEqualStrings("a\nb\nc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\nb\nc\n", term.rt.editorDocument().opened.?.file.content);
 
     try testing.expect(moveLines(fx.session, term, true)); // 아래로
-    try testing.expectEqualStrings("b\na\nc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b\na\nc\n", term.rt.editorDocument().opened.?.file.content);
 
     // **위로도 된다** — 아래만 되는 구현은 위 단언만으로 안 잡힌다(변이 L17).
     const term2 = try undoFixture(&fx, allocator, "ln4b.zig", "a\nb\nc\n");
     term2.rt.editor_selection = editor_selection.Selection.at(2); // 둘째 줄
     try testing.expect(moveLines(fx.session, term2, false));
-    try testing.expectEqualStrings("b\na\nc\n", term2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b\na\nc\n", term2.rt.editorDocument().opened.?.file.content);
 
     // **문서 끝에서 아래로도 무동작이다.**
     term2.rt.editor_selection = editor_selection.Selection.at(4); // 마지막 줄
     try testing.expect(!moveLines(fx.session, term2, true));
-    try testing.expectEqualStrings("b\na\nc\n", term2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b\na\nc\n", term2.rt.editorDocument().opened.?.file.content);
 }
 
 test "LN5 들여쓰기는 탭 문자 — 빈 줄은 안 건드리고, 내어쓰기는 있는 만큼만 (§3.9a)" {
@@ -31100,11 +31108,11 @@ test "LN5 들여쓰기는 탭 문자 — 빈 줄은 안 건드리고, 내어쓰�
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // 세 줄 전부
 
     try testing.expect(indentLines(fx.session, term, false));
-    try testing.expectEqualStrings("\ta\n\n\tb\n", term.rt.editor_document.opened.?.file.content); // 빈 줄은 그대로
+    try testing.expectEqualStrings("\ta\n\n\tb\n", term.rt.editorDocument().opened.?.file.content); // 빈 줄은 그대로
 
     // **내어쓰기는 있는 만큼만** — 뺄 것 없는 줄이 섞여도 연산이 통째로 실패하지 않는다.
     try testing.expect(indentLines(fx.session, term, true));
-    try testing.expectEqualStrings("a\n\nb\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n\nb\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(!indentLines(fx.session, term, true)); // 더 뺄 것이 없다
 
     // **공백 들여쓰기는 `editor.tab-width` 만큼 뺀다** — 한 칸만 빼면 네 번 눌러야 한 단계가 풀려
@@ -31113,14 +31121,14 @@ test "LN5 들여쓰기는 탭 문자 — 빈 줄은 안 건드리고, 내어쓰�
     term4.rt.editor_tab_width = 4;
     term4.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(indentLines(fx.session, term4, true));
-    try testing.expectEqualStrings("a\n", term4.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term4.rt.editorDocument().opened.?.file.content);
 
     // **섞이면 있는 쪽만 뺀다** — 뺄 것 없는 줄 하나 때문에 연산이 통째로 실패하면, 블록을 고를
     // 때마다 내어쓰기가 죽는다(변이 L7).
     const term2 = try undoFixture(&fx, allocator, "ln5b.zig", "\tx\ny\n");
     term2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
     try testing.expect(indentLines(fx.session, term2, true));
-    try testing.expectEqualStrings("x\ny\n", term2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("x\ny\n", term2.rt.editorDocument().opened.?.file.content);
 }
 
 test "LN6 Enter 가 이전 줄 들여쓰기를 잇는다 — caret 앞까지만 본다 (§3.9a)" {
@@ -31133,27 +31141,27 @@ test "LN6 Enter 가 이전 줄 들여쓰기를 잇는다 — caret 앞까지만 
 
     term.rt.editor_selection = editor_selection.Selection.at(3); // "\t\ta" 뒤 (b 앞)
     try testing.expect(insertNewlineKeepingIndent(fx.session, term));
-    try testing.expectEqualStrings("\t\ta\n\t\tb\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\t\ta\n\t\tb\n", term.rt.editorDocument().opened.?.file.content);
 
     // **선택이 있으면 지운 뒤 그 자리의 줄을 본다**(§3.9a). 안 지우면 Enter 가 고른 글자를 남긴 채
     // 줄만 늘려, 사용자가 「바꿔 쓰려고 골랐는데 그대로 있다」를 본다(변이 L24).
     const term4 = try undoFixture(&fx, allocator, "ln6d.zig", "\tab\n");
     term4.rt.editor_selection = editor_selection.Selection.fromPoints(1, 3); // "ab"
     try testing.expect(insertNewlineKeepingIndent(fx.session, term4));
-    try testing.expectEqualStrings("\t\n\t\n", term4.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\t\n\t\n", term4.rt.editorDocument().opened.?.file.content);
 
     // **caret 이 들여쓰기 안에 있으면 그 앞까지만 잇는다** — 줄 전체를 보면 뒤쪽 들여쓰기까지
     // 세어 사용자가 자르지 않은 공백이 새 줄에 들어간다(변이 L9).
     const term3 = try undoFixture(&fx, allocator, "ln6c.zig", "\t\tab\n");
     term3.rt.editor_selection = editor_selection.Selection.at(1); // 탭 하나 뒤
     try testing.expect(insertNewlineKeepingIndent(fx.session, term3));
-    try testing.expectEqualStrings("\t\n\t\tab\n", term3.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\t\n\t\tab\n", term3.rt.editorDocument().opened.?.file.content);
 
     // **들여쓰기가 없으면 종전 경로** — 개행만 들어간다.
     const term2 = try undoFixture(&fx, allocator, "ln6b.zig", "x\n");
     term2.rt.editor_selection = editor_selection.Selection.at(1);
     try testing.expect(insertNewlineKeepingIndent(fx.session, term2));
-    try testing.expectEqualStrings("x\n\n", term2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("x\n\n", term2.rt.editorDocument().opened.?.file.content);
 }
 
 test "LN9 줄 조작은 앞뒤 타이핑과 한 undo 로 뭉치지 않는다 (§3.3 연산 종류 변경)" {
@@ -31167,14 +31175,14 @@ test "LN9 줄 조작은 앞뒤 타이핑과 한 undo 로 뭉치지 않는다 (§
 
     term.rt.editor_selection = editor_selection.Selection.at(1);
     try testing.expect(insertText(fx.session, term, "X"));
-    try testing.expectEqualStrings("aX\nb\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aX\nb\n", term.rt.editorDocument().opened.?.file.content);
 
     try testing.expect(deleteLines(fx.session, term));
-    try testing.expectEqualStrings("b\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b\n", term.rt.editorDocument().opened.?.file.content);
 
     // **되돌리기 한 번은 줄 삭제만 푼다** — 친 글자는 남아 있어야 한다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("aX\nb\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aX\nb\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CS1 대소문자 변환 — 선택이 있으면 그 범위, 없으면 caret 의 낱말 (§3.9b)" {
@@ -31188,17 +31196,17 @@ test "CS1 대소문자 변환 — 선택이 있으면 그 범위, 없으면 care
     // 선택 없음 — caret 이 `foo` 안이면 `foo` 만 바뀐다.
     term.rt.editor_selection = editor_selection.Selection.at(1);
     try testing.expect(transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("FOO bar\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("FOO bar\n", term.rt.editorDocument().opened.?.file.content);
 
     // 선택 있음 — 그 범위만.
     term.rt.editor_selection = editor_selection.Selection.fromPoints(4, 7); // "bar"
     try testing.expect(transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("FOO BAR\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("FOO BAR\n", term.rt.editorDocument().opened.?.file.content);
 
     // 소문자로 되돌린다 — 왕복이 원문이다.
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 7);
     try testing.expect(transformCase(fx.session, term, false));
-    try testing.expectEqualStrings("foo bar\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("foo bar\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CS2 덮지 않는 글자는 그대로고, 바뀔 것이 없으면 무동작이다 (§3.9b)" {
@@ -31212,12 +31220,12 @@ test "CS2 덮지 않는 글자는 그대로고, 바뀔 것이 없으면 무동�
 
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 9); // "가나다"
     try testing.expect(!transformCase(fx.session, term, true)); // 한글 — 바뀔 것이 없다
-    try testing.expectEqualStrings("가나다 ABC\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("가나다 ABC\n", term.rt.editorDocument().opened.?.file.content);
 
     // 이미 대문자인 범위도 무동작이다.
     term.rt.editor_selection = editor_selection.Selection.fromPoints(10, 13);
     try testing.expect(!transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("가나다 ABC\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("가나다 ABC\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CS3 길이가 안 변해 다른 커서가 안 밀린다 — 키릴·그리스도 (§3.9b)" {
@@ -31227,17 +31235,17 @@ test "CS3 길이가 안 변해 다른 커서가 안 밀린다 — 키릴·그리
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     const term = try undoFixture(&fx, allocator, "cs3.zig", "абв αβγ\n");
-    const before_len = term.rt.editor_document.opened.?.file.content.len;
+    const before_len = term.rt.editorDocument().opened.?.file.content.len;
 
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 6); // "абв"
     try testing.expect(transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("АБВ αβγ\n", term.rt.editor_document.opened.?.file.content);
-    try testing.expectEqual(before_len, term.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqualStrings("АБВ αβγ\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(before_len, term.rt.editorDocument().opened.?.file.content.len);
 
     term.rt.editor_selection = editor_selection.Selection.fromPoints(7, 13); // "αβγ"
     try testing.expect(transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("АБВ ΑΒΓ\n", term.rt.editor_document.opened.?.file.content);
-    try testing.expectEqual(before_len, term.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqualStrings("АБВ ΑΒΓ\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(before_len, term.rt.editorDocument().opened.?.file.content.len);
 }
 
 test "CS7 멀티 커서면 전부 바뀌고 undo 하나다 (§3.9b)" {
@@ -31256,11 +31264,11 @@ test "CS7 멀티 커서면 전부 바뀌고 undo 하나다 (§3.9b)" {
     try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
 
     try testing.expect(transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("FOO bar FOO\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("FOO bar FOO\n", term.rt.editorDocument().opened.?.file.content);
 
     // **전체가 undo 하나다**(§3.3) — 한 번에 둘 다 돌아온다.
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("foo bar foo\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("foo bar foo\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CS5 깨진 UTF-8 과 낱말 없는 자리는 문서를 안 바꾼다 (§3.8·§3.9b)" {
@@ -31279,13 +31287,13 @@ test "CS5 깨진 UTF-8 과 낱말 없는 자리는 문서를 안 바꾼다 (§3.
     const empty = try undoFixture(&fx, allocator, "cs5b.zig", "");
     empty.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(!transformCase(fx.session, empty, true));
-    try testing.expectEqualStrings("", empty.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("", empty.rt.editorDocument().opened.?.file.content);
 
     // 공백만 있는 자리도 같다.
     const ws = try undoFixture(&fx, allocator, "cs5c.zig", "   \n");
     ws.rt.editor_selection = editor_selection.Selection.at(2);
     try testing.expect(!transformCase(fx.session, ws, true));
-    try testing.expectEqualStrings("   \n", ws.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("   \n", ws.rt.editorDocument().opened.?.file.content);
 }
 
 test "CS4 변환도 비교 뷰·읽기 전용을 거절하고 undo 하나다 (§3.9b)" {
@@ -31298,18 +31306,18 @@ test "CS4 변환도 비교 뷰·읽기 전용을 거절하고 undo 하나다 (§
     term.rt.editor_selection = editor_selection.Selection.at(0);
     term.rt.editor_diff = .{ .requested_ms = 0 };
     try testing.expect(!transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("ab cd\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("ab cd\n", term.rt.editorDocument().opened.?.file.content);
     term.rt.editor_diff = null;
 
     // **타이핑과 한 undo 로 뭉치지 않는다**(§3.3 연산 종류 변경).
     term.rt.editor_selection = editor_selection.Selection.at(2);
     try testing.expect(insertText(fx.session, term, "X"));
-    try testing.expectEqualStrings("abX cd\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("abX cd\n", term.rt.editorDocument().opened.?.file.content);
     term.rt.editor_selection = editor_selection.Selection.at(5); // "cd" 안
     try testing.expect(transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("abX CD\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("abX CD\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("abX cd\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("abX cd\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "LN8 줄 조작은 비교 뷰와 읽기 전용을 거절한다 (§3.9a)" {
@@ -31329,21 +31337,21 @@ test "LN8 줄 조작은 비교 뷰와 읽기 전용을 거절한다 (§3.9a)" {
     try testing.expect(!moveLines(fx.session, term, true));
     try testing.expect(!indentLines(fx.session, term, false));
     try testing.expect(!insertNewlineKeepingIndent(fx.session, term));
-    try testing.expectEqualStrings("a\nb\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\nb\n", term.rt.editorDocument().opened.?.file.content);
     term.rt.editor_diff = null;
 
     // **읽기 전용** — 같은 자리에서 같은 답이다.
-    term.rt.editor_document.opened.?.file.read_only = true;
+    term.rt.editorDocument().opened.?.file.read_only = true;
     try testing.expect(!deleteLines(fx.session, term));
     try testing.expect(!duplicateLines(fx.session, term));
     try testing.expect(!moveLines(fx.session, term, true));
     try testing.expect(!indentLines(fx.session, term, false));
-    try testing.expectEqualStrings("a\nb\n", term.rt.editor_document.opened.?.file.content);
-    term.rt.editor_document.opened.?.file.read_only = false;
+    try testing.expectEqualStrings("a\nb\n", term.rt.editorDocument().opened.?.file.content);
+    term.rt.editorDocument().opened.?.file.read_only = false;
 
     // **정상 상태에서는 된다** — 위 단언이 「늘 거짓」으로 통과하지 않게 대조를 둔다.
     try testing.expect(deleteLines(fx.session, term));
-    try testing.expectEqualStrings("b\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "LN7 ⇧⌘K 와 Tab/⇧Tab 이 실제로 닿는다 — 키 경로 전체 (§3.9a)" {
@@ -31356,29 +31364,29 @@ test "LN7 ⇧⌘K 와 Tab/⇧Tab 이 실제로 닿는다 — 키 경로 전체 (
 
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try pressKey(&fx, .{ .char = 'k' }, .{ .command = true, .shift = true });
-    try testing.expectEqualStrings("b\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b\n", term.rt.editorDocument().opened.?.file.content);
 
     // **선택이 한 줄 안이면 Tab 은 탭 문자다** — 아니면 글자를 못 넣는다.
     // **caret 이 줄 머리가 아니어야 갈린다** — 머리에서 재면 「그 자리에 넣기」와 「줄 들여쓰기」가
     // 같은 답을 내 변이가 살아남는다(L11).
     term.rt.editor_selection = editor_selection.Selection.at(1);
     try pressKey(&fx, .tab, .{});
-    try testing.expectEqualStrings("b\t\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("b\t\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 줄 안에서 여러 글자를 골라도 Tab 은 글자다** — offset 차이로 재면 긴 한 줄이 여러 줄로
     // 오인되어, 단어를 고르고 Tab 을 치면 **줄이 들여쓰기된다**(변이 L12).
     const term3 = try undoFixture(&fx, allocator, "ln7c.zig", "abcd\n");
     term3.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
     try pressKey(&fx, .tab, .{});
-    try testing.expectEqualStrings("\td\n", term3.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\td\n", term3.rt.editorDocument().opened.?.file.content);
 
     // **여러 줄이면 들여쓰기다.**
     const term2 = try undoFixture(&fx, allocator, "ln7b.zig", "a\nb\n");
     term2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
     try pressKey(&fx, .tab, .{});
-    try testing.expectEqualStrings("\ta\n\tb\n", term2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\ta\n\tb\n", term2.rt.editorDocument().opened.?.file.content);
     try pressKey(&fx, .tab, .{ .shift = true });
-    try testing.expectEqualStrings("a\nb\n", term2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\nb\n", term2.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT7 한 줄에 커서가 여럿이어도 표식은 하나다 (§3.7)" {
@@ -31398,7 +31406,7 @@ test "CMT7 한 줄에 커서가 여럿이어도 표식은 하나다 (§3.7)" {
     term.rt.editor_selection = editor_selection.Selection.at(1);
 
     try testing.expect(toggleLineComment(fx.session, term));
-    try testing.expectEqualStrings("// abcd\n// efgh\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// abcd\n// efgh\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT8 여러 줄 토글이 되돌리기 한 번에 풀린다 (§3.3)" {
@@ -31412,15 +31420,15 @@ test "CMT8 여러 줄 토글이 되돌리기 한 번에 풀린다 (§3.3)" {
     // 세 줄을 한 번에 주석 처리 — **한 번의 편집이므로 한 번의 되돌리기**여야 한다.
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
     try testing.expect(toggleLineComment(fx.session, term));
-    try testing.expectEqualStrings("// a\n// b\n// c\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// a\n// b\n// c\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(term)); // 고쳤으니 표시가 뜬다(§3.5)
 
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("a\nb\nc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\nb\nc\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(term)); // 되돌리면 디스크와 같아진다
 
     try testing.expect(redoEdit(fx.session, term));
-    try testing.expectEqualStrings("// a\n// b\n// c\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// a\n// b\n// c\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT9 토글은 앞뒤 타이핑과 한 묶음이 되지 않는다 (§3.3 연산 종류 변경)" {
@@ -31432,18 +31440,18 @@ test "CMT9 토글은 앞뒤 타이핑과 한 묶음이 되지 않는다 (§3.3 �
 
     term.rt.editor_selection = editor_selection.Selection.at(1);
     _ = insertText(fx.session, term, "X"); // 타이핑
-    try testing.expectEqualStrings("aX\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aX\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(toggleLineComment(fx.session, term)); // 토글
-    try testing.expectEqualStrings("// aX\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// aX\n", term.rt.editorDocument().opened.?.file.content);
     _ = insertText(fx.session, term, "Y"); // 다시 타이핑
 
     // **되돌리기 세 번이 세 단계로 풀려야 한다.** 묶이면 사용자가 토글만 되돌릴 수 없다.
     _ = undoEdit(fx.session, term);
-    try testing.expectEqualStrings("// aX\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// aX\n", term.rt.editorDocument().opened.?.file.content);
     _ = undoEdit(fx.session, term);
-    try testing.expectEqualStrings("aX\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("aX\n", term.rt.editorDocument().opened.?.file.content);
     _ = undoEdit(fx.session, term);
-    try testing.expectEqualStrings("a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT10 ⌘/ 키가 실제로 토글에 닿는다 — 키 경로 전체 (§3.7)" {
@@ -31457,20 +31465,20 @@ test "CMT10 ⌘/ 키가 실제로 토글에 닿는다 — 키 경로 전체 (§3
     term.rt.editor_selection = editor_selection.Selection.at(0);
 
     try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
-    try testing.expectEqualStrings("// a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// a\n", term.rt.editorDocument().opened.?.file.content);
 
     // 다시 누르면 풀린다 — 같은 chord가 양방향이다.
     try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
-    try testing.expectEqualStrings("a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
 
     // **수식키를 가린다.** 맨 `/`나 `⌥/`·`⌃/`가 토글이면 사용자가 `/`를 칠 때마다 줄이 뒤집힌다.
     // (글자 입력 자체는 이 경로가 아니라 Swift 입력 진입점이 받으므로 여기서는 **토글 여부**만 잰다.)
     try pressKey(&fx, .{ .char = '/' }, .{});
-    try testing.expectEqualStrings("a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
     try pressKey(&fx, .{ .char = '/' }, .{ .option = true });
-    try testing.expectEqualStrings("a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
     try pressKey(&fx, .{ .char = '/' }, .{ .control = true });
-    try testing.expectEqualStrings("a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT5 선택이 다음 줄 머리에서 끝나면 그 줄은 빼고 센다 (§3.7)" {
@@ -31483,13 +31491,13 @@ test "CMT5 선택이 다음 줄 머리에서 끝나면 그 줄은 빼고 센다 
     // 첫 줄을 끝까지 끌어 고르면 끝이 **둘째 줄 offset 0**이 된다. 둘째 줄은 고른 게 아니다.
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
     try testing.expect(toggleLineComment(fx.session, term));
-    try testing.expectEqualStrings("// a\nb\nc\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// a\nb\nc\n", term.rt.editorDocument().opened.?.file.content);
 
     // 반대로 **둘째 줄 안까지** 뻗으면 둘 다 들어간다 (깨끗한 문서로 다시 잰다).
     const t2 = try undoFixture(&fx, allocator, "tmp2.zig", "a\nb\nc\n");
     t2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
     try testing.expect(toggleLineComment(fx.session, t2));
-    try testing.expectEqualStrings("// a\n// b\nc\n", t2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// a\n// b\nc\n", t2.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT6 공백 없이 붙은 주석도 푼다 (§3.7)" {
@@ -31501,7 +31509,7 @@ test "CMT6 공백 없이 붙은 주석도 푼다 (§3.7)" {
     const term = try undoFixture(&fx, allocator, "tmp.zig", "//a\n");
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(toggleLineComment(fx.session, term));
-    try testing.expectEqualStrings("a\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT1 ⌘/가 줄을 주석 처리하고 다시 누르면 푼다 (§3.7)" {
@@ -31517,16 +31525,16 @@ test "CMT1 ⌘/가 줄을 주석 처리하고 다시 누르면 푼다 (§3.7)" {
     term.rt.editor_selection = editor_selection.Selection.fromPoints(4, 22);
     try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
     // **들여쓰기 뒤**에 들어간다 — 줄 머리에 넣으면 들여쓰기가 무너져 보인다.
-    try testing.expectEqualStrings("    // const a = 1;\n    // const b = 2;\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("    // const a = 1;\n    // const b = 2;\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 번**에 돌아온다(§3.3).
     try testing.expect(undoEdit(fx.session, term));
-    try testing.expectEqualStrings("    const a = 1;\n    const b = 2;\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("    const a = 1;\n    const b = 2;\n", term.rt.editorDocument().opened.?.file.content);
 
     // 다시 주석 처리한 뒤 또 누르면 **푼다** — 표식과 그 뒤 공백 하나까지.
     try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
     try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
-    try testing.expectEqualStrings("    const a = 1;\n    const b = 2;\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("    const a = 1;\n    const b = 2;\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT2 하나라도 주석이 아니면 전부 주석이다 (§3.7 — VSCode 관례)" {
@@ -31541,11 +31549,11 @@ test "CMT2 하나라도 주석이 아니면 전부 주석이다 (§3.7 — VSCod
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 11); // 세 줄 전부
     try testing.expect(toggleLineComment(fx.session, term));
     // 가운데만 주석이 아니었으므로 **전부 주석**이 된다(이미 주석인 줄에도 하나 더).
-    try testing.expectEqualStrings("// // a\n// b\n// // c\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// // a\n// b\n// // c\n", term.rt.editorDocument().opened.?.file.content);
 
     // 이제 전부 주석이므로 다음 토글은 **해제**다.
     try testing.expect(toggleLineComment(fx.session, term));
-    try testing.expectEqualStrings("// a\nb\n// c\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("// a\nb\n// c\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT3 언어를 모르면 아무 일도 안 한다 (§3.7 no-op)" {
@@ -31559,7 +31567,7 @@ test "CMT3 언어를 모르면 아무 일도 안 한다 (§3.7 no-op)" {
     const unknown = try undoFixture(&fx, allocator, "data.bin", "x\n");
     unknown.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(!toggleLineComment(fx.session, unknown));
-    try testing.expectEqualStrings("x\n", unknown.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("x\n", unknown.rt.editorDocument().opened.?.file.content);
 
     // **HTML은 줄 주석이 없다** — 블록만 있으므로 이 슬라이스에서는 no-op이다.
     const html = try undoFixture(&fx, allocator, "a.html", "<p>\n");
@@ -31570,7 +31578,7 @@ test "CMT3 언어를 모르면 아무 일도 안 한다 (§3.7 no-op)" {
     const sh = try undoFixture(&fx, allocator, "run.sh", "echo hi\n");
     sh.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(toggleLineComment(fx.session, sh));
-    try testing.expectEqualStrings("# echo hi\n", sh.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("# echo hi\n", sh.rt.editorDocument().opened.?.file.content);
 }
 
 test "CMT4 빈 줄은 건드리지 않고, 판단에서도 뺀다 (§3.7)" {
@@ -31585,7 +31593,7 @@ test "CMT4 빈 줄은 건드리지 않고, 판단에서도 뺀다 (§3.7)" {
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 10);
     // 빈 줄을 빼면 **둘 다 주석**이므로 해제가 맞다.
     try testing.expect(toggleLineComment(fx.session, term));
-    try testing.expectEqualStrings("a\n\nb\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("a\n\nb\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "AID5 자동으로 넣은 닫는 문자만 backspace로 함께 지운다 (§3.7)" {
@@ -31604,9 +31612,9 @@ test "AID5 자동으로 넣은 닫는 문자만 backspace로 함께 지운다 (�
     const term = try undoFixture(&fx, allocator, "aid5.txt", "\n");
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "("));
-    try testing.expectEqualStrings("()\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("()\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(deleteText(fx.session, term, true));
-    try testing.expectEqualStrings("\n", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\n", term.rt.editorDocument().opened.?.file.content);
 
     // ⑴′ **문자 단위일 때만 함께 지운다.** `⌥⌫`(낱말)·`⌘⌫`(줄)는 사용자가 **범위를 정해** 지우는
     //     것이라, 거기에 자동 닫기 보정을 얹으면 **요청한 것보다 한 글자 더** 사라진다 —
@@ -31615,28 +31623,28 @@ test "AID5 자동으로 넣은 닫는 문자만 backspace로 함께 지운다 (�
         const t = try undoFixture(&fx, allocator, "aid5d.txt", "ab\n");
         t.rt.editor_selection = editor_selection.Selection.at(2);
         try testing.expect(insertText(fx.session, t, "(")); // "ab()" — 표식이 선다
-        try testing.expectEqualStrings("ab()\n", t.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings("ab()\n", t.rt.editorDocument().opened.?.file.content);
         // 낱말 삭제는 **자동 닫은 ")"를 안 먹는다** — "ab("까지가 낱말 경계다.
         try testing.expect(deleteBy(fx.session, t, true, .word));
-        try testing.expectEqualStrings(")\n", t.rt.editor_document.opened.?.file.content);
+        try testing.expectEqualStrings(")\n", t.rt.editorDocument().opened.?.file.content);
     }
 
     // ⑵ **사용자가 직접 친 닫는 문자는 안 지운다.**
     const t2 = try undoFixture(&fx, allocator, "aid5b.txt", "x)\n");
     t2.rt.editor_selection = editor_selection.Selection.at(1); // "x" 뒤, ")" 앞
     try testing.expect(deleteText(fx.session, t2, true));
-    try testing.expectEqualStrings(")\n", t2.rt.editor_document.opened.?.file.content); // ")"는 남는다
+    try testing.expectEqualStrings(")\n", t2.rt.editorDocument().opened.?.file.content); // ")"는 남는다
 
     // ⑶ **커서가 떠나면 표시를 버린다.** 자동으로 닫고 → 옮기고 → 돌아와서 Backspace.
     const t3 = try undoFixture(&fx, allocator, "aid5c.txt", "\n");
     t3.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, t3, "["));
-    try testing.expectEqualStrings("[]\n", t3.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("[]\n", t3.rt.editorDocument().opened.?.file.content);
     try testing.expect(moveCarets(fx.session, t3, .char_right, false)); // 떠난다
     try testing.expect(moveCarets(fx.session, t3, .char_left, false)); // 돌아온다
     try testing.expect(deleteText(fx.session, t3, true));
     // **"["만** 사라진다 — 표시를 안 버렸으면 "]"까지 함께 갔을 것이다.
-    try testing.expectEqualStrings("]\n", t3.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("]\n", t3.rt.editorDocument().opened.?.file.content);
 }
 
 test "EDIT8 편집하면 커서가 보이는 자리로 따라온다 (§5.2 줄 축)" {
@@ -31702,7 +31710,7 @@ test "EDIT8 편집하면 커서가 보이는 자리로 따라온다 (§5.2 줄 �
     try testing.expect(rows >= 2);
 
     // 화면 안(맨 위 다음 줄)에 커서를 두고 친다 — **top이 그대로여야 한다**.
-    const inside = term.rt.editor_document.opened.?.file.lines.line(51).?;
+    const inside = term.rt.editorDocument().opened.?.file.lines.line(51).?;
     term.rt.editor_selection = editor_selection.Selection.at(inside.start);
     try testing.expect(insertText(fx.session, term, "Z"));
     try testing.expectEqual(@as(u32, 50), term.rt.editor_first_line);
@@ -31730,9 +31738,9 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
 
     // 아래로 굴려 뷰포트를 문서 중간에 둔다.
     setEditorTop(fx.session, term, 40, "test");
-    const lines = term.rt.editor_document.opened.?.file.lines;
+    const lines = term.rt.editorDocument().opened.?.file.lines;
     const top_line = lines.line(40).?;
-    const top_text = try allocator.dupe(u8, term.rt.editor_document.opened.?.file.content[top_line.start .. top_line.start + 7]);
+    const top_text = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content[top_line.start .. top_line.start + 7]);
     defer allocator.free(top_text);
 
     // **앵커 쌍을 직접 잰다.** 편집 함수를 통과시키면 caret 노출이 함께 돌아 화면을 커서 쪽으로
@@ -31752,15 +31760,15 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
     const changes = [_]maru.session.editor.delta.Change{
         .{ .start = 0, .end = 0, .text = "a\nb\nc\n" },
     };
-    var inv = try term.rt.editor_document.opened.?.file.apply(.{ .changes = &changes }, &sels_dummy);
+    var inv = try term.rt.editorDocument().opened.?.file.apply(.{ .changes = &changes }, &sels_dummy);
     inv.deinit();
     refreshAfterEdit(fx.session, term, null) catch {};
     restoreScrollAnchor(fx.session, term, anchor, .{ .changes = &changes });
 
     // 맨 위 줄이 **같은 내용**을 가리켜야 한다 — 번호는 43으로 밀렸어도 화면은 제자리다.
     const now_top = term.rt.editor_first_line;
-    const now_line = term.rt.editor_document.opened.?.file.lines.line(now_top).?;
-    const now_text = term.rt.editor_document.opened.?.file.content[now_line.start .. now_line.start + 7];
+    const now_line = term.rt.editorDocument().opened.?.file.lines.line(now_top).?;
+    const now_text = term.rt.editorDocument().opened.?.file.content[now_line.start .. now_line.start + 7];
     try testing.expectEqualStrings(top_text, now_text);
     try testing.expectEqual(@as(usize, 43), now_top); // 실제로 밀렸다(보정이 없으면 40에 머문다)
 
@@ -31772,13 +31780,13 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
         .{ .start = 0, .end = 6, .text = "" }, // "a\nb\nc\n" 중 앞 셋을 지운다
     };
     sels_dummy.items[0] = editor_selection.Selection.at(0);
-    var inv2 = try term.rt.editor_document.opened.?.file.apply(.{ .changes = &changes2 }, &sels_dummy);
+    var inv2 = try term.rt.editorDocument().opened.?.file.apply(.{ .changes = &changes2 }, &sels_dummy);
     inv2.deinit();
     refreshAfterEdit(fx.session, term, null) catch {};
     restoreScrollAnchor(fx.session, term, anchor2, .{ .changes = &changes2 });
 
-    const after_line = term.rt.editor_document.opened.?.file.lines.line(term.rt.editor_first_line).?;
-    const after_text = term.rt.editor_document.opened.?.file.content[after_line.start .. after_line.start + 7];
+    const after_line = term.rt.editorDocument().opened.?.file.lines.line(term.rt.editor_first_line).?;
+    const after_text = term.rt.editorDocument().opened.?.file.content[after_line.start .. after_line.start + 7];
     try testing.expectEqualStrings(top_text, after_text);
 }
 
@@ -31812,7 +31820,7 @@ test "MOV14 `^E` 뒤 세로 이동은 «그 열» 을 지킨다 — 줄 끝에 �
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
 
-    const lines = term.rt.editor_document.opened.?.file.lines;
+    const lines = term.rt.editorDocument().opened.?.file.lines;
     const l0 = lines.line(0).?;
     const l1 = lines.line(1).?;
     const l2 = lines.line(2).?;
@@ -31881,12 +31889,12 @@ test "MOV15 랩된 줄에서 ↓ 를 거듭 눌러도 목표 열이 유지되고
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
 
-    const lines = term.rt.editor_document.opened.?.file.lines;
+    const lines = term.rt.editorDocument().opened.?.file.lines;
     const l0 = lines.line(0).?;
     const l1 = lines.line(1).?;
     var pcm = productColumnMap(term);
     const map = pcm.map();
-    const t0 = term.rt.editor_document.opened.?.file.content[l0.start..l0.contentEnd()];
+    const t0 = term.rt.editorDocument().opened.?.file.content[l0.start..l0.contentEnd()];
 
     // **줄 0 의 조각 머리들.** 여기서 다시 세지 않고 렌더가 굳힌 스냅숏을 읽는다(§4.1g).
     var heads: [32]u32 = undefined;
@@ -31936,7 +31944,7 @@ test "MOV15 랩된 줄에서 ↓ 를 거듭 눌러도 목표 열이 유지되고
 
     // ③ **되돌아온다.** 다음 줄의 넓은 행에서 다시 열 10 이다 — 잘린 값(8)에 안 머문다.
     try pressKey(&fx, .arrow_down, .{});
-    const t1 = term.rt.editor_document.opened.?.file.content[l1.start..l1.contentEnd()];
+    const t1 = term.rt.editorDocument().opened.?.file.content[l1.start..l1.contentEnd()];
     try testing.expectEqual(l1.start + map.offsetOf(map.ctx, t1, start_col), term.rt.editor_selection.?.focus);
 
     // ④ **↑ 도 같다** — 되돌아온 열을 들고 올라간다.
@@ -31981,14 +31989,14 @@ test "MOV9 랩이 켜지면 위/아래가 시각 행을 따라간다 — 이음�
     try testing.expect(moveCarets(fx.session, term, .line_down, false));
     const after_down = term.rt.editor_selection.?.focus;
     try testing.expect(after_down > 0);
-    const first_line = term.rt.editor_document.opened.?.file.lines.line(0).?;
+    const first_line = term.rt.editorDocument().opened.?.file.lines.line(0).?;
     try testing.expect(after_down < first_line.contentEnd()); // **아직 같은 논리 줄 안**이다
 
     // ⑵ 그 자리는 **뒤 행의 머리**다(이음매 결정) — 스냅숏의 조각 시작 열과 정확히 같다.
     const rows = term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len];
     var pcm2 = productColumnMap(term);
     const map2 = pcm2.map();
-    const text = term.rt.editor_document.opened.?.file.content[first_line.start..first_line.contentEnd()];
+    const text = term.rt.editorDocument().opened.?.file.content[first_line.start..first_line.contentEnd()];
     const landed_col = map2.columnOf(map2.ctx, text, after_down - first_line.start);
     try testing.expectEqual(rows[1].start_col, landed_col);
 
@@ -32016,11 +32024,11 @@ fn lineEdgeFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const
 
 /// 고정의 **둘째 시각 행**이 시작하는 문서 offset.
 fn secondRowStart(term: *Term) usize {
-    const line0 = term.rt.editor_document.opened.?.file.lines.line(0).?;
+    const line0 = term.rt.editorDocument().opened.?.file.lines.line(0).?;
     const rows = term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len];
     var pcm = productColumnMap(term);
     const map = pcm.map();
-    const text = term.rt.editor_document.opened.?.file.content[line0.start..line0.contentEnd()];
+    const text = term.rt.editorDocument().opened.?.file.content[line0.start..line0.contentEnd()];
     return line0.start + map.offsetOf(map.ctx, text, rows[1].start_col);
 }
 
@@ -32069,7 +32077,7 @@ test "MOV13 ⌘→ 는 행 끝 → 줄 끝으로 넓어지고, ^A·^E 는 언제
     const term = try lineEdgeFixture(&fx, allocator, "mov13.txt");
     try testing.expect(term.rt.editor_hit_rows_len > 2);
     const row1 = secondRowStart(term);
-    const end0 = term.rt.editor_document.opened.?.file.lines.line(0).?.contentEnd();
+    const end0 = term.rt.editorDocument().opened.?.file.lines.line(0).?.contentEnd();
     try testing.expect(row1 < end0);
 
     // ① 첫 행 가운데 → **그 행 끝**. 행 끝 offset 은 뒤 행 머리와 같은 byte 다.
@@ -32129,13 +32137,13 @@ test "MOV8 문서 끝·처음을 넘지 않고, 나머지 커서만 움직여도
     const term = try undoFixture(&fx, allocator, "mov8.txt", "aa\nbb\ncc\n");
 
     // ⑴ 마지막 줄에서 아래로 — **끝에 머문다**(넘으면 없는 줄이다).
-    const last = term.rt.editor_document.opened.?.file.lines;
+    const last = term.rt.editorDocument().opened.?.file.lines;
     const last_line = last.line(last.lineCount() - 1).?;
     term.rt.editor_selection = editor_selection.Selection.at(last_line.start);
     const before = term.rt.editor_selection.?.focus;
     _ = moveCarets(fx.session, term, .line_down, false);
     try testing.expect(term.rt.editor_selection.?.focus >= before);
-    try testing.expect(term.rt.editor_selection.?.focus <= term.rt.editor_document.opened.?.file.content.len);
+    try testing.expect(term.rt.editor_selection.?.focus <= term.rt.editorDocument().opened.?.file.content.len);
     // 한 번 더 눌러도 같은 자리다 — 넘어가면 여기서 갈린다.
     const settled = term.rt.editor_selection.?.focus;
     _ = moveCarets(fx.session, term, .line_down, false);
@@ -32150,10 +32158,10 @@ test "MOV8 문서 끝·처음을 넘지 않고, 나머지 커서만 움직여도
         drawn.dl.deinit(allocator);
         try testing.expect(pageRows(term) > 1); // 한 페이지가 여러 줄이어야 이 갈래가 열린다
 
-        const first = term.rt.editor_document.opened.?.file.lines.line(0).?;
+        const first = term.rt.editorDocument().opened.?.file.lines.line(0).?;
         term.rt.editor_selection = editor_selection.Selection.at(first.start);
         _ = moveCarets(fx.session, term, .page_down, false);
-        const lines_now = term.rt.editor_document.opened.?.file.lines;
+        const lines_now = term.rt.editorDocument().opened.?.file.lines;
         const last_now = lines_now.line(lines_now.lineCount() - 1).?;
         try testing.expectEqual(last_now.start, term.rt.editor_selection.?.focus);
     }
@@ -32214,7 +32222,7 @@ test "MOV6 커서가 화면 밖으로 나가면 스크롤이 따라간다 (§5.2
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try freeze(&fx, term);
     const target_line: u32 = @intCast(rows_shown); // 화면 바로 아래 첫 줄
-    const line = term.rt.editor_document.opened.?.file.lines.line(target_line).?;
+    const line = term.rt.editorDocument().opened.?.file.lines.line(target_line).?;
     term.rt.editor_selection = editor_selection.Selection.at(line.start);
     revealPrimaryCaret(fx.session, term);
     // 마지막 줄이 되도록 밀었으면 top은 정확히 한 줄만큼 움직인다.
@@ -32227,7 +32235,7 @@ test "MOV6 커서가 화면 밖으로 나가면 스크롤이 따라간다 (§5.2
     // 지우면 보이는 줄인데도 그 줄을 **맨 아래로 끌어내리며 위로 굴러간다**.
     try freeze(&fx, term);
     try testing.expectEqual(@as(u32, 1), term.rt.editor_first_line);
-    const visible_mid = term.rt.editor_document.opened.?.file.lines.line(2).?;
+    const visible_mid = term.rt.editorDocument().opened.?.file.lines.line(2).?;
     term.rt.editor_selection = editor_selection.Selection.at(visible_mid.start);
     revealPrimaryCaret(fx.session, term);
     try testing.expectEqual(@as(u32, 1), term.rt.editor_first_line);
@@ -32336,7 +32344,7 @@ fn fuzzRound(
         d.dl.deinit(allocator);
 
         // ── 불변식 ──
-        const docf = term.rt.editor_document.opened orelse continue;
+        const docf = term.rt.editorDocument().opened orelse continue;
         var iter = selections(term);
         const cursor_count = iter.count();
         while (iter.next()) |sel| {
@@ -32531,7 +32539,7 @@ test "MC4 병합 훑기가 줄마다 전부 훑던 방식과 같은 답을 낸�
         const marks = buildSelectionMarks(fx.session, term, false) orelse continue;
 
         // ── 순진한 기준 구현: 줄마다 커서 전부를 훑는다 ──
-        const docf = term.rt.editor_document.opened.?;
+        const docf = term.rt.editorDocument().opened.?;
         const lines_len = if (term.rt.editor_visible_lines.len > 0)
             term.rt.editor_visible_lines.len
         else
@@ -32746,9 +32754,9 @@ test "OW1 ⌥더블클릭은 커서를 더하지 않고 primary 를 낱말로 �
     // ⑷ **undo 묶음을 끊는다**(§3.3 — 커서가 편집 아닌 이유로 움직였다). `⌥` 갈래에서만 안 끊는
     //    변이가 4회차에 살아남았다: 그러면 `⌥더블클릭` 앞뒤 타이핑이 한 묶음이 되어 undo 한 번이
     //    **둘 다** 되돌린다.
-    term.rt.editor_document.history.last_edit_kind = .insert; // 앞선 타이핑이 남긴 상태
+    term.rt.editorDocument().history.last_edit_kind = .insert; // 앞선 타이핑이 남긴 상태
     try testing.expect(fxo.optClick(false, 8, 0));
-    try testing.expectEqual(EditKind.none, term.rt.editor_document.history.last_edit_kind);
+    try testing.expectEqual(EditKind.none, term.rt.editorDocument().history.last_edit_kind);
 
     // ⑸ **`metal_dirty` 는 여기서 안 잰다 — 잴 수가 없다.** 마지막 줄의 `self.metal_dirty = true`
     //    를 지워도 화면 표시는 그대로 선다: 바로 앞 줄의 `beginPointerGesture` 가
@@ -34634,7 +34642,7 @@ test "ES17 undo 뒤에도 색이 되돌아온다 — 전체 재파싱 경로가 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, fx.term, "// c\n"));
 
-    const doc = fx.term.rt.editor_document.opened.?;
+    const doc = fx.term.rt.editorDocument().opened.?;
     const st = &fx.term.rt.editor_syntax;
     {
         const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 2, 4, &.{}, .inherit);
@@ -34648,7 +34656,7 @@ test "ES17 undo 뒤에도 색이 되돌아온다 — 전체 재파싱 경로가 
     try testing.expect(undoEdit(fx.session, fx.term));
 
     // 되돌린 뒤 첫 줄은 다시 `const a = 1;`이다 — **키워드**여야 한다.
-    const doc2 = fx.term.rt.editor_document.opened.?;
+    const doc2 = fx.term.rt.editorDocument().opened.?;
     const colors2 = syntax_color.lineColors(st, allocator, doc2.file.content, doc2.file.lines, 0, 2, 4, &.{}, .inherit);
     try testing.expect(colors2.len >= 1);
     var is_keyword = false;
@@ -34676,7 +34684,7 @@ test "ES15 편집하면 색이 새 내용을 따라온다 — 트리가 낡지 �
     // 빠뜨려 판정자가 빨갛게 나왔는데, 구현이 아니라 이 테스트가 틀린 것이었다.
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, fx.term, "// added comment line\n"));
-    const doc = fx.term.rt.editor_document.opened.?;
+    const doc = fx.term.rt.editorDocument().opened.?;
     const st = &fx.term.rt.editor_syntax;
     const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 4, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 2);
@@ -34812,7 +34820,7 @@ test "ES41 여는 파싱이 끊긴 채 편집이 오면 처음부터 다시 판�
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n" ** 200);
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     // 여는 경로를 **1ns 예산**으로 다시 태운다 — 끊긴 상태를 기계 속도와 무관하게 만든다(`openBudgeted` 가 판정자에 여는 문).
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.openBudgeted(doc.file.content, .zig, 1);
@@ -34846,7 +34854,7 @@ test "ES42 여는 파싱이 끊긴 채 범위를 모르는 편집이 오면 — 
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n" ** 200);
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.openBudgeted(doc.file.content, .zig, 1);
     if (!fx.term.rt.editor_syntax.pending) return error.SkipZigTest;
@@ -34856,7 +34864,7 @@ test "ES42 여는 파싱이 끊긴 채 범위를 모르는 편집이 오면 — 
     sels.items[0] = editor_selection.Selection.at(0);
     defer allocator.free(sels.items);
     const changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = "// memo\n" }};
-    var inv = try fx.term.rt.editor_document.opened.?.file.apply(.{ .changes = &changes }, &sels);
+    var inv = try fx.term.rt.editorDocument().opened.?.file.apply(.{ .changes = &changes }, &sels);
     inv.deinit();
     refreshAfterEdit(fx.session, fx.term, null) catch {};
 
@@ -34913,7 +34921,7 @@ test "ES21 큰 파일은 여는 프레임에 다 안 판다 — 이어 파고 �
     _ = insertText(fx.session, fx.term, dense_line ** 6000);
 
     // 여는 경로를 다시 태운다 — 위 삽입은 증분 경로라 열기와 다르다.
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
 
@@ -34955,7 +34963,7 @@ test "ES22 파싱이 남아 있으면 다음 프레임을 부른다 — idle ski
     // 45 초(CI)였다 — 「예산을 한 번에 못 끝낼 만큼 조밀하다」는 조건에 몇 번에 넣었는지는 없다.
     const dense_line = "pub fn f() void { const s = \"abc\"; _ = s; }\n";
     _ = insertText(fx.session, fx.term, dense_line ** 6000);
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     // 남은 파싱이 있어야 「다음 프레임을 부른다」를 잴 수 있다 — 빠른 기계에서는 안 끊기므로
@@ -35086,7 +35094,7 @@ test "NS4 항목은 편집 가능 여부를 따른다 — 읽기 전용이면 �
     try testing.expectEqual(@as(usize, 4), editable.len); // 잘라내기·복사·붙여넣기·전체 선택
     settings_ops.closeContextMenu(fx.session);
 
-    fx.term.rt.editor_document.opened.?.file.read_only = true;
+    fx.term.rt.editorDocument().opened.?.file.read_only = true;
     fx.session.mouse(1, pt.x, pt.y, 2, 0);
     const read_only = fx.session.editor_context_menu.?;
     try testing.expectEqual(@as(usize, 2), read_only.len); // 복사·전체 선택만
@@ -35104,7 +35112,7 @@ test "NS4 전체 선택은 편집기 문서를 고른다 — 코어 큐로 새�
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
-    const len = fx.term.rt.editor_document.opened.?.file.content.len;
+    const len = fx.term.rt.editorDocument().opened.?.file.content.len;
     try testing.expect(len > 0);
     fx.term.rt.editor_selection = null;
 
@@ -35462,7 +35470,7 @@ test "ES30 헤더 체인은 primary caret 을 따라간다 — 선택이 있으�
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n        x += 1;\n    }\n};\n");
 
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -35491,7 +35499,7 @@ test "CRUMB2 밴드가 그리는 것은 «경로 + 체인» 이고, 마디 경�
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n    }\n};\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -35547,7 +35555,7 @@ test "ES31 비교 뷰는 체인을 그리지 않는다 — 문서가 둘이다 (
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n    }\n};\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -35609,7 +35617,7 @@ test "ES32 구문 접힘 승격이 보이는 줄 표를 다시 만든다 — 「
     try testing.expect(fx.term.rt.editor_visible_lines.len > 0); // 부분집합이 섰다
 
     // ⑵ 이제 파싱이 끝나고 승격이 돈다.
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
     while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
@@ -35635,7 +35643,7 @@ test "NAV1 이동은 열기→펴기→caret→스크롤 순서로 간다 — �
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n    _ = x;\n}\n\npub fn b() void {\n    const y = 2;\n    _ = y;\n}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     const target = std.mem.indexOf(u8, doc.file.content, "_ = y").?;
 
     try navigateTo(fx.session, .{ .offset = target });
@@ -35654,7 +35662,7 @@ test "NAV2 뒤로 가면 떠난 자리로 돌아오고, 앞으로가 그것을 �
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n}\n\npub fn b() void {\n    const y = 2;\n}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     const first = std.mem.indexOf(u8, doc.file.content, "const x").?;
     const second = std.mem.indexOf(u8, doc.file.content, "const y").?;
 
@@ -35682,7 +35690,7 @@ test "NAV3 같은 자리로 가면 스택이 안 쌓인다 — 뒤로가 먹통�
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     const spot = std.mem.indexOf(u8, doc.file.content, "const x").?;
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(spot);
@@ -35702,7 +35710,7 @@ test "NAV4 새로 이동하면 앞으로 스택을 버린다 — 가지 않은 �
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n}\n\npub fn b() void {\n    const y = 2;\n}\n\npub fn c() void {\n    const z = 3;\n}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     const a = std.mem.indexOf(u8, doc.file.content, "const x").?;
     const b = std.mem.indexOf(u8, doc.file.content, "const y").?;
     const c = std.mem.indexOf(u8, doc.file.content, "const z").?;
@@ -35756,7 +35764,7 @@ test "NAV6 닫힌 Term 을 가리키는 항목은 버리고 다음으로 간다 
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n}\n\npub fn b() void {\n    const y = 2;\n}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     const first = std.mem.indexOf(u8, doc.file.content, "const x").?;
     const second = std.mem.indexOf(u8, doc.file.content, "const y").?;
 
@@ -35798,7 +35806,7 @@ test "NAV7 이동은 그 자리를 화면에 드러낸다 — caret 만 옮기�
     fx.session.editor_nav_back.clearRetainingCapacity();
     fx.session.editor_nav_forward.clearRetainingCapacity();
 
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     const far_line: u32 = 380;
     const far = doc.file.lines.line(far_line) orelse return error.NoLine;
 
@@ -35820,7 +35828,7 @@ test "NAV8 이동은 커서를 하나로 놓는다 — 멀티커서가 남지 �
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "aa\nbb\naa\nbb\naa\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
 
     // **커서를 실제로 여럿 만든다** — 그래야 지우는 규율을 잴 수 있다.
     const extras = try allocator.alloc(editor_selection.Selection, 2);
@@ -35872,7 +35880,7 @@ pub fn recomputeSymbolPicker(self: *AppSession) void {
         self.chrome_host.symbol_picker.setResultCount(0);
         return;
     }
-    const doc = term.rt.editor_document.opened orelse {
+    const doc = term.rt.editorDocument().opened orelse {
         self.symbol_picker_rows.clear(self.allocator);
         self.chrome_host.symbol_picker.setResultCount(0);
         return;
@@ -35918,7 +35926,7 @@ pub const SymbolPickerReadiness = enum {
 pub fn symbolPickerReadiness(self: *AppSession) SymbolPickerReadiness {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return .not_editor;
-    _ = term.rt.editor_document.opened orelse return .not_editor;
+    _ = term.rt.editorDocument().opened orelse return .not_editor;
     const st = &term.rt.editor_syntax;
     // **2층이 있으면 1층 상태를 안 본다**(§8.2o) — 문법이 없거나 아직 파싱 중이어도 서버 목록으로 연다.
     if (symbols_client.list(term) != null) {
@@ -35977,7 +35985,7 @@ test "SP7 피커는 편집기에서만 열린다 — 터미널에는 문서가 �
     // 편집기이고 심볼이 있으면 열린다.
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn alpha() void {}\npub fn beta() void {}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36008,7 +36016,7 @@ test "SP8 「아직 모른다」와 「없다」를 가른다 — 읽는 중인 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     var i: usize = 0;
     while (i < 500) : (i += 1) _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
 
     // ① 예산에 끊긴 상태 — **「아직 모른다」다.**
     fx.term.rt.editor_syntax.deinit(allocator);
@@ -36047,7 +36055,7 @@ test "SP9 고르면 닫고 나서 간다 — 오버레이가 방금 간 자리�
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn alpha() void {}\n\npub fn beta() void {\n    const x = 1;\n    _ = x;\n}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36080,7 +36088,7 @@ test "SP10 일치가 없으면 Enter 는 닫기만 한다 — 안 고른 자리�
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub fn alpha() void {}\npub fn beta() void {}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36114,7 +36122,7 @@ test "SP11 파싱이 끝나면 프레임이 목록을 채운다 — 검색어가
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     var i: usize = 0;
     while (i < 500) : (i += 1) _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
 
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
@@ -36511,7 +36519,7 @@ test "SP17 체인 마디의 열 범위를 렌더가 굳힌다 — 클릭이 그�
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n        _ = x;\n    }\n};\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36587,7 +36595,7 @@ test "SP19 체인 마디를 누르면 형제 목록이 뜬다 — 전체가 아�
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub const A = struct {\n    pub fn a1() void {}\n    pub fn a2() void {}\n};\npub const B = struct {\n    pub fn b1() void {}\n};\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36635,7 +36643,7 @@ test "SP20 프롬프트가 부모 이름을 말한다 — 관계가 아니라 �
     // **`Outer` 를 0번이 아닌 자리에 둔다.** 부모가 목록의 첫 심볼이면 「부모를 찾았다」와
     // 「목록의 처음까지 갔다」가 같은 자리라 구별되지 않는다.
     _ = insertText(fx.session, fx.term, "pub fn head() void {}\npub const Outer = struct {\n    pub fn a1() void {}\n    pub fn a2() void {}\n};\npub fn top() void {}\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36695,7 +36703,7 @@ test "SP24 심볼 목록이 문서보다 낡아도 프롬프트가 문서 밖을
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub const Outer = struct {\n    pub fn a1() void {}\n};\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36722,7 +36730,7 @@ test "SP24 심볼 목록이 문서보다 낡아도 프롬프트가 문서 밖을
     };
     try testing.expect(st.symbols.items[parent].name_end <= doc.file.content.len); // 지금은 안쪽이다
     const shrunk = st.symbols.items[parent].name_start; // 부모 이름 **직전**까지만 남긴다
-    const live = &fx.term.rt.editor_document.opened.?;
+    const live = &fx.term.rt.editorDocument().opened.?;
     const whole = live.file.content;
     live.file.content = whole[0..shrunk];
 
@@ -36745,7 +36753,7 @@ test "SP21 형제 피커도 단일-오버레이 불변식을 지킨다 — 남�
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub const A = struct {\n    pub fn a1() void {}\n    pub fn a2() void {}\n};\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36784,7 +36792,7 @@ test "SP22 누른 마디가 가리키는 심볼이 화면의 그 이름이다 �
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n        _ = x;\n    }\n};\n");
-    const doc = fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
     var rounds: usize = 0;
@@ -36846,7 +36854,7 @@ fn setSiblingPrompt(self: *AppSession, sym_idx: usize) void {
     buf.clearRetainingCapacity();
 
     const parent_name: ?[]const u8 = blk: {
-        const doc = term.rt.editor_document.opened orelse break :blk null;
+        const doc = term.rt.editorDocument().opened orelse break :blk null;
         if (sym_idx >= st.symbols.items.len) break :blk null;
         const d = st.symbols.items[sym_idx].depth;
         // **부모는 「바로 앞의 더 얕은 심볼」이다** — 목록이 문서 순서라 그렇다(§7.5 심볼 목록 층).
@@ -36993,9 +37001,9 @@ test "NSH 핀된 경로가 없으면 안 뜬다 — 참조를 못 만드는 상�
     defer h.drawn.dl.deinit(allocator);
 
     h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
-    const saved = h.fx.term.rt.editor_document.path;
-    h.fx.term.rt.editor_document.path = null;
-    defer h.fx.term.rt.editor_document.path = saved;
+    const saved = h.fx.term.rt.editorDocument().path;
+    h.fx.term.rt.editorDocument().path = null;
+    defer h.fx.term.rt.editorDocument().path = saved;
 
     showSendHelper(h.fx.session, h.fx.term);
     try testing.expect(!h.fx.session.chrome_host.send_helper.open);
@@ -37536,7 +37544,7 @@ test "NSH 문서가 줄어들어도 안 죽고, 낡은 스냅숏이면 내려간
     defer h.fx.deinit(allocator);
     defer h.drawn.dl.deinit(allocator);
 
-    const doc = h.fx.term.rt.editor_document.opened orelse return error.NoDoc;
+    const doc = h.fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     const full = doc.file.content.len;
     try testing.expect(full > 10);
     h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = full };
@@ -37545,7 +37553,7 @@ test "NSH 문서가 줄어들어도 안 죽고, 낡은 스냅숏이면 내려간
     // 문서를 통째로 지운다 — 선택 focus 가 새 내용 밖이다.
     try testing.expect(selectAll(h.fx.session, h.fx.term));
     try testing.expect(deleteText(h.fx.session, h.fx.term, false));
-    try testing.expect(h.fx.term.rt.editor_document.opened.?.file.content.len < full);
+    try testing.expect(h.fx.term.rt.editorDocument().opened.?.file.content.len < full);
 
     // **안 죽는다.** 답은 둘 중 하나로 정해져 있다 — 살아 있으면 앵커가 유효한 자리여야 하고,
     // 아니면 내려가 있어야 한다. 어느 쪽이든 «죽지 않는다» 만으로는 부족해서 상태를 함께 못박는다.
@@ -37564,7 +37572,7 @@ test "NSH 문서가 줄어들어도 안 죽고, 낡은 스냅숏이면 내려간
     defer redrawn.dl.deinit(allocator);
     try testing.expect(h.fx.term.rt.editor_hit_rows_len > 0); // 전제: 이번엔 행이 있다
 
-    const shrunk = h.fx.term.rt.editor_document.opened.?.file.content.len;
+    const shrunk = h.fx.term.rt.editorDocument().opened.?.file.content.len;
     h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = shrunk + 4096 };
     // `lines.lineAt` 은 `offset <= byteLen()` 을 **assert 로 전제**한다 — 묶지 않으면 여기서 죽는다.
     _ = refreshSendHelper(h.fx.session);
@@ -37586,7 +37594,7 @@ test "NSH 읽기 전용 문서에서도 뜬다 — 보내기는 문서를 고치
     defer h.fx.deinit(allocator);
     defer h.drawn.dl.deinit(allocator);
 
-    h.fx.term.rt.editor_document.opened.?.file.read_only = true;
+    h.fx.term.rt.editorDocument().opened.?.file.read_only = true;
     h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
     showSendHelper(h.fx.session, h.fx.term);
     try testing.expect(h.fx.session.chrome_host.send_helper.open);
@@ -37829,9 +37837,9 @@ test "NSH 못 보내면 조용히 끝내지 않고 메뉴를 연다 (적대적 2
 
     // 누르기 **직전에** 참조를 못 만드는 상태로 만든다(핀된 경로 소실 — 이름 바꾸기·닫힘 경로가
     // 실제로 그렇게 만든다). 상자는 이미 떠 있으므로 이 클릭은 보내기로 간다.
-    const saved = h.fx.term.rt.editor_document.path;
-    h.fx.term.rt.editor_document.path = null;
-    defer h.fx.term.rt.editor_document.path = saved;
+    const saved = h.fx.term.rt.editorDocument().path;
+    h.fx.term.rt.editorDocument().path = null;
+    defer h.fx.term.rt.editorDocument().path = saved;
     h.fx.session.last_agent_target = null;
 
     try testing.expect(sendHelperClick(h.fx.session, on.x, on.y)); // 클릭은 상자 것이다
@@ -37925,13 +37933,13 @@ test "NSH 상자가 떠 있어도 키는 편집기 것이다 (적대적 26회차
     showSendHelper(h.fx.session, h.fx.term);
     try testing.expect(h.fx.session.chrome_host.send_helper.open);
 
-    const before = h.fx.term.rt.editor_document.opened.?.file.content.len;
+    const before = h.fx.term.rt.editorDocument().opened.?.file.content.len;
     // **평범한 글자는 키 경로가 아니라 확정 텍스트로 온다** — macOS 는 `NSTextInputClient` 확정으로
     // 보내고 `handleKeyEvent` 에는 meta chord 만 닿는다(`input.zig` 가 그 사실을 적어 두었다).
     // 판정자가 키로 때리면 «상자가 키를 먹었다» 와 «애초에 그 경로가 아니다» 를 못 가른다.
     try testing.expect(input_ops.sendCommittedText(h.fx.session, "X"));
     // **문서가 바뀌었다** — 글자가 상자에 먹히지 않고 편집기로 갔다(고른 5 글자가 X 로 바뀐다).
-    try testing.expect(h.fx.term.rt.editor_document.opened.?.file.content.len != before);
+    try testing.expect(h.fx.term.rt.editorDocument().opened.?.file.content.len != before);
     // 그리고 선택이 사라졌으므로 상자는 다음 판정에서 내려간다.
     try testing.expect(!refreshSendHelper(h.fx.session));
 }
@@ -38034,16 +38042,16 @@ test "NSH 조합 중에도 상자가 입력을 방해하지 않는다 (적대적
     // 조합이 선다 — 상자가 떠 있어도 문서에는 안 들어가고 화면에만 뜬다(IME1 계약).
     h.fx.session.ime_terminal_target_id = h.fx.term.surface.id;
     h.fx.session.ime_active = true;
-    const before_len = h.fx.term.rt.editor_document.opened.?.file.content.len;
+    const before_len = h.fx.term.rt.editorDocument().opened.?.file.content.len;
     setEditorPreedit(h.fx.session, h.fx.term, "한");
-    try testing.expectEqual(before_len, h.fx.term.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqual(before_len, h.fx.term.rt.editorDocument().opened.?.file.content.len);
     try testing.expect(h.fx.term.rt.editor_preedit.len > 0);
     // 상자는 조합을 이유로 사라지지 않는다(선택이 아직 있다).
     try testing.expect(refreshSendHelper(h.fx.session));
 
     // 확정 — 고른 5 글자가 「한」 으로 바뀐다(상자가 그 경로를 막지 않는다).
     try testing.expect(input_ops.sendCommittedText(h.fx.session, "한"));
-    try testing.expect(h.fx.term.rt.editor_document.opened.?.file.content.len != before_len);
+    try testing.expect(h.fx.term.rt.editorDocument().opened.?.file.content.len != before_len);
     // 선택이 사라졌으므로 상자는 내려간다.
     try testing.expect(!refreshSendHelper(h.fx.session));
 }
@@ -38076,7 +38084,7 @@ test "EM-RT 그린 자리를 누르면 그 자리가 나온다 — 좌표 왕복
                 (@as(f64, @floatFromInt(c)) + 0.5) * @as(f64, @floatFromInt(geom.cell_w_px));
             const y = @as(f64, @floatFromInt(geom.body_y)) + (@as(f64, @floatFromInt(r)) + 0.5) * @as(f64, @floatFromInt(geom.cell_h_px));
             const off = hitTestBody(fx.term, x, y) orelse continue;
-            const doc = fx.term.rt.editor_document.opened.?;
+            const doc = fx.term.rt.editorDocument().opened.?;
             const line_idx = doc.file.lines.lineAt(doc.file.lines.clampOffset(off));
             const line = doc.file.lines.line(line_idx) orelse continue;
             const a = chrome_editor.hit.bodyAnchor(.{
@@ -38187,7 +38195,7 @@ test "EM-RT2 그린 자리를 누르면 그 자리가 나온다 — 큰 문서·
                             (@as(f64, @floatFromInt(c)) + 0.5) * @as(f64, @floatFromInt(geom.cell_w_px));
                         const y = @as(f64, @floatFromInt(geom.body_y)) + (@as(f64, @floatFromInt(r)) + 0.5) * @as(f64, @floatFromInt(geom.cell_h_px));
                         const off = hitTestBody(fx.term, x, y) orelse continue;
-                        const doc = fx.term.rt.editor_document.opened.?;
+                        const doc = fx.term.rt.editorDocument().opened.?;
                         const line_idx = doc.file.lines.lineAt(doc.file.lines.clampOffset(off));
                         const line = doc.file.lines.line(line_idx) orelse continue;
                         const a = chrome_editor.hit.bodyAnchor(.{
@@ -38226,7 +38234,7 @@ test "EM-SNAP 스크롤·랩이 바뀌고 **아직 안 그렸으면** 화면에 
     const geom = fx.term.rt.editor_hit_geom;
     const x = @as(f64, @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)))) + 4;
     const y = @as(f64, @floatFromInt(geom.body_y)) + 5.5 * @as(f64, @floatFromInt(geom.cell_h_px));
-    const doc = fx.term.rt.editor_document.opened.?;
+    const doc = fx.term.rt.editorDocument().opened.?;
     const drawn_line = doc.file.lines.lineAt(hitTestBody(fx.term, x, y).?);
 
     // 스크롤만 하고 안 그린다 — 화면은 아직 옛 자리다.
@@ -38267,7 +38275,7 @@ test "SCRL1 프레임 사이에 편집이 둘 와도 화면이 안 떨린다 (�
     defer drawn.dl.deinit(allocator);
     try testing.expect(fx.term.rt.editor_hit_rows_len > 0);
 
-    const doc = fx.term.rt.editor_document.opened.?;
+    const doc = fx.term.rt.editorDocument().opened.?;
     const line20 = doc.file.lines.line(20) orelse return error.NoLine;
     fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(line20.contentEnd());
 
@@ -38296,7 +38304,7 @@ test "SCRL3 랩이 걸려도 프레임 사이 편집 둘이 화면을 안 흔든
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
 
-    const doc = fx.term.rt.editor_document.opened.?;
+    const doc = fx.term.rt.editorDocument().opened.?;
     const line20 = doc.file.lines.line(20) orelse return error.NoLine;
     fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(line20.start + 10);
 
@@ -38324,7 +38332,7 @@ test "SCRL4 프레임 사이 편집 둘에서도 가로 노출이 산다 (적대
     try testing.expect(fx.term.rt.editor_hit_geom.content_width > 0);
 
     // 긴 줄의 **오른쪽 끝**에 caret 을 둔다 — 화면 밖이라 노출이 가로를 밀어야 한다.
-    const doc = fx.term.rt.editor_document.opened.?;
+    const doc = fx.term.rt.editorDocument().opened.?;
     const line3 = doc.file.lines.line(3) orelse return error.NoLine;
     fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(line3.contentEnd());
 
@@ -38456,9 +38464,9 @@ test "U1c 경로 없음은 한 가지로만 나타난다 — null 이고, 그래
 
     // **`null` 이다 — 빈 슬라이스가 아니다.** 빈 슬라이스면 기존 저장 가드(`orelse return false`)가
     // 안 걸려 빈 경로에 쓰려 든다(계약 §3.11 정체성).
-    try testing.expect(term.rt.editor_document.path == null);
-    try testing.expect(term.rt.editor_document.untitled != null);
-    try testing.expectEqual(@as(u32, 1), term.rt.editor_document.untitled.?.n);
+    try testing.expect(term.rt.editorDocument().path == null);
+    try testing.expect(term.rt.editorDocument().untitled != null);
+    try testing.expectEqual(@as(u32, 1), term.rt.editorDocument().untitled.?.n);
     // **문법이 없다**(경로에서 나오므로) — 그래서 그 문서는 끝까지 무색이고, 그것이 계약이다.
     // 「색 배열이 비었다」로 재지 않는다: grammar 없는 파일은 어차피 비어서 구현이 없어도 통과한다.
     //
@@ -38470,8 +38478,8 @@ test "U1c 경로 없음은 한 가지로만 나타난다 — null 이고, 그래
     try testing.expect(term.rt.editor_selection != null);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
     // 빈 문서 한 줄, 그리고 **clean 이다**(여는 순간 저장할 것이 없다).
-    try testing.expect(term.rt.editor_document.opened != null);
-    try testing.expectEqualStrings("", term.rt.editor_document.opened.?.file.content);
+    try testing.expect(term.rt.editorDocument().opened != null);
+    try testing.expectEqualStrings("", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(term));
     // 편집기 밖에서 보는 값도 같은 이야기를 한다(컨트롤 플레인·헤더가 이것을 읽는다).
     const meta = editor_diff_ops.editorMeta(term);
@@ -38494,7 +38502,7 @@ test "U1d 타이핑하면 dirty 가 되고 이름 앞에 표식이 붙는다" {
     try testing.expect(isDirty(term));
     // 이름은 그대로고(표식은 라벨 밖에서 붙는다 — `termLabel` 은 이름만 낸다), 내용이 들어갔다.
     try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(term));
-    try testing.expectEqualStrings("hello", term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("hello", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "U1e ⌘S 는 조용히 실패하지 않는다 — 저장하지 않고 이름을 묻는다" {
@@ -38517,7 +38525,7 @@ test "U1e ⌘S 는 조용히 실패하지 않는다 — 저장하지 않고 이�
     try testing.expect(fx.session.rename.? == .untitled_save);
     // 여전히 dirty 이고 여전히 이름이 없다 — 「저장을 시도했다」는 흔적을 남기지 않는다(§3.11).
     try testing.expect(isDirty(term));
-    try testing.expect(term.rt.editor_document.path == null);
+    try testing.expect(term.rt.editorDocument().path == null);
 }
 
 test "U1f chrome 최소 세션(탭 바 없음)에서는 안 열린다" {
@@ -38659,11 +38667,11 @@ test "U1k 이름이 붙은 적 없는 문서는 붙여넣기·되돌리기도 �
     const t = try openUntitledInActivePane(fx.session);
     // 붙여넣기는 경로를 묻지 않아야 한다(파일 경로 기반 판정이 끼면 여기서 조용히 안 먹는다).
     try testing.expect(pasteText(fx.session, t, "hello\nworld\n"));
-    try testing.expectEqualStrings("hello\nworld\n", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("hello\nworld\n", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(t));
     // 되돌리면 빈 문서로 돌아오고 **clean 이 된다** — 저장 해시가 「빈 문서」였기 때문이다.
     try testing.expect(undoEdit(fx.session, t));
-    try testing.expectEqualStrings("", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t));
     // 이름은 그대로다 — 되돌리기가 문서 정체성을 건드리지 않는다.
     try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(t));
@@ -38744,7 +38752,7 @@ test "U1m 이름 없는 문서만 있는 pane 은 «그 문서로» 복원된다
     // 씨를 뿌린다. 그래서 placeholder 는 **없어야** 한다: 있으면 사용자가 만든 적 없는 셸 탭이 돌아온다.
     const pane = pane_ops.activePane(fx.session);
     const created = try openUntitledInActivePane(fx.session);
-    const number = created.rt.editor_document.untitled.?.n;
+    const number = created.rt.editorDocument().untitled.?.n;
     var i: usize = pane.terms.items.len;
     while (i > 0) {
         i -= 1;
@@ -38770,7 +38778,7 @@ test "U1m 이름 없는 문서만 있는 pane 은 «그 문서로» 복원된다
     defer pane_ops.destroyPane(fx.session, restored);
     try testing.expectEqual(@as(usize, 1), restored.terms.items.len);
     try testing.expectEqual(.editor, restored.terms.items[0].kind);
-    try testing.expectEqual(number, restored.terms.items[0].rt.editor_document.untitled.?.n);
+    try testing.expectEqual(number, restored.terms.items[0].rt.editorDocument().untitled.?.n);
 }
 
 test "U1n 조합(IME)도 바로 받는다 — 커서가 서 있는 것의 다른 얼굴이다" {
@@ -38787,7 +38795,7 @@ test "U1n 조합(IME)도 바로 받는다 — 커서가 서 있는 것의 다른
     // 확정하면 문서에 들어간다.
     setEditorPreedit(fx.session, t, "");
     try testing.expect(insertText(fx.session, t, "\xed\x95\x9c"));
-    try testing.expectEqualStrings("\xed\x95\x9c", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("\xed\x95\x9c", t.rt.editorDocument().opened.?.file.content);
 }
 
 test "U1p 이름과 경로는 배타다 — 파일을 연 문서에는 이름 표식이 없다" {
@@ -38810,15 +38818,15 @@ test "U1p 이름과 경로는 배타다 — 파일을 연 문서에는 이름 �
     defer allocator.free(path);
 
     const filed = try openPathInActivePane(fx.session, path);
-    try testing.expect(filed.rt.editor_document.path != null);
-    try testing.expect(filed.rt.editor_document.untitled == null); // ★ 배타
+    try testing.expect(filed.rt.editorDocument().path != null);
+    try testing.expect(filed.rt.editorDocument().untitled == null); // ★ 배타
     // 번호도 안 썼다 — 파일을 여는 길이 발급기를 건드리면 이름이 건너뛴다.
     try testing.expectEqual(@as(u32, 0), app_session_mod.app_runtime.untitled_docs.last);
 
     // 그리고 반대쪽: 이름 있는 문서에는 경로가 없다.
     const untitled = try openUntitledInActivePane(fx.session);
-    try testing.expect(untitled.rt.editor_document.untitled != null);
-    try testing.expect(untitled.rt.editor_document.path == null); // ★ 배타
+    try testing.expect(untitled.rt.editorDocument().untitled != null);
+    try testing.expect(untitled.rt.editorDocument().path == null); // ★ 배타
 
     // **번호가 다 되면 그 이름의 오류가 온다** — `OutOfMemory` 가 아니다. 실제로는 42 억 번을 열어야
     // 닿지만, 다른 이유의 이름을 붙이면 이 실패를 읽는 쪽(C0)이 「메모리가 없다」고 말한다. 주입해서
@@ -38894,7 +38902,7 @@ test "U1r 이상한 순서로 만져도 흔들리지 않는다 — rename 우선
     t.surface.custom_name = try allocator.dupe(u8, "scratch");
     try testing.expectEqualStrings("scratch", app_session_mod.termLabel(t));
     // **번호는 그대로다** — rename 은 문서 정체성을 건드리지 않는다(이름만 가린다).
-    try testing.expectEqual(@as(u32, 1), t.rt.editor_document.untitled.?.n);
+    try testing.expectEqual(@as(u32, 1), t.rt.editorDocument().untitled.?.n);
 
     // ⑵ **확인을 «수락」하면 정말 닫힌다.** 여기까지의 판정자는 「문구가 뜬다」까지만 봤다 — 수락 경로가
     //    끊겨 있으면 사용자는 확인을 눌러도 탭이 안 닫히는 것을 본다.
@@ -38911,7 +38919,7 @@ test "U1r 이상한 순서로 만져도 흔들리지 않는다 — rename 우선
 
     // ⑷ **split 해도 그 문서는 그대로다.** 분할은 pane 을 나누므로 Term 소유가 옮겨 다니는 자리다.
     try pane_ops.splitActivePane(fx.session, .horizontal);
-    try testing.expect(t2.rt.editor_document.untitled != null);
+    try testing.expect(t2.rt.editorDocument().untitled != null);
     try testing.expectEqualStrings("untitled-2", app_session_mod.termLabel(t2));
     // 새 pane 에서 열면 번호가 이어진다(창 단위가 아니라 앱 단위라는 것의 다른 얼굴).
     const t3 = try openUntitledInActivePane(fx.session);
@@ -38981,16 +38989,16 @@ test "U2b 이름을 주면 파일이 생기고 보통 문서가 된다 — 경�
     try testing.expectEqualStrings("const a = 1;\n", on_disk);
 
     // ⑵ **보통 문서가 됐다**: 경로가 붙고 이름 표식은 사라졌다(§3.11 배타).
-    try testing.expect(t.rt.editor_document.path != null);
-    try testing.expect(std.mem.endsWith(u8, t.rt.editor_document.path.?, "/new.zig"));
-    try testing.expect(t.rt.editor_document.untitled == null);
+    try testing.expect(t.rt.editorDocument().path != null);
+    try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "/new.zig"));
+    try testing.expect(t.rt.editorDocument().untitled == null);
     // ⑶ **색이 생겼다** — 저장 전에는 `.none` 이었다(U1c 가 그것을 쟀다).
     try testing.expectEqual(maru.session.editor.language.Grammar.zig, t.rt.editor_grammar);
     // ⑷ **clean 이다** — 방금 쓴 내용이 곧 디스크 내용이다.
     try testing.expect(!isDirty(t));
     // ⑸ **도크 entry 가 붙었다** — 안 붙으면 workspace 저장 시퀀스 밖이라 저장한 파일이 안 돌아온다.
     try testing.expect(t.file_entry != null);
-    try testing.expectEqualStrings(t.rt.editor_document.path.?, t.file_entry.?.path);
+    try testing.expectEqualStrings(t.rt.editorDocument().path.?, t.file_entry.?.path);
     try testing.expectEqual(t.surface.id, t.file_entry.?.surface_id);
     // ⑹ 라벨이 파일 이름이다(더 이상 `untitled-N` 이 아니다).
     try testing.expectEqualStrings("new.zig", app_session_mod.termLabel(t));
@@ -39023,8 +39031,8 @@ test "U2c 취소는 무상태다 — 이름 없는 dirty 그대로" {
     settings_ops.closeRename(fx.session); // Esc
 
     try testing.expect(fx.session.rename == null);
-    try testing.expect(t.rt.editor_document.path == null);
-    try testing.expect(t.rt.editor_document.untitled != null);
+    try testing.expect(t.rt.editorDocument().path == null);
+    try testing.expect(t.rt.editorDocument().untitled != null);
     try testing.expect(isDirty(t));
     try testing.expect(t.file_entry == null);
     // **파일도 안 생겼다** — 「저장을 시도했다」는 흔적을 남기지 않는다.
@@ -39056,7 +39064,7 @@ test "U2d 같은 이름이 이미 있으면 덮어쓸지 묻고, 수락하면 �
     // **묻는다** — 그리고 아직 안 썼다(파일은 옛 내용 그대로).
     try testing.expect(fx.session.chrome_host.confirm.open);
     try testing.expect(fx.session.pending_confirm == .untitled_overwrite);
-    try testing.expect(t.rt.editor_document.path == null); // 아직 이름이 안 붙었다
+    try testing.expect(t.rt.editorDocument().path == null); // 아직 이름이 안 붙었다
     {
         const still = try dir.dir.readFileAlloc(io, "taken.txt", allocator, .limited(4096));
         defer allocator.free(still);
@@ -39071,8 +39079,8 @@ test "U2d 같은 이름이 이미 있으면 덮어쓸지 묻고, 수락하면 �
     const after = try dir.dir.readFileAlloc(io, "taken.txt", allocator, .limited(4096));
     defer allocator.free(after);
     try testing.expectEqualStrings("new\n", after);
-    try testing.expect(t.rt.editor_document.path != null);
-    try testing.expect(t.rt.editor_document.untitled == null);
+    try testing.expect(t.rt.editorDocument().path != null);
+    try testing.expect(t.rt.editorDocument().untitled == null);
     // 들고 있던 경로는 **비워졌다** — 안 비우면 다음 확인이 옛 경로에 쓴다.
     try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len);
 }
@@ -39104,8 +39112,8 @@ test "U2e 덮어쓰기를 취소하면 아무 일도 없고 들고 있던 경로
     const still = try dir.dir.readFileAlloc(io, "taken.txt", allocator, .limited(4096));
     defer allocator.free(still);
     try testing.expectEqualStrings("old\n", still); // 안 썼다
-    try testing.expect(t.rt.editor_document.path == null);
-    try testing.expect(t.rt.editor_document.untitled != null);
+    try testing.expect(t.rt.editorDocument().path == null);
+    try testing.expect(t.rt.editorDocument().untitled != null);
     try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len); // 비워졌다
 }
 
@@ -39141,8 +39149,8 @@ test "U2f 그 경로로 이미 열린 Term 이 있으면 저장하지 않는다 
         &fx.session.notice_message_buf,
         maru.i18n.t(.editor_untitled_already_open),
     ));
-    try testing.expect(t.rt.editor_document.path == null);
-    try testing.expect(t.rt.editor_document.untitled != null);
+    try testing.expect(t.rt.editorDocument().path == null);
+    try testing.expect(t.rt.editorDocument().untitled != null);
     // 그 파일은 옛 내용 그대로다(두 Term 이 서로의 저장을 지우는 일이 시작되지 않았다).
     const still = try dir.dir.readFileAlloc(io, "open.txt", allocator, .limited(4096));
     defer allocator.free(still);
@@ -39170,8 +39178,8 @@ test "U2g base 밖 이름은 거절한다 — 절대 경로도 «갈아입은 ..
         try fx.session.rename_input.setText(allocator, bad);
         settings_ops.commitRename(fx.session);
         try testing.expect(fx.session.chrome_host.notice.open);
-        try testing.expect(t.rt.editor_document.path == null); // 이름이 안 붙었다
-        try testing.expect(t.rt.editor_document.untitled != null);
+        try testing.expect(t.rt.editorDocument().path == null); // 이름이 안 붙었다
+        try testing.expect(t.rt.editorDocument().untitled != null);
     }
 }
 
@@ -39224,14 +39232,14 @@ test "U2i 저장하면 workspace 저장 시퀀스에 든다 — 다음 실행에
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "kept.txt");
     settings_ops.commitRename(fx.session);
-    try testing.expect(t.rt.editor_document.path != null);
+    try testing.expect(t.rt.editorDocument().path != null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const wtab = try tab_ops.captureWorkspaceTab(fx.session, arena.allocator(), tab_ops.activeTab(fx.session));
     const wp = wtab.panes[0];
     try testing.expectEqual(@as(usize, 1), wp.file_terms.len); // ★ 이제 실린다
-    try testing.expectEqualStrings(t.rt.editor_document.path.?, wp.file_terms[0].path);
+    try testing.expectEqualStrings(t.rt.editorDocument().path.?, wp.file_terms[0].path);
     try testing.expectEqual(maru.session.dock_panel.EntryKind.text, wp.file_terms[0].kind);
     // 직렬화 → 파싱 왕복이 폴백 없이 통과해야 한다(그것이 곧 「유지된다」의 정의다).
     const tabs_slice = try arena.allocator().dupe(maru.session.workspace.Tab, &.{wtab});
@@ -39383,7 +39391,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         fx.session.rename_input.clear();
         try fx.session.rename_input.setText(allocator, name);
         settings_ops.commitRename(fx.session);
-        try testing.expect(t.rt.editor_document.path != null);
+        try testing.expect(t.rt.editorDocument().path != null);
         try testing.expect(t.file_entry != null);
     }
 
@@ -39396,7 +39404,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
             fx.session.rename_input.clear();
             try fx.session.rename_input.setText(allocator, bad);
             settings_ops.commitRename(fx.session);
-            try testing.expect(t.rt.editor_document.path == null);
+            try testing.expect(t.rt.editorDocument().path == null);
             try testing.expect(t.file_entry == null);
         }
         // 그 뒤에 성공해도 정상이다.
@@ -39404,7 +39412,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         fx.session.rename_input.clear();
         try fx.session.rename_input.setText(allocator, "after-bad.txt");
         settings_ops.commitRename(fx.session);
-        try testing.expect(t.rt.editor_document.path != null);
+        try testing.expect(t.rt.editorDocument().path != null);
     }
 
     // ⑶ **덮어쓰기를 취소한 뒤 다시 저장** — 들고 있던 경로가 남아 다음 저장을 오염시키지 않는지.
@@ -39423,7 +39431,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         fx.session.rename_input.clear();
         try fx.session.rename_input.setText(allocator, "other.txt");
         settings_ops.commitRename(fx.session);
-        try testing.expect(std.mem.endsWith(u8, t.rt.editor_document.path.?, "/other.txt"));
+        try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "/other.txt"));
         const untouched = try dir.dir.readFileAlloc(io, "over.txt", allocator, .limited(64));
         defer allocator.free(untouched);
         try testing.expectEqualStrings("old\n", untouched);
@@ -39462,8 +39470,8 @@ test "U2n 쓰기는 됐는데 entry 를 못 붙이면 — 새지 않고, 이름�
     defer allocator.free(on_disk);
     try testing.expectEqualStrings("written\n", on_disk);
     // 그러나 **이름은 안 붙었다** — 반쪽 상태(경로는 있고 entry 는 없는)를 만들지 않는다.
-    try testing.expect(t.rt.editor_document.path == null);
-    try testing.expect(t.rt.editor_document.untitled != null);
+    try testing.expect(t.rt.editorDocument().path == null);
+    try testing.expect(t.rt.editorDocument().untitled != null);
     try testing.expect(t.file_entry == null);
     // 그리고 **무엇이 됐는지 말한다** — 「저장하지 못했습니다」는 이 자리에서 **거짓**이다(파일은 있다).
     // 같은 문구를 쓰면 사용자는 아무 일도 없었다고 읽고, 디스크에는 자기 내용이 담긴 파일이 남는다.
@@ -39571,8 +39579,8 @@ test "U2p 이름 상자가 떠 있는 동안 그 Term 이 닫히면 — 확정�
     try testing.expect(fx.session.rename == null);
     try testing.expectError(error.FileNotFound, dir.dir.access(io, "ghost.txt", .{}));
     // **남은 문서는 그대로다** — 닫힌 것을 못 찾았다고 아무 문서에나 이름을 붙이지 않는다.
-    try testing.expect(other.rt.editor_document.untitled != null);
-    try testing.expect(other.rt.editor_document.path == null);
+    try testing.expect(other.rt.editorDocument().untitled != null);
+    try testing.expect(other.rt.editorDocument().path == null);
     try testing.expect(other.file_entry == null);
 }
 
@@ -39629,8 +39637,8 @@ test "U2u 재진입: 상자가 떠 있는데 또 ⌘S · 확인 중에 또 저�
 
     // ⑸ 수락하면 **처음 고른 문서**가 그 파일을 갖는다.
     fx.session.dispatchChromeAction(.confirm_accept);
-    try testing.expect(a.rt.editor_document.path != null);
-    try testing.expect(std.mem.endsWith(u8, a.rt.editor_document.path.?, "/exists.txt"));
+    try testing.expect(a.rt.editorDocument().path != null);
+    try testing.expect(std.mem.endsWith(u8, a.rt.editorDocument().path.?, "/exists.txt"));
     const got = try dir.dir.readFileAlloc(io, "exists.txt", allocator, .limited(64));
     defer allocator.free(got);
     try testing.expectEqualStrings("A\n", got);
@@ -39668,8 +39676,8 @@ test "U2v 상자는 다른 오버레이와 배타다 — 팔레트·찾기를 �
     try testing.expect(fx.session.rename == null);
     try testing.expect(!fx.session.chrome_host.rename_box.open);
     // 그리고 **이름은 안 붙었다** — 닫힘이 곧 확정이 되면 사용자가 안 정한 이름으로 저장된다.
-    try testing.expect(t.rt.editor_document.path == null);
-    try testing.expect(t.rt.editor_document.untitled != null);
+    try testing.expect(t.rt.editorDocument().path == null);
+    try testing.expect(t.rt.editorDocument().untitled != null);
 
     // **인라인 rename 은 «살아남아야」 한다.** 「전부 닫기」로 넓히면 무관한 알림 하나가 사용자가 치던
     // 이름을 통째로 버린다 — 그쪽은 같은 그리드에 그려지지 않아 겹치지도 않는다. 허용된 자리를 센다.
@@ -39698,7 +39706,7 @@ test "U2w 저장 물음은 이름 없는 문서에만 — 비교·읽기 전용�
 
     // ⑴ **읽기 전용 문서** — 이름 상자가 뜨면 안 된다(저장할 수 없는 문서다).
     const ro = try openPathInActivePane(fx.session, path);
-    ro.rt.editor_document.opened.?.file.read_only = true;
+    ro.rt.editorDocument().opened.?.file.read_only = true;
     try testing.expectError(error.ReadOnly, saveDocument(fx.session, ro));
     try testing.expect(fx.session.rename == null);
 
@@ -39711,7 +39719,7 @@ test "U2w 저장 물음은 이름 없는 문서에만 — 비교·읽기 전용�
 
     // ⑶ **보통 문서** — 묻지 않고 바로 쓴다(U2j 와 같은 술어를 다른 입구로 확인한다).
     const normal = try openPathInActivePane(fx.session, path);
-    normal.rt.editor_document.opened.?.file.read_only = false;
+    normal.rt.editorDocument().opened.?.file.read_only = false;
     normal.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, normal, "n"));
     try saveDocument(fx.session, normal);
@@ -39753,8 +39761,8 @@ test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이�
         try testing.expect(insertText(fx.session, t, "x\n"));
         fx.session.chrome_host.notice.dismiss();
         try save(fx.session, allocator, t, "nodir/x.txt");
-        try testing.expect(t.rt.editor_document.path == null); // 이름이 안 붙었다
-        try testing.expect(t.rt.editor_document.untitled != null);
+        try testing.expect(t.rt.editorDocument().path == null); // 이름이 안 붙었다
+        try testing.expect(t.rt.editorDocument().untitled != null);
         try testing.expect(fx.session.chrome_host.notice.open); // 말한다
         try testing.expectError(error.FileNotFound, dir.dir.access(io, "nodir", .{}));
     }
@@ -39775,8 +39783,8 @@ test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이�
             &fx.session.notice_message_buf,
             maru.i18n.t(.editor_untitled_name_not_file),
         ));
-        try testing.expect(t.rt.editor_document.path == null);
-        try testing.expect(t.rt.editor_document.untitled != null);
+        try testing.expect(t.rt.editorDocument().path == null);
+        try testing.expect(t.rt.editorDocument().untitled != null);
         // 디렉터리는 그대로다(지우거나 바꾸지 않았다).
         var d = try dir.dir.openDir(io, "taken", .{});
         d.close(io);
@@ -39788,7 +39796,7 @@ test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이�
         const t = try openUntitledInActivePane(fx.session);
         try testing.expect(insertText(fx.session, t, "z\n"));
         try save(fx.session, allocator, t, "yesdir/x.txt");
-        try testing.expect(t.rt.editor_document.path != null);
+        try testing.expect(t.rt.editorDocument().path != null);
         const got = try dir.dir.readFileAlloc(io, "yesdir/x.txt", allocator, .limited(64));
         defer allocator.free(got);
         try testing.expectEqualStrings("z\n", got);
@@ -39855,7 +39863,7 @@ test "U2y 「이미 열림」은 이 창만 본다 — 다른 창은 검사 범�
     try w2.rename_input.setText(allocator, "shared.txt");
     settings_ops.commitRename(w2);
     try testing.expect(w2.pending_confirm == .untitled_overwrite); // 확인은 뜬다(디스크에 있다)
-    try testing.expect(t.rt.editor_document.path == null); // 아직 안 썼다
+    try testing.expect(t.rt.editorDocument().path == null); // 아직 안 썼다
 }
 
 test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 저장 못 하는 문서를 만들지 않는다" {
@@ -39879,7 +39887,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, big));
-    try testing.expectEqual(cap + 1, t.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqual(cap + 1, t.rt.editorDocument().opened.?.file.content.len);
 
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "big.txt");
@@ -39887,7 +39895,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
 
     // **파일이 안 생겼다** — 그리고 그 이유를 말한다.
     try testing.expectError(error.FileNotFound, dir.dir.access(io, "big.txt", .{}));
-    try testing.expect(t.rt.editor_document.path == null);
+    try testing.expect(t.rt.editorDocument().path == null);
     try testing.expect(fx.session.chrome_host.notice.open);
     try testing.expect(std.mem.startsWith(
         u8,
@@ -39902,7 +39910,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
     fx.session.rename_input.clear();
     try fx.session.rename_input.setText(allocator, "small.txt");
     settings_ops.commitRename(fx.session);
-    try testing.expect(ok_doc.rt.editor_document.path != null);
+    try testing.expect(ok_doc.rt.editorDocument().path != null);
 }
 
 test "U2B 덮어쓰기 확인이 떠 있는데 그 문서를 닫으면 — 확인도 접힌다" {
@@ -39974,7 +39982,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
         typeName(fx.session, "k1.txt");
         try testing.expectEqualStrings("k1.txt", fx.session.rename_input.text.items);
         settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .enter } });
-        try testing.expect(t.rt.editor_document.path != null);
+        try testing.expect(t.rt.editorDocument().path != null);
         const got = try dir.dir.readFileAlloc(io, "k1.txt", allocator, .limited(64));
         defer allocator.free(got);
         try testing.expectEqualStrings("one\n", got);
@@ -39988,7 +39996,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
         typeName(fx.session, "k2.txt");
         settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .escape } });
         try testing.expect(fx.session.rename == null);
-        try testing.expect(t.rt.editor_document.path == null);
+        try testing.expect(t.rt.editorDocument().path == null);
         try testing.expectError(error.FileNotFound, dir.dir.access(io, "k2.txt", .{}));
     }
 
@@ -40001,7 +40009,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
         typeName(fx.session, "half"); // 아직 다 안 쳤다
         fx.session.mouse(1, 10, 10, 0, 0); // down — 어딘가를 클릭
         try testing.expect(fx.session.rename == null);
-        try testing.expect(t.rt.editor_document.path == null);
+        try testing.expect(t.rt.editorDocument().path == null);
         try testing.expectError(error.FileNotFound, dir.dir.access(io, "half", .{}));
     }
 }
@@ -40074,7 +40082,7 @@ test "U2E 팔레트에서 골라도 열린다 — 카탈로그 항목이 실제�
     fx.session.dispatchAppAction(.new_editor_tab);
     try testing.expectEqual(before + 1, pane.terms.items.len);
     const t = pane.terms.items[pane.terms.items.len - 1];
-    try testing.expect(t.kind == .editor and t.rt.editor_document.untitled != null);
+    try testing.expect(t.kind == .editor and t.rt.editorDocument().untitled != null);
 
     // ⑶ **config 문자열로도 같은 액션이 나온다** — 사용자 keybind 가 이름으로 부른다. 이름이 갈리면
     //    문서에 적힌 `keybind = … = new_editor_tab` 이 조용히 안 먹는다.
@@ -40139,7 +40147,7 @@ test "U2F 상자가 떠 있는데 caret 이 화면 밖으로 나가면 — 보�
     try testing.expect(rename_client.refreshCaretAnchor(fx.session, t.surface.id));
     try testing.expect(fx.session.chrome_host.rename_box.open);
     // 그리고 이름은 여전히 안 붙었다(되돌림이 확정이 아니다).
-    try testing.expect(t.rt.editor_document.path == null);
+    try testing.expect(t.rt.editorDocument().path == null);
 }
 
 test "C0a 저장 실패는 이유별로 말한다 — 하나로 뭉개면 죽는다" {
@@ -40173,7 +40181,7 @@ test "C0a 저장 실패는 이유별로 말한다 — 하나로 뭉개면 죽는
     // ⑵ **읽기 전용** — 제품 경로로 이유가 온다.
     {
         const t = try openPathInActivePane(fx.session, path);
-        t.rt.editor_document.opened.?.file.read_only = true;
+        t.rt.editorDocument().opened.?.file.read_only = true;
         try testing.expectError(error.ReadOnly, saveDocument(fx.session, t));
     }
 
@@ -40385,7 +40393,7 @@ test "C1a-1 저장 충돌은 «알리지 않고 묻는다» — 행동 셋과 �
     // ⑸ **그래서 Enter 는 아무것도 안 지운다.** 포커스가 비교에 있으므로 Enter 는 **비교를 연다** —
     //    디스크도 버퍼도 그대로고 문서는 dirty 로 남는다. 파괴적인 것을 `primary` 로 옮긴 변이는
     //    여기서 죽는다.
-    const buffer_before = try allocator.dupe(u8, c.term.rt.editor_document.opened.?.file.content);
+    const buffer_before = try allocator.dupe(u8, c.term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(buffer_before);
     try c.pressEnter();
     try testing.expect(!s.chrome_host.confirm.open);
@@ -40394,7 +40402,7 @@ test "C1a-1 저장 충돌은 «알리지 않고 묻는다» — 행동 셋과 �
         defer allocator.free(on_disk);
         try testing.expectEqualStrings("outside\n", on_disk);
     }
-    try testing.expectEqualStrings(buffer_before, c.term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(buffer_before, c.term.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(c.term));
 }
 
@@ -40406,7 +40414,7 @@ test "C1a-2 계속 편집은 «아무 일도 안 한다» — 디스크도 버�
     const s = c.fx.session;
 
     try testing.expect(insertText(s, c.term, "x"));
-    const buffer_before = try allocator.dupe(u8, c.term.rt.editor_document.opened.?.file.content);
+    const buffer_before = try allocator.dupe(u8, c.term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(buffer_before);
     try c.writeOutside("keep.txt", "outside\n");
     c.pressSave();
@@ -40414,7 +40422,7 @@ test "C1a-2 계속 편집은 «아무 일도 안 한다» — 디스크도 버�
 
     try testing.expect(!s.chrome_host.confirm.open);
     // **버퍼가 그대로다** — 「취소」가 편집을 버리면 그것은 취소가 아니다.
-    try testing.expectEqualStrings(buffer_before, c.term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(buffer_before, c.term.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(c.term)); // 저장이 안 됐으니 여전히 dirty 다
     {
         const on_disk = try c.diskText(allocator, "keep.txt");
@@ -40464,7 +40472,7 @@ test "C1a-4 다시 읽기는 clean 이고, 되돌리기가 방금 친 것을 되
     const s = c.fx.session;
 
     try testing.expect(insertText(s, c.term, "mine"));
-    const mine = try allocator.dupe(u8, c.term.rt.editor_document.opened.?.file.content);
+    const mine = try allocator.dupe(u8, c.term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(mine);
     try c.writeOutside("rl.txt", "outside\n");
     c.pressSave();
@@ -40472,7 +40480,7 @@ test "C1a-4 다시 읽기는 clean 이고, 되돌리기가 방금 친 것을 되
 
     try testing.expect(!s.chrome_host.confirm.open);
     // ⑴ **디스크 내용이 들어왔다.**
-    try testing.expectEqualStrings("outside\n", c.term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("outside\n", c.term.rt.editorDocument().opened.?.file.content);
     // ⑵ **clean 이다** — 사용자가 「디스크를 받아들였다」고 답했는데 dirty 로 남으면 화면이 그 답과 어긋난다.
     try testing.expect(!isDirty(c.term));
     // ⑶ **디스크를 안 건드렸다** — 다시 읽기는 읽기다.
@@ -40483,7 +40491,7 @@ test "C1a-4 다시 읽기는 clean 이고, 되돌리기가 방금 친 것을 되
     }
     // ⑷ **되돌리기가 되살린다** — 통짜 교체였다면 여기서 안 돌아온다(§4 「undo 를 깨지 않는다」).
     try testing.expect(undoEdit(s, c.term));
-    try testing.expectEqualStrings(mine, c.term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(mine, c.term.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(c.term)); // 되돌린 내용은 디스크와 다르다
 }
 
@@ -40507,7 +40515,7 @@ test "C1a-5 다시 읽기가 실패하면 이유별로 말하고 편집은 남�
     };
 
     try testing.expect(insertText(s, c.term, "mine"));
-    const mine = try allocator.dupe(u8, c.term.rt.editor_document.opened.?.file.content);
+    const mine = try allocator.dupe(u8, c.term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(mine);
     // **글자가 아닌 파일로 바꾼다** — 다시 읽기가 이것을 문서에 넣으면 안 된다.
     try c.writeOutside("bad.txt", "\xff\xfe binary\n");
@@ -40517,7 +40525,7 @@ test "C1a-5 다시 읽기가 실패하면 이유별로 말하고 편집은 남�
     try testing.expect(s.chrome_host.notice.open);
     try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.editor_reload_not_text)));
     // **편집이 그대로 남는다** — 실패한 다시 읽기가 문서를 반쯤 갈아 두면 그것이 최악이다.
-    try testing.expectEqualStrings(mine, c.term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(mine, c.term.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(c.term));
 }
 
@@ -40700,10 +40708,10 @@ test "C1a-11 다시 읽기도 «물은 그 문서»에만 간다 — 활성 추�
     try c.answer('r'); // **다시 읽기는 네 번째 자리(R)**
 
     // ⑴ **물은 문서**가 디스크를 받아들였다.
-    try testing.expectEqualStrings("r1-outside\n", c.term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("r1-outside\n", c.term.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(c.term));
     // ⑵ **남의 문서는 그대로다** — 활성으로 추정하면 여기서 `MINE2` 가 통째로 날아간다.
-    try testing.expectEqualStrings("MINE2r2\n", t2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("MINE2r2\n", t2.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(t2));
 }
 
@@ -40765,8 +40773,8 @@ test "U3-2 저쪽 저장의 결말이 갈린다 — ok 는 «저쪽의 그 파�
     for ([_]maru.session.remote_file_mutation.Outcome{ .stale, .denied, .io, .unsupported, .invalid, .not_found }) |bad| {
         pinFor(fx.session, t, "/srv/app/notes.md");
         app_session_mod.editor_untitled_save_ops.finishRemoteWrite(fx.session, bad);
-        try testing.expect(t.rt.editor_document.untitled != null); // 여전히 이름 없다
-        try testing.expect(t.rt.editor_document.remote == null); // 신원도 안 붙었다
+        try testing.expect(t.rt.editorDocument().untitled != null); // 여전히 이름 없다
+        try testing.expect(t.rt.editorDocument().remote == null); // 신원도 안 붙었다
         try testing.expect(isDirty(t));
         try testing.expect(fx.session.chrome_host.notice.open); // 그리고 **말했다**
         fx.session.chrome_host.notice.dismiss();
@@ -40779,20 +40787,20 @@ test "U3-2 저쪽 저장의 결말이 갈린다 — ok 는 «저쪽의 그 파�
     try testing.expect(fx.session.chrome_host.confirm.open);
     try testing.expect(fx.session.pending_confirm == .untitled_remote_overwrite);
     try testing.expect(save.path_len > 0); // 경로를 들고 있다
-    try testing.expect(t.rt.editor_document.untitled != null); // 아직 이름 없다
+    try testing.expect(t.rt.editorDocument().untitled != null); // 아직 이름 없다
     fx.session.dispatchChromeAction(.confirm_cancel);
     try testing.expectEqual(@as(usize, 0), save.path_len); // 취소는 무상태다
 
     // ⑶ **`ok` 면 저쪽의 그 파일이 된다** — 이름을 버리고 신원을 들고 clean 이다.
     pinFor(fx.session, t, "/srv/app/notes.md");
     app_session_mod.editor_untitled_save_ops.finishRemoteWrite(fx.session, .ok);
-    try testing.expect(t.rt.editor_document.untitled == null);
-    const r = t.rt.editor_document.remote orelse return error.NoRemoteIdentity;
+    try testing.expect(t.rt.editorDocument().untitled == null);
+    const r = t.rt.editorDocument().remote orelse return error.NoRemoteIdentity;
     try testing.expectEqualStrings("user@host", r.dest);
     try testing.expectEqualStrings("/srv/app/notes.md", r.path);
     try testing.expect(!isDirty(t));
     // ⚠️ **로컬 경로와 배타다** — 둘 다 있으면 「어디에 쓸지」가 둘이 된다.
-    try testing.expect(t.rt.editor_document.path == null);
+    try testing.expect(t.rt.editorDocument().path == null);
 }
 
 test "U3-5 저쪽 이름도 «같은 규칙»으로 거른다 — 절대 경로·`..`·NUL 은 base 를 못 벗어난다" {
@@ -40831,8 +40839,8 @@ test "U3-5 저쪽 이름도 «같은 규칙»으로 거른다 — 절대 경로�
         fx.session.chrome_host.notice.dismiss();
         app_session_mod.editor_untitled_save_ops.commit(fx.session, t.surface.id, name);
         try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len);
-        try testing.expect(t.rt.editor_document.remote == null); // 아무것도 붙지 않았다
-        try testing.expect(t.rt.editor_document.untitled != null);
+        try testing.expect(t.rt.editorDocument().remote == null); // 아무것도 붙지 않았다
+        try testing.expect(t.rt.editorDocument().untitled != null);
         try testing.expect(fx.session.chrome_host.notice.open); // 그리고 **말했다**
     }
 
@@ -40891,7 +40899,7 @@ test "U3-6 왕복이 도는 동안 두 번째 저장은 «첫 요청의 보류�
 
     // 첫 결말이 오면 **그 경로로** 붙는다(플래그는 위 `defer` 가 내린다).
     app_session_mod.editor_untitled_save_ops.finishRemoteWrite(fx.session, .ok);
-    const r = t.rt.editor_document.remote orelse return error.NoRemoteIdentity;
+    const r = t.rt.editorDocument().remote orelse return error.NoRemoteIdentity;
     try testing.expectEqualStrings(first, r.path);
 }
 
@@ -40916,18 +40924,18 @@ test "U3-7 결말은 «종류»로 갈린다 — 트리 편집의 답이 문서 
     // ⚠️ **트리 편집의 결말이 그 슬롯으로 온다**(하나를 공유한다). 종류로 안 가르면 **쓰지도 않은
     //    파일의 신원**이 문서에 붙는다 — 사용자는 저장한 적이 없는데 저장됐다고 보게 된다.
     file_panel_ops.finishRemoteRename(fx.session, .{ .outcome = .ok, .kind = .rename });
-    try testing.expect(t.rt.editor_document.remote == null); // 신원이 안 붙었다
-    try testing.expect(t.rt.editor_document.untitled != null); // 이름도 그대로다
+    try testing.expect(t.rt.editorDocument().remote == null); // 신원이 안 붙었다
+    try testing.expect(t.rt.editorDocument().untitled != null); // 이름도 그대로다
     try testing.expectEqualStrings(path, fx.session.pending_untitled_save.path()); // 보류도 그대로다
 
     file_panel_ops.finishRemoteRename(fx.session, .{ .outcome = .ok, .kind = .create_file });
-    try testing.expect(t.rt.editor_document.remote == null);
+    try testing.expect(t.rt.editorDocument().remote == null);
     file_panel_ops.finishRemoteRename(fx.session, .{ .outcome = .ok, .kind = .delete });
-    try testing.expect(t.rt.editor_document.remote == null);
+    try testing.expect(t.rt.editorDocument().remote == null);
 
     // **문서 저장의 결말만** 그 문서를 바꾼다.
     file_panel_ops.finishRemoteRename(fx.session, .{ .outcome = .ok, .kind = .write_file });
-    const r = t.rt.editor_document.remote orelse return error.NoRemoteIdentity;
+    const r = t.rt.editorDocument().remote orelse return error.NoRemoteIdentity;
     try testing.expectEqualStrings(path, r.path);
     try testing.expect(!isDirty(t));
 }
@@ -40961,8 +40969,8 @@ test "U3-8 저쪽 저장도 «같은 상한»에서 멈춘다 — 저쪽이 더 
     //    그리고 상한을 넘으면 **왕복을 아예 시작하지 않는다**(남의 서버로 8 MiB 를 보내고 거절당하지 않는다).
     app_session_mod.editor_untitled_save_ops.commit(fx.session, t.surface.id, "big.md");
     try testing.expect(!fx.session.remote_rename_inflight); // 요청이 안 나갔다
-    try testing.expect(t.rt.editor_document.remote == null); // 신원도 안 붙었다
-    try testing.expect(t.rt.editor_document.untitled != null);
+    try testing.expect(t.rt.editorDocument().remote == null); // 신원도 안 붙었다
+    try testing.expect(t.rt.editorDocument().untitled != null);
     try testing.expect(fx.session.chrome_host.notice.open); // 그리고 **말했다**
     try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.app_save_too_large)));
 }
@@ -40977,11 +40985,11 @@ test "U3-4 저쪽 파일의 탭은 «그 파일 이름»이다 — 「편집기�
     // 이름 없는 동안에는 `untitled-N` 이다(U1 이 그 자리를 잰다).
     try testing.expect(std.mem.startsWith(u8, app_session_mod.termLabel(t), "untitled-"));
 
-    t.rt.editor_document.remote = .{
+    t.rt.editorDocument().remote = .{
         .dest = try allocator.dupe(u8, "user@host"),
         .path = try allocator.dupe(u8, "/srv/app/notes.md"),
     };
-    t.rt.editor_document.untitled = null;
+    t.rt.editorDocument().untitled = null;
 
     // ⚠️ **여기가 회귀 자리다**: 경로도 이름도 없으면 라벨이 「편집기」로 떨어져, 저쪽 문서를 둘
     //    열면 탭이 **둘 다 같은 이름**이 된다(파일 Term 이 파일 이름을 쓰는 그 이유).
@@ -41001,11 +41009,11 @@ test "U3-3 저쪽 파일의 다음 ⌘S 는 묻지 않는다 — 이름도 목�
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "mine"));
     // 저쪽 신원을 직접 세운다(위 ⑶ 이 그 자리를 이미 잰다).
-    t.rt.editor_document.remote = .{
+    t.rt.editorDocument().remote = .{
         .dest = try allocator.dupe(u8, "user@host"),
         .path = try allocator.dupe(u8, "/srv/app/notes.md"),
     };
-    t.rt.editor_document.untitled = null;
+    t.rt.editorDocument().untitled = null;
     try testing.expect(insertText(fx.session, t, "!"));
 
     // ⑴ **`⌘S` 는 이름을 묻지 않는다** — `AskName` 이 아니라 `Handled` 다(이 함수 밖에서 끝났다).
@@ -41028,7 +41036,7 @@ test "C1b-1 비교는 «디스크 ↔ 내 편집» 탭을 열고 답은 아직 �
     const s = c.fx.session;
 
     try testing.expect(insertText(s, c.term, "MINE"));
-    const mine = try allocator.dupe(u8, c.term.rt.editor_document.opened.?.file.content);
+    const mine = try allocator.dupe(u8, c.term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(mine);
     try c.writeOutside("cmp.txt", "THEIRS\n");
     c.pressSave();
@@ -41051,7 +41059,7 @@ test "C1b-1 비교는 «디스크 ↔ 내 편집» 탭을 열고 답은 아직 �
         defer allocator.free(on_disk);
         try testingExpectEqualStringsC1b(on_disk);
     }
-    try testing.expectEqualStrings(mine, c.term.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings(mine, c.term.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(c.term));
     try testing.expect(s.pending_confirm == .none);
     // ⑸ **git 을 안 부른다** — 이 기준으로 백엔드에 요청이 나가면 저장소 없음으로 실패했을 것이다.
@@ -41088,7 +41096,7 @@ test "C1b-2 파일이 또 바뀌면 두 쪽이 «함께» 새로워진다 — gi
     try testing.expect(entry.diff_ready);
     try testing.expect(!entry.diff_failed);
     try testing.expectEqualStrings("T2\n", entry.diff_original);
-    try testing.expectEqualStrings(c.term.rt.editor_document.opened.?.file.content, entry.diff_modified);
+    try testing.expectEqualStrings(c.term.rt.editorDocument().opened.?.file.content, entry.diff_modified);
 
     // ⑵ **여러 번 새로 고쳐도 죽지 않는다**(행 배열이 옛 버퍼를 빌린 채 남으면 여기서 깨진다).
     const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
@@ -41135,7 +41143,7 @@ test "C1b-3 다시 열면 내용이 갱신된다 — 첫 비교를 두 번째 �
     const again = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     try testing.expectEqual(first, again);
     try testing.expectEqualStrings("Y\n", entry.diff_original);
-    try testing.expectEqualStrings(c.term.rt.editor_document.opened.?.file.content, entry.diff_modified);
+    try testing.expectEqualStrings(c.term.rt.editorDocument().opened.?.file.content, entry.diff_modified);
 }
 
 test "C1b-4 문서 Term 이 사라지면 비교는 «실패»다 — 없는 버퍼를 내 편집이라고 보여 주지 않는다" {
@@ -41215,7 +41223,7 @@ test "C1a-8 다시 읽기는 «그 파일의 형식»을 따른다 — 다음 �
     const c = try ConflictFixture.init(allocator, "fmt.txt", "v0\n");
     defer c.deinit(allocator);
     const s = c.fx.session;
-    try testing.expect(!c.term.rt.editor_document.opened.?.file.format.has_bom);
+    try testing.expect(!c.term.rt.editorDocument().opened.?.file.format.has_bom);
 
     try testing.expect(insertText(s, c.term, "mine"));
     // **밖에서 형식까지 바뀌었다** — BOM 이 붙고 CRLF 가 됐다.
@@ -41224,11 +41232,11 @@ test "C1a-8 다시 읽기는 «그 파일의 형식»을 따른다 — 다음 �
     try c.answer('r');
 
     // ⑴ 내용은 BOM 을 뗀 그것이고, **형식은 새 파일의 것**이다.
-    try testing.expectEqualStrings("outer\r\n", c.term.rt.editor_document.opened.?.file.content);
-    try testing.expect(c.term.rt.editor_document.opened.?.file.format.has_bom);
+    try testing.expectEqualStrings("outer\r\n", c.term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(c.term.rt.editorDocument().opened.?.file.format.has_bom);
     try testing.expectEqual(
         maru.session.editor.line_index.LineEnding.crlf,
-        c.term.rt.editor_document.opened.?.file.format.dominant_ending,
+        c.term.rt.editorDocument().opened.?.file.format.dominant_ending,
     );
 
     // ⑵ **그래서 다음 저장이 그 형식으로 쓴다.** 형식을 안 따라가면 여기서 BOM 이 사라진다 — 사용자가
@@ -41284,14 +41292,14 @@ test "C0c 디스크 지문의 수명 — 두 번째 저장이 자기가 쓴 것�
 
     const t = try openPathInActivePane(fx.session, path);
     // ⑴ **열 때 지문이 선다** — 없으면 「연 뒤 바뀌었나」를 영영 못 묻는다.
-    try testing.expect(t.rt.editor_document.opened.?.disk_hash != null);
-    const at_open = t.rt.editor_document.opened.?.disk_hash.?;
+    try testing.expect(t.rt.editorDocument().opened.?.disk_hash != null);
+    const at_open = t.rt.editorDocument().opened.?.disk_hash.?;
 
     // ⑵ **저장을 두 번 이어서** — 갱신을 빠뜨리면 두 번째가 자기가 쓴 것을 「남이 바꿨다」로 읽는다.
     t.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, t, "a"));
     try saveDocument(fx.session, t);
-    const after_first = t.rt.editor_document.opened.?.disk_hash.?;
+    const after_first = t.rt.editorDocument().opened.?.disk_hash.?;
     try testing.expect(after_first != at_open); // 갱신됐다
     try testing.expect(insertText(fx.session, t, "b"));
     try saveDocument(fx.session, t); // ★ 여기서 ExternalConflict 가 나면 갱신이 빠진 것이다
@@ -41311,14 +41319,14 @@ test "C0c 디스크 지문의 수명 — 두 번째 저장이 자기가 쓴 것�
 
     // ⑷ **이름 없는 문서는 지문이 없다**(비교할 과거가 없다) — 그래서 첫 저장이 충돌로 막히지 않는다.
     const u = try openUntitledInActivePane(fx.session);
-    try testing.expect(u.rt.editor_document.opened.?.disk_hash == null);
+    try testing.expect(u.rt.editorDocument().opened.?.disk_hash == null);
     try testing.expect(insertText(fx.session, u, "fresh\n"));
     try testing.expectError(error.AskName, saveDocument(fx.session, u));
     try fx.session.rename_input.setText(allocator, "fresh.txt");
     settings_ops.commitRename(fx.session);
-    try testing.expect(u.rt.editor_document.path != null);
+    try testing.expect(u.rt.editorDocument().path != null);
     // 이름이 붙은 뒤에는 **지문이 선다** — 안 서면 그 문서는 영영 충돌을 못 본다.
-    try testing.expect(u.rt.editor_document.opened.?.disk_hash != null);
+    try testing.expect(u.rt.editorDocument().opened.?.disk_hash != null);
 }
 
 // ── U4a: 미저장 편집의 백업(§3.10) ─────────────────────────────────────────────
@@ -41372,7 +41380,7 @@ test "U4a-1 편집은 곧 백업이 아니다 — 만기 전에는 없고, 만�
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
 
     const t = try openUntitledInActivePane(fx.session);
-    const doc: backup_rules.Doc = .{ .untitled = t.rt.editor_document.untitled.?.n };
+    const doc: backup_rules.Doc = .{ .untitled = t.rt.editorDocument().untitled.?.n };
     try testing.expect(insertText(fx.session, t, "hello"));
     // 편집 통지가 시계를 **미래로** 세웠다 — debounce 가 그것이다.
     try testing.expect(t.rt.editor_backup_dirty);
@@ -41400,7 +41408,7 @@ test "U4a-2 레코드는 그 문서다 — 신원과 내용이 되읽힌다" {
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
 
     const t = try openUntitledInActivePane(fx.session);
-    const n = t.rt.editor_document.untitled.?.n;
+    const n = t.rt.editorDocument().untitled.?.n;
     try testing.expect(insertText(fx.session, t, "line one\nline \"two\"\n"));
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
@@ -41410,7 +41418,7 @@ test "U4a-2 레코드는 그 문서다 — 신원과 내용이 되읽힌다" {
     var parsed = try backup_rules.parse(allocator, bytes);
     defer parsed.deinit(allocator);
     try testing.expectEqual(n, parsed.doc.untitled);
-    try testing.expectEqualStrings(t.rt.editor_document.opened.?.file.content, parsed.content);
+    try testing.expectEqualStrings(t.rt.editorDocument().opened.?.file.content, parsed.content);
 }
 
 test "U4a-3 저장하면 사라진다 — 미저장 편집이 없으니 백업도 없다" {
@@ -41509,7 +41517,7 @@ test "U4a-6 이름이 붙으면 옛 신원의 백업이 사라진다" {
     pinUntitledBase(fx.session, root);
 
     const t = try openUntitledInActivePane(fx.session);
-    const n = t.rt.editor_document.untitled.?.n;
+    const n = t.rt.editorDocument().untitled.?.n;
     try testing.expect(insertText(fx.session, t, "body\n"));
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
@@ -41518,7 +41526,7 @@ test "U4a-6 이름이 붙으면 옛 신원의 백업이 사라진다" {
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "named.txt");
     settings_ops.commitRename(fx.session);
-    try testing.expect(t.rt.editor_document.path != null);
+    try testing.expect(t.rt.editorDocument().path != null);
     // **옛 이름의 파일이 남으면** 다음 실행이 이미 저장된 문서를 「이름 없는 dirty」로 되살린다.
     try testing.expect(!backupExists(root, .{ .untitled = n }));
 }
@@ -41548,7 +41556,7 @@ test "U4a-8 수락된 닫기는 지우고, 앱 종료는 남긴다" {
 
     // ⑴ **앱 종료는 남긴다** — 만기를 기다리지 않고 굳히고, 지우지 않는다.
     const keep = try openUntitledInActivePane(fx.session);
-    const keep_n = keep.rt.editor_document.untitled.?.n;
+    const keep_n = keep.rt.editorDocument().untitled.?.n;
     try testing.expect(insertText(fx.session, keep, "survives"));
     app_session_mod.editor_backup_ops.flushAll(fx.session); // 만기 전인데도 쓴다
     try testing.expect(backupExists(root, .{ .untitled = keep_n }));
@@ -41570,7 +41578,7 @@ test "U4a-9 저장이 끝나도 여전히 dirty 면 보호를 놓지 않는다" 
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
 
     const t = try openUntitledInActivePane(fx.session);
-    const n = t.rt.editor_document.untitled.?.n;
+    const n = t.rt.editorDocument().untitled.?.n;
     try testing.expect(insertText(fx.session, t, "first"));
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
@@ -41629,7 +41637,7 @@ test "U4a-11 백업 파일은 소유자만 읽는다" {
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
 
     const t = try openUntitledInActivePane(fx.session);
-    const n = t.rt.editor_document.untitled.?.n;
+    const n = t.rt.editorDocument().untitled.?.n;
     try testing.expect(insertText(fx.session, t, "secret"));
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
@@ -41656,7 +41664,7 @@ test "U4a-12 에이전트 행 ✕ 는 활성 문서의 백업을 지우지 않�
 
     // 활성 pane 에 **둘**이 있다: 원래 Term 과 방금 연 편집기(활성).
     const t = try openUntitledInActivePane(fx.session);
-    const n = t.rt.editor_document.untitled.?.n;
+    const n = t.rt.editorDocument().untitled.?.n;
     try testing.expect(insertText(fx.session, t, "keep me"));
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
@@ -41686,9 +41694,9 @@ test "U4a-13 한 프레임은 한 문서만 쓰고, 종료는 전부 쓴다" {
     const b = try openUntitledInActivePane(fx.session);
     const c = try openUntitledInActivePane(fx.session);
     const ids = [_]maru.session.editor.backup.Doc{
-        .{ .untitled = a.rt.editor_document.untitled.?.n },
-        .{ .untitled = b.rt.editor_document.untitled.?.n },
-        .{ .untitled = c.rt.editor_document.untitled.?.n },
+        .{ .untitled = a.rt.editorDocument().untitled.?.n },
+        .{ .untitled = b.rt.editorDocument().untitled.?.n },
+        .{ .untitled = c.rt.editorDocument().untitled.?.n },
     };
     for ([_]*Term{ a, b, c }) |t| {
         try testing.expect(insertText(fx.session, t, "x"));
@@ -41757,7 +41765,7 @@ test "U4b-1 지난 세션의 편집이 조용히 되살아난다 — dirty 로, 
 
     const t = try openRestored(&fx, path);
     // ⑴ **내용이 내 편집이다** ⑵ **dirty 다**(디스크는 그대로이므로) ⑶ **묻지 않았다**.
-    try testing.expectEqualStrings("my unsaved work\n", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("my unsaved work\n", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(t));
     try testing.expect(!fx.session.chrome_host.confirm.open);
     // ⑷ **알림 한 줄** — 모달이 아니다.
@@ -41789,7 +41797,7 @@ test "U4b-2 디스크가 그 사이 바뀌어도 «묻지 않는다» — 첫 �
     try plantBackup(allocator, root, .{ .path = .{ .path = path, .disk_hash = contentHash("v0\n") } }, "mine\n");
 
     const t = try openRestored(&fx, path);
-    try testing.expectEqualStrings("mine\n", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("mine\n", t.rt.editorDocument().opened.?.file.content);
     // ⑴ **열 때는 안 묻는다** — 확인이 겹치면 앞의 것이 조용히 취소된다(그 실측이 이 결정의 근거다).
     try testing.expect(!fx.session.chrome_host.confirm.open);
     // ⑵ **묻는 자리는 저장이다** — 레코드의 지문을 들고 있으므로 CAS 가 갈라낸다.
@@ -41817,10 +41825,10 @@ test "U4b-3 되돌리기가 디스크 내용을 되살린다 — 한 편집으�
     try plantBackup(allocator, root, .{ .path = .{ .path = path, .disk_hash = contentHash("on disk\n") } }, "restored\n");
 
     const t = try openRestored(&fx, path);
-    try testing.expectEqualStrings("restored\n", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("restored\n", t.rt.editorDocument().opened.?.file.content);
     // **되돌릴 수 있다** — 통짜 교체였다면 이 줄이 거짓이다.
     try testing.expect(undoEdit(fx.session, t));
-    try testing.expectEqualStrings("on disk\n", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("on disk\n", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t)); // 디스크와 같아졌으니 clean 이다
 }
 
@@ -41872,7 +41880,7 @@ test "U4b-5 손상·잘린 레코드는 무시하고 파일을 그대로 연다 
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = rec_path, .data = full[0 .. full.len - 3] });
 
     const t = try openRestored(&fx, path);
-    try testing.expectEqualStrings("intact\n", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("intact\n", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t));
     try testing.expect(!fx.session.chrome_host.notice.open);
     // **남긴다** — 사용자가 손으로 꺼낼 마지막 기회다(지우는 것은 성공적으로 소비했을 때뿐이다).
@@ -41905,7 +41913,7 @@ test "U4b-6 다른 경로의 레코드는 되살리지 않는다 — 이름은 �
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = rec_path, .data = bytes });
 
     const t = try openRestored(&fx, path);
-    try testing.expectEqualStrings("mine on disk\n", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("mine on disk\n", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t));
 }
 
@@ -41923,9 +41931,9 @@ test "U4b-7 이름 없는 문서를 열 때는 건드리지 않는다 — 그 �
     // 다음 번호의 이름 없는 문서 레코드를 미리 심어 둔다.
     try plantBackup(allocator, root, .{ .untitled = 1 }, "from a past session\n");
     const t = try openUntitledInActivePane(fx.session);
-    try testing.expectEqual(@as(u32, 1), t.rt.editor_document.untitled.?.n);
+    try testing.expectEqual(@as(u32, 1), t.rt.editorDocument().untitled.?.n);
     // **빈 문서 그대로다** — 되살리는 것은 U4c 가 workspace 키와 함께 한다.
-    try testing.expectEqualStrings("", t.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t));
     try testing.expect(backupExists(root, .{ .untitled = 1 })); // 그리고 안 지운다
 }
@@ -41973,9 +41981,9 @@ test "U4b-9 적대적 레코드 둘은 무시된다 — UTF-8 이 아닌 내용,
     const path1 = try std.fmt.bufPrint(&p1, "{s}/x.txt", .{root});
     try plantBackup(allocator, root, .{ .path = .{ .path = path1 } }, "bad \xff\xfe bytes\n");
     const t1 = try openRestored(&fx, path1);
-    try testing.expectEqualStrings("clean\n", t1.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("clean\n", t1.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t1));
-    try testing.expect(std.unicode.utf8ValidateSlice(t1.rt.editor_document.opened.?.file.content));
+    try testing.expect(std.unicode.utf8ValidateSlice(t1.rt.editorDocument().opened.?.file.content));
 
     // ⑵ **저장 상한을 넘는 내용** — 되살리면 저장도 못 하는 dirty 가 된다.
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "y.txt", .data = "small\n" });
@@ -41986,7 +41994,7 @@ test "U4b-9 적대적 레코드 둘은 무시된다 — UTF-8 이 아닌 내용,
     @memset(big, 'a');
     try plantBackup(allocator, root, .{ .path = .{ .path = path2 } }, big);
     const t2 = try openRestored(&fx, path2);
-    try testing.expectEqualStrings("small\n", t2.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("small\n", t2.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t2));
 }
 
@@ -42005,7 +42013,7 @@ test "U4c-1 이름 없는 문서가 번호와 내용으로 돌아온다 — dirt
 
     // ⑴ 문서를 만들고 타이핑한 뒤 **백업이 서기까지** 간다(그것이 재시작이 볼 상태다).
     const created = try openUntitledInActivePane(fx.session);
-    const number = created.rt.editor_document.untitled.?.n;
+    const number = created.rt.editorDocument().untitled.?.n;
     try testing.expect(insertText(fx.session, created, "unsaved draft\n"));
     expireBackupClock(created);
     app_session_mod.editor_backup_ops.tick(fx.session);
@@ -42023,12 +42031,12 @@ test "U4c-1 이름 없는 문서가 번호와 내용으로 돌아온다 — dirt
     defer pane_ops.destroyPane(fx.session, restored);
     var found: ?*Term = null;
     for (restored.terms.items) |t| {
-        if (t.kind == .editor and t.rt.editor_document.untitled != null) found = t;
+        if (t.kind == .editor and t.rt.editorDocument().untitled != null) found = t;
     }
     const doc = found orelse return error.TestUnexpectedResult;
     // ⑶ **번호와 내용이 함께 돌아왔고 dirty 다** — 저장한 적이 없으니 dirty 가 맞다.
-    try testing.expectEqual(number, doc.rt.editor_document.untitled.?.n);
-    try testing.expectEqualStrings("unsaved draft\n", doc.rt.editor_document.opened.?.file.content);
+    try testing.expectEqual(number, doc.rt.editorDocument().untitled.?.n);
+    try testing.expectEqualStrings("unsaved draft\n", doc.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(doc));
     // ⑷ **소비한 레코드는 사라진다**(다음 실행이 또 되살리지 않게) — 그리고 되살린 편집이 다시 보호된다.
     try testing.expect(doc.rt.editor_backup_dirty);
@@ -42043,10 +42051,10 @@ test "U4c-2 복원이 번호 발급기를 그 위로 올린다 — 새 문서가
     // 재시작 직후를 흉내 낸다: 발급기는 비었고 workspace 가 `untitled-9` 를 실어 왔다.
     const restored = try createRestoredUntitledTerm(fx.session, 9);
     defer term_ops.destroyTerm(fx.session, restored);
-    try testing.expectEqual(@as(u32, 9), restored.rt.editor_document.untitled.?.n);
+    try testing.expectEqual(@as(u32, 9), restored.rt.editorDocument().untitled.?.n);
     // **다음 번호는 10 이다** — 안 올리면 새 문서가 `untitled-1` 로 시작해 되살린 것과 같은 이름이 된다.
     const fresh = try openUntitledInActivePane(fx.session);
-    try testing.expectEqual(@as(u32, 10), fresh.rt.editor_document.untitled.?.n);
+    try testing.expectEqual(@as(u32, 10), fresh.rt.editorDocument().untitled.?.n);
 }
 
 test "U4c-3 레코드가 없으면 빈 문서로 돌아온다 — 탭은 사용자가 만든 것이다" {
@@ -42062,8 +42070,8 @@ test "U4c-3 레코드가 없으면 빈 문서로 돌아온다 — 탭은 사용�
 
     const restored = try createRestoredUntitledTerm(fx.session, 3);
     defer term_ops.destroyTerm(fx.session, restored);
-    try testing.expectEqual(@as(u32, 3), restored.rt.editor_document.untitled.?.n);
-    try testing.expectEqualStrings("", restored.rt.editor_document.opened.?.file.content);
+    try testing.expectEqual(@as(u32, 3), restored.rt.editorDocument().untitled.?.n);
+    try testing.expectEqualStrings("", restored.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(restored)); // 되살릴 편집이 없으면 dirty 도 아니다
 }
 
@@ -42077,7 +42085,7 @@ test "U4c-4 섞인 pane 의 순서가 보존된다 — 이름 없는 문서는 �
     const pane = pane_ops.activePane(fx.session);
     const terminals_before = pane.terms.items.len;
     const created = try openUntitledInActivePane(fx.session);
-    const number = created.rt.editor_document.untitled.?.n;
+    const number = created.rt.editorDocument().untitled.?.n;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -42094,7 +42102,7 @@ test "U4c-4 섞인 pane 의 순서가 보존된다 — 이름 없는 문서는 �
     // **자리도 그대로다** — 마지막이 그 문서다.
     const last = restored.terms.items[restored.terms.items.len - 1];
     try testing.expectEqual(.editor, last.kind);
-    try testing.expectEqual(number, last.rt.editor_document.untitled.?.n);
+    try testing.expectEqual(number, last.rt.editorDocument().untitled.?.n);
     for (restored.terms.items[0 .. restored.terms.items.len - 1]) |t| {
         try testing.expect(t.kind != .editor);
     }
@@ -42115,14 +42123,14 @@ test "U4c-5 되살린 문서만 레코드를 삼킨다 — 새로 만든 문서�
     // 복원이 꺼져 있었다). **새로 만드는 문서도 번호 1 을 받는다** — 그때 삼키면 남의 내용이 새 문서에 뜬다.
     try plantBackup(allocator, root, .{ .untitled = 1 }, "from a past session\n");
     const fresh = try openUntitledInActivePane(fx.session);
-    try testing.expectEqual(@as(u32, 1), fresh.rt.editor_document.untitled.?.n);
-    try testing.expectEqualStrings("", fresh.rt.editor_document.opened.?.file.content);
+    try testing.expectEqual(@as(u32, 1), fresh.rt.editorDocument().untitled.?.n);
+    try testing.expectEqualStrings("", fresh.rt.editorDocument().opened.?.file.content);
     try testing.expect(backupExists(root, .{ .untitled = 1 })); // 안 삼켰으니 그대로 있다
 
     // **되살리는 자리는 삼킨다** — 같은 번호, 다른 진입점.
     const restored = try createRestoredUntitledTerm(fx.session, 1);
     defer term_ops.destroyTerm(fx.session, restored);
-    try testing.expectEqualStrings("from a past session\n", restored.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("from a past session\n", restored.rt.editorDocument().opened.?.file.content);
     try testing.expect(!backupExists(root, .{ .untitled = 1 }));
 }
 
@@ -42165,8 +42173,8 @@ test "U4d-3 저쪽에 저장한 문서는 workspace 에 «신원」으로 실린
 
     // 저쪽 신원 문서를 흉내 낸다(U3 의 채택 결과와 같은 상태 — 이름은 없고 원격 신원이 있다).
     const t = try openUntitledInActivePane(fx.session);
-    t.rt.editor_document.untitled = null;
-    t.rt.editor_document.remote = .{
+    t.rt.editorDocument().untitled = null;
+    t.rt.editorDocument().remote = .{
         .dest = try allocator.dupe(u8, "me@host"),
         .path = try allocator.dupe(u8, "/srv/doc.md"),
     };
@@ -42208,10 +42216,10 @@ test "U4d-4 저쪽 신원 문서는 새 이름 없는 문서로 되살아난다 
     app_session_mod.editor_backup_ops.drainRevivals(fx.session);
     try testing.expectEqual(before + 1, pane.terms.items.len);
     const first = pane.terms.items[pane.terms.items.len - 1];
-    try testing.expectEqualStrings("remote work\n", first.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("remote work\n", first.rt.editorDocument().opened.?.file.content);
     // **새 이름 없는 문서다**: 번호가 있고 원격 신원은 없다(그 신원을 다시 세울 수 없다).
-    try testing.expect(first.rt.editor_document.untitled != null);
-    try testing.expect(first.rt.editor_document.remote == null);
+    try testing.expect(first.rt.editorDocument().untitled != null);
+    try testing.expect(first.rt.editorDocument().remote == null);
     try testing.expect(isDirty(first));
     // **알린다** — 조용하면 「왜 이 탭이 생겼지」가 된다.
     try testing.expect(fx.session.chrome_host.notice.open);
@@ -42226,7 +42234,7 @@ test "U4d-4 저쪽 신원 문서는 새 이름 없는 문서로 되살아난다 
     // 되돌리기로 **빈 문서**로 갈 수 있다(한 편집으로 넣었으므로).
     const second = pane.terms.items[pane.terms.items.len - 1];
     try testing.expect(undoEdit(fx.session, second));
-    try testing.expectEqualStrings("", second.rt.editor_document.opened.?.file.content);
+    try testing.expectEqualStrings("", second.rt.editorDocument().opened.?.file.content);
 }
 
 test "U4d-5 원본이 사라진 경로 문서도 같은 규칙으로 되살아난다 — 그 자리는 dock prune 이다" {
@@ -42265,9 +42273,9 @@ test "U4d-5 원본이 사라진 경로 문서도 같은 규칙으로 되살아�
     app_session_mod.editor_backup_ops.drainRevivals(fx.session);
     try testing.expectEqual(before + 1, pane.terms.items.len);
     const revived = pane.terms.items[pane.terms.items.len - 1];
-    try testing.expectEqualStrings("was in a file\n", revived.rt.editor_document.opened.?.file.content);
-    try testing.expect(revived.rt.editor_document.untitled != null);
-    try testing.expect(revived.rt.editor_document.path == null); // 그 경로로 다시 쓰지 않는다
+    try testing.expectEqualStrings("was in a file\n", revived.rt.editorDocument().opened.?.file.content);
+    try testing.expect(revived.rt.editorDocument().untitled != null);
+    try testing.expect(revived.rt.editorDocument().path == null); // 그 경로로 다시 쓰지 않는다
     try testing.expect(!backupExists(root, lost));
 }
 
@@ -42484,7 +42492,7 @@ test "BRP9 커서가 많은 괄호 점프 — 원소 3,000 개 배열의 원소�
     const open_f = std.mem.lastIndexOfScalar(u8, src.items, '(').?;
     const term = try openBracketFixture(&fx, allocator, "many.js", src.items);
     // 큰 문서라 첫 파싱이 한 프레임 예산을 넘는다 — 끝까지 판다(트리가 없으면 점프는 닿은 괄호뿐이다)
-    while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_document.opened.?.file.content);
+    while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
     try testing.expect(term.rt.editor_syntax.provider != null);
     const extras = try allocator.alloc(editor_selection.Selection, n + 1);
     defer allocator.free(extras);
@@ -42586,7 +42594,7 @@ test "BRP12 같은 트리에서 목록이 늦게 완성돼도 강조 캐시가 �
     try text.appendSlice(allocator, "}\n");
     const term = try openBracketFixture(&fx, allocator, "late.js", text.items);
     const st = &term.rt.editor_syntax;
-    const bytes = term.rt.editor_document.opened.?.file.content;
+    const bytes = term.rt.editorDocument().opened.?.file.content;
     while (st.pending) _ = syntax_color.resumeParse(st, bytes);
     try syntax_color.finishBrackets(st, allocator, bytes);
     term.rt.editor_selection = editor_selection.Selection.at(20);
@@ -42687,7 +42695,7 @@ test "LHP1 현재 줄 — caret 줄에 2px 테두리 상자, 포커스와 무관
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     const term = try openBracketFixture(&fx, allocator, "l.txt", "one\ntwo\nthree\nfour\n");
-    const line2 = term.rt.editor_document.opened.?.file.lines.line(2).?;
+    const line2 = term.rt.editorDocument().opened.?.file.lines.line(2).?;
     term.rt.editor_selection = editor_selection.Selection.at(line2.start + 1); // 첫 줄이 아니다
     var got: [16]renderer.metal_frame.GpuQuad = undefined;
     const boxes = try boxedQuads(fx.session, term, .line_highlight, &got);
@@ -42730,7 +42738,7 @@ test "LHP2 활성 줄 번호 — primary caret 줄의 번호만 본문 글자색
     try ensureFoldRanges(fx.session, term);
     try testing.expect(toggleFoldHead(fx.session, term, 0));
     try testing.expectEqual(@as(usize, 4), term.rt.editor_visible_lines.len); // a · d · e · (끝 빈 줄)
-    const line3 = term.rt.editor_document.opened.?.file.lines.line(3).?;
+    const line3 = term.rt.editorDocument().opened.?.file.lines.line(3).?;
     term.rt.editor_selection = editor_selection.Selection.at(line3.start);
     const tk = fx.session.buildChromeTokens();
     const leaf = activeLeafRectForTest(fx.session) orelse return error.NoLeaf;
@@ -42765,11 +42773,11 @@ test "BRP5 길이가 같은 편집 뒤에는 다시 센다 — 키에 revision �
     var got: [16]renderer.metal_frame.GpuQuad = undefined;
     term.rt.editor_selection = editor_selection.Selection.at(3);
     try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
-    const len_before = term.rt.editor_document.opened.?.file.content.len;
+    const len_before = term.rt.editorDocument().opened.?.file.content.len;
     term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 2 };
     try testing.expect(insertText(fx.session, term, ")"));
-    try testing.expectEqualStrings("())x\n", term.rt.editor_document.opened.?.file.content);
-    try testing.expectEqual(len_before, term.rt.editor_document.opened.?.file.content.len);
+    try testing.expectEqualStrings("())x\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(len_before, term.rt.editorDocument().opened.?.file.content.len);
     term.rt.editor_selection = editor_selection.Selection.at(3);
     try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
 
@@ -42779,7 +42787,7 @@ test "BRP5 길이가 같은 편집 뒤에는 다시 센다 — 키에 revision �
     const before = term.rt.editor_brackets.computed;
     _ = try boxedQuads(fx.session, term, .bracket_match_border, &got);
     try testing.expectEqual(before, term.rt.editor_brackets.computed); // 키가 같으면 안 센다(대조군)
-    term.rt.editor_document.opened.?.file.revision += 1;
+    term.rt.editorDocument().opened.?.file.revision += 1;
     _ = try boxedQuads(fx.session, term, .bracket_match_border, &got);
     try testing.expectEqual(before + 1, term.rt.editor_brackets.computed);
 }
@@ -42870,7 +42878,7 @@ test "IGP1 2 칸 파일 — 간격을 2 로 추정해 선을 긋고, 빈 줄은 
     // 탭 폭 설정(기본 4)과 다른 들여쓰기 — 설정 폭만 쓰면 선이 중첩과 어긋난다(§5.1c 「간격」)
     const src = "function f() {\n  if (a) {\n    b();\n\n    c();\n  }\n}\n";
     const term = try openBracketFixture(&fx, allocator, "g.ts", src);
-    const line2 = term.rt.editor_document.opened.?.file.lines.line(2).?;
+    const line2 = term.rt.editorDocument().opened.?.file.lines.line(2).?;
     term.rt.editor_selection = editor_selection.Selection.at(line2.start + 5); // `b();` 안
     var buf: [64]GuideHit = undefined;
     const hits = try guideHits(fx.session, term, &buf);
@@ -43452,4 +43460,94 @@ test "WSP2 비교 뷰 — 두 열 모두 같은 설정으로 공백 기호를 �
     try testing.expectEqual([2]usize{ 3, 4 }, try Count.dots(&fx, term, allocator));
     fx.session.loaded_config.config.editor.render_whitespace = .none;
     try testing.expectEqual([2]usize{ 0, 0 }, try Count.dots(&fx, term, allocator));
+}
+
+test "EDOCREG1 창 종료 뒤에도 read와 request 참조는 본문 신원과 Undo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    var closed = false;
+    defer if (!closed) fx.deinit(testing.allocator);
+    const view = fx.term.rt.editor_document_lease orelse return error.DocumentNotRegistered;
+    const registry = @constCast(view.owner);
+    try testing.expect(registry == &app_session_mod.app_runtime.editor_documents);
+    const read = try registry.retain(view, .read);
+    defer _ = registry.release(read) catch false;
+    const request = try registry.retain(view, .request);
+    defer _ = registry.release(request) catch false;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "한"));
+    setEditorPreedit(fx.session, fx.term, "ㅎ");
+    const state = registry.get(read).?;
+    const undo_len = state.history.undo_len;
+    try testing.expect(undo_len > 0);
+    const revision = state.opened.?.file.revision;
+    fx.deinit(testing.allocator);
+    closed = true;
+    try testing.expect(registry.get(view) == null);
+    try testing.expectEqual(@as(usize, 0), registry.viewCount(read).?);
+    try testing.expect(state == registry.get(request).?);
+    try testing.expect(std.mem.startsWith(u8, state.opened.?.file.content, "한"));
+    try testing.expect(state.path != null);
+    try testing.expectEqual(undo_len, state.history.undo_len);
+    try testing.expectEqual(revision, state.opened.?.file.revision);
+    try testing.expect(!(try registry.release(read)));
+    try testing.expect(try registry.release(request));
+}
+
+test "EDOCREG2 개별 탭 종료는 뷰만 놓고 재열기는 이전 문서와 다른 핸들을 받는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const view = fx.term.rt.editor_document_lease orelse return error.DocumentNotRegistered;
+    const registry = @constCast(view.owner);
+    const pin = try registry.retain(view, .read);
+    defer _ = registry.release(pin) catch false;
+    const state = registry.get(pin).?;
+    const old_pointer = state;
+    const old_surface = fx.term.surface.id;
+    const path = state.path.?;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    const undo_len = state.history.undo_len;
+    const pane = pane_ops.activePane(fx.session);
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, pane.active_term);
+    try testing.expect(term_ops.termBySurfaceId(fx.session, old_surface) == null);
+    try testing.expectEqual(@as(usize, 0), registry.viewCount(pin).?);
+    try testing.expectEqual(undo_len, state.history.undo_len);
+    const reopened = try openPathInActivePane(fx.session, path);
+    const next = reopened.rt.editor_document_lease.?;
+    try testing.expect(next.document.slot != view.document.slot or next.document.generation != view.document.generation);
+    try testing.expect(old_pointer != reopened.rt.editorDocument());
+    try testing.expect(std.mem.startsWith(u8, old_pointer.opened.?.file.content, "x"));
+    try testing.expect(try registry.release(pin));
+}
+
+fn registrationAllocationFailures(allocator: std.mem.Allocator) !void {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var registry: editor.document_registry.Registry = .{ .allocator = allocator };
+    defer registry.deinit() catch unreachable;
+    const saved_allocator = fx.session.allocator;
+    defer fx.session.allocator = saved_allocator;
+    fx.session.allocator = allocator;
+    fx.session.editor_documents = &registry;
+    const pane = pane_ops.activePane(fx.session);
+    const count = pane.terms.items.len;
+    const active = pane.active_term;
+    const old_pointer = fx.term.rt.editorDocument();
+    var prepared = preparePath(fx.session, old_pointer.path.?) catch |err| {
+        try testing.expectEqual(count, pane.terms.items.len);
+        try testing.expectEqual(active, pane.active_term);
+        try testing.expect(old_pointer == fx.term.rt.editorDocument());
+        try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", old_pointer.opened.?.file.content);
+        return err;
+    };
+    defer prepared.deinit(allocator);
+    try testing.expectEqual(count, pane.terms.items.len);
+    try testing.expectEqual(active, pane.active_term);
+}
+
+test "EDOCREG3 등록 준비의 모든 할당 실패는 기존 pane과 문서를 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try testing.checkAllAllocationFailures(testing.allocator, registrationAllocationFailures, .{});
 }

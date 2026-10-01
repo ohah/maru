@@ -63,7 +63,7 @@ pub const State = struct {
 pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) void {
     const st = &term.rt.editor_inlay;
     if (st.waiting) return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     if (term.rt.editor_lsp_version == 0) return;
     const now = self.awakeMs();
     if (st.last_edit_ms != 0 and now -| st.last_edit_ms < quiet_ms) return;
@@ -99,7 +99,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.dirty = true;
         return;
     }
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     inlay.decode(self.allocator, result, doc.file.content, doc.file.lines, enc, &st.hints) catch {
         st.dirty = true;
         return;
@@ -137,7 +137,7 @@ pub fn lineInlays(self: *AppSession, term: *Term, first: usize, count: usize, vi
     st.row_inlays.clearRetainingCapacity();
     st.row_slices.clearRetainingCapacity();
     if (st.hints.items.items.len == 0) return &.{};
-    const doc = term.rt.editor_document.opened orelse return &.{};
+    const doc = term.rt.editorDocument().opened orelse return &.{};
     const budget: usize = @max(1, view_cols / line_budget_divisor);
     const hints = st.hints.items.items;
     // 첫 번째 훑기 — 줄마다 몇 개인지 세어 저장소를 한 번에 잡는다(슬라이스가 움직이지 않게).
@@ -172,7 +172,7 @@ pub fn lineInlays(self: *AppSession, term: *Term, first: usize, count: usize, vi
 pub fn inlaysForLine(term: *Term, src_line: usize, view_cols: u32) []const chrome_editor.content.Inlay {
     const st = &term.rt.editor_inlay;
     if (st.hints.items.items.len == 0) return &.{};
-    const doc = term.rt.editor_document.opened orelse return &.{};
+    const doc = term.rt.editorDocument().opened orelse return &.{};
     const ln = doc.file.lines.line(src_line) orelse return &.{};
     const budget: usize = @max(1, view_cols / line_budget_divisor);
     var n: usize = 0;
@@ -211,7 +211,7 @@ fn sourceLine(term: *Term, render_line: usize) ?usize {
 pub fn lineExtraCols(term: *Term, src_line: usize, view_cols: u32) u32 {
     const st = &term.rt.editor_inlay;
     if (st.hints.items.items.len == 0) return 0;
-    const doc = term.rt.editor_document.opened orelse return 0;
+    const doc = term.rt.editorDocument().opened orelse return 0;
     const ln = doc.file.lines.line(src_line) orelse return 0;
     const budget: usize = @max(1, view_cols / line_budget_divisor);
     var used: usize = 0;

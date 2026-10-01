@@ -924,3 +924,11 @@ zig build test -Dtarget=aarch64-macos 2>&1 | grep -E '\.zig:[0-9]+:[0-9]+: error
 
 L4(플랫폼 어댑터)나 OS 갈래(`builtin.os.tag` 분기, 호스트별 스텁, 중립 계약 필드 rename)를 건드린 PR은
 **CI에 올리기 전에** 위 세 줄을 돌린다. 중립 레이어(L1~L3)만 바꾼 PR은 `mise run check`로 충분하다.
+
+
+### 문서 핸들 제품 수명 검증
+
+`mise exec -- zig build test-editor-document-runtime`은 EDOCREG1~3 제품 판정자 3개와
+import sentinel 4개를 실행한다. 단일 뷰의 등록 준비 실패와 창/탭 종료 뒤 pin 수명을
+빠르게 확인하며, 같은 판정자는 `zig build test-editor`에도 포함된다. 두 뷰 공유나
+실제 OS 입력기 검증을 대체하지 않는다.

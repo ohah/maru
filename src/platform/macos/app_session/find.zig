@@ -98,7 +98,7 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
     // 「전부 바꾸기」가 모두 이 목록을 읽으므로, 소비처마다 범위를 다시 보게 하면 **한 곳만
     // 빠뜨려도 그 자리가 조용히 문서 전체를 건드린다** — 특히 「전부 바꾸기」가 그렇다.
     if (self.chrome_host.find.in_selection) |sel| blk: {
-        const doc = term.rt.editor_document.opened orelse break :blk;
+        const doc = term.rt.editorDocument().opened orelse break :blk;
         var kept: usize = 0;
         for (self.editor_find_matches.items) |m| {
             // 매치는 `(줄, 줄 안 byte)` 이고 범위는 문서 offset 이라 축이 다르다 — `matchRange` 가

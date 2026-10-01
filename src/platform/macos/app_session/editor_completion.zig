@@ -195,7 +195,7 @@ pub fn triggerManual(self: *AppSession) bool {
 /// 서버 없이 버퍼 단어만으로 목록을 세운다(§8.2g-b). 열렸으면 true.
 fn openWordsOnly(self: *AppSession, term: *Term, trigger_char: ?u8) bool {
     const st = &self.editor_completion;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
     const sel = term.rt.editor_selection orelse return false;
     const caret = @min(sel.focus, doc.file.content.len);
@@ -211,7 +211,7 @@ fn openWordsOnly(self: *AppSession, term: *Term, trigger_char: ?u8) bool {
 
 fn ask(self: *AppSession, term: *Term, trigger_char: ?u8) bool {
     const st = &self.editor_completion;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
     const sel = term.rt.editor_selection orelse return false;
     const caret = @min(sel.focus, doc.file.content.len);
@@ -250,7 +250,7 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
         hide(self);
         return;
     };
-    const doc = term.rt.editor_document.opened orelse {
+    const doc = term.rt.editorDocument().opened orelse {
         hide(self);
         return;
     };
@@ -266,7 +266,7 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
 /// LSP 항목(있으면) + 버퍼 단어를 병합해 목록을 세운다(§8.2g-b). 항목은 복사한다. 0 이면 닫힌 채 false.
 fn installItems(self: *AppSession, term: *Term, lsp_items: []const completion.Item, incomplete: bool, enc: lsp.rpc.PositionEncoding) bool {
     const st = &self.editor_completion;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const content = doc.file.content;
     const sel = term.rt.editor_selection orelse return false;
     const caret = @min(sel.focus, content.len);
@@ -379,7 +379,7 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
     st.resolve_waiting = false;
     if (!st.active or st.resolve_item >= st.items.items.len) return;
     const term = visibleEditorTerm(self, st.surface_id) orelse return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     var item = &st.items.items[st.resolve_item];
     item.resolved = true;
     if (result) |r| if (r == .object) {
@@ -423,7 +423,7 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
 /// 접두사로 다시 좁힌다. `force` 면 접두사가 같아도 다시(목록이 갈아 끼워졌다). 결과가 0 이면 false(호출자가 닫는다).
 fn refilter(self: *AppSession, term: *Term, force: bool) bool {
     const st = &self.editor_completion;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const sel = term.rt.editor_selection orelse return false;
     const caret = @min(sel.focus, doc.file.content.len);
     if (caret < st.word_start) return false;
@@ -471,7 +471,7 @@ pub fn refresh(self: *AppSession) bool {
         hide(self);
         return false;
     };
-    const doc = term.rt.editor_document.opened orelse {
+    const doc = term.rt.editorDocument().opened orelse {
         hide(self);
         return false;
     };
@@ -694,7 +694,7 @@ pub fn accept(self: *AppSession) void {
     const st = &self.editor_completion;
     defer hide(self);
     const term = visibleEditorTerm(self, st.surface_id) orelse return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
     if (st.order.items.len == 0) return;
     const pick = @min(self.chrome_host.suggest_box.selected, st.order.items.len - 1);
@@ -724,7 +724,7 @@ pub fn accept(self: *AppSession) void {
         if (c.start < start) shift += @as(i64, @intCast(c.text.len)) - @as(i64, @intCast(c.end - c.start));
     }
     const end: usize = @intCast(@as(i64, @intCast(start)) + shift + @as(i64, @intCast(item.insert.len)));
-    const clamped = @min(end, term.rt.editor_document.opened.?.file.content.len);
+    const clamped = @min(end, term.rt.editorDocument().opened.?.file.content.len);
     term.rt.editor_selection = .{ .anchor_start = clamped, .anchor_end = clamped, .focus = clamped };
     st.accepted += 1;
     if (allow and item.additional.items.len > 0) st.accepted_with_additional += 1;

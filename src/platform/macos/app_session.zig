@@ -1859,13 +1859,13 @@ pub fn termLabel(term: *const Term) []const u8 {
         // **이름 없는 문서는 `untitled-N`**(§3.11) — 「편집기」로 두면 여러 개를 열었을 때 탭이 전부
         // 같은 이름이라 어느 것이 무엇인지 알 수 없다(파일 Term 이 같은 이유로 파일 이름을 쓴다).
         // 사용자 rename 이 있으면 그게 우선인 것은 다른 경로와 같다(`pickLabel` 단일 해석).
-        const auto_name: []const u8 = if (term.rt.editor_document.path) |p|
+        const auto_name: []const u8 = if (term.rt.editorDocument().path) |p|
             std.fs.path.basename(p)
             // **저쪽 파일도 파일 이름이다**(U3 — §3.11). 여기 없으면 탭이 「편집기」로 떨어져, 바로 위
             // 주석이 경고한 상태(여러 개를 열면 이름이 전부 같다)가 저쪽 문서에서 되살아난다.
-        else if (term.rt.editor_document.remote) |*r|
+        else if (term.rt.editorDocument().remote) |*r|
             std.fs.path.basename(r.path)
-        else if (term.rt.editor_document.untitled) |*u|
+        else if (term.rt.editorDocument().untitled) |*u|
             u.text()
         else
             maru.i18n.t(.app_editor);
@@ -2195,8 +2195,11 @@ const TermRuntime = struct {
     /// 드롭 배리어(읽기 전용).
     ended_placeholder: bool = false,
 
-    /// 문서 본문·저장 정보·Undo 이력의 소유자. 아직 단일 Term 값이며 공유 handle은 아니다.
-    editor_document: maru.session.editor.document_state.State = .{},
+    /// 본문이 없는 비교/터미널 및 부착 전 이름을 위한 상태. 등록 뒤에는 본문을 소유하지 않는다.
+    editor_unattached_document: maru.session.editor.document_state.State = .{},
+    /// 일반 텍스트 문서는 앱 전역 registry가 소유한다. 이 뷰는 독립 view lease 한 개를 든다.
+    editor_document_lease: ?maru.session.editor.document_registry.Lease = null,
+
     /// 문서 버퍼를 빌린 논리 줄 배열. 뷰의 파생 상태이므로 본문 수명 안에서만 읽는다.
     editor_lines: []const []const u8 = &.{},
     /// **미저장 편집의 백업 시계**(§3.10) — 편집이 있었고 아직 안 쓴 상태이면 `dirty`, 그 만기가
@@ -2754,6 +2757,11 @@ const TermRuntime = struct {
     /// 마지막으로 커널에 물어본 시각(awake clock ns). **tick 카운터가 아니라 시각인 이유**는 git.zig의
     /// `proc_cwd_poll_interval_ns` 주석에 있다 — 한 프레임에 여러 번 불리는 경로라 카운터로는 주기가 안 지켜진다.
     proc_cwd_polled_ns: i128 = 0,
+    /// 모든 기존 소비자가 같은 문서 주소를 읽는다. 살아 있는 Term의 lease는 stale이면 안 된다.
+    pub fn editorDocument(self: *const @This()) *maru.session.editor.document_state.State {
+        if (self.editor_document_lease) |lease| return lease.owner.get(lease) orelse unreachable;
+        return @constCast(&self.editor_unattached_document);
+    }
 };
 
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): persistent-session P2 seam의 완료 조건은 "GUI layout이
@@ -4864,7 +4872,7 @@ pub const AppSession = struct {
     pub fn editorSaveConflictSmokeProbe(self: *AppSession) EditorSaveConflictSmokeProbe {
         if (!self.surface_initialized or self.tabs.items.len == 0) return .{};
         const term = pane_ops.activePane(self).activeTerm();
-        if (term.kind != .editor or term.rt.editor_document.opened == null) return .{
+        if (term.kind != .editor or term.rt.editorDocument().opened == null) return .{
             .overlay_open = @intFromBool(self.anyOverlayOpen()),
             .compare_ready = self.saveConflictCompareReady(),
         };
@@ -5702,6 +5710,8 @@ pub const AppSession = struct {
     // 예전에는 `var session: AppSession = undefined` 테스트가 이 포인터도 명시 초기화해야 했다
     // ([[devsession-undefined-test-field-trap]]) — **그런 테스트는 이제 없다**(2026-09-10).
     live_registry: *maru.session.LiveSurfaceRegistry(app.LiveSurface) = &app_runtime.live_registry,
+    /// 앱 수명 문서 owner. 창 teardown은 이 저장소 자체를 해제하지 않는다.
+    editor_documents: *maru.session.editor.document_registry.Registry = &app_runtime.editor_documents,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
     // maru는 자기 cwd를 안 바꾸므로 새 탭/분할마다 getcwd를 반복하지 않고, workspace.root 미설정 시 home 승격
     // (workspace_ops.homeForRootCwd)에 쓴다. getcwd 실패 시 false(승격 안 함 — 상속 그대로).
@@ -7891,6 +7901,8 @@ pub const AppSession = struct {
     /// buildKeyHintBadges로 각 chrome 요소 우상단 배지를 그린다. 동작은 keyHintOnFlags/keyHintOnTimer/keyHintCancel 메서드.
     key_hint_hold: keyhint_hold.KeyHintHold = .{},
 
+    /// allocator는 이 창에서 준비한 문서의 마지막 참조까지 유효해야 한다.
+    /// 생산 host는 앱 수명의 smp_allocator를 넘기며 테스트의 주입 allocator도 pin 정산 뒤 놓는다.
     pub fn init(
         self: *AppSession,
         io: std.Io,
@@ -9877,7 +9889,7 @@ pub const AppSession = struct {
         var named: usize = 0;
         forEachTermInScope(self, scope, &named, struct {
             fn f(n: *usize, t: *Term) void {
-                if (editor_ops.isDirty(t) and t.rt.editor_document.untitled == null) n.* += 1;
+                if (editor_ops.isDirty(t) and t.rt.editorDocument().untitled == null) n.* += 1;
             }
         }.f);
         return named == 0;
@@ -14034,7 +14046,7 @@ pub const AppSession = struct {
         if (pane.active_term >= pane.terms.items.len) return false;
         const term = pane.terms.items[pane.active_term];
         // **문서가 있어야 caret 이 그려진다** — `editor_view/frame.zig` 의 `paintCarets` 가 그 자리다.
-        return term.kind == .editor and term.rt.editor_document.opened != null;
+        return term.kind == .editor and term.rt.editorDocument().opened != null;
     }
 
     /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,
@@ -46296,15 +46308,15 @@ test "BLINK-E1 편집기 pane 에서도 커서가 깜빡인다 — 게이트가 
     // ⑵ 편집기 Term 을 **활성 pane** 에 연다 — 문서까지 있어야 caret 이 그려진다.
     const term = try editor_ops.openPathInActivePane(session, path);
     try std.testing.expect(term.kind == .editor);
-    try std.testing.expect(term.rt.editor_document.opened != null);
+    try std.testing.expect(term.rt.editorDocument().opened != null);
     try std.testing.expect(session.editorCaretBlinks());
 
     // ⑶ **문서가 없으면 거짓이다** — 그리지도 않는 caret 때문에 매 틱 전체 grid 를 다시 투영하면
     //    idle 을 못 든다(사이드바 검색이 폭 10칸 미만을 거르는 것과 같은 규율).
-    const saved_doc = term.rt.editor_document.opened;
-    term.rt.editor_document.opened = null;
+    const saved_doc = term.rt.editorDocument().opened;
+    term.rt.editorDocument().opened = null;
     try std.testing.expect(!session.editorCaretBlinks());
-    term.rt.editor_document.opened = saved_doc;
+    term.rt.editorDocument().opened = saved_doc;
 
     // ⑶′ **첫 pane 만 편집기면 거짓이다** — 활성이 아니라 첫 번째를 보는 변이가 여기서 죽는다.
     //     ⑵ 와 **반대 방향**이라 둘이 함께 있어야 상수를 낸 변이도 산 채로 못 지난다.
@@ -49417,7 +49429,7 @@ test "EF11 현재 일치가 primary selection을 옮긴다 — 닫으면 그 자
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.find.open);
     _ = editor_ops.insertText(session, term, "X");
-    try std.testing.expectEqualStrings("abc NEEDLE def NEEDLE\nplain\nX tail\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("abc NEEDLE def NEEDLE\nplain\nX tail\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EF12 매치로 옮길 때 멀티커서를 정리한다 (§3.2)" {
@@ -49493,17 +49505,17 @@ test "EF13 검색으로 옮긴 커서는 앞의 타이핑과 한 묶음이 아�
 
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
     _ = editor_ops.insertText(session, term, "X"); // ⑴ 찾기 전 타이핑
-    try std.testing.expectEqualStrings("Xaa NEEDLE bb\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("Xaa NEEDLE bb\n", term.rt.editorDocument().opened.?.file.content);
 
     session.dispatchAppAction(.toggle_find);
     for ("NEEDLE") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     _ = editor_ops.insertText(session, term, "Y"); // ⑵ 찾아간 자리를 고친다
-    try std.testing.expectEqualStrings("Xaa Y bb\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("Xaa Y bb\n", term.rt.editorDocument().opened.?.file.content);
 
     // **한 번의 되돌리기는 ⑵만 되돌린다.** 묶이면 여기서 ⑴까지 사라진다.
     try std.testing.expect(editor_ops.undoEdit(session, term));
-    try std.testing.expectEqualStrings("Xaa NEEDLE bb\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("Xaa NEEDLE bb\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EF23 ⌥⌘C·⌥⌘W가 찾기 규칙을 바꾼다 — 키 경로 전체 (§5.1)" {
@@ -49852,7 +49864,7 @@ test "ETX5 ⌥Z 가 키 경로로 랩을 토글한다 — 편집기 컨텍스트
     // **줄 이동도 같은 경로로 닿는다** — 컨텍스트 표의 다른 chord 도 디스패치되는지 함께 잰다.
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
     _ = try session.handleKeyEvent(.{ .key = .arrow_down, .modifiers = .{ .option = true } });
-    try std.testing.expectEqualStrings("abc\n", term.rt.editor_document.opened.?.file.content); // 한 줄뿐 — 무동작
+    try std.testing.expectEqualStrings("abc\n", term.rt.editorDocument().opened.?.file.content); // 한 줄뿐 — 무동작
 
     // **찾기가 떠 있으면 오버레이가 키를 갖는다**(키 계약 우선순위 1번). 그래서 `⌥Z` 는 랩을 토글하지
     // 않고 검색어로 들어간다 — 그것이 계약이다. 처음엔 반대로 단언했다가 실측으로 뒤집혔다.
@@ -49959,10 +49971,10 @@ test "CS6 팔레트가 대문자·소문자를 갈라 부른다 — 디스패치
 
     term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(0, 2);
     session.dispatchAppAction(.transform_to_uppercase);
-    try std.testing.expectEqualStrings("AB\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("AB\n", term.rt.editorDocument().opened.?.file.content);
 
     session.dispatchAppAction(.transform_to_lowercase);
-    try std.testing.expectEqualStrings("ab\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("ab\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EF30 좌우 찾기는 실제 Cmd F·옵션 D·Enter·Esc·Cmd G 경로에서 독립적이다" {
@@ -50194,7 +50206,7 @@ test "EF15 바꾸기 하나 — 되돌리기 하나로 풀리고 다음 매치�
     try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
 
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} }); // 바꾸기
-    try std.testing.expectEqualStrings("aa Z bb NEEDLE cc\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("aa Z bb NEEDLE cc\n", term.rt.editorDocument().opened.?.file.content);
 
     // **다음 매치로 갔다** — 바꾼 자리를 다시 가리키면 Enter가 같은 곳을 되풀이한다.
     {
@@ -50205,14 +50217,14 @@ test "EF15 바꾸기 하나 — 되돌리기 하나로 풀리고 다음 매치�
 
     // 한 번 더 → 둘 다 바뀐다.
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
-    try std.testing.expectEqualStrings("aa Z bb Z cc\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("aa Z bb Z cc\n", term.rt.editorDocument().opened.?.file.content);
 
     // **되돌리기 둘이 각각 풀린다**(바꾸기 하나 = 편집 하나).
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(editor_ops.undoEdit(session, term));
-    try std.testing.expectEqualStrings("aa Z bb NEEDLE cc\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("aa Z bb NEEDLE cc\n", term.rt.editorDocument().opened.?.file.content);
     try std.testing.expect(editor_ops.undoEdit(session, term));
-    try std.testing.expectEqualStrings("aa NEEDLE bb NEEDLE cc\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("aa NEEDLE bb NEEDLE cc\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EF16 전부 바꾸기는 되돌리기 하나다 (§5.1·§3.3)" {
@@ -50250,12 +50262,12 @@ test "EF16 전부 바꾸기는 되돌리기 하나다 (§5.1·§3.3)" {
 
     // ⌘Enter = 전부 바꾸기.
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
-    try std.testing.expectEqualStrings("x1\nQQ y QQ\nz QQ\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("x1\nQQ y QQ\nz QQ\n", term.rt.editorDocument().opened.?.file.content);
 
     // **셋이 한 번에 되돌아간다.** 셋이면 사용자는 "전부 바꾸기를 취소"할 수 없다.
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(editor_ops.undoEdit(session, term));
-    try std.testing.expectEqualStrings("x1\nAB y AB\nz AB\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("x1\nAB y AB\nz AB\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EF30 regex mode searches and replaces named captures with one undo" {
@@ -50312,10 +50324,10 @@ test "EF30 regex mode searches and replaces named captures with one undo" {
         _ = try session.handleKeyEvent(.{ .key = .{ .char = ch }, .modifiers = .{} });
     }
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
-    try std.testing.expectEqualStrings("42:foo 7:bar\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("42:foo 7:bar\n", term.rt.editorDocument().opened.?.file.content);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(editor_ops.undoEdit(session, term));
-    try std.testing.expectEqualStrings("foo-42 bar-7\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("foo-42 bar-7\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EF17 바꿀 문자열이 검색어를 품어도 되풀이하지 않는다 (§5.1)" {
@@ -50354,13 +50366,13 @@ test "EF17 바꿀 문자열이 검색어를 품어도 되풀이하지 않는다 
 
     // 전부 바꾸기: 한 번의 편집이라 새로 생긴 `a`를 다시 훑지 않는다.
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
-    try std.testing.expectEqualStrings("aa b aa\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("aa b aa\n", term.rt.editorDocument().opened.?.file.content);
 
     // 하나씩 바꾸기도 **자란 자리 뒤**로 간다 — 다시 그 자리를 가리키면 무한히 자란다.
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
-    const grew = term.rt.editor_document.opened.?.file.content;
+    const grew = term.rt.editorDocument().opened.?.file.content;
     try std.testing.expect(grew.len < 40); // 되풀이했다면 여기서 폭발한다
 }
 
@@ -50396,10 +50408,10 @@ test "EF18 읽기 전용 문서는 안 바뀐다 (§3.5)" {
     _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
     for ("Z") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
 
-    term.rt.editor_document.opened.?.file.read_only = true;
+    term.rt.editorDocument().opened.?.file.read_only = true;
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
-    try std.testing.expectEqualStrings("aa NEEDLE bb\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("aa NEEDLE bb\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EF19 바꾼 뒤 가는 곳은 **바꾼 자리 뒤**다 — 앞으로 돌아가지 않는다 (§5.1)" {
@@ -50440,7 +50452,7 @@ test "EF19 바꾼 뒤 가는 곳은 **바꾼 자리 뒤**다 — 앞으로 돌�
     _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'B' }, .modifiers = .{} });
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} }); // 바꾸기
-    try std.testing.expectEqualStrings("A x B y A\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("A x B y A\n", term.rt.editorDocument().opened.?.file.content);
 
     // 남은 매치는 **앞(0)과 뒤(8)** 둘이다. 가야 할 곳은 뒤다 — 앞으로 돌아가면 사용자는 이미
     // 지나온 자리를 다시 밟는다.
@@ -50485,7 +50497,7 @@ test "EF20 바꾼 문자열이 검색어를 품으면 **자란 만큼** 건너�
     for ("AA") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
 
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} }); // 첫 매치를 바꾼다
-    try std.testing.expectEqualStrings("AA x A\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("AA x A\n", term.rt.editorDocument().opened.?.file.content);
 
     // 매치는 셋(0·1·5). **방금 만든 둘을 건너뛰고** 원래의 셋째로 가야 한다.
     try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
@@ -50589,7 +50601,7 @@ test "IME6 포커스를 잃으면 편집기 조합이 확정된다 — 유령 �
 
     // 조합은 **문서로 확정**되고 화면 상태는 비었다.
     try std.testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
-    try std.testing.expectEqualStrings("a\xed\x95\x9cb\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a\xed\x95\x9cb\n", term.rt.editorDocument().opened.?.file.content);
 
     session.setFocused(true);
     const extra = try allocator.alloc(maru.session.editor.selection.Selection, 1);
@@ -50600,7 +50612,7 @@ test "IME6 포커스를 잃으면 편집기 조합이 확정된다 — 유령 �
     input_ops.imeBegin(session);
     input_ops.imeMarked(session, "글");
     session.setFocused(false);
-    try std.testing.expectEqualStrings("a글한b글\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a글한b글\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "IME Enter commits editor preedit before newline instead of sending it to PTY" {
@@ -50636,7 +50648,7 @@ test "IME Enter commits editor preedit before newline instead of sending it to P
     input_ops.imeMarked(session, "");
     input_ops.imeInsert(session, "한");
     input_ops.imeEnd(session, .{ .key = .enter, .modifiers = .{} });
-    try std.testing.expectEqualStrings("a한\nb\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a한\nb\n", term.rt.editorDocument().opened.?.file.content);
     try std.testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
 
     // A later AppKit callback still belongs to the editor that began the
@@ -50663,7 +50675,7 @@ test "IME Enter commits editor preedit before newline instead of sending it to P
     input_ops.imeInsert(session, "나");
     input_ops.imeMarked(session, "");
     input_ops.imeEnd(session, .{ .key = .enter, .modifiers = .{} });
-    try std.testing.expectEqualStrings("a한\n나b\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a한\n나b\n", term.rt.editorDocument().opened.?.file.content);
     try std.testing.expectEqual(terminal_bytes, session.total_terminal_input_bytes);
 }
 
@@ -50692,9 +50704,9 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     const term = try editor_ops.openPathInActivePane(session, path);
     _ = try session.tick();
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
-    try std.testing.expectEqual(@as(?usize, 4), input_ops.byteAtUtf16(term.rt.editor_document.opened.?.file.content, 2));
-    try std.testing.expect(input_ops.byteAtUtf16(term.rt.editor_document.opened.?.file.content, 3) == null);
-    try std.testing.expectEqual(@as(?usize, 4), input_ops.utf16AtByte(term.rt.editor_document.opened.?.file.content, 8));
+    try std.testing.expectEqual(@as(?usize, 4), input_ops.byteAtUtf16(term.rt.editorDocument().opened.?.file.content, 2));
+    try std.testing.expect(input_ops.byteAtUtf16(term.rt.editorDocument().opened.?.file.content, 3) == null);
+    try std.testing.expectEqual(@as(?usize, 4), input_ops.utf16AtByte(term.rt.editorDocument().opened.?.file.content, 8));
     try std.testing.expectEqualStrings("한😀", input_ops.editorImeSubstring(session, 1, 3).?);
     try std.testing.expect(input_ops.editorImeSubstring(session, 3, 1) == null); // half-surrogate boundary
     try std.testing.expect(!input_ops.editorImeReplacement(session, 3, 1)); // rejected range cannot move the caret
@@ -50709,7 +50721,7 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     input_ops.imeBegin(session);
     try std.testing.expect(input_ops.editorImeReplacement(session, 1, 1));
     input_ops.imeMarked(session, "글");
-    try std.testing.expectEqualStrings("a한😀b\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a한😀b\n", term.rt.editorDocument().opened.?.file.content);
     const ranges = input_ops.editorImeRanges(session).?;
     try std.testing.expectEqual(@as(usize, 1), ranges.marked_start);
     try std.testing.expectEqual(@as(usize, 1), ranges.selected_start);
@@ -50721,7 +50733,7 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     try std.testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.start());
     input_ops.imeInsert(session, "글");
     input_ops.imeEnd(session, null);
-    try std.testing.expectEqualStrings("a글😀b\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a글😀b\n", term.rt.editorDocument().opened.?.file.content);
     try std.testing.expectEqual(@as(usize, 2), input_ops.editorImeRanges(session).?.selected_start);
     const extra = try allocator.alloc(maru.session.editor.selection.Selection, 1);
     extra[0] = .{ .anchor_start = 1, .anchor_end = 4, .focus = 4 };
@@ -50736,7 +50748,7 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     input_ops.imeMarked(session, "");
     input_ops.imeInsert(session, "나");
     input_ops.imeEnd(session, null);
-    try std.testing.expectEqualStrings("a나😀b\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a나😀b\n", term.rt.editorDocument().opened.?.file.content);
     // A disjoint secondary caret must survive an explicit primary range.
     // The committed text replaces that exact range and is also copied to the
     // secondary caret, rather than silently collapsing multi-cursor editing.
@@ -50749,11 +50761,11 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     try std.testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
     try std.testing.expectEqual(@as(usize, 9), term.rt.editor_extra_selections[0].focus);
     input_ops.imeMarked(session, "다");
-    try std.testing.expectEqualStrings("a나😀b\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a나😀b\n", term.rt.editorDocument().opened.?.file.content);
     input_ops.imeMarked(session, "");
     input_ops.imeInsert(session, "다");
     input_ops.imeEnd(session, null);
-    try std.testing.expectEqualStrings("a다😀b다\n", term.rt.editor_document.opened.?.file.content);
+    try std.testing.expectEqualStrings("a다😀b다\n", term.rt.editorDocument().opened.?.file.content);
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(input_ops.editorImeRanges(session) == null);
 }
@@ -66789,7 +66801,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     try std.testing.expect(readonly_at == null);
 
     // **읽기 전용 문서에서는 뜬다.** 위 단언이 「늘 거짓」으로 통과하지 않게 대조를 둔다.
-    editor_term.rt.editor_document.opened.?.file.read_only = true;
+    editor_term.rt.editorDocument().opened.?.file.read_only = true;
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
@@ -66828,7 +66840,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
             try std.testing.expect(entries[eol_i].rect.x < entries[lang_at.?].rect.x); // 줄바꿈보다는 오른쪽
         }
     }
-    editor_term.rt.editor_document.opened.?.file.read_only = false;
+    editor_term.rt.editorDocument().opened.?.file.read_only = false;
 
     // ③ **커서 위치는 편집기 묶음에서 가장 오른쪽 = 가장 오래 산다**(§2.2 표의 첫 항목).
     //    이것이 커밋 전체의 논거인데 재는 자리가 없어, 코드에서 자리를 정반대(묶음 맨 뒤)로 옮겨도
@@ -67714,8 +67726,8 @@ test "N1: 편집기 Term을 열고 세션을 닫으면 문서·줄·경로가 �
     const term = try editor_ops.openPathInActivePane(session, path);
     try std.testing.expectEqual(control_surface.SurfaceKind.editor, term.kind);
     try std.testing.expectEqual(@as(usize, 4), term.rt.editor_lines.len); // 끝 개행이 만든 빈 줄까지
-    try std.testing.expect(term.rt.editor_document.opened != null);
-    try std.testing.expectEqualStrings(path, term.rt.editor_document.path.?);
+    try std.testing.expect(term.rt.editorDocument().opened != null);
+    try std.testing.expectEqualStrings(path, term.rt.editorDocument().path.?);
     // 누수 판정은 `defer session.deinit()`과 testing.allocator가 한다.
 }
 
@@ -67825,7 +67837,7 @@ test "U2A 저장 뒤 컨트롤 플레인·사이드바가 같은 사실을 말�
     try std.testing.expectError(error.AskName, editor_ops.saveDocument(session, t));
     try session.rename_input.setText(allocator, "outward.txt");
     settings_ops.commitRename(session);
-    try std.testing.expect(t.rt.editor_document.path != null);
+    try std.testing.expect(t.rt.editorDocument().path != null);
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -67838,7 +67850,7 @@ test "U2A 저장 뒤 컨트롤 플레인·사이드바가 같은 사실을 말�
         if (dto.detail != .editor) continue;
         seen += 1;
         try std.testing.expect(dto.detail.editor.path != null); // ★ 경로가 나간다
-        try std.testing.expectEqualStrings(t.rt.editor_document.path.?, dto.detail.editor.path.?);
+        try std.testing.expectEqualStrings(t.rt.editorDocument().path.?, dto.detail.editor.path.?);
         try std.testing.expect(!dto.detail.editor.dirty); // 방금 쓴 것이 곧 디스크 내용이다
         try std.testing.expectEqualStrings("outward.txt", dto.title); // ★ 더 이상 untitled-N 이 아니다
     }
@@ -80871,7 +80883,7 @@ test "SCMC1 충돌 행의 동작 버튼은 편집 가능한 편집기를 연다 
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expectEqual(@as(u64, entry.surface_id), term.surfaceId());
     try std.testing.expect(term.kind == .editor);
-    const doc = term.rt.editor_document.opened orelse return error.MissingDocument;
+    const doc = term.rt.editorDocument().opened orelse return error.MissingDocument;
     try std.testing.expect(!doc.file.read_only);
     // 충돌 표시가 든 **그 파일**을 들고 있다(다른 파일을 열고 초록이 되지 않게).
     try std.testing.expect(std.mem.startsWith(u8, doc.file.content, "<<<<<<< HEAD"));
@@ -93191,8 +93203,8 @@ test "원격 탐색기 파일 열기 수직: 결말→미러→열림→read_onl
         defer a.free(mirrored);
         try std.testing.expectEqualStrings("hello from remote\n", mirrored);
     }
-    try std.testing.expect(term.rt.editor_document.opened != null);
-    try std.testing.expect(term.rt.editor_document.opened.?.file.read_only);
+    try std.testing.expect(term.rt.editorDocument().opened != null);
+    try std.testing.expect(term.rt.editorDocument().opened.?.file.read_only);
     // 미러 정리(판정자 위생 — /tmp 에 pid 무관 해시 경로라 양쪽 정리 규율).
     const mirror_dir = std.fs.path.dirname(term.file_entry.?.path).?;
     defer std.Io.Dir.cwd().deleteTree(io, mirror_dir) catch {};

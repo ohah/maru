@@ -51,7 +51,7 @@ pub fn gotoReferencesAtCaret(self: *AppSession) bool {
 pub fn gotoLocationsAtCaret(self: *AppSession, kind: lsp.rpc.LocationKind) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_document.opened orelse return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
     const sel = term.rt.editor_selection orelse return false;
     const st = &self.editor_references;
     if (editor_lsp.readyClientFor(self, term) != null and !editor_lsp.locationKindSupported(self, term, kind)) {
@@ -109,7 +109,7 @@ pub fn tick(self: *AppSession) void {
     st.retry_at_ms = 0;
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_diff != null) return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
     st.retried += 1;
     if (!request(self, term, @min(sel.focus, doc.file.content.len))) {
@@ -155,8 +155,8 @@ pub fn onLocationsResponse(self: *AppSession, kind: lsp.rpc.LocationKind, seq: u
     const kind_none = noneKey(kind);
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return;
-    const doc = term.rt.editor_document.opened orelse return;
-    const current_path = term.rt.editor_document.path orelse "";
+    const doc = term.rt.editorDocument().opened orelse return;
+    const current_path = term.rt.editorDocument().path orelse "";
 
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
     defer arena_state.deinit();

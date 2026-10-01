@@ -287,7 +287,7 @@ fn splitAll(self: *AppSession, state: *State) !void {
 pub fn ensureMaps(self: *AppSession, term: *Term) void {
     const state = &(term.rt.editor_merge orelse return);
     if (!state.ready) return;
-    const doc = term.rt.editor_document.opened orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
     const rev = doc.file.revision;
     if (state.map_revision) |have| if (have == rev) return;
     freeMaps(self, state);
@@ -1145,8 +1145,8 @@ test "MRG7 충돌 행으로 연 편집기는 «병합 모드» 로 선다 (제�
     // ⑷ **저장 표식과 «같이» 붙는다.** 병합 Term 은 고치는 중인 문서라 dirty 가 흔한데, 한쪽만
     // 나오면 「고치는 중」이나 「무엇을 고치는 중」 하나가 사라진다.
     // dirty 는 **파생값**이다(`내용 해시 != 저장 해시`) — 플래그가 없으므로 저장 해시를 흔든다.
-    const saved_hash = if (term.rt.editor_document.opened) |d| d.saved_hash else 0;
-    if (term.rt.editor_document.opened) |*doc| doc.saved_hash = saved_hash ^ 1;
+    const saved_hash = if (term.rt.editorDocument().opened) |d| d.saved_hash else 0;
+    if (term.rt.editorDocument().opened) |*doc| doc.saved_hash = saved_hash ^ 1;
     const dirty_label = try session.diffAwareLabel(allocator, term);
     defer allocator.free(dirty_label);
     // **자리까지 못박는다** — 표식이 뒤로 가도 「둘 다 들어 있나」로는 안 갈린다(적대적 6회차 A8).
@@ -1156,7 +1156,7 @@ test "MRG7 충돌 행으로 연 편집기는 «병합 모드» 로 선다 (제�
     });
     defer allocator.free(want_dirty);
     try testing.expectEqualStrings(want_dirty, dirty_label);
-    if (term.rt.editor_document.opened) |*doc| doc.saved_hash = saved_hash;
+    if (term.rt.editorDocument().opened) |*doc| doc.saved_hash = saved_hash;
 
     // ⑸ **대조군: 충돌이 «아닌» 행으로 연 편집기는 병합 모드가 아니다.** 이것이 없으면 「모든 파일이
     // 병합 모드」로 갈려도 위 셋이 전부 초록이다.
@@ -1345,7 +1345,7 @@ test "MRG12 진짜 충돌 저장소에서 세 판이 «병합 Term 까지» 온�
     try testing.expectEqualStrings("THEIRS\n", state.theirs);
     try testing.expect(!state.degradesToTwoWay());
     // **작업트리 문서는 그대로 충돌 표시가 든 파일이다**(Result 는 그것을 고치는 자리다).
-    const doc = term.rt.editor_document.opened orelse return error.MissingDocument;
+    const doc = term.rt.editorDocument().opened orelse return error.MissingDocument;
     try testing.expect(std.mem.indexOf(u8, doc.file.content, "<<<<<<<") != null);
 }
 
@@ -1728,7 +1728,7 @@ test "MRG21 대응표는 «제품의 쪼개기 경로» 를 지나 선다 — �
     defer allocator.free(path);
     const opened = try pane_ops.openFileTermInActivePane(session, path, .text);
     const term = opened.term;
-    try testing.expect(term.rt.editor_document.opened != null);
+    try testing.expect(term.rt.editorDocument().opened != null);
     term.rt.editor_merge = .{ .request_id = 61 };
 
     // ⑴ 준비 전에는 표가 없다 — 빈 줄 배열과 비교하면 「전부 추가」라는 거짓 표가 선다.

@@ -98,7 +98,7 @@ pub fn marks(self: *AppSession, term: *Term) ?[]const []const Mark {
     if (term.rt.editor_diff != null) return null;
     const mode = modeFor(self, term);
     if (mode == .never) return null;
-    const doc = term.rt.editor_document.opened orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
     const content = doc.file.content;
     const st = &term.rt.editor_brackets;
 

@@ -29,10 +29,12 @@ test "EMK5 performKeyEquivalent 가 편집기 질의를 오버레이 뒤에 부�
     // 순서를 바꾸면 죽는다.
     const block =
         \\        if controller?.anyOverlayOpen == true {
+        \\            guard commitMarkedTextIfComposing() else { return true }
         \\            controller?.handleKeyDown(event)
         \\            return true
         \\        }
         \\        if controller?.editorOwnsChord(event) == true {
+        \\            guard commitMarkedTextIfComposing() else { return true }
         \\            controller?.handleKeyDown(event)
         \\            return true
         \\        }

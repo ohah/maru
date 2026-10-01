@@ -950,3 +950,14 @@ OS 한국어 IME 화면 검증을 의미하지 않는다. 범위와 남은 작�
 편집/Undo/Redo 게시·독립 선택/스크롤·원래 뷰 닫기와 할당 실패를 검증한다.
 `-Doptimize=ReleaseFast`로도 실행한다. 전체 `test-editor`와 `check`에도 포함되며
 공유 IME·LSP·저장·사용자 split UI 완료 또는 실제 OS 입력 증거를 대신하지 않는다.
+
+
+### IME 확정 승인과 host 정산
+
+`mise exec -- zig build test-macos-ime-ack`는 실제 editor의 읽기 전용/pending 확정 실패가
+ABI에서 `key_failed`로 전달되고 유효한 재시도와 중복 확정이 한 번만 적용되는지 검증한다.
+같은 gate의 `tools/test-macos-ime-ack-host.py`는 실제 Swift 메서드를 추출해 stub ABI/OS context로
+실패 정산과 interaction gate를 실행하며 기본 macOS ABI 테스트에도 포함된다.
+`-Doptimize=ReleaseFast`로도 실행한다. `test-editor-shared`의 공유 IME admission 판정자는
+두 뷰의 선택·문서 통지 불변과 allocation 실패 24지점의 재시도를 검증한다. 실제 OS 입력기와
+후보창 검증을 대체하지 않는다.

@@ -3846,3 +3846,8 @@ stale revision 거절과 다른 뷰의 미확정 IME 보존도 판정한다. 이
 사용자 승인이다. [공유 문서 계획](plans/editor-shared-document.md)이 지원 범위와 나머지 gate를 소유한다.
 이 행은 내부 로컬·단일 창 편집 경로다. 경로 정본 통합·원격/untitled/diff/merge·공유 IME·provider·
 저장/외부 변경/복원·사용자 분할 명령·실제 HID/화면은 아직 종료 gate가 남았다.
+
+
+IME 확정 승인: `zig build test-macos-ime-ack`(Debug/ReleaseFast)는 backend→ABI의 거절/재시도를
+검증한다. 공유 editor gate의 read-only와 allocation 실패 주입을 함께 확인한다. Swift stub 기반
+독립 원문 추출 실행과 실제 OS HID·AppKit 후보창 증거는 별도이며 공유 조합 표시 완료로 세지 않는다.

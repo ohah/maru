@@ -2036,7 +2036,21 @@ pub fn build(b: *std.Build) void {
     }
     const install_macos_app_host_abi_lib = b.addInstallArtifact(macos_app_host_abi_lib, .{});
 
+    const ime_ack_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"IME_ACK"},
+    });
+    const run_ime_ack_tests = b.addRunArtifact(ime_ack_tests);
+    run_ime_ack_tests.setCwd(b.path("."));
+    const ime_ack_host = b.addSystemCommand(&.{ "python3", "tools/test-macos-ime-ack-host.py" });
+    ime_ack_host.setCwd(b.path("."));
+    ime_ack_host.has_side_effects = true;
+    const ime_ack_step = b.step("test-macos-ime-ack", "Run backend ABI admission and Swift host IME cleanup judges");
+    ime_ack_step.dependOn(&run_ime_ack_tests.step);
+    ime_ack_step.dependOn(&ime_ack_host.step);
+
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
+    test_macos_app_host_abi_step.dependOn(&ime_ack_host.step);
     // fresh-process 행도 서로 병렬 실행하면 daemon fixture와 wall-clock 성능 오라클이 다시 경쟁한다.
     // aggregate 뒤 실제 TTY, 제품 socket 두 행, teardown, CoreText cache 행 순으로 직렬화한다.
     run_macos_external_tty_fresh_tests.step.dependOn(&run_macos_app_host_abi_shards.step);

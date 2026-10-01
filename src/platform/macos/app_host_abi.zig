@@ -2136,8 +2136,7 @@ pub export fn maru_macos_app_session_ime_delete_backward(session: ?*AppSession) 
 // 포커스 변화. 잃으면 조합 중 텍스트를 확정(커밋)한다 — Terminal.app/Ghostty 의미론.
 pub export fn maru_macos_app_session_set_focus(session: ?*AppSession, focused: i32) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
-    app_session.setFocused(focused != 0);
-    return @intFromEnum(Status.ok);
+    return @intFromEnum(if (app_session.trySetFocused(focused != 0)) Status.ok else Status.key_failed);
 }
 
 // 세팅 등 chrome 오버레이가 열렸는지(keybind 녹음 중이면 settings.open=true라 포함). Swift performKeyEquivalent가 1이면
@@ -2197,8 +2196,7 @@ pub export fn maru_macos_app_session_dispatch_web_app_action(session: ?*AppSessi
 // marked text와 Surface preedit가 어긋나지 않게 한다(조합 없으면 무동작).
 pub export fn maru_macos_app_session_commit_composition(session: ?*AppSession) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
-    app_session.commitComposition();
-    return @intFromEnum(Status.ok);
+    return @intFromEnum(if (app_session.tryCommitComposition()) Status.ok else Status.key_failed);
 }
 
 // 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류를 돌려준다(CursorKind: 0=arrow/사이드바·탭
@@ -8867,4 +8865,66 @@ test "테스트 러너는 셸이 무시로 물려준 SIGINT·SIGQUIT 를 기본 
         std.posix.sigaction(sig, null, &current);
         try std.testing.expect(current.handler.handler != std.posix.SIG.IGN);
     }
+}
+
+test "IME_ACK1 commit and focus ABI reject read-only admission and retry exactly once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const editor = @import("app_session/editor/mod.zig");
+    const input = @import("app_session/input.zig");
+    const ta = std.testing.allocator;
+    const io = std.testing.io;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "ack.zig", .data = "ab" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(ta, &.{ root, "ack.zig" });
+    defer ta.free(path);
+    const session = try ta.create(AppSession);
+    defer ta.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), ta, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const term = try editor.openPathInActivePane(session, path);
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(2);
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_commit_composition(session));
+    for ([_]bool{ false, true }) |pending| {
+        try std.testing.expect(editor_ime_ops.marked(session, "한", .{ .location = 1, .length = 0 }, null));
+        if (pending) {
+            input.imeBegin(session);
+            try std.testing.expect(editor_ime_ops.insert(session, "한", null));
+            try std.testing.expect(editor_ime_ops.marked(session, "", .{ .location = 0, .length = 0 }, null));
+            term.rt.editorDocument().opened.?.file.read_only = true;
+            input.imeEnd(session, null);
+            try std.testing.expect(session.ime_editor_commit_pending);
+        }
+        term.rt.editorDocument().opened.?.file.read_only = true;
+        const rev = term.rt.editorDocument().opened.?.file.revision;
+        const before = try ta.dupe(u8, term.rt.editorDocument().opened.?.file.content);
+        defer ta.free(before);
+        const marked = editor_ime_ops.state(session).?.marked;
+        if (pending) try std.testing.expectEqual(@as(usize, 0), marked.length);
+        for (0..2) |_| {
+            try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.key_failed)), maru_macos_app_session_commit_composition(session));
+            try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.key_failed)), maru_macos_app_session_set_focus(session, 0));
+            try std.testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content);
+            try std.testing.expectEqual(rev, term.rt.editorDocument().opened.?.file.revision);
+            try std.testing.expectEqual(@as(?u64, term.surface.id), session.ime_terminal_target_id);
+            try std.testing.expectEqual(marked, editor_ime_ops.state(session).?.marked);
+        }
+        term.rt.editorDocument().opened.?.file.read_only = false;
+        try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_set_focus(session, 0));
+        const accepted_rev = term.rt.editorDocument().opened.?.file.revision;
+        try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_commit_composition(session));
+        try std.testing.expectEqual(accepted_rev, term.rt.editorDocument().opened.?.file.revision);
+        try std.testing.expectEqual(@as(?u64, null), session.ime_terminal_target_id);
+        try std.testing.expect(!session.ime_editor_commit_pending);
+        try std.testing.expectEqualStrings(if (pending) "ab한한" else "ab한", term.rt.editorDocument().opened.?.file.content);
+    }
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_commit_composition(null));
 }

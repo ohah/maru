@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 190u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 191u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -601,6 +601,9 @@ uint32_t maru_macos_session_default_false_observation(void);
    스레드에서 호출한다(같은 값이면 무해). NULL·빈 값·128 바이트 초과는 무동작이며, 그때 `ui.language = auto`
    는 영어로 떨어진다. */
 void maru_macos_app_set_ui_locale(const uint8_t *tag, size_t tag_len);
+/* ABI v191: 시작 시 저장된 작업공간을 복원하고 종료 시 저장할지(config `workspace.restore`, 기본 1). 첫 AppSession 전에
+   부르므로 세션 없이 기본 config 를 읽는다. 1=복원·저장, 0=둘 다 끔. 읽기 실패는 1. */
+uint32_t maru_macos_workspace_restore_enabled(void);
 /* 작업공간 복원이 불완전했음을 알리는 notice 를 띄운다. Swift 는 상태만 알리고 문장은 Zig 가
    고른다(docs/i18n.md §7.2) — 예전에는 Swift 가 한국어 문장을 조립해 show_notice 로 넘겼고,
    그것이 §7.3 이 남겨 둔 마지막 구멍이었다. */

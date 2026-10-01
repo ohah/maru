@@ -4082,6 +4082,14 @@ private func appInstanceLeaseFailureReason(_ status: UInt32) -> (code: Int32, re
 @main
 @MainActor
 final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
+    /// 작업공간을 복원하고 종료 때 저장할지 — config `workspace.restore`(Zig loader 가 단일 출처, 기본 true)를 **시작 때
+    /// 한 번** 읽는다. 테스트·스모크용 `MARU_NO_WORKSPACE_RESTORE` 는 config 와 무관하게 끈다. 실행 중 config 를 바꿔도 이번
+    /// 실행은 그대로다 — 복원과 저장이 같은 결정을 봐야 한다(갈리면 복원 안 한 기본 단일 창이 저장 파일을 덮어써, 다시 켰을
+    /// 때 되살릴 레이아웃이 사라진다).
+    private lazy var workspaceRestoreEnabled: Bool =
+        ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil &&
+        maru_macos_workspace_restore_enabled() != 0
+
     private static var retainedDelegate: MaruAppHostController?
     private static let statusOK = Int32(MaruAppHostStatusOk.rawValue)
     // PTY 셸이 정상 종료했다는 신호. fault가 아니라 우아한 종료 대상이다.
@@ -4959,7 +4967,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         // workspace가 parse 가능한 실제 창을 하나 이상 가지면 첫 AppSession을 deferred surface 모드로 만든다.
         // Zig parser를 session=NULL preflight로 호출해 Swift가 wire를 따로 해석하지 않으면서 throwaway 셸 spawn을 막는다.
-        let restoreDisabled = ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] != nil
+        let restoreDisabled = !workspaceRestoreEnabled
         let recoverySmoke = isSessionHostRecoverySmokeMode
         let r2aCheckpointSmoke = isSessionHostR2aCheckpointSmokeMode
         let r1TombstoneSmoke = isSessionHostR1TombstoneSmokeMode
@@ -6435,9 +6443,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         deferredInitialSurface: Bool = false
     ) -> Bool {
         guard !smokeMode || isSessionHostR2aCheckpointSmokeMode else { return true }
-        // 끄기(임시): config 토글은 후속. 기본은 ON. 이 플래그는 saveWorkspace도 막는다 — 복원을 끈 사용자의 저장
-        // 파일을 종료 시 덮어쓰지 않게(persistence 자체 off).
-        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return true }
+        // 끄기: config `workspace.restore = false`(또는 테스트용 `MARU_NO_WORKSPACE_RESTORE`). 기본은 ON. 이 결정은
+        // saveWorkspace도 막는다 — 복원을 끈 사용자의 저장 파일을 종료 시 덮어쓰지 않게(persistence 자체 off).
+        guard workspaceRestoreEnabled else { return true }
         guard let session = primary?.appSession, let text = preparedText ?? loadWorkspaceText() else { return true }
         let bytes = Array(text.utf8)
         // launch preflight 결과를 그대로 재사용한다. 같은 immutable text를 deferred session 생성 뒤 다시 parse하면
@@ -12964,7 +12972,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 이 주석은 예전에 「final Quit 이 현재 모델을 게시한다」고 적어 지금 동작과 어긋나 있었다.
     private func armWorkspaceCheckpoint(initialDirty: Bool) {
         guard !workspaceCheckpointArmed, !smokeMode else { return }
-        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
+        guard workspaceRestoreEnabled else { return }
         // staged Window가 하나라도 남아 있으면 아무 세션도 publish하지 않는다. 일부만 enable한 뒤
         // arm 실패/조기 return하면 배경 inventory와 mutation forwarding의 transaction 경계가 갈린다.
         guard windows.allSatisfy({ $0.appSession != nil }) else { return }
@@ -13293,9 +13301,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func captureWorkspaceSnapshot(useTerminationKeyWindow: Bool, publishedOnly: Bool) -> Data? {
         let checkpointWindows = publishedOnly ? windows.filter(\.workspaceCheckpointPublished) : windows
         guard !smokeMode, !checkpointWindows.isEmpty else { return nil }
-        // 복원을 끈 사용자(MARU_NO_WORKSPACE_RESTORE)는 저장도 막는다 — 안 그러면 복원 안 한 기본 단일 창이 종료 시
-        // 저장 파일을 덮어써 사용자가 보존하려던 멀티 창 레이아웃이 사라진다(데이터 손실). 플래그=persistence 자체 off.
-        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return nil }
+        // 복원을 끈 사용자(`workspace.restore = false`·`MARU_NO_WORKSPACE_RESTORE`)는 저장도 막는다 — 안 그러면 복원 안 한
+        // 기본 단일 창이 종료 시 저장 파일을 덮어써 사용자가 보존하려던 멀티 창 레이아웃이 사라진다(데이터 손실).
+        guard workspaceRestoreEnabled else { return nil }
         var blocks = ""
         var blockCount: Int64 = 0
         // 저장 시점 key(활성) 창을 active-window=1 마커로 기록한다 — 재시작 복원이 그 창을 다시 focus(M3e).

@@ -173,8 +173,8 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
     try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
-test "ABI v190 editor IME document range exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 190), abi_version);
+test "ABI v191 workspace restore toggle and pre-session exports match the C header" {
+    try std.testing.expectEqual(@as(u32, 191), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -186,6 +186,44 @@ test "ABI v190 editor IME document range exports match the C header" {
     try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_LOAD_FAILURE), @intFromEnum(SessionConfigBootstrapResult.load_failure));
     try std.testing.expectEqual(@as(u32, c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_MATCHED), @intFromEnum(SessionDefaultFalseObservation.matched));
 }
+
+test "workspace restore toggle reads workspace.restore from the default config before any session" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 첫 AppSession 전에 부르는 함수라 세션 없이 **기본 config 경로**(`MARU_CONFIG` 우선)를 읽어야 한다. 테스트가
+    // 그 환경 변수를 잠깐 돌려쓰고 원래 값으로 되돌린다 — 다른 판정자가 같은 프로세스에서 기본 config 를 읽는다.
+    const previous = std.c.getenv("MARU_CONFIG");
+    var previous_buf: [4096]u8 = undefined;
+    const previous_copy: ?[:0]const u8 = if (previous) |value| blk: {
+        const text = std.mem.span(value);
+        if (text.len >= previous_buf.len) return error.SkipZigTest;
+        @memcpy(previous_buf[0..text.len], text);
+        previous_buf[text.len] = 0;
+        break :blk previous_buf[0..text.len :0];
+    } else null;
+    defer if (previous_copy) |value| {
+        _ = setenv("MARU_CONFIG", value.ptr, 1);
+    } else {
+        _ = unsetenv("MARU_CONFIG");
+    };
+
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-workspace-restore-{d}.config", .{std.c.getpid()});
+    defer _ = std.c.unlink(path.ptr);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", path.ptr, 1));
+
+    // 파일이 없으면 기본값(복원) — loader 의 forgiving 규칙과 같다.
+    _ = std.c.unlink(path.ptr);
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_workspace_restore_enabled());
+
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "workspace.restore = false\n" });
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_workspace_restore_enabled());
+
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "font.size = 15\n" });
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_workspace_restore_enabled());
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 test "app instance LeaseSlot acquires exactly once and preserves typed failure" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -691,6 +729,19 @@ const MARU_FILE_PICK_MESSAGE_BACKGROUND_PNG: u32 = 0;
 const MARU_FILE_PICK_MESSAGE_DOCK_FILE: u32 = 1;
 const MARU_FILE_PICK_MESSAGE_EXPLORER_FOLDER: u32 = 2;
 const MARU_FILE_PICK_MESSAGE_WORKSPACE_FOLDER: u32 = 3;
+
+/// ABI v191: 시작 시 저장된 작업공간을 복원하고 종료 시 저장할지(`workspace.restore`). 첫 AppSession 을 만들기
+/// **전에**(deferred surface 판정) 묻기 때문에 세션 없이 기본 config 를 직접 읽는다 — 값의 단일 출처는 Zig loader 이고
+/// Swift 는 config 를 해석하지 않는다. 읽기 실패·OOM 은 기본값(true, 복원)으로 둔다: loader 가 파일 없음·읽기 실패를
+/// 기본 Config 로 다루는 forgiving 규칙과 같다.
+pub export fn maru_macos_workspace_restore_enabled() u32 {
+    var parsed = maru.config.loader.loadDefault(
+        std.Io.Threaded.global_single_threaded.io(),
+        std.heap.page_allocator,
+    ) catch return 1;
+    defer parsed.deinit();
+    return @intFromBool(parsed.config.workspace.restore);
+}
 
 pub export fn maru_macos_app_set_ui_locale(tag_ptr: ?[*]const u8, tag_len: usize) void {
     const ptr = tag_ptr orelse return;

@@ -1641,12 +1641,18 @@ pub const WorkspaceConfig = struct {
     /// 꺼지던 것을 막는다(단일 출처: macos-app-host-boundary.md "세션 자동 종료"). false면 기존처럼 종료한다
     /// (Terminal.app "shell 종료 시 창 닫기" 취향). loader가 `workspace.hold-on-startup-failure` 키로 파싱.
     hold_on_startup_failure: bool = true,
+    /// 앱을 다시 열 때 지난번 정상 종료한 창·탭·split·cwd 를 되살릴지(docs/plans/workspace-restore.md D-트리거 —
+    /// 「자동 복원, 기본 ON + config 토글」). **기본 true.** `false`면 복원하지 않고 **종료 시 저장도 하지 않는다** —
+    /// 복원을 끈 채 저장만 하면 기본 단일 창이 저장 파일을 덮어써, 다시 켰을 때 되살릴 레이아웃이 사라진다.
+    /// 앱 시작 때 한 번 읽는다(실행 중 바꾸면 다음 실행부터). loader가 `workspace.restore` 키로 파싱.
+    restore: bool = true,
 
-    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit·hold 토글은 스키마-주도.
-    pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / hold-on-startup-failure
+    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit·hold·restore 토글은 스키마-주도.
+    pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / hold-on-startup-failure / restore
         .tab_inherit_cwd = Meta{ .doc = .cfg_workspace_tab_inherit_cwd, .widget = .toggle, .section = .workspace },
         .split_inherit_cwd = Meta{ .doc = .cfg_workspace_split_inherit_cwd, .widget = .toggle, .section = .workspace },
         .hold_on_startup_failure = Meta{ .doc = .cfg_workspace_hold_on_startup_failure, .widget = .toggle, .section = .workspace },
+        .restore = Meta{ .doc = .cfg_workspace_restore, .widget = .toggle, .section = .workspace },
     };
 };
 

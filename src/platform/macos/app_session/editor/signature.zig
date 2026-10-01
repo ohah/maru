@@ -90,7 +90,7 @@ fn ask(self: *AppSession, term: *Term, kind: lsp.rpc.SignatureTriggerKind, trigg
     st.waiting = true;
     st.waiting_seq = seq;
     st.waiting_surface = term.surface.id;
-    st.asked_version = term.rt.editor_lsp_version;
+    st.asked_version = term.rt.editorDocument().notifications.lsp_version;
     st.asked_focus = focus;
     st.dirty = false;
     return true;
@@ -241,7 +241,7 @@ pub fn refresh(self: *AppSession) bool {
         return false;
     };
     const focus = @min(sel.focus, doc.file.content.len);
-    if (term.rt.editor_lsp_version != st.asked_version or focus != st.asked_focus) {
+    if (term.rt.editorDocument().notifications.lsp_version != st.asked_version or focus != st.asked_focus) {
         _ = ask(self, term, .content_change, null, true);
     }
     const anchor = caretAnchor(term) orelse {

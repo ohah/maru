@@ -13012,7 +13012,10 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     try std.testing.expectEqual(@as(usize, 1), countOfB(session, "editor_backup_ops.fileNameIfOnDisk(t, "));
     // **묻는 대상과 지우는 대상이 같은 집합이다** — 범위 순회가 하나뿐인 것으로 그것을 못박는다.
     try std.testing.expectEqual(@as(usize, 1), countOfB(session, "pub fn forEachTermInScope("));
-    try std.testing.expectEqual(@as(usize, 3), countOfB(session, "forEachTermInScope(self, "));
+    // dirty 확인·untitled 확인·공유 뷰 생존 확인·백업 포착은 같은 범위 순회를 사용한다.
+    try std.testing.expectEqual(@as(usize, 4), countOfB(session, "forEachTermInScope(self, "));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "capture.scope = drop_scope;"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "if (!c.session.closesAllEditorDocumentViews(c.scope, t)) return;"));
 
     // ⑷ **종료 경로가 flush 를 부르고, teardown «앞»이다.** 뒤면 문서가 이미 해제돼 쓸 내용이 없다.
     const flush_at = std.mem.indexOf(u8, host, "maru_macos_app_session_flush_editor_backups(session)") orelse

@@ -228,7 +228,7 @@ fn snapshotVersions(self: *AppSession) void {
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
         if (t.kind != .editor or t.rt.editorDocument().opened == null) continue;
         if (st.snaps_len >= st.snaps.len) return;
-        st.snaps[st.snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editor_lsp_version };
+        st.snaps[st.snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editorDocument().notifications.lsp_version };
         st.snaps_len += 1;
     };
 }

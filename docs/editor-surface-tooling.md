@@ -606,7 +606,7 @@ caret 은 남아야 한다). ③ `FormattingOptions.insertSpaces` — 이 편집
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **변환** | `TextEdit{range, newText}` 배열 → `delta.Change[]`: `range` 의 `{line, character}` 를 서버 인코딩으로 byte 에(`position.offsetOf`), `start` 오름차순 정렬(같은 start 의 삽입은 온 순서), **겹치면 전부 거부**(`error.Overlap`), 줄 밖은 문서 끝으로 clamp. `newText` 는 복사해 적용이 끝날 때까지 든다 | `Delta.isWellFormed` 의 불변식(정렬·비겹침)을 변환이 만든다 |
-| **revision** | 요청 때의 `editor_lsp_version` 을 기억하고 응답 때 다르면 **버린다** + 알림 「문서가 바뀌어 포맷 결과를 버렸습니다」. 서버 응답에는 version 이 없으므로 클라이언트가 잰다 | §3.6 「revision 이 어긋나면 버린다」 |
+| **revision** | 요청 때의 `document_state.State.notifications.lsp_version` 을 기억하고 응답 때 다르면 **버린다** + 알림 「문서가 바뀌어 포맷 결과를 버렸습니다」. 서버 응답에는 version 이 없으므로 클라이언트가 잰다 | §3.6 「revision 이 어긋나면 버린다」 |
 | **적용** | `applyEditAsOne` — 되돌리기 **하나**, selection 은 delta 가 민다(삭제 구간 안이면 시작으로), 스크롤 앵커 보존, caret 추종 | §3.6 세 규칙 · 「별도 경로를 만들지 않는다」 |
 | **트리거** | `format_document` — `⇧⌥F`(편집기 컨텍스트 ⑴ `⌘` 없는 `⌥`) · 팔레트 「Editor: Format Document」. 서버가 없거나 `documentFormattingProvider` 가 없으면 무동작. 응답이 빈 배열이면 무동작(이미 정리됨) | VS Code 키. 저장 시 자동 포맷은 「하지 않는 것」(§3.6 — 저장 경로는 editor-surface, 그리고 §8.1 의 tool_execute 판정이 선행) |
 | **요청** | id `4e8+seq`, `options = {tabSize: editor.tab-width, insertSpaces: false}`. 보내기 전에 밀린 didChange 를 먼저 보낸다(`flushDocument`, §8.2d 와 같다). 나가 있는 요청이 있으면 **새 것이 대체**한다 — 앞 응답은 seq 가 달라 버려진다(구현이 되먹인 것: 「나가 있으면 무시」로 두면 답을 안 주는 서버(HANG) 뒤로 포맷이 영영 막힌다) | 위 ③ · 정의로 이동과 같은 seq 규율 |
@@ -651,7 +651,7 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | **입력 상자** | 기존 인라인 rename 의 새 대상 `RenameTarget.symbol{surface, offset, revision}` — caret 아래 **낱말**(식별자: 글자·숫자·`_`·비ASCII)을 씨앗으로, 낱말 첫 글자 셀 아래 팝업(`popup_box` `below_flip_up`, 호버 상자와 같은 간격)에 `input_box`(끝 caret). `Enter` 확정 · `Esc` 취소 · 비었거나 같은 이름이면 요청 없이 닫는다. 모달이라 열린 동안 문서는 안 바뀐다 | `prepareRename` 은 하지 않는다 — 상자를 즉시 띄우고, 못 바꾸는 자리는 서버의 오류 응답을 알림으로 낸다 |
 | **요청** | id `5e8+seq`, `textDocument/rename{position, newName}`. 보내기 전 밀린 didChange 를 먼저(`flushDocument`). 한 번에 하나 — 새 요청이 앞 것을 대체(§8.2e 와 같다) | |
 | **응답 모양** | `changes`(uri → TextEdit[]) 와 `documentChanges`(TextDocumentEdit[] — 같은 uri 는 이어 붙인다) 둘 다 받는다. `CreateFile`·`RenameFile`·`DeleteFile` 이 하나라도 있으면 **전체 거부** + 알림. `file:` 이 아닌 uri 도 전체 거부 | 반만 적용된 rename 은 컴파일되지 않는 코드다 |
-| **검증 → 적용** | 먼저 **모든 파일**을 검증하고 하나라도 틀리면 **아무것도 적용하지 않는다**: root 밖(`withinNavRoot`) · 열린 문서의 revision(그 문서를 든 모든 Term: 서버가 마지막으로 본 `sent_version == editor_lsp_version`, `documentChanges.version` 이 있으면 그것도 같아야) · 읽기 전용 · `toChanges` 의 겹침/모양 · 열려 있지 않은 파일은 읽어서(§3.5 의 `openPath` — UTF-8·BOM·CRLF 보존, 상한 §8.2a) 같은 검증. 그 다음 적용: 열린 Term 은 `applyEditAsOne`(Term 마다 undo 하나), 열려 있지 않은 파일은 메모리에서 적용해 저장 경로(`writeDocumentBytes` — 외부 변경 검사)로 쓴다 | §3.6 · VS Code 보다 엄격한 revision(`changes` 맵에도 검사) |
+| **검증 → 적용** | 먼저 **모든 파일**을 검증하고 하나라도 틀리면 **아무것도 적용하지 않는다**: root 밖(`withinNavRoot`) · 열린 문서의 revision(그 문서를 든 모든 Term: 서버가 마지막으로 본 `sent_version == notifications.lsp_version`, `documentChanges.version` 이 있으면 그것도 같아야) · 읽기 전용 · `toChanges` 의 겹침/모양 · 열려 있지 않은 파일은 읽어서(§3.5 의 `openPath` — UTF-8·BOM·CRLF 보존, 상한 §8.2a) 같은 검증. 그 다음 적용: 열린 Term 은 `applyEditAsOne`(서로 다른 정본마다 undo 하나; 같은 State의 연결 뷰는 한 번 적용), 열려 있지 않은 파일은 메모리에서 적용해 저장 경로(`writeDocumentBytes` — 외부 변경 검사)로 쓴다 | §3.6 · VS Code 보다 엄격한 revision(`changes` 맵에도 검사) |
 | **저장** | 관련 파일이 **두 개 이상**이면 열린 Term 도 `saveDocument` 로 저장한다(열려 있지 않은 파일은 늘 저장 — 버퍼가 없다). **한 파일**이면 저장하지 않고 dirty 로 둔다 | VS Code `files.refactoring.autoSave` 기본(2026-09-19 사용자 결정) |
 | **기록** | 적용에 성공한 WorkspaceEdit 하나를 세션이 든다: 이름·파일마다 {경로, **역연산**(`delta.apply` 가 돌려준 것, 텍스트 소유), 적용 직후 **내용 해시**}. 새 rename 이 성공하면 갈아 끼운다. 되돌리기는 이 기록 위에 선다 | VS Code 의 역편집 보관과 같은 원리 — 되돌리기는 서버에 다시 묻지 않는다 |
 | **`undo_workspace_edit`** | 팔레트 「Editor: Undo Last Rename」(기본 chord 없음). 기록의 **모든 파일**을 먼저 검증: 열린 Term 은 내용 해시가 기록과 같아야(그 뒤 편집·`⌘Z` 가 있었으면 다르다), 열려 있지 않은 파일은 디스크를 읽어 같아야. 하나라도 다르면 **전체 거부** + 알림(「{0} 이 바뀌어 되돌릴 수 없습니다」). 전부 같으면 역연산을 같은 길로 적용(열린 Term 은 `applyEditAsOne` — 그것도 undo 하나, 파일은 쓰기) + 같은 저장 정책. 성공하면 기록을 비운다 | VS Code 는 어긋난 파일에서 「이 파일만」을 묻는다 — 첫 조각은 보수적 부분집합 |
@@ -902,7 +902,7 @@ labelDetails 가 없다.
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **capability** | `textDocument.semanticTokens{requests: {range: true, full: true}, tokenTypes: 표준 23, tokenModifiers: 표준 10, formats: ["relative"], multilineTokenSupport: false, overlappingTokenSupport: false}`. 서버의 `semanticTokensProvider{legend, range, full}` 를 읽는다 | LSP 3.17 |
-| **요청** | id `10e8+seq`(§8.2a 표에 열 번째 칸). **capability 로 갈린다**(시도하고 물러나는 폴백이 아니다 — `initialize` 응답의 `range`/`full` 로 처음부터 정한다): `range` 를 냈으면 **보이는 원본 줄 범위 ± 20줄** 을 `semanticTokens/range`, 안 냈으면(clangd) `semanticTokens/full`(delta 는 안 쓴다). 보내기 전 `flushDocument`; 요청은 그 문서의 `editor_lsp_version` 을 단다 | §5 「보이는 범위만」·② |
+| **요청** | id `10e8+seq`(§8.2a 표에 열 번째 칸). **capability 로 갈린다**(시도하고 물러나는 폴백이 아니다 — `initialize` 응답의 `range`/`full` 로 처음부터 정한다): `range` 를 냈으면 **보이는 원본 줄 범위 ± 20줄** 을 `semanticTokens/range`, 안 냈으면(clangd) `semanticTokens/full`(delta 는 안 쓴다). 보내기 전 `flushDocument`; 요청은 그 문서의 `document_state.State.notifications.lsp_version` 을 단다 | §5 「보이는 범위만」·② |
 | **시점** | 프레임마다 판정: 서버 ready·provider 있음·요청 없음·(토큰의 version ≠ 문서 version **또는** 보이는 범위가 덮인 범위 밖) **그리고 마지막 편집 뒤 120 ms** 가 지났을 때. 한 번에 하나, 대기 중 바뀌면 `dirty` 로 응답 뒤 한 번 더 | 타이핑마다 왕복하지 않는다(VS Code 도 지연) |
 | **응답** | 그 요청의 version 과 지금 version 이 다르면 **버린다**(다시 묻는다). `-32801`(content modified)·오류·`null` 도 버리고 다시. `data` 를 relative 로 풀어 byte 스팬으로 — legend 이름을 `Role` 로 옮기고 모르는 것·무색 것은 뺀다. **상한 50,000 토큰** — 넘으면 앞부분만 | ② |
 | **매핑(코드가 소유 — `session/lsp/semantic.zig`)** | `type·class·struct·enum·interface·typeParameter·builtinType·enumMember` → `type_name` · `function·method·macro` → `function` · `keyword·modifier·builtinAttribute?` → `keyword` · `comment` → `comment` · `string·character·regexp·escapeSequence` → `string` · `number·boolean` → `number` · `property·event` → `property` · `decorator·attribute·derive` → `attribute` · `operator` → `punctuation` · `variable·parameter·namespace·label·lifetime·그 밖` → 무색(1층이 그대로). 수식자는 첫 조각에서 안 쓴다 | §5 「다대일·색이 상한」 — tree-sitter 표(`syntax_capture`)와 같은 방향 |
@@ -955,7 +955,7 @@ character"* 라 `endLine` 은 서버의 것이고 우리는 그대로 따른다(
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **capability** | `textDocument.foldingRange{lineFoldingOnly: true, foldingRangeKind: {valueSet: [comment, imports, region]}}`. 서버의 `foldingRangeProvider`(bool 또는 객체)를 읽는다 — 없으면 3층 없음(1·2층 그대로) | LSP 3.17 · §4 「없어도 접기가 사라지지 않는다」 |
-| **요청** | `textDocument/foldingRange`, id `11e8+seq`(§8.2a 표에 열한 번째 칸). 문서 전체(범위 인자가 없다). 보내기 전 `flushDocument`; 요청은 그 문서의 `editor_lsp_version` 을 단다 | ② 지연 0~28 ms — 전체라도 싸다 |
+| **요청** | `textDocument/foldingRange`, id `11e8+seq`(§8.2a 표에 열한 번째 칸). 문서 전체(범위 인자가 없다). 보내기 전 `flushDocument`; 요청은 그 문서의 `document_state.State.notifications.lsp_version` 을 단다 | ② 지연 0~28 ms — 전체라도 싸다 |
 | **시점** | 프레임마다(`advanceSyntax` — 승격과 같은 자리, 프레임이 줄 표를 잡기 전) 판정: 서버 ready·provider·요청 없음·(든 범위의 version ≠ 문서 version 또는 `dirty`) **그리고 마지막 편집 뒤 120 ms**. 한 번에 하나 | §8.2i 와 같은 시계 |
 | **응답 검증(코드가 소유 — `session/lsp/fold_range.zig`)** | 그 요청의 version ≠ 지금 version 이면 **버리고 다시**(`dirty`). 오류·`null`·**빈 배열**은 「아직 아니다」 — 아래 층을 그대로 두고 조용 시계를 두 배씩 늘려(120 ms → … → 7,680 ms 상한) 되묻는다(실측 ②′: rust-analyzer 가 로드 중 `null`/`[]` 을 낸다 — 빈 것을 「접을 것 없음」으로 적으면 그 문서의 3층이 편집 전까지 안 선다). 접을 것이 정말 없는 문서는 상한 주기로 작은 요청 하나가 계속 나간다(받아들인 비용). 항목은 `startLine < endLine`(머리 한 줄짜리는 안 만든다 — §4.1f)·`endLine < 줄 수` 만 받고, `(startLine ↑, endLine ↓)` 로 정렬해 **같은 시작줄은 큰 것 하나**(tree-sitter 층의 `best` 와 같은 규칙), **엇갈리는 것**(열린 범위 안에서 시작해 그 밖에서 끝남)은 버린다 — 접힘 모델이 중첩만 안다. 레벨은 열린 범위 스택 깊이(승격과 같은 정의). `startCharacter`·`endCharacter`·`collapsedText` 는 안 읽는다(줄 접힘 — §4.1f) | ② rust-analyzer 의 중복 |
 | **층 순서** | `editor_fold_source ∈ {indent, syntax, lsp}`. `dropFoldState` 가 `indent` 로 되돌리고, 승격은 `lsp` 면 **건너뛴다**(3층이 이미 덮었다), 3층 적용은 언제나 덮는다(`syntax` 위든 `indent` 위든). 적용은 승격과 **같은 마무리**(`keepFoldView` → 갈아 끼움 → `rebuildVisible` → `finishFoldChange` — 접어 둔 것은 푼다) | ③④ |
@@ -1214,7 +1214,7 @@ tsgo 32 ms(`2`/`3` 로 읽기·쓰기를 가른다) · clangd 1 ms(전부 `1`(Te
 | **언제 묻나** | caret 아래가 **낱말일 때만**(`selection.wordRangeAt` — §5.1 이 「낱말 경계의 소유자」로 못 박은 그 함수, 새 규칙을 만들지 않는다). **선택이 있으면 안 묻는다**(그 칸은 선택 강조가 이긴다). caret 이 멈추고 150 ms, 편집 뒤에는 조용해진 뒤. 같은 `(version, 낱말 범위)` 면 다시 안 묻는다 | 계획 공격 ① |
 | **요청** | `textDocument/documentHighlight{textDocument, position}`, id `18e8+seq`. 한 번에 하나 | LSP 3.17 |
 | **응답** | `DocumentHighlight[]` → 문서 byte 범위 목록(정렬·중복 제거, 상한 500). **`kind` 는 안 쓴다** — 서버마다 없거나 다르고, 읽기·쓰기를 색으로 가르면 없는 서버에서 화면이 갈린다(다음) | 실측 |
-| **대조** | 요청 때의 `editor_lsp_version` **과** 요청 때의 **낱말 범위**가 지금과 같아야 든다 — caret 이 다른 낱말로 간 뒤 온 답은 그 낱말을 강조하는 거짓말이다 | §8.2b 와 같은 규율 |
+| **대조** | 요청 때의 `document_state.State.notifications.lsp_version` **과** 요청 때의 **낱말 범위**가 지금과 같아야 든다 — caret 이 다른 낱말로 간 뒤 온 답은 그 낱말을 강조하는 거짓말이다 | §8.2b 와 같은 규율 |
 | **편집 중** | **버린다**(밀지 않는다) — 심볼 2층(§8.2o)과 같은 이유. 편집 뒤 조용해지면 caret 자리로 다시 묻는다 | §8.2o |
 | **그리기** | `frame.Props.occurrence_marks`(`search_marks` 와 같은 축). 색은 새 역할 `occurrence` 하나이고 테마에서 파생한다(`syntax_theme.occurrenceFromTheme` — diff·진단과 같은 계열). **우선순위: caret > 선택 > 검색 현재 > 검색 > 같은 낱말** — 가장 약하다 | §5.1·§4.1g |
 | **하지 않는 것** | 읽기/쓰기 색 구분(`kind`) · 서버 없을 때의 **낱말 기반 폴백**(검색 ⌘F 가 그 자리다) · 설정으로 끄기 · 미니맵 표시(§6) · 스크롤바 마커(§4.1a — 검색만) | 다음 |
@@ -1261,8 +1261,8 @@ rust-analyzer 2 ms, 5표본 17~59 ms). ① **clangd 는 주석·전처리 줄에
 | **단계의 원천** | ⑴ **서버** — 한 요청에 커서 전부의 위치(id `19e8+seq`), 응답 `SelectionRange[]` 의 `parent` 사슬을 평탄화(위치당 상한 256) · ⑵ **tree-sitter** — `Provider.enclosingRanges`(기준 범위를 품는 노드부터 뿌리까지, byte 로만 읽는다) · ⑶ **낱말** — 하위 낱말(`_` 경계·소문자→대문자 전환) · 낱말(`selection.wordRangeAt` — [visual-mapping](native-editor-visual-mapping.md) §5.1 이 낱말 경계의 소유자) · 공백뿐인 줄 · **문서 전체**. 셋을 모아 **품는 순서로** 사슬을 세우고(안쪽부터, 앞 단계를 품고 같지 않은 것만 — 어긋난 범위는 버린다) 기준 범위보다 넓은 것만 남긴다 | VS Code `provideSelectionRanges` 의 동작 |
 | **1층을 쓰는 때** | 커서마다: 준비된 서버가 없거나 provider 가 없거나 · 오류·시간 초과 · **서버 사슬에 기준 범위보다 넓은 것이 하나도 없을 때**(실측 ① — clangd 주석). tree-sitter 는 **트리가 있고 `editor_syntax.pending` 이 거짓일 때만** — 여는 파싱이 끊긴 동안 트리는 없거나(§2.1a) 틀릴 수 있었다(#3886) | 실측 ① · [layering](native-editor-layering.md) §2.1a |
 | **줄 단계** | 한 단계가 **다른 줄로 넘어갈 때** 그 앞 단계의 줄들을 「앞뒤 공백을 뺀 줄」과 「줄 전체」로 한 번씩 끼운다(앞 단계를 품고 다음 단계에 품기는 것만) | VS Code `selectLeadingAndTrailingWhitespace`(기본 켬)의 동작 |
-| **대기** | 첫 키에 서버에 묻고 답을 기다린다(실측 17~59 ms). 기다리는 동안 더 누른 키는 **순 걸음**(확장 +1 · 축소 −1)으로 쌓았다가 답이 오면 한 번에 옮긴다. 답은 **보낼 때의 (`editor_lsp_version`, 선택들)** 이 지금과 같을 때만 든다 — 다르면 버린다. **500 ms** 안에 안 오면 1층으로 세우고 늦은 답은 버린다(서버가 멈춰도 키가 죽지 않는다) | 실측 · 계획 공격 |
-| **상태** | Term 의 `editor_smart_select` — 커서마다 범위 스택 + 인덱스, 그리고 **세운 뒤의 (`editor_lsp_version`, 선택들)**. 다음 키에서 그 둘이 지금과 같고 스택 수가 커서 수와 같을 때만 잇는다 — 아니면 지금 선택에서 새로 세운다. 이 한 대조가 「커서가 움직였다」와 「caret 을 안 옮기는 편집(포맷 등)」을 둘 다 잡는다(`refreshAfterEdit` 가 version 을 늘 올린다) | native-editor §12 · 적대적 1회차 「구멍」 |
+| **대기** | 첫 키에 서버에 묻고 답을 기다린다(실측 17~59 ms). 기다리는 동안 더 누른 키는 **순 걸음**(확장 +1 · 축소 −1)으로 쌓았다가 답이 오면 한 번에 옮긴다. 답은 **보낼 때의 (`document_state.State.notifications.lsp_version`, 선택들)** 이 지금과 같을 때만 든다 — 다르면 버린다. **500 ms** 안에 안 오면 1층으로 세우고 늦은 답은 버린다(서버가 멈춰도 키가 죽지 않는다) | 실측 · 계획 공격 |
+| **상태** | Term 의 `editor_smart_select` — 커서마다 범위 스택 + 인덱스, 그리고 **세운 뒤의 (`document_state.State.notifications.lsp_version`, 선택들)**. 다음 키에서 그 둘이 지금과 같고 스택 수가 커서 수와 같을 때만 잇는다 — 아니면 지금 선택에서 새로 세운다. 이 한 대조가 「커서가 움직였다」와 「caret 을 안 옮기는 편집(포맷 등)」을 둘 다 잡는다(`notifyDocumentEdit`가 새 revision에서 문서 version을 올린다) | native-editor §12 · 적대적 1회차 「구멍」 |
 | **멀티 커서** | 커서마다 스택. 옮긴 뒤 `selection.mergeOverlapping`(맞닿아도 합친다 — maru 규칙, VS Code 는 겹칠 때만)을 거치고 **합친 뒤의 선택**을 저장한다 — 합쳐져 수가 줄면 다음 키는 새로 세운다 | [문서 모델](native-editor-document-model.md) §3.2 |
 | **옮긴 뒤** | anchor = 범위 시작, focus = 끝 · `breakUndoGroup` · `revealPrimaryCaret`. 축소는 인덱스 −1, 0 에서는 제자리 · 상태가 없으면 축소는 무동작 | VS Code |
 | **하지 않는 것** | 보조 키 `⌃⇧→` · 비교 뷰(축이 둘 — [visual-mapping](native-editor-visual-mapping.md) §4.1g) · 설정(하위 낱말·줄 단계 끄기) · 메뉴 항목 · 괄호 기반 provider(1층 tree-sitter 가 그 자리다) | 다음 |
@@ -1310,3 +1310,25 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 - control-plane/bridge event를 trace에 넣는 PR은 먼저 [facade-contracts.md](facade-contracts.md)와 [trace-replay.md](trace-replay.md)의 event/redaction/replay 의미를 갱신한다.
 - failure artifact를 fixture로 승격할 때 [project-rules.md](project-rules.md)의 공통 redaction guard를 사용한다. source code에 token이 bare text로 들어갈 수 있어 자동 guard만으로 충분하다고 간주하지 않고 사람 검토를 요구한다.
 - E2E artifact는 semantic summary와 redacted screenshot을 기본으로 하고, 실제 사용자 repository를 자동 캡처하지 않는다.
+
+### 공유 정본의 문서 동기화와 뷰별 provider
+
+LSP version은 `document_state.State.notifications.lsp_version`이 소유한다.
+`notifyDocumentEdit`는 같은 문서 revision에 한 번 version과 백업 debounce를 갱신한다.
+`refreshViewAfterEdit`는 각 뷰의 구문 트리, semantic/inlay/symbol/highlight/fold 상태와
+줄·스크롤·hit cache를 갱신하며 문서 통지를 다시 보내지 않는다. 구문 트리는 현재 뷰별 provider다.
+
+LSP Client의 OpenDoc는 등록 문서의 안정 handle과 read pin으로 연결을 합친다.
+같은 State를 연결한 두 Term은 서버에 didOpen과 version별 didChange를 각각 한 번 보낸다.
+한 뷰가 닫혀도 다른 뷰가 남으면 연결을 유지하고, 마지막 대상이 사라진 pump에서 didClose 뒤
+pin을 해제한다. 서버 종료와 연결 실패도 pin을 정산한다. 보낼 문서 entry capacity와 pin은
+didOpen 전송 전에 준비해 전송 성공 뒤 기록 할당 실패로 다시 열지 않는다.
+
+진단은 version을 확인해 연결 뷰 모두에 게시한다. 뷰별 provider 요청의 응답은 대표 surface가
+아니라 같은 Client 문서에 속한 실제 waiting seq의 뷰로 돌려준다. 같은 정본에 대한
+WorkspaceEdit는 모든 뷰의 stale 검증을 한 뒤 정본별 한 번 적용한다. 경로가 같아도 State가
+다르면 기존 독립 모델 검증과 적용을 유지한다. 경로 identity와 provider 캐시 공유는 별도다.
+
+근거는 [LSP 문서 동기화 명세](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_synchronization)와
+Maru의 [공유 문서 계획](plans/editor-shared-document.md)이다. 제품 split UI와 실제 공유 OS IME는
+이 동기화 계약 밖의 후속 gate다.

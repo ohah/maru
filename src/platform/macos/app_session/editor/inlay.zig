@@ -1,5 +1,5 @@
 //! 인레이 힌트 — 제품 배선(docs/editor-surface-tooling.md §8.2n · visual-mapping §4.1h). semantic 2층(`editor_semantic`)과 같은 창: 프레임마다
-//! `tick` 이 「물을 때인가」를 판정해 보이는 원본 줄 ± `range_pad_lines` 를 묻고, 응답은 요청 때의 `editor_lsp_version` 과 같을 때만 받아 문서
+//! `tick` 이 「물을 때인가」를 판정해 보이는 원본 줄 ± `range_pad_lines` 를 묻고, 응답은 요청 때의 `notifications.lsp_version` 과 같을 때만 받아 문서
 //! 절대 byte 의 힌트로 든다. 편집 통지는 힌트를 민다(경계 = 뒤 — `inlay.shift`). 렌더는 `lineInlays` 로 줄마다 `content.Inlay` 목록을 받는다.
 //!
 //! **힌트 세대**(`generation`)는 응답·밀기·비움마다 오른다 — `frame.RowCache` 가 그것을 키에 넣는다(§4.1h: 힌트가 줄 폭을 늘려 랩 행 수가 바뀐다).
@@ -64,19 +64,19 @@ pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) v
     const st = &term.rt.editor_inlay;
     if (st.waiting) return;
     const doc = term.rt.editorDocument().opened orelse return;
-    if (term.rt.editor_lsp_version == 0) return;
+    if (term.rt.editorDocument().notifications.lsp_version == 0) return;
     const now = self.awakeMs();
     if (st.last_edit_ms != 0 and now -| st.last_edit_ms < quiet_ms) return;
     const line_count = doc.file.lines.lineCount();
     const lo = first_src -| range_pad_lines;
     const hi = @min(last_src + range_pad_lines, line_count -| 1);
-    const version_ok = st.version == term.rt.editor_lsp_version;
+    const version_ok = st.version == term.rt.editorDocument().notifications.lsp_version;
     const covered = lo >= st.covered_lo and hi <= st.covered_hi;
     if (version_ok and covered and !st.dirty) return;
     const seq = editor_lsp.requestInlayHints(self, term, lo, hi) orelse return; // 서버·provider 검사는 요청이 한다
     st.waiting = true;
     st.waiting_seq = seq;
-    st.waiting_version = term.rt.editor_lsp_version;
+    st.waiting_version = term.rt.editorDocument().notifications.lsp_version;
     st.waiting_lo = lo;
     st.waiting_hi = hi;
     st.dirty = false;
@@ -94,7 +94,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         st.last_edit_ms = self.awakeMs(); // 곧바로 되묻지 않는다(조용 뒤)
         return;
     }
-    if (st.waiting_version != term.rt.editor_lsp_version) {
+    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
         st.dropped_stale += 1;
         st.dirty = true;
         return;

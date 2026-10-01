@@ -50,7 +50,7 @@ pub const State = struct {
     /// 앵커 낱말의 문서 범위 — 포인터가 이 밖으로(그리고 상자 밖으로) 나가면 닫는다.
     word_lo: u32 = 0,
     word_hi: u32 = 0,
-    /// 열 때의 revision(`editor_lsp_version` 과 같은 축) — 편집되면 닫는다.
+    /// 열 때의 revision(`notifications.lsp_version` 과 같은 축) — 편집되면 닫는다.
     shown_version: u64 = 0,
     lines: std.ArrayList(hover_box.Line) = .empty,
     owned: std.ArrayList([]u8) = .empty,
@@ -224,7 +224,7 @@ fn openWith(self: *AppSession, surface_id: u64, offset: u32, markdown: ?[]const 
     st.shown_surface = surface_id;
     st.word_lo = @intCast(lo);
     st.word_hi = @intCast(hi);
-    st.shown_version = term.rt.editor_lsp_version;
+    st.shown_version = term.rt.editorDocument().notifications.lsp_version;
     st.opened_count += 1;
     self.chrome_host.hover_box.show(anchor.x, anchor.y, anchor.h);
     self.metal_dirty = true;
@@ -385,7 +385,7 @@ pub fn refresh(self: *AppSession) bool {
         hide(self);
         return false;
     };
-    if (term.rt.editor_lsp_version != st.shown_version or self.anyOverlayOpen()) {
+    if (term.rt.editorDocument().notifications.lsp_version != st.shown_version or self.anyOverlayOpen()) {
         hide(self);
         return false;
     }

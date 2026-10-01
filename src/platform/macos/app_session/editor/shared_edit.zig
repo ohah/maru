@@ -127,10 +127,11 @@ pub fn applyPrepared(
         }
     }
     published = true;
+    editor_ops.notifyDocumentEdit(self, term);
     const span = syntax_color.spanFromInverse(inverse.changes);
     for (prepared) |v| {
         if (v.term == term) continue;
-        editor_ops.refreshAfterEdit(self, v.term, span) catch {};
+        editor_ops.refreshViewAfterEdit(self, v.term, span) catch {};
         // 다른 뷰는 같은 위치 삽입도 원래 보던 텍스트를 anchor로 유지한다.
         const mapped_scroll: ?editor_ops.ScrollAnchor = if (v.scroll) |a| .{
             .off = shared_policy.mapSelection(d, editor_selection.Selection.at(a.off)).focus,

@@ -50,7 +50,7 @@ pub fn startAtCaret(self: *AppSession) bool {
     if (!editor_lsp.renameSupportedFor(self, term)) return false; // 서버가 없거나 rename 을 못 하면 상자도 없다
     const sel = term.rt.editor_selection orelse return false;
     const word = wordAt(doc.file.content, @min(sel.focus, doc.file.content.len)) orelse return false;
-    const target: Target = .{ .surface_id = term.surface.id, .start = word.start, .end = word.end, .version = term.rt.editor_lsp_version };
+    const target: Target = .{ .surface_id = term.surface.id, .start = word.start, .end = word.end, .version = term.rt.editorDocument().notifications.lsp_version };
     settings_ops.startRename(self, .{ .symbol = target }); // 씨앗은 startRename 이 `seedFor` 로 읽는다
     self.editor_rename.opened_count += 1;
     return true;
@@ -71,7 +71,7 @@ pub fn commit(self: *AppSession, t: Target, new_name: []const u8) void {
     if (new_name.len == 0) return;
     const term = termFor(self, t.surface_id) orelse return;
     const doc = term.rt.editorDocument().opened orelse return;
-    if (term.rt.editor_lsp_version != t.version) return; // 모달 동안 바뀔 수 없지만, 바뀌었다면 이 자리는 그 낱말이 아니다
+    if (term.rt.editorDocument().notifications.lsp_version != t.version) return; // 모달 동안 바뀔 수 없지만, 바뀌었다면 이 자리는 그 낱말이 아니다
     const old = seedFor(self, t) orelse return;
     if (std.mem.eql(u8, old, new_name)) return;
     if (doc.file.read_only) return;
@@ -211,7 +211,7 @@ fn snapshotVersions(self: *AppSession) void {
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
         if (t.kind != .editor or t.rt.editorDocument().opened == null) continue;
         if (st.snaps_len >= st.snaps.len) return;
-        st.snaps[st.snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editor_lsp_version };
+        st.snaps[st.snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editorDocument().notifications.lsp_version };
         st.snaps_len += 1;
     };
 }

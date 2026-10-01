@@ -68,12 +68,24 @@ pub const Opened = struct {
 
 /// 본문은 내부 allocator를 기억한다. 경로·원격 신원·이력은 기존 session allocator로 정산한다.
 /// 파생 줄 슬라이스·선택·조합은 이 객체에 포함하지 않는다.
+/// 문서 부수효과 시계를 모아 같은 revision의 뷰 갱신에서 중복 통지하지 않는다.
+/// 시계·I/O는 host가 수행한다. 구문 provider와 표시 캐시는 뷰 소유를 유지한다.
+pub const Notifications = struct {
+    last_revision: ?u64 = null,
+    lsp_version: u64 = 0,
+    backup_dirty: bool = false,
+    backup_due_ns: i128 = 0,
+    backup_on_disk: bool = false,
+    backup_paused: bool = false,
+};
+
 pub const State = struct {
     opened: ?Opened = null,
     path: ?[]u8 = null,
     remote: ?RemoteDoc = null,
     untitled: ?untitled.Name = null,
     history: history.State = .{},
+    notifications: Notifications = .{},
 
     /// 기존 teardown의 본문/뷰 정산 순서를 유지할 수 있도록 본문 해제를 나눈다.
     pub fn clearOpened(self: *State, allocator: std.mem.Allocator) void {
@@ -100,6 +112,7 @@ pub const State = struct {
         self.clearOpened(allocator);
         self.history.clear(allocator);
         self.clearIdentity(allocator);
+        self.notifications = .{};
     }
 };
 

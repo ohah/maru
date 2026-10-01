@@ -65,9 +65,25 @@ const kill_grace_ms: u64 = 5_000;
 
 const OpenDoc = struct {
     surface_id: u64,
+    /// 등록된 문서는 서버 연결 동안 read pin으로 살린다. 대표 뷰는 바뀔 수 있다.
+    document: ?maru.session.editor.document_registry.Lease = null,
     uri: []u8,
     /// 서버에 보낸 마지막 version.
     sent_version: u64,
+
+    fn matches(self: OpenDoc, term: *Term) bool {
+        if (term.kind != .editor or term.rt.editor_diff != null) return false;
+        if (self.document) |pin| {
+            const lease = term.rt.editor_document_lease orelse return false;
+            return pin.owner == lease.owner and std.meta.eql(pin.document, lease.document);
+        }
+        return self.surface_id == term.surfaceId();
+    }
+
+    fn release(self: OpenDoc, allocator: std.mem.Allocator) void {
+        allocator.free(self.uri);
+        if (self.document) |pin| _ = @constCast(pin.owner).release(pin) catch false;
+    }
 };
 
 pub const Client = struct {
@@ -145,14 +161,14 @@ pub const Client = struct {
             p.deinit(allocator);
         }
         self.semantic_caps.deinit(allocator);
-        for (self.docs.items) |d| allocator.free(d.uri);
+        for (self.docs.items) |d| d.release(allocator);
         self.docs.deinit(allocator);
         self.inbuf.deinit(allocator);
         allocator.free(self.root);
     }
 
-    fn findDoc(self: *Client, surface_id: u64) ?*OpenDoc {
-        for (self.docs.items) |*d| if (d.surface_id == surface_id) return d;
+    fn findDoc(self: *Client, term: *Term) ?*OpenDoc {
+        for (self.docs.items) |*d| if (d.matches(term)) return d;
         return null;
     }
 };
@@ -727,20 +743,25 @@ fn onPublishDiagnostics(self: *AppSession, c: *Client, params: ?std.json.Value) 
     const doc = for (c.docs.items) |*d| {
         if (std.mem.eql(u8, d.uri, uri)) break d;
     } else return; // 모르는 문서(root 밖·닫힌 것) — 무시(§8.2a)
-    const term = term_ops.termBySurfaceId(self, doc.surface_id) orelse return;
-    const opened = term.rt.editorDocument().opened orelse return;
-    // version 이 오면 지금 것과 같아야 한다(§5 「revision 으로 폐기」).
-    if (obj.get("version")) |v| switch (v) {
-        .integer => |n| if (n != @as(i64, @intCast(term.rt.editor_lsp_version))) return,
-        else => {},
+    var accepted = false;
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (!doc.matches(term)) continue;
+        const opened = term.rt.editorDocument().opened orelse continue;
+        if (obj.get("version")) |v| switch (v) {
+            .integer => |n| if (n != @as(i64, @intCast(term.rt.editorDocument().notifications.lsp_version))) continue,
+            else => {},
+        };
+        accepted = true;
+        const st = &term.rt.editor_diagnostics;
+        st.lsp.clearRetainingCapacity();
+        st.lsp_messages.clearRetainingCapacity();
+        _ = lsp.position.appendDiagnostics(self.allocator, p, opened.file.content, opened.file.lines, c.encoding, &st.lsp, &st.lsp_messages) catch {};
+        st.lsp_dirty = true;
     };
-    self.editor_lsp.received_diagnostics += 1;
-    const st = &term.rt.editor_diagnostics;
-    st.lsp.clearRetainingCapacity();
-    st.lsp_messages.clearRetainingCapacity();
-    _ = lsp.position.appendDiagnostics(self.allocator, p, opened.file.content, opened.file.lines, c.encoding, &st.lsp, &st.lsp_messages) catch {};
-    st.lsp_dirty = true;
-    self.metal_dirty = true;
+    if (accepted) {
+        self.editor_lsp.received_diagnostics += 1;
+        self.metal_dirty = true;
+    }
 }
 
 // ── 문서 동기화 ───────────────────────────────────────────────────────────────
@@ -756,7 +777,7 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
                 const server = serverFor(self, term.rt.editor_grammar) orelse continue;
                 const root = rootFor(self, term) orelse continue;
                 const c = ensureClient(self, root, server, term.rt.editor_grammar) orelse continue;
-                seen.put(self.allocator, term.surfaceId(), {}) catch {};
+                seen.put(self.allocator, term.surfaceId(), {}) catch return;
                 if (c.docs.items.len == 0 and c.idle_since_ms != 0) c.idle_since_ms = 0;
                 if (c.retry_at_ms == std.math.maxInt(u64)) c.retry_at_ms = 0; // 잠들어 있던 서버를 깨운다
                 gateTrust(self, c);
@@ -781,7 +802,7 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
                     _ = send(self, c, m);
                 }
             }
-            self.allocator.free(d.uri);
+            d.release(self.allocator);
             _ = c.docs.swapRemove(i);
         }
         if (c.docs.items.len == 0 and c.idle_since_ms == 0) c.idle_since_ms = now_ms;
@@ -834,8 +855,9 @@ fn gateTrust(self: *AppSession, c: *Client) void {
 fn syncOne(self: *AppSession, c: *Client, term: *Term) void {
     const opened = term.rt.editorDocument().opened orelse return;
     if (opened.file.content.len > max_sync_bytes) return; // §8.2a: 상한 넘는 문서는 안 보낸다
-    const version: u64 = term.rt.editor_lsp_version;
-    if (c.findDoc(term.surfaceId())) |d| {
+    const version: u64 = term.rt.editorDocument().notifications.lsp_version;
+    if (c.findDoc(term)) |d| {
+        d.surface_id = term.surfaceId(); // 한 뷰 종료 뒤에도 살아 있는 대표를 갱신한다.
         if (d.sent_version == version) return;
         if (d.sent_version == 0) {
             const msg = lsp.rpc.didOpen(self.allocator, d.uri, c.server.language_id, @intCast(version), opened.file.content) catch return;
@@ -852,8 +874,23 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term) void {
     }
     const path = termPath(term) orelse return;
     const uri = lsp.rpc.fileUri(self.allocator, path) catch return;
-    if (term.rt.editor_lsp_version == 0) term.rt.editor_lsp_version = 1; // version 0 은 「안 보냈다」의 자리
-    const v: u64 = term.rt.editor_lsp_version;
+    if (term.rt.editorDocument().notifications.lsp_version == 0) term.rt.editorDocument().notifications.lsp_version = 1; // version 0 은 「안 보냈다」의 자리
+    const v: u64 = term.rt.editorDocument().notifications.lsp_version;
+    c.docs.ensureUnusedCapacity(self.allocator, 1) catch {
+        self.allocator.free(uri);
+        return;
+    };
+    const pin = if (term.rt.editor_document_lease) |lease|
+        @constCast(lease.owner).retain(lease, .read) catch {
+            self.allocator.free(uri);
+            return;
+        }
+    else
+        null;
+    var committed = false;
+    defer if (!committed) {
+        if (pin) |held| _ = @constCast(held.owner).release(held) catch false;
+    };
     const msg = lsp.rpc.didOpen(self.allocator, uri, c.server.language_id, @intCast(v), opened.file.content) catch {
         self.allocator.free(uri);
         return;
@@ -863,18 +900,17 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term) void {
         self.allocator.free(uri);
         return;
     }
-    c.docs.append(self.allocator, .{ .surface_id = term.surfaceId(), .uri = uri, .sent_version = v }) catch {
-        self.allocator.free(uri);
-    };
+    c.docs.appendAssumeCapacity(.{ .surface_id = term.surfaceId(), .document = pin, .uri = uri, .sent_version = v });
+    committed = true;
 }
 
 /// 문서 크기 상한(§3.0 의 상한과 같은 자리 — Full sync 라 전문이 프레임마다 갈 수 있다).
 pub const max_sync_bytes: usize = 4 * 1024 * 1024;
 
-/// 편집이 일어났다 — `refreshAfterEdit` 가 부른다. version 을 올려 다음 pump 가 didChange 를 보내게.
+/// 문서 편집 통지 — `notifyDocumentEdit`가 revision마다 한 번 부른다. version 을 올려 다음 pump 가 didChange 를 보내게.
 pub fn noteEdited(term: *Term) void {
-    if (term.rt.editor_lsp_version == 0) term.rt.editor_lsp_version = 1;
-    term.rt.editor_lsp_version += 1;
+    if (term.rt.editorDocument().notifications.lsp_version == 0) term.rt.editorDocument().notifications.lsp_version = 1;
+    term.rt.editorDocument().notifications.lsp_version += 1;
 }
 
 /// i18n 문장의 첫 `{s}` 에 이름을 끼운다(서식 문자열이 런타임이라 `bufPrint` 를 못 쓴다). `{s}` 가 없으면 그대로.
@@ -938,7 +974,7 @@ pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
     const root = rootFor(self, term) orelse return null;
     const c = clientFor(self, root, server) orelse return null;
     if (c.phase != .ready or c.proc == null) return null;
-    if (c.findDoc(term.surfaceId()) == null) return null;
+    if (c.findDoc(term) == null) return null;
     return c;
 }
 
@@ -954,7 +990,7 @@ pub fn requestFormatting(self: *AppSession, term: *Term) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     if (!c.formatting_supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     c.formatting_seq = lsp.rpc.nextSeq(c.formatting_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.formattingRequest(self.allocator, c.formatting_seq, d.uri, @max(1, term.rt.editor_tab_width), false) catch return null;
     defer self.allocator.free(msg);
@@ -968,7 +1004,7 @@ pub fn requestSignatureHelp(self: *AppSession, term: *Term, offset: usize, kind:
     const c = readyClientFor(self, term) orelse return null;
     flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
     if (!c.signature_triggers.supported) return null;
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
@@ -988,7 +1024,7 @@ pub fn requestSignatureHelp(self: *AppSession, term: *Term, offset: usize, kind:
 pub fn requestDefinition(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
@@ -1024,7 +1060,7 @@ pub fn locationKindSupported(self: *AppSession, term: *Term, kind: lsp.rpc.Locat
 pub fn requestLocations(self: *AppSession, term: *Term, kind: lsp.rpc.LocationKind, offset: usize) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
@@ -1053,7 +1089,7 @@ pub fn requestRename(self: *AppSession, term: *Term, offset: usize, new_name: []
     const c = readyClientFor(self, term) orelse return null;
     if (!c.rename_supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
@@ -1074,7 +1110,7 @@ pub fn requestCompletion(self: *AppSession, term: *Term, offset: usize, trigger_
     const c = readyClientFor(self, term) orelse return null;
     if (!c.completion_triggers.supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);
@@ -1096,7 +1132,7 @@ pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usiz
     const c = readyClientFor(self, term) orelse return null;
     if (!c.code_action_caps.supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const content = opened.file.content;
     const s = @min(start, content.len);
@@ -1133,7 +1169,7 @@ pub fn requestSemanticTokens(self: *AppSession, term: *Term, full: bool, lo: usi
     const c = readyClientFor(self, term) orelse return null;
     if (!c.semantic_caps.supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     c.semantic_seq = lsp.rpc.nextSeq(c.semantic_seq); // 한 번에 하나라 응답 대조에는 안 올려도 같다(적대적 3회차 C5: 등가) — 낡은 응답을 가르는 규율은 다른 요청들과 같이 둔다
     const msg = if (full)
         lsp.rpc.semanticTokensFullRequest(self.allocator, c.semantic_seq, d.uri) catch return null
@@ -1150,7 +1186,7 @@ pub fn requestInlayHints(self: *AppSession, term: *Term, lo: usize, hi: usize) ?
     const c = readyClientFor(self, term) orelse return null;
     if (!c.inlay_supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const line_count = opened.file.lines.lineCount();
     const end_line: u32 = @intCast(@min(hi + 1, line_count -| 1)); // 반열림이되 줄 수를 안 넘긴다(rust-analyzer 는 넘기면 -32603)
@@ -1168,14 +1204,9 @@ pub fn requestInlayHints(self: *AppSession, term: *Term, lo: usize, hi: usize) ?
 
 /// 이 클라이언트의 문서마다 편집기 Term 을 찾아 `f` 를 부른다.
 fn forEachDocTerm(self: *AppSession, c: *Client, f: *const fn (*Term) void) void {
-    for (c.docs.items) |d| {
-        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
-            fn pred(want: u64, t: *Term) bool {
-                return t.kind == .editor and t.surface.id == want;
-            }
-        }.pred) orelse continue;
-        f(loc.pane.terms.items[loc.term_index]);
-    }
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (c.findDoc(term) != null) f(term);
+    };
 }
 
 /// `textDocument/documentSymbol`(§8.2o) — 문서 단위. 서버가 없거나 provider 가 없으면 `null`(묻지 않는다).
@@ -1183,7 +1214,7 @@ pub fn requestDocumentSymbols(self: *AppSession, term: *Term) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     if (!c.symbols_supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     c.symbols_seq = lsp.rpc.nextSeq(c.symbols_seq);
     const msg = lsp.rpc.documentSymbolRequest(self.allocator, c.symbols_seq, d.uri) catch return null;
     defer self.allocator.free(msg);
@@ -1197,7 +1228,7 @@ pub fn requestDocumentHighlight(self: *AppSession, term: *Term, line: u32, chara
     const c = readyClientFor(self, term) orelse return null;
     if (!c.highlight_supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const ln = opened.file.lines.line(line) orelse return null;
     const text = opened.file.content[ln.start..ln.contentEnd()];
@@ -1211,15 +1242,10 @@ pub fn requestDocumentHighlight(self: *AppSession, term: *Term, line: u32, chara
 }
 
 fn termWaitingHighlight(self: *AppSession, c: *Client, seq: u32) ?*Term {
-    for (c.docs.items) |d| {
-        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
-            fn pred(want: u64, t: *Term) bool {
-                return t.kind == .editor and t.surface.id == want;
-            }
-        }.pred) orelse continue;
-        const t = loc.pane.terms.items[loc.term_index];
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
+        if (c.findDoc(t) == null) continue;
         if (t.rt.editor_highlight.waiting and t.rt.editor_highlight.waiting_seq == seq) return t;
-    }
+    };
     return null;
 }
 
@@ -1229,7 +1255,7 @@ pub fn requestSelectionRange(self: *AppSession, term: *Term, queries: []const u3
     if (!c.selection_range_supported) return null;
     if (queries.len == 0) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const positions = self.allocator.alloc(lsp.rpc.Position, queries.len) catch return null;
     defer self.allocator.free(positions);
@@ -1249,55 +1275,35 @@ pub fn requestSelectionRange(self: *AppSession, term: *Term, queries: []const u3
 }
 
 fn termWaitingSelectionRange(self: *AppSession, c: *Client, seq: u32) ?*Term {
-    for (c.docs.items) |d| {
-        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
-            fn pred(want: u64, t: *Term) bool {
-                return t.kind == .editor and t.surface.id == want;
-            }
-        }.pred) orelse continue;
-        const t = loc.pane.terms.items[loc.term_index];
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
+        if (c.findDoc(t) == null) continue;
         if (t.rt.editor_smart_select.waiting and t.rt.editor_smart_select.waiting_seq == seq) return t;
-    }
+    };
     return null;
 }
 
 fn termWaitingSymbols(self: *AppSession, c: *Client, seq: u32) ?*Term {
-    for (c.docs.items) |d| {
-        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
-            fn pred(want: u64, t: *Term) bool {
-                return t.kind == .editor and t.surface.id == want;
-            }
-        }.pred) orelse continue;
-        const t = loc.pane.terms.items[loc.term_index];
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
+        if (c.findDoc(t) == null) continue;
         if (t.rt.editor_symbols.waiting and t.rt.editor_symbols.waiting_seq == seq) return t;
-    }
+    };
     return null;
 }
 
 fn termWaitingInlay(self: *AppSession, c: *Client, seq: u32) ?*Term {
-    for (c.docs.items) |d| {
-        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
-            fn pred(want: u64, t: *Term) bool {
-                return t.kind == .editor and t.surface.id == want;
-            }
-        }.pred) orelse continue;
-        const t = loc.pane.terms.items[loc.term_index];
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
+        if (c.findDoc(t) == null) continue;
         if (t.rt.editor_inlay.waiting and t.rt.editor_inlay.waiting_seq == seq) return t;
-    }
+    };
     return null;
 }
 
 /// 이 클라이언트의 문서 중 `seq` 를 기다리는 편집기 Term.
 fn termWaitingSemantic(self: *AppSession, c: *Client, seq: u32) ?*Term {
-    for (c.docs.items) |d| {
-        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
-            fn pred(want: u64, t: *Term) bool {
-                return t.kind == .editor and t.surface.id == want;
-            }
-        }.pred) orelse continue;
-        const t = loc.pane.terms.items[loc.term_index];
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
+        if (c.findDoc(t) == null) continue;
         if (t.rt.editor_semantic.waiting and t.rt.editor_semantic.waiting_seq == seq) return t;
-    }
+    };
     return null;
 }
 
@@ -1308,7 +1314,7 @@ pub fn noteSaved(self: *AppSession, term: *Term, saved_text: []const u8) bool {
     const c = readyClientFor(self, term) orelse return false;
     if (!c.save_caps.supported) return false;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return false;
+    const d = c.findDoc(term) orelse return false;
     const msg = lsp.rpc.didSave(self.allocator, d.uri, if (c.save_caps.include_text) saved_text else null) catch return false;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return false;
@@ -1321,7 +1327,7 @@ pub fn requestFoldingRange(self: *AppSession, term: *Term) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     if (!c.fold_supported) return null;
     flushDocument(self, c, term);
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     c.fold_seq = lsp.rpc.nextSeq(c.fold_seq);
     const msg = lsp.rpc.foldingRangeRequest(self.allocator, c.fold_seq, d.uri) catch return null;
     defer self.allocator.free(msg);
@@ -1332,15 +1338,10 @@ pub fn requestFoldingRange(self: *AppSession, term: *Term) ?u32 {
 
 /// 이 클라이언트의 문서 중 접힘 `seq` 를 기다리는 편집기 Term.
 fn termWaitingFolding(self: *AppSession, c: *Client, seq: u32) ?*Term {
-    for (c.docs.items) |d| {
-        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
-            fn pred(want: u64, t: *Term) bool {
-                return t.kind == .editor and t.surface.id == want;
-            }
-        }.pred) orelse continue;
-        const t = loc.pane.terms.items[loc.term_index];
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
+        if (c.findDoc(t) == null) continue;
         if (t.rt.editor_fold_lsp.waiting and t.rt.editor_fold_lsp.waiting_seq == seq) return t;
-    }
+    };
     return null;
 }
 
@@ -1399,7 +1400,7 @@ pub fn renameSupportedFor(self: *AppSession, term: *Term) bool {
 pub fn requestHover(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
-    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
     const content = opened.file.content;
     const off = @min(offset, content.len);

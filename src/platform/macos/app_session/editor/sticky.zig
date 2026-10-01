@@ -116,7 +116,7 @@ pub fn compute(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect,
 fn refreshScopes(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     const st = &term.rt.editor_sticky;
     const doc = term.rt.editorDocument().opened orelse return;
-    const version = term.rt.editor_lsp_version;
+    const version = term.rt.editorDocument().notifications.lsp_version;
     // ① 심볼 2층.
     if (editor_ops.symbols_client.list(term)) |l| {
         if (l.len > 0) {

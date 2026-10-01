@@ -1,5 +1,5 @@
 //! 접힘 3층 — `textDocument/foldingRange` 제품 배선(docs/editor-surface-tooling.md §8.2j · visual-mapping §4 「세 소스가 층으로 쌓인다」).
-//! 프레임마다 `tick`(승격과 같은 자리 — `syntaxColors`)이 「물을 때인가」를 판정해 문서 전체를 묻고, 응답은 요청 때의 `editor_lsp_version`
+//! 프레임마다 `tick`(승격과 같은 자리 — `syntaxColors`)이 「물을 때인가」를 판정해 문서 전체를 묻고, 응답은 요청 때의 `notifications.lsp_version`
 //! 과 같을 때만 받아 `editor_fold.Range` 로 갈아 끼운다(`editor.installFoldRanges` — 승격과 같은 마무리, 접어 둔 것은 푼다).
 //! 편집은 오늘 이미 접힘을 통째로 놓고 들여쓰기로 다시 세우므로(`refreshAfterEdit` → `dropFoldState`) 여기서는 조용 시계만 되감는다.
 //!
@@ -49,7 +49,7 @@ pub fn tick(self: *AppSession, term: *Term) void {
     const st = &term.rt.editor_fold_lsp;
     if (st.waiting) return;
     if (term.rt.editorDocument().opened == null) return;
-    const version = term.rt.editor_lsp_version;
+    const version = term.rt.editorDocument().notifications.lsp_version;
     if (version == 0) return; // 아직 서버에 안 열었다
     if (st.version == version and !st.dirty) return;
     const now = self.awakeMs();
@@ -72,7 +72,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         retryLater(self, st);
         return;
     }
-    if (st.waiting_version != term.rt.editor_lsp_version) {
+    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
         st.dropped_stale += 1;
         st.dirty = true;
         return;

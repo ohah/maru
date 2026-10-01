@@ -3449,9 +3449,9 @@ fn pageRows(term: *Term) usize {
 /// 화면이 그만큼 흔들린다(멀티커서 편집·undo가 실제로 그렇게 한다). §4.1c가 *"N2에서 Zed형
 /// 앵커로 승격한다"*고 적은 자리이고, 여기서 **스크롤 앵커만** 먼저 승격한다 — 이 슬라이스가
 /// 요구하는 것이 그것이고, 나머지(선택·표식 앵커)는 각자 필요할 때 같은 방식으로 옮긴다.
-const ScrollAnchor = struct { off: usize };
+pub const ScrollAnchor = struct { off: usize };
 
-fn captureScrollAnchor(term: *Term) ?ScrollAnchor {
+pub fn captureScrollAnchor(term: *Term) ?ScrollAnchor {
     const doc = term.rt.editorDocument().opened orelse return null;
     const top: u32 = @intCast(term.rt.editor_first_line);
     if (top == 0) return null; // 맨 위다 — 밀릴 것이 없다
@@ -3464,7 +3464,7 @@ fn captureScrollAnchor(term: *Term) ?ScrollAnchor {
 ///
 /// **`refreshAfterEdit` 뒤에 부른다** — 줄 인덱스가 새 문서의 것이어야 옮긴 offset이 어느 줄인지
 /// 답할 수 있다.
-fn restoreScrollAnchor(self: *AppSession, term: *Term, saved: ?ScrollAnchor, d: maru.session.editor.delta.Delta) void {
+pub fn restoreScrollAnchor(self: *AppSession, term: *Term, saved: ?ScrollAnchor, d: maru.session.editor.delta.Delta) void {
     const a = saved orelse return;
     const doc = term.rt.editorDocument().opened orelse return;
     const moved = maru.session.editor.delta.mapOffset(d, a.off);
@@ -4871,16 +4871,16 @@ pub fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.ed
     const rows_before = drawnDocLines(term);
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = changes }, &sels) catch {
+    const inverse = applyDocumentEdit(self, term, .{ .changes = changes }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
 
     breakUndoGroup(term); // 타이핑과 다른 연산이다(§3.3 "연산 종류 변경")
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .insert);
     writeBackSelections(self, term, sels);
     // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
-    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = changes });
     revealPrimaryCaretRows(self, term, rows_before);
@@ -7760,7 +7760,6 @@ fn pushUndo(
     primary_before: usize,
     kind: EditKind,
 ) void {
-    var owned_inverse = inverse;
     const now_ms = self.awakeMs();
     if (!sameUndoGroup(term, kind, now_ms)) term.rt.editorDocument().history.edit_group +%= 1;
     term.rt.editorDocument().history.last_edit_kind = kind;
@@ -7770,26 +7769,23 @@ fn pushUndo(
     dropRedo(self, term);
 
     const entry: UndoEntry = .{
-        .inverse = owned_inverse,
+        .inverse = inverse,
         .sels_before = sels_before,
         .primary_before = primary_before,
         .group = term.rt.editorDocument().history.edit_group,
     };
-    if (!pushEntry(self, &term.rt.editorDocument().history.undo, &term.rt.editorDocument().history.undo_len, entry)) {
-        // 못 쌓으면 **되돌릴 수 없는 편집**이 된다. 그래도 편집 자체는 성사시킨다 —
-        // 여기서 편집을 취소하면 할당 실패 하나가 타이핑을 먹는다.
-        var e = entry;
-        e.deinit(self.allocator);
-        owned_inverse = undefined;
-    }
+    // applyDocumentEdit가 본문 변경 전에 capacity를 준비했다. 게시 이후에는 할당하지 않는다.
+    pushPreparedEntry(self, &term.rt.editorDocument().history.undo, &term.rt.editorDocument().history.undo_len, entry);
 }
 
-fn pushEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry: UndoEntry) bool {
-    if (len.* == stack.len) {
-        const next_cap = if (stack.len == 0) 16 else stack.len * 2;
-        const grown = self.allocator.realloc(stack.*, next_cap) catch return false;
-        stack.* = grown;
-    }
+pub fn prepareEntry(self: *AppSession, stack: *[]UndoEntry, len: usize) error{OutOfMemory}!void {
+    if (len < stack.len) return;
+    const next_cap = if (stack.len == 0) 16 else stack.len * 2;
+    stack.* = try self.allocator.realloc(stack.*, next_cap);
+}
+
+fn pushPreparedEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry: UndoEntry) void {
+    std.debug.assert(len.* < stack.len);
     stack.*[len.*] = entry;
     len.* += 1;
 
@@ -7800,7 +7796,6 @@ fn pushEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry: UndoEnt
         std.mem.copyForwards(UndoEntry, stack.*[0 .. len.* - drop], stack.*[drop..len.*]);
         len.* -= drop;
     }
-    return true;
 }
 
 fn dropRedo(self: *AppSession, term: *Term) void {
@@ -7892,25 +7887,28 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
 
     // **같은 묶음을 연속으로 꺼낸다** — 그것이 "연속 타이핑은 undo 하나"의 구현이다.
     while (from_len.* > 0 and from.*[from_len.* - 1].group == group) {
-        from_len.* -= 1;
-        var entry = from.*[from_len.*];
-
-        // 되돌릴 때도 selection을 함께 민다 — `apply`가 그 계약이다.
-        var sels = selectionsForEdit(self, term) orelse {
-            entry.deinit(self.allocator);
-            continue;
-        };
+        // 준비 실패는 원래 항목을 스택에 남긴다. 성공한 delta만 반대 스택으로 옮긴다.
+        var entry = from.*[from_len.* - 1];
+        var sels = selectionsForEdit(self, term) orelse break;
         // 반대편 이력은 이번 역연산 직전의 커서를 되살린다. 원래 entry 의 before 를 다시
         // 복사하면 redo 가 편집 전 커서를 복원해, IME 로 합친 secondary 까지 되살린다.
         // 묶음 중간에는 화면 상태를 아직 게시하지 않았으므로 직전 항목이 복원한 값을 쓴다.
-        const mirror_items: []editor_selection.Selection = self.allocator.dupe(editor_selection.Selection, if (restored) |r| r.items else sels.items) catch &.{};
+        const mirror_items = self.allocator.dupe(editor_selection.Selection, if (restored) |r| r.items else sels.items) catch {
+            self.allocator.free(sels.items);
+            break;
+        };
         const mirror_primary = if (restored) |r| r.primary else sels.primary;
-        const back = term.rt.editorDocument().opened.?.file.apply(entry.inverse.delta(), &sels) catch {
+        prepareEntry(self, to, to_len.*) catch {
             self.allocator.free(mirror_items);
             self.allocator.free(sels.items);
-            entry.deinit(self.allocator);
-            continue;
+            break;
         };
+        const back = applyDocumentEditPrepared(self, term, entry.inverse.delta(), &sels, entry.sels_before.len) catch {
+            self.allocator.free(mirror_items);
+            self.allocator.free(sels.items);
+            break;
+        };
+        from_len.* -= 1;
         self.allocator.free(sels.items);
         did_any = true;
 
@@ -7935,10 +7933,7 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
             .primary_before = mirror_primary,
             .group = group,
         };
-        if (!pushEntry(self, to, to_len, mirror)) {
-            var m = mirror;
-            m.deinit(self.allocator);
-        }
+        pushPreparedEntry(self, to, to_len, mirror);
         entry.inverse.deinit(); // `sels_before`는 위에서 `restored`가 가져갔다
     }
 
@@ -7957,7 +7952,8 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
             if (r.items.len > 1) {
                 // **`catch &.{}`로 적으면 안 된다** — 빈 슬라이스 리터럴이 `[]const`라 타입이
                 // 그쪽으로 굳고 아래 채우기가 "상수에 대입"이 된다. 실패는 옵셔널로 받는다.
-                if (self.allocator.alloc(editor_selection.Selection, r.items.len - 1)) |extras| {
+                const restored_extras = takeSharedSelectionBuffer(self, term, r.items.len - 1) orelse self.allocator.alloc(editor_selection.Selection, r.items.len - 1) catch null;
+                if (restored_extras) |extras| {
                     var k: usize = 0;
                     for (r.items, 0..) |sel, i| {
                         if (i == r.primary) continue;
@@ -7965,7 +7961,7 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
                         k += 1;
                     }
                     term.rt.editor_extra_selections = extras;
-                } else |_| {
+                } else {
                     // 나머지 커서를 못 되살렸다 — primary 하나로 간다. 되돌리기 자체는 성사됐다.
                 }
             }
@@ -8383,7 +8379,7 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+    const inverse = applyDocumentEdit(self, term, .{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -8565,14 +8561,23 @@ fn selectionsForEdit(self: *AppSession, term: *Term) ?maru.session.editor.select
 }
 
 /// 밀린 커서들을 제품 저장소로 되돌린다. **primary와 나머지를 다시 가른다.**
+fn takeSharedSelectionBuffer(self: *AppSession, term: *Term, count: usize) ?[]editor_selection.Selection {
+    const buf = term.rt.editor_shared_selection_buf orelse return null;
+    term.rt.editor_shared_selection_buf = null;
+    if (buf.len == count) return buf;
+    self.allocator.free(buf);
+    return null;
+}
+
 fn writeBackSelections(self: *AppSession, term: *Term, sels: maru.session.editor.selection.Selections) void {
     term.rt.editor_selection = sels.primarySelection();
     const extras_len = sels.items.len - 1;
     if (extras_len == 0) {
+        if (takeSharedSelectionBuffer(self, term, 0)) |empty| self.allocator.free(empty);
         clearExtraSelections(self, term);
         return;
     }
-    const grown = self.allocator.alloc(editor_selection.Selection, extras_len) catch {
+    const grown = takeSharedSelectionBuffer(self, term, extras_len) orelse self.allocator.alloc(editor_selection.Selection, extras_len) catch {
         clearExtraSelections(self, term);
         return;
     };
@@ -9068,16 +9073,16 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
     const rows_before = drawnDocLines(term);
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+    const inverse = applyDocumentEdit(self, term, .{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
 
     breakUndoGroup(term); // 타이핑과 다른 연산이다(§3.3 "연산 종류 변경")
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .insert);
     writeBackSelections(self, term, sels);
     // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
-    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     revealPrimaryCaretRows(self, term, rows_before);
@@ -9102,14 +9107,14 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
     const rows_before = drawnDocLines(term);
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = ranges }, &sels) catch {
+    const inverse = applyDocumentEdit(self, term, .{ .changes = ranges }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
     breakUndoGroup(term);
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .insert);
     writeBackSelections(self, term, sels);
-    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges });
     revealPrimaryCaretRows(self, term, rows_before);
@@ -9578,7 +9583,7 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = dedup.items }, &sels) catch {
+    const inverse = applyDocumentEdit(self, term, .{ .changes = dedup.items }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -9590,10 +9595,10 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     // 묶음이 되어, 붙여넣기를 되돌리려는 undo 한 번에 친 것까지 사라진다 — `pushUndo`가 묶음을
     // 정하므로 그 **전에** 끊어야 붙여넣기가 자기 묶음을 갖는다(적대적 검증 2026-08-26이 잡았다).
     breakUndoGroup(term);
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .insert);
     writeBackSelections(self, term, sels);
     // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
-    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = dedup.items });
     revealPrimaryCaretRows(self, term, rows_before); // 붙여넣은 자리를 보여 준다(§5.2)
@@ -9720,7 +9725,7 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
     const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = term.rt.editorDocument().opened.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+    const inverse = applyDocumentEdit(self, term, .{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
     };
@@ -9736,11 +9741,11 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
         if (i < sels.items.len) sels.items[i] = editor_selection.Selection.at(ic.end);
     }
 
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .delete);
 
     writeBackSelections(self, term, sels);
     // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
-    const edit_span = syntax_color.spanFromInverse(inverse.changes);
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     // **편집한 자리를 보여 준다**(§5.2 줄 축). 앵커 보정 **뒤**여야 한다 — 보정은 "화면을 제자리에"
@@ -10104,7 +10109,25 @@ fn sliceOfLines(doc: anytype, from: u32, to: u32) []const u8 {
 /// 실제 병합에서 이보다 많은 구간이 나오면 파일을 손으로 여는 편이 빠르다.
 pub const max_conflict_regions: usize = 256;
 
-fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
+// 모든 제품 입력과 이력은 같은 공유 게시 coordinator를 지난다.
+const shared_edit_ops = @import("shared_edit.zig");
+
+fn applyDocumentEdit(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, sels: *editor_selection.Selections) !maru.session.editor.delta.Inverse {
+    return shared_edit_ops.apply(self, term, d, sels);
+}
+
+fn applyDocumentEditAtRevision(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, sels: *editor_selection.Selections, base_revision: u64) !maru.session.editor.delta.Inverse {
+    return shared_edit_ops.applyAtRevision(self, term, d, sels, base_revision);
+}
+
+fn applyDocumentEditPrepared(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, sels: *editor_selection.Selections, result_selection_count: usize) !maru.session.editor.delta.Inverse {
+    return shared_edit_ops.applyPrepared(self, term, d, sels, result_selection_count);
+}
+
+pub fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
+    // 직접 IME 커서 정산처럼 별도 준비 저장소를 소비한 경로의 여분 준비를 정산한다.
+    if (term.rt.editor_shared_selection_buf) |buf| self.allocator.free(buf);
+    term.rt.editor_shared_selection_buf = null;
     lsp_client.noteEdited(term); // §8.2a: version 이 오르면 다음 tick 이 didChange 를 보낸다
     // §3.10: 백업 시계를 되감는다. **여기가 유일한 자리다** — 아래 주석이 적듯 제품의 편집 경로
     // 여섯이 전부 이 함수를 지나므로, 통지도 한 곳이면 된다.
@@ -10199,7 +10222,12 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
         editedLineRange(edit, doc.file.lines, term.rt.editor_lines.len, n)
     else
         null;
-    const lines = self.allocator.alloc([]const u8, n) catch |err| {
+    const lines = if (term.rt.editor_shared_lines_ready) blk: {
+        term.rt.editor_shared_lines_ready = false;
+        // 공유 준비에서 content의 새 revision을 빌린 배열이 이미 게시됐다.
+        std.debug.assert(term.rt.editor_lines.len == n);
+        break :blk @constCast(term.rt.editor_lines);
+    } else self.allocator.alloc([]const u8, n) catch |err| {
         if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
         term.rt.editor_lines = &.{};
         dropLineCols(self, term);
@@ -10209,7 +10237,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
         return err;
     };
     for (0..n) |i| lines[i] = doc.file.lineText(i) orelse "";
-    if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
+    if (term.rt.editor_lines.ptr != lines.ptr and term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = lines;
     // **폭 캐시: 살리거나 버리거나.** 편집 구간을 알면 **앞은 그대로 두고 꼬리는 밀고 바뀐 구간만**
     // 다시 센다(한 글자를 치면 한 줄이다). 범위를 모르거나(되돌리기) 밀기가 안 잡히면 버린다 —
@@ -10228,6 +10256,9 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
 }
 
 fn dropSelectionState(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_shared_selection_buf) |buf| self.allocator.free(buf);
+    term.rt.editor_shared_selection_buf = null;
+    term.rt.editor_shared_lines_ready = false;
     @import("../input.zig").cancelEditorCommit(self, term.surface.id);
     term.rt.editor_ime_replacement = null;
     term.rt.editor_ime_commit_selection = null;
@@ -44990,4 +45021,328 @@ fn registrationAllocationFailures(allocator: std.mem.Allocator) !void {
 test "EDOCREG3 등록 준비의 모든 할당 실패는 기존 pane과 문서를 유지한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try testing.checkAllAllocationFailures(testing.allocator, registrationAllocationFailures, .{});
+}
+
+// 분할 UI를 노출하지 않고 실제 Term 두 개를 같은 registry 문서에 연결한다.
+// 읽기/저장 identity 통합과 provider 공유는 후속 단계에서 제품 진입에 배선한다.
+fn sharedViewFixturePeer(fx: *PaneFixture) !*Term {
+    const peer = try openUntitledInActivePane(fx.session);
+    // Term을 파괴하는 releaseEditorTerm은 재사용하지 않는다. 빈 임시 문서만 교체한다.
+    dropFoldState(fx.session, peer);
+    if (peer.rt.editor_lines.len > 0) fx.session.allocator.free(peer.rt.editor_lines);
+    peer.rt.editor_lines = &.{};
+    const old = peer.rt.editor_document_lease.?;
+    _ = try @constCast(old.owner).release(old);
+    const lease = fx.term.rt.editor_document_lease.?;
+    peer.rt.editor_document_lease = try @constCast(lease.owner).retain(lease, .view);
+    try refreshAfterEdit(fx.session, peer, null);
+    return peer;
+}
+
+test "SHVIEW1 두 Term의 입력은 본문 revision과 줄을 함께 게시하고 선택은 독립이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    const doc = fx.term.rt.editorDocument();
+    const rev = doc.opened.?.file.revision;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    peer.rt.editor_first_col = 7;
+    try testing.expect(insertText(fx.session, fx.term, "한\n"));
+    try testing.expect(doc == peer.rt.editorDocument());
+    try testing.expectEqual(rev + 1, peer.rt.editorDocument().opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 4), peer.rt.editor_selection.?.focus);
+    try testing.expectEqual(doc.opened.?.file.lineCount(), peer.rt.editor_lines.len);
+    try testing.expectEqualStrings("한", peer.rt.editor_lines[0]);
+    try testing.expectEqual(@as(usize, 7), peer.rt.editor_first_col);
+    peer.rt.editor_selection = editor_selection.Selection.at(4);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(doc.opened.?.file.content.len);
+    const source_end = fx.term.rt.editor_selection.?.focus;
+    try testing.expect(insertText(fx.session, peer, "x"));
+    try testing.expectEqual(source_end + 1, fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqualStrings("xconst a = 1;", fx.term.rt.editor_lines[1]);
+}
+
+test "SHVIEW2 다른 뷰의 Undo와 Redo는 공유 이력을 쓰고 호출 뷰만 선택을 복원한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    const original = try testing.allocator.dupe(u8, fx.term.rt.editorDocument().opened.?.file.content);
+    defer testing.allocator.free(original);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    peer.rt.editor_selection = editor_selection.Selection.at(10);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    fx.term.rt.editor_selection = editor_selection.Selection.at(20);
+    try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqualStrings(original, fx.term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 19), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), peer.rt.editor_selection.?.focus);
+    try testing.expect(redoEdit(fx.session, peer));
+    try testing.expectEqual(@as(usize, 20), fx.term.rt.editor_selection.?.focus);
+    try testing.expect(std.mem.startsWith(u8, fx.term.rt.editor_lines[0], "xconst"));
+}
+
+test "SHVIEW3 교체 삭제와 멀티커서는 역방향 선택과 스크롤 앵커를 독립 매핑한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    peer.rt.editor_selection = editor_selection.Selection.fromPoints(12, 6);
+    peer.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(24)});
+    peer.rt.editor_first_line = 1;
+    const old_anchor = captureScrollAnchor(peer).?.off;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(13)});
+    try testing.expect(insertText(fx.session, fx.term, "한\n"));
+    try testing.expectEqual(@as(usize, 16), peer.rt.editor_selection.?.fixedEnd());
+    try testing.expectEqual(@as(usize, 10), peer.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 32), peer.rt.editor_extra_selections[0].focus);
+    // 앵커 앞 삽입 하나와 원래 13 위치 삽입을 모두 반영한다.
+    try testing.expectEqual(old_anchor + 8, captureScrollAnchor(peer).?.off);
+    clearExtraSelections(fx.session, fx.term);
+    fx.term.rt.editor_selection = editor_selection.Selection.fromPoints(4, 10);
+    try testing.expect(insertText(fx.session, fx.term, "Z"));
+    try testing.expectEqual(@as(usize, 5), peer.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 11), peer.rt.editor_selection.?.fixedEnd());
+    try testing.expect(deleteText(fx.session, fx.term, true));
+    try testing.expectEqual(@as(usize, 4), peer.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 10), peer.rt.editor_selection.?.fixedEnd());
+    try testing.expectEqualStrings(fx.term.rt.editor_lines[1], peer.rt.editor_lines[1]);
+}
+
+test "SHVIEW4 편집 준비의 모든 할당 실패는 문서와 두 뷰의 줄 선택 revision을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var saw_success = false;
+    var saw_failures: usize = 0;
+    for (0..100) |failure| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const peer = try sharedViewFixturePeer(&fx);
+        const state = fx.term.rt.editorDocument();
+        const original = try testing.allocator.dupe(u8, state.opened.?.file.content);
+        defer testing.allocator.free(original);
+        const old_source_lines = fx.term.rt.editor_lines.ptr;
+        const old_peer_lines = peer.rt.editor_lines.ptr;
+        peer.rt.editor_selection = editor_selection.Selection.at(4);
+        const old_revision = state.opened.?.file.revision;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        fx.session.allocator = failing.allocator();
+        state.opened.?.file.allocator = failing.allocator();
+        state.opened.?.file.buf.allocator = failing.allocator();
+        defer {
+            fx.session.allocator = testing.allocator;
+            state.opened.?.file.allocator = testing.allocator;
+            state.opened.?.file.buf.allocator = testing.allocator;
+        }
+        var items = [_]editor_selection.Selection{editor_selection.Selection.at(4)};
+        var sels: editor_selection.Selections = .{ .items = &items, .primary = 0, .column = null };
+        const changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 5, .text = "한\n" }};
+        if (applyDocumentEdit(fx.session, fx.term, .{ .changes = &changes }, &sels)) |result| {
+            var inverse = result;
+            inverse.deinit();
+            refreshAfterEdit(fx.session, fx.term, null) catch {};
+            try testing.expectEqual(old_revision + 1, state.opened.?.file.revision);
+            try testing.expectEqualStrings("한", peer.rt.editor_lines[0]);
+            try testing.expectEqualStrings("한", fx.term.rt.editor_lines[0]);
+            if (!failing.has_induced_failure) {
+                saw_success = true;
+                break;
+            }
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            saw_failures += 1;
+            try testing.expectEqualStrings(original, state.opened.?.file.content);
+            try testing.expectEqual(old_revision, state.opened.?.file.revision);
+            try testing.expectEqual(old_source_lines, fx.term.rt.editor_lines.ptr);
+            try testing.expectEqual(old_peer_lines, peer.rt.editor_lines.ptr);
+            try testing.expectEqual(@as(usize, 4), peer.rt.editor_selection.?.focus);
+            try testing.expectEqual(@as(usize, 4), sels.items[0].focus);
+        }
+    }
+    try testing.expect(saw_success);
+    try testing.expect(saw_failures >= 5);
+}
+
+test "SHVIEW5 반대 뷰의 삭제 겹침으로 합쳐진 커서는 다음 입력을 한 번만 넣는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 10);
+    peer.rt.editor_selection = editor_selection.Selection.at(5);
+    peer.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(8)});
+    try testing.expect(insertText(fx.session, fx.term, "한"));
+    try testing.expectEqual(@as(usize, 0), peer.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), peer.rt.editor_extra_selections.len);
+    try testing.expect(insertText(fx.session, peer, "x"));
+    try testing.expect(std.mem.startsWith(u8, fx.term.rt.editorDocument().opened.?.file.content, "x한"));
+    try testing.expectEqual(@as(usize, 4), fx.term.rt.editor_selection.?.focus);
+}
+
+test "SHVIEW6 Undo 준비 실패는 본문과 이력을 유지하고 재시도할 수 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    const state = fx.term.rt.editorDocument();
+    const undo_len = state.history.undo_len;
+    const revision = state.opened.?.file.revision;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    const changed = undoEdit(fx.session, peer);
+    fx.session.allocator = testing.allocator;
+    try testing.expect(!changed);
+    try testing.expectEqual(undo_len, state.history.undo_len);
+    try testing.expectEqual(revision, state.opened.?.file.revision);
+    try testing.expect(std.mem.startsWith(u8, peer.rt.editor_lines[0], "xconst"));
+    try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqualStrings("const a = 1;", fx.term.rt.editor_lines[0]);
+}
+
+test "SHVIEW7 Undo 스택 성장 실패는 새 편집을 게시하지 않고 기존 Undo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    const state = fx.term.rt.editorDocument();
+    // 한 live entry와 같은 capacity로 줄여 다음 push가 실제 성장하게 한다.
+    const compact = try testing.allocator.dupe(UndoEntry, state.history.undo[0..state.history.undo_len]);
+    testing.allocator.free(state.history.undo);
+    state.history.undo = compact;
+    const before = try testing.allocator.dupe(u8, state.opened.?.file.content);
+    defer testing.allocator.free(before);
+    const revision = state.opened.?.file.revision;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var items = [_]editor_selection.Selection{editor_selection.Selection.at(0)};
+    var sels = editor_selection.Selections.init(&items, 0);
+    const changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = "unrecorded" }};
+    fx.session.allocator = failing.allocator();
+    const result = applyDocumentEdit(fx.session, fx.term, .{ .changes = &changes }, &sels);
+    fx.session.allocator = testing.allocator;
+    try testing.expectError(error.OutOfMemory, result);
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectEqualStrings(before, state.opened.?.file.content);
+    try testing.expectEqual(revision, state.opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 1), state.history.undo_len);
+    try testing.expectEqual(@as(usize, 0), sels.items[0].focus);
+    try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqualStrings("const a = 1;", fx.term.rt.editor_lines[0]);
+}
+
+test "SHVIEW8 이전 revision의 준비된 요청은 새 입력을 덮지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    const state = fx.term.rt.editorDocument();
+    const before_revision = state.opened.?.file.revision;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    const before = try testing.allocator.dupe(u8, state.opened.?.file.content);
+    defer testing.allocator.free(before);
+    var items = [_]editor_selection.Selection{editor_selection.Selection.at(0)};
+    var sels = editor_selection.Selections.init(&items, 0);
+    const changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 1, .text = "stale" }};
+    try testing.expectError(error.StaleRevision, applyDocumentEditAtRevision(fx.session, peer, .{ .changes = &changes }, &sels, before_revision));
+    try testing.expectEqualStrings(before, state.opened.?.file.content);
+    try testing.expectEqual(before_revision + 1, state.opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 0), sels.items[0].focus);
+    // 새 동기 입력은 최신 기준으로 정상 적용된다.
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "y"));
+    try testing.expect(std.mem.startsWith(u8, fx.term.rt.editor_lines[0], "yxconst"));
+}
+
+test "SHVIEW9 다른 뷰가 자동 닫기 쌍을 바꾸면 Backspace가 남의 글자를 함께 지우지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    fx.term = try undoFixture(&fx, testing.allocator, "shared-pair.txt", "\n");
+    const peer = try sharedViewFixturePeer(&fx);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "("));
+    try testing.expectEqualStrings("()\n", peer.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(?usize, 1), peer.rt.editor_auto_closed_at);
+    fx.term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 1);
+    try testing.expect(insertText(fx.session, fx.term, "X"));
+    try testing.expectEqualStrings("X)\n", peer.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(?usize, null), peer.rt.editor_auto_closed_at);
+    try testing.expect(deleteText(fx.session, peer, true));
+    try testing.expectEqualStrings(")\n", fx.term.rt.editorDocument().opened.?.file.content);
+}
+
+test "SHVIEW10 다른 뷰 선택 경계의 삽입은 방향을 유지하며 범위를 확장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    peer.rt.editor_selection = editor_selection.Selection.fromPoints(2, 5);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, fx.term, "한"));
+    try testing.expectEqual(@as(usize, 2), peer.rt.editor_selection.?.fixedEnd());
+    try testing.expectEqual(@as(usize, 8), peer.rt.editor_selection.?.focus);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    try testing.expectEqual(@as(usize, 2), peer.rt.editor_selection.?.fixedEnd());
+    try testing.expectEqual(@as(usize, 9), peer.rt.editor_selection.?.focus);
+    const bytes = peer.rt.editorDocument().opened.?.file.content;
+    try testing.expectEqualStrings("xnst한", bytes[2..9]);
+    peer.rt.editor_selection = editor_selection.Selection.fromPoints(9, 2);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(9);
+    try testing.expect(insertText(fx.session, fx.term, "z"));
+    try testing.expectEqual(@as(usize, 10), peer.rt.editor_selection.?.fixedEnd());
+    try testing.expectEqual(@as(usize, 2), peer.rt.editor_selection.?.focus);
+}
+
+test "SHVIEW11 Undo의 모든 준비 할당 실패는 두 뷰와 기존 이력을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var saw_success = false;
+    var failures: usize = 0;
+    for (0..100) |failure| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const peer = try sharedViewFixturePeer(&fx);
+        const state = fx.term.rt.editorDocument();
+        fx.term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
+        try testing.expect(insertText(fx.session, fx.term, "한\n"));
+        peer.rt.editor_selection = editor_selection.Selection.at(3);
+        fx.term.rt.editor_selection = editor_selection.Selection.at(8);
+        const before = try testing.allocator.dupe(u8, state.opened.?.file.content);
+        defer testing.allocator.free(before);
+        const revision = state.opened.?.file.revision;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        fx.session.allocator = failing.allocator();
+        state.opened.?.file.allocator = failing.allocator();
+        state.opened.?.file.buf.allocator = failing.allocator();
+        const changed = undoEdit(fx.session, peer);
+        fx.session.allocator = testing.allocator;
+        state.opened.?.file.allocator = testing.allocator;
+        state.opened.?.file.buf.allocator = testing.allocator;
+        if (!changed) {
+            failures += 1;
+            try testing.expect(failing.has_induced_failure);
+            try testing.expectEqualStrings(before, state.opened.?.file.content);
+            try testing.expectEqual(revision, state.opened.?.file.revision);
+            try testing.expectEqual(@as(usize, 1), state.history.undo_len);
+            try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+            try testing.expectEqual(@as(usize, 3), peer.rt.editor_selection.?.focus);
+            try testing.expectEqual(@as(usize, 8), fx.term.rt.editor_selection.?.focus);
+            try testing.expectEqualStrings("한", peer.rt.editor_lines[0]);
+            try testing.expect(undoEdit(fx.session, peer));
+        }
+        try testing.expectEqualStrings("const a = 1;", peer.rt.editor_lines[0]);
+        try testing.expectEqualStrings(peer.rt.editor_lines[0], fx.term.rt.editor_lines[0]);
+        if (!failing.has_induced_failure) {
+            saw_success = true;
+            break;
+        }
+    }
+    try testing.expect(saw_success);
+    try testing.expect(failures >= 5);
 }

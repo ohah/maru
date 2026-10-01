@@ -45,7 +45,7 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 
 | 항목 | 분류 | 현재 코드/계약 근거 | 다음 완료 조건 |
 |---|---|---|---|
-| 같은 파일 두 pane에서 공유 편집 | 승인된 설계의 단일 뷰 이관 + 공유 배선 미착수 | [layering §2.4](../native-editor-layering.md), 여러 뷰 원장 H1~H9. `app_session.zig`의 `TermRuntime.editor_document`가 본문·저장 정보·이력을 묶고 선택은 뷰에 남는다. [단일 뷰 이관](editor-shared-document.md)을 진행 중이다. 제품 소스에서 공유 `DocumentRegistry`와 명시적 editor split 명령을 찾지 못했다 | 승인된 [공유 문서 설계](editor-shared-document.md)에 따라 안정 핸들·연결 수명·provider/뷰 갱신을 구현하고, 한쪽 편집/Undo/외부 변경이 다른 뷰에 반영되며 선택·스크롤은 독립 |
+| 같은 파일 두 pane에서 공유 편집 | 단일 뷰 수명 이관 + 두 뷰 게시 fixture 구현, 제품 연결은 잔여 | [layering §2.4](../native-editor-layering.md), 여러 뷰 원장 H1~H9. 앱 전역 `editor_documents` registry가 본문·저장 정보·이력을 소유하고 Term은 view lease와 독립 선택을 둔다. [공유 문서 계획](editor-shared-document.md)에 단일 뷰 이관과 실제 두 Term의 편집 게시 fixture 범위를 구분한다. 명시적 editor split 명령은 아직 노출하지 않는다 | 승인된 [공유 문서 설계](editor-shared-document.md)에 따라 안정 핸들·연결 수명·provider/뷰 갱신을 구현하고, 한쪽 편집/Undo/외부 변경이 다른 뷰에 반영되며 선택·스크롤은 독립 |
 | 비교 뷰 좌우 독립 찾기 상자 | 구현·검증 완료 | [독립 찾기 계획](editor-diff-find.md). 두 `find.State`와 열별 결과를 유지한다 | 헤드리스·제품 Metal·실제 AppKit/IME 검증 결과는 해당 계획에 기록 |
 | 프로젝트 전체 검색·바꾸기 미리보기 | 남은 기능 + 정책 미결 | 네이티브 후속 표. 파일 안 검색은 있지만 프로젝트 검색 도크·진행/취소·적용 미리보기 경로는 확인되지 않았다 | 검색 범위·제외/무시 규칙·엔진/프로세스·결과 도크·취소·바꾸기 안전 규칙을 결정하고 실제 여러 파일 검증 |
 | 영구 도크 심볼 아웃라인 | 남은 기능 | 후속 표의 목록 UI. `symbols.zig`는 문서 심볼을 공급하고 현재 소비자는 breadcrumb·symbol picker 등이다. 도크 아웃라인 경로는 확인되지 않았다 | 기존 심볼 목록을 재사용하는 도크 배치·선택/추종·문서 전환 계약 |

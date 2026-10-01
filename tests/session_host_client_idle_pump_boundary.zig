@@ -41,6 +41,10 @@ test "P4 E3c client idle pump owns actual generation-backed scale evidence" {
     try std.testing.expectEqual(@as(usize, 0), count(backend, "for (ready_hosts[0..ready_host_count])"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "client_idle_pump_evidence.recordPumpDelta"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "client_idle_pump_evidence.recordTimestampSeal"));
+    // 메타데이터 증거는 두 자리다: 결과가 `.metadata` 인 턴(backend)과, 화면 배치와 **같은 턴에** 적용돼 결과가
+    // `.screen` 하나로 접힌 턴(runtime). 뒤엣것이 없으면 그 메타데이터는 증거에서 사라진다(2026-10-01).
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "client_idle_pump_evidence.recordMetadataEvent"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "client_idle_pump_evidence.recordMetadataEvent"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "client_idle_pump_evidence.recordRegistryVisit"));
     try std.testing.expectEqual(@as(usize, 1), count(e2e, "const runtime_counts = [_]u32{ 1, 10, 15, 100 }"));
     try std.testing.expectEqual(@as(usize, 1), count(e2e, "const idle_frame_count: u32 = 60"));

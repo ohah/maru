@@ -6016,6 +6016,11 @@ pub const RemoteRuntime = struct {
             else => return err,
         };
         if (after_screen.ended) return .ended;
+        // **같은 턴에 적용된 메타데이터를 센다.** 결과는 `.screen` 하나라 소비자(`drainRemoteNow`)는 `.metadata`
+        // 결과만 증거로 세고 이 메타데이터는 못 본다 — OSC 에코와 그 메타데이터가 한 턴에 오면 늘 이 모양이다
+        // (P3-e4d-4 조사 2026-10-01: 적용은 됐는데 결과 종류에 안 보였다). 상태는 이미 적용됐으므로 동작은
+        // 같고, 증거 카운터만 정확해진다.
+        if (events.metadata or after_screen.metadata) client_idle_pump_evidence.recordMetadataEvent();
         return .screen;
     }
 
@@ -11048,6 +11053,11 @@ const B4SemanticFixture = struct {
     }
 
     pub fn initInPlaceWithAllocator(self: *@This(), allocator: std.mem.Allocator) !void {
+        return self.initInPlaceWithTrailingFrames(allocator, "");
+    }
+
+    /// `trailing` 은 스냅샷 **뒤에** 피어가 이어 쓰는 프레임들이다 — attach 뒤 첫 펌프가 소켓에서 읽는다.
+    pub fn initInPlaceWithTrailingFrames(self: *@This(), allocator: std.mem.Allocator, trailing: []const u8) !void {
         try host_adapter_mod.HostAdapter.initializeProcessRuntime();
         const response = try framing.encodeFrame(
             allocator,
@@ -11081,12 +11091,13 @@ const B4SemanticFixture = struct {
         );
         defer allocator.free(snapshot);
         const Peer = struct {
-            fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8) void {
+            fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8, trailing_wire: []const u8) void {
                 defer _ = c.close(fd);
                 const request = readPeerFrame(fd, std.heap.page_allocator) catch return;
                 defer std.heap.page_allocator.free(request.payload);
                 socket_server.writeAll(fd, response_wire) catch return;
                 socket_server.writeAll(fd, snapshot_wire) catch return;
+                if (trailing_wire.len != 0) socket_server.writeAll(fd, trailing_wire) catch return;
             }
         };
         var fds: [2]c.fd_t = undefined;
@@ -11094,7 +11105,7 @@ const B4SemanticFixture = struct {
             @as(c_int, 0),
             c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
         );
-        var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, snapshot });
+        var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, snapshot, trailing });
         self.allocator = allocator;
         self.client = .{
             .allocator = allocator,
@@ -11160,6 +11171,65 @@ const B4SemanticFixture = struct {
         _ = try self.runtime.classifyAndPrepareEvent();
     }
 };
+
+test "metadata applied in the same pump turn as a screen batch is counted as metadata evidence" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    // 피어가 스냅샷 뒤에 **메타데이터 이벤트와 화면 delta 를 연달아** 쓴다 — attach 뒤 첫 펌프 한 턴이 둘 다
+    // 적용하고 결과는 `.screen` 하나다(OSC 에코와 그 메타데이터가 한 턴에 오는 실제 모양).
+    const event = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .event, .stream_id = 7 },
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":{" ++
+            "\"cwd\":\"/same-turn\",\"window_title\":\"t\",\"ssh_remote_dest\":\"same-turn-host\"," ++
+            "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+            "\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1," ++
+            "\"cols\":1,\"rows\":1,\"foreground_available\":false," ++
+            "\"foreground_pgid\":null,\"processes\":[]}}",
+    );
+    defer allocator.free(event);
+    var delta_records: std.ArrayListUnmanaged(u8) = .empty;
+    defer delta_records.deinit(allocator);
+    var delta_runs = [_]screen_stream.Run{.{ .grapheme = "m", .width = 1, .count = 1 }};
+    const delta_record = try screen_stream.encodeSetRuns(
+        allocator,
+        .{ .kind = .set_runs, .generation = 1, .sequence = 1 },
+        .{ .base_generation = 1, .row_index = 0, .start_col = 0, .runs = &delta_runs },
+    );
+    defer allocator.free(delta_record);
+    try screen_stream.appendRecord(&delta_records, allocator, delta_record);
+    const delta = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        delta_records.items,
+    );
+    defer allocator.free(delta);
+    const trailing = try std.mem.concat(allocator, u8, &.{ event, delta });
+    defer allocator.free(trailing);
+
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlaceWithTrailingFrames(allocator, trailing);
+    defer fixture.deinit();
+    // 입력 단계가 막히면 펌프는 화면을 읽기 전에 돌아간다 — 제품 spawn 이 세우는 mutation owner 를 세운다
+    // (픽스처는 runtime 을 `undefined` 에서 필드별로 채우므로 이 owner 는 아직 빈 값이 아니다).
+    fixture.runtime.mutation_owner = .{};
+    try fixture.runtime.mutation_owner.initInPlace(
+        try fixture.runtime.generation_owner.slot.currentGeneration(),
+        fixture.runtime.input_batches.epoch,
+    );
+
+    var evidence: client_idle_pump_evidence.Owner = undefined;
+    evidence.initInPlace();
+    try client_idle_pump_evidence.install(&evidence);
+    defer client_idle_pump_evidence.uninstall(&evidence) catch {};
+
+    try std.testing.expectEqual(RemoteRuntime.PumpResult.screen, try fixture.runtime.pumpDelta());
+    // 둘 다 적용됐다 — 화면에 delta 가, 관측에 dest 가.
+    try std.testing.expectEqual(@as(u21, 'm'), fixture.runtime.currentGeneration().attachment.screenPtr().?.grid.cells[0].codepoint);
+    try std.testing.expectEqualStrings("same-turn-host", fixture.runtime.appliedSshRemoteDest().?);
+    // 결과 종류는 `.screen` 이지만 메타데이터 증거는 하나 남는다.
+    try std.testing.expectEqual(@as(u64, 1), (try evidence.snapshot()).metadata_events);
+}
 
 const B4SemanticProofLossAllocator = struct {
     parent: std.mem.Allocator,

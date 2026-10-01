@@ -297,12 +297,18 @@ fn specialKeys(report: Report, host: *Host, port: u16, detail_buf: []u8) !void {
     try rawOn(host, j_id, 48, 9, false); // Tab — raw_down 만으로 다음 칸
     const tabbed = waitFor(host, .{ .title = .{ .browser = j_id, .text = "focus=k val= caret=0" } });
     try host.send(.{ .destroy_browser = j_id });
-    report(t_clicks != 0 and j_clicks != 0 and typed and deleted and moved and newline and tabbed, "input-special-keys", std.fmt.bufPrint(detail_buf, "클릭 초점(몇 번째) t {d}·j {d} · 타이핑 {} · Backspace raw {} · ← raw {} · Enter 두 번(raw 만·raw+char) 뒤 줄바꿈 하나 {} · Tab raw 초점 이동 {}", .{ t_clicks, j_clicks, typed, deleted, moved, newline, tabbed }) catch "");
+    // 네이티브 host 는 첫 클릭에 초점이 와야 한다 — 다시 누름은 번역(Rosetta)일 때만 받는다.
+    const translated = hostTranslated(host.pid);
+    const max_clicks: u8 = if (translated) 5 else 1;
+    const clicks_ok = t_clicks != 0 and j_clicks != 0 and t_clicks <= max_clicks and j_clicks <= max_clicks;
+    report(clicks_ok and typed and deleted and moved and newline and tabbed, "input-special-keys", std.fmt.bufPrint(detail_buf, "클릭 초점(몇 번째, 번역 {}) t {d}·j {d} · 타이핑 {} · Backspace raw {} · ← raw {} · Enter 두 번(raw 만·raw+char) 뒤 줄바꿈 하나 {} · Tab raw 초점 이동 {}", .{ translated, t_clicks, j_clicks, typed, deleted, moved, newline, tabbed }) catch "");
 }
 
 /// 칸을 누르고 그 칸의 초점 제목(`focus=… val= caret=0`)이 올 때까지 — 오지 않으면 다시 누른다. 몇 번째에 됐는지(0 = 안 됨).
-/// 느린 환경에서는 `keys-ready`(두 번의 rAF) 직후의 클릭을 렌더러가 버린다(x86_64 설치물을 Rosetta 로 — 클릭 뒤 15 초를 기다려도
-/// 초점 0, 1.5 초 뒤에 누르면 됨, W7b 7 차 실측). 키 판정이 클릭 유실을 키 유실로 잘못 읽지 않게 한다.
+/// 느린 환경에서는 `keys-ready`(두 번의 rAF) 직후의 클릭이 페이지에 닿지 않는다(x86_64 설치물을 Rosetta 로 — 페이지의
+/// `mousedown` 도 6 초 동안 오지 않았고, 준비 뒤 0.3 초를 두면 `set_focus` 앞이든 뒤든 첫 클릭에 됨, W7b 7·8 차 실측).
+/// 키 판정이 클릭 유실을 키 유실로 잘못 읽지 않게 한다. 다시 누름은 host 가 번역돼 돌 때만 받는다(`hostTranslated`) —
+/// 네이티브에서도 받으면 「새 브라우저의 첫 클릭이 사라지는」 퇴행을 가린다(8 차).
 fn focusByClick(host: *Host, browser: protocol.message.BrowserId, point: Point, focus_title: []const u8) !u8 {
     var attempt: u8 = 1;
     while (attempt <= 5) : (attempt += 1) {
@@ -311,6 +317,17 @@ fn focusByClick(host: *Host, browser: protocol.message.BrowserId, point: Point, 
         if (waitAllWithin(host, &.{.{ .title = .{ .browser = browser, .text = focus_title } }}, 2_000)) return attempt;
     }
     return 0;
+}
+
+/// host 가 Rosetta 로 번역돼 도는지 — 커널의 프로세스 정보(`kinfo_proc.kp_proc.p_flag` 의 `P_TRANSLATED`). 크기 648·오프셋
+/// 32 는 arm64·x86_64 에서 같다(`<sys/sysctl.h>`·`<sys/proc.h>` 를 C 로 재 확인). 못 읽으면 번역 아님으로 본다(엄격한 쪽).
+fn hostTranslated(pid: c_int) bool {
+    var info: [648]u8 align(8) = undefined;
+    var len: usize = info.len;
+    const mib = [_]c_int{ 1, 14, 1, pid }; // CTL_KERN, KERN_PROC, KERN_PROC_PID
+    if (std.c.sysctl(&mib, mib.len, &info, &len, null, 0) != 0 or len != info.len) return false;
+    const p_flag = std.mem.readInt(i32, info[32..36], .little);
+    return p_flag & 0x20000 != 0; // P_TRANSLATED
 }
 
 fn typeOn(host: *Host, browser: protocol.message.BrowserId, native: u8, ch: u16) !void {

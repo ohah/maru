@@ -2540,7 +2540,7 @@ scroll_script=6/6 clamp_top=true clamp_bottom=true
 
 **⑴ 스크롤 상한을 내가 따로 세고 있었다.** `viewport.clampFirstRow(.., lines.len, rows)` 로 쟀는데,
 컴포넌트가 이미 `Written.max_top_line` 을 준다. 그 필드 doc 이 *"입력이 이것을 읽는다"* 고 못 박았고
-macOS 도 그것을 굳혀 뒀다가 clamp 에 쓴다(`app_session/editor.zig` 의 `editor_max_top_line`). 랩이
+macOS 도 그것을 굳혀 뒀다가 clamp 에 쓴다(`app_session/editor/mod.zig` 의 `editor_max_top_line`). 랩이
 꺼져 있으면 값이 같아 지금은 안 갈리지만, **랩을 켜는 순간** 논리 줄 수와 시각 행 수가 달라져 조용히
 어긋난다 — 그 doc 이 경고하는 자리가 정확히 이것이다. 컴포넌트가 준 값을 쓰게 고쳤다.
 
@@ -8220,7 +8220,7 @@ JSON 파싱·매니페스트 검증 같은 **순수 로직**이고, Linux CI 의
 - **`src/syntax/tree_sitter.zig` 는 보고만 한다.** 중립 파일이 `std.c.clock_gettime` 을 직접 부른다
   (`monotonicNs`) — 이 저장소의 다른 모든 자리는 `std.Io.Clock.awake.now(io)` 를 쓰고, `std.time` 에는
   0.16 에서 시계가 없다(상수뿐 — 확인했다). 즉 **호출자가 `io` 를 준다**가 이 저장소의 사실상 규칙이고,
-  그걸 따르려면 `tree_sitter.zig` 와 호출자 두 자리(`app_session/editor_syntax.zig`)의 서명이 바뀐다.
+  그걸 따르려면 `tree_sitter.zig` 와 호출자 두 자리(`app_session/editor/syntax.zig`)의 서명이 바뀐다.
   macOS 게이트를 여기서 못 돌리므로 **결정과 함께 사용자에게 올린다.**
 
   **지금 제품에는 영향이 없다** — Windows 제품은 `syntax` 를 아예 안 쓴다(`grep` 실측 0 건).
@@ -8258,7 +8258,7 @@ fn onProgress(state: [*c]c.TSParseState) callconv(.c) bool {
 ```
 
 deadline 을 받아도 그 비교를 하려면 「지금」이 있어야 한다. 그래서 남은 길은 **io 를 받는다** 뿐인
-것처럼 보였는데, 그러면 `Provider.init` → `editor_syntax.open` → `app_session/editor.zig` 의 **수십
+것처럼 보였는데, 그러면 `Provider.init` → `editor_syntax.open` → `app_session/editor/mod.zig` 의 **수십
 자리**가 함께 바뀐다(실측).
 
 ## std 를 읽고 셋째 칸을 찾았다
@@ -8612,7 +8612,7 @@ mkdir: cannot change permissions of '/tmp/…/success': Permission denied
 
 Windows 편집기가 글자를 **한 색으로** 그리고 있었다. macOS 는 tree-sitter 로 칠한다.
 
-**베끼지 않는다.** 먼저 재 봤더니 macOS 쪽 `app_session/editor_syntax.zig` 에서 색을 만드는 부분은
+**베끼지 않는다.** 먼저 재 봤더니 macOS 쪽 `app_session/editor/syntax.zig` 에서 색을 만드는 부분은
 호스트 낱말이 하나도 없었다 — 입력은 「바이트 구간 + 줄 경계」, 출력은 「줄별 표시 열 구간」이고
 가운데는 탭 폭 계산과 «마지막이 이긴다» 규칙뿐이다. **호스트가 둘이 되는 순간 그것을 복사하면
 한쪽만 고쳐지는 자리가 생긴다.** 그래서 그 부분을 통째로 중립으로 옮겼다:

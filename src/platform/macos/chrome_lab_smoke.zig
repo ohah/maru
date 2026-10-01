@@ -14,7 +14,7 @@ const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
 const metal_smoke = @import("metal_smoke.zig");
-const editor_ops = @import("app_session/editor.zig");
+const editor_ops = @import("app_session/editor/mod.zig");
 
 const chrome = maru.chrome;
 const artifact_io = maru.app.artifact_io;

@@ -12,7 +12,7 @@
 //! 때(`_onDidChangeLanguage` — 옵션이 같으면 그대로 둔다). 우리 자리는 `applyConfigTabWidth` 와 이름 붙여 저장(`editor_untitled_save`)이다.
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const guides = maru.session.editor.indent_guides;

@@ -8,12 +8,12 @@
 //! 동기로 세고 같은 키면 건너뛴다. 마크는 접힘·스크롤과 함께 달라지므로 프레임마다 옮긴다(같은 낱말 강조와 같다).
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
-const editor_syntax = @import("editor_syntax.zig");
-const pane_ops = @import("pane.zig");
+const editor_ops = @import("mod.zig");
+const editor_syntax = @import("syntax.zig");
+const pane_ops = @import("../pane.zig");
 const brackets = maru.session.editor.brackets;
 const Mark = maru.chrome.components.editor_view.frame.Mark;
 const Provider = editor_syntax.syntax.Provider;

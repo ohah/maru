@@ -299,7 +299,7 @@ TextArea (새 얇은 층 — 세로 축만 소유)
 **이동 체크리스트**(편집기 세션 제보, `main` 기준 — 착수 시 다시 확인한다):
 
 - 참조 여덟 곳: `chrome.zig`(네임스페이스 등록) · `editor_view/{content,frame,gutter,scrollbar,diff_frame}.zig` ·
-  `platform/macos/chrome/lab.zig` · `platform/macos/app_session/editor.zig`
+  `platform/macos/chrome/lab.zig` · `platform/macos/app_session/editor/mod.zig`
 - `diff_frame.zig`는 **테스트 안에서 상대 경로 `@import("visual_map.zig")`를 세 번** 쓴다(스크래치 배열 타입).
 - 옮긴 뒤 편집기 **골든 두 장**이 그 배치를 픽셀로 고정한다:
   `tests/fixtures/golden/dock/editor-diff-side-by-side.ppm` · `editor-diff-scrolled-bands.ppm`.

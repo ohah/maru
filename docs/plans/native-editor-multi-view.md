@@ -57,7 +57,7 @@ pane 안의 Term은 **탭**이다. 계약의 목적은 *"긴 파일의 위아래
 | undo/redo | `TermRuntime.editor_undo`·`editor_undo_len`·`editor_redo`·`editor_redo_len` |
 | 줄 배열 | `TermRuntime.editor_lines` |
 
-수명도 Term에 묶여 있다 — `app_session/editor.zig`가 Term을 놓을 때 `if (term.rt.editor_doc) |*d|
+수명도 Term에 묶여 있다 — `app_session/editor/mod.zig`가 Term을 놓을 때 `if (term.rt.editor_doc) |*d|
 d.deinit(self.allocator);` 한다.
 
 **계약이 가리킨 소유자가 코드에 없다.** §2.4는 *"경로 → 문서 하나의 매핑은 [editor-surface.md](../editor-surface.md) §4의

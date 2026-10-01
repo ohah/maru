@@ -11,15 +11,15 @@
 const std = @import("std");
 const maru = @import("maru");
 
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
-const editor_diff_ops = @import("editor_diff.zig");
-const git_ops = @import("git.zig");
-const git_backend_mod = @import("../git_backend.zig");
-const pane_ops = @import("pane.zig");
-const term_ops = @import("term.zig");
+const editor_ops = @import("mod.zig");
+const editor_diff_ops = @import("diff.zig");
+const git_ops = @import("../git.zig");
+const git_backend_mod = @import("../../git_backend.zig");
+const pane_ops = @import("../pane.zig");
+const term_ops = @import("../term.zig");
 const dock_panel = maru.session.dock_panel;
 
 /// 저장이 충돌로 멈췄다 — **행동 셋과 「계속 편집」**을 띄운다(§4).

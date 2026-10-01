@@ -1,5 +1,5 @@
 //! 네이티브 편집기의 **platform 쪽 절반** — 파일을 읽고 권한을 보는 일
-//! ([native-editor-document-model.md](../../../../docs/native-editor-document-model.md) §3.5).
+//! ([native-editor-document-model.md](../../../../../docs/native-editor-document-model.md) §3.5).
 //!
 //! **L2가 파일을 읽지 않는다.** `session/editor/`는 OS를 모르므로(§2 레이어) bytes만 다루고, 여기서
 //! 읽어 넘긴다. 그래서 이 파일에 있는 것은 딱 둘이다 — 읽기와 쓰기 권한 판정.
@@ -12,21 +12,21 @@ const std = @import("std");
 const maru = @import("maru");
 
 const editor = maru.session.editor;
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
-const file_panel_ops = @import("file_panel.zig");
-const command_catalog = @import("../command_catalog.zig");
+const file_panel_ops = @import("../file_panel.zig");
+const command_catalog = @import("../../command_catalog.zig");
 const Term = app_session_mod.Term;
 const Pane = app_session_mod.Pane;
-const pane_ops = @import("pane.zig");
-const symbol_picker = @import("../symbol_picker.zig");
-const tab_ops = @import("tab.zig");
-const term_ops = @import("term.zig");
-const find_ops = @import("find.zig");
-const scroll_ops = @import("scroll.zig");
-const editor_diff_ops = @import("editor_diff.zig");
-const editor_merge_ops = @import("editor_merge.zig");
-const workspace_ops = @import("workspace.zig");
+const pane_ops = @import("../pane.zig");
+const symbol_picker = @import("../../symbol_picker.zig");
+const tab_ops = @import("../tab.zig");
+const term_ops = @import("../term.zig");
+const find_ops = @import("../find.zig");
+const scroll_ops = @import("../scroll.zig");
+const editor_diff_ops = @import("diff.zig");
+const editor_merge_ops = @import("merge.zig");
+const workspace_ops = @import("../workspace.zig");
 const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
 const editor_fold = maru.session.editor.fold;
@@ -36,8 +36,8 @@ const editor_column = maru.session.editor.column;
 const editor_pairs = maru.session.editor.pairs;
 const occurrence = maru.session.editor.occurrence;
 const chrome_editor = maru.chrome.components.editor_view;
-const settings_ops = @import("settings.zig");
-const input_ops = @import("input.zig");
+const settings_ops = @import("../settings.zig");
+const input_ops = @import("../input.zig");
 const chrome_scroll_area = maru.chrome.ui.scroll_area;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const renderer = app_session_mod.renderer;
@@ -78,34 +78,34 @@ pub fn contentHash(bytes: []const u8) u64 {
 
 /// 구문 강조 색(§5.3 1층). **`syntax` 모듈이 여기서 처음 제품에 들어온다** — 그 전까지는
 /// 모듈만 서 있고 부르는 코드가 없어 exe에 링크되지 않았다.
-pub const syntax_color = @import("editor_syntax.zig");
-pub const diagnostics = @import("editor_diagnostics.zig");
-pub const lsp_client = @import("editor_lsp.zig");
+pub const syntax_color = @import("syntax.zig");
+pub const diagnostics = @import("diagnostics.zig");
+pub const lsp_client = @import("lsp.zig");
 /// 호버 박스(tooling §8.2b) — 진단 메시지 + 언어 서버 hover.
-pub const hover_client = @import("editor_hover.zig");
+pub const hover_client = @import("hover.zig");
 /// 정의로 이동(tooling §8.2c) — `textDocument/definition` → §5.2 `navigateTo`.
-pub const definition_client = @import("editor_definition.zig");
-pub const references_client = @import("editor_references.zig");
+pub const definition_client = @import("definition.zig");
+pub const references_client = @import("references.zig");
 /// 시그니처 힌트(tooling §8.2d) — 호버 박스를 같이 쓴다.
-pub const signature_client = @import("editor_signature.zig");
-pub const format_client = @import("editor_format.zig");
-pub const rename_client = @import("editor_rename.zig");
-pub const completion_client = @import("editor_completion.zig");
-pub const code_action_client = @import("editor_code_action.zig");
-pub const semantic_client = @import("editor_semantic.zig");
-pub const fold_lsp_client = @import("editor_fold_lsp.zig");
-pub const inlay_client = @import("editor_inlay.zig");
-pub const symbols_client = @import("editor_symbols.zig");
-pub const highlight_client = @import("editor_highlight.zig");
-pub const smart_select_client = @import("editor_smart_select.zig");
-pub const sticky_client = @import("editor_sticky.zig");
+pub const signature_client = @import("signature.zig");
+pub const format_client = @import("format.zig");
+pub const rename_client = @import("rename.zig");
+pub const completion_client = @import("completion.zig");
+pub const code_action_client = @import("code_action.zig");
+pub const semantic_client = @import("semantic.zig");
+pub const fold_lsp_client = @import("fold_lsp.zig");
+pub const inlay_client = @import("inlay.zig");
+pub const symbols_client = @import("symbols.zig");
+pub const highlight_client = @import("highlight.zig");
+pub const smart_select_client = @import("smart_select.zig");
+pub const sticky_client = @import("sticky.zig");
 /// 짝 괄호(visual-mapping §5.1b · document-model §3.9c) — 강조 마크와 점프가 같은 출처 고르기를 쓴다.
-pub const brackets_client = @import("editor_brackets.zig");
+pub const brackets_client = @import("brackets.zig");
 /// 들여쓰기 안내선(visual-mapping §5.1c) — 간격 추정 캐시와 그려질 창.
-pub const guides_client = @import("editor_guides.zig");
+pub const guides_client = @import("guides.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
-pub const workspace_edit_client = @import("editor_workspace_edit.zig");
+pub const workspace_edit_client = @import("workspace_edit.zig");
 
 /// 중립 문서 상태의 facade alias. 파일을 여는 작업은 이 platform 모듈이 맡는다.
 pub const RemoteDoc = editor.document_state.RemoteDoc;
@@ -1269,7 +1269,7 @@ pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, t
 }
 
 /// 비교 뷰의 커서 위치 — `(어느 열, 파일 줄 번호, 글자 열)`
-/// ([상태바](../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」).
+/// ([상태바](../../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」).
 ///
 /// **`cursorPosition` 과 따로 두는 이유는 답의 모양이 다르기 때문이다.** 이쪽은 **어느 열인지**를
 /// 함께 답해야 하고(좌우는 서로 다른 두 버퍼다), 줄 번호가 **없을 수 있다**(짝맞춤 빈 행).
@@ -1305,7 +1305,7 @@ pub fn diffCursorPosition(term: *const Term) ?DiffCursor {
 }
 
 /// 비교 뷰 커서 위치를 **상태바 글자로** 만든다 — `R 2:1` · `L -:1` · `R 9:120+`
-/// ([상태바](../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」).
+/// ([상태바](../../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」).
 ///
 /// **형식을 함수로 꺼내 둔다.** 상태바 조립 안에 묻어 두면 **판정자가 글자를 못 읽는다** — 트리
 /// 항목은 id 와 사각만 들기 때문이다. 실제로 `L`/`R` 을 지우거나 맞바꾸거나 빈 행의 `-` 를 `0` 으로
@@ -2155,7 +2155,7 @@ pub fn createEditorTerm(self: *AppSession) !*Term {
 /// 바꿔도 잃는 것이 없었지만, 일반 텍스트는 CM6에서 편집·저장이 된다(`EntryKind.text`의 기본 mode가
 /// `.source_edit`이다). 네이티브 편집기는 N1이라 **읽기 전용이므로, 이 기본은 탐색기에서 연 파일을
 /// 고칠 수 없게 만든다** — 편집이 붙는 N2까지 그렇다. 계획은 원래 이 전환을 N2에 두었고, 사용자가
-/// 그 대가를 알고 앞당겼다(../../../../docs/plans/native-editor.md N1).
+/// 그 대가를 알고 앞당겼다(../../../../../docs/plans/native-editor.md N1).
 ///
 /// **`MARU_NATIVE_TEXT=0`으로 되돌릴 수 있다.** 고쳐야 하는 파일을 만나면 그 길로 CM6를 부른다 —
 /// 훅을 지우는 것은 편집이 붙어 그 경로를 실제로 안 쓰게 된 뒤의 일이다(비교 훅과 같은 규율).
@@ -2989,7 +2989,7 @@ fn widthDragActive(self: *const AppSession) bool {
 /// §3.8 표기(`<U+202E>`)와 초장문 줄 축소에서 갈리고, 사용자가 붙여넣기를 기대하는 것은 **원본**이다.
 ///
 /// **계약과 다른 자리 하나 — caret만 있을 때**(적대적 검증 2026-08-25에 드러났다).
-/// [문서 모델](../../../../docs/native-editor-document-model.md) §3.4는 *"선택 없이 복사하면 caret이
+/// [문서 모델](../../../../../docs/native-editor-document-model.md) §3.4는 *"선택 없이 복사하면 caret이
 /// 있는 줄 전체를 담고, 그 사실을 함께 기억한다"*고 정하는데 여기서는 **거절한다**(`false`).
 ///
 /// 지금 그렇게 두는 이유: 그 규칙의 나머지 절반이 *"그렇게 담긴 것을 붙여넣으면 caret 위치가
@@ -3186,7 +3186,7 @@ pub fn clearExtraSelections(self: *AppSession, term: *Term) void {
     term.rt.editor_extra_selections = &.{};
 }
 
-/// **겹치는 커서를 합친다**([문서 모델](../../../../docs/native-editor-document-model.md) §3.2 —
+/// **겹치는 커서를 합친다**([문서 모델](../../../../../docs/native-editor-document-model.md) §3.2 —
 /// *「편집·이동으로 두 selection 이 겹치면 하나로 합친다. 합치지 않으면 같은 위치에 중복 삽입된다」*).
 ///
 /// **커서를 옮기는 경로가 부른다.** 커서를 *더하는* 쪽(`addCursorVertically`·`addNextOccurrence`)은
@@ -3675,7 +3675,7 @@ fn movedOffset(
 /// 덜 나쁘다. 그 규율과 대조식은 `revealCurrentFindMatch`가 값비싸게 세운 것을 그대로 쓴다.
 ///
 /// **두 축을 다 본다**(2026-09-08 — 한동안 줄 축만 봤다). 한 화면보다 긴 줄에서 `⌘→` 를 누르면
-/// caret 이 화면 밖 오른쪽에 서고 뷰는 그대로였다([시각 매핑](../../../../docs/native-editor-visual-mapping.md)
+/// caret 이 화면 밖 오른쪽에 서고 뷰는 그대로였다([시각 매핑](../../../../../docs/native-editor-visual-mapping.md)
 /// 「가로도 caret 을 따라간다」).
 /// 설정한 caret 여백을 **화면에 맞게 묶는다**(§4 「caret 여백」).
 ///
@@ -3965,7 +3965,7 @@ fn jumpOrStart(doc: Opened, sel: editor_selection.Selection, target: ?usize, goa
 }
 
 /// 위/아래로 커서 추가 — 각 커서마다 한 줄 위(아래)에 **사본**을 더한다
-/// ([문서 모델](../../../../docs/native-editor-document-model.md) §3.2b).
+/// ([문서 모델](../../../../../docs/native-editor-document-model.md) §3.2b).
 ///
 /// **선택 모양이 유지된다.** anchor 와 focus 를 **각자의 목표 열로** 옮기므로 caret 하나면 caret 이,
 /// 범위를 고른 상태면 같은 모양의 범위가 생긴다. `Selection.anchor_goal` 이 그것을 위해 서 있었고
@@ -5356,7 +5356,7 @@ pub fn dragDiffBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64)
 ///
 /// 단일 편집기의 `buildSelectionMarks`와 같은 일인데 훨씬 짧다: 행 배열이 곧 화면이라 축 변환이 없다.
 /// 비교 뷰 caret 을 **그 열의 행 배열**로 굳힌다 — 활성 열만 배열을 받고 **반대 열은 `null`**이다
-/// ([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을 세운다」).
+/// ([키 입력과 단축키](../../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을 세운다」).
 ///
 /// **자리는 선택의 focus 하나다.** caret 을 따로 든 필드로 두면 선택과 두 출처가 되고, 그 둘은
 /// 반드시 갈린다 — 드래그 중에 특히 그렇다.
@@ -5365,7 +5365,7 @@ pub fn dragDiffBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64)
 /// (`materialize`가 `rows.left.len`·`rows.right.len`으로 따로 잡는다), 반대 열 길이로 자르면 그
 /// 불변식이 깨지는 날 범위 밖을 훑는다.
 /// 비교 뷰의 caret 을 옮긴다 — `(행, 행 안 byte)` 축 위의 §3.9 이동 일습
-/// ([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을 세운다」).
+/// ([키 입력과 단축키](../../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을 세운다」).
 ///
 /// **`moveCarets` 를 재사용하지 않는다.** 그 함수는 문서 offset 축을 전제해 첫 줄에서 비교를
 /// 거절한다. 위로 합치려면 좌표를 추상화해야 하고, 그 값이 이 조각에 없다 — 문서 모델이 멀티 커서
@@ -5467,7 +5467,7 @@ pub fn diffMove(self: *AppSession, term: *Term, how: Motion, extend: bool) bool 
 }
 
 /// 비교 뷰의 **열을 넘긴다** — `⌃⇧Tab`
-/// ([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰의 열을 키로 넘긴다」).
+/// ([키 입력과 단축키](../../../../../docs/key-input-and-shortcuts.md) 「비교 뷰의 열을 키로 넘긴다」).
 ///
 /// **키로 열을 바꿀 길이 이것뿐이다.** `editor_diff_selection` 을 쓰는 자리가 넷인데(마우스 둘·씨앗·
 /// 이동) 이동은 열을 **유지**하고, 검색의 「열 넘기기」는 `find.diff_side` 만 세운다.
@@ -20441,7 +20441,7 @@ test "좁은 창에서 센 최대 열이 넓은 창의 도달 거리를 줄이�
 }
 
 test "가로로 밀어도 컨트롤 플레인은 같은 사실을 말한다 — 위치는 메타가 아니다" {
-    // 비교 Term에는 세로에 같은 계약의 테스트가 있다(`editor_diff.zig`). **새 축에도 같은 것이
+    // 비교 Term에는 세로에 같은 계약의 테스트가 있다(`diff.zig`). **새 축에도 같은 것이
     // 필요하다** — 메타(경로·읽기 전용)가 가로 위치에 따라 흔들리면 밖에서 보는 쪽이 "다른 파일이
     // 열렸다"고 오해한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -20880,7 +20880,7 @@ test "접을 것이 없는 문서에서는 전체 접기가 무동작이다" {
 }
 
 test "diff가 로딩·불가 상태여도 접기를 거절한다 — 화면이 그대로인데 성공을 돌려주면 안 된다" {
-    // 비교 뷰의 거짓 성공은 이미 잡았는데(editor_diff.zig), **판정을 뷰 종류로 했다.** diff는
+    // 비교 뷰의 거짓 성공은 이미 잡았는데(diff.zig), **판정을 뷰 종류로 했다.** diff는
     // `.loading`·`.unavailable`도 상태이고 그때도 렌더는 diff 경로를 타므로, 이 둘은 거절을 그냥
     // 지나갔다. `foldSourceLines`가 그 상태에서 빈 배열을 내기 때문에 **접힘 상태만 서고 화면은
     // 그대로**다 — 비교에서 결함이라고 판정한 것과 같은 부류다(적대적 검증 2026-08-17).
@@ -24856,7 +24856,7 @@ test "EDIT6 파생 상태 갱신이 중간에 실패해도 렌더 스냅숏은 �
 
     var reached: usize = 0; // 실제로 편집이 성사된 지점 수
     // 한 스텝이 **실패를 못 주입한 채** 끝나면(할당 수를 넘어섰다) 그 뒤는 전부 같은 성공이라 멈춘다
-    // (`editor_diff.zig`의 비교 계산 훑기와 같은 방법). **측정값이다**(2026-09-06, Debug, macOS arm64):
+    // (`diff.zig`의 비교 계산 훑기와 같은 방법). **측정값이다**(2026-09-06, Debug, macOS arm64):
     // 40 스텝 중 19 스텝이 실패를 못 주입하고 있었다. 검증 범위는 그대로다.
     var clean_pass = false;
     var step: usize = 0;
@@ -29594,7 +29594,7 @@ test "DHS11 줄 끝 너머 몫은 설정이 정한다 — 키·기본값·끄기
 }
 
 test "DHS3 단일 편집기도 가로로 caret 을 따라간다 — 한 화면보다 긴 줄 (키 경로)" {
-    // **두 뷰가 같은 규칙을 쓴다**([시각 매핑](../../../../docs/native-editor-visual-mapping.md)
+    // **두 뷰가 같은 규칙을 쓴다**([시각 매핑](../../../../../docs/native-editor-visual-mapping.md)
     // 「가로도 caret 을 따라간다」). 비교 뷰만 재면 그 규칙이 한쪽에서만 산다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -34507,7 +34507,7 @@ test "[측정] 검색 강조가 프레임마다 문서 전체를 훑는 비용" 
 
 // ── 구문 강조 배선(§5.3 1층) ────────────────────────────────────────────────────
 //
-// **아래 넷은 변환 층이 아니라 배선을 잰다.** `editor_syntax.zig`의 `ES1`~`ES12`는 그 모듈을
+// **아래 넷은 변환 층이 아니라 배선을 잰다.** `syntax.zig`의 `ES1`~`ES12`는 그 모듈을
 // 직접 부르므로, 그것이 **제품 프레임 경로에 실제로 연결됐는지**는 하나도 안 본다 — 적대적
 // 검증에서 배선을 통째로 들어낸 뮤턴트 넷이 전부 살아남았다(`W03`·`W05`·`W06`·`W07`).
 
@@ -41044,7 +41044,7 @@ test "C1b-1 비교는 «디스크 ↔ 내 편집» 탭을 열고 답은 아직 �
     try c.pressEnter();
 
     // ⑴ 비교 Term 이 섰고 기준이 저장 충돌이다.
-    const diff_term = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const diff_term = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = diff_term.file_entry orelse return error.NoEntry;
     try testing.expectEqual(maru.session.dock_panel.DiffBase.save_conflict, entry.diff_base);
     try testing.expect(entry.diff_ready);
@@ -41082,7 +41082,7 @@ test "C1b-2 파일이 또 바뀌면 두 쪽이 «함께» 새로워진다 — gi
     try c.writeOutside("again.txt", "T1\n");
     c.pressSave();
     try c.pressEnter();
-    const diff_term = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const diff_term = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = diff_term.file_entry orelse return error.NoEntry;
     try testing.expectEqualStrings("T1\n", entry.diff_original);
 
@@ -41122,7 +41122,7 @@ test "C1b-3 다시 열면 내용이 갱신된다 — 첫 비교를 두 번째 �
     try c.writeOutside("reopen.txt", "X\n");
     c.pressSave();
     try c.pressEnter();
-    const first = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const first = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = first.file_entry orelse return error.NoEntry;
     try testing.expectEqualStrings("X\n", entry.diff_original);
 
@@ -41140,7 +41140,7 @@ test "C1b-3 다시 열면 내용이 갱신된다 — 첫 비교를 두 번째 �
     try c.pressEnter();
 
     // ⑴ **같은 탭을 쓰고**(하나만 생긴다) ⑵ **내용이 갱신됐다**.
-    const again = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const again = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     try testing.expectEqual(first, again);
     try testing.expectEqualStrings("Y\n", entry.diff_original);
     try testing.expectEqualStrings(c.term.rt.editorDocument().opened.?.file.content, entry.diff_modified);
@@ -41157,7 +41157,7 @@ test "C1b-4 문서 Term 이 사라지면 비교는 «실패»다 — 없는 버�
     try c.writeOutside("subject.txt", "THEIRS\n");
     c.pressSave();
     try c.pressEnter();
-    const diff_term = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const diff_term = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = diff_term.file_entry orelse return error.NoEntry;
     try testing.expect(entry.diff_ready);
 
@@ -41194,7 +41194,7 @@ test "C1b-5 파일이 사라지면 비교도 비운다 — 낡은 두 쪽을 들
     try c.writeOutside("vanish.txt", "THEIRS\n");
     c.pressSave();
     try c.pressEnter();
-    const diff_term = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const diff_term = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = diff_term.file_entry orelse return error.NoEntry;
     try testing.expect(entry.diff_ready);
 

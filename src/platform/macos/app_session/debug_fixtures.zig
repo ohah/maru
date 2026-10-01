@@ -11,7 +11,7 @@
 //! 첫 프레임에 플래그 검사 몇 번으로 끝난다.
 
 const std = @import("std");
-const editor_ops = @import("editor.zig");
+const editor_ops = @import("editor/mod.zig");
 const input_ops = @import("input.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");

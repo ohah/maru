@@ -529,7 +529,7 @@ pub const LiveSurface = union(control_surface.SurfaceKind) {
     web: Web,
     /// editor arm: sentinel surface만. **web과 같은 모양인 이유**는 둘 다 "PTY가 없다"는 사실만
     /// 이 층에 실리기 때문이다 — 편집기 문서(bytes·논리행 인덱스)는 파일을 읽는 platform이 소유하고
-    /// (`app_session/editor.zig`), 이 층은 OS도 파일도 모른다. 렌더가 갈리는 것은 상위의 관심사다.
+    /// (`app_session/editor/mod.zig`), 이 층은 OS도 파일도 모른다. 렌더가 갈리는 것은 상위의 관심사다.
     editor: Editor,
 
     /// 편집기 Term의 슬롯. `Web`과 필드가 같지만 **타입을 나눈다** — 합치면 `kind`가 둘을 가르는

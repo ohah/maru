@@ -12697,7 +12697,7 @@ test "이름 없는 문서: 이름을 붙이는 자리는 하나, workspace 제�
         //    workspace 가 실어 온 번호로 만든다). 이 판정자가 막으려는 것은 **발급기를 안 쓰고 이름만
         //    짓는 경로**이므로, 자리 수와 함께 **발급기 호출 둘**(새 번호 `next()` · 되살린 번호
         //    `observe()`)을 센다 — 셋째 자리가 생기면 여기서 빨개진다.
-        const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+        const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/mod.zig");
         defer allocator.free(editor);
         var set: usize = 0;
         var i: usize = 0;
@@ -12750,7 +12750,7 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
     // **허용된 자리를 센다 — 금지된 모양 0 건이 아니다.** 「빈 슬라이스가 없다」류의 부재 판정은 그 일을
     // 아예 안 하는 퇴행도 통과한다.
     const allocator = std.testing.allocator;
-    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_untitled_save.zig");
+    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/untitled_save.zig");
     defer allocator.free(save);
 
     const countOf = struct {
@@ -12832,9 +12832,9 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
     const allocator = std.testing.allocator;
     const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_session);
-    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/mod.zig");
     defer allocator.free(editor);
-    const conflict = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_conflict.zig");
+    const conflict = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/conflict.zig");
     defer allocator.free(conflict);
 
     const countOf3 = struct {
@@ -12900,13 +12900,13 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
 test "저쪽 저장: 쓰는 종류 하나 · 일괄은 건너뛴다 · 신원은 경로와 배타다" {
     // **계약**: docs/native-editor-document-model.md §3.11 「저장 — 어디에」(U3).
     const allocator = std.testing.allocator;
-    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_untitled_save.zig");
+    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/untitled_save.zig");
     defer allocator.free(save);
     const panel = try readZigFileZ(allocator, "src/platform/macos/app_session/file_panel.zig");
     defer allocator.free(panel);
-    const bulk = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_workspace_edit.zig");
+    const bulk = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/workspace_edit.zig");
     defer allocator.free(bulk);
-    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/mod.zig");
     defer allocator.free(editor);
     const helper = try readZigFileZ(allocator, "tools/remote-watch/main.zig");
     defer allocator.free(helper);
@@ -12958,15 +12958,15 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     // 지워도 런타임 판정자가 초록일 수 있다(종료 flush 가 그 부류다: 헤드리스로는 함수를 직접 부르므로
     // 제품 종료 경로가 그것을 안 불러도 안 걸린다).
     const allocator = std.testing.allocator;
-    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/mod.zig");
     defer allocator.free(editor);
-    const conflict = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_conflict.zig");
+    const conflict = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/conflict.zig");
     defer allocator.free(conflict);
-    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_untitled_save.zig");
+    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/untitled_save.zig");
     defer allocator.free(save);
     const session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(session);
-    const backup_mod = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_backup.zig");
+    const backup_mod = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/backup.zig");
     defer allocator.free(backup_mod);
     const backup_rules_src = try readZigFileZ(allocator, "src/session/editor/backup.zig");
     defer allocator.free(backup_rules_src);
@@ -13100,7 +13100,7 @@ test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {
     const allocator = std.testing.allocator;
     const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_session);
-    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/mod.zig");
     defer allocator.free(editor);
 
     const countOf2 = struct {

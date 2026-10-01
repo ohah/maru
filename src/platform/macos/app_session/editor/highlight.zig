@@ -7,10 +7,10 @@
 //! **편집이 나면 버린다**(심볼 2층과 같은 규율) — 범위가 낡으면 엉뚱한 자리를 칠한다.
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_lsp = @import("editor_lsp.zig");
+const editor_lsp = @import("lsp.zig");
 const lsp = maru.session.editor.lsp;
 const highlight = lsp.highlight;
 

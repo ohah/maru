@@ -5,10 +5,10 @@
 //! **힌트 세대**(`generation`)는 응답·밀기·비움마다 오른다 — `frame.RowCache` 가 그것을 키에 넣는다(§4.1h: 힌트가 줄 폭을 늘려 랩 행 수가 바뀐다).
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_lsp = @import("editor_lsp.zig");
+const editor_lsp = @import("lsp.zig");
 const chrome_editor = maru.chrome.components.editor_view;
 const lsp = maru.session.editor.lsp;
 const inlay = lsp.inlay;

@@ -2,7 +2,7 @@
 //! [문서 모델](../../../docs/native-editor-document-model.md) §3.10 이 소유한다.
 //!
 //! **왜 L2 인가.** 「무엇을 적어 두면 되살릴 수 있나」는 정책이고 화면도 OS 도 모른다. 파일을 여는
-//! 일은 L4 가 하고(`app_session/editor_backup.zig`), 이 모듈은 **레코드의 모양과 이름·주기 정책**만
+//! 일은 L4 가 하고(`app_session/editor/backup.zig`), 이 모듈은 **레코드의 모양과 이름·주기 정책**만
 //! 안다 — 그래야 화면 없이 검사할 수 있고 이식할 때 따라간다.
 //!
 //! **포맷은 저장소 관례를 그대로 쓴다**: 첫 줄 bare 헤더 토큰(`schema=` 접두 없음), 그다음 한 줄
@@ -43,7 +43,7 @@ pub const Doc = union(Kind) {
 
     pub const Path = struct {
         path: []const u8,
-        /// **마지막으로 본 디스크 내용의 지문**(`app_session/editor.zig` 의 `contentHash` — Wyhash-64).
+        /// **마지막으로 본 디스크 내용의 지문**(`app_session/editor/mod.zig` 의 `contentHash` — Wyhash-64).
         /// 이것이 레코드에 실려야 복원이 「그 사이 남이 고쳤나」를 물을 수 있다. 메모리에만 있는
         /// `Opened.disk_hash` 를 그대로 싣는 것이고, 새 축을 만들지 않는다(§3.10).
         disk_hash: ?u64 = null,

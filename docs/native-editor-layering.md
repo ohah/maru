@@ -207,7 +207,7 @@ N2 이후로 미룬다.** 인레이 힌트·ghost text가 "편집기 폰트 크�
 **세션 allocator를 쓰는 자리는 `checkAllAllocationFailures`를 그대로 못 쓴다.** allocator가 init에
 고정이고, 함수에 다른 allocator를 넘기면 나중에 해제하는 쪽(`releaseEditorTerm`)과 어긋나 **진짜
 버그**가 된다. 대신 **세션을 `FailingAllocator`로 만들고 init이 끝난 뒤부터 `fail_index`를 옮긴다** —
-init은 흔들지 않으므로 남의 코드를 시험하지 않고 빠르다(`editor.zig`의 "파일 열기가 어디서 할당에
+init은 흔들지 않으므로 남의 코드를 시험하지 않고 빠르다(`editor/mod.zig`의 "파일 열기가 어디서 할당에
 실패해도 새지 않는다"). 그 테스트는 **실패를 몇 번 겪었는지 세어서 단언한다**: 열기가 쓰는 할당 수가
 줄어 창을 벗어나면 한 번도 실패하지 않고 조용히 통과할 수 있기 때문이다.
 

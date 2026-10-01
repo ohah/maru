@@ -307,7 +307,7 @@ pub fn build(b: *std.Build) void {
     // **별도 모듈로 세운다 — `maru`에 매달지 않는다.** wasm·mobile 빌드가 같은 root
     // (`src/maru.zig`)를 쓰므로 거기 C를 매달면 그 둘이 깨진다(`check-wasm-sync`가 게이트다).
     //
-    // **제품이 이 모듈을 `@import`한다**(`app_session/editor.zig`) — 그래서 exe 루트와 편집기
+    // **제품이 이 모듈을 `@import`한다**(`app_session/editor/mod.zig`) — 그래서 exe 루트와 편집기
     // 판정자 모듈이 이것을 import로 받는다. 코어와 grammar가 배포물에 들어간다:
     // `ReleaseFast`(배포 `macos-dmg`가 쓰는 모드) object 실측으로 코어 896KB · zig grammar 736KB.
     // 화면에 색이 뜨는 것이 그 대가로 얻는 것이고, **링크되는 순간 라이선스 전문 동봉 의무가
@@ -4806,7 +4806,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "maru", .module = maru_mod },
-            // **편집기 판정자가 제품 코드를 들여오므로 `syntax`도 따라온다** — `app_session/editor.zig`가
+            // **편집기 판정자가 제품 코드를 들여오므로 `syntax`도 따라온다** — `app_session/editor/mod.zig`가
             // 그것을 `@import`한다. 없으면 이 스텝이 컴파일조차 안 된다.
             .{ .name = "syntax", .module = syntax_mod },
         },
@@ -4830,11 +4830,13 @@ pub fn build(b: *std.Build) void {
         editor_test_module.linkFramework("CoreGraphics", .{});
         editor_test_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     }
+    // L2의 session.editor 필터는 별도 core artifact에만 둔다. 중첩 폴더명의 부분 일치로
+    // platform 보조 파일까지 추가 선택하지 않고 이동 전과 같은 제품 판정자 범위를 유지한다.
     const editor_tests = addProjectTest(b, .{
         .root_module = editor_test_module,
         // **import와 필터를 함께 쓴다.** 진입 파일의 `test {}`가 대상 파일을 참조해 분석을
         // 강제하고(그것 없이 필터만 걸면 0개를 돌고도 통과한다 — 실측), 필터가 그 안에서 편집
-        // 슬라이스의 판정자만 고른다. import만 두면 `editor.zig`가 `app_session.zig`를 들여와
+        // 슬라이스의 판정자만 고른다. import만 두면 `editor/mod.zig`가 `app_session.zig`를 들여와
         // 3,851개가 통째로 딸려온다(이것도 실측).
         // **`CRT`를 여기 적어 두었다가 0개를 돌았다**(적대적 검증 2026-08-26). caret 렌더 판정자와
         // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
@@ -4843,11 +4845,11 @@ pub fn build(b: *std.Build) void {
         //
         // **이름 접두 대신 «모듈 경로» 로 고른다**(2026-09-09). 접두는 사람이 붙이는 것이라 빠뜨리면
         // 그 판정자가 조용히 안 돈다 — 실측으로 편집기 영역 판정자 **224개**가 그렇게 0번 돌고
-        // 있었다(`selection.zig` 는 37개 전부). 필터는 **정규화된 이름**(`app_session.editor.test.…`)
-        // 에 걸리므로 `"app_session.editor."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
+        // 있었다(`selection.zig` 는 37개 전부). 필터는 **정규화된 이름**(`app_session.editor.mod.test.…`)
+        // 에 걸리므로 `"app_session.editor.mod."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
         // 모듈에 흩어진 판정자를 마저 긁으려고 남긴다. 대가는 시간이다 — 실측 75초 → 97초
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.", "app_session.editor_diff.", "session.editor." },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.diff." },
     });
     // 문서 핸들의 제품 수명과 등록 실패를 빠르게 재현한다. 전체 test-editor에도 같은 판정자가 실린다.
     const document_runtime_tests = addProjectTest(b, .{
@@ -4870,7 +4872,7 @@ pub fn build(b: *std.Build) void {
     // 2026-09-09 — 그 자리에 변이를 걸고서야 드러났다). `CRT*` 를 chrome 모듈째 물고 온 것과 같은
     // 이유·같은 자리다: **필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다.**
     editor_test_step.dependOn(&run_macos_coretext_frame_builder_tests.step);
-    // **L2 순수 모듈(`session/editor/*.zig`)의 판정자도 이 바이너리에 없다.** `app_session/editor.zig`가
+    // **L2 순수 모듈(`session/editor/*.zig`)의 판정자도 이 바이너리에 없다.** `app_session/editor/mod.zig`가
     // 그것들을 **부르지만**, 부르는 것과 그 파일의 `test`가 함께 실려 오는 것은 다르다 — `maru`는 별도
     // 모듈이고 `zig test`는 루트 모듈의 test만 싣는다. `LANG`을 필터에 적어 놓고 **0개를 돌았다**
     // (적대적 검증 2026-08-27 — `CRT`와 똑같은 함정을 같은 파일에서 반복했다). 그래서 `maru` 모듈을

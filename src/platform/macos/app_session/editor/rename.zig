@@ -8,15 +8,15 @@
 const std = @import("std");
 const maru = @import("maru");
 const chrome = maru.chrome;
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
-const editor_lsp = @import("editor_lsp.zig");
-const editor_wse = @import("editor_workspace_edit.zig");
-const pane_ops = @import("pane.zig");
-const settings_ops = @import("settings.zig");
-const term_ops = @import("term.zig");
+const editor_ops = @import("mod.zig");
+const editor_lsp = @import("lsp.zig");
+const editor_wse = @import("workspace_edit.zig");
+const pane_ops = @import("../pane.zig");
+const settings_ops = @import("../settings.zig");
+const term_ops = @import("../term.zig");
 const lsp = maru.session.editor.lsp;
 
 /// 인라인 rename 의 심볼 대상 — 어느 문서의 어느 자리(낱말 시작)인가, 그리고 열 때의 revision(모달이라 바뀔 일은 없지만 대조한다).

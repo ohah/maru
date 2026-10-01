@@ -11,14 +11,14 @@
 
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const chrome = maru.chrome;
-const editor_ops = @import("editor.zig");
-const editor_lsp = @import("editor_lsp.zig");
-const pane_ops = @import("pane.zig");
-const term_ops = @import("term.zig");
+const editor_ops = @import("mod.zig");
+const editor_lsp = @import("lsp.zig");
+const pane_ops = @import("../pane.zig");
+const term_ops = @import("../term.zig");
 const hover_box = chrome.components.hover_box;
 const diagnostic = maru.session.editor.diagnostic;
 const hover_text = maru.session.editor.hover_text;
@@ -443,7 +443,7 @@ fn boxLines(self: *const AppSession) []const hover_box.Line {
 }
 
 fn hideOwner(self: *AppSession) void {
-    if (self.editor_signature.active) @import("editor_signature.zig").hide(self) else hide(self);
+    if (self.editor_signature.active) @import("signature.zig").hide(self) else hide(self);
 }
 
 /// 그릴 줄(닫혀 있으면 빈 슬라이스).

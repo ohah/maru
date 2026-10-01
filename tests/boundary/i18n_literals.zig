@@ -164,11 +164,11 @@ const inventory = [_]Entry{
     // 을 만든다(`"값 {d}"`·`"한글 {d}"`) — 한글은 EAW Wide 라 **열 계산이 ASCII 와 다르고**, 제보가
     // 파일 종류와 무관하다고 했으므로 그 축을 픽스처가 실제로 담아야 한다. 화면에 나가는 문구가
     // 아니라 **디스크에 쓰는 테스트 파일의 내용**이다.
-    .{ .path = "src/platform/macos/app_session/editor.zig", .count = 2 },
+    .{ .path = "src/platform/macos/app_session/editor/mod.zig", .count = 2 },
     // **표시 문자열이 아니라 판정자의 진단 출력이다**(§7 "표시가 아니면 그 사실을 적고 원장을
     // 올린다"). DSEL3가 그려진 글자와 클릭이 답한 byte를 대조하다 어긋나면 그 자리를 사람이 읽을
     // 수 있게 한 줄 찍는다 — 실패했을 때만 나오고 화면에는 영영 안 간다.
-    .{ .path = "src/platform/macos/app_session/editor_diff.zig", .count = 1 },
+    .{ .path = "src/platform/macos/app_session/editor/diff.zig", .count = 1 },
     .{ .path = "src/platform/macos/app_session/settings.zig", .count = 1 },
     // `sidebar.zig`(3) 는 **0 이 되어 빠졌다.** 에이전트 상태줄 넷 중 running 만 키를 거치고 나머지
     // 셋(`입력 대기`·`대기중`·`상태 확인 중`)이 한국어 리터럴이라, 영어 화면에서 **한 줄 안에 언어가

@@ -9,18 +9,18 @@
 //! 옮기는 편집」을 함께 잡는다 — `refreshAfterEdit` 가 version 을 조건 없이 올리기 때문이다.
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_lsp = @import("editor_lsp.zig");
-const editor_ops = @import("editor.zig");
-const pane_ops = @import("pane.zig");
+const editor_lsp = @import("lsp.zig");
+const editor_ops = @import("mod.zig");
+const pane_ops = @import("../pane.zig");
 const lsp = maru.session.editor.lsp;
 const smart = maru.session.editor.smart_select;
 const Range = smart.Range;
 const sel_mod = maru.session.editor.selection;
 const Selection = sel_mod.Selection;
-const ByteRange = @import("editor_syntax.zig").syntax.Provider.ByteRange;
+const ByteRange = @import("syntax.zig").syntax.Provider.ByteRange;
 
 /// 서버 답을 기다리는 상한(§8.2q). 넘으면 1층으로 세우고 늦은 답은 버린다 — 서버가 멈춰도 키가 죽지 않는다.
 pub const timeout_ms: u64 = 500;

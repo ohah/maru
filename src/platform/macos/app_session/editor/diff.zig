@@ -14,19 +14,19 @@ const maru = @import("maru");
 const diff = maru.session.editor.diff;
 const diff_state = maru.session.editor.diff_state;
 const intraline = maru.session.editor.intraline;
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const dock_panel = maru.session.dock_panel;
 const chrome_editor = maru.chrome.components.editor_view;
-// 테스트 픽스처가 쓰는 형제 모듈. `editor.zig`가 이 파일을 부르고 이쪽이 그쪽을 부르지만, 파일 단위
+// 테스트 픽스처가 쓰는 형제 모듈. `editor/mod.zig`가 이 파일을 부르고 이쪽이 그쪽을 부르지만, 파일 단위
 // 순환 import는 Zig에서 문제가 없다(타입이 서로를 comptime으로 품지 않는다).
-const editor_ops = @import("editor.zig");
-const term_ops = @import("term.zig");
-const pane_ops = @import("pane.zig");
-const find_ops = @import("find.zig");
-const scroll_ops = @import("scroll.zig");
-const settings_ops = @import("settings.zig");
+const editor_ops = @import("mod.zig");
+const term_ops = @import("../term.zig");
+const pane_ops = @import("../pane.zig");
+const find_ops = @import("../find.zig");
+const scroll_ops = @import("../scroll.zig");
+const settings_ops = @import("../settings.zig");
 
 /// diff Term 하나가 드는 것. **행들은 줄 배열을 빌리고, 줄 배열은 entry의 두 쪽 버퍼를 빌린다** —
 /// 그래서 entry 내용이 갈릴 때 `invalidate`가 먼저 불려야 한다(호출자 계약).
@@ -337,7 +337,7 @@ fn computeRows(self: *AppSession, term: *Term, entry: *dock_panel.Entry, st: *St
     // 다시 세지만, 그때는 이미 막대 없이 한 프레임이 나간 뒤다).
     editor_ops.ensureMaxColsForDiff(term);
 
-    // **caret 을 세운다**([키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md)
+    // **caret 을 세운다**([키 입력과 단축키](../../../../../docs/key-input-and-shortcuts.md)
     // 「비교 뷰에 caret 을 세운다」). `invalidate`가 옛 선택을 버린 뒤라 여기가 되세우는 자리다 —
     // **`invalidate` 안에서는 안 된다**: 그 함수는 Term 이 죽을 때도 불리므로(`release`) 죽는
     // Term 에 caret 을 심는다.
@@ -1400,7 +1400,7 @@ test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지
     // 부르는 **경로 전체**(줄 분할·대응·표시 배열·마크)를 한 번에 흔들어, 아직 안 본 자리에 같은
     // 모양이 남아 있는지 본다. 세션 allocator는 init에 고정이라 `checkAllAllocationFailures`를
     // 그대로 못 쓴다 — 세션을 실패 allocator로 만들고 **init이 끝난 뒤부터** 실패 지점을 민다
-    // (`editor.zig`의 파일 열기 테스트와 같은 방법).
+    // (`editor/mod.zig`의 파일 열기 테스트와 같은 방법).
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const backing = testing.allocator;
 
@@ -2458,7 +2458,7 @@ test "DSEL4 선택을 든 채 문서가 짧아져도 죽지 않는다 (§4.1g �
 
 // ── DCARET: 비교 뷰 caret ──────────────────────────────────────────────────────
 //
-// 계약은 [키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을
+// 계약은 [키 입력과 단축키](../../../../../docs/key-input-and-shortcuts.md) 「비교 뷰에 caret 을
 // 세운다」가 소유한다. **판정자 하나는 제품 입구(`handleKeyEvent`)로 들어간다** — resolver·ops 를
 // 직접 부르는 판정자만 있으면 그 위 층이 키를 가로채도 전부 초록이다(⌘D·⌥⌘↑↓ 가 그렇게 죽어
 // 있었다).
@@ -3403,7 +3403,7 @@ test "DCARET24: caret 은 **caret 이 선 열**에 그려진다 — 검색 열�
 
 // ── DCOL: 비교 뷰 열 넘기기(`⌃⇧Tab`) ─────────────────────────────────────────
 //
-// 계약은 [키 입력과 단축키](../../../../docs/key-input-and-shortcuts.md) 「비교 뷰의 열을 키로
+// 계약은 [키 입력과 단축키](../../../../../docs/key-input-and-shortcuts.md) 「비교 뷰의 열을 키로
 // 넘긴다」가 소유한다. **판정자 둘이 제품 입구를 지난다** — `handleKeyEvent` 와 렌더.
 
 /// `⌃⇧Tab` 한 번.
@@ -3797,7 +3797,7 @@ test "DCOL11: 비교 재계산·빈 열·Term 전환에서도 검색 출처와 �
 
 // ── DSB: 비교 뷰의 상태바 커서 위치 ────────────────────────────────────────────
 //
-// 계약은 [상태바](../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」가 소유한다.
+// 계약은 [상태바](../../../../../docs/status-bar.md) 「비교 뷰의 커서 위치」가 소유한다.
 
 test "DSB1: 줄은 gutter 가 그리는 파일 번호이고, 짝맞춤 빈 행에는 번호가 없다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
@@ -3992,7 +3992,7 @@ test "DSB10: 빈 행 갈래도 버퍼가 모자라면 글을 안 낸다" {
 
 // ── DHS: 가로도 caret 을 따라간다 ──────────────────────────────────────────────
 //
-// 계약은 [시각 매핑](../../../../docs/native-editor-visual-mapping.md) 「가로도 caret 을 따라간다」.
+// 계약은 [시각 매핑](../../../../../docs/native-editor-visual-mapping.md) 「가로도 caret 을 따라간다」.
 
 test "DHS1: 비교 뷰에서 ⌘→ 를 누르면 가로가 따라온다 (handleKeyEvent)" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;

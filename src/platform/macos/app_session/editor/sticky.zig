@@ -5,11 +5,11 @@
 //! 그린 줄은 기억해 두었다가 클릭·호버가 읽는다(그 행은 본문이 아니라 머리줄이다).
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
-const editor_syntax = @import("editor_syntax.zig");
+const editor_ops = @import("mod.zig");
+const editor_syntax = @import("syntax.zig");
 const chrome_editor = maru.chrome.components.editor_view;
 const frame = chrome_editor.frame;
 const sticky = maru.session.editor.sticky;

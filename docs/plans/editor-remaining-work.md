@@ -27,18 +27,18 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 
 | 범위 | 현재 구현 근거 | 완료 주장에 붙는 경계 |
 |---|---|---|
-| 읽기·편집·선택·멀티커서·Undo/Redo·클립보드·저장 | [editor.zig](../../src/platform/macos/app_session/editor.zig), [buffer](../../src/session/editor/buffer.zig), [delta](../../src/session/editor/delta.zig), [clipboard](../../src/session/editor/clipboard.zig) | 공유 문서/다중 뷰 완료를 뜻하지 않는다 |
-| 이름 없는 문서·백업/복원·저장 실패/충돌 선택 | [editor-untitled 계획](editor-untitled.md), [저장](../../src/platform/macos/app_session/editor_untitled_save.zig), [백업](../../src/platform/macos/app_session/editor_backup.zig), [충돌 선택](../../src/platform/macos/app_session/editor_conflict.zig) | 외부 변경의 상시 감시·자동 clean reload 전체를 대신하지 않는다 |
-| IME 문서 범위·모든 커서 조합 표시/확정 | 네이티브 계획 N3와 검증 매트릭스의 IME 행, `editor.zig` | 실제 입력기 증거와 헤드리스 callback 증거를 구분한다 |
+| 읽기·편집·선택·멀티커서·Undo/Redo·클립보드·저장 | [editor/mod.zig](../../src/platform/macos/app_session/editor/mod.zig), [buffer](../../src/session/editor/buffer.zig), [delta](../../src/session/editor/delta.zig), [clipboard](../../src/session/editor/clipboard.zig) | 공유 문서/다중 뷰 완료를 뜻하지 않는다 |
+| 이름 없는 문서·백업/복원·저장 실패/충돌 선택 | [editor-untitled 계획](editor-untitled.md), [저장](../../src/platform/macos/app_session/editor/untitled_save.zig), [백업](../../src/platform/macos/app_session/editor/backup.zig), [충돌 선택](../../src/platform/macos/app_session/editor/conflict.zig) | 외부 변경의 상시 감시·자동 clean reload 전체를 대신하지 않는다 |
+| IME 문서 범위·모든 커서 조합 표시/확정 | 네이티브 계획 N3와 검증 매트릭스의 IME 행, `editor/mod.zig` | 실제 입력기 증거와 헤드리스 callback 증거를 구분한다 |
 | 일반/PCRE2 찾기·바꾸기·검색 옵션 | [find host](../../src/platform/macos/app_session/find.zig), [editor find](../../src/session/editor/find.zig), [find UI](../../src/chrome/components/find.zig) | 프로젝트 전체 검색과 좌우 독립 찾기 상자는 별개다 |
 | 구문 색·괄호·접힘·안내선·공백 표시·sticky·미니맵 | 네이티브 계획 N1/N4/N5, [frame](../../src/chrome/components/editor_view/frame.zig) | B2 draw 저장소 결정과 모든 부족 조건의 표시 보장은 남았다 |
-| LSP 호버·시그니처·정의·포맷·이름 바꾸기·자동완성·code action | [도구 계약 §8.2b~h](../editor-surface-tooling.md), 대응 `editor_*` host 모듈, [LSP 응답 라우터](../../src/platform/macos/app_session/editor_lsp.zig) | 기능이 있다는 것과 E3 도구 실행 계약 전체 완료는 다르다 |
+| LSP 호버·시그니처·정의·포맷·이름 바꾸기·자동완성·code action | [도구 계약 §8.2b~h](../editor-surface-tooling.md), 대응 `editor_*` host 모듈, [LSP 응답 라우터](../../src/platform/macos/app_session/editor/lsp.zig) | 기능이 있다는 것과 E3 도구 실행 계약 전체 완료는 다르다 |
 | semantic tokens·접힘·didSave·참조/구현/타입 정의/선언·inlay·심볼·낱말 강조·선택 확장 | 도구 계약 §8.2i~q와 대응 host 모듈 | 참조 피커와 문서 심볼 목록은 영구 도크 아웃라인이 아니다 |
-| 비교 본문 선택·복사·랩된 이어진 조각의 글자 강조 | [diff host](../../src/platform/macos/app_session/editor_diff.zig)의 DSEL2·DSEL4·DSEL5, `frame`의 바뀐 글자 painter와 이어진 조각 회귀 판정자 | 좌우 wrap 높이 정렬 제한과는 다른 기능이다 |
-| 3-way 병합 기본 기능 | [병합 계약 S1~S6](../editor-merge-conflicts.md), [merge host](../../src/platform/macos/app_session/editor_merge.zig) | 고르기 토글/스마트 결합 상태 모델은 별도 보류다 |
+| 비교 본문 선택·복사·랩된 이어진 조각의 글자 강조 | [diff host](../../src/platform/macos/app_session/editor/diff.zig)의 DSEL2·DSEL4·DSEL5, `frame`의 바뀐 글자 painter와 이어진 조각 회귀 판정자 | 좌우 wrap 높이 정렬 제한과는 다른 기능이다 |
+| 3-way 병합 기본 기능 | [병합 계약 S1~S6](../editor-merge-conflicts.md), [merge host](../../src/platform/macos/app_session/editor/merge.zig) | 고르기 토글/스마트 결합 상태 모델은 별도 보류다 |
 
-호버·시그니처는 `editor_lsp.zig`의 응답 처리와 `app_session.zig`의 명령·tick·박스 렌더에 연결된다.
-참조는 `editor_references.zig`의 요청·응답·피커 선택과 LSP 라우터가 연결된다.
+호버·시그니처는 `lsp.zig`의 응답 처리와 `app_session.zig`의 명령·tick·박스 렌더에 연결된다.
+참조는 `references.zig`의 요청·응답·피커 선택과 LSP 라우터가 연결된다.
 진단 overview도 `frame.Props.diag_lines`가 막대와 미니맵으로 전달되므로 신규 기능으로 다시 세지 않는다.
 
 ## 실제 남은 기능과 미결
@@ -48,12 +48,12 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 | 같은 파일 두 pane에서 공유 편집 | 승인된 설계의 단일 뷰 이관 + 공유 배선 미착수 | [layering §2.4](../native-editor-layering.md), 여러 뷰 원장 H1~H9. `app_session.zig`의 `TermRuntime.editor_document`가 본문·저장 정보·이력을 묶고 선택은 뷰에 남는다. [단일 뷰 이관](editor-shared-document.md)을 진행 중이다. 제품 소스에서 공유 `DocumentRegistry`와 명시적 editor split 명령을 찾지 못했다 | 승인된 [공유 문서 설계](editor-shared-document.md)에 따라 안정 핸들·연결 수명·provider/뷰 갱신을 구현하고, 한쪽 편집/Undo/외부 변경이 다른 뷰에 반영되며 선택·스크롤은 독립 |
 | 비교 뷰 좌우 독립 찾기 상자 | 구현·검증 완료 | [독립 찾기 계획](editor-diff-find.md). 두 `find.State`와 열별 결과를 유지한다 | 헤드리스·제품 Metal·실제 AppKit/IME 검증 결과는 해당 계획에 기록 |
 | 프로젝트 전체 검색·바꾸기 미리보기 | 남은 기능 + 정책 미결 | 네이티브 후속 표. 파일 안 검색은 있지만 프로젝트 검색 도크·진행/취소·적용 미리보기 경로는 확인되지 않았다 | 검색 범위·제외/무시 규칙·엔진/프로세스·결과 도크·취소·바꾸기 안전 규칙을 결정하고 실제 여러 파일 검증 |
-| 영구 도크 심볼 아웃라인 | 남은 기능 | 후속 표의 목록 UI. `editor_symbols.zig`는 문서 심볼을 공급하고 현재 소비자는 breadcrumb·symbol picker 등이다. 도크 아웃라인 경로는 확인되지 않았다 | 기존 심볼 목록을 재사용하는 도크 배치·선택/추종·문서 전환 계약 |
+| 영구 도크 심볼 아웃라인 | 남은 기능 | 후속 표의 목록 UI. `symbols.zig`는 문서 심볼을 공급하고 현재 소비자는 breadcrumb·symbol picker 등이다. 도크 아웃라인 경로는 확인되지 않았다 | 기존 심볼 목록을 재사용하는 도크 배치·선택/추종·문서 전환 계약 |
 | 심볼 선택 중 문서 미리보기 | 남은 기능, 선행 대기 | 네이티브 UI §7.5와 후속 표. 현재 심볼 이동/피커와 다른 기능 | 공유 문서/뷰 수명 계약을 먼저 닫고, 미리보기 이동과 확정/취소 복원 검증 |
 | Markdown 소스 모드의 편집기 선택 | 계약 밖의 정책 미결 | [네이티브 계약 §12](../native-editor.md), [파일 kind 계약](../file-panel-kinds.md). Markdown 소스는 현재 CM6이며 text/diff의 네이티브 이관과 별개다 | 소스도 네이티브로 할지, 웹 모드와의 전환·문서 소유·편집 경험을 어떻게 통일할지 결정 |
 | 언어별 들여쓰기·자동 닫기 문맥 규칙 | 별도 개선 후보, 정책 미결 | 네이티브 계약 §12. 기본 `pairs.zig`·`language.zig`는 있지만 VS Code식 `onEnterRules`·문맥 제외·언어별 정규식 규칙까지 완료된 것은 아니다 | 실제 차이 입력부터 재현하고 grammar별 규칙 소유·엔진을 결정. 검색 PCRE2 채택을 타이핑 규칙 채택으로 해석하지 않는다 |
 | 편집기 plugin 확장점 | 앱 전체 plugin 경계의 별도 결정 | 네이티브 계약 §12: 내부 span/completion provider와 외부 plugin API는 다르다 | 신뢰/권한·수명·확장 API 계약을 해당 이니셔티브에서 결정. 내부 provider 존재를 plugin 지원으로 세지 않는다 |
-| 저장 시 자동 포맷/린트 fix | 남은 기능 + 보안 정책 미결 | 후속 표와 도구 §8.1. `editor_format.zig`는 명시적 LSP 포맷 요청; `saveDocumentGuarded`의 저장은 자동 실행 기능을 제공하지 않는다 | 자동 실행 신뢰/권한과 실패·취소 정책, revision·커서·undo 한 번·저장 순서 검증 |
+| 저장 시 자동 포맷/린트 fix | 남은 기능 + 보안 정책 미결 | 후속 표와 도구 §8.1. `format.zig`는 명시적 LSP 포맷 요청; `saveDocumentGuarded`의 저장은 자동 실행 기능을 제공하지 않는다 | 자동 실행 신뢰/권한과 실패·취소 정책, revision·커서·undo 한 번·저장 순서 검증 |
 | 선택적 외부 formatter/linter 실행 | E3 계약 잔여 | 도구 §8.1의 trust/allowlist/executable·시간/출력/child 정산 규칙은 LSP 포맷만으로 닫히지 않는다 | registry·명시적 trust UX·취소/폭주/실행 종료 fixture를 별도 대조 후 구현 범위 결정 |
 | B2 op 저장소 제품 적용 | 실험 있음, 제품 연결·정책 미결 | [B2 기록](editor-op-b2-evaluation.md). `B2Experiment`는 test 전용, 제품 `frame.build`는 기존 scratch 경로 | 소유 범위·창/pane 수명·메모리 정책 결정과 제품 출력/입력/실패/성능 검증 |
 | 기본 scratch 부족 시 중요한 표시 보존 | 검증·범위 한계 | #4021은 기본 scratch에 들어간 현재 검색만 성장 실패에서 보호한다 | 부족 종류별 반례부터 재현하고, 실제 결함과 표시 정책을 구분 |

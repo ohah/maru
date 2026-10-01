@@ -168,7 +168,7 @@
 - L2 `session/editor/backup.zig`: 레코드 인코딩/디코딩 · 파일 이름 · **주기와 임계 정책**.
   포맷은 저장소 관례(bare 헤더 줄 → `key=value` 한 줄 → 빈 줄 → **원문 바이트 그대로**)를 쓴다 —
   본문을 escape 하지 않는 이유는 8 MiB 짜리 사본을 한 벌 더 만들지 않는 것이다.
-- L4 `app_session/editor_backup.zig`: 편집 통지(`refreshAfterEdit` — **제품 편집 경로 여섯이 지나는 그
+- L4 `app_session/editor/backup.zig`: 편집 통지(`refreshAfterEdit` — **제품 편집 경로 여섯이 지나는 그
   함수**) · tick 에서 debounce 만기 쓰기 · 저장 성공/수락된 닫기에서 지우기 · **종료 flush**(ABI 하나).
 - 큰 문서는 **멈추고 상태바로 알린다**(`editor_degraded` — 저하를 모으는 기존 칸, 새 항목이 아니다).
 - **아직 아무것도 읽지 않는다.** 종료: 크래시 뒤 디스크에 그 문서의 내용이 **남아 있다**(사용자가 손으로

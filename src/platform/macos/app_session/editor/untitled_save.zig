@@ -9,17 +9,17 @@
 const std = @import("std");
 const maru = @import("maru");
 
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const dock_panel = maru.session.dock_panel;
-const editor_ops = @import("editor.zig");
-const pane_ops = @import("pane.zig");
-const term_ops = @import("term.zig");
-const settings_ops = @import("settings.zig");
-const git_ops = @import("git.zig");
-const file_panel_ops = @import("file_panel.zig");
-const workspace_ops = @import("workspace.zig");
+const editor_ops = @import("mod.zig");
+const pane_ops = @import("../pane.zig");
+const term_ops = @import("../term.zig");
+const settings_ops = @import("../settings.zig");
+const git_ops = @import("../git.zig");
+const file_panel_ops = @import("../file_panel.zig");
+const workspace_ops = @import("../workspace.zig");
 
 /// **저쪽 목적지를 굳힌 값**(U3). 목록·diff·쓰기가 같은 판정을 공유하도록 `remoteScmTargetFor` 가
 /// 주는 셋을 그대로 든다 — 목적지·control socket·**저쪽 cwd(= base)**.

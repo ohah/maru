@@ -5,7 +5,7 @@
 //!
 //! ## 왜 여기(중립)에 있는가
 //!
-//! macOS `app_session/editor.zig` 의 `hitTestBody` 가 이 계산을 갖고 있었다. Windows 편집기 표면이
+//! macOS `app_session/editor/mod.zig` 의 `hitTestBody` 가 이 계산을 갖고 있었다. Windows 편집기 표면이
 //! 같은 것을 필요로 하는데 **다시 쓰면 안 된다** — 그 함수 주석에는 적대적 검증이 찾은 결함이
 //! 다섯 적혀 있고(아래 각 단계가 그 기록이다), 다시 쓰면 그 다섯을 다시 밟는다.
 //!

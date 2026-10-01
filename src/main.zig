@@ -4382,7 +4382,7 @@ fn openFileFor(
 fn syntaxLanguageFor(g: maru.session.editor.language.Grammar) ts.Language {
     // **두 열거는 같은 축이고 이름이 1:1 이다**(`tree_sitter.zig` 의 doc: *"이 모듈은 maru 를 못
     // 들여오므로 필요한 것만 다시 적는다 — 값을 늘릴 때 두 곳이 갈리지 않게 **호출자가 옮긴다**"*).
-    // macOS 도 같은 자리를 갖는다(`app_session/editor_syntax.zig` 의 `syntaxLanguage`) — 두 모듈을
+    // macOS 도 같은 자리를 갖는다(`app_session/editor/syntax.zig` 의 `syntaxLanguage`) — 두 모듈을
     // 다 보는 공용 자리가 없어서다(§2m.112 의 «배선» 절).
     //
     // **드리프트를 컴파일 오류로 만든다.** 손으로 쓴 갈래는 문법이 늘 때 조용히 `.other` 로
@@ -16557,7 +16557,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
 
     // **스크롤 상한은 컴포넌트가 준 값을 쓴다** — `Written.max_top_line`. 그 필드 doc 이
     // *"입력이 이것을 읽는다"* 고 못 박았고 macOS 도 그것을 굳혀 뒀다가 clamp 에 쓴다
-    // (`app_session/editor.zig` 의 `editor_max_top_line`).
+    // (`app_session/editor/mod.zig` 의 `editor_max_top_line`).
     //
     // `viewport.clampFirstRow(.., lines.len, rows)` 로 따로 세면 **두 번째 출처**가 된다. 랩이
     // 꺼져 있으면 값이 같아 지금은 안 갈리지만, 랩을 켜는 순간 논리 줄 수와 시각 행 수가 달라져

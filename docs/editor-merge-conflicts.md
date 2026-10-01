@@ -202,7 +202,7 @@ gutter 는 번호와 접힘 표식 **둘 다** 그 술어만 본다(`gutter.zig:
   것은 **본문을 한 번도 안 누른 상태**에서 일어난다(파일을 열자마자 고르는 흐름). 커서가 없으면
   구간 머리에 놓는다 — 있으면 안 건드린다(CodeLens 를 누르는 것이 커서를 옮기는 동작은 아니다).
 
-판정자 `CFL1`~`CFL9`(`app_session/editor.zig`)와 파서 판정자 일곱(`session/editor/conflict.zig`),
+판정자 `CFL1`~`CFL9`(`app_session/editor/mod.zig`)와 파서 판정자 일곱(`session/editor/conflict.zig`),
 Chrome Lab 시나리오 `editor-conflict` + 골든 둘이 이것을 든다. **Lab 픽스처의 밴드·위젯 표는 손으로
 안 적는다** — 제품과 **같은 파서**가 만든다(손으로 적으면 파서가 망가져도 그림은 예쁘게 나온다).
 

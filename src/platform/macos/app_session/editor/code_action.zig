@@ -8,16 +8,16 @@
 
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
-const editor_lsp = @import("editor_lsp.zig");
-const editor_rename = @import("editor_rename.zig");
-const editor_wse = @import("editor_workspace_edit.zig");
-const pane_ops = @import("pane.zig");
-const settings_ops = @import("settings.zig");
-const term_ops = @import("term.zig");
+const editor_ops = @import("mod.zig");
+const editor_lsp = @import("lsp.zig");
+const editor_rename = @import("rename.zig");
+const editor_wse = @import("workspace_edit.zig");
+const pane_ops = @import("../pane.zig");
+const settings_ops = @import("../settings.zig");
+const term_ops = @import("../term.zig");
 const lsp = maru.session.editor.lsp;
 
 /// 메뉴 항목 상한. **버퍼 크기가 아니라 이 메뉴가 스스로 정한 상한**이다(버퍼는 `ctx_menu_buf_len`

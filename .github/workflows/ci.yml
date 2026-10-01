@@ -46,11 +46,19 @@ jobs:
     name: changed areas
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # main push 의 「PR 에서 증명됨」 판정이 머지된 PR 과 그 head 의 check run 을 읽는다.
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
     outputs:
       code: ${{ steps.areas.outputs.code }}
       runtime: ${{ steps.areas.outputs.runtime }}
       web: ${{ steps.areas.outputs.web }}
       docs: ${{ steps.areas.outputs.docs }}
+      proven_file_explorer: ${{ steps.proven.outputs.proven_file_explorer }}
+      proven_macos_only: ${{ steps.proven.outputs.proven_macos_only }}
+      proven_appkit: ${{ steps.proven.outputs.proven_appkit }}
     steps:
       # three-dot diff에 merge-base가 필요해 전체 히스토리를 받는다(얕은 클론은 base.sha가 없다).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -66,6 +74,16 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: sh tools/ci/changed-areas.sh "$BASE" "$HEAD" >> "$GITHUB_OUTPUT"
+      # **main push 에서 PR 이 같은 tree 로 이미 통과한 macOS 잡은 다시 돌리지 않는다.** macOS 러너(동시 5대)를 main push 가
+      # 81분, PR 이 29분 썼고(2026-09-30 ~ 10-01 run 60개), PR 의 macOS 잡은 실행 시간만큼 러너를 기다렸다. 같은 tree 는 같은
+      # 소스·같은 워크플로라 다시 돌려도 새로 아는 것이 없다. 확인하지 못하면 전부 false(잡이 돈다) — tools/ci/pr-proven-jobs.sh.
+      # main 전용 잡(session host·editor ReleaseFast)은 PR 에서 안 돌아 증명이 없으므로 그대로 돈다.
+      - run: sh tools/ci/pr-proven-jobs.test.sh
+      - id: proven
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh tools/ci/pr-proven-jobs.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
   # 기본 게이트: fmt-check, unit, e2e, recorded oracle, stress, facade import 경계와 build를
   # 한 번에 검증한다. SVG hash/C·Zig registry는 외부 도구 없이 Zig test가 검증한다.
@@ -309,7 +327,7 @@ jobs:
   file-explorer-macos:
     name: file explorer macOS product path
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_file_explorer != 'true' }}
     runs-on: macos-15
     # 15 → 25. AppSession 전수 스위트(아래 "Run the macOS AppSession test suite")가 붙으면서 늘렸다.
     # 실측은 웜 캐시 로컬에서 2분 29초이고, 콜드 러너는 이 모듈을 필터 없이 처음 컴파일하므로 더 든다.
@@ -459,7 +477,7 @@ jobs:
     #
     # 캐시는 자기 그룹(`macos-only`)을 쓴다. file explorer 캐시를 빌려 읽기만 하면, 그쪽이 더는 이 바이너리들을
     # 컴파일하지 않으므로 여기가 영영 콜드가 된다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_macos_only != 'true' }}
     runs-on: macos-15
     # 떼어 내기 전 잡(50분)의 이 부분 실측은 웜 약 7분 — 콜드 러너 편차와 첫 캐시 없는 실행을 수용한다.
     timeout-minutes: 30
@@ -666,7 +684,7 @@ jobs:
     #   · 편집기 저장 충돌 — `⌘S` 가 `keyDown` 의 chord 우회를 지나 저장 디스패치에 닿는가, 밖에서 바뀐
     #     파일을 **안 덮는가**(docs/native-editor-document-model.md §3.9d 「판정」). 헤드리스 판정자는 그
     #     둘을 볼 수 없다 — 하나는 AppKit 키 배달이고 하나는 디스크의 사실이다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_appkit != 'true' }}
     runs-on: macos-15
     # 세 잡이 각 20분이었다. 합친 실측 예상은 11~12분(콜드 번들 빌드 한 번 + 스모크 합)이라 30분이면
     # 여유가 있고, hang 은 계속 유한하게 닫는다.

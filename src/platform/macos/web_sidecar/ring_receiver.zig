@@ -228,6 +228,15 @@ test "after the first message a different pid version is refused" {
     try std.testing.expectEqual(@as(?Rejection, .wrong_pid_version), receiver.check(&message, testAudit(500, 42)));
 }
 
+test "a popup ring announcement (MWBP — W6a) passes the same checks as the view ring, and other ids do not" {
+    var receiver = testReceiver(500);
+    var message = testMessage(receiver.token);
+    message.header.id = ring_message.popup_message_id;
+    try std.testing.expectEqual(@as(?Rejection, null), receiver.check(&message, testAudit(500, 41)));
+    message.header.id = ring_message.popup_message_id + 1;
+    try std.testing.expectEqual(@as(?Rejection, .malformed), receiver.check(&message, testAudit(500, 41)));
+}
+
 test "a message that is not a ring announcement is malformed" {
     var receiver = testReceiver(500);
     var message = testMessage(receiver.token);

@@ -70,7 +70,7 @@ pub const Error = error{
     UnknownPermissionResult,
     InvalidModifiers,
     InvalidCoordinate,
-    /// 닫힌 팝업(`popup_changed.visible = false`)에 0 이 아닌 사각형(W6a).
+    /// 팝업 알림의 닫힌 필드 위반(W6a) — 닫힌 팝업에 0 이 아닌 사각형·세대, 열린 팝업에 세대 0·크기 0.
     InvalidPopup,
     InvalidClickCount,
     InvalidRange,

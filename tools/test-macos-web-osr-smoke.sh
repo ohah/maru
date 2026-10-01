@@ -371,6 +371,10 @@ ime 40 m:U+314B
 ime 53 k:U+1B m:- c:cancelOperation:
 ime 0 k:U+61 i:U+61 m:U+3131
 ime 49 k:U+20 i:U+3131 i:U+20
+sleep 300
+ime 4 m:U+D55C
+sleep 300
+imeout u i:U+97D3
 sleep 500
 ime 4 m:U+314E
 sleep 300
@@ -415,6 +419,9 @@ i_empty = vals.index('') if '' in vals else -1
 check(i_empty >= 0, '⌘A then Backspace empties the textarea (select all is the page edit command)')
 check(i_empty >= 0 and any('안' in v for v in vals[i_empty + 1:]), '⌘Z undoes it (undo is the page edit command)')
 check(any(e.get('e') == 'cend' and e.get('d') == 'ㅎ' for e in evs), 'opening an overlay mid-composition finishes the composition (ㅎ)')
+# 후보창에서 마우스로 고르기: 조합(한) 중 트랜잭션 밖에서 unmarkText 뒤 insertText(韓) — 고른 글이 조합을 대신한다(한韓 이 아니다 —
+# main 기준 리베이스 적대 검증: main 의 unmarkText 「keyDown 밖이면 즉시 확정」이 Chromium 탭에서 확정을 두 번 보냈다).
+check(any(v.endswith('韓') for v in vals) and not any('한韓' in v for v in vals), f'picking a candidate after unmarkText replaces the composition ({[v[-3:] for v in vals if "韓" in v][:3]})')
 blur_at = max((i for i, n in enumerate(names) if n == 'blur'), default=-1)
 check(blur_at >= 0 and 'focus' in names[blur_at + 1:], 'the page loses focus under the overlay and gets it back when it closes')
 check(loads >= 2, f'⌘R reloads the tab (page loads {loads})')

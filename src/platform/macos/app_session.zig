@@ -41207,6 +41207,38 @@ fn e4d4WaitUpload(
             e4d3SurfaceContains(term, session.io, screen_needle)) return;
         _ = usleep(20 * 1000);
     }
+    // P3-e4d-3 과 같은 종단 상태를 남긴다 — 「바이트가 안 갔나 · 화면에 안 돌아왔나 · 큐가 실패했나」가
+    // 갈려야 쫓을 수 있다. 부하에서 100 회 중 2 회 이 자리에서 말없이 빨갰다(2026-10-01).
+    session.upload_mutex.lockUncancelable(session.io);
+    const inflight = session.upload_inflight;
+    const results = session.upload_results.items.len;
+    session.upload_mutex.unlock(session.io);
+    std.debug.print(
+        "E4D4 upload terminal state needle={s} remote_bytes={any} screen_path={any} queue_active={any} inflight={d} results={d} notice={any}:{s}\n" ++
+            "E4D4 last user action failure: {s}\n",
+        .{
+            screen_needle,
+            e4d3FileEquals(session.io, session.allocator, remote_path, expected),
+            e4d3SurfaceContains(term, session.io, screen_needle),
+            session.user_action_queue.active_id,
+            inflight,
+            results,
+            session.chrome_host.notice.open,
+            session.chrome_host.notice.message,
+            if (session.user_action_last_failure_len == 0)
+                "(none - not a queue failure)"
+            else
+                session.user_action_last_failure_buf[0..session.user_action_last_failure_len],
+        },
+    );
+    // 늦었을 뿐인가, 멈췄는가. 시한 뒤로 더 기다려 본다 — 결과는 같아도(실패) 고칠 방향이 정반대다.
+    const late_ticks: ?usize = for (0..1000) |late| {
+        _ = try session.tick();
+        if (e4d3FileEquals(session.io, session.allocator, remote_path, expected) and
+            e4d3SurfaceContains(term, session.io, screen_needle)) break late;
+        _ = usleep(20 * 1000);
+    } else null;
+    std.debug.print("E4D4 upload after deadline: observed_late_ticks={any} (20 ms each)\n", .{late_ticks});
     return error.UploadNotObserved;
 }
 

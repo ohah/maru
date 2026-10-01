@@ -10595,6 +10595,13 @@ release workflow/runner 준비 PR은 component fixture를 이유로 제품 gate�
               actual socket/fail-index fixture는 parse 1회, raw FIFO, GUI/external attach resource cleanup,
               attach→event cache, response↔event 양 순서, producer sibling 격리와 EOF를 고정한다.
 
+              **GUI metadata coalesce는 observation probe nonce를 버리지 않는다(2026-10-01).** nonce는 상태가 아니라
+              사용자 동작 freshness barrier의 응답 표식이고 `metadataSemanticEqlExact`는 그것을 비교하지 않는다. 그래서
+              같은 revision이면 nonce를 실은 새 event가 nonce 없는 대기 event를 대체하고(반대 순서는 기존처럼 접힌다),
+              더 새 revision은 nonce를 실은 대기 event를 덮지 않고 그 뒤에 선다. 예전 규칙은 host가 수 ms 안에 낸
+              응답을 큐 안에서 지워 동작이 5초 뒤 `active_expired`로 실패했다 — P3-e4d-3/4가 부하에서 빨갛던 원인이다.
+              runtime당 in-flight probe는 하나이므로 stream당 추가 대기 event는 최대 하나다.
+
               **c3a2 — prepared normalize와 paired evidence/Client transfer.** storage final address 안의 empty slot을 받는
               `Client.prepareExternalPumpTransfer(out:*PreparedExternalPumpTransfer,
               destination:*?Client,resident_cap)`가 destination null을 seal하고

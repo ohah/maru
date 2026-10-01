@@ -26141,6 +26141,11 @@ test "client: attach, input, resize, and detach a real runtime over the wire" {
 test "client: receives a delta_chunk stream reflecting input echoed onto the screen" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
+    // 이 판정자는 «같은 프레임» 안에서 `readStreamBatch` 를 되풀이해 echo 를 기다린다 — 앞선 판정자가 제품 tick
+    // (`maintenanceEventTick`)으로 올려 둔 프레임 도장이 남아 있으면 첫 «비어 있음» 이 캐시돼 남은 99 번은 소켓을 아예
+    // 안 본다(2026-10-01 실측: `재접속 은퇴 창` 판정자 바로 뒤에 두면 매번 `expect(found)` 가 깨졌다). 도장을 0 으로 꺼 둔다.
+    resetUiFrameStampForTest();
+    defer resetUiFrameStampForTest();
 
     var dir_buf: [256]u8 = undefined;
     const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-delta-{d}", .{c.getpid()}) catch return error.SkipZigTest;

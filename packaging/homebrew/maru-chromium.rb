@@ -64,16 +64,21 @@ class MaruChromium < Formula
     host = libexec/"maru-web-host"
     framework = libexec/"Chromium Embedded Framework.framework/Chromium Embedded Framework"
     assert_path_exists host
-    # Homebrew 가 설치 때 아무것도 고치지 않았다 — 서명이 온전하고(프레임워크는 번들 봉인으로 안쪽 dylib 까지) ID 가
-    # 그대로 @rpath 다.
+    # 서명이 온전하고 프레임워크 ID 가 그대로 @rpath 다 — 프레임워크는 번들 봉인이 안쪽 dylib 까지 보므로 Homebrew 가 고쳐
+    # 다시 서명했다면 여기서 걸린다. host·helper 는 다시 서명돼도 strict 가 통과하므로(W7b 7 차 실측) 이 확인만으로
+    # 「고치지 않았다」를 보이지는 못한다 — 그 쪽은 빌드 때 `tools/web-sidecar-dist-macho.sh` 가 고칠 것이 없게 만든다.
     [host, libexec/"maru-web-helper", framework].each do |file|
       system "/usr/bin/codesign", "--verify", "--strict", file
     end
     # 실제로 뜨는지 — strict 서명 확인은 서명이 코드를 덮어쓴 파일도 통과시킨다(W7b 5·6 차). host 는 제어 채널(stdin)이
-    # 닫혀 있으면 handshake_failed(11)로 끝난다. helper 는 libcef_sandbox 를 올린 뒤 샌드박스 밖이면 1, 이미 샌드박스
-    # 안이면(`brew test` 가 그렇다 — 실측) 프레임워크까지 올리고 0 으로 끝난다. 시작하다 죽으면 신호(128 이상)다.
+    # EOF 면 handshake_failed(11)로 끝난다(프레임워크를 올리기 전이다). helper 는 libcef_sandbox 를 올리고 샌드박스 안이면
+    # 프레임워크까지 올려 0 으로 끝난다 — `brew test` 는 늘 샌드박스 안이다(실측). 샌드박스 밖이면 샌드박스 확인에서 1 이지만,
+    # 1 은 「프레임워크를 못 올림」도 같은 값이라(W7b 7 차 — 없는 시스템 프레임워크에 링크한 프레임워크로 실측) 그 문구일
+    # 때만 받는다. 시작하다 죽으면 신호(128 이상)다.
     shell_output("#{host} </dev/null", 11)
-    assert_match(/^exit=[01]$/, shell_output("#{libexec}/maru-web-helper </dev/null >/dev/null 2>&1; echo exit=$?"))
+    helper = shell_output("#{libexec}/maru-web-helper </dev/null 2>&1; echo exit=$?")
+    assert helper.end_with?("exit=0\n") || (helper.end_with?("exit=1\n") && helper.include?("sandbox is not active")),
+           "maru-web-helper did not start cleanly: #{helper}"
     assert_match "@rpath/", shell_output("/usr/bin/otool -D '#{framework}'")
     manifest = JSON.parse((libexec/"maru-chromium.json").read)
     assert_equal Hardware::CPU.arm? ? "arm64" : "x86_64", manifest["arch"]

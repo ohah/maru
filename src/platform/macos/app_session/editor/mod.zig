@@ -7809,9 +7809,13 @@ fn dropRedo(self: *AppSession, term: *Term) void {
 }
 
 /// undo·redo 스택을 통째로 놓는다(Term이 죽거나 문서를 다시 열 때).
-pub fn dropUndoState(self: *AppSession, term: *Term) void {
+fn dropDirectIMEState(self: *AppSession, term: *Term) void {
     if (term.rt.editor_ime_direct.items.len > 0) self.allocator.free(term.rt.editor_ime_direct.items);
     term.rt.editor_ime_direct = .{};
+}
+
+pub fn dropUndoState(self: *AppSession, term: *Term) void {
+    dropDirectIMEState(self, term);
     term.rt.editorDocument().history.clear(self.allocator);
 }
 
@@ -10520,6 +10524,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     // 뒷날 Term 이 문서를 **갈아 끼우게** 되면 이 줄이 비로소 일을 하고, 그때 판정자가 설 수 있다.
     term.rt.editor_drawn_doc_lines = 0;
     term.rt.editor_drawn_content_cols = 0;
+    dropDirectIMEState(self, term); // IME provenance is view-owned, independently of document leases.
     setEditorPreedit(self, term, ""); // 조합 중이던 글자(N3)
     dropFoldState(self, term); // 접힘 층을 통째로 놓는다(그 함수 doc)
     dropSelectionState(self, term);

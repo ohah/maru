@@ -4584,6 +4584,14 @@ pub const RemoteRuntime = struct {
         return self.runtime_id_hex;
     }
 
+    /// 이 runtime 이 지금 적용해 둔 원격 ssh dest(없으면 null). `pumpDelta` 는 메타데이터가 화면 배치와
+    /// 같은 턴에 오면 결과를 `.screen` 하나로 합쳐 보고한다 — 그래서 «dest 가 적용됐는가» 는 결과 종류가
+    /// 아니라 이 상태로 본다. 결과 종류만 기다리던 P3-e4d-4 가 부하에서 그렇게 빨갰다(2026-09-30).
+    pub fn appliedSshRemoteDest(self: *const RemoteRuntime) ?[]const u8 {
+        const observation = &self.currentGenerationConst().observation;
+        return if (observation.ssh_remote_dest_present) observation.ssh_remote_dest.items else null;
+    }
+
     fn deinitGenerationOwnerAndScreenSource(self: *RemoteRuntime) void {
         self.reconnect_executor.deinit(&self.generation_owner) catch
             @panic("runtime reconnect executor teardown lost final authority");

@@ -7514,24 +7514,8 @@ pub fn setEditorTabWidth(self: *AppSession, term: *Term, tab_width: u8) void {
 /// `Inverse`가 할당을 소유하므로 이 항목을 버릴 때는 **반드시 `deinit`** 한다 — 스택을 자르는
 /// 자리가 넷이라(새 편집이 redo를 버릴 때·상한을 넘을 때·Term이 죽을 때·문서를 다시 열 때)
 /// 한 곳만 빠뜨려도 샌다.
-pub const UndoEntry = struct {
-    inverse: maru.session.editor.delta.Inverse,
-    /// **편집 전** 커서들(문서 순서). §3.3: *"undo/redo는 텍스트뿐 아니라 그 시점의 selection
-    /// 배열 전체와 primary 인덱스를 되돌린다."*
-    sels_before: []editor_selection.Selection,
-    primary_before: usize,
-    /// 묶음 번호. **같은 번호는 한 번의 undo로 함께 돌아간다.**
-    group: u32,
-
-    pub fn deinit(self: *UndoEntry, allocator: std.mem.Allocator) void {
-        self.inverse.deinit();
-        allocator.free(self.sels_before);
-        self.* = undefined;
-    }
-};
-
-/// 마지막 편집의 종류. 종류가 바뀌면 묶음을 끊는다(§3.3).
-pub const EditKind = enum { none, insert, delete };
+pub const UndoEntry = maru.session.editor.history.Entry;
+pub const EditKind = maru.session.editor.history.EditKind;
 
 /// 연속 타이핑으로 볼 시간 간격(ms). 이보다 벌어지면 묶음을 끊는다.
 ///
@@ -7550,7 +7534,7 @@ const undo_stack_limit: usize = 2048;
 /// 안 끊으면 "클릭해서 다른 곳에 커서를 두고 친 글자"가 앞의 타이핑과 한 묶음이 되어 undo 한 번에
 /// 둘 다 사라진다 — 사용자가 예측할 수 없다.
 pub fn breakUndoGroup(term: *Term) void {
-    term.rt.editor_last_edit_kind = .none;
+    term.rt.editor_history.last_edit_kind = .none;
     // **자동 닫기 표시도 여기서 버린다**(§3.7 — "그 표시는 그 caret이 떠나면 버린다").
     //
     // 이 함수는 *"커서가 편집 아닌 이유로 움직였다"*의 단일 자리다(클릭·⌘⌃D·이동 일습·붙여넣기).
@@ -7561,9 +7545,9 @@ pub fn breakUndoGroup(term: *Term) void {
 
 /// 이번 편집이 앞의 것과 같은 묶음인가.
 fn sameUndoGroup(term: *Term, kind: EditKind, now_ms: u64) bool {
-    if (term.rt.editor_last_edit_kind != kind) return false;
+    if (term.rt.editor_history.last_edit_kind != kind) return false;
     if (kind == .none) return false;
-    return now_ms -| term.rt.editor_last_edit_ms <= undo_group_gap_ms;
+    return now_ms -| term.rt.editor_history.last_edit_ms <= undo_group_gap_ms;
 }
 
 /// 편집 하나를 undo 스택에 쌓는다. **`inverse`의 소유가 여기로 넘어온다.**
@@ -7577,9 +7561,9 @@ fn pushUndo(
 ) void {
     var owned_inverse = inverse;
     const now_ms = self.awakeMs();
-    if (!sameUndoGroup(term, kind, now_ms)) term.rt.editor_edit_group +%= 1;
-    term.rt.editor_last_edit_kind = kind;
-    term.rt.editor_last_edit_ms = now_ms;
+    if (!sameUndoGroup(term, kind, now_ms)) term.rt.editor_history.edit_group +%= 1;
+    term.rt.editor_history.last_edit_kind = kind;
+    term.rt.editor_history.last_edit_ms = now_ms;
 
     // **새 편집은 redo를 버린다**(§3.3).
     dropRedo(self, term);
@@ -7588,9 +7572,9 @@ fn pushUndo(
         .inverse = owned_inverse,
         .sels_before = sels_before,
         .primary_before = primary_before,
-        .group = term.rt.editor_edit_group,
+        .group = term.rt.editor_history.edit_group,
     };
-    if (!pushEntry(self, &term.rt.editor_undo, &term.rt.editor_undo_len, entry)) {
+    if (!pushEntry(self, &term.rt.editor_history.undo, &term.rt.editor_history.undo_len, entry)) {
         // 못 쌓으면 **되돌릴 수 없는 편집**이 된다. 그래도 편집 자체는 성사시킨다 —
         // 여기서 편집을 취소하면 할당 실패 하나가 타이핑을 먹는다.
         var e = entry;
@@ -7619,21 +7603,13 @@ fn pushEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry: UndoEnt
 }
 
 fn dropRedo(self: *AppSession, term: *Term) void {
-    for (term.rt.editor_redo[0..term.rt.editor_redo_len]) |*e| e.deinit(self.allocator);
-    term.rt.editor_redo_len = 0;
+    for (term.rt.editor_history.redo[0..term.rt.editor_history.redo_len]) |*e| e.deinit(self.allocator);
+    term.rt.editor_history.redo_len = 0;
 }
 
 /// undo·redo 스택을 통째로 놓는다(Term이 죽거나 문서를 다시 열 때).
 pub fn dropUndoState(self: *AppSession, term: *Term) void {
-    for (term.rt.editor_undo[0..term.rt.editor_undo_len]) |*e| e.deinit(self.allocator);
-    for (term.rt.editor_redo[0..term.rt.editor_redo_len]) |*e| e.deinit(self.allocator);
-    if (term.rt.editor_undo.len > 0) self.allocator.free(term.rt.editor_undo);
-    if (term.rt.editor_redo.len > 0) self.allocator.free(term.rt.editor_redo);
-    term.rt.editor_undo = &.{};
-    term.rt.editor_redo = &.{};
-    term.rt.editor_undo_len = 0;
-    term.rt.editor_redo_len = 0;
-    term.rt.editor_last_edit_kind = .none;
+    term.rt.editor_history.clear(self.allocator);
 }
 
 /// **되돌린다**(§3.3). 같은 묶음은 함께 돌아간다.
@@ -7676,11 +7652,11 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
     if (term.rt.editor_diff != null) return false;
     if (term.rt.editor_doc == null) return false;
 
-    const from_len = if (is_undo) &term.rt.editor_undo_len else &term.rt.editor_redo_len;
+    const from_len = if (is_undo) &term.rt.editor_history.undo_len else &term.rt.editor_history.redo_len;
     if (from_len.* == 0) return false;
-    const from = if (is_undo) &term.rt.editor_undo else &term.rt.editor_redo;
-    const to = if (is_undo) &term.rt.editor_redo else &term.rt.editor_undo;
-    const to_len = if (is_undo) &term.rt.editor_redo_len else &term.rt.editor_undo_len;
+    const from = if (is_undo) &term.rt.editor_history.undo else &term.rt.editor_history.redo;
+    const to = if (is_undo) &term.rt.editor_history.redo else &term.rt.editor_history.undo;
+    const to_len = if (is_undo) &term.rt.editor_history.redo_len else &term.rt.editor_history.undo_len;
 
     const group = from.*[from_len.* - 1].group;
     var restored: ?struct { items: []editor_selection.Selection, primary: usize } = null;
@@ -15708,7 +15684,7 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
 
     // ⑴ caret 을 둘째 줄 `y`(offset 14) 에 두고 `⇧⌥F` — 요청 하나 → 두 줄이 한 응답으로 바뀐다. caret 은 여전히 `y` 를 가리킨다(offset 11).
     term.rt.editor_selection = .{ .anchor_start = 14, .anchor_end = 14, .focus = 14 };
-    const undo_before = term.rt.editor_undo_len;
+    const undo_before = term.rt.editor_history.undo_len;
     try pressKey(&fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_formattings);
     try testing.expect(fx.session.editor_format.waiting);
@@ -15717,12 +15693,12 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     try testing.expectEqualStrings("int x;\nint y;\n", content(term));
     try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(u8, 'y'), content(term)[term.rt.editor_selection.?.focus]);
-    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len); // 되돌리기 **하나**
+    try testing.expectEqual(undo_before + 1, term.rt.editor_history.undo_len); // 되돌리기 **하나**
     // 되돌리기 하나로 두 줄이 다 돌아오고 caret 도 원래 글자(offset 14 의 `y`)로.
     fx.session.dispatchAppAction(.editor_undo);
     try testing.expectEqualStrings("int  x;\nint   y;\n", content(term));
     try testing.expectEqual(@as(usize, 14), term.rt.editor_selection.?.focus);
-    try testing.expectEqual(undo_before, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_before, term.rt.editor_history.undo_len);
     // ⑵ **낡은 revision 은 버리고 알린다** — 요청을 보낸 뒤 응답 전에 문서를 고치면 그 결과는 이 문서의 것이 아니다.
     fx.session.dispatchAppAction(.format_document); // 팔레트 명령 경로
     try testing.expectEqual(@as(u64, 2), fx.session.editor_lsp.sent_formattings);
@@ -15748,24 +15724,24 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expectEqual(@as(u64, 2), fx.session.editor_format.applied);
     try testing.expectEqualStrings("int x;\nint y;\n", content(term));
-    const undo_clean = term.rt.editor_undo_len;
+    const undo_clean = term.rt.editor_history.undo_len;
     fx.session.dispatchAppAction(.format_document);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expectEqual(@as(u64, 1), fx.session.editor_format.noop);
     try testing.expectEqual(@as(u64, 2), fx.session.editor_format.applied);
-    try testing.expectEqual(undo_clean, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_clean, term.rt.editor_history.undo_len);
     try testing.expect(!fx.session.chrome_host.notice.open);
     // ⑷ **겹치는 edit 은 전부 거부** — 문서는 그대로, 알림. (`BADFMT` 는 겹치는 edit 둘을 낸다.)
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
     try testing.expect(insertText(fx.session, term, "BADFMT "));
     const before_bad = try allocator.dupe(u8, content(term));
     defer allocator.free(before_bad);
-    const undo_bad = term.rt.editor_undo_len;
+    const undo_bad = term.rt.editor_history.undo_len;
     fx.session.dispatchAppAction(.format_document);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expectEqual(@as(u64, 1), fx.session.editor_format.rejected);
     try testing.expectEqualStrings(before_bad, content(term));
-    try testing.expectEqual(undo_bad, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_bad, term.rt.editor_history.undo_len);
     try testing.expect(fx.session.chrome_host.notice.open);
     try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.fmt_rejected)));
     fx.session.chrome_host.notice.dismiss();
@@ -15967,11 +15943,11 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     try testing.expect(s.rename == null and !s.chrome_host.rename_box.open);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_renames);
     try testing.expect(s.editor_rename.waiting);
-    const undo_before = term.rt.editor_undo_len;
+    const undo_before = term.rt.editor_history.undo_len;
     try testing.expect(h.settled());
     // 열린 문서: 세 자리가 한 응답으로 바뀌고 undo 하나 · 열려 있지 않은 other.c: 디스크가 바뀌었고(add_x 는 안 건드린다) · 두 파일이라 r.c 도 저장됐다.
     try testing.expectEqualStrings("int add2(int a) { return add2(a); }\nint y = add2(1);\n", h.content());
-    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_before + 1, term.rt.editor_history.undo_len);
     {
         const od = try h.otherOnDisk(allocator);
         defer allocator.free(od);
@@ -16317,7 +16293,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try testing.expect(s.editor_completion.active and !s.editor_completion.incomplete);
     try testing.expectEqualStrings("printf", completion_client.rows(s)[0].label);
     // ⑶ `↓`·`↓`(wrap)·`Enter` → `pr` 가 `printf` 로, caret 은 끝, undo 하나, 팝업 닫힘.
-    const undo_before = term.rt.editor_undo_len;
+    const undo_before = term.rt.editor_history.undo_len;
     try testing.expectEqual(@as(usize, 4), completion_client.rows(s).len); // printf · pr · lazy_import · fake_import(부분열, preselect)
     try testing.expectEqual(@as(usize, 3), s.chrome_host.suggest_box.selected); // preselect 가 처음 선택
     try pressKey(&fx, .arrow_down, .{});
@@ -16338,7 +16314,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try testing.expect(!s.editor_completion.active and !s.chrome_host.suggest_box.open);
     try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  printf\n}\n", content(term));
     try testing.expectEqual(line3 + 6, term.rt.editor_selection.?.focus);
-    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_before + 1, term.rt.editor_history.undo_len);
     try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted);
     s.dispatchAppAction(.editor_undo);
     try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  pr\n}\n", content(term));
@@ -16353,11 +16329,11 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try frame(s, leaf, term);
     try testing.expect(s.editor_completion.active);
     try testing.expectEqualStrings("fake_import", completion_client.rows(s)[s.chrome_host.suggest_box.selected].label);
-    const undo_fa = term.rt.editor_undo_len;
+    const undo_fa = term.rt.editor_history.undo_len;
     try pressKey(&fx, .tab, .{});
     try testing.expectEqualStrings("#include \"fake.h\"\nint printf(int x);\nint add(int a);\nint main() {\n  fake_import\n}\n", content(term));
     try testing.expectEqual(@as(usize, 18 + line3 + 11), term.rt.editor_selection.?.focus);
-    try testing.expectEqual(undo_fa + 1, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_fa + 1, term.rt.editor_history.undo_len);
     try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_with_additional);
     s.dispatchAppAction(.editor_undo);
     try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  fa\n}\n", content(term));
@@ -16783,11 +16759,11 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
         try testing.expectEqual(n, s.editor_lsp.sent_completion_resolves);
         try testing.expect(!s.editor_completion.resolve_waiting);
     }
-    const undo_before = term.rt.editor_undo_len;
+    const undo_before = term.rt.editor_history.undo_len;
     try pressKey(&fx, .enter, .{});
     try testing.expect(!s.editor_completion.active); // 이미 풀려 있어 기다리지 않는다
     try testing.expectEqualStrings("#include \"lazy.h\"\nint printf(int x);\nint main() {\n  lazy_import\n}\n", content(term));
-    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_before + 1, term.rt.editor_history.undo_len);
     s.dispatchAppAction(.editor_undo);
     try testing.expectEqualStrings("int printf(int x);\nint main() {\n  lazy\n}\n", content(term));
     try clearRange(s, term, line3, 4);
@@ -17866,11 +17842,11 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     const a = pointerAtOffset(term, 1).?;
     try testing.expect(s.chrome_host.context_menu.anchor_y > @as(i32, @intFromFloat(a.y)));
     // fix 를 고르면(Enter) 진단 범위 0..3 → FIXED, undo 하나, 기록이 선다, 알림.
-    const undo_before = term.rt.editor_undo_len;
+    const undo_before = term.rt.editor_history.undo_len;
     try pressKey(&fx, .enter, .{});
     try testing.expect(!s.chrome_host.context_menu.open and !s.code_action_menu);
     try testing.expectEqualStrings("FIXED x;\nint y;\n", content(term));
-    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_before + 1, term.rt.editor_history.undo_len);
     try testing.expectEqual(@as(u64, 1), s.editor_code_action.applied);
     try testing.expect(s.editor_workspace_edit.last != null);
     try testing.expect(s.chrome_host.notice.open);
@@ -26000,7 +25976,7 @@ test "UNDO10 손을 뗐다 다시 치면 묶음이 끊긴다 — 시간 경과 (
     try testing.expect(insertText(fx.session, term, "1"));
 
     // 간격을 넘긴다(경계보다 확실히 크게).
-    term.rt.editor_last_edit_ms -|= undo_group_gap_ms + 50;
+    term.rt.editor_history.last_edit_ms -|= undo_group_gap_ms + 50;
     try testing.expect(insertText(fx.session, term, "2"));
     try testing.expectEqualStrings("AB12\n", term.rt.editor_doc.?.file.content);
 
@@ -26120,7 +26096,7 @@ test "UNDO7 스택 상한을 넘겨도 죽지 않고 새지 않는다 (§3.3)" {
         breakUndoGroup(term); // 항목마다 따로 쌓이게 한다
         _ = insertText(fx.session, term, "z");
     }
-    try testing.expect(term.rt.editor_undo_len <= 2048);
+    try testing.expect(term.rt.editor_history.undo_len <= 2048);
     // 남은 것으로 되돌릴 수 있다(잘린 뒤에도 스택이 성립한다).
     try testing.expect(undoEdit(fx.session, term));
 }
@@ -26285,9 +26261,9 @@ test "OPT2 primary 를 지우면 앞의 것이 잇는다 — 제품은 primary �
 
     // **undo 묶음을 끊는다**(§3.3) — 커서가 편집 아닌 이유로 움직였다. 안 끊으면 클릭 뒤 친 글자를
     // 되돌릴 때 클릭 **전** 타이핑까지 함께 사라진다(변이 O14).
-    term.rt.editor_last_edit_kind = .insert;
+    term.rt.editor_history.last_edit_kind = .insert;
     toggleCursorAt(fx.session, term, 15);
-    try testing.expectEqual(@as(@TypeOf(term.rt.editor_last_edit_kind), .none), term.rt.editor_last_edit_kind);
+    try testing.expectEqual(@as(@TypeOf(term.rt.editor_history.last_edit_kind), .none), term.rt.editor_history.last_edit_kind);
 }
 
 test "OPT3 게이트 — 비교 뷰·읽기 전용·커서 없음 (§3.2c)" {
@@ -27710,7 +27686,7 @@ test "L2C9 되돌리기도 «범위를 안다» — 한 묶음의 앞끝과 꼬�
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     drawn.dl.deinit(allocator);
     const lines_before = term.rt.editor_lines.len;
-    const undo_before = term.rt.editor_undo_len;
+    const undo_before = term.rt.editor_history.undo_len;
 
     // **한 묶음 안에 항목 여럿** — 묶음을 안 끊고 문서의 **서로 다른 자리**를 친다. 그래야 각
     // 적용이 그 뒤를 밀고, 나이브한 합치기가 어긋난다.
@@ -27719,7 +27695,7 @@ test "L2C9 되돌리기도 «범위를 안다» — 한 묶음의 앞끝과 꼬�
     if (!insertText(fx.session, term, "WWWW")) return error.InsertRejected;
     term.rt.editor_selection = editor_selection.Selection.at(0);
     if (!insertText(fx.session, term, "VVV")) return error.InsertRejected;
-    if (term.rt.editor_undo_len < undo_before + 2) return error.FixtureNotOneGroup; // 항목이 여럿이어야 한다
+    if (term.rt.editor_history.undo_len < undo_before + 2) return error.FixtureNotOneGroup; // 항목이 여럿이어야 한다
     const typed_first = term.rt.editor_line_cols[0];
 
     // 되돌린다 — 한 번에 그 묶음 전부.
@@ -30850,12 +30826,12 @@ test "AID2 닫는 괄호를 다시 치면 지나간다 — 겹쳐 쓰지 않는�
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, term, "("));
     // `()`의 가운데에서 `)`를 치면 **하나 더 넣지 않고** caret만 넘어간다.
-    const undo_before = term.rt.editor_undo_len;
+    const undo_before = term.rt.editor_history.undo_len;
     try testing.expect(insertText(fx.session, term, ")"));
     // **undo 스택이 안 늘었다.** 문서가 안 바뀐 편집을 쌓으면 되돌리기 한 번이 아무것도 안 하는
     // 것처럼 보인다 — 묶음이 그것을 가리므로(같은 종류·500ms 안이면 앞 편집과 한 묶음이 된다)
     // **문서 상태만으로는 안 드러난다**(적대적 검증 2026-08-27).
-    try testing.expectEqual(undo_before, term.rt.editor_undo_len);
+    try testing.expectEqual(undo_before, term.rt.editor_history.undo_len);
     try testing.expectEqualStrings("()\n", term.rt.editor_doc.?.file.content);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
 
@@ -32830,9 +32806,9 @@ test "OW1 ⌥더블클릭은 커서를 더하지 않고 primary 를 낱말로 �
     // ⑷ **undo 묶음을 끊는다**(§3.3 — 커서가 편집 아닌 이유로 움직였다). `⌥` 갈래에서만 안 끊는
     //    변이가 4회차에 살아남았다: 그러면 `⌥더블클릭` 앞뒤 타이핑이 한 묶음이 되어 undo 한 번이
     //    **둘 다** 되돌린다.
-    term.rt.editor_last_edit_kind = .insert; // 앞선 타이핑이 남긴 상태
+    term.rt.editor_history.last_edit_kind = .insert; // 앞선 타이핑이 남긴 상태
     try testing.expect(fxo.optClick(false, 8, 0));
-    try testing.expectEqual(EditKind.none, term.rt.editor_last_edit_kind);
+    try testing.expectEqual(EditKind.none, term.rt.editor_history.last_edit_kind);
 
     // ⑸ **`metal_dirty` 는 여기서 안 잰다 — 잴 수가 없다.** 마지막 줄의 `self.metal_dirty = true`
     //    를 지워도 화면 표시는 그대로 선다: 바로 앞 줄의 `beginPointerGesture` 가

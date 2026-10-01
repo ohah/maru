@@ -1,8 +1,8 @@
 # 공유 문서와 독립 편집기 뷰 — 설계 제안
 
-상태: VS Code 기준 공유 뷰 UX 승인, 구현 준비 설계. 제품 미구현. 2026-10-01 main `bb0ef4948`의 코드와 기존 계약을 대조했다.
+상태: VS Code 기준 공유 뷰 UX 승인, 단일 뷰 이력 소유 분리 착수. 공유 뷰 제품 미구현. 2026-10-01 main `bb0ef4948`의 코드와 기존 계약을 대조했다.
 사용자는 설계 정리·단계 분해에 이어 2026-10-01 VS Code 기준 UX 채택을 승인했다.
-목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 제품 구현과 OS 검증은 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
+목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰 제품 구현과 실제 OS 입력 검증은 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
 [Surface 문서 identity](../editor-surface.md), [탭·split 배치](../tabs-splits-layout.md)가 소유한다.
 
 ## VS Code 정책 대조
@@ -18,8 +18,9 @@ IME 조합의 모델 반영은 현재 Maru preedit 계약과 달라 표시 목�
 한 파일의 위아래를 나란히 보고 어느 쪽에서든 편집한다. 내용·Undo/Redo·저장 상태는 공유하고,
 커서·선택·스크롤·접힘·랩은 뷰마다 독립이다. 두 개의 텍스트 복사본을 서로 동기화하지 않는다.
 
-현재 `src/platform/macos/app_session.zig`의 `TermRuntime`은 `editor_doc`, `editor_undo`,
-`editor_redo`, `editor_selection`, `editor_preedit`을 가진다. `editor.zig`가 편집·저장·해제를
+`src/platform/macos/app_session.zig`의 `TermRuntime`은 `editor_doc`, `editor_history`,
+`editor_selection`, `editor_preedit`을 가진다. 첫 이관으로 Undo/Redo의 자원은 `editor_history`에
+묶었지만 여전히 단일 Term이 그 객체를 소유한다. `editor.zig`가 편집·저장·해제를
 Term 기준으로 수행한다. `src/session/editor/delta.zig`는 변경·역연산·offset 매핑을 제공하지만
 여러 뷰에 대한 게시·Undo 그룹·IME 소유자 전환까지 제공하지 않는다.
 `DocumentRegistry`는 기존 설계의 이름이며 제품 구현이 이미 있다는 뜻이 아니다.
@@ -351,3 +352,63 @@ callback을 실행한 결과가 아니므로, 미결 정책과 단계별 제품 
 - provider 중복: Term마다 기존 `refreshAfterEdit`를 반복하는 방식은 이관 방법으로 채택하지 않는다.
 
 새 제품 코드·실패 주입·실제 IME 실행은 이번 조사에서 수행하지 않았다.
+
+
+## 단일 뷰 이관 첫 슬라이스 — 이력 소유 분리
+
+`src/session/editor/history.zig`가 역연산·선택 snapshot의 `Entry`와 Undo/Redo 저장소·
+묶음 번호·마지막 편집 종류/시각의 `State`를 소유한다. `TermRuntime.editor_history`가
+현재 이 객체를 값으로 보유한다. 문서 버퍼·저장 identity·provider는 아직 기존 Term 소유이며,
+app-global 공유 문서와 안정 handle 이관 완료를 뜻하지 않는다.
+
+기존 platform `UndoEntry`/`EditKind` 이름은 facade alias로 유지한다. 편집의 적용·push·
+Undo/Redo 실행·시계/입력 사건과 자동 괄호 추적은 기존 배선에 남는다. 새 객체의 `clear`는
+live entry만 정산하고 retained capacity도 해제한다. 기존 reset처럼 묶음 번호와 마지막
+시각을 보존하고 마지막 종류만 `none`으로 바꾼다. 500ms 묶음·2048항목 상한·기록 할당
+실패 시 편집 유지 정책은 변경하지 않는다.
+
+이력 객체의 빈 상태/해제 후 재해제, moved-out stale capacity의 이중 해제 방지와 실제
+역연산·선택 snapshot의 해제를 allocator 판정자로 확인한다. 제품 단일 뷰의 기존 Undo/저장/
+멀티커서/IME fixture도 같은 이력 객체를 소비하도록 옮긴다. 다음은 문서 버퍼와 저장 identity의
+소유 경계를 이관하고 안정 handle·마지막 연결 해제를 검증하는 슬라이스다.
+
+
+### 이력 소유 분리 적대적 검증 5회
+
+제품 공유 뷰를 실행한 결과와 구분하며, 이번 이력 분리 범위의 판정자를 대조했다.
+
+1. 소유/해제: 양쪽 스택의 live entry·비활성 alias 슬롯·retained capacity·해제 후 재사용을
+   함께 검사하도록 기존 판정자의 누락을 보완했다. redo 해제 누락과 비활성 capacity 해제
+   오류를 격리 사본에 넣으면 실제 테스트 실행이 실패한다.
+2. Undo 의미: `breakUndoGroup`, `sameUndoGroup`, `pushUndo`, `pushEntry`, `dropRedo`,
+   `stepHistory`는 필드 경로 치환 후 기존 main 함수와 정확히 같다. Entry의 역연산/선택
+   snapshot 표현도 동일하다. 이는 코드 대조이며 실행 검증의 대체물이 아니다.
+3. 실패/재사용: 준비 과정의 모든 allocation fail-index에서 정산을 검사하고 Debug와
+   ReleaseFast로 실행했다. 기존 reset이 보존하는 group 번호를 0으로 바꾸는 변이도 잡았다.
+   제품의 Undo 기록 실패 정책은 바꾸지 않았다.
+4. 입력/저장 회귀: 기존 에디터 집계로 멀티커서·조합 callback/렌더·Undo·저장/backup 회귀를
+   다시 실행한다. 실제 macOS 한국어 OS 입력기 화면은 이번 검증에 포함하지 않는다.
+5. 문서/PR/CI: 첫 슬라이스와 공유 owner 미구현 상태를 대조하고 누락된 editor 영역 라벨을
+   보완했다. Draft 조건으로 생략된 CI를 통과한 제품 검사로 간주하지 않는다. 실제 CI는
+   ready 전환 후 최신 head에서 별도로 확인한다.
+
+이번 검증에서 제품 동작의 새 결함은 발견하지 못했다. 발견한 것은 테스트 coverage와 PR
+메타데이터 누락이며, 소유 테스트의 준비 실패 unwind도 판정자 안에서 보완했다.
+
+
+### 머지 전 실제 CI에서 드러난 준비 조건 경쟁
+
+Ready 이벤트를 다시 발생시켜 실제 제품 CI를 실행하자 기존 판정자 두 개가 실패했다.
+이력 분리의 제품 동작 오류와 구분하며, 두 사례 모두 로컬의 명시적 사건 순서로 재현했다.
+
+- 갤러리 취소: 스캔을 기다리는 tick이 이미 썸네일을 수확할 수 있어 다음 tick의 pending 수가
+  반드시 4라는 전제가 틀렸다(CI: 2, 화면 썸네일을 먼저 완성한 로컬 반례: 0).
+  취소 전 검증은 4개 그대로 유지하고, 수확 없이 실제 제출을 반복해 목록을 가득 채운 뒤
+  소스를 바꾼다. 이미 완료된 썸네일이 있는 경우도 판정자에 포함한다.
+- host 선택: 30줄의 출력을 쓰는 fixture가 scrollback 20행만 기다리면 출력 중간에 선택을
+  시작한다. 25줄에서 출력을 나눠 보내 로컬에서도 잘못된 행을 비교하는 증상을 재현했다.
+  마지막 개행까지의 31논리행에서 5행 viewport를 뺀 26행을 기다리고 선택/복사 fence를 검사한다.
+
+수정은 테스트의 준비 조건이며 갤러리·PTY 제품 경로와 Undo 정책은 변경하지 않는다.
+임시 집중 build target은 조사 도구로만 사용하고 저장소에 추가하지 않는다. CI 실패 로그와
+수정 전/후 집중 실행 결과 및 독립 프로세스 20회 반복 결과는 PR 본문에 기록한다.

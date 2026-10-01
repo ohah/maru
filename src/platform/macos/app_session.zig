@@ -2537,21 +2537,9 @@ const TermRuntime = struct {
     editor_caret_rows: [][]const u32 = &.{},
     /// 위 배열이 가리키는 저장소. 커서 하나가 한 자리이므로 **커서 수**만큼이면 된다.
     editor_caret_buf: []u32 = &.{},
-    /// **undo 스택**(§3.3 — 선형. undo tree는 UI 비용 대비 이득이 작아 채택하지 않는다).
-    ///
-    /// 항목마다 **묶음 번호**를 단다. §3.3이 "연속 타이핑은 하나로 묶는다"고 했는데 두 delta를
-    /// 실제로 **합치면** 좌표를 다시 계산해야 하고 그 산술이 틀릴 여지가 크다 — 번호가 같은 것을
-    /// 연속으로 꺼내면 같은 결과를 얻으면서 delta는 손대지 않는다.
-    editor_undo: []editor_ops.UndoEntry = &.{},
-    editor_undo_len: usize = 0,
-    /// redo 스택. **새 편집은 이것을 버린다**(§3.3).
-    editor_redo: []editor_ops.UndoEntry = &.{},
-    editor_redo_len: usize = 0,
-    /// 지금 쌓고 있는 묶음 번호.
-    editor_edit_group: u32 = 0,
-    /// 마지막 편집의 종류와 시각(ms) — 묶음을 끊을지 판정한다.
-    editor_last_edit_kind: editor_ops.EditKind = .none,
-    editor_last_edit_ms: u64 = 0,
+    /// 문서 이력의 단일 소유자. 선택·IME·자동 닫기 추적은 뷰에 남는다.
+    /// 현재는 단일 뷰 runtime이 소유하며 공유 문서 owner 이관의 준비 단계다.
+    editor_history: maru.session.editor.history.State = .{},
     /// **검색 결과**를 줄별 범위로 자른 것(§5.1). `editor_selection_marks`와 자리도 축도 같고
     /// **저장소 크기만 다르다** — 선택은 이어진 하나라 줄마다 최대 하나지만, 매치는 한 줄에
     /// 여럿이다. 그 하나 때문에 선택 저장소를 재사용하지 않는다(`buf[i..i+1]`로 자르는 그 구조가
@@ -91958,8 +91946,36 @@ test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대�
         while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
     }
 
-    // ── ① 자리를 **가득** 채운 채로 소스를 바꾼다(그래야 죽은 항목이 전부를 막는다).
-    _ = session.tick() catch {};
+    // 이미 화면의 썸네일이 완료된 경우도 포함한다. 한 tick 뒤 pending 수는 캐시에 따라 달라진다.
+    const visible = agent_activity_ops.gridLayout(session);
+    try std.testing.expect(visible.first + visible.visible < session.agent_activity.count());
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending()) {
+            var warmed = true;
+            for (visible.first..visible.first + visible.visible) |n| {
+                if (session.agent_activity.tileFor(n) == null) warmed = false;
+            }
+            if (warmed) break;
+            agent_activity_ops.ensureTiles(session, visible.first, visible.visible);
+            agent_activity_ops.poll(session);
+        }
+        for (visible.first..visible.first + visible.visible) |n| {
+            try std.testing.expect(session.agent_activity.tileFor(n) != null);
+        }
+    }
+
+    // ── ① 자리를 가득 채운 뒤 바꾼다. tick은 완료본도 수확하므로 캐시가 먼저 채워지면
+    // pending이 4보다 작을 수 있다. 수확 없이 실제 제출만 반복하여 취소의 전제조건을 만든다.
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.pending_len < agent_image_decode_backend.max_inflight) {
+            for (0..session.agent_activity.count()) |n| {
+                if (session.agent_activity.pending_len == agent_image_decode_backend.max_inflight) break;
+                agent_activity_ops.ensureTiles(session, n, 1);
+            }
+        }
+    }
     try std.testing.expectEqual(
         @as(usize, agent_image_decode_backend.max_inflight),
         session.agent_activity.pending_len,

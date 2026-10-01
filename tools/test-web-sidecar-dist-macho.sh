@@ -1,7 +1,7 @@
 #!/bin/sh
 # `tools/web-sidecar-dist-macho.sh` 자체 시험(W7b) — 그 스크립트는 CEF SDK 가 있어야 도는 `web-sidecar-dist` 안에서만
 # 돌아, 결함이 formula 설치에서야 드러난다. 가짜 설치물(작은 dylib 과 `/usr/bin/true` 사본, zig 로 만든 x86_64 실행 파일)로
-# 스물세 경우를 본다. `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 zig 경로를 인자로 주고 부른다.
+# 스물다섯 경우를 본다. `zig build test-web-sidecar-dist-macho`(macOS CI 의 `test-macos-only`)가 zig 경로를 인자로 주고 부른다.
 set -eu
 zig=${1:?사용: test-web-sidecar-dist-macho.sh <zig 경로>}
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -69,6 +69,19 @@ done
 make_dist "$root/stray"
 cc -dynamiclib -o "$root/stray/Chromium Embedded Framework.framework/Resources/libextra.dylib" "$root/probe.c" -install_name ./libextra.dylib
 expect fail "Libraries 밖의 @rpath 아닌 dylib" "$root/stray" "libextra.dylib 의 ID 가 @rpath 가 아니다"
+
+# ②b Libraries 밖 dylib 의 ID 가 @rpath 이지만 코드가 바뀌어 서명이 깨졌다 — 스크립트가 고치지 않는 자리라 파일마다의 서명
+#    확인만 잡는다(번들 봉인은 재서명한 프레임워크가 지금 상태로 다시 봉인한다 — 8 차 변이 「dylib 서명 확인 건너뜀」이 살아남았다).
+make_dist "$root/stray-bad"
+cc -dynamiclib -o "$root/stray-bad/Chromium Embedded Framework.framework/Resources/libextra.dylib" "$root/probe.c" -install_name @rpath/libextra.dylib
+extra_off=$(otool -l "$root/stray-bad/Chromium Embedded Framework.framework/Resources/libextra.dylib" | awk '/sectname __text/{t=1} t&&/^ *offset /{print $2; exit}')
+printf '\000\000\000\000' | dd of="$root/stray-bad/Chromium Embedded Framework.framework/Resources/libextra.dylib" bs=1 seek="$extra_off" conv=notrunc 2>/dev/null
+expect fail "Libraries 밖 dylib 의 깨진 서명" "$root/stray-bad" "libextra.dylib 의 서명이 온전하지 않다"
+
+# ②c Libraries 밖 dylib 의 ID 가 @loader_path — Homebrew 는 @rpath 로 시작하지 않는 ID 를 고쳐 쓴다(`@*` 로 넓히는 8 차 변이가 살아남았다).
+make_dist "$root/stray-loader"
+cc -dynamiclib -o "$root/stray-loader/Chromium Embedded Framework.framework/Resources/libextra.dylib" "$root/probe.c" -install_name @loader_path/libextra.dylib
+expect fail "Libraries 밖 dylib 의 @loader_path ID" "$root/stray-loader" "libextra.dylib 의 ID 가 @rpath 가 아니다"
 
 # ③ host 에 설치 경로 rpath 가 붙었다 — Homebrew 가 고쳐 쓰다 서명을 깬다.
 make_dist "$root/rpath"
@@ -229,4 +242,4 @@ if [ "$failures" != 0 ]; then
     echo "web-sidecar-dist-macho 자체 시험: 틀림 $failures 건" >&2
     exit 1
 fi
-echo "web-sidecar-dist-macho 자체 시험: 스물세 경우 모두 맞음"
+echo "web-sidecar-dist-macho 자체 시험: 스물다섯 경우 모두 맞음"

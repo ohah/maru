@@ -67,6 +67,8 @@ jobs:
           # 저장된 툴체인 캐시는 그 PR만 읽을 수 있고, PR이 닫히면 영영 못 읽으면서 한도(10GB)만 먹는다.
           # 실측: 닫힌 PR 13개가 남긴 죽은 캐시 36개 = 4.9GB. main push는 그대로 저장해 모두가 읽는다.
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
 
       # The protected tag source selects the mise version. Capture its pathname object now so the
       # later baseline runner can reject any toolchain drift around child execution.
@@ -205,6 +207,8 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
 
       - name: Download exact-attempt signed candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -334,6 +338,8 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
 
       - name: Download exact-attempt durable-tombstone evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -395,6 +401,8 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
 
       - name: Download exact-attempt signed candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -589,6 +597,8 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
 
       - name: Download exact-attempt Notification Center evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -754,6 +764,8 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
 
       - name: Build live timing verifier
         run: mise exec -- zig build session-host-release-live-timing-verifier -Doptimize=ReleaseFast
@@ -819,6 +831,8 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
 
       - name: Build remote Release verifier
         run: mise exec -- zig build session-host-release-remote-verifier -Doptimize=ReleaseFast
@@ -900,6 +914,8 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
 
       - name: Build remote pass auditor
         run: mise exec -- zig build session-host-release-remote-pass-auditor -Doptimize=ReleaseFast

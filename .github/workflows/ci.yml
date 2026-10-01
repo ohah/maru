@@ -98,6 +98,8 @@ jobs:
           # 저장된 툴체인 캐시는 그 PR만 읽을 수 있고, PR이 닫히면 영영 못 읽으면서 한도(10GB)만 먹는다.
           # 실측: 닫힌 PR 13개가 남긴 죽은 캐시 36개 = 4.9GB. main push는 그대로 저장해 모두가 읽는다.
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
       #
       # **캐시 이름에 버전(`v2`)을 둔다.** `restore-keys` 의 마지막 줄은 해시 없는 넓은 prefix 라
@@ -222,6 +224,8 @@ jobs:
           version: 2026.2.7
           sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -336,6 +340,8 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -466,6 +472,8 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -542,6 +550,8 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       # Zig 빌드 캐시. **실측**(로컬, session host Debug): 콜드 243초 → 웜 156초(-36%),
       # 캐시 크기 local 607MB + global 48MB. 그 절감분을 655MB 전송이 먹을 수 있어 **가장 무거운 두 잡에만**
       # 먼저 넣고 실제 효과를 본 뒤 확대한다(무작정 5개 잡에 붙이면 저장소 10GB 한도에서 서로 밀어낸다).
@@ -603,6 +613,8 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -668,6 +680,8 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: false
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       # 소켓의 0700/0600 권한만 확인하면 getpeereid 하드 게이트가 죽어도 초록이다. passwordless sudo의
       # 실제 root client는 파일 권한을 통과한 뒤 커널 peer UID에서 거부되어야 한다.
       - name: 실제 타 UID peer 거부 스모크
@@ -783,6 +797,8 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       # Zig 빌드 캐시. **실측**(로컬, session host Debug): 콜드 243초 → 웜 156초(-36%),
       # 캐시 크기 local 607MB + global 48MB. 그 절감분을 655MB 전송이 먹을 수 있어 **가장 무거운 두 잡에만**
       # 먼저 넣고 실제 효과를 본 뒤 확대한다(무작정 5개 잡에 붙이면 저장소 10GB 한도에서 서로 밀어낸다).
@@ -846,6 +862,8 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       # **복원은 항상, 저장은 main push 에서만** — 이웃 잡들과 같은 규율이다. 모드가 달라 Debug 캐시를
       # 나눠 쓸 수 없으므로 이 잡만의 키 공간을 쓴다.
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -896,6 +914,8 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -966,6 +986,8 @@ jobs:
           version: 2026.2.7
           sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Zig 패키지를 저장소 사본에서 채운다(외부 다운로드 0)
+        run: sh tools/ci/prime-zig-packages.sh
       # 빌드 캐시. session host 두 잡에서 실측한 형태 그대로다(복원 5초, 빌드 311→219초).
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:

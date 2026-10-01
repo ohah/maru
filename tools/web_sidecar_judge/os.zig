@@ -31,6 +31,18 @@ pub fn alive(pid: c_int) bool {
     return std.c.kill(pid, @enumFromInt(0)) == 0;
 }
 
+/// `pid` 의 실행 인자에 `needle` 이 그대로 든 것이 있는가(`KERN_PROCARGS2` — argc, 실행 경로, 인자들이 NUL 로 이어진다).
+/// 못 읽으면 false.
+pub fn argsContain(pid: c_int, needle: []const u8) bool {
+    var buf: [65536]u8 = undefined;
+    var len: usize = buf.len;
+    const mib = [_]c_int{ 1, 49, pid }; // CTL_KERN, KERN_PROCARGS2
+    if (std.c.sysctl(&mib, mib.len, &buf, &len, null, 0) != 0 or len <= @sizeOf(c_int)) return false;
+    var parts = std.mem.splitScalar(u8, buf[@sizeOf(c_int)..len], 0);
+    while (parts.next()) |part| if (std.mem.eql(u8, part, needle)) return true;
+    return false;
+}
+
 pub fn executablePath(pid: c_int, buf: []u8) []const u8 {
     const n = proc_pidpath(pid, buf.ptr, @intCast(buf.len));
     if (n <= 0) return "";

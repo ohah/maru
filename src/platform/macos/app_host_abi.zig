@@ -2308,13 +2308,13 @@ pub export fn maru_macos_app_session_pending_clipboard(
     return @intFromEnum(Status.ok);
 }
 
-/// v197(W5c): 방금 내보낸 알림이 웹 알림이면 그 번호.
+/// v199(W5c): 방금 내보낸 알림이 웹 알림이면 그 번호.
 pub export fn maru_macos_app_session_pending_notification_web_token(session: ?*AppSession) u64 {
     const app = session orelse return 0;
     return app.notification_web_token_out;
 }
 
-/// v197(W5c): 웹 알림을 눌렀다 — 페이지의 onclick.
+/// v199(W5c): 웹 알림을 눌렀다 — 페이지의 onclick.
 pub export fn maru_macos_app_session_web_notification_click(session: ?*AppSession, surface_id: u64, token: u64) void {
     const app = session orelse return;
     session_mod.web_osr.clickWebNotification(app.allocator, surface_id, token);
@@ -4689,27 +4689,27 @@ pub export fn maru_macos_mermaid_shutdown() void {
     session_mod.mermaidCoordinator().shutdown();
 }
 
-/// v190(W3b): 앱 종료 — Chromium sidecar(웹 OSR)가 떠 있으면 shutdown 을 보내고 잠시(3 초) 기다린 뒤 남았으면 죽인다.
+/// v192(W3b): 앱 종료 — Chromium sidecar(웹 OSR)가 떠 있으면 shutdown 을 보내고 잠시(3 초) 기다린 뒤 남았으면 죽인다.
 /// 개발용 환경변수로 켜지 않았으면 무동작. sidecar 는 부모가 사라지면 스스로도 끝나지만(kqueue), 정상 종료는 열린
 /// 브라우저를 닫고 프로필을 깨끗이 쓴다. **메인 스레드 전용.**
 pub export fn maru_macos_web_osr_shutdown() void {
     session_mod.web_osr.shutdownForExit();
 }
 
-/// v191(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대. Swift 가 tick 전에 넣는다(GPU 소비자 규칙).
+/// v193(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대. Swift 가 tick 전에 넣는다(GPU 소비자 규칙).
 pub export fn maru_macos_app_session_set_osr_completed_generation(session: ?*AppSession, generation: u64) void {
     const app = session orelse return;
     app.osr_completed_generation = generation;
 }
 
-/// v191(W3c): 이번 프레임에 그릴 Chromium 탭 본문. 그린 탭에 이 세대를 기록한다. **메인 스레드 전용.**
+/// v193(W3c): 이번 프레임에 그릴 Chromium 탭 본문. 그린 탭에 이 세대를 기록한다. **메인 스레드 전용.**
 pub export fn maru_macos_app_session_osr_quads(session: ?*AppSession, frame_generation: u64, out: ?[*]session_mod.web_ops.OsrQuad, out_cap: usize) usize {
     const app = session orelse return 0;
     const buf = out orelse return 0;
     return session_mod.web_ops.osrQuads(app, frame_generation, buf[0..out_cap]);
 }
 
-/// v192(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 한 번(tick 뒤 Swift 가 가져간다).
+/// v194(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 한 번(tick 뒤 Swift 가 가져간다).
 pub export fn maru_macos_app_session_take_osr_cursor(session: ?*AppSession, out_cursor_kind: ?*i32) i32 {
     const app = session orelse return 0;
     const out = out_cursor_kind orelse return 0;
@@ -4718,7 +4718,7 @@ pub export fn maru_macos_app_session_take_osr_cursor(session: ?*AppSession, out_
     return 1;
 }
 
-/// v194(W5a): 이 창에 띄울 Chromium 탭의 대화상자·파일 선택(한 번).
+/// v196(W5a): 이 창에 띄울 Chromium 탭의 대화상자·파일 선택(한 번).
 pub export fn maru_macos_app_session_take_osr_dialog(session: ?*AppSession, out: ?*c.MaruAppHostOsrDialog) i32 {
     const app = session orelse return 0;
     const dst = out orelse return 0;
@@ -4768,7 +4768,7 @@ pub export fn maru_macos_app_session_osr_file_dialog_reply(session: ?*AppSession
     session_mod.web_ops.osrFileDialogReply(app, surface_id, token, accept != 0);
 }
 
-/// v195(W5b): 권한 요청의 답 — 답했으면 1(요청이 이미 사라졌으면 0). 모르는 값이면 「못 물음」으로 본다(차단은 Chromium 이
+/// v197(W5b): 권한 요청의 답 — 답했으면 1(요청이 이미 사라졌으면 0). 모르는 값이면 「못 물음」으로 본다(차단은 Chromium 이
 /// 기억하고 닫기는 embargo 를 쌓는다).
 pub export fn maru_macos_app_session_osr_permission_reply(session: ?*AppSession, surface_id: u64, token: u64, result: u32) i32 {
     const app = session orelse return 0;
@@ -4776,13 +4776,13 @@ pub export fn maru_macos_app_session_osr_permission_reply(session: ?*AppSession,
     return @intFromBool(session_mod.web_ops.osrPermissionReply(app, surface_id, token, value));
 }
 
-/// v196(W5b2): sheet 는 닫혔지만 답은 나중에 — 창의 표시만 푼다.
+/// v198(W5b2): sheet 는 닫혔지만 답은 나중에 — 창의 표시만 푼다.
 pub export fn maru_macos_app_session_osr_dialog_release(session: ?*AppSession, surface_id: u64, token: u64) void {
     const app = session orelse return;
     session_mod.web_ops.osrDialogRelease(app, surface_id, token);
 }
 
-/// v196(W5b2): 기억된 위치 요청 하나(sheet 없이 좌표만 구한다).
+/// v198(W5b2): 기억된 위치 요청 하나(sheet 없이 좌표만 구한다).
 pub export fn maru_macos_app_session_take_osr_location(session: ?*AppSession, out: ?*c.MaruAppHostOsrLocationRequest) i32 {
     const app = session orelse return 0;
     const dst = out orelse return 0;
@@ -4791,7 +4791,7 @@ pub export fn maru_macos_app_session_take_osr_location(session: ?*AppSession, ou
     return 1;
 }
 
-/// v196(W5b2): 위치 요청의 좌표 — 답했으면 1. 모르는 status 는 「없음」으로 본다.
+/// v198(W5b2): 위치 요청의 좌표 — 답했으면 1. 모르는 status 는 「없음」으로 본다.
 pub export fn maru_macos_app_session_osr_location_reply(session: ?*AppSession, surface_id: u64, token: u64, status: u32, latitude: f64, longitude: f64, accuracy: f64) i32 {
     const app = session orelse return 0;
     const value = std.enums.fromInt(session_mod.web_ops.LocationStatus, status) orelse .unavailable;
@@ -4803,20 +4803,20 @@ pub export fn maru_macos_web_dialog_string(which: u32, number: i64, out: ?[*]u8,
     return session_mod.web_ops.osrDialogString(which, number, dst[0..out_cap]).len;
 }
 
-/// v192(W4b): 추가 마우스 버튼(3=뒤로·4=앞으로)이 Chromium 탭 본문 위면 그 탭을 뒤로·앞으로 보내고 1.
+/// v194(W4b): 추가 마우스 버튼(3=뒤로·4=앞으로)이 Chromium 탭 본문 위면 그 탭을 뒤로·앞으로 보내고 1.
 pub export fn maru_macos_app_session_osr_aux_button(session: ?*AppSession, button_number: i32, x_px: f64, y_px: f64) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrAuxButton(app, button_number, x_px, y_px));
 }
 
-/// v193(W4c): 키 대상이 Chromium 탭인가. 판정 전에 대상을 맞춘다(키로 탭을 바꾼 직후의 키 — 적대 검증).
+/// v195(W4c): 키 대상이 Chromium 탭인가. 판정 전에 대상을 맞춘다(키로 탭을 바꾼 직후의 키 — 적대 검증).
 pub export fn maru_macos_app_session_osr_keyboard_active(session: ?*AppSession) i32 {
     const app = session orelse return 0;
     session_mod.web_ops.syncOsrKeyTarget(app);
     return @intFromBool(session_mod.web_ops.osrKeyTarget(app) != null);
 }
 
-/// v193(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.
+/// v195(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.
 pub export fn maru_macos_app_session_osr_key(session: ?*AppSession, phase: i32, key_code: u32, character: u32, unmodified: u32, mods: i32) i32 {
     const app = session orelse return 0;
     const key: session_mod.web_ops.OsrKey = .{
@@ -4828,7 +4828,7 @@ pub export fn maru_macos_app_session_osr_key(session: ?*AppSession, phase: i32, 
     return @intFromBool(session_mod.web_ops.osrKey(app, phase, key));
 }
 
-/// v193(W4c): 메뉴 편집 명령을 키 대상 Chromium 탭에.
+/// v195(W4c): 메뉴 편집 명령을 키 대상 Chromium 탭에.
 pub export fn maru_macos_app_session_osr_edit(session: ?*AppSession, command: i32) i32 {
     const app = session orelse return 0;
     if (command < 0 or command > 255) return 0;
@@ -4836,13 +4836,13 @@ pub export fn maru_macos_app_session_osr_edit(session: ?*AppSession, command: i3
     return @intFromBool(session_mod.web_ops.osrEdit(app, kind));
 }
 
-/// v193(W4c): 입력기의 키 동작 명령(deleteBackward 밖).
+/// v195(W4c): 입력기의 키 동작 명령(deleteBackward 밖).
 pub export fn maru_macos_app_session_ime_command(session: ?*AppSession) void {
     const app = session orelse return;
     _ = session_mod.web_ops.osrImeCommand(app, false);
 }
 
-/// v193(W4c): Zig 가 끝낸 조합을 입력기 세션에서도 버리라는 요청(한 번).
+/// v195(W4c): Zig 가 끝낸 조합을 입력기 세션에서도 버리라는 요청(한 번).
 pub export fn maru_macos_app_session_take_osr_discard_marked(session: ?*AppSession) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.takeOsrDiscardMarked(app));

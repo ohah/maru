@@ -2,7 +2,7 @@
 //!
 //! ① CEF 를 모르는 부분(명령 상자·명령 처리)의 시험은 **기본 `test`** 에 건다. SDK 없이 어느 호스트에서나 돈다.
 //! ② `maru-web-host`·`maru-web-helper`·판정자는 `-Dcef-sdk=<경로>` 가 있을 때만 `web-sidecar` 스텝이 만든다.
-//!    CEF 는 프로젝트 규칙 「의존성」 예외 ③ 이라 기본 빌드·`mise run check` 는 SDK 없이 돈다. SDK 는
+//!    CEF 는 프로젝트 규칙 「의존성」 예외 ④ 이라 기본 빌드·`mise run check` 는 SDK 없이 돈다. SDK 는
 //!    `tools/cef-sdk-fetch.sh` 가 해시를 확인해 캐시에 푼다(`zig fetch` 는 .tar.bz2 를 못 푼다 — 실측).
 
 const std = @import("std");

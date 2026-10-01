@@ -7,6 +7,9 @@ const std = @import("std");
 const mach = @import("mach.zig");
 
 pub const message_id: i32 = 0x4D57_4252; // 'MWBR'
+/// 팝업 위젯(`<select>` 목록 등)의 링(W6a — D4). 팝업은 본 화면과 다른 compositor 가 따로 그려 크기·세대가 따로라 링도 따로
+/// 둔다 — 본문 배치는 같고 머리 id 로만 가른다.
+pub const popup_message_id: i32 = 0x4D57_4250; // 'MWBP'
 pub const slot_count = 3;
 
 /// 본문 인라인 값. C 헤더의 4 바이트 정렬(pack(4))에 맞춰 전부 u32 다.

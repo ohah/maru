@@ -69,6 +69,8 @@ pub const Painted = enum {
 pub const Producer = struct {
     browser: u64,
     scale: f32,
+    /// 알림 머리 id — 본 화면 `ring_message.message_id`, 팝업 `ring_message.popup_message_id`(W6a).
+    message_id: i32 = ring_message.message_id,
     /// maru 가 받은 링.
     ring: ?Ring = null,
     /// 만들었지만 아직 못 알린 링. 그리기는 여기로 가고, 알리면 `ring` 이 된다.
@@ -105,7 +107,7 @@ pub const Producer = struct {
         const fresh = if (self.pending) |*fresh| fresh else return .delivered;
         const to = channel orelse return .pending;
         if (now_ms < self.retry_after_ms) return .pending;
-        announce(to, self.browser, fresh) catch {
+        announce(to, self.browser, self.message_id, fresh) catch {
             // 한 링의 첫 실패만 알린다 — 대기열을 채우는 공격 동안 재시도마다 찍지 않게.
             if (self.retry_after_ms == 0) std.debug.print("maru-web-host: ring for browser {d} (generation {d}) is waiting — the frame channel did not take it, retrying every {d} ms\n", .{ self.browser, fresh.generation, retry_interval_ms });
             self.send_failures += 1;
@@ -185,14 +187,14 @@ fn makeRing(generation: u32, w: u32, h: u32, scale: f32) error{RingFailed}!Ring 
     return ring;
 }
 
-fn announce(channel: *const Channel, browser: u64, ring: *Ring) error{SendFailed}!void {
+fn announce(channel: *const Channel, browser: u64, message_id: i32, ring: *Ring) error{SendFailed}!void {
     var message: ring_message.Message = std.mem.zeroes(ring_message.Message);
     message.header = .{
         .bits = mach.bits(mach.type_copy_send, 0) | mach.bits_complex,
         .size = @sizeOf(ring_message.Message),
         .remote = channel.port,
         .local = mach.null_port,
-        .id = ring_message.message_id,
+        .id = message_id,
     };
     message.body = .{ .descriptor_count = ring_message.slot_count + 1 };
     for (0..ring_message.slot_count) |i| {

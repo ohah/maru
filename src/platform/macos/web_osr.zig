@@ -95,6 +95,8 @@ const Surface = struct {
     composing: bool = false,
     /// 마지막 IME 조합 사각형(view DIP — `ime_range`). 후보창 위치(`firstRect`)에 쓴다.
     ime_bounds: ?ws.message.Rect = null,
+    /// 열린 팝업 위젯(`<select>` 목록 등)의 view DIP 사각형(W6a — D4). 닫혔으면 null. 그리기는 W6a②.
+    popup_bounds: ?ws.message.Rect = null,
     /// 답을 기다리는 대화상자·파일 선택(W5a)·권한 요청(W5b) — 온 차례대로.
     dialogs: std.ArrayList(Dialog) = .empty,
     /// 아직 maru 알림으로 내보내지 않은 웹 알림(W5c) — 온 차례대로, 탭마다 `max_notes_per_surface` 까지(넘치면 오래된 것부터 버린다).
@@ -1537,6 +1539,11 @@ fn receiveRings() void {
         switch (received) {
             .rejected => rejected_rings += 1,
             .ring => |ring| {
+                // 팝업 위젯의 링(W6a) — 그리기는 W6a②. 그때까지 받은 권리를 바로 놓는다(새지 않게).
+                if (ring.popup) {
+                    ring.release();
+                    continue;
+                }
                 const app_ring: AppRing = .{ .generation = ring.generation, .control = @ptrFromInt(ring.control_address), .width = ring.width, .height = ring.height, .ring = ring };
                 const s = surfaces.getPtr(ring.browser) orelse {
                     app_ring.release();
@@ -1662,6 +1669,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .ime_range => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.ime_bounds = v.bounds;
+        },
+        .popup_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
+            s.popup_bounds = if (v.visible) v.bounds else null;
         },
         .js_dialog => |v| {
             const kind: DialogKind = switch (v.kind) {

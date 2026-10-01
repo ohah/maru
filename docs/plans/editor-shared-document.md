@@ -5,6 +5,14 @@
 아래 미결 UX의 승인을 뜻하지 않는다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
 [Surface 문서 identity](../editor-surface.md), [탭·split 배치](../tabs-splits-layout.md)가 소유한다.
 
+## VS Code 정책 대조
+
+사용자 요청에 따라 [VS Code 정책 대조](../editor-shared-document-vscode.md)에 모든 미결 항목의
+1차 근거·권장안·확인 한계를 기록했다. 확인한 source commit은 해당 문서에 고정한다.
+공유 Undo와 포커스 뷰의 선택 복원, 비활성 좌표 추종, 초기 상태 복사·마지막 닫기·저장 순서가
+주요 UX 기준이다. 뷰 전환이 언제나 Undo stop이라는 주장은 소스 근거가 부족해 유지하지 않는다.
+IME 조합의 모델 반영은 현재 Maru preedit 계약과 달라 표시 목표와 구현 방법을 구분한다.
+
 ## 목표와 현재 차이
 
 한 파일의 위아래를 나란히 보고 어느 쪽에서든 편집한다. 내용·Undo/Redo·저장 상태는 공유하고,
@@ -99,8 +107,8 @@ version·백업 debounce·구문 provider 편집 통지는 문서/해당 provide
 좌우 두 슬롯을 일반 pane 뷰 저장소로 그대로 사용하지 않는다. 두 pane 검색→본문 편집→
 다른 뷰 재검색→닫기→⌘G에서 query·count·highlight·marker·revision을 판정한다.
 
-Undo/Redo는 문서의 실제 편집 순서를 따른다. 뷰 전환은 연속 타이핑 그룹의 경계로 삼는 것을
-제안한다. Undo 호출 뷰의 선택 복원과 다른 뷰의 좌표 매핑 규칙을 먼저 고정한다.
+Undo/Redo는 문서의 실제 편집 순서를 따른다. 뷰 전환의 Undo 그룹 경계는 VS Code
+교차 뷰 입력 동작 대조 후 결정한다. focus setter만으로 항상 그룹을 끊는다는 근거는 없다. Undo 호출 뷰의 선택 복원과 다른 뷰의 좌표 매핑 규칙을 먼저 고정한다.
 한 뷰의 Undo가 다른 뷰에서 한 편집을 되돌릴 수 있으므로 이를 테스트와 사용자 동작에 드러낸다.
 
 ## IME와 비동기 요청

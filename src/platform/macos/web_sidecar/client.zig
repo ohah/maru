@@ -8,9 +8,9 @@
 //! 임시 안전 기본값으로 억제한다 — `alert` 는 바로 돌아오고 `confirm`·`prompt` 는 취소로 끝난다. maru 가 대화상자를
 //! 그리는 것은 W5(C6)다. 떠나기 확인(beforeunload)은 떠나기로 답한다.
 //!
-//! **우클릭 메뉴도 막는다**(W4): 창 없는 브라우저라도 기본 우클릭 메뉴는 네이티브 메뉴다 — sidecar 가 maru 밖에 메뉴를
-//! 띄우고 UI 스레드가 메뉴 루프에 묶인다. 메뉴 항목을 비워 띄우지 않는다. 페이지의 `contextmenu` 이벤트는 그대로 간다.
-//! maru 가 메뉴를 그리는 것은 W6(D5)다.
+//! **우클릭 메뉴는 띄우지 않는다**(W4): 메뉴 항목을 비운다. 비우지 않아도 창 없는 모드에서 부모 view 가 없으면 CEF 의 Mac
+//! 메뉴는 뜨지 않는다(`menu_runner_mac.mm` — W6 착수 전 조사; 처음 적은 「UI 스레드가 메뉴 루프에 묶인다」는 이 설정에서는
+//! 틀렸다). 페이지의 `contextmenu` 이벤트는 그대로 간다. maru 의 메뉴는 W6c(D5 — NSMenu)다.
 //!
 //! **제목은 조절한다**: 같은 제목은 다시 안 보내고, 간격 안의 변경은 마지막 것만 보낸다(`title_gate.zig`).
 
@@ -207,21 +207,34 @@ fn onAcceleratedPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_
 
 /// 팝업 위젯(`<select>` 목록 등)이 열리거나 닫혔다(W6a). 열림은 바로 뒤의 `on_popup_size` 가 사각형과 함께 알린다(CEF 는 같은
 /// 자리에서 둘을 잇달아 부른다 — 착수 전 실측). 닫힘은 여기서 알리고 팝업 링을 버린다.
+/// CEF 는 한 번도 보이지 않은 팝업이 사라질 때도 `show = 0` 을 부른다(`CancelWidget` 은 보였는지 보지 않는다 — 적대 검증 2 차).
+/// 열린 팝업이 없으면 알리지 않는다. 다른 팝업이 그 순간 보이고 있을 일은 드물어 그때는 그대로 「닫힘」으로 알린다 — 그러면
+/// 그 팝업은 다시 열 때까지 보이지 않는다(`popup_open` 이 꺼져 그림도 버린다). CEF 154 는 렌더러가 죽거나 화면 배율이 바뀌어도 이것으로 팝업을 닫는다(W6a① 적대
+/// 검증 4 차 실측 — 판정 `popup-renderer-gone`·`popup-rescale`, 렌더러 쪽은 순서를 보지 않는다).
 fn onPopupShow(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, show: c_int) callconv(.c) void {
     defer object.releaseArg(browser);
-    if (show != 0) return;
     const entry = entryOf(browser) orelse return;
+    const was_open = entry.popup_open;
+    entry.popup_open = show != 0;
+    if (show != 0) return;
     browsers.dropPopup(entry);
-    browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = false } }) catch {};
+    // 이미 닫혔으면(렌더러 사망 쪽이 먼저 닫았거나, 한 번도 보이지 않은 팝업의 `CancelWidget`) 다시 알리지 않는다(W6a① 적대 검증 6 차 —
+    // CEF 154 는 렌더러가 죽을 때 이것을 먼저 불러 그쪽 순서는 실측되지 않았다).
+    if (was_open) browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = false } }) catch {};
 }
 
-/// 팝업 위젯의 사각형(view DIP). 열릴 때와 옮겨질 때 온다.
+/// 팝업 위젯의 사각형(view DIP). CEF 154 구현에서는 열릴 때 한 번 온다(`InitAsPopup` 에서만 부름 — 헤더는 옮기거나 크기를 바꿀
+/// 때도 부른다고 적는다, W6a① 적대 검증). 다시 와도 같은 첫 세대를 보낸다. 0 크기 팝업은 알리지 않는다.
 fn onPopupSize(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, rect: [*c]const c.cef_rect_t) callconv(.c) void {
     defer object.releaseArg(browser);
     const entry = entryOf(browser) orelse return;
+    // 열림(`show(1)`) 없이 온 사각형은 알리지 않는다 — 알리면 닫힘은 `popup_open` 이 거짓이라 가지 않아 앱에 옛 사각형이 남는다
+    // (W6a① 적대 검증 7 차 — CEF 154 는 `show(1)` 직후에 부르므로 닿지 않는 방어).
+    if (!entry.popup_open) return;
     if (rect == null or rect.*.width <= 0 or rect.*.height <= 0) return;
     const bounds: protocol.message.Rect = .{ .x = rect.*.x, .y = rect.*.y, .width = @intCast(rect.*.width), .height = @intCast(rect.*.height) };
-    browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = true, .bounds = bounds } }) catch {};
+    // 앞 팝업은 이미 닫혀 링을 버렸다(CEF `InitAsPopup` 이 새 팝업의 알림보다 먼저 앞 것을 닫는다) — 이 팝업의 링은 이 세대부터다.
+    browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = true, .bounds = bounds, .first_generation = entry.popup_generation } }) catch {};
 }
 
 fn onTitleChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t, title: [*c]const c.cef_string_t) callconv(.c) void {
@@ -309,6 +322,15 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
         c.TS_INTEGRITY_FAILURE => .integrity_failure,
         else => .abnormal,
     };
+    // CEF 154 는 렌더러가 죽으면 열린 팝업을 스스로 닫는다(판정 `popup-renderer-gone`). 그렇지 않은 버전이어도 죽은 페이지 위에
+    // 옛 목록이 남지 않게 여기서도 닫는다 — 방어다. 판정에서는 CEF 의 `show(0)` 이 먼저 와 이 줄이 쓰이지 않는 것으로 보인다
+    // (추론 — 이것이 없던 4 차에도 닫힘이 왔고, `show(0)` 쪽 가드를 뺀 변이도 닫힘 1 번이었다). 둘 다 `popup_open` 을 보고
+    // 끄므로 코드상 닫힘 알림은 한 번이다(W6a① 적대 검증 5~7 차).
+    if (entry.popup_open) {
+        entry.popup_open = false;
+        browsers.dropPopup(entry);
+        browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = false } }) catch {};
+    }
     browsers.state.writer.send(.{ .renderer_gone = .{ .browser = entry.id, .reason = reason } }) catch {};
     dialogs.rendererGone(entry.id);
     permissions.rendererGone(entry.id);

@@ -157,7 +157,10 @@ pub const Producer = struct {
             if (ring.fits(w, h, self.scale)) return ring;
         }
         self.pending = try makeRing(self.next_generation, w, h, self.scale);
-        self.next_generation += 1;
+        // 넘치면 1 부터 다시 센다 — 0 은 「세대 없음」(닫힌 팝업의 `first_generation`)이고, ReleaseFast 의 `+=` 넘침은 정의되지
+        // 않은 동작이다(W6a① 적대 검증 3 차 — 40 억 번 넘게 그려야 닿는다).
+        self.next_generation +%= 1;
+        if (self.next_generation == 0) self.next_generation = 1;
         self.retry_after_ms = 0;
         return &self.pending.?;
     }
@@ -270,6 +273,19 @@ test "a failed announce to a full queue hands back every right — no port name 
     // 실패한 동안 링을 새로 만들지 않았다 — 세대는 그대로 1.
     try std.testing.expectEqual(@as(u32, 1), producer.pending.?.generation);
     producer.deinit();
+}
+
+test "the generation wraps past the maximum to 1, never 0 — 0 means no generation (W6a)" {
+    var producer: Producer = .{ .browser = 1, .scale = 1, .next_generation = std.math.maxInt(u32) };
+    defer producer.deinit();
+    const source = try iosurface.create(8, 8);
+    defer iosurface.release(source);
+    _ = try producer.paint(null, source, 10);
+    try std.testing.expectEqual(std.math.maxInt(u32), producer.pending.?.generation);
+    try std.testing.expectEqual(@as(u32, 1), producer.next_generation);
+    producer.scale = 2;
+    _ = try producer.paint(null, source, 20);
+    try std.testing.expectEqual(@as(u32, 1), producer.pending.?.generation);
 }
 
 test "a pending ring is retried only after the interval, and a scale-only change makes a new generation" {

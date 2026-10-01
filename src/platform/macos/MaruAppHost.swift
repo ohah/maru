@@ -289,8 +289,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     /// W4c: Zig 가 이미 조합을 끝냈다(Chromium 탭 키 대상이 바뀜) — 입력기 세션의 조합만 버린다(다시 확정하지 않는다).
     func discardOsrMarkedText() {
         guard hasMarkedText() else { return }
-        inputContext?.discardMarkedText()
+        // 버퍼를 먼저 비운다 — 입력기가 discard 중에 `unmarkText` 를 동기로 불러도 끝난 조합을 새 키 대상에 다시 보내지 않게
+        // (`commitMarkedTextIfComposing` 과 같은 순서, main 기준 리베이스 적대 검증).
         markedTextBuffer = ""
+        markedSelection = NSRange(location: 0, length: 0)
+        pendingUnmarkText = nil
+        editorHanjaCandidateActive = false
+        inputContext?.discardMarkedText()
     }
 
     func commitMarkedTextIfComposing() {
@@ -493,6 +498,17 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     func unmarkText() {
         imeLog("unmarkText")
         editorHanjaCandidateActive = false
+        // W4c: Chromium 탭은 조합 지우기만 보낸다 — 판정은 Zig(`web.zig` `osrImeMarked`·`flushUnmark`)가 한다: 트랜잭션 밖이면
+        // 미뤘다가 곧 오는 확정 글이 조합을 대신하고, 안이면 트랜잭션 끝에 정한다. 아래 터미널 경로의 「keyDown 밖이면 즉시 확정」
+        // 을 타면(웹 갈래는 `interpretingIMEKey` 를 세우지 않는다) 확정이 두 번 간다 — 예: 후보창에서 고른 한자 앞에 「한」이
+        // 함께 들어간다(main 기준 리베이스 적대 검증).
+        if controller?.osrKeyboardActive == true {
+            markedTextBuffer = ""
+            markedSelection = NSRange(location: 0, length: 0)
+            pendingUnmarkText = nil
+            controller?.imeMarked("")
+            return
+        }
         if let state = controller?.editorIMEState() {
             if state.marked.length > 0, let text = controller?.editorIMESubstring(state.marked)?.text {
                 controller?.imeInsert(text, replacementRange: NSRange(location: NSNotFound, length: 0))
@@ -8521,7 +8537,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // ime keyCode 단계… — 입력기 없이 한 트랜잭션(osr_key 쥐기 → ime_begin → 단계들 → ime_end → 뗌)을 돈다. 사용자
                 // 입력 소스(한글·영문)에 따라 합성 키의 결과가 갈리지 않게 입력기 콜백을 직접 부른다(진짜 입력기는 W4d
                 // 시험기). 단계: `k:글자`(키 자체의 글자 — 없으면 첫 `i:`) · `i:글`(insertText) · `m:글`(setMarkedText, `m:-` 는
-                // 빈 조합) · `c:셀렉터`(doCommand) · `d`(deleteBackward). 글은 U+ 16진을 `,` 로 이은 것.
+                // 빈 조합) · `c:셀렉터`(doCommand) · `d`(deleteBackward) · `u`(unmarkText). 글은 U+ 16진을 `,` 로 이은 것.
                 // 키 이벤트의 글자(진짜 keyDown 도 characters 를 싣는다 — 없으면 페이지가 key 를 못 정한다): `k:글자` 단계가
                 // 있으면 그것, 없으면 첫 `i:` 글.
                 let keyStep = line.dropFirst(2).first { $0.hasPrefix("k:") } ?? line.dropFirst(2).first { $0.hasPrefix("i:") }
@@ -8545,10 +8561,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                                 continue
                             } else if step == "d" {
                                 terminal.doCommand(by: #selector(NSStandardKeyBindingResponding.deleteBackward(_:)))
+                            } else if step == "u" {
+                                terminal.unmarkText()
                             }
                         }
                     }
                     terminal.keyUp(with: up)
+                }
+            case "imeout" where line.count >= 2:
+                // imeout 단계… — 키 없이, 트랜잭션 밖에서 입력기 콜백만(후보창을 마우스로 고를 때처럼). 단계는 `ime` 와 같은
+                // `i:`·`m:`·`u`(unmarkText).
+                if let window, let terminal = Self.firstTerminalView(in: window.contentView) {
+                    for step in line.dropFirst(1) {
+                        let text = String(step.dropFirst(2)).split(separator: ",").map { Self.testScalar(String($0)) }.joined()
+                        if step.hasPrefix("i:") {
+                            terminal.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+                        } else if step.hasPrefix("m:") {
+                            terminal.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0),
+                                                   replacementRange: NSRange(location: NSNotFound, length: 0))
+                        } else if step == "u" {
+                            terminal.unmarkText()
+                        }
+                    }
                 }
             default:
                 break

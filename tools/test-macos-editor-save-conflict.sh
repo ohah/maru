@@ -113,7 +113,14 @@ run_scenario() {
             waited=$((waited + 1))
         done
         # **다른 프로세스가 쓴다** — 앱이 쓰면 그것은 "밖에서"가 아니다.
-        printf '%s' "$external" > "$document"
+        #
+        # ⚠️ **한 번에 바꾼다(임시 파일 → `mv`).** `>` 는 파일을 먼저 비우고 나서 쓴다 — 드라이버가 그
+        # 틈에 읽으면 **빈 내용**을 「밖에서 바뀐 값」으로 잡고, 곧이어 디스크의 진짜 내용과 달라
+        # `overwrote_external_change` 로 실패한다. 앱은 한 글자도 안 썼는데도(2026-09-29 main CI 실측:
+        # 실패 아티팩트의 doc.txt 가 밖에서 쓴 바이트 그대로였다). 제품의 충돌 판정은 내용 해시 CAS 라
+        # 제자리 쓰기와 교체가 같은 뜻이다.
+        printf '%s' "$external" > "$document.tmp"
+        mv -f "$document.tmp" "$document"
         printf '%s' "$external" > "$reference"
         # ⚠️ **「다시 읽기」가 몰래 쓰는 것은 내용으로 안 보인다** — 다시 읽은 직후의 버퍼는 디스크와
         # 같은 바이트라, 그것을 되쓰면 파일은 글자 하나 안 바뀐다. 그래서 **쓴 시각**을 본다(소수점

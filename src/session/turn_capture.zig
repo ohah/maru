@@ -75,7 +75,7 @@ pub const Fold = enum { too_large, binary };
 /// 한 시점의 파일 상태.
 ///
 /// **`absent`·`empty` 를 가른다.** `Write` 로 새 파일을 만드는 흐름에서 「없었다」와 「0바이트로
-/// 있었다」는 다른 사실이다(`editor.zig` 가 `readFileAlloc` 이 빈 파일을 `null` 로 주는 함정을 이미
+/// 있었다」는 다른 사실이다(`editor/mod.zig` 가 `readFileAlloc` 이 빈 파일을 `null` 로 주는 함정을 이미
 /// 적어 뒀다). 같은 규율이 `Snapshot.files_known` 의 「0과 모름은 다르다」다.
 pub const Side = union(enum) {
     absent,

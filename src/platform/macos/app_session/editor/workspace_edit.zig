@@ -9,10 +9,10 @@
 
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
+const editor_ops = @import("mod.zig");
 const lsp = maru.session.editor.lsp;
 const delta_mod = maru.session.editor.delta;
 const editor_selection = maru.session.editor.selection;

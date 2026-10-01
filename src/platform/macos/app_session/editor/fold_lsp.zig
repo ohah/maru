@@ -6,11 +6,11 @@
 //! 요청은 `11e8+seq`(§8.2a id 표). 서버가 없거나 provider 가 없으면 아무것도 안 한다 — 1·2층만(저하, 실패 아님).
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_lsp = @import("editor_lsp.zig");
-const editor = @import("editor.zig");
+const editor_lsp = @import("lsp.zig");
+const editor = @import("mod.zig");
 const lsp = maru.session.editor.lsp;
 const fold_range = lsp.fold_range;
 

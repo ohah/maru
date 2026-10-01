@@ -1,5 +1,5 @@
 //! **미저장 편집이 크래시를 넘어 살아남는다 — 파일을 여는 쪽**(U4a).
-//! 계약은 [문서 모델](../../../../docs/native-editor-document-model.md) §3.10 이 소유하고,
+//! 계약은 [문서 모델](../../../../../docs/native-editor-document-model.md) §3.10 이 소유하고,
 //! **레코드의 모양·이름·주기 정책은 L2 `session.editor.backup`** 가 소유한다. 이 파일이 아는 것은
 //! 셋뿐이다 — 어느 Term 이 대상인가 · 언제 시계가 만기인가 · 어디에 쓰는가.
 //!
@@ -13,10 +13,10 @@
 const std = @import("std");
 const maru = @import("maru");
 
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
+const editor_ops = @import("mod.zig");
 const editor_selection = maru.session.editor.selection;
 const backup = maru.session.editor.backup;
 

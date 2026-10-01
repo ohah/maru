@@ -5,10 +5,10 @@
 //! 거짓말이다(색과 갈리는 자리 — semantic 2층은 민다). 1층(tree-sitter)은 증분 파싱이라 즉시 옳으므로 **그 사이는 1층**이다.
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_lsp = @import("editor_lsp.zig");
+const editor_lsp = @import("lsp.zig");
 const syntax = @import("syntax");
 const lsp = maru.session.editor.lsp;
 const symbols = lsp.symbols;

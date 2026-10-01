@@ -6,7 +6,7 @@
 const std = @import("std");
 const maru = @import("maru");
 const syntax = @import("syntax");
-const editor_syntax = @import("../app_session/editor_syntax.zig");
+const editor_syntax = @import("../app_session/editor/syntax.zig");
 const lowering = @import("metal_lowering.zig");
 
 /// **Lab 안의 탭 폭 단일 출처.** 제품은 `Term.rt.editor_tab_width`를 쓰는데 Lab에는 Term이 없다.

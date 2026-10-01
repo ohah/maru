@@ -8,13 +8,13 @@
 
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
-const editor_lsp = @import("editor_lsp.zig");
-const pane_ops = @import("pane.zig");
-const term_ops = @import("term.zig");
+const editor_ops = @import("mod.zig");
+const editor_lsp = @import("lsp.zig");
+const pane_ops = @import("../pane.zig");
+const term_ops = @import("../term.zig");
 const lsp = maru.session.editor.lsp;
 
 pub const State = struct {

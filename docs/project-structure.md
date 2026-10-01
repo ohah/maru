@@ -189,7 +189,11 @@ src/
                         `maybeDebugOpenSettings`였지만 하는 일이 세팅이 아니라 시나리오 강제라, 제품 경로를 읽는
                         사람이 이 분량을 지나지 않도록 따로 뺐다). 각 파일은 `*AppSession`을 받는
                         free fn 모음이고, `app_session.zig`에는 ABI가 직접 부르는 진입을 얇은 facade로 남긴다.
-                        **F 시리즈가 아닌 파일도 이 폴더에 산다** — editor.zig·editor_diff.zig(네이티브 편집기의
+                        editor/는 네이티브 편집기 macOS 배선을 묶는다. 진입은 mod.zig이고 completion.zig·
+                        lsp.zig·backup.zig·untitled_save.zig 등은 폴더명과 겹치는 editor_ 접두사를 쓰지 않는다.
+                        문서/검색/Undo 정책은 session/editor/, 본문 화면 구성은 chrome/components/editor_view/에
+                        유지한다. 파일 배치만 묶으며 AppSession 의존성을 공통 코어로 옮기는 단계가 아니다.
+                        **F 시리즈가 아닌 파일도 이 폴더에 산다** — editor/{mod,diff}.zig(네이티브 편집기의
                         platform 쪽 절반 — 파일 읽기/권한 판정, diff Term 배선. docs/plans/native-editor.md가 단계를
                         소유한다)와 scm_dock.zig(소스 컨트롤 도크의 호스트 배선 — `session/scm_view.zig`의 행 모델을
                         component props로 투영하고 포인터를 그 tree로 라우팅한다. Session Dock과 같은 경로를 쓴다)는

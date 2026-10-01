@@ -67,7 +67,7 @@ const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const agent_ops = @import("agent.zig");
 const git_ops = @import("git.zig");
-const editor_ops = @import("editor.zig");
+const editor_ops = @import("editor/mod.zig");
 const settings_ops = @import("settings.zig");
 
 /// 창 바닥 상태표시줄의 backing px 높이. `dock_layout`이 이 값으로 작업영역을 깎고(S1 seam), 렌더러가

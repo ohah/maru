@@ -35,7 +35,7 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 - **코어는 GitHub 태그 tarball이 아니라 crates.io 소스 배포본을 받는다**(`build.zig.zon`이 근거를 갖는다). 상류 저장소의 `build.zig`가 Zig 0.16에서 제거된 API를 부르는데 `lazyDependency`는 그 파일을 **실행**하므로, 우리가 거기서 아무것도 안 가져와도 빌드가 죽는다. crates.io 배포본에는 `build.zig`가 없고 `src/`는 두 배포본이 동일하다 — **같은 코드, 같은 MIT 라이선스**이며 경로 접두사(`lib/`)만 다르다.
 - **번들 언어는 명시 목록으로 관리한다** — grammar마다 `parser.c`가 붙어 배포물이 커지므로 열린 집합으로 두지 않는다. 목록과 추가 절차는 [네이티브 편집기 구현 계획](plans/native-editor.md)이 소유한다.
 - **grammar를 추가하는 PR은 이 표에 행을 더한다.** 라이선스 확인 없이 grammar를 넣지 않는다.
-- **라이선스 전문을 동봉한다 — 배포물에 들어간다.** `app_session/editor_syntax.zig`가 `syntax` 모듈을 `@import`하면서 코어와 grammar가 exe에 링크됐다(`nm` 실측: tree-sitter 심볼이 0개 → 8개). 폰트가 `Resources/Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리에 넣는다 — `Resources/Licenses/tree-sitter-LICENSE`와 `tree-sitter-<언어>-LICENSE` **열여덟 개**다(2026-08-29 실측: 번들에 18개 파일).
+- **라이선스 전문을 동봉한다 — 배포물에 들어간다.** `app_session/editor/syntax.zig`가 `syntax` 모듈을 `@import`하면서 코어와 grammar가 exe에 링크됐다(`nm` 실측: tree-sitter 심볼이 0개 → 8개). 폰트가 `Resources/Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리에 넣는다 — `Resources/Licenses/tree-sitter-LICENSE`와 `tree-sitter-<언어>-LICENSE` **열여덟 개**다(2026-08-29 실측: 번들에 18개 파일).
 - **목록을 손으로 적지 않는다.** `build.zig`의 grammar 표가 복사 명령과 **확인 목록을 함께** 만든다 — 손으로 적으면 언어를 늘릴 때 한쪽만 빠지고, 그 누락은 아무 테스트도 안 깨뜨린다(재배포 의무의 성질이다). 빠지면 번들이 `error: bundled code library license missing or empty: … — 재배포 의무`로 **소리 내어 죽는다**.
 - **한 저장소가 두 grammar 를 내면 라이선스는 하나다**(TypeScript/TSX). 표가 dep 단위로 중복을 걷는다.
 - **wuffs 는 `.app` 뿐 아니라 wasm 배포물에도 들어간다.** `packages/core/wasm/maru-vt.wasm` 이 PNG 디코더를 품는다(실측 brotli 53 KB → 88 KB) — 그 배포 경로의 attribution 은 웹 패키지 쪽 라이선스 표기가 함께 진다. 동봉 파일은 `Resources/Licenses/wuffs-LICENSE` 하나이고, 그 한 파일에 MIT·Apache-2.0 **전문이 둘 다** 들어 있어 어느 쪽을 택하든 의무가 끝난다.

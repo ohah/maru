@@ -434,7 +434,7 @@ pub const Provider = struct {
     /// 시계 읽기는 I/O 가 아니다 — std 구현이 그것을 그대로 말한다(`Io/Threaded.zig`의 `now`가
     /// `userdata` 를 받자마자 `_ = t;` 로 버리고 `nowWindows`/`nowPosix` 로 간다, 0.16 실측).
     /// 즉 어느 인스턴스로 읽어도 같은 값이고 공유 상태를 안 건드린다. 그 한 줄을 위해 `open` 의
-    /// 서명을 바꾸면 호출자 수십 자리가 따라 바뀐다(`app_session/editor.zig` 실측).
+    /// 서명을 바꾸면 호출자 수십 자리가 따라 바뀐다(`app_session/editor/mod.zig` 실측).
     ///
     /// **`awake` 는 옛 시계와 「같은」 것이 아니다** — macOS 에서만 갈린다(`Io/Threaded.clockToPosix`):
     ///

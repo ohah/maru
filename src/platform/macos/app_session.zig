@@ -1,9 +1,9 @@
 const std = @import("std");
 const debug_fixtures = @import("app_session/debug_fixtures.zig");
 /// N1: 네이티브 편집기의 platform 쪽(파일 읽기·권한). L2는 OS를 모르므로 여기서 읽어 넘긴다.
-const editor_ops = @import("app_session/editor.zig");
-pub const editor_diff_ops = @import("app_session/editor_diff.zig");
-pub const editor_merge_ops = @import("app_session/editor_merge.zig");
+const editor_ops = @import("app_session/editor/mod.zig");
+pub const editor_diff_ops = @import("app_session/editor/diff.zig");
+pub const editor_merge_ops = @import("app_session/editor/merge.zig");
 const term_ops = @import("app_session/term.zig");
 const git_ops = @import("app_session/git.zig");
 const remote_agent_ops = @import("app_session/remote_agent.zig");
@@ -3497,13 +3497,13 @@ pub fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usi
 pub var app_runtime: app.AppRuntime = .{};
 
 /// U2 — 이름 없는 문서 저장(§3.11). 세션 필드 타입과 확인 수락이 이 모듈을 부른다.
-pub const editor_untitled_save_ops = @import("app_session/editor_untitled_save.zig");
+pub const editor_untitled_save_ops = @import("app_session/editor/untitled_save.zig");
 
 /// C1a — 저장 충돌의 선택(editor-surface.md §4). 확인 수락·alternate 가 이 모듈을 부른다.
-pub const editor_conflict_ops = @import("app_session/editor_conflict.zig");
+pub const editor_conflict_ops = @import("app_session/editor/conflict.zig");
 
 /// U4a — 미저장 편집의 백업(§3.10). 편집 통지·tick 만기·저장/닫기의 지우기·종료 flush 가 부른다.
-pub const editor_backup_ops = @import("app_session/editor_backup.zig");
+pub const editor_backup_ops = @import("app_session/editor/backup.zig");
 
 // P3-e3-4d 영속 세션 host 연결 — **앱 프로세스 전역**(창별이 아니라). 한 앱에 창을 여러 개 열어도 host 연결은 **하나**를
 // 공유한다(daemon은 serial serve라 연결이 앱당 하나여야 함 — 창마다 연결하면 두 번째 창이 handshake 타임아웃→in-process
@@ -23302,7 +23302,7 @@ pub const AppSession = struct {
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
     /// 아니라 collectPaletteDraws로 따로 모은다. 닫혀 있거나 메트릭/박스 미상이면 에러(호출자가 무시). macOS 전용.
     /// **`pub` 인 이유는 판정자다** — 편집기 선택 헬퍼(NSH)가 이 프레임에 실리는지는 다른 파일의
-    /// 픽스처(`app_session/editor.zig`)에서만 잴 수 있고, 못 재면 "상자를 영영 안 그린다" 는 변이가
+    /// 픽스처(`app_session/editor/mod.zig`)에서만 잴 수 있고, 못 재면 "상자를 영영 안 그린다" 는 변이가
     /// 판정자 전부를 통과한다(실측으로 통과했다).
     pub fn buildChromeOverlayPrep(self: *AppSession) !?OverlayPrep {
         // 오버레이는 터미널과 같은 셀·폰트(1×)로 그린다 — buildChromeProps도 같은 셀을 컴포넌트에 준다. 1.3× 확대는

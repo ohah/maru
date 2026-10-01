@@ -390,7 +390,8 @@ pub const inventory = [_]Proof{
     // 낡은 로컬 경로 노출). count는 2 그대로다 — 바뀐 것은 두 값의 출처뿐이고 `@field` 반사 접근이나
     // Client 구성·receiver 집합은 건드리지 않는다.
     //
-    // N1 네이티브 편집기의 파일 읽기가 붙어 또 바뀐다(`app_session/editor.zig` import + 디버그 훅
+    // editor/ 폴더 이관은 AppSession의 import 경로만 바꾼다. reflection 사이트 수는 그대로다.
+    // N1 네이티브 편집기의 파일 읽기가 붙어 또 바뀐다(`app_session/editor/mod.zig` import + 디버그 훅
     // 플래그 하나 + 훅 호출 한 줄). count는 2 그대로다 — 새 코드는 필드를 이름으로 읽지 않는다.
     // CR0b는 current와 N-1 restore의 Client 생성 경로를 managed publication으로 바꾼다. 검토된
     // 생성 경로 두 곳은 그대로이며, digest만 새 prepare -> bind -> commit 순서를 봉인한다.

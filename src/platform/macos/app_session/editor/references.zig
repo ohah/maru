@@ -8,13 +8,13 @@
 
 const std = @import("std");
 const maru = @import("maru");
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const editor_ops = @import("editor.zig");
-const editor_lsp = @import("editor_lsp.zig");
-const pane_ops = @import("pane.zig");
-const reference_picker = @import("../reference_picker.zig");
+const editor_ops = @import("mod.zig");
+const editor_lsp = @import("lsp.zig");
+const pane_ops = @import("../pane.zig");
+const reference_picker = @import("../../reference_picker.zig");
 const lsp = maru.session.editor.lsp;
 
 /// 「지금은 못 답한다」(content modified·server cancelled) 뒤 되묻기 — 간격과 횟수 상한(§8.2l). rust-analyzer 는 작업 공간을 읽는 동안

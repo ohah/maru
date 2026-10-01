@@ -18,17 +18,17 @@ const conflict = maru.session.editor.conflict;
 const merge_map = maru.session.editor.merge_map;
 const dock_panel = maru.session.dock_panel;
 const git_command = maru.session.git_command;
-const app_session_mod = @import("../app_session.zig");
+const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
-const git_backend_mod = @import("../git_backend.zig");
-const git_ops = @import("git.zig");
-const pane_ops = @import("pane.zig");
-const tab_ops = @import("tab.zig");
-const coretext_frame_builder = @import("../coretext_frame_builder.zig");
+const git_backend_mod = @import("../../git_backend.zig");
+const git_ops = @import("../git.zig");
+const pane_ops = @import("../pane.zig");
+const tab_ops = @import("../tab.zig");
+const coretext_frame_builder = @import("../../coretext_frame_builder.zig");
 const chrome = maru.chrome;
 const chrome_editor = maru.chrome.components.editor_view;
-const editor_ops = @import("editor.zig");
+const editor_ops = @import("mod.zig");
 const editor_motion = maru.session.editor.motion;
 const testing = std.testing;
 
@@ -877,7 +877,7 @@ test "MRG1 병합 모드는 «종류가 아니라 상태»다 — 없으면 평�
     term.rt.editor_merge = null;
 }
 
-/// 판정자 전용 세션 하나(`editor_diff.zig` 의 픽스처와 같은 모양).
+/// 판정자 전용 세션 하나(`diff.zig` 의 픽스처와 같은 모양).
 fn smokeSession(allocator: std.mem.Allocator) !*AppSession {
     const session = try allocator.create(AppSession);
     errdefer allocator.destroy(session);

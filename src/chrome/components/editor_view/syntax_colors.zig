@@ -8,7 +8,7 @@
 //! 그 모듈을 **import 하지 않는다**(`tokens.ColorRole` 의 doc 이 그 경계를 적어 뒀다). 둘을 잇는
 //! 자리는 위쪽 잎이다 — `maru.syntax_colors`(`chrome_theme`·`scm_items` 와 같은 모양).
 //!
-//! **`platform/macos/app_session/editor_syntax.zig` 에서 옮겨 왔다**(§2m.112). 그 파일에 있는 동안
+//! **`platform/macos/app_session/editor/syntax.zig` 에서 옮겨 왔다**(§2m.112). 그 파일에 있는 동안
 //! 이 규칙은 macOS 것이었고, Windows 가 색을 칠하려면 **같은 규칙을 다시 적어야** 했다 — 「마지막
 //! 캡처가 이긴다」와 탭 열 계산의 주인이 둘이 되는 자리다.
 

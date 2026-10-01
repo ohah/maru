@@ -32,8 +32,8 @@ test "LOOP1 빠른 고리가 편집기 영역 모듈을 통째로 고른다 — 
     // 그렇게 만들었고, 일부러 지워 보는 실험에서 드러났다.
     const build_src = @embedFile("build_zig_src");
     const required = [_][]const u8{
-        "\"app_session.editor.\"", // editor.zig — 347
-        "\"app_session.editor_diff.\"", // editor_diff.zig — 100
+        "\"app_session.editor.mod.\"", // editor/mod.zig — 제품 진입 파일 전체
+        "\"app_session.editor.diff.\"", // editor/diff.zig — 비교 파일 전체
         "\"session.editor.\"", // selection.zig·motion.zig 등 L2 순수 모듈
         "\"platform.cell_text.\"", // 밴드 라벨·마디 열 범위
         "\"session.repo_path.\"", // breadcrumb 경로 규칙
@@ -58,8 +58,8 @@ test "LOOP1 빠른 고리가 편집기 영역 모듈을 통째로 고른다 — 
 }
 
 test {
-    _ = @import("app_session/editor.zig");
-    _ = @import("app_session/editor_syntax.zig");
-    _ = @import("app_session/editor_diff.zig");
+    _ = @import("app_session/editor/mod.zig");
+    _ = @import("app_session/editor/syntax.zig");
+    _ = @import("app_session/editor/diff.zig");
     _ = @import("symbol_picker.zig");
 }

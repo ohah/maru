@@ -16,6 +16,7 @@ const SharedPreparedView = struct {
     term: *Term,
     lines: [][]const u8,
     scroll: ?editor_ops.ScrollAnchor,
+    first_piece: u32,
     primary: ?editor_selection.Selection,
     extras: []editor_selection.Selection,
 };
@@ -31,8 +32,7 @@ pub fn applyAtRevision(self: *AppSession, term: *Term, d: maru.session.editor.de
     const opened = state.opened orelse return error.DocumentNotOpen;
     if (opened.file.revision != base_revision) return error.StaleRevision;
     if (opened.file.read_only) return error.ReadOnly;
-    // 역연산·선택 snapshot은 기존 호출자가 준비한다. 스택 capacity도 정본 변경 앞으로 옮긴다.
-    try editor_ops.prepareEntry(self, &state.history.undo, state.history.undo_len);
+    // Accepted edits survive a later history recording OOM; pushUndo clears old offsets.
     return applyPrepared(self, term, d, sels, sels.items.len);
 }
 
@@ -69,6 +69,7 @@ pub fn applyPrepared(
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |view| {
         if (view.kind != .editor or view.rt.editorDocument() != state) continue;
         if (n == count) return error.SharedViewCountMismatch;
+        if (view != term and (view.rt.editor_preedit.len > 0 or (self.ime_editor_commit_pending and self.ime_terminal_target_id == view.surface.id))) return error.SharedCompositionBusy;
         const lines = try self.allocator.alloc([]const u8, line_count);
         errdefer self.allocator.free(lines);
         var primary = view.rt.editor_selection;
@@ -93,7 +94,7 @@ pub fn applyPrepared(
         } else {
             extras = try self.allocator.alloc(editor_selection.Selection, 0);
         }
-        prepared[n] = .{ .term = view, .lines = lines, .scroll = editor_ops.captureScrollAnchor(view), .primary = primary, .extras = extras };
+        prepared[n] = .{ .term = view, .lines = lines, .scroll = editor_ops.captureScrollAnchor(view), .first_piece = view.rt.editor_first_piece, .primary = primary, .extras = extras };
         n += 1;
     };
     // 다른 창의 view는 아직 이 coordinator에 연결하지 않았다. 부분 게시로 넘기지 않는다.
@@ -135,6 +136,7 @@ pub fn applyPrepared(
             .off = shared_policy.mapSelection(d, editor_selection.Selection.at(a.off)).focus,
         } else null;
         editor_ops.restoreScrollAnchor(self, v.term, mapped_scroll, .{ .changes = &.{} });
+        v.term.rt.editor_first_piece = v.first_piece;
     }
     return inverse;
 }

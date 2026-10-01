@@ -274,6 +274,7 @@ fn specialKeys(report: Report, host: *Host, port: u16, detail_buf: []u8) !void {
     if (!waitFor(host, .{ .title = .{ .browser = t_id, .text = "keys-ready" } })) return error.KeysPageNotReady;
     try host.send(.{ .set_focus = .{ .browser = t_id, .value = true } });
     const t_focus = try focusWhenReady(host, t_id, .{ .x = 150, .y = 50 }, "focus=t val= caret=0");
+    if (t_focus.moves == 0) return notReady(report, host, t_id, "t", detail_buf);
     try typeOn(host, t_id, 0, 'a');
     try typeOn(host, t_id, 11, 'b');
     try typeOn(host, t_id, 8, 'c');
@@ -294,17 +295,28 @@ fn specialKeys(report: Report, host: *Host, port: u16, detail_buf: []u8) !void {
     if (!waitFor(host, .{ .title = .{ .browser = j_id, .text = "keys-ready" } })) return error.KeysPageNotReady;
     try host.send(.{ .set_focus = .{ .browser = j_id, .value = true } });
     const j_focus = try focusWhenReady(host, j_id, .{ .x = 150, .y = 135 }, "focus=j val= caret=0");
+    if (j_focus.moves == 0) return notReady(report, host, j_id, "j", detail_buf);
     try rawOn(host, j_id, 48, 9, false); // Tab — raw_down 만으로 다음 칸
     const tabbed = waitFor(host, .{ .title = .{ .browser = j_id, .text = "focus=k val= caret=0" } });
     try host.send(.{ .destroy_browser = j_id });
-    report(t_focus.focused and j_focus.focused and typed and deleted and moved and newline and tabbed, "input-special-keys", std.fmt.bufPrint(detail_buf, "입력 준비(몇 번째 이동) t {d}·j {d} · 첫 클릭 초점 t {}·j {} · 타이핑 {} · Backspace raw {} · ← raw {} · Enter 두 번(raw 만·raw+char) 뒤 줄바꿈 하나 {} · Tab raw 초점 이동 {}", .{ t_focus.moves, j_focus.moves, t_focus.focused, j_focus.focused, typed, deleted, moved, newline, tabbed }) catch "");
+    report(t_focus.focused and j_focus.focused and typed and deleted and moved and newline and tabbed, "input-special-keys", std.fmt.bufPrint(detail_buf, "입력 준비(ibeam 이 온 250 ms 창) t {d}·j {d} · 첫 클릭 초점 t {}·j {} · 타이핑 {} · Backspace raw {} · ← raw {} · Enter 두 번(raw 만·raw+char) 뒤 줄바꿈 하나 {} · Tab raw 초점 이동 {}", .{ t_focus.moves, j_focus.moves, t_focus.focused, j_focus.focused, typed, deleted, moved, newline, tabbed }) catch "");
+}
+
+/// 칸 위 포인터에 ibeam 이 끝내 오지 않았다 — 클릭을 보내지 않았으니 「첫 클릭」이 아니라 「준비 안 됨」으로 알리고, 키 판정마다
+/// 기한을 다 기다리지 않게 바로 끝낸다(W7b 10 차 — 전에는 「첫 클릭 초점 false」로 85 초 뒤에 엉뚱한 이유를 댔다).
+fn notReady(report: Report, host: *Host, browser: protocol.message.BrowserId, field: []const u8, detail_buf: []u8) !void {
+    try host.send(.{ .destroy_browser = browser });
+    report(false, "input-special-keys", std.fmt.bufPrint(detail_buf, "{s} 칸 입력 준비 안 됨 — 칸 위 포인터에 ibeam 커서가 5 초 동안 오지 않아 누르지 않았다", .{field}) catch "");
 }
 
 /// 칸이 입력을 받을 준비가 된 뒤 한 번만 누른다 — 준비는 「칸 위로 옮긴 포인터에 ibeam 커서가 돌아옴」(브라우저가 그 자리를
 /// 맞힘 판정했다는 증거)으로 본다. `keys-ready`(두 번의 rAF)는 그보다 이를 수 있다: x86_64 설치물을 Rosetta 로 돌리면 준비 직후
-/// 0 ms 의 클릭은 페이지에 닿지 않았고(`mousedown` 도 6 초 동안 없음) 50 ms 뒤면 닿았다 — `/keys` 는 불러오기 시작부터 준비까지
-/// 약 110 ms, `/input` 은 145 ms 라 `/input` 의 즉시 클릭은 닿는다(W7b 7~9 차 실측). 다시 누르지 않는다 — 다시 누름은 「새
-/// 브라우저의 첫 클릭이 사라지는」 퇴행을 가렸다(8 차). 몇 번째 이동에서 준비됐는지(0 = 안 됨)와 첫 클릭의 초점을 돌려준다.
+/// 0 ms 의 클릭은 페이지에 닿지 않았고(`mousedown` 도 6 초 동안 없음) t 칸에서 50 ms 뒤면 닿았다 — 불러오기 시작부터 준비까지
+/// `/keys` 110~118 ms, `/input` 140~153 ms 였고 `/input` 의 즉시 클릭은 닿았다(입력은 시작에서 110~140 ms 사이부터 받는 듯 —
+/// 가설, W7b 7~10 차 실측). 다시 누르지 않는다 — 다시 누름은 「새
+/// 브라우저의 첫 클릭이 사라지는」 퇴행을 가렸다(8 차). 몇 번째 250 ms 창에서 ibeam 이 왔는지(0 = 안 옴 — host 는 커서가 바뀔
+/// 때만 알리므로 늦게 온 첫 이동의 ibeam 도 뒤 창에서 셀 수 있다)와 첫 클릭의 초점을 돌려준다. 첫 **이벤트** 자체가 사라지는
+/// 퇴행은 준비 기다림이 덮는다(의도 — 사람은 누르기 전에 포인터를 옮긴다), 클릭만 사라지는 퇴행은 숨지 않는다.
 const FocusResult = struct { moves: u8, focused: bool };
 
 fn focusWhenReady(host: *Host, browser: protocol.message.BrowserId, point: Point, focus_title: []const u8) !FocusResult {

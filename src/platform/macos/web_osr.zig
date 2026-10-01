@@ -21,6 +21,7 @@ const iosurface = @import("web_sidecar/iosurface.zig");
 const ws = maru.session.web_sidecar;
 const plan = maru.session.web_osr_plan;
 const mailbox = ws.mailbox;
+const osr_input = maru.session.web_osr_input;
 
 /// 링 하나(W3c): 받은 IOSurface 셋·제어 페이지와, View 가 보는 세대·mailbox 워드.
 pub const AppRing = struct {
@@ -104,10 +105,12 @@ const Surface = struct {
     /// 열림 사이에 온 그림만 막는다. W6a① 적대 검증 5~7 차 — 판정 `popup-frame` 이 쓰는 조건). 브라우저가 닫혀도(`browser_closed`)
     /// 닫힘 알림은 오지 않는다 — 그때도 지운다(`dropPopup`).
     popup_first_generation: u32 = 0,
-    /// 팝업 링의 보일 장 고르기(W6a②) — 본 화면과 같은 규칙(GPU 소비자 규칙·기대 크기 = 사각형 × scale). 닫혀도 링은
-    /// 남긴다(다음 팝업의 첫 장이 꺼낼 때·브라우저가 사라질 때 놓는다 — 많아야 둘): A 닫힘 알림을 처리하기 전에 B 의 링이 먼저
-    /// 와 있을 수 있어, 닫힐 때 놓으면 다시 알리지 않는 B 의 링을 잃는다(W6a② 적대 검증 1 차).
+    /// 팝업 링의 보일 장 고르기(W6a②) — 본문과 같은 규칙(GPU 소비자 규칙·기대 크기 = 사각형 × scale). 닫혀도 곧바로
+    /// 비우지 않는다: A 닫힘 알림을 처리하기 전에 B 의 링이 먼저 와 있을 수 있어, 닫힐 때 다 놓으면 다시 알리지 않는 B 의
+    /// 링을 잃는다(1 차). 닫힐 때 보이던 링만 GPU 가 끝난 뒤 놓는다(`popup_release_generation` — 4 차).
     popup_view: RingView = .{},
+    /// 닫힐 때 보이던 팝업 링의 세대(0 = 없음) — 그 링이 아직 보이는 링이고 기다리는 링이 없으면 GPU 가 끝난 뒤 놓는다.
+    popup_release_generation: u32 = 0,
     /// 팝업 front 를 마지막으로 그린 창(본문의 `drawn_by` 와 따로 — 본문만 그린 다른 창의 세대와 비교하지 않게).
     popup_drawn_by: usize = 0,
     /// 팝업이 열리거나 닫혔다 — 새 프레임이 없어도 창을 다시 그린다(정적 페이지에서 닫힌 목록이 남거나, 링이 알림보다 먼저
@@ -1015,6 +1018,11 @@ pub fn pollFrame(surface_id: u64, completed_generation: u64, window: usize) bool
     const popup = s.popup_view.poll(popup_completed);
     for (popup.retired) |ring| if (ring) |r| r.release();
     if (popup.corrupt) rejected_rings += 1;
+    const shown_generation: ?u32 = if (s.popup_view.shown) |r| r.generation else null;
+    if (osr_input.popupReleasable(s.popup_bounds != null, s.popup_release_generation, shown_generation, s.popup_view.pending != null, s.popup_view.drawn_generation, popup_completed)) {
+        for (s.popup_view.clear()) |ring| if (ring) |r| r.release();
+        s.popup_release_generation = 0;
+    }
     const redraw = s.popup_redraw;
     s.popup_redraw = false;
     return polled.new_frame or (popup.new_frame and s.popup_bounds != null) or redraw;
@@ -1035,10 +1043,10 @@ pub const PopupFront = struct { front: Front, bounds: ws.message.Rect };
 
 pub fn popupFront(surface_id: u64) ?PopupFront {
     const s = surfaces.getPtr(surface_id) orelse return null;
-    const bounds = s.popup_bounds orelse return null;
-    if (!s.popup_view.has_frame) return null;
-    const shown = s.popup_view.shown orelse return null;
-    if (shown.generation < s.popup_first_generation) return null;
+    const shown_generation: ?u32 = if (s.popup_view.shown) |r| r.generation else null;
+    if (!osr_input.popupShows(s.popup_bounds != null, s.popup_view.has_frame, shown_generation, s.popup_first_generation)) return null;
+    const bounds = s.popup_bounds.?;
+    const shown = s.popup_view.shown.?;
     return .{ .front = .{ .surface = shown.ring.surfaces[s.popup_view.front], .width = shown.ring.width, .height = shown.ring.height }, .bounds = bounds };
 }
 
@@ -1060,6 +1068,7 @@ fn hidePopup(s: *Surface) void {
     s.popup_bounds = null;
     s.popup_first_generation = 0;
     s.popup_redraw = true;
+    s.popup_release_generation = if (s.popup_view.shown) |r| r.generation else 0;
 }
 
 /// 브라우저·sidecar 가 사라졌다 — 링까지 곧바로 놓는다. 생산자는 이미 없고(더 덮어쓰지 않는다), GPU 가 읽던 장은 renderer
@@ -1068,6 +1077,7 @@ fn hidePopup(s: *Surface) void {
 fn dropPopup(s: *Surface) void {
     hidePopup(s);
     for (s.popup_view.clear()) |ring| if (ring) |r| r.release();
+    s.popup_release_generation = 0;
 }
 
 /// 이 프레임(세대)이 그 surface 의 front 를 그렸다.
@@ -1742,6 +1752,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 s.popup_first_generation = v.first_generation;
                 s.popup_view.expect(pixels(v.bounds.width, s.record.size.scale), pixels(v.bounds.height, s.record.size.scale));
                 s.popup_redraw = true;
+                s.popup_release_generation = 0; // 남은 옛 링은 이 팝업의 첫 장이 꺼낼 때 놓인다(poll 의 retire)
             } else hidePopup(s);
         },
         .js_dialog => |v| {

@@ -92,6 +92,26 @@ pub fn popupQuad(rect: Rect, bounds: message.Rect, scale: f64, tex_w: u32, tex_h
     };
 }
 
+/// 팝업 장을 그리는가(W6a②) — 열려 있고, 실제 프레임이고, 그 팝업의 첫 세대 이상인 링의 장일 때만. 링은 보임 알림보다
+/// 먼저 올 수 있고 닫힌 팝업의 링이 아직 보이는 링으로 남아 있을 수 있어(같은 select 를 다시 열면 크기도 같다) **그릴 때**
+/// 세대로 거른다 — 이것이 없으면 새 목록의 첫 장이 오기 전 수십 ms 동안 옛 목록이 비친다(W6a② 적대 검증 4 차).
+pub fn popupShows(open: bool, has_frame: bool, shown_generation: ?u32, first_generation: u32) bool {
+    const generation = shown_generation orelse return false;
+    return open and has_frame and generation >= first_generation;
+}
+
+/// 닫힌 팝업의 링을 놓는가(W6a②) — 닫힐 때 보이던 링(`release_generation`, 0 = 없음)이 아직 보이는 링이고, 기다리는 새
+/// 링이 없고, 그 링을 마지막으로 그린 프레임을 GPU 가 끝냈을 때만. 닫힘을 처리하기 전에 다음 팝업의 링이 먼저 와 있으면
+/// 그것은 기다리는 링이거나(놓지 않는다) 첫 장을 꺼내 보이는 링이 됐다(세대가 달라 놓지 않는다) — 다시 알리지 않는 그
+/// 링을 잃지 않는다(1 차). 닫힌 목록의 장을 브라우저가 사라질 때까지 쥐지 않는다 — scale 2 목록 하나가 링당 약 3 MB 다
+/// (4 차).
+pub fn popupReleasable(open: bool, release_generation: u32, shown_generation: ?u32, pending: bool, drawn_generation: u64, completed_generation: u64) bool {
+    if (open or release_generation == 0 or pending) return false;
+    const generation = shown_generation orelse return false;
+    if (generation != release_generation) return false;
+    return drawn_generation == 0 or completed_generation >= drawn_generation;
+}
+
 pub fn find(targets: []const Target, surface_id: u64) ?Target {
     for (targets) |t| if (t.surface_id == surface_id) return t;
     return null;
@@ -359,6 +379,31 @@ test "ime outcome with a composition: last jamo Backspace, empty commit and Esc 
     try testing.expectEqual(ImeOutcome{ .raw_down = true }, imeOutcome(.{ .key_code = 123, .had_composition = true, .command = true }));
     // 조합 중 아무 일도 없음 → 입력기가 삼킴.
     try testing.expectEqual(ImeOutcome{}, imeOutcome(.{ .key_code = 7, .had_composition = true }));
+}
+
+test "popup shows only when open, with a real frame, from a ring of this popup (generation >= first)" {
+    try testing.expect(popupShows(true, true, 5, 5));
+    try testing.expect(popupShows(true, true, 6, 5));
+    // 닫힌 팝업의 링이 아직 보이는 링이다(같은 select 를 다시 열었다 — 크기도 같다) — 새 팝업의 첫 장 전에는 그리지 않는다.
+    try testing.expect(!popupShows(true, true, 4, 5));
+    try testing.expect(!popupShows(false, true, 5, 5));
+    try testing.expect(!popupShows(true, false, 5, 5));
+    try testing.expect(!popupShows(true, true, null, 0));
+}
+
+test "a closed popup's ring is released only when it is still the shown ring, nothing waits, and the GPU is done" {
+    // 닫힐 때 보이던 링(7) 그대로, 기다리는 링 없음, GPU 가 그 장을 그린 프레임(30)을 끝냈다.
+    try testing.expect(popupReleasable(false, 7, 7, false, 30, 30));
+    try testing.expect(popupReleasable(false, 7, 7, false, 0, 0)); // 그린 적 없다
+    // GPU 가 아직 읽는다.
+    try testing.expect(!popupReleasable(false, 7, 7, false, 30, 29));
+    // 다음 팝업의 링이 먼저 와 기다린다 / 이미 첫 장을 꺼내 보이는 링이 됐다 — 다시 알리지 않는 그 링을 잃지 않는다.
+    try testing.expect(!popupReleasable(false, 7, 7, true, 30, 30));
+    try testing.expect(!popupReleasable(false, 7, 8, false, 30, 30));
+    // 열려 있다 / 닫힐 때 보이던 링이 없었다 / 보이는 링이 없다.
+    try testing.expect(!popupReleasable(true, 7, 7, false, 30, 30));
+    try testing.expect(!popupReleasable(false, 0, 7, false, 30, 30));
+    try testing.expect(!popupReleasable(false, 7, null, false, 30, 30));
 }
 
 test "popup quad: 1:1 at the view DIP spot, clipped to the body with matching UV, null when fully outside" {

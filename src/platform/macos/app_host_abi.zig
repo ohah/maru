@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v190 editor IME document range exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 199), abi_version);
+    try std.testing.expectEqual(@as(u32, 200), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -4809,11 +4809,13 @@ pub export fn maru_macos_app_session_osr_aux_button(session: ?*AppSession, butto
     return @intFromBool(session_mod.web_ops.osrAuxButton(app, button_number, x_px, y_px));
 }
 
-/// v195(W4c): 키 대상이 Chromium 탭인가. 판정 전에 대상을 맞춘다(키로 탭을 바꾼 직후의 키 — 적대 검증).
+/// v195(W4c): 키 대상이 Chromium 탭인가. 판정 전에 대상을 맞춘다(키로 탭을 바꾼 직후의 키 — 적대 검증). v200(W6a②): 그
+/// 탭에 팝업 위젯이 열려 있으면 2.
 pub export fn maru_macos_app_session_osr_keyboard_active(session: ?*AppSession) i32 {
     const app = session orelse return 0;
     session_mod.web_ops.syncOsrKeyTarget(app);
-    return @intFromBool(session_mod.web_ops.osrKeyTarget(app) != null);
+    if (session_mod.web_ops.osrKeyTarget(app) == null) return 0;
+    return if (session_mod.web_ops.osrPopupOpen(app)) 2 else 1;
 }
 
 /// v195(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.

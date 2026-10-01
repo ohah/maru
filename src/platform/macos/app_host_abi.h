@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 199u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 200u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2136,10 +2136,11 @@ int32_t maru_macos_app_session_take_osr_cursor(MaruAppHostSession *session, int3
    뒤로·앞으로 보내고 1. 본문이 아니면 0 — Swift 는 옛 경로(handleMouse)로 흘린다. */
 int32_t maru_macos_app_session_osr_aux_button(MaruAppHostSession *session, int32_t button_number, double x_px, double y_px);
 /* v195(W4c): 키 대상이 Chromium 탭인가(활성 pane 의 OSR browser·입력 초점이 터미널 자리·창 키). 1 이면 Swift 는 키를
-   터미널 경로가 아니라 아래 osr_key·입력기 트랜잭션으로 보낸다. */
+   터미널 경로가 아니라 아래 osr_key·입력기 트랜잭션으로 보낸다. v200(W6a②): 그 탭에 팝업 위젯(`<select>` 목록 등)이
+   열려 있으면 2 — Swift 는 입력기를 거치지 않고 osr_key phase 3 으로 보낸다. */
 int32_t maru_macos_app_session_osr_keyboard_active(MaruAppHostSession *session);
 /* v195(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
-   2 = 뗌. key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
+   2 = 뗌, 3(v200 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */
 int32_t maru_macos_app_session_osr_key(MaruAppHostSession *session, int32_t phase, uint32_t key_code, uint32_t character,
                                        uint32_t unmodified, int32_t mods);

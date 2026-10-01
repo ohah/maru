@@ -802,6 +802,15 @@ pub fn osrQuads(self: *AppSession, frame_generation: u64, out: []OsrQuad) usize 
         };
         web_osr.drew(layout.surface_id, frame_generation, @intFromPtr(self));
         n += 1;
+        // W6a②: 열린 팝업 위젯(`<select>` 목록 등)을 그 본문 바로 위에 — 같은 pass 라 모달 오버레이 아래다.
+        if (n < out.len) if (web_osr.popupFront(layout.surface_id)) |p| {
+            const scale: f64 = if (self.scale_milli == 0) 1.0 else @as(f64, @floatFromInt(self.scale_milli)) / 1000.0;
+            if (osr_input.popupQuad(layout.rect, p.bounds, scale, p.front.width, p.front.height)) |q| {
+                out[n] = .{ .iosurface = p.front.surface, .dest_x = q.x, .dest_y = q.y, .dest_w = q.w, .dest_h = q.h, .u0 = q.u0, .v0 = q.v0, .u1 = q.u1, .v1 = q.v1 };
+                web_osr.drewPopup(layout.surface_id, frame_generation, @intFromPtr(self));
+                n += 1;
+            }
+        };
     }
     return n;
 }
@@ -1064,17 +1073,39 @@ fn sendKey(self: *AppSession, sid: u64, kind: ws_message.KeyKind, key: OsrKey, c
 }
 
 /// Swift 키 한 번. phase 0 = 지금 raw_down(⌘·⌃ chord·기능키 — 입력기를 거치지 않는다), 1 = 입력기 트랜잭션 키로 쥐어 둠
-/// (`osrImeEnd` 가 판정한다), 2 = 뗌. 다른 값은 거절한다. 키 대상이 Chromium 탭이면 true(Swift 는 터미널 경로를 안 탄다).
+/// (`osrImeEnd` 가 판정한다), 2 = 뗌, 3 = 열린 팝업 위젯의 키(누름 + 글자 — W6a②). 다른 값은 거절한다. 키 대상이 Chromium 탭이면 true(Swift 는 터미널 경로를 안 탄다).
 pub fn osrKey(self: *AppSession, phase: i32, key: OsrKey) bool {
-    if (phase < 0 or phase > 2) return false;
+    if (phase < 0 or phase > 3) return false;
     syncOsrKeyTarget(self);
     const sid = osrKeyTarget(self) orelse return false;
     switch (phase) {
         0 => sendKey(self, sid, .raw_down, key, key.character),
         1 => self.osr_armed_key = key,
-        else => sendKey(self, sid, .up, key, key.character),
+        2 => sendKey(self, sid, .up, key, key.character),
+        else => {
+            // 3: 열린 팝업 위젯의 키(W6a②) — 입력기 없이 누름과 글자(목록의 글자 찾기). 기능키(사설 영역)·제어 문자·짝 없는
+            // 대리 문자와 ⌘·⌃ 조합은 글자를 보내지 않는다(Chrome 은 ⌘ 조합에 keypress 를 보내지 않는다 — ⌘B 가 「banana」로
+            // 옮기지 않게, W6a② 적대 검증 3 차).
+            sendKey(self, sid, .raw_down, key, key.character);
+            if (popupKeyHasChar(key)) sendKey(self, sid, .char, key, key.character);
+        },
     }
     return true;
+}
+
+fn popupKeyHasChar(key: OsrKey) bool {
+    const ch = key.character;
+    if (key.modifiers.command or key.modifiers.control) return false;
+    if (ch < 0x20 or ch == 0x7F) return false;
+    if (ch >= 0xD800 and ch <= 0xDFFF) return false;
+    return !(ch >= 0xF700 and ch <= 0xF8FF);
+}
+
+/// 키 대상 탭에 팝업 위젯이 열려 있는가(W6a②). 열린 목록은 편집할 수 없어 입력기 조합이 갈 곳이 없다 — 조합이 서면 그 뒤의
+/// Esc 가 「조합 취소」로 먹혀 목록이 한 번에 안 닫혔다(실측). Chrome 의 목록은 네이티브 메뉴라 입력기가 끼지 않는다.
+pub fn osrPopupOpen(self: *AppSession) bool {
+    const sid = osrKeyTarget(self) orelse return false;
+    return web_osr.popupOpen(sid);
 }
 
 /// 터미널이 조합을 쥐고 있으면(`ime_terminal_target_id` — 조합 중 대상이 바뀜) 확정될 때까지 그쪽 것이다.

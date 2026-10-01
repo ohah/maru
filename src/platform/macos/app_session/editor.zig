@@ -35265,37 +35265,46 @@ test "NS9 대상 줄은 그 pane 에서 실제로 도는 것을 말한다 — �
     // 않는다 — 조이면 **보호는 안 늘고 실패 경로만 는다.**
     pane_ops.newTermInActivePane(fx.session) catch {};
 
-    // 관측에 이름을 심는다 — 제품이 읽는 그 자리다.
+    // 관측에 이름을 심는다 — 제품이 읽는 그 자리다. **터미널마다 서로 다른 이름을** 심는다.
+    // 한 곳에만 심으면 나머지 줄은 실제 자식이 포그라운드가 됐는지에 달린다 — 막 띄운 자식은 아직
+    // pgid 가 없어 옛 문구로 떨어지고(관측 전 폴백 — 제품은 맞다), 이 판정자가 그렇게 빨갰다(main CI
+    // ReleaseFast 4회, 2026-09-27 ~ 10-01. 실패 순간 그 줄은 `fg_len=0 pgid=null` 이었다).
+    // 이름이 다르면 「줄마다 **자기** pane 의 이름인가」까지 잰다 — 섞이면 고른 것과 다른 곳으로 보낸다.
+    const names = [_][]const u8{ "fish", "zsh", "nu", "elvish" };
+    var planted_ids: [names.len]u64 = undefined;
+    var planted: usize = 0;
     const pane = pane_ops.activePane(fx.session);
-    var planted: bool = false;
     for (pane.terms.items) |t| {
         if (t.kind != .terminal) continue;
+        if (planted == names.len) return error.MoreTerminalTermsThanPlantedNames;
         var name: maru.pty.types.ForegroundProcessName = .{};
-        const want = "fish";
-        @memcpy(name.bytes[0..want.len], want);
-        name.len = want.len;
+        @memcpy(name.bytes[0..names[planted].len], names[planted]);
+        name.len = @intCast(names[planted].len);
         // **비우고 심는다.** 픽스처가 실제 자식을 띄우므로 목록에 이미 이름이 있고(관측이 실제로
         // 도는 증거다 — 첫 회차에 `bash` 가 나왔다), 뒤에 붙이면 첫 항목이 안 바뀐다.
         t.rt.observation.foreground_processes.clearRetainingCapacity();
         try t.rt.observation.foreground_processes.append(allocator, name);
-        planted = true;
-        break;
+        planted_ids[planted] = t.surface.id;
+        planted += 1;
     }
-    // 심을 자리가 없으면 이 판정자는 아무것도 안 잰다. 위의 `try` 가 spawn 실패를 이미 걸러내므로
-    // 여기까지 와서 못 심었다면 **종류 판정이 바뀐 것**이다 — 그래서 이름이 따로 필요하다.
-    if (!planted) return error.NoTerminalTermToPlantForegroundNameInto;
+    // 심을 자리가 없으면 이 판정자는 아무것도 안 잰다 — 여기까지 와서 못 심었다면 **종류 판정이
+    // 바뀐 것**이다. 그래서 이름이 따로 필요하다.
+    if (planted == 0) return error.NoTerminalTermToPlantForegroundNameInto;
 
     var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
     var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
     const collected = term_ops.collectAgentTargets(fx.session, &buf, &folders);
-    var saw = false;
+    var matched: usize = 0;
     for (collected.items) |c| {
-        if (std.mem.eql(u8, c.shell_name, "fish")) saw = true;
         // 옛 판은 **전부** 고정 문구였다 — 하나라도 그 문구면 그 줄은 대상을 못 가른다.
         if (std.mem.eql(u8, c.shell_name, maru.i18n.t(.ctx_target_shell)))
             return error.TargetRowFellBackToFixedShellPhrase;
+        const at = std.mem.indexOfScalar(u64, planted_ids[0..planted], c.surface_id) orelse
+            return error.TargetRowForUnplantedTerm;
+        if (!std.mem.eql(u8, c.shell_name, names[at])) return error.TargetRowNamesAnotherPane;
+        matched += 1;
     }
-    if (!saw) return error.PlantedForegroundNameMissingFromTargets;
+    if (matched != planted) return error.PlantedForegroundNameMissingFromTargets;
 }
 
 test "NS8 멀티 커서면 주 선택만 간다고 말한다 — 나머지가 갔다고 믿게 두지 않는다" {

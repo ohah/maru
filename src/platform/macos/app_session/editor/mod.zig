@@ -2605,6 +2605,9 @@ pub fn openUntitledInActivePane(self: *AppSession) (OpenFileError || error{Untit
     // **번호가 다 된 것을 OOM 이라 부르지 않는다.** 42 억 번을 열어야 닿는 자리라 실제로는 안 오지만,
     // 그렇다고 **다른 이유의 이름**을 붙이면 뒤에 이 실패를 읽는 쪽(계획 C0 — 저장·열기 실패를 이유별로
     // 말하는 슬라이스)이 「메모리가 없다」고 말한다. 있는 원인을 지우는 것이 값싼 거짓말이다.
+    // **디스크에 남은 레코드 번호 위에서** 낸다 — 안 그러면 되살리지 못한 레코드와 같은 번호가 나와 이 문서의
+    // 백업이 그 레코드를 덮는다(`observeRecordedUntitledNumbers`).
+    app_session_mod.editor_backup_ops.observeRecordedUntitledNumbers(self);
     const n = app_session_mod.app_runtime.untitled_docs.next() orelse return error.UntitledNamesExhausted;
 
     var prepared = try prepareUntitled(self);
@@ -43490,10 +43493,10 @@ test "U4b-7 이름 없는 문서를 열 때는 건드리지 않는다 — 그 �
     const root = try pinBackupDir(&root_buf, &dir);
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
 
-    // 다음 번호의 이름 없는 문서 레코드를 미리 심어 둔다.
+    // 이름 없는 문서 레코드를 미리 심어 둔다. 새 문서는 그 번호를 **피해 간다**(디스크 레코드 위로 — 2026-10-02).
     try plantBackup(allocator, root, .{ .untitled = 1 }, "from a past session\n");
     const t = try openUntitledInActivePane(fx.session);
-    try testing.expectEqual(@as(u32, 1), t.rt.editorDocument().untitled.?.n);
+    try testing.expectEqual(@as(u32, 2), t.rt.editorDocument().untitled.?.n);
     // **빈 문서 그대로다** — 되살리는 것은 U4c 가 workspace 키와 함께 한다.
     try testing.expectEqualStrings("", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t));
@@ -43682,10 +43685,11 @@ test "U4c-5 되살린 문서만 레코드를 삼킨다 — 새로 만든 문서�
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
 
     // 지난 실행이 `untitled-1` 레코드를 남겼다(workspace 는 그것을 안 싣고 있다 — 창을 정상으로 닫았거나
-    // 복원이 꺼져 있었다). **새로 만드는 문서도 번호 1 을 받는다** — 그때 삼키면 남의 내용이 새 문서에 뜬다.
+    // 복원이 꺼져 있었다). 새로 만드는 문서는 그 레코드를 **삼키지 않는다** — 삼키면 남의 내용이 새 문서에 뜬다.
+    // 그리고 **같은 번호도 받지 않는다**(2026-10-02) — 예전엔 1 을 받아, 그 문서의 백업이 남의 레코드를 덮었다.
     try plantBackup(allocator, root, .{ .untitled = 1 }, "from a past session\n");
     const fresh = try openUntitledInActivePane(fx.session);
-    try testing.expectEqual(@as(u32, 1), fresh.rt.editorDocument().untitled.?.n);
+    try testing.expectEqual(@as(u32, 2), fresh.rt.editorDocument().untitled.?.n);
     try testing.expectEqualStrings("", fresh.rt.editorDocument().opened.?.file.content);
     try testing.expect(backupExists(root, .{ .untitled = 1 })); // 안 삼켰으니 그대로 있다
 

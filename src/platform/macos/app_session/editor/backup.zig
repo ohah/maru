@@ -272,6 +272,43 @@ pub fn discardDeferredDrops(self: *AppSession) void {
     self.deferred_backup_drops.clearRetainingCapacity();
 }
 
+/// 백업 폴더에 남은 **이름 없는 문서 레코드의 번호**(`u-<16진수>.bak`)를 발급기에 알린다 — 새 번호가 그 위에서
+/// 나오게. 발급기는 실행마다 0 부터 시작하고 **되살린** 번호만 보아서, 되살리지 못한 레코드(실패한 창 복원·크래시
+/// 뒤 고아)가 있으면 새 문서가 같은 번호를 받았다. 레코드 이름은 번호로 정해지므로 그 문서의 백업이 남겨 둔
+/// 레코드를 **덮어썼다**(2026-10-02 실험: 실패한 복원 뒤 새 문서가 `untitled-1` 을 받고 `u-1.bak` 이 새 내용이 됨).
+/// 새 번호를 낼 때마다 훑는다 — 사용자 행동이라 드물고, 한 번만 훑으면 그 뒤에 생긴 레코드를 놓친다.
+/// 폴더를 못 읽으면 아무것도 안 한다.
+pub fn observeRecordedUntitledNumbers(self: *AppSession) void {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dirPath(&dir_buf) orelse return;
+    var dir = std.Io.Dir.cwd().openDir(self.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(self.io);
+    var it = dir.iterate();
+    while (it.next(self.io) catch return) |entry| {
+        if (recordedUntitledNumber(entry.name)) |n| app_session_mod.app_runtime.untitled_docs.observe(n);
+    }
+}
+
+/// `u-<16진수>.bak` 의 번호. 그 모양이 아니거나 0 이면 null — 임시 파일·경로 레코드는 건너뛴다.
+fn recordedUntitledNumber(name: []const u8) ?u32 {
+    const prefix = "u-";
+    const suffix = ".bak";
+    if (name.len <= prefix.len + suffix.len) return null;
+    if (!std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, suffix)) return null;
+    const n = std.fmt.parseInt(u32, name[prefix.len .. name.len - suffix.len], 16) catch return null;
+    return if (n == 0) null else n;
+}
+
+test "recorded untitled numbers parse only the record name shape" {
+    try std.testing.expectEqual(@as(?u32, 1), recordedUntitledNumber("u-1.bak"));
+    try std.testing.expectEqual(@as(?u32, 0x1f), recordedUntitledNumber("u-1f.bak"));
+    // 파일 이름은 `backup.fileName` 이 정한다 — 같은 모양을 읽어야 한다.
+    var buf: [backup.max_file_name_len]u8 = undefined;
+    try std.testing.expectEqual(@as(?u32, 0xabc), recordedUntitledNumber(backup.fileName(&buf, .{ .untitled = 0xabc })));
+    for ([_][]const u8{ "u-0.bak", "u-.bak", "u-zz.bak", "u-1.bak.tmp", "p-0123456789abcdef.bak", "u-1", "x-1.bak" }) |name|
+        try std.testing.expectEqual(@as(?u32, null), recordedUntitledNumber(name));
+}
+
 pub fn dropName(self: *AppSession, name: []const u8) void {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = dirPath(&dir_buf) orelse return;

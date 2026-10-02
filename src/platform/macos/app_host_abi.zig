@@ -7516,6 +7516,80 @@ test "a failed window restore keeps the backup records of documents it had alrea
     }
 }
 
+test "a new untitled document never takes the number of a record a failed restore kept" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 레코드를 남겨도 **같은 실행에서** 덮일 수 있었다(2026-10-02 실험). 발급기는 되살린 번호만 보아서, 되살리기 전에
+    // 실패한 창의 `u-1.bak` 을 모른 채 새 문서에 1 을 주었고, 그 문서의 백업이 `u-1.bak` 을 새 내용으로 덮었다.
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const editor_ops = @import("app_session/editor/mod.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    session_mod.editor_backup_ops.setDirForTest(root);
+    defer session_mod.editor_backup_ops.setDirForTest(null);
+    const saved_counter = session_mod.app_runtime.untitled_docs;
+    defer session_mod.app_runtime.untitled_docs = saved_counter;
+    session_mod.app_runtime.untitled_docs = .{};
+    const backup_mod = maru.session.editor.backup;
+    const kept = try backup_mod.encode(a, .{ .untitled = 1 }, "precious unsaved text\n");
+    defer a.free(kept);
+    var kept_name_buf: [backup_mod.max_file_name_len]u8 = undefined;
+    const kept_name = backup_mod.fileName(&kept_name_buf, .{ .untitled = 1 });
+    try tmp.dir.writeFile(io, .{ .sub_path = kept_name, .data = kept });
+
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+    // 문서 1 은 **망가진 탭 뒤**의 탭에 있다 — 그 탭에 닿기 전에 apply 가 실패해 발급기가 1 을 보지 못한다.
+    const text =
+        "maru.workspace.v1\n" ++
+        "window tabs=3 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"ok\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n" ++
+        "tab panes=2 active-pane=0 custom-name=\"broken\"\n" ++
+        "tree-node split vertical ratio=500\n" ++
+        "tree-node leaf pane=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"later\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" untitled-term=\"1:1\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n";
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.create_failed)),
+        maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0),
+    );
+
+    const term = try editor_ops.openUntitledInActivePane(session.?);
+    try std.testing.expectEqual(@as(u32, 2), term.rt.editorDocument().untitled.?.n);
+    var changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = "new doc typed text\n" }};
+    try std.testing.expect(editor_ops.applyEditAsOne(session.?, term, &changes));
+    session_mod.editor_backup_ops.flushAll(session.?);
+
+    var read_buf: [4096]u8 = undefined;
+    // 남겨 둔 레코드는 **원래 내용 그대로**다.
+    try std.testing.expectEqualStrings(kept, try tmp.dir.readFile(io, kept_name, &read_buf));
+    // 새 문서는 **자기 자리**(`u-2.bak`)에 백업한다.
+    var new_name_buf: [backup_mod.max_file_name_len]u8 = undefined;
+    const new_name = backup_mod.fileName(&new_name_buf, .{ .untitled = 2 });
+    const new_record = try tmp.dir.readFile(io, new_name, &read_buf);
+    try std.testing.expect(std.mem.indexOf(u8, new_record, "new doc typed text") != null);
+}
+
 test "a successful window restore still consumes the backup record into the revived document" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     // 대조군 — 미루기가 **성공 경로의 삭제까지 막으면** 다음 실행이 같은 내용을 또 되살려 문서가 둘이 된다.

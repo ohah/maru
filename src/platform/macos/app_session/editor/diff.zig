@@ -1426,7 +1426,11 @@ test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지
         );
         fx.term.file_entry = &entry;
 
-        fa.fail_index = fa.allocations + step; // 여기서부터 실패한다
+        fa.fail_index = fa.alloc_index + step; // 여기서부터 새 할당을 실패시킨다.
+        // resize/remap 성공은 backing allocator와 머신에 따라 달라진다. 제자리 확장을
+        // 허용하면 새 할당 실패 지점의 범위가 달라져 같은 sweep을 재현할 수 없다.
+        // 모든 성장의 대체 할당을 훑어 같은 실패 경계를 검사한다(제품 allocator는 그대로다).
+        fa.resize_fail_index = fa.resize_index;
         poll(fx.session, fx.term);
         if (fx.term.rt.editor_diff) |st| {
             if (std.meta.activeTag(st.view) == .compare and st.left_texts.len > 0) ok_steps += 1 else failed_steps += 1;
@@ -1437,6 +1441,8 @@ test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지
         invalidate(fx.session, fx.term);
     }
     // **공허해질 수 없게 센다** — 한 번도 실패하지 않으면 이 테스트는 아무것도 지키지 않는다.
+    std.debug.print("diff OOM sweep: steps={d} unavailable={d} compare={d} clean={}\n", .{ step, failed_steps, ok_steps, diff_clean_pass });
+    try testing.expect(diff_clean_pass); // 120개 상한으로 잘린 sweep을 완료로 세지 않는다.
     try testing.expect(failed_steps >= 5);
     try testing.expect(ok_steps >= 1);
 }

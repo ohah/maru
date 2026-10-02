@@ -980,3 +980,18 @@ ABI에서 `key_failed`로 전달되고 유효한 재시도와 중복 확정이 �
 수정하며 등록된 앱·TCC·입력 소스를 바꾸지 않는다. 별도 뷰별 offscreen 프레임이므로
 동시에 열린 두 pane의 실제 OS 입력 화면을 증명하지 않는다. `cancelled` 단계는 빈
 marked 갱신이며 OS 취소를 관측했다는 뜻이 아니다.
+
+
+### 실제 한국어 HID와 공유 입력 대상 전환
+
+`mise run macos-editor-ime-late-focus-smoke`는 같은 fixture 문서의 두 일반 편집기
+Term을 열고 실제 두벌식 HID로 A의 `가` 조합 → Cmd+Option+]로 B 전환 →
+B의 `나` 조합 → Cmd+Option+[로 A 복귀를 실행한다. 문서의 한 번 적용,
+A의 독립 caret 보존, 전환 후 600ms 동안 문서·선택 불변과 저장 바이트를 검사한다.
+준비는 opt-in debug fixture이며 조합 callback과 전환 chord를 직접 주입하지 않는다.
+창을 활성화하고 입력 소스를 일시 변경하며 종료 시 기존 소스를 복원한다.
+`/tmp/maru-editor-ime.*`의 summary와 stderr가 해당 실행의 증거다.
+`MARU_IME_DEBUG=1`은 guard 이전 callback 도착/승인 여부, 단조 시각,
+현재 owner와 세대, 캡처된 해석 세대, 해석 시작/종료와 확정 승인을 기록한다.
+전환 뒤 자연 callback 관측 수가 0이면 입력 전환 회귀 통과이며,
+발생원 토큰 없는 늦은 OS callback 자체의 재현·격리 완료를 뜻하지 않는다.

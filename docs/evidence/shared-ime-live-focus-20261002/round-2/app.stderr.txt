@@ -1,0 +1,160 @@
+warning(app): maru build: mtime=1790907912 pid=31036
+warning: reconnect tick inactive: not_owner_thread
+[IME_FIXTURE] source=2 peer=3
+[IME] ? selectedRange editor -> loc=0 len=0 t=230133.59619837502 gen=0 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=3 t=230133.74252620834 gen=0 captured=none owner=2 discard=false
+[IME] keyDown mods=[Cmd ] t=230133.80102629168 gen=0 captured=none owner=2 discard=false text="" [U+F702] len=1 keyCode=123
+[IME] ? hasMarkedText editor -> false t=230133.80111225002 gen=0 captured=none owner=2 discard=false
+[IME] admission_begin t=230133.80112037502 gen=0 captured=none owner=2 discard=false
+[IME] admission_accepted t=230133.801130125 gen=1 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=3 t=230133.87657020835 gen=1 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230133.87661095834 gen=1 captured=none owner=2 discard=false
+[IME] ? markedRange editor -> loc=0 len=0 t=230133.87661875002 gen=1 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230133.87662433335 gen=1 captured=none owner=2 discard=false
+[IME] keyDown mods=[] t=230133.87848975 gen=1 captured=none owner=2 discard=false text="" [U+F703] len=1 keyCode=124
+[IME] interpret_begin t=230133.87855558336 gen=1 captured=1 owner=2 discard=false
+2026-10-02 11:26:28.777 maru-macos-app[31036:18474207] TSM AdjustCapsLockLEDForKeyTransitionHandling - _ISSetPhysicalKeyboardCapsLockLED Inhibit
+[IME] ? selectedRange editor -> loc=0 len=0 t=230133.87944629168 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230133.87969108333 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230133.87994470834 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230133.87996416667 gen=1 captured=1 owner=2 discard=false
+[IME] callback_arrival doCommand accepted=true t=230133.88009545836 gen=1 captured=1 owner=2 discard=false
+[IME] doCommand:moveRight: t=230133.880107375 gen=1 captured=1 owner=2 discard=false
+[IME] interpret_end t=230133.88020062502 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230133.8802310417 gen=1 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=3 t=230134.0097864167 gen=1 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=1 len=0 t=230134.00981779167 gen=1 captured=none owner=2 discard=false
+[IME] ? markedRange editor -> loc=1 len=0 t=230134.00982458334 gen=1 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230134.00982958334 gen=1 captured=none owner=2 discard=false
+[IME] keyDown mods=[] t=230134.01200491667 gen=1 captured=none owner=2 discard=false text="ㄱ" [U+3131] len=1 keyCode=15
+[IME] interpret_begin t=230134.01205395834 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=1 len=0 t=230134.01262325002 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=1 len=0 t=230134.01306275002 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230134.01325012502 gen=1 captured=1 owner=2 discard=false
+[IME] callback_arrival setMarkedText accepted=true t=230134.01335158336 gen=1 captured=1 owner=2 discard=false
+[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=230134.0133975 gen=1 captured=1 owner=2 discard=false text="ㄱ" [U+3131] len=1
+2026-10-02 11:26:28.912 maru-macos-app[31036:18474207] error messaging the mach port for IMKCFRunLoopWakeUpReliable
+[IME] interpret_end t=230134.01384275002 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=230134.01389925 gen=1 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230134.14438641668 gen=1 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230134.14441420833 gen=1 captured=none owner=2 discard=false
+[IME] ? markedRange editor -> loc=1 len=1 t=230134.14442070836 gen=1 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=230134.14443037502 gen=1 captured=none owner=2 discard=false
+[IME] keyDown mods=[] t=230134.14590783336 gen=1 captured=none owner=2 discard=false text="ㅏ" [U+314F] len=1 keyCode=40
+[IME] interpret_begin t=230134.145945625 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230134.14645350003 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230134.14659554168 gen=1 captured=1 owner=2 discard=false
+[IME] ? attributedSubstring editor loc=1 len=1 t=230134.1467610417 gen=1 captured=1 owner=2 discard=false
+[IME] ? attributedSubstring editor loc=1 len=1 t=230134.14678995835 gen=1 captured=1 owner=2 discard=false
+[IME] ? attributedSubstring editor loc=1 len=1 t=230134.14681075 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230134.14705608334 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230134.14716595833 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=230134.14743812502 gen=1 captured=1 owner=2 discard=false
+[IME] callback_arrival setMarkedText accepted=true t=230134.147464375 gen=1 captured=1 owner=2 discard=false
+[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=230134.14747408335 gen=1 captured=1 owner=2 discard=false text="가" [U+AC00] len=1
+[IME] interpret_end t=230134.14775200002 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=230134.14776808335 gen=1 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230134.27629508334 gen=1 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230134.276323625 gen=1 captured=none owner=2 discard=false
+[IME] ? markedRange editor -> loc=1 len=1 t=230134.27633016667 gen=1 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=230134.27633529168 gen=1 captured=none owner=2 discard=false
+[IME_FOCUS] post code=30 owner=2 t=230134.2765585417
+[IME] ? hasMarkedText editor -> true t=230134.2831825417 gen=1 captured=none owner=2 discard=false
+[IME] admission_begin t=230134.28319483335 gen=1 captured=none owner=2 discard=false
+[IME] admission_accepted t=230134.28329866668 gen=2 captured=none owner=2 discard=false
+[IME_FOCUS] observed owner=3 t=230134.41298750002
+[IME] ? selectedRange editor -> loc=0 len=0 t=230134.413941125 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230134.41396587502 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230134.413979125 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=230134.4139841667 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230134.54373162502 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230134.54374866668 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=230134.54375375 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230134.6762267917 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230134.67625120835 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=230134.67625858335 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230134.8078346667 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230134.80786404168 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=230134.80787070835 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230134.92838495836 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230134.92840379168 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=230134.92840925002 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230135.05889054167 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230135.05891750002 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=230135.05892345836 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230135.05893275002 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230135.05893783335 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=230135.05894145835 gen=2 captured=none owner=3 discard=false
+[IME] keyDown mods=[Cmd ] t=230135.06149929168 gen=2 captured=none owner=3 discard=false text="" [U+F703] len=1 keyCode=124
+[IME] ? hasMarkedText editor -> false t=230135.061549 gen=2 captured=none owner=3 discard=false
+[IME] admission_begin t=230135.06155566667 gen=2 captured=none owner=3 discard=false
+[IME] admission_accepted t=230135.06156329167 gen=3 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=230135.19489383334 gen=3 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=4 len=0 t=230135.1949162917 gen=3 captured=none owner=3 discard=false
+[IME] ? markedRange editor -> loc=4 len=0 t=230135.194923875 gen=3 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=230135.19492916667 gen=3 captured=none owner=3 discard=false
+[IME] keyDown mods=[] t=230135.19662404168 gen=3 captured=none owner=3 discard=false text="ㄴ" [U+3134] len=1 keyCode=1
+[IME] interpret_begin t=230135.19665791668 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=4 len=0 t=230135.19758133334 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=4 len=0 t=230135.19800120834 gen=3 captured=3 owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=230135.19822191668 gen=3 captured=3 owner=3 discard=false
+[IME] callback_arrival setMarkedText accepted=true t=230135.1983245 gen=3 captured=3 owner=3 discard=false
+[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=230135.19837125 gen=3 captured=3 owner=3 discard=false text="ㄴ" [U+3134] len=1
+[IME] interpret_end t=230135.19871041668 gen=3 captured=3 owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=230135.19874450003 gen=3 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230135.32833375002 gen=3 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=230135.3283520417 gen=3 captured=none owner=3 discard=false
+[IME] ? markedRange editor -> loc=4 len=1 t=230135.32835775003 gen=3 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=230135.32836304168 gen=3 captured=none owner=3 discard=false
+[IME] keyDown mods=[] t=230135.329780625 gen=3 captured=none owner=3 discard=false text="ㅏ" [U+314F] len=1 keyCode=40
+[IME] interpret_begin t=230135.32981362502 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=230135.33037033334 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=230135.33055400001 gen=3 captured=3 owner=3 discard=false
+[IME] ? attributedSubstring editor loc=4 len=1 t=230135.33071070834 gen=3 captured=3 owner=3 discard=false
+[IME] ? attributedSubstring editor loc=4 len=1 t=230135.33073229168 gen=3 captured=3 owner=3 discard=false
+[IME] ? attributedSubstring editor loc=4 len=1 t=230135.33075429167 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=230135.3309977917 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=230135.331127125 gen=3 captured=3 owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=230135.33139179167 gen=3 captured=3 owner=3 discard=false
+[IME] callback_arrival setMarkedText accepted=true t=230135.33141629168 gen=3 captured=3 owner=3 discard=false
+[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=230135.331425375 gen=3 captured=3 owner=3 discard=false text="나" [U+B098] len=1
+[IME] interpret_end t=230135.33164683334 gen=3 captured=3 owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=230135.33166225 gen=3 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230135.45909120835 gen=3 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=230135.45911583334 gen=3 captured=none owner=3 discard=false
+[IME] ? markedRange editor -> loc=4 len=1 t=230135.45912166667 gen=3 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=230135.45912595835 gen=3 captured=none owner=3 discard=false
+[IME_FOCUS] post code=33 owner=3 t=230135.4593025
+[IME] ? hasMarkedText editor -> true t=230135.46211120836 gen=3 captured=none owner=3 discard=false
+[IME] admission_begin t=230135.46212537502 gen=3 captured=none owner=3 discard=false
+[IME] admission_accepted t=230135.46220745836 gen=4 captured=none owner=3 discard=false
+[IME_FOCUS] observed owner=2 t=230135.5921540417
+[IME] ? selectedRange editor -> loc=2 len=0 t=230135.59224625002 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230135.59226445833 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230135.59227270834 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230135.59227741667 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230135.72592845836 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230135.72594745836 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230135.7259532917 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230135.85984091667 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230135.8598620417 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230135.85986770835 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230135.99481595834 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230135.99483358336 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230135.99483879167 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230136.12835891667 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230136.12838075001 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230136.1283881667 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230136.25928875 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230136.26080091667 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=230136.26080841667 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230136.26081870834 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230136.26082466668 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230136.260829125 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=230136.26107691668 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=230136.26108583334 gen=4 captured=none owner=2 discard=false
+[IME] keyDown mods=[Cmd ] t=230136.2611615 gen=4 captured=none owner=2 discard=false text="s" [U+0073] len=1 keyCode=1
+[IME] ? hasMarkedText editor -> false t=230136.261185125 gen=4 captured=none owner=2 discard=false
+[IME] admission_begin t=230136.2611895417 gen=4 captured=none owner=2 discard=false
+[IME] admission_accepted t=230136.26119475003 gen=5 captured=none owner=2 discard=false
+=== maru app exit pid=31036 via=exit ===

@@ -1186,7 +1186,7 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
     if (path.len == 0) return;
 
     // **연 파일을 활성 pane에 편집기 Term으로 붙인다** — N1의 "화면에 파일이 뜬다"가 여기서 닫힌다.
-    _ = editor_ops.openPathInActivePane(self, path) catch |e| {
+    const source = editor_ops.openPathInActivePane(self, path) catch |e| {
         // **왜 못 열었는지 구분해서 알린다.** §3.5가 "여는 것을 막는 이유는 UTF-8 아님 하나"라고
         // 정했으므로, 나머지 이유가 같은 메시지로 뭉개지면 그 계약을 확인할 수 없다.
         self.showNoticeKey(switch (e) {
@@ -1197,6 +1197,25 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
         });
         return;
     };
+    // Only the live focus fixture opens a peer. Its setup uses the same shared-view/focus
+    // operations as the product; subsequent composition and switching come from OS HID events.
+    if (std.c.getenv("MARU_EDITOR_IME_LATE_FOCUS")) |flag| {
+        if (std.mem.eql(u8, std.mem.span(flag), "1")) {
+            // A newly opened viewer has no caret until its body is selected. Establish the
+            // fixture's starting caret before cloning it; otherwise IME queries intentionally
+            // return NSNotFound and no composing input is admitted.
+            source.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+            const peer = editor_ops.openSharedViewInActivePane(self, source) catch return;
+            const pane = pane_ops.activePane(self);
+            for (pane.terms.items, 0..) |term, index| {
+                if (term == source) {
+                    self.focusTerm(index);
+                    break;
+                }
+            }
+            std.debug.print("[IME_FIXTURE] source={d} peer={d}\n", .{ source.surfaceId(), peer.surfaceId() });
+        }
+    }
     self.metal_dirty = true;
 }
 

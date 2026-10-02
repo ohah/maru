@@ -276,9 +276,11 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // IME 콜백 진단 트레이스(MARU_IME_DEBUG=1). 입력기가 실제로 보내는 콜백 순서/인자를
     // 그대로 찍어, 한글 조합/삭제의 실측 시퀀스로 버그를 잡는다(추측 금지).
     private static let imeDebug = ProcessInfo.processInfo.environment["MARU_IME_DEBUG"] != nil
+    // Arrival logs run before admission guards so rejected callbacks remain observable.
     private func imeLog(_ label: String, _ text: String? = nil, keyCode: UInt16? = nil) {
         guard Self.imeDebug else { return }
         var line = "[IME] \(label)"
+        line += " t=\(ProcessInfo.processInfo.systemUptime) gen=\(imeOwnerGeneration) captured=\(interpretingIMEGeneration.map(String.init) ?? "none") owner=\(controller?.imeDiagnosticOwnerID ?? 0) discard=\(discardingIMECallbacks)"
         if let text {
             let hex = text.unicodeScalars.map { String(format: "U+%04X", $0.value) }.joined(separator: " ")
             line += " text=\"\(text)\" [\(hex)] len=\(text.utf16.count)"
@@ -314,8 +316,10 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     func commitMarkedTextIfComposing() -> Bool {
         // Query admission even without visible marked text: Zig may retain a rejected commit.
         let hadMarkedText = hasMarkedText() || !markedTextBuffer.isEmpty || pendingUnmarkText != nil
-        guard controller?.imeCommit() == true else { return false }
+        imeLog("admission_begin")
+        guard controller?.imeCommit() == true else { imeLog("admission_rejected"); return false }
         invalidateIMECallbacks()
+        imeLog("admission_accepted")
         guard hadMarkedText else { return true }
         markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
         editorHanjaCandidateActive = false
@@ -430,7 +434,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             let previousGeneration = self.interpretingIMEGeneration
             self.interpretingIMEKey = true
             self.interpretingIMEGeneration = callbackGeneration
+            self.imeLog("interpret_begin")
             defer {
+                self.imeLog("interpret_end")
                 self.interpretingIMEKey = previousKey
                 self.interpretingIMEGeneration = previousGeneration
             }
@@ -456,6 +462,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 방지용 오버라이드만) — 그 키의 전송 여부는 Zig의 ime_end가 일괄 판정한다(확정 텍스트가
     // 없고 조합 변화도 없으면 일반 키로 인코딩).
     override func doCommand(by selector: Selector) {
+        imeLog("callback_arrival doCommand accepted=\(acceptsIMECallback())")
         guard acceptsIMECallback() else { return }
         imeLog("doCommand:\(NSStringFromSelector(selector))")
         // deleteBackward는 Zig 트랜잭션에 기록한다 — 한글 마지막 자모 백스페이스에서 입력기가
@@ -471,6 +478,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
+        imeLog("callback_arrival insertText accepted=\(acceptsIMECallback())")
         guard acceptsIMECallback() else { return }
         pendingUnmarkGeneration = nil
         pendingUnmarkText = nil
@@ -494,6 +502,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 표시는 Zig가 커서 위치에 합성한다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        imeLog("callback_arrival setMarkedText accepted=\(acceptsIMECallback())")
         guard acceptsIMECallback() else { return }
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         imeLog("setMarkedText selected=\(selectedRange) replacement=\(replacementRange)", markedTextBuffer)
@@ -502,6 +511,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func unmarkText() {
+        imeLog("callback_arrival unmarkText accepted=\(acceptsIMECallback())")
         guard acceptsIMECallback() else { return }
         imeLog("unmarkText")
         editorHanjaCandidateActive = false
@@ -12275,6 +12285,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             latestFrameSummary = summary
         }
     }
+
+    // Read the summary already published by normal input/frame handling; diagnostics never tick the backend.
+    var imeDiagnosticOwnerID: UInt64 { latestFrameSummary.surface_id }
 
     // IME 키 트랜잭션: begin -> 입력기 해석(클로저) -> end. 판정은 전부 Zig가 한다.
     func imeKeyTransaction(

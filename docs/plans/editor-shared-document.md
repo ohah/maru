@@ -753,3 +753,18 @@ insert/marked/unmark/delete 콜백을 로컬 상태 변경 전에 거절하며, 
 문자열/범위 callback과 [discardMarkedText](https://developer.apple.com/documentation/appkit/nstextinputcontext/discardmarkedtext())의
 현재 conversion session 폐기 계약이다. 해당 문서가 거래 id나 폐기 후 모든 비동기 callback의
 종료를 보장한다고 추론하지 않는다. 캡처 세대와 폐기 재진입 scope는 Maru의 독립 설계다.
+
+
+### 실제 공유 owner 전환 관측 — 2026-10-02
+
+`macos-editor-ime-late-focus-smoke`의 최신 앱은 5개의 새 프로세스에서 실제 두벌식
+HID 조합 `가` → A/B Term 전환 → `나` → A 복귀를 통과했다. 각 회차에서
+marked callback 4회, 합계 20회와 owner 전환 10회가 관측됐다. 정본·저장 바이트는
+`L가 R나`이며 A caret은 UTF-16 위치 2로 유지됐고 입력 소스가 복원됐다.
+[실행 증거](../evidence/shared-ime-live-focus-20261002/manifest.json)는 소스·앱·
+회차별 전체 trace와 summary·저장 바이트의 SHA-256을 기록한다.
+초기 실패는 새 viewer에 caret을 놓지 않은 fixture 준비 문제였으며 그 전제조건만 보정했다.
+전환 HID post부터 새 published owner 관측까지와 이후 600ms 대기에서 자연 callback은
+0회였다. 기존 frame summary가 실제 전환보다 늦게 관측될 수 있어 두 구간을 함께
+검사했다. 이 회차들은 실제 한국어 공유 입력 전환의 회귀 증거이고, 자연 늦은 callback
+자체는 재현되지 않았다. token 없는 비동기 callback 수명 격리의 미완료 판정은 유지한다.

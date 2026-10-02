@@ -51,7 +51,11 @@ test "IME 조합 확정은 키보드·포인터·메뉴·드롭 네 모달리티
     try std.testing.expect(count(body, "controller?.imeCommit()") == 1);
     try std.testing.expect(count(body, "discardAdmittedMarkedText()") == 1);
     try std.testing.expect(count(body, "markedTextBuffer = \"\"") == 1);
-    const admission = std.mem.indexOf(u8, body, "guard controller?.imeCommit() == true else { return false }") orelse return error.TestUnexpectedResult;
+    // Arrival/admission diagnostics may precede the return; the rejection must still
+    // stop before owner invalidation or any marked-state cleanup.
+    const admission = std.mem.indexOf(u8, body, "guard controller?.imeCommit() == true else {") orelse return error.TestUnexpectedResult;
+    const rejected = between(body[admission..], "else {", "}") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(count(rejected, "return false") == 1);
     const clear = std.mem.indexOf(u8, body, "markedTextBuffer =") orelse return error.TestUnexpectedResult;
     const discard = std.mem.indexOf(u8, body, "discardAdmittedMarkedText()") orelse return error.TestUnexpectedResult;
     const no_marked = std.mem.indexOf(u8, body, "guard hadMarkedText else { return true }") orelse return error.TestUnexpectedResult;

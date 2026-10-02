@@ -3865,3 +3865,12 @@ paint/hit와 독립 선택·스크롤, stale hit 거절, projection OOM의 거�
 제품 draw-list를 CoreText·Metal에 태워 네 단계의 뷰별 PNG/PPM을 기록하고 정본 내용/
 revision·독립 선택·peer preedit 불변과 native 렌더 결과를 검사한다. source/artifact
 SHA-256 manifest가 해당 소스와 캡처를 묶는다. OS/HID 및 동시 두 pane 입력 증거는 아니다.
+
+
+실제 공유 입력 대상 전환은 opt-in `mise run macos-editor-ime-late-focus-smoke`로 검사한다.
+같은 문서 A/B Term의 준비 후 실제 한국어 HID 조합과 Cmd+Option+] / [ 전환을
+사용하며, 한 번 적용·독립 caret·저장·입력 소스 복원을 요구한다. stderr는 승인 guard
+이전 도착·현재 세대·캡처 세대·단조 시각과 focus post/관측 marker를 포함한다.
+owner 관측은 기존 published frame summary이므로 실제 전환 시점보다 늦을 수 있다.
+전환 전체 trace와 관측 뒤 대기 trace를 함께 확인한다. 자연 늦은 callback이
+관측되지 않은 회차는 해당 전환 회귀의 통과이며 token 없는 비동기 경로 완료가 아니다.

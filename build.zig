@@ -4014,7 +4014,7 @@ pub fn build(b: *std.Build) void {
 
         // Range callbacks and real input-source events prove different boundaries. The live gate
         // activates a window and temporarily changes the input source, so both remain opt-in.
-        inline for (.{ .{ "macos-editor-ime-smoke", "0" }, .{ "macos-editor-ime-live-smoke", "1" }, .{ "macos-editor-ime-wrapped-candidate-smoke", "2" } }) |row| {
+        inline for (.{ .{ "macos-editor-ime-smoke", "0" }, .{ "macos-editor-ime-live-smoke", "1" }, .{ "macos-editor-ime-wrapped-candidate-smoke", "2" }, .{ "macos-editor-ime-late-focus-smoke", "3" } }) |row| {
             const ime_smoke_step = b.step(row[0], "Run the native-editor NSTextInputClient fixture");
             const ime_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-editor-ime.sh", "./zig-out/Maru.app/Contents/MacOS/maru-macos-app", row[1] });
             ime_smoke.setCwd(b.path("."));

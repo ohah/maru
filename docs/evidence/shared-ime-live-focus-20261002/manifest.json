@@ -1,0 +1,148 @@
+{
+  "schema": "maru.editor-ime.live-focus.observation.v1",
+  "created_utc": "2026-10-02T02:29:51.896638+00:00",
+  "scope": "Real Korean HID shared-document owner roundtrip; setup caret/peer fixture, save NSEvent. No synthetic late callback injection. Published owner summary may lag actual cutover; whole switch interval also checked. No natural late callback reproduced.",
+  "app_sha256": "b183bdee7216e799e56ed0f2818cfb9c376c45bf5a65341b0010c2fd01294c8f",
+  "source_sha256": {
+    "src/platform/macos/MaruAppHost.swift": "9ccf43393f08206e23cdf8497929abc466324f111c18d5a2201f76c78e858e4a",
+    "src/platform/macos/EditorIMESmokeDriver.swift": "8a69e24e3f89c853824239b4a4c28f155c5e986901cd8c33732f93a79b0a6036",
+    "src/platform/macos/app_session/debug_fixtures.zig": "5d7f56433fd46751bfc21af0d6b88fb228f3586e015ed3821a63c971c894ce6b",
+    "src/platform/macos/app_session/editor_ime.zig": "28fe26f22ff3a6aeb7682d008e04543967d9bfe70834a9db587906a28d4251d0",
+    "src/platform/macos/app_session/editor/mod.zig": "ce15dbd8ad22caf8b2dc1115bc7022f09799b1651a9ca39522b102f3f4e8d530",
+    "src/platform/macos/app_session/input.zig": "fca0ca3e38960b85dda7dc03d2097e892ec31f581947a52ff857cf840dad438e",
+    "tools/test-macos-editor-ime.sh": "79fa8659a90defbe20cc48c4d761f9975d54ba1f92d4a433a6fa8e4fafecf195"
+  },
+  "records": [
+    {
+      "round": 2,
+      "app_pid": 29975,
+      "source": 2,
+      "peer": 3,
+      "failure_count": 0,
+      "actual_marked_callbacks": 4,
+      "switch_post_to_observed_callback_arrivals": [
+        0,
+        0
+      ],
+      "post_observed_callback_arrivals": 0,
+      "natural_late_callback_reproduced": false,
+      "saved_utf8": "L가 R나",
+      "source_caret_utf16": 2,
+      "input_source_restored": true,
+      "sha256": {
+        "summary.txt": "6e70eed0976ed2648a8f19cbfee94c444849c8f59a912f6c539e26ffd4769732",
+        "app.stderr.txt": "974208067df34d5e15485a5a1c087d40ae75b868540dcb17387809cfe9993dcf",
+        "document.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e",
+        "expected.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e"
+      },
+      "original_fixture_root": "/private/tmp/maru-editor-ime.4qQSJi",
+      "artifact_directory": "round-1"
+    },
+    {
+      "round": 3,
+      "app_pid": 31036,
+      "source": 2,
+      "peer": 3,
+      "failure_count": 0,
+      "actual_marked_callbacks": 4,
+      "switch_post_to_observed_callback_arrivals": [
+        0,
+        0
+      ],
+      "post_observed_callback_arrivals": 0,
+      "natural_late_callback_reproduced": false,
+      "saved_utf8": "L가 R나",
+      "source_caret_utf16": 2,
+      "input_source_restored": true,
+      "sha256": {
+        "summary.txt": "2dad945574fa0983bfbdc11bebf94c50d644227d024c5c6ecc4417f58ac086f0",
+        "app.stderr.txt": "90a7e0652bcc89942f5738d2999bef9884014213254bf1a5f54efdcdc0fc4e57",
+        "document.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e",
+        "expected.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e"
+      },
+      "original_fixture_root": "/private/tmp/maru-editor-ime.9uXvF8",
+      "artifact_directory": "round-2"
+    },
+    {
+      "round": 4,
+      "app_pid": 32997,
+      "source": 2,
+      "peer": 3,
+      "failure_count": 0,
+      "actual_marked_callbacks": 4,
+      "switch_post_to_observed_callback_arrivals": [
+        0,
+        0
+      ],
+      "post_observed_callback_arrivals": 0,
+      "natural_late_callback_reproduced": false,
+      "saved_utf8": "L가 R나",
+      "source_caret_utf16": 2,
+      "input_source_restored": true,
+      "sha256": {
+        "summary.txt": "3e7e6f85adaa6381ff1a4117e38e49f94921d2de1e1d3fd56cc53c0234678dc1",
+        "app.stderr.txt": "b901b280f24b3ed8f8c56f81ba5a40038e4ef36b59e603d886c7ea4ca15dc011",
+        "document.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e",
+        "expected.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e"
+      },
+      "original_fixture_root": "/private/tmp/maru-editor-ime.d0gceA",
+      "artifact_directory": "round-3"
+    },
+    {
+      "round": 5,
+      "app_pid": 37234,
+      "source": 2,
+      "peer": 3,
+      "failure_count": 0,
+      "actual_marked_callbacks": 4,
+      "switch_post_to_observed_callback_arrivals": [
+        0,
+        0
+      ],
+      "post_observed_callback_arrivals": 0,
+      "natural_late_callback_reproduced": false,
+      "saved_utf8": "L가 R나",
+      "source_caret_utf16": 2,
+      "input_source_restored": true,
+      "sha256": {
+        "summary.txt": "7bce86621cc04346c5b9ac2a8d87903ecd0e80148b0edd877b338da21f4b8403",
+        "app.stderr.txt": "1389c9fd4860b16ff7fa2d7ed516cbea005b7de01ab1550b5f887d38ba93740d",
+        "document.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e",
+        "expected.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e"
+      },
+      "original_fixture_root": "/private/tmp/maru-editor-ime.j3e02A",
+      "artifact_directory": "round-4"
+    },
+    {
+      "round": 6,
+      "app_pid": 37973,
+      "source": 2,
+      "peer": 3,
+      "failure_count": 0,
+      "actual_marked_callbacks": 4,
+      "switch_post_to_observed_callback_arrivals": [
+        0,
+        0
+      ],
+      "post_observed_callback_arrivals": 0,
+      "natural_late_callback_reproduced": false,
+      "saved_utf8": "L가 R나",
+      "source_caret_utf16": 2,
+      "input_source_restored": true,
+      "sha256": {
+        "summary.txt": "e3b1e5a1bb7c8193b09ba192bc15cc6be11a9629f6a4191858623a6e4d70c792",
+        "app.stderr.txt": "9bcf691030a1d5c8f1920c189370aa1ec31420f7d640e6c0c9e63db58247c0aa",
+        "document.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e",
+        "expected.txt": "a29ba7627f5fab235416797cc52786140820f25e049ce9976d02b92a2b20300e"
+      },
+      "original_fixture_root": "/private/tmp/maru-editor-ime.DgQoLg",
+      "artifact_directory": "round-5"
+    }
+  ],
+  "base_head": "88622b2e4160edca13a446592baf31f9016fe7af",
+  "initial_failed_setup": {
+    "failure_count": 27,
+    "fixture_root": "/private/tmp/maru-editor-ime.kl3SZ6",
+    "cause": "New viewer had no caret; fixture now initializes source caret before peer cloning. Product viewer policy unchanged."
+  }
+}

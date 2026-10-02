@@ -1859,11 +1859,12 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
             if (seeded_untitled and ui == 0) break; // 씨로 이미 만든 그 record 다
             const ut = m.untitled_terms[ui];
             const at = @min(ut.insert_after, pane.terms.items.len);
+            // **끼울 자리를 먼저 잡는다.** 되살리기는 레코드를 소비한다(창이 확정되면 그 레코드를 지운다 —
+            // `DeferredBackupDrop`). 되살린 **뒤에** 끼우기가 실패해 탭을 버리면 창은 그대로 확정되고 레코드까지
+            // 지워져 미저장 내용이 사라졌다. 자리를 못 잡으면 되살리지도 않는다 — 레코드는 다음 실행을 기다린다.
+            pane.terms.ensureUnusedCapacity(self.allocator, 1) catch continue;
             const term = editor_ops.createRestoredUntitledTerm(self, ut.number) catch continue; // 그 record 만 버린다
-            pane.terms.insert(self.allocator, at, term) catch {
-                term_ops.destroyTerm(self, term);
-                continue;
-            };
+            pane.terms.insertAssumeCapacity(at, term);
             if (at <= pane.active_term) pane.active_term += 1;
         }
         pane.active_term = @min(pane.active_term, pane.terms.items.len - 1);

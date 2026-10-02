@@ -282,9 +282,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-// 200: W6a② — osr_keyboard_active 가 키 대상 탭에 팝업 위젯이 열려 있으면 2, osr_key phase 3(열린 목록의 키 — 누름과 글자,
+// 202: W6a② — osr_keyboard_active 가 키 대상 탭에 팝업 위젯이 열려 있으면 2, osr_key phase 3(열린 목록의 키 — 누름과 글자,
 // 입력기 없이).
-// 201: W6b — osr_tooltip(hover 중인 Chromium 탭의 툴팁 글과 일련번호 — Swift 가 macOS 툴팁으로 띄운다).
+// 203: W6b — osr_tooltip(hover 중인 Chromium 탭의 툴팁 글과 일련번호 — Swift 가 macOS 툴팁으로 띄운다).
 pub const abi_version: u32 = 203;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과

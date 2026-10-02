@@ -1620,7 +1620,7 @@ fn diffRowCount(term: *const Term) usize {
 /// 풀어 두면 `hitTestBody`가 **행 해석에** live 상태를 안 읽는다. 기하와 셀 크기도 같은 이유로 이
 /// 함수가 함께 굳힌다(아래 `editor_hit_geom` 대입) — 셋이 한 함수 안에서 사이에 return 없이 세워지므로
 /// "행 배열과 다른 프레임의 기하"가 생길 자리가 없다.
-fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, rows: []const chrome_editor.visual_map.VisualRow) void {
+fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, rows: []const chrome_editor.visual_map.VisualRow, painted_total_lines: usize) void {
     if (rows.len > term.rt.editor_hit_rows.len) {
         const grown = self.allocator.alloc(chrome_editor.visual_map.VisualRow, rows.len) catch {
             term.rt.editor_hit_rows_len = 0; // 못 잡았다 — 이 프레임은 클릭을 못 받는다
@@ -1677,11 +1677,11 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
     const inner_h = body_outer.h -| inset * 2;
     // **미니맵이 가져간 폭을 뺀다**(§6.1) — 렌더가 그 폭에서 열 수를 쟀다.
     const m = chrome_editor.diff_frame.sideMetrics(inner_w -| minimapPxFor(self, term, inner_w), inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
-    var geometry_arena = std.heap.ArenaAllocator.init(self.allocator);
-    defer geometry_arena.deinit();
-    const geometry_view = makePreeditViewWithSession(self, geometry_arena.allocator(), term);
     term.rt.editor_hit_capacity_rows = m.visible_rows -| 1;
-    const lay = chrome_editor.geometry.compute(m.total_cols, if (geometry_view) |v| v.total_lines else term.rt.editor_lines.len, .{});
+    // Use the line count of the frame that produced these rows. Rebuilding the
+    // overlay here could fail allocation and silently publish a canonical gutter
+    // against projected text (at the 99,999 -> 100,000 line-width boundary).
+    const lay = chrome_editor.geometry.compute(m.total_cols, painted_total_lines, .{});
     term.rt.editor_hit_geom = .{
         .body_x = @intCast(body_outer.x + inset),
         .body_y = @intCast(body_outer.y + inset),
@@ -2140,7 +2140,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // Result·Incoming·Base 순). 앞에서부터 읽으면 **Current pane 의 행**을 Result 것으로 굳혀,
         // 위젯 행이 없어지고 짧은 문서에서만 우연히 맞는다(S3b-3a 판정자가 잡았다).
         const result_part = chrome_editor.merge_frame.splitScratch(scratch, 1);
-        storeHitRows(self, term, leaf_rect, result_part.visual_rows[0..@min(pf.visual_rows, result_part.visual_rows.len)]);
+        storeHitRows(self, term, leaf_rect, result_part.visual_rows[0..@min(pf.visual_rows, result_part.visual_rows.len)], if (projected) |v| v.total_lines else term.rt.editor_lines.len);
         // **판 둘의 행과 기하도 같은 순간에 굳힌다**(S3b-3c). 첫째·셋째 조각이 Current·Incoming 이다.
         const cur_part = chrome_editor.merge_frame.splitScratch(scratch, 0);
         const inc_part = chrome_editor.merge_frame.splitScratch(scratch, 2);
@@ -2149,7 +2149,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         const base_part = chrome_editor.merge_frame.splitScratch(scratch, 3);
         editor_merge_ops.storePaneHits(self, term, .base, base_part.visual_rows[0..@min(pf.merge_base_visual_rows, base_part.visual_rows.len)], pf.merge_base_top);
     } else {
-        storeHitRows(self, term, leaf_rect, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
+        storeHitRows(self, term, leaf_rect, visual_rows[0..@min(pf.visual_rows, visual_rows.len)], if (projected) |v| v.total_lines else term.rt.editor_lines.len);
     }
     if (projected) |v| {
         term.rt.editor_hit_preedit_first = draw_first;
@@ -46779,4 +46779,220 @@ test "shared editor IME terminal interpretation retains its target before editor
     try testing.expectEqual(@as(u64, 0), fx.term.rt.editorDocument().opened.?.file.revision);
     try testing.expect(fx.session.activateSurfaceById(fx.term.surface.id));
     try testing.expectEqual(events + 1, fx.session.total_terminal_input_events);
+}
+
+const SharedIMESingleFailAllocator = struct {
+    child: std.mem.Allocator,
+    attempts: usize = 0,
+    fail_at: usize = std.math.maxInt(usize),
+    failed: bool = false,
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        const at = self.attempts;
+        self.attempts += 1;
+        if (at == self.fail_at) {
+            self.failed = true;
+            return null;
+        }
+        return self.child.rawAlloc(len, alignment, ra);
+    }
+    fn resize(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.child.rawResize(memory, alignment, new_len, ra);
+    }
+    fn remap(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.child.rawRemap(memory, alignment, new_len, ra);
+    }
+    fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.child.rawFree(memory, alignment, ra);
+    }
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+};
+
+test "shared editor IME adversarial R1 isolated drawing OOM keeps painted glyph hits in the same gutter" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try testing.expect(selectAll(fx.session, fx.term));
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    try text.appendSlice(testing.allocator, "Zsuffix\n");
+    for (0..99993) |_| try text.appendSlice(testing.allocator, "t\n");
+    try testing.expect(insertText(fx.session, fx.term, text.items));
+    try testing.expectEqual(@as(usize, 99995), fx.term.rt.editor_lines.len);
+    // Line-number width has a five-cell minimum: the first real gutter transition
+    // is 99,999 -> 100,000, not 999 -> 1,000.
+    try testing.expect(chrome_editor.geometry.compute(80, 99995, .{}).contentLeft() < chrome_editor.geometry.compute(80, 100005, .{}).contentLeft());
+    const peer = try sharedViewFixturePeer(&fx);
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(ime.marked(fx.session, "한\n한\n한\n한\n한\n한\n한\n한\n한\n한\n", .{ .location = 20, .length = 0 }, null));
+    const notifications = peer.rt.editorDocument().notifications;
+    const selection = peer.rt.editor_selection;
+    var warm = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingWarmFrame;
+    warm.dl.deinit(testing.allocator);
+    var counting = SharedIMESingleFailAllocator{ .child = testing.allocator };
+    fx.session.allocator = counting.allocator();
+    var counted = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingCountedFrame;
+    fx.session.allocator = testing.allocator;
+    counted.dl.deinit(testing.allocator);
+    var induced: usize = 0;
+    var accepted: usize = 0;
+    for (0..counting.attempts) |failure| {
+        var failing = SharedIMESingleFailAllocator{ .child = testing.allocator, .fail_at = failure };
+        fx.session.allocator = failing.allocator();
+        const maybe = appendPaneFrame(fx.session, fx.leaf_rect, peer);
+        fx.session.allocator = testing.allocator;
+        if (failing.failed) induced += 1;
+        try testing.expectEqualDeep(selection, peer.rt.editor_selection);
+        try testing.expectEqualDeep(notifications, peer.rt.editorDocument().notifications);
+        try testing.expectEqualStrings(text.items, peer.rt.editorDocument().opened.?.file.content);
+        if (maybe) |drawn_value| {
+            var drawn = drawn_value;
+            defer drawn.dl.deinit(testing.allocator);
+            if (peer.rt.editor_hit_rows_len == 0 or hitSnapshotStale(fx.session, peer)) continue;
+            for (drawn.dl.cells) |cell| {
+                if (cell.codepoint != 'Z') continue;
+                const x = @as(f64, @floatFromInt(drawn.rect.x + @as(u32, cell.col) * fx.session.cell_width_px)) + @as(f64, @floatFromInt(fx.session.cell_width_px)) / 4;
+                const y = @as(f64, @floatFromInt(drawn.rect.y + @as(u32, cell.row) * fx.session.cell_height_px)) + @as(f64, @floatFromInt(fx.session.cell_height_px)) / 2;
+                const hit = hitTestBodyModeWithSession(.cluster, fx.session, peer, x, y);
+                if (hit != 0) std.debug.print("R1 OOM counterexample: fail_at={d} glyph=({d},{d}) hit={any} content_left={d} stamp={d}\n", .{ failure, cell.col, cell.row, hit, peer.rt.editor_hit_geom.content_left_px, peer.rt.editor_hit_preedit_stamp });
+                try testing.expectEqual(@as(?usize, 0), hit);
+                accepted += 1;
+            }
+        }
+    }
+    std.debug.print("R1 OOM matrix: allocation_positions={d} induced={d} painted_hits_checked={d}\n", .{ counting.attempts, induced, accepted });
+    try testing.expect(induced > 0 and accepted > 0);
+}
+
+test "shared editor IME adversarial R1 explicit UTF16 CRLF replacement maps peer painted suffix to canonical bytes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const canonical = "ab😀\r\n한tail\r\nZsuffix\nend";
+    try testing.expect(selectAll(fx.session, fx.term));
+    try testing.expect(insertText(fx.session, fx.term, canonical));
+    const peer = try sharedViewFixturePeer(&fx);
+    try sharedPreeditFixtureFocus(&fx);
+    peer.rt.editor_selection = editor_selection.Selection.fromPoints(25, 17);
+    peer.rt.editor_wrap = true;
+    const peer_selection = peer.rt.editor_selection;
+    const doc = peer.rt.editorDocument();
+    const notifications = doc.notifications;
+    try testing.expect(ime.marked(fx.session, "가\n😀", .{ .location = 4, .length = 0 }, .{ .location = 2, .length = 7 }));
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_preedit_at);
+    try testing.expectEqual(@as(usize, 13), fx.term.rt.editor_preedit_end);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const projected = makePreeditViewWithSession(fx.session, arena.allocator(), peer) orelse return error.MissingPeerProjection;
+    try testing.expectEqualStrings("ab가", projected.lines[0]);
+    try testing.expectEqualStrings("😀il", projected.lines[1]);
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingPeerFrame;
+    defer painted.dl.deinit(testing.allocator);
+    var suffix_checked = false;
+    for (painted.dl.cells) |cell| {
+        if (cell.codepoint != 'Z') continue;
+        const x = @as(f64, @floatFromInt(painted.rect.x + @as(u32, cell.col) * fx.session.cell_width_px)) + @as(f64, @floatFromInt(fx.session.cell_width_px)) / 4;
+        const y = @as(f64, @floatFromInt(painted.rect.y + @as(u32, cell.row) * fx.session.cell_height_px)) + @as(f64, @floatFromInt(fx.session.cell_height_px)) / 2;
+        try testing.expectEqual(@as(?usize, 17), hitTestBodyModeWithSession(.cluster, fx.session, peer, x, y));
+        suffix_checked = true;
+    }
+    try testing.expect(suffix_checked);
+    // A borrowed projection must not permit the peer to publish an edit over its owner's range.
+    try testing.expect(!insertText(fx.session, peer, "wrong"));
+    try testing.expectEqualStrings(canonical, doc.opened.?.file.content);
+    try testing.expectEqualDeep(peer_selection, peer.rt.editor_selection);
+    try testing.expectEqualDeep(notifications, doc.notifications);
+    // Diff rendering observes its own rows even if an internal fixture shares State identity.
+    peer.rt.editor_diff = .{};
+    defer peer.rt.editor_diff = null;
+    try testing.expect(makePreeditViewWithSession(fx.session, arena.allocator(), peer) == null);
+    try testing.expectEqual(@as(u64, 0), preeditStampWithSession(fx.session, peer));
+    var diff = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingDiffStatusFrame;
+    defer diff.dl.deinit(testing.allocator);
+    try testing.expect(!drawnHasCodepoint(diff.dl, 0xAC00));
+    try testing.expectEqualStrings("가\n😀", fx.term.rt.editor_preedit);
+    try testing.expectEqualStrings(canonical, doc.opened.?.file.content);
+}
+
+test "shared editor IME adversarial R1 closing inactive peer preserves live owner and surviving projection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const retiring = try sharedViewFixturePeer(&fx);
+    const survivor = try sharedViewFixturePeer(&fx);
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    const doc = fx.term.rt.editorDocument();
+    const canonical = try testing.allocator.dupe(u8, doc.opened.?.file.content);
+    defer testing.allocator.free(canonical);
+    const notifications = doc.notifications;
+    survivor.rt.editor_selection = editor_selection.Selection.fromPoints(12, 6);
+    const before_selection = survivor.rt.editor_selection;
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    const retired_id = retiring.surface.id;
+    const pane = pane_ops.activePane(fx.session);
+    const index: usize = for (pane.terms.items, 0..) |member, i| {
+        if (member == retiring) break i;
+    } else return error.MissingRetiringPeer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, index);
+    try testing.expect(term_ops.termBySurfaceId(fx.session, retired_id) == null);
+    try testing.expectEqual(fx.term.surface.id, fx.session.ime_terminal_target_id.?);
+    try testing.expect(fx.session.app_window.active().? == fx.term.surface);
+    try testing.expectEqualStrings("한", fx.term.rt.editor_preedit);
+    try testing.expectEqualStrings(canonical, doc.opened.?.file.content);
+    try testing.expectEqualDeep(notifications, doc.notifications);
+    try testing.expectEqualDeep(before_selection, survivor.rt.editor_selection);
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, survivor) orelse return error.MissingSurvivorFrame;
+    defer painted.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasCodepoint(painted.dl, 0xD55C));
+    try testing.expect(fx.session.tryCommitComposition());
+    try testing.expect(std.mem.startsWith(u8, doc.opened.?.file.content, "한const"));
+    const revision = doc.opened.?.file.revision;
+    try testing.expect(fx.session.tryCommitComposition());
+    try testing.expectEqual(revision, doc.opened.?.file.revision);
+}
+
+// Host callback ordering oracle: rejection must not settle bytes before a later delete.
+test "shared editor IME rejected focus keeps later callback deletion at original owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |kind| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const peer = try openSharedViewInActivePane(fx.session, fx.term);
+        try sharedPreeditFixtureFocus(&fx);
+        fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+        peer.rt.editor_selection = editor_selection.Selection.at(24);
+        const doc = fx.term.rt.editorDocument();
+        const original = try testing.allocator.dupe(u8, doc.opened.?.file.content);
+        defer testing.allocator.free(original);
+        const input = if (kind == 1) "한글" else "한";
+        fx.session.imeBegin();
+        fx.session.imeInsert(input);
+        try testing.expect(!fx.session.activateSurfaceById(peer.surface.id));
+        try testing.expect(!fx.session.trySetFocused(false));
+        try testing.expectEqualStrings(input, fx.session.ime_inserted.items);
+        try testing.expectEqualStrings(original, doc.opened.?.file.content);
+        if (kind != 0) fx.session.imeDeleteBackward();
+        fx.session.imeEnd(null);
+        const expected = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ if (kind == 2) "" else "한", original });
+        defer testing.allocator.free(expected);
+        try testing.expectEqualStrings(expected, doc.opened.?.file.content);
+        try testing.expectEqual(@as(u64, if (kind == 2) 0 else 1), doc.opened.?.file.revision);
+        try testing.expect(!fx.session.ime_active);
+        try testing.expectEqual(@as(usize, 0), fx.session.ime_inserted.items.len);
+        try testing.expect(fx.session.activateSurfaceById(peer.surface.id));
+        const revision = doc.opened.?.file.revision;
+        fx.session.imeEnd(null);
+        try testing.expectEqual(revision, doc.opened.?.file.revision);
+        try testing.expectEqualStrings(expected, doc.opened.?.file.content);
+    }
 }

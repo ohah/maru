@@ -4,12 +4,16 @@
 macOS only. Creates an isolated source snapshot and compiles a focused fixture there.
 No installed app, GUI input, input source, TCC, or repository build graph is changed.
 The captures are separate per-view frames, not one simultaneous two-pane window.
+Each phase/view executes in a fresh process because the product screenshot hook
+retains its initial environment path for the lifetime of that process.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -77,6 +81,10 @@ def main() -> None:
     build_path = snapshot / "build.zig"
     build = unique_replace(build_path.read_text(), ANCHOR, LINK + ANCHOR)
     build = unique_replace(build, FILTER, '.filters = &.{"shared editor GPU capture"},')
+    # Cached compilation is reusable; the test execution must happen every time.
+    build = unique_replace(build, "    const run_shared_editor_tests = b.addRunArtifact(shared_editor_tests);",
+                           "    const run_shared_editor_tests = b.addRunArtifact(shared_editor_tests);\n"
+                           "    run_shared_editor_tests.has_side_effects = true;")
     build_path.write_text(build)
     fixture = (snapshot / "tools/shared-ime-gpu/fixture.zig.inc").read_text()
     # Escape only the inside of the fixture's Zig string literals.
@@ -86,10 +94,33 @@ def main() -> None:
         stream.write("\n\n" + fixture)
     command = ["mise", "exec", "--", "zig", "build", "test-editor-shared", "-j2"]
     log = output / "capture.log"
-    with log.open("w") as stream:
-        subprocess.run(command, cwd=snapshot, stdout=stream, stderr=subprocess.STDOUT,
-                       check=True, timeout=600)
     phases = ("before", "marked", "cancelled", "committed")
+    executions = []
+    process_ids = set()
+    with log.open("w") as combined:
+        for phase in phases:
+            for view in ("owner", "peer"):
+                selectors = {"MARU_SHARED_IME_CAPTURE_PHASE": phase,
+                             "MARU_SHARED_IME_CAPTURE_VIEW": view}
+                run_log = output / f"capture-{phase}-{view}.log"
+                with run_log.open("w") as stream:
+                    subprocess.run(command, cwd=snapshot, env={**os.environ, **selectors},
+                                   stdout=stream, stderr=subprocess.STDOUT,
+                                   check=True, timeout=600)
+                transcript = run_log.read_text()
+                combined.write(transcript)
+                combined.flush()
+                captures = re.findall(r"GPU (\w+)/(\w+) pid=(\d+) status=0 draw=1 png=1 revision=(\d+)", transcript)
+                if len(captures) != 1 or captures[0][:2] != (phase, view):
+                    raise RuntimeError(f"Expected exactly one acknowledged frame: {phase}/{view}")
+                pid = int(captures[0][2])
+                if pid in process_ids:
+                    raise RuntimeError("Capture process was reused across scenarios")
+                process_ids.add(pid)
+                if int(captures[0][3]) != int(phase == "committed"):
+                    raise RuntimeError("Captured canonical revision disagrees with the phase")
+                executions.append({"argv": command, "env": selectors, "cwd": str(snapshot),
+                                   "log": str(run_log), "capture_process_pid": pid})
     images = [artifacts / f"{phase}-{view}.{ext}" for phase in phases
               for view in ("owner", "peer") for ext in ("png", "ppm")]
     for image in images:
@@ -105,6 +136,7 @@ def main() -> None:
         "snapshot_mod_sha256": digest(mod_path),
         "snapshot_build_sha256": digest(build_path),
         "command": command,
+        "fresh_process_commands": executions,
         "log": str(log),
         "phases": {phase: {"canonical_revision": int(phase == "committed"),
                            "peer_preedit_bytes": 0} for phase in phases},

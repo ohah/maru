@@ -750,11 +750,6 @@ fn expectResealedPhaseBeforeContextReject(
 
 fn runActualPreparedSettlement(options: ActualSettlementOptions) !void {
     try attachment_mod.testing_api.initializeProcessRuntime();
-    // reentry 콜백은 «정산 도중에는 post snapshot 이 아직 없다»(`post_unpublished`)를 본다. 그 snapshot 은 제품 이벤트
-    // 해제가 끝날 때마다 채워지고 누가 가져가야만 비는 판정자 전역(threadlocal)이라, 앞선 판정자가 남긴 것이 있으면
-    // 거짓이 된다(2026-10-01 실측: `C3-3b6 AppSession은 owner별 cleanup 뒤 backend graph를 마지막에 파괴한다` 바로
-    // 뒤에 두면 매번 깨졌고, 이어진 teardown panic 이 그 실패를 가려 샤드가 통째로 죽었다). 시작 전에 비운다.
-    _ = attachment_mod.testing_api.takeEventReleasePostSnapshot();
     var forwarding_allocator: CallbackForwardingAllocator = .{ .parent = std.testing.allocator };
     const allocator = forwarding_allocator.allocator();
     var fds: [2]std.c.fd_t = undefined;

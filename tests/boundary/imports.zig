@@ -1294,7 +1294,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "ui_frame_stamp_test_generation" },
-                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "currentTestGeneration" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "currentTestGeneration" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "effectiveUiFrameStamp" },
                 // poison 이 어느 불변식에서 났는지 남기는 축(=진단). 판정은 안 바꾸고 사유만 적는다.
                 .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "ScopeInvalidAxis" },
@@ -1646,6 +1646,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                // post snapshot 을 쓴 판정자의 번호(2026-10-02) — 판정자 빌드 전용(`void`). 앞선 판정자가 남긴 snapshot 이 실행
+                // 순서에 따라 뒤 판정자의 «아직 게시 안 됨» 단언을 깨던 것을 UI 프레임 도장과 같은 장치로 순서와 무관하게 닫는다.
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_post_snapshot_test_generation" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "encodeGenerationRequestParamsWithCapabilities" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "catchup_barrier_contract" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_deadline" },

@@ -87,6 +87,11 @@ pub const EventReleasePostSnapshot = struct {
 };
 threadlocal var event_release_post_snapshot: if (builtin.is_test) ?EventReleasePostSnapshot else void =
     if (builtin.is_test) null else {};
+/// post snapshot 을 **쓴 판정자의 번호**(`client_mod.currentTestGeneration`). 꺼낼 때 번호가 다르면 「없음」 이다 — 제품 이벤트
+/// 해제가 끝날 때마다 채워지고 누가 꺼내야만 비는 판정자 전역이라, 앞선 판정자가 남긴 것이 실행 순서에 따라 뒤 판정자의 «아직
+/// 게시 안 됨» 단언을 깼다(2026-10-01 — 그때는 읽는 판정자가 시작에서 비웠다). UI 프레임 도장과 같은 장치다.
+threadlocal var event_release_post_snapshot_test_generation: if (builtin.is_test) u64 else void =
+    if (builtin.is_test) 0 else {};
 threadlocal var pending_event_payload_callback_count: if (builtin.is_test) u64 else void =
     if (builtin.is_test) 0 else {};
 
@@ -391,6 +396,7 @@ pub const testing = if (builtin.is_test) struct {
     pub fn takeEventReleasePostSnapshot() ?EventReleasePostSnapshot {
         const snapshot = event_release_post_snapshot;
         event_release_post_snapshot = null;
+        if (event_release_post_snapshot_test_generation != client_mod.currentTestGeneration()) return null;
         return snapshot;
     }
 
@@ -11932,6 +11938,7 @@ pub fn finishPendingEventReleaseNoFail(
         .callback = begun.callback_returned_receipt,
     };
     if (!settlement_contract.validEventReleasePostContext(post_context, post, completion)) effectProofLoss();
+    if (builtin.is_test) event_release_post_snapshot_test_generation = client_mod.currentTestGeneration();
     if (builtin.is_test) event_release_post_snapshot = .{
         .permit_seal = permit_seal,
         .post = post,
@@ -23677,4 +23684,25 @@ test "CR3a-2c2 stale stream operation permit rejects before deinitialized node a
         error.InvalidStreamOperationPermit,
         slot.consumeStreamOperationPermit(permit),
     );
+}
+
+test "post snapshot 은 그것을 쓴 판정자 안에서만 꺼내진다 — 앞선 판정자가 남긴 것은 「없음」" {
+    const root = @import("root");
+    if (comptime !@hasDecl(root, "maru_test_generation")) return error.SkipZigTest;
+    const own = @atomicLoad(u64, &root.maru_test_generation, .monotonic);
+    defer @atomicStore(u64, &root.maru_test_generation, own, .monotonic);
+    defer event_release_post_snapshot = null;
+
+    // 같은 판정자 안에서 쓰면 그대로 꺼내진다(제품 이벤트 해제 완료가 하는 일 — 번호와 값을 함께 적는다).
+    event_release_post_snapshot_test_generation = client_mod.currentTestGeneration();
+    event_release_post_snapshot = undefined;
+    try std.testing.expect(testing.takeEventReleasePostSnapshot() != null);
+    try std.testing.expect(testing.takeEventReleasePostSnapshot() == null);
+
+    // 다음 판정자인 척 번호만 바꾼다 — 값은 앞 판정자가 남긴 그대로. 이제 「없음」 이고, 꺼내면서 비워진다.
+    event_release_post_snapshot_test_generation = client_mod.currentTestGeneration();
+    event_release_post_snapshot = undefined;
+    @atomicStore(u64, &root.maru_test_generation, own +% 1, .monotonic);
+    try std.testing.expect(testing.takeEventReleasePostSnapshot() == null);
+    try std.testing.expect(event_release_post_snapshot == null);
 }

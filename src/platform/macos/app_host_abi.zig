@@ -8928,3 +8928,18 @@ test "IME_ACK1 commit and focus ABI reject read-only admission and retry exactly
     }
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_commit_composition(null));
 }
+
+test "러너는 판정자마다 번호를 바꾼다 — 프레임 도장 같은 판정자 전역이 판정자 사이에서 새지 않게" {
+    // `client.zig` 의 UI 프레임 도장은 올린 판정자의 번호(`maru_test_generation`)와 함께 적히고, 번호가 다르면 0 으로
+    // 읽힌다 — 그래야 앞선 판정자가 남긴 도장이 실행 순서와 무관하게 뒤 판정자를 막지 않는다. 그 장치는 러너가 **판정자마다
+    // 번호를 바꾼다**는 데 달려 있다. 러너가 안 바꾸면 모든 판정자가 같은 번호라 장치가 조용히 꺼진다. 그래서 이
+    // 판정자는 자기 번호가 정확히 「자기 위치 + 1」 인지 본다. 이 바이너리는 CI 에서 늘 이 저장소의 러너로 돈다.
+    const root = @import("root");
+    if (comptime !@hasDecl(root, "maru_test_generation")) return error.TestUnexpectedResult;
+    const me = "러너는 판정자마다 번호를 바꾼다 — 프레임 도장 같은 판정자 전역이 판정자 사이에서 새지 않게";
+    var position: ?usize = null;
+    for (builtin.test_functions, 0..) |t, i| {
+        if (std.mem.endsWith(u8, t.name, me)) position = i;
+    }
+    try std.testing.expectEqual(@as(?u64, @as(u64, position orelse return error.TestUnexpectedResult) + 1), @atomicLoad(u64, &root.maru_test_generation, .monotonic));
+}

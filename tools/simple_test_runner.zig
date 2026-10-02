@@ -20,6 +20,16 @@ pub const std_options: std.Options = .{
     .logFn = log,
 };
 
+/// **지금 도는 판정자의 번호**(`builtin.test_functions` 안의 위치 + 1, 아직 아무것도 안 돌면 0). 첫 테스트 직전부터
+/// 각 테스트를 부르기 **직전**에 바뀐다.
+///
+/// 판정자들은 한 프로세스의 전역을 나눠 쓴다. 앞선 판정자가 올려 두고 안 되돌린 전역이 뒤 판정자를 깨는 일이
+/// 실행 순서에 따라 나타났다 사라졌다(2026-10-01 — 선언 순서가 바뀌자 프레임 도장이 남아 판정자 넷이 깨졌다).
+/// 이 번호로 그런 전역은 **자기를 쓴 판정자 안에서만** 유효하게 만들 수 있다 — 쓸 때 번호를 함께 적고, 읽을 때
+/// 번호가 다르면 「없음」으로 본다(`client.zig` 의 UI 프레임 도장). 제품 코드는 `@hasDecl(@import("root"), …)` 로
+/// 읽어 이 러너가 아닌 곳(제품 빌드·기본 러너)에서는 0 이다 — extern 이 아니라 링크를 깨지 않는다.
+pub var maru_test_generation: u64 = 0;
+
 /// **fork 된 판정자 자식이 panic 하면 DWARF 를 읽지 않는다** — 함수 이름 수준의 스택만 찍고 끝낸다.
 ///
 /// fail-stop 판정자는 일부러 panic 하는 자식을 fork 하고, 부모는 그 자식의 종료 상태와 stderr 의 **panic 메시지
@@ -289,6 +299,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         testing.environ = init.environ;
         is_fuzz_test = false;
 
+        @atomicStore(u64, &maru_test_generation, @as(u64, index) + 1, .monotonic);
         const test_node = root_node.start(test_fn.name, 0);
         if (!have_tty) std.debug.print("{d}/{d} {s}...", .{ index + 1, test_functions.len, test_fn.name });
         if (test_fn.func()) |_| {

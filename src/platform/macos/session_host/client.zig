@@ -557,6 +557,37 @@ test "client connect errno classification separates launchable absence from deni
     try std.testing.expectEqual(EndpointFailure.transient, classifyConnectErrno(.TIMEDOUT));
 }
 
+test "프레임 도장은 그것을 올린 판정자 안에서만 유효하다 — 다음 판정자의 되풀이 읽기를 막지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const root = @import("root");
+    if (comptime !@hasDecl(root, "maru_test_generation")) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = Client{ .allocator = allocator, .fd = fds[0], .host_id = 1, .parser = framing.FrameParser.init(allocator) };
+    defer client.deinit();
+    resetUiFrameStampForTest();
+    defer resetUiFrameStampForTest();
+    const own = @atomicLoad(u64, &root.maru_test_generation, .monotonic);
+    defer @atomicStore(u64, &root.maru_test_generation, own, .monotonic);
+
+    // 같은 판정자 안에서는 제품 의미 그대로다: 도장을 올린 프레임의 첫 «비어 있음» 이 캐시돼, 그 뒤 데이터가 와도 같은
+    // 프레임의 두 번째 읽기는 소켓을 안 본다.
+    advanceUiFrameStamp();
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    const frame = try framing.encodeFrame(allocator, .{ .kind = .snapshot_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream }, "x");
+    defer allocator.free(frame);
+    try socket_server.writeAll(fds[1], frame);
+    try testing.expect((try client.readStreamBatch(7)) == null);
+
+    // 다음 판정자인 척 번호만 바꾼다 — 도장은 앞 판정자가 남긴 그대로 둔다. 이제 도장은 0 으로 보여 소켓을 다시 본다.
+    @atomicStore(u64, &root.maru_test_generation, own +% 1, .monotonic);
+    const batch = (try client.readStreamBatch(7)) orelse return error.TestUnexpectedResult;
+    defer batch.deinit();
+    try testing.expectEqualStrings("x", batch.bytes);
+}
+
 test "client screen assembler yields between split snapshot chunks and resumes boundedly" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -570,11 +601,6 @@ test "client screen assembler yields between split snapshot chunks and resumes b
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    // 이 판정자는 «같은 프레임» 안에서 소켓에 써 놓고 곧장 읽는다 — 앞선 판정자(remote_term_backend 의 제품 tick)가
-    // 올려 둔 프레임 도장이 남아 있으면 첫 읽기가 남긴 «비어 있음» 캐시가 두 번째 읽기를 막는다(집계 실행 1550/2662 에서
-    // `.?` 가 터졌다). 도장을 0 으로 되돌려 캐시를 끈다.
-    resetUiFrameStampForTest();
-    defer resetUiFrameStampForTest();
     const first = try framing.encodeFrame(
         allocator,
         .{ .kind = .snapshot_chunk, .stream_id = 7 },
@@ -7777,7 +7803,7 @@ pub const Client = struct {
         defer if (operation_fence_held) self.endPublicMutation();
         if (stream_id == 0) return error.ProtocolError;
         if (self.pending_outbound != null) return false;
-        const frame = ui_frame_stamp.load(.monotonic);
+        const frame = effectiveUiFrameStamp();
         if (frame == 0 or self.socket_empty_at_frame != frame) return false;
         if (self.screen_inbox.recovery.state(stream_id) != .valid) return false;
         return !self.bufferedRuntimeWorkFor(stream_id);
@@ -21374,10 +21400,33 @@ test "client ended event replaces same-stream metadata at exact event cap" {
 
 /// UI 프레임 도장. `RemoteTermBackend.maintenanceEventTick` 이 tick 마다 하나 올린다(`advanceUiFrameStamp`). 프레임
 /// 루프가 없는 경로(CLI)는 0 에 머물고, 그때 `pollReadableThisFrame` 은 언제나 실제로 묻는다 — 도장이 안 움직이면
-/// 「같은 프레임」 판정이 성립하지 않으므로 캐시가 켜지지 않는다(안전한 기본값). 판정자는 **프로세스 전역**을 나눠 쓴다:
-/// 제품 tick 을 지나는 판정자(remote_term_backend)가 올린 도장이 뒤의 판정자에 남으므로, 같은 프레임 안에서 쓰고 읽는
-/// 판정자는 `resetUiFrameStampForTest` 로 먼저 끈다.
+/// 「같은 프레임」 판정이 성립하지 않으므로 캐시가 켜지지 않는다(안전한 기본값). 읽는 자리는 모두 `effectiveUiFrameStamp`
+/// 를 거친다.
+///
+/// **판정자 빌드에서는 도장이 그것을 올린 판정자 안에서만 유효하다.** 판정자는 프로세스 전역을 나눠 쓰는데, 제품 tick 을
+/// 지나는 판정자가 올리고 안 되돌린 도장이 뒤 판정자에 남으면, 같은 프레임 안에서 되풀이해 읽는 판정자의 첫 «비어 있음»
+/// 이 캐시돼 소켓을 다시 안 본다. 한때는 읽는 판정자마다 `resetUiFrameStampForTest` 로 먼저 껐지만, 선언 순서가 바뀌자
+/// 그 «중간에서 끄던» 판정자가 사이에서 빠져 판정자 넷이 한꺼번에 깨졌다(2026-10-01). 그래서 올릴 때 러너의 판정자 번호
+/// (`maru_test_generation`)를 함께 적고, 읽을 때 번호가 다르면 0 으로 본다 — 순서와 무관하다.
 var ui_frame_stamp: std.atomic.Value(u64) = .init(0);
+var ui_frame_stamp_test_generation: if (builtin.is_test) std.atomic.Value(u64) else void =
+    if (builtin.is_test) .init(0) else {};
+
+/// 지금 도는 판정자의 번호 — 이 저장소의 러너(`tools/simple_test_runner.zig`)로 돌 때만 의미가 있고, 그 밖(제품 빌드·
+/// 기본 러너)에서는 0 이다. extern 이 아니라 root 선언 유무로 고르므로 러너 없이 `zig test` 해도 링크가 깨지지 않는다.
+fn currentTestGeneration() u64 {
+    if (!builtin.is_test) return 0;
+    const root = @import("root");
+    if (!@hasDecl(root, "maru_test_generation")) return 0;
+    return @atomicLoad(u64, &root.maru_test_generation, .monotonic);
+}
+
+/// 읽는 자리의 유일한 출구 — 판정자 빌드에서 다른 판정자가 올린 도장은 0(캐시 꺼짐)으로 본다.
+fn effectiveUiFrameStamp() u64 {
+    const frame = ui_frame_stamp.load(.monotonic);
+    if (builtin.is_test and ui_frame_stamp_test_generation.load(.monotonic) != currentTestGeneration()) return 0;
+    return frame;
+}
 
 /// 프레임 하나가 시작됐다. 메인 스레드가 부른다.
 /// 어느 Client 든 `pending_events` 에 이벤트가 **추가될 때마다** 오르는 프로세스 전역 세대.
@@ -21395,13 +21444,14 @@ var ui_frame_stamp: std.atomic.Value(u64) = .init(0);
 pub var generation_event_enqueue_epoch: std.atomic.Value(u64) = .init(1);
 
 pub fn advanceUiFrameStamp() void {
+    if (builtin.is_test) ui_frame_stamp_test_generation.store(currentTestGeneration(), .monotonic);
     _ = ui_frame_stamp.fetchAdd(1, .monotonic);
 }
 
 /// 판정자 전용 — 지금 프레임 도장(«이 프레임에 소켓이 비었다» 를 흉내 낼 때 쓴다).
 pub fn currentUiFrameStampForTest() u64 {
     if (!builtin.is_test) @compileError("test-only");
-    return ui_frame_stamp.load(.monotonic);
+    return effectiveUiFrameStamp();
 }
 
 /// 판정자 전용 — 도장을 0 으로 되돌려 캐시를 끈다(다른 판정자에 새지 않게).
@@ -21414,7 +21464,7 @@ pub fn resetUiFrameStampForTest() void {
 /// `pumpScreen` 의 polling 읽기 한 곳만 쓴다 — `pollReadableOrTerminal` 은 peer 종료를 새 TX 보다 먼저 봐야 하는 자리라
 /// 캐시하지 않는다.
 fn pollReadableThisFrame(self: *Client) bool {
-    const frame = ui_frame_stamp.load(.monotonic);
+    const frame = effectiveUiFrameStamp();
     if (frame != 0 and self.socket_empty_at_frame == frame) return false;
     if (pollReadable(self.fd)) return true;
     self.socket_empty_at_frame = frame;
@@ -26141,11 +26191,6 @@ test "client: attach, input, resize, and detach a real runtime over the wire" {
 test "client: receives a delta_chunk stream reflecting input echoed onto the screen" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
-    // 이 판정자는 «같은 프레임» 안에서 `readStreamBatch` 를 되풀이해 echo 를 기다린다 — 앞선 판정자가 제품 tick
-    // (`maintenanceEventTick`)으로 올려 둔 프레임 도장이 남아 있으면 첫 «비어 있음» 이 캐시돼 남은 99 번은 소켓을 아예
-    // 안 본다(2026-10-01 실측: `재접속 은퇴 창` 판정자 바로 뒤에 두면 매번 `expect(found)` 가 깨졌다). 도장을 0 으로 꺼 둔다.
-    resetUiFrameStampForTest();
-    defer resetUiFrameStampForTest();
 
     var dir_buf: [256]u8 = undefined;
     const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-delta-{d}", .{c.getpid()}) catch return error.SkipZigTest;

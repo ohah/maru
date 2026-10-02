@@ -3,8 +3,9 @@
 
 This is not an AppKit/HID test: ABI status, controller state, input context,
 responder superclass, event geometry and mouse ABI dispatch are stubs. It does
-not prove Zig admission, OS candidate windows, owner generations or shared IME
-projection. The separate product ABI/shared-view and OS gates own those claims.
+not prove Zig admission, OS candidate windows or shared IME projection. Captured
+callback generation tests use controller/context stubs; they cannot identify
+unsolicited OS callbacks that carry no token. Product and OS gates remain separate.
 
 Declarations are extracted from the repository's current Swift source, never
 copied implementations. Missing/duplicate declarations fail before compilation.
@@ -124,7 +125,7 @@ def extract_method(source, masked, class_name, name):
     if opening < 0:
         raise ValueError(f"missing class body: {class_name}")
     end = closing_brace(masked, opening)
-    pattern = r"(?m)^[ \t]*(?:override[ \t]+)?func[ \t]+" + re.escape(name) + r"[ \t]*\("
+    pattern = r"(?m)^[ \t]*(?:(?:private|fileprivate|override|final)[ \t]+)*func[ \t]+" + re.escape(name) + r"[ \t]*\("
     candidates = []
     for match in re.compile(pattern).finditer(masked, opening + 1, end - 1):
         prefix = masked[opening + 1:match.start()]
@@ -140,10 +141,16 @@ def extract_method(source, masked, class_name, name):
 
 
 HOST_TEMPLATE = r'''import Foundation
+import AppKit
 import Darwin
 var backendStatus: Int32 = 0
 var commitCalls = 0
 var focusCalls = 0
+struct StubKey { var value:Int32=1 }
+var beginCalls=0
+var endKeys:[Bool]=[]
+func maru_macos_app_session_ime_begin(_ session:UnsafeMutableRawPointer)->Int32 { beginCalls+=1;return 0 }
+func maru_macos_app_session_ime_end(_ session:UnsafeMutableRawPointer,_ key:UnsafePointer<StubKey>?)->Int32 { endKeys.append(key != nil);return 0 }
 func maru_macos_app_session_commit_composition(_ session: UnsafeMutableRawPointer) -> Int32 { commitCalls += 1; return backendStatus }
 func maru_macos_app_session_set_focus(_ session: UnsafeMutableRawPointer, _ focus: Int32) -> Int32 { focusCalls += 1; return backendStatus }
 class NSEvent {}
@@ -151,6 +158,23 @@ class Controller {
  var anyOverlayOpen=false
  var ownsChord=false
  var keyCalls=0
+ var inserts:[String]=[]
+ var marks:[String]=[]
+ var deletes=0
+ var smokeInserts=0
+ var smokeMarks=0
+ var editorState:(selected:NSRange,marked:NSRange)?=nil
+ var normalizes=true
+ func normalizedKeyEvent(from event:NSEvent)->StubKey? { normalizes ? StubKey() : nil }
+@@TRANSACTION@@
+ func imeInsert(_ text:String,replacementRange:NSRange=NSRange(location:NSNotFound,length:0)) { inserts.append(text) }
+ func imeMarked(_ text:String) { marks.append(text) }
+ func imeMarked(_ text:String,selectedRange:NSRange,replacementRange:NSRange) { marks.append(text) }
+ func imeDeleteBackward() { deletes+=1 }
+ func editorIMEState()->(selected:NSRange,marked:NSRange)? { editorState }
+ func editorIMESubstring(_ range:NSRange)->(text:String,range:NSRange)? { ("한",range) }
+ func recordSessionHostInputSmokeInsert() { smokeInserts+=1 }
+ func recordSessionHostInputSmokeMarked() { smokeMarks+=1 }
  func editorOwnsChord(_ event:NSEvent)->Bool { ownsChord }
  func handleKeyDown(_ event:NSEvent) { keyCalls+=1 }
  static let statusOK: Int32 = 0
@@ -158,8 +182,8 @@ class Controller {
 @@METHOD3@@
 @@METHOD4@@
 }
-class Context { var discards=0; func discardMarkedText() { discards += 1 } }
-class BaseView { var superKeys=0; func performKeyEquivalent(with event:NSEvent)->Bool { superKeys+=1; return false }; var resigns=0; func resignFirstResponder() -> Bool { resigns += 1; return true } }
+class Context { var discards=0; var onDiscard:(()->Void)?; func discardMarkedText() { discards += 1; onDiscard?() } }
+class BaseView { var superKeys=0; func performKeyEquivalent(with event:NSEvent)->Bool { superKeys+=1; return false }; var resigns=0; func resignFirstResponder() -> Bool { resigns += 1; return true }; func doCommand(by selector:Selector) {} }
 class View: BaseView {
  func hasMarkedText()->Bool { !markedTextBuffer.isEmpty }
  var controller: Controller? = Controller()
@@ -168,6 +192,25 @@ class View: BaseView {
  var editorHanjaCandidateActive = true
  var markedSelection = NSRange(location: 1, length: 2)
  var pendingUnmarkText: String? = "글"
+ var imeOwnerGeneration:UInt64=0
+ var interpretingIMEGeneration:UInt64?
+ var pendingUnmarkGeneration:UInt64?=0
+ var discardingIMECallbacks=false
+ var interpretingIMEKey=false
+ var sessionHostCandidateDocumentContext:String?
+ func imeLog(_ message:String,_ text:String="") {}
+ func simulateOwnerChange() { invalidateIMECallbacks() }
+ func simulateDiscard() { discardAdmittedMarkedText() }
+ var onInterpret:(()->Void)?
+ func interpretKeyEvents(_ events:[NSEvent]) { onInterpret?() }
+ func simulateKeyTransaction(suppress:Bool=false) {
+   let event=NSEvent()
+   let suppressCandidateProbeKey=suppress
+   let editorHanjaCandidate=false
+   let candidateWasActive=false
+@@INTERPRET@@
+ }
+@@CALLBACKS@@
 @@METHOD0@@
 @@METHOD1@@
 @@METHOD2@@
@@ -219,7 +262,95 @@ for overlay in [false,true] {
  backendStatus=0; check(gate.performKeyEquivalent(with:NSEvent()),"admitted key consumed");cleared(gate,"admitted key"); check(gate.controller!.keyCalls==1,"admitted key once")
 }
 let other=View(); backendStatus = -2;let count=commitCalls;check(!other.performKeyEquivalent(with:NSEvent()),"unowned uses super");check(other.superKeys==1,"unowned super once");check(commitCalls==count,"unowned no commit")
+@@CALLBACK_TESTS@@
 print("PASS checks=\(checks) commitCalls=\(commitCalls) focusCalls=\(focusCalls)")
+'''
+
+CALLBACK_TESTS = r'''
+let absent=NSRange(location:NSNotFound,length:0)
+let selected=NSRange(location:1,length:0)
+let backspace = #selector(NSStandardKeyBindingResponding.deleteBackward(_:))
+for callback in 0..<4 {
+ let stale=View(); stale.interpretingIMEGeneration=0;stale.simulateOwnerChange()
+ switch callback {
+ case 0: stale.insertText("옛",replacementRange:absent)
+ case 1: stale.setMarkedText("옛",selectedRange:selected,replacementRange:absent)
+ case 2: stale.unmarkText()
+ default: stale.doCommand(by:backspace)
+ }
+ preserved(stale,"stale callback \(callback)")
+ check(stale.controller!.inserts.isEmpty,"stale no insert")
+ check(stale.controller!.marks.isEmpty,"stale no marked")
+ check(stale.controller!.deletes==0,"stale no delete")
+ check(stale.controller!.smokeInserts==0 && stale.controller!.smokeMarks==0,"stale no observer")
+ check(stale.pendingUnmarkGeneration==nil,"retired pending generation")
+}
+let admitted=View();admitted.interpretingIMEGeneration=0
+admitted.setMarkedText("새",selectedRange:selected,replacementRange:absent)
+check(admitted.markedTextBuffer=="새","current marked accepted")
+check(admitted.controller!.marks==["새"],"current marked once")
+admitted.insertText("글",replacementRange:absent)
+check(admitted.controller!.inserts==["글"],"current insert once")
+check(admitted.markedTextBuffer.isEmpty,"current insert clears marked")
+check(admitted.pendingUnmarkGeneration==nil && admitted.pendingUnmarkText==nil,"insert clears deferred")
+admitted.doCommand(by:backspace);check(admitted.controller!.deletes==1,"current command accepted")
+let rejected=View();rejected.interpretingIMEGeneration=0;backendStatus=7
+check(!rejected.commitComposition(),"reject retains callback owner")
+check(rejected.imeOwnerGeneration==0 && rejected.pendingUnmarkGeneration==0,"reject generation unchanged")
+rejected.setMarkedText("계속",selectedRange:selected,replacementRange:absent)
+check(rejected.controller!.marks==["계속"],"retry callback still admitted")
+let deferred=View();deferred.interpretingIMEGeneration=0;deferred.interpretingIMEKey=true
+deferred.unmarkText()
+check(deferred.pendingUnmarkText=="한" && deferred.pendingUnmarkGeneration==0,"deferred captures origin")
+check(deferred.controller!.inserts.isEmpty,"deferred does not insert early")
+deferred.simulateOwnerChange();check(deferred.pendingUnmarkGeneration==nil,"owner change retires deferred")
+for useFocus in [false,true] {
+ // Discard can callback outside interpretation; a stale captured generation
+ // would hide a broken discard scope and make this control falsely green.
+ let reentrant=View();backendStatus=0
+ reentrant.inputContext!.onDiscard = { [unowned reentrant] in
+   reentrant.insertText("중복",replacementRange:absent)
+   reentrant.setMarkedText("옛",selectedRange:selected,replacementRange:absent)
+   reentrant.unmarkText(); reentrant.doCommand(by:backspace)
+ }
+ check(useFocus ? reentrant.commitComposition() : reentrant.commitMarkedTextIfComposing(),"reentrant admission")
+ cleared(reentrant,"reentrant discard")
+ check(reentrant.controller!.inserts.isEmpty && reentrant.controller!.marks.isEmpty && reentrant.controller!.deletes==0,"discard callbacks cannot dispatch")
+ check(reentrant.imeOwnerGeneration==1,"success advances generation")
+ check(!reentrant.discardingIMECallbacks,"discard scope restored")
+ check(reentrant.pendingUnmarkGeneration==nil,"success retires pending generation")
+}
+let nested=View();nested.discardingIMECallbacks=true;nested.simulateDiscard()
+check(nested.discardingIMECallbacks,"nested discard restores previous scope")
+let wrap=View();wrap.imeOwnerGeneration=UInt64.max;wrap.simulateOwnerChange()
+check(wrap.imeOwnerGeneration==0,"generation overflow handled")
+// Direct unlabelled callbacks are deliberately not classified as stale.
+let unsolicited=View();unsolicited.simulateOwnerChange()
+unsolicited.setMarkedText("직접",selectedRange:selected,replacementRange:absent)
+check(unsolicited.controller!.marks==["직접"],"unlabelled callback limit explicit")
+for mode in 0..<5 {
+ let origin=View();origin.pendingUnmarkText=nil;origin.pendingUnmarkGeneration=nil
+ origin.onInterpret = { [unowned origin] in
+   origin.unmarkText()
+   if mode==1 { origin.simulateOwnerChange();origin.setMarkedText("늦음",selectedRange:selected,replacementRange:absent) }
+   if mode==2 { origin.pendingUnmarkGeneration=99 }
+ }
+ origin.controller!.normalizes = mode != 4
+ let begins=beginCalls;let ends=endKeys.count
+ origin.simulateKeyTransaction(suppress:mode==3)
+ check(beginCalls==begins+1 && endKeys.count==ends+1,"transaction exactly paired")
+ check(endKeys.last==(!(mode==1 || mode==3 || mode==4)),"physical fallback follows owner")
+ check(origin.controller!.inserts==(mode==1 || mode==2 ? []:["한"]),"deferred flush uses captured generation")
+ check(origin.controller!.marks==[""],"stale marked cannot revive")
+ check(origin.interpretingIMEGeneration==nil && !origin.interpretingIMEKey,"interpret scope restored")
+}
+let nestedInterpret=View();nestedInterpret.pendingUnmarkText=nil;nestedInterpret.pendingUnmarkGeneration=nil
+nestedInterpret.interpretingIMEGeneration=0;nestedInterpret.interpretingIMEKey=true
+nestedInterpret.simulateKeyTransaction()
+check(nestedInterpret.interpretingIMEGeneration==0 && nestedInterpret.interpretingIMEKey,"nested interpret restores outer scope")
+let detached=Controller();detached.appSession=nil;let begins=beginCalls;var interpreted=false
+detached.imeKeyTransaction(NSEvent()) { interpreted=true;return true }
+check(!interpreted && beginCalls==begins,"nil session cannot interpret")
 '''
 
 MOUSE_TEMPLATE = r'''import Foundation
@@ -273,11 +404,33 @@ def run(source_path):
     host = HOST_TEMPLATE
     for i, (owner, name) in enumerate(specs):
         host = host.replace(f"@@METHOD{i}@@", extract_method(source, masked, owner, name))
+    callbacks = ["acceptsIMECallback", "invalidateIMECallbacks", "discardAdmittedMarkedText",
+                 "insertText", "setMarkedText", "unmarkText", "doCommand"]
+    host = host.replace("@@CALLBACKS@@", "\n".join(
+        extract_method(source, masked, view, name) for name in callbacks))
+    host = host.replace("@@CALLBACK_TESTS@@", CALLBACK_TESTS)
+    host = host.replace("@@TRANSACTION@@", extract_method(source, masked, controller, "imeKeyTransaction"))
+    # Extract the capture and closure from the real keyDown method, rather than
+    # reproducing its semantics in a stub. All surrounding key-routing is outside
+    # this harness; interpretation, ABI and event normalization are stubs.
+    key_down = extract_method(source, masked, view, "keyDown")
+    key_mask = masked_swift(key_down)
+    captures = list(re.finditer(r"\blet\s+callbackGeneration\s*=", key_mask))
+    if len(captures) != 1:
+        raise ValueError("expected one keyDown callback generation capture")
+    start = captures[0].start()
+    calls = list(re.finditer(r"controller\?\.imeKeyTransaction\(", key_mask[start:]))
+    if len(calls) != 1:
+        raise ValueError("expected one keyDown captured interpretation call")
+    opening = key_mask.find("{", start + calls[0].end())
+    if opening < 0:
+        raise ValueError("missing keyDown interpretation closure")
+    host = host.replace("@@INTERPRET@@", key_down[start:closing_brace(key_mask, opening)])
     mouse = MOUSE_TEMPLATE.replace("@@MOUSE@@", extract_method(source, masked, controller, "handleMouse"))
     print(f"source={source_path} sha256={hashlib.sha256(source.encode('utf-8')).hexdigest()}", flush=True)
     with tempfile.TemporaryDirectory(prefix="maru-ime-ack-host-") as directory:
         root = Path(directory)
-        for name, code, expected in [("host", host, "PASS checks=151"),
+        for name, code, expected in [("host", host, "PASS checks=253"),
                                      ("mouse", mouse, "failed_cases=0")]:
             swift = root / f"{name}.swift"
             binary = root / name

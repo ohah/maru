@@ -287,7 +287,7 @@ fn buildMergePaneOps(
     const carets = if (projection) |v| blk: {
         const offsets = allocator.alloc(usize, term.rt.editor_extra_selections.len + 1) catch break :blk null;
         const selected = preeditSelected(term);
-        offsets[0] = if (selected) |selection| selection.end else term.rt.editor_preedit_at + term.rt.editor_preedit.len;
+        offsets[0] = if (selected) |selection| selection.end else projectedPrimaryCaret(v, term);
         for (term.rt.editor_extra_selections, 0..) |selection, i| offsets[i + 1] = v.forward(selection.focus);
         break :blk preedit_view.carets(v, allocator, offsets) catch null;
     } else buildCaretRows(self, term);
@@ -1091,7 +1091,7 @@ pub fn buildPaneOps(
 /// 두 벌이면 진단이 제품과 다른 것을 재게 된다.
 pub fn hitSnapshotStale(self: *AppSession, term: *Term) bool {
     const geom = term.rt.editor_hit_geom;
-    return term.rt.editor_hit_preedit_stamp != preeditStamp(term) or geom.top_line != term.rt.editor_first_line or
+    return term.rt.editor_hit_preedit_stamp != preeditStampWithSession(self, term) or geom.top_line != term.rt.editor_first_line or
         geom.top_piece != term.rt.editor_first_piece or
         geom.visible_len != editorLines(term).len or
         geom.wrap != (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) or
@@ -1114,12 +1114,16 @@ pub fn acceptConflictAtPoint(self: *AppSession, pane: *Pane, x_px: f64, y_px: f6
     if (pane.terms.items.len == 0) return false;
     const term = pane.activeTerm();
     // Result 의 줄이 먼저, 없으면 판의 줄(S3b-3c). 둘은 사각이 겹치지 않아 순서는 뜻이 없다.
-    const hit = conflictActionAtPoint(term, x_px, y_px) orelse
+    const hit = conflictActionAtPointWithSession(self, term, x_px, y_px) orelse
         editor_merge_ops.paneActionAtPoint(term, x_px, y_px) orelse return false;
     return acceptConflict(self, term, hit.region, hit.choice);
 }
 
 pub fn conflictActionAtPoint(term: *Term, x_px: f64, y_px: f64) ?AppSession.ConflictActionSpan {
+    return conflictActionAtPointWithSession(null, term, x_px, y_px);
+}
+
+pub fn conflictActionAtPointWithSession(self: ?*AppSession, term: *Term, x_px: f64, y_px: f64) ?AppSession.ConflictActionSpan {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null;
     // **병합 모드에서는 Result pane 만 받는다**(계약 §5 S3b-2). 오늘은 이 가드가 없어도 왼쪽은
@@ -1132,7 +1136,7 @@ pub fn conflictActionAtPoint(term: *Term, x_px: f64, y_px: f64) ?AppSession.Conf
     }
     const spans = term.rt.editor_conflict_actions;
     if (spans.len == 0) return null;
-    if (term.rt.editor_hit_preedit_stamp != preeditStamp(term)) return null;
+    if (term.rt.editor_hit_preedit_stamp != preeditStampWithSession(self, term)) return null;
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
     const geom = term.rt.editor_hit_geom;
@@ -1154,10 +1158,10 @@ pub fn conflictActionAtPoint(term: *Term, x_px: f64, y_px: f64) ?AppSession.Conf
     // **`v.line` 은 뷰포트 첫 줄로부터의 «상대» 값이고 표는 «절대» 축이다**(S1.5 가 `VisualRow.line`
     // 을 그렇게 정의했고, `storeHitRows` 가 같은 자리에 같은 문장을 적어 두었다). 더하지 않으면
     // **스크롤한 화면에서 누르는 자리가 통째로 밀린다** — 적대적 검증 3회차가 이 자리를 열었다.
-    const visible_line: usize = if (term.rt.editor_preedit.len > 0) blk: {
+    const visible_line: usize = if (preeditOwner(self, term) != null) blk: {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
-        const projection = makePreeditView(arena.allocator(), term) orelse return null;
+        const projection = makePreeditViewWithSession(self, arena.allocator(), term) orelse return null;
         const projected_row = term.rt.editor_hit_preedit_first + v.line;
         if (projected_row >= projection.sources.len) return null;
         const source = projection.sources[projected_row] orelse return null;
@@ -1189,13 +1193,20 @@ fn insideRect(rect: chrome_draw.Rect, x_px: f64, y_px: f64) bool {
 }
 
 pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
-    return hitTestBodyMode(.caret, term, x_px, y_px);
+    return hitTestBodyWithSession(null, term, x_px, y_px);
+}
+
+pub fn hitTestBodyWithSession(self: ?*AppSession, term: *Term, x_px: f64, y_px: f64) ?usize {
+    return hitTestBodyModeWithSession(.caret, self, term, x_px, y_px);
 }
 
 /// `hitTestBody` 의 뜻 고르기 — `.cluster` 는 포인터 아래의 **글자** offset(호버, tooling §8.2b). caret 반올림이 없다.
 pub fn hitTestBodyMode(comptime mode: chrome_editor.content.PointMode, term: *Term, x_px: f64, y_px: f64) ?usize {
+    return hitTestBodyModeWithSession(mode, null, term, x_px, y_px);
+}
+pub fn hitTestBodyModeWithSession(comptime mode: chrome_editor.content.PointMode, self: ?*AppSession, term: *Term, x_px: f64, y_px: f64) ?usize {
     if (term.kind != .editor) return null;
-    if (term.rt.editor_hit_preedit_stamp != preeditStamp(term)) return null;
+    if (term.rt.editor_hit_preedit_stamp != preeditStampWithSession(self, term)) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 범위 밖
     // **병합 모드에서는 Result pane 만 입력을 받는다**(계약 §5 S3b-2). 이 가드가 없으면 Base pane 을
     // 눌렀을 때 **Result 문서의 caret 이 움직인다** — 좌표가 같은 Term 의 하나뿐인 히트 기하를
@@ -1214,7 +1225,7 @@ pub fn hitTestBodyMode(comptime mode: chrome_editor.content.PointMode, term: *Te
     // **이 함수가 남기는 것은 두 가지뿐이다**: ⒜ 굳힌 값을 모아 넘기고 ⒝ 줄 안 byte 를 **문서
     // offset** 으로 바꾼다. ⒝ 는 문서 모델(session)을 알아야 해서 chrome 이 못 한다.
     const geom = term.rt.editor_hit_geom;
-    if (term.rt.editor_preedit.len > 0) return hitPreeditBody(mode, term, x_px, y_px);
+    if (preeditOwner(self, term) != null) return hitPreeditBody(mode, self, term, x_px, y_px);
     // **힌트 칸을 누르면 앵커 byte**(§4.1h) — 줄별 힌트는 렌더와 같은 예산으로(`inlaysForLine`). `editor_hit_lines` 는 원본 줄 번호다.
     const InlayCtx = struct { t: *Term, cols: u32 };
     const p = chrome_editor.hit.bodyPointModeWith(
@@ -1403,9 +1414,13 @@ pub const max_status_column: usize = chrome_editor.frame.default_max_columns;
 /// `toggleFoldAtPoint`가 `editor_fold_ranges`로 판정한다 — 여기서 함께 보면 좌표 변환을 재는
 /// 테스트가 접힘 상태까지 세워야 돌아간다.
 pub fn hitTestFoldMark(term: *Term, x_px: f64, y_px: f64) ?u32 {
+    return hitTestFoldMarkWithSession(null, term, x_px, y_px);
+}
+
+pub fn hitTestFoldMarkWithSession(self: ?*AppSession, term: *Term, x_px: f64, y_px: f64) ?u32 {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 접힘 자체가 없다(`foldsUnavailable`)
-    if (term.rt.editor_hit_preedit_stamp != preeditStamp(term)) return null;
+    if (term.rt.editor_hit_preedit_stamp != preeditStampWithSession(self, term)) return null;
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
 
@@ -1440,10 +1455,10 @@ pub fn hitTestFoldMark(term: *Term, x_px: f64, y_px: f64) ?u32 {
     if (!term.rt.editor_hit_rows[row_i].showsLineNumber()) return null;
 
     var source_line = term.rt.editor_hit_lines[row_i];
-    if (term.rt.editor_preedit.len > 0) {
+    if (preeditOwner(self, term) != null) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
-        const projected = makePreeditView(arena.allocator(), term) orelse return null;
+        const projected = makePreeditViewWithSession(self, arena.allocator(), term) orelse return null;
         const projected_row = term.rt.editor_hit_preedit_first + term.rt.editor_hit_rows[row_i].line;
         if (projected_row >= projected.sources.len or projected.folds[projected_row] == .none) return null;
         source_line = @intCast(projected.sources[projected_row] orelse return null);
@@ -1664,7 +1679,7 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
     const m = chrome_editor.diff_frame.sideMetrics(inner_w -| minimapPxFor(self, term, inner_w), inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
     var geometry_arena = std.heap.ArenaAllocator.init(self.allocator);
     defer geometry_arena.deinit();
-    const geometry_view = makePreeditView(geometry_arena.allocator(), term);
+    const geometry_view = makePreeditViewWithSession(self, geometry_arena.allocator(), term);
     term.rt.editor_hit_capacity_rows = m.visible_rows -| 1;
     const lay = chrome_editor.geometry.compute(m.total_cols, if (geometry_view) |v| v.total_lines else term.rt.editor_lines.len, .{});
     term.rt.editor_hit_geom = .{
@@ -1963,7 +1978,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **조합 중이면 그 글자를 끼운 사본을 그린다**(N3). 문서는 그대로다 — 조합은 확정이 아니다.
     var preedit_arena = std.heap.ArenaAllocator.init(self.allocator);
     defer preedit_arena.deinit();
-    const projected = makePreeditView(preedit_arena.allocator(), term);
+    const projected = makePreeditViewWithSession(self, preedit_arena.allocator(), term);
     const draw_lines: []const []const u8 = if (projected) |v| v.lines else lines;
     const draw_first = if (projected) |v| preeditTopRow(v, term) else term.rt.editor_first_line;
     var secondary_marker_buf: [chrome_editor.scrollbar.marker_budget]u32 = undefined;
@@ -2042,7 +2057,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             const projected_inlays = preedit_view.inlays(v, a, term.rt.editor_visible_numbers, canonical_inlays) catch chrome_editor.content.InlayWindow{};
             const colors = preedit_view.colors(v, a, term.rt.editor_visible_numbers, syntaxColors(self, term), term.rt.editor_tab_width, canonical_inlays, projected_inlays) catch &.{};
             const offsets = a.alloc(usize, term.rt.editor_extra_selections.len + 1) catch return null;
-            offsets[0] = if (selected) |selection| selection.end else term.rt.editor_preedit_at + term.rt.editor_preedit.len;
+            offsets[0] = if (selected) |selection| selection.end else projectedPrimaryCaret(v, term);
             for (term.rt.editor_extra_selections, 0..) |selection, i| offsets[i + 1] = v.forward(selection.focus);
             const carets = preedit_view.carets(v, a, offsets) catch null;
             const deco = projectedDecorations(self, term, v, a, offsets[0]);
@@ -2143,7 +2158,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             term.rt.editor_hit_lines[i] = @intCast(v.source_index.lineAt(v.sourcePoint(projected_row, 0)));
         }
     }
-    term.rt.editor_hit_preedit_stamp = if (projected != null) preeditStamp(term) else 0;
+    term.rt.editor_hit_preedit_stamp = if (projected != null) preeditStampWithSession(self, term) else 0;
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
     // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
@@ -4495,10 +4510,10 @@ pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
     // is not a screen row; the old arithmetic put wrapped candidates on the first row.
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
-    const projected = makePreeditView(arena.allocator(), term);
+    const projected = makePreeditViewWithSession(self, arena.allocator(), term);
     const source_line = doc.file.lines.lineAt(at);
     const target_row: usize, const byte: usize, const preview_text: []const u8 = if (projected) |v| blk: {
-        const point = v.point(at) orelse return null;
+        const point = v.point(if (term.rt.editor_preedit.len > 0) at else v.forward(at)) orelse return null;
         break :blk .{ point.row, point.byte, v.lines[point.row] };
     } else blk: {
         const line = doc.file.lines.line(source_line) orelse return null;
@@ -4527,7 +4542,7 @@ pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
     }
     if (g.cell_w_px == 0 or g.cell_h_px == 0 or g.content_width == 0) return null;
     var rows: []const chrome_editor.visual_map.VisualRow = term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len];
-    const fresh = term.rt.editor_hit_preedit_stamp != preeditStamp(term) or rows.len == 0;
+    const fresh = term.rt.editor_hit_preedit_stamp != preeditStampWithSession(self, term) or rows.len == 0;
     const first = if (projected) |v| preeditTopRow(v, term) else term.rt.editor_first_line;
     if (fresh) {
         // Input methods ask before the next paint. Reuse the renderer's layout routine so
@@ -4578,7 +4593,7 @@ pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
 fn projectedDecorations(self: *AppSession, term: *Term, v: preedit_view.View, a: std.mem.Allocator, caret: usize) Decorations {
     var deco = paneDecorations(self, term);
     deco.active_line = if (v.point(caret)) |p| p.row else null;
-    deco.selection_empty = if (preeditSelected(term)) |selection| selection.start == selection.end else true;
+    deco.selection_empty = if (preeditSelected(term)) |selection| selection.start == selection.end else if (term.rt.editor_selection) |selection| selection.isEmpty() else true;
     deco.bracket_marks = preedit_view.marks(v, a, term.rt.editor_visible_numbers, deco.bracket_marks, null) catch null;
     const old = deco.indent_guides;
     const guide_type = chrome_editor.frame.GuideLine;
@@ -4611,22 +4626,78 @@ fn projectSticky(v: preedit_view.View, a: std.mem.Allocator, old: []const chrome
     return rows.items;
 }
 
+// A peer borrows the live owner's overlay only while drawing. No buffer or owner
+// pointer survives this call; document storage and each view's input state stay separate.
+fn preeditOwner(self: ?*AppSession, term: *Term) ?*Term {
+    if (term.rt.editor_diff != null) return null;
+    if (term.rt.editor_preedit.len > 0) return visiblePreeditOwner(term, term);
+    const session = self orelse return null;
+    if (term.rt.editor_merge != null) return null;
+    const state = term.rt.editorDocument();
+    for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |view| {
+        if (view.kind == .editor and view.rt.editor_diff == null and view.rt.editor_merge == null and
+            view.rt.editorDocument() == state and view.rt.editor_preedit.len > 0)
+            return visiblePreeditOwner(term, view);
+    };
+    return null;
+}
+
+// A composition inside this view's collapsed rows is not painted. Use the same
+// visibility decision for drawing, freshness and hit routing so the canonical
+// rows remain clickable without unfolding the peer or touching the owner.
+fn visiblePreeditOwner(term: *Term, owner: *Term) ?*Term {
+    const doc = term.rt.editorDocument().opened orelse return null;
+    if (owner.rt.editor_preedit_at > owner.rt.editor_preedit_end or owner.rt.editor_preedit_end > doc.file.content.len) return null;
+    const numbers = term.rt.editor_visible_numbers;
+    if (numbers.len > 0) {
+        const wanted = doc.file.lines.lineAt(owner.rt.editor_preedit_at) + 1;
+        // Fold maps keep source numbers sorted; any blank padding is at the tail.
+        // Borrowed diff/merge projections are excluded before this lookup.
+        var lo: usize = 0;
+        var hi: usize = numbers.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const number = numbers[mid] orelse {
+                hi = mid;
+                continue;
+            };
+            if (number < wanted) lo = mid + 1 else hi = mid;
+        }
+        if (lo == numbers.len) return null;
+        const number = numbers[lo] orelse return null;
+        if (number != wanted) return null;
+    }
+    return owner;
+}
+
 fn preeditStamp(term: *Term) u64 {
-    if (term.rt.editor_preedit.len == 0) return 0;
+    return preeditStampWithSession(null, term);
+}
+fn preeditStampWithSession(self: ?*AppSession, term: *Term) u64 {
+    const owner = preeditOwner(self, term) orelse return 0;
     var hash = std.hash.Wyhash.init(0);
-    hash.update(term.rt.editor_preedit);
-    hash.update(std.mem.asBytes(&term.rt.editor_preedit_at));
-    hash.update(std.mem.asBytes(&term.rt.editor_preedit_end));
+    hash.update(std.mem.asBytes(&owner.surface.id));
+    hash.update(owner.rt.editor_preedit);
+    hash.update(std.mem.asBytes(&owner.rt.editor_preedit_at));
+    hash.update(std.mem.asBytes(&owner.rt.editor_preedit_end));
     if (term.rt.editorDocument().opened) |doc| hash.update(std.mem.asBytes(&doc.file.revision));
     return hash.final() | 1;
 }
 
 fn makePreeditView(allocator: std.mem.Allocator, term: *Term) ?preedit_view.View {
-    if (term.rt.editor_preedit.len == 0 or term.rt.editor_diff != null) return null;
+    return makePreeditViewWithSession(null, allocator, term);
+}
+fn makePreeditViewWithSession(self: ?*AppSession, allocator: std.mem.Allocator, term: *Term) ?preedit_view.View {
+    const owner = preeditOwner(self, term) orelse return null;
     const doc = term.rt.editorDocument().opened orelse return null;
-    return preedit_view.build(allocator, doc.file.content, doc.file.lines, term.rt.editor_visible_numbers, foldMarks(term) orelse &.{}, .{ .start = term.rt.editor_preedit_at, .end = term.rt.editor_preedit_end }, term.rt.editor_preedit) catch null;
+    return preedit_view.build(allocator, doc.file.content, doc.file.lines, term.rt.editor_visible_numbers, foldMarks(term) orelse &.{}, .{ .start = owner.rt.editor_preedit_at, .end = owner.rt.editor_preedit_end }, owner.rt.editor_preedit) catch null;
+}
+fn projectedPrimaryCaret(v: preedit_view.View, term: *Term) usize {
+    if (term.rt.editor_preedit.len > 0) return term.rt.editor_preedit_at + term.rt.editor_preedit.len;
+    return v.forward(if (term.rt.editor_selection) |selection| selection.focus else 0);
 }
 fn preeditSelected(term: *Term) ?maru.session.editor.text_input.ByteRange {
+    if (term.rt.editor_preedit.len == 0) return null;
     const local = maru.session.editor.text_input.byteRange(term.rt.editor_preedit, term.rt.editor_preedit_selected) orelse return null;
     return .{ .start = term.rt.editor_preedit_at + local.start, .end = term.rt.editor_preedit_at + local.end };
 }
@@ -4654,10 +4725,10 @@ fn preeditPiece(v: preedit_view.View, term: *Term, wrap: bool) u32 {
     const capacity: u32 = @max(@as(u32, 1), term.rt.editor_hit_capacity_rows);
     return @max(effectiveFirstPiece(wrap, term), count.rows -| capacity);
 }
-fn hitPreeditBody(comptime mode: chrome_editor.content.PointMode, term: *Term, x: f64, y: f64) ?usize {
+fn hitPreeditBody(comptime mode: chrome_editor.content.PointMode, self: ?*AppSession, term: *Term, x: f64, y: f64) ?usize {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const v = makePreeditView(arena.allocator(), term) orelse return null;
+    const v = makePreeditViewWithSession(self, arena.allocator(), term) orelse return null;
     const g = term.rt.editor_hit_geom;
     const a = arena.allocator();
     const first = term.rt.editor_first_line;
@@ -5375,9 +5446,14 @@ fn buildOccurrenceMarks(self: *AppSession, term: *Term) ?[]const []const chrome_
 /// `hitTestBody` 와 **같은 굳은 스냅숏**을 읽는다 — 다른 프레임의 값을 섞으면 사각형이 caret 과 다른
 /// 자리를 잡는다(§4.1g). 행은 **문서 기준**이라야 자동 스크롤 중에도 안 미끄러진다: `editor_hit_rows`
 /// 의 첨자는 뷰포트 상대이므로 **`editor_first_line` 을 더해** 문서 축으로 올린다.
-fn visualRowColAt(term: *Term, x_px: f64, y_px: f64) ?struct { row: u32, col: u32 } {
-    if (term.rt.editor_preedit.len > 0) return null;
-    if (term.rt.editor_hit_preedit_stamp != preeditStamp(term)) return null;
+const VisualRowCol = struct { row: u32, col: u32 };
+
+fn visualRowColAt(term: *Term, x_px: f64, y_px: f64) ?VisualRowCol {
+    return visualRowColAtWithSession(null, term, x_px, y_px);
+}
+fn visualRowColAtWithSession(self: ?*AppSession, term: *Term, x_px: f64, y_px: f64) ?VisualRowCol {
+    if (preeditOwner(self, term) != null) return null;
+    if (term.rt.editor_hit_preedit_stamp != preeditStampWithSession(self, term)) return null;
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
     const geom = term.rt.editor_hit_geom;
@@ -5426,7 +5502,7 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64, 
     if (term.kind != .editor) return false;
     // **고정 행은 본문이 아니다**(§4.1i) — 그 행을 누르면 그 머리줄로 간다. 히트 스냅숏은 본문 행 그대로라 여기서 먼저 가른다.
     if (sticky_client.click(self, term, x_px, y_px)) return true;
-    const off = hitTestBody(term, x_px, y_px) orelse return false;
+    const off = hitTestBodyWithSession(self, term, x_px, y_px) orelse return false;
     logHitSnapshotDiag(self, term, y_px, off);
     // 클릭 한 번이 멀티커서를 정리한다 — 안 그러면 사용자가 커서를 없앨 방법이 없다(§9.1).
     //
@@ -5447,7 +5523,7 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64, 
     // VSCode 관례이고 **둘이 같은 결과**라 설정으로 가를 것이 없다. `⌘`(32)는 링크 열기가 쓰므로
     // 여기 안 온다.
     term.rt.editor_column_anchor = if ((mods & 8) != 0) blk: {
-        const rc = visualRowColAt(term, x_px, y_px) orelse break :blk null;
+        const rc = visualRowColAtWithSession(self, term, x_px, y_px) orelse break :blk null;
         break :blk .{ .from_row = rc.row, .from_col = rc.col, .to_row = rc.row, .to_col = rc.col };
     } else null;
 
@@ -6119,7 +6195,7 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     if (pointOnEditorScrollbar(term, x_px, y_px)) return false;
     // 고정 행의 더블·세 번 클릭도 그 머리줄로 간다(가려진 본문 줄의 낱말을 고르지 않는다 — §4.1i).
     if (sticky_client.click(self, term, x_px, y_px)) return true;
-    const off = hitTestBody(term, x_px, y_px) orelse return false;
+    const off = hitTestBodyWithSession(self, term, x_px, y_px) orelse return false;
     const doc = term.rt.editorDocument().opened orelse return false;
 
     const range: struct { lo: usize, hi: usize, kind: editor_selection.AnchorKind } = if (whole_line) blk: {
@@ -6417,14 +6493,14 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
             // **열 선택이면 사각형을 늘리고 파생한다**(§3.2a) — 아래 「잡은 단위로 늘어난다」 갈래는
             // 단일 selection 의 focus 를 미는 것이라 사각형과 축이 다르다.
             if (owner.term.rt.editor_column_anchor != null) {
-                if (visualRowColAt(owner.term, x_px, y_px)) |rc| {
+                if (visualRowColAtWithSession(self, owner.term, x_px, y_px)) |rc| {
                     owner.term.rt.editor_column_anchor.?.to_row = rc.row;
                     owner.term.rt.editor_column_anchor.?.to_col = rc.col;
                     applyColumnSelection(self, owner.term);
                 }
                 return true;
             }
-            const off = hitTestBody(owner.term, x_px, y_px) orelse return true; // 잡은 채로 밖 — 소비만 한다
+            const off = hitTestBodyWithSession(self, owner.term, x_px, y_px) orelse return true; // 잡은 채로 밖 — 소비만 한다
             if (owner.term.rt.editor_selection) |*sel| {
                 // **잡은 단위로 늘어난다**(`AnchorKind` doc). 더블클릭 뒤 끌면 지나가는 단어가
                 // 통째로, 트리플클릭 뒤 끌면 줄이 통째로 들어온다 — 글자 단위로 늘면 잡은 단어의
@@ -7506,7 +7582,7 @@ pub fn toggleFoldAtPoint(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) b
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
     if (foldsUnavailable(term)) return false; // 비교 뷰 등 — 접힘 자체가 성립하지 않는다
-    const line = hitTestFoldMark(term, x_px, y_px) orelse return false;
+    const line = hitTestFoldMarkWithSession(self, term, x_px, y_px) orelse return false;
     // 범위는 파일을 열 때 세지만(§4.1f), 그때 실패했을 수 있으므로 여기서도 한 번 확인한다.
     ensureFoldRanges(self, term) catch return false;
     // **화살표가 없는 줄의 접기 칸은 아무도 안 가져간다.** 여기서 `true`를 주면 빈 칸을 눌러도
@@ -46392,4 +46468,315 @@ test "shared editor composite activation stops on rejected tab admission before 
         try testing.expect(fx.session.activateSurfaceById(destination));
         try testing.expectEqual(revision + 1, doc.opened.?.file.revision);
     }
+}
+
+fn sharedPreeditFixtureFocus(fx: *PaneFixture) !void {
+    const pane = pane_ops.activePane(fx.session);
+    const source_index: usize = for (pane.terms.items, 0..) |member, i| {
+        if (member == fx.term) break i;
+    } else return error.MissingSource;
+    fx.session.focusTerm(source_index);
+}
+
+test "shared editor IME borrowed projection paints peers without publishing document or input state" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try testing.expect(selectAll(fx.session, fx.term));
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for (0..100) |_| {
+        try text.appendSlice(testing.allocator, "const ");
+        for (0..20) |_| try text.appendSlice(testing.allocator, "abcdefghijklmnopqrstuvwxyz_");
+        try text.appendSlice(testing.allocator, " = 1;\n");
+    }
+    try testing.expect(insertText(fx.session, fx.term, text.items));
+    const peer = try sharedViewFixturePeer(&fx);
+    var baseline = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingCanonicalPeerFrame;
+    baseline.dl.deinit(testing.allocator);
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    peer.rt.editor_selection = editor_selection.Selection.fromPoints(12, 6);
+    peer.rt.editor_first_line = 1;
+    try testing.expect(scrollCols(fx.session, peer, fx.leaf_rect, -3, null));
+    peer.rt.editor_first_piece = 0;
+    peer.rt.editor_wrap = false;
+    const selection = peer.rt.editor_selection.?;
+    const doc = fx.term.rt.editorDocument();
+    const canonical = try testing.allocator.dupe(u8, doc.opened.?.file.content);
+    defer testing.allocator.free(canonical);
+    const notifications = doc.notifications;
+    try testing.expect(ime.marked(fx.session, "한\n나", .{ .location = 3, .length = 0 }, null));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const projected = makePreeditViewWithSession(fx.session, arena.allocator(), peer) orelse return error.MissingPeerProjection;
+    try testing.expectEqualStrings("한", projected.lines[0]);
+    try testing.expect(std.mem.startsWith(u8, projected.lines[1], "나const"));
+    try testing.expectEqual(projected.rowForSource(1), preeditTopRow(projected, peer));
+    try testing.expectEqual(@as(u32, 0), preeditPiece(projected, peer, true));
+    try testing.expectEqual(@as(?maru.session.editor.text_input.ByteRange, null), preeditSelected(peer));
+    try testing.expectEqual(projected.forward(selection.focus), projectedPrimaryCaret(projected, peer));
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingPeerFrame;
+    defer painted.dl.deinit(testing.allocator);
+    // The peer is scrolled below the composed row; painting may never reveal the owner's caret.
+    try testing.expectEqual(@as(u32, 1), peer.rt.editor_first_line);
+    try testing.expectEqual(@as(u32, 3), peer.rt.editor_first_col);
+    try testing.expectEqual(@as(u32, 0), peer.rt.editor_first_piece);
+    try testing.expectEqualDeep(selection, peer.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), peer.rt.editor_preedit.len);
+    try testing.expectEqualStrings(canonical, doc.opened.?.file.content);
+    try testing.expectEqualDeep(notifications, doc.notifications);
+    try testing.expectEqual(fx.term.surface.id, fx.session.ime_terminal_target_id.?);
+    try testing.expectEqual(preeditStampWithSession(fx.session, peer), peer.rt.editor_hit_preedit_stamp);
+    try testing.expect(fx.session.tryCommitComposition());
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_preedit.len);
+    try testing.expectEqual(@as(usize, 0), peer.rt.editor_preedit.len);
+    try testing.expect(std.mem.startsWith(u8, doc.opened.?.file.content, "한\n나const"));
+    try testing.expectEqual(@as(u64, 0), preeditStampWithSession(fx.session, peer));
+    const committed_revision = doc.opened.?.file.revision;
+    try testing.expect(fx.session.tryCommitComposition());
+    try testing.expectEqual(committed_revision, doc.opened.?.file.revision);
+}
+
+test "shared editor IME peer projection maps suffix clicks and invalidates stale owner bytes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    peer.rt.editor_selection = editor_selection.Selection.at(7);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingPeerFrame;
+    defer painted.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasCodepoint(painted.dl, 0xD55C));
+    const geom = peer.rt.editor_hit_geom;
+    const x: f64 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px + geom.cell_w_px * 4)));
+    const y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast(geom.cell_h_px / 2)));
+    try testing.expectEqual(@as(?usize, 2), hitTestBodyWithSession(fx.session, peer, x, y));
+    // The Term-only compatibility entry point cannot reconstruct another view's bytes.
+    try testing.expectEqual(@as(?usize, null), hitTestBody(peer, x, y));
+    try testing.expect(!hitSnapshotStale(fx.session, peer));
+    try testing.expect(ime.marked(fx.session, "가나", .{ .location = 2, .length = 0 }, null));
+    try testing.expect(hitSnapshotStale(fx.session, peer));
+    try testing.expectEqual(@as(?usize, null), hitTestBodyWithSession(fx.session, peer, x, y));
+    setEditorPreedit(fx.session, fx.term, "");
+    try testing.expectEqual(@as(u64, 0), preeditStampWithSession(fx.session, peer));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expect(makePreeditViewWithSession(fx.session, arena.allocator(), peer) == null);
+}
+
+test "shared editor IME peer projection allocation failure leaves owner and notifications untouched" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    const notifications = peer.rt.editorDocument().notifications;
+    const revision = peer.rt.editorDocument().opened.?.file.revision;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expect(makePreeditViewWithSession(fx.session, failing.allocator(), peer) == null);
+    try testing.expectEqualStrings("한", fx.term.rt.editor_preedit);
+    try testing.expectEqual(@as(usize, 0), peer.rt.editor_preedit.len);
+    try testing.expectEqual(revision, peer.rt.editorDocument().opened.?.file.revision);
+    try testing.expectEqualDeep(notifications, peer.rt.editorDocument().notifications);
+    // OOM while drawing never turns the peer into a competing composition writer.
+    try testing.expect(fx.session.tryCommitComposition());
+}
+
+test "shared editor IME pending prefix uses the existing owner overlay in both views" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    const input = @import("../input.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    input.imeBegin(fx.session);
+    try testing.expect(ime.insert(fx.session, "한", null));
+    try testing.expect(ime.marked(fx.session, "글", .{ .location = 1, .length = 0 }, null));
+    fx.term.rt.editorDocument().opened.?.file.read_only = true;
+    input.imeEnd(fx.session, null);
+    try testing.expect(fx.session.ime_editor_commit_pending);
+    try testing.expectEqualStrings("한", fx.session.ime_inserted.items);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const owner = makePreeditView(arena.allocator(), fx.term) orelse return error.MissingOwnerProjection;
+    const borrowed = makePreeditViewWithSession(fx.session, arena.allocator(), peer) orelse return error.MissingPeerProjection;
+    try testing.expectEqualStrings(owner.lines[0], borrowed.lines[0]);
+    // Rendering mirrors the established marked-only overlay. AppKit query includes
+    // the pending committed prefix; this change does not redefine that older contract.
+    try testing.expect(std.mem.startsWith(u8, borrowed.lines[0], "글const"));
+    try testing.expect(!std.mem.startsWith(u8, borrowed.lines[0], "한글"));
+    fx.term.rt.editorDocument().opened.?.file.read_only = false;
+    try testing.expect(fx.session.tryCommitComposition());
+    try testing.expect(std.mem.startsWith(u8, peer.rt.editorDocument().opened.?.file.content, "한글const"));
+}
+
+test "shared editor IME projection resolves live owner after source closes and excludes other documents" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    const other = try openUntitledInActivePane(fx.session);
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expect(makePreeditViewWithSession(fx.session, arena.allocator(), peer) != null);
+    try testing.expect(makePreeditViewWithSession(fx.session, arena.allocator(), other) == null);
+    const source_surface = fx.term.surface.id;
+    const pane = pane_ops.activePane(fx.session);
+    const source_index: usize = for (pane.terms.items, 0..) |member, i| {
+        if (member == fx.term) break i;
+    } else return error.MissingSource;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, source_index);
+    try testing.expect(term_ops.termBySurfaceId(fx.session, source_surface) == null);
+    try testing.expectEqual(@as(u64, 0), preeditStampWithSession(fx.session, peer));
+    try testing.expect(makePreeditViewWithSession(fx.session, arena.allocator(), peer) == null);
+    // Closing a composing view already cancels its uncommitted overlay.
+    try testing.expect(std.mem.startsWith(u8, peer.rt.editorDocument().opened.?.file.content, "const"));
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "X"));
+    try testing.expect(std.mem.startsWith(u8, peer.rt.editorDocument().opened.?.file.content, "Xconst"));
+}
+
+test "shared editor IME projection uses peer folds and wrap without borrowing owner view state" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try testing.expect(selectAll(fx.session, fx.term));
+    try testing.expect(insertText(fx.session, fx.term, "a:\n  one\n  two\nb:\n  three\ntail"));
+    const peer = try sharedViewFixturePeer(&fx);
+    try ensureFoldRanges(fx.session, peer);
+    try testing.expect(toggleFoldHead(fx.session, peer, 0));
+    try testing.expectEqual(@as(usize, 1), foldedHeads(peer).len);
+    peer.rt.editor_wrap = true;
+    fx.term.rt.editor_wrap = false;
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(21); // final visible line, after both blocks
+    const peer_numbers = try testing.allocator.dupe(?u32, peer.rt.editor_visible_numbers);
+    defer testing.allocator.free(peer_numbers);
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const owner = makePreeditViewWithSession(fx.session, arena.allocator(), fx.term) orelse return error.MissingOwnerProjection;
+    const borrowed = makePreeditViewWithSession(fx.session, arena.allocator(), peer) orelse return error.MissingPeerProjection;
+    try testing.expect(owner.lines.len > borrowed.lines.len);
+    try testing.expectEqualSlices(?u32, peer_numbers, peer.rt.editor_visible_numbers);
+    try testing.expectEqual(@as(u32, 0), foldedHeads(peer)[0]);
+    try testing.expectEqual(@as(usize, 0), foldedHeads(fx.term).len);
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingPeerFrame;
+    defer painted.dl.deinit(testing.allocator);
+    try testing.expect(peer.rt.editor_hit_geom.wrap);
+    try testing.expect(!fx.term.rt.editor_wrap.?);
+    try testing.expectEqualSlices(?u32, peer_numbers, peer.rt.editor_visible_numbers);
+    try testing.expectEqual(@as(u32, 0), foldedHeads(peer)[0]);
+}
+
+test "shared editor IME hidden peer composition keeps canonical visible rows clickable" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try testing.expect(selectAll(fx.session, fx.term));
+    try testing.expect(insertText(fx.session, fx.term, "a:\n  one\n  two\nb:\n  three\ntail"));
+    const peer = try sharedViewFixturePeer(&fx);
+    try ensureFoldRanges(fx.session, peer);
+    try testing.expect(toggleFoldHead(fx.session, peer, 0));
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(5); // inside peer's collapsed first block
+    const peer_selection = peer.rt.editor_selection;
+    try testing.expect(ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null));
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingPeerFrame;
+    defer painted.dl.deinit(testing.allocator);
+    try testing.expect(!drawnHasCodepoint(painted.dl, 0xD55C));
+    try testing.expectEqual(@as(u64, 0), peer.rt.editor_hit_preedit_stamp);
+    const geom = peer.rt.editor_hit_geom;
+    const x: f64 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)));
+    const y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast(geom.cell_h_px / 2)));
+    std.debug.print("hidden composition snapshot: painted_stamp={d} effective_stamp={d} stale={} body={any}\n", .{ peer.rt.editor_hit_preedit_stamp, preeditStampWithSession(fx.session, peer), hitSnapshotStale(fx.session, peer), hitTestBodyWithSession(fx.session, peer, x, y) });
+    try testing.expect(!hitSnapshotStale(fx.session, peer));
+    try testing.expectEqual(@as(?usize, 0), hitTestBodyWithSession(fx.session, peer, x, y));
+    try testing.expectEqual(@as(usize, 1), foldedHeads(peer).len);
+    try testing.expectEqual(@as(u32, 0), foldedHeads(peer)[0]);
+    try testing.expectEqualDeep(peer_selection, peer.rt.editor_selection);
+    try testing.expectEqualStrings("한", fx.term.rt.editor_preedit);
+    // Showing this row later must restore projection rather than persist a hidden-state stamp.
+    try testing.expect(toggleFoldHead(fx.session, peer, 0));
+    var visible = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.MissingVisiblePeerFrame;
+    defer visible.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasCodepoint(visible.dl, 0xD55C));
+    try testing.expect(!hitSnapshotStale(fx.session, peer));
+}
+
+test "shared editor IME active interpretation refuses focus release until queued text settles" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    try sharedPreeditFixtureFocus(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    peer.rt.editor_selection = editor_selection.Selection.at(24);
+    const peer_selection = peer.rt.editor_selection.?;
+    const source_id = fx.term.surface.id;
+    const doc = fx.term.rt.editorDocument();
+    const notifications = doc.notifications;
+    fx.session.imeBegin();
+    fx.session.imeInsert("옛");
+    try testing.expect(!fx.session.tryCommitComposition());
+    try testing.expect(!fx.session.activateSurfaceById(peer.surface.id));
+    try testing.expect(fx.session.app_window.active().? == fx.term.surface);
+    try testing.expectEqual(@as(?u64, source_id), fx.session.ime_terminal_target_id);
+    try testing.expectEqualStrings("옛", fx.session.ime_inserted.items);
+    try testing.expectEqualDeep(peer_selection, peer.rt.editor_selection.?);
+    try testing.expectEqualDeep(notifications, doc.notifications);
+    try testing.expectEqual(@as(u64, 0), doc.opened.?.file.revision);
+    fx.session.imeEnd(null);
+    try testing.expect(std.mem.startsWith(u8, doc.opened.?.file.content, "옛const"));
+    try testing.expectEqual(@as(u64, 1), doc.opened.?.file.revision);
+    try testing.expect(fx.session.activateSurfaceById(peer.surface.id));
+    try testing.expect(fx.session.app_window.active().? == peer.surface);
+    try testing.expectEqual(@as(u64, 1), doc.opened.?.file.revision);
+    try testing.expect(fx.session.tryCommitComposition());
+    try testing.expectEqual(@as(u64, 1), doc.opened.?.file.revision);
+}
+
+test "shared editor IME terminal interpretation retains its target before editor focus" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const pane = pane_ops.activePane(fx.session);
+    const terminal_index: usize = for (pane.terms.items, 0..) |term, i| {
+        if (term.kind == .terminal) break i;
+    } else return error.MissingTerminal;
+    fx.session.focusTerm(terminal_index);
+    const terminal_term = pane.activeTerm();
+    const events = fx.session.total_terminal_input_events;
+    const bytes = fx.session.total_terminal_input_bytes;
+    fx.session.imeBegin();
+    fx.session.imeInsert("옛");
+    try testing.expect(!fx.session.tryCommitComposition());
+    try testing.expect(!fx.session.activateSurfaceById(fx.term.surface.id));
+    try testing.expect(fx.session.app_window.active().? == terminal_term.surface);
+    try testing.expectEqual(@as(?u64, terminal_term.surface.id), fx.session.ime_terminal_target_id);
+    try testing.expectEqualStrings("옛", fx.session.ime_inserted.items);
+    try testing.expectEqual(events, fx.session.total_terminal_input_events);
+    fx.session.imeEnd(null);
+    try testing.expectEqual(events + 1, fx.session.total_terminal_input_events);
+    try testing.expectEqual(bytes + "옛".len, fx.session.total_terminal_input_bytes);
+    try testing.expectEqual(@as(u64, 0), fx.term.rt.editorDocument().opened.?.file.revision);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surface.id));
+    try testing.expectEqual(events + 1, fx.session.total_terminal_input_events);
 }

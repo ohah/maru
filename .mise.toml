@@ -264,6 +264,10 @@ run = "zig build macos-editor-ime-smoke"
 description = "Run actual Korean input-source events in the native editor (activates a window)"
 run = "zig build macos-editor-ime-live-smoke"
 
+[tasks.macos-editor-ime-late-focus-smoke]
+description = "Run real Korean HID composition across shared editor owners"
+run = "zig build macos-editor-ime-late-focus-smoke"
+
 [tasks.macos-editor-ime-wrapped-candidate-smoke]
 description = "Verify wrapped editor Hanja candidates with actual HID and single-window OCR"
 run = "zig build macos-editor-ime-wrapped-candidate-smoke"

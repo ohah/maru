@@ -15,6 +15,15 @@ final class EditorIMESmokeDriver {
     private let outputPath: String
     private let live: Bool
     private let wrappedCandidate: Bool
+    private let lateFocus: Bool
+    private var lateSourceID: UInt64?
+    private var latePeerID: UInt64?
+    private var lateSwitchTraceOffset: UInt64 = 0
+    private var lateQuietTraceOffset: UInt64 = 0
+    private var lateQuietStarted: TimeInterval?
+    private var lateQuietSelection: NSRange?
+    private var lateQuietPreserved = true
+    private var lateObservedCallbacks = 0
     private var candidateIndex = 0
     private let candidateObserver = SessionHostIMECandidateObservation()
     private var candidateBefore: SessionHostIMECandidateObservation.Snapshot?
@@ -38,6 +47,7 @@ final class EditorIMESmokeDriver {
         let caret: Int
         let composition: NSRange?
         var markedStates: [LiveMarkedExpectation] = []
+        var requiresCallback = true
     }
     private var pendingLiveKey: LiveKeyExpectation?
     private var liveKeyPostedAt: TimeInterval = 0
@@ -59,6 +69,7 @@ final class EditorIMESmokeDriver {
         outputPath = output
         live = environment["MARU_EDITOR_IME_SMOKE_LIVE"] == "1"
         wrappedCandidate = environment["MARU_EDITOR_IME_WRAPPED_CANDIDATE"] == "1"
+        lateFocus = environment["MARU_EDITOR_IME_LATE_FOCUS"] == "1"
     }
 
     private func expect(_ condition: Bool, _ name: String) {
@@ -104,6 +115,10 @@ final class EditorIMESmokeDriver {
                 : (liveReplacementCallbacks > 0 ? "insertText_replacement" :
                     (liveInsertCallbacks > 0 ? "insertText" : "unobserved"))
             observations.append("live_callback_protocol=\(protocolName)")
+        }
+        if lateFocus {
+            observations.append("late_focus_os_callback_count_after_observed_cutover=\(lateObservedCallbacks)")
+            observations.append("late_focus_os_callback_observed=\(lateObservedCallbacks > 0)")
         }
         observations.append("failure_count=\(failures.count)")
         observations.append("failures=\(failures.joined(separator: ","))")
@@ -272,7 +287,7 @@ final class EditorIMESmokeDriver {
                 expect(false, "\(expected.name)_callback_trace_bounded"); return
             }
             let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
-            expect(lines.contains { $0.hasPrefix("[IME] keyDown ") && $0.hasSuffix("keyCode=\(expected.code)") },
+            expect(lines.contains { $0.hasPrefix("[IME] keyDown ") && $0.split(separator: " ").contains(where: { String($0) == "keyCode=\(expected.code)" }) },
                    "\(expected.name)_hid_received")
             var headers: [String] = []
             for line in lines {
@@ -287,11 +302,12 @@ final class EditorIMESmokeDriver {
                 headers.append(String(line.components(separatedBy: " text=").first ?? String(line)))
             }
             observations.append("\(expected.name)_callbacks=\(headers.joined(separator: " | "))")
-            expect(!headers.isEmpty, "\(expected.name)_callback_observed")
+            expect(!headers.isEmpty || !expected.requiresCallback, "\(expected.name)_callback_observed")
         } catch { expect(false, "\(expected.name)_callback_trace") }
     }
 
-    private func postLiveKey(_ expected: LiveKeyExpectation, view: MaruMetalTerminalView, window: NSWindow) -> Bool {
+    private func postLiveKey(_ expected: LiveKeyExpectation, view: MaruMetalTerminalView, window: NSWindow,
+                             flags: CGEventFlags = []) -> Bool {
         fflush(stderr)
         guard let file = try? FileHandle(forReadingFrom: traceURL) else {
             expect(false, "\(expected.name)_callback_trace_open"); return false
@@ -301,7 +317,7 @@ final class EditorIMESmokeDriver {
             expect(false, "\(expected.name)_callback_trace_offset"); return false
         }
         liveTraceOffset = offset
-        guard post(expected.code, view: view, window: window) else { return false }
+        guard post(expected.code, view: view, window: window, flags: flags) else { return false }
         pendingLiveKey = expected
         liveKeyPostedAt = ProcessInfo.processInfo.systemUptime
         return true
@@ -389,7 +405,7 @@ final class EditorIMESmokeDriver {
             context.deactivate()
             context.selectedKeyboardInputSource = SessionHostInputSourcePolicy.korean2SetSourceID
             context.activate()
-            liveStep = wrappedCandidate ? 30 : 1
+            liveStep = lateFocus ? 50 : (wrappedCandidate ? 30 : 1)
         case 1, 5:
             key(0, "a", view: view, window: window)
             view.insertText("left right", replacementRange: unspecified)
@@ -550,6 +566,157 @@ final class EditorIMESmokeDriver {
             finish()
         case 30...39:
             tickWrappedCandidate(view: view, window: window)
+        case 50...69:
+            tickLateFocus(view: view, window: window)
+        default: break
+        }
+    }
+
+    private func fixtureTrace(from offset: UInt64 = 0) -> String? {
+        fflush(stderr)
+        guard let file = try? FileHandle(forReadingFrom: traceURL) else { return nil }
+        defer { try? file.close() }
+        do {
+            try file.seek(toOffset: offset)
+            let data = try file.read(upToCount: 1_048_576) ?? Data()
+            guard data.count < 1_048_576 else { return nil }
+            return String(decoding: data, as: UTF8.self)
+        } catch { return nil }
+    }
+
+    private func fixtureTraceEnd() -> UInt64? {
+        fflush(stderr)
+        guard let file = try? FileHandle(forReadingFrom: traceURL) else { return nil }
+        defer { try? file.close() }
+        return try? file.seekToEnd()
+    }
+
+    private func focusCallbackLines(_ trace: String) -> [String] {
+        trace.split(separator: "\n").filter {
+            $0.hasPrefix("[IME] callback_arrival insertText ") ||
+                $0.hasPrefix("[IME] callback_arrival setMarkedText ") ||
+                $0.hasPrefix("[IME] callback_arrival unmarkText ") ||
+                $0.hasPrefix("[IME] callback_arrival doCommand ")
+        }.map(String.init)
+    }
+
+    private func beginLateSwitch(code: UInt16, view: MaruMetalTerminalView, window: NSWindow) -> Bool {
+        guard let offset = fixtureTraceEnd() else { return false }
+        lateSwitchTraceOffset = offset
+        lateQuietStarted = nil
+        lateQuietSelection = nil
+        lateQuietPreserved = true
+        fputs("[IME_FOCUS] post code=\(code) owner=\(view.controller?.imeDiagnosticOwnerID ?? 0) t=\(ProcessInfo.processInfo.systemUptime)\n", stderr)
+        fflush(stderr)
+        return post(code, view: view, window: window, flags: [.maskCommand, .maskAlternate])
+    }
+
+    /// A successful focus round trip is distinct from observing a late OS callback. Keep the
+    /// entire natural switch trace and separately count callbacks after the new owner was seen.
+    private func settleLateSwitch(owner: UInt64, text: String, name: String,
+                                  view: MaruMetalTerminalView) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let actualOwner = view.controller?.imeDiagnosticOwnerID
+        if lateQuietStarted == nil {
+            guard actualOwner == owner else { return false }
+            fputs("[IME_FOCUS] observed owner=\(owner) t=\(now)\n", stderr)
+            guard let offset = fixtureTraceEnd() else { return false }
+            lateQuietStarted = now
+            lateQuietTraceOffset = offset
+            lateQuietSelection = view.selectedRange()
+            observations.append("\(name)_owner=\(owner)")
+        }
+        lateQuietPreserved = lateQuietPreserved && actualOwner == owner && virtualText(view) == text &&
+            view.selectedRange() == lateQuietSelection && !view.hasMarkedText()
+        guard now - (lateQuietStarted ?? now) >= 0.6 else { return false }
+        expect(lateQuietPreserved, "\(name)_settled_document_selection")
+        observations.append("\(name)_text_actual=\(virtualText(view) ?? "<unavailable>")")
+        observations.append("\(name)_caret_actual=\(view.selectedRange().location),\(view.selectedRange().length)")
+        if let trace = fixtureTrace(from: lateSwitchTraceOffset),
+           let quietTrace = fixtureTrace(from: lateQuietTraceOffset) {
+            let callbacks = focusCallbackLines(trace)
+            let quietCallbacks = focusCallbackLines(quietTrace)
+            lateObservedCallbacks += quietCallbacks.count
+            observations.append("\(name)_switch_callbacks=\(callbacks.joined(separator: " | "))")
+            observations.append("\(name)_callbacks_after_observed_cutover=\(quietCallbacks.count)")
+        } else { expect(false, "\(name)_callback_trace") }
+        return true
+    }
+
+    /// Both tabs share one fixture document but keep their own caret. All composing keys and
+    /// tab chords go through HID/TSM; no setMarkedText/insertText callback is injected here.
+    private func tickLateFocus(view: MaruMetalTerminalView, window: NSWindow) {
+        func failedInput() {
+            failures.append("late_focus_input_unavailable")
+            restoreInputSource(view: view)
+            finish()
+        }
+        switch liveStep {
+        case 50:
+            guard let trace = fixtureTrace(),
+                  let fixture = trace.split(separator: "\n").first(where: { $0.hasPrefix("[IME_FIXTURE] source=") }) else { return }
+            let fields = fixture.split(separator: " ")
+            guard let sourceField = fields.first(where: { $0.hasPrefix("source=") }),
+                  let peerField = fields.first(where: { $0.hasPrefix("peer=") }),
+                  let source = UInt64(sourceField.dropFirst(7)), let peer = UInt64(peerField.dropFirst(5)),
+                  source != peer, view.controller?.imeDiagnosticOwnerID == source else { return }
+            lateSourceID = source
+            latePeerID = peer
+            observations.append("late_focus_source=\(source)")
+            observations.append("late_focus_peer=\(peer)")
+            expect(virtualText(view) == "L R", "late_focus_shared_seed")
+            var expected = LiveKeyExpectation(name: "late_focus_source_start", code: 123,
+                                              text: "L R", caret: 0, composition: nil)
+            expected.requiresCallback = false
+            guard postLiveKey(expected, view: view, window: window, flags: .maskCommand) else { failedInput(); return }
+            liveStep = 51
+        case 51:
+            guard postLiveKey(LiveKeyExpectation(name: "late_focus_source_position", code: 124,
+                                                text: "L R", caret: 1, composition: nil), view: view, window: window) else { failedInput(); return }
+            liveStep = 52
+        case 52:
+            guard postLiveKey(LiveKeyExpectation(name: "late_focus_source_initial", code: 15,
+                                                text: "Lㄱ R", caret: 2, composition: NSRange(location: 1, length: 1)), view: view, window: window) else { failedInput(); return }
+            liveStep = 53
+        case 53:
+            guard postLiveKey(LiveKeyExpectation(name: "late_focus_source_syllable", code: 40,
+                                                text: "L가 R", caret: 2, composition: NSRange(location: 1, length: 1)), view: view, window: window) else { failedInput(); return }
+            liveStep = 54
+        case 54:
+            expect(view.controller?.imeDiagnosticOwnerID == lateSourceID, "late_focus_source_before_switch")
+            guard beginLateSwitch(code: 30, view: view, window: window) else { failedInput(); return }
+            liveStep = 55
+        case 55:
+            guard let peer = latePeerID,
+                  settleLateSwitch(owner: peer, text: "L가 R", name: "late_focus_peer", view: view) else { return }
+            var expected = LiveKeyExpectation(name: "late_focus_peer_end", code: 124,
+                                              text: "L가 R", caret: 4, composition: nil)
+            expected.requiresCallback = false
+            guard postLiveKey(expected, view: view, window: window, flags: .maskCommand) else { failedInput(); return }
+            liveStep = 56
+        case 56:
+            guard postLiveKey(LiveKeyExpectation(name: "late_focus_peer_initial", code: 1,
+                                                text: "L가 Rㄴ", caret: 5, composition: NSRange(location: 4, length: 1)), view: view, window: window) else { failedInput(); return }
+            liveStep = 57
+        case 57:
+            guard postLiveKey(LiveKeyExpectation(name: "late_focus_peer_syllable", code: 40,
+                                                text: "L가 R나", caret: 5, composition: NSRange(location: 4, length: 1)), view: view, window: window) else { failedInput(); return }
+            liveStep = 58
+        case 58:
+            expect(view.controller?.imeDiagnosticOwnerID == latePeerID, "late_focus_peer_before_return")
+            guard beginLateSwitch(code: 33, view: view, window: window) else { failedInput(); return }
+            liveStep = 59
+        case 59:
+            guard let source = lateSourceID,
+                  settleLateSwitch(owner: source, text: "L가 R나", name: "late_focus_return", view: view) else { return }
+            range(view.selectedRange(), NSRange(location: 2, length: 0), "late_focus_source_caret_preserved")
+            expect(virtualText(view) == "L가 R나", "late_focus_shared_exact_once")
+            key(1, "s", view: view, window: window)
+            liveStep = 60
+        case 60:
+            guard disk("L가 R나", "late_focus_shared_saved") else { return }
+            restoreInputSource(view: view)
+            finish()
         default: break
         }
     }

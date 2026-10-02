@@ -7,8 +7,10 @@ app_path=${1:?Maru app executable path is required}
 live=${2:-0}
 smoke_ms=20000
 wrapped=0
+late_focus=0
 fixture_window_size=960x600
 if [ "$live" = 2 ]; then wrapped=1; live=1; fi
+if [ "$live" = 3 ]; then late_focus=1; live=1; fi
 fixture_root=$(mktemp -d /tmp/maru-editor-ime.XXXXXX)
 # The editor's pinned parent writer rejects symlink path components; macOS /tmp is one.
 fixture_root=$(cd "$fixture_root" && pwd -P)
@@ -17,6 +19,7 @@ chmod 700 "$fixture_root/session-host"
 mkdir -p "$fixture_root/home/.config/maru"
 printf 'session.keep-alive-after-quit = false\n' > "$fixture_root/home/.config/maru/config"
 printf '%s' 'ab😀한cd' > "$fixture_root/document.txt"
+if [ "$late_focus" = 1 ]; then printf '%s' 'L R' > "$fixture_root/document.txt"; fi
 printf '%s' 'cat cat' > "$fixture_root/expected.txt"
 xcrun swiftc src/platform/macos/SessionHostInputSourcePolicy.swift \
     tests/macos_editor_ime_input_source_policy.swift -o "$fixture_root/test-input-source-policy"
@@ -34,6 +37,7 @@ right' > "$fixture_root/expected.txt"
     if [ "$wrapped" = 1 ]; then
         python3 -c 'import sys;sys.stdout.write("x"*320+" 韓")' > "$fixture_root/expected.txt"
     fi
+    if [ "$late_focus" = 1 ]; then printf '%s' 'L가 R나' > "$fixture_root/expected.txt"; fi
     xcrun swiftc src/platform/macos/SessionHostInputSourcePolicy.swift \
         src/platform/macos/SessionHostInputSourceRestore.swift -o "$fixture_root/restore-input-source"
     restore_input_source() {
@@ -65,6 +69,7 @@ env CFFIXED_USER_HOME="$fixture_root/home" \
     MARU_SESSION_HOST_ROOT="$fixture_root/session-host" \
     MARU_FT_WINDOW_SIZE="${MARU_FT_WINDOW_SIZE:-$fixture_window_size}" MARU_MACOS_APP_SMOKE_MS="$smoke_ms" MARU_EDITOR_IME_SMOKE=1 MARU_IME_DEBUG=1 \
     MARU_EDITOR_IME_SMOKE_LIVE="$live" MARU_EDITOR_IME_WRAPPED_CANDIDATE="$wrapped" \
+    MARU_EDITOR_IME_LATE_FOCUS="$late_focus" \
     MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT="$fixture_root" \
     MARU_NATIVE_EDITOR="$fixture_root/document.txt" \
     MARU_EDITOR_IME_SMOKE_OUT="$fixture_root/summary.txt" \

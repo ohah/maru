@@ -547,7 +547,9 @@ echo "PASS typing in the open <select> list picks the item (c → cherry)"
 # 셸에서 띄운 앱은 맨 앞이 아니라 macOS 가 툴팁을 실제로 띄우지 않는다(비활성 앱 — W6b 착수 전 실측). 그래서 maru 가 view 에
 # macOS 툴팁을 **맞는 글로 달았는지**를 본다(대본 `tooltip` — 앱 로그의 `osr-test tooltip` 줄). title 있는 곳에 올리면 달리고(여러
 # 줄), 빈 곳으로 가면 떼고, 다시 올리면 다시 달리고, 누르면(view 마우스 메서드 — macOS 가 숨긴다) 떼었다가 다음 움직임에 다시 달고
-# (Chrome 은 누른 뒤 같은 요소에서 움직이면 다시 띄운다 — 실측), 팔레트가 열리면(탭을 떠난 것으로 — leave) 뗀다.
+# (Chrome 은 누른 뒤 같은 요소에서 움직이면 다시 띄운다 — 실측), 포인터를 멈춘 채 분할하면 영역이 줄어든 본문으로 옮겨 가고,
+# 팔레트가 열리면(탭을 떠난 것으로 — leave) 뗀다. 영역은 view 전체가 아니라 포인터가 있는 탭 본문이다(적대 검증 3 차 — view 전체면
+# 멈춘 채 배치가 바뀔 때 옛 글이 터미널 위에 떴다).
 cat > "$root/tip.txt" <<'SCRIPT'
 sleep 7000
 hover 0.40 0.33 0 0
@@ -572,6 +574,9 @@ tooltip
 view move 0.42 0.35 0 0
 sleep 300
 tooltip
+action split_vertical
+sleep 1000
+tooltip
 action toggle_command_palette
 sleep 1000
 tooltip
@@ -579,16 +584,23 @@ key 53 U+1B
 sleep 500
 SCRIPT
 : > "$root/requests.log"
-run_app /tip-app 16000 "$root/tip.summary" MARU_WEB_OSR_TEST_INPUT="$root/tip.txt"
+run_app /tip-app 17000 "$root/tip.summary" MARU_WEB_OSR_TEST_INPUT="$root/tip.txt"
 grep -a '^osr-test tooltip' "$root/app-tip-app.log" > "$root/tip.report" || true
 cat "$root/tip.report"
 python3 - "$root/tip.report" <<'PY' || fail "the page tooltip was not attached to the view as expected"
 import sys
 lines = [l.strip() for l in open(sys.argv[1])]
-want = ['osr-test tooltip active=true text=A tip\\nline2', 'osr-test tooltip active=false text=', 'osr-test tooltip active=true text=A tip\\nline2',
-        'osr-test tooltip active=false text=', 'osr-test tooltip active=true text=A tip\\nline2', 'osr-test tooltip active=false text=']
-ok = lines == want
-print(('PASS ' if ok else 'FAIL ') + f'tooltip attached over the titled element (multi-line), detached outside, reattached, detached by a click and reattached on the next move (Chrome re-shows), detached when the palette opens ({lines})')
+on, off = 'osr-test tooltip active=true text=A tip\\nline2 area=', 'osr-test tooltip active=false text= area=-'
+want = [on, off, on, off, on, on, off]
+shape = len(lines) == len(want) and all(l.startswith(w) if w == on else l == w for l, w in zip(lines, want))
+areas = [tuple(float(v) for v in l[len(on):].split(',')) for l in lines if l.startswith(on)] if shape else []
+def holds(a, x, y): return a[0] <= x <= a[0] + a[2] and a[1] <= y <= a[1] + a[3]
+# 처음 셋은 같은 본문(title 자리 0.42·0.34 와 같은 본문의 빈 자리 0.85·0.85 를 품고 view 전체가 아니다 — 위아래를 뒤집어
+# 풀면 빈 자리가 빠진다), 분할 뒤는 포인터(0.42·0.35)를 품은 더 작은 본문으로 옮겼다.
+body = shape and areas[0] == areas[1] == areas[2] and holds(areas[0], 0.42, 0.34) and holds(areas[0], 0.85, 0.85) and areas[0] != (0.0, 0.0, 1.0, 1.0)
+moved = body and areas[3] != areas[0] and areas[3][2] * areas[3][3] < areas[0][2] * areas[0][3] and holds(areas[3], 0.42, 0.35)
+ok = shape and body and moved
+print(('PASS ' if ok else 'FAIL ') + f'tooltip attached to the hovered web body (not the whole view) over the titled element (multi-line), detached outside, reattached, detached by a click and reattached on the next move (Chrome re-shows), moved to the smaller body after a split with the pointer still, detached when the palette opens (shape {shape} body {body} moved {moved} {lines})')
 sys.exit(0 if ok else 1)
 PY
 

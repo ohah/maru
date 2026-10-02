@@ -1104,11 +1104,14 @@ fn popupKeyHasChar(key: OsrKey) bool {
 /// hover 중인 Chromium 탭의 툴팁(W6b) — 글과, (hover 탭, 그 탭의 툴팁 세대)가 바뀔 때마다 오르는 일련번호. Swift 는 일련번호가
 /// 바뀌면 macOS 툴팁을 다시 단다(글이 비었으면 뗀다). 포인터가 탭을 떠나거나(오버레이가 열리며 leave 를 보낸 경우도) 다른 탭으로
 /// 가면 hover 탭이 바뀌어 일련번호가 오른다 — 옛 탭의 글이 새 자리에 남지 않는다.
-pub fn osrTooltip(self: *AppSession) struct { serial: u64, text: []const u8 } {
+/// `rect` 는 그 탭 본문(backing px, view 왼쪽 위 원점) — Swift 는 툴팁 영역을 view 전체가 아니라 여기에 단다. 포인터를 멈춘 채
+/// 배치가 바뀌면(분할·크기) hover 탭이 그대로여도 포인터가 본문 밖일 수 있다 — 그때 옛 글이 터미널 위에 뜨지 않게(W6b 적대 검증 3 차).
+pub fn osrTooltip(self: *AppSession) struct { serial: u64, text: []const u8, rect: ?osr_input.Rect } {
     const sid = self.osr_hover_surface;
     const t = if (sid != 0) web_osr.tooltip(sid) else null;
     const serial = self.osr_tooltip_seen.observe(sid, if (t) |x| x.generation else 0);
-    return .{ .serial = serial, .text = if (t) |x| x.text else "" };
+    const layout = if (sid != 0) osr_input.find(self.osr_layouts.items, sid) else null;
+    return .{ .serial = serial, .text = if (t) |x| x.text else "", .rect = if (layout) |l| l.rect else null };
 }
 
 /// 키 대상 탭에 팝업 위젯이 열려 있는가(W6a②). 열린 목록은 편집할 수 없어 입력기 조합이 갈 곳이 없다 — 조합이 서면 그 뒤의

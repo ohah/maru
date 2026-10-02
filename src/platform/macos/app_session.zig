@@ -15951,6 +15951,10 @@ pub const AppSession = struct {
     }
 
     fn commitTerminalCompositionWithFlush(self: *AppSession, flush: bool) bool {
+        // Interpretation may still revise/delete queued text. Releasing its pin now
+        // lets imeEnd route that payload to a newly focused view. Keep the whole
+        // transaction with its original owner until imeEnd settles it.
+        if (self.ime_active) return false;
         if (!input_ops.retryEditorCommit(self)) return false;
         // **편집기 조합은 코어에 없다**(N3). 아래는 sentinel 코어의 preedit를 읽는데 편집기는 늘
         // 비어 있어 *"확정할 것이 없다"*고 답하고 고정만 푼다 — 그러면 화면에 그려지던 조합 글자가
@@ -50640,6 +50644,9 @@ test "IME6 포커스를 잃으면 편집기 조합이 확정된다 — 유령 �
     try std.testing.expectEqual(@as(usize, 3), term.rt.editor_preedit.len);
     try std.testing.expect(input_ops.imeComposingActive(session)); // 조합 중으로 보고한다
 
+    // marked text remains composing after interpretKeyEvents has returned.
+    // End the host key transaction before simulating a later application switch.
+    input_ops.imeEnd(session, null);
     session.setFocused(false); // 앱 전환
 
     // 조합은 **문서로 확정**되고 화면 상태는 비었다.
@@ -50654,6 +50661,7 @@ test "IME6 포커스를 잃으면 편집기 조합이 확정된다 — 유령 �
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(1);
     input_ops.imeBegin(session);
     input_ops.imeMarked(session, "글");
+    input_ops.imeEnd(session, null); // interpretation ended; marked overlay is still live
     session.setFocused(false);
     try std.testing.expectEqualStrings("a글한b글\n", term.rt.editorDocument().opened.?.file.content);
 }

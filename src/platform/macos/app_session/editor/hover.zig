@@ -101,7 +101,7 @@ pub fn notePointer(self: *AppSession, x_px: f64, y_px: f64) void {
     if (self.chrome_host.hover_box.open) {
         if (hover_box.contains(&self.chrome_host.hover_box, st.lines.items, chromeProps(self), x_px, y_px)) return;
         if (shownTerm(self)) |term| {
-            if (pointerOffset(term, x_px, y_px)) |off| {
+            if (pointerOffsetWithSession(self, term, x_px, y_px)) |off| {
                 if (off >= st.word_lo and off < st.word_hi) return;
             }
         }
@@ -131,7 +131,7 @@ pub fn tick(self: *AppSession) void {
     if (self.pointer_gesture_owner != .none) return; // 드래그 중에는 안 연다
     if (self.anyOverlayOpen()) return;
     const term = pane_ops.activePane(self).activeTerm();
-    const off = pointerOffset(term, st.pointer_x, st.pointer_y) orelse return;
+    const off = pointerOffsetWithSession(self, term, st.pointer_x, st.pointer_y) orelse return;
     begin(self, term, off, true);
 }
 
@@ -183,7 +183,7 @@ fn openWith(self: *AppSession, surface_id: u64, offset: u32, markdown: ?[]const 
     if (offset >= content.len) return;
     // 포인터에서 왔으면 포인터가 아직 그 자리인지 본다 — 기다리는 동안 딴 데로 갔으면 열지 않는다.
     if (from_pointer) {
-        const now_off = pointerOffset(term, st.pointer_x, st.pointer_y) orelse return;
+        const now_off = pointerOffsetWithSession(self, term, st.pointer_x, st.pointer_y) orelse return;
         const w = maru.session.editor.selection.wordRangeAt(content, offset);
         if (now_off < w.lo or now_off >= w.hi) return;
     }
@@ -294,6 +294,10 @@ fn firstLine(s: []const u8) []const u8 {
 
 /// 포인터 아래의 **글자** offset. 본문 밖·gutter·줄 끝 뒤·공백은 `null`(§8.2b 「글자가 없는 자리는 열지 않는다」).
 pub fn pointerOffset(term: *Term, x_px: f64, y_px: f64) ?usize {
+    return pointerOffsetWithSession(null, term, x_px, y_px);
+}
+
+fn pointerOffsetWithSession(self: ?*AppSession, term: *Term, x_px: f64, y_px: f64) ?usize {
     if (term.kind != .editor or term.rt.editor_diff != null) return null;
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     const rows_len = term.rt.editor_hit_rows_len;
@@ -308,7 +312,7 @@ pub fn pointerOffset(term: *Term, x_px: f64, y_px: f64) ?usize {
     // **글자 아래**(`.cluster`)다 — 클릭의 중점 반올림(caret)을 쓰면 셀 오른쪽 절반에서 다음 글자가 잡힌다(HOVB1 실측: 1 → 2).
     // 고정 행 위에서는 안 뜬다(§4.1i) — 히트 스냅숏은 그 아래 가려진 본문 줄을 가리킨다.
     if (editor_ops.sticky_client.rowAt(term, y_px) != null) return null;
-    const off = editor_ops.hitTestBodyMode(.cluster, term, x_px, y_px) orelse return null;
+    const off = editor_ops.hitTestBodyModeWithSession(.cluster, self, term, x_px, y_px) orelse return null;
     const doc = term.rt.editorDocument().opened orelse return null;
     if (!charAt(doc.file.content, off)) return null;
     return off;

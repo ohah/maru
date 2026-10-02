@@ -1,6 +1,6 @@
 # 공유 문서와 독립 편집기 뷰 — 설계 제안
 
-상태: VS Code 기준 공유 뷰 UX 승인. 정본·이력·안정 handle, 내부 공유 편집·문서 통지와 IME 확정 승인 첫 슬라이스 구현. 사용자용 공유 분할 UI, 반대 뷰 조합 projection과 실제 공유 OS 입력 검증은 미완료다. 아래 초기 대조와 구현 기록은 작성 당시 main을 각각 명시한다.
+상태: VS Code 기준 공유 뷰 UX 승인. 정본·이력·안정 handle, 내부 공유 편집·문서 통지와 IME 확정 승인 첫 슬라이스 구현. 사용자용 공유 분할 UI, 반대 뷰 조합 projection의 구현은 아래 후속 절에서 구분하며 실제 공유 OS 입력 검증은 미완료다. 아래 초기 대조와 구현 기록은 작성 당시 main을 각각 명시한다.
 사용자는 설계 정리·단계 분해에 이어 2026-10-01 VS Code 기준 UX 채택을 승인했다.
 목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰의 내부 제품 경로는 구현했고, 사용자용 분할 UI와 실제 OS 공유 입력 검증은 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
 [Surface 문서 identity](../editor-surface.md), [탭·split 배치](../tabs-splits-layout.md)가 소유한다.
@@ -712,3 +712,41 @@ marked/discard/전환 gate를 실행하므로 실제 AppKit/HID 증거와 구분
 반대 뷰 조합 projection, OS callback owner 세대, 늦은 callback 격리와 실제 한국어 HID·한자 후보창은
 이 슬라이스의 완료 범위가 아니다. 기존 preedit는 overlay이며 검색·저장·LSP의 정본 관측을
 조합 표시 승인만으로 변경하지 않는다. 사용자 권한이 등록된 staged 앱은 이 변경의 빌드와 별개다.
+
+
+## 공유 IME 표시와 캡처 가능한 host 콜백 격리
+
+2026-10-02, `ab2dcb432` 이후 구현이다. 입력 조합은 원래 뷰의 preedit에 남기고,
+같은 창에서 같은 문서 State를 쓰는 일반 편집기 뷰는 살아 있는 owner를 조회하여 표시
+projection을 빌린다. 반대 뷰에 preedit를 복사하거나 정본을 임시 편집하지 않는다.
+검색·저장·LSP·백업·Undo의 입력은 기존처럼 확정 문서이며, 조합 갱신은 문서 revision을
+증가시키지 않는다. 반대 뷰의 선택·스크롤·접힘·랩은 해당 뷰의 상태를 사용한다.
+조합 표시의 hit snapshot도 owner의 조합 갱신을 반영해 낡은 좌표를 거절한다.
+조합의 시작행이 해당 뷰의 접힘에 숨으면 projection 없이 확정 문서를 표시하고 클릭한다.
+표시·stamp·hit가 같은 할당 없는 가시성 판정을 사용하며 반대 뷰를 자동으로 펼치지 않는다.
+이번 표시 경로는 기존 owner 렌더와 같은 marked overlay를 사용한다. 키 거래 안에서
+아직 정본에 적용되지 않은 `ime_inserted` 접두까지 화면에 새로 표시하는 확장은 포함하지
+않는다. 입력기의 substring/range 질의가 이 대기 접두를 포함하는 기존 계약은 유지한다.
+
+Swift는 키 해석을 시작하기 전에 owner 세대를 캡처한다. 확정 승인이 성공하면 세대를
+바꾸고, 실패하면 기존 세대와 거래를 보존한다. 캡처된 해석 도중 세대가 바뀌면
+insert/marked/unmark/delete 콜백을 로컬 상태 변경 전에 거절하며, 대기 중 unmark 확정도
+발생 당시 세대에서만 보낸다. 폐기 중 AppKit의 재진입 콜백은 이미 승인된 글자를 다시
+넣지 못한다. 무효화된 해석의 물리 키는 새 owner로 replay하지 않는다.
+
+키 해석이 열린 동안은 terminal/editor 확정·포커스 전환 승인을 거절한다. 이때 이미 받은
+`ime_inserted`와 pin은 원래 owner에 남는다. 해석이 끝나기 전에 pin을 풀면 `imeEnd`가
+큐의 글자를 새 활성 뷰의 caret에 삽입하는 실제 제품 회귀를 재현했다. `imeEnd`가
+원래 거래를 정산한 다음 전환을 재시도할 수 있으며 정본 편집은 한 번만 일어난다.
+미완성 해석을 조기에 commit/cancel하여 Backspace나 범위 callback의 의미를 바꾸지 않는다.
+
+**직접 OS 콜백의 한계:** AppKit이 발생원 토큰 없이 해석 경계 밖에서 전달하는 콜백은
+이 세대만으로 이전 owner인지 판별할 수 없다. 새 세대를 콜백 수신 시 붙였다는 이유로
+해결됐다고 보지 않는다. 실제 한국어 HID·두 공유 뷰의 GPU 화면·후보창과 이 비동기
+경로는 별도 검증 gate이며, 이번 캡처 경로의 자동 테스트로 대신하지 않는다.
+
+
+어댑터 근거는 Apple [NSTextInputClient](https://developer.apple.com/documentation/appkit/nstextinputclient)의
+문자열/범위 callback과 [discardMarkedText](https://developer.apple.com/documentation/appkit/nstextinputcontext/discardmarkedtext())의
+현재 conversion session 폐기 계약이다. 해당 문서가 거래 id나 폐기 후 모든 비동기 callback의
+종료를 보장한다고 추론하지 않는다. 캡처 세대와 폐기 재진입 scope는 Maru의 독립 설계다.

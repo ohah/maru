@@ -3852,3 +3852,16 @@ stale revision 거절과 다른 뷰의 미확정 IME 보존도 판정한다. 이
 IME 확정 승인: `zig build test-macos-ime-ack`(Debug/ReleaseFast)는 backend→ABI의 거절/재시도를
 검증한다. 공유 editor gate의 read-only와 allocation 실패 주입을 함께 확인한다. Swift stub 기반
 독립 원문 추출 실행과 실제 OS HID·AppKit 후보창 증거는 별도이며 공유 조합 표시 완료로 세지 않는다.
+
+
+공유 IME 표시 후속 검증: `test-editor-shared`는 원래 owner의 overlay를 빌린 peer
+paint/hit와 독립 선택·스크롤, stale hit 거절, projection OOM의 거래 보존을 판정한다.
+`test-macos-ime-ack`의 실제 Swift 추출 경로는 발생 때 캡처한 해석 세대와 폐기 중
+재진입을 검사한다. 이 증거는 실제 한국어 OS 콜백·공유 GPU 화면·후보창과 구분한다.
+해석 경계 밖의 token 없는 직접 콜백을 새 owner로부터 구별하는 수명 경로는 미완료다.
+
+
+공유 IME Metal 판정자는 `python3 tools/shared-ime-gpu/capture.py`다. 실제 공유 뷰 생성과
+제품 draw-list를 CoreText·Metal에 태워 네 단계의 뷰별 PNG/PPM을 기록하고 정본 내용/
+revision·독립 선택·peer preedit 불변과 native 렌더 결과를 검사한다. source/artifact
+SHA-256 manifest가 해당 소스와 캡처를 묶는다. OS/HID 및 동시 두 pane 입력 증거는 아니다.

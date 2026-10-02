@@ -961,3 +961,22 @@ ABI에서 `key_failed`로 전달되고 유효한 재시도와 중복 확정이 �
 `-Doptimize=ReleaseFast`로도 실행한다. `test-editor-shared`의 공유 IME admission 판정자는
 두 뷰의 선택·문서 통지 불변과 allocation 실패 24지점의 재시도를 검증한다. 실제 OS 입력기와
 후보창 검증을 대체하지 않는다.
+
+
+### 공유 IME 표시와 해석 세대 회귀
+
+`mise exec -- zig build test-editor-shared`는 실제 공유 Term의 반대 뷰 draw-list,
+독립 선택·스크롤, 조합 갱신 뒤 hit snapshot 무효화와 projection 할당 실패를 검사한다.
+`mise exec -- zig build test-macos-ime-ack`의 Swift 추출 하네스는 캡처된 세대가
+바뀐 뒤의 insert/marked/unmark/delete 거절과 discard 재진입 차단을 실행한다.
+두 step은 `-Doptimize=ReleaseFast`에서도 확인한다. 해석 경계 밖의 token 없는
+직접 AppKit callback 식별, 두 뷰의 실제 GPU 화면과 한국어 HID는 별도 gate다.
+
+
+`python3 tools/shared-ime-gpu/capture.py --output /tmp/maru-shared-ime-pixels-<고유명>`은
+저장소 밖의 새 빈 디렉터리에 소스 스냅샷을 만들고 실제 `openSharedViewInActivePane`와
+`appendPaneFrame`을 CoreText·제품 Metal readback에 연결한다. 조합 전/중/빈 marked 갱신/
+확정 후의 owner·peer PNG/PPM과 source/artifact SHA-256 manifest를 남긴다. 스냅샷만
+수정하며 등록된 앱·TCC·입력 소스를 바꾸지 않는다. 별도 뷰별 offscreen 프레임이므로
+동시에 열린 두 pane의 실제 OS 입력 화면을 증명하지 않는다. `cancelled` 단계는 빈
+marked 갱신이며 OS 취소를 관측했다는 뜻이 아니다.

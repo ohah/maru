@@ -232,6 +232,32 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     private var markedSelection = NSRange(location: 0, length: 0)
     private var interpretingIMEKey = false
     private var pendingUnmarkText: String?
+    // AppKit callbacks have no transaction id. Capture the generation at our
+    // interpretation boundary, rather than assigning a new owner on receipt.
+    // Unsolicited OS callbacks outside that boundary cannot be identified by it.
+    private var imeOwnerGeneration: UInt64 = 0
+    private var interpretingIMEGeneration: UInt64?
+    private var pendingUnmarkGeneration: UInt64?
+    private var discardingIMECallbacks = false
+
+    private func acceptsIMECallback() -> Bool {
+        !discardingIMECallbacks && (interpretingIMEGeneration == nil
+            || interpretingIMEGeneration == imeOwnerGeneration)
+    }
+
+    private func invalidateIMECallbacks() {
+        imeOwnerGeneration &+= 1
+        pendingUnmarkGeneration = nil
+    }
+
+    private func discardAdmittedMarkedText() {
+        // discardMarkedText may synchronously call the text client. The backend
+        // already admitted this text, so those callbacks must not insert it again.
+        let previous = discardingIMECallbacks
+        discardingIMECallbacks = true
+        defer { discardingIMECallbacks = previous }
+        inputContext?.discardMarkedText()
+    }
     // 편집기의 ⌥Return 한자 후보가 열렸을 때만 다음 키(후보 탐색/선택)를 IME 소유로
     // 유지한다. 일반 한글 조합의 Enter는 기존 설정대로 확정 뒤 개행해야 한다.
     private var editorHanjaCandidateActive = false
@@ -289,12 +315,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // Query admission even without visible marked text: Zig may retain a rejected commit.
         let hadMarkedText = hasMarkedText() || !markedTextBuffer.isEmpty || pendingUnmarkText != nil
         guard controller?.imeCommit() == true else { return false }
+        invalidateIMECallbacks()
         guard hadMarkedText else { return true }
         markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
         editorHanjaCandidateActive = false
         markedSelection = NSRange(location: 0, length: 0)
         pendingUnmarkText = nil
-        inputContext?.discardMarkedText()  // Only discard after admission, never after a failed commit.
+        discardAdmittedMarkedText()  // Only discard after admission, never after a failed commit.
         return true
     }
 
@@ -397,17 +424,27 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 아래에서 넘기며, 입력기의 비동기/다중 콜백은 Zig 트랜잭션이 일괄 처리한다.
         // 후보창 열기는 insert/marked 콜백 없이 키만 소비할 수 있다. 그때 ime_end가
         // Option-Return을 일반 Enter로 재생하면 선택 한글이 삭제되므로 키 fallback도 막는다.
+        let callbackGeneration = imeOwnerGeneration
         controller?.imeKeyTransaction(event, suppressUnconsumedKey: suppressCandidateProbeKey || editorHanjaCandidate || candidateWasActive) {
+            let previousKey = self.interpretingIMEKey
+            let previousGeneration = self.interpretingIMEGeneration
             self.interpretingIMEKey = true
-            defer { self.interpretingIMEKey = false }
+            self.interpretingIMEGeneration = callbackGeneration
+            defer {
+                self.interpretingIMEKey = previousKey
+                self.interpretingIMEGeneration = previousGeneration
+            }
             self.interpretKeyEvents([event])
             // AppKit may finish a composition with unmarkText alone. The
             // protocol requires accepting that text; insertText wins if both
             // callbacks arrive in the same key transaction.
-            if let pending = self.pendingUnmarkText {
+            if self.acceptsIMECallback(), self.pendingUnmarkGeneration == callbackGeneration,
+               let pending = self.pendingUnmarkText {
                 self.pendingUnmarkText = nil
+                self.pendingUnmarkGeneration = nil
                 self.controller?.imeInsert(pending)
             }
+            return self.acceptsIMECallback()
         }
         // 콜백이 후보를 확정·취소하면 아래 플래그가 먼저 지워진다. Option-Return이 실제로
         // marked text를 시작한 경우에만 다음 키까지 후보 소유권을 이어 간다.
@@ -419,6 +456,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 방지용 오버라이드만) — 그 키의 전송 여부는 Zig의 ime_end가 일괄 판정한다(확정 텍스트가
     // 없고 조합 변화도 없으면 일반 키로 인코딩).
     override func doCommand(by selector: Selector) {
+        guard acceptsIMECallback() else { return }
         imeLog("doCommand:\(NSStringFromSelector(selector))")
         // deleteBackward는 Zig 트랜잭션에 기록한다 — 한글 마지막 자모 백스페이스에서 입력기가
         // insertText(조합 글자) + deleteBackward를 함께 보내면 둘이 상쇄돼야 한다(글자가 PTY에
@@ -433,6 +471,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
+        guard acceptsIMECallback() else { return }
+        pendingUnmarkGeneration = nil
         pendingUnmarkText = nil
         markedTextBuffer = ""
         editorHanjaCandidateActive = false
@@ -454,6 +494,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 표시는 Zig가 커서 위치에 합성한다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        guard acceptsIMECallback() else { return }
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         imeLog("setMarkedText selected=\(selectedRange) replacement=\(replacementRange)", markedTextBuffer)
         controller?.imeMarked(markedTextBuffer, selectedRange: selectedRange, replacementRange: replacementRange)
@@ -461,6 +502,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func unmarkText() {
+        guard acceptsIMECallback() else { return }
         imeLog("unmarkText")
         editorHanjaCandidateActive = false
         if let state = controller?.editorIMEState() {
@@ -489,6 +531,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         if !committed.isEmpty {
             if interpretingIMEKey {
                 pendingUnmarkText = committed
+                pendingUnmarkGeneration = interpretingIMEGeneration
             }
         }
     }
@@ -499,11 +542,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     @discardableResult
     func commitComposition() -> Bool {
         guard controller?.imeFocus(false) == true else { return false }
+        invalidateIMECallbacks()
         markedTextBuffer = ""
         editorHanjaCandidateActive = false
         markedSelection = NSRange(location: 0, length: 0)
         pendingUnmarkText = nil
-        inputContext?.discardMarkedText()
+        discardAdmittedMarkedText()
         return true
     }
 
@@ -12236,14 +12280,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func imeKeyTransaction(
         _ event: NSEvent,
         suppressUnconsumedKey: Bool = false,
-        interpret: () -> Void
+        interpret: () -> Bool
     ) {
         guard let session = appSession else { return }
         _ = maru_macos_app_session_ime_begin(session)
-        interpret()
+        let sameOwner = interpret()
+        // A transition inside interpretation invalidates the physical key too;
+        // replaying it would apply an old owner's key to the new focused view.
         // ime_end는 정규화 실패(codepoint/keyCode 없음)에도 반드시 호출한다 — 안 그러면 ime_begin
         // 후 트랜잭션이 안 닫혀 누적 텍스트가 유실되고 ime_active가 박힌다. 키가 없으면 nil 전달.
-        if suppressUnconsumedKey {
+        if suppressUnconsumedKey || !sameOwner {
             _ = maru_macos_app_session_ime_end(session, nil)
         } else if var keyEvent = normalizedKeyEvent(from: event) {
             _ = maru_macos_app_session_ime_end(session, &keyEvent)

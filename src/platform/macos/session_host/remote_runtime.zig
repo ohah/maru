@@ -16057,6 +16057,20 @@ test "CR0b registered operation deferred poison은 canonical suffix를 호출한
     try testing.expectEqual(published.first_incident_id, admission.incident_id);
     try owner.reconnect_admissions.consume(admission);
 
+    // This judges poison publication, not the production 200ms disk-flush budget.
+    // Wait for asynchronous store work before requiring the cleanup to join.
+    const service = &owner.runtime.?.service;
+    var writer_idle = false;
+    for (0..2_000) |_| {
+        if (service.mutex.tryLock()) {
+            writer_idle = service.pending_slots == 0 and service.writer_inflight_slots == 0;
+            service.mutex.unlock();
+            if (writer_idle) break;
+        }
+        var delay = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+        _ = c.poll(@ptrCast(&delay), 0, 1);
+    }
+    try testing.expect(writer_idle);
     app_process_incident_owner.publication_port_testing_api.reset();
     const shutdown = try owner.shutdown();
     owner_settled = true;

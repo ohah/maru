@@ -1843,6 +1843,13 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   | subprocess 3 | `CR0b subprocess는 ring id key reason 중간 drift를 common fatal로 닫는다` |
   | subprocess 4 | `CR0b subprocess는 optimize mode별 unexpected poison 결과를 고정한다` |
 
+  caller 3의 정리 단계는 service mutex 아래 `pending_slots`와 `writer_inflight_slots`가 모두 0임을
+  확인한 뒤 정상 join을 단언한다. 비동기 기록이 진행 중인 상태에서 제품의 200 ms 종료 budget에
+  I/O 완료를 요구하던 CI 의존을 제거한다. 별도 사본에서 기록기를 1.5초 보류하면 이전 정리는
+  `.joined` 대신 `.detached`로 실패하고, 완료 확인을 복원하면 같은 지연에서도 통과한다.
+  이는 게시 순서·reason·incident·reconnect 단언을 유지하는 fixture 정리이며, 제품 shutdown의
+  deadline·detach 정책이나 OS 성능 측정 결과를 바꾸지 않는다.
+
   suffix 1은 ring/id/key 각 중간 stage의 실제 reconnect-admission probe가 0이고 reason store 뒤 exact 1임을 검증한다. 모든 이름의
   conjunction과 matrix는 closed case table과 exact executed-case count를 함께 assert한다. subprocess 3은 ring/id/key/reason 각 drift
   injection stage의 distinct marker와 exact 4행을 고정한다. caller 2~6은 공용 facade를 직접 부르지 않고 이름에

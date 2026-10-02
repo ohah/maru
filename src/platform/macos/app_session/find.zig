@@ -568,6 +568,8 @@ pub fn findNavigate(self: *AppSession, forward: bool) void {
     if (!self.surface_initialized) return;
     if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
     if (activeEditorTerm(self)) |term| {
+        // A command can precede the next frame after editing the active shared view.
+        refreshViewFind(self, term);
         // 닫은 뒤 ⌘G로 돌아온 경우 목록이 비어 있다 — 보존된 검색어로 다시 채운다(스크롤백과 같은
         // 규칙이고, 현재 인덱스는 `setMatchCount`가 범위로 clamp해 닫기 전 위치를 지킨다).
         //

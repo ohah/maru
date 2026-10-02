@@ -3881,6 +3881,7 @@ owner 관측은 기존 published frame summary이므로 실제 전환 시점보�
 | 판정 | 실제 경로와 요구 결과 |
 |---|---|
 | 검색 A/B 복귀 | `openSharedViewInActivePane` → 활성화 → Find. query/options/current/count가 뷰마다 유지된다. 새 peer는 빈 검색이며 닫힌 ⌘G는 자신의 query를 사용한다. |
+| 렌더 전 검색 명령 | 공유 편집 → tick/render 없이 바꾸기 하나·전부·닫힌 ⌘G. 현재 revision으로 결과를 갱신한 뒤 올바른 문자열·선택 위치를 사용한다. |
 | 공유 편집 뒤 강조 | peer 편집 → source `appendPaneFrame`. 각 query로 revision을 다시 세고 source의 실제 find marks가 해당 query를 가리킨다. 선택·스크롤은 불변이다. |
 | 최초 이관과 실패 | 기존 query/replace/current를 단일 문서용 이력으로 보존한다. 이관 준비 할당 실패는 원래 슬롯과 검색 결과를 바꾸지 않는다. |
 | 검색 IME와 종료 | 검색 preedit → `imeEnd` → 다른 owner 활성화 → peer 종료. 조합은 원래 검색어에 남고 생존 뷰의 슬롯을 복원한다. |

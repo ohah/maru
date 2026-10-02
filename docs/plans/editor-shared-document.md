@@ -788,3 +788,24 @@ marked callback 4회, 합계 20회와 owner 전환 10회가 관측됐다. 정본
 최초 이관 전에는 기존 검색의 확정 query와 replace 문자열만 복제해 세션 검색 이력을 보존한다.
 조합 중 문자열은 원래 뷰에만 남는다. 이 준비가 실패하면 peer를 연결하기 전에 종료하여
 기존 본문·뷰·검색 소유권을 유지한다.
+
+### 뷰별 검색 추가 적대적 검증 5회 — 2026-10-02
+
+| 회차 | 공격 경로 | 판정 |
+|---|---|---|
+| R1 | 세 owner를 15회 전환, case/word/regex 오류·replace 문자열 격리, 바꾸기 IME 조합 중 focus 전환 | 원래 슬롯에 확정하고 다른 슬롯으로 이동하지 않는다. |
+| R2 | 공유 편집 직후 렌더 없이 Replace One/All와 닫힌 ⌘G 실행 | 낡은 좌표 결함을 재현·수정했다. `prefix`가 `letx`로 잘못 바뀌거나 선택이 이전 줄로 가던 것을 막는다. |
+| R3 | 세 뷰의 세 가지 종료 순서, 마지막 공유 뷰 종료 후 파일 재열기·다시 공유 | 생존 슬롯·legacy 복원과 슬롯 해제를 검사한다. 이름 없는 문서는 기존 공유 계약 밖이라 재열기는 경로 있는 파일로 한다. |
+| R4 | 실제 `openSharedViewInActivePane`의 모든 11개 할당 지점에서 하나씩 실패 | 8개 연결 거절은 원래 검색·정본·Term 수·view lease 수 불변이다. 나머지 3개는 기존 파생 상태의 실패 허용 경로로 정상 연결된다. |
+| R5 | 공유 검색 → diff 검색 → 공유 검색 → 터미널 legacy 검색 → 공유 검색 왕복 | 기존 diff 종료·세션 이력과 공유 query/current가 섞이지 않는다. |
+
+R2의 원인은 surface id가 같아도 문서 revision이 달라질 수 있는데 명령이 렌더 갱신을
+기다렸다는 점이다. `replaceCurrentMatch`·`replaceAllMatches`·`revealCurrentFindMatch`와
+`findNavigate`는 좌표를 사용하거나 current를 전진시키기 전에 `refreshViewFind`를 호출한다.
+비활성 렌더의 갱신은 기존처럼 caret·scroll을 움직이지 않는다. 이번 수정은 기존 OOM 입력
+정책이나 OS callback 수명 정책을 바꾸지 않는다.
+
+최종 집중 gate는 Debug·ReleaseFast 각각 14/14(행위 판정자 10개와 import 판정자 4개)다.
+R2의 네 갱신 호출을 제거한 별도 소스 사본은 기존 바꾸기·닫힌 이동 판정자가 실제 결과로
+실패했고, 기준선/원복 사본은 각각 14/14 통과했다. 최신 find GPU capture는 8개 fresh process,
+16개 PNG/PPM과 12개 source SHA-256을 확인했으며 PR에 첨부한 다섯 PNG와 동일하다.

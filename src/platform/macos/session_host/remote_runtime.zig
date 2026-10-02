@@ -20336,11 +20336,14 @@ test "CR6e-c3c remote select-all copy survives projection refresh (§6b-2)" {
     // viewport(8행)보다 긴 내용을 만든 뒤 전체 선택한다. placeholder만 고르면 보이는 8행 밖 EARLY-00은
     // 복사될 수 없으므로, 이 단언이 Cmd+A 의도→host selectAll→scrollback 추출 전체 경로를 증명한다.
     try rr.sendInput("EARLY-00\nEARLY-01\nEARLY-02\nEARLY-03\nEARLY-04\nEARLY-05\nEARLY-06\nEARLY-07\nEARLY-08\nEARLY-09\nEARLY-10\nEARLY-11\n");
+    // 마지막 줄이 화면에 올 때까지만 기다린다 — 예전에는 조건 없이 150 번(3 초)을 다 돌았다. 화면에 `EARLY-11` 이 보이면
+    // host 는 이미 그 줄까지 처리했고, 아래 Select All(host 단일 출처)은 `EARLY-00`·`EARLY-11` 을 모두 담는다. 상한은 그대로다.
     attempts = 0;
-    while (attempts < 150) : (attempts += 1) {
+    while (attempts < 150 and !metadataParitySurfaceContains(&rr, io, "EARLY-11")) : (attempts += 1) {
         _ = rr.pumpDelta() catch break;
         _ = usleep(20 * 1000);
     }
+    try testing.expect(metadataParitySurfaceContains(&rr, io, "EARLY-11"));
     const all_span = (try rr.selectContentAware("all", 0, 0, "")) orelse {
         try testing.expect(false);
         return;

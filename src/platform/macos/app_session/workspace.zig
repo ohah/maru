@@ -708,8 +708,14 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // 기억해 둔 비교 기준을 되싣는다(§3.5 P7b). **저장소가 지금 있는지는 안 본다** — 없는 저장소의
     // 기억은 화면에 아무 영향이 없고(그 저장소를 열 때만 쓰인다), 여기서 지우면 잠시 마운트가 빠진
     // 외장 디스크의 저장소 기억이 조용히 사라진다.
-    for (win.scm_bases) |entry| {
-        if (!scm_dock_ops.rememberScmBase(self, entry.repo, entry.base)) break; // 상한을 넘으면 거기서 멈춘다
+    for (win.scm_bases, 0..) |entry, base_index| {
+        if (!scm_dock_ops.rememberScmBase(self, entry.repo, entry.base)) { // 상한을 넘으면 거기서 멈춘다
+            std.log.scoped(.app).warn(
+                "workspace restore dropped: kind=scm-base reason=limit count={d}",
+                .{win.scm_bases.len - base_index},
+            );
+            break;
+        }
     }
     // «최근 세션» 을 되싣고 그 링을 디스크에서 미리 되살린다(AT7) — 첫 훅 이벤트 전에도 에이전트 탭이 선다. 7일 sweep 도 이때.
     if (win.last_agent_session.len > 0) git_ops.rememberAgentSession(self, win.last_agent_session);

@@ -158,8 +158,13 @@ GUI 실행(Dock·Finder)의 stderr 는 `/dev/null` 이라 진단이 통째로 �
 (`app_host_abi.zig`)가 fd 2 를 `<cache>/app.log` 로 바꾸고 `=== maru app start pid=N ===` 을 찍어
 어디부터가 이번 실행인지 표시한다. **stderr 가 `/dev/null` 일 때만 바꾼다**(2026-10-02) — tty·파일·파이프로
 받는 실행(터미널 개발, `2> 파일` 하네스)은 이미 진단을 받고 있고, 그것을 가로채면 그 출력을 빼앗는다.
-**앱 시작 직후**(Swift `main` 첫 줄, ABI `maru_macos_app_redirect_stderr`) 바꾼다 — 예전에는 첫 창 세션을 만들 때여서
-그 전의 인스턴스 lease·config bootstrap 실패 줄이 사라졌다. 두 조건은 `tests/app_log_redirect_boundary.zig` 가 함께 고정한다.
+**인스턴스 lease 를 얻은 직후, config bootstrap 이전**(ABI `maru_macos_app_redirect_stderr`) 바꾼다 — 예전에는 첫 창
+세션을 만들 때여서 그 전의 config bootstrap 실패·`workspace.restore` 읽기 실패 줄이 사라졌다. **lease 앞으로는 당기지
+않는다**: lease 를 못 얻은 두 번째 인스턴스(`open -n`·직접 실행)가 `app.log` 를 만들면 「패자는 lock 생성 말고
+파일시스템을 안 건드린다」 계약([persistent-session-host.md](persistent-session-host.md))을 어긴다 — 2026-10-02 에 앞당겨
+봤다가 실측으로 확인하고 되돌렸다. 그래서 lease 단계의 패자 진단은 Dock·Finder 실행에서 여전히 안 남는다(그 패자는
+종료 코드 2 로 이미 떠 있는 앱에 양보할 뿐이다). 순서는 `tests/app_log_redirect_boundary.zig` 가, 패자 무변경은
+`zig build macos-app-instance-lease-smoke` 의 `/dev/null` stderr 패자 단계가 고정한다.
 
 시작 마커만으로는 **어떻게 끝났는지**를 못 본다. 2026-08-29 에 앱 업데이트 직후 여섯 번 연속으로 앱이
 조용히 사라졌는데, `app.log` 에 `workspace checkpoint: final-quit` 이 한 줄도 없고 크래시 리포트도

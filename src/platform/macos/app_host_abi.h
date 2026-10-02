@@ -604,8 +604,9 @@ void maru_macos_app_set_ui_locale(const uint8_t *tag, size_t tag_len);
 /* ABI v191: 시작 시 저장된 작업공간을 복원하고 종료 시 저장할지(config `workspace.restore`, 기본 1). 첫 AppSession 전에
    부르므로 세션 없이 기본 config 를 읽는다. 1=복원·저장, 0=둘 다 끔. 읽기 실패는 1. */
 uint32_t maru_macos_workspace_restore_enabled(void);
-/* ABI v192: 앱 시작 직후(Swift main 첫 줄) stderr 가 /dev/null 이면(Dock·Finder 실행) ~/.cache/maru/app.log 로
-   돌린다. 파일·파이프·tty 로 받는 실행은 건드리지 않는다. 멱등. */
+/* ABI v192: 인스턴스 lease 를 얻은 직후(config bootstrap 이전) stderr 가 /dev/null 이면(Dock·Finder 실행)
+   <XDG_CACHE_HOME 또는 ~/.cache>/maru/app.log 로 돌린다. 파일·파이프·tty 로 받는 실행은 건드리지 않는다. 멱등.
+   lease 를 못 얻은 두 번째 인스턴스는 부르지 않는다 — 그 프로세스는 파일시스템을 건드리지 않아야 한다. */
 void maru_macos_app_redirect_stderr(void);
 /* 작업공간 복원이 불완전했음을 알리는 notice 를 띄운다. Swift 는 상태만 알리고 문장은 Zig 가
    고른다(docs/i18n.md §7.2) — 예전에는 Swift 가 한국어 문장을 조립해 show_notice 로 넘겼고,

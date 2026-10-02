@@ -7400,9 +7400,8 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
 /// 접힘 범위 목록을 **갈아 끼운다** — 구문 승격(2층)과 LSP `foldingRange`(3층)가 같은 자리를 지난다(§4 「층으로 쌓인다」 · §8.2j 「층 순서」).
 /// `ranges` 는 머리 오름차순·중첩만(엇갈림 없음)이어야 하고, 성공하면 **소유가 넘어간다**(실패하면 호출자가 놓는다).
 ///
-/// **접어 둔 것은 푼다.** 갈아 끼우면 화살표가 서는 줄이 달라지므로 옛 머리 번호가 가리키는 곳이 다른 범위가 된다 —
-/// **틀린 곳이 접힌 채로 남는 것보다 펼쳐지는 편이 낫다**(승격의 규율 그대로). 편집은 이미 전부 풀어 두므로(`dropFoldState`)
-/// 실제로 잃는 것은 응답이 오기 전 짧은 창에 접은 것뿐이다.
+/// 단일 뷰는 기존처럼 접힘을 푼다. 공유 뷰는 새 목록에서 머리와 끝이 모두 일치하는 범위만 유지한다.
+/// 수동 뷰의 편집 게시가 먼저 좌표를 매핑하므로, 낡은 줄 번호로 다른 블록을 접지 않는다.
 ///
 /// **표식 배열도 여기서 맞춘다.** `ensureFoldRanges` 는 들여쓰기 범위가 0이면 표식을 잡지 않는다 — 그 위에 2·3층이 범위를 올리면
 /// 표식이 없어 **화살표가 안 선다**(§8.2j 계획 공격: `use` 두 줄에 한 줄짜리 fn 만 있는 파일 — 들여쓰기 0, 서버 `imports` 1).
@@ -7424,6 +7423,27 @@ pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.R
         };
     }
 
+    // 공유 뷰의 접힘은 새 provider가 같은 머리/끝 범위를 확인한 경우에만 이어 간다.
+    // 단일 뷰의 기존 승격 동작은 유지한다.
+    var kept_len: usize = 0;
+    if (term.rt.editor_document_lease) |lease| {
+        if ((lease.owner.viewCount(lease) orelse 0) > 1) {
+            var old_index: usize = 0;
+            var head_index: usize = 0;
+            const heads = foldedHeads(term);
+            for (ranges) |range| {
+                while (old_index < term.rt.editor_fold_ranges.len and term.rt.editor_fold_ranges[old_index].head < range.head) old_index += 1;
+                while (head_index < heads.len and heads[head_index] < range.head) head_index += 1;
+                if (head_index == heads.len or heads[head_index] != range.head or old_index == term.rt.editor_fold_ranges.len) continue;
+                const old = term.rt.editor_fold_ranges[old_index];
+                if (old.head == range.head and old.last_hidden == range.last_hidden) {
+                    folded[kept_len] = range.head;
+                    kept_len += 1;
+                }
+            }
+        }
+    }
+
     // 여기서부터 실패 지점이 없다 — 옛 것을 놓고 새 것을 건다.
     if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
     if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
@@ -7436,7 +7456,7 @@ pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.R
     term.rt.editor_fold_ranges = ranges;
     term.rt.editor_folded_buf = folded;
     term.rt.editor_folded_prev = folded_prev;
-    term.rt.editor_folded_len = 0; // 접어 둔 것은 푼다(위 주석)
+    term.rt.editor_folded_len = kept_len; // 공유 뷰의 확인된 범위만 유지
 
     // **보이는 줄 표를 다시 만든다.** 위에서 접어 둔 것을 풀었으므로 `rebuildVisible` 의 불변식
     // (「접힌 것이 없으면 보이는 줄 배열은 비어 있다」 = 원본을 그대로 그리라는 표시)이 지금
@@ -7455,11 +7475,8 @@ pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.R
     // 승격 전 `max_cols=621 · first_col=538`, 승격 뒤 **둘 다 0**.
     // 편집(`refreshAfterEdit`)·접기(`finishFoldChange`)에서 이미 고친 그 부류의 **세 번째 자리**다.
     const keep = keepFoldView(term);
-    // **아래 `catch` 는 오늘 닿지 않는다 — 그 변이가 살아남는 것이 정상이다**(적대적 검증 W5·W5b).
-    // 바로 위에서 `folded_len = 0` 으로 놓았고 `foldedHeads` 는 `folded_buf[0..folded_len]` 이라,
-    // `rebuildVisible` 은 「접힌 것이 없다」 갈래로 가 **할당을 하나도 안 한다**(`PROMO1` ⑵ 가 그
-    // 할당 수가 0 임을 잰다). 그럼에도 갈래를 적어 두는 이유는 **뜻**이다 — 위 순서가 바뀌어
-    // 접힌 채로 이 함수를 부르게 되는 날, 실패가 「부분집합을 그대로 둔 화면」을 남기지 않는다.
+    // 단일 뷰는 펼친 상태라 할당이 없지만, 공유 뷰의 유지된 접힘은 파생 배열을 할당한다.
+    // 실패하면 전체 줄 표시와 접힘 상태를 함께 펼쳐 낡은 부분집합을 남기지 않는다.
     rebuildVisible(self, term) catch {
         // 못 만들면 **부분집합을 그대로 두지 않는다** — 틀린 표보다 없는 편이 낫다(`rebuildVisible`
         // 자신이 실패 갈래에서 같은 판단을 한다).
@@ -7469,6 +7486,8 @@ pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.R
         term.rt.editor_visible_numbers = &.{};
         // **여기서도 상한은 다시 센다.** 표가 없어도 문서는 그대로라 가로 축은 그대로 있다 —
         // 안 세면 그 프레임부터 막대가 사라진다.
+        term.rt.editor_folded_len = 0;
+        rebuildVisible(self, term) catch unreachable; // 펼친 뷰는 할당하지 않는다.
         finishFoldChange(self, term, keep);
         return true;
     };
@@ -10320,6 +10339,36 @@ pub fn notifyDocumentEdit(self: *AppSession, term: *Term) void {
 
 /// 문서 부수효과 없이 이 뷰가 소유한 provider·줄·접힘·hit cache만 갱신한다.
 pub fn refreshViewAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
+    return refreshViewAfterEditImpl(self, term, edit, false);
+}
+
+pub const FoldMark = chrome_editor.gutter.Fold;
+
+pub fn publishMappedFolds(self: *AppSession, term: *Term, ranges: []editor_fold.Range, folded: []u32, previous: []u32, marks: []FoldMark, len: usize) void {
+    const source = term.rt.editor_fold_source;
+    dropFoldState(self, term);
+    term.rt.editor_fold_ranges = ranges;
+    term.rt.editor_folded_buf = folded;
+    term.rt.editor_folded_prev = previous;
+    term.rt.editor_fold_marks = marks;
+    term.rt.editor_folded_len = len;
+    term.rt.editor_fold_source = source;
+}
+
+pub fn refreshMappedViewAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
+    return refreshViewAfterEditImpl(self, term, edit, true);
+}
+
+fn rebuildMappedVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
+    rebuildVisible(self, term) catch |err| {
+        // 파생 배열 실패 시 접힘 상태와 실제로 보이는 전체 줄이 갈리지 않게 한다.
+        term.rt.editor_folded_len = 0;
+        rebuildVisible(self, term) catch unreachable;
+        return err;
+    };
+}
+
+fn refreshViewAfterEditImpl(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan, mapped_folds: bool) error{OutOfMemory}!void {
     // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
     // 늦다: `rebuildVisible` 이 같은 폐기를 **먼저** 불러 그때는 이미 0 이다(실측으로 걸렸다).
     const kept_col = term.rt.editor_first_col;
@@ -10437,10 +10486,30 @@ pub fn refreshViewAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.
     dropColMarks(self, term);
     if (cols_patch == null or !applyLineColsPatch(self, term, cols_patch.?)) dropLineCols(self, term);
 
-    // ⑵⑶ 접힘 층과 보이는 줄.
-    dropFoldState(self, term);
-    try ensureFoldRanges(self, term);
-    try rebuildVisible(self, term);
+    // ⑵⑶ 접힘 층과 보이는 줄. 수동 공유 뷰는 이미 새 좌표로 준비한 접힘을 사용한다.
+    if (mapped_folds) {
+        if (term.rt.editor_fold_source == .indent) {
+            const count = editor_fold.countRanges(term.rt.editor_lines, term.rt.editor_tab_width);
+            const ranges = self.allocator.alloc(editor_fold.Range, count) catch |err| {
+                try rebuildMappedVisible(self, term);
+                return err;
+            };
+            _ = editor_fold.compute(term.rt.editor_lines, term.rt.editor_tab_width, ranges);
+            if (!installFoldRanges(self, term, ranges)) {
+                self.allocator.free(ranges);
+                try rebuildMappedVisible(self, term);
+                return error.OutOfMemory;
+            }
+        } else {
+            // 파싱이 진행 중이면 매핑한 범위를 사용하고, 완료 후 새 provider 범위와 대조한다.
+            promoteFoldRangesToSyntax(self, term);
+            try rebuildMappedVisible(self, term);
+        }
+    } else {
+        dropFoldState(self, term);
+        try ensureFoldRanges(self, term);
+        try rebuildVisible(self, term);
+    }
 }
 
 fn dropSelectionState(self: *AppSession, term: *Term) void {
@@ -47070,6 +47139,14 @@ test "shared editor view find inactive paint refreshes its own query after peer 
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fx = try PaneFixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
+    // 원래 텍스트를 따라가는 스크롤 앵커와 짧은 문서의 viewport clamp를 혼동하지 않는다.
+    // 찾기 갱신 자체의 스크롤 불변성을 재도록 화면보다 긴 본문을 만든다.
+    fx.term.rt.editor_selection = editor_selection.Selection.at(fx.term.rt.editorDocument().opened.?.file.content.len);
+    var tail: std.ArrayList(u8) = .empty;
+    defer tail.deinit(testing.allocator);
+    for (0..64) |_| try tail.appendSlice(testing.allocator, "tail\n");
+    try testing.expect(insertText(fx.session, fx.term, tail.items));
+    fx.term.rt.editor_first_line = 0;
     const peer = try openSharedViewInActivePane(fx.session, fx.term);
     try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
     find_ops.toggleFind(fx.session);
@@ -47638,4 +47715,165 @@ test "shared editor view find adversarial R10 zero width replace Undo Redo retai
     try testing.expectEqualStrings(after, fx.term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(@as(usize, 3), (find_ops.viewFind(fx.session, fx.term) orelse return error.MissingFind).matches.len);
     try testing.expectEqualStrings("(?=const)", fx.session.chrome_host.find.input.query.items);
+}
+
+test "shared editor peer folds survive insertion before the folded block" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    try testing.expect(selectAll(s, a));
+    try testing.expect(insertText(s, a, "before\nblock\n    child\n    child2\nafter\n"));
+    try testing.expect(toggleFoldHead(s, b, 1));
+    try testing.expectEqual(@as(u32, 1), foldedHeads(b)[0]);
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(s, a, "new\n"));
+    try testing.expectEqual(@as(usize, 1), foldedHeads(b).len);
+    try testing.expectEqual(@as(u32, 2), foldedHeads(b)[0]);
+}
+
+test "shared editor peer fold and scroll anchors survive Undo Redo and hidden edits" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    try testing.expect(selectAll(s, a));
+    try testing.expect(insertText(s, a, "before\nblock\n    child\n    child2\nafter\ntail"));
+    dropUndoState(s, a);
+    try testing.expect(toggleFoldHead(s, b, 1));
+    b.rt.editor_first_line = 2; // after — hidden rows do not count
+    b.rt.editor_first_col = 3;
+    b.rt.editor_selection = editor_selection.Selection.fromPoints(43, 35);
+    const anchor = captureScrollAnchor(b).?.off;
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(s, a, "new\n"));
+    try testing.expectEqual(@as(u32, 2), foldedHeads(b)[0]);
+    try testing.expectEqual(anchor + 4, captureScrollAnchor(b).?.off);
+    try testing.expectEqual(@as(u32, 3), b.rt.editor_first_col);
+    try testing.expectEqual(@as(usize, 47), b.rt.editor_selection.?.anchor_start);
+    try testing.expect(undoEdit(s, a));
+    try testing.expectEqual(@as(u32, 1), foldedHeads(b)[0]);
+    try testing.expectEqual(anchor, captureScrollAnchor(b).?.off);
+    try testing.expect(redoEdit(s, a));
+    try testing.expectEqual(@as(u32, 2), foldedHeads(b)[0]);
+    // Editing inside a hidden block is published without opening the peer's block.
+    const file = &a.rt.editorDocument().opened.?.file;
+    a.rt.editor_selection = editor_selection.Selection.at(file.lines.line(3).?.start + 5);
+    try testing.expect(insertText(s, a, "X"));
+    try testing.expectEqual(@as(u32, 2), foldedHeads(b)[0]);
+    try testing.expectEqual(anchor + 4 + 1, captureScrollAnchor(b).?.off);
+}
+
+test "shared editor peer deleted fold head does not collapse the next block" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    try testing.expect(selectAll(s, a));
+    try testing.expect(insertText(s, a, "first\n    one\nsecond\n    two\ntail"));
+    try testing.expect(toggleFoldHead(s, b, 0));
+    const file = &a.rt.editorDocument().opened.?.file;
+    a.rt.editor_selection = editor_selection.Selection.fromPoints(0, file.lines.line(2).?.start);
+    try testing.expect(deleteText(s, a, true));
+    try testing.expectEqual(@as(usize, 0), foldedHeads(b).len);
+    try testing.expectEqualStrings("second", b.rt.editor_lines[0]);
+}
+
+test "shared editor peer top row follows original text after insertion at document start" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    fx.other.rt.editor_first_line = 0;
+    fx.base.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.base.session, fx.base.term, "new\n"));
+    try testing.expectEqual(@as(usize, 1), fx.other.rt.editor_first_line);
+}
+
+test "shared editor peer folds survive syntax provider refresh and nested multi change mapping" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try SharedEditFixture.init();
+    defer fx.deinit();
+    const s = fx.base.session;
+    const a = fx.base.term;
+    const b = fx.other;
+    try testing.expect(selectAll(s, a));
+    try testing.expect(insertText(s, a, "outer\n    inner\n        child\n    tail\nend\n"));
+    try testing.expect(toggleFoldHead(s, b, 1));
+    try testing.expect(toggleFoldHead(s, b, 0));
+    b.rt.editor_fold_source = .syntax;
+    const changes = [_]editor.delta.Change{
+        .{ .start = 0, .end = 0, .text = "before\n" },
+        .{ .start = 16, .end = 16, .text = "    added\n" },
+    };
+    var items = [_]editor_selection.Selection{editor_selection.Selection.at(0)};
+    var sels = editor_selection.Selections{ .items = &items, .primary = 0 };
+    var inverse = try applySharedDelta(s, a, .{ .changes = &changes }, &sels, a.rt.editorDocument().opened.?.file.revision);
+    defer inverse.deinit();
+    try refreshAfterEdit(s, a, syntax_color.spanFromInverse(inverse.changes));
+    try testing.expectEqualSlices(u32, &.{ 1, 2 }, foldedHeads(b));
+    try testing.expectEqual(@as(u32, 4), b.rt.editor_fold_ranges[1].last_hidden);
+    const refreshed = try s.allocator.dupe(editor_fold.Range, b.rt.editor_fold_ranges);
+    try testing.expect(installFoldRanges(s, b, refreshed));
+    try testing.expectEqualSlices(u32, &.{ 1, 2 }, foldedHeads(b));
+    // A genuinely different provider boundary must not hide a different block.
+    const changed = try s.allocator.dupe(editor_fold.Range, b.rt.editor_fold_ranges);
+    changed[1].last_hidden -= 1;
+    try testing.expect(installFoldRanges(s, b, changed));
+    try testing.expectEqualSlices(u32, &.{1}, foldedHeads(b));
+}
+
+test "shared editor peer fold preparation OOM preserves document selection and scroll" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var failures: usize = 0;
+    var completed = false;
+    for (0..64) |index| {
+        var fx = try SharedEditFixture.init();
+        defer fx.deinit();
+        const s = fx.base.session;
+        const a = fx.base.term;
+        const b = fx.other;
+        try testing.expect(selectAll(s, a));
+        try testing.expect(insertText(s, a, "before\nblock\n    child\nafter\n"));
+        try testing.expect(toggleFoldHead(s, b, 1));
+        b.rt.editor_first_line = 2;
+        b.rt.editor_selection = editor_selection.Selection.fromPoints(27, 23);
+        const before = try testing.allocator.dupe(u8, a.rt.editorDocument().opened.?.file.content);
+        defer testing.allocator.free(before);
+        const revision = a.rt.editorDocument().opened.?.file.revision;
+        const selection = b.rt.editor_selection;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        s.allocator = failing.allocator();
+        const changes = [_]editor.delta.Change{.{ .start = 0, .end = 0, .text = "new\n" }};
+        var items = [_]editor_selection.Selection{editor_selection.Selection.at(0)};
+        var sels = editor_selection.Selections{ .items = &items, .primary = 0 };
+        const result = applySharedDelta(s, a, .{ .changes = &changes }, &sels, a.rt.editorDocument().opened.?.file.revision);
+        s.allocator = testing.allocator;
+        if (result) |value| {
+            var inverse = value;
+            defer inverse.deinit();
+            try refreshAfterEdit(s, a, syntax_color.spanFromInverse(inverse.changes));
+            if (!failing.has_induced_failure) {
+                try testing.expectEqualSlices(u32, &.{2}, foldedHeads(b));
+                completed = true;
+                break;
+            }
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+            try testing.expectEqualStrings(before, a.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(revision, a.rt.editorDocument().opened.?.file.revision);
+            try testing.expectEqualDeep(selection, b.rt.editor_selection);
+            try testing.expectEqualSlices(u32, &.{1}, foldedHeads(b));
+            try testing.expectEqual(@as(usize, 2), b.rt.editor_first_line);
+            try testing.expectEqualStrings("before", b.rt.editor_lines[0]);
+        }
+    }
+    try testing.expect(failures >= 4);
+    try testing.expect(completed);
 }

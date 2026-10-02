@@ -1009,3 +1009,9 @@ A의 독립 caret 보존, 전환 후 600ms 동안 문서·선택 불변과 저�
 `python3 tools/shared-ime-gpu/capture.py --scenario find --output /tmp/maru-shared-find-<고유명>`은
 검색 전/서로 다른 검색/공유 편집 후/source 검색 닫힘을 각 뷰의 제품 Metal PNG로 기록한다.
 정본 revision·뷰별 match 수와 source/artifact SHA-256을 검사한다. 기본 `--scenario ime`도 유지한다.
+
+### 공유 뷰 접힘·스크롤 판정
+
+`mise exec -- zig build test-editor-shared-anchors`는 수동 공유 뷰의 접힘 매핑·스크롤 앵커·
+provider 갱신·준비 할당 실패를 집중 실행한다. ReleaseFast는 `-Doptimize=ReleaseFast`를 붙인다.
+같은 판정자는 `test-editor-shared`와 전체 editor 집계에도 포함된다.

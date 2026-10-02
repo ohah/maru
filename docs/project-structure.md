@@ -587,3 +587,10 @@ tools/
     pr-metadata.yml         라벨 1개 이상 + assignee=ohah 강제(required check 지정은 branch protection에서 한다)
     release.yml             태그 푸시(v*) 시 universal .dmg를 서명·공증하고 새 draft에 무덮어쓰기 첨부·재검증한 뒤 publish한다(distribution.md "CI 릴리스")
 ```
+
+### 공유 에디터의 제품 Metal 캡처
+
+`tools/shared-ime-gpu/capture.py`는 격리한 소스 사본에서 제품 프레임을 캡처한다.
+같은 디렉터리의 `fixture.zig.inc`(IME), `find-fixture.zig.inc`(뷰별 찾기),
+`anchors-fixture.zig.inc`(수동 뷰 접힘·스크롤)가 시나리오 입력과 도메인 판정을 소유한다.
+캡처용 테스트는 제품 소스 사본에만 덧붙이고, 일반 빌드나 설치된 앱을 바꾸지 않는다.

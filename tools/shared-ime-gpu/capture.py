@@ -23,6 +23,7 @@ SOURCE_FILES = (
     "build.zig",
     "src/platform/macos/app_session.zig",
     "src/platform/macos/app_session/editor/mod.zig",
+    "src/platform/macos/app_session/editor/shared_edit.zig",
     "src/platform/macos/app_session/editor_ime.zig",
     "src/platform/macos/app_session/find.zig",
     "src/platform/macos/app_session/term.zig",
@@ -58,7 +59,7 @@ def unique_replace(text: str, old: str, new: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=("ime", "find"), default="ime")
+    parser.add_argument("--scenario", choices=("ime", "find", "anchors"), default="ime")
     parser.add_argument("--output", type=Path, help="New or empty evidence directory")
     args = parser.parse_args()
     if sys.platform != "darwin":
@@ -74,7 +75,7 @@ def main() -> None:
     artifacts = output / "artifacts"
     snapshot.mkdir()
     artifacts.mkdir()
-    fixture_path = "tools/shared-ime-gpu/fixture.zig.inc" if args.scenario == "ime" else "tools/shared-ime-gpu/find-fixture.zig.inc"
+    fixture_path = {"ime": "tools/shared-ime-gpu/fixture.zig.inc", "find": "tools/shared-ime-gpu/find-fixture.zig.inc", "anchors": "tools/shared-ime-gpu/anchors-fixture.zig.inc"}[args.scenario]
     source_files = tuple(name for name in SOURCE_FILES if name != "tools/shared-ime-gpu/fixture.zig.inc") + (fixture_path,)
     source_hashes = {name: digest(repo / name) for name in source_files}
     subprocess.run(
@@ -101,8 +102,10 @@ def main() -> None:
         stream.write("\n\n" + fixture)
     command = ["mise", "exec", "--", "zig", "build", "test-editor-shared", "-j2"]
     log = output / "capture.log"
-    phases = ("before", "marked", "cancelled", "committed") if args.scenario == "ime" else ("before", "search", "edited", "closed")
+    phases = {"ime": ("before", "marked", "cancelled", "committed"), "find": ("before", "search", "edited", "closed"), "anchors": ("before", "edited", "undo", "redo")}[args.scenario]
     revisions = {phase: int(phase == "committed") if args.scenario == "ime" else int(phase in ("edited", "closed")) for phase in phases}
+    if args.scenario == "anchors":
+        revisions = {"before": 0, "edited": 1, "undo": 2, "redo": 3}
     executions = []
     process_ids = set()
     with log.open("w") as combined:

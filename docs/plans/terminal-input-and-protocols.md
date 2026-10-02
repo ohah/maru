@@ -552,6 +552,13 @@ K1(placement 코어)에 이어 **실제로 이미지 픽셀을 화면에 그리�
   - **뷰포트 crop**: 렌더러 이미지 패스(`MARU_DRAW_IMAGES`)에는 scissor 가 없어, 뷰포트에 걸친 placement 가 옆 pane·도크(오른쪽·아래 넘침)나 pane 탭 바(위로 밀림) 위에 그려졌다. `buildGpuImages` 가 각 quad 를 자기 뷰포트로 자르고 UV 도 같은 비율로 줄인다(`clipToViewport`) — ABI 무변경. 옛 판정자 「위로 걸친 건 음수 dest_y 로 유지(렌더러가 클립)」는 이 계약으로 갱신했다.
   - **판정자**: `app_session` 「split 으로 함께 보이는 비활성 pane 의 이미지도 그린다 — 같은 로컬 id 는 전역 id 로 갈린다」(두 pane 에 같은 `i=7` → 이미지 2 개·전역 id 가 갈림·원래 id 는 활성 pane·각자 origin·둘 다 업로드·두 번째 프레임에도 id 안정). 돌연변이 둘로 유효성 확인: 비활성 수집을 끄면 `expected 2, found 1`, 매핑을 걷어내면 id 동일로 FAIL. 매핑 단위 6 개(`kitty_image_ids.zig`), crop 2 개(`metal_frame.zig`).
 
-후속(K2 밖): 텍스처 eviction(삭제 이미지 GPU 메모리 해제, 현재 안 그려질 뿐)·reflow 정밀 재배치는 K4/별도. K3 디코드 확장(PNG/zlib/chunked). 비활성 panel 이미지는 K2e 로 완료.
+후속(K2 밖): 텍스처 eviction(삭제 이미지 GPU 메모리 해제, 현재 안 그려질 뿐)은 K4/별도. **reflow 정밀 재배치는 완료**(2026-10-02):
+placement 앵커는 **셀**을 따라간다 — 활성 화면 reflow(`screen.resize`)와 스크롤백 재-wrap(`rewrapScrollbackInner`, 지연 포함)이
+행을 다시 자를 때 앵커 셀이 떨어진 새 행·열로 옮긴다(`kitty.AnchorRemap`·`AnchorWalker`). 재-wrap 으로 스크롤백 길이가 바뀌면
+활성 화면 앵커를 그 차만큼 민다(안 밀면 폭을 바꾼 뒤 위로 스크롤하는 순간 화면 위 이미지가 튀었다 — 실측 한 줄). reflow 가
+스크롤백으로 미는 행 중 **이미지가 덮는 빈 행**은 「빈 행은 보관하지 않는다」에서 뺀다(빼지 않으면 스크롤백의 다음 글이 이미지
+밑으로 당겨진다). 버려진 행(cap 초과 eviction·재-wrap cap 드랍·스크롤백 0)에 앵커가 있던 placement 는 eviction 과 같은 규율로
+지운다. 앵커가 줄 내용 뒤 빈칸에 있으면 내용이 끝난 자리에서 같은 거리(폭을 넘으면 마지막 칸)에 둔다. alt 화면 resize 는
+여전히 clip/pad 라 옮기지 않는다(TUI 가 다시 그린다). K3 디코드 확장(PNG/zlib/chunked). 비활성 panel 이미지는 K2e 로 완료.
 
-한계(설계 시점에 알려진): 자동 크기(`r` 미지정) 커서 advance는 **셀 메트릭 주입(접근 B, `setCellMetrics`)으로 구현 완료**(code review #2) — 코어가 셀 픽셀 1쌍을 보관해 이미지 픽셀 높이를 행 span으로 환산하고(렌더러 `buildGpuImages`와 `PlacementGeometry` 공유 — 화면 행 수와 일치), 메트릭 없는 헤드리스만 미이동(K1 fallback). platform→core 메트릭 주입은 마우스 1016 선례와 같은 결이고, 그 외 픽셀↔셀 환산은 여전히 렌더러 책임이다. reflow 후 정밀 재배치·세분화된 `d` 타깃·query 응답·애니메이션은 K3/K4 또는 별도. 멀티 윈도우에서 이미지 텍스처 캐시 소유권은 glyph atlas의 per-session 소유권 재검토와 함께 본다(현재 단일 윈도우 기준).
+한계(설계 시점에 알려진): 자동 크기(`r` 미지정) 커서 advance는 **셀 메트릭 주입(접근 B, `setCellMetrics`)으로 구현 완료**(code review #2) — 코어가 셀 픽셀 1쌍을 보관해 이미지 픽셀 높이를 행 span으로 환산하고(렌더러 `buildGpuImages`와 `PlacementGeometry` 공유 — 화면 행 수와 일치), 메트릭 없는 헤드리스만 미이동(K1 fallback). platform→core 메트릭 주입은 마우스 1016 선례와 같은 결이고, 그 외 픽셀↔셀 환산은 여전히 렌더러 책임이다. reflow 후 정밀 재배치는 위 후속 문단대로 완료(2026-10-02)했고, 세분화된 `d` 타깃·query 응답·애니메이션은 K3/K4 또는 별도. 멀티 윈도우에서 이미지 텍스처 캐시 소유권은 glyph atlas의 per-session 소유권 재검토와 함께 본다(현재 단일 윈도우 기준).

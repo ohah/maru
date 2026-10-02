@@ -105,6 +105,10 @@ const Surface = struct {
     /// 열림 사이에 온 그림만 막는다. W6a① 적대 검증 5~7 차 — 판정 `popup-frame` 이 쓰는 조건). 브라우저가 닫혀도(`browser_closed`)
     /// 닫힘 알림은 오지 않는다 — 그때도 지운다(`dropPopup`).
     popup_first_generation: u32 = 0,
+    /// 페이지의 지금 툴팁 글(W6b — 비었으면 null)과 바뀔 때마다 오르는 세대. 창이 세대로 바뀐 것을 안다(꺼내 가지 않는다 — 창이
+    /// 여럿이어도 한 창이 먹어 버리지 않게).
+    tooltip_text: ?[]u8 = null,
+    tooltip_generation: u32 = 0,
     /// 팝업 링의 보일 장 고르기(W6a②) — 본문과 같은 규칙(GPU 소비자 규칙·기대 크기 = 사각형 × scale). 닫혀도 곧바로
     /// 비우지 않는다: A 닫힘 알림을 처리하기 전에 B 의 링이 먼저 와 있을 수 있어, 닫힐 때 다 놓으면 다시 알리지 않는 B 의
     /// 링을 잃는다(1 차). 닫힐 때 보이던 링만 GPU 가 끝난 뒤 놓는다(`popup_release_generation` — 4 차).
@@ -404,6 +408,23 @@ pub fn decide(config_wants_chromium: bool) void {
         var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
         if (install.runCacheRoot(&cache_buf, install.hardenedRuntime())) |root| install.sweepRunCopies(root);
     }
+}
+
+test "tooltip text is owned per surface, cleared by an empty text, and each change bumps the generation (W6b)" {
+    const gpa = std.testing.allocator;
+    var s: Surface = .{ .record = .{ .surface_id = 1, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false } };
+    var source = "A tip\nline2".*;
+    setTooltip(gpa, &s, &source);
+    source[0] = 'X'; // 받은 글은 복사해 둔다(디코더 버퍼는 다음 frame 에 덮인다)
+    try std.testing.expectEqualStrings("A tip\nline2", s.tooltip_text.?);
+    try std.testing.expectEqual(@as(u32, 1), s.tooltip_generation);
+    setTooltip(gpa, &s, "B");
+    try std.testing.expectEqualStrings("B", s.tooltip_text.?);
+    setTooltip(gpa, &s, ""); // 빈 글이면 없앤다(렌더러 죽음·sidecar 잃음·브라우저 닫힘도 이 길)
+    try std.testing.expect(s.tooltip_text == null);
+    try std.testing.expectEqual(@as(u32, 3), s.tooltip_generation);
+    setTooltip(gpa, &s, "C");
+    if (s.tooltip_text) |t| gpa.free(t); // 테스트 할당자가 새는 것을 잡는다(freeSurface 의 해제와 같은 몫)
 }
 
 test "engine decision: env first, then an installed maru-chromium, else WebKit with a notice" {
@@ -1342,8 +1363,23 @@ pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
 
 // ── 안 ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/// 툴팁 글을 바꾼다(W6b). 빈 글이면 없앤다. 세대는 늘 오른다.
+fn setTooltip(gpa: std.mem.Allocator, s: *Surface, text: []const u8) void {
+    if (s.tooltip_text) |old| gpa.free(old);
+    s.tooltip_text = if (text.len == 0) null else gpa.dupe(u8, text) catch null;
+    s.tooltip_generation +%= 1;
+}
+
+/// 이 surface 의 지금 툴팁 글과 세대(W6b).
+pub fn tooltip(surface_id: u64) ?struct { text: []const u8, generation: u32 } {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return .{ .text = s.tooltip_text orelse "", .generation = s.tooltip_generation };
+}
+
 fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     forgetLocationSurface(gpa, s.record.surface_id);
+    if (s.tooltip_text) |t| gpa.free(t);
+    s.tooltip_text = null;
     if (s.last_url) |u| gpa.free(u);
     if (s.url) |u| gpa.free(u);
     s.last_url = null;
@@ -1569,6 +1605,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
     for (surfaces.values()) |*s| {
         dropDialogs(gpa, s);
         dropNotes(gpa, s);
+        setTooltip(gpa, s, ""); // 죽은 sidecar 의 툴팁은 끝났다(W6b)
         dropPopup(s); // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게. 새 sidecar 는 세대를 1 부터 세므로 옛 링도 놓는다
     }
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
@@ -1714,7 +1751,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             if (s.focused) send(gpa, .{ .set_focus = .{ .browser = id, .value = true } });
             s.composing = false;
         },
-        .browser_closed => |id| if (surfaces.getPtr(id)) |s| dropPopup(s), // 닫힘 알림 없이 사라진다(W6a②)
+        .browser_closed => |id| if (surfaces.getPtr(id)) |s| {
+            dropPopup(s); // 닫힘 알림 없이 사라진다(W6a②)
+            setTooltip(gpa, s, ""); // 툴팁도(W6b — 방어)
+        },
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
             if (s.url) |old| gpa.free(old);
@@ -1739,7 +1779,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             .cef_initialize_failed, .protocol_violation => protocolBroken(gpa, now_ms),
             .browser_create_failed, .unknown_browser, .duplicate_browser, .frame_channel_failed => {},
         },
-        .title_changed, .load_finished, .renderer_gone => {},
+        .title_changed, .load_finished => {},
+        // 렌더러가 죽으면 그 페이지의 툴팁도 끝났다(CEF 가 빈 글을 부르지 않을 수 있다).
+        .renderer_gone => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, ""),
+        .tooltip_changed => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, v.text),
         .cursor_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.cursor = v.cursor;
             s.cursor_generation +%= 1;

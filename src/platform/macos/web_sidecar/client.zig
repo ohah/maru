@@ -24,6 +24,7 @@ const dialogs = @import("dialogs.zig");
 const permissions = @import("permissions.zig");
 const title_gate = @import("title_gate.zig");
 const input = @import("input.zig");
+const tooltip = @import("tooltip.zig");
 const notifications = @import("notifications.zig");
 
 var client_obj: c.cef_client_t = undefined;
@@ -91,9 +92,10 @@ pub fn get() *c.cef_client_t {
         display.on_title_change = &onTitleChange;
         display.on_address_change = &onAddressChange;
         display.on_cursor_change = &input.onCursorChange;
+        display.on_tooltip = &tooltip.onTooltip;
         load.on_loading_state_change = &onLoadingStateChange;
         load.on_load_end = &onLoadEnd;
-        load.on_load_start = &dialogs.onLoadStart;
+        load.on_load_start = &onLoadStart;
         load.on_load_error = &dialogs.onLoadError;
         request.on_render_process_terminated = &onRenderProcessTerminated;
         jsdialog.on_jsdialog = &dialogs.onJsDialog;
@@ -290,6 +292,15 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
     const text = library.readString(browsers.state.api, url, &buf);
     if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다)
     browsers.state.writer.send(.{ .url_changed = .{ .browser = entry.id, .url = text } }) catch {};
+}
+
+/// `on_load_start` — 새 문서면 툴팁 기억을 비우고(W6b — 옛 페이지 툴팁이 남지 않게, 새 문서의 같은 글이 다시 오게) 대화상자
+/// 쪽 처리로 넘긴다(그쪽이 인자 참조를 놓는다).
+fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, transition: c.cef_transition_type_t) callconv(.c) void {
+    if (frame != null and frame.*.is_main.?(frame) != 0) {
+        if (entryOf(browser)) |entry| tooltip.reset(entry.id);
+    }
+    dialogs.onLoadStart(handler, browser, frame, transition);
 }
 
 fn onLoadingStateChange(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, loading: c_int, can_go_back: c_int, can_go_forward: c_int) callconv(.c) void {

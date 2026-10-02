@@ -57,6 +57,10 @@ SEL = ("<!doctype html><title>sel</title><style>html,body{margin:0;height:100%;b
     "var a=document.getElementById('a');a.addEventListener('focus',function(){new Image().src='/ev?e=focus&id=a&t='+Date.now()});"
     "a.addEventListener('change',function(){new Image().src='/ev?e=change&v='+a.value+'&t='+Date.now()});"
     "</script>").encode()
+# W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
+TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
+    "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
+    "<div id=a title='A tip&#10;line2'>a</div>").encode()
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -73,6 +77,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = KEYS
         elif self.path == "/sel":
             body = SEL
+        elif self.path == "/tip-app":
+            body = TIP
         elif self.path == "/nav-a":
             body = b"<!doctype html><title>a</title><style>html,body{margin:0;height:100%}a{display:block;height:100%}</style><body><a href='/nav-b'>b</a><script>addEventListener('pageshow',function(){new Image().src='/ev?e=shown-a&t='+Date.now()})</script>"
         elif self.path == "/nav-b":
@@ -536,6 +542,55 @@ SCRIPT
 run_app /sel 14000 "$root/popup-type.summary" MARU_WEB_OSR_TEST_INPUT="$root/popup-type.txt"
 grep -q 'e=change&v=cherry' "$root/requests.log" || fail "typing c then Enter in the open <select> list did not pick cherry ($(grep '^/ev' "$root/requests.log" | tr '\n' ' '))"
 echo "PASS typing in the open <select> list picks the item (c → cherry)"
+
+# ── W6b: 페이지 툴팁 ─────────────────────────────────────────────────────────────────────────────────────────
+# 셸에서 띄운 앱은 맨 앞이 아니라 macOS 가 툴팁을 실제로 띄우지 않는다(비활성 앱 — W6b 착수 전 실측). 그래서 maru 가 view 에
+# macOS 툴팁을 **맞는 글로 달았는지**를 본다(대본 `tooltip` — 앱 로그의 `osr-test tooltip` 줄). title 있는 곳에 올리면 달리고(여러
+# 줄), 빈 곳으로 가면 떼고, 다시 올리면 다시 달리고, 누르면(view 마우스 메서드 — macOS 가 숨긴다) 떼었다가 다음 움직임에 다시 달고
+# (Chrome 은 누른 뒤 같은 요소에서 움직이면 다시 띄운다 — 실측), 팔레트가 열리면(탭을 떠난 것으로 — leave) 뗀다.
+cat > "$root/tip.txt" <<'SCRIPT'
+sleep 7000
+hover 0.40 0.33 0 0
+sleep 300
+hover 0.41 0.33 0 0
+sleep 300
+hover 0.42 0.34 0 0
+sleep 1000
+tooltip
+hover 0.85 0.85 0 0
+sleep 1000
+tooltip
+hover 0.40 0.33 0 0
+sleep 300
+hover 0.41 0.34 0 0
+sleep 1000
+tooltip
+view down 0.41 0.34 0 0
+view up 0.41 0.34 0 0
+sleep 300
+tooltip
+view move 0.42 0.35 0 0
+sleep 300
+tooltip
+action toggle_command_palette
+sleep 1000
+tooltip
+key 53 U+1B
+sleep 500
+SCRIPT
+: > "$root/requests.log"
+run_app /tip-app 16000 "$root/tip.summary" MARU_WEB_OSR_TEST_INPUT="$root/tip.txt"
+grep -a '^osr-test tooltip' "$root/app-tip-app.log" > "$root/tip.report" || true
+cat "$root/tip.report"
+python3 - "$root/tip.report" <<'PY' || fail "the page tooltip was not attached to the view as expected"
+import sys
+lines = [l.strip() for l in open(sys.argv[1])]
+want = ['osr-test tooltip active=true text=A tip\\nline2', 'osr-test tooltip active=false text=', 'osr-test tooltip active=true text=A tip\\nline2',
+        'osr-test tooltip active=false text=', 'osr-test tooltip active=true text=A tip\\nline2', 'osr-test tooltip active=false text=']
+ok = lines == want
+print(('PASS ' if ok else 'FAIL ') + f'tooltip attached over the titled element (multi-line), detached outside, reattached, detached by a click and reattached on the next move (Chrome re-shows), detached when the palette opens ({lines})')
+sys.exit(0 if ok else 1)
+PY
 
 # ── W4d①: 설정 `browser.engine` ─────────────────────────────────────────────────────────────────────────────
 # 개발용 환경변수 없이 설정으로 켠다. 설치 위치는 `$HOMEBREW_PREFIX/opt/maru-chromium/libexec` 를 먼저 본다 — 가짜 prefix 에

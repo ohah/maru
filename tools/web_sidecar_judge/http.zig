@@ -136,6 +136,7 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/input")) return input_page;
     if (std.mem.eql(u8, path, "/keys")) return keys_page;
     if (std.mem.eql(u8, path, "/sel")) return select_page;
+    if (std.mem.eql(u8, path, "/tip") or std.mem.eql(u8, path, "/tip2")) return tooltip_page;
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
     }
@@ -245,6 +246,16 @@ const select_page =
     \\<!doctype html><title>loading</title><style>body{margin:0}#s{position:absolute;left:10px;top:10px;width:200px;height:30px;font-size:16px}</style>
     \\<select id=s><option value=a>alpha</option><option value=b>bravo</option><option value=c>charlie</option><option value=d>delta</option><option value=e>echo</option></select>
     \\<script>var s=document.getElementById('s');s.addEventListener('change',function(){document.title='sel:'+s.value});requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='sel-ready'})});</script>
+;
+
+/// W6b 툴팁 — A·B(여러 줄)·제어 문자·5000 자 title. `#push` 해시로 오면 pushState 도 한다(주소만 바뀌는 경우), `#busy` 면
+/// 렌더러를 1.5 초 붙잡는다(CEF 의 빈 글이 늦게 오게 — sidecar 의 떠남 초기화를 따로 보려고).
+const tooltip_page =
+    \\<!doctype html><title>loading</title><style>body{margin:0}div{position:absolute}#a{left:0;top:0;width:300px;height:200px}#b{left:320px;top:0;width:300px;height:200px}#x{left:0;top:220px;width:300px;height:80px}#y{left:320px;top:220px;width:300px;height:80px}</style>
+    \\<div id=a title="A tip">a</div><div id=b title="B line1&#13;&#10;B line2">b</div><div id=x>x</div><div id=y>y</div>
+    \\<script>document.getElementById('x').title='ctl\x1bchar';document.getElementById('y').title='L'.repeat(5000);
+    \\addEventListener('hashchange',function(){if(location.hash=='#push')history.pushState({},'','/tip?pushed');if(location.hash=='#busy'){document.title='busy';var t=Date.now();while(Date.now()-t<1500){}}});
+    \\requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='tip-ready'})});</script>
 ;
 
 const keys_page =

@@ -17,6 +17,7 @@ const library = @import("library.zig");
 const browsers = @import("browsers.zig");
 const registry_mod = @import("registry.zig");
 const input_map = @import("input_map.zig");
+const tooltip = @import("tooltip.zig");
 
 const message = protocol.message;
 const Message = message.Message;
@@ -48,6 +49,8 @@ pub fn handle(msg: Message) bool {
         .mouse => |value| if (hostOf(value.browser)) |host| {
             defer object.release(host);
             mouse(host, value);
+            // 포인터가 떠났다 — CEF 도 빈 글을 부르지만, 바쁜 렌더러가 늦거나 빠뜨려도 maru 의 툴팁이 남지 않게(W6b).
+            if (value.kind == .leave) tooltip.reset(value.browser);
         },
         .wheel => |value| if (hostOf(value.browser)) |host| {
             defer object.release(host);

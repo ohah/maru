@@ -112,6 +112,25 @@ pub fn popupReleasable(open: bool, release_generation: u32, shown_generation: ?u
     return drawn_generation == 0 or completed_generation >= drawn_generation;
 }
 
+/// 창이 Swift 에 알린 툴팁(W6b) — (hover 탭, 그 탭의 툴팁 세대)와 그것이 바뀔 때마다 오르는 일련번호. Swift 는 일련번호가 바뀌면
+/// macOS 툴팁을 다시 단다(글이 비었으면 뗀다).
+pub const TooltipSeen = struct {
+    surface: u64 = 0,
+    generation: u32 = 0,
+    serial: u64 = 0,
+
+    /// 지금 hover 탭(`surface`, 없으면 0)과 그 탭의 툴팁 세대를 본다 — 둘 중 하나라도 바뀌었으면 일련번호를 올린다. 다른 탭으로
+    /// 가거나 탭을 떠나면(0) 세대가 같아도 오른다 — 옛 탭의 글이 새 자리에 남지 않게.
+    pub fn observe(self: *TooltipSeen, surface: u64, generation: u32) u64 {
+        if (surface != self.surface or generation != self.generation) {
+            self.surface = surface;
+            self.generation = generation;
+            self.serial +%= 1;
+        }
+        return self.serial;
+    }
+};
+
 pub fn find(targets: []const Target, surface_id: u64) ?Target {
     for (targets) |t| if (t.surface_id == surface_id) return t;
     return null;
@@ -379,6 +398,22 @@ test "ime outcome with a composition: last jamo Backspace, empty commit and Esc 
     try testing.expectEqual(ImeOutcome{ .raw_down = true }, imeOutcome(.{ .key_code = 123, .had_composition = true, .command = true }));
     // 조합 중 아무 일도 없음 → 입력기가 삼킴.
     try testing.expectEqual(ImeOutcome{}, imeOutcome(.{ .key_code = 7, .had_composition = true }));
+}
+
+test "tooltip serial bumps when the hover surface or its tooltip generation changes, not otherwise" {
+    var seen: TooltipSeen = .{};
+    const s0 = seen.observe(0, 0);
+    try testing.expectEqual(s0, seen.observe(0, 0));
+    const s1 = seen.observe(7, 3); // 탭에 들어왔다
+    try testing.expect(s1 != s0);
+    try testing.expectEqual(s1, seen.observe(7, 3)); // 그대로
+    const s2 = seen.observe(7, 4); // 글이 바뀌었다
+    try testing.expect(s2 != s1);
+    const s3 = seen.observe(9, 4); // 다른 탭(세대가 우연히 같다)
+    try testing.expect(s3 != s2);
+    const s4 = seen.observe(0, 0); // 떠났다
+    try testing.expect(s4 != s3);
+    try testing.expectEqual(s4, seen.observe(0, 0));
 }
 
 test "popup shows only when open, with a real frame, from a ring of this popup (generation >= first)" {

@@ -31,6 +31,33 @@ pub fn replaceControlKeepLines(bytes: []u8) void {
     }
 }
 
+/// 줄바꿈을 LF 하나로 맞춘다(제자리, 새 길이를 돌려준다) — CRLF 는 LF, 홀로 선 CR 은 LF(W6b 툴팁: 페이지가 `title` 에 넣은
+/// `\r\n`·`\r` 이 받는 쪽에서 줄 조각에 섞이지 않게). 글이 짧아지기만 한다.
+pub fn normalizeNewlines(bytes: []u8) usize {
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        if (bytes[i] == '\r') {
+            bytes[out] = '\n';
+            out += 1;
+            if (i + 1 < bytes.len and bytes[i + 1] == '\n') i += 1;
+            continue;
+        }
+        bytes[out] = bytes[i];
+        out += 1;
+    }
+    return out;
+}
+
+test "normalizeNewlines turns CRLF and lone CR into LF and leaves the rest" {
+    var a = "a\r\nb\rc\nd\r".*;
+    try std.testing.expectEqualStrings("a\nb\nc\nd\n", a[0..normalizeNewlines(&a)]);
+    var b = "가\r\r\n나".*;
+    try std.testing.expectEqualStrings("가\n\n나", b[0..normalizeNewlines(&b)]);
+    var empty: [0]u8 = .{};
+    try std.testing.expectEqual(@as(usize, 0), normalizeNewlines(&empty));
+}
+
 test "replaceControlKeepLines keeps line breaks and tabs, blanks escape sequences" {
     var buf = "a\nb\tc\r\x1b]0;x\x07\x7f".*;
     replaceControlKeepLines(&buf);

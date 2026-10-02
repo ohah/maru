@@ -1101,6 +1101,16 @@ fn popupKeyHasChar(key: OsrKey) bool {
     return !(ch >= 0xF700 and ch <= 0xF8FF);
 }
 
+/// hover 중인 Chromium 탭의 툴팁(W6b) — 글과, (hover 탭, 그 탭의 툴팁 세대)가 바뀔 때마다 오르는 일련번호. Swift 는 일련번호가
+/// 바뀌면 macOS 툴팁을 다시 단다(글이 비었으면 뗀다). 포인터가 탭을 떠나거나(오버레이가 열리며 leave 를 보낸 경우도) 다른 탭으로
+/// 가면 hover 탭이 바뀌어 일련번호가 오른다 — 옛 탭의 글이 새 자리에 남지 않는다.
+pub fn osrTooltip(self: *AppSession) struct { serial: u64, text: []const u8 } {
+    const sid = self.osr_hover_surface;
+    const t = if (sid != 0) web_osr.tooltip(sid) else null;
+    const serial = self.osr_tooltip_seen.observe(sid, if (t) |x| x.generation else 0);
+    return .{ .serial = serial, .text = if (t) |x| x.text else "" };
+}
+
 /// 키 대상 탭에 팝업 위젯이 열려 있는가(W6a②). 열린 목록은 편집할 수 없어 입력기 조합이 갈 곳이 없다 — 조합이 서면 그 뒤의
 /// Esc 가 「조합 취소」로 먹혀 목록이 한 번에 안 닫혔다(실측). Chrome 의 목록은 네이티브 메뉴라 입력기가 끼지 않는다.
 pub fn osrPopupOpen(self: *AppSession) bool {

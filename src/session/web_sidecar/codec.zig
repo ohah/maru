@@ -157,6 +157,10 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeBrowser(&cursor, value.browser);
             try writeRect(&cursor, value.bounds);
         },
+        .tooltip_changed => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try writeDialogText(&cursor, value.text);
+        },
         .popup_changed => |value| {
             if (!popupConsistent(value)) return error.InvalidPopup;
             try writeBrowser(&cursor, value.browser);
@@ -356,6 +360,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             .cursor = std.enums.fromInt(WebCursor, try cursor.readByte()) orelse return error.UnknownCursor,
         } },
         .ime_range => .{ .ime_range = .{ .browser = try readBrowser(&cursor), .bounds = try readRect(&cursor) } },
+        .tooltip_changed => .{ .tooltip_changed = .{ .browser = try readBrowser(&cursor), .text = try readDialogText(&cursor) } },
         .popup_changed => blk: {
             const value: message_mod.PopupChanged = .{ .browser = try readBrowser(&cursor), .visible = try readBool(&cursor), .bounds = try readRect(&cursor), .first_generation = try cursor.readU32() };
             if (!popupConsistent(value)) return error.InvalidPopup;
@@ -511,7 +516,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  3,  0, // v3, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  4,  0, // v4, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -828,6 +833,17 @@ test "input messages round trip" {
     try std.testing.expectEqual(range, (try roundTrip(.{ .ime_range = range })).ime_range);
 }
 
+test "tooltip_changed round-trips multi-line and empty text, flows to maru, and refuses control characters" {
+    var buf: [256]u8 = undefined;
+    const multi = (try roundTrip(.{ .tooltip_changed = .{ .browser = 7, .text = "A tip\nsecond\tline" } })).tooltip_changed;
+    try std.testing.expectEqual(@as(message_mod.BrowserId, 7), multi.browser);
+    try std.testing.expectEqualStrings("A tip\nsecond\tline", multi.text);
+    try std.testing.expectEqualStrings("", (try roundTrip(.{ .tooltip_changed = .{ .browser = 7, .text = "" } })).tooltip_changed.text);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.tooltip_changed.direction());
+    // sidecar 는 제어 문자를 공백으로 바꿔 보낸다(`readDialogString`) — 그래도 섞이면 encode 가 거절한다.
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .tooltip_changed = .{ .browser = 7, .text = "a\x1bb" } }, &buf));
+}
+
 test "popup_changed round-trips, flows to maru, a hidden popup carries an all-zero rect and generation, a shown one a generation" {
     const shown: message_mod.PopupChanged = .{ .browser = 7, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 }, .first_generation = 3 };
     try std.testing.expectEqual(shown, (try roundTrip(.{ .popup_changed = shown })).popup_changed);
@@ -961,6 +977,8 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         // W6a 팝업.
         .{ .popup_changed = .{ .browser = 3, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 }, .first_generation = 2 } },
         .{ .popup_changed = .{ .browser = 3, .visible = false } },
+        .{ .tooltip_changed = .{ .browser = 3, .text = "first line\nsecond line" } },
+        .{ .tooltip_changed = .{ .browser = 3, .text = "" } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;

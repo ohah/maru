@@ -42,6 +42,8 @@ pub const Tag = enum(u8) {
     geolocation = 23,
     /// 사용자가 maru 알림(배너·목록)을 눌렀다(W5c) — sidecar 는 그 페이지 알림의 `click` 을 부른다(Chrome 과 같다).
     web_notification_click = 24,
+    /// 우클릭 메뉴에서 고른 것(W6c — D5). 메뉴 번호는 `context_menu` 가 준 것이다. 고르지 않고 닫았으면 `cancel`.
+    context_menu_command = 25,
 
     hello_ack = 32,
     browser_created = 33,
@@ -78,6 +80,12 @@ pub const Tag = enum(u8) {
     /// 요소 안에서 움직일 때마다 같은 글을 다시 부른다 — 실측), 페이지를 새로 불러오기 시작할 때·주 프레임 이동이 실패해 오류 페이지가 될 때·포인터가 떠날 때 기억한 글을
     /// 비우며 비어 있지 않았으면 빈 글을 한 번 보낸다(같은 문서 안 주소 변경에는 비우지 않는다). 여러 줄은 `\n` 으로 온다(대화상자 글 규칙).
     tooltip_changed = 49,
+    /// 페이지에서 우클릭했다(W6c — D5). 메뉴는 maru 가 macOS 메뉴로 띄운다 — CEF 의 기본 메뉴는 창 없는 모드에서 뜨지 않고 항목도
+    /// 적다(착수 전 실측). maru 는 고른 것을 `context_menu_command` 로 답한다. 페이지가 `contextmenu` 를 막으면 오지 않는다.
+    context_menu = 50,
+    /// 그 메뉴가 끝났다 — 고른 명령을 마쳤거나, 페이지가 이동·닫혀 CEF 가 메뉴를 거뒀다(`on_context_menu_dismissed`). maru 는 떠
+    /// 있는 메뉴를 닫는다. 메뉴마다 한 번.
+    context_menu_closed = 51,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -492,6 +500,109 @@ pub const TooltipChanged = struct {
     text: []const u8,
 };
 
+/// 우클릭한 자리와 그 자리에서 할 수 있는 일(W6c). 닫힌 필드 — 쓰지 않는 비트는 0, `image_loaded` 는 `image` 와,
+/// `selection_truncated` 는 `selection` 과 함께만, `selection` 은 선택한 글이 있을 때만.
+pub const ContextMenuFlags = packed struct(u16) {
+    link: bool = false,
+    image: bool = false,
+    /// 이미지 픽셀이 있다(「이미지 복사」 — 아직 안 받아진 이미지는 주소만 있다).
+    image_loaded: bool = false,
+    /// 이미지가 아닌 미디어(동영상·오디오·canvas·플러그인) — 그 자리의 Chrome 메뉴는 미디어 항목이라 페이지 항목(뒤로 등)을 내지 않는다.
+    media: bool = false,
+    selection: bool = false,
+    /// 선택한 글이 글 상한(4 KiB)에서 잘렸다.
+    selection_truncated: bool = false,
+    editable: bool = false,
+    can_undo: bool = false,
+    can_redo: bool = false,
+    can_cut: bool = false,
+    can_copy: bool = false,
+    can_paste: bool = false,
+    can_select_all: bool = false,
+    can_go_back: bool = false,
+    can_go_forward: bool = false,
+    _reserved: u1 = 0,
+};
+
+pub const ContextMenu = struct {
+    browser: BrowserId,
+    /// 브라우저마다 1 부터 오르는 번호(0 은 없다). 명령·닫힘을 이 번호로 짝짓는다 — 늦게 온 명령이 다음 메뉴에 붙지 않게.
+    menu: u32,
+    /// 우클릭한 자리 — view 좌상단 기준 DIP(iframe 안이어도 view 좌표, 실측).
+    point: Point,
+    flags: ContextMenuFlags,
+    /// 선택한 글(대화상자 글 규칙 — 4 KiB, UTF-8, `\t`·`\n`·`\r` 말고 제어 문자 없음). 「'…' 찾기」·음성·서비스가 쓴다.
+    selection: []const u8 = "",
+};
+
+pub const ContextMenuClosed = struct {
+    browser: BrowserId,
+    menu: u32,
+};
+
+/// 우클릭 메뉴에서 고른 것. CEF 명령(뒤로~모두 선택)은 sidecar 가 CEF 메뉴 콜백으로 실행한다 — 초점이 있는 frame 에 간다(우클릭은
+/// 그 자리에 초점을 준다 — iframe 안 입력 칸도 그 iframe 에 갔다, 실측). 기본 메뉴 모델에 없는 번호도 실행된다(새로고침 — 변이 실측). 복사 셋은 sidecar 가 클립보드에 쓴다(주소·이미지는 maru 에 오지 않는다 — 이미지는 frame 상한보다 크다).
+pub const ContextMenuCommandKind = enum(u8) {
+    cancel = 0,
+    back = 1,
+    forward = 2,
+    reload = 3,
+    undo = 4,
+    redo = 5,
+    cut = 6,
+    copy = 7,
+    paste = 8,
+    paste_and_match_style = 9,
+    select_all = 10,
+    copy_link_address = 11,
+    copy_image_address = 12,
+    copy_image = 13,
+};
+
+pub const ContextMenuCommand = struct {
+    browser: BrowserId,
+    menu: u32,
+    command: ContextMenuCommandKind,
+};
+
+/// 그 메뉴에서 할 수 있는 명령인가 — maru 는 이 규칙대로 항목을 보이고(W6c②), sidecar 는 이 규칙을 지나지 못한 명령을 취소로
+/// 바꾼다. Chrome 메뉴를 따른다(착수 전 실측): 뒤로·앞으로·새로고침은 빈 페이지에서만, 편집 명령은 입력 칸에서만(복사는 선택한
+/// 글에서도), 복사 셋은 그 대상이 있을 때만.
+pub fn contextMenuAllows(flags: ContextMenuFlags, command: ContextMenuCommandKind) bool {
+    const page = !flags.link and !flags.image and !flags.media and !flags.selection and !flags.editable;
+    return switch (command) {
+        .cancel => true,
+        .back => page and flags.can_go_back,
+        .forward => page and flags.can_go_forward,
+        .reload => page,
+        .undo => flags.editable and flags.can_undo,
+        .redo => flags.editable and flags.can_redo,
+        .cut => flags.editable and flags.can_cut,
+        .copy => flags.can_copy and (flags.selection or flags.editable),
+        .paste, .paste_and_match_style => flags.editable and flags.can_paste,
+        .select_all => flags.editable and flags.can_select_all,
+        .copy_link_address => flags.link,
+        .copy_image_address => flags.image,
+        .copy_image => flags.image_loaded,
+    };
+}
+
+test "context menu commands follow what the menu showed — page items only on the page, edit items where they apply, copies need their target" {
+    const page: ContextMenuFlags = .{ .can_go_back = true, .can_select_all = true };
+    try std.testing.expect(contextMenuAllows(page, .back) and contextMenuAllows(page, .reload) and !contextMenuAllows(page, .forward));
+    try std.testing.expect(!contextMenuAllows(page, .select_all)); // 페이지의 모두 선택은 Chrome 메뉴에 없다
+    const link: ContextMenuFlags = .{ .link = true, .selection = true, .can_copy = true, .can_go_back = true };
+    try std.testing.expect(contextMenuAllows(link, .copy_link_address) and contextMenuAllows(link, .copy));
+    try std.testing.expect(!contextMenuAllows(link, .back) and !contextMenuAllows(link, .reload) and !contextMenuAllows(link, .copy_image_address));
+    try std.testing.expect(contextMenuAllows(.{ .image = true }, .copy_image_address) and !contextMenuAllows(.{ .image = true }, .copy_image));
+    try std.testing.expect(contextMenuAllows(.{ .image = true, .image_loaded = true }, .copy_image));
+    const input: ContextMenuFlags = .{ .editable = true, .can_paste = true, .can_select_all = true };
+    try std.testing.expect(contextMenuAllows(input, .paste) and contextMenuAllows(input, .paste_and_match_style) and contextMenuAllows(input, .select_all));
+    try std.testing.expect(!contextMenuAllows(input, .undo) and !contextMenuAllows(input, .cut) and !contextMenuAllows(input, .copy) and !contextMenuAllows(input, .reload));
+    try std.testing.expect(contextMenuAllows(.{ .selection = true }, .cancel) and !contextMenuAllows(.{ .selection = true }, .copy)); // 복사는 can_copy 를 본다
+    try std.testing.expect(!contextMenuAllows(.{ .media = true, .can_go_back = true }, .back) and !contextMenuAllows(.{ .media = true }, .reload)); // 동영상 자리
+}
+
 pub const ImeRange = struct {
     browser: BrowserId,
     /// 조합 글자들의 사각형을 모두 합친 것.
@@ -597,6 +708,7 @@ pub const Message = union(Tag) {
     permission_reply: PermissionReply,
     geolocation: Geolocation,
     web_notification_click: WebNotificationClick,
+    context_menu_command: ContextMenuCommand,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -616,6 +728,8 @@ pub const Message = union(Tag) {
     web_notification: WebNotification,
     popup_changed: PopupChanged,
     tooltip_changed: TooltipChanged,
+    context_menu: ContextMenu,
+    context_menu_closed: ContextMenuClosed,
 };
 
 test "tags split by direction at 32" {

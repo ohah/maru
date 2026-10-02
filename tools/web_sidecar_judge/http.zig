@@ -63,6 +63,10 @@ const Timeval = extern struct { sec: i64, usec: i32 };
 /// 팝업 페이지(`/title?t=opened`)가 실제로 요청된 수. 창 없는 모드에서는 허용된 팝업이 **보이지 않는 브라우저**로
 /// 뜨므로 창 수로는 못 잡는다(변이 실측) — 페이지가 불렸는지로 본다.
 pub var opened_requests = std.atomic.Value(u32).init(0);
+/// `/flaky.svg` 를 받은 수(W6c) — 첫 요청은 HTML(깨진 이미지), 그 뒤는 진짜 SVG. 못 받은 이미지의 「이미지 복사」가 다시 받으면
+/// 성공하게 만들어, 허용 규칙이 그 명령을 막는지를 판정이 가를 수 있게 한다.
+pub var flaky_requests = std.atomic.Value(u32).init(0);
+const flaky_svg = "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><rect width='60' height='60' fill='blue'/></svg>";
 
 pub const Server = struct {
     fd: c_int,
@@ -107,11 +111,13 @@ fn handle(conn: c_int) void {
     const query = if (std.mem.indexOfScalar(u8, target, '=')) |eq| target[eq + 1 ..] else "";
 
     var body_buf: [8192]u8 = undefined;
-    const body = page(path, query, &body_buf) catch "<!doctype html><title>not-found</title>";
+    const flaky_image = std.mem.eql(u8, path, "/flaky.svg") and flaky_requests.fetchAdd(1, .monotonic) > 0;
+    const body = if (flaky_image) flaky_svg else page(path, query, &body_buf) catch "<!doctype html><title>not-found</title>";
+    const content_type = if (flaky_image) "image/svg+xml" else "text/html; charset=utf-8";
     var head_buf: [320]u8 = undefined;
     // `/perm?a=nsandbox` 는 CSP sandbox 로 — 주 프레임이 불투명 출처가 된다(같은 프로세스에 남는다).
     const csp = if (std.mem.eql(u8, path, "/perm") and std.mem.eql(u8, query, "nsandbox")) "Content-Security-Policy: sandbox allow-scripts\r\n" else "";
-    const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\n{s}Connection: close\r\n\r\n", .{ body.len, csp }) catch return;
+    const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nCache-Control: no-store\r\n{s}Connection: close\r\n\r\n", .{ content_type, body.len, csp }) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
     _ = std.c.write(conn, body.ptr, body.len);
 }
@@ -137,6 +143,7 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/keys")) return keys_page;
     if (std.mem.eql(u8, path, "/sel")) return select_page;
     if (std.mem.eql(u8, path, "/tip") or std.mem.eql(u8, path, "/tip2")) return tooltip_page;
+    if (std.mem.eql(u8, path, "/cm")) return context_menu_page;
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
     }
@@ -250,6 +257,20 @@ const select_page =
 
 /// W6b 툴팁 — A·B(여러 줄)·제어 문자·5000 자 title. `#push` 해시로 오면 pushState 도 한다(주소만 바뀌는 경우), `#busy` 면
 /// 렌더러를 1.5 초 붙잡는다(CEF 의 빈 글이 늦게 오게 — sidecar 의 떠남 초기화를 따로 보려고).
+/// W6c 우클릭 메뉴 — 자리마다 한 요소(`contextmenu_check.zig` 의 좌표). 제목은 이 탭에서 문서를 불러온 횟수(「cm N」 —
+/// 새로고침·이동을 센다), 입력 칸·iframe 칸은 값을 제목으로, 막힌 자리는 「prevented」. 긴 글은 「가」 5000 자(15 KB — 4 KiB
+/// 상한을 글자 경계에서 자르는지).
+const context_menu_page =
+    "<!doctype html><title>loading</title><style>html,body{margin:0;font:16px sans-serif}body>*{position:absolute;margin:0}</style><body>" ++
+    "<a href='/cm-target?x=1' style='left:20px;top:20px;width:200px;height:24px'>a link here</a>" ++
+    "<img style='left:20px;top:70px;width:120px;height:60px' src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%2260%22%3E%3Crect width=%22120%22 height=%2260%22 fill=%22red%22/%3E%3C/svg%3E'>" ++
+    "<img style='left:160px;top:70px;width:60px;height:60px' src='/flaky.svg'>" ++
+    "<input style='left:20px;top:215px;width:200px' value='some input text' oninput='document.title=\"val:\"+this.value'>" ++
+    "<iframe style='left:300px;top:220px;width:200px;height:60px' srcdoc=\"<input value='frame text' oninput='parent.document.title=&quot;frame:&quot;+this.value'>\"></iframe>" ++
+    "<div oncontextmenu='event.preventDefault();document.title=\"prevented\"' style='left:300px;top:150px;width:160px;height:40px;background:#cfc'>no menu here</div>" ++
+    "<div id=long style='left:480px;top:40px;width:150px;height:90px;overflow:hidden'></div>" ++
+    "<script>document.getElementById('long').textContent='\u{AC00}'.repeat(5000);sessionStorage.n=(+sessionStorage.n||0)+1;document.title='cm '+sessionStorage.n</script>";
+
 const tooltip_page =
     \\<!doctype html><title>loading</title><style>body{margin:0}div{position:absolute}#a{left:0;top:0;width:300px;height:200px}#b{left:320px;top:0;width:300px;height:200px}#x{left:0;top:220px;width:300px;height:80px}#y{left:320px;top:220px;width:300px;height:80px}</style>
     \\<div id=a title="A tip">a</div><div id=b title="B line1&#13;&#10;B line2">b</div><div id=x>x</div><div id=y>y</div>

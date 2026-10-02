@@ -19,6 +19,7 @@ const ring_producer = @import("ring_producer.zig");
 const iosurface = @import("iosurface.zig");
 const ring_message = @import("ring_message.zig");
 const input = @import("input.zig");
+const context_menus = @import("context_menu.zig");
 const dialogs = @import("dialogs.zig");
 const notifications = @import("notifications.zig");
 const permissions = @import("permissions.zig");
@@ -55,6 +56,7 @@ pub fn init(api: *const library.Api, writer: *events.Writer) void {
     ring_retry_task = object.zeroed(c.cef_task_t);
     object.staticRefCounted(&ring_retry_task.base);
     ring_retry_task.execute = &retryRings;
+    context_menus.init();
 }
 
 pub fn handler() dispatch.Handler {
@@ -80,6 +82,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .navigate => |value| navigate(value, writer),
         .nav_action => |value| navAction(value, writer),
         .frame_channel => |value| frameChannel(value, writer),
+        .context_menu_command => |value| context_menus.onCommand(value),
         else => {},
     }
 }
@@ -212,6 +215,7 @@ pub fn onClosed(cef_id: c_int) void {
         }
         var closing = entry;
         dropPopup(&closing);
+        context_menus.drop(&closing);
         state.writer.send(.{ .browser_closed = entry.id }) catch {};
     }
     if (state.shutting_down and state.registry.count() == 0) quit();

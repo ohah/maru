@@ -40,6 +40,8 @@ pub const Entry = struct {
     /// 같은 글은 보내지 않는다. 빈 글도 하나의 값이다(처음은 빈 글).
     tooltip_hash: u64 = 0,
     tooltip_nonempty: bool = false,
+    /// 쥔 우클릭 메뉴(W6c — `context_menu.Held`, CEF 메뉴 콜백을 든다). 목록은 CEF 를 몰라 불투명하게 든다.
+    context_menu: ?*anyopaque = null,
     /// 마지막으로 알린 커서(W4 — 같은 것은 다시 안 보낸다).
     cursor: ?protocol.message.WebCursor = null,
     /// 마지막으로 알린 IME 조합 사각형(W4 — 같은 것은 다시 안 보낸다).

@@ -223,6 +223,25 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             if (value.notification == 0) return error.InvalidNotification;
             try cursor.writeU32(value.notification);
         },
+        .context_menu => |value| {
+            try fields.checkContextMenu(value.menu, value.flags, value.selection);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.menu);
+            try writePoint(&cursor, value.point);
+            try cursor.writeU16(@bitCast(value.flags));
+            try writeDialogText(&cursor, value.selection);
+        },
+        .context_menu_closed => |value| {
+            if (value.menu == 0) return error.InvalidContextMenu;
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.menu);
+        },
+        .context_menu_command => |value| {
+            if (value.menu == 0) return error.InvalidContextMenu;
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.menu);
+            try cursor.writeByte(@intFromEnum(value.command));
+        },
         .geolocation => |value| {
             try writeRequest(&cursor, value.browser, value.request);
             try fields.checkGeolocation(value);
@@ -450,6 +469,31 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             if (notification == 0) return error.InvalidNotification;
             break :blk .{ .web_notification_click = .{ .browser = browser, .notification = notification } };
         },
+        .context_menu => blk: {
+            const browser = try readBrowser(&cursor);
+            const menu = try cursor.readU32();
+            const point = try readPoint(&cursor);
+            const flags: message_mod.ContextMenuFlags = @bitCast(try cursor.readU16());
+            const selection = try readDialogText(&cursor);
+            try fields.checkContextMenu(menu, flags, selection);
+            break :blk .{ .context_menu = .{ .browser = browser, .menu = menu, .point = point, .flags = flags, .selection = selection } };
+        },
+        .context_menu_closed => blk: {
+            const browser = try readBrowser(&cursor);
+            const menu = try cursor.readU32();
+            if (menu == 0) return error.InvalidContextMenu;
+            break :blk .{ .context_menu_closed = .{ .browser = browser, .menu = menu } };
+        },
+        .context_menu_command => blk: {
+            const browser = try readBrowser(&cursor);
+            const menu = try cursor.readU32();
+            if (menu == 0) return error.InvalidContextMenu;
+            break :blk .{ .context_menu_command = .{
+                .browser = browser,
+                .menu = menu,
+                .command = std.enums.fromInt(message_mod.ContextMenuCommandKind, try cursor.readByte()) orelse return error.UnknownContextMenuCommand,
+            } };
+        },
         .geolocation => blk: {
             const request = try readRequest(&cursor);
             const value: message_mod.Geolocation = .{
@@ -516,7 +560,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  4,  0, // v4, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  5,  0, // v5, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -844,6 +888,41 @@ test "tooltip_changed round-trips multi-line and empty text, flows to maru, and 
     try std.testing.expectError(error.ControlCharacter, encode(.{ .tooltip_changed = .{ .browser = 7, .text = "a\x1bb" } }, &buf));
 }
 
+test "context menu messages round trip, flow both ways, and refuse menu 0, reserved bits, unpaired bits and a selection flag that disagrees with the text" {
+    const shown: message_mod.ContextMenu = .{ .browser = 7, .menu = 3, .point = .{ .x = 40, .y = -2 }, .flags = .{ .selection = true, .selection_truncated = true, .editable = true, .can_paste = true, .can_go_back = true }, .selection = "첫\n둘\t셋" };
+    const back = (try roundTrip(.{ .context_menu = shown })).context_menu;
+    try std.testing.expectEqual(shown.menu, back.menu);
+    try std.testing.expectEqual(shown.point, back.point);
+    try std.testing.expectEqual(shown.flags, back.flags);
+    try std.testing.expectEqualStrings(shown.selection, back.selection);
+    try std.testing.expectEqual(message_mod.ContextMenuCommandKind.paste_and_match_style, (try roundTrip(.{ .context_menu_command = .{ .browser = 7, .menu = 3, .command = .paste_and_match_style } })).context_menu_command.command);
+    try std.testing.expectEqual(@as(u32, 3), (try roundTrip(.{ .context_menu_closed = .{ .browser = 7, .menu = 3 } })).context_menu_closed.menu);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.context_menu.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.context_menu_closed.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.context_menu_command.direction());
+    var buf: [256]u8 = undefined;
+    var bad = shown;
+    bad.menu = 0;
+    try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = bad }, &buf));
+    bad = shown;
+    bad.flags._reserved = 1;
+    try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = bad }, &buf));
+    try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = .{ .browser = 7, .menu = 1, .point = .{ .x = 0, .y = 0 }, .flags = .{ .image_loaded = true } } }, &buf));
+    try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = .{ .browser = 7, .menu = 1, .point = .{ .x = 0, .y = 0 }, .flags = .{ .selection_truncated = true } } }, &buf));
+    try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = .{ .browser = 7, .menu = 1, .point = .{ .x = 0, .y = 0 }, .flags = .{ .selection = true } } }, &buf));
+    try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = .{ .browser = 7, .menu = 1, .point = .{ .x = 0, .y = 0 }, .flags = .{}, .selection = "x" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .context_menu = .{ .browser = 7, .menu = 1, .point = .{ .x = 0, .y = 0 }, .flags = .{ .selection = true }, .selection = "a\x1bb" } }, &buf));
+    try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu_closed = .{ .browser = 7, .menu = 0 } }, &buf));
+    try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu_command = .{ .browser = 7, .menu = 0, .command = .cancel } }, &buf));
+    // 손으로 만든 frame — 모르는 명령, 쓰지 않는 비트(디코더도 거절한다).
+    const command_len = try encode(.{ .context_menu_command = .{ .browser = 7, .menu = 3, .command = .copy_image } }, &buf);
+    buf[command_len - 1] = 14;
+    try std.testing.expectError(error.UnknownContextMenuCommand, decodeExact(buf[0..command_len]));
+    const menu_len = try encode(.{ .context_menu = .{ .browser = 7, .menu = 3, .point = .{ .x = 0, .y = 0 }, .flags = .{} } }, &buf);
+    buf[menu_len - 6] = 0x80; // flags 높은 바이트의 쓰지 않는 비트(15 번 — 뒤는 글 길이 u32)
+    try std.testing.expectError(error.InvalidContextMenu, decodeExact(buf[0..menu_len]));
+}
+
 test "popup_changed round-trips, flows to maru, a hidden popup carries an all-zero rect and generation, a shown one a generation" {
     const shown: message_mod.PopupChanged = .{ .browser = 7, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 }, .first_generation = 3 };
     try std.testing.expectEqual(shown, (try roundTrip(.{ .popup_changed = shown })).popup_changed);
@@ -979,6 +1058,11 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .popup_changed = .{ .browser = 3, .visible = false } },
         .{ .tooltip_changed = .{ .browser = 3, .text = "first line\nsecond line" } },
         .{ .tooltip_changed = .{ .browser = 3, .text = "" } },
+        // W6c 우클릭 메뉴.
+        .{ .context_menu = .{ .browser = 3, .menu = 2, .point = .{ .x = 5, .y = -6 }, .flags = .{ .link = true, .selection = true, .can_copy = true }, .selection = "글" } },
+        .{ .context_menu = .{ .browser = 3, .menu = 2, .point = .{ .x = 5, .y = 6 }, .flags = .{ .image = true, .image_loaded = true } } },
+        .{ .context_menu_closed = .{ .browser = 3, .menu = 2 } },
+        .{ .context_menu_command = .{ .browser = 3, .menu = 2, .command = .copy_image } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;

@@ -1828,6 +1828,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             send(gpa, .{ .permission_reply = .{ .browser = v.browser, .request = v.request, .result = if (allowed) .accept else .ignore } });
         },
         .web_notification => |v| queueNote(gpa, v),
+        // W6c①: 우클릭 메뉴는 앱이 아직 띄우지 않는다(W6c② — NSMenu) — 곧바로 취소로 답해 sidecar 가 CEF 메뉴 콜백을 쥔 채 남지
+        // 않게 한다(사용자가 보는 동작은 W6c 전과 같다 — 메뉴 없음).
+        .context_menu => |v| send(gpa, .{ .context_menu_command = .{ .browser = v.browser, .menu = v.menu, .command = .cancel } }),
+        .context_menu_closed => {},
         .dialog_closed => |v| if (surfaces.getPtr(v.browser)) |s| {
             for (s.dialogs.items) |d| if (d.request == v.request) {
                 removeDialog(gpa, s, d.token);
@@ -1835,7 +1839,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command => unreachable,
     }
 }
 
@@ -2065,6 +2069,23 @@ test "web notifications queue per tab, drop the oldest past the cap, and a click
     clickWebNotification(gpa, 7, second.token);
     try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames)); // 앞의 그 하나뿐 — 새로 나간 것이 없다
     try std.testing.expect(takeWebNotification(7) == null);
+}
+
+test "a context menu is answered with cancel at once until the app shows menus (W6c①), and a closed menu needs no answer" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 4, .point = .{ .x = 1, .y = 2 }, .flags = .{ .link = true } } }, 0);
+    apply(gpa, .{ .context_menu_closed = .{ .browser = 7, .menu = 4 } }, 0);
+    var frames: [4]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    try std.testing.expectEqual(@as(u64, 7), frames[0].context_menu_command.browser);
+    try std.testing.expectEqual(@as(u32, 4), frames[0].context_menu_command.menu);
+    try std.testing.expectEqual(ws.message.ContextMenuCommandKind.cancel, frames[0].context_menu_command.command);
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

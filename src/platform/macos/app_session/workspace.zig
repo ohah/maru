@@ -649,6 +649,7 @@ pub fn applySavedWorkspaceWindow(self: *AppSession, windows: []const maru.sessio
 }
 
 pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Window) !void {
+    AppSession.restore_position = .{ .stage = "admission" };
     if (win.tabs.len == 0) {
         if (!self.surface_initialized) return error.EmptyWorkspace;
         return;
@@ -669,6 +670,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     defer self.workspace_restore_staging = false;
     errdefer app_session_mod.editor_backup_ops.discardDeferredDrops(self);
 
+    AppSession.restore_position = .{ .stage = "dock" };
     var new_dock = try dock_panel.DockPanel.restore(self.allocator, &app_session_mod.app_runtime.entry_ids, win.dock);
     var new_dock_owned = true;
     errdefer if (new_dock_owned) new_dock.deinit();
@@ -692,6 +694,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // Explorer roots, watcher union, projected rows, and backend lifetime are staged before the
     // first live tab/dock teardown. Missing or inaccessible persisted roots degrade only that root;
     // allocation failure leaves the whole current session untouched.
+    AppSession.restore_position = .{ .stage = "file_tree" };
     var new_file_tree = file_tree.Tree.init(self.allocator);
     var new_file_tree_owned = true;
     errdefer if (new_file_tree_owned) new_file_tree.deinit();
@@ -718,6 +721,8 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
         for (roots) |root_path| {
             const root = try file_tree_backend.validateRootSnapshot(self.allocator, self.io, root_path) orelse {
                 dropped += 1; // 미존재·접근 불가 root는 그 root만 버리고 복원을 계속한다 — 버린 사실은 위로 알린다.
+                // **무엇을** 버렸는지 남긴다 — 개수만으로는 어느 폴더가 사라졌는지 사용자도 우리도 모른다.
+                std.log.scoped(.app).warn("workspace restore dropped: kind=explorer-root reason=missing-or-inaccessible path={s}", .{root_path});
                 continue;
             };
             validated[validated_len] = root;
@@ -755,9 +760,11 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     defer new_tabs.deinit(self.allocator);
     errdefer for (new_tabs.items) |t| tab_ops.destroyTabStandalone(self, t);
     try new_tabs.ensureTotalCapacity(self.allocator, win.tabs.len);
-    for (win.tabs) |tab_model| {
+    for (win.tabs, 0..) |tab_model, tab_index| {
+        AppSession.restore_position = .{ .stage = "tabs", .tab = tab_index };
         new_tabs.appendAssumeCapacity(try tab_ops.buildWorkspaceTab(self, tab_model));
     }
+    AppSession.restore_position = .{ .stage = "publish" };
     // 재부팅 부활(RB1)은 `ended` surface 를 묘비가 아니라 새 셸로 세웠으므로 짝 맞출 묘비가 없다 — 그 경우
     // 이 단계를 건너뛴다. 안 건너뛰면 「ended 인데 묘비가 없다」를 손상으로 읽어 창 전체가 실패한다.
     if (!self.restore_reboot_proven) try assignEndedManifestOrdinals(new_tabs.items, win);

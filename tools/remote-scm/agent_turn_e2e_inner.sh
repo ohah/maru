@@ -101,11 +101,12 @@ if [ "${MARU_E2E_RESTART:-0}" = 1 ]; then
     MARU_SCREENSHOT="$SHOT2" MARU_SCREENSHOT_DELAY_MS=150000 \
     "$APP" > "$CAP_HOME/app2.out" 2>&1 || echo "app2 exit: $?"
   cp "$SHOT2" "${OUT%.png}-restart.ppm" 2>/dev/null && python3 "$ROOT/tools/remote-scm/ppm_to_png.py" "$SHOT2" "${OUT%.png}-restart.png" || echo "no restart screenshot"
-  echo "=== restart std.log"; tail -40 "$CAP_HOME/.cache/maru/app.log" 2>/dev/null | grep -iE 'turn|ring|persist|expire' | tail -10
+  # 앱 stderr 를 파일로 받으므로 std.log 는 그 파일로 간다(app.log 리다이렉트는 /dev/null stderr 에만 — 2026-10-02).
+  echo "=== restart std.log"; cat "$CAP_HOME/app2.out" "$CAP_HOME/.cache/maru/app.log" 2>/dev/null | tail -40 | grep -iE 'turn|ring|persist|expire' | tail -10
 fi
 echo "settings.json after: $(stat -f '%Sm' $HOME/.claude/settings.json) events=$(python3 -c 'import json,os;print(sorted(json.load(open(os.path.expanduser("~/.claude/settings.json")))["hooks"].keys()))')"
 echo "=== app.out (tail)"; tail -20 "$CAP_HOME/app.out"
-echo "=== std.log"; tail -40 "$CAP_HOME/.cache/maru/app.log" 2>/dev/null | grep -iE 'agent|hook|remote|snapshot|turn' | tail -25
+echo "=== std.log"; cat "$CAP_HOME/app.out" "$CAP_HOME/.cache/maru/app.log" 2>/dev/null | tail -40 | grep -iE 'agent|hook|remote|snapshot|turn' | tail -25
 echo "=== remote events new files"; ls -la ~/.cache/maru/remote-agent-events/ | grep -v -f "$CAP_HOME/remote-events-before.txt" || true
 echo "=== /tmp/maru-turn idx"; ls -la /tmp/maru-turn-*.idx 2>/dev/null || echo none
 # 죽은 서버의 소켓 파일이 남아 있을 수 있다(이전 회차) — 그 `kill-server` 실패가 `set -e` 로 아래 절을 삼키지 않게 소켓을 지우고 넘어간다.

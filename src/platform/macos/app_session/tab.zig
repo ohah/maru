@@ -1565,7 +1565,14 @@ pub fn buildWorkspaceTab(self: *AppSession, m: maru.session.workspace.Tab) !*Tab
     errdefer for (tab.panes.items) |p| pane_ops.destroyPane(self, p);
 
     try tab.panes.ensureTotalCapacity(self.allocator, m.panes.len);
-    for (m.panes) |pm| tab.panes.appendAssumeCapacity(try pane_ops.buildWorkspacePane(self, pm));
+    for (m.panes, 0..) |pm, pane_index| {
+        AppSession.restore_position.pane = pane_index;
+        AppSession.restore_position.slot = null;
+        tab.panes.appendAssumeCapacity(try pane_ops.buildWorkspacePane(self, pm));
+    }
+    // 이 뒤의 실패(트리 손상 등)는 특정 pane 의 것이 아니다 — pane 번호를 남기면 엉뚱한 곳을 가리킨다.
+    AppSession.restore_position.pane = null;
+    AppSession.restore_position.slot = null;
 
     // 트리 빌드 — 새로 만든 split 노드를 추적해 에러 시 전부 해제(트리 미완성이라 PaneTree.deinit 못 씀).
     // capacity를 split 노드 수만큼 미리 잡아 추적 append를 무실패화한다: create 직후 append가 OOM이면 그

@@ -102,7 +102,8 @@ env -u CLAUDE_CODE_CHILD_SESSION \
 # 「그림이 틀렸다」를 진단할 유일한 실마리다(적대적 검증에서 실제로 그 로그가 없어 헤맸다).
 #
 # ⚠️ **로그는 두 갈래다.** 여기 리다이렉트한 것은 stdout/stderr 이고 거기엔 종료 시 상태 덤프만 온다.
-# `std.log` 는 앱이 자기 logFn 으로 `<HOME>/.cache/maru/app.log` 에 쓴다(`app_host_abi.zig`).
+# `std.log` 는 stderr 로 나간다. 여기처럼 파일로 받으면 위 파일에 함께 들어오고, Dock·Finder 실행(stderr 가
+# /dev/null)일 때만 앱이 `<HOME>/.cache/maru/app.log` 로 돌린다(`app_host_abi.zig`, 2026-10-02 기준 변경).
 # 그 파일을 안 챙겨서 적대적 검증 8 회차에 「계측을 넣었는데 한 줄도 안 나온다」로 한참 헤맸다 —
 # 실은 나오고 있었고 **지워지는 HOME 과 함께 사라지고 있었다.** 둘을 한 파일로 잇는다.
 {

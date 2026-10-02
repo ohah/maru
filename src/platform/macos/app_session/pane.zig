@@ -1782,6 +1782,8 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
     var next_surface: usize = 0;
     var seeded_file = false;
     var seeded_untitled = false;
+    // 씨 Term 은 그 pane 의 **첫 자리**(slot 0)를 만든다 — 실패하면 그 자리가 원인이다.
+    AppSession.restore_position.slot = 0;
     if (m.surfaces.len > 0) {
         pane = try createPaneFromSurface(self, m.surfaces[0]);
         next_surface = 1;
@@ -1802,6 +1804,7 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
     var slot: usize = 0;
     var seed_file_used = !seeded_file;
     while (slot < total) : (slot += 1) {
+        AppSession.restore_position.slot = slot;
         const file_index: ?usize = blk: {
             for (m.file_terms, 0..) |ft, fi| if (ft.index == slot) break :blk fi;
             break :blk null;
@@ -1829,7 +1832,15 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
             bi -= 1;
             const bt = m.browser_terms[bi];
             const at = @min(bt.insert_after, pane.terms.items.len);
-            const term = web_ops.createWebTerm(self, .browser) catch continue; // 실패한 record만 버린다(창은 살린다)
+            // 실패한 record만 버린다(창은 살린다). **세지도 않고 버리던 자리다** — 어느 브라우저 탭이 왜 안 돌아왔는지
+            // 남긴다. URL 은 싣지 않는다(쿼리에 토큰이 있을 수 있다) — 위치와 오류 이름이면 저장 파일에서 찾는다.
+            const term = web_ops.createWebTerm(self, .browser) catch |err| {
+                std.log.scoped(.app).warn(
+                    "workspace restore dropped: kind=browser-term reason={s} tab={?d} pane={?d} record={d}",
+                    .{ @errorName(err), AppSession.restore_position.tab, AppSession.restore_position.pane, bi },
+                );
+                continue;
+            };
             term.pending_url = self.allocator.dupe(u8, bt.url) catch null;
             pane.terms.insert(self.allocator, at, term) catch {
                 term_ops.destroyTerm(self, term);

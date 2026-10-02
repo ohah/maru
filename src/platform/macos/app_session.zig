@@ -281,7 +281,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 191;
+pub const abi_version: u32 = 192;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -9178,6 +9178,17 @@ pub const AppSession = struct {
     /// 이 프로세스의 재부팅 증명 판정(RB1). **한 번만** 내린다 — 창마다 따로 판정하면, 첫 창이 부활하며 쓴 「이번
     /// 부팅에 부활함」 표식(`recordRevivedThisBoot`)을 다음 창이 읽고 증명을 거둬 창끼리 갈린다. null = 아직 안 내림.
     pub var reboot_proven_decision: ?bool = null;
+    /// 복원 중인 창 안에서 **지금 만드는 자리**(단계·탭·pane·slot). 창 복원은 트랜잭션이라 surface 하나가
+    /// 실패해도 창 전체가 실패하는데, 그 실패 줄(`workspace apply failed`)이 어느 탭의 어느 surface 였는지
+    /// 말하지 않아 고칠 곳을 저장 파일에서 역산해야 했다(workspace-restore.md 완료 기준 「어떤 surface 가 왜
+    /// 실패했는지 artifact 가 남는다」). apply 실패 경고가 이 값을 함께 싣는다. 메인 스레드 전용.
+    pub const RestorePosition = struct {
+        stage: []const u8 = "-",
+        tab: ?usize = null,
+        pane: ?usize = null,
+        slot: ?usize = null,
+    };
+    pub var restore_position: RestorePosition = .{};
     /// 그 실패의 **원래 reason**. 특히 연결 실패는 `host_gone` 이 아니면 reason 을 **버리고** 접는다 —
     /// 죽은 host 가 왜 `host_gone` 으로 안 갈렸는지가 그래서 안 보였다.
     pub var restore_host_reason: []const u8 = "-";

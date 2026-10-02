@@ -122,8 +122,10 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     //  자연 종료·spawn 재시도가 로그 없이(또는 거짓 폴백 줄로) 끝나지 않는지 문법 자리로 잰다.
     // +1(2026-10-01): `ci_zig_package_prime_boundary` — CI 의 Zig 의존성이 저장소 사본에서만 오는지(채우기
     //  스텝 배선 · 사본 집합 == build.zig.zon 해시) 잰다. 빠지면 Zig 가 조용히 네트워크로 받아 초록이다.
-    try std.testing.expectEqual(@as(usize, 211), old_count);
-    try std.testing.expectEqual(@as(usize, 212), new_count);
+    // +1(2026-10-02): `app_log_redirect_boundary` — 앱 진단 통로를 시작 직후·`/dev/null` stderr 에만 연결하는지
+    //  (Swift main 순서·리다이렉트 기준) 잰다. 둘 중 하나만 바뀌면 진단이 사라지거나 하네스 출력을 빼앗는다.
+    try std.testing.expectEqual(@as(usize, 212), old_count);
+    try std.testing.expectEqual(@as(usize, 213), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0

@@ -1,6 +1,12 @@
 // Appended only to the isolated source snapshot by capture.py.
 // Real AppSession shared-view opening and frame assembly; no product-source edits.
 test "shared editor GPU capture real product source and peer" {
+    // The product screenshot hook is process-scoped and retains its first path.
+    // capture.py launches this fixture once per phase/view, never twice per process.
+    const capture_phase = std.mem.span(std.c.getenv("MARU_SHARED_IME_CAPTURE_PHASE") orelse return error.MissingCapturePhase);
+    const capture_view = std.mem.span(std.c.getenv("MARU_SHARED_IME_CAPTURE_VIEW") orelse return error.MissingCaptureView);
+    if (!std.mem.eql(u8, capture_phase, "before") and !std.mem.eql(u8, capture_phase, "marked") and !std.mem.eql(u8, capture_phase, "cancelled") and !std.mem.eql(u8, capture_phase, "committed")) return error.InvalidCapturePhase;
+    if (!std.mem.eql(u8, capture_view, "owner") and !std.mem.eql(u8, capture_view, "peer")) return error.InvalidCaptureView;
     const alloc = testing.allocator;
     var fx = try PaneFixture.init(alloc);
     defer fx.deinit(alloc);
@@ -24,7 +30,12 @@ test "shared editor GPU capture real product source and peer" {
         try testing.expectEqual(@as(u64, if (std.mem.eql(u8, phase, "committed")) 1 else 0), revision);
         try testing.expectEqual(@as(usize, 0), peer.rt.editor_preedit.len);
         try testing.expectEqualStrings(if (std.mem.eql(u8, phase, "committed")) "한const a = 1;\nconst b = 2;\nconst c = 3;\n" else "const a = 1;\nconst b = 2;\nconst c = 3;\n", fx.term.rt.editorDocument().opened.?.file.content);
+        // Apply preceding transitions to the real product fixture, but render only
+        // the selected phase/view. Each process therefore sets MARU_SCREENSHOT once.
+        if (!std.mem.eql(u8, phase, capture_phase)) continue;
         for ([_]*Term{ fx.term, peer }, 0..) |term, idx| {
+            const name = if (idx == 0) "owner" else "peer";
+            if (!std.mem.eql(u8, name, capture_view)) continue;
             fx.session.gpu_quads.clearRetainingCapacity();
             const leaf = maru.session.SplitRect{ .x = 0, .y = 0, .w = 800, .h = 300 };
             var drawn = appendPaneFrame(fx.session, leaf, term) orelse return error.MissingFrame;
@@ -52,14 +63,13 @@ test "shared editor GPU capture real product source and peer" {
                 cell.origin_x = @intCast(drawn.rect.x);
                 cell.origin_y = @intCast(drawn.rect.y);
             }
-            const name = if (idx == 0) "owner" else "peer";
             const ppm = try std.fmt.allocPrintSentinel(alloc, "__ARTIFACT_DIR__/{s}-{s}.ppm", .{ phase, name }, 0);
             defer alloc.free(ppm);
             const png = try std.fmt.allocPrintSentinel(alloc, "__ARTIFACT_DIR__/{s}-{s}.png", .{ phase, name }, 0);
             defer alloc.free(png);
             var result = capture.NativeResult{ .status = -1, .renderer_created = 0, .atlas_ready = 0, .draw_submitted = 0, .ppm_written = 0, .png_written = 0 };
             capture.maru_macos_chrome_lab_smoke_render(800, 300, ppm, png, 100, 18, 8, 16, native.cells.ptr, native.cells.len, native.atlas_width_px, native.atlas_height_px, native.raster_uploads.ptr, native.raster_uploads.len, native.raster_pixels.ptr, native.raster_pixels.len, fx.session.gpu_quads.items.ptr, fx.session.gpu_quads.items.len, null, 0, null, 0, 0, 0, 0, 0, 0, &result);
-            std.debug.print("GPU {s}/{s} status={d} draw={d} png={d} revision={d} owner_preedit={s} peer_preedit={d}\n", .{ phase, name, result.status, result.draw_submitted, result.png_written, revision, fx.term.rt.editor_preedit, peer.rt.editor_preedit.len });
+            std.debug.print("GPU {s}/{s} pid={d} status={d} draw={d} png={d} revision={d} owner_preedit={s} peer_preedit={d}\n", .{ phase, name, std.c.getpid(), result.status, result.draw_submitted, result.png_written, revision, fx.term.rt.editor_preedit, peer.rt.editor_preedit.len });
             // A PNG alone could be a stale or black conversion artifact. Require every
             // actual Metal creation/upload/draw/readback stage to acknowledge success.
             try testing.expectEqual(@as(c_int, 0), result.status);
@@ -68,5 +78,6 @@ test "shared editor GPU capture real product source and peer" {
         }
         if (!std.mem.eql(u8, phase, "committed")) try testing.expectEqualDeep(peer_sel, peer.rt.editor_selection);
         try testing.expectEqual(revision, fx.term.rt.editorDocument().opened.?.file.revision);
+        break;
     }
 }

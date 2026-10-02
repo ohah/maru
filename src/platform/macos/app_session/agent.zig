@@ -2833,6 +2833,17 @@ test "Codex 질문 훅은 제품 배지를 입력 대기로 세우고 답변 뒤
     const unidentified_seq = term.hook.turn_seq;
     _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
     try std.testing.expectEqual(unidentified_seq +% 1, term.hook.turn_seq);
+    // A folded oversized child Stop must still retire its exact worker and queue completion.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"folded-session\",\"turn_id\":\"folded-turn\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"folded-child\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"session_id\":\"folded-session\",\"turn_id\":\"folded-turn\"}").?);
+    try std.testing.expectEqual(mode.State.running, term.hook.state);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"SubagentStop\",\"session_id\":\"folded-session\",\"turn_id\":\"folded-turn\",\"agent_id\":\"folded-child\"}").?);
+    try std.testing.expectEqual(mode.State.idle, term.hook.state);
+    try std.testing.expectEqual(@as(usize, 0), term.hook.progress.childCount());
+    const folded_since = term.hook.notice.since_ms;
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, folded_since + 1499) == null);
+    try std.testing.expectEqual(mode.Notice.done, takeHookNoticeAt(term, &term.hook, folded_since + 1500).?.kind);
 }
 
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {

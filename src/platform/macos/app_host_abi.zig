@@ -4818,12 +4818,13 @@ pub export fn maru_macos_app_session_osr_keyboard_active(session: ?*AppSession) 
     return if (session_mod.web_ops.osrPopupOpen(app)) 2 else 1;
 }
 
-/// v201(W6b): hover 중인 Chromium 탭의 툴팁 글과 일련번호. 글이 있으면 1. 글은 4 KiB(wire 글 상한) 안이라 Swift 가 그만큼 준다 —
-/// 더 작으면 UTF-8 글자 경계에서 자른다.
-pub export fn maru_macos_app_session_osr_tooltip(session: ?*AppSession, out_serial: ?*u64, out: ?[*]u8, out_cap: usize, out_len: ?*usize) i32 {
+/// v201(W6b): hover 중인 Chromium 탭의 툴팁 글과 일련번호, 그 탭 본문 rect(x·y·w·h backing px — 없으면 0). 글이 있으면 1. 글은
+/// 4 KiB(wire 글 상한) 안이라 Swift 가 그만큼 준다 — 더 작으면 UTF-8 글자 경계에서 자른다.
+pub export fn maru_macos_app_session_osr_tooltip(session: ?*AppSession, out_serial: ?*u64, out: ?[*]u8, out_cap: usize, out_len: ?*usize, out_rect: ?*[4]u32) i32 {
     const app = session orelse return 0;
     const t = session_mod.web_ops.osrTooltip(app);
     if (out_serial) |p| p.* = t.serial;
+    if (out_rect) |p| p.* = if (t.rect) |r| .{ r.x, r.y, r.w, r.h } else .{ 0, 0, 0, 0 };
     const text = maru.session.web_sidecar.text.clampUtf8(t.text, out_cap);
     if (out) |o| @memcpy(o[0..text.len], text);
     if (out_len) |p| p.* = text.len;

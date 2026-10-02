@@ -467,6 +467,123 @@ fn removeOnePlacement(self: *TerminalCore, image_id: u32, placement_id: u32) voi
     }
 }
 
+/// reflow·스크롤백 재-wrap 이 행을 다시 자를 때 **함께 옮겨야 하는** placement 앵커 하나. 옛 위치(`row` 는
+/// 재배치 구간 안의 행 번호, `col`)와 그 셀이 떨어진 산출 위치(`out_row`·`out_col`)를 담는다. 위치는 행이 아니라
+/// **셀** 단위다 — 긴 줄 가운데 놓인 이미지는 줄이 다시 잘리면 다른 행·열로 간다.
+///
+/// 예전에는 아무도 옮기지 않았다(2026-10-02 실측): 폭을 넓혀 위 줄이 합쳐지면 내용은 한 줄 올라가는데 이미지는
+/// 그 자리에 남았고, 폭을 바꾼 뒤 위로 스크롤하는 순간(지연 재-wrap) 스크롤백 길이가 바뀌어 화면 위 이미지가 튀었다.
+pub const AnchorRemap = struct {
+    index: usize, // kitty_placements 안의 자리 — 재배치가 끝날 때까지 목록은 안 바뀐다
+    row: usize,
+    col: u16,
+    span_rows: u16, // 덮는 행 수 — reflow 가 이미지 아래 빈 행을 버리지 않게 한다
+    out_row: usize = 0,
+    out_col: u16 = 0,
+};
+
+fn anchorInRange(self: *const TerminalCore, p: StoredPlacement, first_abs: usize, count: usize) bool {
+    return p.on_alt == self.alt_active and p.anchor_row >= first_abs and p.anchor_row - first_abs < count;
+}
+
+/// 재배치 구간 [first_abs, first_abs+count) 에 앵커가 있는 **이 화면의** placement 를 (행, 열) 순으로 모은다.
+/// 없으면 할당하지 않는다(빈 슬라이스) — placement 가 없는 resize·재-wrap 의 비용은 그대로다.
+pub fn collectAnchorRemaps(self: *const TerminalCore, allocator: std.mem.Allocator, first_abs: usize, count: usize) ![]AnchorRemap {
+    var n: usize = 0;
+    for (self.kitty_placements.items) |p| {
+        if (anchorInRange(self, p, first_abs, count)) n += 1;
+    }
+    if (n == 0) return &.{};
+    const out = try allocator.alloc(AnchorRemap, n);
+    var k: usize = 0;
+    for (self.kitty_placements.items, 0..) |p, i| {
+        if (!anchorInRange(self, p, first_abs, count)) continue;
+        out[k] = .{ .index = i, .row = p.anchor_row - first_abs, .col = p.anchor_col, .span_rows = placementCellSpan(self, p).rows };
+        k += 1;
+    }
+    std.mem.sort(AnchorRemap, out, {}, struct {
+        fn lessThan(_: void, a: AnchorRemap, b: AnchorRemap) bool {
+            return a.row < b.row or (a.row == b.row and a.col < b.col);
+        }
+    }.lessThan);
+    return out;
+}
+
+/// 재배치 루프가 셀을 내보내는 순서((행, 열) 오름차순)대로 앵커를 짝짓는다 — 셀마다 목록을 훑지 않는다.
+pub const AnchorWalker = struct {
+    items: []AnchorRemap,
+    next: usize = 0,
+
+    /// 옛 셀 (row, col) 이 산출 (out_row, out_col) 에 놓였다.
+    pub fn cell(w: *AnchorWalker, row: usize, col: usize, out_row: usize, out_col: u16) void {
+        while (w.next < w.items.len and w.items[w.next].row == row and w.items[w.next].col == col) : (w.next += 1) {
+            w.items[w.next].out_row = out_row;
+            w.items[w.next].out_col = out_col;
+        }
+    }
+
+    /// 옛 행 `row` 의 내용(`contrib` 칸)이 산출 (out_row, out_col) 에서 끝났다. 남은 앵커는 내용 뒤 빈칸에 있다 —
+    /// 내용이 끝난 자리에서 같은 거리만큼 띄우고, 폭을 넘으면 마지막 칸에 둔다(이미지는 보통 빈 줄 첫 칸에 선다).
+    pub fn endRow(w: *AnchorWalker, row: usize, contrib: usize, out_row: usize, out_col: u16, cols: u16) void {
+        while (w.next < w.items.len and w.items[w.next].row <= row) : (w.next += 1) {
+            const it = &w.items[w.next];
+            const past: usize = @as(usize, it.col) -| contrib;
+            it.out_row = out_row;
+            it.out_col = @intCast(@min(@as(usize, out_col) + past, @as(usize, cols) - 1));
+        }
+    }
+};
+
+/// 재배치가 끝났다: 앵커를 `out_row - lost_below`·`out_col` 로 옮긴다. `out_row < lost_below` 면 그 행이 버려졌다
+/// (재-wrap 이 cap 을 넘긴 가장 오래된 행) — placement 도 지운다(eviction 과 같은 규율).
+pub fn moveAnchors(self: *TerminalCore, remaps: []const AnchorRemap, lost_below: usize) void {
+    if (remaps.len == 0) return;
+    const gone = std.math.maxInt(usize); // 지울 표시 — 실제 앵커는 이 값에 닿지 않는다
+    var any_gone = false;
+    for (remaps) |r| {
+        const p = &self.kitty_placements.items[r.index];
+        if (r.out_row < lost_below) {
+            p.anchor_row = gone;
+            any_gone = true;
+        } else {
+            p.anchor_row = r.out_row - lost_below;
+            p.anchor_col = r.out_col;
+        }
+    }
+    if (!any_gone) return;
+    var i: usize = 0;
+    while (i < self.kitty_placements.items.len) {
+        if (self.kitty_placements.items[i].anchor_row == gone) {
+            _ = self.kitty_placements.orderedRemove(i);
+        } else i += 1;
+    }
+}
+
+/// 스크롤백 길이가 `old_count` 에서 `new_count` 로 바뀌었다(재-wrap). 활성 화면의 절대 행은 `sb.count + 행` 이라
+/// 그 화면에 앵커가 있는 placement 를 그만큼 민다 — 안 밀면 화면 위 이미지가 길이 차만큼 튄다.
+pub fn rebaseActiveAnchors(self: *TerminalCore, old_count: usize, new_count: usize) void {
+    if (old_count == new_count) return;
+    for (self.kitty_placements.items) |*p| {
+        if (p.on_alt != self.alt_active or p.anchor_row < old_count) continue;
+        p.anchor_row = p.anchor_row - old_count + new_count;
+    }
+}
+
+/// reflow 가 스크롤백으로 보내려던 행 하나가 저장되지 못했다(cap 0·OOM) — 그 행(절대 `abs_row`)에 앵커가 있던
+/// placement 는 지우고, 뒤 행의 앵커는 한 칸 당긴다. 미리 옮겨 둔 앵커가 없는 행을 가리키지 않게 한다.
+pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize) void {
+    var i: usize = 0;
+    while (i < self.kitty_placements.items.len) {
+        const p = &self.kitty_placements.items[i];
+        if (p.on_alt == self.alt_active and p.anchor_row == abs_row) {
+            _ = self.kitty_placements.orderedRemove(i);
+            continue;
+        }
+        if (p.on_alt == self.alt_active and p.anchor_row > abs_row) p.anchor_row -= 1;
+        i += 1;
+    }
+}
+
 /// 가장 오래된 n개 행이 빠질 때 placement anchor(abs 행)를 n칸 당긴다(eviction n=1, 하향 트림 n=drop).
 /// 빠진 행 범위 [0, n)에 anchor가 걸린 placement는 제거한다. selection의 shiftSelectionForEviction과 같은 규율.
 pub fn shiftPlacementsForEviction(self: *TerminalCore, n: usize) void {

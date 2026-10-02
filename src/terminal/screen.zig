@@ -593,6 +593,13 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
     const keep = @min(total_out, self.screen.sb.cap);
     const skip = total_out - keep; // 생성 없이 건너뛸 산출 행 수(가장 오래된 쪽)
 
+    // 스크롤백에 앵커가 있는 이미지는 **자기 셀을 따라간다**. 행이 다시 잘리면 셀의 행·열이 바뀌고, 스크롤백
+    // 길이가 바뀌면 활성 화면의 절대 행(`sb.count + 행`)도 바뀐다 — 둘 다 commit 뒤에 반영한다(실패하면 그대로).
+    const old_count = self.screen.sb.count;
+    const remaps = try self.collectAnchorRemaps(self.allocator, 0, old_count);
+    defer if (remaps.len > 0) self.allocator.free(remaps);
+    var walker: core.PlacementAnchorWalker = .{ .items = remaps };
+
     var rows: std.ArrayList([]types.Cell) = .empty;
     var wraps: std.ArrayList(bool) = .empty;
     var pmarks: std.ArrayList(types.RowPrompt) = .empty; // 산출 행별 OSC 133 태그(rows와 병렬)
@@ -634,7 +641,10 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
             // 앵커 옛 행이 시작되는 시점의 산출 행이 "보던 줄"의 새 위치다(셀 단위 정밀도까지는
             // 불필요 — 행 단위면 보던 내용이 화면 안에 유지된다).
             if (anchor_row != null and r == anchor_row.?) anchor_out = emitted;
-            const src = self.scrollbackRow(r) orelse continue;
+            const src = self.scrollbackRow(r) orelse {
+                walker.endRow(r, 0, emitted, oc, new_cols);
+                continue;
+            };
             // soft 행은 쓴 칸까지, hard(마지막) 행은 뒤 빈칸 trim. pushScrollback이 이미 soft 행을 쓴 칸까지
             // 저장하므로 보통 `src.len`과 같지만, 옛 바이너리가 인코딩한 핸드오프 행은 wrap 채움을 달고 올 수
             // 있어(그때는 soft 행을 full 폭으로 저장했다) 여기서도 같은 기준으로 읽는다.
@@ -655,6 +665,7 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
                     emitted += 1;
                     oc = 0;
                 }
+                walker.cell(r, c, emitted, oc);
                 // skip 범위를 지나서야 행 버퍼를 만든다(버려질 행은 셀 스캔만 하고 할당 생략).
                 if (cur == null and emitted >= skip) {
                     cur = try self.allocator.alloc(types.Cell, new_cols);
@@ -663,6 +674,7 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
                 if (cur) |dst| dst[oc] = cell;
                 oc += 1;
             }
+            walker.endRow(r, contrib, emitted, oc, new_cols);
         }
         // 논리 줄의 마지막 행을 닫는다(내용이 전혀 없던 빈 줄도 한 행으로 보존).
         if (cur == null and emitted >= skip) {
@@ -694,6 +706,9 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
     }
     self.screen.sb.deinit(self.allocator); // 전부 성공 — 옛 storage 해제하고 교체
     self.screen.sb = rebuilt;
+    // 활성 화면 앵커를 먼저 민다 — 스크롤백 앵커는 옮긴 뒤 옛 길이를 넘을 수 있어 순서가 바뀌면 두 번 민다.
+    self.rebaseActiveAnchors(old_count, self.screen.sb.count);
+    self.moveAnchors(remaps, skip);
 
     if (anchor_out) |a| {
         if (a >= skip) return a - skip; // cap 드랍을 반영한 새 행 인덱스
@@ -1901,6 +1916,15 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
     // 방어 flush 여유다. new_cols>=2(clampGridSize)라 new_cols-1>=1.
     const cap_rows: usize = 2 * @as(usize, old_rows) + total_content / (new_cols - 1) + 4;
     try ensureReflowScratch(self, cap_rows, new_cols);
+
+    // 활성 화면에 앵커가 있는 이미지는 **자기 셀을 따라간다**(스크롤백 재-wrap 과 같은 규칙). 이미지가 덮는 행은
+    // 대개 빈 행이라, 스크롤백으로 밀려날 때 「빈 행은 보관하지 않는다」에 걸려 사라지면 이미지 아래 글이 이미지
+    // 밑으로 당겨진다 — 그 행은 `keep_blank` 로 지킨다.
+    const remaps = try self.collectAnchorRemaps(self.allocator, self.screen.sb.count, old_rows);
+    defer if (remaps.len > 0) self.allocator.free(remaps);
+    const keep_blank: []bool = if (remaps.len > 0) try self.allocator.alloc(bool, cap_rows) else &.{};
+    defer if (keep_blank.len > 0) self.allocator.free(keep_blank);
+    var walker: core.PlacementAnchorWalker = .{ .items = remaps };
     const scratch = self.reflow_cells;
     const swrap = self.reflow_wrapped;
     const pmarks = self.reflow_prompt_marks; // 산출 행별 OSC 133 태그(소스 옛 행에서 carry)
@@ -1943,6 +1967,7 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
                     cursor_out_row = out_rows;
                     cursor_out_col = @min(self.screen.cursor.col, new_cols - 1);
                 }
+                walker.endRow(r, 0, out_rows, 0, new_cols); // verbatim — 같은 열(넘치면 마지막 칸)
                 out_rows += 1;
             }
             @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
@@ -1973,9 +1998,11 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
                 oc = 0;
                 @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
             }
+            walker.cell(old_r, c, out_rows, oc);
             scratch[out_rows * new_cols + oc] = cell;
             oc += 1;
         }
+        walker.endRow(old_r, contrib, out_rows, oc, new_cols);
         if (!soft) {
             // 논리 줄 끝: 부분 출력 행을 hard(wrapped=false)로 닫는다.
             swrap[out_rows] = false;
@@ -2021,12 +2048,38 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
     const next_prompt_marks = try self.allocator.alloc(types.RowPrompt, new_rows);
     @memset(next_prompt_marks, .{});
 
+    // 앵커를 새 자리로 — **eviction 이전 좌표**로 둔다. 아래 push 가 cap 을 넘겨 가장 오래된 행을 밀어낼 때마다
+    // `shiftCoordsForEviction` 이 앵커를 한 칸씩 당기므로, push 앞 좌표로 두면 다 끝났을 때 맞는 자리에 선다
+    // (밀려난 행에 걸린 placement 는 그 보정이 지운다). 산출 행 j 의 자리:
+    //   스크롤백으로 가는 행(j < push_count) → 지금 길이 + 그 앞에서 실제로 보관되는 행 수
+    //   버려지는 빈 행(push_count ≤ j < drop) → 화면 첫 행
+    //   화면에 남는 행(j ≥ drop) → 지금 길이 + 보관 행 수 + (j - drop)
+    if (remaps.len > 0) {
+        @memset(keep_blank[0..push_count], false);
+        for (remaps) |r| {
+            var y = r.out_row;
+            while (y < push_count and y < r.out_row + r.span_rows) : (y += 1) keep_blank[y] = true;
+        }
+        const sb_before = self.screen.sb.count;
+        var kept: usize = 0;
+        var k: usize = 0;
+        var row: usize = 0;
+        while (row < push_count) : (row += 1) {
+            while (k < remaps.len and remaps[k].out_row == row) : (k += 1) remaps[k].out_row = sb_before + kept;
+            if (keep_blank[row] or !outputRowBlank(scratch, row, new_cols)) kept += 1;
+        }
+        while (k < remaps.len) : (k += 1) remaps[k].out_row = sb_before + kept + (remaps[k].out_row -| drop);
+        self.moveAnchors(remaps, 0);
+    }
+
     // 밀려나는 위쪽 콘텐츠 행을 그 wrap 플래그·OSC 133 태그와 함께 스크롤백으로(가장 오래된 것부터).
-    // 빈 행은 스크롤백을 오염시키므로 보관하지 않는다(빈 화면 resize 등).
+    // 빈 행은 스크롤백을 오염시키므로 보관하지 않는다(빈 화면 resize 등) — 단 이미지가 덮는 행은 보관한다(위).
     var pr: usize = 0;
     while (pr < push_count) : (pr += 1) {
-        if (!outputRowBlank(scratch, pr, new_cols)) {
+        if ((keep_blank.len > 0 and keep_blank[pr]) or !outputRowBlank(scratch, pr, new_cols)) {
             const pushed = pushScrollback(self, scratch[pr * new_cols ..][0..new_cols], swrap[pr], pmarks[pr]);
+            // 보관되지 못했다(cap 0·OOM) — 미리 옮겨 둔 앵커가 없는 행을 가리키지 않게 정리한다.
+            if (!pushed and remaps.len > 0) self.dropLostRowAnchors(self.screen.sb.count);
             // 과거를 보는 중이면 새로 밀려든 행만큼 offset도 올린다(scroll-lock — 보던 내용 유지).
             if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.screen.sb.count);
         }

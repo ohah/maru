@@ -16,6 +16,8 @@ const input_report = @import("input_report.zig"); // 입력/이벤트 → host �
 // kitty graphics 저장 struct는 kitty.zig 소유(self-contained — Scrollback 선례). core는 별칭으로 필드 타입을 둔다.
 const KittyGraphicsCommand = kitty.KittyGraphicsCommand;
 const StoredPlacement = kitty.StoredPlacement;
+pub const PlacementAnchorRemap = kitty.AnchorRemap; // screen.zig 의 reflow·재-wrap 이 쓴다(screen→kitty 직접 import 없이)
+pub const PlacementAnchorWalker = kitty.AnchorWalker;
 const KittyImageStorage = kitty.KittyImageStorage;
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
@@ -1440,6 +1442,23 @@ pub const TerminalCore = struct {
     pub fn shiftCoordsForEviction(self: *TerminalCore, n: usize) void {
         selection.shiftSelectionForEviction(self, n);
         kitty.shiftPlacementsForEviction(self, n);
+    }
+
+    /// reflow·재-wrap 이 옮길 placement 앵커를 모은다. 본문: kitty.collectAnchorRemaps.
+    pub fn collectAnchorRemaps(self: *const TerminalCore, allocator: std.mem.Allocator, first_abs: usize, count: usize) ![]PlacementAnchorRemap {
+        return kitty.collectAnchorRemaps(self, allocator, first_abs, count);
+    }
+    /// 재배치가 끝난 앵커를 새 자리로. 본문: kitty.moveAnchors.
+    pub fn moveAnchors(self: *TerminalCore, remaps: []const PlacementAnchorRemap, lost_below: usize) void {
+        kitty.moveAnchors(self, remaps, lost_below);
+    }
+    /// 스크롤백 길이 변화만큼 활성 화면 앵커를 민다. 본문: kitty.rebaseActiveAnchors.
+    pub fn rebaseActiveAnchors(self: *TerminalCore, old_count: usize, new_count: usize) void {
+        kitty.rebaseActiveAnchors(self, old_count, new_count);
+    }
+    /// 스크롤백에 못 들어간 행의 앵커를 정리한다. 본문: kitty.dropLostRowAnchors.
+    pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize) void {
+        kitty.dropLostRowAnchors(self, abs_row);
     }
 
     /// 현재 뷰포트에 보이는 선택 범위(렌더용). 본문: selection.selectionViewportSpan.
@@ -4553,6 +4572,183 @@ test "setMaxScrollback 하향 트림: placement anchor를 버린 행 수만큼 �
     const drop = before - 2;
     try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // anchor 0짜리는 제거
     try std.testing.expectEqual(before - 1 - drop, core.kitty_placements.items[0].anchor_row); // 살아남은 건 drop만큼 당김
+}
+
+/// `rows` 행을 덮는(명시 c/r — 셀 메트릭 없이도 span 이 정해진다) 테스트용 placement.
+fn mkSpanPlacement(anchor_row: usize, anchor_col: u16, rows: u32) StoredPlacement {
+    var p = mkTestPlacement(anchor_row);
+    p.anchor_col = anchor_col;
+    p.columns = 2;
+    p.rows = rows;
+    return p;
+}
+
+/// 절대 행의 첫 글자(스크롤백 또는 활성 화면). 빈 행이면 0.
+fn absFirstCodepoint(core: *const TerminalCore, abs: usize) u21 {
+    if (abs < core.screen.sb.count) {
+        const row = core.scrollbackRow(abs) orelse return 0;
+        return if (row.len > 0) row[0].codepoint else 0;
+    }
+    return core.screen.cells[core.index(@intCast(abs - core.screen.sb.count), 0)].codepoint;
+}
+
+test "kitty reflow: 폭을 넓혀 위 줄이 합쳐지면 이미지도 내용과 함께 올라간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
+    defer core.deinit();
+    try core.write("AAAAAAAAAAAAAAAAAAAA\r\n"); // 10칸에서 soft wrap 두 행(0·1) — 커서 2행
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(2, 0, 2)); // 2·3행을 덮는다
+    try core.write("\r\n\r\nB"); // 이미지 아래 4행에 B
+    try core.resize(20, 6);
+    // A 두 행이 한 행으로 합쳐졌다 — 내용이 한 줄 올라갔고 이미지도 따라 올라가야 한다(예전엔 2 에 남아 B 를 덮었다).
+    try std.testing.expectEqual(@as(u21, 'B'), core.screen.cells[core.index(3, 0)].codepoint);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items[0].anchor_row);
+}
+
+test "kitty reflow: 폭을 좁혀 위 줄이 쪼개지면 이미지도 내용과 함께 내려간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    try core.write("AAAAAAAAAAAAAAA\r\n"); // 15 자 — 10칸이면 두 행
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(1, 0, 2));
+    try core.write("\r\n\r\nB"); // 3행에 B
+    try core.resize(10, 6);
+    try std.testing.expectEqual(@as(u21, 'B'), core.screen.cells[core.index(4, 0)].codepoint);
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items[0].anchor_row);
+}
+
+test "kitty reflow: 긴 줄 가운데 놓인 이미지는 그 셀을 따라 다음 행·열로 간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    try core.write("0123456789ABCDE\r\n\r\nX"); // 커서는 2행 — 0행은 커서 줄이 아니라 다시 잘린다
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(0, 12, 1)); // 'C' 위
+    try core.resize(10, 6);
+    // 0행이 "0123456789" + "ABCDE" 로 잘렸다 — 'C'(옛 12열)는 1행 2열.
+    try std.testing.expectEqual(@as(u21, 'C'), core.screen.cells[core.index(1, 2)].codepoint);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items[0].anchor_row);
+    try std.testing.expectEqual(@as(u16, 2), core.kitty_placements.items[0].anchor_col);
+}
+
+/// 이미지(0·1행, 빈 행) 아래 80 자 줄(40칸 두 행)과 커서 줄 C. 10칸으로 좁히면 이미지 2 + B 8 + C 1 = 11 행이라
+/// 6 행 화면에서 위 5 행(이미지 둘 + B 셋)이 스크롤백으로 간다.
+fn writeImageAboveLongLine(core: *TerminalCore) !void {
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(0, 0, 2));
+    try core.write("\r\n\r\n" ++ ("B" ** 80) ++ "\r\nC");
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(4, 0, 1)); // 커서 줄 C 위
+}
+
+test "kitty reflow: 스크롤백으로 밀려나는 이미지의 빈 행을 버리지 않는다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 40, .rows = 6 });
+    defer core.deinit();
+    core.setMaxScrollback(100);
+    try writeImageAboveLongLine(&core);
+    try core.resize(10, 6);
+    // 이미지가 덮는 두 빈 행도 스크롤백에 남는다 — 예전엔 「빈 행은 보관하지 않는다」로 빠져, 스크롤백의 B 가
+    // 이미지 밑으로 당겨졌다.
+    try std.testing.expectEqual(@as(usize, 5), core.screen.sb.count);
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items[0].anchor_row);
+    try std.testing.expectEqual(@as(u21, 0), absFirstCodepoint(&core, 0));
+    try std.testing.expectEqual(@as(u21, 0), absFirstCodepoint(&core, 1));
+    try std.testing.expectEqual(@as(u21, 'B'), absFirstCodepoint(&core, 2));
+    // 커서 줄 C 의 이미지는 화면 마지막 행(옛 산출 10 - 밀려난 5) = 절대 5 + 5.
+    try std.testing.expectEqual(@as(usize, 10), core.kitty_placements.items[1].anchor_row);
+    try std.testing.expectEqual(@as(u21, 'C'), absFirstCodepoint(&core, 10));
+}
+
+test "kitty reflow: 밀어내기가 cap 을 넘겨 행을 버리면 그 행의 이미지는 지우고 나머지는 맞는 자리에 선다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 40, .rows = 6 });
+    defer core.deinit();
+    core.setMaxScrollback(2); // 5 행을 밀면 가장 오래된 3 행(이미지 둘 + B 하나)이 버려진다
+    try writeImageAboveLongLine(&core);
+    try core.resize(10, 6);
+    try std.testing.expectEqual(@as(usize, 2), core.screen.sb.count);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // 이미지 행이 버려졌다
+    try std.testing.expectEqual(@as(usize, 7), core.kitty_placements.items[0].anchor_row); // 2 + 5
+    try std.testing.expectEqual(@as(u21, 'C'), absFirstCodepoint(&core, 7));
+}
+
+test "kitty reflow: 스크롤백이 꺼져 있으면 밀려난 행의 이미지는 지우고 화면의 이미지는 화면 기준으로 선다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 40, .rows = 6 });
+    defer core.deinit();
+    core.setMaxScrollback(0);
+    try writeImageAboveLongLine(&core);
+    try core.resize(10, 6);
+    try std.testing.expectEqual(@as(usize, 0), core.screen.sb.count);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 5), core.kitty_placements.items[0].anchor_row);
+    try std.testing.expectEqual(@as(u21, 'C'), absFirstCodepoint(&core, 5));
+}
+
+test "kitty reflow: 폭을 바꾼 뒤 위로 스크롤해도(지연 재-wrap) 이미지는 자기 내용에 붙어 있다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.setMaxScrollback(100);
+    var i: usize = 0;
+    while (i < 6) : (i += 1) try core.write("CCCCCCCCCCCCCCC\r\n"); // 15 자 = 두 행씩
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(2, 0, 1)); // 스크롤백: 둘째 줄 첫 행
+    const cur_abs = core.screen.sb.count + core.screen.cursor.row;
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(cur_abs, 0, 1)); // 화면: 커서 줄
+    try core.resize(5, 4);
+    try std.testing.expect(core.screen.sb.rewrap_pending); // 바닥을 보는 중이라 스크롤백은 아직 옛 폭
+    try std.testing.expectEqual(core.screen.sb.count + core.screen.cursor.row, core.kitty_placements.items[1].anchor_row);
+    const count_before = core.screen.sb.count;
+
+    core.scrollViewport(1); // 과거를 보는 순간 재-wrap 된다
+    try std.testing.expect(!core.screen.sb.rewrap_pending);
+    try std.testing.expect(core.screen.sb.count != count_before); // 길이가 실제로 바뀌는 경우다
+    // 화면 위 이미지: 예전엔 길이 차만큼 튀었다(실측 9 → 10 에서 한 줄 위로).
+    try std.testing.expectEqual(core.screen.sb.count + core.screen.cursor.row, core.kitty_placements.items[1].anchor_row);
+    // 스크롤백 이미지: 둘째 줄은 5칸에서 세 행씩이라 3 행에서 시작한다.
+    try std.testing.expectEqual(@as(usize, 3), core.kitty_placements.items[0].anchor_row);
+}
+
+test "kitty reflow: 재-wrap 이 cap 을 넘겨 버린 행의 이미지는 지우고 남은 이미지는 자기 줄을 따라간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    core.setMaxScrollback(4);
+    try core.write("BBBBBBBBBB\r\nCCCCCCCCCC\r\nDDDDDDDDDD\r\nEEEEEEEEEE\r\nFFFFFFFFFF\r\n"); // 스크롤백 B·C·D·E
+    try std.testing.expectEqual(@as(usize, 4), core.screen.sb.count);
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(2, 0, 1)); // D
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(3, 0, 1)); // E
+    // 5칸으로: 화면의 F 가 두 행이 되어 한 행을 밀고(가득 찬 스크롤백에서 B 가 eviction — D·E 는 한 칸 당겨진다),
+    // 위로 스크롤하면 C·D·E(10칸)+F 첫 행 = 7 행으로 재-wrap 되어 cap 4 를 넘는 앞 3 행(C 둘 + **D 첫 행**)이 버려진다.
+    try core.resize(5, 2);
+    core.scrollViewport(1);
+    try std.testing.expectEqual(@as(usize, 4), core.screen.sb.count);
+    try std.testing.expectEqual(@as(u21, 'D'), absFirstCodepoint(&core, 0)); // D 의 둘째 행만 남았다
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // D 첫 행의 이미지는 함께 지워졌다
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items[0].anchor_row);
+    try std.testing.expectEqual(@as(u21, 'E'), absFirstCodepoint(&core, 1));
+}
+
+test "kitty reflow: 과거를 보는 중 폭을 바꿔도(즉시 재-wrap + reflow) 두 화면의 이미지가 자기 내용에 붙어 있다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.setMaxScrollback(100);
+    var i: usize = 0;
+    while (i < 6) : (i += 1) try core.write("CCCCCCCCCCCCCCC\r\n");
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(2, 0, 1));
+    const cur_abs = core.screen.sb.count + core.screen.cursor.row;
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(cur_abs, 0, 1));
+    try core.write("D"); // 커서 줄 — 화면 이미지가 이 글자 위에 있다
+    core.scrollViewport(3); // 과거를 보는 중 → resize 가 스크롤백을 즉시 재-wrap 한다
+    try core.resize(5, 4);
+    try std.testing.expectEqual(@as(usize, 3), core.kitty_placements.items[0].anchor_row);
+    try std.testing.expectEqual(core.screen.sb.count + core.screen.cursor.row, core.kitty_placements.items[1].anchor_row);
+    try std.testing.expectEqual(@as(u21, 'D'), absFirstCodepoint(&core, core.kitty_placements.items[1].anchor_row));
+}
+
+test "kitty reflow: 넓힌 뒤 스크롤백 이미지는 행 번호가 아니라 같은 글자 위에 남는다" {
+    // 행 번호 기대값은 계산이 틀려도 함께 틀릴 수 있다 — 여기서는 앵커 행의 **글자**로 본다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    core.setMaxScrollback(100);
+    try core.write("AAAAAAAAAAAAAAA\r\nBBBB\r\nCCCCCCCCCCCCCCC\r\nXXXX\r\nYYYY\r\nZZZZ\r\n");
+    // 스크롤백: A(0,1) B(2) C(3,4) X(5)... — B 줄에 이미지
+    try std.testing.expectEqual(@as(u21, 'B'), absFirstCodepoint(&core, 2));
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(2, 0, 1));
+    try core.resize(20, 3);
+    core.scrollViewport(1);
+    const a = core.kitty_placements.items[0].anchor_row;
+    try std.testing.expectEqual(@as(u21, 'B'), absFirstCodepoint(&core, a));
 }
 
 test "setMaxScrollback: alt 중 하향 트림은 활성 alt 화면의 placement를 보정하지 않는다" {
@@ -11168,23 +11364,34 @@ test "kitty 애니메이션: s=1 로 멈춘 동안에는 은행도 쌓이지 않
     try std.testing.expect(core.advanceAnimations(40)); // 40ms 가 지나야 한 장
 }
 
-// 가시성 판정은 **리사이즈로도 흔들린다** — 행 수가 줄면 아래쪽 placement 가 화면 밖이 되고,
-// 늘리면 다시 들어온다. 이 판정자가 없으면 「스크롤만」 보는 가시성 게이트가 리사이즈에서
-// 틀린 쪽으로 굳어도(늘 보인다 / 늘 안 보인다) 아무도 모른다. 폭만 바꾸는 재래핑에서는
-// 계속 돌아야 한다(내용이 위아래로 움직이지 않는다).
-test "kitty 애니메이션: 리사이즈로 화면 밖이 되면 멈추고 되돌리면 이어 돈다 (적대적 검증)" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 24 });
-    defer core.deinit();
-    core.setCellMetrics(10, 20);
+/// 애니메이션 이미지(2x2, 프레임 하나 추가, 재생 중)를 **지금 커서 자리**에 띄운다.
+fn placeAnimatedImageAtCursor(core: *TerminalCore) !void {
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
     const px = [_]u8{ 4, 4, 4, 255 } ** 4;
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
-    try core.write("\x1b[20;1H"); // 20 번째 줄 — 24 줄에선 보이고 8 줄에선 밖이다
     try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
     try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+}
+
+// 가시성 판정은 **리사이즈로도 흔들린다** — 행 수가 줄면 아래쪽 placement 가 화면 밖이 되고,
+// 늘리면 다시 들어온다. 이 판정자가 없으면 「스크롤만」 보는 가시성 게이트가 리사이즈에서
+// 틀린 쪽으로 굳어도(늘 보인다 / 늘 안 보인다) 아무도 모른다. 폭만 바꾸는 재래핑에서는
+// 계속 돌아야 한다(내용이 위아래로 움직이지 않는다).
+//
+// **커서는 맨 위에 둔다**(2026-10-02). 줄일 때 잘리는 것은 커서 **아래**다 — 커서 위 줄은 스크롤백으로
+// 밀려 올라가며 화면에 남는다. 예전 판정자는 커서를 이미지 바로 아래(21 번째 줄)에 두고도 「8 줄에선
+// 밖」을 기대했는데, 그건 reflow 가 앵커를 안 옮겨 이미지가 **자기 줄을 떠나** 화면 밖에 남던 결함의
+// 모양이었다. 그 기하는 아래 판정자가 「커서와 함께 화면에 남는다」로 따로 본다.
+test "kitty 애니메이션: 리사이즈로 화면 밖이 되면 멈추고 되돌리면 이어 돈다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 24 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    try core.write("\x1b[20;1H"); // 20 번째 줄 — 24 줄에선 보이고, 커서가 맨 위면 8 줄에선 밖이다
+    try placeAnimatedImageAtCursor(&core);
+    try core.write("\x1b[1;1H");
     try std.testing.expect(core.advanceAnimations(40));
 
     try core.resize(20, 8);
@@ -11194,6 +11401,22 @@ test "kitty 애니메이션: 리사이즈로 화면 밖이 되면 멈추고 되�
     try std.testing.expect(core.advanceAnimations(40));
 
     try core.resize(10, 24); // 폭만 — 재래핑이지 세로 이동이 아니다
+    try std.testing.expect(core.advanceAnimations(40));
+}
+
+// 커서 바로 위 이미지는 화면을 줄여도 **그 줄과 함께** 남는다 — 줄이면 위쪽 줄이 스크롤백으로 밀려 올라가지
+// 커서 쪽이 잘리지 않는다. 그러니 애니메이션도 계속 돈다(2026-10-02 전에는 앵커만 옛 행에 남아 이미지가 화면
+// 밖으로 떨어지고 멈췄다).
+test "kitty 애니메이션: 커서 바로 위 이미지는 화면을 줄여도 커서와 함께 남아 계속 돈다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 24 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    try core.write("\x1b[20;1H");
+    try placeAnimatedImageAtCursor(&core); // C=0 — 커서는 이미지 아래 21 번째 줄로 간다
+    try std.testing.expect(core.advanceAnimations(40));
+
+    try core.resize(20, 8);
+    try std.testing.expectEqual(core.screen.sb.count + core.screen.cursor.row - 1, core.kitty_placements.items[0].anchor_row);
     try std.testing.expect(core.advanceAnimations(40));
 }
 

@@ -83,7 +83,9 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
     const host = sidecarExe(b, ctx, sdk, protocol_mod, "maru-web-host", "src/platform/macos/web_sidecar/host_main.zig");
     // 픽셀 링(W2) — IOSurface 세 장을 만들고 mach 로 넘긴다. helper 는 샌드박스 전 적재를 줄이려 붙이지 않는다.
-    linkMacosFrameworks(b, ctx, host, &.{ "IOSurface", "CoreFoundation" });
+    linkMacosFrameworks(b, ctx, host, &.{ "IOSurface", "CoreFoundation", "AppKit" });
+    // W6c: 우클릭 메뉴의 복사(링크·이미지 주소·이미지)를 클립보드에 쓴다 — Objective-C 런타임을 직접 부른다(`pasteboard.zig`).
+    linkObjc(b, ctx, host);
     const helper = sidecarExe(b, ctx, sdk, protocol_mod, "maru-web-helper", "src/platform/macos/web_sidecar/helper_main.zig");
     const judge = b.addExecutable(.{
         .name = "maru-web-judge",
@@ -96,7 +98,15 @@ pub fn register(b: *std.Build, ctx: Context) void {
         }),
     });
     // 판정자는 host 의 창 수(CGWindowList)를 세고, maru 역할로 픽셀 링을 받는다(IOSurface).
-    linkMacosFrameworks(b, ctx, judge, &.{ "CoreGraphics", "CoreFoundation", "IOSurface" });
+    linkMacosFrameworks(b, ctx, judge, &.{ "CoreGraphics", "CoreFoundation", "IOSurface", "AppKit" });
+    // W6c: host 가 판정자 전용 이름의 클립보드에 쓴 것을 읽는다(`MARU_WEB_TEST_PASTEBOARD`).
+    linkObjc(b, ctx, judge);
+    judge.root_module.addImport("web_sidecar_pasteboard", b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/web_sidecar/pasteboard.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+    }));
     judge.root_module.addImport("web_sidecar_ring", b.createModule(.{
         .root_source_file = b.path("src/platform/macos/web_sidecar/ring.zig"),
         .target = ctx.target,
@@ -189,6 +199,14 @@ fn sidecarExe(
     // 덮어써 host 가 뜨자마자 죽었다(W7b 5 차 적대 검증 — Rosetta 로 실측).
     exe.headerpad_max_install_names = true;
     return exe;
+}
+
+/// Objective-C 런타임(`libobjc`). 경로는 `/usr/lib` 로만 준다 — sysroot(SDK)가 앞에 붙여 푼다(SDK 절대경로를 주면 두 번
+/// 붙어 깨진다 — build.zig 의 SDK 주석).
+fn linkObjc(b: *std.Build, ctx: Context, artifact: *std.Build.Step.Compile) void {
+    _ = b;
+    if (ctx.macos_sdk != null) artifact.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+    artifact.root_module.linkSystemLibrary("objc", .{});
 }
 
 fn linkMacosFrameworks(b: *std.Build, ctx: Context, artifact: *std.Build.Step.Compile, names: []const []const u8) void {

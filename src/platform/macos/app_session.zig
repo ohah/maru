@@ -2130,6 +2130,20 @@ const NormalizedConfig = struct {
     defer_initial_surface: bool = false,
 };
 
+pub const EditorViewFind = struct {
+    state: chrome.components.find.State = .{},
+    matches: std.ArrayList(maru.session.editor.find.Match) = .empty,
+    source: u64 = 0,
+    nav: bool = false,
+    selection_at_open: @TypeOf(@as(chrome.components.find.State, .{}).in_selection) = null,
+
+    pub fn deinit(self: *EditorViewFind, allocator: std.mem.Allocator) void {
+        self.state.deinit(allocator);
+        self.matches.deinit(allocator);
+        self.* = .{};
+    }
+};
+
 const TermRuntime = struct {
     // persistent-session P2 seam(docs/persistent-session-host.md §13 P2): 런타임 소유는 앱 전역
     // `app_runtime.live_registry`(LiveSurfaceRegistry(LiveSurface))에 있고, GUI(Term)는 그 runtime을 가리키는 opaque
@@ -2536,6 +2550,11 @@ const TermRuntime = struct {
     /// 한다** — 안 그러면 랩을 켠 직후 첫 Enter가 매치를 화면에 못 올려 **두 번 눌러야 보인다**
     /// (적대적 검증 2026-08-24 실측). 원격 find가 `remote_find_scroll_pending`으로 쓰는 그 패턴이다.
     editor_find_reveal_pending: bool = false,
+    // Shared ordinary views own their search history; only the active view lends
+    // its slot to chrome. Diff's two columns remain a separate contract.
+    editor_view_find_owned: bool = false,
+    editor_view_find: EditorViewFind = .{},
+    editor_view_find_revision: ?u64 = null,
     editor_diff_find_matches: std.ArrayList(maru.session.editor.find.Match) = .empty,
     editor_diff_find_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
     editor_diff_find_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
@@ -4509,7 +4528,9 @@ pub const AppSession = struct {
 
     /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
     pub fn activateSurfaceById(self: *AppSession, id: u64) bool {
-        return term_ops.activateSurfaceById(self, id);
+        const activated = term_ops.activateSurfaceById(self, id);
+        if (activated) find_ops.syncDiffFind(self);
+        return activated;
     }
 
     pub const NotificationRuntimeAction = enum {
@@ -5928,7 +5949,7 @@ pub const AppSession = struct {
     symbol_picker_prompt: std.ArrayList(u8) = .empty,
     /// 찾기를 **여는 순간**의 편집기 선택(§5.1 「선택 영역 내에서만」). 그때 떠 두지 않으면
     /// 검색어 한 글자에 선택이 첫 매치로 옮겨져(`revealCurrentFindMatch`) 범위를 잃는다.
-    find_selection_at_open: ?struct { start: usize, end: usize } = null,
+    find_selection_at_open: @TypeOf(@as(chrome.components.find.State, .{}).in_selection) = null,
     symbol_picker_scroll: chrome.ui.scroll_area.State = .{},
     symbol_picker_followed_selected: ?usize = null,
     /// 참조 피커(tooling §8.2l) — 굳힌 행(값)·프롬프트 버퍼·목록 역학(심볼 피커와 같은 셋).
@@ -5947,6 +5968,8 @@ pub const AppSession = struct {
     // 매치는 남의 문서 것이 되므로 다시 계산해야 하는데, 그 사실을 알 방법이 이것뿐이다 —
     // Term 포인터를 들면 그 Term이 닫힐 때 대롱거린다(id는 비재사용이라 그럴 일이 없다).
     editor_find_source: u64 = 0,
+    editor_view_find_owner: u64 = 0,
+    editor_view_find_fallback: EditorViewFind = .{},
     // tick마다 활성 surface의 매치를 뷰포트 span으로 클립해 담는 재사용 버퍼(cell_colors.search_matches로 넘긴다).
     // 매 frame 새로 채우되 capacity는 재사용한다 — 스크롤·출력에 따라 뷰 안 매치가 바뀌므로 캐시하지 않는다.
     find_view_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
@@ -24015,6 +24038,7 @@ pub const AppSession = struct {
         self.editor_nav_back.deinit(self.allocator);
         self.editor_nav_forward.deinit(self.allocator);
         self.editor_find_matches.deinit(self.allocator);
+        self.editor_view_find_fallback.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         self.remote_find_spans.deinit(self.allocator); // §6c host-backed 검색 캐시
         self.remote_find_pending.deinit(self.allocator); // 같은 캐시의 수신 버퍼(view_offset 대조 후 swap 승격)

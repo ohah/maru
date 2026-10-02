@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture real shared IME editor frames through the product Metal readback.
+"""Capture real shared IME and find editor frames through the product Metal readback.
 
 macOS only. Creates an isolated source snapshot and compiles a focused fixture there.
 No installed app, GUI input, input source, TCC, or repository build graph is changed.
@@ -54,6 +54,7 @@ def unique_replace(text: str, old: str, new: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scenario", choices=("ime", "find"), default="ime")
     parser.add_argument("--output", type=Path, help="New or empty evidence directory")
     args = parser.parse_args()
     if sys.platform != "darwin":
@@ -69,7 +70,11 @@ def main() -> None:
     artifacts = output / "artifacts"
     snapshot.mkdir()
     artifacts.mkdir()
-    source_hashes = {name: digest(repo / name) for name in SOURCE_FILES}
+    fixture_path = "tools/shared-ime-gpu/fixture.zig.inc" if args.scenario == "ime" else "tools/shared-ime-gpu/find-fixture.zig.inc"
+    source_files = tuple(name for name in SOURCE_FILES if name != "tools/shared-ime-gpu/fixture.zig.inc") + (fixture_path,)
+    if args.scenario == "find":
+        source_files += ("src/platform/macos/app_session/find.zig", "src/platform/macos/app_session/term.zig")
+    source_hashes = {name: digest(repo / name) for name in source_files}
     subprocess.run(
         ["rsync", "-a", "--exclude=.git", "--exclude=.zig-cache", "--exclude=zig-out",
          "--exclude=node_modules", "--exclude=.env*", f"{repo}/", f"{snapshot}/"],
@@ -86,7 +91,7 @@ def main() -> None:
                            "    const run_shared_editor_tests = b.addRunArtifact(shared_editor_tests);\n"
                            "    run_shared_editor_tests.has_side_effects = true;")
     build_path.write_text(build)
-    fixture = (snapshot / "tools/shared-ime-gpu/fixture.zig.inc").read_text()
+    fixture = (snapshot / fixture_path).read_text()
     # Escape only the inside of the fixture's Zig string literals.
     fixture = fixture.replace("__ARTIFACT_DIR__", json.dumps(str(artifacts))[1:-1])
     mod_path = snapshot / "src/platform/macos/app_session/editor/mod.zig"
@@ -94,7 +99,8 @@ def main() -> None:
         stream.write("\n\n" + fixture)
     command = ["mise", "exec", "--", "zig", "build", "test-editor-shared", "-j2"]
     log = output / "capture.log"
-    phases = ("before", "marked", "cancelled", "committed")
+    phases = ("before", "marked", "cancelled", "committed") if args.scenario == "ime" else ("before", "search", "edited", "closed")
+    revisions = {phase: int(phase == "committed") if args.scenario == "ime" else int(phase in ("edited", "closed")) for phase in phases}
     executions = []
     process_ids = set()
     with log.open("w") as combined:
@@ -117,7 +123,7 @@ def main() -> None:
                 if pid in process_ids:
                     raise RuntimeError("Capture process was reused across scenarios")
                 process_ids.add(pid)
-                if int(captures[0][3]) != int(phase == "committed"):
+                if int(captures[0][3]) != revisions[phase]:
                     raise RuntimeError("Captured canonical revision disagrees with the phase")
                 executions.append({"argv": command, "env": selectors, "cwd": str(snapshot),
                                    "log": str(run_log), "capture_process_pid": pid})
@@ -131,17 +137,20 @@ def main() -> None:
     manifest = {
         "scope": "Real AppSession shared views -> appendPaneFrame -> CoreText -> product Metal offscreen readback",
         "limits": "Separate per-view frames. No OS/HID callback or simultaneous multi-pane window evidence.",
-        "cancelled_operation": "ime.marked with empty string; not an observed OS cancellation",
+        "scenario": args.scenario,
         "source_sha256": source_hashes,
         "snapshot_mod_sha256": digest(mod_path),
         "snapshot_build_sha256": digest(build_path),
         "command": command,
         "fresh_process_commands": executions,
         "log": str(log),
-        "phases": {phase: {"canonical_revision": int(phase == "committed"),
-                           "peer_preedit_bytes": 0} for phase in phases},
+        "phases": {phase: {"canonical_revision": revisions[phase]} for phase in phases},
         "artifact_sha256": {str(image.relative_to(output)): digest(image) for image in images},
     }
+    if args.scenario == "ime":
+        manifest["cancelled_operation"] = "ime.marked with empty string; not an observed OS cancellation"
+        for phase in phases:
+            manifest["phases"][phase]["peer_preedit_bytes"] = 0
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(output / "manifest.json")
 

@@ -237,6 +237,7 @@ pub fn tryFocusTerm(self: *AppSession, term_index: usize) bool {
     self.file_tree_rows_dirty = true; // 활성 파일이 바뀌었을 수 있다 — 트리 활성 마커 갱신
     pane_ops.recomputeActivePaneRect(self);
     self.metal_dirty = true;
+    @import("find.zig").syncDiffFind(self);
     self.workspaceChanged(.selection);
     return true;
 }

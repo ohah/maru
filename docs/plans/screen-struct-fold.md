@@ -1,10 +1,10 @@
 # Screen struct fold (§10, 방향 B)
 
-필드를 `Screen` 하위 struct로 접는 2단계 이니셔티브다. B-min은 채택·확정됐고 B-full(Option 3, per-screen cursor)은 의도적 동작 변경을 동반한다. 분해 1단계(방향 A)의 설계는 [TerminalCore 분해 설계](../terminal-core-decomposition.md)가 소유한다.
+필드를 `Screen` 하위 struct로 접는 2단계 이니셔티브다. B-min(B1~B3)과 B-full(Option 3, per-screen cursor — B4~B6, 의도적 동작 변경)이 모두 끝났다(§10.8.5). 다음 단계는 [page-aligned storage](page-aligned-storage.md)(§11)다. 분해 1단계(방향 A)의 설계는 [TerminalCore 분해 설계](../terminal-core-decomposition.md)가 소유한다.
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§7`처럼 절만 가리키면 여기서 소유 파일을 찾는다 — §1~§3·§5 [terminal-core-decomposition.md](../terminal-core-decomposition.md) · §0·§4·§6~§9 [분해 기록](terminal-core-decomposition.md) · §10 [Screen struct fold](screen-struct-fold.md) · §11 [page-aligned storage](page-aligned-storage.md)
 
-## 10. Screen struct fold (방향 B, 2단계) — B-min(B1~B3) 완결 · B-full(B4~) 진행 (헤딩 정정 2026-08-29)
+## 10. Screen struct fold (방향 B, 2단계) — B-min(B1~B3) 완결 · B-full(B4~B6) 완결 (헤딩 정정 2026-10-03)
 
 §2에서 미룬 **2단계**(architecture.md §"스크롤백은 화면에 귀속한다" 종착지)다. 방향 A(연산 추출)는 §5~§9로 소진됐고, 남은 건 **필드를 `Screen` 하위 struct로 접는** 구조 변경이다. 이건 함수 이동과 성격이 다르다 — 동작 변경 없는 **대규모 기계적 필드-접근 rename**(self.cells → self.screen.cells)이고, alt-screen swap 의미까지 건드린다. **고위험 단일 도약**이라 합의 후 착수한다.
 
@@ -102,9 +102,9 @@ Ghostty `Screen`은 `cursor: Cursor` + `saved_cursor: ?SavedCursor`를 **소유*
 
 #### 10.8.5 PR 분해
 
-- **B4**: cursor 클러스터(`cursor`·`pen`·`pending_wrap`·`last_print`·`last_printed_cp`)를 Screen으로 fold + enter/leave를 cursor 포함 swap으로. 47/1047/1049의 save_cursor 흡수(플래그 제거). `saved_cursor_primary/alt`는 **일단 core 잔류**(1048/DECSC가 `alt_active`로 슬롯 선택 — 사실상 per-screen). **+ per-screen cursor 동작 테스트 다수**(§10.8.6).
-- **B5**: `saved_cursor_primary`/`saved_cursor_alt` → per-Screen `saved_cursor`(DECSC 슬롯도 swap을 탐). `activeSavedCursor` → `&self.screen.saved_cursor`(플래그 선택 → swap 선택, 등가). **+ per-screen DECSC 테스트**.
-- **B6**: 누적 `/code-review max`(B4~B5 배치) + cleanup.
+- **B4** ✅(2f8f2b1d2): cursor 클러스터(`cursor`·`pen`·`pending_wrap`·`last_print`·`last_printed_cp`)를 Screen으로 fold + enter/leave를 cursor 포함 swap으로. 47/1047/1049의 save_cursor 흡수(플래그 제거). `saved_cursor_primary/alt`는 **일단 core 잔류**(1048/DECSC가 `alt_active`로 슬롯 선택 — 사실상 per-screen). **+ per-screen cursor 동작 테스트 다수**(§10.8.6).
+- **B5** ✅(58cb48ef9): `saved_cursor_primary`/`saved_cursor_alt` → per-Screen `saved_cursor`(DECSC 슬롯도 swap을 탐). `activeSavedCursor` → `&self.screen.saved_cursor`(플래그 선택 → swap 선택, 등가). **+ per-screen DECSC 테스트**.
+- **B6** ✅(2d3165053, §10.8.7): 누적 `/code-review max`(B4~B5 배치) + cleanup.
 
 #### 10.8.6 테스트 계획 (heavy — 동작 변경 방어, 사용자 요청)
 

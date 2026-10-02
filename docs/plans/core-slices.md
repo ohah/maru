@@ -120,7 +120,7 @@ TDD 방식:
 아직 하지 않는다:
 
 - xterm 전체 호환성.
-- Kitty graphics protocol 잔여: K5 query(`a=q`) 응답·sixel(DCS 기반)·풀 PNG(전 color type/16-bit). K1~K4는 완료(APC 파서·디코드·저장·placement·K2 Metal 렌더·K3 chunked/zlib/PNG·K4 delete/LRU evict/텍스처 evict) — 아래 "kitty graphics K2 렌더" 절·K3~K5 항목 참조. sixel은 Ghostty도 미지원이라 후순위.
+- Kitty graphics protocol 잔여: sixel(DCS 기반 — 지금은 DCS 상태기계가 소비·폐기만 한다, `src/terminal/parser.zig`). K1~K5는 완료(APC 파서·디코드·저장·placement·K2 Metal 렌더·K3 chunked/zlib/PNG·K4 delete/LRU evict/텍스처 evict·K5 query(`a=q`) 응답 — 6092cf4ea, `src/terminal/kitty.zig`)이고 PNG도 전 color type·bit depth를 받는다(wuffs, 5b6b4ef07) — [터미널 입력·프로토콜 이력](terminal-input-and-protocols.md)의 "kitty graphics K2 렌더"·"kitty graphics PNG" 절 참조. sixel은 Ghostty도 미지원이라 후순위.
 - OSC/clipboard/advanced mouse mode 전체.
 - 합자(ligatures, line-level shaping)·`isExtendedPictographic`의 완전한 Extended_Pictographic 속성표는 후속이다. ambiguous width 설정(`text.ambiguous-width`)·ZWJ emoji(GB11, mode 2027)·box drawing 합성/정렬·grapheme 다중 저장(`grapheme_id`+`grapheme_store`, `Cell.combining` 폐지)은 완료 — 위 "한글 Grapheme Cluster" 절·[grapheme-clustering](../grapheme-clustering.md) 참조.
 - Ghostty/libghostty-vt 코드 복사.

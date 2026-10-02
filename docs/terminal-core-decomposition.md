@@ -23,7 +23,7 @@
 |---|---|---|
 | §1~§3 · §5 | 이 문서 | 분리 메커니즘, 방향 A 채택 근거, 책임 분류, 검증 프로토콜 |
 | §0 · §4 · §6~§9 | [분해 기록](plans/terminal-core-decomposition.md) | PR 시퀀스와 결과, selection·kitty·input_report 후속 |
-| §10 | [Screen struct fold](plans/screen-struct-fold.md) | 방향 B — B-min 확정, B-full 설계 |
+| §10 | [Screen struct fold](plans/screen-struct-fold.md) | 방향 B — B-min·B-full(per-screen cursor) 설계·결정·PR 기록 |
 | §11 | [page-aligned storage](plans/page-aligned-storage.md) | 페이지 모델 전환, P0 측정, 진행 결정 |
 
 ## 1. 분리 메커니즘 (Zig 제약 + 선례에서 유도)

@@ -541,6 +541,12 @@ unsigned int maru_mobile_long_press_ms(void);
 /// 조용히 자르지 않는다.
 unsigned int maru_mobile_take_copy(unsigned char *out, unsigned int cap);
 
+/// 본문에서 HTTP(S) 링크를 짧게 탭하면 코어가 추출한 URL을 한 번 꺼낸다.
+/// 0이면 요청 없음. `cap`이 부족하면 0을 답하고 요청을 보존한다(잘린 URL은 열지 않는다).
+/// URL 판정은 코어가, 실제 열기는 iOS/Android host가 맡는다. 파일 경로 및 다른 스킴은
+/// 모바일의 원격 셸 경로를 폰 로컬 파일로 오인하지 않도록 이 경계에서 열지 않는다.
+unsigned int maru_mobile_take_open_url(unsigned char *out, unsigned int cap);
+
 /// 선택 범위(뷰포트 기준, 각 16비트: start_row·start_col·end_row·end_col). **끝 열은 포함**
 /// 이다. 선택이 없으면 전부 1. host 가 복사 버튼 자리를 잡을 때 쓴다.
 unsigned long long maru_mobile_selection_span(void);

@@ -1993,6 +1993,36 @@ static void drainClipboard(struct android_app *app) {
     (*vm)->DetachCurrentThread(vm);
 }
 
+// 브리지가 고른 URL만 Java UI 스레드의 ACTION_VIEW로 보낸다. 링크 텍스트는
+// 로그에 남기지 않는다(터미널 출력에는 토큰·개인 경로가 섞일 수 있다).
+static void drainOpenUrl(struct android_app *app) {
+    unsigned char url_buf[8192];
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int n = maru_mobile_take_open_url(url_buf, sizeof url_buf);
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (!n) return;
+    JNIEnv *env = NULL;
+    JavaVM *vm = app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0 || !env) return;
+    if (g_activity_cls) {
+        jmethodID method = (*env)->GetStaticMethodID(env, g_activity_cls, "openWebUrl", "(Ljava/lang/String;)V");
+        if (method) {
+            jchar u16[8192];
+            jsize len = utf8ToUtf16((const char *)url_buf, n, u16, 8192);
+            jstring value = (*env)->NewString(env, u16, len);
+            if (value) {
+                (*env)->CallStaticVoidMethod(env, g_activity_cls, method, value);
+                (*env)->DeleteLocalRef(env, value);
+            }
+        }
+    } else LOGI("MARU_LINK no_class bytes=%u", n);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        LOGI("MARU_LINK host_failed bytes=%u", n);
+    }
+    (*vm)->DetachCurrentThread(vm);
+}
+
 static void showKeyboard(struct android_app *app) {
     JavaVM *vm = app->activity->vm;
     JNIEnv *env = NULL;
@@ -2113,6 +2143,7 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
                 // 이라고 못 적는다 — `take_copy` 는 꺼낼 것이 없으면 0 을 돌려주므로 그냥 묻는다.
                 // host 의 판단이 또 하나 줄었다.
                 drainClipboard(app);
+                drainOpenUrl(app);
                 unsigned int vo = maru_mobile_view_offset();
                 unsigned int has_sel = maru_mobile_has_selection();
                 // **`finger_dy` 는 손가락이 간 거리이지 화면이 흐른 양이 아니다.** 둘을 나란히

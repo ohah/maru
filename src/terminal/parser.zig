@@ -446,6 +446,10 @@ pub fn setPrivateModes(self: *TerminalCore, set: bool) void {
             7 => self.autowrap = set, // DECAWM(G8): autowrap on/off — off면 마지막 칸에서 덮어쓴다
             2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
             2031 => self.color_scheme_notify = set, // 색 구성(라이트/다크) 통지 구독 — 바뀌면 CSI ? 997 ; n (core.setDefaultColors)
+            2048 => { // in-band resize 통지 구독 — 크기가 바뀌면 CSI 48 ; … t (core.resize·setCellMetrics)
+                self.in_band_resize = set;
+                if (set) self.appendInBandResizeReport(); // 켜는 순간 지금 크기를 보낸다 — 이미 켜져 있어도(명세 MUST)
+            },
             2026 => {
                 self.sync_output = set; // synchronized output(set=BSU hold 시작, reset=ESU flush)
                 // ESU(reset=프레임 완성)마다 카운트 — shouldProjectFrame의 esu_advanced가 tick 폴링이 놓친 완성 프레임을 flush.
@@ -574,6 +578,7 @@ pub fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
         2026 => if (self.sync_output) 1 else 2,
         2027 => if (self.grapheme_cluster_mode) 1 else 2,
         2031 => if (self.color_scheme_notify) 1 else 2, // 색 구성 통지(실측: Claude Code 가 시작마다 켠다)
+        2048 => if (self.in_band_resize) 1 else 2, // in-band resize 통지
         // 1048: DECSC/DECRC 와 같은 커서 슬롯을 쓰는 저장/복원. **상태를 되읽을 수 없는 «동작» 모드**라
         // set/reset 이 없다 — `?1048h` 는 저장, `?1048l` 은 복원이고 «지금 켜져 있다» 는 상태가 없다.
         // 그래서 상태 대신 **영구 reset(4)** 으로 답한다(DECRPM 이 정의한 값): «이 모드를 안다, 다만

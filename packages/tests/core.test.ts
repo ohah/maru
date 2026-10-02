@@ -932,6 +932,21 @@ test("ambiguous wide를 켜면 레이아웃이 갈린다", async () => {
   term.dispose();
 });
 
+test("DECSET 2048 크기 통지는 resize 직후 onData 로 나간다 — 앱이 아무것도 안 써도", async () => {
+  const term = await makeTerminal();
+  const seen: string[] = [];
+  term.onData((b) => seen.push(new TextDecoder().decode(b)));
+  term.write("\x1b[?2048h"); // 켜는 순간 지금 크기를 알린다(명세)
+  // 정규식에 제어문자를 넣지 않으려 문자열로 판정한다(위 질의 응답 판정자와 같은 결).
+  expect(seen.some((s) => s.startsWith("\x1b[48;") && s.endsWith("t"))).toBe(true);
+  seen.length = 0;
+  term.resize(60, 10); // 이 뒤로 write 가 없다 — 그래도 나가야 한다
+  const report = seen.join("");
+  expect(report.startsWith("\x1b[48;10;60;")).toBe(true);
+  expect(report.endsWith("t")).toBe(true);
+  term.dispose();
+});
+
 test("resize가 그리드와 이벤트에 반영된다", async () => {
   const term = await makeTerminal({ cols: 20, rows: 4 });
   const seen: { cols: number; rows: number }[] = [];

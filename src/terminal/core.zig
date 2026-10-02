@@ -448,6 +448,11 @@ pub const TerminalCore = struct {
     color_scheme_notify: bool = false,
     /// 마지막으로 앱에 알린(또는 처음 주입된) 배경의 밝기 등급. `null` 이면 아직 색이 한 번도 안 왔다 — 첫 주입은 통지가 아니다.
     color_scheme_dark_seen: ?bool = null,
+    /// DECSET 2048 — in-band resize 통지 구독(rockorager «In-Band Window Resize Notifications»). 켜져 있으면 격자(`resize`)나
+    /// 셀 픽셀(`setCellMetrics`)이 **실제로 바뀔 때** `CSI 48 ; 행 ; 열 ; 높이px ; 너비px t` 를 보낸다(`appendInBandResizeReport`).
+    /// 켜는 순간에도 지금 크기를 보낸다(명세 MUST — 이미 켜져 있어도). SIGWINCH 를 못 받는 자리(ssh 너머·컨테이너)의 앱이
+    /// 크기를 바이트로 받는 길이다.
+    in_band_resize: bool = false,
     /// 지금까지 만든 `CSI ? 997 ; n` 수(질의 답 + 통지). 진단·판정자용 — 응답 버퍼는 리더가 비우므로 «만들었나» 를 따로 센다
     /// (`sync_bsu_count` 와 같은 결).
     color_scheme_reports: u32 = 0,
@@ -747,6 +752,7 @@ pub const TerminalCore = struct {
         self.mouse_format = .x10; // 1006/1015/1016 — 마우스 인코딩 기본 복원
         self.kitty_flags = .{}; // kitty keyboard 스택·플래그 전부 비움
         self.color_scheme_notify = false; // 2031 — 색 구성 통지 구독 해지(앱이 다시 켠다)
+        self.in_band_resize = false; // 2048 — 크기 통지 구독 해지(끄지 않고 죽은 앱이 셸에 보고를 흘리지 않게)
     }
 
     pub fn deinit(self: *TerminalCore) void {
@@ -1634,8 +1640,25 @@ pub const TerminalCore = struct {
     /// 셀 픽셀 크기를 platform이 주입한다(폰트·DPI·resize 시 갱신). kitty 자동 크기 이미지의 커서 advance에
     /// 쓴다(마우스 1016이 픽셀을 주입하는 것과 같은 결). 그 외 픽셀↔셀 환산은 렌더러 책임(K1).
     pub fn setCellMetrics(self: *TerminalCore, cell_width_px: u32, cell_height_px: u32) void {
+        const changed = self.cell_width_px != cell_width_px or self.cell_height_px != cell_height_px;
         self.cell_width_px = cell_width_px;
         self.cell_height_px = cell_height_px;
+        // 2048: 셀 픽셀이 바뀌면 보고의 픽셀 값이 바뀐다. 활성 surface 의 프레임 빌드가 매 tick 같은 값을 다시 넣으므로
+        // 바뀐 때만 — 같은 값 재주입은 조용하다.
+        if (changed and self.in_band_resize) self.appendInBandResizeReport();
+    }
+
+    /// `CSI 48 ; 행 ; 열 ; 높이px ; 너비px t` — DECSET 2048 의 크기 통지. 픽셀은 텍스트 영역(행×셀 높이, 열×셀 너비 — `CSI 14 t`
+    /// 와 같은 값)이고, 셀 픽셀을 아직 모르면 0 이다(명세: 모르면 0 으로 보고).
+    pub fn appendInBandResizeReport(self: *TerminalCore) void {
+        var buf: [64]u8 = undefined;
+        const report = std.fmt.bufPrint(&buf, "\x1b[48;{d};{d};{d};{d}t", .{
+            self.size.rows,
+            self.size.cols,
+            @as(u32, self.size.rows) * self.cell_height_px,
+            @as(u32, self.size.cols) * self.cell_width_px,
+        }) catch return;
+        self.appendResponse(report);
     }
 
     /// 기본 전경/배경 색(theme RGB)을 platform이 주입한다(셀 메트릭과 같은 결). OSC 10/11 색 질의 응답에
@@ -1919,7 +1942,12 @@ pub const TerminalCore = struct {
     }
 
     pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
-        return screen.resize(self, cols_in, rows_in);
+        const before = self.size;
+        try screen.resize(self, cols_in, rows_in);
+        // 2048: 내부 resize 가 **끝난 뒤** 알린다(명세 MUST NOT — 끝나기 전엔 보내지 않는다). 같은 크기 resize(재접속의 강제
+        // resize 등)는 조용하다.
+        if (self.in_band_resize and (self.size.cols != before.cols or self.size.rows != before.rows))
+            self.appendInBandResizeReport();
     }
 
     /// 렌더용 snapshot. 본문은 screen.zig가 소유 — 외부(app/session/renderer)가 점-호출하므로 facade 메서드로 남긴다.
@@ -12999,4 +13027,66 @@ test "2031 은 RIS 가 끈다 — 입력 모드 리셋과 같은 결" {
     defer core.deinit();
     try core.write("\x1b[?2031h\x1bc\x1b[?2031$p");
     try std.testing.expectEqualStrings("\x1b[?2031;2$y", core.pendingResponse());
+}
+
+test "2048 in-band resize: 켜면 곧바로 지금 크기를 알리고, 이미 켜져 있어도 다시 켜면 또 알린다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    // 셀 픽셀을 모르면 픽셀 값은 0 이다(명세: «pixel sizes … must report them as 0»).
+    try core.write("\x1b[?2048h");
+    try std.testing.expectEqualStrings("\x1b[48;24;80;0;0t", core.pendingResponse());
+    core.clearResponse();
+    // 셀 크기가 들어오면 픽셀은 «텍스트 영역» = 행×셀 높이, 열×셀 너비 — CSI 14t 와 같은 값이다.
+    core.setCellMetrics(9, 20);
+    core.clearResponse(); // 셀 크기 변경 통지는 아래 테스트가 본다
+    try core.write("\x1b[?2048h");
+    try std.testing.expectEqualStrings("\x1b[48;24;80;480;720t", core.pendingResponse());
+    core.clearResponse();
+    // DECRQM — 켜짐/꺼짐. 0(미인식)으로 답하면 앱이 기능을 안 쓴다.
+    try core.write("\x1b[?2048$p");
+    try std.testing.expectEqualStrings("\x1b[?2048;1$y", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b[?2048l\x1b[?2048$p");
+    try std.testing.expectEqualStrings("\x1b[?2048;2$y", core.pendingResponse());
+}
+
+test "2048 in-band resize: 켜져 있을 때 격자나 셀 픽셀이 실제로 바뀌면 알리고, 같은 값 재주입·꺼진 동안은 조용하다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    core.setCellMetrics(9, 20);
+    // 꺼진 동안: 바뀌어도 조용하다.
+    try core.resize(100, 30);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    try core.write("\x1b[?2048h");
+    core.clearResponse();
+    // 격자 변경 — 내부 resize 가 끝난 뒤의 크기로 알린다.
+    try core.resize(120, 40);
+    try std.testing.expectEqualStrings("\x1b[48;40;120;800;1080t", core.pendingResponse());
+    core.clearResponse();
+    // 같은 크기 resize(재접속의 강제 resize 등)는 조용하다.
+    try core.resize(120, 40);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 셀 픽셀 재주입 — 활성 surface 의 프레임 빌드가 매 tick 같은 값을 넣는다 — 같으면 조용하다.
+    core.setCellMetrics(9, 20);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 글꼴 크기 변경 등으로 셀 픽셀만 바뀌면 픽셀 값이 바뀌었으므로 알린다.
+    core.setCellMetrics(10, 22);
+    try std.testing.expectEqualStrings("\x1b[48;40;120;880;1200t", core.pendingResponse());
+    core.clearResponse();
+    // 끄면 다시 조용하다.
+    try core.write("\x1b[?2048l");
+    try core.resize(80, 24);
+    core.setCellMetrics(9, 20);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "2048 in-band resize: 셸 프롬프트의 입력 모드 초기화가 구독을 끈다 — 끄지 않고 죽은 앱이 셸에 보고를 흘리지 않게" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    try core.write("\x1b[?2048h");
+    core.clearResponse();
+    core.resetInputModes();
+    try std.testing.expect(!core.in_band_resize);
+    try core.resize(100, 30);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
 }

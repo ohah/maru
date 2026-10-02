@@ -178,6 +178,9 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 100, .name = "color_scheme_notify", .optional = true },
     .{ .tag = 101, .name = "color_scheme_dark_seen", .optional = true },
     .{ .tag = 102, .name = "color_scheme_reports", .optional = true },
+    // in-band resize 통지(DECSET 2048, 2026-10-03). 구독이 handoff 를 건너야 업그레이드 뒤에도 크기가 바뀌면 앱이 듣는다 —
+    // 끊기면 그 앱은 다시 켤 때까지 크기를 바이트로 못 받는다(«마지막으로 알린 크기» 는 따로 없다 — 코어가 바뀌기 전·후를 대조한다).
+    .{ .tag = 103, .name = "in_band_resize", .optional = true },
     .{ .tag = 72, .name = "charset_g0" },
     .{ .tag = 73, .name = "charset_g1" },
     .{ .tag = 74, .name = "charset_gl" },
@@ -1626,6 +1629,8 @@ test "handoff v1 exhaustive valid fixtures cover every stable core field and ree
     try candidate.write("\x1b[?2031h");
     candidate.setDefaultColors(.{ .r = 0xff, .g = 0xff, .b = 0xff }, .{ .r = 0xfd, .g = 0xf6, .b = 0xe3 });
     candidate.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, .{ .r = 0x10, .g = 0x10, .b = 0x10 });
+    // in-band resize 통지(2048, tag 103): 구독(켜는 순간의 크기 보고는 PTY 몫이라 비운다).
+    try candidate.write("\x1b[?2048h");
     candidate.clearResponse();
     try observeNonDefaultCoreFields(&coverage, &baseline, &candidate);
     try expectCanonicalCoreRoundTrip(&candidate);

@@ -103,6 +103,10 @@ pub const PtyIo = struct {
     // 백엔드(live_pty WriteQueueIo)만 채운다 — null이면 위임 경로 없음(runtime이 직접 적용으로 폴백). 순환 import를
     // 피해 명령 타입은 중립 `core_command`에 둔다(opaque ctx로 큐 타입은 백엔드가 숨김).
     enqueue_command: ?*const fn (ctx: *anyopaque, cmd: core_command.CoreCommand) anyerror!void = null,
+    // 메인이 명령 밖에서 코어에 남긴 응답(resize 의 DECSET 2048 크기 통지)을 reader 가 비우게 깨운다. 응답은 reader 가
+    // 유일한 PTY writer 로서 비차단·상한 응답 버퍼로 보내는 것이 계약이다 — 입력 큐(`write_input`)로 보내면 paste 로 찬
+    // 큐에서 호출 스레드가 막힌다. interactive 백엔드(live_pty WriteQueueIo)만 채운다 — null 이면 직접 쓰기로 폴백.
+    request_response_flush: ?*const fn (ctx: *anyopaque) void = null,
 
     pub fn fromSession(session: *pty.PtySession) PtyIo {
         return .{
@@ -323,15 +327,41 @@ pub const SurfaceRuntime = struct {
         // glyph continuation 때문에 cols>=2를 요구하고 init/resize에서 자체 clamp하는데, PTY
         // winsize를 raw size로 보내면 grid(2칸)와 셸 winsize(1칸)가 어긋난다. 같은 clamp 값을 둘 다에.
         const grid = terminal.clampGridSize(size);
+        // resize 가 만든 응답(DECSET 2048 in-band 크기 통지)은 PTY 출력이 오기 전엔 아무도 안 흘린다 — 응답은 보통 PTY 출력을
+        // 처리한 reader 가 비우는데, 크기가 바뀐 앱이 아무것도 안 쓰면 영영 안 나간다. 그래서 여기서 꺼내 직접 보낸다.
+        var reply_buf: ?[]u8 = null;
+        defer if (reply_buf) |reply| self.allocator.free(reply);
         {
             // 코어 resize도 코어 변경이라 락 아래(docs/io-render-threading.md). PTY ioctl은 락 밖.
             link.surface.lockCore(io);
             defer link.surface.unlockCore(io);
             try link.surface.core.resize(grid.cols, grid.rows);
+            const reply = link.surface.core.pendingResponse();
+            if (reply.len > 0) {
+                // OOM이면 best-effort 드롭(다른 응답 자리와 같은 결) — 응답은 비운다.
+                reply_buf = self.allocator.dupe(u8, reply) catch null;
+                link.surface.core.clearResponse();
+            }
         }
         // MARU_TRACE: 재생이 core.resize로 reflow를 재구성하도록 clamp된 grid 크기를 기록(코어에 적용된 값과 동일).
         if (link.trace_recorder) |rec| rec.recordResize(link.surface_id, grid.cols, grid.rows);
         link.pty_io.resize(grid) catch return error.ResizeFailed;
+        // 통지는 PTY winsize 까지 바뀐 **뒤** 보낸다 — 명세가 «내부 resize 가 끝나기 전엔 보내지 말라» 고 한다. winsize 가 실패하면
+        // 앱의 크기와 보고가 어긋나므로 보내지 않는다(위에서 반환 — 버퍼는 defer 가 푼다).
+        if (reply_buf) |reply| {
+            if (link.pty_io.request_response_flush) |request_flush| {
+                // reader 가 있으면 응답은 reader 몫이다(위 `PtyIo.request_response_flush`). winsize 를 바꾼 **뒤에** 코어에
+                // 되돌려 놓는다 — 락 아래 resize 직후 그대로 두면, 그 사이 출력을 처리한 reader 가 ioctl 전에 보낼 수 있다.
+                link.surface.lockCore(io);
+                link.surface.core.appendResponse(reply);
+                link.surface.unlockCore(io);
+                request_flush(link.pty_io.ctx);
+            } else {
+                // reader 없는 경로(controlled smoke·테스트). 쓰기 실패는 삼킨다(출력 응답 자리와 같은 결): resize 자체는
+                // 이미 끝났고, 오류를 돌려주면 host 의 `resizeWithApply` 가 «부분 적용» 으로 보고 runtime 을 fail-stop 한다.
+                link.pty_io.writeInput(reply) catch {};
+            }
+        }
     }
 
     /// io는 코어 락(std.Io.Mutex)을 잡는 데 쓴다 — 호출자(pump는 queue.io, 테스트는 testing.io)가
@@ -454,6 +484,12 @@ const FakePty = struct {
     fail_write: bool = false,
     suppress_input: bool = false,
     fail_resize: bool = false,
+    /// 첫 write 때까지 resize 가 몇 번 불렸나 — 「winsize 를 바꾼 뒤에 통지를 쓴다」 순서를 잰다.
+    resize_calls_at_first_write: ?usize = null,
+    /// reader 가 있는 백엔드 흉내 — 켜면 `request_response_flush` 를 채운다(요청 횟수와 그때의 resize 횟수를 잰다).
+    reader_flush: bool = false,
+    flush_requests: usize = 0,
+    resize_calls_at_first_flush: ?usize = null,
 
     fn init(allocator: std.mem.Allocator) FakePty {
         return .{ .allocator = allocator };
@@ -469,13 +505,21 @@ const FakePty = struct {
             .write_input = fakeWriteInput,
             .write_input_nb = fakeWriteInputNonBlocking,
             .resize_fn = fakeResize,
+            .request_response_flush = if (self.reader_flush) fakeRequestResponseFlush else null,
         };
+    }
+
+    fn fakeRequestResponseFlush(ctx: *anyopaque) void {
+        const self: *FakePty = @ptrCast(@alignCast(ctx));
+        if (self.resize_calls_at_first_flush == null) self.resize_calls_at_first_flush = self.resize_calls;
+        self.flush_requests += 1;
     }
 
     fn fakeWriteInput(ctx: *anyopaque, bytes: []const u8) !void {
         const self: *FakePty = @ptrCast(@alignCast(ctx));
         if (self.suppress_input) return error.Unauthorized;
         if (self.fail_write) return error.FakeWriteFailed;
+        if (self.resize_calls_at_first_write == null) self.resize_calls_at_first_write = self.resize_calls;
         try self.writes.appendSlice(self.allocator, bytes);
     }
 
@@ -861,6 +905,80 @@ test "runtime resize updates core and pty io together" {
     try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, surface.core.size);
     try std.testing.expectEqual(@as(usize, 1), fake_pty.resize_calls);
     try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, fake_pty.last_size.?);
+}
+
+test "runtime resize 는 DECSET 2048 크기 통지를 winsize 를 바꾼 뒤 PTY 로 보낸다 — 앱이 아무것도 안 써도" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 5 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try surface.core.write("\x1b[?2048h");
+    surface.core.clearResponse(); // 켤 때의 보고는 코어 판정자가 본다
+
+    try runtime.resize(1, .{ .cols = 42, .rows = 13 }, std.testing.io);
+    try std.testing.expectEqualStrings("\x1b[48;13;42;0;0t", fake_pty.writes.items);
+    try std.testing.expectEqual(@as(?usize, 1), fake_pty.resize_calls_at_first_write); // winsize 가 먼저다
+    try std.testing.expectEqualStrings("", surface.core.pendingResponse()); // 코어에 남기지 않는다
+
+    // 같은 크기 resize 는 조용하다(코어가 바뀐 때만 만든다).
+    try runtime.resize(1, .{ .cols = 42, .rows = 13 }, std.testing.io);
+    try std.testing.expectEqualStrings("\x1b[48;13;42;0;0t", fake_pty.writes.items);
+}
+
+test "runtime resize 는 reader 가 있으면 DECSET 2048 통지를 입력 큐로 안 보내고 winsize 뒤에 reader 에게 맡긴다" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 5 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+    fake_pty.reader_flush = true;
+
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try surface.core.write("\x1b[?2048h");
+    surface.core.clearResponse();
+
+    try runtime.resize(1, .{ .cols = 42, .rows = 13 }, std.testing.io);
+    // 입력 큐(`write_input` — 포화면 막는다)엔 아무것도 안 갔다. 통지는 reader 가 비울 코어 응답에 있다.
+    try std.testing.expectEqualStrings("", fake_pty.writes.items);
+    try std.testing.expectEqualStrings("\x1b[48;13;42;0;0t", surface.core.pendingResponse());
+    try std.testing.expectEqual(@as(usize, 1), fake_pty.flush_requests);
+    try std.testing.expectEqual(@as(?usize, 1), fake_pty.resize_calls_at_first_flush); // winsize 가 먼저다
+
+    // 같은 크기 resize 는 조용하다 — 깨우지도 않는다.
+    surface.core.clearResponse();
+    try runtime.resize(1, .{ .cols = 42, .rows = 13 }, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 1), fake_pty.flush_requests);
+}
+
+test "runtime resize 는 DECSET 2048 통지 쓰기가 실패해도 성공한다 — 통지 하나로 runtime 을 fail-stop 시키지 않는다" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 5 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try surface.core.write("\x1b[?2048h");
+    surface.core.clearResponse();
+    fake_pty.fail_write = true;
+
+    // host 는 resize 오류를 «부분 적용» 으로 보고 runtime 을 거둔다(`runtime_manager.resizeWithApply`).
+    try runtime.resize(1, .{ .cols = 42, .rows = 13 }, std.testing.io);
+    try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, surface.core.size);
+    try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, fake_pty.last_size.?);
+    try std.testing.expectEqualStrings("", surface.core.pendingResponse()); // 못 보낸 통지를 코어에 쌓지 않는다
 }
 
 test "runtime resize clamps to at least 2 columns for both core and pty winsize" {

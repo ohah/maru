@@ -52,6 +52,13 @@ const WriteQueueIo = struct {
         self.session.signalWrite();
     }
 
+    /// 메인이 코어에 남긴 응답을 reader 가 다음 명령 단계에서 비우게 하고 poll 을 깨운다(PtyIo.request_response_flush).
+    fn requestResponseFlush(ctx: *anyopaque) void {
+        const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
+        self.command_queue.requestResponseFlush();
+        self.session.signalWrite();
+    }
+
     fn writeInputNonBlocking(ctx: *anyopaque, bytes: []const u8) !usize {
         const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
         const n = try self.write_queue.enqueueSome(bytes); // paste: 들어가는 만큼만(잔량은 다음 tick)
@@ -355,6 +362,7 @@ pub const LivePtySession = struct {
                 .resize_fn = WriteQueueIo.resize,
                 .write_input_nb = WriteQueueIo.writeInputNonBlocking,
                 .enqueue_command = WriteQueueIo.enqueueCommand,
+                .request_response_flush = WriteQueueIo.requestResponseFlush,
             };
         }
         return runtime_mod.PtyIo.fromSession(self.session);
@@ -809,6 +817,58 @@ test "upgrade pause drains query response, input fence, and core command in exac
         if (!ordered) _ = usleep(1000);
     }
     try std.testing.expect(ordered);
+}
+
+test "DECSET 2048 크기 통지는 실제 reader 가 resize 뒤 자식 stdin 으로 보낸다 — 입력 큐를 거치지 않고" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var surface = try surface_mod.Surface.init(allocator, 79, .{ .cols = 40, .rows = 4 });
+    defer surface.deinit();
+    var live: LivePtySession = undefined;
+    // 자식은 켜는 순간의 보고(40×4)와 resize 뒤 보고(30×10)를 **정확히 그 바이트 수만큼** 읽어 대조한다(14 + 15 = 29).
+    try live.init(std.testing.io, allocator, 79, .{
+        .command = "/bin/sh",
+        .args = &.{
+            "-c",
+            "stty raw -echo; printf '\\033[?2048h'; v=$(dd bs=1 count=29 2>/dev/null | od -An -tx1 | tr -d ' \\n'); " ++
+                "if [ \"$v\" = 1b5b34383b343b34303b303b30741b5b34383b31303b33303b303b3074 ]; then printf 'PASS\\r\\n'; else printf 'FAIL%s\\r\\n' \"$v\"; fi; sleep 5",
+        },
+        .size = .{ .cols = 40, .rows = 4 },
+    }, 1);
+    defer live.deinit();
+    _ = try live.attachSurface(&runtime, &surface, true);
+    var pump = live.pump(&runtime);
+
+    // 켜는 순간의 보고가 코어에 닿을 때까지(구독이 서야 resize 가 보고를 만든다).
+    var attempts: usize = 0;
+    while (attempts < 5000) : (attempts += 1) {
+        _ = try pump.drainAvailable();
+        surface.lockCore(std.testing.io);
+        const on = surface.core.in_band_resize;
+        surface.unlockCore(std.testing.io);
+        if (on) break;
+        _ = usleep(1000);
+    }
+    try runtime.resize(79, .{ .cols = 30, .rows = 10 }, std.testing.io);
+
+    var verdict: enum { none, pass, fail } = .none;
+    attempts = 0;
+    while (attempts < 5000 and verdict == .none) : (attempts += 1) {
+        _ = try pump.drainAvailable();
+        surface.lockCore(std.testing.io);
+        const dump = try surface.core.dumpUtf8(allocator);
+        surface.unlockCore(std.testing.io);
+        defer allocator.free(dump);
+        if (std.mem.indexOf(u8, dump, "PASS") != null) verdict = .pass;
+        if (std.mem.indexOf(u8, dump, "FAIL") != null) verdict = .fail;
+        if (verdict == .none) _ = usleep(1000);
+    }
+    try std.testing.expectEqual(.pass, verdict);
+    // 입력 큐(포화면 호출 스레드를 막는 `enqueueBlocking`)는 한 바이트도 안 탔다 — 통지는 reader 의 응답 버퍼로 갔다.
+    try std.testing.expectEqual(@as(u64, 0), live.write_queue.enqueuedTotal());
 }
 
 const FakePty = struct {

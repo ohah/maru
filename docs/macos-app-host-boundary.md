@@ -156,8 +156,10 @@ Web의 `renderMermaid` mailbox는 독립 timeout을 갖지 않고 Zig exact term
 
 GUI 실행(Dock·Finder)의 stderr 는 `/dev/null` 이라 진단이 통째로 사라진다. `redirectStderrToAppLog`
 (`app_host_abi.zig`)가 fd 2 를 `<cache>/app.log` 로 바꾸고 `=== maru app start pid=N ===` 을 찍어
-어디부터가 이번 실행인지 표시한다. **stderr 가 tty 면 건드리지 않는다** — 터미널에서 띄웠다면 콘솔이
-이미 진단을 받고 있고, 그것을 파일로 가로채면 개발 중 출력을 빼앗는다.
+어디부터가 이번 실행인지 표시한다. **stderr 가 `/dev/null` 일 때만 바꾼다**(2026-10-02) — tty·파일·파이프로
+받는 실행(터미널 개발, `2> 파일` 하네스)은 이미 진단을 받고 있고, 그것을 가로채면 그 출력을 빼앗는다.
+**앱 시작 직후**(Swift `main` 첫 줄, ABI `maru_macos_app_redirect_stderr`) 바꾼다 — 예전에는 첫 창 세션을 만들 때여서
+그 전의 인스턴스 lease·config bootstrap 실패 줄이 사라졌다. 두 조건은 `tests/app_log_redirect_boundary.zig` 가 함께 고정한다.
 
 시작 마커만으로는 **어떻게 끝났는지**를 못 본다. 2026-08-29 에 앱 업데이트 직후 여섯 번 연속으로 앱이
 조용히 사라졌는데, `app.log` 에 `workspace checkpoint: final-quit` 이 한 줄도 없고 크래시 리포트도

@@ -173,8 +173,8 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
     try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
-test "ABI v191 workspace restore toggle and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 191), abi_version);
+test "ABI v192 early app log redirect and pre-session exports match the C header" {
+    try std.testing.expectEqual(@as(u32, 192), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -960,15 +960,35 @@ fn enforceAppLogCap() void {
     if (std.c.lseek(2, 0, std.c.SEEK.END) > app_log_max_bytes) _ = std.c.ftruncate(2, 0);
 }
 
+/// `fd` 가 `/dev/null` 인가. LaunchServices 는 Dock·Finder 로 띄운 앱의 stdin/stdout/stderr 를 `/dev/null` 에
+/// 붙인다(2026-10-02 실측: Finder·Dock·System Settings 의 fd 0·1·2 가 모두 `CHR /dev/null`). 문자 장치이고
+/// 장치 번호가 `/dev/null` 과 같을 때만 참이다 — 확인하지 못하면 거짓(돌리지 않는 쪽).
+fn fdIsDevNull(fd: c_int) bool {
+    var target: std.c.Stat = undefined;
+    if (std.c.fstat(fd, &target) != 0) return false;
+    if (!std.c.S.ISCHR(@intCast(target.mode))) return false;
+    const null_fd = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (null_fd < 0) return false;
+    defer _ = std.c.close(null_fd);
+    var dev_null: std.c.Stat = undefined;
+    if (std.c.fstat(null_fd, &dev_null) != 0) return false;
+    return target.rdev == dev_null.rdev;
+}
+
 fn redirectStderrToAppLog() void {
     if (builtin.is_test) return;
+    // 앱 시작 직후(`maru_macos_app_redirect_stderr`)와 창마다(`maru_macos_app_session_create`) 불린다 — 한 번만 한다.
+    if (app_log_redirected) return;
     // LaunchServices connects this opt-in harness's stderr to its isolated artifact. Replacing
     // fd 2 here silently hides typed IME failures from the verifier. Normal GUI logs still use
     // the bounded app.log owner below; only the exact smoke flag preserves the supplied fd.
     if (std.c.getenv("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE")) |value| {
         if (std.mem.eql(u8, std.mem.span(value), "1")) return;
     }
-    if (std.c.isatty(2) != 0) return;
+    // **stderr 가 `/dev/null` 일 때만 돌린다**(Dock·Finder 실행). 예전 기준은 「tty 가 아니면」이었는데, 그러면
+    // `2> 파일` 이나 파이프로 받는 하네스·사용자의 출력까지 빼앗는다 — 시작을 앞당기자 세션 이전 줄을 파일에서
+    // 기다리는 lease 하네스(tools/test-macos-app-instance-lease.sh)가 그 줄을 영영 못 보게 된다. 버려지는 출력만 살린다.
+    if (!fdIsDevNull(2)) return;
 
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = controlBaseDir(&base_buf) orelse return;
@@ -1189,11 +1209,19 @@ fn logBuildIdentity() void {
     std.log.scoped(.app).warn("{s}", .{buildIdentityLine(&buf, exeMtimeSeconds(), std.c.getpid())});
 }
 
+/// ABI v192: 앱 시작 **직후**(Swift `main` 첫 줄) stderr 를 `app.log` 로 돌린다. 예전에는 첫 창의 세션을 만들 때
+/// (`maru_macos_app_session_create`) 돌려서, 그보다 먼저 나오는 진단 — 인스턴스 lease·config bootstrap 실패,
+/// `workspace.restore` 읽기 — 이 Dock·Finder 실행에서 `/dev/null` 로 사라졌다. 멱등이다.
+pub export fn maru_macos_app_redirect_stderr() void {
+    redirectStderrToAppLog();
+}
+
 pub export fn maru_macos_app_session_create(
     config: ?*const AppSessionConfig,
     out_session: ?*?*AppSession,
 ) c_int {
-    // 앱의 가장 이른 Zig 진입점이다. 여기서 걸어야 config 경고를 포함한 시작 단계 진단이 전부 남는다.
+    // 앱 시작 때 `maru_macos_app_redirect_stderr` 가 이미 돌렸으면 무동작이다. Swift 가 아닌 호스트·하네스가
+    // 이 함수부터 부르는 경우를 위해 남긴다.
     redirectStderrToAppLog();
     // **어느 바이너리인지 먼저 말한다.** 로그를 리다이렉트한 **직후**여야 이 줄도 `app.log` 에 남는다 —
     // 그 파일은 누적이라, 이 줄이 없으면 「지금 보는 로그가 방금 빌드한 것인가」를 매번 추측하게 된다.
@@ -3630,10 +3658,14 @@ pub export fn maru_macos_app_session_apply_workspace_window(
         // **한 겹 더 있다.** `PersistentRuntimeUnavailable` 은 네 자리에서 나오고 그중 둘은
         // 원래 오류를 통째로 버린다 — 풀에 호스트가 없는 것과 연결이 닫힌 것은 고칠 곳이 다르다.
         std.log.scoped(.app).warn(
-            "workspace apply failed: window_index={d} err={s} attach_site={s} attach_raw={s} attach_outcome={s} host_site={s} host_reason={s}",
+            "workspace apply failed: window_index={d} err={s} stage={s} tab={?d} pane={?d} slot={?d} attach_site={s} attach_raw={s} attach_outcome={s} host_site={s} host_reason={s}",
             .{
                 window_index,
                 @errorName(err),
+                AppSession.restore_position.stage,
+                AppSession.restore_position.tab,
+                AppSession.restore_position.pane,
+                AppSession.restore_position.slot,
                 AppSession.attach_fail_site,
                 AppSession.attach_fail_raw,
                 AppSession.attach_fail_outcome,
@@ -7685,6 +7717,78 @@ test "a successful window restore still consumes the backup record into the revi
     const revived = pane.terms.items[1];
     try std.testing.expectEqualStrings(content, revived.rt.editorDocument().opened.?.file.content);
     try std.testing.expectEqual(@as(usize, 0), session.?.deferred_backup_drops.items.len);
+}
+
+test "app log redirect targets only a /dev/null stderr" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // Dock·Finder 실행의 stderr 는 `/dev/null` 이다 — 그때만 돌린다. 하네스·사용자가 파일이나 파이프로 받는
+    // 출력은 빼앗지 않는다. `/dev/zero` 는 같은 문자 장치라 「문자 장치면 돌린다」로 잘못 짜면 여기서 걸린다.
+    const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    try std.testing.expect(dev_null >= 0);
+    defer _ = std.c.close(dev_null);
+    try std.testing.expect(fdIsDevNull(dev_null));
+
+    const dev_zero = std.c.open("/dev/zero", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    try std.testing.expect(dev_zero >= 0);
+    defer _ = std.c.close(dev_zero);
+    try std.testing.expect(!fdIsDevNull(dev_zero));
+
+    var pipe_fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe_fds));
+    defer _ = std.c.close(pipe_fds[0]);
+    defer _ = std.c.close(pipe_fds[1]);
+    try std.testing.expect(!fdIsDevNull(pipe_fds[1]));
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-log-redirect-{d}", .{std.c.getpid()});
+    const file = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    try std.testing.expect(file >= 0);
+    defer _ = std.c.unlink(path.ptr);
+    defer _ = std.c.close(file);
+    try std.testing.expect(!fdIsDevNull(file));
+
+    try std.testing.expect(!fdIsDevNull(-1)); // 닫힌 fd — 확인하지 못하면 돌리지 않는다
+}
+
+test "workspace apply failure names the tab it was building" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 창 복원은 트랜잭션이라 탭 하나가 실패해도 창 전체가 실패한다. 그 실패 줄이 **어느 탭**이었는지 말해야
+    // 저장 파일에서 고칠 곳을 바로 짚는다 — 두 번째 탭의 트리가 같은 pane 을 두 번 가리키게 망가뜨린다.
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+    const text =
+        "maru.workspace.v1\n" ++
+        "window tabs=2 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"ok\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n" ++
+        "tab panes=2 active-pane=0 custom-name=\"broken\"\n" ++
+        "tree-node split vertical ratio=500\n" ++
+        "tree-node leaf pane=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n";
+    AppSession.restore_position = .{};
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.create_failed)),
+        maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0),
+    );
+    try std.testing.expectEqualStrings("tabs", AppSession.restore_position.stage);
+    try std.testing.expectEqual(@as(?usize, 1), AppSession.restore_position.tab);
+    // 트리 손상은 특정 pane 의 실패가 아니다 — pane·slot 을 남기면 엉뚱한 자리를 가리킨다.
+    try std.testing.expectEqual(@as(?usize, null), AppSession.restore_position.pane);
+    try std.testing.expectEqual(@as(?usize, null), AppSession.restore_position.slot);
 }
 
 test "workspace restore ABI preserves multi-window count active and apply" {

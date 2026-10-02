@@ -192,7 +192,8 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 - **프레임 타이밍 진단**(`MARU_DEBUG=1`): `logFrameTime`이 tick을 단계 트리로 분해해 `<cache>/maru/app.log`에 남긴다 —
   느린 tick(총>8ms)은 즉시 `SLOW` 한 줄, 약 1초 창마다 실효 rate·mean/max·단계 비중. 단계 트리와 읽는 법은
   [present cadence §10.6](io-render-present.md)이 단일 출처다. GUI로 띄우면 stderr가 `/dev/null`이라 앱이 스스로
-  app.log로 돌리므로, 터미널에서 잴 때도 **stderr를 파일로 리다이렉트**하면 같은 자리에 쌓인다:
+  app.log로 돌린다. 터미널에서 잴 때는 **stderr를 파일로 리다이렉트**하면 **그 파일**에 쌓인다(앱은 `/dev/null`
+  stderr 만 app.log 로 돌린다 — 2026-10-02 전에는 「tty 가 아니면」이라 이 경우에도 app.log 로 갔다):
   `MARU_DEBUG=1 ./zig-out/Maru.app/Contents/MacOS/maru-macos-app > /tmp/maru.out 2>&1`
   - ⚠️ **성능을 잴 때는 반드시 `-Doptimize=`를 준다.** `zig build macos-app`은 `standardOptimizeOption` 기본이라
     **Debug**이고, 이미지 경로 실측에서 ReleaseFast보다 **15배** 느렸다(§10.6 표).

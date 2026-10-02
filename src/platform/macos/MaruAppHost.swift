@@ -4823,6 +4823,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     static func main() {
+        // **가장 먼저** 진단 통로를 살린다. Dock·Finder 로 띄우면 stderr 가 `/dev/null` 이라, 아래 lease·config
+        // bootstrap 실패 줄이 아무 데도 안 남았다(예전엔 첫 창 세션을 만들 때에야 `app.log` 로 돌렸다).
+        // 파일·파이프·tty 로 받는 실행은 Zig 쪽이 건드리지 않는다.
+        maru_macos_app_redirect_stderr()
         let scenarioLoad = NotificationReleaseAppScenarioConfiguration.load(
             environment: ProcessInfo.processInfo.environment
         ) { requestIdentifier, hostId, runtimeId, eventId in
@@ -13886,7 +13890,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             print("artifacts written to \(artifactDirectory)/")
         } catch {
             // `artifactDirectory`는 상대 경로라 개발/CI(저장소 cwd)에서만 쓸 수 있다. `.app`을 Finder/Dock으로
-            // 실행하면 cwd가 "/"여서 쓰기가 실패하고, stdout/stderr도 보이지 않아 종료 요약이 통째로 사라진다.
+            // 실행하면 cwd가 "/"여서 쓰기가 실패하고, 요약은 stdout 으로 나가므로(stderr 만 `~/.cache/maru/app.log` 로
+            // 돌린다 — 2026-08-26 이후) 종료 요약이 통째로 사라진다.
             // 그 경로에서도 quit_* 계측을 되짚을 수 있어야 하므로 사용자 홈 아래로 폴백한다. 기존 경로가 성공하는
             // 개발/CI에서는 이 분기를 타지 않으므로 아티팩트 계약은 그대로다.
             if let fallback = maruFallbackSummaryFileURL(),

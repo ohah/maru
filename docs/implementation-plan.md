@@ -90,7 +90,7 @@ macOS 로컬 shell 1개 surface
 - **커맨드 팝업(⌘⇧P)**: fuzzy 필터·한글 IME 검색 — 완료. 영어 표시 제목은 유지하고 모든 명령의 한국어 검색 별칭을 카탈로그에 둔다. 쿼리의 글자 순서대로 매칭해 연속·앞쪽·단어 시작을 우선하며, 한글 조합 중에도 후보를 갱신한다.
 - **선택/클립보드**: 블록(직사각형) 선택 — **완료**(Option+드래그 = 직사각형 — iTerm2/Terminal.app 관례). `selection_block` 플래그 + `SelectionSpan.block`로 `extractSelection`(각 행 [lo,hi]·행마다 개행·뒤 빈칸 trim)·`inSelection`(모든 행 동일 열 범위)·`selectionViewportSpan`(col min/max 정렬)이 분기. platform mouse가 Option(mods&8)이면 `setSelectionBlock`하고 mouse-reporting override에 option 포함. `selectionStart` 시그니처는 불변(기존 호출처 보존).
 - **New Window(멀티 윈도우)**: W3/W4 잔여 — global hotkey(toggle_window/quick)의 멀티 창 타게팅·창별 독립 config·탭 tear-off(창 간 탭 이동); W5 — atlas 공유(SharedGridSet식 grid-per-size, memory `multi-window-atlas-ownership` — 프로파일 후).
-- **Workspace restore**: config 토글(현재 `MARU_NO_WORKSPACE_RESTORE` env-var)·부분 복구 artifact(한 surface 실패 시 이유 기록)·startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
+- **Workspace restore**: **config 토글 — 완료**(`workspace.restore`, 끄면 저장도 안 함; env `MARU_NO_WORKSPACE_RESTORE` 는 테스트용 강제 끔). **부분 복구 기록 — 완료**(`app.log` 에 창 apply 실패의 단계·탭·pane·slot 과, 버려진 파일 패널 항목·explorer root·브라우저 Term 을 한 줄씩 — [workspace 복원 계획](plans/workspace-restore.md) 완료 기준). 남은 것: startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
 - **kitty graphics**: reflow 후 정밀 재배치·멀티 윈도우 텍스처 캐시 소유권(atlas 소유권 재검토와 함께). query/애니메이션은 위 kitty 절 K5 참조. (비활성 panel 이미지 렌더는 **완료** — [terminal-input-and-protocols.md](plans/terminal-input-and-protocols.md) K2e.)
 
 ## Session host 실행 중 transport reconnect (제품 배선 완료·CR6d 후보창 증거 미완료)

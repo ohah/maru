@@ -5602,6 +5602,18 @@ pub fn build(b: *std.Build) void {
     run_ci_zig_package_prime_boundary_tests.addArg("--maru-expect-tests=2");
     run_ci_zig_package_prime_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_ci_zig_package_prime_boundary_tests.step);
+    // 앱 진단 통로는 시작 직후·`/dev/null` stderr 에만 — Swift main 순서와 리다이렉트 기준을 함께 센다.
+    const app_log_redirect_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/app_log_redirect_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_app_log_redirect_boundary_tests = b.addRunArtifact(app_log_redirect_boundary_tests);
+    run_app_log_redirect_boundary_tests.addArg("--maru-expect-tests=1");
+    run_app_log_redirect_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_app_log_redirect_boundary_tests.step);
     const perf_gate_mode_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/perf_gate_mode_boundary.zig"),

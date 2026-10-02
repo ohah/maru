@@ -3224,6 +3224,13 @@ pub fn fileEntryIsFocusTarget(self: *const AppSession, entry: *const dock_panel.
 /// 계속 복원한다. 원래 active entry가 버려지면 첫 유효 entry를 활성화하며, 전부 버려지면 빈 도크다.
 /// 반환은 **버린 entry 수**다. 호출자(applyWorkspaceWindow)가 이 값을 checkpoint 차단 판정에 쓴다 — 조용히 버리고
 /// apply를 성공으로 반환하면 다음 Quit이 버려진 도크를 파일에 커밋해 사용자가 배치를 영구히 잃는다.
+/// 복원이 버린 파일 패널 항목을 **하나씩** 남긴다. 예전에는 개수(`workspace restore accounting: dropped=N`)만 남아
+/// 어느 파일이 왜 사라졌는지 알 수 없었다. 경로는 저장 파일(`workspace.v1`, 0600)에 이미 있는 값이고 이 줄은
+/// 같은 사용자만 읽는 `app.log`(0600)로 간다.
+fn logDroppedFilePanelEntry(reason: []const u8, path: []const u8) void {
+    std.log.scoped(.app).warn("workspace restore dropped: kind=file-panel-entry reason={s} path={s}", .{ reason, path });
+}
+
 pub fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_panel.DockPanel) usize {
     const old_active = panel.restored_active;
     const original_len = panel.restored.items.len;
@@ -3233,6 +3240,7 @@ pub fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_pane
     while (original_index < original_len) : (original_index += 1) {
         const entry = panel.restored.items[current_index];
         const open_kind = file_panel_bridge.openKindForPath(entry.path) orelse {
+            logDroppedFilePanelEntry("unknown-kind", entry.path);
             const removed = panel.restored.orderedRemove(current_index);
             self.allocator.free(removed.path);
             continue;
@@ -3255,6 +3263,7 @@ pub fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_pane
             // 지금 만들지 않고 예약만 하는 이유: 이 자리는 복원 staging 이라 pane 도 Term 도 아직 없다.
             // **파일이 사라진 경우만**이다(종류가 안 맞거나 경로가 이상한 것은 파일이 그대로 있다).
             if (file_gone) self.queueBackupRevival(.{ .path = .{ .path = entry.path } });
+            logDroppedFilePanelEntry(if (file_gone) "missing" else "invalid", entry.path);
             const removed = panel.restored.orderedRemove(current_index);
             self.allocator.free(removed.path);
             continue;

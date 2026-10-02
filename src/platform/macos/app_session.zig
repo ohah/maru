@@ -4336,6 +4336,16 @@ pub const AppSession = struct {
 
     /// 예약을 **한 프레임에 하나씩** 소비한다 — 사본이 최대 8 MiB 라 여럿을 한 프레임에 되살리면
     /// 그 프레임이 통째로 I/O 가 된다(백업 쓰기와 같은 규율).
+    /// 미룬 백업 레코드 삭제 한 건 — 레코드 **파일 이름**만 든다(내용·경로 문자열을 소유하지 않는다).
+    pub const DeferredBackupDrop = struct {
+        name: [maru.session.editor.backup.max_file_name_len]u8 = undefined,
+        len: u8 = 0,
+
+        pub fn slice(self: *const DeferredBackupDrop) []const u8 {
+            return self.name[0..self.len];
+        }
+    };
+
     pub fn queueBackupRevival(self: *AppSession, doc: maru.session.editor.backup.Doc) void {
         if (self.pending_backup_revivals.items.len >= max_pending_revivals) return;
         var entry: PendingRevival = switch (doc) {
@@ -6049,6 +6059,13 @@ pub const AppSession = struct {
     /// **되살릴 문서들**(U4d) — 복원 트리 staging·dock prune 이 예약하고 tick 이 하나씩 소비한다.
     /// 그 자리들에는 아직/이미 pane 이 없어 Term 을 만들 수 없기 때문이다.
     pending_backup_revivals: std.ArrayList(PendingRevival) = .empty,
+    /// **창 복원이 확정될 때까지 미룬 백업 레코드 삭제**(파일 이름). 복원은 레코드 내용을 Term 에 넣자마자 레코드를
+    /// 지웠는데, 창 apply 는 트랜잭션이라 뒤의 탭 하나만 실패해도 그 Term 들이 롤백된다 — 레코드도 Term 도 없어져
+    /// 미저장 내용이 영영 사라졌다(2026-10-02 실험: 실패한 apply 뒤 `u-1.bak` 이 지워짐). 그래서 apply 가 도는 동안은
+    /// 여기 모으기만 하고, 확정되면 지우고(`commitDeferredDrops`), 실패하면 버려서 레코드를 남긴다.
+    deferred_backup_drops: std.ArrayList(DeferredBackupDrop) = .empty,
+    /// 지금 창 복원 apply 안인가 — 위 미루기를 켠다. `applyWorkspaceWindow` 만 세우고 내린다.
+    workspace_restore_staging: bool = false,
     /// 위 payload 를 **어떤 bracketed 모드로 빚었는가**(적대적 15 회차 — 없으면 그 자리에서 다시 읽는다).
     ///
     /// **확인 모달은 창이 사람 시간만큼 넓다.** 모달이 뜬 동안 사용자가 읽고 고르는 몇 초 사이에
@@ -23720,6 +23737,7 @@ pub const AppSession = struct {
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         if (self.file_tree_external_open) |path| self.allocator.free(path);
         self.pending_backup_revivals.deinit(self.allocator);
+        self.deferred_backup_drops.deinit(self.allocator);
         if (self.config_path_buffer) |b| self.allocator.free(b);
         {
             var it = self.pending_pastes.valueIterator();

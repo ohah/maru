@@ -7415,6 +7415,153 @@ test "Explorer v137 root picker ABI drains typed operations and cancel or invali
     try std.testing.expect(session.?.file_tree_root_validation == null);
 }
 
+/// 창 하나를 apply 하되 **두 번째 탭의 트리를 망가뜨려** 반드시 실패하게 만드는 workspace. 첫 탭의 pane 꼬리(`pane_tail`)에
+/// 되살릴 문서를 싣는다 — 그 문서는 첫 탭에서 이미 되살아난 뒤 두 번째 탭 실패로 롤백된다.
+fn failingRestoreText(buf: []u8, pane_tail: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "maru.workspace.v1\n" ++
+        "window tabs=2 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"ok\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"{s}\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n" ++
+        "tab panes=2 active-pane=0 custom-name=\"broken\"\n" ++
+        "tree-node split vertical ratio=500\n" ++
+        "tree-node leaf pane=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n", .{pane_tail});
+}
+
+fn readBackupRecord(dir: std.Io.Dir, name: []const u8, buf: []u8) ?[]const u8 {
+    return dir.readFile(std.testing.io, name, buf) catch null;
+}
+
+fn countDirEntries(dir: std.Io.Dir) !usize {
+    var it_dir = try dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer it_dir.close(std.testing.io);
+    var it = it_dir.iterate();
+    var n: usize = 0;
+    while (try it.next(std.testing.io)) |_| n += 1;
+    return n;
+}
+
+test "a failed window restore keeps the backup records of documents it had already revived" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // **데이터 손실 회귀(2026-10-02).** 복원은 레코드 내용을 Term 에 넣자마자 레코드를 지웠다. 창 apply 는 트랜잭션이라
+    // 뒤의 탭이 실패하면 그 Term 이 롤백되고, 레코드도 Term 도 없어져 미저장 내용이 영영 사라졌다
+    // (실험: status=4 record_before=true record_after=false). 수정을 끄면 **이름 없는 문서** 케이스가 `BackupRecordLost` 로
+    // 실패한다. 경로 문서(`file-term`)는 복원 staging 에서 레코드를 소비하지 않아 수정 전에도 남았다 — 그 사실이 계속
+    // 참인지(롤백이 경로 레코드도 건드리지 않는지)를 지키는 가드로 함께 둔다.
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    try tmp.dir.createDirPath(io, "backups");
+    var backups_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const backups = try std.fmt.bufPrint(&backups_buf, "{s}/backups", .{root});
+    session_mod.editor_backup_ops.setDirForTest(backups);
+    defer session_mod.editor_backup_ops.setDirForTest(null);
+    var backup_dir = try tmp.dir.openDir(io, "backups", .{});
+    defer backup_dir.close(io);
+    const backup_mod = maru.session.editor.backup;
+
+    // 경로 문서: 디스크 내용과 **다른** 미저장 편집이 레코드에 있다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.txt", .data = "on disk\n" });
+    var doc_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const doc_path = try std.fmt.bufPrint(&doc_path_buf, "{s}/doc.txt", .{root});
+
+    const Case = struct { doc: backup_mod.Doc, content: []const u8, tail: []const u8 };
+    var tail_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    const path_tail = try std.fmt.bufPrint(&tail_buf, " file-term=\"1:text:source-edit:{d}:{s}\"", .{ doc_path.len, doc_path });
+    const cases = [_]Case{
+        .{ .doc = .{ .untitled = 1 }, .content = "precious unsaved text\n", .tail = " untitled-term=\"1:1\"" },
+        .{ .doc = .{ .path = .{ .path = doc_path } }, .content = "unsaved edit on top\n", .tail = path_tail },
+    };
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    for (cases) |case| {
+        const record = try backup_mod.encode(a, case.doc, case.content);
+        defer a.free(record);
+        var name_buf: [backup_mod.max_file_name_len]u8 = undefined;
+        const name = backup_mod.fileName(&name_buf, case.doc);
+        try backup_dir.writeFile(io, .{ .sub_path = name, .data = record });
+
+        var session: ?*AppSession = null;
+        try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+        defer maru_macos_app_session_destroy(session);
+
+        var text_buf: [8192]u8 = undefined;
+        const text = try failingRestoreText(&text_buf, case.tail);
+        try std.testing.expectEqual(
+            @as(c_int, @intFromEnum(Status.create_failed)),
+            maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0),
+        );
+        // 레코드가 **바이트까지 그대로** 남고, 다른 이름으로 옮겨 간 것도 아니다(폴더에 그 하나뿐).
+        var read_buf: [4096]u8 = undefined;
+        const after = readBackupRecord(backup_dir, name, &read_buf) orelse return error.BackupRecordLost;
+        try std.testing.expectEqualStrings(record, after);
+        try std.testing.expectEqual(@as(usize, 1), try countDirEntries(backup_dir));
+        try std.testing.expectEqual(@as(usize, 0), session.?.deferred_backup_drops.items.len);
+        try std.testing.expect(!session.?.workspace_restore_staging);
+        try backup_dir.deleteFile(io, name);
+    }
+}
+
+test "a successful window restore still consumes the backup record into the revived document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 대조군 — 미루기가 **성공 경로의 삭제까지 막으면** 다음 실행이 같은 내용을 또 되살려 문서가 둘이 된다.
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    session_mod.editor_backup_ops.setDirForTest(root);
+    defer session_mod.editor_backup_ops.setDirForTest(null);
+    const backup_mod = maru.session.editor.backup;
+    const content = "precious unsaved text\n";
+    const record = try backup_mod.encode(a, .{ .untitled = 1 }, content);
+    defer a.free(record);
+    var name_buf: [backup_mod.max_file_name_len]u8 = undefined;
+    const name = backup_mod.fileName(&name_buf, .{ .untitled = 1 });
+    try tmp.dir.writeFile(io, .{ .sub_path = name, .data = record });
+
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+    const text =
+        "maru.workspace.v1\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"ok\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" untitled-term=\"1:1\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n";
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0));
+    var read_buf: [4096]u8 = undefined;
+    try std.testing.expect(readBackupRecord(tmp.dir, name, &read_buf) == null);
+    const pane = session.?.tabs.items[0].panes.items[0];
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    const revived = pane.terms.items[1];
+    try std.testing.expectEqualStrings(content, revived.rt.editorDocument().opened.?.file.content);
+    try std.testing.expectEqual(@as(usize, 0), session.?.deferred_backup_drops.items.len);
+}
+
 test "workspace restore ABI preserves multi-window count active and apply" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const config: AppSessionConfig = .{

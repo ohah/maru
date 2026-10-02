@@ -250,6 +250,28 @@ pub fn fileNameIfOnDisk(term: *const Term, buf: *[backup.max_file_name_len]u8) ?
 }
 
 /// 이름으로 지운다 — `fileNameIfOnDisk` 로 떠 둔 이름을 **닫힌 뒤에** 소비한다.
+/// 복원이 **소비한** 레코드를 지운다 — 창 복원 apply 안이면 **확정까지 미룬다**. apply 는 트랜잭션이라 뒤에서
+/// 실패하면 방금 내용을 넣은 Term 이 롤백되는데, 그때 레코드까지 지워져 있으면 미저장 내용이 사라진다.
+/// 목록에 못 넣으면(OOM) **지우지 않는다** — 다음 실행이 같은 레코드를 다시 보는 쪽이 잃는 쪽보다 낫다.
+fn dropConsumed(self: *AppSession, doc: backup.Doc) void {
+    if (!self.workspace_restore_staging) return dropDoc(self, doc);
+    var deferred: AppSession.DeferredBackupDrop = .{};
+    const name = backup.fileName(&deferred.name, doc);
+    deferred.len = @intCast(name.len);
+    self.deferred_backup_drops.append(self.allocator, deferred) catch {};
+}
+
+/// 창 복원이 **확정됐다** — 미뤄 둔 레코드를 이제 지운다(내용은 살아 있는 Term 에 있다).
+pub fn commitDeferredDrops(self: *AppSession) void {
+    for (self.deferred_backup_drops.items) |*deferred| dropName(self, deferred.slice());
+    self.deferred_backup_drops.clearRetainingCapacity();
+}
+
+/// 창 복원이 **실패해 롤백됐다** — 미뤄 둔 삭제를 버린다. 레코드는 디스크에 그대로 남는다.
+pub fn discardDeferredDrops(self: *AppSession) void {
+    self.deferred_backup_drops.clearRetainingCapacity();
+}
+
 pub fn dropName(self: *AppSession, name: []const u8) void {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = dirPath(&dir_buf) orelse return;
@@ -315,7 +337,7 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
     if (parsed.content.len > backup.pause_bytes) return;
     // 내용이 이미 같으면 되살릴 것이 없다 — 레코드만 걷는다(다음 실행이 또 보지 않게).
     if (std.mem.eql(u8, parsed.content, doc.file.content)) {
-        dropDoc(self, parsed.doc);
+        dropConsumed(self, parsed.doc);
         return;
     }
 
@@ -340,7 +362,7 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
         },
         else => {},
     }
-    dropDoc(self, parsed.doc);
+    dropConsumed(self, parsed.doc);
     term.rt.editorDocument().notifications.backup_on_disk = false;
     // **알림 한 줄**(모달이 아니다) — 크래시를 몰랐던 사용자는 dirty 를 버그로 읽는다.
     self.showNoticeKey(.editor_backup_restored);

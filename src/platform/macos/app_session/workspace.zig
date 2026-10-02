@@ -663,6 +663,11 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // 일이어야 한다. 모델 교체와 같은 transaction에 묶어 다음 tick/재시도에 유령 count가 남지 않게 한다.
     const restore_accounting_before = RestoreAccountingSnapshot.capture(self);
     errdefer restore_accounting_before.restore(self);
+    // 이 apply 동안 복원이 소비한 백업 레코드는 **확정까지 지우지 않는다**(`DeferredBackupDrop`). 실패하면 버려서
+    // 레코드를 남기고, 성공하면 함수 끝에서 지운다 — 롤백된 Term 과 함께 미저장 내용이 사라지지 않게.
+    self.workspace_restore_staging = true;
+    defer self.workspace_restore_staging = false;
+    errdefer app_session_mod.editor_backup_ops.discardDeferredDrops(self);
 
     var new_dock = try dock_panel.DockPanel.restore(self.allocator, &app_session_mod.app_runtime.entry_ids, win.dock);
     var new_dock_owned = true;
@@ -884,6 +889,8 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
         .{ dropped, demoted, revived, if (dropped > 0) "set" else "clear" },
     );
     if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
+    // 창이 확정됐다 — 내용이 살아 있는 Term 으로 옮겨 갔으니 미룬 레코드를 이제 지운다.
+    app_session_mod.editor_backup_ops.commitDeferredDrops(self);
 }
 
 /// Reconciliation numbers only runtime-bound Workspace surfaces, in Window/Tab/Pane/surface order.

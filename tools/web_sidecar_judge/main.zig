@@ -26,6 +26,7 @@ const input_check = @import("input_check.zig");
 const dialogs_check = @import("dialogs_check.zig");
 const permissions_check = @import("permissions_check.zig");
 const popup_check = @import("popup_check.zig");
+const tooltip_check = @import("tooltip_check.zig");
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -76,6 +77,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         popupChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--tooltip")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        tooltipChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--permissions")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
@@ -121,6 +130,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     dialogChecks(host_path, profile_root);
     permissionChecks(host_path, profile_root);
     popupChecks(host_path, profile_root);
+    tooltipChecks(host_path, profile_root);
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
 
     // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
@@ -291,6 +301,14 @@ fn warmUp(host_path: [:0]const u8, profile_root: []const u8) void {
     _ = std.c.close(host.commands);
     _ = std.c.close(host.events);
     std.debug.print("warm-up: host 첫 실행과 빈 페이지 {d} ms(판정 아님 — 불러옴 {})\n", .{ os.nowMs() - started, created });
+}
+
+/// 툴팁 판정(W6b) — 프로필은 `<뿌리>/j`.
+fn tooltipChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "tooltip", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/j", .{profile_root}) catch return report(false, "tooltip", "프로필 경로가 길다", .{});
+    tooltip_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "tooltip", "{s}", .{@errorName(err)});
 }
 
 /// 팝업 판정(W6a) — 프로필은 `<뿌리>/i`.

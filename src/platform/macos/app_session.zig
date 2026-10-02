@@ -284,7 +284,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // only for the call; Zig owns reduction and absent-target publication.
 // 200: W6a② — osr_keyboard_active 가 키 대상 탭에 팝업 위젯이 열려 있으면 2, osr_key phase 3(열린 목록의 키 — 누름과 글자,
 // 입력기 없이).
-pub const abi_version: u32 = 202;
+// 201: W6b — osr_tooltip(hover 중인 Chromium 탭의 툴팁 글과 일련번호 — Swift 가 macOS 툴팁으로 띄운다).
+pub const abi_version: u32 = 203;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6342,6 +6343,8 @@ pub const AppSession = struct {
     osr_completed_generation: u64 = 0,
     /// W4b: 포인터가 올라 있는 OSR 탭(0 = 없음). 벗어나면 그 탭에 leave 를 보낸다.
     osr_hover_surface: u64 = 0,
+    /// W6b: Swift 에 알린 툴팁의 (hover 중인 탭, 그 탭의 툴팁 세대)와 그것이 바뀔 때마다 오르는 일련번호.
+    osr_tooltip_seen: maru.session.web_osr_input.TooltipSeen = .{},
     /// W4b: 그 탭 커서의 본 세대 — 바뀌면 `osr_cursor_pending` 을 세워 Swift 가 포인터를 움직이지 않아도 커서를 바꾼다.
     osr_hover_cursor_generation: u32 = 0,
     osr_cursor_pending: ?CursorKind = null,

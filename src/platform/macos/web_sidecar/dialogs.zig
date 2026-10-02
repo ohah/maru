@@ -20,6 +20,7 @@ const library = @import("library.zig");
 const browsers = @import("browsers.zig");
 const dialog_table = @import("dialog_table.zig");
 const permissions = @import("permissions.zig");
+const tooltip = @import("tooltip.zig");
 
 const message = protocol.message;
 const Message = message.Message;
@@ -260,6 +261,9 @@ pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
     if (frame == null or frame.*.is_main.?(frame) == 0 or error_code == c.ERR_ABORTED) return;
     const id = browserId(browser) orelse return;
     permissions.cancelMedia(id);
+    // 오류 페이지로 문서가 바뀌었다 — `on_load_start` 가 없으니 툴팁 기억도 여기서 비운다(W6b 적대 검증 — 연결이 거부된 링크
+    // 위에 포인터를 둔 채 열면 옛 링크의 툴팁이 오류 페이지 위에 남았다).
+    tooltip.reset(id);
 }
 
 /// 렌더러가 죽었다 — 그 페이지의 JS 대화상자는 답할 곳이 없다(CEF 가 상태 비우기를 부르지 않을 수 있다 — 적대 검증). 콜백을

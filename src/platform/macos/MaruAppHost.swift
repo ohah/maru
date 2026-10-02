@@ -110,6 +110,51 @@ func CGSSetWindowBackgroundBlurRadius(_ connection: CGSConnectionID, _ windowNum
 final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     weak var controller: MaruAppHostController?
 
+    // W6b: Chromium 탭 툴팁은 macOS 의 툴팁으로 띄운다 — Mac 의 Chrome 도 웹 툴팁을 AppKit 툴팁으로 띄운다(실측: 지연은
+    // 사용자 설정 NSInitialToolTipDelay 를 따랐다). 지연·위치·접기·다크 모드·키에 숨기·창을 떠나면 흐려지기·비활성 앱에서 안
+    // 띄우기는 macOS 가 한다. maru 는 글이 바뀌면 이 view 전체에 툴팁 영역을 다시 단다(지웠다 다시 달면 지금 포인터 자리로
+    // 옮겨 0.3 초 안팎에 바뀌고, 포인터를 움직이지 않아도 지연 뒤 뜬다 — 공개 API 실측).
+    final class OsrTooltipOwner: NSObject, NSViewToolTipOwner {
+        var text = ""
+        func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+            text
+        }
+    }
+    let osrTooltipOwner = OsrTooltipOwner()
+    var osrTooltipSerial: UInt64 = 0
+    /// 없음 · 달려 있음 · 다음 움직임에 다시 달 것(누름 뒤 — macOS 가 숨겼다, 휠 뒤 — 우리가 뗐다).
+    enum OsrTooltipState { case none, attached, rearm }
+    private(set) var osrTooltipState: OsrTooltipState = .none
+    var osrTooltipActive: Bool { osrTooltipState == .attached }
+    private var osrTooltipBounds = NSRect.zero
+
+    /// 툴팁을 단다(빈 글·nil 이면 뗀다).
+    func setOsrTooltip(_ text: String?) {
+        removeAllToolTips()
+        osrTooltipState = .none
+        guard let text, !text.isEmpty else { return }
+        osrTooltipOwner.text = text
+        osrTooltipBounds = bounds
+        addToolTip(bounds, owner: osrTooltipOwner, userData: nil)
+        osrTooltipState = .attached
+    }
+
+    /// view 크기가 바뀌었으면 영역을 다시 단다(영역은 단 때의 bounds 다). 휠로 떼어 둔 동안은 달지 않는다.
+    func refitOsrTooltip() {
+        if osrTooltipState == .attached, osrTooltipBounds != bounds { setOsrTooltip(osrTooltipOwner.text) }
+    }
+
+    /// 누름(어느 버튼이든 — macOS 가 숨긴다) 뒤 다음 움직임에 다시 단다. Chrome 은 누른 뒤 같은 요소에서 움직이면 다시 띄운다(실측).
+    /// macOS 는 누름에 툴팁을 숨기고 같은 영역에서는 다시 띄우지 않는다(실측) — 다시 달면 지연 뒤 뜬다.
+    private func noteOsrTooltipMouseDown() {
+        if osrTooltipState == .attached { osrTooltipState = .rearm }
+    }
+
+    private func rearmOsrTooltipIfNeeded() {
+        guard osrTooltipState == .rearm else { return }
+        setOsrTooltip(osrTooltipOwner.text)
+    }
+
     override var acceptsFirstResponder: Bool {
         return true
     }
@@ -172,19 +217,25 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     // Cmd+hover URL 하이라이트용 mouseMoved 추적. 보이는 영역 전체를 따라가게 inVisibleRect로 둔다.
+    // **우리 것만** 바꾼다 — macOS 툴팁(W6b `addToolTip`)도 이 view 에 추적 영역을 건다. 전부 지우면 AppKit 이 이 함수를 부를
+    // 때(창이 키가 될 때 등) 툴팁 추적까지 사라져 막 뜬 툴팁이 곧바로 꺼졌다(W6b 맨 앞 실측 — 34 ms 만에 사라짐).
+    private var hoverTrackingArea: NSTrackingArea?
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(
+        if let old = hoverTrackingArea { removeTrackingArea(old) }
+        let area = NSTrackingArea(
             rect: .zero,
             options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
             owner: self,
             userInfo: nil
-        ))
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
     }
 
     override func mouseMoved(with event: NSEvent) {
         controller?.handleHover(event, in: self)        // Cmd+링크 밑줄·커서 모양
+        rearmOsrTooltipIfNeeded() // hover 뒤 — 터미널 pane 위로 가 hover 탭이 바뀐 이동이면 다음 tick 이 뗀다
         controller?.handleMouseMotion(event, in: self)  // mouse reporting(DECSET 1003) — Zig가 트래킹 확인 후 리포트
     }
 
@@ -750,6 +801,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        // W6b: Chrome 은 휠에 툴팁을 숨긴다(실측) — 떼어 두고 다음 움직임에 다시 단다.
+        if osrTooltipState == .attached { removeAllToolTips(); osrTooltipState = .rearm }
         controller?.handleScroll(event, in: self)
     }
 
@@ -774,6 +827,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 마우스 선택: raw 좌표만 backing 픽셀(좌상단 원점)로 바꿔 Zig에 넘긴다 — 셀 변환·선택 모델은
     // Zig가 소유한다(네이티브 최소화). NSView 좌표는 좌하단 원점이라 y를 뒤집는다.
     override func mouseDown(with event: NSEvent) {
+        noteOsrTooltipMouseDown() // W6b: macOS 가 누름에 숨긴다 — 다음 움직임에 다시 단다
         // 사이드바 헤더 빈 영역(maru "타이틀바")이면 네이티브 타이틀바처럼: 더블클릭=창 확대(zoom), 단일 down=창 이동
         // (performDrag). 아이콘·검색·터미널 본문은 false라 아래 일반 처리로 흐른다. mouseDownCanMoveWindow=false라
         // AppKit 자동 드래그가 없어 여기서 명시적으로 한다(드래그 영역 hit-test 단일 출처는 Zig).
@@ -796,13 +850,17 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // right/middle 버튼도 reporting용으로 라우팅(handleMouse가 buttonNumber→xterm 변환). tracking이 꺼졌으면
     // Zig가 button!=0을 무시한다(셀렉션은 left만, context 메뉴 없음). down/drag/up = kind 1/2/3.
-    override func rightMouseDown(with event: NSEvent) { controller?.handleMouse(event, kind: 1, in: self) }
+    override func rightMouseDown(with event: NSEvent) {
+        noteOsrTooltipMouseDown()
+        controller?.handleMouse(event, kind: 1, in: self)
+    }
     override func rightMouseDragged(with event: NSEvent) { controller?.handleMouse(event, kind: 2, in: self) }
     override func rightMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
     // 추가 버튼(buttonNumber 3 이상 — 뒤로·앞으로)은 Chromium 탭 본문 위의 누름만 그 탭의 뒤로·앞으로로 쓰고 나머지는
     // 버린다(W4b). 예전에는 `handleMouse` 가 3 이상을 **왼쪽**(0)으로 바꿔 넘겨, 뒤로 버튼이 터미널 선택을 시작하거나 닫기
     // 확인 모달의 확정 버튼을 누르고, 그 뗌이 진행 중인 왼쪽 끌기를 끝냈다(적대 검증).
     override func otherMouseDown(with event: NSEvent) {
+        noteOsrTooltipMouseDown()
         if event.buttonNumber >= 3 {
             _ = controller?.handleOsrAuxButton(event, in: self)
             return
@@ -7697,6 +7755,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainBellBadge() // BEL이 언포커스 시 울렸으면 Dock 배지를 띄운다(config bell.dock-badge).
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
+            drainOsrTooltip() // W6b: hover 중인 Chromium 탭의 툴팁 글이 바뀌었으면 macOS 툴팁을 다시 단다.
             drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
             drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
             drainOsrLocation() // W5b2: 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다.
@@ -8513,6 +8572,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 Self.testReport("overlay \(anyOverlayOpen)")
             case "cursor":
                 Self.testReport("cursor \(Self.testCursorName(NSCursor.current))")
+            case "tooltip":
+                // W6b: maru 가 이 view 에 단 macOS 툴팁(단 글 — 줄바꿈은 \\n 으로). 띄우는 것은 macOS 다(맨 앞 앱일 때).
+                if let window, let terminal = Self.firstTerminalView(in: window.contentView) {
+                    let text = terminal.osrTooltipOwner.text.replacingOccurrences(of: "\n", with: "\\n")
+                    Self.testReport("tooltip active=\(terminal.osrTooltipActive) text=\(terminal.osrTooltipActive ? text : "")")
+                }
             case "imerect":
                 // 입력기가 후보창 자리를 묻는 그 호출(firstRect) — 창 내용 view 의 왼쪽 위 원점 pt 로 보고한다.
                 if let window, let terminal = Self.firstTerminalView(in: window.contentView) {
@@ -9332,6 +9397,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let window, window.isKeyWindow, let content = window.contentView,
               content.bounds.contains(content.convert(window.mouseLocationOutsideOfEventStream, from: nil)) else { return }
         Self.cursor(for: kind).set()
+    }
+
+    /// W6b: hover 중인 Chromium 탭의 툴팁(일련번호가 바뀌었으면 다시 단다 — 글이 비었으면 뗀다).
+    private var osrTooltipBuffer = [UInt8](repeating: 0, count: 4096)
+    private func drainOsrTooltip() {
+        guard let session = appSession, let view = metalTerminalView else { return }
+        var serial: UInt64 = 0
+        var length = 0
+        let has = osrTooltipBuffer.withUnsafeMutableBufferPointer {
+            maru_macos_app_session_osr_tooltip(session, &serial, $0.baseAddress, $0.count, &length)
+        }
+        if serial != view.osrTooltipSerial {
+            view.osrTooltipSerial = serial
+            view.setOsrTooltip(has != 0 ? String(decoding: osrTooltipBuffer[0..<length], as: UTF8.self) : nil)
+        } else {
+            view.refitOsrTooltip()
+        }
     }
 
     func clearHover() {

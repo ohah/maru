@@ -2645,6 +2645,165 @@ pub fn testApplyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent
     return applyHookEvent(self, term, ev);
 }
 
+test "Codex 질문 훅은 제품 배지를 입력 대기로 세우고 답변 뒤 푼다" {
+    // The captured question goes through the same hook slot, screen poll and arbitration as the sidebar.
+    // This catches a dropped provider/tool identity between the pure parser and the product consumer.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 110,
+        .rows = 32,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const term = tab_ops.activeTab(session).activeTerm();
+    term.agent_kind = .codex;
+    term.rt.observation.availability = .current;
+    session.loaded_config.config.sidebar.agent_hooks = true;
+    term.agent_hook_log_present = true;
+    const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
+    const parser = maru.session.agent_hook_event;
+    _ = testApplyHookEvent(session, term, parser.parseLine(
+        "codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"product-question\"}",
+    ).?);
+    // A previous non-question frame cannot release a question before the next screen poll.
+    term.agent_screen_seq = 1;
+    term.agent_screen_state = .running;
+    term.agent_screen_visible_blocker = false;
+    arbitrateAgentState(session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_state);
+    try surface.core.write("\x1b[2J\x1b[H  Question 1/1 (1 unanswered)\r\n  Which do you choose?\r\n\r\n" ++
+        "  › 1. Alpha (Recommended)  Choose Alpha for this harmless UI test.\r\n" ++
+        "    2. Beta                 Choose Beta for this harmless UI test.\r\n" ++
+        "    3. None of the above    Optionally, add details in notes (tab)\r\n\r\n" ++
+        "  tab to add notes | enter to submit answer | esc to interrupt\r\n");
+    term.agent_output_batches +%= 1;
+    pollAgentState(session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_state);
+    try std.testing.expectEqual(maru.session.agent_state_arbiter.Origin.hook, term.agent_state_origin);
+    _ = testApplyHookEvent(session, term, parser.parseLine(
+        "codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"product-question\"}",
+    ).?);
+    // Even if the screen poll still holds the previous question frame, its old blocker cannot undo the reply.
+    arbitrateAgentState(session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expectEqualStrings("D2", term.agent_state_rule);
+    // Old responses cannot roll a new question back or erase its live child roster.
+    _ = testApplyHookEvent(session, term, parser.parseLine(
+        "codex\t{\"hook_event_name\":\"PreToolUse\",\"turn_id\":\"new-turn\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"product-cancel\"}",
+    ).?);
+    _ = testApplyHookEvent(session, term, parser.parseLine(
+        "codex\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"live-child\"}",
+    ).?);
+    const seq = term.hook.turn_seq;
+    _ = testApplyHookEvent(session, term, parser.parseLine(
+        "codex\t{\"hook_event_name\":\"PostToolUse\",\"turn_id\":\"old-turn\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"product-question\"}",
+    ).?);
+    try std.testing.expectEqualStrings("new-turn", term.hook.progress.turnKey());
+    try std.testing.expectEqual(seq, term.hook.turn_seq);
+    try std.testing.expectEqual(@as(usize, 1), term.hook.progress.childCount());
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.hook.state);
+    // Cancellation must never queue a success notice, even after its last child exits.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Interrupt\",\"turn_id\":\"new-turn\"}").?);
+    arbitrateAgentState(session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expect(!term.hook.progress.turn_open);
+    _ = testApplyHookEvent(session, term, parser.parseLine(
+        "codex\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"live-child\"}",
+    ).?);
+    arbitrateAgentState(session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.hook.notice.kind);
+    const mode = maru.session.agent_hook_mode;
+    // Stop is only a candidate. A new turn before delivery must erase it.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"turn_id\":\"notice-a\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"turn_id\":\"notice-a\"}").?);
+    const first_since = term.hook.notice.since_ms;
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, first_since + 1499) == null);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"turn_id\":\"notice-b\"}").?);
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, first_since + 1500) == null);
+    // Late Stop cannot roll the current turn back, alter identity or create a candidate.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"turn_id\":\"notice-a\",\"session_id\":\"old-session\"}").?);
+    try std.testing.expectEqualStrings("notice-b", term.hook.progress.turnKey());
+    try std.testing.expectEqual(mode.Notice.none, term.hook.notice.kind);
+    // The completed pane may notify while another pane keeps the aggregate badge running.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"turn_id\":\"notice-b\"}").?);
+    term.agent_state = .running;
+    const since = term.hook.notice.since_ms;
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, since + 1499) == null);
+    try std.testing.expectEqual(mode.Notice.done, takeHookNoticeAt(term, &term.hook, since + 1500).?.kind);
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, since + 1600) == null);
+    // Same-turn resumed work cancels pending delivery; duplicate Stop cannot notify twice.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"turn_id\":\"notice-b\",\"tool_name\":\"Bash\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"turn_id\":\"notice-b\"}").?);
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, term.hook.notice.since_ms + 1500) == null);
+    // Every kind of renewed work invalidates a queued candidate, including a session boundary.
+    const invalidators = [_][]const u8{
+        "codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"new-question\"}",
+        "codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\"}",
+        "codex\t{\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\"}",
+        "codex\t{\"hook_event_name\":\"Interrupt\"}",
+        "codex\t{\"hook_event_name\":\"SessionStart\"}",
+        "codex\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"pending-child\"}",
+    };
+    for (invalidators) |line| {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\"}").?);
+        try std.testing.expectEqual(mode.Notice.done, term.hook.notice.kind);
+        const queued_at = term.hook.notice.since_ms;
+        _ = testApplyHookEvent(session, term, parser.parseLine(line).?);
+        try std.testing.expect(takeHookNoticeAt(term, &term.hook, queued_at + 1500) == null);
+    }
+    // Last-child completion starts a fresh interval; the lead's earlier Stop cannot start it.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"pending-child\"}").?);
+    const drained_at = term.hook.notice.since_ms;
+    try std.testing.expectEqual(mode.Notice.done, term.hook.notice.kind);
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, drained_at + 1499) == null);
+    try std.testing.expectEqual(mode.Notice.done, takeHookNoticeAt(term, &term.hook, drained_at + 1500).?.kind);
+    term.hook.transcript.setIdentity("");
+    term.hook.progress = .{};
+    term.hook.state = .unknown;
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"identity-child\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"session_id\":\"learned-session\"}").?);
+    try std.testing.expectEqual(@as(usize, 1), term.hook.progress.childCount());
+    try std.testing.expectEqual(mode.Notice.none, term.hook.notice.kind);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"learned-session\",\"turn_id\":\"session-turn\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"session_id\":\"stale-session\",\"turn_id\":\"session-turn\"}").?);
+    try std.testing.expectEqualStrings("learned-session", term.hook.transcript.identity());
+    try std.testing.expect(term.hook.progress.turn_open);
+    try std.testing.expectEqual(mode.State.running, term.hook.state);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"session_id\":\"learned-session\",\"turn_id\":\"session-turn\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"replacement-session\",\"tool_name\":\"Bash\"}").?);
+    try std.testing.expectEqual(mode.Notice.none, term.hook.notice.kind);
+    try std.testing.expectEqualStrings("replacement-session", term.hook.transcript.identity());
+    // Repeated approval events retain the original debounce candidate instead of erasing it.
+    const permission = parser.parseLine("codex\t{\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\"}").?;
+    _ = testApplyHookEvent(session, term, permission);
+    const attention_since = term.hook.notice.since_ms;
+    _ = testApplyHookEvent(session, term, permission);
+    try std.testing.expectEqual(mode.Notice.attention, term.hook.notice.kind);
+    try std.testing.expectEqual(attention_since, term.hook.notice.since_ms);
+    term.agent_state = .blocked;
+    try std.testing.expectEqual(mode.Notice.attention, takeHookNoticeAt(term, &term.hook, attention_since + 1200).?.kind);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"replacement-session\",\"turn_id\":\"retired-turn\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"replacement-session\",\"turn_id\":\"active-turn\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"retirement-child\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"replacement-session\",\"turn_id\":\"retired-turn\",\"cwd\":\"/must-not-adopt\",\"tool_name\":\"Bash\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"session_id\":\"replacement-session\",\"turn_id\":\"retired-turn\"}").?);
+    try std.testing.expectEqualStrings("active-turn", term.hook.progress.turnKey());
+    try std.testing.expectEqual(@as(usize, 1), term.hook.progress.childCount());
+    try std.testing.expect(term.hook.progress.turn_open);
+    try std.testing.expectEqual(mode.Notice.none, term.hook.notice.kind);
+}
+
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
     return applyHookEventTo(self, term, &term.hook, ev);
 }
@@ -2659,19 +2818,21 @@ pub fn primaryHookSlot(self: *AppSession, term: *Term) *HookSlot {
 
 /// Term 의 훅 상태 **집계**(RA7.3 결정 1 — 하위 중 하나라도 `running` 이면 running). 그 다음은 blocked(누군가 승인을 기다린다),
 /// 그 다음 idle. 자식 수·턴 순번은 합한다 — 권위표(`arbitrate`)의 입력이 이것이다.
-pub const HookAggregate = struct { state: maru.session.agent_observer.State, child_count: u32, turn_seq: u64 };
+pub const HookAggregate = struct { state: maru.session.agent_observer.State, child_count: u32, turn_seq: u64, question_pending: bool = false };
 
 pub fn hookSlotsAggregate(self: *AppSession, term: *Term) HookAggregate {
     var agg: HookAggregate = .{
         .state = term.hook.state,
         .child_count = @intCast(term.hook.progress.childCount()),
         .turn_seq = term.hook.turn_seq,
+        .question_pending = term.hook.progress.hasPendingQuestions(),
     };
     var it = self.remote_agent_panes.forSurface(term.surfaceId());
     while (it.next()) |e| {
         agg.state = strongerState(agg.state, e.slot.state);
         agg.child_count +|= @as(u32, @intCast(e.slot.progress.childCount()));
         agg.turn_seq +%= e.slot.turn_seq;
+        agg.question_pending = agg.question_pending or e.slot.progress.hasPendingQuestions();
     }
     return agg;
 }
@@ -2694,6 +2855,15 @@ fn strongerState(a: maru.session.agent_observer.State, b: maru.session.agent_obs
 /// 화면 관측)은 그대로 `term` 에서 읽는다.
 fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.session.agent_hook_event.Event) Applied {
     const mode_mod = maru.session.agent_hook_mode;
+    if (mode_mod.ignoresEvent(&slot.progress, ev)) return .{};
+    // A terminal event from a different session cannot close the currently open lead.
+    if (slot.progress.turn_open and slot.transcript.identity().len != 0 and ev.agent_id.len == 0 and
+        ev.session_id.len != 0 and (ev.kind == .stop or ev.kind == .stop_failure or ev.kind == .interrupt))
+    {
+        var identity_buf: [maru.session.agent_transcript.max_identity_bytes + 1]u8 = undefined;
+        const identity = maru.session.agent_hook_event.decodeInto(&identity_buf, ev.session_id);
+        if (!std.mem.eql(u8, identity, slot.transcript.identity())) return .{};
+    }
     // **맨 앞이어야 한다.** 신원이 갈리면 `cache.reset()` 이 `owned` 를 비우는데, 이 함수 아래쪽이
     // `owned.setPrompt`/`setReply` 를 쓰고 `.done` 분기가 `owned.reply()` 를 읽는다 — 뒤에 두면 방금
     // 저장한 대화를 스스로 지운다.
@@ -2703,7 +2873,15 @@ fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.se
     //   ⑵ 그 switch 는 `.stop`·`.user_prompt_submit` 에서 **early return** 한다 — 대화를 싣는 바로 그
     //      이벤트에서 채택이 **아예 안 돈다**.
     // 판정자: `app_session.zig` 「신원은 payload 가 정한다」 블록의 마지막 두 단언.
+    var identity_before_buf: [maru.session.agent_transcript.max_identity_bytes]u8 = undefined;
+    const identity_before_len = slot.transcript.identity().len;
+    @memcpy(identity_before_buf[0..identity_before_len], slot.transcript.identity());
     adoptHookSessionIdentity(self, slot, ev);
+    if (!std.mem.eql(u8, identity_before_buf[0..identity_before_len], slot.transcript.identity())) {
+        // Learning a previously unknown identity is not a session switch: keep its live children.
+        slot.progress.adoptSession(ev);
+        slot.notice.clear();
+    }
     adoptHookImageSource(self, slot, ev);
     // **훅이 알려 준 작업 디렉터리를 담는다.** 원격 pane 에서 OSC 7 은 `precmd` 라 전면 TUI 가 붙어
     // 있는 동안 발화하지 못해 값이 접속 직전에서 멈춘다(ssh-integration.md §9.5) — 훅은 그 구간에도
@@ -2735,6 +2913,12 @@ fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.se
     //
     // backlog 따라잡기 중에는 찍지 않는다: 창이 없던 시간의 이벤트라 지금을 찍으면 몇 시간 전 턴이
     // «방금 열렸다» 가 된다. 그 구간의 턴은 시각을 주장하지 않고 0 으로 남는다.
+    // Any resumed work or explicit boundary invalidates a queued completion for this pane.
+    const completion_pending = slot.notice.kind == .done or slot.notice.kind == .failed;
+    if ((completion_pending and (slot.state != .idle or slot.progress.turn_open)) or
+        (slot.notice.kind == .attention and slot.state != .blocked) or ev.kind == .session_start or
+        ev.kind == .user_prompt_submit or slot.notice.generation != slot.progress.generation)
+        slot.notice.clear();
     const open_now = slot.progress.turn_open;
     const key_now = slot.progress.turnKey();
     const turn_changed = !std.mem.eql(u8, key_before, key_now);
@@ -2782,7 +2966,8 @@ fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.se
     // 시작했다» 다. 배지는 그대로 바뀌고 알림만 가려진다.
     // **알림은 훅 전이에만 붙는다**(§1.1.1). C1·C2 가 만든 전이에 걸면 codex 오류 턴에 「완료」가
     // 나간다 — 화면은 «끝났다» 는 알아도 «어떻게 끝났는지» 는 모른다(계약 §2).
-    const notice = if (mode_mod.suppressesNotice(ev)) mode_mod.Notice.none else mode_mod.noticeOn(prev_state, slot.state);
+    const notice = if (mode_mod.suppressesNotice(ev) or slot.progress.lead_interrupted) mode_mod.Notice.none else mode_mod.noticeOn(prev_state, slot.state);
+    if (ev.kind == .interrupt) slot.notice.clear();
     switch (notice) {
         .none => {},
         // 턴 끝은 같은 전이지만 **오류로 끝난 턴을 «완료» 라 부르지 않는다**(계약 §2). 그 사실은
@@ -2829,6 +3014,8 @@ fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.se
             slot.notice.set(.attention, hookDisplayText(&body_buf, raw), self.awakeMs());
         },
     }
+
+    if (slot.notice.kind != .none) slot.notice.generation = slot.progress.generation;
 
     // **마지막 대화도 훅에서 온다**(계약 §4b). 그 Term 은 transcript 파일을 읽지 않으므로 신원 해소·
     // 256 KiB tail 파싱·폴링이 통째로 빠진다.
@@ -3010,17 +3197,30 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
 }
 
 fn takeHookNoticeFrom(self: *AppSession, term: *Term, slot: *HookSlot) ?HookNotice {
+    return takeHookNoticeAt(term, slot, self.awakeMs());
+}
+
+fn takeHookNoticeAt(term: *Term, slot: *HookSlot, now_ms: u64) ?HookNotice {
     const mode_mod = maru.session.agent_hook_mode;
     const kind = slot.notice.kind;
     switch (kind) {
         .none => return null,
-        // 완료도 오류도 **바로** 띄운다 — 디바운스는 «곧 저절로 해소될 수 있는» 주의 알림만의 규율이다.
-        .done, .failed => {},
+        .done, .failed => {
+            if (slot.state != .idle or slot.progress.turn_open or slot.progress.child_count != 0 or
+                slot.progress.lead_interrupted or slot.progress.completion_notified or
+                slot.notice.generation != slot.progress.generation)
+            {
+                slot.notice.clear();
+                return null;
+            }
+            if (kind == .done and !mode_mod.completionReady(&slot.progress, slot.state, slot.notice.generation, slot.notice.since_ms, now_ms)) return null;
+            slot.progress.completion_notified = true;
+        },
         // **여기는 훅 자리가 아니라 «지금 배지» 다**(§1.1.1 — 적대적 검증이 잡았다). 알림을 **만드는** 것은
         // 훅 전이지만, 만들어 둔 알림을 **띄울지**는 지금도 유효한가의 문제다. 훅에는 승인 해제 이벤트가
         // 없어 `agent_hook_state` 는 영영 `blocked` 이므로, 그것으로 판단하면 C1 이 화면으로 풀어 준 뒤에도
         // 디바운스가 끝나며 「승인이 필요합니다」가 나간다 — 사용자가 이미 승인한 뒤에.
-        .attention => switch (mode_mod.attentionDebounce(term.agent_state, slot.notice.since_ms, self.awakeMs())) {
+        .attention => switch (mode_mod.attentionDebounce(term.agent_state, slot.notice.since_ms, now_ms)) {
             .wait => return null,
             .drop => {
                 slot.notice.clear();
@@ -3243,6 +3443,7 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         .hook_child_count = agg.child_count,
         .screen = term.agent_screen_state,
         .screen_visible_blocker = term.agent_screen_visible_blocker,
+        .hook_question_pending = agg.question_pending,
         .screen_visible_idle = term.agent_screen_visible_idle,
         .screen_visible_running = term.agent_screen_visible_running,
         .screen_idle_is_chrome = term.agent_screen_idle_is_chrome,

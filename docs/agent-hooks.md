@@ -163,7 +163,7 @@ lead의 `Stop`이 턴 끝이 아니기 때문이고, 그 판별은 화면에 근
 | --- | --- | --- | --- |
 | **A** | 훅 로그 파일이 없다(§1.2) | 화면이 상태를 세운다 | 훅이 아무것도 모른다 |
 | **B** | 훅 이벤트가 있다 | **훅이 상태를 세운다** | 기본 권위. 아래 C만이 이것을 뒤집는다 |
-| **C1** | B + 훅 상태가 `blocked` + 화면에 승인 chrome 없음(`!visible_blocker`) | `running` | 승인 해제는 훅 이벤트가 아니다. 훅은 승인 요청 직전에 `running`이었으므로(`PreToolUse`) 그 자리로 돌린다. **확인 절차 없음 — 다음 폴링에서 바로 푼다**(§1.6의 시간) |
+| **C1** | B + 훅 상태가 `blocked` + 미응답 Codex 질문 없음 + 화면에 승인 chrome 없음(`!visible_blocker`) | `running` | 승인 해제는 훅 이벤트가 아니다. 훅은 승인 요청 직전에 `running`이었으므로(`PreToolUse`) 그 자리로 돌린다. **확인 절차 없음 — 다음 폴링에서 바로 푼다**(§1.6의 시간) |
 | **C2** | B + 훅 상태가 `running` + `child_count == 0` + 화면 `visible_idle`이 **연속 3회**(§1.5), 단 그 근거가 **상시 chrome이면 `output_active`가 거짓일 때만**(아래 개정) | `idle` | codex에 `StopFailure`가 없다(§9-10). 3회는 **폴링 3회**이지 tick 3회가 아니다 — 실제 시간은 §1.6 |
 | **C3** | 프로세스가 종료됐다 | **즉시** `idle` — 확인 절차 없음 | 가장 강한 증거. 훅·화면 둘 다 필요 없다. ⚠️ **제품에서는 이 입력이 항상 `false` 다** — 아래 주 |
 | **D1** | B + 훅 상태가 `running` + `child_count > 0` | 화면과 **무관하게** `running` | 계약 §2 — 자식이 도는 동안 lead의 `Stop`은 턴 끝이 아니다 |
@@ -232,7 +232,7 @@ codex 오류 턴이 안 풀리는 것은 그대로 남는다. 메우려면 원�
 
 차단된 회차는 **연속 셈도 안 올린다** — 작업 중 관측이 나중의 판정을 오염시키지 않는다.
 
-⚠️ **알려진 한계 — codex 중단 화면은 chrome 으로 읽힌다.** `■ Conversation interrupted`(885) 가
+훅이 없는 화면 관측 경로의 ⚠️ **알려진 한계 — codex 중단 화면은 chrome 으로 읽힌다.** `■ Conversation interrupted`(885) 가
 **아래에 있는** 입력창의 `live_prompt`(900) 에 위치 비교로 진다(「아래가 최신」). 그래서 명시적 종료
 신호가 chrome 뒤로 가려지고, C2 가 그 화면에서는 출력이 끊기기를 기다린다.
 
@@ -655,7 +655,7 @@ codex 는 열하나다. 그 둘을 섞어 읽지 않는다 — «세트를 늘�
 (§3, §2.1) 무엇이 **있는지**와 무엇을 **거는지**는 다른 질문이다.
 
 **세트는 provider 마다 다르다** — claude **11 개**(2026-09-20 AT3b-1 로 `PostToolUse`·`PostToolUseFailure`(`Bash`) 가
-들어왔다), **codex 8 개**(`Notification`·`StopFailure` 가 없다 — `PostToolUse(Bash)` 는 AT3b-2 로 들어왔다). 코드에서도
+들어왔다), **codex 9 개**(`Notification`·`StopFailure` 가 없다 — `PostToolUse(Bash)` 는 AT3b-2, `Interrupt`는 2026-10-02 취소 실측으로 들어왔다). 코드에서도
 전역 세트를 두지 않고 `agent_hook_command.eventsFor(provider)` 로 갈라 둔다: 하나로 두면 codex 에 없는
 이벤트가 조용히 섞이고, 그 사실이 드러나는 자리는 사용자의 설정 파일뿐이다.
 
@@ -689,9 +689,10 @@ payload 도 같은 소스가 못 박는다(`codex-rs/hooks/src/schema.rs`, `deny
 | `SessionStart` | — | ✅ | 턴 0 스냅샷(`opensSessionBase`), 세션 신원(`session_id`). `transcript_path`는 **파싱만** 한다 — 훅 모드는 transcript 파일을 아예 안 읽는 것이 설계다 |
 | `UserPromptSubmit` | — | ✅ | 턴 시작, `working` 진입, 턴 식별자 |
 | `Stop` | — | ✅ | 턴 종료 스냅샷, 마지막 응답(`last_assistant_message` → 사이드바 대화 줄), 완료 상태·완료 알림, **`background_tasks`**(상태를 붙잡는 근거가 **아니다** — 자식 로스터의 유령을 거두는 데만 쓴다). **링 항목의 턴 제목은 (AT2)** — `Snapshot`에 아직 제목 슬롯이 없다 |
+| `Interrupt` | — | ✅ (Codex 전용) | 취소로 턴과 질문 대기 종료. 완료 알림 없음. 살아 있는 자식은 종료까지 별도 추적 |
 | `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. **대화형에서 발화 확인**(2026-08-29 재실측). 헤드리스에서는 권한 거부가 실제로 일어나도 이 이벤트도 `PermissionDenied`도 오지 않는다(§9-6) |
-| `PreToolUse` | `*` | ✅ | 진행 중 세부(`tool_description`). AI 소행 경로(`file_path` — AT3 캡처). **셸 구간의 시작**(`tool_use_id`·`run_in_background` — AT3b-1, [턴 변경분 §4.4](agent-turn-changes.md)). **두 provider의 payload 모양이 다르다 — §2.1** |
-| `PostToolUse` | **`Bash`** | ✅ (AT3b-2 로 세트에) | **셸 구간의 끝**(`tool_use_id`·`duration_ms`)과 **셸 편집 목록**(`tool_response.bashEditDiff.changedFiles` — claude 2.1.271+ bypassPermissions, 명령 전후의 작업트리 diff · AT3b-2). `Bash` 로 좁혀 §3.1 의 근거(`originalFile`)를 비껴간다. claude 는 실패한 도구에 이것을 **보내지 않는다** — 아래 변종이 온다. codex 는 실패에도 이것을 보내지만 `tool_response` 가 stdout 문자열이라 diff 는 없다(2026-09-20 실측) |
+| `PreToolUse` | `*` | ✅ | 진행 중 세부(`tool_description`). Codex의 `request_user_input`이면 **입력 대기**, 다른 도구는 진행 중(아래 실측). AI 소행 경로(`file_path` — AT3 캡처). **셸 구간의 시작**(`tool_use_id`·`run_in_background` — AT3b-1, [턴 변경분 §4.4](agent-turn-changes.md)). **두 provider의 payload 모양이 다르다 — §2.1** |
+| `PostToolUse` | claude **`Bash`**, codex **`^(Bash\|request_user_input)$`** | ✅ (AT3b-2 로 세트에) | **셸 구간의 끝**(`tool_use_id`·`duration_ms`)과 **셸 편집 목록**(`tool_response.bashEditDiff.changedFiles` — claude 2.1.271+ bypassPermissions, 명령 전후의 작업트리 diff · AT3b-2). Codex 질문의 답변이 돌아오면 **입력 대기 → 진행 중**으로 푼다. 편집 도구의 종료 payload는 받지 않아 §3.1의 `originalFile`을 비껴간다. claude는 실패한 도구에 이것을 **보내지 않는다** — 아래 변종이 온다. codex는 실패에도 이것을 보내지만 셸의 `tool_response`는 stdout 문자열이라 diff는 없다(2026-09-20 실측) |
 | `PostToolUseFailure` | **`Bash`** | ❌ **없다** | **실패로 끝난 도구**(비0 종료 — 셸 호출의 1.7%). 구간을 닫는 데는 성공과 같은 뜻이다. `duration_ms`·`is_interrupt`·`error` 를 싣는다(2026-09-19 실측). 이것이 없으면 실패한 셸의 구간이 턴 끝까지 열린다 |
 | `SubagentStart` | — | ✅ | **서브에이전트 수 세기.** 자식이 도는 동안 lead `Stop` 은 턴 끝이 아니다 |
 | `SubagentStop` | — | ✅ | 자식이 끝났다. **마지막** 자식이 끝나고 lead 도 끝났으면 그때가 턴 끝이다 |
@@ -883,7 +884,7 @@ maru 의 두 알림은 다른 이벤트에 걸려 있다: **완료 알림은 `St
   - **턴을 여는 것은 프롬프트만이 아니다.** `running`·`blocked` 로 가는 **모든 lead 이벤트**가 문이다.
     프롬프트 하나만 문으로 두면 **훅을 이미 돌던 세션에 붙인 경우**(첫 이벤트가 도구 호출인 경우) 턴이
     영영 안 열린 것으로 보여, 자식이 끝나는 순간 **아직 일하는 lead 를 완료로 단정한다**.
-  - 닫는 것은 lead 의 `Stop`·`StopFailure` 다. 그때 자식이 남아 있으면 **완료로 단정하지 않고** 마지막
+  - 닫는 것은 lead 의 `Stop`·`StopFailure`·Codex `Interrupt` 다. 그때 자식이 남아 있으면 **완료로 단정하지 않고** 마지막
     자식이 끝날 때 푼다.
 - **서브에이전트가 돌고 있으면 lead `Stop`도 턴 끝이 아니다.** `PreToolUse(Agent)`의 `tool_input`은
   `{description, prompt, subagent_type}`뿐이라 자식이 무엇을 고칠지 알 수 없고(실측), 자식 활동은 자식
@@ -915,6 +916,34 @@ maru 의 두 알림은 다른 이벤트에 걸려 있다: **완료 알림은 `St
   구분한다.
 - Claude의 `AskUserQuestion`은 자동 허용이라 `PermissionRequest`가 오지 않고 **`PreToolUse`로만** 온다.
   `*` matcher가 이 경우를 자동으로 덮는다.
+
+**Codex 질문 대기 실측(2026-10-02, CLI 0.159.0, 격리된 Plan mode·tmux 110×32).**
+`request_user_input`은 승인 요청이 아니다. 질문 화면에 `Question 1/1 (1 unanswered)`와
+`tab to add notes | enter to submit answer | esc to interrupt`가 보이는 동안
+`PreToolUse(request_user_input)`만 왔고, 답변을 제출하면 `PostToolUse(request_user_input)` → `Stop`이 왔다.
+`PermissionRequest`는 없었다. 이전 구현은 모든 `PreToolUse`를 `running`으로 처리해 §1.1 D2가
+질문 화면의 `blocked`를 버렸고, 설치한 `PostToolUse(Bash)`는 답변 훅도 받지 못했다.
+
+이제 **provider가 `codex`이고 도구 이름이 정확히 `request_user_input`인 lead 이벤트만**
+앞 훅으로 `blocked`를 세우고 **같은 턴·호출 ID의 응답**으로 푼다. 다른 도구와 중복 응답은 대기를 풀지 않는다. 자식 이벤트·다른 provider·비슷한 MCP
+이름에는 적용하지 않으며, 이미 `idle`인 턴은 늦은 응답으로 다시 열지 않는다. **미응답 질문에는 C1을 적용하지 않는다**: 질문이 아직 그려지지 않은 화면도 응답이 아니기 때문이다. 승인 대기의 C1과 D2는 유지한다. 셸 종료 훅은 기존처럼 받으며, Codex 종료 matcher만 두 도구로 좁혀
+확장한다. **로컬·원격 모두 같은 세트**다. 설치기는 이전 `Bash` matcher를 갱신하고 Codex 신뢰 값도
+기존 경로로 갱신한다. 사용자 훅은 보존한다.
+
+취소 실측에서는 질문 화면의 Esc가 `Interrupt`만 보내고 Post/Stop은 보내지 않았다. `Interrupt`는
+대기와 턴을 닫으며 완료 알림을 만들지 않는다. 이전 턴의 질문 응답·취소는 현재 턴의 신원·자식·도구 표시를
+바꾸기 전에 거른다. 같은 취소 턴의 늦은 도구 콜백도 턴을 다시 열지 않는다.
+질문은 호출 ID 전문(최대 64바이트)으로 동시에 8개까지 추적한다. ID 누락·길이 초과·용량 초과는
+응답으로 조기 해제하지 않고 Stop/Interrupt/새 턴 경계에서 정리한다.
+
+큰 질문 페이로드는 실측 Codex 키 순서의 `tool_input` 앞 신원과 마지막 `tool_use_id` 뒤를 원문으로 이어
+본문만 버린다. 도구 이름·턴·세션·호출 ID를 보존하며, 중첩 키에서 잘려 JSON 구조가 맞지 않으면 파서가
+거부한다. 키 순서가 달라 신원을 보존할 수 없는 경우 기존 이름 폴백으로 간다. 셸 게이트 4e가 큰 Pre/Post를
+실제 `/bin/sh`로 확인한다. `Interrupt`의 신뢰 해시는 CLI 0.159.0 `hooks/list` 실측값으로 검증한다.
+
+matcher의 정규식과 일반 함수 도구의 Pre/Post 훅은 [공식 Hooks 문서](https://learn.chatgpt.com/docs/hooks#matcher-patterns)에
+근거한다. 특정 질문 도구의 발화 여부와 화면 배치는 위 실측이 근거다. 일반 승인 문구를 화면에서만 보고
+훅의 상태를 덮는 예외는 추가하지 않는다.
 
 ### 2.1 `PreToolUse` 의 payload 는 provider 마다 다르다
 
@@ -1362,7 +1391,7 @@ maru의 기존 codex 훅이 이미 이 형태다.
   그대로 들어가므로 따옴표가 섞인 값을 실으면 파서가 그 줄을 통째로 버려 이름까지 잃는다. 검증을 못 지나면
   id 를 버리고 이름만 남긴다. 셸 게이트 4c 가 실제 `/bin/sh` 로 이것을 본다.
 
-  커맨드는 **claude 세트**로 훑는다 — codex 세트는 그 부분집합이라(§2 테스트가 못박는다) 한 벌이 둘을 덮고
+  커맨드는 **두 provider 이름의 합집합**으로 훑는다 — Codex 전용 `Interrupt`도 포함해 한 벌이 둘을 덮고
   provider마다 커맨드가 갈리지 않는다.
 - **리다이렉션까지 그룹으로 감싸 stderr를 버린다**(`{ printf … >> file; } 2>/dev/null`). `printf … 2>/dev/null`
   은 printf 자신의 stderr만 막고 **리다이렉션 대상이 없을 때 셸이 내는 에러**는 못 막는다 — 실측에서 로그
@@ -1634,12 +1663,22 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 여전히 도구 종료 신호가 필요하다(`PostToolUse` 를 다시 볼지, `PostToolBatch` 의 크기를 재 볼지). 세트를
 늘리는 결정이므로 여기서는 하지 않고 후속으로 남긴다.
 
-중복 방지가 **필수**다(없으면 같은 완료를 여러 번 알린다). **알림을 상태 «전이» 에 붙여 그것을 구조로
-얻는다**(2026-08-21) — 세는 코드는 언제나 어딘가에서 어긋난다:
+중복 방지는 상태 전이와 턴별 발송 기록으로 보장한다(2026-10-02 사용자 승인).
 
-- **턴 단위 1회**는 전이에서 나온다. 같은 턴에서 `Stop` 이 여러 번 와도 상태가 이미 `idle` 이라 전이가 없다.
-- **재발화 가드**도 마찬가지다. `stop_hook_active` 인 `Stop` 과 백그라운드 작업이 남은 `Stop` 은 애초에
-  상태를 옮기지 않으므로(§2·§4) 알림도 생기지 않는다. 토큰을 따로 들지 않는다.
+- **완료는 후보를 예약한다.** 현재 lead 턴이 닫히고 추적한 자식이 모두 끝나면 해당 pane에 예약한다.
+  **1.5초 동안 종료 상태가 유지된 뒤** 드레인에서 그 pane의 상태·턴 세대를 다시 확인해 발송한다.
+  다른 pane의 작업은 이 pane의 알림을 막지 않는다. 문구는 «턴이 끝났습니다»이며 전체 요청 완료를 추론하지 않는다.
+- **재개·질문·승인 요구·취소·새 턴·세션 전환은 후보를 폐기한다.** 같은 턴이 다시 작업한 뒤 종료해도
+  이미 발송한 완료를 반복하지 않는다. provider가 턴 ID를 생략한 경우에도 명시적 턴 경계의 로컬 세대로 구분한다.
+- **다른 턴의 늦은 `Stop`·`StopFailure`·`Interrupt`는 신원·상태를 변경하기 전에 거부한다.**
+  현재 열린 턴에 다른 세션의 종료 이벤트가 들어와도 종료시키지 않는다. ID가 없는 이벤트의 과거 여부는 판별할 수 없다.
+- **재발화 가드**: `stop_hook_active`나 자식이 남은 `Stop`은 완료 후보를 만들지 않는다.
+  마지막 자식이 끝난 때부터 유예를 잰다. `Interrupt` 뒤 자식이 끝나도 성공 알림을 만들지 않는다.
+  오류 알림은 종료 상태·턴 세대·중복 여부를 검증한 뒤 기존처럼 즉시 보낸다.
+- **베이스/선택**: Orca 터미널 경로의 1500ms quiet 정책을 참고해 Maru의 훅/자식 추적 계약에 맞춰 독립 구현했다.
+  검토 기준은 Orca commit `b666d0711750ba8d281e3490ae49a03458c78d79`의
+  [완료 컨트롤러](https://github.com/stablyai/orca/blob/b666d0711750ba8d281e3490ae49a03458c78d79/src/renderer/src/components/terminal-pane/agent-completion-notification-controller.ts)다.
+  transcript 감시나 응답 문구로 최종 완료를 추측하는 방식은 도입하지 않는다.
 - **주의 알림은 디바운스한다.** 자동 승인으로 곧 해소되는 요청이 있다(Codex "Approve for me"). 반면
   **배지는 즉시 바꾼다** — 시각 상태와 OS 배너의 타이밍을 분리한다.
 - 활성·포커스 pane은 배너를 억제하고 목록에만 남긴다(현행 OSC 경로의 `foreground_banner` 정책과 동형).
@@ -2074,3 +2113,17 @@ trusted_hash = "sha256:…"
 - **`MaxSessions` 기본값이 10 이고 다중화도 여기 포함된다.** pane 당 터미널 1 + 채널 1 이면 같은 호스트
   **pane 5 개가 상한**이고, 넘으면 `Session open refused by peer` 와 함께 255 로 죽는다 — 위 사망 판정과
   값이 겹친다.
+
+### 2026-10-02 알림 회귀 보강
+
+`parseLine`은 고정 크기 allocator의 JSON 토큰 검증으로 전체 문서의 문법을 먼저 검사한다.
+잘못된 쉼표·뒤따르는 쓰레기·중복된 최상위 신원 키는 이벤트로 채택하지 않는다. 부동소수점 변환이나
+새 런타임 의존성은 없다. 큰 Codex 질문을 접을 때 앞에 이미 있는 호출 ID를 중첩 ID로 덮지 않고,
+입력 본문 뒤의 자식 신원도 보존한다. 구조를 증명할 수 없는 잘림은 소비 파서가 거부한다.
+질문 답변은 별도 승인 요청을 해제하지 않으며, C2도 다른 pane에 남아 있는 질문을 완료로 뒤집지 않는다.
+
+검증: 순수 모드의 1499/1500ms·세대·재발송·자식·취소 경계, 제품 경로의 예약→새 턴·재개·질문·승인·세션 전환,
+마지막 자식 종료, aggregate가 running인 pane별 발송, 실제 셸의 큰 질문 신원 보존과 악성 중첩 ID를 검증한다.
+OS 배너의 실제 표시 여부는 별도의 앱 실기 검증이다.
+
+2026-10-02 추가 적대적 검증에서 «지난 턴 PreToolUse → 지난 턴 Stop»이 현재 턴과 자식 목록을 되돌리는 재현을 고정했다. pane별 최근 16개 떠난 신원(턴·세션 각각)을 정확한 바이트로 보관해 오래된 진행 이벤트도 신원·cwd·상태·알림 변경 전에 거부한다. 턴 기록은 세션에 귀속되므로 새 세션의 턴 ID 재사용과 명시적 `SessionStart`를 통한 이전 세션 resume은 허용한다. 고정 크기 기록 밖으로 밀려난 신원이나 ID가 없는 이벤트의 과거 여부는 판별할 수 없다.

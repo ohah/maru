@@ -907,6 +907,39 @@ test "codex 세트로 넣으면 Notification 이 들어가지 않는다" {
     try testing.expectEqual(Plan.leave, planForSet(.codex, .local, .{ .known = known }, .ensure));
 }
 
+test "Codex 질문 응답 matcher 는 기존 Bash 설치를 갱신하고 사용자 훅을 보존한다" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try wantCommand(a);
+    var hooks: std.json.ObjectMap = .empty;
+    try apply(.codex, .local, a, &hooks, want, .install);
+    // Simulate the previously installed set. A matcher-only change must schedule a refresh too.
+    var groups = hooks.getPtr("PostToolUse").?.array.items;
+    try groups[0].object.put(a, "matcher", .{ .string = "Bash" });
+    const user = (try std.json.parseFromSlice(std.json.Value, a, "{\"matcher\":\"apply_patch\",\"hooks\":[{\"type\":\"command\",\"command\":\"user-hook.sh\"}]}", .{})).value;
+    try hooks.getPtr("PostToolUse").?.array.append(user);
+    const old = scan(.codex, .local, .{ .object = hooks }, want).?;
+    try testing.expectEqual(Plan.refresh, planForSet(.codex, .local, .{ .known = old }, .ensure));
+    try apply(.codex, .local, a, &hooks, want, .install);
+    const current = scan(.codex, .local, .{ .object = hooks }, want).?;
+    try std.testing.expectEqual(command.codex_events.len, current.ours_current);
+    try testing.expectEqual(Plan.leave, planForSet(.codex, .local, .{ .known = current }, .ensure));
+    groups = hooks.get("PostToolUse").?.array.items;
+    try testing.expectEqual(@as(usize, 2), groups.len);
+    var ours = false;
+    var preserved = false;
+    for (groups) |group| {
+        const matcher = group.object.get("matcher").?.string;
+        if (std.mem.eql(u8, matcher, command.codex_post_tool_matcher)) ours = true;
+        if (std.mem.eql(u8, matcher, "apply_patch")) {
+            preserved = true;
+            try testing.expectEqualStrings("user-hook.sh", group.object.get("hooks").?.array.items[0].object.get("command").?.string);
+        }
+    }
+    try testing.expect(ours and preserved);
+}
+
 test "provider 를 바꿔 보면 남은 항목이 세트 밖으로 잡힌다" {
     var arena = testArena();
     defer arena.deinit();

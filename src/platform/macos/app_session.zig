@@ -26862,8 +26862,8 @@ test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라�
     // ⑴ 슬롯 둘 — 인라인 슬롯은 비어 있다(모든 이벤트가 pane 을 달고 왔다).
     try std.testing.expectEqual(@as(usize, 2), session.remote_agent_panes.countFor(term.surfaceId()));
     try std.testing.expectEqualStrings("", term.hook.transcript.identity());
-    const pa = session.remote_agent_panes.find(term.surfaceId(), "%0") orelse return error.NoPaneA;
-    const pb = session.remote_agent_panes.find(term.surfaceId(), "%1") orelse return error.NoPaneB;
+    const pa = session.remote_agent_panes.findMut(term.surfaceId(), "%0") orelse return error.NoPaneA;
+    const pb = session.remote_agent_panes.findMut(term.surfaceId(), "%1") orelse return error.NoPaneB;
     try std.testing.expectEqualStrings("S-A", pa.slot.transcript.identity());
     try std.testing.expectEqualStrings("S-B", pb.slot.transcript.identity());
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, pa.slot.state);
@@ -26882,6 +26882,7 @@ test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라�
     // ⑷' 훅 cwd 도 대표 슬롯에서 — 인라인만 보면 비어 있어 폴더줄·원격 스냅샷이 사라진다(실기 2 pane e2e 가 잡았다).
     try std.testing.expectEqualStrings("/srv/app", git_ops.remoteCwd(&session, term));
     // ⑸ 알림: A 의 완료가 나온다. B 는 아직 running 이라 없다.
+    pa.slot.notice.since_ms = session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms;
     const n1 = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingNoticeA;
     try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, n1.kind);
     try std.testing.expect(agent_ops.takeAgentHookNotice(&session, term) == null);
@@ -26895,6 +26896,7 @@ test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라�
     try std.testing.expectEqual(@as(usize, 2), agent_ops.test_turn_snapshot_calls);
     try std.testing.expectEqualStrings("S-B", agent_ops.test_last_turn_session[0..agent_ops.test_last_turn_session_len]);
     try std.testing.expectEqualStrings("B 끝", agent_ops.primaryHookSlot(&session, term).transcript.reply());
+    pb.slot.notice.since_ms = session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms;
     const n2 = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingNoticeB;
     try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, n2.kind);
 
@@ -27965,7 +27967,11 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     }
 
     // ── ③ 훅 알림은 실제로 방출된다 ──────────────────────────────────────────────────────────
-    term.hook.notice.set(.done, "끝났습니다", session.awakeMs());
+    term.hook.state = .idle;
+    term.hook.progress.turn_open = false;
+    term.hook.progress.completion_notified = false;
+    term.hook.notice.set(.done, "끝났습니다", session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms);
+    term.hook.notice.generation = term.hook.progress.generation;
     const emitted = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
     // 본문에는 그 Term 의 **마지막 대화**가 함께 실린다(`notificationBodyOwned` — 관측 모드와 같은 tail).
     // 그래서 정확히 같지 않고 포함 관계다.
@@ -27985,7 +27991,11 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         // 순수 분기 테스트라 vtable 을 부르지 않는다(위 `shouldDetachRemoteOnAppQuit` 테스트와 같은 주입).
         term.surface.remote = .{ .ctx = @ptrFromInt(1), .vtable = @ptrFromInt(@alignOf(maru.session.surface.ScreenSource.VTable)) };
         defer term.surface.remote = null;
-        term.hook.notice.set(.done, "원격에서도 끝났습니다", session.awakeMs());
+        term.hook.state = .idle;
+        term.hook.progress.turn_open = false;
+        term.hook.progress.completion_notified = false;
+        term.hook.notice.set(.done, "원격에서도 끝났습니다", session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms);
+        term.hook.notice.generation = term.hook.progress.generation;
         const remote_emitted = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
         try std.testing.expect(std.mem.indexOf(u8, remote_emitted.body, "원격에서도 끝났습니다") != null);
         try std.testing.expectEqual(term.surfaceId(), remote_emitted.surface_id);
@@ -28098,6 +28108,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    term.hook.notice.since_ms = session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms;
     const lead_body = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
     try std.testing.expect(std.mem.indexOf(u8, lead_body.body, "lead 가 정리했습니다") != null);
     try std.testing.expect(std.mem.indexOf(u8, lead_body.body, "from-child") == null);
@@ -28148,6 +28159,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
+    term.hook.notice.since_ms = session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms;
     const ok = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
     try std.testing.expect(std.mem.indexOf(u8, ok.title, maru.i18n.t(.agent_hook_notice_done)) != null);
     try std.testing.expect(std.mem.indexOf(u8, ok.body, "다 했습니다") != null);
@@ -29703,6 +29715,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
     // ⑦ **알림은 전이에 붙는다**(계약 §6). 위 ⑥에서 `Stop` 을 읽어 idle 로 갔으므로 완료 알림이 예약돼
     //    있어야 하고, 꺼내 가면 슬롯이 비어 **두 번 울리지 않아야** 한다.
     {
+        term.hook.notice.since_ms = session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms;
         const notice = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingHookNotice;
         try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, notice.kind);
         try std.testing.expectEqualStrings("끝났습니다", notice.body);
@@ -30056,6 +30069,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
         try std.testing.expect(std.mem.indexOfScalar(u8, term.hook.transcript.owned.reply(), '\n') == null);
         // 알림 본문은 **반대다** — OS 배너는 여러 줄을 제대로 보여주므로 개행을 살리고, 대신 `\n` 두 글자가
         // 나가면 안 된다(인앱 히스토리는 자기 tail 에서 눕힌다).
+        term.hook.notice.since_ms = session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms;
         const notice = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingHookNotice;
         try std.testing.expect(std.mem.indexOfScalar(u8, notice.body, '\n') != null);
         try std.testing.expect(std.mem.indexOf(u8, notice.body, "\\n") == null);
@@ -30078,6 +30092,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
                 "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"" ++ long_korean ++ "\"}\n",
         });
         agent_ops.pollAgentHookEvents(&session, term, false);
+        term.hook.notice.since_ms = session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms;
         const notice = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingHookNotice;
         try std.testing.expect(notice.body.len > 0);
         try std.testing.expect(std.unicode.utf8ValidateSlice(notice.body)); // 배너
@@ -30133,6 +30148,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
         });
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+        term.hook.notice.since_ms = session.awakeMs() -| maru.session.agent_hook_mode.completion_quiet_ms;
         const bg = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
         try std.testing.expect(std.mem.indexOf(u8, bg.title, maru.i18n.t(.agent_hook_notice_done)) != null);
         try std.testing.expect(std.mem.indexOf(u8, bg.body, "띄웠음") != null);

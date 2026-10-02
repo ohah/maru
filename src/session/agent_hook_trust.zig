@@ -52,6 +52,8 @@ pub const events = [_]EventTrust{
     .{ .json_name = "SessionStart", .snake = "session_start", .matcher_in_hash = true, .confidence = .measured },
     .{ .json_name = "UserPromptSubmit", .snake = "user_prompt_submit", .matcher_in_hash = false, .confidence = .measured },
     .{ .json_name = "Stop", .snake = "stop", .matcher_in_hash = false, .confidence = .measured },
+    // Codex 0.159.0 hooks/list measured on 2026-10-02; matcher normalizes to null.
+    .{ .json_name = "Interrupt", .snake = "interrupt", .matcher_in_hash = false, .confidence = .measured },
     .{ .json_name = "PermissionRequest", .snake = "permission_request", .matcher_in_hash = true, .confidence = .measured },
     .{ .json_name = "PreToolUse", .snake = "pre_tool_use", .matcher_in_hash = true, .confidence = .measured },
     // 2026-09-20 실측(codex 0.154.0, matcher `Bash`): `hooks/list` 의 `currentHash` 가 matcher 를 넣은 공식과 일치했고
@@ -471,6 +473,7 @@ const golden = [_]GoldenCase{
     // 아래 둘은 fixture 에 matcher 가 **있는데도** 없이 계산한 값이다.
     .{ .json_name = "UserPromptSubmit", .hash = "sha256:6ccb18ff90f1de0bbc4e0ddc0818549d36697d64710ab0c5040a165fd86ba45a" },
     .{ .json_name = "Stop", .hash = "sha256:d445818a88b2e64da7d09e58850802e0f15124c6a7d9d428e44e437e433f017d" },
+    .{ .json_name = "Interrupt", .hash = "sha256:b4a9de44a791b7fba65074c977cf8f31eb01f8611a660a80726e761323f14b6d" },
 };
 
 test "golden: 세트의 모든 이벤트가 codex 가 계산한 값과 같다" {
@@ -483,10 +486,10 @@ test "golden: 세트의 모든 이벤트가 codex 가 계산한 값과 같다" {
     }
 }
 
-test "golden: matcher 를 빼는 두 이벤트는 matcher 를 줘도 값이 같다" {
+test "golden: matcher 를 빼는 세 이벤트는 matcher 를 줘도 값이 같다" {
     // «넣을지 말지» 를 우리가 실제로 가른다는 증거. 이 대조가 없으면 위 테스트는 matcher 를 늘 무시하는
     // 구현으로도 통과한다.
-    for ([_][]const u8{ "UserPromptSubmit", "Stop" }) |name| {
+    for ([_][]const u8{ "UserPromptSubmit", "Stop", "Interrupt" }) |name| {
         const with_m = try hashAlloc(forEvent(name).?, golden_command, golden_timeout, "*");
         defer testing.allocator.free(with_m);
         const without_m = try hashAlloc(forEvent(name).?, golden_command, golden_timeout, null);

@@ -60,7 +60,12 @@ test "Session default G1 provenance boundary keeps one parser and the exact G2 c
     // the flip relies on. Kept counted here on purpose: this boundary is what forces the next
     // reader to come here and say which of the two it is.
     try std.testing.expectEqual(@as(usize, 8), try countOutsideConfig(allocator, "session_keep_alive_provenance"));
-    try std.testing.expectEqual(@as(usize, 20), try countOutsideConfig(allocator, "file_provenance"));
+    //
+    // file_provenance 21st·22nd (2026-10-02): the `workspace.restore` toggle
+    // (`maru_macos_workspace_restore_enabled` in app_host_abi.zig) and its same-file test. **Diagnostic only,
+    // not a policy owner** — the loader never errors for an unreadable/oversized file, so the toggle logs that
+    // provenance; the restore decision still comes from `config.workspace.restore` alone.
+    try std.testing.expectEqual(@as(usize, 22), try countOutsideConfig(allocator, "file_provenance"));
 }
 
 fn countOutsideConfig(allocator: std.mem.Allocator, needle: []const u8) !usize {

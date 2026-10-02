@@ -27,6 +27,7 @@ const layout_math = maru.session.layout_math;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
+const find_ops = @import("find.zig");
 const web_ops = @import("web.zig");
 const editor_ops = @import("editor/mod.zig");
 const editor_diff_ops = @import("editor/diff.zig");
@@ -1008,6 +1009,7 @@ pub fn moveTermToPane(self: *AppSession, src: *Pane, src_idx: usize, dst: *Pane,
     self.app_window.tabs = self.surface_ptrs.items;
     resizeActiveTabPanes(self) catch {}; // 옮긴 Term을 dst term rect grid로(+ src 형제가 빈자리 확장)
     recomputeActivePaneRect(self);
+    find_ops.syncDiffFind(self);
     self.metal_dirty = true;
 }
 
@@ -1304,6 +1306,7 @@ pub fn tryFocusPane(self: *AppSession, pane_index: usize) bool {
     self.surface_ptrs.items[self.app_window.active_tab] = tab.activeTerm().surface;
     self.app_window.tabs = self.surface_ptrs.items;
     recomputeActivePaneRect(self);
+    find_ops.syncDiffFind(self);
     self.metal_dirty = true;
     self.workspaceChanged(.selection);
     return true;

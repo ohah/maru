@@ -803,3 +803,11 @@ pub fn refreshDiffFind(self: *AppSession, term: *Term) void {
     std.mem.swap(std.ArrayList(maru.session.editor.find.Match), &self.editor_find_matches, &term.rt.editor_diff_find_matches);
     self.chrome_host.find.input_focused = focused;
 }
+
+/// Replacement edits clear only replacement diagnostics; an unchanged invalid pattern stays visible.
+pub fn replacementTextChanged(self: *AppSession) void {
+    if (self.chrome_host.find.regex_error) |message| {
+        if (std.mem.eql(u8, message, "invalid replace")) self.chrome_host.find.regex_error = null;
+    }
+    self.metal_dirty = true;
+}

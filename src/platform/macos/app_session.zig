@@ -12937,10 +12937,7 @@ pub const AppSession = struct {
                 self.recomputeFind(),
             // **바꿀 문자열은 검색을 다시 돌리지 않는다** — 검색어가 그대로이기 때문이다. 다시 돌리면
             // 타이핑마다 `current`가 0으로 리셋돼(증분 검색 규칙) 사용자가 고른 매치를 잃는다.
-            .find_replace_text_changed => {
-                self.chrome_host.find.regex_error = null;
-                self.metal_dirty = true;
-            },
+            .find_replace_text_changed => find_ops.replacementTextChanged(self),
             .find_focus_moved => self.metal_dirty = true,
             .find_replace_one => find_ops.replaceOne(self),
             .find_replace_all => find_ops.replaceAll(self),
@@ -15911,7 +15908,7 @@ pub const AppSession = struct {
             // 검색어가 그대로이므로 다시 돌리면 `current`가 0으로 리셋돼 고른 매치를 잃는다.
             .find => if (self.chrome_host.find.focused().commitPreedit(self.allocator)) {
                 if (self.chrome_host.find.replaceActive() and self.chrome_host.find.focus == .replace) {
-                    self.metal_dirty = true;
+                    find_ops.replacementTextChanged(self);
                 } else {
                     self.recomputeFind(); // 검색어가 바뀜
                     self.metal_dirty = true;

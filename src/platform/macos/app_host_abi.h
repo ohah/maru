@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 202u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 203u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2148,6 +2148,10 @@ int32_t maru_macos_app_session_osr_aux_button(MaruAppHostSession *session, int32
    터미널 경로가 아니라 아래 osr_key·입력기 트랜잭션으로 보낸다. v200(W6a②): 그 탭에 팝업 위젯(`<select>` 목록 등)이
    열려 있으면 2 — Swift 는 입력기를 거치지 않고 osr_key phase 3 으로 보낸다. */
 int32_t maru_macos_app_session_osr_keyboard_active(MaruAppHostSession *session);
+/* v201(W6b): hover 중인 Chromium 탭의 툴팁 글(UTF-8, 여러 줄은 LF)을 out 에 out_cap 까지 쓰고 길이를 out_len 에, (hover 탭, 그 탭의
+   툴팁 세대)가 바뀔 때마다 오르는 일련번호를 out_serial 에. 글이 있으면 1. Swift 는 일련번호가 바뀌면 macOS 툴팁을 다시 단다. */
+int32_t maru_macos_app_session_osr_tooltip(MaruAppHostSession *session, uint64_t *out_serial, uint8_t *out, size_t out_cap,
+                                           size_t *out_len);
 /* v195(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
    2 = 뗌, 3(v200 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */

@@ -74,6 +74,10 @@ pub const Tag = enum(u8) {
     /// 알린다(`InitAsPopup` — 헤더는 옮기거나 크기를 바꿀 때도 부른다고 적는다, 다시 와도 같은 첫 세대를 보낸다). 열리면 view DIP 사각형과 그 팝업 링의 첫 세대, 닫히면 0 사각형·0 세대.
     /// 팝업의 픽셀은 본 화면과 다른 링으로 온다(`ring_message.popup_message_id`).
     popup_changed = 48,
+    /// 페이지의 툴팁 글이 바뀌었다(W6b — HTML `title`). 빈 글이면 툴팁이 없다. sidecar 는 연달아 같은 글을 보내지 않고(CEF 는
+    /// 요소 안에서 움직일 때마다 같은 글을 다시 부른다 — 실측), 페이지를 새로 불러오기 시작할 때·포인터가 떠날 때 기억한 글을
+    /// 비우며 비어 있지 않았으면 빈 글을 한 번 보낸다(같은 문서 안 주소 변경에는 비우지 않는다). 여러 줄은 `\n` 으로 온다(대화상자 글 규칙).
+    tooltip_changed = 49,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -482,6 +486,12 @@ pub const PopupChanged = struct {
     first_generation: u32 = 0,
 };
 
+/// 툴팁 글(W6b). 대화상자 글 규칙(`fields.checkDialogText` — 4 KiB, UTF-8, `\t`·`\n`·`\r` 말고 제어 문자 없음).
+pub const TooltipChanged = struct {
+    browser: BrowserId,
+    text: []const u8,
+};
+
 pub const ImeRange = struct {
     browser: BrowserId,
     /// 조합 글자들의 사각형을 모두 합친 것.
@@ -605,6 +615,7 @@ pub const Message = union(Tag) {
     permission_request: PermissionRequest,
     web_notification: WebNotification,
     popup_changed: PopupChanged,
+    tooltip_changed: TooltipChanged,
 };
 
 test "tags split by direction at 32" {

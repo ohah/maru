@@ -1946,14 +1946,15 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **검색 결과는 검색 중인 그 문서에만 칠한다**(§5.1). 열려 있는 편집기가 여럿이면 나머지에도
     // 같은 색이 깔리는데, 그러면 Enter가 어디로 갈지 화면이 말해 주지 못한다 — 터미널 쪽이
     // 활성 surface의 매치만 클립하는 것과 같은 규칙이다.
+    const view_find = find_ops.viewFind(self, term);
     const find_marks: ?[]const []const chrome_editor.frame.Mark = blk: {
-        if (!isFindTarget(self, term)) break :blk null;
+        const vf = view_find orelse break :blk null;
         // **닫은 채 ⌘G로 오가는 중이면 현재 매치만 그린다** — 스크롤백이 같은 자리에서 같은
         // 판정을 한다(`collectFindViewSpans`의 `if (find.open)`). 닫아 둔 검색의 나머지 강조까지
         // 남으면 "닫았는데 화면이 그대로"가 된다.
-        const all = self.editor_find_matches.items;
-        if (self.chrome_host.find.open) break :blk buildFindMarks(self, term, all);
-        const cur = self.chrome_host.find.current;
+        const all = vf.matches;
+        if (vf.state.open) break :blk buildFindMarks(self, term, all);
+        const cur = vf.state.current;
         if (cur >= all.len) break :blk null;
         break :blk buildFindMarks(self, term, all[cur .. cur + 1]);
     };
@@ -1969,10 +1970,12 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     var marker_line_buf: [chrome_editor.scrollbar.marker_budget]u32 = undefined;
     var marker_lines: []const u32 = &.{};
     var marker_current: ?usize = null;
-    if (isFindTarget(self, term) and self.chrome_host.find.open) {
-        const cur_idx = self.chrome_host.find.current;
-        const filled = markerRows(term, self.editor_find_matches.items, cur_idx, &marker_line_buf, &marker_current);
-        marker_lines = marker_line_buf[0..filled];
+    if (view_find) |vf| {
+        if (vf.state.open) {
+            const cur_idx = vf.state.current;
+            const filled = markerRows(term, vf.matches, cur_idx, &marker_line_buf, &marker_current);
+            marker_lines = marker_line_buf[0..filled];
+        }
     }
 
     // **조합 중이면 그 글자를 끼운 사본을 그린다**(N3). 문서는 그대로다 — 조합은 확정이 아니다.
@@ -2380,11 +2383,14 @@ pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || err
 pub fn openSharedViewInActivePane(self: *AppSession, source: *Term) (OpenFileError || error{UnsupportedSharedDocument})!*Term {
     var prepared = try prepareSharedView(self, source);
     errdefer prepared.deinit(self.allocator);
+    var legacy_search = try find_ops.prepareSharedViewFind(self, source);
+    errdefer if (legacy_search) |*slot| slot.deinit(self.allocator);
     const term = createEditorTerm(self) catch return error.OutOfMemory;
     errdefer term_ops.destroyTerm(self, term);
     const pane = pane_ops.activePane(self);
     pane.terms.append(self.allocator, term) catch return error.OutOfMemory;
     finishAttach(self, term, prepared);
+    find_ops.enableSharedViewFind(self, source, term, legacy_search);
     self.focusTerm(pane.terms.items.len - 1);
     self.metal_dirty = true;
     return term;
@@ -5299,9 +5305,13 @@ fn visibleRowOfDocLine(term: *const Term, doc_line: u32) ?u32 {
 
 /// 현재 매치를 **보이는 줄 축**으로 옮긴다(렌더가 색을 가르는 데 쓴다).
 pub fn currentVisibleMatch(self: *AppSession, term: *Term) ?VisibleMatch {
-    const idx = self.chrome_host.find.current;
-    if (idx >= self.editor_find_matches.items.len) return null;
-    const m = self.editor_find_matches.items[idx];
+    const vf: find_ops.ViewFind = if (term.rt.editor_view_find_owned and term.rt.editor_diff == null)
+        find_ops.viewFind(self, term) orelse return null
+    else
+        .{ .state = &self.chrome_host.find, .matches = self.editor_find_matches.items, .nav = self.find_nav };
+    const idx = vf.state.current;
+    if (idx >= vf.matches.len) return null;
+    const m = vf.matches[idx];
     const row = visibleRowOfDocLine(term, m.line) orelse return null;
     return .{ .row = row, .start = m.start };
 }
@@ -10319,7 +10329,7 @@ pub fn refreshViewAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.
     // **문서가 바뀌면 「선택 영역 내에서만」의 범위를 버린다**(§5.1). 굳혀 둔 offset 이 이제 다른
     // 글자를 가리킨다 — 따라가게 만들면 마커·매치·범위 셋이 각각 다른 시점을 말한다. 여기가
     // 맞는 자리인 이유는 위 주석 그대로다: **편집 경로 여섯이 전부 이 함수를 지난다.**
-    find_ops.dropFindSelectionRange(self);
+    find_ops.invalidateViewFind(self, term);
 
     // **이 뷰의 구문 provider에 편집을 알린다 — 뷰 갱신의 한 자리다**(§5.3 `onEdit`). 제품의 편집 경로
     // 여섯이 전부 이 함수를 지나므로 통지도 한 곳이면 된다. 알리지 않으면 §5.3이 적었듯
@@ -10472,6 +10482,9 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
 
     if (term.rt.editor_find_marks.len > 0) self.allocator.free(term.rt.editor_find_marks);
     if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
+    term.rt.editor_view_find.deinit(self.allocator);
+    term.rt.editor_view_find_owned = false;
+    term.rt.editor_view_find_revision = null;
     term.rt.editor_diff_find_matches.deinit(self.allocator);
     term.rt.editor_diff_find_matches = .empty;
     self.allocator.free(term.rt.editor_diff_find_marks);
@@ -15013,11 +15026,15 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     try testing.expect(refSettled(&fx));
     try testing.expect(s.chrome_host.reference_picker.open);
     try testing.expectEqual(@as(usize, 6), rows.all.items.len);
-    const last = rows.all.items[5];
-    try testing.expect(last.outside);
-    try testing.expectEqualStrings(maru.i18n.t(.ref_outside_title), last.title);
-    try testing.expectEqualStrings("…onexistent-outside-root/x.c", last.binding); // 절대 경로는 28칸 꼬리로(앞 `…`)
-    s.chrome_host.reference_picker.selected = 5;
+    // 현재 파일 뒤의 행은 절대 경로로 정렬된다. 체크아웃 위치에 따라 root 밖 행의 순서가 달라진다.
+    const outside_index = for (rows.all.items, 0..) |row, i| {
+        if (std.mem.eql(u8, row.path, "/nonexistent-outside-root/x.c")) break i;
+    } else return error.TestUnexpectedResult;
+    const outside_row = rows.all.items[outside_index];
+    try testing.expect(outside_row.outside);
+    try testing.expectEqualStrings(maru.i18n.t(.ref_outside_title), outside_row.title);
+    try testing.expectEqualStrings("…onexistent-outside-root/x.c", outside_row.binding); // 절대 경로는 28칸 꼬리로(앞 `…`)
+    s.chrome_host.reference_picker.selected = outside_index;
     const focus_before = term.rt.editor_selection.?.focus;
     try pressKey(&fx, .enter, .{});
     try testing.expectEqual(@as(u64, 1), s.editor_references.notified_outside);
@@ -46999,4 +47016,155 @@ test "shared editor IME rejected focus keeps later callback deletion at original
         try testing.expectEqual(revision, doc.opened.?.file.revision);
         try testing.expectEqualStrings(expected, doc.opened.?.file.content);
     }
+}
+
+test "shared editor view find retains independent query options current and closed navigation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    _ = try fx.session.tick();
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "const");
+    find_ops.recomputeFind(fx.session);
+    fx.session.chrome_host.find.current = 1;
+    fx.session.chrome_host.find.match_case = true;
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    _ = try fx.session.tick();
+    // A new shared view has not searched yet; it must not inherit A's open widget.
+    try testing.expect(!fx.session.chrome_host.find.open);
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "b");
+    find_ops.recomputeFind(fx.session);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    _ = try fx.session.tick();
+    try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+    try testing.expect(fx.session.chrome_host.find.match_case);
+    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.current);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_find_matches.items.len);
+    find_ops.toggleFind(fx.session); // close A, keep its own Cmd+G history
+    try testing.expect(!fx.session.chrome_host.find.open);
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    _ = try fx.session.tick();
+    try testing.expectEqualStrings("b", fx.session.chrome_host.find.input.query.items);
+    try testing.expect(!fx.session.chrome_host.find.match_case);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    // Cmd+G must restore A synchronously, even before the next frame tick.
+    find_ops.findNavigate(fx.session, true);
+    try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+    try testing.expect(fx.session.find_nav);
+    try testing.expectEqual(@as(usize, 2), fx.session.chrome_host.find.current);
+}
+
+test "shared editor view find inactive paint refreshes its own query after peer edit without scrolling" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "const");
+    find_ops.recomputeFind(fx.session);
+    fx.session.chrome_host.find.current = 1;
+    fx.session.chrome_host.find.in_selection = .{ .start = 0, .end = 40 };
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "b");
+    find_ops.recomputeFind(fx.session);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "const b = 0;\n"));
+    const first = fx.term.rt.editor_first_line;
+    const selection = fx.term.rt.editor_selection;
+    var painted = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.MissingFrame;
+    defer painted.dl.deinit(testing.allocator);
+    const vf = find_ops.viewFind(fx.session, fx.term) orelse return error.MissingViewFind;
+    try testing.expectEqualStrings("const", vf.state.input.query.items);
+    try testing.expectEqual(@as(usize, 4), vf.matches.len);
+    try testing.expect(vf.state.in_selection == null);
+    try testing.expectEqual(@as(usize, 1), vf.state.current);
+    try testing.expectEqual(first, fx.term.rt.editor_first_line);
+    try testing.expectEqualDeep(selection, fx.term.rt.editor_selection);
+    try testing.expectEqualStrings("b", fx.session.chrome_host.find.input.query.items);
+    // The actual inactive frame materialized marks for its query, not B's query.
+    try testing.expect(fx.term.rt.editor_find_marks.len > 0);
+    try testing.expectEqual(@as(usize, 5), fx.term.rt.editor_find_marks[0][0].len);
+    const active = find_ops.viewFind(fx.session, peer) orelse return error.MissingActiveFind;
+    try testing.expectEqual(@as(usize, 2), active.matches.len);
+}
+
+test "shared editor view find search IME stays with original slot and closing active peer restores survivor" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "const");
+    find_ops.recomputeFind(fx.session);
+    fx.session.imeBegin();
+    fx.session.imeMarked("한");
+    try testing.expectEqualStrings("한", fx.session.chrome_host.find.input.preedit.items);
+    fx.session.imeEnd(null);
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    find_ops.syncDiffFind(fx.session);
+    try testing.expectEqualStrings("const한", fx.term.rt.editor_view_find.state.input.query.items);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_view_find.state.input.preedit.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.input.query.items.len);
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "b");
+    find_ops.recomputeFind(fx.session);
+    const peer_id = peer.surfaceId();
+    const pane = pane_ops.activePane(fx.session);
+    const idx: usize = for (pane.terms.items, 0..) |t, i| {
+        if (t == peer) break i;
+    } else return error.MissingPeer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    find_ops.syncDiffFind(fx.session);
+    try testing.expect(term_ops.termBySurfaceId(fx.session, peer_id) == null);
+    try testing.expectEqualStrings("const한", fx.session.chrome_host.find.input.query.items);
+    try testing.expect(fx.session.chrome_host.find.open);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.match_count);
+    try testing.expectEqual(fx.term.surfaceId(), fx.session.editor_view_find_owner);
+    _ = try openUntitledInActivePane(fx.session);
+    find_ops.syncDiffFind(fx.session);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.input.query.items.len);
+}
+
+test "shared editor view find first migration preserves legacy search and prepares failure before attaching" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "const");
+    try fx.session.chrome_host.find.replace.query.appendSlice(testing.allocator, "let");
+    find_ops.recomputeFind(fx.session);
+    fx.session.chrome_host.find.current = 1;
+    var failing = SharedIMESingleFailAllocator{ .child = testing.allocator, .fail_at = 0 };
+    fx.session.allocator = failing.allocator();
+    const failed = find_ops.prepareSharedViewFind(fx.session, fx.term);
+    fx.session.allocator = testing.allocator;
+    try testing.expectError(error.OutOfMemory, failed);
+    try testing.expect(!fx.term.rt.editor_view_find_owned);
+    try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_find_matches.items.len);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    try testing.expect(!fx.session.chrome_host.find.open);
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "b");
+    find_ops.recomputeFind(fx.session);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+    try testing.expectEqualStrings("let", fx.session.chrome_host.find.replace.query.items);
+    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.find.current);
+    const ordinary = try openUntitledInActivePane(fx.session);
+    _ = ordinary;
+    find_ops.syncDiffFind(fx.session);
+    try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+    try testing.expectEqualStrings("let", fx.session.chrome_host.find.replace.query.items);
+    try testing.expectEqual(@as(u64, 0), fx.session.editor_view_find_owner);
+    // Returning to B still restores B's independently changed search.
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    try testing.expectEqualStrings("b", fx.session.chrome_host.find.input.query.items);
 }

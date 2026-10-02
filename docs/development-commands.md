@@ -996,3 +996,15 @@ A의 독립 caret 보존, 전환 후 600ms 동안 문서·선택 불변과 저�
 현재 owner와 세대, 캡처된 해석 세대, 해석 시작/종료와 확정 승인을 기록한다.
 전환 뒤 자연 callback 관측 수가 0이면 입력 전환 회귀 통과이며,
 발생원 토큰 없는 늦은 OS callback 자체의 재현·격리 완료를 뜻하지 않는다.
+
+
+### 공유 뷰별 검색
+
+`zig build test-editor-shared-find`는 공유 일반 편집기의 검색 슬롯 교환·독립 결과·닫힘 ⌘G,
+문서 편집 뒤 비활성 frame 강조·스크롤 불변, 검색 IME와 종료 정산을 검사한다.
+`-Doptimize=ReleaseFast`에서도 실행한다. 기본 `test-editor-shared`와 제품 에디터 검사에도
+포함되며 새 split UI나 검색 이력의 workspace 복원을 검증하는 gate는 아니다.
+
+`python3 tools/shared-ime-gpu/capture.py --scenario find --output /tmp/maru-shared-find-<고유명>`은
+검색 전/서로 다른 검색/공유 편집 후/source 검색 닫힘을 각 뷰의 제품 Metal PNG로 기록한다.
+정본 revision·뷰별 match 수와 source/artifact SHA-256을 검사한다. 기본 `--scenario ime`도 유지한다.

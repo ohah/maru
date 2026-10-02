@@ -59,6 +59,123 @@ pub fn activeTermIsEditor(self: *AppSession) bool {
     return activeEditorTerm(self) != null;
 }
 
+fn swapViewSlot(self: *AppSession, slot: *@import("../app_session.zig").EditorViewFind) void {
+    std.mem.swap(find_ui.State, &self.chrome_host.find, &slot.state);
+    std.mem.swap(std.ArrayList(maru.session.editor.find.Match), &self.editor_find_matches, &slot.matches);
+    std.mem.swap(u64, &self.editor_find_source, &slot.source);
+    std.mem.swap(bool, &self.find_nav, &slot.nav);
+    std.mem.swap(@TypeOf(self.find_selection_at_open), &self.find_selection_at_open, &slot.selection_at_open);
+}
+
+/// Activation exchanges ownership, never copies ArrayLists or another view's IME.
+/// The existing session search is retained separately for nonshared editors/terminal/web.
+pub fn syncViewFind(self: *AppSession) void {
+    const active = activeEditorTerm(self);
+    const wanted: u64 = if (active) |t| (if (t.rt.editor_view_find_owned and t.rt.editor_diff == null) t.surfaceId() else 0) else 0;
+    if (wanted == self.editor_view_find_owner) return;
+    if (self.editor_view_find_owner != 0) {
+        if (term_ops.termBySurfaceId(self, self.editor_view_find_owner)) |old| {
+            if (self.chrome_host.find.input.commitPreedit(self.allocator)) {
+                self.chrome_host.find.current = 0;
+                recomputeEditorFind(self, old);
+            }
+            _ = self.chrome_host.find.replace.commitPreedit(self.allocator);
+            swapViewSlot(self, &old.rt.editor_view_find);
+        } else {
+            // Its active slot outlived the closed Term; release it before restoring fallback.
+            self.chrome_host.find.deinit(self.allocator);
+            self.chrome_host.find = .{};
+            self.editor_find_matches.deinit(self.allocator);
+            self.editor_find_matches = .empty;
+            self.editor_find_source = 0;
+            self.find_nav = false;
+            self.find_selection_at_open = null;
+        }
+        swapViewSlot(self, &self.editor_view_find_fallback);
+    }
+    self.editor_view_find_owner = wanted;
+    if (wanted != 0) {
+        swapViewSlot(self, &self.editor_view_find_fallback);
+        swapViewSlot(self, &active.?.rt.editor_view_find);
+        refreshViewFind(self, active.?);
+    }
+    self.metal_dirty = true;
+}
+
+/// Snapshot the legacy search before the source starts owning it. Only strings
+/// need duplication; the legacy target will recompute its own result list.
+/// Prepare before attaching a peer so OOM cannot partially migrate ownership.
+pub fn prepareSharedViewFind(self: *AppSession, source: *Term) error{OutOfMemory}!?@import("../app_session.zig").EditorViewFind {
+    if (source.rt.editor_view_find_owned or activeEditorTerm(self) != source or self.editor_view_find_owner != 0) return null;
+    var slot: @import("../app_session.zig").EditorViewFind = .{
+        .state = self.chrome_host.find,
+        .nav = self.find_nav,
+        .selection_at_open = self.find_selection_at_open,
+    };
+    // Composition belongs only to the source slot, never to legacy history.
+    slot.state.input = .{};
+    slot.state.replace = .{};
+    errdefer slot.deinit(self.allocator);
+    try slot.state.input.query.appendSlice(self.allocator, self.chrome_host.find.input.query.items);
+    try slot.state.replace.query.appendSlice(self.allocator, self.chrome_host.find.replace.query.items);
+    return slot;
+}
+
+pub fn enableSharedViewFind(self: *AppSession, source: *Term, peer: *Term, legacy: ?@import("../app_session.zig").EditorViewFind) void {
+    if (!source.rt.editor_view_find_owned) {
+        if (legacy) |slot| {
+            self.editor_view_find_fallback.deinit(self.allocator);
+            self.editor_view_find_fallback = slot;
+            self.editor_view_find_owner = source.surfaceId();
+        }
+        source.rt.editor_view_find_owned = true;
+    }
+    peer.rt.editor_view_find_owned = true;
+}
+
+pub const ViewFind = struct { state: *find_ui.State, matches: []const maru.session.editor.find.Match, nav: bool };
+
+pub fn refreshViewFind(self: *AppSession, term: *Term) void {
+    if (!term.rt.editor_view_find_owned or term.rt.editor_diff != null) return;
+    const doc = term.rt.editorDocument().opened orelse return;
+    if (term.rt.editor_view_find_revision == doc.file.revision) return;
+    if (self.editor_view_find_owner == term.surfaceId()) {
+        if (self.chrome_host.find.open or self.find_nav) recomputeEditorFind(self, term);
+    } else {
+        const slot = &term.rt.editor_view_find;
+        if (slot.state.open or slot.nav) {
+            recomputeViewMatches(self, term, &slot.state, &slot.matches);
+            slot.source = term.surfaceId();
+        }
+    }
+    term.rt.editor_view_find_revision = doc.file.revision;
+}
+
+pub fn viewFind(self: *AppSession, term: *Term) ?ViewFind {
+    if (term.rt.editor_view_find_owned and term.rt.editor_diff == null) {
+        refreshViewFind(self, term);
+        if (self.editor_view_find_owner != term.surfaceId()) {
+            const slot = &term.rt.editor_view_find;
+            if (slot.source != term.surfaceId() or !(slot.state.open or slot.nav)) return null;
+            return .{ .state = &slot.state, .matches = slot.matches.items, .nav = slot.nav };
+        }
+    }
+    if (self.editor_find_source != term.surfaceId() or !(self.chrome_host.find.open or self.find_nav)) return null;
+    return .{ .state = &self.chrome_host.find, .matches = self.editor_find_matches.items, .nav = self.find_nav };
+}
+
+pub fn invalidateViewFind(self: *AppSession, term: *Term) void {
+    if (!term.rt.editor_view_find_owned) {
+        dropFindSelectionRange(self);
+        return;
+    }
+    term.rt.editor_view_find_revision = null;
+    if (self.editor_view_find_owner == term.surfaceId()) dropFindSelectionRange(self) else {
+        term.rt.editor_view_find.state.in_selection = null;
+        term.rt.editor_view_find.selection_at_open = null;
+    }
+}
+
 /// 지금 편집기 매치가 **어느 Term의 것이어야 하는가**(0 = 편집기가 아니거나 검색이 꺼져 있다).
 ///
 /// **tick이 매 프레임 이 값과 `editor_find_source`를 대조한다.** `target` 값만 비교하던 초판은
@@ -78,18 +195,18 @@ pub fn wantedEditorFindSource(self: *AppSession) u64 {
 
 /// 편집기 문서를 다시 검색한다. 매치가 **어느 Term의 것인지** 함께 싣는다(`editor_find_source`) —
 /// 그 표식이 없으면 pane을 바꾼 다음 프레임이 남의 좌표를 이 문서에 칠한다.
-fn recomputeEditorFind(self: *AppSession, term: *Term) void {
-    self.chrome_host.find.regex_error = null;
+fn recomputeViewMatches(self: *AppSession, term: *Term, state: *find_ui.State, matches: *std.ArrayList(maru.session.editor.find.Match)) void {
+    state.regex_error = null;
     maru.session.editor.find.findMatches(
         self.allocator,
         editor_ops.findLines(self, term),
-        self.chrome_host.find.input.query.items,
+        state.input.query.items,
         // 같은 PCRE2 토글을 편집기와 스크롤백이 공유한다. 웹은 이 값을 읽지 않는다.
-        .{ .match_case = self.chrome_host.find.match_case, .whole_word = self.chrome_host.find.whole_word, .regex = self.chrome_host.find.regex },
-        &self.editor_find_matches,
+        .{ .match_case = state.match_case, .whole_word = state.whole_word, .regex = state.regex },
+        matches,
     ) catch |err| {
-        self.editor_find_matches.clearRetainingCapacity();
-        if (self.chrome_host.find.regex) self.chrome_host.find.regex_error = regexErrorText(err);
+        matches.clearRetainingCapacity();
+        if (state.regex) state.regex_error = regexErrorText(err);
     };
     // **매치가 0이어도 출처를 세운다.** 이 값의 뜻은 "몇 개 찾았나"가 아니라 **"이 목록이 어느
     // 문서의 것인가"**다. 0일 때 비워 두면 tick의 대조가 매 프레임 "안 맞는다"고 답해 재검색이
@@ -97,23 +214,30 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
     // **「선택 영역 내에서만」은 여기 한 곳에서 거른다**(§5.1). 카운터·막대 마커·Enter 이동·
     // 「전부 바꾸기」가 모두 이 목록을 읽으므로, 소비처마다 범위를 다시 보게 하면 **한 곳만
     // 빠뜨려도 그 자리가 조용히 문서 전체를 건드린다** — 특히 「전부 바꾸기」가 그렇다.
-    if (self.chrome_host.find.in_selection) |sel| blk: {
+    if (state.in_selection) |sel| blk: {
         const doc = term.rt.editorDocument().opened orelse break :blk;
         var kept: usize = 0;
-        for (self.editor_find_matches.items) |m| {
+        for (matches.items) |m| {
             // 매치는 `(줄, 줄 안 byte)` 이고 범위는 문서 offset 이라 축이 다르다 — `matchRange` 가
             // 이미 그 변환을 갖고 있으므로 두 번째 변환을 만들지 않는다.
             const r = editor_ops.matchRangePublic(doc, m) orelse continue;
             if (r.start >= sel.start and r.end <= sel.end) {
-                self.editor_find_matches.items[kept] = m;
+                matches.items[kept] = m;
                 kept += 1;
             }
         }
-        self.editor_find_matches.shrinkRetainingCapacity(kept);
+        matches.shrinkRetainingCapacity(kept);
     }
 
+    state.setMatchCount(matches.items.len);
+}
+
+fn recomputeEditorFind(self: *AppSession, term: *Term) void {
+    recomputeViewMatches(self, term, &self.chrome_host.find, &self.editor_find_matches);
     self.editor_find_source = term.surfaceId();
-    self.chrome_host.find.setMatchCount(self.editor_find_matches.items.len);
+    if (term.rt.editor_view_find_owned) if (term.rt.editorDocument().opened) |doc| {
+        term.rt.editor_view_find_revision = doc.file.revision;
+    };
 }
 
 /// 찾기 줄에 **적을 열** — 활성 편집기가 없거나 비교 뷰가 아니면 `null`(§5.1).
@@ -212,6 +336,7 @@ pub fn clearAllFindMatches(self: *AppSession) void {
 /// **이미 열려 있으면 닫지 않고 바꾸기 줄만 켠다.** ⌘F로 검색어를 친 뒤 "바꿔야겠다"고 생각하는
 /// 것이 흔한 순서인데, 여기서 닫아 버리면 방금 친 검색어가 사라진다.
 pub fn toggleFindReplace(self: *AppSession) void {
+    syncDiffFind(self);
     if (activeEditorTerm(self)) |term| {
         if (term.rt.editor_diff != null) {
             toggleFind(self);
@@ -284,6 +409,7 @@ pub fn findRuleChordIntercept(self: *AppSession, event: terminal.KeyEvent) bool 
 /// **오버레이를 열지 않는다.** 찾기가 안 떠 있으면 토글해도 사용자가 그 사실을 볼 자리가 없고,
 /// 다음에 ⌘F 를 눌렀을 때 **켠 기억이 없는 규칙**으로 검색되어 결과가 틀린 것처럼 보인다.
 pub fn toggleFindMatchCase(self: *AppSession) void {
+    syncDiffFind(self);
     if (!isEditorFindTarget(self)) return;
     self.chrome_host.find.match_case = !self.chrome_host.find.match_case;
     refilterAfterRuleChange(self);
@@ -291,6 +417,7 @@ pub fn toggleFindMatchCase(self: *AppSession) void {
 
 /// ⌥⌘R: switch between literal text and PCRE2 syntax for editor or scrollback Find.
 pub fn toggleFindRegex(self: *AppSession) void {
+    syncDiffFind(self);
     if (!self.chrome_host.find.open or self.chrome_host.find.target == .page) return;
     self.chrome_host.find.regex = !self.chrome_host.find.regex;
     if (self.chrome_host.find.target == .editor) {
@@ -304,6 +431,7 @@ pub fn toggleFindRegex(self: *AppSession) void {
 
 /// ⌥⌘W: 낱말 단위로만 셀지 토글한다(§5.1). 낱말 판정의 소유자는 `selection.wordRangeAt` 이다.
 pub fn toggleFindWholeWord(self: *AppSession) void {
+    syncDiffFind(self);
     if (!isEditorFindTarget(self)) return;
     self.chrome_host.find.whole_word = !self.chrome_host.find.whole_word;
     refilterAfterRuleChange(self);
@@ -340,6 +468,7 @@ pub fn toggleFindDiffSide(self: *AppSession) void {
 /// 범위가 그 매치 하나로 쪼그라든다 — §5.1 의 *"현재 일치는 primary selection 을 옮긴다"* 와
 /// 같은 필드를 두 뜻으로 쓰게 되기 때문이다.
 pub fn toggleFindInSelection(self: *AppSession) void {
+    syncDiffFind(self);
     if (!isEditorFindTarget(self)) return;
     if (self.chrome_host.find.in_selection != null) {
         self.chrome_host.find.in_selection = null;
@@ -435,6 +564,7 @@ pub fn toggleFind(self: *AppSession) void {
 /// 하이라이트(현재 매치)·출력 시 재검색을 닫힌 채로도 유지한다. 오버레이가 열려 있으면 모달 라우팅이 키를
 /// 가로채 이 경로는 안 탄다.
 pub fn findNavigate(self: *AppSession, forward: bool) void {
+    syncDiffFind(self);
     if (!self.surface_initialized) return;
     if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
     if (activeEditorTerm(self)) |term| {
@@ -490,6 +620,7 @@ pub fn replaceAll(self: *AppSession) void {
 }
 
 pub fn recomputeFind(self: *AppSession) void {
+    syncDiffFind(self);
     if (!self.surface_initialized) return;
     if (activeEditorTerm(self)) |term| {
         // **스크롤백 목록을 비운다.** 대상이 편집기로 넘어왔으므로 그쪽 매치는 이 화면 것이 아니다 —
@@ -610,6 +741,7 @@ pub fn closeCurrentFind(self: *AppSession) void {
 
 /// Source and geometry are synchronized even when the visible widgets have body focus.
 pub fn syncDiffFind(self: *AppSession) void {
+    defer syncViewFind(self);
     const h = &self.chrome_host;
     if (h.diff_find_source == 0) return;
     const term = activeEditorTerm(self) orelse {

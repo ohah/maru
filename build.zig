@@ -4903,6 +4903,14 @@ pub fn build(b: *std.Build) void {
     run_shared_editor_tests.setCwd(b.path("."));
     run_shared_editor_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-shared", "Run shared document edit and independent view judges").dependOn(&run_shared_editor_tests.step);
+    const shared_find_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{"shared editor view find"},
+    });
+    const run_shared_find_tests = b.addRunArtifact(shared_find_tests);
+    run_shared_find_tests.setCwd(b.path("."));
+    run_shared_find_tests.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-shared-find", "Run per-view shared document find judges").dependOn(&run_shared_find_tests.step);
     const run_document_runtime_tests = b.addRunArtifact(document_runtime_tests);
     run_document_runtime_tests.setCwd(b.path("."));
     run_document_runtime_tests.step.dependOn(&install_fake_lsp.step);

@@ -3874,3 +3874,19 @@ SHA-256 manifest가 해당 소스와 캡처를 묶는다. OS/HID 및 동시 두 
 owner 관측은 기존 published frame summary이므로 실제 전환 시점보다 늦을 수 있다.
 전환 전체 trace와 관측 뒤 대기 trace를 함께 확인한다. 자연 늦은 callback이
 관측되지 않은 회차는 해당 전환 회귀의 통과이며 token 없는 비동기 경로 완료가 아니다.
+
+
+### 공유 일반 편집기 검색 슬롯
+
+| 판정 | 실제 경로와 요구 결과 |
+|---|---|
+| 검색 A/B 복귀 | `openSharedViewInActivePane` → 활성화 → Find. query/options/current/count가 뷰마다 유지된다. 새 peer는 빈 검색이며 닫힌 ⌘G는 자신의 query를 사용한다. |
+| 공유 편집 뒤 강조 | peer 편집 → source `appendPaneFrame`. 각 query로 revision을 다시 세고 source의 실제 find marks가 해당 query를 가리킨다. 선택·스크롤은 불변이다. |
+| 최초 이관과 실패 | 기존 query/replace/current를 단일 문서용 이력으로 보존한다. 이관 준비 할당 실패는 원래 슬롯과 검색 결과를 바꾸지 않는다. |
+| 검색 IME와 종료 | 검색 preedit → `imeEnd` → 다른 owner 활성화 → peer 종료. 조합은 원래 검색어에 남고 생존 뷰의 슬롯을 복원한다. |
+
+집중 명령은 `zig build test-editor-shared-find`이다. 기존 diff의 두 검색창과 단일 문서/터미널/웹의
+세션 검색 동작은 유지한다. 전체 에디터 회귀 검사와 실제 렌더 증거를 함께 확인한다.
+
+제품 Metal 증거는 `capture.py --scenario find`의 before/search/edited/closed owner·peer PNG와
+manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실제 OS/HID 입력 증거는 아니다.

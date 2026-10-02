@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v190 editor IME document range exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 200), abi_version);
+    try std.testing.expectEqual(@as(u32, 201), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -4816,6 +4816,18 @@ pub export fn maru_macos_app_session_osr_keyboard_active(session: ?*AppSession) 
     session_mod.web_ops.syncOsrKeyTarget(app);
     if (session_mod.web_ops.osrKeyTarget(app) == null) return 0;
     return if (session_mod.web_ops.osrPopupOpen(app)) 2 else 1;
+}
+
+/// v201(W6b): hover 중인 Chromium 탭의 툴팁 글과 일련번호. 글이 있으면 1. 글은 4 KiB(wire 글 상한) 안이라 Swift 가 그만큼 준다 —
+/// 더 작으면 UTF-8 글자 경계에서 자른다.
+pub export fn maru_macos_app_session_osr_tooltip(session: ?*AppSession, out_serial: ?*u64, out: ?[*]u8, out_cap: usize, out_len: ?*usize) i32 {
+    const app = session orelse return 0;
+    const t = session_mod.web_ops.osrTooltip(app);
+    if (out_serial) |p| p.* = t.serial;
+    const text = maru.session.web_sidecar.text.clampUtf8(t.text, out_cap);
+    if (out) |o| @memcpy(o[0..text.len], text);
+    if (out_len) |p| p.* = text.len;
+    return @intFromBool(text.len != 0);
 }
 
 /// v195(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.

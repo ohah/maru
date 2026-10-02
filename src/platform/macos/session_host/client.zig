@@ -21414,7 +21414,8 @@ var ui_frame_stamp_test_generation: if (builtin.is_test) std.atomic.Value(u64) e
 
 /// 지금 도는 판정자의 번호 — 이 저장소의 러너(`tools/simple_test_runner.zig`)로 돌 때만 의미가 있고, 그 밖(제품 빌드·
 /// 기본 러너)에서는 0 이다. extern 이 아니라 root 선언 유무로 고르므로 러너 없이 `zig test` 해도 링크가 깨지지 않는다.
-fn currentTestGeneration() u64 {
+/// 판정자 전역을 «그것을 쓴 판정자 안에서만» 유효하게 하는 자리들의 단일 출처다(UI 프레임 도장, `client_slot` 의 post snapshot).
+pub fn currentTestGeneration() u64 {
     if (!builtin.is_test) return 0;
     const root = @import("root");
     if (!@hasDecl(root, "maru_test_generation")) return 0;

@@ -1766,6 +1766,15 @@ pub fn dockDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
     );
 }
 
+/// 이름 없는 문서를 이번에 되살리지 못했다 — **레코드는 디스크에 남는다**(다음 실행이 다시 시도한다). 탭이 왜
+/// 안 돌아왔는지와 그 내용이 어디 남았는지 남긴다.
+fn logUntitledNotRevived(err: anyerror, number: u32) void {
+    std.log.scoped(.app).warn(
+        "workspace restore dropped: kind=untitled-term reason={s} tab={?d} pane={?d} number={d} record=kept",
+        .{ @errorName(err), AppSession.restore_position.tab, AppSession.restore_position.pane, number },
+    );
+}
+
 /// 모델 Pane → 완성된 *Pane. 첫 surface로 createPane(=1 Term)하고 나머지 surface를 Term으로 추가한다.
 /// FP16 §5.0: pane은 **persisted 시퀀스**(터미널 surface + 파일 Term)를 index 순서대로 되살린다.
 /// `file-term`의 index가 그 시퀀스 안의 자리이고, 나머지 자리를 `surfaces`가 순서대로 채운다.
@@ -1841,8 +1850,19 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
                 );
                 continue;
             };
-            term.pending_url = self.allocator.dupe(u8, bt.url) catch null;
-            pane.terms.insert(self.allocator, at, term) catch {
+            term.pending_url = self.allocator.dupe(u8, bt.url) catch blk: {
+                // 탭은 서지만 **주소가 사라진다** — 빈 브라우저 탭이 왜 생겼는지 남긴다(URL 은 싣지 않는다).
+                std.log.scoped(.app).warn(
+                    "workspace restore dropped: kind=browser-url reason=OutOfMemory tab={?d} pane={?d} record={d}",
+                    .{ AppSession.restore_position.tab, AppSession.restore_position.pane, bi },
+                );
+                break :blk null;
+            };
+            pane.terms.insert(self.allocator, at, term) catch |err| {
+                std.log.scoped(.app).warn(
+                    "workspace restore dropped: kind=browser-term reason={s} tab={?d} pane={?d} record={d}",
+                    .{ @errorName(err), AppSession.restore_position.tab, AppSession.restore_position.pane, bi },
+                );
                 term_ops.destroyTerm(self, term);
                 continue;
             };
@@ -1873,8 +1893,14 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
             // **끼울 자리를 먼저 잡는다.** 되살리기는 레코드를 소비한다(창이 확정되면 그 레코드를 지운다 —
             // `DeferredBackupDrop`). 되살린 **뒤에** 끼우기가 실패해 탭을 버리면 창은 그대로 확정되고 레코드까지
             // 지워져 미저장 내용이 사라졌다. 자리를 못 잡으면 되살리지도 않는다 — 레코드는 다음 실행을 기다린다.
-            pane.terms.ensureUnusedCapacity(self.allocator, 1) catch continue;
-            const term = editor_ops.createRestoredUntitledTerm(self, ut.number) catch continue; // 그 record 만 버린다
+            pane.terms.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                logUntitledNotRevived(err, ut.number);
+                continue;
+            };
+            const term = editor_ops.createRestoredUntitledTerm(self, ut.number) catch |err| { // 그 record 만 버린다
+                logUntitledNotRevived(err, ut.number);
+                continue;
+            };
             pane.terms.insertAssumeCapacity(at, term);
             if (at <= pane.active_term) pane.active_term += 1;
         }

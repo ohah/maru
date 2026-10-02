@@ -4823,10 +4823,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     static func main() {
-        // **가장 먼저** 진단 통로를 살린다. Dock·Finder 로 띄우면 stderr 가 `/dev/null` 이라, 아래 lease·config
-        // bootstrap 실패 줄이 아무 데도 안 남았다(예전엔 첫 창 세션을 만들 때에야 `app.log` 로 돌렸다).
-        // 파일·파이프·tty 로 받는 실행은 Zig 쪽이 건드리지 않는다.
-        maru_macos_app_redirect_stderr()
         let scenarioLoad = NotificationReleaseAppScenarioConfiguration.load(
             environment: ProcessInfo.processInfo.environment
         ) { requestIdentifier, hostId, runtimeId, eventId in
@@ -4871,6 +4867,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             fputs("maru: \(failure.reason)\n", stderr)
             Darwin.exit(failure.code)
         }
+        // **lease 를 얻은 직후**, config bootstrap 보다 먼저 진단 통로를 살린다. Dock·Finder 로 띄우면 stderr 가
+        // `/dev/null` 이라 아래 bootstrap 실패 줄이 아무 데도 안 남았다(예전엔 첫 창 세션을 만들 때에야 돌렸다).
+        // **lease 앞으로 당기지 않는다** — 그러면 lease 를 못 얻은 두 번째 인스턴스가 `<cache>/maru/app.log` 를 만들고
+        // 써서, 「lock 생성이 패자의 유일한 파일시스템 효과 · cache 무변경」 계약(persistent-session-host.md)을 어긴다
+        // (2026-10-02 실측: 패자 rc=2 가 app.log 를 새로 만들었다). 파일·파이프·tty 로 받는 실행은 Zig 쪽이 건드리지 않는다.
+        maru_macos_app_redirect_stderr()
         let configBootstrapStatus = maru_macos_session_config_bootstrap()
         guard configBootstrapStatus == UInt32(MARU_SESSION_CONFIG_BOOTSTRAP_READY) else {
             fputs("maru: session config bootstrap failed (status=\(configBootstrapStatus))\n", stderr)

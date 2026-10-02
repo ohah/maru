@@ -134,6 +134,25 @@ kill -0 "$winner_pid"
 snapshot_tree "$test_root/after-loser.snapshot"
 cmp "$test_root/before-loser.snapshot" "$test_root/after-loser.snapshot"
 
+# **Dock·Finder 처럼 stderr 가 /dev/null 인 패자**도 파일시스템을 건드리지 않아야 한다. 앱은 그런 stderr 만
+# app.log 로 돌리므로, 리다이렉트가 lease 앞에 있으면 패자가 cache 에 app.log 를 만든다 — 위의 패자는 stderr 를
+# 파일로 받아 리다이렉트 자체가 일어나지 않아 그것을 못 잡는다(2026-10-02 실측으로 위반을 찾은 자리).
+set +e
+launch 1000 "$test_root/loser-devnull.stdout" /dev/null
+loser_devnull_status=$?
+set -e
+if [ "$loser_devnull_status" -ne 2 ]; then
+    echo "/dev/null-stderr second instance exited with $loser_devnull_status, expected 2" >&2
+    exit 1
+fi
+kill -0 "$winner_pid"
+snapshot_tree "$test_root/after-devnull-loser.snapshot"
+if ! cmp "$test_root/before-loser.snapshot" "$test_root/after-devnull-loser.snapshot"; then
+    echo "/dev/null-stderr second instance touched home/config/cache before losing the lease" >&2
+    diff "$test_root/before-loser.snapshot" "$test_root/after-devnull-loser.snapshot" | head -20 >&2 || true
+    exit 1
+fi
+
 kill -KILL "$winner_pid"
 wait "$winner_pid" 2>/dev/null || true
 winner_pid=

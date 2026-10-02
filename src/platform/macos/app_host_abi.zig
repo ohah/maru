@@ -738,7 +738,11 @@ pub export fn maru_macos_workspace_restore_enabled() u32 {
     var parsed = maru.config.loader.loadDefault(
         std.Io.Threaded.global_single_threaded.io(),
         std.heap.page_allocator,
-    ) catch return 1;
+    ) catch |err| {
+        // 이 판단은 lease 직후의 리다이렉트 **뒤**에 일어나므로 Dock·Finder 실행에서도 `app.log` 에 남는다.
+        std.log.scoped(.app).warn("workspace.restore: config read failed err={s} — restoring (default)", .{@errorName(err)});
+        return 1;
+    };
     defer parsed.deinit();
     return @intFromBool(parsed.config.workspace.restore);
 }
@@ -1209,9 +1213,11 @@ fn logBuildIdentity() void {
     std.log.scoped(.app).warn("{s}", .{buildIdentityLine(&buf, exeMtimeSeconds(), std.c.getpid())});
 }
 
-/// ABI v192: 앱 시작 **직후**(Swift `main` 첫 줄) stderr 를 `app.log` 로 돌린다. 예전에는 첫 창의 세션을 만들 때
-/// (`maru_macos_app_session_create`) 돌려서, 그보다 먼저 나오는 진단 — 인스턴스 lease·config bootstrap 실패,
-/// `workspace.restore` 읽기 — 이 Dock·Finder 실행에서 `/dev/null` 로 사라졌다. 멱등이다.
+/// ABI v192: 인스턴스 lease 를 얻은 **직후**(config bootstrap 이전) stderr 를 `app.log` 로 돌린다. 예전에는 첫 창의
+/// 세션을 만들 때(`maru_macos_app_session_create`) 돌려서, 그보다 먼저 나오는 진단 — config bootstrap 실패 등 — 이
+/// Dock·Finder 실행에서 `/dev/null` 로 사라졌다. lease **앞**에서 부르면 안 된다: 패자 인스턴스가 `app.log` 를 만들어
+/// 「패자는 lock 생성 말고 파일시스템을 안 건드린다」 계약을 어긴다(Swift `main` 주석·tests/app_log_redirect_boundary.zig).
+/// 멱등이다.
 pub export fn maru_macos_app_redirect_stderr() void {
     redirectStderrToAppLog();
 }
@@ -1220,7 +1226,7 @@ pub export fn maru_macos_app_session_create(
     config: ?*const AppSessionConfig,
     out_session: ?*?*AppSession,
 ) c_int {
-    // 앱 시작 때 `maru_macos_app_redirect_stderr` 가 이미 돌렸으면 무동작이다. Swift 가 아닌 호스트·하네스가
+    // lease 직후 `maru_macos_app_redirect_stderr` 가 이미 돌렸으면 무동작이다. Swift 가 아닌 호스트·하네스가
     // 이 함수부터 부르는 경우를 위해 남긴다.
     redirectStderrToAppLog();
     // **어느 바이너리인지 먼저 말한다.** 로그를 리다이렉트한 **직후**여야 이 줄도 `app.log` 에 남는다 —

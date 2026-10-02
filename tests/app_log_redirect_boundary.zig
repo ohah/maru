@@ -1,9 +1,9 @@
-//! 앱 진단 통로(`app.log`)는 **앱 시작 직후**, **버려지는 stderr 에만** 연결한다.
+//! 앱 진단 통로(`app.log`)는 **lease 획득 직후·config bootstrap 이전**, **버려지는 stderr 에만** 연결한다.
 //!
 //! Dock·Finder 로 띄운 앱의 stderr 는 `/dev/null` 이다. 예전에는 첫 창 세션을 만들 때에야 `app.log` 로 돌려서
-//! 그 전의 lease·config bootstrap 실패 줄이 사라졌다. 앞당기면서 기준도 「tty 가 아니면」에서 「`/dev/null` 이면」으로
-//! 좁혔다 — 그대로 두면 `2> 파일` 로 세션 이전 줄을 기다리는 하네스(tools/test-macos-app-instance-lease.sh)가
-//! 그 줄을 못 본다. 두 조건은 서로를 전제로 하므로 함께 고정한다.
+//! 그 전의 config bootstrap 실패 줄이 사라졌다. **lease 앞으로는 당기지 않는다** — lease 를 못 얻은 두 번째
+//! 인스턴스가 `app.log` 를 만들면 「패자는 lock 생성 말고 파일시스템을 안 건드린다」 계약을 어긴다(2026-10-02 실측).
+//! 기준은 「tty 가 아니면」이 아니라 「`/dev/null` 이면」이다 — 파일·파이프로 받는 실행의 출력을 빼앗지 않게.
 const std = @import("std");
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -22,7 +22,7 @@ fn stripComments(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-test "app log redirect runs first in main and only for a /dev/null stderr" {
+test "app log redirect runs after the instance lease and only for a /dev/null stderr" {
     const allocator = std.testing.allocator;
     const swift_raw = try read(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(swift_raw);
@@ -32,13 +32,14 @@ test "app log redirect runs first in main and only for a /dev/null stderr" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "maru_macos_app_redirect_stderr()"));
     const main_at = std.mem.indexOf(u8, swift, "static func main() {") orelse return error.MainMissing;
     const call_at = std.mem.indexOf(u8, swift, "maru_macos_app_redirect_stderr()").?;
-    // main 안의 **첫 진단 출력**과 lease 획득보다 앞이어야 한다 — 그보다 늦으면 그 줄들이 다시 사라진다.
+    // **lease 획득 뒤**(패자는 파일시스템을 안 건드린다), **config bootstrap 앞**(그 실패 줄이 남는다).
     const lease_at = std.mem.indexOfPos(u8, swift, main_at, "acquireAppInstanceWriterLeaseBeforeAppKit()") orelse
         return error.LeaseCallMissing;
-    const first_fputs = std.mem.indexOfPos(u8, swift, main_at, "fputs(") orelse return error.NoDiagnosticInMain;
-    try std.testing.expect(main_at < call_at);
-    try std.testing.expect(call_at < lease_at);
-    try std.testing.expect(call_at < first_fputs);
+    const bootstrap_at = std.mem.indexOfPos(u8, swift, main_at, "maru_macos_session_config_bootstrap()") orelse
+        return error.BootstrapCallMissing;
+    try std.testing.expect(main_at < lease_at);
+    try std.testing.expect(lease_at < call_at);
+    try std.testing.expect(call_at < bootstrap_at);
 
     const abi_raw = try read(allocator, "src/platform/macos/app_host_abi.zig");
     defer allocator.free(abi_raw);

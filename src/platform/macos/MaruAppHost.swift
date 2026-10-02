@@ -112,8 +112,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // W6b: Chromium 탭 툴팁은 macOS 의 툴팁으로 띄운다 — Mac 의 Chrome 도 웹 툴팁을 AppKit 툴팁으로 띄운다(실측: 지연은
     // 사용자 설정 NSInitialToolTipDelay 를 따랐다). 지연·위치·접기·다크 모드·키에 숨기·창을 떠나면 흐려지기·비활성 앱에서 안
-    // 띄우기는 macOS 가 한다. maru 는 글이 바뀌면 이 view 전체에 툴팁 영역을 다시 단다(지웠다 다시 달면 지금 포인터 자리로
-    // 옮겨 0.3 초 안팎에 바뀌고, 포인터를 움직이지 않아도 지연 뒤 뜬다 — 공개 API 실측).
+    // 띄우기는 macOS 가 한다. maru 는 글이 바뀌면 hover 중인 탭 본문에 툴팁 영역을 다시 단다(지웠다 다시 달면 지금 포인터
+    // 자리로 옮겨 0.3 초 안팎에 바뀌고, 포인터를 움직이지 않아도 지연 뒤 뜬다 — 공개 API 실측). view 전체가 아니라 본문인 것은
+    // 포인터를 멈춘 채 배치가 바뀌면 옛 글이 터미널 위에 뜨지 않게다(적대 검증 3 차).
     final class OsrTooltipOwner: NSObject, NSViewToolTipOwner {
         var text = ""
         func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
@@ -122,37 +123,49 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
     let osrTooltipOwner = OsrTooltipOwner()
     var osrTooltipSerial: UInt64 = 0
-    /// 없음 · 달려 있음 · 다음 움직임에 다시 달 것(누름 뒤 — macOS 가 숨겼다, 휠 뒤 — 우리가 뗐다).
+    /// 없음 · 달려 있음 · 다음 움직임에 다시 달 것(누름·휠 뒤 — 영역을 떼어 두었다).
     enum OsrTooltipState { case none, attached, rearm }
     private(set) var osrTooltipState: OsrTooltipState = .none
     var osrTooltipActive: Bool { osrTooltipState == .attached }
-    private var osrTooltipBounds = NSRect.zero
+    /// 툴팁을 단(또는 다시 달) 영역 — hover 중인 탭 본문(view 좌표).
+    private(set) var osrTooltipRect = NSRect.zero
 
-    /// 툴팁을 단다(빈 글·nil 이면 뗀다).
-    func setOsrTooltip(_ text: String?) {
+    /// 탭 본문 rect(backing px, view 왼쪽 위 원점) → view 좌표. 잡는 쪽(`backingPx`)과 같은 배율로 거꾸로 푼다.
+    func osrTooltipViewRect(px: (UInt32, UInt32, UInt32, UInt32)) -> NSRect {
+        let scale = archiveSmokeRenderScale(window)
+        let w = CGFloat(px.2) / scale, h = CGFloat(px.3) / scale
+        let rect = NSRect(x: CGFloat(px.0) / scale, y: bounds.height - CGFloat(px.1) / scale - h, width: w, height: h)
+        return rect.intersection(bounds)
+    }
+
+    /// 툴팁을 `rect` 에 단다(빈 글·nil·빈 rect 면 뗀다).
+    func setOsrTooltip(_ text: String?, in rect: NSRect) {
         removeAllToolTips()
         osrTooltipState = .none
         guard let text, !text.isEmpty else { return }
         osrTooltipOwner.text = text
-        osrTooltipBounds = bounds
-        addToolTip(bounds, owner: osrTooltipOwner, userData: nil)
+        osrTooltipRect = rect
+        guard !rect.isEmpty else { return }
+        addToolTip(rect, owner: osrTooltipOwner, userData: nil)
         osrTooltipState = .attached
     }
 
-    /// view 크기가 바뀌었으면 영역을 다시 단다(영역은 단 때의 bounds 다). 휠로 떼어 둔 동안은 달지 않는다.
-    func refitOsrTooltip() {
-        if osrTooltipState == .attached, osrTooltipBounds != bounds { setOsrTooltip(osrTooltipOwner.text) }
+    /// 본문 rect 가 바뀌었으면(포인터를 멈춘 채 분할·크기) 영역을 옮긴다. 떼어 둔 동안은 rect 만 기억한다(다시 달 때 쓴다).
+    func refitOsrTooltip(_ rect: NSRect) {
+        guard rect != osrTooltipRect else { return }
+        if osrTooltipState == .attached { setOsrTooltip(osrTooltipOwner.text, in: rect) } else { osrTooltipRect = rect }
     }
 
-    /// 누름(어느 버튼이든 — macOS 가 숨긴다) 뒤 다음 움직임에 다시 단다. Chrome 은 누른 뒤 같은 요소에서 움직이면 다시 띄운다(실측).
-    /// macOS 는 누름에 툴팁을 숨기고 같은 영역에서는 다시 띄우지 않는다(실측) — 다시 달면 지연 뒤 뜬다.
+    /// 누름(어느 버튼이든) 뒤 다음 움직임에 다시 단다. macOS 는 누름에 툴팁을 숨기고 같은 영역에서는 다시 띄우지 않는다(실측) —
+    /// 다시 달면 지연 뒤 뜬다. Chrome 은 누른 뒤 같은 요소에서 움직이면 다시 띄운다(실측). 영역도 떼어 「다시 달 것 ⇒ 영역 없음」을
+    /// 휠과 같이 지킨다.
     private func noteOsrTooltipMouseDown() {
-        if osrTooltipState == .attached { osrTooltipState = .rearm }
+        if osrTooltipState == .attached { removeAllToolTips(); osrTooltipState = .rearm }
     }
 
     private func rearmOsrTooltipIfNeeded() {
         guard osrTooltipState == .rearm else { return }
-        setOsrTooltip(osrTooltipOwner.text)
+        setOsrTooltip(osrTooltipOwner.text, in: osrTooltipRect)
     }
 
     override var acceptsFirstResponder: Bool {
@@ -8576,7 +8589,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // W6b: maru 가 이 view 에 단 macOS 툴팁(단 글 — 줄바꿈은 \\n 으로). 띄우는 것은 macOS 다(맨 앞 앱일 때).
                 if let window, let terminal = Self.firstTerminalView(in: window.contentView) {
                     let text = terminal.osrTooltipOwner.text.replacingOccurrences(of: "\n", with: "\\n")
-                    Self.testReport("tooltip active=\(terminal.osrTooltipActive) text=\(terminal.osrTooltipActive ? text : "")")
+                    // 영역은 view 비율(왼쪽 위 원점 — 대본의 hover 와 같은 좌표)로.
+                    let r = terminal.osrTooltipRect, b = terminal.bounds
+                    let area = terminal.osrTooltipActive && b.width > 0 && b.height > 0
+                        ? String(format: "%.3f,%.3f,%.3f,%.3f", r.minX / b.width, (b.height - r.maxY) / b.height, r.width / b.width, r.height / b.height) : "-"
+                    Self.testReport("tooltip active=\(terminal.osrTooltipActive) text=\(terminal.osrTooltipActive ? text : "") area=\(area)")
                 }
             case "imerect":
                 // 입력기가 후보창 자리를 묻는 그 호출(firstRect) — 창 내용 view 의 왼쪽 위 원점 pt 로 보고한다.
@@ -9399,20 +9416,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         Self.cursor(for: kind).set()
     }
 
-    /// W6b: hover 중인 Chromium 탭의 툴팁(일련번호가 바뀌었으면 다시 단다 — 글이 비었으면 뗀다).
+    /// W6b: hover 중인 Chromium 탭의 툴팁(일련번호가 바뀌었으면 그 탭 본문에 다시 단다 — 글이 비었으면 뗀다. 휠·누름으로 떼어 둔
+    /// 뒤라도 새 글이면 단다 — Chrome 도 글이 바뀌면 다시 정한다(휠 뒤는 Chrome 에서 재지 않았다). 본문 rect 가 바뀌면 옮긴다).
     private var osrTooltipBuffer = [UInt8](repeating: 0, count: 4096)
     private func drainOsrTooltip() {
         guard let session = appSession, let view = metalTerminalView else { return }
         var serial: UInt64 = 0
         var length = 0
-        let has = osrTooltipBuffer.withUnsafeMutableBufferPointer {
-            maru_macos_app_session_osr_tooltip(session, &serial, $0.baseAddress, $0.count, &length)
+        var px: (UInt32, UInt32, UInt32, UInt32) = (0, 0, 0, 0)
+        let has = osrTooltipBuffer.withUnsafeMutableBufferPointer { buffer in
+            withUnsafeMutablePointer(to: &px) { tuple in
+                tuple.withMemoryRebound(to: UInt32.self, capacity: 4) {
+                    maru_macos_app_session_osr_tooltip(session, &serial, buffer.baseAddress, buffer.count, &length, $0)
+                }
+            }
         }
+        let rect = view.osrTooltipViewRect(px: px)
         if serial != view.osrTooltipSerial {
             view.osrTooltipSerial = serial
-            view.setOsrTooltip(has != 0 ? String(decoding: osrTooltipBuffer[0..<length], as: UTF8.self) : nil)
+            view.setOsrTooltip(has != 0 ? String(decoding: osrTooltipBuffer[0..<length], as: UTF8.self) : nil, in: rect)
         } else {
-            view.refitOsrTooltip()
+            view.refitOsrTooltip(rect)
         }
     }
 
@@ -14423,6 +14447,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// config에서 자동 숨김을 끄면(quickAutoHide=false) 토글로만 숨기고 여기선 무동작. 애니메이션 중(특히
     /// 숨김 완료 orderOut의 resignKey)에는 재진입을 막고, 보이는 상태일 때만 숨긴다.
     @objc private func quickTerminalLostKey(_ note: Notification) {
+        // W6b: 일반 창의 windowDidResignKey 처럼 hover 를 풀어 Chromium 탭에 leave 를 보낸다 — 키를 잃은 패널에는 이동이 더 안 와
+        // (activeInKeyWindow) hover 가 남고, 그 탭 툴팁이 자동 숨김을 끈 채 보이는 패널에 남았다(적대 검증 3 차). 숨길 때도 같다.
+        if let session = quick?.appSession {
+            var cursorKind: Int32 = 0
+            _ = maru_macos_app_session_hover(session, -1, -1, 0, &cursorKind)
+        }
         guard quickAutoHide, !quickAnimating, let panel = quick?.window, panel.isVisible else { return }
         // W5a: 키를 가져간 것이 이 패널에 붙은 sheet(Chromium 탭 대화상자)면 숨기지 않는다 — 숨기면 sheet 도 사라져 페이지가 영영
         // 멈췄다(적대 검증).

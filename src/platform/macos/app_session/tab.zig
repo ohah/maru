@@ -34,6 +34,7 @@ const VirtualLayout = AppSession.VirtualLayout;
 const group_normalize = app_session_mod.group_normalize;
 const input_math = app_session_mod.input_math;
 const term_ops = @import("term.zig");
+const find_ops = @import("find.zig");
 const git_ops = @import("git.zig");
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
@@ -455,6 +456,7 @@ pub fn switchTab(self: *AppSession, index: usize) bool {
     pane_ops.resizeTabPanes(self, activeTab(self));
     self.metal_dirty = true;
     pane_ops.recomputeActivePaneRect(self); // 새 탭의 활성 panel rect로 좌표 origin 갱신
+    find_ops.syncDiffFind(self);
     sidebar_ops.rebuildSidebar(self) catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
     if (index != prev_tab) self.workspaceChanged(.selection);
     return true;

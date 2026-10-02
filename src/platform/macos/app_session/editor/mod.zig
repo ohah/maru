@@ -47405,3 +47405,237 @@ test "shared editor view find adversarial R2 closed navigation refreshes before 
     try testing.expectEqual(expected_start, peer.rt.editor_selection.?.start());
     try testing.expectEqual(@as(u32, 3), fx.session.editor_find_matches.items[2].line);
 }
+
+test "shared editor view find adversarial R6 selection snapshots survive switches and expire after edits" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    for ([_]*Term{ fx.term, peer }, 0..) |view, i| {
+        try testing.expect(fx.session.activateSurfaceById(view.surfaceId()));
+        _ = try fx.session.tick();
+        const first_line: usize = if (i == 0) 0 else 1;
+        const doc = view.rt.editorDocument().opened.?;
+        const start = doc.file.lines.line(first_line).?.start;
+        const end = doc.file.lines.line(first_line + 1).?.start;
+        view.rt.editor_selection = .{ .anchor_start = start, .anchor_end = end, .focus = end };
+        find_ops.toggleFind(fx.session);
+        try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "const");
+        find_ops.recomputeFind(fx.session); // Reveal changes the live selection; scope must use the saved range.
+        find_ops.toggleFindInSelection(fx.session);
+        try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
+        try testing.expectEqual(@as(u32, @intCast(first_line)), fx.session.editor_find_matches.items[0].line);
+    }
+    for ([_]*Term{ fx.term, peer }, 0..) |view, i| {
+        try testing.expect(fx.session.activateSurfaceById(view.surfaceId()));
+        try testing.expectEqual(@as(u32, @intCast(i)), fx.session.editor_find_matches.items[0].line);
+        try testing.expect(fx.session.find_selection_at_open != null);
+    }
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "const b = 0;\n"));
+    for ([_]*Term{ fx.term, peer }) |view| {
+        const vf = find_ops.viewFind(fx.session, view) orelse return error.MissingScopedFind;
+        try testing.expect(vf.state.in_selection == null);
+        try testing.expectEqual(@as(usize, 4), vf.matches.len);
+        try testing.expect(fx.session.activateSurfaceById(view.surfaceId()));
+        find_ops.toggleFindInSelection(fx.session);
+        try testing.expect(fx.session.chrome_host.find.in_selection == null);
+        try testing.expect(fx.session.find_selection_at_open == null);
+    }
+}
+
+test "shared editor view find adversarial R6 replacement typing preserves invalid pattern diagnostics" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    _ = try fx.session.tick();
+    find_ops.toggleFindReplace(fx.session);
+    fx.session.chrome_host.find.regex = true;
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "[");
+    find_ops.recomputeFind(fx.session);
+    try testing.expectEqualStrings("invalid regex", fx.session.chrome_host.find.regex_error.?);
+    try pressKey(&fx, .{ .char = 'x' }, .{});
+    try testing.expectEqualStrings("x", fx.session.chrome_host.find.replace.query.items);
+    try testing.expectEqualStrings("invalid regex", fx.session.chrome_host.find.regex_error orelse return error.LostPatternDiagnostic);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    try testing.expectEqualStrings("invalid regex", fx.session.chrome_host.find.regex_error.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.match_count);
+    fx.session.imeBegin();
+    fx.session.imeMarked("한");
+    try testing.expect(fx.session.tryCommitComposition());
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("invalid regex", fx.session.chrome_host.find.regex_error.?);
+    fx.session.chrome_host.find.input.query.clearRetainingCapacity();
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "(const)");
+    fx.session.chrome_host.find.replace.query.clearRetainingCapacity();
+    try fx.session.chrome_host.find.replace.query.appendSlice(testing.allocator, "$99");
+    find_ops.recomputeFind(fx.session);
+    const revision = peer.rt.editorDocument().opened.?.file.revision;
+    find_ops.replaceOne(fx.session);
+    try testing.expectEqualStrings("invalid replace", fx.session.chrome_host.find.regex_error.?);
+    try testing.expectEqual(revision, peer.rt.editorDocument().opened.?.file.revision);
+    fx.session.chrome_host.find.replace.query.clearRetainingCapacity();
+    fx.session.imeBegin();
+    fx.session.imeMarked("한");
+    try testing.expect(fx.session.tryCommitComposition());
+    fx.session.imeEnd(null);
+    try testing.expect(fx.session.chrome_host.find.regex_error == null);
+    try testing.expectEqualStrings("한", fx.session.chrome_host.find.replace.query.items);
+}
+
+test "shared editor view find adversarial R7 initial sharing commits composition only into its source slot" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |replace| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try fx.session.tick();
+        find_ops.toggleFindReplace(fx.session);
+        try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "const");
+        try fx.session.chrome_host.find.replace.query.appendSlice(testing.allocator, "let");
+        find_ops.recomputeFind(fx.session);
+        fx.session.chrome_host.find.focus = if (replace) .replace else .find;
+        fx.session.imeBegin();
+        fx.session.imeMarked("한");
+        const peer = try openSharedViewInActivePane(fx.session, fx.term);
+        fx.session.imeEnd(null);
+        try testing.expectEqualStrings(if (replace) "const" else "const한", fx.term.rt.editor_view_find.state.input.query.items);
+        try testing.expectEqualStrings(if (replace) "let한" else "let", fx.term.rt.editor_view_find.state.replace.query.items);
+        try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.input.query.items.len);
+        try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.replace.query.items.len);
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_view_find.state.input.preedit.items.len);
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_view_find.state.replace.preedit.items.len);
+        const shell = pane_ops.activePane(fx.session).terms.items[0];
+        try testing.expect(fx.session.activateSurfaceById(shell.surfaceId()));
+        try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+        try testing.expectEqualStrings("let", fx.session.chrome_host.find.replace.query.items);
+        try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+        try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.input.query.items.len);
+    }
+}
+
+test "shared editor view find adversarial R9 pane focus and drag publish search ownership before the next frame" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    for ([_]*Term{ fx.term, peer }, [_][]const u8{ "const", "b" }) |view, query| {
+        try testing.expect(fx.session.activateSurfaceById(view.surfaceId()));
+        _ = try fx.session.tick();
+        find_ops.toggleFind(fx.session);
+        try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, query);
+        find_ops.recomputeFind(fx.session);
+    }
+    const source_pane = pane_ops.activePane(fx.session);
+    const idx = for (source_pane.terms.items, 0..) |term, i| {
+        if (term == peer) break i;
+    } else return error.MissingPeer;
+    pane_ops.moveTermToNewSplit(fx.session, source_pane, idx, source_pane, .right);
+    const peer_pane = pane_ops.activePane(fx.session);
+    try testing.expect(peer_pane != source_pane);
+    try testing.expect(pane_ops.focusPaneByPtr(fx.session, source_pane));
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == fx.term);
+    try testing.expectEqual(fx.term.surfaceId(), fx.session.editor_view_find_owner);
+    try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+    fx.session.chrome_host.find.replace_open = true;
+    try fx.session.chrome_host.find.replace.query.appendSlice(testing.allocator, "let");
+    find_ops.replaceOne(fx.session); // A chrome callback before tick must act on the newly focused pane.
+    try testing.expect(std.mem.startsWith(u8, fx.term.rt.editorDocument().opened.?.file.content, "let"));
+    try testing.expect(undoEdit(fx.session, fx.term));
+    try testing.expect(pane_ops.focusPaneByPtr(fx.session, peer_pane));
+    try testing.expectEqual(peer.surfaceId(), fx.session.editor_view_find_owner);
+    const a_index = for (source_pane.terms.items, 0..) |term, i| {
+        if (term == fx.term) break i;
+    } else return error.MissingSource;
+    pane_ops.moveTermToPane(fx.session, source_pane, a_index, peer_pane, peer_pane.terms.items.len);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == fx.term);
+    try testing.expectEqual(fx.term.surfaceId(), fx.session.editor_view_find_owner);
+    try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+    // Original pane now holds the shell; promote the pane with both shared views.
+    const original_workspace = fx.session.app_window.active_tab;
+    pane_ops.promotePaneToNewWorkspace(fx.session, peer_pane);
+    const peer_workspace = fx.session.app_window.active_tab;
+    try testing.expect(original_workspace != peer_workspace);
+    try testing.expect(tab_ops.switchTab(fx.session, original_workspace));
+    try testing.expectEqual(@as(u64, 0), fx.session.editor_view_find_owner);
+    try testing.expect(tab_ops.switchTab(fx.session, peer_workspace));
+    try testing.expectEqual(fx.term.surfaceId(), fx.session.editor_view_find_owner);
+    try testing.expectEqualStrings("const", fx.session.chrome_host.find.input.query.items);
+}
+
+test "shared editor view find adversarial R8 result growth OOM clears partial matches and explicit retry recovers" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    for ([_]*Term{ fx.term, peer }, [_][]const u8{ "const", "b" }) |view, query| {
+        try testing.expect(fx.session.activateSurfaceById(view.surfaceId()));
+        _ = try fx.session.tick();
+        find_ops.toggleFind(fx.session);
+        try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, query);
+        find_ops.recomputeFind(fx.session);
+    }
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for (0..100) |_| try text.appendSlice(testing.allocator, "const extra = 0;\n");
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, text.items));
+    const revision = peer.rt.editorDocument().opened.?.file.revision;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    const failed = find_ops.viewFind(fx.session, fx.term) orelse return error.MissingFind;
+    fx.session.allocator = testing.allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectEqual(@as(usize, 0), failed.matches.len);
+    try testing.expectEqual(@as(usize, 0), failed.state.match_count);
+    try testing.expectEqual(revision, peer.rt.editorDocument().opened.?.file.revision);
+    try testing.expectEqualStrings("b", fx.session.chrome_host.find.input.query.items);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    find_ops.recomputeFind(fx.session);
+    try testing.expectEqual(@as(usize, 103), fx.session.editor_find_matches.items.len);
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    find_ops.recomputeFind(fx.session);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
+}
+
+test "shared editor view find adversarial R10 zero width replace Undo Redo retain independent searches" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    _ = try fx.session.tick();
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "const");
+    find_ops.recomputeFind(fx.session);
+    fx.session.chrome_host.find.current = 2;
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    _ = try fx.session.tick();
+    find_ops.toggleFindReplace(fx.session);
+    fx.session.chrome_host.find.regex = true;
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "(?=const)");
+    try fx.session.chrome_host.find.replace.query.appendSlice(testing.allocator, "X");
+    find_ops.recomputeFind(fx.session);
+    const before = try testing.allocator.dupe(u8, peer.rt.editorDocument().opened.?.file.content);
+    defer testing.allocator.free(before);
+    find_ops.replaceAll(fx.session);
+    const after = try testing.allocator.dupe(u8, peer.rt.editorDocument().opened.?.file.content);
+    defer testing.allocator.free(after);
+    try testing.expectEqual(before.len + 3, after.len);
+    try testing.expect(std.mem.startsWith(u8, after, "Xconst"));
+    const inactive = find_ops.viewFind(fx.session, fx.term) orelse return error.MissingFind;
+    try testing.expectEqual(@as(usize, 3), inactive.matches.len);
+    try testing.expectEqual(@as(usize, 2), inactive.state.current);
+    try testing.expect(fx.session.activateSurfaceById(fx.term.surfaceId()));
+    try testing.expect(undoEdit(fx.session, fx.term));
+    try testing.expectEqualStrings(before, peer.rt.editorDocument().opened.?.file.content);
+    const peer_find = find_ops.viewFind(fx.session, peer) orelse return error.MissingPeerFind;
+    try testing.expectEqualStrings("(?=const)", peer_find.state.input.query.items);
+    try testing.expectEqual(@as(usize, 3), peer_find.matches.len);
+    try testing.expect(fx.session.activateSurfaceById(peer.surfaceId()));
+    try testing.expect(redoEdit(fx.session, peer));
+    try testing.expectEqualStrings(after, fx.term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 3), (find_ops.viewFind(fx.session, fx.term) orelse return error.MissingFind).matches.len);
+    try testing.expectEqualStrings("(?=const)", fx.session.chrome_host.find.input.query.items);
+}

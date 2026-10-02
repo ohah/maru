@@ -3886,6 +3886,12 @@ owner 관측은 기존 published frame summary이므로 실제 전환 시점보�
 | 최초 이관과 실패 | 기존 query/replace/current를 단일 문서용 이력으로 보존한다. 이관 준비 할당 실패는 원래 슬롯과 검색 결과를 바꾸지 않는다. |
 | 검색 IME와 종료 | 검색 preedit → `imeEnd` → 다른 owner 활성화 → peer 종료. 조합은 원래 검색어에 남고 생존 뷰의 슬롯을 복원한다. |
 
+추가 R6–R10은 선택 범위의 뷰별 snapshot·편집 후 만료, 잘못된 정규식에서 치환 타이핑/IME,
+최초 공유 연결 중 chrome 조합의 source/legacy 격리, 결과 배열 성장의 할당·resize 실패와
+명시적 재검색 복구, pane 포커스·드래그·workspace 전환 직후 렌더 없는 치환 콜백,
+zero-width 정규식 치환 및 반대 뷰 Undo/Redo를 판정한다. 치환 수정은 치환 오류만 지우고
+검색어 오류는 보존하며, 구조 전환이 성공하면 새 활성 뷰의 검색 슬롯을 즉시 복원한다.
+
 집중 명령은 `zig build test-editor-shared-find`이다. 기존 diff의 두 검색창과 단일 문서/터미널/웹의
 세션 검색 동작은 유지한다. 전체 에디터 회귀 검사와 실제 렌더 증거를 함께 확인한다.
 

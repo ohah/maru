@@ -24,6 +24,10 @@ SOURCE_FILES = (
     "src/platform/macos/app_session.zig",
     "src/platform/macos/app_session/editor/mod.zig",
     "src/platform/macos/app_session/editor_ime.zig",
+    "src/platform/macos/app_session/find.zig",
+    "src/platform/macos/app_session/term.zig",
+    "src/platform/macos/app_session/pane.zig",
+    "src/platform/macos/app_session/tab.zig",
     "src/platform/macos/chrome_lab_smoke.m",
     "src/platform/macos/maru_metal_renderer.m",
     "src/platform/macos/coretext_frame_builder.zig",
@@ -72,8 +76,6 @@ def main() -> None:
     artifacts.mkdir()
     fixture_path = "tools/shared-ime-gpu/fixture.zig.inc" if args.scenario == "ime" else "tools/shared-ime-gpu/find-fixture.zig.inc"
     source_files = tuple(name for name in SOURCE_FILES if name != "tools/shared-ime-gpu/fixture.zig.inc") + (fixture_path,)
-    if args.scenario == "find":
-        source_files += ("src/platform/macos/app_session/find.zig", "src/platform/macos/app_session/term.zig")
     source_hashes = {name: digest(repo / name) for name in source_files}
     subprocess.run(
         ["rsync", "-a", "--exclude=.git", "--exclude=.zig-cache", "--exclude=zig-out",

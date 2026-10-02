@@ -22,7 +22,9 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     const allocator = std.testing.allocator;
     const swift = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/MaruAppHost.swift", allocator, .limited(2 * 1024 * 1024));
     defer allocator.free(swift);
-    const abi = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/app_host_abi.zig", allocator, .limited(512 * 1024));
+    // 상한은 **판정 대상이 아니다** — 파일이 자라 상한을 넘으면 판정이 아니라 읽기가 `StreamTooLong` 으로 빨개진다
+    // (2026-10-02: 517 KB → 526 KB 로 512 KiB 를 넘었다). 다른 소스와 같은 2 MiB 로 둔다.
+    const abi = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/app_host_abi.zig", allocator, .limited(2 * 1024 * 1024));
     defer allocator.free(abi);
     const build = try build_source.read(allocator);
     defer allocator.free(build);

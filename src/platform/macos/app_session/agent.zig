@@ -2802,6 +2802,37 @@ test "Codex 질문 훅은 제품 배지를 입력 대기로 세우고 답변 뒤
     try std.testing.expectEqual(@as(usize, 1), term.hook.progress.childCount());
     try std.testing.expect(term.hook.progress.turn_open);
     try std.testing.expectEqual(mode.Notice.none, term.hook.notice.kind);
+    // Unknown events must be rejected before identity/cwd and notice side effects.
+    const sequence_before_unknown = term.hook.turn_seq;
+    for ([_][]const u8{ "FutureEvent", "__oversized__" }) |unsupported| {
+        var line: [256]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&line, "codex\t{{\"hook_event_name\":\"{s}\",\"session_id\":\"unknown-session\",\"turn_id\":\"unknown-turn\",\"cwd\":\"/must-not-adopt\"}}", .{unsupported});
+        _ = testApplyHookEvent(session, term, parser.parseLine(payload).?);
+        try std.testing.expectEqualStrings("replacement-session", term.hook.transcript.identity());
+        try std.testing.expectEqualStrings("active-turn", term.hook.progress.turnKey());
+        try std.testing.expectEqual(@as(usize, 1), term.hook.progress.childCount());
+        try std.testing.expectEqual(sequence_before_unknown, term.hook.turn_seq);
+    }
+    var judge: maru.session.agent_state_arbiter.Arbiter = .{};
+    for (1..4) |screen_seq| {
+        const verdict = judge.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = screen_seq, .hook_turn_seq = sequence_before_unknown });
+        if (screen_seq == 3) try std.testing.expectEqual(mode.State.idle, verdict.state);
+    }
+    // An ID-less prompt is still a fresh C2 boundary and cannot accept the old Stop.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+    try std.testing.expectEqual(sequence_before_unknown +% 1, term.hook.turn_seq);
+    const fresh_verdict = judge.arbitrate(.{ .hook = term.hook.state, .screen_visible_idle = true, .screen_seq = 4, .hook_turn_seq = term.hook.turn_seq });
+    try std.testing.expectEqual(mode.State.running, fresh_verdict.state);
+    try std.testing.expectEqualStrings("C2-pending", fresh_verdict.rule);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"turn_id\":\"active-turn\"}").?);
+    try std.testing.expectEqual(mode.State.running, term.hook.state);
+    try std.testing.expect(term.hook.progress.turn_open);
+    try std.testing.expectEqual(mode.Notice.none, term.hook.notice.kind);
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, session.awakeMs() + 1500) == null);
+    // Even repeated missing IDs must reset the screen arbiter's previous-turn counter.
+    const unidentified_seq = term.hook.turn_seq;
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+    try std.testing.expectEqual(unidentified_seq +% 1, term.hook.turn_seq);
 }
 
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
@@ -2921,7 +2952,8 @@ fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.se
         slot.notice.clear();
     const open_now = slot.progress.turn_open;
     const key_now = slot.progress.turnKey();
-    const turn_changed = !std.mem.eql(u8, key_before, key_now);
+    const turn_changed = !std.mem.eql(u8, key_before, key_now) or
+        (ev.agent_id.len == 0 and ev.kind == .user_prompt_submit);
     // **권위표의 C2 가 언제 셈을 버릴지의 유일한 입력이다**(§1.6-⑵-a). 안 올리면 C2 가 한 번 성공한 뒤
     // 카운터가 임계에 남아, 새 턴의 첫 판정에서 화면이 아직 이전 idle chrome 을 들고 있는 동안 **확인
     // 절차 없이 완료**가 된다(적대적 검증 R8 에서 재현한 그 버그다). 턴 정체가 바뀌면 새 턴이다.

@@ -100,7 +100,7 @@ pub const Input = struct {
     /// 화면 상태를 세운 근거. A 경로에서 그대로 `Verdict.origin` 이 된다.
     screen_origin: Origin = .screen,
     process_exited: bool = false,
-    /// 훅이 연 **턴**의 일련번호. 호출자가 `turn_key`(claude `prompt_id`·codex `turn_id`)가 바뀔 때 올린다.
+    /// 훅이 연 **턴**의 일련번호. 호출자가 `turn_key` 변화 또는 명시적 새 프롬프트마다 올린다.
     ///
     /// **이것이 없으면 C2 가 한 번 성공한 뒤 다음 턴을 즉시 접는다**(적대적 검증 R8 에서 실제로 재현했다).
     /// C2 가 idle 을 낸 뒤 카운터는 3 에 남아 있고, 사용자가 새 프롬프트를 넣어 훅이 running 이 되어도

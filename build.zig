@@ -4908,6 +4908,14 @@ pub fn build(b: *std.Build) void {
     run_shared_editor_tests.setCwd(b.path("."));
     run_shared_editor_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-shared", "Run shared document edit and independent view judges").dependOn(&run_shared_editor_tests.step);
+    const shared_split_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{"shared editor split"},
+    });
+    const run_shared_split_tests = b.addRunArtifact(shared_split_tests);
+    run_shared_split_tests.setCwd(b.path("."));
+    run_shared_split_tests.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-shared-split", "Run shared editor pane split and lifecycle judges").dependOn(&run_shared_split_tests.step);
     const shared_anchor_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
         .filters = &.{"shared editor peer"},

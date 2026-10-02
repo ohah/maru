@@ -227,6 +227,14 @@ pub fn ensureActiveTermVisible(self: *AppSession, pane: *Pane) void {
     }
 }
 
+/// 경로로 다시 열 때 공유 뷰 중 사용자가 마지막으로 활성화한 뷰를 고른다.
+/// handle이나 pane 인덱스를 저장하지 않아 이동/삭제 뒤 별도 remap이 필요 없다.
+pub fn noteEditorFocus(self: *AppSession, term: *Term) void {
+    if (term.kind != .editor) return;
+    self.editor_focus_order.* +|= 1;
+    term.rt.editor_focus_order = self.editor_focus_order.*;
+}
+
 pub fn focusTerm(self: *AppSession, term_index: usize) void {
     _ = tryFocusTerm(self, term_index);
 }
@@ -235,10 +243,14 @@ pub fn focusTerm(self: *AppSession, term_index: usize) void {
 pub fn tryFocusTerm(self: *AppSession, term_index: usize) bool {
     const pane = pane_ops.activePane(self);
     if (term_index >= pane.terms.items.len) return false;
-    if (pane.active_term == term_index) return true;
+    if (pane.active_term == term_index) {
+        noteEditorFocus(self, pane.activeTerm());
+        return true;
+    }
     if (!self.tryCommitComposition()) return false; // Rejected admission must not publish a new input owner.
     self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 Term 이동 → 보류 무효화(stale 대상 close 방지)
     pane.active_term = term_index;
+    noteEditorFocus(self, pane.activeTerm());
     self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
     self.app_window.tabs = self.surface_ptrs.items;
     ensureActiveTermVisible(self, pane); // #2(리뷰): 스크롤 밖 탭 선택 시 보이게 tab_scroll_cols 조정

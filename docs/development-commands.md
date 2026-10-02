@@ -1015,3 +1015,10 @@ A의 독립 caret 보존, 전환 후 600ms 동안 문서·선택 불변과 저�
 `mise exec -- zig build test-editor-shared-anchors`는 수동 공유 뷰의 접힘 매핑·스크롤 앵커·
 provider 갱신·준비 할당 실패를 집중 실행한다. ReleaseFast는 `-Doptimize=ReleaseFast`를 붙인다.
 같은 판정자는 `test-editor-shared`와 전체 editor 집계에도 포함된다.
+
+### 공유 편집기 pane 분할 내부 판정
+
+`mise exec -- zig build test-editor-shared-split`는 셸 없는 공유 pane 준비·접힘 복사·
+할당 실패의 트리/포커스 보존·마지막 뷰 닫기·최근 사용 뷰 선택을 검사한다.
+ReleaseFast는 `-Doptimize=ReleaseFast`를 붙인다. 같은 판정자는 공유 및 전체 editor 집계에 포함된다.
+사용자 명령·workspace 포맷·재시작 복원·실제 두 pane GUI/OS IME 증거는 이 gate의 범위가 아니다.

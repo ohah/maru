@@ -1039,6 +1039,45 @@ pub fn newTermInActivePane(self: *AppSession) !void {
     self.workspaceChanged(.topology);
 }
 
+/// 공유 편집기 분할은 셸을 만들지 않는다. 문서 참조·검색·트리 노드를
+/// 모두 준비한 뒤 한 번 게시해야 OOM에서 기존 레이아웃과 포커스를 보존한다.
+/// 사용자 명령 연결은 복원 gate를 통과한 뒤 별도로 노출한다.
+pub fn splitSharedEditorPane(self: *AppSession, direction: maru.session.SplitDirection, before: bool) !*Term {
+    const tab = tab_ops.activeTab(self);
+    const active = tab.activePane();
+    const source = tab.activeTerm();
+    if (!self.tryCommitComposition()) return error.CompositionPending;
+    var prepared = try editor_ops.prepareSharedView(self, source);
+    errdefer prepared.deinit(self.allocator);
+    var legacy_search = try find_ops.prepareSharedViewFind(self, source);
+    errdefer if (legacy_search) |*slot| slot.deinit(self.allocator);
+    const peer = try editor_ops.createEditorTerm(self);
+    errdefer term_ops.destroyTerm(self, peer);
+    const new_pane = try self.allocator.create(Pane);
+    errdefer self.allocator.destroy(new_pane);
+    new_pane.* = .{};
+    errdefer new_pane.terms.deinit(self.allocator);
+    try new_pane.terms.append(self.allocator, peer);
+    try tab.panes.ensureUnusedCapacity(self.allocator, 1);
+    const split = try self.allocator.create(PaneTree.Split);
+    errdefer self.allocator.destroy(split);
+    split.* = .{
+        .direction = direction,
+        .ratio = 0.5,
+        .a = .{ .leaf = if (before) new_pane else active },
+        .b = .{ .leaf = if (before) active else new_pane },
+    };
+    if (!PaneTree.replaceLeaf(&tab.tree, active, .{ .split = split })) return error.ActivePaneNotInTree;
+    // 이 아래는 소유권을 게시하는 단계다. fallible 준비를 다시 끼우지 않는다.
+    tab.panes.appendAssumeCapacity(new_pane);
+    editor_ops.finishAttach(self, peer, prepared);
+    find_ops.enableSharedViewFind(self, source, peer, legacy_search);
+    resizeTabPanes(self, tab);
+    focusPane(self, tab.panes.items.len - 1);
+    self.workspaceChanged(.topology);
+    return peer;
+}
+
 /// 활성 panel을 direction으로 둘로 나눈다(사실상 표준 멀티플렉서 split 동작 참고 — 코드 미참고). 활성 panel의
 /// 현재 leaf rect를 splitRect로 a(기존)·b(새)로 나눠, b 크기로 새 셸 panel을 spawn하고, 트리에서 활성
 /// leaf를 split{a: 기존 leaf, b: 새 leaf}로 교체하고, 기존 panel을 a 크기로 줄인 뒤 새 panel로 포커스를
@@ -1299,10 +1338,14 @@ pub fn focusPane(self: *AppSession, pane_index: usize) void {
 pub fn tryFocusPane(self: *AppSession, pane_index: usize) bool {
     const tab = tab_ops.activeTab(self);
     if (pane_index >= tab.panes.items.len) return false;
-    if (tab.active_pane == pane_index) return true;
+    if (tab.active_pane == pane_index) {
+        term_ops.noteEditorFocus(self, tab.activeTerm());
+        return true;
+    }
     if (!self.tryCommitComposition()) return false; // Retain the original input owner on rejected admission.
     self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 pane 이동 → 보류 무효화(stale 대상 close 방지)
     tab.active_pane = pane_index;
+    term_ops.noteEditorFocus(self, tab.activeTerm());
     self.surface_ptrs.items[self.app_window.active_tab] = tab.activeTerm().surface;
     self.app_window.tabs = self.surface_ptrs.items;
     recomputeActivePaneRect(self);

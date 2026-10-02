@@ -445,6 +445,7 @@ pub fn switchTab(self: *AppSession, index: usize) bool {
     if (index >= self.app_window.tabs.len) return false;
     if (index != prev_tab and !self.tryCommitComposition()) return false;
     if (!self.app_window.selectTab(index)) return false;
+    term_ops.noteEditorFocus(self, activeTab(self).activeTerm());
     // 실제 탭이 바뀔 때만 보류 닫기 무효화 — selectTab은 index<len이면 같은 탭 재선택에도 true를 돌려주므로
     // (window.zig), 알림 클릭이 이미 활성인 탭의 Term을 activateSurfaceById→switchTab(same)로 지날 때 유효한
     // 닫기 모달을 헛되이 취소하던 것 방지(code-review — focusPane/focusTerm은 자체 early-return이 no-op을 거른다).

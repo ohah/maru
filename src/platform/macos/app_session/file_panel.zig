@@ -3178,16 +3178,29 @@ pub fn toggleActiveFilePanelMode(self: *AppSession) void {
 /// 창 전체에서 **그 경로의 비-diff 파일 Term**. diff는 같은 경로로 따로 존재할 수 있어(§3.5 유일성 키가
 /// `(경로, kind, base)`) 여기서 제외한다 — 안 그러면 탐색기에서 파일을 열 때 열려 있던 diff Term이 활성화된다.
 pub fn fileTermForPath(self: *AppSession, path: []const u8) ?*Term {
+    return recentFileTermForPath(self, path, false);
+}
+
+// MRU 편집 뷰는 entry가 없을 수 있다. 메타데이터 조회는 entry를 실제로
+// 소유한 뷰를 찾아야 peer 활성화가 파일 entry의 존재를 숨기지 않는다.
+fn recentFileTermForPath(self: *AppSession, path: []const u8, require_entry: bool) ?*Term {
+    var recent: ?*Term = null;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                const entry = term.file_entry orelse continue;
-                if (entry.kind == .diff) continue;
-                if (std.mem.eql(u8, entry.path, path)) return term;
+                if (require_entry and term.file_entry == null) continue;
+                const matches = if (term.file_entry) |entry|
+                    entry.kind != .diff and std.mem.eql(u8, entry.path, path)
+                else if (term.kind == .editor and term.rt.editor_diff == null and term.rt.editor_merge == null)
+                    if (term.rt.editorDocument().path) |p| std.mem.eql(u8, p, path) else false
+                else
+                    false;
+                if (!matches) continue;
+                if (recent == null or term.rt.editor_focus_order > recent.?.rt.editor_focus_order) recent = term;
             }
         }
     }
-    return null;
+    return recent;
 }
 
 pub fn dockHasContent(self: *const AppSession) bool {
@@ -4642,7 +4655,7 @@ pub fn buildFileTreeRowsForEntries(
 
 /// 창 전체에서 그 경로의 파일 entry. 경로 유일성은 pane별이 아니라 **창 전체** 불변식이다(§1).
 pub fn fileEntryForPath(self: *AppSession, path: []const u8) ?*dock_panel.Entry {
-    const term = fileTermForPath(self, path) orelse return null;
+    const term = recentFileTermForPath(self, path, true) orelse return null;
     return term.file_entry;
 }
 

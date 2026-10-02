@@ -44,6 +44,9 @@ pub const AppRuntime = struct {
 
     /// 문서 주소·참조는 창보다 오래 산다. 각 창은 view lease만 정산한다.
     editor_documents: @import("../session/editor/document_registry.zig").Registry = .{ .allocator = std.heap.smp_allocator },
+    /// 뷰가 다른 창으로 옮겨져도 최근 활성화 순서는 같은 앱 시간축을 따른다.
+    /// 문서 연결 권한이나 영속 identity로 사용하지 않는다.
+    editor_focus_order: u64 = 0,
 
     /// 파일 도크 entry의 앱 전역 opaque identity 발급기. path rename과 WKWebView eviction을 넘어 같은 entry를
     /// 추적하며 모든 AppSession이 공유한다. surface_id와 의미/수명은 달라 별도 typed allocator로 둔다.

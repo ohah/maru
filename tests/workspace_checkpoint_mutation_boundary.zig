@@ -28,7 +28,8 @@ test "P4 C3b topology selection naming SCM mutation은 app-global owner 하나�
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, app_session, "self.workspaceChanged(.runtime_binding)"));
     try std.testing.expect(std.mem.indexOf(u8, app_session, "if (!self.workspace_checkpoint_mutations_enabled) return;") != null);
     try std.testing.expectEqual(@as(usize, 14), std.mem.count(u8, tab, "self.workspaceChanged("));
-    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, pane, "self.workspaceChanged("));
+    // 공유 편집기 분할도 셸 분할과 같은 topology checkpoint를 요청한다.
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, pane, "self.workspaceChanged("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, term, "self.workspaceChanged(.selection)"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, settings, "self.workspaceChanged(.naming)"));
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, scm, "self.workspaceChanged(.scm_base)"));

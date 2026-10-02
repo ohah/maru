@@ -2471,6 +2471,8 @@ const TermRuntime = struct {
     ///
     /// 렌더가 아니라 **입력이 세운다**. 렌더는 이 값을 읽어 띠를 그릴 뿐이고, 다음 프레임이 덮지
     /// 않는다 — `editor_hit_*`(렌더가 굳히는 스냅숏)와 방향이 반대다.
+    /// 배열 자리 대신 뷰 자체에 최근 활성화 순서를 둔다. 이동·닫기 압축 뒤에도 의미가 같다.
+    editor_focus_order: u64 = 0,
     editor_selection: ?maru.session.editor.selection.Selection = null,
     /// **IME 조합 중 글자**(N3 — native-editor.md §11). 문서에 넣지 않고 **화면에만** 끼워 그린다 —
     /// 조합은 아직 확정이 아니므로 버퍼에 들어가면 undo·저장·검색이 전부 그것을 진짜 내용으로 본다.
@@ -5746,6 +5748,8 @@ pub const AppSession = struct {
     // 예전에는 `var session: AppSession = undefined` 테스트가 이 포인터도 명시 초기화해야 했다
     // ([[devsession-undefined-test-field-trap]]) — **그런 테스트는 이제 없다**(2026-09-10).
     live_registry: *maru.session.LiveSurfaceRegistry(app.LiveSurface) = &app_runtime.live_registry,
+    /// 최근 활성화 순서도 창 이동에서 재사용하므로 앱 전역 발급기를 빌린다.
+    editor_focus_order: *u64 = &app_runtime.editor_focus_order,
     /// 앱 수명 문서 owner. 창 teardown은 이 저장소 자체를 해제하지 않는다.
     editor_documents: *maru.session.editor.document_registry.Registry = &app_runtime.editor_documents,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
@@ -9896,13 +9900,16 @@ pub const AppSession = struct {
     ///
     /// 이 문이 없어서 `⌘W` 한 번에 **저장 안 한 편집이 조용히 사라졌다** — 되돌릴 방법이 없는 종류다.
     pub fn scopeHasUnsavedEditor(self: *AppSession, scope: CloseScope) bool {
-        var dirty: usize = 0;
+        const Count = struct { session: *AppSession, scope: CloseScope, n: usize = 0 };
+        var dirty: Count = .{ .session = self, .scope = scope };
         forEachTermInScope(self, scope, &dirty, struct {
-            fn f(n: *usize, t: *Term) void {
-                if (editor_ops.isDirty(t)) n.* += 1;
+            fn f(c: *Count, t: *Term) void {
+                // 연결만 닫는 것은 미저장 문서를 버리는 일이 아니다. 백업 삭제와
+                // 동일한 마지막 뷰 판정을 써야 확인 문구와 실제 손실 범위가 일치한다.
+                if (editor_ops.isDirty(t) and c.session.closesAllEditorDocumentViews(c.scope, t)) c.n += 1;
             }
         }.f);
-        return dirty != 0;
+        return dirty.n != 0;
     }
 
     /// **이 범위가 teardown 할 Term 들** — 「무엇이 닫히나」의 단일 출처다(§3.10 이 백업 지우기를 여기에
@@ -9949,13 +9956,15 @@ pub const AppSession = struct {
         // 범위가 없으면 거짓이다 — 이 함수 혼자로는 판정하지 않는다는 위 규칙을 값으로 지킨다
         // (집합이 비면 「전부 그렇다」가 공허하게 참이 된다).
         if (std.meta.activeTag(scope) == .none) return false;
-        var named: usize = 0;
+        const Count = struct { session: *AppSession, scope: CloseScope, n: usize = 0 };
+        var named: Count = .{ .session = self, .scope = scope };
         forEachTermInScope(self, scope, &named, struct {
-            fn f(n: *usize, t: *Term) void {
-                if (editor_ops.isDirty(t) and t.rt.editorDocument().untitled == null) n.* += 1;
+            fn f(c: *Count, t: *Term) void {
+                if (editor_ops.isDirty(t) and t.rt.editorDocument().untitled == null and
+                    c.session.closesAllEditorDocumentViews(c.scope, t)) c.n += 1;
             }
         }.f);
-        return named == 0;
+        return named.n == 0;
     }
 
     /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — resolveCloseScope(cascade 단일 출처)로 범위를 풀고 검사.

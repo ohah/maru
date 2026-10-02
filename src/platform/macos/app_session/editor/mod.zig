@@ -2302,6 +2302,16 @@ const SharedSeed = struct {
     first_piece: u32,
     first_col: u32,
     wrap: ?bool,
+    ranges: []editor_fold.Range,
+    folded: []u32,
+    folded_len: usize,
+    previous: []u32,
+    visible_lines: [][]const u8,
+    visible_numbers: []?u32,
+    fold_source: FoldSource,
+    marks: []chrome_editor.gutter.Fold,
+    marks_len: usize,
+    syntax_folds_applied: bool,
 };
 
 /// 문서를 Term에 붙이기 직전까지 준비한 앱 전역 문서 참조와 뷰 줄 배열.
@@ -2318,7 +2328,15 @@ pub const Prepared = struct {
     /// 아직 뷰에 넘기지 않은 참조와 줄 배열을 되돌린다. registry는 문서를 한 번만 정산한다.
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
         allocator.free(self.lines);
-        if (self.seed) |seed| if (seed.extras.len > 0) allocator.free(seed.extras);
+        if (self.seed) |seed| {
+            allocator.free(seed.extras);
+            allocator.free(seed.ranges);
+            allocator.free(seed.folded);
+            allocator.free(seed.previous);
+            allocator.free(seed.visible_lines);
+            allocator.free(seed.visible_numbers);
+            allocator.free(seed.marks);
+        }
         _ = @constCast(self.lease.owner).release(self.lease) catch unreachable;
         self.* = undefined;
     }
@@ -2369,6 +2387,20 @@ pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || err
     for (lines, 0..) |*line, i| line.* = doc.file.lineText(i) orelse "";
     const extras = try self.allocator.dupe(editor_selection.Selection, source.rt.editor_extra_selections);
     errdefer self.allocator.free(extras);
+    // 초기 뷰 상태도 게시 전에 준비한다. 접힘을 뒤늦게 복사하면 OOM에서
+    // 분할은 성공했는데 새 뷰만 펼쳐지는 부분 성공이 생긴다.
+    const ranges = try self.allocator.dupe(editor_fold.Range, source.rt.editor_fold_ranges);
+    errdefer self.allocator.free(ranges);
+    const folded = try self.allocator.dupe(u32, source.rt.editor_folded_buf);
+    errdefer self.allocator.free(folded);
+    const previous = try self.allocator.dupe(u32, source.rt.editor_folded_prev);
+    errdefer self.allocator.free(previous);
+    const visible_lines = try self.allocator.dupe([]const u8, source.rt.editor_visible_lines);
+    errdefer self.allocator.free(visible_lines);
+    const visible_numbers = try self.allocator.dupe(?u32, source.rt.editor_visible_numbers);
+    errdefer self.allocator.free(visible_numbers);
+    const marks = try self.allocator.dupe(chrome_editor.gutter.Fold, source.rt.editor_fold_marks);
+    errdefer self.allocator.free(marks);
     const lease = self.editor_documents.retain(source_lease, .view) catch return error.OutOfMemory;
     return .{ .lease = lease, .lines = lines, .shared = true, .seed = .{
         .selection = source.rt.editor_selection,
@@ -2377,6 +2409,16 @@ pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || err
         .first_piece = source.rt.editor_first_piece,
         .first_col = source.rt.editor_first_col,
         .wrap = source.rt.editor_wrap,
+        .ranges = ranges,
+        .folded = folded,
+        .folded_len = source.rt.editor_folded_len,
+        .previous = previous,
+        .visible_lines = visible_lines,
+        .visible_numbers = visible_numbers,
+        .fold_source = source.rt.editor_fold_source,
+        .marks = marks,
+        .marks_len = source.rt.editor_fold_marks_len,
+        .syntax_folds_applied = source.rt.editor_syntax_folds_applied,
     } };
 }
 
@@ -2493,6 +2535,23 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
         term.rt.editor_first_piece = seed.first_piece;
         term.rt.editor_first_col = seed.first_col;
         term.rt.editor_wrap = seed.wrap;
+        // finishAttach의 임시 파생 배열을 놓고 준비된 독립 사본을 인계한다.
+        self.allocator.free(term.rt.editor_fold_ranges);
+        self.allocator.free(term.rt.editor_folded_buf);
+        self.allocator.free(term.rt.editor_folded_prev);
+        self.allocator.free(term.rt.editor_visible_lines);
+        self.allocator.free(term.rt.editor_visible_numbers);
+        term.rt.editor_fold_ranges = seed.ranges;
+        term.rt.editor_folded_buf = seed.folded;
+        term.rt.editor_folded_len = seed.folded_len;
+        term.rt.editor_folded_prev = seed.previous;
+        term.rt.editor_visible_lines = seed.visible_lines;
+        term.rt.editor_visible_numbers = seed.visible_numbers;
+        term.rt.editor_fold_source = seed.fold_source;
+        self.allocator.free(term.rt.editor_fold_marks);
+        term.rt.editor_fold_marks = seed.marks;
+        term.rt.editor_fold_marks_len = seed.marks_len;
+        term.rt.editor_syntax_folds_applied = seed.syntax_folds_applied;
     }
 }
 
@@ -47876,4 +47935,211 @@ test "shared editor peer fold preparation OOM preserves document selection and s
     }
     try testing.expect(failures >= 4);
     try testing.expect(completed);
+}
+
+test "shared editor split creates only an editor pane and retains shared Undo after close" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const saved_checkpoint = app_session_mod.app_runtime.workspace_checkpoint;
+    app_session_mod.app_runtime.workspace_checkpoint = .{};
+    defer app_session_mod.app_runtime.workspace_checkpoint = saved_checkpoint;
+    try app_session_mod.app_runtime.workspace_checkpoint.arm(.{
+        .debounce_ns = 500_000_000,
+        .retry_initial_ns = 1_000_000_000,
+        .retry_max_ns = 30_000_000_000,
+    }, false);
+    inline for (.{ maru.session.SplitDirection.horizontal, maru.session.SplitDirection.vertical }) |direction| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const s = fx.session;
+        // 실제 게시된 창과 달리 PaneFixture는 staging 상태로 시작한다.
+        s.workspace_checkpoint_mutations_enabled = true;
+        const source = fx.term;
+        const tab = s.tabs.items[s.app_window.active_tab];
+        const source_pane = pane_ops.activePane(s);
+        const old_panes = tab.panes.items.len;
+        const old_checkpoint_revision = app_session_mod.app_runtime.workspace_checkpoint.change_revision;
+        source.rt.editor_selection = editor_selection.Selection.at(4);
+        source.rt.editor_first_col = 2;
+        const peer = try pane_ops.splitSharedEditorPane(s, direction, false);
+        const new_pane = pane_ops.activePane(s);
+        try testing.expectEqual(old_panes + 1, tab.panes.items.len);
+        try testing.expectEqual(direction, tab.tree.split.direction);
+        try testing.expect(tab.tree.split.a.leaf == source_pane);
+        try testing.expect(tab.tree.split.b.leaf == new_pane);
+        try testing.expect(app_session_mod.app_runtime.workspace_checkpoint.change_revision > old_checkpoint_revision);
+        try testing.expectEqual(maru.app.workspace_checkpoint_product.ChangeKind.topology, app_session_mod.app_runtime.workspace_checkpoint.last_change_kind.?);
+        try testing.expectEqual(@as(usize, 1), new_pane.terms.items.len);
+        try testing.expect(new_pane.terms.items[0] == peer);
+        try testing.expect(peer.kind == .editor);
+        try testing.expect(peer.rt.editorDocument() == source.rt.editorDocument());
+        try testing.expectEqualDeep(source.rt.editor_selection, peer.rt.editor_selection);
+        try testing.expectEqual(source.rt.editor_first_col, peer.rt.editor_first_col);
+        try testing.expect(insertText(s, peer, "한"));
+        try testing.expectEqualStrings(source.rt.editor_lines[0], peer.rt.editor_lines[0]);
+        term_ops.closeTermAt(s, s.app_window.active_tab, new_pane, 0);
+        try testing.expectEqual(old_panes, tab.panes.items.len);
+        try testing.expect(pane_ops.activePane(s) == source_pane);
+        try testing.expect(undoEdit(s, source));
+        try testing.expectEqualStrings("const a = 1;", source.rt.editor_lines[0]);
+    }
+}
+
+test "shared editor split copies folds without coupling subsequent view state" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try testing.expect(selectAll(fx.session, fx.term));
+    try testing.expect(insertText(fx.session, fx.term, "block\n    child\nafter\n"));
+    try testing.expect(toggleFoldHead(fx.session, fx.term, 0));
+    const source_pane = pane_ops.activePane(fx.session);
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, true);
+    const tab = fx.session.tabs.items[fx.session.app_window.active_tab];
+    try testing.expect(tab.tree.split.a.leaf == pane_ops.activePane(fx.session));
+    try testing.expect(tab.tree.split.b.leaf == source_pane);
+    try testing.expectEqualSlices(u32, foldedHeads(fx.term), foldedHeads(peer));
+    try testing.expect(toggleFoldHead(fx.session, peer, 0));
+    try testing.expectEqualSlices(u32, &.{0}, foldedHeads(fx.term));
+    try testing.expectEqual(@as(usize, 0), foldedHeads(peer).len);
+}
+
+test "shared editor split allocation failures retain tree focus and document references" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var failures: usize = 0;
+    var completed = false;
+    for (0..96) |index| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const s = fx.session;
+        // 접힘/보이는 줄/추가 선택 배열이 비어 있으면 그 준비 할당을 시험하지 못한다.
+        try testing.expect(selectAll(s, fx.term));
+        try testing.expect(insertText(s, fx.term, "block\n    child\nafter\n"));
+        try testing.expect(toggleFoldHead(s, fx.term, 0));
+        fx.term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(6)});
+        const tab = s.tabs.items[s.app_window.active_tab];
+        const old_pane = pane_ops.activePane(s);
+        const old_count = tab.panes.items.len;
+        const old_tree = tab.tree;
+        const old_selection = fx.term.rt.editor_selection;
+        const lease = fx.term.rt.editor_document_lease.?;
+        const refs = lease.owner.viewCount(lease).?;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index, .resize_fail_index = 0 });
+        s.allocator = failing.allocator();
+        const result = pane_ops.splitSharedEditorPane(s, .vertical, false);
+        s.allocator = testing.allocator;
+        if (result) |peer| {
+            try testing.expect(peer.rt.editorDocument() == fx.term.rt.editorDocument());
+            if (!failing.has_induced_failure) {
+                completed = true;
+                break;
+            }
+        } else |err| {
+            failures += 1;
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(old_count, tab.panes.items.len);
+            try testing.expect(pane_ops.activePane(s) == old_pane);
+            try testing.expect(std.meta.eql(old_tree, tab.tree));
+            try testing.expectEqual(refs, lease.owner.viewCount(lease).?);
+            try testing.expectEqualDeep(old_selection, fx.term.rt.editor_selection);
+            try testing.expectEqualSlices(u32, &.{0}, foldedHeads(fx.term));
+            try testing.expectEqualStrings("block\n    child\nafter\n", fx.term.rt.editorDocument().opened.?.file.content);
+        }
+    }
+    try testing.expect(failures > 0);
+    try testing.expect(completed);
+}
+
+test "shared editor split closing a dirty peer requires confirmation only for the last view" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const s = fx.session;
+    const peer = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(s, peer, "changed"));
+    try testing.expect(!s.scopeHasUnsavedEditor(.pane));
+    try testing.expect(s.scopeHasUnsavedEditor(.session));
+    const peer_id = peer.surfaceId();
+    s.requestClose(.term_or_pane);
+    try testing.expect(term_ops.termBySurfaceId(s, peer_id) == null);
+    try testing.expect(isDirty(fx.term));
+    try testing.expect(s.scopeHasUnsavedEditor(.term));
+}
+
+test "shared editor split reopening selects the recently focused surviving view" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const s = fx.session;
+    const source_pane = pane_ops.activePane(s);
+    const path = fx.term.rt.editorDocument().path.?;
+    // 사용자 파일 entry는 원본에 있다. MRU peer가 entry 없이 선택돼도
+    // rename/파일 상태 소비처의 entry 조회는 원본 소유자를 계속 찾아야 한다.
+    const entry = try testing.allocator.create(maru.session.dock_panel.Entry);
+    entry.* = .{
+        .id = try app_session_mod.app_runtime.entry_ids.next(),
+        .path = try testing.allocator.dupe(u8, path),
+        .kind = .text,
+        .mode = .source_edit,
+        .native_editor = true,
+        .surface_id = fx.term.surfaceId(),
+    };
+    fx.term.file_entry = entry;
+    const b = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+    const b_pane = pane_ops.activePane(s);
+    const c = try pane_ops.splitSharedEditorPane(s, .vertical, true);
+    try testing.expect(file_panel_ops.fileTermForPath(s, path).? == c);
+    try testing.expect(file_panel_ops.fileEntryForPath(s, path) == entry);
+    try testing.expect(pane_ops.focusPaneByPtr(s, source_pane));
+    try testing.expect(file_panel_ops.fileTermForPath(s, path).? == fx.term);
+    try testing.expect(pane_ops.focusPaneByPtr(s, b_pane));
+    const reopened = try pane_ops.openFileTermInActivePane(s, path, .text);
+    try testing.expect(!reopened.created);
+    try testing.expect(reopened.term == b);
+    try testing.expect(file_panel_ops.fileEntryForPath(s, path) == entry);
+    const bid = b.surfaceId();
+    s.requestClose(.term_or_pane);
+    try testing.expect(term_ops.termBySurfaceId(s, bid) == null);
+    try testing.expect(file_panel_ops.fileTermForPath(s, path).? != b);
+}
+
+test "shared editor split rejects unsupported documents without publishing a pane" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const s = fx.session;
+    const tab = s.tabs.items[s.app_window.active_tab];
+    const old_count = tab.panes.items.len;
+    const source_pane = pane_ops.activePane(s);
+    fx.term.rt.editorDocument().untitled = .{ .n = 123 };
+    defer fx.term.rt.editorDocument().untitled = null;
+    try testing.expectError(error.UnsupportedSharedDocument, pane_ops.splitSharedEditorPane(s, .horizontal, false));
+    try testing.expectEqual(old_count, tab.panes.items.len);
+    try testing.expect(pane_ops.activePane(s) == source_pane);
+    try testing.expectEqual(@as(usize, 1), s.editor_documents.viewCount(fx.term.rt.editor_document_lease.?).?);
+}
+
+test "shared editor split retains rejected composition and commits it once before copying the view" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../editor_ime.zig");
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const s = fx.session;
+    const source = fx.term;
+    const tab = s.tabs.items[s.app_window.active_tab];
+    const old_count = tab.panes.items.len;
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(ime.marked(s, "한", .{ .location = 1, .length = 0 }, null));
+    source.rt.editorDocument().opened.?.file.read_only = true;
+    try testing.expectError(error.CompositionPending, pane_ops.splitSharedEditorPane(s, .horizontal, false));
+    try testing.expectEqual(old_count, tab.panes.items.len);
+    try testing.expectEqualStrings("한", source.rt.editor_preedit);
+    try testing.expectEqualStrings("const a = 1;", source.rt.editor_lines[0]);
+    source.rt.editorDocument().opened.?.file.read_only = false;
+    const peer = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+    try testing.expectEqualStrings("한const a = 1;", peer.rt.editor_lines[0]);
+    try testing.expectEqual(@as(usize, 1), source.rt.editorDocument().history.undo_len);
+    try testing.expectEqualDeep(source.rt.editor_selection, peer.rt.editor_selection);
+    try testing.expectEqual(@as(usize, 0), source.rt.editor_preedit.len);
+    try testing.expect(s.tryCommitComposition());
+    try testing.expectEqual(@as(usize, 1), source.rt.editorDocument().history.undo_len);
 }

@@ -513,7 +513,7 @@ are not thread safe"*, 여러 스레드가 동시에 쓰려면 `ts_tree_copy`가
 ### 2.4a VS Code 기준 공유 뷰 UX (2026-10-01 사용자 승인)
 
 사용자는 공유 문서의 미결 UX를 VS Code 기준으로 정리하도록 승인했다.
-아래는 목표 계약이며 제품 구현은 아직 없다. 근거/확인 한계는
+아래는 공유 뷰 UX 계약이다. 근거/확인 한계는
 [VS Code 정책 대조](editor-shared-document-vscode.md), 구현 순서는
 [공유 문서 계획](plans/editor-shared-document.md)이 소유한다.
 

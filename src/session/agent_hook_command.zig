@@ -358,10 +358,14 @@ pub fn providerFromTag(tag_text: []const u8) ?Provider {
     return null;
 }
 
-/// `PostToolUse` 계열의 matcher — **셸 도구 하나**다. 양 provider 모두 셸 도구 이름이 `Bash` 다
+/// 셸 구간을 받는 matcher. 양 provider 모두 셸 도구 이름이 `Bash` 다
 /// (2026-08-26 실측: `exec` 는 0건). `Monitor` 는 넣지 않는다 — 장기 실행이라 `Post` 가 수 분 뒤에
 /// 오거나 안 오고, 그 구간은 턴 전체를 덮어 사용자 편집을 끌어들인다.
 pub const shell_tool_matcher = "Bash";
+
+/// Only the shell and the Codex question response need PostToolUse. Anchored alternatives avoid
+/// receiving large edit-tool payloads or unrelated MCP tools with a similar name (contract §2).
+pub const codex_post_tool_matcher = "^(Bash|request_user_input)$";
 
 /// codex 세트 — **`Notification` 과 `StopFailure` 가 없다**(2026-08-21 실측). codex 자신에게 물어
 /// 확정했다: app-server `hooks/list` 는 **codex 가 실제로 로드한 것만** 돌려주므로, 모르는 이름을 함께
@@ -381,16 +385,18 @@ pub const shell_tool_matcher = "Bash";
 /// **다음 사람에게**: 이 자리를 다시 파기 전에 §9-10 을 읽어라. 답은 «codex 가 훅을 하나 내어 주기 전까지
 /// 없다» 이고, 그 조사는 이미 소스까지 갔다.
 ///
-/// 나머지 일곱은 claude 와 같은 이름이다(codex 도 `hooks.json` 에는 PascalCase 로 적는다 — 실측).
+/// Interrupt를 제외한 나머지는 claude 와 같은 이름이다(codex 도 `hooks.json` 에는 PascalCase 로 적는다 — 실측).
 pub const codex_events = [_]Event{
     .{ .name = "SessionStart" },
     .{ .name = "UserPromptSubmit" },
     .{ .name = "Stop" },
+    .{ .name = "Interrupt" },
     .{ .name = "PermissionRequest", .matcher = "*" },
     .{ .name = "PreToolUse", .matcher = "*" },
     // **셸 구간의 끝**(AT3b-2 에서 넣었다 — 사용자 결정 B 의 시점). codex 는 실패에도 이것을 보내므로
     // `PostToolUseFailure` 는 필요 없고 열거에도 없다. `bashEditDiff` 는 없어 구간만 닫힌다(AT3b-3 폴백의 재료).
-    .{ .name = "PostToolUse", .matcher = shell_tool_matcher },
+    // 질문 응답도 받아야 blocked가 즉시 풀린다(0.159.0 실측). 편집 도구로 넓히지는 않는다.
+    .{ .name = "PostToolUse", .matcher = codex_post_tool_matcher },
     // 자식 수를 **세는** 유일한 신뢰 신호다(계약 §2). 자식이 도는 동안 lead 의 `Stop` 은 턴 끝이
     // 아니고, 세지 않으면 «자식이 아직 도는데 완료 알림» 이 나간다. 양 provider 열거에 다 있다(실측).
     .{ .name = "SubagentStart" },
@@ -608,6 +614,23 @@ pub fn build(
         "if [ \"$mh_dt\" != \"$mh_p\" ]; then mh_dc=\"$mh_dh\\\"bashEditDiff\\\":{\\\"moreFiles\\\":$mh_dt\"; " ++
         "case \"$mh_dc\" in *'\"changedFiles\":'*) mh_p=\"$mh_dc\" ;; esac; fi ;; esac; ");
     try out.print(allocator, "fi; if [ ${{#mh_p}} -gt {d} ]; then ", .{max_payload_bytes});
+    // Keep the original prefix and the earliest remaining identity suffix. Never append an
+    // call identity already in the prefix: a nested call id is not a replacement for the root id.
+    // Always retain a later role suffix: a nested agent_id in the prefix must not hide a root role.
+    // Unprovable nested cuts remain malformed and the strict consumer rejects them.
+    try out.appendSlice(allocator, "mh_qh=\"${mh_p%%\\\"tool_input\\\":*}\"; " ++
+        "case \"$mh_qh\" in *'\"tool_name\":\"request_user_input\"'*) " ++
+        "if [ \"$mh_qh\" != \"$mh_p\" ]; then " ++
+        "mh_qr=\"${mh_p#*\\\"tool_input\\\":}\"; mh_qs=\"\"; " ++
+        "for mh_qk in agent_id tool_use_id session_id turn_id prompt_id; do " ++
+        "if [ \"$mh_qk\" != agent_id ]; then case \"$mh_qh\" in *\\\"$mh_qk\\\":*) continue ;; esac; fi; " ++
+        "mh_qt=\"${mh_qr##*\\\"$mh_qk\\\":}\"; " ++
+        "if [ \"$mh_qt\" != \"$mh_qr\" ]; then mh_qt=\"\\\"$mh_qk\\\":$mh_qt\"; " ++
+        "if [ ${#mh_qt} -gt ${#mh_qs} ]; then mh_qs=\"$mh_qt\"; fi; fi; done; " ++
+        "if [ -z \"$mh_qs\" ]; then mh_qc=\"$mh_qh\\\"tool_input\\\":null}\"; " ++
+        "else mh_qc=\"$mh_qh\\\"tool_input\\\":null,$mh_qs\"; fi; ");
+    try out.print(allocator, "if [ ${{#mh_qc}} -le {d} ]; then mh_p=\"$mh_qc\"; fi; fi ;; esac; fi; " ++
+        "if [ ${{#mh_p}} -gt {d} ]; then ", .{ max_payload_bytes, max_payload_bytes });
     // **`tool_use_id` 도 살린다**(계획 AT3b-1). `PostToolUse(Bash)` 는 명령 출력을 실어 0.1% 가 상한을
     // 넘기는데, 이름만 남기면 그 구간을 **닫을 수 없다**(짝지을 id 가 없다) — 턴 끝까지 열린 채로 사용자
     // 편집을 끌어들인다. 파라미터 확장뿐이라 프로세스가 늘지 않는다(셸 내장).
@@ -621,11 +644,11 @@ pub fn build(
         "if [ ${{#mh_i}} -gt {d} ]; then mh_i=\"\"; fi; " ++
         "mh_s=\"\"; if [ -n \"$mh_i\" ]; then mh_s=\",\\\"tool_use_id\\\":\\\"$mh_i\\\"\"; fi; " ++
         "case \"$mh_p\" in ", .{ comptime tool_use_id_class.shellClass(), event.max_tool_use_id_len });
-    // **claude 세트로 훑는다 — codex 세트는 그 부분집합이다**(위 테스트가 못박는다). 그래서 커맨드가
-    // provider 마다 갈리지 않고, 한 벌로 두 곳을 덮는다.
+    // 두 provider 이름의 합집합을 접는다. Interrupt는 Codex 전용이다.
     for (claude_events) |e| {
         try out.print(allocator, "*'\"hook_event_name\":\"{s}\"'*) mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}' ;; ", .{ e.name, e.name });
     }
+    try out.appendSlice(allocator, "*'\"hook_event_name\":\"Interrupt\"'*) mh_p='{\"hook_event_name\":\"Interrupt\"}' ;; ");
     try out.print(allocator, "*) mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}' ;; esac; fi; ", .{event.oversized_marker});
     // **`{ … } 2>/dev/null` 로 감싼다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 **리다이렉션
     // 대상이 없을 때 셸이 내는 에러**(`No such file or directory`)는 못 막는다 — 실측에서 로그 디렉터리가
@@ -1165,21 +1188,23 @@ test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
     try testing.expectEqual(@as(usize, 11), claude_events.len);
     // codex 에는 `Notification` 이 없다(계약 §2.1 실측).
     // 5 → 7: 서브에이전트 둘. `StopFailure` 는 codex 열거에 없어 더하지 않는다. 7 → 8: `PostToolUse(Bash)`(AT3b-2).
-    try testing.expectEqual(@as(usize, 8), codex_events.len);
+    try testing.expectEqual(@as(usize, 9), codex_events.len);
     for (codex_events) |e| try testing.expect(!std.mem.eql(u8, e.name, "Notification"));
     for (codex_events) |e| try testing.expect(!std.mem.eql(u8, e.name, "StopFailure"));
-    // codex 세트는 claude 세트의 **부분집합**이어야 한다(이름도 matcher 도) — 두 세트가 따로 흘러가면
-    // provider 마다 다른 상태가 된다.
+    // Interrupt는 Codex 전용이다. 질문 응답의 PostToolUse matcher도 다르다.
     for (codex_events) |c| {
         var found = false;
         for (claude_events) |cl| {
             if (std.mem.eql(u8, c.name, cl.name)) {
                 try testing.expectEqual(cl.matcher == null, c.matcher == null);
-                if (cl.matcher) |m| try testing.expectEqualStrings(m, c.matcher.?);
+                if (cl.matcher) |m| try testing.expectEqualStrings(
+                    if (std.mem.eql(u8, c.name, "PostToolUse")) codex_post_tool_matcher else m,
+                    c.matcher.?,
+                );
                 found = true;
             }
         }
-        try testing.expect(found);
+        try testing.expect(found or std.mem.eql(u8, c.name, "Interrupt"));
     }
 
     for ([_]Provider{ .claude, .codex }) |provider| {
@@ -1191,9 +1216,9 @@ test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
             if (std.mem.eql(u8, m, "*")) {
                 star += 1;
             } else {
-                // `*` 가 아닌 matcher 는 **셸 도구 하나**뿐이다 — `PostToolUse` 계열이 `*` 로 넓어지면
+                // 종료 훅은 셸과 Codex 질문 응답만 받는다 — `PostToolUse` 계열이 `*` 로 넓어지면
                 // 편집 도구의 `originalFile` 이 실려 상한에 잘린다(계약 §3.1 — 그래서 뺐던 이벤트다).
-                try testing.expectEqualStrings(shell_tool_matcher, m);
+                try testing.expectEqualStrings(if (provider == .codex) codex_post_tool_matcher else shell_tool_matcher, m);
                 try testing.expect(std.mem.startsWith(u8, e.name, "PostToolUse"));
                 shell += 1;
             }

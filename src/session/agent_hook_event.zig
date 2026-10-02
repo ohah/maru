@@ -68,6 +68,8 @@ pub const Kind = enum {
     stop,
     /// 오류로 끝난 턴. provider 가 `Stop` **대신** 보낸다 — 걸지 않으면 그 pane 이 영영 «진행 중» 이다.
     stop_failure,
+    /// Codex main turn was interrupted. This is not a successful Stop.
+    interrupt,
     /// 서브에이전트가 떴다. 자식 수를 **세는** 유일한 신뢰 신호다.
     subagent_start,
     /// 서브에이전트가 끝났다.
@@ -314,6 +316,7 @@ fn kindFromName(name: []const u8) Kind {
         .{ "UserPromptSubmit", Kind.user_prompt_submit },
         .{ "Stop", Kind.stop },
         .{ "StopFailure", Kind.stop_failure },
+        .{ "Interrupt", Kind.interrupt },
         .{ "SubagentStart", Kind.subagent_start },
         .{ "SubagentStop", Kind.subagent_stop },
         .{ "PermissionRequest", Kind.permission_request },
@@ -338,12 +341,26 @@ pub fn parseLine(line: []const u8) ?Event {
     const json = std.mem.trim(u8, line[sep + 1 ..], " \r\n");
     if (json.len < 2 or json[0] != '{') return null;
 
+    // Validate the whole document before extracting fields. Token validation does not parse numbers
+    // into floats and uses a bounded stack instead of a runtime heap allocation.
+    var validation_storage: [4096]u8 = undefined;
+    var validation_allocator = std.heap.FixedBufferAllocator.init(&validation_storage);
+    if (!(std.json.validate(validation_allocator.allocator(), json) catch false)) return null;
+    var seen: u64 = 0;
     var ev: Event = .{ .provider = provider };
     var scan: Scanner = .{ .src = json };
     if (!scan.expectObjectStart()) return null;
 
     var saw_event_name = false;
     while (scan.nextKey()) |key| {
+        // Ambiguous top-level identity must not be resolved by last-key-wins.
+        inline for (.{ "hook_event_name", "session_id", "turn_id", "prompt_id", "tool_name", "tool_use_id", "agent_id", "tool_input" }, 0..) |name, bit| {
+            if (std.mem.eql(u8, key, name)) {
+                const mask = @as(u64, 1) << bit;
+                if (seen & mask != 0) return null;
+                seen |= mask;
+            }
+        }
         if (std.mem.eql(u8, key, "hook_event_name")) {
             const v = scan.stringValue() orelse return null;
             ev.kind = kindFromName(v);
@@ -1612,4 +1629,18 @@ test "중첩된 message 는 최상위 자리를 안 건드린다 — 커밋 도�
     const ev = parseLine(line).?;
     try testing.expectEqualStrings("커밋", ev.tool_description);
     try testing.expectEqualStrings("", ev.notice_text);
+}
+
+test "malformed or ambiguous hook identity never produces a state event" {
+    const bad = [_][]const u8{
+        "codex\t{\"hook_event_name\":\"Stop\" \"turn_id\":\"t1\"}",
+        "codex\t{\"hook_event_name\":\"Stop\",}",
+        "codex\t{\"hook_event_name\":\"Stop\"} trailing",
+        "codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_use_id\":\"real\",\"tool_use_id\":\"nested\"}",
+        "codex\t{\"hook_event_name\":\"Stop\",\"session_id\":\"a\",\"session_id\":\"b\"}",
+        "codex\t{\"hook_event_name\":\"Stop\",\"unknown\":01}",
+        "codex\t{\"hook_event_name\":\"Stop\",\"unknown\":[1,]}",
+    };
+    for (bad) |line| try testing.expect(parseLine(line) == null);
+    try testing.expect(parseLine("codex\t{\"hook_event_name\":\"Stop\",\"unknown\":[1,true,null,{\"text\":\"값\"}]}") != null);
 }

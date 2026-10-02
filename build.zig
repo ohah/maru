@@ -1939,6 +1939,8 @@ pub fn build(b: *std.Build) void {
             // 보고, 그 사이 배선이 끊겨도 초록이다 — 실제로 fast-path 가 C2 를 굶기는 동안 게이트가
             // 초록이었다.
             "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 풀린다 (§1.1 C1 · 제품 경로)",
+            "Codex 질문 훅은 제품 배지를 입력 대기로 세우고 답변 뒤 푼다",
+            "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라도 running 이면 running, 턴 끝·알림은 각자 (RA7)",
             "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫힌다 — 출력이 없어도 (§1.1 C2 · 제품 경로)",
             "AW3 훅 소스가 끊기면 훅 자리도 버린다 — 돌아왔을 때 낡은 값이 배지가 되지 않게 (§1.1)",
             "AW4 화면이 뒤집은 배지에만 각주 표식이 붙는다 (§1.4 · 사이드바)",
@@ -1973,15 +1975,15 @@ pub fn build(b: *std.Build) void {
     run_provider_no_mutation_tests.setCwd(b.path("."));
     run_provider_no_mutation_tests.setEnvironmentVariable("MARU_TEST_PROVIDER_NO_MUTATION", "1");
     // 위 file-explorer 스텝과 같은 이유로 개수를 못 박는다 — 이름 필터는 0개 매치도 green이라
-    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 33 = 위 필터 28개 + 이름 없는 test 블록 5개.
+    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 41 = 기존 39 + Codex 질문 제품 경로 1개 + 실제 tmux 2-pane 경로 1개.
     // **+10 은 원격(ssh) 축이다**(docs/plans/remote-agent-state.md RA5). 그 열을 여기 적기 전까지는
     // 그 판정자들이 **어느 게이트에도 안 매달려 있었다** — 파일에 있으니 도는 줄 알았는데 이름 필터는
     // 0개 매치도 초록이라, 정확히 이 주석이 경고하는 사고가 원격 축에서 한 번 더 날 뻔했다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-tests=39");
+    run_provider_no_mutation_tests.addArg("--maru-expect-tests=41");
     // **골라진 수만으로는 부족하다.** 이 게이트가 드는 증거 중 하나(훅 이름 이음매)는 aggregate 에서
     // 건너뛰도록 env 가드를 달고 있어, 그 env 가 이 스텝에도 새어 들어오면 **SKIP 인 채 17 로 초록**이
     // 된다. 통과 수를 함께 못박아 「돌았는가」를 센다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-passed=39");
+    run_provider_no_mutation_tests.addArg("--maru-expect-passed=41");
     const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
     test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
 
@@ -4405,7 +4407,7 @@ pub fn build(b: *std.Build) void {
         macos_only_test_step.dependOn(&run_remote_explorer_tests.step);
 
         // 에이전트 훅·턴 캡처 배선 판정자(AH·AT3·AT4·AT3b) — app_session 전체를 12 분 돌리지 않고 이 축만
-        // 잰다(«훅» 이 이름에 든 것 전부 + 턴 스냅샷, 45개 · ~15초). 순수 층(`turn_capture`·`shell_bracket`)은
+        // 잰다(«훅» 이 이름에 든 것 전부 + 턴 스냅샷, 68개 · ~15초). 순수 층(`turn_capture`·`shell_bracket`)은
         // `zig test` 로 단독 확인이 되지만 **배선**(어느 이벤트가 어느 게이트에서 무엇을 트리거하나)은
         // `AppSession` 을 세워야 보인다.
         const turn_capture_wiring_tests = addProjectTest(b, .{
@@ -4430,7 +4432,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_turn_capture_wiring = b.addRunArtifact(turn_capture_wiring_tests);
         // **개수 가드** — 필터가 아무것도 안 고르는 회귀는 실제로 CI 를 통과한 적이 있다(위 `test-remote-activity-vertical`).
-        run_turn_capture_wiring.addArg("--maru-expect-tests=67"); // +1: RA7 가지치기(2026-09-24)
+        run_turn_capture_wiring.addArg("--maru-expect-tests=68"); // +1: Codex 질문/알림 제품 경로(2026-10-02)
         run_turn_capture_wiring.setCwd(b.path("."));
         b.step("test-agent-turn-capture", "Run the agent turn capture wiring judges only (AT3/AT4/AT3b)").dependOn(&run_turn_capture_wiring.step);
         macos_only_test_step.dependOn(&run_turn_capture_wiring.step);

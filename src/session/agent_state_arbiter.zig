@@ -68,6 +68,8 @@ pub const Input = struct {
     hook: ?State = null,
     /// 살아 있는 자식 수(`liveSubagentIds` 가 센 것). D1 이 이 값 하나로 선다.
     hook_child_count: u32 = 0,
+    /// A question has an explicit response hook. Screen absence is not its answer (C1).
+    hook_question_pending: bool = false,
     /// `agent_observer` + `Stabilizer` 를 통과한 화면·OSC 상태.
     screen: State = .unknown,
     /// 화면에 승인 chrome 이 **지금** 보이는가. C1 이 이것의 부재로 선다.
@@ -249,14 +251,14 @@ pub const Arbiter = struct {
         // 여기서는 running 까지만 간다. 화면 상태를 그대로 실으면 blocked → idle 이 **한 tick 에** 일어나
         // C2 의 연속 확인을 통째로 우회한다. 훅은 승인 요청 직전에 running 이었으므로(`PreToolUse`) 그
         // 자리로 돌리는 것이 사실에도 맞다.
-        if (hook == .blocked and in.screen_seq != 0 and !in.screen_visible_blocker) {
+        if (hook == .blocked and !in.hook_question_pending and in.screen_seq != 0 and !in.screen_visible_blocker) {
             self.idle_confirmations = 0;
             return .{ .state = .running, .origin = .screen, .rule = "C1" };
         }
 
         // C2 — 훅은 running 인데 자식이 없고 화면이 idle 을 **연속으로** 보인다. codex 오류 턴이 여기서
         // 닫힌다(§9-10 — codex 에는 `StopFailure` 가 없어 `Stop` 이 오지 않는다).
-        if (hook == .running and in.hook_child_count == 0 and in.screen_visible_idle and
+        if (hook == .running and !in.hook_question_pending and in.hook_child_count == 0 and in.screen_visible_idle and
             (!in.screen_idle_is_chrome or !in.output_active))
         {
             // **같은 화면 관측을 두 번 세지 않는다**(`Input.screen_seq` 주석). 중재가 다시 불렸을 뿐이면
@@ -856,5 +858,20 @@ test "AR-blind: 기록은 판정을 바꾸지 않는다" {
         try std.testing.expectEqual(without.state, with.state);
         try std.testing.expectEqual(without.origin, with.origin);
         try std.testing.expectEqualStrings(without.rule, with.rule);
+    }
+}
+
+test "C2 cannot close an aggregate with an unanswered question in another pane" {
+    var a: Arbiter = .{};
+    for (1..7) |seq| {
+        const verdict = a.arbitrate(.{
+            .hook = .running,
+            .hook_question_pending = true,
+            .screen = .idle,
+            .screen_visible_idle = true,
+            .screen_seq = seq,
+        });
+        try testing.expectEqual(State.running, verdict.state);
+        try testing.expect(!std.mem.eql(u8, "C2", verdict.rule));
     }
 }

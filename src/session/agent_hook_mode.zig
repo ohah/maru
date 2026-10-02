@@ -74,15 +74,20 @@ pub fn next(current: State, ev: event.Event) State {
         // 세션이 시작됐다. 아직 턴이 없으므로 «대기» 다.
         .session_start => .idle,
         .user_prompt_submit => .running,
-        .pre_tool_use => .running,
+        // Codex 0.159.0 emits a normal tool hook for its question UI, not PermissionRequest.
+        // Keeping the hook slot running makes D2 discard the visible question as old scrollback.
+        .pre_tool_use => if (isCodexQuestion(ev)) .blocked else .running,
         // 도구가 끝났다 — 턴은 아직 도는 중이다(모델이 결과를 받아 이어 간다). 상태를 **안 흔든다**: 이것을
         // `.running` 으로 두면 `blocked` 에서 승인 뒤 온 `Post` 가 배지를 풀지만 그 역할은 이미 `PreToolUse`
-        // 가 한다(승인이 나면 도구가 돌기 전에 Pre 가 온다). 이 이벤트의 소비자는 셸 구간 층뿐이다(AT3b-1).
-        .post_tool_use, .post_tool_use_failure => current,
+        // 가 한다(승인이 나면 도구가 돌기 전에 Pre 가 온다). 질문의 응답은 예외다: 답변이 돌아오면
+        // 모델이 이어 일한다. 이미 끝난 턴의 늦은 응답으로 idle을 다시 열지는 않는다.
+        .post_tool_use => if (current == .blocked and isCodexQuestion(ev)) .running else current,
+        .post_tool_use_failure => current,
         .permission_request => .blocked,
         // **오류로 끝난 턴**(계약 §2). provider 가 `Stop` **대신** 보내므로, 이것을 안 받으면 그 pane 은
         // 영영 «진행 중» 에 멈춘다. 끝은 끝이라 같은 전이를 쓴다 — 문구만 알림에서 갈린다.
         .stop_failure => .idle,
+        .interrupt => .idle,
         .stop => blk: {
             if (ev.stop_hook_active) break :blk current; // 재발화 — 턴이 끝난 것이 아니다
             // **`background_tasks` 는 여기서 보지 않는다**(2026-08-23 결정). 예전에는 그 목록에 `running`
@@ -113,6 +118,63 @@ pub fn next(current: State, ev: event.Event) State {
     };
 }
 
+fn isCodexQuestion(ev: event.Event) bool {
+    // Exact provider/tool identity keeps arbitrary MCP tools and Claude calls out of this exception.
+    return std.mem.eql(u8, ev.provider, "codex") and std.mem.eql(u8, ev.tool_name, "request_user_input");
+}
+
+test "Codex 질문 훅은 입력 대기를 세우고 답변 뒤 진행 중으로 돌아온다" {
+    // Codex 0.159.0의 격리된 Plan mode 실측(2026-10-02). 질문에는 PermissionRequest가
+    // 없고 이 두 도구 훅만 온다. 화면도 읽어 기존 C1/D2를 거친 실제 배지 전이를 재현한다.
+    const observer = @import("agent_observer.zig");
+    const arbiter = @import("agent_state_arbiter.zig");
+    const pre = event.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"call-question\"}").?;
+    const post = event.parseLine("codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"call-question\"}").?;
+    const screen =
+        "  Question 1/1 (1 unanswered)\n" ++
+        "  Which do you choose?\n\n" ++
+        "  › 1. Alpha (Recommended)  Choose Alpha for this harmless UI test.\n" ++
+        "    2. Beta                 Choose Beta for this harmless UI test.\n" ++
+        "    3. None of the above    Optionally, add details in notes (tab)\n\n" ++
+        "  tab to add notes | enter to submit answer | esc to interrupt\n";
+    const detection = observer.detect(.codex, .{ .screen = screen });
+    try std.testing.expect(detection.visible_blocker);
+    var progress: Progress = .{};
+    const waiting = advance(&progress, .running, pre);
+    var judge: arbiter.Arbiter = .{};
+    const badge = judge.arbitrate(.{
+        .hook = waiting,
+        .screen = detection.state,
+        .screen_visible_blocker = detection.visible_blocker,
+        .screen_seq = 1,
+    });
+    try std.testing.expectEqual(State.blocked, badge.state);
+    try std.testing.expectEqual(arbiter.Origin.hook, badge.origin);
+    try std.testing.expectEqual(State.running, advance(&progress, waiting, post));
+    // Answer completion is progress, not a completed turn or a completion notice.
+    try std.testing.expect(progress.turn_open);
+    try std.testing.expectEqual(Notice.none, noticeOn(.blocked, .running));
+}
+
+test "Codex 질문 예외는 다른 provider 도구와 자식 이벤트에 적용하지 않는다" {
+    var ev: event.Event = .{ .provider = "codex", .kind = .pre_tool_use, .tool_name = "request_user_input" };
+    ev.agent_id = "child";
+    try std.testing.expectEqual(State.running, next(.running, ev));
+    ev.agent_id = "";
+    ev.provider = "claude";
+    try std.testing.expectEqual(State.running, next(.running, ev));
+    ev.provider = "codex";
+    ev.tool_name = "mcp__test__request_user_input";
+    try std.testing.expectEqual(State.running, next(.running, ev));
+    ev.kind = .post_tool_use;
+    ev.tool_name = "Bash";
+    try std.testing.expectEqual(State.blocked, next(.blocked, ev));
+    ev.tool_name = "request_user_input";
+    try std.testing.expectEqual(State.idle, next(.idle, ev));
+    ev.agent_id = "child";
+    try std.testing.expectEqual(State.blocked, next(.blocked, ev));
+}
+
 /// 한 턴의 진행 상태. **자식이 몇이나 도는지**와 **lead 가 이미 끝났는지**를 든다.
 ///
 /// 왜 필요한가(계약 §2): 서브에이전트가 도는 동안 lead 의 `Stop` 은 턴 끝이 아니다. 그것을 완료로 다루면
@@ -140,7 +202,51 @@ fn childKey(id: []const u8) ChildKey {
     return std.hash.Wyhash.hash(0, id);
 }
 
+/// Bounded exact identities reject delayed events without allocating in the hook consumer.
+/// Entries are scoped to a pane; turn entries are scoped further to its current session.
+const RetiredKeys = struct {
+    keys: [16][64]u8 = undefined,
+    lengths: [16]u8 = @splat(0),
+    cursor: usize = 0,
+
+    fn contains(self: *const RetiredKeys, key: []const u8) bool {
+        if (key.len == 0) return false;
+        for (self.lengths, 0..) |len, i| {
+            if (std.mem.eql(u8, self.keys[i][0..len], key)) return true;
+        }
+        return false;
+    }
+
+    fn remove(self: *RetiredKeys, key: []const u8) void {
+        for (self.lengths, 0..) |len, i| {
+            if (std.mem.eql(u8, self.keys[i][0..len], key)) self.lengths[i] = 0;
+        }
+    }
+
+    fn add(self: *RetiredKeys, key: []const u8) void {
+        if (key.len == 0 or key.len > 64 or self.contains(key)) return;
+        @memcpy(self.keys[self.cursor][0..key.len], key);
+        self.lengths[self.cursor] = @intCast(key.len);
+        self.cursor = (self.cursor + 1) % self.keys.len;
+    }
+};
+
 pub const Progress = struct {
+    /// Exact call identities, not a counter: duplicate/old replies cannot answer another question.
+    /// Overflow or an absent/oversized id stays conservative until a real turn boundary.
+    questions: [8]struct { id: [event.max_tool_use_id_len]u8 = undefined, len: u8 = 0 } = @splat(.{}),
+    question_count: u8 = 0,
+    question_untracked: bool = false,
+    /// A canceled lead must not produce a completion notice when the last child eventually exits.
+    lead_interrupted: bool = false,
+    /// A local turn generation binds delayed notices even when the provider omits a turn id.
+    generation: u64 = 0,
+    retired_turns: RetiredKeys = .{},
+    retired_sessions: RetiredKeys = .{},
+    session_buf: [64]u8 = undefined,
+    session_len: usize = 0,
+    completion_notified: bool = false,
+    approval_pending: bool = false,
     /// 지금 도는 자식들의 `agent_id`.
     ///
     /// **개수로 세면 안 된다**(2026-08-21 실사용이 뒤집었다). claude 는 우리가 시작을 본 적 없는
@@ -175,6 +281,52 @@ pub const Progress = struct {
     /// 에서 일어난다. 그 순간의 이벤트만 보면 오류였다는 사실이 사라져 «턴이 끝났습니다» 가 나간다.
     lead_failed: bool = false,
 
+    pub fn hasPendingQuestions(self: *const Progress) bool {
+        return self.question_count != 0 or self.question_untracked;
+    }
+
+    fn addQuestion(self: *Progress, id: []const u8) void {
+        if (id.len == 0 or id.len > event.max_tool_use_id_len) {
+            self.question_untracked = true;
+            return;
+        }
+        for (self.questions[0..self.question_count]) |q| {
+            if (std.mem.eql(u8, q.id[0..q.len], id)) return;
+        }
+        if (self.question_count == self.questions.len) {
+            self.question_untracked = true;
+            return;
+        }
+        const q = &self.questions[self.question_count];
+        @memcpy(q.id[0..id.len], id);
+        q.len = @intCast(id.len);
+        self.question_count += 1;
+    }
+
+    fn hasQuestion(self: *const Progress, id: []const u8) bool {
+        if (id.len == 0) return false;
+        for (self.questions[0..self.question_count]) |q| {
+            if (std.mem.eql(u8, q.id[0..q.len], id)) return true;
+        }
+        return false;
+    }
+
+    fn answerQuestion(self: *Progress, id: []const u8) bool {
+        if (id.len == 0) return false;
+        for (self.questions[0..self.question_count], 0..) |q, i| {
+            if (!std.mem.eql(u8, q.id[0..q.len], id)) continue;
+            self.question_count -= 1;
+            self.questions[i] = self.questions[self.question_count];
+            return true;
+        }
+        return false;
+    }
+
+    fn clearQuestions(self: *Progress) void {
+        self.question_count = 0;
+        self.question_untracked = false;
+    }
+
     pub fn reset(self: *Progress) void {
         // **턴 키는 남긴다.** 이것은 «지금 어느 턴인가» 라는 사실이지 그 턴의 진행 상태가 아니다.
         // 함께 지우면 같은 턴의 다음 이벤트가 «키가 바뀌었다» 로 읽혀 매번 리셋이 돈다.
@@ -182,9 +334,31 @@ pub const Progress = struct {
         var buf: [64]u8 = undefined;
         @memcpy(buf[0..key.len], key);
         const n = key.len;
-        self.* = .{};
+        const generation = self.generation +% 1;
+        const turns = self.retired_turns;
+        const sessions = self.retired_sessions;
+        const session = self.session_buf;
+        const session_len = self.session_len;
+        self.* = .{ .generation = generation, .retired_turns = turns, .retired_sessions = sessions, .session_buf = session, .session_len = session_len };
         @memcpy(self.turn_buf[0..n], buf[0..n]);
         self.turn_len = n;
+    }
+
+    pub fn adoptSession(self: *Progress, ev: event.Event) void {
+        if (ev.agent_id.len != 0 or ev.session_id.len == 0) return;
+        var decoded: [65]u8 = undefined;
+        const key = event.decodeInto(&decoded, ev.session_id);
+        if (key.len == 0 or key.len > self.session_buf.len or
+            std.mem.eql(u8, key, self.session_buf[0..self.session_len])) return;
+        if (self.session_len != 0) {
+            var retired = self.retired_sessions;
+            // SessionStart explicitly authorizes resuming a previously retired session.
+            if (ev.kind == .session_start) retired.remove(key);
+            retired.add(self.session_buf[0..self.session_len]);
+            self.* = .{ .generation = self.generation +% 1, .retired_sessions = retired };
+        }
+        @memcpy(self.session_buf[0..key.len], key);
+        self.session_len = key.len;
     }
 
     pub fn childCount(self: *const Progress) usize {
@@ -259,6 +433,7 @@ pub const Progress = struct {
         if (key.len == 0 or key.len > self.turn_buf.len) return false;
         if (std.mem.eql(u8, self.turnKey(), key)) return false;
         const had = self.turn_len != 0;
+        self.retired_turns.add(self.turnKey());
         @memcpy(self.turn_buf[0..key.len], key);
         self.turn_len = key.len;
         // 처음 본 키는 «바뀐 것» 이 아니다 — 훅을 이미 돌던 세션에 붙였을 뿐이다.
@@ -291,9 +466,33 @@ fn marksTurnProgress(ev: event.Event) bool {
     return ev.agent_id.len == 0 and ev.kind != .notification;
 }
 
+/// Reject before all consumer side effects, including identity, cwd and tool labels.
+pub fn ignoresEvent(progress: *const Progress, ev: event.Event) bool {
+    if (ev.agent_id.len != 0) return false;
+    var session_buf: [65]u8 = undefined;
+    const session = event.decodeInto(&session_buf, ev.session_id);
+    if (ev.kind != .session_start and progress.retired_sessions.contains(session)) return true;
+    const new_session = session.len != 0 and session.len <= 64 and progress.session_len != 0 and
+        !std.mem.eql(u8, session, progress.session_buf[0..progress.session_len]);
+    if (!new_session and progress.retired_turns.contains(ev.turn_key)) return true;
+    const different_turn = !new_session and ev.turn_key.len != 0 and progress.turnKey().len != 0 and
+        !std.mem.eql(u8, ev.turn_key, progress.turnKey());
+    if (ev.kind == .post_tool_use and isCodexQuestion(ev))
+        return new_session or different_turn or !progress.hasQuestion(ev.tool_use_id);
+    if (different_turn and (ev.kind == .interrupt or ev.kind == .stop or ev.kind == .stop_failure)) return true;
+    return progress.lead_interrupted and !new_session and !different_turn and
+        (ev.kind == .pre_tool_use or ev.kind == .post_tool_use or ev.kind == .permission_request);
+}
+
 /// 이벤트를 진행 상태에 반영하고 **그 뒤의 배지 상태**를 돌려준다. 기본 전이는 `next` 가 하고, 여기서는
 /// 자식 때문에 달라지는 부분만 얹는다.
 pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
+    if (ignoresEvent(progress, ev)) return current;
+    progress.adoptSession(ev);
+    if (ev.agent_id.len == 0 and ev.kind == .post_tool_use and isCodexQuestion(ev)) {
+        _ = progress.answerQuestion(ev.tool_use_id);
+        return if (progress.hasPendingQuestions() or progress.approval_pending) .blocked else .running;
+    }
     switch (ev.kind) {
         .subagent_start => {
             progress.addChild(ev.agent_id);
@@ -334,11 +533,21 @@ pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
     if (marksTurnProgress(ev) and (ev.kind == .user_prompt_submit or ev.kind == .session_start))
         progress.reset();
 
-    const base = next(current, ev);
+    // Answering a question does not grant a separate tool approval.
+    if (ev.agent_id.len == 0 and ev.kind == .permission_request) progress.approval_pending = true;
+    if (ev.agent_id.len == 0 and ev.kind == .pre_tool_use and !isCodexQuestion(ev)) progress.approval_pending = false;
+    if (ev.agent_id.len == 0 and ev.kind == .pre_tool_use and isCodexQuestion(ev))
+        progress.addQuestion(ev.tool_use_id);
+    // Other parallel tools are progress, but they are not the user's answer.
+    const base = if (ev.agent_id.len == 0 and ev.kind == .pre_tool_use and progress.hasPendingQuestions())
+        State.blocked
+    else
+        next(current, ev);
 
     // lead 의 턴이 끝났는데 자식이 남아 있으면 **완료로 단정하지 않는다**. 그 사실을 기억해 두었다가
     // 마지막 자식이 끝날 때 푼다(위 `.subagent_stop`).
     if (marksTurnProgress(ev) and ev.kind == .stop_failure) progress.lead_failed = true;
+    if (marksTurnProgress(ev) and ev.kind == .interrupt) progress.lead_interrupted = true;
 
     // **lead 가 돌고 있다는 신호가 턴을 연다.** 프롬프트만 보고 열면, 훅을 이미 돌던 세션에 붙인 경우
     // (첫 이벤트가 도구 호출인 경우)에 턴이 영영 안 열린 것으로 보여 자식이 끝나는 순간 **아직 일하는
@@ -354,7 +563,10 @@ pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
 
     // lead 의 턴이 끝났는데 자식이 남아 있으면 **완료로 단정하지 않는다**. 턴을 닫아 두었다가 마지막
     // 자식이 끝날 때 푼다(위 `.subagent_stop`).
-    if (marksTurnProgress(ev) and (ev.kind == .stop or ev.kind == .stop_failure)) {
+    if (marksTurnProgress(ev) and (ev.kind == .stop or ev.kind == .stop_failure or ev.kind == .interrupt)) {
+        if (ev.kind == .stop and ev.stop_hook_active) return base;
+        progress.clearQuestions();
+        progress.approval_pending = false;
         progress.turn_open = false;
         // **여기서 유령을 거둔다**(계약 §2). lead 의 턴 끝은 목록이 가라앉은 자리이고, 붙잡을지 말지를
         // 정하기 **직전**이라 그 판단이 최신 사실 위에서 이뤄진다. 다른 이벤트에서는 거두지 않는다 —
@@ -376,10 +588,8 @@ pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
 
 // ── 알림 정책(계약 §6) ─────────────────────────────────────────────────────────────────────────
 //
-// **알림을 상태 «전이» 에 붙인다.** 그러면 계약이 요구하는 중복 방지가 규칙이 아니라 구조에서 나온다:
-// 같은 턴에서 `Stop` 이 여러 번 와도 상태는 이미 `idle` 이라 전이가 없고, 재발화(`stop_hook_active`)나
-// 백그라운드 작업이 남은 `Stop` 은 애초에 상태를 옮기지 않는다. 「턴 단위 1회」와 「재발화 가드」를 따로
-// 세지 않아도 된다 — 세는 코드는 언제나 어딘가에서 어긋난다.
+// State transitions create candidates; PendingNotice binds them to a local turn generation.
+// A quiet interval and completion_notified prevent stale delivery and same-turn replay after resume.
 
 pub const Notice = enum {
     none,
@@ -421,7 +631,7 @@ pub fn noticeOn(prev: State, now: State) Notice {
 /// `unknown` 에서 나오는 전이를 억제하는 것과 같은 부류다(`noticeOn`): 상태만 보면 «완료» 로 보이지만
 /// 사실은 «이제 알게 됐다»·«다시 시작했다» 인 자리들이다.
 pub fn suppressesNotice(ev: event.Event) bool {
-    return ev.kind == .session_start;
+    return ev.kind == .session_start or ev.kind == .interrupt;
 }
 
 /// 이 이벤트가 **세션 base 스냅샷(턴 0)** 을 열어야 하나(AT1 — 계약 §3 표의 `SessionStart` 행).
@@ -613,15 +823,25 @@ pub fn labelFor(ev: event.Event) LabelChange {
             return if (body.len == 0) .keep else .{ .set = body };
         },
         // 턴 경계에서는 비운다. 도구 종료는 **다음 `PreToolUse` 또는 `Stop`** 으로 안다(계약 §2).
-        .stop, .stop_failure, .user_prompt_submit, .session_start => return .clear,
+        .stop, .stop_failure, .interrupt, .user_prompt_submit, .session_start => return .clear,
         else => return .keep,
     }
+}
+
+pub const completion_quiet_ms: u64 = 1500;
+
+/// The pane must remain finished for the entire quiet interval. Clock regressions wait.
+pub fn completionReady(progress: *const Progress, state: State, generation: u64, since_ms: u64, now_ms: u64) bool {
+    return state == .idle and !progress.turn_open and progress.child_count == 0 and
+        !progress.lead_interrupted and !progress.completion_notified and progress.generation == generation and
+        now_ms >= since_ms and now_ms - since_ms >= completion_quiet_ms;
 }
 
 pub const PendingNotice = struct {
     pub const max_text = 512;
 
     kind: Notice = .none,
+    generation: u64 = 0,
     /// 예약된 시각(awake clock, ms). 주의 알림의 디바운스가 이 값으로 잰다.
     since_ms: u64 = 0,
     len: usize = 0,
@@ -1949,4 +2169,204 @@ test "CwdLabel: 경로는 (host, path) 쌍이다 — 기계가 바뀌면 그 값
     l.clear();
     try testing.expect(l.isEmpty());
     try testing.expectEqualStrings("", l.host());
+}
+
+fn questionFixture(kind: event.Kind, id: []const u8, turn: []const u8) event.Event {
+    return .{ .provider = "codex", .kind = kind, .tool_name = "request_user_input", .tool_use_id = id, .turn_key = turn };
+}
+
+test "질문 취소는 대기와 턴을 닫고 늦은 도구 이벤트가 되살리지 않는다" {
+    var p: Progress = .{};
+    var state = advance(&p, .running, questionFixture(.pre_tool_use, "q1", "t1"));
+    const cancel = event.parseLine("codex\t{\"hook_event_name\":\"Interrupt\",\"turn_id\":\"t1\"}").?;
+    state = advance(&p, state, cancel);
+    try std.testing.expectEqual(State.idle, state);
+    try std.testing.expect(!p.turn_open and !p.hasPendingQuestions());
+    try std.testing.expect(suppressesNotice(cancel));
+    state = advance(&p, state, questionFixture(.post_tool_use, "q1", "t1"));
+    state = advance(&p, state, questionFixture(.pre_tool_use, "late", "t1"));
+    try std.testing.expectEqual(State.idle, state);
+    state = advance(&p, state, questionFixture(.pre_tool_use, "q2", "t2"));
+    try std.testing.expectEqual(State.blocked, state);
+    try std.testing.expect(!p.lead_interrupted);
+}
+
+test "병렬 도구와 중복 응답은 다른 질문을 풀지 않는다" {
+    var p: Progress = .{};
+    var state = advance(&p, .running, questionFixture(.pre_tool_use, "q1", "t1"));
+    state = advance(&p, state, questionFixture(.pre_tool_use, "q1", "t1"));
+    state = advance(&p, state, questionFixture(.pre_tool_use, "q2", "t1"));
+    state = advance(&p, state, .{ .provider = "codex", .kind = .pre_tool_use, .tool_name = "Bash", .turn_key = "t1" });
+    try std.testing.expectEqual(State.blocked, state);
+    try std.testing.expectEqual(@as(u8, 2), p.question_count);
+    state = advance(&p, state, questionFixture(.post_tool_use, "q1", "t1"));
+    state = advance(&p, state, questionFixture(.post_tool_use, "q1", "t1"));
+    try std.testing.expectEqual(State.blocked, state);
+    state = advance(&p, state, questionFixture(.post_tool_use, "q2", "t1"));
+    try std.testing.expectEqual(State.running, state);
+}
+
+test "옛 질문 응답과 취소는 새 턴 질문과 자식 로스터를 바꾸지 않는다" {
+    var p: Progress = .{};
+    var state = advance(&p, .running, questionFixture(.pre_tool_use, "q1", "t1"));
+    state = advance(&p, state, questionFixture(.pre_tool_use, "q2", "t2"));
+    state = advance(&p, state, .{ .provider = "codex", .kind = .subagent_start, .agent_id = "live-child" });
+    state = advance(&p, state, questionFixture(.post_tool_use, "q1", "t1"));
+    state = advance(&p, state, .{ .provider = "codex", .kind = .interrupt, .turn_key = "t1" });
+    try std.testing.expectEqual(State.blocked, state);
+    try std.testing.expectEqualStrings("t2", p.turnKey());
+    try std.testing.expectEqual(@as(usize, 1), p.childCount());
+}
+
+test "질문 신원이 없거나 상한을 넘으면 짝 없는 응답으로 해제하지 않는다" {
+    var p: Progress = .{};
+    var state = advance(&p, .running, questionFixture(.pre_tool_use, "", "t1"));
+    state = advance(&p, state, questionFixture(.post_tool_use, "", "t1"));
+    try std.testing.expectEqual(State.blocked, state);
+    state = advance(&p, state, .{ .provider = "codex", .kind = .user_prompt_submit, .turn_key = "t2" });
+    for (0..9) |i| {
+        var buf: [16]u8 = undefined;
+        const id = try std.fmt.bufPrint(&buf, "q{d}", .{i});
+        state = advance(&p, state, questionFixture(.pre_tool_use, id, "t2"));
+    }
+    for (0..9) |i| {
+        var buf: [16]u8 = undefined;
+        const id = try std.fmt.bufPrint(&buf, "q{d}", .{i});
+        state = advance(&p, state, questionFixture(.post_tool_use, id, "t2"));
+    }
+    try std.testing.expectEqual(State.blocked, state);
+    state = advance(&p, state, .{ .provider = "codex", .kind = .stop, .turn_key = "t2" });
+    try std.testing.expectEqual(State.idle, state);
+    try std.testing.expect(!p.hasPendingQuestions());
+}
+
+test "질문 훅은 아직 질문이 안 보이는 화면의 C1 해제를 막는다" {
+    const arbiter = @import("agent_state_arbiter.zig");
+    var p: Progress = .{};
+    const state = advance(&p, .running, questionFixture(.pre_tool_use, "q1", "t1"));
+    var judge: arbiter.Arbiter = .{};
+    const badge = judge.arbitrate(.{ .hook = state, .hook_question_pending = p.hasPendingQuestions(), .screen = .running, .screen_seq = 1 });
+    try std.testing.expectEqual(State.blocked, badge.state);
+}
+
+test "접힌 큰 질문도 파서부터 답변까지 호출 신원을 유지한다" {
+    var p: Progress = .{};
+    const pre = event.parseLine("codex\t{\"session_id\":\"s1\",\"turn_id\":\"t1\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_input\":null,\"tool_use_id\":\"call_big\"}").?;
+    const post = event.parseLine("codex\t{\"session_id\":\"s1\",\"turn_id\":\"t1\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_input\":null,\"tool_use_id\":\"call_big\"}").?;
+    var state = advance(&p, .running, pre);
+    try std.testing.expectEqual(State.blocked, state);
+    state = advance(&p, state, post);
+    try std.testing.expectEqual(State.running, state);
+    try std.testing.expectEqualStrings("t1", p.turnKey());
+    // A splice at a nested tool_input leaves its parent open; never manufacture a lead question.
+    try std.testing.expect(event.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"metadata\":{\"tool_name\":\"request_user_input\",\"tool_input\":null,\"tool_use_id\":\"fake\"}") == null);
+}
+
+test "completion candidates require a stable closed pane and exact generation" {
+    var p: Progress = .{ .generation = 7 };
+    try testing.expect(!completionReady(&p, .idle, 7, 100, 1599));
+    try testing.expect(completionReady(&p, .idle, 7, 100, 1600));
+    try testing.expect(!completionReady(&p, .running, 7, 100, 1600));
+    try testing.expect(!completionReady(&p, .idle, 6, 100, 1600));
+    try testing.expect(!completionReady(&p, .idle, 7, 100, 99));
+    p.turn_open = true;
+    try testing.expect(!completionReady(&p, .idle, 7, 100, 1600));
+    p.turn_open = false;
+    p.child_count = 1;
+    try testing.expect(!completionReady(&p, .idle, 7, 100, 1600));
+    p.child_count = 0;
+    p.lead_interrupted = true;
+    try testing.expect(!completionReady(&p, .idle, 7, 100, 1600));
+    p.lead_interrupted = false;
+    p.completion_notified = true;
+    try testing.expect(!completionReady(&p, .idle, 7, 100, 1600));
+    p.reset();
+    try testing.expectEqual(@as(u64, 8), p.generation);
+    try testing.expect(!p.completion_notified);
+}
+
+test "late terminal events cannot close another turn or erase its question" {
+    var p: Progress = .{};
+    var q = evOf(.pre_tool_use);
+    q.provider = "codex";
+    q.tool_name = "request_user_input";
+    q.tool_use_id = "q2";
+    q.turn_key = "t2";
+    const state = advance(&p, .running, q);
+    for ([_]event.Kind{ .stop, .stop_failure, .interrupt }) |kind| {
+        var old = evOf(kind);
+        old.turn_key = "t1";
+        try testing.expect(ignoresEvent(&p, old));
+        try testing.expectEqual(State.blocked, advance(&p, state, old));
+        try testing.expectEqualStrings("t2", p.turnKey());
+        try testing.expect(p.hasPendingQuestions());
+    }
+    var approval = evOf(.permission_request);
+    approval.turn_key = "t2";
+    _ = advance(&p, state, approval);
+    q.kind = .post_tool_use;
+    try testing.expectEqual(State.blocked, advance(&p, state, q));
+    try testing.expect(!p.hasPendingQuestions());
+    var approved = evOf(.pre_tool_use);
+    approved.tool_name = "Bash";
+    approved.turn_key = "t2";
+    try testing.expectEqual(State.running, advance(&p, .blocked, approved));
+}
+
+test "a retired tool event cannot roll a live turn back before its late Stop" {
+    var p: Progress = .{};
+    var first = evOf(.user_prompt_submit);
+    first.turn_key = "old";
+    var state = advance(&p, .unknown, first);
+    var current = first;
+    current.turn_key = "current";
+    state = advance(&p, state, current);
+    var child = evOf(.subagent_start);
+    child.agent_id = "live";
+    state = advance(&p, state, child);
+    var late = evOf(.pre_tool_use);
+    late.turn_key = "old";
+    late.tool_name = "Bash";
+    state = advance(&p, state, late);
+    late.kind = .stop;
+    state = advance(&p, state, late);
+    try testing.expectEqualStrings("current", p.turnKey());
+    try testing.expectEqual(@as(usize, 1), p.childCount());
+    try testing.expect(p.turn_open);
+    try testing.expectEqual(State.running, state);
+}
+
+test "retired sessions reject delayed work and fresh sessions may reuse turn ids" {
+    var p: Progress = .{};
+    var ev = evOf(.user_prompt_submit);
+    ev.session_id = "s1";
+    ev.turn_key = "t1";
+    var state = advance(&p, .unknown, ev);
+    ev.turn_key = "t2";
+    state = advance(&p, state, ev);
+    ev.session_id = "s2";
+    ev.turn_key = "t1";
+    state = advance(&p, state, ev);
+    try testing.expectEqualStrings("s2", p.session_buf[0..p.session_len]);
+    try testing.expectEqualStrings("t1", p.turnKey());
+    ev.session_id = "s1";
+    ev.kind = .pre_tool_use;
+    try testing.expect(ignoresEvent(&p, ev));
+    try testing.expectEqual(state, advance(&p, state, ev));
+    ev.session_id = "s2";
+    ev.kind = .interrupt;
+    state = advance(&p, state, ev);
+    ev.session_id = "s3";
+    ev.kind = .pre_tool_use;
+    try testing.expect(!ignoresEvent(&p, ev));
+    try testing.expectEqual(State.running, advance(&p, state, ev));
+    try testing.expect(!p.lead_interrupted);
+    ev.session_id = "s1";
+    ev.kind = .session_start;
+    try testing.expect(!ignoresEvent(&p, ev));
+    state = advance(&p, .running, ev);
+    try testing.expectEqual(State.idle, state);
+    ev.kind = .pre_tool_use;
+    try testing.expect(!ignoresEvent(&p, ev));
+    try testing.expectEqual(State.running, advance(&p, state, ev));
 }

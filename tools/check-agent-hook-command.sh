@@ -198,6 +198,56 @@ printf '%s\n' "$hangul" | env LANG=ko_KR.UTF-8 LC_ALL=ko_KR.UTF-8 MARU_HOOK_INST
 grep -q '"hook_event_name":"PostToolUse","tool_use_id":"toolu_hangul"' "$evdir/17.ndjson" || fail "접힌 모양이 아니다: $(cut -c1-120 "$evdir/17.ndjson")"
 pass "상한을 바이트로 센다(UTF-8 로케일)"
 
+echo "4e) 큰 Codex 질문에서도 도구·턴·호출 신원이 남는다"
+for kind in PreToolUse PostToolUse; do
+  huge_question=$(awk -v kind="$kind" 'BEGIN { printf "{\"session_id\":\"s1\",\"turn_id\":\"t1\",\"hook_event_name\":\"%s\",\"tool_name\":\"request_user_input\",\"tool_input\":{\"text\":\"", kind; for (i=0; i<40000; i++) printf "x"; printf "\"},\"tool_response\":{},\"tool_use_id\":\"call_big\"}" }')
+  rm -f "$evdir/16.ndjson"
+  printf '%s\n' "$huge_question" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=16 /bin/sh -c "$cmd" || fail "큰 질문 훅 실패"
+  expected="$(printf 'claude\t')"'{"session_id":"s1","turn_id":"t1","hook_event_name":"'"$kind"'","tool_name":"request_user_input","tool_input":null,"tool_use_id":"call_big"}'
+  [ "$(cat "$evdir/16.ndjson")" = "$expected" ] || fail "큰 질문의 신원을 잃었다"
+done
+# 실제 shell 출력의 JSON 구조도 검증한다. 중첩된 가짜 도구/id를 lead 신원으로 승격하지 않는다.
+python3 - "$cmd" "$evdir/17.ndjson" "$inst" <<'QUESTION_PY' || fail "큰 질문 JSON 구조 검증 실패"
+import json, os, pathlib, subprocess, sys
+cmd, target, instance = sys.argv[1:]
+env = dict(os.environ, MARU_HOOK_INSTANCE=instance, MARU_HOOK_PANE="17")
+def fold(payload):
+    pathlib.Path(target).unlink(missing_ok=True)
+    subprocess.run(["/bin/sh", "-c", cmd], input=json.dumps(payload, separators=(",", ":"))+"\n", text=True, env=env, check=True)
+    return pathlib.Path(target).read_text().split("\t", 1)[1].strip()
+base = dict(session_id="s1", turn_id="t1", hook_event_name="PostToolUse", tool_name="request_user_input")
+# Large response, small input; id and turn must still match the pending question.
+out = json.loads(fold(dict(base, tool_input={}, tool_response={"text": "x"*40000}, tool_use_id="real")))
+assert out["tool_use_id"] == "real" and out["turn_id"] == "t1" and out["tool_name"] == "request_user_input"
+# Identity before the bulk input must not be overwritten by a nested identity.
+out = json.loads(fold(dict(base, tool_use_id="real", tool_input={"text":"x"*40000,"tool_use_id":"nested"})))
+assert out["tool_use_id"] == "real"
+# A child marker between the bulk input and the call id stays a child marker.
+out = json.loads(fold(dict(base, tool_input={"text":"x"*40000}, agent_id="child", tool_use_id="real")))
+assert out["agent_id"] == "child" and out["tool_use_id"] == "real"
+# Nested role metadata in the prefix must not hide the actual child role after the input.
+with_nested_role = dict(base, metadata={"agent_id":"nested"}, tool_input={"text":"x"*40000}, agent_id="child", tool_use_id="real")
+out = json.loads(fold(with_nested_role))
+assert out["agent_id"] == "child" and out["tool_use_id"] == "real"
+# A nested marker can make the splice malformed; rejection must happen before mode transition.
+malformed = fold(dict(hook_event_name="PreToolUse", metadata=dict(tool_name="request_user_input", tool_input={"text":"x"*40000}), tool_use_id="real"))
+try:
+    out = json.loads(malformed)
+except json.JSONDecodeError:
+    pass
+else:
+    assert out.get("tool_name") != "request_user_input"
+# The last nested id cannot be lifted into a matching top-level answer.
+malformed = fold(dict(base, tool_input={}, tool_response={"text":"x"*40000,"tool_use_id":"fake"}))
+try:
+    out = json.loads(malformed)
+except json.JSONDecodeError:
+    pass
+else:
+    assert out.get("tool_use_id") != "fake"
+QUESTION_PY
+pass "큰 질문 Pre/Post 신원 보존·중첩 신원 비승격"
+
 echo "5) 로그 디렉터리가 없어도 조용히 0 으로 끝난다"
 # **stderr 까지 조용해야 한다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 리다이렉션 대상이
 # 없을 때 셸이 내는 `No such file or directory` 는 못 막는다 — 실제로 그 메시지가 새는 것을 이 검사가

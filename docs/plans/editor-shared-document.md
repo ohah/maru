@@ -178,7 +178,9 @@ snapshot으로 보존한다. 현재 동기 `saveDocumentGuarded`의 빌린 `save
 
 2026-10-03 사용자는 포맷 구현 전에 설계 검토를 선택했다.
 [복원 포맷 검토안](editor-shared-restore.md)은 선택적 필드와 v2의 차이, downgrade 한계,
-문서/뷰 identity와 실패 판정 목록을 비교한다. 승인 전 사용자용 분할 UI는 노출하지 않는다.
+문서/뷰 identity와 실패 판정 목록을 비교한다. 이후 사용자는 v2 방향으로 설계 진행에 동의했다.
+창별 문서 표·뷰 참조, 같은 revision 캡처, 전체 checkpoint 실패 보존과 v1 migration 경계를
+검토안에 구체화했다. codec·host migration·재시작 검증 전 사용자용 분할 UI는 노출하지 않는다.
 
 ## 공유 편집기 pane 연결 내부 경로 — 2026-10-03
 

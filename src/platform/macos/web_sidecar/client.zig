@@ -25,6 +25,7 @@ const permissions = @import("permissions.zig");
 const title_gate = @import("title_gate.zig");
 const input = @import("input.zig");
 const tooltip = @import("tooltip.zig");
+const context_menus = @import("context_menu.zig");
 const notifications = @import("notifications.zig");
 
 var client_obj: c.cef_client_t = undefined;
@@ -103,7 +104,8 @@ pub fn get() *c.cef_client_t {
         jsdialog.on_reset_dialog_state = &dialogs.onResetDialogState;
         jsdialog.on_dialog_closed = &dialogs.onDialogClosed;
         file_dialog.on_file_dialog = &dialogs.onFileDialog;
-        context_menu.on_before_context_menu = &onBeforeContextMenu;
+        context_menu.run_context_menu = &context_menus.onRun;
+        context_menu.on_context_menu_dismissed = &context_menus.onDismissed;
         permission.on_show_permission_prompt = &permissions.onShowPermissionPrompt;
         permission.on_dismiss_permission_prompt = &permissions.onDismissPermissionPrompt;
         permission.on_request_media_access_permission = &permissions.onRequestMediaAccessPermission;
@@ -137,22 +139,6 @@ fn getContextMenu(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_context_menu_han
 }
 fn getPermission(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_permission_handler_t {
     return &permission;
-}
-
-/// 항목을 비우면 CEF 는 메뉴를 띄우지 않는다(헤더 — 「The |model| can be cleared to show no context menu」). 비우지 않아도 창 없는
-/// 모드에서 부모 view 가 없으면 CEF 의 Mac 메뉴는 뜨지 않는다(`menu_runner_mac.mm` — W6 착수 전 조사). 메뉴는 W6c(D5 — NSMenu).
-fn onBeforeContextMenu(
-    _: [*c]c.cef_context_menu_handler_t,
-    browser: [*c]c.cef_browser_t,
-    frame: [*c]c.cef_frame_t,
-    params: [*c]c.cef_context_menu_params_t,
-    model: [*c]c.cef_menu_model_t,
-) callconv(.c) void {
-    defer object.releaseArg(browser);
-    defer object.releaseArg(frame);
-    defer object.releaseArg(params);
-    defer object.releaseArg(model);
-    if (model != null) _ = model.*.clear.?(model);
 }
 
 fn entryOf(browser: [*c]c.cef_browser_t) ?*@import("registry.zig").Entry {
@@ -342,6 +328,9 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
         browsers.dropPopup(entry);
         browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = false } }) catch {};
     }
+    // 쥔 우클릭 메뉴를 끝낸다 — 방어다. CEF 154 는 렌더러가 죽으면 스스로 메뉴를 거둔다(판정 `cm-renderer-gone` — 이 줄을 뺀 변이도
+    // 통과했다). 거두지 않는 버전이어도 콜백이 쥔 채 남지 않게(거두기가 먼저 왔으면 쥔 것이 없어 아무 일도 없다).
+    context_menus.finish(entry, .cancel);
     browsers.state.writer.send(.{ .renderer_gone = .{ .browser = entry.id, .reason = reason } }) catch {};
     dialogs.rendererGone(entry.id);
     permissions.rendererGone(entry.id);

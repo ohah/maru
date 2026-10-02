@@ -408,3 +408,11 @@ pub fn readService(cursor: *ReadCursor) Error![]const u8 {
     if (!validService(name)) return error.InvalidServiceName;
     return name;
 }
+
+/// 우클릭 메뉴(W6c)의 닫힌 필드 — `message.ContextMenuFlags` 주석.
+pub fn checkContextMenu(menu: u32, flags: message.ContextMenuFlags, selection: []const u8) Error!void {
+    if (menu == 0 or flags._reserved != 0) return error.InvalidContextMenu;
+    if (flags.image_loaded and !flags.image) return error.InvalidContextMenu;
+    if (flags.selection_truncated and !flags.selection) return error.InvalidContextMenu;
+    if (flags.selection != (selection.len != 0)) return error.InvalidContextMenu;
+}

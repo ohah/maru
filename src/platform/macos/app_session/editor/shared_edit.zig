@@ -19,7 +19,93 @@ const SharedPreparedView = struct {
     first_piece: u32,
     primary: ?editor_selection.Selection,
     extras: []editor_selection.Selection,
+    folds: ?MappedFolds,
 };
+
+// 접힘 좌표는 정본 변경 전에 새 줄 번호로 준비한다. 옛 본문은 게시 후 읽지 않는다.
+const MappedFolds = struct {
+    ranges: []maru.session.editor.fold.Range,
+    folded: []u32,
+    previous: []u32,
+    marks: []editor_ops.FoldMark,
+    len: usize,
+
+    fn deinit(self: MappedFolds, allocator: std.mem.Allocator) void {
+        allocator.free(self.ranges);
+        allocator.free(self.folded);
+        allocator.free(self.previous);
+        allocator.free(self.marks);
+    }
+};
+
+fn mappedRow(file: *const maru.session.editor.edit_doc.EditableFile, d: maru.session.editor.delta.Delta, at: usize) u32 {
+    var cursor: usize = 0;
+    var rows: usize = 0;
+    for (d.changes) |c| {
+        if (at < c.start) break;
+        rows += file.lines.lineAt(c.start) - file.lines.lineAt(cursor);
+        // 삽입 경계는 새 글자 뒤, 삭제/교체 안의 점은 변경 시작에 붙는다.
+        if (at < c.end or (at == c.start and c.end > c.start)) return @intCast(rows);
+        rows += std.mem.count(u8, c.text, "\n");
+        cursor = c.end;
+    }
+    rows += file.lines.lineAt(at) - file.lines.lineAt(cursor);
+    return @intCast(rows);
+}
+
+fn mappedRange(view: *Term, d: maru.session.editor.delta.Delta, range: maru.session.editor.fold.Range) ?maru.session.editor.fold.Range {
+    const file = &view.rt.editorDocument().opened.?.file;
+    const head = file.lines.line(range.head) orelse return null;
+    const last = file.lines.line(range.last_hidden) orelse return null;
+    for (d.changes) |c| {
+        if (c.start <= head.start and c.end > head.contentEnd()) return null;
+    }
+    const h = mappedRow(file, d, head.start);
+    const l = mappedRow(file, d, last.start);
+    if (l <= h) return null;
+    return .{ .head = h, .first_hidden = h + 1, .last_hidden = l, .level = range.level };
+}
+
+fn prepareFolds(self: *AppSession, view: *Term, d: maru.session.editor.delta.Delta, line_count: usize) !MappedFolds {
+    var count: usize = 0;
+    var last_head: ?u32 = null;
+    for (view.rt.editor_fold_ranges) |range| {
+        const mapped = mappedRange(view, d, range) orelse continue;
+        if (last_head == null or last_head.? != mapped.head) count += 1;
+        last_head = mapped.head;
+    }
+    const ranges = try self.allocator.alloc(maru.session.editor.fold.Range, count);
+    errdefer self.allocator.free(ranges);
+    const folded = try self.allocator.alloc(u32, count);
+    errdefer self.allocator.free(folded);
+    const previous = try self.allocator.alloc(u32, count);
+    errdefer self.allocator.free(previous);
+    const marks = try self.allocator.alloc(editor_ops.FoldMark, line_count);
+    var n: usize = 0;
+    var len: usize = 0;
+    var folded_index: usize = 0;
+    const heads = editor_ops.foldedHeads(view);
+    for (view.rt.editor_fold_ranges) |range| {
+        const mapped = mappedRange(view, d, range) orelse continue;
+        // 병합된 머리는 중복 범위/선택으로 남기지 않는다.
+        if (n > 0 and ranges[n - 1].head == mapped.head) {
+            ranges[n - 1].last_hidden = @max(ranges[n - 1].last_hidden, mapped.last_hidden);
+        } else {
+            ranges[n] = mapped;
+            n += 1;
+        }
+        while (folded_index < heads.len and heads[folded_index] < range.head) folded_index += 1;
+        if (folded_index < heads.len and heads[folded_index] == range.head and
+            (len == 0 or folded[len - 1] != mapped.head))
+        {
+            folded[len] = mapped.head;
+            len += 1;
+        }
+    }
+    // 사전 계산과 게시 배열의 범위 수가 일치해야 한다.
+    std.debug.assert(n == count);
+    return .{ .ranges = ranges, .folded = folded, .previous = previous, .marks = marks, .len = len };
+}
 
 pub fn apply(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, sels: *editor_selection.Selections) !maru.session.editor.delta.Inverse {
     const revision = (term.rt.editorDocument().opened orelse return error.DocumentNotOpen).file.revision;
@@ -32,7 +118,7 @@ pub fn applyAtRevision(self: *AppSession, term: *Term, d: maru.session.editor.de
     const opened = state.opened orelse return error.DocumentNotOpen;
     if (opened.file.revision != base_revision) return error.StaleRevision;
     if (opened.file.read_only) return error.ReadOnly;
-    // Accepted edits survive a later history recording OOM; pushUndo clears old offsets.
+    // Undo 기록 준비는 호출자가 정본 변경 전에 완료한다.
     return applyPrepared(self, term, d, sels, sels.items.len);
 }
 
@@ -64,6 +150,7 @@ pub fn applyPrepared(
         for (prepared[0..n]) |v| {
             self.allocator.free(v.lines);
             self.allocator.free(v.extras);
+            if (v.folds) |folds| folds.deinit(self.allocator);
         }
     };
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |view| {
@@ -94,7 +181,11 @@ pub fn applyPrepared(
         } else {
             extras = try self.allocator.alloc(editor_selection.Selection, 0);
         }
-        prepared[n] = .{ .term = view, .lines = lines, .scroll = editor_ops.captureScrollAnchor(view), .first_piece = view.rt.editor_first_piece, .primary = primary, .extras = extras };
+        const folds: ?MappedFolds = if (view == term or view.rt.editor_folded_len == 0) null else prepareFolds(self, view, d, line_count) catch |err| {
+            self.allocator.free(extras);
+            return err;
+        };
+        prepared[n] = .{ .term = view, .lines = lines, .scroll = editor_ops.captureScrollAnchor(view) orelse if (view != term and view.rt.editor_first_line == 0) editor_ops.ScrollAnchor{ .off = 0 } else null, .first_piece = view.rt.editor_first_piece, .primary = primary, .extras = extras, .folds = folds };
         n += 1;
     };
     // 다른 창의 view는 아직 이 coordinator에 연결하지 않았다. 부분 게시로 넘기지 않는다.
@@ -127,11 +218,15 @@ pub fn applyPrepared(
         }
     }
     published = true;
+
     editor_ops.notifyDocumentEdit(self, term);
     const span = syntax_color.spanFromInverse(inverse.changes);
     for (prepared) |v| {
         if (v.term == term) continue;
-        editor_ops.refreshViewAfterEdit(self, v.term, span) catch {};
+        if (v.folds) |folds| {
+            editor_ops.publishMappedFolds(self, v.term, folds.ranges, folds.folded, folds.previous, folds.marks, folds.len);
+            editor_ops.refreshMappedViewAfterEdit(self, v.term, span) catch {};
+        } else editor_ops.refreshViewAfterEdit(self, v.term, span) catch {};
         // 다른 뷰는 같은 위치 삽입도 원래 보던 텍스트를 anchor로 유지한다.
         const mapped_scroll: ?editor_ops.ScrollAnchor = if (v.scroll) |a| .{
             .off = shared_policy.mapSelection(d, editor_selection.Selection.at(a.off)).focus,

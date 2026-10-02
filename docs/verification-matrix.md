@@ -3912,3 +3912,12 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 | 훅 완료 알림 안정화 (2026-10-02) | 구현 | `test-provider-session-removal`의 실제 AppSession 경로에서 1499/1500ms, 새 턴·질문·승인·작업 재개·취소·세션 전환의 예약 폐기, 마지막 자식 종료 후 새 유예, aggregate running 중 pane별 발송과 턴당 1회를 검증한다. `agent_hook_mode.zig`·`agent_hook_event.zig`·`agent_state_arbiter.zig` 순수 테스트와 `check-agent-hook-command` 실제 셸은 늦은 종료·손상/중복 JSON·큰 질문 신원 보존·질문 잔류 C2 가드를 검증한다. | 실제 OS 배너 표시와 provider 이벤트가 보내지지 않는 구간은 이 자동 검증의 범위 밖이다. |
 
 2026-10-02 추가 적대적 검증에서 «지난 턴 PreToolUse → 지난 턴 Stop»이 현재 턴과 자식 목록을 되돌리는 재현을 고정했다. pane별 최근 16개 떠난 신원(턴·세션 각각)을 정확한 바이트로 보관해 오래된 진행 이벤트도 신원·cwd·상태·알림 변경 전에 거부한다. 턴 기록은 세션에 귀속되므로 새 세션의 턴 ID 재사용과 명시적 `SessionStart`를 통한 이전 세션 resume은 허용한다. 고정 크기 기록 밖으로 밀려난 신원이나 ID가 없는 이벤트의 과거 여부는 판별할 수 없다.
+
+## 공유 편집 수동 뷰의 접힘·스크롤
+
+- Gate: `zig build test-editor-shared-anchors` (Debug / ReleaseFast).
+- 제품 소비처: `shared_edit.applyPrepared` → `publishMappedFolds` → `refreshMappedViewAfterEdit` → `installFoldRanges` / `rebuildVisible`.
+- 반례: 접힌 블록 앞 삽입에서 모든 접힘 초기화; 문서 맨 위를 보던 수동 뷰의 앵커 누락.
+- 판정: 입력/삭제/숨은 본문·Undo/Redo·중첩/다중 변경·삭제된 머리·provider 범위 변경·OOM 미게시.
+- 시각 증거: `tools/shared-ime-gpu/capture.py --scenario anchors`; 제품 AppSession/CoreText/Metal의 별도 뷰 프레임.
+- 경계: 사용자 split UI·동시 두 pane GUI·실제 OS 입력기는 이 gate의 완료 주장에 포함하지 않는다.

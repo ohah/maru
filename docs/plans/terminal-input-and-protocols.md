@@ -140,8 +140,8 @@
 매 frame 주입되는 셀 메트릭을 그대로 흘리면 시그널 폭풍이 된다. 라이브 실측(오프스크린 캡처 하네스,
 `font.size` 8→22 A/B): 셀 8×18 → 13×29 로 두 경로가 **같은 값으로 함께** 움직였다.
 
-**남은 것**: in-band resize(`?2048`)는 여전히 미구현이고 DECRQM이 0으로 정직하게 답한다. color-scheme 통지(`?2031`)는
-아래 절(2026-09-22)에서 구현했다.
+**남은 것**: 없다 — color-scheme 통지(`?2031`)는 아래 절(2026-09-22)에서, in-band resize(`?2048`)는 그 아래 절(2026-10-03)에서
+구현했다.
 
 ### 색 구성 통지 `?2031` / `?996n` (구현 2026-09-22)
 
@@ -149,7 +149,7 @@
 codex 44, 살아 있는 pane 11개 전부 claude). claude 2.1.278 을 pty 에서 띄워 8초 캡처하니 시작마다 `?2031h`×2 · `?2004h` · `?1004h` ·
 `?1049h` · `CSI ? u` · `OSC 11;?`×2 · `CSI c`×4 를 보내고, 입력 파서(바이너리의 정규식)에 `\?997;[12]n` 분기가 있다 — **앱은 양쪽이 다
 되어 있고 maru 만 0(모름)으로 답해** 라이브 테마 전환 뒤 claude 화면이 옛 테마로 남았다(`theme.follow-system` — 사용자 결정: 테마를
-따라가는 것이 당연하다). `?2048` 은 바이너리에 참조만 있고 시작 8초 안엔 안 보냈다 — 보류.
+따라가는 것이 당연하다). `?2048` 은 바이너리에 참조만 있고 시작 8초 안엔 안 보냈다 — 그때는 보류했고, 아래 절(2026-10-03)에서 구현했다.
 
 **프로토콜**(xterm/contour DEC 사적 모드 2031): `CSI ? 2031 h/l` 구독·해지, DECRQM `CSI ? 2031 $ p` → `CSI ? 2031 ; 1|2 $ y`,
 `CSI ? 996 n` 질의 → `CSI ? 997 ; 1 n`(다크)/`; 2 n`(라이트), 구독 중 등급이 바뀌면 같은 바이트를 스스로 보낸다.
@@ -191,6 +191,54 @@ kitty graphics의 unicode placeholder(`U=1`)는 이제 **파싱해 virtual place
 천장이 `0xFFFF_FFFE`이던 동안은 **언제나** 24비트를 넘었다. 두 기능은 각각 초록이었고 **조합에서만**
 깨졌다. 지금은 (1) 셋째 diacritic을 읽고, (2) 배정 천장을 `core.kitty_auto_id_top`(0x00FF_FFFE)로
 낮춰 셋째를 안 쓰는 앱까지 동작하게 한다 — 둘 다 판정자로 고정했다.
+
+### in-band resize `?2048` (구현 2026-10-03)
+
+**프로토콜**(공개 명세 — rockorager «In-Band Window Resize Notifications», https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83):
+`CSI ? 2048 h/l` 구독·해지. 구독 중 크기가 바뀌면 `CSI 48 ; 높이(행) ; 너비(열) ; 높이(px) ; 너비(px) t` 를 보낸다. **켜는 순간에도
+지금 크기를 보낸다**(이미 켜져 있어도 다시 켜면 또 — 명세 MUST). 내부 resize 가 **끝나기 전엔** 보내지 않는다(MUST NOT). 픽셀을
+모르면 0. DECRQM `CSI ? 2048 $ p` → `CSI ? 2048 ; 1|2 $ y`. 보내는 빈도는 명세가 정하지 않는다.
+
+**왜**: SIGWINCH 는 PTY 를 직접 쥔 자식만 받는다 — ssh 너머·컨테이너·멀티플렉서 안의 앱은 크기를 바이트로 받는 편이 확실하다.
+DECRQM 이 0(모름)으로 답하는 동안 앱은 이 기능을 아예 안 쓴다(`?2031` 이 정확히 그랬다).
+
+**구현**:
+- 코어에 `in_band_resize`(모드) 하나. `appendInBandResizeReport` 가 보고를 만든다 — 픽셀은 «텍스트 영역» = 행×셀 높이, 열×셀 너비로
+  `CSI 14 t` 와 같은 값이다.
+- **바뀐 때만 보낸다.** 「마지막으로 알린 크기」 를 따로 들지 않고 코어가 바뀌기 **전·후**를 대조한다: `resize` 는 격자가 실제로 달라질
+  때(같은 크기 resize — 재접속의 강제 resize 등 — 는 조용하다), `setCellMetrics` 는 셀 픽셀이 실제로 달라질 때(활성 surface 의 프레임
+  빌드가 매 tick 같은 값을 다시 넣는다). 켜는 순간은 무조건 보낸다.
+- **보내는 자리.** 응답은 보통 PTY 출력을 처리한 reader 가 비우는데, 크기가 바뀐 앱이 아무것도 안 쓰면 영영 안 나간다. 그래서
+  `SurfaceRuntime.resize` 가 코어 resize 직후 응답을 꺼내 두고, PTY winsize 를 바꾼 **뒤** 내보낸다(로컬·host 공통 — host 도 이
+  함수로 resize 한다). winsize 가 실패하면 보내지 않는다(앱의 크기와 보고가 어긋나므로).
+  - reader 가 있으면(interactive) 꺼내 둔 응답을 코어에 **되돌려 놓고** reader 를 깨운다(`PtyIo.request_response_flush` →
+    `CoreCommandQueue.requestResponseFlush`). reader 가 명령 단계에서 명령 응답과 같은 버퍼로 보낸다 — reader 가 유일한 PTY
+    writer 이고 그 버퍼는 비차단·상한이다. 입력 큐(`enqueueBlocking`)로 보내면 paste 로 찬 큐에서 메인이 자식이 읽을 때까지
+    막힌다(창 resize 는 모든 Term 을 건드린다). 명령으로 싣지 않은 것은 그 명령이 host wire 까지 번지기 때문이다. 되돌려 놓는
+    시점이 ioctl 뒤인 것은, 락 아래 그대로 두면 그 사이 출력을 처리한 reader 가 ioctl 전에 보낼 수 있어서다.
+    host 업그레이드 handoff 는 코어 응답이 비어 있어야 하는데(`response` must_be_empty), resize 는 admission gate 의 lease
+    안에서만 돌고 업그레이드는 gate 를 닫고 비운 **뒤에** reader 를 멈추므로 멈춘 reader 의 코어에 통지가 남지 않는다. 직전에
+    끼어든 통지는 reader 가 멈춤 검사보다 앞선 명령 단계에서 먼저 비운다. 비우기 요청 깃발 자체도 인벤토리에서 must_be_empty 이고
+    `CoreCommandQueue.emptyAndOpen` 이 그것을 보므로, reader 는 깃발을 꺼내기 전엔 멈춤을 승인하지 않는다.
+  - reader 가 없으면(controlled smoke·테스트) 직접 쓰고 실패는 삼킨다 — resize 는 이미 끝났고, 오류를 돌려주면 host 의
+    `resizeWithApply` 가 «부분 적용» 으로 보고 runtime 을 fail-stop 한다.
+  - 웹(`@maru/core`)은 `resize()` 가 응답을 비운다. 셀 픽셀 변경은 명령 큐(`set_cell_metrics`)를 타 reader 가 이미 비운다.
+- **받을 곳이 없으면 버린다.** 표시 grid 만 맞추는 `resizeTermCoreToLayout`(묘비·자식 종료·link 사망)엔 PTY 가 없다 — 남기면 아무도
+  안 비워 창 크기를 바꿀 때마다 코어에 쌓이므로 그 자리에서 비운다.
+- 셸 프롬프트의 입력 모드 초기화(`resetInputModes`)가 끈다 — 끄지 않고 죽은 앱이 셸에 보고를 흘리지 않게(`?2031` 과 같은 자리).
+- host 업그레이드(handoff)에 구독을 싣는다(tag 103) — 끊기면 그 앱은 다시 켤 때까지 크기를 못 받는다.
+
+**검증**: 코어 판정자 셋(켜는 순간·이미 켜져 있을 때·DECRQM / 바뀐 때만·같은 값 재주입·꺼진 동안 / 입력 모드 초기화), runtime 판정자
+셋(reader 없음: winsize 다음에 PTY 로 나가고 코어에 안 남는다·같은 크기는 조용 / 쓰기가 실패해도 resize 는 성공 / reader 있음: 입력 큐는
+안 타고 winsize 뒤에 reader 를 깨운다), 실 PTY 판정자(실제 reader 가 두 보고를 자식 stdin 으로 보내고 입력 큐는 0 바이트), 앱 판정자(자식이
+끝난 Term 엔 쌓이지 않는다), 웹 판정자(resize 직후 `onData`), handoff 왕복·비기본값 커버리지. 변이 열아홉(켤 때 보고·픽셀 순서·두 변화
+게이트·초기화·DECRQM·winsize 순서·폴백 안 보냄·폴백 쓰기 실패 전파·코어 응답 안 비움·reader 깃발 무시·reader 경로 무시·winsize 전에 깨움·
+live_pty 훅 없음·되돌려 놓지 않음·안전 지점이 비우기 요청 무시·handoff tag·웹 비우기·받을 곳 없는 갈래)이 전부 빨개진다.
+
+**한계 — 글꼴 크기를 바꾸면 통지가 두 번 갈 수 있다.** `applyMetricsPipeline` 은 셀 픽셀을 다시 잡은 뒤 pane 을 resize 하는데, 그 resize
+시점의 코어는 아직 **옛 셀 픽셀**을 들고 있다(코어에 셀 픽셀을 넣는 것은 다음 tick 의 `set_cell_metrics` 명령이다). 그래서 첫 통지는
+«새 격자 × 옛 픽셀», 곧 이은 둘째가 최종값이다. 하나로 합치려면 셀 픽셀 명령과 resize 의 순서를 스레드(host 는 연결)를 건너 보장해야
+해 여기서 하지 않는다 — 명세는 통지 횟수를 정하지 않고, 마지막 통지는 늘 맞다.
 
 ## kitty graphics PNG — 전 변종 지원 (해결, 2026-09-14)
 

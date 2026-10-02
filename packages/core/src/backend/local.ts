@@ -166,6 +166,9 @@ export class LocalBackend implements Backend {
     }
     this.#size = { cols, rows };
     this.#cb?.({ type: "resize", size: { cols, rows } });
+    // 크기 통지(DECSET 2048 — `CSI 48 ; 행 ; 열 ; 높이px ; 너비px t`)는 resize 가 만든 응답이다. 다음 write 를 기다리면
+    // 앱이 아무것도 안 쓰는 동안 영영 안 나가므로 여기서 비운다.
+    this.#drainResponse();
     this.#markDirty();
   }
 

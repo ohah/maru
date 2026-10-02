@@ -420,6 +420,9 @@ pub const CoreCommandQueue = struct {
     cap: usize, // 최대 대기 명령 수 — backpressure 기준
     closed: bool = false,
     debug: bool, // MARU_DEBUG(init 1회 캐시) — coreq 로깅·enqueue 타임스탬프 게이트(미설정 시 분기 하나, no-alloc)
+    /// 메인이 명령 밖에서 코어에 남긴 응답(resize 의 DECSET 2048 크기 통지)을 reader 가 명령 단계에서 비우게 하는 깃발.
+    /// 명령으로 싣지 않는 것은 그 명령이 host wire 까지 번지기 때문이다 — 응답 비우기는 이 프로세스 안의 일이다.
+    response_flush_requested: std.atomic.Value(bool) = .init(false),
 
     const coreq = std.log.scoped(.coreq);
 
@@ -481,6 +484,16 @@ pub const CoreCommandQueue = struct {
         if (self.debug) coreq.info("enqueue {s} (depth={d})", .{ @tagName(cmd), self.pendingAssumeLocked() });
     }
 
+    /// 메인: 코어에 남긴 응답을 다음 명령 단계에서 비워 달라고 표시한다. 호출자가 wake 로 reader poll 을 깨운다.
+    pub fn requestResponseFlush(self: *CoreCommandQueue) void {
+        self.response_flush_requested.store(true, .release);
+    }
+
+    /// I/O 스레드: 비우기 요청을 꺼낸다(있었으면 true, 표시는 내린다).
+    pub fn takeResponseFlushRequest(self: *CoreCommandQueue) bool {
+        return self.response_flush_requested.swap(false, .acq_rel);
+    }
+
     /// I/O 스레드: 다음 inline 명령 값 1건을 꺼낸다(없으면 null). head는 I/O 스레드만 움직이는 단일 소비자라,
     /// pop↔적용 사이 메인 enqueue가 tail에
     /// append해도 안전하다. 다 비면 버퍼를 비워 head=0으로 되돌린다(재사용).
@@ -519,10 +532,11 @@ pub const CoreCommandQueue = struct {
     }
 
     /// Host exec-upgrade safe-point용. command queue를 닫지 않고 현재 fence가 전부 적용됐는지 확인한다.
+    /// 응답 비우기 요청(`requestResponseFlush`)도 남은 일이다 — reader 가 꺼내 가기 전엔 비지 않았다(handoff 인벤토리 must_be_empty).
     pub fn emptyAndOpen(self: *CoreCommandQueue) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return !self.closed and self.pendingAssumeLocked() == 0;
+        return !self.closed and self.pendingAssumeLocked() == 0 and !self.response_flush_requested.load(.acquire);
     }
 
     /// reader가 명령 적용 직후 호출 — MARU_DEBUG일 때만 enqueue→apply 지연(µs)을 `coreq.apply`로 찍는다(§9.7
@@ -1138,6 +1152,17 @@ pub const PtyReader = struct {
                     cq.logApply(entry); // MARU_DEBUG면 enqueue→apply 지연 로깅
                     applied = true;
                 }
+                // 메인이 명령 밖에서 남긴 응답(resize 의 DECSET 2048 크기 통지 — `CoreCommandQueue.requestResponseFlush`).
+                // 명령 응답과 같은 버퍼로 보낸다 — 비차단·상한이라 자식이 stdin 을 안 읽어도 메인이 막히지 않는다.
+                if (cq.takeResponseFlushRequest()) {
+                    core.owner_dbg.lock(mutex, self.io);
+                    const reply = core.pendingResponse();
+                    if (reply.len > 0) {
+                        appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
+                        core.clearResponse();
+                    }
+                    core.owner_dbg.unlock(mutex, self.io);
+                }
                 // 명령이 코어를 바꿨으면 렌더 트리거(출력과 같은 빈 신호). 비블로킹(tryPush) — full이면 드롭(coalescing,
                 // 교차-큐 데드락 방지, read 단계와 동일 근거).
                 if (applied) self.queue.tryPush(.{ .output = .{ .pty_id = self.pty_id, .bytes = &.{} } }) catch |err| switch (err) {
@@ -1702,6 +1727,17 @@ test "CoreCommandQueue: zero capacity 거부 / close 후 enqueue는 QueueClosed"
     defer q.deinit();
     q.close();
     try std.testing.expectError(error.QueueClosed, q.enqueueBlocking(.{ .scroll = 1 }));
+}
+
+test "CoreCommandQueue: 응답 비우기 요청(DECSET 2048 통지)이 남아 있으면 비지 않았다 — 업그레이드 안전 지점이 기다린다" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 4);
+    defer q.deinit();
+    try std.testing.expect(q.emptyAndOpen());
+    q.requestResponseFlush();
+    try std.testing.expect(!q.emptyAndOpen()); // reader 가 꺼내 가기 전엔 handoff 할 수 없다(인벤토리 must_be_empty)
+    try std.testing.expect(q.takeResponseFlushRequest());
+    try std.testing.expect(!q.takeResponseFlushRequest()); // 한 번 꺼내면 내려간다
+    try std.testing.expect(q.emptyAndOpen());
 }
 
 test "CoreCommandQueue: close discards pending inline commands" {

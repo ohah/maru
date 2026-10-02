@@ -57711,6 +57711,39 @@ test "레이아웃 resize: 자식이 종료된(.exited) Term도 split 후 자기
     try std.testing.expectEqual(term_ops.activeSurface(session).core.size, dead.surface.core.size); // 두 pane은 같은 크기(0.5 분할)
 }
 
+// 자식이 끝난 Term 에는 응답을 받을 PTY 가 없다. 앱이 DECSET 2048(크기 통지)을 켠 채 죽으면, 표시 grid 를 맞추는
+// 코어 resize 가 통지를 만들고 아무도 안 비워 창 크기를 바꿀 때마다 코어에 쌓인다 — 그래서 그 자리에서 버린다.
+test "레이아웃 resize: 자식이 종료된 Term 의 크기 통지(DECSET 2048)는 받을 곳이 없어 코어에 쌓이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+
+    const dead = term_ops.activeSurface(session);
+    dead.process_state = .exited; // runtime 이 `ProcessExited` 로 거부 → 표시 grid 만 맞추는 갈래
+    {
+        dead.lockCore(session.io);
+        defer dead.unlockCore(session.io);
+        try dead.core.write("\x1b[?2048h");
+        dead.core.clearResponse();
+    }
+    const before = dead.core.size;
+
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try std.testing.expect(!std.meta.eql(before, dead.core.size)); // 코어 grid 는 실제로 바뀌었다(통지가 만들어지는 조건)
+    try std.testing.expect(dead.core.in_band_resize);
+    try std.testing.expectEqualStrings("", dead.core.pendingResponse());
+}
+
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): 레이아웃 적용은 한 Term의 runtime 전달 실패로
 // **중단되지 않는다**. 활성 pane의 Term이 죽어 있을 때 창 크기를 바꾸면, 예전엔 그 에러가 `resize()` 밖으로
 // 전파돼 `recomputeActivePaneRect`·`last_resize_size`·`metal_dirty`가 통째로 스킵된 half-state가 남았다

@@ -178,6 +178,9 @@ pub fn resizeTermCoreToLayout(self: *AppSession, term: *Term, size: terminal.Siz
         term.surface.lockCore(self.io);
         defer term.surface.unlockCore(self.io);
         term.surface.core.resize(grid.cols, grid.rows) catch return; // OOM이면 기존 grid 유지(표시만 영향)
+        // 이 갈래엔 응답을 받을 PTY 가 없다(묘비·자식 종료·link 사망). resize 가 만든 응답(DECSET 2048 크기 통지)을
+        // 남기면 아무도 비우지 않아 창 크기를 바꿀 때마다 코어에 쌓인다 — 받을 곳이 없으니 버린다.
+        term.surface.core.clearResponse();
     }
     // 관측 캐시도 함께 옮긴다. 묘비는 `live_initialized == false`라 `refreshTermObservation`이 즉시 반환하므로
     // 여기서 갱신하지 않으면 생성 시 심은 저장 grid에 영원히 갇힌다 — `captureWorkspaceTab`은 core.size보다

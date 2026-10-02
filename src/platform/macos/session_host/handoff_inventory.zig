@@ -138,6 +138,7 @@ pub const terminal_core_groups = [_]Group{
             "color_scheme_notify",
             "color_scheme_dark_seen",
             "color_scheme_reports",
+            "in_band_resize",
             "cursor_visible",
             "cursor_shape",
             "cursor_blink",
@@ -532,8 +533,8 @@ pub const core_command_queue_groups = [_]Group{
     },
     .{
         .disposition = .must_be_empty,
-        .fields = &.{ "items", "head", "closed" },
-        .why = "all admitted commands and input fences must be applied before exec",
+        .fields = &.{ "items", "head", "closed", "response_flush_requested" },
+        .why = "all admitted commands and input fences must be applied before exec, and a requested core-response flush (the DECSET 2048 resize report) must have been taken by the reader",
     },
 };
 

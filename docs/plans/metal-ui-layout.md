@@ -56,14 +56,17 @@ ML 슬라이스의 구현 순서와 검증 게이트다. 계약은 [Metal UI 레
    - **텍스트 모델 전환**: legacy 쪽은 셀 격자다(예: `notifications.zig`의 `card_rows = 2`(셀 2행),
      `text_indent_cols = 3`, 말줄임 `truncateToCols`(EAW 칸 추정)). typed 쪽은 measured 비례 텍스트
      (`ChromeTextRole` line box + `system_text.Artifact`)다. 두 모델은 좌표계가 달라 부분 이주가 안 된다.
-   - **없는 프리미티브 — 스크롤 목록/가상화**: 계약과 이관 순서는 [ScrollArea](../scroll-area.md)가 소유한다.
-     (알림·palette·설정이 픽셀 스크롤을 실제로 원하는지는 그 문서가 열어 둔 질문이다 — 셋은 지금
-     `overlay_input.windowStart`의 item-index windowing을 쓴다.)
-   - **없는 프리미티브 — sticky 헤더 밴드**: 알림 패널이 viewport 상단에 고정 헤더를 두고 그 아래만
-     스크롤한다.
-   - **부분 행 클리핑**: 픽셀 스크롤로 반쯤 걸친 행을 자르려면 `draw.Op.clip` 경로(ML3b의 scissor)가
-     필요하다. 렌더러의 하단-원점 변환은 정정했으나(2026-08-06) ML3b가 요구한 **경계 screenshot gate는
-     아직 없다** — 그 gate를 만드는 것이 첫 소비자 작업의 일부다.
+   - ~~**없는 프리미티브 — 스크롤 목록/가상화**~~ → **블로커 아님**: ScrollArea(`chrome/ui/scroll_area.zig`·
+     `tree.scrollArea`)가 생겼고 이관(SV0~SV6b)이 끝났다 — 계약은 [ScrollArea](../scroll-area.md), 순서와 잔여는
+     [ScrollArea 이관 계획](scroll-area.md)이 소유한다. 알림은 픽셀 offset으로(SV5a), 팔레트·세팅은 공유 offset
+     상태로 휠·드래그 스크롤이 된다(SV5d) — 셋 다 더는 `overlay_input.windowStart`를 쓰지 않는다. 오버레이는 그 막대를
+     host가 자식 없는 scroll-area로 발행할 뿐 레이아웃은 아직 손계산이고(팔레트 `usable_cols`, SV5b), 그것을
+     typed tree로 옮기는 것이 이 ML6의 몫이다.
+   - ~~**없는 프리미티브 — sticky 헤더 밴드**~~ → 프리미티브는 생겼다(`tree.ScrollDeclaration.sticky`,
+     [ScrollArea](../scroll-area.md) §4.7 — SV1d). 알림 패널의 고정 헤더는 아직 컴포넌트가 직접 예약한다.
+   - **부분 행 클리핑**: 걸친 행을 자르는 경로는 섰다 — 셀이 자기 clip을 드는 ABI v169와 텍스트 op의 `clip`
+     필드로 알림 패널이 부분 카드를 자른다(SV5a). 다만 ML3b가 요구한 **경계 screenshot gate는 아직 없다**
+     (SV5a는 헤드리스 판정자만 더했다).
 
    각 컴포넌트 이주는 그 자체로 시각 회귀 위험이 크므로, `test-dock-visual-golden`처럼 **이주 전 캡처를
    골든으로 박고 이주 후 전체 프레임 픽셀 차이를 보이는** 절차를 따른다(무변경이 목표면 0픽셀이 증거다).

@@ -220,6 +220,18 @@ test "workspace restore toggle reads workspace.restore from the default config b
 
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "font.size = 15\n" });
     try std.testing.expectEqual(@as(u32, 1), maru_macos_workspace_restore_enabled());
+
+    // **끈 줄이 있어도 못 읽으면 복원이 켜진다**(forgiving) — 그래서 사유가 남아야 한다. 로더는 에러가 아니라
+    // provenance 로 알린다: 에러 갈래(`catch`)만 보던 예전 로그는 이 경우 아무것도 안 찍었다.
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "workspace.restore = false\n" });
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path.ptr, 0o000));
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_workspace_restore_enabled());
+    var unreadable = try maru.config.loader.loadDefault(std.testing.io, std.testing.allocator);
+    defer unreadable.deinit();
+    try std.testing.expectEqualStrings("unreadable", restoreConfigReadIssue(unreadable.file_provenance).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), restoreConfigReadIssue(.missing));
+    try std.testing.expectEqual(@as(?[]const u8, null), restoreConfigReadIssue(.readable));
+    try std.testing.expectEqualStrings("oversize", restoreConfigReadIssue(.oversize).?);
 }
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -744,7 +756,21 @@ pub export fn maru_macos_workspace_restore_enabled() u32 {
         return 1;
     };
     defer parsed.deinit();
+    if (restoreConfigReadIssue(parsed.file_provenance)) |issue| {
+        std.log.scoped(.app).warn("workspace.restore: config file {s} — restoring (default)", .{issue});
+    }
     return @intFromBool(parsed.config.workspace.restore);
+}
+
+/// 설정 파일이 **있는데 못 읽었으면** 그 사유. 로더는 이때도 에러 없이 기본값을 돌려주므로(forgiving) 복원이 켜진다 —
+/// 사용자가 `workspace.restore = false` 로 끈 줄을 못 본 것일 수 있어 남긴다. 파일이 없는 것은 정상(사유 없음).
+/// 2026-10-02 전에는 OOM(유일한 에러)만 남겨, 권한·크기 실패가 조용히 「복원 켬」이 됐다.
+fn restoreConfigReadIssue(provenance: maru.config.loader.FileProvenance) ?[]const u8 {
+    return switch (provenance) {
+        .missing, .readable => null,
+        .unreadable => "unreadable",
+        .oversize => "oversize",
+    };
 }
 
 pub export fn maru_macos_app_set_ui_locale(tag_ptr: ?[*]const u8, tag_len: usize) void {

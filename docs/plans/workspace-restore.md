@@ -32,8 +32,9 @@ TDD 방식:
     무슨 오류로 실패했는지 말하고, 복원이 조용히 버린 것은 `workspace restore dropped: kind=<file-panel-entry|explorer-root|
     browser-term|browser-url|untitled-term|scm-base> reason=… path=…|tab=… pane=… record=…|number=… record=kept|count=…`
     한 줄씩 남는다(브라우저 Term 은 URL 대신 위치 — 쿼리에 토큰이 있을 수 있다. 이름 없는 문서는 레코드가 디스크에
-    남아 다음 실행이 다시 시도한다). `workspace.restore` 설정을 못 읽으면 `workspace.restore: config read failed err=…`
-    를 남기고 기본값(복원)으로 간다. 리다이렉트는 lease 직후라 이 줄들은 Dock·Finder 실행에서도 남는다.
+    남아 다음 실행이 다시 시도한다). 설정 파일이 있는데 못 읽으면(권한·1 MiB 초과)
+    `workspace.restore: config file <unreadable|oversize>` 를, 메모리가 모자라 못 읽으면 `config read failed err=…`
+    를 남기고 기본값(복원)으로 간다 — 로더는 앞의 둘을 에러가 아니라 provenance 로 알린다(파일 없음은 정상). 리다이렉트는 lease 직후라 이 줄들은 Dock·Finder 실행에서도 남는다.
     별도 리포트 파일 대신 이 자리를 쓴 이유: 실패 즉시 append 되어 크래시에도 남고, 이미 같은 권한으로 진단을 모으는 곳이다.
 
 ### 설계·결정 (window-aware, 사용자 결정 2026-06-14)

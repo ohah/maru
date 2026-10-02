@@ -12959,8 +12959,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return Int32(r)
     }
 
-    /// Restore-incomplete 실행도 mutation generation은 추적하되 background publication만 막는다. 그래야 C4 final
-    /// Quit이 secure `.bak` 보존 뒤 현재 전체 모델을 게시해 다음 실행의 자기영속 restore drop을 끊을 수 있다.
+    /// Restore-incomplete 실행도 mutation generation은 추적하되 background publication을 막는다. **final Quit 도
+    /// 게시하지 않는다** — `beginFinalWorkspaceCheckpoint` 가 같은 래치로 건너뛴다(2026-09-13, 「keeping the file」).
+    /// 이 주석은 예전에 「final Quit 이 현재 모델을 게시한다」고 적어 지금 동작과 어긋나 있었다.
     private func armWorkspaceCheckpoint(initialDirty: Bool) {
         guard !workspaceCheckpointArmed, !smokeMode else { return }
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }

@@ -10,6 +10,8 @@
 ```sh
 sh tools/mobile-harness/run.sh chrome-ios          # 시뮬레이터에 설치·실행 + 스크린샷
 sh tools/mobile-harness/run.sh chrome-android-app  # 에뮬레이터에 설치·실행 + 스크린샷
+MARU_MOBILE_BUILD_ONLY=1 sh tools/mobile-harness/run.sh chrome-android-app  # 설치 없이 Android APK만 빌드
+MARU_MOBILE_BUILD_ONLY=1 MARU_MOBILE_ISOLATED_TEST=1 sh tools/mobile-harness/run.sh chrome-android-app  # 별도 dev.maru.chrome.linktest APK
 sh tools/mobile-harness/run.sh present-ios         # present 페이싱을 표시 클럭으로 실측
 sh tools/mobile-harness/run.sh features-android    # Vulkan 으로 여섯 기능 판정
 sh tools/mobile-harness/run.sh features-ios        # 같은 판정 (5 PASS / 1 FAIL — 아래)

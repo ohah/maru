@@ -529,6 +529,15 @@ iOS 가 딱 그 두 자리에서만 보고 있었고, Android 는 처음부터 �
 **네 단계를 다 받는다**(down·move·up·cancel — `maru_mobile_pointer`). 그래서 탭과 롱프레스가
 갈리고(코어가 프레임 시각으로 판정), 끌면 스크롤이 된다.
 
+터미널 본문의 짧은 탭은 **코어가 down·up 양쪽 셀에서 같은 HTTP(S) URL을 찾은 경우에만**
+링크 열기로 소비한다. 자동 웹 링크와 OSC 8 명시 링크는 기존 `terminal.selection.extractUrlAt`을
+재사용하고, 외부로 내보내기 전 `file_panel_bridge.isExplicitHttpLink`의 길이·스킴·형식
+게이트를 지난다. URL이 아니면 기존 커서 행 키보드 올리기 동작으로 돌아간다. 드래그·
+롱프레스·cancel은 열지 않는다. 원격 셸의 파일 경로를 폰의 로컬 파일로 오인하지 않도록
+파일 경로와 웹 이외의 스킴은 이 터치 경로에서 열지 않는다. 브리지는 URL 한 건만
+`maru_mobile_take_open_url`로 게시하고, iOS는 `UIApplication.openURL`, Android는
+`ACTION_VIEW`를 실행한다. 작은 host 버퍼에는 URL을 자르지 않고 요청을 보존한다.
+
 #### 어디로 갈지는 코어가 정한다 (R)
 
 **`down` 이 목적지를 정하고, 그 제스처는 끝까지 거기로 간다.** 목적지는 셋이고 순서가 있다 —

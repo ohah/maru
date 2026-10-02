@@ -717,6 +717,28 @@ public class MaruActivity extends android.app.NativeActivity {
         android.util.Log.i("MaruChrome", "MARU_COPY len=" + text.length());
     }
 
+    /** 코어가 고른 웹 URL을 시스템 브라우저로 연다. UI 스레드가 아닌 NativeActivity
+     * 입력 스레드에서 불리므로 UI 스레드로 넘긴다. 앱·파일 스킴은 여기서도 거부한다. */
+    public static void openWebUrl(final String text) {
+        final MaruActivity a = current;
+        if (a == null || text == null) return;
+        final android.net.Uri uri = android.net.Uri.parse(text);
+        final String scheme = uri.getScheme();
+        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https")) ||
+                uri.getHost() == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                try {
+                    Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+                    intent.addCategory(Intent.CATEGORY_BROWSABLE);
+                    a.startActivity(intent);
+                } catch (android.content.ActivityNotFoundException | SecurityException e) {
+                    android.util.Log.w("MaruChrome", "MARU_LINK no_handler");
+                }
+            }
+        });
+    }
+
     /** OS 값을 코어에 알린다. **재개할 때마다** 다시 읽는다 — 사용자가 설정을 바꾸고
      *  돌아올 수 있고, 그때 옛 값을 쓰면 접근성 설정이 무시된다. */
     private void applyLongPressTimeout() {

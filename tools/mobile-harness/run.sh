@@ -360,6 +360,13 @@ chrome-android-app)
     sed 's|<application |<application android:debuggable="true" |' \
         "$ANDROID/AndroidManifest.xml" > "$DEVMANIFEST"
     grep -q 'android:debuggable="true"' "$DEVMANIFEST" || { echo "개발 매니페스트에 debuggable 을 못 넣었다" >&2; exit 1; }
+    # 기존 실사용 APK와 서명이 달라도 삭제·덮어쓰지 않도록 실기기 검증용은
+    # 패키지 ID만 분리한다. Java R 클래스의 소유 패키지는 그대로 둔다.
+    set --
+    if [ "${MARU_MOBILE_ISOLATED_TEST:-0}" = 1 ]; then
+        [ "${MARU_MOBILE_BUILD_ONLY:-0}" = 1 ] || { echo "isolated test는 build only로 먼저 생성한다" >&2; exit 1; }
+        set -- --custom-package dev.maru.chrome --rename-manifest-package dev.maru.chrome.linktest
+    fi
     # **`R.java` 를 함께 뽑는다.** Java 가 우리 리소스를 이름으로 가리키려면(알림 아이콘이 그렇다)
     # 리소스 ID 상수가 필요한데, 그것은 aapt2 가 만든다 — 없으면 `android.R` 의 시스템 자원만 쓸 수
     # 있어 제품 아이콘을 못 단다(그래서 한동안 시스템 새로고침 아이콘을 빌려 쓰고 있었다).
@@ -368,6 +375,7 @@ chrome-android-app)
     rm -rf "$OUT/gen" && mkdir -p "$OUT/gen"
     "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
         --manifest "$DEVMANIFEST" -A "$OUT/assets" -R "$OUT/res.zip" \
+        "$@" \
         --java "$OUT/gen" \
         -o "$OUT/base.apk" --auto-add-overlay
     [ -s "$OUT/gen/dev/maru/chrome/R.java" ] || { echo "aapt2 가 R.java 를 안 냈다" >&2; exit 1; }
@@ -391,6 +399,12 @@ chrome-android-app)
     "$BT/zipalign" -f 4 "$OUT/base.apk" "$OUT/maru-chrome.apk"
     "$BT/apksigner" sign --ks "$OUT/debug.keystore" --ks-pass pass:android \
         --key-pass pass:android "$OUT/maru-chrome.apk"
+    # 실기기 배포 전 검증에서는 기존 앱/데이터를 건드리지 않고 APK만 만든다.
+    # 설치는 대상 기기와 서명을 확인한 뒤 명시적으로 한다.
+    if [ "${MARU_MOBILE_BUILD_ONLY:-0}" = 1 ]; then
+        echo "APK: $OUT/maru-chrome.apk (build only)"
+        exit 0
+    fi
     # **`adb install` 은 실패해도 exit 0 이다.** "Failure [...]" 를 찍고 0 을 내므로 `set -e`
     # 가 못 잡고, 스크립트는 옛 APK 가 그대로 깔린 채로 성공을 보고한다 — 실제로 그 상태에서
     # "고쳤는데 화면이 그대로" 를 한참 봤다. 출력을 판정한다.

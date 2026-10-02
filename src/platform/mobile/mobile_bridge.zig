@@ -93,6 +93,50 @@ comptime {
 const term_allocator = std.heap.page_allocator;
 var term_core: ?terminal.core.TerminalCore = null;
 
+/// 터미널 탭이 게시한 외부 URL. 브리지는 OS를 호출하지 않고, host가 제스처 끝에
+/// 한 번 가져가서 시스템 브라우저에 연다. 앞 요청을 새 탭으로 덮지 않는다.
+const max_open_url_bytes = maru.session.file_panel_bridge.max_http_link_bytes;
+var open_url_buf: [max_open_url_bytes]u8 = undefined;
+var open_url_len: usize = 0;
+
+/// 버퍼가 모자라면 URL 일부를 절대 넘기지 않고 요청을 보존한다.
+pub export fn maru_mobile_take_open_url(out: [*]u8, cap: u32) u32 {
+    if (open_url_len == 0) return 0;
+    if (cap < open_url_len) {
+        setLastError("open_url_buffer_small");
+        return 0;
+    }
+    const n = open_url_len;
+    @memcpy(out[0..n], open_url_buf[0..n]);
+    open_url_len = 0;
+    return @intCast(n);
+}
+
+fn queueTappedWebLink(core: *terminal.core.TerminalCore, down_x: f32, down_y: f32, up_x: f32, up_y: f32) bool {
+    if (open_url_len != 0 or screenTop() != .terminal) return false;
+    const down = bodyCell(down_x, down_y) orelse return false;
+    const up = bodyCell(up_x, up_y) orelse return false;
+    // 레이아웃은 갱신됐지만 코어 resize가 실패한 프레임에서는 두 크기가 다를 수 있다.
+    // 없는 셀을 링크 추출기에 넘기지 않는다.
+    if (down.row >= core.size.rows or up.row >= core.size.rows or
+        down.col >= core.size.cols or up.col >= core.size.cols) return false;
+    const first = terminal.selection.extractUrlAt(core, term_allocator, down.row, down.col, terminal.link_scopes_web) catch {
+        setLastError("open_url_extract");
+        return false;
+    } orelse return false;
+    defer term_allocator.free(first.text);
+    if (first.kind != .url or !maru.session.file_panel_bridge.isExplicitHttpLink(first.text)) return false;
+    const last = terminal.selection.extractUrlAt(core, term_allocator, up.row, up.col, terminal.link_scopes_web) catch {
+        setLastError("open_url_extract");
+        return false;
+    } orelse return false;
+    defer term_allocator.free(last.text);
+    if (last.kind != .url or !std.mem.eql(u8, first.text, last.text)) return false;
+    @memcpy(open_url_buf[0..first.text.len], first.text);
+    open_url_len = first.text.len;
+    return true;
+}
+
 /// 파싱된 모바일 config. **파일이 단일 출처**이고 host 가 바이트를 넘긴다(계약 §7 — 브리지엔 OS
 /// 호출이 없다). 없으면 기본값으로 돈다 — 설정을 한 번도 안 건드린 기기가 정상 상태다.
 var cfg_parsed: ?mobile_config.Parsed = null;
@@ -2912,7 +2956,12 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             // (`?25l`)으로 커서를 끄고, 스크롤백을 보는 중에는 커서가 화면 밖이다. 그때는 근거가
             // 없으므로 **아무 데나 두드려도 올린다** — 판정할 수 없을 때 아무것도 안 하면
             // 사용자는 키보드를 못 부른다.
+            const down_x = body_press.down_x;
+            const down_y = body_press.down_y;
             if (body_press.end() == .tap) {
+                // 먼저 링크를 소비한다. 링크 탭이 키보드도 올리면 외부 브라우저로
+                // 전환되는 순간 소프트 키보드가 뜨는 부작용이 생긴다.
+                if (queueTappedWebLink(core, down_x, down_y, x, y)) return;
                 if (term_core) |*tc| {
                     const scrolled = tc.viewOffset() != 0;
                     const hit = maru_mobile_hit_cell(x, y);

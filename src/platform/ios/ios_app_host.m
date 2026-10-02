@@ -637,6 +637,21 @@ static NSArray<UIAccessibilityCustomAction *> *maruA11yActions(unsigned int inde
         [UIPasteboard.generalPasteboard setData:d forPasteboardType:@"public.utf8-plain-text"];
         NSLog(@"MARU_COPY len=%u", cn);
     }
+    // 코어가 터미널 셀에서 HTTP(S) 링크를 판정한다. 여기서는 OS에 열기만
+    // 맡긴다 — 브리지에 UIKit 호출을 넣으면 Android와 다른 링크 규칙이 된다.
+    unsigned char url_buf[8192];
+    unsigned int un = maru_mobile_take_open_url(url_buf, sizeof url_buf);
+    if (un > 0) {
+        NSString *text = [[NSString alloc] initWithBytes:url_buf length:un encoding:NSUTF8StringEncoding];
+        NSURL *url = text ? [NSURL URLWithString:text] : nil;
+        if (url) {
+            [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
+                NSLog(@"MARU_LINK opened=%d bytes=%u", success, un);
+            }];
+        } else {
+            NSLog(@"MARU_LINK invalid_url bytes=%u", un);
+        }
+    }
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {

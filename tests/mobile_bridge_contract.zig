@@ -925,6 +925,95 @@ test "재현: 커서가 숨으면 아무 데나 두드려도 키보드가 올라
     bridge.maru_mobile_clear_error();
 }
 
+// 링크 판정은 터미널 코어가, 열기는 OS host가 소유한다. 탭만 요청을 게시하고
+// 드래그·롱프레스·일반 셀은 키보드/선택 경로를 그대로 지나야 한다.
+test "모바일 본문 링크 탭은 HTTP URL을 한 번만 host에 넘긴다" {
+    enterTerminal();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_take_keyboard_raise();
+    var out: [8192]u8 = undefined;
+    _ = bridge.maru_mobile_take_open_url(&out, out.len);
+    const line = "\x1b[2J\x1b[Hhttps://example.com/a?q=1 plain";
+    _ = bridge.maru_mobile_term_write(line, line.len);
+
+    const link = pointForCell(0, 8) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, link.x, link.y, now());
+    bridge.maru_mobile_pointer(2, 1, link.x, link.y, now());
+    const n = c_abi.maru_mobile_take_open_url(&out, out.len); // 헤더 타입과 Zig export도 함께 확인한다
+    try std.testing.expectEqualStrings("https://example.com/a?q=1", out[0..n]);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_open_url(&out, out.len));
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_keyboard_raise());
+
+    const plain = pointForCell(0, 27) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 1, plain.x, plain.y, now());
+    bridge.maru_mobile_pointer(2, 1, plain.x, plain.y, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_open_url(&out, out.len));
+    endAnyGesture();
+}
+
+test "모바일 링크는 이동·롱프레스·짧은 host 버퍼로 열리지 않거나 잘리지 않는다" {
+    enterTerminal();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    var out: [8192]u8 = undefined;
+    _ = bridge.maru_mobile_take_open_url(&out, out.len);
+    const line = "\x1b[2J\x1b[Hhttps://example.com/long";
+    _ = bridge.maru_mobile_term_write(line, line.len);
+    const link = pointForCell(0, 8) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 2, link.x, link.y, now());
+    bridge.maru_mobile_pointer(1, 2, link.x + 25, link.y + 25, now());
+    bridge.maru_mobile_pointer(2, 2, link.x + 25, link.y + 25, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_open_url(&out, out.len));
+
+    bridge.maru_mobile_pointer(0, 2, link.x, link.y, now());
+    holdPast(600);
+    bridge.maru_mobile_pointer(2, 2, link.x, link.y, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_open_url(&out, out.len));
+    clearSelection(link.x, link.y); // 선택이 화면 밖으로 밀리기 전에 지운다
+
+    // 앞선 드래그가 뷰포트를 움직였을 수 있으므로 새 화면을 같은 위치에 둔다.
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_term_write(line, line.len);
+    const again = pointForCell(0, 8) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 2, again.x, again.y, now());
+    bridge.maru_mobile_pointer(2, 2, again.x, again.y, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_open_url(&out, 4));
+    const n = bridge.maru_mobile_take_open_url(&out, out.len);
+    try std.testing.expectEqualStrings("https://example.com/long", out[0..n]);
+    endAnyGesture();
+    const blank = pointForCell(1, 0) orelse return error.TestUnexpectedResult;
+    clearSelection(blank.x, blank.y); // 이 테스트의 롱프레스 선택을 다음 테스트에 남기지 않는다
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_has_selection());
+    _ = bridge.maru_mobile_take_keyboard_raise();
+}
+
+test "모바일 OSC 8은 웹 URL만 열고 파일 URI는 거부한다" {
+    enterTerminal();
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    var out: [8192]u8 = undefined;
+    _ = bridge.maru_mobile_take_open_url(&out, out.len);
+    const line = "\x1b[2J\x1b[H\x1b]8;;https://example.com/osc\x1b\\go\x1b]8;;\x1b\\ " ++
+        "\x1b]8;;file:///tmp/remote.txt\x1b\\file\x1b]8;;\x1b\\";
+    _ = bridge.maru_mobile_term_write(line, line.len);
+
+    const file = pointForCell(0, 4) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 3, file.x, file.y, now());
+    bridge.maru_mobile_pointer(2, 3, file.x, file.y, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_open_url(&out, out.len));
+
+    const web = pointForCell(0, 0) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 3, web.x, web.y, now());
+    bridge.maru_mobile_pointer(2, 3, web.x, web.y, now());
+    const n = bridge.maru_mobile_take_open_url(&out, out.len);
+    try std.testing.expectEqualStrings("https://example.com/osc", out[0..n]);
+    endAnyGesture();
+}
+
 // **연결이 없으면 컨트롤 축의 잔해를 말하지 않는다.** 끊기면 채널도 함께 죽는데, 그 종료 코드가
 // 127 로 잡혀 목록이 `그 기계에 maru 가 없다` 고 했다 — 서버에는 멀쩡히 있었고 사용자가 고칠
 // 것은 아무것도 없었다(기기 실측). **틀린 안내는 침묵보다 나쁘다.**

@@ -1,7 +1,7 @@
 # 공유 편집기 복원 포맷 — 검토안
 
-상태: 설계 검토. 2026-10-03 사용자는 복원 포맷을 구현하기 전에 검토하기로 선택했다.
-이 문서는 새 포맷의 승인이나 구현 완료를 뜻하지 않는다. 사용자용 분할 명령은 복원 gate까지 닫은 뒤 공개한다.
+상태: v2 방향 선택, 상세 설계 검토 완료·codec 미착수. 2026-10-03 사용자는 문서/뷰를 분리하는 v2 설계 진행에 동의했다.
+v2 방향은 선택됐지만 이 문서의 wire 예시는 구현 완료를 뜻하지 않는다. 사용자용 분할 명령은 복원 gate까지 닫은 뒤 공개한다.
 진행 순서는 [공유 문서 계획](editor-shared-document.md), 기존 백업 계약은
 [문서 모델](../native-editor-document-model.md)과 [workspace 복원](../workspace-restore.md)이 소유한다.
 
@@ -18,8 +18,8 @@
 | 방법 | 장점 | 문제 | 판단 |
 |---|---|---|---|
 | 기존 `file-term`에 같은 경로만 반복 | 기존 reader가 파일 탭을 읽을 수 있음 | 공유와 독립 문서를 구분하지 못하며, 뷰 상태도 없음. 경로 별칭·권한 정책을 암묵적으로 바꿈 | 단독 사용하지 않음 |
-| v1의 기존 줄에 선택적 공유 관계·뷰 상태 필드 추가 | 기존 파일을 그대로 읽고, 없는 필드는 기존 동작 유지. 새 line kind가 없어 기존 줄 구조를 유지함. 기존 필드 수 한도 안에서만 옛 reader 파싱 가능 | 옛 reader는 공유 관계를 무시하므로 downgrade에서 두 독립 문서가 될 수 있음. 필드/줄 한도 검증 필요 | 첫 로컬·같은 창 슬라이스에 권장, 사용자 검토 필요 |
-| v2의 문서 표와 뷰 참조를 분리 | 전체 구조가 명확하고 창 간 공유까지 표현 가능 | 새 writer/reader·host 캡처 조정·마이그레이션·downgrade 보호가 한 번에 필요 | 창 간 공유까지 같은 포맷에서 지원해야 한다면 재검토 |
+| v1의 기존 줄에 선택적 공유 관계·뷰 상태 필드 추가 | 기존 파일을 그대로 읽고, 없는 필드는 기존 동작 유지. 새 line kind가 없어 기존 줄 구조를 유지함. 기존 필드 수 한도 안에서만 옛 reader 파싱 가능 | 옛 reader는 공유 관계를 무시하므로 downgrade에서 두 독립 문서가 될 수 있음. 필드/줄 한도 검증 필요 | 비선택: 구조 분리와 downgrade 손실을 우선함 |
+| v2의 문서 표와 뷰 참조를 분리 | 전체 구조가 명확하고 창 간 공유까지 표현 가능 | 새 writer/reader·host 캡처 조정·마이그레이션·downgrade 보호가 한 번에 필요 | 선택: 첫 구현은 같은 창 로컬 문서로 제한 |
 
 ‘옛 reader가 읽는다’와 ‘옛 reader에서도 공유 의미가 유지된다’는 별개다.
 선택적 필드 방식은 전자만 제공한다. 새 workspace를 구버전이 다시 저장하면 추가 필드는 사라질 수 있다.
@@ -27,10 +27,10 @@
 같은 backup identity로 서로 다른 내용을 쓸 수 있다. downgrade를 지원한다고 선언하려면
 이 손실 경로의 차단/보존 방법도 구현·검증해야 한다. 필드를 무시한다는 사실만으로 안전하다고 보지 않는다.
 
-## 권장 표현의 의미
+## 이전 선택적 필드안의 의미 — 비교용
 
 첫 슬라이스는 일반 로컬 문서·같은 창의 공유 분할에 한정한다. untitled·원격·diff/merge는 기존 지원 gate 없이 합치지 않는다.
-아래 키/값은 검토용 문법이며 제품 reader/writer에는 아직 넣지 않았다.
+아래 키/값은 비선택한 v1 안의 비교용 문법이며 제품 reader/writer에는 넣지 않는다.
 
 ```mermaid
 flowchart TD
@@ -104,11 +104,88 @@ AppSession 내부 순회에 의존하는 제약을 먼저 해결해야 한다. �
 | 구버전으로 새 파일 열고 재저장 | 공유 의미 손실 가능성을 별도 검증·명시 |
 | 다른 창 이동·한 창 종료 | 창 간 소유/공유 게시 gate 없이는 노출하지 않음 |
 
-## 결정 제안
+## 선택한 v2 설계
 
-현재 창별 캡처와 기존 v1 유지가 우선이면 선택적 필드 방식으로 일반 로컬 공유 분할부터 구현한다.
-구버전 재저장에서도 공유 의미를 보장하거나 첫 공개에서 창 간 공유까지 필요하다면 v2와 host 캡처 경계를 함께 설계한다.
-두 요구를 선택적 필드만으로 모두 충족한다고 주장하지 않는다. 사용자 검토 후 표현·호환 경계를 확정한다.
+문서 정본과 뷰 참조를 분리한다. 기존 `workspace.Window`의 창별 캡처 경계를 유지하며
+각 Window 블록 안에 문서 표를 둔다. 문서 번호는 창 안에서만 유효하다. 앱 전체 표나 창 간 공유는
+이번에 구현하지 않으며, v2라는 이름만으로 장래 기능의 완성이나 추가 버전 변경 불필요를 보장하지 않는다.
+
+### 값 모델과 wire 책임
+
+`src/session/workspace.zig`가 v1/v2 reader, v2 writer, 참조 검증을 소유한다.
+`Window`에 문서 descriptor 목록, `Pane`에 편집 뷰 목록을 추가하는 모델을 사용한다.
+아래는 구현할 필드의 의미이며 정확한 키 철자/목록 인코딩은 codec 커밋에서 한 곳에 정의한다.
+
+| 레코드 | 소유하는 값 | 불변식 |
+|---|---|---|
+| 창 문서 | 창 내부 document index, 일반 로컬 path, kind, disk/base fingerprint, 현재 내용 지문 | 같은 lease만 같은 index. 경로가 같아도 다른 lease는 다른 index |
+| pane 뷰 | persisted Term index, document index, mode, 독립 선택·스크롤·wrap·접힘 | 하나의 위치에 하나의 Term. 뷰는 존재하는 문서만 참조 |
+| 기존 비편집 Term | 현재 surface/file/browser/untitled/remote 레코드 | 기존 종류별 복원 정책 유지 |
+
+v2에서 일반 로컬 editor는 entry 유무와 관계없이 뷰 레코드로 저장한다. 같은 Term을
+`file-term`에도 중복 기록하지 않는다. file preview 등 기존 비편집 파일 레코드는 유지한다.
+뷰의 persisted index는 기존 terminal/file 시퀀스에 포함하고, browser/untitled/remote의
+`insert_after`는 이 시퀀스의 개수를 기준으로 캡처한다. active Term remap 역시 동일 소유자가 계산한다.
+연결 뷰가 모두 없거나 참조가 없는 문서 descriptor는 정상 writer가 만들지 않는다.
+권한과 실행 중 handle/generation은 직렬화 identity로 사용하지 않는다.
+
+### 같은 시점의 캡처
+
+기존 메인 스레드의 동기 창 캡처 안에서 문서 descriptor와 각 뷰의 상태를 owned bytes로 복사한다.
+이 캡처 구간에는 await, 이벤트 루프 재진입, IME 확정이나 편집을 일으키는 callback을 넣지 않는다.
+문서 revision을 캡처 시작/종료에 대조하여 다르면 전체 창 캡처를 실패시킨다. 일부 문서/뷰만
+저장하거나 무한 재시도하지 않는다. 기존 host의 전체 Window 수집 실패 정책으로 마지막 완전본을 보존한다.
+복사 뒤 직렬화는 owned 모델만 읽으며 런타임 뷰 포인터를 읽지 않는다.
+IME marked text는 저장하지 않고 이미 확정된 정본 revision만 캡처한다.
+
+### 한도 초과와 부분 손상
+
+writer는 전체 모델·참조·필드 예산을 사전 검증한 뒤 출력한다. 한도 초과 또는 OOM이면
+전체 checkpoint를 실패시켜 이전 완전본을 보존한다. 뷰 상태만 잘라내거나 일부 Window만 게시하지 않는다.
+기존 `workspace.max_line_fields` 등 적용 가능한 한도와 host 버퍼 계약을 사용하며,
+동적 선택/접힘 목록의 전체 payload 예산은 codec 구현에서 실제 버퍼 경계와 대조한다.
+단순 동적 배열 사용이 입력 크기 검증을 대체하지 않는다.
+
+문서 참조 누락·중복 Term 위치·중복 문서 번호·종류/신원 충돌은 구조 손상으로 거절한다.
+기존 parser가 전체 manifest를 거절하는 `BadLine` 경계를 유지하며 새 부분 성공 모드를 만들지 않는다.
+새 reader의 거절은 기존 파일 self-heal을 허용한다는 뜻이 아니다. v2 원본·backup을 보존하고
+restore-incomplete latch로 자동 checkpoint 덮어쓰기를 막아야 한다.
+파일 접근 실패나 staged 뷰 준비 실패도 해당 창 publication을 하지 않는다.
+모든 창의 live 모델을 하나의 거래로 교체한다는 보장은 없으며, 기존 host의 창별 restore accounting을 따른다.
+내용 지문 불일치는 구조 손상과 구분한다. 정본 복구는 기존 충돌 경로를 따르고
+선택·스크롤·접힘은 안전한 기본 표시로 열며 degraded 상태를 관측한다.
+
+### v1 migration과 downgrade
+
+새 reader는 v1을 계속 읽는다. 공유 정보가 없는 v1의 같은 경로 레코드는 각기 독립 문서로 복원한다.
+v1 원본을 그 자리에서 v2로 덮지 않는다. 첫 완전한 capture/publication 성공 후 v2 파일을 생성하며
+실패 시 v1과 미저장 backup을 보존한다. v2가 없을 때만 v1을 가져오고, v2가 있는데 손상됐다면
+오래된 v1로 조용히 돌아가지 않는다. 복구 안내와 기존 보존 latch를 사용한다.
+
+v2는 별도 `workspace.v2`와 자체 temp/backup 이름을 사용한다. Swift URL·헤더 집계와
+`workspace_checkpoint_file.zig`의 고정 leaf를 함께 변경한다. 동시에 두 writer가 다른 버전을 쓰지 않도록
+기존 `workspace.v1.lock`의 앱 단일 소유 잠금은 유지한다. 버전별 lock으로 분리하지 않는다.
+새 바이너리는 v2 운영 중 v1 projection을 자동으로 다시 쓰지 않는다.
+
+이 정책은 구버전이 v2 manifest를 덮는 것을 막는다. **구버전 downgrade 편집은 지원하지 않는다.**
+구버전은 남아 있는 v1의 오래된 layout을 열 수 있으며 기존 document backup 경로도 공유한다.
+따라서 v2 파일 분리만으로 미저장 backup의 downgrade 안전성까지 보장하지 않는다.
+백업 namespace를 바꾸거나 구버전 실행을 강제로 막는 별도 정책은 이번 범위에 넣지 않는다.
+공개 전 이 한계를 복구 안내와 검증 매트릭스에 명시하고 downgrade에서 backup 손실을
+막는다고 주장하지 않는지 판정한다.
+
+### 구현 순서와 완료 판정
+
+1. codec: v1 reader 유지, v2 값 모델/reader/writer, 참조 검증. 결정론적 round-trip,
+   혼합 Term 순서, 손상 입력, OOM, 크기 한도 판정과 compile-valid mutation으로 확인한다.
+2. capture/restore: entryless 뷰 캡처, same-revision 검사, 문서당 한 번 backup 적용,
+   모든 뷰 staging과 창 publication. 각 실패 지점에서 기존 tree/lease/backup 보존을 확인한다.
+3. host migration: Swift 집계·ABI 헤더·고정 publisher leaf·backup re-arm·동일 lock을 함께 연결한다.
+   v1→v2 첫 저장 실패, v2 손상, atomic replace 전후 crash와 구버전 manifest 격리를 검증한다.
+4. 재시작과 제품 화면: dirty 두 pane, 독립 선택/스크롤/접힘, 마지막 뷰 닫기, IME 확정 후 재시작을 검증한다.
+   이 gate를 통과한 뒤 사용자용 분할 action/chord를 연결한다.
+
+현재 완료는 위 설계의 구체화다. codec·migration·실제 재시작·GUI gate는 미착수다.
 
 ## 설계 반례 검토 — 2026-10-03
 
@@ -129,5 +206,5 @@ AppSession 내부 순회에 의존하는 제약을 먼저 해결해야 한다. �
 5. **검증 주장 반례:** 내부 pane fixture와 방향·MRU·접힘·마지막 뷰 닫기 검사는 실제 새 codec, downgrade 재저장, 재시작 복원, OS IME 또는 두 pane의 화면 결과를 입증하지 않는다. 이들은 각각 후속 구현/공개 gate이며 초안 PR의 내부 구현 통과와 구분한다. 같은 경로의 독립 문서는 공유하지 않는다는 요구와 기존 backup identity 충돌 가능성도 구분한다. 공유 레코드만으로 기존 독립 문서 백업 문제까지 해결했다고 주장하지 않는다.
 
 이번 다섯 회는 서로 다른 반례 축으로 현재 소스·설계·검증 범위를 다시 대조한 것이다.
-캡처 경계, 한도 초과 처리, 부분 손상 처리와 downgrade 보호는 아직 설계 판정 항목이며,
-이를 임의로 선택해 codec에 구현하지 않는다.
+이 검토 당시에는 캡처 경계, 한도 초과 처리, 부분 손상 처리와 downgrade 보호가 미결이었다.
+이후 선택한 v2 설계 절에 처리 방향을 구체화했다. codec 구현과 실행 검증은 별도 완료 gate다.

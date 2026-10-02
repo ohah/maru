@@ -468,6 +468,8 @@ fn marksTurnProgress(ev: event.Event) bool {
 
 /// Reject before all consumer side effects, including identity, cwd and tool labels.
 pub fn ignoresEvent(progress: *const Progress, ev: event.Event) bool {
+    // Unsupported/oversized markers remain observable, but cannot prove turn progress.
+    if (ev.kind == .unknown or ev.kind == .oversized) return true;
     if (ev.agent_id.len != 0) return false;
     var session_buf: [65]u8 = undefined;
     const session = event.decodeInto(&session_buf, ev.session_id);
@@ -489,6 +491,14 @@ pub fn ignoresEvent(progress: *const Progress, ev: event.Event) bool {
 pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
     if (ignoresEvent(progress, ev)) return current;
     progress.adoptSession(ev);
+    // An explicit prompt starts a new turn even when payload folding lost its ID.
+    // Retire the old ID now, so a delayed Stop cannot close this unidentified turn.
+    if (ev.agent_id.len == 0 and ev.kind == .user_prompt_submit and
+        (ev.turn_key.len == 0 or ev.turn_key.len > progress.turn_buf.len))
+    {
+        progress.retired_turns.add(progress.turnKey());
+        progress.turn_len = 0;
+    }
     if (ev.agent_id.len == 0 and ev.kind == .post_tool_use and isCodexQuestion(ev)) {
         _ = progress.answerQuestion(ev.tool_use_id);
         return if (progress.hasPendingQuestions() or progress.approval_pending) .blocked else .running;
@@ -2369,4 +2379,143 @@ test "retired sessions reject delayed work and fresh sessions may reuse turn ids
     ev.kind = .pre_tool_use;
     try testing.expect(!ignoresEvent(&p, ev));
     try testing.expectEqual(State.running, advance(&p, state, ev));
+}
+
+test "ID 없는 새 프롬프트는 옛 턴을 은퇴시키고 첫 새 ID는 자식을 보존한다" {
+    for ([_][]const u8{ "", "x" ** 65 }) |missing| {
+        var p: Progress = .{};
+        var state = advance(&p, .idle, .{ .provider = "codex", .kind = .user_prompt_submit, .turn_key = "old" });
+        state = advance(&p, state, .{ .provider = "codex", .kind = .user_prompt_submit, .turn_key = missing });
+        try testing.expectEqualStrings("", p.turnKey());
+        state = advance(&p, state, .{ .kind = .subagent_start, .agent_id = "worker" });
+        for ([_]event.Kind{ .pre_tool_use, .stop, .stop_failure, .interrupt }) |kind|
+            state = advance(&p, state, .{ .provider = "codex", .kind = kind, .turn_key = "old" });
+        try testing.expectEqual(State.running, state);
+        try testing.expect(p.turn_open);
+        try testing.expect(!completionReady(&p, state, p.generation, 0, 1500));
+        const generation = p.generation;
+        state = advance(&p, state, questionFixture(.pre_tool_use, "question", "new"));
+        try testing.expectEqual(generation, p.generation);
+        try testing.expectEqual(@as(usize, 1), p.childCount());
+        try testing.expectEqual(State.blocked, state);
+        state = advance(&p, state, questionFixture(.post_tool_use, "question", "new"));
+        state = advance(&p, state, .{ .kind = .stop, .turn_key = "new" });
+        try testing.expectEqual(State.running, state);
+        state = advance(&p, state, .{ .kind = .subagent_stop, .agent_id = "worker" });
+        try testing.expectEqual(State.idle, state);
+        try testing.expect(completionReady(&p, state, p.generation, 0, 1500));
+    }
+}
+
+test "모르는 이벤트는 세션 질문 자식 턴 세대를 변경하지 않는다" {
+    var p: Progress = .{};
+    var state = advance(&p, .idle, .{ .kind = .user_prompt_submit, .session_id = "session", .turn_key = "turn" });
+    state = advance(&p, state, questionFixture(.pre_tool_use, "question", "turn"));
+    state = advance(&p, state, .{ .kind = .subagent_start, .agent_id = "worker" });
+    const before = p;
+    const ev = event.parseLine("codex\t{\"hook_event_name\":\"FutureEvent\",\"session_id\":\"other\",\"turn_id\":\"other-turn\",\"cwd\":\"/bad\"}").?;
+    try testing.expect(ignoresEvent(&p, ev));
+    try testing.expectEqual(State.blocked, advance(&p, state, ev));
+    try testing.expectEqualDeep(before, p);
+}
+
+test "적대적 R1 ID 없는 경계 뒤 옛 이벤트 3개 순열은 질문과 자식을 보존한다" {
+    const kinds = [_]event.Kind{ .pre_tool_use, .post_tool_use, .permission_request, .stop, .stop_failure, .interrupt };
+    for ([_][]const u8{ "", "x" ** 65 }) |missing| {
+        for (0..kinds.len * kinds.len * kinds.len) |n| {
+            var p: Progress = .{};
+            var state = advance(&p, .idle, .{ .kind = .user_prompt_submit, .turn_key = "old" });
+            state = advance(&p, state, .{ .kind = .user_prompt_submit, .turn_key = missing });
+            state = advance(&p, state, .{ .kind = .subagent_start, .agent_id = "worker" });
+            state = advance(&p, state, questionFixture(.pre_tool_use, "live", ""));
+            const generation = p.generation;
+            var index = n;
+            for (0..3) |_| {
+                state = advance(&p, state, .{ .provider = "codex", .kind = kinds[index % kinds.len], .turn_key = "old", .tool_name = "Bash" });
+                index /= kinds.len;
+            }
+            try testing.expectEqual(State.blocked, state);
+            try testing.expectEqual(@as(usize, 1), p.childCount());
+            try testing.expect(p.turn_open and p.hasPendingQuestions());
+            try testing.expectEqual(generation, p.generation);
+            try testing.expectEqualStrings("", p.turnKey());
+            // Learning the new ID after work began must preserve both the question and child.
+            state = advance(&p, state, .{ .kind = .pre_tool_use, .turn_key = "new", .tool_name = "Bash" });
+            try testing.expectEqual(State.blocked, state);
+            try testing.expectEqual(@as(usize, 1), p.childCount());
+            try testing.expect(p.hasPendingQuestions());
+        }
+    }
+}
+
+test "적대적 R2 미지원 이벤트는 모든 상태와 lead child 역할에서 무효다" {
+    for ([_]State{ .unknown, .idle, .running, .blocked }) |initial| {
+        for ([_][]const u8{ "", "worker" }) |role| {
+            for ([_][]const u8{ "FutureEvent", "__oversized__" }) |name| {
+                var p: Progress = .{};
+                _ = advance(&p, .idle, .{ .kind = .user_prompt_submit, .session_id = "live-session", .turn_key = "live-turn" });
+                _ = advance(&p, .running, questionFixture(.pre_tool_use, "question", "live-turn"));
+                _ = advance(&p, .blocked, .{ .kind = .subagent_start, .agent_id = "worker" });
+                var line: [256]u8 = undefined;
+                const payload = try std.fmt.bufPrint(&line, "codex\t{{\"hook_event_name\":\"{s}\",\"session_id\":\"untrusted-session\",\"turn_id\":\"untrusted-turn\",\"agent_id\":\"{s}\"}}", .{ name, role });
+                const ev = event.parseLine(payload).?;
+                const before = p;
+                try testing.expectEqual(initial, advance(&p, initial, ev));
+                try testing.expectEqualDeep(before, p);
+                try testing.expect(ignoresEvent(&p, ev));
+            }
+        }
+    }
+}
+
+test "적대적 R3 반복 ID 없는 경계와 세션 전환에서 은퇴 기록은 정확히 격리된다" {
+    var p: Progress = .{};
+    var state: State = .idle;
+    var identities: [16][16]u8 = undefined;
+    var lengths: [16]usize = undefined;
+    for (0..16) |i| {
+        const key = try std.fmt.bufPrint(&identities[i], "turn-{d}", .{i});
+        lengths[i] = key.len;
+        state = advance(&p, state, .{ .kind = .user_prompt_submit, .session_id = "session-a", .turn_key = key });
+        state = advance(&p, state, .{ .kind = .user_prompt_submit });
+        // Duplicate ID-less boundaries cannot consume extra slots in the retirement history.
+        state = advance(&p, state, .{ .kind = .user_prompt_submit });
+    }
+    for (identities, lengths) |key, len|
+        try testing.expect(ignoresEvent(&p, .{ .kind = .pre_tool_use, .turn_key = key[0..len] }));
+    state = advance(&p, state, .{ .kind = .user_prompt_submit, .session_id = "session-b", .turn_key = identities[0][0..lengths[0]] });
+    try testing.expectEqualStrings("turn-0", p.turnKey());
+    try testing.expectEqual(State.running, state);
+    const before = p;
+    try testing.expectEqual(state, advance(&p, state, .{ .kind = .pre_tool_use, .session_id = "session-a", .turn_key = "turn-15" }));
+    try testing.expectEqualDeep(before, p);
+    // An authoritative SessionStart may resume a retired session, including its old turn ID.
+    _ = advance(&p, state, .{ .kind = .session_start, .session_id = "session-a", .turn_key = "turn-0" });
+    try testing.expectEqualStrings("session-a", p.session_buf[0..p.session_len]);
+    try testing.expectEqualStrings("turn-0", p.turnKey());
+}
+
+test "적대적 R5 ID 없는 경계 뒤 완료 시각 세대 중복과 취소는 오발송을 막는다" {
+    var p: Progress = .{};
+    var state = advance(&p, .idle, .{ .kind = .user_prompt_submit, .turn_key = "old" });
+    state = advance(&p, state, .{ .kind = .stop, .turn_key = "old" });
+    const retired_generation = p.generation;
+    state = advance(&p, state, .{ .kind = .user_prompt_submit });
+    state = advance(&p, state, .{ .kind = .subagent_start, .agent_id = "worker" });
+    const active_generation = p.generation;
+    state = advance(&p, state, .{ .kind = .stop, .turn_key = "new" });
+    try testing.expectEqual(State.running, state);
+    state = advance(&p, state, .{ .kind = .subagent_stop, .agent_id = "worker" });
+    try testing.expectEqual(State.idle, state);
+    for ([_]u64{ 0, 999, 1000, 2499, 2500, 100000 }) |now| {
+        try testing.expectEqual(now >= 2500, completionReady(&p, state, active_generation, 1000, now));
+        try testing.expect(!completionReady(&p, state, retired_generation, 1000, now));
+    }
+    p.completion_notified = true;
+    try testing.expect(!completionReady(&p, state, active_generation, 1000, 100000));
+    state = advance(&p, state, .{ .kind = .user_prompt_submit });
+    state = advance(&p, state, .{ .kind = .subagent_start, .agent_id = "worker" });
+    state = advance(&p, state, .{ .kind = .interrupt });
+    state = advance(&p, state, .{ .kind = .subagent_stop, .agent_id = "worker" });
+    try testing.expect(!completionReady(&p, state, p.generation, 1000, 100000));
 }

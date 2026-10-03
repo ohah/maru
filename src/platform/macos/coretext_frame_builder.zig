@@ -757,12 +757,6 @@ pub fn buildDockNoticeDrawList(
     };
 }
 
-fn appendAscii(cells: *std.ArrayList(renderer.DrawCell), allocator: std.mem.Allocator, text: []const u8, row: u16, col: u16, style: terminal.Style) !void {
-    for (text, 0..) |ch, i| {
-        try cells.append(allocator, .{ .row = row, .col = col +| @as(u16, @intCast(i)), .codepoint = ch, .width = 1, .style = style });
-    }
-}
-
 /// 상태표시줄 항목 하나(아이콘 + 텍스트) 한 줄짜리 DrawList. 항목마다 **자기 frame**을 만들고 호출자가
 /// px origin에 놓는다(`chrome.components.status_bar`가 그 origin을 정한다) — 상태바는 터미널 grid 밖이라
 /// grid 행/열로는 그릴 수 없고(`metal_frame`이 `row >= frame.size.rows`를 버린다), 우측 정렬도 셀 경계가
@@ -2655,20 +2649,6 @@ test "buildFromDrawList interns faces into the shared RendererState registry (Fo
     // Menlo의 FontId가 frame 간 불변 = atlas cache key 안정(루트커즈 봉인). 뒤집힌 등장 순서로 다시 intern해도
     // idempotent라 새 순번을 안 받는다.
     try std.testing.expectEqual(menlo_id, try renderer_state.font_registry.intern(.{ .postscript_name = "Menlo-Regular" }));
-}
-
-fn cellAt(cells: []const renderer.DrawCell, row: u16, col: u16) ?renderer.DrawCell {
-    for (cells) |c| {
-        if (c.row == row and c.col == col) return c;
-    }
-    return null;
-}
-
-fn hasCell(cells: []const renderer.DrawCell, row: u16, codepoint: u32) bool {
-    for (cells) |c| {
-        if (c.row == row and c.codepoint == codepoint) return true;
-    }
-    return false;
 }
 
 // SB1-S3b: 상태표시줄 항목 빌더. 배치(`chrome.components.status_bar`)는 px 폭을 받으므로 이 frame의 `cols`가

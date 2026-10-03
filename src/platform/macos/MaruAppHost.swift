@@ -122,6 +122,17 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         }
     }
     let osrTooltipOwner = OsrTooltipOwner()
+
+    // W6c②: Chromium 탭 우클릭 메뉴의 「서비스」가 받을 선택한 글. 메뉴를 띄우는 동안만 있다 — 그때만 이 view 가 서비스 요청자다
+    // (터미널 선택은 서비스로 보내지 않는다 — 지금과 같다). 페이지 글을 바꿔 돌려주는 서비스(returnType)는 받지 않는다.
+    var osrServiceSelection: String?
+    /// 선택 글을 둔 차례 — 메뉴를 닫은 뒤 지우는 타이머가 다음 메뉴의 글까지 지우지 않게(W6c② 적대 검증).
+    var osrServiceGeneration: UInt64 = 0
+
+    override func validRequestor(forSendType sendType: NSPasteboard.PasteboardType?, returnType: NSPasteboard.PasteboardType?) -> Any? {
+        if osrServiceSelection != nil, sendType == .string, returnType == nil { return self }
+        return super.validRequestor(forSendType: sendType, returnType: returnType)
+    }
     var osrTooltipSerial: UInt64 = 0
     /// 없음 · 달려 있음 · 다음 움직임에 다시 달 것(누름·휠 뒤 — 영역을 떼어 두었다).
     enum OsrTooltipState { case none, attached, rearm }
@@ -7760,6 +7771,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
             drainOsrTooltip() // W6b: hover 중인 Chromium 탭의 툴팁 글이 바뀌었으면 macOS 툴팁을 다시 단다.
+            drainOsrContextMenu() // W6c②: Chromium 탭 우클릭 메뉴 — tick 이 끝난 뒤 macOS 메뉴로 띄우고, 페이지가 닫으면 거둔다.
             drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
             drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
             drainOsrLocation() // W5b2: 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다.
@@ -8576,6 +8588,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 Self.testReport("overlay \(anyOverlayOpen)")
             case "cursor":
                 Self.testReport("cursor \(Self.testCursorName(NSCursor.current))")
+            case "menu":
+                // W6c②: 띄운 우클릭 메뉴의 항목(판정 모드 — 띄우지 않는다).
+                Self.testReport(osrContextMenu.map { "menu items=\(Self.describeOsrMenu($0.menu))" } ?? "menu none")
+            case "menupick" where line.count >= 2:
+                testPickOsrContextMenu(line.dropFirst().joined(separator: " "))
+            case "menuclose":
+                testPickOsrContextMenu(nil)
             case "tooltip":
                 // W6b: maru 가 이 view 에 단 macOS 툴팁(단 글 — 줄바꿈은 \\n 으로). 띄우는 것은 macOS 다(맨 앞 앱일 때).
                 if let window, let terminal = Self.firstTerminalView(in: window.contentView) {
@@ -8700,6 +8719,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: next))
                     testSurface = surface
                 }
+            case "firstwindow":
+                // W6c②: 첫 창을 다시 대상으로(`newwindow` 뒤) — 창이 둘일 때 메뉴가 띄운 창의 것인지 본다.
+                testSurface = windows.first
             case "live" where line.count >= 2:
                 testLive(line, view)
             case "ime" where line.count >= 3:
@@ -9429,6 +9451,238 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         } else {
             view.refitOsrTooltip(rect)
         }
+    }
+
+    // ── W6c②: Chromium 탭 우클릭 메뉴 ──
+    // 무엇을 담을지는 Zig 가 정한다(`web_osr_context_menu` — Chrome 154 메뉴 순서·문구). Swift 는 NSMenu 로 옮겨 띄우고, 고른 것을
+    // 답한다. 찾기·음성·서비스·이모티콘은 macOS 기능이라 여기서 하고 sidecar 에는 취소로 답한다.
+    private struct OsrContextMenuShown {
+        let token: UInt32
+        let menu: NSMenu
+        let point: NSPoint
+        let selection: String
+        let services: NSMenu?
+        /// 메뉴를 띄운 창과 그 view. tick 은 창마다 돌고 메뉴 상태는 컨트롤러에 하나라, 닫힘 확인·답은 이 창의 세션으로만 한다 —
+        /// 다른 창의 tick 이 「그 창엔 메뉴가 없다」를 「닫혔다」로 읽어 메뉴를 곧바로 거두고 답을 엉뚱한 세션에 보냈다(W6c② 적대 검증).
+        let owner: TerminalSurface
+        let view: MaruMetalTerminalView
+    }
+    private var osrContextMenu: OsrContextMenuShown?
+    /// 메뉴에서 고른 항목(종류·명령) — 항목의 동작이 적고, 메뉴가 끝나면 읽는다.
+    private var osrContextMenuChoice: (kind: Int32, command: Int32)?
+    private var osrSpeech: NSSpeechSynthesizer?
+    private var osrServicesRegistered = false
+    /// 판정 전용(`MARU_WEB_OSR_TEST_CONTEXT_MENU`): 메뉴를 띄우지 않고(셸에서 띄운 앱은 맨 앞이 아니다) 항목을 보고하고 대본의
+    /// `menupick`·`menuclose` 를 기다린다. 값이 `cancel` 이면 곧바로 취소로 끝맺는다 — 메뉴를 보지 않는 단계의 우클릭(W4b 등)이
+    /// 진짜 메뉴를 띄우면 아무도 닫지 못해 앱이 끝나지 않았다(W6c② 스모크 — 메뉴가 떠 있는 동안 스모크 종료 타이머가 돌지 않는다).
+    private static let osrContextMenuTestValue = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_CONTEXT_MENU"]
+    private static let osrContextMenuTestMode = osrContextMenuTestValue != nil
+
+    private func drainOsrContextMenu() {
+        guard let session = appSession, let view = metalTerminalView, let owner = activeSurface else { return }
+        if let shown = osrContextMenu {
+            // 띄운 창의 tick 에서만 본다. 페이지가 이동했거나 탭이 닫혀 sidecar 가 닫았다 — 떠 있는 메뉴를 거둔다(끝맺음은 popUp 이
+            // 돌아온 뒤).
+            guard shown.owner === owner else { return }
+            if maru_macos_app_session_osr_context_menu_open(session, shown.token) == 0 {
+                if Self.osrContextMenuTestMode {
+                    Self.testReport("menu closed-by-page")
+                    finishOsrContextMenu(shown, choice: nil)
+                } else {
+                    shown.menu.cancelTracking()
+                }
+            }
+            return
+        }
+        var token: UInt32 = 0
+        var x = 0.0, y = 0.0
+        let count = maru_macos_app_session_osr_context_menu_take(session, &token, &x, &y)
+        guard count > 0 else { return }
+        let scale = archiveSmokeRenderScale(view.window)
+        let point = NSPoint(x: x / scale, y: view.bounds.height - y / scale)
+        let built = buildOsrContextMenu(session, token, Int(count))
+        let shown = OsrContextMenuShown(token: token, menu: built.menu, point: point,
+                                        selection: osrContextMenuSelection(session, token), services: built.services,
+                                        owner: owner, view: view)
+        osrContextMenu = shown
+        if Self.osrContextMenuTestMode {
+            Self.testReport("menu shown items=\(Self.describeOsrMenu(shown.menu))")
+            if Self.osrContextMenuTestValue == "cancel" { finishOsrContextMenu(shown, choice: nil) }
+            return
+        }
+        // tick 이 끝난 **뒤** 띄운다 — tick 안에서 띄우면 메뉴가 닫힐 때까지 tick 이 멈춘다(시험 앱 실측: 0 번). 띄운 동안은
+        // tick 이 그대로 돈다(.common 모드 타이머 — 0.8 s 에 63 번).
+        DispatchQueue.main.async { [weak self] in self?.popUpOsrContextMenu(shown) }
+    }
+
+    private func buildOsrContextMenu(_ session: OpaquePointer, _ token: UInt32, _ count: Int) -> (menu: NSMenu, services: NSMenu?) {
+        let menu = NSMenu(title: "")
+        menu.autoenablesItems = false
+        var submenu: NSMenu?
+        var services: NSMenu?
+        var label = [UInt8](repeating: 0, count: 1024)
+        for index in 0..<count {
+            var kind: Int32 = 0, command: Int32 = 0, enabled: Int32 = 0, depth: Int32 = 0
+            var length = 0
+            let ok = label.withUnsafeMutableBufferPointer {
+                maru_macos_app_session_osr_context_menu_item(session, token, UInt32(index), &kind, &command, &enabled, &depth,
+                                                             $0.baseAddress, $0.count, &length)
+            }
+            guard ok != 0 else { continue }
+            let title = String(decoding: label[0..<length], as: UTF8.self)
+            let target = depth > 0 ? (submenu ?? menu) : menu
+            if kind == 1 {
+                target.addItem(.separator())
+                continue
+            }
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            switch kind {
+            case 3: // 음성 ▸
+                let sub = NSMenu(title: title)
+                sub.autoenablesItems = false
+                item.submenu = sub
+                submenu = sub
+            case 6: // 서비스 ▸ — 항목은 macOS 가 채운다(띄우는 동안만 앱의 서비스 메뉴로 단다 — 시험 앱 실측)
+                let sub = NSMenu(title: title)
+                item.submenu = sub
+                services = sub
+            default:
+                item.action = #selector(osrContextMenuPicked(_:))
+                item.target = self
+                item.tag = Int(kind) * 256 + Int(command)
+                item.isEnabled = enabled != 0
+                if kind == 5 { item.isEnabled = osrSpeech?.isSpeaking == true } // 말하기 중지 — 말하는 중에만
+            }
+            target.addItem(item)
+        }
+        return (menu, services)
+    }
+
+    private func osrContextMenuSelection(_ session: OpaquePointer, _ token: UInt32) -> String {
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        var length = 0
+        let ok = buffer.withUnsafeMutableBufferPointer {
+            maru_macos_app_session_osr_context_menu_selection(session, token, $0.baseAddress, $0.count, &length)
+        }
+        return ok != 0 ? String(decoding: buffer[0..<length], as: UTF8.self) : ""
+    }
+
+    @objc private func osrContextMenuPicked(_ item: NSMenuItem) {
+        osrContextMenuChoice = (Int32(item.tag / 256), Int32(item.tag % 256))
+    }
+
+    private func popUpOsrContextMenu(_ shown: OsrContextMenuShown) {
+        guard osrContextMenu?.token == shown.token, let session = shown.owner.appSession else { return }
+        let view = shown.view
+        osrContextMenuChoice = nil
+        var picked = false
+        // 띄우기 전에 닫혔으면(페이지 이동) 띄우지 않는다.
+        if maru_macos_app_session_osr_context_menu_open(session, shown.token) != 0 {
+            var savedServices: NSMenu?
+            // 서비스는 이 view 가 키 응답자일 때만 — 서비스 요청자는 responder chain 으로 찾는다. 다른 view(WKWebView 패널 등)가
+            // 키면 그 선택이 서비스로 가므로 항목을 뺀다(W6c② 적대 검증).
+            let servicesUsable = shown.services != nil && !shown.selection.isEmpty && view.window?.firstResponder === view
+            if let services = shown.services, !servicesUsable { Self.removeOsrMenuItem(holding: services, from: shown.menu) }
+            if servicesUsable, let services = shown.services {
+                if !osrServicesRegistered {
+                    NSApp.registerServicesMenuSendTypes([.string], returnTypes: [])
+                    osrServicesRegistered = true
+                }
+                view.osrServiceSelection = shown.selection
+                view.osrServiceGeneration &+= 1
+                savedServices = NSApp.servicesMenu
+                NSApp.servicesMenu = services
+            }
+            picked = shown.menu.popUp(positioning: nil, at: shown.point, in: view)
+            if servicesUsable { NSApp.servicesMenu = savedServices }
+        }
+        // 고른 항목의 동작은 메뉴가 끝나며 온다 — 한 차례 뒤에 읽는다. 골랐다는데(popUp 이 true) 동작이 아직이면 몇 차례 더 기다린다.
+        func finishLater(_ turns: Int) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if picked, self.osrContextMenuChoice == nil, turns > 0 { return finishLater(turns - 1) }
+                self.finishOsrContextMenu(shown, choice: self.osrContextMenuChoice)
+            }
+        }
+        finishLater(5)
+    }
+
+    /// 하위 메뉴를 단 항목과 그 앞 구분선을 뺀다(구분선이 맨 끝·맨 앞에 남지 않게).
+    private static func removeOsrMenuItem(holding submenu: NSMenu, from menu: NSMenu) {
+        guard let index = menu.items.firstIndex(where: { $0.submenu === submenu }) else { return }
+        menu.removeItem(at: index)
+        if index > 0, index - 1 < menu.items.count, menu.items[index - 1].isSeparatorItem, index - 1 == menu.items.count - 1 {
+            menu.removeItem(at: index - 1)
+        }
+    }
+
+    /// 메뉴를 끝맺는다 — macOS 항목을 하고 sidecar 에 답한다(그 탭이 오른쪽을 쥔 채면 Zig 가 떼기를 보낸다). hover 를 지금 포인터
+    /// 자리로 다시 맞춘다(메뉴가 떠 있는 동안 view 는 이동을 받지 못했다).
+    private func finishOsrContextMenu(_ shown: OsrContextMenuShown, choice: (kind: Int32, command: Int32)?) {
+        guard osrContextMenu?.token == shown.token else { return }
+        osrContextMenu = nil
+        osrContextMenuChoice = nil
+        // 띄운 창의 세션·view 로 끝맺는다(그 사이 키 창이 바뀌었을 수 있다). 창이 닫혔으면 Zig 의 세션 정리가 취소했다.
+        let view = shown.view
+        guard let session = shown.owner.appSession, let window = view.window else { return }
+        var command: Int32 = 0
+        switch choice?.kind {
+        case 0: command = choice?.command ?? 0
+        case 2: view.showDefinition(for: NSAttributedString(string: shown.selection), at: shown.point)
+        case 4:
+            let speech = osrSpeech ?? NSSpeechSynthesizer()
+            osrSpeech = speech
+            speech.startSpeaking(shown.selection)
+        case 5: osrSpeech?.stopSpeaking()
+        default: break
+        }
+        let local = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        let scale = archiveSmokeRenderScale(window)
+        let xPx = Double(local.x * scale), yPx = Double((view.bounds.height - local.y) * scale)
+        // 지금 실제로 눌린 버튼 — 메뉴가 먹은 떼기만 Zig 가 대신 보낸다. 판정 모드의 입력은 합성 이벤트라 하드웨어 상태
+        // (`pressedMouseButtons`)에 나타나지 않는다 — 그때는 「메뉴가 먹는 것은 오른쪽 떼기뿐, 다른 버튼은 대본의 진짜 떼기가 온다」로
+        // 넘긴다(W4b 의 「왼쪽으로 끄는 중 오른쪽」이 왼쪽 떼기까지 빼앗겼다 — W6c② 스모크).
+        let pressed = Self.osrContextMenuTestMode ? UInt32(0b101) : UInt32(truncatingIfNeeded: NSEvent.pressedMouseButtons)
+        _ = maru_macos_app_session_osr_context_menu_answer(session, shown.token, command, xPx, yPx, pressed,
+                                                           choice?.kind == 7 ? 1 : 0)
+        withSurface(shown.owner) {
+            updateHover(atWindowPoint: window.mouseLocationOutsideOfEventStream, mods: 0, in: view)
+            markMetalNeedsRedraw()
+        }
+        // 이모티콘은 답이 그 탭을 활성으로 올린 **뒤** 연다 — 고른 글자가 입력기 경로로 그 칸에 간다.
+        if choice?.kind == 7 { NSApp.orderFrontCharacterPalette(nil) }
+        // 서비스는 메뉴가 끝난 뒤 선택 글을 읽는다 — 잠시 두었다가 지운다(그 뒤 터미널 선택이 서비스로 가지 않게). 그 사이 다음 메뉴가
+        // 글을 두었으면 그것은 두고 간다.
+        let generation = view.osrServiceGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak view] in
+            if let view, view.osrServiceGeneration == generation { view.osrServiceSelection = nil }
+        }
+    }
+
+    /// 판정 보고 — 항목을 「|」로 잇는다(구분선 —, 꺼진 항목 (off), 하위 메뉴 ▸[…]).
+    private static func describeOsrMenu(_ menu: NSMenu) -> String {
+        menu.items.map { item -> String in
+            if item.isSeparatorItem { return "—" }
+            var text = item.title
+            if let sub = item.submenu { text += "▸[" + describeOsrMenu(sub) + "]" }
+            if item.submenu == nil, !item.isEnabled { text += "(off)" }
+            return text
+        }.joined(separator: "|")
+    }
+
+    /// 판정 — 그 문구의 항목을 고른 것으로 끝맺는다(하위 메뉴 안도 찾는다). 없으면 고르지 않은 것으로.
+    private func testPickOsrContextMenu(_ title: String?) {
+        guard let shown = osrContextMenu else { return Self.testReport("menu none") }
+        func find(_ menu: NSMenu) -> NSMenuItem? {
+            for item in menu.items {
+                if item.title == title, item.isEnabled, item.action != nil { return item }
+                if let sub = item.submenu, let hit = find(sub) { return hit }
+            }
+            return nil
+        }
+        let picked = title.flatMap { _ in find(shown.menu) }
+        if title != nil, picked == nil { Self.testReport("menu pick-missing \(title ?? "")") }
+        finishOsrContextMenu(shown, choice: picked.map { (Int32($0.tag / 256), Int32($0.tag % 256)) })
     }
 
     func clearHover() {
@@ -15536,5 +15790,14 @@ private func reportFileTreeTrashOutcome(
                 buffer.count
             )
         }
+    }
+}
+
+// W6c②: 우클릭 메뉴의 「서비스」 — 선택한 글을 보낸다(돌려받지 않는다).
+extension MaruMetalTerminalView: NSServicesMenuRequestor {
+    func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+        guard let text = osrServiceSelection, types.contains(.string) else { return false }
+        pboard.clearContents()
+        return pboard.setString(text, forType: .string)
     }
 }

@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 203u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 204u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2153,6 +2153,20 @@ int32_t maru_macos_app_session_osr_keyboard_active(MaruAppHostSession *session);
    out_rect[4] 에. 글이 있으면 1. Swift 는 일련번호가 바뀌면 macOS 툴팁을 그 rect 에 다시 달고, rect 가 바뀌면 옮긴다. */
 int32_t maru_macos_app_session_osr_tooltip(MaruAppHostSession *session, uint64_t *out_serial, uint8_t *out, size_t out_cap,
                                            size_t *out_len, uint32_t *out_rect);
+/* v204(W6c②): Chromium 탭 우클릭 메뉴. take 는 이 창에 보이는 탭에 온 메뉴를 가져가 항목 수(없으면 0)·메뉴 번호·자리(창 backing
+   px, view 좌상단 원점)를 준다 — 한 번에 하나, Swift 는 tick 이 끝난 뒤 띄운다. item 은 항목 하나(종류 0 명령·1 구분선·2 찾기·
+   3 음성 하위 메뉴·4 말하기 시작·5 말하기 중지·6 서비스 하위 메뉴·7 이모티콘, 명령, 켜짐, 깊이, 문구). selection 은 선택한 글,
+   open 이 0 이면 sidecar 가 닫았으니 메뉴를 거둔다. answer 는 고른 명령(macOS 항목·고르지 않음은 0 = 취소), 지금 포인터 자리와 눌린
+   버튼(NSEvent.pressedMouseButtons — 메뉴가 먹은 떼기를 대신 보낸다), activate(1 이면 그 탭을 활성으로 — 이모티콘). */
+int32_t maru_macos_app_session_osr_context_menu_take(MaruAppHostSession *session, uint32_t *out_menu, double *out_x, double *out_y);
+int32_t maru_macos_app_session_osr_context_menu_item(MaruAppHostSession *session, uint32_t menu, uint32_t index, int32_t *out_kind,
+                                                     int32_t *out_command, int32_t *out_enabled, int32_t *out_depth, uint8_t *out_label,
+                                                     size_t label_cap, size_t *out_label_len);
+int32_t maru_macos_app_session_osr_context_menu_selection(MaruAppHostSession *session, uint32_t menu, uint8_t *out, size_t cap,
+                                                          size_t *out_len);
+int32_t maru_macos_app_session_osr_context_menu_open(MaruAppHostSession *session, uint32_t menu);
+int32_t maru_macos_app_session_osr_context_menu_answer(MaruAppHostSession *session, uint32_t menu, int32_t command, double x_px,
+                                                       double y_px, uint32_t pressed, int32_t activate);
 /* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
    2 = 뗌, 3(v202 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */

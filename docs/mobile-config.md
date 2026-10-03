@@ -134,7 +134,7 @@
 | `ui.language` | **OS 로케일을 받는 경로가 없다** — 브리지·두 host·ABI 어디에도 로케일을 알리는 자리가 없다(macOS 는 `maru_macos_app_set_ui_locale` 로 Swift 가 넣는다). 기본값이 `auto` 라 그 자리가 없으면 영어로 떨어지고, `ko` 로 명시해도 적용할 호출부(`applyPreference`)가 없다. `theme.follow-system` 과 **같은 모양의 구멍**이라 OS 상태를 알리는 ABI 를 여는 슬라이스에서 함께 연다(iOS `Locale.preferredLanguages`·Android `LocaleList`). 모바일 자체 UI 문자열은 [다국어](i18n.md) I3e 가 키로 옮긴다 |
 | `input.link-detection`·`input.link-open-target` | 링크를 눌러 여는 경로가 없다 |
 | `input.page-keys` | 키바에 PageUp/Down 키캡은 있지만 이 정책을 보는 자리가 없다 |
-| `notifications.osc`·`notifications.history-limit` | 알림을 받는 자리도 목록도 없다 |
+| `notifications.osc`·`notifications.web`·`notifications.history-limit` | 알림을 받는 자리도 목록도 없다(`notifications.web` 은 macOS Chromium 탭 전용이기도 하다) |
 | `scrollback.sticky-command` | 그 chrome 표시가 모바일에 없다 |
 | `font.letter-spacing` | 자간을 조절하는 자리가 없다(글리프를 칸에 맞춰 그린다) |
 | `term` | `TERM` 문자열은 **세션을 만드는 쪽**이 정한다 — 모바일은 원격에서 받는다([M3a](plans/mobile-platform.md)) |
@@ -193,6 +193,7 @@
 | `cursor.unfocused` | 창이 하나라 "포커스 잃은 창" 이 없다 |
 | `font.ligatures` | 글자를 **칸 단위로** 굽고 그린다. 합자는 셰이핑이 필요한데 그 경로가 없고, 있어도 격자와 어긋난다 |
 | `scroll.multiplier` | 마우스 휠 축이다. 터치 스크롤의 느낌은 관성이 정하고 그건 host 몫이다([플랫폼 §3.1](mobile-platform.md)) |
+| `browser.engine` | **Chromium 사이드카(CEF) 는 데스크톱 전용이다.** 폰에서 웹 탭이 쓰는 엔진은 OS 가 정한다(iOS 는 WebKit 만 허용한다) — 고를 것이 없다([OSR 계획](plans/web-osr-backend.md)) |
 | `chrome.theme` | 색 축은 `theme` 계열 하나로 둔다. 두 이름이 같은 것을 정하면 어느 쪽이 이기는지 사용자가 모른다 |
 
 ### 4.5 기본값이 데스크톱과 다른 것

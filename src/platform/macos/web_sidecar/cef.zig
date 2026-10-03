@@ -1,0 +1,27 @@
+//! CEF C API 헤더(W1b). 헤더는 저장소에 없다 — 빌드가 `-Dcef-sdk` 로 받은 SDK 의 include 를 넘긴다(프로젝트 규칙
+//! 예외 ④). 여기서는 **타입만** 쓴다: 함수는 링크하지 않고 `library.zig` 가 dlopen 한 프레임워크에서 찾는다.
+
+pub const c = @cImport({
+    // SDK 가 고정한 API 버전(154.0.23). 첫 `cef_api_hash` 호출이 이 값을 라이브러리에 등록한다.
+    @cDefine("CEF_API_VERSION", "15400");
+    @cInclude("include/cef_api_hash.h");
+    @cInclude("include/capi/cef_app_capi.h");
+    @cInclude("include/capi/cef_command_line_capi.h");
+    @cInclude("include/capi/cef_task_capi.h");
+    @cInclude("include/capi/cef_browser_capi.h");
+    @cInclude("include/capi/cef_client_capi.h");
+    @cInclude("include/capi/cef_life_span_handler_capi.h");
+    @cInclude("include/capi/cef_render_handler_capi.h");
+    @cInclude("include/capi/cef_display_handler_capi.h");
+    @cInclude("include/capi/cef_load_handler_capi.h");
+    @cInclude("include/capi/cef_request_handler_capi.h");
+    @cInclude("include/capi/cef_browser_process_handler_capi.h");
+    @cInclude("include/capi/cef_frame_capi.h");
+    @cInclude("include/capi/cef_context_menu_handler_capi.h");
+    @cInclude("include/capi/cef_parser_capi.h"); // W5a — 대화상자 제목의 출처(보안 표시 형식)
+    @cInclude("include/capi/cef_render_process_handler_capi.h"); // W5c — helper 의 웹 알림 대리 스크립트
+    @cInclude("include/capi/cef_v8_capi.h");
+    @cInclude("include/capi/cef_process_message_capi.h");
+});
+
+pub const api_version: c_int = 15400;

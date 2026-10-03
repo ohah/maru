@@ -66,9 +66,9 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
 
     // The read-only record exposes five scalar observations and no
     // input handle, runtime pointer, or action token that Swift could use to bypass NSEvent.
-    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 192;"));
-    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 192), abi_version)"));
-    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 192u"));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 204;"));
+    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 204), abi_version)"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 204u"));
     const probe_record = between(
         abi,
         "pub const SessionHostInputSmokeProbe = extern struct {",
@@ -165,7 +165,12 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
         "session_host_input_smoke_first_responder=",
         "session_host_input_smoke_frontmost_pid=",
     }) |field| try std.testing.expectEqual(@as(usize, 1), count(swift, field));
-    try std.testing.expectEqual(@as(usize, 2), count(swift, ".post(tap: .cghidEventTap)"));
+    // 시스템 HID 로 보내는 자리는 opt-in 시험 둘뿐이다 — CR6d 입력 연속성(누름·뗌)과 W4d② 자리 비움 모드(`testLive` 의
+    // 키·포인터 — `MARU_WEB_OSR_TEST_LIVE` 가 없으면 아무것도 보내지 않는다).
+    try std.testing.expectEqual(@as(usize, 4), count(swift, ".post(tap: .cghidEventTap)"));
+    const web_osr_live = between(swift, "private func testLive(", "func restoreTestLive(") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(web_osr_live, ".post(tap: .cghidEventTap)"));
+    try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, web_osr_live[std.mem.indexOfScalar(u8, web_osr_live, '{').? + 1 ..], " \n"), "guard let recordPath = ProcessInfo.processInfo.environment[\"MARU_WEB_OSR_TEST_LIVE\"]"));
     try std.testing.expectEqual(@as(usize, 0), count(swift, "func MaruCreateCarbonEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(swift, "handled = context.handleEvent(event)"));
     try std.testing.expectEqual(@as(usize, 0), count(swift, ".postToPid(pid)"));
@@ -281,7 +286,12 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
     try std.testing.expectEqual(@as(usize, 2), count(build, "SessionHostIMECandidateObservation.swift"));
     try std.testing.expectEqual(@as(usize, 1), count(header, "maru_macos_session_host_ime_candidate_observation_publish("));
     try std.testing.expectEqual(@as(usize, 1), count(abi, "pub export fn maru_macos_session_host_ime_candidate_observation_publish("));
-    try std.testing.expectEqual(@as(usize, 1), count(swift, "CGPreflightScreenCaptureAccess()"));
+    // 화면 기록 권한 확인은 두 곳뿐이다 — 이 입력 smoke 와 W5b 의 웹 화면 공유 허용(`ensureMacAccess` — 사용자가 maru 권한
+    // sheet 에서 허용한 뒤 macOS 권한을 본다). 그 밖의 호출은 없다.
+    try std.testing.expectEqual(@as(usize, 2), count(swift, "CGPreflightScreenCaptureAccess()"));
+    const web_access = between(swift, "private func ensureMacAccess(", "private func showMacAccessBlocked(") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(web_access, "CGPreflightScreenCaptureAccess()"));
     const input_smoke = between(
         swift,
         "private func maybeRunSessionHostInputContinuitySmoke()",

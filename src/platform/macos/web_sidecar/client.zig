@@ -1,0 +1,364 @@
+//! 모든 브라우저가 함께 쓰는 `cef_client_t` 와 처리기들(W1c). CEF 는 콜백에서 browser identifier 로만 브라우저를
+//! 알려 주므로 `browsers.state.registry` 에서 maru 의 `BrowserId` 를 찾아 알림을 보낸다.
+//!
+//! **팝업은 막는다**: 창 없는 브라우저라도 `window.open` 의 기본 동작은 네이티브 Chrome 창이다 — maru 가 통제하지
+//! 못하는 창을 sidecar 가 열면 안 된다(탭으로 여는 것은 W3·W6).
+//!
+//! **JS 대화상자도 막는다**: `alert`·`confirm`·`prompt` 의 기본 동작도 네이티브 창이고 사용자 제스처 없이 뜬다(적대 검증).
+//! 임시 안전 기본값으로 억제한다 — `alert` 는 바로 돌아오고 `confirm`·`prompt` 는 취소로 끝난다. maru 가 대화상자를
+//! 그리는 것은 W5(C6)다. 떠나기 확인(beforeunload)은 떠나기로 답한다.
+//!
+//! **우클릭 메뉴는 띄우지 않는다**(W4): 메뉴 항목을 비운다. 비우지 않아도 창 없는 모드에서 부모 view 가 없으면 CEF 의 Mac
+//! 메뉴는 뜨지 않는다(`menu_runner_mac.mm` — W6 착수 전 조사; 처음 적은 「UI 스레드가 메뉴 루프에 묶인다」는 이 설정에서는
+//! 틀렸다). 페이지의 `contextmenu` 이벤트는 그대로 간다. maru 의 메뉴는 W6c(D5 — NSMenu)다.
+//!
+//! **제목은 조절한다**: 같은 제목은 다시 안 보내고, 간격 안의 변경은 마지막 것만 보낸다(`title_gate.zig`).
+
+const std = @import("std");
+const protocol = @import("web_sidecar_protocol");
+const c = @import("cef.zig").c;
+const object = @import("object.zig");
+const library = @import("library.zig");
+const browsers = @import("browsers.zig");
+const dialogs = @import("dialogs.zig");
+const permissions = @import("permissions.zig");
+const title_gate = @import("title_gate.zig");
+const input = @import("input.zig");
+const tooltip = @import("tooltip.zig");
+const context_menus = @import("context_menu.zig");
+const notifications = @import("notifications.zig");
+
+var client_obj: c.cef_client_t = undefined;
+var life_span: c.cef_life_span_handler_t = undefined;
+var render: c.cef_render_handler_t = undefined;
+var display: c.cef_display_handler_t = undefined;
+var load: c.cef_load_handler_t = undefined;
+var request: c.cef_request_handler_t = undefined;
+var jsdialog: c.cef_jsdialog_handler_t = undefined;
+var file_dialog: c.cef_dialog_handler_t = undefined;
+var context_menu: c.cef_context_menu_handler_t = undefined;
+var permission: c.cef_permission_handler_t = undefined;
+var title_task: c.cef_task_t = undefined;
+var title_flush_posted = false;
+var ready = false;
+
+/// 프로세스 수명 동안 사는 client. 첫 호출에서 채운다(CEF UI 스레드).
+pub fn get() *c.cef_client_t {
+    if (!ready) {
+        ready = true;
+        client_obj = object.zeroed(c.cef_client_t);
+        object.staticRefCounted(&client_obj.base);
+        life_span = object.zeroed(c.cef_life_span_handler_t);
+        object.staticRefCounted(&life_span.base);
+        render = object.zeroed(c.cef_render_handler_t);
+        object.staticRefCounted(&render.base);
+        display = object.zeroed(c.cef_display_handler_t);
+        object.staticRefCounted(&display.base);
+        load = object.zeroed(c.cef_load_handler_t);
+        object.staticRefCounted(&load.base);
+        request = object.zeroed(c.cef_request_handler_t);
+        object.staticRefCounted(&request.base);
+        jsdialog = object.zeroed(c.cef_jsdialog_handler_t);
+        object.staticRefCounted(&jsdialog.base);
+        file_dialog = object.zeroed(c.cef_dialog_handler_t);
+        object.staticRefCounted(&file_dialog.base);
+        context_menu = object.zeroed(c.cef_context_menu_handler_t);
+        object.staticRefCounted(&context_menu.base);
+        permission = object.zeroed(c.cef_permission_handler_t);
+        object.staticRefCounted(&permission.base);
+        title_task = object.zeroed(c.cef_task_t);
+        object.staticRefCounted(&title_task.base);
+        title_task.execute = &flushTitles;
+
+        client_obj.get_life_span_handler = &getLifeSpan;
+        client_obj.get_render_handler = &getRender;
+        client_obj.get_display_handler = &getDisplay;
+        client_obj.get_load_handler = &getLoad;
+        client_obj.get_request_handler = &getRequest;
+        client_obj.get_jsdialog_handler = &getJsDialog;
+        client_obj.get_dialog_handler = &getFileDialog;
+        client_obj.get_context_menu_handler = &getContextMenu;
+        client_obj.get_permission_handler = &getPermission;
+        // W5c: helper 의 알림 대리 스크립트가 보내는 프로세스 메시지.
+        client_obj.on_process_message_received = &notifications.onProcessMessageReceived;
+        life_span.on_before_popup = &onBeforePopup;
+        life_span.on_before_close = &onBeforeClose;
+        render.get_view_rect = &getViewRect;
+        render.get_screen_info = &getScreenInfo;
+        render.on_paint = &onPaint;
+        render.on_accelerated_paint = &onAcceleratedPaint;
+        render.on_popup_show = &onPopupShow;
+        render.on_popup_size = &onPopupSize;
+        render.on_ime_composition_range_changed = &input.onImeCompositionRangeChanged;
+        display.on_title_change = &onTitleChange;
+        display.on_address_change = &onAddressChange;
+        display.on_cursor_change = &input.onCursorChange;
+        display.on_tooltip = &tooltip.onTooltip;
+        load.on_loading_state_change = &onLoadingStateChange;
+        load.on_load_end = &onLoadEnd;
+        load.on_load_start = &onLoadStart;
+        load.on_load_error = &dialogs.onLoadError;
+        request.on_render_process_terminated = &onRenderProcessTerminated;
+        jsdialog.on_jsdialog = &dialogs.onJsDialog;
+        jsdialog.on_before_unload_dialog = &dialogs.onBeforeUnloadDialog;
+        jsdialog.on_reset_dialog_state = &dialogs.onResetDialogState;
+        jsdialog.on_dialog_closed = &dialogs.onDialogClosed;
+        file_dialog.on_file_dialog = &dialogs.onFileDialog;
+        context_menu.run_context_menu = &context_menus.onRun;
+        context_menu.on_context_menu_dismissed = &context_menus.onDismissed;
+        permission.on_show_permission_prompt = &permissions.onShowPermissionPrompt;
+        permission.on_dismiss_permission_prompt = &permissions.onDismissPermissionPrompt;
+        permission.on_request_media_access_permission = &permissions.onRequestMediaAccessPermission;
+    }
+    return &client_obj;
+}
+
+fn getLifeSpan(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_life_span_handler_t {
+    return &life_span;
+}
+fn getRender(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_render_handler_t {
+    return &render;
+}
+fn getDisplay(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_display_handler_t {
+    return &display;
+}
+fn getLoad(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_load_handler_t {
+    return &load;
+}
+fn getRequest(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_request_handler_t {
+    return &request;
+}
+fn getJsDialog(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_jsdialog_handler_t {
+    return &jsdialog;
+}
+fn getFileDialog(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_dialog_handler_t {
+    return &file_dialog;
+}
+fn getContextMenu(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_context_menu_handler_t {
+    return &context_menu;
+}
+fn getPermission(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_permission_handler_t {
+    return &permission;
+}
+
+fn entryOf(browser: [*c]c.cef_browser_t) ?*@import("registry.zig").Entry {
+    if (browser == null) return null;
+    return browsers.state.registry.byCefId(browser.*.get_identifier.?(browser));
+}
+
+/// 목록에 넣기 전(`create_browser_sync` 안)에 CEF 가 물으면 만드는 중인 크기로 답한다.
+fn sizeOf(browser: [*c]c.cef_browser_t) protocol.message.ViewSize {
+    if (entryOf(browser)) |entry| return entry.size;
+    return browsers.state.creating_size orelse .{ .width = 1, .height = 1, .scale = 1 };
+}
+
+fn getViewRect(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, rect: [*c]c.cef_rect_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    const size = sizeOf(browser);
+    rect.* = .{ .x = 0, .y = 0, .width = @intCast(size.width), .height = @intCast(size.height) };
+}
+
+fn getScreenInfo(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, info: [*c]c.cef_screen_info_t) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    info.*.device_scale_factor = sizeOf(browser).scale;
+    return 1;
+}
+
+fn countPaint(browser: [*c]c.cef_browser_t) void {
+    if (entryOf(browser)) |entry| entry.paints += 1;
+}
+
+fn onPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, kind: c.cef_paint_element_type_t, _: usize, _: [*c]const c.cef_rect_t, _: ?*const anyopaque, _: c_int, _: c_int) callconv(.c) void {
+    defer object.releaseArg(browser);
+    countPaint(browser);
+    // D9 — GPU 경로가 아니라 CPU 버퍼로 그렸다. 이 브라우저는 그리지 않고 한 번 알린다(maru 가 그 pane 에 안내한다).
+    if (kind != c.PET_VIEW) return;
+    const entry = entryOf(browser) orelse return;
+    if (entry.gpu_unavailable_sent) return;
+    entry.gpu_unavailable_sent = true;
+    browsers.state.writer.send(.{ .failure = .{ .browser = entry.id, .code = .gpu_unavailable, .detail = "CEF painted through the CPU path" } }) catch {};
+}
+
+fn onAcceleratedPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, kind: c.cef_paint_element_type_t, _: usize, _: [*c]const c.cef_rect_t, info: [*c]const c.cef_accelerated_paint_info_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    countPaint(browser);
+    // 본 화면(PET_VIEW)과 팝업 위젯(PET_POPUP — W6a)은 따로 그려져 링도 따로다. CEF surface 는 이 콜백 안에서만 유효하다(C3).
+    if (info == null) return;
+    const surface = info.*.shared_texture_io_surface orelse return;
+    const entry = entryOf(browser) orelse return;
+    switch (kind) {
+        c.PET_VIEW => browsers.deliverFrame(entry, @ptrCast(surface)),
+        c.PET_POPUP => browsers.deliverPopupFrame(entry, @ptrCast(surface)),
+        else => {},
+    }
+}
+
+/// 팝업 위젯(`<select>` 목록 등)이 열리거나 닫혔다(W6a). 열림은 바로 뒤의 `on_popup_size` 가 사각형과 함께 알린다(CEF 는 같은
+/// 자리에서 둘을 잇달아 부른다 — 착수 전 실측). 닫힘은 여기서 알리고 팝업 링을 버린다.
+/// CEF 는 한 번도 보이지 않은 팝업이 사라질 때도 `show = 0` 을 부른다(`CancelWidget` 은 보였는지 보지 않는다 — 적대 검증 2 차).
+/// 열린 팝업이 없으면 알리지 않는다. 다른 팝업이 그 순간 보이고 있을 일은 드물어 그때는 그대로 「닫힘」으로 알린다 — 그러면
+/// 그 팝업은 다시 열 때까지 보이지 않는다(`popup_open` 이 꺼져 그림도 버린다). CEF 154 는 렌더러가 죽거나 화면 배율이 바뀌어도 이것으로 팝업을 닫는다(W6a① 적대
+/// 검증 4 차 실측 — 판정 `popup-renderer-gone`·`popup-rescale`, 렌더러 쪽은 순서를 보지 않는다).
+fn onPopupShow(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, show: c_int) callconv(.c) void {
+    defer object.releaseArg(browser);
+    const entry = entryOf(browser) orelse return;
+    const was_open = entry.popup_open;
+    entry.popup_open = show != 0;
+    if (show != 0) return;
+    browsers.dropPopup(entry);
+    // 이미 닫혔으면(렌더러 사망 쪽이 먼저 닫았거나, 한 번도 보이지 않은 팝업의 `CancelWidget`) 다시 알리지 않는다(W6a① 적대 검증 6 차 —
+    // CEF 154 는 렌더러가 죽을 때 이것을 먼저 불러 그쪽 순서는 실측되지 않았다).
+    if (was_open) browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = false } }) catch {};
+}
+
+/// 팝업 위젯의 사각형(view DIP). CEF 154 구현에서는 열릴 때 한 번 온다(`InitAsPopup` 에서만 부름 — 헤더는 옮기거나 크기를 바꿀
+/// 때도 부른다고 적는다, W6a① 적대 검증). 다시 와도 같은 첫 세대를 보낸다. 0 크기 팝업은 알리지 않는다.
+fn onPopupSize(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, rect: [*c]const c.cef_rect_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    const entry = entryOf(browser) orelse return;
+    // 열림(`show(1)`) 없이 온 사각형은 알리지 않는다 — 알리면 닫힘은 `popup_open` 이 거짓이라 가지 않아 앱에 옛 사각형이 남는다
+    // (W6a① 적대 검증 7 차 — CEF 154 는 `show(1)` 직후에 부르므로 닿지 않는 방어).
+    if (!entry.popup_open) return;
+    if (rect == null or rect.*.width <= 0 or rect.*.height <= 0) return;
+    const bounds: protocol.message.Rect = .{ .x = rect.*.x, .y = rect.*.y, .width = @intCast(rect.*.width), .height = @intCast(rect.*.height) };
+    // 앞 팝업은 이미 닫혀 링을 버렸다(CEF `InitAsPopup` 이 새 팝업의 알림보다 먼저 앞 것을 닫는다) — 이 팝업의 링은 이 세대부터다.
+    browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = true, .bounds = bounds, .first_generation = entry.popup_generation } }) catch {};
+}
+
+fn onTitleChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t, title: [*c]const c.cef_string_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    const entry = entryOf(browser) orelse return;
+    var buf: [protocol.wire.max_text_bytes]u8 = undefined;
+    const text = library.readString(browsers.state.api, title, &buf);
+    const now = nowMs();
+    switch (entry.title.offer(text, now)) {
+        .send => sendTitle(entry.id, text),
+        .held => postTitleFlush(entry.title.flushAt().? -| now),
+        .duplicate => {},
+    }
+}
+
+fn sendTitle(id: protocol.message.BrowserId, text: []const u8) void {
+    browsers.state.writer.send(.{ .title_changed = .{ .browser = id, .text = text } }) catch {};
+}
+
+/// 쥔 제목을 내보낼 task 를 하나만 올린다 — 브라우저가 몇이든 task 는 하나다.
+fn postTitleFlush(delay_ms: u64) void {
+    if (title_flush_posted) return;
+    title_flush_posted = true;
+    _ = browsers.state.api.post_delayed_task(c.TID_UI, &title_task, @intCast(@max(delay_ms, 1)));
+}
+
+fn flushTitles(_: [*c]c.cef_task_t) callconv(.c) void {
+    title_flush_posted = false;
+    const now = nowMs();
+    var next: ?u64 = null;
+    for (&browsers.state.registry.slots) |*slot| {
+        if (slot.*) |*entry| {
+            if (entry.title.flush(now)) |text| sendTitle(entry.id, text);
+            if (entry.title.flushAt()) |at| next = @min(next orelse at, at);
+        }
+    }
+    if (next) |at| postTitleFlush(at -| now);
+}
+
+pub fn nowMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
+/// 주 프레임 주소만 알린다(주소창). 상한을 넘거나 비었으면 보내지 않는다 — codec 이 거절한다.
+fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, url: [*c]const c.cef_string_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    if (frame == null or frame.*.is_main.?(frame) == 0) return;
+    const entry = entryOf(browser) orelse return;
+    var buf: [protocol.wire.max_url_bytes]u8 = undefined;
+    const text = library.readString(browsers.state.api, url, &buf);
+    if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다)
+    browsers.state.writer.send(.{ .url_changed = .{ .browser = entry.id, .url = text } }) catch {};
+}
+
+/// `on_load_start` — 새 문서면 툴팁 기억을 비우고(W6b — 옛 페이지 툴팁이 남지 않게, 새 문서의 같은 글이 다시 오게) 대화상자
+/// 쪽 처리로 넘긴다(그쪽이 인자 참조를 놓는다).
+fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, transition: c.cef_transition_type_t) callconv(.c) void {
+    if (frame != null and frame.*.is_main.?(frame) != 0) {
+        if (entryOf(browser)) |entry| tooltip.reset(entry.id);
+    }
+    dialogs.onLoadStart(handler, browser, frame, transition);
+}
+
+fn onLoadingStateChange(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, loading: c_int, can_go_back: c_int, can_go_forward: c_int) callconv(.c) void {
+    defer object.releaseArg(browser);
+    const entry = entryOf(browser) orelse return;
+    browsers.state.writer.send(.{ .nav_state = .{
+        .browser = entry.id,
+        .can_go_back = can_go_back != 0,
+        .can_go_forward = can_go_forward != 0,
+        .loading = loading != 0,
+    } }) catch {};
+}
+
+fn onLoadEnd(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, status: c_int) callconv(.c) void {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    if (frame == null or frame.*.is_main.?(frame) == 0) return;
+    const entry = entryOf(browser) orelse return;
+    browsers.state.writer.send(.{ .load_finished = .{ .browser = entry.id, .http_status = status } }) catch {};
+}
+
+fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, status: c.cef_termination_status_t, _: c_int, _: [*c]const c.cef_string_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    const entry = entryOf(browser) orelse return;
+    const reason: protocol.message.RendererGoneReason = switch (status) {
+        c.TS_PROCESS_WAS_KILLED => .killed,
+        c.TS_PROCESS_CRASHED => .crashed,
+        c.TS_PROCESS_OOM => .out_of_memory,
+        c.TS_LAUNCH_FAILED => .launch_failed,
+        c.TS_INTEGRITY_FAILURE => .integrity_failure,
+        else => .abnormal,
+    };
+    // CEF 154 는 렌더러가 죽으면 열린 팝업을 스스로 닫는다(판정 `popup-renderer-gone`). 그렇지 않은 버전이어도 죽은 페이지 위에
+    // 옛 목록이 남지 않게 여기서도 닫는다 — 방어다. 판정에서는 CEF 의 `show(0)` 이 먼저 와 이 줄이 쓰이지 않는 것으로 보인다
+    // (추론 — 이것이 없던 4 차에도 닫힘이 왔고, `show(0)` 쪽 가드를 뺀 변이도 닫힘 1 번이었다). 둘 다 `popup_open` 을 보고
+    // 끄므로 코드상 닫힘 알림은 한 번이다(W6a① 적대 검증 5~7 차).
+    if (entry.popup_open) {
+        entry.popup_open = false;
+        browsers.dropPopup(entry);
+        browsers.state.writer.send(.{ .popup_changed = .{ .browser = entry.id, .visible = false } }) catch {};
+    }
+    // 쥔 우클릭 메뉴를 끝낸다 — 방어다. CEF 154 는 렌더러가 죽으면 스스로 메뉴를 거둔다(판정 `cm-renderer-gone` — 이 줄을 뺀 변이도
+    // 통과했다). 거두지 않는 버전이어도 콜백이 쥔 채 남지 않게(거두기가 먼저 왔으면 쥔 것이 없어 아무 일도 없다).
+    context_menus.finish(entry, .cancel);
+    browsers.state.writer.send(.{ .renderer_gone = .{ .browser = entry.id, .reason = reason } }) catch {};
+    dialogs.rendererGone(entry.id);
+    permissions.rendererGone(entry.id);
+}
+
+fn onBeforePopup(
+    _: [*c]c.cef_life_span_handler_t,
+    browser: [*c]c.cef_browser_t,
+    frame: [*c]c.cef_frame_t,
+    _: c_int,
+    _: [*c]const c.cef_string_t,
+    _: [*c]const c.cef_string_t,
+    _: c.cef_window_open_disposition_t,
+    _: c_int,
+    _: [*c]const c.cef_popup_features_t,
+    _: [*c]c.cef_window_info_t,
+    _: [*c][*c]c.cef_client_t,
+    _: [*c]c.cef_browser_settings_t,
+    _: [*c][*c]c.cef_dictionary_value_t,
+    _: [*c]c_int,
+) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    return 1; // 취소 — 네이티브 창을 열지 않는다.
+}
+
+fn onBeforeClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    if (browser == null) return;
+    browsers.onClosed(browser.*.get_identifier.?(browser));
+}

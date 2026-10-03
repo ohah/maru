@@ -42,8 +42,10 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
     return .dismissed;
 }
 
-/// 메시지 한 줄을 중앙 모달 박스로 그린다 — 박스 기하·폭 clamp·soft-lock 가드·배경 quad+테두리는 modal_box.view
-/// 단일 출처에 위임한다(notice/confirm 공유). 안 열렸으면 무동작. 순수: state·props·tokens만 읽는다.
+/// 메시지를 중앙 모달 박스로 그린다 — 박스에 한 줄로 안 들어가면 `modal_box.wrap` 으로 여러 줄로 나눈다(한 줄로만 그리던
+/// 때는 긴 안내가 박스 밖으로 넘쳐 끝이 안 보였다 — 예: Chromium 엔진 「버전 불일치」 146 칸). 박스 기하·폭 clamp·soft-lock
+/// 가드·배경 quad+테두리는 modal_box.view 단일 출처에 위임한다(notice/confirm 공유). 안 열렸으면 무동작. 순수: state·
+/// props·tokens만 읽는다.
 pub fn view(
     state: *const State,
     p: props.ChromeProps,
@@ -52,7 +54,10 @@ pub fn view(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (!state.open) return;
-    try modal_box.view(&.{.{ .text = state.message, .role = .surface_fg }}, p, tk, arena, out);
+    const texts = try modal_box.wrap(state.message, p, tk, arena) orelse return;
+    const lines = try arena.alloc(modal_box.Line, texts.len);
+    for (texts, lines) |t, *ln| ln.* = .{ .text = t, .role = .surface_fg };
+    try modal_box.view(lines, p, tk, arena, out);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -114,4 +119,116 @@ test "notice view: 닫힘이면 ops 0, 열림이면 quad+text(modal)" {
     // rich 패딩 침범)는 modal_box.zig 테스트가 단일 출처로 커버한다(notice/confirm 공유 — 여기선 위임만 확인).
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
     try std.testing.expect(out.items[0].quad.rect.w > 0);
+}
+
+test "notice view: a message wider than the workspace wraps into lines that stay inside the box" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const overlay_input = @import("overlay_input.zig");
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    // 작업영역 80 칸(8px × 640) — 146 칸짜리 안내.
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 640,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+    var s = State{};
+    s.show("The installed Chromium engine (maru-chromium) does not match this maru. Update maru and maru-chromium to their latest versions, then restart maru.");
+    try view(&s, p, &tk, arena, &out);
+    try std.testing.expect(out.items.len >= 3); // quad + 두 줄 이상
+    const box = out.items[0].quad.rect;
+    for (out.items[1..]) |op| {
+        try std.testing.expect(op == .text);
+        const right = op.text.origin.x + @as(i32, @intCast(overlay_input.displayCols(op.text.runs[0].text) * 8));
+        try std.testing.expect(op.text.origin.x >= box.x and right <= box.x + @as(i32, @intCast(box.w)));
+        try std.testing.expect(op.text.origin.y + 16 <= box.y + @as(i32, @intCast(box.h)));
+    }
+}
+
+test "notice view: a line that fills the width stays inside the box's side margins" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{
+        .metrics = .{
+            .cell_width_px = 8,
+            .cell_height_px = 16,
+            .sidebar_width_px = 0,
+            .backing_width_px = 320, // 40 칸
+            .backing_height_px = 600,
+        },
+    };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+    var s = State{};
+    s.show("x" ** 200); // 공백 없는 긴 단어 — 줄이 폭을 꽉 채운다
+    try view(&s, p, &tk, arena, &out);
+    const box = out.items[0].quad.rect;
+    const margin: i32 = @intCast(tk.space.modal_margin_cells * 8);
+    for (out.items[1..]) |op| {
+        const right = op.text.origin.x + @as(i32, @intCast(op.text.runs[0].text.len * 8));
+        try std.testing.expect(op.text.origin.x >= box.x + margin);
+        try std.testing.expect(right <= box.x + @as(i32, @intCast(box.w)) - margin);
+    }
+}
+
+test "notice view: NFD Korean, emoji and combining marks are measured as the painter draws them — lines stay inside the box" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const overlay_input = @import("overlay_input.zig");
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 320, .backing_height_px = 600 } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const margin: i32 = @intCast(tk.space.modal_margin_cells * 8);
+    for ([_][]const u8{
+        "/Users/x/" ++ "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}" ** 8 ++ ".txt", // NFD 한글 경로
+        "\u{2764}\u{FE0F}" ** 30, // VS16
+        "cafe\u{301} " ** 12, // 결합 문자
+        "bad \xff\xfe bytes " ** 6, // 손상 UTF-8
+    }) |msg| {
+        var out: std.ArrayList(draw.Op) = .empty;
+        var s = State{};
+        s.show(msg);
+        try view(&s, p, &tk, arena, &out);
+        const box = out.items[0].quad.rect;
+        try std.testing.expect(out.items.len >= 2);
+        for (out.items[1..]) |op| {
+            const t = op.text.runs[0].text;
+            try std.testing.expect(std.unicode.utf8ValidateSlice(t)); // 그리는 쪽이 버리지 않게
+            try std.testing.expectEqual(tokens.ColorRole.surface_fg, op.text.role);
+            const right = op.text.origin.x + @as(i32, @intCast(overlay_input.displayCols(t) * 8));
+            try std.testing.expect(right <= box.x + @as(i32, @intCast(box.w)) - margin);
+        }
+    }
+}
+
+test "notice view: in a short workspace the wrapped lines are cut to the rows so the box stays inside" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    // 작업영역 40 칸 × 5 행(8×16px, 320×80) — 콘텐츠 3 행.
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 320,
+        .backing_height_px = 80,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+    var s = State{};
+    s.show("The installed Chromium engine (maru-chromium) does not match this maru. Update maru and maru-chromium to their latest versions, then restart maru.");
+    try view(&s, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 4), out.items.len); // quad + 세 줄
+    const box = out.items[0].quad.rect;
+    try std.testing.expect(box.y >= 0 and box.y + @as(i32, @intCast(box.h)) <= 80);
+    try std.testing.expect(std.mem.endsWith(u8, out.items[3].text.runs[0].text, "…"));
 }

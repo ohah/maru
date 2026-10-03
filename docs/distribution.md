@@ -24,7 +24,7 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 
 ### 1) Homebrew tap — formula(소스 빌드), 주력
 
-- 사용자: `brew tap ohah/maru && brew install maru`
+- 사용자: `brew install ohah/maru/maru` — **전체 이름으로**. Homebrew 7 은 신뢰하지 않은 tap 의 formula 를 짧은 이름으로 불러오지 않고, `brew tap` 은 신뢰를 주지 않는다. 전체 이름으로 설치하면 tap 을 받고 그 formula 를 **설치한 사용자의** 신뢰 목록(`$XDG_CONFIG_HOME/homebrew/trust.json`, 없으면 `~/.homebrew/trust.json`)에 올려, 뒤의 `brew upgrade`(인자 없이)·`brew upgrade maru` 는 짧은 이름으로 된다(Homebrew 7.0.1 `cmd/install.rb` 실측). 신뢰는 이름 붙은 formula 만이고(같은 tap 의 의존은 따로 이름을 줘야 한다), `brew uninstall` 이 그 항목을 지운다 — 다른 계정이 같은 prefix 에서 인자 없이 `brew upgrade` 하면 건너뛴다
 - formula가 `zig build`로 사용자 맥에서 직접 빌드한다. 따라서:
   - **인증서/공증 불필요**: 로컬 빌드 산출물엔 quarantine이 안 붙어 Gatekeeper가 검사하지 않는다.
     arm64 실행에 필요한 ad-hoc 서명은 `zig build`가 자동으로 한다.
@@ -32,6 +32,7 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 - CLI 진입은 이미 있는 `maru install-cli`(self-exe를 `~/.local/bin/maru`에 symlink)와 같은 위치에
   brew가 심볼릭 링크를 건다(`macos-app-host-boundary.md` 참고).
 - 의존: zig 0.16.0(빌드 시). 빌드 시간(수 분)을 사용자가 감수한다.
+- **Chromium 엔진 `maru-chromium`(W7b)**: 별도 formula(원본 `packaging/homebrew/maru-chromium.rb`, tap 게시는 첫 출시 때). 설치는 `brew install ohah/maru/maru-chromium`(전체 이름 — Homebrew 7 은 신뢰하지 않은 tap 의 formula 를 짧은 이름으로 불러오지 않는다), macOS 13 이상(CEF 154). CEF SDK 를 `resource` 로 받아 `zig build web-sidecar-dist` 로 만든 설치물을 `libexec` 에 둔다. 설치물의 dylib·프레임워크 ID 는 `@rpath/…` 로 미리 바꿔 재서명돼 있고 formula 는 `preserve_rpath` 로 이를 지킨다(Homebrew 가 formula 를 이름으로 다시 불러와야 읽히므로 **tap 으로만** 설치한다 — 파일 경로 설치는 이것이 꺼진다, `--debug-symbols` 설치는 `.dSYM` 이 프레임워크 봉인을 깨뜨린다) — Homebrew 의 소스 설치 relocation 이 CEF dylib 을 고쳐 쓰다 중간에 멈춰 프레임워크 서명을 깨뜨리기 때문이다([web-osr-backend.md](plans/web-osr-backend.md) W7 행). 설치 뒤 `libexec` 권한을 `go-w` 로 정리한다(umask 002 사용자도 maru 의 실행 전 검사를 통과하게). 이 맥에서 실제 설치로 확인했다(Homebrew 가 아무 파일도 고치지 않음·판정자 92/92·hardened 앱이 설치를 찾아 띄움).
 
 ### 2) universal `.dmg` — 서명+공증, 직접 다운로드용
 
@@ -149,6 +150,8 @@ iphonesimulator` 를 쓰므로 새 의존이 아니다. 아이콘 PNG 는 지금
 
 - **서명**: `Developer ID Application: <조직명> (<TEAM_ID>)` 인증서로 codesign(실제 값은 저장소에 두지 않고 `MARU_SIGN_IDENTITY`/`-Dmacos-sign-identity=`로 주입)
   (`--options runtime` hardened + `--timestamp`). 실행파일과 `.app` 번들을 서명한다. Mermaid helper 도입 이후 `Contents/Helpers/MaruMermaidRenderer.app`도 nested code이므로 App Sandbox entitlement로 main app보다 먼저 inside-out 서명하고 `codesign --verify --strict --deep`과 공증 smoke에서 누락을 실패시킨다.
+- **Maru.app entitlements(W7a1)**: main executable 은 `src/platform/macos/MaruApp.entitlements`(카메라·마이크·위치 — Chromium 탭의 권한 요청, [web-osr-backend.md](plans/web-osr-backend.md) W5b)를 **번들 서명에** 받는다 — 번들 서명이 main executable 을 다시 서명하므로 거기서 빠지면 hardened runtime 이 묻지 않고 거절할 수 있다. 두 서명 경로(`tools/build-macos-universal-dmg.sh`·`zig build macos-dmg`) 모두 서명 뒤 `tools/check-macos-app-entitlements.sh` 가 정확히 셋인지 본다. Chromium 엔진(`maru-chromium`)은 dmg 에 들어가지 않고 따로 설치한다(같은 문서 D8).
+- **서명된 판과 Chromium sidecar(W7a2)**: `--options runtime` 으로 서명한 Maru(dmg)는 실행 중 hardened runtime(`csops` 의 `CS_RUNTIME`)을 보고, sidecar 를 찾고 둘 때 개발용 `MARU_WEB_OSR_DIR`·`HOMEBREW_PREFIX` 와 `HOME` 을 무시한다 — `maru-chromium` 은 `/opt/homebrew`·`/usr/local` 의 keg 만, 실행 사본과 웹 프로필은 계정 홈 아래. 띄우기 전 keg 의 경로·소유·권한·종류를 보고, 검사한 keg 를 `~/Library/Caches/maru/web-osr-run` 으로 APFS 복제한 뒤 **사본에서** host·helper 서명과 manifest 의 제어 채널 버전을 보고 거기서 띄운다([web-osr-backend.md](plans/web-osr-backend.md) 결정 표 「sidecar 실행 전 검증」·「실행 사본」). 복제가 안 되면(홈이 Homebrew 와 다른 볼륨, 캐시 뿌리가 이 사용자 소유에 그룹·남이 접근할 수 없는 디렉터리가 아님) brew 설치를 띄우지 않는다. 스모크는 같은 앱을 ad-hoc 으로 `--options runtime` 서명해 이것을 본다.
 - **개발/CI helper 서명(FP10c1부터, FP10c2 sandbox 강화)**: 인증서 없는 `macos-app-bundle`도 release와 같은 `Contents/Helpers/MaruMermaidRenderer.app` layout을 만들고 helper app→main executable→app 순서로 ad-hoc 서명한다. helper admission은 App Sandbox와 WebContent 기동용 `network.client`를 요구하고 사용자 파일·Downloads·network server entitlement는 거부한다. runtime bundle containment·regular/non-symlink·code validity 검사는 생략하지 않으며, Developer ID 채널에서는 main/helper Team ID 일치도 확인한다. `mise run macos-mermaid-helper-smoke`가 실제 ad-hoc helper app에서 entitlement, helper/path ABA, resource digest·symlink, protocol·lifecycle을 검증하고 `zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json`을 남긴다.
 - **universal helper 결합**: `tools/build-macos-universal-dmg.sh`는 arm64/x86_64 nested helper의 `Info.plist`와 exact `mermaid-helper.js` bytes가 같은지 먼저 비교하고, `Contents/MacOS/maru-mermaid-renderer` 실행파일만 `lipo`한다. main·CLI·helper가 각각 정확히 두 architecture인지, 옛 flat helper와 main resource의 helper runtime이 없는지 확인한 뒤 nested helper를 entitlement 포함 inside-out 재서명하고 최종 `.app`을 `codesign --verify --strict --deep`으로 검증한다.
 - **session-host candidate 산출물**: universal 앱과 DMG의 서명·공증·staple 검증이 모두 끝나면 빌드 스크립트는 `dist/session-host-candidate-<버전>/`을 새 디렉터리로 배타 게시한다. 디렉터리는 검증된 `Maru.app`, 같은 빌드의 universal DMG, 앱의 `Contents/MacOS/maru-macos-app`과 byte-for-byte 같은 `maru-session-host-<버전>` frozen executable을 exact 1개씩 가진다. 임시 sibling에서 세 사본과 실행 파일 동일성을 검증한 뒤 rename하며, 기존 final이나 symlink를 덮어쓰지 않는다. 이 디렉터리는 같은 trusted run의 제품 E2E 입력을 보존하는 staging 산출물일 뿐, GitHub attestation·immutable Release asset·durable update authority가 아니다.

@@ -22,8 +22,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const notification_ops = @import("notification.zig");
 
 const chrome = maru.chrome;
+const ws = maru.session.web_sidecar;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const WebNavAction = app_session_mod.WebNavAction;
@@ -34,6 +36,7 @@ const nav_button_w = app_session_mod.nav_button_w;
 const addr_nav_url_cap = app_session_mod.addr_nav_url_cap;
 const config_mod = app_session_mod.config_mod;
 const dock_ops = @import("dock.zig");
+const web_osr = @import("../web_osr.zig");
 const layout_math = app_session_mod.layout_math;
 const nav_button_count = app_session_mod.nav_button_count;
 const CloseScope = app_session_mod.CloseScope;
@@ -382,6 +385,1083 @@ pub fn activeWebSurfaceId(self: *AppSession) u64 {
     return if (isBrowserTerm(term)) term.surfaceId() else 0;
 }
 
+/// OSR(Chromium sidecar)이 그리는 browser 탭인가(W3b — 개발용 환경변수로만 켠다, `web_osr.zig`). 신뢰 패널(markdown)과
+/// 파일 HTML 은 늘 WKWebView 다(분업 — docs/plans/web-osr-backend.md).
+pub fn isOsrTerm(term: *const Term) bool {
+    return isBrowserTerm(term) and web_osr.enabled();
+}
+
+/// OSR 이 들고 있는 surface 인가(control-plane 이 「이 엔진은 아직 지원하지 않는다」로 답한다 — W9 전까지).
+pub fn isOsrSurface(surface_id: u64) bool {
+    return web_osr.enabled() and web_osr.owns(surface_id);
+}
+
+/// 창 tick 마다(W3b): sidecar 파이프를 비우고, 이 창 OSR 탭의 새 주소·탐색 상태를 주소창에 넣고, 안내를 띄운다.
+pub fn tickWebOsr(self: *AppSession) void {
+    // W4d: 설정은 chromium 을 청했는데 설치가 없다 — 한 번 안내(엔진은 WebKit).
+    if (web_osr.takeInstallNotice()) self.showNoticeKey(.web_osr_not_installed);
+    if (!web_osr.enabled()) return;
+    web_osr.pump(self.allocator, @intCast(app_session_mod.monotonicMs()));
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (!isOsrTerm(term)) continue;
+                const sid = term.surfaceId();
+                if (web_osr.takeNavUpdate(sid)) |nav| setWebNavState(self, sid, nav.can_go_back, nav.can_go_forward, nav.url);
+                if (web_osr.takeGpuNotice(sid)) self.showNoticeKey(.web_osr_gpu_unavailable);
+                // 엔진이 멈췄다 — 이 탭이 있는 창이 한 번 보인다(멈춘 뒤 새로 연 탭도).
+                if (web_osr.takeStoppedNotice(sid)) |notice| self.showNoticeKey(osrNoticeKey(notice));
+                // W3c: 새 웹 프레임이면 이 창을 다시 그린다 — 재투영 없이 세대만 올린다(커서 페이드와 같은 길).
+                // 숨은 탭도 front 는 갱신한다(다시 보일 때 옛 장이 한 프레임 비치지 않게) — CEF 가 숨은 탭은 거의
+                // 안 그린다.
+                if (web_osr.pollFrame(sid, self.osr_completed_generation, @intFromPtr(self))) self.metal_buffer.generation += 1;
+            }
+        }
+    }
+    // W4c: 키 대상이 바뀌었으면(탭·pane 전환·오버레이·창 키) 포커스를 옮기고 조합을 확정한다. 트랜잭션 밖 unmark 뒤 확정
+    // 글이 안 왔으면 조합을 그대로 확정한다.
+    syncOsrKeyTarget(self);
+    if (self.osr_key_target != 0 and self.osr_ime_surface == 0) flushUnmark(self, self.osr_key_target);
+    // W4b: hover 중인 탭의 커서가 바뀌었으면(페이지는 이동을 처리한 **뒤** 커서를 알린다) Swift 가 포인터를 다시 움직이지
+    // 않아도 바꾸게 세운다 — 안 그러면 멈춘 자리의 커서가 한 박자 전 것으로 남는다.
+    if (self.osr_hover_surface != 0) {
+        // 포인터를 움직이지 않은 채 hover 가 끝났다 — 키보드로 오버레이를 열었거나 탭을 바꿨거나 탭이 닫혔다. leave 를 보내
+        // 페이지의 `:hover` 를 풀고, 커서는 화살표로 돌린다(페이지가 커서를 숨겼으면 포인터가 안 보인 채 남는다 — 적대 검증).
+        if (self.anyOverlayOpen() or osr_input.find(self.osr_layouts.items, self.osr_hover_surface) == null) {
+            if (self.pointer_gesture_owner != .web_osr) {
+                osrLeave(self, -1, -1, 0);
+                self.osr_cursor_pending = .default;
+            }
+        } else if (web_osr.cursor(self.osr_hover_surface)) |c| if (c.generation != self.osr_hover_cursor_generation) {
+            self.osr_hover_cursor_generation = c.generation;
+            self.osr_cursor_pending = cursorKindOf(c.cursor);
+        };
+    }
+    tickOsrDialog(self);
+}
+
+fn osrNoticeKey(notice: web_osr.Notice) maru.i18n.Key {
+    return switch (notice) {
+        .gpu_unavailable => .web_osr_gpu_unavailable,
+        .profile_in_use => .web_osr_profile_in_use,
+        .start_failed => .web_osr_start_failed,
+        .crashed_repeatedly => .web_osr_crashed,
+        .version_mismatch => .web_osr_version_mismatch,
+    };
+}
+
+// ── W5a: 대화상자·파일 선택 · W5b: 권한 ──────────────────────────────────────────────────────────────────────────────
+//
+// sidecar 가 보낸 요청은 `web_osr` 가 탭마다 쥔다. 창은 **키보드 초점을 가진**(`osr_key_target` — 창 키·활성 pane) Chromium
+// 탭의 요청만 고른다 — 뒤쪽 탭·초점 없는 옆 pane 의 대화상자는 초점이 올 때까지 기다린다(페이지는 그동안 멈춘다). 보이는데
+// 초점이 없는 pane 이 기다리면 한 번 안내한다. Swift 는 maru 창에 붙는 네이티브 sheet 로 묻고 답을 돌려준다(사용자 결정
+// 2026-09-25 — docs/plans/web-osr-backend.md C6).
+
+pub const OsrDialogShown = struct { surface_id: u64, token: u64 };
+
+fn tickOsrDialog(self: *AppSession) void {
+    if (self.osr_dialog) |shown| {
+        if (web_osr.dialogPending(shown.surface_id, shown.token) != null) return;
+        // 떠 있던(또는 띄우려던) 요청이 사라졌다 — Swift 가 가져가기 전이면 그냥 거두고, 띄웠으면 닫게 한다.
+        self.osr_dialog = null;
+        if (self.osr_dialog_ready) self.osr_dialog_ready = false else self.osr_dialog_dismiss = true;
+        return;
+    }
+    // 키보드 초점을 가진 Chromium 탭만 띄운다 — 보이기만 하는 옆 pane 이 띄우면 sheet 가 곧바로 키를 가져가, 터미널에 치던
+    // 글자(비밀번호)와 Return 이 대화상자로 들어갔다(적대 검증). 초점이 그 탭으로 오면(클릭·pane 이동) 그때 뜬다.
+    for (self.osr_layouts.items) |layout| {
+        const d = web_osr.nextDialog(layout.surface_id) orelse continue;
+        if (layout.surface_id != self.osr_key_target) {
+            // 보이는데 초점이 없는 pane 이 답을 기다린다 — 표시 없이 얼어 있지 않게 알림 목록에 한 번 남긴다(안 읽음 배지 —
+            // 적대 검증). 토스트는 쓰지 않는다: 「다음 입력이 닫는다」라 그 pane 으로 옮기는 첫 키·클릭을 먹었다(시험기 실측).
+            // 그 pane 을 누르면 읽음이 된다(웹 클릭이 `markNotificationsReadBySurface`).
+            if (self.osr_dialog_hinted != d.token) {
+                self.osr_dialog_hinted = d.token;
+                _ = notification_ops.pushNotificationHistory(self, maru.i18n.t(.web_dialog_waiting), d.origin, layout.surface_id);
+            }
+            continue;
+        }
+        web_osr.markDialogShown(layout.surface_id, d.token, @intFromPtr(self));
+        self.markNotificationsReadBySurface(layout.surface_id); // 기다린다는 알림은 이제 읽었다
+        self.osr_dialog = .{ .surface_id = layout.surface_id, .token = d.token };
+        self.osr_dialog_ready = true;
+        return;
+    }
+}
+
+pub const OsrDialogView = struct {
+    surface_id: u64,
+    token: u64,
+    offer_suppress: bool,
+    kind: web_osr.DialogKind,
+    title: []const u8,
+    message: []const u8,
+    default_text: []const u8,
+    accept: []const u8,
+    ok_label: []const u8,
+    cancel_label: []const u8,
+    /// 권한 요청(W5b)이 청한 종류 — Swift 가 macOS 권한(카메라·마이크·화면 녹화)을 먼저 받을지 가린다.
+    permission_kinds: u32 = 0,
+    permission_media: u8 = 0,
+};
+
+/// 띄울 요청(한 번). 글은 `web_osr` 가 쥔 요청(답할 때까지)과 이 창의 버퍼(다음 가져가기까지)를 빌린다. 문구는 여기서
+/// 번역·조립한다(Swift 는 문장을 만들지 않는다 — docs/i18n.md §7.2).
+pub fn takeOsrDialog(self: *AppSession) ?OsrDialogView {
+    if (!self.osr_dialog_ready) return null;
+    const shown = self.osr_dialog orelse return null;
+    const d = web_osr.dialogPending(shown.surface_id, shown.token) orelse return null;
+    self.osr_dialog_ready = false;
+    const t = maru.i18n.t;
+    var view: OsrDialogView = .{
+        .surface_id = shown.surface_id,
+        .token = shown.token,
+        .offer_suppress = d.offer_suppress,
+        .kind = d.kind,
+        .title = "",
+        .message = d.message,
+        .default_text = d.default_text,
+        .accept = d.accept,
+        .ok_label = t(.web_dialog_ok),
+        .cancel_label = t(.web_dialog_cancel),
+    };
+    switch (d.kind) {
+        .alert, .confirm, .prompt => {
+            view.title = if (d.origin.len == 0) t(.web_dialog_title_page) else maru.i18n.format(&self.osr_dialog_title_buf, t(.web_dialog_title), &.{.{ .s = d.origin }});
+            if (d.kind == .alert) view.cancel_label = "";
+        },
+        .before_unload => {
+            // 페이지 글이 아니라 maru 문구(CEF 도 영어 한 줄을 준다 — 페이지가 문구를 정하지 못하는 것이 떠나기 확인의 규칙).
+            view.title = t(.web_dialog_leave_title);
+            view.message = t(.web_dialog_leave_message);
+            view.ok_label = t(.web_dialog_leave);
+        },
+        .file_open, .file_open_multiple, .file_open_folder, .file_save => {
+            // 파일 선택은 `message` 에 페이지가 준 제목(대개 빈 글)이 있다 — 창의 안내는 maru 문구. 저장은 페이지에 **쓰기**를
+            // 맡기는 선택이라 올리기 문구를 쓰지 않는다(적대 검증).
+            view.title = d.message;
+            view.message = t(if (d.kind == .file_save) .web_file_save_message else .web_file_pick_message);
+        },
+        .permission => {
+            view.title = if (d.origin.len == 0) t(.web_permission_title_page) else maru.i18n.format(&self.osr_dialog_title_buf, t(.web_permission_title), &.{.{ .s = d.origin }});
+            view.message = permissionMessage(&self.osr_dialog_message_buf, d.permission_kinds, d.permission_media);
+            view.ok_label = t(.web_permission_allow);
+            view.cancel_label = t(.web_permission_block);
+            view.permission_kinds = d.permission_kinds;
+            view.permission_media = d.permission_media;
+        },
+    }
+    return view;
+}
+
+/// 권한 요청 sheet 의 본문 — 청한 권한을 한 줄씩(「• 카메라」), 프롬프트면 기억 안내를 붙인다(허용·차단은 Chromium 이 그
+/// 사이트에 기억한다 — 사용자 결정 2026-09-25). 미디어 요청은 기억하지 않고(W5b 실측), 위치는 저장된 허용이 있어도 매번 다시
+/// 묻고(실측), 파일 편집은 방문 동안만이라 그 둘만 청하면 안내를 붙이지 않는다(적대 검증). 버퍼가 모자라면 앞쪽 줄까지만.
+fn permissionMessage(buf: []u8, kinds: u32, media: u8) []const u8 {
+    const t = maru.i18n.t;
+    var len: usize = 0;
+    // 두 비트가 한 이름으로 이어진다(저장소 접근 둘·로컬 네트워크 둘) — 같은 줄을 두 번 쓰지 않는다.
+    var written = std.EnumSet(maru.i18n.Key).initEmpty();
+    const Line = struct {
+        fn add(out: []u8, at: *usize, name: []const u8) void {
+            const bullet = "• ";
+            const need = @as(usize, @intFromBool(at.* > 0)) + bullet.len + name.len;
+            if (at.* + need > out.len) return;
+            if (at.* > 0) {
+                out[at.*] = '\n';
+                at.* += 1;
+            }
+            @memcpy(out[at.*..][0..bullet.len], bullet);
+            at.* += bullet.len;
+            @memcpy(out[at.*..][0..name.len], name);
+            at.* += name.len;
+        }
+    };
+    inline for (std.meta.fields(ws.message.MediaPermission)) |field| {
+        const which: ws.message.MediaPermission = @enumFromInt(field.value);
+        if (media & which.bit() != 0 and !written.contains(mediaName(which))) {
+            written.insert(mediaName(which));
+            Line.add(buf, &len, t(mediaName(which)));
+        }
+    }
+    inline for (std.meta.fields(ws.message.PermissionKind)) |field| {
+        const which: ws.message.PermissionKind = @enumFromInt(field.value);
+        if (kinds & which.bit() != 0 and !written.contains(permissionName(which))) {
+            written.insert(permissionName(which));
+            Line.add(buf, &len, t(permissionName(which)));
+        }
+    }
+    const not_remembered = ws.message.PermissionKind.geolocation.bit() | ws.message.PermissionKind.file_system_access.bit();
+    // 위치는 허용을 maru 가 그 탭에서 다시 시작할 때까지 기억한다(W5b2) — 그 범위를 적는다(2 차 적대 검증 — 적지 않으면 동의
+    // 문구와 실제가 달랐다).
+    const location_only = kinds == ws.message.PermissionKind.geolocation.bit();
+    if (kinds & ~not_remembered != 0 or location_only) {
+        const note = t(if (location_only) .web_permission_location_note else .web_permission_remembered);
+        if (len + 2 + note.len <= buf.len) {
+            @memcpy(buf[len..][0..2], "\n\n");
+            len += 2;
+            @memcpy(buf[len..][0..note.len], note);
+            len += note.len;
+        }
+    }
+    return buf[0..len];
+}
+
+fn mediaName(which: ws.message.MediaPermission) maru.i18n.Key {
+    return switch (which) {
+        .microphone => .perm_microphone,
+        .camera => .perm_camera,
+        .screen_audio => .perm_screen_audio,
+        .screen => .perm_screen,
+    };
+}
+
+fn permissionName(which: ws.message.PermissionKind) maru.i18n.Key {
+    return switch (which) {
+        .ar_session => .perm_ar_session,
+        .camera_pan_tilt_zoom => .perm_camera_pan_tilt_zoom,
+        .camera => .perm_camera,
+        .captured_surface_control => .perm_captured_surface_control,
+        .clipboard => .perm_clipboard,
+        .top_level_storage_access, .storage_access => .perm_storage_access,
+        .disk_quota => .perm_disk_quota,
+        .local_fonts => .perm_local_fonts,
+        .geolocation => .perm_geolocation,
+        .hand_tracking => .perm_hand_tracking,
+        .identity_provider => .perm_identity_provider,
+        .idle_detection => .perm_idle_detection,
+        .microphone => .perm_microphone,
+        .midi_sysex => .perm_midi_sysex,
+        .multiple_downloads => .perm_multiple_downloads,
+        .notifications => .perm_notifications,
+        .keyboard_lock => .perm_keyboard_lock,
+        .pointer_lock => .perm_pointer_lock,
+        .protected_media_identifier => .perm_protected_media_identifier,
+        .register_protocol_handler => .perm_register_protocol_handler,
+        .vr_session => .perm_vr_session,
+        .web_app_installation => .perm_web_app_installation,
+        .window_management => .perm_window_management,
+        .file_system_access => .perm_file_system_access,
+        .local_network_access, .local_network => .perm_local_network,
+        .loopback_network => .perm_loopback_network,
+        .sensors => .perm_sensors,
+    };
+}
+
+pub fn takeOsrDialogDismiss(self: *AppSession) bool {
+    const v = self.osr_dialog_dismiss;
+    self.osr_dialog_dismiss = false;
+    return v;
+}
+
+fn clearShown(self: *AppSession, surface_id: u64, token: u64) void {
+    const shown = self.osr_dialog orelse return;
+    if (shown.surface_id != surface_id or shown.token != token) return;
+    self.osr_dialog = null;
+    self.osr_dialog_ready = false;
+}
+
+pub fn osrDialogReply(self: *AppSession, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool) void {
+    web_osr.replyDialog(self.allocator, surface_id, token, accept, text, suppress);
+    clearShown(self, surface_id, token);
+}
+
+pub fn osrFileDialogPath(self: *AppSession, surface_id: u64, token: u64, path: []const u8) void {
+    web_osr.fileDialogPath(self.allocator, surface_id, token, path);
+}
+
+pub fn osrFileDialogReply(self: *AppSession, surface_id: u64, token: u64, accept: bool) void {
+    web_osr.replyFileDialog(self.allocator, surface_id, token, accept);
+    clearShown(self, surface_id, token);
+}
+
+/// W5b2: 아직 맡지 않은 기억된 위치 요청 하나(sheet 없이 좌표만 구한다 — 이 창이 맡는다).
+pub fn takeOsrLocation(self: *AppSession) ?OsrDialogShown {
+    const next = web_osr.nextLocation(@intFromPtr(self)) orelse return null;
+    return .{ .surface_id = next.surface_id, .token = next.token };
+}
+
+pub const LocationStatus = enum(u32) { position = 0, unavailable = 1, blocked = 2 };
+
+/// W5b2: sheet 가 닫혔지만 답은 나중에 온다(위치 — macOS 위치 창·좌표를 기다린다). 이 창의 표시만 풀어 다른 탭의 대화상자가
+/// 기다리지 않게 한다(요청은 이 창이 맡은 채 남아 같은 탭의 다음 요청은 답을 기다린다 — 적대 검증).
+pub fn osrDialogRelease(self: *AppSession, surface_id: u64, token: u64) void {
+    clearShown(self, surface_id, token);
+}
+
+/// W5b2: 위치 요청의 좌표. 처음 요청(sheet 에서 허용)이면 macOS 가 막았을 때 못 물음(사용자는 사이트를 허용했다 — 기억·embargo
+/// 가 쌓이지 않게 — 카메라와 같다), 기억된 요청이면 허용과 「없음」(되풀이된 못 물음이 embargo 가 되지 않게). 답했으면 true.
+pub fn osrLocationReply(self: *AppSession, surface_id: u64, token: u64, status: LocationStatus, position: web_osr.Position) bool {
+    const d = web_osr.dialogPending(surface_id, token) orelse {
+        clearShown(self, surface_id, token);
+        return false;
+    };
+    const remembered = d.remembered;
+    const answered = switch (status) {
+        .position => web_osr.replyLocation(self.allocator, surface_id, token, position, .accept),
+        .unavailable => web_osr.replyLocation(self.allocator, surface_id, token, null, .accept),
+        .blocked => web_osr.replyLocation(self.allocator, surface_id, token, null, if (remembered) .accept else .ignore),
+    };
+    clearShown(self, surface_id, token);
+    return answered;
+}
+
+/// 답했으면 true — 요청이 이미 사라졌으면(이동·닫힘) false(Swift 는 그때 macOS 안내를 띄우지 않는다).
+pub fn osrPermissionReply(self: *AppSession, surface_id: u64, token: u64, result: ws.message.PermissionResult) bool {
+    const answered = web_osr.replyPermission(self.allocator, surface_id, token, result);
+    clearShown(self, surface_id, token);
+    return answered;
+}
+
+/// Swift 가 sheet 에 쓰는 나머지 문구(번역·조립은 Zig — docs/i18n.md §7.2). 0 = 억제 선택, 1 = 폴더 올리기 확인 제목(`number`
+/// 는 파일 수), 2 = 올리기 단추, 3 = 취소 단추, 4 = 폴더가 너무 크다(`number` 는 상한), 5 = 권한 닫기 단추(W5b), 6 = macOS 가
+/// Maru 의 장치 사용을 막았다(`number` 는 장치 — 0 카메라·1 마이크·2 화면 기록·3 위치 서비스(W5b2) — 화면 기록은 다시 시작해야
+/// 반영된다는 안내를 붙인다), 7 = 시스템 설정 열기 단추, 8 = 확인 단추.
+pub fn osrDialogString(which: u32, number: i64, buf: []u8) []const u8 {
+    const t = maru.i18n.t;
+    return switch (which) {
+        0 => maru.i18n.format(buf, t(.web_dialog_suppress), &.{}),
+        1 => maru.i18n.format(buf, t(.web_folder_upload_title), &.{.{ .d = number }}),
+        2 => maru.i18n.format(buf, t(.web_folder_upload), &.{}),
+        3 => maru.i18n.format(buf, t(.web_dialog_cancel), &.{}),
+        4 => maru.i18n.format(buf, t(.web_folder_too_many), &.{.{ .d = number }}),
+        5 => maru.i18n.format(buf, t(.web_permission_close), &.{}),
+        6 => maru.i18n.format(buf, t(if (number == 2) .web_permission_macos_blocked_restart else .web_permission_macos_blocked), &.{.{ .s = t(switch (number) {
+            0 => .web_device_camera,
+            1 => .web_device_microphone,
+            3 => .web_device_location,
+            else => .web_permission_screen_recording,
+        }) }}),
+        7 => maru.i18n.format(buf, t(.web_permission_open_settings), &.{}),
+        8 => maru.i18n.format(buf, t(.web_dialog_ok), &.{}),
+        else => buf[0..0],
+    };
+}
+
+/// 이번 tick 배치 중 OSR 탭을 sidecar 에 맞추고 WKWebView 전이 집합에서 뺀다 — Swift 가 그 탭에 WKWebView 를 만들지
+/// 않게. 창의 scale 로 DIP 크기를 정한다. 파괴는 여기서 하지 않는다(배치에서 빠진 탭은 다른 창으로 옮겨졌을 수 있다 —
+/// Term 이 실제로 사라질 때 `destroyTerm` 이 한다).
+fn routeOsrLayouts(self: *AppSession) void {
+    const now: i64 = @intCast(app_session_mod.monotonicMs());
+    self.osr_layouts.clearRetainingCapacity();
+    var i: usize = 0;
+    while (i < self.web_cur_scratch.items.len) {
+        const layout = self.web_cur_scratch.items[i];
+        const term = term_ops.termBySurfaceId(self, layout.surface_id) orelse {
+            i += 1;
+            continue;
+        };
+        if (!isOsrTerm(term)) {
+            i += 1;
+            continue;
+        }
+        web_osr.ensure(self.allocator, .{
+            .surface_id = layout.surface_id,
+            .width_px = layout.content_rect.w,
+            .height_px = layout.content_rect.h,
+            .visible = layout.visible,
+        }, self.scale_milli, now);
+        // W3c: 이 창이 그릴 rect(보이는 것만). 매 tick 새로 모은다.
+        if (layout.visible and layout.content_rect.w > 0 and layout.content_rect.h > 0) {
+            // W4b: divider 잡는 띠(pt → backing px) — 그 안의 클릭·hover 는 divider 것이다(WKWebView 의 hitTest 통과와 같은 자리).
+            const scale: f64 = @as(f64, @floatFromInt(@max(self.scale_milli, 1))) / 1000.0;
+            self.osr_layouts.append(self.allocator, .{
+                .surface_id = layout.surface_id,
+                .rect = layout.content_rect,
+                .seam_edges = layout.seam_edges,
+                .left_band_px = layout.divider_grab_bands_pt.left * scale,
+                .right_band_px = layout.divider_grab_bands_pt.right * scale,
+                .bottom_band_px = layout.divider_grab_bands_pt.bottom * scale,
+            }) catch {};
+        }
+        _ = self.web_cur_scratch.orderedRemove(i);
+    }
+}
+
+/// W3c: 이번 프레임(세대 `frame_generation`)에 그릴 OSR 본문 — 보이는 탭마다 front IOSurface 를 본문 rect(창 backing px,
+/// 좌상단)에 1:1 로 붙인다. 장은 DIP 올림이라 rect 보다 크거나 같다 — UV 로 rect 만큼만 자른다(늘리지 않아 흐려지지
+/// 않는다). 장이 rect 보다 작으면(크기 변경 중 옛 링) 장 크기만 그리고 나머지는 그리지 않는다. 그린 탭에는 이 세대를
+/// 적어 GPU 소비자 규칙(`web_osr_view`)이 쓴다.
+pub fn osrQuads(self: *AppSession, frame_generation: u64, out: []OsrQuad) usize {
+    if (!web_osr.enabled()) return 0;
+    var n: usize = 0;
+    for (self.osr_layouts.items) |layout| {
+        if (n == out.len) break;
+        const f = web_osr.front(layout.surface_id) orelse continue;
+        if (f.width == 0 or f.height == 0) continue;
+        const w = @min(layout.rect.w, f.width);
+        const h = @min(layout.rect.h, f.height);
+        out[n] = .{
+            .iosurface = f.surface,
+            .dest_x = @floatFromInt(layout.rect.x),
+            .dest_y = @floatFromInt(layout.rect.y),
+            .dest_w = @floatFromInt(w),
+            .dest_h = @floatFromInt(h),
+            .u1 = @as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(f.width)),
+            .v1 = @as(f32, @floatFromInt(h)) / @as(f32, @floatFromInt(f.height)),
+        };
+        web_osr.drew(layout.surface_id, frame_generation, @intFromPtr(self));
+        n += 1;
+        // W6a②: 열린 팝업 위젯(`<select>` 목록 등)을 그 본문 바로 위에 — 같은 pass 라 모달 오버레이 아래다.
+        if (n < out.len) if (web_osr.popupFront(layout.surface_id)) |p| {
+            const scale: f64 = if (self.scale_milli == 0) 1.0 else @as(f64, @floatFromInt(self.scale_milli)) / 1000.0;
+            if (osr_input.popupQuad(layout.rect, p.bounds, scale, p.front.width, p.front.height)) |q| {
+                out[n] = .{ .iosurface = p.front.surface, .dest_x = q.x, .dest_y = q.y, .dest_w = q.w, .dest_h = q.h, .u0 = q.u0, .v0 = q.v0, .u1 = q.u1, .v1 = q.v1 };
+                web_osr.drewPopup(layout.surface_id, frame_generation, @intFromPtr(self));
+                n += 1;
+            }
+        };
+    }
+    return n;
+}
+
+// ── W4b: 포인터(C5 — 마우스 게이트·제스처 주인·포커스 주인·창) ─────────────────────────────────────────────
+// 판정은 이 창이 마지막 tick 에 그린 본문(`osr_layouts`)으로만 한다 — 다른 창의 같은 좌표는 이 창 것이 아니다. 오버레이
+// 게이트는 호출자(`mouse`·`scrollWheel`)가 앞에서 끝냈고, hover 만 여기서 본다(hover 경로는 게이트가 흩어져 있다).
+
+const osr_input = maru.session.web_osr_input;
+
+fn osrDip(self: *AppSession, layout: app_session_mod.OsrLayout, x_px: f64, y_px: f64) osr_input.Point {
+    return osr_input.toDip(layout.rect, x_px, y_px, self.scale_milli);
+}
+
+/// 본문 위의 누름(kind 1·4·5). 왼쪽 누름이면 그 탭을 활성으로 올린다(WKWebView `webPanelPrimaryDown` 과 같은 길 — 알림 읽음·
+/// 작업 공간 입력 포커스). 누름은 제스처 주인이 되어 끌기·뗌을 받는다. 같은 탭의 제스처가 살아 있으면(왼쪽으로 끄는 중
+/// 오른쪽) 주인을 바꾸지 않고 그 버튼의 down 만 보탠다. 본문이 아니면 false(아래 일반 라우팅으로).
+pub fn osrMouseDown(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_button: i32, mods: i32) bool {
+    if (self.osr_layouts.items.len == 0) return false;
+    const count = osr_input.clickCount(kind) orelse return false;
+    // 제스처가 살아 있으면(왼쪽으로 끄는 중 다른 버튼) 누른 자리가 본문 밖이어도 그 탭이 받는다 — 페이지가 capture 를 쥐고 있다.
+    const owned: ?app_session_mod.OsrLayout = if (self.pointer_gesture_owner == .web_osr) osr_input.find(self.osr_layouts.items, self.pointer_gesture_owner.web_osr.surface_id) else null;
+    const layout = owned orelse osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
+    const button = osr_input.button(xterm_button) orelse return true; // 모르는 버튼 — 본문 것이니 삼킨다
+    var held = osr_input.Held.one(button);
+    if (owned != null) {
+        held = self.pointer_gesture_owner.web_osr.held.with(button, true);
+        self.pointer_gesture_owner.web_osr.held = held;
+    } else {
+        if (button == .left and self.activateSurfaceById(layout.surface_id)) {
+            self.markNotificationsReadBySurface(layout.surface_id);
+            self.focusWorkspaceInput();
+        }
+        // 활성으로 올린 탭에 키 포커스를 **누름보다 먼저** 준다 — 입력칸을 누르면 caret 이 서게(W4c).
+        syncOsrKeyTarget(self);
+        // 주인을 먼저 세운다 — 옛 제스처의 capture_lost 가 새 down 보다 먼저 가게(적대 검증 — 순서가 거꾸로였다).
+        self.beginPointerGesture(.{ .web_osr = .{ .surface_id = layout.surface_id, .first = button, .held = held, .click_count = count } });
+    }
+    _ = web_osr.sendInput(self.allocator, .{ .mouse = .{
+        .browser = layout.surface_id,
+        .kind = .down,
+        .button = button,
+        .point = osrDip(self, layout, x_px, y_px),
+        .modifiers = osr_input.modifiers(mods, held),
+        .click_count = count,
+    } });
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 제스처 주인이 Chromium 탭이면 끌기(2)·뗌(3)을 그 탭에 보낸다 — 본문 밖이어도(C5 — rect 밖 클램프 없음). 뗌은 그
+/// 버튼만 떼고, 눌린 버튼이 모두 떼어지면 끝난다. 탭이 이 창의 배치에서 사라졌으면(닫힘·숨김·다른 창으로) 제스처를 끝내고
+/// capture 를 놓게 한다.
+pub fn osrGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, mods: i32, xterm_button: i32) bool {
+    if (self.pointer_gesture_owner != .web_osr) return false;
+    const g = self.pointer_gesture_owner.web_osr;
+    const layout = osr_input.find(self.osr_layouts.items, g.surface_id) orelse {
+        self.finishPointerGesture();
+        _ = web_osr.sendInput(self.allocator, .{ .capture_lost = g.surface_id });
+        return true;
+    };
+    const point = osrDip(self, layout, x_px, y_px);
+    if (kind == 2) {
+        _ = web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = g.surface_id, .kind = .move, .point = point, .modifiers = osr_input.modifiers(mods, g.held) } });
+        return true;
+    }
+    // 이 제스처가 누르지 않은 버튼의 뗌(본문 밖에서 누른 버튼)은 삼킨다.
+    const button = osr_input.button(xterm_button) orelse return true;
+    if (!g.held.has(button)) return true;
+    const held = g.held.with(button, false);
+    if (held.empty()) self.finishPointerGesture() else self.pointer_gesture_owner.web_osr.held = held;
+    _ = web_osr.sendInput(self.allocator, .{ .mouse = .{
+        .browser = g.surface_id,
+        .kind = .up,
+        .button = button,
+        .point = point,
+        .modifiers = osr_input.modifiers(mods, held),
+        .click_count = if (button == g.first) g.click_count else 1,
+    } });
+    return true;
+}
+
+/// 끊긴 제스처(`cancelPointerGesture`) — 페이지가 잡은 capture 를 놓게 한다.
+pub fn osrCaptureLost(self: *AppSession, surface_id: u64) void {
+    _ = web_osr.sendInput(self.allocator, .{ .capture_lost = surface_id });
+}
+
+/// 버튼 없는 이동(hover). 본문 위면 그 탭에 이동을 보내고 페이지 커서를 돌려준다. 오버레이가 열렸거나 본문 밖이면 hover
+/// 하던 탭에 leave 를 보내고 null. 본문으로 들어오면 창의 일반 hover 를 창 밖 좌표로 한 번 돌려 다른 강조(사이드바·탭·
+/// 상태바·도크)를 모두 내린다 — 본문 위에서는 일반 hover 가 돌지 않아 곧장 들어오면 강조가 남는다(적대 검증).
+/// Chromium 탭 제스처 중(끄는 중 수식키를 눌러 hover 가 불린 경우)에는 아무것도 보내지 않는다 — 버튼 비트가 빠진 move 나
+/// leave 가 가면 페이지는 끌기가 끝난 것으로 본다(적대 검증).
+pub fn osrHover(self: *AppSession, x_px: f64, y_px: f64, mods: i32) ?app_session_mod.CursorKind {
+    if (self.pointer_gesture_owner == .web_osr) {
+        const c = web_osr.cursor(self.pointer_gesture_owner.web_osr.surface_id) orelse return .default;
+        return cursorKindOf(c.cursor);
+    }
+    const layout: ?app_session_mod.OsrLayout = if (self.anyOverlayOpen()) null else osr_input.hit(self.osr_layouts.items, x_px, y_px);
+    const now: u64 = if (layout) |l| l.surface_id else 0;
+    if (self.osr_hover_surface != 0 and self.osr_hover_surface != now) osrLeave(self, x_px, y_px, mods);
+    const l = layout orelse return null;
+    if (self.osr_hover_surface != l.surface_id) {
+        // 창 밖 좌표로 일반 hover 를 한 번 — 여기(osrHover)는 hover 중인 탭이 없어 null 로 흘러 모든 강조를 내린다.
+        _ = self.hoverCursor(-1, -1, 0);
+        self.osr_hover_surface = l.surface_id;
+    }
+    _ = web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = l.surface_id, .kind = .move, .point = osrDip(self, l, x_px, y_px), .modifiers = osr_input.modifiers(mods, .{}) } });
+    const c = web_osr.cursor(l.surface_id) orelse return .default;
+    self.osr_hover_cursor_generation = c.generation;
+    return cursorKindOf(c.cursor);
+}
+
+/// hover 하던 탭에 leave 를 보내고 hover 를 푼다.
+fn osrLeave(self: *AppSession, x_px: f64, y_px: f64, mods: i32) void {
+    const sid = self.osr_hover_surface;
+    self.osr_hover_surface = 0;
+    const prev = osr_input.find(self.osr_layouts.items, sid);
+    const point: osr_input.Point = if (prev) |p| osrDip(self, p, x_px, y_px) else .{ .x = -1, .y = -1 };
+    _ = web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = sid, .kind = .leave, .point = point, .modifiers = osr_input.modifiers(mods, .{}) } });
+}
+
+/// 본문 위의 휠(오버레이 게이트 뒤). 본문이 아니면 false.
+pub fn osrWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) bool {
+    if (self.osr_layouts.items.len == 0) return false;
+    const layout = osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
+    _ = web_osr.sendInput(self.allocator, .{ .wheel = .{
+        .browser = layout.surface_id,
+        .point = osrDip(self, layout, x_px, y_px),
+        .delta_x = osr_input.wheelDelta(delta_x, precise),
+        .delta_y = osr_input.wheelDelta(delta_y, precise),
+        .modifiers = .{ .precise_scroll = precise },
+    } });
+    return true;
+}
+
+/// 뒤로·앞으로 마우스 버튼(macOS buttonNumber 3·4). CEF 마우스 API 에는 이 버튼이 없어 주소창의 뒤로·앞으로로 보낸다
+/// (브라우저 관례). 본문이 아니면 false — 호출자가 옛 경로로 흘린다.
+pub fn osrAuxButton(self: *AppSession, button_number: i32, x_px: f64, y_px: f64) bool {
+    if (self.anyOverlayOpen() or self.osr_layouts.items.len == 0) return false;
+    const layout = osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
+    const action: maru.session.web_sidecar.message.NavActionKind = switch (button_number) {
+        3 => .back,
+        4 => .forward,
+        else => return true, // 본문 위의 다른 추가 버튼은 삼킨다
+    };
+    // 그 pane 을 활성으로 올린다(왼쪽 누름과 같은 길) — 이동이 떠나기 확인을 부르면 초점 있는 pane 이라야 sheet 가 뜬다(적대 검증:
+    // 초점 없는 pane 에서 확인이 보이지 않은 채 걸렸다).
+    if (self.activateSurfaceById(layout.surface_id)) self.focusWorkspaceInput();
+    syncOsrKeyTarget(self);
+    web_osr.navAction(self.allocator, layout.surface_id, action);
+    return true;
+}
+
+/// Swift 가 tick 뒤에 가져간다 — hover 중인 탭의 커서가 바뀌었거나 hover 가 포인터 이동 없이 끝났으면 한 번.
+pub fn takeOsrCursor(self: *AppSession) ?app_session_mod.CursorKind {
+    const c = self.osr_cursor_pending orelse return null;
+    self.osr_cursor_pending = null;
+    return c;
+}
+
+// ── W4c: 키보드(C5 — 키 라우트·모달 에지·IME·편집 명령) ─────────────────────────────────────────────────
+// 키 대상은 **Zig 활성 pane 이 답한다**(Swift 는 따로 들지 않는다): 창이 키 창이고, 입력 초점이 터미널 자리(모달·notice·
+// 주소창·rename·검색 등이 아님)이고, 활성 Term 이 OSR browser 면 그 탭이다. 키 이벤트는 W4a 실측 규칙대로 보낸다 —
+// 모든 키는 raw_down, 글자를 만드는 키(평문·Enter)만 char 를 더한다(Backspace·Tab·화살표·Home·Esc·⌥⌫ 는 raw_down 만으로
+// 동작하고, char 를 더하면 쓸데없는 keypress 가 생긴다 — W4c 착수 전 실측). 입력기가 가져간 키(조합)는 키 이벤트 대신
+// 조합 메시지로 간다. macOS 텍스트 편집 단축키(⌃A·⌃E·⌃K 등)는 키 이벤트로는 동작하지 않는다 — CDP 편집 명령이 필요해 W9
+// 에서 붙인다(사용자 결정 2026-09-24).
+
+const ws_message = maru.session.web_sidecar.message;
+
+/// Swift 가 넘긴 키 하나(macOS keyCode·글자·수식자).
+pub const OsrKey = struct {
+    key_code: u8,
+    character: u16,
+    unmodified: u16,
+    modifiers: ws_message.Modifiers,
+};
+
+/// Swift 의 수식자 비트(xterm 과 같은 shift=4·alt=8·ctrl=16·cmd=32 에 caps=64·숫자패드=128·반복=256) → codec 수식자.
+pub fn osrKeyModifiers(bits: i32) ws_message.Modifiers {
+    return .{
+        .shift = bits & 4 != 0,
+        .alt = bits & 8 != 0,
+        .control = bits & 16 != 0,
+        .command = bits & 32 != 0,
+        .caps_lock = bits & 64 != 0,
+        .key_pad = bits & 128 != 0,
+        .is_repeat = bits & 256 != 0,
+    };
+}
+
+/// 입력기 트랜잭션에서 일어난 일(글 버퍼는 AppSession 이 든다).
+pub const OsrTxnFlags = struct {
+    had_composition: bool = false,
+    commit_present: bool = false,
+    commit_sent: bool = false,
+    marked: bool = false,
+    command: bool = false,
+    delete_backward: bool = false,
+    cleared: bool = false,
+};
+
+/// 키 대상 Chromium 탭(없으면 null). 텍스트 입력을 maru 가 가지는 동안(모달·주소창·rename·검색·파일 트리 —
+/// `terminalOwnsInput`)은 아니다. **notice 토스트는 빼앗지 않는다** — WKWebView 탭과 같은 규칙(적대 검증 — 처음엔
+/// `inputFocus` 로 판정해 토스트가 뜨면 페이지가 blur 되고 조합이 끊겼다).
+pub fn osrKeyTarget(self: *AppSession) ?u64 {
+    if (!web_osr.enabled() or !self.surface_initialized or !self.window_focused) return null;
+    if (self.terminalOwnsInput()) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (!isOsrTerm(term)) return null;
+    return term.surfaceId();
+}
+
+/// 키 대상이 바뀌었으면 포커스를 옮긴다(C5 모달 에지): 옛 탭은 조합을 그대로 확정하고(`ime_finish_composing`) 포커스를
+/// 놓는다, 새 탭은 포커스를 받는다. tick·키·편집 명령 **직전**과 탭을 활성으로 올리는 누름 **직전**에 부른다 — 키로 탭을
+/// 바꾼 직후의 키가 포커스 없는 브라우저로 가지 않게(적대 검증).
+pub fn syncOsrKeyTarget(self: *AppSession) void {
+    const now = osrKeyTarget(self) orelse 0;
+    if (now == self.osr_key_target) return;
+    // 새 탭이 아직 sidecar 기록에 없으면(배치가 이 tick 뒤에 브라우저를 만든다) 미룬다 — 먼저 대상을 바꿔 두면 포커스를
+    // 영영 못 준다(W4c 실측 — 첫 동기화가 기록 전에 돌아 페이지가 포커스 없이 남았다).
+    if (now != 0 and !web_osr.owns(now)) return;
+    const window = @intFromPtr(self);
+    if (self.osr_key_target != 0) {
+        const old = self.osr_key_target;
+        if (web_osr.composing(old)) {
+            _ = web_osr.sendInput(self.allocator, .{ .ime_finish_composing = .{ .browser = old, .value = false } });
+            self.osr_discard_marked = true;
+        }
+        web_osr.setFocus(self.allocator, old, false, window);
+    }
+    self.osr_down_sent = 0;
+    self.osr_unmark_pending = false;
+    if (now != 0) web_osr.setFocus(self.allocator, now, true, window);
+    self.osr_key_target = now;
+}
+
+fn sendKey(self: *AppSession, sid: u64, kind: ws_message.KeyKind, key: OsrKey, character: u16) void {
+    const bit = @as(u128, 1) << @intCast(key.key_code & 0x7F);
+    switch (kind) {
+        // ⌘ chord 는 macOS 가 keyUp 을 주지 않는다 — 기록하지 않아 다음 같은 키의 짝 없는 keyup 이 안 나가게.
+        .raw_down, .down => if (!key.modifiers.command) {
+            self.osr_down_sent |= bit;
+        },
+        .up => {
+            // keydown 을 안 보낸 키(입력기가 가져간 키)의 keyup 은 보내지 않는다.
+            if (self.osr_down_sent & bit == 0) return;
+            self.osr_down_sent &= ~bit;
+        },
+        .char => {},
+    }
+    _ = web_osr.sendInput(self.allocator, .{ .key = .{
+        .browser = sid,
+        .kind = kind,
+        .modifiers = key.modifiers,
+        .native_key_code = key.key_code,
+        .character = character,
+        .unmodified_character = key.unmodified,
+    } });
+}
+
+/// Swift 키 한 번. phase 0 = 지금 raw_down(⌘·⌃ chord·기능키 — 입력기를 거치지 않는다), 1 = 입력기 트랜잭션 키로 쥐어 둠
+/// (`osrImeEnd` 가 판정한다), 2 = 뗌, 3 = 열린 팝업 위젯의 키(누름 + 글자 — W6a②). 다른 값은 거절한다. 키 대상이 Chromium 탭이면 true(Swift 는 터미널 경로를 안 탄다).
+pub fn osrKey(self: *AppSession, phase: i32, key: OsrKey) bool {
+    if (phase < 0 or phase > 3) return false;
+    syncOsrKeyTarget(self);
+    const sid = osrKeyTarget(self) orelse return false;
+    switch (phase) {
+        0 => sendKey(self, sid, .raw_down, key, key.character),
+        1 => self.osr_armed_key = key,
+        2 => sendKey(self, sid, .up, key, key.character),
+        else => {
+            // 3: 열린 팝업 위젯의 키(W6a②) — 입력기 없이 누름과 글자(목록의 글자 찾기). 기능키(사설 영역)·제어 문자·짝 없는
+            // 대리 문자와 ⌘·⌃ 조합은 글자를 보내지 않는다(Chrome 은 ⌘ 조합에 keypress 를 보내지 않는다 — ⌘B 가 「banana」로
+            // 옮기지 않게, W6a② 적대 검증 3 차).
+            sendKey(self, sid, .raw_down, key, key.character);
+            if (popupKeyHasChar(key)) sendKey(self, sid, .char, key, key.character);
+        },
+    }
+    return true;
+}
+
+fn popupKeyHasChar(key: OsrKey) bool {
+    const ch = key.character;
+    if (key.modifiers.command or key.modifiers.control) return false;
+    if (ch < 0x20 or ch == 0x7F) return false;
+    if (ch >= 0xD800 and ch <= 0xDFFF) return false;
+    return !(ch >= 0xF700 and ch <= 0xF8FF);
+}
+
+/// hover 중인 Chromium 탭의 툴팁(W6b) — 글과, (hover 탭, 그 탭의 툴팁 세대)가 바뀔 때마다 오르는 일련번호. Swift 는 일련번호가
+/// 바뀌면 macOS 툴팁을 다시 단다(글이 비었으면 뗀다). 포인터가 탭을 떠나거나(오버레이가 열리며 leave 를 보낸 경우도) 다른 탭으로
+/// 가면 hover 탭이 바뀌어 일련번호가 오른다 — 옛 탭의 글이 새 자리에 남지 않는다.
+/// `rect` 는 그 탭 본문(backing px, view 왼쪽 위 원점) — Swift 는 툴팁 영역을 view 전체가 아니라 여기에 단다. 포인터를 멈춘 채
+/// 배치가 바뀌면(분할·크기) hover 탭이 그대로여도 포인터가 본문 밖일 수 있다 — 그때 옛 글이 터미널 위에 뜨지 않게(W6b 적대 검증 3 차).
+pub fn osrTooltip(self: *AppSession) struct { serial: u64, text: []const u8, rect: ?osr_input.Rect } {
+    const sid = self.osr_hover_surface;
+    const t = if (sid != 0) web_osr.tooltip(sid) else null;
+    const serial = self.osr_tooltip_seen.observe(sid, if (t) |x| x.generation else 0);
+    const layout = if (sid != 0) osr_input.find(self.osr_layouts.items, sid) else null;
+    return .{ .serial = serial, .text = if (t) |x| x.text else "", .rect = if (layout) |l| l.rect else null };
+}
+
+/// 이 창이 띄운 우클릭 메뉴(W6c②). 항목은 순수 모듈이 정하고(`web_osr_context_menu`), 자리는 창 backing px 다.
+pub const OsrContextMenu = struct {
+    surface: u64,
+    menu: u32,
+    x_px: f64,
+    y_px: f64,
+    items: maru.session.web_osr_context_menu.Menu,
+};
+
+/// 이 창에 보이는 탭에 온 우클릭 메뉴가 있으면 가져간다(한 번에 하나 — 띄운 것이 있으면 기다린다). 오버레이가 열렸으면 띄우지
+/// 않고 취소한다(메뉴가 오는 사이 키로 팔레트를 열었다).
+pub fn osrContextMenuTake(self: *AppSession) ?*const OsrContextMenu {
+    if (self.osr_context_menu != null) return null;
+    for (self.osr_layouts.items) |layout| {
+        const taken = web_osr.takeContextMenu(layout.surface_id) orelse continue;
+        if (self.anyOverlayOpen()) {
+            web_osr.answerContextMenu(self.allocator, layout.surface_id, taken.menu, .cancel);
+            continue;
+        }
+        const at = osr_input.toWindowPx(layout.rect, taken.point, self.scale_milli);
+        self.osr_context_menu = .{
+            .surface = layout.surface_id,
+            .menu = taken.menu,
+            .x_px = at.x,
+            .y_px = at.y,
+            .items = maru.session.web_osr_context_menu.build(taken.flags, maru.session.web_osr_context_menu.hasVisibleText(web_osr.contextMenuSelection(layout.surface_id, taken.menu))),
+        };
+        return &self.osr_context_menu.?;
+    }
+    return null;
+}
+
+/// 띄운 그 메뉴(`menu` 가 맞을 때만).
+pub fn osrContextMenuShown(self: *AppSession, menu: u32) ?*const OsrContextMenu {
+    if (self.osr_context_menu == null or self.osr_context_menu.?.menu != menu) return null;
+    return &self.osr_context_menu.?;
+}
+
+/// 띄운 메뉴가 아직 열려 있어야 하는가 — sidecar 가 닫았거나(이동·탭 닫힘) 탭이 사라졌으면 false(Swift 가 메뉴를 거둔다).
+pub fn osrContextMenuOpen(self: *AppSession, menu: u32) bool {
+    const m = osrContextMenuShown(self, menu) orelse return false;
+    return web_osr.contextMenuOpen(m.surface, m.menu);
+}
+
+/// 띄운 메뉴의 선택한 글.
+pub fn osrContextMenuSelection(self: *AppSession, menu: u32) []const u8 {
+    const m = osrContextMenuShown(self, menu) orelse return "";
+    return web_osr.contextMenuSelection(m.surface, m.menu);
+}
+
+/// 띄운 메뉴의 답(고른 명령, 고르지 않았거나 macOS 항목이면 취소). 메뉴가 떼기를 먹었으면(누른 채 뜬 메뉴 — 시험 앱 실측: 메뉴
+/// 위에서 떼면 view 에 떼기가 오지 않는다) 그 탭의 제스처가 버튼을 쥔 채 남아 hover 가 막힌다 — 제스처가 쥐었지만 지금 실제로
+/// 눌려 있지 않은 버튼(`pressed` — `NSEvent.pressedMouseButtons` 비트: 1 왼·2 오른·4 가운데)을 지금 포인터 자리에서 뗀다. 아직
+/// 눌려 있으면 진짜 떼기가 온다. `activate` 면 그 탭을 활성으로 올린다(이모티콘 — 고른 글자가 입력기 경로로 그 칸에 가게. 우클릭은
+/// 탭을 활성으로 올리지 않는다 — W6c② 적대 검증).
+pub fn osrContextMenuAnswer(self: *AppSession, menu: u32, command: ws.message.ContextMenuCommandKind, x_px: f64, y_px: f64, pressed: u32, activate: bool) bool {
+    const m = (osrContextMenuShown(self, menu) orelse return false).*;
+    self.osr_context_menu = null;
+    // 떼기를 먼저 보낸다 — 명령(모두 선택 등) 뒤에 온 왼쪽 떼기가 페이지의 선택을 바꾸지 않게(W6c② 적대 검증 2 차).
+    for ([_]struct { bit: u32, xterm: i32, button: osr_input.MouseButton }{
+        .{ .bit = 2, .xterm = 2, .button = .right },
+        .{ .bit = 1, .xterm = 0, .button = .left },
+        .{ .bit = 4, .xterm = 1, .button = .middle },
+    }) |b| {
+        if (self.pointer_gesture_owner != .web_osr) break;
+        const g = self.pointer_gesture_owner.web_osr;
+        if (g.surface_id == m.surface and g.held.has(b.button) and pressed & b.bit == 0) _ = osrGesture(self, 3, x_px, y_px, 0, b.xterm);
+    }
+    web_osr.answerContextMenu(self.allocator, m.surface, m.menu, command);
+    if (activate and self.activateSurfaceById(m.surface)) {
+        self.focusWorkspaceInput();
+        syncOsrKeyTarget(self);
+    }
+    return true;
+}
+
+/// 창이 사라진다 — 띄운 메뉴를 취소로 끝낸다(Swift 가 답할 곳을 잃었다. 안 그러면 sidecar 의 CEF 가 그 탭의 우클릭을 버린다).
+pub fn osrContextMenuDropShown(self: *AppSession) void {
+    const m = self.osr_context_menu orelse return;
+    self.osr_context_menu = null;
+    web_osr.answerContextMenu(self.allocator, m.surface, m.menu, .cancel);
+}
+
+/// 키 대상 탭에 팝업 위젯이 열려 있는가(W6a②). 열린 목록은 편집할 수 없어 입력기 조합이 갈 곳이 없다 — 조합이 서면 그 뒤의
+/// Esc 가 「조합 취소」로 먹혀 목록이 한 번에 안 닫혔다(실측). Chrome 의 목록은 네이티브 메뉴라 입력기가 끼지 않는다.
+pub fn osrPopupOpen(self: *AppSession) bool {
+    const sid = osrKeyTarget(self) orelse return false;
+    return web_osr.popupOpen(sid);
+}
+
+/// 터미널이 조합을 쥐고 있으면(`ime_terminal_target_id` — 조합 중 대상이 바뀜) 확정될 때까지 그쪽 것이다.
+fn terminalHoldsComposition(self: *AppSession) bool {
+    return self.ime_terminal_target_id != null;
+}
+
+/// 입력기 트랜잭션 시작 — 키 대상이 Chromium 탭이면 그 탭 몫으로 연다(터미널 core 를 건드리지 않는다).
+pub fn osrImeBegin(self: *AppSession) bool {
+    if (terminalHoldsComposition(self)) return false;
+    syncOsrKeyTarget(self);
+    const sid = osrKeyTarget(self) orelse return false;
+    flushUnmark(self, sid);
+    self.osr_ime_surface = sid;
+    self.osr_ime_typed.clearRetainingCapacity();
+    self.osr_ime_commit.clearRetainingCapacity();
+    self.osr_txn = .{ .had_composition = web_osr.composing(sid) };
+    return true;
+}
+
+/// 트랜잭션 안에서 조합이 아직 열려 있는가(시작 때 조합이 있었고 확정이 쥐어지지 않았다, 또는 이번에 새로 섰다).
+fn txnComposing(self: *AppSession) bool {
+    const t = self.osr_txn;
+    return t.marked or (t.had_composition and !t.commit_present and !t.commit_sent);
+}
+
+/// 조합 글 갱신. 트랜잭션 안에서 비지 않은 조합이 서면 그 키는 입력기 것이다. 빈 글은 Swift `insertText` 가 확정 **전에**
+/// 늘 보내는 조합 지우기이거나(조합이 없으면 아무 일도 아니다 — 처음엔 이것을 「입력기가 가져감」으로 세어 평문 타이핑이
+/// 통째로 사라졌다), 조합 취소(Esc 등)다. 트랜잭션 밖의 빈 글(unmarkText)은 Apple 의미대로 확정인데, 곧 확정 글이 오면
+/// 그 글이 조합을 대신하므로 미뤘다가 판정한다(`flushUnmark`).
+pub fn osrImeMarked(self: *AppSession, bytes: []const u8) bool {
+    if (terminalHoldsComposition(self)) return false;
+    const in_txn = self.osr_ime_surface != 0;
+    const sid = if (in_txn) self.osr_ime_surface else osrKeyTarget(self) orelse return false;
+    if (bytes.len == 0) {
+        if (in_txn) {
+            if (txnComposing(self)) self.osr_txn.cleared = true;
+        } else if (web_osr.composing(sid)) {
+            self.osr_unmark_pending = true;
+        }
+        return true;
+    }
+    if (!in_txn) flushUnmark(self, sid);
+    // 쥐어 둔 확정(「한」)·쌓인 글이 있으면 새 조합(「ㄱ」)보다 먼저 보낸다 — 안 그러면 조합이 그 글을 덮는다(적대 검증).
+    if (in_txn and self.osr_txn.commit_present) {
+        commitText(self, sid, self.osr_ime_commit.items);
+        self.osr_ime_commit.clearRetainingCapacity();
+        self.osr_txn.commit_present = false;
+        self.osr_txn.commit_sent = true;
+    }
+    if (in_txn and self.osr_ime_typed.items.len > 0) {
+        commitText(self, sid, self.osr_ime_typed.items);
+        self.osr_ime_typed.clearRetainingCapacity();
+    }
+    if (in_txn) self.osr_txn.marked = true;
+    self.osr_txn.cleared = false;
+    _ = sendCompositionText(self, sid, bytes);
+    return true;
+}
+
+/// 확정 글. 트랜잭션 안에서 시작 때 조합을 확정하는 첫 글은 끝까지 쥐어 둔다(뒤에 deleteBackward 만 오면 취소다), 그 뒤
+/// 글은 이번 키가 만든 글이다. 트랜잭션 밖(문자 팔레트·받아쓰기·후보창 마우스 선택)이면 곧바로 확정한다 — 조합이 있으면
+/// 그 글이 조합을 대신한다(ime_commit_text 가 조합을 바꾼다).
+pub fn osrImeInsert(self: *AppSession, bytes: []const u8) bool {
+    if (terminalHoldsComposition(self)) return false;
+    const in_txn = self.osr_ime_surface != 0;
+    const sid = if (in_txn) self.osr_ime_surface else osrKeyTarget(self) orelse return false;
+    if (!in_txn) {
+        self.osr_unmark_pending = false;
+        if (bytes.len == 0) {
+            _ = web_osr.sendInput(self.allocator, .{ .ime_cancel_composition = sid }); // 조합이 없으면 web_osr 가 막는다
+        } else commitText(self, sid, bytes);
+        return true;
+    }
+    if (txnComposing(self) and !self.osr_txn.marked and !self.osr_txn.commit_present) {
+        self.osr_ime_commit.appendSlice(self.allocator, bytes) catch {};
+        self.osr_txn.commit_present = true;
+        self.osr_txn.cleared = false;
+        return true;
+    }
+    if (self.osr_txn.marked) {
+        // 이번 트랜잭션에 선 조합을 확정한다(드묾 — 조합 뒤 바로 확정).
+        commitText(self, sid, bytes);
+        self.osr_txn.marked = false;
+        self.osr_txn.commit_sent = true;
+        return true;
+    }
+    self.osr_ime_typed.appendSlice(self.allocator, bytes) catch {};
+    return true;
+}
+
+/// 트랜잭션 밖에서 조합이 비워진 채(unmarkText) 확정 글이 안 왔으면 조합을 그대로 확정한다(Apple 의미).
+fn flushUnmark(self: *AppSession, sid: u64) void {
+    if (!self.osr_unmark_pending) return;
+    self.osr_unmark_pending = false;
+    if (web_osr.composing(sid)) _ = web_osr.sendInput(self.allocator, .{ .ime_finish_composing = .{ .browser = sid, .value = false } });
+}
+
+/// 입력기의 키 동작 명령(doCommand — insertNewline·moveLeft·deleteBackward…). 트랜잭션 안이면 기록한다.
+pub fn osrImeCommand(self: *AppSession, delete_backward: bool) bool {
+    if (self.osr_ime_surface == 0) return false;
+    self.osr_txn.command = true;
+    if (delete_backward) self.osr_txn.delete_backward = true;
+    return true;
+}
+
+/// 트랜잭션 끝 — `web_osr_input.imeOutcome` 이 정한 대로 확정·취소·키 이벤트를 보낸다.
+pub fn osrImeEnd(self: *AppSession) bool {
+    const sid = self.osr_ime_surface;
+    if (sid == 0) return false;
+    defer {
+        self.osr_ime_surface = 0;
+        self.osr_armed_key = null;
+        self.osr_ime_typed.clearRetainingCapacity();
+        self.osr_ime_commit.clearRetainingCapacity();
+        self.osr_txn = .{};
+    }
+    const t = self.osr_txn;
+    const outcome = osr_input.imeOutcome(.{
+        .key_code = if (self.osr_armed_key) |k| k.key_code else 0,
+        .had_composition = t.had_composition,
+        .commit = if (t.commit_present) self.osr_ime_commit.items else null,
+        .commit_sent = t.commit_sent,
+        .marked = t.marked,
+        .typed = self.osr_ime_typed.items,
+        .command = t.command,
+        .delete_backward = t.delete_backward,
+        .cleared = t.cleared,
+    });
+    switch (outcome.commit) {
+        .none => {},
+        .send => commitText(self, sid, self.osr_ime_commit.items),
+        .cancel => _ = web_osr.sendInput(self.allocator, .{ .ime_cancel_composition = sid }),
+    }
+    const key = self.osr_armed_key orelse return true;
+    if (outcome.raw_down) sendKey(self, sid, .raw_down, key, key.character);
+    if (outcome.char) |c| sendKey(self, sid, .char, key, c);
+    if (outcome.commit_typed) commitText(self, sid, self.osr_ime_typed.items);
+    return true;
+}
+
+/// 조합을 지금 확정한다(마우스 누름·키 창 잃음·조합 중 앱 단축키·메뉴 편집 명령 — Swift `commitComposition`). 키 대상이
+/// Chromium 탭이 아니면 false(다른 입력 대상이 확정한다).
+pub fn osrCommitComposition(self: *AppSession) bool {
+    syncOsrKeyTarget(self);
+    const sid = osrKeyTarget(self) orelse return false;
+    self.osr_unmark_pending = false;
+    if (web_osr.composing(sid)) _ = web_osr.sendInput(self.allocator, .{ .ime_finish_composing = .{ .browser = sid, .value = false } });
+    return true;
+}
+
+/// Swift 가 tick 뒤에 가져간다 — Zig 가 조합을 끝냈으니 입력기 세션의 조합도 버리라는 뜻(한 번).
+pub fn takeOsrDiscardMarked(self: *AppSession) bool {
+    const v = self.osr_discard_marked;
+    self.osr_discard_marked = false;
+    return v;
+}
+
+/// 후보창 자리(창 backing px) — 조합 글자 사각형(view DIP)을 본문 자리로. 없으면 본문 왼쪽 위.
+pub fn osrImeCursorRect(self: *AppSession) ?struct { x: f64, y: f64, w: f64, h: f64 } {
+    const sid = osrKeyTarget(self) orelse return null;
+    const layout = osr_input.find(self.osr_layouts.items, sid) orelse return null;
+    const scale: f64 = if (self.scale_milli == 0) 1.0 else @as(f64, @floatFromInt(self.scale_milli)) / 1000.0;
+    const x0: f64 = @floatFromInt(layout.rect.x);
+    const y0: f64 = @floatFromInt(layout.rect.y);
+    // 사각형은 조합 중에만 쓴다 — 조합이 끝난 뒤의 옛 자리를 새 조합의 후보창에 쓰지 않는다(적대 검증).
+    const b = (if (web_osr.composing(sid)) web_osr.imeBounds(sid) else null) orelse return .{ .x = x0, .y = y0, .w = 1, .h = 16 * scale };
+    return .{
+        .x = x0 + @as(f64, @floatFromInt(b.x)) * scale,
+        .y = y0 + @as(f64, @floatFromInt(b.y)) * scale,
+        .w = @max(@as(f64, @floatFromInt(b.width)) * scale, 1),
+        .h = @max(@as(f64, @floatFromInt(b.height)) * scale, 1),
+    };
+}
+
+fn osrEditFor(action: anytype) ?ws_message.EditCommandKind {
+    return switch (action) {
+        .select_all => .select_all,
+        .editor_undo => .undo,
+        .editor_redo => .redo,
+        else => null,
+    };
+}
+
+/// 편집 명령(메뉴 ⌘A·⌘C·⌘V·⌘X·⌘Z·⌘⇧Z). 키 대상이 Chromium 탭이면 보내고 true.
+pub fn osrEdit(self: *AppSession, command: ws_message.EditCommandKind) bool {
+    syncOsrKeyTarget(self);
+    const sid = osrKeyTarget(self) orelse return false;
+    _ = web_osr.sendInput(self.allocator, .{ .edit_command = .{ .browser = sid, .command = command } });
+    return true;
+}
+
+fn sendCompositionText(self: *AppSession, sid: u64, bytes: []const u8) bool {
+    var buf: [maru.session.web_sidecar.wire.max_ime_text_bytes]u8 = undefined;
+    const clean = imeSafe(maru.session.web_sidecar.text.clampUtf8(bytes, buf.len), &buf);
+    return web_osr.sendInput(self.allocator, .{ .ime_set_composition = .{ .browser = sid, .text = clean } });
+}
+
+/// codec 이 거절할 제어 문자(탭·줄바꿈 밖)를 뺀다 — 안 빼면 그 조각이 통째로 조용히 사라진다(적대 검증).
+fn imeSafe(bytes: []const u8, out: []u8) []const u8 {
+    var n: usize = 0;
+    for (bytes) |byte| {
+        if ((byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r') or byte == 0x7f) continue;
+        out[n] = byte;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// 확정 글을 IME 글 상한씩 글자 경계에서 나눠 보낸다(받아쓰기·서비스가 긴 글을 넣는다 — W4a 인계).
+fn commitText(self: *AppSession, sid: u64, bytes: []const u8) void {
+    var rest = bytes;
+    var buf: [maru.session.web_sidecar.wire.max_ime_text_bytes]u8 = undefined;
+    while (rest.len > 0) {
+        const chunk = maru.session.web_sidecar.text.clampUtf8(rest, buf.len);
+        if (chunk.len == 0) break; // 한 글자도 못 싣는 잘못된 UTF-8 — 버린다
+        _ = web_osr.sendInput(self.allocator, .{ .ime_commit_text = .{ .browser = sid, .text = imeSafe(chunk, &buf) } });
+        rest = rest[chunk.len..];
+    }
+}
+
+/// 페이지 커서 → maru 커서. 시스템에 없는 것(기다림·진행·도움말)은 화살표.
+fn cursorKindOf(c: maru.session.web_sidecar.message.WebCursor) app_session_mod.CursorKind {
+    return switch (c) {
+        .arrow, .wait, .progress, .help => .default,
+        .hand => .link,
+        .ibeam => .text,
+        .vertical_ibeam => .vertical_text,
+        .crosshair => .crosshair,
+        .resize_ew => .resize_h,
+        .resize_ns => .resize_v,
+        .grab => .grab,
+        .grabbing => .grabbing,
+        .not_allowed => .not_allowed,
+        .copy => .copy,
+        .alias => .alias,
+        .context_menu => .context_menu,
+        .none => .hidden,
+    };
+}
+
+/// ABI 로 넘기는 OSR 사각형 하나(`MaruAppHostOsrQuad` 와 같은 배치).
+pub const OsrQuad = extern struct {
+    iosurface: ?*anyopaque = null,
+    dest_x: f32 = 0,
+    dest_y: f32 = 0,
+    dest_w: f32 = 0,
+    dest_h: f32 = 0,
+    u0: f32 = 0,
+    v0: f32 = 0,
+    u1: f32 = 1,
+    v1: f32 = 1,
+};
+
+/// Term 이 사라졌다 — OSR 브라우저면 sidecar 에서 파괴한다(`destroyTerm`).
+pub fn dropOsrSurface(self: *AppSession, surface_id: u64) void {
+    if (!web_osr.enabled()) return;
+    web_osr.destroy(self.allocator, surface_id);
+}
+
 pub fn isBrowserTerm(term: *const Term) bool {
     // **파일 entry 제외가 여기 있다**(FP16 §8). `.html`/`.pdf` 파일 Term은 격리 config를 쓰려고
     // `web_panel_kind == .browser`를 갖게 되는데, 그렇다고 browser 기능(주소창 밴드·nav 단축키·URL 편집·
@@ -665,7 +1745,13 @@ pub fn takeWebAddrFocusPull(self: *AppSession) ?u64 {
 pub fn takeWebAddrNavigate(self: *AppSession) ?WebNavigateRequest {
     if (self.addr_navigate_pending) |sid| {
         self.addr_navigate_pending = null;
-        return .{ .surface_id = sid, .url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len] };
+        const url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len];
+        // OSR 탭은 Swift 에 WKWebView 가 없다 — sidecar 로 보낸다(W3b).
+        if (isOsrSurface(sid)) {
+            web_osr.navigate(self.allocator, sid, url);
+            return takeRestoredBrowserNavigate(self);
+        }
+        return .{ .surface_id = sid, .url = url };
     }
     return takeRestoredBrowserNavigate(self);
 }
@@ -678,6 +1764,14 @@ pub fn takeRestoredBrowserNavigate(self: *AppSession) ?WebNavigateRequest {
             for (pane.terms.items) |term| {
                 const url = term.pending_url orelse continue;
                 if (url.len == 0 or url.len > addr_nav_url_cap) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
+                    self.allocator.free(url);
+                    term.pending_url = null;
+                    continue;
+                }
+                // OSR 탭: sidecar 가 그 브라우저를 들고 있으면 넘긴다(만들어지기 전이면 만들어진 뒤 보낸다 — web_osr).
+                if (isOsrTerm(term)) {
+                    if (!web_osr.owns(term.surfaceId())) continue; // 아직 배치 전 — 다음 tick
+                    web_osr.navigate(self.allocator, term.surfaceId(), url);
                     self.allocator.free(url);
                     term.pending_url = null;
                     continue;
@@ -734,6 +1828,7 @@ pub fn computeWebSurfaceTransitions(self: *AppSession) void {
     // scratch에 남은 부분 데이터는 다음 tick clearRetainingCapacity가 리셋하므로 무해.
     self.web_cur_scratch.clearRetainingCapacity();
     collectWebSurfaces(self, &self.web_cur_scratch) catch return;
+    if (web_osr.enabled()) routeOsrLayouts(self);
 
     var diff = web_panel_layout.surfaceDiff(self.allocator, self.web_panel_prev.items, self.web_cur_scratch.items) catch return;
     defer diff.deinit(self.allocator);
@@ -839,6 +1934,9 @@ pub fn dispatchWebAppAction(self: *AppSession, surface_id: u64, event: terminal.
         workspace_ops.focusWorkspaceInput(self);
         self.workspace_focus_pending = true;
         self.requestClose(.term_or_pane);
+    } else if (isOsrSurface(surface_id) and osrEditFor(action) != null) {
+        // W4c: Chromium 탭의 ⌘A·⌘Z·⌘⇧Z 는 페이지 편집 명령이다(WKWebView 는 WebKit 이 가진다).
+        _ = osrEdit(self, osrEditFor(action).?);
     } else {
         self.dispatchAppAction(action);
     }
@@ -966,7 +2064,47 @@ pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
 pub fn takeWebNavAction(self: *AppSession) ?WebNavAction {
     if (self.web_nav_action_pending) |sid| {
         self.web_nav_action_pending = null;
+        if (isOsrSurface(sid)) {
+            // 0=back·1=forward·2=reload(주소창 버튼 — WebNavAction 과 같은 번호).
+            web_osr.navAction(self.allocator, sid, switch (self.web_nav_action_code) {
+                0 => .back,
+                1 => .forward,
+                else => .reload,
+            });
+            return null;
+        }
         return .{ .surface_id = sid, .code = self.web_nav_action_code };
     }
     return null;
+}
+
+/// W4d: 설정의 브라우저 엔진이 바뀌었으면(파일 reload·설정 화면) 「재시작하면 적용」을 한 번 알린다.
+pub fn noteBrowserEngineConfig(self: *AppSession) void {
+    if (web_osr.engineChangeNeedsNotice(self.loaded_config.config.browser.engine == .chromium)) self.showNoticeKey(.set_browser_engine_restart);
+}
+
+test "permission sheet text lists each asked permission once and notes remembering only for prompts" {
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
+    const kinds = ws.message.PermissionKind;
+    var buf: [2048]u8 = undefined;
+    // 저장소 접근 두 비트는 한 이름 — 한 줄만. 프롬프트라 기억 안내가 붙는다.
+    const prompt = permissionMessage(&buf, kinds.storage_access.bit() | kinds.top_level_storage_access.bit() | kinds.notifications.bit(), 0);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prompt, maru.i18n.tIn(.ko, .perm_storage_access)));
+    try std.testing.expect(std.mem.indexOf(u8, prompt, maru.i18n.tIn(.ko, .perm_notifications)) != null);
+    try std.testing.expect(std.mem.endsWith(u8, prompt, maru.i18n.tIn(.ko, .web_permission_remembered)));
+    // 미디어 답은 Chromium 이 기억하지 않는다 — 안내가 없다. 마이크·카메라 순서로 한 줄씩.
+    const media = permissionMessage(&buf, 0, ws.message.MediaPermission.camera.bit() | ws.message.MediaPermission.microphone.bit());
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, media, "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, media, maru.i18n.tIn(.ko, .web_permission_remembered)) == null);
+    // 위치만 청하면 위치 안내(이 탭에서 다시 시작할 때까지)가 붙는다 — 사이트 기억 안내가 아니다. 위치와 알림을 함께면 사이트 안내.
+    const location_only = permissionMessage(&buf, kinds.geolocation.bit(), 0);
+    try std.testing.expect(std.mem.indexOf(u8, location_only, maru.i18n.tIn(.ko, .web_permission_remembered)) == null);
+    try std.testing.expect(std.mem.endsWith(u8, location_only, maru.i18n.tIn(.ko, .web_permission_location_note)));
+    try std.testing.expect(std.mem.indexOf(u8, permissionMessage(&buf, kinds.geolocation.bit() | kinds.notifications.bit(), 0), maru.i18n.tIn(.ko, .web_permission_remembered)) != null);
+    // 버퍼가 모자라면 앞쪽 줄까지만(자른 줄은 없다).
+    var small: [24]u8 = undefined;
+    const cut = permissionMessage(&small, kinds.notifications.bit() | kinds.midi_sysex.bit(), 0);
+    try std.testing.expect(cut.len <= small.len and std.unicode.utf8ValidateSlice(cut));
 }

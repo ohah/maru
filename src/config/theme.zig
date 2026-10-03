@@ -1337,6 +1337,7 @@ pub const Config = struct {
     quick_terminal: QuickTerminalConfig = .{},
     /// 파일 도크에서 동시에 유지할 WKWebView 상한. 탭 metadata는 남기고 non-dirty LRU view만 해제한다.
     file_panel: FilePanelConfig = .{},
+    browser: BrowserConfig = .{},
     /// 활성 탭 룩(`chrome.tab-style` = connected|underline|pill). 기본 **underline**(미니멀 — 언더바만, 사용자 요청). connected는
     /// 본문색 cutout + 앰버 언더바, pill은 Warp식 lifted 캡슐. `chrome.theme`·`theme.preset`과 직교. schema-driven(Config.schema).
     chrome_tab_style: ChromeTabStyle = .underline,
@@ -1525,6 +1526,19 @@ pub const Config = struct {
 };
 
 pub const ExternalLinkTarget = enum { in_app, system };
+
+/// 웹 브라우저 탭의 엔진(W4d — docs/plans/web-osr-backend.md). 마크다운·파일 패널은 어느 쪽이든 WKWebView 다(분업).
+/// `chromium` 은 따로 설치하는 `maru-chromium`(Homebrew)이 있을 때만 켜지고, maru 를 다시 시작해야 적용된다 — 열린
+/// 브라우저 탭이 엔진을 옮기며 로그인·입력을 잃지 않게(사용자 결정 2026-09-25).
+pub const BrowserEngine = enum { webkit, chromium };
+
+pub const BrowserConfig = struct {
+    engine: BrowserEngine = .webkit,
+
+    pub const schema = .{
+        .engine = Meta{ .doc = .cfg_browser_engine, .widget = .dropdown, .section = .workspace },
+    };
+};
 
 pub const FilePanelConfig = struct {
     external_link_target: ExternalLinkTarget = .in_app,
@@ -1725,12 +1739,17 @@ pub const NotificationConfig = struct {
     /// `notifications.update-check` 키로 파싱.
     update_check: bool = true,
 
+    /// Chromium 탭(`browser.engine = chromium`)의 웹 알림을 maru 알림(인앱 센터·데스크톱 배너)으로 넘길지. 기본 true. false 면
+    /// 사이트가 알림 권한을 받아도 maru 알림으로 보이지 않는다(W5c). loader 가 `notifications.web` 키로 파싱.
+    web: bool = true,
+
     /// 인앱 알림 센터(종 아이콘 패널)에 보관할 최대 알림 수(ring). 초과하면 가장 오래된 것부터 버린다. 기본 64.
     /// loader가 `notifications.history-limit` 키로 파싱(8~512, 상한은 메모리 가드).
     history_limit: u32 = 64,
 
-    pub const schema = .{ // 키: notifications.osc / notifications.update-check / notifications.history-limit
+    pub const schema = .{ // 키: notifications.osc / notifications.web / notifications.update-check / notifications.history-limit
         .osc = Meta{ .doc = .cfg_notif_osc, .widget = .toggle, .section = .terminal },
+        .web = Meta{ .doc = .cfg_notif_web, .widget = .toggle, .section = .terminal },
         .update_check = Meta{ .doc = .cfg_notif_update_check, .widget = .toggle, .section = .terminal },
         .history_limit = Meta{ .doc = .cfg_notif_history_limit, .range = .{ 8, 512 }, .widget = .number, .section = .terminal },
     };

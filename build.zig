@@ -34,6 +34,7 @@ const linkSessionHostNotificationAdapter = support.linkSessionHostNotificationAd
 const attachPngCodec = support.attachPngCodec;
 const session_host_gates = @import("build/session_host_gates.zig");
 const session_host_release_gates = @import("build/session_host_release_gates.zig");
+const web_sidecar_build = @import("build/web_sidecar.zig");
 
 /// 실제 제품 바이너리를 실행하는 테스트는 workspace와 session-host namespace를 한 root에 묶는다.
 /// 제품 바이너리는 `builtin.is_test == false`라 이 주입이 없으면 실제 `/tmp/maru-<uid>`를 사용한다.
@@ -896,6 +897,23 @@ pub fn build(b: *std.Build) void {
         test_macos_window_smoke_step.dependOn(&run_macos_window_smoke_tests.step);
         macos_only_test_step.dependOn(&run_macos_window_smoke_tests.step);
 
+        // W7a1: 릴리스 서명 뒤의 Maru.app entitlements 검사(`tools/check-macos-app-entitlements.sh`)는 태그 릴리스에서만 돈다 —
+        // 가짜 번들을 ad-hoc 서명해 그 검사 자체를 macOS CI 에서 시험한다(W7a1 적대 검증 8 차).
+        const test_entitlements_check_step = b.step("test-macos-app-entitlements-check", "Self-test tools/check-macos-app-entitlements.sh with ad-hoc signed fake bundles");
+        const run_entitlements_check = b.addSystemCommand(&.{ "/bin/sh", "tools/test-check-macos-app-entitlements.sh" });
+        run_entitlements_check.setCwd(b.path("."));
+        test_entitlements_check_step.dependOn(&run_entitlements_check.step);
+        macos_only_test_step.dependOn(&run_entitlements_check.step);
+
+        // W7b: `maru-chromium` 설치물의 Mach-O 를 Homebrew 가 고칠 것이 없는 모양으로 맞추는 스크립트(`web-sidecar-dist` 안 —
+        // CEF SDK 가 있어야 돈다)를 가짜 dylib 으로 macOS CI 에서 시험한다.
+        const test_dist_macho_step = b.step("test-web-sidecar-dist-macho", "Self-test tools/web-sidecar-dist-macho.sh with small fake dylibs and zig-built x86_64 executables");
+        const run_dist_macho = b.addSystemCommand(&.{ "/bin/sh", "tools/test-web-sidecar-dist-macho.sh" });
+        run_dist_macho.setCwd(b.path("."));
+        run_dist_macho.addArg(b.graph.zig_exe); // zig 가 만든 x86_64 실행 파일(머리 여유 8 바이트) 경우에 쓴다
+        test_dist_macho_step.dependOn(&run_dist_macho.step);
+        macos_only_test_step.dependOn(&run_dist_macho.step);
+
         // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하고,
         // RendererState/GlyphFrame에서 온 atlas slot/UV/raster bytes를 제품 atlas texture
         // shader sampling까지 연결한다. 현재 입력은 실제 TerminalCore text가 아니라 CoreText
@@ -923,6 +941,7 @@ pub fn build(b: *std.Build) void {
         macos_metal_smoke.root_module.linkFramework("Cocoa", .{});
         macos_metal_smoke.root_module.linkFramework("Foundation", .{});
         macos_metal_smoke.root_module.linkFramework("CoreText", .{});
+        macos_metal_smoke.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_metal_smoke.root_module.linkFramework("CoreGraphics", .{});
         macos_metal_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_metal_smoke.root_module.linkFramework("Metal", .{});
@@ -1023,13 +1042,14 @@ pub fn build(b: *std.Build) void {
         });
         macos_chrome_lab_smoke.root_module.linkFramework("Foundation", .{});
         macos_chrome_lab_smoke.root_module.linkFramework("CoreText", .{});
+        macos_chrome_lab_smoke.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_chrome_lab_smoke.root_module.linkFramework("CoreGraphics", .{});
         macos_chrome_lab_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_chrome_lab_smoke.root_module.linkFramework("Metal", .{});
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
         const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
-        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-widget-row", "editor-conflict", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-minimap", "editor-selection", "editor-whitespace-inlay", "editor-find", "editor-diagnostics", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "editor-merge-panes", "editor-merge-narrow", "editor-merge-scrolled", "editor-merge-hscrolled", "editor-merge-caret", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "context-menu-send-helper", "context-menu-bottom-right", "dropdown-open", "dropdown-bottom-clamp", "scm-rows", "scm-history", "scm-turn-badges", "scm-row-hover", "scm-conflict-hover", "scm-conflict-resolved-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
+        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-widget-row", "editor-conflict", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-minimap", "editor-selection", "editor-whitespace-inlay", "editor-find", "editor-diagnostics", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "editor-merge-panes", "editor-merge-narrow", "editor-merge-scrolled", "editor-merge-hscrolled", "editor-merge-caret", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "context-menu-send-helper", "context-menu-bottom-right", "notice-wrap", "dropdown-open", "dropdown-bottom-clamp", "scm-rows", "scm-history", "scm-turn-badges", "scm-row-hover", "scm-conflict-hover", "scm-conflict-resolved-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
             const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab.setCwd(b.path("."));
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
@@ -1070,6 +1090,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_chrome_lab_smoke_tests.root_module.linkFramework("Foundation", .{});
         macos_chrome_lab_smoke_tests.root_module.linkFramework("CoreText", .{});
+        macos_chrome_lab_smoke_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_chrome_lab_smoke_tests.root_module.linkFramework("CoreGraphics", .{});
         macos_chrome_lab_smoke_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
 
@@ -1105,6 +1126,7 @@ pub fn build(b: *std.Build) void {
         macos_app_pty_metal_smoke.root_module.linkFramework("Cocoa", .{});
         macos_app_pty_metal_smoke.root_module.linkFramework("Foundation", .{});
         macos_app_pty_metal_smoke.root_module.linkFramework("CoreText", .{});
+        macos_app_pty_metal_smoke.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_app_pty_metal_smoke.root_module.linkFramework("CoreGraphics", .{});
         macos_app_pty_metal_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_app_pty_metal_smoke.root_module.linkFramework("Metal", .{});
@@ -1195,6 +1217,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_coretext_smoke.root_module.linkFramework("Foundation", .{});
         macos_coretext_smoke.root_module.linkFramework("CoreText", .{});
+        macos_coretext_smoke.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_coretext_smoke.root_module.linkFramework("CoreGraphics", .{});
         macos_coretext_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
 
@@ -1224,6 +1247,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_coretext_smoke_tests.root_module.linkFramework("Foundation", .{});
         macos_coretext_smoke_tests.root_module.linkFramework("CoreText", .{});
+        macos_coretext_smoke_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_coretext_smoke_tests.root_module.linkFramework("CoreGraphics", .{});
         macos_coretext_smoke_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
 
@@ -1251,6 +1275,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_glyph_texture_smoke.root_module.linkFramework("Foundation", .{});
         macos_glyph_texture_smoke.root_module.linkFramework("CoreText", .{});
+        macos_glyph_texture_smoke.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_glyph_texture_smoke.root_module.linkFramework("CoreGraphics", .{});
         macos_glyph_texture_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_glyph_texture_smoke.root_module.linkFramework("Metal", .{});
@@ -1296,6 +1321,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_glyph_text_smoke.root_module.linkFramework("Cocoa", .{});
         macos_glyph_text_smoke.root_module.linkFramework("CoreText", .{});
+        macos_glyph_text_smoke.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_glyph_text_smoke.root_module.linkFramework("CoreGraphics", .{});
         macos_glyph_text_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_glyph_text_smoke.root_module.linkFramework("Metal", .{});
@@ -1614,6 +1640,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_app_host_abi_tests.root_module.linkFramework("Foundation", .{});
         macos_app_host_abi_tests.root_module.linkFramework("CoreText", .{});
+        macos_app_host_abi_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         macos_app_host_abi_tests.root_module.linkFramework("CoreGraphics", .{});
         macos_app_host_abi_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     }
@@ -1694,6 +1721,7 @@ pub fn build(b: *std.Build) void {
     });
     macos_chrome_face_cache_fresh_tests.root_module.linkFramework("Foundation", .{});
     macos_chrome_face_cache_fresh_tests.root_module.linkFramework("CoreText", .{});
+    macos_chrome_face_cache_fresh_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
     macos_chrome_face_cache_fresh_tests.root_module.linkFramework("CoreGraphics", .{});
     macos_chrome_face_cache_fresh_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     const run_macos_chrome_face_cache_fresh_tests = b.addRunArtifact(macos_chrome_face_cache_fresh_tests);
@@ -2227,6 +2255,9 @@ pub fn build(b: *std.Build) void {
             "Metal",
             "-framework",
             "QuartzCore",
+            // W3c: Chromium(OSR) 탭 본문 — sidecar 가 mach 로 넘긴 IOSurface 를 받아(web_sidecar/ring_receiver) 텍스처로 감싼다.
+            "-framework",
+            "IOSurface",
             // Phase 4c: 빈 WKWebView를 pane 본문에 부착(터미널<웹뷰<오버레이 z-order). WebKit은 시스템 프레임워크라
             // 의존성 0(docs/web-panel.md §13). 콘텐츠·브리지·보안은 Phase 5.
             "-framework",
@@ -2312,6 +2343,7 @@ pub fn build(b: *std.Build) void {
         macos_mermaid_helper_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
+            "-framework", "IOSurface", // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
             "-framework", "CoreGraphics",
             "-framework", "Metal",
             "-framework", "QuartzCore",
@@ -2384,6 +2416,7 @@ pub fn build(b: *std.Build) void {
         macos_mermaid_smoke_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
+            "-framework", "IOSurface", // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
             "-framework", "CoreGraphics",
             "-framework", "Metal",
             "-framework", "QuartzCore",
@@ -2456,6 +2489,7 @@ pub fn build(b: *std.Build) void {
         macos_editor_smoke_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
+            "-framework", "IOSurface", // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
             "-framework", "CoreGraphics",
             "-framework", "Metal",
             "-framework", "QuartzCore",
@@ -2727,8 +2761,10 @@ pub fn build(b: *std.Build) void {
                 "codesign --force --options runtime --timestamp --entitlements src/platform/macos/MaruMermaidRenderer.entitlements --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/MacOS/maru; " ++
-                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app; " ++
+                // Maru.app 의 entitlements(카메라·마이크·위치 — W7a1) — 번들 서명이 main executable 을 다시 서명한다.
+                "codesign --force --options runtime --timestamp --entitlements src/platform/macos/MaruApp.entitlements --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app; " ++
                 "codesign --verify --strict --deep zig-out/Maru.app; " ++
+                "sh tools/check-macos-app-entitlements.sh zig-out/Maru.app; " ++
                 "version=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" zig-out/Maru.app/Contents/Info.plist); " ++
                 "rm -rf dist/dmg-staging; mkdir -p dist/dmg-staging; " ++
                 // .app 자체를 먼저 공증 + staple한다 — dmg에만 staple하면 .app엔 티켓이 없어, 다른 맥(특히 오프라인·
@@ -3465,7 +3501,7 @@ pub fn build(b: *std.Build) void {
                 "terminal IME next marked syllable keeps its place until committed cursor echo arrives",
             },
         });
-        for ([_][]const u8{ "Foundation", "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |framework|
+        for ([_][]const u8{ "Foundation", "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO", "IOSurface" }) |framework|
             session_host_cr6d_preedit_incremental_tests.root_module.linkFramework(framework, .{});
         session_host_cr6d_preedit_incremental_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
@@ -4333,7 +4369,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "S3a end-to-end", "S4 end-to-end" },
     });
     const run_merge_stage_e2e = b.addRunArtifact(merge_stage_e2e_tests);
-    run_merge_stage_e2e.setCwd(b.path(".")); // 임시 저장소를 `.zig-cache` 밑에 만든다
+    run_merge_stage_e2e.setCwd(b.path(".")); // 임시 저장소는 워크트리 밖 `$TMPDIR` 에 만든다(`git_backend.tmpRepoPath`)
     run_merge_stage_e2e.addArg("--maru-expect-tests=9");
     // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 git 이 없으면 `SkipZigTest` 로 나간다 — 컴파일 수만
     // 세면 하네스가 조용히 안 서도 초록이다(이 저장소가 가장 나쁘다고 적어 둔 실패 모드).
@@ -4395,6 +4431,7 @@ pub fn build(b: *std.Build) void {
         remote_explorer_tests.root_module.linkFramework("MetalKit", .{});
         remote_explorer_tests.root_module.linkFramework("QuartzCore", .{});
         remote_explorer_tests.root_module.linkFramework("CoreText", .{});
+        remote_explorer_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         remote_explorer_tests.root_module.linkFramework("CoreGraphics", .{});
         remote_explorer_tests.root_module.linkFramework("ImageIO", .{});
         remote_explorer_tests.root_module.addCSourceFile(.{
@@ -4421,7 +4458,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도", "원격 매핑", "RF7", "IG1-e", "원격 왕복 장부" },
         });
         remote_activity_vertical_tests.root_module.link_libc = true;
-        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
+        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO", "IOSurface" }) |fw| {
             remote_activity_vertical_tests.root_module.linkFramework(fw, .{});
         }
         remote_activity_vertical_tests.root_module.addCSourceFile(.{
@@ -4467,7 +4504,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{ "복원 교착", "종료 placeholder 복원", "리소스 팝오버" },
         });
         restore_accounting_tests.root_module.link_libc = true;
-        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
+        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO", "IOSurface" }) |fw| {
             restore_accounting_tests.root_module.linkFramework(fw, .{});
         }
         restore_accounting_tests.root_module.addCSourceFile(.{
@@ -4505,7 +4542,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{ "훅", "턴 스냅샷", "턴 파일 배지" },
         });
         turn_capture_wiring_tests.root_module.link_libc = true;
-        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
+        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO", "IOSurface" }) |fw| {
             turn_capture_wiring_tests.root_module.linkFramework(fw, .{});
         }
         turn_capture_wiring_tests.root_module.addCSourceFile(.{
@@ -4945,6 +4982,7 @@ pub fn build(b: *std.Build) void {
         editor_test_module.linkFramework("QuartzCore", .{});
         editor_test_module.linkFramework("Foundation", .{});
         editor_test_module.linkFramework("CoreText", .{});
+        editor_test_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         editor_test_module.linkFramework("CoreGraphics", .{});
         editor_test_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     }
@@ -7833,6 +7871,7 @@ pub fn build(b: *std.Build) void {
             session_host_metadata_consumers_product_tests.root_module.linkFramework("MetalKit", .{});
             session_host_metadata_consumers_product_tests.root_module.linkFramework("QuartzCore", .{});
             session_host_metadata_consumers_product_tests.root_module.linkFramework("CoreText", .{});
+            session_host_metadata_consumers_product_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
             session_host_metadata_consumers_product_tests.root_module.linkFramework("CoreGraphics", .{});
             session_host_metadata_consumers_product_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
             session_host_metadata_consumers_product_tests.root_module.addCSourceFile(.{
@@ -7952,6 +7991,7 @@ pub fn build(b: *std.Build) void {
             session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("MetalKit", .{});
             session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("QuartzCore", .{});
             session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("CoreText", .{});
+            session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
             session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("CoreGraphics", .{});
             session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
             session_host_legacy_metadata_consumers_product_tests.root_module.addCSourceFile(.{
@@ -8011,6 +8051,7 @@ pub fn build(b: *std.Build) void {
         input_parity_app_tests.root_module.linkFramework("MetalKit", .{});
         input_parity_app_tests.root_module.linkFramework("QuartzCore", .{});
         input_parity_app_tests.root_module.linkFramework("CoreText", .{});
+        input_parity_app_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
         input_parity_app_tests.root_module.linkFramework("CoreGraphics", .{});
         input_parity_app_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         input_parity_app_tests.root_module.addCSourceFile(.{
@@ -8478,6 +8519,7 @@ pub fn build(b: *std.Build) void {
             retention_app_tests.root_module.linkFramework("MetalKit", .{});
             retention_app_tests.root_module.linkFramework("QuartzCore", .{});
             retention_app_tests.root_module.linkFramework("CoreText", .{});
+            retention_app_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver)
             retention_app_tests.root_module.linkFramework("CoreGraphics", .{});
             retention_app_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
             retention_app_tests.root_module.addCSourceFile(.{
@@ -9211,6 +9253,10 @@ pub fn build(b: *std.Build) void {
         .boundary_step = boundary_step,
         .session_host_step = session_host_step,
     });
+
+    // 웹 OSR sidecar(W1b) 등록은 `build/web_sidecar.zig` 가 소유한다 — CEF 없는 시험은 기본 test 에,
+    // sidecar 실행 파일은 `-Dcef-sdk` 가 있을 때만 `web-sidecar` 스텝에.
+    web_sidecar_build.register(b, .{ .target = target, .optimize = optimize, .test_step = test_step, .macos_only_test_step = macos_only_test_step, .macos_sdk = macos_sdk, .maru_version = build_zig_zon.version });
 
     // Opt-in external oracle: validates committed goldens against system libvterm.
     // Intentionally NOT wired into the default `test` step or `mise run check` so

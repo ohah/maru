@@ -10,6 +10,7 @@ const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) 공유 — 박스 폭을 placeText와 같은 폭 규약으로 잡는다
+const text_layout = @import("../text_layout.zig"); // wrap 이 자르는 자리 — grapheme cluster 경계(폭은 overlay_input 셈법)
 
 /// 이 박스가 그리는 레이어(최상위 모달). notice/confirm이 그대로 재노출한다.
 pub const layer = draw.Layer.modal;
@@ -115,6 +116,156 @@ pub fn view(
     const box = layout(content_cols, @intCast(lines.len), p, tk) orelse return;
     try frame(box, p, arena, out);
     for (lines, 0..) |ln, i| try text(box, box.inner_x, @intCast(i), ln.text, ln.role, arena, out);
+}
+
+/// 박스에 한 줄로 안 들어가는 메시지를 콘텐츠 폭 안에 들도록 여러 줄로 나눈다(notice 용 — 한 줄로만 그리던 때는 긴
+/// 안내가 박스 밖으로 넘쳤다). 폭 = 박스가 이 작업영역에서 가질 수 있는 콘텐츠 칸 수(layout 의 폭 clamp 와 같은 규약),
+/// 줄 수 상한 = 박스가 세로로 들어가는 콘텐츠 행 수(rich 패딩이 배경을 위아래로 넓히는 만큼 뺀다) — 넘치면 마지막 줄을
+/// `…` 로 끝낸다. 규약은 `wrapCols`. null=박스를 둘 수 없는 작업영역(layout 과 같은 조건).
+pub fn wrap(message: []const u8, p: props.ChromeProps, tk: *const tokens.Tokens, arena: std.mem.Allocator) !?[]const []const u8 {
+    const widest = layout(std.math.maxInt(u32) / 4, 1, p, tk) orelse return null;
+    // 콘텐츠 칸이 없는 작업영역(5 칸 미만)이면 글자가 어차피 안 보인다 — 한 줄로 두어 빈 박스만 세로로 커지지 않게.
+    if (widest.inner_cols == 0) return try wrapCols(message, std.math.maxInt(u32), 1, arena);
+    const max_cols = widest.inner_cols;
+    const workspace = props.workspaceRect(p.metrics);
+    const usable_h = workspace.h -| 2 * p.shape.modal_padding_px;
+    const max_rows: u32 = @max(usable_h / @max(p.metrics.cell_height_px, 1), 3) - 2; // 위아래 여백 한 줄씩
+    return try wrapCols(message, max_cols, max_rows, arena);
+}
+
+/// `wrap` 의 순수 핵심 — 폭 `max_cols`(≥1)·줄 수 `max_rows`(≥1) 안으로 나눈다(시험한다).
+/// - 폭은 **모달을 실제로 그리는 `metal_lowering.placeText` 와 같은 셈법** — 코드포인트마다 `max(1, EAW)` 칸
+///   (`overlay_input.displayCols`, 박스 폭도 이것으로 잰다). 그래서 NFD 한글 한 음절은 4칸, 결합 문자·VS16·ZWJ 도 각 1칸
+///   이다(cluster 로 재면 실제 그림보다 좁게 재어 줄이 박스 밖으로 넘쳤다 — 3 차 적대 검증).
+/// - **자르는 자리는 grapheme cluster 경계**(`text_layout`) — 받침·결합 문자·ZWJ 이모지가 두 줄로 갈리지 않게.
+/// - 손상 UTF-8 은 바이트마다 U+FFFD 로 바꾼 사본으로 나눈다(`placeText` 는 손상 run 을 통째로 버려 그 줄이 사라졌다).
+/// - 줄은 공백·탭에서 나눈다. 한 줄 **안의** 간격은 원문 그대로 둔다(경로 `My  Docs` 가 `My Docs` 로 바뀌지 않게, 탭은
+///   한 칸 공백으로). 줄이 바뀌는 자리의 간격은 버리고, 문단 첫 줄의 들여쓰기는 남긴다.
+/// - `\n` 은 문단을 끊고(CRLF 의 `\r` 은 뗀다) 빈 문단은 빈 줄 하나. 메시지 끝의 공백·줄바꿈은 뗀다.
+/// - 줄 수를 넘으면 들어가는 마지막 줄을 **반드시** `…` 로 끝낸다.
+/// 한 줄에 들어가는 짧은 메시지(줄바꿈·탭·CR 없음)는 복사 없이 그대로 돌려준다.
+pub fn wrapCols(message_in: []const u8, max_cols: u32, max_rows: u32, arena: std.mem.Allocator) ![]const []const u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    const valid = if (std.unicode.utf8ValidateSlice(message_in)) message_in else try replaceInvalid(message_in, arena);
+    // 앞의 빈 줄(공백·탭만 있는 줄 포함)과 끝의 공백·줄바꿈은 뗀다 — 내용이 처음 나오는 줄의 들여쓰기는 남긴다.
+    const message = std.mem.trimEnd(u8, skipBlankLines(valid), " \t\r\n");
+    if (std.mem.indexOfAny(u8, message, "\n\t\r") == null and widthOf(message) <= max_cols) {
+        try lines.append(arena, message);
+        return lines.items;
+    }
+    const rows = @max(max_rows, 1);
+    // 줄이 `rows` 를 넘으면 더 나누지 않는다 — 넘쳤다는 것만 알면 된다(매 프레임 불리므로 긴 메시지·긴 단어에서 끝까지
+    // 계산하지 않게 — 6 차 적대 검증: 상한 없는 호출자라면 10KB 한 단어가 프레임당 100ms 를 넘었다).
+    var paragraphs = std.mem.splitScalar(u8, message, '\n');
+    outer: while (paragraphs.next()) |para_raw| {
+        const para = std.mem.trimEnd(u8, para_raw, "\r"); // CRLF
+        var line: std.ArrayList(u8) = .empty;
+        var line_cols: u32 = 0;
+        var any = false; // 이 문단이 줄을 하나라도 냈나 — 빈 문단만 빈 줄 하나
+        var first = true; // 문단의 첫 단어 — 앞 간격(들여쓰기)을 남긴다
+        var i: usize = 0;
+        while (i < para.len) {
+            const word_start = std.mem.indexOfNonePos(u8, para, i, " \t") orelse para.len;
+            if (word_start == para.len) break;
+            const sep = para[i..word_start];
+            const word_end = std.mem.indexOfAnyPos(u8, para, word_start, " \t") orelse para.len;
+            const word = para[word_start..word_end];
+            i = word_end;
+            const word_cols = widthOf(word);
+            const keep_sep = line_cols != 0 or first; // 줄 머리의 간격은 문단 첫 줄에서만
+            const sep_cols: u32 = if (keep_sep) @intCast(sep.len) else 0; // 공백·탭 모두 한 칸
+            first = false;
+            if (line_cols + sep_cols + word_cols <= max_cols) {
+                if (keep_sep) for (sep) |_| try line.append(arena, ' ');
+                try line.appendSlice(arena, word);
+                line_cols += sep_cols + word_cols;
+                continue;
+            }
+            if (line_cols != 0) {
+                try lines.append(arena, line.items);
+                if (lines.items.len > rows) break :outer;
+                any = true;
+                line = .empty;
+                line_cols = 0;
+            }
+            // 한 줄보다 긴 단어 — cluster 경계에서 폭만큼씩 자른다.
+            var rest = word;
+            while (widthOf(rest) > max_cols) {
+                const cut = fitCols(rest, max_cols, true);
+                try lines.append(arena, rest[0..cut]);
+                if (lines.items.len > rows) break :outer;
+                any = true;
+                rest = rest[cut..];
+            }
+            try line.appendSlice(arena, rest);
+            line_cols = widthOf(rest);
+        }
+        if (line_cols != 0 or !any) try lines.append(arena, line.items);
+        if (lines.items.len > rows) break;
+    }
+    if (lines.items.len > rows) {
+        // 넘친 줄이 있다 — 들어가는 마지막 줄을 **반드시** `…` 로 끝낸다(다음 줄과 합쳐 자르던 때는 `\n` 으로 나뉜
+        // 짧은 줄끼리 합쳐도 폭 안이라 말줄임 없이 뒷줄이 조용히 사라졌다 — 적대 검증).
+        const last = rows - 1;
+        lines.items[last] = try withEllipsis(lines.items[last], max_cols, arena);
+        lines.shrinkRetainingCapacity(rows);
+    }
+    return lines.items;
+}
+
+/// 앞에서부터 공백·탭·CR 만 있는 줄을 건너뛴 나머지(내용 있는 첫 줄의 시작부터).
+fn skipBlankLines(bytes: []const u8) []const u8 {
+    var start: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, bytes, start, '\n')) |nl| {
+        if (std.mem.indexOfNone(u8, bytes[start..nl], " \t\r") != null) break;
+        start = nl + 1;
+    }
+    return bytes[start..];
+}
+
+/// 표시폭 — `placeText` 와 같은 셈법(코드포인트마다 `max(1, EAW)`).
+fn widthOf(bytes: []const u8) u32 {
+    return overlay_input.displayCols(bytes);
+}
+
+/// 손상 UTF-8 을 바이트마다 U+FFFD 로 바꾼 사본(`text_layout.decodeCodepoint` 와 같은 규칙).
+fn replaceInvalid(bytes: []const u8, arena: std.mem.Allocator) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const d = text_layout.decodeCodepoint(bytes, i);
+        if (d.cp == 0xFFFD and d.advance == 1) {
+            try out.appendSlice(arena, "\u{FFFD}");
+        } else try out.appendSlice(arena, bytes[i .. i + d.advance]);
+        i += d.advance;
+    }
+    return out.items;
+}
+
+/// `line` 끝에 `…`(1칸)을 붙인다 — 폭이 모자라면 앞을 `max_cols - 1` 칸까지 cluster 경계에서 자르고 붙인다.
+/// 결과 표시폭 ≤ max(max_cols, 1).
+fn withEllipsis(line: []const u8, max_cols: u32, arena: std.mem.Allocator) ![]const u8 {
+    if (max_cols <= 1) return "…";
+    const keep = if (widthOf(line) + 1 <= max_cols) line.len else fitCols(line, max_cols - 1, false);
+    return std.fmt.allocPrint(arena, "{s}…", .{line[0..keep]});
+}
+
+/// `bytes` 앞에서 표시폭 `max_cols` 안에 드는 가장 긴 cluster 경계(바이트 수). cluster 의 폭은 그 안 코드포인트들의
+/// `placeText` 폭 합. `at_least_one` 이면 첫 cluster 는 폭을 넘어도 넣는다(전진 보장) — 그래서 **한 줄보다 넓은 cluster
+/// 하나**(긴 ZWJ 이모지, 결합 문자가 수십 개 붙은 글자)는 통째로 한 줄이 되어 폭을 넘고, 넘친 부분은 박스 clamp·셀 격자
+/// 에서 잘린다(cluster 를 가르지 않는 대가).
+fn fitCols(bytes: []const u8, max_cols: u32, at_least_one: bool) usize {
+    var i: usize = 0;
+    var used: u32 = 0;
+    while (i < bytes.len) {
+        const base = text_layout.decodeCodepoint(bytes, i);
+        const end = text_layout.clusterEndAfter(bytes, i, base.advance);
+        const w = widthOf(bytes[i..end]);
+        if (used + w > max_cols and !(at_least_one and i == 0)) break;
+        used += w;
+        i = end;
+    }
+    return i;
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -300,4 +451,225 @@ test "modal_box: authoritative zero-size workspace fails closed instead of using
         .workspace_present = true,
     } };
     try std.testing.expectEqual(@as(?Box, null), layout(20, 4, p, &tk));
+}
+
+test "modal_box wrap: a short message stays one line; a long one wraps at spaces within the width" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const short = try wrapCols("file corrupt", 40, 10, arena);
+    try std.testing.expectEqual(@as(usize, 1), short.len);
+    try std.testing.expectEqualStrings("file corrupt", short[0]);
+    const msg = "The Chromium engine could not start. Reinstall it with brew reinstall ohah/maru/maru-chromium, then restart maru.";
+    const lines = try wrapCols(msg, 40, 10, arena);
+    try std.testing.expect(lines.len >= 3);
+    var joined: std.ArrayList(u8) = .empty;
+    for (lines, 0..) |ln, i| {
+        try std.testing.expect(overlay_input.displayCols(ln) <= 40);
+        try std.testing.expect(ln.len > 0 and ln[0] != ' ' and ln[ln.len - 1] != ' ');
+        if (i != 0) try joined.append(arena, ' ');
+        try joined.appendSlice(arena, ln);
+    }
+    try std.testing.expectEqualStrings(msg, joined.items); // 단어를 잃거나 바꾸지 않는다
+}
+
+test "modal_box wrap: Korean counts two columns per syllable, a word longer than a line is cut, newlines break" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const ko = try wrapCols("Chromium 엔진을 시작하지 못했습니다. 다시 설치한 뒤 maru 를 다시 켜 주세요.", 20, 10, arena);
+    for (ko) |ln| try std.testing.expect(overlay_input.displayCols(ln) <= 20);
+    try std.testing.expect(ko.len >= 3);
+    const long_word = try wrapCols("/Users/someone/Library/Caches/maru/web-osr-run/run-1-abcdef", 16, 10, arena);
+    try std.testing.expect(long_word.len >= 4);
+    for (long_word) |ln| try std.testing.expect(overlay_input.displayCols(ln) <= 16 and ln.len > 0);
+    const wide_word = try wrapCols("가나다라마바사아자차카타파하", 5, 10, arena); // 한 줄 5칸 — 두 글자(4칸)씩
+    for (wide_word) |ln| try std.testing.expectEqual(@as(u32, 4), overlay_input.displayCols(ln));
+    const nl = try wrapCols("first\nsecond", 40, 10, arena);
+    try std.testing.expectEqual(@as(usize, 2), nl.len);
+    try std.testing.expectEqualStrings("second", nl[1]);
+    // 폭 1 에서도 끝난다(한 칸보다 넓은 글자도 한 줄에 하나).
+    const tiny = try wrapCols("가 b", 1, 10, arena);
+    try std.testing.expect(tiny.len == 2);
+}
+
+test "modal_box wrap: a line that exactly fills the width stays one line; trailing newlines, CR and tabs make no extra lines" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const exact = try wrapCols("aaaa bbbb cc", 9, 10, arena); // "aaaa bbbb" 가 딱 9 칸
+    try std.testing.expectEqual(@as(usize, 2), exact.len);
+    try std.testing.expectEqualStrings("aaaa bbbb", exact[0]);
+    const trailing = try wrapCols("hello world\n", 5, 10, arena);
+    try std.testing.expectEqual(@as(usize, 2), trailing.len);
+    const crlf = try wrapCols("def\r\nghi", 40, 10, arena);
+    try std.testing.expectEqual(@as(usize, 2), crlf.len);
+    try std.testing.expectEqualStrings("def", crlf[0]);
+    const tab = try wrapCols("aaaa\tbbb", 5, 10, arena);
+    try std.testing.expectEqualStrings("aaaa", tab[0]);
+    try std.testing.expectEqualStrings("bbb", tab[1]);
+    const wide_last = try wrapCols("가", 1, 10, arena); // 폭보다 넓은 한 글자 — 빈 줄을 뒤에 남기지 않는다
+    try std.testing.expectEqual(@as(usize, 1), wide_last.len);
+    const blank_para = try wrapCols("a\n\nb", 40, 10, arena); // 가운데 빈 문단은 빈 줄로 남는다
+    try std.testing.expectEqual(@as(usize, 3), blank_para.len);
+    try std.testing.expectEqualStrings("", blank_para[1]);
+}
+
+test "modal_box wrap: grapheme clusters are never split, inner spacing is kept, exactly max_rows lines get no ellipsis" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // NFD 한글(ᄒ+ᅡ+ᆫ) 경로 — 받침이나 모음이 줄 머리로 떨어지지 않는다.
+    const nfd = "/Users/x/\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}\u{1112}\u{1161}\u{11AB}.txt";
+    const nfd_lines = try wrapCols(nfd, 10, 10, arena);
+    try std.testing.expect(nfd_lines.len >= 2);
+    for (nfd_lines) |ln| {
+        const cp = std.unicode.utf8Decode(ln[0..(std.unicode.utf8ByteSequenceLength(ln[0]) catch 1)]) catch 0;
+        try std.testing.expect(!(cp >= 0x1160 and cp <= 0x11FF)); // 가운뎃소리·끝소리로 시작하지 않는다
+        try std.testing.expect(widthOf(ln) <= 10);
+    }
+    // 결합 문자(é = e + U+0301)도 앞 글자와 붙어 다닌다.
+    const combining = try wrapCols("e\u{301}e\u{301}e\u{301}e\u{301}", 3, 10, arena);
+    for (combining) |ln| try std.testing.expect(!std.mem.startsWith(u8, ln, "\u{301}"));
+    // 한 줄 안의 간격은 원문 그대로 — 줄이 바뀌는 자리의 간격만 버린다.
+    const spaced = try wrapCols("My  Docs is  here and there", 14, 10, arena);
+    try std.testing.expectEqualStrings("My  Docs is", spaced[0]);
+    try std.testing.expectEqualStrings("here and there", spaced[1]);
+    // 문단 첫 줄의 들여쓰기는 남는다(스택 트레이스 모양).
+    const indented = try wrapCols("error:\n    at foo (a.js:1)", 40, 10, arena);
+    try std.testing.expectEqualStrings("    at foo (a.js:1)", indented[1]);
+    // 짧아도 탭이 있으면 긴 길로 — 탭은 한 칸 공백.
+    const tabbed = try wrapCols("a\tb", 40, 10, arena);
+    try std.testing.expectEqualStrings("a b", tabbed[0]);
+    // 끝의 공백+줄바꿈도 뗀다.
+    const trailing = try wrapCols("hello world \n", 5, 10, arena);
+    try std.testing.expectEqual(@as(usize, 2), trailing.len);
+    // 줄 수가 정확히 상한이면 말줄임을 붙이지 않는다.
+    const exact_rows = try wrapCols("a\nb", 40, 2, arena);
+    try std.testing.expectEqualStrings("b", exact_rows[1]);
+    // ASCII 긴 단어는 폭만큼씩 정확히 자른다.
+    const long_ascii = try wrapCols("abcdefghij", 4, 10, arena);
+    try std.testing.expectEqualStrings("abcd", long_ascii[0]);
+    try std.testing.expectEqualStrings("efgh", long_ascii[1]);
+    try std.testing.expectEqualStrings("ij", long_ascii[2]);
+    // 말줄임이 넓은 글자에서 멈춘다(넘기고 뒤 글자를 넣지 않는다).
+    try std.testing.expectEqualStrings("ab…", try withEllipsis("ab가c", 4, arena));
+}
+
+test "modal_box wrap: widths follow the overlay painter (one column per code point), leading blank lines and first-line indentation" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqual(@as(u32, 4), widthOf("\u{1112}\u{1161}\u{11AB}")); // NFD 한 음절 = 2 + 1 + 1
+    try std.testing.expectEqual(@as(u32, 2), widthOf("e\u{301}"));
+    const mixed = try wrapCols("가나다 xy", 5, 10, arena);
+    try std.testing.expectEqual(@as(usize, 2), mixed.len);
+    try std.testing.expectEqualStrings("가나", mixed[0]);
+    try std.testing.expectEqualStrings("다 xy", mixed[1]);
+    const leading = try wrapCols("\n\n\nabc", 40, 2, arena);
+    try std.testing.expectEqual(@as(usize, 1), leading.len);
+    try std.testing.expectEqualStrings("abc", leading[0]);
+    const indent_first = try wrapCols("  indented first line wraps", 12, 10, arena);
+    try std.testing.expect(std.mem.startsWith(u8, indent_first[0], "  "));
+    const trailing_space_line = try wrapCols("a\n ", 40, 10, arena);
+    try std.testing.expectEqual(@as(usize, 1), trailing_space_line.len);
+}
+
+test "modal_box wrap: rows follow the workspace height minus the rich padding, width uses every column the box can take" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const many = "one\ntwo\nthree\nfour\nfive\nsix\nseven";
+    // 높이 48(3 행) → 콘텐츠 1 줄.
+    var p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 320, .backing_height_px = 48 } };
+    try std.testing.expectEqual(@as(usize, 1), (try wrap(many, p, &tk, arena)).?.len);
+    // 높이 100·rich 패딩 12 → (100 - 24) / 16 = 4 행 → 콘텐츠 2 줄.
+    p.metrics.backing_height_px = 100;
+    p.shape.modal_padding_px = 12;
+    try std.testing.expectEqual(@as(usize, 2), (try wrap(many, p, &tk, arena)).?.len);
+    // 폭: 박스가 가질 수 있는 콘텐츠 칸을 다 쓴다.
+    p.shape.modal_padding_px = 0;
+    p.metrics.backing_height_px = 600;
+    const inner = (layout(std.math.maxInt(u32) / 4, 1, p, &tk) orelse return error.NoBox).inner_cols;
+    const exact = try arena.alloc(u8, inner);
+    @memset(exact, 'x');
+    const msg = try std.fmt.allocPrint(arena, "{s} tail", .{exact});
+    const lines = (try wrap(msg, p, &tk, arena)).?;
+    try std.testing.expectEqual(@as(usize, inner), lines[0].len);
+}
+
+test "modal_box wrap: invalid bytes become U+FFFD in place, blank leading lines go, a wide cluster never pulls a space to the line head" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const repl = try wrapCols("ok \xff done", 40, 10, arena);
+    try std.testing.expectEqualStrings("ok \u{FFFD} done", repl[0]);
+    const blank_lead = try wrapCols("  \n\t\r\nabc", 40, 10, arena);
+    try std.testing.expectEqual(@as(usize, 1), blank_lead.len);
+    try std.testing.expectEqualStrings("abc", blank_lead[0]);
+    const indent_kept = try wrapCols(" \n  abc", 40, 10, arena);
+    try std.testing.expectEqualStrings("  abc", indent_kept[0]);
+    const family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    const after_wide = try wrapCols(family ++ " b", 5, 10, arena);
+    try std.testing.expectEqualStrings("b", after_wide[after_wide.len - 1]);
+    const tight = try wrapCols("가나다\n라", 2, 1, arena); // 말줄임도 폭 안에서
+    try std.testing.expectEqual(@as(usize, 1), tight.len);
+    try std.testing.expect(widthOf(tight[0]) <= 2);
+    const zero_rows = try wrapCols("a\nb", 40, 0, arena); // 줄 수 0 은 1 로
+    try std.testing.expectEqual(@as(usize, 1), zero_rows.len);
+    try std.testing.expectEqualStrings("a…", zero_rows[0]);
+}
+
+test "modal_box wrap: a workspace too narrow for any content column gives one line instead of a tall empty box" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 24, .backing_height_px = 600 } };
+    const box = layout(std.math.maxInt(u32) / 4, 1, p, &tk) orelse return error.NoBox;
+    try std.testing.expectEqual(@as(u32, 0), box.inner_cols);
+    try std.testing.expectEqual(@as(usize, 1), (try wrap("one two three four five six", p, &tk, arena)).?.len);
+}
+
+test "modal_box wrap: short paragraphs past the last row still end in an ellipsis instead of silently merging" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lines = try wrapCols("a\nb\nc\nd", 40, 2, arena);
+    try std.testing.expectEqual(@as(usize, 2), lines.len);
+    try std.testing.expectEqualStrings("a", lines[0]);
+    try std.testing.expectEqualStrings("b…", lines[1]);
+    const full = try wrapCols("aaaa\nbbbb\ncccc", 4, 2, arena); // 마지막 줄이 폭을 꽉 채웠으면 한 칸 잘라 `…`
+    try std.testing.expectEqualStrings("bbb…", full[1]);
+    // 손상 UTF-8 은 U+FFFD 로 바뀌어(그리는 쪽이 손상 run 을 통째로 버리지 않게) 폭 안에서 `…` 로 끝난다.
+    const bad = try wrapCols("aaaa\n\xff\xff\xff\xff\xff\nc", 4, 2, arena);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(bad[1]));
+    try std.testing.expect(std.mem.endsWith(u8, bad[1], "…"));
+    try std.testing.expect(widthOf(bad[1]) <= 4);
+}
+
+test "modal_box wrap: more lines than fit are cut to the rows, the last one ending in an ellipsis" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lines = try wrapCols("one two three four five six seven eight nine ten", 9, 3, arena);
+    try std.testing.expectEqual(@as(usize, 3), lines.len);
+    try std.testing.expect(std.mem.endsWith(u8, lines[2], "…"));
+    try std.testing.expect(overlay_input.displayCols(lines[2]) <= 9);
+}
+
+test "modal_box wrap: once the rows overflow it stops splitting — a long unbroken word in a tiny box is cut after rows + 1 lines" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const word = "x" ** 5000;
+    const lines = try wrapCols(word, 2, 3, arena);
+    try std.testing.expectEqual(@as(usize, 3), lines.len);
+    try std.testing.expectEqualStrings("xx", lines[0]);
+    try std.testing.expectEqualStrings("x…", lines[2]);
+    // 잘린 뒤의 나머지를 줄로 만들지 않았다 — arena 에 5000/2 줄치 슬라이스가 쌓이지 않는다.
+    try std.testing.expect(arena_state.queryCapacity() < 4096);
 }

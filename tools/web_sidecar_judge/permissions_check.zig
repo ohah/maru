@@ -1,0 +1,657 @@
+//! W5b 판정 — 페이지의 권한 요청이 maru 로 와서 maru 의 답으로 끝나는가, 답을 Chromium 이 기억하는가(docs/plans/web-osr-backend.md
+//! C6). 판정자가 maru 역할로 답한다.
+//!
+//!   perm-asks          알림 요청이 `permission_request`(알림 비트·출처)로 온다 — 그동안 host 창 0 개. 허용하면 페이지가 `granted`
+//!   perm-deny          MIDI sysex 차단 → 페이지가 `NotAllowedError`
+//!   perm-dismiss       로컬 글꼴 닫기 → 페이지는 빈 목록을 받고(`queryLocalFonts` 는 거절을 빈 목록으로 준다), 다시 청하면 또
+//!                      묻는다(닫기는 기억하지 않는다) — 이번엔 허용해 글꼴이 온다
+//!   perm-closed        묻는 동안 maru 가 이동시키면 그 요청의 `dialog_closed` 가 오고, 늦은 답·없는 번호의 답은 조용히 버린다
+//!   perm-geolocation   위치는 위치 비트로 온다(기억된 허용 아님) — 닫기면 페이지는 거절(오류 1)
+//!   geo-coords         허용 전에 좌표(`geolocation`)를 보내면 페이지가 그 좌표를 받는다(W5b2 — DevTools 덮어쓰기). 짝이 없는 좌표는
+//!                      버린다
+//!   geo-remembered     허용한 출처가 다시 청하면 Chromium 이 또 묻지만(실측) 요청에 기억된 허용 표시가 붙는다 — 새 좌표를 보내고
+//!                      허용하면 오류 없이 새 좌표가 간다. 같은 서버라도 다른 출처(`localhost`)에는 표시가 붙지 않는다
+//!   geo-unavailable    같은 문서의 둘째 요청(나중에)은 묻지 않고 걸린 좌표를 곧바로 받는다(iframe 도) · 새 문서에서 좌표 없이 허용(앞 문서의
+//!                      좌표가 남지 않는다) · 「없음」을 보내고 허용 — 뒤의 둘은 곧바로 「위치를 알 수 없음」(오류 2 — 시간 초과가 아니다)
+//!   geo-watch          `watchPosition` 은 좌표 하나를 받는다(갱신하지 않는다 — 사용자 결정 2026-09-26)
+//!   geo-block          차단하면 다음 요청은 묻지 않고 거절된다(기억)
+//!   perm-media         카메라: 장치가 있으면 미디어 요청(카메라 비트)이 와서 거부가 닿고, 없으면 요청 전에 `NotFoundError`(이 기계)
+//!   perm-media-helpers 카메라를 청한 뒤 helper 가 다시 뜨기를 되풀이하지 않는다 — 2 초 동안 host 의 자식 pid 가 거의 그대로이고
+//!                      샌드박스 밖 helper 는 많아야 하나이며 그것이 카메라 utility 다(실행 인자로 — Chromium 이 일부러 샌드박스
+//!                      없이 띄운다, W7b 10~13 차)
+//!   perm-camera-gone   정상 종료 직전의 샌드박스 밖 helper(카메라 utility 가 그 안에 있어야 한다)가 모두 host 를 끝낸 뒤
+//!                      사라진다(고아 아님 — W1b 불변식에서 빠진 하나라서). 정상 종료에서는 host 가 자식을 직접 끝낸다
+//!   perm-camera-orphan host 가 **갑자기 죽어도**(SIGKILL) 그 직전의 자식(렌더러·GPU·카메라 utility)이 모두 남지 않는다 — 이때는
+//!                      자식이 IPC 가 끊긴 것을 보고 스스로 끝나야 한다(Chromium `child_thread_impl.cc`). 따로 깨끗한 프로필로 잰다
+//!   perm-display       화면 공유(`getDisplayMedia`)는 미디어 요청(화면 비트)으로 온다 — 거부하면 `NotAllowedError`. 미디어 요청의
+//!                      답은 Chromium 이 기억하지 않는다 — 다시 청하면 또 묻는다(W5b 실측). 허용하면 청한 비트를 그대로 돌려준다
+//!                      (거부와 다른 결과 — 이 기계는 화면 기록 권한이 없어 `NotReadableError`)
+//!   perm-media-left    화면 공유를 묻는 동안 **페이지가 스스로** 떠나면 그 요청의 `dialog_closed` 가 온다(미디어는 CEF 가 닫힘을
+//!                      알리지 않아 새 문서에서 치운다) — 닿지 않는 주소로 떠나 이동이 실패해도(`on_load_start` 없이 오류 페이지)
+//!   perm-ignore        maru 가 못 물음(IGNORE)으로 답해도 페이지는 prompt 로 남지만, Chromium 은 따로 세어 넷이면 다섯째는 묻지
+//!                      않고 거절한다(embargo — 실측. 사용자 닫기는 셋)
+//!   notif-relay        알림을 허용한 출처의 `new Notification` 이 `web_notification`(출처·제목·여러 줄 본문)으로 온다(W5c — Chromium
+//!                      은 OS 로 보내지 않는다) · maru 가 누르면 그 알림의 `onclick` 이 불린다
+//!   notif-stale-click  같은 주소로 다시 연 새 문서에서, 옛 문서의 (누르지 않고 둔) 알림을 눌러도 같은 페이지 번호인 새 문서의
+//!                      알림이 눌리지 않는다(렌더러가 문서 표식을 맞춰 본다)
+//!   notif-click-once   같은 알림을 두 번 눌러도 onclick 은 한 번
+//!   notif-prerender    미리 그린(speculation rules) 문서가 활성화된 뒤에도 `maru` 가 든 전역이 없다
+//!   notif-forged       허용하지 않은 출처(`localhost`)가 `Notification.permission` 을 `granted` 로 속여 띄워도 넘어오지 않는다(sidecar 가 그
+//!                      프레임의 주소로 가른다) · 페이지에 `maru` 가 든 전역이 없다 — 그 문서·스크립트로 만든 `about:blank` iframe·다른
+//!                      사이트 iframe(OOPIF — 대리 스크립트가 들어가지 않는다)·sandbox iframe(불투명 출처)·같은 출처 iframe(대리 스크립트가 꺼내 지운다)·다른 사이트
+//!                      iframe 안의 그 사이트 iframe(부모는 같은 프로세스지만 주 프레임까지 이어지지 않는다) 모두
+//!   notif-cross-origin-frame  포트만 다른(같은 사이트·같은 프로세스) 다른 출처 맨 위 문서 안에서 허용한 출처 iframe 이 띄운
+//!                      알림은 넘어오지 않는다(주 프레임과 같은 출처만)
+//!   notif-opaque       허용한 출처의 주소라도 CSP `sandbox` 로 불투명 출처가 된 문서는 권한을 속여 띄워도 넘어오지 않는다
+//!   notif-flood        열 개를 한꺼번에 띄워도 10 초에 다섯 개까지만 넘어온다
+//!   notif-first-doc    처음부터 알림 페이지로 만든 브라우저의 첫 문서도 넘어온다(대리 스크립트가 첫 문서에도 들어간다)
+//!   perm-remembered    host 를 다시 띄워도(같은 프로필·출처) 허용한 알림·글꼴은 묻지 않고 허용, 차단한 MIDI 는 묻지 않고 거절
+//!                      (사용자 결정 2026-09-25 — Chromium 이 출처별로 기억한다)
+
+const std = @import("std");
+const protocol = @import("web_sidecar_protocol");
+const os = @import("os.zig");
+const windows = @import("windows.zig");
+const Host = @import("host.zig").Host;
+const browsers_check = @import("browsers_check.zig");
+const http = @import("http.zig");
+
+const message = protocol.message;
+const BrowserId = message.BrowserId;
+const RequestId = message.RequestId;
+const PermissionKind = message.PermissionKind;
+const MediaPermission = message.MediaPermission;
+
+pub const Report = browsers_check.Report;
+
+const id: BrowserId = 6;
+const wait_ms = 15_000;
+const size: message.ViewSize = .{ .width = 640, .height = 400, .scale = 2 };
+
+/// 받은 요청(출처는 다음 `next` 에서 무효라 복사해 둔다).
+const Asked = struct {
+    request: RequestId = 0,
+    kinds: u32 = 0,
+    media: u8 = 0,
+    remembered: bool = false,
+    origin_buf: [protocol.fields.max_origin_bytes]u8 = undefined,
+    origin_len: usize = 0,
+
+    fn origin(self: *const Asked) []const u8 {
+        return self.origin_buf[0..self.origin_len];
+    }
+};
+
+/// 한 번 청한 결과 — 요청이 왔으면 `asked`, 요청 없이 페이지가 끝났으면 `title`.
+const Outcome = struct {
+    asked: ?Asked = null,
+    title_buf: [128]u8 = undefined,
+    title_len: usize = 0,
+
+    fn title(self: *const Outcome) []const u8 {
+        return self.title_buf[0..self.title_len];
+    }
+};
+
+/// 결과 제목(`<action>:…`, 준비 알림 말고)을 기다린다. 그 사이 온 권한 요청은 `asked` 에 적고 멈춘다.
+fn waitResult(host: *Host, action: []const u8, stop_on_request: bool, out: *Outcome) void {
+    var ready_buf: [64]u8 = undefined;
+    const ready = std.fmt.bufPrint(&ready_buf, "{s}:ready", .{action}) catch unreachable;
+    const deadline = os.nowMs() + wait_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return) orelse return;
+        switch (next) {
+            .permission_request => |value| if (value.browser == id) {
+                var asked: Asked = .{ .request = value.request, .kinds = value.kinds, .media = value.media, .remembered = value.remembered, .origin_len = value.origin.len };
+                @memcpy(asked.origin_buf[0..value.origin.len], value.origin);
+                out.asked = asked;
+                if (stop_on_request) return;
+            },
+            .title_changed => |value| if (value.browser == id and std.mem.startsWith(u8, value.text, action) and
+                value.text.len > action.len and value.text[action.len] == ':' and !std.mem.eql(u8, value.text, ready))
+            {
+                const len = @min(value.text.len, out.title_buf.len);
+                @memcpy(out.title_buf[0..len], value.text[0..len]);
+                out.title_len = len;
+                return;
+            },
+            else => {},
+        }
+    }
+}
+
+fn waitTitle(host: *Host, text: []const u8) bool {
+    const deadline = os.nowMs() + wait_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return false) orelse return false;
+        if (next == .title_changed and next.title_changed.browser == id and std.mem.eql(u8, next.title_changed.text, text)) return true;
+    }
+    return false;
+}
+
+const Churn = struct { first: usize, distinct: usize, max_unsandboxed: usize, outside_pid: c_int = 0, outside_all_camera: bool = true };
+
+const camera_sub_type_arg = "--utility-sub-type=video_capture.mojom.VideoCaptureService";
+
+/// host 의 자식을 `ms` 동안 50 ms 마다 본다 — 나타난 서로 다른 helper pid 수(처음 본 수와 견준다)와, 한 번에 본 「계속
+/// 샌드박스 밖인」 helper 의 최대 수. `maru-web-helper` 경로인 자식만 센다(`os.unsandboxedHelper` 와 같은 거름). 새 helper 는
+/// 자기 샌드박스를 켜기 전 잠깐 밖이므로, 세 표본(약 100 ms) 잇달아 밖인 것만 「샌드박스 밖」으로 센다. 그렇게 남은 것의
+/// pid 와, 그런 것이 **모두** 카메라 utility 였는지(실행 인자 — 살아 있는 동안 못 읽으면 다음 표본에서 다시 읽고, 확인되지
+/// 않은 채 사라지면 아닌 것으로 친다)도 돌려준다. 50 ms 표본은 그 순간 살아 있는 것만 본다 — 몇 ms 만에 끝나는 다시 뜨기는
+/// 대부분 놓친다(표본 한계와 그 셈은 docs/plans/web-osr-backend.md C1).
+fn helperChurn(host_pid: c_int, ms: u32) Churn {
+    var buf: [64]c_int = undefined;
+    var path_buf: [4096]u8 = undefined;
+    var seen: [512]c_int = undefined;
+    var streak_pid: [64]c_int = undefined;
+    var streak_len: [64]u8 = undefined;
+    var streak_ok: [64]bool = undefined; // 실행 인자로 카메라 utility 임을 확인했다
+    var streaks: usize = 0;
+    var churn: Churn = .{ .first = 0, .distinct = 0, .max_unsandboxed = 0 };
+    const deadline = os.nowMs() + ms;
+    var first = true;
+    while (os.nowMs() < deadline) {
+        const kids = os.children(host_pid, &buf);
+        var next_pid: [64]c_int = undefined;
+        var next_len: [64]u8 = undefined;
+        var next_ok: [64]bool = undefined;
+        var next_n: usize = 0;
+        var named: usize = 0;
+        var persistent: usize = 0;
+        for (kids) |pid| {
+            if (!std.mem.endsWith(u8, os.executablePath(pid, &path_buf), "/maru-web-helper")) continue;
+            named += 1;
+            if (std.mem.indexOfScalar(c_int, seen[0..@min(churn.distinct, seen.len)], pid) == null) {
+                if (churn.distinct < seen.len) seen[churn.distinct] = pid;
+                churn.distinct += 1;
+            }
+            if (os.sandbox_check(pid, null, 0) == 1) continue;
+            const prev = std.mem.indexOfScalar(c_int, streak_pid[0..streaks], pid);
+            next_pid[next_n] = pid;
+            next_len[next_n] = (if (prev) |i| streak_len[i] else 0) +| 1;
+            next_ok[next_n] = if (prev) |i| streak_ok[i] else false;
+            if (next_len[next_n] >= 3) {
+                persistent += 1;
+                // 실행 인자를 읽을 때까지 표본마다 다시 본다 — 여러 번 읽어도 카메라 utility 가 아니면 다른 것이다.
+                if (!next_ok[next_n] and os.argsContain(pid, camera_sub_type_arg)) next_ok[next_n] = true;
+                if (next_ok[next_n]) {
+                    churn.outside_pid = pid;
+                } else if (next_len[next_n] >= 6) churn.outside_all_camera = false;
+            }
+            next_n += 1;
+        }
+        // 확인되지 않은 채 사라진 「계속 샌드박스 밖」 helper 는 카메라 utility 가 아니다(그것은 host 가 끝날 때까지 산다).
+        for (streak_pid[0..streaks], streak_len[0..streaks], streak_ok[0..streaks]) |pid, len, ok| {
+            if (len >= 3 and !ok and std.mem.indexOfScalar(c_int, next_pid[0..next_n], pid) == null) churn.outside_all_camera = false;
+        }
+        if (first) churn.first = named;
+        first = false;
+        @memcpy(streak_pid[0..next_n], next_pid[0..next_n]);
+        @memcpy(streak_len[0..next_n], next_len[0..next_n]);
+        @memcpy(streak_ok[0..next_n], next_ok[0..next_n]);
+        streaks = next_n;
+        churn.max_unsandboxed = @max(churn.max_unsandboxed, persistent);
+        os.sleepMs(50);
+    }
+    return churn;
+}
+
+/// `/perm?a=<action>` 을 열고 눌러 청한다. 요청이 오면 거기서 멈춘다(답은 호출자가).
+fn ask(host: *Host, u: []u8, port: u16, action: []const u8) !Outcome {
+    var path_buf: [64]u8 = undefined;
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, std.fmt.bufPrint(&path_buf, "/perm?a={s}", .{action}) catch unreachable) } });
+    var ready_buf: [64]u8 = undefined;
+    if (!waitTitle(host, std.fmt.bufPrint(&ready_buf, "{s}:ready", .{action}) catch unreachable)) return error.PageNotReady;
+    // 첫 프레임 뒤 약 0.5 초의 입력은 렌더러가 버린다(W4a 실측).
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    var outcome: Outcome = .{};
+    waitResult(host, action, true, &outcome);
+    return outcome;
+}
+
+/// 답하고 페이지의 결과 제목을 돌려준다.
+fn answer(host: *Host, action: []const u8, request: RequestId, result: message.PermissionResult) !Outcome {
+    try host.send(.{ .permission_reply = .{ .browser = id, .request = request, .result = result } });
+    var outcome: Outcome = .{};
+    waitResult(host, action, false, &outcome);
+    return outcome;
+}
+
+fn endsWith(outcome: *const Outcome, suffix: []const u8) bool {
+    return std.mem.endsWith(u8, outcome.title(), suffix);
+}
+
+/// 허용된 글꼴 목록이 왔다(`fonts:ok<1 이상>`).
+fn fontsListed(outcome: *const Outcome) bool {
+    const t = outcome.title();
+    return std.mem.startsWith(u8, t, "fonts:ok") and t.len > "fonts:ok".len and !std.mem.eql(u8, t, "fonts:ok0");
+}
+
+/// 요청 없이 끝났는가(기억한 답).
+fn silent(outcome: *const Outcome) bool {
+    return outcome.asked == null;
+}
+
+/// 그 요청의 `dialog_closed` 가 오는가.
+fn waitClosed(host: *Host, request: RequestId) bool {
+    if (request == 0) return false;
+    const deadline = os.nowMs() + wait_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return false) orelse return false;
+        if (next == .dialog_closed and next.dialog_closed.browser == id and next.dialog_closed.request == request) return true;
+    }
+    return false;
+}
+
+/// `web_notification` 을 기다린다(`timeout_ms` 안에 온 것을 모두 센다). 제목에 `stop_title` 이 오면 그때까지만.
+const Relayed = struct {
+    count: usize = 0,
+    notification: u32 = 0,
+    origin_buf: [64]u8 = undefined,
+    origin_len: usize = 0,
+    text_buf: [128]u8 = undefined,
+    text_len: usize = 0,
+    /// 기다리는 동안 온 이 브라우저의 마지막 제목.
+    title_buf: [64]u8 = undefined,
+    title_len: usize = 0,
+
+    fn title(self: *const Relayed) []const u8 {
+        return self.title_buf[0..self.title_len];
+    }
+};
+
+fn collectRelayed(host: *Host, timeout_ms: u32) Relayed {
+    var out: Relayed = .{};
+    const deadline = os.nowMs() + timeout_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .title_changed and next.title_changed.browser == id) {
+            out.title_len = @min(next.title_changed.text.len, out.title_buf.len);
+            @memcpy(out.title_buf[0..out.title_len], next.title_changed.text[0..out.title_len]);
+        }
+        if (next == .web_notification and next.web_notification.browser == id) {
+            const v = next.web_notification;
+            if (out.count == 0) {
+                out.notification = v.notification;
+                out.origin_len = @min(v.origin.len, out.origin_buf.len);
+                @memcpy(out.origin_buf[0..out.origin_len], v.origin[0..out.origin_len]);
+                const text = std.fmt.bufPrint(&out.text_buf, "{s}|{s}", .{ v.title, v.body }) catch "";
+                out.text_len = text.len;
+            }
+            out.count += 1;
+        }
+    }
+    return out;
+}
+
+/// `web_notification` 을 세며 이 브라우저의 제목이 `prefix` 로 시작하고 `:x` 가 든 것(iframe 이 보낸 결과)이 올 때까지 기다린다.
+fn collectRelayedUntil(host: *Host, prefix: []const u8, timeout_ms: u32) Relayed {
+    var out: Relayed = .{};
+    const deadline = os.nowMs() + timeout_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .web_notification and next.web_notification.browser == id) out.count += 1;
+        if (next == .title_changed and next.title_changed.browser == id and std.mem.startsWith(u8, next.title_changed.text, prefix)) {
+            out.title_len = @min(next.title_changed.text.len, out.title_buf.len);
+            @memcpy(out.title_buf[0..out.title_len], next.title_changed.text[0..out.title_len]);
+        }
+    }
+    return out;
+}
+
+/// 이 브라우저의 제목이 `prefix` 로 시작할 때까지 기다린다(그 제목을 돌려준다 — 못 오면 빈 제목).
+fn waitTitlePrefix(host: *Host, prefix: []const u8) Relayed {
+    var out: Relayed = .{};
+    const deadline = os.nowMs() + wait_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .title_changed and next.title_changed.browser == id and std.mem.startsWith(u8, next.title_changed.text, prefix)) {
+            out.title_len = @min(next.title_changed.text.len, out.title_buf.len);
+            @memcpy(out.title_buf[0..out.title_len], next.title_changed.text[0..out.title_len]);
+            break;
+        }
+    }
+    return out;
+}
+
+fn notificationChecks(report: Report, host: *Host, u: []u8, port: u16, origin: []const u8, detail_buf: []u8) !void {
+    // 허용한 출처(앞 판정이 알림을 허용했다) — 띄우면 넘어온다. 이 알림은 누르지 않고 둔다(아래 옛 알림).
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, "/perm?a=nshow") } });
+    if (!waitTitle(host, "nshow:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    const relayed = collectRelayed(host, 3000);
+    const relay_ok = relayed.count == 1 and std.mem.eql(u8, relayed.origin_buf[0..relayed.origin_len], origin) and
+        std.mem.eql(u8, relayed.text_buf[0..relayed.text_len], "제목|본문\n둘") and relayed.notification != 0;
+    // 같은 주소로 다시 연 새 문서의 알림 — 페이지 번호가 옛 알림과 같다(1).
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, "/perm?a=nshow") } });
+    if (!waitTitle(host, "nshow:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    const again = collectRelayed(host, 2000);
+    // 옛 문서의 알림을 누른다 — 새 문서의 알림이 눌리면 안 된다(렌더러의 문서 표식).
+    if (relayed.notification != 0) try host.send(.{ .web_notification_click = .{ .browser = id, .notification = relayed.notification } });
+    const stale = collectRelayed(host, 1500);
+    const stale_ignored = relayed.notification != 0 and again.count == 1 and !std.mem.startsWith(u8, stale.title(), "nshow:clicked");
+    // 새 알림을 누르면 onclick.
+    if (again.notification != 0) try host.send(.{ .web_notification_click = .{ .browser = id, .notification = again.notification } });
+    const clicked = waitTitle(host, "nshow:clicked1");
+    report(relay_ok and again.count == 1 and clicked, "notif-relay", std.fmt.bufPrint(detail_buf, "알림 {d} 건 · 출처 {s} · 글 [{s}] · 다시 연 문서의 알림 {d} 건 · 누르면 onclick {}", .{ relayed.count, relayed.origin_buf[0..relayed.origin_len], relayed.text_buf[0..relayed.text_len], again.count, clicked }) catch "");
+    report(stale_ignored, "notif-stale-click", std.fmt.bufPrint(detail_buf, "옛 문서의 알림(누르지 않고 둔 것)을 새 문서에서 누름 → 제목 {s}(clicked 가 아니어야)", .{stale.title()}) catch "");
+    // 같은 알림을 다시 누른다 — onclick 은 한 번뿐(Chrome 도 누른 알림은 닫힌다).
+    if (again.notification != 0) try host.send(.{ .web_notification_click = .{ .browser = id, .notification = again.notification } });
+    const twice = collectRelayed(host, 1500);
+    report(clicked and !std.mem.eql(u8, twice.title(), "nshow:clicked2"), "notif-click-once", std.fmt.bufPrint(detail_buf, "같은 알림을 두 번 누름 → 제목 {s}(clicked2 가 아니어야)", .{twice.title()}) catch "");
+
+    // 미리 그린 문서(speculation rules prerender) — 활성화된 뒤에도 `maru` 가 든 전역이 없다(주 프레임이지만 DevTools 대상이
+    // 다를 수 있다 — 적대 검증).
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, "/perm?a=nprerender") } });
+    const activated = waitTitlePrefix(host, "nactivated:g");
+    report(std.mem.startsWith(u8, activated.title(), "nactivated:g0-"), "notif-prerender", std.fmt.bufPrint(detail_buf, "미리 그린 문서가 활성화됨 → 제목 {s}(g0 이어야 — 끝의 a1 은 실제로 미리 그려졌다는 뜻)", .{activated.title()}) catch "");
+
+    // 허용하지 않은 출처가 권한을 속여 띄운다.
+    var other_buf: [128]u8 = undefined;
+    try host.send(.{ .navigate = .{ .browser = id, .url = std.fmt.bufPrint(&other_buf, "http://localhost:{d}/perm?a=nforge", .{port}) catch unreachable } });
+    if (!waitTitle(host, "nforge:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    const forged = collectRelayed(host, 2500);
+    const no_global = std.mem.eql(u8, forged.title(), "nforge:forged0-0-g0-g0-g0-g0");
+    report(forged.count == 0 and no_global, "notif-forged", std.fmt.bufPrint(detail_buf, "허용하지 않은 출처가 권한을 속여 띄움 → 넘어온 알림 {d} 건 · maru 전역 수(이 문서-about:blank-iframe 넷) {s}(모두 0 이어야)", .{ forged.count, forged.title() }) catch "");
+
+    // 포트만 다른 같은 사이트(같은 프로세스)의 허용하지 않은 맨 위 문서가 허용한 출처(이 포트)를 iframe 으로 넣고 그 iframe 이
+    // 알림을 띄운다 — 넘어오지 않는다(Chrome 처럼 주 프레임과 같은 출처만).
+    const other = try http.Server.start();
+    var xtop_buf: [128]u8 = undefined;
+    try host.send(.{ .navigate = .{ .browser = id, .url = std.fmt.bufPrint(&xtop_buf, "http://127.0.0.1:{d}/perm?a=nxtop{d}", .{ other.port, port }) catch unreachable } });
+    const xframe = collectRelayedUntil(host, "nxtop", 6000);
+    report(xframe.count == 0 and std.mem.startsWith(u8, xframe.title(), "nxtop") and std.mem.indexOf(u8, xframe.title(), ":x") != null, "notif-cross-origin-frame", std.fmt.bufPrint(detail_buf, "다른 출처 맨 위 문서 안의 허용한 출처 iframe 이 띄움 → 넘어온 알림 {d} 건 · 제목 {s}(iframe 이 본 권한)", .{ xframe.count, xframe.title() }) catch "");
+
+    // 허용한 출처(127.0.0.1)가 CSP sandbox 로 불투명 출처가 된 문서 — 주소는 허용한 출처지만 넘어오지 않는다(렌더러가 `send`
+    // 를 숨기지 않는다).
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, "/perm?a=nsandbox") } });
+    if (!waitTitle(host, "nsandbox:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    const sandboxed = collectRelayed(host, 2500);
+    report(sandboxed.count == 0 and std.mem.eql(u8, sandboxed.title(), "nsandbox:sandboxed0-null"), "notif-opaque", std.fmt.bufPrint(detail_buf, "허용한 출처의 CSP sandbox 문서가 권한을 속여 띄움 → 넘어온 알림 {d} 건 · 제목 {s}(sandboxed0-null 이어야)", .{ sandboxed.count, sandboxed.title() }) catch "");
+
+    // 폭탄 — 빈도 제한은 브라우저마다라 새 브라우저에서(앞 알림이 창을 쓰지 않게).
+    const flooder: BrowserId = id + 2;
+    try host.send(.{ .create_browser = .{ .browser = flooder, .size = size, .hidden = false, .url = browsers_check.url(u, port, "/perm?a=nflood") } });
+    var flood: Relayed = .{};
+    const flood_deadline = os.nowMs() + 6000;
+    while (os.nowMs() < flood_deadline) {
+        const next = (host.next(@intCast(@max(flood_deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .web_notification and next.web_notification.browser == flooder) flood.count += 1;
+    }
+    try host.send(.{ .destroy_browser = flooder });
+    report(flood.count == 5, "notif-flood", std.fmt.bufPrint(detail_buf, "한꺼번에 열 개 → 넘어온 알림 {d} 건(상한 5)", .{flood.count}) catch "");
+
+    // 처음부터 알림 페이지로 만든 브라우저(첫 문서).
+    const second: BrowserId = id + 1;
+    try host.send(.{ .create_browser = .{ .browser = second, .size = size, .hidden = false, .url = browsers_check.url(u, port, "/perm?a=nauto") } });
+    var first_doc: usize = 0;
+    const deadline = os.nowMs() + wait_ms;
+    while (os.nowMs() < deadline and first_doc == 0) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .web_notification and next.web_notification.browser == second) first_doc += 1;
+    }
+    try host.send(.{ .destroy_browser = second });
+    report(first_doc == 1, "notif-first-doc", std.fmt.bufPrint(detail_buf, "처음부터 알림 페이지인 브라우저의 첫 문서 → 알림 {d} 건", .{first_doc}) catch "");
+}
+
+/// 판정 시작 전 새 브라우저를 만든다.
+fn start(host_path: [:0]const u8, profile_arg: [:0]const u8, u: []u8, port: u16) !Host {
+    var host = try Host.spawn(host_path, profile_arg);
+    errdefer host.send(.shutdown) catch {};
+    try browsers_check.handshake(&host);
+    try host.send(.{ .create_browser = .{ .browser = id, .size = size, .hidden = false, .url = browsers_check.url(u, port, "/title?t=perm-start") } });
+    if (!waitTitle(&host, "perm-start")) return error.PageNotReady;
+    try host.send(.{ .set_focus = .{ .browser = id, .value = true } });
+    return host;
+}
+
+pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, port: u16) !void {
+    var detail_buf: [400]u8 = undefined;
+    var u: [256]u8 = undefined;
+    var origin_buf: [64]u8 = undefined;
+    const origin = std.fmt.bufPrint(&origin_buf, "http://127.0.0.1:{d}", .{port}) catch unreachable;
+
+    var host = try start(host_path, profile_arg, &u, port);
+
+    // ── 알림 허용 ──
+    const notif = try ask(&host, &u, port, "notif");
+    const notif_asked = notif.asked orelse Asked{};
+    const windows_while_asking = windows.ownedBy(host.pid);
+    const notif_shape = notif_asked.kinds == PermissionKind.notifications.bit() and notif_asked.media == 0 and std.mem.eql(u8, notif_asked.origin(), origin);
+    const granted = if (notif.asked != null) try answer(&host, "notif", notif_asked.request, .accept) else Outcome{};
+    report(notif_shape and windows_while_asking == 0 and endsWith(&granted, ":granted"), "perm-asks", std.fmt.bufPrint(&detail_buf, "알림 요청(비트 0x{x} · 출처 {s}) 모양 {} · 묻는 동안 host 창 {d} 개 · 허용 → {s}", .{ notif_asked.kinds, notif_asked.origin(), notif_shape, windows_while_asking, granted.title() }) catch "");
+
+    // ── 웹 알림 중계(W5c) ──
+    try notificationChecks(report, &host, &u, port, origin, &detail_buf);
+
+    // ── MIDI 차단 ──
+    const midi = try ask(&host, &u, port, "midi");
+    const midi_asked = midi.asked orelse Asked{};
+    const denied = if (midi.asked != null) try answer(&host, "midi", midi_asked.request, .deny) else Outcome{};
+    report(midi_asked.kinds == PermissionKind.midi_sysex.bit() and endsWith(&denied, ":err-NotAllowedError"), "perm-deny", std.fmt.bufPrint(&detail_buf, "MIDI sysex 요청(비트 0x{x}) · 차단 → {s}", .{ midi_asked.kinds, denied.title() }) catch "");
+
+    // ── 글꼴 닫기 → 다시 묻는다 ──
+    const fonts = try ask(&host, &u, port, "fonts");
+    const fonts_asked = fonts.asked orelse Asked{};
+    const dismissed = if (fonts.asked != null) try answer(&host, "fonts", fonts_asked.request, .dismiss) else Outcome{};
+    const fonts_again = try ask(&host, &u, port, "fonts");
+    const fonts_again_asked = fonts_again.asked orelse Asked{};
+    const fonts_ok = if (fonts_again.asked != null) try answer(&host, "fonts", fonts_again_asked.request, .accept) else Outcome{};
+    report(fonts_asked.kinds == PermissionKind.local_fonts.bit() and endsWith(&dismissed, ":ok0") and fonts_again.asked != null and fontsListed(&fonts_ok), "perm-dismiss", std.fmt.bufPrint(&detail_buf, "로컬 글꼴(비트 0x{x}) 닫기 → {s} · 다시 청하면 또 묻는다 {} · 허용 → {s}", .{ fonts_asked.kinds, dismissed.title(), fonts_again.asked != null, fonts_ok.title() }) catch "");
+
+    // ── 묻는 동안 이동 ──
+    const screens = try ask(&host, &u, port, "screens");
+    const screens_asked = screens.asked orelse Asked{};
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(&u, port, "/title?t=perm-moved") } });
+    var closed_request: RequestId = 0;
+    var moved = false;
+    const move_deadline = os.nowMs() + wait_ms;
+    while ((closed_request == 0 or !moved) and os.nowMs() < move_deadline) {
+        const next = (host.next(@intCast(@max(move_deadline - os.nowMs(), 1))) catch break) orelse break;
+        switch (next) {
+            .dialog_closed => |value| if (value.browser == id) {
+                closed_request = value.request;
+            },
+            .title_changed => |value| if (value.browser == id and std.mem.eql(u8, value.text, "perm-moved")) {
+                moved = true;
+            },
+            else => {},
+        }
+    }
+    // 늦은 답·없는 번호의 답은 버린다(채널이 닫히거나 실패가 나지 않는다).
+    try host.send(.{ .permission_reply = .{ .browser = id, .request = screens_asked.request, .result = .accept } });
+    try host.send(.{ .permission_reply = .{ .browser = id, .request = 999_999, .result = .accept } });
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(&u, port, "/title?t=perm-alive") } });
+    const alive = waitTitle(&host, "perm-alive");
+    report(screens_asked.kinds == PermissionKind.window_management.bit() and closed_request == screens_asked.request and closed_request != 0 and moved and alive, "perm-closed", std.fmt.bufPrint(&detail_buf, "창 관리 요청 {d}(비트 0x{x}) 중 이동 → dialog_closed {d} · 옮겨 감 {} · 늦은 답 뒤 계속 명령 받음 {}", .{ screens_asked.request, screens_asked.kinds, closed_request, moved, alive }) catch "");
+
+    // ── 위치(비트만) ──
+    const geo = try ask(&host, &u, port, "geo");
+    const geo_asked = geo.asked orelse Asked{};
+    const geo_done = if (geo.asked != null) try answer(&host, "geo", geo_asked.request, .dismiss) else Outcome{};
+    report(geo_asked.kinds == PermissionKind.geolocation.bit() and !geo_asked.remembered and endsWith(&geo_done, ":geo-err1"), "perm-geolocation", std.fmt.bufPrint(&detail_buf, "위치 요청(비트 0x{x} · 기억 {}) · 닫기 → {s}", .{ geo_asked.kinds, geo_asked.remembered, geo_done.title() }) catch "");
+
+    // ── 위치 좌표(W5b2) ──
+    const first = try ask(&host, &u, port, "geox");
+    const first_asked = first.asked orelse Asked{};
+    // 짝이 없는 좌표(없는 번호)는 버린다 — 채널이 닫히거나 실패가 나지 않는다.
+    try host.send(.{ .geolocation = .{ .browser = id, .request = 999_999, .available = true, .latitude = 1, .longitude = 1, .accuracy = 1 } });
+    try host.send(.{ .geolocation = .{ .browser = id, .request = first_asked.request, .available = true, .latitude = 37.5665, .longitude = 126.978, .accuracy = 25 } });
+    const first_done = if (first.asked != null) try answer(&host, "geox", first_asked.request, .accept) else Outcome{};
+    report(!first_asked.remembered and endsWith(&first_done, ":at37.566,126.978,25"), "geo-coords", std.fmt.bufPrint(&detail_buf, "처음 요청(기억 {}) · 좌표를 걸고 허용 → {s}", .{ first_asked.remembered, first_done.title() }) catch "");
+
+    const repeat = try ask(&host, &u, port, "geox");
+    const repeat_asked = repeat.asked orelse Asked{};
+    try host.send(.{ .geolocation = .{ .browser = id, .request = repeat_asked.request, .available = true, .latitude = 35.1796, .longitude = 129.0756, .accuracy = 40 } });
+    const repeat_done = if (repeat.asked != null) try answer(&host, "geox", repeat_asked.request, .accept) else Outcome{};
+    // 다른 출처(같은 서버를 `localhost` 로)는 허용을 물려받지 않는다 — 기억된 허용 표시가 없다(출처별 — 적대 검증).
+    var other_buf: [128]u8 = undefined;
+    try host.send(.{ .navigate = .{ .browser = id, .url = std.fmt.bufPrint(&other_buf, "http://localhost:{d}/perm?a=geox", .{port}) catch unreachable } });
+    if (!waitTitle(&host, "geox:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    var other: Outcome = .{};
+    waitResult(&host, "geox", true, &other);
+    const other_asked = other.asked orelse Asked{};
+    const other_done = if (other.asked != null) try answer(&host, "geox", other_asked.request, .dismiss) else Outcome{};
+    const other_ok = other.asked != null and !other_asked.remembered and std.mem.startsWith(u8, other_asked.origin(), "http://localhost:") and endsWith(&other_done, ":geo-err1");
+    report(repeat_asked.remembered and other_ok and endsWith(&repeat_done, ":at35.180,129.076,40"), "geo-remembered", std.fmt.bufPrint(&detail_buf, "허용한 출처가 다시 청함 → 또 묻지만 기억된 허용 {} · 새 좌표 → {s} · 다른 출처(localhost)는 기억 없이 물음 {}", .{ repeat_asked.remembered, repeat_done.title(), other_ok }) catch "");
+
+    // 같은 문서의 둘째 요청(1.5 초 뒤)은 묻지 않고(Chromium 이 그 문서에 허용을 둔다) 걸린 좌표를 곧바로 받는다(실측).
+    const later = try ask(&host, &u, port, "geolater");
+    if (later.asked) |asked| try host.send(.{ .geolocation = .{ .browser = id, .request = asked.request, .available = true, .latitude = 35.1796, .longitude = 129.0756, .accuracy = 40 } });
+    const later_done = if (later.asked) |asked| try answer(&host, "geolater", asked.request, .accept) else Outcome{};
+    // iframe 도 같다 — 허용 때 넣는 보정은 주 프레임에만 가므로, 새 문서마다 넣는 보정(모든 프레임)이 iframe 을 맡는다.
+    const framed = try ask(&host, &u, port, "geoframe");
+    if (framed.asked) |asked| try host.send(.{ .geolocation = .{ .browser = id, .request = asked.request, .available = true, .latitude = 35.1796, .longitude = 129.0756, .accuracy = 40 } });
+    const framed_done = if (framed.asked) |asked| try answer(&host, "geoframe", asked.request, .accept) else Outcome{};
+    // 좌표 없이 허용 — 새 문서라 앞의 좌표(35.18)가 남지 않고 「없음」이다(sidecar 가 새 문서에서 「없음」으로 되돌리고, 허용 전에도
+    // 「없음」을 건다). 그 뒤 「없음」을 보내고 허용.
+    const bare = try ask(&host, &u, port, "geox");
+    const bare_done = if (bare.asked) |asked| try answer(&host, "geox", asked.request, .accept) else Outcome{};
+    const none = try ask(&host, &u, port, "geox");
+    const none_asked = none.asked orelse Asked{};
+    try host.send(.{ .geolocation = .{ .browser = id, .request = none_asked.request, .available = false } });
+    const none_done = if (none.asked != null) try answer(&host, "geox", none_asked.request, .accept) else Outcome{};
+    report(endsWith(&later_done, ":at35.180|at35.180") and endsWith(&framed_done, ":at35.180|at35.180") and endsWith(&none_done, ":geo-err2") and endsWith(&bare_done, ":geo-err2"), "geo-unavailable", std.fmt.bufPrint(&detail_buf, "같은 문서의 둘째 요청 → {s} · iframe 도 → {s} · 「없음」을 걸고 허용 → {s} · 새 문서에서 좌표 없이 허용 → {s}", .{ later_done.title(), framed_done.title(), none_done.title(), bare_done.title() }) catch "");
+
+    const watch = try ask(&host, &u, port, "watch");
+    if (watch.asked) |asked| try host.send(.{ .geolocation = .{ .browser = id, .request = asked.request, .available = true, .latitude = 33.4996, .longitude = 126.5312, .accuracy = 50 } });
+    const watch_done = if (watch.asked) |asked| try answer(&host, "watch", asked.request, .accept) else Outcome{};
+    report(endsWith(&watch_done, ":n1-33.500"), "geo-watch", std.fmt.bufPrint(&detail_buf, "watchPosition → {s}", .{watch_done.title()}) catch "");
+
+    const blocked = try ask(&host, &u, port, "geox");
+    const blocked_done = if (blocked.asked) |asked| try answer(&host, "geox", asked.request, .deny) else Outcome{};
+    const after_block = try ask(&host, &u, port, "geox");
+    report(endsWith(&blocked_done, ":geo-err1") and silent(&after_block) and endsWith(&after_block, ":geo-err1"), "geo-block", std.fmt.bufPrint(&detail_buf, "차단 → {s} · 다음은 묻지 않고 {s}", .{ blocked_done.title(), after_block.title() }) catch "");
+
+    // ── 카메라 ──
+    const cam = try ask(&host, &u, port, "cam");
+    if (cam.asked) |asked| {
+        const cam_done = try answer(&host, "cam", asked.request, .deny);
+        report(asked.media == MediaPermission.camera.bit() and asked.kinds == 0 and endsWith(&cam_done, ":err-NotAllowedError"), "perm-media", std.fmt.bufPrint(&detail_buf, "카메라 미디어 요청(비트 0x{x}) · 거부 → {s}", .{ asked.media, cam_done.title() }) catch "");
+    } else {
+        report(endsWith(&cam, ":err-NotFoundError"), "perm-media", std.fmt.bufPrint(&detail_buf, "이 기계에 카메라가 없다 — 요청 전에 {s}", .{cam.title()}) catch "");
+    }
+    const churn = helperChurn(host.pid, 2_000);
+    const outside_ok = churn.max_unsandboxed == 0 or (churn.outside_pid != 0 and churn.outside_all_camera);
+    report(churn.distinct <= churn.first + 5 and churn.max_unsandboxed <= 1 and outside_ok, "perm-media-helpers", std.fmt.bufPrint(&detail_buf, "카메라 뒤 2 초 동안 helper pid {d} 개(처음 {d}) · 약 100 ms 넘게 샌드박스 밖 최대 {d} · 그것이 카메라 utility {}", .{ churn.distinct, churn.first, churn.max_unsandboxed, outside_ok and churn.outside_pid != 0 }) catch "");
+
+    // ── 화면 공유 ──
+    const display = try ask(&host, &u, port, "display");
+    const display_asked = display.asked orelse Asked{};
+    const display_done = if (display.asked != null) try answer(&host, "display", display_asked.request, .deny) else Outcome{};
+    // 미디어 요청의 답은 Chromium 이 기억하지 않는다 — 다시 청하면 또 묻는다(프롬프트와 다르다).
+    const display_again = try ask(&host, &u, port, "display");
+    const display_again_done = if (display_again.asked) |again| try answer(&host, "display", again.request, .dismiss) else Outcome{};
+    const display_accept = try ask(&host, &u, port, "display");
+    const display_accepted = if (display_accept.asked) |again| try answer(&host, "display", again.request, .accept) else Outcome{};
+    const accept_differs = display_accept.asked != null and display_accepted.title_len > 0 and !endsWith(&display_accepted, ":err-NotAllowedError");
+    report(display_asked.media & MediaPermission.screen.bit() != 0 and display_asked.kinds == 0 and endsWith(&display_done, ":err-NotAllowedError") and display_again.asked != null and endsWith(&display_again_done, ":err-NotAllowedError") and accept_differs, "perm-display", std.fmt.bufPrint(&detail_buf, "화면 공유 미디어 요청(비트 0x{x}) · 거부 → {s} · 기억하지 않아 다시 묻는다 {} · 닫기 → {s} · 허용 → {s}", .{ display_asked.media, display_done.title(), display_again.asked != null, display_again_done.title(), display_accepted.title() }) catch "");
+
+    // ── 묻는 동안 페이지가 스스로 떠남(미디어) ──
+    const leaving = try ask(&host, &u, port, "displayleave");
+    const leaving_asked = leaving.asked orelse Asked{};
+    var left_closed: RequestId = 0;
+    var left = false;
+    const left_deadline = os.nowMs() + wait_ms;
+    while ((left_closed == 0 or !left) and os.nowMs() < left_deadline) {
+        const next = (host.next(@intCast(@max(left_deadline - os.nowMs(), 1))) catch break) orelse break;
+        switch (next) {
+            .dialog_closed => |value| if (value.browser == id) {
+                left_closed = value.request;
+            },
+            .title_changed => |value| if (value.browser == id and std.mem.eql(u8, value.text, "perm-left")) {
+                left = true;
+            },
+            else => {},
+        }
+    }
+    // 실패한 이동(닿지 않는 주소)은 `on_load_start` 없이 오류 페이지로 바뀐다 — 그래도 요청은 닫힌다(`on_load_error`).
+    const failing = try ask(&host, &u, port, "displayfail");
+    const failing_asked = failing.asked orelse Asked{};
+    const fail_closed = waitClosed(&host, failing_asked.request);
+    report(leaving_asked.media != 0 and left_closed == leaving_asked.request and left_closed != 0 and left and failing_asked.media != 0 and fail_closed, "perm-media-left", std.fmt.bufPrint(&detail_buf, "화면 공유 요청 {d} 중 페이지가 스스로 떠남 → dialog_closed {d} · 옮겨 감 {} · 닿지 않는 주소로 떠나도 닫힘 {}", .{ leaving_asked.request, left_closed, left, fail_closed }) catch "");
+
+    // ── 못 물음(IGNORE) 되풀이 ── Chromium 은 따로 센다: 넷이면 다섯째는 묻지 않고 거절한다(embargo — 실측을 판정으로 남긴다.
+    // CEF 를 올려 바뀌면 maru 가 자동으로 보내는 IGNORE 의 대가가 달라진다).
+    var ignored: usize = 0;
+    var ignore_prompt = true;
+    while (ignored < 4) : (ignored += 1) {
+        const idle = try ask(&host, &u, port, "idle");
+        const asked = idle.asked orelse break;
+        const done = try answer(&host, "idle", asked.request, .ignore);
+        if (!endsWith(&done, ":prompt")) ignore_prompt = false;
+    }
+    const embargoed = try ask(&host, &u, port, "idle");
+    report(ignored == 4 and ignore_prompt and silent(&embargoed) and endsWith(&embargoed, ":denied"), "perm-ignore", std.fmt.bufPrint(&detail_buf, "유휴 감지 못 물음 {d} 번(페이지는 prompt 로 남음 {}) → 다섯째는 묻지 않고 {s}", .{ ignored, ignore_prompt, embargoed.title() }) catch "");
+
+    // ── 다시 띄워도 기억한다 ──
+    // 샌드박스 밖 helper 는 host 와 함께 사라져야 한다(Chromium 의 자식은 IPC 가 끊기면 스스로 끝난다 — 기댄 것을 잰다). 끝내기
+    // **직전**의 샌드박스 밖 helper 를 모두 찍어 본다 — 앞서 기록한 pid 하나만 보면 그 사이 바뀐 것을 놓친다(14 차 리뷰).
+    var outside_buf: [64]c_int = undefined;
+    var outside_n: usize = 0;
+    {
+        var kid_buf: [64]c_int = undefined;
+        var path_buf: [4096]u8 = undefined;
+        for (os.children(host.pid, &kid_buf)) |pid| {
+            if (!os.unsandboxedHelper(pid, &path_buf)) continue;
+            outside_buf[outside_n] = pid;
+            outside_n += 1;
+        }
+    }
+    try host.send(.shutdown);
+    _ = host.wait(wait_ms);
+    const remaining = os.survivors(outside_buf[0..outside_n], 3_000);
+    os.killAlive(outside_buf[0..outside_n]);
+    const camera_listed = churn.outside_pid != 0 and std.mem.indexOfScalar(c_int, outside_buf[0..outside_n], churn.outside_pid) != null;
+    report(camera_listed and remaining == 0, "perm-camera-gone", std.fmt.bufPrint(&detail_buf, "카메라 utility 가 끝내기 직전 샌드박스 밖 helper {d} 개 안에 있음 {} · host 를 끝내고 3 초 뒤 남은 것 {d}", .{ outside_n, camera_listed, remaining }) catch "");
+    host = try start(host_path, profile_arg, &u, port);
+    defer {
+        host.send(.shutdown) catch {};
+        _ = host.wait(wait_ms);
+    }
+    const notif_kept = try ask(&host, &u, port, "notif");
+    const midi_kept = try ask(&host, &u, port, "midi");
+    const fonts_kept = try ask(&host, &u, port, "fonts");
+    report(silent(&notif_kept) and endsWith(&notif_kept, ":granted") and silent(&midi_kept) and endsWith(&midi_kept, ":err-NotAllowedError") and silent(&fonts_kept) and fontsListed(&fonts_kept), "perm-remembered", std.fmt.bufPrint(&detail_buf, "다시 띄운 host 에서 묻지 않고: 알림 {s}({}) · MIDI {s}({}) · 글꼴 {s}({})", .{ notif_kept.title(), silent(&notif_kept), midi_kept.title(), silent(&midi_kept), fonts_kept.title(), silent(&fonts_kept) }) catch "");
+}
+
+/// host 가 갑자기 죽었을 때 고아가 남지 않는가(`perm-camera-orphan`). 깨끗한 프로필에서 장치를 묻게 해 샌드박스 밖 카메라
+/// utility 를 띄우고, 죽이기 **직전** host 의 자식(렌더러·GPU·카메라 utility 모두)을 찍은 뒤 host 를 SIGKILL — 3 초 안에 모두
+/// 사라지는지 본다(Chromium 의 자식은 IPC 가 끊기면 스스로 끝난다). 남은 것은 판정 뒤에 직접 끝낸다.
+pub fn cameraOrphan(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, port: u16) !void {
+    var detail_buf: [240]u8 = undefined;
+    var u: [256]u8 = undefined;
+    var host = try start(host_path, profile_arg, &u, port);
+    errdefer {
+        _ = std.c.kill(host.pid, .KILL);
+        _ = host.wait(wait_ms);
+    }
+    _ = try ask(&host, &u, port, "cam");
+    const churn = helperChurn(host.pid, 1_000);
+    var kid_buf: [64]c_int = undefined;
+    const kids = os.children(host.pid, &kid_buf);
+    var watched: [64]c_int = undefined;
+    @memcpy(watched[0..kids.len], kids);
+    _ = std.c.kill(host.pid, .KILL);
+    _ = host.wait(wait_ms);
+    const survivors = os.survivors(watched[0..kids.len], 3_000);
+    os.killAlive(watched[0..kids.len]);
+    const camera_listed = churn.outside_pid != 0 and std.mem.indexOfScalar(c_int, watched[0..kids.len], churn.outside_pid) != null;
+    report(camera_listed and survivors == 0, "perm-camera-orphan", std.fmt.bufPrint(&detail_buf, "카메라 utility 가 죽이기 직전 자식에 있음 {} · host SIGKILL 직전 자식 {d} 개 중 3 초 뒤 남은 것 {d}", .{ camera_listed, kids.len, survivors }) catch "");
+}

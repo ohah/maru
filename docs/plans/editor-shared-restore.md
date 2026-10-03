@@ -760,13 +760,13 @@ U4b-15의 충돌을 해결하는 제안이며 아직 승인된 포맷이나 제�
 
 본문 backup과 workspace는 서로 다른 파일이며 하나의 atomic transaction이 아니다.
 checkpoint보다 최신 backup은 같은 ID로 읽을 수 있지만 checkpoint에 아직 없는 신규 ID는
-배치 복원으로 찾을 수 없다. orphan 레코드는 자동 삭제하지 않고 기존 복구 열거 경로에서
-내용을 보존한다. 최신 backup과 오래된 view 지문이 다르면 본문은 보존하고 표시 좌표는 기본값을
+배치 복원으로 찾을 수 없다. orphan 레코드는 자동 삭제하지 않는다. 현재 제품은 전체 backup 복구 열거를 제공하지
+않으므로 디스크 보존만으로 사용자 복구 가능을 보장하지 않는다. 신규 discovery 연결이 필요하다. 최신 backup과 오래된 view 지문이 다르면 본문은 보존하고 표시 좌표는 기본값을
 사용한다. 이번 설계가 checkpoint 전의 pane 배치나 모든 마지막 키 입력을 보장하지 않는다.
 
 출시 전 단일 최신 포맷 원칙을 유지한다. 기존 개발 백업/descriptor를 새 ID에 경로만으로
-자동 귀속시키거나 삭제하지 않는다. 이전 레코드의 복구 열거는 보존하되 새 local 문서의
-자동 복원과 혼용하지 않는다. 정확한 헤더/필드 변경과 기존 복구 목록의 reader dispatch를
+자동 귀속시키거나 삭제하지 않는다. 이전 레코드는 보존하고 기존 알려진 신원 기반 복구는 유지하되 새 local 문서의
+자동 복원과 혼용하지 않는다. 전체 orphan 열거는 기존 기능이라고 표현하지 않는다. 정확한 헤더/필드 변경과 기존 복구 목록의 reader dispatch를
 같은 구현 PR에서 연결하고 손상/지원하지 않는 포맷을 missing으로 처리하지 않는다.
 
 #### 적대적 설계 검토와 필수 실행 판정
@@ -786,3 +786,60 @@ checkpoint보다 최신 backup은 같은 ID로 읽을 수 있지만 checkpoint�
 U4b-15는 수정 PR에서 A/B 모두 보존하는 회귀 판정으로 바꾼다. L2 codec/OOM 및 제품
 저장·닫기·복구 대조군, workspace capture/apply, 격리 앱 재시작까지 연결해야 완료다.
 사용자가 이 신원/포맷 방식을 승인하기 전 제품 ID와 wire를 변경하지 않는다.
+
+### recovery ID 추가 적대적 검토와 대안 비교
+
+코드 검토 근거는 L2 `backup.Doc/fileName`과 `workspace_state.Document`, L4
+`backup.restoreFromRecord/reviveAsUntitled/observeRecordedUntitledNumbers/drainRevivals`다.
+아래는 설계 반례이며 새 제품 동작을 실행 검증한 결과가 아니다.
+
+#### 추가로 발견한 설계 빈틈
+
+| 반례 | 영향과 필요한 보완 |
+|---|---|
+| backup은 있지만 checkpoint에 문서가 없음 | 기존 pending revival은 알려진 path/remote 신원에서 예약한다. `observeRecordedUntitledNumbers`는 번호 충돌 방지만 한다. 전체 orphan discovery/read/사용자 복구 연결을 새로 만들어야 한다 |
+| Save As 뒤 backup만 최신, checkpoint는 옛 path | ID는 같아도 path 검사는 거절한다. 다른 path 본문을 자동 적용하지 않고 별도 복구 후보로 보존·표시해야 한다. ID 유지가 자동 복원 성공을 보장하지 않는다 |
+| A 저장으로 같은 path 디스크가 바뀌고 B는 dirty | B 백업과 이전 disk_hash를 그대로 유지한다. B 저장의 외부 충돌을 우회하거나 A 저장 성공을 B clean으로 전파하지 않는다 |
+| 새 ID 예약 직후 백업 쓰기 실패/크래시 | 빈 예약과 정상 backup을 구분해야 한다. 빈 예약이 dirty 복구 후보가 되거나 기존 ID를 다른 내용으로 덮어쓰면 안 된다 |
+| clean 파일을 열 때마다 저장소 예약 | 읽기 전용 열기도 디스크 I/O/권한 실패에 의존하게 된다. ID는 메모리에서 준비하고 영속 예약은 첫 백업 쓰기에 한정하는 후보를 비교한다 |
+| 동일 ID를 두 실행이 동시에 복원 | 난수 충돌 검사만으로 해결되지 않는다. 현재 workspace owner lock의 보호 범위와 backup writer 소유를 함께 검사한다. 별도 실행의 같은 ID를 무조건 atomic replace하지 않는다 |
+| 기존 source-name 버퍼에 새 이름 저장 | 기존 max_file_name_len은 22 bytes, 제안한 d-name은 38 bytes다. Notifications/deferred drop/close capture 버퍼와 길이 판정을 함께 바꿔야 한다 |
+| local에서 remote/untitled로 신원이 바뀜 | 첫 범위가 local이어도 기존 Save As/복구 변환은 교차한다. 유지할 ID와 정리할 source를 명시하지 않으면 백업 중복/잘못된 삭제가 생긴다 |
+| 0-byte dirty 문서의 orphan 복구 | 기존 revive는 빈 내용을 지운다. 파일 전체를 지운 편집도 복구 대상이다. 새 discovery가 기존 revive를 그대로 호출하면 손실된다 |
+| 손상 ID/이름, symlink, directory, 읽기 권한 거부 | 파일 이름의 엄격한 문법과 record 확인, 기존 secure I/O를 유지한다. filename을 사용자 경로로 조합하거나 invalid/failed를 missing으로 바꾸지 않는다 |
+| 백업 수가 많고 일부만 읽기 실패 | 파일 전체를 한 번에 메모리에 올리지 않는다. discovery 진행/실패를 구분하고 실패한 목록을 완전한 것으로 보고 삭제하지 않는다. 구체적 UI/예산은 후속 검토 대상이다 |
+| 동일 path의 legacy backup 하나와 새 A/B 백업 공존 | legacy를 A/B 어느 쪽에도 임의 귀속하지 않는다. 별도 후보로 보존하고 중복 후보가 있음을 드러낸다 |
+
+#### 다른 구현 방법
+
+| 방법 | 장점 | 비용/실패 경계 | 판정 |
+|---|---|---|---|
+| path마다 하나의 정본을 강제 | 기존 backup 키 유지 | 독립 문서 편집을 공유 편집으로 바꾸며 기존 동작과 U4b-15의 전제를 변경 | 현 요청에서는 제외 |
+| path + 본문 hash로 이름 생성 | 내용이 다른 backup 분리 | 편집마다 이름 변경, 같은 내용인 독립 문서 구분 실패, 이전 버전 청소/참조 필요 | 문서 신원 대체로 부적합 |
+| path + checkpoint index/runtime slot | 짧고 발급 간단 | 재시작/새 checkpoint/slot 재사용 시 충돌, checkpoint 전에 backup 키 불안정 | 제외 |
+| 저장소의 영속 증가 counter | 난수 없이 정확한 발급 순서 | counter lock/atomic publication/rollback/부재 복원 필요; 모든 발급이 공유 writer 경로에 의존 | 가능하나 초기 유지보수 비용 큼 |
+| 실행 ID + 실행 안 counter | 문서마다 난수 호출 불필요 | 실행 ID의 고유성/예약과 counter overflow 필요, 복원 문서는 옛 실행 ID 유지 | 유효 대안; 단일 128-bit ID보다 규칙이 많음 |
+| 문서마다 128-bit random ID + 별도 claim 파일 | 단순 참조, 본문 atomic 교체 유지 | claim/record 두 파일의 수명·중단 상태·동시 writer 소유 필요 | 가능; claim 수명 설계 없이 확정하지 않음 |
+| 문서마다 exclusive 생성 directory + 내부 record | mkdir로 namespace 예약, 같은 directory 안 본문 atomic 교체 | 디렉터리 구조/secure I/O/empty reservation/cleanup/owner lock 변경 필요 | reservation 구현 후보로 비교할 가치 있음 |
+| 백업 전체를 하나의 manifest/container에 저장 | 문서 참조와 본문을 함께 게시 가능 | 편집마다 전체 복사 또는 journal/compaction 필요, 손상 영향이 여러 문서로 확대 | 현재 문제에는 과도함 |
+| SQLite/journal 저장소 | transaction과 인덱스 활용 가능 | 런타임 의존성 또는 새 journal 엔진, 운영·복구·migration 책임 증가 | 이번 범위에서는 채택하지 않음 |
+
+현재 추천은 **문서 소유 ID를 유지하되 ID 발급/예약과 orphan discovery를 별도 책임으로 구현**하는
+것이다. 128-bit random ID는 신원 표현 후보이며 파일명이 그 자체로 배타적 writer 권한은 아니다.
+claim 파일과 문서 directory 중 어느 쪽이 실제 기존 atomic writer/lock 경계에 적합한지는
+격리 파일 실험으로 판정한다. 이 비교 전 저장소 배치를 확정하지 않는다.
+
+#### 구현을 나눌 순서와 승인 범위
+
+1. ID 표현/State 소유/descriptor와 record codec을 준비하고 오류·중복·OOM 판정자를 만든다.
+   제품 backup writer는 이 단계만으로 새 이름으로 전환하지 않는다.
+2. claim 파일/directory 후보를 실제 파일로 비교한다. 동시 예약, 첫 쓰기 실패, 예약 후
+   process 중단, 동일 owner 재백업, 다른 owner 거절, 저장/버리기 뒤 정리, 남은 예약 재시작을 판정한다.
+   정상 clean open의 추가 I/O와 파일 수/시간도 측정한다. 물리 전원 차단 시험으로 확대하지 않는다.
+3. local backup writer와 workspace capture/apply를 함께 연결한다. A/B 보존과 peer 정리,
+   shared 하나의 record, 오래된 checkpoint와 Save As, 실패 뒤 기존 완전본을 검증한다.
+4. orphan/legacy discovery의 사용자 복구 경로를 연결한다. 본문 보존과 복구 가능을 구분하며
+   빈 본문·누락 원본·손상/실패·부분 열거·다중 후보를 검사한다. UI 정책은 구현 전에 논의한다.
+
+위 경계를 연결하기 전에는 독립 문서 restart 복구가 완료됐다고 선언하지 않는다.
+이번 추가 검토는 설계 문서만 수정한다. 제품 변경·새 runtime 의존성·새 복구 UX는 승인하지 않는다.

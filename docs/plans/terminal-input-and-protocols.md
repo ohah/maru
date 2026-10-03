@@ -247,9 +247,22 @@ live_pty 훅 없음·되돌려 놓지 않음·안전 지점이 비우기 요청 
     격자만 바꾸고, 셀 픽셀은 다음 tick 의 `syncRemoteCellMetrics` 가 맞춘다(통지 둘 — 틀린 값은 없다). 격자가 그대로면 host 는 resize 를
     백엔드로 넘기지 않으므로(`applied.changed`) 셀 픽셀은 역시 `syncRemoteCellMetrics` 로 간다 — 그때는 그것 하나라 한 번이다.
   - 뒤따르는 `set_cell_metrics`(`syncRemoteCellMetrics`·프레임 빌드의 주입)는 같은 값이라 조용하다.
-  - 로컬 PTY 의 winsize 픽셀 필드는 reader 의 `set_cell_metrics` 적용(`setCellPixels`)이 맞춘다 — reader 가 있는 PTY 에서 메인이
-    픽셀 필드까지 쓰면 그 필드를 쓰는 스레드가 둘이 된다. 그래서 그 경로는 픽셀 필드가 한 tick 늦고 `SIGWINCH` 도 예전처럼 둘이다
-    (통지는 코어가 내므로 한 번이다). reader 없는 PTY(`PtyIo.fromSession`)는 `resizeWithCellPixels` 로 `TIOCSWINSZ` 한 번에 바꾼다.
+  - **PTY winsize 도 한 번에**(2026-10-03): reader 가 있는 PTY(`live_pty` `WriteQueueIo`)도 `resize_with_cell_fn` 으로
+    `PtySession.resizeWithCellPixels` 를 불러 격자와 픽셀 필드를 `TIOCSWINSZ` 한 번에 바꾼다 — 자식은 `SIGWINCH` 를 한 번 받고,
+    통지가 나가기 **전에** 픽셀 필드까지 맞다. 그 필드는 메인(레이아웃)과 reader(`setCellPixels`)가 둘 다 쓰므로
+    `PtySession.winsize_lock`(pthread mutex)으로 «값 + ioctl» 을 묶는다 — 안 묶으면 한쪽이 옛 값으로 쏜 ioctl 이 다른 쪽의 새 값을 덮는다.
+  - **밀린 옛 셀 픽셀 명령은 건너뛴다**(2026-10-03): 로컬 `set_cell_metrics` 는 reader 큐에서 앞선 입력이 다 써진 뒤에야 적용된다
+    (입력 fence). 자식이 stdin 을 안 읽는 동안 글꼴을 다시 바꾸면, 레이아웃이 새 값을 곧바로 넣은 **뒤에** 옛 명령이 적용돼 통지가
+    엉뚱한 크기로 한 번 더 갔다. 그래서 셀 픽셀 결정마다 번호를 매긴다(`TerminalCore.cell_metrics_epoch` — `SurfaceRuntime.enqueueCoreCommand`
+    가 명령에 매기고, `resizeWithCellMetrics` 가 올린다). reader 는 번호가 최신이 아닌 명령을 건너뛰고 PTY 를 **코어의 격자와
+    픽셀 전체**에 맞춘다(`ApplyEffect.cell_grid`) — 픽셀만 맞추면 레이아웃이 코어를 바꾼 뒤 ioctl 을 쏘기 전의 틈에서 «옛 격자 × 새
+    픽셀» 을 쏜다. 전체로 맞추면 뒤이은 레이아웃의 ioctl 이 같은 값이라 커널(XNU `TIOCSWINSZ`)이 `SIGWINCH` 를 다시 안 보낸다.
+    attach bootstrap(`set_runtime_config`)의 셀 픽셀도 같은 번호를 받는다 — 안 그러면 밀린 옛 bootstrap 이 새 값을 덮고, 앱은
+    「이미 보냈다」(`last_sent_cell_*`)고 여겨 그 옛 값에 머문다. host 도 같은 진입점을 지나므로 같은 보호를 받는다. wire 엔 번호를
+    안 싣는다(그 프로세스 안의 순서다). `TerminalCore` 에 u64 하나가 늘어 `RemoteRuntime` 크기 고정값(main 전용)이 ReleaseFast 에서 정렬 때문에 +16(Debug 는 기존 빈자리에 들어가 그대로).
+  - **재연결 강제 resize 의 셀 픽셀은 «마지막으로 알린 값»**(`RemoteRuntime.noteLayoutCell`): 레이아웃 resize 뿐 아니라 셀 픽셀
+    명령(`set_cell_metrics`·attach bootstrap)도 그 자리를 지난다. 배경 탭은 글꼴이 바뀌어도 resize 없이 명령만 받으므로, 안 그러면
+    재연결이 옛 값을 박고 — 위 번호 장치가 뒤늦은 새 명령까지 낡은 것으로 버려 — 그 탭이 다시 보일 때까지 옛 값에 머물렀다.
 
 ## kitty graphics PNG — 전 변종 지원 (해결, 2026-09-14)
 

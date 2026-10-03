@@ -76,7 +76,7 @@ test "CR2a 경계는 generation field 열두 개와 stable shell exclusion을 �
     // 네 값은 `RemoteRuntime` 이 커질 때마다 함께 움직인다. macOS 둘은 **실측**이고, linux 둘은 이
     // 모듈이 macOS 전용이라(session_host.zig 배럴) 이 트리에서 컴파일되지 않아 잴 수 없다.
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11840,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11776,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11792,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11328,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11280,"));
 }
@@ -1190,8 +1190,22 @@ test "CR6e-c3b2d 경계는 재연결 강제 resize 가 레이아웃이 원한 �
     const gated = std.mem.indexOf(u8, resize_fn, "\n        if (!self.gateMutation(.resize)) return;\n");
     try std.testing.expect(recorded != null and gated != null and recorded.? < gated.?);
     // 셀 픽셀(글꼴 크기)도 같은 이유로 관문보다 먼저 적는다 — 끊긴 동안 바뀐 글꼴이 재연결 강제 resize 에 실려야 한다.
-    const cell_recorded = std.mem.indexOf(u8, resize_fn, "\n            self.layout_cell_width_px = cell_w;\n");
+    const cell_recorded = std.mem.indexOf(u8, resize_fn, "\n        self.noteLayoutCell(cell_width_px, cell_height_px);\n");
     try std.testing.expect(cell_recorded != null and cell_recorded.? < gated.?);
+    // 기록 자리는 하나다 — 너비·높이는 짝으로 잠근다(한쪽만 재면 다른 쪽 줄을 지워도 초록이다 — 판정자 규율 «짝을 지어 고정한다»).
+    const note_cell_fn = memberBody(runtime, "pub fn noteLayoutCell(self: *RemoteRuntime, cell_width_px: u32, cell_height_px: u32) void {") orelse
+        return error.MissingResize;
+    try std.testing.expectEqual(@as(usize, 1), count(note_cell_fn, "self.layout_cell_width_px = @intCast(cell_width_px);"));
+    try std.testing.expectEqual(@as(usize, 1), count(note_cell_fn, "self.layout_cell_height_px = @intCast(cell_height_px);"));
+    // 셀 픽셀 **명령**도 그 자리를 지난다 — 배경 탭은 글꼴이 바뀌어도 resize 없이 명령만 받는다(안 적으면 재연결이 옛 값을 박는다).
+    const backend_raw = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend_raw);
+    const cell_cmd = between(backend_raw, ".set_cell_metrics => |metrics| {", "try rr.queueCoreCommand(.{ .set_cell_metrics = .{") orelse
+        return error.MissingResize;
+    try std.testing.expectEqual(@as(usize, 1), count(cell_cmd, "rr.noteLayoutCell(metrics.width, metrics.height);"));
+    const boot_cmd = between(backend_raw, ".set_runtime_config => |config| {", "try rr.queueCoreCommand(.{ .set_runtime_config = .{") orelse
+        return error.MissingResize;
+    try std.testing.expectEqual(@as(usize, 1), count(boot_cmd, "if (config.cell_metrics) |metrics| rr.noteLayoutCell(metrics.width, metrics.height);"));
     // 재연결 강제 resize 가 그 셀 픽셀을 싣는다 — 안 실으면 host 가 격자만 바꾸고 통지가 두 번 간다.
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "                runtime.layout_cell_width_px,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "                runtime.layout_cell_height_px,"));

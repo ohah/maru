@@ -306,9 +306,24 @@ pub const SurfaceRuntime = struct {
     /// (reader-processing)면 명령 큐로 enqueue + reader wake(`pty_io.enqueue_command`)해 reader가 락 아래 적용하고,
     /// 메인은 코어를 직접 mutate하지 않는다(§9.3 재진입 구조적 불가). non-interactive(직접 경로 — controlled
     /// smoke/단위 테스트, reader 없음)면 호출 스레드가 코어 락 아래 직접 적용한다(폴백 — 단일 스레드라 경합 없음).
-    pub fn enqueueCoreCommand(self: *SurfaceRuntime, surface_id: SurfaceId, cmd: core_command.CoreCommand, io: std.Io) RuntimeError!void {
+    pub fn enqueueCoreCommand(self: *SurfaceRuntime, surface_id: SurfaceId, cmd_in: core_command.CoreCommand, io: std.Io) RuntimeError!void {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
+        // 셀 픽셀 명령엔 결정 번호를 매긴다(`core_command.CellMetrics.epoch`) — reader 가 적용할 때 그 뒤의 더 새 결정
+        // (다음 명령·레이아웃의 `resizeWithCellMetrics`)이 있었으면 건너뛴다. 로컬·host 가 모두 이 자리를 지난다.
+        var cmd = cmd_in;
+        const stamp: ?*core_command.CellMetrics = switch (cmd) {
+            .set_cell_metrics => |*cm| cm,
+            // attach bootstrap 도 셀 픽셀을 싣는다 — 같은 판정을 받아야 밀린 옛 값이 새 값을 못 덮는다.
+            .set_runtime_config => |*config| if (config.cell_metrics) |*cm| cm else null,
+            else => null,
+        };
+        if (stamp) |cm| {
+            link.surface.lockCore(io);
+            defer link.surface.unlockCore(io);
+            link.surface.core.cell_metrics_epoch +%= 1;
+            cm.epoch = link.surface.core.cell_metrics_epoch;
+        }
         if (link.pty_io.enqueue_command) |enqueue| {
             enqueue(link.pty_io.ctx, cmd) catch return error.WriteFailed;
         } else {
@@ -511,6 +526,9 @@ const FakePty = struct {
     /// 켜면 `resize_with_cell_fn` 을 채운다(원격·reader 없는 로컬 PTY 흉내) — 마지막으로 받은 셀 픽셀을 남긴다.
     resize_with_cell: bool = false,
     last_cell: ?core_command.CellMetrics = null,
+    /// 켜면 `enqueue_command` 를 채운다(reader 가 있는 백엔드 흉내) — 마지막으로 넘겨받은 명령을 남긴다.
+    capture_commands: bool = false,
+    last_command: ?core_command.CoreCommand = null,
     fail_write: bool = false,
     suppress_input: bool = false,
     fail_resize: bool = false,
@@ -537,7 +555,13 @@ const FakePty = struct {
             .resize_fn = fakeResize,
             .request_response_flush = if (self.reader_flush) fakeRequestResponseFlush else null,
             .resize_with_cell_fn = if (self.resize_with_cell) fakeResizeWithCell else null,
+            .enqueue_command = if (self.capture_commands) fakeEnqueueCommand else null,
         };
+    }
+
+    fn fakeEnqueueCommand(ctx: *anyopaque, cmd: core_command.CoreCommand) !void {
+        const self: *FakePty = @ptrCast(@alignCast(ctx));
+        self.last_command = cmd;
     }
 
     fn fakeResizeWithCell(ctx: *anyopaque, size: terminal.Size, cell: core_command.CellMetrics) !void {
@@ -1023,6 +1047,43 @@ test "runtime resizeWithCell 은 격자와 셀 픽셀을 코어에 한 번에 �
     try runtime.resizeWithCell(1, .{ .cols = 40, .rows = 13 }, .{ .width = 0, .height = 0 }, std.testing.io);
     try std.testing.expectEqual(@as(u32, 12), surface.core.cell_width_px);
     try std.testing.expectEqualStrings("\x1b[48;13;40;338;480t", fake_pty.writes.items);
+}
+
+test "runtime enqueueCoreCommand 는 셀 픽셀 명령에 결정 번호를 매기고 resizeWithCell 은 번호를 올린다 — 밀린 옛 명령을 가르려고" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 5 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+    fake_pty.capture_commands = true; // reader 가 있는 백엔드처럼 큐로 넘긴다(곧바로 적용하지 않는다)
+
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try runtime.enqueueCoreCommand(1, .{ .set_cell_metrics = .{ .width = 11, .height = 22 } }, std.testing.io);
+    const first = fake_pty.last_command.?.set_cell_metrics;
+    try std.testing.expectEqual(surface.core.cell_metrics_epoch, first.epoch);
+    try std.testing.expect(first.epoch != 0);
+
+    try runtime.resizeWithCell(1, .{ .cols = 30, .rows = 10 }, .{ .width = 13, .height = 26 }, std.testing.io);
+    try std.testing.expect(surface.core.cell_metrics_epoch != first.epoch); // 큐의 그 명령은 이제 낡았다
+
+    // attach bootstrap 의 셀 픽셀도 번호를 받는다(밀린 옛 bootstrap 이 새 값을 못 덮게).
+    try runtime.enqueueCoreCommand(1, .{ .set_runtime_config = .{
+        .max_scrollback = 10,
+        .ambiguous_wide = false,
+        .emoji_wide = false,
+        .palette = @splat(null),
+        .default_colors = .{ .foreground = .{ .r = 0, .g = 0, .b = 0 }, .background = .{ .r = 0, .g = 0, .b = 0 } },
+        .cell_metrics = .{ .width = 9, .height = 18 },
+    } }, std.testing.io);
+    try std.testing.expectEqual(surface.core.cell_metrics_epoch, fake_pty.last_command.?.set_runtime_config.cell_metrics.?.epoch);
+
+    // 다른 명령은 번호를 안 건드린다.
+    const before = surface.core.cell_metrics_epoch;
+    try runtime.enqueueCoreCommand(1, .scroll_to_bottom, std.testing.io);
+    try std.testing.expectEqual(before, surface.core.cell_metrics_epoch);
 }
 
 test "runtime resizeWithCell 은 셀 슬롯이 있는 PTY 에 셀 픽셀을 함께 넘긴다 — 원격 host 가 자기 코어에 한 번에 적용하도록" {

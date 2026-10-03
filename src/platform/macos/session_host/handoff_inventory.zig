@@ -234,6 +234,7 @@ pub const terminal_core_groups = [_]Group{
             "reflow_wrapped",
             "reflow_prompt_marks",
             "notification_generation",
+            "cell_metrics_epoch", // 큐에 밀린 셀 픽셀 명령의 낡음 판정용 — 업그레이드는 명령 큐가 비어야 하니 0 부터
         },
         .why = "allocator/debug ownership, dirty/scratch projections, store-derived indexes, and notification admission token are rebuilt; upgrade requires all clients/control queues empty so no old token survives",
     },
@@ -443,8 +444,8 @@ pub const pty_session_groups = [_]Group{
     },
     .{
         .disposition = .reconstructed,
-        .fields = &.{ "wake_read_fd", "wake_write_fd", "owns_child_lifecycle", "cell_width_px", "cell_height_px" },
-        .why = "wake pipes are recreated, target sessions remain non-owning until the host-global graph commits, and the cell pixel geometry is re-derived: the kernel keeps the winsize pixel fields with the inherited fd, and the client re-injects cell metrics every frame, so the struct copy only has to converge (a first post-exec injection may re-issue one identical TIOCSWINSZ)",
+        .fields = &.{ "wake_read_fd", "wake_write_fd", "owns_child_lifecycle", "cell_width_px", "cell_height_px", "winsize_lock" },
+        .why = "wake pipes are recreated, target sessions remain non-owning until the host-global graph commits, and the cell pixel geometry is re-derived: the kernel keeps the winsize pixel fields with the inherited fd, and the client re-injects cell metrics every frame, so the struct copy only has to converge (a first post-exec injection may re-issue one identical TIOCSWINSZ); the winsize lock is a process-local mutex created unlocked",
     },
     .{
         .disposition = .must_be_empty,

@@ -2834,9 +2834,10 @@ pub const RemoteRuntime = struct {
     /// resize 도 버려졌고 input 도 Unauthorized 였다 — 게시 뒤에도 관문이 닫혀 있었다는 뜻이고, 왜 닫혔는지는
     /// 아직 모른다. 이 값은 관문이 제대로 열린 재연결에서 옛 크기가 되박히지 않게 할 뿐이다.
     layout_size: ?terminal.Size = null,
-    /// 레이아웃이 **마지막으로 알린** 셀 픽셀(글꼴 크기 — `resizeWithCell`, 0 = 아직 모름). `layout_size` 와 같은 이유로
-    /// 관문보다 먼저 적고, 재연결 강제 resize 가 함께 싣는다 — 안 실으면 끊긴 동안 글꼴을 바꾼 경우 host 가 격자만 바꿔
-    /// DECSET 2048 통지가 «새 격자 × 옛 픽셀» 뒤에 `set_cell_metrics` 로 한 번 더 간다.
+    /// 앱이 **마지막으로 알린** 셀 픽셀(글꼴 크기, 0 = 아직 모름). 적는 자리는 `noteLayoutCell` 하나이고, 레이아웃 resize
+    /// (`resizeWithCell` — `layout_size` 와 같은 이유로 관문보다 먼저)와 셀 픽셀 명령(`set_cell_metrics`·attach bootstrap —
+    /// `RemoteTermBackend.routeCoreCommand`)이 그리로 간다. 재연결 강제 resize 가 함께 싣는다 — 안 실으면 끊긴 동안 글꼴을
+    /// 바꾼 경우 host 가 격자만 바꿔 DECSET 2048 통지가 «새 격자 × 옛 픽셀» 뒤에 `set_cell_metrics` 로 한 번 더 간다.
     layout_cell_width_px: u16 = 0,
     layout_cell_height_px: u16 = 0,
     /// 관문이 버린 mutation 을 op 마다 **마지막으로 적은 이유**. 같은 op·같은 이유는 다시 적지 않고, 이유가
@@ -5794,6 +5795,16 @@ pub const RemoteRuntime = struct {
         return self.resizeWithCell(cols, rows, 0, 0);
     }
 
+    /// 앱이 이 runtime 에 알린 **마지막** 셀 픽셀을 적는다(`layout_cell_*` — 재연결 강제 resize 가 싣는다). 레이아웃 resize 뿐
+    /// 아니라 셀 픽셀 명령(`set_cell_metrics`·attach bootstrap)도 적어야 한다 — 배경 탭은 글꼴이 바뀌어도 resize 없이 명령만
+    /// 받으므로, 안 적으면 재연결이 옛 값을 박고 앱은 「이미 보냈다」고 여겨 다시 안 보낸다. 0·wire 상한(u16) 초과는 모르는 값이라 둔다.
+    pub fn noteLayoutCell(self: *RemoteRuntime, cell_width_px: u32, cell_height_px: u32) void {
+        if (cell_width_px == 0 or cell_height_px == 0 or
+            cell_width_px > std.math.maxInt(u16) or cell_height_px > std.math.maxInt(u16)) return;
+        self.layout_cell_width_px = @intCast(cell_width_px);
+        self.layout_cell_height_px = @intCast(cell_height_px);
+    }
+
     /// `resize` 에 셀 픽셀을 싣는다(글꼴 크기 변경) — host 코어가 격자와 셀 픽셀을 한 번에 바꿔 DECSET 2048 통지를 한 번만
     /// 낸다. 0 이거나 wire 상한(u16)을 넘으면 안 싣는다 — 그때는 따로 오는 `set_cell_metrics` 가 맞춘다(예전 경로).
     pub fn resizeWithCell(self: *RemoteRuntime, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32) ResizeError!void {
@@ -5804,10 +5815,7 @@ pub const RemoteRuntime = struct {
         try self.admitRuntimeOperation();
         // 관문보다 **먼저** 적는다 — 여기서 버려진 크기도 재연결 게시 때 host 에 박혀야 한다(`layout_size`).
         self.layout_size = .{ .cols = cols, .rows = rows };
-        if (cell_fits) { // 모르면(0) 마지막으로 안 값을 둔다
-            self.layout_cell_width_px = cell_w;
-            self.layout_cell_height_px = cell_h;
-        }
+        self.noteLayoutCell(cell_width_px, cell_height_px);
         // Observer viewport follows the controller's canonical runtime size; local window changes
         // are acknowledged as a no-op instead of becoming an infinite GUI retry.
         if (!self.gateMutation(.resize)) return;
@@ -16888,6 +16896,25 @@ test "C3-3b2b3 DTO role callback drift는 fresh artifact에서 fail-stop한다" 
     try testing.expectEqual(@as(u8, 86), @as(u8, @intCast(std.c.W.EXITSTATUS(unsigned))));
 }
 
+test "remote runtime noteLayoutCell 은 알려진 셀 픽셀만 적고 모르는 값은 마지막 값을 둔다" {
+    // 재연결 강제 resize 가 싣는 값이다 — 0(모름)이나 wire 상한(u16)을 넘는 값으로 아는 값을 덮으면 재연결이 틀린 셀 픽셀을 박는다.
+    var runtime: RemoteRuntime = undefined;
+    runtime.layout_cell_width_px = 0;
+    runtime.layout_cell_height_px = 0;
+    runtime.noteLayoutCell(12, 26);
+    try testing.expectEqual(@as(u16, 12), runtime.layout_cell_width_px);
+    try testing.expectEqual(@as(u16, 26), runtime.layout_cell_height_px);
+    runtime.noteLayoutCell(0, 30); // 모름 — 둔다
+    runtime.noteLayoutCell(30, 0); // 높이도 짝으로 — 모름
+    runtime.noteLayoutCell(70_000, 30); // wire 상한 초과 — 둔다
+    runtime.noteLayoutCell(30, 70_000); // 높이 쪽 상한도
+    try testing.expectEqual(@as(u16, 12), runtime.layout_cell_width_px);
+    try testing.expectEqual(@as(u16, 26), runtime.layout_cell_height_px);
+    runtime.noteLayoutCell(13, 28);
+    try testing.expectEqual(@as(u16, 13), runtime.layout_cell_width_px);
+    try testing.expectEqual(@as(u16, 28), runtime.layout_cell_height_px);
+}
+
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2736), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
@@ -16910,7 +16937,9 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // `expected 11696, found 11776` 으로 실측했다. ⚠️ **그 PR 도 초록이었다** — 이 pin 은 PR 에서 돌지 않는다.
             .Debug => 11840,
             // 2026-09-23 빈 드레인 건너뛰기(`idle_drain_epoch`·`idle_drain_generation`, u64 둘): Debug +16 · ReleaseFast +16(실측).
-            .ReleaseFast => 11776,
+            // 2026-10-03 셀 픽셀 결정 번호(`TerminalCore.cell_metrics_epoch`, u64 — 원격 Surface 의 코어 안): Debug +0(기존
+            // 패딩에 들어감) · ReleaseFast **+16** — `test-session-host-2c3d-c3-3b2b3` 에서 실측(u32 로 줄여도 +16 이었다).
+            .ReleaseFast => 11792,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -16926,7 +16955,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
             .Debug => 9104, // 2026-09-30 #4017 +96(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
-            .ReleaseFast => 9040, // 2026-09-30 #4017 +80(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .ReleaseFast => 9056, // 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -20545,7 +20574,7 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
             // 2026-09-30 #4017 Debug +96 · ReleaseFast +80 — 위 `C3-3b2b3` 표와 같은 CI 실측.
             .Debug => 11840,
-            .ReleaseFast => 11776, // 2026-09-23 빈 드레인 건너뛰기 +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
+            .ReleaseFast => 11792, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서

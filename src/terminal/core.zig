@@ -453,6 +453,9 @@ pub const TerminalCore = struct {
     /// 켜는 순간에도 지금 크기를 보낸다(명세 MUST — 이미 켜져 있어도). SIGWINCH 를 못 받는 자리(ssh 너머·컨테이너)의 앱이
     /// 크기를 바이트로 받는 길이다.
     in_band_resize: bool = false,
+    /// 셀 픽셀을 정한 결정의 번호(`core_command.CellMetrics.epoch`). 셀 픽셀 명령을 큐에 넣을 때(`SurfaceRuntime.enqueueCoreCommand`)와
+    /// 레이아웃이 격자와 함께 직접 바꿀 때(`resizeWithCellMetrics`) 올라간다. 코어 락 아래에서만 바뀐다.
+    cell_metrics_epoch: u64 = 0,
     /// 지금까지 만든 `CSI ? 997 ; n` 수(질의 답 + 통지). 진단·판정자용 — 응답 버퍼는 리더가 비우므로 «만들었나» 를 따로 센다
     /// (`sync_bsu_count` 와 같은 결).
     color_scheme_reports: u32 = 0,
@@ -1958,6 +1961,7 @@ pub const TerminalCore = struct {
         try screen.resize(self, cols_in, rows_in);
         self.cell_width_px = cell_width_px;
         self.cell_height_px = cell_height_px;
+        self.cell_metrics_epoch +%= 1; // 큐에 밀려 있던 옛 셀 픽셀 명령은 이제 낡았다(`core_command.CellMetrics.epoch`)
         const grid_changed = self.size.cols != before.cols or self.size.rows != before.rows;
         if (self.in_band_resize and (grid_changed or cell_changed)) self.appendInBandResizeReport();
     }

@@ -18,7 +18,16 @@ pub const MouseReport = struct {
     mods: u8,
 };
 
-pub const CellMetrics = struct { width: u32, height: u32 };
+pub const CellMetrics = struct {
+    width: u32,
+    height: u32,
+    /// 이 값을 정한 **결정의 번호**(`TerminalCore.cell_metrics_epoch`). `SurfaceRuntime.enqueueCoreCommand` 가 넣을 때 매기고,
+    /// reader 가 적용할 때 그 뒤에 더 새 결정(다음 명령 또는 레이아웃의 `resizeWithCellMetrics`)이 있었으면 건너뛴다 — 안
+    /// 그러면 입력 fence 뒤에 밀려 있던 옛 명령이 늦게 적용돼 DECSET 2048 통지가 엉뚱한 크기로 한 번 더 간다. 0 = 번호 없음
+    /// (늘 적용 — reader 가 돌기 전 spawn 초기 설정, host 가 번호를 매기기 전의 wire 원본). attach bootstrap
+    /// (`set_runtime_config.cell_metrics`)은 번호를 받는다. wire 엔 안 싣는다(그 프로세스 안의 순서다).
+    epoch: u64 = 0,
+};
 pub const DefaultColors = struct { foreground: terminal.Rgb, background: terminal.Rgb };
 pub const RuntimeConfig = struct {
     max_scrollback: usize,
@@ -94,7 +103,22 @@ pub const CoreCommand = union(enum) {
 pub const ApplyEffect = struct {
     send_form_feed: bool = false,
     cell_pixels: ?CellMetrics = null,
+    /// 낡은 셀 픽셀 명령을 건너뛸 때 PTY winsize 를 **코어의 격자와 픽셀 전체**로 맞추라는 표시(`cell_pixels` 와 함께).
+    /// 픽셀만 맞추면, 레이아웃이 코어를 바꾼 뒤 PTY ioctl 을 쏘기 전의 틈에서 «옛 격자 × 새 픽셀» 을 쏴 자식이
+    /// `SIGWINCH` 를 두 번 받는다. 전체로 맞추면 뒤이은 레이아웃의 ioctl 이 같은 값이라 커널이 신호를 다시 안 보낸다.
+    cell_grid: ?terminal.Size = null,
 };
+
+/// 셀 픽셀 결정이 낡았나(`CellMetrics.epoch`). 0 = 번호 없음 — 늘 적용.
+fn cellMetricsStale(core: *const terminal.TerminalCore, cm: CellMetrics) bool {
+    return cm.epoch != 0 and cm.epoch != core.cell_metrics_epoch;
+}
+
+/// 낡은 결정을 건너뛸 때의 효과 — 코어는 이미 더 새 값이니 PTY 를 코어 전체(격자·픽셀)에 맞춘다(위 `cell_grid`).
+fn realignToCore(core: *const terminal.TerminalCore) ApplyEffect {
+    if (core.cell_width_px == 0 or core.cell_height_px == 0) return .{};
+    return .{ .cell_pixels = .{ .width = core.cell_width_px, .height = core.cell_height_px }, .cell_grid = core.size };
+}
 
 /// 명령을 코어에 적용한다. **호출자가 코어 락(core_mutex)을 잡은 상태여야 한다** — reader는 `owner_dbg.lock`,
 /// non-interactive 직접 폴백은 `surface.lockCore`. 단일 mutator 계약상 적용은 한 스레드에서만 일어난다(§9.3).
@@ -106,6 +130,8 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) ApplyEffect {
         .report_mouse => |m| core.reportMouse(m.button, m.col, m.row, m.x_px, m.y_px, m.pressed, m.motion, m.mods),
         .report_focus => |gained| core.reportFocus(gained),
         .set_cell_metrics => |cm| {
+            // 낡은 결정이다(위 `CellMetrics.epoch`). 코어는 이미 더 새 값이다 — PTY 만 코어에 맞춘다.
+            if (cellMetricsStale(core, cm)) return realignToCore(core);
             core.setCellMetrics(cm.width, cm.height);
             return .{ .cell_pixels = cm }; // PTY winsize 픽셀 필드도 같은 값으로 따라가야 한다
         },
@@ -121,11 +147,16 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) ApplyEffect {
             core.emoji_wide = config.emoji_wide;
             core.setConfigPalette(config.palette);
             core.setDefaultColors(config.default_colors.foreground, config.default_colors.background);
-            if (config.cell_metrics) |metrics| core.setCellMetrics(metrics.width, metrics.height);
             core.setDefaultCursorShape(config.default_cursor_shape);
-            // attach/reconnect bootstrap도 PTY winsize 픽셀을 함께 세운다 — 재접속한 세션의 이미지 앱이
-            // 셀 크기를 다시 물어볼 때 0을 보지 않게(set_cell_metrics 단독 경로와 같은 결).
-            if (config.cell_metrics) |metrics| return .{ .cell_pixels = metrics };
+            // 셀 픽셀만은 `set_cell_metrics` 와 같은 낡음 판정을 받는다 — attach bootstrap 이 입력 fence 뒤에 밀린 채 글꼴이 바뀌면
+            // 옛 값이 새 값을 덮고, 앱은 「이미 보냈다」(`last_sent_cell_*`)고 여겨 다시 안 보내 그 옛 값에 머문다.
+            if (config.cell_metrics) |metrics| {
+                if (cellMetricsStale(core, metrics)) return realignToCore(core);
+                core.setCellMetrics(metrics.width, metrics.height);
+                // attach/reconnect bootstrap도 PTY winsize 픽셀을 함께 세운다 — 재접속한 세션의 이미지 앱이
+                // 셀 크기를 다시 물어볼 때 0을 보지 않게(set_cell_metrics 단독 경로와 같은 결).
+                return .{ .cell_pixels = metrics };
+            }
         },
         .scroll_to_abs => |abs| core.scrollToAbs(abs),
         .scroll_to_offset => |target| {
@@ -233,6 +264,61 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
     sw_cmd.select_word.separators[0] = ':';
     _ = apply(&core, sw_cmd); // sep_len=1(":") → 구분자 경로
     _ = apply(&core, .{ .select_line = 0 });
+}
+
+test "core_command.apply: 낡은 결정 번호의 셀 픽셀 명령은 건너뛰고 PTY 를 코어의 격자·픽셀에 맞춘다" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b[?2048h");
+    core.clearResponse();
+    try core.resizeWithCellMetrics(10, 4, 12, 24); // 앞선 결정
+    try core.resizeWithCellMetrics(10, 4, 13, 26); // 더 새 결정(레이아웃) — 번호가 오른다
+    core.clearResponse();
+    const latest = core.cell_metrics_epoch;
+    try std.testing.expect(latest != 0);
+
+    // 그 전에 매겨진 명령(번호 latest-1)은 낡았다 — 코어도 통지도 그대로, PTY 픽셀은 코어 값으로.
+    const stale = apply(&core, .{ .set_cell_metrics = .{ .width = 11, .height = 22, .epoch = latest - 1 } });
+    try std.testing.expectEqual(@as(u32, 13), core.cell_width_px);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    try std.testing.expectEqualDeep(@as(?CellMetrics, .{ .width = 13, .height = 26 }), stale.cell_pixels);
+    // 격자까지 코어에 맞춘다 — 픽셀만 맞추면 레이아웃의 ioctl 전 틈에서 «옛 격자 × 새 픽셀» 을 쏜다.
+    try std.testing.expectEqualDeep(@as(?terminal.Size, core.size), stale.cell_grid);
+
+    // 최신 번호는 적용한다.
+    _ = apply(&core, .{ .set_cell_metrics = .{ .width = 11, .height = 22, .epoch = latest } });
+    try std.testing.expectEqual(@as(u32, 11), core.cell_width_px);
+    core.clearResponse();
+    // 번호 없음(0 — spawn 초기 설정·번호 매기기 전의 wire 원본)은 늘 적용한다.
+    _ = apply(&core, .{ .set_cell_metrics = .{ .width = 12, .height = 24 } });
+    try std.testing.expectEqual(@as(u32, 12), core.cell_width_px);
+}
+
+test "core_command.apply: attach bootstrap 의 셀 픽셀도 낡았으면 건너뛰고 나머지 설정은 적용한다" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    try core.resizeWithCellMetrics(10, 4, 12, 24);
+    try core.resizeWithCellMetrics(10, 4, 13, 26); // 더 새 결정(레이아웃)
+    const latest = core.cell_metrics_epoch;
+    const config: RuntimeConfig = .{
+        .max_scrollback = 77,
+        .ambiguous_wide = true,
+        .emoji_wide = false,
+        .palette = @splat(null),
+        .default_colors = .{ .foreground = .{ .r = 1, .g = 2, .b = 3 }, .background = .{ .r = 4, .g = 5, .b = 6 } },
+        .cell_metrics = .{ .width = 11, .height = 22, .epoch = latest - 1 }, // 밀려 있던 옛 bootstrap
+        .default_cursor_shape = .bar,
+    };
+    const effect = apply(&core, .{ .set_runtime_config = config });
+    try std.testing.expectEqual(@as(u32, 13), core.cell_width_px); // 옛 값이 새 값을 안 덮는다
+    try std.testing.expect(core.ambiguous_wide); // 나머지 설정은 그대로 적용한다
+    try std.testing.expectEqual(terminal.CursorShape.bar, core.default_cursor_shape); // 셀 픽셀 판정보다 **앞**에서 적용한다
+    try std.testing.expectEqualDeep(@as(?terminal.Size, core.size), effect.cell_grid); // PTY 는 코어 전체에 맞춘다
+
+    var fresh = config;
+    fresh.cell_metrics.?.epoch = latest;
+    _ = apply(&core, .{ .set_runtime_config = fresh });
+    try std.testing.expectEqual(@as(u32, 11), core.cell_width_px); // 최신이면 적용한다
 }
 
 test "core_command.apply: clear effect follows authoritative prompt and alt state" {

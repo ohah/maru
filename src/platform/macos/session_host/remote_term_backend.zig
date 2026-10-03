@@ -5295,10 +5295,13 @@ pub const RemoteTermBackend = struct {
             .scroll_to_abs => |row| try rr.queueCoreCommand(.{ .scroll_to_abs = @intCast(row) }),
             .scroll_to_offset => |offset| try rr.queueCoreCommand(.{ .scroll_to_offset = @intCast(offset) }),
             .report_focus => |gained| try rr.queueCoreCommand(.{ .report_focus = gained }),
-            .set_cell_metrics => |metrics| try rr.queueCoreCommand(.{ .set_cell_metrics = .{
-                .width = metrics.width,
-                .height = metrics.height,
-            } }),
+            .set_cell_metrics => |metrics| {
+                rr.noteLayoutCell(metrics.width, metrics.height); // 재연결 강제 resize 가 최신 셀 픽셀을 싣게(`noteLayoutCell`)
+                try rr.queueCoreCommand(.{ .set_cell_metrics = .{
+                    .width = metrics.width,
+                    .height = metrics.height,
+                } });
+            },
             .set_default_colors => |colors| try rr.queueCoreCommand(.{ .set_default_colors = .{
                 .foreground = rgbToWire(colors.foreground),
                 .background = rgbToWire(colors.background),
@@ -5309,21 +5312,24 @@ pub const RemoteTermBackend = struct {
             .set_emoji_wide => |wide| try rr.queueCoreCommand(.{ .set_emoji_wide = wide }),
             // cursor.shape reload — 기본 모양은 host core가 소유하므로(DECSCUSR 0/RIS 복귀 지점) 원격에 위임한다.
             .set_default_cursor_shape => |shape| try rr.queueCoreCommand(.{ .set_default_cursor_shape = @intFromEnum(shape) }),
-            .set_runtime_config => |config| try rr.queueCoreCommand(.{ .set_runtime_config = .{
-                .max_scrollback = @intCast(config.max_scrollback),
-                .ambiguous_wide = config.ambiguous_wide,
-                .emoji_wide = config.emoji_wide,
-                .palette = paletteToWire(config.palette),
-                .default_colors = .{
-                    .foreground = rgbToWire(config.default_colors.foreground),
-                    .background = rgbToWire(config.default_colors.background),
-                },
-                .cell_metrics = if (config.cell_metrics) |metrics| .{
-                    .width = metrics.width,
-                    .height = metrics.height,
-                } else null,
-                .cursor_shape = @intFromEnum(config.default_cursor_shape),
-            } }),
+            .set_runtime_config => |config| {
+                if (config.cell_metrics) |metrics| rr.noteLayoutCell(metrics.width, metrics.height);
+                try rr.queueCoreCommand(.{ .set_runtime_config = .{
+                    .max_scrollback = @intCast(config.max_scrollback),
+                    .ambiguous_wide = config.ambiguous_wide,
+                    .emoji_wide = config.emoji_wide,
+                    .palette = paletteToWire(config.palette),
+                    .default_colors = .{
+                        .foreground = rgbToWire(config.default_colors.foreground),
+                        .background = rgbToWire(config.default_colors.background),
+                    },
+                    .cell_metrics = if (config.cell_metrics) |metrics| .{
+                        .width = metrics.width,
+                        .height = metrics.height,
+                    } else null,
+                    .cursor_shape = @intFromEnum(config.default_cursor_shape),
+                } });
+            },
             .jump_to_prompt => |direction| try rr.queueCoreCommand(.{ .jump_to_prompt = direction }),
             .clear_screen => try rr.queueCoreCommand(.clear_screen),
             .reset_input_modes => try rr.queueCoreCommand(.reset_input_modes),

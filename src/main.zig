@@ -51,6 +51,7 @@ const agent_surface = if (@import("builtin").os.tag == .windows) @import("platfo
 // 같은 것을 밟았다.
 test {
     _ = editor_document;
+    _ = @import("platform/windows/editor/path.zig");
     _ = scm_surface;
     _ = agent_surface;
 }

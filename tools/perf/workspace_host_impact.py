@@ -3,7 +3,7 @@
 Not product restart, editor OOM, or GUI proof. RSS includes the entire probe process.
 """
 from pathlib import Path
-import subprocess, json, tempfile
+import subprocess, json, tempfile, statistics
 root=Path(__file__).resolve().parents[2]
 source=(root/'src/platform/macos/MaruAppHost.swift').read_text()
 def extract(start,end):
@@ -59,7 +59,9 @@ require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:t
 require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:false)==nil,"included failed window blocks capture")
 '''
 work=Path(tempfile.mkdtemp(prefix='maru-workspace-host-impact-'));print('artifacts='+str(work))
-swift=work/'main.swift';swift.write_text(pre+capture+'\n'+load+post)
+swift=work/'main.swift';mapped=load.replace('func loadWorkspaceText()', 'func loadMappedWorkspaceText()').replace('Data(contentsOf: url)', 'Data(contentsOf: url, options: .mappedIfSafe)')
+post=post.replace('let text=h.loadWorkspaceText()!', 'let text=(CommandLine.arguments.count > 2 ? h.loadMappedWorkspaceText() : h.loadWorkspaceText())!')
+swift.write_text(pre+capture+'\n'+load+'\n'+mapped+post)
 subprocess.run(['xcrun','swiftc','-O',str(root/'src/platform/macos/TerminationWindowPolicy.swift'),str(swift),'-o',str(work/'probe')],check=True)
 r=subprocess.run([str(work/'probe')],capture_output=True,text=True,check=True);(work/'capture.log').write_text(r.stdout);print(r.stdout)
 rows=[]
@@ -67,8 +69,21 @@ for mb in [1,16,64]:
  p=work/('workspace-%d.v1'%mb)
  with p.open('wb') as f:
   for i in range(mb):f.write(b'#'+b'x'*(1024*1024-2)+b'\n')
- r=subprocess.run(['/usr/bin/time','-l',str(work/'probe'),str(p)],capture_output=True,text=True,check=True)
- (work/('read-%d.log'%mb)).write_text(r.stdout+r.stderr)
- rss=[line.strip() for line in r.stderr.splitlines() if 'maximum resident' in line][0]
- rows.append({'mb':mb,'result':r.stdout.strip(),'rss':rss});p.unlink()
+ try:
+  for mode in ['original','mapped']:
+   runs=[]
+   for repeat in range(5):
+    command=['/usr/bin/time','-l',str(work/'probe'),str(p)]
+    if mode=='mapped':command.append('mapped')
+    r=subprocess.run(command,capture_output=True,text=True,check=True)
+    (work/('read-%d-%s-%d.log'%(mb,mode,repeat))).write_text(r.stdout+r.stderr)
+    rss=int(next(line for line in r.stderr.splitlines() if 'maximum resident' in line).split()[0])
+    values=dict(token.split('=') for token in r.stdout.strip().split())
+    runs.append({'bytes':int(values['bytes']),'elapsed_us':int(values['elapsed_us']),'rss':rss})
+   assert all(run['bytes']==mb*1024*1024 for run in runs)
+   rows.append({'mb':mb,'mode':mode,'runs':5,'elapsed_median_us':statistics.median(run['elapsed_us'] for run in runs),'rss_median':statistics.median(run['rss'] for run in runs)})
+
+ finally:
+  p.unlink()
+
 print(json.dumps(rows,indent=2));(work/'results.json').write_text(json.dumps(rows,indent=2))

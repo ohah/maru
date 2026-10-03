@@ -370,3 +370,105 @@ syscall 실패와 rename 전 SIGKILL 등의 이전 완전본 보존을 확인한
 재현 도구는 source 추출 실패·컴파일 실패·assertion 실패에서 실패 종료하고 artifact 경로를 출력한다.
 로그: `/tmp/maru-workspace-impact-retained.log`, `/tmp/maru-workspace-impact-coordinator.log`,
 `/tmp/maru-workspace-impact-file.log`. 파일 읽기 probe는 생성한 부하 입력 파일을 실행 후 삭제한다.
+
+## 저장 구조 비교 실측과 판단 갱신
+
+같은 파일과 별도 파일을 실제 파일 게시·캡처·기존 codec 비용으로 비교했다. 제품 저장 정책을
+변경한 것은 아니며, 아래 실험 컨테이너는 제품 wire 포맷이 아니다.
+`tools/perf/workspace_storage_compare.py`는 필수 4KiB와 표시 payload를 합치는 방식,
+세대별 표시 파일을 먼저 게시하고 manifest가 그 세대를 참조하는 방식을 비교한다.
+각 파일은 write/fsync/rename/directory-fsync하며 5회 중앙값을 기록한다. read는 OS cache가 있는
+파일 읽기이며 cold disk나 전원 장애 내구성 시험이 아니다. 기존 C2 보안 검증·종료 backup 복사·
+문서 본문 backup·checksum·실제 metadata 해석·동시 reader는 비용 비교에서 제외한다.
+
+### 파일 게시 비교
+
+마지막 측정군의 5회 중앙값(µs)이다. 별도 파일의 필수 정보만 갱신하는 실험에서는 표시 payload가
+그대로일 때 앞서 게시한 세대를 다시 참조한다. 문서 내용/공유 뷰 집합이 같다는 fixture 전제이며,
+제품에서는 참조 identity와 문서 내용 지문이 일치해야 재사용할 수 있다.
+
+| 표시 payload | 같은 파일 전체 갱신 | 별도 파일 전체 갱신 | 같은 파일 필수 정보만 갱신 | 별도 파일 필수 정보만 갱신 |
+|---|---:|---:|---:|---:|
+| 2,328 bytes | 226 | 404 | 203 | 258 |
+| 1,638,360 bytes | 530 | 1,709 | 558 | 772 |
+| 16 MiB | 4,078 | 5,829 | 2,840 | 2,599 |
+
+다른 측정군의 1.64MB 필수 정보만 갱신에서는 별도 파일이 346µs, 같은 파일이 814µs였다.
+I/O 시간은 측정군 사이 변동이 크므로 별도 파일의 재사용이 항상 빠르다고 결론 내리지 않는다.
+2.3KB/1.64MB의 전체 갱신은 측정군마다 단일 파일이 유리했지만, 제품 작업 비율과 backup 비용까지
+포함한 최종 우열은 아니다. 파일 분리의 이득은 큰 표시 상태를 자주 재사용할 수 있는 경우에 있다.
+현재 실제 사용자의 변경 빈도와 payload 분포를 수집하지 않았으므로 재사용 이득을 가정하지 않는다.
+
+### 중단과 실패 비교
+
+같은 파일 2개, 별도 파일 4개 게시 중단 지점에서 child에 실제 SIGKILL을 보냈다.
+모든 경우 reader는 이전 완전 세대 또는 새 완전 세대를 읽었다. 별도 파일은 manifest 게시 전에
+새 표시 파일이 남을 수 있다. 세대 참조 없는 고정 두 파일의 새 표시/옛 manifest 혼합도 재현했다.
+표시 준비 실패를 명시적으로 주입하면 두 실험 모두 새 필수 정보와 표시 기본값을 게시할 수 있었다.
+이 마지막 주입은 실제 제품 allocator OOM이 아니라 실험 입력 분기다. 제품 codec의 실제 allocator
+실패 해제는 기존 7/7 gate가 소유하며 전체 거래에 연결된 검증과 구분한다.
+
+실험의 GC는 현재 세대만 남긴다. 제품은 이전 checkpoint backup도 참조할 수 있으므로 같은 GC를
+채택하면 안 된다. 이전 완전본의 sidecar 보존, reader와 GC 경쟁, orphan 정리, 문서 지문 대조는
+분리안의 추가 책임이다. SIGKILL 통과를 power-loss·기존 backup 연계·제품 복원 통과로 표기하지 않는다.
+
+### host 사본 비교
+
+실제 Swift `captureWorkspaceSnapshot` 본문을 추출한 기준선, Data 누적 실험안, 기존 잘못된
+UTF-8 치환을 유지하며 Data에 누적하는 실험안을 비교했다. Zig serialize/semantic-count ABI는
+대체하므로 실제 Zig 준비·semantic validation·AppSession은 없다. 5개의 별도 프로세스 중앙값이며
+RSS는 fixture 세션 bytes·Foundation/AppKit·사본을 포함한 전체 프로세스 최대값이다.
+
+| 입력/창 수 | 입력만 준비한 RSS | 기존 capture RSS | 치환 보존 Data 누적 RSS | 기존/치환 보존 시간 µs |
+|---|---:|---:|---:|---:|
+| 4KiB / 1 | 5,963,776 | 6,144,000 | 6,111,232 | 642 / 696 |
+| 1,638,400 bytes / 64 | 9,650,176 | 16,924,672 | 11,534,336 | 1,314 / 1,711 |
+| 16MiB / 1 | 39,600,128 | 90,161,152 | 73,351,168 | 4,109 / 3,068 |
+| 64MiB / 64 | 144,015,360 | 413,876,224 | 213,712,896 | 18,580 / 7,241 |
+
+메모리 개선은 큰 입력에서 재측정해도 확인됐지만 작은 입력의 시간 개선은 보장하지 않는다.
+bytes를 직접 Data에 넣으면 기존 불량 UTF-8 치환이 사라지는 반례를 재현했다.
+한글·한자·quote·backslash·불량 bytes의 제한 fixture에서는 치환 보존안이 기준선과 일치했다.
+전체 제품 입력의 등가성 증거는 아니다. 불필요한 최종 String/Array/Data 사본을 줄일 여지가 있지만,
+capture 시간만으로 실제 main-thread 프레임 예산을 통과했다고 표현하지 않는다.
+
+### 기존 codec과 읽기 비용
+
+`tools/perf/workspace_model_size.zig`는 실제 기존 serializer/parser를 실행한다.
+창마다 tab/pane/terminal 하나인 fixture이며 공유 metadata·host attach는 없다.
+5회 중앙값에서 1/64/512/4,096창의 wire bytes는 301/18,130/144,914/1,159,186,
+encode는 2/16/197/1,535µs, parse+validate는 9/45/581/4,511µs였다.
+프로세스 RSS는 1,867,776/2,015,232/2,932,736/10,371,072 bytes.
+4,096창이 정상적인 사용자 규모라는 뜻은 아니다. 큰 단일 record와 많은 runtime identity의
+검증 비용은 이 fixture에서 측정하지 않았다.
+
+host read도 각각 5회 측정했다. 1/16/64MiB의 RSS 중앙값은
+8,192,000/39,665,664/140,345,344 bytes, 시간은 197/2,197/15,837µs였다.
+추가로 `.mappedIfSafe` 옵션을 비교했지만 64MiB의 RSS는 기존 140,328,960,
+옵션 사용 140,247,040 bytes로 거의 같았다. 시간은 14,422/8,331µs였다.
+옵션이 실제 mmap 사용을 보장하지 않고 이후 String 변환도 남으므로 이 옵션만으로
+읽기 메모리 문제가 해결됐다고 판단하지 않는다.
+완전한 의미 검증을 수행하는 streaming reader는 아직 없으므로, 단순 chunk 합산을
+실제 parser보다 유리한 결과로 비교하지 않았다. 제품 읽기 방식의 최종 판정은 남아 있다.
+
+### 추천의 갱신
+
+1. **기존 구조에서 host 사본 감소를 먼저 검토한다.** 새 파일 책임이나 임의의 상태 삭제 없이
+   실측한 메모리 비용에 직접 효과가 있다. 제품 적용 때는 전역 validator·빈/실패 payload·
+   다중 창·UTF-8의 회귀 판정이 필요하다.
+2. **필수 정보와 표시 정보의 실패를 구분한다.** 문서 신원·공유 관계·pane의 뷰 위치는 필수다.
+   커서·스크롤·접힘은 필수 snapshot 준비 후 독립 scratch에서 만들고, 실패한 표시 단위만
+   명시적 기본값과 한 번의 알림으로 대체하는 후보를 유지한다. 부분 write의 잔여 bytes를
+   checkpoint에 붙이지 않는다. 전역 OOM이나 필수 정보 실패까지 복구하는 것은 아니며
+   그때는 이전 완전본을 보호한다. 이 fallback UX는 사용자 확인 전이고 제품에 넣지 않았다.
+3. **지금 별도 파일을 기본으로 선택하지 않는다.** 큰 표시 상태의 재사용이 실제로 많을 때의
+   후보로 남긴다. 독립 표시 section의 의미 계약을 먼저 정하면 추후 다른 저장 방식도 비교할 수 있다.
+4. **새 임의의 전체 상한은 정하지 않는다.** 정상 64뷰 2.3KB와 부하 64뷰 1.64MB를 구분한다.
+   기존 커서 상한·record 길이와 count 관계·정수 overflow 판정은 유지한다.
+   초기 전체 읽기 개선은 큰 정상 상태의 거부/일부 복원/streaming UX까지 별도로 설계해야 한다.
+
+표시 실패 격리가 최선으로 증명된 것은 아니다. 확인한 것은 저장 실패 전파, 사본 비용과
+개선 후보, 파일 분리의 재사용 조건과 추가 복구 책임이다. 제품 restart 연결은 아직 없다.
+로그: `/tmp/maru-storage-compare-normalized.log`, `/tmp/maru-workspace-model-summary.json`,
+`/tmp/maru-storage-compare-read-final.log`, `/tmp/maru-storage-compare-read-mapped.log`.
+비교 도구는 artifact 위치와 전체 결과 JSON을 출력한다.

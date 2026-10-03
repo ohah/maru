@@ -1032,3 +1032,14 @@ ReleaseFast는 `-Doptimize=ReleaseFast`를 붙인다. 같은 판정자는 공유
 `python3 tools/perf/workspace_host_impact.py`는 macOS host의 실제 capture/read 본문을 추출해
 Zig ABI 실패를 주입하고 1/16/64 MiB 전체 읽기 RSS를 측정한다. AppKit GUI·제품 에디터 OOM·복원 E2E는
 포함하지 않는다. 결과와 한계는 [공유 복원 계획](plans/editor-shared-restore.md#남은-전체-저장읽기-영향-실행-확인)에 기록한다.
+
+`python3 tools/perf/workspace_storage_compare.py`는 단일 파일/세대 참조 sidecar의 5회 I/O 비교,
+6개 SIGKILL 지점, 표시 준비 실패, host 사본과 UTF-8 등가성을 실험한다. 제품 포맷이 아니다.
+기존 codec 단독 측정은 아래 명령을 사용한다. 인수는 창 수이며 기본은 64다.
+
+```sh
+mise exec -- zig build-exe -O ReleaseFast --dep session -Mroot=tools/perf/workspace_model_size.zig -Msession=src/session.zig -lc -femit-bin=/tmp/maru-workspace-model-size
+/usr/bin/time -l /tmp/maru-workspace-model-size 64
+```
+
+범위·제외·판단은 [저장 구조 비교](plans/editor-shared-restore.md#저장-구조-비교-실측과-판단-갱신)를 따른다.

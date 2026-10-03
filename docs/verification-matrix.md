@@ -3940,3 +3940,8 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 기존 checkpoint coordinator 11/11, 파일 게시 17/17. 첫/마지막 창 실패의 전체 캡처 취소와
 재시도·이전 완전본 보존을 계층별로 확인했다. 실제 제품 에디터 OOM·종료 E2E는 제외한다.
 전체 읽기 1/16/64 MiB RSS와 제한은 [공유 복원 계획](plans/editor-shared-restore.md#남은-전체-저장읽기-영향-실행-확인)을 따른다.
+
+저장 구조 비교 실험은 `workspace_storage_compare.py`, 기존 codec 실측은
+`workspace_model_size.zig`가 소유한다. 단일 파일/세대 참조 sidecar·6개 SIGKILL 지점·
+표시 준비 실패·host 사본/UTF-8 등가성을 확인했다. 제품 복원·전원 단절·backup/GC 연결 증거는 아니다.
+[저장 구조 비교](plans/editor-shared-restore.md#저장-구조-비교-실측과-판단-갱신)가 결과와 미검증 범위의 단일 출처다.

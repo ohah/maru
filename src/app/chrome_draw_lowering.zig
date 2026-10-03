@@ -1,12 +1,12 @@
-//! Semantic Chrome draw의 macOS renderer adapter.
+//! Semantic Chrome draw의 공통 renderer adapter.
 //!
 //! 각 `chrome.components.*`는 semantic `ChromeDraw`와 rect tree까지만 소유한다. 이 파일은
-//! 그 결과를 실제 앱의 CoreText `DrawList`와 Metal background quad로 한 방향 투영한다.
+//! 그 결과를 renderer-neutral `DrawList`와 background quad로 한 방향 투영한다.
 //! 따라서 archive/AppSession 좌표 계산이나 provider 문자열 조립은 여기로 들어올 수 없으며,
 //! hit rect와 paint rect의 권위는 계속 component tree 하나다.
 
 const std = @import("std");
-const maru = @import("maru");
+const maru = @import("../maru.zig");
 const chrome = maru.chrome;
 const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물)
 const renderer = maru.renderer;

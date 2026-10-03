@@ -845,7 +845,8 @@ fn encodeCoreFields(writer: *Writer, core: *const TerminalCore) Error!void {
         // optional 필드는 flag를 실어 보낸다 — **구 reader**가 모르는 tag를 만나도 `UnknownRequiredField`로
         // 죽지 않고 건너뛰게 한다(신 host → 구 host 방향의 rollback 이관).
         const start = try writer.beginTlv(spec.tag, if (spec.optional) flag_optional else 0);
-        try encodeCoreField(writer, spec.name, core, trim);
+        const Field = @TypeOf(@field(core.*, spec.name));
+        try encodeCoreField(writer, spec.name, Field, &@field(core.*, spec.name), core, trim);
         try writer.endTlv(start);
     }
 }
@@ -853,11 +854,20 @@ fn encodeCoreFields(writer: *Writer, core: *const TerminalCore) Error!void {
 /// 코어 필드 하나의 **실리는 값**을 쓴다. 대부분은 필드 그대로지만 tag 82 는 두 화면의 placement 를 합친 목록이고,
 /// 예산 트림이 있으면 좌표 필드를 옮긴 사본이다. 전수 판정자(`observeNonDefaultCoreFields`)도 이 함수로 본다 —
 /// 필드를 직접 읽으면 alt 중에 primary 의 배치가 보관 목록에 있어 「기본값」으로 잘못 보인다(2026-10-03 실측).
-fn encodeCoreField(writer: *Writer, comptime name: []const u8, core: *const TerminalCore, trim: CoordTrim) Error!void {
-    const Field = @TypeOf(@field(core.*, name));
+///
+/// 필드 값은 호출자가 꺼내 넘긴다(`value`) — 이 함수 안에는 `@field` 가 없다. 세션 호스트의 `@field` 는 함수·식·개수
+/// 단위로 검토 목록에 올라 있어(tests/boundary/imports.zig), 꺼내는 자리를 기존 호출자들에 그대로 둔다.
+fn encodeCoreField(
+    writer: *Writer,
+    comptime name: []const u8,
+    comptime Field: type,
+    value: *const Field,
+    core: *const TerminalCore,
+    trim: CoordTrim,
+) Error!void {
     if (comptime std.mem.eql(u8, name, "kitty_placements")) return encodePlacementsMerged(writer, core, trim);
     if (try encodeTrimmedCoordField(writer, name, core, trim)) return;
-    try encodeValue(writer, Field, &@field(core.*, name));
+    try encodeValue(writer, Field, value);
 }
 
 /// 트림이 버린 앞줄 수 — 활성 화면(`screen.sb`)과 보관 화면(`saved_screen.sb`) 각각.
@@ -1142,7 +1152,8 @@ pub fn runtimeSizeBreakdown(
     inline for (core_fields_v1) |spec| {
         const before = writer.bytes.items.len;
         const Field = @TypeOf(@field(view.core.*, spec.name));
-        try encodeValue(&writer, Field, &@field(view.core.*, spec.name));
+        // 실제로 실리는 값으로 잰다 — tag 82 는 두 화면의 placement 를 합친 목록이다(alt 중에 지금 목록만 재면 작게 나온다).
+        try encodeCoreField(&writer, spec.name, Field, &@field(view.core.*, spec.name), view.core, .{ .active = 0, .saved = 0 });
         const size = writer.bytes.items.len - before;
         if (std.mem.eql(u8, spec.name, "screen") or std.mem.eql(u8, spec.name, "saved_screen")) {
             screens += size;
@@ -1719,11 +1730,12 @@ fn observeNonDefaultCoreFields(
         const no_trim: CoordTrim = .{ .active = 0, .saved = 0 };
         var baseline_writer: Writer = .{ .allocator = std.testing.allocator };
         defer baseline_writer.deinit();
-        try encodeCoreField(&baseline_writer, spec.name, baseline, no_trim);
+        const Field = @TypeOf(@field(baseline.*, spec.name));
+        try encodeCoreField(&baseline_writer, spec.name, Field, &@field(baseline.*, spec.name), baseline, no_trim);
 
         var candidate_writer: Writer = .{ .allocator = std.testing.allocator };
         defer candidate_writer.deinit();
-        try encodeCoreField(&candidate_writer, spec.name, candidate, no_trim);
+        try encodeCoreField(&candidate_writer, spec.name, Field, &@field(candidate.*, spec.name), candidate, no_trim);
         coverage[index] = coverage[index] or
             !std.mem.eql(u8, baseline_writer.bytes.items, candidate_writer.bytes.items);
     }

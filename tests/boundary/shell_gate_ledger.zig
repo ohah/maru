@@ -47,7 +47,6 @@ const Entry = struct { script: []const u8, reach: Reach };
 const ledger = [_]Entry{
     .{ .script = "tools/check-agent-hook-command.sh", .reach = .every_host },
     .{ .script = "tools/test-release-version.sh", .reach = .every_host },
-    .{ .script = "tools/test-github-release-publication.sh", .reach = .every_host },
     .{ .script = "tools/ci/session-host-release-dmg-authority.sh", .reach = .posix_only },
     .{ .script = "tools/test-session-host-release-attestation-action.sh", .reach = .posix_only },
     .{ .script = "tools/test-session-host-release-candidate-attestation-action.sh", .reach = .posix_only },

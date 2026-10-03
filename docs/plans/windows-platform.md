@@ -125,4 +125,6 @@ layering-and-portability.md §3.4.4에서 공통 CLI wire 계약으로 분리했
 macOS adapter에 남는다. Windows persistent host나 W8.17 편집·저장 완료를 뜻하지 않는다.
 
 같은 file ID를 유지한 부모 reparse 전환의 native 조사 재현은 windows-platform.md §2m.144에 기록했다.
-제품 begin 경로의 결정적 fixture와 namespace fence 검증은 남아 있다.
+제품 begin 경로의 지속·일시적 같은-ID junction fixture와 첫 쓰기 전 namespace fence 판정은
+§2m.145에서 검증했다. safe-save 58개와 경로 29개, 다섯 runtime 변이와 별도 binding 제거 변이가
+통과했다. capability·crash 복구·모든 실패 타이밍·L2 저장 ack와 일반 편집/저장 실앱 연결은 남아 있다.

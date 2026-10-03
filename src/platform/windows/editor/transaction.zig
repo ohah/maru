@@ -21,6 +21,14 @@ extern "advapi32" fn SetFileSecurityW([*:0]const u16, u32, *const anyopaque) cal
 const Luid = extern struct { low: u32, high: i32 };
 const Privileges = extern struct { count: u32 = 1, luid: Luid, attributes: u32 };
 
+// Compile-time hooks reproduce real namespace changes in the gap around native
+// open. The product uses this empty type; no mutable hook or alternate open API
+// is installed in the runtime, and every fixture still opens a real TxF file.
+const NoNamespaceRace = struct {
+    fn beforeOpen(_: *const maru.win32_relative_file.Pinned) !void {}
+    fn afterOpen(_: *const maru.win32_relative_file.Pinned, _: w.HANDLE) !void {}
+};
+
 const Native = struct {
     fn commit(handle: w.HANDLE) bool {
         return CommitTransaction(handle).toBool();
@@ -118,6 +126,9 @@ pub const Transaction = struct {
     /// No write occurs before the entire file ID and expected raw-byte hash match.
     // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfiletransactedw
     pub fn beginExperimental(a: std.mem.Allocator, io: std.Io, pinned: *const maru.win32_relative_file.Pinned, expected_hash: u64, limit: usize) !Transaction {
+        return beginWithNamespaceRace(a, io, pinned, expected_hash, limit, NoNamespaceRace);
+    }
+    fn beginWithNamespaceRace(a: std.mem.Allocator, io: std.Io, pinned: *const maru.win32_relative_file.Pinned, expected_hash: u64, limit: usize, comptime Race: type) !Transaction {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
         const expected_id = try identity_mod.Identity.capture(pinned.original.handle);
         const path = try transportPath(a, pinned);
@@ -128,6 +139,7 @@ pub const Transaction = struct {
             _ = RollbackTransaction(transaction);
             _ = w.ntdll.NtClose(transaction);
         }
+        try Race.beforeOpen(pinned);
         const handle = CreateFileTransactedW(path, 0xc0000000, 7, null, 3, 0x80200000, null, transaction, null, null);
         if (handle == w.INVALID_HANDLE_VALUE) {
             const code = GetLastError();
@@ -138,6 +150,7 @@ pub const Transaction = struct {
             return error.TransactionOpenFailed;
         }
         errdefer _ = w.ntdll.NtClose(handle);
+        try Race.afterOpen(pinned, handle);
         const identity = try identity_mod.Identity.capture(handle);
         if (!expected_id.eql(identity)) return error.IdentityChanged;
         const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -241,6 +254,63 @@ pub const Transaction = struct {
 
 fn beginFixture(a: std.mem.Allocator, io: std.Io, pinned: *const maru.win32_relative_file.Pinned) !Transaction {
     return Transaction.beginExperimental(a, io, pinned, maru.session.editor.document_state.contentHash("original-long-content"), 64);
+}
+
+fn namespaceRaceFixture(comptime transient: bool, comptime restore_attempt: bool) !void {
+    const Fixture = @import("namespace_fixture.zig").Fixture;
+    const io = std.testing.io;
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var grant = try fixture.tmp.dir.openDir(io, "grant", .{});
+    defer grant.close(io);
+    var pinned = try maru.win32_relative_file.open(std.testing.allocator, grant, "nested/original.txt");
+    defer pinned.deinit(io);
+    const Race = struct {
+        var current: ?*Fixture = null;
+        var opened_same_id: bool = false;
+        var attempted_restore: bool = false;
+        fn beforeOpen(_: *const maru.win32_relative_file.Pinned) !void {
+            try current.?.escape();
+        }
+        fn afterOpen(original: *const maru.win32_relative_file.Pinned, handle: w.HANDLE) !void {
+            // The absolute GUID transport followed a new junction, yet the full
+            // ID still matches because the attacker moved the original object.
+            try std.testing.expect((try identity_mod.Identity.capture(original.original.handle)).eql(try identity_mod.Identity.capture(handle)));
+            opened_same_id = true;
+            if (transient) try current.?.clear();
+            if (restore_attempt) {
+                attempted_restore = true;
+                try std.testing.expectEqual(@as(u32, 32), try current.?.returnOriginalError());
+            }
+        }
+    };
+    Race.current = &fixture;
+    Race.opened_same_id = false;
+    Race.attempted_restore = false;
+    defer Race.current = null;
+    if (Transaction.beginWithNamespaceRace(std.testing.allocator, io, &pinned, maru.session.editor.document_state.contentHash("original-long-content"), 64, Race)) |value| {
+        var unexpected = value;
+        try unexpected.close(io);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(if (transient) error.NotFound else error.NamespaceChanged, err);
+    try std.testing.expect(Race.opened_same_id);
+    try std.testing.expectEqual(restore_attempt, Race.attempted_restore);
+    try fixture.expectOriginal();
+}
+
+test "Windows safe save transaction rejects same-ID parent junction escape before writing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try namespaceRaceFixture(false, false);
+}
+
+test "Windows safe save transaction rejects a transient same-ID junction after its tag is removed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try namespaceRaceFixture(true, false);
+}
+
+test "Windows safe save transaction fences restoring an escaped object before its first write" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try namespaceRaceFixture(true, true);
 }
 
 test "Windows safe save transaction publishes exact bytes atomically and keeps object ID" {

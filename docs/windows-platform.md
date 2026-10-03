@@ -10948,3 +10948,22 @@ share READ/WRITE로 고정하고 원본 leaf는 같은 접근과 share READ/WRIT
 [MS-FSA FSCTL_SET_REPARSE_POINT](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4aeefef8-92c3-4abc-af7a-a610caf8a165)이다.
 후자는 directory가 비어 있어야 함을 명시한다. 이 재현은 original leaf를 먼저 이동시켜 그 조건을 만족했다.
 Native 권한·공유 규칙을 완화하거나 사용자 경로를 변경하지 않았다. 최종 저장 계약과 GUI 채택은 계속 진행 대상이다.
+
+### 2m.145 실제 begin 경로의 같은-ID namespace 경쟁 판정 (2026-10-04)
+
+§2m.144의 native 조사 시퀀스를 실제 `Transaction.beginExperimental`과 같은 구현의
+compile-time fixture로 연결했다. 제품 호출은 빈 hook 타입을 쓰며 runtime hook이나 다른 open API를
+설치하지 않는다. fixture는 실제 부모 pin·CreateFileTransactedW·전체 ID·binding 검사를 수행한다.
+모든 변경 경로는 별도의 임시 root 안에 있다. junction tag는 recursive cleanup 전에 제거한다.
+
+실제 판정 세 개에서 GUID transport가 grant 밖으로 이동한 원본을 열고 전체 ID도 동일함을 확인했다.
+지속 junction은 부모 tag 검사에서 `NamespaceChanged`로 거부됐다. 열린 직후 tag를 지운 일시적
+junction은 실제 부모 핸들 상대 reopen의 `NotFound`로 거부됐다. tag를 지운 뒤 원본을 grant 안 이름으로
+되돌리려는 MoveFileW도 첫 쓰기 전에 sharing violation(32)으로 거부됐다. 모두 외부 fixture 원본 bytes를
+그대로 유지했다. ID만으로 이름 권위를 판단하거나 tag가 없다는 이유로 저장을 허용할 수 없다.
+
+원본 ID·disk hash·실패 commit·flush 전 prepared·namespace guard를 각각 훼손한 다섯 변이를
+런타임 실패로 검출하고 원복 후 safe-save 58개와 경로 29개가 통과했다. 추가로 binding 검사만 제거해도
+일시적 같은-ID junction 판정이 실패함을 확인했다. 이 추가 변이는 앞의 다섯 회와 별도로 센다.
+실험적 TxF 경로의 제한된 경쟁 시퀀스 검증이며, capability·crash 복구·모든 실패 타이밍·L2 저장 ack와
+일반 키보드/IME 편집→디스크 저장→재열기 연결은 계속 진행 대상이다.

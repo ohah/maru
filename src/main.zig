@@ -49,6 +49,7 @@ test {
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;
     _ = @import("platform/windows/editor/path.zig");
+    _ = @import("platform/windows/editor/stage.zig");
     _ = scm_surface;
     _ = agent_surface;
 }

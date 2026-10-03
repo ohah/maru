@@ -20,6 +20,7 @@ const iosurface = @import("iosurface.zig");
 const ring_message = @import("ring_message.zig");
 const input = @import("input.zig");
 const context_menus = @import("context_menu.zig");
+const drag = @import("drag.zig");
 const dialogs = @import("dialogs.zig");
 const notifications = @import("notifications.zig");
 const permissions = @import("permissions.zig");
@@ -67,6 +68,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
     if (state.shutting_down) return;
     if (input.handle(message)) return;
     if (dialogs.handle(message)) return;
+    if (drag.handle(message)) return;
     switch (message) {
         .create_browser => |value| create(value, writer),
         .destroy_browser => |browser| destroy(browser, writer),
@@ -216,6 +218,7 @@ pub fn onClosed(cef_id: c_int) void {
         var closing = entry;
         dropPopup(&closing);
         context_menus.drop(&closing);
+        drag.reset(&closing, true);
         state.writer.send(.{ .browser_closed = entry.id }) catch {};
     }
     if (state.shutting_down and state.registry.count() == 0) quit();

@@ -26,6 +26,7 @@ const title_gate = @import("title_gate.zig");
 const input = @import("input.zig");
 const tooltip = @import("tooltip.zig");
 const context_menus = @import("context_menu.zig");
+const drag = @import("drag.zig");
 const notifications = @import("notifications.zig");
 
 var client_obj: c.cef_client_t = undefined;
@@ -90,6 +91,7 @@ pub fn get() *c.cef_client_t {
         render.on_popup_show = &onPopupShow;
         render.on_popup_size = &onPopupSize;
         render.on_ime_composition_range_changed = &input.onImeCompositionRangeChanged;
+        render.update_drag_cursor = &drag.onUpdateDragCursor;
         display.on_title_change = &onTitleChange;
         display.on_address_change = &onAddressChange;
         display.on_cursor_change = &input.onCursorChange;
@@ -331,6 +333,7 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
     // 쥔 우클릭 메뉴를 끝낸다 — 방어다. CEF 154 는 렌더러가 죽으면 스스로 메뉴를 거둔다(판정 `cm-renderer-gone` — 이 줄을 뺀 변이도
     // 통과했다). 거두지 않는 버전이어도 콜백이 쥔 채 남지 않게(거두기가 먼저 왔으면 쥔 것이 없어 아무 일도 없다).
     context_menus.finish(entry, .cancel);
+    drag.reset(entry, false);
     browsers.state.writer.send(.{ .renderer_gone = .{ .browser = entry.id, .reason = reason } }) catch {};
     dialogs.rendererGone(entry.id);
     permissions.rendererGone(entry.id);

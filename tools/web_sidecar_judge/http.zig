@@ -23,6 +23,7 @@
 //!                 `nflood` 페이지가 뜨자마자 알림 열 개 · `watch` 위치 지켜보기(3 초 뒤
 //!                 `n<받은 수>-<위도·오류들>`) · `cam` 카메라 · `display` 화면 공유 · `displayleave` 화면 공유를 청하고 1.5 초 뒤 스스로
 //!                 `/title?t=perm-left` 로 떠난다 · `displayfail` 같은데 닿지 않는 주소(`127.0.0.1:9`)로 떠난다 — 실패한 이동). 준비는 `X:ready`, 결과는 `X:<결과>`(`granted`·`ok`·`err-<이름>` — 글꼴은 `ok<수>`, 거절이면 빈 목록 `ok0`)
+//!   /dnd          W6d① 끌어 놓기(`drag_check.zig` — 아래 `drag_page`)
 //!   /ctl          제목을 `a<BEL>b<DEL>c` 로(제어 문자가 든 제목)
 //!   /flood        2 초 동안 제목을 1ms 마다 200 번씩 바꾼 뒤 `flood-done` 으로
 //!   /tear         매 프레임 화면 전체를 프레임 번호 색(`rgb(n&255, n>>8&255, 200)`)으로 칠한다(W2 — 한 장 안의 줄 색이
@@ -144,6 +145,7 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/sel")) return select_page;
     if (std.mem.eql(u8, path, "/tip") or std.mem.eql(u8, path, "/tip2")) return tooltip_page;
     if (std.mem.eql(u8, path, "/cm")) return context_menu_page;
+    if (std.mem.eql(u8, path, "/dnd")) return drag_page;
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
     }
@@ -260,6 +262,29 @@ const select_page =
 /// W6c 우클릭 메뉴 — 자리마다 한 요소(`contextmenu_check.zig` 의 좌표). 제목은 이 탭에서 문서를 불러온 횟수(「cm N」 —
 /// 새로고침·이동을 센다), 입력 칸·iframe 칸은 값을 제목으로, 막힌 자리는 「prevented」. 긴 글은 「가」 5000 자(15 KB — 4 KiB
 /// 상한을 글자 경계에서 자르는지).
+/// W6d① 끌어 놓기 — 자리마다 한 요소(`drag_check.zig` 의 좌표). 제목은 `dnd <상태 JSON>`(키는 마지막 값 — `n` 은 바뀐 수).
+/// 받는 칸(`z` — 끄는 동안 본 종류·파일 수·읽힌 글 길이, 놓으면 이름:크기·종류·글·주소, 첫 파일 내용, 폴더면 안 이름과 첫 파일 내용), 글 칸(`ta` —
+/// 들어간 값), 이동을 고르는 목록(`L` — 놓인 글).
+const drag_page =
+    "<!doctype html><title>loading</title><style>html,body{margin:0;font:16px sans-serif;width:640px;height:480px}body>*{position:absolute;margin:0;box-sizing:border-box}</style><body>" ++
+    "<div id=z style='left:20px;top:20px;width:280px;height:160px;background:#cfc'>zone</div>" ++
+    "<textarea id=t style='left:20px;top:220px;width:280px;height:60px'></textarea>" ++
+    "<div id=L style='left:360px;top:150px;width:120px;height:80px;background:#fcc'>list</div>" ++
+    \\<script>
+    \\var S={n:0};function put(k,v){S[k]=v;S.n++;document.title='dnd '+JSON.stringify(S).slice(0,900)}
+    \\var z=document.getElementById('z');
+    \\z.addEventListener('dragenter',function(e){e.preventDefault()});
+    \\z.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='copy';put('zover',e.dataTransfer.types.join('+')+'/f'+e.dataTransfer.files.length+'/t'+e.dataTransfer.getData('text/plain').length)});
+    \\z.addEventListener('dragleave',function(e){if(e.target===z)put('zleave',1)});
+    \\z.addEventListener('drop',function(e){e.preventDefault();var dt=e.dataTransfer,f=dt.files,names=[];for(var i=0;i<f.length;i++)names.push(f[i].name+':'+f[i].size);put('zdrop',names.join(',')+'/types='+dt.types.join('+')+'/text='+dt.getData('text/plain').slice(0,40));
+    \\ if(f.length){var r=new FileReader();r.onload=function(){put('zcontent',String(r.result).slice(0,40))};r.onerror=function(){put('zcontent','ERR')};r.readAsText(f[0])}
+    \\ for(var j=0;j<dt.items.length;j++){var en=dt.items[j].webkitGetAsEntry&&dt.items[j].webkitGetAsEntry();if(en&&en.isDirectory){en.createReader().readEntries(function(es){put('zdir',es.map(function(x){return x.name}).sort().join(','));var fe=es.filter(function(x){return x.isFile})[0];if(fe)fe.file(function(ff){var r2=new FileReader();r2.onload=function(){put('zdircontent',String(r2.result).slice(0,40))};r2.readAsText(ff)},function(){put('zdircontent','ERR')})},function(){put('zdir','ERR')})}}});
+    \\var t=document.getElementById('t');t.addEventListener('input',function(){put('ta',t.value.slice(0,60))});
+    \\var L=document.getElementById('L');L.addEventListener('dragenter',function(e){e.preventDefault()});L.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move'});L.addEventListener('drop',function(e){e.preventDefault();put('Ldrop',e.dataTransfer.getData('text/plain'))});
+    \\put('ready',1);
+    \\</script>
+;
+
 const context_menu_page =
     "<!doctype html><title>loading</title><style>html,body{margin:0;font:16px sans-serif}body>*{position:absolute;margin:0}</style><body>" ++
     "<a href='/cm-target?x=1' style='left:20px;top:20px;width:200px;height:24px'>a link here</a>" ++

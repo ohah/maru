@@ -44,6 +44,12 @@ pub const Tag = enum(u8) {
     web_notification_click = 24,
     /// 우클릭 메뉴에서 고른 것(W6c — D5). 메뉴 번호는 `context_menu` 가 준 것이다. 고르지 않고 닫았으면 `cancel`.
     context_menu_command = 25,
+    /// 밖에서 끌어 온 것의 한 조각(W6d① — 파일 경로·글·HTML·주소·주소 제목). `drag_target` 의 enter 앞에 보낸다 — sidecar 는
+    /// 브라우저마다 쌓았다가 enter 에서 drag data 를 만든다. 글·HTML 은 글자 경계에서 나눠 여러 번 보내면 이어 붙인다.
+    drag_data = 26,
+    /// 끌기가 그 탭 본문에 들어왔다·움직였다·나갔다·놓였다(W6d① — CEF `drag_target_*`). 좌표는 view DIP, 허용 동작은 macOS 와
+    /// CEF 가 같은 비트다(복사 1·링크 2·일반 4·개인 8·이동 16·삭제 32).
+    drag_target = 27,
 
     hello_ack = 32,
     browser_created = 33,
@@ -86,6 +92,9 @@ pub const Tag = enum(u8) {
     /// 그 메뉴가 끝났다 — 고른 명령을 마쳤거나, 페이지가 이동·닫혀 CEF 가 메뉴를 거뒀다(`on_context_menu_dismissed`). maru 는 떠
     /// 있는 메뉴를 닫는다. 메뉴마다 한 번.
     context_menu_closed = 51,
+    /// 페이지가 받아들이는 끌기 동작이 바뀌었다(W6d① — CEF `update_drag_cursor`). 0 이면 놓아도 받지 않는다. maru 는 탭마다
+    /// 마지막 값을 끌기 커서(`draggingUpdated`)로 돌려준다.
+    drag_operation = 52,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -559,6 +568,47 @@ pub const ContextMenuCommandKind = enum(u8) {
     copy_image = 13,
 };
 
+/// 끌어 온 것의 종류(W6d①). 경로는 파일·폴더 하나(절대 경로), 글·HTML 은 이어 붙이는 조각, 주소와 그 제목은 하나씩.
+pub const DragDataKind = enum(u8) {
+    path = 0,
+    text = 1,
+    html = 2,
+    url = 3,
+    url_title = 4,
+};
+
+pub const DragData = struct {
+    browser: BrowserId,
+    kind: DragDataKind,
+    bytes: []const u8,
+};
+
+pub const DragTargetKind = enum(u8) {
+    enter = 0,
+    over = 1,
+    leave = 2,
+    drop = 3,
+};
+
+/// 끌기 동작 비트(macOS `NSDragOperation` 과 CEF `cef_drag_operations_mask_t` 가 같은 값 — sidecar 가 comptime 으로 맞춘다).
+pub const drag_operation_mask: u32 = 1 | 2 | 4 | 8 | 16 | 32;
+
+pub const DragTarget = struct {
+    browser: BrowserId,
+    kind: DragTargetKind,
+    /// leave 는 쓰지 않는다(0).
+    point: Point = .{ .x = 0, .y = 0 },
+    modifiers: Modifiers = .{},
+    /// 끌어 온 쪽이 허용한 동작(`drag_operation_mask` 안). leave·drop 은 0.
+    allowed: u32 = 0,
+};
+
+pub const DragOperation = struct {
+    browser: BrowserId,
+    /// 페이지가 받아들이는 동작 하나(또는 0).
+    operation: u32,
+};
+
 pub const ContextMenuCommand = struct {
     browser: BrowserId,
     menu: u32,
@@ -709,6 +759,8 @@ pub const Message = union(Tag) {
     geolocation: Geolocation,
     web_notification_click: WebNotificationClick,
     context_menu_command: ContextMenuCommand,
+    drag_data: DragData,
+    drag_target: DragTarget,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -730,6 +782,7 @@ pub const Message = union(Tag) {
     tooltip_changed: TooltipChanged,
     context_menu: ContextMenu,
     context_menu_closed: ContextMenuClosed,
+    drag_operation: DragOperation,
 };
 
 test "tags split by direction at 32" {

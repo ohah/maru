@@ -111,6 +111,11 @@ const Surface = struct {
     tooltip_generation: u32 = 0,
     /// sidecar 가 알린 우클릭 메뉴(W6c② — 하나). 그 탭이 보이는 창의 tick 이 가져가 macOS 메뉴로 띄운다.
     context_menu: ?ContextMenu = null,
+    /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
+    /// 브라우저가 닫히면 푼다 — 새 sidecar 는 그 끌기를 모른다.
+    drag_entered: bool = false,
+    /// 이 끌기에서 페이지가 받아들이는 동작(`drag_operation` — 0 이면 놓아도 받지 않는다). enter 에서 0 으로 시작한다.
+    drag_operation: u32 = 0,
     /// 팝업 링의 보일 장 고르기(W6a②) — 본문과 같은 규칙(GPU 소비자 규칙·기대 크기 = 사각형 × scale). 닫혀도 곧바로
     /// 비우지 않는다: A 닫힘 알림을 처리하기 전에 B 의 링이 먼저 와 있을 수 있어, 닫힐 때 다 놓으면 다시 알리지 않는 B 의
     /// 링을 잃는다(1 차). 닫힐 때 보이던 링만 GPU 가 끝난 뒤 놓는다(`popup_release_generation` — 4 차).
@@ -1423,6 +1428,129 @@ pub fn contextMenuOpen(surface_id: u64, menu: u32) bool {
     return m.shown and m.menu == menu and !m.closed;
 }
 
+// ── W6d①: 밖에서 끌어 놓기 ─────────────────────────────────────────────────────────────────────────
+// 창(AppSession)이 끌기 동안 끌어 온 것을 쥐고, 포인터가 Chromium 탭 본문에 들어오면 `dragEnter` 로 조각과 enter 를 보낸다.
+// 여기는 탭마다 「enter 를 보냈는가」와 페이지가 받아들이는 동작만 든다.
+
+/// 끌어 온 것(W6d①). 창이 쥔 것을 빌린다.
+pub const DragPayload = struct {
+    paths: []const []const u8 = &.{},
+    text: []const u8 = "",
+    html: []const u8 = "",
+    url: []const u8 = "",
+    url_title: []const u8 = "",
+};
+
+/// 조각 상한 — sidecar(`drag.max_paths`·`max_text_total`)와 같다. 글·HTML 은 넘으면 글자 경계에서 자른다.
+pub const max_drag_paths = 4096;
+pub const max_drag_text = 1024 * 1024;
+
+fn forgetDrag(s: *Surface) void {
+    s.drag_entered = false;
+    s.drag_operation = 0;
+}
+
+/// 끌기가 그 탭 본문에 들어왔다 — 조각을 보내고 enter. 탭이 아직 없으면(sidecar 가 만들기 전 — 다시 뜬 sidecar 도) false.
+/// 경로 규칙(절대·제어 문자 없음·4 KiB)을 못 지나는 경로와 상한 넘은 경로는 빠진다.
+pub fn dragEnter(gpa: std.mem.Allocator, surface_id: u64, payload: DragPayload, point: ws.message.Point, modifiers: ws.message.Modifiers, allowed: u32) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    if (!s.created) return false;
+    var sent_paths: usize = 0;
+    for (payload.paths) |p| {
+        if (sent_paths == max_drag_paths) break;
+        ws.fields.checkPath(p) catch continue;
+        send(gpa, .{ .drag_data = .{ .browser = surface_id, .kind = .path, .bytes = p } });
+        sent_paths += 1;
+    }
+    sendDragText(gpa, surface_id, .text, payload.text);
+    sendDragText(gpa, surface_id, .html, payload.html);
+    if (payload.url.len != 0) if (ws.fields.checkUrl(payload.url)) |_| {
+        send(gpa, .{ .drag_data = .{ .browser = surface_id, .kind = .url, .bytes = payload.url } });
+        if (payload.url_title.len != 0) {
+            var buf: [ws.wire.max_text_bytes]u8 = undefined;
+            const title = cleanDragText(payload.url_title, &buf);
+            if (title.len != 0) send(gpa, .{ .drag_data = .{ .browser = surface_id, .kind = .url_title, .bytes = title } });
+        }
+    } else |_| {};
+    send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .enter, .point = point, .modifiers = modifiers, .allowed = allowed & ws.message.drag_operation_mask } });
+    s.drag_entered = true;
+    s.drag_operation = 0;
+    return true;
+}
+
+/// 글·HTML 을 글자 경계에서 `max_ime_text_bytes` 조각으로 나눠 보낸다 — 탭·줄바꿈 말고 제어 문자는 공백으로, 합계는
+/// `max_drag_text` 에서 자른다. UTF-8 이 아니면 보내지 않는다.
+fn sendDragText(gpa: std.mem.Allocator, surface_id: u64, kind: ws.message.DragDataKind, text: []const u8) void {
+    if (text.len == 0 or !std.unicode.utf8ValidateSlice(text)) return;
+    // 검증은 한 번 — 조각은 글자 경계(이어지는 바이트 앞)에서만 자른다. 조각마다 남은 글 전체를 다시 검증하면 1 MiB 글에서
+    // enter 한 번에 수십 MB 를 읽었다(W6d① 적대 검증 1 차).
+    var rest = text[0..utf8Boundary(text, max_drag_text)];
+    var buf: [ws.wire.max_ime_text_bytes]u8 = undefined;
+    while (rest.len != 0) {
+        const len = utf8Boundary(rest, buf.len);
+        if (len == 0) return;
+        for (rest[0..len], 0..) |byte, i| buf[i] = cleanByte(byte);
+        send(gpa, .{ .drag_data = .{ .browser = surface_id, .kind = kind, .bytes = buf[0..len] } });
+        rest = rest[len..];
+    }
+}
+
+/// 검증된 UTF-8 `text` 의 앞 `limit` 바이트 안에서 가장 긴 글자 경계.
+fn utf8Boundary(text: []const u8, limit: usize) usize {
+    if (text.len <= limit) return text.len;
+    var end = limit;
+    while (end > 0 and text[end] & 0xC0 == 0x80) end -= 1;
+    return end;
+}
+
+fn cleanByte(byte: u8) u8 {
+    return if ((byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r') or byte == 0x7f) ' ' else byte;
+}
+
+/// 탭·줄바꿈 말고 제어 문자를 공백으로 바꿔 `buf` 에 옮긴다(넘치면 글자 경계에서 자른다).
+fn cleanDragText(text: []const u8, buf: []u8) []const u8 {
+    const piece = ws.text.clampUtf8(text, buf.len);
+    for (piece, 0..) |byte, i| buf[i] = cleanByte(byte);
+    return buf[0..piece.len];
+}
+
+/// 끌기가 그 탭 본문 안에서 움직였다(enter 를 보낸 탭에만).
+pub fn dragOver(gpa: std.mem.Allocator, surface_id: u64, point: ws.message.Point, modifiers: ws.message.Modifiers, allowed: u32) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    if (!s.drag_entered) return;
+    send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .over, .point = point, .modifiers = modifiers, .allowed = allowed & ws.message.drag_operation_mask } });
+}
+
+/// 끌기가 그 탭을 떠났다.
+pub fn dragLeave(gpa: std.mem.Allocator, surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    if (!s.drag_entered) return;
+    forgetDrag(s);
+    send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .leave } });
+}
+
+/// 그 탭에 놓았다. enter 를 보낸 탭이면 drop 을 보내고 true. 받을지는 페이지가 정한다(마지막 동작이 0 이면 CEF 가 나가기로 바꾼다).
+pub fn dragDrop(gpa: std.mem.Allocator, surface_id: u64, point: ws.message.Point, modifiers: ws.message.Modifiers) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    if (!s.drag_entered) return false;
+    forgetDrag(s);
+    send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .drop, .point = point, .modifiers = modifiers } });
+    return true;
+}
+
+/// 그 탭에 보낸 enter 가 살아 있는가 — 창이 enter 한 탭이라도 sidecar 가 다시 떴거나 렌더러가 죽었으면(브라우저를 다시
+/// 만들었으면) false 다. 창은 그때 다시 enter 한다(W6d① 적대 검증 1 차 — 안 하면 본문을 나갔다 들어올 때까지 끌기가 멈췄다).
+pub fn dragEntered(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.drag_entered;
+}
+
+/// 이 끌기에서 페이지가 받아들이는 동작(enter 를 보내지 않은 탭이면 0).
+pub fn dragOperation(surface_id: u64) u32 {
+    const s = surfaces.getPtr(surface_id) orelse return 0;
+    return if (s.drag_entered) s.drag_operation else 0;
+}
+
 /// 그 메뉴의 선택한 글(없으면 빈 글).
 pub fn contextMenuSelection(surface_id: u64, menu: u32) []const u8 {
     const s = surfaces.getPtr(surface_id) orelse return "";
@@ -1686,6 +1814,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         setTooltip(gpa, s, ""); // 죽은 sidecar 의 툴팁은 끝났다(W6b)
         dropContextMenu(gpa, s); // 그 메뉴의 콜백도 사라졌다 — 답하지 않는다(W6c②)
         dropPopup(s); // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게. 새 sidecar 는 세대를 1 부터 세므로 옛 링도 놓는다
+        forgetDrag(s); // 새 sidecar 는 그 끌기를 모른다 — enter 없이 drop 을 보내지 않게(W6d①)
     }
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
@@ -1834,6 +1963,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             dropPopup(s); // 닫힘 알림 없이 사라진다(W6a②)
             setTooltip(gpa, s, ""); // 툴팁도(W6b — 방어)
             dropContextMenu(gpa, s); // 브라우저가 닫히며 CEF 가 메뉴를 거뒀다(W6c② — 닫힘 알림은 sidecar 가 보내지 않는다)
+            forgetDrag(s); // 끌기도(W6d①)
+        },
+        .drag_operation => |v| if (surfaces.getPtr(v.browser)) |s| {
+            if (s.drag_entered) s.drag_operation = v.operation;
         },
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
@@ -1861,7 +1994,12 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .title_changed, .load_finished => {},
         // 렌더러가 죽으면 그 페이지의 툴팁도 끝났다(CEF 가 빈 글을 부르지 않을 수 있다).
-        .renderer_gone => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, ""), // 메뉴는 sidecar 가 닫음을 보낸다(W6c①)
+        .renderer_gone => |v| if (surfaces.getPtr(v.browser)) |s| {
+            setTooltip(gpa, s, ""); // 메뉴는 sidecar 가 닫음을 보낸다(W6c①)
+            // sidecar 도 그 끌기를 잊었다 — 남겨 두면 죽은 페이지의 옛 동작을 돌려주고 놓기를 받았다고 답했다(W6d① 적대 검증 1 차).
+            // 창은 다음 움직임에 다시 enter 한다(`dragEntered`).
+            forgetDrag(s);
+        },
         .tooltip_changed => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, v.text),
         .cursor_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.cursor = v.cursor;
@@ -1935,7 +2073,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target => unreachable,
     }
 }
 
@@ -2224,6 +2362,66 @@ test "context menus wait for a window, are answered exactly once, and a menu nob
     try std.testing.expectEqual(@as(usize, 4), sentFrames(&frames));
     _ = takeContextMenu(7).?;
     try std.testing.expect(contextMenuOpen(7, 10));
+}
+
+test "drags send their pieces before enter, split long text at character boundaries, drop bad paths, and are forgotten when the sidecar or browser goes (W6d①)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false } });
+    var frames: [32]Message = undefined;
+    const at: ws.message.Point = .{ .x = 3, .y = 4 };
+    // 아직 만들어지지 않은 탭은 받지 않는다.
+    try std.testing.expect(!dragEnter(gpa, 7, .{ .paths = &.{"/a"} }, at, .{}, 1));
+    surfaces.getPtr(7).?.created = true;
+    // 상대·제어 문자 경로는 빠지고, 글은 조각마다 상한 안·글자 경계(3 바이트 「가」)로 나뉘며 제어 문자는 공백이 된다.
+    const long = "가" ** (ws.wire.max_ime_text_bytes / 3 + 1);
+    try std.testing.expect(dragEnter(gpa, 7, .{ .paths = &.{ "/ok", "rel", "/bad\nname" }, .text = long ++ "\x07끝", .url = "https://a.b/", .url_title = "제목\x1b" }, at, .{}, 0xFF));
+    const n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 6), n);
+    try std.testing.expectEqualStrings("/ok", frames[0].drag_data.bytes);
+    try std.testing.expectEqual(ws.message.DragDataKind.text, frames[1].drag_data.kind);
+    try std.testing.expect(frames[1].drag_data.bytes.len <= ws.wire.max_ime_text_bytes and frames[1].drag_data.bytes.len % 3 == 0);
+    try std.testing.expect(std.mem.endsWith(u8, frames[2].drag_data.bytes, "가 끝"));
+    try std.testing.expectEqual(long.len + 4, frames[1].drag_data.bytes.len + frames[2].drag_data.bytes.len);
+    try std.testing.expectEqualStrings("https://a.b/", frames[3].drag_data.bytes);
+    try std.testing.expectEqualStrings("제목 ", frames[4].drag_data.bytes);
+    try std.testing.expectEqual(ws.message.DragTargetKind.enter, frames[5].drag_target.kind);
+    try std.testing.expectEqual(ws.message.drag_operation_mask, frames[5].drag_target.allowed); // 쓰지 않는 비트는 떼고 보낸다
+    // 페이지가 알린 동작은 그 끌기에만 — 놓으면 drop 이 가고 더는 over·drop 을 보내지 않는다.
+    apply(gpa, .{ .drag_operation = .{ .browser = 7, .operation = 1 } }, 0);
+    try std.testing.expectEqual(@as(u32, 1), dragOperation(7));
+    dragOver(gpa, 7, at, .{}, 1);
+    try std.testing.expect(dragDrop(gpa, 7, at, .{}));
+    try std.testing.expect(!dragDrop(gpa, 7, at, .{}));
+    dragOver(gpa, 7, at, .{}, 1);
+    try std.testing.expectEqual(@as(u32, 0), dragOperation(7));
+    try std.testing.expectEqual(@as(usize, 8), sentFrames(&frames));
+    try std.testing.expectEqual(ws.message.DragTargetKind.over, frames[6].drag_target.kind);
+    try std.testing.expectEqual(ws.message.DragTargetKind.drop, frames[7].drag_target.kind);
+    // enter 뒤 렌더러가 죽으면 잊는다(sidecar 도 잊었다 — 옛 동작을 돌려주거나 놓기를 받았다고 하지 않게), sidecar 가 다시
+    // 떠도, 브라우저가 닫혀도.
+    try std.testing.expect(dragEnter(gpa, 7, .{}, at, .{}, 1));
+    apply(gpa, .{ .drag_operation = .{ .browser = 7, .operation = 1 } }, 0);
+    apply(gpa, .{ .renderer_gone = .{ .browser = 7, .reason = .crashed } }, 0);
+    try std.testing.expect(!dragEntered(7));
+    try std.testing.expectEqual(@as(u32, 0), dragOperation(7));
+    try std.testing.expect(!dragDrop(gpa, 7, at, .{}));
+    try std.testing.expect(dragEnter(gpa, 7, .{}, at, .{}, 1));
+    forgetSidecar(gpa);
+    try std.testing.expect(!dragDrop(gpa, 7, at, .{}));
+    dragLeave(gpa, 7);
+    try std.testing.expect(dragEnter(gpa, 7, .{}, at, .{}, 1));
+    apply(gpa, .{ .browser_closed = 7 }, 0);
+    try std.testing.expect(!dragDrop(gpa, 7, at, .{}));
+    try std.testing.expectEqual(@as(usize, 11), sentFrames(&frames)); // enter 세 번뿐
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

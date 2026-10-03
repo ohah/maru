@@ -76,6 +76,30 @@ MENU = ("<!doctype html><title>menu</title><style>html,body{margin:0;height:100%
     "addEventListener('mouseup',function(e){if(e.button==2)ping('e=up&b=2')});"
     "document.getElementById('n').addEventListener('contextmenu',function(){setTimeout(function(){location='/cm-app?2'},500)});"
     "</script>").encode()
+# W6d①: 끌어 놓기 — 왼쪽 위(폭 50%·높이 60%) 받는 칸(파일 — 처음 dragover 에 본 파일 수, 놓으면 이름:크기와 첫 파일 내용),
+# 오른쪽 위(폭 50%·높이 40%) 글 칸(값), 오른쪽 아래 이동 칸(동작 이동 — 놓인 글), 왼쪽 아래 거절 칸(동작 없음), 들어왔다 나가면
+# leave. `/ev` 로 알린다.
+DND = ("<!doctype html><title>dnd</title><style>html,body{margin:0;height:100%;background:#20a060}"
+    "#z{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}"
+    "#t{position:fixed;left:50%;top:0;width:50%;height:40%;font:28px sans-serif}"
+    "#m{position:fixed;left:50%;top:60%;width:50%;height:40%;background:#0000ff}"
+    "#n{position:fixed;left:0;top:70%;width:50%;height:30%;background:#ffff00}</style><body>"
+    "<div id=z></div><textarea id=t></textarea><div id=m></div><div id=n></div><script>"
+    "function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}ping('e=load');var over=0;"
+    "var z=document.getElementById('z');"
+    "z.addEventListener('dragenter',function(e){e.preventDefault();over=0});"
+    "z.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='copy';if(!over++)ping('e=over&f='+e.dataTransfer.files.length)});"
+    "z.addEventListener('dragleave',function(e){if(e.target===z)ping('e=leave')});"
+    "z.addEventListener('drop',function(e){e.preventDefault();var f=e.dataTransfer.files,n=[];for(var i=0;i<f.length;i++)n.push(f[i].name+':'+f[i].size);"
+    "ping('e=drop&names='+encodeURIComponent(n.join(',')));if(f.length){var r=new FileReader();r.onload=function(){ping('e=content&v='+encodeURIComponent(r.result))};r.readAsText(f[0])}});"
+    "document.getElementById('t').addEventListener('input',function(e){ping('e=input&v='+encodeURIComponent(e.target.value))});"
+    "var m=document.getElementById('m');m.addEventListener('dragenter',function(e){e.preventDefault()});"
+    "m.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move'});"
+    "m.addEventListener('drop',function(e){e.preventDefault();ping('e=mdrop&v='+encodeURIComponent(e.dataTransfer.getData('text/plain')))});"
+    "var n=document.getElementById('n');n.addEventListener('dragenter',function(e){e.preventDefault()});"
+    "n.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='none'});"
+    "n.addEventListener('drop',function(e){e.preventDefault();ping('e=ndrop')});"
+    "</script>").encode()
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -96,6 +120,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = MENU
         elif self.path == "/tip-app":
             body = TIP
+        elif self.path == "/dnd-app":
+            body = DND
         elif self.path == "/nav-a":
             body = b"<!doctype html><title>a</title><style>html,body{margin:0;height:100%}a{display:block;height:100%}</style><body><a href='/nav-b'>b</a><script>addEventListener('pageshow',function(){new Image().src='/ev?e=shown-a&t='+Date.now()})</script>"
         elif self.path == "/nav-b":
@@ -728,6 +754,128 @@ two = [l for l in requests if l.startswith('/ev?e=load&nt=reload') and marks.get
 check('osr-test menu items=뒤로(off)|앞으로(off)|새로고침' in report and len(two) == 1,
       f'with a second window open, the menu stays open for its own window and its pick runs (another window tick must not close it) — reloads {len(two)}')
 check(report.count('osr-test menu closed-by-page') == 1 and report[-1] == 'osr-test menu none', f'only the menu open while the page navigates is closed, and nothing stays open ({report[-2:]})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6d①: 밖에서 끌어 놓기 ─────────────────────────────────────────────────────────────────────────────────
+# 진짜 끌기 세션은 사용자 포인터가 필요하다 — 대본 `drag` 이 터미널 view 의 끌기 메서드(draggingEntered·Updated·
+# performDragOperation·Ended·Exited)를 가짜 끌기 정보(판정자 전용 이름의 pasteboard)로 부른다. 그 뒤(Swift → ABI → Zig →
+# sidecar → 페이지)는 진짜 경로다. 돌려준 동작(`osr-test drag … op=`)과 페이지가 받은 것을 본다.
+mkdir -p "$root/drop"
+printf 'HELLO' > "$root/drop/a.txt"
+cat > "$root/dnd.txt" <<SCRIPT
+sleep 7000
+drag enter 0.25 0.3 0 0 file $root/drop/a.txt
+sleep 300
+drag move 0.25 0.3 0 0
+sleep 300
+drag move 0.25 0.31 0 0
+sleep 300
+drag drop 0.25 0.31 0 0
+sleep 800
+mark filed
+drag enter 0.75 0.2 0 0 text dropped words
+sleep 300
+drag move 0.75 0.2 0 0
+sleep 300
+drag move 0.75 0.21 0 0
+sleep 300
+drag drop 0.75 0.21 0 0
+sleep 800
+mark texted
+drag enter 0.75 0.8 0 0 text moved words
+sleep 300
+drag move 0.75 0.8 0 0
+sleep 300
+drag move 0.75 0.81 0 0
+sleep 300
+drag drop 0.75 0.81 0 0
+sleep 800
+drag enter 0.25 0.85 0 0 text refused words
+sleep 300
+drag move 0.25 0.85 0 0
+sleep 300
+drag move 0.25 0.86 0 0
+sleep 300
+drag drop 0.25 0.86 0 0
+sleep 800
+mark effects
+action toggle_command_palette
+sleep 300
+drag enter 0.25 0.3 0 0 file $root/drop/a.txt
+sleep 300
+drag move 0.25 0.3 0 0
+sleep 300
+drag drop 0.25 0.3 0 0
+sleep 600
+key 53 U+1B
+sleep 300
+mark gated
+drag enter 0.25 0.3 0 0 url file://$root/drop/a.txt
+sleep 300
+drag move 0.25 0.3 0 0
+sleep 300
+drag move 0.25 0.31 0 0
+sleep 300
+drag drop 0.25 0.31 0 0
+sleep 800
+mark urlfile
+drag enter 0.25 0.3 0 0 file $root/drop/a.txt
+sleep 300
+drag move 0.25 0.3 0 0
+sleep 300
+drag exit 0 0 0 0
+sleep 600
+mark exited
+SCRIPT
+: > "$root/requests.log"
+run_app /dnd-app 30000 "$root/dnd.summary" MARU_WEB_OSR_TEST_INPUT="$root/dnd.txt"
+grep -a '^osr-test drag\|^osr-test mark' "$root/app-dnd-app.log" > "$root/dnd.report" || true
+cat "$root/dnd.report"
+python3 - "$root/dnd.report" "$root/requests.log" <<'PY' || fail "dropping onto the Chromium tab did not behave as expected"
+import sys, re, urllib.parse
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+marks = {l.split()[2]: int(l.split()[3]) for l in report if l.startswith('osr-test mark ')}
+def t_of(line):
+    m = re.search(r'[?&]t=(\d+)', line)
+    return int(m.group(1)) if m else 0
+drags = [l for l in report if l.startswith('osr-test drag ')]
+first = drags[:4]
+check(first == ['osr-test drag enter op=0', 'osr-test drag move op=1', 'osr-test drag move op=1', 'osr-test drag drop op=1 ok=true'],
+      f'over the drop zone the view answers the page operation (none until the page answers, then copy) and the drop is taken ({first})')
+overs = [l.split('&t=')[0] for l in requests if l.startswith('/ev?e=over') and t_of(l) < marks.get('filed', 0)]
+check(overs == ['/ev?e=over&f=0'], f'while dragging the page sees no files ({overs})')
+dropped = [urllib.parse.unquote(l) for l in requests if l.startswith('/ev?e=drop') and t_of(l) < marks.get('filed', 0)]
+content = [urllib.parse.unquote(l) for l in requests if l.startswith('/ev?e=content') and t_of(l) < marks.get('filed', 0)]
+check(len(dropped) == 1 and 'names=a.txt:5' in dropped[0] and len(content) == 1 and 'v=HELLO' in content[0],
+      f'after the drop the page reads the file name, size and content ({dropped} {content})')
+typed = [urllib.parse.unquote(l) for l in requests if l.startswith('/ev?e=input') and marks.get('filed', 0) < t_of(l) < marks.get('texted', 0)]
+check(drags[7:8] == ['osr-test drag drop op=1 ok=true'] and len(typed) == 1 and 'v=dropped words' in typed[0],
+      f'text dropped on the text field goes in ({drags[4:8]} {typed})')
+# 양성 대조 — 터미널 경로의 copy(1)와 다른 값을 페이지가 정한다: 이동 칸은 이동(16), 거절 칸은 0(놓기를 부르지 않는다).
+# 두 칸 모두 dragenter 는 기본값(복사)으로 받고 dragover 에서 바꾸므로 첫 움직임의 답은 복사(1)다 — 페이지가 답한 그대로.
+moved = [urllib.parse.unquote(l) for l in requests if l.startswith('/ev?e=mdrop') and marks.get('texted', 0) < t_of(l) < marks.get('effects', 0)]
+check(drags[8:12] == ['osr-test drag enter op=0', 'osr-test drag move op=1', 'osr-test drag move op=16', 'osr-test drag drop op=16 ok=true'] and len(moved) == 1 and 'v=moved words' in moved[0],
+      f'the page picks move on the move cell and the view answers it ({drags[8:12]} {moved})')
+refused = [l for l in requests if l.startswith('/ev?e=ndrop')]
+check(drags[12:16] == ['osr-test drag enter op=0', 'osr-test drag move op=1', 'osr-test drag move op=0', 'osr-test drag drop skipped op=0'] and not refused,
+      f'the page refuses on the refusing cell — the view answers none and nothing is dropped ({drags[12:16]} {refused})')
+gated_page = [l for l in requests if (l.startswith('/ev?e=drop') or l.startswith('/ev?e=over')) and marks.get('effects', 0) < t_of(l) < marks.get('gated', 0)]
+check(drags[16:19] == ['osr-test drag enter op=1', 'osr-test drag move op=1', 'osr-test drag drop op=1 ok=false'] and not gated_page,
+      f'with the command palette open the web body is not a drop target — the terminal drop path refuses it ({drags[16:19]} page {gated_page})')
+# 주소 형식으로만 온 `file://`(다른 앱의 웹 페이지가 끌기에 넣을 수 있다)는 파일이 아니다 — 사용자가 고른 파일이 아니다.
+url_drops = [urllib.parse.unquote(l) for l in requests if l.startswith('/ev?e=drop') and marks.get('gated', 0) < t_of(l) < marks.get('urlfile', 0)]
+url_overs = [l for l in requests if l.startswith('/ev?e=over') and marks.get('gated', 0) < t_of(l) < marks.get('urlfile', 0)]
+check(len(url_overs) == 1 and not any('a.txt' in d for d in url_drops), f'a file:// address dragged as a URL is not handed to the page as a file (the drag reached the page {url_overs}, drops {url_drops})')
+left = [l for l in requests if l.startswith('/ev?e=leave') and marks.get('urlfile', 0) < t_of(l) < marks.get('exited', 0)]
+after = [l for l in requests if l.startswith('/ev?e=drop') and t_of(l) > marks.get('urlfile', 0)]
+check(len(left) == 1 and not after and drags[-1] == 'osr-test drag exit', f'a drag that leaves the view leaves the page and drops nothing ({left} {after} {drags[-1:]})')
 sys.exit(0 if ok else 1)
 PY
 

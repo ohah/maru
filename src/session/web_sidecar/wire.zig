@@ -76,6 +76,10 @@ pub const Error = error{
     /// 선택 비트와 글이 어긋남.
     InvalidContextMenu,
     UnknownContextMenuCommand,
+    /// 끌기(W6d①)의 닫힌 필드 위반 — 빈 조각, 쓰지 않는 동작 비트, leave 에 자리·수식키·허용 동작, drop 에 허용 동작,
+    /// 받아들이는 동작이 둘 이상.
+    InvalidDrag,
+    UnknownDragKind,
     InvalidClickCount,
     InvalidRange,
     InvalidBool,

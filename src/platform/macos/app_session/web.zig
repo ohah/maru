@@ -1197,6 +1197,143 @@ pub fn osrContextMenuDropShown(self: *AppSession) void {
     web_osr.answerContextMenu(self.allocator, m.surface, m.menu, .cancel);
 }
 
+// ── W6d①: 밖에서 끌어 놓기 ─────────────────────────────────────────────────────────────────────────
+// macOS 끌기 세션은 view 가 받는다(Swift `draggingEntered`·`Updated`·`Exited`·`performDragOperation`). Swift 는 들어올 때 끌어 온
+// 것(파일 경로·글·HTML·주소·제목)을 싣고, 움직일 때마다 자리를 묻는다. 그 자리가 Chromium 탭 본문이면 이 창이 그 탭에
+// enter·over 를 보내고 페이지가 받아들이는 동작을 돌려준다. 본문이 아니면 -1 — Swift 는 지금의 터미널 드롭 경로로 간다.
+// 모달 오버레이가 열려 있으면 본문이 아니다(터미널 드롭 `routeDropAtPoint` 와 같은 게이트 — 놓으면 그 경로가 거절한다).
+
+/// 끌어 온 것 — Swift 가 끌기가 view 에 들어올 때 싣는다. `target` 은 지금 enter 를 받은 탭(0 = 없음).
+pub const OsrDrag = struct {
+    paths: std.ArrayList([]const u8) = .empty,
+    text: std.ArrayList(u8) = .empty,
+    html: std.ArrayList(u8) = .empty,
+    url: std.ArrayList(u8) = .empty,
+    url_title: std.ArrayList(u8) = .empty,
+    target: u64 = 0,
+
+    pub fn clear(self: *OsrDrag, gpa: std.mem.Allocator) void {
+        for (self.paths.items) |p| gpa.free(p);
+        self.paths.clearRetainingCapacity();
+        self.text.clearRetainingCapacity();
+        self.html.clearRetainingCapacity();
+        self.url.clearRetainingCapacity();
+        self.url_title.clearRetainingCapacity();
+    }
+
+    pub fn deinit(self: *OsrDrag, gpa: std.mem.Allocator) void {
+        self.clear(gpa);
+        self.paths.deinit(gpa);
+        self.text.deinit(gpa);
+        self.html.deinit(gpa);
+        self.url.deinit(gpa);
+        self.url_title.deinit(gpa);
+    }
+
+    fn payload(self: *const OsrDrag) web_osr.DragPayload {
+        return .{ .paths = self.paths.items, .text = self.text.items, .html = self.html.items, .url = self.url.items, .url_title = self.url_title.items };
+    }
+};
+
+pub const OsrDragKind = enum(u32) { path = 0, text = 1, html = 2, url = 3, url_title = 4 };
+
+/// 끌기를 끝내거나 새로 시작한다 — enter 를 보낸 탭이 있으면 나가기를 보내고 실은 것을 비운다. 이 창에 보이는 Chromium 탭
+/// 본문이 있는가를 돌려준다 — 없으면 Swift 는 실을 것을 읽지 않는다(터미널 끌기마다 큰 글·HTML 을 메인 스레드에서 만들게
+/// 하지 않게 — W6d① 적대 검증 1 차).
+pub fn osrDragReset(self: *AppSession) bool {
+    if (self.osr_drag.target != 0) web_osr.dragLeave(self.allocator, self.osr_drag.target);
+    self.osr_drag.target = 0;
+    self.osr_drag.clear(self.allocator);
+    return self.osr_layouts.items.len != 0;
+}
+
+/// 끌어 온 것 하나를 싣는다. 경로는 `web_osr.max_drag_paths` 개, 글·HTML 은 `max_drag_text` 바이트까지(넘는 것은 버린다 —
+/// 보낼 때 글자 경계에서 다시 자른다). 주소·제목은 마지막 것.
+pub fn osrDragAdd(self: *AppSession, kind: OsrDragKind, bytes: []const u8) bool {
+    const gpa = self.allocator;
+    const d = &self.osr_drag;
+    switch (kind) {
+        .path => {
+            if (d.paths.items.len >= web_osr.max_drag_paths) return false;
+            const copy = gpa.dupe(u8, bytes) catch return false;
+            d.paths.append(gpa, copy) catch {
+                gpa.free(copy);
+                return false;
+            };
+        },
+        .text, .html => {
+            const list = if (kind == .text) &d.text else &d.html;
+            const room = web_osr.max_drag_text -| list.items.len;
+            list.appendSlice(gpa, bytes[0..@min(bytes.len, room)]) catch return false;
+        },
+        .url, .url_title => {
+            const list = if (kind == .url) &d.url else &d.url_title;
+            list.clearRetainingCapacity();
+            list.appendSlice(gpa, bytes) catch return false;
+        },
+    }
+    return true;
+}
+
+/// 그 자리가 Chromium 탭 본문인가(모달 오버레이가 열려 있으면 아니다).
+fn osrDragHit(self: *AppSession, x_px: f64, y_px: f64) ?app_session_mod.OsrLayout {
+    if (self.osr_layouts.items.len == 0 or self.anyModalOverlayOpen()) return null;
+    return osr_input.hit(self.osr_layouts.items, x_px, y_px);
+}
+
+/// 끌기가 그 자리에 왔다(들어옴·움직임). 본문이면 그 탭에 enter(처음이거나 다른 탭에서 옮겨 왔으면 — 옛 탭에는 나가기)나
+/// over 를 보내고 페이지가 받아들이는 동작(0 = 받지 않음)을, 본문이 아니면 -1 을 돌려준다.
+pub fn osrDragUpdate(self: *AppSession, x_px: f64, y_px: f64, mods: i32, allowed: u32) i32 {
+    const layout = osrDragHit(self, x_px, y_px);
+    const now: u64 = if (layout) |l| l.surface_id else 0;
+    if (self.osr_drag.target != 0 and self.osr_drag.target != now) {
+        web_osr.dragLeave(self.allocator, self.osr_drag.target);
+        self.osr_drag.target = 0;
+    }
+    const l = layout orelse return -1;
+    const point = osrDip(self, l, x_px, y_px);
+    const modifiers = osr_input.modifiers(mods, .{});
+    // 처음이거나, enter 한 탭이라도 sidecar 가 다시 떴거나 렌더러가 죽어 그 끌기를 잊었으면 다시 enter 한다(W6d① 적대 검증 1 차).
+    if (self.osr_drag.target == 0 or !web_osr.dragEntered(l.surface_id)) {
+        self.osr_drag.target = 0;
+        if (web_osr.dragEnter(self.allocator, l.surface_id, self.osr_drag.payload(), point, modifiers, allowed)) self.osr_drag.target = l.surface_id;
+    } else {
+        web_osr.dragOver(self.allocator, l.surface_id, point, modifiers, allowed);
+    }
+    // 끌어 온 쪽이 허용하지 않은 동작은 돌려주지 않는다 — 앞 끌기의 늦은 알림이 새 끌기에 섞일 수 있다(W6d① 적대 검증 1 차).
+    return @intCast(web_osr.dragOperation(l.surface_id) & allowed);
+}
+
+/// 끌기가 view 를 떠났다 — 실은 것도 비운다. 다른 창·다른 앱에서 끝나면 이 view 에는 끝남(`draggingEnded`)이 오지 않아
+/// 경로·글이 다음 끌기까지 남았다(W6d① 적대 검증 1 차). 다시 들어오면 `draggingEntered` 가 다시 싣는다.
+pub fn osrDragExit(self: *AppSession) void {
+    _ = osrDragReset(self);
+}
+
+/// 놓았다. enter 를 받은 탭 본문이면 drop 을 보내고 그 탭을 활성으로 올린 뒤(터미널 드롭이 그 pane 에 포커스를 주는 것과
+/// 같다) 1, 본문인데 그 탭이 끌기를 모르면(만들어지기 전 등) 0(거절), 본문이 아니면 -1(터미널 드롭 경로로).
+pub fn osrDragDrop(self: *AppSession, x_px: f64, y_px: f64, mods: i32) i32 {
+    const layout = osrDragHit(self, x_px, y_px) orelse {
+        if (self.osr_drag.target != 0) web_osr.dragLeave(self.allocator, self.osr_drag.target);
+        self.osr_drag.target = 0;
+        return -1;
+    };
+    const target = self.osr_drag.target;
+    self.osr_drag.target = 0;
+    if (target != layout.surface_id) {
+        if (target != 0) web_osr.dragLeave(self.allocator, target);
+        return 0;
+    }
+    if (!web_osr.dragDrop(self.allocator, target, osrDip(self, layout, x_px, y_px), osr_input.modifiers(mods, .{}))) return 0;
+    if (self.activateSurfaceById(target)) {
+        self.markNotificationsReadBySurface(target);
+        self.focusWorkspaceInput();
+    }
+    syncOsrKeyTarget(self);
+    self.metal_dirty = true;
+    return 1;
+}
+
 /// 키 대상 탭에 팝업 위젯이 열려 있는가(W6a②). 열린 목록은 편집할 수 없어 입력기 조합이 갈 곳이 없다 — 조합이 서면 그 뒤의
 /// Esc 가 「조합 취소」로 먹혀 목록이 한 번에 안 닫혔다(실측). Chrome 의 목록은 네이티브 메뉴라 입력기가 끼지 않는다.
 pub fn osrPopupOpen(self: *AppSession) bool {

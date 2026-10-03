@@ -7,7 +7,7 @@
 const array_repeat = @import("array_repeat");
 
 const std = @import("std");
-const detached_worker_wait = @import("detached_worker_wait.zig");
+const detached_worker_wait = maru.app.detached_worker_wait;
 const builtin = @import("builtin");
 const maru = @import("maru");
 const path_shape = maru.path_shape;

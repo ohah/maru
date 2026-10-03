@@ -34,7 +34,7 @@ pub fn outstandingWorkers() usize {
 }
 /// 판정자의 allocator 결산 전에 worker의 마지막 참조 해제까지 끝낸다. 제품 창 닫기는 기다리지 않는다.
 pub fn quietForTest(io: std.Io) void {
-    const wait = @import("../../../../detached_worker_wait.zig");
+    const wait = maru.app.detached_worker_wait;
     const deadline = std.Io.Clock.awake.now(io).nanoseconds + wait.timeout_ns;
     while (outstandingWorkers() != 0) {
         if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return;

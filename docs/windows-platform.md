@@ -10783,3 +10783,28 @@ CoreText 호출과 macOS 캐시 검증은 native adapter에 유지한다. 연결
 전체 build·check-targets·check-doc-links·check-boundaries가 통과했다. Windows SCM 실창에서
 240프레임을 표시했고 이름 10/10·행 hit 10/10·접기·선택·hover·누름 판정이 통과했다.
 Windows 최종 저장·롤백·GUI 저장 연결·실앱 저장 검증은 계속 남아 있다.
+
+### 2m.139 권한 없는 감사 SACL 보존의 native TxF 조사 (2026-10-03)
+
+`python tools/windows/probe-safe-save-txf.py`는 Python 표준 라이브러리만 사용하는
+Windows 전용 opt-in 조사 도구다. 저장소 `.zig-cache`의 고유 임시 디렉터리에만 파일을 만든다.
+fixture 설정·검사 때만 복제 thread token의 이미 할당된 SeSecurityPrivilege를 켜고,
+실제 쓰기 때는 원래 token으로 돌아온다. 쓰기 직전 감사 SACL 조회가 실제로 거절되는지 검사한다.
+
+이 호스트에서 commit·rollback·외부 쓰기·이름 변경·삭제의 다섯 상황을 실행했다.
+commit 전 독자는 원래 내용을 보았고 commit 후 새 내용을 보았다. rollback 후에는 원래 내용이
+남았다. 외부 세 종류의 변경은 ERROR_SHARING_VIOLATION으로 거절됐다.
+보호된 실제 감사 SACL을 포함한 owner/group/DACL/SACL 보안 서술자 전체, 128비트 파일 ID와
+volume ID, named stream이 동일함을 확인했다. 종료한 transaction의 핸들은 재사용하지 않고
+일반 핸들로 다시 열어 ID를 검사한다.
+첫 데이터 쓰기 전에도 외부 이름 변경이 ERROR_SHARING_VIOLATION으로 거절됨을 확인했다.
+
+일반 비트랜잭션 쓰기·commit 대신 rollback·truncate 누락·감사 ACE 변경·named stream 손실을
+주입한 다섯 실행 변이는 모두 assertion 실패로 검출했다. 원본 복구 후 다섯 상황이 다시 통과했다.
+이는 조사 도구의 판정력 검증이며 제품 저장 경로의 다섯 변이 검증으로 대신 세지 않는다.
+
+[Microsoft의 CreateFileTransactedW 계약](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfiletransactedw)은
+TxF 대안을 강하게 권고하고 향후 Windows 제공을 보장하지 않는다. 이 조사는 기본 저장 전략을
+변경하지 않는다. NTFS 이외 파일 시스템·원격 경로 지원, pinned parent 상대 열기, commit 실패의
+결과 판별, 충돌 CAS, 충돌 후 조건부 rollback 및 crash 복구는 증명하지 않았다.
+앱에는 이 도구를 연결하지 않았고 GUI 편집·저장·재열기 검증도 계속 남아 있다.

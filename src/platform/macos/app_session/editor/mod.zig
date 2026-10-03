@@ -48438,3 +48438,120 @@ test "U4d-8 empty missing-path backup is deleted by revival without restoring a 
     try testing.expectEqual(before, fx.session.tabs.items[0].panes.items[0].terms.items.len);
     std.debug.print("empty_revival source_deleted=true restored_document=false\n", .{});
 }
+
+test "U4d-9 revival queue drops overflow and consumes a failed read without restoring" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    for (0..9) |i| {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/lost-{d}", .{ root, i });
+        fx.session.queueBackupRevival(.{ .path = .{ .path = path } });
+    }
+    try testing.expectEqual(@as(usize, 8), fx.session.pending_backup_revivals.items.len);
+    // Make the first candidate an actual directory I/O failure, not a missing file.
+    const first = fx.session.pending_backup_revivals.items[0].doc();
+    var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
+    const name = backup_rules.fileName(&name_buf, first);
+    try dir.dir.createDir(std.testing.io, name, .default_dir);
+    const before = fx.session.tabs.items[0].panes.items[0].terms.items.len;
+    app_session_mod.editor_backup_ops.drainRevivals(fx.session);
+    try testing.expectEqual(@as(usize, 7), fx.session.pending_backup_revivals.items.len);
+    try testing.expectEqual(before, fx.session.tabs.items[0].panes.items[0].terms.items.len);
+    _ = try dir.dir.statFile(std.testing.io, name, .{});
+    std.debug.print("revival_queue ninth_not_queued=true failed_read_removed=true source_directory_preserved=true\n", .{});
+}
+
+test "U4b-17 accepted tab close removes 64 backups but leaves the 65th" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]usize{ 64, 65 }) |count| {
+        var dir = testing.tmpDir(.{});
+        defer dir.cleanup();
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = try pinBackupDir(&root_buf, &dir);
+        defer app_session_mod.editor_backup_ops.setDirForTest(null);
+        var fx = try UntitledFixture.init(allocator, false, false);
+        defer fx.deinit(allocator);
+        for (0..count) |i| {
+            var relative_buf: [64]u8 = undefined;
+            const relative = try std.fmt.bufPrint(&relative_buf, "doc-{d}.txt", .{i});
+            try dir.dir.writeFile(std.testing.io, .{ .sub_path = relative, .data = "disk\n" });
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, relative });
+            const term = try openPathInActivePane(fx.session, path);
+            term.rt.editor_selection = editor_selection.Selection.at(0);
+            try testing.expect(insertText(fx.session, term, "edited:"));
+        }
+        app_session_mod.editor_backup_ops.flushAll(fx.session);
+        _ = try tab_ops.newTab(fx.session);
+        try testing.expect(fx.session.tabs.items.len > 1);
+        fx.session.executeClose(.{ .tab_index = 0 });
+        var surviving: usize = 0;
+        for (0..count) |i| {
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "{s}/doc-{d}.txt", .{ root, i });
+            const doc: backup_rules.Doc = .{ .path = .{ .path = path } };
+            if (backupExists(root, doc)) {
+                surviving += 1;
+                try testing.expectEqual(@as(usize, 64), i);
+                const bytes = try readBackup(allocator, root, doc);
+                defer allocator.free(bytes);
+                var parsed = try backup_rules.parse(allocator, bytes);
+                defer parsed.deinit(allocator);
+                try testing.expectEqualStrings("edited:disk\n", parsed.content);
+            }
+        }
+        try testing.expectEqual(count - 64, surviving);
+        std.debug.print("accepted_tab_close documents={d} surviving_backups={d}\n", .{ count, surviving });
+    }
+}
+
+test "U4b-18 successful save leaves an older backup when directory permissions deny deletion" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.createDir(std.testing.io, "backups", .default_dir);
+    var backup_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_root = try std.fmt.bufPrint(&backup_buf, "{s}/backups", .{root});
+    app_session_mod.editor_backup_ops.setDirForTest(backup_root);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "old:"));
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    const doc = app_session_mod.editor_backup_ops.identity(term).?;
+    const previous = try readBackup(allocator, backup_root, doc);
+    defer allocator.free(previous);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "new:"));
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @enumFromInt(0o500), .{});
+    defer std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @enumFromInt(0o700), .{}) catch {};
+    try saveDocument(fx.session, term);
+    try testing.expect(!isDirty(term));
+    try testing.expect(!term.rt.editorDocument().notifications.backup_on_disk);
+    const written = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(64));
+    defer allocator.free(written);
+    try testing.expectEqualStrings("new:old:disk\n", written);
+    const residual = try readBackup(allocator, backup_root, doc);
+    defer allocator.free(residual);
+    try testing.expectEqualStrings(previous, residual);
+    var parsed = try backup_rules.parse(allocator, residual);
+    defer parsed.deinit(allocator);
+    try testing.expectEqualStrings("old:disk\n", parsed.content);
+    std.debug.print("save_delete_denied save_success=true clean=true old_backup_preserved=true backup_flag=false\n", .{});
+}

@@ -10746,3 +10746,24 @@ coverage to the existing Korean/SVG, scrolled-origin and owned-face tests. The
 focused Windows run passed 32 selected cases. Removing the copied-run cleanup
 produced MemoryLeak; restoring it returned the gate to green. This validates the
 portable request layer, not macOS CoreText runtime shaping.
+
+
+### 2m.129 draw lowering의 공통 런타임 이동 (2026-10-03)
+
+`app/chrome_draw_lowering.zig`가 semantic ops를 renderer-neutral DrawList·glyph placement·
+background quad로 투영한다. main·macOS AppSession·Chrome Lab은 같은 `maru.app` 구현을
+참조한다. 네이티브 셰이핑 호출은 없다. cluster 방출 allowlist의 경로를 옮겼고 공통 텍스트
+요청과 lowering을 번역 문자열 검사 범위에도 넣어 이동으로 방어가 사라지지 않게 했다.
+
+기존 lowering 판정자 16개가 통과했다(익명 집계 포함 37/37). 텍스트 아래 layer·소수점 origin·
+독립 border alpha·gradient 방향·호출자의 quad layer를 깨뜨린 다섯 변이가 모두 실행 판정에서
+실패했고 정확한 bytes 복구 후 다시 통과했다. native system_text의 추가 분리와 Git 작업자,
+전체 safe-save·편집 입력·GUI 저장·실앱 저장 검증은 아직 진행 대상이다.
+
+The draw-lowering rebase retains Chrome Lab's Metal lowering import while routing
+semantic draw projection through `maru.app.chrome_draw_lowering`. The focused
+Windows gate now compiles 44 cases (16 lowering cases plus 28 aggregation blocks).
+Five independent behavioral mutations were rejected: text layer policy, fractional
+pixel origin, independent border alpha, gradient direction, and caller quad layer.
+Each was restored before the next mutation; the final original source passed all
+44 cases. Portable text request and Windows paint regressions also passed.

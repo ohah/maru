@@ -2213,3 +2213,7 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 `zig build test-chrome-text-request` checks owned semantic text requests: Korean
 labels and SVG carriers, offscreen origins, owned family/fallback names, and cleanup
 at every failed allocation prefix. It does not require a native font-shaping device.
+
+`zig build test-chrome-draw-lowering` checks renderer-neutral projection, layer
+ordering, measured text placement, clips, gradient direction and independent border
+alpha without requiring a native GPU window.

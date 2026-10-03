@@ -1060,3 +1060,16 @@ backup_on_disk=false, 이전 backup bytes 보존을 검사한다. 권한은 defe
 제품 134개·규칙 39개가 종료 코드 0으로 통과했다. 최종 로그는
 `/tmp/maru-recovery-additional-final.log`이며 문서 링크/줄 참조 및 Zig fmt 검사도 통과했다.
 실제 재시작·GUI·새 ID codec은 여전히 검증 완료로 세지 않는다.
+
+### 남은 이전 백업의 재열기 결과
+
+U4b-18을 확장해 첫 fixture를 완전히 해제하고 새 AppSession fixture에서 같은 파일을
+openRestored로 열었다. disk의 최신 `new:old:disk` 대신 잔여 backup의 `old:disk`가
+메모리 본문으로 복원되고 dirty가 됐다. disk_hash도 backup의 원래 `disk` 지문으로 돌아갔다.
+이 상태의 saveDocument는 ExternalConflict로 거절하며 disk의 최신 bytes는 유지됐다.
+따라서 잔여 이전 백업은 무시되지 않지만, 이 검사에서는 정상 저장한 파일을 조용히 덮어쓰지는 않았다.
+
+제품 134개·규칙 39개가 종료 코드 0으로 통과했다. 로그:
+`/tmp/maru-residual-backup-reopen.log`. 이는 fixture teardown 후 새로운 제품 세션의
+복원 API 검사다. 실제 GUI 앱 process 종료/재시작·workspace host capture/apply는
+수행하지 않았으며 OS 재시작 증거로 표현하지 않는다. 제품 수정은 포함하지 않는다.

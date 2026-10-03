@@ -4172,6 +4172,42 @@ pub fn build(b: *std.Build) void {
         capture_host_step.dependOn(&b.addSystemCommand(&.{ "echo", "workspace Swift capture judges need macOS; not executed on this target" }).step);
         read_host_step.dependOn(&b.addSystemCommand(&.{ "echo", "workspace Swift read judges need macOS; not executed on this target" }).step);
     }
+    // 후보 어댑터의 오류 판정은 CI에서도 실행한다. 제품 restore 완료나 성능 예산으로 세지 않는다.
+    if (target.result.os.tag == .macos and builtin.os.tag == .macos) {
+        const reservation_fixture = b.addExecutable(.{
+            .name = "editor-recovery-reservation-fixture",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/editor_recovery_reservation.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "session", .module = b.createModule(.{
+                        .root_source_file = b.path("src/session.zig"),
+                        .target = target,
+                        .optimize = optimize,
+                    }) },
+                    .{ .name = "owner_lease", .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/owner_lease.zig"),
+                        .target = target,
+                        .optimize = optimize,
+                        .link_libc = true,
+                    }) },
+                },
+            }),
+        });
+        const run_reservation = b.addSystemCommand(&.{ "python3", "tools/perf/editor-recovery-reservation.py", "--fixture" });
+        run_reservation.addArtifactArg(reservation_fixture);
+        run_reservation.setCwd(b.path("."));
+        b.step("test-editor-recovery-reservation", "Compare isolated editor reservation candidates with real lease and atomic writer").dependOn(&run_reservation.step);
+        test_step.dependOn(&run_reservation.step);
+        macos_only_test_step.dependOn(&run_reservation.step);
+        const perf_reservation = b.addSystemCommand(&.{ "python3", "tools/perf/editor-recovery-reservation.py", "--benchmark", "--fixture" });
+        perf_reservation.addArtifactArg(reservation_fixture);
+        perf_reservation.setCwd(b.path("."));
+        b.step("perf-editor-recovery-reservation", "Measure reservation candidates without process startup in the timed region").dependOn(&perf_reservation.step);
+    }
+
     test_step.dependOn(&run_core_tests.step);
 
     // **macOS 에서만 만들어지는 게이트들의 모음.** `mise run check` 를 도는 CI 잡은 `ubuntu-latest`

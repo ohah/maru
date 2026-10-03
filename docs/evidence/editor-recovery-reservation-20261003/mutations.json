@@ -1,0 +1,71 @@
+{
+  "scope": "compile-valid candidate adapter mutations; targeted real filesystem/process oracles; not product mutations",
+  "source_sha256": "93ef078f21b28ed0fac29f7530e019cf9a0ce2302bffbf540571833b0da93eae",
+  "runner_sha256": "81b8a21293e250777874977f0ef9679a561a5217c39344177151314e24f2bc0b",
+  "mutations": [
+    {
+      "mutation": "namespace_validation_removed",
+      "compile_exit": 0,
+      "cases": [
+        {
+          "candidate": "claim",
+          "detected": true,
+          "assertion": "('publish', 'error', 'ok')"
+        },
+        {
+          "candidate": "directory",
+          "detected": true,
+          "assertion": "('publish', 'error', 'ok')"
+        }
+      ]
+    },
+    {
+      "mutation": "stale_drop_guard_removed",
+      "compile_exit": 0,
+      "cases": [
+        {
+          "candidate": "claim",
+          "detected": true,
+          "assertion": "('drop', 'error:StaleDrop', 'ok')"
+        },
+        {
+          "candidate": "directory",
+          "detected": true,
+          "assertion": "('drop', 'error:StaleDrop', 'ok')"
+        }
+      ]
+    },
+    {
+      "mutation": "atomic_mode_correction_removed",
+      "compile_exit": 0,
+      "cases": [
+        {
+          "candidate": "claim",
+          "detected": true,
+          "assertion": "atomic record mode 0"
+        },
+        {
+          "candidate": "directory",
+          "detected": true,
+          "assertion": "atomic record mode 0"
+        }
+      ]
+    },
+    {
+      "mutation": "record_identity_guard_removed",
+      "compile_exit": 0,
+      "cases": [
+        {
+          "candidate": "claim",
+          "detected": true,
+          "assertion": "('mark-drop', 'error:ForeignRecord', 'ok')"
+        },
+        {
+          "candidate": "directory",
+          "detected": true,
+          "assertion": "('mark-drop', 'error:ForeignRecord', 'ok')"
+        }
+      ]
+    }
+  ]
+}

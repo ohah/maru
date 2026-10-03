@@ -37,6 +37,10 @@ v2 방향은 선택됐지만 이 문서의 wire 예시는 구현 완료를 뜻�
 다음 연결은 ID 발급/예약과 workspace capture/apply가 같은 ID를 다시 찾는 경로이며,
 이 경계를 완성할 때 제품 writer를 전환한다. orphan discovery와 새 복구 UI는 별도 미구현이다.
 
+후속 예약 후보의 실제 `OwnerLease`·atomic writer 비교는
+[복구 ID 예약 실험](editor-recovery-reservation.md)에 기록한다. 파일/프로세스 경계의
+실행 도구이며 제품 저장소 배치 확정, clean open 비용 검증, writer/restore 연결 완료를 뜻하지 않는다.
+
 ## 해결할 문제와 현재 코드
 
 - `editor/mod.zig.prepareSharedView`는 기존 정본 lease를 retain하고 독립 뷰를 만든다. 새 뷰에는 `file_entry`가 없다.
@@ -1049,13 +1053,17 @@ source와 current의 동시 소유/읽기 결과 소비 요구를 추가했다. 
   record parser는 빈 본문을 정상으로 읽지만 revival은 원본을 삭제하고 새 문서를 만들지 않는지
   검사한다. 전체 삭제 편집의 실제 GUI 입력/외부 원본 삭제 이벤트를 수행한 검사는 아니다.
 
-저장소 후보는 `python3 tools/perf/editor-recovery-reservation.py`로 격리 임시 폴더에서
+당시 저장소 후보는 `python3 tools/perf/editor-recovery-reservation.py`의 초기 버전으로 격리 임시 폴더에서
 실행했다. 두 자식 process가 같은 이름을 예약할 때 claim(O_EXCL)과 directory(mkdir)
 모두 하나만 성공했다. 임시 새 본문을 게시하지 않고 버리면 이전 record가 유지됐고,
 os.replace 뒤 새 완전 본문과 예약 객체가 유지됐다. 임시 폴더는 실행 후 정리한다.
 이 도구는 Python의 파일 연산 실험이며 Maru atomic writer/lock에 연결한 구현이 아니다.
 실행 시간에는 process 시작 비용이 포함돼 두 후보의 성능 우위 근거로 사용하지 않는다.
 claim의 stale owner 재인수/경로 ABA/삭제 실패/실제 SIGKILL은 아직 검사하지 않았다.
+
+위 내용은 PR #4097 당시의 Python primitive 실험 결과다. 현재 도구는 `--fixture`가 필요하며
+`zig build test-editor-recovery-reservation`이 실제 Zig 실행 파일을 빌드해 전달한다.
+후속 검증 범위와 남은 한계는 [예약 후보 실행 결과](editor-recovery-reservation.md)를 따른다.
 
 로그는 `/tmp/maru-recovery-edge-execution.log`, `/tmp/maru-reservation-probe.json`이다.
 새 ID/wire/restart 기능은 여전히 미구현이다. 이번 두 제품 반례와 파일 연산 대조를

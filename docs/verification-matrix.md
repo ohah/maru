@@ -3932,7 +3932,7 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 
 ## 에디터 복원 metadata codec
 
-- 상태: 부분 구현. `test-editor-restore-codec` Debug/ReleaseFast 7개 exact-count. `perf-editor-workspace-state`는 codec 부하만 측정한다.
+- 상태: 부분 구현. `test-editor-restore-codec` Debug/ReleaseFast 9개 exact-count. `perf-editor-workspace-state`는 codec 부하만 측정한다.
 - 판정: 방향 있는 선택·wrap 상속·접힘·로컬 path payload, 문서 참조, 잘린 입력·개수 부풀리기·기존 커서 상한·OOM 정산.
 - 한계: 제품 capture/restore·다른 workspace 상태와의 실패 격리·실제 재시작/IME/GUI는 미착수다. 10개 측정 시나리오의 범위와 미결 정책은 [복원 설계](plans/editor-shared-restore.md)가 소유한다.
 
@@ -4007,3 +4007,14 @@ workspace 자동 복원은 꺼 두며 host checkpoint/새 recovery ID/OS reboot 
 같은 path의 독립 ID·공유 State 수명·등록/encode/decode OOM에서 원래 소유 보존을 검사한다.
 제품 writer는 아직 기존 path 신원을 사용한다. 원래 충돌 characterization을 보존하며,
 새 codec 통과를 제품 restart 복구 성공으로 세지 않는다.
+
+## 복구 ID 예약 후보
+
+`zig build test-editor-recovery-reservation`은 macOS의 실제 `OwnerLease`·atomic writer·v2 codec을
+격리 어댑터에서 조합한다. 두 process의 동일 ID 경쟁, 빈 본문, 동일 path의 독립 ID,
+예약/상위 경로 교체, 잘못된 record, 지연 삭제, 쓰기/정리 권한 실패와 SIGKILL 이후 재획득을 판정한다.
+`perf-editor-recovery-reservation -Doptimize=ReleaseFast`는 같은 판정과 함께 시간/entry 수를 출력한다.
+오류 판정은 macOS의 기본 `test`와 `test-macos-only` CI에 연결하고 시간 측정만 opt-in이다.
+제품 clean open·저장/버리기 UI·workspace 복원은 미연결이다.
+물리 전원 손실과 공격적 동일 UID의 최종 검사 직후 교체는 보장하지 않는다.
+디렉터리 후보의 정리 실패와 임시 파일 잔존을 포함한 [비교 결과](plans/editor-recovery-reservation.md)가 상세 근거다.

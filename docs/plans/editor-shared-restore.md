@@ -177,10 +177,12 @@ secure atomic publication을 유지하고 host 헤더 집계를 함께 맞춘다
 불일치하면 뷰 좌표/접힘을 기본값으로 연다. A의 내용까지 복구했다고 주장하지 않는다.
 내용 지문은 표시 상태의 일치 여부 확인이지 마지막 입력 보존 보장이 아니다.
 
-기존 `restoreFromRecord`는 `dropConsumed`로 backup을 삭제한다. 새 staging 경로는
-이 함수를 그대로 호출하지 않는다. record 읽기·staged 적용과 외부 파일 소비를 분리하고,
-모든 뷰 준비 실패에서는 record를 남긴다. publication 성공 뒤 소비 시점 역시
-기존 recovery 수명 계약과 대조해야 하며 게시만으로 crash 복구가 보장된다고 간주하지 않는다.
+기존 `dropConsumed`는 `workspace_restore_staging`이면 삭제를 보류한다.
+`workspace.apply`는 실패 시 `discardDeferredDrops`, 성공 시 `commitDeferredDrops`로 정산한다.
+따라서 staging 중 즉시 삭제된다는 앞선 지적은 현재 코드에서 성립하지 않는다.
+새 공유 복원도 이 admission과 정산 경계 안에서 문서당 한 번 적용해야 한다.
+publication 성공 뒤 소비 시점 역시 기존 recovery 수명 계약과 대조해야 하며
+게시만으로 crash 복구가 보장된다고 간주하지 않는다.
 
 ### 구현 순서와 완료 판정
 
@@ -220,9 +222,21 @@ secure atomic publication을 유지하고 host 헤더 집계를 함께 맞춘다
 ## 저장 위치 권고의 추가 적대적 검토 — 2026-10-03
 
 - **같은 파일이면 전부 일치한다는 반례:** 배치/뷰는 한 atomic checkpoint라도 본문 backup은 별도 파일이다. 지문 불일치에서 안전한 표시로 돌아가는 조건을 보완했다. 백업 실패 뒤 마지막 입력 손실을 이 방식으로 해결했다고 주장하지 않는다.
-- **기존 복원 함수를 그대로 쓰는 반례:** `editor/backup.zig.restoreFromRecord`의 `dropConsumed`가 publication 전에 실행되면 뒤의 staging 실패에서 backup 보존을 깨뜨린다. 읽기·적용·소비를 분리하는 조건을 명시했다. 아직 새 staging 코드는 없다.
-- **같은 경로의 독립 문서 반례:** 문서 표는 둘을 구분하지만 기존 path/base fingerprint 기반 backup identity는 같을 수 있다. 문서 표만으로 각각 다른 dirty 내용을 복구한다고 주장하지 않는다. 첫 공개 전 이 경우의 독립 recovery 식별 또는 생성 정책을 판정해야 한다.
+- **기존 복원 함수의 호출 경계:** 앞선 검토는 `dropConsumed`의 staging 보호를 놓쳤다. 아래 추가 검토에서 즉시 삭제 주장을 정정한다. 실제 조건은 새 공유 복원이 기존 staging admission과 commit/discard 정산을 유지하는지다.
+- **같은 경로의 독립 문서 반례:** 문서 표는 둘을 구분하지만 기존 로컬 backup 파일 이름은 path만으로 정해진다. base fingerprint가 달라도 이름이 같을 수 있다. 문서 표만으로 각각 다른 dirty 내용을 복구한다고 주장하지 않는다. 첫 공개 전 이 경우의 독립 recovery 식별 또는 생성 정책을 판정해야 한다.
 - **선택 상태 저장 실패의 UX 반례:** 큰 다중 선택/접힘 상태 때문에 checkpoint 전체 실패가 반복되면 새 창 배치까지 저장하지 못한다. 현재 실패 보존은 안전성 조건이며 최선의 UX라는 결론은 아니다. 뷰 상태를 명시적 기본값 레코드로 낮춰 구조만 저장하는 방식과 실측 비교할 후속 판정 항목으로 남긴다.
 - **다른 에디터와 동일하다는 반례:** VS Code의 workspace 내부 DB와 그룹/파일별 뷰 상태는 책임 분리를 뒷받침하지만 Maru의 단일 text checkpoint가 최선임을 입증하지 않는다. 현재 권고는 기존 atomic publisher 재사용과 다중 파일 결합 비용을 줄이는 Maru의 구현 선택이다. 별도 파일/DB가 잘못된 방식이라는 주장은 하지 않는다.
 
 이번 검증은 소스와 설계의 대조다. codec/crash/재시작 실행 검증을 완료한 결과가 아니다.
+
+## 추가 적대적 검증 5회 — 저장/복원 경계 재대조
+
+1. **삭제 보호 장치 반증.** `backup.dropConsumed`의 staging guard와 `workspace.apply`의 errdefer/성공 정산을 대조했다. 즉시 삭제라는 이전 주장은 철회한다. staging 목록 append OOM에서도 삭제하지 않는 현재 방어가 있다. 새 복원이 이 범위를 우회하지 않는지를 후속 실행 gate로 둔다. 순수 함수에 `dropConsumed` 호출이 있다는 사실만으로 제품 결함이라 판정하지 않는다.
+2. **백업 신원 반증.** `session/editor/backup.fileName`은 로컬 path만 해시한다. `disk_hash`는 record payload의 저장 충돌 판정 값이며 파일 이름에 들어가지 않는다. 기존 UB6 판정자도 서로 다른 disk_hash에서 같은 이름을 요구한다. 따라서 같은 path의 독립 dirty 문서는 base fingerprint가 달라도 백업 이름이 충돌한다. 현재 문서 표가 이를 해결하지 않으며, 독립 recovery ID 도입 또는 독립 dirty 모델 생성 정책은 공개 전 판정 항목이다. 두 안 중 하나를 이번 문서 검토에서 임의로 구현하지 않는다.
+3. **실패와 부재의 혼동 반증.** 현재 `backup.read`의 `null`은 파일 없음뿐 아니라 접근 실패·OOM·parse 실패도 포함한다. 공유 복원에서 이를 모두 ‘백업 없음, clean disk로 성공’으로 처리하면 checkpoint 지문과 다른 내용으로 열리고 미저장 내용을 놓쳤다는 이유를 알 수 없다. 새 복원 경계에서는 absent/invalid/unreadable/OutOfMemory를 구분해 관측하고, OOM 등 복원 준비 실패는 창 게시를 거절해야 한다. 손상 record는 기존처럼 보존한다. 이는 새 구현 요구이며 기존 함수가 이미 구분한다는 주장은 하지 않는다.
+4. **revision 검사의 범위 반증.** 문서 revision은 커서 이동·접힘·wrap·창 폭 변경을 대표하지 않는다. 따라서 start/end revision 대조만으로 모든 뷰 상태의 동시성을 증명할 수 없다. 같은 메인 스레드 구간에서 topology·뷰 상태·표시 설정까지 owned copy하고 재진입을 금지하는 조건이 필요하다. 복원 때 내용 지문이 같아도 wrap 폭·tab width·fold provider가 바뀔 수 있으므로 랩 조각과 접힘 범위를 현재 표시 매핑으로 다시 검증한다. saved revision 번호를 그대로 다음 실행의 일치 기준으로 쓰지 않는다.
+5. **메모리 게시와 영속 복구의 혼동 반증.** 기존 성공 경로는 live 창 게시 후 `commitDeferredDrops`로 record를 소비하고, 복원된 dirty 문서는 다음 backup 만기에 다시 보호된다. 그 사이 프로세스가 종료되는 경우는 staging rollback과 다른 crash 경계다. 신규 설계는 게시 성공을 영속 내용 보존의 증거로 쓰지 않는다. 공유 복원 공개 전 ‘record 소비 직후→재백업 전 종료’에 대한 격리 프로세스 재현과 보존 수명 판정이 필요하다. 이번 검토는 이 crash를 실행 재현하지 않았다.
+
+다섯 회의 결론은 설계 조건 강화와 이전 주장 정정이다. 현재 저장 위치 권고는
+같은 checkpoint에서 구조/뷰를 결합하는 단순성을 근거로 한 후보이며,
+미저장 recovery identity·실패 분류·성공 후 record 수명까지 해결된 최종 설계라는 뜻은 아니다.

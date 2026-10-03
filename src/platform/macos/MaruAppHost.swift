@@ -241,9 +241,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         if let web = controller?.osrDragUpdate(sender, in: self) { return web }
         guard let types = sender.draggingPasteboard.types,
               !Set(types).isDisjoint(with: Self.dropTypes) else { return [] }
-        // copy 아이콘으로 드롭 가능함을 표시 — 소스가 허용한 것 안에서(페이지 끌기는 이동만 허용할 수 있다 — W6d② 적대 검증 1 차).
+        // copy 아이콘으로 드롭 가능함을 표시. maru 의 Chromium 탭에서 시작한 끌기는 페이지가 허용한 것 안에서(이동만 허용할 수
+        // 있다 — 그러면 이동으로 받는다). 다른 앱의 끌기는 지금처럼 copy — 수식키로 좁혀진 마스크(Control → 링크)를 따르면
+        // Finder 끌기가 거절됐다(W6d② 적대 검증 1·2 차).
+        guard sender.draggingSource is MaruMetalTerminalView else { return .copy }
         let mask = sender.draggingSourceOperationMask
-        return mask.contains(.copy) ? .copy : (mask.contains(.generic) ? .generic : [])
+        return mask.contains(.copy) ? .copy : (mask.contains(.move) ? .move : (mask.contains(.generic) ? .generic : []))
     }
 
     override func draggingExited(_ sender: (any NSDraggingInfo)?) {
@@ -9609,7 +9612,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var iw: UInt32 = 0, ih: UInt32 = 0
         let drag = maru_macos_app_session_osr_drag_out_take(session, &allowed, &hx, &hy, &iw, &ih)
         guard drag != 0 else { return }
-        // 앞 끌기가 남았으면(세션 끝 알림이 오지 않았다) 놓는다 — Zig 가 그 끌기를 취소로 답했다.
+        // 앞 끌기 기록이 남았으면(세션 끝 알림이 오지 않았다) 놓는다 — 다른 번호면 Zig 가 그 끌기를 취소로 답했다.
         osrDragOutSession = nil
         let item = osrDragOutItem(session, drag)
         let mask = NSDragOperation(rawValue: UInt(allowed))
@@ -9627,7 +9630,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // 이미 뗐으면(누름이 끝났다) 세션을 열 수 없다 — 취소로 답한다.
         guard NSEvent.pressedMouseButtons & 1 != 0, let event = view.lastLeftMouseEvent, view.window != nil else {
-            _ = maru_macos_app_session_osr_drag_out_end(session, drag, 0, 0, 0)
+            _ = maru_macos_app_session_osr_drag_out_end(session, drag, .nan, .nan, 0) // 시작 자리로
             return
         }
         let image = osrDragOutImage(session, drag, iw, ih, item)
@@ -9704,7 +9707,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         osrDragOutSession = nil
         withSurface(shown.owner) {
             guard let session = appSession else { return }
-            var xPx = -1.0, yPx = -1.0 // 창이 없으면 시작 자리로(Zig)
+            var xPx = Double.nan, yPx = Double.nan // 창이 없으면 시작 자리로(Zig) — 음수는 창 왼쪽·위 밖의 정상 좌표다
             if let window = shown.view.window {
                 let local = shown.view.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
                 (xPx, yPx) = backingPx(local, in: shown.view)
@@ -10097,10 +10100,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard let session = appSession, maru_macos_app_session_osr_drag_reset(session) != 0 else { return }
             let pb = info.draggingPasteboard
             // maru 의 Chromium 탭에서 시작한 끌기 — pasteboard 대신 sidecar 가 쥔 그 끌기 데이터로(W6d② — 페이지가 정한 형식이 남는다).
-            // 소스가 이 앱의 view 이고 번호가 지금 도는 페이지 끌기일 때만 — 아니면(원래 탭·창이 닫혔다, 다른 maru) pasteboard 로.
+            // 소스가 이 앱의 view 이고 그 끌기가 아직 살아 있을 때만(Zig 가 판정) — 아니면(원래 탭·창이 닫혔다·sidecar 가 다시 떴다,
+            // 다른 maru) pasteboard 로(적대 검증 1·2 차).
             if let mark = pb.string(forType: MaruMetalTerminalView.osrDragType), let drag = UInt32(mark), drag != 0,
-               info.draggingSource is MaruMetalTerminalView, osrDragOutSession?.drag == drag {
-                maru_macos_app_session_osr_drag_set_source(session, drag)
+               info.draggingSource is MaruMetalTerminalView, maru_macos_app_session_osr_drag_set_source(session, drag) != 0 {
                 return
             }
             func add(_ kind: UInt32, _ value: String) {

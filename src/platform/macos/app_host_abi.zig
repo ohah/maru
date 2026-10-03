@@ -5047,10 +5047,11 @@ pub export fn maru_macos_app_session_osr_drag_drop(session: ?*AppSession, x_px: 
     return session_mod.web_ops.osrDragDrop(app, x_px, y_px, mods);
 }
 
-/// v206(W6d②): 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기(번호)다 — Chromium 본문에 들어가면 그 데이터로 enter 한다.
-pub export fn maru_macos_app_session_osr_drag_set_source(session: ?*AppSession, drag: u32) void {
-    const app = session orelse return;
-    session_mod.web_ops.osrDragSetSource(app, drag);
+/// v206(W6d②): 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기(번호)다 — Chromium 본문에 들어가면 그 데이터로 enter 한다. 그
+/// 끌기가 이미 끝났으면(원래 탭·창이 닫혔다·sidecar 가 다시 떴다) 0 — Swift 는 pasteboard 로 간다.
+pub export fn maru_macos_app_session_osr_drag_set_source(session: ?*AppSession, drag: u32) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrDragSetSource(app, drag));
 }
 
 /// v206(W6d②): 페이지가 시작한 끌기를 이 창이 가져간다(그 탭을 왼쪽으로 누른 채일 때만 — 아니면 sidecar 에 취소로 답한다).
@@ -5084,17 +5085,13 @@ pub export fn maru_macos_app_session_osr_drag_out_started(session: ?*AppSession,
     session_mod.web_ops.osrDragOutStarted(app, drag);
 }
 
-/// v206(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px — 음수면 시작 자리)와 받은 동작(`NSDragOperation`, 0 = 취소). 그 끌기가 아니면 0.
+/// v206(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px — NaN 이면 시작 자리, 음수는 정상 좌표)와 받은 동작(`NSDragOperation`,
+/// 0 = 취소). 그 끌기가 아니면 0.
 pub export fn maru_macos_app_session_osr_drag_out_end(session: ?*AppSession, drag: u32, x_px: f64, y_px: f64, operation: u32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrDragOutEnd(app, drag, x_px, y_px, operation));
 }
 
-/// v206(W6d②): 이 창이 돌리는 페이지 끌기 번호(없으면 0).
-pub export fn maru_macos_app_session_osr_drag_out_active(session: ?*AppSession) u32 {
-    const app = session orelse return 0;
-    return session_mod.web_ops.osrDragOutActive(app);
-}
 
 /// v197(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.
 pub export fn maru_macos_app_session_osr_key(session: ?*AppSession, phase: i32, key_code: u32, character: u32, unmodified: u32, mods: i32) i32 {

@@ -1625,6 +1625,14 @@ pub fn takeDragOut(surface_id: u64) ?*const DragOut {
     return d;
 }
 
+/// 그 번호의 페이지 끌기가 아직 살아 있는가(어느 탭이든 창이 가져간 채) — 원래 탭이 닫혔거나 sidecar 가 다시 떴거나 창이 닫혀
+/// 끝났으면 false 다. 그러면 sidecar 도 데이터를 놓았으니 maru 안 놓기는 pasteboard 로 간다(W6d② 적대 검증 2 차).
+pub fn dragOutAlive(drag: u32) bool {
+    if (drag == 0) return false;
+    for (surfaces.values()) |*s| if (s.drag_out) |d| if (d.drag == drag and d.taken) return true;
+    return false;
+}
+
 /// 가져간 그 끌기(창이 조각을 읽는다). 번호가 다르면 null.
 pub fn dragOut(surface_id: u64, drag: u32) ?*const DragOut {
     const s = surfaces.getPtr(surface_id) orelse return null;
@@ -2578,17 +2586,20 @@ test "page drags gather their pieces, are taken by one window, answered once wit
     apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .url, .bytes = "https://y/" } }, 0);
     try std.testing.expect(takeDragOut(7) == null);
     apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 3, .allowed = 1 | 16, .point = .{ .x = 4, .y = 5 } } }, 100);
+    try std.testing.expect(!dragOutAlive(3)); // 아직 아무 창도 안 가져갔다
     // `drag_out` 뒤 조각은 쓰지 않는다.
     apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .text, .bytes = "late" } }, 0);
     const taken = takeDragOut(7).?;
     try std.testing.expectEqualStrings("abc", taken.text.items);
     try std.testing.expectEqualStrings("https://y/", taken.url.items);
     try std.testing.expect(takeDragOut(7) == null); // 한 창만
+    try std.testing.expect(dragOutAlive(3) and !dragOutAlive(4) and !dragOutAlive(0));
     // 가져간 끌기는 만료되지 않는다. 답은 허용 동작 안의 하나로, 한 번만.
     expireDragOuts(gpa, 100 + drag_out_pickup_ms + 1);
     try std.testing.expectEqual(@as(usize, 0), sentFrames(&frames));
     try std.testing.expect(endDragOut(gpa, 7, 3, .{ .x = 1, .y = 2 }, 2 | 16));
     try std.testing.expect(!endDragOut(gpa, 7, 3, .{ .x = 1, .y = 2 }, 1));
+    try std.testing.expect(!dragOutAlive(3)); // 끝난 끌기 — maru 안 놓기는 pasteboard 로
     try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
     try std.testing.expectEqual(@as(u32, 16), frames[0].drag_source_end.operation); // 링크(2)는 허용 밖이라 빠진다
     // 아무 창도 가져가지 않으면 시작 자리·취소로 답한다.

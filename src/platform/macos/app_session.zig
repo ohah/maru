@@ -287,7 +287,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 203: W6b — osr_tooltip(hover 중인 Chromium 탭의 툴팁 글과 일련번호 — Swift 가 macOS 툴팁으로 띄운다).
 // 204: W6c② — Chromium 탭 우클릭 메뉴(osr_context_menu_take·item·selection·open·answer — 창이 macOS 메뉴로 띄운다).
 // 205: W6d① — 밖에서 끌어 놓기(osr_drag_reset·add·update·exit·drop — view 의 끌기 세션을 Chromium 탭 본문에 넘긴다).
-// 206: W6d② — 페이지에서 끌어내기(osr_drag_out_take·part·end·active, osr_drag_set_source — 창이 macOS 끌기 세션을 돌린다).
+// 206: W6d② — 페이지에서 끌어내기(osr_drag_out_take·part·started·end, osr_drag_set_source — 창이 macOS 끌기 세션을 돌린다).
 pub const abi_version: u32 = 206;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
@@ -23776,7 +23776,7 @@ pub const AppSession = struct {
         web_ops.osrContextMenuDropShown(self); // 띄운 우클릭 메뉴도(W6c②)
         _ = web_ops.osrDragReset(self); // 끌기 중 창이 닫히면 그 탭에 나가기를 보낸다(W6d①)
         // 이 창이 돌리던 페이지 끌기는 취소로 답한다(W6d② — 세션의 끝 알림은 닫힌 창에 오지 않을 수 있다).
-        if (self.osr_drag_out) |shown| _ = web_ops.osrDragOutEnd(self, shown.drag, -1, -1, 0);
+        if (self.osr_drag_out) |shown| _ = web_ops.osrDragOutEnd(self, shown.drag, std.math.nan(f64), std.math.nan(f64), 0);
         self.osr_drag.deinit(self.allocator);
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);

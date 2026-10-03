@@ -362,6 +362,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     report(back_menu != 0 and can_back and went_back and forward_menu != 0 and can_forward and went_forward, "cm-back-forward", std.fmt.bufPrint(&detail, "뒤로 가능 {} → 뒤로 {} · 앞으로 가능 {} → 앞으로 「{s}」", .{ can_back, went_back, can_forward, w.url() }) catch "");
 
     // 누른 채 온 메뉴 — 오른쪽 떼기를 먼저 보내고 명령(새로고침)을 뒤에. 떼기가 메뉴를 거두면 명령은 실행되지 않는다.
+    w.pump(700); // 「앞으로」가 새로 불러온 것이면 제목이 늦게 바뀔 수 있다 — 기준 제목을 그 뒤에 잡는다
     const held_before = w.shown;
     const title_before_len = w.title_len;
     var title_before: [128]u8 = undefined;
@@ -382,6 +383,31 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
         }
     }.f);
     report(held_shown and reloaded_after_release and w.untilClosed(held_menu, 2_000), "cm-held-release", std.fmt.bufPrint(&detail, "누른 채 메뉴 {} · 떼기 뒤 새로고침 → 제목 「{s}」 → 「{s}」(바뀌어야) · 닫힘", .{ held_shown, title_before[0..title_before_len], w.title() }) catch "");
+
+    // 왼쪽으로 끄는 중 오른쪽을 눌러 온 메뉴 — 앱은 둘 다 떼고(왼쪽 먼저) 명령을 보낸다. 왼쪽 떼기도 메뉴를 거두지 않아야 한다.
+    w.pump(700);
+    const left_before = w.shown;
+    const left_title_len = w.title_len;
+    var left_title: [128]u8 = undefined;
+    @memcpy(left_title[0..left_title_len], w.title_buf[0..left_title_len]);
+    try host.send(.{ .mouse = .{ .browser = browser_id, .kind = .move, .point = blank_point } });
+    try host.send(.{ .mouse = .{ .browser = browser_id, .kind = .down, .button = .left, .point = blank_point, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = browser_id, .kind = .down, .button = .right, .point = blank_point, .click_count = 1 } });
+    const left_shown = w.until(3_000, left_before, struct {
+        fn f(x: *const Watch, b: u32) bool {
+            return x.shown > b;
+        }
+    }.f);
+    const left_menu = w.menu;
+    try host.send(.{ .mouse = .{ .browser = browser_id, .kind = .up, .button = .left, .point = blank_point, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = browser_id, .kind = .up, .button = .right, .point = blank_point, .click_count = 1 } });
+    try w.command(left_menu, .reload);
+    const left_reloaded = w.until(4_000, left_title[0..left_title_len], struct {
+        fn f(x: *const Watch, before: []const u8) bool {
+            return std.mem.startsWith(u8, x.title(), "cm ") and !std.mem.eql(u8, x.title(), before);
+        }
+    }.f);
+    report(left_shown and left_reloaded and w.untilClosed(left_menu, 2_000), "cm-held-left-release", std.fmt.bufPrint(&detail, "왼쪽·오른쪽 누른 채 메뉴 {} · 둘 다 뗀 뒤 새로고침 → 제목 「{s}」 → 「{s}」(바뀌어야) · 닫힘", .{ left_shown, left_title[0..left_title_len], w.title() }) catch "");
 
     // 4 KiB 넘는 선택.
     try w.click(long_point, 3);

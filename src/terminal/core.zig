@@ -3311,6 +3311,32 @@ test "private CSI sequences are consumed without printing" {
     try std.testing.expectEqualStrings("hi    ", dump);
 }
 
+/// 폭·높이를 오가며 resize 를 세 번 한다 — 매번 reflow 스크래치가 커질 수 있다. OOM 은 정당한 결과라 삼킨다.
+fn resizeAcrossScratchGrowth(allocator: std.mem.Allocator) !void {
+    var core = try TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    try core.write("aaaaaaaaaaaaaaaaaaaaaaaaa\r\nbbbb\r\ncccccccccccccccccc\r\n");
+    core.resize(5, 3) catch |e| if (e != error.OutOfMemory) return e;
+    core.resize(30, 6) catch |e| if (e != error.OutOfMemory) return e;
+    core.resize(4, 2) catch |e| if (e != error.OutOfMemory) return e;
+}
+
+// reflow 스크래치(`ensureReflowScratch`)는 옛 버퍼를 **먼저 풀고** 새로 잡는다. 잡기가 실패하면 필드에 풀린
+// 슬라이스가 남아, 다음 resize 나 `deinit` 이 그것을 **다시 풀었다**(2026-10-03 실측: 할당 실패 주입에서 세그폴트 —
+// `free` 의 memset 이 이미 돌려준 페이지를 썼다). 할당을 하나씩 전부 실패시켜 어느 자리에서도 이중 해제·누수가
+// 없는지 본다.
+test "resize: 스크래치 확장이 OOM 으로 실패해도 다음 resize·해제가 옛 버퍼를 다시 풀지 않는다" {
+    var fail_index: usize = 0;
+    var induced: usize = 0;
+    while (fail_index < 10_000) : (fail_index += 1) {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        resizeAcrossScratchGrowth(fa.allocator()) catch |e| if (e != error.OutOfMemory) return e;
+        if (!fa.has_induced_failure) break;
+        induced += 1;
+    }
+    try std.testing.expect(induced > 0); // 실제로 실패를 주입했다(0 이면 이 판정자가 아무것도 안 본 것)
+}
+
 test "resize preserves overlapping content when growing" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
     defer core.deinit();

@@ -6581,8 +6581,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// workspace.v1 raw 텍스트를 읽는다(관대 UTF-8 디코드 — 깨진 바이트는 U+FFFD). 없으면 nil. 헤더 검증·창 분할은
     /// Zig ABI가 한다(파싱 권위 단일화) — 여기선 포맷을 파싱하지 않는다.
     private func loadWorkspaceText() -> String? {
-        guard let url = workspaceFileURL, let data = try? Data(contentsOf: url) else { return nil }
-        return String(decoding: data, as: UTF8.self)
+        guard let url = workspaceFileURL else { return nil }
+        do {
+            return String(decoding: try Data(contentsOf: url), as: UTF8.self)
+        } catch {
+            let failure = error as NSError
+            // 없는 파일은 첫 실행이다. 읽기 실패는 복원 누락이므로 기본 창으로 덮어쓰지 않는다.
+            if failure.domain != NSCocoaErrorDomain || failure.code != CocoaError.fileReadNoSuchFile.rawValue {
+                workspaceRestoreIncomplete = true
+            }
+            return nil
+        }
     }
 
     /// 한 일반 창의 세션·렌더러를 닫고(요약은 surface.latestFrameSummary에 남긴다) 컬렉션에서 뺀다. NSWindow는
@@ -13310,7 +13319,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 복원을 끈 사용자(`workspace.restore = false`·`MARU_NO_WORKSPACE_RESTORE`)는 저장도 막는다 — 안 그러면 복원 안 한
         // 기본 단일 창이 종료 시 저장 파일을 덮어써 사용자가 보존하려던 멀티 창 레이아웃이 사라진다(데이터 손실).
         guard workspaceRestoreEnabled else { return nil }
-        var blocks = ""
+        // 하나의 Data에 누적해 최종 String/UTF-8 Array 사본을 만들지 않는다.
+        // 창 payload의 기존 불량 UTF-8 치환은 유지하고, 검증한 같은 bytes를 writer에 넘긴다.
+        var snapshot = Data((MARU_WORKSPACE_HEADER + "\n").utf8)
         var blockCount: Int64 = 0
         // 저장 시점 key(활성) 창을 active-window=1 마커로 기록한다 — 재시작 복원이 그 창을 다시 focus(M3e).
         // 최대 하나의 창만 isKeyWindow라 마커도 최대 하나. 옵션-키라 비활성 창은 키가 생략된다(옛 파일 flat 동일).
@@ -13355,20 +13366,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             var len: size_t = 0
             guard maru_macos_app_session_serialize_workspace(session, &ptr, &len, isActive, hasFrame, fx, fy, fw, fh) == Self.statusOK,
                   let bytes = ptr, len > 0 else { return nil } // 하나라도 실패하면 이전 전체 checkpoint 보존
-            blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+            snapshot.append(contentsOf: String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self).utf8)
             blockCount += 1
         }
-        guard !blocks.isEmpty else { return nil }
-        let snapshot = MARU_WORKSPACE_HEADER + "\n" + blocks
+        guard blockCount > 0 else { return nil }
         // R2a: per-window writer만으로는 창을 가로지른 runtime-handle 중복을 볼 수 없다. 실제 publish할 전체 문자열을
         // Zig parser/semantic validator에 다시 넣어, 어떤 파일 write/backup보다 먼저 global owner uniqueness를 확인한다.
         // 실패하면 write 0으로 마지막 완전본을 보존한다. Swift는 binding 문법이나 창 경계를 해석하지 않는다.
-        let snapshotBytes = Array(snapshot.utf8)
-        let validatedWindowCount = snapshotBytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)
+        let validatedWindowCount = snapshot.withUnsafeBytes { raw in
+            let buf = raw.bindMemory(to: UInt8.self)
+            return maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)
         }
         guard validatedWindowCount == blockCount else { return nil }
-        return Data(snapshot.utf8)
+        return snapshot
     }
 
     private func shutdownAppSession(preserveWebPanelsFor summarySurface: TerminalSurface? = nil) {

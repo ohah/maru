@@ -4085,6 +4085,25 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    // Execute the actual Swift capture body as well as the Zig ownership tests.
+    // AppKit fixture stubs need the macOS host SDK; cross-target checks stay compile-only.
+    const capture_host_step = b.step("test-macos-workspace-capture", "Run exact-byte and failure tests of the Swift workspace capture");
+    const read_host_step = b.step("test-macos-workspace-read", "Run missing versus unreadable workspace read judges");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        const capture_host_test = b.addSystemCommand(&.{ "python3", "tools/test-workspace-host-capture.py" });
+        capture_host_test.setCwd(b.path("."));
+        capture_host_step.dependOn(&capture_host_test.step);
+        test_step.dependOn(&capture_host_test.step);
+        macos_only_test_step.dependOn(&capture_host_test.step);
+        const read_host_test = b.addSystemCommand(&.{ "python3", "tools/test-workspace-host-read.py" });
+        read_host_test.setCwd(b.path("."));
+        read_host_step.dependOn(&read_host_test.step);
+        test_step.dependOn(&read_host_test.step);
+        macos_only_test_step.dependOn(&read_host_test.step);
+    } else {
+        capture_host_step.dependOn(&b.addSystemCommand(&.{ "echo", "workspace Swift capture judges need macOS; not executed on this target" }).step);
+        read_host_step.dependOn(&b.addSystemCommand(&.{ "echo", "workspace Swift read judges need macOS; not executed on this target" }).step);
+    }
     test_step.dependOn(&run_core_tests.step);
 
     // **macOS 에서만 만들어지는 게이트들의 모음.** `mise run check` 를 도는 CI 잡은 `ubuntu-latest`

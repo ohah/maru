@@ -476,7 +476,7 @@ test "P4 C4 Swift final Quit validates before secure publish and never legacy-sa
     const capture_end = std.mem.indexOfPos(u8, source, capture_start, "\n    private func shutdownAppSession") orelse
         return error.MissingWorkspaceCaptureEnd;
     const capture = source[capture_start..capture_end];
-    const assemble = std.mem.indexOf(u8, capture, "let snapshot = MARU_WORKSPACE_HEADER") orelse
+    const assemble = std.mem.indexOf(u8, capture, "var snapshot = Data((MARU_WORKSPACE_HEADER") orelse
         return error.MissingWorkspaceAssembly;
     const validate = std.mem.indexOf(u8, capture, "maru_macos_app_session_workspace_window_count(nil") orelse
         return error.MissingWorkspaceValidation;

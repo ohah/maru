@@ -1,6 +1,7 @@
+pub const git_backend = @import("app/git/backend.zig");
 pub const chrome_draw_lowering = @import("app/chrome_draw_lowering.zig");
 pub const chrome_text_request = @import("app/chrome_text_request.zig");
-pub const turn_index_cache = @import("app/turn_index_cache.zig");
+pub const turn_index_cache = @import("app/git/index_cache.zig");
 pub const file_tree_backend = @import("app/file_tree_backend.zig");
 /// Shared archive I/O workers; platform hosts consume the same owner types.
 pub const agent_session_archive_backend = @import("app/agent_session_archive_backend.zig");

@@ -1,4 +1,4 @@
-//! Session-host 제품 프로세스로 진입하는 hidden CLI command의 OS-중립 단일 출처.
+//! POSIX session-host 제품 프로세스로 진입하는 native argv grammar.
 //!
 //! launcher와 `main.zig` dispatch가 같은 값을 import해야 `maru <socket>`처럼 command가 빠지거나 양쪽 문자열이
 //! 서로 달라지는 회귀를 만들지 않는다. Upgrade argv도 producer와 consumer가 문자열을 따로 해석하지 않도록
@@ -7,7 +7,7 @@
 const std = @import("std");
 const upgrade_fd_layout = @import("upgrade_fd_layout.zig");
 
-pub const subcommand = "__session-host";
+pub const subcommand = @import("maru").cli.internal_contract.session_host.subcommand;
 pub const upgrade_preflight_flag = "--upgrade-preflight";
 pub const upgrade_restore_flag = "--upgrade-restore";
 pub const release_compatibility_flag = "--release-compatibility";

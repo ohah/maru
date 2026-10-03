@@ -119,3 +119,10 @@ undo 그룹·저장·dirty-close·외부 감시가 연결된 것은 아니므로
 
 열린 KTM 핸들의 실제 결과 조회와 uncertain phase 반영은 windows-platform.md §2m.142에서
 검증했다. 모든 실패 타이밍과 프로세스 종료 후 복구, L2 revision 저장 ack는 별도 진행 대상이다.
+
+Windows dispatcher의 native macOS 상수 경로 결합은 windows-platform.md §2m.143과
+layering-and-portability.md §3.4.4에서 공통 CLI wire 계약으로 분리했다. POSIX parser와 실행은
+macOS adapter에 남는다. Windows persistent host나 W8.17 편집·저장 완료를 뜻하지 않는다.
+
+같은 file ID를 유지한 부모 reparse 전환의 native 조사 재현은 windows-platform.md §2m.144에 기록했다.
+제품 begin 경로의 결정적 fixture와 namespace fence 검증은 남아 있다.

@@ -61,10 +61,29 @@ test {
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
-const notification_runtime_contract = @import("platform/macos/session_host/release_adapter_notification_runtime_contract.zig");
+// Only macOS parses POSIX session paths and inherited descriptor slots. Other
+// targets dispatch the same wire name without importing that native grammar.
+const session_host_entrypoint = if (builtin.os.tag == .macos)
+    @import("platform/macos/session_host/entrypoint.zig")
+else
+    maru.cli.internal_contract.session_host;
+const notification_runtime_contract = maru.cli.internal_contract.notification_runtime;
 const notification_runtime_child_command = notification_runtime_contract.child_command;
 const session_host_build_options = @import("session_host_build_options");
+test "CLI internal contract preserves existing child command and receipt wire ABI" {
+    // Fixed existing wire values protect compatibility with older launchers and
+    // receipt readers; deriving expectations from the constants would miss drift.
+    try std.testing.expectEqualStrings("__session-host", maru.cli.internal_contract.session_host.subcommand);
+    try std.testing.expectEqualStrings("__notification-release-runtime", notification_runtime_contract.child_command);
+    try std.testing.expectEqualStrings("maru.session-host-notification-runtime-preparation.v1", notification_runtime_contract.receipt_schema);
+}
+test "CLI internal contract keeps native launcher and dispatcher on the same command" {
+    // The native parser is pure POSIX grammar, so its command binding can be
+    // checked on every target without starting or linking a native daemon.
+    const native = @import("platform/macos/session_host/entrypoint.zig");
+    try std.testing.expectEqualStrings(maru.cli.internal_contract.session_host.subcommand, native.subcommand);
+    try std.testing.expectEqualStrings(maru.cli.internal_contract.session_host.subcommand, session_host_entrypoint.subcommand);
+}
 const session_host_admin_cli = if (builtin.os.tag == .macos)
     @import("platform/macos/session_host/admin_cli.zig")
 else

@@ -10903,3 +10903,48 @@ pending을 committed로 해석, committed를 aborted로 해석, 조회 오류를
 원복 후 정상 집계가 통과했다. 이 검증은 살아 있는 KTM 핸들의 실제 결정 반영을 증명한다.
 프로세스 종료 후 복구, 모든 실패 타이밍의 결과 확정, L2 revision 저장 ack와 GUI 연결은 아직 증명하지 않았다.
 일반 파일은 계속 읽기 전용이며 실앱 키보드·IME 편집→저장→재열기 검증은 남아 있다.
+
+### 2m.143 Windows dispatcher의 macOS 폴더 결합을 wire 계약으로 분리 (2026-10-03)
+
+`cli/internal_contract.zig`가 hidden session-host/notification child 명령 이름과 notification receipt
+schema의 단일 출처다. Windows dispatcher는 이 공통 계약을 읽는다. macOS entrypoint import는
+comptime macOS 갈래에만 남기며, POSIX 절대 경로와 descriptor 슬롯 grammar도 그 adapter에 유지한다.
+notification release 부모에는 전체 maru 대신 순수 계약 모듈만 주입했다. 기존 macOS 상수 파일은 제거했고,
+Windows SCM·에이전트 표면의 이미 이동한 Chrome 계약에 관한 낡은 경로 설명도 수정했다.
+
+`test-cli-internal-contract`의 root 집계 2개와 실제 판정 2개가 Windows에서 통과했다.
+기존 child wire ABI와 native launcher/dispatcher의 같은 command 값을 검사하며 기본 `test`에 연결한다.
+실제 exe에서 `__session-host`는 macOS-only 오류, `__notification-release-runtime`은 기존 무출력 오류,
+알 수 없는 명령은 기존 usage 오류로 종료됐다. 사용자 파일이나 native host를 만들지 않았다.
+
+session command 이름, notification command 이름, receipt schema, Windows 계약 연결, native parser 계약
+연결을 바꾸는 다섯 변이를 모두 런타임 실패로 검출했다. 그중 command/Windows 연결 변이 세 개는
+실제 exe의 canonical command가 unknown command로 바뀌는 것도 확인했다. 원복 후 unit/build/CLI가 통과했다.
+`check-targets`는 macOS release 부모와 같은 생성자로 만든 독립 module graph의 native 판정도 컴파일한다.
+해당 생성자의 순수 계약 모듈 주입을 제거한 추가 변이는 native 생산자의 module 누락 오류로 검출했고,
+원복 후 교차 컴파일이 통과했다. 이 컴파일 변이는 앞의 다섯 런타임 변이와 별도로 센다.
+실제 macOS child 실행을 Windows에서 검증한 것으로 세지 않는다.
+Windows persistent host 지원, 안전 저장·편집 입력·GUI 저장·재열기 등 남은 항목은 계속 진행 대상이다.
+
+최종 CLI 판정 4개, safe-save 55개와 경로 29개, build/check-targets/check-doc-links/check-boundaries가
+통과했다. 실제 DirectWrite/D3D editor document smoke도 60프레임에서 수정·역연산 뒤 그림과 revision
+변화를 확인했다. 이는 일반 파일의 키보드·IME 편집과 디스크 저장 검증을 대신하지 않는다.
+
+### 2m.144 부모 pin과 같은 file ID만으로는 reparse 전환을 막지 않는다 (2026-10-03)
+
+사용자 파일과 분리한 native 임시 fixture에서 grant와 nested 부모를 LIST/READ_ATTRIBUTES/SYNCHRONIZE,
+share READ/WRITE로 고정하고 원본 leaf는 같은 접근과 share READ/WRITE/DELETE로 열었다.
+부모의 volume-GUID 전송 경로를 먼저 얻은 뒤 원본을 grant 밖의 별도 fixture 폴더로 옮겨 부모를 비웠다.
+그 부모에 mount-point reparse tag를 설정할 수 있었다. 고정한 부모 핸들에서도 변경된 tag가 관측됐다.
+앞서 얻은 GUID 경로로 CreateFileTransactedW를 호출하면 grant 밖의 이동된 원본을 열었고,
+전체 volume/128-bit ID는 처음 열린 원본과 동일했다. 본문을 쓰지 않고 rollback했으며 fixture를 정리했다.
+
+이는 file ID 비교만으로 grant 안의 이름 권위를 증명할 수 없다는 native 재현이다.
+현재 제품 구현의 부모 tag 확인과 부모 핸들 상대 binding 검사를 우회한 조사이며,
+제품 구현에서 저장이 허용됐다는 판정으로 세지 않는다. 다음 단계는 이 시퀀스를 제품 begin 경로의
+결정적 native fixture로 연결하고, 지속·일시적인 tag 전환 및 열린 transaction의 namespace fence를 검사하는 것이다.
+
+근거는 [reparse 조작 계약](https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-point-operations)과
+[MS-FSA FSCTL_SET_REPARSE_POINT](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4aeefef8-92c3-4abc-af7a-a610caf8a165)이다.
+후자는 directory가 비어 있어야 함을 명시한다. 이 재현은 original leaf를 먼저 이동시켜 그 조건을 만족했다.
+Native 권한·공유 규칙을 완화하거나 사용자 경로를 변경하지 않았다. 최종 저장 계약과 GUI 채택은 계속 진행 대상이다.

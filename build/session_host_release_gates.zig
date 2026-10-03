@@ -12,6 +12,31 @@ const support = @import("support.zig");
 const addProjectTest = support.addProjectTest;
 const attachPngCodec = support.attachPngCodec;
 
+/// Both the release parent and compile-only cross gate use this exact isolated
+/// graph. Importing maru here would link a second live host just for constants.
+pub fn notificationRuntimePreparationModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    bounded_mod: *std.Build.Module,
+) *std.Build.Module {
+    const cli_internal_contract_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/internal_contract.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    return b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_runtime_preparation.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "bounded_process", .module = bounded_mod },
+            .{ .name = "cli_internal_contract", .module = cli_internal_contract_mod },
+        },
+    });
+}
+
 /// `build.zig` 의 `build()` 가 이 자리까지 만들어 둔 값 중 **이 파일이 읽는 것만**.
 /// 필드가 이만큼이라는 사실이 곧 이 덩어리의 결합도다 — 늘어나면 경계를 의심한다.
 pub const Context = struct {
@@ -2266,13 +2291,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .link_libc = true,
             .imports = &.{.{ .name = "release_adapter_pre_publish_workspace", .module = notification_workspace_base_mod }},
         });
-        const notification_runtime_preparation_mod = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_runtime_preparation.zig"),
-            .target = target,
-            .optimize = baseline_phase_optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "bounded_process", .module = notification_app_child_bounded_mod }},
-        });
+        const notification_runtime_preparation_mod = notificationRuntimePreparationModule(b, target, baseline_phase_optimize, notification_app_child_bounded_mod);
         const notification_concrete_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_concrete.zig"),
             .target = target,
@@ -3090,7 +3109,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             const nc_continuity_receipt_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_continuity_receipt.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_evidence", .module = nc_evidence_mod }, .{ .name = "release_adapter_notification_app_receipt", .module = nc_app_receipt_mod }, .{ .name = "release_adapter_notification_helper_receipt", .module = nc_helper_receipt_mod } } });
             const nc_workspace_base_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_pre_publish_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "safe_open", .module = safe_open_mod }} });
             const nc_workspace_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_pre_publish_workspace", .module = nc_workspace_base_mod }} });
-            const nc_runtime_preparation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_runtime_preparation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "bounded_process", .module = bounded_mod }} });
+            const nc_runtime_preparation_mod = notificationRuntimePreparationModule(b, target, composition_optimize, bounded_mod);
             const nc_runtime_preparation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_notification_runtime_preparation.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_notification_runtime_preparation", .module = nc_runtime_preparation_mod }} }) });
             const run_nc_runtime_preparation_tests = b.addRunArtifact(nc_runtime_preparation_tests);
             run_nc_runtime_preparation_tests.addArg("--maru-expect-tests=3");

@@ -230,6 +230,7 @@ src/
                         action 투영)·ids(frame-local intent 표)·view(semantic paint와 text 투영)는 서로 다른 이유로 바뀐다.
                         editor_view/는 facade 없이 폴더만 두고 편집기 본문 렌더를 content·frame·diff_frame·geometry·gutter·scrollbar·surface·viewport로 가른다.
   cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다.
+                        internal_contract.zig는 hidden child command 이름·notification runtime 영수증 스키마의 공통 wire 계약을 소유한다. native argv grammar와 실행 권한은 플랫폼 adapter에 남는다.
                         **이 폴더의 제품 코드는 순수하다**(std + 계약 모듈만, 소켓·OS 0) — 그 순수성이 파서·wire·validator를 테스트 가능하게 만드는 근거다.
                         `test` 블록은 이 규칙 밖이다(실제 동작을 실측하느라 fork/pipe를 쓸 수 있다 — `ssh.zig`의 신호 수명 헬퍼가 그 예다).
                         **이 규칙은 산문이 아니라 `tests/boundary/cli_purity.zig`가 기계로 고정한다** — 재고에 없는 파일은 impure 토큰 0이고,
@@ -252,7 +253,7 @@ src/
     posix/              macOS·Linux가 공유하는 no-follow 파일 열기 adapter.
     macos/              AppKit/Metal/CoreText smoke bridge, Swift app host app shell, Swift/Zig C ABI 계약, workspace_checkpoint_file.zig(P4 C2: parent-fd 결속 fixed temp→atomic rename, typed failure·crash fixture; capture/coordinator/AppKit 비소유), control_socket.zig(1b: 컨트롤 플레인 unix socket bind/accept/peer-cred/hello + A2a `serveReadOnly` per-connection read-only serve 함수(`readInto`+`Framer`→`dispatchReadOnly`→응답+`\n`) + poll-gated accept·read-timeout 헬퍼(A2b용) — macOS-gated 테스트), control_server.zig(**A2b 라이브 서버**: 앱-전역 소켓+accept 스레드+메인 marshal 큐(`ControlRequestQueue`·`PendingRequest`, generic·AppSession 비의존, §8.8 lock-order 준수) — macOS-gated 테스트), app_host_abi.zig(A2b start/drain/stop ABI + collectSessionsInto 멀티창 조립·auth(metadata:self)·dispatch 배선), app_session.zig 안 A1 컨트롤 플레인 per-session collector(collectSessionInto/collectSession — 실 트리→중립 SurfaceDto[]+membership, private 자산 재사용 위해 세션 모듈에 co-locate)
     session_host.zig     P3 barrel(protocol·framing·screen_stream·registry·server·socket_server re-export + test 집약, test module은 socket용 link_libc). 구현은 session_host/에 목적별로.
-    session_host/        P3 진행: entrypoint.zig(hidden `__session-host` CLI command의 launcher/main 공용 단일 출처),
+    session_host/        P3 진행: entrypoint.zig(POSIX native argv grammar; hidden command 이름은 cli/internal_contract.zig가 소유),
                         protocol.zig(`MRSH` 32-byte header·kind/flag·error 어휘 codec — **구현됨, P3-a**),
                         framing.zig(partial I/O incremental parser·kind별 cap·unknown optional skip — **구현됨, P3-a**),
                         screen_stream.zig(`maru.screen-stream.v1` 28-byte record header + snapshot/delta record codec·resolved run·

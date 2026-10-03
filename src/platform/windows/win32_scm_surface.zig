@@ -36,9 +36,8 @@ const maru = @import("maru");
 const draw_host = maru.win32_draw_host;
 const win32_terminal = maru.win32_terminal;
 const d3d11_cells = maru.d3d11_cells;
-/// **이름과 달리 두 OS 를 다 탄다** — Windows 는 §2m.18 이음매로 간다. `main.zig` 도 같은 상대
-/// 경로로 가져오므로 한 모듈 안의 한 파일이다. 아직 `platform/macos/` 에 있는 사정은
-/// layering-and-portability.md §3.4.
+/// Windows와 macOS가 같은 공통 아티팩트 계약을 소비한다. CoreText는 macOS
+/// adapter에 남고 Windows는 native text seam을 쓴다(layering-and-portability.md §3.4.3).
 const system_text = maru.app.chrome_text; // Shared artifact policy; native shaping uses the platform seam.
 
 const scm_view = maru.session.scm_view;

@@ -408,3 +408,20 @@ pixel인 셀 메트릭에는 배율을 다시 적용하지 않는다. Windows na
 `test-chrome-artifact`는 33개 등록(집계 21·판정 12)을 강제하며 Windows에서 모두 통과했다.
 CoreText의 실제 실행 검증은 macOS 호스트가 필요하며 Windows 결과로 이를 대체하지 않는다.
 Git backend 이동은 이미 완료했고, 이 분리는 전체 Windows 저장·편집 UI 완성을 뜻하지 않는다.
+
+### 3.4.4 Hidden CLI wire 계약과 POSIX native grammar 분리 (2026-10-03)
+
+`src/cli/internal_contract.zig`는 `__session-host`, notification runtime child command와 receipt schema의
+공통 단일 출처다. Windows dispatcher는 이 계약을 소비하며 POSIX session-host entrypoint를 import하지 않는다.
+macOS entrypoint는 공통 command 이름을 참조하되 `/` 절대 경로·상속 descriptor 슬롯의 strict argv grammar를
+계속 소유한다. notification release adapter도 같은 공통 receipt 계약을 소비한다.
+macOS 폴더의 별도 상수 파일은 제거했다. 새 계약은 OS 호출이나 파일 경로 모델을 포함하지 않는다.
+
+`test-cli-internal-contract`는 기존 wire ABI와 native launcher/dispatcher의 같은 command 값을 검사하며
+기본 `test`에도 연결했다. 이는 Windows에 persistent host나 macOS release child 실행을 제공하는 변경이 아니다.
+native macOS 실행 검증은 macOS host가 필요하며 Windows 결과로 대체하지 않는다.
+
+독립 notification release 부모와 `check-targets`의 macOS compile-only 판정은 같은
+`notificationRuntimePreparationModule` 생성자를 쓴다. bounded process와 순수 CLI 계약만 주입하며
+상수 때문에 두 번째 live host graph를 연결하지 않는다. native `prepare`의 상대 실행 경로 거절을
+기존 판정에서 직접 호출하여 실제 생산자 본문도 컴파일하게 했다.

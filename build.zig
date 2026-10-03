@@ -1483,12 +1483,42 @@ pub fn build(b: *std.Build) void {
         // **Run 은 안 만든다**(이 게이트의 규칙 그대로). 컴파일만 하면 이 계열은 전부 잡힌다.
         const cross_exe_tests = addProjectTest(b, .{ .root_module = cross_exe_mod });
         check_targets_step.dependOn(&cross_exe_tests.step);
+        if (cross_target.result.os.tag == .macos) {
+            // The release parent intentionally has no live maru host graph.
+            // Compile its isolated producer with only bounded I/O + wire names;
+            // compiling main alone would miss a broken named-module seam here.
+            const isolated_bounded = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+                .target = cross_target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            const isolated_preparation = session_host_release_gates.notificationRuntimePreparationModule(b, cross_target, optimize, isolated_bounded);
+            const isolated_preparation_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/session_host_release_adapter_notification_runtime_preparation.zig"),
+                    .target = cross_target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "release_adapter_notification_runtime_preparation", .module = isolated_preparation }},
+                }),
+            });
+            check_targets_step.dependOn(&isolated_preparation_tests.step);
+        }
     }
 
     const exe_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    const internal_contract_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"CLI internal contract"},
+    });
+    const run_internal_contract_tests = b.addRunArtifact(internal_contract_tests);
+    run_internal_contract_tests.addArg("--maru-expect-tests=4"); // 2 root aggregation blocks, wire ABI, native/dispatcher agreement
+    const internal_contract_step = b.step("test-cli-internal-contract", "Verify shared hidden CLI command contracts across platform adapters");
+    internal_contract_step.dependOn(&run_internal_contract_tests.step);
     const file_open_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
         .filters = &.{"Windows file open"},
@@ -4086,6 +4116,7 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    test_step.dependOn(&run_internal_contract_tests.step);
     test_step.dependOn(&run_core_tests.step);
 
     // **macOS 에서만 만들어지는 게이트들의 모음.** `mise run check` 를 도는 CI 잡은 `ubuntu-latest`

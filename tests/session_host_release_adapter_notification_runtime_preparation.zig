@@ -18,6 +18,14 @@ test "R3b2 preparation rejects relative candidate and missing deadline before pr
     var relative = valid();
     relative.executable = "Maru.app/Contents/MacOS/maru";
     try std.testing.expectError(error.InvalidInput, subject.validateForTest(relative));
+    if (@import("builtin").os.tag == .macos) {
+        // Exercise the actual producer entry as well as its pure validator.
+        // Rejection precedes process access; cross compilation must analyze the
+        // child-command/receipt contract used by the real prepare function.
+        var prepared: subject.Prepared = .{};
+        try std.testing.expectError(error.InvalidInput, subject.prepare(std.testing.allocator, std.testing.io, relative, &prepared));
+        try std.testing.expect(prepared.owner == null);
+    }
     var traversing = valid();
     traversing.executable = "/Volumes/Maru/../foreign/maru";
     try std.testing.expectError(error.InvalidInput, subject.validateForTest(traversing));

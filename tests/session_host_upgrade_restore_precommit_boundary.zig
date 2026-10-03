@@ -85,7 +85,7 @@ test "U5 restore precommit fault vocabulary is closed and absent from the produc
     try std.testing.expect(count(e2e, "restore precommit manifest poison fails closed without recursive rollback") == 1);
     try std.testing.expect(count(runner, "std.mem.eql(u8, first, \"--restore-activation-fault\")") == 1);
     try std.testing.expect(count(runner, "std.mem.eql(u8, first, \"__session-host\")") == 1);
-    try std.testing.expect(count(entrypoint, "pub const subcommand = \"__session-host\";") == 1);
+    try std.testing.expect(count(entrypoint, "pub const subcommand = @import(\"maru\").cli.internal_contract.session_host.subcommand;") == 1);
     var graph = try build_graph.parse(std.testing.allocator);
     defer graph.deinit();
     // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 센다.

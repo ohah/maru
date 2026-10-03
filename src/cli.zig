@@ -6,6 +6,7 @@
 //! `sessions`(컨트롤 플레인 read-only 메타데이터 조회 — `sessions list`/`session get`, Track C 1d).
 //! 구조는 docs/project-structure.md의 `src/cli/` 항목을 단일 출처로 둔다.
 pub const ssh = @import("cli/ssh.zig");
+pub const internal_contract = @import("cli/internal_contract.zig");
 pub const install = @import("cli/install.zig");
 pub const terminfo = @import("cli/terminfo.zig");
 pub const sessions = @import("cli/sessions.zig"); // Track C 1d: `maru sessions list`/`session get` read-only 메타데이터 CLI(파서·--help·client wire)

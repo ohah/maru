@@ -334,6 +334,10 @@ pub const VTable = struct {
     /// grid 크기를 바꾼다 — 코어 resize와 PTY winsize(`TIOCSWINSZ`)를 한 user action으로 함께 적용한다.
     resize: *const fn (ctx: *anyopaque, handle: RuntimeHandle, size: terminal.Size, io: std.Io) anyerror!void,
 
+    /// `resize` 에 셀 픽셀을 함께 싣는다(글꼴 크기 변경 — 코어가 격자와 셀 픽셀을 한 번에 바꿔 DECSET 2048 통지를 한 번만
+    /// 낸다). null 이면 `resize` 로 떨어진다. 호출은 `TermRuntimeBackend.resizeWithCell` 로.
+    resize_with_cell: ?*const fn (ctx: *anyopaque, handle: RuntimeHandle, size: terminal.Size, cell: core_command.CellMetrics, io: std.Io) anyerror!void = null,
+
     /// runtime routing을 끊고(late output 거부) PTY/자식/reader를 종료한다. 멱등 — 실제 탭/창 close의 수명 경계.
     close_and_detach: *const fn (ctx: *anyopaque, handle: RuntimeHandle) CloseProgress,
 
@@ -421,6 +425,12 @@ pub const TermRuntimeBackend = struct {
     }
 
     pub fn resize(self: TermRuntimeBackend, handle: RuntimeHandle, size: terminal.Size, io: std.Io) anyerror!void {
+        return self.vtable.resize(self.ctx, handle, size, io);
+    }
+
+    /// 셀 픽셀이 있고 백엔드가 받을 수 있으면 함께, 아니면 격자만 resize 한다.
+    pub fn resizeWithCell(self: TermRuntimeBackend, handle: RuntimeHandle, size: terminal.Size, cell: ?core_command.CellMetrics, io: std.Io) anyerror!void {
+        if (cell) |c| if (self.vtable.resize_with_cell) |f| return f(self.ctx, handle, size, c, io);
         return self.vtable.resize(self.ctx, handle, size, io);
     }
 

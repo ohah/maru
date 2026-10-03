@@ -54,6 +54,7 @@ pub const InProcessTermBackend = struct {
         .write_input_nonblocking = writeInputNonBlocking,
         .enqueue_core_command = enqueueCoreCommand,
         .resize = resize,
+        .resize_with_cell = resizeWithCell,
         .close_and_detach = closeAndDetach,
         .close = close,
         .finish_after_termination = finishAfterTermination,
@@ -195,6 +196,11 @@ pub const InProcessTermBackend = struct {
     fn resize(ctx: *anyopaque, handle: RuntimeHandle, size: terminal.Size, io: std.Io) anyerror!void {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         return self.runtime.resize(handle, size, io);
+    }
+
+    fn resizeWithCell(ctx: *anyopaque, handle: RuntimeHandle, size: terminal.Size, cell: core_command.CellMetrics, io: std.Io) anyerror!void {
+        const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
+        return self.runtime.resizeWithCell(handle, size, cell, io);
     }
 
     fn closeAndDetach(ctx: *anyopaque, handle: RuntimeHandle) CloseProgress {

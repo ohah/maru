@@ -162,7 +162,11 @@ pub fn resizeTermForLayout(self: *AppSession, term: *Term, size: terminal.Size) 
         resizeTermCoreToLayout(self, term, size);
         return;
     }
-    self.runtime.resize(term.surface.id, size, self.io) catch |err| {
+    // 셀 픽셀을 함께 싣는다 — 글꼴 크기가 바뀌면 `applyMetricsPipeline` 이 셀 픽셀을 다시 잡고 곧바로 여기로 오는데, 코어(로컬)와
+    // host 코어(원격)가 격자와 셀 픽셀을 **한 번에** 바꿔야 DECSET 2048 통지가 «새 격자 × 옛 픽셀» 없이 한 번만 간다.
+    // 0(아직 모름)은 `resizeWithCell` 이 안 싣는다.
+    const cell: maru.session.core_command.CellMetrics = .{ .width = self.cell_width_px, .height = self.cell_height_px };
+    self.runtime.resizeWithCell(term.surface.id, size, cell, self.io) catch |err| {
         // `UnknownSurface`/`ProcessExited`는 core에 닿기 전에 반환되므로 표시 grid가 옛 크기로 남는다.
         // `ResizeFailed`(core는 이미 적용, PTY ioctl만 실패)에서도 같은 값을 다시 적용할 뿐이라 무해하다.
         resizeTermCoreToLayout(self, term, size);
@@ -177,7 +181,11 @@ pub fn resizeTermCoreToLayout(self: *AppSession, term: *Term, size: terminal.Siz
     {
         term.surface.lockCore(self.io);
         defer term.surface.unlockCore(self.io);
-        term.surface.core.resize(grid.cols, grid.rows) catch return; // OOM이면 기존 grid 유지(표시만 영향)
+        // 셀 픽셀도 함께 — 활성 탭은 `refreshCellMetrics` 가 따로 안 보내므로(그 doc) 여기서 안 넣으면 이 갈래의 코어가 옛 값에 남는다.
+        if (self.cell_width_px != 0 and self.cell_height_px != 0)
+            term.surface.core.resizeWithCellMetrics(grid.cols, grid.rows, self.cell_width_px, self.cell_height_px) catch return
+        else
+            term.surface.core.resize(grid.cols, grid.rows) catch return; // OOM이면 기존 grid 유지(표시만 영향)
         // 이 갈래엔 응답을 받을 PTY 가 없다(묘비·자식 종료·link 사망). resize 가 만든 응답(DECSET 2048 크기 통지)을
         // 남기면 아무도 비우지 않아 창 크기를 바꿀 때마다 코어에 쌓인다 — 받을 곳이 없으니 버린다.
         term.surface.core.clearResponse();

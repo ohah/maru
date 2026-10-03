@@ -164,7 +164,7 @@ fn expectRuntimeAdmissionInventory(runtime: []const u8) !void {
 
     const fallible = [_][]const u8{
         "sendInput",          "sendInputNonBlocking",    "requestScrollToBottom", "queueCoreCommand",
-        "resize",             "pumpDelta",               "requestResync",         "refreshObservation",
+        "resizeWithCell",     "pumpDelta",               "requestResync",         "refreshObservation",
         "selectedText",       "linkAt",                  "clipboardWrite",        "find",
         "selectContentAware", "sendCoreCommandBlocking", "sendMouseReport",       "takeNotification",
     };
@@ -173,6 +173,12 @@ fn expectRuntimeAdmissionInventory(runtime: []const u8) !void {
         try std.testing.expectEqual(@as(usize, 1), count(body, "try self.admitRuntimeOperation();"));
     }
     try std.testing.expectEqual(@as(usize, 23), read_only.len + destructive.len + fallible.len);
+    // `resize` 는 셀 픽셀 없는 `resizeWithCell` 로 **위임만** 한다(글꼴 크기 변경 — 셀 픽셀을 싣는 resize). 입장은 위임받는 쪽에
+    // 한 번이다 — 여기에 다른 일이 붙으면 입장 없는 진입점이 생긴다.
+    const resize_body = publicFunction(remote, "resize") orelse return error.MissingRuntimeEntry;
+    try std.testing.expectEqual(@as(usize, 1), count(resize_body, "return self.resizeWithCell(cols, rows, 0, 0);"));
+    try std.testing.expectEqual(@as(usize, 1), count(resize_body, ";")); // 위임 한 문장뿐
+    try std.testing.expectEqual(@as(usize, 0), count(resize_body, "admitRuntimeOperation("));
     try std.testing.expectEqual(@as(usize, 1), count(
         function(remote, "admitDestructiveRuntimeOperation") orelse return error.MissingRuntimeEntry,
         "process_seal_service.fatalIntegrity(.destructive_reentry)",

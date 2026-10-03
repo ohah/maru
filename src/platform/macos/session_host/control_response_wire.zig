@@ -13,6 +13,10 @@ pub const ResizeRequest = struct {
     cols: u16,
     rows: u16,
     client_sequence: u64,
+    /// 셀 픽셀(글꼴 크기 변경 — host 코어가 격자와 함께 한 번에 바꾼다). 0 이면 안 싣는다 — 기존 바이트 그대로이고,
+    /// 이름으로만 읽는 host 는 모르는 키를 무시하므로 옛 host 와도 맞는다.
+    cell_width_px: u16 = 0,
+    cell_height_px: u16 = 0,
 };
 
 pub const ResyncRequest = struct {
@@ -126,11 +130,15 @@ pub fn encodeParams(buffer: []u8, request: WireRequest) EncodeError!EncodedParam
     return switch (request) {
         .resize => |value| .{
             .method = "runtime.resize",
-            .params = std.fmt.bufPrint(
+            .params = (if (value.cell_width_px != 0 and value.cell_height_px != 0) std.fmt.bufPrint(
+                buffer,
+                "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d},\"cell_width\":{d},\"cell_height\":{d}}}",
+                .{ value.stream_id, value.cols, value.rows, value.client_sequence, value.cell_width_px, value.cell_height_px },
+            ) else std.fmt.bufPrint(
                 buffer,
                 "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}",
                 .{ value.stream_id, value.cols, value.rows, value.client_sequence },
-            ) catch return error.BufferTooSmall,
+            )) catch return error.BufferTooSmall,
         },
         .resync => |value| .{
             .method = "runtime.resync",
@@ -379,6 +387,34 @@ const canonical_authority = recovery.ControlAuthority{
     .origin = .client,
     .recovery_epoch = 5,
 };
+
+test "runtime.resize 는 셀 픽셀이 둘 다 있을 때만 싣는다 — 없으면 기존 바이트 그대로(옛 host 호환)" {
+    var buffer: [160]u8 = undefined;
+    const with_cell = try encodeParams(&buffer, .{ .resize = .{
+        .stream_id = 7,
+        .cols = 80,
+        .rows = 24,
+        .client_sequence = 11,
+        .cell_width_px = 12,
+        .cell_height_px = 26,
+    } });
+    try std.testing.expectEqualStrings(
+        "{\"stream_id\":7,\"cols\":80,\"rows\":24,\"client_sequence\":11,\"cell_width\":12,\"cell_height\":26}",
+        with_cell.params,
+    );
+    // 한쪽만 있으면 안 싣는다 — host 도 짝이 안 맞으면 버리지만, 보내는 쪽부터 반쪽을 안 만든다.
+    const half = try encodeParams(&buffer, .{ .resize = .{
+        .stream_id = 7,
+        .cols = 80,
+        .rows = 24,
+        .client_sequence = 11,
+        .cell_width_px = 12,
+    } });
+    try std.testing.expectEqualStrings(
+        "{\"stream_id\":7,\"cols\":80,\"rows\":24,\"client_sequence\":11}",
+        half.params,
+    );
+}
 
 test "typed control admission control wire encodes typed requests and keeps recovery authority local" {
     var buffer: [160]u8 = undefined;

@@ -935,11 +935,11 @@ pub const Owner = struct {
                         resize.internal_reply,
                         &internal_owned,
                     );
-                ops.resize(
-                    ops.ctx,
+                ops.resizeMaybeWithCell(
                     resize.runtime_id,
                     applied.cols,
                     applied.rows,
+                    resize.cell,
                 ) catch return self.rejectResize(
                     requester,
                     resize.internal_reply,
@@ -3496,12 +3496,14 @@ test "poll owner publishes changed resize to controller and observer all or none
         controller.fd,
         .request,
         3,
-        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":100,\"rows\":30,\"client_sequence\":1}}",
+        // 셀 픽셀을 함께 싣는다(글꼴 크기 변경) — 운영 경로(`applyResize`)가 `resize_with_cell` 로 넘겨야 한다.
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":100,\"rows\":30,\"client_sequence\":1,\"cell_width\":12,\"cell_height\":26}}",
     );
     try pumpUntilResponse(&owner, controller.fd, "\"changed\":true");
     try pumpUntilResponse(&owner, observer.fd, "\"event\":\"runtime.resized\"");
     try testing.expectEqual(@as(u16, 100), fake_runtime.resized_cols);
     try testing.expectEqual(@as(u16, 30), fake_runtime.resized_rows);
+    try testing.expectEqualDeep(@as(?server_mod.CellPixels, .{ .width = 12, .height = 26 }), fake_runtime.resized_cell);
     try testing.expectEqual(@as(u16, 100), runtime.cols);
     try testing.expectEqual(@as(u64, 1), runtime.resize_generation);
 

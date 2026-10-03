@@ -5778,6 +5778,16 @@ pub const RemoteRuntime = struct {
     }
 
     pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16) ResizeError!void {
+        return self.resizeWithCell(cols, rows, 0, 0);
+    }
+
+    /// `resize` 에 셀 픽셀을 싣는다(글꼴 크기 변경) — host 코어가 격자와 셀 픽셀을 한 번에 바꿔 DECSET 2048 통지를 한 번만
+    /// 낸다. 0 이거나 wire 상한(u16)을 넘으면 안 싣는다 — 그때는 따로 오는 `set_cell_metrics` 가 맞춘다(예전 경로).
+    pub fn resizeWithCell(self: *RemoteRuntime, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32) ResizeError!void {
+        const cell_fits = cell_width_px != 0 and cell_height_px != 0 and
+            cell_width_px <= std.math.maxInt(u16) and cell_height_px <= std.math.maxInt(u16);
+        const cell_w: u16 = if (cell_fits) @intCast(cell_width_px) else 0;
+        const cell_h: u16 = if (cell_fits) @intCast(cell_height_px) else 0;
         try self.admitRuntimeOperation();
         // 관문보다 **먼저** 적는다 — 여기서 버려진 크기도 재연결 게시 때 host 에 박혀야 한다(`layout_size`).
         self.layout_size = .{ .cols = cols, .rows = rows };
@@ -5790,12 +5800,14 @@ pub const RemoteRuntime = struct {
         if (self.currentGeneration().resize_seq == resize_wire.max_counter)
             return error.SequenceExhausted;
         self.currentGeneration().resize_seq += 1;
-        var buf: [96]u8 = undefined;
+        var buf: [160]u8 = undefined;
         const encoded = control_response_wire.encodeParams(&buf, .{ .resize = .{
             .stream_id = self.currentGeneration().attachment.streamId(),
             .cols = cols,
             .rows = rows,
             .client_sequence = self.currentGeneration().resize_seq,
+            .cell_width_px = cell_w,
+            .cell_height_px = cell_h,
         } }) catch |err| return switch (err) {
             error.InvalidRequest => error.ResizeRejected,
             error.BufferTooSmall => error.OutOfMemory,
@@ -5809,6 +5821,8 @@ pub const RemoteRuntime = struct {
             generation_contract.RuntimeRequest.resize(.{
                 .cols = cols,
                 .rows = rows,
+                .cell_width_px = cell_w,
+                .cell_height_px = cell_h,
                 .client_sequence = self.currentGeneration().resize_seq,
             }),
             encoded.method,

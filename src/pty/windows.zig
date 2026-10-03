@@ -1079,6 +1079,13 @@ pub const PtySession = struct {
         self.cell_height_px = cell_height_px;
     }
 
+    /// macOS 와 시그니처를 맞춘다 — ConPTY 엔 픽셀 필드가 없어 값만 보관하고 격자만 바꾼다.
+    pub fn resizeWithCellPixels(self: *PtySession, size: terminal.Size, cell_width_px: u32, cell_height_px: u32) !void {
+        try self.resize(size);
+        self.cell_width_px = cell_width_px;
+        self.cell_height_px = cell_height_px;
+    }
+
     pub fn resize(self: *PtySession, size: terminal.Size) !void {
         if (size.cols == 0 or size.rows == 0) return error.InvalidSize;
         // **잠금 안에서 읽고 쓴다.** 읽은 뒤 놓으면 그 사이에 리더가 닫기 스레드에 넘겨 해제된 것을 만진다.

@@ -18,7 +18,7 @@ const git_locate = maru.session.git_locate;
 const dock_panel = maru.session.dock_panel;
 const repo_path = maru.session.repo_path;
 const safe_open = @import("safe_open.zig");
-const turn_index_cache = @import("turn_index_cache.zig"); // 임시 index 의 수명 — 워커가 오래된 형제를 프로세스당 한 번 쓸어 낸다
+const turn_index_cache = maru.app.turn_index_cache; // 임시 index 의 수명 — 워커가 오래된 형제를 프로세스당 한 번 쓸어 낸다
 
 /// **이 backend가 쓰는 유일한 allocator.** State·job·argv·결과 버퍼가 전부 여기서 나온다.
 ///

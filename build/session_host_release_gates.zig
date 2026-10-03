@@ -128,7 +128,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .{
                     .name = "safe_open",
                     .module = b.createModule(.{
-                        .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                        .root_source_file = b.path("src/platform/posix/safe_open.zig"),
                         .target = target,
                         .optimize = evidence_files_optimize,
                     }),
@@ -177,7 +177,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     );
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |source_directory_optimize| {
         const safe_open_mod = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+            .root_source_file = b.path("src/platform/posix/safe_open.zig"),
             .target = target,
             .optimize = source_directory_optimize,
             .link_libc = true,
@@ -287,7 +287,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .imports = &.{.{
                 .name = "safe_open",
                 .module = b.createModule(.{
-                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                    .root_source_file = b.path("src/platform/posix/safe_open.zig"),
                     .target = target,
                     .optimize = workspace_optimize,
                 }),
@@ -996,7 +996,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "safe_open", .module = b.createModule(.{
-                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                    .root_source_file = b.path("src/platform/posix/safe_open.zig"),
                     .target = target,
                     .optimize = manifest_download_optimize,
                 }) },
@@ -1130,7 +1130,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .imports = &.{
                     .{ .name = "release_manifest", .module = release_manifest_mod },
                     .{ .name = "release_adapter_identity", .module = manifest_file_identity_mod },
-                    .{ .name = "safe_open", .module = b.createModule(.{ .root_source_file = b.path("src/platform/macos/safe_open.zig"), .target = target, .optimize = manifest_file_optimize }) },
+                    .{ .name = "safe_open", .module = b.createModule(.{ .root_source_file = b.path("src/platform/posix/safe_open.zig"), .target = target, .optimize = manifest_file_optimize }) },
                 },
             });
             const manifest_file_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
@@ -1157,7 +1157,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             const bounded_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"), .target = target, .optimize = attestation_optimize });
             const json_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }} });
             const attestation_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_attestation.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "release_adapter_github_json", .module = json_mod }, .{ .name = "bounded_process", .module = bounded_mod } } });
-            const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/safe_open.zig"), .target = target, .optimize = attestation_optimize });
+            const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/posix/safe_open.zig"), .target = target, .optimize = attestation_optimize });
             const files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"), .target = target, .optimize = attestation_optimize, .link_libc = true, .imports = &.{ .{ .name = "safe_open", .module = safe_open_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const cli_authority_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"), .target = target, .optimize = attestation_optimize, .imports = &.{.{ .name = "release_adapter_files", .module = files_mod }} });
             const file_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_manifest_file.zig"), .target = target, .optimize = attestation_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = release_manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod }, .{ .name = "safe_open", .module = safe_open_mod } } });
@@ -1180,7 +1180,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             const release_manifest_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"), .target = target, .optimize = input_optimize });
             const identity_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"), .target = target, .optimize = input_optimize });
             const context_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"), .target = target, .optimize = input_optimize, .imports = &.{ .{ .name = "release_manifest", .module = release_manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
-            const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/safe_open.zig"), .target = target, .optimize = input_optimize });
+            const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/posix/safe_open.zig"), .target = target, .optimize = input_optimize });
             const files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"), .target = target, .optimize = input_optimize, .link_libc = true, .imports = &.{ .{ .name = "safe_open", .module = safe_open_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const cli_authority_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_cli_authority.zig"), .target = target, .optimize = input_optimize, .imports = &.{.{ .name = "release_adapter_files", .module = files_mod }} });
             const deadline_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_deadline.zig"), .target = target, .optimize = input_optimize, .link_libc = true });
@@ -1223,7 +1223,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 },
             });
             const download_safe_open_mod = b.createModule(.{
-                .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                .root_source_file = b.path("src/platform/posix/safe_open.zig"),
                 .target = target,
                 .optimize = download_optimize,
             });
@@ -2051,7 +2051,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .optimize = baseline_phase_optimize,
         });
         const notification_shared_safe_open_mod = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+            .root_source_file = b.path("src/platform/posix/safe_open.zig"),
             .target = target,
             .optimize = baseline_phase_optimize,
         });
@@ -2353,7 +2353,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             const deadline_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_deadline.zig"), .target = target, .optimize = composition_optimize, .link_libc = true });
             const identity_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"), .target = target, .optimize = composition_optimize });
             const bounded_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"), .target = target, .optimize = composition_optimize });
-            const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/safe_open.zig"), .target = target, .optimize = composition_optimize });
+            const safe_open_mod = b.createModule(.{ .root_source_file = b.path("src/platform/posix/safe_open.zig"), .target = target, .optimize = composition_optimize });
             const json_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_manifest", .module = manifest_mod }} });
             const command_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_download_command.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
             const files_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "safe_open", .module = safe_open_mod }, .{ .name = "release_adapter_identity", .module = identity_mod } } });
@@ -4226,7 +4226,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                         .imports = &.{ .{
                             .name = "safe_open",
                             .module = b.createModule(.{
-                                .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                                .root_source_file = b.path("src/platform/posix/safe_open.zig"),
                                 .target = target,
                                 .optimize = authority_optimize,
                             }),
@@ -4489,7 +4489,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .optimize = dmg_authority_optimize,
         });
         const dmg_safe_open_mod = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+            .root_source_file = b.path("src/platform/posix/safe_open.zig"),
             .target = target,
             .optimize = dmg_authority_optimize,
         });
@@ -4678,7 +4678,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .{
                     .name = "safe_open",
                     .module = b.createModule(.{
-                        .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                        .root_source_file = b.path("src/platform/posix/safe_open.zig"),
                         .target = target,
                         .optimize = files_optimize,
                     }),
@@ -5549,7 +5549,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         // 빨간 동안 이 축도 못 돈다 — 원격 SCM 은 argv 와 파이프의 문제지 번들의 문제가 아니다.
         const remote_scm_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/platform/macos/git_backend.zig"),
+                .root_source_file = b.path("src/app/git/backend.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,

@@ -94,7 +94,7 @@ const test_trust_origin: trust_store.Origin = .{ .source = .sheet };
 const git_ops = @import("../git.zig"); // 신뢰 세대 펌프(계획 workspace-trust WT6b-1a)
 const scm_dock_ops = @import("../scm_dock.zig"); // 도크 신뢰 줄(계획 workspace-trust WT6b-2a)
 const scm_dock_dock_ops = @import("../dock.zig"); // 도크 신뢰 줄 판정자 — 도크 기하·열림(계획 workspace-trust WT6b-2a)
-const git_backend_for_test = @import("../../git_backend.zig");
+const git_backend_for_test = maru.app.git_backend;
 const tool_env = @import("../../tool_env.zig");
 /// 호버 박스(tooling §8.2b) — 진단 메시지 + 언어 서버 hover.
 pub const hover_client = @import("hover.zig");

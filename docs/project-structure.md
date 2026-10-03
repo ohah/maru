@@ -249,7 +249,9 @@ src/
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
   renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, font identity registry, persistent renderer state, glyph atlas, frame stats
+  app/git/              공통 Git 작업자(backend.zig)와 임시 index 수명(index_cache.zig).
   platform/             OS별 process/window/input bridge
+    posix/              macOS·Linux가 공유하는 no-follow 파일 열기 adapter.
     macos/              AppKit/Metal/CoreText smoke bridge, Swift app host app shell, Swift/Zig C ABI 계약, workspace_checkpoint_file.zig(P4 C2: parent-fd 결속 fixed temp→atomic rename, typed failure·crash fixture; capture/coordinator/AppKit 비소유), control_socket.zig(1b: 컨트롤 플레인 unix socket bind/accept/peer-cred/hello + A2a `serveReadOnly` per-connection read-only serve 함수(`readInto`+`Framer`→`dispatchReadOnly`→응답+`\n`) + poll-gated accept·read-timeout 헬퍼(A2b용) — macOS-gated 테스트), control_server.zig(**A2b 라이브 서버**: 앱-전역 소켓+accept 스레드+메인 marshal 큐(`ControlRequestQueue`·`PendingRequest`, generic·AppSession 비의존, §8.8 lock-order 준수) — macOS-gated 테스트), app_host_abi.zig(A2b start/drain/stop ABI + collectSessionsInto 멀티창 조립·auth(metadata:self)·dispatch 배선), app_session.zig 안 A1 컨트롤 플레인 per-session collector(collectSessionInto/collectSession — 실 트리→중립 SurfaceDto[]+membership, private 자산 재사용 위해 세션 모듈에 co-locate)
     macos/web_sidecar/  웹 OSR sidecar(W1b — plans/web-osr-backend.md). `host_main.zig`(`maru-web-host` — CEF 브라우저 프로세스, 샌드박스 밖)·
                         `helper_main.zig`(`maru-web-helper` — 샌드박스를 먼저 켜고 프레임워크를 연다)·`library.zig`(프레임워크 dlopen 함수 표)·

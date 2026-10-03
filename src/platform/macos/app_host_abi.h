@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 204u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 205u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2167,6 +2167,14 @@ int32_t maru_macos_app_session_osr_context_menu_selection(MaruAppHostSession *se
 int32_t maru_macos_app_session_osr_context_menu_open(MaruAppHostSession *session, uint32_t menu);
 int32_t maru_macos_app_session_osr_context_menu_answer(MaruAppHostSession *session, uint32_t menu, int32_t command, double x_px,
                                                        double y_px, uint32_t pressed, int32_t activate);
+/* v205(W6d①): 밖에서 끌어 오는 것. reset 으로 비우고(이 창에 보이는 Chromium 탭 본문이 있으면 1) add(종류 0 경로·1 글·2 HTML·3 주소·4 주소 제목, UTF-8)로 실은 뒤,
+ * update(자리 backing px·허용 동작 NSDragOperation 비트 → Chromium 탭 본문이면 페이지가 받아들이는 동작, 아니면 -1),
+ * exit(떠남), drop(1 놓음·0 거절·-1 본문 아님). */
+int32_t maru_macos_app_session_osr_drag_reset(MaruAppHostSession *session);
+int32_t maru_macos_app_session_osr_drag_add(MaruAppHostSession *session, uint32_t kind, const uint8_t *bytes, size_t len);
+int32_t maru_macos_app_session_osr_drag_update(MaruAppHostSession *session, double x_px, double y_px, int32_t mods, uint32_t allowed);
+void maru_macos_app_session_osr_drag_exit(MaruAppHostSession *session);
+int32_t maru_macos_app_session_osr_drag_drop(MaruAppHostSession *session, double x_px, double y_px, int32_t mods);
 /* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
    2 = 뗌, 3(v202 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */

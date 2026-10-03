@@ -409,6 +409,58 @@ pub fn readService(cursor: *ReadCursor) Error![]const u8 {
     return name;
 }
 
+/// 끌어 온 조각(W6d①)의 종류별 규칙 — 비지 않는다. 경로는 `checkPath`, 글·HTML 은 IME 글 규칙(조각마다 `max_ime_text_bytes`,
+/// 탭·줄바꿈 말고는 제어 문자 거절 — maru 가 공백으로 바꿔 보낸다), 주소는 `checkUrl`, 주소 제목은 대화상자 글 규칙.
+pub fn checkDragData(kind: message.DragDataKind, bytes: []const u8) Error!void {
+    if (bytes.len == 0) return error.InvalidDrag;
+    switch (kind) {
+        .path => try checkPath(bytes),
+        .text, .html => try checkImeText(bytes),
+        .url => try checkUrl(bytes),
+        .url_title => try checkDialogText(bytes),
+    }
+}
+
+fn dragDataLimit(kind: message.DragDataKind) usize {
+    return switch (kind) {
+        .path, .url_title => max_text_bytes,
+        .text, .html => max_ime_text_bytes,
+        .url => max_url_bytes,
+    };
+}
+
+pub fn writeDragData(cursor: *Cursor, kind: message.DragDataKind, bytes: []const u8) Error!void {
+    try checkDragData(kind, bytes);
+    try cursor.writeByte(@intFromEnum(kind));
+    try cursor.writeU32(@intCast(bytes.len));
+    try cursor.writeBytes(bytes);
+}
+
+pub fn readDragData(cursor: *ReadCursor, browser: BrowserId) Error!message.DragData {
+    const kind = std.enums.fromInt(message.DragDataKind, try cursor.readByte()) orelse return error.UnknownDragKind;
+    const len = try cursor.readU32();
+    if (len > dragDataLimit(kind)) return if (kind == .url) error.UrlTooLarge else error.TextTooLarge;
+    const bytes = try cursor.readBytes(len);
+    try checkDragData(kind, bytes);
+    return .{ .browser = browser, .kind = kind, .bytes = bytes };
+}
+
+/// 끌기 알림의 닫힌 필드(W6d①): 허용 동작은 `drag_operation_mask` 안, leave 는 자리·수식키·허용 동작이 없고 drop 은 허용 동작이
+/// 없다(놓을 때의 동작은 마지막 over 가 정했다 — CEF `drag_target_drop` 도 받지 않는다).
+pub fn checkDragTarget(value: message.DragTarget) Error!void {
+    if (value.allowed & ~message.drag_operation_mask != 0) return error.InvalidDrag;
+    switch (value.kind) {
+        .enter, .over => {},
+        .leave => if (value.point.x != 0 or value.point.y != 0 or @as(u16, @bitCast(value.modifiers)) != 0 or value.allowed != 0) return error.InvalidDrag,
+        .drop => if (value.allowed != 0) return error.InvalidDrag,
+    }
+}
+
+/// 페이지가 받아들이는 동작은 0 이거나 `drag_operation_mask` 안의 비트 하나다.
+pub fn checkDragOperation(operation: u32) Error!void {
+    if (operation & ~message.drag_operation_mask != 0 or @popCount(operation) > 1) return error.InvalidDrag;
+}
+
 /// 우클릭 메뉴(W6c)의 닫힌 필드 — `message.ContextMenuFlags` 주석.
 pub fn checkContextMenu(menu: u32, flags: message.ContextMenuFlags, selection: []const u8) Error!void {
     if (menu == 0 or flags._reserved != 0) return error.InvalidContextMenu;

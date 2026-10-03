@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 204), abi_version);
+    try std.testing.expectEqual(@as(u32, 205), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -5012,6 +5012,39 @@ pub export fn maru_macos_app_session_osr_context_menu_answer(session: ?*AppSessi
     const app = session orelse return 0;
     const kind = if (command >= 0 and command <= 255) std.enums.fromInt(maru.session.web_sidecar.message.ContextMenuCommandKind, @as(u8, @intCast(command))) orelse .cancel else .cancel;
     return @intFromBool(session_mod.web_ops.osrContextMenuAnswer(app, menu, kind, x_px, y_px, pressed, activate != 0));
+}
+
+/// v205(W6d①): 밖에서 끌어 오는 것 — 끌기가 view 에 들어올 때 비우고(`reset` — 이 창에 보이는 Chromium 탭 본문이 있으면 1,
+/// 없으면 0 이라 실을 필요가 없다) 실은 뒤(`add` — 종류 0 경로·1 글·2 HTML·3 주소·
+/// 4 주소 제목, UTF-8), 움직일 때마다 자리(창 backing px)와 끌어 온 쪽이 허용한 동작(`NSDragOperation` 비트)으로 묻는다
+/// (`update` — Chromium 탭 본문이면 페이지가 받아들이는 동작, 본문이 아니면 -1). 떠나면 `exit`, 놓으면 `drop`(1 놓음·0 거절·
+/// -1 본문 아님 — 터미널 드롭 경로로).
+pub export fn maru_macos_app_session_osr_drag_reset(session: ?*AppSession) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrDragReset(app));
+}
+
+pub export fn maru_macos_app_session_osr_drag_add(session: ?*AppSession, kind: u32, bytes: ?[*]const u8, len: usize) i32 {
+    const app = session orelse return 0;
+    const k = std.enums.fromInt(session_mod.web_ops.OsrDragKind, kind) orelse return 0;
+    if (len == 0) return 1;
+    const ptr = bytes orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrDragAdd(app, k, ptr[0..len]));
+}
+
+pub export fn maru_macos_app_session_osr_drag_update(session: ?*AppSession, x_px: f64, y_px: f64, mods: i32, allowed: u32) i32 {
+    const app = session orelse return -1;
+    return session_mod.web_ops.osrDragUpdate(app, x_px, y_px, mods, allowed);
+}
+
+pub export fn maru_macos_app_session_osr_drag_exit(session: ?*AppSession) void {
+    const app = session orelse return;
+    session_mod.web_ops.osrDragExit(app);
+}
+
+pub export fn maru_macos_app_session_osr_drag_drop(session: ?*AppSession, x_px: f64, y_px: f64, mods: i32) i32 {
+    const app = session orelse return -1;
+    return session_mod.web_ops.osrDragDrop(app, x_px, y_px, mods);
 }
 
 /// v197(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.

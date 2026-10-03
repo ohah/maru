@@ -231,7 +231,7 @@ pub const TerminalCore = struct {
     // (owner_dbg 와 달리 제품 동작이다).
     handoff: CoreHandoff = .{},
     dirty: ?types.DirtyRegion = null,
-    utf8_tail: [4]u8 = undefined,
+    utf8_tail: [4]u8 = @splat(0), // 0 으로 — 핸드오프가 통째로 싣는다(`= undefined` 면 쓰레기 값이 실렸다, 2026-10-03)
     utf8_tail_len: usize = 0,
     // last_print·pen·cursor·pending_wrap·last_printed_cp는 커서 클러스터로 Screen에 귀속(per-screen, §10.8) —
     // self.screen.<field>로 접근한다.
@@ -411,7 +411,7 @@ pub const TerminalCore = struct {
     osc_large_ok: bool = false,
     // G14 DCS(ESC P ... ST) 수집 버퍼. 현재 DECRQSS(`DCS $ q <req> ST`)만 처리하고 요청은 짧아 64B면 충분
     // (넘으면 overflow로 폐기). Sixel/DECDLD 등 큰 DCS는 미지원이라 소비만 한다(이 상태기계가 그 토대).
-    dcs_buffer: [64]u8 = undefined,
+    dcs_buffer: [64]u8 = @splat(0), // utf8_tail 과 같은 이유
     dcs_len: usize = 0,
     dcs_overflow: bool = false,
     // APC(ESC _ ... ESC \) 축적 버퍼. kitty graphics(`ESC _ G ...payload... ESC \`)용 — 첫 바이트

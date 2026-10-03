@@ -325,7 +325,7 @@ pub fn back(self: *host.AppSession) void {
 
 /// 취소 후 소유자 참조를 놓은 job도 allocator 결산보다 먼저 물러나야 한다. 제품 종료는 기다리지 않는다.
 pub fn quietForTest(self: *host.AppSession) void {
-    const wait = @import("../../../detached_worker_wait.zig");
+    const wait = maru.app.detached_worker_wait;
     if (self.editor_search.batch.collector) |*collector| {
         collector.cancel();
         if (collector.verifier) |*verifier| if (verifier.active) |job| wait.quietState(job, self.io);

@@ -260,7 +260,7 @@ publication 성공 뒤 소비 시점 역시 기존 recovery 수명 계약과 대
 각 회에서 아래 반례를 현재 코드와 대조했다. 소스의 기존 방어는 유지하고 새 codec의 요구와
 미결 정책을 구분한다. 새 codec이 없으므로 문서상 요구를 실행 통과로 세지 않는다.
 
-| 회차 | 반례와 소스 근거 | 판정/완료 조건 |
+| 항목 | 반례와 소스 근거 | 판정/완료 조건 |
 |---|---|---|
 | R1 | 두 창에서 document index=0이 각각 다른 문서를 가리킴. `workspace.Window` 캡처는 창별이다 | index 조회 map은 창 staging에 귀속시킨다. 다른 창 map을 재사용하거나 같은 번호를 공유 lease로 합치지 않는다. 동일 앱 registry owner와 persisted index namespace는 별개다 |
 | R2 | 문서 표 번호가 포인터 주소/hash-map 순회에 따라 달라져 동일 모델의 출력이 매번 바뀜. 기존 workspace writer는 결정론적 순회로 출력한다 | window→tab→pane→Term의 기존 캡처 순서에서 첫 lease 방문 순서로 번호를 발급한다. 주소를 저장/정렬 기준으로 쓰지 않는다. 같은 모델 재캡처의 동일 bytes 양성 대조를 둔다 |
@@ -553,11 +553,11 @@ checkpoint, 잘못된 UTF-8, 알 수 없는 헤더, canonical leaf가 디렉터�
 
 `python3 tools/test-workspace-read-failure-app.py --extended --report /tmp/maru-workspace-hostile-20.json`
 으로 아래 20개 반례를 각각 새 test home에서 실행했다. 이는 전체 suite 20회 반복이 아니라
-서로 다른 입력의 실제 앱 시작·종료 20회다. 모든 회차에서 종료 코드 0, restore-incomplete
+서로 다른 입력의 실제 앱 시작·종료 20회다. 모든 입력에서 종료 코드 0, restore-incomplete
 저장 생략, canonical inode/내용, 기존 백업 inode/bytes, 같은 폴더의 무관한 sentinel 보존과
 임시 저장 파일 부재를 확인했다. 디렉터리는 내부 sentinel을, 권한 거부는 mode 000 유지도 판정했다.
 
-| 회차 | 반례 | 결과 |
+| 입력 번호 | 반례 | 결과 |
 |---|---|---|
 | 1 | 헤더 첫 byte 뒤 절단 | 보존 |
 | 2 | 헤더 중간 절단 | 보존 |
@@ -569,16 +569,16 @@ checkpoint, 잘못된 UTF-8, 알 수 없는 헤더, canonical leaf가 디렉터�
 | 8 | runtime-handle 첫 부분 따옴표 안 절단 | 보존 |
 | 9 | runtime-state 따옴표 안 절단 | 보존 |
 | 10 | runtime-handle 두 번째 부분 따옴표 안 절단 | 보존 |
-| 11 | 알 수 없는 버전 헤더 | 보존 |
-| 12 | 선언된 window 탭 개수와 실제 개수 불일치 | 보존 |
-| 13 | active-tab 숫자 문법 오류 | 보존 |
-| 14 | 선언된 tab pane 개수와 실제 개수 불일치 | 보존 |
-| 15 | active-pane 숫자 문법 오류 | 보존 |
-| 16 | tree leaf의 범위 밖 pane 인덱스 | 보존 |
-| 17 | 선언된 surface 개수와 실제 개수 불일치 | 보존 |
-| 18 | active-term 숫자 문법 오류 | 보존 |
-| 19 | canonical 경로가 디렉터리 | 보존 |
-| 20 | canonical 파일 읽기 권한 거부 | 보존 |
+| 알 수 없는 버전 헤더 | 보존 |
+| 선언된 window 탭 개수와 실제 개수 불일치 | 보존 |
+| active-tab 숫자 문법 오류 | 보존 |
+| 선언된 tab pane 개수와 실제 개수 불일치 | 보존 |
+| active-pane 숫자 문법 오류 | 보존 |
+| tree leaf의 범위 밖 pane 인덱스 | 보존 |
+| 선언된 surface 개수와 실제 개수 불일치 | 보존 |
+| active-term 숫자 문법 오류 | 보존 |
+| canonical 경로가 디렉터리 | 보존 |
+| canonical 파일 읽기 권한 거부 | 보존 |
 
 초기 입력 분류 두 가지는 잘못된 기대값이라 수정했다. `cols=1` 뒤 절단은 완전한 숫자이고
 생략된 rows는 parser 기본값 24를 사용한다. 숫자 `active-tab=999999`는 parser가 읽은 뒤
@@ -844,13 +844,12 @@ claim 파일과 문서 directory 중 어느 쪽이 실제 기존 atomic writer/l
 위 경계를 연결하기 전에는 독립 문서 restart 복구가 완료됐다고 선언하지 않는다.
 이번 추가 검토는 설계 문서만 수정한다. 제품 변경·새 runtime 의존성·새 복구 UX는 승인하지 않는다.
 
-### 추가 검토 — 독립된 적대적 설계 검토 5회
+### 문서 게시·백업 정리·복구 실패의 설계 보완
 
-각 회차는 다른 성공/실패 경계를 기존 코드와 대조한 설계 검토다. 제품 실험 5회나
-변이 테스트 5회 통과를 뜻하지 않는다. 아래 반례는 제안의 누락을 발견한 것이며
+기존 코드와 성공/실패 경계를 대조한 설계 검토다. 제품 실행 검증과는 구분한다. 아래 반례는 제안의 누락을 발견한 것이며
 현재 제품의 신규 재현 결함으로 분류하지 않는다.
 
-#### 회차 1 — 예약 후 registry publication 실패
+#### 예약 후 registry publication 실패
 
 `document_registry.Registry.create`는 refs/Document/slot 용량 할당이 모두 성공한 뒤에만
 prepared State를 소비한다. persistent claim을 이 앞에 추가하면 registry OOM 뒤 예약이
@@ -861,7 +860,7 @@ prepared State를 소비한다. persistent claim을 이 앞에 추가하면 regi
 후속 판정: create의 모든 할당 실패, 첫 예약 성공 뒤 encode OOM, write 실패, 재시도 및
 같은 ID의 기존 record 대조군에서 State/tree/이전 bytes 보존과 예약 소유를 검사한다.
 
-#### 회차 2 — 지연 삭제와 같은 ID의 새 백업
+#### 지연 삭제와 같은 ID의 새 백업
 
 `DeferredBackupDrop`은 filename만 저장하고 `commitDeferredDrops`가 나중에 지운다.
 미래 비동기 writer 또는 복구 후보 처리에서 같은 ID의 새 record가 그 사이 게시되면
@@ -872,7 +871,7 @@ prepared State를 소비한다. persistent claim을 이 앞에 추가하면 regi
 정상 같은 버전 삭제와 staging rollback 대조군을 포함한다. 지금 동기 staging에서 이 경쟁이
 실제로 발생했다고 주장하지 않으며, version 필드 도입도 이 문서에서 확정하지 않는다.
 
-#### 회차 3 — 정상 저장 성공과 backup 삭제 실패
+#### 정상 저장 성공과 backup 삭제 실패
 
 `dropDoc/dropName`의 삭제는 best-effort이고 `markClean`은 저장 후 메모리 clean을 만든다.
 삭제가 실패하거나 저장 성공 직후 process가 끝나면 최신 disk와 과거 dirty backup이 공존한다.
@@ -884,7 +883,7 @@ commit/tombstone 계약과 장애 창을 검토한다. 이번 변경으로 삭�
 후속 판정: 실제 저장→삭제 실패, 저장→정리 전 SIGKILL, backup 내용=disk/내용 불일치 대조군에서
 원본 파일 보존과 복구 후보 표시를 검사한다. 물리 전원 손실 내구성 증거로 세지 않는다.
 
-#### 회차 4 — 복구 큐의 신원과 실패 재시도
+#### 복구 큐의 신원과 실패 재시도
 
 `PendingRevival`은 path/remote만 담고 `queueBackupRevival`은 capacity/OOM에서 조용히
 반환한다. `drainRevivals`는 먼저 orderedRemove하고 revive 실패를 optional 결과로 숨긴다.
@@ -896,7 +895,7 @@ commit/tombstone 계약과 장애 창을 검토한다. 이번 변경으로 삭�
 후속 판정: 같은 path 다른 ID 두 건, 같은 ID 중복, queue OOM/가득 참, apply OOM,
 첫 후보 실패/둘째 정상, 사용자 취소 후 재발견을 검사한다. 큐 상한을 새로 정한 것은 아니다.
 
-#### 회차 5 — optional 백업 문제와 필수 workspace 구조 실패의 혼동
+#### optional 백업 문제와 필수 workspace 구조 실패의 혼동
 
 중복 descriptor ID/잘못된 view 참조는 공유 관계를 불명확하게 하는 필수 구조 실패다.
 반면 올바른 descriptor의 backup I/O 실패는 구조가 온전해도 본문 복구가 미완료인 경우다.
@@ -909,16 +908,15 @@ commit/tombstone 계약과 장애 창을 검토한다. 이번 변경으로 삭�
 view 대조군, 나중의 단독 읽기 성공에서도 기존 incomplete latch 유지, 기본 창 저장으로
 checkpoint/backup을 덮어쓰지 않는지를 실제 host 경계까지 검사한다.
 
-다섯 회차 모두 추가 누락을 발견했다. 따라서 ‘이제 반례가 없다’거나 구현 준비가 완전히
-끝났다고 선언하지 않는다. 다음 실제 실험에는 예약 저장소 비교 외에 지연 정리 순서,
+예약 저장소 비교와 제품 실패 경계의 실행 판정이 필요하다. 다음 실제 실험에는 예약 저장소 비교 외에 지연 정리 순서,
 삭제 실패, 큐 실패 및 혼합 workspace 실패 격리를 포함해야 한다.
 
-### 추가 검토 2 — 적대적 설계 검토 6~10회
+### 앱 전체 신원·복구 게시·종료 순서의 설계 보완
 
-앞선 다섯 회차와 구분해 아래 다섯 경계를 검토했다. 코드에서 확인한 현재 제약과
+코드에서 확인한 현재 제약과
 미구현 recovery ID 설계의 위험을 구분하며, 실제 장애 실행 결과로 세지 않는다.
 
-#### 회차 6 — 여러 창과 복사한 checkpoint의 ID 중복
+#### 여러 창과 복사한 checkpoint의 ID 중복
 
 현재 `workspace_state.validateReferences`의 map은 전달받은 documents의 u32 index만
 검사한다. recovery ID도 창별 검사에만 추가하면 두 창이 각각 독립 정본을 같은 ID로 만들 수
@@ -930,7 +928,7 @@ checkpoint/backup을 덮어쓰지 않는지를 실제 host 경계까지 검사�
 판정 요구: 각 창 안에서는 정상이나 창 사이에만 중복인 두 descriptor, 같은 path 다른 ID
 두 창, 독립 checkpoint 복사, staged 창 순서 변경과 정상 단일 shared descriptor를 대조한다.
 
-#### 회차 7 — 경로 별칭과 새 경로의 접근 권한
+#### 경로 별칭과 새 경로의 접근 권한
 
 recovery ID가 같아도 symlink/대소문자 별칭/파일 rename으로 path 문자열은 달라질 수 있다.
 반대로 canonical path가 같아도 독립 문서들은 합쳐서는 안 된다. ID는 접근 권한이 아니다.
@@ -941,7 +939,7 @@ recovery ID가 같아도 symlink/대소문자 별칭/파일 rename으로 path �
 record 경로를 remote mirror로 바꾼 입력, 정상 같은 path 다른 ID를 검사한다.
 이 절은 파일 경로 정규화/외부 수정 정책을 새로 정한 것이 아니다.
 
-#### 회차 8 — 복구 문서 생성 뒤 본문 적용 실패
+#### 복구 문서 생성 뒤 본문 적용 실패
 
 `reviveAsUntitled`는 `openUntitledInActivePane`로 문서를 먼저 게시한 뒤 applyEditAsOne을
 시도한다. 실패 시 source는 남지만 게시된 빈 문서의 rollback은 이 helper에 없다.
@@ -952,7 +950,7 @@ record 경로를 remote mirror로 바꾼 입력, 정상 같은 path 다른 ID를
 사용자 취소, 성공 뒤 중복 요청에서 원래 tree/탭 수/backup bytes와 owner 수명을 검사한다.
 이는 해당 helper의 코드 경계를 확인한 결과이며 실제 OOM으로 빈 탭을 재현했다는 뜻은 아니다.
 
-#### 회차 9 — final checkpoint와 종료 직전 백업 실패
+#### final checkpoint와 종료 직전 백업 실패
 
 `MaruAppHost.swift`는 C4 final checkpoint 이후 teardown 직전에 창별 editor backup flush를
 호출하며 반환값을 무시한다. `flushAll`도 성공 여부를 집계하지 않는다. 따라서 새 descriptor에
@@ -963,7 +961,7 @@ ID가 실렸다는 사실만으로 종료 직전 본문이 backup에 반영됐�
 기존 backup 뒤 추가 편집 후 종료 실패, 두 창 중 한 창 실패를 검사한다. checkpoint를
 두 번째로 best-effort 게시해 기존 C4 순서와 단일 writer를 깨는 방법은 제외한다.
 
-#### 회차 10 — 예약 경로 교체와 정리의 소유 범위
+#### 예약 경로 교체와 정리의 소유 범위
 
 exclusive claim 파일 또는 mkdir는 생성 순간의 namespace 예약이다. 그 뒤 파일/디렉터리가
 외부에서 바뀌었거나 예약이 삭제·재생성되면 경로 이름만 보고 쓰거나 정리하는 것이 안전하지 않다.
@@ -975,32 +973,32 @@ exclusive claim 파일 또는 mkdir는 생성 순간의 namespace 예약이다. 
 다른 owner가 게시한 record, rollback/정상 정리 대조군을 barrier로 고정해 검사한다.
 물리 저장소/악의적 동일 사용자 공격 전체를 방어한다고 확대하지 않는다.
 
-이번 다섯 회차에서도 완료 주장의 빈틈을 발견했다. 문서별 ID 방향은 유지하지만
+문서별 ID 방향은 유지하지만
 소유권/전체 앱 중복 검사/복구 publication/종료 실패/경로 객체 정합성까지 검증하기 전
 ‘독립 문서 내용이 항상 복구된다’고 선언하지 않는다. 제품 코드는 여전히 변경하지 않았다.
 
-### 추가 검토 3 — 적대적 설계 검토 11~20회
+### 포맷·문서 수명·정리 권한의 설계 보완
 
-10개 별도 경계를 검토했다. ‘추가 누락’은 기존 설계안에 빠진 요구이며 현재 제품의
+‘추가 누락’은 기존 설계안에 빠진 요구이며 현재 제품의
 실행 재현 결함을 뜻하지 않는다. 이미 다룬 원칙으로 방어 가능한 항목도 구분해 기록한다.
 
-| 회차 | 공격 경계와 코드 근거 | 설계 판정 및 필요한 실행 대조 |
-|---|---|---|
-| 11 | 새 ID를 기존 v1 backup의 선택적 키로 넣음. 현재 backup.parse는 모르는 키를 무시한다 | 추가 누락: 신원을 필수로 다루는 새 reader dispatch/header를 함께 바꿔야 한다. ID가 없는/무시되는 record를 새 문서에 적용하지 않는다. old header+new field/new header+missing ID/정상 새 record를 대조한다 |
-| 12 | 같은 ID 키가 record에 두 번 나옴. 현재 key parser는 scalar를 반복 대입한다 | 추가 누락: 새 ID 필드는 중복을 거절한다. 첫 값/마지막 값 중 하나를 선택하면 filename/descriptor 검사와 다른 의미가 된다. 동일 값 중복/다른 값 중복/잘린 값/정상 단일 값 판정이 필요하다 |
-| 13 | ID의 hex 표기가 대소문자·선행 0·부호·초과 길이로 달라짐 | 기존 엄격한 이름 원칙의 구체화: ID의 값은 고정 16 bytes, canonical wire는 정확히 32 lowercase hex로 제안한다. 영 ID는 미발급 표현과 섞지 않도록 거절하는 안을 검토한다. parser/writer/filename에서 동일 문법을 검사하고 31/33자·0·비hex를 대조한다 |
-| 14 | clearIdentity와 clear의 차이. State.clearIdentity는 저장 대상만 제거하고 clear는 본문/이력/notifications를 정산한다 | 추가 누락: recovery ID를 저장 대상 신원과 같은 clear 함수에서 지우지 않는다. 같은 문서의 Save As는 유지, 문서 완전 해제/새 독립 생성은 재발급이다. clearOpened 후 재로드/clearIdentity 후 Save As/완전 clear 후 slot 재사용의 수명을 검사한다 |
-| 15 | backup 쓰기에 State의 borrowed 포인터를 비동기로 전달. Registry의 read/request lease는 수명만 보장한다 | 기존 동기 writer 범위 유지로 방어한다. future 비동기화에서는 pin을 immutable snapshot으로 오해하지 않는다. owned content+ID+kind/path+revision을 함께 준비해야 한다. 편집/Save As/닫기가 snapshot 뒤 발생하는 barrier 검사는 비동기화 PR의 gate다 |
-| 16 | close capture가 중복 view 이름을 먼저 수용. executeClose는 최대 64건 수집 후 넘는 Term을 건너뛴다 | 추가 누락: ID별 dedup과 실제 고유 문서 수에 대한 정리 결과가 필요하다. 이름 길이 확장만으로 해결되지 않는다. 같은 문서 view 다수와 64/65개 독립 문서 대조군, 닫기 취소·정상 마지막 view 닫기를 검사한다. 기존 상한을 임의 확대하거나 무관한 파일 청소로 보완하지 않는다 |
-| 17 | 한 문서에 이전 source backup과 새 ID backup이 동시에 존재 | 기존 원본 보존 정책의 확장: 새 백업 성공/명시적 저장·버리기 경계까지 두 소유를 구분한다. fileNameIfOnDisk가 source 하나만 반환하는 기존 방식이 충분한지 검사한다. source 삭제 실패+새 backup 있음+마지막 view 닫기에서 남은 후보를 성공 정리라고 기록하지 않는다 |
-| 18 | 복구 원본보다 새 backup이 크기 상한을 넘음. settle은 상한 초과 시 기존 backup을 유지한다 | 기존 보존 원칙으로 방어 가능하지만 최신 내용은 보호하지 못한다. ID/claim 존재만으로 최신 backup 성공을 표시하지 않는다. 상한 정확/상한+1/다시 상한 이하로 편집 시 old record 보존과 새 성공 이후 전환을 판정한다 |
-| 19 | backend 쓰기 실패를 파일 부재와 혼동. readAt은 missing/invalid/failed를 구분하나 기존 read는 optional로 축소한다 | 추가 누락: 새 ID restore와 discovery는 readAt 분류를 소비해야 한다. 기존 optional wrapper 재사용만으로 incomplete를 세울 수 없다. missing/directory/권한/OOM/손상과 이후 재시도 대조군에서 보존 latch와 candidate 상태를 검사한다 |
-| 20 | 사용자가 복구 후보를 버렸지만 별도 실행이 같은 ID를 소유하거나 다시 게시함 | 기존 owner 원칙의 구체화: 후보 발견이 삭제 권한을 주지 않는다. 사용자 승인 대상의 record/owner를 묶고 live 소유와 경쟁하는 후보는 자동 삭제하지 않는다. 발견→peer 게시→버리기, 정상 소유 단독 버리기, 오래된 후보 재선택을 barrier로 검사한다 |
+| 공격 경계와 코드 근거 | 설계 판정 및 필요한 실행 대조 |
+|---|---|
+| 새 ID를 기존 v1 backup의 선택적 키로 넣음. 현재 backup.parse는 모르는 키를 무시한다 | 추가 누락: 신원을 필수로 다루는 새 reader dispatch/header를 함께 바꿔야 한다. ID가 없는/무시되는 record를 새 문서에 적용하지 않는다. old header+new field/new header+missing ID/정상 새 record를 대조한다 |
+| 같은 ID 키가 record에 두 번 나옴. 현재 key parser는 scalar를 반복 대입한다 | 추가 누락: 새 ID 필드는 중복을 거절한다. 첫 값/마지막 값 중 하나를 선택하면 filename/descriptor 검사와 다른 의미가 된다. 동일 값 중복/다른 값 중복/잘린 값/정상 단일 값 판정이 필요하다 |
+| ID의 hex 표기가 대소문자·선행 0·부호·초과 길이로 달라짐 | 기존 엄격한 이름 원칙의 구체화: ID의 값은 고정 16 bytes, canonical wire는 정확히 32 lowercase hex로 제안한다. 영 ID는 미발급 표현과 섞지 않도록 거절하는 안을 검토한다. parser/writer/filename에서 동일 문법을 검사하고 31/33자·0·비hex를 대조한다 |
+| clearIdentity와 clear의 차이. State.clearIdentity는 저장 대상만 제거하고 clear는 본문/이력/notifications를 정산한다 | 추가 누락: recovery ID를 저장 대상 신원과 같은 clear 함수에서 지우지 않는다. 같은 문서의 Save As는 유지, 문서 완전 해제/새 독립 생성은 재발급이다. clearOpened 후 재로드/clearIdentity 후 Save As/완전 clear 후 slot 재사용의 수명을 검사한다 |
+| backup 쓰기에 State의 borrowed 포인터를 비동기로 전달. Registry의 read/request lease는 수명만 보장한다 | 기존 동기 writer 범위 유지로 방어한다. future 비동기화에서는 pin을 immutable snapshot으로 오해하지 않는다. owned content+ID+kind/path+revision을 함께 준비해야 한다. 편집/Save As/닫기가 snapshot 뒤 발생하는 barrier 검사는 비동기화 PR의 gate다 |
+| close capture가 중복 view 이름을 먼저 수용. executeClose는 최대 64건 수집 후 넘는 Term을 건너뛴다 | 추가 누락: ID별 dedup과 실제 고유 문서 수에 대한 정리 결과가 필요하다. 이름 길이 확장만으로 해결되지 않는다. 같은 문서 view 다수와 64/65개 독립 문서 대조군, 닫기 취소·정상 마지막 view 닫기를 검사한다. 기존 상한을 임의 확대하거나 무관한 파일 청소로 보완하지 않는다 |
+| 한 문서에 이전 source backup과 새 ID backup이 동시에 존재 | 기존 원본 보존 정책의 확장: 새 백업 성공/명시적 저장·버리기 경계까지 두 소유를 구분한다. fileNameIfOnDisk가 source 하나만 반환하는 기존 방식이 충분한지 검사한다. source 삭제 실패+새 backup 있음+마지막 view 닫기에서 남은 후보를 성공 정리라고 기록하지 않는다 |
+| 복구 원본보다 새 backup이 크기 상한을 넘음. settle은 상한 초과 시 기존 backup을 유지한다 | 기존 보존 원칙으로 방어 가능하지만 최신 내용은 보호하지 못한다. ID/claim 존재만으로 최신 backup 성공을 표시하지 않는다. 상한 정확/상한+1/다시 상한 이하로 편집 시 old record 보존과 새 성공 이후 전환을 판정한다 |
+| backend 쓰기 실패를 파일 부재와 혼동. readAt은 missing/invalid/failed를 구분하나 기존 read는 optional로 축소한다 | 추가 누락: 새 ID restore와 discovery는 readAt 분류를 소비해야 한다. 기존 optional wrapper 재사용만으로 incomplete를 세울 수 없다. missing/directory/권한/OOM/손상과 이후 재시도 대조군에서 보존 latch와 candidate 상태를 검사한다 |
+| 사용자가 복구 후보를 버렸지만 별도 실행이 같은 ID를 소유하거나 다시 게시함 | 기존 owner 원칙의 구체화: 후보 발견이 삭제 권한을 주지 않는다. 사용자 승인 대상의 record/owner를 묶고 live 소유와 경쟁하는 후보는 자동 삭제하지 않는다. 발견→peer 게시→버리기, 정상 소유 단독 버리기, 오래된 후보 재선택을 barrier로 검사한다 |
 
-회차 13의 영 ID 거절은 아직 제안이며 사용자 승인된 포맷으로 취급하지 않는다.
-회차 15는 현재 동기 backup writer의 신규 결함을 주장하지 않으며 비동기화를 추가하지 않는다.
-회차 16의 기존 64건 제한은 코드에서 확인했지만 65개 문서의 실제 손실/화면 결과는 실행하지 않았다.
-회차 17의 best-effort 삭제 실패 정책도 이번 검토에서 변경하지 않는다.
+영 ID 거절은 아직 제안이며 사용자 승인된 포맷으로 취급하지 않는다.
+비동기 snapshot 검토는 현재 동기 backup writer의 신규 결함을 주장하지 않으며 비동기화를 추가하지 않는다.
+64건 정리 제한은 아래 추가 실행 검증에서 제품 탭 닫기 API로 확인했다. 실제 화면 조작은 수행하지 않았다.
+best-effort 삭제 실패 정책도 이번 검토에서 변경하지 않는다.
 
 이번 검토는 ID 방향을 반증하지 않았으나, 새 필수 codec/중복 키/State 정산/닫기 수집/
 source와 current의 동시 소유/읽기 결과 소비 요구를 추가했다. 설계 검토 횟수만으로

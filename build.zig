@@ -4266,31 +4266,22 @@ pub fn build(b: *std.Build) void {
     // 이 스텝이 없던 동안 워커 갈래가 **통째로 무판정**이었다(적대적 검증 2회차: 조상을 현재 것 자리에
     // 싣는 변이 따위 여섯이 전부 살아남았다).
     const merge_stage_e2e_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/git_backend.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "maru", .module = maru_mod },
-                .{ .name = "syntax", .module = syntax_mod },
-            },
-        }),
+        .root_module = maru_mod,
         .filters = &.{ "S3a end-to-end", "S4 end-to-end" },
     });
     const run_merge_stage_e2e = b.addRunArtifact(merge_stage_e2e_tests);
     run_merge_stage_e2e.setCwd(b.path(".")); // 임시 저장소를 `.zig-cache` 밑에 만든다
-    run_merge_stage_e2e.addArg("--maru-expect-tests=9");
+    run_merge_stage_e2e.addArg("--maru-expect-tests=30");
     // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 git 이 없으면 `SkipZigTest` 로 나간다 — 컴파일 수만
     // 세면 하네스가 조용히 안 서도 초록이다(이 저장소가 가장 나쁘다고 적어 둔 실패 모드).
-    run_merge_stage_e2e.addArg("--maru-expect-passed=9");
+    run_merge_stage_e2e.addArg("--maru-expect-passed=30");
     b.step("test-merge-stages-e2e", "Run the merge-stage (S3a) end-to-end judges on a real conflicted repo").dependOn(&run_merge_stage_e2e.step);
     const native_worktree_tests = addProjectTest(b, .{
         .root_module = merge_stage_e2e_tests.root_module,
         .filters = &.{"Windows worktree"},
     });
     const run_native_worktree_tests = b.addRunArtifact(native_worktree_tests);
-    run_native_worktree_tests.addArg("--maru-expect-tests=1");
+    run_native_worktree_tests.addArg("--maru-expect-tests=22");
     b.step("test-win32-worktree", "Verify native Windows Git worktree reads").dependOn(&run_native_worktree_tests.step);
 
 

@@ -10,14 +10,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const maru = @import("maru");
+const maru = @import("../../maru.zig");
 const git_command = maru.session.git_command;
 const git_write_command = maru.session.git_write_command;
 const remote_shell = maru.session.remote_shell;
 const git_locate = maru.session.git_locate;
 const dock_panel = maru.session.dock_panel;
 const repo_path = maru.session.repo_path;
-const safe_open = @import("safe_open.zig");
+const safe_open = maru.posix_safe_open;
 const turn_index_cache = maru.app.turn_index_cache; // 임시 index 의 수명 — 워커가 오래된 형제를 프로세스당 한 번 쓸어 낸다
 
 /// **이 backend가 쓰는 유일한 allocator.** State·job·argv·결과 버퍼가 전부 여기서 나온다.
@@ -2505,7 +2505,11 @@ fn spawnCapture(
 
     var in_fds: [2]c_int = .{ -1, -1 };
     if (stdin_bytes != null) {
-        if (std.c.pipe(&in_fds) != 0) {
+        const pair_result = if (builtin.os.tag == .linux)
+            std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &in_fds)
+        else
+            std.c.pipe(&in_fds);
+        if (pair_result != 0) {
             _ = std.c.close(pipe_fds[0]);
             _ = std.c.close(pipe_fds[1]);
             return error.GitFailed;
@@ -2514,7 +2518,10 @@ fn spawnCapture(
         _ = std.c.fcntl(in_fds[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
         // ⚠️ **자식이 먼저 죽으면 write 가 SIGPIPE 로 앱을 죽인다.** 이 저장소는 그것을 fd 단위로
         // 막는다(`runtime_manager.OutputWake` 와 같은 규율) — 전역 무시는 곳곳의 처분을 바꾼다.
-        _ = std.c.fcntl(in_fds[1], std.c.F.SETNOSIGPIPE, @as(c_int, 1));
+        // Linux send(2) MSG_NOSIGNAL is per-call and preserves EPIPE.
+        // https://man7.org/linux/man-pages/man2/send.2.html
+        if (builtin.os.tag == .macos)
+            _ = std.c.fcntl(in_fds[1], std.c.F.SETNOSIGPIPE, @as(c_int, 1));
     }
 
     // 파이프로 받을 fd와 /dev/null로 보낼 fd.
@@ -2635,7 +2642,10 @@ fn pumpStdinAndDrain(
         }
         if (write_fd >= 0 and fds[1].revents != 0) {
             const rest = payload[sent..];
-            const w = std.c.write(write_fd, rest.ptr, rest.len);
+            const w = if (builtin.os.tag == .linux)
+                std.c.send(write_fd, rest.ptr, rest.len, std.c.MSG.NOSIGNAL)
+            else
+                std.c.write(write_fd, rest.ptr, rest.len);
             if (w > 0) sent += @intCast(w);
             // **EPIPE 는 실패가 아니다** — 자식이 먼저 끝난 것이고, 그 종료 코드가 사실을 말한다.
             // (write 끝에 `SETNOSIGPIPE` 를 걸어 두어 신호가 아니라 오류로 온다.)
@@ -3093,11 +3103,11 @@ test "실행 불가 경로는 후보에서 걸러진다" {
 test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
     // 손 확인에서 화면이 "읽는 중"에 고착됐다. submit→worker→takeResult 전 구간이 실제로 도는지 여기서 못 박는다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest; // git 없는 기기에서는 판정할 것이 없다
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest; // git 없는 기기에서는 판정할 것이 없다
     // 테스트는 저장소 안에서 돈다. `.`을 그대로 넘겨도 git이 -C로 해석하지만, 상대경로를 실행 경로에 쓰지 않는
     // 계약(§6)에 맞춰 절대경로로 바꿔 넘긴다.
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&repo_buf) orelse return error.NoCwd;
     const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
@@ -3115,8 +3125,7 @@ test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
             try testing.expect(std.mem.startsWith(u8, result.status, "# branch."));
             return;
         }
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     }
     return error.GitReadNeverCompleted;
 }
@@ -3125,9 +3134,9 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     // 목록과 달리 본문은 "무엇과 무엇을 비교하는가"가 기준마다 다르다. 실제 저장소·실제 git으로 세 기준을 전부
     // 태워 그 대응을 고정한다(fake로는 `HEAD:` 와 `:` 의 차이가 검증되지 않는다).
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&repo_buf) orelse return error.NoCwd;
     const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
@@ -3191,6 +3200,7 @@ fn makeStageRepo(exe: []const u8, repo: []const u8, fixture: StageFixture) bool 
         &.{ exe, "init", "-q", "-b", "main", repo },
         &.{ exe, "-C", repo, "config", "user.email", "t@t" },
         &.{ exe, "-C", repo, "config", "user.name", "t" },
+        &.{ exe, "-C", repo, "config", "core.autocrlf", "false" },
     };
     for (steps) |argv| {
         if (!runQuiet(argv)) return false;
@@ -3227,7 +3237,7 @@ fn makeStageRepo(exe: []const u8, repo: []const u8, fixture: StageFixture) bool 
 /// (이 파일의 앞선 판정자가 이미 그렇게 적어 두었다) 경로를 직접 만든다.
 fn tmpRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return null;
+    const cwd_ptr = fixtureCwd(&cwd_buf) orelse return null;
     const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     return std.fmt.bufPrint(buf, "{s}/.zig-cache/{s}", .{ cwd, name }) catch null;
 }
@@ -3236,7 +3246,7 @@ test "진짜 충돌에서 세 판을 읽는다 — :1:·:2:·:3: (S3a end-to-end
     // **성공 경로다.** 아래 실패 판정자는 세 판이 **다 없을** 때만 보므로, 「어느 판이 어느 자리에 실리나」가
     // 통째로 무판정이었다(적대적 검증 2회차에서 여섯이 살아남았다).
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
 
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages") orelse return error.SkipZigTest;
@@ -3292,7 +3302,7 @@ test "조상이 «빈 파일»이어도 3-way 다 — 길이로 가르지 않는
     // `:1:` 이 **없는 것**(add/add)과 **비어 있는 것**은 다르다. 길이로 가르면 빈 조상이 「없음」으로
     // 읽혀 3-way 가 근거 없이 2-way 로 저하한다 — 실측으로 stage 1 은 빈 blob(`e69de29`)으로 실린다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
 
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-empty") orelse return error.SkipZigTest;
@@ -3322,7 +3332,7 @@ test "상한을 넘는 판은 «잘린 채로» 도착한다 (S3a end-to-end)" {
     // **대조군은 바로 위 판정자다**(작은 저장소 → `truncated == false`). 여기만 있으면 `truncated` 를
     // 항상 참으로 두는 변이가 산다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
 
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-big") orelse return error.SkipZigTest;
@@ -3369,6 +3379,7 @@ fn makeBigStageRepo(exe: []const u8, repo: []const u8, big: []u8) bool {
         &.{ exe, "init", "-q", "-b", "main", repo },
         &.{ exe, "-C", repo, "config", "user.email", "t@t" },
         &.{ exe, "-C", repo, "config", "user.name", "t" },
+        &.{ exe, "-C", repo, "config", "core.autocrlf", "false" },
     };
     for (steps) |argv| {
         if (!runQuiet(argv)) return false;
@@ -3395,7 +3406,7 @@ fn makeBigStageRepo(exe: []const u8, repo: []const u8, big: []u8) bool {
 
 test "add/add 충돌에는 조상이 «없다» — 2-way 로 저하한다 (S3a end-to-end)" {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
 
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-addadd") orelse return error.SkipZigTest;
@@ -3431,9 +3442,9 @@ test "충돌이 «아닌» 파일에 3-way 를 걸면 깨끗하게 실패한다 
     // 이 전부 없다. 그때 in-flight 가 풀리고 결과가 **한 번** 도착해야 화면이 「여는 중」에 안 갇힌다
     // (같은 규율을 「없는 경로」 판정자가 이미 적어 두었다).
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&repo_buf) orelse return error.NoCwd;
     const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
@@ -3481,8 +3492,7 @@ fn waitForDiff(backend: *Backend) ?DiffResult {
     var spins: usize = 0;
     while (spins < 1000) : (spins += 1) {
         if (backend.takeDiffResult()) |result| return result;
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     }
     return null;
 }
@@ -3494,9 +3504,9 @@ test "diff 왼쪽 rev 는 hex 만 받는다(end-to-end — 인자 주입 차단)
     // 테스트가 `commitBlobSpec` 을 이미 고정하지만, **`submitDiff` 경로가 그 판정을 실제로 지나는지**는
     // 여기서만 보인다 — 그 사이에 인자를 그대로 싣는 길이 생기면 단위 테스트는 여전히 초록이다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&repo_buf) orelse return error.NoCwd;
     const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
@@ -3533,8 +3543,7 @@ fn waitForList(backend: *Backend) ?Result {
     var spins: usize = 0;
     while (spins < 1000) : (spins += 1) {
         if (backend.takeResult()) |result| return result;
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     }
     return null;
 }
@@ -3543,12 +3552,12 @@ test "충돌 파일도 diff가 열린다(HEAD ↔ 작업트리)" {
     // 충돌 중에는 index에 stage 0이 없어 `:<경로>`가 실패한다 — 그대로 두면 왼쪽이 비어 파일 전체가 추가로 보인다.
     // 실제 충돌 저장소를 만들어 그 경로를 태운다(fake로는 stage 0 부재가 재현되지 않는다).
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
 
     // 저장소를 만들 자리: 현재 작업 디렉터리 밑의 임시 경로(테스트가 끝나면 지운다). `std.testing.tmpDir`는
     // 0.16에서 realpath를 안 줘서 경로를 직접 만든다.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&cwd_buf) orelse return error.NoCwd;
     const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-diff", .{cwd}) catch return error.SkipZigTest;
@@ -3575,9 +3584,9 @@ test "실제 충돌 저장소: 마커가 남은 동안은 «남음», 지우면 
     // 목록 한 벌에 실린 마커 판정(`git grep -l -z`)이 **진짜 git** 에서 도는지 본다. 판정의 두 갈래(남음/없음)와
     // 「판정을 했다」 표시, 그리고 이 조각의 전제 — 해결해도 상태 문자가 안 바뀐다 — 를 한 저장소에서 잰다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&cwd_buf) orelse return error.NoCwd;
     const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers", .{cwd}) catch return error.SkipZigTest;
@@ -3625,9 +3634,9 @@ test "실제 충돌 저장소: 배치보다 많은 충돌 파일 — 한 배치�
     // `git grep` 은 경로를 `conflict_markers_batch` 개씩 끊어 돌린다. 둘째 배치를 안 돌리거나 꼬리를 흘리면
     // 그 파일들은 「마커 없음」으로 읽혀 **마커가 남은 파일에 `+` 가 선다** — 이 조각이 막아야 하는 바로 그 사고다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&cwd_buf) orelse return error.NoCwd;
     const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers-many", .{cwd}) catch return error.SkipZigTest;
@@ -3671,13 +3680,14 @@ test "실제 충돌 저장소: 배치보다 많은 충돌 파일 — 한 배치�
 }
 
 test "실제 충돌 저장소: grep 이 실패하면 «판정 못 함» — 충돌 행은 전부 → 로 남는다 (S4 end-to-end)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     // 「판정 못 함」과 「전부 해결됨」은 다른 상태다. 배치 하나가 실패했는데 «했다» 고 적으면 빈 목록이
     // 「전부 해결됨」으로 읽혀 마커가 남은 파일에 `+` 가 선다(적대적 2회차 B2 — 진짜 git 은 안 실패해서
     // 못 갈렸다). `grep` 만 실패시키고 나머지는 진짜 git 에 위임하는 래퍼로 그 갈래를 연다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&cwd_buf) orelse return error.NoCwd;
     const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers-fail", .{cwd}) catch return error.SkipZigTest;
@@ -3746,6 +3756,7 @@ fn makeManyConflictRepo(exe: []const u8, repo: []const u8, n: usize) bool {
         &.{ exe, "init", "-q", "-b", "main", repo },
         &.{ exe, "-C", repo, "config", "user.email", "t@t" },
         &.{ exe, "-C", repo, "config", "user.name", "t" },
+        &.{ exe, "-C", repo, "config", "core.autocrlf", "false" },
     };
     for (steps) |argv| {
         if (!runQuiet(argv)) return false;
@@ -3787,6 +3798,7 @@ fn makeConflictRepo(exe: []const u8, repo: []const u8) bool {
         &.{ exe, "init", "-q", "-b", "main", repo },
         &.{ exe, "-C", repo, "config", "user.email", "t@t" },
         &.{ exe, "-C", repo, "config", "user.name", "t" },
+        &.{ exe, "-C", repo, "config", "core.autocrlf", "false" },
     };
     for (steps) |argv| {
         if (!runQuiet(argv)) return false;
@@ -3806,16 +3818,8 @@ fn makeConflictRepo(exe: []const u8, repo: []const u8) bool {
 
 fn writeFileAt(dir: []const u8, name: []const u8, content: []const u8) !void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, name });
-    const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
-    if (fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(fd);
-    var written: usize = 0;
-    while (written < content.len) {
-        const n = std.c.write(fd, content[written..].ptr, content.len - written);
-        if (n <= 0) return error.WriteFailed;
-        written += @intCast(n);
-    }
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name });
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = path, .data = content });
 }
 
 /// argv를 돌려 성공(exit 0)이면 true. 출력은 버린다(테스트 픽스처 준비용).
@@ -3840,7 +3844,7 @@ pub fn testGitStatusLines(exe: []const u8, repo: []const u8, out: []u8) ?[]const
 pub const testTmpRepoPath = tmpRepoPath;
 pub const TestStageFixture = StageFixture;
 
-fn runQuiet(argv: []const []const u8) bool {
+fn runQuietPosix(argv: []const []const u8) bool {
     var store: [8][:0]u8 = undefined;
     var c_argv: [9:null]?[*:0]const u8 = undefined;
     var built: usize = 0;
@@ -3872,10 +3876,10 @@ fn runQuiet(argv: []const []const u8) bool {
 // **실제 링크가 든 저장소**를 만들어 확인한다 — 이 방어가 도는지는 파일 시스템이 있어야 판정된다.
 test "저장소 밖을 가리키는 symlink는 읽지 않는다" {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&cwd_buf) orelse return error.NoCwd;
     const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-symlink-escape", .{cwd}) catch return error.SkipZigTest;
@@ -3912,10 +3916,10 @@ test "저장소 밖을 가리키는 symlink는 읽지 않는다" {
 test "턴 스냅샷은 진짜 index와 작업트리를 건드리지 않는다(end-to-end)" {
     // 이 기능의 안전 근거가 "임시 index만 쓴다"이므로, 실제 저장소에서 **진짜 index가 그대로인지**를 확인한다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    const exe = fixtureGit(&exe_buf) orelse return error.SkipZigTest;
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd_ptr = fixtureCwd(&cwd_buf) orelse return error.NoCwd;
     const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-turn-snapshot", .{cwd}) catch return error.SkipZigTest;
@@ -4014,23 +4018,8 @@ const WriteFixture = struct {
         try argv.append(allocator, self.root);
         for (args) |a| try argv.append(allocator, a);
 
-        var store: std.ArrayList([:0]u8) = .empty;
-        defer {
-            for (store.items) |a| allocator.free(a);
-            store.deinit(allocator);
-        }
-        var ptrs: std.ArrayList(?[*:0]const u8) = .empty;
-        defer ptrs.deinit(allocator);
-        for (argv.items) |a| {
-            const c = try allocator.dupeZ(u8, a);
-            try store.append(allocator, c);
-            try ptrs.append(allocator, c.ptr);
-        }
-        try ptrs.append(allocator, null);
-        const spawned = try spawnCapture(allocator, @ptrCast(ptrs.items.ptr), @ptrCast(std.c.environ), .stderr_only, null);
-        allocator.free(spawned.stdout_bytes);
-        allocator.free(spawned.stderr_bytes);
-        if (spawned.exit_code != 0) return error.PrepareFailed;
+        const output = try runArgv(allocator, argv.items);
+        defer allocator.free(output.bytes);
     }
 
     /// hook 스크립트를 실행 가능하게 만든다(안 하면 git이 조용히 건너뛴다).
@@ -4630,8 +4619,7 @@ test "바이트 상한에 걸려 못 보낸 경로는 «물어본 목록»에도
     while (spins < 1000) : (spins += 1) {
         taken = backend.takeIgnoreResult();
         if (taken != null) break;
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     }
     var res = taken orelse return error.IgnoreReadNeverCompleted;
     defer res.deinit(worker_allocator);
@@ -4697,8 +4685,7 @@ test "check-ignore 답은 «물어본 목록»을 통째로 들고 온다 — �
     while (spins < 1000) : (spins += 1) {
         taken = backend.takeIgnoreResult();
         if (taken != null) break;
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     }
     var res = taken orelse return error.IgnoreReadNeverCompleted;
     defer res.deinit(worker_allocator);
@@ -4982,8 +4969,7 @@ test "원격 히스토리: 커밋 목록이 저쪽 기계에서 오고 구분자
             try std.testing.expect(std.mem.indexOfScalar(u8, result.text, maru.session.git_log.record_sep) != null);
             break;
         }
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     } else return error.RemoteLogNeverCompleted;
 
     // ⑸ **대조군 — 정말 링크를 탔는가.** 이 하네스의 원격은 loopback 이라 `hx.repo` 가 **이쪽에도
@@ -5008,8 +4994,7 @@ test "원격 히스토리: 커밋 목록이 저쪽 기계에서 오고 구분자
             try std.testing.expect(!result.ok); // 죽은 소켓으로는 못 읽는다
             return;
         }
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     }
     return error.RemoteLogDeadSocketNeverCompleted;
 }
@@ -5042,8 +5027,7 @@ test "원격 커밋의 파일 목록도 저쪽 기계에서 온다 (RS7c)" {
             try std.testing.expect(std.mem.indexOfScalar(u8, result.text, ':') != null);
             break;
         }
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     } else return error.RemoteCommitFilesNeverCompleted;
 
     // **대조군** — 하네스 원격이 loopback 이라 위만으로는 「원격이다」가 증명되지 않는다(RS7b 와 같은
@@ -5059,8 +5043,7 @@ test "원격 커밋의 파일 목록도 저쪽 기계에서 온다 (RS7c)" {
             try std.testing.expect(!result.ok);
             return;
         }
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     }
     return error.RemoteCommitFilesDeadSocketNeverCompleted;
 }
@@ -5122,8 +5105,7 @@ test "원격 턴 스냅샷: 임시 index 로 tree 를 굳히고 진짜 index 는
             try std.testing.expectEqualStrings(oid, result.tree); // 같은 작업트리 = 같은 tree
             break;
         }
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        fixturePause();
     } else return error.RemoteSnapshotNeverCompleted;
 
     // ⑸ **대조군** — 죽은 소켓이면 실패해야 한다(로컬로 새면 loopback 저장소가 있어 여전히 성공한다).
@@ -5219,4 +5201,50 @@ test "Windows worktree native read returns Unicode content and enforces the byte
     defer a.free(capped.bytes);
     try testing.expectEqual(max_output_bytes, capped.bytes.len);
     try testing.expect(capped.truncated);
+}
+
+
+fn fixtureGit(buf: []u8) ?[]const u8 {
+    if (comptime builtin.os.tag == .windows) return "git";
+    return locate(buf);
+}
+
+fn fixtureCwd(buf: []u8) ?[*:0]u8 {
+    const n = std.Io.Dir.cwd().realPath(testing.io, buf) catch return null;
+    if (n >= buf.len) return null;
+    buf[n] = 0;
+    return @ptrCast(buf.ptr);
+}
+
+fn fixturePause() void {
+    testing.io.sleep(.fromMilliseconds(10), .awake) catch {};
+}
+
+fn runQuiet(argv: []const []const u8) bool {
+    if (comptime builtin.os.tag == .windows) return runQuietWindows(argv) else return runQuietPosix(argv);
+}
+
+fn runQuietWindows(argv: []const []const u8) bool {
+    if (argv.len == 0) return false;
+    if (std.mem.eql(u8, argv[0], "/bin/rm")) {
+        if (argv.len != 3 or !std.mem.eql(u8, argv[1], "-rf")) return false;
+        // Resolve both paths before recursive deletion; only this workspace cache is owned.
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = cwd_buf[0..std.Io.Dir.cwd().realPath(testing.io, &cwd_buf) catch return false];
+        const cache = std.fs.path.resolve(testing.allocator, &.{ cwd, ".zig-cache" }) catch return false;
+        defer testing.allocator.free(cache);
+        const target = std.fs.path.resolve(testing.allocator, &.{argv[2]}) catch return false;
+        defer testing.allocator.free(target);
+        if (target.len <= cache.len + 1 or !std.mem.startsWith(u8, target, cache) or target[cache.len] != std.fs.path.sep) return false;
+        std.Io.Dir.cwd().deleteTree(testing.io, target) catch return false;
+        return true;
+    }
+    if (std.mem.eql(u8, argv[0], "/bin/mkdir")) {
+        if (argv.len != 3 or !std.mem.eql(u8, argv[1], "-p")) return false;
+        std.Io.Dir.cwd().createDirPath(testing.io, argv[2]) catch return false;
+        return true;
+    }
+    var output = maru.win32_process.capture(testing.allocator, argv, null, .merged, &.{}, &.{}, 4096) catch return false;
+    defer output.deinit(testing.allocator);
+    return output.exit_code == 0;
 }

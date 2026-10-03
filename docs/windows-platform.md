@@ -10627,3 +10627,26 @@ hard link 읽기 거절·부모 delete 공유·reparse 판정 생략·없는 파
 다섯 컴파일 가능한 변이가 모두 실행 판정에서 실패했고 정확한 bytes 복구 후 두 게이트가
 통과했다. Git 작업자 본체의 공통 계층 이동, 최종 safe-save publish/rollback·GUI 편집/저장과
 실앱 저장 검증은 여전히 진행 대상이다.
+
+
+### 2m.131 Git 작업자의 공통 도메인과 이식 가능한 병합 fixture (2026-10-03)
+
+Git 작업자는 `app/git/backend.zig`, 임시 index 수명은 `app/git/index_cache.zig`에 둔다.
+협력 구현을 도메인 namespace로 묶는 project-structure 규칙을 따른다. 기존 `maru.app` facade
+이름은 유지하며 main·macOS 세션·병합·저장 충돌·턴 영속 소비자가 같은 작업자를 사용한다.
+POSIX no-follow 열기는 `platform/posix/safe_open.zig`가 소유하고 Windows는 native handle 경로를 쓴다.
+
+병합 fixture의 경로 조회·파일 쓰기·대기는 이식 가능한 I/O를 사용한다. Windows fixture Git은
+기존 CreateProcess 캡처로 실행한다. 임시 저장소 삭제는 resolve한 절대 대상이 현재 workspace의
+.zig-cache 안쪽인지 확인한 뒤 native I/O로 수행한다. fixture는 core.autocrlf=false로 원문 LF를
+유지한다. 프로덕션 executable 선택 계약은 바꾸지 않았다.
+
+Windows에서 8개 병합 판정자가 실행돼 통과했다(집계 21 포함 29 pass·1 skip). POSIX 셸 래퍼로
+실패를 주입하는 한 fixture는 Windows 대안이 아직 없다. 조상 판 배치·빈 조상·add/add·잘림 표시·
+꼬리 배치의 다섯 제품 변이가 실행 판정에서 실패했고 원본 복구 뒤 통과했다.
+전체 safe-save publish/rollback·GUI 편집/저장·실앱 저장 검증은 여전히 진행 대상이다.
+
+Git 쓰기 fixture도 공통 실행 경로를 사용해 Windows에서 POSIX spawn을 참조하지 않는다.
+Linux stdin은 socketpair와 send(MSG_NOSIGNAL)을 사용하고 macOS는 기존 pipe의
+F_SETNOSIGPIPE를 유지한다. Linux send(2)의 per-call 신호 억제와 EPIPE 계약을 따른다
+(https://man7.org/linux/man-pages/man2/send.2.html). 전역 SIGPIPE 처분은 바꾸지 않는다.

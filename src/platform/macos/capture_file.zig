@@ -11,7 +11,7 @@ const maru = @import("maru");
 const repo_path = maru.session.repo_path;
 const diff_payload = maru.session.diff_payload;
 const turn_capture = maru.session.turn_capture;
-const safe_open = @import("safe_open.zig");
+const safe_open = maru.posix_safe_open;
 
 /// 그 경로의 **지금 내용**을 `Side` 로. 소유권은 호출자에게 넘어간다(`turn_capture` 가 가져간다).
 ///

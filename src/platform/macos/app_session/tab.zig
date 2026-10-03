@@ -15,6 +15,7 @@
 //! 도로 옮겨야 하고, 남겨서 치르는 값은 pub화 1개뿐이다.
 
 const std = @import("std");
+const editor_ops = @import("editor/mod.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
 
@@ -1296,12 +1297,18 @@ pub fn scrollTabBarAt(self: *AppSession, x_px: f64, y_px: f64, cols: i32) void {
 }
 
 pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !maru.session.workspace.Tab {
+    var editors: editor_ops.workspace_restore.Capture = .{ .allocator = arena };
+    return captureWorkspaceTabWithEditors(self, arena, tab, &editors);
+}
+
+pub fn captureWorkspaceTabWithEditors(self: *AppSession, arena: std.mem.Allocator, tab: *Tab, editors: *editor_ops.workspace_restore.Capture) !maru.session.workspace.Tab {
     var panes: std.ArrayList(maru.session.workspace.Pane) = .empty;
     for (tab.panes.items) |pane| {
         var surfaces: std.ArrayList(maru.session.workspace.Surface) = .empty;
         // FP16 §5.0: persisted 시퀀스는 **터미널 + 파일 Term**이다(브라우저는 계속 미영속). 파일 Term은
         // `pane` 줄의 `file-term` 반복 필드로 나가고, 그 index가 이 시퀀스 안의 위치다.
         var file_terms: std.ArrayList(maru.session.workspace.FileTerm) = .empty;
+        var editor_views: std.ArrayList(maru.session.editor.workspace_state.View) = .empty;
         // WP-P: 브라우저는 **현재 URL만** 싣는다. `insert_after`는 persisted 시퀀스 안 자리가 아니라 "앞의
         // persisted Term 수"라 기존 인덱스 값을 하나도 바꾸지 않는다 — 구버전 리더가 창을 폴백하지 않는 이유다
         // (docs/workspace-restore.md §WP-P).
@@ -1313,6 +1320,11 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         var active_browser: ?usize = null;
         var persisted_index: usize = 0;
         for (pane.terms.items, 0..) |term, term_i| {
+            if (editor_ops.workspace_restore.eligible(term)) {
+                try editor_views.append(arena, try editors.view(term, persisted_index));
+                persisted_index += 1;
+                continue;
+            }
             if (term.file_entry) |entry| {
                 // **diff는 persisted 시퀀스에 들지 않는다**(docs/editor-surface-dock.md §3.5 — 저장하지 않는다).
                 // 여기서 빼지 않고 writer에서만 빼면, 이미 부여한 index가 줄어든 총계와 안 맞아 복원 시
@@ -1432,7 +1444,7 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         // WP-P: URL 있는 브라우저도 이제 복원되므로 **같은 이유로** 세어야 한다(docs/workspace-restore.md
         // §WP-P). 안 그러면 브라우저만 있던 pane이 브라우저 + 안 열었던 셸 탭으로 되살아난다.
         // URL 없는 브라우저만 있는 pane은 여전히 복원할 것이 0이라 종전대로 placeholder를 받는다.
-        if (surfaces.items.len == 0 and file_terms.items.len == 0 and browser_terms.items.len == 0 and
+        if (surfaces.items.len == 0 and file_terms.items.len == 0 and editor_views.items.len == 0 and browser_terms.items.len == 0 and
             untitled_terms.items.len == 0 and remote_doc_terms.items.len == 0)
         {
             const c = &pane.terms.items[0].surface.core; // sentinel이어도 size 유효(1×1)
@@ -1466,7 +1478,7 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
             // `untitled-term` 반복 필드로 나가 **인덱스 공간 밖**에 있기 때문이다(브라우저와 같다).
             // 그 대가는 브라우저와 같은 것 하나: 활성이 이름 없는 문서면 복원 포커스가 이웃 persisted
             // Term 으로 떨어진다(브라우저는 `active-browser` 를 더해 그것을 고쳤다 — 필요해지면 같은 모양으로 더한다).
-            if (t.kind == .editor and t.file_entry == null) continue;
+            if (t.kind == .editor and t.file_entry == null and !editor_ops.workspace_restore.eligible(t)) continue;
             if (t.kind != .web) restored_active += 1;
         }
         // **범위로 clamp한다.** "활성이 브라우저면 다음 persisted Term을 가리킨다"는 **다음이 있을 때만** 참이다 —
@@ -1477,13 +1489,14 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         // [터미널, 파일, 브라우저(활성·마지막)] → 저장 active-term=2 = persisted_total → 복원 시 창 폐기).
         // 파일 Term이 없던 pane에서 이 값이 여태 무해했던 건 그 검증이 `file_terms.len == 0`에서 조기 반환하고
         // buildWorkspacePane이 상한만 clamp했기 때문이다 — 즉 파일 Term 도입(FP16)이 잠재 결함을 깨운 자리다.
-        const persisted_total = surfaces.items.len + file_terms.items.len;
+        const persisted_total = surfaces.items.len + file_terms.items.len + editor_views.items.len;
         if (persisted_total > 0 and restored_active >= persisted_total) restored_active = persisted_total - 1;
         try panes.append(arena, .{
             .active_term = restored_active,
             .custom_name = try arena.dupe(u8, pane.custom_name orelse ""), // pane 사용자 rename(없으면 "")
             .surfaces = try surfaces.toOwnedSlice(arena),
             .file_terms = try file_terms.toOwnedSlice(arena),
+            .editor_views = try editor_views.toOwnedSlice(arena),
             .browser_terms = try browser_terms.toOwnedSlice(arena),
             .untitled_terms = try untitled_terms.toOwnedSlice(arena),
             .remote_doc_terms = try remote_doc_terms.toOwnedSlice(arena),
@@ -1559,7 +1572,7 @@ pub fn destroyTabStandalone(self: *AppSession, tab: *Tab) void {
 /// 모델 Tab → 완성된 *Tab(panes + split 트리). pane들을 먼저 만들고(각 첫 surface로 spawn + 나머지 Term 추가),
 /// 트리를 모델 preorder대로 직접 짓는다(leaf 인덱스 → 그 pane, split → 새 PaneTree.Split). 부분 실패는 granular
 /// errdefer로 정리(트리는 아직 미세팅이라 destroyTabStandalone 안 씀). capacity 예약으로 append를 무실패화.
-pub fn buildWorkspaceTab(self: *AppSession, m: maru.session.workspace.Tab) !*Tab {
+pub fn buildWorkspaceTab(self: *AppSession, m: maru.session.workspace.Tab, editors: *editor_ops.workspace_restore.Staging) !*Tab {
     if (m.panes.len == 0) return error.EmptyTab;
     const tab = try self.allocator.create(Tab);
     errdefer self.allocator.destroy(tab);
@@ -1571,7 +1584,7 @@ pub fn buildWorkspaceTab(self: *AppSession, m: maru.session.workspace.Tab) !*Tab
     for (m.panes, 0..) |pm, pane_index| {
         AppSession.restore_position.pane = pane_index;
         AppSession.restore_position.slot = null;
-        tab.panes.appendAssumeCapacity(try pane_ops.buildWorkspacePane(self, pm));
+        tab.panes.appendAssumeCapacity(try pane_ops.buildWorkspacePaneWithEditors(self, pm, editors));
     }
     // 이 뒤의 실패(트리 손상 등)는 특정 pane 의 것이 아니다 — pane 번호를 남기면 엉뚱한 곳을 가리킨다.
     AppSession.restore_position.pane = null;

@@ -14,7 +14,7 @@ if '--extended' in sys.argv:
        fixture.index(b'surface custom')+10,fixture.index(b'runtime-handle')+20,
        fixture.index(b'runtime-state')+20,fixture.index(b'fedcba')+10]
  cases=[('truncate-%02d'%i,fixture[:cut]) for i,cut in enumerate(cuts,1)]
- edits=[('header',b'maru.workspace.v1',b'maru.workspace.v999'),
+ edits=[('header',b'maru.workspace.v2',b'maru.workspace.v999'),
         ('window-count',b'window tabs=1',b'window tabs=2'),
         ('window-active',b'active-tab=0',b'active-tab=invalid'),
         ('tab-count',b'tab panes=1',b'tab panes=2'),

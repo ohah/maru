@@ -2213,6 +2213,7 @@ const TermRuntime = struct {
     editor_unattached_document: maru.session.editor.document_state.State = .{},
     /// 일반 텍스트 문서는 앱 전역 registry가 소유한다. 이 뷰는 독립 view lease 한 개를 든다.
     editor_document_lease: ?maru.session.editor.document_registry.Lease = null,
+    editor_recovery: ?*editor_ops.recovery_store.Owner = null,
 
     /// 문서 버퍼를 빌린 논리 줄 배열. 뷰의 파생 상태이므로 본문 수명 안에서만 읽는다.
     editor_lines: []const []const u8 = &.{},
@@ -10093,24 +10094,29 @@ pub const AppSession = struct {
     /// resolveCloseScope(cascade 단일 출처)로 범위를 풀어 그 범위의 leaf teardown으로 디스패치한다 — 판정
     /// (closeTargetHasRunningJob)과 정확히 같은 cascade를 타므로 "묻고 닫는 대상"이 항상 일치한다.
     pub fn executeClose(self: *AppSession, target: PendingClose) void {
+        // 보호된 파일 작업으로 창 닫기가 거절되면 삭제 대상을 준비하지 않는다.
+        // defer만으로는 성공과 거절을 구분할 수 없어, 살아 있는 문서의 백업까지 지워졌다.
+        if (self.resolveCloseScope(target) == .session and file_panel_ops.blockSessionExitForFilePanels(self)) return;
         // **사용자가 수락한 닫기다 — 이 범위의 백업은 사라진다**(§3.10). 확인 문구가 「이 내용은
         // 사라집니다」라고 약속했으므로 남기면 그 문구가 거짓이 된다. **앱 종료는 이 길로 오지
         // 않는다** — 그쪽은 남겨서 다음 실행이 되살린다(§3.11).
         //
         // **이름을 먼저 뜨고 파일은 닫은 «뒤에» 지운다.** 신원의 문자열은 Term 이 소유하므로
         // teardown 뒤에 읽으면 해제된 메모리다. 그리고 닫기는 **막힐 수 있다**(보호된 파일 패널) —
-        // 미리 지우면 안 닫힌 문서의 백업이 사라진다. `defer` 가 그 두 조건을 한 번에 만족시킨다.
+        // 미리 지우면 안 닫힌 문서의 백업이 사라진다. 위 보호 검사 뒤 teardown 이후에 정리한다.
         var drop_names: [max_close_backup_drops][maru.session.editor.backup.max_file_name_len]u8 = undefined;
         var drop_lens: [max_close_backup_drops]u8 = undefined;
         var drop_count: usize = 0;
+        var drop_owners: [max_close_backup_drops]?*editor_ops.recovery_store.Owner = @splat(null);
         const Capture = struct {
+            owners: *[max_close_backup_drops]?*editor_ops.recovery_store.Owner,
             names: *[max_close_backup_drops][maru.session.editor.backup.max_file_name_len]u8,
             lens: *[max_close_backup_drops]u8,
             count: *usize,
             session: *AppSession,
             scope: CloseScope = .none,
         };
-        var capture = Capture{ .names = &drop_names, .lens = &drop_lens, .count = &drop_count, .session = self };
+        var capture = Capture{ .owners = &drop_owners, .names = &drop_names, .lens = &drop_lens, .count = &drop_count, .session = self };
         // ⚠️ **에이전트 행 ✕의 좁은 두 범위는 건너뛴다.** `CloseScope` 는 인덱스를 안 실으므로
         // `.term`·`.pane` 은 **활성** pane 기준으로 풀리는데, 그 ✕ 가 닫는 것은 활성과 무관한 Term 이다
         // (아래 인덱스 경로가 그래서 따로 있다). 그 범위를 활성 기준으로 훑으면 **닫지도 않은 문서의
@@ -10133,11 +10139,22 @@ pub const AppSession = struct {
                 for (0..c.count.*) |i| {
                     if (std.mem.eql(u8, name, c.names[i][0..c.lens[i]])) return;
                 }
+                if (editor_backup_ops.identity(t)) |doc| if (doc == .path) {
+                    if (t.rt.editor_recovery) |owner| {
+                        owner.selectDrop() catch return;
+                        c.owners[c.count.*] = owner.retain();
+                    }
+                };
                 c.lens[c.count.*] = @intCast(name.len);
                 c.count.* += 1;
             }
         }.f);
-        defer for (0..drop_count) |i| editor_backup_ops.dropName(self, drop_names[i][0..drop_lens[i]]);
+        defer for (0..drop_count) |i| {
+            if (drop_owners[i]) |owner| {
+                owner.dropSelected() catch {};
+                owner.release();
+            } else editor_backup_ops.dropName(self, drop_names[i][0..drop_lens[i]]);
+        };
 
         // 에이전트 행 ✕는 **활성과 무관한 Term**이라 활성 기준 closeActiveTerm/closeActivePane을 쓸 수 없다 —
         // 인덱스 경로로 직접 닫고, 캐스케이드(마지막 Term→pane→탭)는 closeTermAt이 처리한다.
@@ -52335,7 +52352,7 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     const wins = [_]maru.session.workspace.Window{win};
     const text = try maru.session.workspace.serialize(allocator, .{ .windows = &wins });
     defer allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/tmp/proj\"") != null);
 }
@@ -56602,7 +56619,7 @@ test "하위버전 파일에는 접힘 의도가 없다 — agents-collapsed 없
     // 이 필드를 모르던 버전이 쓴 줄(agents-collapsed 키 없음). Term 2개라 토글 행이 실제로 생기는 구성이다
     // (에이전트 0 + Term 2개 — docs/sidebar-agent-list.md §1). 파서 기본값이 아니라 **화면 행**까지 확인한다.
     const text =
-        "maru.workspace.v1\n" ++
+        "maru.workspace.v2\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"legacy\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node leaf pane=0\n" ++
@@ -56669,7 +56686,7 @@ test "legacy provider workspace fields are ignored across multi-window parse app
     // 삭제 전 writer가 만들던 provider 필드는 일반 unknown scalar로만 취급한다. invalid argc와 bare arg도 구조 필드가
     // 아니므로 복원을 막지 않는다. 이 raw fixture 한 곳만 옛 wire spelling을 보존해 history가 제품 모델로 번지는 것을 막는다.
     const text =
-        "maru.workspace.v1\n" ++
+        "maru.workspace.v2\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=2 active-pane=1 custom-name=\"my work\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node split vertical ratio=300\n" ++

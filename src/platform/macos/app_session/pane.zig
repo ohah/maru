@@ -1826,56 +1826,34 @@ fn logUntitledNotRevived(err: anyerror, number: u32) void {
 /// `file-term`의 index가 그 시퀀스 안의 자리이고, 나머지 자리를 `surfaces`가 순서대로 채운다.
 /// pane은 항상 Term >= 1이어야 하므로(모델 불변식) 시퀀스가 비면 `EmptyPane`이다.
 pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*Pane {
-    const total = m.surfaces.len + m.file_terms.len;
-    // **이름 없는 문서만 있는 pane 도 비어 있지 않다**(U4c) — 그 record 가 되살릴 것을 들고 있다.
-    // 여기서 `EmptyPane` 을 내면 그 창의 탭·split·frame 이 통째로 사라진다.
+    var editors = try editor_ops.workspace_restore.Staging.init(self, &.{});
+    defer editors.deinit();
+    return buildWorkspacePaneWithEditors(self, m, &editors);
+}
+
+pub fn buildWorkspacePaneWithEditors(self: *AppSession, m: maru.session.workspace.Pane, editors: *editor_ops.workspace_restore.Staging) !*Pane {
+    const total = m.surfaces.len + m.file_terms.len + m.editor_views.len;
     if (total == 0 and m.untitled_terms.len == 0) return error.EmptyPane;
-
-    // pane 생성은 Term 하나가 필요하다. 터미널이 하나도 없으면 첫 파일로, 그것도 없으면 **첫 이름 없는
-    // 문서**로 만든다(U4c — 씨로 쓴 record 는 아래 삽입 루프가 건너뛴다).
-    var pane: *Pane = undefined;
-    var next_surface: usize = 0;
-    var seeded_file = false;
-    var seeded_untitled = false;
-    // 씨 Term 은 그 pane 의 **첫 자리**(slot 0)를 만든다 — 실패하면 그 자리가 원인이다.
-    AppSession.restore_position.slot = 0;
-    if (m.surfaces.len > 0) {
-        pane = try createPaneFromSurface(self, m.surfaces[0]);
-        next_surface = 1;
-    } else if (m.file_terms.len > 0) {
-        pane = try createPaneFromFileTerm(self, m.file_terms[0]);
-        seeded_file = true;
-    } else {
-        pane = try createPaneFromUntitledTerm(self, m.untitled_terms[0].number);
-        seeded_untitled = true;
-    }
+    const pane = try self.allocator.create(Pane);
+    pane.* = .{};
     errdefer destroyPane(self, pane);
-    pane.custom_name = try self.dupeCustomName(m.custom_name); // pane 사용자 rename 복원(errdefer destroyPane가 free)
-    try pane.terms.ensureTotalCapacity(self.allocator, total);
-
-    // 시퀀스를 앞에서부터 채운다. 각 자리는 그 index를 요구하는 file-term이 있으면 파일 Term, 없으면
-    // 다음 터미널 surface다(검증 — index 중복 없음·[0,total) 전수 — 은 파서가 이미 했다). seed로 이미
-    // 만든 Term은 건너뛴다.
-    var slot: usize = 0;
-    var seed_file_used = !seeded_file;
-    while (slot < total) : (slot += 1) {
+    pane.custom_name = try self.dupeCustomName(m.custom_name);
+    try pane.terms.ensureTotalCapacity(self.allocator, @max(total, 1));
+    var next_surface: usize = 0;
+    for (0..total) |slot| {
         AppSession.restore_position.slot = slot;
-        const file_index: ?usize = blk: {
-            for (m.file_terms, 0..) |ft, fi| if (ft.index == slot) break :blk fi;
-            break :blk null;
+        const term = term_at: {
+            for (m.editor_views) |view| if (view.index == slot) break :term_at try editors.createView(view);
+            for (m.file_terms) |file| if (file.index == slot) break :term_at try createFileTermFromModel(self, file);
+            if (next_surface >= m.surfaces.len) return error.InvalidTermIndex;
+            const term = try createTermFromSurface(self, m.surfaces[next_surface]);
+            next_surface += 1;
+            break :term_at term;
         };
-        if (file_index) |fi| {
-            if (!seed_file_used) {
-                seed_file_used = true; // seed가 곧 이 자리의 파일이다(터미널 0개인 pane)
-                continue;
-            }
-            pane.terms.appendAssumeCapacity(try createFileTermFromModel(self, m.file_terms[fi]));
-            continue;
-        }
-        if (next_surface >= m.surfaces.len) continue; // seed로 쓴 surface 자리
-        pane.terms.appendAssumeCapacity(try createTermFromSurface(self, m.surfaces[next_surface]));
-        next_surface += 1;
+        pane.terms.appendAssumeCapacity(term);
     }
+    const seeded_untitled = total == 0;
+    if (seeded_untitled) pane.terms.appendAssumeCapacity(try editor_ops.createRestoredUntitledTerm(self, m.untitled_terms[0].number));
     pane.active_term = @min(m.active_term, pane.terms.items.len - 1);
 
     // WP-P: 브라우저 Term을 `insert_after`(앞의 persisted Term 수) 자리에 끼워 넣는다. 뒤에서부터 삽입해야

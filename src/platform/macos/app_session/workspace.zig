@@ -18,6 +18,7 @@
 //! 사고가 없었지만(실측 0건), 이 그룹부터는 struct 소유를 보고 거른다.
 
 const std = @import("std");
+const editor_restore = @import("editor/restore.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const scm_dock_ops = @import("scm_dock.zig"); // 고른 비교 기준을 세션에 되싣는다(§3.5 P7b)
@@ -559,7 +560,8 @@ pub fn currentBootSession() []const u8 {
 
 pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_active: bool, frame: ?maru.session.workspace.Frame) !maru.session.workspace.Window {
     var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
-    for (self.tabs.items) |tab| try tabs.append(arena, try tab_ops.captureWorkspaceTab(self, arena, tab));
+    var editors: editor_restore.Capture = .{ .allocator = arena };
+    for (self.tabs.items) |tab| try tabs.append(arena, try tab_ops.captureWorkspaceTabWithEditors(self, arena, tab, &editors));
     const dock = if (self.dock_initialized) try file_panel_ops.persistFilePanelState(self, arena) else dock_panel.PersistedState{};
     const explorer_roots: ?[]const []const u8 = if (self.file_tree_initialized and self.file_tree.rootMode() == .explicit) blk: {
         const roots = try arena.alloc([]const u8, self.file_tree.rootCount());
@@ -576,12 +578,12 @@ pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_ac
     const last_agent_session: []const u8 = if (self.last_agent_session) |sid| try arena.dupe(u8, sid) else "";
     // 부팅 신원(RB1): 다음 실행이 「이 파일을 쓴 뒤 재부팅됐나」를 판정할 근거다. 모든 창에 같은 값을 싣는다.
     const boot_session = try arena.dupe(u8, currentBootSession());
-    return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .last_agent_session = last_agent_session, .boot_session = boot_session };
+    return .{ .editor_documents = try editors.finish(), .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .last_agent_session = last_agent_session, .boot_session = boot_session };
 }
 
 /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
 /// 캡처는 임시 arena로 하고, 결과 텍스트만 self.allocator로 보관한다(다음 호출/deinit까지 유효 — cwd ABI와
-/// 같은 소유 규칙). Swift가 멀티 창 저장에서 세션마다 호출해 `maru.workspace.v1` 헤더 아래로 모은다.
+/// 같은 소유 규칙). Swift가 멀티 창 저장에서 세션마다 호출해 `maru.workspace.v2` 헤더 아래로 모은다.
 pub fn serializeWorkspaceWindow(self: *AppSession, is_active: bool, frame: ?maru.session.workspace.Frame) ![]const u8 {
     if (self.workspace_buffer) |b| {
         self.allocator.free(b);
@@ -761,6 +763,10 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
         &new_file_tree_rows,
     );
 
+    try maru.session.workspace.validateEditorReferences(self.allocator, .{ .windows = &.{win} });
+    var editors = try editor_restore.Staging.init(self, win.editor_documents);
+    defer editors.deinit();
+
     // 1) 새 탭들을 먼저 다 빌드한다(아직 self.tabs에 안 넣음 — 실패하면 기존 세션 그대로 유지).
     var new_tabs: std.ArrayList(*Tab) = .empty;
     defer new_tabs.deinit(self.allocator);
@@ -768,7 +774,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     try new_tabs.ensureTotalCapacity(self.allocator, win.tabs.len);
     for (win.tabs, 0..) |tab_model, tab_index| {
         AppSession.restore_position = .{ .stage = "tabs", .tab = tab_index };
-        new_tabs.appendAssumeCapacity(try tab_ops.buildWorkspaceTab(self, tab_model));
+        new_tabs.appendAssumeCapacity(try tab_ops.buildWorkspaceTab(self, tab_model, &editors));
     }
     AppSession.restore_position = .{ .stage = "publish" };
     // 재부팅 부활(RB1)은 `ended` surface 를 묘비가 아니라 새 셸로 세웠으므로 짝 맞출 묘비가 없다 — 그 경우
@@ -904,6 +910,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
     // 창이 확정됐다 — 내용이 살아 있는 Term 으로 옮겨 갔으니 미룬 레코드를 이제 지운다.
     app_session_mod.editor_backup_ops.commitDeferredDrops(self);
+    if (editors.restored_content) self.showNoticeKey(.editor_backup_restored);
 }
 
 /// Reconciliation numbers only runtime-bound Workspace surfaces, in Window/Tab/Pane/surface order.

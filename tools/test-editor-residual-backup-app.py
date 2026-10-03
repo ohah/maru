@@ -16,14 +16,16 @@ base.update(HOME=str(home), CFFIXED_USER_HOME=str(home),
     MARU_CONFIG=str(config), XDG_CONFIG_HOME=str(home / '.config'),
     XDG_CACHE_HOME=str(work / 'cache'), XDG_STATE_HOME=str(work / 'state'),
     MARU_SESSION_HOST_ROOT=str(work / 'host'), MARU_EDITOR_BACKUP_ROOT=str(backups),
-    MARU_NO_WORKSPACE_RESTORE='1', MARU_NATIVE_EDITOR=str(document),
-    MARU_MACOS_APP_SMOKE_MS='15000', MARU_EDITOR_SAVE_CONFLICT_SMOKE='1')
+    MARU_NATIVE_EDITOR=str(document), MARU_EDITOR_SAVE_CONFLICT_DOCUMENT=str(document),
+    MARU_EDITOR_RECOVERY_CHECKPOINT_TEST='maru-test-only-v1', MARU_MACOS_APP_SMOKE_MS='15000', MARU_EDITOR_SAVE_CONFLICT_SMOKE='1')
 results = []
 
 def run(scenario):
     summary = work / (scenario + '.summary')
     env = dict(base, MARU_EDITOR_SAVE_CONFLICT_SMOKE_SCENARIO=scenario,
         MARU_APP_SUMMARY_PATH=str(summary))
+    if scenario != 'quit-backup':
+        env.pop('MARU_NATIVE_EDITOR', None)
     with (work / (scenario + '.log')).open('wb') as log:
         child = subprocess.Popen([str(root / 'zig-out/Maru.app/Contents/MacOS/maru-macos-app')],
             env=env, cwd=root, stdout=log, stderr=log, start_new_session=True)
@@ -63,7 +65,7 @@ try:
         older_body_sha256=hashlib.sha256(older_body).hexdigest(),
         save_newer_succeeded=True, older_backup_retained=True,
         relaunch_dirty_without_typing=True, latest_disk_preserved=True,
-        scope='actual AppKit processes; native editor open hook, smoke keys, normal quit; workspace restore disabled')
+        scope='actual AppKit processes; native editor open hook, smoke keys, normal quit; workspace v2 restore selects the persisted recovery ID')
     (work / 'result.json').write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
 finally:

@@ -1,0 +1,39 @@
+{
+  "scenario": "restore-backup from persisted workspace v2 recovery ID; no typing",
+  "viewport": {
+    "width": 960,
+    "height": 600
+  },
+  "theme": "dark",
+  "app_sha256": "e303b57565b3eeabc0678dfd3381b4af6d800d2cbdafe93f21230845162f69cc",
+  "png_sha256": "6ea3c30422e95058a4db2b09975eb3140857d888e79290440b2e9c962600efff",
+  "capture_exit_code": 0,
+  "smoke_stage": "done",
+  "artifact_root": "/private/tmp/maru-residual-app-g40wzngp",
+  "source_image": "/private/tmp/maru-residual-app-g40wzngp/restore.ppm",
+  "image_for_pr": "zig-out/maru-editor-recovery-review/restore.png",
+  "capture_environment": {
+    "MARU_SCREENSHOT": "/private/tmp/maru-residual-app-g40wzngp/restore.ppm",
+    "MARU_SCREENSHOT_KEEP_PROCESS": "maru-test-only-v1",
+    "MARU_EDITOR_RECOVERY_CHECKPOINT_TEST": "maru-test-only-v1",
+    "MARU_EDITOR_SAVE_CONFLICT_SMOKE_SCENARIO": "restore-backup"
+  },
+  "encoding_command": [
+    "ffmpeg",
+    "-y",
+    "-loglevel",
+    "error",
+    "-i",
+    "/private/tmp/maru-residual-app-g40wzngp/restore.ppm",
+    "/Users/yoonhb/Documents/workspace/maru-view-find/zig-out/maru-editor-recovery-review/restore.png"
+  ],
+  "observed": [
+    "restored unsaved body",
+    "dirty indicator",
+    "restored-backup notification"
+  ],
+  "limits": [
+    "single document",
+    "not shared-pane restart or physical OS IME proof"
+  ]
+}

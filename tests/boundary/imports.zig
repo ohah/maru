@@ -12741,9 +12741,12 @@ test "이름 없는 문서: 이름을 붙이는 자리는 하나, workspace 제�
         while (std.mem.indexOfPos(u8, tab, i, needle)) |at| : (i = at + needle.len) {
             const rest = tab[at + needle.len ..];
             if (std.mem.startsWith(u8, rest, "term.file_entry == null)")) hits += 1;
-            if (std.mem.startsWith(u8, rest, "t.file_entry == null) continue;")) hits += 1;
+            if (std.mem.startsWith(u8, rest, "t.file_entry == null and !editor_ops.workspace_restore.eligible(t)) continue;")) hits += 1;
         }
         try std.testing.expectEqual(@as(usize, 2), hits);
+        // 일반 로컬 ID 뷰는 별도 record로 먼저 캡처하므로 활성 셈에서도 제외하지 않는다.
+        try std.testing.expect(std.mem.indexOf(u8, tab, "if (editor_ops.workspace_restore.eligible(term)) {") != null);
+        try std.testing.expect(std.mem.indexOf(u8, tab, "try editor_views.append(arena, try editors.view(term, persisted_index));") != null);
         // 그리고 **각 자리가 자기 일을 한다**: 캡처는 record 하나를 만들고, 활성 셈은 건너뛴다.
         var appended: usize = 0;
         var ai: usize = 0;
@@ -13017,7 +13020,11 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     // ⑶ **수락된 닫기가 지운다 — 이름으로, 닫힌 뒤에.** 신원 문자열은 Term 이 소유하므로 teardown 뒤에
     //    읽으면 해제된 메모리이고, 미리 지우면 **막힌 닫기**(보호된 파일 패널)에서 안 닫힌 문서의
     //    백업이 사라진다. 그래서 자리는 `defer` 하나다.
-    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "defer for (0..drop_count) |i| editor_backup_ops.dropName("));
+    // 로컬 ID 기록은 선택한 Owner/inode로, 기존 untitled/remote 기록은 파일 이름으로 정리한다.
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "defer for (0..drop_count) |i| {"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "owner.dropSelected() catch {};"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "else editor_backup_ops.dropName(self, drop_names[i][0..drop_lens[i]])"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "if (self.resolveCloseScope(target) == .session and file_panel_ops.blockSessionExitForFilePanels(self)) return;"));
     try std.testing.expectEqual(@as(usize, 1), countOfB(session, "editor_backup_ops.fileNameIfOnDisk(t, "));
     // **묻는 대상과 지우는 대상이 같은 집합이다** — 범위 순회가 하나뿐인 것으로 그것을 못박는다.
     try std.testing.expectEqual(@as(usize, 1), countOfB(session, "pub fn forEachTermInScope("));

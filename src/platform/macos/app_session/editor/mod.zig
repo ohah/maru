@@ -2319,7 +2319,71 @@ const SharedSeed = struct {
 /// **왜 중간 상태에 이름을 줬나.** 파일 Term을 여는 경로(`pane.openFileTermInActivePane`)는 Term을
 /// 만드는 **분기 전에** 이 파일을 네이티브로 열 수 있는지 알아야 한다 — 못 읽으면 CM6로 열어야
 /// 하는데, 읽기와 부착이 한 함수에 붙어 있으면 그 판정을 할 수 없다(Term이 이미 만들어진 뒤다).
+pub const recovery_store = @import("recovery_store.zig");
+pub const workspace_restore = @import("restore.zig");
+
+/// 복원 staging의 정본은 아직 live pane에 없으므로 일반 사용자 split admission과 구분한다.
+pub fn prepareRetainedRestoreView(self: *AppSession, source: *Term) !Prepared {
+    const opened = source.rt.editorDocument().opened.?;
+    const lines = try self.allocator.alloc([]const u8, opened.file.lineCount());
+    errdefer self.allocator.free(lines);
+    for (lines, 0..) |*line, i| line.* = opened.file.lineText(i) orelse "";
+    const lease = try self.editor_documents.retain(source.rt.editor_document_lease.?, .view);
+    return .{ .lease = lease, .lines = lines, .shared = true, .recovery = source.rt.editor_recovery.?.retain() };
+}
+
+fn restoredOffset(bytes: []const u8, offset: usize) usize {
+    var at = @min(offset, bytes.len);
+    while (at > 0 and at < bytes.len and bytes[at] & 0xc0 == 0x80) at -= 1;
+    return at;
+}
+
+pub fn restoreViewState(self: *AppSession, term: *Term, value: editor.workspace_state.View, matching: bool) !void {
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    if (!matching) return;
+    const bytes = term.rt.editorDocument().opened.?.file.content;
+    const restored_selections = try self.allocator.alloc(editor_selection.Selection, value.extras.len + 1);
+    defer self.allocator.free(restored_selections);
+    restored_selections[0] = value.primary;
+    @memcpy(restored_selections[1..], value.extras);
+    for (restored_selections) |*sel| {
+        const start = restoredOffset(bytes, sel.anchor_start);
+        const end = restoredOffset(bytes, sel.anchor_end);
+        sel.anchor_start = @min(start, end);
+        sel.anchor_end = @max(start, end);
+        sel.focus = restoredOffset(bytes, sel.focus);
+        sel.goal = .none;
+        sel.anchor_goal = .none;
+    }
+    const merged = editor_selection.mergeOverlapping(restored_selections, 0);
+    const extras = try self.allocator.alloc(editor_selection.Selection, merged.len - 1);
+    var at: usize = 0;
+    for (restored_selections[0..merged.len], 0..) |sel, i| if (i != merged.primary) {
+        extras[at] = sel;
+        at += 1;
+    };
+    self.allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extras;
+    term.rt.editor_selection = restored_selections[merged.primary];
+    term.rt.editor_wrap = value.wrap;
+    term.rt.editor_first_line = @min(value.first_line, term.rt.editor_lines.len -| 1);
+    term.rt.editor_first_piece = if (term.rt.editor_first_line == value.first_line) @min(value.first_piece, @as(u32, @intCast(term.rt.editor_lines[term.rt.editor_first_line].len))) else 0;
+    term.rt.editor_first_col = @min(value.first_col, term.rt.editor_max_columns);
+    try ensureFoldRanges(self, term);
+    promoteFoldRangesToSyntax(self, term);
+    // 현재 provider가 실제로 인정하는 머리만 복원한다. 사라진 접힘을 옆 블록에 옮기지 않는다.
+    term.rt.editor_folded_len = 0;
+    for (term.rt.editor_fold_ranges) |range| {
+        if (std.mem.indexOfScalar(u32, value.folded, range.head) != null) {
+            term.rt.editor_folded_buf[term.rt.editor_folded_len] = range.head;
+            term.rt.editor_folded_len += 1;
+        }
+    }
+    try rebuildVisible(self, term);
+}
+
 pub const Prepared = struct {
+    recovery: ?*recovery_store.Owner = null,
     lease: editor.document_registry.Lease,
     lines: [][]const u8,
     shared: bool = false,
@@ -2337,6 +2401,7 @@ pub const Prepared = struct {
             allocator.free(seed.visible_numbers);
             allocator.free(seed.marks);
         }
+        if (self.recovery) |owner| owner.release();
         _ = @constCast(self.lease.owner).release(self.lease) catch unreachable;
         self.* = undefined;
     }
@@ -2344,6 +2409,10 @@ pub const Prepared = struct {
 
 /// 경로를 읽어 부착 직전까지 만든다. **실패할 수 있는 일은 전부 여기서 끝난다.**
 pub fn preparePath(self: *AppSession, path: []const u8) OpenFileError!Prepared {
+    return prepareRecoveryPath(self, path, null);
+}
+
+pub fn prepareRecoveryPath(self: *AppSession, path: []const u8, restored: ?recovery_store.Id) OpenFileError!Prepared {
     var opened = try openPath(self.io, self.allocator, path);
     errdefer opened.deinit(self.allocator);
     // 원격 미러(RF4)는 어느 길로 열려도 읽기 전용이다 — 근거가 경로 접두라 리로드·재열기·복원이
@@ -2359,9 +2428,11 @@ pub fn preparePath(self: *AppSession, path: []const u8) OpenFileError!Prepared {
 
     const path_copy = self.allocator.dupe(u8, path) catch return error.OutOfMemory;
     errdefer self.allocator.free(path_copy);
-    var state: editor.document_state.State = .{ .opened = opened, .path = path_copy };
+    const recovery = recovery_store.Owner.create(self.allocator, self.io, restored) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Unreadable;
+    errdefer recovery.release();
+    var state: editor.document_state.State = .{ .opened = opened, .path = path_copy, .recovery_id = recovery.id };
     const lease = self.editor_documents.create(&state, self.allocator) catch return error.OutOfMemory;
-    return .{ .lease = lease, .lines = lines };
+    return .{ .lease = lease, .lines = lines, .recovery = recovery };
 }
 
 // A handle may be app-global; connection authority still belongs to its actual window.
@@ -2402,7 +2473,7 @@ pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || err
     const marks = try self.allocator.dupe(chrome_editor.gutter.Fold, source.rt.editor_fold_marks);
     errdefer self.allocator.free(marks);
     const lease = self.editor_documents.retain(source_lease, .view) catch return error.OutOfMemory;
-    return .{ .lease = lease, .lines = lines, .shared = true, .seed = .{
+    return .{ .lease = lease, .lines = lines, .recovery = if (source.rt.editor_recovery) |owner| owner.retain() else null, .shared = true, .seed = .{
         .selection = source.rt.editor_selection,
         .extras = extras,
         .first_line = source.rt.editor_first_line,
@@ -2461,9 +2532,11 @@ pub fn prepareUntitled(self: *AppSession) OpenFileError!Prepared {
     errdefer self.allocator.free(lines);
     for (0..n) |i| lines[i] = opened.file.lineText(i) orelse "";
 
-    var state: editor.document_state.State = .{ .opened = opened };
+    const recovery = recovery_store.Owner.create(self.allocator, self.io, null) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Unreadable;
+    errdefer recovery.release();
+    var state: editor.document_state.State = .{ .opened = opened, .recovery_id = recovery.id };
     const lease = self.editor_documents.create(&state, self.allocator) catch return error.OutOfMemory;
-    return .{ .lease = lease, .lines = lines };
+    return .{ .lease = lease, .lines = lines, .recovery = recovery };
 }
 
 /// 준비한 문서를 Term에 넘긴다. **실패하지 않는다** — 호출자는 이 앞에서 실패할 수 있는 일을 모두
@@ -2481,6 +2554,7 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     if (!prepared.shared) prepared.lease.owner.get(prepared.lease).?.untitled = term.rt.editor_unattached_document.untitled;
     term.rt.editor_unattached_document = .{};
     term.rt.editor_document_lease = prepared.lease;
+    term.rt.editor_recovery = prepared.recovery;
     term.rt.editor_lines = prepared.lines;
 
     // **구문 트리를 여기서 연다**(§5.3). 문서와 수명이 같으므로 `releaseEditorTerm`이 함께 놓는다.
@@ -10882,6 +10956,8 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_row_cache = .{ .prefix = &.{} };
     if (term.rt.editor_document_lease) |lease| {
         term.rt.editor_document_lease = null;
+        if (term.rt.editor_recovery) |owner| owner.release();
+        term.rt.editor_recovery = null;
         _ = @constCast(lease.owner).release(lease) catch unreachable;
     } else {
         term.rt.editor_unattached_document.clear(self.allocator);
@@ -41030,26 +41106,15 @@ test "U2i 저장하면 workspace 저장 시퀀스에 든다 — 다음 실행에
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const wtab = try tab_ops.captureWorkspaceTab(fx.session, arena.allocator(), tab_ops.activeTab(fx.session));
-    const wp = wtab.panes[0];
-    try testing.expectEqual(@as(usize, 1), wp.file_terms.len); // ★ 이제 실린다
-    try testing.expectEqualStrings(t.rt.editorDocument().path.?, wp.file_terms[0].path);
-    try testing.expectEqual(maru.session.dock_panel.EntryKind.text, wp.file_terms[0].kind);
-    // 직렬화 → 파싱 왕복이 폴백 없이 통과해야 한다(그것이 곧 「유지된다」의 정의다).
-    const tabs_slice = try arena.allocator().dupe(maru.session.workspace.Tab, &.{wtab});
-    const wins = try arena.allocator().dupe(maru.session.workspace.Window, &.{.{
-        .active_tab = 0,
-        .active = true,
-        .frame = null,
-        .tabs = tabs_slice,
-        .dock = .{},
-        .explorer = .{ .roots = null },
-    }});
-    const text = try maru.session.workspace.serialize(allocator, .{ .windows = wins });
+    const win = try workspace_ops.captureWorkspaceWindow(fx.session, arena.allocator(), true, null);
+    const wp = win.tabs[0].panes[0];
+    try testing.expectEqual(@as(usize, 1), wp.editor_views.len);
+    try testing.expectEqualStrings(t.rt.editorDocument().path.?, win.editor_documents[0].path);
+    const text = try maru.session.workspace.serialize(allocator, .{ .windows = &.{win} });
     defer allocator.free(text);
     var parsed = try maru.session.workspace.parse(allocator, text);
     defer parsed.deinit();
-    try testing.expectEqual(@as(usize, 1), parsed.workspace.windows[0].tabs[0].panes[0].file_terms.len);
+    try testing.expectEqual(@as(usize, 1), parsed.workspace.windows[0].tabs[0].panes[0].editor_views.len);
 }
 
 test "U2j 저장 뒤에는 보통 문서의 저장 경로를 탄다 — 두 번째 ⌘S 는 묻지 않는다" {
@@ -43136,6 +43201,7 @@ const backup_rules = maru.session.editor.backup;
 /// 백업 디렉터리를 이 테스트 전용으로 박고, 그 절대 경로를 돌려준다.
 fn pinBackupDir(buf: []u8, dir: *std.testing.TmpDir) ![]const u8 {
     const root = buf[0..try dir.dir.realPath(std.testing.io, buf)];
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @enumFromInt(0o700), .{});
     app_session_mod.editor_backup_ops.setDirForTest(root);
     return root;
 }
@@ -43234,10 +43300,10 @@ test "U4a-3 저장하면 사라진다 — 미저장 편집이 없으니 백업�
     try testing.expect(insertText(fx.session, t, "x"));
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
-    try testing.expect(backupExists(root, .{ .path = .{ .path = path } }));
+    try testing.expect(recoveryExists(root, t.rt.editor_recovery.?.id));
 
     try saveDocument(fx.session, t);
-    try testing.expect(!backupExists(root, .{ .path = .{ .path = path } }));
+    try testing.expect(!recoveryExists(root, t.rt.editor_recovery.?.id));
     try testing.expect(!t.rt.editorDocument().notifications.backup_on_disk);
 }
 
@@ -43260,13 +43326,13 @@ test "U4a-4 undo 로 clean 이 되면 지운다 — 디스크와 같은 내용�
     try testing.expect(insertText(fx.session, t, "x"));
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
-    try testing.expect(backupExists(root, .{ .path = .{ .path = path } }));
+    try testing.expect(recoveryExists(root, t.rt.editor_recovery.?.id));
 
     try testing.expect(undoEdit(fx.session, t));
     try testing.expect(!isDirty(t)); // 저장 시점 내용으로 돌아왔다
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
-    try testing.expect(!backupExists(root, .{ .path = .{ .path = path } }));
+    try testing.expect(!recoveryExists(root, t.rt.editor_recovery.?.id));
 }
 
 test "U4a-5 큰 문서는 백업하지 않고 그 사실을 남긴다 — 조용히 멈추지 않는다" {
@@ -43535,9 +43601,51 @@ fn plantBackup(allocator: std.mem.Allocator, root: []const u8, doc: backup_rules
     try af.replace(std.testing.io);
 }
 
-/// 그 파일을 **제품 경로로** 연다(`preparePath` → `finishAttach` — 복원 후크가 사는 그 길).
+// 테스트 checkpoint가 지목할 고정 신원이다. 제품은 경로 해시 대신 secure random ID를 발급한다.
+fn fixtureRecoveryId(path: []const u8) recovery_store.Id {
+    var bytes: [16]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], std.hash.Wyhash.hash(0, path), .big);
+    std.mem.writeInt(u64, bytes[8..16], std.hash.Wyhash.hash(1, path), .big);
+    return .{ .bytes = bytes };
+}
+fn recoveryExists(root: []const u8, id: recovery_store.Id) bool {
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const name = maru.session.editor.recovery_id.fileName(id) catch return false;
+    const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ root, name }) catch return false;
+    _ = std.Io.Dir.cwd().statFile(std.testing.io, path, .{}) catch return false;
+    return true;
+}
+fn readRecovery(allocator: std.mem.Allocator, root: []const u8, id: recovery_store.Id) ![]u8 {
+    const name = try maru.session.editor.recovery_id.fileName(id);
+    const path = try std.fs.path.join(allocator, &.{ root, &name });
+    defer allocator.free(path);
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(backup_rules.max_record_bytes));
+}
+fn recoveryBackupExists(root: []const u8, doc: backup_rules.Doc) bool {
+    return recoveryExists(root, fixtureRecoveryId(doc.path.path));
+}
+fn plantRecoveryBackup(allocator: std.mem.Allocator, root: []const u8, doc: backup_rules.Doc, content: []const u8) !void {
+    const owner = try recovery_store.Owner.create(allocator, std.testing.io, fixtureRecoveryId(doc.path.path));
+    defer owner.release();
+    try owner.write(root, doc.path.path, doc.path.disk_hash, content);
+}
+fn openRestoredId(fx: *UntitledFixture, path: []const u8, id: recovery_store.Id) !*Term {
+    var prepared = try prepareRecoveryPath(fx.session, path, id);
+    const term = createEditorTerm(fx.session) catch |err| {
+        prepared.deinit(fx.session.allocator);
+        return err;
+    };
+    finishAttach(fx.session, term, prepared);
+    errdefer term_ops.destroyTerm(fx.session, term);
+    const restored = try app_session_mod.editor_backup_ops.restoreRecovery(fx.session, term);
+    const pane = pane_ops.activePane(fx.session);
+    try pane.terms.append(fx.session.allocator, term);
+    if (!fx.session.workspace_restore_staging) app_session_mod.editor_backup_ops.commitDeferredDrops(fx.session);
+    if (restored) fx.session.showNoticeKey(.editor_backup_restored);
+    return term;
+}
 fn openRestored(fx: *UntitledFixture, path: []const u8) !*Term {
-    return openPathInActivePane(fx.session, path);
+    return openRestoredId(fx, path, fixtureRecoveryId(path));
 }
 
 test "U4b-1 지난 세션의 편집이 조용히 되살아난다 — dirty 로, 알림 한 줄과 함께" {
@@ -43555,7 +43663,7 @@ test "U4b-1 지난 세션의 편집이 조용히 되살아난다 — dirty 로, 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
     const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } };
-    try plantBackup(allocator, root, doc, "my unsaved work\n");
+    try plantRecoveryBackup(allocator, root, doc, "my unsaved work\n");
 
     const t = try openRestored(&fx, path);
     // ⑴ **내용이 내 편집이다** ⑵ **dirty 다**(디스크는 그대로이므로) ⑶ **묻지 않았다**.
@@ -43570,7 +43678,7 @@ test "U4b-1 지난 세션의 편집이 조용히 되살아난다 — dirty 로, 
     defer allocator.free(on_disk);
     try testing.expectEqualStrings("disk\n", on_disk);
     // ⑹ 재백업 전에도 원래 미저장 내용이 보호된다.
-    try testing.expect(backupExists(root, doc));
+    try testing.expect(recoveryBackupExists(root, doc));
 }
 
 test "U4b-2 디스크가 그 사이 바뀌어도 «묻지 않는다» — 첫 저장이 충돌로 갈린다" {
@@ -43588,7 +43696,7 @@ test "U4b-2 디스크가 그 사이 바뀌어도 «묻지 않는다» — 첫 �
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "c.txt", .data = "v1\n" });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/c.txt", .{root});
-    try plantBackup(allocator, root, .{ .path = .{ .path = path, .disk_hash = contentHash("v0\n") } }, "mine\n");
+    try plantRecoveryBackup(allocator, root, .{ .path = .{ .path = path, .disk_hash = contentHash("v0\n") } }, "mine\n");
 
     const t = try openRestored(&fx, path);
     try testing.expectEqualStrings("mine\n", t.rt.editorDocument().opened.?.file.content);
@@ -43616,7 +43724,7 @@ test "U4b-3 되돌리기가 디스크 내용을 되살린다 — 한 편집으�
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "u.txt", .data = "on disk\n" });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/u.txt", .{root});
-    try plantBackup(allocator, root, .{ .path = .{ .path = path, .disk_hash = contentHash("on disk\n") } }, "restored\n");
+    try plantRecoveryBackup(allocator, root, .{ .path = .{ .path = path, .disk_hash = contentHash("on disk\n") } }, "restored\n");
 
     const t = try openRestored(&fx, path);
     try testing.expectEqualStrings("restored\n", t.rt.editorDocument().opened.?.file.content);
@@ -43641,15 +43749,15 @@ test "U4b-4 내용이 같으면 되살릴 것이 없다 — clean 이고 알림�
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/same.txt", .{root});
     const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("same\n") } };
-    try plantBackup(allocator, root, doc, "same\n");
+    try plantRecoveryBackup(allocator, root, doc, "same\n");
 
     const t = try openRestored(&fx, path);
     try testing.expect(!isDirty(t));
     try testing.expect(!fx.session.chrome_host.notice.open); // 되살린 것이 없으면 말할 것도 없다
-    try testing.expect(!backupExists(root, doc)); // 그래도 걷는다 — 다음 실행이 또 보지 않게
+    try testing.expect(!recoveryBackupExists(root, doc)); // 그래도 걷는다 — 다음 실행이 또 보지 않게
 }
 
-test "U4b-5 손상·잘린 레코드는 무시하고 파일을 그대로 연다 — 그리고 «지우지 않는다»" {
+test "U4b-5 잘린 v1 path 백업은 새 복구 ID에 배정하지 않고 보존한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try UntitledFixture.init(allocator, false, true);
@@ -43681,7 +43789,7 @@ test "U4b-5 손상·잘린 레코드는 무시하고 파일을 그대로 연다 
     try testing.expect(backupExists(root, doc));
 }
 
-test "U4b-6 다른 경로의 레코드는 되살리지 않는다 — 이름은 해시라 충돌할 수 있다" {
+test "U4b-6 다른 경로를 담은 v1 path 백업도 새 복구 ID에 배정하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try UntitledFixture.init(allocator, false, true);
@@ -43695,8 +43803,8 @@ test "U4b-6 다른 경로의 레코드는 되살리지 않는다 — 이름은 �
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "mine.txt", .data = "mine on disk\n" });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/mine.txt", .{root});
-    // **내 이름 자리에 남의 레코드를 심는다**(해시 충돌을 흉내 낸다) — 신원 재확인이 없으면 이것이
-    // 조용히 「다른 내용으로 열기」가 된다.
+    // 이전 path 해시 이름에 다른 경로의 레코드가 남아 있어도 신규 ID로 가져오지 않는다.
+    // v2 내부 ID/path 검증은 recovery_store의 ForeignRecord 판정자가 별도로 검사한다.
     const other: backup_rules.Doc = .{ .path = .{ .path = "/somewhere/else.txt", .disk_hash = 0 } };
     const bytes = try backup_rules.encode(allocator, other, "not mine\n");
     defer allocator.free(bytes);
@@ -43747,18 +43855,18 @@ test "U4b-8 되살린 문서는 다시 보호된다 — 시계가 서고 다음 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/again.txt", .{root});
     const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("d\n") } };
-    try plantBackup(allocator, root, doc, "kept\n");
+    try plantRecoveryBackup(allocator, root, doc, "kept\n");
 
     const t = try openRestored(&fx, path);
-    try testing.expect(backupExists(root, doc)); // 재백업 전 보호
+    try testing.expect(recoveryBackupExists(root, doc)); // 재백업 전 보호
     // 되살린 편집도 **미저장 편집**이다 — 다시 크래시가 와도 잃지 않아야 한다.
     try testing.expect(t.rt.editorDocument().notifications.backup_dirty);
     expireBackupClock(t);
     app_session_mod.editor_backup_ops.tick(fx.session);
-    try testing.expect(backupExists(root, doc));
+    try testing.expect(recoveryBackupExists(root, doc));
 }
 
-test "U4b-9 적대적 레코드 둘은 무시된다 — UTF-8 이 아닌 내용, 저장 상한을 넘는 내용" {
+test "U4b-9 잘못된 본문과 큰 본문을 가진 v1 백업은 그대로 보존한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try UntitledFixture.init(allocator, false, true);
@@ -43769,7 +43877,7 @@ test "U4b-9 적대적 레코드 둘은 무시된다 — UTF-8 이 아닌 내용,
     const root = try pinBackupDir(&root_buf, &dir);
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
 
-    // ⑴ **UTF-8 이 아닌 내용** — 여는 경로는 그것을 막지만(§3.5) **편집 경로는 안 막는다**.
+    // 이전 포맷은 본문 유효성과 무관하게 자동 이관하지 않는다. UTF-8 검증의 증거가 아니다.
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "x.txt", .data = "clean\n" });
     var p1: [std.fs.max_path_bytes]u8 = undefined;
     const path1 = try std.fmt.bufPrint(&p1, "{s}/x.txt", .{root});
@@ -43779,7 +43887,7 @@ test "U4b-9 적대적 레코드 둘은 무시된다 — UTF-8 이 아닌 내용,
     try testing.expect(!isDirty(t1));
     try testing.expect(std.unicode.utf8ValidateSlice(t1.rt.editorDocument().opened.?.file.content));
 
-    // ⑵ **저장 상한을 넘는 내용** — 되살리면 저장도 못 하는 dirty 가 된다.
+    // 이전 포맷의 큰 본문 역시 읽거나 지우지 않는다. v2 크기 검사는 codec이 맡는다.
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "y.txt", .data = "small\n" });
     var p2: [std.fs.max_path_bytes]u8 = undefined;
     const path2 = try std.fmt.bufPrint(&p2, "{s}/y.txt", .{root});
@@ -43790,6 +43898,8 @@ test "U4b-9 적대적 레코드 둘은 무시된다 — UTF-8 이 아닌 내용,
     const t2 = try openRestored(&fx, path2);
     try testing.expectEqualStrings("small\n", t2.rt.editorDocument().opened.?.file.content);
     try testing.expect(!isDirty(t2));
+    try testing.expect(backupExists(root, .{ .path = .{ .path = path1 } }));
+    try testing.expect(backupExists(root, .{ .path = .{ .path = path2 } }));
 }
 
 // ── U4c: 이름 없는 문서가 돌아온다 ─────────────────────────────────────────────
@@ -45359,6 +45469,8 @@ fn sharedViewFixturePeer(fx: *PaneFixture) !*Term {
     _ = try @constCast(old.owner).release(old);
     const lease = fx.term.rt.editor_document_lease.?;
     peer.rt.editor_document_lease = try @constCast(lease.owner).retain(lease, .view);
+    peer.rt.editor_recovery.?.release();
+    peer.rt.editor_recovery = fx.term.rt.editor_recovery.?.retain();
     try refreshViewAfterEdit(fx.session, peer, null);
     return peer;
 }
@@ -46435,7 +46547,7 @@ test "SHVIEW17 수락한 한 뷰 닫기는 살아 있는 문서 백업을 지우
     const peer = try sharedViewFixturePeer(&fx);
     const peer_surface = peer.surfaceId();
     const state = fx.term.rt.editorDocument();
-    const identity = app_session_mod.editor_backup_ops.identity(fx.term).?;
+    const id = fx.term.rt.editor_recovery.?.id;
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, fx.term, "x"));
     // 쓰기 실패도 문서 시계를 포기하지 않는다. 같은 정본의 다음 flush가 재시도한다.
@@ -46445,24 +46557,23 @@ test "SHVIEW17 수락한 한 뷰 닫기는 살아 있는 문서 백업을 지우
     try testing.expect(!state.notifications.backup_on_disk);
     app_session_mod.editor_backup_ops.setDirForTest(root);
     app_session_mod.editor_backup_ops.flushAll(fx.session);
-    try testing.expect(backupExists(root, identity));
+    try testing.expect(recoveryExists(root, id));
     try testing.expect(!state.notifications.backup_dirty);
     try testing.expect(state.notifications.backup_on_disk);
     fx.session.executeClose(.term_or_pane);
     try testing.expect(term_ops.termBySurfaceId(fx.session, peer_surface) == null);
-    try testing.expect(backupExists(root, identity));
+    try testing.expect(recoveryExists(root, id));
     try testing.expect(state.notifications.backup_on_disk);
     try testing.expect(insertText(fx.session, fx.term, "y"));
     app_session_mod.editor_backup_ops.flushAll(fx.session);
-    const bytes = try readBackup(testing.allocator, root, identity);
+    const bytes = try readRecovery(testing.allocator, root, id);
     defer testing.allocator.free(bytes);
-    var record = try backup_rules.parse(testing.allocator, bytes);
+    var record = try backup_rules.parseRecovery(testing.allocator, bytes);
     defer record.deinit(testing.allocator);
     try testing.expectEqualStrings(state.opened.?.file.content, record.content);
-    var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
-    const name = backup_rules.fileName(&name_buf, identity);
+    const name = try maru.session.editor.recovery_id.fileName(id);
     fx.session.executeClose(.term_or_pane);
-    try testing.expectError(error.FileNotFound, dir.dir.statFile(testing.io, name, .{}));
+    try testing.expectError(error.FileNotFound, dir.dir.statFile(testing.io, &name, .{}));
 }
 
 test "SHVIEW18 LSP WorkspaceEdit는 같은 정본에 한 번 적용하고 두 뷰를 갱신한다" {
@@ -48156,14 +48267,14 @@ test "U4b-12 recovery keeps the original backup across a second open without a b
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
     const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } };
-    try plantBackup(allocator, root, doc, "recovered unsaved content\n");
+    try plantRecoveryBackup(allocator, root, doc, "recovered unsaved content\n");
     {
         var first = try UntitledFixture.init(allocator, false, true);
         defer first.deinit(allocator);
         const term = try openRestored(&first, path);
         try testing.expectEqualStrings("recovered unsaved content\n", term.rt.editorDocument().opened.?.file.content);
         try testing.expect(isDirty(term));
-        try testing.expect(backupExists(root, doc));
+        try testing.expect(recoveryBackupExists(root, doc));
         // No debounce tick, save or accepted discard: durable source remains after volatile teardown.
     }
     var second = try UntitledFixture.init(allocator, false, true);
@@ -48185,19 +48296,19 @@ test "U4b-13 recovery flush positive control keeps unsaved content across a seco
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
     const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } };
-    try plantBackup(allocator, root, doc, "recovered unsaved content\n");
+    try plantRecoveryBackup(allocator, root, doc, "recovered unsaved content\n");
     {
         var first = try UntitledFixture.init(allocator, false, true);
         defer first.deinit(allocator);
         const term = try openRestored(&first, path);
         try testing.expect(isDirty(term));
-        try testing.expect(backupExists(root, doc));
+        try testing.expect(recoveryBackupExists(root, doc));
         app_session_mod.editor_backup_ops.flushAll(first.session);
-        try testing.expect(backupExists(root, doc));
+        try testing.expect(recoveryBackupExists(root, doc));
         try testing.expect(term.rt.editorDocument().notifications.backup_on_disk);
     }
     // Flushing replaces the retained backup without creating a protection gap.
-    try testing.expect(backupExists(root, doc));
+    try testing.expect(recoveryBackupExists(root, doc));
     var second = try UntitledFixture.init(allocator, false, true);
     defer second.deinit(allocator);
     const reopened = try openRestored(&second, path);
@@ -48221,12 +48332,12 @@ test "U4b-14 retained local recovery survives staging commit and clears on clean
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
         const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } };
-        try plantBackup(allocator, root, doc, "recovered\n");
+        try plantRecoveryBackup(allocator, root, doc, "recovered\n");
         fx.session.workspace_restore_staging = true;
         const term = try openRestored(&fx, path);
         app_session_mod.editor_backup_ops.commitDeferredDrops(fx.session);
         fx.session.workspace_restore_staging = false;
-        try testing.expect(backupExists(root, doc));
+        try testing.expect(recoveryBackupExists(root, doc));
         if (action == .saved) {
             try saveDocument(fx.session, term);
             const written = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(4096));
@@ -48240,7 +48351,7 @@ test "U4b-14 retained local recovery survives staging commit and clears on clean
             try testing.expect(!isDirty(term));
             app_session_mod.editor_backup_ops.flushAll(fx.session);
         }
-        try testing.expect(!backupExists(root, doc));
+        try testing.expect(!recoveryBackupExists(root, doc));
     }
 }
 
@@ -48310,106 +48421,67 @@ test "U4d-7 revived source survives failed backup and clears only after replacem
     }
 }
 
-test "U4b-15 independent documents at the same path overwrite one backup and reopen only the last writer" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = testing.allocator;
-    for ([_]bool{ false, true }) |rewrite_first| {
-        var dir = testing.tmpDir(.{});
-        defer dir.cleanup();
-        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const root = try pinBackupDir(&root_buf, &dir);
-        defer app_session_mod.editor_backup_ops.setDirForTest(null);
-        try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
-        const wanted = if (rewrite_first) "A2:A:disk\n" else "B:disk\n";
-        {
-            var fx = try UntitledFixture.init(allocator, false, true);
-            defer fx.deinit(allocator);
-            const first = try openPathInActivePane(fx.session, path);
-            const second = try openPathInActivePane(fx.session, path);
-            try testing.expect(first.rt.editorDocument() != second.rt.editorDocument());
-            try testing.expect(first.rt.editor_document_lease.?.document.slot != second.rt.editor_document_lease.?.document.slot);
-            first.rt.editor_selection = editor_selection.Selection.at(0);
-            second.rt.editor_selection = editor_selection.Selection.at(0);
-            try testing.expect(insertText(fx.session, first, "A:"));
-            try testing.expect(insertText(fx.session, second, "B:"));
-            try testing.expectEqualStrings("A:disk\n", first.rt.editorDocument().opened.?.file.content);
-            try testing.expectEqualStrings("B:disk\n", second.rt.editorDocument().opened.?.file.content);
-            const first_identity = app_session_mod.editor_backup_ops.identity(first).?;
-            const second_identity = app_session_mod.editor_backup_ops.identity(second).?;
-            var first_name: [backup_rules.max_file_name_len]u8 = undefined;
-            var second_name: [backup_rules.max_file_name_len]u8 = undefined;
-            try testing.expectEqualStrings(backup_rules.fileName(&first_name, first_identity), backup_rules.fileName(&second_name, second_identity));
-            app_session_mod.editor_backup_ops.flushAll(fx.session);
-            if (rewrite_first) {
-                first.rt.editor_selection = editor_selection.Selection.at(0);
-                try testing.expect(insertText(fx.session, first, "A2:"));
-                app_session_mod.editor_backup_ops.flushAll(fx.session);
-            }
-            try testing.expect(first.rt.editorDocument().notifications.backup_on_disk);
-            try testing.expect(second.rt.editorDocument().notifications.backup_on_disk);
-            const bytes = try readBackup(allocator, root, first_identity);
-            defer allocator.free(bytes);
-            var parsed = try backup_rules.parse(allocator, bytes);
-            defer parsed.deinit(allocator);
-            try testing.expectEqualStrings(wanted, parsed.content);
-        }
-        // No further backup ticks: independent volatile states are gone; only one record survives.
-        var reopened = try UntitledFixture.init(allocator, false, true);
-        defer reopened.deinit(allocator);
-        const one = try openPathInActivePane(reopened.session, path);
-        const two = try openPathInActivePane(reopened.session, path);
-        try testing.expect(one.rt.editorDocument() != two.rt.editorDocument());
-        try testing.expectEqualStrings(wanted, one.rt.editorDocument().opened.?.file.content);
-        try testing.expectEqualStrings(wanted, two.rt.editorDocument().opened.?.file.content);
-        const disk = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(4096));
-        defer allocator.free(disk);
-        try testing.expectEqualStrings("disk\n", disk);
-        std.debug.print("independent_same_path_collision last_writer={s} both_reopen_same=true disk_unchanged=true\n", .{if (rewrite_first) "first" else "second"});
-    }
-}
-
-test "U4b-16 discarding one independent same-path document deletes its peer backup" {
+test "U4b-15 같은 경로의 독립 문서는 반복 백업해도 서로 덮어쓰지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var dir = testing.tmpDir(.{});
     defer dir.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try pinBackupDir(&root_buf, &dir);
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&buffer, &dir);
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+    const path = try std.fs.path.join(allocator, &.{ root, "doc.txt" });
+    defer allocator.free(path);
     var fx = try UntitledFixture.init(allocator, false, true);
     defer fx.deinit(allocator);
-    const a = try openPathInActivePane(fx.session, path);
-    const b = try openPathInActivePane(fx.session, path);
-    try testing.expect(a.rt.editorDocument() != b.rt.editorDocument());
-    a.rt.editor_selection = editor_selection.Selection.at(0);
-    b.rt.editor_selection = editor_selection.Selection.at(0);
-    try testing.expect(insertText(fx.session, a, "A:"));
-    try testing.expect(insertText(fx.session, b, "B:"));
+    const first = try openPathInActivePane(fx.session, path);
+    const second = try openPathInActivePane(fx.session, path);
+    first.rt.editor_selection = editor_selection.Selection.at(0);
+    second.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, first, "A:"));
+    try testing.expect(insertText(fx.session, second, "B:"));
     app_session_mod.editor_backup_ops.flushAll(fx.session);
-    const doc = app_session_mod.editor_backup_ops.identity(b).?;
-    const bytes = try readBackup(allocator, root, doc);
-    defer allocator.free(bytes);
-    var parsed = try backup_rules.parse(allocator, bytes);
-    defer parsed.deinit(allocator);
-    try testing.expectEqualStrings("B:disk\n", parsed.content);
-    app_session_mod.editor_backup_ops.drop(fx.session, a);
-    try testing.expect(!backupExists(root, doc));
-    try testing.expect(isDirty(b));
-    try testing.expectEqualStrings("B:disk\n", b.rt.editorDocument().opened.?.file.content);
-    try testing.expect(b.rt.editorDocument().notifications.backup_on_disk);
-    try testing.expect(!b.rt.editorDocument().notifications.backup_dirty);
-    // Flush cannot repair it: the peer was already marked as backed up.
+    const previous_b = try readRecovery(allocator, root, second.rt.editor_recovery.?.id);
+    defer allocator.free(previous_b);
+    try testing.expect(insertText(fx.session, first, "A2:"));
     app_session_mod.editor_backup_ops.flushAll(fx.session);
-    try testing.expect(!backupExists(root, doc));
-    const disk = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(64));
-    defer allocator.free(disk);
-    try testing.expectEqualStrings("disk\n", disk);
-    std.debug.print("independent_peer_drop backup_missing=true peer_memory_dirty=true flush_repairs=false disk_unchanged=true\n", .{});
+    const current_b = try readRecovery(allocator, root, second.rt.editor_recovery.?.id);
+    defer allocator.free(current_b);
+    try testing.expectEqualStrings(previous_b, current_b);
+    var first_record = (try first.rt.editor_recovery.?.read(root, path)).?;
+    defer first_record.deinit(allocator);
+    try testing.expectEqualStrings(first.rt.editorDocument().opened.?.file.content, first_record.parsed.content);
+    try testing.expect(!first.rt.editor_recovery.?.id.eql(second.rt.editor_recovery.?.id));
+}
+
+test "U4b-16 독립 A를 버려도 같은 경로의 B 백업과 내용은 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "doc.txt" });
+    defer allocator.free(path);
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    const first = try openPathInActivePane(fx.session, path);
+    const second = try openPathInActivePane(fx.session, path);
+    first.rt.editor_selection = editor_selection.Selection.at(0);
+    second.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, first, "A:"));
+    try testing.expect(insertText(fx.session, second, "B:"));
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    app_session_mod.editor_backup_ops.drop(fx.session, first);
+    try testing.expect(!recoveryExists(root, first.rt.editor_recovery.?.id));
+    try testing.expect(recoveryExists(root, second.rt.editor_recovery.?.id));
+    var record = (try second.rt.editor_recovery.?.read(root, path)).?;
+    defer record.deinit(allocator);
+    try testing.expectEqualStrings("B:disk\n", record.parsed.content);
+    try testing.expect(isDirty(second));
+    try testing.expect(!second.rt.editorDocument().notifications.backup_dirty);
 }
 
 test "U4d-8 empty missing-path backup is deleted by revival without restoring a document" {
@@ -48479,6 +48551,7 @@ test "U4b-17 accepted tab close removes 64 backups but leaves the 65th" {
         defer app_session_mod.editor_backup_ops.setDirForTest(null);
         var fx = try UntitledFixture.init(allocator, false, false);
         defer fx.deinit(allocator);
+        var ids: [65]recovery_store.Id = undefined;
         for (0..count) |i| {
             var relative_buf: [64]u8 = undefined;
             const relative = try std.fmt.bufPrint(&relative_buf, "doc-{d}.txt", .{i});
@@ -48486,6 +48559,7 @@ test "U4b-17 accepted tab close removes 64 backups but leaves the 65th" {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, relative });
             const term = try openPathInActivePane(fx.session, path);
+            ids[i] = term.rt.editor_recovery.?.id;
             term.rt.editor_selection = editor_selection.Selection.at(0);
             try testing.expect(insertText(fx.session, term, "edited:"));
         }
@@ -48494,16 +48568,13 @@ test "U4b-17 accepted tab close removes 64 backups but leaves the 65th" {
         try testing.expect(fx.session.tabs.items.len > 1);
         fx.session.executeClose(.{ .tab_index = 0 });
         var surviving: usize = 0;
-        for (0..count) |i| {
-            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const path = try std.fmt.bufPrint(&path_buf, "{s}/doc-{d}.txt", .{ root, i });
-            const doc: backup_rules.Doc = .{ .path = .{ .path = path } };
-            if (backupExists(root, doc)) {
+        for (ids[0..count], 0..) |id, i| {
+            if (recoveryExists(root, id)) {
                 surviving += 1;
                 try testing.expectEqual(@as(usize, 64), i);
-                const bytes = try readBackup(allocator, root, doc);
+                const bytes = try readRecovery(allocator, root, id);
                 defer allocator.free(bytes);
-                var parsed = try backup_rules.parse(allocator, bytes);
+                var parsed = try backup_rules.parseRecovery(allocator, bytes);
                 defer parsed.deinit(allocator);
                 try testing.expectEqualStrings("edited:disk\n", parsed.content);
             }
@@ -48524,10 +48595,12 @@ test "U4b-18 successful save leaves an older backup when directory permissions d
     try dir.dir.createDir(std.testing.io, "backups", .default_dir);
     var backup_buf: [std.fs.max_path_bytes]u8 = undefined;
     const backup_root = try std.fmt.bufPrint(&backup_buf, "{s}/backups", .{root});
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @enumFromInt(0o700), .{});
     app_session_mod.editor_backup_ops.setDirForTest(backup_root);
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+    var id: recovery_store.Id = undefined;
     {
         var fx = try UntitledFixture.init(allocator, false, true);
         defer fx.deinit(allocator);
@@ -48535,8 +48608,8 @@ test "U4b-18 successful save leaves an older backup when directory permissions d
         term.rt.editor_selection = editor_selection.Selection.at(0);
         try testing.expect(insertText(fx.session, term, "old:"));
         app_session_mod.editor_backup_ops.flushAll(fx.session);
-        const doc = app_session_mod.editor_backup_ops.identity(term).?;
-        const previous = try readBackup(allocator, backup_root, doc);
+        id = term.rt.editor_recovery.?.id;
+        const previous = try readRecovery(allocator, backup_root, id);
         defer allocator.free(previous);
         term.rt.editor_selection = editor_selection.Selection.at(0);
         try testing.expect(insertText(fx.session, term, "new:"));
@@ -48548,10 +48621,10 @@ test "U4b-18 successful save leaves an older backup when directory permissions d
         const written = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(64));
         defer allocator.free(written);
         try testing.expectEqualStrings("new:old:disk\n", written);
-        const residual = try readBackup(allocator, backup_root, doc);
+        const residual = try readRecovery(allocator, backup_root, id);
         defer allocator.free(residual);
         try testing.expectEqualStrings(previous, residual);
-        var parsed = try backup_rules.parse(allocator, residual);
+        var parsed = try backup_rules.parseRecovery(allocator, residual);
         defer parsed.deinit(allocator);
         try testing.expectEqualStrings("old:disk\n", parsed.content);
         std.debug.print("save_delete_denied save_success=true clean=true old_backup_preserved=true backup_flag=false\n", .{});
@@ -48559,7 +48632,7 @@ test "U4b-18 successful save leaves an older backup when directory permissions d
     // A fresh session after teardown uses the same on-disk artifacts.
     var reopened = try UntitledFixture.init(allocator, false, true);
     defer reopened.deinit(allocator);
-    const restored = try openRestored(&reopened, path);
+    const restored = try openRestoredId(&reopened, path, id);
     try testing.expectEqualStrings("old:disk\n", restored.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(restored));
     try testing.expectEqual(@as(?u64, contentHash("disk\n")), restored.rt.editorDocument().opened.?.disk_hash);
@@ -48568,4 +48641,418 @@ test "U4b-18 successful save leaves an older backup when directory permissions d
     defer allocator.free(disk_after);
     try testing.expectEqualStrings("new:old:disk\n", disk_after);
     std.debug.print("residual_backup_reopen older_content_restored=true dirty=true save_external_conflict=true latest_disk_preserved=true\n", .{});
+}
+
+test "editor recovery restore 독립 A B와 공유 A 뷰를 실제 백업과 checkpoint로 복원한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @enumFromInt(0o700), .{});
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "document.txt", .data = "disk\nsecond\nthird\n" });
+    const path = try std.fs.path.join(a, &.{ root, "document.txt" });
+    defer a.free(path);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var captured: maru.session.workspace.Window = undefined;
+    {
+        var fx = try UntitledFixture.init(a, false, true);
+        defer fx.deinit(a);
+        const first = try openPathInActivePane(fx.session, path);
+        const second = try openPathInActivePane(fx.session, path);
+        const shared = try openSharedViewInActivePane(fx.session, first);
+        first.rt.editor_selection = editor_selection.Selection.at(0);
+        second.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(fx.session, first, "A:"));
+        try testing.expect(insertText(fx.session, second, "B:"));
+        first.rt.editor_selection = editor_selection.Selection.at(3);
+        shared.rt.editor_selection = editor_selection.Selection.at(8);
+        first.rt.editor_first_line = 1;
+        shared.rt.editor_first_line = 2;
+        shared.rt.editor_wrap = false;
+        app_session_mod.editor_backup_ops.flushAll(fx.session);
+        try testing.expect(first.rt.editorDocument().notifications.backup_on_disk);
+        try testing.expect(second.rt.editorDocument().notifications.backup_on_disk);
+        try testing.expect(first.rt.editor_recovery == shared.rt.editor_recovery);
+        try testing.expect(!first.rt.editor_recovery.?.id.eql(second.rt.editor_recovery.?.id));
+        // 편집기가 terminal보다 앞서도 persisted 순서가 유지돼야 한다.
+        const live_terms = pane_ops.activePane(fx.session).terms.items;
+        std.mem.swap(*Term, &live_terms[0], &live_terms[1]);
+        captured = try workspace_ops.captureWorkspaceWindow(fx.session, arena.allocator(), true, null);
+        try testing.expectEqual(@as(usize, 2), captured.editor_documents.len);
+        try testing.expectEqual(@as(usize, 3), captured.tabs[0].panes[0].editor_views.len);
+    }
+    const bytes = try maru.session.workspace.serialize(a, .{ .windows = &.{captured} });
+    defer a.free(bytes);
+    var parsed = try maru.session.workspace.parse(a, bytes);
+    defer parsed.deinit();
+    var fx = try UntitledFixture.init(a, false, true);
+    defer fx.deinit(a);
+    try workspace_ops.applyWorkspaceWindow(fx.session, parsed.workspace.windows[0]);
+    const terms = pane_ops.activePane(fx.session).terms.items;
+    try testing.expectEqual(@as(usize, 4), terms.len);
+    try testing.expect(terms[1].kind == .terminal);
+    const first = terms[0];
+    const second = terms[2];
+    const shared = terms[3];
+    try testing.expectEqualStrings("A:disk\nsecond\nthird\n", first.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("B:disk\nsecond\nthird\n", second.rt.editorDocument().opened.?.file.content);
+    try testing.expect(first.rt.editorDocument() == shared.rt.editorDocument());
+    try testing.expect(first.rt.editorDocument() != second.rt.editorDocument());
+    try testing.expect(first.rt.editor_view_find_owned and shared.rt.editor_view_find_owned);
+    try testing.expect(fx.session.activateSurfaceById(first.surfaceId()));
+    find_ops.toggleFind(fx.session);
+    try fx.session.chrome_host.find.input.query.appendSlice(a, "only first");
+    find_ops.recomputeFind(fx.session);
+    try testing.expect(fx.session.activateSurfaceById(shared.surfaceId()));
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.input.query.items.len);
+    try testing.expect(fx.session.activateSurfaceById(first.surfaceId()));
+    try testing.expectEqualStrings("only first", fx.session.chrome_host.find.input.query.items);
+    try testing.expectEqual(@as(usize, 3), first.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 8), shared.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), first.rt.editor_first_line);
+    try testing.expectEqual(@as(usize, 2), shared.rt.editor_first_line);
+    try testing.expectEqual(@as(?bool, false), shared.rt.editor_wrap);
+    // A의 저장과 백업 삭제가 독립 B의 백업 및 외부 수정 충돌 기준을 건드리지 않는다.
+    try saveDocument(fx.session, first);
+    var second_record = (try second.rt.editor_recovery.?.read(root, path)).?;
+    defer second_record.deinit(a);
+    try testing.expectEqualStrings("B:disk\nsecond\nthird\n", second_record.parsed.content);
+    try testing.expectError(error.ExternalConflict, saveDocument(fx.session, second));
+}
+
+test "editor recovery restore clean open은 백업 루트가 없어도 파일을 만들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try dir.dir.realPath(std.testing.io, &root_buffer)];
+    const absent = try std.fs.path.join(a, &.{ root, "absent-backups" });
+    defer a.free(absent);
+    app_session_mod.editor_backup_ops.setDirForTest(absent);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "clean" });
+    const path = try std.fs.path.join(a, &.{ root, "file.txt" });
+    defer a.free(path);
+    var fx = try UntitledFixture.init(a, false, true);
+    defer fx.deinit(a);
+    for (0..16) |_| {
+        var prepared = try preparePath(fx.session, path);
+        try testing.expect(prepared.recovery.?.reservation == null);
+        prepared.deinit(a);
+    }
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, absent, .{}));
+}
+
+test "editor recovery restore 손상 백업은 기존 창과 원본을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @enumFromInt(0o700), .{});
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "document.txt", .data = "disk\n" });
+    const path = try std.fs.path.join(a, &.{ root, "document.txt" });
+    defer a.free(path);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var captured: maru.session.workspace.Window = undefined;
+    var id: recovery_store.Id = undefined;
+    {
+        var source = try UntitledFixture.init(a, false, true);
+        defer source.deinit(a);
+        const term = try openPathInActivePane(source.session, path);
+        term.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(source.session, term, "unsaved:"));
+        app_session_mod.editor_backup_ops.flushAll(source.session);
+        id = term.rt.editor_recovery.?.id;
+        captured = try workspace_ops.captureWorkspaceWindow(source.session, arena.allocator(), true, null);
+    }
+    const name = try maru.session.editor.recovery_id.fileName(id);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = &name, .data = "damaged" });
+    var fx = try UntitledFixture.init(a, false, true);
+    defer fx.deinit(a);
+    const before = fx.session.tabs.items[0];
+    try testing.expectError(error.BadHeader, workspace_ops.applyWorkspaceWindow(fx.session, captured));
+    try testing.expect(before == fx.session.tabs.items[0]);
+    const unchanged = try dir.dir.readFileAlloc(std.testing.io, &name, a, .limited(4096));
+    defer a.free(unchanged);
+    try testing.expectEqualStrings("damaged", unchanged);
+    try testing.expect(!fx.session.workspace_restore_staging);
+}
+
+test "editor recovery restore 더 최신 백업은 본문만 복원하고 오래된 뷰 좌표를 버린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @enumFromInt(0o700), .{});
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "document.txt", .data = "disk\nsecond\n" });
+    const path = try std.fs.path.join(a, &.{ root, "document.txt" });
+    defer a.free(path);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var captured: maru.session.workspace.Window = undefined;
+    {
+        var source = try UntitledFixture.init(a, false, true);
+        defer source.deinit(a);
+        const term = try openPathInActivePane(source.session, path);
+        term.rt.editor_selection = editor_selection.Selection.at(6);
+        term.rt.editor_first_line = 1;
+        captured = try workspace_ops.captureWorkspaceWindow(source.session, arena.allocator(), true, null);
+        try testing.expect(insertText(source.session, term, "newer:"));
+        app_session_mod.editor_backup_ops.flushAll(source.session);
+    }
+    // 재백업 없이 두 번 복원해도 첫 복원이 미저장 원본을 소비하지 않는다.
+    for (0..2) |_| {
+        var fx = try UntitledFixture.init(a, false, true);
+        defer fx.deinit(a);
+        try workspace_ops.applyWorkspaceWindow(fx.session, captured);
+        const term = pane_ops.activePane(fx.session).terms.items[1];
+        try testing.expectEqualStrings("disk\nsnewer:econd\n", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+        try testing.expect(term.rt.editorDocument().notifications.backup_on_disk);
+    }
+}
+
+test "editor recovery restore clean open 비용을 이전 준비 경로와 교차 실측한다" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_MEASURE_EDITOR_RECOVERY") == null) return error.SkipZigTest;
+    const a = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try dir.dir.realPath(std.testing.io, &root_buffer)];
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "clean.txt", .data = "one\ntwo\nthree\n" });
+    const path = try std.fs.path.join(a, &.{ root, "clean.txt" });
+    defer a.free(path);
+    var fx = try UntitledFixture.init(a, false, true);
+    defer fx.deinit(a);
+    const Baseline = struct {
+        // #4107의 준비 순서: 실제 openPath와 registry를 사용하되 복구 ID/플랫폼 소유자가 없다.
+        fn prepare(session: *AppSession, file_path: []const u8) !Prepared {
+            var opened = try openPath(session.io, session.allocator, file_path);
+            errdefer opened.deinit(session.allocator);
+            const lines = try session.allocator.alloc([]const u8, opened.file.lineCount());
+            errdefer session.allocator.free(lines);
+            for (lines, 0..) |*line, i| line.* = opened.file.lineText(i) orelse "";
+            const copy = try session.allocator.dupe(u8, file_path);
+            errdefer session.allocator.free(copy);
+            var state: editor.document_state.State = .{ .opened = opened, .path = copy };
+            return .{ .lease = try session.editor_documents.create(&state, session.allocator), .lines = lines };
+        }
+    };
+    var totals = [_]i128{ 0, 0 };
+    for (0..200) |iteration| for (0..2) |offset| {
+        const mode = (iteration + offset) % 2;
+        const start = std.Io.Clock.awake.now(fx.session.io).nanoseconds;
+        var prepared = if (mode == 0) try Baseline.prepare(fx.session, path) else try preparePath(fx.session, path);
+        prepared.deinit(a);
+        totals[mode] += std.Io.Clock.awake.now(fx.session.io).nanoseconds - start;
+    };
+    std.debug.print("editor_clean_prepare iterations=200 baseline_mean_ns={d} recovery_mean_ns={d}\n", .{ @divTrunc(totals[0], 200), @divTrunc(totals[1], 200) });
+}
+
+test "editor recovery restore process 저장과 복원을 서로 다른 실행에서 검증한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const phase = std.mem.span(std.c.getenv("MARU_EDITOR_RECOVERY_PHASE") orelse return error.SkipZigTest);
+    const root = std.mem.span(std.c.getenv("MARU_EDITOR_RECOVERY_FIXTURE") orelse return error.MissingFixture);
+    const a = testing.allocator;
+    const path = try std.fs.path.join(a, &.{ root, "document.txt" });
+    defer a.free(path);
+    const checkpoint = try std.fs.path.join(a, &.{ root, "checkpoint" });
+    defer a.free(checkpoint);
+    var fx = try UntitledFixture.init(a, false, true);
+    defer fx.deinit(a);
+    if (std.mem.eql(u8, phase, "write")) {
+        const first = try openPathInActivePane(fx.session, path);
+        const second = try openPathInActivePane(fx.session, path);
+        const shared = try openSharedViewInActivePane(fx.session, first);
+        first.rt.editor_selection = editor_selection.Selection.at(0);
+        second.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(fx.session, first, "A:"));
+        try testing.expect(insertText(fx.session, second, "B:"));
+        shared.rt.editor_selection = editor_selection.Selection.at(6);
+        app_session_mod.editor_backup_ops.flushAll(fx.session);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const win = try workspace_ops.captureWorkspaceWindow(fx.session, arena.allocator(), true, null);
+        const bytes = try maru.session.workspace.serialize(a, .{ .windows = &.{win} });
+        defer a.free(bytes);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = checkpoint, .data = bytes });
+        std.debug.print("recovery_process phase=write pid={d} documents=2 views=3\n", .{std.c.getpid()});
+        return;
+    }
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, checkpoint, a, .limited(64 * 1024));
+    defer a.free(bytes);
+    if (std.mem.eql(u8, phase, "old-format")) {
+        try testing.expectError(error.BadHeader, maru.session.workspace.parse(a, bytes));
+        return;
+    }
+    var parsed = try maru.session.workspace.parse(a, bytes);
+    defer parsed.deinit();
+    if (std.mem.eql(u8, phase, "invalid")) {
+        const previous = fx.session.tabs.items[0];
+        try testing.expectError(error.BadHeader, workspace_ops.applyWorkspaceWindow(fx.session, parsed.workspace.windows[0]));
+        try testing.expect(previous == fx.session.tabs.items[0]);
+        return;
+    }
+    try workspace_ops.applyWorkspaceWindow(fx.session, parsed.workspace.windows[0]);
+    const terms = pane_ops.activePane(fx.session).terms.items;
+    try testing.expectEqual(@as(usize, 4), terms.len);
+    try testing.expectEqualStrings("A:disk\n", terms[1].rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("B:disk\n", terms[2].rt.editorDocument().opened.?.file.content);
+    try testing.expect(terms[1].rt.editorDocument() == terms[3].rt.editorDocument());
+    try testing.expectEqual(@as(usize, 6), terms[3].rt.editor_selection.?.focus);
+    terms[1].rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, terms[1], "동기화:"));
+    try testing.expectEqualStrings("동기화:A:disk\n", terms[3].rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("B:disk\n", terms[2].rt.editorDocument().opened.?.file.content);
+    std.debug.print("recovery_process phase=restore pid={d} independent=true shared=true selection=true\n", .{std.c.getpid()});
+}
+
+test "editor recovery restore 캡처 OOM은 문서와 뷰 및 예약 상태를 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const shared = try openSharedViewInActivePane(fx.session, fx.term);
+    shared.rt.editor_selection = editor_selection.Selection.at(4);
+    const before_revision = fx.term.rt.editorDocument().opened.?.file.revision;
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(a: std.mem.Allocator, session: *AppSession) !void {
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            const win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), true, null);
+            try testing.expectEqual(@as(usize, 1), win.editor_documents.len);
+        }
+    }.run, .{fx.session});
+    try testing.expectEqual(before_revision, fx.term.rt.editorDocument().opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 4), shared.rt.editor_selection.?.focus);
+    try testing.expect(fx.term.rt.editor_recovery.?.reservation == null);
+}
+
+test "editor recovery restore 접힘과 UTF-8 선택을 독립 뷰에 적용한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var changes = [_]editor.delta.Change{.{
+        .start = 0,
+        .end = fx.term.rt.editorDocument().opened.?.file.content.len,
+        .text = "fn sample() void {\n    const word = \"한글\";\n    _ = word;\n}\n",
+    }};
+    try testing.expect(applyEditAsOne(fx.session, fx.term, &changes));
+    const value: editor.workspace_state.View = .{
+        .index = 0,
+        .document = 0,
+        .primary = editor_selection.Selection.at(std.math.maxInt(usize)),
+        .extras = &.{ editor_selection.Selection.at(0), editor_selection.Selection.at(0) },
+        .folded = &.{ 0, std.math.maxInt(u32) },
+        .first_line = std.math.maxInt(usize),
+        .first_piece = std.math.maxInt(u32),
+        .first_col = std.math.maxInt(u32),
+    };
+    try restoreViewState(fx.session, fx.term, value, true);
+    const content = fx.term.rt.editorDocument().opened.?.file.content;
+    try testing.expectEqual(content.len, fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_extra_selections.len);
+    try testing.expect(fx.term.rt.editor_first_line < fx.term.rt.editor_lines.len);
+    try testing.expect(fx.term.rt.editor_first_col <= fx.term.rt.editor_max_columns);
+    try testing.expectEqualSlices(u32, &.{0}, foldedHeads(fx.term));
+    for (foldedHeads(fx.term)) |head| try testing.expect(head < fx.term.rt.editor_lines.len);
+    try testing.expectEqual(@as(usize, 0), restoredOffset("한글", 2));
+    try testing.expectEqual(@as(usize, 3), restoredOffset("한글", 5));
+}
+
+fn recoveryRestoreAllocationProbe(allocator: std.mem.Allocator, session: *AppSession, doc: editor.workspace_state.Document) !void {
+    const saved_allocator = session.allocator;
+    session.allocator = allocator;
+    defer session.allocator = saved_allocator;
+    var staged = try workspace_restore.Staging.init(session, (&doc)[0..1]);
+    defer staged.deinit();
+    const first = try staged.createView(.{ .index = 0, .document = 0, .primary = editor_selection.Selection.at(1) });
+    defer term_ops.destroyTerm(session, first);
+    const second = try staged.createView(.{ .index = 1, .document = 0, .primary = editor_selection.Selection.at(2) });
+    defer term_ops.destroyTerm(session, second);
+    try testing.expectEqualStrings("dirty\n", first.rt.editorDocument().opened.?.file.content);
+    try testing.expect(first.rt.editorDocument() == second.rt.editorDocument());
+    try testing.expectEqual(@as(usize, 1), first.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 2), second.rt.editor_selection.?.focus);
+}
+
+test "editor recovery restore 모든 staged 할당 실패에서 문서와 백업 소유를 반환한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "document.txt", .data = "disk\n" });
+    const path = try std.fs.path.join(a, &.{ root, "document.txt" });
+    defer a.free(path);
+    try plantRecoveryBackup(a, root, .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } }, "dirty\n");
+    const id = fixtureRecoveryId(path);
+    const doc: editor.workspace_state.Document = .{ .index = 0, .recovery_id = id, .path = path, .disk_hash = contentHash("disk\n"), .content_hash = contentHash("dirty\n") };
+    const before = try readRecovery(a, root, id);
+    defer a.free(before);
+    var fx = try UntitledFixture.init(a, false, true);
+    defer fx.deinit(a);
+    const old_tab = fx.session.tabs.items[0];
+    var baseline = std.testing.FailingAllocator.init(a, .{});
+    try recoveryRestoreAllocationProbe(baseline.allocator(), fx.session, doc);
+    var rejected: usize = 0;
+    for (0..baseline.alloc_index) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        recoveryRestoreAllocationProbe(failing.allocator(), fx.session, doc) catch |err| {
+            if (err != error.OutOfMemory) return err;
+            rejected += 1;
+        };
+        try testing.expect(old_tab == fx.session.tabs.items[0]);
+        const after = try readRecovery(a, root, id);
+        defer a.free(after);
+        try testing.expectEqualStrings(before, after);
+    }
+    try testing.expect(rejected > 0);
+    try recoveryRestoreAllocationProbe(a, fx.session, doc);
+    std.debug.print("editor_restore_oom allocation_points={d} rejected={d} prior_window_and_record_preserved=true\n", .{ baseline.alloc_index, rejected });
+}
+
+test "editor recovery restore 보호된 창 닫기는 살아 있는 문서의 백업을 지우지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "document.txt", .data = "disk\n" });
+    const path = try std.fs.path.join(a, &.{ root, "document.txt" });
+    defer a.free(path);
+    var fx = try UntitledFixture.init(a, false, true);
+    defer fx.deinit(a);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "dirty:"));
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    const id = term.rt.editor_recovery.?.id;
+    try testing.expect(recoveryExists(root, id));
+    fx.session.file_tree_edit_inflight = true;
+    fx.session.executeClose(.window);
+    try testing.expect(!fx.session.ended_seen);
+    try testing.expect(recoveryExists(root, id));
+    try testing.expect(isDirty(term));
+    fx.session.file_tree_edit_inflight = false;
+    // 같은 문서를 실제로 닫으면 기록은 지워진다. 보존만 검사하면 삭제 전체를 꺼도 통과한다.
+    fx.session.executeClose(.active_term);
+    try testing.expect(!recoveryExists(root, id));
 }

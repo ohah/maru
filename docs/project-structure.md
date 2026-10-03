@@ -139,7 +139,7 @@ src/
   session.zig           OS-중립 세션 코어 facade(L2) — 세션 모델·입력/재정렬 수학·IME 판정·agent observer
   terminal.zig          terminal-core facade
   terminfo_cache.zig    maru 자체 terminfo 로컬 캐시 단일 출처(경로·버전·컴파일 셸 명령). pty 자동 컴파일 + cli/terminfo 서브커맨드가 공유(top-level 중립 — color.zig 결)
-  text_escape.zig       라인 기반 텍스트 포맷(maru.workspace.v1·maru.trace.v1·snapshot)의 따옴표 escape 규칙 단일 출처. 어느 facade에도 속하지 않는 중립 leaf
+  text_escape.zig       라인 기반 텍스트 포맷(maru.workspace.v2·maru.trace.v1·snapshot)의 따옴표 escape 규칙 단일 출처. 어느 facade에도 속하지 않는 중립 leaf
   observability.zig     debug event/trace/snapshot facade
   plugin.zig            action/plugin facade
   ui_test.zig           typed Chrome UI namespace만 좁혀 도는 test root(`zig build test-chrome-ui`). 제품 `chrome.zig`가 모든 component를 import하므로 build entrypoint를 따로 둔다
@@ -190,7 +190,7 @@ src/
                         사람이 이 분량을 지나지 않도록 따로 뺐다). 각 파일은 `*AppSession`을 받는
                         free fn 모음이고, `app_session.zig`에는 ABI가 직접 부르는 진입을 얇은 facade로 남긴다.
                         editor/는 네이티브 편집기 macOS 배선을 묶는다. 진입은 mod.zig이고 completion.zig·
-                        lsp.zig·backup.zig·untitled_save.zig 등은 폴더명과 겹치는 editor_ 접두사를 쓰지 않는다.
+                        lsp.zig·backup.zig·recovery_store.zig·restore.zig·untitled_save.zig 등은 폴더명과 겹치는 editor_ 접두사를 쓰지 않는다.
                         문서/검색/Undo 정책은 session/editor/, 본문 화면 구성은 chrome/components/editor_view/에
                         유지한다. 파일 배치만 묶으며 AppSession 의존성을 공통 코어로 옮기는 단계가 아니다.
                         **F 시리즈가 아닌 파일도 이 폴더에 산다** — editor/{mod,diff}.zig(네이티브 편집기의

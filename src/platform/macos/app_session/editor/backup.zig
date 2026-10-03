@@ -140,7 +140,10 @@ pub fn markClean(self: *AppSession, term: *Term, content: []const u8, previous_i
     if (previous_identity) |prev| {
         if (term.rt.editorDocument().notifications.backup_on_disk) {
             term.rt.editorDocument().notifications.backup_on_disk = false;
-            dropDoc(self, prev);
+            if (prev == .path and term.rt.editor_recovery != null)
+                term.rt.editor_recovery.?.drop() catch {}
+            else
+                dropDoc(self, prev);
         }
     }
     if (term.rt.editorDocument().opened.?.isDirty()) {
@@ -158,7 +161,13 @@ pub fn drop(self: *AppSession, term: *Term) void {
     if (!term.rt.editorDocument().notifications.backup_on_disk) return;
     term.rt.editorDocument().notifications.backup_on_disk = false;
     const doc = identity(term) orelse return; // 신원이 이미 바뀌었으면 그 경로가 옛 신원으로 지운다
-    dropDoc(self, doc);
+    dropCurrent(self, term, doc);
+}
+
+fn dropCurrent(self: *AppSession, term: *Term, doc: backup.Doc) void {
+    if (doc == .path and term.rt.editor_recovery != null) {
+        term.rt.editor_recovery.?.drop() catch {};
+    } else dropDoc(self, doc);
 }
 
 /// **신원으로 지운다** — 이름이 붙어 신원이 바뀐 뒤에도(U2·U3) 옛 파일을 지울 수 있어야 한다.
@@ -184,7 +193,7 @@ fn settle(self: *AppSession, term: *Term) void {
     if (!opened.isDirty()) {
         if (term.rt.editorDocument().notifications.backup_on_disk) {
             term.rt.editorDocument().notifications.backup_on_disk = false;
-            dropDoc(self, doc);
+            dropCurrent(self, term, doc);
         }
         term.rt.editorDocument().notifications.backup_paused = false;
         dropRecoverySource(self, term);
@@ -198,7 +207,7 @@ fn settle(self: *AppSession, term: *Term) void {
         return;
     }
     term.rt.editorDocument().notifications.backup_paused = false;
-    if (write(self, doc, opened.file.content)) {
+    if (writeCurrent(self, term, doc, opened.file.content)) {
         dropRecoverySource(self, term);
         term.rt.editorDocument().notifications.backup_on_disk = true;
     } else {
@@ -207,6 +216,21 @@ fn settle(self: *AppSession, term: *Term) void {
         term.rt.editorDocument().notifications.backup_dirty = true;
         term.rt.editorDocument().notifications.backup_due_ns = std.Io.Clock.awake.now(self.io).nanoseconds + backup.debounce_ns;
     }
+}
+
+fn writeCurrent(self: *AppSession, term: *Term, doc: backup.Doc, content: []const u8) bool {
+    if (doc == .path) {
+        if (term.rt.editor_recovery) |owner| {
+            var buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const root = dirPath(&buffer) orelse return false;
+            owner.write(root, doc.path.path, doc.path.disk_hash, content) catch |err| {
+                std.log.scoped(.app).warn("editor backup failed: reason={s}", .{@errorName(err)});
+                return false;
+            };
+            return true;
+        }
+    }
+    return write(self, doc, content);
 }
 
 fn write(self: *AppSession, doc: backup.Doc, content: []const u8) bool {
@@ -255,6 +279,11 @@ pub fn fileNameIfOnDisk(term: *const Term, buf: *[backup.max_file_name_len]u8) ?
     }
     if (!term.rt.editorDocument().notifications.backup_on_disk) return null;
     const doc = identity(term) orelse return null;
+    if (doc == .path) if (term.rt.editor_recovery) |owner| {
+        const name = maru.session.editor.recovery_id.fileName(owner.id) catch return null;
+        @memcpy(buf[0..name.len], &name);
+        return buf[0..name.len];
+    };
     return backup.fileName(buf, doc);
 }
 
@@ -280,6 +309,9 @@ fn dropConsumed(self: *AppSession, doc: backup.Doc) void {
 
 /// 창 복원이 **확정됐다** — 미뤄 둔 레코드를 이제 지운다(내용은 살아 있는 Term 에 있다).
 pub fn commitDeferredDrops(self: *AppSession) void {
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (term.rt.editor_recovery) |owner| if (owner.consume_on_publish) owner.dropSelected() catch {};
+    };
     for (self.deferred_backup_drops.items) |*deferred| dropName(self, deferred.slice());
     self.deferred_backup_drops.clearRetainingCapacity();
 }
@@ -343,6 +375,9 @@ pub fn dropName(self: *AppSession, name: []const u8) void {
 /// **이름 없는 문서와 저쪽 신원 문서는 대상이 아니다**(U4c) — 그 둘은 「어느 창이 되살리나」와
 /// 디렉터리 훑기가 함께 필요하다.
 pub fn restoreIfAny(self: *AppSession, term: *Term) void {
+    // 새 local ID는 checkpoint가 지목한 record만 복원한다. 경로가 같은 개발 v1 record를
+    // 신규 문서에 자동 귀속시키면 독립 A/B의 분리가 다시 깨진다.
+    if (term.rt.editor_recovery != null) return;
     // **경로가 있는 문서만이다.** 이름 없는 문서를 여기서 받으면 **새로 만든 빈 문서**가 옛 번호의
     // 레코드를 조용히 삼킨다(번호는 재시작마다 1 부터 다시 난다 — U4b-7 이 그 사고를 못 박는다).
     // 그래서 이름 없는 문서는 **되살리는 자리 하나**(`restoreUntitled` — workspace 가 번호를 실어 온
@@ -350,6 +385,29 @@ pub fn restoreIfAny(self: *AppSession, term: *Term) void {
     if (term.rt.editorDocument().remote != null) return;
     const path = term.rt.editorDocument().path orelse return;
     restoreFromRecord(self, term, .{ .path = .{ .path = path } });
+}
+
+/// checkpoint가 명시한 ID만 복원한다. absence와 읽기/신원 실패를 분리해 창 staging이
+/// 실패를 성공으로 저장하지 않게 한다. dirty record는 다음 백업 전 종료에도 남는다.
+pub fn restoreRecovery(self: *AppSession, term: *Term) !bool {
+    const owner = term.rt.editor_recovery orelse return error.MissingRecoveryOwner;
+    const path = term.rt.editorDocument().path orelse return error.MissingRecoveryPath;
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = dirPath(&buffer) orelse return error.InvalidRecoveryRoot;
+    var record = (try owner.read(root, path)) orelse return false;
+    defer record.deinit(owner.allocator);
+    const opened = term.rt.editorDocument().opened.?;
+    if (std.mem.eql(u8, opened.file.content, record.parsed.content)) {
+        try owner.selectDrop();
+        owner.consume_on_publish = true;
+        return false;
+    }
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    var changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = opened.file.content.len, .text = record.parsed.content }};
+    if (!editor_ops.applyEditAsOne(self, term, &changes)) return error.OutOfMemory;
+    term.rt.editorDocument().opened.?.disk_hash = record.parsed.doc.disk_hash;
+    term.rt.editorDocument().notifications.backup_on_disk = true;
+    return true;
 }
 
 /// **되살린 이름 없는 문서의 내용을 넣는다**(U4c). 부르는 자리는 `createRestoredUntitledTerm` 하나 —

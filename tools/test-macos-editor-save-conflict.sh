@@ -49,45 +49,48 @@ run_scenario() {
     scenario=$1
     rm -f "$ready"
     printf '%s' "$original" > "$document"
-    # **백업 자리를 비우고 시작한다** — 앞 시나리오가 남긴 파일을 이 시나리오의 결과로 읽지 않는다
-    # (같은 문서라 이름이 같다). ⚠️ `restore-backup` 은 예외다: 그 시나리오는 **심어 둔 레코드**로
-    # 시작하고, 그 이름은 앞 시나리오(`quit-backup`)가 만든 것을 재사용한다(이름이 Wyhash 라 셸이
-    # 계산할 수 없다 — 그 의존을 아래에서 명시로 확인한다).
+    native_editor="$document"
+    recovery_checkpoint=""
+    case "$scenario" in
+        quit-backup|restore-backup) recovery_checkpoint="maru-test-only-v1" ;;
+    esac
+    checkpoint="$home/Library/Application Support/maru/workspace.v1"
     if [ "$scenario" != restore-backup ]; then
         rm -rf "$backups"
+        rm -f "$checkpoint"
+    else
+        # 직전 제품 종료가 쓴 ID와 checkpoint를 유지하고 본문만 바꾼다.
+        # 앱을 띄우기 전에 준비해야 복원 reader와 경쟁하지 않는다.
+        native_editor=""
+        python3 - "$backups" "$checkpoint" <<'PYBACKUP'
+from pathlib import Path
+import re, sys
+backups, checkpoint = map(Path, sys.argv[1:])
+records = list(backups.glob('d-*.bak'))
+assert len(records) == 1 and checkpoint.exists()
+record = records[0]
+header, _ = record.read_bytes().split(b'\n\n', 1)
+assert header.startswith(b'maru.editor-backup.v2\n')
+body = b'restored-from-backup\n'
+header = re.sub(rb'bytes=\d+', b'bytes=' + str(len(body)).encode(), header)
+record.write_bytes(header + b'\n\n' + body)
+assert record.stem[2:] in checkpoint.read_text()
+PYBACKUP
     fi
+    env -u MARU_NO_WORKSPACE_RESTORE \
     HOME="$home" \
     CFFIXED_USER_HOME="$home" \
     MARU_SESSION_HOST_ROOT="$session_root" \
     MARU_MACOS_APP_SMOKE_MS=20000 \
     MARU_EDITOR_SAVE_CONFLICT_SMOKE=1 \
+    MARU_EDITOR_RECOVERY_CHECKPOINT_TEST="$recovery_checkpoint" \
     MARU_EDITOR_SAVE_CONFLICT_SMOKE_SCENARIO="$scenario" \
+    MARU_EDITOR_SAVE_CONFLICT_DOCUMENT="$document" \
     MARU_EDITOR_SAVE_CONFLICT_SMOKE_READY="$ready" \
-    MARU_NATIVE_EDITOR="$document" \
+    MARU_NATIVE_EDITOR="$native_editor" \
     "$app_path" &
     app_pid=$!
 
-    if [ "$scenario" = restore-backup ]; then
-        # **레코드를 미리 심는다** — 크래시 없이 「지난 세션이 남긴 것」을 만드는 유일한 길이다.
-        # 포맷은 `session/editor/backup.zig` 가 소유한다: 헤더 줄 → `key=value` 한 줄 → 빈 줄 → 원문.
-        # `disk-hash` 는 **빼고 쓴다** — 셸은 Wyhash 를 못 내고, 없으면 복원이 지금 디스크 지문을
-        # 그대로 둔다(그 갈래는 헤드리스 `U4b-2` 가 잰다).
-        # ⚠️ **이름은 앱이 계산한다**(Wyhash) — 셸이 맞출 수 없다. 그래서 `quit-backup` 이 **같은
-        # 문서로 방금 만든** 레코드 파일의 이름을 그대로 재사용해 내용만 덮어쓴다.
-        printf '%s' "$restored" > "$root/restored.txt"
-        bytes=$(wc -c < "$root/restored.txt" | tr -d ' ')
-        existing=$(ls "$backups" 2>/dev/null | head -1)
-        if [ -z "$existing" ]; then
-            echo "restore-backup needs the record name produced by quit-backup (run order matters)" >&2
-            exit 1
-        fi
-        {
-            printf 'maru.editor-backup.v1\n'
-            printf 'doc kind=path bytes=%s path="%s"\n' "$bytes" "$document"
-            printf '\n'
-            printf '%s' "$restored"
-        } > "$backups/$existing"
-    fi
     if [ "$scenario" != clean-save ] && [ "$scenario" != quit-backup ] && [ "$scenario" != restore-backup ]; then
         # **드라이버가 부를 때까지 기다린다.** 편집기가 파일을 읽고 글자를 넣은 뒤에야 "밖에서
         # 바뀌었다"가 성립한다. 고정 sleep 은 기계에 따라 순서가 뒤집혀 무엇을 쟀는지 알 수 없다.
@@ -185,11 +188,14 @@ grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/quit-backup.summary.tx
 printf '%s' "$original" > "$reference"
 cmp -s "$document" "$reference"
 # ⑵ **백업이 정확히 하나 있다**(문서당 하나 — §3.10).
-if [ "$(ls -1 "$backups" 2>/dev/null | wc -l | tr -d ' ')" != 1 ]; then
-    echo "expected exactly one backup record in $backups" >&2
-    ls -la "$backups" >&2 || true
-    exit 1
-fi
+python3 - "$backups" <<'PYCOUNT'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+records, claims = list(root.glob('d-*.bak')), list(root.glob('d-*.claim'))
+assert len(records) == 1 and len(claims) == 1, (records, claims)
+assert records[0].stem == claims[0].stem
+PYCOUNT
 # ⑶ **그 안에 미저장 내용이 있다** — 본문은 escape 없이 그대로 실리므로 밖에서 셀 수 있다.
 grep -q 'xyz' "$backups"/*.bak
 grep -q 'original-from-open' "$backups"/*.bak
@@ -201,8 +207,8 @@ fi
 
 # U4b — 지난 세션의 백업이 있는 문서는 **묻지 않고 dirty 로** 열린다(§3.10).
 #
-# `quit-backup` 바로 뒤에 둔다: 레코드 **이름**이 Wyhash 라 셸이 계산할 수 없어, 그 시나리오가 방금
-# 만든 파일 이름에 내용을 덮어써서 심는다(그 의존은 위 `run_scenario` 가 명시로 확인한다).
+# `quit-backup`의 실제 checkpoint가 가리키는 ID를 다음 AppKit 프로세스에서 다시 찾는다.
+# native open 훅을 비워 새 독립 문서가 원래 복구 문서를 가리지 않게 한다.
 run_scenario restore-backup
 grep -Eq '^editor_save_conflict_smoke_scenario=restore-backup$' "$root/restore-backup.summary.txt"
 grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/restore-backup.summary.txt"

@@ -1387,6 +1387,13 @@ pub fn build(b: *std.Build) void {
     const recovery_codec_step = b.step("test-editor-recovery-codec", "Run recovery identity ownership and strict record codecs");
     recovery_codec_step.dependOn(&run_recovery_codec.step);
     recovery_codec_step.dependOn(&run_editor_restore_codec.step);
+    const workspace_editor_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{"workspace editor restore"},
+    });
+    const run_workspace_editor_tests = b.addRunArtifact(workspace_editor_tests);
+    const editor_recovery_restore_step = b.step("test-editor-recovery-restore", "Run editor backup and workspace restore integration judges");
+    editor_recovery_restore_step.dependOn(&run_workspace_editor_tests.step);
 
     const editor_state_perf = b.addExecutable(.{
         .name = "editor-workspace-state-perf",
@@ -3150,7 +3157,7 @@ pub fn build(b: *std.Build) void {
                 "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit finished' \"$success_log\")\" -eq 1; " ++
                 "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit cancelled' \"$success_log\" || true)\" -eq 0; " ++
                 "test \"$(/usr/bin/stat -f '%i' \"$success_checkpoint\")\" != \"$success_inode\"; " ++
-                "/usr/bin/grep -Eq '^maru\\.workspace\\.v1$' \"$success_checkpoint\"; " ++
+                "/usr/bin/grep -Eq '^maru\\.workspace\\.v2$' \"$success_checkpoint\"; " ++
                 "cmp -s \"$success_before\" \"$success_checkpoint.bak\"; test ! -e \"$success_parent/.workspace.v1.bak.tmp\"; test ! -e \"$success_parent/.workspace.v1.tmp\"; " ++
                 "root=zig-out/maru-macos-app/session-host-c4-home; session_root=\"/tmp/maru-product-c4-failure-$$\"; parent=\"$root/Library/Application Support/maru\"; " ++
                 "checkpoint=\"$parent/workspace.v1\"; lease=\"$parent/workspace.v1.lock\"; log=\"$root/app.stderr\"; " ++
@@ -5039,13 +5046,31 @@ pub fn build(b: *std.Build) void {
         // 에 걸리므로 `"app_session.editor.mod."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
         // 모듈에 흩어진 판정자를 마저 긁으려고 남긴다. 대가는 시간이다 — 실측 75초 → 97초
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.diff." },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.diff.", "app_session.editor.recovery_store." },
     });
     // 문서 핸들의 제품 수명과 등록 실패를 빠르게 재현한다. 전체 test-editor에도 같은 판정자가 실린다.
     const document_runtime_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
         .filters = &.{"EDOCREG"},
     });
+    const recovery_restore_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{ "editor recovery restore", "U4", "U2i", "SHVIEW17" },
+    });
+    const run_recovery_restore_tests = b.addRunArtifact(recovery_restore_tests);
+    run_recovery_restore_tests.setCwd(b.path("."));
+    run_recovery_restore_tests.step.dependOn(&install_fake_lsp.step);
+    editor_recovery_restore_step.dependOn(&run_recovery_restore_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos and target.result.cpu.arch == builtin.cpu.arch) {
+        const recovery_process = b.addSystemCommand(&.{ "python3", "tools/test-editor-recovery-process.py" });
+        recovery_process.has_side_effects = true;
+        recovery_process.addArtifactArg(recovery_restore_tests);
+        recovery_process.setCwd(b.path("."));
+        recovery_process.step.dependOn(&install_fake_lsp.step);
+        editor_recovery_restore_step.dependOn(&recovery_process.step);
+        macos_only_test_step.dependOn(&recovery_process.step);
+    }
+
     const shared_view_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
         .filters = &.{"SHVIEW"},

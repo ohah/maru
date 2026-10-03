@@ -220,7 +220,10 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 베이스/결정: Ghostty 드롭 동작을 베이스로 한다(references/ghostty/.../SurfaceView_AppKit.swift) — 우선순위
     // URL > 파일 URL(각각 셸 이스케이프 후 공백으로 join) > 평문(이스케이프 안 함 — 실행할 명령일 수 있음). 코드
     // 표현은 옮기지 않고 maru 독립 구현이다. 이미지를 인라인으로 그리지는 않는다(경로만 — 그래픽 프로토콜은 별도).
-    static let dropTypes: Set<NSPasteboard.PasteboardType> = [.string, .fileURL, .URL, .png, .tiff]
+    static let dropTypes: Set<NSPasteboard.PasteboardType> = [.string, .fileURL, .URL, .png, .tiff, osrDragType]
+    /// maru 의 Chromium 탭에서 시작한 끌기의 표지(W6d② — 값은 끌기 번호). 페이지가 사용자 정의 형식만 넣은 끌기도 maru 안에서는
+    /// 받아야 해서 등록한다(터미널 드롭은 이것만 있으면 넣을 것이 없어 거절된다).
+    static let osrDragType = NSPasteboard.PasteboardType("org.maru.osr-drag")
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         // W6d①: 끌어 온 것을 한 번 싣는다 — 포인터가 Chromium 탭 본문에 들어가면 그 페이지에 넘긴다.
@@ -884,10 +887,15 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         if controller?.handleUrlClick(event, in: self) == true { return }
         // 더블클릭=단어 선택(4), 트리플클릭=논리 줄 선택(5). 선택 의미론은 Zig가 소유한다.
         let kind: Int32 = event.clickCount >= 3 ? 5 : (event.clickCount == 2 ? 4 : 1)
+        lastLeftMouseEvent = event
         controller?.handleMouse(event, kind: kind, in: self)
     }
 
+    /// 마지막 왼쪽 누름·끌기 이벤트(W6d②) — 페이지가 끌기를 시작하면 이 이벤트로 macOS 끌기 세션을 연다(누른 채일 때만).
+    var lastLeftMouseEvent: NSEvent?
+
     override func mouseDragged(with event: NSEvent) {
+        lastLeftMouseEvent = event
         controller?.handleMouse(event, kind: 2, in: self)
     }
 
@@ -7804,6 +7812,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
             drainOsrTooltip() // W6b: hover 중인 Chromium 탭의 툴팁 글이 바뀌었으면 macOS 툴팁을 다시 단다.
             drainOsrContextMenu() // W6c②: Chromium 탭 우클릭 메뉴 — tick 이 끝난 뒤 macOS 메뉴로 띄우고, 페이지가 닫으면 거둔다.
+            drainOsrDragOut() // W6d②: Chromium 탭에서 시작한 끌기 — 누른 채면 macOS 끌기 세션으로.
             drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
             drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
             drainOsrLocation() // W5b2: 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다.
@@ -8678,6 +8687,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // W6c②: 띄운 우클릭 메뉴의 항목(판정 모드 — 띄우지 않는다). 이름이 `menu` 면 아래의 `menu <제목>`(메뉴 막대 항목 —
                 // W4d② 시험기)을 가로챘다(적대 검증 2 차).
                 Self.testReport(osrContextMenu.map { "menu items=\(Self.describeOsrMenu($0.menu))" } ?? "menu none")
+            case "dragout" where line.count >= 2:
+                // W6d②: dragout move|drop fx fy dx dy · dragout cancel — 판정 모드로 가져간 페이지 끌기를 view 의 끌기 메서드로 끝맺는다.
+                testDragOut(line, view)
             case "drag" where line.count >= 6:
                 // W6d①: drag 단계 fx fy dx dy [file 경로… | url 주소 | text 글…] — 터미널 view 의 끌기 메서드(draggingEntered·Updated·
                 // performDragOperation·Ended·Exited)를 가짜 끌기 정보로 부른다(진짜 끌기 세션은 사용자 포인터가 필요하다).
@@ -9570,6 +9582,183 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private static let osrContextMenuTestValue = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_CONTEXT_MENU"]
     private static let osrContextMenuTestMode = osrContextMenuTestValue != nil
 
+    // ── W6d②: 페이지에서 시작한 끌기(끌어내기) ────────────────────────────────────────────────────────────────────────
+    // 페이지가 끌기를 시작하면(sidecar `drag_out`) 그 탭을 누른 채인 창의 tick 이 가져가 macOS 끌기 세션을 연다 — 끌기 그림은
+    // 페이지가 그린 PNG(없거나 못 풀면 글 조각 그림), pasteboard 는 글·주소(제목)·HTML 과 maru 안 표지(끌기 번호). 끝나면 놓인
+    // 자리·받은 동작을 답한다. 판정 모드(`MARU_WEB_OSR_TEST_DRAG_OUT`)는 세션을 열지 않고(셸에서 띄운 앱은 맨 앞이 아니다) 대본의
+    // `dragout` 으로 view 의 끌기 메서드를 불러 끝맺는다.
+
+    private struct OsrDragOutSession {
+        let drag: UInt32
+        let owner: TerminalSurface
+        let view: MaruMetalTerminalView
+        let allowed: NSDragOperation
+        let pasteboard: NSPasteboard?
+    }
+    /// 지금 도는 페이지 끌기(앱에 하나 — macOS 끌기 세션도 하나).
+    private var osrDragOutSession: OsrDragOutSession?
+    private var osrDragOutTestInfo: TestDraggingInfo?
+    private static let osrDragOutTestMode = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_DRAG_OUT"] != nil
+
+    private func drainOsrDragOut() {
+        guard let session = appSession, let view = metalTerminalView, let owner = activeSurface else { return }
+        var allowed: UInt32 = 0
+        var hx: Int32 = 0, hy: Int32 = 0
+        var iw: UInt32 = 0, ih: UInt32 = 0
+        let drag = maru_macos_app_session_osr_drag_out_take(session, &allowed, &hx, &hy, &iw, &ih)
+        guard drag != 0 else { return }
+        // 앞 끌기가 남았으면(세션 끝 알림이 오지 않았다) 놓는다 — Zig 가 그 끌기를 취소로 답했다.
+        osrDragOutSession = nil
+        let item = osrDragOutItem(session, drag)
+        let mask = NSDragOperation(rawValue: UInt(allowed))
+        if Self.osrDragOutTestMode {
+            let pb = NSPasteboard(name: NSPasteboard.Name("maru-test-dragout-\(getpid())"))
+            pb.clearContents()
+            pb.writeObjects([item])
+            osrDragOutSession = OsrDragOutSession(drag: drag, owner: owner, view: view, allowed: mask, pasteboard: pb)
+            let image = osrDragOutImage(session, drag, iw, ih, item)
+            let types = (item.types.map { $0.rawValue }).sorted().joined(separator: ",")
+            let text = (item.string(forType: .string) ?? "").replacingOccurrences(of: "\n", with: "\\n")
+            Self.testReport("dragout start allowed=\(allowed) types=\(types) text=\(text.prefix(60)) image=\(Int(image.size.width))x\(Int(image.size.height)) png=\(iw)x\(ih)")
+            return
+        }
+        // 이미 뗐으면(누름이 끝났다) 세션을 열 수 없다 — 취소로 답한다.
+        guard NSEvent.pressedMouseButtons & 1 != 0, let event = view.lastLeftMouseEvent, view.window != nil else {
+            _ = maru_macos_app_session_osr_drag_out_end(session, drag, 0, 0, 0)
+            return
+        }
+        let image = osrDragOutImage(session, drag, iw, ih, item)
+        let at = view.convert(event.locationInWindow, from: nil)
+        // 잡은 자리는 그림 왼쪽 위 기준(DIP = pt) — view 는 아래가 원점이라 y 를 뒤집는다. 그림이 없으면 포인터 오른쪽 아래.
+        let origin = iw > 0
+            ? NSPoint(x: at.x - CGFloat(hx), y: at.y - (image.size.height - CGFloat(hy)))
+            : NSPoint(x: at.x + 8, y: at.y - image.size.height - 8)
+        let dragging = NSDraggingItem(pasteboardWriter: item)
+        dragging.setDraggingFrame(NSRect(origin: origin, size: image.size), contents: image)
+        osrDragOutSession = OsrDragOutSession(drag: drag, owner: owner, view: view, allowed: mask, pasteboard: nil)
+        let started = view.beginDraggingSession(with: [dragging], event: event, source: view)
+        started.animatesToStartingPositionsOnCancelOrFail = true
+    }
+
+    /// 끌기 pasteboard 항목 — 글(없으면 주소), 주소와 제목, HTML, maru 안 표지.
+    private func osrDragOutItem(_ session: OpaquePointer, _ drag: UInt32) -> NSPasteboardItem {
+        let item = NSPasteboardItem()
+        let text = osrDragOutString(session, drag, 0), html = osrDragOutString(session, drag, 1)
+        let url = osrDragOutString(session, drag, 2), title = osrDragOutString(session, drag, 3)
+        if !url.isEmpty {
+            item.setString(url, forType: .URL)
+            if !title.isEmpty { item.setString(title, forType: NSPasteboard.PasteboardType("public.url-name")) }
+        }
+        if !text.isEmpty { item.setString(text, forType: .string) } else if !url.isEmpty { item.setString(url, forType: .string) }
+        if !html.isEmpty { item.setString(html, forType: .html) }
+        item.setString(String(drag), forType: MaruMetalTerminalView.osrDragType)
+        return item
+    }
+
+    private func osrDragOutBytes(_ session: OpaquePointer, _ drag: UInt32, _ part: UInt32) -> [UInt8] {
+        var length = 0
+        guard maru_macos_app_session_osr_drag_out_part(session, drag, part, nil, 0, &length) != 0, length > 0 else { return [] }
+        var bytes = [UInt8](repeating: 0, count: length)
+        let ok = bytes.withUnsafeMutableBufferPointer { buf in
+            maru_macos_app_session_osr_drag_out_part(session, drag, part, buf.baseAddress, buf.count, &length)
+        }
+        return ok != 0 ? Array(bytes.prefix(length)) : []
+    }
+
+    private func osrDragOutString(_ session: OpaquePointer, _ drag: UInt32, _ part: UInt32) -> String {
+        String(decoding: osrDragOutBytes(session, drag, part), as: UTF8.self)
+    }
+
+    /// 끌기 그림 — 페이지가 그린 PNG(크기는 DIP = pt). 없거나 못 풀면 끄는 글(또는 주소) 조각을 담은 작은 그림.
+    private func osrDragOutImage(_ session: OpaquePointer, _ drag: UInt32, _ width: UInt32, _ height: UInt32, _ item: NSPasteboardItem) -> NSImage {
+        let png = osrDragOutBytes(session, drag, 4)
+        if width > 0, height > 0, !png.isEmpty, let image = NSImage(data: Data(png)) {
+            image.size = NSSize(width: CGFloat(width), height: CGFloat(height))
+            return image
+        }
+        let label = String((item.string(forType: .string) ?? "").replacingOccurrences(of: "\n", with: " ").prefix(40))
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]
+        let text = NSAttributedString(string: label.isEmpty ? " " : label, attributes: attributes)
+        let size = NSSize(width: ceil(text.size().width) + 12, height: ceil(text.size().height) + 6)
+        return NSImage(size: size, flipped: false) { rect in
+            NSColor.windowBackgroundColor.withAlphaComponent(0.85).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
+            text.draw(at: NSPoint(x: 6, y: 3))
+            return true
+        }
+    }
+
+    /// view 가 끌기 세션 소스로 묻는다 — 페이지가 허용한 동작.
+    func osrDragOutMask() -> NSDragOperation {
+        osrDragOutSession?.allowed ?? []
+    }
+
+    /// 끌기 세션이 끝났다(놓았든 취소했든) — 놓인 자리(화면)를 그 탭의 view backing px 로 바꿔 답한다. 창이 닫혔으면 Zig 의 세션
+    /// 정리가 취소로 답했다.
+    func osrDragOutEnded(at screenPoint: NSPoint, operation: NSDragOperation) {
+        guard let shown = osrDragOutSession else { return }
+        osrDragOutSession = nil
+        withSurface(shown.owner) {
+            guard let session = appSession else { return }
+            var xPx = 0.0, yPx = 0.0
+            if let window = shown.view.window {
+                let local = shown.view.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+                (xPx, yPx) = backingPx(local, in: shown.view)
+            }
+            _ = maru_macos_app_session_osr_drag_out_end(session, shown.drag, xPx, yPx, UInt32(truncatingIfNeeded: operation.rawValue))
+            markMetalNeedsRedraw()
+        }
+    }
+
+    /// 판정 모드의 끌어내기(대본 `dragout 단계 fx fy dx dy`) — 페이지 끌기 pasteboard 를 가짜 끌기 정보로 view 의 끌기 메서드에
+    /// 넘기고(소스는 그 view), 놓기·취소 뒤 소스의 끝을 부른다.
+    private func testDragOut(_ line: [String], _ content: NSView) {
+        guard let window, let terminal = Self.firstTerminalView(in: window.contentView) else { return }
+        guard let shown = osrDragOutSession, let pb = shown.pasteboard else { return Self.testReport("dragout none") }
+        let fx = line.count >= 6 ? (Double(line[2]) ?? 0) : 0, fy = line.count >= 6 ? (Double(line[3]) ?? 0) : 0
+        let dx = line.count >= 6 ? (Double(line[4]) ?? 0) : 0, dy = line.count >= 6 ? (Double(line[5]) ?? 0) : 0
+        let local = NSPoint(x: fx * content.bounds.width + dx, y: content.bounds.height - (fy * content.bounds.height + dy))
+        let inWindow = content.convert(local, to: nil)
+        let screen = window.convertPoint(toScreen: inWindow)
+        switch line[1] {
+        case "move":
+            let info = osrDragOutTestInfo ?? TestDraggingInfo(window: window, pasteboard: pb)
+            info.source = terminal
+            info.mask = shown.allowed
+            info.location = inWindow
+            if osrDragOutTestInfo == nil {
+                osrDragOutTestInfo = info
+                Self.testReport("dragout move op=\(terminal.draggingEntered(info).rawValue)")
+            } else {
+                Self.testReport("dragout move op=\(terminal.draggingUpdated(info).rawValue)")
+            }
+        case "drop":
+            guard let info = osrDragOutTestInfo else { return Self.testReport("dragout drop no-enter") }
+            info.location = inWindow
+            let op = terminal.draggingUpdated(info)
+            var done: NSDragOperation = []
+            if op.isEmpty {
+                terminal.draggingExited(info)
+            } else if terminal.prepareForDragOperation(info) && terminal.performDragOperation(info) {
+                done = op
+            }
+            terminal.draggingEnded(info)
+            osrDragOutTestInfo = nil
+            Self.testReport("dragout drop op=\(op.rawValue) done=\(done.rawValue)")
+            osrDragOutEnded(at: screen, operation: done)
+        case "cancel":
+            if let info = osrDragOutTestInfo {
+                terminal.draggingExited(info)
+                terminal.draggingEnded(info)
+            }
+            osrDragOutTestInfo = nil
+            Self.testReport("dragout cancel")
+            osrDragOutEnded(at: screen, operation: [])
+        default:
+            Self.testReport("dragout ?")
+        }
+    }
+
     private func drainOsrContextMenu() {
         guard let session = appSession, let view = metalTerminalView, let owner = activeSurface else { return }
         if let shown = osrContextMenu {
@@ -9903,6 +10092,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         withSurface(surfaceForView(view)) {
             guard let session = appSession, maru_macos_app_session_osr_drag_reset(session) != 0 else { return }
             let pb = info.draggingPasteboard
+            // maru 의 Chromium 탭에서 시작한 끌기 — pasteboard 대신 sidecar 가 쥔 그 끌기 데이터로(W6d② — 페이지가 정한 형식이 남는다).
+            if let mark = pb.string(forType: MaruMetalTerminalView.osrDragType), let drag = UInt32(mark), drag != 0 {
+                maru_macos_app_session_osr_drag_set_source(session, drag)
+                return
+            }
             func add(_ kind: UInt32, _ value: String) {
                 var bytes = Array(value.utf8)
                 _ = bytes.withUnsafeMutableBufferPointer { buf in
@@ -16002,6 +16196,17 @@ private func reportFileTreeTrashOutcome(
 }
 
 // W6c②: 우클릭 메뉴의 「서비스」 — 선택한 글을 보낸다(돌려받지 않는다).
+// W6d②: Chromium 탭에서 시작한 끌기의 소스 — 허용 동작은 페이지가 정했고, 끝나면 controller 가 sidecar 에 답한다.
+extension MaruMetalTerminalView: NSDraggingSource {
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        controller?.osrDragOutMask() ?? []
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        controller?.osrDragOutEnded(at: screenPoint, operation: operation)
+    }
+}
+
 extension MaruMetalTerminalView: NSServicesMenuRequestor {
     func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
         guard let text = osrServiceSelection, types.contains(.string) else { return false }
@@ -16020,13 +16225,15 @@ final class TestDraggingInfo: NSObject, NSDraggingInfo {
         self.pasteboard = pasteboard
     }
     var draggingDestinationWindow: NSWindow? { window }
-    // Finder 가 파일을 끌 때와 같은 허용 동작(복사·링크·일반·이동·삭제 — 개인 빼고).
-    var draggingSourceOperationMask: NSDragOperation { [.copy, .link, .generic, .move, .delete] }
+    // 기본은 Finder 가 파일을 끌 때와 같은 허용 동작(복사·링크·일반·이동·삭제 — 개인 빼고). 페이지 끌기(W6d②)는 페이지가 허용한 것.
+    var mask: NSDragOperation = [.copy, .link, .generic, .move, .delete]
+    var draggingSourceOperationMask: NSDragOperation { mask }
+    var source: Any?
     var draggingLocation: NSPoint { location }
     var draggedImageLocation: NSPoint { location }
     var draggedImage: NSImage? { nil }
     var draggingPasteboard: NSPasteboard { pasteboard }
-    var draggingSource: Any? { nil }
+    var draggingSource: Any? { source }
     var draggingSequenceNumber: Int { 1 }
     func slideDraggedImage(to screenPoint: NSPoint) {}
     var draggingFormation: NSDraggingFormation = .default

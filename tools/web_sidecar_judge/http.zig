@@ -264,12 +264,17 @@ const select_page =
 /// 상한을 글자 경계에서 자르는지).
 /// W6d① 끌어 놓기 — 자리마다 한 요소(`drag_check.zig` 의 좌표). 제목은 `dnd <상태 JSON>`(키는 마지막 값 — `n` 은 바뀐 수).
 /// 받는 칸(`z` — 끄는 동안 본 종류·파일 수·읽힌 글 길이, 놓으면 이름:크기·종류·글·주소, 첫 파일 내용, 폴더면 안 이름과 첫 파일 내용), 글 칸(`ta` —
-/// 들어간 값), 이동을 고르는 목록(`L` — 놓인 글).
+/// 들어간 값), 이동을 고르는 목록(`L` — 놓인 글|사용자 정의 형식 `application/x-maru`). W6d② 끌어내기: 끌 요소(`d` — 글과 사용자
+/// 정의 형식을 싣는다, `dend` 는 끝난 동작+횟수), 링크(`aend`), 글(`p`), 긴 글(`g` — 「가」 6000 자), 페이지가 받은 mouseup 수(`up`).
 const drag_page =
     "<!doctype html><title>loading</title><style>html,body{margin:0;font:16px sans-serif;width:640px;height:480px}body>*{position:absolute;margin:0;box-sizing:border-box}</style><body>" ++
     "<div id=z style='left:20px;top:20px;width:280px;height:160px;background:#cfc'>zone</div>" ++
     "<textarea id=t style='left:20px;top:220px;width:280px;height:60px'></textarea>" ++
     "<div id=L style='left:360px;top:150px;width:120px;height:80px;background:#fcc'>list</div>" ++
+    "<div id=d draggable=true style='left:360px;top:20px;width:120px;height:50px;background:#ccf'>drag me</div>" ++
+    "<a id=a href='/title?t=linked' title='link title' style='left:360px;top:300px;width:120px;height:24px'>a link</a>" ++
+    "<p id=p style='left:20px;top:330px;width:300px;height:24px'>select these words</p>" ++
+    "<div id=g style='left:20px;top:380px;width:300px;height:40px;overflow:hidden;font-size:4px'>" ++ ("가" ** 6000) ++ "</div>" ++
     \\<script>
     \\var S={n:0};function put(k,v){S[k]=v;S.n++;document.title='dnd '+JSON.stringify(S).slice(0,900)}
     \\var z=document.getElementById('z');
@@ -280,7 +285,10 @@ const drag_page =
     \\ if(f.length){var r=new FileReader();r.onload=function(){put('zcontent',String(r.result).slice(0,40))};r.onerror=function(){put('zcontent','ERR')};r.readAsText(f[0])}
     \\ for(var j=0;j<dt.items.length;j++){var en=dt.items[j].webkitGetAsEntry&&dt.items[j].webkitGetAsEntry();if(en&&en.isDirectory){en.createReader().readEntries(function(es){put('zdir',es.map(function(x){return x.name}).sort().join(','));var fe=es.filter(function(x){return x.isFile})[0];if(fe)fe.file(function(ff){var r2=new FileReader();r2.onload=function(){put('zdircontent',String(r2.result).slice(0,40))};r2.readAsText(ff)},function(){put('zdircontent','ERR')})},function(){put('zdir','ERR')})}}});
     \\var t=document.getElementById('t');t.addEventListener('input',function(){put('ta',t.value.slice(0,60))});
-    \\var L=document.getElementById('L');L.addEventListener('dragenter',function(e){e.preventDefault()});L.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move'});L.addEventListener('drop',function(e){e.preventDefault();put('Ldrop',e.dataTransfer.getData('text/plain'))});
+    \\var L=document.getElementById('L');L.addEventListener('dragenter',function(e){e.preventDefault()});L.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move'});L.addEventListener('drop',function(e){e.preventDefault();put('Ldrop',e.dataTransfer.getData('text/plain')+'|'+e.dataTransfer.getData('application/x-maru'))});
+    \\var d=document.getElementById('d');d.addEventListener('dragstart',function(e){e.dataTransfer.setData('text/plain','hello-drag');e.dataTransfer.setData('application/x-maru','secret-type');e.dataTransfer.effectAllowed='copyMove';put('dstart',(S.dstart||0)+1)});d.addEventListener('dragend',function(e){put('dend',e.dataTransfer.dropEffect+(S.dendn=(S.dendn||0)+1))});
+    \\document.getElementById('a').addEventListener('dragend',function(e){put('aend',e.dataTransfer.dropEffect)});
+    \\document.addEventListener('mouseup',function(){put('up',(S.up||0)+1)});
     \\put('ready',1);
     \\</script>
     ;

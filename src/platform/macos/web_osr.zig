@@ -116,6 +116,8 @@ const Surface = struct {
     drag_entered: bool = false,
     /// 이 끌기에서 페이지가 받아들이는 동작(`drag_operation` — 0 이면 놓아도 받지 않는다). enter 에서 0 으로 시작한다.
     drag_operation: u32 = 0,
+    /// 페이지가 시작한 끌기(W6d② — `drag_out`). 조각을 모으다가 `drag_out` 이 오면 창이 가져가 macOS 끌기 세션으로 돌린다.
+    drag_out: ?DragOut = null,
     /// 팝업 링의 보일 장 고르기(W6a②) — 본문과 같은 규칙(GPU 소비자 규칙·기대 크기 = 사각형 × scale). 닫혀도 곧바로
     /// 비우지 않는다: A 닫힘 알림을 처리하기 전에 B 의 링이 먼저 와 있을 수 있어, 닫힐 때 다 놓으면 다시 알리지 않는 B 의
     /// 링을 잃는다(1 차). 닫힐 때 보이던 링만 GPU 가 끝난 뒤 놓는다(`popup_release_generation` — 4 차).
@@ -1012,6 +1014,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     const read = lsp_process.readInto(p, gpa, &inbox, 256 * 1024) catch .eof;
     drainInbox(gpa, now_ms);
     expireContextMenus(gpa, now_ms);
+    expireDragOuts(gpa, now_ms);
     receiveRings();
     // 비우는 사이 sidecar 가 끝났거나(`profile_in_use` 로 멈춤) 다시 떴다 — 위의 `read`·`p` 는 옛 프로세스의 것이다.
     // 처음엔 그대로 이어가 옛 EOF 로 새 sidecar 를 또 죽은 것으로 세거나, 비운 optional 을 읽었다(적대 점검).
@@ -1439,6 +1442,8 @@ pub const DragPayload = struct {
     html: []const u8 = "",
     url: []const u8 = "",
     url_title: []const u8 = "",
+    /// 0 이 아니면 maru 의 Chromium 탭에서 시작한 그 끌기(`drag_out` 번호) — 위 조각 대신 그 데이터를 쓴다(W6d②).
+    source: u32 = 0,
 };
 
 /// 조각 상한 — sidecar(`drag.max_paths`·`max_text_total`)와 같다. 글·HTML 은 넘으면 글자 경계에서 자른다.
@@ -1455,6 +1460,13 @@ fn forgetDrag(s: *Surface) void {
 pub fn dragEnter(gpa: std.mem.Allocator, surface_id: u64, payload: DragPayload, point: ws.message.Point, modifiers: ws.message.Modifiers, allowed: u32) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     if (!s.created) return false;
+    // maru 의 Chromium 탭에서 시작한 끌기 — 조각 대신 sidecar 가 쥔 그 끌기 데이터를 고른다(W6d②).
+    if (payload.source != 0) {
+        send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .enter, .point = point, .modifiers = modifiers, .allowed = allowed & ws.message.drag_operation_mask, .source = payload.source } });
+        s.drag_entered = true;
+        s.drag_operation = 0;
+        return true;
+    }
     var sent_paths: usize = 0;
     for (payload.paths) |p| {
         if (sent_paths == max_drag_paths) break;
@@ -1538,6 +1550,108 @@ pub fn dragDrop(gpa: std.mem.Allocator, surface_id: u64, point: ws.message.Point
     return true;
 }
 
+// ── W6d②: 페이지에서 시작한 끌기 ──────────────────────────────────────────────────────────────────────
+// sidecar 가 조각(`drag_out_data`)과 시작(`drag_out`)을 보내면 탭에 모은다. 그 탭이 보이는 창의 tick 이 가져가(`takeDragOut`) 아직
+// 누르고 있으면 macOS 끌기 세션을 시작하고, 끝나면(`endDragOut`) sidecar 에 답한다. 아무 창도 가져가지 않으면(떼기를 이미 했거나
+// 창이 없다) `drag_out_pickup_ms` 뒤 취소로 답한다 — CEF 는 답이 올 때까지 페이지의 끌기를 붙든다.
+
+pub const drag_out_pickup_ms: i64 = 1_000;
+/// 조각 상한 — sidecar(`drag.max_text_total`·`max_out_png`)와 같다.
+pub const max_drag_out_text = 1024 * 1024;
+pub const max_drag_out_png = 4 * 1024 * 1024;
+
+pub const DragOut = struct {
+    drag: u32,
+    text: std.ArrayList(u8) = .empty,
+    html: std.ArrayList(u8) = .empty,
+    url: std.ArrayList(u8) = .empty,
+    url_title: std.ArrayList(u8) = .empty,
+    png: std.ArrayList(u8) = .empty,
+    allowed: u32 = 0,
+    point: ws.message.Point = .{ .x = 0, .y = 0 },
+    hotspot: ws.message.Point = .{ .x = 0, .y = 0 },
+    image_width: u32 = 0,
+    image_height: u32 = 0,
+    /// `drag_out` 이 왔다(조각이 다 왔다).
+    ready: bool = false,
+    /// 창이 가져갔다(끌기 세션이 돈다) — 만료로 취소하지 않는다.
+    taken: bool = false,
+    arrived_ms: i64 = 0,
+
+    fn add(self: *DragOut, gpa: std.mem.Allocator, kind: ws.message.DragOutDataKind, bytes: []const u8) void {
+        const list, const cap: usize = switch (kind) {
+            .text => .{ &self.text, max_drag_out_text },
+            .html => .{ &self.html, max_drag_out_text },
+            .url => .{ &self.url, ws.wire.max_url_bytes },
+            .url_title => .{ &self.url_title, ws.wire.max_text_bytes },
+            .image_png => .{ &self.png, max_drag_out_png },
+        };
+        // 주소·제목은 한 조각이다(마지막 것).
+        if (kind == .url or kind == .url_title) list.clearRetainingCapacity();
+        if (list.items.len + bytes.len > cap) return; // 넘는 조각은 통째로 버린다(조각마다 글자 경계)
+        list.appendSlice(gpa, bytes) catch {};
+    }
+
+    pub fn deinit(self: *DragOut, gpa: std.mem.Allocator) void {
+        self.text.deinit(gpa);
+        self.html.deinit(gpa);
+        self.url.deinit(gpa);
+        self.url_title.deinit(gpa);
+        self.png.deinit(gpa);
+    }
+};
+
+fn dragOutFor(gpa: std.mem.Allocator, s: *Surface, drag: u32) ?*DragOut {
+    if (s.drag_out) |*d| {
+        if (d.drag == drag) return d;
+        dropDragOut(gpa, s);
+    }
+    s.drag_out = .{ .drag = drag };
+    return &s.drag_out.?;
+}
+
+/// 답하지 않고 버린다(sidecar 가 끝냈거나 사라졌다).
+fn dropDragOut(gpa: std.mem.Allocator, s: *Surface) void {
+    if (s.drag_out) |*d| d.deinit(gpa);
+    s.drag_out = null;
+}
+
+/// 그 탭에 아직 가져가지 않은 다 온 끌기가 있으면 가져간다(창 하나만).
+pub fn takeDragOut(surface_id: u64) ?*const DragOut {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    const d = if (s.drag_out) |*d| d else return null;
+    if (!d.ready or d.taken) return null;
+    d.taken = true;
+    return d;
+}
+
+/// 가져간 그 끌기(창이 조각을 읽는다). 번호가 다르면 null.
+pub fn dragOut(surface_id: u64, drag: u32) ?*const DragOut {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    const d = if (s.drag_out) |*d| d else return null;
+    return if (d.drag == drag) d else null;
+}
+
+/// 그 끌기가 끝났다 — sidecar 에 놓인 자리(view DIP)와 받은 동작을 답하고 버린다. 그 끌기가 아니면(이미 끝났다) false.
+pub fn endDragOut(gpa: std.mem.Allocator, surface_id: u64, drag: u32, point: ws.message.Point, operation: u32) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    const d = s.drag_out orelse return false;
+    if (d.drag != drag or !d.ready) return false;
+    const masked = operation & d.allowed & ws.message.drag_operation_mask;
+    const one: u32 = if (masked == 0) 0 else masked & (~masked +% 1);
+    dropDragOut(gpa, s);
+    send(gpa, .{ .drag_source_end = .{ .browser = surface_id, .drag = drag, .point = point, .operation = one } });
+    return true;
+}
+
+/// 아무 창도 가져가지 않은 끌기를 취소로 끝낸다.
+fn expireDragOuts(gpa: std.mem.Allocator, now_ms: i64) void {
+    for (surfaces.values()) |*s| {
+        const d = s.drag_out orelse continue;
+        if (d.ready and !d.taken and now_ms - d.arrived_ms > drag_out_pickup_ms) _ = endDragOut(gpa, s.record.surface_id, d.drag, d.point, 0);
+    }
+}
+
 /// 그 탭에 보낸 enter 가 살아 있는가 — 창이 enter 한 탭이라도 sidecar 가 다시 떴거나 렌더러가 죽었으면(브라우저를 다시
 /// 만들었으면) false 다. 창은 그때 다시 enter 한다(W6d① 적대 검증 1 차 — 안 하면 본문을 나갔다 들어올 때까지 끌기가 멈췄다).
 pub fn dragEntered(surface_id: u64) bool {
@@ -1586,6 +1700,7 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     if (s.tooltip_text) |t| gpa.free(t);
     s.tooltip_text = null;
     dropContextMenu(gpa, s);
+    dropDragOut(gpa, s);
     if (s.last_url) |u| gpa.free(u);
     if (s.url) |u| gpa.free(u);
     s.last_url = null;
@@ -1815,6 +1930,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         dropContextMenu(gpa, s); // 그 메뉴의 콜백도 사라졌다 — 답하지 않는다(W6c②)
         dropPopup(s); // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게. 새 sidecar 는 세대를 1 부터 세므로 옛 링도 놓는다
         forgetDrag(s); // 새 sidecar 는 그 끌기를 모른다 — enter 없이 drop 을 보내지 않게(W6d①)
+        dropDragOut(gpa, s); // 페이지 끌기도 — 답할 곳이 없다(W6d②)
     }
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
@@ -1964,9 +2080,27 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             setTooltip(gpa, s, ""); // 툴팁도(W6b — 방어)
             dropContextMenu(gpa, s); // 브라우저가 닫히며 CEF 가 메뉴를 거뒀다(W6c② — 닫힘 알림은 sidecar 가 보내지 않는다)
             forgetDrag(s); // 끌기도(W6d①)
+            dropDragOut(gpa, s); // sidecar 가 그 끌기를 놓았다(W6d②)
         },
         .drag_operation => |v| if (surfaces.getPtr(v.browser)) |s| {
             if (s.drag_entered) s.drag_operation = v.operation;
+        },
+        // 페이지 끌기의 조각 — 새 번호면 앞 것을 버린다(sidecar 가 앞 끌기를 끝냈다).
+        .drag_out_data => |v| if (surfaces.getPtr(v.browser)) |s| {
+            const d = dragOutFor(gpa, s, v.drag) orelse return;
+            if (d.ready) return; // `drag_out` 뒤 조각은 규칙 위반이 아니지만 쓰지 않는다
+            d.add(gpa, v.kind, v.bytes);
+        },
+        .drag_out => |v| if (surfaces.getPtr(v.browser)) |s| {
+            const d = dragOutFor(gpa, s, v.drag) orelse return;
+            if (d.ready) return;
+            d.ready = true;
+            d.allowed = v.allowed;
+            d.point = v.point;
+            d.hotspot = v.hotspot;
+            d.image_width = v.image_width;
+            d.image_height = v.image_height;
+            d.arrived_ms = now_ms;
         },
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
@@ -2073,7 +2207,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end => unreachable,
     }
 }
 
@@ -2422,6 +2556,60 @@ test "drags send their pieces before enter, split long text at character boundar
     apply(gpa, .{ .browser_closed = 7 }, 0);
     try std.testing.expect(!dragDrop(gpa, 7, at, .{}));
     try std.testing.expectEqual(@as(usize, 11), sentFrames(&frames)); // enter 세 번뿐
+}
+
+test "page drags gather their pieces, are taken by one window, answered once with an allowed operation, expire when nobody takes them, and are dropped when the sidecar goes (W6d②)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    var frames: [16]Message = undefined;
+    // 조각만 온 끌기는 아직 가져갈 수 없다. 글은 이어 붙고, 주소는 마지막 것.
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .text, .bytes = "ab" } }, 0);
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .text, .bytes = "c" } }, 0);
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .url, .bytes = "https://x/" } }, 0);
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .url, .bytes = "https://y/" } }, 0);
+    try std.testing.expect(takeDragOut(7) == null);
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 3, .allowed = 1 | 16, .point = .{ .x = 4, .y = 5 } } }, 100);
+    // `drag_out` 뒤 조각은 쓰지 않는다.
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .text, .bytes = "late" } }, 0);
+    const taken = takeDragOut(7).?;
+    try std.testing.expectEqualStrings("abc", taken.text.items);
+    try std.testing.expectEqualStrings("https://y/", taken.url.items);
+    try std.testing.expect(takeDragOut(7) == null); // 한 창만
+    // 가져간 끌기는 만료되지 않는다. 답은 허용 동작 안의 하나로, 한 번만.
+    expireDragOuts(gpa, 100 + drag_out_pickup_ms + 1);
+    try std.testing.expectEqual(@as(usize, 0), sentFrames(&frames));
+    try std.testing.expect(endDragOut(gpa, 7, 3, .{ .x = 1, .y = 2 }, 2 | 16));
+    try std.testing.expect(!endDragOut(gpa, 7, 3, .{ .x = 1, .y = 2 }, 1));
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    try std.testing.expectEqual(@as(u32, 16), frames[0].drag_source_end.operation); // 링크(2)는 허용 밖이라 빠진다
+    // 아무 창도 가져가지 않으면 시작 자리·취소로 답한다.
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 4, .allowed = 1, .point = .{ .x = 9, .y = 8 } } }, 1_000);
+    expireDragOuts(gpa, 1_000 + drag_out_pickup_ms);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    expireDragOuts(gpa, 1_000 + drag_out_pickup_ms + 1);
+    try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames));
+    try std.testing.expectEqual(@as(u32, 0), frames[1].drag_source_end.operation);
+    try std.testing.expectEqual(@as(i32, 9), frames[1].drag_source_end.point.x);
+    // 새 번호의 조각은 앞 끌기를 버린다(sidecar 가 끝냈다 — 답하지 않는다). sidecar 가 다시 뜨거나 브라우저가 닫히면 버린다.
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 5, .allowed = 1, .point = .{ .x = 0, .y = 0 } } }, 2_000);
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 6, .kind = .text, .bytes = "n" } }, 2_000);
+    try std.testing.expect(!endDragOut(gpa, 7, 5, .{ .x = 0, .y = 0 }, 1));
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 6, .allowed = 1, .point = .{ .x = 0, .y = 0 } } }, 2_000);
+    forgetSidecar(gpa);
+    try std.testing.expect(takeDragOut(7) == null);
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 7, .allowed = 1, .point = .{ .x = 0, .y = 0 } } }, 3_000);
+    apply(gpa, .{ .browser_closed = 7 }, 3_000);
+    expireDragOuts(gpa, 9_000);
+    try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames)); // 버린 것에는 답하지 않는다
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

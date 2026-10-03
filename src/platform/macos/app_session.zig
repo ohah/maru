@@ -48435,7 +48435,30 @@ test "synchronized output(2026) hold가 스크롤백 탐색 리페인트는 막�
 // 탭 전환 sync-게이트 회귀 테스트 공용 스캐폴딩: controlled_smoke 세션을 만들어 tab0을 정착시키고(출력 소진),
 // 둘째 탭을 만들어(→tab1 활성) 정착시킨 뒤 세션을 돌려준다(호출자가 deinit+destroy). tab0 surface는
 // session.tabs.items[0].panes.items[0].terms.items[0].surface로 얻는다. [code-review 5] 네 테스트의 중복 제거.
+// A fixed number of fast ticks cannot prove a child has run. The controlled
+// child prints this line once and then blocks in read; observing its newline
+// through the product pump is the barrier before callers install test state.
+fn waitControlledStartupLine(session: *AppSession, term: *Term) !void {
+    const deadline = std.Io.Clock.awake.now(session.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (true) {
+        _ = try session.tick();
+        if (e4d3SurfaceContains(term, session.io, "Maru app shell")) {
+            term.surface.lockCore(session.io);
+            const snapshot = term.surface.renderSnapshot();
+            const complete_line = snapshot.cursor.row == 1 and snapshot.cursor.col == 0;
+            term.surface.unlockCore(session.io);
+            if (complete_line) return;
+        }
+        if (std.Io.Clock.awake.now(session.io).nanoseconds >= deadline) return error.ControlledStartupTimeout;
+        try std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+}
+
 fn setupTwoTabsSettled(allocator: std.mem.Allocator) !*AppSession {
+    return setupTwoTabsSettledWithRequest(allocator, null);
+}
+
+fn setupTwoTabsSettledWithRequest(allocator: std.mem.Allocator, second_request: ?maru.pty.SpawnRequest) !*AppSession {
     const session = try allocator.create(AppSession);
     errdefer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -48446,13 +48469,35 @@ fn setupTwoTabsSettled(allocator: std.mem.Allocator) !*AppSession {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     errdefer session.deinit();
-    var i: usize = 0;
-    while (i < 150) : (i += 1) _ = try session.tick(); // tab0 정착(controlled 출력 소진 → output_events=0)
-    _ = try tab_ops.newTab(session); // 둘째 탭 → tab1 활성(createTab이 새 탭을 활성으로)
+    // newTab derives its grid from the viewport, not the initial PTY size.
+    // Give the fixture a real viewport so the startup line remains visible.
+    _ = try session.resize(800, 600, 1000);
+    try waitControlledStartupLine(session, pane_ops.activePane(session).activeTerm());
+    if (second_request) |request| {
+        _ = try tab_ops.createTab(session, request, .{ .cols = 20, .rows = 5 }, 16, "delayed startup", "/bin/sh");
+    } else {
+        _ = try tab_ops.newTab(session); // 둘째 탭 → tab1 활성
+    }
     std.debug.assert(session.tabs.items.len == 2);
-    i = 0;
-    while (i < 150) : (i += 1) _ = try session.tick(); // tab1 정착
+    try waitControlledStartupLine(session, pane_ops.activePane(session).activeTerm());
     return session;
+}
+
+test "cursor PTY settlement waits for delayed child startup" {
+    // Delay real child output beyond a fast tick loop. The fixture must observe
+    // the complete startup line before callers install their blink/sync baseline.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try setupTwoTabsSettledWithRequest(a, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "sleep 0.1; printf 'Maru app shell\\r\\n'; IFS= read -r line" },
+        .size = .{ .cols = 20, .rows = 5 },
+    });
+    defer a.destroy(session);
+    defer session.deinit();
+    for (session.tabs.items) |tab| {
+        try std.testing.expect(e4d3SurfaceContains(tab.activePane().activeTerm(), session.io, "Maru app shell"));
+    }
 }
 
 // ── 회귀: 백그라운드 Term의 출력이 활성 커서 blink 위상을 굶기지 않는다 ─────────────────────────────
@@ -48496,20 +48541,29 @@ test "cursor blink: 백그라운드 Term이 계속 출력해도 활성 커서 �
     const start_visible = session.blink_visible;
     var total_steps: i128 = 0;
     var i: u32 = 0;
+    const background_term = session.tabs.items[0].panes.items[0].terms.items[0];
+    const active_term = pane_ops.activePane(session).activeTerm();
+    const settled_active_batches = active_term.agent_output_batches;
     while (i < 3) : (i += 1) {
+        const before_background_batches = background_term.agent_output_batches;
         session.pasteTextTo(bg_id, "x", false);
-        testAdvanceBlinkHalves(session, 1);
-        const before_phase = session.blink_phase_ns;
-        _ = try session.tick();
-
-        const delta = session.blink_phase_ns - before_phase;
-        // ★ baseline 이 **소비분만큼만** 전진했다 = 리셋이 아니다. 리셋이면 `now_ns` 로 갈아치워져
-        //   반주기의 배수가 아니다(그 차이가 이 판정자가 지키는 회귀다).
-        try std.testing.expectEqual(@as(i128, 0), @mod(delta, interval_ns));
-        const steps = @divTrunc(delta, interval_ns);
-        // ★ 활성 커서 위상은 백그라운드 출력과 무관하게 **매번** 나갔다(굶지 않았다).
-        try std.testing.expect(steps >= 1);
-        total_steps += steps;
+        const deadline = std.Io.Clock.awake.now(session.io).nanoseconds + 5 * std.time.ns_per_s;
+        while (true) {
+            // Check every waiting tick, then require a real background echo.
+            // Otherwise a regression can pass simply because no output arrived.
+            testAdvanceBlinkHalves(session, 1);
+            const before_phase = session.blink_phase_ns;
+            _ = try session.tick();
+            try std.testing.expectEqual(settled_active_batches, active_term.agent_output_batches);
+            const delta = session.blink_phase_ns - before_phase;
+            try std.testing.expectEqual(@as(i128, 0), @mod(delta, interval_ns));
+            const steps = @divTrunc(delta, interval_ns);
+            try std.testing.expect(steps >= 1);
+            total_steps += steps;
+            if (background_term.agent_output_batches > before_background_batches) break;
+            if (std.Io.Clock.awake.now(session.io).nanoseconds >= deadline) return error.BackgroundEchoTimeout;
+            try std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake);
+        }
     }
     // ★ 보이는 상태는 소비한 반주기의 홀짝과 일치한다 — 위상과 화면이 갈리지 않는다.
     const expect_visible = if (@mod(total_steps, 2) == 1) !start_visible else start_visible;

@@ -180,7 +180,9 @@ snapshot으로 보존한다. 현재 동기 `saveDocumentGuarded`의 빌린 `save
 [복원 포맷 검토안](editor-shared-restore.md)은 선택적 필드와 v2의 차이, downgrade 한계,
 문서/뷰 identity와 실패 판정 목록을 비교한다. 이후 사용자는 v2 방향으로 설계 진행에 동의했다.
 창별 문서 표·뷰 참조, 같은 revision 캡처, 전체 checkpoint 실패 보존과 v1 migration 경계를
-검토안에 구체화했다. codec·host migration·재시작 검증 전 사용자용 분할 UI는 노출하지 않는다.
+검토안에 구체화했다. 이후 출시 전이라는 사용자 조건에 따라 v1 호환/migration과 별도 v2 파일 보호는 제거했다.
+에디터 상태 codec의 책임을 분리하되 구조/뷰는 같은 checkpoint, 미저장 본문은 기존 backup으로 저장한다.
+codec·host 연결·재시작 검증 전 사용자용 분할 UI는 노출하지 않는다.
 
 ## 공유 편집기 pane 연결 내부 경로 — 2026-10-03
 

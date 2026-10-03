@@ -112,7 +112,9 @@ AppSession 내부 순회에 의존하는 제약을 먼저 해결해야 한다. �
 
 ### 값 모델과 wire 책임
 
-`src/session/workspace.zig`가 v1/v2 reader, v2 writer, 참조 검증을 소유한다.
+워크스페이스 codec은 창/pane 구조와 참조 배치를 소유한다. 에디터 상태 codec은
+문서 descriptor·뷰 상태의 값 모델, 인코딩·검증을 소유하고 workspace codec이 위임한다.
+이 에디터 codec은 플랫폼 중립 session/editor 계층에 둔다. 물리 저장 파일의 분리와는 별개다.
 `Window`에 문서 descriptor 목록, `Pane`에 편집 뷰 목록을 추가하는 모델을 사용한다.
 아래는 구현할 필드의 의미이며 정확한 키 철자/목록 인코딩은 codec 커밋에서 한 곳에 정의한다.
 
@@ -155,37 +157,43 @@ restore-incomplete latch로 자동 checkpoint 덮어쓰기를 막아야 한다.
 내용 지문 불일치는 구조 손상과 구분한다. 정본 복구는 기존 충돌 경로를 따르고
 선택·스크롤·접힘은 안전한 기본 표시로 열며 degraded 상태를 관측한다.
 
-### v1 migration과 downgrade
+### 출시 전 단일 포맷과 저장 경계
 
-새 reader는 v1을 계속 읽는다. 공유 정보가 없는 v1의 같은 경로 레코드는 각기 독립 문서로 복원한다.
-v1 원본을 그 자리에서 v2로 덮지 않는다. 첫 완전한 capture/publication 성공 후 v2 파일을 생성하며
-실패 시 v1과 미저장 backup을 보존한다. v2가 없을 때만 v1을 가져오고, v2가 있는데 손상됐다면
-오래된 v1로 조용히 돌아가지 않는다. 복구 안내와 기존 보존 latch를 사용한다.
+사용자는 아직 출시 전이므로 하위 버전 호환을 고려하지 않아도 된다고 명시했다.
+v1 reader 유지·migration·구버전 보호를 위한 별도 v2 파일 운영은 이번 설계에서 제거한다.
+문서/뷰를 나눈 단일 최신 포맷을 사용한다. schema 표기는 포맷 식별 용도이며,
+헤더 변경만으로 저장 파일을 추가하지 않는다. 기존 canonical checkpoint 경로와 단일 소유 lock,
+secure atomic publication을 유지하고 host 헤더 집계를 함께 맞춘다.
+구조와 에디터 상태는 같은 checkpoint의 별도 책임 영역으로 기록하며,
+미저장 텍스트는 기존 editor backup 저장소에 둔다.
+이전 개발 포맷을 만나도 원본과 미저장 backup을 자동 삭제·덮어쓰지 않는다.
+복구 실패를 관측하고 기존 보존 latch를 적용한다. 자동 변환·개발 데이터 정리는 별도 작업이다.
 
-v2는 별도 `workspace.v2`와 자체 temp/backup 이름을 사용한다. Swift URL·헤더 집계와
-`workspace_checkpoint_file.zig`의 고정 leaf를 함께 변경한다. 동시에 두 writer가 다른 버전을 쓰지 않도록
-기존 `workspace.v1.lock`의 앱 단일 소유 잠금은 유지한다. 버전별 lock으로 분리하지 않는다.
-새 바이너리는 v2 운영 중 v1 projection을 자동으로 다시 쓰지 않는다.
+같은 checkpoint에 배치와 뷰 상태를 담으면 두 정보의 atomic replace를 공유할 수 있다.
+그러나 별도 텍스트 backup과의 다중 파일 거래는 아니다. `backup.zig.settle`은
+별도 debounce로 기록하고, 종료 flush도 실패 여부로 종료를 막지 않는다.
+따라서 checkpoint가 내용 A의 지문과 뷰 좌표를 담고 실제 backup은 B 또는 없는 경우를
+정상 실패 반례로 취급한다. 복원은 실제로 확보한 내용부터 정한 뒤 지문을 대조하며,
+불일치하면 뷰 좌표/접힘을 기본값으로 연다. A의 내용까지 복구했다고 주장하지 않는다.
+내용 지문은 표시 상태의 일치 여부 확인이지 마지막 입력 보존 보장이 아니다.
 
-이 정책은 구버전이 v2 manifest를 덮는 것을 막는다. **구버전 downgrade 편집은 지원하지 않는다.**
-구버전은 남아 있는 v1의 오래된 layout을 열 수 있으며 기존 document backup 경로도 공유한다.
-따라서 v2 파일 분리만으로 미저장 backup의 downgrade 안전성까지 보장하지 않는다.
-백업 namespace를 바꾸거나 구버전 실행을 강제로 막는 별도 정책은 이번 범위에 넣지 않는다.
-공개 전 이 한계를 복구 안내와 검증 매트릭스에 명시하고 downgrade에서 backup 손실을
-막는다고 주장하지 않는지 판정한다.
+기존 `restoreFromRecord`는 `dropConsumed`로 backup을 삭제한다. 새 staging 경로는
+이 함수를 그대로 호출하지 않는다. record 읽기·staged 적용과 외부 파일 소비를 분리하고,
+모든 뷰 준비 실패에서는 record를 남긴다. publication 성공 뒤 소비 시점 역시
+기존 recovery 수명 계약과 대조해야 하며 게시만으로 crash 복구가 보장된다고 간주하지 않는다.
 
 ### 구현 순서와 완료 판정
 
-1. codec: v1 reader 유지, v2 값 모델/reader/writer, 참조 검증. 결정론적 round-trip,
+1. codec: 단일 최신 값 모델/reader/writer, 에디터 codec 위임과 참조 검증. 결정론적 round-trip,
    혼합 Term 순서, 손상 입력, OOM, 크기 한도 판정과 compile-valid mutation으로 확인한다.
 2. capture/restore: entryless 뷰 캡처, same-revision 검사, 문서당 한 번 backup 적용,
    모든 뷰 staging과 창 publication. 각 실패 지점에서 기존 tree/lease/backup 보존을 확인한다.
-3. host migration: Swift 집계·ABI 헤더·고정 publisher leaf·backup re-arm·동일 lock을 함께 연결한다.
-   v1→v2 첫 저장 실패, v2 손상, atomic replace 전후 crash와 구버전 manifest 격리를 검증한다.
+3. host 연결: Swift 집계·ABI 헤더와 기존 publisher·backup re-arm·동일 lock을 연결한다.
+   최신 포맷 저장 실패/손상, atomic replace 전후 crash와 이전 개발 파일 보존을 검증한다.
 4. 재시작과 제품 화면: dirty 두 pane, 독립 선택/스크롤/접힘, 마지막 뷰 닫기, IME 확정 후 재시작을 검증한다.
    이 gate를 통과한 뒤 사용자용 분할 action/chord를 연결한다.
 
-현재 완료는 위 설계의 구체화다. codec·migration·실제 재시작·GUI gate는 미착수다.
+현재 완료는 위 설계의 구체화다. codec·host 연결·실제 재시작·GUI gate는 미착수다.
 
 ## 설계 반례 검토 — 2026-10-03
 
@@ -208,3 +216,13 @@ v2는 별도 `workspace.v2`와 자체 temp/backup 이름을 사용한다. Swift 
 이번 다섯 회는 서로 다른 반례 축으로 현재 소스·설계·검증 범위를 다시 대조한 것이다.
 이 검토 당시에는 캡처 경계, 한도 초과 처리, 부분 손상 처리와 downgrade 보호가 미결이었다.
 이후 선택한 v2 설계 절에 처리 방향을 구체화했다. codec 구현과 실행 검증은 별도 완료 gate다.
+
+## 저장 위치 권고의 추가 적대적 검토 — 2026-10-03
+
+- **같은 파일이면 전부 일치한다는 반례:** 배치/뷰는 한 atomic checkpoint라도 본문 backup은 별도 파일이다. 지문 불일치에서 안전한 표시로 돌아가는 조건을 보완했다. 백업 실패 뒤 마지막 입력 손실을 이 방식으로 해결했다고 주장하지 않는다.
+- **기존 복원 함수를 그대로 쓰는 반례:** `editor/backup.zig.restoreFromRecord`의 `dropConsumed`가 publication 전에 실행되면 뒤의 staging 실패에서 backup 보존을 깨뜨린다. 읽기·적용·소비를 분리하는 조건을 명시했다. 아직 새 staging 코드는 없다.
+- **같은 경로의 독립 문서 반례:** 문서 표는 둘을 구분하지만 기존 path/base fingerprint 기반 backup identity는 같을 수 있다. 문서 표만으로 각각 다른 dirty 내용을 복구한다고 주장하지 않는다. 첫 공개 전 이 경우의 독립 recovery 식별 또는 생성 정책을 판정해야 한다.
+- **선택 상태 저장 실패의 UX 반례:** 큰 다중 선택/접힘 상태 때문에 checkpoint 전체 실패가 반복되면 새 창 배치까지 저장하지 못한다. 현재 실패 보존은 안전성 조건이며 최선의 UX라는 결론은 아니다. 뷰 상태를 명시적 기본값 레코드로 낮춰 구조만 저장하는 방식과 실측 비교할 후속 판정 항목으로 남긴다.
+- **다른 에디터와 동일하다는 반례:** VS Code의 workspace 내부 DB와 그룹/파일별 뷰 상태는 책임 분리를 뒷받침하지만 Maru의 단일 text checkpoint가 최선임을 입증하지 않는다. 현재 권고는 기존 atomic publisher 재사용과 다중 파일 결합 비용을 줄이는 Maru의 구현 선택이다. 별도 파일/DB가 잘못된 방식이라는 주장은 하지 않는다.
+
+이번 검증은 소스와 설계의 대조다. codec/crash/재시작 실행 검증을 완료한 결과가 아니다.

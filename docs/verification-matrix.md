@@ -3974,3 +3974,7 @@ last-writer-wins와 baseline 백업 보존을 확인한다. 기존 SIGKILL commi
 백업 소비 수명 재현: U4b-12는 제품 복원 후 backup tick 없이 메모리 상태를 제거하고
 새 fixture로 재열기해 복구 내용 유실을 확인한다. characterization 1개이며 수정 완료나
 실제 process crash 증거는 아니다. `test-editor-untitled`는 제품 125개·규칙 39개 통과.
+
+U4b-13 대조군은 U4b-12와 같은 메모리 teardown/재열기에 flushAll만 추가해 복구 내용의
+보존을 판정한다. 최신 test-editor-untitled는 제품 126개·규칙 39개 통과. 정상 종료의 flush
+호출과 fixture teardown을 혼동하지 않는다. 실제 SIGKILL/새 공유 복원 검사는 아니다.

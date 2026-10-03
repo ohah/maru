@@ -23,7 +23,7 @@
 //! W6d② 끌어내기(페이지가 시작한 끌기 — `drag_out`):
 //!   drag-out-start       끌 요소를 누르고 끌면 `drag_out` 이 온다 — 허용 동작(복사·이동), 글, PNG 그림(크기·잡은 자리), 번호
 //!   drag-out-into-page   그 끌기를 같은 페이지 목록에 `source` 로 enter·놓기, 끝(이동) — 목록이 글과 **사용자 정의 형식**을 받고 끌 요소는
-//!                        dragend 이동, 페이지는 mouseup 을 받지 않는다
+//!                        dragend 이동(떼기를 보내지 않는 것은 앱의 일 — 스모크가 본다)
 //!   drag-out-other-tab   다른 브라우저에 `source` 로 놓기 — 그 탭이 같은 데이터를 받는다
 //!   drag-out-cancel      끝(0) — dragend none
 //!   drag-out-link        링크 끌기 — 주소·제목(CEF 는 `title` 속성이 아니라 링크 글을 준다)·글(주소), 끝 뒤 aend
@@ -429,7 +429,7 @@ fn dragOutChecks(report: Report, w: *Watch, host: *Host, port: u16) !void {
     const landed = w.untilHas("\"Ldrop\":\"hello-drag|secret-type\"", 3_000);
     const ended = w.untilHas("\"dend\":\"move1\"", 3_000);
     w.pump(300);
-    report(landed and ended and !w.has("\"up\""), "drag-out-into-page", std.fmt.bufPrint(&detail, "목록이 글·사용자 정의 형식 {} · dragend 이동 {} · mouseup 없음 {} · {s}", .{ landed, ended, !w.has("\"up\""), w.title() }) catch "");
+    report(landed and ended, "drag-out-into-page", std.fmt.bufPrint(&detail, "목록이 글·사용자 정의 형식 {} · dragend 이동 {} · {s}", .{ landed, ended, w.title() }) catch "");
 
     // 다른 브라우저에 source 로.
     try w.load(port);

@@ -902,6 +902,8 @@ sleep 40
 view drag 0.25 0.69 0 0
 sleep 900
 mark started
+view up 0.25 0.69 0 0
+sleep 300
 dragout move 0.75 0.8 0 0
 sleep 300
 dragout move 0.75 0.81 0 0
@@ -958,7 +960,8 @@ moved = ev('/ev?e=mdrop', 'started', 'moved')
 check(moved == ['/ev?e=mdrop&v=smoke-drag&x=smoke-secret'], f'the cell got the page text and its custom type — maru used the source drag data, not the pasteboard ({moved})')
 ends = ev('/ev?e=dend', 'started', 'moved')
 check(ends == ['/ev?e=dend&v=move'], f'the source element saw dragend with move ({ends})')
-check(ev('/ev?e=up', '', 'moved') == [], f'the page got no mouseup for the release the drag session took ({ev("/ev?e=up", "", "moved")})')
+# 세션이 열리면 제스처가 끝나 그 뒤 떼기는 페이지로 가지 않는다(대본이 세션 뒤 떼기를 보낸다 — macOS 세션은 떼기를 먹는다).
+check(ev('/ev?e=up', '', 'moved') == [], f'after the drag session starts, a release does not reach the page as mouseup ({ev("/ev?e=up", "", "moved")})')
 cancelled = ev('/ev?e=dend', 'moved', 'cancelled')
 check(drags[4:5] == ['osr-test dragout cancel'] and cancelled == ['/ev?e=dend&v=none'], f'a cancelled drag ends with none ({drags[4:5]} {cancelled})')
 sys.exit(0 if ok else 1)

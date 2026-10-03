@@ -1942,6 +1942,10 @@ pub fn build(b: *std.Build) void {
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    const chrome_request_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"prepareRequest"} });
+    const chrome_request_step = b.step("test-chrome-text-request", "Verify owned portable chrome text requests and allocation failures");
+    chrome_request_step.dependOn(&b.addRunArtifact(chrome_request_tests).step);
+
     if (target.result.os.tag == .windows) {
         // This focused gate checks the shared-solid/native-gradient merge without a GPU device.
         const paint_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows paint rebase"} });

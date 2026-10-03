@@ -2308,3 +2308,9 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 ReleaseFast 외부 사본에서 실제 OS HID 게시·문서 판·Metal drawable 표시를 연결한다.
 [준비·실행·완전한 A/B 묶음 검증](../tools/editor-input-latency/README.md)과
 [계획 및 사전 실행 범위](plans/editor-input-latency.md)를 따른다. 제품 소스나 기본 빌드는 바꾸지 않는다.
+
+## Portable chrome text request checks
+
+`zig build test-chrome-text-request` checks owned semantic text requests: Korean
+labels and SVG carriers, offscreen origins, owned family/fallback names, and cleanup
+at every failed allocation prefix. It does not require a native font-shaping device.

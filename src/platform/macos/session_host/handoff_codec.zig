@@ -866,6 +866,10 @@ fn encodeCoreField(
     trim: CoordTrim,
 ) Error!void {
     if (comptime std.mem.eql(u8, name, "kitty_placements")) return encodePlacementsMerged(writer, core, trim);
+    // 고정 크기 버퍼는 길이 앞부분만 뜻이 있다 — 뒤는 0 으로 싣는다(형식은 그대로 배열 전체). 남은 옛 내용·쓰레기 값이
+    // 실리면 같은 상태가 다른 바이트가 되고, 디스크의 핸드오프에 무관한 메모리가 섞인다.
+    if (comptime std.mem.eql(u8, name, "utf8_tail")) return encodeLengthPrefixedBuffer(writer, Field, value, core.utf8_tail_len);
+    if (comptime std.mem.eql(u8, name, "dcs_buffer")) return encodeLengthPrefixedBuffer(writer, Field, value, core.dcs_len);
     if (try encodeTrimmedCoordField(writer, name, core, trim)) return;
     try encodeValue(writer, Field, value);
 }
@@ -894,6 +898,12 @@ fn encodeTrimmedCoordField(writer: *Writer, comptime name: []const u8, core: *co
         return true;
     }
     return false;
+}
+
+fn encodeLengthPrefixedBuffer(writer: *Writer, comptime Field: type, value: *const Field, len: usize) Error!void {
+    var copy = value.*;
+    @memset(copy[@min(len, copy.len)..], 0);
+    return encodeValue(writer, Field, &copy);
 }
 
 /// tag 82 는 **두 화면의 placement 를 한 목록으로** 싣는다 — 보관 화면이 먼저, 지금 화면이 뒤(목록을 나누기 전,
@@ -1488,6 +1498,34 @@ test "핸드오프는 화면별 placement 를 한 목록으로 싣고 디코드�
     try after.write("\x1b[?1049l");
     try std.testing.expectEqual(@as(usize, 2), after.kitty_placements.items.len);
     try std.testing.expectEqual(@as(usize, 0), after.saved_kitty_placements.items.len);
+}
+
+// 고정 크기 버퍼(`utf8_tail` [4] · `dcs_buffer` [64])는 **길이 앞부분만 뜻이 있다.** 예전에는 `= undefined` 로 선언된 채
+// 통째로 실려, 같은 상태가 실행마다 다른 바이트가 됐고(2026-10-03 실측: alt fixture 의 해시가 매번 달랐다) 디스크에 쓰는
+// 핸드오프에 힙 주소 같은 쓰레기 값이 섞였다. 길이 뒤는 0 으로 싣는다 — 논리적으로 같은 상태는 같은 바이트다.
+test "핸드오프는 고정 버퍼의 길이 뒤 바이트를 싣지 않는다" {
+    const allocator = std.testing.allocator;
+    var clean = try TerminalCore.init(allocator, .{ .cols = 10, .rows = 3 });
+    defer clean.deinit();
+    var dirty = try TerminalCore.init(allocator, .{ .cols = 10, .rows = 3 });
+    defer dirty.deinit();
+    // 같은 논리 상태: 꼬리 1 바이트(0xE2) · DCS 0 바이트. dirty 는 길이 뒤에 남은 값이 있다.
+    clean.utf8_tail = .{ 0xE2, 0, 0, 0 };
+    clean.utf8_tail_len = 1;
+    dirty.utf8_tail = .{ 0xE2, 0xAA, 0x55, 0x13 };
+    dirty.utf8_tail_len = 1;
+    @memset(&dirty.dcs_buffer, 0xA5);
+    const a = try encodeCore(allocator, &clean);
+    defer allocator.free(a);
+    const b = try encodeCore(allocator, &dirty);
+    defer allocator.free(b);
+    try std.testing.expectEqualSlices(u8, a, b);
+    // 새로 만든 코어는 버퍼가 0 이다(쓰레기가 아니다).
+    const fresh = try TerminalCore.init(allocator, .{ .cols = 10, .rows = 3 });
+    var fresh_core = fresh;
+    defer fresh_core.deinit();
+    for (fresh_core.utf8_tail) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    for (fresh_core.dcs_buffer) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
 test "budget preview encoder stops at the operational allocation cap" {

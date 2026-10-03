@@ -3966,3 +3966,7 @@ workspace 외부 writer/중단: `test-workspace-checkpoint-file-adapter`는 Debu
 21개를 판정한다. 추가 4건은 별도 process의 in-place/atomic 변경을 rename 전후로 고정해
 last-writer-wins와 baseline 백업 보존을 확인한다. 기존 SIGKILL commit-point 검사는 process
 중단 증거이며 물리 전원 차단·OS crash·disk cache loss 검증은 아니다.
+
+백업 읽기 분류 후속: `test-editor-untitled`의 U4b-10은 실제 파일 부재/손상/정상 record·디렉터리 I/O 실패와
+손상 원본 보존·본문/지문을 판정하고, U4b-11은 실제 읽기/파싱의 모든 allocation failure를 부재나 손상으로
+오분류하지 않는지 판정한다. 기존 optional caller 동작은 유지하며 공유 복원 제품 연결은 아니다.

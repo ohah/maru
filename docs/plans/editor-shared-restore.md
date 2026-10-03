@@ -612,3 +612,20 @@ filter와 일치하지 않아 미실행이었으므로 prefix와 exact-count를 
 전원 손실 내구성 강화(file/directory sync와 실제 장애 시험)는 별도 후속 과제로 보류한다.
 이를 현재 구현의 실패 gate나 공유 뷰 복원 완료 조건으로 추가하지 않는다.
 외부 writer와의 충돌 감지 역시 현재 구현이 제공하는 보장으로 표현하지 않는다.
+
+### 백업 읽기 분류 후속 구현
+
+공유 복원 연결 전에 기존 `editor/backup.zig`의 읽기를 `readAt`으로 분리했다. 결과는
+`record`·`missing`·`invalid`·`failed`다. 실제 파일 부재만 missing이며, 레코드 상한 초과와
+파싱 손상은 invalid, I/O 및 할당 실패는 failed로 구분한다. bytes와 parsed 신원의 소유권은
+성공 결과에 함께 넘기고 파싱 실패에서는 bytes를 해제한다.
+
+현재 제품 caller `read`는 성공만 기존 optional record로 전달한다. 기존 조용한 복원 생략,
+원본 백업 보존, 소비 시 삭제 정책을 유지한다. 새 공유 복원이나 사용자 알림에 이 구분을
+연결했다고 주장하지 않는다. 같은 경로 recovery ID·missing-file 공유 복원·큰 표시 상태
+저하·소비 후 백업 수명 정책은 여전히 미결이다.
+
+읽기 분류 집중 gate `test-editor-untitled`는 제품 124개와 규칙 39개가 통과했다.
+U4b-10에서 실제 디렉터리 I/O 실패도 확인했고 U4b-11에서 모든 할당 실패를 주입해
+부재/손상으로 오분류하지 않는지와 해제를 확인했다. 로그는
+`/tmp/maru-backup-read-classification-final.log`다. 전체 검사/원격 CI 결과는 별도로 확인한다.

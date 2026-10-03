@@ -2083,6 +2083,27 @@ pub fn build(b: *std.Build) void {
     }
     const install_macos_app_host_abi_lib = b.addInstallArtifact(macos_app_host_abi_lib, .{});
 
+    // These real-PTY judges share a startup-output barrier. Keep a focused gate
+    // so delayed child output and background echo can be repeated independently.
+    const cursor_pty_settlement_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{
+            "cursor blink: 백그라운드",
+            "cursor PTY settlement waits for delayed child startup",
+            "탭 전환: mid-sync",
+            "탭 전환: 스크롤된 이전 탭",
+            "탭 전환: 이월된 sync_hold_ticks",
+            "글꼴 크기 변경: 셀 픽셀 일괄 전송",
+        },
+    });
+    const run_cursor_pty_settlement_tests = b.addRunArtifact(cursor_pty_settlement_tests);
+    run_cursor_pty_settlement_tests.setCwd(b.path("."));
+    // 7 behavior judges + 5 module-import sanity tests; neither selection nor execution may vanish.
+    run_cursor_pty_settlement_tests.addArg("--maru-expect-tests=12");
+    run_cursor_pty_settlement_tests.addArg("--maru-expect-passed=12");
+    const test_cursor_pty_settlement_step = b.step("test-cursor-pty-settlement", "Verify cursor and tab transition judges after real PTY startup output");
+    test_cursor_pty_settlement_step.dependOn(&run_cursor_pty_settlement_tests.step);
+
     const ime_ack_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"IME_ACK"},

@@ -16972,6 +16972,9 @@ pub const AppSession = struct {
         host.install_done = true;
         switch (maru.cli.agent_hooks.parseOutcome(host.install_out.items)) {
             .ok => |o| {
+                // 설치가 됐다 = 그 목적지로 가는 길이 산다 — 재시도 예산은 「연달아 실패한 횟수」라 여기서 끊는다(`scheduleStreamerRetry`
+                // doc). 안 끊으면 설치 시한 초과를 몇 번 겪은 뒤의 스트리머가 그만큼 적은 재시도로 굳는다.
+                host.retries = 0;
                 if (o.changed)
                     std.log.scoped(.agent).info("원격 훅을 심었다 dest={s}", .{dest})
                 else
@@ -25380,6 +25383,59 @@ test "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스
     // RB2 코드 리뷰: 원격 훅 래치도 푼다 — 안 풀면 로컬 프로세스 판정이 영영 꺼져 이 칸의 로컬 에이전트가 배지도,
     // 재부팅 뒤 이어가기도 못 얻는다.
     try std.testing.expect(!term.agent_kind_from_hook);
+}
+
+test "에이전트 설치가 되면 재시도 예산을 되돌린다 — 앞선 설치 시한 초과가 스트리머의 몫을 깎지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dest = "flaky-box";
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .install = .{ .pid = 0, .out_fd = fds[0] } });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+    host.retries = 5; // 앞서 설치 시한 초과를 다섯 번 겪었다
+
+    // 설치 뒤 스트리머를 띄우는 길에서 실 `ssh` 가 뜨지 않게, control socket 경로가 규격을 넘는 HOME 으로 «영원히» 갈래에
+    // 세운다(그 갈래는 굳히고 돌아간다). 예산은 그보다 **앞에서** 되돌아야 한다.
+    const saved_home = std.c.getenv("HOME");
+    var saved_buf: [1024]u8 = undefined;
+    const saved: ?[:0]const u8 = if (saved_home) |h| std.fmt.bufPrintZ(&saved_buf, "{s}", .{std.mem.span(h)}) catch null else null;
+    defer {
+        if (saved) |h| _ = setenv("HOME", h.ptr, 1) else _ = unsetenv("HOME");
+    }
+    _ = setenv("HOME", "/tmp/" ++ ("h" ** 120), 1);
+
+    const reply = "Welcome\n{\"maru-agent-hooks\":1,\"changed\":false}\n";
+    try std.testing.expect(std.c.write(fds[1], reply.ptr, reply.len) > 0);
+    _ = std.c.close(fds[1]); // 설치 자식이 끝났다
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 100);
+    try std.testing.expect(host.install_done);
+    try std.testing.expectEqual(@as(u8, 0), host.retries);
+    try std.testing.expect(!host.stream_started); // 실 ssh 를 안 띄웠다(경로 규격 초과로 멈췄다)
+
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
 }
 
 test "원격에 maru 가 없으면 축을 안 열고 사유를 남긴다 — 그리고 그 목적지를 다시 안 두드린다" {

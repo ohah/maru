@@ -13,7 +13,7 @@ const renderer = maru.renderer;
 const colorUv = renderer.metal_frame.colorUv; // 컬러 글리프 UV sentinel 단일 출처(u0·u1 동일 규약)
 const terminal = maru.terminal;
 const metal_frame = renderer.metal_frame;
-const system_text = @import("system_text.zig");
+const system_text = maru.app.chrome_text_request;
 
 /// `appendBackgroundQuads`의 `layer` 인자에 쓰는 합성 층 이름. 값의 뜻은 `maru_metal_renderer.m`의
 /// **네 패스 배치**가 정하고, 여기서는 그 숫자에 이름을 준다.

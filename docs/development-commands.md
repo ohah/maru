@@ -2207,3 +2207,9 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 [구현 계획](plans/trust-picker-ime.md)을 따른다.
 
 - 파싱 main queue·문서 수명: `mise exec -- zig build test-editor-parse-runtime test-editor-parse-host test-editor-parse-main-queue -j2`(macOS). [실행 범위와 결함 대조](../tools/editor-parse-runtime/README.md). 일반 입력·표시 경로 전환 전 단계다.
+
+### Portable chrome text request checks
+
+`zig build test-chrome-text-request` checks owned semantic text requests: Korean
+labels and SVG carriers, offscreen origins, owned family/fallback names, and cleanup
+at every failed allocation prefix. It does not require a native font-shaping device.

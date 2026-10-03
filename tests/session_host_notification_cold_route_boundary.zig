@@ -37,10 +37,10 @@ test "P4 N3 cold notification response routes only a coherent stable handle" {
     try expectContains(swift, "let stableRoute = Self.parseStableNotificationRoute(");
     try expectContains(swift, "if let stableRoute {");
     try expectContains(swift, "handleStableNotificationRoute(stableRoute)");
-    try expectContains(swift, "let localRoute = hasStableKey ? nil : Self.parseNotificationRoute(userInfo)");
+    try expectContains(swift, "let localRoute = hasStableKey ? nil : Self.parseNotificationRoute(userInfo, expectedEpoch: notificationInstanceEpoch)");
     try expectContains(swift, "var boundSurface: TerminalSurface?");
-    try expectContains(swift, "if boundSurface != nil { return }");
-    try expectContains(swift, "if matched == 2 { return }");
+    try expectContains(swift, "if boundSurface != nil { return .rejected }");
+    try expectContains(swift, "if matched == 2 { return .rejected }");
     try expectContains(swift, "route.runtimeIdLo,\n                1");
     try expectContains(swift, "route.runtimeIdLo,\n                  2");
 

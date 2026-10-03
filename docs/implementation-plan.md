@@ -56,13 +56,13 @@ macOS 로컬 shell 1개 surface
 - [소스 컨트롤 도크 2판 단계 계획](plans/scm-dock.md)
 - [원격 SCM 단계 계획(RS1~RS7 — 원격 저장소 읽기·쓰기·히스토리)](plans/remote-scm.md)
 - [원격 감시 단계 계획(RW1~RW5 — 저쪽에서 바뀌면 도크가 안다)](plans/remote-watch.md)
-- [원격 파일 트리 단계 계획(RF1~RF6 — 원격 pane 의 폴더를 트리에 그린다)](plans/remote-file-tree.md) — **설계 초안, 사용자 결정 다섯이 열려 있다**
+- [원격 파일 트리 단계 계획(RF1~RF7 — 원격 pane 의 폴더를 트리에 그린다)](plans/remote-file-tree.md) — **RF1~RF7 착지(2026-09-07, RF7 784a4defe)**. 결정 다섯은 전부 닫혔다(①=헬퍼 `list`·②=cwd 따라가기·③=채널 공유·④=되돌릴 수 없음 고지·⑤=읽기 전용). RF3b·RF5b 만 조건 대기(§10.16)
 - [파일 탐색기 트리 컴포넌트 이관 단계 계획](plans/file-tree-component.md)
 - [에이전트 훅 통합 단계 계획](plans/agent-hooks.md)
 - [에이전트 턴 변경분 단계 계획](plans/agent-turn-changes.md)
 - [에이전트 세션 도크 카드 구현 계획](plans/agent-session-list.md)
 - [에이전트 활동 뷰 구현 계획](plans/agent-activity-view.md)
-- [원격 에이전트 활동 뷰(RAV1~RAV8 — ssh 너머 세션의 활동을 여기서 읽는다)](plans/remote-agent-activity.md) — **설계, 사용자 결정 넷이 열려 있다**
+- [원격 에이전트 활동 뷰(RAV1~RAV8 — ssh 너머 세션의 활동을 여기서 읽는다)](plans/remote-agent-activity.md) — **RAV1~RAV8 착지(2026-09-12, RAV8b-2 d621c5020)**. 결정 넷은 2026-09-11 제안대로 확정(§7)
 - [에이전트 이미지 갤러리 구현 계획](plans/agent-image-gallery.md)
 - [사이드바 그룹 단계 분해](plans/sidebar-groups.md)
 - [웹 패널 구현 계획](plans/web-panel.md)

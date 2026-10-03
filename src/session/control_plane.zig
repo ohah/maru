@@ -1,6 +1,6 @@
 //! control_plane — 세션 컨트롤 플레인 wire 프로토콜의 L2 순수 코어 (schema/parser/framing/error-model).
 //! Track C slice 1a. 단일 출처: docs/control-plane.md §1·§10, docs/control-plane-protocol.md §4.1·§4.3,
-//! docs/control-plane-implementation.md §16.
+//! docs/plans/control-plane.md §16.
 //!
 //! **베이스와 결정(clean-room, docs/control-plane.md §10):**
 //! - **메커니즘 = JSON-RPC 2.0** over 로컬 socket(LSP/DAP/CDP가 공유하는 그 메커니즘만 빌린다). request/response는

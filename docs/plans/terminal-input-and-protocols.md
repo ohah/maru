@@ -120,7 +120,7 @@
 
 - **DECSTR soft reset (`CSI ! p`)**: **Ghostty도 미구현**(repo 0건, `CSI p`는 DECRQM만 처리). vim/tmux가 종료 시 보내지만 Ghostty가 무시하고도 동작 → 우선순위 낮음. 한다면 베이스는 ECMA-48/xterm ctlseqs 직접(1차 레퍼런스 없음).
 - **Sixel 그래픽 (DCS 기반)**: Ghostty 미구현, kitty graphics(K1~K4 완료)로 대체되는 흐름. G14의 DCS 상태기계가 생기면 토대만 공유. 보류.
-- **kitty graphics 애니메이션 (`a=a/c/f`)**: Ghostty도 파싱만 하고 실행은 "unimplemented" 에러 반환. 보류(아래 kitty 절 K5 참조).
+- ~~**kitty graphics 애니메이션 (`a=a/c/f`)**: Ghostty도 파싱만 하고 실행은 "unimplemented" 에러 반환. 보류(아래 kitty 절 K5 참조).~~ **구현됨(2026-09-10, e69317687)** — 이 목록(갭 아님)에서 빠진다. `src/terminal/kitty.zig` `advanceAnimations`, 계약·한계는 위 kitty 절 ⑦ 의 «애니메이션» 단락.
 
 ## 터미널 「대답하는 쪽」 감사 (2026-09-08)
 
@@ -552,7 +552,7 @@ K1(placement 코어)에 이어 **실제로 이미지 픽셀을 화면에 그리�
   - **뷰포트 crop**: 렌더러 이미지 패스(`MARU_DRAW_IMAGES`)에는 scissor 가 없어, 뷰포트에 걸친 placement 가 옆 pane·도크(오른쪽·아래 넘침)나 pane 탭 바(위로 밀림) 위에 그려졌다. `buildGpuImages` 가 각 quad 를 자기 뷰포트로 자르고 UV 도 같은 비율로 줄인다(`clipToViewport`) — ABI 무변경. 옛 판정자 「위로 걸친 건 음수 dest_y 로 유지(렌더러가 클립)」는 이 계약으로 갱신했다.
   - **판정자**: `app_session` 「split 으로 함께 보이는 비활성 pane 의 이미지도 그린다 — 같은 로컬 id 는 전역 id 로 갈린다」(두 pane 에 같은 `i=7` → 이미지 2 개·전역 id 가 갈림·원래 id 는 활성 pane·각자 origin·둘 다 업로드·두 번째 프레임에도 id 안정). 돌연변이 둘로 유효성 확인: 비활성 수집을 끄면 `expected 2, found 1`, 매핑을 걷어내면 id 동일로 FAIL. 매핑 단위 6 개(`kitty_image_ids.zig`), crop 2 개(`metal_frame.zig`).
 
-후속(K2 밖): 텍스처 eviction(삭제 이미지 GPU 메모리 해제, 현재 안 그려질 뿐)은 K4/별도. **reflow 정밀 재배치는 완료**(2026-10-02):
+후속(K2 밖): ~~텍스처 eviction(삭제 이미지 GPU 메모리 해제, 현재 안 그려질 뿐)~~ **K4c 로 완료**(ABI v49, aa128e44b — `MetalFrame.live_image_ids` 밖의 텍스처를 `maru_metal_renderer.m` 이 evict). **reflow 정밀 재배치는 완료**(2026-10-02):
 placement 앵커는 **셀**을 따라간다 — 활성 화면 reflow(`screen.resize`)와 스크롤백 재-wrap(`rewrapScrollbackInner`, 지연 포함)이
 행을 다시 자를 때 앵커 셀이 떨어진 새 행·열로 옮긴다(`kitty.AnchorRemap`·`AnchorWalker`). 재-wrap 으로 스크롤백 길이가 바뀌면
 활성 화면 앵커를 그 차만큼 민다(안 밀면 폭을 바꾼 뒤 위로 스크롤하는 순간 화면 위 이미지가 튀었다 — 실측 한 줄). reflow 가

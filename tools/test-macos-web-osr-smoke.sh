@@ -61,6 +61,21 @@ SEL = ("<!doctype html><title>sel</title><style>html,body{margin:0;height:100%;b
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
     "<div id=a title='A tip&#10;line2'>a</div>").encode()
+# W6c②: 우클릭 메뉴 — 왼쪽 위 링크 칸(본문 폭 50%·높이 30% — 글이 없는 자리를 누르면 낱말이 골라지지 않는다), 그 아래 입력 칸
+# (글 「abc」 — 오른쪽 빈 자리를 우클릭하면 낱말이 골라지지 않는다), 오른쪽 위 빈 곳, 그 아래 큰 글 「hello world」(두 번 눌러
+# 고른다), 오른쪽 아래는 우클릭하면 0.5 초 뒤 이동하는 칸(메뉴가 떠 있는 채 닫히는지). 불러옴·입력·
+# 오른쪽 뗌을 `/ev` 로 알린다.
+MENU = ("<!doctype html><title>menu</title><style>html,body{margin:0;height:100%;background:#20a060;font:28px sans-serif}"
+    "#l{position:fixed;left:0;top:0;width:50%;height:30%;display:block;background:#ff0000}"
+    "#i{position:fixed;left:0;top:45%;width:50%;height:15%;font:28px sans-serif}"
+    "#p{position:fixed;left:50%;top:35%;font:60px sans-serif;margin:0}"
+    "#n{position:fixed;left:50%;top:60%;width:50%;height:40%;background:#0000ff}</style><body>"
+    "<a id=l href='/cm-target'>link</a><input id=i value='abc'><p id=p>hello world</p><div id=n></div><script>"
+    "function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}ping('e=load');"
+    "document.getElementById('i').addEventListener('input',function(e){ping('e=input&v='+encodeURIComponent(e.target.value))});"
+    "addEventListener('mouseup',function(e){if(e.button==2)ping('e=up&b=2')});"
+    "document.getElementById('n').addEventListener('contextmenu',function(){setTimeout(function(){location='/cm-app?2'},500)});"
+    "</script>").encode()
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -77,6 +92,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = KEYS
         elif self.path == "/sel":
             body = SEL
+        elif self.path.startswith("/cm-app"):
+            body = MENU
         elif self.path == "/tip-app":
             body = TIP
         elif self.path == "/nav-a":
@@ -178,12 +195,13 @@ leftover=$(pgrep -f "$profile" || true)
 # ── W3c: 본문을 실제로 그린다 ───────────────────────────────────────────────────────────────────────────
 # 앱을 새로 띄워(재시작 예산이 걸리지 않게) 세 가지를 잰다: 정적 페이지가 본문을 빈틈없이 채우는가(스크린샷), 애니메이션
 # 페이지를 CEF 빈도에 가깝게 다시 그리는가, 정적 페이지에서는 다시 그리지 않는가(요약의 metal_frames_drawn).
-run_app() { # $1=경로 $2=실행 ms $3=요약 파일, 나머지는 추가 환경
+run_app() { # $1=경로 $2=실행 ms $3=요약 파일, 나머지는 추가 환경. 우클릭 메뉴는 띄우지 않고 곧바로 취소한다(W6c② — 셸에서
+            # 띄운 앱은 맨 앞이 아니라 메뉴를 쓸 수 없고, 진짜 메뉴는 아무도 닫지 못해 앱이 끝나지 않았다). W6c② 단계는 `=1` 로 덮는다.
     path=$1; ms=$2; summary=$3; shift 3
     rm -rf "$root/home" && mkdir -p "$root/home"
     env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
         MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port$path" \
-        MARU_MACOS_APP_SMOKE_MS="$ms" MARU_APP_SUMMARY_PATH="$summary" "$@" "$app" > "$root/app-${path#/}.log" 2>&1
+        MARU_MACOS_APP_SMOKE_MS="$ms" MARU_APP_SUMMARY_PATH="$summary" MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel "$@" "$app" > "$root/app-${path#/}.log" 2>&1
 }
 
 run_app /solid 20000 "$root/solid.summary" MARU_SCREENSHOT="$root/shot.ppm" MARU_SCREENSHOT_DELAY_MS=7000
@@ -601,6 +619,114 @@ body = shape and areas[0] == areas[1] == areas[2] and holds(areas[0], 0.42, 0.34
 moved = body and areas[3] != areas[0] and areas[3][2] * areas[3][3] < areas[0][2] * areas[0][3] and holds(areas[3], 0.42, 0.35)
 ok = shape and body and moved
 print(('PASS ' if ok else 'FAIL ') + f'tooltip attached to the hovered web body (not the whole view) over the titled element (multi-line), detached outside, reattached, detached by a click and reattached on the next move (Chrome re-shows), moved to the smaller body after a split with the pointer still, detached when the palette opens (shape {shape} body {body} moved {moved} {lines})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6c②: 우클릭 메뉴 ──────────────────────────────────────────────────────────────────────────────────────
+# 셸에서 띄운 앱은 맨 앞이 아니라 macOS 메뉴를 띄울 수 없다 — 판정 모드(`MARU_WEB_OSR_TEST_CONTEXT_MENU`)는 띄우는 대신 항목을
+# 보고하고(`osr-test menu shown items=…`) 대본의 `menupick 문구`·`menuclose` 로 끝맺는다. 그 뒤(답·hover 다시 맞추기·누른 채
+# 뜬 메뉴의 오른쪽 떼기)는 진짜 경로다. 문구는 한국어(`ui.language = ko` — Chrome 154 메뉴 문구)로 본다. 클립보드를 쓰는 항목은
+# 고르지 않는다(사용자 클립보드). 끝 무렵 창을 하나 더 띄워(`newwindow`) 다른 창의 tick 이 메뉴를 거두지 않는지 본다.
+printf 'ui.language = ko\n' > "$root/menu.conf"
+cat > "$root/menu.txt" <<'SCRIPT'
+sleep 7000
+view down 0.79 0.30 0 0 1
+view up 0.79 0.30 0 0 1
+sleep 900
+menupick 새로고침
+sleep 1500
+mark reloaded
+view down 0.395 0.30 0 0 1
+view up 0.395 0.30 0 0 1
+sleep 900
+menuclose
+sleep 300
+view down 0.55 0.588 0 0
+view up 0.55 0.588 0 0
+sleep 300
+view down 0.55 0.588 0 0 1
+view up 0.55 0.588 0 0 1
+sleep 900
+menupick 모두 선택
+sleep 300
+key 6 U+7A
+sleep 600
+mark typed
+view down 0.655 0.49 0 0
+view up 0.655 0.49 0 0
+view down 0.655 0.49 0 0 0 2
+view up 0.655 0.49 0 0 0 2
+sleep 300
+view down 0.655 0.49 0 0 1
+view up 0.655 0.49 0 0 1
+sleep 900
+menuclose
+sleep 300
+mark held
+view down 0.79 0.30 0 0 1
+sleep 900
+menuclose
+sleep 400
+view move 0.39 0.29 0 0
+sleep 300
+view move 0.40 0.30 0 0
+sleep 600
+cursor
+mark hovered
+view up 0.79 0.30 0 0 1
+sleep 300
+newwindow
+sleep 1500
+firstwindow
+mark secondwindow
+view down 0.79 0.30 0 0 1
+view up 0.79 0.30 0 0 1
+sleep 900
+menu
+menupick 새로고침
+sleep 1500
+mark twowindows
+view down 0.79 0.797 0 0 1
+view up 0.79 0.797 0 0 1
+sleep 2000
+menu
+SCRIPT
+: > "$root/requests.log"
+run_app /cm-app 31000 "$root/menu.summary" MARU_WEB_OSR_TEST_INPUT="$root/menu.txt" MARU_WEB_OSR_TEST_CONTEXT_MENU=1 MARU_CONFIG="$root/menu.conf"
+grep -a '^osr-test menu\|^osr-test cursor\|^osr-test mark' "$root/app-cm-app.log" > "$root/menu.report" || true
+cat "$root/menu.report"
+python3 - "$root/menu.report" "$root/requests.log" <<'PY' || fail "the Chromium tab context menu did not behave as expected"
+import sys, re
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+shown = [l[len('osr-test menu shown items='):] for l in report if l.startswith('osr-test menu shown items=')]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+check(len(shown) == 7, f'seven menus were shown (blank, link, input, selection, held, blank with two windows, moving cell) — {len(shown)}')
+check(len(shown) > 0 and shown[0] == '뒤로(off)|앞으로(off)|새로고침', f'the blank-page menu is back(off) · forward(off) · reload in Chrome words ({shown[0] if shown else None})')
+marks = {l.split()[2]: int(l.split()[3]) for l in report if l.startswith('osr-test mark ')}
+def t_of(line):
+    m = re.search(r'[?&]t=(\d+)', line)
+    return int(m.group(1)) if m else 0
+loads = [l for l in requests if l.startswith('/ev?e=load') and t_of(l) < marks.get('reloaded', 0)]
+check(len(loads) == 2, f'picking reload loaded the page again (loads before the mark: {len(loads)})')
+check(len(shown) > 1 and shown[1] == '링크 주소 복사', f'the link menu (no text under the pointer) is copy link address ({shown[1] if len(shown) > 1 else None})')
+edit = re.compile(r'^그림 이모티콘 & 기호\|—\|실행 취소\(off\)\|다시 실행\(off\)\|—\|잘라내기\(off\)\|복사\(off\)\|붙여넣기(\(off\))?\|붙여넣고 스타일 일치시킴(\(off\))?\|모두 선택$')
+check(len(shown) > 2 and bool(edit.match(shown[2])), f'the input menu is emoji — undo · redo — cut · copy · paste · paste and match style · select all ({shown[2] if len(shown) > 2 else None})')
+selection = "'\u2068hello\u2069' 찾기|—|복사|—|음성▸[말하기 시작|말하기 중지(off)]|—|서비스▸[]"
+check(len(shown) > 3 and shown[3] == selection, f"a selected word is look up — copy — speech ▸ — services ▸ ({shown[3] if len(shown) > 3 else None})")
+check(any(l.startswith('/ev?e=input&v=z') for l in requests), f'select all from the menu, then z, replaced the field ({[l for l in requests if l.startswith("/ev?e=input")]})')
+cursor = [l for l in report if l.startswith('osr-test cursor')]
+check(len(cursor) == 1 and cursor[0] == 'osr-test cursor hand', f'after a menu that ate the right-button release, hover works again — the link shows the hand cursor ({cursor})')
+held_ups = [l for l in requests if l.startswith('/ev?e=up&b=2') and marks.get('held', 0) < t_of(l) < marks.get('hovered', 0)]
+check(len(held_ups) == 1, f'the release the held menu ate reached the page once, before the real release (sent by maru) — {len(held_ups)}')
+two = [l for l in requests if l.startswith('/ev?e=load') and marks.get('secondwindow', 0) < t_of(l) < marks.get('twowindows', 0)]
+check('osr-test menu items=뒤로(off)|앞으로(off)|새로고침' in report and len(two) == 1,
+      f'with a second window open, the menu stays open for its own window and its pick runs (another window tick must not close it) — reloads {len(two)}')
+check(report.count('osr-test menu closed-by-page') == 1 and report[-1] == 'osr-test menu none', f'only the menu open while the page navigates is closed, and nothing stays open ({report[-2:]})')
 sys.exit(0 if ok else 1)
 PY
 

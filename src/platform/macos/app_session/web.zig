@@ -1114,6 +1114,88 @@ pub fn osrTooltip(self: *AppSession) struct { serial: u64, text: []const u8, rec
     return .{ .serial = serial, .text = if (t) |x| x.text else "", .rect = if (layout) |l| l.rect else null };
 }
 
+/// 이 창이 띄운 우클릭 메뉴(W6c②). 항목은 순수 모듈이 정하고(`web_osr_context_menu`), 자리는 창 backing px 다.
+pub const OsrContextMenu = struct {
+    surface: u64,
+    menu: u32,
+    x_px: f64,
+    y_px: f64,
+    items: maru.session.web_osr_context_menu.Menu,
+};
+
+/// 이 창에 보이는 탭에 온 우클릭 메뉴가 있으면 가져간다(한 번에 하나 — 띄운 것이 있으면 기다린다). 오버레이가 열렸으면 띄우지
+/// 않고 취소한다(메뉴가 오는 사이 키로 팔레트를 열었다).
+pub fn osrContextMenuTake(self: *AppSession) ?*const OsrContextMenu {
+    if (self.osr_context_menu != null) return null;
+    for (self.osr_layouts.items) |layout| {
+        const taken = web_osr.takeContextMenu(layout.surface_id) orelse continue;
+        if (self.anyOverlayOpen()) {
+            web_osr.answerContextMenu(self.allocator, layout.surface_id, taken.menu, .cancel);
+            continue;
+        }
+        const at = osr_input.toWindowPx(layout.rect, taken.point, self.scale_milli);
+        self.osr_context_menu = .{
+            .surface = layout.surface_id,
+            .menu = taken.menu,
+            .x_px = at.x,
+            .y_px = at.y,
+            .items = maru.session.web_osr_context_menu.build(taken.flags),
+        };
+        return &self.osr_context_menu.?;
+    }
+    return null;
+}
+
+/// 띄운 그 메뉴(`menu` 가 맞을 때만).
+pub fn osrContextMenuShown(self: *AppSession, menu: u32) ?*const OsrContextMenu {
+    if (self.osr_context_menu == null or self.osr_context_menu.?.menu != menu) return null;
+    return &self.osr_context_menu.?;
+}
+
+/// 띄운 메뉴가 아직 열려 있어야 하는가 — sidecar 가 닫았거나(이동·탭 닫힘) 탭이 사라졌으면 false(Swift 가 메뉴를 거둔다).
+pub fn osrContextMenuOpen(self: *AppSession, menu: u32) bool {
+    const m = osrContextMenuShown(self, menu) orelse return false;
+    return web_osr.contextMenuOpen(m.surface, m.menu);
+}
+
+/// 띄운 메뉴의 선택한 글.
+pub fn osrContextMenuSelection(self: *AppSession, menu: u32) []const u8 {
+    const m = osrContextMenuShown(self, menu) orelse return "";
+    return web_osr.contextMenuSelection(m.surface, m.menu);
+}
+
+/// 띄운 메뉴의 답(고른 명령, 고르지 않았거나 macOS 항목이면 취소). 메뉴가 떼기를 먹었으면(누른 채 뜬 메뉴 — 시험 앱 실측: 메뉴
+/// 위에서 떼면 view 에 떼기가 오지 않는다) 그 탭의 제스처가 버튼을 쥔 채 남아 hover 가 막힌다 — 제스처가 쥐었지만 지금 실제로
+/// 눌려 있지 않은 버튼(`pressed` — `NSEvent.pressedMouseButtons` 비트: 1 왼·2 오른·4 가운데)을 지금 포인터 자리에서 뗀다. 아직
+/// 눌려 있으면 진짜 떼기가 온다. `activate` 면 그 탭을 활성으로 올린다(이모티콘 — 고른 글자가 입력기 경로로 그 칸에 가게. 우클릭은
+/// 탭을 활성으로 올리지 않는다 — W6c② 적대 검증).
+pub fn osrContextMenuAnswer(self: *AppSession, menu: u32, command: ws.message.ContextMenuCommandKind, x_px: f64, y_px: f64, pressed: u32, activate: bool) bool {
+    const m = (osrContextMenuShown(self, menu) orelse return false).*;
+    self.osr_context_menu = null;
+    web_osr.answerContextMenu(self.allocator, m.surface, m.menu, command);
+    for ([_]struct { bit: u32, xterm: i32, button: osr_input.MouseButton }{
+        .{ .bit = 2, .xterm = 2, .button = .right },
+        .{ .bit = 1, .xterm = 0, .button = .left },
+        .{ .bit = 4, .xterm = 1, .button = .middle },
+    }) |b| {
+        if (self.pointer_gesture_owner != .web_osr) break;
+        const g = self.pointer_gesture_owner.web_osr;
+        if (g.surface_id == m.surface and g.held.has(b.button) and pressed & b.bit == 0) _ = osrGesture(self, 3, x_px, y_px, 0, b.xterm);
+    }
+    if (activate and self.activateSurfaceById(m.surface)) {
+        self.focusWorkspaceInput();
+        syncOsrKeyTarget(self);
+    }
+    return true;
+}
+
+/// 창이 사라진다 — 띄운 메뉴를 취소로 끝낸다(Swift 가 답할 곳을 잃었다. 안 그러면 sidecar 의 CEF 가 그 탭의 우클릭을 버린다).
+pub fn osrContextMenuDropShown(self: *AppSession) void {
+    const m = self.osr_context_menu orelse return;
+    self.osr_context_menu = null;
+    web_osr.answerContextMenu(self.allocator, m.surface, m.menu, .cancel);
+}
+
 /// 키 대상 탭에 팝업 위젯이 열려 있는가(W6a②). 열린 목록은 편집할 수 없어 입력기 조합이 갈 곳이 없다 — 조합이 서면 그 뒤의
 /// Esc 가 「조합 취소」로 먹혀 목록이 한 번에 안 닫혔다(실측). Chrome 의 목록은 네이티브 메뉴라 입력기가 끼지 않는다.
 pub fn osrPopupOpen(self: *AppSession) bool {

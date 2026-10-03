@@ -147,6 +147,26 @@ pub fn toDip(rect: Rect, x_px: f64, y_px: f64, scale_milli: u32) Point {
     };
 }
 
+/// `toDip` 의 반대 — view DIP 를 창 backing px(view 좌상단 원점)로(W6c② — sidecar 가 알린 우클릭 자리에 메뉴를 띄운다).
+pub fn toWindowPx(rect: Rect, point: Point, scale_milli: u32) struct { x: f64, y: f64 } {
+    const scale: f64 = if (scale_milli == 0) 1.0 else @as(f64, @floatFromInt(scale_milli)) / 1000.0;
+    return .{
+        .x = @as(f64, @floatFromInt(rect.x)) + @as(f64, @floatFromInt(point.x)) * scale,
+        .y = @as(f64, @floatFromInt(rect.y)) + @as(f64, @floatFromInt(point.y)) * scale,
+    };
+}
+
+test "toWindowPx is the inverse of toDip at scale 1 and 2 (menu at the right-clicked spot)" {
+    const rect: Rect = .{ .x = 100, .y = 40, .w = 800, .h = 600 };
+    for ([_]u32{ 1000, 2000, 0 }) |scale| {
+        const p = toWindowPx(rect, .{ .x = 37, .y = 211 }, scale);
+        try testing.expectEqual(Point{ .x = 37, .y = 211 }, toDip(rect, p.x, p.y, scale));
+    }
+    const two = toWindowPx(rect, .{ .x = 10, .y = 5 }, 2000);
+    try testing.expectEqual(@as(f64, 120), two.x);
+    try testing.expectEqual(@as(f64, 50), two.y);
+}
+
 fn clampExtent(v: f64) i32 {
     if (!std.math.isFinite(v)) return 0;
     const limit: f64 = @floatFromInt(message.max_pointer_extent);

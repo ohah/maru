@@ -109,6 +109,8 @@ const Surface = struct {
     /// 여럿이어도 한 창이 먹어 버리지 않게).
     tooltip_text: ?[]u8 = null,
     tooltip_generation: u32 = 0,
+    /// sidecar 가 알린 우클릭 메뉴(W6c② — 하나). 그 탭이 보이는 창의 tick 이 가져가 macOS 메뉴로 띄운다.
+    context_menu: ?ContextMenu = null,
     /// 팝업 링의 보일 장 고르기(W6a②) — 본문과 같은 규칙(GPU 소비자 규칙·기대 크기 = 사각형 × scale). 닫혀도 곧바로
     /// 비우지 않는다: A 닫힘 알림을 처리하기 전에 B 의 링이 먼저 와 있을 수 있어, 닫힐 때 다 놓으면 다시 알리지 않는 B 의
     /// 링을 잃는다(1 차). 닫힐 때 보이던 링만 GPU 가 끝난 뒤 놓는다(`popup_release_generation` — 4 차).
@@ -1004,6 +1006,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     _ = lsp_process.flush(p, gpa) catch {};
     const read = lsp_process.readInto(p, gpa, &inbox, 256 * 1024) catch .eof;
     drainInbox(gpa, now_ms);
+    expireContextMenus(gpa, now_ms);
     receiveRings();
     // 비우는 사이 sidecar 가 끝났거나(`profile_in_use` 로 멈춤) 다시 떴다 — 위의 `read`·`p` 는 옛 프로세스의 것이다.
     // 처음엔 그대로 이어가 옛 EOF 로 새 sidecar 를 또 죽은 것으로 세거나, 비운 optional 을 읽었다(적대 점검).
@@ -1363,6 +1366,79 @@ pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
 
 // ── 안 ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/// 탭의 우클릭 메뉴(W6c②). sidecar 가 CEF 메뉴 콜백을 쥐고 답을 기다린다 — 띄웠든 아니든 답은 정확히 한 번 간다(`answerContextMenu`
+/// 또는 이 파일의 취소). sidecar 가 먼저 닫으면(이동·탭 닫힘 — `context_menu_closed`) 답하지 않는다.
+pub const ContextMenu = struct {
+    menu: u32,
+    /// 우클릭한 자리(view DIP).
+    point: ws.message.Point,
+    flags: ws.message.ContextMenuFlags,
+    /// 선택한 글(소유 — 비었으면 빈 조각). 「찾기」·음성·서비스가 쓴다.
+    selection: []u8,
+    arrived_ms: i64,
+    /// 창이 가져가 메뉴를 띄웠다.
+    shown: bool = false,
+    /// sidecar 가 닫았다 — 띄운 창이 다음 tick 에 메뉴를 거둔다(그 뒤 답은 보내지 않는다).
+    closed: bool = false,
+};
+
+/// 이만큼 지나도 어느 창도 가져가지 않은 메뉴는 취소한다 — 메뉴가 오기 전에 탭을 바꿨다(그 탭이 어느 창에도 보이지 않는다).
+/// 쥔 채 두면 sidecar 의 CEF 는 메뉴가 떠 있다고 보고 그 탭의 다음 우클릭을 버린다(W6c① 판정 중 실측).
+const context_menu_pickup_ms = 2_000;
+
+fn dropContextMenu(gpa: std.mem.Allocator, s: *Surface) void {
+    const m = s.context_menu orelse return;
+    gpa.free(m.selection);
+    s.context_menu = null;
+}
+
+/// 답하지 않은 메뉴를 취소로 끝낸다(sidecar 가 닫지 않았으면 취소를 보낸다).
+fn cancelContextMenu(gpa: std.mem.Allocator, s: *Surface) void {
+    const m = s.context_menu orelse return;
+    if (!m.closed) send(gpa, .{ .context_menu_command = .{ .browser = s.record.surface_id, .menu = m.menu, .command = .cancel } });
+    dropContextMenu(gpa, s);
+}
+
+fn expireContextMenus(gpa: std.mem.Allocator, now_ms: i64) void {
+    for (surfaces.values()) |*s| if (s.context_menu) |m| {
+        if (!m.shown and now_ms - m.arrived_ms > context_menu_pickup_ms) cancelContextMenu(gpa, s);
+    };
+}
+
+/// 그 탭에 아직 띄우지 않은 메뉴가 있으면 띄운 것으로 하고 돌려준다(창이 가져간다 — 한 창만).
+pub fn takeContextMenu(surface_id: u64) ?struct { menu: u32, point: ws.message.Point, flags: ws.message.ContextMenuFlags } {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (s.context_menu == null) return null;
+    const held = &s.context_menu.?;
+    if (held.shown or held.closed) return null;
+    held.shown = true;
+    return .{ .menu = held.menu, .point = held.point, .flags = held.flags };
+}
+
+/// 띄운 그 메뉴가 아직 열려 있어야 하는가 — sidecar 가 닫았거나(이동·닫힘) 탭이 사라졌으면 false.
+pub fn contextMenuOpen(surface_id: u64, menu: u32) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    const m = s.context_menu orelse return false;
+    return m.menu == menu and !m.closed;
+}
+
+/// 그 메뉴의 선택한 글(없으면 빈 글).
+pub fn contextMenuSelection(surface_id: u64, menu: u32) []const u8 {
+    const s = surfaces.getPtr(surface_id) orelse return "";
+    const m = s.context_menu orelse return "";
+    return if (m.menu == menu) m.selection else "";
+}
+
+/// 띄운 메뉴의 답(고른 명령, 고르지 않았으면 취소). sidecar 가 이미 닫았으면 보내지 않는다. 그 메뉴가 아니면 무동작.
+pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, command: ws.message.ContextMenuCommandKind) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    const m = s.context_menu orelse return;
+    // 띄운 그 메뉴에만 답한다 — sidecar 를 다시 띄운 뒤 같은 번호의 새(아직 안 띄운) 메뉴에 옛 창의 늦은 답이 가지 않게(W6c② 적대 검증).
+    if (m.menu != menu or !m.shown) return;
+    if (!m.closed) send(gpa, .{ .context_menu_command = .{ .browser = surface_id, .menu = menu, .command = command } });
+    dropContextMenu(gpa, s);
+}
+
 /// 툴팁 글을 바꾼다(W6b). 빈 글이면 없앤다. 세대는 늘 오른다.
 fn setTooltip(gpa: std.mem.Allocator, s: *Surface, text: []const u8) void {
     if (s.tooltip_text) |old| gpa.free(old);
@@ -1380,6 +1456,7 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     forgetLocationSurface(gpa, s.record.surface_id);
     if (s.tooltip_text) |t| gpa.free(t);
     s.tooltip_text = null;
+    dropContextMenu(gpa, s);
     if (s.last_url) |u| gpa.free(u);
     if (s.url) |u| gpa.free(u);
     s.last_url = null;
@@ -1606,6 +1683,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         dropDialogs(gpa, s);
         dropNotes(gpa, s);
         setTooltip(gpa, s, ""); // 죽은 sidecar 의 툴팁은 끝났다(W6b)
+        dropContextMenu(gpa, s); // 그 메뉴의 콜백도 사라졌다 — 답하지 않는다(W6c②)
         dropPopup(s); // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게. 새 sidecar 는 세대를 1 부터 세므로 옛 링도 놓는다
     }
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
@@ -1754,6 +1832,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .browser_closed => |id| if (surfaces.getPtr(id)) |s| {
             dropPopup(s); // 닫힘 알림 없이 사라진다(W6a②)
             setTooltip(gpa, s, ""); // 툴팁도(W6b — 방어)
+            dropContextMenu(gpa, s); // 브라우저가 닫히며 CEF 가 메뉴를 거뒀다(W6c② — 닫힘 알림은 sidecar 가 보내지 않는다)
         },
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
@@ -1781,7 +1860,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .title_changed, .load_finished => {},
         // 렌더러가 죽으면 그 페이지의 툴팁도 끝났다(CEF 가 빈 글을 부르지 않을 수 있다).
-        .renderer_gone => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, ""),
+        .renderer_gone => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, ""), // 메뉴는 sidecar 가 닫음을 보낸다(W6c①)
         .tooltip_changed => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, v.text),
         .cursor_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.cursor = v.cursor;
@@ -1828,10 +1907,26 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             send(gpa, .{ .permission_reply = .{ .browser = v.browser, .request = v.request, .result = if (allowed) .accept else .ignore } });
         },
         .web_notification => |v| queueNote(gpa, v),
-        // W6c①: 우클릭 메뉴는 앱이 아직 띄우지 않는다(W6c② — NSMenu) — 곧바로 취소로 답해 sidecar 가 CEF 메뉴 콜백을 쥔 채 남지
-        // 않게 한다(사용자가 보는 동작은 W6c 전과 같다 — 메뉴 없음).
-        .context_menu => |v| send(gpa, .{ .context_menu_command = .{ .browser = v.browser, .menu = v.menu, .command = .cancel } }),
-        .context_menu_closed => {},
+        // W6c②: 우클릭 메뉴 — 그 탭이 보이는 창이 가져가 띄운다. 모르는 탭이거나 담을 항목이 없으면(동영상 자리) 곧바로 취소한다.
+        // 앞 메뉴가 남았으면(생기지 않는다 — CEF 는 메뉴가 떠 있는 동안 새 메뉴를 만들지 않는다) 그것은 취소로 끝낸다.
+        .context_menu => |v| {
+            const s = surfaces.getPtr(v.browser) orelse {
+                send(gpa, .{ .context_menu_command = .{ .browser = v.browser, .menu = v.menu, .command = .cancel } });
+                return;
+            };
+            cancelContextMenu(gpa, s);
+            const selection = gpa.dupe(u8, v.selection) catch null;
+            if (selection == null or maru.session.web_osr_context_menu.build(v.flags).len == 0) {
+                if (selection) |b| gpa.free(b);
+                send(gpa, .{ .context_menu_command = .{ .browser = v.browser, .menu = v.menu, .command = .cancel } });
+                return;
+            }
+            s.context_menu = .{ .menu = v.menu, .point = v.point, .flags = v.flags, .selection = selection.?, .arrived_ms = now_ms };
+        },
+        // 띄운 메뉴면 닫혔다고 적어 창이 거두게 하고, 아직 안 띄웠으면 지운다(답은 보내지 않는다 — sidecar 가 끝냈다).
+        .context_menu_closed => |v| if (surfaces.getPtr(v.browser)) |s| if (s.context_menu) |m| if (m.menu == v.menu) {
+            if (m.shown) s.context_menu.?.closed = true else dropContextMenu(gpa, s);
+        },
         .dialog_closed => |v| if (surfaces.getPtr(v.browser)) |s| {
             for (s.dialogs.items) |d| if (d.request == v.request) {
                 removeDialog(gpa, s, d.token);
@@ -2071,21 +2166,56 @@ test "web notifications queue per tab, drop the oldest past the cap, and a click
     try std.testing.expect(takeWebNotification(7) == null);
 }
 
-test "a context menu is answered with cancel at once until the app shows menus (W6c①), and a closed menu needs no answer" {
+test "context menus wait for a window, are answered exactly once, and a menu nobody picks up or that has no items is cancelled (W6c②)" {
     const gpa = std.testing.allocator;
     state = .starting;
     defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
         outbox_pending.deinit(gpa);
         outbox_pending = .empty;
         state = .off;
     }
-    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 4, .point = .{ .x = 1, .y = 2 }, .flags = .{ .link = true } } }, 0);
-    apply(gpa, .{ .context_menu_closed = .{ .browser = 7, .menu = 4 } }, 0);
-    var frames: [4]Message = undefined;
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    var frames: [8]Message = undefined;
+    // 오면 기다린다 — 답은 아직 없다. 창이 가져가 고르면 그 명령이 한 번 간다(두 번째 답은 무동작).
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 4, .point = .{ .x = 1, .y = 2 }, .flags = .{ .editable = true, .can_select_all = true } } }, 0);
+    try std.testing.expectEqual(@as(usize, 0), sentFrames(&frames));
+    const taken = takeContextMenu(7).?;
+    try std.testing.expectEqual(@as(u32, 4), taken.menu);
+    try std.testing.expect(takeContextMenu(7) == null); // 한 창만
+    try std.testing.expect(contextMenuOpen(7, 4));
+    answerContextMenu(gpa, 7, 4, .select_all);
+    answerContextMenu(gpa, 7, 4, .cancel);
     try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
-    try std.testing.expectEqual(@as(u64, 7), frames[0].context_menu_command.browser);
-    try std.testing.expectEqual(@as(u32, 4), frames[0].context_menu_command.menu);
-    try std.testing.expectEqual(ws.message.ContextMenuCommandKind.cancel, frames[0].context_menu_command.command);
+    try std.testing.expectEqual(ws.message.ContextMenuCommandKind.select_all, frames[0].context_menu_command.command);
+    // 띄운 뒤 sidecar 가 닫으면 열려 있지 않고, 그 뒤 답은 보내지 않는다.
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 5, .point = .{ .x = 1, .y = 2 }, .flags = .{} } }, 0);
+    _ = takeContextMenu(7).?;
+    apply(gpa, .{ .context_menu_closed = .{ .browser = 7, .menu = 5 } }, 0);
+    try std.testing.expect(!contextMenuOpen(7, 5));
+    answerContextMenu(gpa, 7, 5, .reload);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    // 아무 창도 가져가지 않으면 2 초 뒤 취소, 항목이 없으면(동영상 자리) 곧바로 취소, 모르는 탭도 곧바로 취소.
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 6, .point = .{ .x = 1, .y = 2 }, .flags = .{ .selection = true, .can_copy = true }, .selection = "글" } }, 1_000);
+    try std.testing.expectEqualStrings("글", contextMenuSelection(7, 6));
+    expireContextMenus(gpa, 2_500);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    expireContextMenus(gpa, 3_100);
+    try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames));
+    try std.testing.expectEqual(ws.message.ContextMenuCommandKind.cancel, frames[1].context_menu_command.command);
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 7, .point = .{ .x = 1, .y = 2 }, .flags = .{ .media = true } } }, 0);
+    apply(gpa, .{ .context_menu = .{ .browser = 99, .menu = 8, .point = .{ .x = 1, .y = 2 }, .flags = .{} } }, 0);
+    try std.testing.expectEqual(@as(usize, 4), sentFrames(&frames));
+    try std.testing.expectEqual(@as(u32, 7), frames[2].context_menu_command.menu);
+    try std.testing.expectEqual(@as(u32, 8), frames[3].context_menu_command.menu);
+    try std.testing.expect(takeContextMenu(7) == null);
+    // 아직 안 띄운 메뉴를 sidecar 가 닫으면 지운다(답 없음).
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 9, .point = .{ .x = 1, .y = 2 }, .flags = .{} } }, 0);
+    apply(gpa, .{ .context_menu_closed = .{ .browser = 7, .menu = 9 } }, 0);
+    try std.testing.expect(takeContextMenu(7) == null);
+    try std.testing.expectEqual(@as(usize, 4), sentFrames(&frames));
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

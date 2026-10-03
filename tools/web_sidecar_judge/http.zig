@@ -283,7 +283,7 @@ const drag_page =
     \\var L=document.getElementById('L');L.addEventListener('dragenter',function(e){e.preventDefault()});L.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move'});L.addEventListener('drop',function(e){e.preventDefault();put('Ldrop',e.dataTransfer.getData('text/plain'))});
     \\put('ready',1);
     \\</script>
-;
+    ;
 
 const context_menu_page =
     "<!doctype html><title>loading</title><style>html,body{margin:0;font:16px sans-serif}body>*{position:absolute;margin:0}</style><body>" ++

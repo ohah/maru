@@ -54,6 +54,7 @@ test {
     _ = @import("platform/windows/editor/security.zig");
     _ = @import("platform/windows/editor/audit_scope.zig");
     _ = @import("platform/windows/editor/identity.zig");
+    _ = @import("platform/windows/editor/transaction.zig");
     _ = scm_surface;
     _ = agent_surface;
 }

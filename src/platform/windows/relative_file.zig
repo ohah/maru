@@ -33,6 +33,12 @@ fn validSegment(segment: []const u8) bool {
     return true;
 }
 
+/// Revalidate a leaf when a native adapter transports its counted name to an
+/// API that accepts an absolute string. ADS/traversal cannot become authority.
+pub fn validateBasename(name: []const u8) Error!void {
+    if (!validSegment(name)) return error.InvalidPath;
+}
+
 fn validate(relative: []const u8) Error!void {
     var it = std.mem.splitAny(u8, relative, "/\\");
     while (it.next()) |segment| if (!validSegment(segment)) return error.InvalidPath;
@@ -267,7 +273,6 @@ fn deletionProbe(root: w.HANDLE) w.NTSTATUS {
     if (result == .SUCCESS) _ = w.ntdll.NtClose(handle);
     return result;
 }
-
 
 test "Windows relative read allows hard links without changing save replacement policy" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;

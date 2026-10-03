@@ -112,3 +112,7 @@ CAS/commit/rollback과 GUI 연결은 계속 남아 있다.
 Windows 뷰 revision 갱신과 여러 view lease의 파생 캐시 수명은 windows-platform.md §2m.140에서
 구현·검증했다. 제품 페인트 경로의 실창 수정/역연산 스모크도 추가했다. 일반 파일의 입력·선택·
 undo 그룹·저장·dirty-close·외부 감시가 연결된 것은 아니므로 W8.17 완료로 세지 않는다.
+
+실험적 local NTFS 저장 transaction과 native 판정은 windows-platform.md §2m.141에 기록했다.
+일반 앱 저장에는 아직 연결하지 않았다. capability·commit 실패 결과 확정·crash 복구·경로 경쟁 검증과
+키보드/IME 편집→저장→재열기 실앱 판정이 남아 있으므로 W8.17은 계속 진행 중이다.

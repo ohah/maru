@@ -10841,3 +10841,36 @@ GUI 입력을 붙일 때도 hit-test·선택·복사 등 모든 본문 소비 �
 일반 파일 열기는 여전히 read_only=true다. 이 스모크는 L2 편집 연산과 실제 렌더 연결을 검증하며
 키 입력·IME·선택 UX·undo 그룹·디스크 저장·dirty-close를 증명하지 않는다.
 revision 변경 때 syntax를 통째로 다시 파는 비용도 남아 있다. 최종 저장·입력 연결·실앱 저장 검증은 계속 진행한다.
+
+### 2m.141 실험적 Windows 저장 트랜잭션과 채택 전 검증 (2026-10-03)
+
+`src/platform/windows/editor/transaction.zig`는 테스트 집계에만 연결한 실험적 local NTFS 구현이다.
+일반 앱 저장의 기본 backend로 채택하지 않았다. pinned 부모 핸들에서 얻은 volume-GUID 경로는
+CreateFileTransactedW의 전송 경로로만 사용한다. basename 검증, 원본과 열린 파일의 전체 ID 비교,
+pinned 디렉터리의 reparse 속성 확인, 실제 부모 핸들 상대 재열기의 ID 비교를 거친 뒤 원본 raw hash와
+호출자의 읽기 상한을 검사한다. 쓰기 전에 실패하면 본문을 변경하지 않는다.
+
+쓰기·길이 조정·flush 중 실패하면 poisoned 상태로 남겨 commit을 거절한다. commit 요청 전에는
+[Microsoft SDK 지침](https://learn.microsoft.com/en-us/windows/win32/fileio/programming-considerations-for-transacted-fileio-)
+대로 transacted 파일 핸들을 닫는다. 실제 파일 fixture에서 이 핸들을 닫은 뒤에도 commit 전 외부 쓰기가
+거절되는지 확인했다. commit 실패는 CommitUncertain으로 반환하고 성공이나 자동 재시도로 처리하지 않는다.
+rollback 실패도 호출자에게 알리며 close는 보유 핸들을 해제한다. 실제 commit 실패의 결과를 조회하여
+확정하는 복구 프로토콜은 아직 구현하지 않았다.
+
+`test-win32-safe-save`의 집계 50개와 native 경로 29개가 통과했다. 신규 transaction 판정은 11개다.
+짧은 본문으로 정확히 교체, commit 전 기존 본문 유지, rollback, 바뀐 hash, 같은 본문의 다른 파일 ID,
+flush 실패, 주입한 commit 실패, 외부 쓰기 거절, 할당 실패 prefix, 크기 상한과 ADS basename 거절을 검사한다.
+보호된 감사 SACL fixture에서는 복제 토큰의 감사 권한을 비활성화하여 보안 정보 읽기 실패를 확인한 상태에서
+저장했고, 권한을 복구한 뒤 owner/group/DACL/SACL 전체 바이트와 ADS 보존을 비교했다.
+보안 snapshot의 backup-intent 핸들이 남아 있으면 실제 native 열기가 6800으로 실패한다.
+이 경우 SourceBusy를 반환하며 권한이나 공유 규칙을 완화하지 않는다.
+
+ID 검사 무시, raw hash 검사 무시, commit 실패 수용, flush 이전 prepared 게시,
+basename 검증과 부모 핸들 상대 binding 검사를 함께 제거한 다섯 실행 변이를 모두 런타임 실패로 검출했다.
+원복 후 정상 집계가 다시 통과했다. 경로 변이는 두 검증을 함께 제거한 판정이며 각 검증의 독립 충분성을
+증명하는 판정으로 세지 않는다.
+
+[CreateFileTransactedW 계약](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfiletransactedw)의
+대안 권고와 파일 시스템 제약은 그대로 적용된다. capability 확인, 실제 commit 실패 결과 확정,
+crash 복구, 조상 reparse 변경 경쟁의 결정적 native 판정과 전체 safe-save 계약 검증이 남아 있다.
+GUI 키보드·IME 편집, 저장, 재열기 실앱 검증도 남아 있으므로 W8.17 완료로 세지 않는다.

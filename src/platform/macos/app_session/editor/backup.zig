@@ -7,8 +7,7 @@
 //! **앱 종료**는 남긴다. 그래서 지우기를 teardown 층에 두지 않는다 — 창 닫기와 앱 종료가 같은
 //! teardown 함수를 지나므로 거기서는 두 뜻을 가를 수 없다.
 //!
-//! **이 슬라이스는 읽지 않는다.** 크래시가 남긴 레코드를 앱이 소비하는 것은 U4b·U4c 다
-//! (계획서 참조) — 그때까지 그 파일은 앱 전용 디렉터리에 쌓이고, **소비하는 쪽이 지우는 주인**이다.
+//! U4b·U4c가 레코드를 읽고 복원하며, **성공적으로 소비하는 쪽이 지우는 주인**이다.
 
 const std = @import("std");
 const maru = @import("maru");
@@ -416,19 +415,31 @@ fn read(self: *AppSession, doc: backup.Doc) ?ReadRecord {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch return null;
 
-    const bytes = std.Io.Dir.cwd().readFileAlloc(
-        self.io,
-        path,
-        self.allocator,
-        .limited(backup.max_record_bytes),
-    ) catch return null;
-    const parsed = backup.parse(self.allocator, bytes) catch {
-        // **손상 레코드는 지우지 않는다** — 사용자가 손으로 꺼낼 마지막 기회다(§3.10 의 「소스가 평문으로
-        // 남는다」가 그 기회를 전제한다). 지우는 것은 **성공적으로 소비했을 때**뿐이다.
-        self.allocator.free(bytes);
-        return null;
+    return switch (readAt(self.allocator, self.io, path)) {
+        .record => |record| record,
+        else => null,
     };
-    return .{ .bytes = bytes, .parsed = parsed };
+}
+
+/// 공유 복원 준비가 부재와 실패를 구분할 수 있는 읽기 결과. 기존 caller의 복원 정책은 유지한다.
+const ReadOutcome = union(enum) {
+    record: ReadRecord,
+    missing,
+    invalid: anyerror,
+    failed: anyerror,
+};
+
+fn readAt(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ReadOutcome {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(backup.max_record_bytes)) catch |err| return switch (err) {
+        error.FileNotFound => .missing,
+        error.StreamTooLong => .{ .invalid = err },
+        else => .{ .failed = err },
+    };
+    const parsed = backup.parse(allocator, bytes) catch |err| {
+        allocator.free(bytes);
+        return if (err == error.OutOfMemory) .{ .failed = err } else .{ .invalid = err };
+    };
+    return .{ .record = .{ .bytes = bytes, .parsed = parsed } };
 }
 
 /// **신원을 잃은 문서를 이름 없는 문서로 되살린다**(U4d). 입구는 둘이고 규칙은 하나다 —
@@ -480,4 +491,55 @@ pub fn drainRevivals(self: *AppSession) void {
     // **앞에서부터 하나** — 예약 순서가 곧 탭 순서다(뒤에서 빼면 순서가 뒤집힌다).
     const entry = self.pending_backup_revivals.orderedRemove(0);
     reviveAsUntitled(self, entry.doc());
+}
+
+test "U4b-10 backup reader distinguishes absent invalid and valid records without deleting source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &buf);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/record.bak", .{buf[0..len]});
+    defer std.testing.allocator.free(path);
+    try std.testing.expect(readAt(std.testing.allocator, std.testing.io, path) == .missing);
+    try std.testing.expect(readAt(std.testing.allocator, std.testing.io, buf[0..len]) == .failed);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "record.bak", .data = "broken" });
+    try std.testing.expect(readAt(std.testing.allocator, std.testing.io, path) == .invalid);
+    const unchanged = try tmp.dir.readFileAlloc(std.testing.io, "record.bak", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(unchanged);
+    try std.testing.expectEqualStrings("broken", unchanged);
+    const encoded = try backup.encode(std.testing.allocator, .{ .path = .{ .path = "/tmp/test", .disk_hash = 7 } }, "dirty content");
+    defer std.testing.allocator.free(encoded);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "record.bak", .data = encoded });
+    var record = switch (readAt(std.testing.allocator, std.testing.io, path)) {
+        .record => |record| record,
+        else => return error.ExpectedRecord,
+    };
+    defer std.testing.allocator.free(record.bytes);
+    defer record.parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("dirty content", record.parsed.content);
+    try std.testing.expectEqual(@as(?u64, 7), record.parsed.doc.path.disk_hash);
+}
+
+test "U4b-11 backup reader allocation failure is not absence or corruption" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &buf);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/record.bak", .{buf[0..len]});
+    defer std.testing.allocator.free(path);
+    const encoded = try backup.encode(std.testing.allocator, .{ .path = .{ .path = "/tmp/test" } }, "dirty content");
+    defer std.testing.allocator.free(encoded);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "record.bak", .data = encoded });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, readRecordAllocationProbe, .{path});
+}
+
+fn readRecordAllocationProbe(allocator: std.mem.Allocator, path: []const u8) !void {
+    var record = switch (readAt(allocator, std.testing.io, path)) {
+        .record => |record| record,
+        .failed => |err| return err,
+        else => return error.MisclassifiedAllocationFailure,
+    };
+    defer allocator.free(record.bytes);
+    defer record.parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("dirty content", record.parsed.content);
 }

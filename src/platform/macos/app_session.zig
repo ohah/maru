@@ -24934,6 +24934,35 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         .queue_capacity = 16,
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
+    // Check while the app is alive: deinit removes this directory, so checking only
+    // after shutdown cannot catch startup cleanup deleting the newly installed queue.
+    {
+        var instance_buf: [hook_command.instance_token_max]u8 = undefined;
+        const instance = agent_ops.hookInstanceToken(&instance_buf);
+        const instance_dir = try std.fmt.allocPrintSentinel(a, "{s}/.cache/maru/agent-turn-events/{s}", .{ home, instance }, 0);
+        defer a.free(instance_dir);
+        var stat: std.posix.Stat = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, instance_dir.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW));
+        try std.testing.expect(std.posix.S.ISDIR(stat.mode));
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), stat.mode & 0o777);
+        const event_path = try std.fmt.allocPrint(a, "{s}/1.ndjson", .{instance_dir});
+        defer a.free(event_path);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = event_path, .data = "codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\"}\n" });
+
+        // A second window must not repeat startup cleanup on the first window's queue.
+        var second: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+        try second.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer second.deinit();
+        const kept = try std.Io.Dir.cwd().readFileAlloc(io, event_path, a, .limited(4096));
+        defer a.free(kept);
+        try std.testing.expect(std.mem.indexOf(u8, kept, "request_user_input") != null);
+    }
     session.deinit();
 
     {
@@ -43838,6 +43867,36 @@ test "RB2-10 에이전트 종류가 바뀌면 checkpoint 가 더럽혀지고, �
         try std.testing.expectEqual(kind, term.agent_kind);
         try std.testing.expectEqual(@as(u64, want), app_runtime.workspace_checkpoint.change_revision);
         try std.testing.expectEqual(maru.app.workspace_checkpoint_product.ChangeKind.agent_session, app_runtime.workspace_checkpoint.last_change_kind);
+    }
+}
+
+test "agent kind changes reproject sidebar rows without a config reload" {
+    // A lone shell has no child list. Detecting its first agent must publish the
+    // list immediately, including when that terminal is not displayed; repaint
+    // alone cannot add rows to the cached sidebar topology.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    session.tabs.items[0].agents_collapsed = false;
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_kind = .none;
+    try sidebar_ops.rebuildSidebar(session);
+    const shell_rows = session.sidebar_rows.items.len;
+    for ([_]AgentKind{ .codex, .claude, .none }) |kind| {
+        agent_ops.noteAgentKind(session, term, kind, false);
+        var agent_rows: usize = 0;
+        var toggles: usize = 0;
+        for (session.sidebar_rows.items) |row| switch (row) {
+            .agent => agent_rows += 1,
+            .agent_toggle => toggles += 1,
+            else => {},
+        };
+        const expected: usize = if (kind == .none) 0 else 1;
+        try std.testing.expectEqual(expected, agent_rows);
+        try std.testing.expectEqual(expected, toggles);
+        try std.testing.expectEqual(shell_rows + expected * 2, session.sidebar_rows.items.len);
     }
 }
 

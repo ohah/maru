@@ -3984,3 +3984,8 @@ U4b-13 대조군은 U4b-12와 같은 메모리 teardown/재열기에 flushAll만
 신원 변경 복구의 중복 방지·재백업 성공/실제 쓰기 실패·Undo·버리기·이름 붙여 저장을 판정한다.
 `test-editor-recovery-window`는 성공/실패한 실제 workspace apply와 번호 보호를 8개
 exact-count한다. 이 판정들은 새 shared restart codec 연결이나 OS 강제 종료 검사는 아니다.
+
+같은 경로 독립 문서 충돌: U4b-15는 두 State/registry slot의 독립성, 같은 backup 이름,
+마지막 writer에 따른 백업 내용과 두 번 재열기의 동일 복구 내용, 원본 disk 불변을 검사한다.
+characterization이며 runtime/GUI crash나 recovery ID 수정 완료 판정은 아니다.
+`test-editor-untitled test-editor-shared`는 제품 129개·규칙 39개·shared 64개 통과.

@@ -698,3 +698,24 @@ revival 중복 방지와 새 백업 성공/실제 쓰기 실패/Undo/버리기/�
 로그는 `/tmp/maru-recovery-retained-final.log`다. 문서 링크/줄 참조와 Zig format 검사도 통과했다.
 전체 검사와 원격 CI는 별도로 확인하며 실제 process SIGKILL/새 shared restart codec 연결을
 검증한 것으로 집계하지 않는다.
+
+### 같은 경로의 독립 문서 백업 충돌 재현
+
+U4b-15에서 실제 `openPathInActivePane` 제품 API로 같은 path를 두 번 열었다. 두 문서는
+서로 다른 State 포인터와 registry slot을 갖는다. 각각 `A:disk`와 `B:disk`로 편집했을 때
+메모리 내용은 서로 독립이지만 backup.fileName은 같은 이름이다. flushAll 후 백업은 B의
+내용 하나이며, 첫 문서를 다시 `A2:A:disk`로 편집하고 flush하면 A의 내용 하나로 바뀐다.
+각 경우 메모리 상태를 제거하고 같은 path를 두 번 다시 열면 두 독립 문서 모두 최종 백업
+내용으로 복구된다. 원본 디스크는 두 경우 모두 `disk` 그대로다. 내부 backup_on_disk는
+두 문서 모두 true지만 두 편집을 각각 복원할 레코드는 하나뿐임도 확인했다.
+
+`zig build test-editor-untitled test-editor-shared -j2`는 제품 129개·규칙 39개·shared
+64개가 통과했다. 로그는 `/tmp/maru-independent-backup-collision.log`이며 마지막 writer가
+B인 경우와 A인 경우를 각각 기록한다. 기존 공유 뷰 검사는 별도 정본의 두 뷰 대조군이다.
+이 검사는 기존 충돌을 재현하는 characterization이며 수정 완료 증거가 아니다. 실제 GUI
+진입·OS restart/SIGKILL은 실행하지 않았다. 백업 포맷이나 recovery ID 정책도 변경하지 않았다.
+
+따라서 같은 path 독립 dirty 문서의 recovery 식별은 실제 보존 문제다. 다음 설계는 runtime
+문서 신원과 restart recovery 신원을 연결하고, shared view들이 한 recovery 레코드를 공유하며
+독립 문서는 서로 다른 레코드를 사용하는 방식을 검토해야 한다. 새로운 ID/포맷을 이번
+재현에서 임의로 도입하지 않는다.

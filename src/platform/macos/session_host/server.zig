@@ -9630,14 +9630,17 @@ const FakeImageSegmentOwner = struct {
             .segment => {},
         }
         self.next_id += 1;
-        return .{ .segment = .{
-            .segment_id = self.next_id,
-            .stream_id = stream_id,
-            .image_id = image_id,
-            .generation = generation,
-            .byte_len = @intCast(pixels.len),
-            .fd = -1,
-        } };
+        return .{
+            .segment = .{
+                .segment_id = self.next_id,
+                .stream_id = stream_id,
+                .image_id = image_id,
+                .generation = generation,
+                .byte_len = @intCast(pixels.len),
+                // This fake owns no OS resource; retain a typed invalid descriptor.
+                .fd = if (@import("builtin").os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1,
+            },
+        };
     }
 
     fn issue(ctx: *anyopaque, segments: []const image_segment_ledger.PreparedImageSegment) void {

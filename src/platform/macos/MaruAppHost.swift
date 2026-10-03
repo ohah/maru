@@ -9912,9 +9912,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 파일은 `public.file-url` 형식을 가진 항목에서만 — `readObjects(NSURL, fileURLsOnly)` 는 `public.url` 항목에 든
             // `file://` 도 파일로 돌려준다. 다른 앱의 웹 페이지가 끌기에 주소로 넣은 `file:///…` 가 사용자가 고르지 않은 파일의
             // 읽기 권한이 되면 안 된다(Chrome 도 file-url 형식만 파일로 본다 — W6d① 적대 검증 1 차).
+            var files = 0
             for item in pb.pasteboardItems ?? [] {
                 guard let link = item.string(forType: .fileURL), let url = URL(string: link), url.isFileURL else { continue }
                 add(0, (url as NSURL).filePathURL?.path ?? url.path)
+                files += 1
+            }
+            // 옛 형식(경로 목록 하나 — 항목마다 file-url 이 없는 옛 Cocoa·Java 앱)도 파일 형식이다(W6d① 적대 검증 2 차).
+            if files == 0, let paths = pb.propertyList(forType: NSPasteboard.PasteboardType("NSFilenamesPboardType")) as? [String] {
+                for path in paths where path.hasPrefix("/") { add(0, path) }
             }
             if let link = pb.string(forType: .URL), let url = URL(string: link), !url.isFileURL {
                 add(3, link)

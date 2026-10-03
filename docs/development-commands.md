@@ -1082,3 +1082,18 @@ workspace 손상 입력의 실제 앱 보존 검사를 20개 반례로 확장하
 필수 ID/참조 검증을 실행한다. RECID/RECB 9개와 공통 test 블록을 포함한 30개 및
 workspace codec 9개를 exact-count한다. `-Doptimize=ReleaseFast`에서도 실행한다.
 제품 writer 전환이나 실제 restart 완료를 뜻하지 않는다.
+
+### 복구 ID 예약 후보의 파일·프로세스 실험
+
+일반 사용자 권한의 macOS에서 실행한다. 실제 `OwnerLease`와 `std.Io.File.Atomic`,
+backup v2 codec을 사용하는 후보 어댑터를 독립 임시 디렉터리에서 비교한다.
+
+```sh
+mise exec -- zig build test-editor-recovery-reservation -j2
+mise exec -- zig build perf-editor-recovery-reservation -Doptimize=ReleaseFast -j2
+```
+
+두 번째 명령은 같은 실패 판정에 후보별 64개 시간 표본을 더해 JSON으로 출력한다.
+오류 판정은 macOS의 기본 `test`와 `test-macos-only` CI에 연결한다. 시간 측정만 opt-in이며
+CI 성능 예산에는 추가하지 않는다.
+제품 backup/restore 호출부와 사용자 데이터는 사용하지 않는다. [실측 범위와 결과](plans/editor-recovery-reservation.md)를 따른다.

@@ -26912,6 +26912,28 @@ test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라�
     try std.testing.expectEqual(maru.session.agent_observer.State.running, agent_ops.hookSlotsAggregate(&session, term).state);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
 
+    // Hostile round 4: actual two-pane remote frames must preserve B's question while A runs.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{"{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"codex\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"tool_name\\\":\\\"request_user_input\\\",\\\"tool_use_id\\\":\\\"pane-question\\\"}\"}"}, 260);
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, pb.slot.state);
+    try std.testing.expect(pb.slot.progress.hasPendingQuestions());
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, pb.slot.notice.kind);
+    try std.testing.expect(agent_ops.takeAgentHookNotice(&session, term) == null);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, pb.slot.notice.kind);
+
+    // Hostile round 9: reverse the table order — first pane blocked, second pane running.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"codex\\t{\\\"hook_event_name\\\":\\\"PostToolUse\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"tool_name\\\":\\\"request_user_input\\\",\\\"tool_use_id\\\":\\\"pane-question\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"codex\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"tool_name\\\":\\\"request_user_input\\\",\\\"tool_use_id\\\":\\\"front-question\\\"}\"}",
+    }, 270);
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, pa.slot.state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, pb.slot.state);
+    try std.testing.expect(!pb.slot.progress.hasPendingQuestions());
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expect(agent_ops.takeAgentHookNotice(&session, term) == null);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, pa.slot.notice.kind);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, pb.slot.notice.kind);
+
     // ⑹ pane 없는 이벤트(구버전 원격·tmux 밖)는 인라인 슬롯 — 지금까지와 같다.
     agent_ops.consumeRemoteAgentLines(&session, term, &.{
         "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"SessionStart\\\",\\\"session_id\\\":\\\"S-inline\\\"}\"}",

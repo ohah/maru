@@ -8976,6 +8976,31 @@ publication ack와 합치고 있었다. 측정은 요청한 snapshot의 실제 p
 `sidebar_clip`·`dock_clamp` 판정은 실패가 남아 전체 Windows 제품 검증 통과로 보고하지 않는다.
 Windows의 `zig build check-boundaries -j4`와 `zig build check-targets -j2`는 exit 0이었다.
 
+### 2m.118 Sidebar clip·dock clamp 판정 입력과 측정 시점 수정 (2026-10-03)
+
+기존 `sidebar_clip` 판정은 트랙의 임의 비율 0.37을 눌렀다. 카드가 일부 잘려도 그 부분이
+여백이면 글리프는 하나도 잘리지 않아 `partial>0, clipped=0`이었다. 이미 그려진 첫 글리프의
+실제 사각형으로 스크롤을 정해 그 글리프 절반이 헤더 경계를 넘도록 바꿨다. 정상 입력에서
+`partial=36, clipped=15, over_header=0`을 관측했다. 실제 clip 구현은 그대로다.
+
+`dock_clamp`는 고정 스핀에서 읽은 행 목록이 유효하지 않았고, 초기 스크롤이 0이라는 가정 때문에
+접을 폴더를 화면 밖으로 밀기도 했다. 그런데 `toggleTreeRow` 계약을 다시 확인하니 접기는
+비동기 스캔을 제출하지 않고 행 목록을 즉시 갱신했다. 따라서 scan completion을 기다리는 방식도
+맞지 않았다. 같은 제품 토글 경로로 기억해 둔 폴더 경로를 접고, 실제 frame clamp와 redraw 뒤
+상태를 측정하도록 바꿨다. 판정 입력도 행 수·폴더 자식 수·휠 설정에 기대지 않도록 접기 전 실제
+스크롤 상한으로 이동시킨다. 큰 폴더를 고른다는 가정 대신 두 행만 줄어도 상한 축소를 시험한다.
+
+clip 적대적 검증 5회는 clip origin +1px, 높이 +1px, UV 보정 제거, 완전히 가려진 셀 유지,
+부분적으로 보이는 셀 제거다. `zig test src/platform/windows/d3d11_cells.zig --test-filter clipCell`의
+행동 판정에서 다섯 변이를 모두 거부했고, 원본 바이트 복원 뒤 2/2 통과했다. 빌드와 소스 변이의
+동시 읽기 가능성을 배제하기 위해 복원 후 제품 스모크를 별도 `.zig-cache/windows-verified`에서
+다시 빌드했다. 최종 소스에서는 baseline → clamp 변이 → 원복 순서로 제품 스모크를 직렬 실행했다.
+정상·원복은 모두 `rows 86→34, off 1097→109, max_after=109, drawn=29, draw_start=5/5`로
+통과했다. clamp 대입을 `@max(dock_scroll_px, dock_max)`로 바꾸자 `off=1097, drawn=0`으로
+실패했고, `ChromeScrollVerificationFailed`와 exit 1을 반환했다. 이 두 판정은 이제 false를
+출력하고 exit 0으로 끝내지 않는다. 다른 미검증 항목까지 통과했다는 뜻은 아니다: 같은 실행의
+`agent_detail_scroll`은 `judgeable=false`여서 여전히 검증되지 않았다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

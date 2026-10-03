@@ -5877,9 +5877,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var reveal_path_len: usize = 0;
     var reveal_digest_before: u64 = 0;
     var reveal_digest_after: u64 = 0;
-    var dclamp_row: usize = 0;
     var dclamp_expanded = false;
     var dclamp_judgeable = false;
+    var dclamp_captured = false;
+    var dclamp_saved_scroll: u32 = 0;
+    var dclamp_path: [std.fs.max_path_bytes]u8 = undefined;
+    var dclamp_path_len: usize = 0;
     var dclamp_off_before: u32 = 0;
     var dclamp_off_after: u32 = 0;
     var dclamp_rows_before: usize = 0;
@@ -8595,13 +8598,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **한 눈금은 카드 높이의 배수가 아니다**(190px vs 57px) — 그래서 첫 카드가 반쯤 잘리고,
         // 그때가 이 판정이 물을 것이 있는 순간이다.
         // **휠로는 이 순간을 못 만든다** — 한 눈금(10 줄 × 19px = 190px)이 카드 높이(38px)의 **정확히
-        // 다섯 배**라 늘 경계에 떨어진다(실측 `partial=0`). 픽셀로 움직이는 **막대 트랙 클릭**을 쓴다.
-        if (smoke and spins == 1052) if (sidebar_bar) |b| {
-            const tx3: i32 = @intFromFloat(b.hit_x + b.hit_w / 2);
-            const ty3: i32 = @intFromFloat(b.track_y + b.track_h * 0.37);
-            window.postSyntheticMouse(.left_down, tx3, ty3);
-            window.postSyntheticMouse(.left_up, tx3, ty3);
-        };
+        // 다섯 배**라 늘 경계에 떨어진다(실측 `partial=0`). 실제 글리프 위치로 픽셀 offset을 정한다.
+        if (smoke and spins == 1052) {
+            const list_top: f32 = @floatFromInt(geom.sidebar.y + sidebar_header_h);
+            for (sidebar_cells.items) |cell| {
+                if (cell.uv[0] < 0 or cell.rect[1] < list_top or cell.rect[3] <= 0) continue;
+                const shift: u32 = @intFromFloat(cell.rect[1] - list_top + cell.rect[3] / 2);
+                sidebar_scroll_px +|= shift;
+                // Force an actual glyph halfway through the clip boundary. A partial card
+                // alone may contain only padding and would exercise no pixel clipping.
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                break;
+            }
+        }
         if (smoke and spins == 1055) {
             clip_partial = sidebar_partial;
             clip_over = sidebar_card_over_header;
@@ -8716,10 +8725,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             for (dock_rows.items, 0..) |r, ri| {
                 if (r != .directory) continue;
                 if (r.directory.expanded) continue;
-                if (ri * cell_h < 220) continue;
+                // The dock may already be scrolled. Reserve the upcoming wheel step
+                // relative to its current viewport instead of assuming offset zero.
+                const upcoming_scroll = @as(u64, dock_scroll_px) + @as(u64, wheel_lines_per_notch) * cell_h;
+                if (@as(u64, ri) * cell_h < upcoming_scroll + cell_h) continue;
                 const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
                 if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
-                dclamp_row = ri;
+                if (r.directory.path.len > dclamp_path.len) continue;
+                @memcpy(dclamp_path[0..r.directory.path.len], r.directory.path);
+                dclamp_path_len = r.directory.path.len;
                 dclamp_expanded = true;
                 const ex: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
                 const ey: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
@@ -8749,30 +8763,29 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 더 굴리면 되접을 줄이 화면 밖으로 나간다.
             window.postSyntheticMouseWheel(.wheel, dsx, dsy, -1);
         }
-        if (smoke and spins == 1024 and dclamp_expanded and dclamp_row < dock_rows.items.len) {
-            dclamp_judgeable = true;
-            dclamp_off_before = dock_scroll_px;
-            dclamp_rows_before = dock_rows.items.len;
-            // **같은 폴더 줄을 다시 누른다** — 그 사이 굴렸으므로 화면 자리는 다시 잰다.
-            const local = @as(i64, @intCast(dclamp_row * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
-            if (local >= 0 and local < @as(i64, @intCast(geom.tree_content.h))) {
-                const cx2: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
-                const cy2: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
-                window.postSyntheticMouse(.left_down, cx2, cy2);
-                window.postSyntheticMouse(.left_up, cx2, cy2);
-            } else {
-                // 접을 줄이 화면 밖이면 이 판정은 아무것도 안 묻는다 — 그렇게 말한다.
-                dclamp_judgeable = false;
+        if (smoke and spins == 1024 and dclamp_expanded) {
+            // Exercise shrink from the true end, independently of directory size and wheel settings.
+            // The product toggle accepts a path; collapsing an ancestor need not require its row
+            // to remain visible while viewing its last child.
+            const path = dclamp_path[0..dclamp_path_len];
+            var is_expanded = false;
+            for (dock_rows.items) |row| {
+                if (row == .directory and std.mem.eql(u8, row.directory.path, path)) {
+                    is_expanded = row.directory.expanded;
+                    break;
+                }
+            }
+            if (is_expanded) {
+                dclamp_saved_scroll = dock_scroll_px;
+                dock_scroll_px = @intCast((@as(u64, dock_rows.items.len) * cell_h) -| geom.tree_content.h);
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                dclamp_off_before = dock_scroll_px;
+                dclamp_rows_before = dock_rows.items.len;
+                dclamp_judgeable = toggleTreeRow(allocator, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".", path, null);
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
-        if (smoke and spins == 1030 and dclamp_judgeable) {
-            dclamp_off_after = dock_scroll_px;
-            dclamp_rows_after = dock_rows.items.len;
-            dclamp_drawn_after = dock_rows_drawn;
-            // **빌더가 실제로 쓴 첫 행**이다(여기서 다시 계산하지 않는다) — 값만 되돌리고 셀을 다시
-            // 안 지으면 이 값이 옛 offset 그대로다.
-            dclamp_draw_start_after = dock_draw_start;
-        }
+
         // ── 눈이 따라간다 (W8.18a) ───────────────────────────────────────────────────
         //
         // **먼저 목록을 맨 위로 굴린다** — 세션이 열셋이라 파일 카드는 바닥에 있고, 위에서 보면
@@ -11593,6 +11606,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
             }
         }
+        if (smoke and dclamp_judgeable and !dclamp_captured and dock_view == .explorer and
+            dock_rows.items.len > 0 and dock_rows.items.len < dclamp_rows_before)
+        {
+            dclamp_off_after = dock_scroll_px;
+            dclamp_rows_after = dock_rows.items.len;
+            dclamp_drawn_after = dock_rows_drawn;
+            dclamp_draw_start_after = dock_draw_start;
+            dclamp_captured = true;
+            // Restore the preceding scenario's viewport after recording the hostile shrink.
+            const restored = @min(dclamp_saved_scroll, dock_scroll_px);
+            if (restored != dock_scroll_px) {
+                dock_scroll_px = restored;
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            }
+        }
         cells.clearRetainingCapacity();
         try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len + sidebar_cells.items.len + titlebar_cells.items.len);
         // **사이드바·도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 그 배경에 덮이면 안 된다.
@@ -12520,13 +12548,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **그리고 끝나면 내린다** — 안 내리면 늘 켜 두는 것과 같아 아무 말도 안 하는 셈이다.
                 notice_settled_judgeable and !notice_still_busy,
         });
+        const sidebar_clip_ok = clip_partial > 0 and clip_clipped > 0 and clip_over == 0;
         try stdout.print("sidebar_clip: partial={d} clipped={d} over_header={d} clip_ok={}\n", .{
             clip_partial,
             clip_clipped,
             clip_over,
             // **자를 것이 있었어야**(`clipped > 0`) 이 판정이 무언가를 묻는다. 그리고 자른 뒤에는
             // 헤더 위에 **아무것도 없어야** 한다.
-            clip_partial > 0 and clip_clipped > 0 and clip_over == 0,
+            sidebar_clip_ok,
         });
         try stdout.print("sidebar_rows_cap: cards={d} rows={d} off={d} last_visible={} drawn {d}+{d} rows_cap_ok={}\n", .{
             cap_cards,
@@ -12554,6 +12583,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **상한은 접힌 뒤의 목록이 정한다** — 판정이 앞 값을 쓰면 아무것도 안 묻는다.
             const dc_content: u32 = @intCast(dclamp_rows_after *| cell_h);
             const dc_max: u32 = dc_content -| geom.tree_content.h;
+            const dock_clamp_ok = dclamp_judgeable and dclamp_captured and dclamp_off_before > dc_max and
+                dclamp_off_after <= dc_max and dclamp_drawn_after > 0 and
+                dclamp_draw_start_after == dclamp_off_after / @max(1, cell_h);
             try stdout.print("dock_clamp: rows {d}->{d} off {d}->{d} max_after={d} drawn={d} draw_start={d}/{d} clamps={d} dock_clamp_ok={}\n", .{
                 dclamp_rows_before,
                 dclamp_rows_after,
@@ -12566,12 +12598,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 dock_clamps,
                 // **접기 전에 그 상한을 넘고 있어야** 이 판정이 무언가를 묻는다. 그리고 되돌아온
                 // 자리에 **행이 그려져 있어야** 한다 — 값만 맞고 화면이 비면 고친 것이 아니다.
-                dclamp_judgeable and dclamp_off_before > dc_max and dclamp_off_after <= dc_max and
-                    dclamp_drawn_after > 0 and
-                    // **그린 첫 행이 되돌아온 자리와 같은가** — 값만 고치고 셀을 다시 안 지으면
-                    // 여기가 갈린다(뮤턴트가 그렇게 살아남았다).
-                    dclamp_draw_start_after == dclamp_off_after / @max(1, cell_h),
+                // **그린 첫 행이 되돌아온 자리와 같은가**도 dock_clamp_ok가 함께 검사한다.
+                dock_clamp_ok,
             });
+            if (!sidebar_clip_ok or !dock_clamp_ok) {
+                try stdout.flush();
+                return error.ChromeScrollVerificationFailed;
+            }
         }
         try stdout.print("sidebar_reveal: slot {d}->{d} visible {}->{} off {d}->{d} digest {x}->{x} reveals={d} reveal_ok={}\n", .{
             reveal_slot,

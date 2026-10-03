@@ -1360,6 +1360,37 @@ pub fn build(b: *std.Build) void {
     run_terminal_regex_core_tests.setCwd(b.path("."));
     terminal_regex_step.dependOn(&run_terminal_regex_core_tests.step);
 
+    // Keep restart metadata tests platform-independent and non-vacuous.
+    const editor_restore_codec_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/session/editor/workspace_state.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+        .filters = &.{"editor restore codec"},
+    });
+    const run_editor_restore_codec = b.addRunArtifact(editor_restore_codec_tests);
+    run_editor_restore_codec.addArg("--maru-expect-tests=7");
+    run_editor_restore_codec.addArg("--maru-expect-passed=7");
+    b.step("test-editor-restore-codec", "Run platform-neutral editor restart metadata judges").dependOn(&run_editor_restore_codec.step);
+
+    const editor_state_perf = b.addExecutable(.{
+        .name = "editor-workspace-state-perf",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/editor_workspace_state.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "workspace_state", .module = b.createModule(.{
+                .root_source_file = b.path("src/session/editor/workspace_state.zig"),
+                .target = target,
+                .optimize = optimize,
+            }) }},
+        }),
+    });
+    const run_editor_state_perf = b.addRunArtifact(editor_state_perf);
+    b.step("perf-editor-workspace-state", "Measure editor metadata size and requested allocator peak (not RSS)").dependOn(&run_editor_state_perf.step);
+
     // ── 크로스 타깃 **컴파일 전용** 게이트 (`zig build check-targets`) ──────────────────────────
     //
     // **왜 `zig build test -Dtarget=…`가 아닌가.** 그 명령은 컴파일 뒤 산출물을 **실행**하려 하고,

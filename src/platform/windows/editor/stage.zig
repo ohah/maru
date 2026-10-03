@@ -3,8 +3,55 @@ const std = @import("std");
 const builtin = @import("builtin");
 const w = std.os.windows;
 const pinned_path = @import("maru").win32_relative_file;
+const abi = @import("maru").win32_abi;
+extern "kernel32" fn ReOpenFile(w.HANDLE, u32, u32, u32) callconv(abi.winapi) w.HANDLE;
 
-pub const Error = std.mem.Allocator.Error || error{ UnsupportedPlatform, InvalidName, CreateFailed, NameCollision, RandomFailed };
+pub const Error = std.mem.Allocator.Error || error{ UnsupportedPlatform, InvalidName, CreateFailed, NameCollision, RandomFailed, DispositionFailed, WitnessFailed };
+
+// ON_CLOSE clears the per-handle delete-on-close state. Rearming is not supported
+// on every filesystem; cancellation then marks the exact owned object for deletion.
+// This is a primitive, not a publish permit.
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex
+fn setOnClose(file: std.Io.File, enabled: bool) Error!void {
+    var info: w.FILE.DISPOSITION.INFORMATION.EX = .{ .Flags = .{
+        .ON_CLOSE = true,
+        .DELETE = enabled,
+        .IGNORE_READONLY_ATTRIBUTE = true,
+    } };
+    var status: w.IO_STATUS_BLOCK = undefined;
+    const result = w.ntdll.NtSetInformationFile(file.handle, &status, &info, @sizeOf(@TypeOf(info)), .DispositionEx);
+    if (result == .NOT_SUPPORTED and enabled) return markOwnedForDeletion(file.handle);
+    if (result != .SUCCESS) {
+        if (builtin.is_test) std.debug.print("on_close enabled={} status=0x{X}\n", .{ enabled, @intFromEnum(result) });
+        return error.DispositionFailed;
+    }
+}
+
+// Metadata-only access does not prevent a later exclusive replacement open. The
+// handle still binds the exact object after its original name has been reused.
+fn retainWitness(file: std.Io.File) Error!std.Io.File {
+    const handle = ReOpenFile(file.handle, 0x00020080, 7, 0x02200000);
+    if (handle == w.INVALID_HANDLE_VALUE) return error.WitnessFailed;
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
+}
+
+fn deleteOwned(witness: std.Io.File) Error!void {
+    const handle = ReOpenFile(witness.handle, 0x00010000, 7, 0x02200000);
+    if (handle == w.INVALID_HANDLE_VALUE) return error.WitnessFailed;
+    defer _ = w.ntdll.NtClose(handle);
+    try markOwnedForDeletion(handle);
+}
+
+fn markOwnedForDeletion(handle: w.HANDLE) Error!void {
+    var info: w.FILE.DISPOSITION.INFORMATION.EX = .{ .Flags = .{
+        .DELETE = true,
+        .POSIX_SEMANTICS = true,
+        .IGNORE_READONLY_ATTRIBUTE = true,
+    } };
+    var status: w.IO_STATUS_BLOCK = undefined;
+    if (w.ntdll.NtSetInformationFile(handle, &status, &info, @sizeOf(@TypeOf(info)), .DispositionEx) != .SUCCESS)
+        return error.DispositionFailed;
+}
 
 pub const Stage = struct {
     allocator: std.mem.Allocator,
@@ -79,6 +126,110 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, pinned: *const pinned_pa
 
 fn expectAbsent(dir: std.Io.Dir, name: []const u8) !void {
     if (dir.statFile(std.testing.io, name, .{})) |_| return error.TestUnexpectedResult else |err| try std.testing.expectEqual(error.FileNotFound, err);
+}
+
+test "Windows safe save stage handoff clears on-close deletion while retaining the object" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "handoff.tmp");
+    var closed = false;
+    defer if (!closed) stage.deinit(io);
+    try stage.write(io, "candidate");
+    const witness = try retainWitness(stage.file);
+    defer witness.close(io);
+    try setOnClose(stage.file, false);
+    stage.deinit(io);
+    closed = true;
+    const bytes = try tmp.dir.readFileAlloc(io, "handoff.tmp", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("candidate", bytes);
+    try std.testing.expectEqual(@as(u64, 9), (try witness.stat(io)).size);
+    // The publisher must be able to open the candidate exclusively while the
+    // metadata-only witness continues to bind it.
+    const exclusive = ReOpenFile(witness.handle, 0xc0010000, 0, 0x02200000);
+    if (exclusive == w.INVALID_HANDLE_VALUE) return error.WitnessFailed;
+    _ = w.ntdll.NtClose(exclusive);
+    try deleteOwned(witness);
+    try expectAbsent(tmp.dir, "handoff.tmp");
+}
+
+test "Windows safe save stage handoff survives closing the final witness" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "survives.tmp");
+    var closed = false;
+    defer if (!closed) stage.deinit(io);
+    const witness = try retainWitness(stage.file);
+    var witness_closed = false;
+    defer if (!witness_closed) witness.close(io);
+    try setOnClose(stage.file, false);
+    stage.deinit(io);
+    closed = true;
+    witness.close(io);
+    witness_closed = true;
+    try std.testing.expectEqual(@as(u64, 0), (try tmp.dir.statFile(io, "survives.tmp", .{})).size);
+}
+
+test "Windows safe save stage cancelled handoff removes its readonly object" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "cancel.tmp");
+    var closed = false;
+    defer if (!closed) stage.deinit(io);
+    try setOnClose(stage.file, false);
+    var basic: w.FILE.BASIC_INFORMATION = .{
+        .CreationTime = 0,
+        .LastAccessTime = 0,
+        .LastWriteTime = 0,
+        .ChangeTime = 0,
+        .FileAttributes = .{ .READONLY = true },
+    };
+    var status: w.IO_STATUS_BLOCK = undefined;
+    try std.testing.expectEqual(w.NTSTATUS.SUCCESS, w.ntdll.NtSetInformationFile(stage.file.handle, &status, &basic, @sizeOf(@TypeOf(basic)), .Basic));
+    try setOnClose(stage.file, true);
+    stage.deinit(io);
+    closed = true;
+    try expectAbsent(tmp.dir, "cancel.tmp");
+}
+
+test "Windows safe save stage disposition refuses a handle without delete authority" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original" });
+    const file = try tmp.dir.openFile(io, "original.txt", .{});
+    defer file.close(io);
+    try std.testing.expectError(error.DispositionFailed, setOnClose(file, true));
+    try std.testing.expectEqual(@as(u64, 8), (try file.stat(io)).size);
+}
+
+test "Windows safe save stage witness cleanup preserves a competitor at the reused name" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "owned.tmp");
+    var closed = false;
+    defer if (!closed) stage.deinit(io);
+    const witness = try retainWitness(stage.file);
+    defer witness.close(io);
+    try setOnClose(stage.file, false);
+    stage.deinit(io);
+    closed = true;
+    try tmp.dir.rename("owned.tmp", tmp.dir, "moved.tmp", io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "owned.tmp", .data = "competitor" });
+    try deleteOwned(witness);
+    try expectAbsent(tmp.dir, "moved.tmp");
+    const bytes = try tmp.dir.readFileAlloc(io, "owned.tmp", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("competitor", bytes);
 }
 
 test "Windows safe save stage writes exact content and cleans the unpublished object" {

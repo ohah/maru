@@ -10650,3 +10650,10 @@ Git 쓰기 fixture도 공통 실행 경로를 사용해 Windows에서 POSIX spaw
 Linux stdin은 socketpair와 send(MSG_NOSIGNAL)을 사용하고 macOS는 기존 pipe의
 F_SETNOSIGPIPE를 유지한다. Linux send(2)의 per-call 신호 억제와 EPIPE 계약을 따른다
 (https://man7.org/linux/man-pages/man2/send.2.html). 전역 SIGPIPE 처분은 바꾸지 않는다.
+
+### 2m.132 공통 chrome 텍스트 요청의 할당 실패 정리 (2026-10-03)
+
+run 배열의 공간을 먼저 확보한 뒤 텍스트를 복사한다. 기존 순서는 복사 성공 후 배열 확장 실패 때
+복사본을 잃었다. 24개 run으로 여러 배열 확장을 유발하고 모든 할당 실패 지점을 검사한 테스트가
+수정 전 누수를 재현했으며 수정 후 25개 판정이 통과했다. 누수 재발·폭 계산·화면 위 run 누락·
+family 혼동·빈 icon 누락의 다섯 실행 변이가 실패했고 원본 복구 후 통과했다.

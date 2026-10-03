@@ -102,7 +102,9 @@ pub fn prepareRequest(
             var first_run = true;
             for (text.runs) |run| {
                 if (!shapesRun(text, run, max_width)) continue;
-                try runs.append(allocator, .{
+                // Reserve before copying: a failed append must not orphan the text.
+                try runs.ensureUnusedCapacity(allocator, 1);
+                runs.appendAssumeCapacity(.{
                     .text = try allocator.dupe(u8, run.text),
                     .role = text.text_role,
                     .origin = text.origin,
@@ -276,4 +278,23 @@ test "prepareRequest owns the face bytes instead of borrowing the caller's appea
 // 번들 폰트 등록 여부에 흔들리지 않기 때문이다.
 fn packRgb(rgb: maru.color.Rgb) u32 {
     return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
+
+fn allocationFailureRequest(allocator: std.mem.Allocator) !void {
+    const runs = [_]chrome.draw.Run{.{ .text = "owned text" }} ** 24;
+    const ops = [_]chrome.draw.Op{.{ .text = .{
+        .origin = .{ .x = 0, .y = 0 }, .runs = &runs,
+        .role = .surface_fg, .text_role = .body, .max_cols = 20,
+    } }};
+    const tk = std.mem.zeroes(chrome.Tokens);
+    var request = try prepareRequest(allocator, 11, &ops, &tk, 8, .{
+        .family = "primary", .fallback = "fallback",
+    });
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 24), request.runs.len);
+    try std.testing.expectEqualStrings("owned text", request.runs[23].text);
+}
+
+test "prepareRequest cleans every allocation failure including run capacity growth" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureRequest, .{});
 }

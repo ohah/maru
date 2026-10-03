@@ -278,6 +278,10 @@ const Writer = struct {
     ///
     /// 이 필드는 생성기 경로(`encodeValue`)가 그대로 들고 다니므로 시그니처를 안 바꾸고 닿는다.
     scrollback_budget: ?u64 = null,
+    /// 예산 트림에서 화면별로 **실을 줄 수**를 미리 정해 둔 표(`planScrollbackTrim`). 스크롤백 인코딩과 그 좌표를
+    /// 쓰는 필드(앵커·view_offset·선택)가 **같은 값**을 쓰게 한다 — 따로 재면 줄 크기 측정을 두 번 하고(업그레이드는
+    /// 5 초 정지 예산 안이다), 두 값이 어긋날 여지도 생긴다.
+    trim_plan: [2]?TrimPlanEntry = .{ null, null },
     bytes: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *Writer) void {
@@ -467,6 +471,28 @@ fn scrollbackKeepCount(writer: *Writer, sb: *const Scrollback, budget: u64) Erro
     return keep;
 }
 
+const TrimPlanEntry = struct { sb: *const Scrollback, keep: usize };
+
+/// 예산이 있으면 이 스크롤백에서 실을 줄 수를 정해 표에 두고 **버릴 줄 수**를 돌려준다(예산이 없으면 0).
+fn planScrollbackTrim(writer: *Writer, sb: *const Scrollback) Error!usize {
+    const budget = writer.scrollback_budget orelse return 0;
+    const keep = try scrollbackKeepCount(writer, sb, budget);
+    for (&writer.trim_plan) |*slot| {
+        if (slot.* == null) {
+            slot.* = .{ .sb = sb, .keep = keep };
+            return sb.count - keep;
+        }
+    }
+    return error.InvalidValue; // 화면은 둘뿐이다
+}
+
+fn plannedKeep(writer: *const Writer, sb: *const Scrollback) ?usize {
+    for (writer.trim_plan) |slot| {
+        if (slot) |entry| if (entry.sb == sb) return entry.keep;
+    }
+    return null;
+}
+
 fn encodeScrollback(writer: *Writer, sb: *const Scrollback) Error!void {
     if (sb.cap > max_scrollback_rows or sb.count > max_scrollback_rows or sb.count > sb.cap)
         return error.LimitExceeded;
@@ -480,7 +506,9 @@ fn encodeScrollback(writer: *Writer, sb: *const Scrollback) Error!void {
     // 성립한다. 즉 **잘린 handoff 도 온전한 스크롤백**이라, 새 tag 도 스키마 변경도 필요 없고 구
     // reader 가 그대로 읽는다(2026-09-10 에 tag 99 를 필수로 추가했다가 업그레이드가 전멸한 것과
     // 정반대의 성질이다 — 여기엔 그 위험이 구조적으로 없다).
-    const keep = if (writer.scrollback_budget) |budget|
+    const keep = if (plannedKeep(writer, sb)) |planned|
+        planned
+    else if (writer.scrollback_budget) |budget|
         try scrollbackKeepCount(writer, sb, budget)
     else
         sb.count;
@@ -806,14 +834,69 @@ fn deinitValue(comptime T: type, value: *T, allocator: std.mem.Allocator) void {
 }
 
 fn encodeCoreFields(writer: *Writer, core: *const TerminalCore) Error!void {
+    // 예산 트림은 앞줄을 버린다 — 그만큼 **같은 절대 행 좌표를 쓰는 상태**도 옮겨 실어야 한다. 예전에는 스크롤백만
+    // 잘라, 위로 스크롤해 둔 세션은 `view_offset > sb.count` 로 디코드가 거절됐고(이관 실패), 화면의 이미지는 앵커가
+    // 버린 줄 수만큼 아래로 밀려 화면 밖으로 사라졌으며, 선택은 엉뚱한 줄을 가리켰다(2026-10-03 실측).
+    const trim: CoordTrim = .{
+        .active = try planScrollbackTrim(writer, &core.screen.sb),
+        .saved = try planScrollbackTrim(writer, &core.saved_screen.sb),
+    };
     inline for (core_fields_v1) |spec| {
         // optional 필드는 flag를 실어 보낸다 — **구 reader**가 모르는 tag를 만나도 `UnknownRequiredField`로
         // 죽지 않고 건너뛰게 한다(신 host → 구 host 방향의 rollback 이관).
         const start = try writer.beginTlv(spec.tag, if (spec.optional) flag_optional else 0);
         const Field = @TypeOf(@field(core.*, spec.name));
-        try encodeValue(writer, Field, &@field(core.*, spec.name));
+        if (!try encodeTrimmedCoordField(writer, spec.name, core, trim))
+            try encodeValue(writer, Field, &@field(core.*, spec.name));
         try writer.endTlv(start);
     }
+}
+
+/// 트림이 버린 앞줄 수 — 활성 화면(`screen.sb`)과 보관 화면(`saved_screen.sb`) 각각.
+const CoordTrim = struct { active: usize, saved: usize };
+
+/// 트림이 있으면 절대 행 좌표 필드를 옮긴 사본으로 싣고 true. 그 밖의 필드·트림 없음은 false(그대로 싣는다 —
+/// 예산이 없을 때 `encodeCore` 와 byte-identical 이어야 한다).
+fn encodeTrimmedCoordField(writer: *Writer, comptime name: []const u8, core: *const TerminalCore, trim: CoordTrim) Error!bool {
+    if (trim.active == 0 and trim.saved == 0) return false;
+    if (comptime std.mem.eql(u8, name, "view_offset")) {
+        // 바닥에서 센 거리라 앞줄을 버려도 그대로다 — 남은 길이를 넘지만 않게 한다(넘으면 디코드가 거절한다).
+        const clamped: usize = @min(core.view_offset, core.screen.sb.count - trim.active);
+        try encodeValue(writer, usize, &clamped);
+        return true;
+    }
+    if (comptime std.mem.eql(u8, name, "selection_anchor") or std.mem.eql(u8, name, "selection_head")) {
+        // 선택은 활성 화면의 것이다. 한쪽 끝이라도 버린 줄에 걸리면 해제한다(eviction 과 같은 규칙).
+        const Point = @TypeOf(core.selection_anchor);
+        const kept = selectionSurvivesTrim(core, trim.active);
+        // 리플렉션(`@field`) 없이 고른다 — 세션 호스트의 `@field` 는 함수별 검토 대상이다(tests/boundary/imports.zig).
+        const original = if (comptime std.mem.eql(u8, name, "selection_anchor")) core.selection_anchor else core.selection_head;
+        const shifted: Point = if (!kept) null else if (original) |p| .{ .row = p.row - trim.active, .col = p.col } else null;
+        try encodeValue(writer, Point, &shifted);
+        return true;
+    }
+    if (comptime std.mem.eql(u8, name, "kitty_placements")) {
+        // 앵커는 **자기 화면의** 스크롤백 기준이다 — 지금 화면이면 `screen.sb`, 아니면 보관 화면의 것.
+        const List = @TypeOf(core.kitty_placements);
+        var moved: List = .empty;
+        defer moved.deinit(writer.allocator);
+        for (core.kitty_placements.items) |p| {
+            const dropped = if (p.on_alt == core.alt_active) trim.active else trim.saved;
+            if (p.anchor_row < dropped) continue; // 버린 줄 위의 이미지는 함께 버린다
+            var copy = p;
+            copy.anchor_row -= dropped;
+            try moved.append(writer.allocator, copy);
+        }
+        try encodeValue(writer, List, &moved);
+        return true;
+    }
+    return false;
+}
+
+fn selectionSurvivesTrim(core: *const TerminalCore, dropped: usize) bool {
+    if (core.selection_anchor) |a| if (a.row < dropped) return false;
+    if (core.selection_head) |h| if (h.row < dropped) return false;
+    return true;
 }
 
 fn replaceCoreField(core: *TerminalCore, tag: u32, reader: *Reader, allocator: std.mem.Allocator) Error!bool {
@@ -1227,6 +1310,109 @@ pub fn encodeHostWithMaxBytes(
     return finishEnvelope(&writer, @intCast(host.runtimes.len + 1 +
         @intFromBool(host.attempt_record != null) + @intFromBool(host.notification_handoff != null) +
         @intFromBool(host.notification_metadata_handoff != null)));
+}
+
+/// 40 줄(`line000`..`line039`)을 3 행 화면에 써 38 줄을 스크롤백으로 보내고, 2x2 이미지 하나(i=7)를 전송해 둔다.
+fn trimFixture(core: *TerminalCore) !void {
+    for (0..40) |i| {
+        var line_buf: [24]u8 = undefined;
+        try core.write(try std.fmt.bufPrint(&line_buf, "line{d:0>3}\r\n", .{i}));
+    }
+    const raw = [_]u8{0xCD} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7,q=2;{s}\x1b\\", .{b64s}));
+}
+
+/// 절대 행의 글자가 `want` 로 시작하는가(스크롤백 또는 활성 화면). 화면 밖 행이면 false.
+fn absRowStartsWith(core: *const TerminalCore, abs: usize, want: []const u8) bool {
+    if (abs >= core.screen.sb.count + core.size.rows or want.len > core.size.cols) return false;
+    for (want, 0..) |ch, c| {
+        const cp: u21 = if (abs < core.screen.sb.count) blk: {
+            const row = core.scrollbackRow(abs) orelse return false;
+            break :blk if (c < row.len) row[c].codepoint else 0;
+        } else core.screen.cells[core.index(@intCast(abs - core.screen.sb.count), @intCast(c))].codepoint;
+        if (cp != ch) return false;
+    }
+    return true;
+}
+
+fn trimPlacement(anchor_row: usize, on_alt: bool) maru.terminal.kitty.StoredPlacement {
+    return .{ .image_id = 7, .placement_id = @intCast(anchor_row + 1), .anchor_row = anchor_row, .anchor_col = 0, .cell_x_offset = 0, .cell_y_offset = 0, .src_x = 0, .src_y = 0, .src_width = 0, .src_height = 0, .columns = 1, .rows = 1, .z = 0, .on_alt = on_alt };
+}
+
+/// 다섯 줄만 들어가는 예산.
+fn fiveRowBudget(allocator: std.mem.Allocator, sb: *const Scrollback) !u64 {
+    var probe: Writer = .{ .allocator = allocator };
+    defer probe.deinit();
+    try encodeScrollbackRow(&probe, sb, sb.count - 1);
+    return @as(u64, @intCast(probe.bytes.items.len)) * 5;
+}
+
+// 예산 트림은 앞줄을 버린다 — 같은 절대 행 좌표를 쓰는 상태도 그만큼 옮겨야 한다. 예전에는 스크롤백만 잘라
+// (2026-10-03 실측) ① 위로 스크롤해 둔 세션이 `view_offset > sb.count` 로 **디코드 거절**(이관 실패),
+// ② 화면 맨 위 이미지가 앵커 38 그대로 → 남은 스크롤백 5 줄 기준 33 행 아래 = 화면 밖으로 사라짐,
+// ③ 화면의 선택 `line039` 가 복원 뒤 빈 문자열이었다.
+test "예산 트림은 좌표 상태도 옮긴다 — 위로 본 세션이 디코드되고 이미지·선택이 자기 줄에 남는다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    try trimFixture(&core);
+    const sb_count = core.screen.sb.count; // 38 — 스크롤백 line000..line037, 화면 line038·line039·(커서)
+    try std.testing.expect(absRowStartsWith(&core, sb_count, "line038"));
+    try core.kitty_placements.append(allocator, trimPlacement(sb_count, false)); // 화면 0 행
+    try core.kitty_placements.append(allocator, trimPlacement(sb_count - 2, false)); // 남을 스크롤백 줄 line036
+    try core.kitty_placements.append(allocator, trimPlacement(0, false)); // 버려질 줄 line000
+    core.selectionStart(1, 0); // 화면 1 행 = line039
+    core.selectionExtend(1, 6);
+    const sel_before = (try core.extractSelection(allocator)).?;
+    defer allocator.free(sel_before);
+    try std.testing.expectEqualStrings("line039", sel_before);
+    core.scrollViewport(30); // 과거를 보는 중
+
+    const bytes = try encodeCoreWithScrollbackBudget(allocator, &core, try fiveRowBudget(allocator, &core.screen.sb));
+    defer allocator.free(bytes);
+    var after = try decodeCore(allocator, bytes); // ① 예전에는 InvalidValue
+    defer after.deinit();
+    const kept = after.screen.sb.count;
+    try std.testing.expectEqual(@as(usize, 5), kept);
+    try std.testing.expectEqual(kept, after.view_offset); // 남은 가장 오래된 줄까지로 줄였다
+    // ② 버린 줄의 이미지는 빠지고, 나머지는 같은 글자 줄 위에 있다.
+    try std.testing.expectEqual(@as(usize, 2), after.kitty_placements.items.len);
+    for (after.kitty_placements.items) |p| {
+        const want: []const u8 = if (p.placement_id == sb_count + 1) "line038" else "line036";
+        try std.testing.expect(absRowStartsWith(&after, p.anchor_row, want));
+    }
+    // ③ 선택은 같은 텍스트다.
+    const sel_after = (try after.extractSelection(allocator)).?;
+    defer allocator.free(sel_after);
+    try std.testing.expectEqualStrings("line039", sel_after);
+}
+
+// alt 화면에 있는 동안의 트림 — primary 의 이미지는 **보관 화면의** 스크롤백 기준이다. 활성(alt) 스크롤백은 비어
+// 있어 아무것도 안 버리므로, 화면을 잘못 고르면 primary 앵커가 그대로 남아 돌아왔을 때 화면 밖이다.
+test "예산 트림은 alt 화면 중에도 primary 이미지를 보관 스크롤백 기준으로 옮긴다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    try trimFixture(&core);
+    const sb_count = core.screen.sb.count;
+    try core.kitty_placements.append(allocator, trimPlacement(sb_count, false)); // primary 화면 0 행(line038)
+    const budget = try fiveRowBudget(allocator, &core.screen.sb);
+    try core.write("\x1b[?1049h"); // alt 진입 — primary(스크롤백 포함)는 saved_screen 으로
+    try core.kitty_placements.append(allocator, trimPlacement(1, true)); // alt 이미지
+
+    const bytes = try encodeCoreWithScrollbackBudget(allocator, &core, budget);
+    defer allocator.free(bytes);
+    var after = try decodeCore(allocator, bytes);
+    defer after.deinit();
+    for (after.kitty_placements.items) |p| {
+        if (p.on_alt) try std.testing.expectEqual(@as(usize, 1), p.anchor_row); // alt 는 버린 줄이 없다
+    }
+    try after.write("\x1b[?1049l"); // primary 로 — alt 이미지는 함께 사라진다
+    try std.testing.expectEqual(@as(usize, 1), after.kitty_placements.items.len);
+    try std.testing.expect(absRowStartsWith(&after, after.kitty_placements.items[0].anchor_row, "line038"));
 }
 
 test "budget preview encoder stops at the operational allocation cap" {

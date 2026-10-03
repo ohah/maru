@@ -126,6 +126,8 @@ pub const KeyChord = struct {
                     put(buf, &w, "Space");
                 } else if (c == '+') {
                     put(buf, &w, "Plus");
+                } else if (c == '=') {
+                    put(buf, &w, "Equal"); // 줄 구분자라 글자로 쓰면 다시 못 읽는다(parseKey 참고)
                 } else {
                     var tmp: [4]u8 = undefined;
                     const n = std.unicode.utf8Encode(c, &tmp) catch 0;
@@ -791,6 +793,9 @@ fn parseKey(raw: []const u8) KeyBindingError!KeyName {
     // '+' is the chord-part separator, so the literal plus key cannot be written
     // inline. Accept the "Plus" spelling so `Cmd+Plus` binds the '+' key.
     if (std.ascii.eqlIgnoreCase(raw, "Plus")) return .{ .char = '+' };
+    // '=' 는 config 줄(`keybind = <chord> = <action>`)의 구분자라 chord 에 그대로 적으면 첫 '=' 에서 잘린다
+    // (`Cmd+= = …` → chord `Cmd+`). `Equal` 로 적는다(Ghostty `equal` 결) — ⌘= 를 다시 묶는 유일한 표기다.
+    if (std.ascii.eqlIgnoreCase(raw, "Equal")) return .{ .char = '=' };
     if (std.ascii.eqlIgnoreCase(raw, "Backspace")) return .backspace;
     if (std.ascii.eqlIgnoreCase(raw, "Delete")) return .delete;
     if (std.ascii.eqlIgnoreCase(raw, "Insert")) return .insert;

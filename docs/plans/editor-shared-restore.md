@@ -660,3 +660,19 @@ U4b-12는 기존 제품 open/restore 경로로 백업 내용을 복원한 뒤 de
 실제 실행 로그는 유효하지만 exact-count 보장은 아니었다. 정상 옵션으로 125개 compile/pass를
 강제해 재실행했고, 같은 binary에 잘못된 기대값 126을 주면 종료 코드 1로 거부한다. 로그는
 `/tmp/maru-recovery-retention-exact.log`, `/tmp/maru-retention-count-control.log`다.
+
+### 보존 제안의 추가 적대적 검토
+
+- 재현 범위를 좁혔다. 정상 앱 종료는 ABI `maru_macos_app_session_flush_editor_backups`로
+  `flushAll`을 호출한다. U4b-12는 이 경로를 거치지 않는 메모리 상태 제거이며, 정상 종료 시
+  항상 유실된다고 주장하지 않는다. 실제 SIGKILL 여부도 아직 판정하지 않았다.
+- U4b-13 대조군은 같은 fixture teardown/재열기를 사용하되 복원 직후 `flushAll`만 추가한다.
+  새 백업 생성과 teardown 이후 파일 보존, 재열기의 복구 내용·dirty 상태를 확인했다. 이는
+  teardown 자체가 백업을 지우거나 재열기 fixture가 항상 복구를 무시한다는 반론을 배제한다.
+- 보존 상태는 단순 Term별 boolean만 추가해 해결하지 않는다. 이름 없는 문서로의 복구는
+  원본과 새 신원이 다르고, 공유 뷰는 하나의 문서 수명을 갖는다. 저장/Undo clean 복귀/
+  마지막 view 버리기/재백업 실패 때 원본 backup 정리와 source 이름의 소유권을 함께 판정해야 한다.
+
+집중 gate는 exact-count 제품 126개·규칙 39개가 통과했다. 로그는
+`/tmp/maru-retention-hostile-review.log`다. 이 검토에서 제품 정책은 바꾸지 않았고
+원본 백업 유지 제안은 여전히 사용자 선택 대기다. 새 실제 process crash/GUI gate는 추가하지 않았다.

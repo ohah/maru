@@ -1155,11 +1155,11 @@ pub fn noteAgentKind(self: *AppSession, term: *Term, kind: AgentKind, displayed:
     self.workspaceChanged(.agent_session);
     if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
     if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(kind)});
-    // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 응답 줄이 사라지면 행 줄 수도
-    // 바뀌므로 **재투영까지** 해야 한다 — metal_dirty만으로는 행 높이가 옛 값으로 남는다.
-    const had_reply_kind = term.hook.transcript.owned.reply().len > 0;
+    // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 종류가 바뀌면 응답 줄뿐 아니라
+    // 단일 Term 카드의 하위 목록 유무도 바뀐다. 보이지 않는 Term도 사이드바에는 있으므로
+    // displayed와 관계없이 재투영한다 — metal_dirty만으로는 캐시된 행이 추가·제거되지 않는다.
     resetAgentObservationForKindChange(term);
-    if (had_reply_kind) sidebar_ops.rebuildSidebar(self) catch {};
+    sidebar_ops.rebuildSidebar(self) catch {};
 }
 
 pub fn pollAgentKinds(self: *AppSession) void {

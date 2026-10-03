@@ -1239,6 +1239,10 @@ pub fn scrollRangeUp(self: *TerminalCore, top: u16, bottom: u16, count: u16, pus
             // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다
             // (scroll-lock). 보관 실패(OOM) 시엔 보정하지 않는다 — 뷰가 내용과 어긋나지 않게.
             if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.screen.sb.count);
+            // 보관되면 절대 행이 그대로라 이미지 앵커도 맞다. **못 하면**(스크롤백 0·alt 화면·OOM) 그 줄은 사라지고
+            // 영역 안의 줄이 한 칸씩 올라온다 — 앵커도 따라 옮긴다. 영역 밖(아래 상태줄)은 안 움직이므로 상한을 둔다.
+            // 다음 행도 실패하면 그 행이 이제 같은 자리(`sb.count + top`)에 있으므로 같은 인자로 다시 부르면 된다.
+            if (!pushed) self.dropLostRowAnchors(self.screen.sb.count + top, self.screen.sb.count + bottom);
         }
     }
 
@@ -2088,7 +2092,7 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         if ((keep_blank.len > 0 and keep_blank[pr]) or !outputRowBlank(scratch, pr, new_cols)) {
             const pushed = pushScrollback(self, scratch[pr * new_cols ..][0..new_cols], swrap[pr], pmarks[pr]);
             // 보관되지 못했다(cap 0·OOM) — 미리 옮겨 둔 앵커가 없는 행을 가리키지 않게 정리한다.
-            if (!pushed and remaps.len > 0) self.dropLostRowAnchors(self.screen.sb.count);
+            if (!pushed and remaps.len > 0) self.dropLostRowAnchors(self.screen.sb.count, std.math.maxInt(usize));
             // 과거를 보는 중이면 새로 밀려든 행만큼 offset도 올린다(scroll-lock — 보던 내용 유지).
             if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.screen.sb.count);
         }

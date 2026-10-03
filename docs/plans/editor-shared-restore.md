@@ -534,3 +534,17 @@ Data 읽기를 유지하되 실제 읽기 실패의 보호를 보완했다. 아�
 로그: `/tmp/maru-product-workspace-final-focused.log`, `/tmp/maru-product-workspace-read-app.log`,
 `/tmp/maru-product-capture-mutations.json`, `/tmp/maru-editor-workspace-failure.log`,
 `/tmp/maru-workspace-chunked-read-reserved.log`, `/tmp/maru-c2-publish-summary.json`.
+
+### 추가 적대적 실제 앱 검사
+
+`tools/test-workspace-read-failure-app.py`를 5개 독립 test home으로 확장했다. 잘린 기존
+checkpoint, 잘못된 UTF-8, 알 수 없는 헤더, canonical leaf가 디렉터리인 경우, 읽기 권한이
+없는 파일에서 실제 앱을 실행하고 자동 Quit했다. 모두 종료 코드 0과 restore-incomplete
+저장 생략을 확인했고 canonical inode·내용(디렉터리는 sentinel)과 기존 `.bak` bytes가
+보존됐다. 권한 실패는 저장 생략 후에도 mode 000인 것을 확인했다.
+
+로그는 `/tmp/maru-hostile-workspace-app-final.log`다. 이는 손상된 기존 checkpoint의
+보존 검사이며, 새 공유 뷰 restore 연결·동시 외부 writer·전원 손실 durability 검증은 아니다.
+캡처 20개·읽기 9개 집중 gate와 캡처 mutation 5개/정상·동등 변경 대조군도
+다시 통과했다 (`/tmp/maru-hostile-focused-repeat.log`, `/tmp/maru-hostile-capture-repeat.log`).
+이번 추가 실행에서 제품 결함은 발견되지 않았다.

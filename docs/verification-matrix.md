@@ -3951,3 +3951,8 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 shared metadata의 제품 capture/apply는 여전히 미연결이며, codec scratch의 11개 실제 allocator
 실패와 chunk reader 7,296개 비교는 별도 실험이다. 상세 경계와 읽기 후보를 채택하지 않은 결과는
 [제품 host 검증](plans/editor-shared-restore.md#제품-host-검증과-재현-결함-수정)에 기록한다.
+
+추가 workspace 적대적 앱 검사: `python3 tools/test-workspace-read-failure-app.py`는
+잘림·잘못된 UTF-8·알 수 없는 헤더·디렉터리·권한 거부 5개 isolated home을 검사한다.
+실제 앱 종료 후 원본 inode/내용과 기존 백업 보존을 판정한다. 동시 writer나 전원 손실
+검증으로 확대하지 않는다 (`/tmp/maru-hostile-workspace-app-final.log`).

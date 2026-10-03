@@ -11607,16 +11607,33 @@ test "kitty placement: 개수 상한은 두 화면 합계다" {
     try std.testing.expectEqual(@as(usize, 0), currentScreenPlacementCount(&core)); // alt 는 비었지만 합계가 찼다
 }
 
-// **현재 동작을 고정한다**: relative 의 부모 찾기는 화면을 가리지 않는다 — alt 의 자식이 primary 의 부모를 잡는다.
-// kitty 는 화면마다 graphics 상태가 따로라 이렇게 되지 않는다(후속 과제 — 고치면 이 판정자를 뒤집는다).
-test "kitty placement: relative 의 부모 찾기는 보관 화면(primary)의 배치도 본다 (현재 동작)" {
+// relative 의 부모는 **같은 화면에서만** 찾는다(kitty 처럼 — 화면마다 graphics 상태가 따로다). 예전에는 화면을 가리지
+// 않아 alt 의 자식이 primary 의 부모를 잡고, 다른 좌표계(primary 의 절대 행)로 자리를 풀었다(2026-10-03 발견, #4108 에서
+// 「현재 동작」으로 고정해 두었던 것을 뒤집는다).
+test "kitty placement: relative 의 부모는 같은 화면에서만 찾는다 — alt 의 자식은 primary 의 부모를 못 잡는다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
     defer core.deinit();
     try transmitTinyImage(&core, 7);
     try transmitTinyImage(&core, 8);
     try core.write("\x1b[1;1H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\"); // primary 부모
-    try core.write("\x1b[?1049h\x1b_Ga=p,i=8,p=5,P=7,Q=1,c=1,r=1,q=2\x1b\\"); // alt 자식
-    try std.testing.expectEqual(@as(usize, 1), currentScreenPlacementCount(&core));
+    try core.write("\x1b[?1049h\x1b_Ga=p,i=8,p=5,P=7,Q=1,c=1,r=1,q=2\x1b\\"); // alt 자식 — 부모가 이 화면에 없다
+    try std.testing.expectEqual(@as(usize, 0), currentScreenPlacementCount(&core));
+    // 같은 화면에 부모가 있으면 된다.
+    try core.write("\x1b[2;2H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\\x1b_Ga=p,i=8,p=5,P=7,Q=1,c=1,r=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 2), currentScreenPlacementCount(&core));
+}
+
+// primary 의 부모·자식은 alt 를 다녀온 뒤에도 그대로 풀린다 — 둘 다 보관됐다가 함께 돌아온다.
+test "kitty placement: primary 의 relative 는 alt 를 다녀와도 부모를 따라 그려진다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try transmitTinyImage(&core, 7);
+    try transmitTinyImage(&core, 8);
+    try core.write("\x1b[2;3H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\\x1b_Ga=p,i=8,p=2,P=7,Q=1,H=1,c=1,r=1,q=2\x1b\\");
+    try core.write("\x1b[?1049h\x1b[?1049l");
+    const views = core.buildPlacementViews(core.screen.sb.count);
+    try std.testing.expectEqual(@as(usize, 2), views.len);
+    for (views) |v| if (v.image_id == 8) try std.testing.expectEqual(@as(u16, 3), v.col); // 부모 열 2 + H=1
 }
 
 // 부모가 지워지면 자식도 지운다(명세) — 자식이 **보관 화면**에 있어도.

@@ -1005,8 +1005,8 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     // 그러면 패스마다 하나씩만 걷혀 O(n³)이 된다. 실측(2026-09-10, 사슬 1024): 거부하면 3 ms,
     // 거부를 빼면 **1094 ms** — 몇 KB 의 escape 로 터미널이 1초 넘게 멈춘다.
     // 이 결합은 눈에 안 보이므로 판정자로 고정해 두었다("부모 없는 relative placement 는 ENOENT").
-    if (cmd.parent_image_id != 0 and findParentPlacement(self, cmd.parent_image_id, cmd.parent_placement_id) == null)
-        return .enoent;
+    if (cmd.parent_image_id != 0 and findParentPlacement(self, self.alt_active, cmd.parent_image_id, cmd.parent_placement_id) == null)
+        return .enoent; // 새 자식은 지금 화면에 선다 — 부모도 지금 화면에 있어야 한다
     // U=1(unicode placeholder): 커서 자리에 그리지 않는다 — 등록만 하고, 실제 배치는 화면에 찍힌
     // placeholder 셀이 정한다. 격자(c×r)가 없으면 타일 크기를 못 정하므로 거부한다(명세상 필수).
     if (cmd.virtual) {
@@ -1166,12 +1166,12 @@ fn removeOrphanedRelatives(self: *TerminalCore) void {
     var changed = true;
     while (changed) {
         changed = false;
-        // 두 화면 모두 — 부모 찾기(`findParentPlacement`)가 두 화면을 보므로 거두는 쪽도 같아야 한다.
+        // 두 화면 모두 — 각 자식은 **자기 화면에서** 부모를 찾는다(`findParentPlacement`).
         for ([_]*std.ArrayListUnmanaged(StoredPlacement){ &self.saved_kitty_placements, &self.kitty_placements }) |list| {
             var i: usize = 0;
             while (i < list.items.len) {
                 const p = list.items[i];
-                if (p.parent_image_id != 0 and findParentPlacement(self, p.parent_image_id, p.parent_placement_id) == null) {
+                if (p.parent_image_id != 0 and findParentPlacement(self, p.on_alt, p.parent_image_id, p.parent_placement_id) == null) {
                     _ = list.orderedRemove(i);
                     changed = true;
                 } else i += 1;
@@ -1321,15 +1321,15 @@ fn deleteAtCursor(self: *TerminalCore, free_image: bool) void {
 /// 놓지 않는다.
 const ParentKind = union(enum) { normal: StoredPlacement, virtual_parent };
 
-fn findParentPlacement(self: *TerminalCore, image_id: u32, placement_id: u32) ?ParentKind {
-    // 두 화면을 **예전 한 목록의 순서**로 본다(보관 화면이 먼저). 화면을 가리지 않는 것은 나누기 전과 같다.
-    for (self.saved_kitty_placements.items) |p| {
-        if (p.image_id == image_id and p.placement_id == placement_id) return .{ .normal = p };
-    }
-    for (self.kitty_placements.items) |p| {
+/// **`on_alt` 화면에서만** 부모를 찾는다(2026-10-04). kitty 처럼 graphics 상태는 화면마다 따로다 — 예전에는 화면을 가리지
+/// 않아 alt 의 자식이 primary 의 부모를 잡고, 그 부모의 절대 행(다른 좌표계)으로 자리를 풀었다.
+fn findParentPlacement(self: *TerminalCore, on_alt: bool, image_id: u32, placement_id: u32) ?ParentKind {
+    const list = if (on_alt == self.alt_active) self.kitty_placements.items else self.saved_kitty_placements.items;
+    for (list) |p| {
         if (p.image_id == image_id and p.placement_id == placement_id) return .{ .normal = p };
     }
     for (self.kitty_virtual_placements.items) |vp| {
+        if (vp.on_alt != on_alt) continue; // U=1 격자도 화면에 귀속된다
         if (vp.image_id == image_id and vp.placement_id == placement_id) return .virtual_parent;
     }
     return null;
@@ -1341,7 +1341,7 @@ fn findParentPlacement(self: *TerminalCore, image_id: u32, placement_id: u32) ?P
 /// **저장 시점에 굳히지 않고 여기서 푸는 이유**: 부모가 다시 display 되어 자리를 옮기면 자식도
 /// 따라가야 한다(명세: "the relative placement moves along with it"). 굳혀 두면 부모만 움직인다.
 fn resolveRelativeAnchor(self: *TerminalCore, p: StoredPlacement) ?struct { row: usize, col: u16 } {
-    const parent = findParentPlacement(self, p.parent_image_id, p.parent_placement_id) orelse return null;
+    const parent = findParentPlacement(self, p.on_alt, p.parent_image_id, p.parent_placement_id) orelse return null;
     const base = switch (parent) {
         .normal => |np| np,
         .virtual_parent => return null, // 화면 위치를 코어가 모른다(placeholder 셀 소유) — 후속

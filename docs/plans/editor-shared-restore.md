@@ -843,3 +843,72 @@ claim 파일과 문서 directory 중 어느 쪽이 실제 기존 atomic writer/l
 
 위 경계를 연결하기 전에는 독립 문서 restart 복구가 완료됐다고 선언하지 않는다.
 이번 추가 검토는 설계 문서만 수정한다. 제품 변경·새 runtime 의존성·새 복구 UX는 승인하지 않는다.
+
+### 추가 검토 — 독립된 적대적 설계 검토 5회
+
+각 회차는 다른 성공/실패 경계를 기존 코드와 대조한 설계 검토다. 제품 실험 5회나
+변이 테스트 5회 통과를 뜻하지 않는다. 아래 반례는 제안의 누락을 발견한 것이며
+현재 제품의 신규 재현 결함으로 분류하지 않는다.
+
+#### 회차 1 — 예약 후 registry publication 실패
+
+`document_registry.Registry.create`는 refs/Document/slot 용량 할당이 모두 성공한 뒤에만
+prepared State를 소비한다. persistent claim을 이 앞에 추가하면 registry OOM 뒤 예약이
+남고, 뒤에 추가하면 이미 게시한 문서를 되돌려야 한다. 두 위치 모두 단순 삽입은 불충분하다.
+제안: 메모리 ID 준비와 registry publication은 기존 실패 원자성을 유지한다. 첫 백업의
+영속 예약은 별도 준비 상태로 두며 claim 성공/record 미게시를 정상 dirty backup으로 세지 않는다.
+예약 rollback은 자신이 새로 만든 빈 예약만 정리하고 복원한 기존 레코드는 정리하지 않는다.
+후속 판정: create의 모든 할당 실패, 첫 예약 성공 뒤 encode OOM, write 실패, 재시도 및
+같은 ID의 기존 record 대조군에서 State/tree/이전 bytes 보존과 예약 소유를 검사한다.
+
+#### 회차 2 — 지연 삭제와 같은 ID의 새 백업
+
+`DeferredBackupDrop`은 filename만 저장하고 `commitDeferredDrops`가 나중에 지운다.
+미래 비동기 writer 또는 복구 후보 처리에서 같은 ID의 새 record가 그 사이 게시되면
+오래된 삭제 요청이 새 내용을 지울 수 있다. ID는 문서 신원이지 record 버전이 아니다.
+제안: 지연 삭제와 writer를 같은 owner 경계 안에서 직렬화하거나 삭제 대상의 게시 generation을
+검증한다. 단순 hash 비교 후 unlink는 검사/삭제 사이 경쟁을 해결하지 않는다.
+후속 판정: barrier로 삭제 준비→새 게시→삭제 확정 순서를 고정해 새 record 보존을 확인한다.
+정상 같은 버전 삭제와 staging rollback 대조군을 포함한다. 지금 동기 staging에서 이 경쟁이
+실제로 발생했다고 주장하지 않으며, version 필드 도입도 이 문서에서 확정하지 않는다.
+
+#### 회차 3 — 정상 저장 성공과 backup 삭제 실패
+
+`dropDoc/dropName`의 삭제는 best-effort이고 `markClean`은 저장 후 메모리 clean을 만든다.
+삭제가 실패하거나 저장 성공 직후 process가 끝나면 최신 disk와 과거 dirty backup이 공존한다.
+ID 분리만으로 stale backup 판정이 해결되지 않는다. disk_hash는 외부 수정 기준이며 backup을
+무조건 최신으로 선언하는 버전 번호가 아니다.
+제안: 현재 저장/복구의 지문 계약과 보존 정책을 그대로 추적하고, 새 discovery가 과거 backup을
+자동으로 disk에 쓰거나 정상 저장을 취소하지 않도록 한다. 자동 정리를 도입하려면 별도
+commit/tombstone 계약과 장애 창을 검토한다. 이번 변경으로 삭제 실패 정책을 임의 강화하지 않는다.
+후속 판정: 실제 저장→삭제 실패, 저장→정리 전 SIGKILL, backup 내용=disk/내용 불일치 대조군에서
+원본 파일 보존과 복구 후보 표시를 검사한다. 물리 전원 손실 내구성 증거로 세지 않는다.
+
+#### 회차 4 — 복구 큐의 신원과 실패 재시도
+
+`PendingRevival`은 path/remote만 담고 `queueBackupRevival`은 capacity/OOM에서 조용히
+반환한다. `drainRevivals`는 먼저 orderedRemove하고 revive 실패를 optional 결과로 숨긴다.
+이를 새 ID 복구에 그대로 사용하면 같은 path A/B를 지정할 수 없고 실패한 후보가 처리 완료처럼
+사라진다. 기존 hasRecoveryBackupSource의 filename 중복 방지와 새 ID 재사용도 맞춰야 한다.
+제안: 새 후보에는 ID와 source 소유를 포함하고 admission 결과를 queued/deferred/failed로
+구분한다. 큐 실패는 파일을 보존하고 discovery를 완료로 표시하지 않는다. 실패 후보 재시도가
+정상 peer 처리를 막지 않도록 한 프레임 작업 예산과 재시도 순서를 정한다.
+후속 판정: 같은 path 다른 ID 두 건, 같은 ID 중복, queue OOM/가득 참, apply OOM,
+첫 후보 실패/둘째 정상, 사용자 취소 후 재발견을 검사한다. 큐 상한을 새로 정한 것은 아니다.
+
+#### 회차 5 — optional 백업 문제와 필수 workspace 구조 실패의 혼동
+
+중복 descriptor ID/잘못된 view 참조는 공유 관계를 불명확하게 하는 필수 구조 실패다.
+반면 올바른 descriptor의 backup I/O 실패는 구조가 온전해도 본문 복구가 미완료인 경우다.
+두 오류를 모두 전체 거절 또는 모두 disk fallback으로 처리하면 정상 터미널/peer까지 막거나
+실패한 dirty 문서를 clean 성공처럼 저장할 수 있다.
+제안: 필수 구조 validator와 backup outcome을 분리한다. 구조 실패는 기존 완전 checkpoint를
+보존하고, 본문 복구 실패에서는 복원 불완전 상태와 원본 backup 보존을 유지한다. 해당 editor를
+제외하고 peer를 열지/창 전체를 유지할지의 UX 정책은 별도 선택이며 아직 구현하지 않는다.
+후속 판정: terminal+정상 editor+읽기 실패 editor의 혼합 checkpoint, 중복 ID와 정상 shared
+view 대조군, 나중의 단독 읽기 성공에서도 기존 incomplete latch 유지, 기본 창 저장으로
+checkpoint/backup을 덮어쓰지 않는지를 실제 host 경계까지 검사한다.
+
+다섯 회차 모두 추가 누락을 발견했다. 따라서 ‘이제 반례가 없다’거나 구현 준비가 완전히
+끝났다고 선언하지 않는다. 다음 실제 실험에는 예약 저장소 비교 외에 지연 정리 순서,
+삭제 실패, 큐 실패 및 혼합 workspace 실패 격리를 포함해야 한다.

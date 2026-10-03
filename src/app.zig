@@ -1,3 +1,6 @@
+/// Shared archive I/O workers; platform hosts consume the same owner types.
+pub const agent_session_archive_backend = @import("app/agent_session_archive_backend.zig");
+pub const agent_session_archive_detail_backend = @import("app/agent_session_archive_detail_backend.zig");
 /// Detached worker quiescence for shared I/O backends; no native OS dependency.
 pub const detached_worker_wait = @import("app/detached_worker_wait.zig");
 pub const app_runtime = @import("app/app_runtime.zig");

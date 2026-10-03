@@ -46,7 +46,7 @@ const posix_walk = @import("posix_walk.zig");
 
 /// **재귀로 훑는다.** 디렉터리 목록을 손으로 적으면 하위 디렉터리 하나가 생기는 순간 게이트가 조용히
 /// 눈을 감는다 — 이 게이트가 막으려는 실패(자리가 하나 더 생겼는데 아무도 모른다)와 같은 모양이다.
-const scan_dir = "src/platform/macos";
+const scan_dirs = [_][]const u8{ "src/platform/macos", "src/app" };
 const session_path = "src/platform/macos/app_session.zig";
 const session_owner_fn = "quietDetachedWorkersForTest";
 
@@ -141,71 +141,72 @@ test "정지 축: detached worker 를 띄우는 backend 는 자기 deinit 이나
     const owner_end = std.mem.indexOfPos(u8, session_source, owner_start, "\n    }\n").?;
     const owner_body = session_source[owner_start..owner_end];
 
-    var dir = try std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true });
-    defer dir.close(io);
-    var walker = try posix_walk.posixWalk(dir, allocator);
-    defer walker.deinit();
-
     var failed = false;
     var found: usize = 0;
     var seen_in_deinit: [in_deinit.len]bool = .{false} ** in_deinit.len;
-    while (try walker.next(io)) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        const name = std.fs.path.basename(entry.path);
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ scan_dir, entry.path });
-        defer allocator.free(path);
-        // **못 읽거나 못 파싱하면 조용히 건너뛰지 않는다** — 스캐너의 침묵을 통과로 읽지 않는다.
-        const source = readFileZ(allocator, io, path) catch |err| {
-            std.debug.print("quiesce axis: {s} 를 못 읽었다({s}).\n", .{ path, @errorName(err) });
-            failed = true;
-            continue;
-        };
-        defer allocator.free(source);
-        const spawns = hasProductToken(allocator, source, "spawn") catch |err| {
-            std.debug.print("quiesce axis: {s} 를 못 파싱했다({s}).\n", .{ path, @errorName(err) });
-            failed = true;
-            continue;
-        };
-        if (!spawns) continue;
-        // **refcount backend 만** 이 축이다 — 「마지막 워커가 `State` 를 파괴한다」가 이 결함의 모양이다.
-        //
-        // ⚠️ **그 밖의 detached 워커가 안 지켜진다는 뜻이 아니다.** 감사해 보니(2026-09-08) 셋으로
-        // 갈린다: ⒜ 테스트 전용 spawn 은 위 `hasProductToken` 이 이미 걸러냈고, ⒝ `control_server`
-        // 처럼 핸들을 들고 **join** 하는 것, ⒞ `file_panel` 의 원격 rename·업로드처럼 자기 `deinit`
-        // 이 **inflight 를 스핀 대기**하는 것이다. 셋 다 자기 자리에서 지킨다.
-        //
-        // **새로 만든다면 그 셋 중 하나를 골라야 한다** — refcount 를 쓰면 이 축이 잡아 주고, 안
-        // 쓰면 잡아 주는 사람이 없으므로 `deinit` 이 직접 거둬야 한다.
-        if (std.mem.indexOf(u8, source, "refs: std.atomic.Value") == null) continue;
-        found += 1;
+    for (scan_dirs) |scan_dir| {
+        var dir = try std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true });
+        defer dir.close(io);
+        var walker = try posix_walk.posixWalk(dir, allocator);
+        defer walker.deinit();
 
-        var listed: ?usize = null;
-        for (in_deinit, 0..) |item, index| {
-            if (std.mem.eql(u8, item.file, name)) listed = index;
-        }
-        if (listed) |index| {
-            seen_in_deinit[index] = true;
-            // **이름이 아니라 「거두는가」** — 재고에 적혔어도 실제로 대기가 있어야 한다.
-            if (!deinitDrains(source)) {
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+            const name = std.fs.path.basename(entry.path);
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ scan_dir, entry.path });
+            defer allocator.free(path);
+            // **못 읽거나 못 파싱하면 조용히 건너뛰지 않는다** — 스캐너의 침묵을 통과로 읽지 않는다.
+            const source = readFileZ(allocator, io, path) catch |err| {
+                std.debug.print("quiesce axis: {s} 를 못 읽었다({s}).\n", .{ path, @errorName(err) });
+                failed = true;
+                continue;
+            };
+            defer allocator.free(source);
+            const spawns = hasProductToken(allocator, source, "spawn") catch |err| {
+                std.debug.print("quiesce axis: {s} 를 못 파싱했다({s}).\n", .{ path, @errorName(err) });
+                failed = true;
+                continue;
+            };
+            if (!spawns) continue;
+            // **refcount backend 만** 이 축이다 — 「마지막 워커가 `State` 를 파괴한다」가 이 결함의 모양이다.
+            //
+            // ⚠️ **그 밖의 detached 워커가 안 지켜진다는 뜻이 아니다.** 감사해 보니(2026-09-08) 셋으로
+            // 갈린다: ⒜ 테스트 전용 spawn 은 위 `hasProductToken` 이 이미 걸러냈고, ⒝ `control_server`
+            // 처럼 핸들을 들고 **join** 하는 것, ⒞ `file_panel` 의 원격 rename·업로드처럼 자기 `deinit`
+            // 이 **inflight 를 스핀 대기**하는 것이다. 셋 다 자기 자리에서 지킨다.
+            //
+            // **새로 만든다면 그 셋 중 하나를 골라야 한다** — refcount 를 쓰면 이 축이 잡아 주고, 안
+            // 쓰면 잡아 주는 사람이 없으므로 `deinit` 이 직접 거둬야 한다.
+            if (std.mem.indexOf(u8, source, "refs: std.atomic.Value") == null) continue;
+            found += 1;
+
+            var listed: ?usize = null;
+            for (in_deinit, 0..) |item, index| {
+                if (std.mem.eql(u8, item.file, name)) listed = index;
+            }
+            if (listed) |index| {
+                seen_in_deinit[index] = true;
+                // **이름이 아니라 「거두는가」** — 재고에 적혔어도 실제로 대기가 있어야 한다.
+                if (!deinitDrains(source)) {
+                    std.debug.print(
+                        "quiesce axis: {s} 는 재고상 자기 `deinit` 에서 거두기로 되어 있는데({s}) 그 본문에 `is_test` 대기가 없다.\n",
+                        .{ path, in_deinit[index].why },
+                    );
+                    failed = true;
+                }
+                continue;
+            }
+            // ⒝ — 세션 종료가 거둔다. 이름이 아니라 **그 함수가 실제로 부르는지**를 본다.
+            const stem = name[0 .. name.len - ".zig".len];
+            if (std.mem.indexOf(u8, owner_body, stem) == null) {
                 std.debug.print(
-                    "quiesce axis: {s} 는 재고상 자기 `deinit` 에서 거두기로 되어 있는데({s}) 그 본문에 `is_test` 대기가 없다.\n",
-                    .{ path, in_deinit[index].why },
+                    "quiesce axis: {s} 는 detached worker 를 띄우는데 아무도 거두지 않는다. 워커가 `shutting_down` 을 봐야 나오면 자기 `deinit` 안에서(취소 뒤에) 거두고 재고에 이유를 적고, 아니면 `{s}` 에 한 줄 더하라.\n",
+                    .{ path, session_owner_fn },
                 );
                 failed = true;
             }
-            continue;
-        }
-        // ⒝ — 세션 종료가 거둔다. 이름이 아니라 **그 함수가 실제로 부르는지**를 본다.
-        const stem = name[0 .. name.len - ".zig".len];
-        if (std.mem.indexOf(u8, owner_body, stem) == null) {
-            std.debug.print(
-                "quiesce axis: {s} 는 detached worker 를 띄우는데 아무도 거두지 않는다. 워커가 `shutting_down` 을 봐야 나오면 자기 `deinit` 안에서(취소 뒤에) 거두고 재고에 이유를 적고, 아니면 `{s}` 에 한 줄 더하라.\n",
-                .{ path, session_owner_fn },
-            );
-            failed = true;
         }
     }
-
     for (in_deinit, 0..) |item, index| {
         if (seen_in_deinit[index]) continue;
         std.debug.print(

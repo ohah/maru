@@ -3,17 +3,12 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 /// tree-sitter. **root 모듈이 이미 갖고 있다**(build.zig 의 `-Msyntax`) — 편집기 색칠이 쓴다.
 const ts = @import("syntax");
-/// **중립 파일이 macOS 폴더에 있다**(`file_tree_backend`·`git_backend` 와 같은 부류). 본문에 네이티브
-/// 참조가 0 이고 `home` 경로만 받는다.
-///
-/// **이사는 예약돼 있지 않다** — [layering-and-portability.md](../docs/layering-and-portability.md) §3.4
-/// 가 2026-08-25 에 실제로 옮겨 보고 **"옮기지 않는다"** 로 닫았다(파일 이동이 아니라 빌드 그래프
-/// 변경이다: 모듈 루트·wasm 배럴·자기 의존·셋째 파일). 새 빚은 이 주석 한 줄로 갚는다.
-const agent_archive_backend = @import("platform/macos/agent_session_archive_backend.zig");
-/// 카드를 펼쳤을 때 읽는 **상세**. 스캔 백엔드와 같은 폴더의 OS 중립 파일이고(§3.4 의 결정),
+/// Shared archive worker; the facade keeps both hosts on one owner type.
+const agent_archive_backend = maru.app.agent_session_archive_backend;
+/// 카드를 펼쳤을 때 읽는 **상세**. 스캔 백엔드와 같은 공통 계층의 파일이고,
 /// **그 안에 지켜야 할 계약이 하나 있다**: 턴 텍스트는 worker 경계를 넘기 전에 민감 내용 가드와
 /// PII 익명화를 지난다(`redactTurns`). 여기서 직접 파일을 읽어 파싱하면 그 계약을 우회한다.
-const agent_detail_backend = @import("platform/macos/agent_session_archive_detail_backend.zig");
+const agent_detail_backend = maru.app.agent_session_archive_detail_backend;
 const file_tree_backend = @import("platform/macos/file_tree_backend.zig"); // 파일 트리 스캔 — 이름과 달리 모든 호스트에서 돈다(계약 §2m.3)
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
 // 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).

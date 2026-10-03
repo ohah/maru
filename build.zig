@@ -1344,6 +1344,16 @@ pub fn build(b: *std.Build) void {
     const test_cli_relay_step = b.step("test-cli-relay", "Run the `maru control --stdio` relay tests only");
     test_cli_relay_step.dependOn(&run_cli_relay_tests.step);
 
+    // The common archive workers must remain runnable after leaving macOS paths.
+    const archive_worker_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "agent_session_archive_backend", "agent_session_archive_detail_backend" },
+    });
+    const run_archive_worker_tests = b.addRunArtifact(archive_worker_tests);
+    run_archive_worker_tests.addArg("--maru-expect-tests=36"); // 15 worker judges and 21 anonymous aggregation blocks
+    run_archive_worker_tests.setCwd(b.path("."));
+    b.step("test-agent-archive-workers", "Verify shared archive worker ownership and history reads").dependOn(&run_archive_worker_tests.step);
+
     const core_tests = addProjectTest(b, .{
         .root_module = maru_mod,
     });

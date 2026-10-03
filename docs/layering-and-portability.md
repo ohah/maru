@@ -350,3 +350,24 @@ Windows PID를 이 신뢰 도메인에 넣는 것은 **세션 호스트 이식�
 
 - **가드 테스트**(B) ✅: `NativeMetalCell`·`MetalFrame`·CoreText/CoreGraphics/AppKit/Metal 타입명이 중립 레이어(**terminal·renderer·session·chrome**)에 **식별자로 등장하면 빌드 실패**(`tests/boundary/imports.zig`의 `scanForbiddenIdentifiers` — `std.zig.Tokenizer`로 .identifier 토큰만 검사해 중립 계약을 설명하는 주석·문자열 속 "Metal"/"CoreText" 언급은 오탐 0). cross-layer `@import` 금지(1차)에 더한 **2차 re-export 가드**(import이 막혀도 타입명이 새는 경로 차단). `app`은 의도적 혼합 레이어(runtime+중립 모델)라 비범위 — 컨벤션으로 다룬다. = [renderer-strategy.md] WebGPU 조건 1("중립 frame만 소비함을 테스트로 증명")의 실제 충족.
 - **topological note**: `metal_frame.zig`(중립 투영 + `replace` Z-합성)는 B에서 **renderer로 이주 완료** — 이름만 "Metal"인 중립 frame 계약(NativeMetalCell·MetalFrame extern DTO, OS 의존 0)을 renderer가 소유해 백엔드(Metal/WebGPU)가 공유한다. 가드는 이제 **이름이 아니라 의존성** 기준이다(frame DTO는 중립, 실제 OS 런타임 `MetalRenderer`·CT*/CG*/NS*/MTL*만 platform 가드). S2 모델 추출 **완료**(§3.1: `Term`을 모델/런타임 분리, 모델을 `session_model.Model(Rt)`로). 추가로 `src/app`에 남은 중립 모델(`surface`·`split_tree`·`workspace`·`window` 등)을 session으로 마저 모아 `session→app` 의존을 없애는 정리는 §3.2(3차 추출, 계획).
+
+### 3.4.1 세션 기록 worker의 실제 공통 계층 이동 (2026-10-03)
+
+사용자의 Windows 폴더 결합 정리 요청에 따라 목록·상세 backend를 각각
+`src/app/agent_session_archive_backend.zig`와
+`src/app/agent_session_archive_detail_backend.zig`로 옮겼다.
+Windows main과 macOS AppSession·agent dock은 `maru.app`의 같은 타입을 사용한다.
+backend가 facade 내부에서 자신의 facade를 이름 import하는 순환 모듈 연결을 만들지 않도록
+공통 worker 내부의 barrel 접근은 같은 모듈 안의 상대 import로 연결한다.
+상세 worker의 목록 worker 참조도 같은 디렉터리의 동일 파일이다.
+
+이동하면서 quiescence scanner의 탐색 범위를 `src/platform/macos`와 `src/app`으로
+확장했다. 이동한 파일을 감시에서 빼지 않고 두 디렉터리 모두 재귀 검사한다.
+i18n 원장도 실제 새 경로를 가리킨다.
+`zig build test-agent-archive-workers`는 36개 등록을 요구하며 Windows 실행에서는
+32개 통과·기존 macOS 전용 4개 skip이다. 두 스트리밍 상한 판정자의 불필요한 macOS 제한을 제거해 Windows 임시 파일에서도 실행한다. 파일 identity의 inode·size·provider,
+enqueue 실패 outcome, 민감 턴 redaction을 깨뜨린 다섯 제품 변이가 모두 실패했고
+원본을 복구한 게이트는 통과했다. skip을 Windows 동작 검증으로 계상하지 않는다.
+
+파일 트리·Git backend와 CoreText가 섞인 텍스트/DrawList 구현은 여전히 분리 대상이다.
+이 두 worker의 이동으로 전체 폴더 결합 해소나 Windows safe-save 완성을 주장하지 않는다.

@@ -10698,3 +10698,22 @@ ON_CLOSE 누락·취소 DELETE 누락·readonly 처리 누락·witness에 데이
 공유 모드를 0으로 바꾼 metadata-only 변이는 살아남았으며 위 다섯 검출 횟수에 포함하지 않는다.
 이 primitive는 아직 runtime 저장 경로에 연결하지 않았다. 원본 동일성 검증·실제 교체·조건부 롤백·
 GUI 편집/저장·실앱 저장 검증은 남아 있다.
+
+### 2m.135 실제 보호된 감사 SACL 복원과 스레드 권한 복원 검증 (2026-10-03)
+
+§2m.133에서 남긴 실제 감사 SACL 성공 검증을 완료했다. 이 Windows 계정에는
+SeSecurityPrivilege가 할당되어 있으나 비활성 상태였다. `editor/audit_scope.zig`는
+현재 토큰을 복제하고 그 복제본에서만 할당된 권한을 활성화한다. 프로세스 토큰은 수정하지 않는다.
+[DuplicateTokenEx](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-duplicatetokenex),
+[AdjustTokenPrivileges](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-adjusttokenprivileges),
+[SetThreadToken](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadtoken)의 계약을 따른다.
+범위를 종료할 때 이전 스레드 토큰을 복원하며 다른 스레드에서 종료하려는 호출은 거절한다.
+현재 이 범위는 네이티브 검증 fixture에서만 사용한다. 런타임 저장에 자동 권한 활성화를 연결하지 않았다.
+
+실제 파일에 protected audit SACL을 설정하고 `metadata.cloneComplete`로 미공개 임시 파일에
+복제한 뒤 ACL 바이트를 조회해 비교했다. 프로세스 권한의 전후 동일성과 중첩 범위에서
+직전 impersonation 토큰의 정확한 복원도 확인했다. 권한이 할당되지 않은 환경은 성공으로
+간주하지 않고 관련 네이티브 판정을 skip한다.
+권한 비활성·primary 토큰 사용·이전 토큰 복원 누락·잘못된 권한 조정 대상·impersonation 권한 누락의
+다섯 실행 변이는 모두 실패했다. 원본 복구 후 root-main 30개와 native 경로 29개 판정이 통과했다.
+최종 파일 교체·조건부 롤백·GUI 편집/저장·실앱 저장 검증은 계속 남아 있다.

@@ -10717,3 +10717,20 @@ SeSecurityPrivilege가 할당되어 있으나 비활성 상태였다. `editor/au
 권한 비활성·primary 토큰 사용·이전 토큰 복원 누락·잘못된 권한 조정 대상·impersonation 권한 누락의
 다섯 실행 변이는 모두 실패했다. 원본 복구 후 root-main 30개와 native 경로 29개 판정이 통과했다.
 최종 파일 교체·조건부 롤백·GUI 편집/저장·실앱 저장 검증은 계속 남아 있다.
+
+### 2m.136 교체 전 객체 동일성의 전체 파일 ID 검증 (2026-10-03)
+
+`editor/identity.zig`는 열린 핸들에서 FileIdInfo를 조회하고 볼륨 일련번호와 128비트 식별자
+전체를 함께 비교한다. [FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)와
+[GetFileInformationByHandleEx](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)의
+공식 계약을 따른다. 조회 실패를 동일한 객체로 간주하지 않는다. `metadata.Source`의 이전
+64비트 내부 index 저장을 대체했으며 복제 전후 안정성 검사에 객체 동일성을 포함했다.
+
+실제 파일을 이름 변경한 뒤 이전 이름에 경쟁 파일을 생성해, 원래 핸들과 새 이름의 핸들은
+같은 객체이고 경쟁 파일은 다른 객체임을 확인했다. 식별자 16바이트 각각과 볼륨의 상위 비트
+차이를 검사하며 잘못된 핸들의 조회 실패도 검사한다. 저장된 식별자가 다르면 메타데이터 복제
+전에 거절하고 원본과 빈 임시 파일이 보존되는 것도 확인했다.
+볼륨 무시·64비트 절단·잘못된 정보 class·조회 실패 수락·원본 동일성 검사 누락의
+다섯 실행 변이를 검출했다. 복구 후 root-main 34개와 native 경로 29개 판정이 통과했다.
+이 검사는 핸들 객체의 동일성을 보장하며 경로 이름의 현재 대상 비교를 대신하지 않는다.
+실제 교체·조건부 롤백과 GUI 저장 연결은 계속 남아 있다.

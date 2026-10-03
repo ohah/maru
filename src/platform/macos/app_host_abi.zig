@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 205), abi_version);
+    try std.testing.expectEqual(@as(u32, 206), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -5045,6 +5045,49 @@ pub export fn maru_macos_app_session_osr_drag_exit(session: ?*AppSession) void {
 pub export fn maru_macos_app_session_osr_drag_drop(session: ?*AppSession, x_px: f64, y_px: f64, mods: i32) i32 {
     const app = session orelse return -1;
     return session_mod.web_ops.osrDragDrop(app, x_px, y_px, mods);
+}
+
+/// v206(W6d②): 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기(번호)다 — Chromium 본문에 들어가면 그 데이터로 enter 한다.
+pub export fn maru_macos_app_session_osr_drag_set_source(session: ?*AppSession, drag: u32) void {
+    const app = session orelse return;
+    session_mod.web_ops.osrDragSetSource(app, drag);
+}
+
+/// v206(W6d②): 페이지가 시작한 끌기를 이 창이 가져간다(그 탭을 왼쪽으로 누른 채일 때만 — 아니면 sidecar 에 취소로 답한다).
+/// 가져갔으면 끌기 번호(0 이 아니다)와 허용 동작·그림 크기(DIP)·그림 안 잡은 자리를 채운다.
+pub export fn maru_macos_app_session_osr_drag_out_take(session: ?*AppSession, allowed: ?*u32, hotspot_x: ?*i32, hotspot_y: ?*i32, image_width: ?*u32, image_height: ?*u32) u32 {
+    const app = session orelse return 0;
+    const info = session_mod.web_ops.osrDragOutTake(app) orelse return 0;
+    if (allowed) |p| p.* = info.allowed;
+    if (hotspot_x) |p| p.* = info.hotspot_x;
+    if (hotspot_y) |p| p.* = info.hotspot_y;
+    if (image_width) |p| p.* = info.image_width;
+    if (image_height) |p| p.* = info.image_height;
+    return info.drag;
+}
+
+/// v206(W6d②): 가져간 끌기의 조각(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG) — `out` 이 null 이면 길이만. 넘치면 0(길이로 다시 부른다).
+pub export fn maru_macos_app_session_osr_drag_out_part(session: ?*AppSession, drag: u32, part: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
+    const app = session orelse return 0;
+    const which = std.enums.fromInt(session_mod.web_ops.OsrDragOutPart, part) orelse return 0;
+    const bytes = session_mod.web_ops.osrDragOutPart(app, drag, which);
+    if (out_len) |p| p.* = bytes.len;
+    const dest = out orelse return 1;
+    if (cap < bytes.len) return 0;
+    @memcpy(dest[0..bytes.len], bytes);
+    return 1;
+}
+
+/// v206(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px)와 받은 동작(`NSDragOperation`, 0 = 취소). 그 끌기가 아니면 0.
+pub export fn maru_macos_app_session_osr_drag_out_end(session: ?*AppSession, drag: u32, x_px: f64, y_px: f64, operation: u32) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrDragOutEnd(app, drag, x_px, y_px, operation));
+}
+
+/// v206(W6d②): 이 창이 돌리는 페이지 끌기 번호(없으면 0).
+pub export fn maru_macos_app_session_osr_drag_out_active(session: ?*AppSession) u32 {
+    const app = session orelse return 0;
+    return session_mod.web_ops.osrDragOutActive(app);
 }
 
 /// v197(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.

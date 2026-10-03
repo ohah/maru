@@ -253,6 +253,25 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writePoint(&cursor, value.point);
             try writeModifiers(&cursor, value.modifiers);
             try cursor.writeU32(value.allowed);
+            try cursor.writeU32(value.source);
+        },
+        .drag_source_end => |value| {
+            try fields.checkDragSourceEnd(value);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.drag);
+            try writePoint(&cursor, value.point);
+            try cursor.writeU32(value.operation);
+        },
+        .drag_out_data => |value| try fields.writeDragOutData(&cursor, value),
+        .drag_out => |value| {
+            try fields.checkDragOut(value);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.drag);
+            try cursor.writeU32(value.allowed);
+            try writePoint(&cursor, value.point);
+            try writePoint(&cursor, value.hotspot);
+            try cursor.writeU32(value.image_width);
+            try cursor.writeU32(value.image_height);
         },
         .drag_operation => |value| {
             try fields.checkDragOperation(value.operation);
@@ -519,9 +538,34 @@ pub fn decodeExact(frame: []const u8) Error!Message {
                 .point = try readPoint(&cursor),
                 .modifiers = try readModifiers(&cursor),
                 .allowed = try cursor.readU32(),
+                .source = try cursor.readU32(),
             };
             try fields.checkDragTarget(value);
             break :blk .{ .drag_target = value };
+        },
+        .drag_source_end => blk: {
+            const value: message_mod.DragSourceEnd = .{
+                .browser = try readBrowser(&cursor),
+                .drag = try cursor.readU32(),
+                .point = try readPoint(&cursor),
+                .operation = try cursor.readU32(),
+            };
+            try fields.checkDragSourceEnd(value);
+            break :blk .{ .drag_source_end = value };
+        },
+        .drag_out_data => .{ .drag_out_data = try fields.readDragOutData(&cursor) },
+        .drag_out => blk: {
+            const value: message_mod.DragOut = .{
+                .browser = try readBrowser(&cursor),
+                .drag = try cursor.readU32(),
+                .allowed = try cursor.readU32(),
+                .point = try readPoint(&cursor),
+                .hotspot = try readPoint(&cursor),
+                .image_width = try cursor.readU32(),
+                .image_height = try cursor.readU32(),
+            };
+            try fields.checkDragOut(value);
+            break :blk .{ .drag_out = value };
         },
         .drag_operation => blk: {
             const browser = try readBrowser(&cursor);
@@ -595,7 +639,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  6,  0, // v6, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  7,  0, // v7, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -957,9 +1001,40 @@ test "drag messages round trip, flow the right way, and refuse empty pieces, bad
     _ = try encode(.{ .drag_data = .{ .browser = 7, .kind = .url, .bytes = &long_url } }, &big);
     // decode 도 같은 규칙: 알 수 없는 종류 바이트.
     const len = try encode(.{ .drag_target = .{ .browser = 7, .kind = .over, .point = .{ .x = 1, .y = 1 }, .allowed = 1 } }, &buf);
-    const body = len - (8 + 1 + 8 + 2 + 4);
+    const body = len - (8 + 1 + 8 + 2 + 4 + 4);
     buf[body + 8] = 9;
     try std.testing.expectError(error.UnknownDragKind, decodeExact(buf[0..len]));
+}
+
+test "drag-out messages round trip, flow the right way, and refuse drag 0, unused bits, a source outside enter, an image hotspot without an image and two operations" {
+    var buf: [256]u8 = undefined;
+    const out: message_mod.DragOut = .{ .browser = 7, .drag = 3, .allowed = 1 | 16, .point = .{ .x = 40, .y = -2 }, .hotspot = .{ .x = 60, .y = 25 }, .image_width = 120, .image_height = 50 };
+    try std.testing.expectEqual(out, (try roundTrip(.{ .drag_out = out })).drag_out);
+    const piece = (try roundTrip(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .image_png, .bytes = "\x89PNG\r\n\x1a\n\x00" } })).drag_out_data;
+    try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\n\x00", piece.bytes); // 그림은 바이트 그대로(제어·NUL 포함)
+    try std.testing.expectEqualStrings("첫\n둘", (try roundTrip(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .text, .bytes = "첫\n둘" } })).drag_out_data.bytes);
+    const end: message_mod.DragSourceEnd = .{ .browser = 7, .drag = 3, .point = .{ .x = -1, .y = 900 }, .operation = 16 };
+    try std.testing.expectEqual(end, (try roundTrip(.{ .drag_source_end = end })).drag_source_end);
+    const enter: message_mod.DragTarget = .{ .browser = 7, .kind = .enter, .point = .{ .x = 1, .y = 2 }, .allowed = 1, .source = 3 };
+    try std.testing.expectEqual(enter, (try roundTrip(.{ .drag_target = enter })).drag_target);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.drag_out.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.drag_out_data.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.drag_source_end.direction());
+
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_out = .{ .browser = 7, .drag = 0, .allowed = 1, .point = .{ .x = 0, .y = 0 } } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_out = .{ .browser = 7, .drag = 1, .allowed = 64, .point = .{ .x = 0, .y = 0 } } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_out = .{ .browser = 7, .drag = 1, .allowed = 1, .point = .{ .x = 0, .y = 0 }, .hotspot = .{ .x = 1, .y = 0 } } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_out = .{ .browser = 7, .drag = 1, .allowed = 1, .point = .{ .x = 0, .y = 0 }, .image_width = 4 } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_out_data = .{ .browser = 7, .drag = 0, .kind = .text, .bytes = "a" } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_out_data = .{ .browser = 7, .drag = 1, .kind = .image_png, .bytes = "" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .drag_out_data = .{ .browser = 7, .drag = 1, .kind = .text, .bytes = "a\x1b" } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_source_end = .{ .browser = 7, .drag = 0, .point = .{ .x = 0, .y = 0 }, .operation = 0 } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_source_end = .{ .browser = 7, .drag = 1, .point = .{ .x = 0, .y = 0 }, .operation = 3 } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_target = .{ .browser = 7, .kind = .over, .source = 3 } }, &buf));
+    var big: [max_frame_bytes]u8 = undefined;
+    const long = [_]u8{0} ** (max_ime_text_bytes + 1);
+    _ = try encode(.{ .drag_out_data = .{ .browser = 7, .drag = 1, .kind = .image_png, .bytes = long[0..max_ime_text_bytes] } }, &big);
+    try std.testing.expectError(error.TextTooLarge, encode(.{ .drag_out_data = .{ .browser = 7, .drag = 1, .kind = .image_png, .bytes = &long } }, &big));
 }
 
 test "context menu messages round trip, flow both ways, and refuse menu 0, reserved bits, unpaired bits and a selection flag that disagrees with the text" {
@@ -1145,6 +1220,12 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .drag_target = .{ .browser = 3, .kind = .leave } },
         .{ .drag_target = .{ .browser = 3, .kind = .drop, .point = .{ .x = 5, .y = 6 } } },
         .{ .drag_operation = .{ .browser = 3, .operation = 16 } },
+        // W6d② 끌어내기.
+        .{ .drag_target = .{ .browser = 3, .kind = .enter, .point = .{ .x = 5, .y = 6 }, .allowed = 1, .source = 4 } },
+        .{ .drag_source_end = .{ .browser = 3, .drag = 4, .point = .{ .x = -5, .y = 6 }, .operation = 16 } },
+        .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .text, .bytes = "끌기\n" } },
+        .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .image_png, .bytes = "\x89PNG\x00\x01" } },
+        .{ .drag_out = .{ .browser = 3, .drag = 4, .allowed = 17, .point = .{ .x = 5, .y = 6 }, .hotspot = .{ .x = 2, .y = 3 }, .image_width = 10, .image_height = 8 } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;

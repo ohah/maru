@@ -454,6 +454,65 @@ pub fn checkDragTarget(value: message.DragTarget) Error!void {
         .leave => if (value.point.x != 0 or value.point.y != 0 or @as(u16, @bitCast(value.modifiers)) != 0 or value.allowed != 0) return error.InvalidDrag,
         .drop => if (value.allowed != 0) return error.InvalidDrag,
     }
+    // 페이지 끌기 데이터는 enter 에서만 고른다.
+    if (value.source != 0 and value.kind != .enter) return error.InvalidDrag;
+}
+
+/// 페이지가 시작한 끌기의 조각(W6d②) — 비지 않는다. 글·HTML 은 IME 글 규칙(sidecar 가 제어 문자를 공백으로 바꿔 보낸다),
+/// 주소는 `checkUrl`, 제목은 대화상자 글 규칙, 그림은 바이트 그대로(조각마다 `max_ime_text_bytes` — maru 가 그림으로 풀어
+/// 보고 못 풀면 버린다).
+pub fn checkDragOutData(kind: message.DragOutDataKind, bytes: []const u8) Error!void {
+    if (bytes.len == 0) return error.InvalidDrag;
+    switch (kind) {
+        .text, .html => try checkImeText(bytes),
+        .url => try checkUrl(bytes),
+        .url_title => try checkDialogText(bytes),
+        .image_png => if (bytes.len > max_ime_text_bytes) return error.TextTooLarge,
+    }
+}
+
+fn dragOutDataLimit(kind: message.DragOutDataKind) usize {
+    return switch (kind) {
+        .url_title => max_text_bytes,
+        .text, .html, .image_png => max_ime_text_bytes,
+        .url => max_url_bytes,
+    };
+}
+
+pub fn writeDragOutData(cursor: *Cursor, value: message.DragOutData) Error!void {
+    if (value.drag == 0) return error.InvalidDrag;
+    try checkDragOutData(value.kind, value.bytes);
+    try writeBrowser(cursor, value.browser);
+    try cursor.writeU32(value.drag);
+    try cursor.writeByte(@intFromEnum(value.kind));
+    try cursor.writeU32(@intCast(value.bytes.len));
+    try cursor.writeBytes(value.bytes);
+}
+
+pub fn readDragOutData(cursor: *ReadCursor) Error!message.DragOutData {
+    const browser = try readBrowser(cursor);
+    const drag = try cursor.readU32();
+    if (drag == 0) return error.InvalidDrag;
+    const kind = std.enums.fromInt(message.DragOutDataKind, try cursor.readByte()) orelse return error.UnknownDragKind;
+    const len = try cursor.readU32();
+    if (len > dragOutDataLimit(kind)) return if (kind == .url) error.UrlTooLarge else error.TextTooLarge;
+    const bytes = try cursor.readBytes(len);
+    try checkDragOutData(kind, bytes);
+    return .{ .browser = browser, .drag = drag, .kind = kind, .bytes = bytes };
+}
+
+/// 페이지가 시작한 끌기(W6d②): 번호는 0 이 아니고, 허용 동작은 `drag_operation_mask` 안, 그림 크기는 view 상한 안이며 그림이
+/// 없으면(크기 0) 잡은 자리도 0 이다.
+pub fn checkDragOut(value: message.DragOut) Error!void {
+    if (value.drag == 0 or value.allowed & ~message.drag_operation_mask != 0) return error.InvalidDrag;
+    if (value.image_width > max_view_extent or value.image_height > max_view_extent) return error.InvalidDrag;
+    if ((value.image_width == 0) != (value.image_height == 0)) return error.InvalidDrag;
+    if (value.image_width == 0 and (value.hotspot.x != 0 or value.hotspot.y != 0)) return error.InvalidDrag;
+}
+
+pub fn checkDragSourceEnd(value: message.DragSourceEnd) Error!void {
+    if (value.drag == 0) return error.InvalidDrag;
+    try checkDragOperation(value.operation);
 }
 
 /// 페이지가 받아들이는 동작은 0 이거나 `drag_operation_mask` 안의 비트 하나다.

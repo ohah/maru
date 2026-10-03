@@ -92,6 +92,7 @@ pub fn get() *c.cef_client_t {
         render.on_popup_size = &onPopupSize;
         render.on_ime_composition_range_changed = &input.onImeCompositionRangeChanged;
         render.update_drag_cursor = &drag.onUpdateDragCursor;
+        render.start_dragging = &drag.onStartDragging;
         display.on_title_change = &onTitleChange;
         display.on_address_change = &onAddressChange;
         display.on_cursor_change = &input.onCursorChange;

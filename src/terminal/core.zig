@@ -1464,8 +1464,8 @@ pub const TerminalCore = struct {
         kitty.rebaseActiveAnchors(self, old_count, new_count);
     }
     /// 스크롤백에 못 들어간 행의 앵커를 정리한다. 본문: kitty.dropLostRowAnchors.
-    pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize) void {
-        kitty.dropLostRowAnchors(self, abs_row);
+    pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize, last_abs: usize) void {
+        kitty.dropLostRowAnchors(self, abs_row, last_abs);
     }
 
     /// 현재 뷰포트에 보이는 선택 범위(렌더용). 본문: selection.selectionViewportSpan.
@@ -4782,6 +4782,60 @@ test "kitty reflow: 넓힌 뒤 스크롤백 이미지는 행 번호가 아니라
     core.scrollViewport(1);
     const a = core.kitty_placements.items[0].anchor_row;
     try std.testing.expectEqual(@as(u21, 'B'), absFirstCodepoint(&core, a));
+}
+
+/// 활성 화면 행의 첫 글자.
+fn screenFirstCodepoint(core: *const TerminalCore, row: usize) u21 {
+    return core.screen.cells[core.index(@intCast(row), 0)].codepoint;
+}
+
+// 줄바꿈 스크롤로 밀려난 줄이 **보관되지 못하면**(스크롤백 0·alt 화면·OOM) 그 줄은 사라지고 아래 줄이 한 칸씩
+// 올라온다. 보관되면 절대 행이 그대로라 앵커가 맞지만, 못 하면 아무도 옮기지 않아 이미지가 제자리에 남아 다른
+// 글자 위에 겹쳤다(2026-10-03 실측: 버려진 줄의 이미지가 `bbb`, 이어서 `ccc` 위에 남았다 — main 에서도 같다).
+test "kitty scroll: 스크롤백이 꺼져 있으면 줄바꿈 스크롤에서 이미지가 줄을 따라 올라가고 버려진 줄의 이미지는 지운다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    core.setMaxScrollback(0);
+    try core.write("aaa\r\nbbb\r\n");
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(0, 0, 1)); // aaa
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(1, 0, 1)); // bbb
+    try core.write("ccc\r\n"); // 맨 아래에서 줄바꿈 — aaa 가 버려지고 bbb·ccc 가 올라온다
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // aaa 의 이미지는 줄과 함께
+    try std.testing.expectEqual(@as(u21, 'b'), screenFirstCodepoint(&core, core.kitty_placements.items[0].anchor_row));
+    try core.write("ddd\r\n");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+}
+
+// alt 화면(vim·less 등 전체 화면 TUI)은 스크롤백이 없다 — 같은 경로다.
+test "kitty scroll: alt 화면의 줄바꿈 스크롤에서도 이미지가 줄을 따라 올라간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b[?1049h");
+    try core.write("aaa\r\nbbb\r\n");
+    var p = mkSpanPlacement(1, 0, 1); // bbb
+    p.on_alt = true;
+    try core.kitty_placements.append(std.testing.allocator, p);
+    try core.write("ccc\r\n");
+    try std.testing.expectEqual(@as(u21, 'b'), screenFirstCodepoint(&core, core.kitty_placements.items[0].anchor_row));
+}
+
+// 스크롤 영역이 맨 아래 줄(상태줄)을 빼면, 영역 밖의 줄은 **움직이지 않는다** — 그 위 이미지도 그대로여야 한다.
+test "kitty scroll: 스크롤 영역 밖(상태줄)의 이미지는 영역이 스크롤돼도 제자리다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.setMaxScrollback(0);
+    try core.write("\x1b[4;1HSSS"); // 상태줄(3 행)
+    try core.write("\x1b[1;3r\x1b[1;1H"); // 영역 0..2
+    try core.write("aaa\r\nbbb\r\nccc");
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(1, 0, 1)); // bbb
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(3, 0, 1)); // SSS
+    try core.write("\r\nddd"); // 영역 바닥에서 줄바꿈 — aaa 가 버려지고 영역만 올라간다
+    try std.testing.expectEqual(@as(u21, 'S'), screenFirstCodepoint(&core, 3));
+    for (core.kitty_placements.items) |pl| {
+        const want: u21 = if (pl.anchor_row == 3) 'S' else 'b';
+        try std.testing.expectEqual(want, screenFirstCodepoint(&core, pl.anchor_row));
+    }
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
 }
 
 test "setMaxScrollback: alt 중 하향 트림은 활성 alt 화면의 placement를 보정하지 않는다" {

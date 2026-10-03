@@ -573,9 +573,14 @@ pub fn rebaseActiveAnchors(self: *TerminalCore, old_count: usize, new_count: usi
     }
 }
 
-/// reflow 가 스크롤백으로 보내려던 행 하나가 저장되지 못했다(cap 0·OOM) — 그 행(절대 `abs_row`)에 앵커가 있던
-/// placement 는 지우고, 뒤 행의 앵커는 한 칸 당긴다. 미리 옮겨 둔 앵커가 없는 행을 가리키지 않게 한다.
-pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize) void {
+/// 스크롤백으로 보내려던 행 하나가 저장되지 못하고 사라졌다(cap 0·alt 화면·OOM) — 그 행(절대 `abs_row`)에 앵커가
+/// 있던 placement 는 지우고, `(abs_row, last_abs]` 의 앵커는 한 칸 당긴다(그 행들이 한 칸씩 올라온다). `last_abs`
+/// 뒤는 움직이지 않는 행이다(스크롤 영역 밖 상태줄 등). reflow 는 활성 화면 전체가 대상이라 상한 없이 부른다.
+pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize, last_abs: usize) void {
+    // 지금 화면의 목록만 본다 — 화면별로 나뉘어 있어 alt 에서 스크롤해도 보관된 primary 의 배치는 훑지 않는다.
+    // 비었으면 바로 돌아간다(kitty 도 지금 화면에 이미지가 있을 때만 스크롤 처리를 한다). alt 화면은 스크롤백이 없어
+    // 줄바꿈마다 이 경로를 지나므로, 빈 목록에서 비용이 0 이어야 한다.
+    if (self.kitty_placements.items.len == 0) return;
     var i: usize = 0;
     while (i < self.kitty_placements.items.len) {
         const p = &self.kitty_placements.items[i];
@@ -583,7 +588,7 @@ pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize) void {
             _ = self.kitty_placements.orderedRemove(i);
             continue;
         }
-        if (p.on_alt == self.alt_active and p.anchor_row > abs_row) p.anchor_row -= 1;
+        if (p.on_alt == self.alt_active and p.anchor_row > abs_row and p.anchor_row <= last_abs) p.anchor_row -= 1;
         i += 1;
     }
 }

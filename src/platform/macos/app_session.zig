@@ -286,7 +286,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 입력기 없이).
 // 203: W6b — osr_tooltip(hover 중인 Chromium 탭의 툴팁 글과 일련번호 — Swift 가 macOS 툴팁으로 띄운다).
 // 204: W6c② — Chromium 탭 우클릭 메뉴(osr_context_menu_take·item·selection·open·answer — 창이 macOS 메뉴로 띄운다).
-pub const abi_version: u32 = 204;
+// 205: W6d① — 밖에서 끌어 놓기(osr_drag_reset·add·update·exit·drop — view 의 끌기 세션을 Chromium 탭 본문에 넘긴다).
+pub const abi_version: u32 = 205;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6348,6 +6349,8 @@ pub const AppSession = struct {
     osr_tooltip_seen: maru.session.web_osr_input.TooltipSeen = .{},
     /// 이 창이 띄운 Chromium 탭 우클릭 메뉴(W6c② — 창마다 하나). Swift 가 답하면(`osrContextMenuAnswer`) 비운다.
     osr_context_menu: ?web_ops.OsrContextMenu = null,
+    /// 밖에서 이 창 view 로 끌어 오는 것(W6d① — 끌기 동안 쥔다)과 enter 를 보낸 탭.
+    osr_drag: web_ops.OsrDrag = .{},
     /// W4b: 그 탭 커서의 본 세대 — 바뀌면 `osr_cursor_pending` 을 세워 Swift 가 포인터를 움직이지 않아도 커서를 바꾼다.
     osr_hover_cursor_generation: u32 = 0,
     osr_cursor_pending: ?CursorKind = null,
@@ -16375,7 +16378,8 @@ pub const AppSession = struct {
     ///      마우스 클릭이 모달에 삼켜지는 것과 **같은 규율**이다(mouse()의 게이트와 같은 단일 판정을 쓴다 — 예전엔
     ///      confirm만 손으로 베껴 설정 화면 뒤 pane에 드롭이 새어 포커스를 훔쳤다).
     ///   ② **대상 Term에 붙일 PTY가 없음**(web 패널, 그리고 §7 종료 placeholder) — 내용이 조용히 사라진다. pane rect는
-    ///      탭 바를 포함하므로 web pane의 바 위 드롭이 실제로 이 경로를 탄다.
+    ///      탭 바를 포함하므로 web pane의 바 위 드롭이 실제로 이 경로를 탄다. Chromium(OSR) 탭 **본문** 위 끌기는 이 경로
+    ///      앞에서 `web_ops.osrDragDrop` 이 그 페이지에 넘긴다(W6d① — 여기 오는 것은 본문 밖·모달이 열린 때뿐이다).
     ///
     /// hit-test는 클릭 경로와 같은 단일 출처(Model.paneAtPoint)를 쓴다. 여기에 더해 **Term 탭 위 드롭이면 그 Term**
     /// 까지 활성으로 만든다(탭 바는 Term 단위인데 pane까지만 라우팅하면, 특정 Term 탭에 떨어뜨려도 그 pane의 *현재*
@@ -23767,6 +23771,8 @@ pub const AppSession = struct {
         // W5a: 이 창이 띄운 Chromium 탭 대화상자는 취소로 답한다(페이지가 영영 멈추지 않게).
         web_osr.cancelDialogsShownBy(self.allocator, @intFromPtr(self));
         web_ops.osrContextMenuDropShown(self); // 띄운 우클릭 메뉴도(W6c②)
+        _ = web_ops.osrDragReset(self); // 끌기 중 창이 닫히면 그 탭에 나가기를 보낸다(W6d①)
+        self.osr_drag.deinit(self.allocator);
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);

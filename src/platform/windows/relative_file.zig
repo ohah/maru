@@ -1,11 +1,11 @@
-//! Native handle-relative traversal for editor safe-save. A save must keep these
+//! Native handle-relative traversal for reads and safe-save. A save must keep these
 //! handles alive through commit; checking a string and reopening it is not authority.
 const std = @import("std");
 const builtin = @import("builtin");
 const w = std.os.windows;
-const abi = @import("maru").win32_abi;
+const abi = @import("../../maru.zig").win32_abi;
 
-pub const Error = std.mem.Allocator.Error || error{ InvalidPath, OpenFailed, ReparsePoint, NotRegular, HardLinked, UnsupportedPlatform };
+pub const Error = std.mem.Allocator.Error || error{ InvalidPath, NotFound, OpenFailed, ReparsePoint, NotRegular, HardLinked, UnsupportedPlatform };
 
 pub const Pinned = struct {
     allocator: std.mem.Allocator,
@@ -41,7 +41,7 @@ fn validate(relative: []const u8) Error!void {
 // Microsoft NtCreateFile: RootDirectory + FILE_OPEN_REPARSE_POINT, and
 // FILE_SHARE_DELETE controls whether competing deletion handles can open.
 // https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
-fn openAt(allocator: std.mem.Allocator, parent: w.HANDLE, name: []const u8, directory: bool) Error!w.HANDLE {
+fn openAt(allocator: std.mem.Allocator, parent: w.HANDLE, name: []const u8, directory: bool, reject_hard_links: bool) Error!w.HANDLE {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, name) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidPath,
@@ -67,6 +67,7 @@ fn openAt(allocator: std.mem.Allocator, parent: w.HANDLE, name: []const u8, dire
         .IO = .SYNCHRONOUS_NONALERT,
         .OPEN_REPARSE_POINT = true,
     }, null, 0);
+    if (result == .OBJECT_NAME_NOT_FOUND or result == .OBJECT_PATH_NOT_FOUND) return error.NotFound;
     if (result != .SUCCESS) return error.OpenFailed;
     errdefer _ = w.ntdll.NtClose(handle);
     var tag: w.FILE.ATTRIBUTE_TAG_INFO = undefined;
@@ -75,11 +76,20 @@ fn openAt(allocator: std.mem.Allocator, parent: w.HANDLE, name: []const u8, dire
     var info: w.FILE.STANDARD_INFORMATION = undefined;
     if (w.ntdll.NtQueryInformationFile(handle, &status, &info, @sizeOf(@TypeOf(info)), .Standard) != .SUCCESS) return error.OpenFailed;
     if (info.Directory.toBool() != directory) return error.NotRegular;
-    if (!directory and info.NumberOfLinks != 1) return error.HardLinked;
+    if (!directory and reject_hard_links and info.NumberOfLinks != 1) return error.HardLinked;
     return handle;
 }
 
 pub fn open(allocator: std.mem.Allocator, root: std.Io.Dir, relative: []const u8) Error!Pinned {
+    return openFor(allocator, root, relative, true);
+}
+
+/// Read-only callers may inspect hard-linked regular files; replacement saves may not.
+pub fn openRead(allocator: std.mem.Allocator, root: std.Io.Dir, relative: []const u8) Error!Pinned {
+    return openFor(allocator, root, relative, false);
+}
+
+fn openFor(allocator: std.mem.Allocator, root: std.Io.Dir, relative: []const u8, reject_hard_links: bool) Error!Pinned {
     if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
     try validate(relative);
     var dirs: std.ArrayList(w.HANDLE) = .empty;
@@ -88,7 +98,7 @@ pub fn open(allocator: std.mem.Allocator, root: std.Io.Dir, relative: []const u8
         dirs.deinit(allocator);
     }
     // NT names do not normalize "."; an empty relative name reopens the selected root.
-    const root_handle = try openAt(allocator, root.handle, "", true);
+    const root_handle = try openAt(allocator, root.handle, "", true, reject_hard_links);
     dirs.append(allocator, root_handle) catch |err| {
         _ = w.ntdll.NtClose(root_handle);
         return err;
@@ -96,7 +106,7 @@ pub fn open(allocator: std.mem.Allocator, root: std.Io.Dir, relative: []const u8
     var it = std.mem.splitAny(u8, relative, "/\\");
     var segment = it.next().?;
     while (it.next()) |next| {
-        const child = try openAt(allocator, dirs.items[dirs.items.len - 1], segment, true);
+        const child = try openAt(allocator, dirs.items[dirs.items.len - 1], segment, true, reject_hard_links);
         dirs.append(allocator, child) catch |err| {
             _ = w.ntdll.NtClose(child);
             return err;
@@ -105,7 +115,7 @@ pub fn open(allocator: std.mem.Allocator, root: std.Io.Dir, relative: []const u8
     }
     const basename = try allocator.dupe(u8, segment);
     errdefer allocator.free(basename);
-    const leaf = try openAt(allocator, dirs.items[dirs.items.len - 1], segment, false);
+    const leaf = try openAt(allocator, dirs.items[dirs.items.len - 1], segment, false, reject_hard_links);
     return .{ .allocator = allocator, .directories = dirs, .basename = basename, .original = .{ .handle = leaf, .flags = .{ .nonblocking = false } } };
 }
 
@@ -256,4 +266,49 @@ fn deletionProbe(root: w.HANDLE) w.NTSTATUS {
     const result = w.ntdll.NtCreateFile(&handle, .{ .STANDARD = .{ .RIGHTS = .{ .DELETE = true }, .SYNCHRONIZE = true } }, &attrs, &status, null, .{}, .{ .READ = true, .WRITE = true, .DELETE = true }, .OPEN, .{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true }, null, 0);
     if (result == .SUCCESS) _ = w.ntdll.NtClose(handle);
     return result;
+}
+
+
+test "Windows relative read allows hard links without changing save replacement policy" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "original" });
+    const original = try absoluteWide(a, tmp.dir, "file.txt");
+    defer a.free(original);
+    const linked = try absoluteWide(a, tmp.dir, "other.txt");
+    defer a.free(linked);
+    if (!CreateHardLinkW(linked, original, null).toBool()) return error.TestUnexpectedResult;
+    var read = try openRead(a, tmp.dir, "other.txt");
+    defer read.deinit(io);
+    var buffer: [32]u8 = undefined;
+    const n = try read.original.readPositionalAll(io, &buffer, 0);
+    try std.testing.expectEqualStrings("original", buffer[0..n]);
+    try expectRefused(error.HardLinked, a, tmp.dir, "file.txt");
+}
+
+test "Windows relative read rejects traversal ADS and preserves missing-file errors" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    for ([_][]const u8{ "", "../a", "a/../b", "a:stream", "a\x00b" }) |name|
+        try std.testing.expectError(error.InvalidPath, openRead(std.testing.allocator, std.Io.Dir.cwd(), name));
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.NotFound, openRead(std.testing.allocator, tmp.dir, "missing.txt"));
+}
+
+test "Windows relative read refuses intermediate junctions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "grant/jump");
+    try tmp.dir.createDirPath(io, "outside");
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside/file.txt", .data = "outside" });
+    try makeJunction(a, tmp.dir, "grant/jump", "outside");
+    var grant = try tmp.dir.openDir(io, "grant", .{});
+    defer grant.close(io);
+    try std.testing.expectError(error.ReparsePoint, openRead(a, grant, "jump/file.txt"));
 }

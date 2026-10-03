@@ -1501,8 +1501,16 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Windows safe save"},
     });
     const run_safe_save_tests = b.addRunArtifact(safe_save_tests);
-    run_safe_save_tests.addArg("--maru-expect-tests=19"); // 2 aggregation blocks, 5 path, 6 stage and 6 metadata tests
-    b.step("test-win32-safe-save", "Verify native editor save path and original-file preservation").dependOn(&run_safe_save_tests.step);
+    run_safe_save_tests.addArg("--maru-expect-tests=14"); // 2 aggregation blocks, 6 stage and 6 metadata tests
+    const safe_save_step = b.step("test-win32-safe-save", "Verify native editor save path and original-file preservation");
+    safe_save_step.dependOn(&run_safe_save_tests.step);
+    const relative_file_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "Windows safe save", "Windows relative read" },
+    });
+    const run_relative_file_tests = b.addRunArtifact(relative_file_tests);
+    run_relative_file_tests.addArg("--maru-expect-tests=29"); // 21 aggregation blocks, 5 save path and 3 read path tests
+    safe_save_step.dependOn(&run_relative_file_tests.step);
 
     const macos_coretext_font_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -4277,6 +4285,14 @@ pub fn build(b: *std.Build) void {
     // 세면 하네스가 조용히 안 서도 초록이다(이 저장소가 가장 나쁘다고 적어 둔 실패 모드).
     run_merge_stage_e2e.addArg("--maru-expect-passed=9");
     b.step("test-merge-stages-e2e", "Run the merge-stage (S3a) end-to-end judges on a real conflicted repo").dependOn(&run_merge_stage_e2e.step);
+    const native_worktree_tests = addProjectTest(b, .{
+        .root_module = merge_stage_e2e_tests.root_module,
+        .filters = &.{"Windows worktree"},
+    });
+    const run_native_worktree_tests = b.addRunArtifact(native_worktree_tests);
+    run_native_worktree_tests.addArg("--maru-expect-tests=1");
+    b.step("test-win32-worktree", "Verify native Windows Git worktree reads").dependOn(&run_native_worktree_tests.step);
+
 
     // 소스 컨트롤 **행 동작 규칙**만(S1 — 충돌 행은 스테이지가 아니라 해결이다). 같은 이유로 maru
     // 그래프에 필터를 건다: 이 판정자들은 `test-editor` 그래프에 **없어서**(실측 2026-09-12) 그 이름만

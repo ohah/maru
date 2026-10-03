@@ -10607,3 +10607,23 @@ background quad로 투영한다. main·macOS AppSession·Chrome Lab은 같은 `m
 독립 border alpha·gradient 방향·호출자의 quad layer를 깨뜨린 다섯 변이가 모두 실행 판정에서
 실패했고 정확한 bytes 복구 후 다시 통과했다. native system_text의 추가 분리와 Git 작업자,
 전체 safe-save·편집 입력·GUI 저장·실앱 저장 검증은 아직 진행 대상이다.
+
+
+### 2m.130 Git diff의 Windows 네이티브 읽기와 공유 경로 권위 (2026-10-03)
+
+editor/path의 handle-relative 구현을 `platform/windows/relative_file.zig`로 옮겼다.
+저장은 기존 single-link 제약을 유지하며 `openRead`는 hard-linked regular file을 읽는다.
+둘 다 각 요소의 reparse point를 거절하고 부모 directory handle을 읽기/저장 동안 고정한다.
+Git worktree 읽기는 Windows에서 이 경로를 사용하고, POSIX는 기존 no-follow descriptor 읽기를
+유지한다. 없는 파일은 NotFound로 구분하며 Windows byte 수집은 16MiB를 초과하지 않는다.
+
+경로 테스트가 named module 이동 때문에 main artifact에서 빠지는 것을 발견해 별도 facade
+artifact로 복구했다. safe-save 게이트는 main 14/14(집계 2·stage 6·metadata 6), facade 29/29
+(집계 21·기존 저장 경로 5·새 읽기 경로 3)을 실행한다. 별도 Git native read 판정자는 실제
+한글 파일·없는 파일·traversal 거절·16MiB 상한을 검사해 통과했다. Windows runner는 현재
+expect-tests 인자를 읽지 않으므로 이 수는 실제 실행 출력으로 확인했다.
+
+hard link 읽기 거절·부모 delete 공유·reparse 판정 생략·없는 파일 오분류·잘림 표시 제거의
+다섯 컴파일 가능한 변이가 모두 실행 판정에서 실패했고 정확한 bytes 복구 후 두 게이트가
+통과했다. Git 작업자 본체의 공통 계층 이동, 최종 safe-save publish/rollback·GUI 편집/저장과
+실앱 저장 검증은 여전히 진행 대상이다.

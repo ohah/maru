@@ -8,6 +8,7 @@ pub const config = @import("config.zig");
 pub const observability = @import("observability.zig");
 pub const plugin = @import("plugin.zig");
 pub const pty = @import("pty.zig");
+pub const win32_relative_file = if (builtin.os.tag == .windows) @import("platform/windows/relative_file.zig") else struct {};
 pub const win32_process = @import("platform/windows/win32_process.zig"); // Windows 캡처 러너. **배럴에 거는 이유는 모듈 경로다** — 이것을 쓰는 `git_backend.zig` 가 모듈 루트가 `platform/macos` 안인 아티팩트에서도 컴파일되는데, 상대 경로로 가져오면 그때 모듈 밖이 되어 깨진다(실측: macOS CI)
 // **Windows 플랫폼 모듈은 switch 로 가려서 내보낸다.**
 // 그냥 `@import` 로 노출하면 `cross_target_surface` 의 walker 가 그 안의 모든 pub 함수 **주소를 잡아**

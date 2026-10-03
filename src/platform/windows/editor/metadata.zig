@@ -286,7 +286,7 @@ test "Windows safe save metadata clones owner DACL creation flags and large name
     for (large, 0..) |*ch, i| ch.* = @truncate(i);
     try tmp.dir.writeFile(io, .{ .sub_path = "source.txt:meta", .data = large });
     try tmp.dir.writeFile(io, .{ .sub_path = "source.txt:second", .data = "second stream" });
-    var pinned = try @import("path.zig").open(allocator, tmp.dir, "source.txt");
+    var pinned = try @import("maru").win32_relative_file.open(allocator, tmp.dir, "source.txt");
     defer pinned.deinit(io);
     try makeOwnerOnly(pinned.original);
     var source = try Source.open(pinned.original);
@@ -340,7 +340,7 @@ test "Windows safe save metadata source binds the original after namespace repla
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "source.txt", .data = "original" });
-    var pinned = try @import("path.zig").open(std.testing.allocator, tmp.dir, "source.txt");
+    var pinned = try @import("maru").win32_relative_file.open(std.testing.allocator, tmp.dir, "source.txt");
     defer pinned.deinit(io);
     try tmp.dir.rename("source.txt", tmp.dir, "displaced.txt", io);
     try tmp.dir.writeFile(io, .{ .sub_path = "source.txt", .data = "foreign" });
@@ -361,7 +361,7 @@ test "Windows safe save metadata source refuses an existing writer instead of ra
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "source.txt", .data = "original" });
-    var pinned = try @import("path.zig").open(std.testing.allocator, tmp.dir, "source.txt");
+    var pinned = try @import("maru").win32_relative_file.open(std.testing.allocator, tmp.dir, "source.txt");
     defer pinned.deinit(io);
     const writer = try tmp.dir.openFile(io, "source.txt", .{ .mode = .read_write });
     defer writer.close(io);
@@ -388,7 +388,7 @@ test "Windows safe save metadata detects changed source attributes before copyin
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "source.txt", .data = "original" });
-    var pinned = try @import("path.zig").open(std.testing.allocator, tmp.dir, "source.txt");
+    var pinned = try @import("maru").win32_relative_file.open(std.testing.allocator, tmp.dir, "source.txt");
     defer pinned.deinit(io);
     var source = try Source.open(pinned.original);
     defer source.deinit(io);
@@ -418,7 +418,7 @@ test "Windows safe save metadata partial restore aborts both native contexts and
     defer allocator.free(large);
     @memset(large, 'x');
     try tmp.dir.writeFile(io, .{ .sub_path = "source.txt:meta", .data = large });
-    var pinned = try @import("path.zig").open(allocator, tmp.dir, "source.txt");
+    var pinned = try @import("maru").win32_relative_file.open(allocator, tmp.dir, "source.txt");
     defer pinned.deinit(io);
     var source = try Source.open(pinned.original);
     defer source.deinit(io);

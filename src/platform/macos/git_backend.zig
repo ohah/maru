@@ -2084,10 +2084,32 @@ fn worktreeSideOn(allocator: std.mem.Allocator, job: *Job, rel_path: []const u8)
 
 fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) !Output {
     if (!repo_path.isSafeRelative(rel_path)) return error.UnsafePath;
+    if (comptime builtin.os.tag == .windows) return worktreeSideWindows(allocator, repo, rel_path);
     const fd = try safe_open.openNoFollow(repo, rel_path);
     defer _ = std.c.close(fd);
     const bytes = try readAllFd(allocator, fd);
     return .{ .bytes = bytes, .truncated = bytes.len >= max_output_bytes };
+}
+
+fn worktreeSideWindows(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) !Output {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var root = try std.Io.Dir.openDirAbsolute(io, repo, .{});
+    defer root.close(io);
+    var pinned = try maru.win32_relative_file.openRead(allocator, root, rel_path);
+    defer pinned.deinit(io);
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    var buffer: [16 * 1024]u8 = undefined;
+    while (bytes.items.len < max_output_bytes) {
+        const chunk = buffer[0..@min(buffer.len, max_output_bytes - bytes.items.len)];
+        const n = try pinned.original.readPositionalAll(io, chunk, bytes.items.len);
+        try bytes.appendSlice(allocator, chunk[0..n]);
+        if (n < chunk.len) break;
+    }
+    const truncated = bytes.items.len >= max_output_bytes;
+    return .{ .bytes = try bytes.toOwnedSlice(allocator), .truncated = truncated };
 }
 
 fn worker(job: *Job) void {
@@ -5171,4 +5193,30 @@ test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른
         error.GitFailed,
         runOn(allocator, remote, .status, git_command.remote_git_exe, "/", null),
     );
+}
+
+
+test "Windows worktree native read returns Unicode content and enforces the byte cap" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    try tmp.dir.createDirPath(io, "nested");
+    try tmp.dir.writeFile(io, .{ .sub_path = "nested/한글.txt", .data = "한글 content" });
+    const read = try worktreeSide(a, root, "nested/한글.txt");
+    defer a.free(read.bytes);
+    try testing.expectEqualStrings("한글 content", read.bytes);
+    try testing.expect(!read.truncated);
+    try testing.expectError(error.UnsafePath, worktreeSide(a, root, "../outside.txt"));
+    try testing.expectError(error.NotFound, worktreeSide(a, root, "missing.txt"));
+    var large = try tmp.dir.createFile(io, "large.txt", .{});
+    try large.setLength(io, max_output_bytes + 1);
+    large.close(io);
+    const capped = try worktreeSide(a, root, "large.txt");
+    defer a.free(capped.bytes);
+    try testing.expectEqual(max_output_bytes, capped.bytes.len);
+    try testing.expect(capped.truncated);
 }

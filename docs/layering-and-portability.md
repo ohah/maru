@@ -392,3 +392,19 @@ capability 없는 submit을 성공시키기, control socket/목적지 혼동, �
 capture cap 변경, 전송 실패의 remote 표식 누락 등 다섯 제품 변이가 모두 실행 판정에서 실패했다.
 원본 복구는 통과했다. 이 시험 전송을 Windows의 실물 SSH 지원 완료로 계상하지 않는다.
 Git backend와 native text 분리는 남아 있다.
+
+### 3.4.3 Chrome 텍스트 아티팩트와 CoreText adapter 분리 (2026-10-03)
+
+`src/app/chrome_text.zig`가 요청 조립·아티팩트 소유권·폰트 registry 해석·배치·clip·GPU DTO 변환을
+소유한다. Windows SCM·에이전트 표면과 main은 `maru.app.chrome_text`를 소비하며 macOS 경로를
+import하지 않는다. `platform/macos/chrome/system_text.zig`는 기존 CoreText·폰트 캐시 호출과
+macOS 전용 판정자를 유지하고, 공통 조립 함수에 native run shaper를 명시적으로 주입한다.
+공통 파일은 macOS host 파일을 import하지 않으며 기본 glyph 생성은 플랫폼 text_shaper seam을 쓴다.
+Request·UnresolvedArtifact·Artifact는 양쪽 host가 같은 타입을 사용한다.
+
+단일 run 요청도 run 배열을 heap에 소유하고 부분 할당을 실패 때 정리한다. 이전의 stack run 배열
+해제를 재현하는 실행 변이를 검사했다. 토큰 크기와 줄 높이는 backing scale을 반영하고 이미 device
+pixel인 셀 메트릭에는 배율을 다시 적용하지 않는다. Windows native glyph에서도 1.5배 줄 높이를 확인했다.
+`test-chrome-artifact`는 33개 등록(집계 21·판정 12)을 강제하며 Windows에서 모두 통과했다.
+CoreText의 실제 실행 검증은 macOS 호스트가 필요하며 Windows 결과로 이를 대체하지 않는다.
+Git backend 이동은 이미 완료했고, 이 분리는 전체 Windows 저장·편집 UI 완성을 뜻하지 않는다.

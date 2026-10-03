@@ -258,8 +258,8 @@ test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 469건 �
             if (std.mem.eql(u8, m, "maru_mod")) maru_to_maru_mod += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 267), maru_any); // +1(2026-09-29): `test-session-host-reconnect-host-charge`. +1(2026-09-29): `test-delta-base-generation`. +1(2026-09-27): 승계 거절 사유 판정자. +1: `test-remote-watch-module`(2026-09-23)
-    try std.testing.expectEqual(@as(usize, 266), maru_to_maru_mod); // +1(2026-09-29): `test-session-host-reconnect-host-charge`. +1(2026-09-29): `test-delta-base-generation`. +1(2026-09-27): 승계 거절 사유 판정자. +1: `test-remote-watch-module`(2026-09-23)
+    try std.testing.expectEqual(@as(usize, 266), maru_any); // -1: shared chrome artifact tests now own the facade root.
+    try std.testing.expectEqual(@as(usize, 265), maru_to_maru_mod); // The former Windows/macOS-path shim no longer injects maru_mod.
 }
 
 test "표도 등록이다 — 루프 한 줄 뒤의 스무 건을 세어 둔다" {

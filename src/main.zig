@@ -24,7 +24,7 @@ const win32_text = maru.win32_text;
 const win32_terminal = maru.win32_terminal;
 const cell_text = maru.cell_text; // 파일 트리 행의 셀 투영 — macOS·Windows 공유 모듈(FT3)
 const chrome_draw_lowering = maru.app.chrome_draw_lowering; // 공통 semantic draw → renderer 투영
-const system_text = @import("platform/macos/chrome/system_text.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 는 §2m.18 이음매로 간다
+const system_text = maru.app.chrome_text; // Shared artifact policy; native shaping uses the platform seam.
 const git_backend_mod = maru.app.git_backend; // 공통 Git 작업자; 실행과 파일 읽기는 플랫폼별 경로를 사용한다
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
 const win32_keys = maru.win32_keys;

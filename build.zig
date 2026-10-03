@@ -4284,7 +4284,6 @@ pub fn build(b: *std.Build) void {
     run_native_worktree_tests.addArg("--maru-expect-tests=22");
     b.step("test-win32-worktree", "Verify native Windows Git worktree reads").dependOn(&run_native_worktree_tests.step);
 
-
     // 소스 컨트롤 **행 동작 규칙**만(S1 — 충돌 행은 스테이지가 아니라 해결이다). 같은 이유로 maru
     // 그래프에 필터를 건다: 이 판정자들은 `test-editor` 그래프에 **없어서**(실측 2026-09-12) 그 이름만
     // 돌리던 적대적 검증이 `scm_view`·`git_write_command` 변이를 전부 「살아남음」으로 읽었다.
@@ -4589,25 +4588,25 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(noteSkippedStep(b, "win32_process 단위 테스트", "Windows 호스트 전용 — CreateProcessW + 익명 파이프를 실제로 돌린다 (docs/windows-platform.md §2m.8)"));
     }
 
-    // 크롬 텍스트 셰이핑의 **Windows 종단**. `system_text.zig` 의 macOS 테스트들은 CoreText 를 링크하는
-    // 아티팩트 안에 있어서 Windows 에서는 하나도 안 돈다 — 이 스텝이 없으면 이음매 배선이 컴파일만 되고
-    // **실행된 적이 없는** 상태로 남는다(실측으로 그랬다: 배선 직후 `zig build test` 에 system_text 테스트가
-    // 한 줄도 안 나왔다). DirectWrite 를 실제로 부르므로 Windows 호스트에서만 건다.
-    if (target.result.os.tag == .windows) {
+    // Shared artifact tests use the facade as their actual root so child-file
+    // tests are discovered. The native DirectWrite case skips on other hosts.
+    {
         const chrome_system_text_win_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                // 루트는 얇은 shim 이다 — 그 파일을 직접 루트로 걸면 모듈 경로가
-                // `src/platform/macos/chrome/` 이 되어 `../../../*.zig` 가 모듈 밖이 된다.
-                .root_source_file = b.path("src/chrome_system_text_win_test_root.zig"),
+                .root_source_file = b.path("src/maru.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
             }),
+            .filters = &.{"chrome artifact:"},
         });
-        test_step.dependOn(&b.addRunArtifact(chrome_system_text_win_tests).step);
-    } else {
-        test_step.dependOn(noteSkippedStep(b, "크롬 셰이핑 Windows 종단", "Windows 호스트 전용 — DirectWrite 를 실제로 불러 글리프를 잰다 (docs/windows-platform.md §2m.18)"));
+        attachPngCodec(b, chrome_system_text_win_tests.root_module);
+        chrome_system_text_win_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+        const run_chrome_system_text_win_tests = b.addRunArtifact(chrome_system_text_win_tests);
+        run_chrome_system_text_win_tests.addArg("--maru-expect-tests=33"); // 21 aggregation blocks and 12 artifact tests, including native DirectWrite.
+        if (target.result.os.tag == .windows) test_step.dependOn(&run_chrome_system_text_win_tests.step);
+        b.step("test-chrome-artifact", "Verify shared chrome artifact ownership, placement and native shaping").dependOn(&run_chrome_system_text_win_tests.step);
     }
     // exe(src/main.zig)는 control plane CLI가 unix domain socket과 POSIX 파일 모드(0600)를 직접 쓴다. 한때
     // 그래서 macOS에서만 걸었지만, W2가 그 자리들을 **호스트 OS 게이트**로 접어(컨트롤 소켓 → "인스턴스 없음",

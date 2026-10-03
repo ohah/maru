@@ -35,7 +35,7 @@ const d3d11_cells = maru.d3d11_cells;
 /// [layering-and-portability.md](../../../docs/layering-and-portability.md) §3.4 — 이 파일은 네이티브
 /// 참조가 37 개인 **섞임** 부류라 애초에 이동 후보도 아니다(떼어내는 것은 이동이 아니라 분해다 —
 /// 그 37 은 §3.4 가 쓴 계수 방식, 즉 주석까지 센 값이다).
-const system_text = @import("../macos/chrome/system_text.zig");
+const system_text = maru.app.chrome_text; // Shared artifact policy; native shaping uses the platform seam.
 
 const component = maru.chrome.components.session_dock;
 const interaction = maru.chrome.ui.interaction;

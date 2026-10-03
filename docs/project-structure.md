@@ -215,6 +215,8 @@ src/
                         동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측). 위 세 예외(editor·editor_diff·
                         scm_dock)는 분해 산물이 아니므로 이 규칙 밖이다.
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현.
+                        chrome_text_request·chrome_text·chrome_draw_lowering은 양쪽 desktop host가 공유하는
+                        요청·아티팩트/배치·draw 투영이다. CoreText 호출은 macOS adapter가 주입한다.
                         persistent-session P2: terminal runtime의 수명·입출력·관측을 GUI layout에서 분리하는
                         vtable 계약 `term_runtime_backend.zig`(TermRuntimeBackend·RuntimeHandle — opaque, PtyIo와 같은
                         관용구)와 그 in-process 구현 `in_process_term_backend.zig`(기존 LiveSurfaceRegistry+LivePtySession+

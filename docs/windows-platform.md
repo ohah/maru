@@ -10765,3 +10765,21 @@ fixture의 재귀 정리를 멈추게 했다. 해당 프로세스를 종료하�
 컴파일에서만 거절된 변이는 제외하고 실행 가능한 형태로 수정해 다시 검증했다.
 복구 후 root-main 39개와 native 경로 29개 판정이 통과했다.
 Prepared는 아직 미공개 후보만 소유하며 최종 publish/조건부 롤백과 GUI 저장은 연결하지 않았다.
+
+### 2m.138 공통 Chrome 텍스트 아티팩트와 Windows 호출 경로 정리 (2026-10-03)
+
+혼합 system_text의 소유권·배치·clip·registry 해석·GPU DTO 변환을 `src/app/chrome_text.zig`로
+이동했다. Windows SCM·에이전트 표면과 main은 공통 facade를 소비하고 macOS 경로를 import하지 않는다.
+CoreText 호출과 macOS 캐시 검증은 native adapter에 유지한다. 연결은
+[레이어링과 이식성](layering-and-portability.md) §3.4.3이 소유한다.
+§2m.18의 얇은 Windows/macOS 경로 test shim은 제거하고 facade root에서 실제 공통 판정자를 실행한다.
+
+기존 단일 run 함수는 run 배열을 요청 소유권에 맞게 할당하지 않았고, native Windows 갈래의
+토큰 줄 높이는 배율 1000으로 고정되어 있었다. run 배열과 문자열의 모든 할당 실패 prefix를 검사하며
+토큰·device 셀 메트릭을 구분하는 공통 정책으로 1.5배 native glyph 줄 높이도 확인한다.
+배율 누락·overhang 누락·이어지는 run의 advance 누락·부분 요청 정리 누락·stack run 배열 사용의
+다섯 실행 변이는 모두 런타임 실패로 검출했다. 원본 복구 후 33개 판정이 통과했다.
+실제 macOS CoreText 실행은 이 Windows 호스트에서 검증하지 못했다.
+전체 build·check-targets·check-doc-links·check-boundaries가 통과했다. Windows SCM 실창에서
+240프레임을 표시했고 이름 10/10·행 hit 10/10·접기·선택·hover·누름 판정이 통과했다.
+Windows 최종 저장·롤백·GUI 저장 연결·실앱 저장 검증은 계속 남아 있다.

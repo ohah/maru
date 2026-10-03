@@ -11,13 +11,15 @@ pub const OpenFile = struct {
     text: []u8,
     lines: std.ArrayList([]const u8),
     line_starts: []usize,
+    /// null means rebuilding failed: no borrowed body/line cache may be read.
+    cached_revision: ?u64 = 0,
     /// 뷰포트 맨 위 줄. 파일마다 따로 산다 — 파일을 오갈 때 자리를 잃으면 안 된다.
     first_line: usize = 0,
     /// 가로 스크롤 위치(열). **계약은 "가로 스크롤이 기본이고 랩은 토글"** 이다
     /// (`native-editor-visual-mapping.md` §…: `editor.wrap` 기본 `false`).
     first_col: u16 = 0,
     /// 문서에서 **가장 긴 줄**의 표시 폭. 중립이 이 값으로 막대 길이를 정하고, 가로 막대를 세울지도
-    /// 이것으로 판단한다(`showsHorizontalBar`). 여는 순간 한 번 센다 — 읽기 전용이라 안 변한다.
+    /// 이것으로 판단한다(`showsHorizontalBar`). 문서 revision마다 다시 센다.
     max_cols: u32 = 0,
     /// **오른쪽 끝** — 직전 프레임에서 중립이 세운 가로 막대의 `max_offset_px` 를 열로 바꾼 값이다.
     /// 여기서 `max_cols - 보이는 열` 로 다시 세지 않는 이유: 본문은 gutter(줄 번호·접기·여백)만큼
@@ -38,9 +40,55 @@ pub const OpenFile = struct {
     /// 색 계산의 저장소 — **규칙과 함께 중립이 갖는다**(§2m.112).
     colors: maru.chrome.components.editor_view.syntax_colors.Scratch = .{},
 
-    /// 사이드바 카드에 뜨는 이름. **경로 안을 가리킨다**(따로 복사하지 않는다).
+    /// Sidebar names may be read before painting refreshes the body projection.
     pub fn name(self: *const OpenFile) []const u8 {
-        return std.fs.path.basename(self.path);
+        const state = self.documents.get(self.document) orelse return "";
+        return std.fs.path.basename(state.path orelse return "");
+    }
+
+    /// Refresh before any body consumer. L2 replaces flattened text on edit;
+    /// keeping the old slices after allocation failure would expose freed memory.
+    /// Each view retries independently and keeps its own scroll position.
+    pub fn refresh(self: *OpenFile, allocator: std.mem.Allocator) !void {
+        const state = self.documents.get(self.document) orelse {
+            self.invalidate(allocator);
+            self.path = @constCast(&.{});
+            return error.StaleDocument;
+        };
+        self.path = state.path orelse @constCast(&.{});
+        const opened = &(state.opened orelse {
+            self.invalidate(allocator);
+            return error.NoDocument;
+        });
+        if (self.cached_revision == opened.file.revision) return;
+        self.invalidate(allocator);
+        const projection = try Projection.init(allocator, &opened.file);
+        self.text = opened.file.content;
+        self.lines = projection.lines;
+        self.line_starts = projection.starts;
+        self.max_cols = projection.widest;
+        self.syntax = ts.Provider.init(self.text, syntaxLanguageFor(maru.session.editor.language.grammarForPath(self.path)), 0);
+        self.cached_revision = opened.file.revision;
+        // A failed rebuild never publishes a revision. A later frame can retry.
+    }
+
+    fn invalidate(self: *OpenFile, allocator: std.mem.Allocator) void {
+        if (self.syntax) |*p| p.deinit();
+        self.syntax = null;
+        self.syntax_spans.clearRetainingCapacity();
+        self.color_spans.clearRetainingCapacity();
+        self.color_lines.clearRetainingCapacity();
+        self.colors.deinit(allocator);
+        self.colors = .{};
+        self.lines.deinit(allocator);
+        self.lines = .empty;
+        allocator.free(self.line_starts);
+        self.line_starts = @constCast(&.{});
+        self.text = @constCast(&.{});
+        self.max_cols = 0;
+        self.hmax_col = 0;
+        self.vmax_line = 0;
+        self.cached_revision = null;
     }
 
     pub fn deinit(self: *OpenFile, allocator: std.mem.Allocator) void {
@@ -54,6 +102,48 @@ pub const OpenFile = struct {
         _ = self.documents.release(self.document) catch unreachable;
     }
 };
+
+/// Only offsets and borrowed line slices belong to the view. L2 owns the body.
+const Projection = struct {
+    lines: std.ArrayList([]const u8),
+    starts: []usize,
+    widest: u32,
+
+    fn init(allocator: std.mem.Allocator, file: *const maru.session.editor.edit_doc.EditableFile) !Projection {
+        const index = file.lines.lines;
+        var lines = try std.ArrayList([]const u8).initCapacity(allocator, index.len);
+        errdefer lines.deinit(allocator);
+        const starts = try allocator.alloc(usize, index.len);
+        errdefer allocator.free(starts);
+        var widest: u32 = 0;
+        for (index, starts) |line, *start| {
+            const content = file.content[line.start..line.contentEnd()];
+            lines.appendAssumeCapacity(content);
+            start.* = line.start;
+            const limit = maru.chrome.components.editor_view.frame.default_max_columns;
+            if (widest < limit) widest = @max(widest, @min(limit, maru.chrome.components.overlay_input.displayCols(content)));
+        }
+        return .{ .lines = lines, .starts = starts, .widest = widest };
+    }
+};
+
+/// Attach another independently cached view to the same L2 document.
+/// The caller's lease is unchanged on success and on every allocation failure.
+pub fn attach(documents: *maru.session.editor.document_registry.Registry, source: maru.session.editor.document_registry.Lease, allocator: std.mem.Allocator) !OpenFile {
+    const lease = try documents.retain(source, .view);
+    var file: OpenFile = .{
+        .documents = documents,
+        .document = lease,
+        .path = @constCast(&.{}),
+        .text = @constCast(&.{}),
+        .lines = .empty,
+        .line_starts = @constCast(&.{}),
+        .cached_revision = null,
+    };
+    errdefer file.deinit(allocator);
+    try file.refresh(allocator);
+    return file;
+}
 
 /// 파일을 읽어 편집기가 쓸 재료로 만든다. **여는 규칙은 중립이 소유한다**
 /// (`file_panel_bridge.openKindForPath`) — 확장자 표를 여기서 다시 적으면 macOS 와 갈린다.
@@ -121,27 +211,19 @@ pub fn openFileFor(
     const text = prepared.opened.?.file.content;
     const owned_path = prepared.path.?;
     var transferred = false;
-    var lines: std.ArrayList([]const u8) = .empty;
-    defer if (!transferred) lines.deinit(allocator);
-    const index = prepared.opened.?.file.lines.lines;
-    const starts = allocator.alloc(usize, index.len) catch return .out_of_memory;
-    defer if (!transferred) allocator.free(starts);
-    var widest: u32 = 0;
-    for (index, starts) |line, *st| {
-        const content = text[line.start..line.contentEnd()];
-        lines.append(allocator, content) catch return .out_of_memory;
-        st.* = line.start;
-        // Compute every start even after the display width reaches its cap.
-        const limit = maru.chrome.components.editor_view.frame.default_max_columns;
-        if (widest < limit) widest = @max(widest, @min(limit, maru.chrome.components.overlay_input.displayCols(content)));
-    }
+    var projection = Projection.init(allocator, &prepared.opened.?.file) catch return .out_of_memory;
+    defer if (!transferred) {
+        projection.lines.deinit(allocator);
+        allocator.free(projection.starts);
+    };
     // **구문 파서를 여기서 한 번 세운다.** 문서가 안 바뀌므로(읽기 전용) 다시 팔 일이 없다 —
     // macOS 의 예산·재개 장치(§2.1a)가 필요한 것은 편집이 있을 때다. 문법이 번들에 없으면 `null`
     // 이고 그때는 무색이다(계약 §5 — 결함이 아니다).
     //
     // **문법 표를 여기서 다시 적지 않는다** — `grammarForPath` 가 단일 출처다.
     const grammar = maru.session.editor.language.grammarForPath(path);
-    const provider = ts.Provider.init(text, syntaxLanguageFor(grammar), 0);
+    var provider = ts.Provider.init(text, syntaxLanguageFor(grammar), 0);
+    defer if (!transferred) if (provider) |*p| p.deinit();
 
     const lease = documents.create(&prepared, allocator) catch return .out_of_memory;
     transferred = true;
@@ -150,9 +232,9 @@ pub fn openFileFor(
         .document = lease,
         .path = owned_path,
         .text = text,
-        .lines = lines,
-        .line_starts = starts,
-        .max_cols = widest,
+        .lines = projection.lines,
+        .line_starts = projection.starts,
+        .max_cols = projection.widest,
         .syntax = provider,
     } };
 }
@@ -259,6 +341,201 @@ test "Windows file open registry owns BOM CRLF and complete line starts" {
     try std.testing.expect(documents.get(lease) == null);
 }
 
+fn testPrepared(a: std.mem.Allocator) !maru.session.editor.document_state.State {
+    var state: maru.session.editor.document_state.State = .{};
+    errdefer state.clear(a);
+    const file = try maru.session.editor.edit_doc.EditableFile.init(a, "alpha\r\n한글\nend", false);
+    state.opened = .{ .file = file, .saved_hash = maru.session.editor.document_state.contentHash(file.content) };
+    state.path = try a.dupe(u8, "sample.txt");
+    return state;
+}
+
+fn testReplace(state: *maru.session.editor.document_state.State, bytes: []const u8) !void {
+    const editor = maru.session.editor;
+    var items = [_]editor.selection.Selection{editor.selection.Selection.at(0)};
+    var selections = editor.selection.Selections.init(&items, 0);
+    var inverse = try state.opened.?.file.apply(.{ .changes = &.{.{ .start = 0, .end = state.opened.?.file.content.len, .text = bytes }} }, &selections);
+    inverse.deinit();
+}
+
+test "Windows file open refresh reflects edited UTF8 and exact CRLF offsets" {
+    const a = std.testing.allocator;
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var state = try testPrepared(a);
+    defer state.clear(a);
+    const lease = try registry.create(&state, a);
+    defer _ = registry.release(lease) catch unreachable;
+    var view = try attach(&registry, lease, a);
+    defer view.deinit(a);
+    view.first_line = 1;
+    view.first_col = 3;
+    try testReplace(registry.get(lease).?, "새줄\r\nchanged\n");
+    try view.refresh(a);
+    try std.testing.expectEqual(@as(?u64, 1), view.cached_revision);
+    try std.testing.expectEqualStrings("새줄", view.lines.items[0]);
+    try std.testing.expectEqualStrings("changed", view.lines.items[1]);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 8, 16 }, view.line_starts);
+    try std.testing.expectEqual(@as(u32, 7), view.max_cols);
+    try std.testing.expectEqual(@as(usize, 1), view.first_line);
+    try std.testing.expectEqual(@as(u16, 3), view.first_col);
+    try std.testing.expect(view.text.ptr == registry.get(lease).?.opened.?.file.content.ptr);
+    try std.testing.expect(registry.get(lease).?.opened.?.isDirty());
+}
+
+test "Windows file open unchanged revision refresh allocates nothing" {
+    const a = std.testing.allocator;
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var state = try testPrepared(a);
+    defer state.clear(a);
+    const lease = try registry.create(&state, a);
+    defer _ = registry.release(lease) catch unreachable;
+    var view = try attach(&registry, lease, a);
+    defer view.deinit(a);
+    const lines = view.lines.items.ptr;
+    const starts = view.line_starts.ptr;
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try view.refresh(failing.allocator());
+    try std.testing.expectEqual(lines, view.lines.items.ptr);
+    try std.testing.expectEqual(starts, view.line_starts.ptr);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "Windows file open refresh failure invalidates old borrows and permits retry" {
+    const a = std.testing.allocator;
+    for (0..2) |fail_index| {
+        var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+        defer registry.deinit() catch unreachable;
+        var state = try testPrepared(a);
+        defer state.clear(a);
+        const lease = try registry.create(&state, a);
+        defer _ = registry.release(lease) catch unreachable;
+        var view = try attach(&registry, lease, a);
+        defer view.deinit(a);
+        view.first_line = 2;
+        try testReplace(registry.get(lease).?, "replacement\nsecond");
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, view.refresh(failing.allocator()));
+        try std.testing.expect(view.cached_revision == null);
+        try std.testing.expectEqual(@as(usize, 0), view.text.len);
+        try std.testing.expectEqual(@as(usize, 0), view.lines.items.len);
+        try std.testing.expectEqual(@as(usize, 0), view.line_starts.len);
+        try std.testing.expect(view.syntax == null);
+        try std.testing.expectEqual(@as(u32, 0), view.max_cols);
+        try view.refresh(a);
+        try std.testing.expectEqualStrings("replacement", view.lines.items[0]);
+        try std.testing.expectEqual(@as(usize, 2), view.first_line);
+        try std.testing.expectEqual(@as(?u64, 1), view.cached_revision);
+    }
+}
+
+test "Windows file open attached views refresh independently and preserve document lifetime" {
+    const a = std.testing.allocator;
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var state = try testPrepared(a);
+    defer state.clear(a);
+    const lease = try registry.create(&state, a);
+    var source_released = false;
+    defer if (!source_released) {
+        _ = registry.release(lease) catch unreachable;
+    };
+    var left = try attach(&registry, lease, a);
+    defer left.deinit(a);
+    var right = try attach(&registry, lease, a);
+    defer right.deinit(a);
+    left.first_line = 1;
+    right.first_line = 2;
+    try std.testing.expectEqual(@as(?usize, 3), registry.viewCount(lease));
+    try testReplace(registry.get(lease).?, "both views\nsee this");
+    try left.refresh(a);
+    // The other view must refresh before reading; a lease is not a text snapshot.
+    try std.testing.expectEqual(@as(?u64, 0), right.cached_revision);
+    try right.refresh(a);
+    try std.testing.expect(left.text.ptr == right.text.ptr);
+    try std.testing.expect(left.lines.items.ptr != right.lines.items.ptr);
+    try std.testing.expectEqualStrings("see this", right.lines.items[1]);
+    try std.testing.expectEqual(@as(usize, 1), left.first_line);
+    try std.testing.expectEqual(@as(usize, 2), right.first_line);
+    try std.testing.expect(!try registry.release(lease));
+    source_released = true;
+    try std.testing.expectEqual(@as(?usize, 2), registry.viewCount(left.document));
+    try left.refresh(a);
+}
+
+fn testAttachAllocations(a: std.mem.Allocator, registry: *maru.session.editor.document_registry.Registry, lease: maru.session.editor.document_registry.Lease) !void {
+    const before = registry.viewCount(lease);
+    var view = attach(registry, lease, a) catch |err| {
+        try std.testing.expectEqual(before, registry.viewCount(lease));
+        return err;
+    };
+    view.deinit(a);
+    try std.testing.expectEqual(before, registry.viewCount(lease));
+}
+
+test "Windows file open attaching releases every failed projection allocation prefix" {
+    const a = std.testing.allocator;
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var state = try testPrepared(a);
+    defer state.clear(a);
+    const lease = try registry.create(&state, a);
+    defer _ = registry.release(lease) catch unreachable;
+    try std.testing.checkAllAllocationFailures(a, testAttachAllocations, .{ &registry, lease });
+}
+
+test "Windows file open refresh replaces native syntax and clears stale spans" {
+    const a = std.testing.allocator;
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var state = try testPrepared(a);
+    defer state.clear(a);
+    const new_path = try a.dupe(u8, "sample.zig");
+    a.free(state.path.?);
+    state.path = new_path;
+    try testReplace(&state, "const old = 1;\n");
+    const lease = try registry.create(&state, a);
+    defer _ = registry.release(lease) catch unreachable;
+    var view = try attach(&registry, lease, a);
+    defer view.deinit(a);
+    if (view.syntax == null) return error.SkipZigTest;
+    view.syntax.?.spansForRange(a, view.text, .{ .start = 0, .end = @intCast(view.text.len) }, &view.syntax_spans);
+    try std.testing.expect(view.syntax_spans.items.len > 0);
+    try testReplace(registry.get(lease).?, "// entirely a comment\n");
+    try view.refresh(a);
+    try std.testing.expectEqual(@as(usize, 0), view.syntax_spans.items.len);
+    try std.testing.expect(view.syntax != null);
+    view.syntax.?.spansForRange(a, view.text, .{ .start = 0, .end = @intCast(view.text.len) }, &view.syntax_spans);
+    try std.testing.expect(view.syntax_spans.items.len > 0);
+    var comments: usize = 0;
+    for (view.syntax_spans.items) |span| {
+        // Zig's bundled query also captures @spell inside comments.
+        try std.testing.expect(std.mem.startsWith(u8, span.capture, "comment") or std.mem.eql(u8, span.capture, "spell"));
+        if (std.mem.eql(u8, span.capture, "comment")) comments += 1;
+    }
+    try std.testing.expect(comments > 0);
+}
+
+test "Windows file open refresh after document clearing exposes no old borrows" {
+    const a = std.testing.allocator;
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var state = try testPrepared(a);
+    defer state.clear(a);
+    const lease = try registry.create(&state, a);
+    defer _ = registry.release(lease) catch unreachable;
+    var view = try attach(&registry, lease, a);
+    defer view.deinit(a);
+    registry.get(lease).?.clear(a);
+    try std.testing.expectError(error.NoDocument, view.refresh(a));
+    try std.testing.expect(view.cached_revision == null);
+    try std.testing.expectEqual(@as(usize, 0), view.text.len);
+    try std.testing.expectEqual(@as(usize, 0), view.lines.items.len);
+    try std.testing.expectEqual(@as(usize, 0), view.path.len);
+    try std.testing.expectEqualStrings("", view.name());
+}
+
 /// `session` 의 문법 이름을 `syntax` 의 것으로 옮긴다. **두 열거가 같은 축이고**(그 파일 doc:
 /// *"값을 늘릴 때 두 곳이 갈리지 않게 호출자가 옮긴다"*), 이름이 1:1 이라 comptime 에 유도한다 —
 /// 손으로 쓴 switch 는 한쪽에 문법이 늘 때 조용히 `.other` 로 떨어진다.
@@ -305,4 +582,3 @@ fn syntaxLanguageFor(g: maru.session.editor.language.Grammar) ts.Language {
         .none => .other,
     };
 }
-

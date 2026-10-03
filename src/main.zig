@@ -209,6 +209,10 @@ fn dispatch(
         try runWin32EditorDrawSmoke(io, allocator, stdout, stderr);
         return;
     }
+    if (std.mem.eql(u8, command, "win32-editor-document-smoke")) {
+        try runWin32EditorDocumentSmoke(allocator, stdout, stderr);
+        return;
+    }
     if (std.mem.eql(u8, command, "win32-file-tree-smoke")) {
         try runWin32FileTreeSmoke(io, allocator, stdout, stderr);
         return;
@@ -4291,6 +4295,7 @@ fn buildComposedEditor(
     cell_w: u32,
     cell_h: u32,
 ) !EditorBuilt {
+    try file.refresh(allocator);
     const n_lines = file.lines.items.len;
     const text_bytes = try allocator.alloc(u8, 256 * 1024);
     defer allocator.free(text_bytes);
@@ -4381,10 +4386,8 @@ fn buildComposedEditor(
 /// 줄 슬라이스가 **문서 어디에 앉아 있는가**. 그 슬라이스는 `text` 안을 가리키므로 포인터 차이가
 /// 곧 진짜 오프셋이다.
 ///
-/// **`OpenFile.line_starts` 를 쓰면 안 된다.** 그것은 CR 을 벗긴 뒤 `off += len + 1` 로 만든 **가상**
-/// 축이라(선택 영역이 그 축을 쓴다) CRLF 문서에서 줄마다 1 씩 어긋난다 — tree-sitter 의 스팬은
-/// `text` 의 바이트 축이므로 그대로 쓰면 **색이 밀린다.** LF 문서에서는 두 축이 같아 증상이 안
-/// 보이므로, 이 자리를 «단순화» 하면 조용히 깨진다(그래서 아래 판정이 CRLF 로 잰다).
+/// L2 now supplies exact CRLF line_starts as well. This helper also serves
+/// standalone draw fixtures, so it derives bounds from the actual text slices.
 fn lineBoundsIn(text: []const u8, line: []const u8) maru.chrome.components.editor_view.syntax_colors.LineBounds {
     const st: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
     return .{ .start = st, .end = st + @as(u32, @intCast(line.len)) };
@@ -4412,16 +4415,15 @@ test "줄 경계는 CRLF 에서도 진짜 문서 오프셋이다" {
 /// 보이는 창의 줄별 구문 색. **규칙은 중립이 갖는다**(`editor_view.syntax_colors`) — 여기서 하는
 /// 일은 재료를 그 층의 낱말로 옮기는 것뿐이다.
 ///
-/// **줄 경계는 진짜 문서 오프셋이어야 한다.** `OpenFile.line_starts` 는 CR 을 벗긴 뒤 만든 **가상**
-/// 오프셋이라(선택 영역이 그 축을 쓴다) CRLF 파일에서 tree-sitter 의 바이트 축과 어긋난다 — 그대로
-/// 쓰면 색이 줄마다 밀린다(적대적 검증이 만들기 전에 잡았다). 줄 슬라이스가 `text` 안을 가리키므로
-/// **포인터 차이**로 진짜 오프셋을 얻는다.
+/// Line bounds use actual document bytes, including CRLF. Refresh first because
+/// editing frees the previous flattened text that these slices borrowed.
 fn editorLineColors(
     allocator: std.mem.Allocator,
     file: *OpenFile,
     first_line: usize,
     count: usize,
 ) []const []const editor_view.content.ColorSpan {
+    file.refresh(allocator) catch return &.{};
     const p = &(file.syntax orelse return &.{});
     const ls = file.lines.items;
     if (first_line >= ls.len or count == 0) return &.{};
@@ -15984,6 +15986,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru dwrite-text-smoke
         \\  maru win32-frame-smoke
         \\  maru win32-terminal-smoke [--hold-editor-ms n] [--hold-notice-ms n]
+        \\  maru win32-editor-document-smoke
         \\  maru win32-clipboard-smoke [<expected> | --paste-encode]
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
@@ -16449,6 +16452,80 @@ fn buildEditorFrame(
     try appendPaintOps(a, op_buf[0..w.ops], tk, v.w, v.h, origin_x, origin_y, &built.cells);
     _ = try h.appendGlyphCellsAt(a, built.frame, cl, origin_x, origin_y, &built.cells);
     return built;
+}
+
+/// Exercise the product's composed editor through real DirectWrite/D3D frames.
+/// Only this in-memory fixture is writable; no user file or config is changed.
+fn runWin32EditorDocumentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (builtin.os.tag != .windows) {
+        try stderr.writeAll("maru win32-editor-document-smoke: Windows only\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    const cfg: maru.config.Config = .{};
+    var host = try draw_host.Host.open(allocator, cfg, .{ .title = std.unicode.utf8ToUtf16LeStringLiteral("maru (editor revision smoke)") });
+    defer host.close();
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = allocator };
+    defer documents.deinit() catch unreachable;
+    // Korean here is file-content fixture data for fallback/CRLF checks, not UI
+    // copy. CLI verdicts stay English; i18n_literals records these two fixtures.
+    const original = "const before = 1;\r\n// 한글\r\n";
+    var prepared: editor.document_state.State = .{};
+    defer prepared.clear(allocator);
+    const file = try editor.edit_doc.EditableFile.init(allocator, original, false);
+    prepared.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content) };
+    prepared.path = try allocator.dupe(u8, "revision-smoke.zig");
+    const lease = try documents.create(&prepared, allocator);
+    defer _ = documents.release(lease) catch unreachable;
+    var view = try editor_document.attach(&documents, lease, allocator);
+    defer view.deinit(allocator);
+    const ops = try allocator.alloc(maru.chrome.draw.Op, 4096);
+    defer allocator.free(ops);
+    const tokens = chromeTokensFor(cfg);
+    var items = [_]editor.selection.Selection{editor.selection.Selection.at(0)};
+    var selections = editor.selection.Selections.init(&items, 0);
+    var inverse: ?editor.delta.Inverse = null;
+    defer if (inverse) |*owned| owned.deinit();
+    var frames: usize = 0;
+    var before_digest: u64 = 0;
+    for (0..3) |phase| {
+        const state = documents.get(lease).?;
+        if (phase == 1) inverse = try state.opened.?.file.apply(.{ .changes = &.{.{ .start = 0, .end = 0, .text = "// 수정된 문서\r\n" }} }, &selections);
+        if (phase == 2) {
+            var undone = try state.opened.?.file.apply(inverse.?.delta(), &selections);
+            undone.deinit();
+        }
+        // No explicit view refresh: the same paint entry used by the app must do it.
+        var built = try buildComposedEditor(allocator, EditorHost.fromHost(&host), &view, .{
+            .x = 0,
+            .y = 0,
+            .w = host.initial.width_px,
+            .h = host.initial.height_px,
+        }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(allocator);
+        if (view.cached_revision != state.opened.?.file.revision or view.text.ptr != state.opened.?.file.content.ptr)
+            return error.StaleEditorProjection;
+        if (view.lines.items.len != state.opened.?.file.lines.lines.len) return error.StaleEditorLines;
+        for (view.lines.items, view.line_starts, state.opened.?.file.lines.lines) |line, start, expected| {
+            if (start != expected.start or !std.mem.eql(u8, line, view.text[expected.start..expected.contentEnd()]))
+                return error.StaleEditorOffsets;
+        }
+        if (state.opened.?.isDirty() != (phase == 1)) return error.WrongEditorDirtyState;
+        if (built.frame.glyph_quad_frame.glyphs.len == 0) return error.EmptyEditorGlyphs;
+        const digest = d3d11_cells.cellsDigest(built.cells.items);
+        if (phase == 0) before_digest = digest;
+        if (phase == 1 and digest == before_digest) return error.UnchangedEditorPicture;
+        if (phase == 2 and !std.mem.eql(u8, view.text, original)) return error.EditorUndoMismatch;
+        const shown = try host.presentLoop(built.cells.items, 0xFF1E2430, 20);
+        if (shown != 20) return error.EditorSmokeInterrupted;
+        frames += shown;
+        try stdout.print("editor_document_phase={d} revision={d} lines={d} dirty={} glyphs={d} digest=0x{X}\n", .{
+            phase, state.opened.?.file.revision, view.lines.items.len, state.opened.?.isDirty(), built.frame.glyph_quad_frame.glyphs.len, digest,
+        });
+    }
+    try stdout.print("editor_document_smoke_ok=true frames_presented={d}\n", .{frames});
+    try stdout.flush();
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.

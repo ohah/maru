@@ -108,3 +108,7 @@ W8.17의 metadata 보존·쓰기·충돌 검사·편집 입력·GUI 저장·외�
 경로 핸들에 상대적으로 배타 생성·본문 교체·sync·미공개 kernel object 정리를 수행한다.
 ACL/owner·부가 stream·속성 복사는 windows-platform.md §2m.133과 §2m.135에서 검증했다.
 CAS/commit/rollback과 GUI 연결은 계속 남아 있다.
+
+Windows 뷰 revision 갱신과 여러 view lease의 파생 캐시 수명은 windows-platform.md §2m.140에서
+구현·검증했다. 제품 페인트 경로의 실창 수정/역연산 스모크도 추가했다. 일반 파일의 입력·선택·
+undo 그룹·저장·dirty-close·외부 감시가 연결된 것은 아니므로 W8.17 완료로 세지 않는다.

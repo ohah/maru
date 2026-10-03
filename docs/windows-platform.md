@@ -10808,3 +10808,36 @@ TxF 대안을 강하게 권고하고 향후 Windows 제공을 보장하지 않�
 변경하지 않는다. NTFS 이외 파일 시스템·원격 경로 지원, pinned parent 상대 열기, commit 실패의
 결과 판별, 충돌 CAS, 충돌 후 조건부 rollback 및 crash 복구는 증명하지 않았다.
 앱에는 이 도구를 연결하지 않았고 GUI 편집·저장·재열기 검증도 계속 남아 있다.
+
+### 2m.140 Windows 문서 revision과 실제 편집기 페인트 갱신 (2026-10-03)
+
+Windows 문서 뷰는 L2 Registry lease로 본문을 빌리며, L2 편집은 평탄화된 메모리를 교체한다.
+`OpenFile.refresh`는 본문 소비 전에 revision을 확인하고 줄 슬라이스·정확한 CRLF 시작 offset·최대 표시 폭·
+native syntax provider를 갱신한다. 이전 캐시를 먼저 무효화하여 할당 실패 뒤 해제된 본문을 읽지 않는다.
+실패한 캐시는 revision을 게시하지 않고 다음 프레임에 재시도한다. 본문이 사라지면 빈 캐시와
+명시적인 오류를 반환한다. 사이드바 이름도 현재 Registry 경로에서 읽는다.
+
+`attach`는 독립 view lease와 파생 캐시만 만들고 본문 소유권은 L2에 유지한다. 두 뷰는 별도로
+갱신하며 각자의 스크롤을 유지한다. 초기 열기와 재구축은 같은 Projection 구현을 쓴다.
+초기 Registry 생성 실패 때 이미 만든 native syntax provider도 정리한다.
+본문을 소비하는 제품 `buildComposedEditor`와 구문 색 계산이 먼저 refresh를 호출한다.
+GUI 입력을 붙일 때도 hit-test·선택·복사 등 모든 본문 소비 전에 같은 계약을 지켜야 한다.
+
+`zig build test-win32-file-open`의 13개 판정이 통과했다. UTF-8/CRLF 수정, revision이 같을 때 무할당,
+두 재구축 할당 실패점과 재시도, 복수 뷰와 원본 lease 해제, attach 파생 캐시 전체 할당 실패 prefix,
+실제 tree-sitter 구문 변경, 본문 제거를 검사한다. revision 무시·실패 시 텍스트 유지·revision 조기 게시·
+구문 스팬 유지·잘못된 lease 종류의 다섯 실행 변이를 모두 런타임 실패로 검출했고 복구 후 통과했다.
+
+`zig-out/bin/maru.exe win32-editor-document-smoke`는 사용자 파일·config를 변경하지 않는 메모리 fixture를
+실제 DirectWrite/D3D 창에 표시한다. 제품 페인트 진입점을 그대로 호출하며 별도 refresh로 대신하지 않는다.
+수정 전 revision 0/3줄/dirty=false, 수정 후 revision 1/4줄/dirty=true,
+역연산 후 revision 2/3줄/dirty=false에서 총 60프레임을 표시했다. glyph는 25→35→25개였고
+그림 digest는 수정 후 바뀌고 역연산 후 원래 값으로 돌아왔다. 줄 오프셋과 본문 포인터도 현재 L2와 비교한다.
+페인트 refresh 두 곳을 모두 제거한 추가 실행 변이는 실제 창에서 StaleEditorProjection으로 검출했다.
+일반 제품 루프의 `win32-terminal-smoke`도 종료 코드 0과 2,582프레임으로 완료했다.
+파일 열기, 편집기 236프레임의 pane 밖 셀 0, 스크롤 그림 변경, 첫 화면과 스크롤 뒤 구문 색 판정이
+통과했다. 파일 활성 상태의 키·세션 추가 두 판정은 이번 실행에서 unjudgeable이므로 통과로 세지 않는다.
+
+일반 파일 열기는 여전히 read_only=true다. 이 스모크는 L2 편집 연산과 실제 렌더 연결을 검증하며
+키 입력·IME·선택 UX·undo 그룹·디스크 저장·dirty-close를 증명하지 않는다.
+revision 변경 때 syntax를 통째로 다시 파는 비용도 남아 있다. 최종 저장·입력 연결·실앱 저장 검증은 계속 진행한다.

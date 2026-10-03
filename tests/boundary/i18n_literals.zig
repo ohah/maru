@@ -72,6 +72,9 @@ const inventory = [_]Entry{
     // `cli/browser/run.zig`(41) 도 **0 이 되어 빠졌다**. `cli/ssh.zig` 에 남은 하나는
     // `@compileError` 라 개발자 메시지이고 §7.1 대상이 아니다 — 그 사실을 그 자리 주석이 든다.
     .{ .path = "src/cli/ssh.zig", .count = 1 },
+    // Windows editor revision smoke: two Korean file-content fixtures, not CLI
+    // messages or translated UI copy. Verdict output remains English (§7.1).
+    .{ .path = "src/main.zig", .count = 2 },
 
     // ── 번역 대상 레이어(§7.2) ──
     // **표시 문자열이 아닌 것들** — 토크나이저 전환으로 드러났고, 각각 성격을 확인해 등재했다.
@@ -316,7 +319,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 373; // +114: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
+const header_total = 375; // +114: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
 const header_config_total = 54;
 
 comptime {

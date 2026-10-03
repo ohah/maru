@@ -3956,3 +3956,8 @@ shared metadata의 제품 capture/apply는 여전히 미연결이며, codec scra
 잘림·잘못된 UTF-8·알 수 없는 헤더·디렉터리·권한 거부 5개 isolated home을 검사한다.
 실제 앱 종료 후 원본 inode/내용과 기존 백업 보존을 판정한다. 동시 writer나 전원 손실
 검증으로 확대하지 않는다 (`/tmp/maru-hostile-workspace-app-final.log`).
+
+확장 모드 `--extended --report /tmp/maru-workspace-hostile-20.json`는 10개 절단 위치와
+8개 문법/구조 오류, 디렉터리·읽기 권한 실패의 20회 실제 앱 검사를 실행한다.
+원본·백업 inode와 내용, 무관한 sibling sentinel, 임시 저장 파일 부재를 판정한다.
+회차별 결과는 [복원 검증 계획](plans/editor-shared-restore.md)에 기록한다.

@@ -48309,3 +48309,63 @@ test "U4d-7 revived source survives failed backup and clears only after replacem
         }
     }
 }
+
+test "U4b-15 independent documents at the same path overwrite one backup and reopen only the last writer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |rewrite_first| {
+        var dir = testing.tmpDir(.{});
+        defer dir.cleanup();
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = try pinBackupDir(&root_buf, &dir);
+        defer app_session_mod.editor_backup_ops.setDirForTest(null);
+        try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+        const wanted = if (rewrite_first) "A2:A:disk\n" else "B:disk\n";
+        {
+            var fx = try UntitledFixture.init(allocator, false, true);
+            defer fx.deinit(allocator);
+            const first = try openPathInActivePane(fx.session, path);
+            const second = try openPathInActivePane(fx.session, path);
+            try testing.expect(first.rt.editorDocument() != second.rt.editorDocument());
+            try testing.expect(first.rt.editor_document_lease.?.document.slot != second.rt.editor_document_lease.?.document.slot);
+            first.rt.editor_selection = editor_selection.Selection.at(0);
+            second.rt.editor_selection = editor_selection.Selection.at(0);
+            try testing.expect(insertText(fx.session, first, "A:"));
+            try testing.expect(insertText(fx.session, second, "B:"));
+            try testing.expectEqualStrings("A:disk\n", first.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualStrings("B:disk\n", second.rt.editorDocument().opened.?.file.content);
+            const first_identity = app_session_mod.editor_backup_ops.identity(first).?;
+            const second_identity = app_session_mod.editor_backup_ops.identity(second).?;
+            var first_name: [backup_rules.max_file_name_len]u8 = undefined;
+            var second_name: [backup_rules.max_file_name_len]u8 = undefined;
+            try testing.expectEqualStrings(backup_rules.fileName(&first_name, first_identity), backup_rules.fileName(&second_name, second_identity));
+            app_session_mod.editor_backup_ops.flushAll(fx.session);
+            if (rewrite_first) {
+                first.rt.editor_selection = editor_selection.Selection.at(0);
+                try testing.expect(insertText(fx.session, first, "A2:"));
+                app_session_mod.editor_backup_ops.flushAll(fx.session);
+            }
+            try testing.expect(first.rt.editorDocument().notifications.backup_on_disk);
+            try testing.expect(second.rt.editorDocument().notifications.backup_on_disk);
+            const bytes = try readBackup(allocator, root, first_identity);
+            defer allocator.free(bytes);
+            var parsed = try backup_rules.parse(allocator, bytes);
+            defer parsed.deinit(allocator);
+            try testing.expectEqualStrings(wanted, parsed.content);
+        }
+        // No further backup ticks: independent volatile states are gone; only one record survives.
+        var reopened = try UntitledFixture.init(allocator, false, true);
+        defer reopened.deinit(allocator);
+        const one = try openPathInActivePane(reopened.session, path);
+        const two = try openPathInActivePane(reopened.session, path);
+        try testing.expect(one.rt.editorDocument() != two.rt.editorDocument());
+        try testing.expectEqualStrings(wanted, one.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings(wanted, two.rt.editorDocument().opened.?.file.content);
+        const disk = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(4096));
+        defer allocator.free(disk);
+        try testing.expectEqualStrings("disk\n", disk);
+        std.debug.print("independent_same_path_collision last_writer={s} both_reopen_same=true disk_unchanged=true\n", .{if (rewrite_first) "first" else "second"});
+    }
+}

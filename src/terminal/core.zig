@@ -844,6 +844,9 @@ pub const TerminalCore = struct {
     pub fn setMaxScrollback(self: *TerminalCore, lines: usize) void {
         const target = if (self.alt_active) &self.saved_screen.sb else &self.screen.sb;
         const dropped = target.setCap(self.allocator, lines);
+        // alt 중이면 잘린 것은 **보관된 primary** 의 스크롤백이다 — 선택·view_offset 은 활성(alt) 화면의 것이라 그대로고,
+        // 그 화면의 이미지만 옮긴다(예전엔 아무것도 안 옮겨 primary 이미지가 다른 줄 위에 섰다, 2026-10-03).
+        if (dropped > 0 and self.alt_active) kitty.shiftSavedPlacementsForEviction(self, dropped);
         if (dropped > 0 and !self.alt_active) { // 활성 primary를 트림했을 때만 좌표 보정
             self.shiftCoordsForEviction(dropped); // 선택(걸리면 해제)·placement anchor를 dropped만큼 당김
             const old_offset = self.view_offset;
@@ -4836,6 +4839,34 @@ test "kitty scroll: 스크롤 영역 밖(상태줄)의 이미지는 영역이 �
         try std.testing.expectEqual(want, screenFirstCodepoint(&core, pl.anchor_row));
     }
     try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+}
+
+// alt 중에 스크롤백 상한을 줄이면 **보관된 primary 의 스크롤백**이 잘린다(활성 alt 는 스크롤백이 없다). 예전에는 「활성
+// primary 를 트림했을 때만」 좌표를 보정해서, primary 의 이미지가 잘린 줄 수만큼 아래 줄로 밀려 다른 글자 위에 섰고
+// 잘린 줄에 있던 이미지는 남아 엉뚱한 줄을 가리켰다(2026-10-03 발견). 보관 화면의 placement 를 같은 규칙으로 옮긴다.
+test "setMaxScrollback: alt 중 보관된 primary 스크롤백을 자르면 primary 이미지도 자기 줄을 따라간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    core.setMaxScrollback(10);
+    try core.write("r0\r\nr1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\r\nr7"); // 스크롤백 r0..r5(6 행), 화면 r6·r7
+    const before = core.scrollbackLen();
+    try std.testing.expectEqual(@as(usize, 6), before);
+    var keep = mkTestPlacement(before - 1); // r5 — 남는다
+    keep.placement_id = 5;
+    var gone = mkTestPlacement(1); // r1 — 잘린다
+    gone.placement_id = 1;
+    try core.kitty_placements.append(std.testing.allocator, keep);
+    try core.kitty_placements.append(std.testing.allocator, gone);
+
+    try core.write("\x1b[?1049h"); // alt — primary 의 배치는 보관 목록으로
+    core.setMaxScrollback(2); // 보관된 primary 스크롤백이 r4·r5 만 남는다(4 행 버림)
+    try core.write("\x1b[?1049l");
+
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // r1 의 이미지는 줄과 함께 사라졌다
+    const p = core.kitty_placements.items[0];
+    try std.testing.expectEqual(@as(u32, 5), p.placement_id);
+    try std.testing.expectEqual(@as(u21, '5'), core.scrollbackRow(p.anchor_row).?[1].codepoint); // 여전히 r5 위
 }
 
 test "setMaxScrollback: alt 중 하향 트림은 활성 alt 화면의 placement를 보정하지 않는다" {

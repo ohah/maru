@@ -725,14 +725,30 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
                 });
             }
         }
-        // Stable GPU paint fixtures above the glyph grid: vertical, horizontal,
-        // and a clipped horizontal gradient. Pixel capture can distinguish a
-        // real interpolation from a solid substitute or restarted endpoints.
-        const red = d3d11_cells.colorFromArgb(0xFFFF0000);
-        const blue = d3d11_cells.colorFromArgb(0xFF0000FF);
-        try cells.append(allocator, d3d11_cells.paintCell(.{ 16, 16, 160, 96 }, .{ 16, 16, 160, 96 }, red, blue, .vertical, .{ 0, 0, 0, 0 }));
-        try cells.append(allocator, d3d11_cells.paintCell(.{ 192, 16, 160, 96 }, .{ 192, 16, 160, 96 }, red, blue, .horizontal, .{ 0, 0, 0, 0 }));
-        try cells.append(allocator, d3d11_cells.paintCell(.{ 400, 16, 80, 96 }, .{ 360, 16, 160, 96 }, red, blue, .horizontal, .{ 0, 0, 0, 0 }));
+        // Exercise the same chrome-op lowering as editor and modal painting,
+        // including clipping, per-side borders and independent border alpha.
+        var fixture_tokens: maru.chrome.Tokens = .{ .palette = std.EnumArray(maru.chrome.tokens.ColorRole, maru.color.Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+        fixture_tokens.palette.set(.surface_bg, .{ .r = 255, .g = 0, .b = 0 });
+        fixture_tokens.palette.set(.surface_fg, .{ .r = 0, .g = 0, .b = 255 });
+        fixture_tokens.palette.set(.focus_accent, .{ .r = 0, .g = 255, .b = 0 });
+        fixture_tokens.palette.set(.terminal_bg, .{ .r = 32, .g = 32, .b = 32 });
+        const paint_ops = [_]maru.chrome.draw.Op{
+            .{ .quad = .{ .rect = .{ .x = 16, .y = 16, .w = 160, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .vertical } },
+            .{ .quad = .{ .rect = .{ .x = 192, .y = 16, .w = 160, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal } },
+            .{ .quad = .{ .rect = .{ .x = 360, .y = 16, .w = 160, .h = 96 }, .clip = .{ .x = 400, .y = 16, .w = 80, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal } },
+            .{ .fill = .{ .rect = .{ .x = 16, .y = 144, .w = 160, .h = 96 }, .role = .terminal_bg } },
+            .{ .quad = .{ .rect = .{ .x = 16, .y = 144, .w = 160, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .alpha = 0, .border_role = .focus_accent, .border_alpha = 255, .border_widths = .{ 0, 0, 8, 0 } } },
+            .{ .fill = .{ .rect = .{ .x = 192, .y = 144, .w = 160, .h = 96 }, .role = .terminal_bg } },
+            .{ .quad = .{ .rect = .{ .x = 192, .y = 144, .w = 160, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .border_role = .focus_accent, .border_widths = .{ 2, 4, 6, 8 }, .corner_radii = .{ 8, 8, 8, 8 } } },
+            .{ .quad = .{ .rect = .{ .x = 360, .y = 144, .w = 160, .h = 96 }, .clip = .{ .x = 400, .y = 144, .w = 80, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .border_role = .focus_accent, .border_widths = .{ 8, 8, 8, 8 }, .corner_radii = .{ 8, 8, 8, 8 } } },
+            .{ .quad = .{ .rect = .{ .x = 16, .y = 272, .w = 160, .h = 48 }, .fill_role = .surface_bg, .gradient = .horizontal, .border_role = .focus_accent, .border_widths = .{ 0, 0, 4, 0 } } },
+            .{ .quad = .{ .rect = .{ .x = 192, .y = 272, .w = 160, .h = 48 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .border_widths = .{ 8, 8, 8, 8 } } },
+            .{ .fill = .{ .rect = .{ .x = 360, .y = 272, .w = 160, .h = 48 }, .role = .terminal_bg } },
+            .{ .quad = .{ .rect = .{ .x = 360, .y = 272, .w = 160, .h = 48 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .border_role = .focus_accent, .border_alpha = 128, .border_widths = .{ 0, 0, 8, 0 } } },
+            .{ .fill = .{ .rect = .{ .x = 540, .y = 16, .w = 80, .h = 96 }, .role = .terminal_bg } },
+            .{ .quad = .{ .rect = .{ .x = 540, .y = 16, .w = 80, .h = 96 }, .clip = .{ .x = 540, .y = 16, .w = 0, .h = 96 }, .fill_role = .surface_bg } },
+        };
+        try appendPaintOps(allocator, &paint_ops, &fixture_tokens, present.width_px, present.height_px, 0, 0, &cells);
         last_cell_count = cells.items.len;
 
         try present.beginFrame(clear);
@@ -16825,12 +16841,8 @@ fn appendConfirmCells(
     try draw_host.syncAtlasTexture(pipeline, renderer_state, atlas_w, atlas_h);
     _ = draw_host.uploadFrameRegions(pipeline, frame);
 
-    // Fills are lowered; the existing border fallback still handles solid quads
-    // only. Keep reporting a partially unpainted gradient+border declaration.
-    for (ops.items) |op| {
-        if (op == .quad and op.quad.gradient != .solid and op.quad.border_role != null)
-            confirm_unpainted_quads.* += 1;
-    }
+    // Both fill and border are lowered, including declared gradients.
+    _ = confirm_unpainted_quads;
     const before = out.items.len;
     try appendConfirmSolids(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, out);
     const colors = maru.renderer.metal_frame.CellColors{
@@ -16953,14 +16965,24 @@ fn appendPaintOps(
             .vertical => .vertical,
             .horizontal => .horizontal,
         } else .solid;
-        try out.append(a, d3d11_cells.paintCell(
+        var painted = d3d11_cells.paintCell(
             .{ @floatFromInt(x0 + @as(i32, @intCast(origin_x))), @floatFromInt(y0 + @as(i32, @intCast(origin_y))), @floatFromInt(x1 - x0), @floatFromInt(y1 - y0) },
             .{ @floatFromInt(rect.x + @as(i32, @intCast(origin_x))), @floatFromInt(rect.y + @as(i32, @intCast(origin_y))), @floatFromInt(rect.w), @floatFromInt(rect.h) },
             d3d11_cells.colorFromArgb(argb),
             end,
             direction,
             .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
-        ));
+        );
+        if (op == .quad) {
+            const q = op.quad;
+            const border: ?[4]f32 = if (q.border_role) |br| blk: {
+                const bc = tk.get(br);
+                const ba = q.border_alpha orelse q.alpha;
+                break :blk d3d11_cells.colorFromArgb((@as(u32, ba) << 24) | (@as(u32, bc.r) << 16) | (@as(u32, bc.g) << 8) | bc.b);
+            } else null;
+            painted = d3d11_cells.withBorder(painted, .{ @floatFromInt(q.border_widths[0]), @floatFromInt(q.border_widths[1]), @floatFromInt(q.border_widths[2]), @floatFromInt(q.border_widths[3]) }, border);
+        }
+        try out.append(a, painted);
     }
 }
 
@@ -16983,8 +17005,12 @@ fn appendSolidOps(
     // `chrome.solid_rects`. 여기는 원점을 더하고 창 밖을 자르는 일만 한다.
     var rects: std.ArrayList(maru.chrome.solid_rects.SolidRect) = .empty;
     defer rects.deinit(a);
-    try maru.chrome.solid_rects.flatten(a, ops, tk, &rects);
-    try appendSolidRects(a, rects.items, clip_w, clip_h, origin_x, origin_y, out);
+    for (ops) |op| {
+        rects.clearRetainingCapacity();
+        try maru.chrome.solid_rects.flatten(a, &.{op}, tk, &rects);
+        const op_clip = if (op == .quad) op.quad.clip else null;
+        try appendSolidRects(a, rects.items, clip_w, clip_h, origin_x, origin_y, op_clip, out);
+    }
 }
 
 /// 단색 사각들을 셀로 — 창(`clip_w`×`clip_h`) 밖은 자르고, 비면 안 낸다.
@@ -16995,21 +17021,25 @@ fn appendSolidRects(
     clip_h: u32,
     origin_x: u32,
     origin_y: u32,
+    op_clip: ?maru.chrome.draw.Rect,
     out: *std.ArrayList(d3d11_cells.Cell),
 ) !void {
     for (rects) |sr| {
         const rect = sr.rect;
-        const x0 = @max(rect.x, 0);
-        const y0 = @max(rect.y, 0);
-        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(clip_w)));
-        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(clip_h)));
+        // Clip each flattened solid without moving its original rounded corners.
+        const cx0: i32 = if (op_clip) |c| @max(c.x, 0) else 0;
+        const cy0: i32 = if (op_clip) |c| @max(c.y, 0) else 0;
+        const cx1: i32 = if (op_clip) |c| @min(c.x + @as(i32, @intCast(c.w)), @as(i32, @intCast(clip_w))) else @intCast(clip_w);
+        const cy1: i32 = if (op_clip) |c| @min(c.y + @as(i32, @intCast(c.h)), @as(i32, @intCast(clip_h))) else @intCast(clip_h);
+        const x0 = @max(rect.x, cx0);
+        const y0 = @max(rect.y, cy0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), cx1);
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), cy1);
         if (x1 <= x0 or y1 <= y0) continue;
-        try out.append(a, d3d11_cells.solidCell(
-            @floatFromInt(x0 + @as(i32, @intCast(origin_x))),
-            @floatFromInt(y0 + @as(i32, @intCast(origin_y))),
-            @floatFromInt(x1 - x0),
-            @floatFromInt(y1 - y0),
-            d3d11_cells.colorFromArgb(sr.argb),
+        try out.append(a, d3d11_cells.paintCell(
+            .{ @floatFromInt(x0 + @as(i32, @intCast(origin_x))), @floatFromInt(y0 + @as(i32, @intCast(origin_y))), @floatFromInt(x1 - x0), @floatFromInt(y1 - y0) },
+            .{ @floatFromInt(rect.x + @as(i32, @intCast(origin_x))), @floatFromInt(rect.y + @as(i32, @intCast(origin_y))), @floatFromInt(rect.w), @floatFromInt(rect.h) },
+            d3d11_cells.colorFromArgb(sr.argb), null, .solid,
             .{ @floatFromInt(sr.radii[0]), @floatFromInt(sr.radii[1]), @floatFromInt(sr.radii[2]), @floatFromInt(sr.radii[3]) },
         ));
     }
@@ -17056,6 +17086,18 @@ test "Windows paint rebase preserves shared solids and gradient geometry" {
     try std.testing.expectEqual(@as(f32, 0), cells.items[0].paint_info[0]);
     try std.testing.expectEqual(@as(f32, 2), cells.items[1].paint_info[0]);
     try std.testing.expectEqual(@as(f32, 0), cells.items[2].paint_info[0]);
+    // A solid with an empty clip must not cover the previously painted background.
+    cells.clearRetainingCapacity();
+    var solid = q; solid.gradient = .solid;
+    solid.clip = .{ .x = 10, .y = 20, .w = 0, .h = 60 };
+    try appendPaintOps(a, &.{.{ .quad = solid }}, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 0), cells.items.len);
+    // Clipped solid corners stay tied to the original rectangle, including translated origins.
+    solid.clip = .{ .x = 40, .y = 30, .w = 20, .h = 15 };
+    try appendPaintOps(a, &.{.{ .quad = solid }}, &tk, 300, 200, 7, 9, &cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.items.len);
+    try std.testing.expectEqual([4]f32{ 47, 39, 20, 15 }, cells.items[0].rect);
+    try std.testing.expectEqual([4]f32{ 17, 29, 100, 60 }, cells.items[0].paint_rect);
     // Modal padding expands the first panel before native gradient lowering.
     cells.clearRetainingCapacity(); q.clip = null;
     const panel = q.visibleRect(tk.space.modal_padding_px);

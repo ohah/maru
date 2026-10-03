@@ -9033,6 +9033,39 @@ Windows 테두리 fallback이 폭 배열을 `[top,bottom,left,right]`로 읽는 
 터미널 스모크의 editor vertical drag 5개·sidebar clip·dock clamp는 모두 true였다.
 `agent_detail_scroll`은 여전히 judgeable=false이므로 이 항목의 완료 증거로 쓰지 않는다.
 
+### 2m.120 Gradient border를 같은 GPU quad에서 그린다 (2026-10-03)
+
+§2m.119의 남은 border를 채움과 같은 셰이더에서 합성한다. 공유 `draw.Quad`의
+`border_widths=[top,right,bottom,left]`와 `border_alpha orelse alpha`를 그대로 내린다.
+기존 사각 넷 fallback은 순서를 `[top,bottom,left,right]`로 잘못 읽었고, 코드 순서상
+border 셀을 채움보다 먼저 넣었다. 이 fallback을 제거해 fill이 stroke를 뒤에서 덮는 경로도 없앴다.
+끝 색이 없어 solid로 접힌 선언에도 border가 유지된다.
+
+원래 paint 사각을 기준으로 각 변까지 거리를 계산하므로 한 변만 지정하면 다른 변에 새 stroke를
+만들지 않는다. clip으로 생긴 경계에도 stroke와 radius를 새로 만들지 않는다. 채움·테두리 RGB
+혼합은 macOS quad와 같은 sRGB↔linear 변환으로 하고, alpha는 독립적으로 혼합한다.
+누락된 border role은 폭도 0으로 만든다. 재사용된 셀에서 role을 제거했을 때도 이전 stroke를
+지우도록 `withBorder`를 수정했고, 수정 전 FAIL·수정 후 PASS로 확인했다.
+
+`Cell`은 border 폭·색 필드를 추가해 **160 bytes**다(초기 80의 두 배). 기존 glyph 인스턴스도 같은
+stride를 쓰는 비용이 있으며, offset·input layout·stride는 컴파일 단언이 지킨다. 여기서 성능
+예산 통과나 전용 quad pipeline 최적화까지 했다고 주장하지 않는다.
+
+실제 픽셀 fixture는 이제 `paintCell` 직접 호출 대신 제품 `appendPaintOps`의 chrome op lowering을
+쓴다. 실제 hardware D3D11 창의 캡처를 `tools/windows/check-paint-pixels.ps1`로 검사한다.
+client origin은 DPI·창 테두리에 따라 달라지므로 명시적으로 넘긴다(이번 캡처는 X=8, Y=31).
+`capture-window.ps1 -TargetProcessId`는 변이 실행의 소유 프로세스만 캡처하도록 추가했다.
+
+적대적 검증 5회는 **실제 셰이더**에 bottom 폭의 슬롯 오독·right 거리 방향 오독·독립 alpha 제거·
+원래 paint 사각 대신 잘린 표시 사각 사용·stroke RGB 무시를 넣었다. 각 변이는 정상 컴파일·
+240 frame present·소유 창 캡처 뒤 픽셀 판정에서 exit 1이었다. 네 번째의 첫 시도는 없는 필드를
+참조한 shader compile 실패여서 세지 않았고, 정상 컴파일되는 변이로 다시 확인했다.
+원본 소스·실행 파일 복원 뒤 초기 24개 샘플이 통과했다. 이어 rounded corner·누락 role·반투명
+border·면적 0 clip을 추가한 **최종 28개 샘플** 모두 통과했고, 셀 단위 판정 8/8·smoke 단계
+경계 1/1도 통과했다. 최종 소스의 `win32-terminal-smoke`, `check-targets -j2`,
+`check-doc-links`, `check-boundaries -j4`도 모두 exit 0이었다. 기존 editor drag 5개·sidebar clip·
+dock clamp는 true였고, `agent_detail_scroll`은 여전히 judgeable=false여서 완료 증거로 쓰지 않는다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

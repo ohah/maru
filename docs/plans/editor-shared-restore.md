@@ -1035,3 +1035,28 @@ claim의 stale owner 재인수/경로 ABA/삭제 실패/실제 SIGKILL은 아직
 후속 flush의 미복원을 확인했다. U4d-8은 빈 정상 record 삭제와 새 문서 부재를 확인했다.
 제품 131개·L2 규칙 39개·shared 64개 검사와 문서 링크/줄 참조 검사는 종료 코드 0이었다.
 테스트 통과는 위 characterization의 기대 결과를 확인한 것이며 결함 수정 완료를 뜻하지 않는다.
+
+### 추가 실행 검증 — 닫기 정리와 복구 큐
+
+U4b-17은 실제 파일을 서로 다른 경로로 만들고 제품 open/edit/flush API로 64개와 65개
+독립 dirty 문서를 준비한다. 다른 탭을 만든 뒤 executeClose(tab_index=0)를 호출한다.
+64개에서는 백업이 모두 삭제되고 65개에서는 마지막 문서의 백업 하나가 남는 결과를 확인했다.
+남은 record의 본문도 원래 편집 bytes와 일치했다. 탭 닫기 실행 coordinator의 검사이며
+마우스/확인 모달/실제 GUI 입력을 수행한 검사는 아니다.
+
+U4d-9는 queueBackupRevival에 서로 다른 path 요청을 넣었을 때 아홉 번째가 큐에 없음을
+확인했다. 첫 candidate의 백업 이름을 실제 directory로 만들고 drainRevivals를 호출하면
+새 문서를 만들지 않고 큐에서 후보를 제거한다. directory는 보존됐다. failed read를
+제품에서 성공 복구했다고 기록한다는 뜻이 아니라 큐 자동 재시도가 없는 동작의 재현이다.
+로그: `/tmp/maru-recovery-additional-execution.log`. 제품 133개·규칙 39개가 통과했다.
+
+U4b-18은 원본과 backup directory를 분리하고 backup directory만 0500으로 바꿔 실제
+삭제 실패를 유도한다. 이전 backup 뒤 추가 편집을 저장하고 disk의 최신 bytes, clean 상태,
+backup_on_disk=false, 이전 backup bytes 보존을 검사한다. 권한은 defer로 복구한다.
+이는 기존 best-effort 삭제 정책의 실행 판정이며 새 삭제 재시도/사용자 알림 정책을 도입하지 않는다.
+실제 재시작에서 잔여 backup이 어떻게 표시되는지는 이 판정자의 범위가 아니다.
+
+최종 실행에서 U4b-18도 최신 disk 저장/clean/이전 backup 보존/flag=false를 확인했다.
+제품 134개·규칙 39개가 종료 코드 0으로 통과했다. 최종 로그는
+`/tmp/maru-recovery-additional-final.log`이며 문서 링크/줄 참조 및 Zig fmt 검사도 통과했다.
+실제 재시작·GUI·새 ID codec은 여전히 검증 완료로 세지 않는다.

@@ -541,6 +541,11 @@ pub const TerminalCore = struct {
     /// (max_kitty_placements)으로 악의적 대량 placement를 막는다 — 이미지 320MB 한계·APC 버퍼 한계와 같은
     /// 결의 방어선이다. K1(현재)은 저장/노출/생애주기(코어)까지 — 화면 렌더는 후속 K-단계.
     kitty_placements: std.ArrayListUnmanaged(StoredPlacement) = .empty,
+    /// **보관 중인 화면의** placement(2026-10-03). `kitty_placements` 는 언제나 **지금 화면의** 것이다 — alt 에
+    /// 들어가면 primary 의 목록을 여기로 옮기고, 나오면 되돌린다(`saved_kitty_flags` 와 같은 꼴, kitty 의 화면별
+    /// graphics 관리자와 같은 구조). 예전엔 두 화면이 한 목록에 섞여 alt 에서 스크롤할 때마다 primary 의 배치까지
+    /// 훑었다. alt 가 아니면 비어 있다. 핸드오프는 여전히 한 목록(tag 82)으로 싣는다 — 형식 불변.
+    saved_kitty_placements: std.ArrayListUnmanaged(StoredPlacement) = .empty,
     /// U=1 virtual placement(unicode placeholder) — 화면 위치를 갖지 않고 «이 이미지를 c×r 격자로 쓴다»만
     /// 등록한다. 실제 배치는 화면의 placeholder 셀이 정하므로 스크롤·eviction 보정 대상이 아니다(그 셀이
     /// 텍스트와 함께 움직인다). 같은 (image_id, placement_id)는 교체한다.
@@ -718,6 +723,7 @@ pub const TerminalCore = struct {
         self.resetInputModes();
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
+        self.saved_kitty_placements.clearRetainingCapacity(); // 보관 화면의 것까지
         self.kitty_virtual_placements.clearRetainingCapacity(); // virtual placement(U=1)도 함께
         self.kitty_image_numbers.clearRetainingCapacity(); // 번호→id 배정도 공장 초기화
         parser.abortKittyChunk(self); // 진행 중이던 chunked 전송도 폐기(parser 소유)
@@ -789,6 +795,7 @@ pub const TerminalCore = struct {
         self.response.deinit(self.allocator);
         self.kitty_images.deinit(self.allocator);
         self.kitty_placements.deinit(self.allocator);
+        self.saved_kitty_placements.deinit(self.allocator);
         self.kitty_virtual_placements.deinit(self.allocator);
         if (self.virtual_placement_views.len > 0) self.allocator.free(self.virtual_placement_views);
         self.kitty_image_numbers.deinit(self.allocator);
@@ -4786,7 +4793,10 @@ test "setMaxScrollback: alt 중 하향 트림은 활성 alt 화면의 placement�
 
     try core.write("\x1b[?1049h"); // alt 진입
     // alt 화면에서 생성된 placement(alt-space anchor — 작은 행 번호). primary 트림과 무관해야 한다.
-    try core.kitty_placements.append(std.testing.allocator, mkTestPlacement(1));
+    // `on_alt` 는 목록 소속과 같아야 한다 — alt 중의 `kitty_placements` 는 alt 의 목록이다(2026-10-03 화면별 분리).
+    var alt_placement = mkTestPlacement(1);
+    alt_placement.on_alt = true;
+    try core.kitty_placements.append(std.testing.allocator, alt_placement);
 
     core.setMaxScrollback(2); // parked primary(saved_sb)를 트림(drop>0) — 활성 alt 좌표는 건드리면 안 됨
     try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // 제거 안 됨
@@ -11452,6 +11462,91 @@ test "kitty 애니메이션: 커서 바로 위 이미지는 화면을 줄여도 
 // 이 판정자가 생긴 이유(적대적 검증 2회차, 라이브 실측): placement 에 화면 범위가 없어 `ESC[?1049h`
 // 뒤에도 primary 의 이미지가 **vim 화면 위에 그대로 그려졌다**. `anchor_row` 는 그 화면 기준 절대
 // 행이라 화면이 다르면 좌표계 자체가 다르다 — 섞어 그리면 엉뚱한 자리에 찍힌다.
+/// **지금 화면의** 배치 수. 목록 표현과 무관하게 센다(`on_alt` 로 거른다) — 목록을 나누기 전 코드에서도 같은 뜻이라,
+/// 아래 판정자들을 나누기 전·후 양쪽에서 돌려 「동작이 같다」를 확인할 수 있다.
+fn currentScreenPlacementCount(core: *const TerminalCore) usize {
+    var n: usize = 0;
+    for (core.kitty_placements.items) |p| {
+        if (p.on_alt == core.alt_active) n += 1;
+    }
+    return n;
+}
+
+/// 2x2 이미지 `id` 를 전송만 해 둔다.
+fn transmitTinyImage(core: *TerminalCore, id: u32) !void {
+    const raw = [_]u8{0xCD} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i={d},q=2;{s}\x1b\\", .{ id, b64s }));
+}
+
+// 아래 다섯은 placement 를 **화면별 목록**으로 나눈 뒤(2026-10-03) 「두 화면을 함께 보는」 자리를 고정한다. 한 목록일
+// 때는 저절로 맞았던 성질이라 판정자가 없었고, 나눈 뒤에는 한쪽만 보게 망가뜨려도 아무것도 빨개지지 않았다(뮤테이션).
+
+// 이미지 데이터는 화면이 아니라 세션 소유다 — alt 에서 마지막 자리를 대문자로 지워도 primary 가 쓰고 있으면 남는다.
+test "kitty placement: alt 중 대문자 삭제는 primary 가 같은 이미지를 쓰면 데이터를 남긴다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try transmitTinyImage(&core, 7);
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\"); // primary
+    try core.write("\x1b[?1049h\x1b[1;1H\x1b_Ga=p,i=7,p=2,c=1,r=1,C=1,q=2\x1b\\"); // alt
+    try core.write("\x1b_Ga=d,d=C,q=2\x1b\\"); // 커서 칸의 배치를 지우고 데이터도(다른 곳이 안 쓰면)
+    try std.testing.expectEqual(@as(usize, 0), currentScreenPlacementCount(&core));
+    try std.testing.expect(core.kitty_images.map.contains(7)); // primary 가 아직 쓴다
+    try core.write("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 1), currentScreenPlacementCount(&core));
+}
+
+// id 로 겨누는 delete 는 **이미지**가 대상이다 — 화면을 가리지 않는다(위치로 겨누는 delete 와 다르다).
+test "kitty placement: alt 중 id 로 지우면 primary 의 같은 이미지 배치도 지운다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try transmitTinyImage(&core, 7);
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\");
+    try core.write("\x1b[?1049h\x1b_Ga=d,d=i,i=7,q=2\x1b\\\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 0), currentScreenPlacementCount(&core));
+}
+
+// 폭주 방어선(1024)은 **두 화면 합계**다 — 나누기 전과 같은 한도.
+test "kitty placement: 개수 상한은 두 화면 합계다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try transmitTinyImage(&core, 7);
+    var seq: [96]u8 = undefined;
+    var k: u32 = 1;
+    while (k <= TerminalCore.max_kitty_placements) : (k += 1)
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=p,i=7,p={d},c=1,r=1,C=1,q=2\x1b\\", .{k}));
+    try std.testing.expectEqual(@as(usize, TerminalCore.max_kitty_placements), currentScreenPlacementCount(&core));
+    try core.write("\x1b[?1049h\x1b_Ga=p,i=7,p=9999,c=1,r=1,C=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), currentScreenPlacementCount(&core)); // alt 는 비었지만 합계가 찼다
+}
+
+// **현재 동작을 고정한다**: relative 의 부모 찾기는 화면을 가리지 않는다 — alt 의 자식이 primary 의 부모를 잡는다.
+// kitty 는 화면마다 graphics 상태가 따로라 이렇게 되지 않는다(후속 과제 — 고치면 이 판정자를 뒤집는다).
+test "kitty placement: relative 의 부모 찾기는 보관 화면(primary)의 배치도 본다 (현재 동작)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try transmitTinyImage(&core, 7);
+    try transmitTinyImage(&core, 8);
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\"); // primary 부모
+    try core.write("\x1b[?1049h\x1b_Ga=p,i=8,p=5,P=7,Q=1,c=1,r=1,q=2\x1b\\"); // alt 자식
+    try std.testing.expectEqual(@as(usize, 1), currentScreenPlacementCount(&core));
+}
+
+// 부모가 지워지면 자식도 지운다(명세) — 자식이 **보관 화면**에 있어도.
+test "kitty placement: alt 중 부모를 지우면 보관 화면의 자식도 거둔다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try transmitTinyImage(&core, 7);
+    try transmitTinyImage(&core, 8);
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\"); // primary 부모
+    try core.write("\x1b_Ga=p,i=8,p=2,P=7,Q=1,c=1,r=1,q=2\x1b\\"); // primary 자식
+    try std.testing.expectEqual(@as(usize, 2), currentScreenPlacementCount(&core));
+    try core.write("\x1b[?1049h\x1b_Ga=d,d=i,i=7,q=2\x1b\\\x1b[?1049l"); // alt 에서 부모 이미지를 id 로
+    try std.testing.expectEqual(@as(usize, 0), currentScreenPlacementCount(&core));
+}
+
 test "kitty placement: primary 이미지는 alt 화면에 안 보이고 돌아오면 다시 보인다 (적대적 검증)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
     defer core.deinit();

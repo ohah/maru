@@ -16935,11 +16935,14 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // 2026-09-30 #4017(재연결 강제 resize 의 `layout_size` + op 별 mutation-drop 이유 슬롯): Debug **+96**
             // · ReleaseFast **+80** — main push 의 `session host macOS (Debug)` 잡이 `expected 11744, found 11840` /
             // `expected 11696, found 11776` 으로 실측했다. ⚠️ **그 PR 도 초록이었다** — 이 pin 은 PR 에서 돌지 않는다.
-            .Debug => 11840,
+            // 2026-10-03 화면별 kitty placement(`TerminalCore.saved_kitty_placements`, ArrayList): Debug **+32** ·
+            // ReleaseFast **+16** — 머지 전 로컬 `zig build test` 가 `expected 11840, found 11872` / `expected 11792, found 11808` 로 실측.
+            .Debug => 11872,
             // 2026-09-23 빈 드레인 건너뛰기(`idle_drain_epoch`·`idle_drain_generation`, u64 둘): Debug +16 · ReleaseFast +16(실측).
             // 2026-10-03 셀 픽셀 결정 번호(`TerminalCore.cell_metrics_epoch`, u64 — 원격 Surface 의 코어 안): Debug +0(기존
             // 패딩에 들어감) · ReleaseFast **+16** — `test-session-host-2c3d-c3-3b2b3` 에서 실측(u32 로 줄여도 +16 이었다).
-            .ReleaseFast => 11792,
+            // 2026-10-03 화면별 kitty placement(`saved_kitty_placements`): ReleaseFast +16(Debug 는 위 줄 +32).
+            .ReleaseFast => 11808,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -16954,8 +16957,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9104, // 2026-09-30 #4017 +96(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
-            .ReleaseFast => 9056, // 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .Debug => 9136, // 2026-09-30 #4017 +96 · 2026-10-03 화면별 kitty placement +32(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .ReleaseFast => 9072, // 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 kitty placement +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -20573,8 +20576,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
             // 2026-09-30 #4017 Debug +96 · ReleaseFast +80 — 위 `C3-3b2b3` 표와 같은 CI 실측.
-            .Debug => 11840,
-            .ReleaseFast => 11792, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
+            // 2026-10-03 화면별 kitty placement(`saved_kitty_placements`) Debug +32 · ReleaseFast +16 — 위 표와 같은 실측.
+            .Debug => 11872,
+            .ReleaseFast => 11808, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 placement +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서

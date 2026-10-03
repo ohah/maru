@@ -1423,6 +1423,9 @@ pub fn enterAltScreen(self: *TerminalCore) void {
     // 키보드 모드도 그 화면의 상태다 — alt 는 자기 스택에서 시작하고, 떠날 때 primary 것이 돌아온다.
     self.saved_kitty_flags = self.kitty_flags;
     self.kitty_flags = .{};
+    // 그래픽 배치도 화면 귀속이다 — primary 의 목록을 보관하고 alt 는 빈 목록으로 시작한다. 할당이 다 성공한
+    // **뒤에** 옮긴다(위에서 실패해 돌아가면 alt 에 안 들어간 것이라 목록도 그대로여야 한다).
+    std.mem.swap(@TypeOf(self.kitty_placements), &self.kitty_placements, &self.saved_kitty_placements);
     self.screen = .{ .cells = alt_cells, .wrapped = alt_wrapped, .prompt_marks = alt_prompt_marks };
     self.semantic_state = .unknown; // alt 진입 — primary의 진행 중 영역을 이어받지 않는다
     self.alt_active = true;

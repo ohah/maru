@@ -6,6 +6,7 @@ const w = std.os.windows;
 const abi = @import("maru").win32_abi;
 const staging = @import("stage.zig");
 const security_snapshot = @import("security.zig");
+const file_identity = @import("identity.zig");
 
 extern "kernel32" fn ReOpenFile(w.HANDLE, u32, u32, u32) callconv(abi.winapi) w.HANDLE;
 extern "kernel32" fn BackupRead(w.HANDLE, ?[*]u8, u32, *u32, w.BOOL, w.BOOL, *?*anyopaque) callconv(abi.winapi) w.BOOL;
@@ -18,12 +19,12 @@ extern "ntdll" fn NtSetSecurityObject(w.HANDLE, u32, *const anyopaque) callconv(
 extern "ntdll" fn NtSetEaFile(w.HANDLE, *w.IO_STATUS_BLOCK, *const anyopaque, u32) callconv(abi.winapi) w.NTSTATUS;
 extern "ntdll" fn NtQueryEaFile(w.HANDLE, *w.IO_STATUS_BLOCK, *anyopaque, u32, w.BOOLEAN, ?*const anyopaque, u32, ?*u32, w.BOOLEAN) callconv(abi.winapi) w.NTSTATUS;
 
-pub const Error = error{ UnsupportedPlatform, SourceBusy, QueryFailed, UnsupportedMetadata, ReadFailed, WriteFailed, TruncatedBackup, UnsafeStream, SourceChanged };
+pub const Error = file_identity.Error || error{ UnsupportedPlatform, SourceBusy, QueryFailed, UnsupportedMetadata, ReadFailed, WriteFailed, TruncatedBackup, UnsafeStream, SourceChanged };
 
 pub const Source = struct {
     file: std.Io.File,
     basic: w.FILE.BASIC_INFORMATION,
-    identity: w.LARGE_INTEGER,
+    identity: file_identity.Identity,
     size: w.LARGE_INTEGER,
 
     pub fn open(original: std.Io.File) Error!Source {
@@ -39,7 +40,7 @@ pub const Source = struct {
         // These attributes need distinct native operations, not a BASIC bit copy.
         // Fail the unpublished clone rather than silently dropping them.
         if (basic.FileAttributes.REPARSE_POINT or basic.FileAttributes.ENCRYPTED or basic.FileAttributes.COMPRESSED or basic.FileAttributes.SPARSE_FILE or basic.FileAttributes.READONLY) return error.UnsupportedMetadata;
-        return .{ .file = .{ .handle = handle, .flags = .{ .nonblocking = false } }, .basic = basic, .identity = (try query(w.FILE.INTERNAL_INFORMATION, handle, .Internal)).IndexNumber, .size = standard.EndOfFile };
+        return .{ .file = .{ .handle = handle, .flags = .{ .nonblocking = false } }, .basic = basic, .identity = try file_identity.Identity.capture(handle), .size = standard.EndOfFile };
     }
 
     pub fn deinit(self: *Source, io: std.Io) void {
@@ -48,6 +49,7 @@ pub const Source = struct {
     }
 
     fn checkStable(self: *const Source) Error!void {
+        if (!self.identity.eql(try file_identity.Identity.capture(self.file.handle))) return error.SourceChanged;
         const now = try query(w.FILE.BASIC_INFORMATION, self.file.handle, .Basic);
         const standard = try query(w.FILE.STANDARD_INFORMATION, self.file.handle, .Standard);
         if (self.basic.ChangeTime != now.ChangeTime or self.basic.LastWriteTime != now.LastWriteTime or @as(u32, @bitCast(self.basic.FileAttributes)) != @as(u32, @bitCast(now.FileAttributes)) or standard.EndOfFile != self.size or standard.NumberOfLinks != 1) return error.SourceChanged;
@@ -262,6 +264,26 @@ test "Windows safe save complete metadata restores an actual protected audit SAC
     try std.testing.expect(sacl_offset != 0);
     try std.testing.expectEqualSlices(u8, sd[20..48], snapshot.bytes[sacl_offset..][0..28]);
     std.debug.print("actual protected audit SACL restored\n", .{});
+}
+
+test "Windows safe save metadata refuses a mismatched captured object identity before copying" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original" });
+    var pinned = try @import("maru").win32_relative_file.open(std.testing.allocator, tmp.dir, "original.txt");
+    defer pinned.deinit(io);
+    var source = try Source.open(pinned.original);
+    defer source.deinit(io);
+    var stage = try staging.create(std.testing.allocator, io, &pinned);
+    defer stage.deinit(io);
+    source.identity.file[15] ^= 1;
+    try std.testing.expectError(error.SourceChanged, cloneReadable(&source, &stage));
+    try std.testing.expectEqual(@as(u64, 0), (try stage.file.stat(io)).size);
+    const bytes = try tmp.dir.readFileAlloc(io, "original.txt", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("original", bytes);
 }
 
 fn cloneFor(source: *const Source, stage: *staging.Stage, comptime Api: type) Error!Report {

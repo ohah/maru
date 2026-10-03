@@ -152,7 +152,6 @@ test "정지 축: detached worker 를 띄우는 backend 는 자기 deinit 이나
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
         const name = std.fs.path.basename(entry.path);
-        if (std.mem.eql(u8, name, "detached_worker_wait.zig")) continue; // 대기 그 자체
         const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ scan_dir, entry.path });
         defer allocator.free(path);
         // **못 읽거나 못 파싱하면 조용히 건너뛰지 않는다** — 스캐너의 침묵을 통과로 읽지 않는다.

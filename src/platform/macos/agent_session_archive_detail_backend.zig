@@ -7,7 +7,7 @@
 //! results on its frame path.
 
 const std = @import("std");
-const detached_worker_wait = @import("detached_worker_wait.zig");
+const detached_worker_wait = maru.app.detached_worker_wait;
 const builtin = @import("builtin");
 const maru = @import("maru");
 const archive = maru.session.agent_session_archive;

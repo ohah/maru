@@ -191,6 +191,10 @@ L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층
 있다" 판정은 **네이티브 참조만 본 것**이었고, 그 기준은 필요조건이지 충분조건이 아니다 — 다음에
 같은 물음이 나오면 **모듈 그래프부터** 본다. 새로 쌓이는 빚은 여전히 주석 한 줄씩이다.
 
+**2026-10-03 사용자 요청으로 구조 정리를 재개한다.** 이전 실측의 모듈 루트·wasm·자기 의존 문제는 계속 검증 대상이다. 호출 이름만 바꾸거나 두 벌로 복사하지 않고 책임과 모듈 배선을 함께 정리한다. 첫 이동은 std만 의존하는 detached worker quiescence를 `src/app/detached_worker_wait.zig`로 옮기는 것이다. macOS 세션·파일 트리·에이전트 상세 backend는 `maru.app.detached_worker_wait`를 통해 같은 구현을 사용한다. 네이티브 I/O나 `maru` 자기 import가 없어 wasm에 POSIX 호출을 끌어들이지 않는다. Windows 편집기 파일 열기/뷰 lease는 `src/platform/windows/editor/document.zig`로 분리하고 본문·형식·이력은 L2 Registry/EditableFile에 둔다.
+
+아직 정리할 호출은 CLI가 직접 가져오는 파일 트리·git·에이전트 archive/detail backend, Chrome draw lowering·system text와 Windows SCM/agent surface의 system text import다. file tree의 macOS SSH helper와 system text의 CoreText bridge가 실제 플랫폼 의존이므로, 이들을 별도 어댑터로 나누고 해당 artifact에 필요한 모듈만 주입해야 한다. 이 목록은 첫 이동의 완료 주장과 구별하며 계속 진행한다.
+
 > **기준 자체는 살아 있다.** 2026-08-25 에 `platform/macos/agent_session_archive_backend.zig`
 > (1,218 줄)가 `main.zig` 의 소비자가 되어 같은 부류에 새로 들어왔고, 같은 기준으로 재면 네이티브
 > 참조가 **0** 이다. 표를 늘리지 않는 이유는 위와 같다.

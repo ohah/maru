@@ -9080,6 +9080,14 @@ W8.21⒜의 조용한 거절을 기존 `chrome.components.notice`에 연결한�
 
 편집/safe-save·외부 변경 감시, 연 파일 수 상한, 모달 위치 비교, 웹 패널과 다른 Windows 잔여 항목은 이 변경으로 완료 처리하지 않는다.
 
+### 2m.122 편집 문서 소유권과 Windows 코드 위치 (2026-10-03)
+
+W8.17 편집·저장의 선행 작업으로 Windows 파일 뷰의 text/path를 앱 수명의 `document_registry.Registry` view lease에서 빌린다. 정본은 L2 `EditableFile`과 `document_state.State`가 소유하고 구문 provider·표시 줄·오프셋·스크롤은 Windows view에 남는다. 닫기와 앱 종료는 view 캐시를 해제한 뒤 lease를 놓는다. 파일 읽기 실패부터 Registry 게시까지 모든 할당 실패 prefix를 검사한다.
+
+BOM은 `FileFormat`에 보존하고 내용 오프셋에서는 제외한다. CRLF와 혼합 줄바꿈을 원형대로 보존하며 표시 줄과 문서 offset은 기존 LineIndex에서 가져온다. 이전 폭 계산은 긴 첫 줄이 폭 상한에 닿으면 루프를 끝내 뒤쪽 start 배열을 초기화하지 않았다. 이제 폭 계산만 상한에서 멈추고 모든 줄 start를 만든다. 실제 임시 파일로 BOM·CRLF·한글·상한보다 긴 첫 줄·뒤쪽 줄·dirty 초기값·본문과 경로 소유자·close 후 lease 무효화를 검증한다.
+
+코드는 `platform/windows/editor/document.zig`로 분리한다. 테스트 namespace를 root에서 명시적으로 참조해 이동 뒤에도 `test-win32-file-open`이 여섯 테스트를 실제 실행한다. 제품 변이 5회(줄 start 오염·줄바꿈 표시 유출·잘못된 saved hash·저장 계약 연결 전 writable 허용·폭 상한 조기 break)를 모두 거부하고 원복은 통과했다. 현재 편집기는 계속 읽기 전용이며 이 항목은 편집/safe-save 완료가 아니다. 사용자는 기존 safe-save 계약을 유지한 Windows 네이티브 저장 구현을 승인했다. 네이티브 저장·입력·undo·dirty 닫기·외부 변경 감시는 계속 구현한다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

@@ -5,7 +5,7 @@
 //! 메모리를 무제한 점유하지 않게 한다(docs/file-panel.md §7).
 
 const std = @import("std");
-const detached_worker_wait = @import("detached_worker_wait.zig");
+const detached_worker_wait = maru.app.detached_worker_wait;
 const builtin = @import("builtin");
 const maru = @import("maru");
 const path_shape = maru.path_shape;

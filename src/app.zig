@@ -1,3 +1,5 @@
+/// Detached worker quiescence for shared I/O backends; no native OS dependency.
+pub const detached_worker_wait = @import("app/detached_worker_wait.zig");
 pub const app_runtime = @import("app/app_runtime.zig");
 pub const workspace_checkpoint_product = @import("app/workspace_checkpoint_product.zig");
 pub const artifact_io = @import("app/artifact_io.zig");

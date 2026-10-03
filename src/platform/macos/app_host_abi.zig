@@ -5092,7 +5092,6 @@ pub export fn maru_macos_app_session_osr_drag_out_end(session: ?*AppSession, dra
     return @intFromBool(session_mod.web_ops.osrDragOutEnd(app, drag, x_px, y_px, operation));
 }
 
-
 /// v197(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.
 pub export fn maru_macos_app_session_osr_key(session: ?*AppSession, phase: i32, key_code: u32, character: u32, unmodified: u32, mods: i32) i32 {
     const app = session orelse return 0;

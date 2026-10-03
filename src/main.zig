@@ -16830,7 +16830,7 @@ fn chromeTokensFor(cfg: anytype) maru.chrome.Tokens {
 ///
 /// **컴포넌트 경로로 간다.** 처음엔 `coretext_frame_builder.buildDockScmDrawList`(셀 그리드)로 지었는데
 /// 그것은 **P1b 가 걷어낸 경로**다 — 형제 히트테스트(`scmRowAt`)는 이미 지웠고(`app_session/git.zig`
-/// 머리말) 그리기 함수만 고아로 남아 있었다. 계획 문서(`docs/plans/scm-dock.md` P1)가 *"셀 그리드
+/// 머리말) 그리기 함수만 고아로 남아 있다가 뒤에 지웠다(2026-10-03). 계획 문서(`docs/plans/scm-dock.md` P1)가 *"셀 그리드
 /// 경로를 제거한다. 히트테스트는 `chrome.ui.interaction` 이 소유한다"* 고 적어 둔 것을 안 보고 쓴
 /// 실수였다. 지금은 macOS 제품과 **같은 함수**를 부른다: `build.build` → `view.view`.
 fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {

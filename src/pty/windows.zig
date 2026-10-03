@@ -1079,11 +1079,12 @@ pub const PtySession = struct {
         self.cell_height_px = cell_height_px;
     }
 
-    /// macOS 와 시그니처를 맞춘다 — ConPTY 엔 픽셀 필드가 없어 값만 보관하고 격자만 바꾼다.
+    /// macOS 와 시그니처를 맞춘다 — ConPTY 엔 픽셀 필드가 없어 격자만 바꾼다. 셀 픽셀 보관은 reader 의
+    /// `setCellPixels` 몫으로 둔다(메인이 그 필드를 같이 쓰지 않게 — macOS 는 `winsize_lock` 으로 묶는다).
     pub fn resizeWithCellPixels(self: *PtySession, size: terminal.Size, cell_width_px: u32, cell_height_px: u32) !void {
+        _ = cell_width_px;
+        _ = cell_height_px;
         try self.resize(size);
-        self.cell_width_px = cell_width_px;
-        self.cell_height_px = cell_height_px;
     }
 
     pub fn resize(self: *PtySession, size: terminal.Size) !void {

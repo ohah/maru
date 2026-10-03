@@ -70,6 +70,14 @@ const WriteQueueIo = struct {
         const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
         try self.session.resize(size);
     }
+
+    /// 격자와 셀 픽셀을 `TIOCSWINSZ` 한 번에(글꼴 크기 변경 — `PtyIo.resize_with_cell_fn`). 자식은 `SIGWINCH` 를 한 번
+    /// 받고, DECSET 2048 통지가 나가기 **전에** winsize 픽셀 필드까지 맞다. reader 의 `setCellPixels` 와는
+    /// `PtySession.winsize_lock` 으로 묶인다.
+    fn resizeWithCell(ctx: *anyopaque, size: terminal.Size, cell: core_command.CellMetrics) !void {
+        const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
+        try self.session.resizeWithCellPixels(size, cell.width, cell.height);
+    }
 };
 
 pub const LivePtySession = struct {
@@ -363,6 +371,7 @@ pub const LivePtySession = struct {
                 .write_input_nb = WriteQueueIo.writeInputNonBlocking,
                 .enqueue_command = WriteQueueIo.enqueueCommand,
                 .request_response_flush = WriteQueueIo.requestResponseFlush,
+                .resize_with_cell_fn = WriteQueueIo.resizeWithCell,
             };
         }
         return runtime_mod.PtyIo.fromSession(self.session);
@@ -869,6 +878,157 @@ test "DECSET 2048 크기 통지는 실제 reader 가 resize 뒤 자식 stdin 으
     try std.testing.expectEqual(.pass, verdict);
     // 입력 큐(포화면 호출 스레드를 막는 `enqueueBlocking`)는 한 바이트도 안 탔다 — 통지는 reader 의 응답 버퍼로 갔다.
     try std.testing.expectEqual(@as(u64, 0), live.write_queue.enqueuedTotal());
+}
+
+test "입력 fence 뒤에 밀린 옛 셀 픽셀 명령은 더 새 레이아웃 resize 뒤에 적용되지 않는다 — 2048 통지 하나·winsize 픽셀은 resize 때 맞다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var surface = try surface_mod.Surface.init(allocator, 80, .{ .cols = 40, .rows = 4 });
+    defer surface.deinit();
+
+    var path_buf: [96]u8 = undefined;
+    const out_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/maru-cellrace-{d}.bin", .{std.c.getpid()});
+    defer _ = std.c.unlink(out_path.ptr);
+    var cmd_buf: [192]u8 = undefined;
+    // 자식은 raw 로 바꾼 뒤 표식(`RAW`)을 내고 1 초 동안 stdin 을 안 읽는다 — 그동안 넣은 입력이 PTY 버퍼를 채워 그 뒤의
+    // 명령이 fence 에 걸린다. **표식 전에 넣으면 안 된다**: 줄 단위 모드의 한 줄 상한(1 KiB)을 넘는 입력은 line discipline 이
+    // 버려, reader 는 다 썼다고 보고 명령이 안 밀린다(실측 — 그때 파일엔 1024 바이트만 왔다).
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "stty raw -echo; printf RAW; sleep 1; exec cat -u > {s}", .{out_path});
+    var live: LivePtySession = undefined;
+    try live.init(std.testing.io, allocator, 80, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", cmd },
+        .size = .{ .cols = 40, .rows = 4 },
+    }, 1);
+    defer live.deinit();
+    _ = try live.attachSurface(&runtime, &surface, true);
+    var pump = live.pump(&runtime);
+    {
+        surface.lockCore(std.testing.io);
+        defer surface.unlockCore(std.testing.io);
+        surface.core.setCellMetrics(9, 20); // 구독 **전에** — 켠 뒤에 바꾸면 그 변경이 통지를 하나 낸다
+        surface.core.in_band_resize = true; // 구독 중(켜는 순간의 보고는 이 판정자의 몫이 아니다)
+    }
+
+    var ready_attempts: usize = 0;
+    while (ready_attempts < 5000) : (ready_attempts += 1) {
+        _ = try pump.drainAvailable();
+        surface.lockCore(std.testing.io);
+        const dump = try surface.core.dumpUtf8(allocator);
+        surface.unlockCore(std.testing.io);
+        defer allocator.free(dump);
+        if (std.mem.indexOf(u8, dump, "RAW") != null) break;
+        _ = usleep(1000);
+    }
+    // ⑴ 자식이 안 읽는 동안 입력을 — raw PTY 입력 버퍼(실측 약 1 KiB)를 넘겨 나머지가 큐에 남는다.
+    const flood = "a" ** 4096;
+    const flood_count = 2;
+    for (0..flood_count) |_| try runtime.writeInput(80, .{ .bytes = flood });
+    // ⑵ 옛 결정 B — 그 입력 fence 뒤에 밀린다.
+    try runtime.enqueueCoreCommand(80, .{ .set_cell_metrics = .{ .width = 11, .height = 22 } }, std.testing.io);
+    // ⑶ 더 새 결정 C — 레이아웃이 격자와 함께 곧바로 바꾼다.
+    try runtime.resizeWithCell(80, .{ .cols = 30, .rows = 10 }, .{ .width = 13, .height = 26 }, std.testing.io);
+    // ⑤ winsize 픽셀은 그 resize 때 이미 맞다(reader 의 다음 명령을 기다리지 않는다).
+    var ws: std.posix.winsize = undefined;
+    try std.testing.expect(std.c.ioctl(live.session.master_fd.load(.acquire), std.c.T.IOCGWINSZ, &ws) >= 0);
+    try std.testing.expectEqual(@as(u16, 30), ws.col);
+    try std.testing.expectEqual(@as(u16, 30 * 13), ws.xpixel);
+    try std.testing.expectEqual(@as(u16, 10 * 26), ws.ypixel);
+
+    // 자식이 읽기 시작하면 밀린 B 가 적용될 차례가 온다 — 낡았으니 건너뛴다(④).
+    var attempts: usize = 0;
+    var reports: usize = 0;
+    var bytes: usize = 0;
+    while (attempts < 6000) : (attempts += 1) {
+        _ = try pump.drainAvailable();
+        const file = std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1 << 20)) catch null;
+        if (file) |data| {
+            defer allocator.free(data);
+            bytes = data.len;
+            reports = std.mem.count(u8, data, "\x1b[48;");
+        }
+        if (bytes >= flood.len * flood_count + 16 and !live.command_queue.hasPending()) break;
+        _ = usleep(1000);
+    }
+    _ = usleep(200_000); // 혹시 늦게 오는 둘째 통지까지
+    _ = try pump.drainAvailable();
+    if (std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1 << 20)) catch null) |data| {
+        defer allocator.free(data);
+        reports = std.mem.count(u8, data, "\x1b[48;");
+        try std.testing.expect(std.mem.indexOf(u8, data, "\x1b[48;10;30;260;390t") != null); // C 의 통지
+    }
+    try std.testing.expectEqual(@as(usize, 1), reports); // 옛 B 로 «10×30 × 11×22» 를 또 알리지 않는다
+    surface.lockCore(std.testing.io);
+    defer surface.unlockCore(std.testing.io);
+    try std.testing.expectEqual(@as(u32, 13), surface.core.cell_width_px); // 코어도 C 에 남는다
+}
+
+test "낡은 셀 픽셀 명령을 건너뛰는 reader 는 PTY 격자까지 코어에 맞춘다 — 레이아웃 ioctl 전 틈에서 옛 격자를 안 쏜다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var surface = try surface_mod.Surface.init(allocator, 81, .{ .cols = 40, .rows = 4 });
+    defer surface.deinit();
+
+    var path_buf: [96]u8 = undefined;
+    const out_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/maru-cellgrid-{d}.bin", .{std.c.getpid()});
+    defer _ = std.c.unlink(out_path.ptr);
+    var cmd_buf: [192]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "stty raw -echo; printf RAW; sleep 1; exec cat -u > {s}", .{out_path});
+    var live: LivePtySession = undefined;
+    try live.init(std.testing.io, allocator, 81, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", cmd },
+        .size = .{ .cols = 40, .rows = 4 },
+    }, 1);
+    defer live.deinit();
+    _ = try live.attachSurface(&runtime, &surface, true);
+    var pump = live.pump(&runtime);
+    {
+        surface.lockCore(std.testing.io);
+        defer surface.unlockCore(std.testing.io);
+        surface.core.setCellMetrics(9, 20);
+    }
+    var ready_attempts: usize = 0;
+    while (ready_attempts < 5000) : (ready_attempts += 1) {
+        _ = try pump.drainAvailable();
+        surface.lockCore(std.testing.io);
+        const dump = try surface.core.dumpUtf8(allocator);
+        surface.unlockCore(std.testing.io);
+        defer allocator.free(dump);
+        if (std.mem.indexOf(u8, dump, "RAW") != null) break;
+        _ = usleep(1000);
+    }
+    const flood = "a" ** 4096;
+    for (0..2) |_| try runtime.writeInput(81, .{ .bytes = flood });
+    // 옛 결정 B 가 입력 fence 뒤에 밀린다.
+    try runtime.enqueueCoreCommand(81, .{ .set_cell_metrics = .{ .width = 11, .height = 22 } }, std.testing.io);
+    // 레이아웃이 **코어만** 바꾼 틈(PTY ioctl 직전 — 또는 그 ioctl 이 실패한 경우)을 그대로 만든다.
+    {
+        surface.lockCore(std.testing.io);
+        defer surface.unlockCore(std.testing.io);
+        try surface.core.resizeWithCellMetrics(30, 10, 13, 26);
+    }
+    var attempts: usize = 0;
+    while (attempts < 8000) : (attempts += 1) {
+        _ = try pump.drainAvailable();
+        if (!live.command_queue.hasPending() and live.write_queue.hasPending() == false) break;
+        _ = usleep(1000);
+    }
+    try std.testing.expect(!live.command_queue.hasPending()); // B 를 처리했다(건너뛰었다)
+    _ = usleep(100_000);
+    var ws: std.posix.winsize = undefined;
+    try std.testing.expect(std.c.ioctl(live.session.master_fd.load(.acquire), std.c.T.IOCGWINSZ, &ws) >= 0);
+    // 픽셀만 맞췄다면 격자는 옛 40×4 에 남는다(«옛 격자 × 새 픽셀»).
+    try std.testing.expectEqual(@as(u16, 30), ws.col);
+    try std.testing.expectEqual(@as(u16, 10), ws.row);
+    try std.testing.expectEqual(@as(u16, 30 * 13), ws.xpixel);
+    try std.testing.expectEqual(@as(u16, 10 * 26), ws.ypixel);
 }
 
 const FakePty = struct {

@@ -432,6 +432,11 @@ pub const PtySession = struct {
     /// 추정값을 보고하면 그것을 나누는 앱의 기하가 조용히 어긋난다(0은 앱이 폴백할 수 있는 신호다).
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
+    /// `size`·`cell_*_px` 와 그것으로 쏘는 `TIOCSWINSZ` 를 한 덩어리로 묶는다. 메인(`resize`·`resizeWithCellPixels` —
+    /// 레이아웃)과 reader(`setCellPixels` — `set_cell_metrics` 적용)가 둘 다 쓴다. 안 묶으면 한쪽이 옛 값을 읽어 쏜
+    /// ioctl 이 다른 쪽의 새 값을 덮는다(예: reader 가 옛 격자 × 새 픽셀을 늦게 쏴 격자를 되돌린다). 구간은 ioctl
+    /// 한 번이라 짧고 다툼은 드물다(크기·글꼴 변경 때만). spawn 이 값으로 돌려주므로 쓰기 전 복사는 정적 초기값이라 안전하다.
+    winsize_lock: std.c.pthread_mutex_t = .{},
 
     /// Live host exec-upgrade eligibility. 이 값들은 serialization 대상이 아니라 quiesce barrier가 모두 false/open임을
     /// 증명하는 lifecycle guard다.
@@ -932,34 +937,40 @@ pub const PtySession = struct {
     }
 
     pub fn resize(self: *PtySession, size: terminal.Size) !void {
-        const fd = try self.activeMasterFd();
-        var window_size = winsizeFromTerminalSize(size, self.cell_width_px, self.cell_height_px);
-        if (std.c.ioctl(fd, tio_cs_winsz, &window_size) < 0) return error.IoctlFailed;
-        self.size = size;
+        _ = std.c.pthread_mutex_lock(&self.winsize_lock);
+        defer _ = std.c.pthread_mutex_unlock(&self.winsize_lock);
+        try self.applyWinsizeLocked(size, self.cell_width_px, self.cell_height_px);
     }
 
     /// 격자와 셀 픽셀을 `TIOCSWINSZ` **한 번에** 바꾼다 — 글꼴 크기가 바뀌면 둘이 같이 바뀌는데, `resize` 뒤
     /// `setCellPixels` 로 나누면 자식이 `SIGWINCH` 를 두 번 받고 그 사이엔 «새 격자 × 옛 픽셀» 을 본다.
-    /// 실패하면 셀 픽셀을 되돌린다(다음 `setCellPixels` 가 「안 바뀌었다」 고 건너뛰지 않게).
+    /// 실패하면 아무것도 안 바꾼다(다음 `setCellPixels` 가 「안 바뀌었다」 고 건너뛰지 않게).
     pub fn resizeWithCellPixels(self: *PtySession, size: terminal.Size, cell_width_px: u32, cell_height_px: u32) !void {
-        const old_w = self.cell_width_px;
-        const old_h = self.cell_height_px;
+        _ = std.c.pthread_mutex_lock(&self.winsize_lock);
+        defer _ = std.c.pthread_mutex_unlock(&self.winsize_lock);
+        try self.applyWinsizeLocked(size, cell_width_px, cell_height_px);
+    }
+
+    /// `winsize_lock` 아래에서만 부른다. 성공했을 때만 값을 남긴다.
+    fn applyWinsizeLocked(self: *PtySession, size: terminal.Size, cell_width_px: u32, cell_height_px: u32) !void {
+        const fd = try self.activeMasterFd();
+        var window_size = winsizeFromTerminalSize(size, cell_width_px, cell_height_px);
+        if (std.c.ioctl(fd, tio_cs_winsz, &window_size) < 0) return error.IoctlFailed;
+        self.size = size;
         self.cell_width_px = cell_width_px;
         self.cell_height_px = cell_height_px;
-        self.resize(size) catch |err| {
-            self.cell_width_px = old_w;
-            self.cell_height_px = old_h;
-            return err;
-        };
     }
 
     /// 셀 픽셀 크기를 갱신하고, 바뀌었으면 현재 그리드로 winsize를 다시 적용한다.
     ///
-    /// **폰트 크기·DPI가 바뀌면 rows/cols가 그대로여도 픽셀 크기는 달라진다** — 그때 `resize`는 안 불리므로
-    /// 이 경로가 유일한 갱신 지점이다. 값이 실제로 바뀔 때만 `TIOCSWINSZ`를 쏜다: 이 ioctl은 자식에게
+    /// **폰트 크기·DPI가 바뀌면 rows/cols가 그대로여도 픽셀 크기는 달라진다** — 레이아웃이 격자와 함께 바꾸는 길은
+    /// `resizeWithCellPixels` 이고, 이것은 격자 없이 픽셀만 오는 길(reader 의 `set_cell_metrics` 적용)이다. 값이 실제로
+    /// 바뀔 때만 `TIOCSWINSZ`를 쏜다: 이 ioctl은 자식에게
     /// `SIGWINCH`를 보내므로, 매 frame 주입되는 셀 메트릭을 그대로 흘리면 셸에 시그널 폭풍이 된다.
     /// PTY가 이미 닫혔으면 조용히 값만 보관한다(다음 spawn/resize가 반영).
     pub fn setCellPixels(self: *PtySession, cell_width_px: u32, cell_height_px: u32) !void {
+        _ = std.c.pthread_mutex_lock(&self.winsize_lock);
+        defer _ = std.c.pthread_mutex_unlock(&self.winsize_lock);
         if (self.cell_width_px == cell_width_px and self.cell_height_px == cell_height_px) return;
         self.cell_width_px = cell_width_px;
         self.cell_height_px = cell_height_px;

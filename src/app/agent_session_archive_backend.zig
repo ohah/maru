@@ -1,11 +1,11 @@
-//! Codex·Claude session archive의 macOS worker backend.
+//! Codex·Claude session archive의 공용 worker backend.
 //!
 //! AppSession frame tick은 submit/takeResult만 호출한다. provider history는 사용자 데이터이므로 worker가
 //! 만든 summary 외 raw JSONL은 main actor로 넘기지 않는다.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const maru = @import("maru");
+const maru = @import("../maru.zig");
 const archive = maru.session.agent_session_archive;
 
 /// 후보 수집은 디렉터리 순회와 `stat`뿐이라 개수 상한을 두지 않는다(실측 351개에 2.4 ms). 다만 손상된
@@ -1102,7 +1102,6 @@ fn expectOversizedLineDropped(line_cap: usize, filler_bytes: usize) !void {
 // 줄의 끝(개행)이 초과를 감지한 그 청크 안에 있는 경우. 이 분기에 상한 검사가 없으면 `pending`이
 // 상한과 무관하게 커져 방어선 자체가 무의미해진다.
 test "스트리밍: 줄 끝이 같은 청크에 보여도 상한 초과 줄은 버린다" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     // 줄 전체가 첫 청크(64 KiB) 안에 들어가므로 개행이 보이는 상태에서 초과가 걸린다.
     try expectOversizedLineDropped(1024, 2048);
 }
@@ -1110,7 +1109,6 @@ test "스트리밍: 줄 끝이 같은 청크에 보여도 상한 초과 줄은 �
 // 초과가 개행 없는 청크에서 걸리는 경우. 버린 줄의 **나머지**를 다음 개행까지 건너뛰지 않으면 그 꼬리가
 // 독립된 줄로 오인돼 "leaked"가 결과에 섞인다.
 test "스트리밍: 상한 초과가 줄 중간에서 걸리면 그 줄의 나머지까지 건너뛴다" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     // filler가 청크보다 커서 첫 개행을 만나기 전에 초과가 걸린다.
     try expectOversizedLineDropped(1024, read_chunk_bytes * 3);
 }

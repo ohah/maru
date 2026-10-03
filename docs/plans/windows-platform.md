@@ -89,3 +89,11 @@
   전부 **OS를 인자로 받는 순수 함수**로 갈라 두어 macOS·Linux CI에서도 두 갈래가 돈다.
 - W7 이후의 시각 검증은 macOS와 같은 골든 이미지 경로를 쓰되, Windows는 **WARP 소프트웨어 래스터라이저**가
   있어 GPU 없는 CI 러너에서도 렌더 스모크를 돌릴 여지가 있다(macOS는 실제 window server가 필요해 못 한다).
+
+## Windows 작업과 함께 진행하는 폴더 결합 정리 (2026-10-03)
+
+사용자가 기존 safe-save 계약의 Windows 네이티브 구현과 macOS 경로 결합 정리를 승인했다.
+목록·상세 세션 기록 worker는 `src/app`으로 이동했고 양쪽 host가 `maru.app`으로 소비한다
+([모듈 연결과 검증](../layering-and-portability.md#341-세션-기록-worker의-실제-공통-계층-이동-2026-10-03)).
+파일 트리·Git backend의 이동 및 native text adapter 분리는 남았다.
+W8.17의 metadata 보존·쓰기·충돌 검사·편집 입력·GUI 저장·외부 변경 감시는 계속 진행 대상이다.

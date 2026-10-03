@@ -102,11 +102,10 @@ pub fn prepareRequest(
             var first_run = true;
             for (text.runs) |run| {
                 if (!shapesRun(text, run, max_width)) continue;
-                const copied = try allocator.dupe(u8, run.text);
-                // run 표 확장 전에는 아직 요청이 사본을 소유하지 않는다. append 실패도 사본을 거둔다.
-                errdefer allocator.free(copied);
-                try runs.append(allocator, .{
-                    .text = copied,
+                // Reserve before copying: a failed append must not orphan the text.
+                try runs.ensureUnusedCapacity(allocator, 1);
+                runs.appendAssumeCapacity(.{
+                    .text = try allocator.dupe(u8, run.text),
                     .role = text.text_role,
                     .origin = text.origin,
                     .max_width_px = max_width,
@@ -302,4 +301,23 @@ fn prepareAllocationProbe(allocator: std.mem.Allocator) !void {
 
 test "prepareRequest releases every failed allocation prefix" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, prepareAllocationProbe, .{});
+}
+
+fn allocationFailureRequest(allocator: std.mem.Allocator) !void {
+    const runs: [24]chrome.draw.Run = @splat(.{ .text = "owned text" });
+    const ops = [_]chrome.draw.Op{.{ .text = .{
+        .origin = .{ .x = 0, .y = 0 }, .runs = &runs,
+        .role = .surface_fg, .text_role = .body, .max_cols = 20,
+    } }};
+    const tk = std.mem.zeroes(chrome.Tokens);
+    var request = try prepareRequest(allocator, 11, &ops, &tk, 8, .{
+        .family = "primary", .fallback = "fallback",
+    });
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 24), request.runs.len);
+    try std.testing.expectEqualStrings("owned text", request.runs[23].text);
+}
+
+test "prepareRequest cleans every allocation failure including run capacity growth" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureRequest, .{});
 }

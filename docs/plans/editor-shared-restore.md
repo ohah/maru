@@ -719,3 +719,70 @@ B인 경우와 A인 경우를 각각 기록한다. 기존 공유 뷰 검사는 �
 문서 신원과 restart recovery 신원을 연결하고, shared view들이 한 recovery 레코드를 공유하며
 독립 문서는 서로 다른 레코드를 사용하는 방식을 검토해야 한다. 새로운 ID/포맷을 이번
 재현에서 임의로 도입하지 않는다.
+
+### 독립 문서 recovery ID — 구현 전 검토안
+
+U4b-15의 충돌을 해결하는 제안이며 아직 승인된 포맷이나 제품 구현이 아니다.
+경로는 저장 대상, runtime lease는 실행 중 수명, recovery ID는 재시작 이후 백업 소유를
+나타낸다. 셋을 구분한다. 독립 문서를 경로로 합치는 방법은 기존 독립 편집 동작을 바꾸므로
+선택하지 않는다. checkpoint 문서 index나 runtime slot도 재사용되므로 영속 백업 키로 쓰지 않는다.
+
+#### 제안하는 소유와 wire
+
+- 문서 State가 128-bit recovery ID를 소유한다. 독립 문서 생성은 새 ID, shared view retain은
+  같은 ID, checkpoint 복원은 기록된 ID를 사용한다. 선택·IME·Undo는 ID에 포함하지 않는다.
+- 플랫폼이 난수를 공급하고 L2는 값 검증·표현·소유 계약을 제공한다. 난수 공급 실패는
+  새 문서 publication 전에 실패로 반환하고 기존 문서·tree를 보존한다. 경로/시간/PID로 대체하지 않는다.
+- 새 백업 이름은 `d-<32 lowercase hex>.bak`, 본문 레코드에는 같은 recovery ID와 기존
+  kind/path/disk-hash를 함께 둔다. 경로 해시를 ID로 쓰지 않는다. 읽기는 filename/record ID와
+  요청한 문서의 kind/path를 모두 확인하고 기존 외부 수정 충돌 계약을 유지한다.
+- workspace의 문서 descriptor에 recovery ID를 기록한다. 문서 index는 그 checkpoint 안의
+  view 참조로만 사용한다. 같은 ID가 서로 다른 독립 descriptor에 중복되면 전체 복원을 거절한다.
+  공유 뷰는 descriptor 하나를 참조한다. 경로가 같고 ID가 다른 두 descriptor는 유효하다.
+- 새 ID가 기존 live 문서 또는 저장소 ID와 충돌하면 기존 레코드를 덮어쓰지 않는다.
+  독립 신규 ID의 예약과 기존 ID 백업의 atomic 교체를 구분하고, 검사 후 쓰기 경쟁을 피하는
+  exclusive 생성/소유 경계를 구현한다. 난수만으로 충돌 불가능을 주장하지 않는다.
+- 첫 범위는 기존 일반 로컬 편집 문서와 같은 창 shared view다. untitled/remote/diff의
+  기존 백업 계약은 그대로 두고 새 local descriptor로 잘못 편입하지 않는다.
+
+#### 생성·복원·정리의 성공 경계
+
+| 경계 | 제안 결과 |
+|---|---|
+| 독립 A/B가 같은 path를 연 뒤 각각 편집 | 서로 다른 ID/백업; 내용 독립 유지 |
+| A를 분할해 A1/A2 생성 | 같은 ID/백업; 두 view가 같은 본문 소유 |
+| A 저장 또는 명시적 버리기 | A의 백업만 정리; B의 dirty 내용/백업 보존 |
+| 같은 문서 저장 대상 변경 | 문서 ID 유지, 새 kind/path와 본문 게시 성공 후 이전 record 수명 정산 |
+| 복원 staging/OOM/새 백업 쓰기 실패 | live tree와 이전 백업 보존; ID를 다른 문서에 재배정하지 않음 |
+| dirty 복원 후 재백업 전 종료 | PR #4094의 원본 보존 수명 유지 |
+| ID는 있으나 백업이 missing | 해당 disk 문서 열기; dirty 복구 성공이라고 기록하지 않음 |
+| 백업 invalid/failed 또는 ID/path 불일치 | 원본 보존·복원 불완전 분류; 다른 ID/같은 path 백업을 대신 적용하지 않음 |
+
+본문 backup과 workspace는 서로 다른 파일이며 하나의 atomic transaction이 아니다.
+checkpoint보다 최신 backup은 같은 ID로 읽을 수 있지만 checkpoint에 아직 없는 신규 ID는
+배치 복원으로 찾을 수 없다. orphan 레코드는 자동 삭제하지 않고 기존 복구 열거 경로에서
+내용을 보존한다. 최신 backup과 오래된 view 지문이 다르면 본문은 보존하고 표시 좌표는 기본값을
+사용한다. 이번 설계가 checkpoint 전의 pane 배치나 모든 마지막 키 입력을 보장하지 않는다.
+
+출시 전 단일 최신 포맷 원칙을 유지한다. 기존 개발 백업/descriptor를 새 ID에 경로만으로
+자동 귀속시키거나 삭제하지 않는다. 이전 레코드의 복구 열거는 보존하되 새 local 문서의
+자동 복원과 혼용하지 않는다. 정확한 헤더/필드 변경과 기존 복구 목록의 reader dispatch를
+같은 구현 PR에서 연결하고 손상/지원하지 않는 포맷을 missing으로 처리하지 않는다.
+
+#### 적대적 설계 검토와 필수 실행 판정
+
+1. 파일명만 분리하면 restart가 path로 읽어 두 문서를 잃는다. descriptor/record/filename ID
+   일치와 실제 두 문서 재시작을 함께 판정해야 한다. codec만 통과한 것을 제품 완료로 세지 않는다.
+2. 저장/Undo clean/마지막 view 닫기가 path 기반 삭제를 쓰면 peer backup이 지워진다.
+   모든 fileName/drop/previous_identity/source-name 호출부를 찾아 A 정리 후 B 파일 bytes를 검사한다.
+3. 같은 ID를 view마다 새로 발급하면 shared 문서 백업이 여러 개가 된다. State 이동·retain·split·
+   staging rollback·slot 재사용을 검사하고 난수 실패/충돌을 주입한다.
+4. ID만 맞고 path가 바뀐 record를 적용하면 다른 저장 대상의 내용을 가져온다. ID/문서 신원/
+   disk_hash를 별도로 판정한다. 정상 Save As와 외부 수정 충돌 대조군을 포함한다.
+5. checkpoint/backup 순서가 어긋날 수 있다. 기존 checkpoint 뒤 더 최신 backup, 백업만 있는
+   신규 문서, 저장 실패, 손상 ID, 중복 descriptor, 기존 개발 레코드 보존을 실제 파일로 판정한다.
+
+이 다섯 항목은 코드 검토에서 도출한 반례 목록이며 실행 통과한 테스트 다섯 회가 아니다.
+U4b-15는 수정 PR에서 A/B 모두 보존하는 회귀 판정으로 바꾼다. L2 codec/OOM 및 제품
+저장·닫기·복구 대조군, workspace capture/apply, 격리 앱 재시작까지 연결해야 완료다.
+사용자가 이 신원/포맷 방식을 승인하기 전 제품 ID와 wire를 변경하지 않는다.

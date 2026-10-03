@@ -4,9 +4,16 @@ const builtin = @import("builtin");
 const w = std.os.windows;
 const pinned_path = @import("maru").win32_relative_file;
 const abi = @import("maru").win32_abi;
+const identity_mod = @import("identity.zig");
 extern "kernel32" fn ReOpenFile(w.HANDLE, u32, u32, u32) callconv(abi.winapi) w.HANDLE;
+extern "kernel32" fn GetCurrentProcess() callconv(abi.winapi) w.HANDLE;
+extern "kernel32" fn GetLastError() callconv(abi.winapi) u32;
+extern "kernel32" fn GetProcessHandleCount(w.HANDLE, *u32) callconv(abi.winapi) w.BOOL;
+extern "kernel32" fn LocalFree(?*anyopaque) callconv(abi.winapi) ?*anyopaque;
+extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW([*:0]const u16, u32, *?*anyopaque, ?*u32) callconv(abi.winapi) w.BOOL;
+extern "ntdll" fn NtSetSecurityObject(w.HANDLE, u32, *const anyopaque) callconv(abi.winapi) w.NTSTATUS;
 
-pub const Error = std.mem.Allocator.Error || error{ UnsupportedPlatform, InvalidName, CreateFailed, NameCollision, RandomFailed, DispositionFailed, WitnessFailed };
+pub const Error = std.mem.Allocator.Error || identity_mod.Error || error{ UnsupportedPlatform, InvalidName, CreateFailed, NameCollision, RandomFailed, DispositionFailed, WitnessFailed, IdentityChanged };
 
 // ON_CLOSE clears the per-handle delete-on-close state. Rearming is not supported
 // on every filesystem; cancellation then marks the exact owned object for deletion.
@@ -42,6 +49,35 @@ fn deleteOwned(witness: std.Io.File) Error!void {
     try markOwnedForDeletion(handle);
 }
 
+fn retainCleanupControl(file: std.Io.File) Error!std.Io.File {
+    // Capture WRITE_DAC before copying a source ACL that can deny later opens.
+    // These metadata rights permit an exclusive publisher data open afterwards.
+    const handle = ReOpenFile(file.handle, 0x00060080, 7, 0x02200000);
+    if (handle == w.INVALID_HANDLE_VALUE) return error.WitnessFailed;
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
+}
+
+fn allowOwnedCleanupDelete(witness: std.Io.File) Error!void {
+    // Native user-mode counterpart of the WDK security setter:
+    // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwsetsecurityobject
+    // Cancellation only: restrict this owned candidate to deletion and metadata.
+    // Grant no data access. The already-held WRITE_DAC authority survives a
+    // cloned restrictive ACL; neither the original nor a reused name is changed.
+    var sd: [48]u8 align(4) = .{0} ** 48;
+    sd[0] = 1;
+    std.mem.writeInt(u16, sd[2..4], 0x9004, .little); // self-relative, protected DACL
+    std.mem.writeInt(u32, sd[16..20], 20, .little);
+    sd[20] = 2;
+    std.mem.writeInt(u16, sd[22..24], 28, .little);
+    std.mem.writeInt(u16, sd[24..26], 1, .little);
+    std.mem.writeInt(u16, sd[30..32], 20, .little); // ACCESS_ALLOWED_ACE
+    std.mem.writeInt(u32, sd[32..36], 0x00110080, .little); // DELETE, SYNCHRONIZE, READ_ATTRIBUTES; no data
+    sd[36] = 1;
+    sd[37] = 1;
+    sd[43] = 1; // Everyone S-1-1-0
+    if (NtSetSecurityObject(witness.handle, 0x80000004, &sd) != .SUCCESS) return error.DispositionFailed;
+}
+
 fn markOwnedForDeletion(handle: w.HANDLE) Error!void {
     var info: w.FILE.DISPOSITION.INFORMATION.EX = .{ .Flags = .{
         .DELETE = true,
@@ -57,9 +93,11 @@ pub const Stage = struct {
     allocator: std.mem.Allocator,
     name: []u8,
     file: std.Io.File,
+    cleanup_control: std.Io.File,
 
     pub fn deinit(self: *Stage, io: std.Io) void {
         // DELETE_ON_CLOSE owns this exact object even if an attempted operation failed.
+        self.cleanup_control.close(io);
         self.file.close(io);
         self.allocator.free(self.name);
         self.* = undefined;
@@ -71,6 +109,52 @@ pub const Stage = struct {
         try self.file.writePositionalAll(io, text, 0);
         try self.file.setLength(io, text.len);
         try self.file.sync(io);
+    }
+
+    /// Success consumes Stage; failure leaves its delete-on-close ownership intact.
+    pub fn handoff(self: *Stage, io: std.Io) Error!Prepared {
+        return self.handoffFor(io, NativeHandoff);
+    }
+
+    fn handoffFor(self: *Stage, io: std.Io, comptime Api: type) Error!Prepared {
+        const identity = try identity_mod.Identity.capture(self.file.handle);
+        const witness = self.cleanup_control;
+        try Api.clearDeletion(self.file);
+        // No fallible work follows clearing auto-deletion: ownership must always
+        // reach Prepared, which binds cleanup to the exact object after rename.
+        self.file.close(io);
+        const prepared: Prepared = .{ .allocator = self.allocator, .name = self.name, .witness = witness, .identity = identity };
+        self.* = undefined;
+        return prepared;
+    }
+};
+
+const NativeHandoff = struct {
+    fn clearDeletion(file: std.Io.File) Error!void {
+        try setOnClose(file, false);
+    }
+};
+
+/// Owns an unpublished candidate after its data handle is closed. A publisher
+/// must keep this owner alive until it has validated publication or rollback.
+pub const Prepared = struct {
+    allocator: std.mem.Allocator,
+    name: []u8,
+    witness: std.Io.File,
+    identity: identity_mod.Identity,
+
+    /// Failure keeps ownership available for retry or recovery; never erase a
+    /// pathname that may now name a competitor. Success consumes Prepared.
+    pub fn cancel(self: *Prepared, io: std.Io) Error!void {
+        if (!self.identity.eql(try identity_mod.Identity.capture(self.witness.handle))) return error.IdentityChanged;
+        deleteOwned(self.witness) catch |err| {
+            if (err != error.WitnessFailed or GetLastError() != 5) return err;
+            try allowOwnedCleanupDelete(self.witness);
+            try deleteOwned(self.witness);
+        };
+        self.witness.close(io);
+        self.allocator.free(self.name);
+        self.* = undefined;
     }
 };
 
@@ -104,7 +188,10 @@ fn createNamed(allocator: std.mem.Allocator, parent: std.Io.Dir, name: []const u
     if (result == .OBJECT_NAME_COLLISION) return error.NameCollision;
     if (result != .SUCCESS) return error.CreateFailed;
     errdefer _ = w.ntdll.NtClose(handle);
-    return .{ .allocator = allocator, .name = try allocator.dupe(u8, name), .file = .{ .handle = handle, .flags = .{ .nonblocking = false } } };
+    const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
+    const cleanup_control = try retainCleanupControl(file);
+    errdefer _ = w.ntdll.NtClose(cleanup_control.handle);
+    return .{ .allocator = allocator, .name = try allocator.dupe(u8, name), .file = file, .cleanup_control = cleanup_control };
 }
 
 /// The caller keeps the path pins alive through staging and the eventual commit.
@@ -126,6 +213,160 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, pinned: *const pinned_pa
 
 fn expectAbsent(dir: std.Io.Dir, name: []const u8) !void {
     if (dir.statFile(std.testing.io, name, .{})) |_| return error.TestUnexpectedResult else |err| try std.testing.expectEqual(error.FileNotFound, err);
+}
+
+test "Windows safe save managed handoff transfers name and permits exclusive replacement access" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "prepared.tmp");
+    var transferred = false;
+    defer if (!transferred) stage.deinit(io);
+    try stage.write(io, "candidate");
+    var prepared = try stage.handoff(io);
+    transferred = true;
+    defer prepared.cancel(io) catch @panic("prepared cleanup failed");
+    try std.testing.expectEqualStrings("prepared.tmp", prepared.name);
+    {
+        const exclusive = ReOpenFile(prepared.witness.handle, 0xc0010000, 0, 0x02200000);
+        try std.testing.expect(exclusive != w.INVALID_HANDLE_VALUE);
+        defer _ = w.ntdll.NtClose(exclusive);
+        try std.testing.expect(prepared.identity.eql(try identity_mod.Identity.capture(exclusive)));
+    }
+    const bytes = try tmp.dir.readFileAlloc(io, prepared.name, std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("candidate", bytes);
+}
+
+test "Windows safe save managed handoff cancellation preserves the reused name competitor" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "prepared.tmp");
+    var transferred = false;
+    defer if (!transferred) stage.deinit(io);
+    var prepared = try stage.handoff(io);
+    transferred = true;
+    var cancelled = false;
+    defer if (!cancelled) prepared.cancel(io) catch @panic("prepared cleanup failed");
+    try tmp.dir.rename("prepared.tmp", tmp.dir, "moved.tmp", io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "prepared.tmp", .data = "competitor" });
+    try prepared.cancel(io);
+    cancelled = true;
+    try expectAbsent(tmp.dir, "moved.tmp");
+    const bytes = try tmp.dir.readFileAlloc(io, "prepared.tmp", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("competitor", bytes);
+}
+
+test "Windows safe save failed managed handoff retains staging ownership and closes witnesses" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    var cleanup_tree = true;
+    defer if (cleanup_tree) tmp.cleanup() else {
+        // A deliberate handle-leak mutant keeps a delete-pending child alive.
+        // Recursive fixture cleanup would spin; report the leak and let process
+        // termination close those leaked handles instead of hiding the failure.
+        tmp.dir.close(io);
+        tmp.parent_dir.close(io);
+    };
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "failure.tmp");
+    var closed = false;
+    defer if (!closed) stage.deinit(io);
+    try stage.write(io, "candidate");
+    const Failure = struct {
+        fn clearDeletion(_: std.Io.File) Error!void {
+            return error.DispositionFailed;
+        }
+    };
+    var before: u32 = 0;
+    try std.testing.expect(GetProcessHandleCount(GetCurrentProcess(), &before).toBool());
+    for (0..100) |_| try std.testing.expectError(error.DispositionFailed, stage.handoffFor(io, Failure));
+    var after: u32 = 0;
+    try std.testing.expect(GetProcessHandleCount(GetCurrentProcess(), &after).toBool());
+    if (before != after) cleanup_tree = false;
+    try std.testing.expectEqual(before, after);
+    try std.testing.expectEqual(@as(u64, 9), (try stage.file.stat(io)).size);
+    stage.deinit(io);
+    closed = true;
+    try expectAbsent(tmp.dir, "failure.tmp");
+}
+
+test "Windows safe save prepared cancellation refuses a mismatched identity and permits retry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "retry.tmp");
+    var transferred = false;
+    defer if (!transferred) stage.deinit(io);
+    var prepared = try stage.handoff(io);
+    transferred = true;
+    const identity = prepared.identity;
+    var cancelled = false;
+    defer if (!cancelled) {
+        prepared.identity = identity;
+        prepared.cancel(io) catch @panic("prepared cleanup failed");
+    };
+    prepared.identity.file[15] ^= 1;
+    if (prepared.cancel(io)) |_| {
+        // A broken cancellation implementation may consume the owner. Do not
+        // let fixture cleanup access it again and conceal the original failure.
+        cancelled = true;
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.IdentityChanged, err);
+    try std.testing.expectEqualStrings("retry.tmp", prepared.name);
+    _ = try tmp.dir.statFile(io, prepared.name, .{});
+    prepared.identity = identity;
+    try prepared.cancel(io);
+    cancelled = true;
+    try expectAbsent(tmp.dir, "retry.tmp");
+}
+
+fn setTestDacl(handle: w.HANDLE, comptime sddl: []const u8) Error!void {
+    var sd: ?*anyopaque = null;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(std.unicode.utf8ToUtf16LeStringLiteral(sddl), 1, &sd, null).toBool()) return error.DispositionFailed;
+    defer _ = LocalFree(sd);
+    if (NtSetSecurityObject(handle, 0x80000004, sd.?) != .SUCCESS) return error.DispositionFailed;
+}
+
+test "Windows safe save managed handoff cancels with retained control when both delete authorities are denied" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // ReOpenFile is a file API; reopen this directory relative to its handle.
+    var empty: [1]u16 = .{0};
+    var name: w.UNICODE_STRING = .{ .Length = 0, .MaximumLength = 0, .Buffer = &empty };
+    const attrs: w.OBJECT.ATTRIBUTES = .{ .RootDirectory = tmp.dir.handle, .ObjectName = &name };
+    var status: w.IO_STATUS_BLOCK = undefined;
+    var parent: w.HANDLE = undefined;
+    try std.testing.expectEqual(w.NTSTATUS.SUCCESS, w.ntdll.NtCreateFile(&parent, @bitCast(@as(u32, 0x00140000)), &attrs, &status, null, .{}, .{ .READ = true, .WRITE = true, .DELETE = true }, .OPEN, .{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true }, null, 0));
+    defer _ = w.ntdll.NtClose(parent);
+    defer setTestDacl(parent, "D:P(A;;FA;;;OW)") catch @panic("fixture parent ACL restoration failed");
+    var stage = try createNamed(std.testing.allocator, tmp.dir, "denied.tmp");
+    var closed = false;
+    defer if (!closed) stage.deinit(io);
+    try stage.write(io, "candidate");
+    // Everyone DELETE deny on the child plus DELETE_CHILD deny on the parent.
+    // OWNER_RIGHTS grants remaining rights so the fixture can restore its DACL.
+    try setTestDacl(stage.file.handle, "D:P(D;;SD;;;WD)(A;;FA;;;OW)");
+    try setTestDacl(parent, "D:P(D;;0x40;;;WD)(A;;FA;;;OW)");
+    var prepared = try stage.handoff(io);
+    closed = true;
+    var cancelled = false;
+    defer if (!cancelled) {
+        setTestDacl(parent, "D:P(A;;FA;;;OW)") catch @panic("fixture parent ACL restoration failed");
+        setTestDacl(prepared.witness.handle, "D:P(A;;FA;;;OW)") catch {};
+        prepared.cancel(io) catch @panic("prepared cleanup failed");
+    };
+    try std.testing.expectEqual(@as(u64, 9), (try prepared.witness.stat(io)).size);
+    try prepared.cancel(io);
+    cancelled = true;
+    try expectAbsent(tmp.dir, "denied.tmp");
 }
 
 test "Windows safe save stage handoff clears on-close deletion while retaining the object" {

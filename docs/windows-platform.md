@@ -10734,3 +10734,34 @@ SeSecurityPrivilege가 할당되어 있으나 비활성 상태였다. `editor/au
 다섯 실행 변이를 검출했다. 복구 후 root-main 34개와 native 경로 29개 판정이 통과했다.
 이 검사는 핸들 객체의 동일성을 보장하며 경로 이름의 현재 대상 비교를 대신하지 않는다.
 실제 교체·조건부 롤백과 GUI 저장 연결은 계속 남아 있다.
+
+### 2m.137 교체 준비 객체의 핸들 소유권 이전과 취소 (2026-10-03)
+
+Stage 생성 시 READ_CONTROL·WRITE_DAC·READ_ATTRIBUTES를 가진 metadata-only 제어 핸들을
+미리 확보한다. 원본 ACL을 복사한 뒤 새 권한을 얻으려 하지 않으며 기존 데이터 핸들의 독점성을
+유지한다. `Stage.handoff`는 전체 파일 ID를 저장하고 자동 삭제를 해제한 뒤 데이터 핸들을 닫고
+이름 할당과 제어 핸들을 `Prepared`에 이전한다. 자동 삭제 해제 뒤에는 실패 가능한 연산을
+두지 않는다. 준비 실패는 기존 Stage의 제어 핸들과 자동 삭제 소유권을 유지한다.
+`Prepared.cancel`은 저장된 객체 ID를 확인하고 그 객체의 삭제를 예약한다.
+취소 실패 때 소유권을 유지해 재시도할 수 있으며 경로 문자열로 경쟁 파일을 삭제하지 않는다.
+Native 삭제 계약과 witness 접근 권한의 근거는 §2m.134와 같다.
+
+실제 파일 DELETE와 부모 DELETE_CHILD가 모두 거절되면 삭제 권한의 재열기가 실패했다.
+독점 데이터 핸들을 유지한 채 DELETE를 다시 여는 사전 확인도 sharing violation으로 거절됐다.
+따라서 취소의 ACCESS_DENIED 때는 미리 확보한 WRITE_DAC로 **소유한 후보 객체에만** 보호된
+정리용 DACL을 설정하고 삭제를 다시 시도한다. 이 DACL은 DELETE·SYNCHRONIZE·READ_ATTRIBUTES를
+허용하며 데이터 접근은 허용하지 않는다. 원본·부모·경쟁 파일의 ACL은 수정하지 않는다.
+[Native 보안 설정 계약](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwsetsecurityobject)에
+따라 이미 열린 핸들의 WRITE_DAC 권한으로 적용한다. 다른 종류의 오류는 ACL을 바꾸지 않고 반환한다.
+실제 양쪽 삭제 거절 상태에서 준비 후 취소가 성공했고, 기존 독점 교체 핸들 열기도 계속 성공했다.
+
+실제 독점 교체 핸들 열기, 이전 이름의 경쟁 파일 보존, 실패 100회 후 프로세스 핸들 개수 동일,
+ID 불일치 거절 후 취소 재시도를 확인했다. 오류 주입 첫 실행에서는 의도적 witness 누수가
+fixture의 재귀 정리를 멈추게 했다. 해당 프로세스를 종료하고 원본을 복구했으며 이 실행은
+검출 횟수에서 제외했다. fixture는 이제 누수를 보고할 때 재귀 정리를 생략하고 디렉터리
+핸들을 닫는다. 정상 구현의 정리는 계속 수행한다.
+최종 코드에서 WRITE_DAC 권한 누락·정리 DELETE 권한 누락·정리 SYNCHRONIZE 누락·데이터 핸들
+유지·취소 ID 검사 누락의 다섯 실행 변이는 모두 런타임 실패로 검출했다(판정 실패 또는 정리 실패 panic).
+컴파일에서만 거절된 변이는 제외하고 실행 가능한 형태로 수정해 다시 검증했다.
+복구 후 root-main 39개와 native 경로 29개 판정이 통과했다.
+Prepared는 아직 미공개 후보만 소유하며 최종 publish/조건부 롤백과 GUI 저장은 연결하지 않았다.

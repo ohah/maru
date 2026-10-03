@@ -8597,8 +8597,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 Self.testReport("overlay \(anyOverlayOpen)")
             case "cursor":
                 Self.testReport("cursor \(Self.testCursorName(NSCursor.current))")
-            case "menu":
-                // W6c②: 띄운 우클릭 메뉴의 항목(판정 모드 — 띄우지 않는다).
+            case "ctxmenu":
+                // W6c②: 띄운 우클릭 메뉴의 항목(판정 모드 — 띄우지 않는다). 이름이 `menu` 면 아래의 `menu <제목>`(메뉴 막대 항목 —
+                // W4d② 시험기)을 가로챘다(적대 검증 2 차).
                 Self.testReport(osrContextMenu.map { "menu items=\(Self.describeOsrMenu($0.menu))" } ?? "menu none")
             case "menupick" where line.count >= 2:
                 testPickOsrContextMenu(line.dropFirst().joined(separator: " "))
@@ -9490,6 +9491,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func drainOsrContextMenu() {
         guard let session = appSession, let view = metalTerminalView, let owner = activeSurface else { return }
         if let shown = osrContextMenu {
+            // 메뉴를 띄운 창이 닫혔다 — 그 창의 tick 은 더 오지 않으니 아무 창의 tick 이 거둔다(답은 Zig 의 세션 정리가 취소로
+            // 보냈다 — W6c② 적대 검증 2 차).
+            if shown.owner.appSession == nil {
+                if Self.osrContextMenuTestMode { finishOsrContextMenu(shown, choice: nil) } else { shown.menu.cancelTracking() }
+                return
+            }
             // 띄운 창의 tick 에서만 본다. 페이지가 이동했거나 탭이 닫혀 sidecar 가 닫았다 — 떠 있는 메뉴를 거둔다(끝맺음은 popUp 이
             // 돌아온 뒤).
             guard shown.owner === owner else { return }
@@ -9581,7 +9588,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func popUpOsrContextMenu(_ shown: OsrContextMenuShown) {
-        guard osrContextMenu?.token == shown.token, let session = shown.owner.appSession else { return }
+        guard osrContextMenu?.token == shown.token else { return }
+        // 가져간 뒤 띄우기 전에 창이 닫혔다 — 상태를 비워야 다른 창이 다음 메뉴를 가져간다(안 비우면 앱 전체의 우클릭 메뉴가 다시
+        // 뜨지 않았다 — 적대 검증 2 차). 답은 Zig 의 세션 정리가 취소로 보냈다.
+        guard let session = shown.owner.appSession else {
+            osrContextMenu = nil
+            return
+        }
         let view = shown.view
         osrContextMenuChoice = nil
         var picked = false
@@ -9590,7 +9603,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             var savedServices: NSMenu?
             // 서비스는 이 view 가 키 응답자일 때만 — 서비스 요청자는 responder chain 으로 찾는다. 다른 view(WKWebView 패널 등)가
             // 키면 그 선택이 서비스로 가므로 항목을 뺀다(W6c② 적대 검증).
-            let servicesUsable = shown.services != nil && !shown.selection.isEmpty && view.window?.firstResponder === view
+            let servicesUsable = shown.services != nil && !shown.selection.isEmpty && view.window?.isKeyWindow == true
+                && view.window?.firstResponder === view
             if let services = shown.services, !servicesUsable { Self.removeOsrMenuItem(holding: services, from: shown.menu) }
             if servicesUsable, let services = shown.services {
                 if !osrServicesRegistered {
@@ -9633,7 +9647,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         osrContextMenuChoice = nil
         // 띄운 창의 세션·view 로 끝맺는다(그 사이 키 창이 바뀌었을 수 있다). 창이 닫혔으면 Zig 의 세션 정리가 취소했다.
         let view = shown.view
-        guard let session = shown.owner.appSession, let window = view.window else { return }
+        // 서비스는 메뉴가 끝난 뒤 선택 글을 읽는다 — 잠시 두었다가 지운다(그 뒤 터미널 선택이 서비스로 가지 않게). 그 사이 다음 메뉴가
+        // 글을 두었으면 그것은 두고 간다. 창이 닫혔어도 지운다(적대 검증 3 차).
+        let generation = view.osrServiceGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak view] in
+            if let view, view.osrServiceGeneration == generation { view.osrServiceSelection = nil }
+        }
+        guard let session = shown.owner.appSession else { return }
+        let window = view.window
         var command: Int32 = 0
         switch choice?.kind {
         case 0: command = choice?.command ?? 0
@@ -9645,7 +9666,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case 5: osrSpeech?.stopSpeaking()
         default: break
         }
-        let local = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        // 판정 모드의 입력은 합성 이벤트라 실제 포인터 자리가 대본과 무관하다 — 메뉴 자리를 쓴다(적대 검증 2 차).
+        let local = Self.osrContextMenuTestMode || window == nil
+            ? shown.point : view.convert(window!.mouseLocationOutsideOfEventStream, from: nil)
         let scale = archiveSmokeRenderScale(window)
         let xPx = Double(local.x * scale), yPx = Double((view.bounds.height - local.y) * scale)
         // 지금 실제로 눌린 버튼 — 메뉴가 먹은 떼기만 Zig 가 대신 보낸다. 판정 모드의 입력은 합성 이벤트라 하드웨어 상태
@@ -9655,16 +9678,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_app_session_osr_context_menu_answer(session, shown.token, command, xPx, yPx, pressed,
                                                            choice?.kind == 7 ? 1 : 0)
         withSurface(shown.owner) {
-            updateHover(atWindowPoint: window.mouseLocationOutsideOfEventStream, mods: 0, in: view)
+            if let window, !Self.osrContextMenuTestMode {
+                updateHover(atWindowPoint: window.mouseLocationOutsideOfEventStream, mods: 0, in: view)
+            }
             markMetalNeedsRedraw()
         }
-        // 이모티콘은 답이 그 탭을 활성으로 올린 **뒤** 연다 — 고른 글자가 입력기 경로로 그 칸에 간다.
-        if choice?.kind == 7 { NSApp.orderFrontCharacterPalette(nil) }
-        // 서비스는 메뉴가 끝난 뒤 선택 글을 읽는다 — 잠시 두었다가 지운다(그 뒤 터미널 선택이 서비스로 가지 않게). 그 사이 다음 메뉴가
-        // 글을 두었으면 그것은 두고 간다.
-        let generation = view.osrServiceGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak view] in
-            if let view, view.osrServiceGeneration == generation { view.osrServiceSelection = nil }
+        // 이모티콘은 답이 그 탭을 활성으로 올린 **뒤** 연다 — 고른 글자가 입력기 경로로 그 칸에 간다. 키 창이 아닌 창에서 우클릭했으면
+        // 그 창을 키로 올리고 view 를 응답자로 둔다 — 문자 뷰어는 키 창의 응답자에 넣는다(적대 검증 2 차).
+        if choice?.kind == 7 {
+            // 문자 뷰어는 **활성 앱**의 응답자에 넣는다 — 비활성 앱의 창을 우클릭했으면 앱부터 올린다(안 그러면 고른 글자가 다른 앱으로
+            // 갔다 — 적대 검증 3 차).
+            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            if let window, !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+            if let window, window.firstResponder !== view { window.makeFirstResponder(view) }
+            NSApp.orderFrontCharacterPalette(nil)
         }
     }
 

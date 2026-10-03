@@ -250,10 +250,12 @@ pub const Action = union(enum) {
     find_next,
     find_previous,
     // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). dispatchAppAction이 appearance.font.size를 바꾸고 cell 메트릭·grid를
-    // 다시 잡는다(코어 resize와 같은 reflow). step은 AppSession 상수(1pt 고정 — 파라미터화는 후속). reset은
-    // config 기본값(base_font_size)으로 되돌린다. 콘텐츠 reflow는 없다(셀 크기·grid 차원만 변경, Ghostty 동일).
-    increase_font_size,
-    decrease_font_size,
+    // 다시 잡는다(코어 resize와 같은 reflow). 값은 한 번에 바꾸는 **보폭(pt)** — 바인딩이 `increase_font_size:1.5`
+    // 처럼 정하고, 숫자 없이 쓰면 `default_font_size_step`(1pt)이다(베이스 = Ghostty `increase_font_size:N`).
+    // 보폭은 바인딩마다라 설정 항목(슬라이더)은 두지 않는다. reset은 config 기본값(base_font_size)으로 되돌린다.
+    // 콘텐츠 reflow는 없다(셀 크기·grid 차원만 변경, Ghostty 동일).
+    increase_font_size: f32,
+    decrease_font_size: f32,
     reset_font_size,
     // maru CLI를 PATH(~/.local/bin/maru)에 설치한다(VS Code "Install 'code' command" 결). dispatchAppAction이
     // installCli로 넘겨 GUI 바이너리의 형제 `maru` CLI를 symlink한다(sudo 불요 user-level, 결과는 notice).
@@ -371,8 +373,8 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_symbol_picker")) return .toggle_symbol_picker;
     if (std.mem.eql(u8, value, "find_next")) return .find_next;
     if (std.mem.eql(u8, value, "find_previous")) return .find_previous;
-    if (std.mem.eql(u8, value, "increase_font_size")) return .increase_font_size;
-    if (std.mem.eql(u8, value, "decrease_font_size")) return .decrease_font_size;
+    if (std.mem.eql(u8, value, "increase_font_size")) return .{ .increase_font_size = default_font_size_step };
+    if (std.mem.eql(u8, value, "decrease_font_size")) return .{ .decrease_font_size = default_font_size_step };
     if (std.mem.eql(u8, value, "reset_font_size")) return .reset_font_size;
     if (std.mem.eql(u8, value, "reset_settings")) return .reset_settings;
 
@@ -388,6 +390,17 @@ pub fn parseAction(value: []const u8) ?Action {
         return .{ .move_pane_to_workspace = index };
     }
 
+    // 보폭(pt)을 단 폰트 키우기/줄이기. 보폭은 양의 유한수만 — 0·음수는 방향이 이름과 어긋나고(줄이기가 키운다)
+    // nan/inf 는 std.meta.eql 비교·클램프가 깨진다.
+    const inc_prefix = "increase_font_size:";
+    if (std.mem.startsWith(u8, value, inc_prefix)) {
+        return .{ .increase_font_size = parseFontSizeStep(value[inc_prefix.len..]) orelse return null };
+    }
+    const dec_prefix = "decrease_font_size:";
+    if (std.mem.startsWith(u8, value, dec_prefix)) {
+        return .{ .decrease_font_size = parseFontSizeStep(value[dec_prefix.len..]) orelse return null };
+    }
+
     const fs_prefix = "set_font_size:";
     if (std.mem.startsWith(u8, value, fs_prefix)) {
         const size = std.fmt.parseFloat(f32, value[fs_prefix.len..]) catch return null;
@@ -396,6 +409,15 @@ pub fn parseAction(value: []const u8) ?Action {
     }
 
     return null;
+}
+
+/// `increase_font_size`·`decrease_font_size` 를 숫자 없이 쓸 때의 보폭(pt). 기본 단축키(⌘+/⌘-)도 이 값이다.
+pub const default_font_size_step: f32 = 1.0;
+
+fn parseFontSizeStep(text: []const u8) ?f32 {
+    const step = std.fmt.parseFloat(f32, text) catch return null;
+    if (!std.math.isFinite(step) or step <= 0) return null;
+    return step;
 }
 
 /// 전역(OS) 단축키 전용 동작 — 앱이 비활성이어도 OS가 단축키를 잡아 Swift가 수행한다. 창 가시성 같은
@@ -453,8 +475,9 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.toggle_find, parseAction("toggle_find").?);
     try std.testing.expectEqual(Action.find_next, parseAction("find_next").?);
     try std.testing.expectEqual(Action.find_previous, parseAction("find_previous").?);
-    try std.testing.expectEqual(Action.increase_font_size, parseAction("increase_font_size").?);
-    try std.testing.expectEqual(Action.decrease_font_size, parseAction("decrease_font_size").?);
+    // 숫자 없이 쓰면 기본 보폭(1pt) — 옛 config 의 맨 이름 바인딩이 그대로 같은 동작이다.
+    try std.testing.expectEqual(Action{ .increase_font_size = default_font_size_step }, parseAction("increase_font_size").?);
+    try std.testing.expectEqual(Action{ .decrease_font_size = default_font_size_step }, parseAction("decrease_font_size").?);
     try std.testing.expectEqual(Action.reset_font_size, parseAction("reset_font_size").?);
 
     const action = parseAction("select_tab:3").?;
@@ -472,6 +495,16 @@ test "parse configured actions" {
     try std.testing.expect(parseAction("set_font_size:abc") == null);
     try std.testing.expect(parseAction("set_font_size:") == null);
     try std.testing.expect(parseAction("set_font_size:inf") == null); // 비유한 거부
+    // increase/decrease_font_size:N — 보폭(pt). 정수·소수, 0·음수·비숫자·비유한은 null(그 줄만 무시).
+    try std.testing.expectEqual(@as(f32, 1.5), parseAction("increase_font_size:1.5").?.increase_font_size);
+    try std.testing.expectEqual(@as(f32, 4), parseAction("decrease_font_size:4").?.decrease_font_size);
+    for ([_][]const u8{ "0", "-1", "abc", "", "inf", "nan" }) |bad| {
+        var buf: [64]u8 = undefined;
+        const inc = try std.fmt.bufPrint(&buf, "increase_font_size:{s}", .{bad});
+        try std.testing.expect(parseAction(inc) == null);
+        const dec = try std.fmt.bufPrint(&buf, "decrease_font_size:{s}", .{bad});
+        try std.testing.expect(parseAction(dec) == null);
+    }
 }
 
 test "parse global actions" {

@@ -461,10 +461,10 @@ pub const default_app_bindings = [_]AppBinding{
     // 런타임 폰트 크기(macOS/브라우저/Ghostty 관례). ⌘=(또는 ⌘+)=키우기, ⌘-(또는 ⌘_)=줄이기, ⌘0=리셋.
     // '=' 키를 Shift와 함께 누르면 '+'가, '-'는 '_'가 오므로 양쪽을 다 묶어 키캡 표기(+/-)와 실제 글자(=/-)를
     // 모두 잡는다(모디파이어 정확 비교). 숫자/기호라 normalizeEventChar가 그대로 통과시킨다. 셸 입력과 안 겹친다.
-    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '=' } }, .action = .increase_font_size },
-    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '+' } }, .action = .increase_font_size },
-    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '-' } }, .action = .decrease_font_size },
-    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '_' } }, .action = .decrease_font_size },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '=' } }, .action = .{ .increase_font_size = action_mod.default_font_size_step } },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '+' } }, .action = .{ .increase_font_size = action_mod.default_font_size_step } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '-' } }, .action = .{ .decrease_font_size = action_mod.default_font_size_step } },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '_' } }, .action = .{ .decrease_font_size = action_mod.default_font_size_step } },
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '0' } }, .action = .reset_font_size },
 };
 

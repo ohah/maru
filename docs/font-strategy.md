@@ -119,7 +119,7 @@ font.family-italic = ""
 해석 규칙:
 
 - `family`는 사용자가 원하는 primary monospace family다.
-- ⌘+/⌘-(폰트 키우기/줄이기)는 `font.size`를 **고정 1pt씩** 바꾼다(보폭은 설정 항목이 아니다 — Terminal.app·iTerm2·Ghostty 관례). ⌘0은 config 기본 크기로 복귀.
+- ⌘+/⌘-(폰트 키우기/줄이기)는 `font.size`를 **1pt씩** 바꾼다. 보폭은 설정 항목(슬라이더)이 아니라 바인딩이 싣는다 — `increase_font_size:N`·`decrease_font_size:N`(Ghostty 와 같은 표기, 숫자 없으면 1pt). ⌘0은 config 기본 크기로 복귀.
 - `font.line-height`는 행간 배수다(1.0=CoreText 자동 cell 높이 그대로). 기본 1.0.
 - `font.letter-spacing`은 자간(논리 pt, 음수 허용 — 칸 좁힘)이다. 기본 0.0.
   - **렌더 모델(자간 적용)**: 자간은 **grid advance(셀 배치 간격)에만** 반영하고, **폰트 글리프 비트맵 폭은 자연폭(자간 무관)**으로 둔다 — `applyFontSpacing`이 `advance_width_px`(spaced, 배치·hit-test·커서)와 `glyph_cell_width_px`(natural, atlas slot·글리프 quad)를 분리 반환하고, `TextLayoutConfig.slotCellWidthPx`가 글리프별로 slot 폭을 고른다. **합성 글리프(box/block/Powerline·notdef = `glyph_id==0`)는 셀에 꽉 차 이음매 없이 타일링돼야 하므로 advance(셀폭) 그대로** 쓴다. 근거: 음수 자간이 폰트 글리프 slot을 좁히면 글리프가 "셀보다 넓다"로 오판→축소+ink세로중앙 경로로 빠져 **글자마다 세로로 흔들리고/찌그러지던** 버그가 났다(code-review). Ghostty도 일반 텍스트를 자연 bearing 좌측정렬로 두고 셀폭 조정은 배치에만 적용한다(`face.zig` "left-aligned within the cell"). 좁힘 시 글리프는 자연폭으로 온전히 그려지고 배치 step만 줄어 이웃과 겹친다.

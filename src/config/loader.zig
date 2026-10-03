@@ -2540,6 +2540,21 @@ test "parse: keybind lines become app bindings; bad/duplicate ones are forgiving
     try p.keyBindingResolver().validate();
 }
 
+test "parse: keybind font size step rides the action and bad steps are diagnostics" {
+    var p = try parse(std.testing.allocator,
+        \\keybind = Ctrl+Cmd+K = increase_font_size:2.5
+        \\keybind = Ctrl+Cmd+J = decrease_font_size
+        \\keybind = Ctrl+Cmd+L = increase_font_size:0
+        \\keybind = Ctrl+Cmd+H = decrease_font_size:-1
+    );
+    defer p.deinit();
+    // 보폭은 바인딩이 싣는다. 숫자 없으면 기본 보폭. 0·음수는 알 수 없는 action 과 같은 diagnostic(그 줄만 무시).
+    try std.testing.expectEqual(@as(usize, 2), p.keybindings.len);
+    try std.testing.expectEqual(@as(f32, 2.5), p.keybindings[0].action.increase_font_size);
+    try std.testing.expectEqual(action_mod.default_font_size_step, p.keybindings[1].action.decrease_font_size);
+    try std.testing.expectEqual(@as(usize, 2), p.diagnostics.len);
+}
+
 test "parse: keybind = <chord> = unbind collects unbinds; dedups across binds and unbinds" {
     var p = try parse(std.testing.allocator,
         \\keybind = Cmd+T = unbind

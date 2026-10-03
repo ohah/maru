@@ -84,8 +84,8 @@ pub const entries = [_]Entry{
     .{ .action = .clear_screen, .key = "clear_screen", .title = "Clear", .search_ko = "화면 지우기" },
     // 런타임 폰트 크기(⌘+/⌘-/⌘0). 모달 토글(toggle_find 등)과 달리 일반 액션이라 팝업/메뉴에 노출한다 —
     // 메뉴는 catalogMenuItem이 바인딩 chord(⌘+/⌘-/⌘0)를 그대로 표시한다(select_all과 같은 결).
-    .{ .action = .increase_font_size, .key = "increase_font_size", .title = "Bigger", .search_ko = "글꼴 크게" },
-    .{ .action = .decrease_font_size, .key = "decrease_font_size", .title = "Smaller", .search_ko = "글꼴 작게" },
+    .{ .action = .{ .increase_font_size = maru.config.action.default_font_size_step }, .key = "increase_font_size", .title = "Bigger", .search_ko = "글꼴 크게" },
+    .{ .action = .{ .decrease_font_size = maru.config.action.default_font_size_step }, .key = "decrease_font_size", .title = "Smaller", .search_ko = "글꼴 작게" },
     .{ .action = .reset_font_size, .key = "reset_font_size", .title = "Actual Size", .search_ko = "글꼴 원래 크기" },
     // 스크롤백 Find(⌘F)·다음/이전 매치(⌘G/⌘⇧G). **toggle_command_palette(팝업 자기 토글 — 재귀)와 달리**
     // Find는 별개 모달이라 팝업에 띄운다(선택 시 acceptPalette가 팝업을 닫고 Find를 연다). 메뉴 Find 서브메뉴는

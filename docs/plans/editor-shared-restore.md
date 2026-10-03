@@ -276,7 +276,7 @@ publication 성공 뒤 소비 시점 역시 기존 recovery 수명 계약과 대
 ### 남은 정책과 실행 gate의 단일 목록
 
 - **정책 미결:** 같은 path 독립 dirty 문서의 recovery 식별, missing-file shared 복구 방식,
-  큰 선택/접힘 상태의 저장 저하 정책, 성공 후 consumed backup의 보존 수명.
+  큰 선택/접힘 상태의 저장 저하 정책. 백업 보존 수명은 아래 후속 구현에서 확정했다.
 - **구현 요구:** backup 읽기 결과 분류, editor codec의 정확한 선택/좌표 wire,
   전체 count/참조/occupancy/overflow 검증, 표시가 준비된 뒤 view state 적용,
   로컬 공유 admission과 owned capture 경계 유지.
@@ -623,7 +623,7 @@ filter와 일치하지 않아 미실행이었으므로 prefix와 exact-count를 
 현재 제품 caller `read`는 성공만 기존 optional record로 전달한다. 기존 조용한 복원 생략,
 원본 백업 보존, 소비 시 삭제 정책을 유지한다. 새 공유 복원이나 사용자 알림에 이 구분을
 연결했다고 주장하지 않는다. 같은 경로 recovery ID·missing-file 공유 복원·큰 표시 상태
-저하·소비 후 백업 수명 정책은 여전히 미결이다.
+저하 정책은 여전히 미결이며, 백업 보존 수명은 아래 후속 구현에서 확정했다.
 
 읽기 분류 집중 gate `test-editor-untitled`는 제품 124개와 규칙 39개가 통과했다.
 U4b-10에서 실제 디렉터리 I/O 실패도 확인했고 U4b-11에서 모든 할당 실패를 주입해
@@ -676,3 +676,25 @@ U4b-12는 기존 제품 open/restore 경로로 백업 내용을 복원한 뒤 de
 집중 gate는 exact-count 제품 126개·규칙 39개가 통과했다. 로그는
 `/tmp/maru-retention-hostile-review.log`다. 이 검토에서 제품 정책은 바꾸지 않았고
 원본 백업 유지 제안은 여전히 사용자 선택 대기다. 새 실제 process crash/GUI gate는 추가하지 않았다.
+
+### 복구 백업 보존 정책 적용
+
+사용자가 유지 정책 진행을 승인했다. 기존 유실 재현 U4b-12를 보존 회귀 검사로 바꿨다.
+같은 신원 dirty 복구는 backup_on_disk를 유지해 재백업 전 원본을 지우지 않는다. clean
+복구는 기존대로 소비한다. 신원이 바뀐 revive는 원본 파일 이름을 문서 Notifications에
+고정 길이로 보관한다(기존 backup 파일 이름 길이를 사용하고 새로운 상한을 만들지 않음).
+새 백업의 atomic 교체 성공·저장·명시적 버리기·Undo clean 복귀 뒤 원본을 정리한다.
+새 백업 쓰기 실패나 상한 초과는 원본과 소유 상태를 유지한다.
+
+원본을 유지하면 같은 원본의 revival 요청이 중복될 수 있어, 앱 전역 문서 registry에서
+원본 이름의 소유를 확인해 동일 실행 중 중복 revival을 막는다. 기존 마지막 view 닫기
+coordinator는 원본 이름을 캡처해 teardown 후 정리한다. 포맷·새 recovery ID·untitled 공유
+admission은 바꾸지 않는다. 백업 삭제 실패는 기존 best-effort 정책이며, 물리 전원 차단
+내구성을 새로 보장하지 않는다.
+
+U4b-14는 staging commit 뒤 원본 보존과 Undo clean/버리기 정리를 검사한다. U4d-7은
+revival 중복 방지와 새 백업 성공/실제 쓰기 실패/Undo/버리기/이름 붙여 실제 저장 5개 분기를 검사한다.
+최종 집중 gate는 제품 128개·규칙 39개·창 복원 8개·shared 64개·split 11개·문서 runtime 7개가 통과했다.
+로그는 `/tmp/maru-recovery-retained-final.log`다. 문서 링크/줄 참조와 Zig format 검사도 통과했다.
+전체 검사와 원격 CI는 별도로 확인하며 실제 process SIGKILL/새 shared restart codec 연결을
+검증한 것으로 집계하지 않는다.

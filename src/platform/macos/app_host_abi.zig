@@ -7705,9 +7705,9 @@ test "a new untitled document never takes the number of a record a failed restor
     try std.testing.expect(std.mem.indexOf(u8, new_record, "new doc typed text") != null);
 }
 
-test "a successful window restore still consumes the backup record into the revived document" {
+test "a successful window restore retains the backup record until a replacement protects the revived document" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    // 대조군 — 미루기가 **성공 경로의 삭제까지 막으면** 다음 실행이 같은 내용을 또 되살려 문서가 둘이 된다.
+    // 성공한 창 복원도 다음 백업 전에 원본을 지우지 않는다.
     const a = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -7743,7 +7743,7 @@ test "a successful window restore still consumes the backup record into the revi
         "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n";
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0));
     var read_buf: [4096]u8 = undefined;
-    try std.testing.expect(readBackupRecord(tmp.dir, name, &read_buf) == null);
+    try std.testing.expectEqualStrings(record, readBackupRecord(tmp.dir, name, &read_buf).?);
     const pane = session.?.tabs.items[0].panes.items[0];
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     const revived = pane.terms.items[1];

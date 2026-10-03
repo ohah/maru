@@ -26,6 +26,16 @@ pub const Registry = struct {
     slots: std.ArrayList(Slot) = .empty,
     last_reference: u64 = 0,
 
+    /// 아직 원본을 보호 중인 복구가 있으면 같은 레코드를 다른 창에서 중복 복구하지 않는다.
+    pub fn hasRecoveryBackupSource(self: *const Registry, name: []const u8) bool {
+        for (self.slots.items) |slot| {
+            const doc = slot.document orelse continue;
+            const state = &doc.state.notifications;
+            if (state.recovery_backup_len > 0 and std.mem.eql(u8, name, state.recovery_backup_name[0..state.recovery_backup_len])) return true;
+        }
+        return false;
+    }
+
     /// 호출자가 독립 소유한 준비 상태를 성공할 때만 소비한다. get으로 빌린 State를 넘기지 않는다.
     /// 실패하면 호출자의 본문·신원·이력은 그대로다.
     /// resource allocator는 기존 경로/이력의 할당 짝이며 마지막 참조 해제까지 살아 있어야 한다.

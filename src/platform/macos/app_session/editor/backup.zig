@@ -136,6 +136,7 @@ pub fn markClean(self: *AppSession, term: *Term, content: []const u8, previous_i
     // ⚠️ **`&(… orelse …)` 로 잡지 않는다** — 그 형태는 optional 의 «사본»에 포인터를 주므로
     // 저장 해시가 임시 값에 쓰이고 문서는 영원히 dirty 로 남는다(적대적 1회차에서 그 형태를 지웠다).
     term.rt.editorDocument().opened.?.saved_hash = editor_ops.contentHash(content);
+    dropRecoverySource(self, term);
     if (previous_identity) |prev| {
         if (term.rt.editorDocument().notifications.backup_on_disk) {
             term.rt.editorDocument().notifications.backup_on_disk = false;
@@ -153,6 +154,7 @@ pub fn markClean(self: *AppSession, term: *Term, content: []const u8, previous_i
 pub fn drop(self: *AppSession, term: *Term) void {
     term.rt.editorDocument().notifications.backup_dirty = false;
     term.rt.editorDocument().notifications.backup_paused = false;
+    dropRecoverySource(self, term);
     if (!term.rt.editorDocument().notifications.backup_on_disk) return;
     term.rt.editorDocument().notifications.backup_on_disk = false;
     const doc = identity(term) orelse return; // 신원이 이미 바뀌었으면 그 경로가 옛 신원으로 지운다
@@ -185,6 +187,7 @@ fn settle(self: *AppSession, term: *Term) void {
             dropDoc(self, doc);
         }
         term.rt.editorDocument().notifications.backup_paused = false;
+        dropRecoverySource(self, term);
         return;
     }
     // **상한을 넘는 문서는 백업하지 않고 그 사실을 화면에 남긴다**(§3.10 — 조용히 멈추면 사용자는
@@ -196,6 +199,7 @@ fn settle(self: *AppSession, term: *Term) void {
     }
     term.rt.editorDocument().notifications.backup_paused = false;
     if (write(self, doc, opened.file.content)) {
+        dropRecoverySource(self, term);
         term.rt.editorDocument().notifications.backup_on_disk = true;
     } else {
         // 쓰지 못했으면 **다음 만기에 다시 시도한다** — 한 번 실패로 보호를 놓지 않는다(디스크가
@@ -243,9 +247,23 @@ fn write(self: *AppSession, doc: backup.Doc, content: []const u8) bool {
 /// Term 이 소유하므로 teardown 이 해제해 버리고, 그 뒤에는 `dropDoc` 로 이름을 만들 수 없다
 /// (해제된 메모리를 읽는다). 이름은 값이라 살아남는다.
 pub fn fileNameIfOnDisk(term: *const Term, buf: *[backup.max_file_name_len]u8) ?[]const u8 {
+    const state = &term.rt.editorDocument().notifications;
+    if (state.recovery_backup_len > 0) {
+        const name = state.recovery_backup_name[0..state.recovery_backup_len];
+        @memcpy(buf[0..name.len], name);
+        return buf[0..name.len];
+    }
     if (!term.rt.editorDocument().notifications.backup_on_disk) return null;
     const doc = identity(term) orelse return null;
     return backup.fileName(buf, doc);
+}
+
+/// 이름 없는 문서로 옮긴 복구 원본은 새 보호가 성공한 뒤 정리한다.
+fn dropRecoverySource(self: *AppSession, term: *Term) void {
+    const state = &term.rt.editorDocument().notifications;
+    if (state.recovery_backup_len == 0) return;
+    dropName(self, state.recovery_backup_name[0..state.recovery_backup_len]);
+    state.recovery_backup_len = 0;
 }
 
 /// 이름으로 지운다 — `fileNameIfOnDisk` 로 떠 둔 이름을 **닫힌 뒤에** 소비한다.
@@ -398,8 +416,8 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
         },
         else => {},
     }
-    dropConsumed(self, parsed.doc);
-    term.rt.editorDocument().notifications.backup_on_disk = false;
+    // 같은 신원 dirty 복구는 재백업 전에도 원본이 보호한다. clean 복구만 위에서 소비한다.
+    term.rt.editorDocument().notifications.backup_on_disk = true;
     // **알림 한 줄**(모달이 아니다) — 크래시를 몰랐던 사용자는 dirty 를 버그로 읽는다.
     self.showNoticeKey(.editor_backup_restored);
 }
@@ -452,6 +470,8 @@ fn readAt(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ReadOutcom
 ///
 /// 레코드가 없거나 읽히지 않으면 **아무것도 만들지 않는다**(빈 탭을 만들 이유가 없다).
 pub fn reviveAsUntitled(self: *AppSession, lost: backup.Doc) void {
+    var source_buf: [backup.max_file_name_len]u8 = undefined;
+    if (self.editor_documents.hasRecoveryBackupSource(backup.fileName(&source_buf, lost))) return;
     const record = read(self, lost) orelse return;
     defer self.allocator.free(record.bytes);
     var parsed = record.parsed;
@@ -480,7 +500,9 @@ pub fn reviveAsUntitled(self: *AppSession, lost: backup.Doc) void {
     const term = editor_ops.openUntitledInActivePane(self) catch return;
     var changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = parsed.content }};
     if (!editor_ops.applyEditAsOne(self, term, &changes)) return; // 못 넣었으면 레코드를 남긴다
-    dropDoc(self, lost);
+    const state = &term.rt.editorDocument().notifications;
+    const source = backup.fileName(&state.recovery_backup_name, lost);
+    state.recovery_backup_len = @intCast(source.len);
     self.showNoticeKey(.editor_backup_revived);
 }
 

@@ -43569,8 +43569,8 @@ test "U4b-1 지난 세션의 편집이 조용히 되살아난다 — dirty 로, 
     const on_disk = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(4096));
     defer allocator.free(on_disk);
     try testing.expectEqualStrings("disk\n", on_disk);
-    // ⑹ **소비한 레코드는 사라진다** — 안 지우면 다음 실행이 같은 것을 또 되살린다.
-    try testing.expect(!backupExists(root, doc));
+    // ⑹ 재백업 전에도 원래 미저장 내용이 보호된다.
+    try testing.expect(backupExists(root, doc));
 }
 
 test "U4b-2 디스크가 그 사이 바뀌어도 «묻지 않는다» — 첫 저장이 충돌로 갈린다" {
@@ -43750,7 +43750,7 @@ test "U4b-8 되살린 문서는 다시 보호된다 — 시계가 서고 다음 
     try plantBackup(allocator, root, doc, "kept\n");
 
     const t = try openRestored(&fx, path);
-    try testing.expect(!backupExists(root, doc)); // 소비됐다
+    try testing.expect(backupExists(root, doc)); // 재백업 전 보호
     // 되살린 편집도 **미저장 편집**이다 — 다시 크래시가 와도 잃지 않아야 한다.
     try testing.expect(t.rt.editorDocument().notifications.backup_dirty);
     expireBackupClock(t);
@@ -43926,7 +43926,7 @@ test "U4c-5 되살린 문서만 레코드를 삼킨다 — 새로 만든 문서�
     const restored = try createRestoredUntitledTerm(fx.session, 1);
     defer term_ops.destroyTerm(fx.session, restored);
     try testing.expectEqualStrings("from a past session\n", restored.rt.editorDocument().opened.?.file.content);
-    try testing.expect(!backupExists(root, .{ .untitled = 1 }));
+    try testing.expect(backupExists(root, .{ .untitled = 1 }));
 }
 
 test "U4c-8 새 이름 없는 문서는 checkpoint 를 «persisted_surface 로» 더럽힌다" {
@@ -44019,13 +44019,13 @@ test "U4d-4 저쪽 신원 문서는 새 이름 없는 문서로 되살아난다 
     // **알린다** — 조용하면 「왜 이 탭이 생겼지」가 된다.
     try testing.expect(fx.session.chrome_host.notice.open);
     try testing.expectEqualStrings(maru.i18n.t(.editor_backup_revived), fx.session.chrome_host.notice.message);
-    // **옛 레코드는 소비된다** — 안 지우면 매 실행마다 또 되살아난다.
-    try testing.expect(!backupExists(root, lost));
+    // **옛 레코드는 새 백업이 성공할 때까지 보호된다.**
+    try testing.expect(backupExists(root, lost));
     try testing.expect(backupExists(root, other)); // 둘째는 아직 예약에 남아 있다
 
     app_session_mod.editor_backup_ops.drainRevivals(fx.session);
     try testing.expectEqual(before + 2, pane.terms.items.len);
-    try testing.expect(!backupExists(root, other));
+    try testing.expect(backupExists(root, other));
     // 되돌리기로 **빈 문서**로 갈 수 있다(한 편집으로 넣었으므로).
     const second = pane.terms.items[pane.terms.items.len - 1];
     try testing.expect(undoEdit(fx.session, second));
@@ -44071,7 +44071,7 @@ test "U4d-5 원본이 사라진 경로 문서도 같은 규칙으로 되살아�
     try testing.expectEqualStrings("was in a file\n", revived.rt.editorDocument().opened.?.file.content);
     try testing.expect(revived.rt.editorDocument().untitled != null);
     try testing.expect(revived.rt.editorDocument().path == null); // 그 경로로 다시 쓰지 않는다
-    try testing.expect(!backupExists(root, lost));
+    try testing.expect(backupExists(root, lost));
 }
 
 test "U4d-6 레코드가 없으면 아무것도 만들지 않는다 — 빈 탭을 만들 이유가 없다" {
@@ -48144,7 +48144,7 @@ test "shared editor split retains rejected composition and commits it once befor
     try testing.expectEqual(@as(usize, 1), source.rt.editorDocument().history.undo_len);
 }
 
-test "U4b-12 current recovery removes the only backup before a second open without a backup tick" {
+test "U4b-12 recovery keeps the original backup across a second open without a backup tick" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var dir = testing.tmpDir(.{});
@@ -48163,14 +48163,14 @@ test "U4b-12 current recovery removes the only backup before a second open witho
         const term = try openRestored(&first, path);
         try testing.expectEqualStrings("recovered unsaved content\n", term.rt.editorDocument().opened.?.file.content);
         try testing.expect(isDirty(term));
-        try testing.expect(!backupExists(root, doc));
-        // No debounce tick, save or accepted discard: fixture teardown loses only volatile state.
+        try testing.expect(backupExists(root, doc));
+        // No debounce tick, save or accepted discard: durable source remains after volatile teardown.
     }
     var second = try UntitledFixture.init(allocator, false, true);
     defer second.deinit(allocator);
     const reopened = try openRestored(&second, path);
-    try testing.expectEqualStrings("disk\n", reopened.rt.editorDocument().opened.?.file.content);
-    try testing.expect(!isDirty(reopened));
+    try testing.expectEqualStrings("recovered unsaved content\n", reopened.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(reopened));
 }
 
 test "U4b-13 recovery flush positive control keeps unsaved content across a second open" {
@@ -48191,16 +48191,121 @@ test "U4b-13 recovery flush positive control keeps unsaved content across a seco
         defer first.deinit(allocator);
         const term = try openRestored(&first, path);
         try testing.expect(isDirty(term));
-        try testing.expect(!backupExists(root, doc));
+        try testing.expect(backupExists(root, doc));
         app_session_mod.editor_backup_ops.flushAll(first.session);
         try testing.expect(backupExists(root, doc));
         try testing.expect(term.rt.editorDocument().notifications.backup_on_disk);
     }
-    // Identical teardown to U4b-12: a completed flush is the only changed condition.
+    // Flushing replaces the retained backup without creating a protection gap.
     try testing.expect(backupExists(root, doc));
     var second = try UntitledFixture.init(allocator, false, true);
     defer second.deinit(allocator);
     const reopened = try openRestored(&second, path);
     try testing.expectEqualStrings("recovered unsaved content\n", reopened.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(reopened));
+}
+
+test "U4b-14 retained local recovery survives staging commit and clears on clean undo or discard" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const Action = enum { clean, discard, saved };
+    for ([_]Action{ .clean, .discard, .saved }) |action| {
+        var fx = try UntitledFixture.init(allocator, false, true);
+        defer fx.deinit(allocator);
+        var dir = testing.tmpDir(.{});
+        defer dir.cleanup();
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = try pinBackupDir(&root_buf, &dir);
+        defer app_session_mod.editor_backup_ops.setDirForTest(null);
+        try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+        const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } };
+        try plantBackup(allocator, root, doc, "recovered\n");
+        fx.session.workspace_restore_staging = true;
+        const term = try openRestored(&fx, path);
+        app_session_mod.editor_backup_ops.commitDeferredDrops(fx.session);
+        fx.session.workspace_restore_staging = false;
+        try testing.expect(backupExists(root, doc));
+        if (action == .saved) {
+            try saveDocument(fx.session, term);
+            const written = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(4096));
+            defer allocator.free(written);
+            try testing.expectEqualStrings("recovered\n", written);
+            try testing.expect(!isDirty(term));
+        } else if (action == .discard) {
+            app_session_mod.editor_backup_ops.drop(fx.session, term);
+        } else {
+            try testing.expect(undoEdit(fx.session, term));
+            try testing.expect(!isDirty(term));
+            app_session_mod.editor_backup_ops.flushAll(fx.session);
+        }
+        try testing.expect(!backupExists(root, doc));
+    }
+}
+
+test "U4d-7 revived source survives failed backup and clears only after replacement clean or discard" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const Action = enum { replacement, failure, clean, discard, saved };
+    for ([_]Action{ .replacement, .failure, .clean, .discard, .saved }) |action| {
+        var fx = try UntitledFixture.init(allocator, false, true);
+        defer fx.deinit(allocator);
+        var dir = testing.tmpDir(.{});
+        defer dir.cleanup();
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = try pinBackupDir(&root_buf, &dir);
+        defer app_session_mod.editor_backup_ops.setDirForTest(null);
+        const source: backup_rules.Doc = .{ .remote = .{ .dest = "me@host", .path = "/srv/doc.md" } };
+        try plantBackup(allocator, root, source, "recovered\n");
+        app_session_mod.editor_backup_ops.reviveAsUntitled(fx.session, source);
+        const pane = pane_ops.activePane(fx.session);
+        const term = pane.terms.items[pane.terms.items.len - 1];
+        const current = app_session_mod.editor_backup_ops.identity(term).?;
+        const before_duplicate = pane.terms.items.len;
+        app_session_mod.editor_backup_ops.reviveAsUntitled(fx.session, source);
+        try testing.expectEqual(before_duplicate, pane.terms.items.len);
+        try testing.expect(backupExists(root, source));
+        try testing.expect(!backupExists(root, current));
+        var source_buf: [backup_rules.max_file_name_len]u8 = undefined;
+        var close_buf: [backup_rules.max_file_name_len]u8 = undefined;
+        try testing.expectEqualStrings(backup_rules.fileName(&source_buf, source), app_session_mod.editor_backup_ops.fileNameIfOnDisk(term, &close_buf).?);
+        switch (action) {
+            .failure => {
+                var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
+                try dir.dir.createDir(std.testing.io, backup_rules.fileName(&name_buf, current), .default_dir);
+                app_session_mod.editor_backup_ops.flushAll(fx.session);
+                try testing.expect(backupExists(root, source));
+                try testing.expect(term.rt.editorDocument().notifications.recovery_backup_len > 0);
+                try testing.expect(term.rt.editorDocument().notifications.backup_dirty);
+                try testing.expect(!term.rt.editorDocument().notifications.backup_on_disk);
+            },
+            .replacement => {
+                app_session_mod.editor_backup_ops.flushAll(fx.session);
+                try testing.expect(!backupExists(root, source));
+                try testing.expect(backupExists(root, current));
+            },
+            .clean => {
+                try testing.expect(undoEdit(fx.session, term));
+                app_session_mod.editor_backup_ops.flushAll(fx.session);
+                try testing.expect(!backupExists(root, source));
+            },
+            .saved => {
+                pinUntitledBase(fx.session, root);
+                try testing.expectError(error.AskName, saveDocument(fx.session, term));
+                try testing.expect(backupExists(root, source));
+                try fx.session.rename_input.setText(allocator, "recovered.txt");
+                settings_ops.commitRename(fx.session);
+                try testing.expect(!isDirty(term));
+                const written = try dir.dir.readFileAlloc(std.testing.io, "recovered.txt", allocator, .limited(4096));
+                defer allocator.free(written);
+                try testing.expectEqualStrings("recovered\n", written);
+                try testing.expect(!backupExists(root, source));
+            },
+            .discard => {
+                app_session_mod.editor_backup_ops.drop(fx.session, term);
+                try testing.expect(!backupExists(root, source));
+            },
+        }
+    }
 }

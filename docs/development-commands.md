@@ -1066,3 +1066,8 @@ workspace 손상 입력의 실제 앱 보존 검사를 20개 반례로 확장하
 `python3 tools/test-workspace-read-failure-app.py --extended --report /tmp/maru-workspace-hostile-20.json`을
 사용한다. 빌드된 앱을 사용하며 각 회차에 독립 test home을 만든다. 전체 suite 20회 반복이나
 새 공유 뷰 재시작 복원 검증으로 집계하지 않는다.
+
+복구 백업 보존의 제품 집중 검사:
+`zig build test-editor-untitled test-editor-recovery-window test-editor-shared test-editor-shared-split test-editor-document-runtime -j2`.
+창 복원 집중 step은 기존 app-host ABI 전체 gate에 포함된 성공/실패 apply 판정자를 빠르게
+실행한다. 복구 백업의 보존·재백업·저장/버리기 정리와 shared 수명을 구분해 판정한다.

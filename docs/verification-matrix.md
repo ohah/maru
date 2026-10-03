@@ -3978,3 +3978,9 @@ last-writer-wins와 baseline 백업 보존을 확인한다. 기존 SIGKILL commi
 U4b-13 대조군은 U4b-12와 같은 메모리 teardown/재열기에 flushAll만 추가해 복구 내용의
 보존을 판정한다. 최신 test-editor-untitled는 제품 126개·규칙 39개 통과. 정상 종료의 flush
 호출과 fixture teardown을 혼동하지 않는다. 실제 SIGKILL/새 공유 복원 검사는 아니다.
+
+복구 백업 보존 회귀: U4b-12는 재백업 없는 재열기에서 복구 내용을 유지하는 판정으로
+변경했다. U4b-14는 staging commit·Undo clean·버리기·실제 파일 저장을, U4d-7은
+신원 변경 복구의 중복 방지·재백업 성공/실제 쓰기 실패·Undo·버리기·이름 붙여 저장을 판정한다.
+`test-editor-recovery-window`는 성공/실패한 실제 workspace apply와 번호 보호를 8개
+exact-count한다. 이 판정들은 새 shared restart codec 연결이나 OS 강제 종료 검사는 아니다.

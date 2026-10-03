@@ -1189,6 +1189,18 @@ test "CR6e-c3b2d 경계는 재연결 강제 resize 가 레이아웃이 원한 �
     const recorded = std.mem.indexOf(u8, resize_fn, "\n        self.layout_size = .{ .cols = cols, .rows = rows };\n");
     const gated = std.mem.indexOf(u8, resize_fn, "\n        if (!self.gateMutation(.resize)) return;\n");
     try std.testing.expect(recorded != null and gated != null and recorded.? < gated.?);
+    // 셀 픽셀(글꼴 크기)도 같은 이유로 관문보다 먼저 적는다 — 끊긴 동안 바뀐 글꼴이 재연결 강제 resize 에 실려야 한다.
+    const cell_recorded = std.mem.indexOf(u8, resize_fn, "\n            self.layout_cell_width_px = cell_w;\n");
+    try std.testing.expect(cell_recorded != null and cell_recorded.? < gated.?);
+    // 재연결 강제 resize 가 그 셀 픽셀을 싣는다 — 안 실으면 host 가 격자만 바꾸고 통지가 두 번 간다.
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "                runtime.layout_cell_width_px,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, "                runtime.layout_cell_height_px,"));
+    const forced_source = try readSource(allocator, "src/platform/macos/session_host/generation_attachment.zig");
+    defer allocator.free(forced_source);
+    const forced = between(forced_source, "pub fn forcePromotedControllerResizeUntil(", "const allocator = self.payloadConst().allocator;") orelse
+        return error.MissingResize;
+    try std.testing.expectEqual(@as(usize, 1), count(forced, ".cell_width_px = cell_width_px,"));
+    try std.testing.expectEqual(@as(usize, 1), count(forced, ".cell_height_px = cell_height_px,"));
 
     // `resize` 는 셀 픽셀 없는 `resizeWithCell` 로 **위임만** 한다 — 관문·기록은 위임받는 쪽 한 자리다.
     const resize_delegate = memberBody(runtime, "pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16)") orelse

@@ -2519,3 +2519,22 @@ test "적대적 R5 ID 없는 경계 뒤 완료 시각 세대 중복과 취소는
     state = advance(&p, state, .{ .kind = .subagent_stop, .agent_id = "worker" });
     try testing.expect(!completionReady(&p, state, p.generation, 1000, 100000));
 }
+
+test "큰 자식 종료를 접어도 신원으로 연결해 마지막 자식 뒤 턴을 끝낸다" {
+    var p: Progress = .{};
+    var state = advance(&p, .idle, .{ .provider = "codex", .kind = .user_prompt_submit, .session_id = "s1", .turn_key = "t1" });
+    state = advance(&p, state, .{ .kind = .subagent_start, .agent_id = "child" });
+    state = advance(&p, state, .{ .kind = .stop, .session_id = "s1", .turn_key = "t1" });
+    try testing.expectEqual(State.running, state);
+    // The real-shell gate checks this exact root identity set after folding 40+ KB.
+    const child = event.parseLine("codex\t{\"hook_event_name\":\"SubagentStop\",\"session_id\":\"s1\",\"turn_id\":\"t1\",\"agent_id\":\"child\"}").?;
+    state = advance(&p, state, child);
+    try testing.expectEqual(State.idle, state);
+    try testing.expectEqual(@as(usize, 0), p.childCount());
+    try testing.expect(completionReady(&p, state, p.generation, 0, 1500));
+    state = advance(&p, state, .{ .kind = .user_prompt_submit, .turn_key = "t2" });
+    const reentry = event.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"turn_id\":\"t2\",\"stop_hook_active\":true}").?;
+    state = advance(&p, state, reentry);
+    try testing.expectEqual(State.running, state);
+    try testing.expect(p.turn_open);
+}

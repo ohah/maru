@@ -2759,7 +2759,11 @@ test "Codex 질문 훅은 제품 배지를 입력 대기로 세우고 답변 뒤
         try std.testing.expectEqual(mode.Notice.done, term.hook.notice.kind);
         const queued_at = term.hook.notice.since_ms;
         _ = testApplyHookEvent(session, term, parser.parseLine(line).?);
-        try std.testing.expect(takeHookNoticeAt(term, &term.hook, queued_at + 1500) == null);
+        // Renewed work invalidates completion, but a new question may legitimately notify.
+        if (takeHookNoticeAt(term, &term.hook, queued_at + 1500)) |renewed_notice| {
+            try std.testing.expectEqual(mode.Notice.attention, renewed_notice.kind);
+        }
+        try std.testing.expect(!term.hook.progress.completion_notified);
     }
     // Last-child completion starts a fresh interval; the lead's earlier Stop cannot start it.
     _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"pending-child\"}").?);
@@ -2833,6 +2837,174 @@ test "Codex 질문 훅은 제품 배지를 입력 대기로 세우고 답변 뒤
     const unidentified_seq = term.hook.turn_seq;
     _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
     try std.testing.expectEqual(unidentified_seq +% 1, term.hook.turn_seq);
+    // A folded oversized child Stop must still retire its exact worker and queue completion.
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"folded-session\",\"turn_id\":\"folded-turn\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"folded-child\"}").?);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"session_id\":\"folded-session\",\"turn_id\":\"folded-turn\"}").?);
+    try std.testing.expectEqual(mode.State.running, term.hook.state);
+    _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"SubagentStop\",\"session_id\":\"folded-session\",\"turn_id\":\"folded-turn\",\"agent_id\":\"folded-child\"}").?);
+    try std.testing.expectEqual(mode.State.idle, term.hook.state);
+    try std.testing.expectEqual(@as(usize, 0), term.hook.progress.childCount());
+    const folded_since = term.hook.notice.since_ms;
+    try std.testing.expect(takeHookNoticeAt(term, &term.hook, folded_since + 1499) == null);
+    try std.testing.expectEqual(mode.Notice.done, takeHookNoticeAt(term, &term.hook, folded_since + 1500).?.kind);
+
+    // Hostile round 1: pending questions survive any aggregate badge; debounce and once-only hold.
+    for ([_]mode.State{ .running, .idle, .blocked }) |aggregate| {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"pane-question\"}").?);
+        const question_notice_since = term.hook.notice.since_ms;
+        term.agent_state = aggregate;
+        try std.testing.expect(takeHookNoticeAt(term, &term.hook, question_notice_since + 1199) == null);
+        try std.testing.expectEqual(mode.Notice.attention, term.hook.notice.kind);
+        try std.testing.expectEqual(mode.Notice.attention, takeHookNoticeAt(term, &term.hook, question_notice_since + 1200).?.kind);
+        try std.testing.expect(takeHookNoticeAt(term, &term.hook, question_notice_since + 1201) == null);
+    }
+    // Hostile round 2: wrong call cannot release the question; answer/cancel/boundary can.
+    for ([_][]const u8{
+        "codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"pane-question\"}",
+        "codex\t{\"hook_event_name\":\"Interrupt\"}",
+        "codex\t{\"hook_event_name\":\"UserPromptSubmit\"}",
+        "codex\t{\"hook_event_name\":\"SessionStart\"}",
+    }) |release| {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"pane-question\"}").?);
+        const question_notice_since = term.hook.notice.since_ms;
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"wrong-question\"}").?);
+        try std.testing.expect(term.hook.progress.hasPendingQuestions());
+        _ = testApplyHookEvent(session, term, parser.parseLine(release).?);
+        term.agent_state = .running;
+        try std.testing.expect(!term.hook.progress.hasPendingQuestions());
+        try std.testing.expect(takeHookNoticeAt(term, &term.hook, question_notice_since + 1200) == null);
+    }
+    // Hostile round 3: generic approvals must still honor C1 after the screen has cleared.
+    for ([_]mode.State{ .running, .idle }) |cleared| {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+        _ = testApplyHookEvent(session, term, permission);
+        const question_notice_since = term.hook.notice.since_ms;
+        try std.testing.expectEqual(mode.State.blocked, term.hook.state);
+        try std.testing.expect(!term.hook.progress.hasPendingQuestions());
+        term.agent_state = cleared;
+        try std.testing.expect(takeHookNoticeAt(term, &term.hook, question_notice_since + 1200) == null);
+        try std.testing.expectEqual(mode.Notice.none, term.hook.notice.kind);
+    }
+    // Hostile round 6: two questions, both response orders and duplicate Pre preserve the candidate.
+    for ([_]bool{ false, true }) |reverse| {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+
+        const q_a = parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"extra-a\"}").?;
+        _ = testApplyHookEvent(session, term, q_a);
+        const extra_since = term.hook.notice.since_ms;
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"extra-b\"}").?);
+        _ = testApplyHookEvent(session, term, q_a);
+        try std.testing.expectEqual(@as(usize, 2), term.hook.progress.question_count);
+        try std.testing.expectEqual(extra_since, term.hook.notice.since_ms);
+        _ = testApplyHookEvent(session, term, parser.parseLine(if (reverse) "codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"extra-b\"}" else "codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"extra-a\"}").?);
+        term.agent_state = .running;
+        try std.testing.expectEqual(@as(usize, 1), term.hook.progress.question_count);
+        try std.testing.expectEqual(mode.Notice.attention, takeHookNoticeAt(term, &term.hook, extra_since + 1200).?.kind);
+        _ = testApplyHookEvent(session, term, parser.parseLine(if (reverse) "codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"extra-a\"}" else "codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"extra-b\"}").?);
+        try std.testing.expect(!term.hook.progress.hasPendingQuestions());
+        try std.testing.expect(takeHookNoticeAt(term, &term.hook, extra_since + 1500) == null);
+    }
+    // Hostile round 7: untrackable IDs and roster overflow remain conservative until a boundary.
+    for ([_][]const u8{ "", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }) |call_id| {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+
+        var extra_line: [512]u8 = undefined;
+        const extra_payload = try std.fmt.bufPrint(&extra_line, "codex\t{{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"{s}\"}}", .{call_id});
+        _ = testApplyHookEvent(session, term, parser.parseLine(extra_payload).?);
+        try std.testing.expect(term.hook.progress.question_untracked);
+        term.agent_state = .running;
+        const extra_since = term.hook.notice.since_ms;
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"extra-a\"}").?);
+        try std.testing.expect(term.hook.progress.hasPendingQuestions());
+        try std.testing.expectEqual(mode.Notice.attention, takeHookNoticeAt(term, &term.hook, extra_since + 1200).?.kind);
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Interrupt\"}").?);
+        try std.testing.expect(!term.hook.progress.hasPendingQuestions());
+    }
+    {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+
+        for (0..9) |call_index| {
+            var extra_line: [512]u8 = undefined;
+            const extra_payload = try std.fmt.bufPrint(&extra_line, "codex\t{{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"q-{d}\"}}", .{call_index});
+            _ = testApplyHookEvent(session, term, parser.parseLine(extra_payload).?);
+        }
+        const extra_since = term.hook.notice.since_ms;
+        try std.testing.expectEqual(@as(usize, 8), term.hook.progress.question_count);
+        for (0..9) |call_index| {
+            var extra_line: [512]u8 = undefined;
+            const extra_payload = try std.fmt.bufPrint(&extra_line, "codex\t{{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"q-{d}\"}}", .{call_index});
+            _ = testApplyHookEvent(session, term, parser.parseLine(extra_payload).?);
+        }
+        try std.testing.expectEqual(@as(usize, 0), term.hook.progress.question_count);
+        try std.testing.expect(term.hook.progress.hasPendingQuestions());
+        term.agent_state = .running;
+        try std.testing.expectEqual(mode.Notice.attention, takeHookNoticeAt(term, &term.hook, extra_since + 1200).?.kind);
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Interrupt\"}").?);
+        try std.testing.expect(!term.hook.progress.hasPendingQuestions());
+    }
+    // Hostile round 8: retired turn/session events with a reused call ID cannot answer or cancel.
+    {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"extra-session\",\"turn_id\":\"extra-old\"}").?);
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"extra-session\",\"turn_id\":\"extra-new\"}").?);
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"extra-session\",\"turn_id\":\"extra-new\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"reused\"}").?);
+        const extra_since = term.hook.notice.since_ms;
+        const extra_generation = term.hook.progress.generation;
+        for ([_][]const u8{ "codex\t{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"extra-session\",\"turn_id\":\"extra-old\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"reused\"}", "codex\t{\"hook_event_name\":\"Stop\",\"session_id\":\"extra-session\",\"turn_id\":\"extra-old\"}", "codex\t{\"hook_event_name\":\"Interrupt\",\"session_id\":\"extra-session\",\"turn_id\":\"extra-old\"}", "codex\t{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"other-session\",\"turn_id\":\"extra-new\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"reused\"}" }) |stale| {
+            _ = testApplyHookEvent(session, term, parser.parseLine(stale).?);
+            try std.testing.expect(term.hook.progress.hasPendingQuestions());
+            try std.testing.expectEqual(extra_generation, term.hook.progress.generation);
+            try std.testing.expectEqual(extra_since, term.hook.notice.since_ms);
+        }
+        term.agent_state = .running;
+        try std.testing.expectEqual(mode.Notice.attention, takeHookNoticeAt(term, &term.hook, extra_since + 1200).?.kind);
+    }
+    // Hostile round 10: all six child lifecycle orders and active Stop preserve the lead question.
+    for ([_][3]usize{ .{ 0, 1, 2 }, .{ 0, 2, 1 }, .{ 1, 0, 2 }, .{ 1, 2, 0 }, .{ 2, 0, 1 }, .{ 2, 1, 0 } }) |order| {
+        term.hook.progress = .{};
+        term.hook.state = .unknown;
+        term.hook.notice.clear();
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"UserPromptSubmit\"}").?);
+
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"request_user_input\",\"tool_use_id\":\"extra-a\"}").?);
+        const extra_since = term.hook.notice.since_ms;
+        const child_events = [_][]const u8{ "codex\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"extra-worker\"}", "codex\t{\"hook_event_name\":\"PreToolUse\",\"agent_id\":\"extra-worker\",\"tool_name\":\"Bash\"}", "codex\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"extra-worker\"}" };
+        for (order) |child_index| {
+            _ = testApplyHookEvent(session, term, parser.parseLine(child_events[child_index]).?);
+            try std.testing.expect(term.hook.progress.hasPendingQuestions());
+            try std.testing.expectEqual(mode.State.blocked, term.hook.state);
+            try std.testing.expectEqual(extra_since, term.hook.notice.since_ms);
+        }
+        _ = testApplyHookEvent(session, term, parser.parseLine("codex\t{\"hook_event_name\":\"Stop\",\"stop_hook_active\":true}").?);
+        term.agent_state = .running;
+        try std.testing.expect(term.hook.progress.hasPendingQuestions());
+        try std.testing.expectEqual(mode.Notice.attention, takeHookNoticeAt(term, &term.hook, extra_since + 1200).?.kind);
+    }
 }
 
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
@@ -3248,11 +3420,14 @@ fn takeHookNoticeAt(term: *Term, slot: *HookSlot, now_ms: u64) ?HookNotice {
             if (kind == .done and !mode_mod.completionReady(&slot.progress, slot.state, slot.notice.generation, slot.notice.since_ms, now_ms)) return null;
             slot.progress.completion_notified = true;
         },
-        // **여기는 훅 자리가 아니라 «지금 배지» 다**(§1.1.1 — 적대적 검증이 잡았다). 알림을 **만드는** 것은
+        // **일반 승인은 훅 자리가 아니라 «지금 배지» 다**(§1.1.1 — 적대적 검증이 잡았다). 알림을 **만드는** 것은
         // 훅 전이지만, 만들어 둔 알림을 **띄울지**는 지금도 유효한가의 문제다. 훅에는 승인 해제 이벤트가
         // 없어 `agent_hook_state` 는 영영 `blocked` 이므로, 그것으로 판단하면 C1 이 화면으로 풀어 준 뒤에도
         // 디바운스가 끝나며 「승인이 필요합니다」가 나간다 — 사용자가 이미 승인한 뒤에.
-        .attention => switch (mode_mod.attentionDebounce(term.agent_state, slot.notice.since_ms, now_ms)) {
+        // Codex questions have a paired response hook, so their own pending-call roster
+        // is authoritative. Another running pane must not discard this pane's question.
+        // Generic approvals still use the screen-arbitrated badge to suppress answered prompts.
+        .attention => switch (mode_mod.attentionDebounce(if (slot.progress.hasPendingQuestions()) slot.state else term.agent_state, slot.notice.since_ms, now_ms)) {
             .wait => return null,
             .drop => {
                 slot.notice.clear();

@@ -9,8 +9,8 @@
 //!
 //! §2가 ScrollArea 소유라고 적은 것은 여기 또는 `ui/tree.zig`에 있다 — 좌표계·투영·스크롤바 기하와
 //! 드래그 수명·분수 휠 잔여는 이 파일이, entry 발행과 viewport clip은 `tree.build`가 그 선언을 보고
-//! 한다. 남은 것은 selection follow(§4.5) 하나이고, 그것은 "무엇이 같은 항목인가"를 domain이 알아야
-//! 해서 seam만 제공한다.
+//! 한다. selection follow(§4.5)는 여기로 흡수하지 않기로 했다(결정 2026-08-30 — 근거는
+//! docs/plans/scroll-area.md "남은 것" 2번). 소비처의 값 비교가 그대로 소유한다.
 
 const std = @import("std");
 const continuous_drag = @import("continuous_drag.zig");

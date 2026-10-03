@@ -24966,7 +24966,9 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     defer a.free(remote_dir);
     try hook_command.build(&want, a, "claude", log_dir, remote_dir);
 
-    const settings_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+    // The inline command is repeated per hook. Read fixtures with the product's 1 MiB
+    // ceiling (readFileAlloc), rather than an unrelated 64 KiB assumption.
+    const settings_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
     defer a.free(settings_after);
     {
         var parsed = try std.json.parseFromSlice(std.json.Value, a, settings_after, .{});
@@ -25020,7 +25022,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
             .command_kind = @intFromEnum(CommandKind.controlled_smoke),
         });
         again.deinit();
-        const twice = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+        const twice = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
         defer a.free(twice);
         try std.testing.expectEqualStrings(settings_after, twice);
 
@@ -26909,6 +26911,28 @@ test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라�
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, pb.slot.state);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, agent_ops.hookSlotsAggregate(&session, term).state);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+
+    // Hostile round 4: actual two-pane remote frames must preserve B's question while A runs.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{"{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"codex\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"tool_name\\\":\\\"request_user_input\\\",\\\"tool_use_id\\\":\\\"pane-question\\\"}\"}"}, 260);
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, pb.slot.state);
+    try std.testing.expect(pb.slot.progress.hasPendingQuestions());
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, pb.slot.notice.kind);
+    try std.testing.expect(agent_ops.takeAgentHookNotice(&session, term) == null);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, pb.slot.notice.kind);
+
+    // Hostile round 9: reverse the table order — first pane blocked, second pane running.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"codex\\t{\\\"hook_event_name\\\":\\\"PostToolUse\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"tool_name\\\":\\\"request_user_input\\\",\\\"tool_use_id\\\":\\\"pane-question\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"codex\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"tool_name\\\":\\\"request_user_input\\\",\\\"tool_use_id\\\":\\\"front-question\\\"}\"}",
+    }, 270);
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, pa.slot.state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, pb.slot.state);
+    try std.testing.expect(!pb.slot.progress.hasPendingQuestions());
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expect(agent_ops.takeAgentHookNotice(&session, term) == null);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, pa.slot.notice.kind);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, pb.slot.notice.kind);
 
     // ⑹ pane 없는 이벤트(구버전 원격·tmux 밖)는 인라인 슬롯 — 지금까지와 같다.
     agent_ops.consumeRemoteAgentLines(&session, term, &.{
@@ -30290,10 +30314,10 @@ test "turning the agent hooks gate off removes what we installed and nothing els
             .command_kind = @intFromEnum(CommandKind.controlled_smoke),
         });
         on.deinit();
-        const installed_claude = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+        const installed_claude = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
         defer a.free(installed_claude);
         try std.testing.expect(std.mem.indexOf(u8, installed_claude, hook_command.marker) != null);
-        const installed_codex = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+        const installed_codex = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(1 << 20));
         defer a.free(installed_codex);
         try std.testing.expect(std.mem.indexOf(u8, installed_codex, hook_command.marker) != null);
         const installed_config = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
@@ -30316,7 +30340,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
         off.deinit();
     }
 
-    const claude_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+    const claude_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
     defer a.free(claude_after);
     try std.testing.expect(std.mem.indexOf(u8, claude_after, hook_command.marker) == null);
     {
@@ -30331,7 +30355,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
         try std.testing.expectEqual(@as(usize, 0), hook_install.scan(.claude, .local, parsed.value.object.get("hooks"), "").?.ours);
     }
 
-    const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+    const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(1 << 20));
     defer a.free(codex_after);
     try std.testing.expect(std.mem.indexOf(u8, codex_after, hook_command.marker) == null);
     try std.testing.expect(std.mem.indexOf(u8, codex_after, legacy_hook) != null); // 과거 표식은 P1대로 남는다
@@ -30352,7 +30376,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
             .command_kind = @intFromEnum(CommandKind.controlled_smoke),
         });
         again.deinit();
-        const twice = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+        const twice = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
         defer a.free(twice);
         try std.testing.expectEqualStrings(claude_after, twice);
         const twice_config = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
@@ -30433,7 +30457,7 @@ test "agent hooks install into codex and record trust without touching existing 
     defer a.free(remote_dir);
     try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir, remote_dir);
 
-    const hooks_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+    const hooks_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(1 << 20));
     defer a.free(hooks_after);
     {
         var parsed = try std.json.parseFromSlice(std.json.Value, a, hooks_after, .{});
@@ -30509,7 +30533,7 @@ test "agent hooks install into codex and record trust without touching existing 
             .command_kind = @intFromEnum(CommandKind.controlled_smoke),
         });
         fresh_both.deinit();
-        const made_hooks = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+        const made_hooks = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(1 << 20));
         defer a.free(made_hooks);
         var parsed_new = try std.json.parseFromSlice(std.json.Value, a, made_hooks, .{});
         defer parsed_new.deinit();
@@ -30569,7 +30593,7 @@ test "agent hooks install into codex and record trust without touching existing 
         });
         refreshed.deinit();
 
-        const fixed = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+        const fixed = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(1 << 20));
         defer a.free(fixed);
         try std.testing.expect(std.mem.indexOf(u8, fixed, "maru-old-log-dir") == null); // 낡은 것이 남지 않는다
         var parsed_fixed = try std.json.parseFromSlice(std.json.Value, a, fixed, .{});
@@ -30604,7 +30628,7 @@ test "agent hooks install into codex and record trust without touching existing 
         const twice = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
         defer a.free(twice);
         try std.testing.expectEqualStrings(config_after, twice);
-        const hooks_twice = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
+        const hooks_twice = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(1 << 20));
         defer a.free(hooks_twice);
         try std.testing.expectEqualStrings(hooks_after, hooks_twice);
     }
@@ -30995,7 +31019,7 @@ test "statusline hook is removed on startup — the wrapped original comes back 
     // **원본이 돌아온다.** 감싸는 설계의 존재 이유가 이것이었고, 제거가 그 약속을 지키는 자리다.
     // 64 KiB — 훅 세트가 11개(AT3b-1)라 우리 항목만 ~27 KB 다. 16 KiB 로 두면 `StreamTooLong` 으로 죽는다
     // (CI 가 그렇게 빨갰다). 제품 쪽 읽기(`readFileState`)는 파일 크기만큼 읽어 상한이 없다.
-    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
     defer a.free(after);
     var parsed = try std.json.parseFromSlice(std.json.Value, a, after, .{});
     defer parsed.deinit();
@@ -31066,7 +31090,7 @@ test "statusline removal leaves someone else's statusLine alone" {
 
     // 64 KiB — 훅 세트가 11개(AT3b-1)라 우리 항목만 ~27 KB 다. 16 KiB 로 두면 `StreamTooLong` 으로 죽는다
     // (CI 가 그렇게 빨갰다). 제품 쪽 읽기(`readFileState`)는 파일 크기만큼 읽어 상한이 없다.
-    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
+    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
     defer a.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, theirs) != null); // 남의 값은 그대로
     try std.testing.expect(tmp.dir.statFile(io, "claude/" ++ sl.script_name, .{}) catch null == null);

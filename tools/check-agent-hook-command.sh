@@ -155,7 +155,7 @@ echo "4c) 상한을 넘겨도 tool_use_id 는 살아남는다 — 없으면 셸 
 # 없어 턴 끝까지 열린 채 사용자 편집을 끌어들인다. 파라미터 확장뿐이라 프로세스는 늘지 않는다.
 huge3=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_response\":{\"stdout\":\""; for (i = 0; i < 40000; i++) printf "x"; printf "\"},\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\"}" }')
 printf '%s\n' "$huge3" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=12 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
-grep -q '"hook_event_name":"PostToolUse","tool_use_id":"toolu_01GxMwqMfHbwqq1dbuxDCwFB"' "$evdir/12.ndjson" || fail "상한을 넘겼다고 tool_use_id 까지 버렸다: $(cat "$evdir/12.ndjson")"
+grep -q '"tool_use_id":"toolu_01GxMwqMfHbwqq1dbuxDCwFB"' "$evdir/12.ndjson" || fail "상한을 넘겼다고 tool_use_id 까지 버렸다: $(cat "$evdir/12.ndjson")"
 [ "$(wc -c < "$evdir/12.ndjson")" -lt 200 ] || fail "상한을 넘긴 원문이 그대로 실렸다"
 # **값은 화이트리스트를 지나야 실린다.** 우리가 만드는 JSON 안에 그대로 들어가므로 따옴표가 섞인 id 를
 # 실으면 파서가 그 줄을 통째로 버려 이름까지 잃는다 — 그때는 id 를 버리고 이름만 남긴다.
@@ -195,7 +195,7 @@ echo "4e) 상한은 바이트로 센다 — UTF-8 로케일에서 한글 payload
 hangul=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PostToolUse\",\"tool_use_id\":\"toolu_hangul\",\"tool_response\":{\"stdout\":\""; for (i = 0; i < 20000; i++) printf "한"; printf "\"}}" }')
 printf '%s\n' "$hangul" | env LANG=ko_KR.UTF-8 LC_ALL=ko_KR.UTF-8 MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=17 /bin/sh -c "$cmd" || fail "한글 상한 경로가 0 으로 끝나지 않았다"
 [ "$(wc -c < "$evdir/17.ndjson")" -lt 200 ] || fail "한글 payload 가 글자 수로 세어져 통째로 적혔다($(wc -c < "$evdir/17.ndjson") 바이트)"
-grep -q '"hook_event_name":"PostToolUse","tool_use_id":"toolu_hangul"' "$evdir/17.ndjson" || fail "접힌 모양이 아니다: $(cut -c1-120 "$evdir/17.ndjson")"
+grep -q '"tool_use_id":"toolu_hangul"' "$evdir/17.ndjson" || fail "접힌 모양이 아니다: $(cut -c1-120 "$evdir/17.ndjson")"
 pass "상한을 바이트로 센다(UTF-8 로케일)"
 
 echo "4e) 큰 Codex 질문에서도 도구·턴·호출 신원이 남는다"
@@ -203,8 +203,12 @@ for kind in PreToolUse PostToolUse; do
   huge_question=$(awk -v kind="$kind" 'BEGIN { printf "{\"session_id\":\"s1\",\"turn_id\":\"t1\",\"hook_event_name\":\"%s\",\"tool_name\":\"request_user_input\",\"tool_input\":{\"text\":\"", kind; for (i=0; i<40000; i++) printf "x"; printf "\"},\"tool_response\":{},\"tool_use_id\":\"call_big\"}" }')
   rm -f "$evdir/16.ndjson"
   printf '%s\n' "$huge_question" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=16 /bin/sh -c "$cmd" || fail "큰 질문 훅 실패"
-  expected="$(printf 'claude\t')"'{"session_id":"s1","turn_id":"t1","hook_event_name":"'"$kind"'","tool_name":"request_user_input","tool_input":null,"tool_use_id":"call_big"}'
-  [ "$(cat "$evdir/16.ndjson")" = "$expected" ] || fail "큰 질문의 신원을 잃었다"
+  python3 - "$evdir/16.ndjson" "$kind" <<'QUESTION_ID_PY' || fail "큰 질문의 신원을 잃었다"
+import json, pathlib, sys
+out = json.loads(pathlib.Path(sys.argv[1]).read_text().split("\t", 1)[1])
+assert out == dict(session_id="s1", turn_id="t1", hook_event_name=sys.argv[2], tool_name="request_user_input", tool_input=None, tool_use_id="call_big")
+QUESTION_ID_PY
+
 done
 # 실제 shell 출력의 JSON 구조도 검증한다. 중첩된 가짜 도구/id를 lead 신원으로 승격하지 않는다.
 python3 - "$cmd" "$evdir/17.ndjson" "$inst" <<'QUESTION_PY' || fail "큰 질문 JSON 구조 검증 실패"
@@ -247,6 +251,84 @@ else:
     assert out.get("tool_use_id") != "fake"
 QUESTION_PY
 pass "큰 질문 Pre/Post 신원 보존·중첩 신원 비승격"
+
+echo "4f) 큰 일반 이벤트의 최상위 신원과 child 역할을 보존한다"
+python3 - "$cmd" "$evdir/18.ndjson" "$inst" <<'IDENTITY_PY' || fail "큰 일반 이벤트 신원 검증 실패"
+import json, os, pathlib, random, shutil, subprocess, sys, time
+cmd, target, instance = sys.argv[1:]
+env = dict(os.environ, MARU_HOOK_INSTANCE=instance, MARU_HOOK_PANE="18")
+path = pathlib.Path(target)
+maximum_ms = 0
+def fold(payload, shell=("/bin/sh",)):
+    global maximum_ms
+    path.unlink(missing_ok=True)
+    raw = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    started = time.monotonic()
+    try:
+        subprocess.run([*shell, "-c", cmd], input=raw+"\n", text=True, env=env, check=True, timeout=2)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("oversized hook exceeded native timeout: "+repr(raw[:120])) from None
+    maximum_ms = max(maximum_ms, (time.monotonic()-started)*1000)
+    line = path.read_bytes().decode()
+    assert len(line.encode()) <= 32768
+    return json.loads(line.split("\t", 1)[1])
+# Metadata may precede or follow the bulk string. Nested keys never change ownership.
+for kind in ("UserPromptSubmit", "Stop", "StopFailure", "Interrupt", "SubagentStart", "SubagentStop", "PreToolUse", "PostToolUse"):
+    fields = [("hook_event_name", kind), ("session_id", "s1"), ("turn_id", "t1"), ("agent_id", "child"),
+              ("tool_name", "Bash"), ("tool_use_id", "call_real"),
+              ("metadata", {"agent_id":"FAKE", "session_id":"FAKE", "turn_id":"FAKE", "tool_use_id":"FAKE"}),
+              ("last_assistant_message", "x"*40000)]
+    for seed in range(4):
+        shuffled = list(fields); random.Random(seed).shuffle(shuffled)
+        out = fold(dict(shuffled))
+        assert out == dict(hook_event_name=kind, session_id="s1", turn_id="t1", agent_id="child", tool_name="Bash", tool_use_id="call_real"), out
+# Retain Stop reentry guards: a completion hook firing recursively is not a turn end.
+out = fold(dict(hook_event_name="Stop", session_id="s1", turn_id="t1", stop_hook_active=True, last_assistant_message="x"*40000))
+assert out["stop_hook_active"] is True
+# Escaped quotes/backslashes and Unicode must not split a string into fake root fields.
+for suffix in ("", 'a"b', "a\\b", "\\", '"', "한글", "a\nb", "a\tb", '\\"', '\\\\"'):
+    out = fold(dict(hook_event_name="SubagentStop", metadata={"values":[suffix, True, None, -1.2e-8]},
+                    last_assistant_message="x"*40000+suffix, agent_id="child", session_id="s1", turn_id="t1"))
+    assert out == dict(hook_event_name="SubagentStop", agent_id="child", session_id="s1", turn_id="t1"), out
+# A Unicode escape followed by a long plain suffix must avoid quadratic slicing.
+out = fold('{"hook_event_name":"SubagentStop","text":"\\u0061'+'x'*100000+'","agent_id":"child"}')
+assert out == dict(hook_event_name="SubagentStop", agent_id="child")
+# Empty/null role and escaped identities preserve the parser's original interpretation.
+for role in ("", None, 'child"quoted', "child\\slash"):
+    out = fold(dict(hook_event_name="SubagentStop", agent_id=role, last_assistant_message="x"*40000))
+    assert out["agent_id"] == role
+# No root event name: a nested Stop must never be lifted into a completion.
+assert fold(dict(metadata=dict(hook_event_name="Stop", agent_id="FAKE"), text="x"*40000))["hook_event_name"] == "__oversized__"
+# Malformed, duplicate, over-limit or wrongly typed identity fails closed.
+bulk = '"'+'x'*40000+'"'
+for raw in (
+    '{"hook_event_name":"Stop","agent_id":"a","agent_id":"b","text":'+bulk+'}',
+    '{"hook_event_name":"Stop","text":'+bulk+',}',
+    '{"hook_event_name":"Stop","text":'+bulk+'} trailing',
+    '{"hook_event_name":"Stop","text":'+bulk+',"agent_id":{}}',
+    '{"hook_event_name":"Stop","text":'+bulk+',"metadata":[1,]}',
+    '{"hook_event_name":"Stop","text":'+bulk+',"metadata":"bad\\q"}',
+    '{"hook_event_name":"Stop","text":'+bulk+',"metadata":01}',
+    '{"hook_event_name":"Stop","text":'+bulk+',"metadata":1e}',
+    '{"hook_event_name":"Stop","text":'+bulk+',\v"agent_id":"child"}',
+):
+    assert fold(raw)["hook_event_name"] == "__oversized__", raw[-100:]
+assert fold(dict(hook_event_name="Stop", agent_id="a"*65, text="x"*40000))["hook_event_name"] == "__oversized__"
+# Bounds reject excessive nesting/escapes instead of keeping the provider hook alive.
+assert fold('{"hook_event_name":"Stop","text":'+bulk+',"nested":'+'['*40+'0'+']'*40+'}')["hook_event_name"] == "__oversized__"
+assert fold(dict(hook_event_name="Stop", text="\\"*40000))["hook_event_name"] == "__oversized__"
+# Check available POSIX implementations and multiple large strings under the native timeout.
+shells = [("/bin/sh",)]
+for name in ("dash", "bash"):
+    binary = shutil.which(name)
+    if binary: shells.append((binary,))
+if pathlib.Path("/bin/zsh").exists(): shells.append(("/bin/zsh", "--emulate", "sh"))
+for shell in shells:
+    out = fold(dict(hook_event_name="SubagentStop", first="x"*250000, agent_id="child", second="한"*85000, session_id="s1", turn_id="t1"), shell)
+    assert out == dict(hook_event_name="SubagentStop", agent_id="child", session_id="s1", turn_id="t1"), (shell, out)
+print("oversized identity: 32 reordered cases, escapes, hostile inputs, POSIX shells; max_ms=", round(maximum_ms))
+IDENTITY_PY
+pass "큰 일반 이벤트 최상위 신원·역할·재진입·비승격·시간 상한"
 
 echo "5) 로그 디렉터리가 없어도 조용히 0 으로 끝난다"
 # **stderr 까지 조용해야 한다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 리다이렉션 대상이

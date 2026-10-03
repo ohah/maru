@@ -27,7 +27,7 @@ const event = @import("agent_hook_event.zig");
 pub const marker = "MARU_HOOK_V3";
 pub const marker_comment = "# " ++ marker ++ " managed by maru: added and removed automatically, do not copy";
 
-/// payload 길이 상한. 넘으면 훅이 **표식 한 줄로 바꿔** 적는다(잘라서 반쪽 JSON을 만들지 않는다).
+/// payload 길이 상한. 넘으면 최상위 메타데이터만 보존하고, 구조를 확인할 수 없으면 표식으로 적는다.
 ///
 /// **줄 상한에서 접두를 뺀 값이다.** 훅이 적는 줄은 `<provider><구분자><payload>` 라서 payload 를 줄 상한과
 /// 같게 두면 그만큼 줄이 길어져 **파서가 버린다** — 커맨드는 통과시키고 파서는 버리는, 상한 경계에서만
@@ -500,7 +500,7 @@ fn appendQuoted(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, 
 /// 1. **stdin을 먼저 전부 삼킨다** — 첫 줄을 payload로 받고 나머지를 드레인한다. 안 그러면 provider 파이프가
 ///    막힌다. 실측상 payload는 개행 없는 한 줄 JSON이라 드레인 루프는 즉시 끝난다.
 /// 2. pane 식별자가 없으면 **아무것도 하지 않고** 나간다(maru 밖에서 띄운 세션에는 남길 pane이 없다).
-/// 3. 상한을 넘으면 표식으로 바꾼다 — 이벤트를 조용히 없애지 않는다.
+/// 3. 상한을 넘으면 신원 메타데이터만 접고, 확인할 수 없는 이벤트는 표식으로 남긴다.
 /// 4. provider 이름을 **우리가 붙인다**(payload에는 그 정보가 없다).
 /// 5. 무슨 일이 있어도 `exit 0`.
 pub fn build(
@@ -591,17 +591,11 @@ pub fn build(
     try out.appendSlice(allocator, "\"/$mh_n$mh_t.ndjson\"; mh_c=");
     try appendQuoted(out, allocator, remote_log_dir_abs);
     try out.print(allocator, "\"/$mh_n$mh_t{s}\"; fi; ", .{tmux_sidecar_suffix});
-    // **상한을 넘겨도 «무엇이었는지» 는 살린다**(2026-08-21 실사용에서 실제로 넘겼다 — codex payload 하나).
-    //
-    // 예전에는 이름까지 버리고 `__oversized__` 하나만 남겼다. 그런데 `Stop` 은 최종 답변 전문
-    // (`last_assistant_message`)을 싣는다 — 긴 보고서를 낸 턴이면 상한을 넘고, 그러면 **턴 끝 신호를
-    // 통째로 잃어 배지가 안 풀린다.** 이 층이 막으려는 바로 그 실패다.
-    //
-    // 그래서 payload 를 버리기 **전에** 이름만 뽑는다. 세트의 이름을 `case` 로 훑는 것이라 프로세스가
-    // 늘지 않는다(셸 내장). 이름을 못 찾으면 예전처럼 표식만 남긴다 — 모르는 것을 지어내지 않는다.
-    // 본문은 사라지므로 알림 문구는 비지만, **상태는 옳게 간다**. 그 둘 중 무엇을 지킬지는 계약이
-    // 이미 정해 두었다: 안 풀리는 배지가 더 나쁘다.
-    try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then ", .{max_payload_bytes});
+    // Preserve ownership as well as event kind. An oversized SubagentStop without agent_id
+    // cannot retire its worker, and an oversized lead Stop without turn/session IDs cannot
+    // be checked against delayed events. Bulk prose is expendable; root identity is not.
+    // Keep the original payload for the bounded projection if the Bash diff fast path fails.
+    try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then mh_raw=\"$mh_p\"; ", .{max_payload_bytes});
     // **먼저 hunks 를 잘라낸다**(계획 AT3b-2). `PostToolUse(Bash)` 의 `bashEditDiff` 는 `files`(hunks)·`moreFiles`·
     // `changedFiles` 순이고(실측 528/528) hunks 가 payload 를 32 KiB 너머로 밀어낸다(4.6%). 필요한 것은
     // `changedFiles`(최대 ~7 KB)뿐이라 `"bashEditDiff":{"files":` 앞까지 + `"moreFiles":` 부터를 이어 붙인다.
@@ -614,42 +608,25 @@ pub fn build(
         "if [ \"$mh_dt\" != \"$mh_p\" ]; then mh_dc=\"$mh_dh\\\"bashEditDiff\\\":{\\\"moreFiles\\\":$mh_dt\"; " ++
         "case \"$mh_dc\" in *'\"changedFiles\":'*) mh_p=\"$mh_dc\" ;; esac; fi ;; esac; ");
     try out.print(allocator, "fi; if [ ${{#mh_p}} -gt {d} ]; then ", .{max_payload_bytes});
-    // Keep the original prefix and the earliest remaining identity suffix. Never append an
-    // call identity already in the prefix: a nested call id is not a replacement for the root id.
-    // Always retain a later role suffix: a nested agent_id in the prefix must not hide a root role.
-    // Unprovable nested cuts remain malformed and the strict consumer rejects them.
-    try out.appendSlice(allocator, "mh_qh=\"${mh_p%%\\\"tool_input\\\":*}\"; " ++
-        "case \"$mh_qh\" in *'\"tool_name\":\"request_user_input\"'*) " ++
-        "if [ \"$mh_qh\" != \"$mh_p\" ]; then " ++
-        "mh_qr=\"${mh_p#*\\\"tool_input\\\":}\"; mh_qs=\"\"; " ++
-        "for mh_qk in agent_id tool_use_id session_id turn_id prompt_id; do " ++
-        "if [ \"$mh_qk\" != agent_id ]; then case \"$mh_qh\" in *\\\"$mh_qk\\\":*) continue ;; esac; fi; " ++
-        "mh_qt=\"${mh_qr##*\\\"$mh_qk\\\":}\"; " ++
-        "if [ \"$mh_qt\" != \"$mh_qr\" ]; then mh_qt=\"\\\"$mh_qk\\\":$mh_qt\"; " ++
-        "if [ ${#mh_qt} -gt ${#mh_qs} ]; then mh_qs=\"$mh_qt\"; fi; fi; done; " ++
-        "if [ -z \"$mh_qs\" ]; then mh_qc=\"$mh_qh\\\"tool_input\\\":null}\"; " ++
-        "else mh_qc=\"$mh_qh\\\"tool_input\\\":null,$mh_qs\"; fi; ");
-    try out.print(allocator, "if [ ${{#mh_qc}} -le {d} ]; then mh_p=\"$mh_qc\"; fi; fi ;; esac; fi; " ++
-        "if [ ${{#mh_p}} -gt {d} ]; then ", .{ max_payload_bytes, max_payload_bytes });
-    // **`tool_use_id` 도 살린다**(계획 AT3b-1). `PostToolUse(Bash)` 는 명령 출력을 실어 0.1% 가 상한을
-    // 넘기는데, 이름만 남기면 그 구간을 **닫을 수 없다**(짝지을 id 가 없다) — 턴 끝까지 열린 채로 사용자
-    // 편집을 끌어들인다. 파라미터 확장뿐이라 프로세스가 늘지 않는다(셸 내장).
-    //
-    // 값은 **화이트리스트로 검증한다** — 우리가 만드는 JSON 에 그대로 들어가므로 따옴표·역슬래시가 섞이면
-    // 파서가 그 줄을 버린다(그러면 이름까지 잃는다). 두 provider 의 id 알파벳(`toolu_…`·`exec-<uuid>`)은
-    // 영숫자·`_`·`-` 뿐이다. 길이 상한은 파서 쪽 `max_tool_use_id_len` 과 같은 값이다.
-    try out.print(allocator, "mh_i=\"${{mh_p#*\\\"tool_use_id\\\":\\\"}}\"; " ++
-        "if [ \"$mh_i\" = \"$mh_p\" ]; then mh_i=\"\"; else mh_i=\"${{mh_i%%\\\"*}}\"; fi; " ++
-        "case \"$mh_i\" in ''|*[!{s}]*) mh_i=\"\" ;; esac; " ++
-        "if [ ${{#mh_i}} -gt {d} ]; then mh_i=\"\"; fi; " ++
-        "mh_s=\"\"; if [ -n \"$mh_i\" ]; then mh_s=\",\\\"tool_use_id\\\":\\\"$mh_i\\\"\"; fi; " ++
-        "case \"$mh_p\" in ", .{ comptime tool_use_id_class.shellClass(), event.max_tool_use_id_len });
-    // 두 provider 이름의 합집합을 접는다. Interrupt는 Codex 전용이다.
-    for (claude_events) |e| {
-        try out.print(allocator, "*'\"hook_event_name\":\"{s}\"'*) mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}' ;; ", .{ e.name, e.name });
+    // Project only root metadata after checking the original oversized payload structure. A nested
+    // agent_id must never become a lead/child identity. The embedded shell fragment is built
+    // into this same inline command; it adds no executable or process at runtime.
+    try out.print(allocator, "mh_limit={d}; mh_tab='\t'; mh_cr='\r'; ", .{event.max_tool_use_id_len});
+    var fold_lines = std.mem.splitScalar(u8, @embedFile("agent_hook_command/payload_fold.sh"), '\n');
+    while (fold_lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var parts = std.mem.splitSequence(u8, line, "__TOOL_USE_ID_CLASS__");
+        try out.appendSlice(allocator, parts.next().?);
+        while (parts.next()) |part| {
+            try out.appendSlice(allocator, comptime tool_use_id_class.shellClass());
+            try out.appendSlice(allocator, part);
+        }
+        try out.append(allocator, ' ');
     }
-    try out.appendSlice(allocator, "*'\"hook_event_name\":\"Interrupt\"'*) mh_p='{\"hook_event_name\":\"Interrupt\"}' ;; ");
-    try out.print(allocator, "*) mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}' ;; esac; fi; ", .{event.oversized_marker});
+    try out.print(allocator, "mh_p='{{\"hook_event_name\":\"{s}\"}}'; if mh_project; then case \"$mh_ev\" in ", .{event.oversized_marker});
+    for (claude_events) |e| try out.print(allocator, "\"{s}\"|", .{e.name});
+    try out.appendSlice(allocator, "\"Interrupt\") mh_p=\"{\\\"hook_event_name\\\":\\\"$mh_ev\\\"$mh_meta}\" ;; esac; fi; fi; ");
     // **`{ … } 2>/dev/null` 로 감싼다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 **리다이렉션
     // 대상이 없을 때 셸이 내는 에러**(`No such file or directory`)는 못 막는다 — 실측에서 로그 디렉터리가
     // 없을 때 그 메시지가 provider 화면으로 샜다. 훅은 어떤 실패도 사용자에게 보이지 않아야 한다.
@@ -1111,36 +1088,18 @@ test "셸 구간은 Post 가 세트에 있는 provider 에서만 연다 — 세�
     try testing.expect(providerFromTag("") == null);
 }
 
-test "상한을 넘긴 payload 에서 tool_use_id 를 살린다 — 검증·상한을 지나서만" {
-    // 실제 셸 동작은 게이트 4c 가 본다. 여기서는 **구조**만 고정한다: 추출이 파라미터 확장이고(프로세스 0),
-    // 화이트리스트 클래스가 maru 쪽 판정과 같은 소스에서 렌더되며, 길이 상한이 파서 상수와 같은 값이다.
+test "상한 접기는 원문 최상위 신원만 보존하고 프로세스와 비용을 제한한다" {
     const cmd = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
-    try testing.expect(std.mem.indexOf(u8, cmd, "mh_i=\"${mh_p#*\\\"tool_use_id\\\":\\\"}\"") != null);
-    try testing.expect(std.mem.indexOf(u8, cmd, "*[!" ++ comptime tool_use_id_class.shellClass() ++ "]*) mh_i=\"\"") != null);
-    var limit_buf: [32]u8 = undefined;
-    const limit = try std.fmt.bufPrint(&limit_buf, "-gt {d} ]; then mh_i=\"\"", .{event.max_tool_use_id_len});
-    try testing.expect(std.mem.indexOf(u8, cmd, limit) != null);
-    // 모든 접힌 모양에 id 자리가 붙는다 — 이름은 아는데 id 를 버리는 팔이 하나라도 있으면 그 이벤트의 구간은 안 닫힌다.
-    for (claude_events) |e| {
-        var arm_buf: [160]u8 = undefined;
-        const arm = try std.fmt.bufPrint(&arm_buf, "mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}'", .{e.name});
-        try testing.expect(std.mem.indexOf(u8, cmd, arm) != null);
-    }
-    // hunks 잘라내기(AT3b-2)가 **id 추출보다 앞**에 있고, 가드(`"changedFiles":` 확인)가 있다. 실제 동작은 게이트 4d.
+    try testing.expect(std.mem.indexOf(u8, cmd, "mh_raw=\"$mh_p\"") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "mh_project()") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "*[!" ++ comptime tool_use_id_class.shellClass() ++ "]*) return 0") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "mh_fuel=2048") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "session_id|turn_id|prompt_id|agent_id|tool_name|tool_use_id|notification_type") != null);
     const strip_at = std.mem.indexOf(u8, cmd, "*'\"bashEditDiff\":{\"files\":'*)").?;
-    const id_at = std.mem.indexOf(u8, cmd, "mh_i=\"${mh_p#*").?;
-    try testing.expect(strip_at < id_at);
+    const projection_at = std.mem.indexOf(u8, cmd, "mh_project()").?;
+    try testing.expect(strip_at < projection_at);
     try testing.expect(std.mem.indexOf(u8, cmd, "case \"$mh_dc\" in *'\"changedFiles\":'*) mh_p=\"$mh_dc\" ;; esac") != null);
-    // 클래스에 따옴표·역슬래시·`/` 가 없다 — 이것이 지키는 성질이다.
-    try testing.expect(!tool_use_id_class.accepts("ab\"c"));
-    try testing.expect(!tool_use_id_class.accepts("a\\b"));
-    try testing.expect(!tool_use_id_class.accepts("../x"));
-    try testing.expect(tool_use_id_class.accepts("toolu_01GxMwqMfHbwqq1dbuxDCwFB"));
-    try testing.expect(tool_use_id_class.accepts("exec-c7898e4a-0bc2-4b77-8091-90ef775316d9"));
-    // `-` 는 bracket 표현의 맨 끝이어야 글자로 읽힌다 — 그 자리가 바뀌면 범위 표기가 되어 가드가 깨진다.
-    const cls = comptime tool_use_id_class.shellClass();
-    try testing.expectEqual(@as(u8, '-'), cls[cls.len - 1]);
 }
 
 test "어떤 경로로 나가든 exit 0이다" {

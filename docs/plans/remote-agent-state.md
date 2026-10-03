@@ -386,6 +386,10 @@ pane 만으로 「어느 Term 인가」가 정해진다. instance 칸이 필요�
 
 #### RA7.3 착지 상태 (2026-09-07 실측)
 
+> **이후 착지했다(2026-09-21, cb467ff78 — RA7 조각 2·3).** 아래 표의 「소비자가 `pane` 을 쓴다」와 결정 1 은
+> 그 커밋으로 섰다 — `consumeRemoteAgentLines` 가 `e.pane` 이 있으면 `remote_agent_panes` 의 그 pane 슬롯으로
+> 보내고(`app_session/agent.zig`), Term 배지는 `hookSlotsAggregate` 가 정한다. 아래는 2026-09-07 시점 기록이다.
+
 **결정 3 은 절반만 서 있다 — 선까지 왔는데 받는 쪽이 버린다.**
 
 | 자리 | 상태 | 근거 |
@@ -762,7 +766,7 @@ kind 로 칠해야 한다.
 
 | 축 | 상태 |
 | --- | --- |
-| **RA7.3 결정 3**(소비자가 `e.pane` 을 쓴다) | **미착지** — 위 §RA7.3 착지 상태 참조. 배지는 서지만 한 Term 에 tmux pane 이 여럿이면 **상태가 마지막 이벤트를 따른다** |
+| ~~**RA7.3 결정 3**(소비자가 `e.pane` 을 쓴다)~~ | **착지(2026-09-21, cb467ff78)** — pane 별 슬롯 테이블(`session/remote_pane_table.zig`)로 라우팅하고, Term 배지는 pane 중 하나라도 `running` 이면 `running`(결정 1). 위 §RA7 재실측의 조각 2·3 참조 |
 | **설치 spawn 실패 두 곳** | `remoteShellCommandAll`·`spawnRemoteCommand` 의 `catch` 가 OOM 을 영구 차단으로 접는다. 재시도하려면 `ctl` 을 `HOME` 에서 다시 만드는 배선이 한 칸 는다 |
 | `stopped` 래치 | 세우는 자리 열 곳에 **해제 코드가 없다**. 풀리는 길은 그 목적지의 Term 이 **전부 사라져** 항목이 회수될 때뿐이다(위 사유표) |
 

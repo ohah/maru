@@ -15,7 +15,8 @@ param(
   [string]$OutPath,
   [string]$ClassName = "MaruWindowClass",
   [string]$ProcName = "maru",
-  [int]$TimeoutMs = 20000
+  [int]$TimeoutMs = 20000,
+  [int]$TargetProcessId = 0
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -55,7 +56,7 @@ $sw = [Diagnostics.Stopwatch]::StartNew()
 $h = [IntPtr]::Zero
 $seen = @()
 while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
-  $pids = @(Get-Process -Name $ProcName -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+  $pids = if ($TargetProcessId -gt 0) { @($TargetProcessId) } else { @(Get-Process -Name $ProcName -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }) }
   if ($pids.Count -gt 0) {
     $seen = [Cap]::Windows($pids)
     foreach ($row in $seen) {

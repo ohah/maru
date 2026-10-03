@@ -912,3 +912,69 @@ checkpoint/backup을 덮어쓰지 않는지를 실제 host 경계까지 검사�
 다섯 회차 모두 추가 누락을 발견했다. 따라서 ‘이제 반례가 없다’거나 구현 준비가 완전히
 끝났다고 선언하지 않는다. 다음 실제 실험에는 예약 저장소 비교 외에 지연 정리 순서,
 삭제 실패, 큐 실패 및 혼합 workspace 실패 격리를 포함해야 한다.
+
+### 추가 검토 2 — 적대적 설계 검토 6~10회
+
+앞선 다섯 회차와 구분해 아래 다섯 경계를 검토했다. 코드에서 확인한 현재 제약과
+미구현 recovery ID 설계의 위험을 구분하며, 실제 장애 실행 결과로 세지 않는다.
+
+#### 회차 6 — 여러 창과 복사한 checkpoint의 ID 중복
+
+현재 `workspace_state.validateReferences`의 map은 전달받은 documents의 u32 index만
+검사한다. recovery ID도 창별 검사에만 추가하면 두 창이 각각 독립 정본을 같은 ID로 만들 수
+있다. workspace 파일 복사도 기존 backup 소유를 복제하지 않는다.
+보완: app 전체 capture/restore staging에서 recovery ID를 검사한다. 같은 창의 shared
+뷰는 하나의 descriptor를 참조하고, 현재 미지원인 창 간 공유를 ID 일치만으로 허용하지 않는다.
+복사한 checkpoint 또는 두 실행이 같은 ID를 주장하면 소유 충돌로 분류한다. 자동으로 새 ID를
+발급해 기존 backup을 두 문서에 붙이는 방식은 사용하지 않는다.
+판정 요구: 각 창 안에서는 정상이나 창 사이에만 중복인 두 descriptor, 같은 path 다른 ID
+두 창, 독립 checkpoint 복사, staged 창 순서 변경과 정상 단일 shared descriptor를 대조한다.
+
+#### 회차 7 — 경로 별칭과 새 경로의 접근 권한
+
+recovery ID가 같아도 symlink/대소문자 별칭/파일 rename으로 path 문자열은 달라질 수 있다.
+반대로 canonical path가 같아도 독립 문서들은 합쳐서는 안 된다. ID는 접근 권한이 아니다.
+보완: 기존 authorized open과 local-only admission을 먼저 적용한다. ID를 근거로 record path를
+임의로 열거나 remote cache/read-only/diff를 쓰기 가능한 local 정본으로 승격하지 않는다.
+경로 불일치 후보는 기존 원본을 보존하며 복구 UI의 명시적 선택 없이 자동 귀속하지 않는다.
+판정 요구: symlink 별칭, 대소문자 구분 여부가 다른 저장소, 원본 이동/삭제 후 경로 재생성,
+record 경로를 remote mirror로 바꾼 입력, 정상 같은 path 다른 ID를 검사한다.
+이 절은 파일 경로 정규화/외부 수정 정책을 새로 정한 것이 아니다.
+
+#### 회차 8 — 복구 문서 생성 뒤 본문 적용 실패
+
+`reviveAsUntitled`는 `openUntitledInActivePane`로 문서를 먼저 게시한 뒤 applyEditAsOne을
+시도한다. 실패 시 source는 남지만 게시된 빈 문서의 rollback은 이 helper에 없다.
+새 discovery가 이를 반복 호출하면 같은 후보의 실패 재시도가 빈 탭을 반복 생성할 수 있다.
+보완: 새 ID 복구는 본문/문서/view를 준비한 뒤 성공 시 한 번 게시하는 경계가 필요하다.
+후보 owner는 게시 성공 전 live 소유로 처리하지 않고, 취소/OOM 뒤 원래 backup을 남긴다.
+판정 요구: 문서 생성 성공 뒤 본문 적용/Undo 준비 OOM, view 준비 실패, 같은 후보 재시도,
+사용자 취소, 성공 뒤 중복 요청에서 원래 tree/탭 수/backup bytes와 owner 수명을 검사한다.
+이는 해당 helper의 코드 경계를 확인한 결과이며 실제 OOM으로 빈 탭을 재현했다는 뜻은 아니다.
+
+#### 회차 9 — final checkpoint와 종료 직전 백업 실패
+
+`MaruAppHost.swift`는 C4 final checkpoint 이후 teardown 직전에 창별 editor backup flush를
+호출하며 반환값을 무시한다. `flushAll`도 성공 여부를 집계하지 않는다. 따라서 새 descriptor에
+ID가 실렸다는 사실만으로 종료 직전 본문이 backup에 반영됐다고 주장할 수 없다.
+보완: 기존 종료 계약을 유지한다면 마지막 실패와 이전 backup/없는 backup을 명확히 구분한다.
+종료 취소/재시도 UX는 별도 사용자 결정이며 이번 설계에서 자동으로 추가하지 않는다.
+판정 요구: final checkpoint 성공 뒤 encode/디스크 full/권한 실패, 첫 backup 전 종료,
+기존 backup 뒤 추가 편집 후 종료 실패, 두 창 중 한 창 실패를 검사한다. checkpoint를
+두 번째로 best-effort 게시해 기존 C4 순서와 단일 writer를 깨는 방법은 제외한다.
+
+#### 회차 10 — 예약 경로 교체와 정리의 소유 범위
+
+exclusive claim 파일 또는 mkdir는 생성 순간의 namespace 예약이다. 그 뒤 파일/디렉터리가
+외부에서 바뀌었거나 예약이 삭제·재생성되면 경로 이름만 보고 쓰거나 정리하는 것이 안전하지 않다.
+문서 directory를 쓴다고 symlink/ABA/다른 owner의 record 삭제 문제가 저절로 사라지지 않는다.
+보완: 실제 writer/cleanup이 같은 예약 객체와 owner를 사용하는지 검증하고 기존 secure 파일
+계약과 lock 수명을 유지한다. 소유를 확인할 수 없으면 해당 후보를 보존하고 임의의 다른
+파일을 삭제하지 않는다. 권한을 확보하지 못한 경우 새 백업 성공으로 표시하지 않는다.
+판정 요구: 예약 후 경로 rename/대체, claim unlink 후 같은 이름 재생성, symlink 대체,
+다른 owner가 게시한 record, rollback/정상 정리 대조군을 barrier로 고정해 검사한다.
+물리 저장소/악의적 동일 사용자 공격 전체를 방어한다고 확대하지 않는다.
+
+이번 다섯 회차에서도 완료 주장의 빈틈을 발견했다. 문서별 ID 방향은 유지하지만
+소유권/전체 앱 중복 검사/복구 publication/종료 실패/경로 객체 정합성까지 검증하기 전
+‘독립 문서 내용이 항상 복구된다’고 선언하지 않는다. 제품 코드는 여전히 변경하지 않았다.

@@ -10680,3 +10680,21 @@ readable-only로 낮추지 않고 실패한다. 프로세스 권한을 자동으
 복사본은 이제 4바이트 정렬로 할당하고 소유 타입에도 정렬을 유지한다. Native 열기·조회에서
 접근 거절/권한 부족만 SecurityUnavailable로 분류하며 그 밖의 실패는 별도 오류로 보존한다.
 이것은 미게시 임시 파일 단계이며 최종 publish/rollback, GUI 저장, 실앱 저장 검증은 남아 있다.
+
+### 2m.134 교체 전 임시 파일 핸들 유지와 취소 정리의 실제 Windows 검증 (2026-10-03)
+
+`editor/stage.zig`에 교체 단계가 사용할 비공개 Native primitive를 둔다. 자동 삭제 상태 해제,
+메타데이터 전용 핸들 유지, 열린 객체에 대한 삭제를 실제 파일로 검사한다.
+[FILE_DISPOSITION_INFORMATION_EX](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)의 ON_CLOSE 계약을 근거로 한다.
+이 환경에서는 자동 삭제 해제는 됐지만 재설정은 STATUS_NOT_SUPPORTED였다. 취소 때 이 상태만
+열린 소유 객체의 명시적 삭제 예약으로 처리한다. readonly 속성도 소유 객체의 삭제 옵션으로 처리하며
+원본 속성을 바꾸지 않는다. 취소·정리는 경로 이름으로 임의 파일을 지우지 않는다.
+
+임시 파일의 데이터 핸들과 마지막 metadata 핸들을 닫아도 해제된 자동 삭제가 재발하지 않았다.
+metadata 핸들을 유지한 채 교체에 필요한 독점 read/write/delete 핸들도 열렸다.
+소유 파일을 다른 이름으로 옮기고 이전 이름에 경쟁 파일을 둔 뒤 객체 핸들로 정리하면 경쟁 파일은 보존됐다.
+ON_CLOSE 누락·취소 DELETE 누락·readonly 처리 누락·witness에 데이터 접근 추가·객체 DELETE 누락의
+다섯 실행 변이가 실패했고 복구 후 root-main 27개와 native 경로 29개 판정이 통과했다.
+공유 모드를 0으로 바꾼 metadata-only 변이는 살아남았으며 위 다섯 검출 횟수에 포함하지 않는다.
+이 primitive는 아직 runtime 저장 경로에 연결하지 않았다. 원본 동일성 검증·실제 교체·조건부 롤백·
+GUI 편집/저장·실앱 저장 검증은 남아 있다.

@@ -1933,6 +1933,12 @@ pub fn build(b: *std.Build) void {
         paint_step.dependOn(&b.addRunArtifact(paint_tests).step);
     }
 
+    const file_open_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"Windows file open"},
+    });
+    const file_open_test_step = b.step("test-win32-file-open", "Verify file-open outcomes, localized notices and allocation-failure ownership");
+    file_open_test_step.dependOn(&b.addRunArtifact(file_open_tests).step);
 
     const macos_coretext_font_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

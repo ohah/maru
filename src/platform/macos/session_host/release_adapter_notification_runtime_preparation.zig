@@ -9,7 +9,7 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const bounded = @import("bounded_process");
-const contract = @import("release_adapter_notification_runtime_contract.zig");
+const contract = @import("cli_internal_contract").notification_runtime;
 
 pub const child_command = contract.child_command;
 

@@ -77,6 +77,9 @@ pub const Notifications = struct {
     backup_due_ns: i128 = 0,
     backup_on_disk: bool = false,
     backup_paused: bool = false,
+    /// 신원이 바뀐 복구의 원본 백업. 새 백업/저장/버리기 성공까지 문서가 소유한다.
+    recovery_backup_name: [@import("backup.zig").max_file_name_len]u8 = undefined,
+    recovery_backup_len: u8 = 0,
 };
 
 pub const State = struct {

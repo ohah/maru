@@ -1873,6 +1873,16 @@ pub fn build(b: *std.Build) void {
     // ⚠️ **L2 규칙(`UT1`~`UT4`)은 여기서 안 돈다** — `session/editor/untitled.zig` 는 `maru` 모듈에
     // 있고 Zig 는 별도 모듈의 test 를 안 모은다(`MPN1~5` 가 같은 이유로 `test-editor` 에 있다).
     // 그쪽은 `zig build test` 가 돈다.
+    const recovery_window_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "a successful window restore", "a failed window restore", "a new untitled document never takes" },
+    });
+    const run_recovery_window_tests = b.addRunArtifact(recovery_window_tests);
+    run_recovery_window_tests.addArg("--maru-expect-tests=8");
+    run_recovery_window_tests.addArg("--maru-expect-passed=8");
+    run_recovery_window_tests.setCwd(b.path("."));
+    b.step("test-editor-recovery-window", "Run backup retention and failed workspace restore product judges").dependOn(&run_recovery_window_tests.step);
+
     const macos_editor_untitled_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{ "U1", "U2", "C0", "C1a", "C1b", "U3-", "U4a-", "U4b-", "U4c-", "U4d-" }, // `SYNU1` 도 걸린다(부분 일치) — 아래 개수가 그것을 포함한다
@@ -1881,9 +1891,9 @@ pub fn build(b: *std.Build) void {
     // 101 = 앞의 90(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯 +
     //       C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯 + U3-1~U3-8 여덟)에
     //       **U4a-1~U4a-13 열셋 + U4b-1~U4b-9 아홉 + U4c-1~U4c-5·U4c-8 여섯 + U4d-3~U4d-6 넷**을 더한 값이다(U4a 백업 · U4b 복원 · U4c 이름 없는 문서, §3.10).
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=126");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=128");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=126");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=128");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
     const untitled_step = b.step(
         "test-editor-untitled",

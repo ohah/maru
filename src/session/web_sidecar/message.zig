@@ -50,6 +50,9 @@ pub const Tag = enum(u8) {
     /// 끌기가 그 탭 본문에 들어왔다·움직였다·나갔다·놓였다(W6d① — CEF `drag_target_*`). 좌표는 view DIP, 허용 동작은 macOS 와
     /// CEF 가 같은 비트다(복사 1·링크 2·일반 4·개인 8·이동 16·삭제 32).
     drag_target = 27,
+    /// 페이지에서 시작한 끌기(W6d② — `drag_out`)가 끝났다 — 놓인 자리(그 탭 view DIP)와 받은 동작(0 = 취소). sidecar 는
+    /// CEF `drag_source_ended_at`·`drag_source_system_drag_ended` 를 부르고 쥔 끌기 데이터를 놓는다. 끌기 번호가 지금 끌기가 아니면 버린다.
+    drag_source_end = 28,
 
     hello_ack = 32,
     browser_created = 33,
@@ -95,6 +98,13 @@ pub const Tag = enum(u8) {
     /// 페이지가 받아들이는 끌기 동작이 바뀌었다(W6d① — CEF `update_drag_cursor`). 0 이면 놓아도 받지 않는다. maru 는 탭마다
     /// 마지막 값을 끌기 커서(`draggingUpdated`)로 돌려준다.
     drag_operation = 52,
+    /// 페이지가 시작한 끌기의 한 조각(W6d② — 글·HTML·주소·주소 제목·끌기 그림 PNG). `drag_out` 앞에 보낸다 — 글·HTML·그림은
+    /// 나눠 여러 번 오면 이어 붙인다.
+    drag_out_data = 53,
+    /// 페이지가 끌기를 시작했다(W6d② — CEF `start_dragging`). maru 는 아직 누르고 있으면 macOS 끌기 세션을 시작하고, 끝나면
+    /// `drag_source_end` 로 답한다(떼기를 이미 했으면 곧바로 취소로). 끌기는 sidecar 에 하나 — 새 끌기가 오면 앞 끌기는 sidecar 가
+    /// 취소로 끝냈다.
+    drag_out = 54,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -596,11 +606,52 @@ pub const drag_operation_mask: u32 = 1 | 2 | 4 | 8 | 16 | 32;
 pub const DragTarget = struct {
     browser: BrowserId,
     kind: DragTargetKind,
+    /// enter 에서만: 0 이 아니면 쌓인 조각 대신 그 번호의 페이지 끌기(`drag_out`) 데이터를 쓴다 — maru 안의 Chromium 탭으로 놓을
+    /// 때 페이지가 정한 형식(사용자 정의 MIME 등)이 pasteboard 를 거치며 사라지지 않게(W6d②).
+    source: u32 = 0,
     /// leave 는 쓰지 않는다(0).
     point: Point = .{ .x = 0, .y = 0 },
     modifiers: Modifiers = .{},
     /// 끌어 온 쪽이 허용한 동작(`drag_operation_mask` 안). leave·drop 은 0.
     allowed: u32 = 0,
+};
+
+/// 페이지가 시작한 끌기의 조각 종류(W6d②). 그림은 PNG 바이트(조각을 이어 붙인다).
+pub const DragOutDataKind = enum(u8) {
+    text = 0,
+    html = 1,
+    url = 2,
+    url_title = 3,
+    image_png = 4,
+};
+
+pub const DragOutData = struct {
+    browser: BrowserId,
+    drag: u32,
+    kind: DragOutDataKind,
+    bytes: []const u8,
+};
+
+pub const DragOut = struct {
+    browser: BrowserId,
+    /// 0 이 아니다 — sidecar 전체에서 오른다.
+    drag: u32,
+    /// 페이지가 허용한 동작(`drag_operation_mask` 안).
+    allowed: u32,
+    /// 끌기가 시작된 자리(view DIP).
+    point: Point,
+    /// 그림 안에서 포인터가 잡은 자리와 그림 크기(DIP — 그림이 없으면 0).
+    hotspot: Point = .{ .x = 0, .y = 0 },
+    image_width: u32 = 0,
+    image_height: u32 = 0,
+};
+
+pub const DragSourceEnd = struct {
+    browser: BrowserId,
+    drag: u32,
+    point: Point,
+    /// 받은 동작 하나(또는 0 — 취소).
+    operation: u32,
 };
 
 pub const DragOperation = struct {
@@ -761,6 +812,7 @@ pub const Message = union(Tag) {
     context_menu_command: ContextMenuCommand,
     drag_data: DragData,
     drag_target: DragTarget,
+    drag_source_end: DragSourceEnd,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -783,6 +835,8 @@ pub const Message = union(Tag) {
     context_menu: ContextMenu,
     context_menu_closed: ContextMenuClosed,
     drag_operation: DragOperation,
+    drag_out_data: DragOutData,
+    drag_out: DragOut,
 };
 
 test "tags split by direction at 32" {

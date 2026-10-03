@@ -77,14 +77,16 @@ MENU = ("<!doctype html><title>menu</title><style>html,body{margin:0;height:100%
     "document.getElementById('n').addEventListener('contextmenu',function(){setTimeout(function(){location='/cm-app?2'},500)});"
     "</script>").encode()
 # W6d①: 끌어 놓기 — 왼쪽 위(폭 50%·높이 60%) 받는 칸(파일 — 처음 dragover 에 본 파일 수, 놓으면 이름:크기와 첫 파일 내용),
-# 오른쪽 위(폭 50%·높이 40%) 글 칸(값), 오른쪽 아래 이동 칸(동작 이동 — 놓인 글), 왼쪽 아래 거절 칸(동작 없음), 들어왔다 나가면
-# leave. `/ev` 로 알린다.
+# 오른쪽 위(폭 50%·높이 40%) 글 칸(값), 오른쪽 아래 이동 칸(동작 이동 — 놓인 글과 사용자 정의 형식), 왼쪽 아래 거절 칸(동작
+# 없음), 들어왔다 나가면 leave. W6d②: 받는 칸 아래 끌 요소(글 `smoke-drag`·사용자 정의 형식 `application/x-maru` — 끝나면 동작),
+# 페이지가 받은 mouseup. `/ev` 로 알린다.
 DND = ("<!doctype html><title>dnd</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#z{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}"
     "#t{position:fixed;left:50%;top:0;width:50%;height:40%;font:28px sans-serif}"
     "#m{position:fixed;left:50%;top:60%;width:50%;height:40%;background:#0000ff}"
-    "#n{position:fixed;left:0;top:70%;width:50%;height:30%;background:#ffff00}</style><body>"
-    "<div id=z></div><textarea id=t></textarea><div id=m></div><div id=n></div><script>"
+    "#n{position:fixed;left:0;top:70%;width:50%;height:30%;background:#ffff00}"
+    "#d{position:fixed;left:0;top:60%;width:50%;height:10%;background:#ff00ff}</style><body>"
+    "<div id=z></div><textarea id=t></textarea><div id=m></div><div id=n></div><div id=d draggable=true></div><script>"
     "function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}ping('e=load');var over=0;"
     "var z=document.getElementById('z');"
     "z.addEventListener('dragenter',function(e){e.preventDefault();over=0});"
@@ -95,7 +97,10 @@ DND = ("<!doctype html><title>dnd</title><style>html,body{margin:0;height:100%;b
     "document.getElementById('t').addEventListener('input',function(e){ping('e=input&v='+encodeURIComponent(e.target.value))});"
     "var m=document.getElementById('m');m.addEventListener('dragenter',function(e){e.preventDefault()});"
     "m.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move'});"
-    "m.addEventListener('drop',function(e){e.preventDefault();ping('e=mdrop&v='+encodeURIComponent(e.dataTransfer.getData('text/plain')))});"
+    "m.addEventListener('drop',function(e){e.preventDefault();ping('e=mdrop&v='+encodeURIComponent(e.dataTransfer.getData('text/plain'))+'&x='+encodeURIComponent(e.dataTransfer.getData('application/x-maru')))});"
+    "var d=document.getElementById('d');d.addEventListener('dragstart',function(e){e.dataTransfer.setData('text/plain','smoke-drag');e.dataTransfer.setData('application/x-maru','smoke-secret');e.dataTransfer.effectAllowed='copyMove';ping('e=dstart')});"
+    "d.addEventListener('dragend',function(e){ping('e=dend&v='+e.dataTransfer.dropEffect)});"
+    "addEventListener('mouseup',function(){ping('e=up')});"
     "var n=document.getElementById('n');n.addEventListener('dragenter',function(e){e.preventDefault()});"
     "n.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='none'});"
     "n.addEventListener('drop',function(e){e.preventDefault();ping('e=ndrop')});"
@@ -876,6 +881,86 @@ check(len(url_overs) == 1 and not any('a.txt' in d for d in url_drops), f'a file
 left = [l for l in requests if l.startswith('/ev?e=leave') and marks.get('urlfile', 0) < t_of(l) < marks.get('exited', 0)]
 after = [l for l in requests if l.startswith('/ev?e=drop') and t_of(l) > marks.get('urlfile', 0)]
 check(len(left) == 1 and not after and drags[-1] == 'osr-test drag exit', f'a drag that leaves the view leaves the page and drops nothing ({left} {after} {drags[-1:]})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6d②: 페이지에서 끌어내기 ─────────────────────────────────────────────────────────────────────────────
+# 셸에서 띄운 앱은 맨 앞이 아니라 macOS 끌기 세션을 쓸 수 없다 — 판정 모드(`MARU_WEB_OSR_TEST_DRAG_OUT`)는 세션 대신 끌기
+# pasteboard·그림을 보고하고(`osr-test dragout start …`), 대본 `dragout move|drop|cancel` 이 그 pasteboard 를 가짜 끌기 정보로
+# view 의 끌기 메서드에 넘긴 뒤(소스는 그 view) 소스의 끝을 부른다. 그 앞(페이지 → sidecar → 창이 가져감 → 제스처를 조용히 끝냄)과
+# 뒤(maru 안 놓기의 source → sidecar → 페이지, 끝 → dragend)는 진짜 경로다.
+cat > "$root/dragout.txt" <<SCRIPT
+sleep 7000
+view down 0.25 0.65 0 0
+sleep 80
+view drag 0.25 0.66 0 0
+sleep 40
+view drag 0.25 0.67 0 0
+sleep 40
+view drag 0.25 0.68 0 0
+sleep 40
+view drag 0.25 0.69 0 0
+sleep 900
+mark started
+dragout move 0.75 0.8 0 0
+sleep 300
+dragout move 0.75 0.81 0 0
+sleep 300
+dragout move 0.75 0.82 0 0
+sleep 300
+dragout drop 0.75 0.82 0 0
+sleep 900
+mark moved
+view down 0.25 0.65 0 0
+sleep 80
+view drag 0.25 0.66 0 0
+sleep 40
+view drag 0.25 0.67 0 0
+sleep 40
+view drag 0.25 0.68 0 0
+sleep 40
+view drag 0.25 0.69 0 0
+sleep 900
+dragout cancel
+sleep 900
+mark cancelled
+SCRIPT
+: > "$root/requests.log"
+run_app /dnd-app 22000 "$root/dragout.summary" MARU_WEB_OSR_TEST_INPUT="$root/dragout.txt" MARU_WEB_OSR_TEST_DRAG_OUT=1
+grep -a '^osr-test dragout\|^osr-test mark' "$root/app-dnd-app.log" > "$root/dragout.report" || true
+cat "$root/dragout.report"
+python3 - "$root/dragout.report" "$root/requests.log" <<'PY' || fail "dragging out of the Chromium tab did not behave as expected"
+import sys, re, urllib.parse
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+marks = {l.split()[2]: int(l.split()[3]) for l in report if l.startswith('osr-test mark ')}
+def t_of(line):
+    m = re.search(r'[?&]t=(\d+)', line)
+    return int(m.group(1)) if m else 0
+def ev(prefix, a, b):
+    return [urllib.parse.unquote(l.split('&t=')[0]) for l in requests if l.startswith(prefix) and marks.get(a, 0) < t_of(l) < marks.get(b, 1 << 62)]
+starts = [l for l in report if l.startswith('osr-test dragout start')]
+first = starts[0] if starts else ''
+m = re.search(r'image=(\d+)x(\d+) png=(\d+)x(\d+)', first)
+check(len(starts) == 2 and 'allowed=17' in first and 'org.maru.osr-drag' in first and 'public.utf8-plain-text' in first and 'text=smoke-drag' in first
+      and m is not None and int(m.group(1)) > 0 and int(m.group(3)) > 0,
+      f'pressing and dragging the draggable element starts a drag the window takes — the page text, its drag image and the maru mark ({starts})')
+drags = [l for l in report if l.startswith('osr-test dragout ') and not l.startswith('osr-test dragout start')]
+# 첫 움직임은 페이지가 아직 답하지 않아 0, 그 뒤는 페이지의 답(이동) — 끌기 허용이 복사·이동이라 dragenter 의 기본값도 이동이다.
+check(len(drags) >= 4 and drags[0] == 'osr-test dragout move op=0' and drags[2] == 'osr-test dragout move op=16' and drags[3] == 'osr-test dragout drop op=16 done=16',
+      f'over the move cell inside maru the page answers move and the drop is taken ({drags[:4]})')
+moved = ev('/ev?e=mdrop', 'started', 'moved')
+check(moved == ['/ev?e=mdrop&v=smoke-drag&x=smoke-secret'], f'the cell got the page text and its custom type — maru used the source drag data, not the pasteboard ({moved})')
+ends = ev('/ev?e=dend', 'started', 'moved')
+check(ends == ['/ev?e=dend&v=move'], f'the source element saw dragend with move ({ends})')
+check(ev('/ev?e=up', '', 'moved') == [], f'the page got no mouseup for the release the drag session took ({ev("/ev?e=up", "", "moved")})')
+cancelled = ev('/ev?e=dend', 'moved', 'cancelled')
+check(drags[4:5] == ['osr-test dragout cancel'] and cancelled == ['/ev?e=dend&v=none'], f'a cancelled drag ends with none ({drags[4:5]} {cancelled})')
 sys.exit(0 if ok else 1)
 PY
 

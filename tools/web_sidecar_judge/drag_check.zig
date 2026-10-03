@@ -19,6 +19,18 @@
 //!   drag-renderer-gone   끄는 중 렌더러가 죽어도, 죽은 페이지에 enter·놓기가 와도 host 가 살고, 새 페이지에 다시 끌어 놓을 수
 //!                        있다
 //!   drag-unknown-browser 없는 브라우저의 끌기는 버리고 host 가 산다, 닫힌 브라우저에 남은 조각도 그렇다
+//!
+//! W6d② 끌어내기(페이지가 시작한 끌기 — `drag_out`):
+//!   drag-out-start       끌 요소를 누르고 끌면 `drag_out` 이 온다 — 허용 동작(복사·이동), 글, PNG 그림(크기·잡은 자리), 번호
+//!   drag-out-into-page   그 끌기를 같은 페이지 목록에 `source` 로 enter·놓기, 끝(이동) — 목록이 글과 **사용자 정의 형식**을 받고 끌 요소는
+//!                        dragend 이동, 페이지는 mouseup 을 받지 않는다
+//!   drag-out-other-tab   다른 브라우저에 `source` 로 놓기 — 그 탭이 같은 데이터를 받는다
+//!   drag-out-cancel      끝(0) — dragend none
+//!   drag-out-link        링크 끌기 — 주소·제목(CEF 는 `title` 속성이 아니라 링크 글을 준다)·글(주소), 끝 뒤 aend
+//!   drag-out-long-text   모두 선택한 뒤(누르고 쉬었다) 끌면 16 KiB 넘는 글이 조각으로 와 이어 붙는다(UTF-8)
+//!   drag-out-answer-gates 답하기 전에는 새 끌기가 시작되지 않는다(Chromium 이 앞 끌기를 붙든다 — maru 는 아무 창도 가져가지 않은 끌기를
+//!                        1 초 뒤 취소로 답한다), 답하면(none) 다음 끌기가 되고, 앞 번호의 늦은 끝은 버린다
+//!   drag-out-closed      끌기 중 그 브라우저가 닫혀도 host 가 살고 다음 끌기가 된다
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -49,6 +61,14 @@ const Watch = struct {
     operation: ?u32 = null,
     operations: u32 = 0,
     renderer_gone: u32 = 0,
+    /// 페이지 끌기(W6d②) — 마지막 `drag_out` 과 그 번호의 조각.
+    out: ?protocol.message.DragOut = null,
+    outs: u32 = 0,
+    out_text: std.ArrayList(u8) = .empty,
+    out_url: std.ArrayList(u8) = .empty,
+    out_title: std.ArrayList(u8) = .empty,
+    out_png: std.ArrayList(u8) = .empty,
+    out_piece_drag: u32 = 0,
 
     fn title(self: *const Watch) []const u8 {
         return self.title_buf[0..self.title_len];
@@ -73,6 +93,27 @@ const Watch = struct {
             },
             .renderer_gone => |v| if (v.browser == browser_id) {
                 self.renderer_gone += 1;
+            },
+            .drag_out_data => |v| {
+                if (v.drag != self.out_piece_drag) {
+                    self.out_piece_drag = v.drag;
+                    self.out_text.clearRetainingCapacity();
+                    self.out_url.clearRetainingCapacity();
+                    self.out_title.clearRetainingCapacity();
+                    self.out_png.clearRetainingCapacity();
+                }
+                const into = switch (v.kind) {
+                    .text => &self.out_text,
+                    .url => &self.out_url,
+                    .url_title => &self.out_title,
+                    .image_png => &self.out_png,
+                    .html => return,
+                };
+                into.appendSlice(std.heap.c_allocator, v.bytes) catch {};
+            },
+            .drag_out => |v| {
+                self.out = v;
+                self.outs += 1;
             },
             else => {},
         }
@@ -127,6 +168,28 @@ const Watch = struct {
         self.pump(200);
     }
 };
+
+/// 페이지 안을 누르고 조금씩 끈다(왼쪽 누른 채). `hold` 는 누른 뒤 쉬는 시간(선택한 글은 Blink 의 Mac 글 끌기 지연을 넘겨야 한다).
+fn pressDrag(w: *Watch, from: Point, to: Point, hold: u32) !void {
+    try w.host.send(.{ .mouse = .{ .browser = browser_id, .kind = .move, .point = from } });
+    try w.host.send(.{ .mouse = .{ .browser = browser_id, .kind = .down, .button = .left, .point = from, .modifiers = .{ .left_button = true }, .click_count = 1 } });
+    w.pump(hold);
+    var i: i32 = 1;
+    while (i <= 6) : (i += 1) {
+        const p: Point = .{ .x = from.x + @divTrunc((to.x - from.x) * i, 6), .y = from.y + @divTrunc((to.y - from.y) * i, 6) };
+        try w.host.send(.{ .mouse = .{ .browser = browser_id, .kind = .move, .point = p, .modifiers = .{ .left_button = true } } });
+        w.pump(40);
+    }
+}
+
+/// 새 `drag_out` 이 올 때까지(최대 `ms`).
+fn untilOut(w: *Watch, before: u32, ms: u32) bool {
+    return w.until(ms, before, struct {
+        fn f(x: *const Watch, b: u32) bool {
+            return x.outs > b;
+        }
+    }.f);
+}
 
 fn writeFile(path: []const u8, body: []const u8) !void {
     var b: [1024]u8 = undefined;
@@ -250,7 +313,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, r
     try w.enterOver(list, finder_ops);
     const op_move = w.operation != null and w.operation.? == 16;
     try w.target(.drop, list, 0);
-    const moved = w.untilHas("\"Ldrop\":\"move me\"", 2_000);
+    const moved = w.untilHas("\"Ldrop\":\"move me|\"", 2_000);
     report(op_move and moved, "drag-move-effect", std.fmt.bufPrint(&detail, "동작 {?d}(16 이어야) · {s}", .{ w.operation, w.title() }) catch "");
 
     // 받지 않는 곳에 파일 — 그 파일로 이동, 그 페이지는 옆 파일을 못 읽는다.
@@ -316,6 +379,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, r
     const again = w.untilHas("\"zcontent\":\"DRAG-CONTENT-A\"", 4_000);
     report(killed >= 1 and gone and again, "drag-renderer-gone", std.fmt.bufPrint(&detail, "죽인 렌더러 {d} · renderer_gone {} · 새 페이지에 다시 놓기 {}", .{ killed, gone, again }) catch "");
 
+    try dragOutChecks(report, &w, &host, port);
+
     // 없는 브라우저·닫힌 브라우저에 남은 조각.
     try host.send(.{ .drag_data = .{ .browser = 999, .kind = .path, .bytes = file_a } });
     try host.send(.{ .drag_target = .{ .browser = 999, .kind = .enter, .point = zone, .allowed = 1 } });
@@ -333,4 +398,163 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, r
     try w.target(.drop, zone, 0);
     const alive = w.untilHas("\"zcontent\":\"DRAG-CONTENT-A\"", 4_000);
     report(alive, "drag-unknown-browser", std.fmt.bufPrint(&detail, "없는 브라우저의 끌기·닫힌 브라우저의 조각 뒤에도 놓기 {}", .{alive}) catch "");
+}
+
+const drag_point: Point = .{ .x = 420, .y = 45 };
+const link_point: Point = .{ .x = 380, .y = 310 };
+const text_point: Point = .{ .x = 60, .y = 342 };
+
+fn dragOutChecks(report: Report, w: *Watch, host: *Host, port: u16) !void {
+    var detail: [600]u8 = undefined;
+
+    // 시작.
+    try w.load(port);
+    var before = w.outs;
+    try pressDrag(w, drag_point, .{ .x = 420, .y = 120 }, 0);
+    const started = untilOut(w, before, 3_000);
+    const out = w.out orelse protocol.message.DragOut{ .browser = 0, .drag = 0, .allowed = 0, .point = .{ .x = 0, .y = 0 } };
+    const png_ok = w.out_png.items.len > 8 and std.mem.startsWith(u8, w.out_png.items, "\x89PNG\r\n\x1a\n");
+    const image_ok = out.image_width > 0 and out.image_height > 0 and out.hotspot.x <= out.image_width and out.hotspot.y <= out.image_height;
+    report(started and out.drag != 0 and out.allowed == (1 | 16) and std.mem.eql(u8, w.out_text.items, "hello-drag") and png_ok and image_ok, "drag-out-start", std.fmt.bufPrint(&detail, "drag_out {} · 번호 {d} · 허용 {d}(17 이어야) · 글 「{s}」 · PNG {d} 바이트 {} · 그림 {d}x{d} 잡은 자리 {d},{d}", .{ started, out.drag, out.allowed, w.out_text.items, w.out_png.items.len, png_ok, out.image_width, out.image_height, out.hotspot.x, out.hotspot.y }) catch "");
+
+    // 같은 페이지 목록에 source 로 — 사용자 정의 형식까지.
+    const drag = out.drag;
+    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .enter, .point = .{ .x = 420, .y = 150 }, .allowed = 1 | 16, .source = drag } });
+    w.pump(120);
+    try w.target(.over, .{ .x = 420, .y = 190 }, 1 | 16);
+    try w.target(.over, .{ .x = 420, .y = 191 }, 1 | 16);
+    w.pump(200);
+    try w.target(.drop, .{ .x = 420, .y = 191 }, 0);
+    try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = drag, .point = .{ .x = 420, .y = 191 }, .operation = 16 } });
+    const landed = w.untilHas("\"Ldrop\":\"hello-drag|secret-type\"", 3_000);
+    const ended = w.untilHas("\"dend\":\"move1\"", 3_000);
+    w.pump(300);
+    report(landed and ended and !w.has("\"up\""), "drag-out-into-page", std.fmt.bufPrint(&detail, "목록이 글·사용자 정의 형식 {} · dragend 이동 {} · mouseup 없음 {} · {s}", .{ landed, ended, !w.has("\"up\""), w.title() }) catch "");
+
+    // 다른 브라우저에 source 로.
+    try w.load(port);
+    var other_buf: [256]u8 = undefined;
+    const other: u64 = browser_id + 2;
+    try host.send(.{ .create_browser = .{ .browser = other, .size = .{ .width = 640, .height = 480, .scale = 1 }, .hidden = false, .url = browsers_check.url(&other_buf, port, "/dnd") } });
+    w.pump(2_500);
+    before = w.outs;
+    try pressDrag(w, drag_point, .{ .x = 420, .y = 120 }, 0);
+    const other_started = untilOut(w, before, 3_000);
+    const other_drag = if (w.out) |o| o.drag else 0;
+    try host.send(.{ .drag_target = .{ .browser = other, .kind = .enter, .point = .{ .x = 420, .y = 150 }, .allowed = 1 | 16, .source = other_drag } });
+    w.pump(120);
+    inline for (.{ 190, 191 }) |y| {
+        try host.send(.{ .drag_target = .{ .browser = other, .kind = .over, .point = .{ .x = 420, .y = y }, .allowed = 1 | 16 } });
+        w.pump(150);
+    }
+    try host.send(.{ .drag_target = .{ .browser = other, .kind = .drop, .point = .{ .x = 420, .y = 191 } } });
+    try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = other_drag, .point = .{ .x = 0, .y = 0 }, .operation = 16 } });
+    const source_ended = w.untilHas("\"dend\":\"move1\"", 3_000);
+    // 다른 탭의 제목은 Watch 가 보지 않는다 — 판정자는 그 탭의 목록 값을 직접 묻지 못하니 그 탭을 이 Watch 로 옮겨 본다.
+    var other_title: [256]u8 = undefined;
+    const other_got = otherTitle(w, other, &other_title, 2_000);
+    try host.send(.{ .destroy_browser = other });
+    w.pump(500);
+    report(other_started and source_ended and std.mem.indexOf(u8, other_got, "\"Ldrop\":\"hello-drag|secret-type\"") != null, "drag-out-other-tab", std.fmt.bufPrint(&detail, "보낸 탭 dragend 이동 {} · 받은 탭 「{s}」", .{ source_ended, other_got }) catch "");
+
+    // 취소.
+    try w.load(port);
+    before = w.outs;
+    try pressDrag(w, drag_point, .{ .x = 420, .y = 120 }, 0);
+    const cancel_started = untilOut(w, before, 3_000);
+    if (w.out) |o| try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = o.drag, .point = .{ .x = 900, .y = 900 }, .operation = 0 } });
+    const cancelled = w.untilHas("\"dend\":\"none1\"", 3_000);
+    report(cancel_started and cancelled, "drag-out-cancel", std.fmt.bufPrint(&detail, "{s}", .{w.title()}) catch "");
+
+    // 링크.
+    try w.load(port);
+    before = w.outs;
+    try pressDrag(w, link_point, .{ .x = 380, .y = 420 }, 0);
+    const link_started = untilOut(w, before, 3_000);
+    var want_buf: [256]u8 = undefined;
+    const want = browsers_check.url(&want_buf, port, "/title?t=linked");
+    const link_ok = std.mem.eql(u8, w.out_url.items, want) and std.mem.eql(u8, w.out_title.items, "a link") and std.mem.eql(u8, w.out_text.items, want);
+    if (w.out) |o| try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = o.drag, .point = .{ .x = 380, .y = 420 }, .operation = 1 } });
+    const link_ended = w.untilHas("\"aend\":\"copy\"", 3_000);
+    report(link_started and link_ok and link_ended, "drag-out-link", std.fmt.bufPrint(&detail, "주소 「{s}」 · 제목 「{s}」 · 글 「{s}」 · aend copy {}", .{ w.out_url.items, w.out_title.items, w.out_text.items, link_ended }) catch "");
+
+    // 모두 선택한 긴 글(누르고 쉬었다 끈다).
+    try w.load(port);
+    try host.send(.{ .edit_command = .{ .browser = browser_id, .command = .select_all } });
+    w.pump(400);
+    before = w.outs;
+    try pressDrag(w, text_point, .{ .x = 60, .y = 440 }, 400);
+    const text_started = untilOut(w, before, 3_000);
+    const long_ok = w.out_text.items.len > protocol.wire.max_ime_text_bytes and std.unicode.utf8ValidateSlice(w.out_text.items) and std.mem.count(u8, w.out_text.items, "가") == 6000;
+    if (w.out) |o| try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = o.drag, .point = .{ .x = 60, .y = 440 }, .operation = 0 } });
+    w.pump(300);
+    report(text_started and long_ok, "drag-out-long-text", std.fmt.bufPrint(&detail, "글 {d} 바이트(16 KiB 넘게) · UTF-8 {} · 「가」 {d} 자(6000 이어야)", .{ w.out_text.items.len, std.unicode.utf8ValidateSlice(w.out_text.items), std.mem.count(u8, w.out_text.items, "가") }) catch "");
+
+    // 답하기 전에는 새 끌기가 시작되지 않는다 — 답하면 된다, 늦은 끝은 버린다.
+    try w.load(port);
+    before = w.outs;
+    try pressDrag(w, drag_point, .{ .x = 420, .y = 120 }, 0);
+    _ = untilOut(w, before, 3_000);
+    const first = if (w.out) |o| o.drag else 0;
+    try w.host.send(.{ .mouse = .{ .browser = browser_id, .kind = .up, .button = .left, .point = .{ .x = 420, .y = 120 }, .click_count = 1 } });
+    w.pump(200);
+    before = w.outs;
+    try pressDrag(w, drag_point, .{ .x = 420, .y = 120 }, 0);
+    const held_back = !untilOut(w, before, 1_000);
+    try w.host.send(.{ .mouse = .{ .browser = browser_id, .kind = .up, .button = .left, .point = .{ .x = 420, .y = 120 }, .click_count = 1 } });
+    try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = first, .point = .{ .x = 0, .y = 0 }, .operation = 0 } });
+    const first_cancelled = w.untilHas("\"dend\":\"none1\"", 3_000);
+    before = w.outs;
+    try pressDrag(w, drag_point, .{ .x = 420, .y = 120 }, 0);
+    const second_started = untilOut(w, before, 3_000);
+    const second = if (w.out) |o| o.drag else 0;
+    try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = first, .point = .{ .x = 0, .y = 0 }, .operation = 16 } });
+    w.pump(300);
+    const stale_ignored = !w.has("\"dend\":\"move");
+    try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = second, .point = .{ .x = 0, .y = 0 }, .operation = 1 } });
+    const second_ended = w.untilHas("\"dend\":\"copy2\"", 3_000);
+    report(held_back and first_cancelled and second_started and second != first and stale_ignored and second_ended, "drag-out-answer-gates", std.fmt.bufPrint(&detail, "답 전 새 끌기 없음 {} · 답(none) {} · 다음 끌기 {} · 늦은 끝 버림 {} · 뒤 끌기 copy {} · {s}", .{ held_back, first_cancelled, second_started, stale_ignored, second_ended, w.title() }) catch "");
+
+    // 끌기 중 그 브라우저가 닫힌다.
+    var closing_buf: [256]u8 = undefined;
+    const closing: u64 = browser_id + 3;
+    try host.send(.{ .create_browser = .{ .browser = closing, .size = .{ .width = 640, .height = 480, .scale = 1 }, .hidden = false, .url = browsers_check.url(&closing_buf, port, "/dnd") } });
+    w.pump(2_500);
+    try host.send(.{ .mouse = .{ .browser = closing, .kind = .move, .point = drag_point } });
+    try host.send(.{ .mouse = .{ .browser = closing, .kind = .down, .button = .left, .point = drag_point, .modifiers = .{ .left_button = true }, .click_count = 1 } });
+    var k: i32 = 1;
+    while (k <= 6) : (k += 1) {
+        try host.send(.{ .mouse = .{ .browser = closing, .kind = .move, .point = .{ .x = 420, .y = 45 + k * 12 }, .modifiers = .{ .left_button = true } } });
+        w.pump(40);
+    }
+    w.pump(500);
+    const closing_drag = if (w.out) |o| (if (o.browser == closing) o.drag else 0) else 0;
+    try host.send(.{ .destroy_browser = closing });
+    w.pump(800);
+    if (closing_drag != 0) try host.send(.{ .drag_source_end = .{ .browser = closing, .drag = closing_drag, .point = .{ .x = 0, .y = 0 }, .operation = 1 } });
+    try w.load(port);
+    before = w.outs;
+    try pressDrag(w, drag_point, .{ .x = 420, .y = 120 }, 0);
+    const after_close = untilOut(w, before, 3_000);
+    if (w.out) |o| try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = o.drag, .point = .{ .x = 0, .y = 0 }, .operation = 0 } });
+    w.pump(300);
+    report(closing_drag != 0 and after_close, "drag-out-closed", std.fmt.bufPrint(&detail, "닫힌 탭의 끌기 {d} · 그 뒤 끌기 {}", .{ closing_drag, after_close }) catch "");
+}
+
+/// 다른 브라우저의 마지막 제목(Watch 는 판정 브라우저 것만 든다 — 그동안 온 메시지에서 찾는다).
+fn otherTitle(w: *Watch, other: u64, buf: []u8, ms: u32) []const u8 {
+    var len: usize = 0;
+    const deadline = os.nowMs() + ms;
+    while (os.nowMs() < deadline) {
+        const m = (w.host.next(20) catch null) orelse continue;
+        switch (m) {
+            .title_changed => |v| if (v.browser == other) {
+                len = @min(v.text.len, buf.len);
+                @memcpy(buf[0..len], v.text[0..len]);
+                if (std.mem.indexOf(u8, buf[0..len], "Ldrop") != null) break;
+            },
+            else => {},
+        }
+    }
+    return buf[0..len];
 }

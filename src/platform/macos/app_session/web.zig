@@ -1211,6 +1211,8 @@ pub const OsrDrag = struct {
     url: std.ArrayList(u8) = .empty,
     url_title: std.ArrayList(u8) = .empty,
     target: u64 = 0,
+    /// 0 이 아니면 maru 의 Chromium 탭에서 시작한 끌기(`drag_out` 번호) — 조각 대신 그 데이터로 enter 한다(W6d②).
+    source: u32 = 0,
     /// Swift 가 이 끌기의 것을 실었다(들어올 때 이 창에 Chromium 탭 본문이 있었다). 싣지 않은 끌기는 끄는 중에 본문이 생겨도
     /// 넘기지 않는다 — 빈 끌기가 들어가 놓으면 받았다고 답했다(W6d① 적대 검증 2 차).
     loaded: bool = false,
@@ -1234,7 +1236,7 @@ pub const OsrDrag = struct {
     }
 
     fn payload(self: *const OsrDrag) web_osr.DragPayload {
-        return .{ .paths = self.paths.items, .text = self.text.items, .html = self.html.items, .url = self.url.items, .url_title = self.url_title.items };
+        return .{ .paths = self.paths.items, .text = self.text.items, .html = self.html.items, .url = self.url.items, .url_title = self.url_title.items, .source = self.source };
     }
 };
 
@@ -1247,8 +1249,81 @@ pub fn osrDragReset(self: *AppSession) bool {
     if (self.osr_drag.target != 0) web_osr.dragLeave(self.allocator, self.osr_drag.target);
     self.osr_drag.target = 0;
     self.osr_drag.clear(self.allocator);
+    self.osr_drag.source = 0;
     self.osr_drag.loaded = self.osr_layouts.items.len != 0;
     return self.osr_drag.loaded;
+}
+
+/// 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기다(W6d② — Swift 가 끌기 소스가 maru view 이고 그 번호가 살아 있을 때 부른다).
+/// Chromium 본문에 들어가면 조각 대신 그 데이터로 enter 한다 — 페이지가 정한 형식이 pasteboard 를 거치며 사라지지 않게.
+pub fn osrDragSetSource(self: *AppSession, drag: u32) void {
+    self.osr_drag.source = drag;
+    if (drag != 0) self.osr_drag.loaded = true;
+}
+
+// ── W6d②: 페이지에서 시작한 끌기(끌어내기) ───────────────────────────────────────────────────────────────
+// sidecar 가 보낸 끌기를 이 창이 가져간다 — 이 창에서 그 탭을 왼쪽으로 누른 채(제스처 주인)일 때만. 그때 제스처를 조용히 끝낸다
+// (macOS 끌기 세션이 떼기를 먹는다 — 떼기를 보내지 않는다: Chrome 도 끌기 뒤 mouseup 을 페이지에 주지 않는다, 착수 전 실측). 이미
+// 뗐으면 곧바로 취소로 답한다.
+
+pub const OsrDragOutShown = struct { surface: u64, drag: u32 };
+
+pub const OsrDragOutInfo = struct {
+    drag: u32,
+    allowed: u32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+    image_width: u32,
+    image_height: u32,
+};
+
+pub fn osrDragOutTake(self: *AppSession) ?OsrDragOutInfo {
+    for (self.osr_layouts.items) |l| {
+        const d = web_osr.takeDragOut(l.surface_id) orelse continue;
+        const held = self.pointer_gesture_owner == .web_osr and self.pointer_gesture_owner.web_osr.surface_id == l.surface_id and
+            self.pointer_gesture_owner.web_osr.held.has(.left);
+        if (!held) {
+            _ = web_osr.endDragOut(self.allocator, l.surface_id, d.drag, d.point, 0);
+            continue;
+        }
+        // 앞 끌기가 남아 있으면(세션이 끝을 알리지 않았다) 취소로 끝낸다.
+        if (self.osr_drag_out) |old| _ = web_osr.endDragOut(self.allocator, old.surface, old.drag, .{ .x = 0, .y = 0 }, 0);
+        self.finishPointerGesture();
+        self.osr_drag_out = .{ .surface = l.surface_id, .drag = d.drag };
+        return .{ .drag = d.drag, .allowed = d.allowed, .hotspot_x = d.hotspot.x, .hotspot_y = d.hotspot.y, .image_width = d.image_width, .image_height = d.image_height };
+    }
+    return null;
+}
+
+pub const OsrDragOutPart = enum(u32) { text = 0, html = 1, url = 2, url_title = 3, image_png = 4 };
+
+/// 가져간 끌기의 조각 하나(바이트 그대로). 그 끌기가 아니면 빈 것.
+pub fn osrDragOutPart(self: *AppSession, drag: u32, part: OsrDragOutPart) []const u8 {
+    const shown = self.osr_drag_out orelse return "";
+    if (shown.drag != drag) return "";
+    const d = web_osr.dragOut(shown.surface, drag) orelse return "";
+    return switch (part) {
+        .text => d.text.items,
+        .html => d.html.items,
+        .url => d.url.items,
+        .url_title => d.url_title.items,
+        .image_png => d.png.items,
+    };
+}
+
+/// 끌기 세션이 끝났다 — 놓인 자리(창 backing px — 그 탭이 이 창에 없으면 시작 자리)와 받은 동작을 sidecar 에 답한다.
+pub fn osrDragOutEnd(self: *AppSession, drag: u32, x_px: f64, y_px: f64, operation: u32) bool {
+    const shown = self.osr_drag_out orelse return false;
+    if (shown.drag != drag) return false;
+    self.osr_drag_out = null;
+    const d = web_osr.dragOut(shown.surface, drag) orelse return false;
+    const point = if (osr_input.find(self.osr_layouts.items, shown.surface)) |l| osrDip(self, l, x_px, y_px) else d.point;
+    return web_osr.endDragOut(self.allocator, shown.surface, drag, point, operation);
+}
+
+/// 지금 이 창이 돌리는 페이지 끌기 번호(없으면 0) — Swift 가 그 끌기가 maru 안에 놓일 때 `osrDragSetSource` 에 쓴다.
+pub fn osrDragOutActive(self: *const AppSession) u32 {
+    return if (self.osr_drag_out) |shown| shown.drag else 0;
 }
 
 /// 끌어 온 것 하나를 싣는다. 경로는 `web_osr.max_drag_paths` 개, 글·HTML 은 `max_drag_text` 바이트까지(넘는 것은 버린다 —

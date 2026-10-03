@@ -9066,6 +9066,20 @@ border·면적 0 clip을 추가한 **최종 28개 샘플** 모두 통과했고, 
 `check-doc-links`, `check-boundaries -j4`도 모두 exit 0이었다. 기존 editor drag 5개·sidebar clip·
 dock clamp는 true였고, `agent_detail_scroll`은 여전히 judgeable=false여서 완료 증거로 쓰지 않는다.
 
+### 2m.121 파일 열기 실패를 Notice로 알린다 (2026-10-03)
+
+W8.21⒜의 조용한 거절을 기존 `chrome.components.notice`에 연결한다. 지원하지 않는 종류·웹 패널 필요·읽기 실패(권한/4 MiB 상한)·메모리 부족을 서로 다른 영어/한국어 정적 문자열로 알린다. 실패 경로가 트리 행 문자열을 빌리거나 추가 할당을 요구하지 않는다. 성공한 파일에는 Notice를 열지 않는다.
+
+입력 순서는 Confirm → Notice → 검색/편집기/도크/터미널이다. Notice를 닫는 키는 셸로 보내지 않고, IME preedit도 전달하지 않는다. 마우스는 네이티브 캡션 버튼을 처리한 뒤 차단하므로 최소화·최대화·닫기는 사용할 수 있지만 덮인 앱 컨트롤은 누를 수 없다. 에디터 막대의 캡처도 Notice를 여는 순간 끝낸다. 렌더는 기존 Notice view의 ops를 Confirm과 공유하는 Windows modal lowering에 전달한다.
+
+함께 드러난 할당 실패 누수를 고쳤다. `openFileFor`는 error union 대신 tagged outcome을 반환하므로 기존 `errdefer`는 `.out_of_memory` 반환에 실행되지 않았다. 이제 소유권 이전 여부를 따라 text·path·line 배열·start 배열을 해제한다. `zig build test-win32-file-open`은 실제 임시 파일의 모든 할당 실패 prefix, 읽기 실패/상한/종류 구분과 두 언어 문구를 검증한다. 작업 트리 파일에 쓰지 않는다.
+
+제품 스모크는 실제 `.md` 행 클릭 → Notice의 메시지/그려진 cell·glyph → 다른 세션 카드 클릭 차단 → 터미널 위 문자키 닫기와 PTY 전달 차단을 관찰한다. `notice_ok=false`이면 `error.FileOpenNoticeVerificationFailed`로 종료한다. 원래 마우스 검증은 현재 세션 카드를 눌러 차단 제거 변이를 놓쳤다. 다른 세션을 대상으로 하고 실제 `sidebar_card_clicks`도 비교해 화면 변화만으로 판정하던 빈틈을 닫았다.
+
+적대적 검증은 안내 제거·오류 이유 바꿈·키 라우팅 제거·포인터 차단 제거·렌더 제거의 컴파일 가능한 제품 변이 다섯 가지를 각각 실제 창에서 실행한다. 다섯 변이가 모두 동작 판정에 거부되고 원복 스모크가 통과한 로그를 완료 근거로 삼는다. 컴파일 오류로 끝난 시도는 횟수에 넣지 않는다. `--hold-notice-ms`는 실제 Notice glyph가 present된 뒤 선택적으로 멈추는 캡처용 옵션이며 기본값 0이다.
+
+편집/safe-save·외부 변경 감시, 연 파일 수 상한, 모달 위치 비교, 웹 패널과 다른 Windows 잔여 항목은 이 변경으로 완료 처리하지 않는다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

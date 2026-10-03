@@ -225,15 +225,15 @@ fn dispatch(
             }
             opt_buf[n_opt] = a;
         }
-        const hold_editor_ms = switch (terminalSmokeOpts(opt_buf[0..n_opt])) {
-            .ok => |o| o.hold_editor_ms,
+        const smoke_opts = switch (terminalSmokeOpts(opt_buf[0..n_opt])) {
+            .ok => |o| o,
             .needs_value => |name| {
                 try stderr.print("maru win32-terminal-smoke: {s} needs a value\n", .{name});
                 try stderr.flush();
                 return error.InvalidArgs;
             },
             .bad_value => |v| {
-                try stderr.print("maru win32-terminal-smoke: --hold-editor-ms wants a number, got {s}\n", .{v});
+                try stderr.print("maru win32-terminal-smoke: hold duration wants a number, got {s}\n", .{v});
                 try stderr.flush();
                 return error.InvalidArgs;
             },
@@ -244,14 +244,14 @@ fn dispatch(
             },
         };
         // 스모크는 **상한이 있어야 한다** — 사람이 안 닫아도 끝나야 CI·자동 캡처가 성립한다.
-        try runWin32Terminal(io, allocator, stdout, stderr, smoke_spin_cap, hold_editor_ms);
+        try runWin32Terminal(io, allocator, stdout, stderr, smoke_spin_cap, smoke_opts);
         return;
     }
     if (std.mem.eql(u8, command, "win32-terminal")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         // **같은 코드 경로다.** 다른 것은 상한 하나뿐이라 "스모크에서는 되는데 앱에서는 안 되는" 자리가
         // 안 생긴다. 창을 닫을 때까지 돈다.
-        try runWin32Terminal(io, allocator, stdout, stderr, null, 0);
+        try runWin32Terminal(io, allocator, stdout, stderr, null, .{});
         return;
     }
 
@@ -4336,6 +4336,17 @@ const OpenOutcome = union(enum) {
     read_failed,
     out_of_memory,
 
+    /// Static localized text survives allocator failure and does not borrow a tree row.
+    fn noticeKey(self: std.meta.Tag(OpenOutcome)) ?maru.i18n.Key {
+        return switch (self) {
+            .opened => null,
+            .unsupported => .win_file_open_unsupported,
+            .needs_web_panel => .win_file_open_web,
+            .read_failed => .win_file_open_read,
+            .out_of_memory => .win_file_open_memory,
+        };
+    }
+
     fn name(self: std.meta.Tag(OpenOutcome)) []const u8 {
         return switch (self) {
             .opened => "opened",
@@ -4355,18 +4366,23 @@ fn openFileFor(
     const kind = maru.session.file_panel_bridge.openKindForPath(path) orelse return .unsupported;
     if (kind != .text) return .needs_web_panel;
 
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 << 20)) catch return .read_failed;
-    errdefer allocator.free(text);
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 << 20)) catch |err|
+        return if (err == error.OutOfMemory) .out_of_memory else .read_failed;
+    // This function returns a tagged outcome, not an error union. errdefer would
+    // never run on .out_of_memory, leaking the successfully allocated prefix.
+    var transferred = false;
+    defer if (!transferred) allocator.free(text);
     const owned_path = allocator.dupe(u8, path) catch return .out_of_memory;
-    errdefer allocator.free(owned_path);
+    defer if (!transferred) allocator.free(owned_path);
 
     var lines: std.ArrayList([]const u8) = .empty;
-    errdefer lines.deinit(allocator);
+    defer if (!transferred) lines.deinit(allocator);
     var it = std.mem.splitScalar(u8, text, 0x0A);
     // CRLF 를 여기서 벗긴다 — 편집기 뷰는 **표시 텍스트**를 받는다(스모크가 쓰는 그 규칙).
     while (it.next()) |raw| lines.append(allocator, std.mem.trimEnd(u8, raw, "\r")) catch return .out_of_memory;
 
     const starts = allocator.alloc(usize, lines.items.len) catch return .out_of_memory;
+    defer if (!transferred) allocator.free(starts);
     var off: usize = 0;
     var widest: u32 = 0;
     for (lines.items, starts) |l, *st| {
@@ -4392,6 +4408,7 @@ fn openFileFor(
     const grammar = maru.session.editor.language.grammarForPath(path);
     const provider = ts.Provider.init(text, syntaxLanguageFor(grammar), 0);
 
+    transferred = true;
     return .{ .opened = .{
         .path = owned_path,
         .text = text,
@@ -4400,6 +4417,62 @@ fn openFileFor(
         .max_cols = widest,
         .syntax = provider,
     } };
+}
+
+test "Windows file open outcomes have distinct localized notices" {
+    const tags = [_]std.meta.Tag(OpenOutcome){ .unsupported, .needs_web_panel, .read_failed, .out_of_memory };
+    try std.testing.expect(OpenOutcome.noticeKey(.opened) == null);
+    for (tags, 0..) |tag, i| {
+        const key = OpenOutcome.noticeKey(tag).?;
+        for ([_]maru.i18n.Lang{ .en, .ko }) |lang| {
+            const text = maru.i18n.tIn(lang, key);
+            try std.testing.expect(text.len > 0);
+            for (tags[0..i]) |other|
+                try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.tIn(lang, OpenOutcome.noticeKey(other).?)));
+        }
+    }
+}
+
+fn testOpenAllocation(allocator: std.mem.Allocator, path: []const u8) !void {
+    switch (openFileFor(allocator, std.testing.io, path)) {
+        .opened => |value| {
+            var file = value;
+            defer file.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 3), file.lines.items.len);
+        },
+        .out_of_memory => return error.OutOfMemory,
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Windows file open releases every failed allocation prefix" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sample.txt", .data = "alpha\nbeta\n" });
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &root);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root[0..len], "sample.txt" });
+    defer std.testing.allocator.free(path);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testOpenAllocation, .{path});
+}
+
+test "Windows file open distinguishes web binary missing and over-limit files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const big = try std.testing.allocator.alloc(u8, (4 << 20) + 1);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'x');
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "large.txt", .data = big });
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &root);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root[0..len], "large.txt" });
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqual(std.meta.Tag(OpenOutcome).read_failed, std.meta.activeTag(openFileFor(std.testing.allocator, std.testing.io, path)));
+    const missing = try std.fs.path.join(std.testing.allocator, &.{ root[0..len], "missing.txt" });
+    defer std.testing.allocator.free(missing);
+    try std.testing.expectEqual(std.meta.Tag(OpenOutcome).read_failed, std.meta.activeTag(openFileFor(std.testing.allocator, std.testing.io, missing)));
+    try std.testing.expectEqual(std.meta.Tag(OpenOutcome).needs_web_panel, std.meta.activeTag(openFileFor(std.testing.allocator, std.testing.io, "missing.md")));
+    try std.testing.expectEqual(std.meta.Tag(OpenOutcome).unsupported, std.meta.activeTag(openFileFor(std.testing.allocator, std.testing.io, "missing.exe")));
 }
 
 /// `session` 의 문법 이름을 `syntax` 의 것으로 옮긴다. **두 열거가 같은 축이고**(그 파일 doc:
@@ -5282,7 +5355,7 @@ fn dockGeometryFor(
 /// 얽혀 있어 판정을 걸 수 없고, 실제로 이 계약은 한동안 **손으로 세 번 돌려 본 것**이 전부였다
 /// (적대적 검증 7 회차). 오류를 던지지 않고 **무엇이 잘못됐는지 값으로** 돌려주는 이유는 안내문에
 /// 그 토큰이 들어가야 하기 때문이다.
-const TerminalSmokeOpts = struct { hold_editor_ms: u32 = 0 };
+const TerminalSmokeOpts = struct { hold_editor_ms: u32 = 0, hold_notice_ms: u32 = 0 };
 const TerminalSmokeOptsResult = union(enum) {
     ok: TerminalSmokeOpts,
     /// 값을 받아야 하는 이름인데 뒤가 비었다.
@@ -5296,10 +5369,12 @@ fn terminalSmokeOpts(args: []const []const u8) TerminalSmokeOptsResult {
     var out: TerminalSmokeOpts = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--hold-editor-ms")) {
+        if (std.mem.eql(u8, args[i], "--hold-editor-ms") or std.mem.eql(u8, args[i], "--hold-notice-ms")) {
+            const notice = std.mem.eql(u8, args[i], "--hold-notice-ms");
             if (i + 1 >= args.len) return .{ .needs_value = args[i] };
             i += 1;
-            out.hold_editor_ms = std.fmt.parseInt(u32, args[i], 10) catch return .{ .bad_value = args[i] };
+            const value = std.fmt.parseInt(u32, args[i], 10) catch return .{ .bad_value = args[i] };
+            if (notice) out.hold_notice_ms = value else out.hold_editor_ms = value;
         } else return .{ .unknown = args[i] };
     }
     return .{ .ok = out };
@@ -5308,6 +5383,8 @@ fn terminalSmokeOpts(args: []const []const u8) TerminalSmokeOptsResult {
 test "win32-terminal-smoke 선택지" {
     // 기본은 **0 이다** — 게이트가 이 플래그를 안 주므로 그때 시간이 안 변해야 한다.
     try std.testing.expectEqual(@as(u32, 0), terminalSmokeOpts(&.{}).ok.hold_editor_ms);
+    try std.testing.expectEqual(@as(u32, 0), terminalSmokeOpts(&.{}).ok.hold_notice_ms);
+    try std.testing.expectEqual(@as(u32, 500), terminalSmokeOpts(&.{ "--hold-notice-ms", "500" }).ok.hold_notice_ms);
     try std.testing.expectEqual(@as(u32, 250), terminalSmokeOpts(&.{ "--hold-editor-ms", "250" }).ok.hold_editor_ms);
 
     // **잘못된 인자는 조용히 무시되면 안 된다.** 무시하면 증거를 만들려던 사람이 «찍었는데 편집기가
@@ -5514,7 +5591,8 @@ test "구문 색 세기는 셀마다 한 번, 행마다 한 번, 그리고 구�
     try std.testing.expectEqual(@as(usize, 4), got.total_rows);
 }
 
-fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, hold_editor_ms: u32) !void {
+fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, smoke_opts: TerminalSmokeOpts) !void {
+    const hold_editor_ms = smoke_opts.hold_editor_ms;
     if (@import("builtin").os.tag != .windows) {
         try stderr.writeAll("maru win32-terminal-smoke: Windows only\n");
         try stderr.flush();
@@ -5977,6 +6055,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var open_sidebar_digest_before: u64 = 0;
     var open_sidebar_digest_after: u64 = 0;
     var md_judgeable = false;
+    var md_notice_open = false;
+    var md_notice_message = false;
+    var md_notice_drawn: usize = 0;
+    var md_notice_glyphs: usize = 0;
+    var md_notice_pointer_blocked = false;
+    var md_notice_pointer_sent = false;
+    var md_notice_pointer_clicks_before: usize = 0;
+    var md_notice_saved_view: ActiveView = .{ .terminal = 0 };
+    var md_notice_saved_focus = false;
+    var md_notice_keys_before: usize = 0;
+    var md_notice_bytes_before: usize = 0;
+    var file_notice_held = false;
     var md_files_before: usize = 0;
     var md_files_after: usize = 0;
     var md_rejects_before: usize = 0;
@@ -5993,6 +6083,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     //
     // Windows 에 없던 것은 셋이다: 그리는 배선, 모달이 떠 있는 동안의 **입력 주인**, 그리고 보류 상태.
     var confirm_state: maru.chrome.components.confirm.State = .{};
+    var file_notice: maru.chrome.components.notice.State = .{};
+    var file_notice_frame: ?maru.renderer.RenderFrame = null;
+    defer if (file_notice_frame) |*f| f.deinit(allocator);
+    var file_notice_cells: usize = 0;
+    var file_notice_glyphs: usize = 0;
     // 확인을 기다리는 닫기 대상. **번호가 아니라 id 다.**
     //
     // 처음에는 목록 번호를 들었다 — 모달이 입력을 삼키므로 그동안 목록이 안 바뀐다고 봤기 때문이다.
@@ -8376,6 +8471,51 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             md_files_after = open_files.items.len;
             md_rejects_after = file_rejects;
             md_reason = last_reject;
+            md_notice_open = file_notice.open;
+            md_notice_message = std.mem.eql(u8, file_notice.message, maru.i18n.t(.win_file_open_web));
+            md_notice_drawn = file_notice_cells;
+            md_notice_glyphs = file_notice_glyphs;
+            md_notice_saved_view = active_view;
+            md_notice_saved_focus = dock_key_focus;
+            md_notice_pointer_clicks_before = sidebar_card_clicks;
+            if (md_judgeable) {
+                const notice_rows = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
+                const notice_metrics = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+                for (notice_rows, 0..) |row, ri| {
+                    if (row != .card or row.card.tab >= sidebar_cards.items.len or sidebar_cards.items[row.card.tab].source != .session) continue;
+                    if (sidebar_cards.items[row.card.tab].source.session == app_window.active_tab) continue;
+                    const top = maru.chrome.components.sidebar.rowTop(notice_rows, ri, sidebar_header_h, notice_metrics, sidebar_scroll_px);
+                    const mid = top + @as(i64, @intCast(cell_h / 2));
+                    if (mid < sidebar_header_h or mid >= geom.sidebar.h) continue;
+                    const nx: i32 = @intCast(geom.sidebar.x + sidebar_w / 4);
+                    const ny: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + mid);
+                    md_notice_pointer_sent = true;
+                    window.postSyntheticMouse(.left_down, nx, ny);
+                    window.postSyntheticMouse(.left_up, nx, ny);
+                    break;
+                }
+            }
+        }
+        if (smoke and spins == 786 and md_judgeable) {
+            md_notice_pointer_blocked = md_notice_pointer_sent and sidebar_card_clicks == md_notice_pointer_clicks_before and std.meta.eql(active_view, md_notice_saved_view) and file_notice.open;
+            // Exercise the dismissal over a live terminal, not a read-only editor
+            // that would mask a broken modal route by swallowing the leaked key.
+            active_view = .{ .terminal = app_window.active_tab };
+            dock_key_focus = false;
+            md_notice_keys_before = keys_to_shell;
+            md_notice_bytes_before = bytes_to_shell;
+            window.postSyntheticChar('N');
+        }
+        if (smoke and spins == 787 and md_judgeable) {
+            const notice_dismissed = !file_notice.open;
+            const notice_key_consumed = keys_to_shell == md_notice_keys_before and bytes_to_shell == md_notice_bytes_before;
+            active_view = md_notice_saved_view;
+            dock_key_focus = md_notice_saved_focus;
+            const notice_ok = md_notice_open and md_notice_message and md_notice_drawn > 0 and md_notice_glyphs > 0 and
+                md_notice_pointer_blocked and notice_dismissed and notice_key_consumed;
+            try stdout.print("file_open_notice: opened={} message={} cells={d} glyphs={d} pointer_blocked={} dismissed={} key_consumed={} notice_ok={}\n", .{ md_notice_open, md_notice_message, md_notice_drawn, md_notice_glyphs, md_notice_pointer_blocked, notice_dismissed, notice_key_consumed, notice_ok });
+            try stdout.flush();
+            if (!notice_ok) return error.FileOpenNoticeVerificationFailed;
         }
         // **곧바로 잰다.** 뒤로 미루면 그 사이의 호버·두 번째 클릭이 지문을 바꿔, 이 판정이
         // "무언가가 사이드바를 건드렸다" 로 흐려진다.
@@ -9982,6 +10122,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     };
                     continue;
                 }
+                // Confirm retains its higher priority. A dismissal gesture belongs
+                // to Notice and must not also type into an underlying terminal.
+                if (file_notice.open) {
+                    _ = maru.chrome.components.notice.handle(win32_keys.chromeKeyEvent(key_ev), &file_notice);
+                    continue;
+                }
                 // ── 검색이 포커스면 키는 검색 것이다 (W8.15) ─────────────────────────
                 //
                 // **파일 삼킴보다 먼저 본다.** 뒤에 두면 문서를 보는 중에는 검색에 글자를 못 친다.
@@ -10162,6 +10308,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // IME 조합 미리보기. **중립 계약에 그대로 넣는다** — `renderSnapshot()`이 합성해 주므로
             // Windows 가 미리보기 렌더를 따로 만들지 않는다(§2i).
             .preedit_changed => {
+                if (file_notice.open or confirm_state.open) continue;
                 const text = window.preeditText();
                 // **조합은 포커스를 따라간다**(W8.15 잔여). 검색 줄에 치는 동안 미리보기가 터미널로
                 // 가면 사용자는 자기가 친 것을 못 보는데 셸은 그것을 받는다 — 키 입력이 이미 겪은
@@ -10258,6 +10405,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     caption_hover = null;
                     rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
                 }
+
+                // Keep native caption controls available, but block covered app actions.
+                if (file_notice.open and !confirm_state.open) continue;
 
                 // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────
                 //
@@ -11019,7 +11169,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         else => null,
                                     };
                                     if (clicked_file_path) |fp| {
-                                        const owned = allocator.dupe(u8, fp) catch continue;
+                                        const owned = allocator.dupe(u8, fp) catch {
+                                            file_rejects += 1;
+                                            last_reject = .out_of_memory;
+                                            file_notice.show(maru.i18n.t(.win_file_open_memory));
+                                            continue;
+                                        };
                                         // `openFileFor` 가 자기 몫을 따로 복사하므로 이것은 항상 놓는다.
                                         defer allocator.free(owned);
                                         // **이미 열려 있으면 그것으로 간다**(창당 경로 유일성).
@@ -11040,6 +11195,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 open_files.append(allocator, of) catch {
                                                     var tmp = of;
                                                     tmp.deinit(allocator);
+                                                    file_rejects += 1;
+                                                    last_reject = .out_of_memory;
+                                                    file_notice.show(maru.i18n.t(.win_file_open_memory));
                                                     continue;
                                                 };
                                                 file_opens += 1;
@@ -11051,6 +11209,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                             else => |why| {
                                                 file_rejects += 1;
                                                 last_reject = std.meta.activeTag(why);
+                                                file_notice.show(maru.i18n.t(OpenOutcome.noticeKey(last_reject).?));
+                                                hbar_drag.end();
+                                                vbar_drag.end();
+                                                hbar_drag_release = false;
+                                                vbar_drag_release = false;
                                                 continue;
                                             },
                                         }
@@ -11927,6 +12090,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 confirm_center_x = @intFromFloat((minx + maxx) / 2);
             } else |_| confirm_draw_failures += 1;
         }
+        file_notice_cells = 0;
+        file_notice_glyphs = 0;
+        if (file_notice.open and !confirm_state.open) {
+            file_notice_cells = appendNoticeCells(allocator, &cells, &file_notice, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &file_notice_frame) catch 0;
+            for (cells.items[cells.items.len - file_notice_cells ..]) |cell|
+                if (cell.uv[0] >= 0 and cell.rect[2] > 0 and cell.rect[3] > 0) {
+                    file_notice_glyphs += 1;
+                };
+        }
         last_cells = cells.items.len;
 
         // **터미널 셀이 도크 사각형에 들어가면 안 된다**(§2m.31 의 진짜 위험). 격자를 창 폭에서
@@ -11957,6 +12129,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **`esyn*_judgeable` 만 보고 멈추면 안 된다.** 그 값은 **색칠 수와 무관하게** 서므로 색이
         // 하나도 없는 프레임에서 멈춰 **거짓 증거**를 만든다(§2m.113 의 적대적 검증 2 회차). 그래서
         // 각 판정이 초록이라고 말하는 그 문턱을 그대로 쓴다.
+        if (smoke and smoke_opts.hold_notice_ms != 0 and file_notice.open and file_notice_glyphs > 0 and !file_notice_held) {
+            file_notice_held = true;
+            try stdout.print("file_notice_hold: ms={d} glyphs={d}\n", .{ smoke_opts.hold_notice_ms, file_notice_glyphs });
+            try stdout.flush();
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(smoke_opts.hold_notice_ms), .awake);
+        }
         if (hold_editor_ms != 0 and showing_file) {
             const first_ready = esyn_judgeable and esyn_rows * 2 >= esyn_total_rows and esyn_distinct >= 2;
             const scrolled_ready = esyn2_judgeable and esyn2_first_line > 0 and
@@ -16039,7 +16217,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru d3d11-cells-smoke
         \\  maru dwrite-text-smoke
         \\  maru win32-frame-smoke
-        \\  maru win32-terminal-smoke
+        \\  maru win32-terminal-smoke [--hold-editor-ms n] [--hold-notice-ms n]
         \\  maru win32-clipboard-smoke [<expected> | --paste-encode]
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
@@ -16198,9 +16376,49 @@ fn appendConfirmCells(
     try maru.chrome.components.confirm.view(state, p, tk, arena.allocator(), &ops);
     if (ops.items.len == 0) return 0;
 
+    _ = confirm_unpainted_quads;
+    return appendModalOpsCells(allocator, out, ops.items, p, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, frame_slot);
+}
+
+fn appendNoticeCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    state: *const maru.chrome.components.notice.State,
+    p: maru.chrome.props.ChromeProps,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    frame_slot: *?maru.renderer.RenderFrame,
+) !usize {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    defer ops.deinit(arena.allocator());
+    try maru.chrome.components.notice.view(state, p, tk, arena.allocator(), &ops);
+    if (ops.items.len == 0) return 0;
+
+    return appendModalOpsCells(allocator, out, ops.items, p, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, frame_slot);
+}
+
+fn appendModalOpsCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    ops: []const maru.chrome.draw.Op,
+    p: maru.chrome.props.ChromeProps,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    frame_slot: *?maru.renderer.RenderFrame,
+) !usize {
     const cols: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, p.metrics.backing_width_px / p.metrics.cell_width_px)));
     const rows: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, p.metrics.backing_height_px / p.metrics.cell_height_px)));
-    const dl = try chrome_draw_lowering.buildTextDrawList(allocator, ops.items, tk, p.metrics.cell_width_px, p.metrics.cell_height_px, cols, rows);
+    const dl = try chrome_draw_lowering.buildTextDrawList(allocator, ops, tk, p.metrics.cell_width_px, p.metrics.cell_height_px, cols, rows);
     const frame = renderer_state.buildFrameFromDrawListWithRasterizer(allocator, dl, builder.shaper, builder.rasterizer) catch |err| {
         var l = dl;
         l.deinit(allocator);
@@ -16213,9 +16431,8 @@ fn appendConfirmCells(
     _ = draw_host.uploadFrameRegions(pipeline, frame);
 
     // Both fill and border are lowered, including declared gradients.
-    _ = confirm_unpainted_quads;
     const before = out.items.len;
-    try appendPaintOps(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, 0, 0, out);
+    try appendPaintOps(allocator, ops, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, 0, 0, out);
     const colors = maru.renderer.metal_frame.CellColors{
         .default_fg = blk: {
             const c = tk.get(.surface_fg);

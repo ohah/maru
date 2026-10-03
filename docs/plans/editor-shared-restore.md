@@ -978,3 +978,30 @@ exclusive claim 파일 또는 mkdir는 생성 순간의 namespace 예약이다. 
 이번 다섯 회차에서도 완료 주장의 빈틈을 발견했다. 문서별 ID 방향은 유지하지만
 소유권/전체 앱 중복 검사/복구 publication/종료 실패/경로 객체 정합성까지 검증하기 전
 ‘독립 문서 내용이 항상 복구된다’고 선언하지 않는다. 제품 코드는 여전히 변경하지 않았다.
+
+### 추가 검토 3 — 적대적 설계 검토 11~20회
+
+10개 별도 경계를 검토했다. ‘추가 누락’은 기존 설계안에 빠진 요구이며 현재 제품의
+실행 재현 결함을 뜻하지 않는다. 이미 다룬 원칙으로 방어 가능한 항목도 구분해 기록한다.
+
+| 회차 | 공격 경계와 코드 근거 | 설계 판정 및 필요한 실행 대조 |
+|---|---|---|
+| 11 | 새 ID를 기존 v1 backup의 선택적 키로 넣음. 현재 backup.parse는 모르는 키를 무시한다 | 추가 누락: 신원을 필수로 다루는 새 reader dispatch/header를 함께 바꿔야 한다. ID가 없는/무시되는 record를 새 문서에 적용하지 않는다. old header+new field/new header+missing ID/정상 새 record를 대조한다 |
+| 12 | 같은 ID 키가 record에 두 번 나옴. 현재 key parser는 scalar를 반복 대입한다 | 추가 누락: 새 ID 필드는 중복을 거절한다. 첫 값/마지막 값 중 하나를 선택하면 filename/descriptor 검사와 다른 의미가 된다. 동일 값 중복/다른 값 중복/잘린 값/정상 단일 값 판정이 필요하다 |
+| 13 | ID의 hex 표기가 대소문자·선행 0·부호·초과 길이로 달라짐 | 기존 엄격한 이름 원칙의 구체화: ID의 값은 고정 16 bytes, canonical wire는 정확히 32 lowercase hex로 제안한다. 영 ID는 미발급 표현과 섞지 않도록 거절하는 안을 검토한다. parser/writer/filename에서 동일 문법을 검사하고 31/33자·0·비hex를 대조한다 |
+| 14 | clearIdentity와 clear의 차이. State.clearIdentity는 저장 대상만 제거하고 clear는 본문/이력/notifications를 정산한다 | 추가 누락: recovery ID를 저장 대상 신원과 같은 clear 함수에서 지우지 않는다. 같은 문서의 Save As는 유지, 문서 완전 해제/새 독립 생성은 재발급이다. clearOpened 후 재로드/clearIdentity 후 Save As/완전 clear 후 slot 재사용의 수명을 검사한다 |
+| 15 | backup 쓰기에 State의 borrowed 포인터를 비동기로 전달. Registry의 read/request lease는 수명만 보장한다 | 기존 동기 writer 범위 유지로 방어한다. future 비동기화에서는 pin을 immutable snapshot으로 오해하지 않는다. owned content+ID+kind/path+revision을 함께 준비해야 한다. 편집/Save As/닫기가 snapshot 뒤 발생하는 barrier 검사는 비동기화 PR의 gate다 |
+| 16 | close capture가 중복 view 이름을 먼저 수용. executeClose는 최대 64건 수집 후 넘는 Term을 건너뛴다 | 추가 누락: ID별 dedup과 실제 고유 문서 수에 대한 정리 결과가 필요하다. 이름 길이 확장만으로 해결되지 않는다. 같은 문서 view 다수와 64/65개 독립 문서 대조군, 닫기 취소·정상 마지막 view 닫기를 검사한다. 기존 상한을 임의 확대하거나 무관한 파일 청소로 보완하지 않는다 |
+| 17 | 한 문서에 이전 source backup과 새 ID backup이 동시에 존재 | 기존 원본 보존 정책의 확장: 새 백업 성공/명시적 저장·버리기 경계까지 두 소유를 구분한다. fileNameIfOnDisk가 source 하나만 반환하는 기존 방식이 충분한지 검사한다. source 삭제 실패+새 backup 있음+마지막 view 닫기에서 남은 후보를 성공 정리라고 기록하지 않는다 |
+| 18 | 복구 원본보다 새 backup이 크기 상한을 넘음. settle은 상한 초과 시 기존 backup을 유지한다 | 기존 보존 원칙으로 방어 가능하지만 최신 내용은 보호하지 못한다. ID/claim 존재만으로 최신 backup 성공을 표시하지 않는다. 상한 정확/상한+1/다시 상한 이하로 편집 시 old record 보존과 새 성공 이후 전환을 판정한다 |
+| 19 | backend 쓰기 실패를 파일 부재와 혼동. readAt은 missing/invalid/failed를 구분하나 기존 read는 optional로 축소한다 | 추가 누락: 새 ID restore와 discovery는 readAt 분류를 소비해야 한다. 기존 optional wrapper 재사용만으로 incomplete를 세울 수 없다. missing/directory/권한/OOM/손상과 이후 재시도 대조군에서 보존 latch와 candidate 상태를 검사한다 |
+| 20 | 사용자가 복구 후보를 버렸지만 별도 실행이 같은 ID를 소유하거나 다시 게시함 | 기존 owner 원칙의 구체화: 후보 발견이 삭제 권한을 주지 않는다. 사용자 승인 대상의 record/owner를 묶고 live 소유와 경쟁하는 후보는 자동 삭제하지 않는다. 발견→peer 게시→버리기, 정상 소유 단독 버리기, 오래된 후보 재선택을 barrier로 검사한다 |
+
+회차 13의 영 ID 거절은 아직 제안이며 사용자 승인된 포맷으로 취급하지 않는다.
+회차 15는 현재 동기 backup writer의 신규 결함을 주장하지 않으며 비동기화를 추가하지 않는다.
+회차 16의 기존 64건 제한은 코드에서 확인했지만 65개 문서의 실제 손실/화면 결과는 실행하지 않았다.
+회차 17의 best-effort 삭제 실패 정책도 이번 검토에서 변경하지 않는다.
+
+이번 검토는 ID 방향을 반증하지 않았으나, 새 필수 codec/중복 키/State 정산/닫기 수집/
+source와 current의 동시 소유/읽기 결과 소비 요구를 추가했다. 설계 검토 횟수만으로
+이 요구들의 제품 실행 판정이 완료됐다고 선언하지 않는다.

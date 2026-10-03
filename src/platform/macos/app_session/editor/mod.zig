@@ -48369,3 +48369,72 @@ test "U4b-15 independent documents at the same path overwrite one backup and reo
         std.debug.print("independent_same_path_collision last_writer={s} both_reopen_same=true disk_unchanged=true\n", .{if (rewrite_first) "first" else "second"});
     }
 }
+
+test "U4b-16 discarding one independent same-path document deletes its peer backup" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    const a = try openPathInActivePane(fx.session, path);
+    const b = try openPathInActivePane(fx.session, path);
+    try testing.expect(a.rt.editorDocument() != b.rt.editorDocument());
+    a.rt.editor_selection = editor_selection.Selection.at(0);
+    b.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, a, "A:"));
+    try testing.expect(insertText(fx.session, b, "B:"));
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    const doc = app_session_mod.editor_backup_ops.identity(b).?;
+    const bytes = try readBackup(allocator, root, doc);
+    defer allocator.free(bytes);
+    var parsed = try backup_rules.parse(allocator, bytes);
+    defer parsed.deinit(allocator);
+    try testing.expectEqualStrings("B:disk\n", parsed.content);
+    app_session_mod.editor_backup_ops.drop(fx.session, a);
+    try testing.expect(!backupExists(root, doc));
+    try testing.expect(isDirty(b));
+    try testing.expectEqualStrings("B:disk\n", b.rt.editorDocument().opened.?.file.content);
+    try testing.expect(b.rt.editorDocument().notifications.backup_on_disk);
+    try testing.expect(!b.rt.editorDocument().notifications.backup_dirty);
+    // Flush cannot repair it: the peer was already marked as backed up.
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    try testing.expect(!backupExists(root, doc));
+    const disk = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(64));
+    defer allocator.free(disk);
+    try testing.expectEqualStrings("disk\n", disk);
+    std.debug.print("independent_peer_drop backup_missing=true peer_memory_dirty=true flush_repairs=false disk_unchanged=true\n", .{});
+}
+
+test "U4d-8 empty missing-path backup is deleted by revival without restoring a document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/missing.txt", .{root});
+    const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("formerly nonempty\n") } };
+    // Empty is a valid edit (deleting the entire original document).
+    try plantBackup(allocator, root, doc, "");
+    const bytes = try readBackup(allocator, root, doc);
+    defer allocator.free(bytes);
+    var parsed = try backup_rules.parse(allocator, bytes);
+    defer parsed.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), parsed.content.len);
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    const before = fx.session.tabs.items[0].panes.items[0].terms.items.len;
+    app_session_mod.editor_backup_ops.reviveAsUntitled(fx.session, doc);
+    try testing.expect(!backupExists(root, doc));
+    try testing.expectEqual(before, fx.session.tabs.items[0].panes.items[0].terms.items.len);
+    std.debug.print("empty_revival source_deleted=true restored_document=false\n", .{});
+}

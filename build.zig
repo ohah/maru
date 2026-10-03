@@ -1891,9 +1891,9 @@ pub fn build(b: *std.Build) void {
     // 101 = 앞의 90(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯 +
     //       C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯 + U3-1~U3-8 여덟)에
     //       **U4a-1~U4a-13 열셋 + U4b-1~U4b-9 아홉 + U4c-1~U4c-5·U4c-8 여섯 + U4d-3~U4d-6 넷**을 더한 값이다(U4a 백업 · U4b 복원 · U4c 이름 없는 문서, §3.10).
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=129");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=131");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=129");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=131");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
     const untitled_step = b.step(
         "test-editor-untitled",

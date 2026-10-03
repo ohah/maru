@@ -1254,12 +1254,15 @@ pub fn osrDragReset(self: *AppSession) bool {
     return self.osr_drag.loaded;
 }
 
-/// 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기다(W6d② — Swift 가 끌기 소스가 이 앱의 maru view 이고 그 번호가 지금 도는
-/// 페이지 끌기일 때만 부른다. 표지만 믿으면 원래 탭이 닫혀 sidecar 가 데이터를 놓은 뒤 pasteboard 의 글까지 버렸다 — 적대 검증 1 차).
+/// 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기다(W6d② — Swift 는 끌기 소스가 이 앱의 maru view 일 때 부른다). 그 번호의
+/// 페이지 끌기가 아직 살아 있을 때만 받아들이고 true — 아니면(원래 탭이 닫혔다·sidecar 가 다시 떴다·창이 닫혔다) false 라 Swift 가
+/// pasteboard 로 간다. 표지만 믿으면 그때 sidecar 가 데이터를 놓아 enter 가 빠지고 pasteboard 의 글까지 버렸다(적대 검증 1·2 차).
 /// Chromium 본문에 들어가면 조각 대신 그 데이터로 enter 한다 — 페이지가 정한 형식이 pasteboard 를 거치며 사라지지 않게.
-pub fn osrDragSetSource(self: *AppSession, drag: u32) void {
+pub fn osrDragSetSource(self: *AppSession, drag: u32) bool {
+    if (!web_osr.dragOutAlive(drag)) return false;
     self.osr_drag.source = drag;
-    if (drag != 0) self.osr_drag.loaded = true;
+    self.osr_drag.loaded = true;
+    return true;
 }
 
 // ── W6d②: 페이지에서 시작한 끌기(끌어내기) ───────────────────────────────────────────────────────────────
@@ -1292,7 +1295,8 @@ pub fn osrDragOutTake(self: *AppSession) ?OsrDragOutInfo {
         // 앞 끌기가 남아 있으면(세션이 끝을 알리지 않았다) 취소로 끝낸다 — 방금 가져간 그 끌기면 건드리지 않는다(sidecar 가 다시 떠
         // 번호가 같아졌다 — W6d② 적대 검증 1 차).
         if (self.osr_drag_out) |old| if (!(old.surface == l.surface_id and old.drag == info.drag)) {
-            _ = web_osr.endDragOut(self.allocator, old.surface, old.drag, .{ .x = 0, .y = 0 }, 0);
+            const at = if (web_osr.dragOut(old.surface, old.drag)) |o| o.point else ws_point_zero;
+            _ = web_osr.endDragOut(self.allocator, old.surface, old.drag, at, 0);
         };
         self.osr_drag_out = .{ .surface = l.surface_id, .drag = info.drag };
         return info;
@@ -1323,21 +1327,19 @@ pub fn osrDragOutStarted(self: *AppSession, drag: u32) void {
     if (self.pointer_gesture_owner == .web_osr and self.pointer_gesture_owner.web_osr.surface_id == shown.surface) self.finishPointerGesture();
 }
 
-/// 끌기 세션이 끝났다 — 놓인 자리(창 backing px — 음수이거나 그 탭이 이 창에 없으면 시작 자리)와 받은 동작을 sidecar 에 답한다.
+/// 끌기 세션이 끝났다 — 놓인 자리(창 backing px — NaN 이거나 그 탭이 이 창에 없으면 시작 자리)와 받은 동작을 sidecar 에 답한다.
+/// 음수는 정상 좌표다(창 왼쪽·위 밖에 놓았다 — 페이지 dragend 가 그 자리로 「밖에 놓았다」를 판단한다).
 pub fn osrDragOutEnd(self: *AppSession, drag: u32, x_px: f64, y_px: f64, operation: u32) bool {
     const shown = self.osr_drag_out orelse return false;
     if (shown.drag != drag) return false;
     self.osr_drag_out = null;
     const d = web_osr.dragOut(shown.surface, drag) orelse return false;
-    const layout = if (x_px < 0 or y_px < 0) null else osr_input.find(self.osr_layouts.items, shown.surface);
+    const layout = if (std.math.isNan(x_px) or std.math.isNan(y_px)) null else osr_input.find(self.osr_layouts.items, shown.surface);
     const point = if (layout) |l| osrDip(self, l, x_px, y_px) else d.point;
     return web_osr.endDragOut(self.allocator, shown.surface, drag, point, operation);
 }
 
-/// 지금 이 창이 돌리는 페이지 끌기 번호(없으면 0) — Swift 가 그 끌기가 maru 안에 놓일 때 `osrDragSetSource` 에 쓴다.
-pub fn osrDragOutActive(self: *const AppSession) u32 {
-    return if (self.osr_drag_out) |shown| shown.drag else 0;
-}
+const ws_point_zero: maru.session.web_sidecar.message.Point = .{ .x = 0, .y = 0 };
 
 /// 끌어 온 것 하나를 싣는다. 경로는 `web_osr.max_drag_paths` 개, 글·HTML 은 `max_drag_text` 바이트까지(넘는 것은 버린다 —
 /// 보낼 때 글자 경계에서 다시 자른다). 주소·제목은 마지막 것.

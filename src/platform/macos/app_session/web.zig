@@ -1211,6 +1211,9 @@ pub const OsrDrag = struct {
     url: std.ArrayList(u8) = .empty,
     url_title: std.ArrayList(u8) = .empty,
     target: u64 = 0,
+    /// Swift 가 이 끌기의 것을 실었다(들어올 때 이 창에 Chromium 탭 본문이 있었다). 싣지 않은 끌기는 끄는 중에 본문이 생겨도
+    /// 넘기지 않는다 — 빈 끌기가 들어가 놓으면 받았다고 답했다(W6d① 적대 검증 2 차).
+    loaded: bool = false,
 
     pub fn clear(self: *OsrDrag, gpa: std.mem.Allocator) void {
         for (self.paths.items) |p| gpa.free(p);
@@ -1244,7 +1247,8 @@ pub fn osrDragReset(self: *AppSession) bool {
     if (self.osr_drag.target != 0) web_osr.dragLeave(self.allocator, self.osr_drag.target);
     self.osr_drag.target = 0;
     self.osr_drag.clear(self.allocator);
-    return self.osr_layouts.items.len != 0;
+    self.osr_drag.loaded = self.osr_layouts.items.len != 0;
+    return self.osr_drag.loaded;
 }
 
 /// 끌어 온 것 하나를 싣는다. 경로는 `web_osr.max_drag_paths` 개, 글·HTML 은 `max_drag_text` 바이트까지(넘는 것은 버린다 —
@@ -1264,7 +1268,9 @@ pub fn osrDragAdd(self: *AppSession, kind: OsrDragKind, bytes: []const u8) bool 
         .text, .html => {
             const list = if (kind == .text) &d.text else &d.html;
             const room = web_osr.max_drag_text -| list.items.len;
-            list.appendSlice(gpa, bytes[0..@min(bytes.len, room)]) catch return false;
+            // 글자 경계에서 자른다 — 바이트로 자르면 보낼 때의 UTF-8 검증에 걸려 글 전체가 사라졌다(1 MiB 넘는 한글 — W6d① 적대
+            // 검증 2 차). UTF-8 이 아니면 싣지 않는다.
+            list.appendSlice(gpa, maru.session.web_sidecar.text.clampUtf8(bytes, room)) catch return false;
         },
         .url, .url_title => {
             const list = if (kind == .url) &d.url else &d.url_title;
@@ -1284,7 +1290,7 @@ fn osrDragHit(self: *AppSession, x_px: f64, y_px: f64) ?app_session_mod.OsrLayou
 /// 끌기가 그 자리에 왔다(들어옴·움직임). 본문이면 그 탭에 enter(처음이거나 다른 탭에서 옮겨 왔으면 — 옛 탭에는 나가기)나
 /// over 를 보내고 페이지가 받아들이는 동작(0 = 받지 않음)을, 본문이 아니면 -1 을 돌려준다.
 pub fn osrDragUpdate(self: *AppSession, x_px: f64, y_px: f64, mods: i32, allowed: u32) i32 {
-    const layout = osrDragHit(self, x_px, y_px);
+    const layout = if (self.osr_drag.loaded) osrDragHit(self, x_px, y_px) else null;
     const now: u64 = if (layout) |l| l.surface_id else 0;
     if (self.osr_drag.target != 0 and self.osr_drag.target != now) {
         web_osr.dragLeave(self.allocator, self.osr_drag.target);
@@ -1313,7 +1319,8 @@ pub fn osrDragExit(self: *AppSession) void {
 /// 놓았다. enter 를 받은 탭 본문이면 drop 을 보내고 그 탭을 활성으로 올린 뒤(터미널 드롭이 그 pane 에 포커스를 주는 것과
 /// 같다) 1, 본문인데 그 탭이 끌기를 모르면(만들어지기 전 등) 0(거절), 본문이 아니면 -1(터미널 드롭 경로로).
 pub fn osrDragDrop(self: *AppSession, x_px: f64, y_px: f64, mods: i32) i32 {
-    const layout = osrDragHit(self, x_px, y_px) orelse {
+    const hit = if (self.osr_drag.loaded) osrDragHit(self, x_px, y_px) else null;
+    const layout = hit orelse {
         if (self.osr_drag.target != 0) web_osr.dragLeave(self.allocator, self.osr_drag.target);
         self.osr_drag.target = 0;
         return -1;
@@ -1324,7 +1331,12 @@ pub fn osrDragDrop(self: *AppSession, x_px: f64, y_px: f64, mods: i32) i32 {
         if (target != 0) web_osr.dragLeave(self.allocator, target);
         return 0;
     }
+    // 놓을 때 페이지가 마지막으로 알린 동작 — AppKit 이 본 값(직전 `draggingUpdated`)보다 새롭다. 0 이면(페이지가 거절으로
+    // 바꿨다) CEF 도 놓기를 나가기로 바꾸므로 받지 않았다고 답한다 — 받았다고 하면 이동 끌기의 원본이 지워졌다(W6d① 적대
+    // 검증 2 차). 놓기는 그대로 보낸다(페이지가 정한다 — Chrome 과 같다).
+    const accepted = web_osr.dragOperation(target) != 0;
     if (!web_osr.dragDrop(self.allocator, target, osrDip(self, layout, x_px, y_px), osr_input.modifiers(mods, .{}))) return 0;
+    if (!accepted) return 0;
     if (self.activateSurfaceById(target)) {
         self.markNotificationsReadBySurface(target);
         self.focusWorkspaceInput();

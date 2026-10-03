@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 203), abi_version);
+    try std.testing.expectEqual(@as(u32, 204), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -4942,6 +4942,76 @@ pub export fn maru_macos_app_session_osr_tooltip(session: ?*AppSession, out_seri
     if (out) |o| @memcpy(o[0..text.len], text);
     if (out_len) |p| p.* = text.len;
     return @intFromBool(text.len != 0);
+}
+
+/// v204(W6c②): 이 창에 보이는 Chromium 탭에 온 우클릭 메뉴를 가져간다 — 항목 수(없으면 0), 메뉴 번호, 띄울 자리(창 backing px,
+/// view 좌상단 원점). 띄운 메뉴가 있으면 0 — 한 번에 하나다. Swift 는 tick 이 끝난 **뒤** 띄운다(tick 안에서 띄우면 메뉴가 닫힐
+/// 때까지 tick 이 멈춘다 — 시험 앱 실측).
+pub export fn maru_macos_app_session_osr_context_menu_take(session: ?*AppSession, out_menu: ?*u32, out_x: ?*f64, out_y: ?*f64) i32 {
+    const app = session orelse return 0;
+    const m = session_mod.web_ops.osrContextMenuTake(app) orelse return 0;
+    if (out_menu) |p| p.* = m.menu;
+    if (out_x) |p| p.* = m.x_px;
+    if (out_y) |p| p.* = m.y_px;
+    return @intCast(m.items.len);
+}
+
+/// v204(W6c②): 띄운 메뉴의 항목 하나 — 종류(0 명령·1 구분선·2 찾기·3 음성 하위 메뉴·4 말하기 시작·5 말하기 중지·6 서비스 하위
+/// 메뉴·7 이모티콘), 명령(`ContextMenuCommandKind`), 켜짐, 깊이(1 은 바로 앞 하위 메뉴 안), 문구(UTF-8 — `cap` 에서 글자 경계로
+/// 자른다). 그 메뉴가 아니거나 범위 밖이면 0.
+pub export fn maru_macos_app_session_osr_context_menu_item(
+    session: ?*AppSession,
+    menu: u32,
+    index: u32,
+    out_kind: ?*i32,
+    out_command: ?*i32,
+    out_enabled: ?*i32,
+    out_depth: ?*i32,
+    out_label: ?[*]u8,
+    label_cap: usize,
+    out_label_len: ?*usize,
+) i32 {
+    const app = session orelse return 0;
+    const m = session_mod.web_ops.osrContextMenuShown(app, menu) orelse return 0;
+    if (index >= m.items.len) return 0;
+    const item = m.items.items[index];
+    if (out_kind) |p| p.* = @intFromEnum(item.kind);
+    if (out_command) |p| p.* = @intFromEnum(item.command);
+    if (out_enabled) |p| p.* = @intFromBool(item.enabled);
+    if (out_depth) |p| p.* = item.depth;
+    var buf: [1024]u8 = undefined;
+    const label: []const u8 = if (item.kind == .look_up)
+        maru.session.web_osr_context_menu.lookUpLabel(session_mod.web_ops.osrContextMenuSelection(app, menu), &buf)
+    else if (item.label) |key| maru.i18n.t(key) else "";
+    const text = maru.session.web_sidecar.text.clampUtf8(label, label_cap);
+    if (out_label) |o| @memcpy(o[0..text.len], text);
+    if (out_label_len) |p| p.* = text.len;
+    return 1;
+}
+
+/// v204(W6c②): 띄운 메뉴의 선택한 글(찾기·음성·서비스 — UTF-8, `cap` 에서 글자 경계로 자른다). 그 메뉴가 아니면 0.
+pub export fn maru_macos_app_session_osr_context_menu_selection(session: ?*AppSession, menu: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
+    const app = session orelse return 0;
+    _ = session_mod.web_ops.osrContextMenuShown(app, menu) orelse return 0;
+    const text = maru.session.web_sidecar.text.clampUtf8(session_mod.web_ops.osrContextMenuSelection(app, menu), cap);
+    if (out) |o| @memcpy(o[0..text.len], text);
+    if (out_len) |p| p.* = text.len;
+    return 1;
+}
+
+/// v204(W6c②): 띄운 메뉴가 아직 열려 있어야 하면 1 — 0 이면(페이지가 이동했거나 탭이 닫혀 sidecar 가 닫았다) Swift 가 메뉴를 거둔다.
+pub export fn maru_macos_app_session_osr_context_menu_open(session: ?*AppSession, menu: u32) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrContextMenuOpen(app, menu));
+}
+
+/// v204(W6c②): 띄운 메뉴의 답 — 고른 명령(`ContextMenuCommandKind`, 모르는 값은 취소), 고르지 않았거나 macOS 항목이면 0(취소).
+/// 지금 포인터 자리(창 backing px)와 지금 눌린 버튼(`NSEvent.pressedMouseButtons`)은 메뉴가 먹은 떼기를 대신 보낼 때 쓴다.
+/// `activate` 가 1 이면 그 탭을 활성으로 올린다(이모티콘). 그 메뉴가 아니면 0.
+pub export fn maru_macos_app_session_osr_context_menu_answer(session: ?*AppSession, menu: u32, command: i32, x_px: f64, y_px: f64, pressed: u32, activate: i32) i32 {
+    const app = session orelse return 0;
+    const kind = if (command >= 0 and command <= 255) std.enums.fromInt(maru.session.web_sidecar.message.ContextMenuCommandKind, @as(u8, @intCast(command))) orelse .cancel else .cancel;
+    return @intFromBool(session_mod.web_ops.osrContextMenuAnswer(app, menu, kind, x_px, y_px, pressed, activate != 0));
 }
 
 /// v197(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.

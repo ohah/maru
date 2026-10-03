@@ -285,7 +285,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 202: W6a② — osr_keyboard_active 가 키 대상 탭에 팝업 위젯이 열려 있으면 2, osr_key phase 3(열린 목록의 키 — 누름과 글자,
 // 입력기 없이).
 // 203: W6b — osr_tooltip(hover 중인 Chromium 탭의 툴팁 글과 일련번호 — Swift 가 macOS 툴팁으로 띄운다).
-pub const abi_version: u32 = 203;
+// 204: W6c② — Chromium 탭 우클릭 메뉴(osr_context_menu_take·item·selection·open·answer — 창이 macOS 메뉴로 띄운다).
+pub const abi_version: u32 = 204;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6345,6 +6346,8 @@ pub const AppSession = struct {
     osr_hover_surface: u64 = 0,
     /// W6b: Swift 에 알린 툴팁의 (hover 중인 탭, 그 탭의 툴팁 세대)와 그것이 바뀔 때마다 오르는 일련번호.
     osr_tooltip_seen: maru.session.web_osr_input.TooltipSeen = .{},
+    /// 이 창이 띄운 Chromium 탭 우클릭 메뉴(W6c② — 창마다 하나). Swift 가 답하면(`osrContextMenuAnswer`) 비운다.
+    osr_context_menu: ?web_ops.OsrContextMenu = null,
     /// W4b: 그 탭 커서의 본 세대 — 바뀌면 `osr_cursor_pending` 을 세워 Swift 가 포인터를 움직이지 않아도 커서를 바꾼다.
     osr_hover_cursor_generation: u32 = 0,
     osr_cursor_pending: ?CursorKind = null,
@@ -23763,6 +23766,7 @@ pub const AppSession = struct {
     pub fn deinit(self: *AppSession) void {
         // W5a: 이 창이 띄운 Chromium 탭 대화상자는 취소로 답한다(페이지가 영영 멈추지 않게).
         web_osr.cancelDialogsShownBy(self.allocator, @intFromPtr(self));
+        web_ops.osrContextMenuDropShown(self); // 띄운 우클릭 메뉴도(W6c②)
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);

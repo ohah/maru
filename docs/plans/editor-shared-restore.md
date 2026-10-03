@@ -1073,3 +1073,29 @@ openRestored로 열었다. disk의 최신 `new:old:disk` 대신 잔여 backup의
 `/tmp/maru-residual-backup-reopen.log`. 이는 fixture teardown 후 새로운 제품 세션의
 복원 API 검사다. 실제 GUI 앱 process 종료/재시작·workspace host capture/apply는
 수행하지 않았으며 OS 재시작 증거로 표현하지 않는다. 제품 수정은 포함하지 않는다.
+
+### 실제 AppKit 앱 종료·재실행 확인
+
+`zig build macos-app-bundle`로 새 빌드를 만들고
+`python3 tools/test-editor-residual-backup-app.py`를 실행했다. 기존 저장 충돌 smoke driver에
+fixture 전용 residual-save 시나리오를 더했다. 정상 제품 설정에서는 실행되지 않는다.
+
+첫 AppKit process는 제품 입력/키 경로로 편집하고 정상 종료해 backup을 생성했다.
+다음 process는 그 backup을 dirty로 복원한 뒤 더 최신 내용을 정상 저장했다. backup directory의
+0500 권한 때문에 이전 record는 bytes 그대로 남았고, 앱은 정상 종료했다. 권한을 되돌린 뒤
+새 process의 restore-backup 시나리오는 입력 없이 dirty 복원을 확인하고 정상 종료했다.
+외부 harness는 최신 disk bytes 보존과 남은 backup 본문 일치를 확인했다. 세 process 모두
+smoke stage=done, failure 비어 있음, exit=0이었다. 증거는
+`../evidence/editor-residual-backup-app-20261003/result.json`이다.
+
+HOME/CFFIXED_USER_HOME/config/cache/state/backup/session-host/summary는 테스트 경로로
+격리했다. timeout은 해당 fixture의 process group만 종료한다. 사용자 앱·저장 데이터를
+조작하지 않는다. artifact는 보존하고 변경한 directory 권한은 finally에서 복구한다.
+
+이제 실제 AppKit 앱 종료·재실행과 native-editor open 경로의 dirty 복원을 확인했다.
+workspace 자동 복원은 MARU_NO_WORKSPACE_RESTORE=1로 껐다. host checkpoint 복원과
+새 ID descriptor 연결, 물리 키 입력/화면 캡처·OS reboot 검증으로 확대하지 않는다.
+복원 본문의 정확한 bytes/저장 ExternalConflict는 앞의 제품 API 검사에서 확인했다.
+이번 GUI process probe는 dirty와 disk 보존을 확인하며 화면 pixels를 직접 비교하지 않는다.
+제품 동작 수정은 여전히 포함하지 않는다. 실행 로그:
+`/tmp/maru-residual-backup-app-final.log`, 빌드 로그 `/tmp/maru-residual-app-build-final.log`.

@@ -1,0 +1,31 @@
+{
+  "artifact_root": "/private/tmp/maru-residual-app-ok3cmcx_",
+  "processes": [
+    {
+      "scenario": "quit-backup",
+      "pid": 10789,
+      "exit_code": 0,
+      "stage": "done"
+    },
+    {
+      "scenario": "residual-save",
+      "pid": 10819,
+      "exit_code": 0,
+      "stage": "done"
+    },
+    {
+      "scenario": "restore-backup",
+      "pid": 10849,
+      "exit_code": 0,
+      "stage": "done"
+    }
+  ],
+  "app_sha256": "8fcb8b86403eaae07570b1fd34b0a5ff4dddc4178a6a4522f5e2e5251d7e0d2a",
+  "latest_disk_sha256": "f1af6a47c55492024bafdbf8193cc4ac916237e4f74d9edf6fa7507f0c2b58d0",
+  "older_body_sha256": "b5e0d02852a5b997a070f44980fff4d9f90c15a4e60e36705d55339efab32c36",
+  "save_newer_succeeded": true,
+  "older_backup_retained": true,
+  "relaunch_dirty_without_typing": true,
+  "latest_disk_preserved": true,
+  "scope": "actual AppKit processes; native editor open hook, smoke keys, normal quit; workspace restore disabled"
+}

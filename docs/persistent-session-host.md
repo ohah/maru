@@ -1,5 +1,9 @@
 # 영속 터미널 세션 호스트
 
+> 공유 편집 복원의 스키마는 `maru.workspace.v2`를 사용한다. 저장 파일 경로는 `workspace.v1`을 유지한다.
+> 이 문서에서 v1 additive 호환을 설명하는 부분은 해당 변경 당시의 이력이며 v1↔v2 호환을 보장하지 않는다.
+> 문서/뷰 참조와 현재 포맷 계약은 [workspace 복원](workspace-restore.md#로컬-편집-문서와-뷰)을 따른다.
+
 이 문서는 Maru GUI가 종료되어도 terminal Term의 PTY·자식 프로세스·화면 상태를 유지하고, 다시 실행한 Maru 또는
 다른 터미널의 `maru attach` 클라이언트가 재접속하는 기능의 단일 출처다. 탭/split UI, workspace restore,
 control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID·종료 의미·복구·검증 단계를 정한다.
@@ -441,7 +445,7 @@ Window 2
 교체 재연결이 확정되지 않은 host 포함, `connect_failed`, lease `unknown`)와 교체가 계속 실패하는 동안의 실행당 비용
 (스캔+prepare 약 1 s)은 [session-host-upgrade](session-host-upgrade.md) 상태 블록이 소유한다.
 
-현재 `maru.workspace.v1`에서 `Window`는 OS 창, `Tab`은 Workspace, `Pane`과 `Surface`는 각각 split leaf와 Term이다.
+현재 `maru.workspace.v2`에서 `Window`는 OS 창, `Tab`은 Workspace, `Pane`과 `Surface`는 각각 split leaf와 Term이다.
 별도 session DB나 창별 workspace 파일을 만들지 않고 기존 단일
 `~/Library/Application Support/maru/workspace.v1` 파일을 그대로 공유한다. 일반 Window/Workspace는 기존
 `runtime-handle`과 P4 R1에서 구현한 `runtime-state` scalar로 Term 슬롯을 연결한다.

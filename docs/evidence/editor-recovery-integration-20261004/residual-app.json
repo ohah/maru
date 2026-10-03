@@ -1,0 +1,31 @@
+{
+  "artifact_root": "/private/tmp/maru-residual-app-g40wzngp",
+  "processes": [
+    {
+      "scenario": "quit-backup",
+      "pid": 73743,
+      "exit_code": 0,
+      "stage": "done"
+    },
+    {
+      "scenario": "residual-save",
+      "pid": 73873,
+      "exit_code": 0,
+      "stage": "done"
+    },
+    {
+      "scenario": "restore-backup",
+      "pid": 73954,
+      "exit_code": 0,
+      "stage": "done"
+    }
+  ],
+  "app_sha256": "e303b57565b3eeabc0678dfd3381b4af6d800d2cbdafe93f21230845162f69cc",
+  "latest_disk_sha256": "59e249da179f5f3ada538bed9cd4e3222df47bf820caaeece9b4bfbccda3517f",
+  "older_body_sha256": "b5e0d02852a5b997a070f44980fff4d9f90c15a4e60e36705d55339efab32c36",
+  "save_newer_succeeded": true,
+  "older_backup_retained": true,
+  "relaunch_dirty_without_typing": true,
+  "latest_disk_preserved": true,
+  "scope": "actual AppKit processes; native editor open hook, smoke keys, normal quit; workspace v2 restore selects the persisted recovery ID"
+}

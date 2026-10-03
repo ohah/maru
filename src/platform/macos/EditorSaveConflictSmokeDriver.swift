@@ -17,7 +17,7 @@ final class EditorSaveConflictSmokeDriver {
         case externalConflict = "external-conflict"
         /// 밖에서 바뀌지 않은 파일에 `⌘S` — 조용히 저장되어야 한다(대조군).
         case cleanSave = "clean-save"
-        /// Save newer text after restoration while the fixture denies backup deletion.
+        /// 백업 삭제가 막힌 fixture에서 복원된 문서의 새 편집을 저장한다.
         case residualSave = "residual-save"
         /// 충돌 상자에서 **덮어쓰기**(`D` — `alternate`) — 내 편집이 디스크에 있어야 한다(C1a).
         case conflictOverwrite = "conflict-overwrite"
@@ -118,7 +118,8 @@ final class EditorSaveConflictSmokeDriver {
 
     init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
         guard let scenario = Scenario(environment: environment) else { return nil }
-        guard let path = environment["MARU_NATIVE_EDITOR"], !path.isEmpty else { return nil }
+        // 복원 시에는 workspace가 문서 ID를 선택한다. 검사 대상 경로만 받고 새 문서를 열지 않는다.
+        guard let path = environment["MARU_EDITOR_SAVE_CONFLICT_DOCUMENT"] ?? environment["MARU_NATIVE_EDITOR"], !path.isEmpty else { return nil }
         self.scenario = scenario
         self.documentPath = path
         self.readyPath = environment["MARU_EDITOR_SAVE_CONFLICT_SMOKE_READY"]

@@ -1,0 +1,114 @@
+# 로컬 문서 ID 백업과 공유 뷰 복원
+
+상태: 제품 writer·workspace capture/apply 연결 구현. 헤드리스 및 별도 프로세스 검증 완료.
+공개 분할 명령·두 pane의 실제 AppKit 재시작/IME·비동기 접힘 provider 화면 gate는 남아 있다.
+이 단계는 [공유 복원 계획](editor-shared-restore.md)의 세 번째 연결 단계다.
+첫 단계 ID/codec은 #4103, 예약 후보 비교는 #4107에서 머지했다.
+
+## 바뀐 동작과 경계
+
+같은 경로를 독립적으로 연 A/B는 다른 `State.recovery_id`를 갖고 각각 백업한다.
+명시적으로 공유한 A의 뷰들은 하나의 State·백업·플랫폼 Owner를 쓴다.
+A의 저장/버리기 때문에 B의 백업이 덮이거나 삭제되던 path 신원 충돌을 제거했다.
+`file_entry`가 없는 공유 뷰도 checkpoint의 `editor-view`로 저장된다.
+
+- `editor/recovery_store.zig.Owner`: secure random ID, 공유 뷰의 쓰기 소유권, 첫 백업에서만 예약.
+  L2 read/request lease는 쓰기 권한을 유지하지 않는다. 마지막 준비/부착 뷰가 없어지면 잠금을 놓는다.
+- `Reservation`: private root의 flat `d-<id>.claim`과 `d-<id>.bak`. 후보 비교에서 별도 문서 디렉터리보다
+  파일 수와 정리 경계가 작은 방식을 택했다. 기존 `OwnerLease`·atomic writer를 사용한다.
+- `Capture`: 실제 State 동일성으로 창별 document table을 구성한다. 경로·선택·접힘 배열을 복사하고
+  revision을 재확인한다. 메인 스레드의 동기 캡처이며 read lease를 immutable snapshot으로 간주하지 않는다.
+- `Staging`: 첫 뷰만 디스크/백업에서 정본을 만들고 이후 뷰는 retain한다. 같은 path라는 이유로 합치지 않는다.
+  검색은 새 빈 독립 상태로 시작한다. 본문 hash가 달라지면 좌표를 기본값으로 시작하고 저하 로그를 남긴다.
+- `workspace.zig`: `maru.workspace.v2`, 창의 `editor-document`와 pane의 `editor-view`를 함께 읽고 쓴다.
+  파일 경로 `workspace.v1`과 기존 잠금/게시 흐름은 유지한다. v1 자동 변환은 하지 않고 읽기 실패 시 보존한다.
+  참조 누락·중복·고아 descriptor, 창 간 중복 ID, file/editor 위치 충돌은 staging 전에 거절한다.
+
+```mermaid
+flowchart TD
+  P["prepareRecoveryPath: ID + State + Owner"] --> W["Owner.write: 첫 백업에 Reservation"]
+  W --> C["Capture.view: 문서 표와 뷰 사본"]
+  C --> S["workspace.serialize: v2 checkpoint"]
+  S --> V["workspace.parse + validateEditorReferences"]
+  V --> R["Staging.createView: 첫 정본 복원, 나머지 retain"]
+  R --> A["applyWorkspaceWindow: 새 트리 게시"]
+  A --> D["commitDeferredDrops: clean 레코드만 정리"]
+```
+
+원본·백업 읽기 또는 필수 준비 할당 실패는 새 창 트리를 버리고 이전 창/백업을 보존한다.
+복원된 dirty 백업은 읽자마자 지우지 않는다. 저장 지문은 레코드의 disk_hash를 유지하므로,
+복원 뒤 외부 변경이 있는 파일을 저장하면 기존 `ExternalConflict`가 발생한다.
+
+쓰기 전에는 root/claim 소유와 기존 record ID/path를 확인한다. 최초 게시에는 atomic link,
+재백업에는 선택했던 inode가 유지된 경우 atomic replace를 쓴다. 지연 삭제도 선택한 record fd를
+잡아 두고 inode가 바뀌면 `StaleDrop`으로 거절한다. 종료·정리 실패의 모르는 파일은 보존한다.
+이것은 동일 UID의 공격적인 최종 검사 직후 교체나 물리 전원 차단 내구성 보장이 아니다.
+
+## 검증에서 고친 내용
+
+- 복원된 공유 뷰에도 `enableSharedViewFind`를 적용해 포커스 이동이 검색 입력을 섞지 않게 했다.
+- 보호된 파일 작업으로 창 닫기가 거절되면 백업 삭제 준비 전에 반환한다. 이전의 `defer`만으로는
+  성공/거절을 구분하지 못했다. 백업 보존과 이후 실제 닫기의 삭제를 함께 검사한다.
+- editor가 terminal보다 앞에 있는 혼합 Term 순서를 그대로 만든다. 첫 terminal을 무조건 seed하지 않는다.
+- 과거 v1 path 레코드를 심는 테스트는 새 ID validator의 증거로 부르지 않고, 이전 파일 보존 검사로 명시했다.
+- 기존 AppKit 스크립트의 path 해시/한 파일 가정을 ID와 claim으로 맞췄다. 복원 실행은 새 native open 대신
+  직전 앱의 checkpoint를 사용하며, 레코드는 앱 시작 전에 준비해 reader와의 경쟁을 제거한다.
+- CI에서 종료 성공 검사 하나가 이전 `v1` 헤더를 요구하는 누락을 찾았다. 실제 앱은 v2 저장과 종료를
+  마친 상태였다. 같은 실패를 로컬에서 재현하고 판정을 v2로 수정한 뒤 정상 종료와 저장 실패 시
+  종료 취소를 모두 확인했다(`macos-session-host-c4-quit-cancel-smoke -Doptimize=ReleaseFast`).
+
+## 실행 검증
+
+`mise exec -- zig build test-editor-recovery-restore`와 `-Doptimize=ReleaseFast`를 사용한다.
+codec·메타데이터, 실제 AppSession, 플랫폼 파일 소유권 검사를 묶는다.
+최종 main `b1a5d995d` 반영 후 격리된 백업 디렉터리에서 `mise run check` 전체를 실행해
+통과했다(exit 0, 698.97초). 전체 `test-editor`와 ReleaseFast 앱 번들 빌드도 통과했다.
+
+| 입력/실패 조건 | 확인 결과 |
+|---|---|
+| 동일 path의 독립 A/B와 공유 A, capture→직렬화→새 AppSession | 서로 다른 본문·ID와 공유 정본, 독립 선택/스크롤/wrap/검색 유지 |
+| A 저장과 B 저장 | A 백업 정리 뒤 B 기록 보존, B는 외부 수정 충돌 |
+| 손상 백업 | 이전 창 포인터와 원본 백업 보존 |
+| 더 최신 백업 + 이전 checkpoint | 본문은 복원, 오래된 선택/스크롤은 기본값 |
+| 두 공유 뷰 staging의 모든 필수 할당 실패 | 46개 할당 지점에서 오류 반환, 이전 창과 기록 유지, 정상 재시도 가능 |
+| 저장소/owned capture 할당 실패 | 누수 없이 자원 반환, 문서 revision/선택 보존 |
+| 다른 ID/path, claim 교체, 지연 삭제 | 읽기/쓰기/삭제 거절, 기존 또는 새 정상 레코드 유지 |
+| clean open | 백업 루트 생성·claim 예약 없음 |
+
+보호 조건을 제거하는 compile-valid 변이도 실행했다. `RecoveryRecord.matches` 검사를 무력화하면
+다른 ID/path 레코드 판정이 실패하고, 내용 hash를 무조건 일치시키면 오래된 좌표 기본값 판정이 실패했다.
+공유 검색 연결을 생략하면 복원 후 독립 검색 검사가 실패했다. `matches` 조건에 `and true`를 붙이는
+등가 변이는 통과했다. 각 변이 뒤 원본을 되돌렸다. 검토 횟수 대신 검출한 동작을 기록한다.
+
+`tools/test-editor-recovery-process.py`는 실제 AppSession test artifact를 서로 다른 프로세스로 실행한다.
+write 1회와 restore 2회, 손상 record, v1 header 거절을 검사한다. 복원 뒤 다시 백업할 편집을 하지 않아도
+원본 record가 남으며 디스크/정상 sibling 기록/checkpoint가 보존된다. `test-macos-only` CI에 연결했다.
+이 결과는 AppKit 또는 실제 OS IME 화면 검증과 구분한다.
+
+clean prepare 비용은 ReleaseFast에서 같은 작은 파일을 200회 교차 실행했다.
+#4107의 openPath/lines/path/registry 준비를 기준으로 평균 43,337 ns, ID/Owner 추가 경로는 48,593 ns였다.
+차이는 약 5.3 µs다. warm file cache와 테스트 allocator를 쓰는 한 번의 로컬 표본이며 앱 시작·화면 파싱 비용이나
+큰 파일 성능 수치가 아니다. 시간 측정은 `MARU_MEASURE_EDITOR_RECOVERY=1`일 때만 실행한다.
+
+## 남은 범위
+
+- 공개 분할 명령은 이 단계에서 노출하지 않는다. 실제 두 pane 재시작의 첫 렌더, 배경 pane/폭 변화와
+  wrap 정산, 큰 파일의 지연 syntax/LSP 접힘 전환, OS IME 확정 후 복원은 공개 전 별도 gate다.
+  현재 저장한 접힘은 준비 시점 provider에 있는 머리만 적용하며 이후 provider 교체의 기존 정책을 따른다.
+- orphan/legacy 열거와 사용자 복구 UI는 후속 단계다. 이전 v1 백업과 checkpoint 밖의 ID 레코드를
+  보존하는 것과 사용자에게 복구 진입점을 제공하는 것은 다르다. 원본 누락도 창 staging을 거절한다.
+- untitled/remote/diff의 백업 계약과 Undo/Redo 미직렬화 정책은 유지한다. 창 간 공유를 추가하지 않는다.
+- 기존 `max_close_backup_drops` 한도 밖 기록과 삭제 권한 실패 시 오래된 레코드가 남는 한계는 유지한다.
+  ID 분리로 best-effort 정리나 stale-backup 판정 전체가 해결됐다고 주장하지 않는다.
+- 프로세스 강제 중단 시 빈 claim/임시 파일이 남을 수 있다. 일반 GC·tombstone을 도입하지 않는다.
+
+
+실제 AppKit의 단일 문서 v2 재시작도 `python3 tools/test-editor-residual-backup-app.py`로 확인했다.
+서로 다른 앱 프로세스에서 정상 종료 백업 → 복원 후 최신 내용 저장(삭제 권한 실패) → 입력 없는 dirty 재복원을 실행했다.
+최신 디스크와 남겨진 이전 백업을 보존했다. 이는 기존 stale-backup 한계가 유지된다는 대조군이며
+최신 내용 자동 선택을 구현했다는 뜻이 아니다. fixture는 일반 smoke의 checkpoint 생략을 쓰지 않도록
+정확한 `MARU_EDITOR_RECOVERY_CHECKPOINT_TEST=maru-test-only-v1` 토큰에서만 제품 종료/capture/restore를 통과한다.
+타이핑은 NSTextInputClient와 합성 chord를 쓰며 물리 OS IME 검증은 아니다.
+실제 제품 Metal renderer로 복원 직후의 960×600 화면도 캡처했다. 미저장 본문·dirty 표시·복원 알림을 확인했으며,
+이는 단일 문서 증거다. 두 공유 pane의 첫 화면이나 물리 IME 검증을 대신하지 않는다.
+증거: [프로세스·바이너리·내용 해시](../evidence/editor-recovery-integration-20261004/residual-app.json), [캡처 메타데이터](../evidence/editor-recovery-integration-20261004/capture.json), [보호 조건 변이 결과](../evidence/editor-recovery-integration-20261004/mutations.json).

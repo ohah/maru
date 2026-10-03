@@ -7,7 +7,7 @@
 //!
 //! **포맷은 저장소 관례를 그대로 쓴다**: 첫 줄 bare 헤더 토큰(`schema=` 접두 없음), 그다음 한 줄
 //! `key=value`(따옴표 값은 `text_escape` 단일 출처), 빈 줄 하나, 그 뒤가 **원문 바이트 그대로**다
-//! (`maru.workspace.v1`·`maru.trace.v1` 와 같은 규칙 — 새 escape 규칙을 만들지 않는다).
+//! (`maru.workspace.v2`·`maru.trace.v1` 와 같은 규칙 — 새 escape 규칙을 만들지 않는다).
 //! 본문을 escape 하지 않는 이유: 문서는 8 MiB 까지 오고 escape 하면 사본이 한 벌 더 생긴다.
 
 const std = @import("std");
@@ -57,8 +57,8 @@ pub const Doc = union(Kind) {
     };
 };
 
-/// 파일 이름 최대 길이 — 가장 긴 갈래는 `p-` + hex 16 + `.bak`.
-pub const max_file_name_len: usize = 2 + 16 + 4;
+/// 레거시와 복구 ID 레코드가 함께 사용하는 파일 이름 버퍼의 크기.
+pub const max_file_name_len: usize = 38; // d-<128-bit recovery ID>.bak도 소유 이름 버퍼에 들어간다.
 
 fn keyHash(parts: []const []const u8) u64 {
     var h = std.hash.Wyhash.init(0);

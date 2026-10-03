@@ -1,5 +1,9 @@
 # 윈도우와 Surface 이동성(detach/reattach)
 
+> 공유 편집 복원의 스키마는 `maru.workspace.v2`를 사용한다. 저장 파일 경로는 `workspace.v1`을 유지한다.
+> 이 문서에서 v1 additive 호환을 설명하는 부분은 해당 변경 당시의 이력이며 v1↔v2 호환을 보장하지 않는다.
+> 문서/뷰 참조와 현재 포맷 계약은 [workspace 복원](workspace-restore.md#로컬-편집-문서와-뷰)을 따른다.
+
 이 문서는 Maru의 terminal/web surface, Pane, Workspace를 OS 윈도우 사이에서 분리(detach)하고 다시 합치는(reattach/merge) 기능의 단일 출처다. 브라우저 탭 분리 UX를 위한 전용 기능이 아니라, 멀티윈도우 workspace restore, control-plane ID, 권한 scope, 알림 라우팅, WKWebView reparent의 공통 토대다.
 
 하위 버전 호환은 고려하지 않는다. 기존 저장 파일이나 외부 ID 계약을 유지하려고 복잡도를 늘리지 않고, 새 모델에 맞지 않는 옛 상태는 조용히 기본 창으로 시작한다.

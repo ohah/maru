@@ -1,0 +1,40 @@
+[
+  {
+    "case": "foreign_record_guard",
+    "expected": "test_failure",
+    "returncode": 1,
+    "observed": true,
+    "failures": [
+      "FAIL (TestExpectedError)"
+    ],
+    "log": "/tmp/maru-recovery-mutation-foreign_record_guard.log"
+  },
+  {
+    "case": "content_fingerprint_guard",
+    "expected": "test_failure",
+    "returncode": 1,
+    "observed": true,
+    "failures": [
+      "FAIL (TestExpectedEqual)"
+    ],
+    "log": "/tmp/maru-recovery-mutation-content_fingerprint_guard.log"
+  },
+  {
+    "case": "shared_find_wiring",
+    "expected": "test_failure",
+    "returncode": 1,
+    "observed": true,
+    "failures": [
+      "47/65 app_session.editor.mod.test.editor recovery restore 독립 A B와 공유 A 뷰를 실제 백업과 checkpoint로 복원한다...FAIL (TestUnexpectedResult)"
+    ],
+    "log": "/tmp/maru-recovery-mutation-shared_find_wiring.log"
+  },
+  {
+    "case": "equivalent_identity_guard",
+    "expected": "pass",
+    "returncode": 0,
+    "observed": true,
+    "failures": [],
+    "log": "/tmp/maru-recovery-mutation-equivalent_identity_guard.log"
+  }
+]

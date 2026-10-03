@@ -165,6 +165,8 @@ const inventory = [_]Entry{
     // 파일 종류와 무관하다고 했으므로 그 축을 픽스처가 실제로 담아야 한다. 화면에 나가는 문구가
     // 아니라 **디스크에 쓰는 테스트 파일의 내용**이다.
     .{ .path = "src/platform/macos/app_session/editor/mod.zig", .count = 2 },
+    // 화면 문구가 아니라 공유 복원 codec fixture의 UTF-8 경로다. 콜론·따옴표·개행과 함께 bytes 왕복을 검사한다.
+    .{ .path = "src/session/workspace.zig", .count = 2 },
     // **표시 문자열이 아니라 판정자의 진단 출력이다**(§7 "표시가 아니면 그 사실을 적고 원장을
     // 올린다"). DSEL3가 그려진 글자와 클릭이 답한 byte를 대조하다 어긋나면 그 자리를 사람이 읽을
     // 수 있게 한 줄 찍는다 — 실패했을 때만 나오고 화면에는 영영 안 간다.
@@ -316,7 +318,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 374; // +1: 원격 훅 설치 시한 초과 재시도 사유(로그) · +114: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
+const header_total = 376; // +2: workspace 복원 codec의 한글 경로 fixture · +1: 원격 훅 설치 시한 초과 재시도 사유(로그) · +114: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
 const header_config_total = 54;
 
 comptime {

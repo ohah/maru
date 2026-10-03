@@ -2,6 +2,31 @@
 
 이 문서는 Maru의 workspace restore가 무엇을 저장하고, 무엇을 저장하지 않는지 정한다.
 
+## 로컬 편집 문서와 뷰
+
+현재 스키마 헤더는 `maru.workspace.v2`다. 저장 경로는 기존 `workspace.v1`과 같은 잠금·atomic 게시 경계를
+유지한다. 출시 전 단일 포맷이므로 v1 헤더를 추측해서 읽거나 자동 변환하지 않으며, 읽기 실패 보존 규칙을 따른다.
+이 문서의 과거 additive/downgrade 설명은 당시 v1 변경 이력이며 v1↔v2 호환 계약이 아니다.
+
+창은 `editor-document value="..."` 줄에 문서 index·recovery ID·disk/content hash·절대 path를 담고,
+pane의 `editor-view="..."`가 문서 index와 독립 선택·스크롤·wrap·접힌 머리를 참조한다.
+같은 path의 독립 문서는 합치지 않는다. 공유 뷰는 하나의 문서 descriptor와 백업을 참조한다.
+선택된 일반 로컬 native editor는 `file-term`과 중복 저장하지 않는다. persisted index는
+terminal·file-term·editor-view의 합계이며 브라우저·untitled·remote의 insert-after도 이 합계 기준이다.
+본문·Undo/Redo·IME marked text·검색 입력·구문/LSP 캐시는 checkpoint에 넣지 않는다.
+
+`Capture`는 같은 메인 스레드 구간에서 경로와 뷰 배열을 복사하고 문서 revision을 다시 확인한다.
+복원은 문서/뷰 참조와 창 간 ID 중복을 검증한 뒤 새 트리에서 첫 뷰의 문서를 준비하고 나머지 뷰가 retain한다.
+백업 파일 이름·레코드 ID·요청 path가 모두 맞아야 적용한다. 원본 또는 백업의 읽기 실패와 준비 OOM은
+창 staging을 중단하고 기존 창·백업을 보존한다. 원본 누락을 이름 없는 문서로 바꾸는 UI는 이 계약 밖이다.
+본문 hash가 checkpoint와 다르면 최신으로 읽은 본문을 살리고 표시 좌표는 기본값으로 시작하며 저하 로그를 남긴다.
+일치하면 UTF-8 선택 경계·줄/열·현재 provider의 접힘을 검증한다. 렌더의 기존 wrap/스크롤 정산은 유지한다.
+
+복구한 dirty 백업은 다음 백업·저장·명시적 버리기가 성공할 때까지 유지한다. 디스크와 같은 clean 백업의 삭제도
+새 창 게시 뒤로 미룬다. 삭제는 선택한 inode가 그대로일 때만 수행하여 중간에 게시된 새 백업을 지우지 않는다.
+공유 검색은 빈 독립 상태로 시작한다. 공개 분할 명령·GUI 재시작 gate와 orphan/legacy 복구 UI는
+[공유 복원 계획](plans/editor-shared-restore.md) 및 [실행 검증](plans/editor-recovery-integration.md)을 따른다.
+
 ## 초보자용 설명
 
 workspace restore는 "실행 중이던 shell process를 그대로 냉동했다가 다시 살리는 기능"이 아니다.
@@ -117,7 +142,7 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 | 재부팅 증명 없이 host 종료가 긍정적으로 검증됨 | 기존 handle은 ended. 사용자가 `⏎`로 새 shell을 열 수는 있지만 동일 session continuation 아님 |
 | host에만 runtime이 남음 | 삭제하지 않음. primary Window의 `Recovered Sessions`에 노출하고 사용자의 explicit adopt만 허용 |
 
-현재 `maru.workspace.v1`의 terminal `runtime-handle`은 구현됐다. writer는
+현재 `maru.workspace.v2`의 terminal `runtime-handle`은 구현됐다. writer는
 `<host-id>:<runtime-id>`를 함께 쓰고 reader는 길이·lowercase hex·구분자를 fail-closed 검증한다. 옛
 `runtime-id` 단독 파일은 한 번의 attach migration을 위해 읽지만 새 live capture는 bare ID를 만들지 않는다.
 첫 복원의 ended placeholder와 `⏎` 제자리 재생성은 제품 계약이다. P4 R1은
@@ -215,7 +240,7 @@ throwaway host runtime을 하나도 spawn하지 않는다. primary Window 적용
 일반 layout에는 optional scalar만 추가한다.
 
 ```text
-maru.workspace.v1
+maru.workspace.v2
 window tabs=1 active-tab=0 active-window=1
 tab panes=1 active-pane=0 custom-name="work" pinned=0 background-color=0 accent-color=0
 tree-node leaf pane=0
@@ -518,7 +543,7 @@ read-old/write-new 방식이므로 한 번 저장하면 자연스럽게 사라�
 “영속 session binding wire”를 따른다.
 
 ```text
-maru.workspace.v1
+maru.workspace.v2
 workspace id=<stable-id>
 root /path/to/repo
 
@@ -535,7 +560,7 @@ layout
 ```
 
 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로
-bare 토큰(`maru.workspace.v1`)을 쓰고 `schema=` 접두어를 두지 않는다.
+bare 토큰(`maru.workspace.v2`)을 쓰고 `schema=` 접두어를 두지 않는다.
 
 멀티윈도우와 live surface 소유권은 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다. 현재 v1은 이미
 한 header 아래 Window N개, 각 Window의 workspace order·pane tree·surface metadata, active window와 geometry를 저장한다.

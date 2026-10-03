@@ -1029,7 +1029,8 @@ ReleaseFast는 `-Doptimize=ReleaseFast`를 붙인다. 같은 판정자는 공유
 
 - `mise exec -- zig build test-editor-restore-codec`: 플랫폼 중립 codec의 9개 판정자. Debug/ReleaseFast에서 실행한다.
 - `mise exec -- zig build perf-editor-workspace-state -Doptimize=ReleaseFast`: 10개 metadata 부하 시나리오의 raw bytes·요청 할당 peak·encode/parse+validate 시간. 실제 RSS·본문·host 사본·disk I/O는 제외한다.
-- codec은 제품 checkpoint에 아직 연결하지 않았다. 정책과 범위는 [복원 설계](plans/editor-shared-restore.md)를 따른다.
+- 제품 capture/restore는 `mise exec -- zig build test-editor-recovery-restore`로 검증한다. 로컬 ID 백업·공유/독립 뷰·실패 보존과 별도 프로세스 재실행을 포함한다. AppKit 화면 검증과는 구분한다.
+- clean open 교차 비용 측정: `MARU_MEASURE_EDITOR_RECOVERY=1 mise exec -- zig build test-editor-recovery-restore -Doptimize=ReleaseFast`. 기본 검사에서는 시간 측정을 건너뛴다. 정책과 범위는 [제품 연결 결과](plans/editor-recovery-integration.md)를 따른다.
 
 `python3 tools/perf/workspace_host_impact.py`는 macOS host의 실제 capture/read 본문을 추출해
 Zig ABI 실패를 주입하고 1/16/64 MiB 전체 읽기 RSS를 측정한다. AppKit GUI·제품 에디터 OOM·복원 E2E는

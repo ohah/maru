@@ -14,7 +14,7 @@ load=extract('    private func loadWorkspaceText()', '\n    /// 한 일반 창�
 pre=r'''
 import Foundation
 import AppKit
-let MARU_WORKSPACE_HEADER="maru.workspace.v1"
+let MARU_WORKSPACE_HEADER="maru.workspace.v2"
 final class Session {
  let payload: [UInt8]; let buffer: UnsafeMutablePointer<UInt8>; var status: UInt32=0
  var noPointer=false; var empty=false

@@ -135,9 +135,9 @@ const inventory = [_]Entry{
     },
     .{
         .path = "src/platform/macos/app_session/tab.zig",
-        .fns = &.{"captureWorkspaceTab"},
+        .fns = &.{"captureWorkspaceTabWithEditors"},
         .aliases = 0,
-        .why = "Q3(영속화) — workspace capture가 저장할 값. 복원 계약이 따로 판단할 문제라 축과 분리한다.",
+        .why = "Q3(영속화) — 문서 표를 받는 captureWorkspaceTabWithEditors로 기존 저장용 cwd 읽기를 옮겼다. 직독 책임과 개수는 같다.",
     },
     .{
         .path = "src/platform/macos/app_session/term.zig",

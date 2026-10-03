@@ -4622,8 +4622,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var editorSaveConflictSmokeDriver: EditorSaveConflictSmokeDriver?
     /// `quit-backup` 시나리오의 종료 요청은 **한 번만** 나간다(재진입 terminate 금지).
     private var editorSaveConflictSmokeQuitRequested = false
+    private var isEditorRecoveryCheckpointTest: Bool {
+        ProcessInfo.processInfo.environment["MARU_EDITOR_RECOVERY_CHECKPOINT_TEST"] == "maru-test-only-v1"
+    }
     private var isEditorSaveConflictSmokeMode: Bool {
-        smokeMode && ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_CONFLICT_SMOKE"] == "1"
+        (smokeMode || isEditorRecoveryCheckpointTest) && ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_CONFLICT_SMOKE"] == "1"
     }
 
     /// CIM2 divider E2E. 이 모드는 실제 `NSEvent`를 `MaruMetalTerminalView`에 흘려 제품 pointer
@@ -4931,7 +4934,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = notification
         let abiReady = validateZigBoundary()
         let smokeDuration = smokeDurationMs()
-        smokeMode = smokeDuration != nil
+        // 복구 fixture는 실제 checkpoint 저장/복원을 통과해야 한다. 일반 smoke의 저장 생략을 쓰지 않는다.
+        smokeMode = smokeDuration != nil && !isEditorRecoveryCheckpointTest
 
         // 잘못 무장된 하니스가 0 기반 헛 latency를 쓰거나 일반 앱을 붙잡지 않게 renderer 구성 전에 닫는다.
         if appLaunchFirstDrawableArmed && appLaunchFirstDrawableStartNs == 0 {
@@ -11762,6 +11766,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 확인 모달 없이 `.terminateNow` 라(무인 계측) 이 길이 곧 `applicationWillTerminate` 다.
         if driver.wantsPromptQuit, !editorSaveConflictSmokeQuitRequested {
             editorSaveConflictSmokeQuitRequested = true
+            // 무인 fixture의 확인만 생략하고 applicationShouldTerminate의 final checkpoint는 그대로 실행한다.
+            if isEditorRecoveryCheckpointTest { bypassQuitConfirm = true }
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }
     }
@@ -12970,7 +12976,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// 정상 종료 시 현재 멀티 창 workspace를 디스크에 저장한다(R5). 각 일반 창(세션)의 블록을 ABI로 받아
-    /// `maru.workspace.v1` 헤더 하나 아래로 모은다. quick 패널은 transient라 제외. smoke·빈 창·쓰기 실패는
+    /// `maru.workspace.v2` 헤더 하나 아래로 모은다. quick 패널은 transient라 제외. smoke·빈 창·쓰기 실패는
     /// best-effort로 건너뛴다(저장 실패가 종료를 막지 않는다). 크래시 가드는 호출처(applicationWillTerminate가
     /// 정상 종료에만 불림)가 보장 — 깨진 세션이 마지막 저장을 덮어쓰지 않는다.
     /// 안전한 Double→Int32 변환(saveWorkspace 창 frame 저장용). `Int32(x.rounded())`는 **trapping** 변환이라 비유한

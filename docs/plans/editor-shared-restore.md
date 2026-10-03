@@ -1,8 +1,10 @@
-# 공유 편집기 복원 포맷 — 검토안
+# 공유 편집기 복원 포맷과 구현 계획
 
-상태: 문서/뷰 분리 방향과 단계별 구현 진행 승인, 복구 신원·플랫폼 중립 codec 구현·제품 연결 미완료. 2026-10-03 사용자는 문서/뷰를 분리하는 v2 설계 진행에 동의했다.
-v2 방향은 선택됐지만 이 문서의 wire 예시는 구현 완료를 뜻하지 않는다. 사용자용 분할 명령은 복원 gate까지 닫은 뒤 공개한다.
-진행 순서는 [공유 문서 계획](editor-shared-document.md), 기존 백업 계약은
+상태: 로컬 문서 ID 기반 백업과 같은 창의 문서/뷰 capture·restore 연결 구현.
+헤드리스 AppSession 및 별도 프로세스 실행 검증은 [제품 연결 결과](editor-recovery-integration.md)를 따른다.
+실제 AppKit 재시작·IME·비동기 접힘 provider 화면 gate와 사용자용 분할 명령 공개는 남아 있다.
+사용자는 출시 전 단일 v2 포맷과 단계별 구현을 승인했다. Undo/Redo 이력은 저장하지 않는다.
+진행 순서는 [공유 문서 계획](editor-shared-document.md), 계약은
 [문서 모델](../native-editor-document-model.md)과 [workspace 복원](../workspace-restore.md)이 소유한다.
 
 ## 현재 구현 — 복구 신원과 codec
@@ -32,22 +34,22 @@ v2 방향은 선택됐지만 이 문서의 wire 예시는 구현 완료를 뜻�
 
 집중 검사는 `zig build test-editor-recovery-codec`다. 필수 ID/경로/빈 본문 round-trip,
 헤더 분리, 손상/중복/길이 상한, State 수명과 registry publication, 모든 관련 allocation
-실패를 검사한다. 기존 제품 backup writer는 아직 v1을 사용하고 runtime의 새 ID 발급은
-아직 연결하지 않았다. 그러므로 U4b-15/16의 실제 제품 충돌이 이 단계에서 고쳐졌다고 주장하지 않는다.
-다음 연결은 ID 발급/예약과 workspace capture/apply가 같은 ID를 다시 찾는 경로이며,
-이 경계를 완성할 때 제품 writer를 전환한다. orphan discovery와 새 복구 UI는 별도 미구현이다.
+실패를 검사한다. 제품의 일반 로컬 문서는 이제 ID를 발급하고 첫 백업에만 `.claim`을 예약한다.
+`recovery_store.Owner`는 공유 뷰 사이에서 같은 쓰기 소유권을 유지한다. untitled/remote 백업은 기존 계약을 쓴다.
+`workspace`의 v2 문서 표/뷰 참조와 writer 전환은 함께 연결했으며, U4b-15/16은
+같은 경로의 독립 문서 A/B를 반복 백업하거나 A를 정리해도 B가 보존되는 회귀 판정으로 바꿨다.
 
-후속 예약 후보의 실제 `OwnerLease`·atomic writer 비교는
-[복구 ID 예약 실험](editor-recovery-reservation.md)에 기록한다. 파일/프로세스 경계의
-실행 도구이며 제품 저장소 배치 확정, clean open 비용 검증, writer/restore 연결 완료를 뜻하지 않는다.
+[예약 후보 실험](editor-recovery-reservation.md)은 #4107 시점의 비교 근거다.
+flat claim을 선택한 제품의 수명·정리·실패 경계와 실행 결과는 [연결 결과](editor-recovery-integration.md)를 따른다.
+이하 설계 검토에서 '현재 코드', '미연결', '제안'이라고 쓴 부분은 **제품 연결 전 검토 이력**이다.
+현재 계약과 검증 범위는 위 문서와 이 문서 첫 절을 우선한다. orphan/legacy discovery와 새 복구 UI는 별도 미착수다.
 
-## 해결할 문제와 현재 코드
+## 해결한 문제 — 연결 전 코드의 한계
 
-- `editor/mod.zig.prepareSharedView`는 기존 정본 lease를 retain하고 독립 뷰를 만든다. 새 뷰에는 `file_entry`가 없다.
-- `tab.zig.captureWorkspaceTab`는 entry 없는 일반 로컬 편집기를 저장하지 않는다. 따라서 이 내부 경로를 명령에 연결하면 재시작 때 새 pane의 파일이 사라질 수 있다.
-- 현재 `workspace.FileTerm`은 위치·kind·mode·경로만 담는다. 같은 경로가 두 번 등장해도 명시적으로 공유한 뷰인지 독립 문서인지 알 수 없다.
-- `workspace.serializeWindow`는 창별 블록을 만들고 host가 `maru.workspace.v1` 헤더 아래 합친다. 앱 전체 document table을 추가하면 이 창별 캡처 경계도 바꿔야 한다.
-- 백업은 `editor/backup.zig.identity`로 조회하며 파일 이름은 로컬 path·untitled 번호·원격 dest/path에 대응한다. 로컬 base hash는 record payload의 충돌 판정 값이다. registry의 실행 중 handle/generation은 재시작 identity가 아니다.
+- entry 없는 공유 편집 뷰가 checkpoint에서 빠져 재시작 때 사라졌다. 이제 문서 참조로 저장한다.
+- path만으로 독립 문서와 공유 뷰를 구분할 수 없었다. 문서 State의 동일성으로 묶고 recovery ID를 저장한다.
+- 로컬 path 해시 백업은 같은 경로의 독립 편집끼리 덮어쓰거나 삭제했다. ID별 기록과 쓰기 소유자를 사용한다.
+- 창별 캡처를 유지하며 `maru.workspace.v2` 아래 문서 표를 둔다. 저장 파일 경로 `workspace.v1`은 바꾸지 않는다.
 
 ## 초기 선택지 비교 — 하위 호환 검토 이력
 

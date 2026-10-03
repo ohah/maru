@@ -3934,7 +3934,7 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 
 - 상태: 부분 구현. `test-editor-restore-codec` Debug/ReleaseFast 9개 exact-count. `perf-editor-workspace-state`는 codec 부하만 측정한다.
 - 판정: 방향 있는 선택·wrap 상속·접힘·로컬 path payload, 문서 참조, 잘린 입력·개수 부풀리기·기존 커서 상한·OOM 정산.
-- 한계: 제품 capture/restore·다른 workspace 상태와의 실패 격리·실제 재시작/IME/GUI는 미착수다. 10개 측정 시나리오의 범위와 미결 정책은 [복원 설계](plans/editor-shared-restore.md)가 소유한다.
+- 이 codec gate는 제품 실행 증거가 아니다. 후속 제품 capture/restore와 헤드리스 프로세스 재실행은 아래 「로컬 문서 ID 백업과 공유 뷰 복원」을 따른다. AppKit/IME/GUI gate는 남아 있다. 10개 측정 시나리오의 범위와 미결 정책은 [복원 설계](plans/editor-shared-restore.md)가 소유한다.
 
 전체 저장 영향 추가 확인: `tools/perf/workspace_host_impact.py`의 host 본문 실행 assertion 12개,
 기존 checkpoint coordinator 11/11, 파일 게시 17/17. 첫/마지막 창 실패의 전체 캡처 취소와
@@ -3948,7 +3948,7 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 
 제품 host 추가 검증: `test-macos-workspace-capture` 20개와 `test-macos-workspace-read` 9개를
 일반/macOS 집계에 연결했다. 실제 앱 R2a·C4·R7와 읽기 권한 실패의 원본/inode/backup 보존을 검사했다.
-shared metadata의 제품 capture/apply는 여전히 미연결이며, codec scratch의 11개 실제 allocator
+이 저장 비교 실험은 제품 연결 전 이력이다. codec scratch의 11개 실제 allocator
 실패와 chunk reader 7,296개 비교는 별도 실험이다. 상세 경계와 읽기 후보를 채택하지 않은 결과는
 [제품 host 검증](plans/editor-shared-restore.md#제품-host-검증과-재현-결함-수정)에 기록한다.
 
@@ -4005,8 +4005,8 @@ workspace 자동 복원은 꺼 두며 host checkpoint/새 recovery ID/OS reboot 
 `zig build test-editor-recovery-codec`는 RECID/RECB와 workspace codec을 실행한다.
 필수 ID/정확한 파일 이름·옛/새 header 오인식 방지·중복 metadata와 descriptor 거절,
 같은 path의 독립 ID·공유 State 수명·등록/encode/decode OOM에서 원래 소유 보존을 검사한다.
-제품 writer는 아직 기존 path 신원을 사용한다. 원래 충돌 characterization을 보존하며,
-새 codec 통과를 제품 restart 복구 성공으로 세지 않는다.
+codec gate만으로 제품 restart 복구 성공을 주장하지 않는다. 후속 제품 writer/restore와
+같은 path의 독립 문서 충돌 회귀는 아래 제품 연결 절에서 별도로 검증한다.
 
 ## 복구 ID 예약 후보
 
@@ -4015,6 +4015,32 @@ workspace 자동 복원은 꺼 두며 host checkpoint/새 recovery ID/OS reboot 
 예약/상위 경로 교체, 잘못된 record, 지연 삭제, 쓰기/정리 권한 실패와 SIGKILL 이후 재획득을 판정한다.
 `perf-editor-recovery-reservation -Doptimize=ReleaseFast`는 같은 판정과 함께 시간/entry 수를 출력한다.
 오류 판정은 macOS의 기본 `test`와 `test-macos-only` CI에 연결하고 시간 측정만 opt-in이다.
-제품 clean open·저장/버리기 UI·workspace 복원은 미연결이다.
+이 후보 실험은 제품 clean open·저장/버리기 UI·workspace 복원의 증거가 아니다.
+후속 제품 연결의 실제 범위는 아래 절을 따른다.
 물리 전원 손실과 공격적 동일 UID의 최종 검사 직후 교체는 보장하지 않는다.
 디렉터리 후보의 정리 실패와 임시 파일 잔존을 포함한 [비교 결과](plans/editor-recovery-reservation.md)가 상세 근거다.
+
+
+## 로컬 문서 ID 백업과 공유 뷰 복원
+
+상태: 제품 연결 구현, 헤드리스 AppSession·서로 다른 프로세스 검증. 공개 분할 명령과 AppKit/IME 재시작 화면 gate는 남아 있다.
+`zig build test-editor-recovery-restore`는 v2 문서/뷰 참조와 혼합 Term 순서, 실제 백업의 독립 A/B와 공유 A,
+커서/스크롤/wrap, 독립 검색 상태, 저장 충돌, 손상 백업의 창 전체 rollback, 오래된 표시 지문 기본값을 검사한다.
+메모리 할당 실패에서 캡처/복원·저장소의 자원을 반환하고 이전 창/기록을 보존하는지 판정한다.
+소유권 교체·다른 ID/path·지연 삭제를 거절하고 clean open은 예약 파일을 만들지 않는다.
+보호된 파일 작업 때문에 창 닫기가 막히면 백업을 보존하며, 실제 닫기 성공 대조군에서는 삭제한다.
+
+`tools/test-editor-recovery-process.py`는 위 빌드의 실제 AppSession test artifact를 격리 root에서 실행한다.
+write 프로세스 뒤 서로 다른 restore 프로세스 둘이 독립 본문·공유 정본·선택을 되살리고, 편집 없이 다시 종료해도
+레코드가 남는지 검사한다. 손상 레코드와 v1 checkpoint는 보존한 채 거절한다. `test-macos-only` CI에 포함한다.
+AppKit 실행 파일의 화면·OS IME·물리 전원 차단 검증은 아니다. 접힘 provider 전환과 실제 pane geometry의
+첫 렌더, orphan/legacy 복구 UI, 기존 정리 개수 제한과 best-effort 삭제 실패는 [제품 연결 결과](plans/editor-recovery-integration.md)를 따른다.
+
+
+실제 AppKit의 단일 문서 v2 재시작도 `python3 tools/test-editor-residual-backup-app.py`로 확인했다.
+서로 다른 앱 프로세스에서 정상 종료 백업 → 복원 후 최신 내용 저장(삭제 권한 실패) → 입력 없는 dirty 재복원을 실행했다.
+최신 디스크와 남겨진 이전 백업을 보존했다. 이는 기존 stale-backup 한계가 유지된다는 대조군이며
+최신 내용 자동 선택을 구현했다는 뜻이 아니다. fixture는 일반 smoke의 checkpoint 생략을 쓰지 않도록
+정확한 `MARU_EDITOR_RECOVERY_CHECKPOINT_TEST=maru-test-only-v1` 토큰에서만 제품 종료/capture/restore를 통과한다.
+타이핑은 NSTextInputClient와 합성 chord를 쓰며 물리 OS IME 검증은 아니다.
+증거와 fixture 범위는 [제품 연결 결과](plans/editor-recovery-integration.md)를 따른다.

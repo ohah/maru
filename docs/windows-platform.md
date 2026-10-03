@@ -10854,8 +10854,8 @@ pinned 디렉터리의 reparse 속성 확인, 실제 부모 핸들 상대 재열
 [Microsoft SDK 지침](https://learn.microsoft.com/en-us/windows/win32/fileio/programming-considerations-for-transacted-fileio-)
 대로 transacted 파일 핸들을 닫는다. 실제 파일 fixture에서 이 핸들을 닫은 뒤에도 commit 전 외부 쓰기가
 거절되는지 확인했다. commit 실패는 CommitUncertain으로 반환하고 성공이나 자동 재시도로 처리하지 않는다.
-rollback 실패도 호출자에게 알리며 close는 보유 핸들을 해제한다. 실제 commit 실패의 결과를 조회하여
-확정하는 복구 프로토콜은 아직 구현하지 않았다.
+rollback 실패도 호출자에게 알리며 close는 보유 핸들을 해제한다. 이 초기 구현에 없던 열린 KTM 핸들의
+결과 조회와 terminal 결정 반영은 후속 §2m.142에서 구현했다.
 
 `test-win32-safe-save`의 집계 50개와 native 경로 29개가 통과했다. 신규 transaction 판정은 11개다.
 짧은 본문으로 정확히 교체, commit 전 기존 본문 유지, rollback, 바뀐 hash, 같은 본문의 다른 파일 ID,
@@ -10871,6 +10871,35 @@ basename 검증과 부모 핸들 상대 binding 검사를 함께 제거한 다�
 증명하는 판정으로 세지 않는다.
 
 [CreateFileTransactedW 계약](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfiletransactedw)의
-대안 권고와 파일 시스템 제약은 그대로 적용된다. capability 확인, 실제 commit 실패 결과 확정,
-crash 복구, 조상 reparse 변경 경쟁의 결정적 native 판정과 전체 safe-save 계약 검증이 남아 있다.
+대안 권고와 파일 시스템 제약은 그대로 적용된다. capability 확인, crash 복구,
+조상 reparse 변경 경쟁의 결정적 native 판정과 전체 safe-save 계약 검증이 남아 있다.
 GUI 키보드·IME 편집, 저장, 재열기 실앱 검증도 남아 있으므로 W8.17 완료로 세지 않는다.
+
+### 2m.142 저장 오류 응답과 KTM의 실제 결정을 구분한다 (2026-10-03)
+
+`Transaction.queryOutcome`는 열린 KTM 핸들에
+[GetTransactionInformation](https://learn.microsoft.com/en-us/windows/win32/api/ktmw32/nf-ktmw32-gettransactioninformation)을
+호출한다. 반환값은 SDK의
+[TRANSACTION_OUTCOME](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-transaction_outcome)
+1/2/3을 각각 undetermined/committed/aborted로 해석한다. 조회 실패와 미지의 값은 오류이고,
+닫힌 핸들은 호출하지 않는다. 조회만으로 로컬 phase나 쓰기 허가를 바꾸지 않는다.
+
+`reconcile`은 uncertain 상태에만 적용한다. native terminal 결정이면 committed/rolled_back으로
+반영하고, undetermined면 uncertain을 유지하여 쓰기·commit 재시도를 계속 거절한다.
+uncertain 상태의 rollback은 먼저 실제 결과를 조회한다. 이미 committed면 rollback을 거절하고,
+이미 aborted면 추가 요청 없이 확정한다. close도 결과를 조회한 뒤 terminal 결정에는 rollback을
+요청하지 않는다. 조회나 rollback 오류가 나더라도 close는 핸들을 해제하며 오류를 호출자에게 전달한다.
+따라서 close 자체를 저장 성공이나 원본 유지의 증거로 사용하지 않는다.
+
+신규 native 판정 5개를 더해 `test-win32-safe-save` 집계 55개와 경로 29개가 통과했다.
+실제 commit 뒤 false 응답 주입, 실제 rollback 뒤 false 응답 주입은 명시적인 reconcile과 close
+두 경로를 검사했다. 실제 KTM rollback 뒤 제품 commit을 요청하면 Windows 오류 6704로 실패하며,
+조회는 aborted를 반환하고 원본은 유지됐다. 실패·미지의 조회 값은 uncertain을 유지하고,
+pending 조회는 재시도 허가가 되지 않는다. Native 조회 자체의 invalid-handle 실패도 검사한다.
+기존 실제 파일 테스트에 active/prepared/committed/aborted 조회와 닫힌 상태 거절 판정을 추가했다.
+
+pending을 committed로 해석, committed를 aborted로 해석, 조회 오류를 committed로 처리,
+미지의 값을 committed로 처리, close의 결과 조회 제거라는 다섯 실행 변이를 모두 런타임 실패로 검출했고
+원복 후 정상 집계가 통과했다. 이 검증은 살아 있는 KTM 핸들의 실제 결정 반영을 증명한다.
+프로세스 종료 후 복구, 모든 실패 타이밍의 결과 확정, L2 revision 저장 ack와 GUI 연결은 아직 증명하지 않았다.
+일반 파일은 계속 읽기 전용이며 실앱 키보드·IME 편집→저장→재열기 검증은 남아 있다.

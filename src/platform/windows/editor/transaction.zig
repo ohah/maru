@@ -1,6 +1,6 @@
 //! Experimental local NTFS save transaction. Not a production save permit.
-//! TxF availability, failed-commit outcome reconciliation and crash recovery must
-//! be resolved before GUI adoption. Microsoft recommends alternatives to TxF.
+//! TxF availability, namespace races and crash recovery must be resolved before
+//! GUI adoption. Microsoft recommends alternatives to TxF.
 const std = @import("std");
 const builtin = @import("builtin");
 const w = std.os.windows;
@@ -10,6 +10,7 @@ const identity_mod = @import("identity.zig");
 extern "ktmw32" fn CreateTransaction(?*anyopaque, ?*anyopaque, u32, u32, u32, u32, ?[*:0]const u16) callconv(abi.winapi) w.HANDLE;
 extern "ktmw32" fn CommitTransaction(w.HANDLE) callconv(abi.winapi) w.BOOL;
 extern "ktmw32" fn RollbackTransaction(w.HANDLE) callconv(abi.winapi) w.BOOL;
+extern "ktmw32" fn GetTransactionInformation(w.HANDLE, ?*u32, ?*u32, ?*u32, ?*u32, u32, ?[*]u16) callconv(abi.winapi) w.BOOL;
 extern "kernel32" fn CreateFileTransactedW([*:0]const u16, u32, u32, ?*anyopaque, u32, u32, ?w.HANDLE, w.HANDLE, ?*u16, ?*anyopaque) callconv(abi.winapi) w.HANDLE;
 extern "kernel32" fn GetFinalPathNameByHandleW(w.HANDLE, [*]u16, u32, u32) callconv(abi.winapi) u32;
 extern "kernel32" fn ReOpenFile(w.HANDLE, u32, u32, u32) callconv(abi.winapi) w.HANDLE;
@@ -23,6 +24,11 @@ const Privileges = extern struct { count: u32 = 1, luid: Luid, attributes: u32 }
 const Native = struct {
     fn commit(handle: w.HANDLE) bool {
         return CommitTransaction(handle).toBool();
+    }
+    fn outcome(handle: w.HANDLE) !u32 {
+        var result: u32 = undefined;
+        if (!GetTransactionInformation(handle, &result, null, null, null, 0, null).toBool()) return error.OutcomeQueryFailed;
+        return result;
     }
     fn write(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
         try file.writePositionalAll(io, bytes, 0);
@@ -95,6 +101,10 @@ fn diskHash(file: std.Io.File, io: std.Io, limit: usize) !u64 {
 }
 
 pub const Phase = enum { active, prepared, poisoned, uncertain, committed, rolled_back, closed };
+// These are KTM decisions, not our local write phases. In particular, an active
+// transaction after a failed request is still not permission to retry a save.
+// https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-transaction_outcome
+pub const Outcome = enum(u32) { undetermined = 1, committed = 2, aborted = 3 };
 
 pub const Transaction = struct {
     transaction: w.HANDLE,
@@ -166,8 +176,47 @@ pub const Transaction = struct {
         self.phase = .committed;
     }
 
+    /// Querying observes KTM without changing a write/commit permit. Unknown
+    /// values and failed queries never imply successful save or rollback.
+    // https://learn.microsoft.com/en-us/windows/win32/api/ktmw32/nf-ktmw32-gettransactioninformation
+    pub fn queryOutcome(self: *const Transaction) !Outcome {
+        return self.queryOutcomeWith(Native);
+    }
+    fn queryOutcomeWith(self: *const Transaction, comptime Api: type) !Outcome {
+        if (self.phase == .closed) return error.InvalidState;
+        return switch (try Api.outcome(self.transaction)) {
+            1 => .undetermined,
+            2 => .committed,
+            3 => .aborted,
+            else => error.UnsupportedOutcome,
+        };
+    }
+
+    /// Resolve an uncertain reply only with a terminal native decision. A
+    /// pending decision keeps the transaction uncertain and blocks save retries.
+    pub fn reconcile(self: *Transaction) !Outcome {
+        return self.reconcileWith(Native);
+    }
+    fn reconcileWith(self: *Transaction, comptime Api: type) !Outcome {
+        if (self.phase != .uncertain) return error.InvalidState;
+        const outcome = try self.queryOutcomeWith(Api);
+        switch (outcome) {
+            .committed => self.phase = .committed,
+            .aborted => self.phase = .rolled_back,
+            .undetermined => {},
+        }
+        return outcome;
+    }
+
     pub fn rollback(self: *Transaction) !void {
         if (self.phase == .committed or self.phase == .rolled_back or self.phase == .closed) return error.InvalidState;
+        if (self.phase == .uncertain) {
+            switch (try self.reconcile()) {
+                .committed => return error.InvalidState,
+                .aborted => return,
+                .undetermined => {},
+            }
+        }
         self.phase = .uncertain;
         if (!RollbackTransaction(self.transaction).toBool()) return error.RollbackUncertain;
         self.phase = .rolled_back;
@@ -183,6 +232,9 @@ pub const Transaction = struct {
             _ = w.ntdll.NtClose(self.transaction);
             self.phase = .closed;
         }
+        // A failed commit reply may already have committed. Observe its native
+        // outcome before requesting rollback; never undo/claim failure blindly.
+        if (self.phase == .uncertain) _ = try self.reconcile();
         if (self.phase != .committed and self.phase != .rolled_back) try self.rollback();
     }
 };
@@ -201,12 +253,15 @@ test "Windows safe save transaction publishes exact bytes atomically and keeps o
     defer pinned.deinit(io);
     var tx = try beginFixture(std.testing.allocator, io, &pinned);
     defer tx.close(io) catch @panic("transaction close failed");
+    try std.testing.expectEqual(Outcome.undetermined, try tx.queryOutcome());
     try std.testing.expectError(error.InvalidState, tx.commit(io));
     try tx.write(io, "new");
+    try std.testing.expectEqual(Outcome.undetermined, try tx.queryOutcome());
     var bytes: [64]u8 = undefined;
     try std.testing.expectEqualStrings("original-long-content", bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
     try tx.commit(io);
     try std.testing.expectEqual(Phase.committed, tx.phase);
+    try std.testing.expectEqual(Outcome.committed, try tx.queryOutcome());
     try std.testing.expectEqualStrings("new", bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
     try std.testing.expect(tx.identity.eql(try identity_mod.Identity.capture(pinned.original.handle)));
     try std.testing.expectError(error.InvalidState, tx.commit(io));
@@ -224,10 +279,14 @@ test "Windows safe save transaction rollback and close preserve original data" {
         defer pinned.deinit(io);
         var tx = try beginFixture(std.testing.allocator, io, &pinned);
         try tx.write(io, "uncommitted");
-        if (explicit) try tx.rollback();
+        if (explicit) {
+            try tx.rollback();
+            try std.testing.expectEqual(Outcome.aborted, try tx.queryOutcome());
+        }
         try tx.close(io);
         try std.testing.expectEqual(Phase.closed, tx.phase);
         try std.testing.expectError(error.InvalidState, tx.close(io));
+        try std.testing.expectError(error.InvalidState, tx.queryOutcome());
         var bytes: [64]u8 = undefined;
         try std.testing.expectEqualStrings("original-long-content", bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
     }
@@ -295,6 +354,161 @@ test "Windows safe save transaction failed commit remains uncertain until rollba
     try std.testing.expectError(error.InvalidState, tx.commit(io));
     try tx.rollback();
     try std.testing.expectEqual(Phase.rolled_back, tx.phase);
+}
+
+test "Windows safe save transaction reconciles a committed decision after a lost reply" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    for ([_]bool{ true, false }) |explicit| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original-long-content" });
+        var pinned = try maru.win32_relative_file.open(std.testing.allocator, tmp.dir, "original.txt");
+        defer pinned.deinit(io);
+        var tx = try beginFixture(std.testing.allocator, io, &pinned);
+        var live = true;
+        defer if (live and tx.phase != .closed) tx.close(io) catch @panic("transaction close failed");
+        try tx.write(io, "committed despite reply loss");
+        const LostReply = struct {
+            fn commit(handle: w.HANDLE) bool {
+                _ = Native.commit(handle);
+                return false;
+            }
+        };
+        try std.testing.expectError(error.CommitUncertain, tx.commitWith(io, LostReply));
+        try std.testing.expectEqual(Phase.uncertain, tx.phase);
+        try std.testing.expectEqual(Outcome.committed, try tx.queryOutcome());
+        // Observation alone must not silently alter our caller-visible phase.
+        try std.testing.expectEqual(Phase.uncertain, tx.phase);
+        if (explicit) {
+            try std.testing.expectEqual(Outcome.committed, try tx.reconcile());
+            try std.testing.expectEqual(Phase.committed, tx.phase);
+            try std.testing.expectError(error.InvalidState, tx.rollback());
+        }
+        try tx.close(io);
+        live = false;
+        var bytes: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("committed despite reply loss", bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
+    }
+}
+
+test "Windows safe save transaction reconciles an aborted decision after a lost reply" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    for ([_]bool{ true, false }) |explicit| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original-long-content" });
+        var pinned = try maru.win32_relative_file.open(std.testing.allocator, tmp.dir, "original.txt");
+        defer pinned.deinit(io);
+        var tx = try beginFixture(std.testing.allocator, io, &pinned);
+        var live = true;
+        defer if (live and tx.phase != .closed) tx.close(io) catch @panic("transaction close failed");
+        try tx.write(io, "must not publish");
+        const AbortedReply = struct {
+            fn commit(handle: w.HANDLE) bool {
+                _ = RollbackTransaction(handle);
+                return false;
+            }
+        };
+        try std.testing.expectError(error.CommitUncertain, tx.commitWith(io, AbortedReply));
+        try std.testing.expectEqual(Outcome.aborted, try tx.queryOutcome());
+        if (explicit) {
+            try std.testing.expectEqual(Outcome.aborted, try tx.reconcile());
+            try std.testing.expectEqual(Phase.rolled_back, tx.phase);
+        }
+        try tx.close(io);
+        live = false;
+        var bytes: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("original-long-content", bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
+    }
+}
+
+test "Windows safe save transaction resolves an actual native failed commit after abort" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original-long-content" });
+    var pinned = try maru.win32_relative_file.open(std.testing.allocator, tmp.dir, "original.txt");
+    defer pinned.deinit(io);
+    var tx = try beginFixture(std.testing.allocator, io, &pinned);
+    defer tx.close(io) catch @panic("transaction close failed");
+    try tx.write(io, "must not publish");
+    // An external KTM decision makes the actual CommitTransaction request fail,
+    // rather than merely injecting a false API result in our adapter.
+    try std.testing.expect(RollbackTransaction(tx.transaction).toBool());
+    try std.testing.expectError(error.CommitUncertain, tx.commit(io));
+    try std.testing.expectEqual(@as(u32, 6704), GetLastError());
+    try std.testing.expectEqual(Outcome.aborted, try tx.reconcile());
+    try std.testing.expectEqual(Phase.rolled_back, tx.phase);
+    var bytes: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("original-long-content", bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
+}
+
+test "Windows safe save transaction retains uncertainty on failed and unknown outcome queries" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expectError(error.OutcomeQueryFailed, Native.outcome(w.INVALID_HANDLE_VALUE));
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original-long-content" });
+    var pinned = try maru.win32_relative_file.open(std.testing.allocator, tmp.dir, "original.txt");
+    defer pinned.deinit(io);
+    var tx = try beginFixture(std.testing.allocator, io, &pinned);
+    defer tx.close(io) catch @panic("transaction close failed");
+    try tx.write(io, "prepared");
+    const Fault = struct {
+        fn commit(_: w.HANDLE) bool {
+            return false;
+        }
+        fn outcome(_: w.HANDLE) !u32 {
+            return error.OutcomeQueryFailed;
+        }
+    };
+    try std.testing.expectError(error.CommitUncertain, tx.commitWith(io, Fault));
+    try std.testing.expectError(error.OutcomeQueryFailed, tx.reconcileWith(Fault));
+    try std.testing.expectEqual(Phase.uncertain, tx.phase);
+    const Unknown = struct {
+        var raw: u32 = 0;
+        fn outcome(_: w.HANDLE) !u32 {
+            return raw;
+        }
+    };
+    for ([_]u32{ 0, 4, 99, 0xffffffff }) |raw| {
+        Unknown.raw = raw;
+        try std.testing.expectError(error.UnsupportedOutcome, tx.reconcileWith(Unknown));
+        try std.testing.expectEqual(Phase.uncertain, tx.phase);
+    }
+    try std.testing.expectEqual(Outcome.undetermined, try tx.queryOutcome());
+}
+
+test "Windows safe save transaction pending reconciliation never permits a save retry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original-long-content" });
+    var pinned = try maru.win32_relative_file.open(std.testing.allocator, tmp.dir, "original.txt");
+    defer pinned.deinit(io);
+    var tx = try beginFixture(std.testing.allocator, io, &pinned);
+    defer tx.close(io) catch @panic("transaction close failed");
+    try std.testing.expectError(error.InvalidState, tx.reconcile());
+    try tx.write(io, "prepared");
+    try std.testing.expectError(error.InvalidState, tx.reconcile());
+    const Fault = struct {
+        fn commit(_: w.HANDLE) bool {
+            return false;
+        }
+    };
+    try std.testing.expectError(error.CommitUncertain, tx.commitWith(io, Fault));
+    try std.testing.expectEqual(Outcome.undetermined, try tx.reconcile());
+    try std.testing.expectEqual(Phase.uncertain, tx.phase);
+    try std.testing.expectError(error.InvalidState, tx.commit(io));
+    try std.testing.expectError(error.InvalidState, tx.write(io, "retry"));
+    try tx.rollback();
+    try std.testing.expectEqual(Outcome.aborted, try tx.queryOutcome());
+    try std.testing.expectError(error.InvalidState, tx.reconcile());
 }
 
 test "Windows safe save transaction refuses a same-content competitor at the original name" {

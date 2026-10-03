@@ -1501,7 +1501,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Windows safe save"},
     });
     const run_safe_save_tests = b.addRunArtifact(safe_save_tests);
-    run_safe_save_tests.addArg("--maru-expect-tests=50"); // 2 aggregation blocks, 16 stage, 9 metadata, 7 security, 2 audit-scope, 3 identity, 11 transaction tests
+    run_safe_save_tests.addArg("--maru-expect-tests=55"); // 2 aggregation blocks, 16 stage, 9 metadata, 7 security, 2 audit-scope, 3 identity, 16 transaction tests
     const safe_save_step = b.step("test-win32-safe-save", "Verify native editor save path and original-file preservation");
     safe_save_step.dependOn(&run_safe_save_tests.step);
     const relative_file_tests = addProjectTest(b, .{

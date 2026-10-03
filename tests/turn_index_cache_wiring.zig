@@ -60,7 +60,7 @@ test "이름 짓기는 모듈의 접두를 쓰고, 그 문자열을 따로 적�
 }
 
 test "스냅샷 워커는 index 를 쓰기 전에 오래된 형제를 한 번 쓸어 낸다" {
-    const src = try readSource(std.testing.allocator, "src/platform/macos/git_backend.zig");
+    const src = try readSource(std.testing.allocator, "src/app/git/backend.zig");
     defer std.testing.allocator.free(src);
     const body = functionBody(src, "fn snapshotWorker(job: *SnapshotJob) void {", "\n}\n") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), countOutsideComments(body, "turn_index_cache.sweepStaleSiblingsOnce(state.io, job.index_file)"));

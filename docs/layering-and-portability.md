@@ -191,6 +191,10 @@ L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층
 있다" 판정은 **네이티브 참조만 본 것**이었고, 그 기준은 필요조건이지 충분조건이 아니다 — 다음에
 같은 물음이 나오면 **모듈 그래프부터** 본다. 새로 쌓이는 빚은 여전히 주석 한 줄씩이다.
 
+**2026-10-03 사용자 요청으로 구조 정리를 재개한다.** 이전 실측의 모듈 루트·wasm·자기 의존 문제는 계속 검증 대상이다. 호출 이름만 바꾸거나 두 벌로 복사하지 않고 책임과 모듈 배선을 함께 정리한다. 첫 이동은 std만 의존하는 detached worker quiescence를 `src/app/detached_worker_wait.zig`로 옮기는 것이다. macOS 세션·파일 트리·에이전트 상세 backend는 `maru.app.detached_worker_wait`를 통해 같은 구현을 사용한다. 네이티브 I/O나 `maru` 자기 import가 없어 wasm에 POSIX 호출을 끌어들이지 않는다. Windows 편집기 파일 열기/뷰 lease는 `src/platform/windows/editor/document.zig`로 분리하고 본문·형식·이력은 L2 Registry/EditableFile에 둔다.
+
+아직 정리할 호출은 CLI가 직접 가져오는 파일 트리·git·에이전트 archive/detail backend, Chrome draw lowering·system text와 Windows SCM/agent surface의 system text import다. file tree의 macOS SSH helper와 system text의 CoreText bridge가 실제 플랫폼 의존이므로, 이들을 별도 어댑터로 나누고 해당 artifact에 필요한 모듈만 주입해야 한다. 이 목록은 첫 이동의 완료 주장과 구별하며 계속 진행한다.
+
 > **기준 자체는 살아 있다.** 2026-08-25 에 `platform/macos/agent_session_archive_backend.zig`
 > (1,218 줄)가 `main.zig` 의 소비자가 되어 같은 부류에 새로 들어왔고, 같은 기준으로 재면 네이티브
 > 참조가 **0** 이다. 표를 늘리지 않는 이유는 위와 같다.
@@ -346,3 +350,61 @@ Windows PID를 이 신뢰 도메인에 넣는 것은 **세션 호스트 이식�
 
 - **가드 테스트**(B) ✅: `NativeMetalCell`·`MetalFrame`·CoreText/CoreGraphics/AppKit/Metal 타입명이 중립 레이어(**terminal·renderer·session·chrome**)에 **식별자로 등장하면 빌드 실패**(`tests/boundary/imports.zig`의 `scanForbiddenIdentifiers` — `std.zig.Tokenizer`로 .identifier 토큰만 검사해 중립 계약을 설명하는 주석·문자열 속 "Metal"/"CoreText" 언급은 오탐 0). cross-layer `@import` 금지(1차)에 더한 **2차 re-export 가드**(import이 막혀도 타입명이 새는 경로 차단). `app`은 의도적 혼합 레이어(runtime+중립 모델)라 비범위 — 컨벤션으로 다룬다. = [renderer-strategy.md] WebGPU 조건 1("중립 frame만 소비함을 테스트로 증명")의 실제 충족.
 - **topological note**: `metal_frame.zig`(중립 투영 + `replace` Z-합성)는 B에서 **renderer로 이주 완료** — 이름만 "Metal"인 중립 frame 계약(NativeMetalCell·MetalFrame extern DTO, OS 의존 0)을 renderer가 소유해 백엔드(Metal/WebGPU)가 공유한다. 가드는 이제 **이름이 아니라 의존성** 기준이다(frame DTO는 중립, 실제 OS 런타임 `MetalRenderer`·CT*/CG*/NS*/MTL*만 platform 가드). S2 모델 추출 **완료**(§3.1: `Term`을 모델/런타임 분리, 모델을 `session_model.Model(Rt)`로). 추가로 `src/app`에 남은 중립 모델(`surface`·`split_tree`·`workspace`·`window` 등)을 session으로 마저 모아 `session→app` 의존을 없애는 정리는 §3.2(3차 추출, 계획).
+
+### 3.4.1 세션 기록 worker의 실제 공통 계층 이동 (2026-10-03)
+
+사용자의 Windows 폴더 결합 정리 요청에 따라 목록·상세 backend를 각각
+`src/app/agent_session_archive_backend.zig`와
+`src/app/agent_session_archive_detail_backend.zig`로 옮겼다.
+Windows main과 macOS AppSession·agent dock은 `maru.app`의 같은 타입을 사용한다.
+backend가 facade 내부에서 자신의 facade를 이름 import하는 순환 모듈 연결을 만들지 않도록
+공통 worker 내부의 barrel 접근은 같은 모듈 안의 상대 import로 연결한다.
+상세 worker의 목록 worker 참조도 같은 디렉터리의 동일 파일이다.
+
+이동하면서 quiescence scanner의 탐색 범위를 `src/platform/macos`와 `src/app`으로
+확장했다. 이동한 파일을 감시에서 빼지 않고 두 디렉터리 모두 재귀 검사한다.
+i18n 원장도 실제 새 경로를 가리킨다.
+`zig build test-agent-archive-workers`는 36개 등록을 요구하며 Windows 실행에서는
+32개 통과·기존 macOS 전용 4개 skip이다. 두 스트리밍 상한 판정자의 불필요한 macOS 제한을 제거해 Windows 임시 파일에서도 실행한다. 파일 identity의 inode·size·provider,
+enqueue 실패 outcome, 민감 턴 redaction을 깨뜨린 다섯 제품 변이가 모두 실패했고
+원본을 복구한 게이트는 통과했다. skip을 Windows 동작 검증으로 계상하지 않는다.
+
+Git backend와 CoreText가 섞인 텍스트/DrawList 구현은 여전히 분리 대상이다. 파일 트리의 후속 분리는 §3.4.2에서 완료했다.
+이 두 worker의 이동으로 전체 폴더 결합 해소나 Windows safe-save 완성을 주장하지 않는다.
+
+### 3.4.2 파일 트리 worker와 native SSH 전송 분리 (2026-10-03)
+
+`file_tree_backend.zig`는 `src/app/file_tree_backend.zig`로 이동했다.
+공통 worker는 macOS SSH 모듈을 import하지 않는다. `Backend.init`은 로컬 전용이고,
+`Backend.initWithRemote`가 받는 `RemoteTransport`는 bounded capture 함수와 list script를
+담는다. 전송 capability가 없으면 원격 submit은 경로 소유권을 받지 않고 false를 반환한다.
+macOS의 초기 생성·파일 패널 재초기화·워크스페이스 복원 세 경로는
+`platform/macos/file_tree_remote.zig`의 기존 SSH adapter를 명시적으로 주입한다.
+Windows main과 macOS AppSession·LSP는 동일한 `maru.app.file_tree_backend`를 소비한다.
+
+정지 worker 검사와 scan identity 검사는 공통 app 경로도 훑는다. i18n 검사와 원격 경로가
+로컬 filesystem을 호출하지 않는 검사는 이동한 실제 파일을 계속 읽는다.
+`test-file-tree-backend`는 42개 등록을 강제하며 Windows에서 33개 pass·기존 macOS 전용
+9개 skip이다. 새 판정자는 실제 detached worker에 remote job을 제출해 주입된 전송의
+control socket·목적지·script·단일 path 인자·capture cap과 결과 identity/generation을 확인한다.
+전송 없음·전송 실패의 path 소유권과 local capability가 없는 결과도 검사한다.
+capability 없는 submit을 성공시키기, control socket/목적지 혼동, 잘못된 script,
+capture cap 변경, 전송 실패의 remote 표식 누락 등 다섯 제품 변이가 모두 실행 판정에서 실패했다.
+원본 복구는 통과했다. 이 시험 전송을 Windows의 실물 SSH 지원 완료로 계상하지 않는다.
+Git backend와 native text 분리는 남아 있다.
+
+### 3.4.3 Chrome 텍스트 아티팩트와 CoreText adapter 분리 (2026-10-03)
+
+`src/app/chrome_text.zig`가 요청 조립·아티팩트 소유권·폰트 registry 해석·배치·clip·GPU DTO 변환을
+소유한다. Windows SCM·에이전트 표면과 main은 `maru.app.chrome_text`를 소비하며 macOS 경로를
+import하지 않는다. `platform/macos/chrome/system_text.zig`는 기존 CoreText·폰트 캐시 호출과
+macOS 전용 판정자를 유지하고, 공통 조립 함수에 native run shaper를 명시적으로 주입한다.
+공통 파일은 macOS host 파일을 import하지 않으며 기본 glyph 생성은 플랫폼 text_shaper seam을 쓴다.
+Request·UnresolvedArtifact·Artifact는 양쪽 host가 같은 타입을 사용한다.
+
+단일 run 요청도 run 배열을 heap에 소유하고 부분 할당을 실패 때 정리한다. 이전의 stack run 배열
+해제를 재현하는 실행 변이를 검사했다. 토큰 크기와 줄 높이는 backing scale을 반영하고 이미 device
+pixel인 셀 메트릭에는 배율을 다시 적용하지 않는다. Windows native glyph에서도 1.5배 줄 높이를 확인했다.
+`test-chrome-artifact`는 33개 등록(집계 21·판정 12)을 강제하며 Windows에서 모두 통과했다.
+CoreText의 실제 실행 검증은 macOS 호스트가 필요하며 Windows 결과로 이를 대체하지 않는다.
+Git backend 이동은 이미 완료했고, 이 분리는 전체 Windows 저장·편집 UI 완성을 뜻하지 않는다.

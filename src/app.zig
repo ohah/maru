@@ -1,3 +1,14 @@
+pub const chrome_text = @import("app/chrome_text.zig");
+pub const git_backend = @import("app/git/backend.zig");
+pub const chrome_draw_lowering = @import("app/chrome_draw_lowering.zig");
+pub const chrome_text_request = @import("app/chrome_text_request.zig");
+pub const turn_index_cache = @import("app/git/index_cache.zig");
+pub const file_tree_backend = @import("app/file_tree_backend.zig");
+/// Shared archive I/O workers; platform hosts consume the same owner types.
+pub const agent_session_archive_backend = @import("app/agent_session_archive_backend.zig");
+pub const agent_session_archive_detail_backend = @import("app/agent_session_archive_detail_backend.zig");
+/// Detached worker quiescence for shared I/O backends; no native OS dependency.
+pub const detached_worker_wait = @import("app/detached_worker_wait.zig");
 pub const app_runtime = @import("app/app_runtime.zig");
 pub const workspace_checkpoint_product = @import("app/workspace_checkpoint_product.zig");
 pub const artifact_io = @import("app/artifact_io.zig");

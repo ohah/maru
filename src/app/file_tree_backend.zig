@@ -1,19 +1,16 @@
-//! 파일 패널 트리의 macOS L4 디렉터리 열거 backend.
+//! 파일 패널 트리의 공용 L4 디렉터리 열거 backend.
 //!
 //! render tick은 `submit`/`takeResult`만 호출하며 둘 다 메모리 queue 조작뿐이다. 실제 open/readdir/stat은
 //! detached worker thread에서 실행한다. 요청·완료·in-flight를 모두 bound해 watcher burst가 frame loop나
 //! 메모리를 무제한 점유하지 않게 한다(docs/file-panel.md §7).
 
 const std = @import("std");
-const detached_worker_wait = @import("detached_worker_wait.zig");
+const detached_worker_wait = maru.app.detached_worker_wait;
 const builtin = @import("builtin");
-const maru = @import("maru");
+const maru = @import("../maru.zig");
 const path_shape = maru.path_shape;
 const file_tree = maru.session.file_tree;
 const listing = maru.session.remote_file_listing; // 원격 목록 wire(RF1) — 파서·상한의 단일 출처
-// **조건부 임포트**(RF2b) — 이 파일은 Windows 에서도 컴파일되는데 ssh_upload 는 macOS 전용이다.
-// barrel 조건부 import + comptime gate 가 이 저장소의 처방이다(macos-only-code-linux-crosscompile-check).
-const ssh_upload = if (builtin.os.tag == .macos) @import("ssh_upload.zig") else struct {};
 const c = std.c;
 
 var test_tmp_counter: std.atomic.Value(u64) = .init(0);
@@ -111,9 +108,17 @@ pub const ValidatedRoot = struct {
     }
 };
 
+/// A host supplies transport; a missing capability must never turn remote paths into local scans.
+// Function and script storage must outlive every detached job; hosts install static adapters.
+pub const RemoteTransport = struct {
+    runCapped: *const fn (std.mem.Allocator, []const u8, []const u8, []const u8, []const []const u8, usize, *[]u8) anyerror!c_int,
+    list_script: []const u8,
+};
+
 const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    remote_transport: ?RemoteTransport = null,
     mutex: std.Io.Mutex = .init,
     refs: std.atomic.Value(usize) = .init(1), // Backend owner + detached workers
     inflight: usize = 0,
@@ -135,8 +140,12 @@ pub const Backend = struct {
     state: ?*State,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Backend {
+        return initWithRemote(allocator, io, null);
+    }
+
+    pub fn initWithRemote(allocator: std.mem.Allocator, io: std.Io, remote_transport: ?RemoteTransport) !Backend {
         const state = try allocator.create(State);
-        state.* = .{ .allocator = allocator, .io = io };
+        state.* = .{ .allocator = allocator, .io = io, .remote_transport = remote_transport };
         return .{ .state = state };
     }
 
@@ -146,7 +155,7 @@ pub const Backend = struct {
     }
 
     /// **원격 root 의 디렉터리 스캔**(RF2b). 목적지·control socket 은 복사해 job 이 소유한다.
-    /// macOS 전용 — 다른 호스트에선 항상 false 다(전송이 ssh_upload 라 그 밖에 없다).
+    /// 호스트가 전송 capability를 제공하지 않으면 path 소유권을 받지 않고 false다.
     ///
     /// true 면 path 소유권이 backend 로 이동한다(로컬 submit 과 같은 계약). false 면 호출자가
     /// 재예약 뒤 free 한다 — **원격 슬롯 상한(`max_remote_inflight`)에 걸려도 false** 다: 로컬을
@@ -158,8 +167,8 @@ pub const Backend = struct {
         ctl: []const u8,
         expected_root_generation: u64,
     ) bool {
-        if (comptime builtin.os.tag != .macos) return false;
         const state = self.state orelse return false;
+        if (state.remote_transport == null) return false;
         const dest_owned = state.allocator.dupe(u8, dest) catch return false;
         const ctl_owned = state.allocator.dupe(u8, ctl) catch {
             state.allocator.free(dest_owned);
@@ -260,7 +269,7 @@ pub const Backend = struct {
         const was_remote = job.remote != null;
         var result = switch (job.kind) {
             .directory => if (job.remote) |remote|
-                remoteScanDirectory(state.allocator, job.path, remote)
+                remoteScanDirectory(state.allocator, job.path, remote, state.remote_transport.?)
             else if (job.validated_dir) |dir|
                 scanOpenedDirectory(state.allocator, state.io, job.path, dir)
             else
@@ -594,14 +603,13 @@ fn identityOfFile(io: std.Io, file: std.Io.File) !file_tree.Identity {
 ///
 /// **여기는 백그라운드 스레드다** — `std.Io` 를 안 만진다(`ssh_upload` 의 규율). 로컬 파일시스템도
 /// 안 만진다: 이 함수 안에 open/stat 이 생기면 그것이 §2.4 위반이고, 경계 게이트가 그 토큰을 센다.
-fn remoteScanDirectory(allocator: std.mem.Allocator, owned_path: []u8, remote: RemoteTarget) Result {
-    if (comptime builtin.os.tag != .macos) unreachable; // submitRemoteDirectory 가 이미 막는다
+fn remoteScanDirectory(allocator: std.mem.Allocator, owned_path: []u8, remote: RemoteTarget, transport: RemoteTransport) Result {
     var out: []u8 = &.{};
-    const code = ssh_upload.runRemoteCapped(
+    const code = transport.runCapped(
         allocator,
         remote.ctl,
         remote.dest,
-        ssh_upload.list_script,
+        transport.list_script,
         &.{owned_path},
         listing.max_wire_bytes,
         &out,
@@ -1672,4 +1680,80 @@ test "원격 매핑: 원격 오류(`!`)는 완결된 답이다 — 메시지가 
     try std.testing.expect(!result.ok);
     try std.testing.expectEqualStrings("opendir failed: AccessDenied", result.remote_error.?);
     try std.testing.expectEqual(@as(usize, 0), result.entries.items.len);
+}
+
+const TestRemoteTransport = struct {
+    fn runCapped(allocator: std.mem.Allocator, ctl: []const u8, dest: []const u8, script: []const u8, args: []const []const u8, cap: usize, out: *[]u8) !c_int {
+        try std.testing.expectEqualStrings("test-control", ctl);
+        try std.testing.expectEqualStrings("test-destination", dest);
+        try std.testing.expectEqualStrings("test-list", script);
+        try std.testing.expectEqual(@as(usize, 1), args.len);
+        try std.testing.expectEqualStrings("/remote-only/line\nname", args[0]);
+        try std.testing.expectEqual(listing.max_wire_bytes, cap);
+        var wire: [1024]u8 = undefined;
+        var n = listing.appendHeader(&wire, 0).?;
+        n = listing.appendDirIdentity(&wire, n, .{ .dev = 8, .ino = 70 }).?;
+        n = listing.appendEntry(&wire, n, .{ .dev = 8, .ino = 71, .kind = .file, .name = "remote.txt" }).?;
+        n = listing.appendFooter(&wire, n, 1).?;
+        out.* = try allocator.dupe(u8, wire[0..n]);
+        return 0;
+    }
+
+    fn fail(_: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8, _: []const []const u8, _: usize, _: *[]u8) !c_int {
+        return error.TransportUnavailable;
+    }
+};
+
+test "file tree transport capability rejects remote submission without taking path ownership" {
+    const allocator = std.testing.allocator;
+    var backend = try Backend.init(allocator, std.testing.io);
+    defer backend.deinit();
+    const path = try allocator.dupe(u8, "/remote-only/line\nname");
+    defer allocator.free(path);
+    try std.testing.expect(!backend.submitRemoteDirectory(path, "test-destination", "test-control", 19));
+    try std.testing.expectEqual(@as(usize, 0), backend.state.?.inflight);
+    try std.testing.expect(backend.takeResult() == null);
+}
+
+test "file tree injected transport runs through the worker and publishes remote identity" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var backend = try Backend.initWithRemote(allocator, io, .{ .runCapped = TestRemoteTransport.runCapped, .list_script = "test-list" });
+    defer backend.deinit();
+    defer backend.quietForTest();
+    const path = try allocator.dupe(u8, "/remote-only/line\nname");
+    if (!backend.submitRemoteDirectory(path, "test-destination", "test-control", 19)) {
+        allocator.free(path);
+        return error.TestUnexpectedResult;
+    }
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 30 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (backend.takeResult()) |owned| {
+            var result = owned;
+            defer result.deinit(allocator, io);
+            try std.testing.expect(result.ok);
+            try std.testing.expect(result.was_remote);
+            try std.testing.expectEqualStrings("/remote-only/line\nname", result.path);
+            try std.testing.expectEqual(@as(u64, 19), result.expected_root_generation);
+            try std.testing.expectEqual(@as(u64, 70), result.identity.?.value.inode);
+            try std.testing.expectEqual(@as(usize, 1), result.entries.items.len);
+            try std.testing.expectEqualStrings("remote.txt", result.entries.items[0].name);
+            try std.testing.expect(result.validated_dir == null);
+            return;
+        }
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "file tree transport failure keeps a remote failure result and owns the original path" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "/remote-only/line\nname");
+    var result = remoteScanDirectory(allocator, path, .{ .ctl = @constCast("test-control"), .dest = @constCast("test-destination") }, .{ .runCapped = TestRemoteTransport.fail, .list_script = "test-list" });
+    defer result.deinit(allocator, std.testing.io);
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(result.was_remote);
+    try std.testing.expect(result.path.ptr == path.ptr);
+    try std.testing.expectEqual(@as(usize, 0), result.entries.items.len);
+    try std.testing.expect(result.validated_dir == null);
 }

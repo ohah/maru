@@ -39,7 +39,7 @@ const d3d11_cells = maru.d3d11_cells;
 /// **이름과 달리 두 OS 를 다 탄다** — Windows 는 §2m.18 이음매로 간다. `main.zig` 도 같은 상대
 /// 경로로 가져오므로 한 모듈 안의 한 파일이다. 아직 `platform/macos/` 에 있는 사정은
 /// layering-and-portability.md §3.4.
-const system_text = @import("../macos/chrome/system_text.zig");
+const system_text = maru.app.chrome_text; // Shared artifact policy; native shaping uses the platform seam.
 
 const scm_view = maru.session.scm_view;
 const git_write_command = maru.session.git_write_command;

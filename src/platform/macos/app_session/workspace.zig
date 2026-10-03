@@ -740,7 +740,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
         for (validated[0..validated_len]) |root| _ = new_file_tree.pinRootIdentity(root.path, root.identity);
     }
     try file_panel_ops.resetFileTreeWatchRootsForEntries(&new_file_tree, restored_entries.items.items, null);
-    var new_file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
+    var new_file_tree_backend = try file_tree_backend.Backend.initWithRemote(self.allocator, self.io, @import("../file_tree_remote.zig").transport);
     var new_file_tree_backend_owned = true;
     errdefer if (new_file_tree_backend_owned) new_file_tree_backend.deinit();
     var new_file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty;

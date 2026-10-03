@@ -1,19 +1,19 @@
-//! Semantic Chrome draw의 macOS renderer adapter.
+//! Semantic Chrome draw의 공통 renderer adapter.
 //!
 //! 각 `chrome.components.*`는 semantic `ChromeDraw`와 rect tree까지만 소유한다. 이 파일은
-//! 그 결과를 실제 앱의 CoreText `DrawList`와 Metal background quad로 한 방향 투영한다.
+//! 그 결과를 renderer-neutral `DrawList`와 background quad로 한 방향 투영한다.
 //! 따라서 archive/AppSession 좌표 계산이나 provider 문자열 조립은 여기로 들어올 수 없으며,
 //! hit rect와 paint rect의 권위는 계속 component tree 하나다.
 
 const std = @import("std");
-const maru = @import("maru");
+const maru = @import("../maru.zig");
 const chrome = maru.chrome;
 const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물)
 const renderer = maru.renderer;
 const colorUv = renderer.metal_frame.colorUv; // 컬러 글리프 UV sentinel 단일 출처(u0·u1 동일 규약)
 const terminal = maru.terminal;
 const metal_frame = renderer.metal_frame;
-const system_text = @import("system_text.zig");
+const system_text = maru.app.chrome_text_request;
 
 /// `appendBackgroundQuads`의 `layer` 인자에 쓰는 합성 층 이름. 값의 뜻은 `maru_metal_renderer.m`의
 /// **네 패스 배치**가 정하고, 여기서는 그 숫자에 이름을 준다.

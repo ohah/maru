@@ -215,6 +215,8 @@ src/
                         동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측). 위 세 예외(editor·editor_diff·
                         scm_dock)는 분해 산물이 아니므로 이 규칙 밖이다.
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현.
+                        chrome_text_request·chrome_text·chrome_draw_lowering은 양쪽 desktop host가 공유하는
+                        요청·아티팩트/배치·draw 투영이다. CoreText 호출은 macOS adapter가 주입한다.
                         persistent-session P2: terminal runtime의 수명·입출력·관측을 GUI layout에서 분리하는
                         vtable 계약 `term_runtime_backend.zig`(TermRuntimeBackend·RuntimeHandle — opaque, PtyIo와 같은
                         관용구)와 그 in-process 구현 `in_process_term_backend.zig`(기존 LiveSurfaceRegistry+LivePtySession+
@@ -245,7 +247,9 @@ src/
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
   renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, font identity registry, persistent renderer state, glyph atlas, frame stats
+  app/git/              공통 Git 작업자(backend.zig)와 임시 index 수명(index_cache.zig).
   platform/             OS별 process/window/input bridge
+    posix/              macOS·Linux가 공유하는 no-follow 파일 열기 adapter.
     macos/              AppKit/Metal/CoreText smoke bridge, Swift app host app shell, Swift/Zig C ABI 계약, workspace_checkpoint_file.zig(P4 C2: parent-fd 결속 fixed temp→atomic rename, typed failure·crash fixture; capture/coordinator/AppKit 비소유), control_socket.zig(1b: 컨트롤 플레인 unix socket bind/accept/peer-cred/hello + A2a `serveReadOnly` per-connection read-only serve 함수(`readInto`+`Framer`→`dispatchReadOnly`→응답+`\n`) + poll-gated accept·read-timeout 헬퍼(A2b용) — macOS-gated 테스트), control_server.zig(**A2b 라이브 서버**: 앱-전역 소켓+accept 스레드+메인 marshal 큐(`ControlRequestQueue`·`PendingRequest`, generic·AppSession 비의존, §8.8 lock-order 준수) — macOS-gated 테스트), app_host_abi.zig(A2b start/drain/stop ABI + collectSessionsInto 멀티창 조립·auth(metadata:self)·dispatch 배선), app_session.zig 안 A1 컨트롤 플레인 per-session collector(collectSessionInto/collectSession — 실 트리→중립 SurfaceDto[]+membership, private 자산 재사용 위해 세션 모듈에 co-locate)
     session_host.zig     P3 barrel(protocol·framing·screen_stream·registry·server·socket_server re-export + test 집약, test module은 socket용 link_libc). 구현은 session_host/에 목적별로.
     session_host/        P3 진행: entrypoint.zig(hidden `__session-host` CLI command의 launcher/main 공용 단일 출처),

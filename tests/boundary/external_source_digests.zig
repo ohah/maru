@@ -131,7 +131,7 @@ pub const inventory = [_]Proof{
     // origin/HEAD`)과 `Job.base`가 늘고, `submit`이 그 기준을 받아 세 명령(ahead/behind·merge-base·브랜치
     // 범위)에 같은 값으로 넘긴다. `submitBranches`는 목록 종류를 인자로 받는다(전환용/기준 후보용).
     // **count는 그대로다** — 새 진입점이 아니라 기존 두 진입점의 인자가 늘었을 뿐이다.
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "bb9c34ed8bc86258092871e45f518e4adc350f57ac6b28cf1a99345bad204838" },
+    .{ .path = "src/app/git/backend.zig", .count = 2, .digest_hex = "bb9c34ed8bc86258092871e45f518e4adc350f57ac6b28cf1a99345bad204838" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.

@@ -47,8 +47,8 @@ pub const content_menu = maru.session.content_menu;
 pub const file_tree = maru.session.file_tree;
 pub const file_tree_navigation = maru.session.file_tree_navigation;
 pub const dock_view_bar = chrome.components.dock_view_bar;
-pub const git_backend_mod = @import("git_backend.zig");
-const turn_index_cache = @import("turn_index_cache.zig"); // 턴 스냅샷 임시 index 의 수명(창 닫힘에 삭제·오래된 형제 스윕)
+pub const git_backend_mod = maru.app.git_backend;
+const turn_index_cache = maru.app.turn_index_cache; // 턴 스냅샷 임시 index 의 수명(창 닫힘에 삭제·오래된 형제 스윕)
 pub const git_write_command = maru.session.git_write_command; // 쓰기 argv·안전 술어(읽기와 환경·플래그가 갈린다)
 pub const scm_view = maru.session.scm_view;
 pub const file_panel_bridge = maru.session.file_panel_bridge;
@@ -79,20 +79,20 @@ pub const coretext_bridge = @import("coretext_smoke_bridge.zig");
 pub const coretext_frame_builder = @import("coretext_frame_builder.zig");
 pub const coretext_shaper = @import("coretext_shaper.zig"); // present §10.7 grid shaping 진단 시계 주입 지점
 const coretext_smoke_bridge = @import("coretext_smoke_bridge.zig"); // present §10.7 native 단계 통계 getter
-pub const file_tree_backend = @import("file_tree_backend.zig");
-const detached_worker_wait = @import("detached_worker_wait.zig");
+pub const file_tree_backend = maru.app.file_tree_backend;
+const detached_worker_wait = maru.app.detached_worker_wait;
 pub const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
-pub const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
-pub const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
+pub const agent_session_archive_backend = maru.app.agent_session_archive_backend;
+pub const agent_session_archive_detail_backend = maru.app.agent_session_archive_detail_backend;
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
-pub const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
+pub const chrome_draw_lowering = maru.app.chrome_draw_lowering;
 pub const chrome_system_text = @import("chrome/system_text.zig");
 test {
     // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
     _ = @import("chrome/lab.zig");
-    _ = @import("chrome/chrome_draw_lowering.zig");
+    _ = maru.app.chrome_draw_lowering;
     _ = @import("app_session/turn_store.zig"); // AT7: 턴 링 디스크 저장소의 판정자(배선 전에는 여기서만 분석된다)
 }
 pub const agent_session_archive_view = maru.session.agent_session_archive_view;
@@ -7998,7 +7998,7 @@ pub const AppSession = struct {
             errdefer self.file_tree.deinit();
             self.remote_explorer = .{ .tree = file_tree.Tree.init(allocator) };
             errdefer self.remote_explorer.deinit(allocator);
-            self.file_tree_backend = try file_tree_backend.Backend.init(allocator, io);
+            self.file_tree_backend = try file_tree_backend.Backend.initWithRemote(allocator, io, @import("file_tree_remote.zig").transport);
             errdefer self.file_tree_backend.deinit();
             self.file_tree_mutation_backend = try file_tree_mutation_backend.Backend.init(allocator, io);
             self.agent_session_archive_backend = try agent_session_archive_backend.Backend.init(allocator, io);

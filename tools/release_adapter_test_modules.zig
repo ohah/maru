@@ -12,7 +12,7 @@ pub const Row = struct { root: []const u8, names: []const []const u8, deps: []co
 
 pub const rows = [_]Row{
     .{ .root = "src/platform/macos/product_identity.zig", .names = &.{"product_identity"}, .deps = &.{} },
-    .{ .root = "src/platform/macos/safe_open.zig", .names = &.{"safe_open"}, .deps = &.{} },
+    .{ .root = "src/platform/posix/safe_open.zig", .names = &.{"safe_open"}, .deps = &.{} },
     .{ .root = "src/platform/macos/session_host/bounded_process.zig", .names = &.{"bounded_process"}, .deps = &.{} },
     .{ .root = "src/platform/macos/session_host/release_manifest.zig", .names = &.{"release_manifest"}, .deps = &.{} },
     .{ .root = "src/platform/macos/session_host/release_adapter_apple_product.zig", .names = &.{"release_adapter_apple_product"}, .deps = &.{ "product_identity", "release_manifest" } },

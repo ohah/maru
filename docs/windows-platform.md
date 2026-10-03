@@ -8921,6 +8921,184 @@ CAPTURE-OK ... distinct_colors=149
 | **W8.6** | **웹 패널** — WebView2 + DirectComposition. **§8 의 합성 모델 결정이 선행이다** | 결정 대기 |
 
 **웹 패널을 마지막에 두는 이유**는 그것만 미결 결정에 걸려 있기 때문이다 — 앞의 다섯을 막지 않는다.
+### 2m.115 릴리스 publication 판정도 셸 없이 돈다 (W8.24, 2026-10-03)
+
+`zig build check-github-release-publication`은 이제 `tests/release_workflow/publication.zig`를
+실행한다. 기존 스크립트의 legacy writer 부재·local action 호출 수·단계 순서·덮어쓰기 금지·토큰
+배치·tag-only 서명·외부 Action SHA 및 개수·checkout credential 보존 금지를 유지했다.
+실제 GitHub 릴리스를 만들지 않고 저장소 파일만 읽는다. 기본 `test`도 같은 판정에 연결한다.
+
+Windows Zig 0.16.0에서 정상 입력은 exit 0이다. 적대적 검증 5회는 각각 checkout을 mutable tag로
+변경, 수동 서명 trigger 추가, `--clobber` 추가, draft 단계 제거, `GH_TOKEN` 하나 제거다.
+다섯 변이 모두 exit 1이고, 매회 원본 바이트를 복원한 뒤 최종 정상 입력은 다시 exit 0이다.
+옛 스크립트는 제거해 판정의 두 사본을 남기지 않았다. W8.24의 셸 동작 자체를 재는 두 판정과
+다른 Windows 지원 잔여 항목은 아직 완료되지 않았다.
+
+전체 `check-boundaries`를 Windows에서 실행하는 중, `handoff_codec.zig`의 측정 보조 함수가
+`std.c.clock_gettime`을 직접 불러 컴파일이 실패하는 것도 발견했다. 제품 codec과 판정 범위는
+그대로 두고 측정 시계만 `std.Io.Clock.awake.now(std.testing.io)`로 바꿨다.
+`zig build test-handoff-scrollback-budget`은 Windows에서 exact-count 5/5 통과했다.
+원격 감시 모듈의 POSIX 프로세스/파이프 타입도 별도의 기존 Windows 컴파일 실패로 발견했고,
+그 수정과 검증은 아래 2m.116에 기록했다.
+
+### 2m.116 원격 감시 상태 판정은 Windows에서도 실행한다 (2026-10-03)
+
+`WatchStream.pid`를 기존 중립 `pty.ChildPid` 계약으로 바꿨다. POSIX 타입은 그대로이며,
+Windows libc의 HANDLE 타입을 비활성 채널의 PID 0으로 초기화하던 컴파일 실패가 사라졌다.
+POSIX 정리 함수를 Windows에서 실제 호출하면 명시적으로 panic한다. Windows 원격 감시
+프로세스 구현을 대신하거나 성공으로 처리하지 않는다.
+
+`zig build test-remote-watch-module`은 Windows에서 전체 11개 판정을 컴파일하고 상태·출력
+판정 8개를 통과한다. POSIX 파이프/실물 sshd 통합 판정 3개는 Windows에서 SKIP이고,
+POSIX에서는 기존 실행을 유지한다. 적대적 검증 5회는 영구 오류를 일시 오류로 변경,
+루트 오류의 의미 제거, pause 시 backoff 제거, pause 시 root 기억 제거, 알 수 없는 출력을
+change로 인정하는 변이였다. 다섯 변이는 컴파일 성공 뒤 행동 판정에서 각각 실패했다.
+원본 복원 뒤 정상 입력은 exit 0이다. 첫 탐색의 미사용 인자 컴파일 오류는 이 5회에 세지 않았다.
+
+### 2m.117 편집기 세로 막대를 실제로 잡을 수 있다 (W8.17⒞ 후속, 2026-10-03)
+
+기존 중립 frame은 이미 세로 막대와 기하를 만들고 있었지만 Windows 입력은 가로 막대만 받았다.
+세로 입력을 `scroll_area.Drag`에 배선하고 양쪽 축 모두 down 시점에 그린 기하를 사용한다.
+이미 잡은 드래그는 caption·sidebar·dock 영역 판정보다 먼저 처리한다. release의 마지막 좌표는
+프레임 tick에 반영한 뒤 해제하며, 파일/뷰가 바뀌면 이전 드래그를 취소한다.
+세로 상한도 frame의 `max_offset_px`에서 읽어 가로 막대가 먹는 높이를 빼먹지 않는다.
+
+`zig build win32-terminal-smoke`의 실제 Win32 창에서 적대적 시나리오 5개가 통과했다:
+thumb 드래그와 화면 digest 변화, track 끝 클릭과 정확한 끝 도달, move 없이 release만 하는
+플릭, pane 밖 위쪽 release와 위치 0 clamp, 드래그 도중 터미널로 전환하고 capture 취소.
+다섯 판정 중 하나라도 실패하면 스모크 자체가 오류로 종료한다. 모든 각본은 `smoke`로 가른다.
+기존 스핀 790의 휠 판정은 현재 25줄뿐인 YAML 파일에 기대어 scroll_ok=false였으므로,
+이미 열린 충분히 긴 문서에서 휠을 재는 늦은 단계로 옮겼다. 0→30행 이동과 digest 변화로 통과한다.
+
+별도로 agent snapshot 판정은 worker 완료 전에 고정 스핀에서 읽은 값을, 나중에 받은
+publication ack와 합치고 있었다. 측정은 요청한 snapshot의 실제 publication 직후로 옮겼다.
+편집·safe-save·외부 파일 감시·키보드 이동·wrap은 이 변경의 완료 범위에 포함하지 않는다.
+최신 제품 스모크에서 위 5개·휠 스크롤·agent snapshot 정리는 모두 통과했다.
+`sidebar_clip`·`dock_clamp` 판정은 실패가 남아 전체 Windows 제품 검증 통과로 보고하지 않는다.
+Windows의 `zig build check-boundaries -j4`와 `zig build check-targets -j2`는 exit 0이었다.
+
+### 2m.118 Sidebar clip·dock clamp 판정 입력과 측정 시점 수정 (2026-10-03)
+
+기존 `sidebar_clip` 판정은 트랙의 임의 비율 0.37을 눌렀다. 카드가 일부 잘려도 그 부분이
+여백이면 글리프는 하나도 잘리지 않아 `partial>0, clipped=0`이었다. 이미 그려진 첫 글리프의
+실제 사각형으로 스크롤을 정해 그 글리프 절반이 헤더 경계를 넘도록 바꿨다. 정상 입력에서
+`partial=36, clipped=15, over_header=0`을 관측했다. 실제 clip 구현은 그대로다.
+
+`dock_clamp`는 고정 스핀에서 읽은 행 목록이 유효하지 않았고, 초기 스크롤이 0이라는 가정 때문에
+접을 폴더를 화면 밖으로 밀기도 했다. 그런데 `toggleTreeRow` 계약을 다시 확인하니 접기는
+비동기 스캔을 제출하지 않고 행 목록을 즉시 갱신했다. 따라서 scan completion을 기다리는 방식도
+맞지 않았다. 같은 제품 토글 경로로 기억해 둔 폴더 경로를 접고, 실제 frame clamp와 redraw 뒤
+상태를 측정하도록 바꿨다. 판정 입력도 행 수·폴더 자식 수·휠 설정에 기대지 않도록 접기 전 실제
+스크롤 상한으로 이동시킨다. 큰 폴더를 고른다는 가정 대신 두 행만 줄어도 상한 축소를 시험한다.
+
+clip 적대적 검증 5회는 clip origin +1px, 높이 +1px, UV 보정 제거, 완전히 가려진 셀 유지,
+부분적으로 보이는 셀 제거다. `zig test src/platform/windows/d3d11_cells.zig --test-filter clipCell`의
+행동 판정에서 다섯 변이를 모두 거부했고, 원본 바이트 복원 뒤 2/2 통과했다. 빌드와 소스 변이의
+동시 읽기 가능성을 배제하기 위해 복원 후 제품 스모크를 별도 `.zig-cache/windows-verified`에서
+다시 빌드했다. 최종 소스에서는 baseline → clamp 변이 → 원복 순서로 제품 스모크를 직렬 실행했다.
+정상·원복은 모두 `rows 86→34, off 1097→109, max_after=109, drawn=29, draw_start=5/5`로
+통과했다. clamp 대입을 `@max(dock_scroll_px, dock_max)`로 바꾸자 `off=1097, drawn=0`으로
+실패했고, `ChromeScrollVerificationFailed`와 exit 1을 반환했다. 이 두 판정은 이제 false를
+출력하고 exit 0으로 끝내지 않는다. 다른 미검증 항목까지 통과했다는 뜻은 아니다: 같은 실행의
+`agent_detail_scroll`은 `judgeable=false`여서 여전히 검증되지 않았다.
+
+### 2m.119 D3D11 그라디언트 채움과 원래 paint geometry (2026-10-03)
+
+W8.21⒞의 quad 채움은 이제 Windows에서도 세로(top→bottom)·가로(left→right) 두 색으로
+그린다. 방향만 있고 끝 색이 없으면 macOS `chrome_draw_lowering`처럼 solid로 접는다.
+`Cell`의 글리프 필드를 재활용하지 않고 `fill_end`, `paint_rect`, `paint_info`를 추가했다.
+인스턴스 stride는 80→128 bytes이고, 필드 오프셋·입력 레이아웃을 컴파일 때 함께 검사한다.
+기존 글리프 셀은 새 필드 기본값 0을 쓰므로 기존 atlas·coverage 규약을 유지한다.
+
+clip은 viewport와 quad 자체 clip의 교집합이다. GPU에는 잘린 표시 사각과 원래 paint 사각을
+별도로 보내므로, clip 시작점에서 그라디언트가 다시 시작하지 않고 둥근 모서리도 원래 위치에
+남는다. 보간은 HLSL `lerp`이며 색 양 끝 모두 quad의 alpha를 따른다.
+
+검증: `zig test src/platform/windows/d3d11_cells.zig --test-filter paintCell`의 행동 판정에
+원래 사각을 표시 사각으로 치환·방향 뒤집기·끝 색을 시작 색으로 치환·끝 알파를 1로 치환·
+끝 색 누락에도 방향 켜기의 변이 5개를 순차 적용했다. 다섯 회 모두 FAIL, 원본 바이트 복원 뒤
+1/1 통과했다. 실제 `d3d11-cells-smoke`는 hardware driver에서 240 frame을 present했다.
+고정 fixture 세 개(세로·가로·잘린 가로)를 실제 MaruWindowClass의 PrintWindow 캡처로 확인했고,
+7개 픽셀을 예상 보간 값 ±3으로 대조해 모두 통과했다. 잘린 가로의 첫 샘플은 RGB 190,0,64로
+원래 구간의 1/4 지점이며, 빨강으로 다시 시작하지 않았다.
+
+이는 채움의 증거다. gradient와 border를 함께 선언한 quad의 border 경로는 아직 기존 solid-only
+분기를 쓴다. 둥근 border의 정확한 표현까지 완료했다고 주장하지 않는다. 추가 대조에서 기존
+Windows 테두리 fallback이 폭 배열을 `[top,bottom,left,right]`로 읽는 오류도 확인했다. 공유 계약은
+`[top,right,bottom,left]`이고, 이 순서·독립 border alpha·gradient+border 조합을 다음 수정에서 함께
+처리한다. GPU fixture는 셀 파이프라인을 직접 쓰므로 chrome op lowering까지의 픽셀 검증은
+그 다음 fixture에서 연결해야 한다.
+
+최종 소스 검증: `win32-terminal-smoke`, `check-targets -j2`, `check-doc-links`,
+`check-boundaries -j4` 모두 exit 0. D3D11 셀 단위 판정 7/7, smoke 단계 경계 1/1도 통과했다.
+터미널 스모크의 editor vertical drag 5개·sidebar clip·dock clamp는 모두 true였다.
+`agent_detail_scroll`은 여전히 judgeable=false이므로 이 항목의 완료 증거로 쓰지 않는다.
+
+### 2m.120 Gradient border를 같은 GPU quad에서 그린다 (2026-10-03)
+
+§2m.119의 남은 border를 채움과 같은 셰이더에서 합성한다. 공유 `draw.Quad`의
+`border_widths=[top,right,bottom,left]`와 `border_alpha orelse alpha`를 그대로 내린다.
+기존 사각 넷 fallback은 순서를 `[top,bottom,left,right]`로 잘못 읽었고, 코드 순서상
+border 셀을 채움보다 먼저 넣었다. 이 fallback을 제거해 fill이 stroke를 뒤에서 덮는 경로도 없앴다.
+끝 색이 없어 solid로 접힌 선언에도 border가 유지된다.
+
+원래 paint 사각을 기준으로 각 변까지 거리를 계산하므로 한 변만 지정하면 다른 변에 새 stroke를
+만들지 않는다. clip으로 생긴 경계에도 stroke와 radius를 새로 만들지 않는다. 채움·테두리 RGB
+혼합은 macOS quad와 같은 sRGB↔linear 변환으로 하고, alpha는 독립적으로 혼합한다.
+누락된 border role은 폭도 0으로 만든다. 재사용된 셀에서 role을 제거했을 때도 이전 stroke를
+지우도록 `withBorder`를 수정했고, 수정 전 FAIL·수정 후 PASS로 확인했다.
+
+`Cell`은 border 폭·색 필드를 추가해 **160 bytes**다(초기 80의 두 배). 기존 glyph 인스턴스도 같은
+stride를 쓰는 비용이 있으며, offset·input layout·stride는 컴파일 단언이 지킨다. 여기서 성능
+예산 통과나 전용 quad pipeline 최적화까지 했다고 주장하지 않는다.
+
+실제 픽셀 fixture는 이제 `paintCell` 직접 호출 대신 제품 `appendPaintOps`의 chrome op lowering을
+쓴다. 실제 hardware D3D11 창의 캡처를 `tools/windows/check-paint-pixels.ps1`로 검사한다.
+client origin은 DPI·창 테두리에 따라 달라지므로 명시적으로 넘긴다(이번 캡처는 X=8, Y=31).
+`capture-window.ps1 -TargetProcessId`는 변이 실행의 소유 프로세스만 캡처하도록 추가했다.
+
+적대적 검증 5회는 **실제 셰이더**에 bottom 폭의 슬롯 오독·right 거리 방향 오독·독립 alpha 제거·
+원래 paint 사각 대신 잘린 표시 사각 사용·stroke RGB 무시를 넣었다. 각 변이는 정상 컴파일·
+240 frame present·소유 창 캡처 뒤 픽셀 판정에서 exit 1이었다. 네 번째의 첫 시도는 없는 필드를
+참조한 shader compile 실패여서 세지 않았고, 정상 컴파일되는 변이로 다시 확인했다.
+원본 소스·실행 파일 복원 뒤 초기 24개 샘플이 통과했다. 이어 rounded corner·누락 role·반투명
+border·면적 0 clip을 추가한 **최종 28개 샘플** 모두 통과했고, 셀 단위 판정 8/8·smoke 단계
+경계 1/1도 통과했다. 최종 소스의 `win32-terminal-smoke`, `check-targets -j2`,
+`check-doc-links`, `check-boundaries -j4`도 모두 exit 0이었다. 기존 editor drag 5개·sidebar clip·
+dock clamp는 true였고, `agent_detail_scroll`은 여전히 judgeable=false여서 완료 증거로 쓰지 않는다.
+
+### 2m.121 파일 열기 실패를 Notice로 알린다 (2026-10-03)
+
+W8.21⒜의 조용한 거절을 기존 `chrome.components.notice`에 연결한다. 지원하지 않는 종류·웹 패널 필요·읽기 실패(권한/4 MiB 상한)·메모리 부족을 서로 다른 영어/한국어 정적 문자열로 알린다. 실패 경로가 트리 행 문자열을 빌리거나 추가 할당을 요구하지 않는다. 성공한 파일에는 Notice를 열지 않는다.
+
+입력 순서는 Confirm → Notice → 검색/편집기/도크/터미널이다. Notice를 닫는 키는 셸로 보내지 않고, IME preedit도 전달하지 않는다. 마우스는 네이티브 캡션 버튼을 처리한 뒤 차단하므로 최소화·최대화·닫기는 사용할 수 있지만 덮인 앱 컨트롤은 누를 수 없다. 에디터 막대의 캡처도 Notice를 여는 순간 끝낸다. 렌더는 기존 Notice view의 ops를 Confirm과 공유하는 Windows modal lowering에 전달한다.
+
+함께 드러난 할당 실패 누수를 고쳤다. `openFileFor`는 error union 대신 tagged outcome을 반환하므로 기존 `errdefer`는 `.out_of_memory` 반환에 실행되지 않았다. 이제 소유권 이전 여부를 따라 text·path·line 배열·start 배열을 해제한다. `zig build test-win32-file-open`은 실제 임시 파일의 모든 할당 실패 prefix, 읽기 실패/상한/종류 구분과 두 언어 문구를 검증한다. 작업 트리 파일에 쓰지 않는다.
+
+제품 스모크는 실제 `.md` 행 클릭 → Notice의 메시지/그려진 cell·glyph → 다른 세션 카드 클릭 차단 → 터미널 위 문자키 닫기와 PTY 전달 차단을 관찰한다. `notice_ok=false`이면 `error.FileOpenNoticeVerificationFailed`로 종료한다. 원래 마우스 검증은 현재 세션 카드를 눌러 차단 제거 변이를 놓쳤다. 다른 세션을 대상으로 하고 실제 `sidebar_card_clicks`도 비교해 화면 변화만으로 판정하던 빈틈을 닫았다.
+
+적대적 검증은 안내 제거·오류 이유 바꿈·키 라우팅 제거·포인터 차단 제거·렌더 제거의 컴파일 가능한 제품 변이 다섯 가지를 각각 실제 창에서 실행한다. 다섯 변이가 모두 동작 판정에 거부되고 원복 스모크가 통과한 로그를 완료 근거로 삼는다. 컴파일 오류로 끝난 시도는 횟수에 넣지 않는다. `--hold-notice-ms`는 실제 Notice glyph가 present된 뒤 선택적으로 멈추는 캡처용 옵션이며 기본값 0이다.
+
+편집/safe-save·외부 변경 감시, 연 파일 수 상한, 모달 위치 비교, 웹 패널과 다른 Windows 잔여 항목은 이 변경으로 완료 처리하지 않는다.
+
+### 2m.122 편집 문서 소유권과 Windows 코드 위치 (2026-10-03)
+
+W8.17 편집·저장의 선행 작업으로 Windows 파일 뷰의 text/path를 앱 수명의 `document_registry.Registry` view lease에서 빌린다. 정본은 L2 `EditableFile`과 `document_state.State`가 소유하고 구문 provider·표시 줄·오프셋·스크롤은 Windows view에 남는다. 닫기와 앱 종료는 view 캐시를 해제한 뒤 lease를 놓는다. 파일 읽기 실패부터 Registry 게시까지 모든 할당 실패 prefix를 검사한다.
+
+BOM은 `FileFormat`에 보존하고 내용 오프셋에서는 제외한다. CRLF와 혼합 줄바꿈을 원형대로 보존하며 표시 줄과 문서 offset은 기존 LineIndex에서 가져온다. 이전 폭 계산은 긴 첫 줄이 폭 상한에 닿으면 루프를 끝내 뒤쪽 start 배열을 초기화하지 않았다. 이제 폭 계산만 상한에서 멈추고 모든 줄 start를 만든다. 실제 임시 파일로 BOM·CRLF·한글·상한보다 긴 첫 줄·뒤쪽 줄·dirty 초기값·본문과 경로 소유자·close 후 lease 무효화를 검증한다.
+
+코드는 `platform/windows/editor/document.zig`로 분리한다. 테스트 namespace를 root에서 명시적으로 참조해 이동 뒤에도 `test-win32-file-open`이 여섯 테스트를 실제 실행한다. 제품 변이 5회(줄 start 오염·줄바꿈 표시 유출·잘못된 saved hash·저장 계약 연결 전 writable 허용·폭 상한 조기 break)를 모두 거부하고 원복은 통과했다. 현재 편집기는 계속 읽기 전용이며 이 항목은 편집/safe-save 완료가 아니다. 사용자는 기존 safe-save 계약을 유지한 Windows 네이티브 저장 구현을 승인했다. 네이티브 저장·입력·undo·dirty 닫기·외부 변경 감시는 계속 구현한다.
+
+### 2m.123 Native save의 핸들 기준 경로 순회 (2026-10-03)
+
+Windows safe-save의 첫 I/O 단계는 `platform/windows/editor/path.zig`다. 사용자가 고른 root directory handle을 기준으로 각 segment를 `NtCreateFile(RootDirectory, FILE_OPEN_REPARSE_POINT)`로 열고 attribute-tag를 조회해 reparse point를 거부한다. 빈 요소·절대/장치 경로·`.`/`..`·ADS의 colon·NUL은 syscall 전에 거부한다. NT의 `.` 이름은 `OBJECT_NAME_INVALID`로 실측되어 선택된 root는 빈 relative name으로 다시 연다. directory는 `FILE_LIST_DIRECTORY`, leaf는 `FILE_READ_DATA`를 써서 같은 bit의 의미를 구분한다. API 근거는 [Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)이다.
+
+`Pinned`가 root부터 모든 중간 directory handle을 보관하며 directory는 `FILE_SHARE_DELETE`를 허용하지 않는다. 저장 호출은 commit까지 그 수명을 유지해야 한다. leaf의 reparse/type/link count도 조회하고, 원본과 연결된 다른 이름을 조용히 끊지 않도록 link count가 1이 아니면 `HardLinked`를 반환한다. pinned parent와 original handle을 저장 단계에 넘긴다. 실패와 정상 해제는 모든 allocator prefix와 handle을 정산한다. 각 OutOfMemory prefix 뒤에는 native DELETE-access open 성공도 검사해 heap 누수뿐 아니라 남은 kernel handle 잠금까지 판정한다. Win32 fixture 호출 규약은 기존 `windows/abi.zig`를 사용한다.
+
+`test-win32-safe-save`는 실제 임시 NTFS root에서 경로 거절, 부모 pin/해제, 할당 실패 전수, hard link와 junction을 검증한다. junction은 [Microsoft REPARSE_DATA_BUFFER](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_reparse_data_buffer)의 mount-point 형식과 `FSCTL_SET_REPARSE_POINT`로 만들며 shell·관리자 권한·symlink developer mode에 의존하지 않는다. root 밖 fixture가 읽히거나 변하지 않았는지도 검사한다.
+
+부모 rename만 보던 초기 판정은 SHARE_DELETE 허용 변이를 놓쳤다. 다른 열린 descendant도 rename을 막을 수 있기 때문이다. 이제 같은 부모에 `DELETE` 권한으로 실제 native handle을 열어 pin 중 `STATUS_SHARING_VIOLATION`, 해제 후 `STATUS_SUCCESS`를 확인한다. traversal/ADS 허용·부모 delete 공유·junction follow·hard link 허용의 다섯 제품 변이가 모두 실패하고 원복 7/7 통과했다. 현재 단계는 파일 본문을 쓰지 않으며 GUI 저장 완료가 아니다. metadata 보존·temp/write/flush·CAS/commit·failure cleanup과 GUI 저장 연결은 계속 구현한다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어
@@ -10337,3 +10515,297 @@ WebView2에는 대응물이 없다. UDF는 항상 생기고 지울 수 있을 �
 > 기본값은 PowerShell(§3.1a), 바꾸는 수단은 `shell.windows-shell`(종류)·`shell.command[.windows]`(경로),
 > config의 OS 분기는 **일반 메커니즘**(키 접미)으로 넣었다. 그 셋의 우선순위와 규칙은 §3.1a와
 > [configuration.md](configuration.md) "OS별 값"이 소유한다.
+
+### 2m.124 공통 파일 트리 worker의 macOS 경로 결합 해소 (2026-10-03)
+
+사용자가 요청한 폴더 결합 정리로 worker를 `src/app/file_tree_backend.zig`로 옮겼다.
+공통 worker는 OS SSH 구현을 직접 import하지 않고 `RemoteTransport`를 초기화 시 받는다.
+macOS host는 `platform/macos/file_tree_remote.zig`의 기존 전송을 주입하고,
+Windows는 기존 로컬 파일 트리 경로를 같은 `maru.app` 타입으로 소비한다.
+전송 없는 원격 submit은 거절하며 local scan으로 바꾸지 않는다.
+Windows 파일 identity·교체·링크·핸들 수명 판정자는 그대로 실행되고,
+추가 전송 판정자는 실제 worker의 비동기 결과와 path 소유권을 확인한다.
+42개 등록 중 Windows 33 pass·9 skip, 실행 동작을 깨뜨린 변이 5개 모두 검출·복구 통과.
+Git·텍스트 adapter와 safe-save 전체는 완료되지 않았다.
+
+### 2m.125 Windows safe-save의 미공개 native staging 파일 (2026-10-03)
+
+`platform/windows/editor/stage.zig`가 고정된 부모 handle 아래에 임시 파일을 만든다.
+[Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)의
+`RootDirectory`·`FILE_CREATE`·동기 nonalert·`FILE_OPEN_REPARSE_POINT`·`FILE_DELETE_ON_CLOSE`를 사용한다.
+파일 이름은 secure random 128bit이며 충돌은 최대 16번 다시 시도한다. 다른 reader/writer/delete
+handle과 공유하지 않고, 기존 파일을 여는 OPEN_IF/overwrite fallback은 없다.
+미공개 파일의 정리는 경로 delete가 아니라 소유한 kernel handle의 close다. 이름 소유권을 만드는
+할당이 실패해도 handle을 닫아 파일을 정리한다. 부모 pin은 staging과 향후 commit 동안 유지한다.
+
+본문은 positional write와 정확한 setLength로 교체한 뒤 sync한다. 짧게 다시 쓰면 이전 꼬리를
+남기지 않는다. 실제 파일의 sync endpoint만 실패시키는 fault injection은 오류가 호출자로
+전파되고 원본 내용이 유지되며 미공개 파일이 정리됨을 확인한다. metadata 복사에 필요한
+READ_CONTROL·WRITE_DAC·WRITE_OWNER·READ_EA·WRITE_EA는 생성 handle에서 요청하고 실제
+FileAccessInformation으로 grant를 확인한다. **이것은 메타데이터 복사 완료가 아니다.**
+ACL/owner·부가 stream·속성의 실제 보존, 원본 충돌 검사와 publish/rollback은 다음 단계다.
+
+`test-win32-safe-save`는 13개 등록(익명 2·path 5·stage 6)을 강제하며 Windows 13/13 통과했다.
+충돌 파일을 OPEN_IF로 열기·DELETE_ON_CLOSE 제거·잘못된 본문 길이·sync 생략·metadata 권한
+누락의 다섯 제품 변이가 모두 실행 판정에서 실패했고 정확한 원본 bytes 복구 후 통과했다.
+여전히 GUI save는 연결되지 않았고 Windows 편집기를 저장 가능하다고 표시하지 않는다.
+
+
+### 2m.126 Windows safe-save의 읽을 수 있는 메타데이터 복사 (2026-10-03)
+
+`platform/windows/editor/metadata.zig`는 미공개 staging 파일에 owner·group·DACL,
+EA와 부가 stream을 복사한다. [Microsoft BackupRead](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-backupread)와
+[BackupWrite](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-backupwrite)의
+동기 handle·security 처리·context abort 계약을 따른다. ReOpenFile은 원본 handle의
+객체를 다시 열고 데이터 쓰기와 삭제 공유를 차단한다. 속성 변경 권한은 이 공유 차단과
+별개이므로 복사 전후 ChangeTime·LastWriteTime·속성·크기·link 수를 확인한다.
+
+실제 Windows 파일에서 보호된 DACL·owner/group SID·EA 값·생성 시각·숨김 속성과
+두 부가 stream을 비교한다. 128KiB를 넘는 stream은 64KiB 버퍼 경계를 넘겨 검증한다.
+복원 도중 두 번째 native write를 실패시키는 판정자는 두 backup context의 abort,
+원본 보존과 미공개 파일 정리를 확인한다. namespace record와 경로를 포함한 stream 이름은 거절한다.
+
+**전체 메타데이터 보존이나 저장 완료를 뜻하지 않는다.** audit SACL은
+ACCESS_SYSTEM_SECURITY가 없으면 backup API가 생략한다. 결과의 `audit_complete`는 false이며
+publish 허가로 사용할 수 없다. 압축·희소·암호화·읽기 전용 파일과 미지원 stream은
+별도 구현이 필요해 현재 복사를 거절한다. 최종 CAS·교체·rollback·GUI 저장 연결과
+실앱 편집→저장→재열기 검증은 남아 있다.
+
+
+### 2m.127 Git 임시 index 정리의 공통 계층 이동 (2026-10-03)
+
+Git 작업자와 macOS 세션이 공유하는 index 수명 코드를 `app/turn_index_cache.zig`로
+옮겼다. 두 소비자는 `maru.app.turn_index_cache`를 사용한다. 정리 규칙은 유지한다:
+정해진 접두의 일반 파일만 대상으로 하며, 오래된 파일만 지우고 스윕은 프로세스당 한 번이다.
+Windows에서 실제 파일을 사용하는 기존 네 판정자가 모두 통과했다. 접두 반전·시간 경계 변경·
+반복 스윕·스윕 삭제 실패·닫기 삭제 생략의 다섯 변이는 모두 실행 판정에서 실패했고,
+원본 bytes 복구 뒤 네 판정자가 다시 통과했다. Git 작업자 본체와 POSIX 안전 열기의 분리는 남아 있다.
+
+
+### 2m.128 텍스트 요청을 네이티브 셰이핑과 분리 (2026-10-03)
+
+`app/chrome_text_request.zig`가 owned Request·Face·run 선택·폭 예산·요청 복사를 소유한다.
+네이티브 system_text는 같은 타입과 함수를 사용하며 draw lowering은 이 공통 모듈을 직접
+참조한다. CoreText shape/resolve는 아직 macOS adapter에 남아 있다. 기존 요청 생성 판정자
+세 개가 통과했다(프로젝트 모듈을 사용하는 실행에서는 익명 집계 21개를 포함해 24/24).
+아이콘 선택·폭 계산·화면 위 run 누락·family 복사·빈 icon-in-rect 누락의 다섯 컴파일 가능한
+변이가 모두 실행 판정에서 실패했고 정확한 bytes 복구 후 통과했다. 컴파일 오류 시도는 제외했다.
+
+실제 Windows SCM 창 스모크는 240프레임을 표시하고 파일명 4/4·행 hit 4/4·접기·선택·
+hover·press 검사를 통과했다. 앱 빌드·플랫폼 대상·문서 링크·전체 경계 검사는 통과했다.
+이것은 편집/저장 실앱 검증이 아니다. draw lowering의 물리 위치와 네이티브 텍스트 adapter의
+추가 분리, Git 작업자 본체, 최종 safe-save와 GUI 저장 연결은 남아 있다.
+
+
+### 2m.129 draw lowering의 공통 런타임 이동 (2026-10-03)
+
+`app/chrome_draw_lowering.zig`가 semantic ops를 renderer-neutral DrawList·glyph placement·
+background quad로 투영한다. main·macOS AppSession·Chrome Lab은 같은 `maru.app` 구현을
+참조한다. 네이티브 셰이핑 호출은 없다. cluster 방출 allowlist의 경로를 옮겼고 공통 텍스트
+요청과 lowering을 번역 문자열 검사 범위에도 넣어 이동으로 방어가 사라지지 않게 했다.
+
+기존 lowering 판정자 16개가 통과했다(익명 집계 포함 37/37). 텍스트 아래 layer·소수점 origin·
+독립 border alpha·gradient 방향·호출자의 quad layer를 깨뜨린 다섯 변이가 모두 실행 판정에서
+실패했고 정확한 bytes 복구 후 다시 통과했다. native system_text의 추가 분리와 Git 작업자,
+전체 safe-save·편집 입력·GUI 저장·실앱 저장 검증은 아직 진행 대상이다.
+
+
+### 2m.130 Git diff의 Windows 네이티브 읽기와 공유 경로 권위 (2026-10-03)
+
+editor/path의 handle-relative 구현을 `platform/windows/relative_file.zig`로 옮겼다.
+저장은 기존 single-link 제약을 유지하며 `openRead`는 hard-linked regular file을 읽는다.
+둘 다 각 요소의 reparse point를 거절하고 부모 directory handle을 읽기/저장 동안 고정한다.
+Git worktree 읽기는 Windows에서 이 경로를 사용하고, POSIX는 기존 no-follow descriptor 읽기를
+유지한다. 없는 파일은 NotFound로 구분하며 Windows byte 수집은 16MiB를 초과하지 않는다.
+
+경로 테스트가 named module 이동 때문에 main artifact에서 빠지는 것을 발견해 별도 facade
+artifact로 복구했다. safe-save 게이트는 main 14/14(집계 2·stage 6·metadata 6), facade 29/29
+(집계 21·기존 저장 경로 5·새 읽기 경로 3)을 실행한다. 별도 Git native read 판정자는 실제
+한글 파일·없는 파일·traversal 거절·16MiB 상한을 검사해 통과했다. Windows runner는 현재
+expect-tests 인자를 읽지 않으므로 이 수는 실제 실행 출력으로 확인했다.
+
+hard link 읽기 거절·부모 delete 공유·reparse 판정 생략·없는 파일 오분류·잘림 표시 제거의
+다섯 컴파일 가능한 변이가 모두 실행 판정에서 실패했고 정확한 bytes 복구 후 두 게이트가
+통과했다. Git 작업자 본체의 공통 계층 이동, 최종 safe-save publish/rollback·GUI 편집/저장과
+실앱 저장 검증은 여전히 진행 대상이다.
+
+
+### 2m.131 Git 작업자의 공통 도메인과 이식 가능한 병합 fixture (2026-10-03)
+
+Git 작업자는 `app/git/backend.zig`, 임시 index 수명은 `app/git/index_cache.zig`에 둔다.
+협력 구현을 도메인 namespace로 묶는 project-structure 규칙을 따른다. 기존 `maru.app` facade
+이름은 유지하며 main·macOS 세션·병합·저장 충돌·턴 영속 소비자가 같은 작업자를 사용한다.
+POSIX no-follow 열기는 `platform/posix/safe_open.zig`가 소유하고 Windows는 native handle 경로를 쓴다.
+
+병합 fixture의 경로 조회·파일 쓰기·대기는 이식 가능한 I/O를 사용한다. Windows fixture Git은
+기존 CreateProcess 캡처로 실행한다. 임시 저장소 삭제는 resolve한 절대 대상이 현재 workspace의
+.zig-cache 안쪽인지 확인한 뒤 native I/O로 수행한다. fixture는 core.autocrlf=false로 원문 LF를
+유지한다. 프로덕션 executable 선택 계약은 바꾸지 않았다.
+
+Windows에서 8개 병합 판정자가 실행돼 통과했다(집계 21 포함 29 pass·1 skip). POSIX 셸 래퍼로
+실패를 주입하는 한 fixture는 Windows 대안이 아직 없다. 조상 판 배치·빈 조상·add/add·잘림 표시·
+꼬리 배치의 다섯 제품 변이가 실행 판정에서 실패했고 원본 복구 뒤 통과했다.
+전체 safe-save publish/rollback·GUI 편집/저장·실앱 저장 검증은 여전히 진행 대상이다.
+
+Git 쓰기 fixture도 공통 실행 경로를 사용해 Windows에서 POSIX spawn을 참조하지 않는다.
+Linux stdin은 socketpair와 send(MSG_NOSIGNAL)을 사용하고 macOS는 기존 pipe의
+F_SETNOSIGPIPE를 유지한다. Linux send(2)의 per-call 신호 억제와 EPIPE 계약을 따른다
+(https://man7.org/linux/man-pages/man2/send.2.html). 전역 SIGPIPE 처분은 바꾸지 않는다.
+
+### 2m.132 공통 chrome 텍스트 요청의 할당 실패 정리 (2026-10-03)
+
+run 배열의 공간을 먼저 확보한 뒤 텍스트를 복사한다. 기존 순서는 복사 성공 후 배열 확장 실패 때
+복사본을 잃었다. 24개 run으로 여러 배열 확장을 유발하고 모든 할당 실패 지점을 검사한 테스트가
+수정 전 누수를 재현했으며 수정 후 25개 판정이 통과했다. 누수 재발·폭 계산·화면 위 run 누락·
+family 혼동·빈 icon 누락의 다섯 실행 변이가 실패했고 원본 복구 후 통과했다.
+
+### 2m.133 전체 보안 설명자 복제의 명시적 권한과 검증 (2026-10-03)
+
+`platform/windows/editor/security.zig`는 열린 원본의 전체 보안 설명자를 보관한다.
+Microsoft SECURITY_INFORMATION의 BACKUP_SECURITY_INFORMATION 계약을 따른다:
+owner/group/DACL뿐 아니라 전체 SACL을 조회하려면 READ_CONTROL과 ACCESS_SYSTEM_SECURITY가,
+복원에는 WRITE_DAC·WRITE_OWNER·ACCESS_SYSTEM_SECURITY가 필요하다.
+[공식 보안 정보 계약](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-information)과
+[공식 Native 조회 계약](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwquerysecurityobject)을 근거로 한다.
+NtQuerySecurityObject가 반환한 self-relative 설명자를 RtlValidRelativeSecurityDescriptor로 검사하고,
+DACL·SACL 각각의 protected/unprotected 상태를 명시해 복원한다. 원본을 복원 전후에 다시 조회하고
+임시 파일의 복원 결과도 비교한다. 핸들은 경로를 다시 열지 않는 ReOpenFile로 얻고 모든 실패 때 닫는다.
+
+`metadata.cloneComplete`는 이 snapshot을 readable 복제 전후에 적용한다. 전체 보안 권한이 없으면
+readable-only로 낮추지 않고 실패한다. 프로세스 권한을 자동으로 올리거나 토큰 권한을 변경하지 않는다.
+실제 Windows 검증에서는 audit authority가 없어 거절됐고 원본과 빈 임시 파일이 보존됐다.
+권한을 가진 환경에서 실제 audit SACL 복원이 성공하는 것은 아직 입증하지 못했다.
+권한·상속 보호·원본 변경·복원 비교·할당 정리는 I/O 오류 주입과 실제 Windows 설명자 검증으로 확인했다.
+다섯 실행 변이가 실패했고 복구 후 root-main 22개와 native 경로 29개 판정이 통과했다.
+홀수 크기 선행 할당을 둔 고정 버퍼 테스트가 snapshot 복사의 정렬 누락을 재현했다.
+복사본은 이제 4바이트 정렬로 할당하고 소유 타입에도 정렬을 유지한다. Native 열기·조회에서
+접근 거절/권한 부족만 SecurityUnavailable로 분류하며 그 밖의 실패는 별도 오류로 보존한다.
+이것은 미게시 임시 파일 단계이며 최종 publish/rollback, GUI 저장, 실앱 저장 검증은 남아 있다.
+
+### 2m.134 교체 전 임시 파일 핸들 유지와 취소 정리의 실제 Windows 검증 (2026-10-03)
+
+`editor/stage.zig`에 교체 단계가 사용할 비공개 Native primitive를 둔다. 자동 삭제 상태 해제,
+메타데이터 전용 핸들 유지, 열린 객체에 대한 삭제를 실제 파일로 검사한다.
+[FILE_DISPOSITION_INFORMATION_EX](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)의 ON_CLOSE 계약을 근거로 한다.
+이 환경에서는 자동 삭제 해제는 됐지만 재설정은 STATUS_NOT_SUPPORTED였다. 취소 때 이 상태만
+열린 소유 객체의 명시적 삭제 예약으로 처리한다. readonly 속성도 소유 객체의 삭제 옵션으로 처리하며
+원본 속성을 바꾸지 않는다. 취소·정리는 경로 이름으로 임의 파일을 지우지 않는다.
+
+임시 파일의 데이터 핸들과 마지막 metadata 핸들을 닫아도 해제된 자동 삭제가 재발하지 않았다.
+metadata 핸들을 유지한 채 교체에 필요한 독점 read/write/delete 핸들도 열렸다.
+소유 파일을 다른 이름으로 옮기고 이전 이름에 경쟁 파일을 둔 뒤 객체 핸들로 정리하면 경쟁 파일은 보존됐다.
+ON_CLOSE 누락·취소 DELETE 누락·readonly 처리 누락·witness에 데이터 접근 추가·객체 DELETE 누락의
+다섯 실행 변이가 실패했고 복구 후 root-main 27개와 native 경로 29개 판정이 통과했다.
+공유 모드를 0으로 바꾼 metadata-only 변이는 살아남았으며 위 다섯 검출 횟수에 포함하지 않는다.
+이 primitive는 아직 runtime 저장 경로에 연결하지 않았다. 원본 동일성 검증·실제 교체·조건부 롤백·
+GUI 편집/저장·실앱 저장 검증은 남아 있다.
+
+### 2m.135 실제 보호된 감사 SACL 복원과 스레드 권한 복원 검증 (2026-10-03)
+
+§2m.133에서 남긴 실제 감사 SACL 성공 검증을 완료했다. 이 Windows 계정에는
+SeSecurityPrivilege가 할당되어 있으나 비활성 상태였다. `editor/audit_scope.zig`는
+현재 토큰을 복제하고 그 복제본에서만 할당된 권한을 활성화한다. 프로세스 토큰은 수정하지 않는다.
+[DuplicateTokenEx](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-duplicatetokenex),
+[AdjustTokenPrivileges](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-adjusttokenprivileges),
+[SetThreadToken](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadtoken)의 계약을 따른다.
+범위를 종료할 때 이전 스레드 토큰을 복원하며 다른 스레드에서 종료하려는 호출은 거절한다.
+현재 이 범위는 네이티브 검증 fixture에서만 사용한다. 런타임 저장에 자동 권한 활성화를 연결하지 않았다.
+
+실제 파일에 protected audit SACL을 설정하고 `metadata.cloneComplete`로 미공개 임시 파일에
+복제한 뒤 ACL 바이트를 조회해 비교했다. 프로세스 권한의 전후 동일성과 중첩 범위에서
+직전 impersonation 토큰의 정확한 복원도 확인했다. 권한이 할당되지 않은 환경은 성공으로
+간주하지 않고 관련 네이티브 판정을 skip한다.
+권한 비활성·primary 토큰 사용·이전 토큰 복원 누락·잘못된 권한 조정 대상·impersonation 권한 누락의
+다섯 실행 변이는 모두 실패했다. 원본 복구 후 root-main 30개와 native 경로 29개 판정이 통과했다.
+최종 파일 교체·조건부 롤백·GUI 편집/저장·실앱 저장 검증은 계속 남아 있다.
+
+### 2m.136 교체 전 객체 동일성의 전체 파일 ID 검증 (2026-10-03)
+
+`editor/identity.zig`는 열린 핸들에서 FileIdInfo를 조회하고 볼륨 일련번호와 128비트 식별자
+전체를 함께 비교한다. [FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)와
+[GetFileInformationByHandleEx](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)의
+공식 계약을 따른다. 조회 실패를 동일한 객체로 간주하지 않는다. `metadata.Source`의 이전
+64비트 내부 index 저장을 대체했으며 복제 전후 안정성 검사에 객체 동일성을 포함했다.
+
+실제 파일을 이름 변경한 뒤 이전 이름에 경쟁 파일을 생성해, 원래 핸들과 새 이름의 핸들은
+같은 객체이고 경쟁 파일은 다른 객체임을 확인했다. 식별자 16바이트 각각과 볼륨의 상위 비트
+차이를 검사하며 잘못된 핸들의 조회 실패도 검사한다. 저장된 식별자가 다르면 메타데이터 복제
+전에 거절하고 원본과 빈 임시 파일이 보존되는 것도 확인했다.
+볼륨 무시·64비트 절단·잘못된 정보 class·조회 실패 수락·원본 동일성 검사 누락의
+다섯 실행 변이를 검출했다. 복구 후 root-main 34개와 native 경로 29개 판정이 통과했다.
+이 검사는 핸들 객체의 동일성을 보장하며 경로 이름의 현재 대상 비교를 대신하지 않는다.
+실제 교체·조건부 롤백과 GUI 저장 연결은 계속 남아 있다.
+
+### 2m.137 교체 준비 객체의 핸들 소유권 이전과 취소 (2026-10-03)
+
+Stage 생성 시 READ_CONTROL·WRITE_DAC·READ_ATTRIBUTES를 가진 metadata-only 제어 핸들을
+미리 확보한다. 원본 ACL을 복사한 뒤 새 권한을 얻으려 하지 않으며 기존 데이터 핸들의 독점성을
+유지한다. `Stage.handoff`는 전체 파일 ID를 저장하고 자동 삭제를 해제한 뒤 데이터 핸들을 닫고
+이름 할당과 제어 핸들을 `Prepared`에 이전한다. 자동 삭제 해제 뒤에는 실패 가능한 연산을
+두지 않는다. 준비 실패는 기존 Stage의 제어 핸들과 자동 삭제 소유권을 유지한다.
+`Prepared.cancel`은 저장된 객체 ID를 확인하고 그 객체의 삭제를 예약한다.
+취소 실패 때 소유권을 유지해 재시도할 수 있으며 경로 문자열로 경쟁 파일을 삭제하지 않는다.
+Native 삭제 계약과 witness 접근 권한의 근거는 §2m.134와 같다.
+
+실제 파일 DELETE와 부모 DELETE_CHILD가 모두 거절되면 삭제 권한의 재열기가 실패했다.
+독점 데이터 핸들을 유지한 채 DELETE를 다시 여는 사전 확인도 sharing violation으로 거절됐다.
+따라서 취소의 ACCESS_DENIED 때는 미리 확보한 WRITE_DAC로 **소유한 후보 객체에만** 보호된
+정리용 DACL을 설정하고 삭제를 다시 시도한다. 이 DACL은 DELETE·SYNCHRONIZE·READ_ATTRIBUTES를
+허용하며 데이터 접근은 허용하지 않는다. 원본·부모·경쟁 파일의 ACL은 수정하지 않는다.
+[Native 보안 설정 계약](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwsetsecurityobject)에
+따라 이미 열린 핸들의 WRITE_DAC 권한으로 적용한다. 다른 종류의 오류는 ACL을 바꾸지 않고 반환한다.
+실제 양쪽 삭제 거절 상태에서 준비 후 취소가 성공했고, 기존 독점 교체 핸들 열기도 계속 성공했다.
+
+실제 독점 교체 핸들 열기, 이전 이름의 경쟁 파일 보존, 실패 100회 후 프로세스 핸들 개수 동일,
+ID 불일치 거절 후 취소 재시도를 확인했다. 오류 주입 첫 실행에서는 의도적 witness 누수가
+fixture의 재귀 정리를 멈추게 했다. 해당 프로세스를 종료하고 원본을 복구했으며 이 실행은
+검출 횟수에서 제외했다. fixture는 이제 누수를 보고할 때 재귀 정리를 생략하고 디렉터리
+핸들을 닫는다. 정상 구현의 정리는 계속 수행한다.
+최종 코드에서 WRITE_DAC 권한 누락·정리 DELETE 권한 누락·정리 SYNCHRONIZE 누락·데이터 핸들
+유지·취소 ID 검사 누락의 다섯 실행 변이는 모두 런타임 실패로 검출했다(판정 실패 또는 정리 실패 panic).
+컴파일에서만 거절된 변이는 제외하고 실행 가능한 형태로 수정해 다시 검증했다.
+복구 후 root-main 39개와 native 경로 29개 판정이 통과했다.
+Prepared는 아직 미공개 후보만 소유하며 최종 publish/조건부 롤백과 GUI 저장은 연결하지 않았다.
+
+### 2m.138 공통 Chrome 텍스트 아티팩트와 Windows 호출 경로 정리 (2026-10-03)
+
+혼합 system_text의 소유권·배치·clip·registry 해석·GPU DTO 변환을 `src/app/chrome_text.zig`로
+이동했다. Windows SCM·에이전트 표면과 main은 공통 facade를 소비하고 macOS 경로를 import하지 않는다.
+CoreText 호출과 macOS 캐시 검증은 native adapter에 유지한다. 연결은
+[레이어링과 이식성](layering-and-portability.md) §3.4.3이 소유한다.
+§2m.18의 얇은 Windows/macOS 경로 test shim은 제거하고 facade root에서 실제 공통 판정자를 실행한다.
+
+기존 단일 run 함수는 run 배열을 요청 소유권에 맞게 할당하지 않았고, native Windows 갈래의
+토큰 줄 높이는 배율 1000으로 고정되어 있었다. run 배열과 문자열의 모든 할당 실패 prefix를 검사하며
+토큰·device 셀 메트릭을 구분하는 공통 정책으로 1.5배 native glyph 줄 높이도 확인한다.
+배율 누락·overhang 누락·이어지는 run의 advance 누락·부분 요청 정리 누락·stack run 배열 사용의
+다섯 실행 변이는 모두 런타임 실패로 검출했다. 원본 복구 후 33개 판정이 통과했다.
+실제 macOS CoreText 실행은 이 Windows 호스트에서 검증하지 못했다.
+전체 build·check-targets·check-doc-links·check-boundaries가 통과했다. Windows SCM 실창에서
+240프레임을 표시했고 이름 10/10·행 hit 10/10·접기·선택·hover·누름 판정이 통과했다.
+Windows 최종 저장·롤백·GUI 저장 연결·실앱 저장 검증은 계속 남아 있다.
+
+### 2m.139 권한 없는 감사 SACL 보존의 native TxF 조사 (2026-10-03)
+
+`python tools/windows/probe-safe-save-txf.py`는 Python 표준 라이브러리만 사용하는
+Windows 전용 opt-in 조사 도구다. 저장소 `.zig-cache`의 고유 임시 디렉터리에만 파일을 만든다.
+fixture 설정·검사 때만 복제 thread token의 이미 할당된 SeSecurityPrivilege를 켜고,
+실제 쓰기 때는 원래 token으로 돌아온다. 쓰기 직전 감사 SACL 조회가 실제로 거절되는지 검사한다.
+
+이 호스트에서 commit·rollback·외부 쓰기·이름 변경·삭제의 다섯 상황을 실행했다.
+commit 전 독자는 원래 내용을 보았고 commit 후 새 내용을 보았다. rollback 후에는 원래 내용이
+남았다. 외부 세 종류의 변경은 ERROR_SHARING_VIOLATION으로 거절됐다.
+보호된 실제 감사 SACL을 포함한 owner/group/DACL/SACL 보안 서술자 전체, 128비트 파일 ID와
+volume ID, named stream이 동일함을 확인했다. 종료한 transaction의 핸들은 재사용하지 않고
+일반 핸들로 다시 열어 ID를 검사한다.
+첫 데이터 쓰기 전에도 외부 이름 변경이 ERROR_SHARING_VIOLATION으로 거절됨을 확인했다.
+
+일반 비트랜잭션 쓰기·commit 대신 rollback·truncate 누락·감사 ACE 변경·named stream 손실을
+주입한 다섯 실행 변이는 모두 assertion 실패로 검출했다. 원본 복구 후 다섯 상황이 다시 통과했다.
+이는 조사 도구의 판정력 검증이며 제품 저장 경로의 다섯 변이 검증으로 대신 세지 않는다.
+
+[Microsoft의 CreateFileTransactedW 계약](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfiletransactedw)은
+TxF 대안을 강하게 권고하고 향후 Windows 제공을 보장하지 않는다. 이 조사는 기본 저장 전략을
+변경하지 않는다. NTFS 이외 파일 시스템·원격 경로 지원, pinned parent 상대 열기, commit 실패의
+결과 판별, 충돌 CAS, 충돌 후 조건부 rollback 및 crash 복구는 증명하지 않았다.
+앱에는 이 도구를 연결하지 않았고 GUI 편집·저장·재열기 검증도 계속 남아 있다.

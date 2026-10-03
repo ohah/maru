@@ -74,7 +74,7 @@ fn recordShaderError(blob: ?*d3d11.ID3DBlob) void {
 /// 픽셀로 들고 있어서다(`atlas_x_px` 등) — GPU는 0~1 UV를 원하므로 변환이 어딘가에서 일어나야 하고, 그
 /// 변환은 아틀라스 크기를 아는 쪽(여기)이 한다. 색도 `0xAARRGGBB` 정수에서 여기서 한 번 푼다.
 ///
-/// 64바이트. 필드 순서가 곧 입력 레이아웃이라 아래 `input_elements`와 함께 움직여야 한다.
+/// 160바이트. 필드 순서가 곧 입력 레이아웃이라 아래 `input_elements`와 함께 움직여야 한다.
 pub const Cell = extern struct {
     /// 화면 픽셀 사각형 — `{x, y, width, height}`. 좌상단 기준.
     rect: [4]f32,
@@ -94,16 +94,31 @@ pub const Cell = extern struct {
     /// 계산해야 한다. 남는 필드에 얹지 않고 이름 있는 자리를 하나 만든다 — `uv`·`fg` 가 단색 셀에서
     /// 안 쓰인다고 거기 실으면 "이 값이 무엇인가" 가 셀 종류에 따라 갈려 곧 썩는다.
     shape: [4]f32 = .{ 0, 0, 0, 0 },
+    /// Gradient end RGBA; glyph cells ignore all paint fields.
+    fill_end: [4]f32 = .{ 0, 0, 0, 0 },
+    /// Original, unclipped paint rectangle. Clipping must not restart the gradient
+    /// or move rounded corners to the newly exposed edge.
+    paint_rect: [4]f32 = .{ 0, 0, 0, 0 },
+    /// x: 0 solid, 1 top-to-bottom, 2 left-to-right. Remaining values reserved.
+    paint_info: [4]f32 = .{ 0, 0, 0, 0 },
+    /// Side widths in the shared chrome order: top, right, bottom, left.
+    border_widths: [4]f32 = .{ 0, 0, 0, 0 },
+    border_color: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
 comptime {
     if (@sizeOf(usize) == 8) {
-        std.debug.assert(@sizeOf(Cell) == 80);
+        std.debug.assert(@sizeOf(Cell) == 160);
         std.debug.assert(@offsetOf(Cell, "rect") == 0);
         std.debug.assert(@offsetOf(Cell, "uv") == 16);
         std.debug.assert(@offsetOf(Cell, "fg") == 32);
         std.debug.assert(@offsetOf(Cell, "bg") == 48);
         std.debug.assert(@offsetOf(Cell, "shape") == 64);
+        std.debug.assert(@offsetOf(Cell, "fill_end") == 80);
+        std.debug.assert(@offsetOf(Cell, "paint_rect") == 96);
+        std.debug.assert(@offsetOf(Cell, "paint_info") == 112);
+        std.debug.assert(@offsetOf(Cell, "border_widths") == 128);
+        std.debug.assert(@offsetOf(Cell, "border_color") == 144);
     }
 }
 
@@ -128,6 +143,72 @@ pub fn solidCell(x_px: f32, y_px: f32, w_px: f32, h_px: f32, rgba: [4]f32, corne
         .bg = rgba,
         .shape = corner_radii,
     };
+}
+
+/// Paint geometry stays independent of the visible rectangle. The shader can
+/// therefore clip a gradient without changing its endpoints or rounded corners.
+pub const FillDirection = enum(u8) { solid = 0, vertical = 1, horizontal = 2 };
+
+pub fn paintCell(visible: [4]f32, original: [4]f32, start: [4]f32, end: ?[4]f32, direction: FillDirection, radii: [4]f32) Cell {
+    var cell = solidCell(visible[0], visible[1], visible[2], visible[3], start, radii);
+    cell.paint_rect = original;
+    if (end) |last| {
+        // A missing direction is a solid declaration, as on the Metal host.
+        if (direction != .solid and original[2] > 0 and original[3] > 0) {
+            cell.fill_end = last;
+            cell.paint_info[0] = @floatFromInt(@intFromEnum(direction));
+        }
+    }
+    return cell;
+}
+
+/// A missing border role means no stroke, even when widths were declared.
+/// Keep border alpha independent of the fill alpha (e.g. editor line highlights).
+pub fn withBorder(fill: Cell, widths: [4]f32, color: ?[4]f32) Cell {
+    var cell = fill;
+    cell.border_widths = .{ 0, 0, 0, 0 };
+    cell.border_color = .{ 0, 0, 0, 0 };
+    if (color) |rgba| {
+        cell.border_widths = widths;
+        cell.border_color = rgba;
+    }
+    return cell;
+}
+
+test "withBorder preserves independent alpha and side order, null removes stroke" {
+    const fill = paintCell(.{ 20, 30, 60, 70 }, .{ 10, 20, 100, 120 }, colorFromArgb(0x00336699), colorFromArgb(0x00CC9966), .horizontal, .{ 2, 3, 4, 5 });
+    const rgba = colorFromArgb(0xFF00FF00);
+    const widths: [4]f32 = .{ 1, 3, 5, 7 };
+    const c = withBorder(fill, widths, rgba);
+    try std.testing.expectEqual(widths, c.border_widths);
+    try std.testing.expectEqual(rgba, c.border_color);
+    try std.testing.expectEqual(fill.bg, c.bg);
+    try std.testing.expectEqual(fill.paint_rect, c.paint_rect);
+    try std.testing.expectEqual(fill.paint_info, c.paint_info);
+    try std.testing.expectEqual(fill.shape, c.shape);
+    const ghost = withBorder(c, widths, null);
+    try std.testing.expectEqual(@as([4]f32, .{ 0, 0, 0, 0 }), ghost.border_widths);
+}
+
+test "paintCell preserves clipped geometry, direction, colors and alpha" {
+    const start = colorFromArgb(0x66336699);
+    const end = colorFromArgb(0x66CC9966);
+    const original: [4]f32 = .{ -20, -30, 100, 200 };
+    const visible: [4]f32 = .{ 0, 0, 80, 170 };
+    const c = paintCell(visible, original, start, end, .vertical, .{ 2, 3, 4, 5 });
+    try std.testing.expectEqual(visible, c.rect);
+    try std.testing.expectEqual(original, c.paint_rect);
+    try std.testing.expectEqual(start, c.bg);
+    try std.testing.expectEqual(end, c.fill_end);
+    try std.testing.expectEqual(@as(f32, 1), c.paint_info[0]);
+    try std.testing.expectEqual(@as(f32, 5), c.shape[3]);
+    try std.testing.expect(c.uv[0] < 0);
+    const h = paintCell(visible, original, start, end, .horizontal, .{ 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(f32, 2), h.paint_info[0]);
+    const missing = paintCell(visible, original, start, null, .horizontal, .{ 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(f32, 0), missing.paint_info[0]);
+    const solid = paintCell(visible, original, start, end, .solid, .{ 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(f32, 0), solid.paint_info[0]);
 }
 
 test "단색 셀: 아틀라스를 안 읽는 모양이다" {
@@ -243,6 +324,11 @@ const hlsl_source =
     \\    float4 fg   : TEXCOORD2;
     \\    float4 bg   : TEXCOORD3;
     \\    float4 shape: TEXCOORD4;
+    \\    float4 fill_end : TEXCOORD5;
+    \\    float4 paint_rect : TEXCOORD6;
+    \\    float4 paint_info : TEXCOORD7;
+    \\    float4 border_widths : TEXCOORD8;
+    \\    float4 border_color : TEXCOORD9;
     \\    uint   vid  : SV_VertexID;
     \\};
     \\
@@ -258,6 +344,11 @@ const hlsl_source =
     \\    float4 box   : TEXCOORD4;
     \\    float4 shape : TEXCOORD5;
     \\    float2 frag  : TEXCOORD6;
+    \\    float4 fill_end : TEXCOORD7;
+    \\    float4 paint_rect : TEXCOORD8;
+    \\    float4 paint_info : TEXCOORD9;
+    \\    float4 border_widths : TEXCOORD10;
+    \\    float4 border_color : TEXCOORD11;
     \\};
     \\
     \\VSOut vs_main(VSIn i) {
@@ -275,12 +366,28 @@ const hlsl_source =
     \\    // (`renderer_glyph_zero_ink_count` 가 그런 글리프를 세고 있다). 글리프 UV 는 0..1 이라
     \\    // 음수를 낼 수 없으므로 이 신호는 절대 겹치지 않는다.
     \\    o.solid = (i.uv.x < 0.0) ? 1.0 : 0.0;
-    \\    o.box = float4(i.rect.xy + i.rect.zw * 0.5, i.rect.zw * 0.5);
+    \\    float4 paint = (i.paint_rect.z > 0.0 && i.paint_rect.w > 0.0) ? i.paint_rect : i.rect;
+    \\    o.box = float4(paint.xy + paint.zw * 0.5, paint.zw * 0.5);
+    \\    o.fill_end = i.fill_end;
+    \\    o.paint_rect = paint;
+    \\    o.paint_info = i.paint_info;
+    \\    o.border_widths = i.border_widths;
+    \\    o.border_color = i.border_color;
     \\    o.shape = i.shape;
     \\    o.frag = p;
     \\    return o;
     \\}
     \\
+    \\float3 srgb_to_linear(float3 c) {
+    \\    float3 lo = c / 12.92;
+    \\    float3 hi = pow((c + 0.055) / 1.055, 2.4);
+    \\    return float3(c.r <= 0.04045 ? lo.r : hi.r, c.g <= 0.04045 ? lo.g : hi.g, c.b <= 0.04045 ? lo.b : hi.b);
+    \\}
+    \\float3 linear_to_srgb(float3 c) {
+    \\    float3 lo = c * 12.92;
+    \\    float3 hi = 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+    \\    return float3(c.r <= 0.0031308 ? lo.r : hi.r, c.g <= 0.0031308 ? lo.g : hi.g, c.b <= 0.0031308 ? lo.b : hi.b);
+    \\}
     \\float4 ps_main(VSOut i) : SV_Target {
     \\    // 커버리지는 알파에 있다 — RGB(흰색)는 쓰지 않는다. 색은 셀이 들고 온다.
     \\    //
@@ -303,7 +410,23 @@ const hlsl_source =
     \\        float2 qr = q + r;
     \\        float dist = min(max(qr.x, qr.y), 0.0) + length(max(qr, 0.0)) - r;
     \\        float a = saturate(0.5 - dist);
-    \\        return float4(i.bg.rgb, i.bg.a * a);
+    \\        float4 fill = i.bg;
+    \\        if (i.paint_info.x > 0.5) {
+    \\            float t = (i.paint_info.x > 1.5)
+    \\                ? (i.frag.x - i.paint_rect.x) / i.paint_rect.z
+    \\                : (i.frag.y - i.paint_rect.y) / i.paint_rect.w;
+    \\            fill = lerp(i.bg, i.fill_end, saturate(t));
+    \\        }
+    \\        // Each side measures its original edge, independent of quadrant and clipping.
+    \\        float2 local = i.frag - i.paint_rect.xy;
+    \\        float aa = max(fwidth(dist), 0.0001);
+    \\        float stroke = 0.0;
+    \\        if (i.border_widths.x > 0.0) stroke = max(stroke, 1.0 - smoothstep(i.border_widths.x - aa, i.border_widths.x + aa, local.y));
+    \\        if (i.border_widths.y > 0.0) stroke = max(stroke, 1.0 - smoothstep(i.border_widths.y - aa, i.border_widths.y + aa, i.paint_rect.z - local.x));
+    \\        if (i.border_widths.z > 0.0) stroke = max(stroke, 1.0 - smoothstep(i.border_widths.z - aa, i.border_widths.z + aa, i.paint_rect.w - local.y));
+    \\        if (i.border_widths.w > 0.0) stroke = max(stroke, 1.0 - smoothstep(i.border_widths.w - aa, i.border_widths.w + aa, local.x));
+    \\        float3 rgb = linear_to_srgb(lerp(srgb_to_linear(fill.rgb), srgb_to_linear(i.border_color.rgb), stroke));
+    \\        return float4(rgb, lerp(fill.a, i.border_color.a, stroke) * a);
     \\    }
     \\    float cov = atlas.Sample(samp, i.uv).a;
     \\    if (i.bg.a < 0.5) {
@@ -321,13 +444,18 @@ const input_elements = [_]d3d11.InputElementDesc{
     .{ .semantic_name = "TEXCOORD", .semantic_index = 2, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 32, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
     .{ .semantic_name = "TEXCOORD", .semantic_index = 3, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 48, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
     .{ .semantic_name = "TEXCOORD", .semantic_index = 4, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 64, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
+    .{ .semantic_name = "TEXCOORD", .semantic_index = 5, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 80, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
+    .{ .semantic_name = "TEXCOORD", .semantic_index = 6, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 96, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
+    .{ .semantic_name = "TEXCOORD", .semantic_index = 7, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 112, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
+    .{ .semantic_name = "TEXCOORD", .semantic_index = 8, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 128, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
+    .{ .semantic_name = "TEXCOORD", .semantic_index = 9, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 144, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
 };
 
 comptime {
     // **두 곳이 서로를 검증하게 한다.** `Cell`을 재배치하면 위 오프셋 단언이 잡지만, 여기 리터럴 오프셋만
     // 잘못 고치면 아무것도 안 잡고 런타임에 색과 좌표가 뒤섞인다(오류가 아니라 잘못된 그림이 나온다).
     // 필드 이름과 슬롯 순서를 여기서 묶어 둔다.
-    const bound = [_][]const u8{ "rect", "uv", "fg", "bg", "shape" };
+    const bound = [_][]const u8{ "rect", "uv", "fg", "bg", "shape", "fill_end", "paint_rect", "paint_info", "border_widths", "border_color" };
     std.debug.assert(input_elements.len == bound.len);
     for (input_elements, bound) |elem, name| {
         std.debug.assert(elem.aligned_byte_offset == @offsetOf(Cell, name));

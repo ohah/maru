@@ -596,12 +596,22 @@ pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize, last_abs: usize) 
 /// 가장 오래된 n개 행이 빠질 때 placement anchor(abs 행)를 n칸 당긴다(eviction n=1, 하향 트림 n=drop).
 /// 빠진 행 범위 [0, n)에 anchor가 걸린 placement는 제거한다. selection의 shiftSelectionForEviction과 같은 규율.
 pub fn shiftPlacementsForEviction(self: *TerminalCore, n: usize) void {
+    shiftListForEviction(&self.kitty_placements, n);
+}
+
+/// **보관 화면**(alt 중의 primary)의 스크롤백에서 가장 오래된 n 행이 빠졌다 — 그 화면의 placement 를 같은 규칙으로
+/// 옮긴다. alt 중 `setMaxScrollback` 이 보관 스크롤백을 자를 때 부른다(활성 alt 는 스크롤백이 없다).
+pub fn shiftSavedPlacementsForEviction(self: *TerminalCore, n: usize) void {
+    shiftListForEviction(&self.saved_kitty_placements, n);
+}
+
+fn shiftListForEviction(list: *std.ArrayListUnmanaged(StoredPlacement), n: usize) void {
     if (n == 0) return;
     var i: usize = 0;
-    while (i < self.kitty_placements.items.len) {
-        const p = &self.kitty_placements.items[i];
+    while (i < list.items.len) {
+        const p = &list.items[i];
         if (p.anchor_row < n) {
-            _ = self.kitty_placements.orderedRemove(i);
+            _ = list.orderedRemove(i);
         } else {
             p.anchor_row -= n;
             i += 1;

@@ -1371,9 +1371,21 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"editor restore codec"},
     });
     const run_editor_restore_codec = b.addRunArtifact(editor_restore_codec_tests);
-    run_editor_restore_codec.addArg("--maru-expect-tests=7");
-    run_editor_restore_codec.addArg("--maru-expect-passed=7");
+    run_editor_restore_codec.addArg("--maru-expect-tests=9");
+    run_editor_restore_codec.addArg("--maru-expect-passed=9");
     b.step("test-editor-restore-codec", "Run platform-neutral editor restart metadata judges").dependOn(&run_editor_restore_codec.step);
+
+    // ID/record checks are platform-neutral and also belong to the normal core aggregate.
+    const recovery_codec_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "RECID", "RECB" },
+    });
+    const run_recovery_codec = b.addRunArtifact(recovery_codec_tests);
+    run_recovery_codec.addArg("--maru-expect-tests=30");
+    run_recovery_codec.addArg("--maru-expect-passed=30");
+    const recovery_codec_step = b.step("test-editor-recovery-codec", "Run recovery identity ownership and strict record codecs");
+    recovery_codec_step.dependOn(&run_recovery_codec.step);
+    recovery_codec_step.dependOn(&run_editor_restore_codec.step);
 
     const editor_state_perf = b.addExecutable(.{
         .name = "editor-workspace-state-perf",

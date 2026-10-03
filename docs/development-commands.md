@@ -1026,7 +1026,7 @@ ReleaseFast는 `-Doptimize=ReleaseFast`를 붙인다. 같은 판정자는 공유
 
 ### 에디터 복원 metadata codec과 크기 측정
 
-- `mise exec -- zig build test-editor-restore-codec`: 플랫폼 중립 codec의 7개 판정자. Debug/ReleaseFast에서 실행한다.
+- `mise exec -- zig build test-editor-restore-codec`: 플랫폼 중립 codec의 9개 판정자. Debug/ReleaseFast에서 실행한다.
 - `mise exec -- zig build perf-editor-workspace-state -Doptimize=ReleaseFast`: 10개 metadata 부하 시나리오의 raw bytes·요청 할당 peak·encode/parse+validate 시간. 실제 RSS·본문·host 사본·disk I/O는 제외한다.
 - codec은 제품 checkpoint에 아직 연결하지 않았다. 정책과 범위는 [복원 설계](plans/editor-shared-restore.md)를 따른다.
 
@@ -1072,3 +1072,12 @@ workspace 손상 입력의 실제 앱 보존 검사를 20개 반례로 확장하
 `zig build test-editor-untitled test-editor-recovery-window test-editor-shared test-editor-shared-split test-editor-document-runtime -j2`.
 창 복원 집중 step은 기존 app-host ABI 전체 gate에 포함된 성공/실패 apply 판정자를 빠르게
 실행한다. 복구 백업의 보존·재백업·저장/버리기 정리와 shared 수명을 구분해 판정한다.
+
+
+### 복구 ID와 필수 신원 codec
+
+`mise exec -- zig build test-editor-recovery-codec`는 ID 문법/filename, 문서 소유와 registry
+중복/OOM, backup v2의 필수 metadata·헤더 분리·UTF-8/크기 상한과 문서 descriptor의
+필수 ID/참조 검증을 실행한다. RECID/RECB 9개와 공통 test 블록을 포함한 30개 및
+workspace codec 9개를 exact-count한다. `-Doptimize=ReleaseFast`에서도 실행한다.
+제품 writer 전환이나 실제 restart 완료를 뜻하지 않는다.

@@ -52,7 +52,11 @@ fn runCase(io: std.Io, name: []const u8, view_count: usize, extra_count: usize, 
     for (folds, 0..) |*value, i| value.* = @intCast(i);
     const docs = try input.alloc(codec.Document, doc_count);
     defer input.free(docs);
-    for (docs, 0..) |*doc, i| doc.* = .{ .index = @intCast(i), .path = path, .disk_hash = 123, .content_hash = 456 };
+    for (docs, 0..) |*doc, i| {
+        var bytes: [16]u8 = @splat(0);
+        std.mem.writeInt(u64, bytes[8..16], @intCast(i + 1), .big);
+        doc.* = .{ .index = @intCast(i), .recovery_id = try codec.RecoveryId.fromBytes(bytes), .path = path, .disk_hash = 123, .content_hash = 456 };
+    }
     var tracker: Tracker = .{};
     const a = tracker.allocator();
     var output: std.Io.Writer.Allocating = .init(a);

@@ -16,6 +16,8 @@ const writeEscaped = @import("../../text_escape.zig").writeEscaped;
 const unescapeAlloc = @import("../../text_escape.zig").unescapeAlloc;
 
 pub const header = "maru.editor-backup.v1";
+pub const recovery_header = "maru.editor-backup.v2";
+const recovery = @import("recovery_id.zig");
 
 /// 편집이 멎은 뒤 이만큼 지나면 쓴다(§3.10 「편집 후 debounce」). **workspace checkpoint 의
 /// 500 ms 보다 길다** — 그쪽은 탭 배치라 한 줄이고 이쪽은 문서 전체 사본이다.
@@ -89,10 +91,15 @@ pub fn encode(allocator: std.mem.Allocator, doc: Doc, content: []const u8) std.m
 }
 
 fn write(w: *std.Io.Writer, doc: Doc, content: []const u8) !void {
-    try w.writeAll(header);
+    try writeRecord(w, doc, content, null);
+}
+
+fn writeRecord(w: *std.Io.Writer, doc: Doc, content: []const u8, id: ?recovery.Id) !void {
+    try w.writeAll(if (id != null) recovery_header else header);
     try w.writeAll("\ndoc kind=");
     try w.writeAll(@tagName(doc));
     try w.print(" bytes={d}", .{content.len});
+    if (id) |value| try w.print(" recovery-id={s}", .{value.hex()});
     switch (doc) {
         .path => |p| {
             if (p.disk_hash) |h| try w.print(" disk-hash={x:0>16}", .{h});
@@ -135,10 +142,53 @@ pub const Parsed = struct {
 };
 
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
+    var unused: ?recovery.Id = null;
+    return parseRecord(allocator, bytes, false, &unused);
+}
+
+/// 새 신원 레코드를 옛 path reader에 조용히 적용하지 않도록 진입점을 분리한다.
+pub const RecoveryRecord = struct {
+    id: recovery.Id,
+    doc: Doc.Path,
+    content: []const u8,
+
+    pub fn deinit(self: *RecoveryRecord, allocator: std.mem.Allocator) void {
+        allocator.free(self.doc.path);
+        self.* = undefined;
+    }
+
+    pub fn matches(self: RecoveryRecord, name: []const u8, id: recovery.Id, path: []const u8) bool {
+        const named = recovery.fromFileName(name) catch return false;
+        return self.id.eql(id) and named.eql(id) and std.mem.eql(u8, self.doc.path, path);
+    }
+};
+
+fn validRecoveryPath(path: []const u8) bool {
+    return path.len > 0 and path.len <= std.fs.max_path_bytes and std.fs.path.isAbsolute(path) and
+        std.unicode.utf8ValidateSlice(path) and std.mem.indexOfScalar(u8, path, 0) == null;
+}
+
+pub fn encodeRecovery(allocator: std.mem.Allocator, id: recovery.Id, doc: Doc.Path, content: []const u8) ParseError![]u8 {
+    if (!id.valid() or !validRecoveryPath(doc.path) or !std.unicode.utf8ValidateSlice(content)) return error.BadRecord;
+    if (content.len > pause_bytes) return error.TooLarge;
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    writeRecord(&out.writer, .{ .path = doc }, content, id) catch return error.OutOfMemory;
+    if (out.written().len > max_record_bytes) return error.TooLarge;
+    return out.toOwnedSlice();
+}
+
+pub fn parseRecovery(allocator: std.mem.Allocator, bytes: []const u8) ParseError!RecoveryRecord {
+    var id: ?recovery.Id = null;
+    const parsed = try parseRecord(allocator, bytes, true, &id);
+    return .{ .id = id.?, .doc = parsed.doc.path, .content = parsed.content };
+}
+
+fn parseRecord(allocator: std.mem.Allocator, bytes: []const u8, modern: bool, id: *?recovery.Id) ParseError!Parsed {
     if (bytes.len > max_record_bytes) return error.TooLarge;
     var rest = bytes;
     const first_nl = std.mem.indexOfScalar(u8, rest, '\n') orelse return error.BadHeader;
-    if (!std.mem.eql(u8, rest[0..first_nl], header)) return error.BadHeader;
+    if (!std.mem.eql(u8, rest[0..first_nl], if (modern) recovery_header else header)) return error.BadHeader;
     rest = rest[first_nl + 1 ..];
     const second_nl = std.mem.indexOfScalar(u8, rest, '\n') orelse return error.BadRecord;
     const line = rest[0..second_nl];
@@ -148,14 +198,27 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Parsed 
     const body = rest[1..];
 
     if (!std.mem.startsWith(u8, line, "doc ")) return error.BadRecord;
-    var fields = Fields{ .rest = line["doc ".len..] };
+    var fields = Fields{ .rest = line["doc ".len..], .strict = modern };
     var kind: ?Kind = null;
     var declared_bytes: ?usize = null;
     var disk_hash: ?u64 = null;
     var number: ?u32 = null;
     var path_raw: ?[]const u8 = null;
     var dest_raw: ?[]const u8 = null;
+    var seen: u8 = 0;
     while (try fields.next()) |f| {
+        if (modern) {
+            const keys = [_][]const u8{ "kind", "bytes", "disk-hash", "path", "recovery-id" };
+            const bit: u8 = bit: {
+                for (keys, 0..) |key, i| {
+                    if (std.mem.eql(u8, f.key, key)) break :bit @as(u8, 1) << @intCast(i);
+                }
+                return error.BadRecord;
+            };
+            // 중복 필드를 허용하면 filename과 descriptor의 신원 검사가 서로 다른 값을 볼 수 있다.
+            if (seen & bit != 0) return error.BadRecord;
+            seen |= bit;
+        }
         if (std.mem.eql(u8, f.key, "kind")) {
             kind = std.meta.stringToEnum(Kind, f.value) orelse return error.BadRecord;
         } else if (std.mem.eql(u8, f.key, "bytes")) {
@@ -168,20 +231,26 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Parsed 
             path_raw = f.value;
         } else if (std.mem.eql(u8, f.key, "dest")) {
             dest_raw = f.value;
+        } else if (modern and std.mem.eql(u8, f.key, "recovery-id")) {
+            id.* = recovery.Id.parse(f.value) catch return error.BadRecord;
         }
-        // 모르는 키는 **버린다**(옛 판이 새 키를 만나도 열린다 — workspace 리더와 같은 관대함).
+        // v1의 기존 관용은 유지한다. v2는 위에서 모르는 키와 중복을 모두 거절한다.
     }
     // **길이가 맞아야 받는다.** 잘린 파일(쓰는 중에 죽었다)을 통째로 되살리면 문서가 조용히
     // 잘린다 — 그것이 백업이 막으려던 손실이다.
     const declared = declared_bytes orelse return error.BadRecord;
     if (declared != body.len) return error.BadRecord;
+    if (modern) {
+        if (id.* == null or kind != .path or !std.unicode.utf8ValidateSlice(body)) return error.BadRecord;
+        if (body.len > pause_bytes) return error.TooLarge;
+    }
 
     return switch (kind orelse return error.BadRecord) {
         .path => blk: {
             const raw = path_raw orelse return error.BadRecord;
             const path = try unescapeAlloc(allocator, raw);
             errdefer allocator.free(path);
-            if (path.len == 0) return error.BadRecord;
+            if (path.len == 0 or (modern and !validRecoveryPath(path))) return error.BadRecord;
             break :blk .{ .doc = .{ .path = .{ .path = path, .disk_hash = disk_hash } }, .content = body };
         },
         .untitled => .{ .doc = .{ .untitled = number orelse return error.BadRecord }, .content = body },
@@ -202,6 +271,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Parsed 
 /// 경로에 공백이 있으면 그 규칙이 없으면 값이 끊긴다.
 const Fields = struct {
     rest: []const u8,
+    strict: bool = false,
 
     const Field = struct { key: []const u8, value: []const u8 };
 
@@ -223,6 +293,7 @@ const Fields = struct {
                 if (self.rest[i] == '"') break;
             }
             if (i >= self.rest.len) return error.BadRecord; // 안 닫힌 따옴표
+            if (self.strict and i + 1 < self.rest.len and self.rest[i + 1] != ' ') return error.BadRecord;
             const value = self.rest[value_start..i];
             self.rest = self.rest[@min(i + 1, self.rest.len)..];
             return .{ .key = key, .value = value };
@@ -363,4 +434,94 @@ test "UB10 적대적 머리말 — 안 닫힌 따옴표·`=` 없는 토큰·빈 
     try testing.expectError(error.BadRecord, parse(testing.allocator, header ++ "\ndoc kind=remote bytes=0 path=\"/x\"\n\n"));
     // 빈 경로는 신원이 아니다.
     try testing.expectError(error.BadRecord, parse(testing.allocator, header ++ "\ndoc kind=path bytes=0 path=\"\"\n\n"));
+}
+
+test "RECB independent identities share a path without sharing record names" {
+    const a = try recovery.Id.parse("000102030405060708090a0b0c0d0eff");
+    const b = try recovery.Id.parse("ff0102030405060708090a0b0c0d0eff");
+    const path = "/tmp/한 글\"\n.txt";
+    for ([_][]const u8{ "", "각\r\n本文" }) |body| {
+        const bytes = try encodeRecovery(testing.allocator, a, .{ .path = path, .disk_hash = 0 }, body);
+        defer testing.allocator.free(bytes);
+        var record = try parseRecovery(testing.allocator, bytes);
+        defer record.deinit(testing.allocator);
+        try testing.expectEqualStrings(body, record.content);
+        try testing.expectEqual(@as(?u64, 0), record.doc.disk_hash);
+        try testing.expect(record.matches(&(try recovery.fileName(a)), a, path));
+        try testing.expect(!record.matches(&(try recovery.fileName(b)), a, path));
+        try testing.expect(!record.matches(&(try recovery.fileName(a)), b, path));
+        try testing.expect(!record.matches(&(try recovery.fileName(a)), a, "/other"));
+        try testing.expectError(error.BadHeader, parse(testing.allocator, bytes));
+    }
+    const legacy = try encode(testing.allocator, .{ .path = .{ .path = path } }, "legacy");
+    defer testing.allocator.free(legacy);
+    try testing.expectError(error.BadHeader, parseRecovery(testing.allocator, legacy));
+}
+
+test "RECB invalid duplicate and unknown metadata cannot select a recovery document" {
+    const valid = "kind=path bytes=0 recovery-id=000102030405060708090a0b0c0d0eff path=\"/doc\"";
+    const cases = [_][]const u8{
+        "kind=path bytes=0 path=\"/doc\"",
+        "kind=path bytes=0 recovery-id=00000000000000000000000000000000 path=\"/doc\"",
+        valid ++ " recovery-id=000102030405060708090a0b0c0d0eff",
+        valid ++ " bytes=0",
+        valid ++ " kind=path",
+        valid ++ " path=\"/other\"",
+        valid ++ " disk-hash=1 disk-hash=1",
+        valid ++ " ignored=1",
+        "kind=remote bytes=0 recovery-id=000102030405060708090a0b0c0d0eff path=\"/doc\"",
+        "kind=path bytes=0 recovery-id=000102030405060708090a0b0c0d0eff path=\"relative\"",
+        "kind=path bytes=0 recovery-id=000102030405060708090a0b0c0d0eff path=\"/doc\"disk-hash=1",
+        valid ++ " number=1",
+    };
+    for (cases) |fields| {
+        const bytes = try std.fmt.allocPrint(testing.allocator, "{s}\ndoc {s}\n\n", .{ recovery_header, fields });
+        defer testing.allocator.free(bytes);
+        try testing.expectError(error.BadRecord, parseRecovery(testing.allocator, bytes));
+    }
+    const bytes = try encodeRecovery(testing.allocator, .{ .bytes = @splat(1) }, .{ .path = "/doc" }, "한");
+    defer testing.allocator.free(bytes);
+    for (0..bytes.len) |n| {
+        const result = parseRecovery(testing.allocator, bytes[0..n]);
+        if (result) |value| {
+            var record = value;
+            record.deinit(testing.allocator);
+            return error.AcceptedTruncatedRecovery;
+        } else |err| try testing.expect(err == error.BadHeader or err == error.BadRecord);
+    }
+    bytes[bytes.len - 1] = 0xff;
+    try testing.expectError(error.BadRecord, parseRecovery(testing.allocator, bytes));
+}
+
+test "RECB allocation failures free record preparation and remain allocation failures" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            // UTF-8·escape round-trip fixture이며 사용자 표시 문자열이 아니다.
+            const bytes = try encodeRecovery(allocator, .{ .bytes = @splat(1) }, .{ .path = "/a \"한\n.txt", .disk_hash = 1 }, "한글");
+            defer allocator.free(bytes);
+            var record = try parseRecovery(allocator, bytes);
+            defer record.deinit(allocator);
+            try testing.expectEqualStrings("한글", record.content);
+            try testing.expectEqualStrings("/a \"한\n.txt", record.doc.path);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Probe.run, .{});
+}
+
+test "RECB write and read enforce the same existing content and path bounds" {
+    const id: recovery.Id = .{ .bytes = @splat(1) };
+    const content = try testing.allocator.alloc(u8, pause_bytes + 1);
+    defer testing.allocator.free(content);
+    @memset(content, 'x');
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.TooLarge, encodeRecovery(failing.allocator(), id, .{ .path = "/doc" }, content));
+    try testing.expect(!failing.has_induced_failure);
+    try testing.expectError(error.BadRecord, encodeRecovery(testing.allocator, id, .{ .path = "/bad\x00name" }, ""));
+    try testing.expectError(error.BadRecord, encodeRecovery(testing.allocator, id, .{ .path = "/doc" }, "\xff"));
+    try testing.expectError(error.BadRecord, encodeRecovery(testing.allocator, .{ .bytes = @splat(0) }, .{ .path = "/doc" }, ""));
+    const bytes = try encodeRecovery(testing.allocator, id, .{ .path = "/doc" }, content[0..pause_bytes]);
+    defer testing.allocator.free(bytes);
+    var record = try parseRecovery(testing.allocator, bytes);
+    defer record.deinit(testing.allocator);
+    try testing.expectEqual(pause_bytes, record.content.len);
 }

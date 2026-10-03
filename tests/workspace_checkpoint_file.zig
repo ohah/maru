@@ -617,3 +617,71 @@ test "P4 C5 R7-5 backup arm crash ordinals never expose a partial final backup" 
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, ".workspace.v1.bak.tmp", .{}));
     }
 }
+
+// Characterization: atomic publication does not detect an external writer of the canonical leaf.
+fn externalWriterAtPhase(phase: checkpoint_file.testing.Phase, atomic_replace: bool) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "old-complete" });
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publish(parent, "old-complete"));
+    var ready: [2]std.c.fd_t = undefined;
+    var release: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&ready) != 0) return error.PipeFailed;
+    defer _ = std.c.close(ready[0]);
+    defer _ = std.c.close(ready[1]);
+    if (std.c.pipe(&release) != 0) return error.PipeFailed;
+    defer _ = std.c.close(release[0]);
+    defer _ = std.c.close(release[1]);
+    const child = std.c.fork();
+    if (child < 0) return error.ForkFailed;
+    if (child == 0) {
+        var pause: Pause = .{ .ready_fd = ready[1], .release_fd = release[0], .phase = phase };
+        const result = checkpoint_file.testing.publishObservedForTest(parent, "new-complete", .{ .context = &pause, .callback = pauseAt });
+        std.c._exit(if (result == .committed) 0 else 3);
+    }
+    var reaped = false;
+    defer if (!reaped) {
+        _ = std.c.kill(child, std.c.SIG.KILL);
+        var status: c_int = undefined;
+        _ = std.c.waitpid(child, &status, 0);
+    };
+    try waitOne(ready[0]);
+    if (atomic_replace) {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "external.v1", .data = "external-complete" });
+        const fd = std.c.open(parent.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(std.c.mode_t, 0));
+        if (fd < 0) return error.OpenFailed;
+        defer _ = std.c.close(fd);
+        if (std.c.renameat(fd, "external.v1", fd, "workspace.v1") != 0) return error.RenameFailed;
+    } else {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "external-complete" });
+    }
+    const byte = [_]u8{1};
+    if (std.c.write(release[1], &byte, 1) != 1) return error.WriteFailed;
+    var status: c_int = undefined;
+    if (std.c.waitpid(child, &status, 0) != child) return error.WaitFailed;
+    reaped = true;
+    const unsigned: c_uint = @bitCast(status);
+    try std.testing.expect(std.c.W.IFEXITED(unsigned) and std.c.W.EXITSTATUS(unsigned) == 0);
+    var read_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(if (phase == .temp_closed) "new-complete" else "external-complete", try readLeaf(&tmp, "workspace.v1", &read_buf));
+    try std.testing.expectEqualStrings("old-complete", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, ".workspace.v1.tmp", .{}));
+}
+
+test "P4 C2 external in-place writer before rename is overwritten while baseline backup survives" {
+    try externalWriterAtPhase(.temp_closed, false);
+}
+
+test "P4 C2 external atomic writer before rename is overwritten while baseline backup survives" {
+    try externalWriterAtPhase(.temp_closed, true);
+}
+
+test "P4 C2 external in-place writer after rename wins while baseline backup survives" {
+    try externalWriterAtPhase(.replaced, false);
+}
+
+test "P4 C2 external atomic writer after rename wins while baseline backup survives" {
+    try externalWriterAtPhase(.replaced, true);
+}

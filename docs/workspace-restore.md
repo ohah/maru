@@ -309,7 +309,10 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 - workspace 생성/삭제, split, rename/group/pin, Term 이동/닫기, cross-window 이동, binding 변경은 dirty를 만들고 짧은
   debounce 뒤 같은 디렉터리 temp write·atomic replace로 전체 manifest를 교체한다. GUI process 비정상 종료와 경합해도
   이전 또는 새 완전본 중 하나만 남겨야 하며, 창별로 따로 publish하지 않는다. 전원 손실 durability와 file/directory
-  `fsync`는 비목표다.
+  `fsync`는 비목표다. 같은 canonical을 외부 writer가 동시에 수정하면 rename 전 변경은
+  덮일 수 있고 rename 후 변경은 외부 값이 최종본이 된다. atomic publication은 외부 변경 감지가
+  아니다. pipe barrier로 고정한 실제 process 검사 4건은 이 제한과 baseline 백업 보존을 확인했다
+  ([검증 기록](plans/editor-shared-restore.md)). SIGKILL 검사는 실제 전원 차단 내구성을 입증하지 않는다.
 - 위 목록은 topology 예시이지 전체 dirty inventory가 아니다. 영속 사용자 의도인 order/color, active tab/pane/Term,
   file/browser persisted state, dock 표시·view, explicit Explorer root, SCM base와 runtime ended tombstone도 포함한다.
   반면 checkpoint 때 최신 값을 함께 캡처하는 OSC title·cwd·prompt·agent·Git 관측 갱신은 자체 dirty를 만들지 않는다.

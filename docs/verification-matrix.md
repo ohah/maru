@@ -3961,3 +3961,8 @@ shared metadata의 제품 capture/apply는 여전히 미연결이며, codec scra
 8개 문법/구조 오류, 디렉터리·읽기 권한 실패의 20회 실제 앱 검사를 실행한다.
 원본·백업 inode와 내용, 무관한 sibling sentinel, 임시 저장 파일 부재를 판정한다.
 회차별 결과는 [복원 검증 계획](plans/editor-shared-restore.md)에 기록한다.
+
+workspace 외부 writer/중단: `test-workspace-checkpoint-file-adapter`는 Debug·ReleaseFast 각각
+21개를 판정한다. 추가 4건은 별도 process의 in-place/atomic 변경을 rename 전후로 고정해
+last-writer-wins와 baseline 백업 보존을 확인한다. 기존 SIGKILL commit-point 검사는 process
+중단 증거이며 물리 전원 차단·OS crash·disk cache loss 검증은 아니다.

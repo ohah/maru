@@ -587,3 +587,21 @@ checkpoint, 잘못된 UTF-8, 알 수 없는 헤더, canonical leaf가 디렉터�
 `/tmp/maru-workspace-hostile-20-final.log`이며 최종 20회 결과는
 `/tmp/maru-workspace-hostile-20-verified.log`와 JSON 보고서에 남겼다.
 제품 수정은 없으며, 새 공유 뷰 복원 연결·동시 외부 writer·전원 손실 보장은 여전히 제외한다.
+
+### 동시 외부 writer와 중단 검증
+
+같은 canonical checkpoint를 별도 process가 쓰는 순서를 pipe barrier로 고정하고 실제 C2
+publisher를 rename 직전/직후에서 정지시켰다. 각 위치에서 외부 process의 in-place write와
+atomic rename을 모두 검사했다. 직전 외부 변경은 Maru rename에 덮이고, 직후 외부 변경은
+최종 canonical로 남는다. 4건 모두 baseline `.bak`의 원래 완전 bytes를 유지했고 임시 파일은
+남지 않았다. 이는 외부 편집 보호 성공이 아니라 last-writer-wins 제한의 재현이다.
+
+`test-workspace-checkpoint-file-adapter`는 Debug/ReleaseFast에서 각각 21개를 실행했다. 기존
+rename 전후·backup unlink 전후·backup arm의 실제 process SIGKILL 검사도 통과했다. 로그는
+`/tmp/maru-external-crash-validation-complete.log`다. 처음 추가한 test 이름은 gate의 `P4 C`
+filter와 일치하지 않아 미실행이었으므로 prefix와 exact-count를 수정해 21개 실행을 확인했다.
+
+물리 전원 차단·OS crash·disk cache loss는 실행하지 않았다. 제품은 file/directory sync를
+의도적으로 하지 않으며 기존 계약도 power-loss durability를 비목표로 둔다. SIGKILL 후
+완전 파일 판정을 전원 차단 보장으로 확대하지 않는다. 외부 변경 감지와 durability의 제품
+정책은 이번에 변경하지 않았다.

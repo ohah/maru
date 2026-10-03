@@ -5078,7 +5078,13 @@ pub export fn maru_macos_app_session_osr_drag_out_part(session: ?*AppSession, dr
     return 1;
 }
 
-/// v206(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px)와 받은 동작(`NSDragOperation`, 0 = 취소). 그 끌기가 아니면 0.
+/// v206(W6d②): 세션이 열렸다 — 그 탭의 제스처를 조용히 끝낸다(떼기를 보내지 않는다).
+pub export fn maru_macos_app_session_osr_drag_out_started(session: ?*AppSession, drag: u32) void {
+    const app = session orelse return;
+    session_mod.web_ops.osrDragOutStarted(app, drag);
+}
+
+/// v206(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px — 음수면 시작 자리)와 받은 동작(`NSDragOperation`, 0 = 취소). 그 끌기가 아니면 0.
 pub export fn maru_macos_app_session_osr_drag_out_end(session: ?*AppSession, drag: u32, x_px: f64, y_px: f64, operation: u32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrDragOutEnd(app, drag, x_px, y_px, operation));

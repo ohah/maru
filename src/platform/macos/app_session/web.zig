@@ -1254,7 +1254,8 @@ pub fn osrDragReset(self: *AppSession) bool {
     return self.osr_drag.loaded;
 }
 
-/// 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기다(W6d② — Swift 가 끌기 소스가 maru view 이고 그 번호가 살아 있을 때 부른다).
+/// 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기다(W6d② — Swift 가 끌기 소스가 이 앱의 maru view 이고 그 번호가 지금 도는
+/// 페이지 끌기일 때만 부른다. 표지만 믿으면 원래 탭이 닫혀 sidecar 가 데이터를 놓은 뒤 pasteboard 의 글까지 버렸다 — 적대 검증 1 차).
 /// Chromium 본문에 들어가면 조각 대신 그 데이터로 enter 한다 — 페이지가 정한 형식이 pasteboard 를 거치며 사라지지 않게.
 pub fn osrDragSetSource(self: *AppSession, drag: u32) void {
     self.osr_drag.source = drag;
@@ -1262,9 +1263,10 @@ pub fn osrDragSetSource(self: *AppSession, drag: u32) void {
 }
 
 // ── W6d②: 페이지에서 시작한 끌기(끌어내기) ───────────────────────────────────────────────────────────────
-// sidecar 가 보낸 끌기를 이 창이 가져간다 — 이 창에서 그 탭을 왼쪽으로 누른 채(제스처 주인)일 때만. 그때 제스처를 조용히 끝낸다
-// (macOS 끌기 세션이 떼기를 먹는다 — 떼기를 보내지 않는다: Chrome 도 끌기 뒤 mouseup 을 페이지에 주지 않는다, 착수 전 실측). 이미
-// 뗐으면 곧바로 취소로 답한다.
+// sidecar 가 보낸 끌기를 이 창이 가져간다 — 이 창에서 그 탭을 왼쪽으로 누른 채(제스처 주인)일 때만, 이미 뗐으면 곧바로 취소로
+// 답한다. 세션이 실제로 열리면(`osrDragOutStarted`) 제스처를 조용히 끝낸다(macOS 끌기 세션이 떼기를 먹는다 — 떼기를 보내지 않는다:
+// Chrome 도 끌기 뒤 mouseup 을 페이지에 주지 않는다, 착수 전 실측). 가져갈 때 끝내면 Swift 가 세션을 못 열고 취소할 때(이미 뗐다)
+// 큐에 남은 떼기가 주인 없는 제스처로 일반 라우팅에 흘렀다(W6d② 적대 검증 1 차).
 
 pub const OsrDragOutShown = struct { surface: u64, drag: u32 };
 
@@ -1286,11 +1288,14 @@ pub fn osrDragOutTake(self: *AppSession) ?OsrDragOutInfo {
             _ = web_osr.endDragOut(self.allocator, l.surface_id, d.drag, d.point, 0);
             continue;
         }
-        // 앞 끌기가 남아 있으면(세션이 끝을 알리지 않았다) 취소로 끝낸다.
-        if (self.osr_drag_out) |old| _ = web_osr.endDragOut(self.allocator, old.surface, old.drag, .{ .x = 0, .y = 0 }, 0);
-        self.finishPointerGesture();
-        self.osr_drag_out = .{ .surface = l.surface_id, .drag = d.drag };
-        return .{ .drag = d.drag, .allowed = d.allowed, .hotspot_x = d.hotspot.x, .hotspot_y = d.hotspot.y, .image_width = d.image_width, .image_height = d.image_height };
+        const info: OsrDragOutInfo = .{ .drag = d.drag, .allowed = d.allowed, .hotspot_x = d.hotspot.x, .hotspot_y = d.hotspot.y, .image_width = d.image_width, .image_height = d.image_height };
+        // 앞 끌기가 남아 있으면(세션이 끝을 알리지 않았다) 취소로 끝낸다 — 방금 가져간 그 끌기면 건드리지 않는다(sidecar 가 다시 떠
+        // 번호가 같아졌다 — W6d② 적대 검증 1 차).
+        if (self.osr_drag_out) |old| if (!(old.surface == l.surface_id and old.drag == info.drag)) {
+            _ = web_osr.endDragOut(self.allocator, old.surface, old.drag, .{ .x = 0, .y = 0 }, 0);
+        };
+        self.osr_drag_out = .{ .surface = l.surface_id, .drag = info.drag };
+        return info;
     }
     return null;
 }
@@ -1311,13 +1316,21 @@ pub fn osrDragOutPart(self: *AppSession, drag: u32, part: OsrDragOutPart) []cons
     };
 }
 
-/// 끌기 세션이 끝났다 — 놓인 자리(창 backing px — 그 탭이 이 창에 없으면 시작 자리)와 받은 동작을 sidecar 에 답한다.
+/// 세션이 열렸다 — 그 탭의 제스처를 조용히 끝낸다(떼기를 보내지 않는다).
+pub fn osrDragOutStarted(self: *AppSession, drag: u32) void {
+    const shown = self.osr_drag_out orelse return;
+    if (shown.drag != drag) return;
+    if (self.pointer_gesture_owner == .web_osr and self.pointer_gesture_owner.web_osr.surface_id == shown.surface) self.finishPointerGesture();
+}
+
+/// 끌기 세션이 끝났다 — 놓인 자리(창 backing px — 음수이거나 그 탭이 이 창에 없으면 시작 자리)와 받은 동작을 sidecar 에 답한다.
 pub fn osrDragOutEnd(self: *AppSession, drag: u32, x_px: f64, y_px: f64, operation: u32) bool {
     const shown = self.osr_drag_out orelse return false;
     if (shown.drag != drag) return false;
     self.osr_drag_out = null;
     const d = web_osr.dragOut(shown.surface, drag) orelse return false;
-    const point = if (osr_input.find(self.osr_layouts.items, shown.surface)) |l| osrDip(self, l, x_px, y_px) else d.point;
+    const layout = if (x_px < 0 or y_px < 0) null else osr_input.find(self.osr_layouts.items, shown.surface);
+    const point = if (layout) |l| osrDip(self, l, x_px, y_px) else d.point;
     return web_osr.endDragOut(self.allocator, shown.surface, drag, point, operation);
 }
 

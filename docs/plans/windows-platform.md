@@ -95,7 +95,8 @@
 사용자가 기존 safe-save 계약의 Windows 네이티브 구현과 macOS 경로 결합 정리를 승인했다.
 목록·상세 세션 기록 worker는 `src/app`으로 이동했고 양쪽 host가 `maru.app`으로 소비한다
 ([모듈 연결과 검증](../layering-and-portability.md#341-세션-기록-worker의-실제-공통-계층-이동-2026-10-03)).
-Git backend는 `src/app/git/backend.zig`로 이동했다. native text adapter 분리는 남았다.
+Git backend는 `src/app/git/backend.zig`로 이동했다. Chrome 텍스트 아티팩트는
+`src/app/chrome_text.zig`로 분리했고 CoreText만 macOS adapter에 유지한다(layering-and-portability.md §3.4.3).
 파일 트리 분리는 layering-and-portability.md §3.4.2에 기록했다.
 W8.17의 metadata 보존·쓰기·충돌 검사·편집 입력·GUI 저장·외부 변경 감시는 계속 진행 대상이다.
 

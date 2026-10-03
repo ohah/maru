@@ -209,7 +209,9 @@ fn appendStr(buf: []u8, len: *usize, s: []const u8) void {
 }
 
 /// 한 액션에 현재 묶인 chord를 찾는다(표시용). resolve와 같은 우선순위: 사용자 app_bindings 먼저, 없으면
-/// 빌트인 default_app_bindings(단, 사용자가 unbind한 chord는 건너뜀 — resolve의 unbind 처리와 일치).
+/// 빌트인 default_app_bindings(단, 사용자가 unbind했거나 **사용자 바인딩이 차지한** chord는 건너뜀 — resolve 가
+/// 그 chord 에서 빌트인까지 내려가지 않으므로). 차지한 chord 를 돌려주면 메뉴 keyEquivalent 가 되어 AppKit 이
+/// keyDown 보다 먼저 가로챈다 — `Cmd+= = increase_font_size:2` 가 메뉴의 보폭 1 로 실행되던 결함.
 /// 안 묶였으면 null. select_tab 같은 payload 액션은 std.meta.eql로 payload까지 비교한다.
 pub fn chordForAction(resolver: KeyBindingResolver, action: Action) ?KeyChord {
     for (resolver.app_bindings) |binding| {
@@ -226,16 +228,16 @@ pub fn chordForAction(resolver: KeyBindingResolver, action: Action) ?KeyChord {
     }
     for (default_app_bindings) |binding| {
         if (!std.meta.eql(binding.action, action)) continue;
-        var unbound = false;
-        for (resolver.unbinds) |u| {
-            if (u.eql(binding.chord)) {
-                unbound = true;
-                break;
-            }
-        }
-        if (!unbound) return binding.chord;
+        if (!builtinChordShadowed(resolver, binding.chord)) return binding.chord;
     }
     return null;
+}
+
+fn builtinChordShadowed(resolver: KeyBindingResolver, chord: KeyChord) bool {
+    for (resolver.unbinds) |u| if (u.eql(chord)) return true;
+    for (resolver.app_bindings) |b| if (b.chord.eql(chord)) return true;
+    for (resolver.terminal_bindings) |b| if (b.chord.eql(chord)) return true;
+    return false;
 }
 
 /// 비-modifier 키 1개의 macOS 표준 표시 글리프를 buf에 쓰고 그 slice를 돌려준다 — formatChord 키 글리프의 단일
@@ -373,6 +375,18 @@ test "chordForAction: 빌트인·사용자·unbind" {
     // 빌트인 chord를 unbind하면 표시도 사라진다(null).
     const unbind_resolver: KeyBindingResolver = .{ .unbinds = &.{try KeyChord.parse("Cmd+T")} };
     try std.testing.expect(chordForAction(unbind_resolver, .new_term) == null);
+
+    // 사용자 바인딩이 **차지한** 빌트인 chord 도 표시하지 않는다 — 메뉴 keyEquivalent 가 되면 AppKit 이 keyDown 보다
+    // 먼저 가로채 사용자 동작 대신 빌트인이 돈다. ⌘= 를 보폭 2 로 묶으면 Bigger(보폭 1)는 남은 빌트인 ⌘⇧+ 만 갖는다.
+    const bigger: Action = .{ .increase_font_size = maru.config.action.default_font_size_step };
+    try std.testing.expect(chordForAction(builtin_resolver, bigger).?.key.eql(.{ .char = '=' })); // 대조군
+    const cmd_eq = try KeyChord.parse("Cmd+=");
+    const step_resolver: KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = cmd_eq, .action = .{ .increase_font_size = 2 } }} };
+    const bigger_chord = chordForAction(step_resolver, bigger).?;
+    try std.testing.expect(bigger_chord.key.eql(.{ .char = '+' }) and bigger_chord.modifiers.shift);
+    // 터미널 매크로가 차지해도 같다(resolve 는 사용자 매크로를 빌트인 app 보다 먼저 본다).
+    const macro_resolver: KeyBindingResolver = .{ .terminal_bindings = &.{.{ .chord = try KeyChord.parse("Cmd+T"), .input = .{ .send_text = "x" } }} };
+    try std.testing.expect(chordForAction(macro_resolver, .new_term) == null);
 }
 
 test "keyEquivalent/modifierMask: NSMenuItem용 소문자 글자·mask·화살표 unichar" {

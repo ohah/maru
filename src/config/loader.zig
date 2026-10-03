@@ -703,6 +703,16 @@ fn parseKeybindLine(trimmed: []const u8) ?KeybindLine {
     };
 }
 
+/// write-back 의 action 대조 — 줄의 rhs 가 세팅 GUI 가 고른 action 과 **같은 동작**인가. 글자만 보면
+/// `increase_font_size:1` 처럼 표기는 달라도 파싱하면 같은 action 인 줄을 놓친다: 라이브 판정(`std.meta.eql`)은
+/// 그 줄을 해제·재바인딩했다고 보는데 파일엔 옛 줄이 남아 재시작하면 되살아난다. 그래서 라이브와 같은 잣대로 잰다.
+fn sameAppAction(action: []const u8, rhs: []const u8) bool {
+    if (std.mem.eql(u8, action, rhs)) return true;
+    const want = action_mod.parseAction(action) orelse return false;
+    const have = action_mod.parseAction(rhs) orelse return false;
+    return std.meta.eql(want, have);
+}
+
 /// keybind 줄(`keybind = <chord> = <action>`)을 **action 기준**으로 in-place 갱신한다 — updateConfigText의 keybind 짝.
 /// keybind는 `key = value`가 아니라 줄마다 같은 `keybind` 키 + 두 번째 `=`로 chord와 action을 나눠서, key 기준
 /// updateConfigText로는 다룰 수 없다(모든 keybind 줄이 한 키로 충돌). 그래서 전용 패스를 둔다: rhs(두 번째 `=` 뒤,
@@ -728,7 +738,7 @@ pub fn updateKeybindLines(allocator: std.mem.Allocator, original: []const u8, re
         if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
             if (!std.mem.startsWith(u8, kl.chord, "global:")) {
                 for (rebinds, 0..) |rb, i| {
-                    if (std.mem.eql(u8, rb.action, kl.rhs)) {
+                    if (sameAppAction(rb.action, kl.rhs)) {
                         try out.appendSlice(allocator, "keybind = ");
                         try out.appendSlice(allocator, rb.chord);
                         try out.appendSlice(allocator, " = ");
@@ -799,7 +809,7 @@ pub fn removeKeybindLines(allocator: std.mem.Allocator, original: []const u8, ac
         // 좌측 chord가 `global:`면 전역 줄 — in-app 제거 패스가 안 건드린다(removeGlobalKeybindLines가 담당).
         if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
             if (!std.mem.startsWith(u8, kl.chord, "global:")) {
-                for (actions) |a| if (std.mem.eql(u8, a, kl.rhs)) {
+                for (actions) |a| if (sameAppAction(a, kl.rhs)) {
                     drop = true;
                     break;
                 };
@@ -1838,6 +1848,44 @@ test "removeKeybindLines: action 기준 keybind 줄 삭제, 매크로·다른 ke
     try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+E = new_term") == null); // 삭제됨
 }
 
+test "keybind recorder 가 쓴 chord 는 config 줄로 다시 읽힌다 — 구분자와 같은 키 포함" {
+    // `KeyChord.parse` 단독 왕복은 `Cmd+=` 도 통과해 이 결함을 못 본다. 실제 쓰기는 `keybind = <chord> = <action>`
+    // 한 줄이라 chord 안의 '=' 가 구분자로 먹혔다(⌘= 를 녹화하면 재시작 뒤 사라짐). 줄째 파싱으로 잰다.
+    const a = std.testing.allocator;
+    for ([_]u21{ '=', '+', '-', ',', 'K' }) |ch| {
+        const chord = keybinding.KeyChord{ .modifiers = .{ .command = true }, .key = .{ .char = ch } };
+        var chord_buf: [32]u8 = undefined;
+        var line_buf: [64]u8 = undefined;
+        const line = try std.fmt.bufPrint(&line_buf, "keybind = {s} = new_tab\n", .{chord.toConfigString(&chord_buf)});
+        var p = try parse(a, line);
+        defer p.deinit();
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+        try std.testing.expectEqual(@as(usize, 1), p.keybindings.len);
+        try std.testing.expect(p.keybindings[0].chord.eql(chord));
+    }
+}
+
+test "keybind write-back 은 표기가 달라도 같은 action 인 줄을 잡고 보폭이 다른 줄은 남긴다" {
+    // `increase_font_size:1` 은 파싱하면 세팅 GUI 의 Bigger(`increase_font_size`)와 같은 action 이다 — 라이브 판정이
+    // 그 줄을 해제·재바인딩했다고 보는데 파일에 옛 줄이 남으면 재시작 뒤 되살아난다. 보폭 2 는 다른 action 이라 남는다.
+    const a = std.testing.allocator;
+    const original =
+        "keybind = Ctrl+Cmd+K = increase_font_size:1\n" ++
+        "keybind = Ctrl+Cmd+J = increase_font_size:2\n";
+
+    const removed = try removeKeybindLines(a, original, &.{"increase_font_size"});
+    defer a.free(removed);
+    try std.testing.expect(std.mem.indexOf(u8, removed, "increase_font_size:1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, removed, "Ctrl+Cmd+J = increase_font_size:2") != null);
+
+    const rebinds = [_]KeybindRebind{.{ .action = "increase_font_size", .chord = "Ctrl+Cmd+B" }};
+    const rebound = try updateKeybindLines(a, original, &rebinds);
+    defer a.free(rebound);
+    try std.testing.expect(std.mem.indexOf(u8, rebound, "Ctrl+Cmd+K") == null); // 옛 chord 가 안 남는다
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rebound, "Ctrl+Cmd+B")); // append 가 아니라 교체
+    try std.testing.expect(std.mem.indexOf(u8, rebound, "Ctrl+Cmd+J = increase_font_size:2") != null);
+}
+
 test "updateKeybindLines: action 기준 교체, 없으면 append, 매크로·다른 줄·주석 보존 (keybind recorder write-back)" {
     const a = std.testing.allocator;
     const original =
@@ -2546,13 +2594,18 @@ test "parse: keybind font size step rides the action and bad steps are diagnosti
         \\keybind = Ctrl+Cmd+J = decrease_font_size
         \\keybind = Ctrl+Cmd+L = increase_font_size:0
         \\keybind = Ctrl+Cmd+H = decrease_font_size:-1
+        \\keybind = Cmd+Equal = increase_font_size:2
     );
     defer p.deinit();
     // 보폭은 바인딩이 싣는다. 숫자 없으면 기본 보폭. 0·음수는 알 수 없는 action 과 같은 diagnostic(그 줄만 무시).
-    try std.testing.expectEqual(@as(usize, 2), p.keybindings.len);
+    try std.testing.expectEqual(@as(usize, 3), p.keybindings.len);
     try std.testing.expectEqual(@as(f32, 2.5), p.keybindings[0].action.increase_font_size);
     try std.testing.expectEqual(action_mod.default_font_size_step, p.keybindings[1].action.decrease_font_size);
     try std.testing.expectEqual(@as(usize, 2), p.diagnostics.len);
+    // ⌘= 는 `Equal` 로 적는다 — 빌트인 ⌘=(보폭 1)를 덮는 가장 흔한 쓰임새다.
+    try std.testing.expect((try keybinding.KeyChord.parse("Cmd+Equal")).eql(p.keybindings[2].chord));
+    try std.testing.expect(p.keybindings[2].chord.key.eql(.{ .char = '=' }));
+    try std.testing.expectEqual(@as(f32, 2), p.keybindings[2].action.increase_font_size);
 }
 
 test "parse: keybind = <chord> = unbind collects unbinds; dedups across binds and unbinds" {

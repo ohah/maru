@@ -1005,3 +1005,33 @@ exclusive claim 파일 또는 mkdir는 생성 순간의 namespace 예약이다. 
 이번 검토는 ID 방향을 반증하지 않았으나, 새 필수 codec/중복 키/State 정산/닫기 수집/
 source와 current의 동시 소유/읽기 결과 소비 요구를 추가했다. 설계 검토 횟수만으로
 이 요구들의 제품 실행 판정이 완료됐다고 선언하지 않는다.
+
+### 실행 검증 — 제품 반례와 저장소 후보
+
+제품 변경 없이 U4b-16과 U4d-8 characterization 판정자를 추가했다. 이 판정자는
+정상 동작을 주장하는 회귀 검사가 아니라 기존 동작의 실패 결과를 확인한다.
+
+- U4b-16: 같은 path를 실제 openPathInActivePane으로 두 번 열고 독립 State를 확인한 뒤
+  A/B를 편집·flush한다. B 내용의 백업을 읽고 A의 drop을 호출한다. B 본문은 dirty로
+  남지만 백업 파일은 없고 B의 backup_on_disk는 true다. 후속 flush도 재생성하지 않는지 검사한다.
+  이는 백업 버리기 제품 API의 검사이며 실제 창 닫기 UI 경로의 실행 증거는 아니다.
+- U4d-8: 원본이 없는 path에 유효한 0-byte backup을 만들고 실제 reviveAsUntitled를 호출한다.
+  record parser는 빈 본문을 정상으로 읽지만 revival은 원본을 삭제하고 새 문서를 만들지 않는지
+  검사한다. 전체 삭제 편집의 실제 GUI 입력/외부 원본 삭제 이벤트를 수행한 검사는 아니다.
+
+저장소 후보는 `python3 tools/perf/editor-recovery-reservation.py`로 격리 임시 폴더에서
+실행했다. 두 자식 process가 같은 이름을 예약할 때 claim(O_EXCL)과 directory(mkdir)
+모두 하나만 성공했다. 임시 새 본문을 게시하지 않고 버리면 이전 record가 유지됐고,
+os.replace 뒤 새 완전 본문과 예약 객체가 유지됐다. 임시 폴더는 실행 후 정리한다.
+이 도구는 Python의 파일 연산 실험이며 Maru atomic writer/lock에 연결한 구현이 아니다.
+실행 시간에는 process 시작 비용이 포함돼 두 후보의 성능 우위 근거로 사용하지 않는다.
+claim의 stale owner 재인수/경로 ABA/삭제 실패/실제 SIGKILL은 아직 검사하지 않았다.
+
+로그는 `/tmp/maru-recovery-edge-execution.log`, `/tmp/maru-reservation-probe.json`이다.
+새 ID/wire/restart 기능은 여전히 미구현이다. 이번 두 제품 반례와 파일 연산 대조를
+전체 설계의 실행 통과로 확대하지 않는다.
+
+실행 결과: U4b-16은 B의 backup 파일 부재, dirty 본문 유지, backup_on_disk=true,
+후속 flush의 미복원을 확인했다. U4d-8은 빈 정상 record 삭제와 새 문서 부재를 확인했다.
+제품 131개·L2 규칙 39개·shared 64개 검사와 문서 링크/줄 참조 검사는 종료 코드 0이었다.
+테스트 통과는 위 characterization의 기대 결과를 확인한 것이며 결함 수정 완료를 뜻하지 않는다.

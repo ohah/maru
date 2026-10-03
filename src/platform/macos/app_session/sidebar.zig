@@ -3002,7 +3002,10 @@ pub fn groupDragPreviewFrame(self: *AppSession, marker: usize, y_px: f64, cmd_he
 /// 뽑아 갱신한다. 분수 scale을 그대로 곱한 device 픽셀 font size로 조회한다. macOS가
 /// 아니거나(테스트/CI) 조회 실패면 같은 device 픽셀 font size의 정사각으로 대체한다.
 /// scale_milli가 바뀌는 resize에서도 호출한다.
-pub fn refreshCellMetrics(self: *AppSession) void {
+/// `active_tab_resize_follows`: 호출자가 곧 활성 탭을 resize 한다(글꼴 크기·DPI 변경). 그 탭의 Term 에는 셀 픽셀을 여기서
+/// 따로 보내지 않는다 — 따로 보내면 reader 가 먼저 적용해 DECSET 2048 통지가 «옛 격자 × 새 픽셀» 로 한 번, 이어 resize 로 또 한 번
+/// 간다. 그 탭은 뒤따르는 resize 가 셀 픽셀을 함께 실어(`SurfaceRuntime.resizeWithCell`) 격자와 한 번에 바꾼다.
+pub fn refreshCellMetrics(self: *AppSession, active_tab_resize_follows: bool) void {
     const device_font_size = renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli);
     const square: u32 = @intFromFloat(@round(device_font_size));
     self.cell_width_px = square;
@@ -3083,7 +3086,9 @@ pub fn refreshCellMetrics(self: *AppSession) void {
     if (self.surface_initialized) {
         // Phase 3 위임(docs/plans/io-render-threading.md §9 P3-3): 폰트/DPI 변경 시 셀 메트릭을 reader로 위임한다(메인
         // 직접 mutate 없음). 모든 Term에 보내 inactive host runtime도 다음 kitty 출력 전에 새 metric을 보게 한다.
+        const resized_next: ?*const Tab = if (active_tab_resize_follows and self.tabs.items.len > 0) tab_ops.activeTab(self) else null;
         for (self.tabs.items) |tab| {
+            if (resized_next == tab) continue; // 뒤따르는 resize 가 격자와 함께 싣는다(위 doc)
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.kind != .terminal) continue;

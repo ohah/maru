@@ -8152,7 +8152,7 @@ pub const AppSession = struct {
         // 저장된 사이드바 폭(sidebar.width, pt)을 런타임 폭으로 seed한다 — 아래 refreshCellMetrics가 동적 하한으로
         // clamp하고 backing px로 환산한다(단일 출처). config 키가 없으면 기본 180이라 struct 기본값과 같아 현 동작 그대로다.
         self.sidebar_width_pt = self.loaded_config.config.sidebar.width_pt;
-        sidebar_ops.refreshCellMetrics(self);
+        sidebar_ops.refreshCellMetrics(self, false);
 
         // 첫 spawn 크기 = 창 backing px가 오면 cell 메트릭으로 grid 계산(실제 창 크기), 아니면 cols/rows(헤드리스
         // 테스트·창 미상) 폴백. gridFromBacking은 resize 경로와 같은 단일 출처라 첫 grid와 이후 resize가 일치한다.
@@ -13279,7 +13279,8 @@ pub const AppSession = struct {
     /// + 각 pane resize(resize 본문과 동일한 reflow). 아직 첫 resize 전(backing 0)이면 grid는 스킵 — 곧 올 Swift
     /// resize가 새 메트릭으로 grid를 잡는다.
     pub fn applyMetricsPipeline(self: *AppSession) void {
-        sidebar_ops.refreshCellMetrics(self);
+        // 창 크기를 알면 곧 활성 탭을 resize 한다(아래) — 그 탭의 셀 픽셀은 그 resize 가 격자와 함께 싣는다.
+        sidebar_ops.refreshCellMetrics(self, self.backing_width_px > 0 and self.backing_height_px > 0);
         _ = self.renderer_state.atlas.invalidate(.font_size_changed);
         // The renderer's FontId registry deliberately lives as long as the atlas. A font family
         // switch may retain identical cell metrics, so metric-only fingerprinting is insufficient:
@@ -19021,7 +19022,8 @@ pub const AppSession = struct {
         // 다시 뽑는다. grid 계산이 placeholder가 아니라 실제 cell 크기를 쓰도록 순서가 중요하다.
         if (scale_changed) {
             self.scale_milli = next_scale;
-            sidebar_ops.refreshCellMetrics(self);
+            // scale 이 바뀌면 아래에서 반드시 크기를 다시 적용한다 — 활성 탭의 셀 픽셀은 그 resize 가 격자와 함께 싣는다.
+            sidebar_ops.refreshCellMetrics(self, true);
             // B1 text artifacts key both pixel placement and glyph raster scale. Rebuild from
             // the resolved appearance rather than replaying a 1x/2x shaped-record cache.
             self.clearMeasuredTextCaches();
@@ -57758,6 +57760,91 @@ test "newTab(새 워크스페이스): 직전 활성 탭이 split이어도 새 �
 // resize를 거부해도(자식 종료 `.exited`·link 없음) core grid는 자기 pane 크기를 따라야 한다. 렌더러는 셀을
 // `pane origin + col×cell_w`로만 두고 **pane 클리핑이 없으므로**(maru_metal_renderer.m), 옛 grid가 남으면 그
 // Term이 divider를 넘어 **옆 pane 글자 위에 겹쳐 그려진다** — 사용자가 실제로 겪은 화면 손상이다.
+// 글꼴 크기를 바꾸면 격자와 셀 픽셀이 같이 바뀐다. resize 가 셀 픽셀을 함께 실어야 코어(로컬)·host 코어(원격)가 둘을 **한 번에**
+// 바꿔 DECSET 2048 통지가 «새 격자 × 옛 픽셀» 을 거치지 않는다. 예전 경로라면 셀 픽셀은 다음 tick 의 `set_cell_metrics`·프레임
+// 빌드가 넣으므로, tick 전의 코어는 옛 셀 픽셀을 들고 있다 — 그 차이를 잰다.
+test "글꼴 크기 변경: resize 가 셀 픽셀을 함께 실어 tick 전에 코어가 이미 새 셀 픽셀을 든다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    session.backing_width_px = session.sidebar_width_px + 800; // grid 재산출에 backing 이 필요하다(applyMetricsPipeline)
+    session.backing_height_px = 600;
+    try pane_ops.resizeActiveTabPanes(session);
+
+    const surface = term_ops.activeSurface(session);
+    const before_w = session.cell_width_px;
+    const before_grid = surface.core.size;
+    session.setFontSize(session.appearance.font.size * 2);
+    try std.testing.expect(session.cell_width_px != before_w); // 셀 픽셀이 실제로 바뀌었다
+    try std.testing.expect(!std.meta.eql(before_grid, surface.core.size)); // 격자도 바뀌었다(같은 resize 로)
+    // tick 없이 — 같은 resize 가 셀 픽셀까지 코어에 넣었다.
+    try std.testing.expectEqual(session.cell_width_px, surface.core.cell_width_px);
+    try std.testing.expectEqual(session.cell_height_px, surface.core.cell_height_px);
+}
+
+// 위 판정자의 짝: 일괄 `set_cell_metrics` 가 곧 resize 될 활성 탭까지 가면, 그것이 먼저 적용돼 DECSET 2048 통지가 «옛 격자 × 새
+// 픽셀» 로 한 번 더 간다(resize 가 셀 픽셀을 실어도). 그래서 활성 탭은 건너뛰고 다른 탭만 보낸다 — controlled smoke 는 명령을 곧바로
+// 적용하므로(reader 없음) 두 코어의 값으로 그 가름이 보인다.
+test "글꼴 크기 변경: 셀 픽셀 일괄 전송은 곧 resize 될 활성 탭을 건너뛴다 — 다른 탭엔 곧바로 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try setupTwoTabsSettled(allocator); // tab1 활성, tab0 배경
+    defer {
+        session.deinit();
+        allocator.destroy(session);
+    }
+    const background = session.tabs.items[0].panes.items[0].terms.items[0].surface;
+    const active = term_ops.activeSurface(session);
+    try std.testing.expect(background != active);
+    const old_w = active.core.cell_width_px;
+
+    session.appearance.font.size *= 2;
+    sidebar_ops.refreshCellMetrics(session, true);
+    try std.testing.expect(session.cell_width_px != old_w);
+    try std.testing.expectEqual(session.cell_width_px, background.core.cell_width_px); // 배경 탭: 격자 그대로라 지금 보낸다
+    try std.testing.expectEqual(old_w, active.core.cell_width_px); // 활성 탭: 뒤따르는 resize 가 격자와 함께 싣는다
+
+    // resize 가 따라오지 않는 호출(초기화)은 활성 탭까지 보낸다.
+    sidebar_ops.refreshCellMetrics(session, false);
+    try std.testing.expectEqual(session.cell_width_px, active.core.cell_width_px);
+}
+
+// 활성 탭의 셀 픽셀은 resize 가 싣는다(`refreshCellMetrics` 가 건너뛴다). 자식이 끝난 Term 은 runtime 이 거부해 표시 grid 만
+// 맞추는 갈래(`resizeTermCoreToLayout`)로 가므로, 그 갈래도 셀 픽셀을 넣지 않으면 그 코어만 옛 값에 남는다.
+test "레이아웃 resize: 자식이 종료된 Term 도 격자와 함께 셀 픽셀을 맞춘다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+
+    const dead = term_ops.activeSurface(session);
+    dead.process_state = .exited; // runtime 이 `ProcessExited` 로 거부 → 표시 grid 만 맞추는 갈래
+    dead.core.setCellMetrics(1, 1); // 이 갈래가 넣지 않으면 남을 옛 값
+
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try std.testing.expectEqual(session.cell_width_px, dead.core.cell_width_px);
+    try std.testing.expectEqual(session.cell_height_px, dead.core.cell_height_px);
+}
+
 test "레이아웃 resize: 자식이 종료된(.exited) Term도 split 후 자기 pane grid로 줄어든다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
     const allocator = std.testing.allocator;

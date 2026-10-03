@@ -1184,11 +1184,17 @@ test "CR6e-c3b2d 경계는 재연결 강제 resize 가 레이아웃이 원한 �
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "!registry_mod.gridSizeAllowed(layout.cols, layout.rows))"));
 
     // resize 는 관문보다 **먼저** 의도를 적는다 — 뒤에 적으면 버려진 크기가 사라진다.
-    const resize_fn = between(runtime, "pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16)", "const ResizeDecodeContext = struct {") orelse
+    const resize_fn = between(runtime, "pub fn resizeWithCell(self: *RemoteRuntime, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32)", "const ResizeDecodeContext = struct {") orelse
         return error.MissingResize;
     const recorded = std.mem.indexOf(u8, resize_fn, "\n        self.layout_size = .{ .cols = cols, .rows = rows };\n");
     const gated = std.mem.indexOf(u8, resize_fn, "\n        if (!self.gateMutation(.resize)) return;\n");
     try std.testing.expect(recorded != null and gated != null and recorded.? < gated.?);
+
+    // `resize` 는 셀 픽셀 없는 `resizeWithCell` 로 **위임만** 한다 — 관문·기록은 위임받는 쪽 한 자리다.
+    const resize_delegate = memberBody(runtime, "pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16)") orelse
+        return error.MissingResize;
+    try std.testing.expectEqual(@as(usize, 1), count(resize_delegate, "return self.resizeWithCell(cols, rows, 0, 0);"));
+    try std.testing.expectEqual(@as(usize, 0), count(resize_delegate, "gateMutation("));
 
     // 사용자 mutation 은 관문과 stable owner 둘 다 **기록하는** 경로로 지난다. op 마다 관문 한 자리·owner 한 자리.
     inline for (.{
@@ -1197,7 +1203,7 @@ test "CR6e-c3b2d 경계는 재연결 강제 resize 가 레이아웃이 원한 �
         .{ "pub fn enqueueInputBatch(self: *RemoteRuntime", "input_batch" },
         .{ "pub fn requestScrollToBottom(self: *RemoteRuntime)", "scroll" },
         .{ "pub fn queueCoreCommand(self: *RemoteRuntime", "core_command" },
-        .{ "pub fn resize(self: *RemoteRuntime, cols: u16, rows: u16)", "resize" },
+        .{ "pub fn resizeWithCell(self: *RemoteRuntime, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32)", "resize" },
         .{ "pub fn find(self: *RemoteRuntime", "find_scroll" },
         .{ "pub fn selectContentAware(self: *RemoteRuntime", "select" },
         .{ "pub fn sendCoreCommandBlocking(self: *RemoteRuntime", "core_command" },

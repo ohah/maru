@@ -5272,6 +5272,7 @@ pub const RemoteTermBackend = struct {
             .resize_fn = ioResize,
             .write_input_nb = ioWriteInputNonBlocking,
             .enqueue_command = ioEnqueueCommand, // host-authoritative command는 exhaustive router로 전달.
+            .resize_with_cell_fn = ioResizeWithCell, // 글꼴 크기 변경 — host 코어가 격자와 셀 픽셀을 한 번에(2048 통지 한 번)
         };
     }
 
@@ -5423,6 +5424,11 @@ pub const RemoteTermBackend = struct {
         const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
         return rr.resize(size.cols, size.rows);
     }
+
+    fn ioResizeWithCell(ctx: *anyopaque, size: maru.terminal.Size, cell: maru.session.core_command.CellMetrics) anyerror!void {
+        const rr: *RemoteRuntime = @ptrCast(@alignCast(ctx));
+        return rr.resizeWithCell(size.cols, size.rows, cell.width, cell.height);
+    }
 };
 
 fn persistentSpawnRequest(request_in: maru.pty.SpawnRequest) maru.pty.SpawnRequest {
@@ -5439,6 +5445,15 @@ fn persistentSpawnRequest(request_in: maru.pty.SpawnRequest) maru.pty.SpawnReque
     request.hook_instance = null;
     request.hook_pane = null;
     return request;
+}
+
+test "원격 PtyIo 는 셀 픽셀을 싣는 resize 를 받는다 — 글꼴 크기 변경이 host 코어에 격자와 함께 한 번에 닿도록" {
+    // 이 슬롯이 비면 `SurfaceRuntime.resizeWithCell` 이 격자만 보내고, host 코어는 다음 tick 의 `set_cell_metrics` 에서야 셀 픽셀을
+    // 받아 DECSET 2048 통지가 «새 격자 × 옛 픽셀» 을 거친다. 실제 바이트는 `control_response_wire`·`client_slot` 판정자가 본다.
+    // `remotePtyIo` 는 포인터를 ctx 로 담기만 한다(역참조 없음) — 정렬된 가짜 주소면 된다.
+    const unused: *RemoteRuntime = @ptrFromInt(@alignOf(RemoteRuntime));
+    const io = RemoteTermBackend.remotePtyIo(unused);
+    try std.testing.expect(io.resize_with_cell_fn != null);
 }
 
 test "P4 N2b1 remote backend binding은 UTF-8 display label을 256-byte 경계에서만 자른다" {

@@ -235,10 +235,21 @@ DECRQM 이 0(모름)으로 답하는 동안 앱은 이 기능을 아예 안 쓴�
 게이트·초기화·DECRQM·winsize 순서·폴백 안 보냄·폴백 쓰기 실패 전파·코어 응답 안 비움·reader 깃발 무시·reader 경로 무시·winsize 전에 깨움·
 live_pty 훅 없음·되돌려 놓지 않음·안전 지점이 비우기 요청 무시·handoff tag·웹 비우기·받을 곳 없는 갈래)이 전부 빨개진다.
 
-**한계 — 글꼴 크기를 바꾸면 통지가 두 번 갈 수 있다.** `applyMetricsPipeline` 은 셀 픽셀을 다시 잡은 뒤 pane 을 resize 하는데, 그 resize
-시점의 코어는 아직 **옛 셀 픽셀**을 들고 있다(코어에 셀 픽셀을 넣는 것은 다음 tick 의 `set_cell_metrics` 명령이다). 그래서 첫 통지는
-«새 격자 × 옛 픽셀», 곧 이은 둘째가 최종값이다. 하나로 합치려면 셀 픽셀 명령과 resize 의 순서를 스레드(host 는 연결)를 건너 보장해야
-해 여기서 하지 않는다 — 명세는 통지 횟수를 정하지 않고, 마지막 통지는 늘 맞다.
+**글꼴 크기 변경 — 통지 한 번(2026-10-03).** 예전엔 셀 픽셀과 격자가 **따로** 코어에 닿았다: `refreshCellMetrics` 가 모든 Term 에
+`set_cell_metrics` 를 일괄로 보내고(reader 가 비동기로 적용), 이어 `applyMetricsPipeline` 이 pane 을 resize 했다(메인). 그래서 DECSET
+2048 통지가 둘이었고, 중간값은 경쟁에 따라 «옛 격자 × 새 픽셀» 또는 «새 격자 × 옛 픽셀» — 한 번도 실재하지 않은 크기였다. 이제:
+  - **resize 가 셀 픽셀을 함께 싣는다**: `resizeTermForLayout` → `SurfaceRuntime.resizeWithCell` → 코어 `resizeWithCellMetrics`(격자와
+    셀 픽셀을 한 번에 바꾸고 어느 하나라도 바뀌었으면 한 번 알린다). 표시 grid 만 맞추는 `resizeTermCoreToLayout` 도 같은 함수를 쓴다.
+  - **곧 resize 될 활성 탭에는 일괄 `set_cell_metrics` 를 안 보낸다**(`refreshCellMetrics(self, active_tab_resize_follows)` — 글꼴 크기·
+    DPI 변경). 다른 탭은 격자가 그대로라 지금처럼 보내도 통지가 한 번이다(그 탭이 보일 때의 resize 는 실제로 크기가 바뀐 것이다).
+  - **host 세션**은 `runtime.resize` 요청의 선택 필드 `cell_width`/`cell_height` 로 싣고(`RemoteRuntime.resizeWithCell`), host 가
+    `RuntimeOps.resize_with_cell` → `TermRuntimeBackend.resizeWithCell` 로 자기 코어에 같은 일을 한다. 옛 host 는 모르는 키를 무시해
+    격자만 바꾸고, 셀 픽셀은 다음 tick 의 `syncRemoteCellMetrics` 가 맞춘다(통지 둘 — 틀린 값은 없다). 격자가 그대로면 host 는 resize 를
+    백엔드로 넘기지 않으므로(`applied.changed`) 셀 픽셀은 역시 `syncRemoteCellMetrics` 로 간다 — 그때는 그것 하나라 한 번이다.
+  - 뒤따르는 `set_cell_metrics`(`syncRemoteCellMetrics`·프레임 빌드의 주입)는 같은 값이라 조용하다.
+  - 로컬 PTY 의 winsize 픽셀 필드는 reader 의 `set_cell_metrics` 적용(`setCellPixels`)이 맞춘다 — reader 가 있는 PTY 에서 메인이
+    픽셀 필드까지 쓰면 그 필드를 쓰는 스레드가 둘이 된다. 그래서 그 경로는 픽셀 필드가 한 tick 늦고 `SIGWINCH` 도 예전처럼 둘이다
+    (통지는 코어가 내므로 한 번이다). reader 없는 PTY(`PtyIo.fromSession`)는 `resizeWithCellPixels` 로 `TIOCSWINSZ` 한 번에 바꾼다.
 
 ## kitty graphics PNG — 전 변종 지원 (해결, 2026-09-14)
 

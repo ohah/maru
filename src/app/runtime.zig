@@ -107,6 +107,10 @@ pub const PtyIo = struct {
     // 유일한 PTY writer 로서 비차단·상한 응답 버퍼로 보내는 것이 계약이다 — 입력 큐(`write_input`)로 보내면 paste 로 찬
     // 큐에서 호출 스레드가 막힌다. interactive 백엔드(live_pty WriteQueueIo)만 채운다 — null 이면 직접 쓰기로 폴백.
     request_response_flush: ?*const fn (ctx: *anyopaque) void = null,
+    // 격자와 셀 픽셀을 한 번에 바꾸는 resize(글꼴 크기 변경 — `SurfaceRuntime.resizeWithCell`). 로컬 PTY 는 `TIOCSWINSZ`
+    // 한 번(SIGWINCH 한 번)에, 원격은 resize 요청에 셀 픽셀을 실어 host 코어가 한 번에 바꾸게 한다. null 이면 격자만 바꾼다 —
+    // 셀 픽셀은 따로 오는 `set_cell_metrics` 가 맞춘다(예전 경로).
+    resize_with_cell_fn: ?*const fn (ctx: *anyopaque, size: terminal.Size, cell: core_command.CellMetrics) anyerror!void = null,
 
     pub fn fromSession(session: *pty.PtySession) PtyIo {
         return .{
@@ -114,6 +118,7 @@ pub const PtyIo = struct {
             .write_input = writeSessionInput,
             .resize_fn = resizeSession,
             .write_input_nb = writeSessionInputNonBlocking,
+            .resize_with_cell_fn = resizeSessionWithCell,
         };
     }
 
@@ -133,6 +138,12 @@ pub const PtyIo = struct {
         try self.resize_fn(self.ctx, size);
     }
 
+    /// 셀 픽셀까지 실을 수 있으면 함께, 아니면 격자만 바꾼다(`resize_with_cell_fn`).
+    pub fn resizeWithCell(self: PtyIo, size: terminal.Size, cell: ?core_command.CellMetrics) !void {
+        if (cell) |c| if (self.resize_with_cell_fn) |f| return f(self.ctx, size, c);
+        try self.resize_fn(self.ctx, size);
+    }
+
     fn writeSessionInput(ctx: *anyopaque, bytes: []const u8) !void {
         const session: *pty.PtySession = @ptrCast(@alignCast(ctx));
         try session.writeInput(bytes);
@@ -146,6 +157,11 @@ pub const PtyIo = struct {
     fn resizeSession(ctx: *anyopaque, size: terminal.Size) !void {
         const session: *pty.PtySession = @ptrCast(@alignCast(ctx));
         try session.resize(size);
+    }
+
+    fn resizeSessionWithCell(ctx: *anyopaque, size: terminal.Size, cell: core_command.CellMetrics) !void {
+        const session: *pty.PtySession = @ptrCast(@alignCast(ctx));
+        try session.resizeWithCellPixels(size, cell.width, cell.height);
     }
 };
 
@@ -320,6 +336,14 @@ pub const SurfaceRuntime = struct {
     }
 
     pub fn resize(self: *SurfaceRuntime, surface_id: SurfaceId, size: terminal.Size, io: std.Io) RuntimeError!void {
+        return self.resizeWithCell(surface_id, size, null, io);
+    }
+
+    /// `resize` 에 셀 픽셀을 함께 싣는다(글꼴 크기 변경). 코어는 격자와 셀 픽셀을 한 번에 바꿔 DECSET 2048 통지를 **한 번**
+    /// 내고(`TerminalCore.resizeWithCellMetrics`), PTY 는 `PtyIo.resizeWithCell` 로 함께 바꾼다. `cell == null` 이면 `resize` 와 같다.
+    /// 0 픽셀(아직 모름)은 싣지 않는다 — 모르는 값으로 아는 값을 덮지 않게.
+    pub fn resizeWithCell(self: *SurfaceRuntime, surface_id: SurfaceId, size: terminal.Size, cell_in: ?core_command.CellMetrics, io: std.Io) RuntimeError!void {
+        const cell: ?core_command.CellMetrics = if (cell_in) |c| (if (c.width == 0 or c.height == 0) null else c) else null;
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
 
@@ -335,7 +359,10 @@ pub const SurfaceRuntime = struct {
             // 코어 resize도 코어 변경이라 락 아래(docs/io-render-threading.md). PTY ioctl은 락 밖.
             link.surface.lockCore(io);
             defer link.surface.unlockCore(io);
-            try link.surface.core.resize(grid.cols, grid.rows);
+            if (cell) |c|
+                try link.surface.core.resizeWithCellMetrics(grid.cols, grid.rows, c.width, c.height)
+            else
+                try link.surface.core.resize(grid.cols, grid.rows);
             const reply = link.surface.core.pendingResponse();
             if (reply.len > 0) {
                 // OOM이면 best-effort 드롭(다른 응답 자리와 같은 결) — 응답은 비운다.
@@ -345,7 +372,7 @@ pub const SurfaceRuntime = struct {
         }
         // MARU_TRACE: 재생이 core.resize로 reflow를 재구성하도록 clamp된 grid 크기를 기록(코어에 적용된 값과 동일).
         if (link.trace_recorder) |rec| rec.recordResize(link.surface_id, grid.cols, grid.rows);
-        link.pty_io.resize(grid) catch return error.ResizeFailed;
+        link.pty_io.resizeWithCell(grid, cell) catch return error.ResizeFailed;
         // 통지는 PTY winsize 까지 바뀐 **뒤** 보낸다 — 명세가 «내부 resize 가 끝나기 전엔 보내지 말라» 고 한다. winsize 가 실패하면
         // 앱의 크기와 보고가 어긋나므로 보내지 않는다(위에서 반환 — 버퍼는 defer 가 푼다).
         if (reply_buf) |reply| {
@@ -481,6 +508,9 @@ const FakePty = struct {
     writes: std.ArrayList(u8) = .empty,
     resize_calls: usize = 0,
     last_size: ?terminal.Size = null,
+    /// 켜면 `resize_with_cell_fn` 을 채운다(원격·reader 없는 로컬 PTY 흉내) — 마지막으로 받은 셀 픽셀을 남긴다.
+    resize_with_cell: bool = false,
+    last_cell: ?core_command.CellMetrics = null,
     fail_write: bool = false,
     suppress_input: bool = false,
     fail_resize: bool = false,
@@ -506,7 +536,14 @@ const FakePty = struct {
             .write_input_nb = fakeWriteInputNonBlocking,
             .resize_fn = fakeResize,
             .request_response_flush = if (self.reader_flush) fakeRequestResponseFlush else null,
+            .resize_with_cell_fn = if (self.resize_with_cell) fakeResizeWithCell else null,
         };
+    }
+
+    fn fakeResizeWithCell(ctx: *anyopaque, size: terminal.Size, cell: core_command.CellMetrics) !void {
+        const self: *FakePty = @ptrCast(@alignCast(ctx));
+        try fakeResize(ctx, size);
+        self.last_cell = cell;
     }
 
     fn fakeRequestResponseFlush(ctx: *anyopaque) void {
@@ -957,6 +994,58 @@ test "runtime resize 는 reader 가 있으면 DECSET 2048 통지를 입력 큐�
     surface.core.clearResponse();
     try runtime.resize(1, .{ .cols = 42, .rows = 13 }, std.testing.io);
     try std.testing.expectEqual(@as(usize, 1), fake_pty.flush_requests);
+}
+
+test "runtime resizeWithCell 은 격자와 셀 픽셀을 코어에 한 번에 바꾼다 — 글꼴 크기 변경의 DECSET 2048 통지는 한 번" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 5 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+    surface.core.setCellMetrics(9, 20);
+    try surface.core.write("\x1b[?2048h");
+    surface.core.clearResponse();
+
+    // 글꼴을 키웠다: 격자는 42×13, 셀은 12×26. «새 격자 × 옛 픽셀» 없이 최종값 하나.
+    try runtime.resizeWithCell(1, .{ .cols = 42, .rows = 13 }, .{ .width = 12, .height = 26 }, std.testing.io);
+    try std.testing.expectEqualStrings("\x1b[48;13;42;338;504t", fake_pty.writes.items);
+    try std.testing.expectEqual(@as(u32, 12), surface.core.cell_width_px);
+    try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, fake_pty.last_size.?); // 셀 슬롯이 없는 PTY 는 격자만
+    try std.testing.expect(fake_pty.last_cell == null);
+
+    // 0(아직 모름)은 안 싣는다 — 아는 값을 모르는 값으로 덮지 않는다.
+    fake_pty.writes.clearRetainingCapacity();
+    try runtime.resizeWithCell(1, .{ .cols = 40, .rows = 13 }, .{ .width = 0, .height = 0 }, std.testing.io);
+    try std.testing.expectEqual(@as(u32, 12), surface.core.cell_width_px);
+    try std.testing.expectEqualStrings("\x1b[48;13;40;338;480t", fake_pty.writes.items);
+}
+
+test "runtime resizeWithCell 은 셀 슬롯이 있는 PTY 에 셀 픽셀을 함께 넘긴다 — 원격 host 가 자기 코어에 한 번에 적용하도록" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 5 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+    fake_pty.resize_with_cell = true;
+
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try runtime.resizeWithCell(1, .{ .cols = 42, .rows = 13 }, .{ .width = 12, .height = 26 }, std.testing.io);
+    try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, fake_pty.last_size.?);
+    try std.testing.expectEqualDeep(@as(?core_command.CellMetrics, .{ .width = 12, .height = 26 }), fake_pty.last_cell);
+
+    // 셀 없는 resize 는 예전 경로(격자만).
+    fake_pty.last_cell = null;
+    try runtime.resize(1, .{ .cols = 40, .rows = 13 }, std.testing.io);
+    try std.testing.expect(fake_pty.last_cell == null);
+    try std.testing.expectEqual(@as(usize, 2), fake_pty.resize_calls);
 }
 
 test "runtime resize 는 DECSET 2048 통지 쓰기가 실패해도 성공한다 — 통지 하나로 runtime 을 fail-stop 시키지 않는다" {

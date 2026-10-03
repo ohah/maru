@@ -7515,7 +7515,7 @@ migration할 수 있다. 실행 중 PTY를 **다른 PID**로 넘기는 방식은
 | `runtime.attach` | `runtime_id`, observer/controller, cols/rows | `runtime_metadata_v1` 협상 client에는 initial full metadata+revision, 공통으로 새 `stream_id`, granted capabilities, snapshot generation 또는 `controller_busy`; `mode=takeover`와 미지 mode는 `invalid_request` |
 | `runtime.observation` | `stream_id` | `runtime_metadata_v1` observe subscription 전용 user-action barrier. 현재 host full-state와 subscription metadata revision/base를 원자적으로 전진시켜 응답 |
 | `runtime.detach` | `stream_id` | 해당 subscription/controller release, runtime 유지 |
-| `runtime.resize` | `stream_id`, cols/rows, `client_sequence` | controller만 PTY와 `TerminalCore`에 적용하고 applied size/`resize_generation` 응답; 변경은 `runtime.resized` broadcast |
+| `runtime.resize` | `stream_id`, cols/rows, `client_sequence`, 선택 `cell_width`/`cell_height` | controller만 PTY와 `TerminalCore`에 적용하고 applied size/`resize_generation` 응답; 변경은 `runtime.resized` broadcast. 셀 픽셀(글꼴 크기 변경 때 GUI 가 싣는다 — 둘 다 1..65535 일 때만 쓴다)이 있으면 코어가 격자와 함께 **한 번에** 바꿔 DECSET 2048 통지가 한 번만 간다. 이름으로만 읽으므로 옛 host 는 무시한다(그때는 `set_cell_metrics` 가 따로 맞춘다). 응답·`runtime.resized` 에는 싣지 않는다(필드 수 고정) |
 | `runtime.snapshot` | `stream_id`, expected generation | fresh snapshot chunk stream |
 | `scrollback.page` | `runtime_id`, generation, line range | bounded binary page 또는 `invalid_generation` |
 | `controller.status` | 기존 attachment의 `stream_id` | 현재 `controller_generation`과 이 exact subscription의 controller 여부를 조회한다. long-lived observer가 전환 뒤 generation을 갱신하고 사용자 재확인 전 stale intent를 재사용하지 않게 한다. |

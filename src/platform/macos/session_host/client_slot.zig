@@ -5071,7 +5071,14 @@ fn encodeGenerationRequestParamsWithCapabilities(
             "{{\"runtime_id\":\"{x:0>32}\",\"mode\":\"observer\"}}",
             .{identity.runtime_id},
         ) catch null,
-        .resize => |v| stringifyGenerationParams(out, .{
+        .resize => |v| if (v.cell_width_px != 0 and v.cell_height_px != 0) stringifyGenerationParams(out, .{
+            .stream_id = stream_id,
+            .cols = v.cols,
+            .rows = v.rows,
+            .client_sequence = v.client_sequence,
+            .cell_width = v.cell_width_px,
+            .cell_height = v.cell_height_px,
+        }) else stringifyGenerationParams(out, .{
             .stream_id = stream_id,
             .cols = v.cols,
             .rows = v.rows,
@@ -5430,6 +5437,20 @@ test "CR3a-2c3b typed request encoder injects only canonical binding identities"
         "{\"stream_id\":77,\"q\":\"662e6f\",\"cur\":1,\"scroll\":false,\"regex\":true}",
         encodeGenerationRequestParams(&buffer, identity, 77, .{
             .find = contract.FindRequest.initWithMode("f.o", 1, false, true).?,
+        }).?,
+    );
+    // resize 는 셀 픽셀(글꼴 크기 변경)이 둘 다 있을 때만 싣는다 — 없으면 기존 바이트 그대로다. host 는 이름으로만 읽어 옛 host 는
+    // 무시하고(그때는 `set_cell_metrics` 가 따로 맞춘다), 새 host 는 코어에 격자와 함께 한 번에 적용한다.
+    try std.testing.expectEqualStrings(
+        "{\"stream_id\":77,\"cols\":80,\"rows\":24,\"client_sequence\":3}",
+        encodeGenerationRequestParams(&buffer, identity, 77, .{
+            .resize = .{ .cols = 80, .rows = 24, .client_sequence = 3 },
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"stream_id\":77,\"cols\":80,\"rows\":24,\"client_sequence\":3,\"cell_width\":12,\"cell_height\":26}",
+        encodeGenerationRequestParams(&buffer, identity, 77, .{
+            .resize = .{ .cols = 80, .rows = 24, .cell_width_px = 12, .cell_height_px = 26, .client_sequence = 3 },
         }).?,
     );
     try std.testing.expectEqualStrings(

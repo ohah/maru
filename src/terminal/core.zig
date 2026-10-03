@@ -1950,6 +1950,18 @@ pub const TerminalCore = struct {
             self.appendInBandResizeReport();
     }
 
+    /// 격자와 셀 픽셀을 **한 번에** 바꾼다 — 글꼴 크기가 바뀌면 둘이 같이 바뀌는데, 따로 바꾸면 2048 통지가 두 번 가고 그
+    /// 첫째는 «새 격자 × 옛 픽셀» 처럼 한 번도 실재하지 않은 크기를 알린다. 어느 하나라도 실제로 바뀌었을 때 **한 번** 알린다.
+    pub fn resizeWithCellMetrics(self: *TerminalCore, cols_in: u16, rows_in: u16, cell_width_px: u32, cell_height_px: u32) !void {
+        const before = self.size;
+        const cell_changed = self.cell_width_px != cell_width_px or self.cell_height_px != cell_height_px;
+        try screen.resize(self, cols_in, rows_in);
+        self.cell_width_px = cell_width_px;
+        self.cell_height_px = cell_height_px;
+        const grid_changed = self.size.cols != before.cols or self.size.rows != before.rows;
+        if (self.in_band_resize and (grid_changed or cell_changed)) self.appendInBandResizeReport();
+    }
+
     /// 렌더용 snapshot. 본문은 screen.zig가 소유 — 외부(app/session/renderer)가 점-호출하므로 facade 메서드로 남긴다.
     pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
         return screen.snapshot(self);
@@ -13078,6 +13090,35 @@ test "2048 in-band resize: 켜져 있을 때 격자나 셀 픽셀이 실제로 �
     try core.resize(80, 24);
     core.setCellMetrics(9, 20);
     try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "2048 in-band resize: 격자와 셀 픽셀을 한 번에 바꾸면 통지도 한 번 — 글꼴 크기 변경이 «새 격자 × 옛 픽셀» 을 안 흘린다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    core.setCellMetrics(9, 20);
+    try core.write("\x1b[?2048h");
+    core.clearResponse();
+
+    // 글꼴을 키웠다: 격자는 줄고 셀은 커진다. 최종값 하나만 나간다.
+    try core.resizeWithCellMetrics(60, 18, 12, 26);
+    try std.testing.expectEqualStrings("\x1b[48;18;60;468;720t", core.pendingResponse());
+    core.clearResponse();
+
+    // 격자는 그대로, 셀만 바뀌어도 한 번 알린다(창 여백이 흡수한 경우).
+    try core.resizeWithCellMetrics(60, 18, 13, 26);
+    try std.testing.expectEqualStrings("\x1b[48;18;60;468;780t", core.pendingResponse());
+    core.clearResponse();
+
+    // 둘 다 같으면 조용하다.
+    try core.resizeWithCellMetrics(60, 18, 13, 26);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+
+    // 꺼져 있으면 값만 바뀐다.
+    try core.write("\x1b[?2048l");
+    try core.resizeWithCellMetrics(40, 10, 9, 20);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    try std.testing.expectEqual(@as(u32, 9), core.cell_width_px);
+    try std.testing.expectEqual(@as(u16, 40), core.size.cols);
 }
 
 test "2048 in-band resize: 셸 프롬프트의 입력 모드 초기화가 구독을 끈다 — 끄지 않고 죽은 앱이 셸에 보고를 흘리지 않게" {

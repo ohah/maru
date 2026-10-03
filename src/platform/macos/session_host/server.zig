@@ -250,6 +250,9 @@ pub fn canonicalizeObservation(
 /// host의 실 runtime 소유(spawn/terminate)를 dispatch가 위임하는 vtable(`runtime.PtyIo` 선례, layering-and-portability.md
 /// §3.1). server.zig는 이 계약만 알아 codec 순수성을 지키고, host 측 `runtime_manager`(app `InProcessTermBackend` 재사용)가
 /// 이를 구현한다. read-only host(테스트·조회 전용)는 null이라 spawn/terminate 요청이 unauthorized로 떨어진다.
+/// resize 요청에 실려 오는 셀 픽셀(글꼴 크기 변경). wire 의 `cell_width`·`cell_height` — 둘 다 0 이 아닐 때만 있다.
+pub const CellPixels = struct { width: u16, height: u16 };
+
 pub const RuntimeOps = struct {
     ctx: *anyopaque,
     /// 실 PTY runtime을 띄우고 발급한 `runtime_id`(u128, §4)를 돌려준다. 실패는 anyerror(host 내부 오류로 매핑).
@@ -262,6 +265,9 @@ pub const RuntimeOps = struct {
     /// 실패가 부분 core/PTY mutation 뒤 발생할 수 있는 backend는 반환 전에 runtime을 fail-stop terminate해 실제
     /// allocation을 회수해야 한다. 그러면 registry transaction은 commit하지 않고 남은 runtime만 계속 정확히 계상한다.
     resize: *const fn (ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void,
+    /// `resize` 에 셀 픽셀을 함께 싣는다(글꼴 크기 변경 — 코어가 격자와 셀 픽셀을 한 번에 바꿔 DECSET 2048 통지를 한 번만
+    /// 낸다). null 이면 `resize` 로 떨어지고 셀 픽셀은 따로 오는 `set_cell_metrics` 가 맞춘다. 호출은 `resizeMaybeWithCell` 로.
+    resize_with_cell: ?*const fn (ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16, cell: CellPixels) anyerror!void = null,
     /// runtime의 현재 화면을 §12 screen_stream 레코드 스트림(length-prefixed)으로 투영한다(attach 첫 snapshot). caller가
     /// 소유하는 바이트를 돌려주며(host가 core lock 아래 투영), server가 이를 snapshot_chunk frame으로 나눠 보낸다.
     snapshot: *const fn (ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!ProjectedSnapshot,
@@ -352,6 +358,12 @@ pub const RuntimeOps = struct {
     /// host가 정확히 아는 **이벤트**라 그 주기를 기다릴 이유가 없다. true면 다음 serve tick(약 20ms)에 바로
     /// 관측을 만들어 push한다 — 통로는 그대로 두고 트리거만 앞당긴다.
     observation_urgent: *const fn (ctx: *anyopaque, runtime_id: u128) bool,
+
+    /// 셀 픽셀이 있고 백엔드가 받을 수 있으면 함께, 아니면 격자만 resize 한다.
+    pub fn resizeMaybeWithCell(self: RuntimeOps, runtime_id: u128, cols: u16, rows: u16, cell: ?CellPixels) anyerror!void {
+        if (cell) |c| if (self.resize_with_cell) |f| return f(self.ctx, runtime_id, cols, rows, c);
+        return self.resize(self.ctx, runtime_id, cols, rows);
+    }
 };
 
 pub const ScreenChangeToken = struct {
@@ -545,6 +557,8 @@ pub const Action = union(enum) {
         internal_reply: []u8,
         exhausted_reply: []u8,
         event_body: ?[]u8,
+        /// 요청에 실려 온 셀 픽셀(없으면 null). 응답·`runtime.resized` 이벤트엔 싣지 않는다 — 둘은 필드 수가 고정이다.
+        cell: ?CellPixels = null,
     };
 
     reply: []u8,
@@ -2705,6 +2719,13 @@ pub const Connection = struct {
         const rows = intField(p, "rows") orelse return self.replyError(request_id, .invalid_request);
         const seq = intFieldU64(p, "client_sequence") orelse
             return self.replyError(request_id, .invalid_request);
+        // 선택 필드 — 글꼴 크기 변경 때 앱이 셀 픽셀을 함께 싣는다. 둘 다 유효한 양수일 때만 쓰고, 아니면 없는 것으로 본다
+        // (옛 앱은 안 보낸다 — 그때는 따로 오는 `set_cell_metrics` 가 맞춘다).
+        const cell: ?CellPixels = blk: {
+            const w = intField(p, "cell_width") orelse break :blk null;
+            const h = intField(p, "cell_height") orelse break :blk null;
+            break :blk if (w == 0 or h == 0) null else .{ .width = w, .height = h };
+        };
         const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
         const runtime_id = sub.runtime_id;
 
@@ -2765,6 +2786,7 @@ pub const Connection = struct {
                     .internal_reply = internal,
                     .exhausted_reply = exhausted,
                     .event_body = event_body,
+                    .cell = cell,
                 } };
             },
         }
@@ -4130,11 +4152,11 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
                 .stale => unreachable,
                 .applied => |applied| if (applied.changed) blk: {
                     const ops = conn.runtime_ops orelse break :blk false;
-                    ops.resize(
-                        ops.ctx,
+                    ops.resizeMaybeWithCell(
                         resize.runtime_id,
                         applied.cols,
                         applied.rows,
+                        resize.cell,
                     ) catch break :blk false;
                     break :blk true;
                 } else true,
@@ -5167,6 +5189,8 @@ pub const FakeRuntimeOps = struct {
     resized_cols: u16 = 0,
     resized_rows: u16 = 0,
     resized_runtime: u128 = 0,
+    /// 마지막 resize 에 실려 온 셀 픽셀(`resize_with_cell` 로 왔을 때만 — 격자만 온 resize 는 null 로 되돌린다).
+    resized_cell: ?CellPixels = null,
     resize_fail_count: usize = 0,
     delta_base_seen: [64]u8 = undefined,
     delta_base_seen_len: usize = 0,
@@ -5294,6 +5318,12 @@ pub const FakeRuntimeOps = struct {
         self.resized_cols = cols;
         self.resized_rows = rows;
         self.resized_runtime = runtime_id;
+        self.resized_cell = null;
+    }
+    fn resizeWithCellFn(ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16, cell: CellPixels) anyerror!void {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        try resizeFn(ctx, runtime_id, cols, rows);
+        self.resized_cell = cell;
     }
     /// 고정 snapshot 바이트를 caller 소유로 돌려준다(server가 이걸 snapshot_chunk로 나눠 보낸다).
     fn snapshotFn(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!ProjectedSnapshot {
@@ -5592,7 +5622,7 @@ pub const FakeRuntimeOps = struct {
     }
 
     pub fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .advance_animations = advanceAnimationsFn, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .notification_config_update = notificationConfigUpdateFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .cached_observation = cachedObservationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
+        return .{ .ctx = self, .advance_animations = advanceAnimationsFn, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .resize_with_cell = resizeWithCellFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .notification_config_update = notificationConfigUpdateFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .cached_observation = cachedObservationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
     }
 
     pub fn opsWithScreenChangeToken(self: *FakeRuntimeOps) RuntimeOps {
@@ -5818,6 +5848,30 @@ test "server: attach grants capabilities; controller input/resize dispatch throu
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "stale") != null);
     }
     try testing.expectEqual(@as(u16, 0), fake.resized_cols); // stale이라 위임 안 됨.
+    try testing.expect(fake.resized_cell == null); // 셀 픽셀 없는 요청은 격자만(`resize`)
+
+    // 셀 픽셀을 실은 resize(글꼴 크기 변경) → `resize_with_cell` 로 위임(코어가 한 번에 바꾼다). 응답 모양은 그대로다.
+    {
+        const r = try feedJson(&conn, .request, 5, "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":90,\"rows\":30,\"client_sequence\":2,\"cell_width\":12,\"cell_height\":26}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"changed\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "cell_") == null); // 응답엔 안 싣는다(필드 수 고정)
+    }
+    try testing.expectEqual(@as(u16, 90), fake.resized_cols);
+    try testing.expectEqualDeep(@as(?CellPixels, .{ .width = 12, .height = 26 }), fake.resized_cell);
+
+    // 짝이 안 맞거나 0 이면 없는 것으로 본다 — 격자만 바꾼다(잘못된 셀 픽셀로 코어를 덮지 않는다).
+    for ([_][]const u8{
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":91,\"rows\":30,\"client_sequence\":3,\"cell_width\":12}}",
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":92,\"rows\":30,\"client_sequence\":4,\"cell_width\":0,\"cell_height\":26}}",
+        "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":1,\"cols\":93,\"rows\":30,\"client_sequence\":5,\"cell_width\":\"12\",\"cell_height\":26}}",
+    }, [_]u16{ 91, 92, 93 }) |payload, cols| {
+        const r = try feedJson(&conn, .request, 6, payload);
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"changed\":true") != null);
+        try testing.expectEqual(cols, fake.resized_cols);
+        try testing.expect(fake.resized_cell == null);
+    }
 
     // detach → subscription 해제, 이후 input은 조용히 버려진다(none, write_input 미호출).
     {

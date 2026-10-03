@@ -656,7 +656,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .screen_change_token = screenChangeTokenOp, .metadata_change_token = metadataChangeTokenOp, .sample_metadata_sources = sampleMetadataSourcesOp, .advance_animations = advanceAnimationsOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .resize_with_cell = resizeWithCellOp, .snapshot = snapshotOp, .delta = deltaOp, .screen_change_token = screenChangeTokenOp, .metadata_change_token = metadataChangeTokenOp, .sample_metadata_sources = sampleMetadataSourcesOp, .advance_animations = advanceAnimationsOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -1873,13 +1873,20 @@ pub const RuntimeManager = struct {
 
     fn resizeOp(ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
-        try self.resizeWithApply(runtime_id, cols, rows, self, backendResizeApply);
+        try self.resizeWithApply(runtime_id, cols, rows, null, self, backendResizeApply);
         try self.publishScreenChange(runtime_id);
     }
 
-    fn backendResizeApply(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, io: std.Io) anyerror!void {
+    /// 글꼴 크기 변경 — 격자와 셀 픽셀을 코어에 한 번에(DECSET 2048 통지 한 번). `server.RuntimeOps.resize_with_cell`.
+    fn resizeWithCellOp(ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16, cell: server.CellPixels) anyerror!void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
-        return self.backend_impl.backend().resize(handle, size, io);
+        try self.resizeWithApply(runtime_id, cols, rows, .{ .width = cell.width, .height = cell.height }, self, backendResizeApply);
+        try self.publishScreenChange(runtime_id);
+    }
+
+    fn backendResizeApply(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, cell: ?core_command.CellMetrics, io: std.Io) anyerror!void {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        return self.backend_impl.backend().resizeWithCell(handle, size, cell, io);
     }
 
     fn resizeWithApply(
@@ -1887,11 +1894,12 @@ pub const RuntimeManager = struct {
         runtime_id: u128,
         cols: u16,
         rows: u16,
+        cell: ?core_command.CellMetrics,
         apply_ctx: *anyopaque,
-        apply: *const fn (*anyopaque, RuntimeHandle, maru.terminal.Size, std.Io) anyerror!void,
+        apply: *const fn (*anyopaque, RuntimeHandle, maru.terminal.Size, ?core_command.CellMetrics, std.Io) anyerror!void,
     ) anyerror!void {
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
-        apply(apply_ctx, handle, .{ .cols = cols, .rows = rows }, self.io) catch |err| {
+        apply(apply_ctx, handle, .{ .cols = cols, .rows = rows }, cell, self.io) catch |err| {
             // SurfaceRuntime resize는 core mutation 뒤 PTY ioctl에서 실패할 수 있어 rollback으로 원래 크기를 보장할 수
             // 없다. 부분 적용 runtime을 살려 ledger보다 큰 heap을 숨기지 말고 fail-stop으로 실제 resource를 전량 회수한다.
             self.terminateRuntime(runtime_id);
@@ -4572,6 +4580,32 @@ test "runtime manager: empty restored graph commits and releases without fallibl
     try std.testing.expect(graph.phase == .readers_released);
 }
 
+test "runtime manager: 셀 픽셀을 실은 resize 는 host 코어의 격자와 셀 픽셀을 한 번에 바꾼다(글꼴 크기 변경)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.init(allocator, std.testing.io, &host_registry, null);
+    defer manager.deinit();
+    const ops = manager.runtimeOps();
+    const runtime_id = try ops.spawn(ops.ctx, .{
+        .argv = &.{"/bin/cat"},
+        .cwd = null,
+        .cols = 80,
+        .rows = 24,
+    });
+    // 운영 경로가 고르는 그 함수(`server.RuntimeOps.resizeMaybeWithCell` — `poll_owner.applyResize`)로 민다.
+    try ops.resizeMaybeWithCell(runtime_id, 100, 30, .{ .width = 12, .height = 26 });
+    const handle = manager.handleFor(runtime_id) orelse return error.TestUnexpectedResult;
+    const terminal_slot = manager.backend_impl.terminalForHostLifecycle(handle) orelse return error.TestUnexpectedResult;
+    terminal_slot.surface.lockCore(std.testing.io);
+    defer terminal_slot.surface.unlockCore(std.testing.io);
+    try std.testing.expectEqual(maru.terminal.Size{ .cols = 100, .rows = 30 }, terminal_slot.surface.core.size);
+    try std.testing.expectEqual(@as(u32, 12), terminal_slot.surface.core.cell_width_px);
+    try std.testing.expectEqual(@as(u32, 26), terminal_slot.surface.core.cell_height_px);
+}
+
 test "runtime manager: resize backend failure fail-stops runtime and releases daemon ledger" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -4592,7 +4626,8 @@ test "runtime manager: resize backend failure fail-stops runtime and releases da
     try std.testing.expectEqual(@as(usize, 1), manager.live_registry.count());
 
     const Injected = struct {
-        fn apply(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, io: std.Io) anyerror!void {
+        fn apply(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, cell: ?core_command.CellMetrics, io: std.Io) anyerror!void {
+            _ = cell;
             // 실제 SurfaceRuntime과 같은 순서로 core를 먼저 mutate한 뒤 PTY 단계 실패를 주입한다.
             const owner: *RuntimeManager = @ptrCast(@alignCast(ctx));
             const terminal_slot = owner.backend_impl.terminalForHostLifecycle(handle) orelse
@@ -4605,7 +4640,7 @@ test "runtime manager: resize backend failure fail-stops runtime and releases da
     };
     try std.testing.expectError(
         error.InjectedPartialResizeFailure,
-        manager.resizeWithApply(runtime_id, 120, 40, &manager, Injected.apply),
+        manager.resizeWithApply(runtime_id, 120, 40, null, &manager, Injected.apply),
     );
     try std.testing.expectEqual(@as(usize, 0), host_registry.count());
     try std.testing.expectEqual(@as(usize, 0), host_registry.liveGridCells());

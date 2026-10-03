@@ -938,6 +938,21 @@ pub const PtySession = struct {
         self.size = size;
     }
 
+    /// 격자와 셀 픽셀을 `TIOCSWINSZ` **한 번에** 바꾼다 — 글꼴 크기가 바뀌면 둘이 같이 바뀌는데, `resize` 뒤
+    /// `setCellPixels` 로 나누면 자식이 `SIGWINCH` 를 두 번 받고 그 사이엔 «새 격자 × 옛 픽셀» 을 본다.
+    /// 실패하면 셀 픽셀을 되돌린다(다음 `setCellPixels` 가 「안 바뀌었다」 고 건너뛰지 않게).
+    pub fn resizeWithCellPixels(self: *PtySession, size: terminal.Size, cell_width_px: u32, cell_height_px: u32) !void {
+        const old_w = self.cell_width_px;
+        const old_h = self.cell_height_px;
+        self.cell_width_px = cell_width_px;
+        self.cell_height_px = cell_height_px;
+        self.resize(size) catch |err| {
+            self.cell_width_px = old_w;
+            self.cell_height_px = old_h;
+            return err;
+        };
+    }
+
     /// 셀 픽셀 크기를 갱신하고, 바뀌었으면 현재 그리드로 winsize를 다시 적용한다.
     ///
     /// **폰트 크기·DPI가 바뀌면 rows/cols가 그대로여도 픽셀 크기는 달라진다** — 그때 `resize`는 안 불리므로

@@ -612,6 +612,9 @@ pub fn requestMethod(tag: RuntimeRequestTag) []const u8 {
 pub const ResizeRequest = extern struct {
     cols: u16,
     rows: u16,
+    /// 셀 픽셀(글꼴 크기 변경). 0 이면 안 싣는다. `rows` 와 `client_sequence` 사이의 정렬 빈자리에 들어가 크기는 그대로다.
+    cell_width_px: u16 = 0,
+    cell_height_px: u16 = 0,
     client_sequence: u64,
 };
 

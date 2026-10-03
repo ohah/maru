@@ -1486,6 +1486,12 @@ pub fn build(b: *std.Build) void {
     const file_open_test_step = b.step("test-win32-file-open", "Verify file-open outcomes, localized notices and allocation-failure ownership");
     file_open_test_step.dependOn(&b.addRunArtifact(file_open_tests).step);
 
+    const safe_save_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"Windows safe save"},
+    });
+    b.step("test-win32-safe-save", "Verify native editor save path and original-file preservation").dependOn(&b.addRunArtifact(safe_save_tests).step);
+
     const macos_coretext_font_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/coretext_font.zig"),

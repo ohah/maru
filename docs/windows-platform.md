@@ -9088,6 +9088,16 @@ BOM은 `FileFormat`에 보존하고 내용 오프셋에서는 제외한다. CRLF
 
 코드는 `platform/windows/editor/document.zig`로 분리한다. 테스트 namespace를 root에서 명시적으로 참조해 이동 뒤에도 `test-win32-file-open`이 여섯 테스트를 실제 실행한다. 제품 변이 5회(줄 start 오염·줄바꿈 표시 유출·잘못된 saved hash·저장 계약 연결 전 writable 허용·폭 상한 조기 break)를 모두 거부하고 원복은 통과했다. 현재 편집기는 계속 읽기 전용이며 이 항목은 편집/safe-save 완료가 아니다. 사용자는 기존 safe-save 계약을 유지한 Windows 네이티브 저장 구현을 승인했다. 네이티브 저장·입력·undo·dirty 닫기·외부 변경 감시는 계속 구현한다.
 
+### 2m.123 Native save의 핸들 기준 경로 순회 (2026-10-03)
+
+Windows safe-save의 첫 I/O 단계는 `platform/windows/editor/path.zig`다. 사용자가 고른 root directory handle을 기준으로 각 segment를 `NtCreateFile(RootDirectory, FILE_OPEN_REPARSE_POINT)`로 열고 attribute-tag를 조회해 reparse point를 거부한다. 빈 요소·절대/장치 경로·`.`/`..`·ADS의 colon·NUL은 syscall 전에 거부한다. NT의 `.` 이름은 `OBJECT_NAME_INVALID`로 실측되어 선택된 root는 빈 relative name으로 다시 연다. directory는 `FILE_LIST_DIRECTORY`, leaf는 `FILE_READ_DATA`를 써서 같은 bit의 의미를 구분한다. API 근거는 [Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)이다.
+
+`Pinned`가 root부터 모든 중간 directory handle을 보관하며 directory는 `FILE_SHARE_DELETE`를 허용하지 않는다. 저장 호출은 commit까지 그 수명을 유지해야 한다. leaf의 reparse/type/link count도 조회하고, 원본과 연결된 다른 이름을 조용히 끊지 않도록 link count가 1이 아니면 `HardLinked`를 반환한다. pinned parent와 original handle을 저장 단계에 넘긴다. 실패와 정상 해제는 모든 allocator prefix와 handle을 정산한다. 각 OutOfMemory prefix 뒤에는 native DELETE-access open 성공도 검사해 heap 누수뿐 아니라 남은 kernel handle 잠금까지 판정한다. Win32 fixture 호출 규약은 기존 `windows/abi.zig`를 사용한다.
+
+`test-win32-safe-save`는 실제 임시 NTFS root에서 경로 거절, 부모 pin/해제, 할당 실패 전수, hard link와 junction을 검증한다. junction은 [Microsoft REPARSE_DATA_BUFFER](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_reparse_data_buffer)의 mount-point 형식과 `FSCTL_SET_REPARSE_POINT`로 만들며 shell·관리자 권한·symlink developer mode에 의존하지 않는다. root 밖 fixture가 읽히거나 변하지 않았는지도 검사한다.
+
+부모 rename만 보던 초기 판정은 SHARE_DELETE 허용 변이를 놓쳤다. 다른 열린 descendant도 rename을 막을 수 있기 때문이다. 이제 같은 부모에 `DELETE` 권한으로 실제 native handle을 열어 pin 중 `STATUS_SHARING_VIOLATION`, 해제 후 `STATUS_SUCCESS`를 확인한다. traversal/ADS 허용·부모 delete 공유·junction follow·hard link 허용의 다섯 제품 변이가 모두 실패하고 원복 7/7 통과했다. 현재 단계는 파일 본문을 쓰지 않으며 GUI 저장 완료가 아니다. metadata 보존·temp/write/flush·CAS/commit·failure cleanup과 GUI 저장 연결은 계속 구현한다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

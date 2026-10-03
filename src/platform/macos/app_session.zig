@@ -1252,10 +1252,11 @@ pub const max_status_bar_right_items: usize = chrome.components.status_bar.right
 // theme.font_size_min/max(세팅 슬라이더 range)와 **같은 값** — 단축키·GUI가 한 범위를 공유한다(drift 시 둘 다 갱신).
 pub const font_size_min: f32 = 6.0;
 pub const font_size_max: f32 = 72.0;
-// ⌘+/⌘- 한 번에 바꾸는 폰트 크기 보폭(pt). Terminal.app·iTerm2·Ghostty처럼 **고정 1pt** — 설정 항목으로 두지
-// 않는다(보폭값은 화면에 즉각 반영이 안 보여 슬라이더로 노출하면 혼란만 준다). ⌘0 reset은 보폭과 무관하게
+// ⌘+/⌘- 한 번에 바꾸는 폰트 크기 보폭(pt)은 액션이 싣는다(`increase_font_size:N`, 숫자 없으면
+// `default_font_size_step` 1pt — Ghostty `increase_font_size:N` 결). 설정 항목(슬라이더)으로는 두지 않는다
+// (보폭값은 화면에 즉각 반영이 안 보여 슬라이더로 노출하면 혼란만 준다). ⌘0 reset은 보폭과 무관하게
 // base_font_size로 복귀.
-const font_size_step: f32 = 1.0;
+const font_size_step = maru.config.action.default_font_size_step;
 
 // fade(자동 흐려짐) — 스크롤(view_offset 변화) 후 visible_ms 동안 full, 이어 fade_ms 동안 idle(faint)로
 // 흐려진다. 숨기지 않고 faint로만 남겨(위치·잡을 곳을 잃지 않게) macOS overlay 관례를 따른다.
@@ -11326,9 +11327,9 @@ pub const AppSession = struct {
             .find_next => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, false) else self.findNavigate(true),
             .find_previous => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, true) else self.findNavigate(false),
             // 런타임 폰트 크기(⌘+/⌘-/⌘0) — cell 메트릭·grid 재계산(setFontSize). 콘텐츠 reflow 없음.
-            // 보폭은 고정 1pt(font_size_step 상수). ⌘0 reset은 보폭과 무관하게 base_font_size로 복귀.
-            .increase_font_size => self.adjustFontSize(font_size_step),
-            .decrease_font_size => self.adjustFontSize(-font_size_step),
+            // 보폭은 바인딩이 싣는다(숫자 없으면 1pt). ⌘0 reset은 보폭과 무관하게 base_font_size로 복귀.
+            .increase_font_size => |step| self.adjustFontSize(step),
+            .decrease_font_size => |step| self.adjustFontSize(-step),
             .reset_font_size => self.resetFontSize(),
             .reset_settings => self.requestResetAll(), // 통합 리셋 — 확인 모달 후 전체 기본값 + config 파일 덮어쓰기
             // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
@@ -52004,8 +52005,8 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     // 기본(⌘0 기준)에서 파일 패널 줌 배율은 정확히 1.0(=1000milli)이라 프리뷰가 평소 크기를 유지한다(§2.3).
     try std.testing.expectEqual(@as(u32, 1000), session.filePanelZoomMilli());
 
-    // ⌘+ : 폰트 +보폭(고정 1pt, font_size_step 상수) → cell 픽셀이 커지고(메트릭) grid는 줄거나 같다(같은 backing px).
-    session.dispatchAppAction(.increase_font_size);
+    // ⌘+ : 폰트 +보폭(기본 1pt, font_size_step) → cell 픽셀이 커지고(메트릭) grid는 줄거나 같다(같은 backing px).
+    session.dispatchAppAction(.{ .increase_font_size = font_size_step });
     try std.testing.expectEqual(base + font_size_step, session.appearance.font.size);
     try std.testing.expect(session.cell_width_px > cw0);
     const cols1 = term_ops.activeSurface(session).core.snapshot().size.cols;
@@ -52038,16 +52039,23 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
     session.dispatchAppAction(.{ .set_font_size = 1 }); // 하한 클램프
     try std.testing.expectEqual(font_size_min, session.appearance.font.size);
+    session.dispatchAppAction(.reset_font_size);
+
+    // increase/decrease_font_size:N — 보폭은 액션이 싣는다(바인딩마다 다른 보폭). 기본 1pt 와 다른 값으로 잰다.
+    session.dispatchAppAction(.{ .increase_font_size = 2.5 });
+    try std.testing.expectEqual(base + 2.5, session.appearance.font.size);
+    session.dispatchAppAction(.{ .decrease_font_size = 4 });
+    try std.testing.expectEqual(base + 2.5 - 4, session.appearance.font.size);
     session.dispatchAppAction(.reset_font_size); // base로 복원(아래 경계 반복 기준)
 
     // ⌘- 반복 : 하한(font_size_min) 아래로 안 내려간다(경계에서 무동작).
     var i: usize = 0;
-    while (i < 100) : (i += 1) session.dispatchAppAction(.decrease_font_size);
+    while (i < 100) : (i += 1) session.dispatchAppAction(.{ .decrease_font_size = font_size_step });
     try std.testing.expectEqual(font_size_min, session.appearance.font.size);
 
     // ⌘+ 반복 : 상한(font_size_max) 위로 안 올라간다.
     i = 0;
-    while (i < 200) : (i += 1) session.dispatchAppAction(.increase_font_size);
+    while (i < 200) : (i += 1) session.dispatchAppAction(.{ .increase_font_size = font_size_step });
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
 }
 
@@ -52071,14 +52079,14 @@ test "Session Dock Cmd zoom grows and shrinks one resolved layout/text/scroll sc
     try std.testing.expectEqual(@as(u32, 1000), agent_dock.agentSessionDockUiZoomMilli(session));
     try std.testing.expectEqual(@as(u32, 1000), base_scale);
 
-    session.dispatchAppAction(.increase_font_size);
+    session.dispatchAppAction(.{ .increase_font_size = font_size_step });
     const larger_scale = agent_dock.agentSessionDockScaleMilli(session);
     const larger_card_h_px = agent_dock.agentSessionDockScrollItems(session).card_h_px;
     try std.testing.expect(larger_scale > base_scale);
     try std.testing.expect(larger_card_h_px > base_card_h_px);
 
     session.dispatchAppAction(.reset_font_size);
-    session.dispatchAppAction(.decrease_font_size);
+    session.dispatchAppAction(.{ .decrease_font_size = font_size_step });
     const smaller_scale = agent_dock.agentSessionDockScaleMilli(session);
     const smaller_card_h_px = agent_dock.agentSessionDockScrollItems(session).card_h_px;
     try std.testing.expect(smaller_scale < base_scale);
@@ -66843,7 +66851,7 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
 
     // 폰트를 키우면 live 메트릭이 즉시 바뀐다(슬롯/띠는 cell 높이 파생). 아직 재투영 전이므로 frame은 **옛 값**을
     // 유지해야 한다 — 그래야 그 프레임의 셀과 정합한다.
-    session.dispatchAppAction(.increase_font_size);
+    session.dispatchAppAction(.{ .increase_font_size = font_size_step });
     try std.testing.expect(session.sidebar_slot_height_px != stamped_slot or session.titlebar_strip_px != stamped_strip);
     try std.testing.expectEqual(stamped_slot, session.metalFrame().sidebar_slot_height_px);
     try std.testing.expectEqual(stamped_strip, session.metalFrame().titlebar_strip_px);
@@ -66945,7 +66953,7 @@ test "SB1: 상태바 높이는 텍스트 행 + 여백을 담고, 하한은 폰�
 
     // 폰트를 키워 셀이 하한을 넘겨도 바가 따라 커진다 — 안 그러면 글자가 바 아래로 넘친다.
     var i: usize = 0;
-    while (i < 12) : (i += 1) session.dispatchAppAction(.increase_font_size);
+    while (i < 12) : (i += 1) session.dispatchAppAction(.{ .increase_font_size = font_size_step });
     try std.testing.expect(session.cell_height_px > layout_math.ptToPx(status_bar_height_pt, session.scale_milli));
     try std.testing.expect(status_bar_ops.statusBarHeightPx(session) >= session.cell_height_px + pad2);
 }
@@ -70400,7 +70408,7 @@ test "SB1: 상태바 hit-test는 그려진 rect와 같은 자리를 가리킨다
     // 폰트를 바꿔 바 높이가 달라져도 둘이 함께 가는지 본다 — 한쪽만 갱신되는 드리프트가 여기서 잡힌다.
     var round: usize = 0;
     while (round < 3) : (round += 1) {
-        if (round > 0) session.dispatchAppAction(.increase_font_size);
+        if (round > 0) session.dispatchAppAction(.{ .increase_font_size = font_size_step });
         _ = try session.tick();
 
         // 그려진 바 quad를 기하로 찾는다(bottom 버킷은 탭 밴드와 공유하므로 레이어로는 특정 못 한다).

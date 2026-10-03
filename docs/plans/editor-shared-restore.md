@@ -240,3 +240,15 @@ publication 성공 뒤 소비 시점 역시 기존 recovery 수명 계약과 대
 다섯 회의 결론은 설계 조건 강화와 이전 주장 정정이다. 현재 저장 위치 권고는
 같은 checkpoint에서 구조/뷰를 결합하는 단순성을 근거로 한 후보이며,
 미저장 recovery identity·실패 분류·성공 후 record 수명까지 해결된 최종 설계라는 뜻은 아니다.
+
+## 저장/복원 설계 추가 적대적 검증 5회 — 계약의 누락 재대조
+
+1. **지문의 목적 혼동:** checkpoint의 현재 내용 지문과 backup의 본문이 다르다는 이유로 record를 거절하면 checkpoint 이후의 더 최신 편집을 버릴 수 있다. `restoreFromRecord`가 지키는 record의 disk_hash는 저장 CAS 기준이고, 뷰 내용 지문은 좌표 적용 기준이다. backup의 신원·본문 유효성·기존 복구 정책을 먼저 판정하고 실제 복원 내용과 뷰 지문을 대조한다. 지문 불일치에서는 뷰 상태를 기본값으로 열고 복원할 수 있는 본문은 보존한다. checkpoint 지문을 backup 본문 버전의 권위로 쓰지 않는다.
+2. **wrap 기본값 손실:** 현재 `editor_wrap`은 `?bool`이며 null은 config 상속이다. 실제 화면이 wrap=true였다는 이유로 true를 저장하면 다음 실행의 config 변경을 따르지 않게 된다. codec은 inherit/on/off를 구분하고, 상속 상태에서 유효 wrap을 영속 override로 바꾸지 않는다. first_piece는 새 창 폭과 유효 wrap에서 다시 검증한다. inherited/explicit true/explicit false 모두 round-trip과 config 변경 후 판정 대상이다.
+3. **혼합 Term 위치 중복:** 편집 뷰와 기존 `file-term`/surface가 같은 persisted 위치에 들어가면 view record 자체의 index는 유효해도 active Term이나 insert_after가 다른 대상을 가리킬 수 있다. 문서 표의 참조 유효성 검사와 별도로 모든 persisted 종류의 위치를 합쳐 단일 occupancy를 검증한다. writer는 일반 로컬 editor를 한 번만 내고 reader도 중복 위치를 거절한다. browser/untitled/remote의 기존 삽입 순서 계약은 그대로 사용하고, 거절/제외 항목을 거친 최종 active remap을 검증한다.
+4. **경로 복원으로 권한 우회:** `prepareSharedView`는 원격 신원뿐 아니라 `remoteViewPathIsReadOnly`가 식별하는 로컬 캐시 경로도 제외한다. descriptor를 local로 썼다는 이유만으로 이 검사를 건너뛰면 원격 mirror를 일반 로컬 shared editor로 복원할 수 있다. restored 파일의 실제 종류·현재 접근 정책을 다시 판정하고, 기존 authorized open 경계와 동일한 local-only admission을 통과한 정본만 공유한다. persisted read_only나 mode가 쓰기 권한을 부여하지 않는다.
+5. **검증 범위/미지 레코드 혼동:** 기존 workspace parser의 trailing line 관용은 새 단일 포맷의 완전한 구조 검증 근거가 아니다. 새 codec은 선언한 문서/뷰/창 레코드를 끝까지 소비하고 남은 알 수 없는 구조 레코드·누락 block·초과 count를 거절해야 한다. 정상 입력 round-trip만으로 두 번째 창의 조용한 손실을 방어했다고 주장하지 않는다. 헤더를 붙인 정상 창 뒤 미지 레코드와 추가 창을 넣는 반례, 문서/뷰 count 절단과 정상 두 창 양성 대조를 후속 실행 판정 목록에 추가한다.
+
+각 회는 현재 코드의 호출·값 의미를 새 설계에 대입한 반례 검토다.
+새 codec은 아직 없으므로 위 반례를 새 reader/writer가 실제로 거절했다는 뜻은 아니다.
+기존 집중 gate 재실행은 현재 분할·백업 동작의 회귀 확인에만 사용한다.

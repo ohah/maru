@@ -48143,3 +48143,32 @@ test "shared editor split retains rejected composition and commits it once befor
     try testing.expect(s.tryCommitComposition());
     try testing.expectEqual(@as(usize, 1), source.rt.editorDocument().history.undo_len);
 }
+
+test "U4b-12 current recovery removes the only backup before a second open without a backup tick" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+    const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } };
+    try plantBackup(allocator, root, doc, "recovered unsaved content\n");
+    {
+        var first = try UntitledFixture.init(allocator, false, true);
+        defer first.deinit(allocator);
+        const term = try openRestored(&first, path);
+        try testing.expectEqualStrings("recovered unsaved content\n", term.rt.editorDocument().opened.?.file.content);
+        try testing.expect(isDirty(term));
+        try testing.expect(!backupExists(root, doc));
+        // No debounce tick, save or accepted discard: fixture teardown loses only volatile state.
+    }
+    var second = try UntitledFixture.init(allocator, false, true);
+    defer second.deinit(allocator);
+    const reopened = try openRestored(&second, path);
+    try testing.expectEqualStrings("disk\n", reopened.rt.editorDocument().opened.?.file.content);
+    try testing.expect(!isDirty(reopened));
+}

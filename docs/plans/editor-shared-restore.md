@@ -629,3 +629,34 @@ filter와 일치하지 않아 미실행이었으므로 prefix와 exact-count를 
 U4b-10에서 실제 디렉터리 I/O 실패도 확인했고 U4b-11에서 모든 할당 실패를 주입해
 부재/손상으로 오분류하지 않는지와 해제를 확인했다. 로그는
 `/tmp/maru-backup-read-classification-final.log`다. 전체 검사/원격 CI 결과는 별도로 확인한다.
+
+### 복구 백업의 보존 시점 — 재현과 제안
+
+U4b-12는 기존 제품 open/restore 경로로 백업 내용을 복원한 뒤 debounce tick·저장·명시적
+버리기 없이 fixture의 메모리 상태를 제거하고 새 fixture로 같은 파일을 연다. 첫 열기는
+복구 내용으로 dirty지만 원래 백업은 이미 삭제됐고, 두 번째 열기는 disk 내용만 clean으로
+열린다. 집중 gate는 제품 125개·규칙 39개 통과했고 재현 로그는
+`/tmp/maru-recovery-retention-repro.log`다. 이는 현재 유실 경로를 고정한 characterization이며
+제품 결함을 수정한 회귀 검사는 아니다. 실제 process SIGKILL이나 OS 전원 차단도 실행하지 않았다.
+
+제안 정책은 복구한 dirty 백업을 재백업 성공 또는 저장·명시적 버리기 성공까지 보존하는 것이다.
+디스크 내용과 같은 clean 백업의 정리는 기존 규칙을 유지한다. 사용자 선택 전 이 정책은 확정이
+아니며 제품 동작을 변경하지 않는다. 기존 restoreFromRecord와 reviveAsUntitled가 모두
+성공 편집 직후 레코드를 삭제하므로 한 경로만 바꾸면 보장에 빈틈이 남는다.
+
+구현 검토안:
+- 같은 신원으로 복구한 dirty 문서는 기존 backup_on_disk를 유지하고 성공한 새 백업이 같은
+  파일을 atomic 교체하도록 한다. 쓰기 실패·상한 초과·staging rollback에서는 기존 파일을 남긴다.
+- 이름 없는 문서로 신원이 바뀐 복구는 원본 backup 이름을 문서 소유 상태로 별도 유지한다.
+  새 신원의 백업이 성공하거나 저장/명시적 버리기가 성공한 뒤에만 옛 원본을 정리한다.
+- 정상 저장 중 추가 편집, Undo로 clean이 된 경우, shared document 마지막 view 닫기,
+  복원 실패 및 신원 변경을 함께 판정한다. 새로운 recovery ID나 백업 포맷은 이 항목과 분리한다.
+
+정책 선택 필요 근거는 이 문서의 남은 정책 목록과 프로젝트 규칙의 설계 변경 보고 요구다.
+현재 작업은 재현·검토안이며 사용자에게 정책 확인을 요청했다.
+
+테스트 runner 설정의 이전 오류도 수정했다. 옵션 `--maru-expect-tests =122`와
+`--maru-expect-passed =122`의 공백 때문에 이전 gate는 개수를 강제하지 않았다. 이전 124개
+실제 실행 로그는 유효하지만 exact-count 보장은 아니었다. 정상 옵션으로 125개 compile/pass를
+강제해 재실행했고, 같은 binary에 잘못된 기대값 126을 주면 종료 코드 1로 거부한다. 로그는
+`/tmp/maru-recovery-retention-exact.log`, `/tmp/maru-retention-count-control.log`다.

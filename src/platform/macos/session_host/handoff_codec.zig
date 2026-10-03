@@ -2406,9 +2406,9 @@ test "스크롤백 바이트 예산: 최신 줄만 남고 잘린 결과도 온�
 }
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+    // This source-only codec is tested on every host, including Windows where clock_gettime
+    // has no usable C ABI. Use Zig's monotonic clock through the test I/O implementation.
+    return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
 }
 
 test "스크롤백 바이트 예산: 측정 비용이 pause 예산을 위협하지 않는다 (실측)" {

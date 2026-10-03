@@ -8920,6 +8920,62 @@ CAPTURE-OK ... distinct_colors=149
 | **W8.6** | **웹 패널** — WebView2 + DirectComposition. **§8 의 합성 모델 결정이 선행이다** | 결정 대기 |
 
 **웹 패널을 마지막에 두는 이유**는 그것만 미결 결정에 걸려 있기 때문이다 — 앞의 다섯을 막지 않는다.
+### 2m.115 릴리스 publication 판정도 셸 없이 돈다 (W8.24, 2026-10-03)
+
+`zig build check-github-release-publication`은 이제 `tests/release_workflow/publication.zig`를
+실행한다. 기존 스크립트의 legacy writer 부재·local action 호출 수·단계 순서·덮어쓰기 금지·토큰
+배치·tag-only 서명·외부 Action SHA 및 개수·checkout credential 보존 금지를 유지했다.
+실제 GitHub 릴리스를 만들지 않고 저장소 파일만 읽는다. 기본 `test`도 같은 판정에 연결한다.
+
+Windows Zig 0.16.0에서 정상 입력은 exit 0이다. 적대적 검증 5회는 각각 checkout을 mutable tag로
+변경, 수동 서명 trigger 추가, `--clobber` 추가, draft 단계 제거, `GH_TOKEN` 하나 제거다.
+다섯 변이 모두 exit 1이고, 매회 원본 바이트를 복원한 뒤 최종 정상 입력은 다시 exit 0이다.
+옛 스크립트는 제거해 판정의 두 사본을 남기지 않았다. W8.24의 셸 동작 자체를 재는 두 판정과
+다른 Windows 지원 잔여 항목은 아직 완료되지 않았다.
+
+전체 `check-boundaries`를 Windows에서 실행하는 중, `handoff_codec.zig`의 측정 보조 함수가
+`std.c.clock_gettime`을 직접 불러 컴파일이 실패하는 것도 발견했다. 제품 codec과 판정 범위는
+그대로 두고 측정 시계만 `std.Io.Clock.awake.now(std.testing.io)`로 바꿨다.
+`zig build test-handoff-scrollback-budget`은 Windows에서 exact-count 5/5 통과했다.
+원격 감시 모듈의 POSIX 프로세스/파이프 타입도 별도의 기존 Windows 컴파일 실패로 발견했고,
+그 수정과 검증은 아래 2m.116에 기록했다.
+
+### 2m.116 원격 감시 상태 판정은 Windows에서도 실행한다 (2026-10-03)
+
+`WatchStream.pid`를 기존 중립 `pty.ChildPid` 계약으로 바꿨다. POSIX 타입은 그대로이며,
+Windows libc의 HANDLE 타입을 비활성 채널의 PID 0으로 초기화하던 컴파일 실패가 사라졌다.
+POSIX 정리 함수를 Windows에서 실제 호출하면 명시적으로 panic한다. Windows 원격 감시
+프로세스 구현을 대신하거나 성공으로 처리하지 않는다.
+
+`zig build test-remote-watch-module`은 Windows에서 전체 11개 판정을 컴파일하고 상태·출력
+판정 8개를 통과한다. POSIX 파이프/실물 sshd 통합 판정 3개는 Windows에서 SKIP이고,
+POSIX에서는 기존 실행을 유지한다. 적대적 검증 5회는 영구 오류를 일시 오류로 변경,
+루트 오류의 의미 제거, pause 시 backoff 제거, pause 시 root 기억 제거, 알 수 없는 출력을
+change로 인정하는 변이였다. 다섯 변이는 컴파일 성공 뒤 행동 판정에서 각각 실패했다.
+원본 복원 뒤 정상 입력은 exit 0이다. 첫 탐색의 미사용 인자 컴파일 오류는 이 5회에 세지 않았다.
+
+### 2m.117 편집기 세로 막대를 실제로 잡을 수 있다 (W8.17⒞ 후속, 2026-10-03)
+
+기존 중립 frame은 이미 세로 막대와 기하를 만들고 있었지만 Windows 입력은 가로 막대만 받았다.
+세로 입력을 `scroll_area.Drag`에 배선하고 양쪽 축 모두 down 시점에 그린 기하를 사용한다.
+이미 잡은 드래그는 caption·sidebar·dock 영역 판정보다 먼저 처리한다. release의 마지막 좌표는
+프레임 tick에 반영한 뒤 해제하며, 파일/뷰가 바뀌면 이전 드래그를 취소한다.
+세로 상한도 frame의 `max_offset_px`에서 읽어 가로 막대가 먹는 높이를 빼먹지 않는다.
+
+`zig build win32-terminal-smoke`의 실제 Win32 창에서 적대적 시나리오 5개가 통과했다:
+thumb 드래그와 화면 digest 변화, track 끝 클릭과 정확한 끝 도달, move 없이 release만 하는
+플릭, pane 밖 위쪽 release와 위치 0 clamp, 드래그 도중 터미널로 전환하고 capture 취소.
+다섯 판정 중 하나라도 실패하면 스모크 자체가 오류로 종료한다. 모든 각본은 `smoke`로 가른다.
+기존 스핀 790의 휠 판정은 현재 25줄뿐인 YAML 파일에 기대어 scroll_ok=false였으므로,
+이미 열린 충분히 긴 문서에서 휠을 재는 늦은 단계로 옮겼다. 0→30행 이동과 digest 변화로 통과한다.
+
+별도로 agent snapshot 판정은 worker 완료 전에 고정 스핀에서 읽은 값을, 나중에 받은
+publication ack와 합치고 있었다. 측정은 요청한 snapshot의 실제 publication 직후로 옮겼다.
+편집·safe-save·외부 파일 감시·키보드 이동·wrap은 이 변경의 완료 범위에 포함하지 않는다.
+최신 제품 스모크에서 위 5개·휠 스크롤·agent snapshot 정리는 모두 통과했다.
+`sidebar_clip`·`dock_clamp` 판정은 실패가 남아 전체 Windows 제품 검증 통과로 보고하지 않는다.
+Windows의 `zig build check-boundaries -j4`와 `zig build check-targets -j2`는 exit 0이었다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

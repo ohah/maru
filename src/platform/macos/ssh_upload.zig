@@ -440,7 +440,9 @@ pub fn readFileNoIo(allocator: std.mem.Allocator, path: []const u8, max: usize) 
 }
 
 pub const WatchStream = struct {
-    pid: std.c.pid_t,
+    // Channel state uses a logical PID, not Windows libc's HANDLE-shaped pid_t.
+    // POSIX keeps exactly its existing type; the neutral model can be tested on Windows.
+    pid: @import("maru").pty.ChildPid,
     /// 자식 stdout(논블로킹). 호출자가 읽고 **닫는다**.
     out_fd: c_int,
     /// 자식 stdin 의 **쓰기 끝**. 아무것도 쓰지 않는다 — 이 fd 의 존재 자체가 「부모가 살아 있다」다.
@@ -774,6 +776,9 @@ pub fn spawnRemoteWatch(
 /// 반환은 `reapPid` 규약을 따른다: 정상 종료면 그 코드, 신호로 죽었으면 `-1`. 우리가 `SIGTERM` 을
 /// 보낸 뒤라 **정상 정리에서는 보통 `-1`** 이다 — 호출자는 그 값을 「이유 없음」으로 읽어야 한다.
 pub fn stopRemoteWatch(stream: WatchStream) c_int {
+    // The POSIX process adapter has no Windows implementation. Pure channel tests never
+    // own a live child; reaching cleanup with one must fail loudly instead of leaking it.
+    if (@import("builtin").os.tag == .windows) @panic("POSIX remote watch cleanup is unsupported on Windows");
     if (stream.in_fd >= 0) _ = std.c.close(stream.in_fd); // ① EOF — 스스로 끝내게 한다
     if (stream.out_fd >= 0) _ = std.c.close(stream.out_fd);
     // ⚠️ `kill(0, …)` 은 프로세스 그룹 전체다 — pid 를 반드시 검사한다(에이전트 스트림과 같은 이유).
@@ -892,6 +897,8 @@ fn harnessEnv(name: [*:0]const u8) ?[]const u8 {
 }
 
 test "RF2b 하네스: 제품 전송이 실물 sshd 위에서 목록 wire 를 왕복한다" {
+    // These integration judges exercise the POSIX adapter, not the portable channel model.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const dest = harnessEnv("MARU_REMOTE_SCM_DEST") orelse return error.SkipZigTest;
     const ctl = harnessEnv("MARU_REMOTE_SCM_CTL") orelse return error.SkipZigTest;
     const repo = harnessEnv("MARU_REMOTE_SCM_REPO") orelse return error.SkipZigTest;
@@ -929,6 +936,8 @@ test "RF2b 하네스: 제품 전송이 실물 sshd 위에서 목록 wire 를 왕
 }
 
 test "RF2b 하네스: 없는 원격 디렉터리는 wire 오류로 완결된다 — 침묵이 아니다 (§2.5)" {
+    // These integration judges exercise the POSIX adapter, not the portable channel model.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const dest = harnessEnv("MARU_REMOTE_SCM_DEST") orelse return error.SkipZigTest;
     const ctl = harnessEnv("MARU_REMOTE_SCM_CTL") orelse return error.SkipZigTest;
     const helper = harnessEnv("MARU_RFLS_HELPER") orelse return error.SkipZigTest;

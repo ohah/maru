@@ -8872,9 +8872,16 @@ pub fn build(b: *std.Build) void {
         release_version_step.dependOn(&release_tag_check.step);
     }
 
-    const github_release_publication_contract = b.addSystemCommand(&.{ "sh", "tools/test-github-release-publication.sh" });
+    // Source-only contract: run through Zig on every host without requiring a POSIX shell.
+    const github_release_publication_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/release_workflow/publication.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const github_release_publication_contract = b.addRunArtifact(github_release_publication_tests);
     github_release_publication_contract.setCwd(b.path("."));
-    github_release_publication_contract.stdio = .inherit;
     const github_release_publication_step = b.step("check-github-release-publication", "Check draft-first GitHub release publication");
     github_release_publication_step.dependOn(&github_release_publication_contract.step);
     test_step.dependOn(&github_release_publication_contract.step);

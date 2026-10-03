@@ -95,7 +95,8 @@
 사용자가 기존 safe-save 계약의 Windows 네이티브 구현과 macOS 경로 결합 정리를 승인했다.
 목록·상세 세션 기록 worker는 `src/app`으로 이동했고 양쪽 host가 `maru.app`으로 소비한다
 ([모듈 연결과 검증](../layering-and-portability.md#341-세션-기록-worker의-실제-공통-계층-이동-2026-10-03)).
-Git backend의 이동 및 native text adapter 분리는 남았다. 파일 트리 분리는 layering-and-portability.md §3.4.2에 기록했다.
+Git backend는 `src/app/git/backend.zig`로 이동했다. native text adapter 분리는 남았다.
+파일 트리 분리는 layering-and-portability.md §3.4.2에 기록했다.
 W8.17의 metadata 보존·쓰기·충돌 검사·편집 입력·GUI 저장·외부 변경 감시는 계속 진행 대상이다.
 
 파일 트리 worker도 `src/app/file_tree_backend.zig`로 이동했다. macOS SSH 전송은
@@ -104,4 +105,5 @@ W8.17의 metadata 보존·쓰기·충돌 검사·편집 입력·GUI 저장·외�
 
 안전 저장의 native staging은 windows-platform.md §2m.125에 구현·검증을 기록했다.
 경로 핸들에 상대적으로 배타 생성·본문 교체·sync·미공개 kernel object 정리를 수행한다.
-ACL/owner·부가 stream·속성 복사와 CAS/commit/rollback, GUI 연결은 계속 남아 있다.
+ACL/owner·부가 stream·속성 복사는 windows-platform.md §2m.133과 §2m.135에서 검증했다.
+CAS/commit/rollback과 GUI 연결은 계속 남아 있다.

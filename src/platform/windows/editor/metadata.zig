@@ -219,6 +219,51 @@ test "Windows safe save complete metadata preserves original when audit authorit
     try std.testing.expectEqualStrings("original content", bytes[0..len]);
 }
 
+test "Windows safe save complete metadata restores an actual protected audit SACL" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var scope = @import("audit_scope.zig").Scope.enter() catch |err| switch (err) {
+        error.Unavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer scope.leave() catch @panic("audit thread token restoration failed");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "audit.txt", .data = "original" });
+    var pinned = try @import("maru").win32_relative_file.open(std.testing.allocator, tmp.dir, "audit.txt");
+    defer pinned.deinit(io);
+    const handle = ReOpenFile(pinned.original.handle, 0x01020000, 7, 0x02200000);
+    if (handle == w.INVALID_HANDLE_VALUE) return error.QueryFailed;
+    defer _ = w.ntdll.NtClose(handle);
+    var sd: [48]u8 align(4) = @splat(0);
+    sd[0] = 1;
+    std.mem.writeInt(u16, sd[2..4], 0xa010, .little); // relative, protected SACL present
+    std.mem.writeInt(u32, sd[12..16], 20, .little);
+    sd[20] = 2;
+    std.mem.writeInt(u16, sd[22..24], 28, .little);
+    std.mem.writeInt(u16, sd[24..26], 1, .little);
+    sd[28] = 2; // SYSTEM_AUDIT_ACE_TYPE
+    sd[29] = 0xc0; // success and failure audits
+    std.mem.writeInt(u16, sd[30..32], 20, .little);
+    std.mem.writeInt(u32, sd[32..36], 1, .little); // FILE_READ_DATA
+    sd[36] = 1;
+    sd[37] = 1;
+    sd[43] = 1; // S-1-1-0 (Everyone)
+    try std.testing.expectEqual(w.NTSTATUS.SUCCESS, NtSetSecurityObject(handle, 0x40000008, &sd));
+    var source = try Source.open(pinned.original);
+    defer source.deinit(io);
+    var stage = try staging.create(std.testing.allocator, io, &pinned);
+    defer stage.deinit(io);
+    const report = try cloneComplete(std.testing.allocator, &source, &stage);
+    try std.testing.expect(report.audit_complete);
+    var snapshot = try security_snapshot.Snapshot.capture(std.testing.allocator, stage.file);
+    defer snapshot.deinit();
+    const sacl_offset = std.mem.readInt(u32, snapshot.bytes[12..16], .little);
+    try std.testing.expect(sacl_offset != 0);
+    try std.testing.expectEqualSlices(u8, sd[20..48], snapshot.bytes[sacl_offset..][0..28]);
+    std.debug.print("actual protected audit SACL restored\n", .{});
+}
+
 fn cloneFor(source: *const Source, stage: *staging.Stage, comptime Api: type) Error!Report {
     if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
     try source.checkStable();

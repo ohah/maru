@@ -52,6 +52,7 @@ test {
     _ = @import("platform/windows/editor/stage.zig");
     _ = @import("platform/windows/editor/metadata.zig");
     _ = @import("platform/windows/editor/security.zig");
+    _ = @import("platform/windows/editor/audit_scope.zig");
     _ = scm_surface;
     _ = agent_surface;
 }

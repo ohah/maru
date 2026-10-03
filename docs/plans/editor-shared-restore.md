@@ -472,3 +472,65 @@ host read도 각각 5회 측정했다. 1/16/64MiB의 RSS 중앙값은
 로그: `/tmp/maru-storage-compare-normalized.log`, `/tmp/maru-workspace-model-summary.json`,
 `/tmp/maru-storage-compare-read-final.log`, `/tmp/maru-storage-compare-read-mapped.log`.
 비교 도구는 artifact 위치와 전체 결과 JSON을 출력한다.
+
+## 제품 host 검증과 재현 결함 수정
+
+2026-10-03 추가 검증에서 host의 사본 감소를 제품에 적용했다. 하나의 Data에 각 창 bytes를
+기존 `String(decoding:as:)` 치환을 거쳐 누적하고 같은 Data를 전역 semantic validator와
+비동기 publisher에 넘긴다. 기존 포맷·창 선택·필드 값·전체 취소 정책은 유지한다.
+`test-macos-workspace-capture`의 실제 함수 본문 실행 판정 20개를 `test`와 `test-macos-only`에
+연결했다. 한글·한자·불량 UTF-8 치환·검증 bytes/반환 bytes 일치·session buffer 변경 후 소유를 검사한다.
+격리 사본의 전역 검증 무력화·serialize status 무시·UTF-8 치환 생략·미게시 창 포함·다른 bytes 반환
+5개 변이는 컴파일 후 실제 실행에서 실패했고 기준선/동등 count 조건은 통과했다.
+
+읽기 검증에서는 존재하지만 읽지 못하는 파일을 `nil`로만 반환해 fresh-start와 구분하지 못하고
+`workspaceRestoreIncomplete`가 false인 반례를 권한 000 파일로 재현했다. 이제 없는 파일만 정상 첫
+실행으로 처리하며 그 외 읽기 오류는 기존 incomplete latch를 세워 기본 창으로 덮어쓰지 않게 한다.
+`test-macos-workspace-read` 9개를 양쪽 macOS 집계에 연결했다. 빈 파일·불량 UTF-8의 기존 decode,
+없는 URL/파일·권한 오류·directory·기존 failure latch 보존을 판정한다. 한 번 누락된 live 복원은
+나중의 단독 읽기 성공만으로 완전한 복원이 되지 않으므로 latch를 자동 해제하지 않는다.
+
+실제 앱 검사도 실행했다. R2a 중복 runtime checkpoint 거절/보존, C4 final quit 성공 및 저장 실패의
+quit 취소, R7 GUI SIGKILL 후 세 runtime 재시작 재연결 gate가 모두 통과했다.
+별도 `tools/test-workspace-read-failure-app.py`는 격리 home의 권한 000 원본과 읽을 수 있는 백업을
+둔 실제 앱 실행/종료에서 원본 bytes·inode·권한·backup과 temp 부재를 확인했다.
+이 검사는 기존 workspace 복원 경로의 증거이며 새 공유 editor metadata 복원 연결 증거가 아니다.
+새 shared codec의 capture/apply·recovery 신원·표시 기본값 UX는 여전히 미결/미연결이다.
+
+### 표시 실패 격리와 읽기 대안의 반례
+
+`tools/perf/editor_workspace_failure.zig`는 필수 workspace bytes를 기존 serializer로 먼저 준비한
+뒤 실제 `writeView`에 FailingAllocator를 적용한다. resize 성공으로 할당 실패가 숨지 않도록
+resize 실패도 고정했고 11개 allocation 위치 모두의 실패에서 scratch가 해제되고 필수 bytes와
+정상 peer record가 유지되는 후보 구조를 확인했다. 필수 serializer의 첫 할당 실패는 새 저장
+성공으로 처리하지 않았다. 이것은 제안된 준비 순서의 실험이고 제품 fallback 구현은 아니다.
+
+`tools/test-workspace-chunked-read.py`의 7,296개 UTF-8 비교/없는 파일/directory 판정은 통과했다.
+그러나 실제 RSS와 시간 때문에 이 reader 후보는 채택하지 않았다. 5회 중앙값:
+
+| 입력 | 기존 read RSS/time µs | 단순 chunk RSS/time µs | 용량 선예약 chunk RSS/time µs |
+|---|---:|---:|---:|
+| 1MiB | 8,175,616 / 213 | 9,568,256 / 1,076 | 8,388,608 / 1,236 |
+| 16MiB | 39,616,512 / 3,126 | 60,817,408 / 8,188 | 40,140,800 / 8,577 |
+| 64MiB | 140,296,192 / 15,239 | 224,886,784 / 41,360 | 141,197,312 / 39,444 |
+
+String 재할당과 임시 decode 비용이 남아 chunk만으로 좋아지지 않았다. 현재 제품 reader는 전체
+Data 읽기를 유지하되 실제 읽기 실패의 보호를 보완했다. 아직 memory-bounded streaming parser를
+구현했다고 표현하지 않는다. 후보 reader의 일반 UTF-8 등가성만으로 I/O 변경·동시 파일 변경까지
+입증한 것도 아니다.
+
+### 실제 publisher 비용과 전체 gate
+
+이전 파일 분리 실험은 fsync를 사용했다. 제품 C2는 의도적으로 sync를 하지 않으므로 그 실험
+시간을 제품 쓰기 시간으로 인용하면 안 된다. `tools/perf/workspace_publish.zig`로 실제 C2를
+각 5회 게시하고 bytes를 다시 읽어 비교했다. 기존 `.bak`이 있는 warm 게시와 `.bak`을 해제한 뒤
+새 baseline을 잡는 rearm의 중앙값은 2,328 bytes 193/747µs, 1,638,360 bytes 1,546/3,296µs,
+16MiB 2,726/14,277µs였다. 입력은 leaf 게시 bytes fixture이고 full semantic parse/capture는 제외한다.
+
+최초 전체 검사는 새 macOS 판정자를 `test-macos-only`에 함께 연결하지 않은 경계 누락으로 실패했다.
+같은 변경에서 연결을 보완했다. 두 번째 검사는 읽기 결함 수정이 추가돼 해당 검사만 중단했다.
+다른 worktree의 검사에는 신호를 보내지 않았다. 최종 전체 `mise run check`는 종료 코드 0으로 통과했다.
+전체 로그는 `/tmp/maru-product-workspace-full-check-complete.log`에 남겼다.
+로그: `/tmp/maru-product-workspace-final-focused.log`, `/tmp/maru-product-workspace-read-app.log`,
+`/tmp/maru-product-capture-mutations.json`, `/tmp/maru-editor-workspace-failure.log`,
+`/tmp/maru-workspace-chunked-read-reserved.log`, `/tmp/maru-c2-publish-summary.json`.

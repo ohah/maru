@@ -120,9 +120,18 @@ def capture():
         a=original.index(start);return original[a:original.index(end,a)].replace('private func','func')
     values={}
     for node in ast.parse((ROOT/'tools/perf/workspace_host_impact.py').read_text()).body:
-        if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id in ('pre','post') for t in node.targets):
+        if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant) and any(isinstance(t,ast.Name) and t.id in ('pre','post') for t in node.targets):
             values[node.targets[0].id]=ast.literal_eval(node.value)
     method=extract('    private func captureWorkspaceSnapshot(', '\n    private func shutdownAppSession(')
+    product=method.replace('func captureWorkspaceSnapshot','func captureProduct')
+    if 'var snapshot = Data((MARU_WORKSPACE_HEADER' in method:
+        # Preserve the pre-optimization baseline explicitly; product is measured separately.
+        method=method.replace('var snapshot = Data((MARU_WORKSPACE_HEADER + "\\n").utf8)', 'var blocks = ""')
+        method=method.replace('snapshot.append(contentsOf: String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self).utf8)', 'blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)')
+        method=method.replace('guard blockCount > 0 else { return nil }', 'guard !blocks.isEmpty else { return nil }\n        let snapshot = MARU_WORKSPACE_HEADER + "\\n" + blocks')
+        method=method.replace('let validatedWindowCount = snapshot.withUnsafeBytes { raw in\n            let buf = raw.bindMemory(to: UInt8.self)\n            return maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)', 'let snapshotBytes = Array(snapshot.utf8)\n        let validatedWindowCount = snapshotBytes.withUnsafeBufferPointer { buf in\n            maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)')
+        method=method.replace('return snapshot', 'return Data(snapshot.utf8)')
+
     # Experimental alternative: accumulate once in Data and validate the same final bytes.
     alternative=method.replace('func captureWorkspaceSnapshot','func captureData').replace('var blocks = ""','var blocks = Data((MARU_WORKSPACE_HEADER + "\\n").utf8)').replace('blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)','blocks.append(bytes, count: len)').replace('let snapshot = MARU_WORKSPACE_HEADER + "\\n" + blocks','let snapshot = blocks').replace('let snapshotBytes = Array(snapshot.utf8)','let snapshotBytes = snapshot').replace('snapshotBytes.withUnsafeBufferPointer { buf in','snapshotBytes.withUnsafeBytes { raw in\n            let buf = raw.bindMemory(to: UInt8.self)').replace('return Data(snapshot.utf8)','return snapshot').replace('            maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)', '            return maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)')
     normalized=alternative.replace('func captureData', 'func captureNormalizedData').replace('blocks.append(bytes, count: len)', 'blocks.append(contentsOf: String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self).utf8)')
@@ -131,19 +140,19 @@ def capture():
 let mode=CommandLine.arguments[1];let total=Int(CommandLine.arguments[2])!;let count=Int(CommandLine.arguments[3])!
 let h=Host();validatedCount=Int64(count)
 for _ in 0..<count {h.windows.append(Surface(Session(String(repeating:"x",count:total/count))))}
-if mode=="equivalence" {precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==h.captureData(useTerminationKeyWindow:false,publishedOnly:true));h.windows=[Surface(Session("한글\nquote \" slash \\")),Surface(Session("한자\n"))];validatedCount=2;precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==h.captureData(useTerminationKeyWindow:false,publishedOnly:true));h.windows[0].appSession!.buffer[0]=255;precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true) != h.captureData(useTerminationKeyWindow:false,publishedOnly:true));precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==h.captureNormalizedData(useTerminationKeyWindow:false,publishedOnly:true));print("valid UTF8 equivalent, invalid UTF8 behavior differs");exit(0)}
+if mode=="equivalence" {precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==h.captureData(useTerminationKeyWindow:false,publishedOnly:true));h.windows=[Surface(Session("한글\nquote \" slash \\")),Surface(Session("한자\n"))];validatedCount=2;precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==h.captureData(useTerminationKeyWindow:false,publishedOnly:true));h.windows[0].appSession!.buffer[0]=255;precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true) != h.captureData(useTerminationKeyWindow:false,publishedOnly:true));precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==h.captureNormalizedData(useTerminationKeyWindow:false,publishedOnly:true));precondition(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==h.captureProduct(useTerminationKeyWindow:false,publishedOnly:true));print("valid UTF8 equivalent, invalid UTF8 behavior differs");exit(0)}
 let start=DispatchTime.now().uptimeNanoseconds
-let result = mode=="control" ? nil : (mode=="original" ? h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true) : (mode=="normalized" ? h.captureNormalizedData(useTerminationKeyWindow:false,publishedOnly:true) : h.captureData(useTerminationKeyWindow:false,publishedOnly:true)))
+let result = mode=="control" ? nil : (mode=="original" ? h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true) : (mode=="product" ? h.captureProduct(useTerminationKeyWindow:false,publishedOnly:true) : (mode=="normalized" ? h.captureNormalizedData(useTerminationKeyWindow:false,publishedOnly:true) : h.captureData(useTerminationKeyWindow:false,publishedOnly:true))))
 if mode != "control" {precondition(result?.count == total+MARU_WORKSPACE_HEADER.utf8.count+1)}
 print("elapsed_us=\((DispatchTime.now().uptimeNanoseconds-start)/1000) bytes=\(result?.count ?? 0)")
 '''
-    main=ART/'main.swift';main.write_text(values['pre']+method+alternative+normalized+harness)
+    main=ART/'main.swift';main.write_text(values['pre']+method+alternative+normalized+product+harness)
     binary=ART/'capture'
     subprocess.run(['xcrun','swiftc','-O',str(ROOT/'src/platform/macos/TerminationWindowPolicy.swift'),str(main),'-o',str(binary)],check=True)
     subprocess.run([str(binary),'equivalence','4096','2'],check=True)
     rows=[]
     for total,count in [(4096,1),(1638400,64),(16*1024*1024,1),(64*1024*1024,64)]:
-        for mode in ('control','original','data','normalized'):
+        for mode in ('control','original','data','normalized','product'):
             rss=[];durations=[]
             for repeat in range(5):
                 r=subprocess.run(['/usr/bin/time','-l',str(binary),mode,str(total),str(count)],capture_output=True,text=True,check=True)

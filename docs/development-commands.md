@@ -1043,3 +1043,21 @@ mise exec -- zig build-exe -O ReleaseFast --dep session -Mroot=tools/perf/worksp
 ```
 
 범위·제외·판단은 [저장 구조 비교](plans/editor-shared-restore.md#저장-구조-비교-실측과-판단-갱신)를 따른다.
+
+제품 workspace host 판정: `zig build test-macos-workspace-capture test-macos-workspace-read`.
+macOS에서는 각각 20/9개 함수 본문 실행 판정이며 기본 `test`와 `test-macos-only`에도 연결돼 있다.
+실제 앱 읽기 실패의 원본 보존은 앱 bundle을 빌드한 뒤
+`python3 tools/test-workspace-read-failure-app.py`로 검사한다. 모두 격리된 fixture를 사용한다.
+
+읽기 후보의 반례/실측: `python3 tools/test-workspace-chunked-read.py`.
+표시 scratch 실패 실험과 실제 C2 게시 비용은 다음 opt-in 명령을 사용한다.
+
+```sh
+mise exec -- zig build-exe -O ReleaseFast --dep session -Mroot=tools/perf/editor_workspace_failure.zig -Msession=src/session.zig -lc -femit-bin=/tmp/maru-editor-workspace-failure
+/tmp/maru-editor-workspace-failure
+mise exec -- zig build-exe -O ReleaseFast --dep checkpoint_file -Mroot=tools/perf/workspace_publish.zig -Mcheckpoint_file=src/platform/macos/workspace_checkpoint_file.zig -lc -femit-bin=/tmp/maru-workspace-publish
+```
+
+C2 도구의 인수는 private parent 경로·bytes·`warm` 또는 `rearm`이다. 고정 leaf에 쓰므로 사용자 저장
+경로에 실행하지 않고 새 임시 폴더를 사용한다. 제품/실험 범위는
+[제품 host 검증](plans/editor-shared-restore.md#제품-host-검증과-재현-결함-수정)을 따른다.

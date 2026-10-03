@@ -3945,3 +3945,9 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 `workspace_model_size.zig`가 소유한다. 단일 파일/세대 참조 sidecar·6개 SIGKILL 지점·
 표시 준비 실패·host 사본/UTF-8 등가성을 확인했다. 제품 복원·전원 단절·backup/GC 연결 증거는 아니다.
 [저장 구조 비교](plans/editor-shared-restore.md#저장-구조-비교-실측과-판단-갱신)가 결과와 미검증 범위의 단일 출처다.
+
+제품 host 추가 검증: `test-macos-workspace-capture` 20개와 `test-macos-workspace-read` 9개를
+일반/macOS 집계에 연결했다. 실제 앱 R2a·C4·R7와 읽기 권한 실패의 원본/inode/backup 보존을 검사했다.
+shared metadata의 제품 capture/apply는 여전히 미연결이며, codec scratch의 11개 실제 allocator
+실패와 chunk reader 7,296개 비교는 별도 실험이다. 상세 경계와 읽기 후보를 채택하지 않은 결과는
+[제품 host 검증](plans/editor-shared-restore.md#제품-host-검증과-재현-결함-수정)에 기록한다.

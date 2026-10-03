@@ -1419,7 +1419,8 @@ pub fn takeContextMenu(surface_id: u64) ?struct { menu: u32, point: ws.message.P
 pub fn contextMenuOpen(surface_id: u64, menu: u32) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     const m = s.context_menu orelse return false;
-    return m.menu == menu and !m.closed;
+    // 띄운 것만 — sidecar 를 다시 띄운 뒤 같은 번호의 새(안 띄운) 메뉴가 옛 NSMenu 를 열어 두지 않게(W6c② 적대 검증 2 차).
+    return m.shown and m.menu == menu and !m.closed;
 }
 
 /// 그 메뉴의 선택한 글(없으면 빈 글).
@@ -1916,7 +1917,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
             cancelContextMenu(gpa, s);
             const selection = gpa.dupe(u8, v.selection) catch null;
-            if (selection == null or maru.session.web_osr_context_menu.build(v.flags).len == 0) {
+            if (selection == null or maru.session.web_osr_context_menu.build(v.flags, true).len == 0) {
                 if (selection) |b| gpa.free(b);
                 send(gpa, .{ .context_menu_command = .{ .browser = v.browser, .menu = v.menu, .command = .cancel } });
                 return;

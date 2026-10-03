@@ -83,10 +83,12 @@ pub const Menu = struct {
     }
 };
 
-pub fn build(flags: Flags) Menu {
+/// `look_up` 은 「찾기」를 둘지 — 선택한 글에 보이는 글자가 있을 때만(`hasVisibleText` — 빈칸뿐인 선택이면 「''찾기」가 됐다, W6c②
+/// 적대 검증 3 차).
+pub fn build(flags: Flags, look_up: bool) Menu {
     var menu: Menu = .{};
     if (flags.editable) {
-        if (flags.selection) {
+        if (flags.selection and look_up) {
             menu.push(.{ .kind = .look_up });
             menu.separator();
         }
@@ -110,7 +112,7 @@ pub fn build(flags: Flags) Menu {
         }
         if (flags.selection) {
             // 링크 위의 선택은 링크 글이다(우클릭이 고른다 — 실측) — Chrome 은 그때 「찾기」를 내지 않는다.
-            if (!flags.link) {
+            if (!flags.link and look_up) {
                 menu.separator();
                 menu.push(.{ .kind = .look_up });
             }
@@ -128,6 +130,14 @@ pub fn build(flags: Flags) Menu {
     }
     while (menu.len > 0 and menu.items[menu.len - 1].kind == .separator) menu.len -= 1;
     return menu;
+}
+
+/// 「찾기」 문구에 남을 글자가 있는가(빈칸·보이지 않는 글자뿐이면 false).
+pub fn hasVisibleText(selection: []const u8) bool {
+    var it = std.unicode.Utf8View.initUnchecked(selection).iterator();
+    if (!std.unicode.utf8ValidateSlice(selection)) return false;
+    while (it.nextCodepoint()) |cp| if (!isSpace(cp) and !isHidden(cp)) return true;
+    return false;
 }
 
 /// 「'…' 찾기」 줄인 글의 상한(글자 수). Chrome 도 긴 선택을 줄여 싣는다.
@@ -159,7 +169,7 @@ pub fn lookUpLabel(selection: []const u8, buf: []u8) []const u8 {
         const bytes = selection[i .. i + n];
         i += n;
         if (isSpace(cp)) {
-            pending_space = len != 0;
+            pending_space = len > fsi.len; // 격리 문자 뒤에 쓴 글이 있을 때만 — 앞 빈칸은 걷는다
             continue;
         }
         if (isHidden(cp)) continue;
@@ -218,7 +228,7 @@ fn find(menu: Menu, cmd: Command) ?Item {
 }
 
 test "the page menu is back · forward · reload with back and forward off when there is nowhere to go" {
-    const menu = build(.{ .can_go_forward = true });
+    const menu = build(.{ .can_go_forward = true }, true);
     try std.testing.expectEqual(@as(usize, 3), menu.len);
     try std.testing.expectEqual(Command.back, menu.items[0].command);
     try std.testing.expect(!menu.items[0].enabled and menu.items[1].enabled and menu.items[2].enabled);
@@ -227,7 +237,7 @@ test "the page menu is back · forward · reload with back and forward off when 
 
 test "a link with its text selected is copy link address — copy — speech — services, without look up or page items" {
     var buf: [max_items]Kind = undefined;
-    const menu = build(.{ .link = true, .selection = true, .can_copy = true, .can_go_back = true });
+    const menu = build(.{ .link = true, .selection = true, .can_copy = true, .can_go_back = true }, true);
     try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .command, .separator, .speech, .speech_start, .speech_stop, .separator, .services }, kinds(menu, &buf));
     try std.testing.expectEqual(Command.copy_link_address, menu.items[0].command);
     try std.testing.expectEqual(Command.copy, menu.items[2].command);
@@ -236,22 +246,22 @@ test "a link with its text selected is copy link address — copy — speech —
 }
 
 test "an image is copy image (off without pixels) and copy image address; a linked image adds copy link address first" {
-    const loading = build(.{ .image = true });
+    const loading = build(.{ .image = true }, true);
     try std.testing.expectEqual(@as(usize, 2), loading.len);
     try std.testing.expect(!find(loading, .copy_image).?.enabled and find(loading, .copy_image_address).?.enabled);
     var buf: [max_items]Kind = undefined;
-    const linked = build(.{ .link = true, .image = true, .image_loaded = true });
+    const linked = build(.{ .link = true, .image = true, .image_loaded = true }, true);
     try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .command, .command }, kinds(linked, &buf));
     try std.testing.expect(find(linked, .copy_image).?.enabled);
 }
 
 test "an input shows emoji and all seven edit items, each off when it cannot run; a selection adds look up first and speech/services last" {
     var buf: [max_items]Kind = undefined;
-    const plain = build(.{ .editable = true, .can_paste = true, .can_select_all = true });
+    const plain = build(.{ .editable = true, .can_paste = true, .can_select_all = true }, true);
     try std.testing.expectEqualSlices(Kind, &.{ .emoji, .separator, .command, .command, .separator, .command, .command, .command, .command, .command }, kinds(plain, &buf));
     try std.testing.expect(!find(plain, .undo).?.enabled and !find(plain, .cut).?.enabled and !find(plain, .copy).?.enabled);
     try std.testing.expect(find(plain, .paste).?.enabled and find(plain, .paste_and_match_style).?.enabled and find(plain, .select_all).?.enabled);
-    const selected = build(.{ .editable = true, .selection = true, .can_copy = true, .can_cut = true });
+    const selected = build(.{ .editable = true, .selection = true, .can_copy = true, .can_cut = true }, true);
     try std.testing.expectEqual(Kind.look_up, selected.items[0].kind);
     try std.testing.expectEqual(Kind.services, selected.items[selected.len - 1].kind);
     try std.testing.expect(find(selected, .cut).?.enabled and find(selected, .copy).?.enabled);
@@ -259,9 +269,9 @@ test "an input shows emoji and all seven edit items, each off when it cannot run
 
 test "a selection outside inputs is look up — copy — speech — services; media has no items" {
     var buf: [max_items]Kind = undefined;
-    const menu = build(.{ .selection = true, .can_copy = true });
+    const menu = build(.{ .selection = true, .can_copy = true }, true);
     try std.testing.expectEqualSlices(Kind, &.{ .look_up, .separator, .command, .separator, .speech, .speech_start, .speech_stop, .separator, .services }, kinds(menu, &buf));
-    try std.testing.expectEqual(@as(usize, 0), build(.{ .media = true, .can_go_back = true }).len);
+    try std.testing.expectEqual(@as(usize, 0), build(.{ .media = true, .can_go_back = true }, true).len);
 }
 
 test "no flag combination makes a leading, trailing or doubled separator or overflows the list" {
@@ -270,13 +280,22 @@ test "no flag combination makes a leading, trailing or doubled separator or over
         const flags: Flags = @bitCast(@as(u16, @intCast(bits)));
         if (flags.image_loaded and !flags.image) continue;
         if (flags.selection_truncated and !flags.selection) continue;
-        const menu = build(flags);
+        const menu = build(flags, true);
         const items = menu.slice();
         if (items.len == 0) continue;
         try std.testing.expect(items[0].kind != .separator and items[items.len - 1].kind != .separator);
         for (items[1..], 0..) |item, i| try std.testing.expect(!(item.kind == .separator and items[i].kind == .separator));
         for (items) |item| if (item.kind == .command) try std.testing.expectEqual(message.contextMenuAllows(flags, item.command), item.enabled);
     }
+}
+
+test "a selection of only spaces or invisible characters gets no look up item" {
+    try std.testing.expect(!hasVisibleText("  \n\u{200B}\u{202E} "));
+    try std.testing.expect(hasVisibleText(" a "));
+    const blank = build(.{ .selection = true, .can_copy = true }, false);
+    try std.testing.expect(blank.items[0].kind != .look_up);
+    try std.testing.expectEqual(Kind.command, blank.items[0].kind); // 복사가 맨 앞 — 앞 구분선이 남지 않는다
+    try std.testing.expect(build(.{ .editable = true, .selection = true }, false).items[0].kind == .emoji);
 }
 
 test "the look up label drops direction overrides and controls, folds line breaks, and shortens long selections at a character boundary" {

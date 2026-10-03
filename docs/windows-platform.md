@@ -10669,3 +10669,25 @@ partitions concurrently, each with two jobs. An aggregate is successful only whe
 all four processes exit zero, all four shard manifests agree on the total, and
 the selected-step counts sum to that total. This changes local orchestration only;
 no boundary registration, test, or default CI execution is removed.
+
+### 2m.125 Windows safe-save의 미공개 native staging 파일 (2026-10-03)
+
+`platform/windows/editor/stage.zig`가 고정된 부모 handle 아래에 임시 파일을 만든다.
+[Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)의
+`RootDirectory`·`FILE_CREATE`·동기 nonalert·`FILE_OPEN_REPARSE_POINT`·`FILE_DELETE_ON_CLOSE`를 사용한다.
+파일 이름은 secure random 128bit이며 충돌은 최대 16번 다시 시도한다. 다른 reader/writer/delete
+handle과 공유하지 않고, 기존 파일을 여는 OPEN_IF/overwrite fallback은 없다.
+미공개 파일의 정리는 경로 delete가 아니라 소유한 kernel handle의 close다. 이름 소유권을 만드는
+할당이 실패해도 handle을 닫아 파일을 정리한다. 부모 pin은 staging과 향후 commit 동안 유지한다.
+
+본문은 positional write와 정확한 setLength로 교체한 뒤 sync한다. 짧게 다시 쓰면 이전 꼬리를
+남기지 않는다. 실제 파일의 sync endpoint만 실패시키는 fault injection은 오류가 호출자로
+전파되고 원본 내용이 유지되며 미공개 파일이 정리됨을 확인한다. metadata 복사에 필요한
+READ_CONTROL·WRITE_DAC·WRITE_OWNER·READ_EA·WRITE_EA는 생성 handle에서 요청하고 실제
+FileAccessInformation으로 grant를 확인한다. **이것은 메타데이터 복사 완료가 아니다.**
+ACL/owner·부가 stream·속성의 실제 보존, 원본 충돌 검사와 publish/rollback은 다음 단계다.
+
+`test-win32-safe-save`는 13개 등록(익명 2·path 5·stage 6)을 강제하며 Windows 13/13 통과했다.
+충돌 파일을 OPEN_IF로 열기·DELETE_ON_CLOSE 제거·잘못된 본문 길이·sync 생략·metadata 권한
+누락의 다섯 제품 변이가 모두 실행 판정에서 실패했고 정확한 원본 bytes 복구 후 통과했다.
+여전히 GUI save는 연결되지 않았고 Windows 편집기를 저장 가능하다고 표시하지 않는다.

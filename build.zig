@@ -1932,6 +1932,13 @@ pub fn build(b: *std.Build) void {
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    if (target.result.os.tag == .windows) {
+        // This focused gate checks the shared-solid/native-gradient merge without a GPU device.
+        const paint_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows paint rebase"} });
+        const paint_step = b.step("test-windows-paint", "Verify Windows solid and gradient lowering contracts");
+        paint_step.dependOn(&b.addRunArtifact(paint_tests).step);
+    }
+
 
     const macos_coretext_font_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

@@ -725,6 +725,14 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
                 });
             }
         }
+        // Stable GPU paint fixtures above the glyph grid: vertical, horizontal,
+        // and a clipped horizontal gradient. Pixel capture can distinguish a
+        // real interpolation from a solid substitute or restarted endpoints.
+        const red = d3d11_cells.colorFromArgb(0xFFFF0000);
+        const blue = d3d11_cells.colorFromArgb(0xFF0000FF);
+        try cells.append(allocator, d3d11_cells.paintCell(.{ 16, 16, 160, 96 }, .{ 16, 16, 160, 96 }, red, blue, .vertical, .{ 0, 0, 0, 0 }));
+        try cells.append(allocator, d3d11_cells.paintCell(.{ 192, 16, 160, 96 }, .{ 192, 16, 160, 96 }, red, blue, .horizontal, .{ 0, 0, 0, 0 }));
+        try cells.append(allocator, d3d11_cells.paintCell(.{ 400, 16, 80, 96 }, .{ 360, 16, 160, 96 }, red, blue, .horizontal, .{ 0, 0, 0, 0 }));
         last_cell_count = cells.items.len;
 
         try present.beginFrame(clear);
@@ -16822,15 +16830,12 @@ fn appendConfirmCells(
     try draw_host.syncAtlasTexture(pipeline, renderer_state, atlas_w, atlas_h);
     _ = draw_host.uploadFrameRegions(pipeline, frame);
 
-    // **버려지는 op 를 센다.** 이 셰이더에 그라디언트 계산이 없어 그런 quad 는 안 그려지는데(테두리는 단색 사각으로 그린다),
-    // 조용히 넘기면 "패널 없이 글자만 뜨는" 화면이 그럴듯해 보인다(실측으로 그랬다).
-    for (ops.items) |op| switch (op) {
-        // **그라디언트만 남았다.** 테두리는 단색 사각으로 그린다(`chrome.solid_rects` — 둥근 상자는 바깥판 + 들인 채움).
-        .quad => |q| if (q.gradient != .solid) {
+    // Fills are lowered; the existing border fallback still handles solid quads
+    // only. Keep reporting a partially unpainted gradient+border declaration.
+    for (ops.items) |op| {
+        if (op == .quad and op.quad.gradient != .solid and op.quad.border_role != null)
             confirm_unpainted_quads.* += 1;
-        },
-        else => {},
-    };
+    }
     const before = out.items.len;
     try appendConfirmSolids(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, out);
     const colors = maru.renderer.metal_frame.CellColors{
@@ -16860,10 +16865,17 @@ fn appendConfirmSolids(
     client_h: u32,
     out: *std.ArrayList(d3d11_cells.Cell),
 ) !void {
-    var rects: std.ArrayList(maru.chrome.solid_rects.SolidRect) = .empty;
-    defer rects.deinit(a);
-    try maru.chrome.solid_rects.flattenModal(a, ops, tk, &rects);
-    try appendSolidRects(a, rects.items, client_w, client_h, 0, 0, out);
+    // Match flattenModal's first-panel expansion before choosing solid or gradient paint.
+    // Applying padding after clipping would move the gradient endpoints and modal hit geometry.
+    var panel_done = false;
+    for (ops) |op| {
+        var painted = op;
+        if (!panel_done and painted == .quad) {
+            panel_done = true;
+            painted.quad.rect = painted.quad.visibleRect(tk.space.modal_padding_px);
+        }
+        try appendPaintOps(a, &.{painted}, tk, client_w, client_h, 0, 0, out);
+    }
 }
 
 // 확인 모달이 떠 있으면 마우스 루프는 **새 제스처를 시작하지 않는다** — 그 삼킴이 디바이더 잡기·스크롤바 누름·도크 키보드 주인 바꾸기보다
@@ -16898,6 +16910,63 @@ test "확인 모달(Windows): props 가 제품 토큰의 모양을 싣는다 —
     const p = confirmProps(1200, 800, 8, 16, 200, &tk);
     try std.testing.expectEqual(maru.chrome.props.ShapeTokens.fromTokens(&tk), p.shape);
     try std.testing.expect(p.shape.modal_padding_px > 0); // 전제: rich 는 0 이 아니다
+}
+
+/// Lower gradients without replacing the shared solid geometry rules.
+fn appendPaintOps(
+    a: std.mem.Allocator,
+    ops: []const maru.chrome.draw.Op,
+    tk: *const maru.chrome.Tokens,
+    clip_w: u32,
+    clip_h: u32,
+    origin_x: u32,
+    origin_y: u32,
+    out: *std.ArrayList(d3d11_cells.Cell),
+) !void {
+    for (ops) |op| {
+        // Keep main's shared rounded-border and alpha rules for solid operations.
+        // Only gradient paint needs the native shader path below.
+        if (op != .quad or op.quad.gradient == .solid) {
+            try appendSolidOps(a, &.{op}, tk, clip_w, clip_h, origin_x, origin_y, out);
+            continue;
+        }
+        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
+            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
+            .quad => |q| .{ q.rect, q.fill_role, q.alpha, q.corner_radii },
+            else => continue,
+        };
+        // Intersect both the viewport and the op clip; preserve the original paint
+        // rectangle below so a clipped gradient does not restart at the new edge.
+        const op_clip = if (op == .quad) op.quad.clip else null;
+        const cx0: i32 = if (op_clip) |c| @max(c.x, 0) else 0;
+        const cy0: i32 = if (op_clip) |c| @max(c.y, 0) else 0;
+        const cx1: i32 = if (op_clip) |c| @min(c.x + @as(i32, @intCast(c.w)), @as(i32, @intCast(clip_w))) else @intCast(clip_w);
+        const cy1: i32 = if (op_clip) |c| @min(c.y + @as(i32, @intCast(c.h)), @as(i32, @intCast(clip_h))) else @intCast(clip_h);
+        const x0 = @max(rect.x, cx0);
+        const y0 = @max(rect.y, cy0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), cx1);
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), cy1);
+        if (x1 <= x0 or y1 <= y0) continue;
+        const rgb = tk.get(role);
+        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+        const end: ?[4]f32 = if (op == .quad and op.quad.gradient != .solid and op.quad.fill_role_end != null) blk: {
+            const rgb_end = tk.get(op.quad.fill_role_end.?);
+            break :blk d3d11_cells.colorFromArgb((@as(u32, alpha) << 24) | (@as(u32, rgb_end.r) << 16) | (@as(u32, rgb_end.g) << 8) | rgb_end.b);
+        } else null;
+        const direction: d3d11_cells.FillDirection = if (op == .quad) switch (op.quad.gradient) {
+            .solid => .solid,
+            .vertical => .vertical,
+            .horizontal => .horizontal,
+        } else .solid;
+        try out.append(a, d3d11_cells.paintCell(
+            .{ @floatFromInt(x0 + @as(i32, @intCast(origin_x))), @floatFromInt(y0 + @as(i32, @intCast(origin_y))), @floatFromInt(x1 - x0), @floatFromInt(y1 - y0) },
+            .{ @floatFromInt(rect.x + @as(i32, @intCast(origin_x))), @floatFromInt(rect.y + @as(i32, @intCast(origin_y))), @floatFromInt(rect.w), @floatFromInt(rect.h) },
+            d3d11_cells.colorFromArgb(argb),
+            end,
+            direction,
+            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+        ));
+    }
 }
 
 /// `draw.Op` 의 **단색 사각**(fill·solid quad)을 셀로 낮춘다. 글리프는 호출자가 따로 넣는다 —
@@ -16949,6 +17018,55 @@ fn appendSolidRects(
             .{ @floatFromInt(sr.radii[0]), @floatFromInt(sr.radii[1]), @floatFromInt(sr.radii[2]), @floatFromInt(sr.radii[3]) },
         ));
     }
+}
+
+test "Windows paint rebase preserves shared solids and gradient geometry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var tk = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors));
+    tk.palette.set(.surface_bg, .{ .r = 30, .g = 40, .b = 50 });
+    tk.palette.set(.focus_accent, .{ .r = 200, .g = 100, .b = 20 });
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(a);
+    var q: maru.chrome.draw.Op.Quad = .{
+        .rect = .{ .x = 10, .y = 20, .w = 100, .h = 60 },
+        .fill_role = .surface_bg, .border_role = .focus_accent,
+        .border_widths = .{ 1, 2, 3, 4 }, .corner_radii = .{ 8, 8, 8, 8 },
+    };
+    // Rounded opaque borders must retain main's outer plate and inset fill.
+    try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 2), cells.items.len);
+    try std.testing.expectEqual([4]f32{ 14, 21, 94, 56 }, cells.items[1].rect);
+    try std.testing.expectEqual([4]f32{ 4, 4, 4, 4 }, cells.items[1].shape);
+    // Transparent fills cannot use the opaque plate; independent border alpha survives.
+    cells.clearRetainingCapacity(); q.alpha = 0; q.border_alpha = 255;
+    try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 5), cells.items.len);
+    try std.testing.expectEqual(@as(f32, 0), cells.items[0].bg[3]);
+    try std.testing.expectEqual(@as(f32, 1), cells.items[1].bg[3]);
+    // Clipping a gradient must preserve its original endpoints.
+    cells.clearRetainingCapacity(); q.alpha = 255; q.border_role = null;
+    q.gradient = .horizontal; q.fill_role_end = .focus_accent;
+    q.clip = .{ .x = 40, .y = 30, .w = 20, .h = 15 };
+    try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.items.len);
+    try std.testing.expectEqual([4]f32{ 40, 30, 20, 15 }, cells.items[0].rect);
+    try std.testing.expectEqual([4]f32{ 10, 20, 100, 60 }, cells.items[0].paint_rect);
+    try std.testing.expectEqual(@as(f32, 2), cells.items[0].paint_info[0]);
+    // Mixed operations retain z order instead of batching all solids ahead of gradients.
+    cells.clearRetainingCapacity();
+    const fill: maru.chrome.draw.Op = .{ .fill = .{ .rect = q.rect, .role = .surface_bg } };
+    try appendPaintOps(a, &.{ fill, .{ .quad = q }, fill }, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 3), cells.items.len);
+    try std.testing.expectEqual(@as(f32, 0), cells.items[0].paint_info[0]);
+    try std.testing.expectEqual(@as(f32, 2), cells.items[1].paint_info[0]);
+    try std.testing.expectEqual(@as(f32, 0), cells.items[2].paint_info[0]);
+    // Modal padding expands the first panel before native gradient lowering.
+    cells.clearRetainingCapacity(); q.clip = null;
+    const panel = q.visibleRect(tk.space.modal_padding_px);
+    try appendConfirmSolids(a, &.{.{ .quad = q }}, &tk, 300, 200, &cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.items.len);
+    try std.testing.expectEqual([4]f32{ @floatFromInt(panel.x), @floatFromInt(panel.y), @floatFromInt(panel.w), @floatFromInt(panel.h) }, cells.items[0].paint_rect);
 }
 
 /// 편집기 프레임에 필요한 렌더 자원. **스모크는 `draw_host.Host` 가, 합성 루프는 흩어져 있는 자기
@@ -17116,7 +17234,7 @@ fn buildEditorFrame(
     errdefer built.deinit(a);
 
     // **단색 사각(배경·스크롤바)을 글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다.
-    try appendSolidOps(a, op_buf[0..w.ops], tk, v.w, v.h, origin_x, origin_y, &built.cells);
+    try appendPaintOps(a, op_buf[0..w.ops], tk, v.w, v.h, origin_x, origin_y, &built.cells);
     _ = try h.appendGlyphCellsAt(a, built.frame, cl, origin_x, origin_y, &built.cells);
     return built;
 }

@@ -2177,12 +2177,14 @@ void maru_macos_app_session_osr_drag_exit(MaruAppHostSession *session);
 int32_t maru_macos_app_session_osr_drag_drop(MaruAppHostSession *session, double x_px, double y_px, int32_t mods);
 /* v206(W6d②): 페이지에서 끌어내기. set_source(maru 안에 놓이는 그 끌기 번호), out_take(이 창이 가져간 끌기 번호 — 0 이면 없음,
  * 허용 동작·그림 잡은 자리·그림 크기 DIP), out_part(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG — out 이 NULL 이면 길이만, 넘치면 0),
- * out_end(놓인 자리 backing px·받은 동작, 0 = 취소), out_active(이 창이 돌리는 끌기 번호). */
+ * out_started(세션이 열렸다 — 제스처를 끝낸다), out_end(놓인 자리 backing px — 음수면 시작 자리·받은 동작, 0 = 취소),
+ * out_active(이 창이 돌리는 끌기 번호). */
 void maru_macos_app_session_osr_drag_set_source(MaruAppHostSession *session, uint32_t drag);
 uint32_t maru_macos_app_session_osr_drag_out_take(MaruAppHostSession *session, uint32_t *allowed, int32_t *hotspot_x, int32_t *hotspot_y,
                                                   uint32_t *image_width, uint32_t *image_height);
 int32_t maru_macos_app_session_osr_drag_out_part(MaruAppHostSession *session, uint32_t drag, uint32_t part, uint8_t *out, size_t cap,
                                                  size_t *out_len);
+void maru_macos_app_session_osr_drag_out_started(MaruAppHostSession *session, uint32_t drag);
 int32_t maru_macos_app_session_osr_drag_out_end(MaruAppHostSession *session, uint32_t drag, double x_px, double y_px, uint32_t operation);
 uint32_t maru_macos_app_session_osr_drag_out_active(MaruAppHostSession *session);
 /* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),

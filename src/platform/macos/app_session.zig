@@ -23776,7 +23776,7 @@ pub const AppSession = struct {
         web_ops.osrContextMenuDropShown(self); // 띄운 우클릭 메뉴도(W6c②)
         _ = web_ops.osrDragReset(self); // 끌기 중 창이 닫히면 그 탭에 나가기를 보낸다(W6d①)
         // 이 창이 돌리던 페이지 끌기는 취소로 답한다(W6d② — 세션의 끝 알림은 닫힌 창에 오지 않을 수 있다).
-        if (self.osr_drag_out) |shown| _ = web_ops.osrDragOutEnd(self, shown.drag, 0, 0, 0);
+        if (self.osr_drag_out) |shown| _ = web_ops.osrDragOutEnd(self, shown.drag, -1, -1, 0);
         self.osr_drag.deinit(self.allocator);
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);

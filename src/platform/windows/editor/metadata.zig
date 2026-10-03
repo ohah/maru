@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const w = std.os.windows;
 const abi = @import("maru").win32_abi;
 const staging = @import("stage.zig");
+const security_snapshot = @import("security.zig");
 
 extern "kernel32" fn ReOpenFile(w.HANDLE, u32, u32, u32) callconv(abi.winapi) w.HANDLE;
 extern "kernel32" fn BackupRead(w.HANDLE, ?[*]u8, u32, *u32, w.BOOL, w.BOOL, *?*anyopaque) callconv(abi.winapi) w.BOOL;
@@ -175,6 +176,47 @@ const Native = struct {
 
 pub fn cloneReadable(source: *const Source, stage: *staging.Stage) Error!Report {
     return cloneFor(source, stage, Native);
+}
+
+/// Complete security coverage requires explicit audit authority. Failure leaves
+/// the original untouched and the stage unpublished; no readable-only fallback.
+pub fn cloneComplete(allocator: std.mem.Allocator, source: *const Source, stage: *staging.Stage) (Error || security_snapshot.Error)!Report {
+    try source.checkStable();
+    var snapshot = try security_snapshot.Snapshot.capture(allocator, source.file);
+    defer snapshot.deinit();
+    var report = try cloneReadable(source, stage);
+    try snapshot.restore(stage.file);
+    try source.checkStable();
+    report.audit_complete = true;
+    return report;
+}
+
+test "Windows safe save complete metadata preserves original when audit authority is unavailable" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original content" });
+    var pinned = try @import("maru").win32_relative_file.open(std.testing.allocator, tmp.dir, "original.txt");
+    defer pinned.deinit(io);
+    var source = try Source.open(pinned.original);
+    defer source.deinit(io);
+    var stage = try staging.create(std.testing.allocator, io, &pinned);
+    defer stage.deinit(io);
+    const report: ?Report = cloneComplete(std.testing.allocator, &source, &stage) catch |err| switch (err) {
+        error.SecurityUnavailable => null,
+        else => return err,
+    };
+    if (report) |complete| {
+        try std.testing.expect(complete.audit_complete);
+        std.debug.print("audit_authority=available\n", .{});
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), (try stage.file.stat(io)).size);
+        std.debug.print("audit_authority=unavailable; original untouched\n", .{});
+    }
+    var bytes: [64]u8 = undefined;
+    const len = try pinned.original.readPositionalAll(io, &bytes, 0);
+    try std.testing.expectEqualStrings("original content", bytes[0..len]);
 }
 
 fn cloneFor(source: *const Source, stage: *staging.Stage, comptime Api: type) Error!Report {

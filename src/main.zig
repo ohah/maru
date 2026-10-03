@@ -51,6 +51,7 @@ test {
     _ = maru.win32_relative_file;
     _ = @import("platform/windows/editor/stage.zig");
     _ = @import("platform/windows/editor/metadata.zig");
+    _ = @import("platform/windows/editor/security.zig");
     _ = scm_surface;
     _ = agent_surface;
 }

@@ -10657,3 +10657,26 @@ run 배열의 공간을 먼저 확보한 뒤 텍스트를 복사한다. 기존 �
 복사본을 잃었다. 24개 run으로 여러 배열 확장을 유발하고 모든 할당 실패 지점을 검사한 테스트가
 수정 전 누수를 재현했으며 수정 후 25개 판정이 통과했다. 누수 재발·폭 계산·화면 위 run 누락·
 family 혼동·빈 icon 누락의 다섯 실행 변이가 실패했고 원본 복구 후 통과했다.
+
+### 2m.133 전체 보안 설명자 복제의 명시적 권한과 검증 (2026-10-03)
+
+`platform/windows/editor/security.zig`는 열린 원본의 전체 보안 설명자를 보관한다.
+Microsoft SECURITY_INFORMATION의 BACKUP_SECURITY_INFORMATION 계약을 따른다:
+owner/group/DACL뿐 아니라 전체 SACL을 조회하려면 READ_CONTROL과 ACCESS_SYSTEM_SECURITY가,
+복원에는 WRITE_DAC·WRITE_OWNER·ACCESS_SYSTEM_SECURITY가 필요하다.
+[공식 보안 정보 계약](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-information)과
+[공식 Native 조회 계약](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwquerysecurityobject)을 근거로 한다.
+NtQuerySecurityObject가 반환한 self-relative 설명자를 RtlValidRelativeSecurityDescriptor로 검사하고,
+DACL·SACL 각각의 protected/unprotected 상태를 명시해 복원한다. 원본을 복원 전후에 다시 조회하고
+임시 파일의 복원 결과도 비교한다. 핸들은 경로를 다시 열지 않는 ReOpenFile로 얻고 모든 실패 때 닫는다.
+
+`metadata.cloneComplete`는 이 snapshot을 readable 복제 전후에 적용한다. 전체 보안 권한이 없으면
+readable-only로 낮추지 않고 실패한다. 프로세스 권한을 자동으로 올리거나 토큰 권한을 변경하지 않는다.
+실제 Windows 검증에서는 audit authority가 없어 거절됐고 원본과 빈 임시 파일이 보존됐다.
+권한을 가진 환경에서 실제 audit SACL 복원이 성공하는 것은 아직 입증하지 못했다.
+권한·상속 보호·원본 변경·복원 비교·할당 정리는 I/O 오류 주입과 실제 Windows 설명자 검증으로 확인했다.
+다섯 실행 변이가 실패했고 복구 후 root-main 22개와 native 경로 29개 판정이 통과했다.
+홀수 크기 선행 할당을 둔 고정 버퍼 테스트가 snapshot 복사의 정렬 누락을 재현했다.
+복사본은 이제 4바이트 정렬로 할당하고 소유 타입에도 정렬을 유지한다. Native 열기·조회에서
+접근 거절/권한 부족만 SecurityUnavailable로 분류하며 그 밖의 실패는 별도 오류로 보존한다.
+이것은 미게시 임시 파일 단계이며 최종 publish/rollback, GUI 저장, 실앱 저장 검증은 남아 있다.

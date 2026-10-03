@@ -1,3 +1,4 @@
+pub const file_tree_backend = @import("app/file_tree_backend.zig");
 /// Shared archive I/O workers; platform hosts consume the same owner types.
 pub const agent_session_archive_backend = @import("app/agent_session_archive_backend.zig");
 pub const agent_session_archive_detail_backend = @import("app/agent_session_archive_detail_backend.zig");

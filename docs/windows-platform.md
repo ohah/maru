@@ -10643,3 +10643,29 @@ The scanner retains Zig 0.17 array initialization. Focused archive tests compile
 Windows runner argument parsing currently bypasses that numeric guard, so actual
 output was inspected explicitly. macOS runtime verification remains separate.
 The standalone quiescence judge and Windows paint regression gate also passed.
+
+### 2m.124 공통 파일 트리 worker의 macOS 경로 결합 해소 (2026-10-03)
+
+사용자가 요청한 폴더 결합 정리로 worker를 `src/app/file_tree_backend.zig`로 옮겼다.
+공통 worker는 OS SSH 구현을 직접 import하지 않고 `RemoteTransport`를 초기화 시 받는다.
+macOS host는 `platform/macos/file_tree_remote.zig`의 기존 전송을 주입하고,
+Windows는 기존 로컬 파일 트리 경로를 같은 `maru.app` 타입으로 소비한다.
+전송 없는 원격 submit은 거절하며 local scan으로 바꾸지 않는다.
+Windows 파일 identity·교체·링크·핸들 수명 판정자는 그대로 실행되고,
+추가 전송 판정자는 실제 worker의 비동기 결과와 path 소유권을 확인한다.
+42개 등록 중 Windows 33 pass·9 skip, 실행 동작을 깨뜨린 변이 5개 모두 검출·복구 통과.
+Git·텍스트 adapter와 safe-save 전체는 완료되지 않았다.
+
+The file-tree-worker rebase preserves main's concurrent-growing-file hash test and
+adds the transport capability tests without dropping either side. The focused
+Windows build compiled 50 cases: 22 worker judges and 28 aggregation blocks, with
+40 passed and 10 platform skips. Remote-tree routing, scan identity, build-graph
+inventory, and Windows paint checks passed. Reusing `maru_mod` removes one dedicated
+module and one maru import pair; the existing main inventories were decremented
+for that removal rather than replaced by the older branch totals.
+
+Subsequent local rebase verification runs all four existing `boundary-shard=i/4`
+partitions concurrently, each with two jobs. An aggregate is successful only when
+all four processes exit zero, all four shard manifests agree on the total, and
+the selected-step counts sum to that total. This changes local orchestration only;
+no boundary registration, test, or default CI execution is removed.

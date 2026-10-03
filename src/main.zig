@@ -9,7 +9,7 @@ const agent_archive_backend = maru.app.agent_session_archive_backend;
 /// **그 안에 지켜야 할 계약이 하나 있다**: 턴 텍스트는 worker 경계를 넘기 전에 민감 내용 가드와
 /// PII 익명화를 지난다(`redactTurns`). 여기서 직접 파일을 읽어 파싱하면 그 계약을 우회한다.
 const agent_detail_backend = maru.app.agent_session_archive_detail_backend;
-const file_tree_backend = @import("platform/macos/file_tree_backend.zig"); // 파일 트리 스캔 — 이름과 달리 모든 호스트에서 돈다(계약 §2m.3)
+const file_tree_backend = maru.app.file_tree_backend; // Shared directory worker; the host supplies native remote transport.
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
 // 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).
 const win32_window = maru.win32_window;
@@ -45,6 +45,8 @@ const agent_surface = if (@import("builtin").os.tag == .windows) @import("platfo
 // (실측: 추가 직후 `zig build test` 출력에 `win32_scm_surface` 가 0 회). 이 저장소가 §2m.18 에서
 // 같은 것을 밟았다.
 test {
+    // Cross-target tests must compile the native adapter as well as the common worker.
+    if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;
     _ = @import("platform/windows/editor/path.zig");
     _ = scm_surface;

@@ -72,7 +72,7 @@
 | W9 | **`maru ssh` Windows 지원** — W2가 미지원 안내로 접어 둔 것을 되살린다. 지금은 `/bin/sh -c <래퍼 스크립트>`를 execve하는데 Windows엔 `/bin/sh`도 `environ`도 없다. **선행 결정**(계약 §3.5a에 없다): 래퍼 스크립트를 ⑴ `ssh.exe` 직접 exec로 대체하고 terminfo bootstrap을 포기할지 ⑵ Git for Windows의 `sh.exe`를 탐지해 쓸지(외부 의존) ⑶ PowerShell로 재작성할지. Windows 내장 OpenSSH **클라이언트**는 있다(§6 실측 — `sshd` 서버는 기본 Stopped) | 미착수 |
 | W10 | **`maru install-cli` Windows 지원** — 마찬가지로 W2가 접어 뒀다. 지금은 `~/.local/bin/maru`에 symlink를 거는데 Windows엔 그 관례가 없고 `symlink` 심볼도 msvcrt에 없다. **선행 결정 3건**: 설치 위치(`%LOCALAPPDATA%\Programs`?), shim 방식·PATH 등록. **셋 다 정했다(§2m.62)** — 위치는 `%LOCALAPPDATA%\maru\bin`(`user_paths` 모듈 doc 이 "Windows 는 그 아래로 모은다" 로 이미 정한 자리), shim 은 `.cmd`(symlink 는 개발자 모드·관리자 권한이 필요하다), PATH 는 **안내만**(레지스트리를 쓰면 되돌리기와 실패 처리가 늘고 사용자가 안 시킨 시스템 상태를 바꾼다) | **완료**(§2m.62) |
 | 후속 | **크롬 색이 테마를 안 탄다**(계약 §2m.33) — 터미널은 타는데 도크·트리·소스 컨트롤은 색 리터럴이다. 원인은 테마 → `chrome.Tokens` 매핑이 macOS `app_session.zig` 안에 갇힌 것(§3.4 의 빚)이고, 뺄 자리는 최상위 잎으로 정해져 있다. ~~**사용자 판단(2026-08-24): 인지된 부채로 둔다**~~ → **갚았다(§2m.40, 2026-08-25).** 투영을 `src/chrome_theme.zig` 로 빼고 Windows 리터럴 여섯을 역할로 바꿨다. **그 뒤에 늘어난 표면들(사이드바 헤더·뷰 바·에이전트 도크)까지 다시 쟀다** — 아홉 자리가 전부 따라온다(§2m.58) | **완료** |
-| 후속 | **`platform/macos/` 에 있는 중립 파일 둘을 `src/app/` 로 옮긴다** — `file_tree_backend.zig`(1360줄)·`git_backend.zig`(3013줄). 네이티브 참조 0 이고 `std`·`builtin`·`maru` 만 import 한다. 나머지 셋(`coretext_frame_builder`·`system_text`·`chrome_draw_lowering`)은 진짜로 섞여 있어 **이동이 아니라 분해**라 범위 밖. 공용 폴더(`src/common/`)는 **안 만든다** — 근거·목적지·시점은 [layering-and-portability.md](../layering-and-portability.md) §3.4. ~~**W8 이 끝난 뒤** 독립 PR~~ → **안 옮긴다(결정 2026-08-25).** W8 이 끝나 실제로 해 보니 **"순수 이동" 이 아니었다** — 묶어 두는 것은 폴더가 아니라 **모듈 그래프**다(배럴은 wasm·모바일의 루트이기도 해서 `git_backend` 의 libc 호출 63 개가 따라 들어가 `check-targets` 가 깨진다). 실측 넷과 근거는 [layering-and-portability.md](../layering-and-portability.md) §3.4 "그런데 순수 이동이 아니었다" | **안 함(문서로 갚음)** |
+| 후속 | **`platform/macos/` 에 있는 중립 파일 둘을 `src/app/` 로 옮긴다** — `file_tree_backend.zig`(1360줄)·`git_backend.zig`(3013줄). 네이티브 참조 0 이고 `std`·`builtin`·`maru` 만 import 한다. 나머지 셋(`coretext_frame_builder`·`system_text`·`chrome_draw_lowering`)은 진짜로 섞여 있어 **이동이 아니라 분해**라 범위 밖. 공용 폴더(`src/common/`)는 **안 만든다** — 근거·목적지·시점은 [layering-and-portability.md](../layering-and-portability.md) §3.4. ~~**W8 이 끝난 뒤** 독립 PR~~ → **안 옮긴다(결정 2026-08-25).** W8 이 끝나 실제로 해 보니 **"순수 이동" 이 아니었다** — 묶어 두는 것은 폴더가 아니라 **모듈 그래프**다(배럴은 wasm·모바일의 루트이기도 해서 `git_backend` 의 libc 호출 63 개가 따라 들어가 `check-targets` 가 깨진다). 실측 넷과 근거는 [layering-and-portability.md](../layering-and-portability.md) §3.4 "그런데 순수 이동이 아니었다" | **재개 — 파일 트리 완료, Git·text 분리 진행** (§3.4.2, 2026-10-03 사용자 요청) |
 | 후속 | **영속 세션 호스트** — named pipe 기반 재설계. 계약 범위 밖 | 미착수 |
 
 ## 검증
@@ -95,5 +95,9 @@
 사용자가 기존 safe-save 계약의 Windows 네이티브 구현과 macOS 경로 결합 정리를 승인했다.
 목록·상세 세션 기록 worker는 `src/app`으로 이동했고 양쪽 host가 `maru.app`으로 소비한다
 ([모듈 연결과 검증](../layering-and-portability.md#341-세션-기록-worker의-실제-공통-계층-이동-2026-10-03)).
-파일 트리·Git backend의 이동 및 native text adapter 분리는 남았다.
+Git backend의 이동 및 native text adapter 분리는 남았다. 파일 트리 분리는 layering-and-portability.md §3.4.2에 기록했다.
 W8.17의 metadata 보존·쓰기·충돌 검사·편집 입력·GUI 저장·외부 변경 감시는 계속 진행 대상이다.
+
+파일 트리 worker도 `src/app/file_tree_backend.zig`로 이동했다. macOS SSH 전송은
+별도 host adapter를 초기화 시 주입한다. 검증과 남은 범위는
+[layering-and-portability.md](../layering-and-portability.md) §3.4.2가 소유한다.

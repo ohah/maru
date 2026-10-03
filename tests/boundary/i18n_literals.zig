@@ -42,7 +42,7 @@ const roots = [_][]const u8{ "src/chrome", "src/session", "src/platform/macos", 
 ///
 /// `src/platform` 전체를 뿌리로 넣지 않는 이유: Windows·wasm 어댑터가 진단·usage 문자열을 한국어로
 /// 들고 있어(실측 170건 이상) 이 게이트의 범위가 통째로 달라진다. 그것은 별도 판단이다.
-const extra_files = [_][]const u8{ "src/platform/cell_text.zig", "src/app/agent_session_archive_backend.zig", "src/app/agent_session_archive_detail_backend.zig" };
+const extra_files = [_][]const u8{ "src/platform/cell_text.zig", "src/app/agent_session_archive_backend.zig", "src/app/agent_session_archive_detail_backend.zig", "src/app/file_tree_backend.zig" };
 
 /// **영어 고정 표면**(계약 §7.1) — CLI 는 스크립트가 파싱하고 이슈에 붙여 넣는 출력이라 언어를 고르지
 /// 않는다. 그래서 여기서는 키가 아니라 **영어 문장**이 정답이고, 한국어 리터럴은 곧 위반이다.

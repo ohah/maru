@@ -79,7 +79,7 @@ pub const coretext_bridge = @import("coretext_smoke_bridge.zig");
 pub const coretext_frame_builder = @import("coretext_frame_builder.zig");
 pub const coretext_shaper = @import("coretext_shaper.zig"); // present §10.7 grid shaping 진단 시계 주입 지점
 const coretext_smoke_bridge = @import("coretext_smoke_bridge.zig"); // present §10.7 native 단계 통계 getter
-pub const file_tree_backend = @import("file_tree_backend.zig");
+pub const file_tree_backend = maru.app.file_tree_backend;
 const detached_worker_wait = maru.app.detached_worker_wait;
 pub const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 pub const agent_session_archive_backend = maru.app.agent_session_archive_backend;
@@ -7994,7 +7994,7 @@ pub const AppSession = struct {
             errdefer self.file_tree.deinit();
             self.remote_explorer = .{ .tree = file_tree.Tree.init(allocator) };
             errdefer self.remote_explorer.deinit(allocator);
-            self.file_tree_backend = try file_tree_backend.Backend.init(allocator, io);
+            self.file_tree_backend = try file_tree_backend.Backend.initWithRemote(allocator, io, @import("file_tree_remote.zig").transport);
             errdefer self.file_tree_backend.deinit();
             self.file_tree_mutation_backend = try file_tree_mutation_backend.Backend.init(allocator, io);
             self.agent_session_archive_backend = try agent_session_archive_backend.Backend.init(allocator, io);

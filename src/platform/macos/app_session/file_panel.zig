@@ -475,7 +475,7 @@ pub fn rebuildFileTreeFromDock(self: *AppSession) !void {
     self.file_tree_backend.deinit();
     self.file_tree.deinit();
     self.file_tree = file_tree.Tree.init(self.allocator);
-    self.file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
+    self.file_tree_backend = try file_tree_backend.Backend.initWithRemote(self.allocator, self.io, @import("../file_tree_remote.zig").transport);
     self.file_tree_rows.clearRetainingCapacity();
     self.file_tree_rows_dirty = true;
     self.file_tree_watch_reset_pending = true;

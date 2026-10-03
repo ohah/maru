@@ -10514,3 +10514,15 @@ WebView2에는 대응물이 없다. UDF는 항상 생기고 지울 수 있을 �
 > 기본값은 PowerShell(§3.1a), 바꾸는 수단은 `shell.windows-shell`(종류)·`shell.command[.windows]`(경로),
 > config의 OS 분기는 **일반 메커니즘**(키 접미)으로 넣었다. 그 셋의 우선순위와 규칙은 §3.1a와
 > [configuration.md](configuration.md) "OS별 값"이 소유한다.
+
+### 2m.124 공통 파일 트리 worker의 macOS 경로 결합 해소 (2026-10-03)
+
+사용자가 요청한 폴더 결합 정리로 worker를 `src/app/file_tree_backend.zig`로 옮겼다.
+공통 worker는 OS SSH 구현을 직접 import하지 않고 `RemoteTransport`를 초기화 시 받는다.
+macOS host는 `platform/macos/file_tree_remote.zig`의 기존 전송을 주입하고,
+Windows는 기존 로컬 파일 트리 경로를 같은 `maru.app` 타입으로 소비한다.
+전송 없는 원격 submit은 거절하며 local scan으로 바꾸지 않는다.
+Windows 파일 identity·교체·링크·핸들 수명 판정자는 그대로 실행되고,
+추가 전송 판정자는 실제 worker의 비동기 결과와 path 소유권을 확인한다.
+42개 등록 중 Windows 33 pass·9 skip, 실행 동작을 깨뜨린 변이 5개 모두 검출·복구 통과.
+Git·텍스트 adapter와 safe-save 전체는 완료되지 않았다.

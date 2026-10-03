@@ -32,7 +32,7 @@ fn fnBody(source: []const u8, name: []const u8) ?[]const u8 {
 
 test "원격 스캔 갈래는 로컬 파일시스템에 닿지 않는다 (§2.4)" {
     const allocator = std.testing.allocator;
-    const backend = try read(allocator, "src/platform/macos/file_tree_backend.zig", 2 * 1024 * 1024);
+    const backend = try read(allocator, "src/app/file_tree_backend.zig", 2 * 1024 * 1024);
     defer allocator.free(backend);
 
     // 원격 갈래 둘의 본문에서 로컬 FS 진입 토큰을 센다. **호출 토큰**이다 — 주석의 낱말이 아니라
@@ -55,7 +55,7 @@ test "원격 스캔 갈래는 로컬 파일시스템에 닿지 않는다 (§2.4)
     }
     // 전송은 정확히 하나의 문으로 나간다.
     const scan = fnBody(backend, "remoteScanDirectory").?;
-    try std.testing.expect(std.mem.indexOf(u8, scan, "runRemoteCapped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scan, "transport.runCapped") != null);
 }
 
 test "원격 submit 의 소비처 재고 — 여는 자리는 정확히 하나다" {
@@ -67,6 +67,22 @@ test "원격 submit 의 소비처 재고 — 여는 자리는 정확히 하나�
     const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
     defer allocator.free(panel);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, panel, ".submitRemoteDirectory("));
+    // Every native host construction must install the existing SSH capability after extraction.
+    for ([_][]const u8{
+        "src/platform/macos/app_session.zig",
+        "src/platform/macos/app_session/file_panel.zig",
+        "src/platform/macos/app_session/workspace.zig",
+    }) |path| {
+        const source = try read(allocator, path, 8 * 1024 * 1024);
+        defer allocator.free(source);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "file_tree_backend.Backend.initWithRemote("));
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "file_tree_backend.Backend.init("));
+        try std.testing.expect(std.mem.indexOf(u8, source, "file_tree_remote.zig\").transport") != null);
+    }
+    const adapter = try read(allocator, "src/platform/macos/file_tree_remote.zig", 64 * 1024);
+    defer allocator.free(adapter);
+    try std.testing.expect(std.mem.indexOf(u8, adapter, ".runCapped = ssh_upload.runRemoteCapped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, adapter, ".list_script = ssh_upload.list_script") != null);
     const still_zero = [_][]const u8{
         "src/platform/macos/file_tree_mutation_backend.zig",
         "src/platform/macos/app_session.zig",

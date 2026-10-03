@@ -4105,18 +4105,14 @@ pub fn build(b: *std.Build) void {
     //
     // 그래서 이 파일만 도는 산출물을 따로 세워 `test` 에 매단다. macOS 에서는 `app_session` 경로와
     // 중복이지만(같은 테스트가 두 번 돈다) 그 비용이 "Windows 갈래가 검증 없이 남는 것" 보다 싸다.
-    // 파일 위치가 `platform/macos/` 인 것은 이제 이름과 안 맞는다 — 옮기는 것은 소비자가 생기는
-    // W8.2 와 함께 볼 일이다.
+    // Both hosts now share the app-layer worker; filter its judges from the facade module.
     const file_tree_backend_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/file_tree_backend.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "maru", .module = maru_mod }},
-        }),
+        .root_module = maru_mod,
+        .filters = &.{"app.file_tree_backend"},
     });
     const run_file_tree_backend_tests = b.addRunArtifact(file_tree_backend_tests);
+    run_file_tree_backend_tests.addArg("--maru-expect-tests=42"); // 21 worker tests + 21 aggregate blocks
+    run_file_tree_backend_tests.setCwd(b.path("."));
     test_step.dependOn(&run_file_tree_backend_tests.step);
     // 원격 매핑(RF2b)처럼 이 파일만 도는 반복 작업이 생겨 이름을 붙였다 — `zig build test` 전체(12 분)를
     // 돌리지 않고 이 축만 잰다.

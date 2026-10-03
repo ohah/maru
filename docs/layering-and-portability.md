@@ -369,5 +369,26 @@ i18n 원장도 실제 새 경로를 가리킨다.
 enqueue 실패 outcome, 민감 턴 redaction을 깨뜨린 다섯 제품 변이가 모두 실패했고
 원본을 복구한 게이트는 통과했다. skip을 Windows 동작 검증으로 계상하지 않는다.
 
-파일 트리·Git backend와 CoreText가 섞인 텍스트/DrawList 구현은 여전히 분리 대상이다.
+Git backend와 CoreText가 섞인 텍스트/DrawList 구현은 여전히 분리 대상이다. 파일 트리의 후속 분리는 §3.4.2에서 완료했다.
 이 두 worker의 이동으로 전체 폴더 결합 해소나 Windows safe-save 완성을 주장하지 않는다.
+
+### 3.4.2 파일 트리 worker와 native SSH 전송 분리 (2026-10-03)
+
+`file_tree_backend.zig`는 `src/app/file_tree_backend.zig`로 이동했다.
+공통 worker는 macOS SSH 모듈을 import하지 않는다. `Backend.init`은 로컬 전용이고,
+`Backend.initWithRemote`가 받는 `RemoteTransport`는 bounded capture 함수와 list script를
+담는다. 전송 capability가 없으면 원격 submit은 경로 소유권을 받지 않고 false를 반환한다.
+macOS의 초기 생성·파일 패널 재초기화·워크스페이스 복원 세 경로는
+`platform/macos/file_tree_remote.zig`의 기존 SSH adapter를 명시적으로 주입한다.
+Windows main과 macOS AppSession·LSP는 동일한 `maru.app.file_tree_backend`를 소비한다.
+
+정지 worker 검사와 scan identity 검사는 공통 app 경로도 훑는다. i18n 검사와 원격 경로가
+로컬 filesystem을 호출하지 않는 검사는 이동한 실제 파일을 계속 읽는다.
+`test-file-tree-backend`는 42개 등록을 강제하며 Windows에서 33개 pass·기존 macOS 전용
+9개 skip이다. 새 판정자는 실제 detached worker에 remote job을 제출해 주입된 전송의
+control socket·목적지·script·단일 path 인자·capture cap과 결과 identity/generation을 확인한다.
+전송 없음·전송 실패의 path 소유권과 local capability가 없는 결과도 검사한다.
+capability 없는 submit을 성공시키기, control socket/목적지 혼동, 잘못된 script,
+capture cap 변경, 전송 실패의 remote 표식 누락 등 다섯 제품 변이가 모두 실행 판정에서 실패했다.
+원본 복구는 통과했다. 이 시험 전송을 Windows의 실물 SSH 지원 완료로 계상하지 않는다.
+Git backend와 native text 분리는 남아 있다.

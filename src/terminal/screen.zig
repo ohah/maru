@@ -1769,18 +1769,24 @@ fn clearTruncatedWideBase(row: []types.Cell) void {
 }
 
 /// reflow 출력 스크래치를 cap_rows×cols 이상으로 키운다(grow-only, 내용 보존 안 함).
+///
+/// 옛 버퍼를 풀자마자 필드를 **빈 슬라이스로 비운다** — 이어지는 할당이 OOM 으로 실패하면 필드에 풀린 슬라이스가
+/// 남아, 다음 resize(여기)나 `deinit` 이 그것을 다시 풀었다(2026-10-03, 할당 실패 주입에서 세그폴트).
 fn ensureReflowScratch(self: *TerminalCore, cap_rows: usize, cols: u16) !void {
     const need_cells = cap_rows * @as(usize, cols);
     if (self.reflow_cells.len < need_cells) {
         if (self.reflow_cells.len > 0) self.allocator.free(self.reflow_cells);
+        self.reflow_cells = &.{};
         self.reflow_cells = try self.allocator.alloc(types.Cell, need_cells);
     }
     if (self.reflow_wrapped.len < cap_rows) {
         if (self.reflow_wrapped.len > 0) self.allocator.free(self.reflow_wrapped);
+        self.reflow_wrapped = &.{};
         self.reflow_wrapped = try self.allocator.alloc(bool, cap_rows);
     }
     if (self.reflow_prompt_marks.len < cap_rows) {
         if (self.reflow_prompt_marks.len > 0) self.allocator.free(self.reflow_prompt_marks);
+        self.reflow_prompt_marks = &.{};
         self.reflow_prompt_marks = try self.allocator.alloc(types.RowPrompt, cap_rows);
     }
 }

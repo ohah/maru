@@ -48,7 +48,7 @@ test {
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;
-    _ = @import("platform/windows/editor/path.zig");
+    _ = maru.win32_relative_file;
     _ = @import("platform/windows/editor/stage.zig");
     _ = @import("platform/windows/editor/metadata.zig");
     _ = scm_surface;

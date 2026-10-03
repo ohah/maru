@@ -2,7 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const w = std.os.windows;
-const pinned_path = @import("path.zig");
+const pinned_path = @import("maru").win32_relative_file;
 
 pub const Error = std.mem.Allocator.Error || error{ UnsupportedPlatform, InvalidName, CreateFailed, NameCollision, RandomFailed };
 

@@ -845,11 +845,19 @@ fn encodeCoreFields(writer: *Writer, core: *const TerminalCore) Error!void {
         // optional 필드는 flag를 실어 보낸다 — **구 reader**가 모르는 tag를 만나도 `UnknownRequiredField`로
         // 죽지 않고 건너뛰게 한다(신 host → 구 host 방향의 rollback 이관).
         const start = try writer.beginTlv(spec.tag, if (spec.optional) flag_optional else 0);
-        const Field = @TypeOf(@field(core.*, spec.name));
-        if (!try encodeTrimmedCoordField(writer, spec.name, core, trim))
-            try encodeValue(writer, Field, &@field(core.*, spec.name));
+        try encodeCoreField(writer, spec.name, core, trim);
         try writer.endTlv(start);
     }
+}
+
+/// 코어 필드 하나의 **실리는 값**을 쓴다. 대부분은 필드 그대로지만 tag 82 는 두 화면의 placement 를 합친 목록이고,
+/// 예산 트림이 있으면 좌표 필드를 옮긴 사본이다. 전수 판정자(`observeNonDefaultCoreFields`)도 이 함수로 본다 —
+/// 필드를 직접 읽으면 alt 중에 primary 의 배치가 보관 목록에 있어 「기본값」으로 잘못 보인다(2026-10-03 실측).
+fn encodeCoreField(writer: *Writer, comptime name: []const u8, core: *const TerminalCore, trim: CoordTrim) Error!void {
+    const Field = @TypeOf(@field(core.*, name));
+    if (comptime std.mem.eql(u8, name, "kitty_placements")) return encodePlacementsMerged(writer, core, trim);
+    if (try encodeTrimmedCoordField(writer, name, core, trim)) return;
+    try encodeValue(writer, Field, &@field(core.*, name));
 }
 
 /// 트림이 버린 앞줄 수 — 활성 화면(`screen.sb`)과 보관 화면(`saved_screen.sb`) 각각.
@@ -875,22 +883,43 @@ fn encodeTrimmedCoordField(writer: *Writer, comptime name: []const u8, core: *co
         try encodeValue(writer, Point, &shifted);
         return true;
     }
-    if (comptime std.mem.eql(u8, name, "kitty_placements")) {
-        // 앵커는 **자기 화면의** 스크롤백 기준이다 — 지금 화면이면 `screen.sb`, 아니면 보관 화면의 것.
-        const List = @TypeOf(core.kitty_placements);
-        var moved: List = .empty;
-        defer moved.deinit(writer.allocator);
-        for (core.kitty_placements.items) |p| {
+    return false;
+}
+
+/// tag 82 는 **두 화면의 placement 를 한 목록으로** 싣는다 — 보관 화면이 먼저, 지금 화면이 뒤(목록을 나누기 전,
+/// alt 중의 한 목록 순서와 같다). 그래서 출력 바이트가 나누기 전과 같고, 구 host 도 그대로 읽는다(골든 바이트로 확인).
+/// 예산 트림이 있으면 앵커를 **자기 화면의** 스크롤백 기준으로 당기고 버린 줄의 것은 뺀다.
+fn encodePlacementsMerged(writer: *Writer, core: *const TerminalCore, trim: CoordTrim) Error!void {
+    const List = @TypeOf(core.kitty_placements);
+    if (core.saved_kitty_placements.items.len == 0 and trim.active == 0 and trim.saved == 0)
+        return encodeValue(writer, List, &core.kitty_placements); // 흔한 경우 — 사본 없이
+    var merged: List = .empty;
+    defer merged.deinit(writer.allocator);
+    for ([_][]const @typeInfo(@TypeOf(core.kitty_placements.items)).pointer.child{ core.saved_kitty_placements.items, core.kitty_placements.items }) |items| {
+        for (items) |p| {
             const dropped = if (p.on_alt == core.alt_active) trim.active else trim.saved;
             if (p.anchor_row < dropped) continue; // 버린 줄 위의 이미지는 함께 버린다
             var copy = p;
             copy.anchor_row -= dropped;
-            try moved.append(writer.allocator, copy);
+            try merged.append(writer.allocator, copy);
         }
-        try encodeValue(writer, List, &moved);
-        return true;
     }
-    return false;
+    return encodeValue(writer, List, &merged);
+}
+
+/// 디코드한 한 목록(tag 82)을 화면별로 나눈다 — `on_alt` 가 지금 화면과 같으면 지금 목록, 다르면 보관 목록.
+/// alt 가 아닌데 alt 의 배치가 있으면 버린다(alt 를 떠날 때 버리는 규칙과 같다 — 예전 형식에서도 생길 수 없는 상태).
+fn splitDecodedPlacements(core: *TerminalCore, allocator: std.mem.Allocator) Error!void {
+    var i: usize = 0;
+    while (i < core.kitty_placements.items.len) {
+        const p = core.kitty_placements.items[i];
+        if (p.on_alt == core.alt_active) {
+            i += 1;
+            continue;
+        }
+        _ = core.kitty_placements.orderedRemove(i);
+        if (core.alt_active) try core.saved_kitty_placements.append(allocator, p);
+    }
 }
 
 fn selectionSurvivesTrim(core: *const TerminalCore, dropped: usize) bool {
@@ -973,6 +1002,9 @@ fn rebuildAndValidate(core: *TerminalCore, allocator: std.mem.Allocator) Error!v
     for (core.kitty_placements.items) |placement| {
         if (!core.kitty_images.map.contains(placement.image_id)) return error.InvalidReference;
     }
+    for (core.saved_kitty_placements.items) |placement| {
+        if (!core.kitty_images.map.contains(placement.image_id)) return error.InvalidReference;
+    }
     core.dirty = maru.terminal.core.fullDirty(core.size);
 }
 
@@ -1050,6 +1082,7 @@ pub fn decodeCore(allocator: std.mem.Allocator, bytes: []const u8) Error!Termina
     }
     try payload_reader.finish();
     if (!saw_core) return error.MissingRequiredField;
+    try splitDecodedPlacements(&core, allocator);
     try rebuildAndValidate(&core, allocator);
     return core;
 }
@@ -1415,6 +1448,37 @@ test "예산 트림은 alt 화면 중에도 primary 이미지를 보관 스크�
     try std.testing.expect(absRowStartsWith(&after, after.kitty_placements.items[0].anchor_row, "line038"));
 }
 
+// placement 는 화면별 목록(지금·보관)으로 나뉘어 있지만 핸드오프는 **한 목록(tag 82)** 으로 싣는다 — 보관 화면이 먼저.
+// 나누기 전 형식 그대로라 구 host 와 바이트가 같다(2026-10-03, main 과 골든 바이트 세 벌이 해시까지 일치). 여기서는
+// 디코드가 다시 화면별로 나누고, 다시 인코딩하면 같은 바이트이며, alt 를 떠나면 primary 배치가 돌아오는지를 고정한다.
+test "핸드오프는 화면별 placement 를 한 목록으로 싣고 디코드에서 다시 나눈다" {
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try trimFixture(&core); // 이미지 i=7
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\"); // primary
+    try core.write("\x1b[2;3H\x1b_Ga=p,i=7,p=2,c=1,r=1,C=1,q=2\x1b\\"); // primary
+    try core.write("\x1b[?1049h\x1b[1;1H\x1b_Ga=p,i=7,p=1,c=1,r=1,C=1,q=2\x1b\\"); // alt — primary 와 같은 키
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 2), core.saved_kitty_placements.items.len);
+
+    const bytes = try encodeCore(allocator, &core);
+    defer allocator.free(bytes);
+    var after = try decodeCore(allocator, bytes);
+    defer after.deinit();
+    try std.testing.expectEqual(@as(usize, 1), after.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 2), after.saved_kitty_placements.items.len);
+    for (after.kitty_placements.items) |p| try std.testing.expect(p.on_alt);
+    for (after.saved_kitty_placements.items) |p| try std.testing.expect(!p.on_alt);
+    const again = try encodeCore(allocator, &after);
+    defer allocator.free(again);
+    try std.testing.expectEqualSlices(u8, bytes, again);
+
+    try after.write("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 2), after.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 0), after.saved_kitty_placements.items.len);
+}
+
 test "budget preview encoder stops at the operational allocation cap" {
     const host: HostView = .{
         .host_id = 1,
@@ -1652,14 +1716,14 @@ fn observeNonDefaultCoreFields(
     candidate: *const TerminalCore,
 ) !void {
     inline for (core_fields_v1, 0..) |spec, index| {
+        const no_trim: CoordTrim = .{ .active = 0, .saved = 0 };
         var baseline_writer: Writer = .{ .allocator = std.testing.allocator };
         defer baseline_writer.deinit();
-        const Field = @TypeOf(@field(baseline.*, spec.name));
-        try encodeValue(&baseline_writer, Field, &@field(baseline.*, spec.name));
+        try encodeCoreField(&baseline_writer, spec.name, baseline, no_trim);
 
         var candidate_writer: Writer = .{ .allocator = std.testing.allocator };
         defer candidate_writer.deinit();
-        try encodeValue(&candidate_writer, Field, &@field(candidate.*, spec.name));
+        try encodeCoreField(&candidate_writer, spec.name, candidate, no_trim);
         coverage[index] = coverage[index] or
             !std.mem.eql(u8, baseline_writer.bytes.items, candidate_writer.bytes.items);
     }

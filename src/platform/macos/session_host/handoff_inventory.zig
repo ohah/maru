@@ -235,6 +235,9 @@ pub const terminal_core_groups = [_]Group{
             "reflow_prompt_marks",
             "notification_generation",
             "cell_metrics_epoch", // 큐에 밀린 셀 픽셀 명령의 낡음 판정용 — 업그레이드는 명령 큐가 비어야 하니 0 부터
+            // 보관 화면의 placement — 값은 `kitty_placements`(tag 82) 한 목록에 함께 실리고(보관 화면이 먼저),
+            // 디코드 끝에서 `on_alt` 로 다시 나눈다. 자기 태그가 없어 형식이 그대로다.
+            "saved_kitty_placements",
         },
         .why = "allocator/debug ownership, dirty/scratch projections, store-derived indexes, and notification admission token are rebuilt; upgrade requires all clients/control queues empty so no old token survives",
     },

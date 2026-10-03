@@ -351,19 +351,17 @@ fn addOrReplacePlacement(self: *TerminalCore, p: StoredPlacement) void {
             return;
         }
     }
-    if (self.kitty_placements.items.len >= core.TerminalCore.max_kitty_placements) return; // 폭주 방어선
+    // 상한은 **두 화면 합계**다(목록을 나누기 전과 같은 한도).
+    if (self.kitty_placements.items.len + self.saved_kitty_placements.items.len >= core.TerminalCore.max_kitty_placements) return; // 폭주 방어선
     self.kitty_placements.append(self.allocator, p) catch {};
 }
 
 /// alt 화면에서 만들어진 placement 를 전부 버린다(`leaveAltScreen` 이 부른다). 이미지는 건드리지
 /// 않는다 — 픽셀은 세션 소유이고 primary 에서 다시 배치될 수 있다.
 pub fn dropAltScreenPlacements(self: *TerminalCore) void {
-    var i: usize = 0;
-    while (i < self.kitty_placements.items.len) {
-        if (self.kitty_placements.items[i].on_alt) {
-            _ = self.kitty_placements.orderedRemove(i);
-        } else i += 1;
-    }
+    // 지금 목록이 alt 의 것이다 — 비우고(용량은 다음 alt 를 위해 남긴다) 보관해 둔 primary 의 목록을 되돌린다.
+    self.kitty_placements.clearRetainingCapacity();
+    std.mem.swap(@TypeOf(self.kitty_placements), &self.kitty_placements, &self.saved_kitty_placements);
     // U=1 격자도 같다 — alt 의 등록은 alt 와 함께 죽는다. 안 그러면 다시 alt 에 들어갔을 때
     // 이전 TUI 의 격자가 새 TUI 에 적용된다.
     var v: usize = 0;
@@ -449,20 +447,26 @@ fn dropAnimationFrames(self: *TerminalCore, img: *KittyImage) void {
 /// 특정 image_id의 placement를 모두 제거한다(delete 시 이미지와 함께). 순서를 보존해(orderedRemove)
 /// 노출 순서를 결정적으로 둔다 — placement 수는 작아 비용이 무시할 만하다.
 fn removePlacementsForImage(self: *TerminalCore, image_id: u32) void {
-    var i: usize = 0;
-    while (i < self.kitty_placements.items.len) {
-        if (self.kitty_placements.items[i].image_id == image_id) {
-            _ = self.kitty_placements.orderedRemove(i);
-        } else i += 1;
+    // **두 화면 모두** — 이미지는 화면이 아니라 세션에 속한다(id 로 겨누는 delete 의 대상).
+    for ([_]*std.ArrayListUnmanaged(StoredPlacement){ &self.saved_kitty_placements, &self.kitty_placements }) |list| {
+        var i: usize = 0;
+        while (i < list.items.len) {
+            if (list.items[i].image_id == image_id) {
+                _ = list.orderedRemove(i);
+            } else i += 1;
+        }
     }
 }
 
 /// (image_id, placement_id) 한 placement만 제거한다(delete d=i + p 지정).
 fn removeOnePlacement(self: *TerminalCore, image_id: u32, placement_id: u32) void {
-    for (self.kitty_placements.items, 0..) |p, i| {
-        if (p.image_id == image_id and p.placement_id == placement_id) {
-            _ = self.kitty_placements.orderedRemove(i);
-            return;
+    // 두 화면을 **예전 한 목록의 순서**(보관 화면이 먼저 — alt 중 primary 의 배치가 앞에 있었다)로 본다.
+    for ([_]*std.ArrayListUnmanaged(StoredPlacement){ &self.saved_kitty_placements, &self.kitty_placements }) |list| {
+        for (list.items, 0..) |p, i| {
+            if (p.image_id == image_id and p.placement_id == placement_id) {
+                _ = list.orderedRemove(i);
+                return;
+            }
         }
     }
 }
@@ -603,6 +607,9 @@ pub fn shiftPlacementsForEviction(self: *TerminalCore, n: usize) void {
 /// 이미지에 살아있는 placement가 있는지(evict 우선순위 판정용).
 pub fn kittyImageHasPlacement(self: *const TerminalCore, image_id: u32) bool {
     for (self.kitty_placements.items) |p| {
+        if (p.image_id == image_id) return true;
+    }
+    for (self.saved_kitty_placements.items) |p| { // 보관 화면의 배치도 이미지를 쓴다
         if (p.image_id == image_id) return true;
     }
     return false;
@@ -1144,13 +1151,16 @@ fn removeOrphanedRelatives(self: *TerminalCore) void {
     var changed = true;
     while (changed) {
         changed = false;
-        var i: usize = 0;
-        while (i < self.kitty_placements.items.len) {
-            const p = self.kitty_placements.items[i];
-            if (p.parent_image_id != 0 and findParentPlacement(self, p.parent_image_id, p.parent_placement_id) == null) {
-                _ = self.kitty_placements.orderedRemove(i);
-                changed = true;
-            } else i += 1;
+        // 두 화면 모두 — 부모 찾기(`findParentPlacement`)가 두 화면을 보므로 거두는 쪽도 같아야 한다.
+        for ([_]*std.ArrayListUnmanaged(StoredPlacement){ &self.saved_kitty_placements, &self.kitty_placements }) |list| {
+            var i: usize = 0;
+            while (i < list.items.len) {
+                const p = list.items[i];
+                if (p.parent_image_id != 0 and findParentPlacement(self, p.parent_image_id, p.parent_placement_id) == null) {
+                    _ = list.orderedRemove(i);
+                    changed = true;
+                } else i += 1;
+            }
         }
     }
 }
@@ -1241,6 +1251,9 @@ fn freeImageIfUnreferenced(self: *TerminalCore, image_id: u32) void {
     for (self.kitty_placements.items) |p| {
         if (p.image_id == image_id) return; // 다른 자리가 아직 쓴다 — 데이터는 남긴다
     }
+    for (self.saved_kitty_placements.items) |p| {
+        if (p.image_id == image_id) return; // 보관 화면의 자리도 참조다
+    }
     for (self.kitty_virtual_placements.items) |v| {
         if (v.image_id == image_id) return; // U=1 격자도 참조다
     }
@@ -1294,6 +1307,10 @@ fn deleteAtCursor(self: *TerminalCore, free_image: bool) void {
 const ParentKind = union(enum) { normal: StoredPlacement, virtual_parent };
 
 fn findParentPlacement(self: *TerminalCore, image_id: u32, placement_id: u32) ?ParentKind {
+    // 두 화면을 **예전 한 목록의 순서**로 본다(보관 화면이 먼저). 화면을 가리지 않는 것은 나누기 전과 같다.
+    for (self.saved_kitty_placements.items) |p| {
+        if (p.image_id == image_id and p.placement_id == placement_id) return .{ .normal = p };
+    }
     for (self.kitty_placements.items) |p| {
         if (p.image_id == image_id and p.placement_id == placement_id) return .{ .normal = p };
     }

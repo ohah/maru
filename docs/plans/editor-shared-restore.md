@@ -1,6 +1,6 @@
 # 공유 편집기 복원 포맷 — 검토안
 
-상태: v2 방향 선택, 상세 설계 검토 완료·codec 미착수. 2026-10-03 사용자는 문서/뷰를 분리하는 v2 설계 진행에 동의했다.
+상태: 문서/뷰 분리 방향 선택, 상세 설계 검토 중·codec 미착수. 2026-10-03 사용자는 문서/뷰를 분리하는 v2 설계 진행에 동의했다.
 v2 방향은 선택됐지만 이 문서의 wire 예시는 구현 완료를 뜻하지 않는다. 사용자용 분할 명령은 복원 gate까지 닫은 뒤 공개한다.
 진행 순서는 [공유 문서 계획](editor-shared-document.md), 기존 백업 계약은
 [문서 모델](../native-editor-document-model.md)과 [workspace 복원](../workspace-restore.md)이 소유한다.
@@ -11,9 +11,11 @@ v2 방향은 선택됐지만 이 문서의 wire 예시는 구현 완료를 뜻�
 - `tab.zig.captureWorkspaceTab`는 entry 없는 일반 로컬 편집기를 저장하지 않는다. 따라서 이 내부 경로를 명령에 연결하면 재시작 때 새 pane의 파일이 사라질 수 있다.
 - 현재 `workspace.FileTerm`은 위치·kind·mode·경로만 담는다. 같은 경로가 두 번 등장해도 명시적으로 공유한 뷰인지 독립 문서인지 알 수 없다.
 - `workspace.serializeWindow`는 창별 블록을 만들고 host가 `maru.workspace.v1` 헤더 아래 합친다. 앱 전체 document table을 추가하면 이 창별 캡처 경계도 바꿔야 한다.
-- 백업은 `editor/backup.zig.identity`의 기존 로컬 path/base hash·untitled 번호·원격 dest/path로 식별한다. registry의 실행 중 handle/generation은 재시작 identity가 아니다.
+- 백업은 `editor/backup.zig.identity`로 조회하며 파일 이름은 로컬 path·untitled 번호·원격 dest/path에 대응한다. 로컬 base hash는 record payload의 충돌 판정 값이다. registry의 실행 중 handle/generation은 재시작 identity가 아니다.
 
-## 선택지
+## 초기 선택지 비교 — 하위 호환 검토 이력
+
+현재 범위는 아래 출시 전 단일 포맷 절을 따른다. 이 비교의 downgrade 논의는 초기 검토 이력이며 현재 구현 요구가 아니다.
 
 | 방법 | 장점 | 문제 | 판단 |
 |---|---|---|---|
@@ -74,7 +76,7 @@ pane ... file-term="0:text:source-edit:12:/tmp/doc.zig" editor-link="0:1" editor
 5. 준비 OOM·파일 접근 실패·부분 모델 실패에서는 기존 live 모델과 backup을 보존한다. 기존 restore accounting과 checkpoint 덮어쓰기 방지 latch를 따른다.
 
 추가 뷰를 복원하지 못했다고 정본 내용을 버리거나 백업을 삭제하지 않는다.
-부분 손상에서 한 뷰만 살릴지 창 블록을 거절할지는 기존 `BadLine`·restore admission 정책과 구현 전에 대조한다.
+구조 손상은 아래 최신 설계의 전체 parse 거절/원본 보존 경계를 따른다. 뷰 표시 저하와 구조 손상을 구분한다.
 창 간 공유 문서를 묵시적으로 복원하지 않는다. 창 이동 지원 때 창별 캡처/복원 순서와 app-global owner 게시를 별도 검증한다.
 
 ## 닫기·저장·다른 창 이동
@@ -195,7 +197,7 @@ publication 성공 뒤 소비 시점 역시 기존 recovery 수명 계약과 대
 4. 재시작과 제품 화면: dirty 두 pane, 독립 선택/스크롤/접힘, 마지막 뷰 닫기, IME 확정 후 재시작을 검증한다.
    이 gate를 통과한 뒤 사용자용 분할 action/chord를 연결한다.
 
-현재 완료는 위 설계의 구체화다. codec·host 연결·실제 재시작·GUI gate는 미착수다.
+현재 작업은 설계 구체화이며 공개 전 판정 항목이 남아 있다. codec·host 연결·실제 재시작·GUI gate는 미착수다.
 
 ## 설계 반례 검토 — 2026-10-03
 
@@ -252,3 +254,34 @@ publication 성공 뒤 소비 시점 역시 기존 recovery 수명 계약과 대
 각 회는 현재 코드의 호출·값 의미를 새 설계에 대입한 반례 검토다.
 새 codec은 아직 없으므로 위 반례를 새 reader/writer가 실제로 거절했다는 뜻은 아니다.
 기존 집중 gate 재실행은 현재 분할·백업 동작의 회귀 확인에만 사용한다.
+
+## 추가 적대적 검증 10회 — 저장 모델과 제품 복원 계약
+
+각 회에서 아래 반례를 현재 코드와 대조했다. 소스의 기존 방어는 유지하고 새 codec의 요구와
+미결 정책을 구분한다. 새 codec이 없으므로 문서상 요구를 실행 통과로 세지 않는다.
+
+| 회차 | 반례와 소스 근거 | 판정/완료 조건 |
+|---|---|---|
+| R1 | 두 창에서 document index=0이 각각 다른 문서를 가리킴. `workspace.Window` 캡처는 창별이다 | index 조회 map은 창 staging에 귀속시킨다. 다른 창 map을 재사용하거나 같은 번호를 공유 lease로 합치지 않는다. 동일 앱 registry owner와 persisted index namespace는 별개다 |
+| R2 | 문서 표 번호가 포인터 주소/hash-map 순회에 따라 달라져 동일 모델의 출력이 매번 바뀜. 기존 workspace writer는 결정론적 순회로 출력한다 | window→tab→pane→Term의 기존 캡처 순서에서 첫 lease 방문 순서로 번호를 발급한다. 주소를 저장/정렬 기준으로 쓰지 않는다. 같은 모델 재캡처의 동일 bytes 양성 대조를 둔다 |
+| R3 | 역선택·단어 선택·다중 커서를 start/end만으로 복원해 caret 방향과 primary를 잃음. `editor.selection.Selection`은 anchor_start/anchor_end/focus와 kind를 갖는다 | persisted selection 의미를 방향 있는 anchor/focus로 정의한다. primary 위치와 extras를 보존하며 anchor 종류/범위를 대조한다. 범위 clamp·UTF-8 및 현재 caret 정산·중복 selection 정리는 기존 편집 규칙에 위임한다. goal 같은 표시 의존 값은 재계산 여부를 codec에서 명시한다 |
+| R4 | 숫자로 선언한 길이·개수가 실제 payload를 넘거나 합산/곱셈에서 넘침. workspace의 길이 접두와 동적 배열은 그 자체로 안전성 증명이 아니다 | 새 decoder는 남은 payload 길이와 count/element 예산을 할당 전에 확인한다. 덧셈/곱셈은 checked 산술 또는 남은 길이 기반 비교로 검증한다. 잘린 escape·다국어 byte 길이·가장 큰 숫자·빈/정상 레코드를 Debug/ReleaseFast 양쪽에서 판정한다 |
+| R5 | dirty 백업을 정본으로 복원한 뒤 현재 disk 지문을 저장 기준으로 덮어 외부 변경을 무조건 저장함. `backup.restoreFromRecord`는 record의 disk_hash를 적용한다 | 공유 정본 한 번 복원에서도 기존 CAS 기준을 유지한다. disk base 지문/clean saved_hash/현재 본문 지문을 섞지 않는다. dirty는 저장 기준과 실제 내용으로 판정하며 문서 descriptor의 dirty=true만으로 본문 존재를 간주하지 않는다 |
+| R6 | 원본 파일이 삭제된 shared 문서의 두 뷰를 열 수 없음. 기존 `backup.reviveAsUntitled`는 신원을 잃은 내용을 한 이름 없는 문서로 되살린다 | 현재 local-only 공유 gate와 이름 없는 복구가 충돌한다. 창 복원 거절 뒤 backup 보존만 할지, 하나의 recovery 문서를 별도로 열지, untitled 공유까지 확장할지는 **미결**이다. 기존 helper를 뷰마다 불러 같은 내용을 중복 복구하지 않는다 |
+| R7 | Save As/rename 중 새 경로 checkpoint와 이전 경로 backup이 섞임. `backup.markClean`은 previous_identity를 받아 정산하며 공유 문서 계획은 저장 요청 신원을 구분한다 | 캡처는 한 정본의 확정된 현재 path를 모든 뷰에 사용한다. 저장 요청 진행 상태를 workspace에서 재개하지 않는다. 새 경로·옛 backup·저장 중 추가 입력의 결합은 source/target 실패 지점별 후속 gate이며 경로만 바꿔 성공으로 세지 않는다 |
+| R8 | pane에 같은 path의 뷰 둘을 복원할 때 기존 `validatePaneFileTerms`의 path 중복 금지를 그대로 적용하거나 mode를 아무 종류에나 허용함 | editor view의 유일성은 Term 위치와 명시적 문서 참조로 판정하고 기존 file preview 계약과 분리한다. 같은 문서의 서로 다른 뷰를 path 중복으로 거절하지 않는다. mode/kind는 기존 `Mode.allowedFor` 의미와 대조하며 지원하지 않는 editor 역할을 공유 정본에 붙이지 않는다 |
+| R9 | 표시가 아직 sentinel 1×1 크기일 때 first_piece를 clamp해 실제 창에서 원래 스크롤 위치를 잃음. `createEditorTerm`은 1×1 surface이고 workspace 적용 후 layout resize가 이어진다 | 논리 스크롤 앵커를 staging에서 보관하고 실제 pane geometry/유효 wrap이 준비된 뒤 표시 매핑으로 정산한다. pixel 위치나 화면 행 번호만 영속하지 않는다. 배경 pane·다른 scale/폭·접힘 provider 변경에서 첫 제품 frame을 검사한다 |
+| R10 | atomic rename 성공을 정전에도 최신 내용이 보존되는 보장으로 설명함. `workspace_checkpoint_file.zig`는 sync syscall을 하지 않고 전원 손실 durability를 명시적으로 주장하지 않는다 | 기존 보장 범위를 유지한다. 프로세스 crash 전후 complete-file publication과 전원 손실 durability를 구분한다. 별도 backup의 성공 여부도 checkpoint commit으로 대신하지 않는다. SIGKILL gate와 전원 손실 미검증을 별도로 표기한다 |
+
+### 남은 정책과 실행 gate의 단일 목록
+
+- **정책 미결:** 같은 path 독립 dirty 문서의 recovery 식별, missing-file shared 복구 방식,
+  큰 선택/접힘 상태의 저장 저하 정책, 성공 후 consumed backup의 보존 수명.
+- **구현 요구:** backup 읽기 결과 분류, editor codec의 정확한 선택/좌표 wire,
+  전체 count/참조/occupancy/overflow 검증, 표시가 준비된 뒤 view state 적용,
+  로컬 공유 admission과 owned capture 경계 유지.
+- **실행 미검증:** 새 codec의 정상/손상/OOM/mutation, 저장 진행 중 경로 변경,
+  새 공유 복원 staging의 모든 실패, 소비 직후 crash, 실제 재시작/IME/두 pane 화면.
+
+이 목록이 있으므로 현재 상태를 ‘누락 없이 확정된 설계’라고 부르지 않는다.
+검토 누적 횟수와 기존 집중 gate 통과는 위 정책 선택이나 새 실행 gate를 대신하지 않는다.

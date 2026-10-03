@@ -2217,6 +2217,13 @@ test "context menus wait for a window, are answered exactly once, and a menu nob
     apply(gpa, .{ .context_menu_closed = .{ .browser = 7, .menu = 9 } }, 0);
     try std.testing.expect(takeContextMenu(7) == null);
     try std.testing.expectEqual(@as(usize, 4), sentFrames(&frames));
+    // 아직 안 띄운 메뉴는 열려 있지 않고 답도 가지 않는다 — sidecar 를 다시 띄운 뒤 같은 번호가 오면 옛 NSMenu 를 거둬야 한다.
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 10, .point = .{ .x = 1, .y = 2 }, .flags = .{} } }, 0);
+    try std.testing.expect(!contextMenuOpen(7, 10));
+    answerContextMenu(gpa, 7, 10, .reload);
+    try std.testing.expectEqual(@as(usize, 4), sentFrames(&frames));
+    _ = takeContextMenu(7).?;
+    try std.testing.expect(contextMenuOpen(7, 10));
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

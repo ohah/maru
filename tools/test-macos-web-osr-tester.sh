@@ -165,7 +165,8 @@ run_app() { # $1=대본 $2=실행 ms, 나머지는 추가 환경(NAME=값)
     printf 'browser.engine = chromium\n' > "$root/config"
     set -- HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" MARU_CONFIG="$root/config" \
         MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port${page_path:-/tester}" \
-        MARU_MACOS_APP_SMOKE_MS="$ms" MARU_WEB_OSR_TEST_INPUT="$script" MARU_WEB_OSR_TEST_REPORT="$root/report" "$@"
+        MARU_MACOS_APP_SMOKE_MS="$ms" MARU_WEB_OSR_TEST_INPUT="$script" MARU_WEB_OSR_TEST_REPORT="$root/report" \
+        MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel "$@"
     if [ "$live" = 1 ]; then
         # 셸에서 띄운 실행 파일은 맨 앞 앱이 되지 못한다 — LaunchServices 로 번들을 띄운다(CR6d 와 같은 길). 앱 pid 는 번들
         # 실행 파일 경로로 찾아 cleanup 이 죽인다(`open` 의 argv 에는 앱 pid 가 없다).

@@ -1139,7 +1139,7 @@ pub fn osrContextMenuTake(self: *AppSession) ?*const OsrContextMenu {
             .menu = taken.menu,
             .x_px = at.x,
             .y_px = at.y,
-            .items = maru.session.web_osr_context_menu.build(taken.flags),
+            .items = maru.session.web_osr_context_menu.build(taken.flags, maru.session.web_osr_context_menu.hasVisibleText(web_osr.contextMenuSelection(layout.surface_id, taken.menu))),
         };
         return &self.osr_context_menu.?;
     }
@@ -1172,7 +1172,7 @@ pub fn osrContextMenuSelection(self: *AppSession, menu: u32) []const u8 {
 pub fn osrContextMenuAnswer(self: *AppSession, menu: u32, command: ws.message.ContextMenuCommandKind, x_px: f64, y_px: f64, pressed: u32, activate: bool) bool {
     const m = (osrContextMenuShown(self, menu) orelse return false).*;
     self.osr_context_menu = null;
-    web_osr.answerContextMenu(self.allocator, m.surface, m.menu, command);
+    // 떼기를 먼저 보낸다 — 명령(모두 선택 등) 뒤에 온 왼쪽 떼기가 페이지의 선택을 바꾸지 않게(W6c② 적대 검증 2 차).
     for ([_]struct { bit: u32, xterm: i32, button: osr_input.MouseButton }{
         .{ .bit = 2, .xterm = 2, .button = .right },
         .{ .bit = 1, .xterm = 0, .button = .left },
@@ -1182,6 +1182,7 @@ pub fn osrContextMenuAnswer(self: *AppSession, menu: u32, command: ws.message.Co
         const g = self.pointer_gesture_owner.web_osr;
         if (g.surface_id == m.surface and g.held.has(b.button) and pressed & b.bit == 0) _ = osrGesture(self, 3, x_px, y_px, 0, b.xterm);
     }
+    web_osr.answerContextMenu(self.allocator, m.surface, m.menu, command);
     if (activate and self.activateSurfaceById(m.surface)) {
         self.focusWorkspaceInput();
         syncOsrKeyTarget(self);

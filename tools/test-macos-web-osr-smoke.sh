@@ -71,7 +71,7 @@ MENU = ("<!doctype html><title>menu</title><style>html,body{margin:0;height:100%
     "#p{position:fixed;left:50%;top:35%;font:60px sans-serif;margin:0}"
     "#n{position:fixed;left:50%;top:60%;width:50%;height:40%;background:#0000ff}</style><body>"
     "<a id=l href='/cm-target'>link</a><input id=i value='abc'><p id=p>hello world</p><div id=n></div><script>"
-    "function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}ping('e=load');"
+    "function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}ping('e=load&nt='+performance.getEntriesByType('navigation')[0].type);"
     "document.getElementById('i').addEventListener('input',function(e){ping('e=input&v='+encodeURIComponent(e.target.value))});"
     "addEventListener('mouseup',function(e){if(e.button==2)ping('e=up&b=2')});"
     "document.getElementById('n').addEventListener('contextmenu',function(){setTimeout(function(){location='/cm-app?2'},500)});"
@@ -682,14 +682,14 @@ mark secondwindow
 view down 0.79 0.30 0 0 1
 view up 0.79 0.30 0 0 1
 sleep 900
-menu
+ctxmenu
 menupick 새로고침
 sleep 1500
 mark twowindows
 view down 0.79 0.797 0 0 1
 view up 0.79 0.797 0 0 1
 sleep 2000
-menu
+ctxmenu
 SCRIPT
 : > "$root/requests.log"
 run_app /cm-app 31000 "$root/menu.summary" MARU_WEB_OSR_TEST_INPUT="$root/menu.txt" MARU_WEB_OSR_TEST_CONTEXT_MENU=1 MARU_CONFIG="$root/menu.conf"
@@ -723,7 +723,8 @@ cursor = [l for l in report if l.startswith('osr-test cursor')]
 check(len(cursor) == 1 and cursor[0] == 'osr-test cursor hand', f'after a menu that ate the right-button release, hover works again — the link shows the hand cursor ({cursor})')
 held_ups = [l for l in requests if l.startswith('/ev?e=up&b=2') and marks.get('held', 0) < t_of(l) < marks.get('hovered', 0)]
 check(len(held_ups) == 1, f'the release the held menu ate reached the page once, before the real release (sent by maru) — {len(held_ups)}')
-two = [l for l in requests if l.startswith('/ev?e=load') and marks.get('secondwindow', 0) < t_of(l) < marks.get('twowindows', 0)]
+# 다시 불러오기만 센다(새 창이 같은 시험 페이지를 처음 불러오는 것은 navigate — 시각으로 가르면 그것이 늦게 오면 흔들렸다).
+two = [l for l in requests if l.startswith('/ev?e=load&nt=reload') and marks.get('secondwindow', 0) < t_of(l) < marks.get('twowindows', 0)]
 check('osr-test menu items=뒤로(off)|앞으로(off)|새로고침' in report and len(two) == 1,
       f'with a second window open, the menu stays open for its own window and its pick runs (another window tick must not close it) — reloads {len(two)}')
 check(report.count('osr-test menu closed-by-page') == 1 and report[-1] == 'osr-test menu none', f'only the menu open while the page navigates is closed, and nothing stays open ({report[-2:]})')

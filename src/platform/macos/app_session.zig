@@ -16942,13 +16942,24 @@ pub const AppSession = struct {
 
         ssh_upload.stopAgentEvents(st);
         host.install = null;
-        host.install_done = true;
 
         if (!eof) {
-            host.stopped = true;
             host.install_out.clearAndFree(self.allocator);
+            // **두 실패를 가른다**(§RA5-b). 출력이 상한을 넘은 것은 그 원격이 이상하게 구는 것이라 굳힌다. 시한만 넘긴
+            // 것은 멎은 링크일 수 있다 — 「지금만」 이라 백오프로 다시 띄운다(`drainRemoteAgentHost` 의 `install == null`
+            // 갈래). `ForceCommand` 처럼 영원히 안 닫는 서버는 재시도 예산이 다하면 `scheduleStreamerRetry` 가 굳히고
+            // 사용자에게 말한다. 예전엔 둘 다 굳혀서 링크 한 번 멎으면 그 목적지의 Term 이 전부 사라질 때까지 죽었다.
+            if (!overflow) {
+                host.install_started_ms = 0; // 다시 띄운 설치의 시한은 그때부터 잰다
+                // 사유 문자열은 로그(`warn`) 전용이다 — 화면엔 안 나간다(옆 자리 사유들과 같다, i18n §7 원장 +1).
+                self.scheduleStreamerRetry(dest, host, "원격 훅 설치가 시한 안에 안 끝났다");
+                return;
+            }
+            host.install_done = true;
+            host.stopped = true;
             return;
         }
+        host.install_done = true;
         switch (maru.cli.agent_hooks.parseOutcome(host.install_out.items)) {
             .ok => |o| {
                 if (o.changed)
@@ -25460,12 +25471,80 @@ test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 �
     remote_agent_ops.drainRemoteAgentHost(&session, dest, host, ah.install_deadline_ms - 1);
     try std.testing.expect(!host.install_done);
 
-    // 시한을 넘기면 **끝낸다**: 자식을 놓고, 축을 안 열고, 다시 안 두드린다.
+    // 시한을 넘기면 **끝낸다**: 자식을 놓고, 축을 안 연다. 다만 **굳히지 않는다** — 멎은 링크는 「지금만」 이라
+    // 백오프로 설치를 다시 띄울 예약을 건다(§RA5-b 「두 실패를 가른다」).
     remote_agent_ops.drainRemoteAgentHost(&session, dest, host, ah.install_deadline_ms + 1);
-    try std.testing.expect(host.install_done);
     try std.testing.expect(host.install == null); // 자식을 거뒀다
-    try std.testing.expect(host.stopped); // 축을 안 연다
+    try std.testing.expect(!host.install_done); // 설치를 다시 띄울 갈래(`install == null`)에 남는다
+    try std.testing.expect(!host.stopped);
+    try std.testing.expect(host.retry_at_ms != 0); // 예약이 섰다
+    try std.testing.expectEqual(@as(u8, 1), host.retries);
+    try std.testing.expectEqual(@as(u64, 0), host.install_started_ms); // 다음 설치의 시한은 새로 잰다
     try std.testing.expect(!host.stream_started); // 스트리머를 안 띄운다
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+
+    // 예약 시각 전에는 아무것도 안 띄운다(폭주 가드) — 예약은 실제 시계라 이 가짜 시각보다 늘 뒤다.
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, ah.install_deadline_ms + 2);
+    try std.testing.expect(host.install == null);
+    try std.testing.expect(!host.stopped);
+
+    // 영원히 안 닫는 서버(`ForceCommand`)는 재시도 예산이 다하면 굳는다 — 마지막 시도도 시한을 넘긴 경우.
+    var fds2: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds2));
+    defer _ = std.c.close(fds2[1]);
+    const fl2 = std.c.fcntl(fds2[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds2[0], std.c.F.SETFL, fl2 | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    host.install = .{ .pid = 0, .out_fd = fds2[0] };
+    host.retries = AppSession.RemoteAgentHost.retry_max;
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 10);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 10 + ah.install_deadline_ms + 1);
+    try std.testing.expect(host.install == null);
+    try std.testing.expect(host.stopped);
+    try std.testing.expect(!host.stream_started);
+
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
+}
+
+test "설치 출력이 상한을 넘는 원격은 굳힌다 — 시한과 달리 「지금만」 이 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    const ah = maru.cli.agent_hooks;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dest = "chatty-box";
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[1]);
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .install = .{ .pid = 0, .out_fd = fds[0] } });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+    // 상한만큼 이미 받았다 — 다음 훑기에서 넘친다(파이프는 안 닫혔고 시한도 안 지났다).
+    try host.install_out.appendNTimes(a, 'x', ah.install_output_max);
+
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 1);
+    try std.testing.expect(host.install == null);
+    try std.testing.expect(host.install_done);
+    try std.testing.expect(host.stopped);
+    try std.testing.expectEqual(@as(u64, 0), host.retry_at_ms); // 다시 띄울 예약을 안 건다
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 
     remote_agent_ops.closeRemoteAgentHost(&session, dest);

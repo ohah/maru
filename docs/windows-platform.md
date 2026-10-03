@@ -10548,3 +10548,24 @@ ACL/owner·부가 stream·속성의 실제 보존, 원본 충돌 검사와 publi
 충돌 파일을 OPEN_IF로 열기·DELETE_ON_CLOSE 제거·잘못된 본문 길이·sync 생략·metadata 권한
 누락의 다섯 제품 변이가 모두 실행 판정에서 실패했고 정확한 원본 bytes 복구 후 통과했다.
 여전히 GUI save는 연결되지 않았고 Windows 편집기를 저장 가능하다고 표시하지 않는다.
+
+
+### 2m.126 Windows safe-save의 읽을 수 있는 메타데이터 복사 (2026-10-03)
+
+`platform/windows/editor/metadata.zig`는 미공개 staging 파일에 owner·group·DACL,
+EA와 부가 stream을 복사한다. [Microsoft BackupRead](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-backupread)와
+[BackupWrite](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-backupwrite)의
+동기 handle·security 처리·context abort 계약을 따른다. ReOpenFile은 원본 handle의
+객체를 다시 열고 데이터 쓰기와 삭제 공유를 차단한다. 속성 변경 권한은 이 공유 차단과
+별개이므로 복사 전후 ChangeTime·LastWriteTime·속성·크기·link 수를 확인한다.
+
+실제 Windows 파일에서 보호된 DACL·owner/group SID·EA 값·생성 시각·숨김 속성과
+두 부가 stream을 비교한다. 128KiB를 넘는 stream은 64KiB 버퍼 경계를 넘겨 검증한다.
+복원 도중 두 번째 native write를 실패시키는 판정자는 두 backup context의 abort,
+원본 보존과 미공개 파일 정리를 확인한다. namespace record와 경로를 포함한 stream 이름은 거절한다.
+
+**전체 메타데이터 보존이나 저장 완료를 뜻하지 않는다.** audit SACL은
+ACCESS_SYSTEM_SECURITY가 없으면 backup API가 생략한다. 결과의 `audit_complete`는 false이며
+publish 허가로 사용할 수 없다. 압축·희소·암호화·읽기 전용 파일과 미지원 stream은
+별도 구현이 필요해 현재 복사를 거절한다. 최종 CAS·교체·rollback·GUI 저장 연결과
+실앱 편집→저장→재열기 검증은 남아 있다.

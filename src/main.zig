@@ -50,6 +50,7 @@ test {
     _ = editor_document;
     _ = @import("platform/windows/editor/path.zig");
     _ = @import("platform/windows/editor/stage.zig");
+    _ = @import("platform/windows/editor/metadata.zig");
     _ = scm_surface;
     _ = agent_surface;
 }

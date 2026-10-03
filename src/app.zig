@@ -1,3 +1,4 @@
+pub const chrome_draw_lowering = @import("app/chrome_draw_lowering.zig");
 pub const chrome_text_request = @import("app/chrome_text_request.zig");
 pub const turn_index_cache = @import("app/turn_index_cache.zig");
 pub const file_tree_backend = @import("app/file_tree_backend.zig");

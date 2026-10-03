@@ -86,13 +86,13 @@ pub const agent_session_archive_backend = maru.app.agent_session_archive_backend
 pub const agent_session_archive_detail_backend = maru.app.agent_session_archive_detail_backend;
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
-pub const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
+pub const chrome_draw_lowering = maru.app.chrome_draw_lowering;
 pub const chrome_system_text = @import("chrome/system_text.zig");
 test {
     // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
     _ = @import("chrome/lab.zig");
-    _ = @import("chrome/chrome_draw_lowering.zig");
+    _ = maru.app.chrome_draw_lowering;
     _ = @import("app_session/turn_store.zig"); // AT7: 턴 링 디스크 저장소의 판정자(배선 전에는 여기서만 분석된다)
 }
 pub const agent_session_archive_view = maru.session.agent_session_archive_view;

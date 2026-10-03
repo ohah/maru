@@ -10594,3 +10594,16 @@ Windows에서 실제 파일을 사용하는 기존 네 판정자가 모두 통�
 hover·press 검사를 통과했다. 앱 빌드·플랫폼 대상·문서 링크·전체 경계 검사는 통과했다.
 이것은 편집/저장 실앱 검증이 아니다. draw lowering의 물리 위치와 네이티브 텍스트 adapter의
 추가 분리, Git 작업자 본체, 최종 safe-save와 GUI 저장 연결은 남아 있다.
+
+
+### 2m.129 draw lowering의 공통 런타임 이동 (2026-10-03)
+
+`app/chrome_draw_lowering.zig`가 semantic ops를 renderer-neutral DrawList·glyph placement·
+background quad로 투영한다. main·macOS AppSession·Chrome Lab은 같은 `maru.app` 구현을
+참조한다. 네이티브 셰이핑 호출은 없다. cluster 방출 allowlist의 경로를 옮겼고 공통 텍스트
+요청과 lowering을 번역 문자열 검사 범위에도 넣어 이동으로 방어가 사라지지 않게 했다.
+
+기존 lowering 판정자 16개가 통과했다(익명 집계 포함 37/37). 텍스트 아래 layer·소수점 origin·
+독립 border alpha·gradient 방향·호출자의 quad layer를 깨뜨린 다섯 변이가 모두 실행 판정에서
+실패했고 정확한 bytes 복구 후 다시 통과했다. native system_text의 추가 분리와 Git 작업자,
+전체 safe-save·편집 입력·GUI 저장·실앱 저장 검증은 아직 진행 대상이다.

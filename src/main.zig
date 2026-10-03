@@ -23,7 +23,7 @@ const dwrite_font = maru.dwrite_font;
 const win32_text = maru.win32_text;
 const win32_terminal = maru.win32_terminal;
 const cell_text = maru.cell_text; // 파일 트리 행의 셀 투영 — macOS·Windows 공유 모듈(FT3)
-const chrome_draw_lowering = @import("platform/macos/chrome/chrome_draw_lowering.zig"); // 이름과 달리 ops → DrawList 낮추기는 CoreText 를 안 부른다 — 본문 참조 0 회(§2m.6 과 같은 방식으로 쟀다)
+const chrome_draw_lowering = maru.app.chrome_draw_lowering; // 공통 semantic draw → renderer 투영
 const system_text = @import("platform/macos/chrome/system_text.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 는 §2m.18 이음매로 간다
 const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 갈래는 캡처 러너로 간다(§2m.9)
 // W7.4a Win32 키 입력 → 중립 KeyEvent.

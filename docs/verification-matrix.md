@@ -3970,3 +3970,7 @@ last-writer-wins와 baseline 백업 보존을 확인한다. 기존 SIGKILL commi
 백업 읽기 분류 후속: `test-editor-untitled`의 U4b-10은 실제 파일 부재/손상/정상 record·디렉터리 I/O 실패와
 손상 원본 보존·본문/지문을 판정하고, U4b-11은 실제 읽기/파싱의 모든 allocation failure를 부재나 손상으로
 오분류하지 않는지 판정한다. 기존 optional caller 동작은 유지하며 공유 복원 제품 연결은 아니다.
+
+백업 소비 수명 재현: U4b-12는 제품 복원 후 backup tick 없이 메모리 상태를 제거하고
+새 fixture로 재열기해 복구 내용 유실을 확인한다. characterization 1개이며 수정 완료나
+실제 process crash 증거는 아니다. `test-editor-untitled`는 제품 125개·규칙 39개 통과.

@@ -9001,6 +9001,38 @@ clip 적대적 검증 5회는 clip origin +1px, 높이 +1px, UV 보정 제거, �
 출력하고 exit 0으로 끝내지 않는다. 다른 미검증 항목까지 통과했다는 뜻은 아니다: 같은 실행의
 `agent_detail_scroll`은 `judgeable=false`여서 여전히 검증되지 않았다.
 
+### 2m.119 D3D11 그라디언트 채움과 원래 paint geometry (2026-10-03)
+
+W8.21⒞의 quad 채움은 이제 Windows에서도 세로(top→bottom)·가로(left→right) 두 색으로
+그린다. 방향만 있고 끝 색이 없으면 macOS `chrome_draw_lowering`처럼 solid로 접는다.
+`Cell`의 글리프 필드를 재활용하지 않고 `fill_end`, `paint_rect`, `paint_info`를 추가했다.
+인스턴스 stride는 80→128 bytes이고, 필드 오프셋·입력 레이아웃을 컴파일 때 함께 검사한다.
+기존 글리프 셀은 새 필드 기본값 0을 쓰므로 기존 atlas·coverage 규약을 유지한다.
+
+clip은 viewport와 quad 자체 clip의 교집합이다. GPU에는 잘린 표시 사각과 원래 paint 사각을
+별도로 보내므로, clip 시작점에서 그라디언트가 다시 시작하지 않고 둥근 모서리도 원래 위치에
+남는다. 보간은 HLSL `lerp`이며 색 양 끝 모두 quad의 alpha를 따른다.
+
+검증: `zig test src/platform/windows/d3d11_cells.zig --test-filter paintCell`의 행동 판정에
+원래 사각을 표시 사각으로 치환·방향 뒤집기·끝 색을 시작 색으로 치환·끝 알파를 1로 치환·
+끝 색 누락에도 방향 켜기의 변이 5개를 순차 적용했다. 다섯 회 모두 FAIL, 원본 바이트 복원 뒤
+1/1 통과했다. 실제 `d3d11-cells-smoke`는 hardware driver에서 240 frame을 present했다.
+고정 fixture 세 개(세로·가로·잘린 가로)를 실제 MaruWindowClass의 PrintWindow 캡처로 확인했고,
+7개 픽셀을 예상 보간 값 ±3으로 대조해 모두 통과했다. 잘린 가로의 첫 샘플은 RGB 190,0,64로
+원래 구간의 1/4 지점이며, 빨강으로 다시 시작하지 않았다.
+
+이는 채움의 증거다. gradient와 border를 함께 선언한 quad의 border 경로는 아직 기존 solid-only
+분기를 쓴다. 둥근 border의 정확한 표현까지 완료했다고 주장하지 않는다. 추가 대조에서 기존
+Windows 테두리 fallback이 폭 배열을 `[top,bottom,left,right]`로 읽는 오류도 확인했다. 공유 계약은
+`[top,right,bottom,left]`이고, 이 순서·독립 border alpha·gradient+border 조합을 다음 수정에서 함께
+처리한다. GPU fixture는 셀 파이프라인을 직접 쓰므로 chrome op lowering까지의 픽셀 검증은
+그 다음 fixture에서 연결해야 한다.
+
+최종 소스 검증: `win32-terminal-smoke`, `check-targets -j2`, `check-doc-links`,
+`check-boundaries -j4` 모두 exit 0. D3D11 셀 단위 판정 7/7, smoke 단계 경계 1/1도 통과했다.
+터미널 스모크의 editor vertical drag 5개·sidebar clip·dock clamp는 모두 true였다.
+`agent_detail_scroll`은 여전히 judgeable=false이므로 이 항목의 완료 증거로 쓰지 않는다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어

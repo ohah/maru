@@ -693,6 +693,14 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
                 });
             }
         }
+        // Stable GPU paint fixtures above the glyph grid: vertical, horizontal,
+        // and a clipped horizontal gradient. Pixel capture can distinguish a
+        // real interpolation from a solid substitute or restarted endpoints.
+        const red = d3d11_cells.colorFromArgb(0xFFFF0000);
+        const blue = d3d11_cells.colorFromArgb(0xFF0000FF);
+        try cells.append(allocator, d3d11_cells.paintCell(.{ 16, 16, 160, 96 }, .{ 16, 16, 160, 96 }, red, blue, .vertical, .{ 0, 0, 0, 0 }));
+        try cells.append(allocator, d3d11_cells.paintCell(.{ 192, 16, 160, 96 }, .{ 192, 16, 160, 96 }, red, blue, .horizontal, .{ 0, 0, 0, 0 }));
+        try cells.append(allocator, d3d11_cells.paintCell(.{ 400, 16, 80, 96 }, .{ 360, 16, 160, 96 }, red, blue, .horizontal, .{ 0, 0, 0, 0 }));
         last_cell_count = cells.items.len;
 
         try present.beginFrame(clear);
@@ -16152,7 +16160,7 @@ const EditorBuilt = struct {
 /// 확인 모달을 셀로 낮춰 **맨 위에** 얹는다. 그린 셀 수를 돌려준다(0 이면 안 그렸다).
 ///
 /// **편집기와 같은 길을 쓴다** — `confirm.view` 가 내는 op 를 `buildTextDrawList` 로 글자로, 단색
-/// 사각은 `appendSolidOps` 로. 모달은 창 좌표에 그려지므로 원점이 (0,0)이다.
+/// 사각은 `appendPaintOps` 로. 모달은 창 좌표에 그려지므로 원점이 (0,0)이다.
 fn appendConfirmCells(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(d3d11_cells.Cell),
@@ -16188,17 +16196,14 @@ fn appendConfirmCells(
     try draw_host.syncAtlasTexture(pipeline, renderer_state, atlas_w, atlas_h);
     _ = draw_host.uploadFrameRegions(pipeline, frame);
 
-    // **버려지는 op 를 센다.** 이 셰이더에 그라디언트·테두리 계산이 없어 그런 quad 는 안 그려지는데,
-    // 조용히 넘기면 "패널 없이 글자만 뜨는" 화면이 그럴듯해 보인다(실측으로 그랬다).
-    for (ops.items) |op| switch (op) {
-        // **그라디언트만 남았다.** 테두리는 이제 사각 넷으로 그린다(`appendSolidOps`).
-        .quad => |q| if (q.gradient != .solid) {
+    // Fills are lowered; the existing border fallback still handles solid quads
+    // only. Keep reporting a partially unpainted gradient+border declaration.
+    for (ops.items) |op| {
+        if (op == .quad and op.quad.gradient != .solid and op.quad.border_role != null)
             confirm_unpainted_quads.* += 1;
-        },
-        else => {},
-    };
+    }
     const before = out.items.len;
-    try appendSolidOps(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, 0, 0, out);
+    try appendPaintOps(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, 0, 0, out);
     const colors = maru.renderer.metal_frame.CellColors{
         .default_fg = blk: {
             const c = tk.get(.surface_fg);
@@ -16216,12 +16221,12 @@ fn appendConfirmCells(
     return out.items.len - before;
 }
 
-/// `draw.Op` 의 **단색 사각**(fill·solid quad)을 셀로 낮춘다. 글리프는 호출자가 따로 넣는다 —
+/// `draw.Op` 의 사각 채움(fill·solid/gradient quad)을 셀로 낮춘다. 글리프는 호출자가 따로 넣는다 —
 /// 그리는 순서가 곧 z 순서라 사각이 **먼저**여야 한다.
 ///
 /// **한 곳에 둔다.** 편집기와 확인 모달이 같은 op 스트림을 쓰는데, 이 루프를 각자 적으면 그라디언트·
 /// 테두리를 세는 규칙(아래)이 한쪽만 바뀌는 날 화면이 조용히 갈린다.
-fn appendSolidOps(
+fn appendPaintOps(
     a: std.mem.Allocator,
     ops: []const maru.chrome.draw.Op,
     tk: *const maru.chrome.Tokens,
@@ -16236,7 +16241,7 @@ fn appendSolidOps(
         // 변마다 두께를 주므로 단색 사각으로 정확히 같은 그림이 된다 — 확인 모달의 패널 테두리가
         // 통째로 빠져 글자만 떠 있던 것이 그래서였다(실측: 버려진 quad 4 개).
         //
-        // **그라디언트는 여전히 안 그린다** — 그것은 단색으로 근사하면 화면이 틀린 채로 그럴듯해진다.
+        // Gradient fills retain their original rectangle below, independently of clipping.
         if (op == .quad) {
             const q = op.quad;
             if (q.gradient == .solid) {
@@ -16271,26 +16276,38 @@ fn appendSolidOps(
         }
         const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
             .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
-            // **그라디언트는 아직 없다** — 단색으로 근사하면 화면이 틀린 채로 그럴듯해진다.
-            .quad => |q| if (q.gradient == .solid)
-                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
-            else
-                continue,
+            .quad => |q| .{ q.rect, q.fill_role, q.alpha, q.corner_radii },
             else => continue,
         };
-        const x0 = @max(rect.x, 0);
-        const y0 = @max(rect.y, 0);
-        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(clip_w)));
-        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(clip_h)));
+        // Intersect both the viewport and the op clip; preserve the original paint
+        // rectangle below so a clipped gradient does not restart at the new edge.
+        const op_clip = if (op == .quad) op.quad.clip else null;
+        const cx0: i32 = if (op_clip) |c| @max(c.x, 0) else 0;
+        const cy0: i32 = if (op_clip) |c| @max(c.y, 0) else 0;
+        const cx1: i32 = if (op_clip) |c| @min(c.x + @as(i32, @intCast(c.w)), @as(i32, @intCast(clip_w))) else @intCast(clip_w);
+        const cy1: i32 = if (op_clip) |c| @min(c.y + @as(i32, @intCast(c.h)), @as(i32, @intCast(clip_h))) else @intCast(clip_h);
+        const x0 = @max(rect.x, cx0);
+        const y0 = @max(rect.y, cy0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), cx1);
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), cy1);
         if (x1 <= x0 or y1 <= y0) continue;
         const rgb = tk.get(role);
         const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
-        try out.append(a, d3d11_cells.solidCell(
-            @floatFromInt(x0 + @as(i32, @intCast(origin_x))),
-            @floatFromInt(y0 + @as(i32, @intCast(origin_y))),
-            @floatFromInt(x1 - x0),
-            @floatFromInt(y1 - y0),
+        const end: ?[4]f32 = if (op == .quad and op.quad.gradient != .solid and op.quad.fill_role_end != null) blk: {
+            const rgb_end = tk.get(op.quad.fill_role_end.?);
+            break :blk d3d11_cells.colorFromArgb((@as(u32, alpha) << 24) | (@as(u32, rgb_end.r) << 16) | (@as(u32, rgb_end.g) << 8) | rgb_end.b);
+        } else null;
+        const direction: d3d11_cells.FillDirection = if (op == .quad) switch (op.quad.gradient) {
+            .solid => .solid,
+            .vertical => .vertical,
+            .horizontal => .horizontal,
+        } else .solid;
+        try out.append(a, d3d11_cells.paintCell(
+            .{ @floatFromInt(x0 + @as(i32, @intCast(origin_x))), @floatFromInt(y0 + @as(i32, @intCast(origin_y))), @floatFromInt(x1 - x0), @floatFromInt(y1 - y0) },
+            .{ @floatFromInt(rect.x + @as(i32, @intCast(origin_x))), @floatFromInt(rect.y + @as(i32, @intCast(origin_y))), @floatFromInt(rect.w), @floatFromInt(rect.h) },
             d3d11_cells.colorFromArgb(argb),
+            end,
+            direction,
             .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
         ));
     }
@@ -16461,7 +16478,7 @@ fn buildEditorFrame(
     errdefer built.deinit(a);
 
     // **단색 사각(배경·스크롤바)을 글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다.
-    try appendSolidOps(a, op_buf[0..w.ops], tk, v.w, v.h, origin_x, origin_y, &built.cells);
+    try appendPaintOps(a, op_buf[0..w.ops], tk, v.w, v.h, origin_x, origin_y, &built.cells);
     _ = try h.appendGlyphCellsAt(a, built.frame, cl, origin_x, origin_y, &built.cells);
     return built;
 }

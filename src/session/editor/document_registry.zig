@@ -21,7 +21,7 @@ const Document = struct {
 const Slot = struct { generation: u64 = 1, document: ?*Document = null };
 
 pub const Registry = struct {
-    pub const Error = std.mem.Allocator.Error || error{ StaleReference, ReferenceIdExhausted, Busy };
+    pub const Error = std.mem.Allocator.Error || error{ StaleReference, ReferenceIdExhausted, Busy, InvalidRecoveryId, DuplicateRecoveryId };
     allocator: std.mem.Allocator,
     slots: std.ArrayList(Slot) = .empty,
     last_reference: u64 = 0,
@@ -40,6 +40,14 @@ pub const Registry = struct {
     /// 실패하면 호출자의 본문·신원·이력은 그대로다.
     /// resource allocator는 기존 경로/이력의 할당 짝이며 마지막 참조 해제까지 살아 있어야 한다.
     pub fn create(self: *Registry, prepared: *document_state.State, resource_allocator: std.mem.Allocator) Error!Lease {
+        // 독립 문서를 같은 복구 신원으로 등록하지 않는다. 공유 view는 retain을 사용한다.
+        if (prepared.recovery_id) |recovery| {
+            if (!recovery.valid()) return error.InvalidRecoveryId;
+            for (self.slots.items) |slot| {
+                const existing = slot.document orelse continue;
+                if (existing.state.recovery_id) |other| if (recovery.eql(other)) return error.DuplicateRecoveryId;
+            }
+        }
         const id = try self.nextId();
         var index = self.slots.items.len;
         for (self.slots.items, 0..) |slot, i| {
@@ -247,6 +255,60 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
 
 test "DREG3 every create and retain allocation failure preserves caller or existing ownership" {
     try testing.checkAllAllocationFailures(testing.allocator, allocationFailures, .{});
+}
+
+test "RECID registry rejects duplicate documents while shared and request leases retain one identity" {
+    const id = @import("recovery_id.zig").Id{ .bytes = @splat(1) };
+    var registry: Registry = .{ .allocator = testing.allocator };
+    defer registry.deinit() catch unreachable;
+    var first_state: document_state.State = .{ .recovery_id = id };
+    defer first_state.clear(testing.allocator);
+    const first = try registry.create(&first_state, testing.allocator);
+    const peer = try registry.retain(first, .view);
+    const request = try registry.retain(first, .request);
+    try testing.expect(first_state.recovery_id == null);
+    try testing.expect(registry.get(peer).?.recovery_id.?.eql(id));
+    var duplicate: document_state.State = .{ .recovery_id = id };
+    defer duplicate.clear(testing.allocator);
+    duplicate.path = try testing.allocator.dupe(u8, "/preserve");
+    const reference = registry.last_reference;
+    try testing.expectError(error.DuplicateRecoveryId, registry.create(&duplicate, testing.allocator));
+    try testing.expectEqualStrings("/preserve", duplicate.path.?);
+    try testing.expectEqual(reference, registry.last_reference);
+    try testing.expect(duplicate.recovery_id.?.eql(id));
+    try testing.expect(!try registry.release(first));
+    try testing.expect(!try registry.release(peer));
+    try testing.expectError(error.DuplicateRecoveryId, registry.create(&duplicate, testing.allocator));
+    try testing.expect(try registry.release(request));
+    // 복원 ID는 모든 참조가 해제된 뒤 재등록할 수 있다. 저장소 소유 검사는 별도 경계다.
+    const restored = try registry.create(&duplicate, testing.allocator);
+    try testing.expect(registry.get(restored).?.recovery_id.?.eql(id));
+    try testing.expect(try registry.release(restored));
+    var invalid: document_state.State = .{ .recovery_id = .{ .bytes = @splat(0) } };
+    try testing.expectError(error.InvalidRecoveryId, registry.create(&invalid, testing.allocator));
+}
+
+fn recoveryRegistryAllocationProbe(allocator: std.mem.Allocator) !void {
+    const id = @import("recovery_id.zig").Id{ .bytes = @splat(1) };
+    var registry: Registry = .{ .allocator = allocator };
+    defer registry.deinit() catch unreachable;
+    var state: document_state.State = .{ .recovery_id = id };
+    defer state.clear(allocator);
+    state.path = try allocator.dupe(u8, "/owned");
+    const lease = registry.create(&state, allocator) catch |err| {
+        try testing.expect(state.recovery_id.?.eql(id));
+        try testing.expectEqualStrings("/owned", state.path.?);
+        try testing.expectEqual(@as(u64, 0), registry.last_reference);
+        for (registry.slots.items) |slot| try testing.expect(slot.document == null);
+        return err;
+    };
+    defer _ = registry.release(lease) catch unreachable;
+    try testing.expect(state.recovery_id == null);
+    try testing.expect(registry.get(lease).?.recovery_id.?.eql(id));
+}
+
+test "RECID registry allocation failure preserves the prepared identity and ownership" {
+    try testing.checkAllAllocationFailures(testing.allocator, recoveryRegistryAllocationProbe, .{});
 }
 
 test "DREG4 wrong owner or altered lease kind cannot release an unrelated document" {

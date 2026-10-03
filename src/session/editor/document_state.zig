@@ -83,6 +83,8 @@ pub const Notifications = struct {
 };
 
 pub const State = struct {
+    /// 저장 대상(path/remote) 변경으로 지우지 않는다. 완전 해제 때만 놓는 문서 신원이다.
+    recovery_id: ?@import("recovery_id.zig").Id = null,
     opened: ?Opened = null,
     path: ?[]u8 = null,
     remote: ?RemoteDoc = null,
@@ -116,6 +118,7 @@ pub const State = struct {
         self.history.clear(allocator);
         self.clearIdentity(allocator);
         self.notifications = .{};
+        self.recovery_id = null;
     }
 };
 
@@ -155,6 +158,20 @@ fn exerciseOwnedState(allocator: std.mem.Allocator, bytes: []const u8, remote: b
     state.untitled = untitled.Name.init(3);
     state.clear(allocator);
     try std.testing.expect(state.untitled == null);
+}
+
+test "RECID document identity survives target changes and clears with the complete state" {
+    const id = @import("recovery_id.zig").Id{ .bytes = @splat(1) };
+    var state: State = .{ .recovery_id = id };
+    defer state.clear(std.testing.allocator);
+    state.path = try std.testing.allocator.dupe(u8, "/before");
+    state.clearIdentity(std.testing.allocator);
+    try std.testing.expect(state.path == null);
+    try std.testing.expect(state.recovery_id.?.eql(id));
+    state.clearOpened(std.testing.allocator);
+    try std.testing.expect(state.recovery_id.?.eql(id));
+    state.clear(std.testing.allocator);
+    try std.testing.expect(state.recovery_id == null);
 }
 
 test "document owner local and remote preparation unwinds every allocation failure" {

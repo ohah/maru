@@ -1,9 +1,41 @@
 # 공유 편집기 복원 포맷 — 검토안
 
-상태: 문서/뷰 분리 방향 선택, 상세 설계 검토 중·플랫폼 중립 codec 부분 구현. 2026-10-03 사용자는 문서/뷰를 분리하는 v2 설계 진행에 동의했다.
+상태: 문서/뷰 분리 방향과 단계별 구현 진행 승인, 복구 신원·플랫폼 중립 codec 구현·제품 연결 미완료. 2026-10-03 사용자는 문서/뷰를 분리하는 v2 설계 진행에 동의했다.
 v2 방향은 선택됐지만 이 문서의 wire 예시는 구현 완료를 뜻하지 않는다. 사용자용 분할 명령은 복원 gate까지 닫은 뒤 공개한다.
 진행 순서는 [공유 문서 계획](editor-shared-document.md), 기존 백업 계약은
 [문서 모델](../native-editor-document-model.md)과 [workspace 복원](../workspace-restore.md)이 소유한다.
+
+## 현재 구현 — 복구 신원과 codec
+
+사용자가 설계/재현 PR #4097 머지와 구현 진행을 승인했다. 구현 순서의 첫 단계인
+플랫폼 중립 신원·소유·codec을 구현했다. 아래 계약이 현재 코드의 기준이며 뒤의 검토안 중
+이미 구현한 항목은 이 절을 따른다.
+
+- `session.editor.recovery_id.Id`는 16 bytes다. 외부 표현은 정확히 32자리 소문자 hex이고
+  영 ID·잘린 값·부호·대문자·파일 경로 성분을 거절한다. 파일 이름은 `d-<id>.bak`이다.
+  난수 공급·exclusive 예약·파일 I/O를 이 타입에 넣지 않는다. ID는 writer 권한이 아니다.
+- `document_state.State.recovery_id`는 문서 소유다. 저장 대상만 비우는 clearIdentity와
+  본문만 정산하는 clearOpened에서는 유지하고 전체 clear에서 해제한다. registry는 새 독립
+  문서의 invalid/duplicate ID를 publication 전에 거절한다. 공유 view/read/request lease는
+  같은 State를 retain하므로 ID도 유지한다. OOM은 준비 상태의 ID/경로/본문 소유를 보존한다.
+- `backup.encodeRecovery/parseRecovery`는 로컬 문서의 필수 ID 레코드
+  `maru.editor-backup.v2`를 처리한다. 기존 `encode/parse`와 헤더를 서로 받아들이지 않는다.
+  v2는 ID뿐 아니라 모든 metadata 중복·미지 키·잘못된 kind를 거절하고, 절대 UTF-8 path와
+  NUL 부재, UTF-8 본문/기존 저장 크기 상한을 검사한다. 빈 본문은 유효한 편집이다.
+  본문은 입력 bytes를 빌리고 path만 소유하며 allocation failure를 손상으로 바꾸지 않는다.
+- `RecoveryRecord.matches`는 파일 이름·요청 ID·레코드 ID·요청 path를 함께 확인한다.
+  `disk_hash`는 저장 충돌 기준으로 따로 보존한다. ID/본문 hash/저장 지문을 서로 대신 쓰지 않는다.
+- `workspace_state.Document`는 필수 recovery_id를 포함한다. descriptor wire는
+  `index:recovery-id:disk-hash-or-none:content-hash:path-byte-length:path`다. 이전 개발 payload를
+  새 ID로 추측해서 읽지 않는다. 서로 다른 descriptor가 같은 ID를 쓰면 참조 검증이 거절한다.
+  같은 path의 다른 ID와 하나의 descriptor를 참조하는 여러 view는 유효하다.
+
+집중 검사는 `zig build test-editor-recovery-codec`다. 필수 ID/경로/빈 본문 round-trip,
+헤더 분리, 손상/중복/길이 상한, State 수명과 registry publication, 모든 관련 allocation
+실패를 검사한다. 기존 제품 backup writer는 아직 v1을 사용하고 runtime의 새 ID 발급은
+아직 연결하지 않았다. 그러므로 U4b-15/16의 실제 제품 충돌이 이 단계에서 고쳐졌다고 주장하지 않는다.
+다음 연결은 ID 발급/예약과 workspace capture/apply가 같은 ID를 다시 찾는 경로이며,
+이 경계를 완성할 때 제품 writer를 전환한다. orphan discovery와 새 복구 UI는 별도 미구현이다.
 
 ## 해결할 문제와 현재 코드
 

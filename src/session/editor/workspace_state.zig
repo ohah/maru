@@ -4,9 +4,11 @@
 const std = @import("std");
 const selection = @import("selection.zig");
 pub const Selection = selection.Selection;
+pub const RecoveryId = @import("recovery_id.zig").Id;
 
 pub const Document = struct {
     index: u32,
+    recovery_id: RecoveryId,
     path: []const u8,
     disk_hash: ?u64,
     content_hash: u64,
@@ -34,6 +36,7 @@ pub const View = struct {
 pub const DecodeError = error{BadRecord} || std.mem.Allocator.Error;
 
 pub fn validateDocument(doc: Document) error{BadRecord}!void {
+    if (!doc.recovery_id.valid()) return error.BadRecord;
     if (doc.path.len == 0 or doc.path.len > std.fs.max_path_bytes or
         !std.fs.path.isAbsolute(doc.path) or !std.unicode.utf8ValidateSlice(doc.path) or
         std.mem.indexOfScalar(u8, doc.path, 0) != null) return error.BadRecord;
@@ -43,7 +46,7 @@ pub fn validateDocument(doc: Document) error{BadRecord}!void {
 /// The returned document borrows the decoded payload; its enclosing arena owns it.
 pub fn writeDocument(w: *std.Io.Writer, doc: Document) !void {
     try validateDocument(doc);
-    try w.print("{d}:", .{doc.index});
+    try w.print("{d}:{s}:", .{ doc.index, doc.recovery_id.hex() });
     if (doc.disk_hash) |hash| try w.print("{d}", .{hash}) else try w.writeAll("none");
     try w.print(":{d}:{d}:{s}", .{ doc.content_hash, doc.path.len, doc.path });
 }
@@ -51,12 +54,13 @@ pub fn writeDocument(w: *std.Io.Writer, doc: Document) !void {
 pub fn parseDocument(payload: []const u8) error{BadRecord}!Document {
     var cursor: Cursor = .{ .rest = payload };
     const index = try cursor.uint(u32);
+    const recovery_id = RecoveryId.parse(try cursor.token()) catch return error.BadRecord;
     const base = try cursor.token();
     const disk_hash: ?u64 = if (std.mem.eql(u8, base, "none")) null else try number(u64, base);
     const content_hash = try cursor.uint(u64);
     const len = try cursor.uint(usize);
     if (cursor.rest.len != len) return error.BadRecord;
-    const result: Document = .{ .index = index, .path = cursor.rest, .disk_hash = disk_hash, .content_hash = content_hash };
+    const result: Document = .{ .index = index, .recovery_id = recovery_id, .path = cursor.rest, .disk_hash = disk_hash, .content_hash = content_hash };
     try validateDocument(result);
     return result;
 }
@@ -140,11 +144,15 @@ pub const ViewSlot = struct { pane: usize, view: View };
 pub fn validateReferences(allocator: std.mem.Allocator, documents: []const Document, views: []const ViewSlot) DecodeError!void {
     var ids = std.AutoHashMap(u32, usize).init(allocator);
     defer ids.deinit();
+    var recoveries = std.AutoHashMap([16]u8, void).init(allocator);
+    defer recoveries.deinit();
     const used = try allocator.alloc(bool, documents.len);
     defer allocator.free(used);
     @memset(used, false);
     for (documents, 0..) |doc, index| {
         try validateDocument(doc);
+        const recovery_entry = try recoveries.getOrPut(doc.recovery_id.bytes);
+        if (recovery_entry.found_existing) return error.BadRecord;
         const entry = try ids.getOrPut(doc.index);
         if (entry.found_existing) return error.BadRecord;
         entry.value_ptr.* = index;
@@ -162,17 +170,18 @@ pub fn validateReferences(allocator: std.mem.Allocator, documents: []const Docum
 }
 
 const testing = std.testing;
+const test_recovery = RecoveryId{ .bytes = @splat(1) };
 
 test "editor restore codec preserves local path bytes and distinct content/base fingerprints" {
-    const doc: Document = .{ .index = 3, .path = "/tmp/한:글\"\n.zig", .disk_hash = 7, .content_hash = 9 };
+    const doc: Document = .{ .index = 3, .recovery_id = test_recovery, .path = "/tmp/한:글\"\n.zig", .disk_hash = 7, .content_hash = 9 };
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try writeDocument(&out.writer, doc);
     const restored = try parseDocument(out.written());
     try testing.expectEqualDeep(doc, restored);
-    try testing.expectError(error.BadRecord, parseDocument("0:none:1:999:/x"));
-    try testing.expectError(error.BadRecord, parseDocument("0:none:1:2:xx"));
-    try testing.expectError(error.BadRecord, parseDocument("0:none:1:18446744073709551616:/x"));
+    try testing.expectError(error.BadRecord, parseDocument("0:01010101010101010101010101010101:none:1:999:/x"));
+    try testing.expectError(error.BadRecord, parseDocument("0:01010101010101010101010101010101:none:1:2:xx"));
+    try testing.expectError(error.BadRecord, parseDocument("0:01010101010101010101010101010101:none:1:18446744073709551616:/x"));
 }
 
 test "editor restore codec preserves primary direction extras folds and wrap inheritance" {
@@ -212,9 +221,10 @@ test "editor restore codec frees all prepared arrays on allocation failure" {
 }
 
 test "editor restore codec validates explicit references without merging equal paths" {
-    const a: Document = .{ .index = 1, .path = "/same", .disk_hash = 2, .content_hash = 3 };
+    const a: Document = .{ .index = 1, .recovery_id = test_recovery, .path = "/same", .disk_hash = 2, .content_hash = 3 };
     var b = a;
     b.index = 2;
+    b.recovery_id = .{ .bytes = @splat(2) };
     b.content_hash = 4;
     const first: View = .{ .index = 0, .document = 1, .primary = selection.Selection.at(0) };
     var independent = first;
@@ -228,7 +238,7 @@ test "editor restore codec validates explicit references without merging equal p
 }
 
 fn oomReferences(allocator: std.mem.Allocator) !void {
-    try validateReferences(allocator, &.{.{ .index = 1, .path = "/doc", .disk_hash = null, .content_hash = 1 }}, &.{.{ .pane = 0, .view = .{ .index = 0, .document = 1, .primary = selection.Selection.at(0) } }});
+    try validateReferences(allocator, &.{.{ .index = 1, .recovery_id = test_recovery, .path = "/doc", .disk_hash = null, .content_hash = 1 }}, &.{.{ .pane = 0, .view = .{ .index = 0, .document = 1, .primary = selection.Selection.at(0) } }});
 }
 
 test "editor restore codec reference admission frees scratch state on every allocation failure" {
@@ -255,4 +265,30 @@ test "editor restore codec enforces the existing total cursor limit before alloc
     var restored = try parseView(testing.allocator, out.written());
     defer restored.deinit(testing.allocator);
     try testing.expectEqual(selection.max_cursors - 1, restored.extras.len);
+}
+
+test "editor restore codec rejects one recovery identity assigned to independent descriptors" {
+    const a: Document = .{ .index = 1, .recovery_id = test_recovery, .path = "/a", .disk_hash = 1, .content_hash = 2 };
+    var b = a;
+    b.index = 2;
+    b.path = "/b";
+    const slots = [_]ViewSlot{
+        .{ .pane = 0, .view = .{ .index = 0, .document = 1, .primary = Selection.at(0) } },
+        .{ .pane = 1, .view = .{ .index = 0, .document = 2, .primary = Selection.at(0) } },
+    };
+    try testing.expectError(error.BadRecord, validateReferences(testing.allocator, &.{ a, b }, &slots));
+    b.recovery_id = .{ .bytes = @splat(2) };
+    try validateReferences(testing.allocator, &.{ a, b }, &slots);
+}
+
+test "editor restore codec rejects absent invalid or zero identity before emitting metadata" {
+    try testing.expectError(error.BadRecord, parseDocument("1:none:2:2:/a"));
+    try testing.expectError(error.BadRecord, parseDocument("1:00000000000000000000000000000000:none:2:2:/a"));
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expectError(error.BadRecord, writeDocument(&out.writer, .{ .index = 1, .recovery_id = .{ .bytes = @splat(0) }, .path = "/a", .disk_hash = null, .content_hash = 2 }));
+    try testing.expectEqual(@as(usize, 0), out.written().len);
+    try writeDocument(&out.writer, .{ .index = 1, .recovery_id = test_recovery, .path = "/a", .disk_hash = null, .content_hash = 2 });
+    const bytes = out.written();
+    for (0..bytes.len) |n| try testing.expectError(error.BadRecord, parseDocument(bytes[0..n]));
 }

@@ -3998,3 +3998,12 @@ characterization이며 runtime/GUI crash나 recovery ID 수정 완료 판정은 
 실패, 새 AppKit process의 입력 없는 dirty 복원을 확인한다. 최신 disk bytes도 보존한다.
 workspace 자동 복원은 꺼 두며 host checkpoint/새 recovery ID/OS reboot gate가 아니다.
 증거: [실행 결과](evidence/editor-residual-backup-app-20261003/result.json).
+
+
+## 복구 ID와 codec
+
+`zig build test-editor-recovery-codec`는 RECID/RECB와 workspace codec을 실행한다.
+필수 ID/정확한 파일 이름·옛/새 header 오인식 방지·중복 metadata와 descriptor 거절,
+같은 path의 독립 ID·공유 State 수명·등록/encode/decode OOM에서 원래 소유 보존을 검사한다.
+제품 writer는 아직 기존 path 신원을 사용한다. 원래 충돌 characterization을 보존하며,
+새 codec 통과를 제품 restart 복구 성공으로 세지 않는다.

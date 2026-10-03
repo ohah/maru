@@ -1418,6 +1418,12 @@ VSCode 의 macOS 기본이 `⇧⌘\` 다. 표에는 `\` 와 `|` **둘 다** 넣�
 
 ### 3.10 미저장 내용 백업 (2026-08-09 사용자 결정)
 
+**복구 신원 codec 구현:** 플랫폼 중립 `recovery_id.Id`, 문서 State의 ID 소유·registry 중복
+거절, 필수 ID를 담는 backup v2/문서 descriptor codec을 구현했다. 제품 writer는 아직
+기존 v1이다. ID 발급·예약과 workspace capture/apply 연결 전에 파일 이름만 전환하지 않는다.
+현재 wire·소유·검증 범위는 [공유 복원 계획](plans/editor-shared-restore.md)의
+「현재 구현 — 복구 신원과 codec」이 소유한다.
+
 **앱이 비정상 종료해도 미저장 편집이 살아남아야 한다.** 이는 [file-panel.md](file-panel.md)가 웹 경로에서 "제공하지 않는다"고 정했던 것을 **뒤집는 결정**이며, 근거는 §1.1의 "VSCode 사용자 무회귀"다 — VSCode는 hot exit로 같은 것을 제공하므로 그 사용자는 앱이 죽어도 편집이 남아 있기를 기대한다.
 
 - **자동 저장이 아니다.** [file-panel.md](file-panel.md) §1의 *"focus-loss/autosave는 하지 않는다"*는 그대로 유효하다 — **원본 파일은 명시적 `⌘S`로만 쓴다.** 백업은 **별도 파일에 미저장 내용을 보존**하는 것이고, 원본을 건드리지 않으므로 그 결정과 충돌하지 않는다. 사용자가 저장하지 않은 편집은 **여전히 저장되지 않은 상태**로 남고, 다만 앱이 죽어도 사라지지 않는다.

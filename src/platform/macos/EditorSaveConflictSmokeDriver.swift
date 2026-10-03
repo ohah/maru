@@ -17,6 +17,8 @@ final class EditorSaveConflictSmokeDriver {
         case externalConflict = "external-conflict"
         /// 밖에서 바뀌지 않은 파일에 `⌘S` — 조용히 저장되어야 한다(대조군).
         case cleanSave = "clean-save"
+        /// Save newer text after restoration while the fixture denies backup deletion.
+        case residualSave = "residual-save"
         /// 충돌 상자에서 **덮어쓰기**(`D` — `alternate`) — 내 편집이 디스크에 있어야 한다(C1a).
         case conflictOverwrite = "conflict-overwrite"
         /// 충돌 상자에서 **다시 읽기**(`R`) — 디스크는 그대로이고 문서가 clean 이어야 한다(C1a).
@@ -90,7 +92,7 @@ final class EditorSaveConflictSmokeDriver {
 
     /// **지금 앱을 종료해야 하나.** `quit-backup` 만 참이 된다 — 그 시나리오의 판정은 종료 경로에
     /// 있으므로, 스모크 시간(20 초)을 기다리면 그 사이 debounce 가 만기돼 **무엇이 썼는지** 갈리지 않는다.
-    var wantsPromptQuit: Bool { (scenario == .quitBackup || scenario == .restoreBackup) && stage == .done }
+    var wantsPromptQuit: Bool { (scenario == .quitBackup || scenario == .restoreBackup || scenario == .residualSave) && stage == .done }
 
     private(set) var stage: Stage = .notStarted
     private(set) var failure: String = ""
@@ -173,7 +175,11 @@ final class EditorSaveConflictSmokeDriver {
                 return
             }
             // 이미 dirty 면 우리가 넣은 글자와 남의 편집을 못 가른다 — 그 판은 쓰지 않는다.
-            guard !p.dirty else { return fail("document_dirty_before_typing") }
+            if scenario == .residualSave {
+                guard p.dirty else { return fail("residual_source_not_restored") }
+            } else {
+                guard !p.dirty else { return fail("document_dirty_before_typing") }
+            }
             guard pressKey(.selectAll), pressKey(.caretToLineEnd) else { return fail("caret_key_refused") }
             guard typeText(Self.typed_marker) else { return fail("type_refused") }
             guard let after = probe(), after.dirty else { return fail("typing_left_document_clean") }
@@ -181,7 +187,7 @@ final class EditorSaveConflictSmokeDriver {
 
         case .typed:
             switch scenario {
-            case .cleanSave:
+            case .cleanSave, .residualSave:
                 stage = .saved
                 guard pressKey(.save) else { return fail("save_key_refused") }
             case .quitBackup:
@@ -236,10 +242,10 @@ final class EditorSaveConflictSmokeDriver {
                 guard p.dirty else { return fail("conflict_left_document_clean") }
             case .quitBackup, .restoreBackup:
                 return fail("unexpected_saved_stage") // 이 둘은 저장하지 않는다
-            case .cleanSave:
+            case .cleanSave, .residualSave:
                 // 대조군: 저장이 되고 **조용하다**. 이 갈래가 없으면 「전부 거절」도 통과한다.
                 guard now.contains(Self.typed_marker) else { return fail("clean_save_did_not_write") }
-                if p.overlayOpen { return fail("clean_save_showed_notice") }
+                if scenario == .cleanSave && p.overlayOpen { return fail("clean_save_showed_notice") }
                 if p.dirty { return fail("clean_save_left_dirty") }
             }
             stage = .done
@@ -263,7 +269,7 @@ final class EditorSaveConflictSmokeDriver {
                 //    버리지 않는 선택이라 그 둘이 함께 참이어야 한다.
                 guard p.compareReady else { return fail("compare_did_not_open") }
                 guard now == contentOnDisk else { return fail("compare_touched_disk") }
-            case .externalConflict, .cleanSave, .quitBackup, .restoreBackup:
+            case .externalConflict, .cleanSave, .residualSave, .quitBackup, .restoreBackup:
                 return fail("unexpected_answer_stage")
             }
             stage = .done

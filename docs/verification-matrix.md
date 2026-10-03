@@ -3989,3 +3989,12 @@ exact-count한다. 이 판정들은 새 shared restart codec 연결이나 OS 강
 마지막 writer에 따른 백업 내용과 두 번 재열기의 동일 복구 내용, 원본 disk 불변을 검사한다.
 characterization이며 runtime/GUI crash나 recovery ID 수정 완료 판정은 아니다.
 `test-editor-untitled test-editor-shared`는 제품 129개·규칙 39개·shared 64개 통과.
+
+
+## 이전 백업 잔존의 실제 앱 재실행
+
+`zig build macos-app-bundle` 후 `python3 tools/test-editor-residual-backup-app.py`로
+격리 HOME/backup/session-host에서 정상 종료 backup 생성, 복원 후 최신 저장과 삭제 권한
+실패, 새 AppKit process의 입력 없는 dirty 복원을 확인한다. 최신 disk bytes도 보존한다.
+workspace 자동 복원은 꺼 두며 host checkpoint/새 recovery ID/OS reboot gate가 아니다.
+증거: [실행 결과](evidence/editor-residual-backup-app-20261003/result.json).

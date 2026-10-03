@@ -1022,3 +1022,9 @@ provider 갱신·준비 할당 실패를 집중 실행한다. ReleaseFast는 `-D
 할당 실패의 트리/포커스 보존·마지막 뷰 닫기·최근 사용 뷰 선택을 검사한다.
 ReleaseFast는 `-Doptimize=ReleaseFast`를 붙인다. 같은 판정자는 공유 및 전체 editor 집계에 포함된다.
 사용자 명령·workspace 포맷·재시작 복원·실제 두 pane GUI/OS IME 증거는 이 gate의 범위가 아니다.
+
+### 에디터 복원 metadata codec과 크기 측정
+
+- `mise exec -- zig build test-editor-restore-codec`: 플랫폼 중립 codec의 7개 판정자. Debug/ReleaseFast에서 실행한다.
+- `mise exec -- zig build perf-editor-workspace-state -Doptimize=ReleaseFast`: 10개 metadata 부하 시나리오의 raw bytes·요청 할당 peak·encode/parse+validate 시간. 실제 RSS·본문·host 사본·disk I/O는 제외한다.
+- codec은 제품 checkpoint에 아직 연결하지 않았다. 정책과 범위는 [복원 설계](plans/editor-shared-restore.md)를 따른다.

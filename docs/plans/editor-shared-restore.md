@@ -1,6 +1,6 @@
 # 공유 편집기 복원 포맷 — 검토안
 
-상태: 문서/뷰 분리 방향 선택, 상세 설계 검토 중·codec 미착수. 2026-10-03 사용자는 문서/뷰를 분리하는 v2 설계 진행에 동의했다.
+상태: 문서/뷰 분리 방향 선택, 상세 설계 검토 중·플랫폼 중립 codec 부분 구현. 2026-10-03 사용자는 문서/뷰를 분리하는 v2 설계 진행에 동의했다.
 v2 방향은 선택됐지만 이 문서의 wire 예시는 구현 완료를 뜻하지 않는다. 사용자용 분할 명령은 복원 gate까지 닫은 뒤 공개한다.
 진행 순서는 [공유 문서 계획](editor-shared-document.md), 기존 백업 계약은
 [문서 모델](../native-editor-document-model.md)과 [workspace 복원](../workspace-restore.md)이 소유한다.
@@ -197,7 +197,7 @@ publication 성공 뒤 소비 시점 역시 기존 recovery 수명 계약과 대
 4. 재시작과 제품 화면: dirty 두 pane, 독립 선택/스크롤/접힘, 마지막 뷰 닫기, IME 확정 후 재시작을 검증한다.
    이 gate를 통과한 뒤 사용자용 분할 action/chord를 연결한다.
 
-현재 작업은 설계 구체화이며 공개 전 판정 항목이 남아 있다. codec·host 연결·실제 재시작·GUI gate는 미착수다.
+현재 작업은 설계 구체화이며 공개 전 판정 항목이 남아 있다. 플랫폼 중립 codec은 부분 구현했고 host 연결·실제 재시작·GUI gate는 미착수다.
 
 ## 설계 반례 검토 — 2026-10-03
 
@@ -285,3 +285,52 @@ publication 성공 뒤 소비 시점 역시 기존 recovery 수명 계약과 대
 
 이 목록이 있으므로 현재 상태를 ‘누락 없이 확정된 설계’라고 부르지 않는다.
 검토 누적 횟수와 기존 집중 gate 통과는 위 정책 선택이나 새 실행 gate를 대신하지 않는다.
+
+## 파일 크기·할당·다른 상태 영향 적대적 검증 10개 시나리오
+
+`src/session/editor/workspace_state.zig`의 Document/View payload와 명시적 참조 판정은 부분 구현했다.
+제품 checkpoint reader/writer/capture/restore에는 아직 연결하지 않았다. Undo와 본문은 이 codec에 없다.
+`zig build test-editor-restore-codec`는 7개 실제 판정자를 Debug/ReleaseFast exact-count한다.
+경로 bytes, base/current 지문 구분, 방향 있는 primary/extras, inherit/on/off, 접힘,
+절단/미지 값/부풀린 count, 참조 중복/부재/고아, 준비 할당 실패의 해제를 검사한다.
+
+측정은 `zig build perf-editor-workspace-state -Doptimize=ReleaseFast`를 5회 실행한 결과다.
+10개 시나리오를 매회 실행해 각 출력의 종료 시 tracked live bytes=0을 확인했다.
+시나리오의 규모는 codec 부하용이다. 실제 제품 pane/document admission이나 fold provider 결과의
+유효성을 입증하지 않으며, 기존 제품 커서 상한을 넘는 입력은 거절한다.
+
+| 시나리오 | raw payload bytes | codec 요청 할당 peak bytes | encode/parse+validate 중앙값 µs | 판정 |
+|---|---:|---:|---:|---|
+| 한 문서·한 뷰 | 60 | 589 | 10/17 | 왕복/참조 판정 통과·tracked live 0 |
+| 한 문서·64뷰 | 2328 | 13962 | 15/46 | 왕복/참조 판정 통과·tracked live 0 |
+| 한 문서·1,024뷰 | 36888 | 227532 | 151/280 | 왕복/참조 판정 통과·tracked live 0 |
+| primary 포함 10,000커서 | 246705 | 749394 | 467/834 | 왕복/참조 판정 통과·tracked live 0 |
+| 100,000 추가 커서 | 출력 없음 | 0 | 해당 없음 | 할당/출력 전에 거절 |
+| 100,000 접힌 머리 | 588955 | 996122 | 542/1300 | 왕복/참조 판정 통과·tracked live 0 |
+| 64뷰 각각 추가 커서·접힘 1,000 | 1638360 | 5382795 | 1528/3460 | 왕복/참조 판정 통과·tracked live 0 |
+| std.fs.max_path_bytes 길이 경로 | 1076 | 3681 | 4/7 | 왕복/참조 판정 통과·tracked live 0 |
+| 독립 문서·뷰 10,000 | 657780 | 3237788 | 1198/3974 | 왕복/참조 판정 통과·tracked live 0 |
+| 최대 정수 count 공격 10,000회 | 출력 없음 | 0 | 해당 없음 | 할당/출력 전에 거절 |
+
+**측정 범위:** raw payload에는 전체 workspace 문법·따옴표 escape·Swift 문자열/Data/Array 사본이
+포함되지 않는다. peak는 tracker에 요청한 bytes이며 RSS가 아니다. 입력 fixture 배열·현재 에디터
+본문·뷰 모델·문서 hash 계산·provider·AppKit·실제 disk I/O는 제외했다. decoded arrays와 참조
+검증 scratch는 포함했다. 시간은 이 머신에서의 5회 중앙값이며 제품 frame budget 통과 주장에 쓰지 않는다.
+
+**발견하고 수정한 실제 codec 누락:** 기존 `selection.max_cursors`를 적용하지 않아
+100,000 추가 커서도 받아들였다. primary를 포함한 기존 상한을 writer/reader 양쪽에 적용했다.
+한계 바로 아래 정상 입력 양성 대조와, 입력 길이는 유효하지만 상한만 넘는 record를
+FailingAllocator 첫 할당 전에 거절하는 판정자를 추가했다. 격리 copy에서 writer guard 제거와
+reader guard 제거는 각각 compile-valid runtime 실패를 일으켰고, 등가 writer 조건 변이는 통과했다.
+
+**다른 workspace 값 영향:** 현재 Swift `captureWorkspaceSnapshot`은 한 창 serialize 실패나
+전체 snapshot semantic validation 실패에서 전체 저장을 건너뛴다. 기존 apply-error와
+incomplete-no-clobber boundary 각각 1/1은 이 배선의 소스 판정이다. 새 codec 오류를 주입한
+제품 통합 테스트는 아니며 다른 상태 저장 격리를 입증하지 않는다.
+
+**설계 결론:** 크기 증가와 전체 저장 실패 전파 가능성은 실재하는 설계 비용이다. 구조/문서 참조를
+필수로 유지하고 표시 상태는 별도 실패 예산을 적용하는 안을 우선 비교한다. 선택 상태만 한도를
+넘었을 때 명시적 기본값으로 내보내는 정책은 사용자 선택을 기다리는 중이며 아직 제품에 넣지 않았다.
+현재 host의 `loadWorkspaceText`는 `Data(contentsOf:)`로 전체 파일을 읽으므로 필드 수 한도만으로
+전체 bytes와 초기 read 메모리를 제한했다고 주장할 수 없다. codec 단독의 count 검증과
+checkpoint 전체 read/capture 예산은 서로 다른 gate다. 새 전역 한도를 임의로 확정하지 않는다.

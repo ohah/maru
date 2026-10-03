@@ -3929,3 +3929,9 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 - 실제 AppSession에서 셸 없는 가로/세로 연결, 새 뷰의 초기 접힘과 독립 상태, Undo와 생존 뷰 닫기, 준비 OOM의 트리/포커스/참조 수 불변, 최근 활성 뷰 재선택과 지원 밖 종류 거절을 검사한다.
 - 사용자 명령·기본 chord·workspace 복원은 공개하지 않는다. 실제 동시 두 pane GUI/OS IME는 이 헤드리스 gate의 증거가 아니다.
 - 복원 포맷은 [검토안](plans/editor-shared-restore.md)을 먼저 검토한다. 문서 내용과 뷰 상태를 함께 보존하는 복원 gate를 통과하기 전 사용자용 split은 노출하지 않는다.
+
+## 에디터 복원 metadata codec
+
+- 상태: 부분 구현. `test-editor-restore-codec` Debug/ReleaseFast 7개 exact-count. `perf-editor-workspace-state`는 codec 부하만 측정한다.
+- 판정: 방향 있는 선택·wrap 상속·접힘·로컬 path payload, 문서 참조, 잘린 입력·개수 부풀리기·기존 커서 상한·OOM 정산.
+- 한계: 제품 capture/restore·다른 workspace 상태와의 실패 격리·실제 재시작/IME/GUI는 미착수다. 10개 측정 시나리오의 범위와 미결 정책은 [복원 설계](plans/editor-shared-restore.md)가 소유한다.

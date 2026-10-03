@@ -1061,3 +1061,8 @@ mise exec -- zig build-exe -O ReleaseFast --dep checkpoint_file -Mroot=tools/per
 C2 도구의 인수는 private parent 경로·bytes·`warm` 또는 `rearm`이다. 고정 leaf에 쓰므로 사용자 저장
 경로에 실행하지 않고 새 임시 폴더를 사용한다. 제품/실험 범위는
 [제품 host 검증](plans/editor-shared-restore.md#제품-host-검증과-재현-결함-수정)을 따른다.
+
+workspace 손상 입력의 실제 앱 보존 검사를 20개 반례로 확장하려면
+`python3 tools/test-workspace-read-failure-app.py --extended --report /tmp/maru-workspace-hostile-20.json`을
+사용한다. 빌드된 앱을 사용하며 각 회차에 독립 test home을 만든다. 전체 suite 20회 반복이나
+새 공유 뷰 재시작 복원 검증으로 집계하지 않는다.

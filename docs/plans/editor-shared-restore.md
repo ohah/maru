@@ -548,3 +548,42 @@ checkpoint, 잘못된 UTF-8, 알 수 없는 헤더, canonical leaf가 디렉터�
 캡처 20개·읽기 9개 집중 gate와 캡처 mutation 5개/정상·동등 변경 대조군도
 다시 통과했다 (`/tmp/maru-hostile-focused-repeat.log`, `/tmp/maru-hostile-capture-repeat.log`).
 이번 추가 실행에서 제품 결함은 발견되지 않았다.
+
+### 추가 적대적 검증 20회 — 실제 앱의 손상 입력 보존
+
+`python3 tools/test-workspace-read-failure-app.py --extended --report /tmp/maru-workspace-hostile-20.json`
+으로 아래 20개 반례를 각각 새 test home에서 실행했다. 이는 전체 suite 20회 반복이 아니라
+서로 다른 입력의 실제 앱 시작·종료 20회다. 모든 회차에서 종료 코드 0, restore-incomplete
+저장 생략, canonical inode/내용, 기존 백업 inode/bytes, 같은 폴더의 무관한 sentinel 보존과
+임시 저장 파일 부재를 확인했다. 디렉터리는 내부 sentinel을, 권한 거부는 mode 000 유지도 판정했다.
+
+| 회차 | 반례 | 결과 |
+|---|---|---|
+| 1 | 헤더 첫 byte 뒤 절단 | 보존 |
+| 2 | 헤더 중간 절단 | 보존 |
+| 3 | window 줄 구조 키 절단 | 보존 |
+| 4 | tab 줄 구조 키 절단 | 보존 |
+| 5 | tree-node 줄 절단 | 보존 |
+| 6 | pane 줄 구조 키 절단 | 보존 |
+| 7 | surface custom-name 따옴표 안 절단 | 보존 |
+| 8 | runtime-handle 첫 부분 따옴표 안 절단 | 보존 |
+| 9 | runtime-state 따옴표 안 절단 | 보존 |
+| 10 | runtime-handle 두 번째 부분 따옴표 안 절단 | 보존 |
+| 11 | 알 수 없는 버전 헤더 | 보존 |
+| 12 | 선언된 window 탭 개수와 실제 개수 불일치 | 보존 |
+| 13 | active-tab 숫자 문법 오류 | 보존 |
+| 14 | 선언된 tab pane 개수와 실제 개수 불일치 | 보존 |
+| 15 | active-pane 숫자 문법 오류 | 보존 |
+| 16 | tree leaf의 범위 밖 pane 인덱스 | 보존 |
+| 17 | 선언된 surface 개수와 실제 개수 불일치 | 보존 |
+| 18 | active-term 숫자 문법 오류 | 보존 |
+| 19 | canonical 경로가 디렉터리 | 보존 |
+| 20 | canonical 파일 읽기 권한 거부 | 보존 |
+
+초기 입력 분류 두 가지는 잘못된 기대값이라 수정했다. `cols=1` 뒤 절단은 완전한 숫자이고
+생략된 rows는 parser 기본값 24를 사용한다. 숫자 `active-tab=999999`는 parser가 읽은 뒤
+기존 workspace apply가 마지막 탭으로 보정한다. 이 둘을 손상 파일 거부 대상으로 집계하지
+않았다. 초기 실패 로그는 `/tmp/maru-workspace-hostile-20.log`,
+`/tmp/maru-workspace-hostile-20-final.log`이며 최종 20회 결과는
+`/tmp/maru-workspace-hostile-20-verified.log`와 JSON 보고서에 남겼다.
+제품 수정은 없으며, 새 공유 뷰 복원 연결·동시 외부 writer·전원 손실 보장은 여전히 제외한다.

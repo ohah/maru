@@ -114,5 +114,8 @@ Windows 뷰 revision 갱신과 여러 view lease의 파생 캐시 수명은 wind
 undo 그룹·저장·dirty-close·외부 감시가 연결된 것은 아니므로 W8.17 완료로 세지 않는다.
 
 실험적 local NTFS 저장 transaction과 native 판정은 windows-platform.md §2m.141에 기록했다.
-일반 앱 저장에는 아직 연결하지 않았다. capability·commit 실패 결과 확정·crash 복구·경로 경쟁 검증과
+일반 앱 저장에는 아직 연결하지 않았다. capability·crash 복구·경로 경쟁 검증과
 키보드/IME 편집→저장→재열기 실앱 판정이 남아 있으므로 W8.17은 계속 진행 중이다.
+
+열린 KTM 핸들의 실제 결과 조회와 uncertain phase 반영은 windows-platform.md §2m.142에서
+검증했다. 모든 실패 타이밍과 프로세스 종료 후 복구, L2 revision 저장 ack는 별도 진행 대상이다.

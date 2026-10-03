@@ -233,6 +233,7 @@ src/
                         action 투영)·ids(frame-local intent 표)·view(semantic paint와 text 투영)는 서로 다른 이유로 바뀐다.
                         editor_view/는 facade 없이 폴더만 두고 편집기 본문 렌더를 content·frame·diff_frame·geometry·gutter·scrollbar·surface·viewport로 가른다.
   cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; lsp_trust: `maru editor lsp trust list|revoke|forget` 파서·`--help`·client wire — 언어 서버 신뢰 조회·철회·잊기(부여 없음, 워크스페이스 신뢰 WT4b); sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다.
+                        internal_contract.zig는 hidden child command 이름·notification runtime 영수증 스키마의 공통 wire 계약을 소유한다. native argv grammar와 실행 권한은 플랫폼 adapter에 남는다.
                         **이 폴더의 제품 코드는 순수하다**(std + 계약 모듈만, 소켓·OS 0) — 그 순수성이 파서·wire·validator를 테스트 가능하게 만드는 근거다.
                         `test` 블록은 이 규칙 밖이다(실제 동작을 실측하느라 fork/pipe를 쓸 수 있다 — `ssh.zig`의 신호 수명 헬퍼가 그 예다).
                         **이 규칙은 산문이 아니라 `tests/boundary/cli_purity.zig`가 기계로 고정한다** — 재고에 없는 파일은 impure 토큰 0이고,
@@ -264,7 +265,7 @@ src/
                         `profile.zig`(0700·소유자·ACL·링크 거절·백업 제외)·앱 쪽(W3b): `../web_osr.zig`(sidecar 띄우기·재시작 예산·브라우저 기록·알림 적용 — lsp_process 선례)·`session/web_osr_plan.zig`(창 배치 → sidecar 명령, 순수)·`session/web_osr_view.zig`(보일 링 고르기·GPU 소비자 규칙, 순수)·`session/web_osr_input.zig`(W4b — 본문 hit·divider 잡는 띠 제외·DIP·수식자·휠, 순수)·`session/web_osr_console.zig`(W9c① — 탭의 콘솔 링·읽는 쪽에 따른 거름, 순수)·`session/web_osr_network.zig`(W9d① — 탭의 네트워크 기록·읽는 쪽마다 시작점·설정이 꺼지면 투영, 순수)·`session/web_sidecar/net_fields.zig`·`net_policy.zig`(W9d① — 네트워크 메시지의 닫힌 칸·헤더 덩어리, 보이는 칸의 규칙 — sidecar 와 maru 가 같은 파일)·픽셀 링(W2): `ring_producer.zig`(sidecar — 복사·맞바꾸기·세대)·`ring_receiver.zig`(maru —
                         pid·토큰 검증, CEF 없이 시험)·`ring_message.zig`·`mach.zig`·`iosurface.zig`·`ring.zig`(판정자·W3 입구)·`app`·`settings`·`layout`·`object`·`cef`. CEF 헤더는 저장소에 없고 `-Dcef-sdk` 가 있을 때만 빌드한다(build/web_sidecar.zig).
     session_host.zig     P3 barrel(protocol·framing·screen_stream·registry·server·socket_server re-export + test 집약, test module은 socket용 link_libc). 구현은 session_host/에 목적별로.
-    session_host/        P3 진행: entrypoint.zig(hidden `__session-host` CLI command의 launcher/main 공용 단일 출처),
+    session_host/        P3 진행: entrypoint.zig(POSIX native argv grammar; hidden command 이름은 cli/internal_contract.zig가 소유),
                         protocol.zig(`MRSH` 32-byte header·kind/flag·error 어휘 codec — **구현됨, P3-a**),
                         framing.zig(partial I/O incremental parser·kind별 cap·unknown optional skip — **구현됨, P3-a**),
                         screen_stream.zig(`maru.screen-stream.v1` 28-byte record header + snapshot/delta record codec·resolved run·

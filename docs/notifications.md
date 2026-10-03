@@ -96,7 +96,8 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
   `Recovered Sessions`에 둔다. `event_id`는 host-lifetime monotonic u64이고 재사용하지 않으며
   `{host_id,event_id}`가 dedup key다.
 - **local/quick 식별자**: in-process runtime은 stable host handle이 없으므로
-  `{app_instance_epoch,token,surface_id}`만 쓴다. 앱 종료와 함께 route도 끝나며 cold attach 대상이 아니다.
+  `{app_instance_epoch,token,surface_id}`만 쓴다(OS `userInfo` 키는 `ae/wt/sid`). `ae`는 실행마다 새 UUID이며 현재 실행과 정확히 일치해야 한다. 누락된 레거시 알림과 다른 실행의 알림은 이동 없이 exact 정리만 한다. `wt/sid`는 양의 정수만 허용한다. 앱 종료와 함께 route도 끝나며 cold attach 대상이 아니다.
+  `wt`는 발화 당시 위치 힌트다. 먼저 힌트 창을 조회하고, 없거나 surface가 이동했으면 같은 실행의 다른 일반 창과 quick에서 현재 소유자를 찾는다. 정확한 surface 활성화가 성공한 뒤에만 그 창을 전면으로 올린다. 닫힌 surface는 창 포커스도 바꾸지 않는다.
 - **역조회·활성화(Zig)**: `activateSurfaceById(id)` — `findTermWhere`로 `(tab, pane, term)`을 찾아
   **`switchTab → focusPaneByPtr → focusTerm`** 순서로 활성화(focusPaneByPtr는 활성 탭의 panes만, focusTerm은 활성
   pane만 보므로 순서가 강제된다 — 이 계약을 한 메서드에 가둔다). id는 재사용하지 않으므로(단조 증가) stale id가 다른

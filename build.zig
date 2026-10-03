@@ -1169,6 +1169,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationLocalRoute.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -2095,6 +2096,28 @@ pub fn build(b: *std.Build) void {
     }
     const install_macos_app_host_abi_lib = b.addInstallArtifact(macos_app_host_abi_lib, .{});
 
+    // Keep source identity and moved/closed target checks repeatable through the product PTY path.
+    const notification_click_state_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{
+            "activateSurfaceById:",
+            "M3d-2a-i moveWorkspaceToSession:",
+            "pendingNotification:",
+            "훅 원격 프레임: tmux pane 둘은 슬롯 둘",
+            "훅 Term 은 두 소스를 함께 읽고",
+            "부재 중 쌓인 로그는 상태만",
+            "원격 이벤트가 배지·알림을 로컬과 같은 자리에",
+            "알림 히스토리: push 상한",
+        },
+    });
+    const run_notification_click_state_tests = b.addRunArtifact(notification_click_state_tests);
+    run_notification_click_state_tests.setCwd(b.path("."));
+    // 10 behavior judges + 5 module-import sanity tests, including all three M3d-2a-i move judges.
+    run_notification_click_state_tests.addArg("--maru-expect-tests=15");
+    run_notification_click_state_tests.addArg("--maru-expect-passed=15");
+    const notification_click_state_step = b.step("test-notification-click-state", "Verify notification source identity, moved/closed targets and hook state isolation");
+    notification_click_state_step.dependOn(&run_notification_click_state_tests.step);
+
     // These real-PTY judges share a startup-output barrier. Keep a focused gate
     // so delayed child output and background echo can be repeated independently.
     const cursor_pty_settlement_tests = addProjectTest(b, .{
@@ -2221,6 +2244,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationLocalRoute.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         // swiftc is the final linker; a Zig static archive does not absorb its dependent archive.
@@ -5166,6 +5190,18 @@ pub fn build(b: *std.Build) void {
         macos_only_test_step.dependOn(&notification_center_helper_boundary.step);
         test_step.dependOn(&run_notification_center_helper_policy.step);
         macos_only_test_step.dependOn(&run_notification_center_helper_policy.step);
+
+        const notification_local_route_tests = b.addSystemCommand(&.{ "xcrun", "swiftc", "-parse-as-library", "-target", swiftMacOSTarget(b, target.result) });
+        notification_local_route_tests.addFileArg(b.path("src/platform/macos/NotificationLocalRoute.swift"));
+        notification_local_route_tests.addFileArg(b.path("tests/macos_notification_local_route.swift"));
+        notification_local_route_tests.addArg("-o");
+        const notification_local_route_bin = notification_local_route_tests.addOutputFileArg("maru-notification-local-route-tests");
+        const run_notification_local_route_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_notification_local_route_tests.addFileArg(notification_local_route_bin);
+        const notification_local_route_step = b.step("test-notification-local-route", "Reject local notification routes from a previous app launch");
+        notification_local_route_step.dependOn(&run_notification_local_route_tests.step);
+        test_step.dependOn(&run_notification_local_route_tests.step);
+        macos_only_test_step.dependOn(&run_notification_local_route_tests.step);
 
         const notification_scenario_receipt_tests = b.addSystemCommand(&.{
             "xcrun",

@@ -2522,7 +2522,7 @@ test "P4 N2b3 notification ABI projects the complete stable route and zeroes rou
 // 데스크톱 알림 클릭 → 발신 surface로 활성화. Swift가 알림 userInfo의 (창 토큰, surface_id)에서 토큰으로 올바른
 // 창/세션을 고른 뒤(창 키 활성화 makeKeyAndOrderFront도 Swift), 이 세션에 surface_id를 넘긴다. Zig가 (탭/panel/
 // Term)을 역조회해 그 자리로 포커스한다(activateSurfaceById — switchTab→focusPaneByPtr→focusTerm 순서 단일 출처).
-// 찾아서 활성화했으면 1, 그 surface가 이미 닫혔으면 0(무동작 — 창 활성화까지만). session null이면 0. take_bell과
+// 찾아서 활성화했으면 1, 그 surface가 이미 닫혔으면 0(무동작). Swift는 성공한 현재 소유 창만 활성화한다. session null이면 0. take_bell과
 // 같은 u32 반환 패턴(상태 코드가 아니라 found 여부). 배너 클릭으로 그 surface를 봤으니 인앱 센터의 같은 surface
 // 알림도 읽음 처리한다(배너↔센터 동기화 — 닫힌 surface여도 읽음은 한다).
 pub export fn maru_macos_app_session_activate_surface(session: ?*AppSession, surface_id: u64) u32 {

@@ -39665,6 +39665,21 @@ test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조
     try std.testing.expect(!term_ops.activateSurfaceById(session, 0xFFFF_FFFF));
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
+    // A pane move retains identity; the click must resolve the new pane, not stale geometry.
+    const target_tab = tab_ops.activeTab(session);
+    pane_ops.moveTermToPane(session, target_tab.panes.items[1], 1, target_tab.panes.items[0], 0);
+    try std.testing.expect(tab_ops.switchTab(session, 0));
+    try std.testing.expect(session.activateSurfaceById(target_id));
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(@as(usize, 0), tab_ops.activeTab(session).active_pane);
+    try std.testing.expectEqual(@as(usize, 0), pane_ops.activePane(session).active_term);
+    // A closed source cannot redirect an old banner to a newly-created terminal.
+    term_ops.closeTermAt(session, 1, pane_ops.activePane(session), 0);
+    try pane_ops.newTermInActivePane(session);
+    const replacement_id = term_ops.activeSurface(session).id;
+    try std.testing.expect(replacement_id != target_id);
+    try std.testing.expect(!session.activateSurfaceById(target_id));
+    try std.testing.expectEqual(replacement_id, term_ops.activeSurface(session).id);
 }
 
 test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id로 drain한다" {
@@ -72685,6 +72700,11 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
 
     var buf: [8]u64 = undefined;
     const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf);
+    // A pre-move banner still carries the source window hint. Only the current
+    // destination may activate this globally stable surface id after transfer.
+    try std.testing.expect(!src.activateSurfaceById(moved_id));
+    try std.testing.expect(dst.activateSurfaceById(moved_id));
+    try std.testing.expectEqual(moved_id, term_ops.activeSurface(dst).id);
 
     // outcome: 창 간 이동, moved={moved_id}, normal↔normal이라 revoke 없음, src에 첫 워크스페이스 남아 안 닫힘.
     try std.testing.expect(outcome.cross_window);

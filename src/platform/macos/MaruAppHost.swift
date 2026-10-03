@@ -4163,6 +4163,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     )
     // 알림 클릭 라우팅 토큰 채번기(makeTerminalSurface가 단조 증가로 부여 — 창마다 유일). 0은 미설정 sentinel이라 1부터.
     private var nextSurfaceToken: UInt64 = 1
+    // Window and surface counters restart on launch; persisted local banners need this epoch.
+    private let notificationInstanceEpoch = UUID().uuidString
     private struct StableNotificationRoute: Equatable, Sendable {
         let hostIdHi: UInt64
         let hostIdLo: UInt64
@@ -8307,7 +8309,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // drainNotification은 tickAppSession이 explicitSurface로 이 창을 고른 컨텍스트에서 돈다 — activeSurface가 곧
         // 발신 창이다. 그 token과 surface_id를 실어, 클릭 시 token으로 창/세션을, surface_id로 그 안의 Term을 찾는다.
         // fg=전면 배너 여부(Zig 결정) — willPresent가 읽어 자기 화면 OSC 알림 배너 노이즈를 억제한다.
-        var userInfo: [String: Any] = ["wt": activeSurface?.token ?? 0, "sid": surfaceId, "fg": foreground]
+        var userInfo: [String: Any] = ["ae": notificationInstanceEpoch, "wt": activeSurface?.token ?? 0, "sid": surfaceId, "fg": foreground]
         let identifier: String
         if routePresent != 0 {
             let stableHostId = String(format: "%016llx%016llx", hostIdHi, hostIdLo)
@@ -8375,13 +8377,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return String(cString: bytes)
     }
 
-    /// 알림 userInfo에서 (창 토큰, surface_id)를 꺼낸다(drainNotification이 실은 ["wt","sid"]를 역으로 읽는다).
-    /// token이 양수일 때만 유효 — 0(미설정 sentinel)이거나 외부/레거시 알림이면 nil이라 클릭이 무시된다. 순수 함수라
-    /// AppKit 의존이 없어 라우팅 파싱을 단위로 검증할 수 있다(세션 내 역조회는 Zig activate_surface가 소유 — 네이티브 최소).
-    nonisolated static func parseNotificationRoute(_ userInfo: [AnyHashable: Any]) -> (token: UInt64, surfaceId: UInt64)? {
-        guard let wt = (userInfo["wt"] as? NSNumber)?.uint64Value, wt != 0,
-              let sid = (userInfo["sid"] as? NSNumber)?.uint64Value else { return nil }
-        return (token: wt, surfaceId: sid)
+    /// Local banners expire with their app launch. Validate the epoch before numbers can
+    /// select any current window; the Zig surface lookup owns tab/pane/Term activation.
+    nonisolated static func parseNotificationRoute(
+        _ userInfo: [AnyHashable: Any], expectedEpoch: String
+    ) -> NotificationLocalRoute? {
+        NotificationLocalRoute.parse(userInfo, expectedEpoch: expectedEpoch)
     }
 
     /// Persisted Notification Center userInfo is untrusted input, not attach authority. Accept only
@@ -8723,7 +8724,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
         let callbackAtNs = notificationReleaseContinuousTimeNs()
         let hasStableKey = userInfo["hid"] != nil || userInfo["rid"] != nil || userInfo["eid"] != nil
-        let localRoute = hasStableKey ? nil : Self.parseNotificationRoute(userInfo)
+        let localRoute = hasStableKey ? nil : Self.parseNotificationRoute(userInfo, expectedEpoch: notificationInstanceEpoch)
         Task { @MainActor [weak self] in
             defer { completionHandler() } // 누락 시 OS 경고 — 모든 경로에서 보장.
             guard let self else { return }
@@ -8754,7 +8755,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // Any stable-key-shaped response that failed strict parsing is malformed persisted input.
             // Never reinterpret its possibly stale wt/sid as a local route in a new process.
             guard !hasStableKey, let route = localRoute else { return }
-            guard let surface = self.surfaceForToken(route.token) else { return } // 창이 닫혔으면 무동작.
+            // A workspace can move after the banner is posted. Activate its exact surface
+            // in the current owner before bringing any window forward; a closed target changes no focus.
+            let owners = self.windows + (self.quick.map { [$0] } ?? [])
+            guard let surface = route.activateOwner(among: owners.map { (token: $0.token, owner: $0) }, activate: { owner, id in
+                guard let session = owner.appSession else { return false }
+                return maru_macos_app_session_activate_surface(session, id) != 0
+            }) else { return }
             if surface === self.quick, let panel = surface.window {
                 // quick 패널은 숨김 시 화면 밖(frames.hidden)에 있어, 그냥 makeKeyAndOrderFront하면 보이지 않는 창이
                 // 키를 가져간다. 숨김 상태면 정식 show 경로(슬라이드/페이드 + grid + 상태)를 태우고, 이미 보이면 키만 올린다.
@@ -8767,9 +8774,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             } else {
                 surface.window?.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
-            }
-            if let session = surface.appSession {
-                _ = maru_macos_app_session_activate_surface(session, route.surfaceId)
             }
         }
     }

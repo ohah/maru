@@ -10634,3 +10634,12 @@ workers added on main (preview, disk apply, batch collection and mixed preparati
 now consume `maru.app.detached_worker_wait` after the shared lifecycle module moves
 out of the macOS folder. File-open ownership, allocation-failure and BOM/CRLF tests
 passed together with the Windows paint regression gate at this commit.
+
+The archive-worker rebase scans both `src/platform/macos` and `src/app` in the
+detached-worker quiescence judge; neither root is removed to make the move pass.
+The scanner retains Zig 0.17 array initialization. Focused archive tests compiled
+43 cases (15 worker cases and 28 anonymous aggregation blocks), yielding 39 passed,
+4 platform skips and no failures on Windows. The registered expected count is 43;
+Windows runner argument parsing currently bypasses that numeric guard, so actual
+output was inspected explicitly. macOS runtime verification remains separate.
+The standalone quiescence judge and Windows paint regression gate also passed.

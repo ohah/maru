@@ -341,15 +341,11 @@ resolve 단계에서 다시 실패하지 않는다.)
 
 ## 범위와 후속
 
-appearance(폰트/테마/커서)와 키바인딩 **파싱**까지 구현됐다. 의존성 순서상 config가 먼저 와야
-뒤따르는 설정형 기능이 하드코딩 후 재작업되지 않는다([구현 계획](implementation-plan.md) 참조).
+appearance(폰트/테마/커서)·키바인딩(파싱과 app action 실행 — `AppSession.dispatchAppAction`)·동작 토글
+(`input.paste-protection` 등)·terminal 입력 remap(`<조합> → 바이트` 매크로, `TerminalBinding`)·메뉴의 수동
+**Reload Config**/**Reset to Defaults**·설정 화면(GUI — [세팅 페이지](settings-page.md))이 있다. 의존성 순서상
+config가 먼저 와야 뒤따르는 설정형 기능이 하드코딩 후 재작업되지 않는다([구현 계획](implementation-plan.md) 참조).
 후속:
 
-- **키바인딩 dispatch**: 파싱된 `KeyBindingResolver`로 실제 app action(탭 열기 등)을 실행한다 —
-  8단계 탭/quick terminal/global shortcut에서.
-- **동작 토글**: paste 보호, 이모지 grapheme 기본값(DEC mode 2027 강제) 등.
-- **terminal 입력 remap**: `<조합> → 바이트` 매크로(TerminalBinding) config.
 - **파일 변경 자동 감지 reload**: 파일 watcher로 변경을 감지해 자동 재-resolve(자동 감지만 후속). 메뉴의 수동 **Reload Config**(파일 재로드해 재시작 없이 적용)·**Reset to Defaults**(확인 모달 후 `session.keep-alive-after-quit`은 보존하고 나머지 config를 내장 기본값으로 되돌려 파일을 덮어씀 — 커맨드 팝업 "Reset All Settings to Defaults"와 같은 통합 리셋)는 구현됨.
 - **다른 셸(bash/fish) 통합·ssh 라우팅**(보류, 2026-06): 셸 통합(macOS 편집키·OSC 133/7·`shell-integration.ssh` ssh 라우팅)은 **현재 zsh 전용**(`ZDOTDIR`+`.zshenv` 주입)이다. fish는 vendor `conf.d`로 깔끔히 주입할 수 있으나, bash는 maru가 **login 셸**로 띄워(`login=true`) `--rcfile`이 무시되고 `~/.bash_profile`만 읽어 사용자 설정을 안 깨는 주입이 까다롭다(레퍼런스 동작 비교 + 신중한 검증 필요). 그래서 별도 후속으로 둔다 — bash/fish 사용자는 그때까지 직접 `maru ssh`를 쓴다.
-- **설정 UI**: 앱 내 세팅 화면(GUI) + config 파일 양방향 반영. 전략·섹션 구조·신규 키·PR 분해는
-  [세팅 페이지 전략과 구현 계획](settings-page.md)을 단일 출처로 둔다(계획 단계, 2026-06).

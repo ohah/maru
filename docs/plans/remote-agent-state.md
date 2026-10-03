@@ -1,6 +1,7 @@
 # 원격 에이전트 상태(배지·대화 줄) — 단계 계획
 
-**초안.** 확정 전까지 [AGENTS.md](../../AGENTS.md) 인덱스에 연결하지 않는다.
+[구현 계획 인덱스](../implementation-plan.md)에 연결돼 있다. **RA1~RA8 착지** — RA7 pane 별 슬롯은 2026-09-21(cb467ff78 ·
+`session/remote_pane_table.zig`), RA8 훅 커맨드 통일도 같은 날이다. 남은 축은 §1.9 «남은 것» 표가 소유한다.
 
 ## 0. 전제
 

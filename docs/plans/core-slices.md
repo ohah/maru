@@ -122,7 +122,7 @@ TDD 방식:
 - xterm 전체 호환성.
 - Kitty graphics protocol 잔여: sixel(DCS 기반 — 지금은 DCS 상태기계가 소비·폐기만 한다, `src/terminal/parser.zig`). K1~K5는 완료(APC 파서·디코드·저장·placement·K2 Metal 렌더·K3 chunked/zlib/PNG·K4 delete/LRU evict/텍스처 evict·K5 query(`a=q`) 응답 — 6092cf4ea, `src/terminal/kitty.zig`)이고 PNG도 전 color type·bit depth를 받는다(wuffs, 5b6b4ef07) — [터미널 입력·프로토콜 이력](terminal-input-and-protocols.md)의 "kitty graphics K2 렌더"·"kitty graphics PNG" 절 참조. sixel은 Ghostty도 미지원이라 후순위.
 - OSC/clipboard/advanced mouse mode 전체.
-- 합자(ligatures, line-level shaping)·`isExtendedPictographic`의 완전한 Extended_Pictographic 속성표는 후속이다. ambiguous width 설정(`text.ambiguous-width`)·ZWJ emoji(GB11, mode 2027)·box drawing 합성/정렬·grapheme 다중 저장(`grapheme_id`+`grapheme_store`, `Cell.combining` 폐지)은 완료 — 위 "한글 Grapheme Cluster" 절·[grapheme-clustering](../grapheme-clustering.md) 참조.
+- `isExtendedPictographic`의 완전한 Extended_Pictographic 속성표는 후속이다(지금은 블록 범위 셋 — `src/grapheme.zig`). 합자(ligatures)는 착지했다 — run 단위 셰이핑 + `font.ligatures`(기본 켬, 0e9fdd929 · `coretext_shaper.zig` `ligatures_enabled`). ambiguous width 설정(`text.ambiguous-width`)·ZWJ emoji(GB11, mode 2027)·box drawing 합성/정렬·grapheme 다중 저장(`grapheme_id`+`grapheme_store`, `Cell.combining` 폐지)은 완료 — 위 "한글 Grapheme Cluster" 절·[grapheme-clustering](../grapheme-clustering.md) 참조.
 - Ghostty/libghostty-vt 코드 복사.
 
 ## 4단계: macOS `PtySession` 최소 구현
@@ -322,4 +322,4 @@ macOS bridge 언어 선택:
 막기 위해 config 파일 로더를 먼저 깐다. 1단계로 **appearance(폰트/테마/커서)**와 **키바인딩 파싱**을 구현했다 —
 `~/.config/maru/config`(또는 `$MARU_CONFIG`)의 `key = value` 형식을 순수 파서(`config/loader.zig`,
 Linux CI 포함 단위 테스트)로 `theme.Config`에 담고 `resolveAppearance`에 넘긴다. forgiving(알 수
-없는 key·잘못된 값은 기본값 유지 + diagnostic), 문자열 소유권은 arena(세션 동안 보관). 키바인딩(`keybind = <조합> = <action>`)은 KeyChord.parse·parseAction으로 파싱하고 중복을 걸러 검증된 KeyBindingResolver로 준비한다 — 실제 dispatch는 8단계(탭 액션)에서 이 resolver를 그대로 쓴다. 자세한 형식/키는 [설정(config) 파일](../configuration.md). 후속: 동작 토글, terminal 입력 remap, 런타임 reload, 설정 UI.
+없는 key·잘못된 값은 기본값 유지 + diagnostic), 문자열 소유권은 arena(세션 동안 보관). 키바인딩(`keybind = <조합> = <action>`)은 KeyChord.parse·parseAction으로 파싱하고 중복을 걸러 검증된 KeyBindingResolver로 준비한다 — 실제 dispatch는 8단계(탭 액션)에서 이 resolver를 그대로 쓴다. 자세한 형식/키는 [설정(config) 파일](../configuration.md). 후속이던 넷은 착지했다(2026-10-03 확인): 동작 토글(`input.paste-protection` 등 — [설정 파일](../configuration.md) 표), terminal 입력 remap(`text:`/`esc:`/`ctrl:` 매크로 키바인딩, aa2543fb1), 런타임 reload(메뉴 Reload Config — `maru_macos_app_session_reload_config`, 18cb1808c), 설정 UI(⌘, 세팅 화면 — `app_session/settings.zig`, 149ff13e5). 파일 변경 자동 감지 reload 만 후속이다.

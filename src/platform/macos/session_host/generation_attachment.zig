@@ -1488,6 +1488,9 @@ pub const GenerationAttachment = struct {
         controller_generation: u64,
         cols: u16,
         rows: u16,
+        /// 셀 픽셀(0 = 안 싣는다 — `control_response_wire.ResizeRequest`).
+        cell_width_px: u16,
+        cell_height_px: u16,
         client_sequence: u64,
         deadline: client_deadline.AbsoluteDeadline,
     ) anyerror!ForcedResizeResult {
@@ -1499,12 +1502,14 @@ pub const GenerationAttachment = struct {
             self.poison(.read_timeout) catch {};
             return error.DeadlineExceeded;
         }
-        var buffer: [96]u8 = undefined;
+        var buffer: [160]u8 = undefined;
         const encoded = control_response_wire.encodeParams(&buffer, .{ .resize = .{
             .stream_id = stage.stream_id,
             .cols = cols,
             .rows = rows,
             .client_sequence = client_sequence,
+            .cell_width_px = cell_width_px,
+            .cell_height_px = cell_height_px,
         } }) catch |err| {
             self.poison(if (err == error.BufferTooSmall)
                 .local_resource_exhausted

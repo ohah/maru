@@ -2184,6 +2184,8 @@ pub const ReconnectGenerationOwner = struct {
         stage: *const catchup_stage_contract.PreparedStage,
         controller_generation: u64,
         size: terminal.Size,
+        cell_width_px: u16,
+        cell_height_px: u16,
         deadline: client_deadline.AbsoluteDeadline,
     ) anyerror!void {
         if (!self.validateCandidatePromotedController(
@@ -2202,6 +2204,8 @@ pub const ReconnectGenerationOwner = struct {
                 controller_generation,
                 size.cols,
                 size.rows,
+                cell_width_px,
+                cell_height_px,
                 next_sequence,
                 deadline,
             ),
@@ -2830,6 +2834,11 @@ pub const RemoteRuntime = struct {
     /// resize 도 버려졌고 input 도 Unauthorized 였다 — 게시 뒤에도 관문이 닫혀 있었다는 뜻이고, 왜 닫혔는지는
     /// 아직 모른다. 이 값은 관문이 제대로 열린 재연결에서 옛 크기가 되박히지 않게 할 뿐이다.
     layout_size: ?terminal.Size = null,
+    /// 레이아웃이 **마지막으로 알린** 셀 픽셀(글꼴 크기 — `resizeWithCell`, 0 = 아직 모름). `layout_size` 와 같은 이유로
+    /// 관문보다 먼저 적고, 재연결 강제 resize 가 함께 싣는다 — 안 실으면 끊긴 동안 글꼴을 바꾼 경우 host 가 격자만 바꿔
+    /// DECSET 2048 통지가 «새 격자 × 옛 픽셀» 뒤에 `set_cell_metrics` 로 한 번 더 간다.
+    layout_cell_width_px: u16 = 0,
+    layout_cell_height_px: u16 = 0,
     /// 관문이 버린 mutation 을 op 마다 **마지막으로 적은 이유**. 같은 op·같은 이유는 다시 적지 않고, 이유가
     /// 바뀌면 다시 적는다 — 재연결 중 일시적 이유(예: `attachment_not_live`) 하나가 뒤따르는 진짜 이유를
     /// 가리면 로그가 엉뚱한 원인을 가리킨다. 그 op 가 stable mutation 을 얻으면 비우고, 재연결 게시가
@@ -3275,6 +3284,8 @@ pub const RemoteRuntime = struct {
                 stage,
                 controller_generation,
                 size,
+                runtime.layout_cell_width_px, // 끊긴 동안 바뀐 글꼴도 격자와 함께 한 번에(`layout_cell_width_px` 주석)
+                runtime.layout_cell_height_px,
                 deadline,
             );
             return size;
@@ -4173,6 +4184,8 @@ pub const RemoteRuntime = struct {
         self.io = io;
         // in-place(`undefined`) 생성이라 필드 기본값이 안 먹는다 — 모든 constructor 가 지나는 여기서 적는다.
         self.layout_size = null;
+        self.layout_cell_width_px = 0;
+        self.layout_cell_height_px = 0;
         self.mutation_drop_reasons = @splat(null);
         self.mutation_drop_lines = 0;
         self.generation_owner = .{};
@@ -5791,6 +5804,10 @@ pub const RemoteRuntime = struct {
         try self.admitRuntimeOperation();
         // 관문보다 **먼저** 적는다 — 여기서 버려진 크기도 재연결 게시 때 host 에 박혀야 한다(`layout_size`).
         self.layout_size = .{ .cols = cols, .rows = rows };
+        if (cell_fits) { // 모르면(0) 마지막으로 안 값을 둔다
+            self.layout_cell_width_px = cell_w;
+            self.layout_cell_height_px = cell_h;
+        }
         // Observer viewport follows the controller's canonical runtime size; local window changes
         // are acknowledged as a no-op instead of becoming an infinite GUI retry.
         if (!self.gateMutation(.resize)) return;
@@ -8504,6 +8521,8 @@ pub const testing_api = if (builtin.is_test) struct {
         // 이후 input epoch가 정해진 첫 mutation에서 final-address 초기화할 수 있게 한다.
         runtime.mutation_owner = .{};
         runtime.layout_size = null;
+        runtime.layout_cell_width_px = 0;
+        runtime.layout_cell_height_px = 0;
         runtime.mutation_drop_reasons = @splat(null);
         runtime.mutation_drop_lines = 0;
         runtime.generation_owner = .{};
@@ -12834,6 +12853,8 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
                                     4,
                                     80,
                                     24,
+                                    0, // 셀 픽셀 없음 — 요청 바이트는 예전 그대로(이 판정자의 peer 가 그 바이트를 본다)
+                                    0,
                                     1,
                                     catchup_deadline,
                                 );

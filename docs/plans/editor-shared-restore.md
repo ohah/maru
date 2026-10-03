@@ -334,3 +334,39 @@ incomplete-no-clobber boundary 각각 1/1은 이 배선의 소스 판정이다. 
 현재 host의 `loadWorkspaceText`는 `Data(contentsOf:)`로 전체 파일을 읽으므로 필드 수 한도만으로
 전체 bytes와 초기 read 메모리를 제한했다고 주장할 수 없다. codec 단독의 count 검증과
 checkpoint 전체 read/capture 예산은 서로 다른 gate다. 새 전역 한도를 임의로 확정하지 않는다.
+
+## 남은 전체 저장·읽기 영향 실행 확인
+
+`python3 tools/perf/workspace_host_impact.py`는 현재 Swift host의
+`captureWorkspaceSnapshot`과 `loadWorkspaceText` 본문을 그대로 추출해 macOS에서 실행한다.
+창/session fixture와 Zig serialize/semantic-count ABI만 대체한다. 정상 sibling bytes,
+첫/마지막 창 실패와 후속 호출 중단, nil/빈 payload, 없는 session, 전역 validation 실패,
+정상 재시도, published-only 제외/포함을 12개 assertion으로 확인했다.
+ABI 실패가 에디터 OOM 때문에 발생했다는 제품 재현이나 새 metadata codec 연결 검사는 아니다.
+fixture bytes의 terminal/browser/layout 표식은 host의 문자열 보존을 확인할 뿐 실제 Zig 포맷 판정이 아니다.
+
+**확인된 영향:** 포함된 창 하나의 serialize 실패는 이미 모은 다른 창 bytes도 게시하지 못하게 한다.
+실패하지 않는 창만 저장하면 실패한 창이 다음 복원에서 사라지므로 현재 전체 취소는 의도된 보호다.
+실패가 지속되면 terminal/browser/layout 변경도 마지막 성공 checkpoint 이후 갱신되지 않는다.
+이는 현재 live 값의 변조와 다르며, 이전 checkpoint 이후 변경을 재시작에서 잃을 가능성이다.
+원인을 없애고 재시도하면 정상 전체 bytes가 다시 나온다. 새 codec을 연결하지 않았으므로
+그 codec의 실패가 현재 제품 저장을 막는다고 표현하지 않는다.
+
+기존 checkpoint coordinator 실행 검사 11/11에서 background capture 실패는 write 효과 없이
+dirty와 backoff 재시도를 유지하고, final capture 실패는 `cancel_quit`을 내는 것을 확인했다.
+Swift host는 keep-alive 종료를 취소하며 end-all 허용 종료는 진행할 수 있다. 파일 게시 검사 17/17은
+syscall 실패와 rename 전 SIGKILL 등의 이전 완전본 보존을 확인한다. 각 계층의 실행 증거이며
+실제 앱 종료까지 연결한 새 E2E 증거는 아니다. 표시 metadata만 기본값으로 내려 저장하는 정책과
+필수 문서/topology 실패에서 전체 취소하는 정책은 별도로 결정해야 한다.
+
+**읽기 비용 실측:** 실제 `loadWorkspaceText`를 1/16/64 MiB 파일에 실행하면 모두 전체 bytes를 읽는다.
+각 새 프로세스의 최대 RSS는 8,159,232 / 39,649,280 / 140,296,192 bytes였다.
+64 MiB 입력은 약 134 MiB RSS를 보였다. 메모리에는 Foundation/AppKit과 read/decode 비용이 포함되며
+제품 AppSession·Zig parser·복원 모델은 없다. 파일은 큰 주석 줄 fixture이며 의미 검증 전 read 비용이다.
+한 번씩 측정한 시간은 520/3,144/15,761 µs로 성능 보장이나 frame budget 판정에 쓰지 않는다.
+필드 수 제한은 이 최초 전체 읽기 비용을 제한하지 않는다. 새 파일 byte 상한이나 streaming parser는
+이번 확인에서 도입하지 않았고 정상 규모 측정·실패 UX와 함께 별도 설계해야 한다.
+
+재현 도구는 source 추출 실패·컴파일 실패·assertion 실패에서 실패 종료하고 artifact 경로를 출력한다.
+로그: `/tmp/maru-workspace-impact-retained.log`, `/tmp/maru-workspace-impact-coordinator.log`,
+`/tmp/maru-workspace-impact-file.log`. 파일 읽기 probe는 생성한 부하 입력 파일을 실행 후 삭제한다.

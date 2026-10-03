@@ -3935,3 +3935,8 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 - 상태: 부분 구현. `test-editor-restore-codec` Debug/ReleaseFast 7개 exact-count. `perf-editor-workspace-state`는 codec 부하만 측정한다.
 - 판정: 방향 있는 선택·wrap 상속·접힘·로컬 path payload, 문서 참조, 잘린 입력·개수 부풀리기·기존 커서 상한·OOM 정산.
 - 한계: 제품 capture/restore·다른 workspace 상태와의 실패 격리·실제 재시작/IME/GUI는 미착수다. 10개 측정 시나리오의 범위와 미결 정책은 [복원 설계](plans/editor-shared-restore.md)가 소유한다.
+
+전체 저장 영향 추가 확인: `tools/perf/workspace_host_impact.py`의 host 본문 실행 assertion 12개,
+기존 checkpoint coordinator 11/11, 파일 게시 17/17. 첫/마지막 창 실패의 전체 캡처 취소와
+재시도·이전 완전본 보존을 계층별로 확인했다. 실제 제품 에디터 OOM·종료 E2E는 제외한다.
+전체 읽기 1/16/64 MiB RSS와 제한은 [공유 복원 계획](plans/editor-shared-restore.md#남은-전체-저장읽기-영향-실행-확인)을 따른다.

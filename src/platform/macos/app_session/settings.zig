@@ -876,6 +876,9 @@ pub fn removeTerminalMacro(self: *AppSession, chord_str: []const u8) void {
         if (!b.chord.eql(chord)) list.append(a, b) catch return;
     }
     self.loaded_config.terminal_bindings = list.toOwnedSlice(a) catch return;
+    // 매크로가 차지하던 빌트인 chord 가 풀렸다 — 메뉴 keyEquivalent·팔레트 표시를 다시 깐다(chordForAction 이
+    // 사용자 매크로가 차지한 빌트인 chord 를 건너뛰므로 매크로 증감이 메뉴를 바꾼다).
+    self.rebuildCommandCatalog();
     self.cancelPendingMacro(chord_str); // 같은 chord 대기 추가 예약 상쇄 + 중복 삭제 예약 방지
     const chord_owned = a.dupe(u8, chord_str) catch return;
     self.config_terminal_macro_removes.append(self.allocator, chord_owned) catch return;
@@ -3347,6 +3350,9 @@ pub fn setTerminalMacro(self: *AppSession, chord_str: []const u8, rhs_str: []con
     if (!resolverUnbinds(self.loaded_config.unbinds, chord) and input_ops.chordShadowsBuiltin(chord))
         settingsMessageOrNotice(self, .set_macro_overrides_default);
     self.loaded_config.terminal_bindings = new_binds; // 라이브 반영(다음 keyBindingResolver가 본다)
+    // 매크로가 빌트인 chord 를 차지하면 메뉴가 그 chord 를 놓아야 한다 — 안 그러면 AppKit 이 keyDown 보다 먼저
+    // 메뉴의 빌트인 동작을 실행해 매크로가 재시작 전까지 안 나간다.
+    self.rebuildCommandCatalog();
     // 이 chord를 죽인 옛 `keybind = <chord> = unbind` 지시어가 남아 있으면 정리(rebind 경로와 동일) — 안 그러면
     // 나중에 이 매크로를 지웠을 때 stale unbind가 빌트인을 영영 비활성으로 둔다(code-review max).
     self.clearStaleUnbind(chord);

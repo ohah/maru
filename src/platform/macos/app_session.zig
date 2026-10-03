@@ -61464,9 +61464,26 @@ test "터미널 매크로: 추가·편집·삭제 라이브 반영 + write-back 
     // (validate는 user 바인딩만 보므로 chordShadowsBuiltin가 별도로 경고). 라이브 반영 + notice 표시.
     session.chrome_host.notice.dismiss();
     try std.testing.expect(input_ops.chordShadowsBuiltin(try config_mod.keybinding.KeyChord.parse("Cmd+T"))); // Cmd+T는 빌트인
+    _ = session.takeCommandCatalogDirty();
+    try std.testing.expect(newTermKeyDisplay(session).len > 0); // 대조군: 매크로 전엔 메뉴가 ⌘T 를 갖는다
     settings_ops.setTerminalMacro(session, "Cmd+T", "text:hi");
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.terminal_bindings.len); // 적용됨(차단 아님)
     try std.testing.expect(session.chrome_host.notice.open); // 덮어쓰기 경고 표시
+    // 매크로가 차지한 빌트인 chord 는 메뉴가 놓는다 — 메뉴 keyEquivalent 가 남으면 AppKit 이 keyDown 보다 먼저
+    // new_term 을 실행해 매크로가 안 나간다. 카탈로그를 다시 깔고 Swift 에 메뉴 재빌드를 알린다.
+    try std.testing.expect(session.takeCommandCatalogDirty());
+    try std.testing.expectEqual(@as(usize, 0), newTermKeyDisplay(session).len);
+    // 매크로를 지우면 빌트인 ⌘T 가 메뉴로 돌아온다.
+    settings_ops.removeTerminalMacro(session, "Cmd+T");
+    try std.testing.expect(session.takeCommandCatalogDirty());
+    try std.testing.expect(newTermKeyDisplay(session).len > 0);
+}
+
+fn newTermKeyDisplay(session: *AppSession) []const u8 {
+    for (command_catalog.entries, 0..) |entry, i| {
+        if (std.mem.eql(u8, entry.key, "new_term")) return session.command_key_displays.items[i];
+    }
+    unreachable;
 }
 
 // config write-back pending registry characterization(#2 리팩터 그물) — takeConfigDirty/clearConfigDirty가 **모든**

@@ -211,7 +211,7 @@ fn appendStr(buf: []u8, len: *usize, s: []const u8) void {
 /// 한 액션에 현재 묶인 chord를 찾는다(표시용). resolve와 같은 우선순위: 사용자 app_bindings 먼저, 없으면
 /// 빌트인 default_app_bindings(단, 사용자가 unbind했거나 **사용자 바인딩이 차지한** chord는 건너뜀 — resolve 가
 /// 그 chord 에서 빌트인까지 내려가지 않으므로). 차지한 chord 를 돌려주면 메뉴 keyEquivalent 가 되어 AppKit 이
-/// keyDown 보다 먼저 가로챈다 — `Cmd+= = increase_font_size:2` 가 메뉴의 보폭 1 로 실행되던 결함.
+/// keyDown 보다 먼저 가로챈다 — `Cmd+Equal = increase_font_size:2` 가 메뉴의 보폭 1 로 실행되던 결함.
 /// 안 묶였으면 null. select_tab 같은 payload 액션은 std.meta.eql로 payload까지 비교한다.
 pub fn chordForAction(resolver: KeyBindingResolver, action: Action) ?KeyChord {
     for (resolver.app_bindings) |binding| {

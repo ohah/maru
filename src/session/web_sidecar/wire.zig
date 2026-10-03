@@ -9,7 +9,7 @@ const std = @import("std");
 pub const magic = "MWEB".*;
 /// maru 와 sidecar 는 따로 설치된다(`maru` 와 `maru-chromium` formula — 따로 업그레이드된다). 그래서 Mermaid 처럼
 /// 「항상 같은 버전」을 전제하지 않고, 버전이 다르면 첫 frame(hello)에서 `UnsupportedVersion` 으로 드러난다. 메시지 tag 나
-/// 본문을 바꾸면 올린다(W7a1 — W5a·W5b·W5c 가 tag 와 본문을 늘려 2, W6a 가 `popup_changed` 로 3, W6b 가 `tooltip_changed` 로 4, W6c 가 우클릭 메뉴 셋으로 5).
+/// 본문을 바꾸면 올린다(W7a1 — W5a·W5b·W5c 가 tag 와 본문을 늘려 2, W6a 가 `popup_changed` 로 3, W6b 가 `tooltip_changed` 로 4, W6c 가 우클릭 메뉴 셋으로 5, W6d① 이 끌어 놓기 셋으로 6).
 ///
 /// **버전이 바뀌어도 바꾸지 않는 것**(버전이 다른 쪽도 「버전 불일치」를 알아보게):
 /// - frame 머리 `[u32 길이][MWEB][u16 버전]` — decoder 는 길이·magic·버전을 tag·본문보다 먼저 본다(`codec.decodeExact`).
@@ -17,7 +17,7 @@ pub const magic = "MWEB".*;
 ///   버전 불일치 대신 `FrameTooLarge`(규칙 위반 — 재시작)로 보인다(W7a1 적대 검증).
 /// sidecar 는 다른 버전의 hello 를 받으면 제 버전으로 `hello_ack`(0·0) 하나를 보내고 끝내고(exit 18), maru 는 handshake 중
 /// 버전이 다른 frame 을 받으면 다시 띄우지 않고 안내한다(C2).
-pub const version: u16 = 5;
+pub const version: u16 = 6;
 
 /// maru 가 보내는 URL 상한. 사용자가 친 주소·링크를 싣는 자리라 이 크기면 넉넉하고, 고정 decoder 저장소를
 /// 작게 둔다. 이보다 긴 URL(큰 data: URL 등)은 maru 가 보내지 않는다.

@@ -7,6 +7,8 @@
 //!   drag-files-folder    파일 둘과 폴더 — 폴더 안 파일 이름과 내용까지 읽힌다(Chrome 과 같다 — 사용자 결정)
 //!   drag-text            글 칸에 글 — 두 조각으로 보낸 글이 이어 붙어 들어간다(여러 줄·탭), 끄는 동안 다른 칸에서는 글이 안
 //!                        읽힌다(길이 0)
+//!   drag-html-url        HTML·주소·글을 함께 — 페이지가 `text/html`·`text/uri-list`·`text/plain` 으로 받는다
+//!   drag-pieces-per-enter 조각은 그 enter 에만 — 나가기 없이 enter 가 두 번 오면 앞 enter 의 파일은 뒤 끌기에 섞이지 않는다
 //!   drag-leave           들어왔다 나가면 dragleave, 그 뒤 온 놓기는 아무 일도 하지 않는다
 //!   drag-no-enter        enter 없이 온 over·놓기는 버린다(조각만 보낸 뒤 놓아도 받지 않는다)
 //!   drag-move-effect     페이지가 이동(16)을 고르면 그 동작이 온다
@@ -202,6 +204,27 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, r
     try w.target(.drop, textarea, 0);
     const typed = w.untilHas("\"ta\":\"첫 줄\\n둘째\\t끝\"", 3_000);
     report(hidden and typed, "drag-text", std.fmt.bufPrint(&detail, "끄는 동안 글 안 읽힘 {} · {s}", .{ hidden, w.title() }) catch "");
+
+    // HTML·주소·글을 함께.
+    try w.load(port);
+    try w.data(.html, "<b>bold</b>");
+    try w.data(.url, "https://example.test/x");
+    try w.data(.url_title, "제목");
+    try w.data(.text, "plain words");
+    try w.enterOver(zone, finder_ops);
+    try w.target(.drop, zone, 0);
+    const rich = w.untilHas("zdrop", 3_000);
+    report(rich and w.has("text/html") and w.has("text/uri-list") and w.has("/text=plain words") and w.has("/uri=https://example.test/x") and w.has("<b>bold</b>"), "drag-html-url", std.fmt.bufPrint(&detail, "{s}", .{w.title()}) catch "");
+
+    // 나가기 없이 enter 두 번 — 앞 enter 의 조각은 그 enter 에만.
+    try w.load(port);
+    try w.data(.path, file_a);
+    try w.target(.enter, zone, finder_ops);
+    try w.data(.path, file_b);
+    try w.enterOver(zone, finder_ops);
+    try w.target(.drop, zone, 0);
+    const second = w.untilHas("zdrop", 3_000);
+    report(second and w.has("\"zdrop\":\"둘.txt:3/types"), "drag-pieces-per-enter", std.fmt.bufPrint(&detail, "뒤 끌기만 {s}", .{w.title()}) catch "");
 
     // 들어왔다 나간 뒤의 놓기.
     try w.load(port);

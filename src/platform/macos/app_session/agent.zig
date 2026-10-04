@@ -2636,8 +2636,9 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
         }
     }
 
-    // ⑵ 이미 묶인 세션 — 묶인 Term 이 아직 그 목록에 있고 세션이 다시 시작된 것이 아닐 때만(`Bindings.resolve`).
-    const bound = self.codex_daemon_bindings.resolve(sid, ev.kind == .session_start, any_cwd[0..any_count]);
+    // ⑵ 이미 묶인 세션 — 묶인 Term 이 아직 그 목록에 있고 세션이 다시 시작된 것이 아닐 때만(`Bindings.resolve`). 턴 도중
+    // 자동 압축의 `SessionStart`(source=compact)는 다시 시작이 아니다(`sessionRestarted`).
+    const bound = self.codex_daemon_bindings.resolve(sid, attr.sessionRestarted(ev.kind == .session_start, ev.source), any_cwd[0..any_count]);
 
     // ⑶ 같은 cwd 후보. 어느 목록을 쓸지는 순수 층이 정한다(같은 cwd 가 비면 cwd 무관 — `codex -C <dir>`). 묶인 세션이면
     // 모을 필요가 없다 — cwd 조회는 Term 관측을 새로 고치므로 이벤트마다 하지 않는다.

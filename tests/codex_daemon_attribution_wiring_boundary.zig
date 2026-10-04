@@ -98,7 +98,8 @@ test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하�
     const any_at = try expectOnce(route, "any_cwd[any_count] = .{ .id = t.surfaceId() };", "cwd 무관 후보");
     if (!(eligible_at < any_at)) return error.WiringChanged;
     // 묶음은 그 목록으로 살아 있는지 보고, SessionStart 면 버린다 — 그 판정은 순수 층(`Bindings.resolve`)에 있다.
-    const resolve_at = try expectOnce(route, "const bound = self.codex_daemon_bindings.resolve(sid, ev.kind == .session_start, any_cwd[0..any_count]);", "묶음 조회");
+    // 다시 판정할지는 이벤트 종류와 **source** 둘로 정한다 — compact 의 SessionStart 에 묶음을 풀면 그 턴의 끝이 버려진다.
+    const resolve_at = try expectOnce(route, "const bound = self.codex_daemon_bindings.resolve(sid, attr.sessionRestarted(ev.kind == .session_start, ev.source), any_cwd[0..any_count]);", "묶음 조회");
     if (!(any_at < resolve_at)) return error.WiringChanged;
     try expectCount(route, "codex_daemon_bindings.lookup(", 0, "검사 없는 묶음 조회");
     // 같은 cwd 후보도 순수 층이 정하고, 그 판정을 지난 것만 넣는다.

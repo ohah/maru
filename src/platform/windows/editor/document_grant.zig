@@ -10,30 +10,7 @@ const relative = maru.win32_relative_file;
 const identity_mod = @import("identity.zig");
 const transaction_mod = @import("transaction.zig");
 const w = std.os.windows;
-extern "kernel32" fn ReOpenFile(w.HANDLE, u32, u32, u32) callconv(maru.win32_abi.winapi) w.HANDLE;
-extern "kernel32" fn DuplicateHandle(w.HANDLE, w.HANDLE, w.HANDLE, *w.HANDLE, u32, w.BOOL, u32) callconv(maru.win32_abi.winapi) w.BOOL;
-extern "kernel32" fn OpenFileById(w.HANDLE, *const FileIdDescriptor, u32, u32, ?*anyopaque, u32) callconv(maru.win32_abi.winapi) w.HANDLE;
-
-// SDK FILE_ID_DESCRIPTOR: retain the full 128-bit selector. No legacy-ID
-// fallback may turn an unsupported volume into a weaker identity grant.
-// https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_descriptor
-const FileIdDescriptor = extern struct {
-    size: u32 = @sizeOf(FileIdDescriptor),
-    kind: u32 = 2, // ExtendedFileIdType
-    data: extern union { extended: [16]u8, legacy_alignment: i64 },
-};
-comptime {
-    if (@sizeOf(FileIdDescriptor) != 24 or @offsetOf(FileIdDescriptor, "data") != 8) @compileError("FILE_ID_DESCRIPTOR ABI mismatch");
-}
-
-fn duplicate(handle: w.HANDLE) !w.HANDLE {
-    var owned: w.HANDLE = undefined;
-    // Duplicate the selected object without reopening a pathname or changing its
-    // sharing policy. The caller can close its handle independently of the grant.
-    // https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle
-    if (!DuplicateHandle(w.GetCurrentProcess(), handle, w.GetCurrentProcess(), &owned, 0, .FALSE, 2).toBool()) return error.HandleDuplicateFailed;
-    return owned;
-}
+const native_open = @import("native_open.zig");
 
 pub const Attempt = struct {
     pinned: relative.Pinned,
@@ -62,52 +39,30 @@ pub const Grant = struct {
     /// ADS and escapes. This does not enable ordinary GUI saves or claim TxF
     /// capability/crash-recovery support. The returned view is a separate lease.
     pub fn openExperimental(a: std.mem.Allocator, io: std.Io, root: std.Io.Dir, name: []const u8, registry: *registry_mod.Registry, limit: usize) !Opened {
-        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
-        var owned_root: std.Io.Dir = .{ .handle = try duplicate(root.handle) };
-        errdefer owned_root.close(io);
-        const owned_name = try a.dupe(u8, name);
-        errdefer a.free(owned_name);
-        var pinned = try relative.open(a, owned_root, name);
-        defer pinned.deinit(io);
-        const identity = try identity_mod.Identity.capture(pinned.original.handle);
-        // A name-opened witness, even attributes-only, prevents ordinary NTFS
-        // containing-directory rename. Opening by full ID keeps the object alive
-        // without that name dependency. This is an identity witness, never path
-        // authority: reading/writing still enters through selected-root traversal.
-        // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-openfilebyid
-        const descriptor: FileIdDescriptor = .{ .data = .{ .extended = identity.file } };
-        const witness = OpenFileById(pinned.original.handle, &descriptor, 0x80, 7, null, 0x00200000);
-        if (witness == w.INVALID_HANDLE_VALUE) return error.IdentityWitnessFailed;
-        const original: std.Io.File = .{ .handle = witness, .flags = .{ .nonblocking = false } };
-        errdefer original.close(io);
-        if (!identity.eql(try identity_mod.Identity.capture(witness))) return error.IdentityChanged;
-        // ReOpenFile preserves object identity and applies a read-time write
-        // sharing fence. Never reread through a path after checking its ID.
-        // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile
-        const handle = ReOpenFile(pinned.original.handle, 0x80000000, 5, 0x00200000);
-        if (handle == w.INVALID_HANDLE_VALUE) return error.SourceBusy;
-        const snapshot: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
-        defer snapshot.close(io);
-        if (!identity.eql(try identity_mod.Identity.capture(handle))) return error.IdentityChanged;
-        const size = (try snapshot.stat(io)).size;
-        if (size > limit) return error.FileTooLarge;
-        const bytes = try a.alloc(u8, @intCast(size));
-        defer a.free(bytes);
-        if (try snapshot.readPositionalAll(io, bytes, 0) != size) return error.SourceChanged;
-        var root_path: [std.fs.max_path_bytes]u8 = undefined;
-        const root_len = try root.realPath(io, &root_path);
-        const path = try std.fs.path.join(a, &.{ root_path[0..root_len], name });
-        errdefer a.free(path);
+        var snapshot = try native_open.Snapshot.open(a, io, root, name, limit);
+        defer snapshot.deinit(io);
+        return publishOpen(a, registry, &snapshot);
+    }
+
+    /// Only the app owner publishes. Failure leaves the native image and handles
+    /// with the caller; success consumes them after every Registry allocation.
+    pub fn publishOpen(a: std.mem.Allocator, registry: *registry_mod.Registry, snapshot: *native_open.Snapshot) !Opened {
+        try snapshot.validate();
         var state: editor.document_state.State = .{};
         defer state.clear(a);
-        const file = try editor.edit_doc.EditableFile.init(a, bytes, false);
-        state.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content), .disk_hash = editor.document_state.contentHash(bytes) };
-        state.path = try a.dupe(u8, path);
+        const file = try editor.edit_doc.EditableFile.init(a, snapshot.bytes, false);
+        state.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content), .disk_hash = snapshot.raw_hash };
+        state.path = try a.dupe(u8, snapshot.path);
         const epoch = state.persistence.epoch;
         const view = try registry.create(&state, a);
         errdefer _ = registry.release(view) catch unreachable;
         const lease = try registry.retain(view, .request);
-        return .{ .view = view, .grant = .{ .allocator = a, .registry = registry, .lease = lease, .root = owned_root, .relative_path = owned_name, .original = original, .identity = identity, .path = path, .epoch = epoch } };
+        const grant: Grant = .{ .allocator = snapshot.allocator, .registry = registry, .lease = lease, .root = snapshot.root, .relative_path = snapshot.relative_path, .original = snapshot.original, .identity = snapshot.identity, .path = snapshot.path, .epoch = epoch };
+        // No fallible work follows ownership transfer. Decoded text is app-owned;
+        // raw bytes are no longer borrowed after publication.
+        snapshot.allocator.free(snapshot.bytes);
+        snapshot.owned = false;
+        return .{ .view = view, .grant = grant };
     }
 
     pub fn validate(self: *const Grant, request: *const editor.save_request.Request) !void {
@@ -177,6 +132,10 @@ test "Windows document grant reads the saved object and retains document after v
     defer registry.deinit() catch unreachable;
     var opened = try Grant.openExperimental(test_allocator, io, tmp.dir, "file.txt", &registry, 128);
     defer opened.grant.deinit(io);
+    var view_owned = true;
+    defer if (view_owned) {
+        _ = registry.release(opened.view) catch unreachable;
+    };
     const state = registry.get(opened.view).?;
     try std.testing.expectEqualStrings("base\r\n", state.opened.?.file.content);
     try std.testing.expectEqual(@as(?u64, editor.document_state.contentHash(original)), state.opened.?.disk_hash);
@@ -187,6 +146,7 @@ test "Windows document grant reads the saved object and retains document after v
     var request = try requestFor(&registry, opened.view);
     defer request.deinit();
     try std.testing.expect(!try registry.release(opened.view));
+    view_owned = false;
     try std.testing.expectEqual(@as(usize, 0), registry.viewCount(opened.grant.lease).?);
     var tx = try opened.grant.beginExperimental(io, &request, 128);
     defer tx.close(io) catch unreachable;
@@ -344,6 +304,15 @@ test "Windows document grant allocation failures release document and native par
     try std.testing.checkAllAllocationFailures(test_allocator, allocationPrefix, .{tmp.dir});
 }
 
+fn expectOpenError(expected: anyerror, result: anyerror!Opened, io: std.Io, registry: *registry_mod.Registry) !void {
+    if (result) |value| {
+        var opened = value;
+        opened.grant.deinit(io);
+        _ = try registry.release(opened.view);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(expected, err);
+}
+
 test "Windows document grant refuses an active writer before publishing the read image" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const io = std.testing.io;
@@ -354,7 +323,7 @@ test "Windows document grant refuses an active writer before publishing the read
     try writer.writePositionalAll(io, "base", 0);
     var registry: registry_mod.Registry = .{ .allocator = test_allocator };
     defer registry.deinit() catch unreachable;
-    try std.testing.expectError(error.SourceBusy, Grant.openExperimental(test_allocator, io, tmp.dir, "file.txt", &registry, 128));
+    try expectOpenError(error.SourceBusy, Grant.openExperimental(test_allocator, io, tmp.dir, "file.txt", &registry, 128), io, &registry);
     try std.testing.expectEqual(@as(u64, 0), registry.last_reference);
 }
 
@@ -365,7 +334,7 @@ test "Windows document grant enforces the raw read limit before creating a docum
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase" });
     var registry: registry_mod.Registry = .{ .allocator = test_allocator };
     defer registry.deinit() catch unreachable;
-    try std.testing.expectError(error.FileTooLarge, Grant.openExperimental(test_allocator, std.testing.io, tmp.dir, "file.txt", &registry, 6));
+    try expectOpenError(error.FileTooLarge, Grant.openExperimental(test_allocator, std.testing.io, tmp.dir, "file.txt", &registry, 6), std.testing.io, &registry);
     try std.testing.expectEqual(@as(u64, 0), registry.last_reference);
 }
 
@@ -446,4 +415,112 @@ test "Windows document grant save allocation failures release transient parent f
     try tmp.dir.createDir(std.testing.io, "a", .default_dir);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a/file.txt", .data = "base" });
     try std.testing.checkAllAllocationFailures(test_allocator, saveAllocationPrefix, .{tmp.dir});
+}
+
+test "Windows document grant initial snapshot publishes raw BOM CAS and decoded text independently" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = "\xef\xbb\xbfbase\r\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = raw });
+    var snapshot = try native_open.Snapshot.open(test_allocator, io, tmp.dir, "file.txt", 128);
+    defer snapshot.deinit(io);
+    var registry: registry_mod.Registry = .{ .allocator = test_allocator };
+    defer registry.deinit() catch unreachable;
+    try std.testing.expectEqual(@as(usize, 0), registry.slots.items.len);
+    var opened = try Grant.publishOpen(test_allocator, &registry, &snapshot);
+    defer opened.grant.deinit(io);
+    defer _ = registry.release(opened.view) catch unreachable;
+    const state = registry.get(opened.view).?;
+    try std.testing.expectEqualStrings("base\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(?u64, editor.document_state.contentHash(raw)), state.opened.?.disk_hash);
+    try std.testing.expect(!snapshot.owned);
+    try std.testing.expect(opened.grant.identity.eql(try identity_mod.Identity.capture(opened.grant.original.handle)));
+}
+
+test "Windows document grant changed initial image cannot publish a document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "base" });
+    var snapshot = try native_open.Snapshot.open(test_allocator, io, tmp.dir, "file.txt", 128);
+    defer snapshot.deinit(io);
+    snapshot.bytes[0] = 'X';
+    var registry: registry_mod.Registry = .{ .allocator = test_allocator };
+    defer registry.deinit() catch unreachable;
+    const result = Grant.publishOpen(test_allocator, &registry, &snapshot);
+    if (result) |value| {
+        var opened = value;
+        opened.grant.deinit(io);
+        _ = try registry.release(opened.view);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.OpenImageChanged, err);
+    try std.testing.expect(snapshot.owned);
+    try std.testing.expectEqual(@as(usize, 0), registry.slots.items.len);
+}
+
+test "Windows document grant consumed initial snapshot refuses another publication" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "base" });
+    var snapshot = try native_open.Snapshot.open(test_allocator, io, tmp.dir, "file.txt", 128);
+    defer snapshot.deinit(io);
+    var registry: registry_mod.Registry = .{ .allocator = test_allocator };
+    defer registry.deinit() catch unreachable;
+    var opened = try Grant.publishOpen(test_allocator, &registry, &snapshot);
+    defer opened.grant.deinit(io);
+    defer _ = registry.release(opened.view) catch unreachable;
+    // Remove the consumed, freed byte pointer before testing the owner guard.
+    // A broken guard must fail without turning negative verification into UAF.
+    snapshot.bytes = &.{};
+    snapshot.raw_hash = editor.document_state.contentHash(snapshot.bytes);
+    try std.testing.expectError(error.OpenSnapshotConsumed, snapshot.validate());
+}
+
+fn publishAllocationPrefix(a: std.mem.Allocator, root: std.Io.Dir) !void {
+    const io = std.testing.io;
+    var snapshot = try native_open.Snapshot.open(test_allocator, io, root, "file.txt", 128);
+    defer snapshot.deinit(io);
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var opened = Grant.publishOpen(a, &registry, &snapshot) catch |err| {
+        try std.testing.expect(snapshot.owned);
+        try std.testing.expect(snapshot.identity.eql(try identity_mod.Identity.capture(snapshot.original.handle)));
+        try snapshot.validate();
+        return err;
+    };
+    defer opened.grant.deinit(io);
+    defer _ = registry.release(opened.view) catch unreachable;
+    try std.testing.expect(!snapshot.owned);
+}
+
+test "Windows document grant publication allocation failure keeps initial native ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "base" });
+    try std.testing.checkAllAllocationFailures(test_allocator, publishAllocationPrefix, .{tmp.dir});
+}
+
+test "Windows document grant initial snapshot owns root beyond caller close" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "base" });
+    var selected = try tmp.dir.openDir(io, ".", .{});
+    var selected_owned = true;
+    defer if (selected_owned) selected.close(io);
+    var snapshot = try native_open.Snapshot.open(test_allocator, io, selected, "file.txt", 128);
+    defer snapshot.deinit(io);
+    selected.close(io);
+    selected_owned = false;
+    var pinned = try relative.open(test_allocator, snapshot.root, snapshot.relative_path);
+    defer pinned.deinit(io);
+    try std.testing.expect(snapshot.identity.eql(try identity_mod.Identity.capture(pinned.original.handle)));
+    try std.testing.expectEqualStrings("base", snapshot.bytes);
 }

@@ -1571,7 +1571,7 @@ pub fn build(b: *std.Build) void {
     const document_grant_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows document grant"} });
     const document_grant_step = b.step("test-win32-document-grant", "Verify native read identity and document-bound save authority");
     const run_document_grant_tests = b.addRunArtifact(document_grant_tests);
-    run_document_grant_tests.addArg("--maru-expect-tests=14"); // 2 aggregation blocks and 12 native authority tests
+    run_document_grant_tests.addArg("--maru-expect-tests=19"); // 2 aggregation blocks and 17 native authority/publication tests
     document_grant_step.dependOn(&run_document_grant_tests.step);
     const save_controller_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows save controller"} });
     const save_controller_step = b.step("test-win32-save-controller", "Verify Windows save ownership, native decisions and failure settlement");

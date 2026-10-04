@@ -11919,3 +11919,18 @@ Overwrite를 실행했다. 외부 bytes 대신 편집 내용 `BOM + Xbase CRLF`�
 프로세스가 정상 종료했다. 소유 HWND에 synthetic 메시지를 주입한 검증이며 물리 입력/IME로
 세지 않는다. 코드 hash·전체 byte proof·선택 화면 캡처는 private cache에 보관한다.
 전체 gate를 이어서 검증하며 초기 open I/O 이관, 물리 입력/IME와 나머지 Windows 범위는 남아 있다.
+
+### 2m.181 — 초기 native 읽기와 문서 등록의 소유권 분리
+
+`native_open.Snapshot`이 선택 root의 독립 handle·상대 경로·최초 full identity·원본
+bytes와 raw hash를 소유한다. 경로 탐색·identity witness·공유 제한 snapshot 읽기는
+Registry를 참조하지 않는다. `Grant.publishOpen`은 앱 소유 스레드에서 raw image를 검증하고
+본문과 문서 CAS를 등록한다. 모든 fallible 등록 뒤에만 native 소유권을 소비하며 실패하면
+호출자가 원래 Snapshot을 계속 소유한다. 본문 자원과 native 자원의 allocator도 따로 보유한다.
+
+기존 동기 open은 이 두 경계를 순서대로 호출한다. 초기 열기의 실제 worker 연결과 capability
+probe·UTF-8 처리 이관은 후속이며 이번 분리만으로 UI 스레드 I/O 제거를 주장하지 않는다.
+권한 gate 19개가 Debug/ReleaseFast에서 통과했고 raw image 검증 생략·decoded hash를
+disk CAS로 사용·소비된 owner 수락·read limit 생략·쓰기 공유 허용의 다섯 compiled runtime
+변형을 검출했다. 각 변형 뒤 원본 bytes를 복원했다. 부정 검증에서 예기치 않은 성공 또는
+조기 assertion 실패가 생겨도 native grant와 view 참조를 정리하도록 기존 테스트도 보강했다.

@@ -1987,6 +1987,14 @@ pub fn build(b: *std.Build) void {
     run_internal_contract_tests.addArg("--maru-expect-tests=4"); // 2 root aggregation blocks, wire ABI, native/dispatcher agreement
     const internal_contract_step = b.step("test-cli-internal-contract", "Verify shared hidden CLI command contracts across platform adapters");
     internal_contract_step.dependOn(&run_internal_contract_tests.step);
+    const save_request_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{"Editor save request"},
+    });
+    const run_save_request_tests = b.addRunArtifact(save_request_tests);
+    run_save_request_tests.addArg("--maru-expect-tests=40");
+    const save_request_step = b.step("test-editor-save-request", "Verify owned save images and document completion CAS");
+    save_request_step.dependOn(&run_save_request_tests.step);
     const file_open_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
         .filters = &.{"Windows file open"},
@@ -1999,7 +2007,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Windows safe save"},
     });
     const run_safe_save_tests = b.addRunArtifact(safe_save_tests);
-    run_safe_save_tests.addArg("--maru-expect-tests=58"); // 2 aggregation blocks, 16 stage, 9 metadata, 7 security, 2 audit-scope, 3 identity, 19 transaction tests
+    run_safe_save_tests.addArg("--maru-expect-tests=61"); // 2 aggregation blocks, 16 stage, 9 metadata, 7 security, 2 audit-scope, 3 identity, 22 transaction tests
     const safe_save_step = b.step("test-win32-safe-save", "Verify native editor save path and original-file preservation");
     safe_save_step.dependOn(&run_safe_save_tests.step);
     const relative_file_tests = addProjectTest(b, .{
@@ -5476,6 +5484,7 @@ pub fn build(b: *std.Build) void {
         b.step("perf-editor-recovery-reservation", "Measure reservation candidates without process startup in the timed region").dependOn(&perf_reservation.step);
     }
 
+    test_step.dependOn(save_request_step);
     test_step.dependOn(&run_internal_contract_tests.step);
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_syntax_stamp.step);

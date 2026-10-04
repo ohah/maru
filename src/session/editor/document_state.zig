@@ -98,6 +98,16 @@ pub const State = struct {
     /// 본문 개정과 별개다. 저장 대상이나 문서 본체를 갈면 이전 완료를 거부한다.
     save_target_epoch: u64 = 1,
 
+    /// Save callbacks belong to an opened lifetime and a monotonically issued
+    /// request. Neither a reload nor a late callback can rewind that authority.
+    persistence: struct {
+        epoch: u64 = 0,
+        issued: u64 = 0,
+        acknowledged: u64 = 0,
+        persisted_revision: ?u64 = null,
+        uncertain_sequence: ?u64 = null,
+    } = .{},
+
     pub fn invalidateSaveTarget(self: *State) void {
         self.save_target_epoch +|= 1;
     }
@@ -107,6 +117,9 @@ pub const State = struct {
         self.invalidateSaveTarget();
         if (self.opened) |*opened| opened.deinit(allocator);
         self.opened = null;
+        self.persistence.epoch +|= 1;
+        self.persistence.persisted_revision = null;
+        self.persistence.uncertain_sequence = null;
     }
 
     /// 뷰 정산과 경로 정산의 기존 순서를 유지한다. 저장 정책은 호출자 책임이다.

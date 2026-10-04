@@ -343,3 +343,10 @@ nonzero host scope와 전체 image binding에 한 번만 소비되도록 결속�
 Registry 접근·문서 ack가 없다. 요청 23개 Debug/ReleaseFast와 다섯 compiled runtime mutation
 검출이 통과했다. native binding-ready/main-thread 승인 왕복·host의 변경 제한·취소 경합·
 정리 연결은 후속이며 기존 commit 권한 검사를 바꾸거나 async commit 완료로 세지 않는다.
+
+§2m.178: controller의 cleanupAsync/pollCleanup과 일반 앱의 commit/poll을 terminal 정리
+worker에 연결했다. cleaning/finishing 상태는 Request와 native 소유권을 보존하고, 정리 후
+main thread에서 native decision과 문서 CAS를 따로 정산한다. 최종 권한 실패도 rollback과
+정리 후 보고하며 늦은 Esc가 이미 committed인 결과를 cancelled로 바꾸지 않는다. controller
+33개·host 56개 Debug/ReleaseFast와 각각 다섯 compiled runtime mutation 검출이 통과했다.
+native commit 승인 왕복·conflict overwrite·초기 open 이관 및 전체 잔여 Windows 범위는 계속 진행한다.

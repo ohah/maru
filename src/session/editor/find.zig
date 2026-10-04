@@ -340,15 +340,15 @@ test "FND2: 매치는 겹치지 않는다 — aaa에서 aa는 하나다" {
 }
 
 test "FND3: 대소문자를 무시한다 — 터미널과 같은 규칙" {
-    // ASCII만이 아니다. 터미널 검색이 덮는 블록(Latin-1·Greek·Cyrillic)이 여기서도 같아야
+    // ASCII만이 아니다. 터미널 검색이 덮는 블록(Latin-1·Latin Ext-A·Greek·Cyrillic)이 여기서도 같아야
     // "같은 검색어인데 pane에 따라 다르다"가 안 생긴다.
-    const lines = [_][]const u8{ "Hello World", "ÉCOLE", "ΑΒΓ", "ПРИВЕТ" };
+    const lines = [_][]const u8{ "Hello World", "ÉCOLE", "ΑΒΓ", "ПРИВЕТ", "ŁÓDŹ" };
 
     // **양방향으로 잰다.** 소문자 검색어만 넣으면 **haystack만 접어도** 전부 통과한다 —
     // 실제로 그 뮤턴트가 이 판정자를 뚫고 살아남았다(2라운드 적대적 검증). 사용자로 치면
     // "찾기 상자에 `HELLO`를 치면 아무것도 안 나온다"가 L2 판정자 열 개를 그대로 지나간다.
-    const lower = [_][]const u8{ "hello", "école", "αβγ", "привет" };
-    const upper = [_][]const u8{ "HELLO", "ÉCOLE", "ΑΒΓ", "ПРИВЕТ" };
+    const lower = [_][]const u8{ "hello", "école", "αβγ", "привет", "łódź" };
+    const upper = [_][]const u8{ "HELLO", "ÉCOLE", "ΑΒΓ", "ПРИВЕТ", "ŁÓDŹ" };
     for (lower, upper, 0..) |lo, up, line| {
         var a = try collect(&lines, lo);
         defer a.deinit(testing.allocator);

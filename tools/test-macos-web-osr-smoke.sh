@@ -152,9 +152,6 @@ class H(http.server.BaseHTTPRequestHandler):
                     b"addEventListener('message',function(m){ping('msg-'+m.data);" + close + b"})</script>")
         elif self.path == "/pop-nb":
             body = b"<!doctype html><title>nb</title><body>nb"
-        elif self.path == "/self-close":
-            # 탭이 스스로 닫는다(기록이 하나뿐인 탭은 스크립트가 닫을 수 있다 — Blink). maru 는 그 탭을 닫는다(W6f② 적대 검증 4 차).
-            body = b"<!doctype html><title>sc</title><body>sc<script>setTimeout(function(){window.close()},1000)</script>"
         elif self.path == "/pop-child":
             body = b"<!doctype html><title>child</title><style>html,body{margin:0;height:100%;background:#20a060}</style><body><script>if(window.opener)window.opener.postMessage('hi','*')</script>"
         elif self.path == "/nt-a" or self.path.startswith("/nt-b?"):
@@ -1117,17 +1114,12 @@ SCRIPT
 rm -f "$root/adopt.ppm"
 run_app /pop-stay 25000 "$root/adopt-stay.summary" MARU_WEB_OSR_TEST_INPUT="$root/adopt.txt" MARU_SCREENSHOT="$root/adopt.ppm" MARU_SCREENSHOT_DELAY_MS=15500
 grep -a '^osr-test newtab' "$root/app-pop-stay.log" > "$root/adopt-stay.report" || true
-# 스스로 닫는 탭 — maru 가 닫지 않았는데 닫힌 브라우저의 탭을 닫는다(죽은 탭으로 남지 않게).
-cat > "$root/selfclose.txt" <<SCRIPT
-sleep 9000
-SCRIPT
-run_app /self-close 15000 "$root/selfclose.summary" MARU_WEB_OSR_TEST_INPUT="$root/selfclose.txt"
-grep -a '^osr-test newtab' "$root/app-self-close.log" > "$root/selfclose.report" || true
+
 : > "$root/requests.log"
 run_app /pop-app 20000 "$root/adopt.summary" MARU_WEB_OSR_TEST_INPUT="$root/adopt.txt"
 grep -a '^osr-test newtab' "$root/app-pop-app.log" > "$root/adopt.report" || true
 cat "$root/adopt.report"
-python3 - "$root/adopt.report" "$root/requests.log" "$root/adopt.ppm" "$root/adopt-stay.report" "$root/selfclose.report" <<'PY' || fail "a popup the page opened did not stay connected to it"
+python3 - "$root/adopt.report" "$root/requests.log" "$root/adopt.ppm" "$root/adopt-stay.report" <<'PY' || fail "a popup the page opened did not stay connected to it"
 import sys
 report = [l.strip() for l in open(sys.argv[1])]
 requests = [l.strip() for l in open(sys.argv[2])]
@@ -1147,8 +1139,8 @@ check(any(l.startswith('/ev?e=closed-true') for l in ev) and any(l.startswith('o
 check('osr-test newtab page-closed active-opener=true' in report, f'after the popup closed, the page that opened it is the active tab again — not the tab to its right ({report})')
 stay = [l.strip() for l in open(sys.argv[4])]
 check(any(l.endswith('placement=foreground adopted=true') for l in stay), f'the screenshot run opened the popup through adoption too ({stay})')
-selfclose = [l.strip() for l in open(sys.argv[5])]
-check(any(l.startswith('osr-test newtab page-closed') for l in selfclose), f'a tab whose page closes itself (window.close) is closed, not left as a dead tab ({selfclose})')
+# 스스로 닫는 보통 탭은 여기서 보지 않는다 — maru 탭은 about:blank 로 만든 뒤 옮겨, 그것이 먼저 커밋되면 기록이 둘이라 Blink 가 닫기를
+# 막고 늦으면 닫힌다(실측: 둘 다 나왔다). 닫히면 그 탭을 닫는 것은 단위 시험(`web_osr` W6f②)이 본다.
 # 붙인 팝업 탭이 그려진다 — 맡긴 번호의 링이 `popup_created` 보다 먼저 와도 잃지 않는다(초록 바탕이 본문을 채운다).
 green = 0
 try:

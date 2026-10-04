@@ -136,10 +136,10 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'image/png'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
             return
         elif self.path == "/nt-app":
-            # W6e: 위는 보통 링크(가운데 클릭 → 뒤 탭), 아래는 `target=_blank`(클릭 → 앞 탭).
+            # W6e: 위는 보통 링크(가운데 클릭 → 뒤 탭 — 5000 자 주소: 복원 경로의 4 KiB 상한에서 버려지지 않는지), 아래는 `target=_blank`(앞 탭).
             body = (b"<!doctype html><title>nt</title><style>html,body{margin:0;height:100%}a{position:absolute;left:0;width:100%;display:block}</style><body>"
-                    b"<a href='/nt-b' style='top:5%;height:40%;background:#ccf'>b</a><a href='/nt-a' target=_blank style='top:55%;height:40%;background:#cfc'>a</a>")
-        elif self.path in ("/nt-a", "/nt-b"):
+                    b"<a href='/nt-b?q=" + b"x" * 5000 + b"' style='top:5%;height:40%;background:#ccf'>b</a><a href='/nt-a' target=_blank style='top:55%;height:40%;background:#cfc'>a</a>")
+        elif self.path == "/nt-a" or self.path.startswith("/nt-b?"):
             body = b"<!doctype html><title>nt target</title><body>target"
         elif self.path == "/nav-a":
             body = b"<!doctype html><title>a</title><style>html,body{margin:0;height:100%}a{display:block;height:100%}</style><body><a href='/nav-b'>b</a><script>addEventListener('pageshow',function(){new Image().src='/ev?e=shown-a&t='+Date.now()})</script>"
@@ -1074,7 +1074,8 @@ want = [f'osr-test newtab at={o + 1} tabs={n + 1} opener={o} active={o} placemen
         f'osr-test newtab at={o + 2} tabs={n + 2} opener={o} active={o} placement=background',
         f'osr-test newtab at={o + 3} tabs={n + 3} opener={o} active={o + 3} placement=foreground']
 check(len(report) == 3 and report == want, f'two middle clicks open background tabs right of the page in order, then a target=_blank link opens a foreground tab after them ({report})')
-check(requests.count('/nt-b') == 2 and requests.count('/nt-a') == 1, f'each new tab loads its address ({[r for r in requests if r.startswith("/nt-")]})')
+long_b = '/nt-b?q=' + 'x' * 5000
+check(requests.count(long_b) == 2 and requests.count('/nt-a') == 1, f'each new tab loads its address — the 5000-character one too ({[r[:20] + "…" + str(len(r)) for r in requests if r.startswith("/nt-")]})')
 sys.exit(0 if ok else 1)
 PY
 

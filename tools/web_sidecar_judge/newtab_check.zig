@@ -15,6 +15,7 @@
 //!   newtab-no-gesture     입력 없이 페이지가 연 것(`window.open`·만든 ⌘ 클릭·`click()`) → 탭 없음, 지금 탭도 그대로
 //!   newtab-handled-drop   페이지가 받은 놓기(이동 없음) 뒤 페이지가 만든 ⌘ 클릭 → 지금 탭은 이동하지 않고 그 링크의 새 탭 하나(놓기도
 //!                         Chromium 의 사용자 활성화다 — Chrome 과 같다). 놓기 뒤 지금 탭에서 여는 것은 놓은 그 주소의 이동뿐이다
+//!   newtab-drop-window    놓은 링크와 같은 주소의 ⌘ 클릭도 놓기 2.5 초 뒤면 새 탭(놓기 이동은 놓은 뒤 2 초만)
 //!   newtab-menu           링크 우클릭 메뉴가 `link_openable` 이고 「새 탭에서 링크 열기」 → 뒤 탭. `mailto:` 링크는 열 수 없다
 //!   newtab-no-window      그동안 host 창 0 개, 팝업 주소 요청 0(보이지 않는 팝업 브라우저도 만들지 않았다)
 
@@ -46,6 +47,7 @@ const dl_point: Point = .{ .x = 340, .y = 125 };
 const late_point: Point = .{ .x = 60, .y = 175 };
 const rep_point: Point = .{ .x = 480, .y = 175 };
 const dz_point: Point = .{ .x = 480, .y = 100 };
+const dz2_point: Point = .{ .x = 595, .y = 100 };
 const blank_point: Point = .{ .x = 520, .y = 360 };
 
 const Opened = struct { placement: Placement, url: [256]u8 = undefined, url_len: usize = 0 };
@@ -140,6 +142,19 @@ const Watch = struct {
         return o.url[0..o.url_len];
     }
 };
+
+/// 링크 주소 하나를 그 자리에 끌어 놓는다(enter → over 둘 → drop). 페이지가 받으면 제목이 `title` 이 된다.
+fn dropLink(w: *Watch, point: Point, url: []const u8, title: []const u8, ms: u32) !bool {
+    try w.host.send(.{ .drag_data = .{ .browser = browser_id, .kind = .url, .bytes = url } });
+    try w.host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .enter, .point = point, .allowed = 1 } });
+    w.pump(120);
+    try w.host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .over, .point = point, .allowed = 1 } });
+    w.pump(120);
+    try w.host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .over, .point = point, .allowed = 1 } });
+    w.pump(200);
+    try w.host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .drop, .point = point } });
+    return w.untilTitle(title, ms);
+}
 
 pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, port: u16) !void {
     var detail: [400]u8 = undefined;
@@ -258,21 +273,25 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     _ = w.untilTitle("nt-ready", wait_ms);
     w.pump(300);
 
-    // 페이지가 받은 놓기 — 이동이 없다. 그 뒤 페이지가 만든 ⌘ 클릭은 지금 탭을 옮기지 않는다. 장은 먼저 쥐여 둔다(빈 곳 누름).
+    // 페이지가 받은 놓기 — 이동이 없다. 놓은 것은 다른 주소의 링크다. 그 뒤 페이지가 만든 `#pl` ⌘ 클릭은 놓은 주소가 아니라 지금 탭을
+    // 옮기지 않고 새 탭이 된다. 장은 먼저 쥐여 둔다(빈 곳 누름).
     _ = try w.click(blank_point, .left, .{}, 300);
     const drop_changes = w.url_changes;
     const drop_opened = w.opened_len;
-    try host.send(.{ .drag_data = .{ .browser = browser_id, .kind = .text, .bytes = "dropped" } });
-    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .enter, .point = dz_point, .allowed = 1 } });
-    w.pump(120);
-    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .over, .point = dz_point, .allowed = 1 } });
-    w.pump(120);
-    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .over, .point = dz_point, .allowed = 1 } });
-    w.pump(200);
-    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .drop, .point = dz_point } });
-    const dropped = w.untilTitle("nt-dropped", 3_000);
+    const dropped = try dropLink(&w, dz_point, browsers_check.url(&u, port, "/title?t=nt-dz"), "nt-dropped", 3_000);
     w.pump(1_000);
     report(dropped and w.url_changes == drop_changes and w.opened_len == drop_opened + 1 and w.lastIs(.foreground, port, "/title?t=nt-pl"), "newtab-handled-drop", std.fmt.bufPrint(&detail, "놓기 받음 {} · 지금 탭 이동 {d} · 새 탭 {d}", .{ dropped, w.url_changes - drop_changes, w.opened_len - drop_opened }) catch "");
+    try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/newtab") } });
+    _ = w.untilTitle("nt-ready", wait_ms);
+    w.pump(300);
+
+    // 놓은 링크와 같은 주소여도 2.5 초 뒤면 놓기 이동이 아니다 — 새 탭(활성화는 5 초라 제스처는 있다).
+    _ = try w.click(blank_point, .left, .{}, 300);
+    const late_changes = w.url_changes;
+    const late_opened = w.opened_len;
+    const late_dropped = try dropLink(&w, dz2_point, browsers_check.url(&u, port, "/title?t=nt-pl"), "nt-dropped-late", 5_000);
+    w.pump(1_000);
+    report(late_dropped and w.url_changes == late_changes and w.opened_len == late_opened + 1 and w.lastIs(.foreground, port, "/title?t=nt-pl"), "newtab-drop-window", std.fmt.bufPrint(&detail, "놓기 받음 {} · 지금 탭 이동 {d} · 새 탭 {d}", .{ late_dropped, w.url_changes - late_changes, w.opened_len - late_opened }) catch "");
     try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/newtab") } });
     _ = w.untilTitle("nt-ready", wait_ms);
     w.pump(300);

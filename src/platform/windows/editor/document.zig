@@ -80,6 +80,7 @@ pub const OpenFile = struct {
     navigation: maru.session.editor.view_navigation.View = .{},
     selection_paint: selection_projection.Projection = .{},
     navigation_rows: usize = 1,
+    recovered: bool = false,
 
     /// Syntax remains a view cache, independent of selection/navigation.
     syntax: ?ts.Provider = null,
@@ -345,6 +346,23 @@ pub fn openFileFor(
         .max_cols = projection.widest,
         .syntax = provider,
     } };
+}
+
+/// The app chooses this path after its close/save UI is available. Unsupported
+/// native capability remains readable; OOM never becomes a readonly fallback.
+pub fn openFileForHost(book: *@import("file_host.zig").Book, io: std.Io, path: []const u8) OpenOutcome {
+    const kind = maru.session.file_panel_bridge.openKindForPath(path) orelse return .unsupported;
+    if (kind != .text) return .needs_web_panel;
+    const lease = book.openPath(io, path, 4 << 20) catch |err| {
+        if (err == error.OutOfMemory) return .out_of_memory;
+        return openFileFor(book.registry, book.allocator, io, path);
+    };
+    defer _ = book.registry.release(lease) catch unreachable;
+    const view = attach(book.registry, lease, book.allocator) catch {
+        book.release(io, lease, false) catch unreachable;
+        return .out_of_memory;
+    };
+    return .{ .opened = view };
 }
 
 test "Windows file open outcomes have distinct localized notices" {

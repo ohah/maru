@@ -1140,3 +1140,8 @@ poisoned native attempt/실패 보존 및 명시적 rollback을 검사한다.
 receipt/ack 이후 닫기를 검사한다. `-Doptimize=ReleaseFast`도 실행한다.
 `test-win32-save-controller` 23개를 회귀 검증하며 실제 앱의 Ctrl+S·Save-close와
 물리 키보드/IME 검증은 구분한다. native commit/abort와 초기 open은 아직 동기 I/O다.
+
+§2m.173의 `zig build test-win32-save-settle`은 native 테스트 7개다. 다른 thread의 실제
+rollback·unknown/committed native 조회·실패 후 재시도·미소비 소유권·copied owner·admission
+할당 실패와 Request 해제 후 독립 이미지를 검사한다. `-Doptimize=ReleaseFast`도 실행한다.
+worker 결과는 문서 ack가 아니며 controller/앱 연결 전이므로 앱의 async rollback 증거로 세지 않는다.

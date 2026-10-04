@@ -312,3 +312,9 @@ BOM/CRLF 보존·종료를 확인했다. 물리 입력·IME, 비동기 commit/ab
 충돌 overwrite의 worker 이관과 다중 파일 닫기의 충돌·취소 GUI 검증은 계속 진행 대상이다.
 다중 dirty 문서의 정상 Save-close는 격리 실제 앱에서 두 본문 저장·BOM/CRLF 및 LF 보존과
 프로세스 종료를 확인했다. 이 성공 검증은 충돌·취소 조합을 증명하지 않는다.
+
+§2m.173: native rollback/outcome worker가 독립 준비 이미지와 attempt의 소유권을 이동받아
+Registry 없이 실행한다. 실패·unknown 결과도 handle/image/phase를 반환하고 미소비 결과의
+deinit을 거절한다. native 7개 Debug/ReleaseFast와 다섯 compiled runtime mutant 검출을
+통과했다. controller/앱의 취소·reconcile 연결, native commit 승인 왕복과 cleanup 이관,
+초기 open 및 나머지 Windows 범위는 계속 진행한다. 앱의 비동기 rollback 완료로 세지 않는다.

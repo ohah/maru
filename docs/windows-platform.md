@@ -11710,3 +11710,21 @@ native commit/abort/reconcile/cleanup과 명시적 충돌 overwrite는 아직 ma
 창 닫기의 Save를 선택하여 두 디스크 본문과 프로세스 종료를 대조했다. 첫 문서의 BOM·CRLF와
 둘째 문서의 LF가 모두 보존됐다. 창이 가려져도 대상 HWND의 PrintWindow 캡처로 두 번째
 편집본과 닫기 선택창을 확인했다. 정상 성공 경로의 증거이며 충돌·취소 전체 조합을 대신하지 않는다.
+
+### 2m.173 — native rollback과 outcome 조회 worker
+
+`save_settle_worker.Worker`는 준비 결과의 native attempt와 독립 이미지 전체를 이동받아
+다른 스레드에서 rollback 또는 reconcile을 실행한다. Registry나 Request를 조회하지 않는다.
+실패에도 이미지·handle·native phase·오류를 모두 돌려주며 unknown을 aborted로 바꾸지 않는다.
+단일 결과 슬롯과 고정 주소를 지키고 완료됐어도 미소비 결과가 있으면 deinit을 거절한다.
+admission 할당/스레드 시작 실패는 원래 caller 소유권을 유지한다. worker 결과 자체는 문서 ack가 아니다.
+
+`test-win32-save-settle`의 native 테스트 7개가 Debug/ReleaseFast에서 통과했다.
+실제 다른 thread의 rollback과 원본 디스크 보존, copied/busy owner 거절, 실패 후 실제 재시도,
+unknown outcome 유지, 실제 commit 뒤 유실 응답의 committed 조회, admission 할당 실패와
+main Request 해제 뒤 독립 이미지 소유권을 검사한다. aborted/unknown 분류 변조,
+실제 rollback 생략, 실패 삼키기와 준비 오류 유실의 다섯 변형을 컴파일 후 runtime에서
+검출하고 원본 bytes를 복원했다. 컴파일 실패만 난 변형은 검출 횟수에 포함하지 않았다.
+
+이 worker의 controller/일반 앱 연결은 이어서 구현한다. 현재 일반 앱의 취소 rollback과
+commit·cleanup은 여전히 main thread이고 native commit 승인 왕복·초기 open 이관도 남아 있다.

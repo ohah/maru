@@ -3418,7 +3418,7 @@ const editor_restore_fixture: Window = .{
         .surfaces = &.{.{ .cwd = "/tmp", .cols = 80, .rows = 24 }},
         .file_terms = &.{.{ .index = 3, .kind = .text, .mode = .source_edit, .path = "/tmp/preview.txt" }},
         .editor_views = &.{
-            .{ .index = 0, .document = 0, .primary = editor_state.Selection.at(3), .extras = &.{editor_state.Selection.at(7)}, .first_line = 4, .first_piece = 2, .first_col = 5, .wrap = false, .folded = &.{ 1, 9 } },
+            .{ .index = 0, .document = 0, .primary = editor_state.Selection.at(3), .extras = &.{editor_state.Selection.at(7)}, .first_doc_line = 4, .first_piece = 2, .first_col = 5, .wrap = false, .folded = &.{ 1, 9 } },
             .{ .index = 2, .document = 7, .primary = editor_state.Selection.at(8) },
             .{ .index = 4, .document = 0, .primary = editor_state.Selection.at(1) },
         },

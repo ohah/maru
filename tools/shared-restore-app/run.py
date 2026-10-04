@@ -38,7 +38,7 @@ def compare_states(name, scenarios):
     observed = {(v["label"], v["view"]) for v in restored["states"]}
     if len(seed["states"]) != 2 or set(expected) != {"0", "1"} or len(restored["states"]) != 8 or observed != labels:
         return [dict(scenario=name, field="observations", expected="2 seed + 8 restore states", actual="missing")]
-    fields = ("hash", "bytes", "dirty", "anchor", "focus", "wrap", "folded", "doc_line", "piece", "col")
+    fields = ("hash", "bytes", "dirty", "anchor", "focus", "wrap", "folded", "fold_heads_hash", "doc_line", "piece", "col")
     for actual in restored["states"]:
         before = expected[actual["view"]]
         for key in fields:

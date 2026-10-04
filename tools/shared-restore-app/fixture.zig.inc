@@ -34,11 +34,11 @@ fn sharedRestoreReport(self: *AppSession, label: u32) !void {
             rt.editor_visible_numbers[rt.editor_first_line].? - 1
         else
             rt.editor_first_line;
-        std.debug.print("SHARED_RESTORE label={d} view={d} shared={any} surface={d} hash={x} bytes={d} dirty={any} anchor={d} focus={d} line={d} doc_line={d} piece={d} col={d} wrap={any} folded={d} fold_source={s} pending={any} max_cols={d} visible={d} hit_rows={d}\n", .{
+        std.debug.print("SHARED_RESTORE label={d} view={d} shared={any} surface={d} hash={x} bytes={d} dirty={any} anchor={d} focus={d} line={d} doc_line={d} piece={d} col={d} wrap={any} folded={d} fold_heads_hash={x} fold_source={s} pending={any} max_cols={d} visible={d} hit_rows={d}\n", .{
             label, i, shared, term.surfaceId(), editor_ops.contentHash(doc.file.content), doc.file.content.len,
             doc.isDirty(), selection.anchor_start, selection.focus, rt.editor_first_line, top_doc,
             rt.editor_first_piece, rt.editor_first_col, rt.editor_wrap orelse self.loaded_config.config.editor.wrap,
-            rt.editor_folded_len, @tagName(rt.editor_fold_source), rt.editor_syntax.pending,
+            rt.editor_folded_len, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(editor_ops.foldedHeads(term))), @tagName(rt.editor_fold_source), rt.editor_syntax.pending,
             rt.editor_max_cols, visible.len, rt.editor_hit_rows_len,
         });
     }

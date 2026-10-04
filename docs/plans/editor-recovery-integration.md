@@ -1,7 +1,8 @@
 # 로컬 문서 ID 백업과 공유 뷰 복원
 
 상태: 제품 writer·workspace capture/apply 연결 구현. 헤드리스 및 별도 프로세스 검증 완료.
-공개 분할 명령·두 pane의 실제 AppKit 재시작/IME·비동기 접힘 provider 화면 gate는 남아 있다.
+원문 좌표와 지연 접힘 복원을 구현했고 실제 두 pane AppKit/clangd 재시작 검증을 통과했다.
+실제 OS 한글 입력기 전환·저장·재시작도 통과했으며 공개 분할 명령은 다음 단계다.
 이 단계는 [공유 복원 계획](editor-shared-restore.md)의 세 번째 연결 단계다.
 첫 단계 ID/codec은 #4103, 예약 후보 비교는 #4107에서 머지했다.
 
@@ -122,7 +123,7 @@ clean prepare 비용은 ReleaseFast에서 같은 작은 파일을 200회 교차 
   갱신 전후 맨 위 문서 줄이 같으면 그 조각을 보존한다. 실제 LSP 응답 소비 경로와 첫 렌더를
   회귀 테스트에 포함한다. 이것은 실제 외부 언어 서버의 네트워크/프로세스 검증과 다르다.
 
-**공개 gate는 아직 통과하지 않았다.** 실제 앱에서 약 60 KB 문서는 파싱 완료 시점에 따라,
+**#4122 당시 남았던 반례:** 실제 앱에서 약 60 KB 문서는 파싱 완료 시점에 따라,
 약 1.2 MB 문서는 지연 파싱에서 저장한 구문 접힘이 들여쓰기 범위로 복원됐다가 풀리는 현상을
 확인했다. 두 provider의 끝줄이 다르면 기존 보존 정책이 이를 펼친다. 이때 checkpoint의
 `first_line`은 접힌 배열의 첨자인데 들여쓰기/구문 배열이 달라져 맨 위 문서 줄도 바뀔 수 있다.
@@ -137,8 +138,8 @@ restore는 초기 구문 범위와 실제 `textDocument/foldingRange` 응답 적
 
 하네스는 앱의 정상 종료만으로 통과하지 않는다. 본문 hash·선택·dirty·wrap·접힘·맨 위 문서 줄·
 wrap 조각·가로 위치를 종료 전후 대조하고, 차이가 있으면 `manifest.json`의 `issues`와 exit 1을
-남긴다. 재시작 뒤 provider 준비를 기다리는 상태와 문서 기준 스크롤 앵커의 계약을 정해야 하며,
-이 점검에서 임의로 포맷/접힘 정책을 바꾸거나 사용자용 분할 명령을 공개하지 않는다.
+남긴다. 이때 발견한 반례는 아래 원문 좌표와 지연 provider 복원에서 수정했다.
+#4122 자체는 포맷/접힘 정책 변경이나 사용자용 분할 명령을 포함하지 않는다.
 
 증거: [수정 전 앱](../evidence/editor-shared-restore-app-20261004/baseline.json),
 [수정 후 앱과 남은 반례](../evidence/editor-shared-restore-app-20261004/restored.json),
@@ -161,3 +162,35 @@ wrap 조각·가로 위치를 종료 전후 대조하고, 차이가 있으면 `m
 실제 제품 Metal renderer로 복원 직후의 960×600 화면도 캡처했다. 미저장 본문·dirty 표시·복원 알림을 확인했으며,
 이는 단일 문서 증거다. 두 공유 pane의 첫 화면이나 물리 IME 검증을 대신하지 않는다.
 증거: [프로세스·바이너리·내용 해시](../evidence/editor-recovery-integration-20261004/residual-app.json), [캡처 메타데이터](../evidence/editor-recovery-integration-20261004/capture.json), [보호 조건 변이 결과](../evidence/editor-recovery-integration-20261004/mutations.json).
+
+## 원문 좌표와 지연 provider 복원
+
+사용자가 PR #4122 뒤의 원문 좌표 저장과 지연 복원 구현을 승인했다. `first_doc_line` 저장과
+뷰별 복원 요청을 연결했다. 계약의 단일 출처는 [workspace 복원](../workspace-restore.md)이다.
+같은 본문에서만 저장된 접힘을 다시 대조하고, 사용자가 새로 바꾼 위치/선택/접힘을 우선한다.
+
+수정 전 새 회귀 테스트는 원문 20번째 줄이 18로 저장되는 오류, 분석 전 재저장의 접힘 누락,
+늦은 provider에서 접힘 소실을 검출했다. 수정 후에는 원문 앵커, 선택 끝점 보호, provider 지연 중
+재저장, 스크롤/막대/wrap/키보드/펼치기/IME 조작, 공유 뷰별 대기 소유와 공유 편집 무효화,
+staging·공유 준비의 모든 할당 실패 및 provider 파생 배열 실패 후 다음 프레임 재시도를 검사한다.
+선택 끝점은 한 번 정렬해 범위마다 이진 탐색하므로 접힘 수 × 커서 수의 반복 비교를 만들지 않는다.
+
+최종 앱 빌드에서 다음을 실행했다. 원본과 변경된 코드의 차이는 별도 사본에 넣은 관측기이며,
+제품 checkpoint·본문·편집·provider·Metal·종료 경로는 그대로 사용했다.
+
+| 실행 | 확인된 결과 |
+|---|---|
+| 작은 약 60 KB / 큰 약 1.2 MB Zig 파일, 각 seed·첫 프레임·복원 프로세스 | 두 뷰의 본문 hash·dirty·선택·wrap·접힌 머리 hash·맨 위 원문 줄·wrap 조각·가로 위치 보존 |
+| 실제 Apple clangd 17.0.0, 시작 1초 지연 | 구문 → LSP 전환 후에도 원문 줄 46/96(0-based), 오른쪽 조각 2, 왼쪽 가로 위치 70, 각 접힘 1개 보존 |
+| 960×600 → 640×480 → 1200×800 | 같은 원문 앵커와 독립 wrap/가로 위치 유지; 첫 Metal 프레임 및 각 크기의 PNG 직접 확인 |
+| NSTextInputClient 콜백·멀티커서·Undo·저장·재시작 | `cat cat` 본문과 두 독립 선택 보존, 입력 검증 실패 0 |
+| 실제 macOS 두벌식 HID·두 pane 전환·저장·재시작 | `L가 R나`가 한 번씩 반영, 두 커서 byte 4/9 보존, 원래 입력 소스 복원 |
+
+실제 앱 비교는 접힘 개수뿐 아니라 머리 목록 hash도 검사하며 모든 시나리오의 `issues`가 비었다.
+[구문 분석과 리사이즈](../evidence/editor-deferred-restore-20261004/syntax.json),
+[실제 clangd](../evidence/editor-deferred-restore-20261004/clangd.json),
+[입력 콜백](../evidence/editor-deferred-restore-20261004/callbacks.json),
+[실제 한국어 HID](../evidence/editor-deferred-restore-20261004/live-ime.json)에 앱/소스 hash·프로세스 ID·
+관측값·이미지 경로와 hash를 보관한다. 콜백 주입은 실제 OS 입력기 증거와 구분한다.
+공개 분할 명령은 이 복원 수정 뒤 별도로 연결한다. 다른 언어 서버 전체나 자연 발생하지 않은
+늦은 OS 콜백까지 검증했다고 확대하지 않는다.

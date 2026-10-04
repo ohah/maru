@@ -2270,6 +2270,8 @@ const TermRuntime = struct {
     editor_total_visual_rows: u32 = 0,
     /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 여기를 움직인다.
     editor_first_line: usize = 0,
+    /// 접힘 provider가 늦게 준비돼도 원문 위치와 저장된 접힘을 다시 적용하는 뷰별 요청.
+    editor_restore: ?editor_ops.workspace_restore.Pending = null,
     /// 접을 수 있는 범위(§4.1f — 들여쓰기 층). **명령이 필요할 때 세어 여기 둔다** — 렌더는 할당하지
     /// 않고 이것을 읽기만 한다. 비어 있으면 아직 안 셌거나 접을 것이 없다.
     editor_fold_ranges: []const maru.session.editor.fold.Range = &.{},

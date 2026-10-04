@@ -241,3 +241,13 @@ directory 알림을 살아 있는 개별 lease에 배분하는 검사를 추가�
 파일 교체를 검사한다. watch 14개·host 24개의 Debug/ReleaseFast와 각 다섯 compiled
 runtime mutation 검출이 통과했다. 일반 앱 프레임 루프의 구독 수명 관리·hint 예약과
 clean 갱신·dirty 선택 UI는 아직 남아 있으며, 이 구독 API만으로 연결 완료를 주장하지 않는다.
+
+§2m.165: 공통 edit_commands의 clean 외부 변경 적용과 Windows view의 peer 게시 경로를
+추가했다. 동일 prefix/suffix를 남기는 UTF-8 scalar 경계 replacement를 독립 Undo entry로
+게시하여 이전 이력과 각 view의 selection을 보존한다. dirty·live save image·uncertain save는
+거절하며 BOM/개행 속성·본문 saved hash·BOM 포함 raw disk hash를 함께 갱신한다. 할당 실패
+시 본문·선택·이력·포맷·hash를 보존한다. 포맷만 바뀌면 텍스트 이력은 추가하지 않는다.
+공통 명령 32개와 native host 25개의 Debug/ReleaseFast, 다섯 compiled runtime mutation
+검출과 실제 창의 외부 내용 표시 2프레임·커서·Undo 검사가 통과했다. 빌드·문서 링크·
+target·전체 경계 검사도 통과했다. 일반 앱의 구독 수명 관리·자동 예약과 dirty 선택 UI는
+계속 남아 있다.

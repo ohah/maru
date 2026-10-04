@@ -4513,6 +4513,60 @@ const FileCloseFixture = struct {
     }
 };
 
+test "Windows editor host external notification worker read and clean edit preserve dirty conflict authority" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const watch = @import("platform/windows/editor/directory_watch.zig");
+    var groups: watch.Groups = .{ .allocator = a };
+    defer groups.deinit() catch unreachable;
+    const lease = try f.book.subscribeWatch(io, &groups, f.views.items[0].document);
+    try f.views.items[0].navigation.items.append(a, maru.session.editor.selection.Selection.at(6));
+    const raw = "\xef\xbb\xbfbaseEXT\r\n";
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = raw });
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    var notified = false;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (groups.poll(std.Io.Clock.awake.now(io).nanoseconds)) |notice| {
+            try std.testing.expect(notice.problem == null and try groups.receives(lease, notice.group));
+            notified = true;
+            break;
+        }
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(notified);
+    const reading = @import("platform/windows/editor/file_read_worker.zig");
+    var reader: reading.Reader = .{ .allocator = a };
+    defer reader.deinit(io) catch unreachable;
+    _ = try f.book.submitRead(&reader, f.views.items[0].document);
+    var result: ?reading.Result = null;
+    defer if (result) |*value| value.deinit();
+    const read_deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (result == null and std.Io.Clock.awake.now(io).nanoseconds < read_deadline) {
+        result = try reader.takeResult();
+        if (result == null) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const image = result orelse return error.ReadDidNotComplete;
+    try std.testing.expect(image == .image);
+    try std.testing.expect(try f.book.acceptsRead(&reader, image, f.views.items[0].document));
+    try std.testing.expect(try f.views.items[0].acceptExternal(a, f.views.items, image.image.bytes, 10));
+    try f.views.items[0].refresh(a);
+    try std.testing.expectEqualStrings("baseEXT\r\n", f.views.items[0].text);
+    try std.testing.expectEqual(@as(usize, 9), f.views.items[0].navigation.items.items[0].focus);
+    try std.testing.expect(!f.documents.get(f.views.items[0].document).?.opened.?.isDirty());
+    try f.expectDisk(raw);
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 11, .views = f.views.items });
+    const state = f.documents.get(f.views.items[0].document).?;
+    const disk_hash = state.opened.?.disk_hash;
+    try std.testing.expect(!try f.book.acceptsRead(&reader, image, f.views.items[0].document));
+    try std.testing.expectError(error.DirtyDocument, f.views.items[0].acceptExternal(a, f.views.items, "other", 12));
+    try std.testing.expectEqual(disk_hash, state.opened.?.disk_hash);
+    try std.testing.expect(state.opened.?.isDirty());
+    try f.expectDisk(raw);
+}
+
 test "Windows editor host publication allocation failure precedes recovery and preserves retry ownership" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = std.testing.allocator;
@@ -17084,6 +17138,7 @@ fn runWin32EditorDocumentSmoke(io: std.Io, allocator: std.mem.Allocator, stdout:
     }
     try stdout.print("editor_document_smoke_ok=true frames_presented={d}\n", .{frames});
     try runEditorNavigationFrames(allocator, &host, stdout);
+    try runEditorExternalReadFrames(io, allocator, &host, stdout);
     try runEditorTypingFrames(io, allocator, &host, stdout);
     try stdout.flush();
 }
@@ -17170,6 +17225,64 @@ fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout
 
 /// Exercise the ordinary app opener on a disposable file and backup location.
 /// Window messages then use the same input/paint methods as user documents.
+fn runEditorExternalReadFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
+    var nonce: [16]u8 = undefined;
+    try io.randomSecure(&nonce);
+    const path = try std.fmt.allocPrint(a, ".zig-cache/editor-external-smoke-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
+    defer a.free(path);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDir(io, path, .default_dir);
+    defer cwd.deleteDir(io, path) catch unreachable;
+    var root = try cwd.openDir(io, path, .{});
+    defer root.close(io);
+    try root.writeFile(io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase\r\n" });
+    defer root.deleteFile(io, "file.txt") catch unreachable;
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = a };
+    defer documents.deinit() catch unreachable;
+    var book: file_host.Book = .{ .allocator = a, .registry = &documents };
+    defer book.deinit(io) catch unreachable;
+    const lease = try book.open(io, root, "file.txt", 128);
+    defer _ = documents.release(lease) catch unreachable;
+    var views = [_]OpenFile{try editor_document.attach(&documents, lease, a)};
+    defer views[0].deinit(a);
+    try views[0].navigation.items.append(a, editor.selection.Selection.at(6));
+    const external = "\xef\xbb\xbfbaseEXT\r\n";
+    try root.writeFile(io, .{ .sub_path = "file.txt", .data = external });
+    var reader: @import("platform/windows/editor/file_read_worker.zig").Reader = .{};
+    defer reader.deinit(io) catch unreachable;
+    _ = try book.submitRead(&reader, views[0].document);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    const ops = try a.alloc(maru.chrome.draw.Op, 4096);
+    defer a.free(ops);
+    const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+    var applied = false;
+    var frames: usize = 0;
+    while (frames < 2 or !applied) {
+        for (try host.poll()) |event| if (event == .close_requested) return error.EditorSmokeInterrupted;
+        if (!applied) if (try reader.takeResult()) |value| {
+            var result = value;
+            defer result.deinit();
+            if (result != .image or !try book.acceptsRead(&reader, result, views[0].document)) return error.EditorExternalReadMismatch;
+            if (!try views[0].acceptExternal(a, &views, result.image.bytes, std.Io.Clock.awake.now(io).nanoseconds)) return error.EditorExternalEditMissing;
+            applied = true;
+            frames = 0;
+        };
+        var frame = try buildComposedEditor(a, EditorHost.fromHost(host), &views[0], .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer frame.deinit(a);
+        try host.drawFrame(frame.cells.items, 0xFF1E2430);
+        frames += 1;
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.EditorExternalReadTimeout;
+    }
+    const state = documents.get(lease).?;
+    if (!std.mem.eql(u8, views[0].text, "baseEXT\r\n") or views[0].navigation.items.items[0].focus != 9 or state.opened.?.isDirty()) return error.EditorExternalPublicationMismatch;
+    if (state.history.undo_len != 1 or state.opened.?.disk_hash != editor.document_state.contentHash(external)) return error.EditorExternalAuthorityMismatch;
+    const participants = [_]editor.edit_commands.Participant{.{ .view = &views[0].navigation, .id = views[0].document.id }};
+    _ = try editor.edit_commands.run(a, state, &participants, 0, .undo, .{ .now_ms = 1 });
+    if (!std.mem.eql(u8, state.opened.?.file.content, "base\r\n") or !state.opened.?.isDirty()) return error.EditorExternalUndoMismatch;
+    try stdout.print("editor_external_read_smoke_ok=true painted_frames={d} clean_update=true cursor_mapped=true undo_preserved=true\n", .{frames});
+}
+
 fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
     const editor = maru.session.editor;
     var documents: editor.document_registry.Registry = .{ .allocator = a };

@@ -29328,7 +29328,12 @@ test "훅 캡처: PostToolUse 의 bashEditDiff 가 셸 편집을 캡처에 싣�
         const open = session.turn_captures.openTurn("S-diff") orelse return error.NoOpenTurn;
         // read_then(이미 있음, 플래그) + by_shell(새) + /etc/hosts(루트 밖 — 경로만) = 3. 워크트리 안은 **없다**.
         try std.testing.expectEqual(@as(usize, 3), open.entries.items.len);
-        for (open.entries.items) |e| try std.testing.expect(std.mem.indexOf(u8, e.path, "worktrees") == null);
+        // 「경로에 `worktrees` 가 없다」로 재면 이 저장소의 공유 워크트리(`.claude/worktrees/work`)에서 돌 때 **정상 경로도
+        // 걸려** 늘 빨갰다 — tmp 픽스처가 cwd 아래에 서기 때문이다. 재야 할 것은 **픽스처 안의 다른 저장소** 아래 경로다.
+        var wt_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const worktree_dir = try std.fmt.bufPrint(&wt_buf, "{s}/.claude/worktrees/agent-a/", .{root});
+        for (open.entries.items) |e| try std.testing.expect(!std.mem.startsWith(u8, e.path, worktree_dir));
+        try std.testing.expect(open.find(in_worktree) == null);
         try std.testing.expect(open.find(by_shell) != null);
         try std.testing.expect(open.entries.items[open.find(read_then).?].shell_diff);
         try std.testing.expectEqualStrings("v1\n", open.entries.items[open.find(read_then).?].before.text); // 첫 캡처 그대로

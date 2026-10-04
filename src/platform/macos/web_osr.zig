@@ -1049,7 +1049,13 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     gpa_ref = gpa;
     reapRetiring(gpa, now_ms);
     const generation = process_generation;
-    const p = if (process) |*p| p else return;
+    const p = if (process) |*p| p else {
+        // sidecar 가 멈췄어도(실패·프로필 사용 중) 붙이지 못한 팝업의 만료·정리는 한다 — 기록이 앱이 끝날 때까지 남지 않게(W6f② 적대 검증
+        // 2 차). 보낼 곳이 없으면 `destroy` 는 보내지 않고 지우기만 한다.
+        expireNewTabs(gpa, now_ms);
+        closeOrphanPopups(gpa);
+        return;
+    };
     _ = lsp_process.flush(p, gpa) catch {};
     // 청한 파일 내용을 받는 동안은 한 번에 더 읽는다 — sidecar 는 다 보낼 때까지 CEF 스레드(모든 Chromium 탭)에서 쓰기를 기다린다.
     // tick 마다 256 KiB 면 32 MiB 에 2 초 넘게 탭이 멈췄다(W6d③ 적대 검증 2 차).
@@ -1841,7 +1847,8 @@ fn dropNewTabs(gpa: std.mem.Allocator, s: *Surface) void {
 /// 붙이지 못한 팝업 — pump 가 닫는다(지금 표를 돌고 있을 수 있다).
 pub fn abandonPopup(gpa: std.mem.Allocator, id: u64) void {
     orphan_popups.append(gpa, id) catch {
-        // 쥘 곳이 없다 — 브라우저만이라도 닫는다(기록은 다음에 같은 번호가 오지 않으니 남아도 그리지 않는다).
+        // 쥘 곳이 없다(메모리 부족) — 브라우저만이라도 닫는다. 기록은 남는다: sidecar 가 다시 뜨면 Term 없는 브라우저로 되살아나고
+        // sidecar 를 내리지 못한다 — 메모리 부족일 때만이다.
         send(gpa, .{ .destroy_browser = id });
     };
 }
@@ -1944,6 +1951,23 @@ fn dropPendingAdopt(gpa: std.mem.Allocator, id: u64) bool {
         return true;
     };
     return false;
+}
+
+/// 페이지가 닫은 팝업인데 그 탭을 닫지 않는다(그 pane 의 유일한 탭 — W6f②). 브라우저는 이미 없다 — 그 번호로 빈 보통 탭을 새로
+/// 만든다(`about:blank`). 그대로 두면 입력·크기·이동이 죽은 번호로 가고, sidecar 를 내리지 못하고, sidecar 가 다시 뜨면 닫힌 팝업이 처음
+/// 주소로 되살아났다(로그인 흐름의 첫 주소 — W6f② 적대 검증 2 차).
+pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    s.adopted_popup = false;
+    s.page_closed = false;
+    dropDialogs(gpa, s);
+    dropNotes(gpa, s);
+    for (s.view.clear()) |ring| if (ring) |r| r.release();
+    const blank = gpa.dupe(u8, "about:blank") catch null;
+    if (s.last_url) |u| gpa.free(u);
+    s.last_url = blank;
+    s.created = false;
+    if (state == .running or state == .starting) sendCommand(gpa, .{ .create = .{ .browser = surface_id, .size = s.record.size, .hidden = s.record.hidden } });
 }
 
 /// 꺼내 간 창이 지금 닫지 못했다(탭을 끄는 중·닫기 확인) — 다음 tick 에 다시.
@@ -3088,9 +3112,15 @@ test "popups the sidecar made with a reserved id are adopted as tabs of their op
     state = .running;
     try std.testing.expectEqual(@as(usize, 2), popupIdsWanted()); // 둘 다 거뒀다
     state = .starting;
+    // 페이지가 닫은 유일한 탭(101)은 그 번호로 빈 보통 탭을 새로 만든다 — 죽은 번호로 보내지 않고, 처음 주소로 되살아나지 않게.
+    revivePageClosed(gpa, 101);
+    const r = surfaces.getPtr(101).?;
+    try std.testing.expect(!r.created and !r.adopted_popup);
+    try std.testing.expectEqualStrings("about:blank", r.last_url.?);
     const n = sentFrames(&frames);
-    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(@as(usize, 2), n);
     try std.testing.expectEqual(@as(u64, 105), frames[0].destroy_browser);
+    try std.testing.expectEqual(@as(u64, 101), frames[1].create_browser.browser);
 }
 
 test "dragged image files are fetched only when asked, gathered apart from the drag, checked against the announced size, and failed when the sidecar or browser goes (W6d③)" {

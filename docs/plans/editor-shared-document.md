@@ -186,7 +186,8 @@ codec·host 연결·재시작 검증 전 사용자용 분할 UI는 노출하지 
 
 ## 공유 편집기 pane 연결 내부 경로 — 2026-10-03
 
-상태: 내부 구현. 사용자용 action/chord·복원 포맷·두 pane GUI 검증은 미착수다.
+상태: 내부 구현. 복원 포맷과 두 pane AppKit 재시작·지연 provider 검증은
+[제품 연결 결과](editor-recovery-integration.md)에 연결했다. 사용자용 action/chord는 다음 단계다.
 
 `pane.splitSharedEditorPane`는 셸 없이 같은 로컬 정본의 새 편집기 pane을 준비한다.
 가로/세로와 앞/뒤 배치에서 문서 참조·검색 슬롯·트리 노드를 모두 준비한 뒤 게시한다.

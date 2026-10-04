@@ -624,6 +624,9 @@ fn inlayWindow(self: *AppSession, term: *Term) chrome_editor.content.InlayWindow
 fn advanceSyntax(self: *AppSession, term: *Term) void {
     if (term.rt.editor_diff != null) return;
     const doc = term.rt.editorDocument().opened orelse return;
+    if (term.rt.editor_restore != null and workspace_restore.pending(term) == null)
+        workspace_restore.clear(self.allocator, term);
+    retryRestoredFolds(self, term);
 
     // **끊긴 파싱을 이 프레임 몫만큼 이어 판다**(§2.1a). 여는 파싱이 한 프레임에 안 끝나는 문서가
     // 있으므로(`build.zig` 675KB 가 `ReleaseFast` 에서 22.5ms — §2.1a 실측, 4ms 로 여섯 라운드) 프레임마다 예산만큼만 판다. 아직 남았으면 **다음 프레임을
@@ -811,6 +814,7 @@ pub const MinimapPress = enum { none, jumped, grabbed };
 pub fn minimapPress(self: *AppSession, term: *Term, x_px: f64, y_px: f64) MinimapPress {
     const r = term.rt.editor_minimap_rect orelse return .none;
     if (!app_session_mod.layout_math.pointInRect(x_px, y_px, r)) return .none;
+    workspace_restore.cancelScroll(term);
     const cell_h: u32 = @max(self.cell_height_px, 1);
     const visible: usize = r.h / cell_h;
     const rel: i64 = @intFromFloat(@floor(y_px - @as(f64, @floatFromInt(r.y))));
@@ -2296,6 +2300,7 @@ pub fn nativeTextFromEnv() bool {
 }
 
 const SharedSeed = struct {
+    restore: ?workspace_restore.Pending,
     selection: ?editor_selection.Selection,
     extras: []editor_selection.Selection,
     first_line: usize,
@@ -2341,6 +2346,7 @@ fn restoredOffset(bytes: []const u8, offset: usize) usize {
 }
 
 pub fn restoreViewState(self: *AppSession, term: *Term, value: editor.workspace_state.View, matching: bool) !void {
+    workspace_restore.clear(self.allocator, term);
     term.rt.editor_selection = editor_selection.Selection.at(0);
     if (!matching) return;
     const bytes = term.rt.editorDocument().opened.?.file.content;
@@ -2370,26 +2376,85 @@ pub fn restoreViewState(self: *AppSession, term: *Term, value: editor.workspace_
     term.rt.editor_wrap = value.wrap;
     try ensureFoldRanges(self, term);
     promoteFoldRangesToSyntax(self, term);
-    // 현재 provider가 실제로 인정하는 머리만 복원한다. 사라진 접힘을 옆 블록에 옮기지 않는다.
-    term.rt.editor_folded_len = 0;
-    for (term.rt.editor_fold_ranges) |range| {
-        if (std.mem.indexOfScalar(u32, value.folded, range.head) != null) {
-            term.rt.editor_folded_buf[term.rt.editor_folded_len] = range.head;
-            term.rt.editor_folded_len += 1;
-        }
+    const folded = try self.allocator.dupe(u32, value.folded);
+    errdefer self.allocator.free(folded);
+    std.mem.sort(u32, folded, {}, std.sort.asc(u32));
+    const selection_lines = try self.allocator.alloc(u32, merged.len * 3);
+    const doc = term.rt.editorDocument().opened.?;
+    for (restored_selections[0..merged.len], 0..) |sel, i| {
+        for ([_]usize{ sel.anchor_start, sel.anchor_end, sel.focus }, 0..) |offset, j|
+            selection_lines[i * 3 + j] = @intCast(doc.file.lines.lineAt(offset));
     }
-    try rebuildVisible(self, term);
-    // 접힘 재구성은 파생 폭과 랩 조각을 지운다. 그 뒤에 저장된 표시 좌표를 적용해야
-    // 첫 프레임부터 보던 위치가 유지된다. first_line은 문서 줄이 아니라 보이는 줄의 첨자다.
+    std.mem.sort(u32, selection_lines, {}, std.sort.asc(u32));
+    term.rt.editor_restore = .{
+        .revision = doc.file.revision,
+        .folded = folded,
+        .selection_lines = selection_lines,
+        .scroll = .{
+            .doc_line = @min(value.first_doc_line, term.rt.editor_lines.len -| 1),
+            .piece = value.first_piece,
+            .col = value.first_col,
+        },
+    };
+    term.rt.editor_folded_len = restoredFoldHeads(term, term.rt.editor_fold_ranges, term.rt.editor_folded_buf);
+    // 준비 실패 시 호출자는 staged Term을 버린다. 새 복원 배열은 이 함수에서 회수한다.
+    rebuildVisible(self, term) catch |err| {
+        term.rt.editor_restore = null;
+        self.allocator.free(selection_lines);
+        return err;
+    };
+    applyRestoredScroll(self, term);
+}
+
+/// 내용이 같은 동안만 저장된 머리와 현재 provider의 범위를 대응시킨다. 준비 중인
+/// 다른 provider의 범위가 복원한 커서를 숨기면 그 접힘은 적용하지 않고 다음 결과를 기다린다.
+fn restoredFoldHeads(term: *Term, ranges: []const editor_fold.Range, out: []u32) usize {
+    const value = workspace_restore.pending(term) orelse return 0;
+    var n: usize = 0;
+    for (ranges) |range| {
+        if (std.sort.binarySearch(u32, value.folded, range.head, orderU32) == null) continue;
+        const at = std.sort.lowerBound(u32, value.selection_lines, range.first_hidden, orderU32);
+        if (at < value.selection_lines.len and value.selection_lines[at] <= range.last_hidden) continue;
+        out[n] = range.head;
+        n += 1;
+    }
+    return n;
+}
+
+fn applyRestoredScroll(self: *AppSession, term: *Term) void {
+    const value = workspace_restore.pending(term) orelse return;
+    const scroll = value.scroll orelse return;
+    // 접힘 배열을 만든 뒤 원문 줄을 현재 보이는 줄로 변환한다. 기하에 따른 clamp는
+    // 기존 렌더가 담당하며, 사용자 입력 전에는 그 임시 clamp를 새 복원 의도로 저장하지 않는다.
     ensureLineCols(self, term);
     ensureMaxCols(term, false);
+    restoreTop(term, scroll.doc_line);
     const lines = editorLines(term);
-    term.rt.editor_first_line = @min(value.first_line, lines.len -| 1);
-    term.rt.editor_first_piece = if (lines.len > 0 and term.rt.editor_first_line == value.first_line)
-        @min(value.first_piece, @as(u32, @intCast(lines[term.rt.editor_first_line].len)))
+    term.rt.editor_first_piece = if (lines.len > 0 and topDocLine(term) == scroll.doc_line)
+        @min(scroll.piece, @as(u32, @intCast(lines[term.rt.editor_first_line].len)))
     else
         0;
-    term.rt.editor_first_col = @min(value.first_col, term.rt.editor_max_columns);
+    term.rt.editor_first_col = @min(scroll.col, term.rt.editor_max_columns);
+}
+
+fn retryRestoredFolds(self: *AppSession, term: *Term) void {
+    const value = workspace_restore.pending(term) orelse return;
+    if (!value.retry_folds) return;
+    const keep = keepFoldView(term);
+    const piece = term.rt.editor_first_piece;
+    term.rt.editor_folded_len = restoredFoldHeads(term, term.rt.editor_fold_ranges, term.rt.editor_folded_buf);
+    rebuildVisible(self, term) catch {
+        term.rt.editor_folded_len = 0;
+        rebuildVisible(self, term) catch unreachable;
+        finishFoldChange(self, term, keep);
+        term.rt.editor_first_piece = piece;
+        self.metal_dirty = true;
+        return;
+    };
+    value.retry_folds = false;
+    finishFoldChange(self, term, keep);
+    if (topDocLine(term) == keep.anchor) term.rt.editor_first_piece = piece;
+    applyRestoredScroll(self, term);
 }
 
 pub const Prepared = struct {
@@ -2403,6 +2468,7 @@ pub const Prepared = struct {
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
         allocator.free(self.lines);
         if (self.seed) |seed| {
+            if (seed.restore) |value| value.deinit(allocator);
             allocator.free(seed.extras);
             allocator.free(seed.ranges);
             allocator.free(seed.folded);
@@ -2482,8 +2548,11 @@ pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || err
     errdefer self.allocator.free(visible_numbers);
     const marks = try self.allocator.dupe(chrome_editor.gutter.Fold, source.rt.editor_fold_marks);
     errdefer self.allocator.free(marks);
+    const deferred = if (workspace_restore.pending(source)) |value| try value.clone(self.allocator) else null;
+    errdefer if (deferred) |value| value.deinit(self.allocator);
     const lease = self.editor_documents.retain(source_lease, .view) catch return error.OutOfMemory;
     return .{ .lease = lease, .lines = lines, .recovery = if (source.rt.editor_recovery) |owner| owner.retain() else null, .shared = true, .seed = .{
+        .restore = deferred,
         .selection = source.rt.editor_selection,
         .extras = extras,
         .first_line = source.rt.editor_first_line,
@@ -2617,6 +2686,7 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // 한다(위 전부). 이름 없는 문서는 그 안에서 걸러진다(경로가 없으면 이 슬라이스의 대상이 아니다).
     if (!prepared.shared) app_session_mod.editor_backup_ops.restoreIfAny(self, term);
     if (prepared.seed) |seed| {
+        term.rt.editor_restore = seed.restore;
         term.rt.editor_selection = seed.selection;
         term.rt.editor_extra_selections = seed.extras;
         term.rt.editor_first_line = seed.first_line;
@@ -2827,6 +2897,7 @@ pub fn openRecoveredSource(self: *AppSession, source: *recovery_store.Source) !*
 /// 화면 맨 위 줄이 그대로다(그 필드 주석). 대가는 랩이 켜졌을 때 긴 줄이 한 번에 지나간다는 것이고,
 /// 조각 단위 스크롤(`first_piece`)이 붙으면 여기가 그것을 함께 움직인다.
 pub fn scrollLines(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, lines: i32) bool {
+    workspace_restore.cancelScroll(term);
     if (term.kind != .editor) return false;
     if (lines == 0) return true; // 0줄이어도 **소유는 한다**(잔여 델타는 호출자의 accumulator가 든다)
 
@@ -3118,6 +3189,7 @@ fn mergeAwareBodyRect(self: *AppSession, leaf_rect: maru.session.SplitRect, term
 ///
 /// **랩이 켜져 있으면 가로가 없다.** `visual_map`이 폭에 맞춰 잘라 두므로 넘칠 것이 없다.
 pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect, cols: i32, x_px: ?f64) bool {
+    workspace_restore.cancelScroll(term);
     if (term.kind != .editor) return false;
     if (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) return false;
 
@@ -4153,6 +4225,7 @@ fn revealCaretColumn(self: *AppSession, term: *Term, right: bool, col: u32, visi
 /// 줄을 **맨 위에 두므로**, 그대로 두면 **한 글자 칠 때마다 화면이 그 줄을 천장으로 끌어올린다**
 /// (적대적 검증 2026-08-26이 잡았다). 편집 전 화면이 몇 줄이었는지는 그 순간에도 알 수 있다.
 fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) void {
+    workspace_restore.cancel(term);
     const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
     const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len)));
@@ -4938,6 +5011,7 @@ fn hitPreeditBody(comptime mode: chrome_editor.content.PointMode, self: ?*AppSes
 /// IME 고정). 조합 중에 커서가 움직일 일은 없지만(입력기가 키를 다 먹는다) 두 값이 갈리면
 /// **조합 글자와 확정 글자가 다른 자리에 나타난다.**
 pub fn setEditorPreedit(self: *AppSession, term: *Term, bytes: []const u8) void {
+    if (bytes.len > 0) workspace_restore.cancel(term);
     if (bytes.len == 0) {
         if (term.rt.editor_preedit.len > 0) self.allocator.free(term.rt.editor_preedit);
         term.rt.editor_preedit = &.{};
@@ -5409,6 +5483,7 @@ pub fn setEditorTop(self: *AppSession, term: *Term, line: usize, reason: []const
 /// **한 번만 다시 만든다.** 겹마다 `toggleFoldHead`를 부르면 그때마다 보이는 줄 배열을 다시 만들고
 /// 보던 자리를 되돌리는데, 여기서는 곧바로 다른 자리로 갈 것이라 그 일이 통째로 버려진다.
 fn revealFoldedLine(self: *AppSession, term: *Term, doc_line: u32) bool {
+    workspace_restore.cancel(term);
     if (term.rt.editor_folded_len == 0) return false;
     if (foldsUnavailable(term)) return false;
     const buf = term.rt.editor_folded_buf;
@@ -6867,6 +6942,7 @@ pub fn scrollbarCaptureActive(self: *const AppSession) bool {
 pub fn setEditorScrollFromBarPx(self: *AppSession, offset_px: u32) void {
     // **잡은 Term에 간다** — 드래그 도중 포커스가 옮겨져도 손가락이 잡은 그 문서가 움직여야 한다.
     const term = self.editor_scrollbar_term orelse return;
+    workspace_restore.cancelScroll(term);
     if (term.kind != .editor) return;
     const cell_h: u32 = @intCast(self.cell_height_px);
     if (cell_h == 0) return;
@@ -6915,6 +6991,7 @@ pub fn setEditorScrollFromBarPx(self: *AppSession, offset_px: u32) void {
 /// 가로 막대 드래그가 준 **px offset**을 **열**로 옮긴다. 세로와 달리 선형이다(열 × 셀 폭).
 pub fn setEditorHScrollFromBarPx(self: *AppSession, offset_px: u32) void {
     const term = self.editor_scrollbar_term orelse return;
+    workspace_restore.cancelScroll(term);
     if (term.kind != .editor) return;
     const cell_w: u32 = @intCast(self.cell_width_px);
     if (cell_w == 0) return;
@@ -7486,6 +7563,7 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
 /// **접어 둔 것은 푼다.** 승격하면 화살표가 서는 줄이 달라지므로 옛 머리 번호가 가리키는 곳이
 /// 다른 범위가 된다. 파싱은 여는 직후에 끝나므로 그 사이에 접어 둔 것이 있을 확률은 낮고, 있어도
 /// **틀린 곳이 접힌 채로 남는 것보다 펼쳐지는 편이 낫다**.
+/// 재시작 복원 요청은 같은 본문 revision에서 저장된 머리를 따로 검증해 다시 적용한다.
 fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
     const doc = term.rt.editorDocument().opened orelse return;
     const st = &term.rt.editor_syntax;
@@ -7566,7 +7644,7 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
 /// 접힘 범위 목록을 **갈아 끼운다** — 구문 승격(2층)과 LSP `foldingRange`(3층)가 같은 자리를 지난다(§4 「층으로 쌓인다」 · §8.2j 「층 순서」).
 /// `ranges` 는 머리 오름차순·중첩만(엇갈림 없음)이어야 하고, 성공하면 **소유가 넘어간다**(실패하면 호출자가 놓는다).
 ///
-/// 단일 뷰는 기존처럼 접힘을 푼다. 공유 뷰는 새 목록에서 머리와 끝이 모두 일치하는 범위만 유지한다.
+/// 복원 요청이 없으면 단일 뷰는 기존처럼 접힘을 푼다. 공유 뷰는 머리와 끝이 모두 일치하는 범위만 유지한다.
 /// 수동 뷰의 편집 게시가 먼저 좌표를 매핑하므로, 낡은 줄 번호로 다른 블록을 접지 않는다.
 ///
 /// **표식 배열도 여기서 맞춘다.** `ensureFoldRanges` 는 들여쓰기 범위가 0이면 표식을 잡지 않는다 — 그 위에 2·3층이 범위를 올리면
@@ -7589,10 +7667,12 @@ pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.R
         };
     }
 
-    // 공유 뷰의 접힘은 새 provider가 같은 머리/끝 범위를 확인한 경우에만 이어 간다.
-    // 단일 뷰의 기존 승격 동작은 유지한다.
+    // 복원은 본문 revision과 선택을 검증한 저장 의도를 사용한다. 그 밖의 공유 뷰는
+    // 같은 머리/끝 범위만 이어 가고, 일반 단일 뷰의 승격 동작은 유지한다.
     var kept_len: usize = 0;
-    if (term.rt.editor_document_lease) |lease| {
+    if (workspace_restore.pending(term) != null) {
+        kept_len = restoredFoldHeads(term, ranges, folded);
+    } else if (term.rt.editor_document_lease) |lease| {
         if ((lease.owner.viewCount(lease) orelse 0) > 1) {
             var old_index: usize = 0;
             var head_index: usize = 0;
@@ -7646,8 +7726,9 @@ pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.R
         // provider 결과만 바뀌고 같은 문서 줄을 계속 보면 랩 조각도 같은 자리다.
         // 머리줄이 숨겨져 다른 줄로 이동한 경우에는 새 줄의 첫 조각에서 시작한다.
         if (topDocLine(term) == keep.anchor) term.rt.editor_first_piece = keep_piece;
+        applyRestoredScroll(self, term);
     }
-    // 단일 뷰는 펼친 상태라 할당이 없지만, 공유 뷰의 유지된 접힘은 파생 배열을 할당한다.
+    // 복원 또는 공유 뷰의 접힘을 유지하면 보이는 줄의 파생 배열을 할당한다.
     // 실패하면 전체 줄 표시와 접힘 상태를 함께 펼쳐 낡은 부분집합을 남기지 않는다.
     rebuildVisible(self, term) catch {
         // 못 만들면 **부분집합을 그대로 두지 않는다** — 틀린 표보다 없는 편이 낫다(`rebuildVisible`
@@ -7660,6 +7741,9 @@ pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.R
         // 안 세면 그 프레임부터 막대가 사라진다.
         term.rt.editor_folded_len = 0;
         rebuildVisible(self, term) catch unreachable; // 펼친 뷰는 할당하지 않는다.
+        // 서버 응답은 이미 소비됐다. 파생 배열 실패를 복원 의도 소실로 바꾸지 않고
+        // 다음 제품 프레임에서 다시 만든다.
+        if (workspace_restore.pending(term)) |value| value.retry_folds = true;
         finishFoldChange(self, term, keep);
         return true;
     };
@@ -7748,6 +7832,7 @@ fn finishFoldChange(self: *AppSession, term: *Term, keep: FoldViewKeep) void {
 /// (같은 길이라도 다른 머리들이다) 백업 배열을 함께 든다.
 fn applyFold(self: *AppSession, level: ?u16) bool {
     const term = pane_ops.activePane(self).activeTerm();
+    workspace_restore.cancel(term);
     if (term.kind != .editor) return false;
     if (foldsUnavailable(term)) return false; // 아래 doc — diff 상태에서는 접지 않는다
     ensureFoldRanges(self, term) catch return false; // 못 세면 아무 일도 안 한다
@@ -7810,6 +7895,7 @@ pub fn toggleFoldAtPoint(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) b
 /// **실패하면 있던 집합으로 되돌린다** — `applyFold`와 같은 이유이고 같은 백업 배열을 쓴다. 화면은
 /// 그대로인데 상태만 달라지면 `unfoldAll`이 거절해 숨은 줄을 못 되찾는다.
 fn toggleFoldHead(self: *AppSession, term: *Term, head: u32) bool {
+    workspace_restore.cancel(term);
     const prev_len = term.rt.editor_folded_len;
     const buf = term.rt.editor_folded_buf;
     @memcpy(term.rt.editor_folded_prev[0..prev_len], buf[0..prev_len]);
@@ -7841,6 +7927,7 @@ fn toggleFoldHead(self: *AppSession, term: *Term, head: u32) bool {
 /// 전부 펼친다.
 pub fn unfoldAll(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
+    workspace_restore.cancel(term);
     if (term.kind != .editor) return false;
     if (foldsUnavailable(term)) return false;
     if (term.rt.editor_folded_len == 0) return false;
@@ -8089,6 +8176,7 @@ const undo_stack_limit: usize = 2048;
 /// 안 끊으면 "클릭해서 다른 곳에 커서를 두고 친 글자"가 앞의 타이핑과 한 묶음이 되어 undo 한 번에
 /// 둘 다 사라진다 — 사용자가 예측할 수 없다.
 pub fn breakUndoGroup(term: *Term) void {
+    workspace_restore.cancel(term);
     term.rt.editorDocument().history.last_edit_kind = .none;
     term.rt.editor_ime_direct.revision = null;
     // **자동 닫기 표시도 여기서 버린다**(§3.7 — "그 표시는 그 caret이 떠나면 버린다").
@@ -8992,6 +9080,7 @@ fn writeBackSelections(self: *AppSession, term: *Term, sels: maru.session.editor
 /// **멀티 커서를 정리한다** — 전체를 고르는 것은 커서를 하나로 되돌리는 일이다. 남겨 두면 그 다음
 /// 편집이 여러 자리에 들어간다.
 pub fn selectAll(self: *AppSession, term: *Term) bool {
+    workspace_restore.cancel(term);
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 문서가 둘이라 "전체" 가 안 정해진다
     const doc = term.rt.editorDocument().opened orelse return false;
@@ -10541,6 +10630,7 @@ fn rebuildMappedVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void 
 }
 
 fn refreshViewAfterEditImpl(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan, mapped_folds: bool) error{OutOfMemory}!void {
+    workspace_restore.clear(self.allocator, term);
     // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
     // 늦다: `rebuildVisible` 이 같은 폐기를 **먼저** 불러 그때는 이미 0 이다(실측으로 걸렸다).
     const kept_col = term.rt.editor_first_col;
@@ -10759,6 +10849,7 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
 }
 
 fn dropFoldState(self: *AppSession, term: *Term) void {
+    workspace_restore.clear(self.allocator, term);
     if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
     if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
     if (term.rt.editor_folded_prev.len > 0) self.allocator.free(term.rt.editor_folded_prev);
@@ -10844,7 +10935,7 @@ fn foldsUnavailable(term: *Term) bool {
 
 /// 지금 화면 맨 위가 **문서 몇째 줄**인가(0-based). 접힘이 바뀌면 첨자의 뜻이 달라지므로, 위치를
 /// 옮길 때는 이 문서 좌표로 건너간다.
-fn topDocLine(term: *Term) usize {
+pub fn topDocLine(term: *Term) usize {
     const nums = term.rt.editor_visible_numbers;
     if (nums.len == 0) return term.rt.editor_first_line; // 접힌 것이 없다 — 첨자가 곧 문서 줄이다
     if (term.rt.editor_first_line >= nums.len) return term.rt.editor_first_line;
@@ -10930,6 +11021,7 @@ pub fn foldedHeads(term: *const Term) []const u32 {
 /// 그것이 **기본값**이고(다음에 여는 뷰가 따른다) 토글은 이 뷰의 일이기 때문이다.
 pub fn toggleWrap(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
+    workspace_restore.cancelScroll(term);
     if (term.kind != .editor) return false;
     const now = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
     term.rt.editor_wrap = !now;
@@ -49016,7 +49108,7 @@ test "editor recovery restore 접힘과 UTF-8 선택을 독립 뷰에 적용한�
         .primary = editor_selection.Selection.at(std.math.maxInt(usize)),
         .extras = &.{ editor_selection.Selection.at(0), editor_selection.Selection.at(0) },
         .folded = &.{ 0, std.math.maxInt(u32) },
-        .first_line = std.math.maxInt(usize),
+        .first_doc_line = std.math.maxInt(usize),
         .first_piece = std.math.maxInt(u32),
         .first_col = std.math.maxInt(u32),
     };
@@ -49038,7 +49130,7 @@ fn recoveryRestoreAllocationProbe(allocator: std.mem.Allocator, session: *AppSes
     defer session.allocator = saved_allocator;
     var staged = try workspace_restore.Staging.init(session, (&doc)[0..1]);
     defer staged.deinit();
-    const first = try staged.createView(.{ .index = 0, .document = 0, .primary = editor_selection.Selection.at(1) });
+    const first = try staged.createView(.{ .index = 0, .document = 0, .primary = editor_selection.Selection.at(1), .folded = &.{0} });
     defer term_ops.destroyTerm(session, first);
     const second = try staged.createView(.{ .index = 1, .document = 0, .primary = editor_selection.Selection.at(2) });
     defer term_ops.destroyTerm(session, second);
@@ -49060,7 +49152,7 @@ test "editor recovery restore 접힘 표를 재구성해도 가로 위치와 랩
             .index = 0,
             .document = 0,
             .primary = editor_selection.Selection.at(0),
-            .first_line = 4,
+            .first_doc_line = 4,
             .first_col = if (wrap) 0 else 70,
             .first_piece = if (wrap) 2 else 0,
             .wrap = wrap,
@@ -49072,7 +49164,7 @@ test "editor recovery restore 접힘 표를 재구성해도 가로 위치와 랩
         try testing.expectEqual(value.first_piece, term.rt.editor_first_piece);
         var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
         defer drawn.dl.deinit(a);
-        try testing.expectEqual(value.first_line, term.rt.editor_first_line);
+        try testing.expectEqual(value.first_doc_line, term.rt.editor_first_line);
         try testing.expectEqual(value.first_col, term.rt.editor_first_col);
         try testing.expectEqual(value.first_piece, term.rt.editor_first_piece);
     }
@@ -49090,7 +49182,7 @@ test "editor recovery restore 늦은 접힘 provider가 같은 맨 위 줄의 �
         .index = 0,
         .document = 0,
         .primary = editor_selection.Selection.at(0),
-        .first_line = 4,
+        .first_doc_line = 4,
         .first_piece = 2,
         .wrap = true,
     }, true);
@@ -49108,6 +49200,231 @@ test "editor recovery restore 늦은 접힘 provider가 같은 맨 위 줄의 �
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(a);
     try testing.expectEqual(@as(u32, 2), term.rt.editor_first_piece);
+}
+
+test "editor recovery restore 접힌 배열 대신 원문 줄을 저장하고 복원한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "restore-anchor.txt", "head\n    one\n    two\nend\n" ++ "row\n" ** 60);
+    try testing.expect(toggleFoldHead(fx.session, term, 0));
+    restoreTop(term, 20);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var capture: workspace_restore.Capture = .{ .allocator = arena.allocator() };
+    const value = try capture.view(term, 0);
+    try testing.expectEqual(@as(usize, 20), value.first_doc_line);
+    try restoreViewState(fx.session, term, value, true);
+    try testing.expectEqual(@as(usize, 20), topDocLine(term));
+}
+
+fn restoreTestFoldResponse(self: *AppSession, term: *Term, seq: u32) !void {
+    var response = try std.json.parseFromSlice(std.json.Value, self.allocator, "[{\"startLine\":0,\"endLine\":3},{\"startLine\":4,\"endLine\":6}]", .{});
+    defer response.deinit();
+    term.rt.editorDocument().notifications.lsp_version = 1;
+    term.rt.editor_fold_lsp = .{ .waiting = true, .waiting_seq = seq, .waiting_version = 1 };
+    fold_lsp_client.onResponse(self, term, seq, response.value, false);
+}
+
+test "editor recovery restore 늦은 provider와 재저장이 저장된 접힘 의도를 잃지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "restore-deferred.txt", "head\n    one\n    two\nend\n" ++ ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 60);
+    try restoreViewState(fx.session, term, .{
+        .index = 0,
+        .document = 0,
+        .primary = editor_selection.Selection.at(0),
+        .folded = &.{ 0, 4 },
+        .first_doc_line = 20,
+        .first_piece = 2,
+        .wrap = true,
+    }, true);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var capture: workspace_restore.Capture = .{ .allocator = arena.allocator() };
+    const value = try capture.view(term, 0);
+    try testing.expectEqualSlices(u32, &.{ 0, 4 }, value.folded);
+    try testing.expectEqual(@as(usize, 20), value.first_doc_line);
+    try restoreTestFoldResponse(fx.session, term, 1);
+    try testing.expectEqualSlices(u32, &.{ 0, 4 }, foldedHeads(term));
+    try testing.expectEqual(@as(usize, 20), topDocLine(term));
+    try testing.expectEqual(@as(u32, 2), term.rt.editor_first_piece);
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(a);
+    try testing.expectEqual(@as(usize, 20), topDocLine(term));
+    try testing.expectEqual(@as(u32, 2), term.rt.editor_first_piece);
+}
+
+test "editor recovery restore 사용자의 스크롤과 펼치기가 늦은 응답보다 우선한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "restore-interaction.txt", "head\n    one\n    two\nend\n" ++ "row\n" ** 100);
+    try restoreViewState(fx.session, term, .{
+        .index = 0,
+        .document = 0,
+        .primary = editor_selection.Selection.at(0),
+        .folded = &.{0},
+        .first_doc_line = 20,
+    }, true);
+    try testing.expect(scrollLines(fx.session, term, fx.leaf_rect, 5));
+    const top = topDocLine(term);
+    try restoreTestFoldResponse(fx.session, term, 1);
+    try testing.expectEqual(top, topDocLine(term));
+    try testing.expectEqualSlices(u32, &.{0}, foldedHeads(term));
+    try testing.expect(unfoldAll(fx.session));
+    try restoreTestFoldResponse(fx.session, term, 2);
+    try testing.expectEqual(@as(usize, 0), foldedHeads(term).len);
+    try testing.expectEqual(top, topDocLine(term));
+}
+
+test "editor recovery restore 막대와 랩 및 키보드 명령을 늦은 응답이 되돌리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const Action = enum { vertical_bar, horizontal_bar, wrap, keyboard, unfold_before_ready };
+    for (std.enums.values(Action)) |action| {
+        var fx = try PaneFixture.init(a);
+        defer fx.deinit(a);
+        const term = try undoFixture(&fx, a, "restore-actions.txt", "head\n    one\n    two\nend\n" ++ ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 100);
+        try restoreViewState(fx.session, term, .{
+            .index = 0,
+            .document = 0,
+            .primary = editor_selection.Selection.at(0),
+            .folded = &.{4},
+            .first_doc_line = 20,
+            .first_col = 70,
+            .wrap = false,
+        }, true);
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer drawn.dl.deinit(a);
+        fx.session.editor_scrollbar_term = term;
+        switch (action) {
+            .vertical_bar => setEditorScrollFromBarPx(fx.session, 30 * fx.session.cell_height_px),
+            .horizontal_bar => setEditorHScrollFromBarPx(fx.session, 10 * fx.session.cell_width_px),
+            .wrap => try testing.expect(toggleWrap(fx.session)),
+            .keyboard => try testing.expect(moveCarets(fx.session, term, .char_right, false)),
+            .unfold_before_ready => try testing.expect(!unfoldAll(fx.session)),
+        }
+        const top = topDocLine(term);
+        const col = term.rt.editor_first_col;
+        const focus = term.rt.editor_selection.?.focus;
+        try restoreTestFoldResponse(fx.session, term, 1);
+        try testing.expectEqual(top, topDocLine(term));
+        try testing.expectEqual(col, term.rt.editor_first_col);
+        try testing.expectEqual(focus, term.rt.editor_selection.?.focus);
+        if (action == .keyboard or action == .unfold_before_ready) {
+            try testing.expect(workspace_restore.pending(term) == null);
+            try testing.expectEqual(@as(usize, 0), foldedHeads(term).len);
+        } else {
+            try testing.expect(workspace_restore.pending(term).?.scroll == null);
+            try testing.expectEqualSlices(u32, &.{4}, foldedHeads(term));
+        }
+    }
+}
+
+test "editor recovery restore 임시 provider가 선택을 숨기지 않고 실제 입력은 복원을 취소한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "restore-selection.txt", "head\n    one\n    two\nend\n" ++ "row\n" ** 60);
+    const selected = term.rt.editorDocument().opened.?.file.lines.line(3).?.start;
+    try restoreViewState(fx.session, term, .{
+        .index = 0,
+        .document = 0,
+        .primary = editor_selection.Selection.at(selected),
+        .folded = &.{0},
+        .first_doc_line = 20,
+    }, true);
+    try testing.expectEqualSlices(u32, &.{0}, foldedHeads(term));
+    try restoreTestFoldResponse(fx.session, term, 1);
+    try testing.expectEqual(@as(usize, 0), foldedHeads(term).len);
+    try testing.expectEqual(selected, term.rt.editor_selection.?.focus);
+    try testing.expect(workspace_restore.pending(term) != null);
+    setEditorPreedit(fx.session, term, "가");
+    try testing.expect(workspace_restore.pending(term) == null);
+    setEditorPreedit(fx.session, term, "");
+    try restoreTestFoldResponse(fx.session, term, 2);
+    try testing.expectEqual(selected, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), foldedHeads(term).len);
+}
+
+fn restoreCloneAllocationProbe(allocator: std.mem.Allocator, session: *AppSession, source: *Term) !void {
+    const saved = session.allocator;
+    session.allocator = allocator;
+    defer session.allocator = saved;
+    var prepared = try prepareSharedView(session, source);
+    defer prepared.deinit(allocator);
+    const copy = prepared.seed.?.restore.?;
+    try testing.expectEqualSlices(u32, workspace_restore.pending(source).?.folded, copy.folded);
+    try testing.expect(copy.folded.ptr != workspace_restore.pending(source).?.folded.ptr);
+}
+
+test "editor recovery restore 공유 뷰는 대기를 독립 소유하고 공유 편집은 모두 무효화한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "restore-shared.txt", "head\n    one\n    two\nend\n" ++ "row\n" ** 60);
+    try restoreViewState(fx.session, term, .{
+        .index = 0,
+        .document = 0,
+        .primary = editor_selection.Selection.at(0),
+        .folded = &.{ 0, 4 },
+        .first_doc_line = 20,
+    }, true);
+    try testing.checkAllAllocationFailures(a, restoreCloneAllocationProbe, .{ fx.session, term });
+    const peer = try openSharedViewInActivePane(fx.session, term);
+    try testing.expect(workspace_restore.pending(peer) != null);
+    try testing.expect(workspace_restore.pending(peer).?.folded.ptr != workspace_restore.pending(term).?.folded.ptr);
+    try testing.expect(selectAll(fx.session, peer));
+    try testing.expect(workspace_restore.pending(peer) == null);
+    try testing.expect(workspace_restore.pending(term) != null);
+    try restoreTestFoldResponse(fx.session, term, 1);
+    try testing.expectEqualSlices(u32, &.{ 0, 4 }, foldedHeads(term));
+    try testing.expect(insertText(fx.session, peer, "changed\n"));
+    try testing.expect(workspace_restore.pending(peer) == null);
+    try testing.expect(workspace_restore.pending(term) == null);
+    try restoreTestFoldResponse(fx.session, term, 2);
+    try testing.expectEqual(@as(usize, 0), foldedHeads(term).len);
+}
+
+test "editor recovery restore provider 적용 중 할당 실패도 다음 프레임에서 재시도한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var failures: usize = 0;
+    for (0..8) |index| {
+        var fx = try PaneFixture.init(a);
+        defer fx.deinit(a);
+        const term = try undoFixture(&fx, a, "restore-oom.txt", "head\n    one\n    two\nend\n" ++ ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 60);
+        try restoreViewState(fx.session, term, .{
+            .index = 0,
+            .document = 0,
+            .primary = editor_selection.Selection.at(0),
+            .folded = &.{0},
+            .first_doc_line = 20,
+            .first_piece = 2,
+            .wrap = true,
+        }, true);
+        const ranges = try a.dupe(editor_fold.Range, &.{.{ .head = 0, .first_hidden = 1, .last_hidden = 3, .level = 1 }});
+        var failing = testing.FailingAllocator.init(a, .{ .fail_index = index });
+        fx.session.allocator = failing.allocator();
+        const installed = installFoldRanges(fx.session, term, ranges);
+        fx.session.allocator = a;
+        if (!installed) a.free(ranges);
+        if (failing.has_induced_failure) failures += 1;
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer drawn.dl.deinit(a);
+        try testing.expectEqualSlices(u32, &.{0}, foldedHeads(term));
+        try testing.expectEqual(@as(usize, 20), topDocLine(term));
+        try testing.expectEqual(@as(u32, 2), term.rt.editor_first_piece);
+        try testing.expect(!workspace_restore.pending(term).?.retry_folds);
+    }
+    try testing.expect(failures >= 5);
 }
 
 test "editor recovery restore 모든 staged 할당 실패에서 문서와 백업 소유를 반환한다" {

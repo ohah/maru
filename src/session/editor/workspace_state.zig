@@ -19,7 +19,8 @@ pub const View = struct {
     document: u32,
     primary: selection.Selection,
     extras: []const selection.Selection = &.{},
-    first_line: usize = 0,
+    /// 0-based 원문 줄. 접힘에 따라 바뀌는 표시 배열 첨자는 checkpoint에 넣지 않는다.
+    first_doc_line: usize = 0,
     first_piece: u32 = 0,
     first_col: u32 = 0,
     wrap: ?bool = null,
@@ -73,8 +74,8 @@ fn writeSelection(w: *std.Io.Writer, value: selection.Selection) !void {
 pub fn writeView(w: *std.Io.Writer, view: View) !void {
     // Restart must not reintroduce more carets than live editing admits.
     if (view.extras.len >= selection.max_cursors) return error.BadRecord;
-    try w.print("{d}:{d}:{d}:{d}:{d}:{s}:", .{
-        view.index,                                                         view.document, view.first_line, view.first_piece, view.first_col,
+    try w.print("{d}:{d}:doc:{d}:{d}:{d}:{s}:", .{
+        view.index,                                                         view.document, view.first_doc_line, view.first_piece, view.first_col,
         if (view.wrap) |value| (if (value) "on" else "off") else "inherit",
     });
     try writeSelection(w, view.primary);
@@ -88,7 +89,9 @@ pub fn parseView(allocator: std.mem.Allocator, payload: []const u8) DecodeError!
     var cursor: Cursor = .{ .rest = payload };
     const index = try cursor.uint(usize);
     const document = try cursor.uint(u32);
-    const first_line = try cursor.uint(usize);
+    // 옛 보이는 줄 첨자를 원문 줄로 조용히 오해하지 않도록 좌표 종류를 명시한다.
+    if (!std.mem.eql(u8, try cursor.token(), "doc")) return error.BadRecord;
+    const first_doc_line = try cursor.uint(usize);
     const first_piece = try cursor.uint(u32);
     const first_col = try cursor.uint(u32);
     const wrap_token = try cursor.token();
@@ -107,7 +110,7 @@ pub fn parseView(allocator: std.mem.Allocator, payload: []const u8) DecodeError!
     errdefer allocator.free(folded);
     for (folded) |*head| head.* = try cursor.uint(u32);
     if (cursor.rest.len != 0) return error.BadRecord;
-    return .{ .index = index, .document = document, .primary = primary, .extras = extras, .first_line = first_line, .first_piece = first_piece, .first_col = first_col, .wrap = wrap, .folded = folded };
+    return .{ .index = index, .document = document, .primary = primary, .extras = extras, .first_doc_line = first_doc_line, .first_piece = first_piece, .first_col = first_col, .wrap = wrap, .folded = folded };
 }
 
 fn number(comptime T: type, token: []const u8) error{BadRecord}!T {
@@ -186,7 +189,7 @@ test "editor restore codec preserves local path bytes and distinct content/base 
 
 test "editor restore codec preserves primary direction extras folds and wrap inheritance" {
     for ([_]?bool{ null, false, true }) |wrap| {
-        const view: View = .{ .index = 5, .document = 3, .primary = .{ .anchor_start = 6, .anchor_end = 9, .focus = 0, .kind = .word }, .extras = &.{selection.Selection.at(11)}, .first_line = 4, .first_piece = 2, .first_col = 7, .wrap = wrap, .folded = &.{ 0, 3 } };
+        const view: View = .{ .index = 5, .document = 3, .primary = .{ .anchor_start = 6, .anchor_end = 9, .focus = 0, .kind = .word }, .extras = &.{selection.Selection.at(11)}, .first_doc_line = 4, .first_piece = 2, .first_col = 7, .wrap = wrap, .folded = &.{ 0, 3 } };
         var out: std.Io.Writer.Allocating = .init(testing.allocator);
         defer out.deinit();
         try writeView(&out.writer, view);
@@ -202,16 +205,18 @@ test "editor restore codec rejects truncation unknown values and inflated counts
     try writeView(&out.writer, .{ .index = 0, .document = 0, .primary = selection.Selection.at(0), .folded = &.{1} });
     const bytes = out.written();
     for (0..bytes.len) |len| try testing.expectError(error.BadRecord, parseView(testing.allocator, bytes[0..len]));
-    try testing.expectError(error.BadRecord, parseView(testing.allocator, "0:0:0:0:0:on:0:0:0:simple:18446744073709551615:0:"));
-    try testing.expectError(error.BadRecord, parseView(testing.allocator, "0:0:0:0:0:bad:0:0:0:simple:0:0:"));
-    try testing.expectError(error.BadRecord, parseView(testing.allocator, "0:0:0:0:0:on:0:0:0:bad:0:0:"));
+    try testing.expectError(error.BadRecord, parseView(testing.allocator, "0:0:doc:0:0:0:on:0:0:0:simple:18446744073709551615:0:"));
+    try testing.expectError(error.BadRecord, parseView(testing.allocator, "0:0:doc:0:0:0:bad:0:0:0:simple:0:0:"));
+    try testing.expectError(error.BadRecord, parseView(testing.allocator, "0:0:doc:0:0:0:on:0:0:0:bad:0:0:"));
+    // 출시 전 옛 좌표 payload를 새 원문 좌표로 추측하지 않는다.
+    try testing.expectError(error.BadRecord, parseView(testing.allocator, "0:0:0:0:0:inherit:0:0:0:simple:0:0:"));
     const trailing = try std.mem.concat(testing.allocator, u8, &.{ bytes, "junk" });
     defer testing.allocator.free(trailing);
     try testing.expectError(error.BadRecord, parseView(testing.allocator, trailing));
 }
 
 fn oomDecode(allocator: std.mem.Allocator) !void {
-    const payload = "0:0:0:0:0:inherit:0:0:0:simple:1:3:3:3:simple:2:1:4:";
+    const payload = "0:0:doc:0:0:0:inherit:0:0:0:simple:1:3:3:3:simple:2:1:4:";
     var view = try parseView(allocator, payload);
     defer view.deinit(allocator);
 }
@@ -254,7 +259,7 @@ test "editor restore codec enforces the existing total cursor limit before alloc
     try testing.expectError(error.BadRecord, writeView(&out.writer, .{ .index = 0, .document = 0, .primary = selection.Selection.at(0), .extras = extras }));
     try testing.expectEqual(@as(usize, 0), out.written().len);
     // Build an otherwise valid oversized input without the guarded writer.
-    try out.writer.print("0:0:0:0:0:inherit:0:0:0:simple:{d}:", .{extras.len});
+    try out.writer.print("0:0:doc:0:0:0:inherit:0:0:0:simple:{d}:", .{extras.len});
     for (extras) |value| try writeSelection(&out.writer, value);
     try out.writer.writeAll("0:");
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });

@@ -18,7 +18,7 @@
 이 문서의 과거 additive/downgrade 설명은 당시 v1 변경 이력이며 v1↔v2 호환 계약이 아니다.
 
 창은 `editor-document value="..."` 줄에 문서 index·recovery ID·disk/content hash·절대 path를 담고,
-pane의 `editor-view="..."`가 문서 index와 독립 선택·스크롤·wrap·접힌 머리를 참조한다.
+pane의 `editor-view="..."`가 문서 index와 독립 선택·원문 줄 기준 스크롤·wrap·접힌 머리를 참조한다.
 같은 path의 독립 문서는 합치지 않는다. 공유 뷰는 하나의 문서 descriptor와 백업을 참조한다.
 선택된 일반 로컬 native editor는 `file-term`과 중복 저장하지 않는다. persisted index는
 terminal·file-term·editor-view의 합계이며 브라우저·untitled·remote의 insert-after도 이 합계 기준이다.
@@ -29,7 +29,24 @@ terminal·file-term·editor-view의 합계이며 브라우저·untitled·remote�
 백업 파일 이름·레코드 ID·요청 path가 모두 맞아야 적용한다. 원본 또는 백업의 읽기 실패와 준비 OOM은
 창 staging을 중단하고 기존 창·백업을 보존한다. 원본 누락을 이름 없는 문서로 바꾸는 UI는 이 계약 밖이다.
 본문 hash가 checkpoint와 다르면 최신으로 읽은 본문을 살리고 표시 좌표는 기본값으로 시작하며 저하 로그를 남긴다.
-일치하면 UTF-8 선택 경계·줄/열·현재 provider의 접힘을 검증한다. 렌더의 기존 wrap/스크롤 정산은 유지한다.
+일치하면 UTF-8 선택 경계·줄/열·현재 provider의 접힘을 검증한다. 스크롤은 접힌 표시 배열의
+첨자가 아닌 0-based 원문 줄(`first_doc_line`)로 저장하고, 접힘 배열을 만든 뒤 표시 줄로 변환한다.
+뷰 payload는 `index:document:doc:first_doc_line:first_piece:first_col:wrap:…`로 좌표 종류를
+명시한다. 출시 전 단일 v2이며 `doc` 표식 없는 이전 개발 payload를 새 좌표로 추측해 읽지 않는다.
+렌더의 기존 wrap/스크롤 정산은 유지한다.
+
+구문 분석·LSP 준비가 늦어도 복원은 창 게시를 기다리게 하지 않는다. 같은 본문 revision에 대해
+뷰별 복원 요청이 저장된 머리를 현재 provider의 유효한 머리와 대조한다. 옆 줄의 블록으로 옮기지
+않으며, 임시 범위가 복원한 선택 끝점을 숨기면 해당 접힘을 적용하지 않는다. 다음 provider의
+결과에서 다시 대조하므로 들여쓰기/구문/LSP의 끝줄 차이가 복원 의도를 지우지 않는다.
+일반 편집 중 provider 교체의 기존 접힘 보존 정책은 별개다.
+
+사용자 스크롤·minimap·scrollbar·wrap 조작은 저장 위치의 재적용을 취소한다. 커서/선택 이동,
+접기/펼치기, IME 조합 시작은 해당 뷰의 복원 요청을 취소한다. 본문 편집은 공유 뷰 모두에서
+이전 요청을 폐기하며 revision 검사도 낡은 적용을 거절한다. 자동 렌더 clamp와 리사이즈는 사용자
+입력으로 취급하지 않는다. 복원 대기 중 재저장은 원래 접힘과 아직 취소하지 않은 원문 위치를
+유지한다. 공유 뷰를 추가하면 복원 요청도 독립 복사한다. provider 적용 중 파생 배열 할당이
+실패하면 안전하게 펼치고 다음 프레임에 다시 시도하며, 닫기/다시 열기는 대기 배열을 해제한다.
 
 복구한 dirty 백업은 다음 백업·저장·명시적 버리기가 성공할 때까지 유지한다. 디스크와 같은 clean 백업의 삭제도
 새 창 게시 뒤로 미룬다. 삭제는 선택한 inode가 그대로일 때만 수행하여 중간에 게시된 새 백업을 지우지 않는다.

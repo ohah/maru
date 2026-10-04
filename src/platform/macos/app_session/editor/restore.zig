@@ -8,6 +8,52 @@ const backup = @import("backup.zig");
 const term_ops = @import("../term.zig");
 const codec = maru.session.editor.workspace_state;
 
+/// 분석 완료 시점에 의존하지 않는 복원 의도다. 새 사용자 조작은 이 요청보다 우선한다.
+/// 본문 revision이 달라지면 같은 줄 번호도 다른 블록이므로 다시 적용하지 않는다.
+pub const Pending = struct {
+    revision: u64,
+    folded: []u32,
+    /// 선택 끝점의 원문 줄을 정렬해 접힘 수 × 커서 수의 전수 비교를 피한다.
+    selection_lines: []u32,
+    scroll: ?Scroll,
+    active: bool = true,
+    retry_folds: bool = false,
+
+    pub const Scroll = struct { doc_line: usize, piece: u32, col: u32 };
+
+    pub fn deinit(self: Pending, allocator: std.mem.Allocator) void {
+        allocator.free(self.folded);
+        allocator.free(self.selection_lines);
+    }
+
+    pub fn clone(self: Pending, allocator: std.mem.Allocator) !Pending {
+        var result = self;
+        result.folded = try allocator.dupe(u32, self.folded);
+        errdefer allocator.free(result.folded);
+        result.selection_lines = try allocator.dupe(u32, self.selection_lines);
+        return result;
+    }
+};
+
+pub fn pending(term: *app.Term) ?*Pending {
+    const value = if (term.rt.editor_restore) |*value| value else return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
+    return if (value.active and value.revision == doc.file.revision) value else null;
+}
+
+pub fn cancel(term: *app.Term) void {
+    if (term.rt.editor_restore) |*value| value.active = false;
+}
+
+pub fn cancelScroll(term: *app.Term) void {
+    if (pending(term)) |value| value.scroll = null;
+}
+
+pub fn clear(allocator: std.mem.Allocator, term: *app.Term) void {
+    if (term.rt.editor_restore) |*value| value.deinit(allocator);
+    term.rt.editor_restore = null;
+}
+
 pub fn eligible(term: *const app.Term) bool {
     const doc = term.rt.editorDocument();
     return term.kind == .editor and term.rt.editor_diff == null and term.rt.editor_merge == null and
@@ -37,16 +83,18 @@ pub const Capture = struct {
             try self.sources.append(self.allocator, .{ .state = state, .revision = opened.file.revision });
             break :blk i;
         };
+        const deferred = pending(term);
+        const scroll = if (deferred) |value| value.scroll else null;
         return .{
             .index = index,
             .document = document,
             .primary = term.rt.editor_selection orelse codec.Selection.at(0),
             .extras = try self.allocator.dupe(codec.Selection, term.rt.editor_extra_selections),
-            .first_line = term.rt.editor_first_line,
-            .first_piece = term.rt.editor_first_piece,
-            .first_col = term.rt.editor_first_col,
+            .first_doc_line = if (scroll) |value| value.doc_line else editor.topDocLine(term),
+            .first_piece = if (scroll) |value| value.piece else term.rt.editor_first_piece,
+            .first_col = if (scroll) |value| value.col else term.rt.editor_first_col,
             .wrap = term.rt.editor_wrap,
-            .folded = try self.allocator.dupe(u32, editor.foldedHeads(term)),
+            .folded = try self.allocator.dupe(u32, if (deferred) |value| value.folded else editor.foldedHeads(term)),
         };
     }
     pub fn finish(self: *Capture) ![]const codec.Document {

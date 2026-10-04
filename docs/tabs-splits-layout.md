@@ -182,6 +182,10 @@ Node = leaf(Pane)
 
 ### split 키·방향·포커스
 
+- **같은 문서의 편집기 분할**: 편집기 `⌘\`는 `split_editor_right`로 같은 로컬 문서의 새 뷰를
+  오른쪽에 연다. View 메뉴·팔레트의 `split_editor_left`·`split_editor_down`·`split_editor_up`은
+  왼쪽·아래·위에 배치한다. 본문·Undo는 공유하고 새 뷰는 선택·스크롤·접힘·랩을 복사한 뒤
+  독립적으로 유지하며 검색은 빈 상태로 시작한다. 지원 범위는 [공유 뷰 계약](native-editor-layering.md#24a-vs-code-기준-공유-뷰-ux-2026-10-01-사용자-승인)을 따른다.
 - **키**: `Cmd+D` = 좌우 분할(`split_horizontal`), `Cmd+Shift+D` = 상하 분할(`split_vertical`). **베이스**: iTerm2의 기본
   Split 키(Cmd+D=나란히 좌우, Cmd+Shift+D=위아래)를 그대로 따른다 — macOS 터미널 사용자에게 가장 익숙한 매핑이라
   채택. tmux는 `prefix %`(좌우)/`prefix "`(상하)로 다르지만 옵션 드라이버일 뿐이라 기본 네이티브 키는 iTerm2 관습을 베이스로 한다.

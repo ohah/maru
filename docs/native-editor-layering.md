@@ -526,8 +526,9 @@ are not thread safe"*, 여러 스레드가 동시에 쓰려면 `ts_tree_copy`가
   범위는 유효 위치로 매핑한다. 비활성 뷰는 편집 위치로 자동 reveal하지 않고 viewport anchor를 유지한다.
 - 명시적 split은 기존 pane 배치를 사용하며 기본은 오른쪽이다. 왼쪽/위/아래 방향도 같은
   문서 연결 규칙을 따른다. 새 뷰는 원본 view state를 복사하고 포커스를 받으며 이후 독립이다.
-  macOS 기본 chord 후보는 ⌘\다. 기존 사용자 바인딩을 우선하며 editor 컨텍스트의 충돌 판정과
-  카테고리/팔레트 명령은 UI 구현 단계에서 함께 고정한다. Split in Group은 별도 보류다.
+  macOS 기본키는 편집기 컨텍스트의 `⌘\`(`split_editor_right`)다. View 메뉴·팔레트에는
+  `split_editor_left`·`split_editor_down`·`split_editor_up`도 있다. 사용자 바인딩·macro·unbind가
+  기본키보다 우선하며 메뉴는 별도 keyEquivalent를 등록하지 않는다. Split in Group은 별도 범위다.
 - 조합 중 글자는 같은 문서의 모든 연결 뷰에 실시간 보인다. 실제 IME owner와 후보창 caret는
   입력 중인 뷰 하나다. focus 이동은 원래 조합을 정산한 뒤 owner를 전환하고, 확정은 한 번만 한다.
   VS Code textarea는 모델 편집 경로로 조합을 반영한다. Maru의 표시 projection/정본 처리 방법은
@@ -544,6 +545,9 @@ are not thread safe"*, 여러 스레드가 동시에 쓰려면 `ts_tree_copy`가
 - 일반 네이티브 문서·untitled·기존 원격 편집 문서의 동일 문서 split을 목표 지원 범위로 둔다.
   해당 종류의 저장/백업/복원 gate를 통과하기 전 명령을 노출하지 않는다. diff/merge snapshot은
   편집 정본과 합치지 않으며 해당 editor의 별도 지원 계약 전에는 이 명령을 거절한다.
+  공개 명령의 지원 대상은 현재 같은 창의 일반 로컬 파일이다. 이름 없는 문서·원격 문서와
+  원격 미러 경로·비교/병합 뷰에서는 새 pane을 만들지 않는다. 검증 범위는
+  [공유 분할 명령 계획](plans/editor-shared-split.md)이 소유한다.
 
 VS Code의 allocator 실패 정책이나 모든 창의 문서 공유는 동일하다고 확인되지 않았다.
 앱 전역 identity·실패 주입·스레드/renderer 수명·권한 스코프는 기존 Maru 계약과 독립 판정자로

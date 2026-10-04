@@ -93,9 +93,8 @@ clean prepare 비용은 ReleaseFast에서 같은 작은 파일을 200회 교차 
 
 ## 남은 범위
 
-- 공개 분할 명령은 이 단계에서 노출하지 않는다. 아래 실제 두 pane/IME 재시작 점검에서 남은
-  지연 syntax/LSP 접힘 복원 반례를 해결해야 한다.
-  현재 저장한 접힘은 준비 시점 provider에 있는 머리만 적용하며 이후 provider 교체의 기존 정책을 따른다.
+- 지연 syntax/LSP 접힘 복원 반례는 #4125에서 해결했다. 공개 분할 명령은
+  [공유 분할 명령](editor-shared-split.md)에서 메뉴·팔레트·키 입력과 연결한다.
 - orphan/legacy 열거와 사용자 복구 UI는 [백업 발견과 복구](editor-backup-discovery.md)에서 연결한다.
   `recover_editor_backups`는 선택한 사본을 별도 미저장 문서로 연다. 원본 누락 시 전체 창
   staging을 거절하는 기존 정책과 이 수동 복구 경로를 구분한다.
@@ -197,5 +196,5 @@ staging·공유 준비의 모든 할당 실패 및 provider 파생 배열 실패
 [입력 콜백](../evidence/editor-deferred-restore-20261004/callbacks.json),
 [실제 한국어 HID](../evidence/editor-deferred-restore-20261004/live-ime.json)에 앱/소스 hash·프로세스 ID·
 관측값·이미지 경로와 hash를 보관한다. 콜백 주입은 실제 OS 입력기 증거와 구분한다.
-공개 분할 명령은 이 복원 수정 뒤 별도로 연결한다. 다른 언어 서버 전체나 자연 발생하지 않은
+공개 분할 명령과 입력 진입점 검증은 [공유 분할 명령](editor-shared-split.md)에서 연결한다. 다른 언어 서버 전체나 자연 발생하지 않은
 늦은 OS 콜백까지 검증했다고 확대하지 않는다.

@@ -48,6 +48,7 @@ macOS 로컬 shell 1개 surface
 - [세션 컨트롤 플레인 Phase·검증·코드 위치](plans/control-plane.md)
 - [네이티브 편집기 구현 계획](plans/native-editor.md) — [여러 뷰 축 실측·선례 원장](plans/native-editor-multi-view.md)(같은 파일 두 곳 보기·병합 편집기·Split in Group) · [B2 op 저장소 후보 실험](plans/editor-op-b2-evaluation.md)
 - [공유 문서와 독립 편집기 뷰 설계 제안](plans/editor-shared-document.md) — 소유·수명·편집 게시·IME·저장 경계와 구현 단계
+- [공유 편집기 분할 명령](plans/editor-shared-split.md) — 로컬 파일 공유 뷰의 메뉴·팔레트·단축키 연결과 제품 검증
 - [공유 편집기 복원 포맷과 구현 계획](plans/editor-shared-restore.md) — 문서 연결과 뷰 상태, v1 선택적 필드와 v2 비교, downgrade와 복원 실패 경계
 - [복구 ID 예약 후보 실험](plans/editor-recovery-reservation.md) — 실제 owner lease·atomic writer, 실패/중단/정리 경계와 비용 비교; 제품 연결 전 비교 이력
 - [로컬 문서 ID 백업과 공유 뷰 복원](plans/editor-recovery-integration.md) — 제품 writer·checkpoint 연결 및 헤드리스 재실행 검증; GUI 공개 gate는 별도

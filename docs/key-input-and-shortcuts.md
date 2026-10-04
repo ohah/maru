@@ -259,6 +259,12 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`(terminal·
 
 ### 편집기 Term 컨텍스트 (2026-09-03)
 
+`⌘\`는 같은 로컬 파일의 오른쪽 공유 뷰를 여는 `split_editor_right`다.
+사용자 app rebind·terminal macro·unbind가 우선하며 전역 기본 표에는 등록하지 않는다.
+네 방향의 View 메뉴는 `actionMenuItem`으로 클릭만 전달해 다른 입력 컨텍스트의 키를 가로채지 않는다.
+팔레트와 키 설정의 표시도 가려진 기본 바인딩을 제외한다. 지원 범위와 검증은
+[공유 분할 명령](plans/editor-shared-split.md)을 참조한다.
+
 **막혀 있던 것은 기능이 아니라 「그 기능을 어떤 키가 부르는가」였다.** 편집기 액션 여럿이 **chord 없이**
 커맨드 팔레트로만 닿는다 — [입력 설정](configuration-input.md)의 「무엇이 막고 있나」 표가 그 부류를
 소유하고, 그중 하나가 *"`⌥Z`는 Option 단독이라 터미널의 Meta/ESC 입력을 전역으로 뺏는다"* 다.

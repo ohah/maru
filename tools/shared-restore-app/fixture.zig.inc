@@ -2,6 +2,7 @@
 var shared_restore_session: ?*AppSession = null;
 var shared_restore_seeded = false;
 var shared_restore_edited = false;
+var shared_restore_split_ready = false;
 
 pub fn sharedRestoreObserve(self: *AppSession) void {
     if (std.c.getenv("MARU_SHARED_RESTORE_PHASE") == null) return;
@@ -55,8 +56,14 @@ fn sharedRestoreSeed(self: *AppSession) !bool {
         shared_restore_edited = true;
         return false;
     }
-    const peer = try pane_ops.splitSharedEditorPane(self, .horizontal, false);
-    const views = [_]*app_session_mod.Term{ source, peer };
+    var views: [2]*app_session_mod.Term = undefined;
+    const count = sharedRestoreViews(self, &views);
+    if (count == 1) {
+        // 공개 메뉴/키/팔레트 경로는 Swift 드라이버가 실행한다. 여기서 내부 helper를 대신 부르지 않는다.
+        shared_restore_split_ready = true;
+        return false;
+    }
+    if (count != 2) return error.ExpectedTwoViews;
     for (views, 0..) |term, i| {
         term.rt.editor_wrap = i == 1;
         const ranges = term.rt.editor_fold_ranges;
@@ -80,7 +87,7 @@ fn sharedRestoreSeed(self: *AppSession) !bool {
         term.rt.editor_first_col = if (i == 0) 70 else 0;
         term.rt.editor_first_piece = if (i == 0) 0 else 2;
     }
-    if (!self.activateSurfaceById(source.surfaceId())) return error.FocusFailed;
+    if (!self.activateSurfaceById(views[0].surfaceId())) return error.FocusFailed;
     self.metal_dirty = true;
     shared_restore_seeded = true;
     return true;
@@ -95,7 +102,7 @@ export fn maru_shared_restore_fixture_step(command: u32) callconv(.c) i32 {
 }
 
 fn sharedRestoreStep(self: *AppSession, command: u32) !i32 {
-    if (command == 1) return if (try sharedRestoreSeed(self)) 1 else 0;
+    if (command == 1) return if (try sharedRestoreSeed(self)) 1 else if (shared_restore_split_ready) 2 else 0;
     var views: [2]*app_session_mod.Term = undefined;
     if (sharedRestoreViews(self, &views) != 2) return 0;
     if (command == 2) {

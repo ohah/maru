@@ -75,6 +75,8 @@ keybind = F4 = esc:[2J
   modifier는 정확히 비교하므로 Shift로 나오는 글자는 Shift까지 적는다(US 배열 ⌘+ = `Cmd+Shift+Plus`).
 - **action**: 워크스페이스 `new_tab`·`close_tab`·`next_tab`·`previous_tab`·`select_tab:N`(N=0부터),
   포커스 기반 닫기 `close_focused`, Term 전용 `new_term`·`close_term`·`next_term`·`previous_term`, 분할 `split_horizontal`·`split_vertical`,
+  같은 로컬 파일의 공유 뷰 분할 `split_editor_right`·`split_editor_left`·`split_editor_down`·`split_editor_up`
+  (오른쪽 기본키 `Cmd+\`, 편집기 컨텍스트; 나머지는 기본키 없음),
   pane 포커스 `focus_pane_left`·`focus_pane_right`·`focus_pane_up`·`focus_pane_down`, split 순환 `next_pane`·`previous_pane`,
   폰트 크기 `increase_font_size[:N]`·`decrease_font_size[:N]`(N=한 번에 바꾸는 보폭 pt, 양수만 — 숫자 없으면 1pt.
   예: `Cmd+Equal = increase_font_size:2`로 기본 ⌘=의 보폭을 바꾼다)·`reset_font_size`·`set_font_size:N`

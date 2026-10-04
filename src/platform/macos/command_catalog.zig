@@ -48,6 +48,10 @@ pub const entries = [_]Entry{
     .{ .action = .previous_tab, .key = "previous_tab", .title = "Previous Workspace", .search_ko = "이전 워크스페이스" },
     .{ .action = .split_horizontal, .key = "split_horizontal", .title = "Split Right", .search_ko = "오른쪽 분할" },
     .{ .action = .split_vertical, .key = "split_vertical", .title = "Split Down", .search_ko = "아래쪽 분할" },
+    .{ .action = .split_editor_right, .key = "split_editor_right", .title = "Editor: Split Right", .search_ko = "편집기 오른쪽 분할" },
+    .{ .action = .split_editor_left, .key = "split_editor_left", .title = "Editor: Split Left", .search_ko = "편집기 왼쪽 분할" },
+    .{ .action = .split_editor_down, .key = "split_editor_down", .title = "Editor: Split Down", .search_ko = "편집기 아래쪽 분할" },
+    .{ .action = .split_editor_up, .key = "split_editor_up", .title = "Editor: Split Up", .search_ko = "편집기 위쪽 분할" },
     .{ .action = .toggle_file_panel_dock_side, .key = "toggle_file_panel_dock_side", .title = "Move File Panel Right/Bottom", .search_ko = "파일 패널 위치 변경" },
     .{ .action = .toggle_file_panel_focus, .key = "toggle_file_panel_focus", .title = "Toggle File Panel Focus", .search_ko = "파일 패널 포커스 전환" },
     .{ .action = .toggle_file_panel_mode, .key = "toggle_file_panel_mode", .title = "Toggle File Panel Mode", .search_ko = "파일 패널 모드 전환" },
@@ -222,10 +226,12 @@ pub fn chordForAction(resolver: KeyBindingResolver, action: Action) ?KeyChord {
     // 이것이 없으면 `⌘D`·`⌥Z`·`⌥↑↓` 가 배선돼 있는데도 팔레트가 **「단축키 없음」**이라고 말해
     // 발견조차 안 된다(실측). 전역 표보다 **먼저** 보는 것은 `resolveEditor` 의 순서와 같다.
     //
-    // **메뉴에 chord 가 새로 달리지는 않는다** — 이 표의 액션들은 팔레트 카탈로그에만 있고
-    // `catalogMenuItem` 이 거는 스무 항목에 하나도 없다(실측). 즉 바뀌는 것은 팔레트 표시뿐이다.
+    // 편집기 전용 키는 메뉴 keyEquivalent로 등록하지 않는다. 공유 분할 메뉴도
+    // actionMenuItem으로 클릭만 받고, 팔레트와 키 설정에 현재 유효한 chord를 표시한다.
     for (editor_context_bindings) |binding| {
-        if (std.meta.eql(binding.action, action)) return binding.chord;
+        if (!std.meta.eql(binding.action, action)) continue;
+        // 실제 resolver가 사용자 바인딩·macro·unbind를 먼저 보므로 표시도 같은 키를 양보한다.
+        if (!builtinChordShadowed(resolver, binding.chord)) return binding.chord;
     }
     for (default_app_bindings) |binding| {
         if (!std.meta.eql(binding.action, action)) continue;

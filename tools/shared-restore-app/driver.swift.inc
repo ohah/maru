@@ -6,9 +6,51 @@ private func sharedRestoreFixtureStep(_ command: UInt32) -> Int32
 private enum SharedRestoreRun {
     static var stage = 0
     static var next = 0.0
+    static var splitDispatched = false
 }
 
 extension MaruAppHostController {
+    private func invokeSharedSplit(window: NSWindow) -> Bool {
+        guard let view = primary?.view, let mainMenu = NSApp.mainMenu else { return false }
+        var items: [String: (NSMenu, Int)] = [:]
+        func collect(_ menu: NSMenu) {
+            for (index, item) in menu.items.enumerated() {
+                if let key = item.representedObject as? String, key.hasPrefix("split_editor_") {
+                    items[key] = (menu, index)
+                    // 전역 메뉴 keyEquivalent가 편집기 컨텍스트 밖의 키를 가로채지 않아야 한다.
+                    if !item.keyEquivalent.isEmpty { items.removeValue(forKey: key) }
+                }
+                if let child = item.submenu { collect(child) }
+            }
+        }
+        collect(mainMenu)
+        guard Set(items.keys) == Set(["split_editor_right", "split_editor_left", "split_editor_down", "split_editor_up"]),
+              captureSharedRestore("before-split") else { return false }
+        func key(_ code: UInt16, _ text: String, _ modifiers: NSEvent.ModifierFlags) -> Bool {
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, characters: text, charactersIgnoringModifiers: text,
+                isARepeat: false, keyCode: code) else { return false }
+            if !view.performKeyEquivalent(with: event) { view.keyDown(with: event) }
+            return true
+        }
+        let entry = ProcessInfo.processInfo.environment["MARU_SHARED_RESTORE_SPLIT_ENTRY"] ?? "keyboard"
+        switch entry {
+        case "menu":
+            guard let (menu, index) = items["split_editor_right"] else { return false }
+            menu.performActionForItem(at: index)
+        case "palette":
+            guard key(35, "P", [.command, .shift]) else { return false }
+            view.insertText("Editor: Split Right", replacementRange: NSRange(location: NSNotFound, length: 0))
+            guard captureSharedRestore("split-palette"), key(36, "\r", []) else { return false }
+        case "keyboard":
+            guard key(42, "\\", [.command]) else { return false }
+        default: return false
+        }
+        FileHandle.standardError.write(Data("SHARED_SPLIT_ENTRY entry=\(entry) transport=AppKit-local\n".utf8))
+        return true
+    }
+
     private func captureSharedRestore(_ label: String) -> Bool {
         guard let surface = primary, let renderer = surface.metalRenderer,
               let root = ProcessInfo.processInfo.environment["MARU_SHARED_RESTORE_OUTPUT"] else { return false }
@@ -40,6 +82,13 @@ extension MaruAppHostController {
                 let ready = sharedRestoreFixtureStep(1)
                 if ready < 0 { finishSharedRestore(false); return }
                 if ready == 0 { return }
+                if ready == 2 {
+                    if !SharedRestoreRun.splitDispatched {
+                        SharedRestoreRun.splitDispatched = true
+                        if !invokeSharedSplit(window: window) { finishSharedRestore(false) }
+                    }
+                    return
+                }
                 SharedRestoreRun.stage = 1
                 SharedRestoreRun.next = now + 0.5
                 return

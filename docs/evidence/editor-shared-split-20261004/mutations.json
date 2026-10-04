@@ -1,0 +1,108 @@
+{
+  "root": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-split-mutations-83g440v6",
+  "command": [
+    "mise",
+    "exec",
+    "--",
+    "zig",
+    "build",
+    "test-editor-shared-split",
+    "-Doptimize=ReleaseFast",
+    "-j2"
+  ],
+  "results": [
+    {
+      "name": "reverse-axis",
+      "source": "src/platform/macos/app_session.zig",
+      "old": ".split_editor_right, .split_editor_left => .horizontal,",
+      "new": ".split_editor_right, .split_editor_left => .vertical,",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "2/16 app_session.editor.mod.test.shared editor split 공개 명령은 네 방향으로 같은 문서의 뷰를 만든다...expected .horizontal, found .vertical",
+        "FAIL (TestExpectedEqual)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-split-mutations-83g440v6/reverse-axis.log",
+      "log_sha256": "c9f451c428576d80ea03b169bad6aee12e5ec79f5a77f028caabc822f21b4854"
+    },
+    {
+      "name": "ignore-leading-side",
+      "source": "src/platform/macos/app_session.zig",
+      "old": "const before = action == .split_editor_left or action == .split_editor_up;",
+      "new": "const before = (action == .split_editor_left or action == .split_editor_up) and false;",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "2/16 app_session.editor.mod.test.shared editor split 공개 명령은 네 방향으로 같은 문서의 뷰를 만든다...FAIL (TestUnexpectedResult)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-split-mutations-83g440v6/ignore-leading-side.log",
+      "log_sha256": "680ad01763a1d9c58e1217dda46e333e30fbe15bdd8570ecf58884e6d7fa4b10"
+    },
+    {
+      "name": "disable-public-dispatch",
+      "source": "src/platform/macos/app_session.zig",
+      "old": "if (self.tabsBlocked()) return;\n                const direction:",
+      "new": "if (self.tabsBlocked() or true) return;\n                const direction:",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "2/16 app_session.editor.mod.test.shared editor split 공개 명령은 네 방향으로 같은 문서의 뷰를 만든다...expected 2, found 1",
+        "FAIL (TestExpectedEqual)",
+        "3/16 app_session.editor.mod.test.shared editor split 기본 키는 편집기에서만 실행되고 메뉴 표시는 사용자 설정을 따른다...expected 2, found 1",
+        "FAIL (TestExpectedEqual)",
+        "4/16 app_session.editor.mod.test.shared editor split 팔레트 선택은 실행되고 모달과 Quick 창 제한은 지킨다...expected 2, found 1",
+        "FAIL (TestExpectedEqual)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-split-mutations-83g440v6/disable-public-dispatch.log",
+      "log_sha256": "2937e2ed91ae1b0a3af42cb8bd0fabbe010f3321c3513b38ca8f42d8e1f185cb"
+    },
+    {
+      "name": "commit-before-admission",
+      "source": "src/platform/macos/app_session/pane.zig",
+      "old": "if (!editor_ops.canShareView(self, source)) return error.UnsupportedSharedDocument;",
+      "new": "if (!editor_ops.canShareView(self, source) and false) return error.UnsupportedSharedDocument;",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "FAIL (TestExpectedEqual)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-split-mutations-83g440v6/commit-before-admission.log",
+      "log_sha256": "52cab57984bf8d5117417319ec686d02b6af7388d851fffc31fff84240a76363"
+    },
+    {
+      "name": "show-shadowed-chord",
+      "source": "src/platform/macos/command_catalog.zig",
+      "old": "        // 실제 resolver가 사용자 바인딩·macro·unbind를 먼저 보므로 표시도 같은 키를 양보한다.\n        if (!builtinChordShadowed(resolver, binding.chord)) return binding.chord;",
+      "new": "        // 실제 resolver가 사용자 바인딩·macro·unbind를 먼저 보므로 표시도 같은 키를 양보한다.\n        return binding.chord;",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "3/16 app_session.editor.mod.test.shared editor split 기본 키는 편집기에서만 실행되고 메뉴 표시는 사용자 설정을 따른다...FAIL (TestUnexpectedResult)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-split-mutations-83g440v6/show-shadowed-chord.log",
+      "log_sha256": "6313eeafe729d90977a5240f580d8620f7254ee19f56f2497515762c222b60ea"
+    },
+    {
+      "name": "equivalent-side-order",
+      "source": "src/platform/macos/app_session.zig",
+      "old": "const before = action == .split_editor_left or action == .split_editor_up;",
+      "new": "const before = action == .split_editor_up or action == .split_editor_left;",
+      "expected_pass": true,
+      "exit_code": 0,
+      "expected_observed": true,
+      "runtime_failures": [],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-split-mutations-83g440v6/equivalent-side-order.log",
+      "log_sha256": "aa66f97fc1d04066b01471c654f161fb4c26396c738ef44195054dd230c3ed76"
+    }
+  ],
+  "restored_sha256": {
+    "src/platform/macos/app_session.zig": "3071cbe83c296489edd6049450e0577dc73168beddce87c99afa0cc59c20d54e",
+    "src/platform/macos/app_session/pane.zig": "16d3ee835111c3ab59793e76160c3da6fceaf0b71b62b64c236443561a35ca84",
+    "src/platform/macos/command_catalog.zig": "36133580a9b25ffa24616a7b5c66f43be6eae2c9901040e1ce9e288e7028d190"
+  }
+}

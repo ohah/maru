@@ -136,11 +136,14 @@ test "filter: 빈 쿼리=전부·fuzzy 순위·actionAt 해석" {
     try filter(allocator, "", &out);
     try std.testing.expectEqual(command_catalog.entries.len, out.items.len); // 빈 쿼리 = 전부
 
-    // "split" → terminal pane 2개. FP16에서 도크 group split 액션 2개가 사라졌다.
+    // 일반 pane 둘과 같은 문서를 보는 편집기 분할 네 방향을 함께 찾는다.
     try filter(allocator, "split", &out);
-    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqual(@as(usize, 6), out.items.len);
     try std.testing.expect(actionAt(out.items, 0).? == .split_horizontal);
     try std.testing.expect(actionAt(out.items, 1).? == .split_vertical);
+    try filter(allocator, "편집기 오른쪽 분할", &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expect(actionAt(out.items, 0).? == .split_editor_right);
     try filter(allocator, "new t", &out);
     try std.testing.expect(out.items.len > 1); // New Terminal 외 New Editor Tab 등도 부분열 후보
     try std.testing.expect(actionAt(out.items, 0).? == .new_term); // 연속 구간이 더 길어 우선

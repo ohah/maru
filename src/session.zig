@@ -97,6 +97,7 @@ pub const agent_hook_mode = @import("session/agent_hook_mode.zig"); // 훅 모�
 pub const agent_state_arbiter = @import("session/agent_state_arbiter.zig"); // 훅·화면 두 소스를 한 판정으로 합치는 권위표(docs/agent-hooks.md §1.1, 순수)
 pub const remote_pane_table = @import("session/remote_pane_table.zig"); // RA7: 원격 tmux pane 별 훅 슬롯 테이블(순수)
 pub const remote_agent_stream = @import("session/remote_agent_stream.zig"); // RA5: 원격 스트리머 wire 소비·채널 수명(hello·하트비트·강등, 순수)
+pub const codex_daemon_attribution = @import("session/codex_daemon_attribution.zig"); // codex 공유 데몬 훅의 Term 귀속(세션 id·프롬프트, 순수)
 pub const remote_tmux_route = @import("session/remote_tmux_route.zig"); // RA6: 원격 tmux 에서 오염된 nonce 를 역조회로 되찾는 판정(순수)
 pub const session_model = @import("session/session_model.zig");
 pub const split_tree = @import("session/split_tree.zig");

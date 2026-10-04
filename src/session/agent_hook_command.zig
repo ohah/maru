@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const event = @import("agent_hook_event.zig");
+const attribution = @import("codex_daemon_attribution.zig");
 
 /// 커맨드 끝에 붙는 표식. **우리 항목을 고르는 유일한 근거**다(파일이 없으므로 파일명 매칭이 불가능하다).
 ///
@@ -487,6 +488,18 @@ fn appendQuoted(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, 
     try out.append(allocator, '\'');
 }
 
+/// 셸 큰따옴표 안에 그대로 넣을 수 있게 `"` 앞에 역슬래시를 붙인다(comptime 상수 전용 — `$`·`` ` ``·`\` 가 없는 값만).
+fn shellDoubleQuoted(comptime s: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (s) |c| {
+            if (c == '$' or c == '`' or c == '\\') @compileError("shellDoubleQuoted: unsupported byte in constant");
+            out = out ++ (if (c == '"') "\\\"" else &[_]u8{c});
+        }
+        return out;
+    }
+}
+
 /// 한 provider의 훅 커맨드를 만든다. `local_log_dir_abs`·`remote_log_dir_abs` 는 maru 가 **미리 만들어 둔** 이벤트 로그
 /// 디렉터리 둘이다(`localLogDirAlloc`·`remoteLogDirAlloc` — 둘 다 HOME 만으로 계산한다).
 ///
@@ -514,6 +527,12 @@ pub fn build(
     // 깨진다**(구분자가 둘이 되거나 줄이 둘로 갈린다). 파서와 같은 규칙을 쓴다 — 두 곳이 기준이 다르면
     // «훅은 적었는데 파서는 못 읽는» 이름이 생긴다.
     if (!event.looksLikeProvider(provider)) return error.InvalidProvider;
+    // **codex 만 데몬 표식을 단다**(`codex_daemon_attribution`). claude 커맨드 바이트는 그대로다 — 설치기가 바이트를
+    // 비교해 갱신하므로(`agent_hook_install.planFor`), 안 바뀐 provider 의 사용자 파일을 다시 쓰지 않는다.
+    const marks_detached = std.mem.eql(u8, provider, attribution.daemon_provider);
+    // 표식이 들어갈 자리를 **상한에서 미리 뺀다** — 상한 처리 뒤에 끼우므로, 안 빼면 꽉 찬 줄이 표식만큼 넘쳐
+    // 파서가 통째로 버린다.
+    const payload_budget = if (marks_detached) max_payload_bytes - attribution.detached_field.len else max_payload_bytes;
     // `|| :` — provider가 `sh -e`로 실행해도 마지막 줄의 read 실패(개행 없이 끝남)가 훅을 죽이지 않게.
     // **파일 권한을 훅이 정한다.** 이 로그에는 payload 가 그대로 실리고 거기엔 소스 코드와 셸 명령 원문이
     // 들어간다(계약 §7). `>>` 가 만드는 파일의 권한은 **셸의 umask** 에 끌려가므로, 두지 않으면 흔한 기본값
@@ -595,7 +614,7 @@ pub fn build(
     // cannot retire its worker, and an oversized lead Stop without turn/session IDs cannot
     // be checked against delayed events. Bulk prose is expendable; root identity is not.
     // Keep the original payload for the bounded projection if the Bash diff fast path fails.
-    try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then mh_raw=\"$mh_p\"; ", .{max_payload_bytes});
+    try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then mh_raw=\"$mh_p\"; ", .{payload_budget});
     // **먼저 hunks 를 잘라낸다**(계획 AT3b-2). `PostToolUse(Bash)` 의 `bashEditDiff` 는 `files`(hunks)·`moreFiles`·
     // `changedFiles` 순이고(실측 528/528) hunks 가 payload 를 32 KiB 너머로 밀어낸다(4.6%). 필요한 것은
     // `changedFiles`(최대 ~7 KB)뿐이라 `"bashEditDiff":{"files":` 앞까지 + `"moreFiles":` 부터를 이어 붙인다.
@@ -607,7 +626,7 @@ pub fn build(
         "mh_dh=\"${mh_p%%\\\"bashEditDiff\\\":\\{\\\"files\\\":*}\"; mh_dt=\"${mh_p#*\\\"moreFiles\\\":}\"; " ++
         "if [ \"$mh_dt\" != \"$mh_p\" ]; then mh_dc=\"$mh_dh\\\"bashEditDiff\\\":{\\\"moreFiles\\\":$mh_dt\"; " ++
         "case \"$mh_dc\" in *'\"changedFiles\":'*) mh_p=\"$mh_dc\" ;; esac; fi ;; esac; ");
-    try out.print(allocator, "fi; if [ ${{#mh_p}} -gt {d} ]; then ", .{max_payload_bytes});
+    try out.print(allocator, "fi; if [ ${{#mh_p}} -gt {d} ]; then ", .{payload_budget});
     // Project only root metadata after checking the original oversized payload structure. A nested
     // agent_id must never become a lead/child identity. The embedded shell fragment is built
     // into this same inline command; it adds no executable or process at runtime.
@@ -627,6 +646,22 @@ pub fn build(
     try out.print(allocator, "mh_p='{{\"hook_event_name\":\"{s}\"}}'; if mh_project; then case \"$mh_ev\" in ", .{event.oversized_marker});
     for (claude_events) |e| try out.print(allocator, "\"{s}\"|", .{e.name});
     try out.appendSlice(allocator, "\"Interrupt\") mh_p=\"{\\\"hook_event_name\\\":\\\"$mh_ev\\\"$mh_meta}\" ;; esac; fi; fi; ");
+    // **pane 터미널 밖에서 돌았으면 표식을 단다**(codex 공유 데몬 — `codex_daemon_attribution`).
+    //
+    // 데몬(`codex app-server --managed-daemon`)은 세션 리더라 **제어 터미널이 없다**(2026-10-04 실측: `Ss`, tty `??`).
+    // 그 밑에서 도는 훅도 없다. 제어 터미널이 없는 프로세스는 `/dev/tty` 를 못 연다(ENXIO) — 그래서 **여는 것만**
+    // 해 보고 실패하면 표식을 끼운다. 조상 프로세스를 `ps` 로 거슬러 오르는 방법(Orca #23411)은 프로세스를 띄워
+    // 이 커맨드의 규율(추가 프로세스 0)을 깬다.
+    //
+    // ⚠️ `true` 다, `:` 가 아니다. `:` 는 **특수 내장**이라 POSIX 셸에서 리디렉션이 실패하면 셸이 **통째로 나간다** —
+    // 그러면 훅이 아무것도 안 적는다. `true` 는 일반 내장이라 실패 상태만 돌려준다.
+    //
+    // 표식은 payload **맨 앞**에 끼운다. 객체가 `{"` 로 시작할 때만 — 빈 객체(`{}`)에 끼우면 `{"…":true,}` 로 JSON 이
+    // 깨진다. 상한 처리 **뒤**에 두는 이유: 상한 처리가 payload 를 통째로 다시 짓는 갈래가 있어 앞에 두면 표식이 사라진다.
+    if (marks_detached) {
+        try out.print(allocator, "if {{ true </dev/tty; }} 2>/dev/null; then :; else case \"$mh_p\" in '{{\"'*) " ++
+            "mh_p=\"{{{s}${{mh_p#\\{{}}\" ;; esac; fi; ", .{comptime shellDoubleQuoted(attribution.detached_field)});
+    }
     // **`{ … } 2>/dev/null` 로 감싼다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 **리다이렉션
     // 대상이 없을 때 셸이 내는 에러**(`No such file or directory`)는 못 막는다 — 실측에서 로그 디렉터리가
     // 없을 때 그 메시지가 provider 화면으로 샜다. 훅은 어떤 실패도 사용자에게 보이지 않아야 한다.
@@ -1434,4 +1469,42 @@ test "원격 훅은 nonce 가 비어도 tmux 안이면 적는다 — 안 적으�
     // 이벤트 로그와 옆 파일이 **같은 이름**을 쓴다.
     try testing.expect(std.mem.indexOf(u8, cmd, "\"/$mh_n$mh_t.ndjson\"") != null);
     try testing.expect(std.mem.indexOf(u8, cmd, "\"/$mh_n$mh_t" ++ tmux_sidecar_suffix ++ "\"") != null);
+}
+
+test "codex 훅만 데몬 표식을 단다 — 제어 터미널을 열어 보고 실패하면 payload 맨 앞에 끼운다" {
+    // 2026-10-04 실측: codex 0.160 의 공유 데몬(세션 리더, tty 없음)이 먼저 뜬 pane 의 env 로 **남의 세션** 훅을 돌려
+    // 그 이벤트가 대기 중인 pane 에 붙었다. 이 표식이 «파일 이름을 믿지 마라» 를 앱에 알린다.
+    const codex = try buildAlloc("codex", "/tmp/ev", .local);
+    defer testing.allocator.free(codex);
+    const claude = try buildAlloc("claude", "/tmp/ev", .local);
+    defer testing.allocator.free(claude);
+
+    const probe = "if { true </dev/tty; } 2>/dev/null; then :; else ";
+    const splice = "case \"$mh_p\" in '{\"'*) mh_p=\"{\\\"" ++ attribution.detached_key ++ "\\\":true,${mh_p#\\{}\" ;; esac; fi; ";
+    try testing.expect(std.mem.indexOf(u8, codex, probe ++ splice) != null);
+    // claude 커맨드는 한 바이트도 안 바뀐다 — 설치기가 바이트로 갱신을 판정하므로 사용자 파일을 다시 쓰지 않는다.
+    try testing.expect(std.mem.indexOf(u8, claude, "/dev/tty") == null);
+    try testing.expect(std.mem.indexOf(u8, claude, attribution.detached_key) == null);
+    // `:` 는 특수 내장이라 리디렉션이 실패하면 셸이 나간다(실측: 그 뒤 echo 가 안 돈다) — 반드시 `true` 다.
+    try testing.expect(std.mem.indexOf(u8, codex, "{ : </dev/tty") == null);
+
+    // **상한 처리 뒤, 기록 앞이다.** 앞에 두면 상한 갈래가 payload 를 다시 지으며 표식을 지운다.
+    const at = std.mem.indexOf(u8, codex, probe).?;
+    const fold_at = std.mem.lastIndexOf(u8, codex, event.oversized_marker).?;
+    const write_at = std.mem.indexOf(u8, codex, ">> \"$mh_o\"").?;
+    try testing.expect(fold_at < at and at < write_at);
+}
+
+test "codex 훅의 상한은 표식 자리만큼 줄어든다 — 꽉 찬 줄이 표식 때문에 넘치면 파서가 통째로 버린다" {
+    const codex = try buildAlloc("codex", "/tmp/ev", .local);
+    defer testing.allocator.free(codex);
+    const claude = try buildAlloc("claude", "/tmp/ev", .local);
+    defer testing.allocator.free(claude);
+    var buf: [64]u8 = undefined;
+    const reduced = try std.fmt.bufPrint(&buf, "-gt {d} ]", .{max_payload_bytes - attribution.detached_field.len});
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, codex, reduced));
+    var full_buf: [64]u8 = undefined;
+    const full = try std.fmt.bufPrint(&full_buf, "-gt {d} ]", .{max_payload_bytes});
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, codex, full));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, claude, full));
 }

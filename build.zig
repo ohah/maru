@@ -6428,6 +6428,66 @@ pub fn build(b: *std.Build) void {
     single_host_policy_step.dependOn(&run_single_host_wiring.step);
     boundary_step.dependOn(single_host_policy_step);
 
+    // codex 공유 데몬이 돌린 훅 이벤트를 **파일 이름(pane)이 아니라 세션 id 로** 귀속하는가(2026-10-04: 같은 폴더의 codex
+    // 두 pane 이 사이드바에서 뒤바뀌었다 — 데몬이 먼저 뜬 pane 의 env 로 남의 세션 훅을 그 pane 파일에 적었다). 판정·표식·
+    // 파서는 std-only 라 PR 에서 돌고, 앱 배치 루프가 판정을 지나서만 적용하는지는 wiring 경계가 잰다.
+    const codex_daemon_step = b.step(
+        "test-codex-daemon-attribution",
+        "Codex shared-daemon hook events are attributed by session id, never by the inherited pane file name",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |codex_daemon_optimize| {
+        const codex_daemon_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/session/codex_daemon_attribution.zig"),
+                .target = target,
+                .optimize = codex_daemon_optimize,
+            }),
+            .filters = &.{"codex 데몬 귀속"},
+        });
+        const run_codex_daemon_tests = b.addRunArtifact(codex_daemon_tests);
+        run_codex_daemon_tests.addArg("--maru-expect-tests=3");
+        run_codex_daemon_tests.addArg("--maru-expect-passed=3");
+        codex_daemon_step.dependOn(&run_codex_daemon_tests.step);
+    }
+    // 훅이 다는 표식과 파서가 읽는 표식은 같은 상수에서 나온다 — 두 파일의 판정자를 함께 돌린다.
+    const codex_daemon_hook_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/session/agent_hook_command.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{ "codex 훅만 데몬 표식을 단다", "codex 훅의 상한은 표식 자리만큼" },
+    });
+    const run_codex_daemon_hook = b.addRunArtifact(codex_daemon_hook_tests);
+    run_codex_daemon_hook.addArg("--maru-expect-tests=2");
+    run_codex_daemon_hook.addArg("--maru-expect-passed=2");
+    codex_daemon_step.dependOn(&run_codex_daemon_hook.step);
+    const codex_daemon_parse_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/session/agent_hook_event.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"데몬 표식(`maru_detached`)은 읽히고"},
+    });
+    const run_codex_daemon_parse = b.addRunArtifact(codex_daemon_parse_tests);
+    run_codex_daemon_parse.addArg("--maru-expect-tests=1");
+    run_codex_daemon_parse.addArg("--maru-expect-passed=1");
+    codex_daemon_step.dependOn(&run_codex_daemon_parse.step);
+    const codex_daemon_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/codex_daemon_attribution_wiring_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_codex_daemon_wiring = b.addRunArtifact(codex_daemon_wiring_tests);
+    run_codex_daemon_wiring.addArg("--maru-expect-tests=2");
+    run_codex_daemon_wiring.addArg("--maru-expect-passed=2");
+    run_codex_daemon_wiring.setCwd(b.path("."));
+    codex_daemon_step.dependOn(&run_codex_daemon_wiring.step);
+    boundary_step.dependOn(codex_daemon_step);
+
     // 앱 세션의 글리프 배치가 **배치 트랜잭션을 지나는지**(한 입구·배치 앞 begin·교체 성공 뒤에만 commit). 규칙 자체는
     // `renderer.glyph_placement` 의 순수 판정자가 실제 아틀라스·가짜 텍스처로 잰다(`test`). app_session 테스트는
     // macOS 잡에서만 돌아, 배선을 PR 에서 보는 것은 이 글자 판정자다(2026-09-29 — 버린 배치로 한글이 엉뚱한 글리프로).

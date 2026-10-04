@@ -302,3 +302,11 @@ attempt와 두 이미지를 유지한다. 취소 이미지는 commit으로 되�
 23개·worker 9개 Debug/ReleaseFast와 다섯 compiled runtime mutation 검출이 통과했다.
 일반 앱 Book/UI는 아직 동기 저장 API를 사용하며, 비동기 commit/abort·정산과 앱 배선,
 초기 open 이관 및 나머지 Windows 범위는 계속 진행한다.
+
+
+§2m.172: 일반 앱 Ctrl+S와 Save-close가 Book의 준비 worker/poll 경로를 사용한다.
+완료 receipt의 committed/ack를 확인한 뒤 닫기를 이어가며 Esc 취소는 이미지와 native
+소유권 drain 후 정산한다. host 47개 Debug/ReleaseFast, controller 23개와 다섯 compiled
+runtime mutation 검출이 통과했다. 격리 실제 앱의 대상 입력 큐로 Ctrl+S·Save-close와
+BOM/CRLF 보존·종료를 확인했다. 물리 입력·IME, 비동기 commit/abort/정산·초기 open,
+충돌 overwrite의 worker 이관과 다중 파일 닫기 전체 GUI 검증은 계속 진행 대상이다.

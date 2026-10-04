@@ -1,0 +1,45 @@
+{
+  "app": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-split-move-app-unnksx7s/snapshot/zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+  "app_sha256": "d7e7e988e77c50eb8860dfd2735ea7629546e0003807deafb390719448d97c87",
+  "runner_sha256": "0e32ccab93bd554b0bb1d5d7918a6d47b0ad4fe9fdb83810a0ec9d826d5fad5e",
+  "split_entry": "keyboard",
+  "source_sha256": {
+    "src/platform/macos/app_session/editor/mod.zig": "77a51683a90dd7132fd1a8a2267923acd853f5147976f7498ec832ec4999bdcc",
+    "src/platform/macos/app_session/editor/restore.zig": "d4beff367eb9f90511c1a3cbaf562473a0ca9c18f67d8004110f432736a526c4",
+    "src/platform/macos/app_session.zig": "8dbe00abdfd864e44536ebf951a5ee3b5a30cfdc7118b3375365ee6ce311a3a4",
+    "src/platform/macos/app_session/pane.zig": "16d3ee835111c3ab59793e76160c3da6fceaf0b71b62b64c236443561a35ca84",
+    "src/platform/macos/app_session/workspace.zig": "3a67ddd39f4e6d337c5042e9db3b4fb7de9b2d601e5695218465c258312cfa5f",
+    "src/i18n.zig": "eb4feb337fe20d404dd0f0bf98a9be5951b3919b33a4b8bcf9ea67d3b93d4c39",
+    "src/config/action.zig": "4ca578cb004ed91b8b7e5f5822f08cb9e05bdac3d62b4d81a0bc8751907a6b1c",
+    "src/config/keybinding.zig": "aa6f9bd5c983dd1ea7e47ca2586c2d7f2b9f3f44d11a30e29238ba71f92dfdca",
+    "src/platform/macos/command_catalog.zig": "4869bc53360f9b36b17a7c14daa5f6ebd4e7f913bbf997b3f1ee6a6904fe3fb3",
+    "src/platform/macos/app_session/debug_fixtures.zig": "c0f1dfab6e8c55be0fe35c871913a3615ff07c2359de27409b254dc56ab527a6",
+    "src/platform/macos/MaruAppHost.swift": "4f49a2aeeb43bdcfb15326bdb9d6072352a20867febf5a025416dfa188e780c7",
+    "src/platform/macos/EditorIMESmokeDriver.swift": "d2067e82dd652d8c3c2f0789c9e4a6b4c3be3e33989f82c38581c34171070728",
+    "src/platform/macos/maru_metal_renderer.m": "15115b1cf48a0321ee4ada5b08fffa0106c3c0834b08d868e43bac74f1914e62"
+  },
+  "scenarios": [
+    {
+      "name": "move",
+      "phase": "move-refusal",
+      "pid": 68554,
+      "exit_code": 0,
+      "states": [],
+      "images": [
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-gk67cvb_/move/move-refusal/before-split.png",
+          "sha256": "e700a88cbb7cecc435ae76d502a7992d14f83fcf793a2edb5429cb05b2c1881b"
+        },
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-gk67cvb_/move/move-refusal/move-refusal.png",
+          "sha256": "5f2b14df4c3264c4f08858990c8d4942724c5b5a454bfe578dc37be7c2c11cc8"
+        }
+      ],
+      "split_entry": "keyboard",
+      "split_transport": "AppKit-local"
+    }
+  ],
+  "issues": [],
+  "scope": "실제 AppKit 프로세스와 제품 workspace/Metal 경로. 초기 상태와 관측기는 소스 사본에만 주입.",
+  "move_refusal_gate_passed": true
+}

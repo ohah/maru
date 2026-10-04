@@ -16,6 +16,7 @@
 | 일반 로컬 파일 | 공유 뷰 생성과 workspace 재시작 복원을 지원한다 |
 | 이름 없는 문서·원격 문서/캐시·diff·merge·비편집기 | 분할을 거절하고 레이아웃·포커스를 유지한다 |
 | Quick 창의 탭 비허용 상태 | 새 pane을 만들지 않는다 |
+| 공유 문서의 일부 뷰만 다른 창으로 이동 | 이동 전에 안내하고 거절한다. 단일 뷰/공유 뷰 전체 이동과 같은 창 안 이동은 허용한다 |
 
 메뉴는 클릭 명령만 보내고 `keyEquivalent`를 등록하지 않는다. 키 해석기는 편집기 컨텍스트에서만
 기본키를 소유하며, 팔레트·키 설정은 현재 유효한 바인딩을 표시한다. 기존 터미널 분할 action과
@@ -47,11 +48,21 @@ AppKit의 메뉴·단축키는 기존 공통 정책대로 원래 입력 대상�
 표시하는 오류를 찾았다. 실제 해석기와 같은 우선순위로 기본키를 걸러 팔레트/키 설정의 표시를 맞췄다.
 명령 추가로 검색 결과가 늘어난 팔레트·설정 테스트도 실제 여섯 항목과 대조하도록 갱신했다.
 
+공개 분할 → 한 pane을 새 워크스페이스로 이동 → 그 워크스페이스만 다른 창으로 이동하면,
+이동은 성공하지만 두 뷰 모두 입력을 거절하는 반례를 실제 AppSession에서 재현했다.
+공유 편집 coordinator는 한 창의 모든 뷰를 갱신하므로 일부 뷰만 창 밖으로 보내면 참조 수가 맞지 않는다.
+이동 범위가 문서의 모든 뷰를 포함하는지 기존 닫기 범위 판정으로 검사하고, 조합 정산·탐색기 등록·
+트리 변경 전에 안내 후 거절한다. 양쪽 어느 뷰를 옮겨도 한글 preedit·선택·정본·트리를 보존하며,
+거절 후 입력과 정상 전체 이동 뒤 원래 창 종료/입력도 검사했다. 같은 창 안 이동도 유지한다.
+검사를 제거하거나 모든 편집기 이동을 막는 변이는 런타임 실패했고 같은 의미의 조건식은 통과했다.
+[이동 변이 결과](../evidence/editor-shared-split-20261004/move-mutations.json)를 보관한다.
+
 | 실행 | 확인된 동작 | 증거 |
 |---|---|---|
 | AppKit 로컬 `⌘\` 이벤트 | 기본키로 오른쪽 공유 pane 생성 후 작은/큰 문서 재시작 | [keyboard](../evidence/editor-shared-split-20261004/keyboard.json) |
 | 실제 NSMenu 항목 실행 | 네 방향 항목과 빈 `keyEquivalent` 존재, 오른쪽 항목으로 분할·재시작 | [menu](../evidence/editor-shared-split-20261004/menu.json) |
 | 실제 팔레트 입력·Enter | `Editor: Split Right` 검색 결과와 `⌘\` 표시, 실행 뒤 두 pane 복원 | [palette](../evidence/editor-shared-split-20261004/palette.json) |
+| 일부 공유 뷰의 창 이동 거절 | 제품 API에서 본문·트리 보존과 실제 Metal 안내 표시. 목적지는 헤드리스 AppSession | [move-refusal](../evidence/editor-shared-split-20261004/move-refusal.json) |
 | NSTextInputClient 콜백 | 공개 분할 뒤 조합/확정·멀티커서·Undo·저장, `cat cat`과 독립 선택 재시작 보존 | [callbacks](../evidence/editor-shared-split-20261004/callbacks.json) |
 | 실제 macOS 두벌식 HID | 공개 분할 뒤 A→B→A 조합, `L가 R나` 단일 반영·저장, 원래 입력 소스 복원과 독립 선택 재시작 보존 | [live-ime](../evidence/editor-shared-split-20261004/live-ime.json) |
 
@@ -65,6 +76,11 @@ AppKit의 메뉴·단축키는 기존 공통 정책대로 원래 입력 대상�
 새 회귀 테스트가 각각 런타임 실패를 내는지 확인했다. 같은 뜻의 좌우 조건식은 통과했다.
 [변이 결과](../evidence/editor-shared-split-20261004/mutations.json)는 변경한 식, 실제 실패,
 로그 hash와 원복한 소스 hash를 기록한다.
+
+창 이동 수정 빌드에서 `--move-refusal`의 한국어 안내 화면을 직접 확인했다.
+같은 새 빌드의 [키 분할·작은/큰 문서 재시작](../evidence/editor-shared-split-20261004/post-move-keyboard.json)과
+[IME 콜백·저장·재시작](../evidence/editor-shared-split-20261004/post-move-callbacks.json)도 `issues=[]`였다.
+이동 거절의 목적지는 헤드리스 AppSession이므로 실제 두 OS 창 사이 메뉴·드래그의 증거로 세지 않는다.
 
 ## 남은 범위
 

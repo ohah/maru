@@ -1,0 +1,44 @@
+{
+  "test_scope": "공유 분할 뒤 일부/전체/단일 뷰와 같은 창 이동",
+  "variants": [
+    {
+      "variant": "admit-partial-move",
+      "expression": "false",
+      "expected_pass": false,
+      "exit_code": 1,
+      "confirmed": true,
+      "elapsed_seconds": 36.55,
+      "log": "/tmp/maru-shared-split-admit-partial-move.log",
+      "log_sha256": "b75f2c27ee02f05b4939f0d959ac80e435268e8b14a66eae18cfe241b98fb3e1",
+      "failures": [
+        "14/19 app_session.editor.mod.test.shared editor split 공유 뷰가 다른 창으로 갈라지는 이동은 조합과 구조 변경 전에 거절한다...expected error.UnsupportedMove, found .{ .moved_surfaces = { 117 }, .from_window = 4595744768, .to_window = 4596301824, .cross_window = true, .revoke_caps = false, .source_window_closed = false }",
+        "FAIL (TestExpectedError)"
+      ]
+    },
+    {
+      "variant": "reject-all-editor-moves",
+      "expression": "term.kind == .editor",
+      "expected_pass": false,
+      "exit_code": 1,
+      "confirmed": true,
+      "elapsed_seconds": 40.37,
+      "log": "/tmp/maru-shared-split-reject-all-editor-moves.log",
+      "log_sha256": "7f27441e353f4b3768a5450eef500e95640310ba4fc5480b453ef67a2d9fc1e0",
+      "failures": [
+        "15/19 app_session.editor.mod.test.shared editor split 단일 뷰와 공유 뷰 전체의 창 이동은 편집을 유지한다...FAIL (UnsupportedMove)"
+      ]
+    },
+    {
+      "variant": "equivalent-membership",
+      "expression": "term.kind == .editor and src.closesAllEditorDocumentViews(.{ .tab = idx }, term) == false",
+      "expected_pass": true,
+      "exit_code": 0,
+      "confirmed": true,
+      "elapsed_seconds": 25.85,
+      "log": "/tmp/maru-shared-split-equivalent-membership.log",
+      "log_sha256": "f667eba0f57488d6600bf3b79137795198f794a217663e0bbe186cdbbf001e6f",
+      "failures": []
+    }
+  ],
+  "restored_source_sha256": "3a67ddd39f4e6d337c5042e9db3b4fb7de9b2d601e5695218465c258312cfa5f"
+}

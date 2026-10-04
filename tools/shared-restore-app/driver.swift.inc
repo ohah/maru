@@ -77,7 +77,7 @@ extension MaruAppHostController {
               phase != "ime", SharedRestoreRun.stage < 99,
               let window = primary?.window else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        if phase == "seed" {
+        if phase == "seed" || phase == "move-refusal" {
             if SharedRestoreRun.stage == 0 {
                 let ready = sharedRestoreFixtureStep(1)
                 if ready < 0 { finishSharedRestore(false); return }
@@ -94,6 +94,11 @@ extension MaruAppHostController {
                 return
             }
             guard now >= SharedRestoreRun.next else { return }
+            if phase == "move-refusal" {
+                let ok = sharedRestoreFixtureStep(40) == 1 && captureSharedRestore("move-refusal")
+                finishSharedRestore(ok)
+                return
+            }
             let ok = sharedRestoreFixtureStep(10) == 1 && captureSharedRestore("seed")
             finishSharedRestore(ok)
             return

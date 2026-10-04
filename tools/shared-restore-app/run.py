@@ -104,7 +104,7 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
         MARU_SHARED_RESTORE_SPLIT_ENTRY=split_entry,
         MARU_SHARED_RESTORE_CAPTURE="1", MARU_FT_WINDOW_SIZE="960x600",
         MARU_APP_SUMMARY_PATH=str(output / "summary.txt"))
-    if phase == "seed" or ime or callbacks:
+    if phase in ("seed", "move-refusal") or ime or callbacks:
         env["MARU_NATIVE_EDITOR"] = str(document)
     if first:
         env["MARU_SCREENSHOT"] = str(output / "first.ppm")
@@ -139,8 +139,10 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
     assert code == 0 and "SHARED_RESTORE_ERROR" not in transcript, (phase, code, str(output))
     if not first and not ime and not callbacks:
         assert "SHARED_RESTORE_FINISH success=true" in transcript, str(output)
-    if phase == "seed":
+    if phase in ("seed", "move-refusal"):
         assert f"SHARED_SPLIT_ENTRY entry={split_entry} transport=AppKit-local" in transcript, str(output)
+    if phase == "move-refusal":
+        assert "SHARED_SPLIT_MOVE refused=true topology_preserved=true body_preserved=true" in transcript, str(output)
     if ime or callbacks:
         assert "failure_count=0\n" in (output / "ime.txt").read_text(), str(output)
         assert document.read_bytes() == ("L가 R나" if ime else "cat cat").encode()
@@ -153,7 +155,7 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
     states = [dict(re.findall(r"(\w+)=(\S+)", line.split("SHARED_RESTORE ", 1)[1]))
               for line in transcript.splitlines() if "SHARED_RESTORE label=" in line]
     result = dict(phase=phase, pid=child.pid, exit_code=code, states=states, images=images)
-    if phase == "seed":
+    if phase in ("seed", "move-refusal"):
         result.update(split_entry=split_entry, split_transport="AppKit-local")
     elif ime or callbacks:
         result.update(split_entry="split_editor_right", split_transport="public-action")
@@ -165,6 +167,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--app", type=Path, help="이미 빌드한 이 하네스의 실행 파일")
+    parser.add_argument("--move-refusal", action="store_true", help="공유 뷰 일부의 창 이동 거절과 실제 Metal 안내 화면만 검사")
     parser.add_argument("--live-ime", action="store_true")
     parser.add_argument("--only-ime", action="store_true", help="작은/큰 파일 검증을 생략하고 실제 IME와 재시작만 실행")
     parser.add_argument("--callback-ime", action="store_true", help="OS 입력기 대신 실제 NSTextInputClient 콜백만 주입해 재시작 확인")
@@ -174,6 +177,8 @@ def main():
     args = parser.parse_args()
     if args.clangd and (args.live_ime or args.only_ime or args.callback_ime):
         parser.error("clangd와 IME 시나리오는 별도로 실행합니다")
+    if args.move_refusal and (args.live_ime or args.only_ime or args.callback_ime or args.clangd):
+        parser.error("창 이동 거절은 별도로 실행합니다")
     repo = Path(__file__).resolve().parents[2]
     output = (args.output or Path(tempfile.mkdtemp(prefix="maru-shared-restore-app-"))).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -192,6 +197,7 @@ def main():
     source = app.parents[4]
     names = ("src/platform/macos/app_session/editor/mod.zig", "src/platform/macos/app_session/editor/restore.zig",
              "src/platform/macos/app_session.zig", "src/platform/macos/app_session/pane.zig",
+             "src/platform/macos/app_session/workspace.zig", "src/i18n.zig",
              "src/config/action.zig", "src/config/keybinding.zig", "src/platform/macos/command_catalog.zig",
              "src/platform/macos/app_session/debug_fixtures.zig", "src/platform/macos/MaruAppHost.swift",
              "src/platform/macos/EditorIMESmokeDriver.swift", "src/platform/macos/maru_metal_renderer.m")
@@ -213,13 +219,13 @@ def main():
         os.environ["PATH"] = str(shim) + os.pathsep + os.environ["PATH"]
         report["language_server"] = dict(path=str(server), version=version, sha256=sha(server),
                                          startup_delay_ms=1000, launcher_sha256=sha(launcher))
-    scenes = (("clangd", 100),) if args.clangd else (("small", 100), ("large", 2000))
+    scenes = (("move", 100),) if args.move_refusal else (("clangd", 100),) if args.clangd else (("small", 100), ("large", 2000))
     for name, blocks in (() if args.only_ime or args.callback_ime else scenes):
         root = output / name
         root.mkdir()
         (root / "home").mkdir()
         (root / "backups").mkdir(mode=0o700)
-        (root / "config").write_text("session.keep-alive-after-quit = false\n")
+        (root / "config").write_text("session.keep-alive-after-quit = false\n" + ("ui.language = ko\n" if args.move_refusal else ""))
         if args.clangd:
             # 생성한 C 문서 디렉터리만 격리 config의 신뢰 목록에 넣는다.
             (root / "lsp-trust").write_text(f"allow\t{root}\n")
@@ -228,10 +234,11 @@ def main():
             (f"\nint sample{i}(void) {{\n    int value = {i};\n    return value;\n}}\n" if args.clangd else
              f"\npub fn sample{i}() void {{\n    const value = {i};\n    _ = value;\n}}\n") for i in range(blocks)))
         original = document.read_bytes()
-        for phase in ("seed", "first", "restore"):
+        for phase in (("move-refusal",) if args.move_refusal else ("seed", "first", "restore")):
             report["scenarios"].append(dict(name=name, **run(app, root, phase, document,
                 first=phase == "first", wait_lsp=args.clangd is not None, split_entry=args.split_entry)))
-        report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
+        if not args.move_refusal:
+            report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
         assert document.read_bytes() == original
         assert len(list((root / "backups").glob("*.bak"))) == 1
     if args.live_ime or args.only_ime or args.callback_ime:
@@ -240,14 +247,14 @@ def main():
         root.mkdir()
         (root / "home").mkdir()
         (root / "backups").mkdir(mode=0o700)
-        (root / "config").write_text("session.keep-alive-after-quit = false\n")
+        (root / "config").write_text("session.keep-alive-after-quit = false\n" + ("ui.language = ko\n" if args.move_refusal else ""))
         document = root / "document.txt"
         document.write_text("ab😀한cd" if args.callback_ime else "L R")
         report["scenarios"].append(dict(name=name, **run(app, root, "ime", document, ime=not args.callback_ime, callbacks=args.callback_ime)))
         report["scenarios"].append(dict(name=name, **run(app, root, "restore", document)))
         report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
         report["ime_input"] = "native-callback-injection" if args.callback_ime else "OS-Korean-HID"
-    report["view_restore_gate_passed"] = not report["issues"]
+    report["move_refusal_gate_passed" if args.move_refusal else "view_restore_gate_passed"] = not report["issues"]
     (output / "manifest.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(output / "manifest.json", flush=True)
     if report["issues"]:

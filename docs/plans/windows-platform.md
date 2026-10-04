@@ -309,4 +309,6 @@ attempt와 두 이미지를 유지한다. 취소 이미지는 commit으로 되�
 소유권 drain 후 정산한다. host 47개 Debug/ReleaseFast, controller 23개와 다섯 compiled
 runtime mutation 검출이 통과했다. 격리 실제 앱의 대상 입력 큐로 Ctrl+S·Save-close와
 BOM/CRLF 보존·종료를 확인했다. 물리 입력·IME, 비동기 commit/abort/정산·초기 open,
-충돌 overwrite의 worker 이관과 다중 파일 닫기 전체 GUI 검증은 계속 진행 대상이다.
+충돌 overwrite의 worker 이관과 다중 파일 닫기의 충돌·취소 GUI 검증은 계속 진행 대상이다.
+다중 dirty 문서의 정상 Save-close는 격리 실제 앱에서 두 본문 저장·BOM/CRLF 및 LF 보존과
+프로세스 종료를 확인했다. 이 성공 검증은 충돌·취소 조합을 증명하지 않는다.

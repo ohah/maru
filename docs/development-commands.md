@@ -1053,3 +1053,8 @@ fixture도 Controller를 호출한다. 일반 GUI·비동기 I/O와 crash 복구
 Debounce/frame budget/shutdown distinct flush/실패 재시도/clean 삭제/용량 pause를 실제 저장소로 센다.
 `test-win32-editor-input`는 실제 본문 편집만 백업 시계를 설정하는 연결도 검사한다.
 `test-win32-save-crash`의 backup worker는 직접 write 대신 만기 전 shutdown 유지보수를 사용한다.
+
+§2m.155의 `zig build test-win32-editor-backup`는 default root native 판정 5개를 더해 27개다.
+`win32-editor-document-smoke`는 기존 100 프레임과 함께 `editor_backup_lifecycle_smoke_ok=true`를
+요구한다. 앱과 같은 helper를 disposable LOCALAPPDATA base로 실행해 lazy root/만기 전 flush/
+shared document/due write/clean deletion을 센다. 일반 사용자 백업 폴더를 fixture로 쓰지 않는다.

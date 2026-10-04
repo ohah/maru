@@ -4308,6 +4308,47 @@ const OpenFile = editor_document.OpenFile;
 const OpenOutcome = editor_document.OpenOutcome;
 const openFileFor = editor_document.openFileFor;
 
+fn maintainFileBackups(a: std.mem.Allocator, io: std.Io, owner: *@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, shutdown: bool) @import("platform/windows/editor/backup_store.zig").Maintenance {
+    var states: std.ArrayList(*maru.session.editor.document_state.State) = .empty;
+    defer states.deinit(a);
+    for (views) |*view| {
+        const state = view.documents.get(view.document) orelse continue;
+        if (!state.notifications.backup_dirty) continue;
+        states.append(a, state) catch {
+            for (views) |*pending_view| if (pending_view.documents.get(pending_view.document)) |pending| {
+                if (pending.notifications.backup_dirty) pending.notifications.backup_due_ns = now_ns +| maru.session.editor.backup.debounce_ns;
+            };
+            return .{ .failed = 1, .first_error = error.OutOfMemory };
+        };
+    }
+    return @import("platform/windows/editor/backup_store.zig").maintain(&owner.store, io, states.items, now_ns, shutdown);
+}
+
+fn runFileBackups(a: std.mem.Allocator, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, shutdown: bool, local_override: ?[]const u8) !@import("platform/windows/editor/backup_store.zig").Maintenance {
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    var due = false;
+    for (views) |*view| {
+        const state = view.documents.get(view.document) orelse continue;
+        if (state.notifications.backup_dirty and (shutdown or now_ns >= state.notifications.backup_due_ns)) due = true;
+    }
+    if (!due) return .{};
+    if (owner.* == null) {
+        const environment = if (local_override == null) maru.os_env.allocValue(a, "LOCALAPPDATA") else null;
+        defer if (environment) |value| a.free(value);
+        owner.* = backups.LocalData.open(a, io, local_override orelse environment, maru.session.editor.backup.pause_bytes) catch |err| {
+            for (views) |*view| if (view.documents.get(view.document)) |state| {
+                if (state.notifications.backup_dirty) state.notifications.backup_due_ns = now_ns +| maru.session.editor.backup.debounce_ns;
+            };
+            return err;
+        };
+    }
+    return maintainFileBackups(a, io, &owner.*.?, views, now_ns, shutdown);
+}
+
+fn reportFileBackups(stderr: *std.Io.Writer, report: @import("platform/windows/editor/backup_store.zig").Maintenance) void {
+    if (report.first_error) |err| stderr.print("  warning: editor backup failed({s}); pending recovery retained\n", .{@errorName(err)}) catch {};
+}
+
 /// 합성 창에서 편집기 한 프레임. **스크래치를 여기서 잡고 곧바로 놓는다** — 스모크는 한 파일을
 /// 오래 들고 있어 미리 잡아 두지만, 여기서는 파일이 오갈 때마다 줄 수가 바뀐다.
 ///
@@ -5588,6 +5629,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     defer {
         for (open_files.items) |*f| f.deinit(allocator);
         open_files.deinit(allocator);
+    }
+    // Register after the view cleanup so shutdown flush runs while document
+    // leases are alive. No pending edits means no user backup directory access.
+    var file_backups: ?@import("platform/windows/editor/backup_store.zig").LocalData = null;
+    defer {
+        if (runFileBackups(allocator, io, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, true, null)) |report| {
+            reportFileBackups(stderr, report);
+        } else |err| stderr.print("  warning: editor backup shutdown failed({s})\n", .{@errorName(err)}) catch {};
+        if (file_backups) |*owner| owner.deinit(io);
     }
     var active_view: ActiveView = .{ .terminal = 0 };
     var file_opens: usize = 0;
@@ -6878,6 +6928,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         frames_total += 1;
         if (agent_settling) settle_frames += 1 else spins += 1;
     }) {
+        if (runFileBackups(allocator, io, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, false, null)) |report| {
+            reportFileBackups(stderr, report);
+        } else |err| stderr.print("  warning: editor backup maintenance failed({s})\n", .{@errorName(err)}) catch {};
         // ── 훑는 중임을 화면에 말한다 ────────────────────────────────────────────────────
         //
         // **중립이 이미 다 갖고 있다** — `loading` 이면 개수 대신 "분석 중" 을 쓰고 해골 줄을 깔며,
@@ -16851,7 +16904,41 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
         if (!std.mem.eql(u8, view.text, recovery_text) or built.cells.items.len == 0) return error.EditorBackupPaintMismatch;
         try host.drawFrame(built.cells.items, 0xFF1E2430);
     }
+    // Exercise the same lazy owner/frame/shutdown entry used by the app, with
+    // an explicit disposable LOCALAPPDATA base rather than the user's profile.
+    var local_path: [std.fs.max_path_bytes]u8 = undefined;
+    const local_len = try fixture_root.realPath(io, &local_path);
+    var lifecycle_owner: ?backup_mod.LocalData = null;
+    defer {
+        fixture_root.deleteDir(io, "maru/editor-backups") catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => unreachable,
+        };
+        fixture_root.deleteDir(io, "maru") catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => unreachable,
+        };
+    }
+    defer if (lifecycle_owner) |*owner| owner.deinit(io);
+    // Always delete the known fixture record, including an assertion failure;
+    // product teardown intentionally retains records instead.
+    defer if (lifecycle_owner) |*owner| owner.store.drop(io, backup_doc) catch unreachable;
+    backup_mod.noteEdit(state, 0);
+    const early = try runFileBackups(a, io, &lifecycle_owner, &views, 1, false, local_path[0..local_len]);
+    if (early.attempted != 0 or lifecycle_owner != null) return error.EditorBackupOpenedBeforeDeadline;
+    const flushed = try runFileBackups(a, io, &lifecycle_owner, &views, 1, true, local_path[0..local_len]);
+    if (flushed.attempted != 1 or flushed.failed != 0 or state.notifications.backup_dirty) return error.EditorBackupShutdownMismatch;
+    var lifecycle_record = (try lifecycle_owner.?.store.read(io, backup_doc)) orelse return error.EditorBackupShutdownRecordMissing;
+    defer lifecycle_record.deinit();
+    if (!std.mem.eql(u8, lifecycle_record.parsed.content, recovery_text)) return error.EditorBackupShutdownBodyMismatch;
+    backup_mod.noteEdit(state, 10);
+    const due = try runFileBackups(a, io, &lifecycle_owner, &views, 10 + editor.backup.debounce_ns, false, local_path[0..local_len]);
+    if (due.attempted != 1 or due.failed != 0) return error.EditorBackupFrameMismatch;
     _ = try editor.edit_commands.run(a, state, &participants, 1, .undo, .{ .now_ms = 1 });
+    backup_mod.noteEdit(state, 20);
+    const clean = try runFileBackups(a, io, &lifecycle_owner, &views, 20 + editor.backup.debounce_ns, false, local_path[0..local_len]);
+    if (clean.attempted != 1 or clean.failed != 0 or state.notifications.backup_on_disk) return error.EditorBackupCleanMaintenanceMismatch;
+    if (try lifecycle_owner.?.store.read(io, backup_doc) != null) return error.EditorBackupCleanRecordRetained;
     if (state.opened.?.isDirty() or !std.mem.eql(u8, state.opened.?.file.content, "X// base\r\n")) return error.EditorBackupUndoMismatch;
     for (&views) |*view| {
         var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
@@ -16864,6 +16951,7 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
     if (!std.mem.eql(u8, unchanged, disk)) return error.EditorBackupWroteOriginal;
     try backups.drop(io, backup_doc);
     try stdout.writeAll("editor_backup_smoke_ok=true disk_record=true restored_dirty=true restored_frames=2 undo_frames=2 undo_clean=true original_untouched=true\n");
+    try stdout.writeAll("editor_backup_lifecycle_smoke_ok=true lazy_root=true shared_views=true before_debounce_flush=true frame_write=true clean_drop=true\n");
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.

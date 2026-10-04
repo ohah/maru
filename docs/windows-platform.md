@@ -11262,3 +11262,37 @@ Windows `OpenFile.applyKey`는 성공한 본문 revision 변경만 통지한다.
 일반 앱의 기본 root 생성/소유와 frame/종료 호출, 복원 알림 및 삭제 lifecycle의 앱 연결은 아직
 남아 있다. 입력 통지와 유지보수 API가 존재한다는 것으로 일반 앱 자동 백업을 완료로 간주하지 않는다.
 일반 사용자 파일의 editable grant/GUI 저장·닫기·감시·물리 IME와 다른 W8/W9 잔여도 진행 중이다.
+
+### 2m.155 — 기본 백업 root의 native 소유와 앱 frame/종료 연결
+
+`backup_store.LocalData`가 `%LOCALAPPDATA%/maru/editor-backups`를 선택하고 상위 폴더 핸들을 소유한다.
+Drive absolute 또는 complete UNC root에서 시작해 각 구성요소를 counted handle-relative open으로
+열며, reparse point와 `..`/ADS/NUL을 거절한다. Drive 없는 rooted 경로와 device namespace도
+거절한다. 기존 LOCALAPPDATA 구성요소는 만들지 않는다. 마지막 `maru` 부모만 필요하면 만들고,
+기존 config 부모의 ACL은 바꾸지 않는다. 최종 `editor-backups`에만 current-user protected ACL을
+적용한다. 기존 넓은 백업 ACL은 고치지 않고 거절한다. 부모는 delete sharing 없이 보유하고,
+teardown은 store와 모든 부모 핸들/할당을 해제한다. OOM도 같은 정산을 거친다.
+
+일반 Windows `runWin32Terminal`의 frame 경로가 `runFileBackups`를 호출하고, teardown defer는
+뷰/문서 lease 해제보다 먼저 shutdown flush를 호출한다. pending이 없거나 만기 전이면 default
+폴더를 열지 않는다. 환경변수 읽기는 host에 있으며 HOME/cache/macOS 경로로 fallback하지 않는다.
+Root 열기나 작업 목록 할당이 실패하면 pending을 보존하고 다음 만기를 세운다. native 유지보수의
+오류도 warning으로 관측된다. 문서별 마지막 기록을 teardown에서 암묵적으로 지우지 않는다.
+
+집중 판정은 27개(집계 2 + native 24 + 경로 정책 1)다. 추가 5개는 private root 생성/재열기,
+상위 폴더 실제 rename fence와 해제, 실제 중간 junction, malformed root와 broad ACL,
+전 할당 실패 prefix의 핸들 해제를 검사한다. Native 경로의 reparse/ACL/절대 root/선택 폴더/상한
+전달을 각각 깨뜨린 5개 변형이 runtime 실패로 검출됐고 원복 후 27개가 통과했다.
+
+실제 창 fixture는 명시적 disposable LOCALAPPDATA base로 앱과 같은 helper를 부른다. 만기 전
+lazy owner가 없다는 것, 만기 전 shutdown flush, shared view의 한 문서 처리, due frame write와
+clean undo 뒤 실제 record 삭제를 검증한다. 출력은 `editor_backup_lifecycle_smoke_ok=true`이고,
+paint는 기존 100 프레임이다. 별도 helper 변형 5개(종료/frame 처리 무효화, 문서 목록 누락,
+shutdown 전달 오류, 이른 root open)는 실제 창 실행에서 검출됐다. 원복 후 창도 통과했다.
+이는 같은 helper의 실제 native/창 검증이며 일반 dirty 앱 종료·재실행 UI를 완료로 간주하지 않는다.
+
+검증 중 D: 공간 부족이 드러났다. 공간 부족 및 변형 자체의 컴파일 오류는 적대적 성공으로 세지
+않았다. source와 proof log를 보존하고 재생성 가능한 compiled 파일만 정리한 뒤 다시 실행했다.
+실제 UNC share의 권한/이동 경쟁, 복원 알림·accepted-close 삭제·용량 pause의 상태바 표시,
+missing/untitled/remote revival·stage 중단 정리·capability·GUI Ctrl+S/dirty-close/watch와 물리 IME는
+남아 있다. 일반 사용자 파일은 아직 readonly이며 W8.17 및 전체 Windows 작업은 진행 중이다.

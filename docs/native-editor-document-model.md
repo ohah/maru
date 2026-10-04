@@ -1774,5 +1774,10 @@ Windows 미저장 백업은 동일한 L2 record/이름/본문·지문 정책을 
 `maru/editor-backups`이며 macOS Application Support/cache로 폴백하지 않는다. protected DACL을
 생성 시 적용해 owner SID만 허용하고 broad/reparse/hard-linked 저장소를 거절한다. 로컬 path 복원은
 정상 편집 하나와 옛 disk_hash를 유지하므로 undo는 디스크로 돌아가고 외부 변경은 첫 native save
-CAS에서 막힌다. 두 실제 process crash와 실제 창 복원/undo를 검증했지만, 일반 debounce/종료 flush/
-복원 알림·purge·missing/untitled/remote 복원과 interrupted-stage 정리는 아직 host에 연결하지 않았다.
+CAS에서 막힌다. 두 실제 process crash와 실제 창 복원/undo를 검증했다. §2m.154~155에서 Windows
+입력의 실제 revision 변경을 debounce에 연결하고, native 상위 폴더를 소유하는 기본 root 및 일반
+앱 frame/종료 flush 호출을 연결했다. 종료 flush는 view lease 해제 전에 수행한다. 같은 helper를
+disposable LOCALAPPDATA base로 부르는 실제 창 검증은 만기 전 lazy root, 종료 flush, frame 쓰기와
+clean undo 뒤 삭제를 센다. 일반 dirty 앱 종료·재실행 UI의 종단 검증을 대신하지 않는다.
+복원 알림·accepted-close 삭제·pause 상태바·missing/untitled/remote 복원과 interrupted-stage 정리,
+GUI editable/save/dirty-close/watch·물리 IME 및 실제 UNC share 검증은 여전히 남아 있다.

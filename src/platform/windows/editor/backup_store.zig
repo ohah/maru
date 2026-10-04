@@ -66,13 +66,13 @@ const Policy = struct {
     }
 };
 
-fn node(a: std.mem.Allocator, parent: std.Io.Dir, name: []const u8, policy: *Policy, directory: bool, create: bool, access: u32, share_delete: bool) !std.Io.File {
+fn node(a: std.mem.Allocator, parent: std.Io.Dir, name: []const u8, policy: ?*Policy, directory: bool, create: bool, access: u32, share_delete: bool) !std.Io.File {
     try maru.win32_relative_file.validateBasename(name);
     const wide = try std.unicode.utf8ToUtf16LeAlloc(a, name);
     defer a.free(wide);
     if (wide.len > std.math.maxInt(u16) / 2) return error.InvalidPath;
     var unicode: w.UNICODE_STRING = .{ .Length = @intCast(wide.len * 2), .MaximumLength = @intCast(wide.len * 2), .Buffer = wide.ptr };
-    const attrs: w.OBJECT.ATTRIBUTES = .{ .RootDirectory = parent.handle, .ObjectName = &unicode, .SecurityDescriptor = if (create) &policy.descriptor else null };
+    const attrs: w.OBJECT.ATTRIBUTES = .{ .RootDirectory = parent.handle, .ObjectName = &unicode, .SecurityDescriptor = if (create) (if (policy) |p| &p.descriptor else null) else null };
     var status: w.IO_STATUS_BLOCK = undefined;
     var handle: w.HANDLE = undefined;
     const result = w.ntdll.NtCreateFile(&handle, @bitCast(access), &attrs, &status, null, .{}, .{ .READ = true, .WRITE = directory, .DELETE = share_delete }, if (create) (if (directory) .OPEN_IF else .CREATE) else .OPEN, .{ .DIRECTORY_FILE = directory, .NON_DIRECTORY_FILE = !directory, .OPEN_REPARSE_POINT = true, .IO = .SYNCHRONOUS_NONALERT }, null, 0);
@@ -87,7 +87,7 @@ fn node(a: std.mem.Allocator, parent: std.Io.Dir, name: []const u8, policy: *Pol
     if (w.ntdll.NtQueryInformationFile(handle, &status, &info, @sizeOf(@TypeOf(info)), .Standard) != .SUCCESS) return error.BackupQueryFailed;
     if (info.Directory.toBool() != directory or info.DeletePending.toBool()) return error.UnsupportedBackup;
     if (!directory and info.NumberOfLinks != 1) return error.HardLinked;
-    try policy.check(handle);
+    if (policy) |p| try p.check(handle);
     return .{ .handle = handle, .flags = .{ .nonblocking = false } };
 }
 
@@ -126,6 +126,72 @@ pub const Record = struct {
     pub fn deinit(self: *Record) void {
         self.parsed.deinit(self.allocator);
         self.allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+/// Own the native parent chain of the app's durable backup root. Environment
+/// reading stays with the host; no cache/HOME fallback can select this location.
+pub const LocalData = struct {
+    store: Store,
+    parents: std.ArrayList(std.Io.Dir),
+    allocator: std.mem.Allocator,
+
+    pub fn open(a: std.mem.Allocator, io: std.Io, localappdata: ?[]const u8, limit: usize) !LocalData {
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        const selected = (try maru.user_paths.editorBackupPathFor(a, .windows, null, localappdata)) orelse return error.BackupRootUnavailable;
+        defer a.free(selected);
+        if (std.mem.indexOfScalar(u8, selected, 0) != null) return error.InvalidPath;
+        const parsed = std.fs.path.parsePathWindows(u8, selected);
+        // Drive-rooted and complete UNC roots have stable volume/share authority;
+        // current-drive rooted paths and device namespaces do not select user data.
+        if (parsed.kind != .drive_absolute and parsed.kind != .unc_absolute) return error.InvalidPath;
+        if (parsed.kind == .unc_absolute) {
+            var unc = std.mem.tokenizeAny(u8, parsed.root, "/\\");
+            const server = unc.next() orelse return error.InvalidPath;
+            const share = unc.next() orelse return error.InvalidPath;
+            try maru.win32_relative_file.validateBasename(server);
+            try maru.win32_relative_file.validateBasename(share);
+        }
+        var parents: std.ArrayList(std.Io.Dir) = .empty;
+        errdefer {
+            for (parents.items) |dir| dir.close(io);
+            parents.deinit(a);
+        }
+        const volume = try std.Io.Dir.openDirAbsolute(io, parsed.root, .{ .follow_symlinks = false });
+        parents.append(a, volume) catch |err| {
+            volume.close(io);
+            return err;
+        };
+        // Validate every component BEFORE creating the two application folders.
+        // In particular, '..' must not reach a native path-normalizing API.
+        const suffix = selected[parsed.root.len..];
+        var validation = std.mem.tokenizeAny(u8, suffix, "/\\");
+        while (validation.next()) |segment| try maru.win32_relative_file.validateBasename(segment);
+        var components = std.mem.tokenizeAny(u8, suffix, "/\\");
+        while (components.next()) |segment| {
+            if (components.peek() == null) {
+                if (!std.mem.eql(u8, segment, "editor-backups")) return error.InvalidPath;
+                const store = try Store.open(a, parents.items[parents.items.len - 1], segment, limit);
+                return .{ .store = store, .parents = parents, .allocator = a };
+            }
+            const is_app_parent = std.mem.eql(u8, components.rest(), "editor-backups") and std.mem.eql(u8, segment, "maru");
+            // Existing configuration parent ACLs are not backup ACLs. Only the
+            // final private store applies Policy; no config permissions change.
+            const file = try node(a, parents.items[parents.items.len - 1], segment, null, true, is_app_parent, 0x00100081, false);
+            const dir: std.Io.Dir = .{ .handle = file.handle };
+            parents.append(a, dir) catch |err| {
+                dir.close(io);
+                return err;
+            };
+        }
+        return error.InvalidPath;
+    }
+
+    pub fn deinit(self: *LocalData, io: std.Io) void {
+        self.store.deinit(io);
+        for (self.parents.items) |dir| dir.close(io);
+        self.parents.deinit(self.allocator);
         self.* = undefined;
     }
 };
@@ -393,6 +459,112 @@ fn editFixture(state: *editor.document_state.State, body: []const u8) !void {
     try view.move(a_test, &state.opened.?.file, .select_all, false);
     const participants = [_]editor.edit_commands.Participant{.{ .view = &view, .id = 1 }};
     _ = try editor.edit_commands.run(a_test, state, &participants, 0, .{ .insert = body }, .{ .now_ms = 0, .isolate = true });
+}
+
+fn localFixturePath(tmp: *std.testing.TmpDir, child: []const u8) ![]u8 {
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io_test, &buffer);
+    return std.fs.path.join(a_test, &.{ buffer[0..n], child });
+}
+
+test "Windows editor backup local root creates private store without changing its config parent and reopens records" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try localFixturePath(&tmp, "");
+    defer a_test.free(path);
+    {
+        var owned = try LocalData.open(a_test, io_test, path, 128);
+        defer owned.deinit(io_test);
+        try owned.store.write(io_test, doc_test, "recover");
+        try owned.store.policy.check(owned.store.dir.handle);
+        const selected = try tmp.dir.openDir(io_test, "maru/editor-backups", .{});
+        selected.close(io_test);
+    }
+    var reopened = try LocalData.open(a_test, io_test, path, 128);
+    defer reopened.deinit(io_test);
+    try expectBody(&reopened.store, doc_test, "recover");
+}
+
+test "Windows editor backup local root pins every selected parent until teardown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_test, "local");
+    const path = try localFixturePath(&tmp, "local");
+    defer a_test.free(path);
+    {
+        var owned = try LocalData.open(a_test, io_test, path, 128);
+        defer owned.deinit(io_test);
+        if (tmp.dir.rename("local", tmp.dir, "moved", io_test)) |_| return error.TestUnexpectedResult else |_| {}
+        try owned.store.write(io_test, doc_test, "pinned");
+    }
+    try tmp.dir.rename("local", tmp.dir, "moved", io_test);
+}
+
+test "Windows editor backup local root refuses an actual intermediate junction" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var fixture = try @import("namespace_fixture.zig").Fixture.init();
+    defer fixture.deinit();
+    try fixture.escape();
+    const path = try localFixturePath(&fixture.tmp, "grant/nested");
+    defer a_test.free(path);
+    const result = LocalData.open(a_test, io_test, path, 128);
+    if (result) |value| {
+        var owned = value;
+        owned.deinit(io_test);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.ReparsePoint, err);
+    try fixture.expectOriginal();
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.openDir(io_test, "outside/maru", .{}));
+}
+
+test "Windows editor backup local root refuses malformed roots and broad existing backup permissions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expectError(error.BackupRootUnavailable, LocalData.open(a_test, io_test, null, 128));
+    try std.testing.expectError(error.BackupRootUnavailable, LocalData.open(a_test, io_test, "relative", 128));
+    try std.testing.expectError(error.InvalidPath, LocalData.open(a_test, io_test, "/rooted", 128));
+    try std.testing.expectError(error.InvalidPath, LocalData.open(a_test, io_test, "\\\\?\\C:\\data", 128));
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try localFixturePath(&tmp, "");
+    defer a_test.free(path);
+    const traversal = try std.fmt.allocPrint(a_test, "{s}/../escape", .{path});
+    defer a_test.free(traversal);
+    try std.testing.expectError(error.InvalidPath, LocalData.open(a_test, io_test, traversal, 128));
+    {
+        var owned = try LocalData.open(a_test, io_test, path, 128);
+        defer owned.deinit(io_test);
+        try broadPermissions(owned.store.dir.handle);
+    }
+    if (LocalData.open(a_test, io_test, path, 128)) |value| {
+        var owned = value;
+        owned.deinit(io_test);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.PrivatePermissions, err);
+}
+
+test "Windows editor backup local root allocation prefixes release all native parent fences" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_test, "local");
+    const path = try localFixturePath(&tmp, "local");
+    defer a_test.free(path);
+    for (0..128) |index| {
+        var failing: std.testing.FailingAllocator = .init(a_test, .{ .fail_index = index });
+        const result = LocalData.open(failing.allocator(), io_test, path, 128);
+        if (result) |value| {
+            var owned = value;
+            owned.deinit(io_test);
+            try tmp.dir.rename("local", tmp.dir, "moved", io_test);
+            return;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+        // A retained parent handle would keep this native rename fenced.
+        try tmp.dir.rename("local", tmp.dir, "moved", io_test);
+        try tmp.dir.rename("moved", tmp.dir, "local", io_test);
+    }
+    return error.AllocationPrefixesNotExhausted;
 }
 
 fn restorePermissions(store: *Store) void {

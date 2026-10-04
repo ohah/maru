@@ -124,8 +124,10 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     //  스텝 배선 · 사본 집합 == build.zig.zon 해시) 잰다. 빠지면 Zig 가 조용히 네트워크로 받아 초록이다.
     // +1(2026-10-02): `app_log_redirect_boundary` — 앱 진단 통로를 시작 직후·`/dev/null` stderr 에만 연결하는지
     //  (Swift main 순서·리다이렉트 기준) 잰다. 둘 중 하나만 바뀌면 진단이 사라지거나 하네스 출력을 빼앗는다.
-    try std.testing.expectEqual(@as(usize, 212), old_count);
-    try std.testing.expectEqual(@as(usize, 213), new_count);
+    // +4(2026-10-05): `test-codex-daemon-attribution` — codex 공유 데몬 훅 귀속의 순수 판정(Debug 사본만)·훅 칸·파서·
+    //  배선. step 통째로 매달면 ReleaseFast 사본까지 붙어(그때는 이 수에 안 잡혔다) 실행마다 하나씩 붙인다.
+    try std.testing.expectEqual(@as(usize, 216), old_count);
+    try std.testing.expectEqual(@as(usize, 217), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0

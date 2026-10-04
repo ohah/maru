@@ -68,6 +68,51 @@ pub fn creditLive(granted_ms: i64, now_ms: i64) bool {
     return granted_ms != 0 and now_ms - granted_ms <= activation_ms;
 }
 
+/// maru 쪽 장 — 보낸 사용자 입력마다 하나(최대 `max_credits`, 5 초 + 전달 여유). sidecar 는 입력을 차례로 처리하며 팝업마다 장을
+/// 쓰지만 maru 는 보낼 때 센다 — 빠르게 두 번 누르면 sidecar 는 팝업 둘을 열고 maru 가 하나만 받아 둘째가 열렸다 곧 닫혔다(W6f② 적대
+/// 검증 5 차). 개수로 센다.
+pub const Credits = struct {
+    pub const max_credits = 4;
+    /// sidecar 가 처리하고 팝업이 maru 에 닿기까지의 여유.
+    pub const transit_ms: i64 = 1_000;
+    at: [max_credits]i64 = @splat(0),
+    len: usize = 0,
+
+    fn prune(self: *Credits, now_ms: i64) void {
+        var kept: usize = 0;
+        for (self.at[0..self.len]) |t| if (now_ms - t <= activation_ms + transit_ms) {
+            self.at[kept] = t;
+            kept += 1;
+        };
+        self.len = kept;
+    }
+
+    pub fn grant(self: *Credits, now_ms: i64) void {
+        self.prune(now_ms);
+        if (self.len == max_credits) {
+            var i: usize = 1;
+            while (i < self.len) : (i += 1) self.at[i - 1] = self.at[i];
+            self.len -= 1;
+        }
+        self.at[self.len] = now_ms;
+        self.len += 1;
+    }
+
+    /// 가장 오래된 산 장 하나를 쓴다 — 없으면 false.
+    pub fn take(self: *Credits, now_ms: i64) bool {
+        self.prune(now_ms);
+        if (self.len == 0) return false;
+        var i: usize = 1;
+        while (i < self.len) : (i += 1) self.at[i - 1] = self.at[i];
+        self.len -= 1;
+        return true;
+    }
+
+    pub fn any(self: *const Credits) bool {
+        return self.len != 0;
+    }
+};
+
 /// 새 탭을 끼울 자리(pane 의 탭 순서). `last_child` 는 같은 탭이 이어 연 마지막 뒤 탭의 자리(없으면 null) — 그것이 연 탭
 /// 오른쪽에 있을 때만 따른다.
 pub fn insertIndex(opener: usize, last_child: ?usize) usize {
@@ -178,6 +223,19 @@ test "a key down grants activation except Escape by either code; a credit lives 
     try std.testing.expect(!grantsActivation(.up, 'A', 0) and !grantsActivation(.char, 'a', 0));
     try std.testing.expect(!creditLive(0, 10));
     try std.testing.expect(creditLive(1_000, 6_000) and !creditLive(1_000, 6_001));
+}
+
+test "maru counts one credit per user input it sent, at most four, each living five seconds plus transit" {
+    var c: Credits = .{};
+    try std.testing.expect(!c.take(0));
+    c.grant(100);
+    c.grant(200); // 빠른 두 번 — 둘
+    try std.testing.expect(c.take(300) and c.take(300) and !c.take(300));
+    for (0..6) |i| c.grant(@intCast(1_000 + i));
+    try std.testing.expectEqual(@as(usize, Credits.max_credits), c.len);
+    c.grant(10_000);
+    try std.testing.expect(c.take(10_000 + activation_ms + Credits.transit_ms)); // 10 000 것만 산다
+    try std.testing.expect(!c.take(10_000 + activation_ms + Credits.transit_ms));
 }
 
 test "a new tab goes right of its opener, after the tabs that opener already opened" {

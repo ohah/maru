@@ -42,7 +42,36 @@ const PendingPopup = struct {
     placement: protocol.message.NewTabPlacement,
     size: protocol.message.ViewSize,
     url: []u8,
+    /// 기다리기 시작한 시각 — CEF 가 끝을 알리지 않은 낡은 항목을 거둔다(`purgeStale`).
+    since_ms: i64,
 };
+
+/// 이보다 오래 기다린 팝업은 거둔다 — CEF 는 `on_before_popup` 바로 뒤(실측 6 ms)에 만들거나 거둔다. 같은 브라우저의 둘이 엇갈려
+/// 짝지어지면(만들기가 다른 것의 거둠보다 먼저) 남는 항목이 번호와 자리를 쥐었다(W6f② 적대 검증 5 차).
+const pending_stale_ms: i64 = 2_000;
+
+fn purgeStale(now_ms: i64) void {
+    var i: usize = 0;
+    while (i < pending_len) {
+        if (now_ms - pending[i].since_ms > pending_stale_ms) {
+            const taken = takePending(i);
+            allocator.free(taken.url);
+            onReserve(taken.browser);
+        } else i += 1;
+    }
+}
+
+/// 만들어지는 동안(등록 전) CEF 가 묻는 팝업의 크기 — 그것을 연 브라우저의 기다리는 팝업 크기(전역 하나면 그사이 다른 생성이
+/// 지웠다 — W6f② 적대 검증 5 차).
+pub fn pendingSize(browser: [*c]c.cef_browser_t) ?protocol.message.ViewSize {
+    if (browser == null or pending_len == 0) return null;
+    const host = browser.*.get_host.?(browser);
+    if (host == null) return null;
+    defer object.release(host);
+    const opener_cef = host.*.get_opener_identifier.?(host);
+    for (pending[0..pending_len]) |p| if (p.opener_cef == opener_cef) return p.size;
+    return null;
+}
 var pending: [protocol.message.max_popup_reserve]PendingPopup = undefined;
 var pending_len: usize = 0;
 const allocator = std.heap.c_allocator;
@@ -92,6 +121,7 @@ pub fn beforePopup(
 ) c_int {
     // 맡긴 번호가 없거나, 기다리는 팝업이 넘치거나, 목록에 자리가 없으면(만들게 둔 뒤 등록을 못 해 곧 닫히는 팝업이 되지 않게 — W6f①
     // 적대 검증) W6e 처럼 주소만.
+    purgeStale(nowMs());
     if (reserved_len == 0 or pending_len == pending.len or browser == null or browsers.state.shutting_down or
         browsers.state.registry.count() + pending_len >= registry_mod.capacity)
     {
@@ -123,10 +153,9 @@ pub fn beforePopup(
         .placement = placement,
         .size = entry.size,
         .url = owned,
+        .since_ms = nowMs(),
     };
     pending_len += 1;
-    // 만들어지는 동안 CEF 가 묻는 크기는 연 탭의 크기로(등록 전이라 목록에 없다 — maru 가 붙인 뒤 맞춘다).
-    browsers.state.creating_size = entry.size;
     window_info.*.windowless_rendering_enabled = 1;
     window_info.*.shared_texture_enabled = if (std.c.getenv("MARU_WEB_TEST_CPU_PAINT") != null) 0 else 1;
     return 0;
@@ -148,7 +177,6 @@ pub fn onBeforePopupAborted(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef
     for (pending[0..pending_len], 0..) |p, i| if (p.opener_cef == cef_id and p.popup_id == popup_id) {
         const taken = takePending(i);
         allocator.free(taken.url);
-        browsers.state.creating_size = null;
         onReserve(taken.browser);
         return;
     };
@@ -174,10 +202,8 @@ pub fn onAfterCreated(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_brows
     } else null;
     if (index == null or browsers.state.shutting_down) {
         if (index) |i| allocator.free(takePending(i).url);
-        browsers.state.creating_size = null;
         return browsers.discard(browser);
     }
-    browsers.state.creating_size = null;
     const p = takePending(index.?);
     defer allocator.free(p.url);
     // 넘겨받은 참조 하나는 목록이 쥔다(실패하면 `register` 가 닫고 푼다 — maru 에 알린다: 그 번호는 쓰이지 않았다).
@@ -185,6 +211,13 @@ pub fn onAfterCreated(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_brows
         browsers.state.writer.send(.{ .failure = .{ .browser = p.browser, .code = .browser_create_failed, .detail = "popup not adopted" } }) catch {};
         return;
     };
+    // 등록 전 질의가 다른 크기를 받았을 수 있다 — 등록한 크기·배율로 다시 알린다(W6f② 적대 검증 5 차).
+    const host = browser.*.get_host.?(browser);
+    if (host != null) {
+        defer object.release(host);
+        host.*.notify_screen_info_changed.?(host);
+        host.*.was_resized.?(host);
+    }
     browsers.state.writer.send(.{ .popup_created = .{ .opener = p.opener, .browser = p.browser, .placement = p.placement, .url = p.url } }) catch {};
 }
 

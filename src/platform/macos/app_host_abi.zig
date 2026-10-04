@@ -5098,21 +5098,31 @@ pub export fn maru_macos_app_session_osr_drag_file_request(session: ?*AppSession
     return @intFromBool(session_mod.web_ops.osrDragFileRequest(app, drag));
 }
 
-/// v207(W6d③): 청한 파일 내용 — 0 아직, 1 다 왔다(`out` 이 있고 `cap` 이 넉넉하면 옮겨 적고 놓는다, null 이면 길이만), -1 실패.
+/// v207(W6d③): 청한 파일 내용 — 0 아직(또는 `cap` 이 모자라 옮기지 못했다), 1 다 왔다(`out` 이 있고 `cap` 이 넉넉하면 옮겨 적고
+/// 놓는다, null 이면 길이만), -1 실패(놓는다).
 pub export fn maru_macos_app_session_osr_drag_file_poll(session: ?*AppSession, drag: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
     const app = session orelse return -1;
     const got = session_mod.web_ops.osrDragFile(drag);
     switch (got.state) {
         .pending => return 0,
-        .failed => return -1,
+        .failed => {
+            session_mod.web_ops.osrDragFileRelease(app, drag);
+            return -1;
+        },
         .ready => {},
     }
     if (out_len) |p| p.* = got.bytes.len;
     const dest = out orelse return 1;
-    if (cap < got.bytes.len) return 1;
+    if (cap < got.bytes.len) return 0;
     @memcpy(dest[0..got.bytes.len], got.bytes);
     session_mod.web_ops.osrDragFileRelease(app, drag);
     return 1;
+}
+
+/// v207(W6d③): 청한 파일 내용을 기다리다 그만뒀다 — 놓는다.
+pub export fn maru_macos_app_session_osr_drag_file_release(session: ?*AppSession, drag: u32) void {
+    const app = session orelse return;
+    session_mod.web_ops.osrDragFileRelease(app, drag);
 }
 
 /// v206(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px — NaN 이면 시작 자리, 음수는 정상 좌표)와 받은 동작(`NSDragOperation`,

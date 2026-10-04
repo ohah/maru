@@ -262,6 +262,8 @@ pub fn onStartDragging(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser
 fn endSource(point: message.Point, operation: u32) void {
     const held = source orelse return;
     source = null;
+    // 취소(받은 곳 없음)로 끝난 끌기의 파일은 아무도 청하지 않는다 — 놓는다(W6d③ 적대 검증 2 차 — 다음 끌기까지 32 MiB 를 쥐었다).
+    if (operation == 0) if (held_file) |f| if (f.drag == held.drag and f.browser == held.browser) dropHeldFile();
     defer object.release(@as([*c]c.cef_drag_data_t, held.data));
     const entry = liveEntry(held.browser) orelse return;
     const cef_browser: [*c]c.cef_browser_t = @ptrCast(@alignCast(entry.handle));

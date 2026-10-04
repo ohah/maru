@@ -2187,10 +2187,12 @@ int32_t maru_macos_app_session_osr_drag_out_part(MaruAppHostSession *session, ui
 void maru_macos_app_session_osr_drag_out_started(MaruAppHostSession *session, uint32_t drag);
 int32_t maru_macos_app_session_osr_drag_out_end(MaruAppHostSession *session, uint32_t drag, double x_px, double y_px, uint32_t operation);
 /* v207(W6d③): 끌어낸 이미지 파일. out_file_size(받아 둔 내용 크기 — 안전한 이름이 없으면 0), drag_file_request(Finder 가 청할 때 — 끌기가
- * 끝난 뒤여도 된다, 못 청하면 0), drag_file_poll(0 아직·1 다 왔다(out 이 넉넉하면 옮겨 적고 놓는다, NULL 이면 길이만)·-1 실패). */
+ * 끝난 뒤여도 된다, 못 청하면 0), drag_file_poll(0 아직·1 다 왔다(out 이 넉넉하면 옮겨 적고 놓는다, NULL 이면 길이만)·-1 실패),
+ * drag_file_release(기다리다 그만뒀다 — 놓는다). */
 uint32_t maru_macos_app_session_osr_drag_out_file_size(MaruAppHostSession *session, uint32_t drag);
 int32_t maru_macos_app_session_osr_drag_file_request(MaruAppHostSession *session, uint32_t drag);
 int32_t maru_macos_app_session_osr_drag_file_poll(MaruAppHostSession *session, uint32_t drag, uint8_t *out, size_t cap, size_t *out_len);
+void maru_macos_app_session_osr_drag_file_release(MaruAppHostSession *session, uint32_t drag);
 /* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
    2 = 뗌, 3(v202 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */

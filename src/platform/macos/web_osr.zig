@@ -2147,6 +2147,9 @@ fn monotonicNow() i64 {
 /// 마지막 브라우저가 사라졌다 — shutdown 을 보내고 기다리지 않는다(`reapRetiring` 이 거둔다). 이미 물러나는 옛
 /// sidecar 가 있으면 그것은 바로 죽인다(둘을 쌓지 않는다).
 fn retire(gpa: std.mem.Allocator, now_ms: i64) void {
+    // 내리는 sidecar 에 맡긴 번호(W6f②) — 다음 sidecar 에 다시 맡긴다(안 잊으면 남은 칸 때문에 다시 맡기지 않아, 첫 내림 뒤로 팝업
+    // 이어 받기가 앱이 끝날 때까지 꺼졌다 — W6f② 적대 검증).
+    forgetReserved();
     var p = process orelse {
         state = .off;
         return;
@@ -2456,7 +2459,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // 다른 maru 가 같은 프로필을 쓴다 — 다시 띄워도 같다. 멈추고 안내한다.
             .profile_in_use => stopWith(gpa, .profile_in_use),
             .cef_initialize_failed, .protocol_violation => protocolBroken(gpa, now_ms),
-            .browser_create_failed, .unknown_browser, .duplicate_browser, .frame_channel_failed => {},
+            // 맡긴 번호로 팝업을 등록하지 못했다(W6f① — sidecar 가 닫았다) — 그 번호는 쓰였다고 보고 거둔다(다시 맡긴다).
+            .browser_create_failed => if (takeReserved(f.browser)) |r| if (r.ring) |ring| ring.release(),
+            .unknown_browser, .duplicate_browser, .frame_channel_failed => {},
         },
         .title_changed, .load_finished => {},
         // 렌더러가 죽으면 그 페이지의 툴팁도 끝났다(CEF 가 빈 글을 부르지 않을 수 있다).
@@ -3067,6 +3072,25 @@ test "popups the sidecar made with a reserved id are adopted as tabs of their op
     reservePopupId(gpa, 104);
     forgetSidecar(gpa);
     try std.testing.expectEqual(@as(usize, 2), popupIdsWanted());
+    // 마지막 Chromium 탭이 닫혀 sidecar 를 내려도 잊는다(안 잊으면 다음 sidecar 에 다시 맡기지 않았다 — W6f② 적대 검증).
+    reservePopupId(gpa, 107);
+    retire(gpa, 0); // 프로세스가 없다 — 상태만 내린다
+    state = .running;
+    try std.testing.expectEqual(@as(usize, 2), popupIdsWanted());
+    // 보내는 것 — 맡기기, 붙이지 않는 팝업 닫기, 맡긴 번호의 등록 실패는 거두기(sidecar 가 닫았다 — 보내지 않는다).
+    reservePopupId(gpa, 105);
+    reservePopupId(gpa, 106);
+    state = .starting;
+    defer outbox_pending.clearAndFree(gpa);
+    var frames: [8]Message = undefined;
+    apply(gpa, .{ .popup_created = .{ .opener = 7, .browser = 105, .placement = .foreground, .url = "https://a.example/" } }, 0); // 장이 없다
+    apply(gpa, .{ .failure = .{ .browser = 106, .code = .browser_create_failed, .detail = "popup not adopted" } }, 0);
+    state = .running;
+    try std.testing.expectEqual(@as(usize, 2), popupIdsWanted()); // 둘 다 거뒀다
+    state = .starting;
+    const n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(@as(u64, 105), frames[0].destroy_browser);
 }
 
 test "dragged image files are fetched only when asked, gathered apart from the drag, checked against the announced size, and failed when the sidecar or browser goes (W6d③)" {

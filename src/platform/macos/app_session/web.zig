@@ -1179,6 +1179,10 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
             for (pane.terms.items, 0..) |term, index| {
                 if (term.surfaceId() != surface_id) continue;
                 if (tab_ops.tabDragTransaction(self, pane) != null) return web_osr.markPageClosed(surface_id);
+                // 그 pane 의 유일한 탭이면 닫지 않는다 — 빈 pane·워크스페이스 닫기·창 닫기로 번진다(마지막 창이면 앱 종료, W6f② 적대
+                // 검증: 해제된 surface 에 써서 죽었다). 페이지의 `window.close` 가 사용자 확인 없이 창을 닫게 두지 않는다. 탭은 남고
+                // 브라우저는 닫혔다(사용자가 닫는다).
+                if (pane.terms.items.len == 1) return;
                 term_ops.closeTermAt(self, tab_index, pane, index);
                 self.workspaceChanged(.topology);
                 self.metal_dirty = true;

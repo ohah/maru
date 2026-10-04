@@ -282,3 +282,9 @@ Compare/Overwrite/Reload와 비교 scrollbar drag·크기 변경 UX, 비동기 �
 통과했다. 일반 앱의 overwrite/compare/reload·닫기와 실제 writer를 유지한 대기/Esc 취소를
 확인했다. native 쓰기·commit 및 초기 open의 UI I/O, 다중 파일 닫기 전체 GUI 검증과 나머지
 Windows 계획은 계속 진행 대상이다.
+
+§2m.169: Registry 접근 없는 불변 저장 이미지와 main-thread export 검증을 분리했다.
+native prepared 이미지와 commit/ack 요청을 full lease·epoch·sequence·raw hash로 대조한다.
+공통 요청 18개와 native safe-save 66개가 Debug/ReleaseFast에서 통과했고 source hash·checksum·
+epoch·sequence·lease의 다섯 compiled runtime mutant를 검출했다. native 쓰기·commit의
+worker 이관과 main-thread 승인 왕복, 최초 open 비동기화는 아직 진행 대상이다.

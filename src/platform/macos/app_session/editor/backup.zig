@@ -10,6 +10,7 @@
 //! U4b·U4c가 레코드를 읽고 복원하며, **성공적으로 소비하는 쪽이 지우는 주인**이다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 
 const app_session_mod = @import("../../app_session.zig");
@@ -56,6 +57,11 @@ fn dirPath(buf: []u8) ?[]const u8 {
     // root isolates fixture recovery records without changing HOME or touching user backups.
     // A malformed override disables backup access; falling back would defeat that isolation.
     if (std.c.getenv("MARU_EDITOR_BACKUP_ROOT")) |raw| return explicitRoot(buf, std.mem.span(raw));
+    // **테스트 빌드는 사용자 자리로 떨어지지 않는다** — 주입(`setDirForTest`)도 명시 경로도 없으면 백업을 끈다.
+    // 예전에는 주입을 잊은 테스트가 그대로 `$HOME/Library/Application Support/maru/editor-backups` 에 썼다:
+    // 2026-10-04 실측 4,200 개 레코드가 전부 테스트 산물(`.zig-cache/tmp/…` 경로)이었고, 앱 호스트 스위트 한 번에
+    // 3 개씩(LSP·시맨틱 판정자의 `r.c`·`im.c`·`h.c`) 늘었다. 관례(「잊지 말고 주입하라」)가 아니라 여기서 막는다.
+    if (builtin.is_test) return null;
     const home_z = std.c.getenv("HOME") orelse return null;
     const home = std.mem.span(home_z);
     if (home.len == 0) return null;
@@ -68,6 +74,16 @@ fn explicitRoot(buf: []u8, path: []const u8) ?[]const u8 {
     if (!std.fs.path.isAbsolute(path) or path.len > buf.len) return null;
     @memcpy(buf[0..path.len], path);
     return buf[0..path.len];
+}
+
+test "테스트 빌드는 주입·명시 경로 없이 사용자 백업 자리로 떨어지지 않는다" {
+    const saved_override = dir_override;
+    defer dir_override = saved_override;
+    dir_override = null;
+    // 명시 경로(제품 스모크의 격리 수단)가 이 프로세스에 걸려 있으면 그 갈래를 타므로 이 판정과 무관하다.
+    if (std.c.getenv("MARU_EDITOR_BACKUP_ROOT") != null) return error.SkipZigTest;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expect(dirPath(&buf) == null);
 }
 
 test "IME backup smoke root requires an absolute path and never truncates into a user directory" {

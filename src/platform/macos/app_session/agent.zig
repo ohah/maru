@@ -2527,7 +2527,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     const tool_before = term.hook.tool;
     const had_reply = term.hook.transcript.owned.reply().len > 0;
     var turn_batch: TurnBatch = .{};
-    // **파일 이름이 곧 pane 이라는 가정은 codex 공유 데몬 앞에서 깨진다**(`codex_daemon_attribution`). 데몬 표식이 붙은
+    // **파일 이름이 곧 pane 이라는 가정은 codex 공유 데몬 앞에서 깨진다**(`codex_daemon_attribution`). 훅을 띄운 프로세스가 데몬인
     // 이벤트만 세션 id 로 다시 귀속하고, 나머지는 예전처럼 이 Term 에 적용한다.
     for (events[0..batch.count]) |ev| switch (routeHookEvent(self, term, ev)) {
         .here => turn_batch.step(self, term, ev),
@@ -2600,7 +2600,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
 
 /// 훅 이벤트 하나가 **어느 Term 의 것인가**(docs/agent-hooks.md §4.4).
 pub const HookRoute = enum {
-    /// 이 파일의 Term 에 적용한다 — 데몬 표식이 없는 이벤트는 언제나 여기다(예전 동작 그대로).
+    /// 이 파일의 Term 에 적용한다 — 데몬이 돌리지 않은 이벤트는 언제나 여기다(예전 동작 그대로).
     here,
     /// 다른 Term 에 이미 적용했다.
     elsewhere,
@@ -2608,14 +2608,14 @@ pub const HookRoute = enum {
     dropped,
 };
 
-/// 데몬 표식이 붙은 codex 이벤트를 **세션 id 로** 귀속한다. 판정은 순수 층(`codex_daemon_attribution.decide`)이 하고,
+/// 공유 데몬이 돌린 codex 이벤트를 **세션 id 로** 귀속한다. 판정은 순수 층(`codex_daemon_attribution.decide`)이 하고,
 /// 여기서는 그 입력(묶음·후보·화면 일치)을 모으고 결과를 집행만 한다.
 ///
-/// ⚠️ **표식이 붙은 이벤트는 이 파일의 Term 에 그대로 적용하지 않는다.** 그 파일 이름은 데몬을 띄운 pane 에서
+/// ⚠️ **데몬이 돌린 이벤트는 이 파일의 Term 에 그대로 적용하지 않는다.** 그 파일 이름은 데몬을 띄운 pane 에서
 /// 물려받은 값이라, 여기서 `adoptHookSessionIdentity` 로 흘리면 남의 세션이 이 pane 에 붙는다(2026-10-04 실측).
 pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) HookRoute {
     const attr = maru.session.codex_daemon_attribution;
-    if (!attr.isDaemonEvent(ev.provider, ev.detached)) return .here;
+    if (!attr.isDaemonEvent(ev.provider, hookParentIsDaemon(self, ev))) return .here;
 
     var sid_buf: [attr.Bindings.max_session_bytes + 1]u8 = undefined;
     const sid = maru.session.agent_hook_event.decodeInto(&sid_buf, ev.session_id);
@@ -2688,6 +2688,18 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
             return .elsewhere;
         },
     }
+}
+
+/// 훅을 띄운 프로세스(`maru_hook_ppid`)가 codex 공유 데몬인가. argv 읽기(sysctl)는 pid 마다 한 번이다 — 판정을
+/// 기억한다(`ParentVerdicts`). 칸이 없는 옛 줄·이미 사라진 처음 보는 pid 는 «아니다»(= 예전 규칙)로 접는다.
+fn hookParentIsDaemon(self: *AppSession, ev: maru.session.agent_hook_event.Event) bool {
+    const attr = maru.session.codex_daemon_attribution;
+    if (ev.hook_ppid == 0 or !std.mem.eql(u8, ev.provider, attr.daemon_provider)) return false;
+    if (self.codex_daemon_parents.lookup(ev.hook_ppid)) |known| return known;
+    const pid = std.math.cast(i32, ev.hook_ppid) orelse return false;
+    const verdict = maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return false;
+    self.codex_daemon_parents.remember(ev.hook_ppid, verdict);
+    return verdict;
 }
 
 /// 다른 Term 에 재배정된 이벤트 하나를 그 Term 의 배치로 적용한다 — 로컬 배치 루프와 **같은** `TurnBatch` 를 쓴다

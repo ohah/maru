@@ -6445,18 +6445,18 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"codex 데몬 귀속"},
         });
         const run_codex_daemon_tests = b.addRunArtifact(codex_daemon_tests);
-        run_codex_daemon_tests.addArg("--maru-expect-tests=3");
-        run_codex_daemon_tests.addArg("--maru-expect-passed=3");
+        run_codex_daemon_tests.addArg("--maru-expect-tests=4");
+        run_codex_daemon_tests.addArg("--maru-expect-passed=4");
         codex_daemon_step.dependOn(&run_codex_daemon_tests.step);
     }
-    // 훅이 다는 표식과 파서가 읽는 표식은 같은 상수에서 나온다 — 두 파일의 판정자를 함께 돌린다.
+    // 훅이 싣는 칸과 파서가 읽는 칸은 같은 상수에서 나온다 — 두 파일의 판정자를 함께 돌린다.
     const codex_daemon_hook_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/session/agent_hook_command.zig"),
             .target = target,
             .optimize = optimize,
         }),
-        .filters = &.{ "codex 훅만 데몬 표식을 단다", "codex 훅의 상한은 표식 자리만큼" },
+        .filters = &.{ "codex 훅만 데몬 판정 칸을 싣는다", "codex 훅의 상한은 칸 자리만큼" },
     });
     const run_codex_daemon_hook = b.addRunArtifact(codex_daemon_hook_tests);
     run_codex_daemon_hook.addArg("--maru-expect-tests=2");
@@ -6468,7 +6468,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-        .filters = &.{"데몬 표식(`maru_detached`)은 읽히고"},
+        .filters = &.{"훅 부모 pid(`maru_hook_ppid`)는 읽히고"},
     });
     const run_codex_daemon_parse = b.addRunArtifact(codex_daemon_parse_tests);
     run_codex_daemon_parse.addArg("--maru-expect-tests=1");

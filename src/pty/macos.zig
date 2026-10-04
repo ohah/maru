@@ -986,6 +986,16 @@ pub const PtySession = struct {
         return .{ .cols = window_size.col, .rows = window_size.row };
     }
 
+    /// `pid` 의 KERN_PROCARGS2 원문(argv+envp)을 판정 `judge` 에 넘긴다 — 원문은 정적 procargs_buf 라 밖으로 내보내지
+    /// 않고 판정 결과만 돌려준다. 없는 pid·담지 못한 원문이면 null(«모른다»). **틱 스레드 전용**(procargs_buf 공유).
+    pub fn judgeProcessArgs(pid: i32, judge: *const fn ([]const u8) bool) ?bool {
+        if (pid <= 0) return null;
+        var mib = [_]c_int{ ctl_kern, kern_procargs2, pid };
+        var size: usize = procargs_buf.len;
+        if (sysctl(&mib, mib.len, &procargs_buf, &size, null, 0) != 0) return null;
+        return judge(procargs_buf[0..size]);
+    }
+
     /// 에이전트가 **자식에게 내려주는 세션 신원**을 읽는다 — claude는 `CLAUDE_CODE_SESSION_ID`(그 값이 곧
     /// `<id>.jsonl` 파일명), codex는 `CODEX_THREAD_ID`(rollout 파일명의 uuid이자 `session_meta.id`)다.
     ///

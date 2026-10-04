@@ -1510,11 +1510,15 @@ env(`MARU_HOOK_INSTANCE`·`MARU_HOOK_PANE`)를 물려받는다. 그래서 나중
 사이드바는 그 세션을 왼쪽에 붙였다. 같은 결함이 [openai/codex#48500](https://github.com/openai/codex/issues/48500)
 (열려 있음, 공식 답 없음)이고, Orca·muxa 등 다른 터미널도 같은 문제를 겪었다.
 
-**표식.** codex 훅 커맨드만 «pane 터미널 밖에서 돌았다» 를 적는다. 데몬은 세션 리더라 제어 터미널이 없고, 제어
-터미널이 없는 프로세스는 `/dev/tty` 를 못 연다. 훅은 `true </dev/tty` 를 해 보고(셸 내장 — §4.1 의 «추가 프로세스 0»
-을 지킨다) 실패하면 payload 맨 앞에 `"maru_detached":true,` 를 끼운다. 줄 형식(`<provider>\t<payload>`)은 그대로라
-옛 파서는 모르는 키로 건너뛴다. 표식 길이만큼 상한을 미리 줄인다(꽉 찬 줄이 넘치면 파서가 통째로 버린다).
-`:` 가 아니라 `true` 인 이유: `:` 는 특수 내장이라 리디렉션이 실패하면 셸이 통째로 나간다(실측).
+**데몬 판별.** codex 훅 커맨드만 자기를 띄운 프로세스를 싣는다 — payload 맨 앞에 `"maru_hook_ppid":<$PPID>,`
+(셸 내장 — §4.1 의 «추가 프로세스 0» 을 지킨다). 줄 형식(`<provider>\t<payload>`)은 그대로라 옛 파서는 모르는 키로
+건너뛴다. 그 칸의 최대 길이만큼 상한을 미리 줄인다(꽉 찬 줄이 넘치면 파서가 통째로 버린다). 앱은 그 pid 의 argv 가
+`codex app-server … --managed-daemon` 일 때만 데몬 이벤트로 본다(`isManagedDaemonArgs`, pid 마다 한 번 읽고 기억한다).
+데몬을 안 쓰는 codex 는 훅을 TUI 가 직접 띄우므로 예전 규칙(파일 = pane)이 그대로다.
+
+⚠️ **제어 터미널로는 못 가른다.** 첫 판은 `/dev/tty` 를 열어 보고 실패하면 데몬으로 봤는데, codex 는 데몬이든 아니든
+훅을 tty 에서 떼어 띄운다(0.156 `detach_from_tty`, 0.160 `ProcessMode::NewSession` —
+`codex-rs/hooks/src/engine/command_runner.rs`). 그러면 데몬을 안 쓰는 codex 이벤트까지 전부 재배정을 탄다.
 
 **귀속.** 표식이 붙은 codex 이벤트는 파일 이름을 믿지 않고 `session_id` 로 Term 을 고른다
 (`src/session/codex_daemon_attribution.zig`):
@@ -2071,6 +2075,10 @@ notification_condition = "always"   # unfocused | always
 - OSC 9 를 쓰고 tmux passthrough(`ESC Ptmux;`)도 자기가 붙인다.
 
 **⑵ 임의 알림 — 훅에서 직접 쏜다.** codex 훅에는 제어 터미널이 있다(실측 `DEVTTY_OK`).
+
+> ⚠️ **codex 0.156 이후로는 틀렸다(2026-10-05 소스 확인).** 훅 러너가 자식을 tty 에서 뗀다 — 0.156
+> `pre_exec(detach_from_tty)`, 0.160 `ProcessMode::NewSession`(`codex-rs/hooks/src/engine/command_runner.rs`). 그
+> 버전에서는 아래 `> /dev/tty` 가 조용히 실패한다. 위 실측은 그 이전 버전의 것이다. §4.4 가 같은 사실을 쓴다.
 
 ```json
 { "hooks": { "Stop": [ { "hooks": [ { "type": "command",

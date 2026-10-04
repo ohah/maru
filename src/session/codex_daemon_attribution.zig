@@ -6,27 +6,92 @@
 //! 적힌다 — 파일 이름(pane)이 증거가 못 된다(2026-10-04 실측: 오른쪽 pane 의 세션 이벤트 26건이 전부 대기 중인
 //! 왼쪽 pane 파일에 있었고, 사이드바는 그 세션을 왼쪽에 붙였다). openai/codex#48500 이 같은 결함이다.
 //!
-//! **해법**(muxa #197 · Orca #23411 과 같은 수준): 훅이 «pane 터미널 밖에서 돌았다» 는 표식을 남기면
-//! (`agent_hook_command` — 데몬은 세션 리더라 제어 터미널이 없다), 그 이벤트의 파일 이름은 믿지 않고
-//! `session_id` 로 귀속한다:
+//! **해법**(muxa #197 · Orca #23411 과 같은 수준): codex 훅은 자기를 띄운 프로세스(`$PPID`, 셸 내장)를 줄에 싣고
+//! (`agent_hook_command`), 앱이 그 pid 의 argv 가 공유 데몬(`isManagedDaemonArgs`)이면 그 이벤트의 파일 이름은
+//! 믿지 않고 `session_id` 로 귀속한다:
 //!
 //! 1. 이미 묶인 세션이면 그 Term.
 //! 2. 같은 cwd 에서 codex 가 도는 로컬 Term(후보)이 **하나**면 그 Term.
 //! 3. 여럿이면 **프롬프트 제출** 때 그 프롬프트가 화면에 보이는 후보가 **정확히 하나**일 때만 그 Term.
 //! 4. 나머지는 어느 Term 에도 붙이지 않는다 — 틀린 pane 에 붙이느니 화면 관측만 남긴다.
 //!
+//! ⚠️ **제어 터미널 유무로는 못 가른다.** codex 는 데몬이든 아니든 훅을 tty 에서 떼어 띄운다(0.156
+//! `detach_from_tty`, 0.160 `ProcessMode::NewSession` — `codex-rs/hooks/src/engine/command_runner.rs`). 첫 판은
+//! `/dev/tty` 를 열어 보고 실패하면 표식을 달았는데, 그러면 **데몬을 안 쓰는 codex 이벤트까지** 전부 재배정을 탔다.
+//!
 //! **이 파일은 순수하다.** 프로세스도 화면도 읽지 않는다 — 호출자가 모은 사실로 판정만 한다.
 
 const std = @import("std");
 
-/// 훅이 «pane 터미널 밖에서 돌았다» 를 적는 JSON 키. 훅은 이 키를 payload **맨 앞**에 끼운다
+/// 훅이 자기를 띄운 프로세스 pid(`$PPID`)를 적는 JSON 키. 훅은 이 키를 payload **맨 앞**에 끼운다
 /// (`agent_hook_command.build`). 줄 형식(`<provider>\t<payload>`)을 안 바꾸므로 옛 파서는 모르는 키로 건너뛴다.
-pub const detached_key = "maru_detached";
-/// 훅이 끼우는 바이트 그대로. 훅의 상한 계산이 이 길이만큼 자리를 비워 둔다.
-pub const detached_field = "\"" ++ detached_key ++ "\":true,";
+pub const parent_pid_key = "maru_hook_ppid";
+/// 훅이 끼우는 칸의 **최대** 바이트(`"maru_hook_ppid":<10자리>,`). 훅의 상한 계산이 이만큼 자리를 비워 둔다.
+pub const parent_pid_field_max = "\"".len + parent_pid_key.len + "\":".len + 10 + ",".len;
 
-/// 표식을 믿는 provider. claude 는 공유 데몬이 없고 그 훅 커맨드에는 표식 자체가 없다.
+/// 데몬 판정을 하는 provider. claude 는 공유 데몬이 없고 그 훅 커맨드에는 이 칸 자체가 없다.
 pub const daemon_provider = "codex";
+
+/// KERN_PROCARGS2 원문(`[argc:u32 LE][exec_path\0][\0 패딩][argv0\0]…[argv{argc-1}\0][envp…]`)이 codex 공유 데몬
+/// (`codex app-server … --managed-daemon`, 2026-10-04 실측 argv)인가. **argv 만** 본다 — envp 에 같은 글자가 있어도
+/// 걸리지 않는다. `app-server` 를 IDE 가 stdio 로 띄운 것(`--managed-daemon` 없음)과 데몬 보조
+/// (`app-server daemon pid-update-loop`)는 데몬이 아니다 — 앞의 것은 pane 이 없고 뒤의 것은 훅을 안 돌린다.
+pub fn isManagedDaemonArgs(procargs: []const u8) bool {
+    if (procargs.len <= 4) return false;
+    const argc: u32 = @as(u32, procargs[0]) | (@as(u32, procargs[1]) << 8) | (@as(u32, procargs[2]) << 16) | (@as(u32, procargs[3]) << 24);
+    if (argc < 3) return false;
+    var off: usize = 4;
+    while (off < procargs.len and procargs[off] != 0) off += 1; // exec_path
+    while (off < procargs.len and procargs[off] == 0) off += 1; // 패딩
+    var saw_codex = false;
+    var saw_app_server = false;
+    var saw_managed = false;
+    var i: u32 = 0;
+    while (i < argc and off < procargs.len) : (i += 1) {
+        const start = off;
+        while (off < procargs.len and procargs[off] != 0) off += 1;
+        const arg = procargs[start..off];
+        if (off < procargs.len) off += 1; // 구분 null 하나만 — 빈 인자도 자리를 센다
+        if (i == 0) {
+            const base = if (std.mem.lastIndexOfScalar(u8, arg, '/')) |s| arg[s + 1 ..] else arg;
+            saw_codex = std.mem.eql(u8, base, "codex");
+        } else if (i == 1) {
+            saw_app_server = std.mem.eql(u8, arg, "app-server");
+        } else if (std.mem.eql(u8, arg, "--managed-daemon")) {
+            saw_managed = true;
+        }
+    }
+    return saw_codex and saw_app_server and saw_managed;
+}
+
+/// 훅을 띄운 pid 마다 «데몬이었나» 를 기억한다 — argv 읽기(sysctl)를 이벤트마다 하지 않으려고. 고정 크기, 가득 차면
+/// 돌아가며 덮는다. **이미 사라진 pid** 는 여기 없으면 «데몬 아님»(= 예전 규칙)으로 접는다: 따라잡기(backlog) 줄의
+/// 데몬이 이미 죽었으면 그 세션은 끝난 것이고, 모르는 것을 재배정하는 쪽보다 예전대로 두는 쪽이 덜 틀린다.
+pub const ParentVerdicts = struct {
+    pub const capacity = 8;
+    pids: [capacity]u32 = [_]u32{0} ** capacity,
+    daemon: [capacity]bool = [_]bool{false} ** capacity,
+    next: usize = 0,
+
+    pub fn lookup(self: *const ParentVerdicts, pid: u32) ?bool {
+        if (pid == 0) return null;
+        for (self.pids, self.daemon) |p, d| if (p == pid) return d;
+        return null;
+    }
+
+    pub fn remember(self: *ParentVerdicts, pid: u32, is_daemon: bool) void {
+        if (pid == 0) return;
+        for (&self.pids, &self.daemon) |*p, *d| {
+            if (p.* == pid) {
+                d.* = is_daemon;
+                return;
+            }
+        }
+        self.pids[self.next] = pid;
+        self.daemon[self.next] = is_daemon;
+        self.next = (self.next + 1) % capacity;
+    }
+};
 
 /// 프롬프트로 후보를 고를 때의 **최소 길이**(공백을 뺀 코드포인트 수).
 ///
@@ -34,9 +99,10 @@ pub const daemon_provider = "codex";
 /// 이 하한은 2차다. muxa #197 이 같은 자리에 12 를 쓴다 — 한글은 글자당 정보가 많아 12 코드포인트면 한 문장이다.
 pub const min_prompt_codepoints: usize = 12;
 
-/// 이 이벤트가 데몬 표식을 단 codex 이벤트인가. 아니면 지금 규칙(파일 이름 = pane)을 그대로 쓴다.
-pub fn isDaemonEvent(provider: []const u8, detached: bool) bool {
-    return detached and std.mem.eql(u8, provider, daemon_provider);
+/// 이 이벤트가 공유 데몬이 돌린 codex 이벤트인가. 아니면 지금 규칙(파일 이름 = pane)을 그대로 쓴다.
+/// `parent_is_daemon` 은 호출자가 `$PPID` 의 argv 로 정한 값이다(`isManagedDaemonArgs`).
+pub fn isDaemonEvent(provider: []const u8, parent_is_daemon: bool) bool {
+    return parent_is_daemon and std.mem.eql(u8, provider, daemon_provider);
 }
 
 /// 후보 하나 — 같은 cwd 에서 codex 가 도는 로컬 Term.
@@ -258,4 +324,49 @@ test "codex 데몬 귀속: 묶음은 세션마다 하나, Term 이 떠나면 풀
     try testing.expectEqual(@as(?u64, 0), f.lookup("s000"));
     try testing.expectEqual(@as(?u64, null), f.lookup("s001")); // 가장 오래 안 쓴 것이 밀렸다
     try testing.expectEqual(@as(?u64, 99), f.lookup("new"));
+}
+
+fn procargsFixture(buf: []u8, argv: []const []const u8, envp: []const []const u8) []const u8 {
+    std.mem.writeInt(u32, buf[0..4], @intCast(argv.len), .little);
+    var n: usize = 4;
+    const exec_path = "/x/bin/exec";
+    @memcpy(buf[n..][0..exec_path.len], exec_path);
+    n += exec_path.len;
+    @memset(buf[n..][0..3], 0); // exec_path 끝 + 패딩
+    n += 3;
+    for ([_][]const []const u8{ argv, envp }) |list| {
+        for (list) |s| {
+            @memcpy(buf[n..][0..s.len], s);
+            n += s.len;
+            buf[n] = 0;
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+test "codex 데몬 귀속: 훅의 부모 argv 가 공유 데몬일 때만 데몬이고, 판정은 pid 마다 기억된다" {
+    var b: [1024]u8 = undefined;
+    const bin = "/Users/u/.codex/packages/app-server-daemon/releases/0.160.0-aarch64-apple-darwin/bin/codex";
+    // 2026-10-04 실측 argv.
+    try testing.expect(isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "--listen", "unix://", "--managed-daemon" }, &.{"HOME=/u"})));
+    // 데몬 보조·IDE 의 stdio app-server·TUI(데몬 안 쓰는 codex 는 훅을 TUI 가 직접 띄운다)는 데몬이 아니다.
+    try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "daemon", "pid-update-loop" }, &.{})));
+    try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "--listen", "stdio://" }, &.{})));
+    try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ "/n/codex-darwin-arm64/bin/codex", "--dangerously-bypass-approvals-and-sandbox" }, &.{})));
+    // envp 의 같은 글자는 argv 가 아니다.
+    try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "exec", "x" }, &.{ "A=app-server", "--managed-daemon" })));
+    // 다른 프로그램의 같은 인자는 codex 데몬이 아니다.
+    try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ "/usr/bin/other", "app-server", "--managed-daemon" }, &.{})));
+    try testing.expect(!isManagedDaemonArgs(&.{ 3, 0, 0 }));
+
+    var v: ParentVerdicts = .{};
+    try testing.expectEqual(@as(?bool, null), v.lookup(63831));
+    v.remember(63831, true);
+    v.remember(65639, false);
+    try testing.expectEqual(@as(?bool, true), v.lookup(63831));
+    try testing.expectEqual(@as(?bool, false), v.lookup(65639));
+    try testing.expectEqual(@as(?bool, null), v.lookup(0)); // pid 칸이 없던 옛 줄
+    for (0..ParentVerdicts.capacity) |i| v.remember(@intCast(1000 + i), false);
+    try testing.expectEqual(@as(?bool, null), v.lookup(63831)); // 돌아가며 덮인다
 }

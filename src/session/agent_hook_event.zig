@@ -175,11 +175,11 @@ pub const Event = struct {
     /// 슬라이스 하나(16 바이트)만 들고, 필요한 자리에서 `liveSubagentIds` 로 다시 훑는다. 슬라이스는
     /// 읽기 버퍼를 가리키므로 **그 배치를 처리하는 동안만** 유효하다.
     background_tasks_raw: []const u8 = "",
-    /// 훅이 **pane 터미널 밖에서** 돌았다는 표식(`maru_detached` — 훅이 끼운 키, provider 가 보낸 값이 아니다).
+    /// 훅을 띄운 프로세스 pid(`maru_hook_ppid` — 훅이 `$PPID` 로 끼운 키, provider 가 보낸 값이 아니다). 0 은 «없었다».
     ///
     /// codex 0.157+ 는 훅을 공유 데몬이 돌리고, 그 데몬은 먼저 뜬 pane 의 env 를 물려받아 **남의 세션 이벤트를
-    /// 그 pane 파일에 적는다**. 이 값이 서면 파일 이름(pane)을 믿지 않는다(`codex_daemon_attribution`).
-    detached: bool = false,
+    /// 그 pane 파일에 적는다**. 이 pid 가 그 데몬이면 파일 이름(pane)을 믿지 않는다(`codex_daemon_attribution`).
+    hook_ppid: u32 = 0,
 };
 
 /// `Notification` 이 말하는 종류(계약 §6).
@@ -393,8 +393,9 @@ pub fn parseLine(line: []const u8) ?Event {
             ev.text = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "stop_hook_active")) {
             ev.stop_hook_active = scan.boolValue() orelse return null;
-        } else if (std.mem.eql(u8, key, codex_daemon_attribution.detached_key)) {
-            ev.detached = scan.boolValue() orelse return null;
+        } else if (std.mem.eql(u8, key, codex_daemon_attribution.parent_pid_key)) {
+            const pid = scan.uintValue() orelse return null;
+            ev.hook_ppid = if (pid) |p| std.math.cast(u32, p) orelse 0 else 0;
         } else if (std.mem.eql(u8, key, "message")) {
             ev.notice_text = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "notification_type")) {
@@ -1653,11 +1654,14 @@ test "malformed or ambiguous hook identity never produces a state event" {
     try testing.expect(parseLine("codex\t{\"hook_event_name\":\"Stop\",\"unknown\":[1,true,null,{\"text\":\"값\"}]}") != null);
 }
 
-test "데몬 표식(`maru_detached`)은 읽히고, 없으면 거짓이다 — 다른 칸은 그대로다" {
-    const marked = parseLine("codex\t{\"maru_detached\":true,\"session_id\":\"01a1\",\"hook_event_name\":\"SessionStart\"}").?;
-    try testing.expect(marked.detached);
+test "훅 부모 pid(`maru_hook_ppid`)는 읽히고, 없으면 0 이다 — 다른 칸은 그대로다" {
+    const marked = parseLine("codex\t{\"maru_hook_ppid\":63831,\"session_id\":\"01a1\",\"hook_event_name\":\"SessionStart\"}").?;
+    try testing.expectEqual(@as(u32, 63831), marked.hook_ppid);
     try testing.expectEqualStrings("01a1", marked.session_id);
     try testing.expectEqual(Kind.session_start, marked.kind);
     const plain = parseLine("codex\t{\"session_id\":\"01a1\",\"hook_event_name\":\"SessionStart\"}").?;
-    try testing.expect(!plain.detached);
+    try testing.expectEqual(@as(u32, 0), plain.hook_ppid);
+    // u32 를 넘는 값은 pid 가 아니다 — 줄은 살리고 칸만 버린다.
+    const huge = parseLine("codex\t{\"maru_hook_ppid\":99999999999,\"hook_event_name\":\"Stop\"}").?;
+    try testing.expectEqual(@as(u32, 0), huge.hook_ppid);
 }

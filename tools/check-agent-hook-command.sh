@@ -467,6 +467,50 @@ printf '%s\n' "$payload" | env -u MARU_HOOK_INSTANCE -u MARU_HOOK_PANE -u LC_MAR
 [ "$(find "$work" -type f | wc -l)" -eq "$before_all" ] || fail "빈 env 인데 파일이 생겼다"
 pass "빈 env"
 
+echo "9) codex 훅은 자기를 띄운 프로세스(\$PPID)를 payload 맨 앞에 싣는다 — 공유 데몬 귀속의 근거 (agent-hooks.md §4.4)"
+# codex 0.157+ 공유 데몬은 먼저 뜬 pane 의 env 로 남의 세션 훅을 그 pane 파일에 적는다. 앱은 이 칸의 pid argv 가
+# `codex app-server … --managed-daemon` 이면 파일 이름을 믿지 않는다. claude 커맨드에는 이 칸이 없다(바이트 불변).
+codex_golden="$root/tests/golden/agent_hook_command_codex.sh"
+[ -r "$codex_golden" ] || fail "codex golden 이 없다: $codex_golden"
+attr_src="$root/src/session/codex_daemon_attribution.zig"
+ppid_key=$(sed -n 's/^pub const parent_pid_key = "\([^"]*\)";$/\1/p' "$attr_src")
+[ -n "$ppid_key" ] || fail "부모 pid 키 상수를 찾지 못했다: $attr_src"
+# 칸의 최대 길이(`"<key>":<10자리>,`)만큼 상한을 미리 뺀다 — 빌더의 `parent_pid_field_max` 와 같은 계산이다.
+codex_limit=$((zig_limit - (1 + ${#ppid_key} + 2 + 10 + 1)))
+grep -q "$zig_marker" "$codex_golden" || fail "codex golden 이 낡았다 — 표식 '$zig_marker' 이 없다"
+grep -q "gt $codex_limit " "$codex_golden" || fail "codex golden 이 낡았다 — payload 상한이 $codex_limit 이 아니다"
+grep -qF "\\\"$ppid_key\\\":\$PPID," "$codex_golden" || fail "codex golden 이 낡았다 — \$PPID 칸이 없다"
+grep -qF '/dev/tty' "$codex_golden" && fail "codex golden 이 제어 터미널로 데몬을 가른다 — codex 는 훅을 언제나 tty 에서 뗀다"
+grep -qF "$ppid_key" "$golden" && fail "claude 커맨드에 부모 pid 칸이 생겼다 — claude 사용자 파일까지 다시 쓰게 된다"
+codex_cmd=$(sed "s|__LOG_DIR__|$logdir|g; s|__REMOTE_LOG_DIR__|$remotedir|g" "$codex_golden")
+
+rm -f "$evdir/21.ndjson"
+printf '%s\n' '{"session_id":"s1","hook_event_name":"SessionStart"}' | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=21 /bin/sh -c "$codex_cmd" || fail "codex 정상 경로가 0 으로 끝나지 않았다"
+codex_line=$(cat "$evdir/21.ndjson")
+# 훅을 띄운 것은 이 스크립트의 셸이다(파이프 원소는 이 셸이 fork 한다) — 칸의 값이 그 pid 여야 한다.
+[ "$codex_line" = "codex	{\"$ppid_key\":$$,\"session_id\":\"s1\",\"hook_event_name\":\"SessionStart\"}" ] \
+  || fail "codex 줄 맨 앞에 부모 pid($$)가 안 실렸다: $codex_line"
+pass "codex 부모 pid 칸(\$PPID = 훅을 띄운 프로세스)"
+
+rm -f "$evdir/22.ndjson"
+printf '%s\n' '{}' | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=22 /bin/sh -c "$codex_cmd" || fail "codex 빈 객체 경로가 0 으로 끝나지 않았다"
+[ "$(cat "$evdir/22.ndjson")" = "codex	{}" ] || fail "빈 객체에 칸을 끼워 JSON 을 깼다: $(cat "$evdir/22.ndjson")"
+pass "codex 빈 객체는 그대로(JSON 을 깨지 않는다)"
+
+# **상한에 딱 맞는 payload 도 칸을 단 뒤 줄 상한 안이다.** 칸 자리를 안 비우면 그 줄이 넘쳐 파서가 통째로 버린다.
+rm -f "$evdir/23.ndjson"
+fill_head='{"hook_event_name":"Stop","session_id":"s1","last_assistant_message":"'
+fill_tail='"}'
+fill_n=$((codex_limit - ${#fill_head} - ${#fill_tail}))
+big=$(printf '%s%s%s' "$fill_head" "$(head -c "$fill_n" /dev/zero | tr '\0' x)" "$fill_tail")
+[ "$(printf '%s' "$big" | wc -c)" -eq "$codex_limit" ] || fail "상한 payload 를 못 만들었다"
+printf '%s\n' "$big" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=23 /bin/sh -c "$codex_cmd" || fail "codex 상한 경로가 0 으로 끝나지 않았다"
+big_line_bytes=$(head -n 1 "$evdir/23.ndjson" | tr -d '\n' | wc -c)
+[ "$big_line_bytes" -le $((zig_kib * 1024)) ] || fail "칸을 단 상한 줄($big_line_bytes)이 줄 상한($((zig_kib * 1024)))을 넘는다"
+grep -qF "\"$ppid_key\":$$," "$evdir/23.ndjson" || fail "상한 payload 에 부모 pid 칸이 안 실렸다"
+grep -qF '"last_assistant_message":"xxx' "$evdir/23.ndjson" || fail "상한에 딱 맞는 payload 를 접었다(칸 자리 계산이 틀렸다)"
+pass "codex 상한 payload + 칸 ≤ 줄 상한"
+
 echo "8) 원격 설치기(maru agent-hooks)가 심는 바이트는 이 fixture 를 HOME 규칙으로 채운 것과 같다 — 핑퐁의 부재 (RA8)"
 # 로컬 GUI 설치기는 빌더 + HOME 규칙으로 커맨드를 만들고 이 fixture 는 그 빌더에서 나온다. 원격 CLI 가 같은 바이트를
 # 쓰는지는 **제품 바이너리**로만 알 수 있다. 바이너리가 없으면 «못 쟀다» 로 적는다(SKIP — 초록으로 세지 않는다).

@@ -6,8 +6,8 @@
 //! 세션·훅을 공유 데몬 하나가 돌리고, 그 데몬은 먼저 뜬 pane 의 env 를 물려받아 **나중 pane 의 세션 훅도 첫 pane 파일에**
 //! 적는다. 앱은 파일 이름을 pane 으로 믿고 그 세션 신원을 대기 중인 첫 pane 에 채택했다(openai/codex#48500 와 같은 결함).
 //!
-//! 판정 자체(`src/session/codex_daemon_attribution.zig`)와 훅이 다는 표식(`agent_hook_command`)은 순수 테스트가 잰다.
-//! 앱 배치 루프는 `app_session` 테스트라 PR 에서 안 돈다 — 그래서 루프가 **판정을 지나서만** 적용하는지, 표식 붙은
+//! 판정 자체(`src/session/codex_daemon_attribution.zig`)와 훅이 싣는 부모 pid 칸(`agent_hook_command`)은 순수 테스트가 잰다.
+//! 앱 배치 루프는 `app_session` 테스트라 PR 에서 안 돈다 — 그래서 루프가 **판정을 지나서만** 적용하는지, 데몬이 돌린
 //! 이벤트가 판정 없이 `adoptHookSessionIdentity` 로 흐를 길이 없는지, 재배정받은 Term 이 관측 모드로 떨어지지 않고
 //! 에이전트가 떠나면 묶음이 풀리는지를 여기서 글자로 잰다.
 
@@ -68,7 +68,7 @@ fn fnBody(src: []const u8, comptime name: []const u8) ![]const u8 {
     return src[at..end];
 }
 
-test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하고, 표식 붙은 이벤트는 판정 없이 이 pane 에 채택되지 않는다" {
+test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하고, 데몬이 돌린 이벤트는 판정 없이 이 pane 에 채택되지 않는다" {
     const a = std.testing.allocator;
     const raw = try read(a, agent_path);
     defer a.free(raw);
@@ -80,9 +80,14 @@ test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하�
     _ = try expectOnce(poll, "for (events[0..batch.count]) |ev| switch (routeHookEvent(self, term, ev)) { .here => turn_batch.step(self, term, ev), .elsewhere, .dropped => {}, };", "배치 루프");
     try expectCount(poll, "turn_batch.step(", 1, "배치 루프 밖의 적용");
 
-    // ⑵ 판정의 입구: 표식이 없으면 예전 그대로(`.here`), 있으면 순수 판정 **한 번**을 지난다.
+    // ⑵ 판정의 입구: 데몬이 돌린 이벤트가 아니면 예전 그대로(`.here`), 맞으면 순수 판정 **한 번**을 지난다.
     const route = try fnBody(src, "routeHookEvent");
-    const gate = try expectOnce(route, "if (!attr.isDaemonEvent(ev.provider, ev.detached)) return .here;", "표식 게이트");
+    const gate = try expectOnce(route, "if (!attr.isDaemonEvent(ev.provider, hookParentIsDaemon(self, ev))) return .here;", "데몬 게이트");
+    // 데몬 판정은 훅이 실은 `$PPID` 의 argv 로 한다 — 제어 터미널 같은 대리 증거가 아니다(첫 판의 오판).
+    const parent = try fnBody(src, "hookParentIsDaemon");
+    _ = try expectOnce(parent, "if (ev.hook_ppid == 0 or !std.mem.eql(u8, ev.provider, attr.daemon_provider)) return false;", "칸 없는 옛 줄");
+    _ = try expectOnce(parent, "maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return false;", "argv 판정");
+    _ = try expectOnce(parent, "self.codex_daemon_parents.remember(ev.hook_ppid, verdict);", "판정 기억");
     const decide_at = try expectOnce(route, "const decision = attr.decide(.{", "순수 판정");
     if (!(gate < decide_at)) return error.WiringChanged;
     // 판정 앞에서 `.here` 로 빠지는 길은 게이트 하나뿐이다 — 그 밖의 조기 `.here` 는 판정 우회다.

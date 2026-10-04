@@ -98,7 +98,7 @@ pub const Dispatcher = struct {
                 return .keep_running;
             },
             // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-            .hello_ack, .browser_created, .browser_closed, .title_changed, .load_finished, .renderer_gone, .failure, .url_changed, .nav_state, .cursor_changed, .ime_range, .js_dialog, .file_dialog, .dialog_closed, .permission_request, .web_notification, .popup_changed, .tooltip_changed, .context_menu, .context_menu_closed, .drag_operation, .drag_out_data, .drag_out, .drag_file_ready => unreachable,
+            .hello_ack, .browser_created, .browser_closed, .title_changed, .load_finished, .renderer_gone, .failure, .url_changed, .nav_state, .cursor_changed, .ime_range, .js_dialog, .file_dialog, .dialog_closed, .permission_request, .web_notification, .popup_changed, .tooltip_changed, .context_menu, .context_menu_closed, .drag_operation, .drag_out_data, .drag_out, .drag_file_ready, .open_tab => unreachable,
         }
     }
 

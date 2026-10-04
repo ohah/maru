@@ -104,7 +104,12 @@ pub fn build(flags: Flags, look_up: bool) Menu {
         menu.command(flags, .select_all, .web_menu_select_all);
         if (flags.selection) menu.speechAndServices();
     } else {
-        if (flags.link) menu.command(flags, .copy_link_address, .web_menu_copy_link_address);
+        if (flags.link) {
+            // Chrome 처럼 링크 열기가 먼저(W6e — 뒤 탭). http·https 가 아닌 링크(`mailto:` 등)면 꺼 둔다.
+            menu.command(flags, .open_link_new_tab, .web_menu_open_link_new_tab);
+            menu.separator();
+            menu.command(flags, .copy_link_address, .web_menu_copy_link_address);
+        }
         if (flags.image) {
             menu.separator();
             menu.command(flags, .copy_image, .web_menu_copy_image);
@@ -235,13 +240,17 @@ test "the page menu is back · forward · reload with back and forward off when 
     try std.testing.expectEqual(Command.reload, menu.items[2].command);
 }
 
-test "a link with its text selected is copy link address — copy — speech — services, without look up or page items" {
+test "a link with its text selected is open in new tab — copy link address — copy — speech — services, without look up or page items" {
     var buf: [max_items]Kind = undefined;
-    const menu = build(.{ .link = true, .selection = true, .can_copy = true, .can_go_back = true }, true);
-    try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .command, .separator, .speech, .speech_start, .speech_stop, .separator, .services }, kinds(menu, &buf));
-    try std.testing.expectEqual(Command.copy_link_address, menu.items[0].command);
-    try std.testing.expectEqual(Command.copy, menu.items[2].command);
-    try std.testing.expectEqual(@as(u8, 1), menu.items[5].depth);
+    const menu = build(.{ .link = true, .link_openable = true, .selection = true, .can_copy = true, .can_go_back = true }, true);
+    try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .command, .separator, .command, .separator, .speech, .speech_start, .speech_stop, .separator, .services }, kinds(menu, &buf));
+    try std.testing.expectEqual(Command.open_link_new_tab, menu.items[0].command);
+    try std.testing.expect(menu.items[0].enabled);
+    try std.testing.expectEqual(Command.copy_link_address, menu.items[2].command);
+    try std.testing.expectEqual(Command.copy, menu.items[4].command);
+    try std.testing.expectEqual(@as(u8, 1), menu.items[7].depth);
+    // http·https 가 아닌 링크(`mailto:`)는 새 탭 열기를 꺼 둔다(W6e).
+    try std.testing.expect(!find(build(.{ .link = true }, true), .open_link_new_tab).?.enabled);
     try std.testing.expect(find(menu, .back) == null);
 }
 
@@ -251,7 +260,7 @@ test "an image is copy image (off without pixels) and copy image address; a link
     try std.testing.expect(!find(loading, .copy_image).?.enabled and find(loading, .copy_image_address).?.enabled);
     var buf: [max_items]Kind = undefined;
     const linked = build(.{ .link = true, .image = true, .image_loaded = true }, true);
-    try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .command, .command }, kinds(linked, &buf));
+    try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .command, .separator, .command, .command }, kinds(linked, &buf));
     try std.testing.expect(find(linked, .copy_image).?.enabled);
 }
 
@@ -276,10 +285,11 @@ test "a selection outside inputs is look up — copy — speech — services; me
 
 test "no flag combination makes a leading, trailing or doubled separator or overflows the list" {
     var bits: u32 = 0;
-    while (bits < (1 << 15)) : (bits += 1) {
+    while (bits < (1 << 16)) : (bits += 1) { // 15 번 비트 `link_openable`(W6e)까지 모두
         const flags: Flags = @bitCast(@as(u16, @intCast(bits)));
         if (flags.image_loaded and !flags.image) continue;
         if (flags.selection_truncated and !flags.selection) continue;
+        if (flags.link_openable and !flags.link) continue;
         const menu = build(flags, true);
         const items = menu.slice();
         if (items.len == 0) continue;

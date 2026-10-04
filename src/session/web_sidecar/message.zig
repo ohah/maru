@@ -110,6 +110,10 @@ pub const Tag = enum(u8) {
     drag_out = 54,
     /// 청한 파일 내용의 끝(W6d③) — 보낸 크기와 성공 여부. 그 번호의 내용이 없으면(다음 끌기가 시작됐다·브라우저가 닫혔다) 실패.
     drag_file_ready = 55,
+    /// 페이지가 새 탭을 열려 한다(W6e — `target=_blank`·`window.open`·⌘/가운데 클릭·메뉴 「새 탭에서 링크 열기」). sidecar 는 CEF 의
+    /// 팝업을 취소하고(창을 만들지 않는다) 주소만 보낸다 — maru 는 그 탭 오른쪽에 새 탭을 만든다. 원래 페이지와는 이어지지 않는다
+    /// (`window.opener` 없음 — 이어 받기는 다음 단계). sidecar 는 사용자 입력 하나에 하나만 보낸다.
+    open_tab = 56,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -545,7 +549,8 @@ pub const ContextMenuFlags = packed struct(u16) {
     can_select_all: bool = false,
     can_go_back: bool = false,
     can_go_forward: bool = false,
-    _reserved: u1 = 0,
+    /// 링크를 새 탭에서 열 수 있다(W6e — 걸러진 링크 주소가 http·https 이고 주소 상한 안이다). `link` 일 때만.
+    link_openable: bool = false,
 };
 
 pub const ContextMenu = struct {
@@ -581,6 +586,21 @@ pub const ContextMenuCommandKind = enum(u8) {
     copy_link_address = 11,
     copy_image_address = 12,
     copy_image = 13,
+    /// 링크를 새 탭(뒤)에서 연다(W6e — Chrome 「새 탭에서 링크 열기」). `link_openable` 일 때만.
+    open_link_new_tab = 14,
+};
+
+/// 새 탭을 앞에 둘지(그 탭으로 옮긴다) 뒤에 둘지(W6e — Chrome 과 같다: ⌘·가운데 클릭과 메뉴는 뒤, 그 밖은 앞).
+pub const NewTabPlacement = enum(u8) {
+    foreground = 0,
+    background = 1,
+};
+
+pub const OpenTab = struct {
+    browser: BrowserId,
+    placement: NewTabPlacement,
+    /// http·https 주소(maru 가 다시 거른다).
+    url: []const u8,
 };
 
 /// 끌어 온 것의 종류(W6d①). 경로는 파일·폴더 하나(절대 경로), 글·HTML 은 이어 붙이는 조각, 주소와 그 제목은 하나씩.
@@ -711,6 +731,7 @@ pub fn contextMenuAllows(flags: ContextMenuFlags, command: ContextMenuCommandKin
         .copy_link_address => flags.link,
         .copy_image_address => flags.image,
         .copy_image => flags.image_loaded,
+        .open_link_new_tab => flags.link_openable,
     };
 }
 
@@ -721,6 +742,8 @@ test "context menu commands follow what the menu showed — page items only on t
     const link: ContextMenuFlags = .{ .link = true, .selection = true, .can_copy = true, .can_go_back = true };
     try std.testing.expect(contextMenuAllows(link, .copy_link_address) and contextMenuAllows(link, .copy));
     try std.testing.expect(!contextMenuAllows(link, .back) and !contextMenuAllows(link, .reload) and !contextMenuAllows(link, .copy_image_address));
+    try std.testing.expect(!contextMenuAllows(link, .open_link_new_tab)); // 걸러진 주소가 http·https 가 아니면 새 탭 없음
+    try std.testing.expect(contextMenuAllows(.{ .link = true, .link_openable = true }, .open_link_new_tab));
     try std.testing.expect(contextMenuAllows(.{ .image = true }, .copy_image_address) and !contextMenuAllows(.{ .image = true }, .copy_image));
     try std.testing.expect(contextMenuAllows(.{ .image = true, .image_loaded = true }, .copy_image));
     const input: ContextMenuFlags = .{ .editable = true, .can_paste = true, .can_select_all = true };
@@ -865,6 +888,7 @@ pub const Message = union(Tag) {
     drag_out_data: DragOutData,
     drag_out: DragOut,
     drag_file_ready: DragFileReady,
+    open_tab: OpenTab,
 };
 
 test "tags split by direction at 32" {

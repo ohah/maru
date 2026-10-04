@@ -50,6 +50,11 @@ pub const Entry = struct {
     cursor: ?protocol.message.WebCursor = null,
     /// 마지막으로 알린 IME 조합 사각형(W4 — 같은 것은 다시 안 보낸다).
     ime_bounds: ?protocol.message.Rect = null,
+    /// 새 탭 한 장(W6e — `new_tab`). maru 가 보낸 누름·키가 주고 새 탭 하나가 쓴다.
+    new_tab_credit: bool = false,
+    /// 밖에서 끌어 온 것을 놓았다(W6e) — 페이지가 받지 않은 놓기는 Chromium 이 `on_open_urlfrom_tab`(앞 탭·제스처 1 — 실측)으로 그 주소를
+    /// 연다. Chrome 처럼 지금 탭에서 이동시킨다(W6d① 사용자 결정). 다음 누름·키에서 지운다.
+    drop_navigation: bool = false,
 };
 
 pub const Error = error{ Duplicate, Full };

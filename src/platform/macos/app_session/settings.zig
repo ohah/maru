@@ -931,6 +931,7 @@ pub fn resetSelectedSettingRow(self: *AppSession) void {
         const key = cf.nums[sel - cf.bools.len].key;
         const dv = defaults.numFor(key) orelse return;
         if (config_mod.schema.setNumber(&self.loaded_config.config, key, dv)) {
+            self.allow_scrollback_shrink = std.mem.eql(u8, key, "scrollback.lines"); // 사용자가 그 행을 바꿨다
             reapplyLoadedConfig(self);
             markConfigKeyRemoved(self, key);
             self.metal_dirty = true;
@@ -1103,6 +1104,7 @@ pub fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
         const step = if (n.is_int) @max(@as(f64, 1), span * 0.04) else span * 0.04;
         const value = std.math.clamp(n.value + @as(f64, @floatFromInt(dir)) * step, n.min, n.max);
         if (config_mod.schema.setNumber(&self.loaded_config.config, n.key, value)) {
+            self.allow_scrollback_shrink = std.mem.eql(u8, n.key, "scrollback.lines"); // 사용자가 그 행을 바꿨다
             reapplyLoadedConfig(self);
             markConfigKeyDirty(self, n.key);
         }
@@ -2173,7 +2175,16 @@ pub fn reloadConfig(self: *AppSession) void {
     var anchored_buf: [128]u8 = undefined;
     const anchored = captureSelectedRowKey(self, &anchored_buf);
 
-    var new_parsed = config_mod.loadConfigDefault(self.io, self.allocator) catch return; // 실패 시 무동작(forgiving)
+    // 기준선은 **로더가 읽기 전에** 잡는다 — 읽은 뒤에 잡으면 그 사이 저장이 기준선(새 내용)과 메모리(옛 내용)를 갈라
+    // 다음 편집까지 반영되지 않는다. 먼저 잡으면 최악이 「한 번 더 다시 읽기」다(적대적 검증).
+    const pre_load_digest = configFileDigest(self);
+    // 명시된 경로(config_path_buffer — 테스트의 tmp redirect 포함)가 있으면 거기서, 없으면 기본 로더로 읽는다.
+    // **configPath() 를 부르지 않는다** — 그건 기본 경로를 버퍼에 캐시하고, 캐시가 서면 테스트의 쓰기 가드
+    // (configWritePath: 버퍼가 null 이면 쓰기 스킵)가 풀려 뒤따르는 writer 가 실 사용자 config 를 덮을 수 있다.
+    var new_parsed = (if (self.config_path_buffer) |explicit|
+        config_mod.loadConfigFile(self.io, self.allocator, explicit)
+    else
+        config_mod.loadConfigDefault(self.io, self.allocator)) catch return; // 실패 시 무동작(forgiving)
     // 새 config로 appearance를 먼저 resolve한 뒤에 옛 loaded_config를 버린다 — resolve가 실패하면 옛
     // appearance·loaded_config를 그대로 보존해 use-after-free(옛 arena의 family를 빌린 appearance)를 막는다.
     const new_appearance = config_mod.resolveAppearance(new_parsed.config) catch {
@@ -2192,12 +2203,22 @@ pub fn reloadConfig(self: *AppSession) void {
     // 교체가 뒤에 오면 **옛 값으로 재고 새 값으로 그리게** 되어, 예컨대 `status-bar.show`를 끈 reload에서
     // 바는 사라졌는데 셸은 늘어난 행을 못 받는다(실측 36행이어야 할 것이 35행). 옛 arena는 appearance를
     // 통째로 바꾼 뒤에 버려야 UAF가 없으므로 deinit만 마지막에 남긴다.
+    // 열린 드롭다운의 되돌리기 스냅샷(폰트 이름·테마 hex)은 **옛 arena** 를 가리킨다 — 아래에서 그 arena 를 버리면 취소
+    // (Esc)·「직접 입력」 미리보기가 해제된 메모리를 읽는다(UAF·config 오염). 이제 다른 창의 저장·외부 편집만으로도 reload
+    // 가 오므로, 드롭다운을 닫고 스냅샷을 버린다(새 파일 값이 정본 — 되돌릴 원본이 이미 바뀌었다).
+    if (self.chrome_host.settings.dropdown.open or self.dropdown_snapshot_kind != .none) {
+        self.chrome_host.settings.dropdown.hide();
+        self.dropdown_snapshot_kind = .none;
+        self.dropdown_snapshot_font = "";
+        self.dropdown_snapshot_theme = .{};
+    }
     var old_loaded = self.loaded_config;
     self.loaded_config = new_parsed;
     logConfigDiagnostics(self, .reload);
     applyAppearancePreservingZoom(self, new_appearance);
     old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
     replaceAppKeepAlivePolicyFromReload(self.loaded_config);
+    self.config_file_digest = pre_load_digest; // 자동 reload 기준선 — 로더가 읽기 직전의 내용
     app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 파일이 정본
     // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
     // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
@@ -2322,6 +2343,7 @@ pub fn resetAllSettings(self: *AppSession) void {
     app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 기본값(앱 전역)
     self.theme_pre_follow = null; // 기본값으로 갈았으니 follow-system 복귀 스냅샷(옛 arena slice)도 무효 — 비운다(F2-9 dangling 방지)
     self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
+    self.allow_scrollback_shrink = true; // 전체 리셋 — 사용자가 고른 시점(스크롤백도 기본값으로)
     applyLoadedConfig(self, false); // resolve→apply→behavior 캐시→reapply* 재적용. false=런타임 줌도 config 기본으로(통합 리셋이라 ⌘+/− 확대 해제; resolve-first 안전, reloadConfig 미러 — 리뷰 #827)
     // **config 파일을 기본 상태로 덮어쓴다**(삭제 아님) → 빈+주석이라 다음 로드는 schema·특수 키·주석 전부 기본값.
     // 부분 갱신(updateForKeys)이 아닌 전체 덮어쓰기인 이유: 기본값 위 override만 쓰는 정책상 (a) 비-schema 키
@@ -2346,7 +2368,11 @@ pub fn resetAllSettings(self: *AppSession) void {
                 null;
             defer if (owned) |b| self.allocator.free(b);
             const body: []const u8 = if (owned) |b| b else header;
-            var af = std.Io.Dir.cwd().createFileAtomic(self.io, path, .{ .replace = true, .make_path = true }) catch break :write_blk;
+            // config 가 심볼릭 링크(dotfiles)면 **실제 파일**에 쓴다 — 링크 자리에 atomic 으로 쓰면 링크가 일반 파일로 바뀌어
+            // dotfiles 저장소와 끊긴다(적대적 검증). 없는 파일·끊어진 링크는 그 경로 그대로.
+            var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const target = resolveExistingFile(self.io, path, &real_buf);
+            var af = std.Io.Dir.cwd().createFileAtomic(self.io, target, .{ .replace = true, .make_path = true }) catch break :write_blk;
             defer af.deinit(self.io); // replace 성공 시 no-op, 실패/중도 탈출 시 temp 정리
             var wbuf: [256]u8 = undefined;
             var fw = af.file.writer(self.io, &wbuf);
@@ -2354,6 +2380,7 @@ pub fn resetAllSettings(self: *AppSession) void {
             fw.interface.flush() catch break :write_blk;
             af.replace(self.io) catch break :write_blk;
             wrote = true;
+            self.config_file_digest = std.hash.Wyhash.hash(0, body); // 자동 reload 가 이 쓰기를 다시 읽지 않게
         }
     }
     if (wrote) {
@@ -2476,11 +2503,19 @@ pub fn reapplyConfigPalette(self: *AppSession) void {
 /// lazy-alloc/scroll로 읽으므로). 이미 할당된 ring을 줄이지는 않는다 — 코어가 다음 eviction에서 새 cap을 본다.
 pub fn reapplyScrollback(self: *AppSession) void {
     const lines = self.loaded_config.config.scrollback.lines;
+    // **사용자가 그 시점을 고른 적용에서만 살아 있는 기록을 줄인다.** 코어의 setMaxScrollback 은 줄어든 만큼 즉시 잘라
+    // 내고 되돌릴 수 없다 — 편집기 자동 저장의 중간 값(`50000` 을 치다 `5`)·지운 줄(기본 1000)이 자동 reload 로, 또는 그
+    // 뒤 다른 키 변경·시스템 외관 자동 전환의 재적용으로 손대지 않은 모든 창의 기록을 지웠다(적대적 검증). 그 밖엔 살아
+    // 있는 Term 을 지금 가장 큰 값으로 맞춘다(작은 값으로 만든 새 Term 은 늘어난다 — 줄어든 값은 새 Term 부터).
+    const shrink_ok = self.allow_scrollback_shrink;
+    self.allow_scrollback_shrink = false;
+    const target = if (shrink_ok or lines >= self.live_scrollback_max) lines else self.live_scrollback_max;
+    self.live_scrollback_max = target;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 // Phase 3 위임(P3-3): scrollback cap 재적용도 reader로 위임(config 재적용과 동일 — best-effort).
-                self.enqueueCoreCommandForTerm(term, .{ .set_max_scrollback = lines }) catch {};
+                self.enqueueCoreCommandForTerm(term, .{ .set_max_scrollback = target }) catch {};
             }
         }
     }
@@ -2668,6 +2703,72 @@ pub fn takeConfigDirty(self: *AppSession) bool {
     return self.theme_preset_persist != null; // 리스트가 아닌 optional이라 registry 밖 — 따로 본다
 }
 
+/// `path` 가 있는 파일(심볼릭 링크면 따라간 끝)의 실제 경로. 열 수 없으면(없는 파일·끊어진 링크) `path` 그대로.
+pub fn resolveExistingFile(io: std.Io, path: []const u8, buf: []u8) []const u8 {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return path;
+    defer file.close(io);
+    const n = file.realPath(io, buf) catch return path;
+    return buf[0..n];
+}
+
+/// config 파일 내용의 digest(Wyhash). 없는 파일은 빈 내용과 같다(지우면 기본값으로 reload). 못 읽으면 null —
+/// 판정 보류(편집기가 쓰는 도중일 수 있다, 다음 알림이 다시 본다).
+pub fn configFileDigest(self: *AppSession) ?u64 {
+    const bytes = readConfigFileForWatch(self) orelse return null;
+    defer self.allocator.free(bytes);
+    return std.hash.Wyhash.hash(0, bytes);
+}
+
+/// 파일 감시가 config 파일 변경을 알렸다(macOS FSEvents — platform 은 알리기만 하고 판정은 여기). `behavior.auto-reload`
+/// 가 꺼졌거나, 내용이 이 창이 마지막으로 읽거나 쓴 것과 같으면(앱 자신의 write-back) 무동작. 다르면 `reloadConfig` —
+/// 다른 창이 세팅 화면에서 바꿔 쓴 값도 이 길로 이 창에 들어온다. 계획: settings-page.md §2 S0-2. 다시 읽었으면 true.
+pub fn configFileChanged(self: *AppSession) bool {
+    // 아직 파일에 안 쓴 세팅 편집이 있으면 미룬다 — 지금 다시 읽으면 메모리 값이 파일 값으로 돌아가고 write-back 대기열이
+    // 비워져 그 편집이 사라진다(적대적 검증). 다음 tick 의 write-back 이 쓰고 나면(원본이 기준선과 다르면 기준선은 그대로)
+    // 다음 확인이 다시 읽어 양쪽 변경을 다 갖는다.
+    if (takeConfigDirty(self)) return false;
+    const bytes = readConfigFileForWatch(self) orelse return false;
+    defer self.allocator.free(bytes);
+    const digest = std.hash.Wyhash.hash(0, bytes);
+    if (self.config_file_digest) |seen| if (seen == digest) return false;
+    // 이 창이 방금 쓴 내용이 파일에 닿았다 — 자기 쓰기다. 기준선을 옮기고 다시 읽지 않는다.
+    if (self.config_expected_write_digest) |expected| {
+        if (expected == digest) {
+            self.config_file_digest = digest;
+            self.config_expected_write_digest = null;
+            return false;
+        }
+    }
+    if (!self.loaded_config.config.behavior_auto_reload) {
+        // 이 창에선 꺼져 있다 — 그래도 **새 내용이 켜는 것**이면 따른다. 다른 창이 세팅 화면에서 다시 켜 쓴 경우다:
+        // 안 보면 이 창은 꺼진 채 남아(꺼짐은 읽어서 알았는데 켜짐은 못 읽는다) 영영 갈린다(적대적 검증).
+        var peek = config_mod.parseConfig(self.allocator, bytes) catch return false;
+        defer peek.deinit();
+        if (!peek.config.behavior_auto_reload) return false;
+    }
+    self.reload_is_automatic = true;
+    defer self.reload_is_automatic = false;
+    reloadConfig(self); // 성공하면 기준선(config_file_digest)도 새 내용으로 선다
+    self.config_file_digest = digest; // 파싱 실패로 reload 가 무동작이어도 같은 내용으로 매 알림 다시 읽지 않는다
+    return true;
+}
+
+/// 감시 판정용으로 config 파일을 읽는다(owned). 없는 파일은 빈 내용(지우면 기본값으로 reload). 못 읽으면 null —
+/// 판정 보류(편집기가 쓰는 도중일 수 있다, 다음 알림이 다시 본다). 경로는 configPath() 처럼 캐시하지 않는다.
+fn readConfigFileForWatch(self: *AppSession) ?[]u8 {
+    const default_owned: ?[]const u8 = if (self.config_path_buffer == null)
+        (config_mod.defaultConfigPath(self.allocator) catch null)
+    else
+        null;
+    defer if (default_owned) |d| self.allocator.free(d);
+    const path = self.config_path_buffer orelse default_owned orelse return null;
+    if (path.len == 0) return null;
+    return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited((1 << 20) + 1)) catch |err| switch (err) {
+        error.FileNotFound => self.allocator.alloc(u8, 0) catch null,
+        else => null,
+    };
+}
+
 /// config 파일 경로(Open Config 메뉴용). loader.defaultConfigPath(MARU_CONFIG override·$HOME/.config/maru/
 /// config)가 단일 출처 — 한 번 계산해 세션 소유 버퍼에 캐시한다(다음 호출은 캐시, destroy까지 유효).
 /// HOME 없음·OOM이면 빈 슬라이스(Swift가 무동작). 경로 계산만 — 파일 생성/열기는 platform(Swift) OS 동작.
@@ -2778,10 +2879,19 @@ pub fn serializeConfig(self: *AppSession) ![]const u8 {
         self.sidebar_config_buffer = null;
     }
     const path = configPath(self);
+    // 원본을 못 읽으면(1 MiB 초과·권한 등) **쓰지 않는다** — 빈 원본으로 보고 바뀐 키만 남겨 파일 전체를 덮었다(사용자
+    // config 유실, 적대적 검증). 없는 파일만 빈 원본이다. 한도는 로더와 같은 1 MiB(Limit 은 배타라 +1).
     const owned: ?[]u8 = if (path.len == 0)
         null
     else
-        std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(1 << 20)) catch null;
+        std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited((1 << 20) + 1)) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => {
+                // 대기열을 비운다 — 남기면 매 tick 재시도가 최대 1 MiB 를 다시 읽는다. 앱 안의 값은 그대로(파일만 안 바뀜).
+                clearConfigDirty(self);
+                return error.ConfigUnreadable;
+            },
+        };
     defer if (owned) |o| self.allocator.free(o);
     const original: []const u8 = owned orelse &.{};
 
@@ -2870,6 +2980,15 @@ pub fn serializeConfig(self: *AppSession) ![]const u8 {
     }
     self.sidebar_config_buffer = text;
     self.config_dirty_keys.clearRetainingCapacity();
+    // 곧 이 내용이 파일에 쓰인다 — 자동 reload 가 자기를 다시 읽지 않게 기준선을 옮긴다. **단 방금 읽은 원본이 기준선과
+    // 같을 때만.** 원본이 다르면 그사이 외부 편집(E)이 있었고, 이 쓰기(E+K)에 섞여 들어가도 이 창의 메모리엔 E 가 없다 —
+    // 기준선을 그대로 두면 곧 올 알림이 이 창을 다시 읽게 해 E 와 K 를 둘 다 갖게 한다(적대적 검증).
+    // 빈 텍스트는 Swift 가 쓰지 않는다(0 바이트 = 직렬화 실패와 구분이 안 돼 지우지 않는다) — 기준선도 그대로.
+    // 기준선은 **쓰기가 파일에 닿은 것을 본 뒤**(configFileChanged)에 옮긴다 — 여기선 기대값만 둔다.
+    self.config_expected_write_digest = if (text.len > 0 and (self.config_file_digest == null or self.config_file_digest.? == std.hash.Wyhash.hash(0, original)))
+        std.hash.Wyhash.hash(0, text)
+    else
+        null;
     return text;
 }
 
@@ -2981,7 +3100,15 @@ fn reanchorSelectedByKey(self: *AppSession, key: []const u8) void {
     self.chrome_host.settings.endSearch();
     if (sectionIndexOfSettingsKey(self, key)) |sec| self.chrome_host.settings.section = sec;
     refreshSettingsFieldCount(self); // 섹션까지 옮겼으면 행 수가 또 바뀐다
-    if (indexOfSettingsKey(self, key)) |i| self.chrome_host.settings.selected = i;
+    if (indexOfSettingsKey(self, key)) |i| {
+        self.chrome_host.settings.selected = i;
+        return;
+    }
+    // 그 행이 사라졌다(reload 로 env/macro 줄이 지워짐 등). 편집·색 고르기·녹음이 켜진 채면 Enter 가 **지금 그 인덱스의
+    // 남의 행**에 커밋해 다른 env 값·매크로를 덮고 영속한다(적대적 검증) — 진행 중인 입력을 거둔다.
+    self.chrome_host.settings.cancelEdit();
+    self.chrome_host.settings.picking = false;
+    self.chrome_host.settings.recording = false;
 }
 
 /// 현재 필터를 통과하는 행들에서 `key` 의 행 인덱스. `currentSectionFields` 와 **같은 순서**(bool → number
@@ -3236,6 +3363,7 @@ pub fn commitSelectedText(self: *AppSession) void {
         const nkey = cf.nums[ni].key;
         const parsed = std.fmt.parseFloat(f64, std.mem.trim(u8, self.chrome_host.settings.editText(), " ")) catch return;
         if (config_mod.schema.setNumber(&self.loaded_config.config, nkey, parsed)) {
+            self.allow_scrollback_shrink = std.mem.eql(u8, nkey, "scrollback.lines"); // 사용자가 그 행을 바꿨다
             reapplyLoadedConfig(self);
             markConfigKeyDirty(self, nkey);
         }
@@ -3983,6 +4111,37 @@ test "재적용은 config 미러를 되쓰지 않는다" {
     reapplyLoadedConfig(session);
 
     try std.testing.expect(!session.loaded_config.config.session.keep_alive_after_quit);
+}
+
+// 앵커 행이 **끝내 못 찾아지면**(reload 가 env/macro 줄을 지웠다) 진행 중인 입력을 거둔다 — 편집·색 고르기·녹음이
+// 켜진 채면 Enter 가 지금 그 인덱스의 **남의 행**에 커밋해 다른 env 값·매크로를 덮었다(적대적 검증).
+test "앵커 행이 끝내 사라지면 편집·고르기·녹음을 거둔다 — 남의 행에 커밋하지 않게" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.enterEdit("bar");
+    session.chrome_host.settings.picking = true;
+    session.chrome_host.settings.recording = true;
+    reanchorSelectedByKey(session, "env.ZZ_GONE_BY_RELOAD");
+    try std.testing.expect(!session.chrome_host.settings.editing);
+    try std.testing.expect(!session.chrome_host.settings.picking);
+    try std.testing.expect(!session.chrome_host.settings.recording);
+
+    // 대조군: 행이 있으면 입력을 거두지 않는다(그 행에 다시 앉을 뿐).
+    session.chrome_host.settings.enterEdit("x");
+    reanchorSelectedByKey(session, "env.");
+    try std.testing.expect(session.chrome_host.settings.editing);
 }
 
 // 앵커 행이 **사라졌을 때** 폴백이 그 키의 섹션까지 옮기는가.

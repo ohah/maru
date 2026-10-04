@@ -1454,6 +1454,11 @@ pub const Config = struct {
     /// ⌘Q·메뉴 Quit 은 이 값과 무관하게 앱을 끝낸다. quick 터미널은 「창」으로 세지 않는다.
     /// 베이스: Ghostty `quit-after-last-window-closed`(같은 이름·뜻). loader 가 `window.quit-after-last-window-closed`.
     window_quit_after_last_window_closed: bool = true,
+    /// config 파일이 바뀌면(외부 편집기 저장 등) 재시작·메뉴 없이 다시 읽는다. 기본 true. 끄면 Reload Config(메뉴)로만.
+    /// 감시는 platform(macOS FSEvents — 파일이 든 폴더, 심볼릭 링크면 실제 파일의 폴더도)이 알리기만 하고, 「바뀌었나」는
+    /// 내용 digest 로 Zig 가 판정한다 — 앱 자신의 write-back(세팅 GUI)은 다시 읽지 않고, 다른 창이 쓴 값은 이 창도 읽는다.
+    /// 계획: settings-page.md §2 S0-2. loader 가 `behavior.auto-reload`.
+    behavior_auto_reload: bool = true,
     /// split pane 사이 divider(경계선) 두께(논리 pt). 기본 1.0(≈1x에서 1px, 2x Retina에서 2px — 얇은
     /// 헤어라인). 0이면 divider를 안 그린다(숨김). 렌더러가 이 pt를 device px로 환산(× scale_milli/1000, letter-spacing과 동형)해
     /// divider strip(reserved 30 세로·31 가로) 폭에만 쓴다 — 커서 강조선(reserved 2~5)·GPU quad `FocusOwner` border와 **분리**.
@@ -1524,6 +1529,7 @@ pub const Config = struct {
         .window_background_image = Meta{ .key = "window.background-image", .doc = .cfg_window_background_image, .widget = .text, .section = .window, .path_value = true },
         .window_blur = Meta{ .key = "window.blur", .doc = .cfg_window_blur, .range = .{ 0, 100 }, .widget = .number, .section = .window },
         .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = .cfg_window_unfocused_dim, .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
+        .behavior_auto_reload = Meta{ .key = "behavior.auto-reload", .doc = .cfg_behavior_auto_reload, .widget = .toggle, .section = .app },
         .window_quit_after_last_window_closed = Meta{ .key = "window.quit-after-last-window-closed", .doc = .cfg_window_quit_after_last_window_closed, .widget = .toggle, .section = .window },
         .split_divider_thickness = Meta{ .key = "split.divider-thickness", .doc = .cfg_split_divider_thickness, .range = .{ 0.0, 16.0 }, .widget = .number, .section = .window },
         .term = Meta{ .key = "term", .doc = .cfg_term, .widget = .text, .section = .terminal },

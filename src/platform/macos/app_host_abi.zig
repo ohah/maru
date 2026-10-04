@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 193), abi_version);
+    try std.testing.expectEqual(@as(u32, 194), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -522,6 +522,76 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
     const auto_quit = try swiftFunctionBody(source, "    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {");
     try std.testing.expect(std.mem.indexOf(u8, auto_quit, "return false") != null);
     try std.testing.expect(std.mem.indexOf(u8, auto_quit, "return true") == null);
+}
+
+test "AR1 config 자동 reload 감시: 폴링 없이 FSEvents 와 앱 활성화로 알리고, 폴더를 만들지 않으며, 판정은 창마다 Zig 다 (behavior.auto-reload)" {
+    const source = try swiftCodeWithoutComments(std.testing.allocator, @embedFile("MaruAppHost.swift"));
+    defer std.testing.allocator.free(source);
+    // 실행 시 한 번 건다 — smoke 는 사용자 config 를 안 보므로 제외(전역 단축키 등록과 같은 갈래, 바로 다음).
+    const hk_line = "            registerGlobalHotkeys()\n";
+    const hk = std.mem.indexOf(u8, source, hk_line) orelse return error.MissingHotkeyRegistration;
+    const watch = std.mem.indexOf(u8, source, "startConfigFileWatcher()\n") orelse return error.MissingWatcherStart;
+    try std.testing.expect(hk < watch);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.trim(u8, source[hk + hk_line.len .. watch], " \n").len);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "startConfigFileWatcher()\n"));
+    // 건 직후 한 번 판정한다 — 첫 세션이 읽은 뒤부터 건 때까지의 저장은 이벤트가 없다.
+    const starter = try swiftFunctionBody(source, "    private func startConfigFileWatcher() {");
+    const st_start = std.mem.indexOf(u8, starter, "watcher.start(configPath: path)") orelse return error.MissingStart;
+    // 감시 생성 클로저(`{ self?.configFileChanged() }`)가 앞에 있으므로 줄 머리의 호출을 찾는다.
+    const st_check = std.mem.indexOf(u8, starter, "\n        configFileChanged()\n") orelse return error.MissingInitialCheck;
+    try std.testing.expect(st_start < st_check);
+    // 앱이 앞으로 오면 한 번 본다 — 폴링 대신 FSEvents 가 못 보는 경우를 메운다.
+    const active = try swiftFunctionBody(source, "    func applicationDidBecomeActive(_ notification: Notification) {");
+    try std.testing.expect(std.mem.indexOf(u8, active, "configFileWatcher?.revalidate()") != null);
+    const revalidate = try swiftFunctionBody(source, "    func revalidate() {");
+    // 로컬 디스크가 아니면(SMB·NFS·iCloud) 활성화 확인도 안 한다 — 파일 접근이 main 을 몇 초씩 막을 수 있다.
+    try std.testing.expect(std.mem.indexOf(u8, revalidate, "guard !configPath.isEmpty, configIsLocal else { return }") != null);
+    const start_fn = try swiftFunctionBody(source, "    func start(configPath path: String) {");
+    try std.testing.expect(std.mem.indexOf(u8, start_fn, "forKeys: [.volumeIsLocalKey]") != null);
+    const rv_rebuild = std.mem.indexOf(u8, revalidate, "rebuild()") orelse return error.MissingRebuild;
+    const rv_notify = std.mem.indexOf(u8, revalidate, "onChange()") orelse return error.MissingNotify;
+    try std.testing.expect(rv_rebuild < rv_notify);
+    // 폴링하지 않는다 — 감시 클래스에 타이머가 없다.
+    const cls_start = std.mem.indexOf(u8, source, "final class MaruConfigFileWatcher {") orelse return error.MissingWatcherClass;
+    const cls_end = std.mem.indexOfPos(u8, source, cls_start, "\n}\n") orelse return error.MissingWatcherClass;
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source[cls_start..cls_end], "Timer"));
+    // 폴더를 만들지 않는다(지운 폴더를 되살려 뒤따르는 `ln -s` 를 엉뚱한 곳에 만들었다). 홈·`/` 는 FSEvents 로 안 본다.
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source[cls_start..cls_end], "createDirectory"));
+    const rebuild = try swiftFunctionBody(source, "    private func rebuild() {");
+    try std.testing.expect(std.mem.indexOf(u8, rebuild, "guard configIsLocal else { return }") != null);
+    // 넓은 폴더 — `/`·계정 홈·`$HOME`(NSHomeDirectory 는 $HOME 을 안 따른다)은 FSEvents 로 안 본다.
+    try std.testing.expect(std.mem.indexOf(u8, rebuild, "if let envHome = ProcessInfo.processInfo.environment[\"HOME\"], !envHome.isEmpty {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rebuild, "broad.insert(URL(fileURLWithPath: envHome).resolvingSymlinksInPath().path)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rebuild, "return exists && !broad.contains(dir)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rebuild, "let target = link.resolvingSymlinksInPath()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rebuild, "files.insert(\"/private\" + file)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rebuild, "kFSEventStreamCreateFlagFileEvents") != null);
+    // 다시 걸 때 옛 이벤트를 재생하지 않는다(새 폴더 이력 전체가 쏟아진다) — 틈은 직후의 onChange 가 메운다. 0.5s debounce.
+    try std.testing.expect(std.mem.indexOf(u8, rebuild, "            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),\n            0.5,\n") != null);
+    // 그 파일(링크 경로나 실제 경로)이 바뀐 이벤트·폴더 이동·놓친 신호만 알린다. 이름 선필터가 경로 해석보다 앞.
+    const handle = try swiftFunctionBody(source, "    func handle(_ paths: [String], flags: [FSEventStreamEventFlags]) {");
+    const name_gate = std.mem.indexOf(u8, handle, "guard watchedNames.contains((path as NSString).lastPathComponent) else { return false }") orelse return error.MissingNameGate;
+    const touched = std.mem.indexOf(u8, handle, "watchedFiles.contains(url.standardizedFileURL.path) || watchedFiles.contains(url.resolvingSymlinksInPath().path)") orelse return error.MissingMatch;
+    const gate = std.mem.indexOf(u8, handle, "guard coarse || touched else { return }") orelse return error.MissingGate;
+    const notify = std.mem.indexOf(u8, handle, "onChange()") orelse return error.MissingNotify;
+    const rearm = std.mem.lastIndexOf(u8, handle, "rebuild()") orelse return error.MissingRearm;
+    try std.testing.expect(name_gate < touched and touched < gate and gate < notify and notify < rearm);
+    // 판정은 창마다 Zig — 일반 창과 quick 모두에 알리고, 다시 읽은 창이 있을 때만 platform 쪽 재적용.
+    const changed = try swiftFunctionBody(source, "    private func configFileChanged() {");
+    try std.testing.expect(std.mem.indexOf(u8, changed, "var sessions = windows.compactMap(\\.appSession)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, changed, "if let quickSession = quick?.appSession { sessions.append(quickSession) }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, changed, "maru_macos_app_session_config_file_changed(session) != 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, changed, "if reloaded { refreshFilePanelSyntaxTheme() }") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "maru_macos_app_session_config_file_changed("));
+    // write-back 은 Zig 가 만든 바이트를 그대로, 심볼릭 링크면 실제 파일에 쓴다.
+    const persist = try swiftFunctionBody(source, "    func persistSidebarConfig() {");
+    try std.testing.expect(std.mem.indexOf(u8, persist, "let data = Data(bytes: textBytes, count: textLen)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, persist, "let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, persist, "String(decoding:")); // 경로 디코드 하나뿐
+}
+
+test "config_file_changed ABI: 세션이 없으면 아무것도 안 한다 (v194)" {
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_config_file_changed(null));
 }
 
 test "CR0b AppHost termination transcript는 session settlement 뒤 incident ABI를 exact 한 번 호출한다" {
@@ -2943,6 +3013,13 @@ pub export fn maru_macos_app_session_take_mouse_hide(session: ?*AppSession) u32 
 pub export fn maru_macos_app_session_option_as_meta(session: ?*AppSession) u32 {
     const app_session = session orelse return 1;
     return if (app_session.optionAsMeta()) 1 else 0;
+}
+
+// platform 파일 감시가 config 파일(또는 그 폴더)의 변경을 알린다. 다시 읽을지는 Zig 가 판정한다(behavior.auto-reload·
+// 내용 digest). 다시 읽었으면 1 — Swift 는 그때만 열린 편집기 syntax 색 등 platform 쪽 재적용을 한다. 세션 null=0.
+pub export fn maru_macos_app_session_config_file_changed(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.configFileChanged()) 1 else 0;
 }
 
 // 마지막 일반 창을 닫으면 앱도 끝내는가(config `window.quit-after-last-window-closed`). Swift 의 빨간 버튼·창 닫기·

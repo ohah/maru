@@ -54,7 +54,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 | **Workspace** | `workspace.*`, `session.*` | root, tab/split inherit-cwd, `session.keep-alive-after-quit` |
 | **Quick Terminal** | `quick-terminal.*` | height/width/position/screen/auto-hide/chrome/minimal-tabs (라이브 반영 — 매 토글 재조회, config-gui.md §6.10; chrome/minimal-tabs만 세션 재생성) |
 | **Sidebar** | `sidebar.*` | show-branch, show-folder (이미 ⚙ 양방향 — 첫 선례) |
-| **Behavior** | (앱 동작) | 탭/창 닫기 확인, config 자동 reload 토글 |
+| **Behavior** | (앱 동작) | 탭/창 닫기 확인. config 자동 reload 토글(`behavior.auto-reload`)은 **App** 섹션에 있다(`Section` enum 에 behavior 가 없다) |
 
 ## 2. 토대: 양방향 config 반영 (Phase S0)
 
@@ -72,7 +72,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 |---|---|---|---|
 | **S0-1a** | **역파싱 코어** `config.configKeyValues(arena, Config) → []KeyValue`(`src/config/serialize.zig`) — parse의 대칭 역연산. 전 필드를 정규 토큰으로(enum은 명시 매핑 — `commit-only` 등; palette는 non-null만; float은 `{d}` shortest round-trip). **round-trip 대칭 테스트**(`parse(render(configKeyValues(cfg))) == cfg`)가 parse/serialize 누락을 못박는다. | 중간 | ✅ 구현·green(1058/1060). `updateConfigText` 재사용 |
 | **S0-1b** ✅ | **per-key write-back 일반화** — `serialize.updateForKeys(original, config, keys)`가 넘긴 키만 현재값으로 `updateConfigText` 부분 갱신(즉시-저장 GUI 결정에 맞춤 — full-config diff 대신 변경 키만; **override-only by construction**). 사이드바 write-back 경로(`serialize_sidebar_config` ABI export, snake_case 이름은 호환 유지 — `AppSession.serializeConfig`가 래핑)도 이 `updateForKeys`를 쓴다(bool 손코드 제거, byte-identical). | 낮음 | ✅ 머지. dirty 비트마스크·전체 diff는 불필요(즉시-저장은 변경 키만 씀); GUI는 같은 `updateForKeys` 경로 |
-| **S0-2** | config 파일 **자동 감지 reload** — macOS `DispatchSource`/FSEvents watcher(Swift), debounce(0.5~1s), 편집 중 불완전 파일 회피(.tmp→rename 가정), 기존 `reloadConfig` 재사용. `behavior.auto-reload`로 끌 수 있게. | 낮음~중간 | 🔜 Zig는 변경 없음(reload 이미 있음). watcher만 platform(Swift) |
+| **S0-2** ✅ | config 파일 **자동 감지 reload** — 폴링하지 않는다. macOS FSEvents 가 config 파일이 든 폴더(심볼릭 링크면 실제 파일의 폴더도, 폴더는 만들지 않고 홈·`/` 처럼 넓으면 제외, 로컬 디스크가 아니면 아무것도 안 함)를 latency 0.5s(debounce)로 보고, **앱이 앞으로 올 때** 한 번 더 본다(FSEvents 가 못 보는 폴더 링크 재연결·네트워크 드라이브를 메움). 알림만 ABI v194 `maru_macos_app_session_config_file_changed` 로 창마다 넘기고, 다시 읽을지는 Zig `configFileChanged` 가 판정한다 — `behavior.auto-reload`(기본 on)와 **내용 digest**(그 창이 마지막으로 읽거나 쓴 내용)가 다를 때만, 쓰지 않은 세팅 편집이 없을 때만 `reloadConfig`. 되돌릴 수 없는 스크롤백 축소는 사용자가 그 시점을 고른 적용(메뉴 Reload Config·세팅의 스크롤백 변경·전체 리셋)에서만 하고, 그 밖엔 새 Term 부터. reload 는 열린 드롭다운을 닫는다. 기준선은 쓰기가 파일에 닿은 것을 본 뒤에만 옮긴다(실패한 쓰기 뒤 세팅 변경이 되돌아가지 않게). | 낮음~중간 | ✅ 머지 |
 
 > 경계: write-back은 **앱→파일**(GUI 편집 저장), reload는 **파일→앱**(외부 편집 감지). 둘은 직교하며 같은
 > `updateConfigText`/`reloadConfig`를 공유한다. env 등 민감값 직렬화는 [project-rules.md] redaction 기준을

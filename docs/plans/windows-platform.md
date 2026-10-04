@@ -170,3 +170,10 @@ Windows §2m.152는 6개 native 저장 checkpoint와 두 이미지의 12개 실�
 owner/group/DACL·생성 시각·속성·ADS와 재시작 뒤 새 저장 준비/abort를 확인하고 적대적
 검증 5회를 수행했다. 전원 장애·미저장 백업 복원·capability·일반 GUI 저장/닫기/감시와
 물리 IME 완료를 뜻하지 않는다. W8.17은 계속 진행 중이다.
+
+Windows §2m.153은 private native 백업 저장소·공통 record·옛 disk_hash를 유지하는 단일 편집 복원과
+양 OS 기본 경로 정책을 연결한다. 17개 집중 판정과 적대적 검증 5회, 두 실제 process crash 뒤 복원/
+native save 또는 외부 CAS 거절, 실제 창 복원/undo 4개 추가 프레임을 확인했다. Windows runner의
+compiled/passed count 인자도 이제 실제 검사한다. 일반 백업 root/debounce/종료 flush/복원 알림·
+purge와 missing/untitled/remote 복원, interrupted-stage 정리·capability·GUI 저장/닫기/감시·물리 IME는
+계속 남아 있다. W8.17은 진행 중이다.

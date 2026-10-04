@@ -2035,6 +2035,11 @@ pub fn build(b: *std.Build) void {
     const run_save_controller_tests = b.addRunArtifact(save_controller_tests);
     run_save_controller_tests.addArg("--maru-expect-tests=15"); // 2 aggregation blocks and 13 actual native controller tests
     save_controller_step.dependOn(&run_save_controller_tests.step);
+    const backup_store_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor backup"} });
+    const backup_store_step = b.step("test-win32-editor-backup", "Verify private native recovery storage and restored document authority");
+    const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
+    run_backup_store_tests.addArg("--maru-expect-tests=17"); // 2 aggregation blocks + 14 native tests + 1 cross-platform path policy
+    backup_store_step.dependOn(&run_backup_store_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {
         const save_crash_probe = b.addExecutable(.{
@@ -5498,6 +5503,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(edit_command_step);
     test_step.dependOn(document_grant_step);
     test_step.dependOn(save_controller_step);
+    test_step.dependOn(backup_store_step);
     test_step.dependOn(save_crash_step);
     test_step.dependOn(editor_input_step);
     test_step.dependOn(&run_internal_contract_tests.step);
@@ -5587,7 +5593,7 @@ pub fn build(b: *std.Build) void {
     attachPngCodec(b, marker_preview_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다(위 주석)
     marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
-    run_marker_preview_tests.addArg("--maru-expect-tests=107"); // 실측(2026-10-11, main 기준 rebase): 이름에 `context_menu` 가 든 W6c② `session.web_osr_context_menu` 10 + 나머지 97(이 그래프의 이름 없는 블록 23 포함 — 아래 내역은 그 전 것이라 합이 맞지 않는다) · MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
+    run_marker_preview_tests.addArg(if (target.result.os.tag == .windows) "--maru-expect-tests=114" else "--maru-expect-tests=107"); // 실측(2026-10-11, main 기준 rebase): 이름에 `context_menu` 가 든 W6c② `session.web_osr_context_menu` 10 + 나머지 97(이 그래프의 이름 없는 블록 23 포함 — 아래 내역은 그 전 것이라 합이 맞지 않는다) · MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
     b.step("test-marker-preview", "Run the terminal image-marker preview core judges only (MP1 filter)").dependOn(&run_marker_preview_tests.step);
 
     // 색 구성 통지(DECSET 2031 / DSR 996)의 코어 판정자만 — 위 `test-marker-preview` 와 같은 이유(변이 한 개에 전체 test 6 분을 안 쓴다).
@@ -5691,7 +5697,8 @@ pub fn build(b: *std.Build) void {
     run_merge_stage_e2e.addArg("--maru-expect-tests=37");
     // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 git 이 없으면 `SkipZigTest` 로 나간다 — 컴파일 수만
     // 세면 하네스가 조용히 안 서도 초록이다(이 저장소가 가장 나쁘다고 적어 둔 실패 모드).
-    run_merge_stage_e2e.addArg("--maru-expect-passed=37");
+    // The POSIX shell-wrapper fault fixture skips on Windows; eight native Git cases still run.
+    run_merge_stage_e2e.addArg(if (target.result.os.tag == .windows) "--maru-expect-passed=36" else "--maru-expect-passed=37");
     b.step("test-merge-stages-e2e", "Run the merge-stage (S3a) end-to-end judges on a real conflicted repo").dependOn(&run_merge_stage_e2e.step);
     const native_worktree_tests = addProjectTest(b, .{
         .root_module = merge_stage_e2e_tests.root_module,

@@ -69,6 +69,8 @@ const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn _NSGetArgv() *[*:null]?[*:0]u8;
+extern var environ: [*:null]?[*:0]u8;
 
 /// 이 test 프로세스와 **그 자식들**이 사용자의 session-host registry와 workspace를 절대 건드리지 않게 한다.
 ///
@@ -83,7 +85,15 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 ///
 /// inherited roots are untrusted: 부모 셸의 값이 제품 root를 가리킬 수 있으므로 언제나 이 process의
 /// PID root로 덮어쓴다. 같은 이유로 AppKit/Foundation이 workspace checkpoint 위치를 정할 때 보는
-/// `CFFIXED_USER_HOME`도 덮어쓴다. `HOME`까지 바꾸면 PTY·shell fixture의 의미가 달라지므로 건드리지 않는다.
+/// `CFFIXED_USER_HOME`도 덮어쓴다.
+///
+/// **`HOME` 은 실제 사용자 홈일 때만 PID 별 임시 홈(`/tmp/maru-home-<pid>`)으로 바꾼다**(2026-10-04). 제품 자식은 `HOME` 에서 캐시를
+/// 유도한다 — 테스트가 띄운 `maru __session-host` 가 실제 `~/.cache/maru/agent-turn-events/` 에 칸을 만들고 그
+/// 안의 죽은 host 칸을 **지우는 정리까지** 돌았다. 셸은 `~/.bash_history` 를, terminfo 는 `~/.cache/maru/terminfo`
+/// 를 썼다. 예전에는 「PTY·shell fixture 의 의미가 달라진다」며 두었으나, 전체 `zig build test` 를 가짜 `HOME` 으로
+/// 돌려 새로 빨개지는 판정자가 0 개임을 실측했다. 이미 다른 곳을 가리키는 `HOME`(앱 스모크 빌드 스텝의
+/// fixture home)은 그 스텝의 격리이므로 그대로 둔다. 바꿀 때는 이미 설정된 `XDG_*` 도 새 홈 아래로 옮긴다 —
+/// 부모 셸의 `XDG_CACHE_HOME` 이 실제 캐시를 가리키면 `HOME` 만 옮겨서는 소용없다(`reexecWithIsolatedHome`).
 /// 어느 주입이든 실패하면 test process는 시작하지 않는다. 라이브러리의 `builtin.is_test` 기본값은 이
 /// process만 보호하며, 환경을 못 받은 제품 child는 사용자 공용 namespace와 workspace로 돌아가므로 여기서
 /// 계속 실행할 안전한 fallback은 없다.
@@ -99,6 +109,58 @@ fn isolateSessionHostRoot() error{IsolationFailed}!void {
         return error.IsolationFailed;
     if (setenv("CFFIXED_USER_HOME", root.ptr, 1) != 0)
         return error.IsolationFailed;
+    if (homeIsRealUserHome()) try reexecWithIsolatedHome();
+}
+
+/// 실제 홈 대신 PID 별 임시 홈(`/tmp/maru-home-<pid>`)을 세우고 **이 바이너리를 그 환경으로 다시 exec 한다.**
+///
+/// 왜 exec 인가: 시작 뒤 `setenv` 로만 바꾸면 libc 의 `environ` 은 새 값을, std 가 시작 때 붙잡은 envp 조각
+/// (`init.environ` → `testing.environ`·`testing.io_instance`·debug Io)은 **실제 홈**을 본다. 한 프로세스 안에서
+/// 두 홈이 갈려, 실측 2026-10-04 에 app-host-abi 샤드 둘에서 판정자 12 개가 결정적으로 빨갰다 — 같은 러너를
+/// `zig build` 바깥에서 가짜 `HOME` 으로 띄운 실행은 0 개였다. 조각을 사후에 갈아 끼우면 libc 가 다음 `setenv`
+/// 에서 배열을 재할당할 때 그 조각이 해제된 메모리를 가리킨다. exec 는 처음부터 그 환경으로 시작한 것과 같고,
+/// **pid 를 유지**하므로 `/tmp/maru-t<pid>` 와 정리 규칙(`kill -0`)이 그대로다. argv 도 그대로라
+/// `_NSGetArgc` 로 fixture 게이트를 판단하는 판정자들도 영향이 없다.
+///
+/// `XDG_*` 는 **지우지 않고**(macOS libc 의 `unsetenv` 는 배열을 제자리에서 줄여 std 의 조각 훑기를 죽인다 —
+/// `std_environ_view.zig`), 이미 설정된 것만 새 홈 아래로 바꾼다. 없는 것은 새 `HOME` 에서 유도된다.
+/// session root 와 같은 자리는 쓰지 않는다 — root 안에는 session host 의 것만 둔다. 이름은 `maru-<태그>-<pid>`
+/// 꼴이라 `tools/clean-tmp-fixtures.sh` 가 pid 를 읽어 거둔다. exec 된 쪽은 홈이 실제가 아니므로 다시 돌지 않는다.
+fn reexecWithIsolatedHome() error{IsolationFailed}!void {
+    var home_buf: [64]u8 = undefined;
+    const home = std.fmt.bufPrintZ(&home_buf, "/tmp/maru-home-{d}", .{std.c.getpid()}) catch
+        return error.IsolationFailed;
+    // 셸이 `cd ~` 하고 제품이 `~/.cache/maru` 를 만들 수 있게 미리 세운다(있으면 그대로).
+    if (std.c.mkdir(home.ptr, 0o700) != 0 and std.c._errno().* != @intFromEnum(std.c.E.EXIST))
+        return error.IsolationFailed;
+    if (setenv("HOME", home.ptr, 1) != 0)
+        return error.IsolationFailed;
+    const xdg = [_]struct { name: [*:0]const u8, sub: []const u8 }{
+        .{ .name = "XDG_CACHE_HOME", .sub = ".cache" },
+        .{ .name = "XDG_CONFIG_HOME", .sub = ".config" },
+        .{ .name = "XDG_DATA_HOME", .sub = ".local/share" },
+        .{ .name = "XDG_STATE_HOME", .sub = ".local/state" },
+    };
+    for (xdg) |x| {
+        if (getenv(x.name) == null) continue;
+        var buf: [128]u8 = undefined;
+        const value = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ home, x.sub }) catch return error.IsolationFailed;
+        if (setenv(x.name, value.ptr, 1) != 0) return error.IsolationFailed;
+    }
+    var exe_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    var exe_len: u32 = std.fs.max_path_bytes;
+    if (std.c._NSGetExecutablePath(&exe_buf, &exe_len) != 0) return error.IsolationFailed;
+    _ = std.c.execve(@ptrCast(&exe_buf), _NSGetArgv().*, environ);
+    return error.IsolationFailed; // execve 는 성공하면 돌아오지 않는다
+}
+
+/// 지금 `HOME` 이 이 사용자의 실제 홈(OS 사용자 DB)인가. **없으면 아니다** — 명시 환경으로 자기 자신을 다시 띄우는
+/// fixture 자식들이 그렇고, 그때는 제품의 홈 유도가 null 이라 샐 곳이 없다. 사용자 DB 를 못 읽으면 「실제」로 본다.
+fn homeIsRealUserHome() bool {
+    const home = std.mem.span(getenv("HOME") orelse return false);
+    const pw = std.c.getpwuid(std.c.getuid()) orelse return true;
+    const dir = std.mem.span(pw.dir orelse return true);
+    return std.mem.eql(u8, std.mem.trimEnd(u8, home, "/"), std.mem.trimEnd(u8, dir, "/"));
 }
 
 fn optionValue(args: std.process.Args, prefix: []const u8) ?usize {

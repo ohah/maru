@@ -59,6 +59,7 @@ test {
     _ = @import("platform/windows/editor/save_controller.zig");
     _ = @import("platform/windows/editor/file_host.zig");
     _ = @import("platform/windows/editor/directory_watch.zig");
+    _ = @import("platform/windows/editor/file_read_worker.zig");
     _ = @import("platform/windows/editor/backup_store.zig");
     _ = scm_surface;
     _ = agent_surface;
@@ -17209,6 +17210,28 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
     const ops = try a.alloc(maru.chrome.draw.Op, 4096);
     defer a.free(ops);
     const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+    // Exercise the app grant's worker admission while the real window keeps
+    // polling and painting. This does not yet wire notification-driven reload.
+    var file_reader: @import("platform/windows/editor/file_read_worker.zig").Reader = .{};
+    defer file_reader.deinit(io) catch unreachable;
+    _ = try app_files.submitRead(&file_reader, lease);
+    const read_deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    var read_frames: usize = 0;
+    while (true) {
+        for (try host.poll()) |event| if (event == .close_requested) return error.EditorSmokeInterrupted;
+        var read_frame = try buildComposedEditor(a, EditorHost.fromHost(host), &views[0], .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer read_frame.deinit(a);
+        try host.drawFrame(read_frame.cells.items, 0xFF1E2430);
+        read_frames += 1;
+        if (try file_reader.takeResult()) |value| {
+            var result = value;
+            defer result.deinit();
+            if (result != .image or !std.mem.eql(u8, result.image.bytes, original) or !try app_files.acceptsRead(&file_reader, result, lease)) return error.EditorReadWorkerMismatch;
+            break;
+        }
+        if (std.Io.Clock.awake.now(io).nanoseconds >= read_deadline) return error.EditorReadWorkerTimeout;
+    }
+    try stdout.print("editor_read_worker_smoke_ok=true painted_frames={d} current_ticket=true\n", .{read_frames});
     const Fixture = struct { char: ?u16 = null, vk: ?u32 = null, neutral: ?maru.terminal.KeyEvent = null, expected: []const u8 };
     const ctrl = maru.terminal.ModifierSet{ .control = true };
     const ctrl_shift = maru.terminal.ModifierSet{ .control = true, .shift = true };

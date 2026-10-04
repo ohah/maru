@@ -11458,3 +11458,37 @@ fixture에서 파일 선택·X 편집·닫기 취소 후 원본 BOM/CRLF와 백�
 생긴 테스트 프로세스만 강제 종료하고 새 앱에서 같은 파일을 선택해 Xbase와 복원 안내를
 확인했다. 저장 후 닫기는 BOM+Xbase+CRLF를 남기고 앱 종료·백업 삭제까지 확인했다.
 이는 posted window 이벤트 검사이며 물리 키보드/IME 검증은 아니다. 감시 앱 연결도 남아 있다.
+
+### 2m.163 — native 재검증 읽기 작업자와 앱 grant 경계
+
+Windows L4 editor/file_read_worker.zig는 한 Reader당 pending 또는 미소비 결과 한 개만
+허용한다. 선택한 root handle과 counted 상대 이름을 독립 소유하고, 경로 순회·파일 읽기·raw
+hash는 detached 스레드에서 수행한다. 본문은 최대 4 MiB, 이름은 std.fs.max_path_bytes로
+제한한다. 작업자는 Registry나 본문을 빌리지 않고 자체 I/O provider를 스레드에서 소유한다.
+제품 deinit은 참조만 놓으며 마지막 참조가 native handle·이름·미소비 이미지를 정리한다.
+테스트 deinit은 기존 detached_worker_wait의 참조 수명 대기로 allocator 결산 전에 정산한다.
+
+상대 순회로 연 원본의 full identity를 기존 grant와 비교한 뒤 같은 객체를 READ 공유만
+허용해 재연다. 읽기 동안 write/delete 접근을 거절하므로 BOM 포함 raw bytes의 snapshot을
+얻는다. [Microsoft ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile)의
+sharing 계약과 [DuplicateHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)의
+객체 복제 계약을 기반으로 한다. 실제 NTFS에서 native 상대 open 핸들의 재열기와 경쟁
+write/delete 거절을 검사했다. 같은 bytes로 바꾼 다른 file ID는 갱신 기준으로 채택하지 않는다.
+
+결과 ticket은 비재사용 source scope, 문서 slot/generation·epoch·revision·disk_hash를
+담는다. Reader도 비재사용 owner와 요청 sequence를 검사하고 deinit 뒤 옛 결과를 거절한다.
+Book.submitRead/acceptsRead는 현재 view/grant/경로와 pending save를 검사한다. Registry를
+같은 주소에 다시 만들어 나머지 ticket 축이 모두 같아도 옛 scope 결과는 통과하지 않는다.
+읽기 완료만으로 공유 문서·saved hash·disk hash를 바꾸지 않는다.
+
+test-win32-editor-read는 aggregation 2·native 8·pure 1, 총 11개이며 기본 test에 연결된다.
+host gate는 읽기 admission/완료 세 행을 더해 23개(aggregation 2·native 18·pure 3)다.
+각각 Debug/ReleaseFast가 통과했다. 작업자 다섯 변형(identity 무시, write/delete 공유,
+정확한 byte 상한 거절, 옛 sequence 허용, foreign reader 허용)과 Book 다섯 변형(prepared
+읽기 허용, epoch/경로 검사 제거, revision 무시, source scope 무시)이 모두 컴파일 후
+runtime 실패로 검출됐다. 두 소스의 byte 원복과 두 모드의 정상 실행을 확인했다.
+
+실제 Windows 창 fixture는 프레임을 poll/paint하면서 앱 grant의 작업 결과를 받고 raw bytes와
+현재 ticket을 확인한다. 기존 편집·native 저장·복구·닫기 스모크도 함께 실행한다. 이 경로는
+worker/app grant의 연결이며 일반 앱의 directory hint→읽기 예약·결과 적용, clean 최소 edit,
+dirty 선택 UI는 아직 연결 전이다. 전체 외부 감시·비동기 저장 완료로 세지 않는다.

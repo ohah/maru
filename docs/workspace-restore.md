@@ -2,6 +2,14 @@
 
 이 문서는 Maru의 workspace restore가 무엇을 저장하고, 무엇을 저장하지 않는지 정한다.
 
+## 창 0 개 저장
+
+헤더 줄만 있는 저장(`maru.workspace.v2` 한 줄)은 **창 0 개**다. 복원은 이것을 오류가 아니라 「기본 빈 창으로
+시작」으로 읽는다(`restoreWorkspace` 의 count==0). macOS 앱은 `window.quit-after-last-window-closed = false` 로
+마지막 창을 닫고 Dock 에 남은 동안에만 이 모양을 저장한다 — 다음 실행·재열기가 닫은 창을 되살리지 않고 빈 창이
+되도록. 그 밖의 창 0 개(종료 도중·발행 전)는 여전히 캡처 불가다. 복원이 불완전했던 실행은 이 경우에도 아무것도
+쓰지 않는다(아래 읽기 실패 보존 규칙과 같음).
+
 ## 로컬 편집 문서와 뷰
 
 현재 스키마 헤더는 `maru.workspace.v2`다. 저장 경로는 기존 `workspace.v1`과 같은 잠금·atomic 게시 경계를

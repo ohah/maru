@@ -4090,7 +4090,13 @@ pub export fn maru_macos_app_session_workspace_window_count(
     const tp = text_ptr orelse return -1;
     // launch preflight는 throwaway shell 없는 deferred session을 만들지 결정해야 하므로 session 생성 **전**에도 호출한다.
     const parse_allocator = if (session) |app_session| app_session.allocator else std.heap.smp_allocator;
-    var parsed = maru.session.workspace.parse(parse_allocator, tp[0..text_len]) catch return -1;
+    // **실패 이유를 남긴다.** -1 하나만 돌려주면 「왜 복원이 안 되나」가 로그에서 통째로 사라진다 — 2026-10-05
+    // 헤더가 v2 로 바뀐 뒤 v1 저장본이 `BadHeader` 로 거절됐는데 앱 로그엔 래치 줄 하나뿐이라 세션이 전부 사라진
+    // 것처럼 보였다(호스트에는 34 개가 살아 있었다). 오류 이름만 싣는다 — 경로·제목 같은 파일 내용은 찍지 않는다.
+    var parsed = maru.session.workspace.parse(parse_allocator, tp[0..text_len]) catch |err| {
+        std.log.scoped(.app).warn("workspace parse failed: {s} bytes={d}", .{ @errorName(err), text_len });
+        return -1;
+    };
     defer parsed.deinit();
     return @intCast(parsed.workspace.windows.len);
 }

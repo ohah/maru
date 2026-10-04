@@ -16,6 +16,10 @@
 현재 스키마 헤더는 `maru.workspace.v2`다. 저장 경로는 기존 `workspace.v1`과 같은 잠금·atomic 게시 경계를
 유지한다. 출시 전 단일 포맷이므로 v1 헤더를 추측해서 읽거나 자동 변환하지 않으며, 읽기 실패 보존 규칙을 따른다.
 이 문서의 과거 additive/downgrade 설명은 당시 v1 변경 이력이며 v1↔v2 호환 계약이 아니다.
+그래서 v1 저장본은 파싱 실패(`BadHeader`)로 떨어진다: 기본 창으로 시작하고 「checkpoint 보호」 래치가 파일을 그대로
+둔다 — **자동 변환·덮어쓰기는 없으므로 실행마다 빈 창이 된다.** 앱 로그에 `workspace parse failed: <err>`(Zig)와
+`maru: workspace restore skipped — saved workspace did not parse …`(Swift) 두 줄이 남는다. 2026-10-05 실측: 이 두 줄이
+없던 때는 래치 줄 하나뿐이라 host 에 살아 있던 세션 34개가 「사라진」 것처럼 보였다.
 
 창은 `editor-document value="..."` 줄에 문서 index·recovery ID·disk/content hash·절대 path를 담고,
 pane의 `editor-view="..."`가 문서 index와 독립 선택·원문 줄 기준 스크롤·wrap·접힌 머리를 참조한다.
@@ -641,7 +645,7 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 - custom_name은 트리 내 위치(인덱스)로 round-trip한다(cwd/title과 같은 식별).
 - 자동 제목(surface `title`)은 복원 직후 셸이 OSC를 다시 보내기 전까지의 폴백 표시용으로만 저장·소비한다. custom_name이 있으면 표시 규칙상 자동 제목보다 우선한다.
 - **하위 호환**: additive 스칼라 필드는 key-addressed로 하위호환된다(옛 파일이 그 키의 기본값으로 복원 — 폴백 없음).
-  구조 변경은 스키마 버전을 올리거나 통째 폴백+self-heal한다. 현재 unknown trailing line 성공 종료는 legacy 관용성이며
+  구조 변경은 스키마 버전을 올리거나 통째 폴백한다(파일은 보존 — 아래 「checkpoint 보호」, self-heal 없음). 현재 unknown trailing line 성공 종료는 legacy 관용성이며
   새 block/tree/count의 확장점으로 일반화하지 않는다.
 
 ## 직렬화 전략: 스칼라 필드 key-addressed 파싱
@@ -677,7 +681,7 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 
 **범위 밖(하위호환 안 되는 변경).** 새 블록 타입 추가·`tree-node` 인코딩 변경·카운트 의미 변경은 지원 포맷으로 쓰지
 않고 스키마 버전을 올린다(`maru.workspace.v1`→`.v2`). known block 내부에서 실제 parse error가 난 경우에만 통째
-fallback/self-heal한다. unknown top-level trailing line은 현 parser가 early-success하므로 뒤 Window를 조용히 잃을 수
+fallback한다 — 기본 창으로 시작하고 파일은 덮어쓰지 않는다(「checkpoint 보호」, self-heal 없음). unknown top-level trailing line은 현 parser가 early-success하므로 뒤 Window를 조용히 잃을 수
 있고, 이 관용성을 구조 호환성으로 간주하지 않는다. additive 스칼라 필드는 버전을 안 올린다.
 
 **writer.** writer는 required 필드와 각 optional 필드의 canonical emission 규칙(기본/부재면 생략 포함)을

@@ -109,7 +109,7 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 - **exact OS 정리**: `didReceive`는 전달받은 request identifier 하나만 pending·delivered store 양쪽에서 제거한다.
   목록을 열거하거나 `removeAll*`을 쓰지 않는다. 릴리스 검증도 `NotificationExactCleanup` 제품 leaf를 재사용해야 하며,
   별도의 테스트 전용 삭제 정책을 만들지 않는다.
-- **quick 패널**: 알림 대상이 quick 터미널이고 숨김이면 `showQuickTerminalAnimated`로 띄운다(화면 밖에 있는 패널을
+- **quick 패널**: 숨겨진 상태에서도 세션 tick과 알림 drain·셸 종료 처리는 계속한다. Metal 표시만 보일 때 수행하며 숨김 중 generation은 표시 완료로 기록하지 않는다. 알림 대상이 quick 터미널이고 숨김이면 `showQuickTerminalAnimated`로 띄운다(화면 밖에 있는 패널을
   그냥 `makeKeyAndOrderFront`하면 보이지 않는 창이 키를 가져간다). quick은 확정적으로 in-process이며 앱 Quit 때
   runtime과 알림 route가 함께 끝난다. workspace manifest·persistent notification journal·cold-launch attach에는 넣지
   않는다. 앱이 종료된 동안 살아 있는 일반 persistent runtime의 배너 클릭만 `runtime_handle`로 exact normal Term을 연다.

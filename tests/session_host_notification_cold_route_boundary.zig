@@ -54,6 +54,17 @@ test "P4 N3 cold notification response routes only a coherent stable handle" {
     try expectContains(header, "uint32_t maru_macos_app_session_activate_notification_runtime(");
 }
 
+// This source gate locks the UI/session seam; actual hidden OSC delivery is also exercised on macOS.
+test "hidden quick keeps session progress while deferring Metal presentation" {
+    const source = try readSource(std.testing.allocator, "src/platform/macos/MaruAppHost.swift");
+    defer std.testing.allocator.free(source);
+    try expectContains(source, "if let quick {\n            explicitSurface = quick");
+    try expectContains(source, "let quickStatus = renderTick(presentMetalFrame: quick.window?.isVisible == true)");
+    try expectContains(source, "if presentMetalFrame && (summary.metal_generation != lastSeenMetalGeneration || metalNeedsRedraw || screenshotDelayPending) {");
+    try expectContains(source, "lastSeenMetalGeneration = summary.metal_generation\n                drawMetalFrame()\n            }\n            drainWebSurfaceTransition()");
+    try expectContains(source, "if tearDownQuickTerminalIfUnprotected(persistentTickFault: true) {\n                    if windows.isEmpty");
+}
+
 fn expectOne(haystack: []const u8, needle: []const u8) !usize {
     try std.testing.expectEqual(@as(usize, 1), count(haystack, needle));
     return std.mem.indexOf(u8, haystack, needle) orelse error.TestExpectedEqual;

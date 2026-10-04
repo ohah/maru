@@ -593,6 +593,29 @@ pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize, last_abs: usize) 
     }
 }
 
+/// 활성 화면의 행 `[first_abs, last_abs]` 가 `delta` 행만큼 옮겨졌다(음수 = 위로) — 그 범위 안의 앵커를 함께 옮긴다.
+/// `drop_outside` 면 옮긴 뒤 범위를 벗어난 앵커(그 행은 스크롤 영역 밖으로 밀려 사라졌다)를 지운다. 범위 밖 앵커는 그대로다.
+/// 스크롤 영역 안의 스크롤(DECSTBM·IL·DL·SU·SD·RI)이 부른다(2026-10-04 — 예전에는 아무것도 안 옮겨 이미지가 다른 줄 위에
+/// 남았다). 지금 화면의 목록만 본다.
+pub fn shiftRegionAnchors(self: *TerminalCore, first_abs: usize, last_abs: usize, delta: isize, drop_outside: bool) void {
+    if (delta == 0 or self.kitty_placements.items.len == 0) return;
+    var i: usize = 0;
+    while (i < self.kitty_placements.items.len) {
+        const p = &self.kitty_placements.items[i];
+        if (p.anchor_row < first_abs or p.anchor_row > last_abs) {
+            i += 1;
+            continue;
+        }
+        const moved: isize = @as(isize, @intCast(p.anchor_row)) + delta;
+        if (drop_outside and (moved < @as(isize, @intCast(first_abs)) or moved > @as(isize, @intCast(last_abs)))) {
+            _ = self.kitty_placements.orderedRemove(i);
+            continue;
+        }
+        p.anchor_row = @intCast(@max(moved, 0));
+        i += 1;
+    }
+}
+
 /// 가장 오래된 n개 행이 빠질 때 placement anchor(abs 행)를 n칸 당긴다(eviction n=1, 하향 트림 n=drop).
 /// 빠진 행 범위 [0, n)에 anchor가 걸린 placement는 제거한다. selection의 shiftSelectionForEviction과 같은 규율.
 pub fn shiftPlacementsForEviction(self: *TerminalCore, n: usize) void {

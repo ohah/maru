@@ -1231,6 +1231,8 @@ pub fn scrollRangeUp(self: *TerminalCore, top: u16, bottom: u16, count: u16, pus
     // (커서가 거기로 이어져 명령 출력 등이 계속된다). 부분 region 스크롤·IL/DL의 빈 행은 .unknown.
     const lf_scroll = push_history and top == 0 and bottom == self.size.rows - 1;
 
+    // 스크롤백에 저장된 줄 수 — 저장될 때마다 화면 줄의 절대 행이 하나씩 커진다(아래 상태줄 보정에 쓴다).
+    var stored_rows: usize = 0;
     if (push_history) {
         var pr: u16 = 0;
         while (pr < n) : (pr += 1) {
@@ -1243,7 +1245,21 @@ pub fn scrollRangeUp(self: *TerminalCore, top: u16, bottom: u16, count: u16, pus
             // 영역 안의 줄이 한 칸씩 올라온다 — 앵커도 따라 옮긴다. 영역 밖(아래 상태줄)은 안 움직이므로 상한을 둔다.
             // 다음 행도 실패하면 그 행이 이제 같은 자리(`sb.count + top`)에 있으므로 같은 인자로 다시 부르면 된다.
             if (!pushed) self.dropLostRowAnchors(self.screen.sb.count + top, self.screen.sb.count + bottom);
+            if (pushed) stored_rows += 1;
         }
+        // 저장된 줄만큼 화면 줄의 절대 행이 커졌다 — 영역 안은 줄이 같이 올라가 앵커가 맞지만, **영역 아래(상태줄 등)는
+        // 움직이지 않았으니** 앵커를 그만큼 늘린다(eviction 으로 당겨졌어도 같은 식이다). 그 앵커들은 지금 [sb.count + bottom + 1
+        // - k, sb.count + rows - 1 - k] 에 있고, 영역 안·스크롤백의 앵커와 겹치지 않는다.
+        if (stored_rows > 0 and bottom + 1 < self.size.rows) {
+            const sb_count = self.screen.sb.count;
+            const lo = (sb_count + bottom + 1) -| stored_rows;
+            const hi = (sb_count + self.size.rows - 1) -| stored_rows;
+            self.shiftRegionAnchors(lo, hi, @intCast(stored_rows), false);
+        }
+    } else {
+        // 저장하지 않는 위쪽 스크롤(위가 0 이 아닌 영역·DL·SU): 영역 안을 n 줄 위로 — 영역 위로 밀려난 줄의 이미지는 사라진다.
+        const sb_count = self.screen.sb.count;
+        self.shiftRegionAnchors(sb_count + top, sb_count + bottom, -@as(isize, n), true);
     }
 
     var row: u16 = top + n;
@@ -1289,6 +1305,8 @@ pub fn scrollRangeDown(self: *TerminalCore, top: u16, bottom: u16, count: u16) v
 
     // 아래로 스크롤(IL/RI)은 항상 활성 영역 안에서 행을 옮기므로 선택 좌표가 어긋난다 — 해제.
     self.invalidateSelection();
+    // 이미지도 영역 안에서 n 줄 아래로 — 바닥으로 밀려난 줄의 이미지는 사라진다(IL·SD·RI).
+    self.shiftRegionAnchors(self.screen.sb.count + top, self.screen.sb.count + bottom, @as(isize, n), true);
 
     var row: u16 = bottom;
     while (row >= top + n) : (row -= 1) {

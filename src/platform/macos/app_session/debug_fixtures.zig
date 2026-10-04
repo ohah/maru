@@ -2223,6 +2223,10 @@ pub fn maybeDebugEditOp(self: *AppSession) void {
 }
 
 pub fn maybeDebugOpenPalette(self: *AppSession) void {
+    if (std.c.getenv("MARU_EDITOR_RECOVERY_CAPTURE")) |value| {
+        maybeDebugRecovery(self, std.mem.span(value));
+        return;
+    }
     if (std.c.getenv("MARU_OPEN_COMMAND_PALETTE") == null) return;
     // 심볼 피커 훅과 같은 이유로 **한 번만 열지 않는다** — 나중에 뜨는 알림이 배타적으로 닫는다.
     if (self.chrome_host.palette.open) return;
@@ -2236,6 +2240,33 @@ pub fn maybeDebugOpenPalette(self: *AppSession) void {
         self.recomputePalette();
     }
     self.metal_dirty = true;
+}
+
+/// 목록과 선택 후 문서의 실제 Metal 출력을 촬영한다. 원본은 반드시 격리된 fixture다.
+fn maybeDebugRecovery(self: *AppSession, mode: []const u8) void {
+    if (std.c.getenv("MARU_SCREENSHOT") == null or std.c.getenv("MARU_EDITOR_BACKUP_ROOT") == null) return;
+    if (!std.mem.eql(u8, mode, "list") and !std.mem.eql(u8, mode, "open")) return;
+    if (self.debug_recovery_capture_stage == 0) {
+        self.debug_recovery_capture_stage = 1;
+        self.dispatchAppAction(.recover_editor_backups);
+        return;
+    }
+    if (self.debug_recovery_capture_stage != 1) return;
+    const catalog = self.editor_recovery.catalog orelse return;
+    if (!catalog.complete or catalog.failure != null) return;
+    self.debug_recovery_capture_stage = 2;
+    std.debug.print("recovery_capture candidates={d}\n", .{catalog.candidates.items.len});
+    if (std.mem.eql(u8, mode, "open")) {
+        if (std.c.getenv("MARU_EDITOR_RECOVERY_CAPTURE_QUERY")) |query| {
+            self.chrome_host.recovery_picker.input.query.appendSlice(self.allocator, std.mem.span(query)) catch return;
+            @import("editor/recovery.zig").recompute(self);
+        }
+        @import("editor/recovery.zig").accept(self);
+        self.chrome_host.notice.dismiss();
+        const term = @import("pane.zig").activePane(self).activeTerm();
+        const opened = term.rt.editorDocument().opened orelse return;
+        std.debug.print("recovery_capture opened=true dirty={any} bytes={d}\n", .{ opened.isDirty(), opened.file.content.len });
+    }
 }
 
 pub fn maybeDebugOpenSymbolPicker(self: *AppSession) void {

@@ -51,6 +51,7 @@ macOS 로컬 shell 1개 surface
 - [공유 편집기 복원 포맷과 구현 계획](plans/editor-shared-restore.md) — 문서 연결과 뷰 상태, v1 선택적 필드와 v2 비교, downgrade와 복원 실패 경계
 - [복구 ID 예약 후보 실험](plans/editor-recovery-reservation.md) — 실제 owner lease·atomic writer, 실패/중단/정리 경계와 비용 비교; 제품 연결 전 비교 이력
 - [로컬 문서 ID 백업과 공유 뷰 복원](plans/editor-recovery-integration.md) — 제품 writer·checkpoint 연결 및 헤드리스 재실행 검증; GUI 공개 gate는 별도
+- [워크스페이스에서 빠진 편집기 백업 복구](plans/editor-backup-discovery.md) — ID/기존 백업 열거, 선택한 사본의 별도 문서 복구와 실패 보존
 - [비교 뷰 좌우 독립 찾기 상자](plans/editor-diff-find.md)
 - [에디터 전체 잔여 작업 점검](plans/editor-remaining-work.md) — 기능·제품 연결·미결 계약·검증 한계의 현재 코드 대조
 - [에디터 Surface 단계 계획](plans/editor-surface.md)

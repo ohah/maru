@@ -20,6 +20,8 @@ pub const Action = union(enum) {
     // 이름을 묻는다(U2). 기본 키바인딩 **⌘⌥N**(형제가 전부 갖고 있다 — ⌘T=new_term·⌘⇧T=new_tab·
     // ⌘⌥T=new_web_tab). 메뉴 File·커맨드 팔릿에도 노출.
     new_editor_tab,
+    /// 워크스페이스에서 빠진 미저장 백업의 목록을 연다.
+    recover_editor_backups,
     // Markdown/HTML 파일 선택창을 열어 현재 창의 전역 도크에 연다. 기본 Cmd+O(macOS Open 관례), 커맨드 팔릿·메뉴와
     // 사용자 keybind에서도 같은 액션을 쓴다. 파일 선택/경로 I/O는 Swift, 종류·도크 라우팅 정책은 Zig가 소유한다.
     open_file_panel,
@@ -299,6 +301,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "new_term")) return .new_term;
     if (std.mem.eql(u8, value, "new_web_tab")) return .new_web_tab;
     if (std.mem.eql(u8, value, "new_editor_tab")) return .new_editor_tab;
+    if (std.mem.eql(u8, value, "recover_editor_backups")) return .recover_editor_backups;
     if (std.mem.eql(u8, value, "open_file_panel")) return .open_file_panel;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
     if (std.mem.eql(u8, value, "toggle_file_panel_focus")) return .toggle_file_panel_focus;

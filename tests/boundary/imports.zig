@@ -13012,9 +13012,9 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     // **신원이 바뀌는 둘은 옛 신원을 먼저 뜬다** — 새 이름으로는 옛 파일을 지울 수 없다.
     try std.testing.expectEqual(@as(usize, 2), countOfB(save, "editor_backup_ops.identity(term)"));
 
-    // ⑵ **편집 통지와 만기 검사는 각각 한 자리다** — 통지가 둘이면 시계가 갈리고, tick 이 없으면
-    //    백업은 종료에만 생긴다(크래시에 무용 — §3.10 이 debounce 를 요구한 이유).
-    try std.testing.expectEqual(@as(usize, 1), countOfB(editor, "editor_backup_ops.noteEdit(self, term)"));
+    // ⑵ 편집 게시와 별도 문서 복구가 같은 noteEdit 시계를 예약한다. 복구 본문은 초기 상태여서
+    //    편집 연산을 거치지 않는다. 두 호출의 효과는 U4와 discovery 제품 판정자가 실제 파일로 잰다.
+    try std.testing.expectEqual(@as(usize, 2), countOfB(editor, "editor_backup_ops.noteEdit(self, term)"));
     try std.testing.expectEqual(@as(usize, 1), countOfB(session, "editor_backup_ops.tick(self)"));
 
     // ⑶ **수락된 닫기가 지운다 — 이름으로, 닫힌 뒤에.** 신원 문자열은 Term 이 소유하므로 teardown 뒤에
@@ -13090,9 +13090,9 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "pub fn drainRevivals("));
     try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "orderedRemove(0)"));
     // **되살린 문서는 새 이름 없는 문서다** — 옛 신원을 다시 세우지 않는다(그 신원은 지금 못 세운다).
-    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "editor_ops.openUntitledInActivePane(self)"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "editor_ops.openRecoveredSource(self, &source.?)"));
     try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "editorDocument().remote = "));
-    // **알리고 소비한다** — 조용히 되살리면 「왜 이 탭이 생겼지」가 되고, 안 지우면 매 실행마다 또 생긴다.
+    // 복구 결과를 알리되 원본은 재백업·저장·명시적 버리기 성공 전까지 보존한다.
     try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "showNoticeKey(.editor_backup_revived)"));
 
     // ⑾ **신원을 다시 확인한다 — 레코드를 읽는 «두 자리 모두»**(복원과 되살리기). 이름이 해시라 충돌하면

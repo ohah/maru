@@ -1157,7 +1157,8 @@ fn osrOpenNewTab(self: *AppSession, opener: u64) bool {
                 const request = web_osr.takeNewTab(opener) orelse return false;
                 const visible = tab_index == self.app_window.active_tab and pane == pane_ops.activePane(self) and pane.active_term == index;
                 insertNewTab(self, pane, index, request, visible) catch {
-                    if (request.adopt != 0) web_osr.abandonPopup(self.allocator, request.adopt); // 붙이지 못한 팝업은 닫는다(W6f②)
+                    // 붙이지 못한 팝업은 닫는다(W6f②) — Term 을 만들었다 지웠으면 `destroyTerm` 이 이미 닫았다(두 번 보내지 않게).
+                    if (request.adopt != 0 and web_osr.owns(request.adopt)) web_osr.abandonPopup(self.allocator, request.adopt);
                     self.allocator.free(request.url);
                 };
                 return true;
@@ -1180,9 +1181,9 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
                 if (term.surfaceId() != surface_id) continue;
                 if (tab_ops.tabDragTransaction(self, pane) != null) return web_osr.markPageClosed(surface_id);
                 // 그 pane 의 유일한 탭이면 닫지 않는다 — 빈 pane·워크스페이스 닫기·창 닫기로 번진다(마지막 창이면 앱 종료, W6f② 적대
-                // 검증: 해제된 surface 에 써서 죽었다). 페이지의 `window.close` 가 사용자 확인 없이 창을 닫게 두지 않는다. 탭은 남고
-                // 브라우저는 닫혔다(사용자가 닫는다).
-                if (pane.terms.items.len == 1) return;
+                // 검증: 해제된 surface 에 써서 죽었다). 페이지의 `window.close` 가 사용자 확인 없이 창을 닫게 두지 않는다. 탭은 빈 보통 탭으로
+                // 남는다(사용자가 닫는다).
+                if (pane.terms.items.len == 1) return web_osr.revivePageClosed(self.allocator, surface_id);
                 term_ops.closeTermAt(self, tab_index, pane, index);
                 self.workspaceChanged(.topology);
                 self.metal_dirty = true;

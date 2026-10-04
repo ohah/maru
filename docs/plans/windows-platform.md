@@ -386,3 +386,8 @@ Book은 cancel·capability·raw CAS·소비와 실패 소유권을 보장하며 
 예약하고 초기 lease를 정리한다. host 77개 Debug/ReleaseFast와 Book/앱 각각 다섯 compiled
 runtime 변형 검출이 통과했다. 실앱 Save-close·readonly 입력 거절·큰 파일 읽기 중 닫기의
 전체 bytes/정상 종료를 확인했다. 게시 CPU와 복구 I/O, 물리 입력/IME 및 전체 잔여 범위는 남아 있다.
+
+§2m.185: 초기 worker가 독립 EditableFile의 본문 버퍼/줄 인덱스를 준비하고 Book이 검증 뒤
+재생성 없이 등록한다. worker 11·grant 19·host 78개 Debug/ReleaseFast와 다섯 compiled
+runtime 변형 검출, 새 실앱의 exact BOM/CRLF Save-close가 통과했다. 게시 시 hash/본문
+대조와 view/syntax CPU, 복구 I/O 및 전체 잔여 Windows 범위는 계속 진행한다.

@@ -10998,3 +10998,35 @@ source 지문 생략·image 지문 생략의 다섯 변이를 검출했다. 쓰�
 
 일반 GUI 저장은 활성화하지 않았다. capability·crash 복구·실패 타이밍 전체·일반 키보드/IME 입력·
 dirty-close·외부 감시와 편집→디스크 저장→재열기 실앱 연결은 계속 진행 대상이다.
+
+### 2m.147 읽기 전용 파일의 키보드 커서·선택·복사 연결 (2026-10-04)
+
+일반 파일 뷰의 `applyKey`를 앱 키 라우팅에 연결했다. 좌우·Ctrl+좌우·Home/End·Ctrl+Home/End,
+Shift 선택 확장, Ctrl+A/C를 받으며 release와 Alt 조합은 이동시키지 않는다.
+기존 Win32 번역이 Ctrl+Shift 일부를 command+shift로 표현하므로 control/command를 함께 받는다.
+modal/search/dock 우선순위는 유지하고 파일 뷰의 미지원 키와 오류도 셸로 넘기지 않는다.
+
+L2 `view_navigation`은 뷰별 selection 배열을 소유한다. 좌우는 기존 중립 grapheme 분절을 사용하고,
+CRLF를 한 번에 넘는다. 역방향 선택은 고정 끝을 유지하며 일반 좌우는 먼저 선택을 접는다.
+Home은 기존 smart-home 규칙을 재사용한다. 커서의 줄 추종에 쓰는 viewport 높이는 frame의
+같은 `sideProps` 기하에서 얻는다. 픽셀 caret 위치는 frame의 byte-offset API가 계산한다.
+
+Windows selection projection은 재사용 버퍼를 문서 행 번호로 제공한다. 기존 fixture의
+viewport-relative 선택 행 전달도 문서 행으로 고쳤다. 이전 viewport의 선택과 이전 caret 행은
+buffer 재할당 전에 지워서 OOM 뒤 dangling slice가 남지 않는다. 선택 전에는 행 버퍼를 만들지 않는다.
+여러 커서의 빈 선택은 같은 줄을 한 번 복사하고, 선택 복사는 원본 CRLF bytes를 보존한다.
+
+`test-editor-navigation`은 aggregation 포함 26개(행동 5개), `test-win32-editor-input`은 8개
+(행동 5개)다. NFD/emoji, CRLF, 역방향 anchor, 병합/뷰 독립성, 모든 복사/투영 할당 실패,
+스크롤 후 행 대응을 검증한다. 실제 창 fixture는 WM_KEYDOWN 6개를 제품 `applyKey`와 같은
+paint 경로에 보내 caret과 scrolled selection을 7프레임 표현하고 body/revision/dirty 불변을 검사했다.
+기존 변경/undo fixture 60프레임도 유지했다. 수정키는 중립 이벤트 판정이며 물리 수정키 검증으로 세지 않는다.
+전체 앱의 modal/dock 라우팅과 OS clipboard roundtrip을 이 fixture가 증명한다고 주장하지 않는다.
+
+scalar 오른쪽 이동·CRLF 분리·anchor 손실·viewport 행 오인·실제 창 키 누락의 다섯 변이를
+각각 runtime 실패로 검출하고 byte 단위 원복 후 정상 판정을 다시 실행했다.
+
+일반 문서는 계속 읽기 전용이다. 쓰기/IME/undo와 GUI safe-save, dirty-close, 외부 감시,
+edit→disk→reopen 전체 앱 판정이 남아 있다. 위아래/마우스 선택·가로 caret 추종·랩 토글도
+남아 있으며, 긴 단일 행에서 backward grapheme 탐색 비용과 문서 행 projection 메모리 예산은
+후속 검증 대상이다. W8.17 전체 완료로 세지 않는다.

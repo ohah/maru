@@ -4296,6 +4296,11 @@ const ActiveView = union(enum) { terminal: usize, file: usize };
 
 /// 연 파일 하나. **텍스트를 우리가 소유한다** — `lines` 의 슬라이스가 그 안을 가리킨다.
 const editor_document = @import("platform/windows/editor/document.zig");
+
+test "Windows editor input aggregation" {
+    std.testing.refAllDecls(editor_document.input);
+    std.testing.refAllDecls(@import("platform/windows/editor/selection_projection.zig"));
+}
 const OpenFile = editor_document.OpenFile;
 const OpenOutcome = editor_document.OpenOutcome;
 const openFileFor = editor_document.openFileFor;
@@ -4365,8 +4370,11 @@ fn buildComposedEditor(
     };
     // **구문 색을 여기서 만든다.** 보이는 창만 계산한다 — 문서가 커도 프레임마다 드는 값이 창에 묶인다.
     const line_colors = editorLineColors(allocator, file, file.first_line, @as(usize, grid.rows) + 1);
+    const state = file.documents.get(file.document) orelse return error.StaleDocument;
+    const opened = &(state.opened orelse return error.NoDocument);
+    try file.selection_paint.build(allocator, &opened.file, &file.navigation, file.first_line, @as(usize, grid.rows) + 1);
 
-    return buildEditorFrame(
+    const built = try buildEditorFrame(
         allocator,
         host,
         file.first_line,
@@ -4398,9 +4406,18 @@ fn buildComposedEditor(
         // **0 이면 안 준 것과 같다** — 중립은 `null` 을 "아직 안 셌다" 로 읽어 막대를 안 세운다.
         if (file.max_cols == 0) null else file.max_cols,
         null,
-        .{ .line_starts = file.line_starts, .rows = sel_rows, .buf = sel_buf, .spans = sel_spans },
+        .{
+            .line_starts = file.line_starts,
+            .rows = sel_rows,
+            .buf = sel_buf,
+            .spans = sel_spans,
+            .selection_marks = file.selection_paint.mark_rows.items,
+            .carets = file.selection_paint.caret_rows.items,
+        },
         line_colors,
     );
+    file.navigation_rows = @max(1, built.navigation_rows);
+    return built;
 }
 
 /// 줄 슬라이스가 **문서 어디에 앉아 있는가**. 그 슬라이스는 `text` 안을 가리키므로 포인터 차이가
@@ -10039,6 +10056,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
                 if (active_view == .file) {
                     keys_while_file += 1;
+                    const file_view = &open_files.items[active_view.file];
+                    const maybe_copy = file_view.applyKey(allocator, key_ev) catch |err| {
+                        try stderr.print("  warning: editor input failed({s})\n", .{@errorName(err)});
+                        continue;
+                    };
+                    if (maybe_copy) |text| {
+                        defer allocator.free(text);
+                        win32_clipboard.write(allocator, window.hwnd, text) catch |err| {
+                            try stderr.print("  warning: editor clipboard failed({s})\n", .{@errorName(err)});
+                            clipboard_errors += 1;
+                            continue;
+                        };
+                        copies += 1;
+                        copy_bytes += text.len;
+                    }
                     continue;
                 }
                 // **복사가 여기서 붙는다.** §2j 가 `isCopyChord` 를 만들어 두고 호출자를 못 붙인 것은
@@ -16133,6 +16165,7 @@ const EditorBuilt = struct {
     ops_text: usize,
     ops_fill: usize,
     ops_dropped: usize,
+    navigation_rows: u16 = 1,
 
     pub fn deinit(self: *@This(), a: std.mem.Allocator) void {
         self.cells.deinit(a);
@@ -16404,20 +16437,30 @@ fn buildEditorFrame(
     // 행 → 문서 줄 대응은 **여기서** 푼다(랩·접힘이 없으므로 순차다). 그것이 축을 정하는
     // 일이고, 그 파일 머리말이 호출자 몫이라고 적어 둔 자리다.
     var sel_marks: ?[]const []const editor_view.frame.Mark = null;
-    if (sel) |sr| {
+    var document_marks: ?[][]const editor_view.frame.Mark = null;
+    defer if (document_marks) |rows| a.free(rows);
+    if (@hasField(@TypeOf(ss), "selection_marks")) {
+        sel_marks = ss.selection_marks;
+    } else if (sel) |sr| {
         const n = @min(ss.rows.len, ls.len -| first_line);
         for (0..n) |i| {
             const li = first_line + i;
             ss.spans[i] = .{ .start = ss.line_starts[li], .end = ss.line_starts[li] + ls[li].len };
         }
         editor_view.selection_marks.build(sr.lo, sr.hi, ss.spans[0..n], ss.rows[0..n], ss.buf[0..n]);
-        sel_marks = ss.rows[0..n];
+        // frame indexes marks by document line, not viewport-relative row.
+        const rows = try a.alloc([]const editor_view.frame.Mark, ls.len);
+        document_marks = rows;
+        @memset(rows, &.{});
+        @memcpy(rows[@min(first_line, ls.len)..][0..n], ss.rows[0..n]);
+        sel_marks = rows;
     }
 
     const side: editor_view.diff_frame.Side = .{
         .lines = ls,
         .total_lines = ls.len,
         .selection_marks = sel_marks,
+        .carets = if (@hasField(@TypeOf(ss), "carets")) ss.carets else null,
         .line_colors = line_colors,
         // 가로 스크롤은 **쪽마다**다(그 필드 doc: 공유하면 반대쪽이 엉뚱한 곳을 본다).
         .first_col = first_col,
@@ -16465,6 +16508,7 @@ fn buildEditorFrame(
         .ops_text = n_text,
         .ops_fill = n_fill,
         .ops_dropped = n_drop,
+        .navigation_rows = editor_view.diff_frame.sideProps(side, shared, inn, bg).visible_rows,
     };
     errdefer built.deinit(a);
 
@@ -16545,7 +16589,88 @@ fn runWin32EditorDocumentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Wri
         });
     }
     try stdout.print("editor_document_smoke_ok=true frames_presented={d}\n", .{frames});
+    try runEditorNavigationFrames(allocator, &host, stdout);
     try stdout.flush();
+}
+
+/// Real WM_KEYDOWN -> neutral event -> the product view's applyKey -> the
+/// product frame builder. This fixture cannot write any user file.
+fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = a };
+    defer documents.deinit() catch unreachable;
+    const bytes = "x\u{1100}\u{1161}\u{11a8}\u{1f468}\u{200d}\u{1f469}z\r\nsecond\r\nthird";
+    var prepared: editor.document_state.State = .{};
+    defer prepared.clear(a);
+    const file = try editor.edit_doc.EditableFile.init(a, bytes, true);
+    prepared.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content) };
+    prepared.path = try a.dupe(u8, "navigation-smoke.txt");
+    const lease = try documents.create(&prepared, a);
+    defer _ = documents.release(lease) catch unreachable;
+    var view = try editor_document.attach(&documents, lease, a);
+    defer view.deinit(a);
+    const ops = try a.alloc(maru.chrome.draw.Op, 4096);
+    defer a.free(ops);
+    const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+    const stops = [_]usize{ 1, 10, 21, 22, 24, 22 };
+    var events_seen: usize = 0;
+    var frames: usize = 0;
+    _ = try host.poll();
+    for (stops, 0..) |stop, step| {
+        host.window.postSyntheticVirtualKey(if (step == stops.len - 1) 0x25 else 0x27);
+        var received = false;
+        for (0..120) |_| {
+            for (try host.poll()) |event| switch (event) {
+                .key => |key| {
+                    if (try view.applyKey(a, key)) |copied| a.free(copied);
+                    events_seen += 1;
+                    received = true;
+                },
+                .close_requested => return error.EditorSmokeInterrupted,
+                else => {},
+            };
+            if (received) break;
+            try host.drawFrame(&.{}, 0xFF1E2430);
+        }
+        if (!received or view.navigation.items.items.len != 1 or view.navigation.items.items[0].focus != stop)
+            return error.EditorWindowNavigationMismatch;
+        var built = try buildComposedEditor(a, EditorHost.fromHost(host), &view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+        var carets: usize = 0;
+        for (ops[0..built.written.ops]) |op| switch (op) {
+            .quad => |q| if (q.fill_role == .cursor) {
+                carets += 1;
+            },
+            else => {},
+        };
+        if (carets != 1) return error.EditorCaretPaintMissing;
+        try host.drawFrame(built.cells.items, 0xFF1E2430);
+        frames += 1;
+    }
+    // Modified chords are tested as neutral events: PostMessage does not
+    // change GetKeyState. Do not misreport them as physical modifier tests.
+    _ = try view.applyKey(a, .{ .key = .{ .char = 'a' }, .modifiers = .{ .control = true } });
+    view.first_line = 1;
+    var selected = try buildComposedEditor(a, EditorHost.fromHost(host), &view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+    defer selected.deinit(a);
+    if (view.selection_paint.mark_rows.items[0].len != 0 or view.selection_paint.mark_rows.items[1].len != 1 or view.selection_paint.mark_rows.items[1][0].len != 6)
+        return error.EditorScrolledSelectionMismatch;
+    var selection_quads: usize = 0;
+    for (ops[0..selected.written.ops]) |op| switch (op) {
+        .quad => |q| if (q.fill_role == .selection) {
+            selection_quads += 1;
+        },
+        else => {},
+    };
+    if (selection_quads != 2) return error.EditorSelectionPaintMissing;
+    const copied = (try view.applyKey(a, .{ .key = .{ .char = 'c' }, .modifiers = .{ .control = true } })) orelse return error.EditorCopyMissing;
+    defer a.free(copied);
+    const state = documents.get(lease).?;
+    if (!std.mem.eql(u8, copied, bytes) or !std.mem.eql(u8, state.opened.?.file.content, bytes) or state.opened.?.file.revision != 0 or state.opened.?.isDirty())
+        return error.EditorReadonlyNavigationMutated;
+    try host.drawFrame(selected.cells.items, 0xFF1E2430);
+    frames += 1;
+    try stdout.print("editor_navigation_smoke_ok=true window_keys={d} frames_presented={d} readonly_revision=0\n", .{ events_seen, frames });
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.

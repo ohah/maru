@@ -2,6 +2,8 @@
 const std = @import("std");
 const maru = @import("maru");
 const ts = @import("syntax");
+pub const input = @import("input.zig");
+const selection_projection = @import("selection_projection.zig");
 
 pub const OpenFile = struct {
     /// View data borrows the app-lifetime document lease; body ownership stays in L2.
@@ -28,17 +30,36 @@ pub const OpenFile = struct {
     hmax_col: u16 = 0,
     /// Vertical range comes from the painted frame, including horizontal-bar height.
     vmax_line: usize = 0,
+    navigation: maru.session.editor.view_navigation.View = .{},
+    selection_paint: selection_projection.Projection = .{},
+    navigation_rows: usize = 1,
 
-    /// 이 문서의 구문 파서. **없으면 무색이다** — grammar 가 번들에 없거나 파서를 못 세운 경우이고,
-    /// 그것은 결함이 아니라 계약이다(`native-editor-visual-mapping.md` §5).
+    /// Syntax remains a view cache, independent of selection/navigation.
     syntax: ?ts.Provider = null,
-    /// 질의 결과(문서 byte 축)와 그것을 chrome 낱말로 옮긴 재료. 프레임마다 다시 채우되
-    /// **저장소는 재사용한다**.
     syntax_spans: std.ArrayList(ts.Span) = .empty,
     color_spans: std.ArrayList(maru.chrome.components.editor_view.syntax_colors.ByteSpan) = .empty,
     color_lines: std.ArrayList(maru.chrome.components.editor_view.syntax_colors.LineBounds) = .empty,
-    /// 색 계산의 저장소 — **규칙과 함께 중립이 갖는다**(§2m.112).
     colors: maru.chrome.components.editor_view.syntax_colors.Scratch = .{},
+
+    /// A file owns every key, including unsupported edit keys. Returning null
+    /// means no clipboard write; it never means the event may reach the shell.
+    pub fn applyKey(self: *OpenFile, a: std.mem.Allocator, event: maru.terminal.KeyEvent) !?[]u8 {
+        const state = self.documents.get(self.document) orelse return error.StaleDocument;
+        const opened = &(state.opened orelse return error.NoDocument);
+        switch (input.action(event)) {
+            .ignored => {},
+            .copy => return try input.copy(a, &opened.file, &self.navigation),
+            .move => |command| {
+                try self.navigation.move(a, &opened.file, command, event.modifiers.shift);
+                const selected = self.navigation.items.items[self.navigation.primary];
+                const line = opened.file.lines.lineAt(selected.focus);
+                if (line < self.first_line) self.first_line = line;
+                if (line -| self.first_line >= self.navigation_rows)
+                    self.first_line = line -| (self.navigation_rows -| 1);
+            },
+        }
+        return null;
+    }
 
     /// Sidebar names may be read before painting refreshes the body projection.
     pub fn name(self: *const OpenFile) []const u8 {
@@ -92,6 +113,8 @@ pub const OpenFile = struct {
     }
 
     pub fn deinit(self: *OpenFile, allocator: std.mem.Allocator) void {
+        self.navigation.deinit(allocator);
+        self.selection_paint.deinit(allocator);
         if (self.syntax) |*p| p.deinit();
         self.syntax_spans.deinit(allocator);
         self.color_spans.deinit(allocator);

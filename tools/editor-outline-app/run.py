@@ -33,7 +33,8 @@ def main():
              "src/platform/macos/app_session/editor/outline.zig", "src/platform/macos/MaruAppHost.swift",
              "src/platform/macos/app_session/debug_fixtures.zig", "src/platform/macos/maru_metal_renderer.m",
              "src/platform/macos/app_session/editor/outline/render.zig", "src/session/editor/outline.zig",
-             "src/chrome/components/outline/build.zig", "src/chrome/components/outline/view.zig")
+             "src/chrome/components/outline/build.zig", "src/chrome/components/outline/view.zig",
+             "src/platform/macos/app_session/accessibility.zig", "src/chrome/components/outline/types.zig")
     print(root, flush=True)
     if args.app:
         app = args.app.resolve()
@@ -98,16 +99,17 @@ def main():
             child.wait()
             raise
     transcript = (root / "app.log").read_text()
-    if code != 0 or "EDITOR_OUTLINE_FINISH passed=true" not in transcript or document.read_bytes() != original:
+    if (code != 0 or "EDITOR_OUTLINE_FINISH passed=true" not in transcript or
+            "EDITOR_OUTLINE_CANCEL passed=true caret=0 history=0" not in transcript or document.read_bytes() != original):
         raise RuntimeError("Product verification failed; inspect app.log")
-    expected = ("before", "outline", "navigated", "collapsed", "edited", "split", "shared-edit", "original-view", "bottom-scrolled", "empty")
+    expected = ("before", "outline", "cancelled-drag", "navigated", "collapsed", "edited", "split", "shared-edit", "original-view", "bottom-scrolled", "empty")
     for label in expected:
         ppm = artifacts / (label + ".ppm")
         if not ppm.exists() or ppm.stat().st_size < 1000:
             raise RuntimeError(f"Missing product capture: {label}")
         subprocess.run(["sips", "-s", "format", "png", str(ppm), "--out", str(ppm.with_suffix(".png"))],
                        check=True, stdout=subprocess.DEVNULL, timeout=30)
-    report = dict(scope="Real AppKit mouse events, product commands, text input, shared split, product Metal readback",
+    report = dict(scope="Real AppKit mouse events including drag cancellation, product commands, text input, shared split, product Metal readback",
         limits="No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
         product_passed=True, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")

@@ -5055,11 +5055,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }), .filters = &.{".test.outline"} });
     const run_outline_pure = b.addRunArtifact(outline_pure_tests);
-    run_outline_pure.addArg("--maru-expect-tests=7");
+    run_outline_pure.addArg("--maru-expect-tests=9");
     const outline_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.OUTLINE"} });
     const run_outline_host = b.addRunArtifact(outline_host_tests);
     run_outline_host.setCwd(b.path("."));
-    run_outline_host.addArg("--maru-expect-tests=14");
+    run_outline_host.addArg("--maru-expect-tests=20");
     const outline_step = b.step("test-editor-outline", "Run outline model, component and active editor lifetime judges");
     outline_step.dependOn(&run_outline_pure.step);
     outline_step.dependOn(&run_outline_host.step);

@@ -60,7 +60,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             .paint = .{ .background = if (row.active) .tab_active_bg else .surface_bg, .shadow = .none, .border_widths_px = .{ 0, 0, 0, 0 }, .corner_radii_px = .{ 0, 0, 0, 0 } },
             .cursor = if (row.enabled) .press else .arrow,
             .align_items = .start,
-            .semantics = .{ .role = if (row.enabled) .tree_item else .text, .label = row.label, .enabled = row.enabled, .selected = row.active, .expanded = if (row.expandable) row.expanded else null, .level = @as(u32, row.depth) + 1 },
+            .semantics = .{ .role = if (row.enabled) .tree_item else .text, .label = row.label, .enabled = row.enabled, .selected = row.active, .expanded = if (row.expandable) row.expanded else null, .level = row.depth +| 1 },
         }, buffers.nodes[props.rows.len + index .. props.rows.len + index + 1]);
     }
     const list_h = @as(u32, @intCast(@min(props.rows.len, std.math.maxInt(u32)))) *| m.row_h;

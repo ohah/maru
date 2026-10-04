@@ -106,6 +106,16 @@ pub const Snapshot = struct {
         entries: []const chrome.ui.tree.RectEntry,
         generation: u64,
     ) void {
+        self.rebuildChecked(allocator, entries, generation) catch {};
+    }
+
+    /// 입력 표와 함께 발행하는 소비자는 실패를 받아 동작도 거둔다. 임시 저장소는 오류 반환 때 해제한다.
+    pub fn rebuildChecked(
+        self: *Snapshot,
+        allocator: std.mem.Allocator,
+        entries: []const chrome.ui.tree.RectEntry,
+        generation: u64,
+    ) error{OutOfMemory}!void {
         var elements: std.ArrayList(Element) = .empty;
         errdefer elements.deinit(allocator);
         var strings: std.ArrayList(u8) = .empty;
@@ -114,9 +124,9 @@ pub const Snapshot = struct {
         for (entries) |entry| {
             const semantics = entry.semantics orelse continue;
             const label_offset = strings.items.len;
-            strings.appendSlice(allocator, semantics.label) catch return;
+            try strings.appendSlice(allocator, semantics.label);
             const value_offset = strings.items.len;
-            strings.appendSlice(allocator, semantics.value) catch return;
+            try strings.appendSlice(allocator, semantics.value);
 
             var flags: u32 = 0;
             if (semantics.enabled) flags |= flag_enabled;
@@ -127,7 +137,7 @@ pub const Snapshot = struct {
                 if (expanded) flags |= flag_expanded;
             }
 
-            elements.append(allocator, .{
+            try elements.append(allocator, .{
                 .x = entry.rect.x,
                 .y = entry.rect.y,
                 .width = entry.rect.width,
@@ -142,7 +152,7 @@ pub const Snapshot = struct {
                 .label_len = @intCast(semantics.label.len),
                 .value_offset = @intCast(value_offset),
                 .value_len = @intCast(semantics.value.len),
-            }) catch return;
+            });
         }
 
         self.elements.deinit(allocator);

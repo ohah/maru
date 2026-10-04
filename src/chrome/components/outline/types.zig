@@ -6,7 +6,7 @@ const typography = @import("../../ui/typography.zig");
 pub const Row = struct {
     label: []const u8,
     model_index: usize = 0,
-    depth: u16 = 0,
+    depth: u32 = 0,
     expandable: bool = false,
     expanded: bool = true,
     active: bool = false,
@@ -40,7 +40,7 @@ pub const Metrics = struct {
     }
 
     /// 깊은 계층도 좁은 도크에서 이름이 사라지지 않게 들여쓰기를 먼저 줄인다.
-    pub fn left(self: Metrics, width: f32, depth: u16) f32 {
+    pub fn left(self: Metrics, width: f32, depth: u32) f32 {
         const inset: f32 = @floatFromInt(self.inset);
         const wanted: f32 = @floatFromInt(@as(u32, depth) *| self.indent);
         return @min(inset + wanted, @max(0, width - @as(f32, @floatFromInt(self.disclosure)) - inset - 40));

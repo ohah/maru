@@ -97,7 +97,7 @@ fn store(self: *AppSession, prepared: Prepared) !void {
     state.published_content = prepared.content;
     state.published_offset = state.scroll.offset_y_px;
     state.published_scale = prepared.props.scale_milli;
-    state.accessibility.rebuild(self.allocator, state.entries.items, state.generation);
+    try state.accessibility.rebuildChecked(self.allocator, state.entries.items, state.generation);
 }
 
 /// 그리기 없는 입력·판정자도 제품과 같은 기하를 발행한다. 실패하면 옛 입력을 거둔다.

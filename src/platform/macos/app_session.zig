@@ -10408,6 +10408,7 @@ pub const AppSession = struct {
     /// 모달을 열기 전 단일-오버레이 불변식(collectDraws·inputFocus가 한 번에 하나 가정)을 한 곳에서 강제한다. confirm/보류
     /// 닫기를 건드리지 않으므로, requestClose가 pending_close를 세운 뒤 showConfirm을 불러도 보류가 보존된다.
     pub fn dismissMessageOverlays(self: *AppSession) void {
+        outline_ops.cancelPointer(self); // 새 오버레이가 가져갈 입력에 이전 행 누름을 넘기지 않는다.
         self.chrome_host.notice.dismiss();
         self.chrome_host.find.hide();
         find_ops.clearAllFindMatches(self); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일. 목록은 둘이다)
@@ -14647,6 +14648,8 @@ pub const AppSession = struct {
         // 게이트가 없어 중/우클릭 down도 같은 슬롯 판정을 타는데, 그쪽은 제스처를 취소하지 않으므로 preview가
         // 여전히 화면에 있다 — 캡처를 primary로 좁히면 그 버튼들에서만 슬롯이 model 인덱스로 오독돼 ✕가 다른
         // 터미널을 닫는다(1차 리뷰가 닫은 결함이 버튼 축으로 되살아난다).
+        // 모달이 up을 소비하거나 다른 곳에서 새 누름이 시작되면 아웃라인의 이전 클릭은 끝난다.
+        if ((kind == 1 and button == 0) or self.anyModalOverlayOpen() or self.chrome_host.notice.open) outline_ops.cancelPointer(self);
         var shown_tab_pane: ?*Pane = null;
         if (kind == 1) {
             if (self.pointerGestureIs(.terminal_tab)) shown_tab_pane = self.pointer_gesture_owner.terminal_tab.pane;
@@ -14855,7 +14858,7 @@ pub const AppSession = struct {
         {
             if (self.editor_outline.interaction.capture != null or layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).dock)) {
                 outline_ops.pointer(self, if (kind == 2) .move else .up, x_px, y_px);
-                if (kind == 3) return;
+                return; // 누름이 시작된 도크가 이동 이벤트도 소비한다.
             }
         }
         if (dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and

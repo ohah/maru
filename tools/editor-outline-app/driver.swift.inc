@@ -2,23 +2,29 @@
 @_silgen_name("maru_editor_outline_probe") private func editorOutlineProbe(_ stage: UInt32) -> Int32
 @_silgen_name("maru_editor_outline_action") private func editorOutlineAction(_ stage: UInt32)
 @_silgen_name("maru_editor_outline_coordinate") private func editorOutlineCoordinate(_ index: UInt32, _ disclosure: Bool, _ axis: UInt32) -> Double
+@_silgen_name("maru_editor_outline_cancel_probe") private func editorOutlineCancelProbe() -> Bool
 @MainActor private enum EditorOutlineRun {
     static var stage: UInt32 = 0
     static var next = 0.0
 }
 extension MaruAppHostController {
-    private func editorOutlineClick(_ index: UInt32, disclosure: Bool = false) -> Bool {
+    private func editorOutlineClick(_ index: UInt32, disclosure: Bool = false, releaseOutside: Bool = false) -> Bool {
         guard let surface = primary, let window = surface.window, let view = surface.view else { return false }
         let scale = archiveSmokeRenderScale(window)
         let x = editorOutlineCoordinate(index, disclosure, 0) / scale
         let y = editorOutlineCoordinate(index, disclosure, 1) / scale
         guard x >= 0, y >= 0 else { return false }
         let point = view.convert(NSPoint(x: x, y: view.bounds.height - y), to: nil)
-        for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+        let outside = view.convert(NSPoint(x: 1, y: view.bounds.height - 1), to: nil)
+        let events: [NSEvent.EventType] = releaseOutside ? [.leftMouseDown, .leftMouseDragged, .leftMouseUp] : [.leftMouseDown, .leftMouseUp]
+        for type in events {
+            let location = releaseOutside && type != .leftMouseDown ? outside : point
+            guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else { return false }
-            if type == .leftMouseDown { view.mouseDown(with: event) } else { view.mouseUp(with: event) }
+                context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) else { return false }
+            if type == .leftMouseDown { view.mouseDown(with: event) }
+            else if type == .leftMouseDragged { view.mouseDragged(with: event) }
+            else { view.mouseUp(with: event) }
         }
         return true
     }
@@ -50,6 +56,8 @@ extension MaruAppHostController {
         guard editorOutlineCapture(labels[Int(stage)]) else { finish(false); return }
         switch stage {
         case 1:
+            guard editorOutlineClick(2, releaseOutside: true), editorOutlineCancelProbe(),
+                  editorOutlineCapture("cancelled-drag") else { finish(false); return }
             guard editorOutlineClick(2) else { finish(false); return }
         case 2:
             guard editorOutlineClick(0, disclosure: true) else { finish(false); return }

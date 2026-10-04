@@ -30,6 +30,7 @@ const tooltip_check = @import("tooltip_check.zig");
 const contextmenu_check = @import("contextmenu_check.zig");
 const drag_check = @import("drag_check.zig");
 const newtab_check = @import("newtab_check.zig");
+const popupadopt_check = @import("popupadopt_check.zig");
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -86,6 +87,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         dragChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--popupadopt")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        popupAdoptChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--newtab")) {
@@ -161,6 +170,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     contextMenuChecks(host_path, profile_root);
     dragChecks(host_path, profile_root);
     newTabChecks(host_path, profile_root);
+    popupAdoptChecks(host_path, profile_root);
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
 
     // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
@@ -347,6 +357,14 @@ fn dragChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var profile_buf: [1024]u8 = undefined;
     const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/m", .{profile_root}) catch return report(false, "drag", "프로필 경로가 길다", .{});
     drag_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "drag", "{s}", .{@errorName(err)});
+}
+
+/// 팝업 이어 받기 판정(W6f①) — 프로필은 `<뿌리>/o`.
+fn popupAdoptChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "popupadopt", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/o", .{profile_root}) catch return report(false, "popupadopt", "프로필 경로가 길다", .{});
+    popupadopt_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "popupadopt", "{s}", .{@errorName(err)});
 }
 
 /// 새 탭 판정(W6e) — 프로필은 `<뿌리>/n`.

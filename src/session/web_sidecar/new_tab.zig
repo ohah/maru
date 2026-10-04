@@ -46,6 +46,12 @@ pub fn urlAllowed(url: []const u8) bool {
     return true;
 }
 
+/// 이어 받는 팝업(W6f)이 처음 갈 수 있는 주소 — 새 탭 주소(`urlAllowed`)에 더해 빈 팝업(`about:blank` — `window.open()` 뒤
+/// `document.write` 로 채운다, 착수 전 실측: 이어지면 된다). CEF 는 빈 주소·`javascript:` 를 `about:blank` 로 준다(W6e 실측).
+pub fn popupUrlAllowed(url: []const u8) bool {
+    return urlAllowed(url) or std.mem.eql(u8, url, "about:blank");
+}
+
 /// 새 탭을 끼울 자리(pane 의 탭 순서). `last_child` 는 같은 탭이 이어 연 마지막 뒤 탭의 자리(없으면 null) — 그것이 연 탭
 /// 오른쪽에 있을 때만 따른다.
 pub fn insertIndex(opener: usize, last_child: ?usize) usize {
@@ -140,6 +146,12 @@ test "a drop's own navigation matches what was dropped — decoded file paths, a
     try std.testing.expect(!dropMatches("https://a.example/x", false, "https://a.example/x/z"));
     try std.testing.expect(dropMatches("javascript:alert(1)", false, "about:blank#blocked"));
     try std.testing.expect(!dropMatches("javascript:alert(1)", false, "javascript:alert(1)x"));
+}
+
+test "an adopted popup may also start blank; other local or script addresses still do not open" {
+    try std.testing.expect(popupUrlAllowed("about:blank"));
+    try std.testing.expect(popupUrlAllowed("https://accounts.example/o/oauth2"));
+    for ([_][]const u8{ "", "about:srcdoc", "about:blank#x", "data:text/html,hi", "file:///etc/hosts", "javascript:void(0)", "maru-app://x" }) |url| try std.testing.expect(!popupUrlAllowed(url));
 }
 
 test "a new tab goes right of its opener, after the tabs that opener already opened" {

@@ -5,6 +5,8 @@
 //!   /size         제목을 `w=<innerWidth>` 로, 크기가 바뀔 때마다 다시
 //!   /cookie?v=N   제목을 `cookie=[<document.cookie>]` 로 한 뒤 쿠키 `maru_judge=N` 을 한 시간짜리로 심는다
 //!   /popup        `window.open` 을 부른 뒤 제목을 `popup-tried` 로
+//!   /pa           팝업 이어 받기 판정(W6f①) — 팝업·이름 창·닫기·빈 팝업·10 번 단추, `/pa-popup` 은 원래 페이지에 `postMessage` 하고
+//!                 온 화면 단추로 또 연다(`popupadopt_check.zig`)
 //!   /newtab       새 탭 판정(W6e) — `_blank`·보통·`mailto:` 링크와 `window.open` 단추들(`newtab_check.zig`). `-focus` 는 `_blank`
 //!                 링크에 포커스, `-auto` 는 입력 없이 열기를 시도한다
 //!   /vis          제목을 `vis=<document.visibilityState>` 로, 바뀔 때마다 다시
@@ -210,6 +212,18 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/sel")) return select_page;
     if (std.mem.eql(u8, path, "/tip") or std.mem.eql(u8, path, "/tip2")) return tooltip_page;
     if (std.mem.eql(u8, path, "/cm")) return context_menu_page;
+    // 팝업 이어 받기 판정(W6f①) — 자리는 `popupadopt_check.zig` 와 맞춘다.
+    if (std.mem.eql(u8, path, "/pa")) return "<!doctype html><title>loading</title><style>body{margin:0}button{position:absolute;width:120px;height:30px}</style><body>" ++
+        "<button style='left:0;top:10px' onclick=\"window.w=window.open('/pa-popup','pp')\">op</button>" ++
+        "<button style='left:140px;top:10px' onclick=\"window.nm=window.open('/title?t=pa-n1','nm');setTimeout(function(){var b=window.open('/title?t=pa-n2','nm');r('same='+(window.nm===b))},1000)\">nm</button>" ++
+        "<button style='left:280px;top:10px' onclick=\"window.w.close();setTimeout(function(){r('afterclose='+window.w.closed)},1500)\">cl</button>" ++
+        "<button style='left:420px;top:10px' onclick=\"var x=window.open('','_blank');if(x){x.document.write('<title>written</title>');r('wtitle='+x.document.title)}\">bw</button>" ++
+        "<button style='left:0;top:60px' onclick=\"for(var i=0;i<10;i++)window.open('/pa-popup?'+i)\">m10</button>" ++
+        "<script>function r(s){document.title+=' '+s}addEventListener('message',function(e){r('msg='+e.data)});onload=function(){document.title='pa ready'}</script>";
+    // 이어 받은 팝업 — 원래 페이지에 알리고, 온 화면 단추로 또 연다(중첩).
+    if (std.mem.eql(u8, path, "/pa-popup")) return "<!doctype html><title>loading</title><style>body{margin:0}button{position:absolute;left:0;top:0;width:100%;height:100%}</style><body>" ++
+        "<button onclick=\"window.open('/title?t=pa-nested')\">nest</button>" ++
+        "<script>if(window.opener)window.opener.postMessage('from-popup','*');document.title='pa-popup opener='+(!!window.opener)</script>";
     if (std.mem.eql(u8, path, "/newtab")) return newtab_page ++ "<script>onload=function(){document.title='nt-ready'}</script>";
     if (std.mem.eql(u8, path, "/newtab-focus")) return newtab_page ++ "<script>onload=function(){document.getElementById('ab').focus();document.title='nt-focused'}</script>";
     // 입력 없이 연다 — `window.open`(Chromium 이 막는다), 만든 ⌘ 클릭(제스처 0 으로 sidecar 에 온다 — 착수 전 실측), `click()`.

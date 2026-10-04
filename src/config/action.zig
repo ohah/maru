@@ -52,6 +52,12 @@ pub const Action = union(enum) {
     // 방향 이름은 분할선(divider)의 방향이 아니라 '나란히 놓이는 축'을 따른다 — 단일 출처: docs/tabs-splits-layout.md.
     split_horizontal,
     split_vertical,
+    // 같은 로컬 문서를 보는 새 편집기 뷰다. 내용·Undo는 공유하고 뷰 상태는 복사 뒤 독립이다.
+    // 지원 범위 밖이면 셸을 만들지 않고 거절한다(docs/native-editor-layering.md §2.4a).
+    split_editor_right,
+    split_editor_left,
+    split_editor_down,
+    split_editor_up,
     // split 탭에서 포커스를 방향으로 옮긴다(키보드 pane 이동). 방향 반평면 + 정렬로 인접 panel을 고른다.
     focus_pane_left,
     focus_pane_right,
@@ -282,6 +288,10 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "next_tab")) return .next_tab;
     if (std.mem.eql(u8, value, "split_horizontal")) return .split_horizontal;
     if (std.mem.eql(u8, value, "split_vertical")) return .split_vertical;
+    if (std.mem.eql(u8, value, "split_editor_right")) return .split_editor_right;
+    if (std.mem.eql(u8, value, "split_editor_left")) return .split_editor_left;
+    if (std.mem.eql(u8, value, "split_editor_down")) return .split_editor_down;
+    if (std.mem.eql(u8, value, "split_editor_up")) return .split_editor_up;
     if (std.mem.eql(u8, value, "focus_pane_left")) return .focus_pane_left;
     if (std.mem.eql(u8, value, "focus_pane_right")) return .focus_pane_right;
     if (std.mem.eql(u8, value, "focus_pane_up")) return .focus_pane_up;

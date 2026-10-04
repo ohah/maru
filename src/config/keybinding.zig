@@ -263,6 +263,8 @@ pub const EditorContextBinding = struct {
 };
 
 pub const editor_context_bindings = [_]EditorContextBinding{
+    // 승인된 공유 뷰 UX의 기본키다(레이어 배치 §2.4a). 전역에 넣으면 다른 입력의 키를 가로챈다.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '\\' } }, .action = .split_editor_right, .needs_editable = true },
     // 랩은 **뷰 속성**이라 비교 뷰에서도 뜻이 있다 — `toggleWrap` 이 `kind` 만 보고 비교를 안 거절한다.
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .{ .char = 'Z' } }, .action = .toggle_editor_wrap, .needs_editable = false }, // Opt+Z
     // 다음/이전 충돌 구간(S5). 기능키가 이 컨텍스트에 처음 들어왔다 — 근거는 key-input-and-shortcuts.md 「편집기 Term 컨텍스트」.
@@ -1228,6 +1230,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
     // 이 판정자를 고쳐야 하고, 고치는 사람은 그 절에 근거를 적게 된다.
     const Exception = struct { key: KeyName, action: action_mod.Action };
     const allowed = [_]Exception{
+        .{ .key = .{ .char = '\\' }, .action = .split_editor_right }, // ⌘\ — 승인된 공유 뷰 UX(레이어 배치 §2.4a), ⇧⌘\ 괄호 이동과 구별
         .{ .key = .{ .char = '.' }, .action = .quick_fix }, // ⌘. — VS Code editor.action.quickFix(§8.2h); 전역 표에 `.` chord 없음
         .{ .key = .{ .char = 'D' }, .action = .add_next_occurrence }, // ⌘D — native-editor-ui.md §9.1 확정
         .{ .key = .arrow_up, .action = .add_cursor_above }, // ⌥⌘↑ — §3.2b, focus_pane_up 에서 가져옴

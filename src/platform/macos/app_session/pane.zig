@@ -1041,11 +1041,13 @@ pub fn newTermInActivePane(self: *AppSession) !void {
 
 /// 공유 편집기 분할은 셸을 만들지 않는다. 문서 참조·검색·트리 노드를
 /// 모두 준비한 뒤 한 번 게시해야 OOM에서 기존 레이아웃과 포커스를 보존한다.
-/// 사용자 명령 연결은 복원 gate를 통과한 뒤 별도로 노출한다.
+/// 메뉴·팔레트·키 입력의 공유 분할 명령도 같은 경로를 사용한다.
 pub fn splitSharedEditorPane(self: *AppSession, direction: maru.session.SplitDirection, before: bool) !*Term {
+    if (self.tabs.items.len == 0) return error.UnsupportedSharedDocument;
     const tab = tab_ops.activeTab(self);
     const active = tab.activePane();
     const source = tab.activeTerm();
+    if (!editor_ops.canShareView(self, source)) return error.UnsupportedSharedDocument;
     if (!self.tryCommitComposition()) return error.CompositionPending;
     var prepared = try editor_ops.prepareSharedView(self, source);
     errdefer prepared.deinit(self.allocator);

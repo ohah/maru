@@ -1,0 +1,21 @@
+{
+  "command": [
+    "mise",
+    "exec",
+    "--",
+    "zig",
+    "build",
+    "test-editor-shared-split",
+    "-j2"
+  ],
+  "before": {
+    "log": "/tmp/maru-shared-split-before.log",
+    "sha256": "99b04d838f248839bbc317c56fc3c27ce7e49fac225e4dd8134fc6642bd2a763",
+    "runtime_failures": [
+      "2/14 app_session.editor.mod.test.shared editor split 공개 명령은 네 방향으로 같은 문서의 뷰를 만든다...FAIL (TestUnexpectedResult)",
+      "3/14 app_session.editor.mod.test.shared editor split 기본 키는 편집기에서만 실행되고 메뉴 표시는 사용자 설정을 따른다...FAIL (TestUnexpectedResult)",
+      "4/14 app_session.editor.mod.test.shared editor split 지원 밖 문서의 공개 명령은 조합도 정산하지 않는다...FAIL (TestUnexpectedResult)"
+    ]
+  },
+  "scope": "공개 명령 구현 전 새 회귀 판정자의 런타임 실패. 컴파일 오류를 실패 증거로 세지 않는다."
+}

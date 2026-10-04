@@ -11137,6 +11137,15 @@ pub const AppSession = struct {
             // 트리/탭을 원복하므로 활성 panel 하나가 그대로 남는다.
             .split_horizontal => pane_ops.splitActivePane(self, .horizontal) catch {},
             .split_vertical => pane_ops.splitActivePane(self, .vertical) catch {},
+            .split_editor_right, .split_editor_left, .split_editor_down, .split_editor_up => {
+                if (self.tabsBlocked()) return;
+                const direction: maru.session.SplitDirection = switch (action) {
+                    .split_editor_right, .split_editor_left => .horizontal,
+                    else => .vertical,
+                };
+                const before = action == .split_editor_left or action == .split_editor_up;
+                _ = pane_ops.splitSharedEditorPane(self, direction, before) catch {};
+            },
             // 키보드 pane 이동(Cmd+Option+화살표). split이 없거나 그 방향에 panel이 없으면 무동작.
             .focus_pane_left => pane_ops.focusPaneInDirection(self, .left),
             .focus_pane_right => pane_ops.focusPaneInDirection(self, .right),
@@ -66386,14 +66395,13 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     session.chrome_host.settings.section = input_idx;
 
     // **교차 섹션** 검색 "split"(현재 섹션=input이지만 쿼리가 있으면 전 섹션) → workspace.split-inherit-cwd(bool, 키에
-    // "split") + Split Right/Down keybind 2개. enum은 "split" 미매칭(0).
-    // FP16: 도크 group split 액션 2개가 사라져 keybind 매칭은 pane split 2개뿐이다.
+    // "split") + 일반 pane 둘과 편집기 분할 네 방향. enum은 "split" 미매칭(0).
     session.chrome_host.settings.startSearch();
     for ("split") |c| session.chrome_host.settings.appendSearchCp(c);
     const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     try std.testing.expectEqual(@as(usize, 0), cf.enums.len); // "split" 미매칭
     try std.testing.expect(cf.bools.len >= 1); // 교차 섹션: workspace.split-inherit-cwd(다른 섹션) 매칭
-    try std.testing.expectEqual(@as(usize, 2), cf.keybind_entries.len); // pane split 2개
+    try std.testing.expectEqual(@as(usize, 6), cf.keybind_entries.len);
     for (cf.keybind_entries) |e| try std.testing.expect(std.ascii.indexOfIgnoreCase(e.title, "split") != null);
 
     // keybindRowStart는 앞선 schema 행(여기선 split bool 등) 다음. 그 행 녹음→캡처가 **필터된 첫 keybind 엔트리**(Split Right)를

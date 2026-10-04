@@ -78,7 +78,9 @@ def prepare(repo, snapshot):
         '    static const char *const gates[] = {\n        "MARU_SHARED_RESTORE_CAPTURE",'))
     # 기존 실제 두벌식 드라이버를 같은 pane의 탭 대신 좌우 pane에서 실행한다.
     text = replace_once(debug.read_text(), "const peer = editor_ops.openSharedViewInActivePane(self, source) catch return;",
-                        "const peer = pane_ops.splitSharedEditorPane(self, .horizontal, false) catch return;")
+                        'if (!self.runAction("split_editor_right")) return;\n'
+                        '            const peer = pane_ops.activePane(self).activeTerm();\n'
+                        '            if (peer == source or peer.rt.editorDocument() != source.rt.editorDocument()) return;')
     start = text.index("            const pane = pane_ops.activePane(self);", text.index('getenv("MARU_EDITOR_IME_LATE_FOCUS")'))
     end = text.index('            std.debug.print("[IME_FIXTURE]', start)
     text = text[:start] + "            _ = self.activateSurfaceById(source.surfaceId());\n" + text[end:]
@@ -89,7 +91,7 @@ def prepare(repo, snapshot):
     ime.write_text(text)
 
 
-def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, wait_lsp=False):
+def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, wait_lsp=False, split_entry="keyboard"):
     output = root / phase
     output.mkdir()
     env = {k: v for k, v in os.environ.items() if not k.startswith("MARU_")}
@@ -99,6 +101,7 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
         MARU_SESSION_HOST_ROOT=str(root / "host"), MARU_EDITOR_BACKUP_ROOT=str(root / "backups"),
         MARU_EDITOR_RECOVERY_CHECKPOINT_TEST="maru-test-only-v1", MARU_MACOS_APP_SMOKE_MS="45000",
         MARU_SHARED_RESTORE_PHASE="ime" if ime or callbacks else phase, MARU_SHARED_RESTORE_OUTPUT=str(output),
+        MARU_SHARED_RESTORE_SPLIT_ENTRY=split_entry,
         MARU_SHARED_RESTORE_CAPTURE="1", MARU_FT_WINDOW_SIZE="960x600",
         MARU_APP_SUMMARY_PATH=str(output / "summary.txt"))
     if phase == "seed" or ime or callbacks:
@@ -136,6 +139,8 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
     assert code == 0 and "SHARED_RESTORE_ERROR" not in transcript, (phase, code, str(output))
     if not first and not ime and not callbacks:
         assert "SHARED_RESTORE_FINISH success=true" in transcript, str(output)
+    if phase == "seed":
+        assert f"SHARED_SPLIT_ENTRY entry={split_entry} transport=AppKit-local" in transcript, str(output)
     if ime or callbacks:
         assert "failure_count=0\n" in (output / "ime.txt").read_text(), str(output)
         assert document.read_bytes() == ("L가 R나" if ime else "cat cat").encode()
@@ -148,6 +153,10 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
     states = [dict(re.findall(r"(\w+)=(\S+)", line.split("SHARED_RESTORE ", 1)[1]))
               for line in transcript.splitlines() if "SHARED_RESTORE label=" in line]
     result = dict(phase=phase, pid=child.pid, exit_code=code, states=states, images=images)
+    if phase == "seed":
+        result.update(split_entry=split_entry, split_transport="AppKit-local")
+    elif ime or callbacks:
+        result.update(split_entry="split_editor_right", split_transport="public-action")
     (output / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
     return result
 
@@ -159,6 +168,8 @@ def main():
     parser.add_argument("--live-ime", action="store_true")
     parser.add_argument("--only-ime", action="store_true", help="작은/큰 파일 검증을 생략하고 실제 IME와 재시작만 실행")
     parser.add_argument("--callback-ime", action="store_true", help="OS 입력기 대신 실제 NSTextInputClient 콜백만 주입해 재시작 확인")
+    parser.add_argument("--split-entry", choices=("keyboard", "menu", "palette"), default="keyboard",
+                        help="새 뷰를 만드는 실제 AppKit 진입점. 키는 창 로컬 NSEvent이며 OS HID와 구별합니다")
     parser.add_argument("--clangd", type=Path, help="실제 clangd 실행 파일로 C 문서 복원 검사. 서버 시작을 1초 늦춘다")
     args = parser.parse_args()
     if args.clangd and (args.live_ime or args.only_ime or args.callback_ime):
@@ -180,9 +191,12 @@ def main():
         app = snapshot / "zig-out/Maru.app/Contents/MacOS/maru-macos-app"
     source = app.parents[4]
     names = ("src/platform/macos/app_session/editor/mod.zig", "src/platform/macos/app_session/editor/restore.zig",
+             "src/platform/macos/app_session.zig", "src/platform/macos/app_session/pane.zig",
+             "src/config/action.zig", "src/config/keybinding.zig", "src/platform/macos/command_catalog.zig",
              "src/platform/macos/app_session/debug_fixtures.zig", "src/platform/macos/MaruAppHost.swift",
              "src/platform/macos/EditorIMESmokeDriver.swift", "src/platform/macos/maru_metal_renderer.m")
     report = dict(app=str(app), app_sha256=sha(app), runner_sha256=sha(Path(__file__)),
+                  split_entry=args.split_entry,
                   source_sha256={n: sha(source / n) for n in names}, scenarios=[], issues=[],
                   scope="실제 AppKit 프로세스와 제품 workspace/Metal 경로. 초기 상태와 관측기는 소스 사본에만 주입.")
     if args.clangd:
@@ -216,7 +230,7 @@ def main():
         original = document.read_bytes()
         for phase in ("seed", "first", "restore"):
             report["scenarios"].append(dict(name=name, **run(app, root, phase, document,
-                first=phase == "first", wait_lsp=args.clangd is not None)))
+                first=phase == "first", wait_lsp=args.clangd is not None, split_entry=args.split_entry)))
         report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
         assert document.read_bytes() == original
         assert len(list((root / "backups").glob("*.bak"))) == 1

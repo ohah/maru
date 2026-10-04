@@ -2519,16 +2519,22 @@ fn ownsEditorView(self: *AppSession, source: *Term) bool {
     return false;
 }
 
-/// Another ordinary local view of an already-authorized document handle.
-/// Path alias policy and user-facing split commands are separate gates.
+/// 직접 분할 요청은 지원 범위를 먼저 판정한다. AppKit 공통 단축키의 사전 확정과는 별도다.
+pub fn canShareView(self: *AppSession, source: *Term) bool {
+    if (source.kind != .editor or source.rt.editor_diff != null or source.rt.editor_merge != null) return false;
+    const state = source.rt.editorDocument();
+    if (state.remote != null or state.untitled != null or state.path == null or state.opened == null) return false;
+    // 재시작 뒤 transport가 없어도 원격 미러 경로는 기존 읽기 전용 정책으로 구분한다.
+    if (file_panel_ops.remoteViewPathIsReadOnly(state.path.?)) return false;
+    const lease = source.rt.editor_document_lease orelse return false;
+    return lease.owner == self.editor_documents and ownsEditorView(self, source);
+}
+
+/// 같은 창이 이미 소유한 로컬 문서의 뷰를 준비한다. 경로 별칭을 새로 통합하지 않는다.
 pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || error{UnsupportedSharedDocument})!Prepared {
-    if (source.kind != .editor or source.rt.editor_diff != null or source.rt.editor_merge != null or source.rt.editorDocument().remote != null or source.rt.editorDocument().untitled != null or source.rt.editorDocument().path == null) return error.UnsupportedSharedDocument;
-    // Reopen/restore may lack transport state; the existing cache-path policy still
-    // identifies a remote mirror. It cannot join this local-only sharing phase.
-    if (file_panel_ops.remoteViewPathIsReadOnly(source.rt.editorDocument().path.?)) return error.UnsupportedSharedDocument;
-    const source_lease = source.rt.editor_document_lease orelse return error.UnsupportedSharedDocument;
-    if (source_lease.owner != self.editor_documents or !ownsEditorView(self, source)) return error.UnsupportedSharedDocument;
-    const doc = source.rt.editorDocument().opened orelse return error.UnsupportedSharedDocument;
+    if (!canShareView(self, source)) return error.UnsupportedSharedDocument;
+    const source_lease = source.rt.editor_document_lease.?;
+    const doc = source.rt.editorDocument().opened.?;
     const lines = try self.allocator.alloc([]const u8, doc.file.lineCount());
     errdefer self.allocator.free(lines);
     for (lines, 0..) |*line, i| line.* = doc.file.lineText(i) orelse "";
@@ -48203,6 +48209,138 @@ test "shared editor peer fold preparation OOM preserves document selection and s
     }
     try testing.expect(failures >= 4);
     try testing.expect(completed);
+}
+
+test "shared editor split 공개 명령은 네 방향으로 같은 문서의 뷰를 만든다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 메뉴가 쓰는 문자열 진입점부터 판정해야 내부 분할만 구현된 상태를 통과시키지 않는다.
+    const cases = .{
+        .{ "split_editor_right", maru.session.SplitDirection.horizontal, false },
+        .{ "split_editor_left", maru.session.SplitDirection.horizontal, true },
+        .{ "split_editor_down", maru.session.SplitDirection.vertical, false },
+        .{ "split_editor_up", maru.session.SplitDirection.vertical, true },
+    };
+    inline for (cases) |case| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const s = fx.session;
+        const source_pane = pane_ops.activePane(s);
+        fx.term.rt.editor_selection = editor_selection.Selection.at(4);
+        const old_panes = s.tabs.items[s.app_window.active_tab].panes.items.len;
+        try testing.expect(s.runAction(case[0]));
+        const tab = s.tabs.items[s.app_window.active_tab];
+        const peer_pane = pane_ops.activePane(s);
+        const peer = peer_pane.activeTerm();
+        try testing.expectEqual(old_panes + 1, tab.panes.items.len);
+        try testing.expectEqual(case[1], tab.tree.split.direction);
+        try testing.expect(tab.tree.split.a.leaf == if (case[2]) peer_pane else source_pane);
+        try testing.expect(tab.tree.split.b.leaf == if (case[2]) source_pane else peer_pane);
+        try testing.expect(peer != fx.term and peer.kind == .editor);
+        try testing.expect(peer.rt.editorDocument() == fx.term.rt.editorDocument());
+        try testing.expectEqualDeep(fx.term.rt.editor_selection, peer.rt.editor_selection);
+        try testing.expect(peer.rt.editor_view_find_owned and fx.term.rt.editor_view_find_owned);
+    }
+}
+
+test "shared editor split 기본 키는 편집기에서만 실행되고 메뉴 표시는 사용자 설정을 따른다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const terminal = maru.terminal;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const s = fx.session;
+    s.surface_initialized = true;
+    const event: terminal.KeyEvent = .{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true } };
+    try testing.expect(s.editorOwnsChord(event));
+    _ = try s.handleKeyEvent(event);
+    try testing.expectEqual(@as(usize, 2), s.tabs.items[s.app_window.active_tab].panes.items.len);
+    try testing.expect(pane_ops.activePane(s).activeTerm().rt.editorDocument() == fx.term.rt.editorDocument());
+
+    const action = maru.config.parseAction("split_editor_right") orelse return error.NoSplitAction;
+    const chord = try maru.config.KeyChord.parse("Cmd+\\");
+    try testing.expect(command_catalog.chordForAction(.{}, action).?.eql(chord));
+    const unbound = maru.config.KeyBindingResolver{ .unbinds = &.{chord} };
+    try testing.expect(command_catalog.chordForAction(unbound, action) == null);
+    try testing.expect(unbound.resolveEditor(event, false) == .consumed);
+    const rebound = maru.config.KeyBindingResolver{ .app_bindings = &.{.{ .chord = chord, .action = .toggle_editor_wrap }} };
+    try testing.expect(command_catalog.chordForAction(rebound, action) == null);
+    try testing.expectEqual(maru.config.Action.toggle_editor_wrap, rebound.resolveEditor(event, false).app_action);
+    const macro = maru.config.KeyBindingResolver{ .terminal_bindings = &.{.{ .chord = chord, .input = .{ .send_text = "shell" } }} };
+    try testing.expect(command_catalog.chordForAction(macro, action) == null);
+    try testing.expect(macro.resolveEditor(event, false) == .consumed);
+    const custom_chord = try maru.config.KeyChord.parse("Cmd+Alt+9");
+    const custom = maru.config.KeyBindingResolver{ .app_bindings = &.{.{ .chord = custom_chord, .action = action }} };
+    try testing.expect(command_catalog.chordForAction(custom, action).?.eql(custom_chord));
+    var bytes: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    try testing.expect(try (maru.config.KeyBindingResolver{}).resolve(event, &bytes, .{}) != .app_action);
+    try testing.expect((maru.config.KeyBindingResolver{}).resolveEditor(event, true) != .app_action);
+}
+
+test "shared editor split 팔레트 선택은 실행되고 모달과 Quick 창 제한은 지킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const s = fx.session;
+    s.dispatchAppAction(.toggle_command_palette);
+    try s.chrome_host.palette.input.query.appendSlice(s.allocator, "Editor: Split Down");
+    s.recomputePalette();
+    try testing.expectEqual(@as(usize, 1), s.palette_filtered.items.len);
+    // 메뉴 진입은 열린 팔레트를 우회하지 않는다. Enter 선택만 모달을 닫은 뒤 실행한다.
+    try testing.expect(!s.runAction("split_editor_right"));
+    try testing.expectEqual(@as(usize, 1), s.tabs.items[s.app_window.active_tab].panes.items.len);
+    _ = try s.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try testing.expect(!s.chrome_host.palette.open);
+    try testing.expectEqual(@as(usize, 2), s.tabs.items[s.app_window.active_tab].panes.items.len);
+    try testing.expectEqual(maru.session.SplitDirection.vertical, s.tabs.items[s.app_window.active_tab].tree.split.direction);
+    try testing.expect(pane_ops.activePane(s).activeTerm().rt.editorDocument() == fx.term.rt.editorDocument());
+    s.chrome_minimal = true;
+    s.minimal_tabs = false;
+    try testing.expect(s.runAction("split_editor_right"));
+    try testing.expectEqual(@as(usize, 2), s.tabs.items[s.app_window.active_tab].panes.items.len);
+    s.minimal_tabs = true;
+    try testing.expect(s.runAction("split_editor_right"));
+    try testing.expectEqual(@as(usize, 3), s.tabs.items[s.app_window.active_tab].panes.items.len);
+}
+
+test "shared editor split 공개 명령은 비교 병합 원격과 비편집기를 공유하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    inline for (.{ "diff", "merge", "remote", "terminal", "web" }) |kind| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const s = fx.session;
+        const source = fx.term;
+        const old_kind = source.kind;
+        defer source.kind = old_kind;
+        if (comptime std.mem.eql(u8, kind, "diff")) source.rt.editor_diff = .{};
+        if (comptime std.mem.eql(u8, kind, "merge")) source.rt.editor_merge = .{ .request_id = 7 };
+        if (comptime std.mem.eql(u8, kind, "remote")) source.rt.editorDocument().remote = .{
+            .dest = try s.allocator.dupe(u8, "user@host"),
+            .path = try s.allocator.dupe(u8, "/srv/doc.zig"),
+        };
+        if (comptime std.mem.eql(u8, kind, "terminal")) source.kind = .terminal;
+        if (comptime std.mem.eql(u8, kind, "web")) source.kind = .web;
+        try testing.expect(s.runAction("split_editor_right"));
+        try testing.expectEqual(@as(usize, 1), s.tabs.items[s.app_window.active_tab].panes.items.len);
+        try testing.expect(pane_ops.activePane(s).activeTerm() == source);
+        try testing.expectEqual(@as(usize, 1), s.editor_documents.viewCount(source.rt.editor_document_lease.?).?);
+    }
+}
+
+test "shared editor split 지원 밖 문서의 공개 명령은 조합도 정산하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const s = fx.session;
+    const source_pane = pane_ops.activePane(s);
+    fx.term.rt.editorDocument().untitled = .{ .n = 123 };
+    defer fx.term.rt.editorDocument().untitled = null;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(@import("../editor_ime.zig").marked(s, "한", .{ .location = 1, .length = 0 }, null));
+    try testing.expect(s.runAction("split_editor_right"));
+    try testing.expectEqual(@as(usize, 1), s.tabs.items[s.app_window.active_tab].panes.items.len);
+    try testing.expect(pane_ops.activePane(s) == source_pane);
+    try testing.expectEqualStrings("한", fx.term.rt.editor_preedit);
+    try testing.expectEqualStrings("const a = 1;", fx.term.rt.editor_lines[0]);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editorDocument().history.undo_len);
 }
 
 test "shared editor split creates only an editor pane and retains shared Undo after close" {

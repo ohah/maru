@@ -1,8 +1,8 @@
 # 공유 문서와 독립 편집기 뷰 — 설계 제안
 
-상태: VS Code 기준 공유 뷰 UX 승인. 정본·이력·안정 handle·내부 공유 편집·문서 통지·IME 확정 승인·반대 뷰 조합 projection과 뷰별 검색 구현 완료. workspace의 문서/뷰 복원과 ID 백업은 [제품 연결](editor-recovery-integration.md)에 구현됐다. 사용자용 공유 분할 UI는 아직 없으며, 실제 두 pane 재시작에서 지연 접힘 복원 반례가 남아 있다. 실제 한국어 HID의 A→B→A 전환 회귀는 검사했으며 자연적으로 발생한 늦은 OS callback은 관측하지 못했다. 아래 초기 대조와 구현 기록은 작성 당시 main을 각각 명시한다.
+상태: VS Code 기준 공유 뷰 UX 승인. 정본·이력·안정 handle·내부 공유 편집·문서 통지·IME 확정 승인·반대 뷰 조합 projection과 뷰별 검색 구현 완료. workspace의 문서/뷰 복원과 ID 백업은 [제품 연결](editor-recovery-integration.md)에 구현됐다. 실제 두 pane/clangd 재시작과 지연 접힘 복원은 #4125에서 검증했다. 사용자용 메뉴·팔레트·키 연결과 실행 검증은 [공유 분할 명령](editor-shared-split.md)이 소유한다. 실제 한국어 HID의 A→B→A 전환 회귀는 검사했으며 자연적으로 발생한 늦은 OS callback은 관측하지 못했다. 아래 초기 대조와 구현 기록은 작성 당시 main을 각각 명시한다.
 사용자는 설계 정리·단계 분해에 이어 2026-10-01 VS Code 기준 UX 채택을 승인했다.
-목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰의 내부 제품 경로와 별도 뷰별 Metal 캡처를 제공하며, 사용자용 분할 UI는 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
+목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰의 내부 제품 경로와 별도 뷰별 Metal 캡처를 제공하며, 메뉴·팔레트·단축키는 [공유 분할 명령](editor-shared-split.md)에서 연결한다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
 [Surface 문서 identity](../editor-surface.md), [탭·split 배치](../tabs-splits-layout.md)가 소유한다.
 
 ## VS Code 정책 대조
@@ -20,8 +20,8 @@ IME 조합의 모델 반영은 현재 Maru preedit 계약과 달라 표시 목�
 
 일반 텍스트 문서는 `AppRuntime.editor_documents`가 소유하고 `TermRuntime`은 view lease로
 본문·저장 정보·Undo/Redo를 빌린다. 선택·조합·줄 배열과 provider 상태는 아직 뷰별이다.
-단일 뷰 열기/해제는 핸들에 배선했지만 경로별 정본 통합과 두 뷰의 편집 게시·좌표 매핑·IME
-소유자 전환은 아직 구현하지 않았다. 아래 이관 기록에서 중립 골격과 제품 배선 결과를 구분한다.
+단일 뷰 열기/해제와 두 뷰의 편집 게시·좌표 매핑·IME 소유자 전환은 제품에 배선했다.
+경로 별칭의 정본 통합과 창 간 공유는 남아 있다. 아래 이관 기록은 각 단계 당시의 검증 범위를 구분한다.
 첫 split 대상은 기존 일반 네이티브 편집 문서다. 같은 경로를 보더라도 read-only diff의
 base/modified snapshot과 3-way merge의 각 입력은 정본 편집 뷰로 합치지 않는다.
 비교·병합의 결과 문서를 연결할지, 이름 없는 문서·원격 문서의 split을 언제 노출할지는
@@ -186,8 +186,9 @@ codec·host 연결·재시작 검증 전 사용자용 분할 UI는 노출하지 
 
 ## 공유 편집기 pane 연결 내부 경로 — 2026-10-03
 
-상태: 내부 구현. 복원 포맷과 두 pane AppKit 재시작·지연 provider 검증은
-[제품 연결 결과](editor-recovery-integration.md)에 연결했다. 사용자용 action/chord는 다음 단계다.
+상태: 내부 경로 구현. 복원 포맷과 두 pane AppKit 재시작·지연 provider 검증은
+[제품 연결 결과](editor-recovery-integration.md)에 연결했다. 공개 action/chord는
+[공유 분할 명령](editor-shared-split.md)에서 같은 경로를 사용한다.
 
 `pane.splitSharedEditorPane`는 셸 없이 같은 로컬 정본의 새 편집기 pane을 준비한다.
 가로/세로와 앞/뒤 배치에서 문서 참조·검색 슬롯·트리 노드를 모두 준비한 뒤 게시한다.

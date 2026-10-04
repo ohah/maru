@@ -9650,6 +9650,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         view.addItem(catalogMenuItem("split_horizontal", catalog))
         view.addItem(catalogMenuItem("split_vertical", catalog))
         view.addItem(.separator())
+        // 편집기 컨텍스트의 키는 Zig가 해석한다. 메뉴는 클릭만 받아 터미널·사용자 바인딩의 키를 가로채지 않는다.
+        for key in ["split_editor_right", "split_editor_left", "split_editor_down", "split_editor_up"] {
+            view.addItem(actionMenuItem(key, catalog))
+        }
+        view.addItem(.separator())
         view.addItem(catalogMenuItem("focus_pane_left", catalog))
         view.addItem(catalogMenuItem("focus_pane_right", catalog))
         view.addItem(catalogMenuItem("focus_pane_up", catalog))

@@ -11728,3 +11728,24 @@ main Request 해제 뒤 독립 이미지 소유권을 검사한다. aborted/unkn
 
 이 worker의 controller/일반 앱 연결은 이어서 구현한다. 현재 일반 앱의 취소 rollback과
 commit·cleanup은 여전히 main thread이고 native commit 승인 왕복·초기 open 이관도 남아 있다.
+
+### 2m.174 — controller의 비동기 rollback/outcome 소유권
+
+`Controller.abortAsync`·`reconcileAsync`는 고정 주소의 settlement owner를 만든 뒤 native
+attempt와 독립 이미지를 worker로 이동한다. Request는 controller에 남고 settling 동안
+두 번째 준비·commit·직접 abort/reconcile·deinit을 거절한다. 기존 동기 준비 결과는 admission
+전에 native 이미지를 복사한다. admission 실패는 원래 pending 소유권을 유지한다.
+
+`pollSettlement`는 결과 전 즉시 null을 반환한다. 결과의 attempt/image를 다시 보유하고
+unknown이면 문서 uncertainty를 표시하여 재시도와 닫기를 막는다. known native decision
+뒤에만 main-thread ack/abort·정리로 들어간다. 실제 유실 commit은 committed로 정산하며
+rollback으로 표시하지 않는다. controller가 이동해도 worker 주소와 Request 소유권은 유지된다.
+
+controller gate는 28개(aggregation 2·native 26)로 늘었고 Debug/ReleaseFast에서 통과했다.
+새 다섯 테스트는 pending 문서 유지·busy guard, controller 이동, unknown 이미지 보유/실제
+rollback 재시도, 실제 commit의 유실 응답과 admission 할당 prefix를 검사한다. unknown 성공
+오인, committed를 aborted로 표시, 문서 uncertainty 생략 및 rollback/reconcile action 교환의
+다섯 변형을 컴파일 후 runtime에서 검출하고 원본을 복원했다. settlement worker 7개도 두 모드에서 통과했다.
+
+일반 앱 Book/UI는 아직 이 settlement API 연결 전이다. 앱의 취소·reconcile 연결과
+native commit 승인 왕복·cleanup·초기 open 이관 및 나머지 Windows 범위는 이어서 구현한다.

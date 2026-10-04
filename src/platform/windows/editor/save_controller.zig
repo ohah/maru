@@ -7,8 +7,9 @@ const editor = @import("maru").session.editor;
 const grants = @import("document_grant.zig");
 const transaction = @import("transaction.zig");
 const preparation = @import("save_prepare_worker.zig");
+const settlement = @import("save_settle_worker.zig");
 
-pub const Status = enum { idle, preparing, prepared, uncertain, closed };
+pub const Status = enum { idle, preparing, settling, prepared, uncertain, closed };
 pub const PreparationReady = enum { prepared, cancelled };
 pub const Decision = enum { committed, aborted };
 pub const Receipt = struct {
@@ -30,6 +31,10 @@ const Preparation = struct {
     worker: preparation.Worker,
     request: editor.save_request.Request,
     cancelled: bool = false,
+};
+const Settlement = struct {
+    allocator: std.mem.Allocator,
+    worker: settlement.Worker,
 };
 
 // Compile-time native boundary: faults in tests still operate on actual files
@@ -53,6 +58,7 @@ pub const Controller = struct {
     grant: grants.Grant,
     pending: ?Pending = null,
     preparing: ?*Preparation = null,
+    settling: ?*Settlement = null,
     last_receipt: ?Receipt = null,
     closed: bool = false,
 
@@ -67,6 +73,7 @@ pub const Controller = struct {
     pub fn status(self: *const Controller) Status {
         if (self.closed) return .closed;
         if (self.preparing != null) return .preparing;
+        if (self.settling != null) return .settling;
         const pending = self.pending orelse return .idle;
         return if (pending.attempt.transaction.phase == .uncertain) .uncertain else .prepared;
     }
@@ -89,7 +96,7 @@ pub const Controller = struct {
 
     fn startPreparation(self: *Controller, source: editor.document_registry.Lease, limit: usize, observed_hash: ?u64, worker_allocator: std.mem.Allocator) !void {
         if (self.closed) return error.ControllerClosed;
-        if (self.pending != null or self.preparing != null) return error.SaveBusy;
+        if (self.pending != null or self.preparing != null or self.settling != null) return error.SaveBusy;
         var request = if (observed_hash) |hash|
             try editor.save_request.Request.beginOverwrite(self.grant.allocator, self.grant.registry, source, limit, hash)
         else
@@ -111,6 +118,54 @@ pub const Controller = struct {
         // Keep the request and slot until native ownership returns. A cancel
         // request is neither rollback proof nor permission for a second save.
         waiting.cancelled = true;
+    }
+
+    pub fn abortAsync(self: *Controller) !void {
+        try self.startSettlement(.rollback, std.heap.smp_allocator);
+    }
+
+    pub fn reconcileAsync(self: *Controller) !void {
+        try self.startSettlement(.reconcile, std.heap.smp_allocator);
+    }
+
+    fn startSettlement(self: *Controller, action: settlement.Action, allocator: std.mem.Allocator) !void {
+        if (self.closed) return error.ControllerClosed;
+        if (self.preparing != null or self.settling != null) return error.SaveBusy;
+        const pending = if (self.pending) |*value| value else return error.NoPendingSave;
+        const waiting = try allocator.create(Settlement);
+        errdefer allocator.destroy(waiting);
+        waiting.* = .{ .allocator = allocator, .worker = .{ .allocator = allocator } };
+        // Preparation workers already own an independent native image. Legacy
+        // synchronous attempts get a copy before admission; Request stays main.
+        const image_allocator = if (pending.native_image) |image| image.allocator else std.heap.smp_allocator;
+        const bytes = if (pending.native_image) |image| image.bytes else try image_allocator.dupe(u8, pending.request.bytes);
+        errdefer if (pending.native_image == null) image_allocator.free(bytes);
+        var image = pending.request.image();
+        image.bytes = bytes;
+        var prepared: preparation.Prepared = .{ .allocator = image_allocator, .attempt = pending.attempt, .image = image, .thread_id = 0, .preparation_error = pending.preparation_error };
+        try waiting.worker.submit(&prepared, action);
+        // All native ownership moved. Access to pending.attempt/image is gated
+        // by settling until takeResult returns it; the document Request remains.
+        pending.attempt = undefined;
+        pending.native_image = null;
+        self.settling = waiting;
+    }
+
+    pub fn pollSettlement(self: *Controller, io: std.Io) !?Receipt {
+        if (self.closed) return error.ControllerClosed;
+        const waiting = self.settling orelse return null;
+        const result = (try waiting.worker.takeResult()) orelse return null;
+        const pending = &self.pending.?;
+        pending.attempt = result.prepared.attempt;
+        pending.native_image = .{ .allocator = result.prepared.allocator, .bytes = result.prepared.image.bytes };
+        waiting.worker.deinit() catch unreachable;
+        waiting.allocator.destroy(waiting);
+        self.settling = null;
+        if (result.outcome == .undetermined) {
+            if (pending.attempt.transaction.phase == .uncertain) self.markUncertain();
+            return result.failure orelse error.SaveUncertain;
+        }
+        return self.settle(io, if (result.outcome == .committed) .committed else .aborted);
     }
 
     pub fn pollPreparation(self: *Controller, io: std.Io) !?PreparationReady {
@@ -164,7 +219,7 @@ pub const Controller = struct {
 
     fn prepareImage(self: *Controller, io: std.Io, source: editor.document_registry.Lease, limit: usize, observed_hash: ?u64, comptime Driver: type) !void {
         if (self.closed) return error.ControllerClosed;
-        if (self.pending != null or self.preparing != null) return error.SaveBusy;
+        if (self.pending != null or self.preparing != null or self.settling != null) return error.SaveBusy;
         var request = if (observed_hash) |hash|
             try editor.save_request.Request.beginOverwrite(self.grant.allocator, self.grant.registry, source, limit, hash)
         else
@@ -188,7 +243,7 @@ pub const Controller = struct {
     }
     fn commitWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         if (pending.preparation_error) |failure| return failure;
         if (pending.attempt.transaction.phase != .prepared) return error.SaveUncertain;
@@ -217,7 +272,7 @@ pub const Controller = struct {
     }
     fn reconcileWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         if (pending.attempt.transaction.phase != .uncertain) return error.InvalidState;
         const outcome = try Driver.reconcile(&pending.attempt);
@@ -230,7 +285,7 @@ pub const Controller = struct {
     }
     fn abortWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         Driver.rollback(&pending.attempt) catch |failure| {
             // Rollback itself queries an uncertain transaction. A lost commit
@@ -275,7 +330,7 @@ pub const Controller = struct {
     /// native result. On refusal every handle/image/grant remains owned for retry.
     pub fn deinit(self: *Controller, io: std.Io) !void {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null) return error.SaveBusy;
         if (self.pending) |pending| {
             if (pending.attempt.transaction.phase == .uncertain) {
                 _ = try self.reconcile(io);
@@ -326,6 +381,8 @@ const Fixture = struct {
             self.controller.cancelPreparation() catch unreachable;
             _ = awaitPreparation(&self.controller) catch {};
         }
+        if (self.controller.settling != null) _ = awaitSettlement(&self.controller) catch {};
+        if (self.controller.pending != null and self.controller.status() == .uncertain) _ = self.controller.abort(std.testing.io) catch {};
         if (!self.controller.closed) self.controller.deinit(std.testing.io) catch @panic("fixture has unresolved save");
         _ = self.registry.release(self.view) catch unreachable;
         self.registry.deinit() catch unreachable;
@@ -333,6 +390,126 @@ const Fixture = struct {
         self.tmp.cleanup();
     }
 };
+
+fn awaitSettlement(controller: *Controller) !Receipt {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline) {
+        if (try controller.pollSettlement(std.testing.io)) |receipt| return receipt;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.SettlementDidNotComplete;
+}
+
+test "Windows save controller async rollback retains its document while native ownership moves" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    try f.controller.prepare(std.testing.io, f.view, 128);
+    try f.controller.abortAsync();
+    try std.testing.expectEqual(Status.settling, f.controller.status());
+    try std.testing.expectEqual(@as(u64, 1), f.state().persistence.live_save_images);
+    try std.testing.expectError(error.SaveBusy, f.controller.commit(std.testing.io));
+    try std.testing.expectError(error.SaveBusy, f.controller.abort(std.testing.io));
+    try std.testing.expectError(error.SaveBusy, f.controller.reconcile(std.testing.io));
+    try std.testing.expectError(error.SaveBusy, f.controller.deinit(std.testing.io));
+    try std.testing.expectError(error.SaveBusy, f.controller.abortAsync());
+    try std.testing.expectError(error.SaveBusy, f.controller.prepareAsync(f.view, 128));
+    const receipt = try awaitSettlement(&f.controller);
+    try std.testing.expectEqual(Decision.aborted, receipt.decision);
+    try std.testing.expect(receipt.acknowledgment_error == null);
+    try std.testing.expectEqual(Status.idle, f.controller.status());
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try std.testing.expect(f.state().opened.?.isDirty());
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows save controller async settlement survives moving the controller" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    try f.controller.prepareAsync(f.view, 128);
+    _ = try awaitPreparation(&f.controller);
+    try f.controller.abortAsync();
+    const moved = try std.testing.allocator.create(Controller);
+    moved.* = f.controller;
+    f.controller = undefined;
+    defer {
+        f.controller = moved.*;
+        std.testing.allocator.destroy(moved);
+    }
+    try std.testing.expectEqual(Status.settling, moved.status());
+    const receipt = try awaitSettlement(moved);
+    try std.testing.expectEqual(Decision.aborted, receipt.decision);
+    try std.testing.expectEqual(Status.idle, moved.status());
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows save controller async unknown reconciliation retains images for actual rollback retry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    try f.controller.prepareAsync(f.view, 128);
+    _ = try awaitPreparation(&f.controller);
+    f.controller.pending.?.attempt.transaction.phase = .uncertain;
+    try f.controller.reconcileAsync();
+    try std.testing.expectError(error.SaveUncertain, awaitSettlement(&f.controller));
+    try std.testing.expectEqual(Status.uncertain, f.controller.status());
+    try std.testing.expect(f.controller.pending != null);
+    try std.testing.expect(f.controller.pending.?.native_image != null);
+    try std.testing.expectEqual(@as(u64, 1), f.state().persistence.live_save_images);
+    try std.testing.expect(f.state().persistence.uncertain_sequence != null);
+    try std.testing.expectError(error.SaveBusy, f.controller.prepareAsync(f.view, 128));
+    try f.controller.abortAsync();
+    const receipt = try awaitSettlement(&f.controller);
+    try std.testing.expectEqual(Decision.aborted, receipt.decision);
+    try std.testing.expect(f.state().persistence.uncertain_sequence == null);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows save controller async native committed query acknowledges an actual lost reply" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    try f.controller.prepareAsync(f.view, 128);
+    _ = try awaitPreparation(&f.controller);
+    const pending = &f.controller.pending.?;
+    try f.controller.grant.commit(std.testing.io, &pending.attempt, &pending.request);
+    pending.attempt.transaction.phase = .uncertain;
+    try f.controller.reconcileAsync();
+    const receipt = try awaitSettlement(&f.controller);
+    try std.testing.expectEqual(Decision.committed, receipt.decision);
+    try std.testing.expect(receipt.acknowledgment_error == null);
+    try std.testing.expect(!f.state().opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows save controller async settlement allocation prefixes preserve pending ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    for (0..3) |index| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        try f.edit("X");
+        try f.controller.prepareAsync(f.view, 128);
+        _ = try awaitPreparation(&f.controller);
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+        if (index < 2) {
+            try std.testing.expectError(error.OutOfMemory, f.controller.startSettlement(.rollback, failing.allocator()));
+            try std.testing.expectEqual(Status.prepared, f.controller.status());
+            try std.testing.expect(f.controller.pending.?.native_image != null);
+            try std.testing.expectEqual(@as(u64, 1), f.state().persistence.live_save_images);
+            try f.controller.abortAsync();
+        } else try f.controller.startSettlement(.rollback, failing.allocator());
+        const receipt = try awaitSettlement(&f.controller);
+        try std.testing.expectEqual(Decision.aborted, receipt.decision);
+        try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+        try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    }
+}
 
 fn awaitPreparation(controller: *Controller) !PreparationReady {
     const io = std.testing.io;

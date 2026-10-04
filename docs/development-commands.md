@@ -1145,3 +1145,8 @@ receipt/ack 이후 닫기를 검사한다. `-Doptimize=ReleaseFast`도 실행한
 rollback·unknown/committed native 조회·실패 후 재시도·미소비 소유권·copied owner·admission
 할당 실패와 Request 해제 후 독립 이미지를 검사한다. `-Doptimize=ReleaseFast`도 실행한다.
 worker 결과는 문서 ack가 아니며 controller/앱 연결 전이므로 앱의 async rollback 증거로 세지 않는다.
+
+§2m.174의 `zig build test-win32-save-controller`는 28개(aggregation 2·native 26)다.
+비동기 rollback/reconcile의 문서·pending 소유권, busy guard·controller 이동·unknown 보유와
+실제 retry·유실 commit ack·admission 할당 prefix를 검사한다. `-Doptimize=ReleaseFast`와
+`test-win32-save-settle` 7개도 실행한다. Book/UI의 settlement 연결은 별도 후속 작업이다.

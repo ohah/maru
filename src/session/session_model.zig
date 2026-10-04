@@ -222,6 +222,10 @@ pub fn Model(comptime Rt: type) type {
             /// 그 pane 의 이벤트 로그가 **있는가**(마지막 tick 기준). 모드 판정의 유일한 입력이다
             /// (계약 §1.2 — 이벤트 개수나 시간으로 잡으면 가만히 있는 세션·이미 돌던 세션이 잘못 강등된다).
             agent_hook_log_present: bool = false,
+            /// 이 Term 이 **남의 파일에서 재배정된** 훅 이벤트를 받는가(`codex_daemon_attribution`). codex 공유 데몬은
+            /// 먼저 뜬 pane 의 파일에 모든 세션을 적으므로 나중 pane 의 파일은 영영 안 생긴다 — 이 값이 없으면 그 pane 은
+            /// 재배정을 받아도 다음 tick 에 «파일 없음» 으로 관측 모드로 떨어진다. 에이전트가 떠나면(관측 모드) 내린다.
+            agent_hook_routed: bool = false,
             /// 커서가 읽고 있는 파일의 inode. **회전을 크기만으로 판정하면 놓친다** — 같은 크기로 갈린
             /// 파일이 있으면 옛 오프셋으로 새 내용을 읽어 줄 가운데부터 파싱한다(`resetIfRotated` 계약).
             agent_hook_cursor_inode: u64 = 0,

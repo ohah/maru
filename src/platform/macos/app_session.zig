@@ -7044,6 +7044,11 @@ pub const AppSession = struct {
     /// `Term.hook` 대신 여기 그 pane 의 슬롯에 쓰인다 — 한 tmux 세션의 pane 여럿이 한 Term 으로 접히지 않게. Term 수준
     /// 배지·대화 줄은 `agent_ops.hookSlotsAggregate`/`primaryHookSlot` 가 이 슬롯들과 `Term.hook` 을 합쳐 낸다(조각 3).
     remote_agent_panes: maru.session.remote_pane_table.Table = .{},
+    /// codex 공유 데몬이 돌린 세션 → 그 세션을 띄운 Term(`codex_daemon_attribution`, docs/agent-hooks.md §4.4). 데몬 표식이
+    /// 붙은 이벤트는 파일 이름(pane) 대신 이 표로 귀속한다. 고정 배열이라 할당하지 않는다.
+    codex_daemon_bindings: maru.session.codex_daemon_attribution.Bindings = .{},
+    /// 마지막으로 «붙이지 않았다» 를 남긴 (세션, 사유)의 해시 — 같은 세션의 도구 이벤트마다 한 줄씩 쌓이지 않게.
+    codex_daemon_last_drop_log: u64 = 0,
     /// 그 링의 각 턴이 만진 파일의 **그림자 사본**(계약 §4.4). 링과는 `Snapshot.capture_id` 로 잇는다.
     ///
     /// **힙을 든다** — 이웃 `turn_rings` 가 고정 배열인 것은 스냅샷이 고정 크기이기 때문이고, 파일 내용은

@@ -120,9 +120,7 @@ pub const Transaction = struct {
     file_open: bool = true,
     identity: identity_mod.Identity,
     source_hash: u64,
-    request_lease: ?maru.session.editor.document_registry.Lease = null,
-    request_sequence: u64 = 0,
-    request_disk_hash: u64 = 0,
+    request_image: ?maru.session.editor.save_request.Image = null,
     phase: Phase = .active,
 
     /// Caller keeps every pinned parent alive until close. The original basename,
@@ -166,13 +164,10 @@ pub const Transaction = struct {
     /// The host still binds its grant/file identity before begin. This seam writes
     /// exactly one owned L2 image and binds any later ack to that request lease.
     pub fn writeDocument(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request) !void {
-        try request.validateForWrite();
-        if (request.expectedSourceHash() != self.source_hash) return error.DiskFingerprintChanged;
-        if (maru.session.editor.document_state.contentHash(request.bytes) != request.disk_hash) return error.CorruptSaveImage;
-        try self.write(io, request.bytes);
-        self.request_lease = request.lease;
-        self.request_sequence = request.sequence;
-        self.request_disk_hash = request.disk_hash;
+        const image = try request.imageForWrite();
+        try image.validate(self.source_hash);
+        try self.write(io, image.bytes);
+        self.request_image = image;
     }
 
     /// A generic byte write or another document's callback cannot acknowledge
@@ -189,11 +184,8 @@ pub const Transaction = struct {
     }
 
     fn checkDocumentRequest(self: *const Transaction, request: *const maru.session.editor.save_request.Request) !void {
-        const lease = self.request_lease orelse return error.WrongSaveRequest;
-        if (lease.owner != request.lease.owner or lease.id != request.lease.id or
-            !std.meta.eql(lease.document, request.lease.document) or
-            self.request_sequence != request.sequence or self.request_disk_hash != request.disk_hash)
-            return error.WrongSaveRequest;
+        const image = self.request_image orelse return error.WrongSaveRequest;
+        if (!image.sameRequest(request.image())) return error.WrongSaveRequest;
     }
 
     pub fn write(self: *Transaction, io: std.Io, bytes: []const u8) !void {
@@ -211,7 +203,7 @@ pub const Transaction = struct {
     pub fn commit(self: *Transaction, io: std.Io) !void {
         // A document write cannot bypass its final authority check through the
         // generic byte API. Invalid phases retain their existing error contract.
-        if (self.phase == .prepared and self.request_lease != null) return error.DocumentRequestRequired;
+        if (self.phase == .prepared and self.request_image != null) return error.DocumentRequestRequired;
         try self.commitWith(io, Native);
     }
 
@@ -222,8 +214,7 @@ pub const Transaction = struct {
     fn commitDocumentWith(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request, comptime Api: type) !void {
         if (self.phase != .prepared) return error.InvalidState;
         try self.checkDocumentRequest(request);
-        if (request.expectedSourceHash() != self.source_hash) return error.DiskFingerprintChanged;
-        if (maru.session.editor.document_state.contentHash(request.bytes) != request.disk_hash) return error.CorruptSaveImage;
+        try request.image().validate(self.source_hash);
         // Preparation may outlive a reload, changed path, permission or disk
         // observation. Check immediately before releasing the native file fence.
         // Later editor revisions remain allowed: the owned image is the save.
@@ -366,6 +357,12 @@ test "Windows safe save transaction acknowledges only its committed L2 image and
     state.opened.?.file.read_only = false;
     try std.testing.expectEqual(Phase.active, tx.phase);
     try tx.writeDocument(io, &request);
+    // A request whose lifetime token changed cannot borrow a prepared image's
+    // commit or acknowledgment, even if its lease and sequence still match.
+    request.epoch ^= 1;
+    try std.testing.expectError(error.WrongSaveRequest, tx.commitDocument(io, &request));
+    try std.testing.expectError(error.WrongSaveRequest, tx.acknowledgeDocument(&request));
+    request.epoch ^= 1;
     try documentEdit(state, "later\n");
     try std.testing.expectError(error.SaveNotCommitted, tx.acknowledgeDocument(&request));
     try std.testing.expect(state.opened.?.isDirty());

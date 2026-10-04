@@ -11612,3 +11612,20 @@ Reload 후 외부 원본을 유지한 종료를 확인했다. 실제 writable ha
 실제 native 쓰기·commit과 최초 open의 I/O는 아직 UI 스레드에 있다. 이를 옮기는 작업,
 다중 파일 닫기의 전체 GUI 시나리오와 물리 입력·IME, 비교 scrollbar/크기 변경의 전체 UX,
 readonly/untitled/remote 감시 및 나머지 Windows 플랫폼 구현은 계속 남아 있다.
+
+### 2m.169 — 불변 저장 이미지와 문서 검증 경계
+
+`save_request.Image`는 원본 Request가 살아 있는 동안 빌리는 불변 bytes와 lease·epoch·sequence·
+raw hash·native source hash를 담는다. Registry를 조회하거나 문서에 쓰지 않고 native source와
+checksum을 검사한다. `Request.imageForWrite`는 메인 스레드에서 기존 문서 권한을 검증한 뒤
+이미지를 내보낸다. 순수 `image`는 완료 결과 대조에도 사용하며 commit 권한을 발급하지 않는다.
+
+Transaction은 준비한 이미지의 full lease·epoch·sequence·raw hash를 저장하고 commit/ack의
+요청과 대조한다. commit 직전의 기존 main-thread 문서 검증과 grant의 경로·identity 검증은
+유지한다. epoch를 바꾼 요청의 commit과 ack 거절도 실제 native transaction에서 검사한다.
+공통 gate는 18개로 늘었고 Debug/ReleaseFast에서 통과했다. native safe-save 66개도 두 모드에서
+통과했다. source hash·checksum·epoch·sequence·lease 검사 제거의 다섯 변형은 컴파일 성공 후
+runtime에서 모두 검출했으며 원본 bytes를 복원했다.
+
+이 경계 분리는 worker 이관의 선행 작업이다. 아직 native 쓰기·commit은 UI 스레드에 있으며
+worker 소유권·main-thread commit 승인 왕복과 최초 open의 비동기화는 이어서 구현한다.

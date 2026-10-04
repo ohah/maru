@@ -1115,3 +1115,8 @@ overwrite의 fresh ticket·디스크 재변경 및 queued/active/completed 취�
 `test-win32-safe-save` 66개·`test-win32-document-grant` 14개·`test-win32-save-controller`
 15개를 회귀 검증한다. 실제 앱의 Save-close 충돌 모달과 writable handle을 유지한 대기/Esc
 취소는 별도 격리 파일에서 확인한다.
+
+§2m.169의 `test-editor-save-request`는 불변 이미지의 source/checksum 및 full lease·epoch·
+sequence 대조를 포함해 18개다. `test-win32-safe-save`는 같은 66개 안에서 변조된 epoch의
+native commit/ack 거절을 추가 검사한다. 두 gate를 Debug/ReleaseFast에서 실행하며,
+불변 이미지 export는 worker commit 승인이나 비동기 저장 완료로 간주하지 않는다.

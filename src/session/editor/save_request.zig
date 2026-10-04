@@ -5,6 +5,27 @@ const registry_mod = @import("document_registry.zig");
 const state_mod = @import("document_state.zig");
 
 pub const Result = enum { committed, aborted, uncertain };
+/// Borrowed immutable transport for native I/O. The owner keeps Request alive
+/// until the worker returns. A lease is compared as a token, never dereferenced
+/// here; exporting an image does not authorize a later native commit.
+pub const Image = struct {
+    lease: registry_mod.Lease,
+    epoch: u64,
+    sequence: u64,
+    bytes: []const u8,
+    disk_hash: u64,
+    expected_source_hash: u64,
+
+    pub fn validate(self: Image, source_hash: u64) !void {
+        if (self.expected_source_hash != source_hash) return error.DiskFingerprintChanged;
+        if (state_mod.contentHash(self.bytes) != self.disk_hash) return error.CorruptSaveImage;
+    }
+
+    pub fn sameRequest(self: Image, other: Image) bool {
+        return std.meta.eql(self.lease, other.lease) and self.epoch == other.epoch and
+            self.sequence == other.sequence and self.disk_hash == other.disk_hash;
+    }
+};
 pub const Request = struct {
     allocator: std.mem.Allocator,
     registry: *registry_mod.Registry,
@@ -34,6 +55,18 @@ pub const Request = struct {
 
     pub fn expectedSourceHash(self: *const Request) u64 {
         return self.overwrite_disk_hash orelse self.expected_disk_hash;
+    }
+
+    /// Pure projection, also usable when checking a completed native outcome.
+    /// Main-thread validation is separate because completion may follow a
+    /// permission change and must still reconcile the actual native decision.
+    pub fn image(self: *const Request) Image {
+        return .{ .lease = self.lease, .epoch = self.epoch, .sequence = self.sequence, .bytes = self.bytes, .disk_hash = self.disk_hash, .expected_source_hash = self.expectedSourceHash() };
+    }
+
+    pub fn imageForWrite(self: *const Request) !Image {
+        try self.validateForWrite();
+        return self.image();
     }
 
     /// A request lease pins the same document even after its last view closes.
@@ -158,6 +191,60 @@ pub const Request = struct {
 };
 
 const a = std.testing.allocator;
+
+test "Editor save request image transport validates bytes and native source without registry access" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    var request = try Request.beginOverwrite(a, &registry, lease, 128, state_mod.contentHash("outside"));
+    defer request.deinit();
+    const image = try request.imageForWrite();
+    try image.validate(state_mod.contentHash("outside"));
+    try std.testing.expectError(error.DiskFingerprintChanged, image.validate(state_mod.contentHash("base")));
+    var corrupted = image;
+    corrupted.disk_hash ^= 1;
+    try std.testing.expectError(error.CorruptSaveImage, corrupted.validate(image.expected_source_hash));
+    // The exported transport keeps its captured values when the live document
+    // changes. Validation of live authority stays explicitly on the main thread.
+    registry.get(lease).?.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, request.imageForWrite());
+    try image.validate(image.expected_source_hash);
+    try std.testing.expect(image.sameRequest(request.image()));
+}
+
+test "Editor save request image transport binds full lease lifetime sequence and checksum" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    var request = try Request.begin(a, &registry, lease, 128);
+    defer request.deinit();
+    const image = try request.imageForWrite();
+    try std.testing.expect(image.sameRequest(image));
+    var other = image;
+    other.epoch ^= 1;
+    try std.testing.expect(!image.sameRequest(other));
+    other = image;
+    other.sequence ^= 1;
+    try std.testing.expect(!image.sameRequest(other));
+    other = image;
+    other.disk_hash ^= 1;
+    try std.testing.expect(!image.sameRequest(other));
+    other = image;
+    other.lease.id ^= 1;
+    try std.testing.expect(!image.sameRequest(other));
+    other = image;
+    other.lease.document.generation ^= 1;
+    try std.testing.expect(!image.sameRequest(other));
+    other = image;
+    other.lease.kind = .read;
+    try std.testing.expect(!image.sameRequest(other));
+    var foreign: registry_mod.Registry = .{ .allocator = a };
+    other = image;
+    other.lease.owner = &foreign;
+    try std.testing.expect(!image.sameRequest(other));
+}
 test "Editor save request keeps each overlapping image owned through terminal acknowledgment" {
     var registry: registry_mod.Registry = .{ .allocator = a };
     defer registry.deinit() catch unreachable;

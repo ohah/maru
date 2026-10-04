@@ -87,8 +87,18 @@ pub const EditableFile = struct {
     revision: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, bytes: []const u8, read_only: bool) OpenError!EditableFile {
-        const doc = try document.open(bytes, read_only);
+        return initDocument(allocator, try document.open(bytes, read_only));
+    }
 
+    /// 백업은 이미 해석한 본문이다. 선두 U+FEFF를 파일 BOM으로 다시 소비하면 재백업 때 문자가 사라진다.
+    pub fn initContent(allocator: std.mem.Allocator, content: []const u8, read_only: bool) OpenError!EditableFile {
+        var doc = try document.open(content, read_only);
+        doc.content = content;
+        doc.format.has_bom = false;
+        return initDocument(allocator, doc);
+    }
+
+    fn initDocument(allocator: std.mem.Allocator, doc: document.Document) OpenError!EditableFile {
         var buf = try buffer.Buffer.init(allocator, doc.content);
         errdefer buf.deinit();
 
@@ -100,7 +110,7 @@ pub const EditableFile = struct {
             .allocator = allocator,
             .buf = buf,
             .format = doc.format,
-            .read_only = read_only,
+            .read_only = doc.read_only,
             .content = content,
             .lines = lines,
         };

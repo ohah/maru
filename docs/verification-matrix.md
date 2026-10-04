@@ -4000,6 +4000,19 @@ workspace 자동 복원은 꺼 두며 host checkpoint/새 recovery ID/OS reboot 
 증거: [실행 결과](evidence/editor-residual-backup-app-20261003/result.json).
 
 
+## 미저장 백업 발견과 별도 사본 복구
+
+구현. `zig build test-editor-backup-discovery`는 checkpoint에 없는 ID/legacy 후보 열거,
+빈 본문의 dirty 유지, 교체된 루트·claim·본문의 선택/삭제 거절, 복구 준비와 재백업의 할당 실패,
+재백업 I/O 실패 후 재시도, Save As 취소·실패·성공과 독립 ID 보존을 판정한다.
+선두 U+FEFF·CRLF/LF·NUL 보존과 엄격한 `umask`에서의 0600 재백업을 실행 검사한다.
+목록은 한글 조합 callback·휠·스크롤된 행 클릭·취소를 실제 AppSession 입력 경로로 검사한다.
+
+`tools/test-editor-backup-discovery-process.py`는 제품 백업 뒤 SIGKILL, 새 프로세스의 수동 복구,
+복구 사본의 재백업 직후 두 번째 SIGKILL과 새 백업만으로 재복구를 확인한다. 물리 전원 차단과
+실제 OS IME 후보창 검증은 아니다. 제품 Metal PNG는 `tools/capture-editor-backup-discovery.py`로
+격리 촬영하며, 승인된 정책과 범위는 [백업 발견과 복구](plans/editor-backup-discovery.md)를 따른다.
+
 ## 복구 ID와 codec
 
 `zig build test-editor-recovery-codec`는 RECID/RECB와 workspace codec을 실행한다.

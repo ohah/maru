@@ -2524,7 +2524,7 @@ pub fn prepareUntitled(self: *AppSession) OpenFileError!Prepared {
 fn prepareUntitledContent(self: *AppSession, content: []const u8, recovered: bool) OpenFileError!Prepared {
     var opened: Opened = blk: {
         // 복구도 본문과 파생 줄을 게시 전에 준비한다. 중간 실패가 빈 탭을 남기지 않는다.
-        const file = editor.edit_doc.EditableFile.init(self.allocator, content, false) catch |e| switch (e) {
+        const file = editor.edit_doc.EditableFile.initContent(self.allocator, content, false) catch |e| switch (e) {
             error.NotUtf8 => return error.NotUtf8,
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -49257,7 +49257,7 @@ test "editor backup discovery process 백업 뒤 강제 종료하고 checkpoint 
         const b = try openPathInActivePane(fx.session, path);
         a.rt.editor_selection = editor_selection.Selection.at(0);
         b.rt.editor_selection = editor_selection.Selection.at(0);
-        try testing.expect(insertText(fx.session, a, "A:"));
+        try testing.expect(insertText(fx.session, a, "\xef\xbb\xbfA:"));
         var changes = [_]editor.delta.Change{.{ .start = 0, .end = b.rt.editorDocument().opened.?.file.content.len, .text = "" }};
         try testing.expect(applyEditAsOne(fx.session, b, &changes));
         app_session_mod.editor_backup_ops.flushAll(fx.session);
@@ -49282,11 +49282,18 @@ test "editor backup discovery process 백업 뒤 강제 종료하고 checkpoint 
         try testing.expect(opened.isDirty());
         try testing.expect(term.rt.editorDocument().path == null);
         if (opened.file.content.len == 0) found_empty = true else {
-            try testing.expectEqualStrings("A:disk\n", opened.file.content);
+            try testing.expectEqualStrings("\xef\xbb\xbfA:disk\n", opened.file.content);
             found_body = true;
         }
     }
     try testing.expect(found_empty and found_body);
+    if (std.mem.eql(u8, phase, "rebackup")) {
+        // 새 이름의 백업이 원본 ID를 대신 보호한 직후 다시 죽여 복구를 연속해서 확인한다.
+        app_session_mod.editor_backup_ops.flushAll(fx.session);
+        std.debug.print("discovery_process ready_for_kill pid={d}\n", .{std.c.getpid()});
+        _ = std.c.raise(std.posix.SIG.STOP);
+        return error.UnexpectedResume;
+    }
     std.debug.print("discovery_process recovered=true empty_dirty=true independent=true pid={d}\n", .{std.c.getpid()});
 }
 
@@ -49325,6 +49332,218 @@ test "editor backup discovery 목록은 한글 조합과 휠 및 보이는 행 �
     const term = pane_ops.activePane(fx.session).activeTerm();
     try testing.expectEqualStrings("한글 복구", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(backupExists(root, named));
+}
+
+test "editor backup discovery 재백업은 제한적인 umask에서도 다시 읽을 수 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    const original: backup_rules.Doc = .{ .untitled = 101 };
+    try plantBackup(allocator, root, original, "보호할 본문");
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var name_buffer: [backup_rules.max_file_name_len]u8 = undefined;
+    var source = try recovery_store.Source.open(allocator, testing.io, root, backup_rules.fileName(&name_buffer, original));
+    const term = try openRecoveredSource(fx.session, &source);
+    const current: backup_rules.Doc = .{ .untitled = term.rt.editorDocument().untitled.?.n };
+    // 원본 정리의 전제는 새 파일의 존재뿐 아니라 다음 실행에서 읽을 수 있는 권한이다.
+    const previous_umask = std.c.umask(0o777);
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    _ = std.c.umask(previous_umask);
+    const name = backup_rules.fileName(&name_buffer, current);
+    const stat = try dir.dir.statFile(testing.io, name, .{});
+    defer dir.dir.setFilePermissions(testing.io, name, @enumFromInt(0o600), .{}) catch {};
+    try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(stat.permissions.toMode() & 0o777)));
+    var saved = try recovery_store.Source.open(allocator, testing.io, root, name);
+    defer saved.deinit();
+    var record = try saved.read();
+    defer record.deinit(allocator);
+    try testing.expectEqualStrings("보호할 본문", record.parsed.content);
+    try testing.expect(!backupExists(root, original));
+}
+
+test "editor backup discovery 복구 본문의 선두 문자와 줄바꿈은 재백업에서도 그대로다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    const original: backup_rules.Doc = .{ .untitled = 102 };
+    const body = "\xef\xbb\xbf첫 줄\r\n둘째\n\x00끝";
+    try plantBackup(allocator, root, original, body);
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var name_buffer: [backup_rules.max_file_name_len]u8 = undefined;
+    var source = try recovery_store.Source.open(allocator, testing.io, root, backup_rules.fileName(&name_buffer, original));
+    const term = try openRecoveredSource(fx.session, &source);
+    // 백업은 파일 헤더가 아니라 이미 해석된 문서 본문이다. 선두 U+FEFF도 한 문자다.
+    try testing.expectEqualStrings(body, term.rt.editorDocument().opened.?.file.content);
+    const exported = try term.rt.editorDocument().opened.?.file.saveBytes(allocator);
+    defer allocator.free(exported);
+    try testing.expectEqualStrings(body, exported);
+    try testing.expect(!undoEdit(fx.session, term));
+    try testing.expect(insertText(fx.session, term, "edit"));
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings(body, term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(term));
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    const current: backup_rules.Doc = .{ .untitled = term.rt.editorDocument().untitled.?.n };
+    var saved = try recovery_store.Source.open(allocator, testing.io, root, backup_rules.fileName(&name_buffer, current));
+    defer saved.deinit();
+    var record = try saved.read();
+    defer record.deinit(allocator);
+    try testing.expectEqualStrings(body, record.parsed.content);
+    try testing.expect(!backupExists(root, original));
+}
+
+test "editor backup discovery 재백업의 IO와 할당 실패 뒤에도 원본을 보존하고 재시도한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    const original: backup_rules.Doc = .{ .untitled = 103 };
+    try plantBackup(allocator, root, original, "retry me");
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var name_buffer: [backup_rules.max_file_name_len]u8 = undefined;
+    var source = try recovery_store.Source.open(allocator, testing.io, root, backup_rules.fileName(&name_buffer, original));
+    const term = try openRecoveredSource(fx.session, &source);
+    const current: backup_rules.Doc = .{ .untitled = term.rt.editorDocument().untitled.?.n };
+    const name = backup_rules.fileName(&name_buffer, current);
+    try dir.dir.createDir(testing.io, name, .default_dir);
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    try testing.expect(term.rt.editorDocument().notifications.backup_dirty);
+    try testing.expect(!term.rt.editorDocument().notifications.backup_on_disk);
+    try testing.expect(term.rt.editor_recovery.?.source != null);
+    try testing.expect(backupExists(root, original));
+    try dir.dir.deleteDir(testing.io, name);
+
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    fx.session.allocator = allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expect(term.rt.editorDocument().notifications.backup_dirty);
+    try testing.expect(backupExists(root, original));
+    try testing.expect(!backupExists(root, current));
+
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    try testing.expect(!term.rt.editorDocument().notifications.backup_dirty);
+    try testing.expect(term.rt.editorDocument().notifications.backup_on_disk);
+    try testing.expect(term.rt.editor_recovery.?.source == null);
+    try testing.expect(!backupExists(root, original));
+    var saved = try recovery_store.Source.open(allocator, testing.io, root, name);
+    defer saved.deinit();
+    var record = try saved.read();
+    defer record.deinit(allocator);
+    try testing.expectEqualStrings("retry me", record.parsed.content);
+}
+
+test "editor backup discovery 빈 사본의 저장 취소와 실패는 보존하고 성공은 선택한 ID만 정리한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    const id: recovery_store.Id = .{ .bytes = @splat(41) };
+    const other_id: recovery_store.Id = .{ .bytes = @splat(42) };
+    for ([_]recovery_store.Id{ id, other_id }) |identity| {
+        const owner = try recovery_store.Owner.create(allocator, testing.io, identity);
+        defer owner.release();
+        try owner.write(root, "/missing-same-original.txt", contentHash("disk"), "");
+    }
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    pinUntitledBase(fx.session, root);
+    const name = try maru.session.editor.recovery_id.fileName(id);
+    var source = try recovery_store.Source.open(allocator, testing.io, root, &name);
+    const term = try openRecoveredSource(fx.session, &source);
+    try testing.expectError(error.AskName, saveDocument(fx.session, term));
+    settings_ops.closeRename(fx.session);
+    try testing.expect(isDirty(term));
+    try testing.expect(recoveryExists(root, id));
+    // 존재하지 않는 부모로 저장 실패를 만든다. 실패는 needs_save나 원본 권한을 소비하지 않는다.
+    try testing.expectError(error.AskName, saveDocument(fx.session, term));
+    try fx.session.rename_input.setText(allocator, "missing/recovered.txt");
+    settings_ops.commitRename(fx.session);
+    try testing.expect(isDirty(term));
+    try testing.expect(term.rt.editorDocument().path == null);
+    try testing.expect(term.rt.editor_recovery.?.source != null);
+    try testing.expect(recoveryExists(root, id));
+    try testing.expect(recoveryExists(root, other_id));
+
+    try testing.expectError(error.AskName, saveDocument(fx.session, term));
+    try fx.session.rename_input.setText(allocator, "recovered.txt");
+    settings_ops.commitRename(fx.session);
+    const bytes = try dir.dir.readFileAlloc(testing.io, "recovered.txt", allocator, .limited(128));
+    defer allocator.free(bytes);
+    try testing.expectEqualStrings("", bytes);
+    try testing.expect(!isDirty(term));
+    try testing.expect(term.rt.editorDocument().untitled == null);
+    try testing.expect(term.rt.editor_recovery.?.source == null);
+    try testing.expect(!recoveryExists(root, id));
+    try testing.expect(recoveryExists(root, other_id));
+}
+
+test "editor backup discovery 스크롤된 마지막 행 클릭과 취소는 화면의 후보만 처리한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buffer, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    for (1..15) |n| {
+        const body = try std.fmt.allocPrint(allocator, "body-{d}", .{n});
+        defer allocator.free(body);
+        try plantBackup(allocator, root, .{ .untitled = @intCast(n) }, body);
+    }
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    fx.session.backing_width_px = 960;
+    fx.session.backing_height_px = 600;
+    const before = pane_ops.activePane(fx.session).terms.items.len;
+    fx.session.dispatchAppAction(.recover_editor_backups);
+    while (!fx.session.editor_recovery.catalog.?.complete and fx.session.editor_recovery.catalog.?.failure == null) recovery_ui.tick(fx.session);
+    try testing.expectEqual(@as(usize, 14), fx.session.editor_recovery.shown.items.len);
+    const layout = maru.chrome.components.overlay_input.panelLayout(fx.session.buildChromeProps()).?;
+    const x: f64 = @floatFromInt(layout.x + 3 * @as(i32, @intCast(layout.cw)));
+    const y: f64 = @floatFromInt(layout.y + 10 * @as(i32, @intCast(layout.ch)) + 1);
+    // 헤더와 우클릭은 복구 실행이 아니다. 바깥 클릭과 Escape는 source를 소비하지 않는다.
+    fx.session.mouse(1, x, @as(f64, @floatFromInt(layout.y)) + 1, 0, 0);
+    fx.session.mouse(1, x, y, 2, 0);
+    try testing.expectEqual(before, pane_ops.activePane(fx.session).terms.items.len);
+    fx.session.mouse(1, @as(f64, @floatFromInt(layout.x)) - 1, y, 0, 0);
+    try testing.expect(!fx.session.chrome_host.recovery_picker.open);
+    try testing.expect(fx.session.editor_recovery.catalog == null);
+    fx.session.dispatchAppAction(.recover_editor_backups);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    try testing.expect(fx.session.editor_recovery.catalog == null);
+    fx.session.dispatchAppAction(.recover_editor_backups);
+    while (!fx.session.editor_recovery.catalog.?.complete and fx.session.editor_recovery.catalog.?.failure == null) recovery_ui.tick(fx.session);
+    try testing.expectEqual(@as(usize, 14), fx.session.editor_recovery.shown.items.len);
+    try testing.expect(scroll_ops.scrollOverlayByLines(fx.session, -3));
+    try testing.expectEqual(3 * layout.ch, fx.session.editor_recovery.scroll.offset_y_px);
+    const index = fx.session.editor_recovery.shown.items[12];
+    var selected = try fx.session.editor_recovery.catalog.?.select(index);
+    defer selected.deinit();
+    var record = try selected.read();
+    defer record.deinit(allocator);
+    fx.session.mouse(1, x, y, 0, 0);
+    try testing.expectEqual(before + 1, pane_ops.activePane(fx.session).terms.items.len);
+    try testing.expectEqualStrings(record.parsed.content, pane_ops.activePane(fx.session).activeTerm().rt.editorDocument().opened.?.file.content);
+    for (1..15) |n| try testing.expect(backupExists(root, .{ .untitled = @intCast(n) }));
 }
 
 test "editor backup discovery 검색 할당 실패에서 이전 후보를 잘못 열지 않는다" {

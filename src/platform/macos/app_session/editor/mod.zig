@@ -37934,6 +37934,13 @@ const SymbolPreviewFrame = struct {
         term.rt.editor_max_cols = self.max_cols;
         term.rt.editor_row_cache = self.row_cache;
         term.rt.editor_symbol_preview_drawing = false;
+        // 지금 보이는 것은 임시 투영이다. Esc 다음 클릭이 재그리기보다 먼저 올 수 있으므로
+        // 정본의 지난 입력 표를 비운다. 폭·스크롤 상한은 다음 이동의 계산에 계속 쓴다.
+        term.rt.editor_hit_rows_len = 0;
+        term.rt.editor_sticky.drawn_len = 0;
+        term.rt.editor_scrollbar = null;
+        term.rt.editor_horizontal_scrollbar = null;
+        term.rt.editor_minimap_rect = null;
     }
 };
 
@@ -38219,6 +38226,10 @@ test "SPPREVIEW1 목록 선택은 현재 화면만 이동하고 취소는 원래
     var initial = try symbolPreviewDraw(&fx);
     defer initial.dl.deinit(testing.allocator);
     try testing.expect(drawnHasText(initial.dl, "target00"));
+    const hit_geom = fx.term.rt.editor_hit_geom;
+    const hit_x: f64 = @floatFromInt(hit_geom.body_x + @as(i32, @intCast(hit_geom.content_left_px + 3 * hit_geom.cell_w_px)));
+    const hit_y: f64 = @floatFromInt(hit_geom.body_y + hit_geom.cell_h_px);
+    const original_hit = hitTestBody(fx.term, hit_x, hit_y) orelse return error.MissingOriginalHit;
     const selection = fx.term.rt.editor_selection;
     const revision = fx.term.rt.editorDocument().opened.?.file.revision;
     toggleSymbolPicker(fx.session);
@@ -38232,10 +38243,15 @@ test "SPPREVIEW1 목록 선택은 현재 화면만 이동하고 취소는 원래
     try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
     try testing.expectEqual(revision, fx.term.rt.editorDocument().opened.?.file.revision);
     _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    // AppKit은 키와 클릭 사이에 동기 렌더를 보장하지 않는다. 미리보기가 남아 있는 동안
+    // 이전 본문의 좌표로 선택하면 보이는 함수와 다른 곳에 커서가 생긴다.
+    try testing.expectEqual(@as(?usize, null), hitTestBody(fx.term, hit_x, hit_y));
+    try testing.expect(!beginBodySelection(fx.session, pane_ops.activePane(fx.session), hit_x, hit_y, 0));
     var cancelled = try symbolPreviewDraw(&fx);
     defer cancelled.dl.deinit(testing.allocator);
     try testing.expect(drawnHasText(cancelled.dl, "target00"));
     try testing.expectEqualDeep(selection, fx.term.rt.editor_selection);
+    try testing.expectEqual(@as(?usize, original_hit), hitTestBody(fx.term, hit_x, hit_y));
 }
 
 test "SPPREVIEW2 확정 전 checkpoint와 여러 커서를 보존하고 이동 이력은 한 번 쌓는다" {

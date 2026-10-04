@@ -16,14 +16,17 @@ export fn maru_symbol_preview_probe(stage: u32) callconv(.c) i32 {
     const focus = if (term.rt.editor_selection) |sel| sel.focus else return -1;
     const open = self.chrome_host.symbol_picker.open;
     if (doc.file.revision != 0) return -1;
-    if (stage < 6 and (focus != 0 or term.rt.editor_first_line != 0 or self.editor_nav_back.items.len != 0)) return -1;
-    if ((stage == 1 or stage == 2 or stage == 3 or stage == 5) and !open) return -1;
-    if ((stage == 0 or stage == 4 or stage == 6) and open) return -1;
-    if (stage == 2 or stage == 3) {
+    if (stage < 7 and (focus != 0 or term.rt.editor_first_line != 0 or self.editor_nav_back.items.len != 0)) return -1;
+    if ((stage == 1 or stage == 2 or stage == 3 or stage == 5 or stage == 6) and !open) return -1;
+    if ((stage == 0 or stage == 4 or stage == 7) and open) return -1;
+    if (stage == 2 or stage == 3 or stage == 6) {
         const p = term.rt.editor_symbol_preview orelse return -1;
         if (p.target_line < 150) return -1;
     }
-    if (stage == 6 and (focus == 0 or self.editor_nav_back.items.len != 1)) return -1;
+    if (stage == 7) {
+        const expected = std.mem.indexOf(u8, doc.file.content, "pub fn sample40()") orelse return -1;
+        if (focus != expected or self.editor_nav_back.items.len != 1) return -1;
+    }
     std.debug.print("SYMBOL_PREVIEW stage={d} open={any} focus={d} top={d} revision={d} history={d} rows={d} selected={d}\n", .{ stage, open, focus, term.rt.editor_first_line, doc.file.revision, self.editor_nav_back.items.len, self.symbol_picker_rows.rows.items.len, self.chrome_host.symbol_picker.selected });
     return 1;
 }

@@ -14,6 +14,17 @@ extension MaruAppHostController {
         if !view.performKeyEquivalent(with: event) { view.keyDown(with: event) }
         return true
     }
+    private func symbolPreviewClickBeforeRepaint() -> Bool {
+        guard let surface = primary, let window = surface.window, let view = surface.view else { return false }
+        let point = view.convert(NSPoint(x: view.bounds.width * 0.6, y: view.bounds.height * 0.5), to: nil)
+        for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else { return false }
+            if type == .leftMouseDown { view.mouseDown(with: event) } else { view.mouseUp(with: event) }
+        }
+        return true
+    }
     private func symbolPreviewCapture(_ name: String) -> Bool {
         guard let surface = primary, let renderer = surface.metalRenderer,
               let root = ProcessInfo.processInfo.environment["MARU_SYMBOL_PREVIEW_OUTPUT"] else { return false }
@@ -38,7 +49,7 @@ extension MaruAppHostController {
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }
         guard ready == 1 else { finish(false); return }
-        let labels = ["before", "opened", "filtered", "next-symbol", "cancelled", "korean-query", "accepted"]
+        let labels = ["before", "opened", "filtered", "next-symbol", "cancelled", "korean-query", "accept-preview", "accepted"]
         guard symbolPreviewCapture(labels[Int(stage)]) else { finish(false); return }
         switch stage {
         case 0:
@@ -48,7 +59,8 @@ extension MaruAppHostController {
         case 2:
             guard symbolPreviewKey(125, "\u{F701}") else { finish(false); return }
         case 3:
-            guard symbolPreviewKey(53, "\u{1b}") else { finish(false); return }
+            // Esc와 클릭을 같은 호출에서 보낸다. 사이에 renderTick을 넣으면 낡은 hit 표를 못 잡는다.
+            guard symbolPreviewKey(53, "\u{1b}"), symbolPreviewClickBeforeRepaint() else { finish(false); return }
         case 4:
             guard symbolPreviewKey(31, "O", [.command, .shift]) else { finish(false); return }
             view.setMarkedText("ㅎ", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
@@ -57,6 +69,7 @@ extension MaruAppHostController {
         case 5:
             guard symbolPreviewKey(53, "\u{1b}"), symbolPreviewKey(31, "O", [.command, .shift]) else { finish(false); return }
             view.insertText("sample40", replacementRange: NSRange(location: NSNotFound, length: 0))
+        case 6:
             guard symbolPreviewKey(36, "\r") else { finish(false); return }
         default: finish(true); return
         }

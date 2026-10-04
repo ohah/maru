@@ -150,6 +150,14 @@ pub const OpenFile = struct {
     /// The native host checks the read ticket before entering this shared edit
     /// path. Peer views belong to document identity, never just equal paths.
     pub fn acceptExternal(self: *OpenFile, a: std.mem.Allocator, peers: []OpenFile, raw: []const u8, now_ns: i128) !bool {
+        return self.externalImage(a, peers, raw, now_ns, false);
+    }
+
+    pub fn reloadExternal(self: *OpenFile, a: std.mem.Allocator, peers: []OpenFile, raw: []const u8, now_ns: i128) !bool {
+        return self.externalImage(a, peers, raw, now_ns, true);
+    }
+
+    fn externalImage(self: *OpenFile, a: std.mem.Allocator, peers: []OpenFile, raw: []const u8, now_ns: i128, approved_reload: bool) !bool {
         const state = self.documents.get(self.document) orelse return error.StaleDocument;
         const commands = maru.session.editor.edit_commands;
         var participants: std.ArrayList(commands.Participant) = .empty;
@@ -160,7 +168,10 @@ pub const OpenFile = struct {
             if (peer.documents.get(peer.document) != state) return error.StaleDocument;
             try participants.append(a, .{ .view = &peer.navigation, .id = peer.document.id });
         }
-        const changed = try commands.acceptExternal(a, state, participants.items, 0, raw);
+        const changed = if (approved_reload)
+            try commands.reloadExternal(a, state, participants.items, 0, raw)
+        else
+            try commands.acceptExternal(a, state, participants.items, 0, raw);
         if (changed) @import("backup_store.zig").noteEdit(state, now_ns);
         // Body/syntax projections refresh before paint, using the new revision.
         // Keeping this path nonfallible after publication permits OOM retry.

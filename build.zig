@@ -1543,7 +1543,7 @@ pub fn build(b: *std.Build) void {
     const edit_command_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Editor commands"} });
     const edit_command_step = b.step("test-editor-commands", "Verify atomic native editing, shared-view publication and history");
     const run_edit_command_tests = b.addRunArtifact(edit_command_tests);
-    run_edit_command_tests.addArg("--maru-expect-tests=32"); // 21 aggregation blocks and 11 behavioral tests
+    run_edit_command_tests.addArg("--maru-expect-tests=34"); // 21 aggregation blocks and 13 behavioral tests
     edit_command_step.dependOn(&run_edit_command_tests.step);
     const editor_input_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
@@ -1586,7 +1586,7 @@ pub fn build(b: *std.Build) void {
     const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
     const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
-    run_editor_host_tests.addArg("--maru-expect-tests=32"); // 2 aggregation blocks + 27 native tests + 3 pure policies
+    run_editor_host_tests.addArg("--maru-expect-tests=35"); // 2 aggregation blocks + 28 native tests + 5 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");

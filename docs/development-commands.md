@@ -1101,3 +1101,9 @@ ticket·수명·상한 11개(aggregation 2·native 8·pure 1)를 실행하며 �
 해제·재시도 deadline·directory cap·충돌 안내 합침을 검사한다. 일반 앱의 임시 파일 자동 갱신과
 dirty 충돌·저장 거절·버리기 종료는 별도의 실제 앱 실행으로 확인한다. posted 이벤트 검증이며
 물리 키보드·IME 또는 dirty reload/keep/compare 선택 완료로 보지 않는다.
+
+§2m.167의 `zig build test-editor-commands`는 명시적 dirty reload와 Undo·저장 보호를 더해
+34개(aggregation 21·behavioral 13)다. `zig build test-win32-editor-host`는 fresh choice
+예약·stale 입력 재시도·Undo와 소유된 비교의 행 번호·개행·할당 실패를 더해 35개다
+(aggregation 2·native 28·pure 5). 두 gate는 `-Doptimize=ReleaseFast`로도 실행한다.
+일반 앱의 임시 파일에서 Compare/Keep/Reload·Esc와 저장 충돌 보호를 별도 검증한다.

@@ -323,6 +323,7 @@ src/
                         알림을 살아 있는 문서 구독에 배분하는 검사를 소유한다.
                         file_read_worker는 selected handle 기반 읽기·raw hash와 값 ticket을 프레임 밖에서 만든다.
                         external_changes는 앱의 감시 구독·단일 읽기 슬롯·재시도·현재 문서 적용과 안내 대기를 소유한다.
+                        external_comparison은 현재 편집본과 새 디스크 이미지의 복사본·공통 diff 행 대응·표시 번호/색을 소유한다.
                         공유 문서·Undo·clean 외부 변경의 차분 적용 정책과 플랫폼 중립 경로 선택은
                         session/editor/와 user_paths에 둔다.
     linux/

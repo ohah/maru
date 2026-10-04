@@ -19,11 +19,24 @@ pub const Coordinator = struct {
         notice: ?anyerror = null,
     };
     pub const Event = struct { document: Lease, problem: anyerror };
+    pub const Choice = enum { compare, reload };
+    pub const Request = struct { document: Lease, choice: Choice, retry_at: i128 = 0 };
+    pub const Completion = struct {
+        request: Request,
+        result: reading.Result,
+
+        pub fn deinit(self: *Completion) void {
+            self.result.deinit();
+        }
+    };
     allocator: std.mem.Allocator,
     groups: watching.Groups,
     reader: reading.Reader = .{},
     bindings: std.ArrayList(Binding) = .empty,
     active: ?Lease = null,
+    requested: ?Request = null,
+    active_choice: ?Request = null,
+    completed: ?Completion = null,
     cursor: usize = 0,
     address: ?*Coordinator = null,
     hold_notices: bool = false,
@@ -48,11 +61,35 @@ pub const Coordinator = struct {
         return null;
     }
 
+    /// Choices request a new image; the conflict notification grants no write
+    /// authority and carries no cached body. One reader still bounds all I/O.
+    pub fn requestChoice(self: *Coordinator, target: Lease, choice: Choice) !void {
+        try self.check();
+        if (self.requested != null or self.active_choice != null or self.completed != null) return error.ReadBusy;
+        self.requested = .{ .document = target, .choice = choice };
+    }
+
+    /// Ownership moves to the host, which revalidates acceptsRead immediately
+    /// before applying the reload or copying the current buffer for comparison.
+    pub fn takeChoice(self: *Coordinator) !?Completion {
+        try self.check();
+        const result = self.completed;
+        self.completed = null;
+        return result;
+    }
+
     /// Admission happens once per new view. A failed watch stays explicitly
     /// paused until that view closes; it never silently becomes polling I/O.
     pub fn tick(self: *Coordinator, book: *hosting.Book, io: std.Io, views: []document.OpenFile, now_ns: i128) !?Event {
         try self.check();
         var admission_problem: ?anyerror = null;
+        if (self.requested) |request| if (viewIndex(views, request.document) == null) {
+            self.requested = null;
+        };
+        if (self.completed) |*completion| if (viewIndex(views, completion.request.document) == null) {
+            completion.deinit();
+            self.completed = null;
+        };
         var i = self.bindings.items.len;
         while (i != 0) {
             i -= 1;
@@ -99,11 +136,31 @@ pub const Coordinator = struct {
                 } else if (!binding.paused) binding.pending = true;
             };
         }
-        if (try self.reader.takeResult()) |value| {
+        if (try self.reader.takeResult()) |value| result_block: {
             var result = value;
-            defer result.deinit();
+            var moved = false;
+            defer if (!moved) result.deinit();
             const target = self.active orelse return error.MissingExternalReadOwner;
             self.active = null;
+            if (self.active_choice) |request| {
+                self.active_choice = null;
+                if (viewIndex(views, target) == null) break :result_block;
+                if (!(book.acceptsRead(&self.reader, result, target) catch false)) {
+                    var retry = request;
+                    retry.retry_at = now_ns +| retry_ns;
+                    self.requested = retry;
+                    break :result_block;
+                }
+                if (result == .failure and result.failure.problem == error.SourceBusy) {
+                    var retry = request;
+                    retry.retry_at = now_ns +| retry_ns;
+                    self.requested = retry;
+                    break :result_block;
+                }
+                self.completed = .{ .request = request, .result = result };
+                moved = true;
+                break :result_block;
+            }
             if (viewIndex(views, target)) |vi| {
                 for (self.bindings.items) |*binding| {
                     if (!same(binding.document, target)) continue;
@@ -147,7 +204,24 @@ pub const Coordinator = struct {
                 }
             }
         }
-        if (self.active == null and self.bindings.items.len != 0) {
+        if (self.active == null and self.completed == null) {
+            if (self.requested) |*request| {
+                if (now_ns >= request.retry_at) {
+                    if (book.submitRead(&self.reader, request.document)) |_| {
+                        self.active = request.document;
+                        self.active_choice = request.*;
+                        self.requested = null;
+                    } else |err| {
+                        request.retry_at = now_ns +| retry_ns;
+                        if (err != error.SaveBusy and err != error.ReadBusy and err != error.OutOfMemory) {
+                            self.requested = null;
+                            return err;
+                        }
+                    }
+                }
+            }
+        }
+        if (self.active == null and self.requested == null and self.completed == null and self.bindings.items.len != 0) {
             const count = self.bindings.items.len;
             for (0..count) |offset| {
                 const bi = (self.cursor + offset) % count;
@@ -179,6 +253,10 @@ pub const Coordinator = struct {
     pub fn deinit(self: *Coordinator, io: std.Io) !void {
         try self.check();
         try self.reader.deinit(io);
+        if (self.completed) |*completion| completion.deinit();
+        self.completed = null;
+        self.requested = null;
+        self.active_choice = null;
         try self.groups.deinit();
         self.bindings.deinit(self.allocator);
         self.bindings = .empty;

@@ -11540,3 +11540,32 @@ mutation 검출이 통과했다. 변형은 native hint 누락·hash 무관 self-
 dirty reload/keep/compare 선택 UI, 비동기 저장·초기 open, read-only/untitled/remote 감시와
 volume unmount·sleep/wake의 전체 soak는 아직 남아 있다. 실패한 구독은 파일을 닫았다 다시
 열어 재시도한다. 이 단계는 모든 외부 감시 시나리오 또는 전체 Windows 지원의 완료가 아니다.
+
+### 2m.167 — dirty 외부 변경의 비교·계속 편집·다시 불러오기
+
+일반 앱의 dirty 감시 알림은 공통 네 자리 confirm으로 연결된다. 기본 Enter는 비교이며,
+계속 편집·다시 불러오기·취소가 별도 자리다. 계속 편집과 Esc는 본문이나 저장 기준을
+바꾸지 않는다. 따라서 다음 저장도 외부 변경을 감지하고 덮어쓰기를 거절한다.
+
+비교와 다시 불러오기는 알림의 옛 bytes를 사용하지 않고 같은 단일 reader에서 새 읽기를
+우선 예약한다. 닫힌 lease는 버리고, 읽는 동안 revision이 바뀌면 200ms 뒤 재시도한다.
+완료 이미지는 host에 소유권을 넘기고 적용 직전에 ticket을 다시 검증한다. 비교는 현재
+편집본과 디스크 UTF-8 본문을 각각 복사하고 공통 diff의 행 대응·원래 줄 번호·추가/삭제
+색으로 표시한다. BOM은 본문에서 제거하되 CRLF/LF와 마지막 개행 차이는 비교에 남긴다.
+filler에는 번호가 없다. 비교 화면은 읽기 전용이며 Esc로 돌아간다. 세로 휠은 공유하고
+가로 휠은 포인터가 있는 쪽을 움직인다. 비교 준비 중 할당 실패는 원본 문서를 바꾸지 않는다.
+
+명시적 다시 불러오기는 dirty guard만 승인하며 readonly·live save·uncertain save·UTF-8
+검증을 유지한다. 공통 최소 replacement와 하나의 Undo entry로 게시하므로 Undo하면
+편집본을 복구할 수 있고 이전 이력도 남는다. logical saved hash와 raw disk hash를 함께
+갱신한다. 자동 clean 적용은 여전히 dirty 문서를 거절한다.
+
+공통 명령 34개와 host 35개의 Debug/ReleaseFast가 통과했다. 모델·선택 예약·비교 소유권
+각 경로에서 다섯 compiled runtime mutation을 검출하고 byte 단위로 원복했다. 실제 일반
+앱에서 네 자리 모달·읽기 전용 좌우 비교·Esc 복귀·최신 디스크 reload와 clean 종료,
+계속 편집 후 저장 거절·외부 원본 보존·명시적 discard 종료를 확인했다. posted 창 메시지
+검증이며 물리 키보드·IME는 아니다.
+
+저장 시점의 Compare/Overwrite/Reload 선택은 아직 별도 작업이다. 비교의 scrollbar drag,
+매우 긴 줄과 창 축소에 대한 전체 UX 검증, 비동기 저장·초기 open, readonly/untitled/remote
+감시와 volume unmount·sleep/wake soak도 남아 있다. 전체 Windows 지원은 완료되지 않았다.

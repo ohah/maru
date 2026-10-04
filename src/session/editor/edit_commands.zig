@@ -173,13 +173,24 @@ pub fn run(a: std.mem.Allocator, state: *state_mod.State, views: []const Partici
 /// entries still address the body they were recorded against. Every view maps
 /// its current selection rather than jumping to the replacement's end.
 pub fn acceptExternal(a: std.mem.Allocator, state: *state_mod.State, views: []const Participant, actor: usize, raw: []const u8) !bool {
+    return acceptImage(a, state, views, actor, raw, false);
+}
+
+/// Only an explicit reload choice may replace a dirty body. It remains one
+/// undoable edit, rather than clearing the user's history or replacing State.
+/// The host must admit a fresh read ticket at the time of that choice.
+pub fn reloadExternal(a: std.mem.Allocator, state: *state_mod.State, views: []const Participant, actor: usize, raw: []const u8) !bool {
+    return acceptImage(a, state, views, actor, raw, true);
+}
+
+fn acceptImage(a: std.mem.Allocator, state: *state_mod.State, views: []const Participant, actor: usize, raw: []const u8, approved_reload: bool) !bool {
     if (actor >= views.len) return error.InvalidSelection;
     for (views, 0..) |v, i| for (views[0..i]) |earlier| {
         if (v.id == earlier.id or v.view == earlier.view) return error.InvalidSelection;
     };
     const opened = if (state.opened) |*value| value else return error.NoDocument;
     if (opened.file.read_only) return error.ReadOnly;
-    if (opened.isDirty()) return error.DirtyDocument;
+    if (!approved_reload and opened.isDirty()) return error.DirtyDocument;
     if (state.persistence.live_save_images != 0 or state.persistence.uncertain_sequence != null) return error.SaveBusy;
     const doc = try @import("document.zig").open(raw, false);
     const old = opened.file.content;
@@ -375,6 +386,57 @@ test "Editor commands: external update refuses dirty pending uncertain readonly 
     state.opened.?.file.read_only = false;
     try std.testing.expectError(error.NotUtf8, acceptExternal(a, &state, &views, 0, "\xff"));
     try std.testing.expectEqualStrings("base", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(usize, 0), state.history.undo_len);
+}
+
+test "Editor commands: explicit dirty reload keeps local edits undoable and disk fingerprint current" {
+    const a = std.testing.allocator;
+    var state = try testState(a, "base");
+    defer state.clear(a);
+    var view: navigation.View = .{};
+    defer view.deinit(a);
+    try view.items.append(a, selection.Selection.at(0));
+    const views = [_]Participant{.{ .view = &view, .id = 1 }};
+    _ = try run(a, &state, &views, 0, .{ .insert = "local " }, .{ .now_ms = 1 });
+    const raw = "\xef\xbb\xbfdisk\r\n";
+    try std.testing.expectError(error.DirtyDocument, acceptExternal(a, &state, &views, 0, raw));
+    try std.testing.expect(try reloadExternal(a, &state, &views, 0, raw));
+    try std.testing.expectEqualStrings("disk\r\n", state.opened.?.file.content);
+    try std.testing.expect(!state.opened.?.isDirty());
+    try std.testing.expectEqual(state_mod.contentHash(raw), state.opened.?.disk_hash.?);
+    try std.testing.expectEqual(@as(usize, 2), state.history.undo_len);
+    _ = try run(a, &state, &views, 0, .undo, .{ .now_ms = 2 });
+    try std.testing.expectEqualStrings("local base", state.opened.?.file.content);
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqual(state_mod.contentHash(raw), state.opened.?.disk_hash.?);
+    _ = try run(a, &state, &views, 0, .undo, .{ .now_ms = 3 });
+    try std.testing.expectEqualStrings("base", state.opened.?.file.content);
+    _ = try run(a, &state, &views, 0, .redo, .{ .now_ms = 4 });
+    _ = try run(a, &state, &views, 0, .redo, .{ .now_ms = 5 });
+    try std.testing.expectEqualStrings("disk\r\n", state.opened.?.file.content);
+    try std.testing.expect(!state.opened.?.isDirty());
+}
+
+test "Editor commands: explicit reload still refuses active save uncertain readonly and invalid image" {
+    const a = std.testing.allocator;
+    var state = try testState(a, "local");
+    defer state.clear(a);
+    state.opened.?.saved_hash = state_mod.contentHash("base");
+    var view: navigation.View = .{};
+    defer view.deinit(a);
+    const views = [_]Participant{.{ .view = &view, .id = 1 }};
+    state.persistence.live_save_images = 1;
+    try std.testing.expectError(error.SaveBusy, reloadExternal(a, &state, &views, 0, "disk"));
+    state.persistence.live_save_images = 0;
+    state.persistence.uncertain_sequence = 1;
+    try std.testing.expectError(error.SaveBusy, reloadExternal(a, &state, &views, 0, "disk"));
+    state.persistence.uncertain_sequence = null;
+    state.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, reloadExternal(a, &state, &views, 0, "disk"));
+    state.opened.?.file.read_only = false;
+    try std.testing.expectError(error.NotUtf8, reloadExternal(a, &state, &views, 0, "\xff"));
+    try std.testing.expectEqualStrings("local", state.opened.?.file.content);
+    try std.testing.expect(state.opened.?.isDirty());
     try std.testing.expectEqual(@as(usize, 0), state.history.undo_len);
 }
 

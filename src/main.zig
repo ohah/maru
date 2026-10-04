@@ -4568,6 +4568,60 @@ test "Windows editor host external notification worker read and clean edit prese
 }
 
 const ExternalChanges = @import("platform/windows/editor/external_changes.zig").Coordinator;
+const ExternalComparison = @import("platform/windows/editor/external_comparison.zig").Comparison;
+
+test "Windows editor host conflict comparison owns aligned images numbers and exact line endings without editing source" {
+    const a = std.testing.allocator;
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    const lease: maru.session.editor.document_registry.Lease = .{ .owner = &registry, .document = .{ .slot = 0, .generation = 1 }, .id = 1, .kind = .view };
+    var body = [_]u8{ 'a', '\n', 'b', '\n' };
+    var comparison = try ExternalComparison.init(a, lease, &body, "\xef\xbb\xbfa\nx\ny\nb\n");
+    defer comparison.deinit();
+    body[0] = 'z';
+    try std.testing.expectEqualStrings("a\nb\n", comparison.local);
+    try std.testing.expectEqualStrings("a\nx\ny\nb\n", comparison.disk);
+    try std.testing.expectEqual(comparison.left.lines.len, comparison.right.lines.len);
+    try std.testing.expectEqual(@as(usize, 2), comparison.left.total_lines);
+    try std.testing.expectEqual(@as(usize, 4), comparison.right.total_lines);
+    try std.testing.expectEqual(@as(?u32, 4), comparison.right.numbers[comparison.right.numbers.len - 1]);
+    var fillers: usize = 0;
+    var additions: usize = 0;
+    for (comparison.left.numbers, comparison.right.bands) |number, band| {
+        if (number == null) fillers += 1;
+        if (band == .added) additions += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), fillers);
+    try std.testing.expectEqual(@as(usize, 2), additions);
+    var eol = try ExternalComparison.init(a, lease, "a\r\n", "a\n");
+    defer eol.deinit();
+    try std.testing.expectEqual(editor_view.frame.RowBand.removed, eol.left.bands[0]);
+    try std.testing.expectEqual(editor_view.frame.RowBand.added, eol.right.bands[0]);
+    try std.testing.expectEqualStrings("a", eol.left.lines[0]);
+    var lone = try ExternalComparison.init(a, lease, "a\r", "a");
+    defer lone.deinit();
+    try std.testing.expectEqualStrings("a\r", lone.left.lines[0]);
+    var identical = try ExternalComparison.init(a, lease, "same", "same");
+    defer identical.deinit();
+    try std.testing.expectEqual(editor_view.frame.RowBand.none, identical.left.bands[0]);
+    try std.testing.expectEqual(@as(?u32, 1), identical.right.numbers[0]);
+    var empty = try ExternalComparison.init(a, lease, "", "");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.left.lines.len);
+    try std.testing.expectError(error.NotUtf8, ExternalComparison.init(a, lease, "local", "\xff"));
+}
+
+test "Windows editor host conflict comparison allocation prefixes release every owned preview" {
+    const Check = struct {
+        fn runCase(a: std.mem.Allocator) !void {
+            var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+            const lease: maru.session.editor.document_registry.Lease = .{ .owner = &registry, .document = .{ .slot = 0, .generation = 1 }, .id = 1, .kind = .view };
+            var comparison = try ExternalComparison.init(a, lease, "a\nb\n", "a\nx\ny\nb\n");
+            defer comparison.deinit();
+            try std.testing.expectEqualStrings("a\nb\n", comparison.local);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.runCase, .{});
+}
 
 fn waitExternalJob(changes: *ExternalChanges) !void {
     const io = std.testing.io;
@@ -4576,6 +4630,48 @@ fn waitExternalJob(changes: *ExternalChanges) !void {
         if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ReadDidNotComplete;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
+}
+
+test "Windows editor host explicit conflict choice reads fresh image retries stale typing and reloads undoably" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(a);
+    defer changes.deinit(io) catch unreachable;
+    const lease = f.views.items[0].document;
+    const state = f.documents.get(lease).?;
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 1, .views = f.views.items });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "disk\r\n" });
+    try changes.requestChoice(lease, .reload);
+    try std.testing.expectError(error.ReadBusy, changes.requestChoice(lease, .compare));
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try std.testing.expect(changes.active_choice != null);
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'Y' } }, .{ .now_ms = 2, .views = f.views.items });
+    try waitExternalJob(&changes);
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try std.testing.expect(try changes.takeChoice() == null);
+    try std.testing.expect(changes.requested != null);
+    _ = try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns - 1);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbffresh\r\n" });
+    _ = try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns);
+    try waitExternalJob(&changes);
+    _ = try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns);
+    var completion = (try changes.takeChoice()) orelse return error.MissingChoiceImage;
+    defer completion.deinit();
+    try std.testing.expectEqual(ExternalChanges.Choice.reload, completion.request.choice);
+    try std.testing.expect(try f.book.acceptsRead(&changes.reader, completion.result, lease));
+    try std.testing.expectEqualStrings("XYbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqualStrings("\xef\xbb\xbffresh\r\n", completion.result.image.bytes);
+    _ = try f.views.items[0].reloadExternal(a, f.views.items, completion.result.image.bytes, ExternalChanges.retry_ns);
+    try std.testing.expectEqualStrings("fresh\r\n", state.opened.?.file.content);
+    try std.testing.expect(!state.opened.?.isDirty());
+    const participants = [_]maru.session.editor.edit_commands.Participant{.{ .view = &f.views.items[0].navigation, .id = lease.id }};
+    _ = try maru.session.editor.edit_commands.run(a, state, &participants, 0, .undo, .{ .now_ms = 3 });
+    try std.testing.expectEqualStrings("XYbase\r\n", state.opened.?.file.content);
+    try std.testing.expect(state.opened.?.isDirty());
 }
 
 test "Windows editor host automatic external scheduler applies a real hint and folds only equal raw fingerprints" {
@@ -4979,6 +5075,55 @@ fn reportFileBackups(stderr: *std.Io.Writer, report: @import("platform/windows/e
 /// 오래 들고 있어 미리 잡아 두지만, 여기서는 파일이 오갈 때마다 줄 수가 바뀐다.
 ///
 /// 배경 사각은 **pane 원점에 딱 맞는다**(스모크처럼 음수로 시작하지 않는다 — 그 함수 doc).
+fn buildComparisonSide(
+    a: std.mem.Allocator,
+    host: EditorHost,
+    side: @import("platform/windows/editor/external_comparison.zig").Side,
+    first_line: u32,
+    first_col: u16,
+    rect: maru.session.split_tree.Rect,
+    ops: []maru.chrome.draw.Op,
+    tokens: *const maru.chrome.Tokens,
+    cw: u32,
+    ch: u32,
+) !EditorBuilt {
+    const text = try a.alloc(u8, 256 * 1024);
+    defer a.free(text);
+    const runs = try a.alloc(maru.chrome.draw.Run, 4096);
+    defer a.free(runs);
+    var content: [512]editor_view.content.Row = undefined;
+    var visual: [512]editor_view.visual_map.VisualRow = undefined;
+    var gutter: [512]editor_view.gutter.Row = undefined;
+    var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
+    var carets: [256]u32 = undefined;
+    const counts = try a.alloc(u32, side.lines.len + 1);
+    defer a.free(counts);
+    const inset = editor_view.frame.content_inset_px;
+    const local: maru.chrome.draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
+    return buildEditorFrame(a, host, first_line, side.lines, editor_view.frame.Scratch{
+        .ops = ops,
+        .text_bytes = text,
+        .runs = runs,
+        .content_rows = &content,
+        .visual_rows = &visual,
+        .gutter_rows = &gutter,
+        .row_counts = counts,
+        .count_scratch = &count_scratch,
+        .caret_cols = &carets,
+    }, ops, tokens, .{
+        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+    }, local, .{ .x = 0, .y = 0, .w = rect.w -| inset * 2, .h = rect.h -| inset * 2 }, cw, ch, .{
+        .cols = @intCast(@min(std.math.maxInt(u16), @max(1, rect.w / cw))),
+        .rows = @intCast(@min(std.math.maxInt(u16), @max(1, rect.h / ch))),
+    }, .{ .x = -@as(i32, @intCast(inset)), .y = -@as(i32, @intCast(inset)), .w = rect.w, .h = rect.h }, rect.x, rect.y, first_col, null, null, .{
+        .selection_marks = @as(?[]const []const editor_view.frame.Mark, null),
+        .numbers = side.numbers,
+        .bands = side.bands,
+        .total_lines = side.total_lines,
+    }, &.{});
+}
+
 fn buildComposedEditor(
     allocator: std.mem.Allocator,
     host: EditorHost,
@@ -6591,6 +6736,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 찾아** 번호를 푼다 — macOS `confirm_accept` 가 범위를 다시 푸는 것과 같은 규율이다.
     var pending_close_id: ?u64 = null;
     var pending_file_close: ?FileCloseTarget = null;
+    var pending_file_conflict: ?maru.session.editor.document_registry.Lease = null;
+    var file_comparison: ?ExternalComparison = null;
+    defer if (file_comparison) |*comparison| comparison.deinit();
     var file_exit_accepted = false;
     var confirm_shows: usize = 0;
     var confirm_accepts: usize = 0;
@@ -7572,7 +7720,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (file_changes.tick(&editor_files, io, open_files.items, std.Io.Clock.awake.now(io).nanoseconds)) |event| {
             if (event) |notice| {
                 stderr.print("  editor external change: {s}\n", .{@errorName(notice.problem)}) catch {};
-                file_notice.show(maru.i18n.t(switch (notice.problem) {
+                if (notice.problem == error.DirtyDocument) {
+                    pending_file_conflict = notice.document;
+                    confirm_state.showChoices(maru.i18n.t(.win_editor_external_changed), .{
+                        .primary = maru.i18n.t(.btn_compare),
+                        .alternate = maru.i18n.t(.btn_keep_editing),
+                        .extra = maru.i18n.t(.btn_reload),
+                        .cancel = maru.i18n.t(.common_cancel),
+                    });
+                } else file_notice.show(maru.i18n.t(switch (notice.problem) {
                     error.DirtyDocument => .win_editor_external_changed,
                     error.TooManyDirectoryWatches => .win_editor_watch_limit,
                     error.OutOfMemory => .dbg_editor_oom,
@@ -7583,6 +7739,41 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         } else |err| {
             stderr.print("  warning: editor external maintenance failed({s})\n", .{@errorName(err)}) catch {};
             if (!file_notice.open and !confirm_state.open) file_notice.show(maru.i18n.t(if (err == error.OutOfMemory) .dbg_editor_oom else .win_editor_watch_paused));
+        }
+        if (try file_changes.takeChoice()) |value| {
+            var completion = value;
+            defer completion.deinit();
+            const lease = completion.request.document;
+            if (fileIndexForLease(open_files.items, lease)) |fi| {
+                if (editor_files.acceptsRead(&file_changes.reader, completion.result, lease) catch false) {
+                    switch (completion.result) {
+                        .failure => |failure| file_notice.show(maru.i18n.t(fileSaveNotice(failure.problem))),
+                        .image => |image| switch (completion.request.choice) {
+                            .reload => {
+                                _ = open_files.items[fi].reloadExternal(allocator, open_files.items, image.bytes, std.Io.Clock.awake.now(io).nanoseconds) catch |err| {
+                                    file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                                };
+                            },
+                            .compare => {
+                                const state = editor_files.registry.get(lease).?;
+                                if (ExternalComparison.init(allocator, lease, state.opened.?.file.content, image.bytes)) |comparison| {
+                                    if (file_comparison) |*old| old.deinit();
+                                    file_comparison = comparison;
+                                    active_view = .{ .file = fi };
+                                } else |_| file_notice.show(maru.i18n.t(.editor_compare_failed));
+                            },
+                        },
+                    }
+                } else file_changes.requestChoice(lease, completion.request.choice) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+            }
+        }
+        if (file_comparison) |*comparison| {
+            if (fileIndexForLease(open_files.items, comparison.document) == null or active_view != .file or
+                !std.meta.eql(open_files.items[active_view.file].document, comparison.document))
+            {
+                comparison.deinit();
+                file_comparison = null;
+            }
         }
         // ── 훑는 중임을 화면에 말한다 ────────────────────────────────────────────────────
         //
@@ -10606,7 +10797,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // Enter/Esc·Y/N·←/→).
                 if (confirm_state.open) {
                     if (maru.chrome.components.confirm.handle(win32_keys.chromeKeyEvent(key_ev), &confirm_state)) |action| {
-                        if (pending_file_close != null) {
+                        if (pending_file_close != null or pending_file_conflict != null) {
                             if (confirm_pending_click == null) confirm_pending_click = action;
                             continue;
                         }
@@ -10766,6 +10957,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                             dock_rebuild_failures += 1;
                         };
+                    }
+                    continue;
+                }
+                if (file_comparison != null and active_view == .file) {
+                    if (key_ev.key == .escape) {
+                        file_comparison.?.deinit();
+                        file_comparison = null;
                     }
                     continue;
                 }
@@ -11157,7 +11355,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
                             .confirmed => confirm_pending_click = .confirmed,
                             .cancelled => confirm_pending_click = .cancelled,
-                            .alternate, .extra => if (pending_file_close != null and confirm_pending_click == null) {
+                            .alternate, .extra => if ((pending_file_close != null or pending_file_conflict != null) and confirm_pending_click == null) {
                                 confirm_pending_click = action;
                             },
                         };
@@ -11290,6 +11488,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (fi < open_files.items.len) {
                                             editor_files.requireClose(open_files.items[fi].document, false) catch |err| {
                                                 if (err == error.DirtyDocument) {
+                                                    pending_file_conflict = null;
                                                     pending_file_close = .{ .file = open_files.items[fi].document };
                                                     pending_close_id = null;
                                                     showFileClose(&confirm_state);
@@ -11841,6 +12040,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **가로 스크롤이 기본이고 랩은 토글이다**(`native-editor-visual-mapping.md`) — 그
                 // 기본 축에 입력이 없으면 창보다 긴 줄은 **잘린 채 끝이다**. 둘로 받는다:
                 // 기울임 휠·터치패드의 `wheel_h`, 그리고 평범한 휠에 **Shift**(터미널이 이미 쓰는 관례).
+                if (file_comparison) |*comparison| {
+                    if (m.kind == .wheel or m.kind == .wheel_h) {
+                        const horizontal = m.kind == .wheel_h or (m.mods & win32_mouse.mod_shift) != 0;
+                        const notches = if (horizontal) wheel_acc_h.feed(m.wheel_delta) else wheel_acc_editor.feed(m.wheel_delta);
+                        const amount = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
+                        if (horizontal) {
+                            const col = if (m.x_px < geom.terminal.x + geom.terminal.w / 2) &comparison.left_col else &comparison.right_col;
+                            const signed = if (m.kind == .wheel_h) amount else -amount;
+                            col.* = @intCast(std.math.clamp(@as(i64, col.*) + signed, 0, std.math.maxInt(u16)));
+                        } else {
+                            const visible: u16 = @intCast(@min(std.math.maxInt(u16), @max(1, geom.terminal.h / cell_h)));
+                            const wanted: u32 = @intCast(std.math.clamp(@as(i64, comparison.first_line) - amount, 0, std.math.maxInt(u32)));
+                            comparison.first_line = @intCast(editor_view.viewport.clampFirstRow(wanted, comparison.left.lines.len, visible));
+                        }
+                    }
+                    continue;
+                }
                 if ((m.kind == .wheel or m.kind == .wheel_h) and active_view == .file and active_view.file < open_files.items.len) {
                     const horizontal = m.kind == .wheel_h or (m.mods & win32_mouse.mod_shift) != 0;
                     const notches = if (horizontal) wheel_acc_h.feed(m.wheel_delta) else wheel_acc_editor.feed(m.wheel_delta);
@@ -12459,7 +12675,35 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 .cell_w = cell_w,
                 .cell_h = cell_h,
             };
-            if (buildComposedEditor(allocator, ed_host, of, geom.terminal, ops_buf, &chrome_tokens, cell_w, cell_h)) |built_ed| {
+            if (file_comparison) |comparison| {
+                const left_w = geom.terminal.w / 2;
+                const rects = [_]maru.session.split_tree.Rect{
+                    .{ .x = geom.terminal.x, .y = geom.terminal.y, .w = left_w, .h = geom.terminal.h },
+                    .{ .x = geom.terminal.x + left_w, .y = geom.terminal.y, .w = geom.terminal.w - left_w, .h = geom.terminal.h },
+                };
+                const sides = [_]@import("platform/windows/editor/external_comparison.zig").Side{ comparison.left, comparison.right };
+                const cols = [_]u16{ comparison.left_col, comparison.right_col };
+                const labels = [_][]const u8{ maru.i18n.t(.win_editor_compare_local), maru.i18n.t(.win_editor_compare_disk) };
+                for (rects, sides, cols, labels) |rect, side, col, label| {
+                    const header_h = @min(rect.h, cell_h + editor_view.frame.content_inset_px * 2);
+                    var header_lines = [_][]const u8{label};
+                    var header_numbers = [_]?u32{null};
+                    var header_bands = [_]editor_view.frame.RowBand{.none};
+                    if (buildComparisonSide(allocator, ed_host, .{ .lines = &header_lines, .numbers = &header_numbers, .bands = &header_bands, .total_lines = 0 }, 0, 0, .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = header_h }, ops_buf, &chrome_tokens, cell_w, cell_h)) |value| {
+                        var header = value;
+                        defer header.deinit(allocator);
+                        try cells.appendSlice(allocator, header.cells.items);
+                    } else |_| file_notice.show(maru.i18n.t(.editor_compare_failed));
+                    if (buildComparisonSide(allocator, ed_host, side, comparison.first_line, col, .{ .x = rect.x, .y = rect.y + header_h, .w = rect.w, .h = rect.h - header_h }, ops_buf, &chrome_tokens, cell_w, cell_h)) |value| {
+                        var built = value;
+                        defer built.deinit(allocator);
+                        try cells.appendSlice(allocator, built.cells.items);
+                    } else |_| file_notice.show(maru.i18n.t(.editor_compare_failed));
+                }
+                editor_last_vbar = null;
+                editor_last_hbar = null;
+                editor_bar_file = null;
+            } else if (buildComposedEditor(allocator, ed_host, of, geom.terminal, ops_buf, &chrome_tokens, cell_w, cell_h)) |built_ed| {
                 var be = built_ed;
                 defer be.deinit(allocator);
                 cells.ensureUnusedCapacity(allocator, be.cells.items.len) catch {};
@@ -12600,6 +12844,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     dirty_file = dirty_file or state.opened.?.isDirty();
                 }
                 if (dirty_file) {
+                    pending_file_conflict = null;
                     pending_file_close = .window;
                     pending_close_id = null;
                     showFileClose(&confirm_state);
@@ -12611,7 +12856,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (confirm_pending_click) |act| {
             confirm_pending_click = null;
-            if (pending_file_close) |target| {
+            if (pending_file_conflict) |target| {
+                confirm_state.dismiss();
+                pending_file_conflict = null;
+                if (fileIndexForLease(open_files.items, target) != null) switch (act) {
+                    .confirmed => file_changes.requestChoice(target, .compare) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err))),
+                    .extra => file_changes.requestChoice(target, .reload) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err))),
+                    .alternate, .cancelled => {},
+                };
+            } else if (pending_file_close) |target| {
                 const approved = approveFileClose(io, &editor_files, &file_backups, open_files.items, target, act) catch |err| blk: {
                     stderr.print("  warning: editor close failed({s})\n", .{@errorName(err)}) catch {};
                     file_notice.show(maru.i18n.t(fileSaveNotice(err)));
@@ -17227,7 +17480,9 @@ fn buildEditorFrame(
 
     const side: editor_view.diff_frame.Side = .{
         .lines = ls,
-        .total_lines = ls.len,
+        .total_lines = if (@hasField(@TypeOf(ss), "total_lines")) ss.total_lines else ls.len,
+        .numbers = if (@hasField(@TypeOf(ss), "numbers")) ss.numbers else null,
+        .bands = if (@hasField(@TypeOf(ss), "bands")) ss.bands else null,
         .selection_marks = sel_marks,
         .carets = if (@hasField(@TypeOf(ss), "carets")) ss.carets else null,
         .line_colors = line_colors,

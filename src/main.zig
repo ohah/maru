@@ -4029,6 +4029,34 @@ fn appendStatusBarCells(
 ///
 /// **빈 항목은 안 넣는다.** repo 밖이면 브랜치 줄이 없고 cwd 가 없으면 경로 줄이 없다 — 그것이
 /// 계약이고, 빈 문자열을 넣으면 폭 0 짜리 항목이 `dropped` 로 세어져 "폭이 모자랐다" 로 읽힌다.
+fn recoveredStatusItems(buffer: []StatusBarItem, items: []const StatusBarItem, base_count: usize) []const StatusBarItem {
+    if (base_count >= buffer.len) return items;
+    // Recovery must survive a long cwd exhausting the left group's width.
+    // Only the first restore moves base items; subsequent restores update it.
+    if (items.len == base_count)
+        std.mem.copyBackwards(StatusBarItem, buffer[1 .. base_count + 1], buffer[0..base_count]);
+    buffer[0] = .{ .id = .notifications, .text = maru.i18n.t(.editor_backup_restored) };
+    return buffer[0 .. base_count + 1];
+}
+
+test "Windows editor host recovery status keeps priority base items and repeated restore identity" {
+    var buffer: [4]StatusBarItem = undefined;
+    buffer[0] = .{ .id = .git_branch, .text = "branch" };
+    buffer[1] = .{ .id = .cwd, .text = "a very long work directory" };
+    var items: []const StatusBarItem = buffer[0..2];
+    for (0..5) |_| {
+        items = recoveredStatusItems(&buffer, items, 2);
+        try std.testing.expectEqual(@as(usize, 3), items.len);
+        try std.testing.expectEqual(maru.chrome.components.status_bar.ItemId.notifications, items[0].id);
+        try std.testing.expectEqualStrings(maru.i18n.t(.editor_backup_restored), items[0].text);
+        try std.testing.expectEqualStrings("branch", items[1].text);
+        try std.testing.expectEqualStrings("a very long work directory", items[2].text);
+    }
+    const full = recoveredStatusItems(buffer[0..3], items, 3);
+    try std.testing.expectEqual(items.ptr, full.ptr);
+    try std.testing.expectEqual(items.len, full.len);
+}
+
 fn buildStatusBarItems(
     out: []StatusBarItem,
     scm_status: []const u8,
@@ -11398,8 +11426,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 if (editor_documents.get(of.document).?.opened.?.file.read_only)
                                                     file_notice.show(maru.i18n.t(.editor_readonly));
                                                 if (of.recovered and base_status_items < status_items_buf.len) {
-                                                    status_items_buf[base_status_items] = .{ .id = .notifications, .text = maru.i18n.t(.editor_backup_restored) };
-                                                    status_items = status_items_buf[0 .. base_status_items + 1];
+                                                    status_items = recoveredStatusItems(&status_items_buf, status_items, base_status_items);
                                                     rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                                                 }
                                             },

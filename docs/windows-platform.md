@@ -11376,3 +11376,26 @@ RichTextArtifact의 placement와 Windows cellFromGpuGlyph를 사용해 정확한
 첫 라벨 glyph 누락의 다섯 변형이 모두 빌드 후 실제 창에서 EditorCloseLabel 오류로 검출됐다.
 공유 lowering 원본을 정확히 복구한 뒤 실제 창의 세 선택이 다시 통과했다. 물리 입력과
 일반 앱 프로세스 종료·재실행은 여전히 남아 있다.
+
+### 2m.159 — 일반 앱 프로세스 종료·재실행과 복원 안내 우선순위
+
+실험 전용 document smoke가 아닌 `win32-terminal`을 별도 LOCALAPPDATA와 임시 cwd로
+실행했다. 파일 탐색기의 실제 행 클릭으로 fixture를 열고 창 WM_CHAR로 편집했다. 미저장
+WM_CLOSE의 취소는 본문·복구 레코드·프로세스를 유지했다. 다시 저장을 선택하면 실제 앱이
+종료됐고 원본은 BOM·CRLF를 유지한 Xbase였다. 새 프로세스로 실행해 같은 파일을 선택한
+화면에서 저장 내용을 확인했다. 이후 Y 편집과 debounce 백업을 확인하고 테스트 앱만
+강제 종료했다. 새 프로세스에서 파일을 다시 선택하자 YXbase가 복원됐으며 원본은 Xbase
+그대로였다. 재실행의 열린 파일 목록 자동 복원이나 물리 키보드/IME를 뜻하지 않는다.
+
+복원된 문서의 원본을 외부에서 바꾼 뒤 저장 후 닫기는 실제 충돌 notice와 함께 거부됐고
+앱·본문·레코드를 유지했다. 안내를 닫고 버리기를 선택하면 앱이 종료됐고 외부 원본은
+그대로, 해당 복구 레코드만 제거됐다. 실제 화면은 `.zig-cache/editor-app-restart-*/`의
+reopened·recovered-notice·conflict-notice PNG와 임시 데이터에 기록했다.
+
+이 검증에서 긴 cwd가 복원 상태 항목을 밀어내는 결함을 발견했다. `recoveredStatusItems`는
+첫 복원에서 기존 항목을 뒤로 한 번 이동하고 복원 안내를 먼저 둔다. 다음 복원은 같은
+항목만 갱신하며 base 항목·순서와 bounded capacity를 보존한다. 이는 기존 좌측 비모달
+안내 조립의 수정이며 W8.19 우측 묶음 전체 구현을 뜻하지 않는다. Host gate는 순수 정책
+한 행을 더해 19개다. 안내 우선순위 누락·base 항목 유실·반복 이동·빈 라벨·잘못된 capacity
+거절의 다섯 변형이 컴파일 후 runtime 실패로 검출됐고 byte 원복 후 Debug/ReleaseFast
+각각 19개가 통과했다. 감시·비동기 I/O 및 물리 입력·더 넓은 crash 범위는 계속 남아 있다.

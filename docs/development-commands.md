@@ -1071,3 +1071,6 @@ counter 상한을 포함해 14개이며 전 할당 실패가 이미지 보호를
 2개, 총 18개다. 앱의 native save grant·닫기 선택·기존 백업 복원과 충돌 보존을 검사한다.
 `zig build test-win32-editor-backup`은 기존 root를 생성하지 않는 조회와 private 레코드
 재열기 두 판정을 더해 34개다. 두 gate는 Windows native 호스트에서 실행한다.
+
+§2m.159의 `zig build test-win32-editor-host`는 순수 복원 안내 우선순위·반복 항목·상한
+판정 한 행을 더해 19개다(aggregation 2·native 14·pure 3). Debug와 ReleaseFast에서 실행한다.

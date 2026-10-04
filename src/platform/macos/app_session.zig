@@ -124,6 +124,7 @@ const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1
 const agent_body_search_backend = @import("agent_body_search_backend.zig"); // BS1: 본문 검색 워커
 pub const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
+pub const outline_ops = @import("app_session/editor/outline.zig");
 pub const accessibility = @import("app_session/accessibility.zig"); // 발행된 tree 의 접근성 서술자를 ABI 스냅숏으로 굳힌다 — docs/chrome-interaction-migration.md §3
 const file_panel_ops = @import("app_session/file_panel.zig");
 pub const pane_ops = @import("app_session/pane.zig");
@@ -4106,7 +4107,7 @@ pub const MeasuredTextCache = struct {
         };
     }
 
-    fn clear(slot: *?MeasuredTextCache, allocator: std.mem.Allocator) void {
+    pub fn clear(slot: *?MeasuredTextCache, allocator: std.mem.Allocator) void {
         if (slot.*) |c| {
             allocator.free(c.placements);
             allocator.free(c.records);
@@ -6951,6 +6952,7 @@ pub const AppSession = struct {
     /// 탐색기 세로 스크롤(SV2a). 단위는 **backing pixel**이라 행 경계 사이에서 멈출 수 있고, 그 부분
     /// 행은 pane clip(ABI v147)이 자른다. 행 index 상태였을 때는 바닥 부분 행 자리에 배경이 남았다.
     file_tree_scroll: chrome.ui.scroll_area.State = .{},
+    editor_outline: outline_ops.State = .{},
     /// ET-CWD: 마지막으로 따라간 활성 터미널 cwd(owned, ""=아직 없음). 관측은 폴링이라 매 tick 같은 값이
     /// 오므로 **변화 시에만** reveal을 건다(docs/file-explorer.md §1 정책 2).
     file_tree_followed_cwd: ?[]u8 = null,
@@ -11194,6 +11196,7 @@ pub const AppSession = struct {
                 _ = editor_ops.openUntitledInActivePane(self) catch {};
             },
             .recover_editor_backups => if (!self.tabsBlocked()) editor_ops.recovery_ui.open(self),
+            .show_editor_outline => if (!self.tabsBlocked()) dock_ops.openDockTo(self, .outline),
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),
             .toggle_file_panel_dock_side => file_panel_ops.toggleFilePanelDockSide(self),
             .toggle_file_panel_focus => file_panel_ops.toggleFilePanelFocus(self),
@@ -14262,6 +14265,7 @@ pub const AppSession = struct {
             // 손을 뗀 뒤 돌아와 올린 mouse-up 이 그 사이 바뀐 목록에서 행을 연다. AI 세션 도크가
             // resize 에서 같은 이유로 capture 를 놓는다(app_session.zig 의 그 자리 주석).
             file_tree_dock_ops.releaseFileTreePointer(self);
+            self.editor_outline.interaction = .{};
         }
         // 포커스 변화는 PTY와 무관한 시각 변화다(cursor.unfocused가 window_focused로 커서 모드를 정한다) — frame 빌드가
         // metal_dirty 게이트(idle tick은 빌드 생략) 뒤에 있어 여기서 dirty를 안 세우면 출력 없는 셸에선 Cmd+Tab 후에도
@@ -14846,6 +14850,14 @@ pub const AppSession = struct {
         // 각각 따로 봐야 한다. 선택 drag는 처음 가드가 놓쳐 도크 위에서 놓으면 up이 도크에 먹히고
         // `drag_autoscroll`이 latch된 채 터미널이 무한 스크롤했다.
         // capture 없는 pointer만 rect로 분류한다(docs/chrome-interaction-migration.md §2).
+        if (dock_ops.dockVisible(self) and self.dock.view == .outline and button == 0 and (kind == 2 or kind == 3) and
+            self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
+        {
+            if (self.editor_outline.interaction.capture != null or layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).dock)) {
+                outline_ops.pointer(self, if (kind == 2) .move else .up, x_px, y_px);
+                if (kind == 3) return;
+            }
+        }
         if (dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and
             self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
         {
@@ -15077,6 +15089,13 @@ pub const AppSession = struct {
                 // 뒤에 두면 **소스 컨트롤에서는 영영 실행되지 않는다** — 실제로 그렇게 넣었다가 제품에서
                 // 키가 하나도 안 먹는 것을 사용자가 잡았다(2026-08-30). 판정자는 아래 포인터 테스트다.
                 if (layout_math.pointInRect(x_px, y_px, dg.dock)) agent_dock.takeAgentSessionDockKeyFocus(self);
+                if (self.dock.view == .outline and layout_math.pointInRect(x_px, y_px, dg.dock)) {
+                    if (button == 0) {
+                        if (dock_ops.beginDockListScrollbarGesture(self, x_px, y_px)) return;
+                        outline_ops.pointer(self, .down, x_px, y_px);
+                    }
+                    return;
+                }
                 if (self.dock.view == .source_control and layout_math.pointInRect(x_px, y_px, dg.dock)) {
                     // **published tree 하나가 히트테스트를 소유한다**(P1b). 예전에는 여기서 행 높이를
                     // 다시 곱해 좌표를 인덱스로 바꿨는데, 그 산술이 렌더와 갈리는 순간 누른 것과 열리는
@@ -18001,6 +18020,7 @@ pub const AppSession = struct {
 
     pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, mods: i32) CursorKind {
         if (!self.surface_initialized) return .text;
+        if (!dock_ops.dockVisible(self) or self.dock.view != .outline or !layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content)) outline_ops.clearHover(self);
         // 호버 박스의 포인터 추적(tooling §8.2b) — 정지 시간은 tick 이 잰다. 열려 있으면 sticky 판정(낱말·상자 밖이면 닫힘).
         editor_ops.hover_client.notePointer(self, x_px, y_px);
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
@@ -18165,6 +18185,7 @@ pub const AppSession = struct {
             // selector is a leave transition for the SessionDock tree, not a frozen hover.
             if (self.dock.view == .agent_sessions) _ = agent_dock.agentSessionDockPointer(self, .move, x_px, y_px);
             if (self.dock.view == .source_control) _ = scm_dock_ops.scmDockPointer(self, .move, x_px, y_px);
+            if (self.dock.view == .outline) outline_ops.pointer(self, .move, x_px, y_px);
             if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
                 tab_ops.setHoveredTab(self, null);
                 self.clearHoverUrlAnchor();
@@ -18177,6 +18198,9 @@ pub const AppSession = struct {
             }
             dock_ops.setHoveredDockViewSlot(self, null);
             dock_ops.setHoveredDockAction(self, null);
+            if (self.dock.view == .outline and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
+                return if (self.editor_outline.interaction.hovered != null) .link else .default;
+            }
             // SessionDock hover is owned by the same published tree that mouse down/up uses.
             // The dispatch above already clears a stale card highlight for tree-outside points;
             // this branch only selects the cursor response without a second archive row hit-test.
@@ -20333,6 +20357,7 @@ pub const AppSession = struct {
         // 갤러리의 **범위도 활성 pane 이다**(docs/agent-image-gallery.md §2.1) — 스코프 칩·저장소와 같은
         // 축으로 따라간다. 여기서도 비교는 surface id 하나이고 스캔 자체는 worker 가 한다.
         agent_activity_ops.refreshForFocus(self);
+        outline_ops.refreshForFocus(self);
         agent_dock.updateAgentSessionArchiveProjectScope(self); // scope root worker result만 적용; tick의 filesystem I/O는 0
         file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
@@ -21731,6 +21756,7 @@ pub const AppSession = struct {
                             // 활동 줄을 펼치면 **그때 받은 명령·결과 전문**이 같은 자리에 뜬다(AV3).
                             agent_activity_ops.collectOpenDetail(self, &collected, pane_frame_builder, tabbar_colors);
                         }
+                        if (self.dock.view == .outline) outline_ops.collect(self, &collected, pane_frame_builder, tabbar_colors);
                         if (self.dock.view == .explorer and draw_window.count > 0) {
                             // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
                             // 높이·라운드 밴드를 표현할 수 없어 이 자리에서 물러났다(SCM 도크가 P1b에서
@@ -22411,6 +22437,7 @@ pub const AppSession = struct {
     /// 비워야 중앙 패널 '밖'(사이드바·탭 바·좌상단 ◧·우측 스크롤바)에 켜져 있던 강조가 얼어붙어 보이지 않는다(키보드로
     /// 닫으면 마우스 이동이 없어 영구 잔존하던 회귀 — code-review). 각 setter는 무변화면 no-op이라 중복 rebuild 없음.
     pub fn clearAllHover(self: *AppSession) void {
+        outline_ops.clearHover(self);
         self.setHoveredSlot(null);
         tab_ops.setHoveredTab(self, null);
         file_panel_ops.clearFileTreeHover(self);
@@ -24015,6 +24042,7 @@ pub const AppSession = struct {
                 self.scm_dock_actions.deinit(self.allocator);
                 self.file_tree_entries.deinit(self.allocator);
                 self.file_tree_accessibility.deinit(self.allocator);
+                self.editor_outline.deinit(self.allocator);
                 self.file_tree_actions.deinit(self.allocator);
                 self.agent_session_dock_entries.deinit(self.allocator);
                 self.agent_session_dock_actions.deinit(self.allocator);
@@ -77820,6 +77848,13 @@ test "도크 뷰는 전부 활성 pane 을 따라간다 — 새 뷰는 여기서
                 .call_file = "src/platform/macos/app_session.zig",
                 .call_mod = "agent_dock.",
                 .call_fn = "refreshAgentSessionArchiveProjectScopeForFocus(self);",
+            },
+            .outline => .{
+                .file = "src/platform/macos/app_session/editor/outline.zig",
+                .follow = "pub fn refreshForFocus(self: *AppSession) void {",
+                .call_file = "src/platform/macos/app_session.zig",
+                .call_mod = "outline_ops.",
+                .call_fn = "refreshForFocus(self);",
             },
             // 격자의 소스 세션 목록이 활성 pane 을 따라간다(IG1 §2.1).
             .agent_activity => .{

@@ -3355,13 +3355,19 @@ pub export fn maru_macos_app_session_take_file_tree_watch_root(
     return root.len;
 }
 
+// 스냅숏은 현재 도크 뷰가 고른다. ABI 레코드와 Swift의 역할 번역은 그대로 공유한다.
+fn dockAccessibility(app_session: *AppSession) *session_mod.accessibility.Snapshot {
+    return if (app_session.dock.view == .outline) &app_session.editor_outline.accessibility else &app_session.file_tree_accessibility;
+}
+
 /// 파일 탐색기 행의 접근성 줄 수. 스크린 리더가 자기 리듬으로 묻는 **읽기 전용** 창구다.
 ///
 /// 이 값과 아래 두 함수는 발행 시점에 굳힌 스냅숏만 본다 — 발행된 tree 를 그대로 읽으면 라벨이
 /// 해제된 메모리다(`app_session/accessibility.zig` 머리말).
 pub export fn maru_macos_app_session_accessibility_count(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
-    return @intCast(app_session.file_tree_accessibility.elements.items.len);
+    if (app_session.dock.view == .outline and (!app_session.dock.presented or app_session.dock.collapsed)) return 0;
+    return @intCast(dockAccessibility(app_session).*.elements.items.len);
 }
 
 /// 줄 하나를 읽는다. 라벨·값은 **뒤이은 두 함수**로 따로 가져간다 — extern struct 에 포인터를 담으면
@@ -3376,7 +3382,7 @@ pub export fn maru_macos_app_session_accessibility_element(
 ) c_int {
     const out = out_element orelse return @intFromEnum(Status.null_out);
     const app_session = session orelse return @intFromEnum(Status.null_out);
-    const elements = app_session.file_tree_accessibility.elements.items;
+    const elements = dockAccessibility(app_session).*.elements.items;
     if (index >= elements.len) return @intFromEnum(Status.invalid_config);
     out.* = elements[index];
     return @intFromEnum(Status.ok);
@@ -3393,8 +3399,8 @@ pub export fn maru_macos_app_session_accessibility_label(
     capacity: usize,
 ) usize {
     const app_session = session orelse return 0;
-    if (index >= app_session.file_tree_accessibility.elements.items.len) return 0;
-    const label = app_session.file_tree_accessibility.label(index);
+    if (index >= dockAccessibility(app_session).*.elements.items.len) return 0;
+    const label = dockAccessibility(app_session).*.label(index);
     if (label.len == 0) return 0;
     const ptr = out orelse return label.len;
     if (capacity < label.len) return label.len;
@@ -3410,8 +3416,8 @@ pub export fn maru_macos_app_session_accessibility_value(
     capacity: usize,
 ) usize {
     const app_session = session orelse return 0;
-    if (index >= app_session.file_tree_accessibility.elements.items.len) return 0;
-    const value = app_session.file_tree_accessibility.value(index);
+    if (index >= dockAccessibility(app_session).*.elements.items.len) return 0;
+    const value = dockAccessibility(app_session).*.value(index);
     if (value.len == 0) return 0;
     const ptr = out orelse return value.len;
     if (capacity < value.len) return value.len;

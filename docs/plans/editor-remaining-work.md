@@ -39,7 +39,7 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 | 일반/PCRE2 찾기·바꾸기·검색 옵션 | [find host](../../src/platform/macos/app_session/find.zig), [editor find](../../src/session/editor/find.zig), [find UI](../../src/chrome/components/find.zig) | 프로젝트 전체 검색과 좌우 독립 찾기 상자는 별개다 |
 | 구문 색·괄호·접힘·안내선·공백 표시·sticky·미니맵 | 네이티브 계획 N1/N4/N5, [frame](../../src/chrome/components/editor_view/frame.zig) | B2 draw 저장소 결정과 모든 부족 조건의 표시 보장은 남았다 |
 | LSP 호버·시그니처·정의·포맷·이름 바꾸기·자동완성·code action | [도구 계약 §8.2b~h](../editor-surface-tooling.md), 대응 `editor_*` host 모듈, [LSP 응답 라우터](../../src/platform/macos/app_session/editor/lsp.zig) | 기능이 있다는 것과 E3 도구 실행 계약 전체 완료는 다르다 |
-| semantic tokens·접힘·didSave·참조/구현/타입 정의/선언·inlay·심볼·낱말 강조·선택 확장 | 도구 계약 §8.2i~q와 대응 host 모듈 | 참조 피커와 문서 심볼 목록은 영구 도크 아웃라인이 아니다 |
+| semantic tokens·접힘·didSave·참조/구현/타입 정의/선언·inlay·심볼·낱말 강조·선택 확장 | 도구 계약 §8.2i~q와 대응 host 모듈 | 도크 아웃라인은 아래 별도 항목에서 범위를 구분한다 |
 | 비교 본문 선택·복사·랩된 이어진 조각의 글자 강조 | [diff host](../../src/platform/macos/app_session/editor/diff.zig)의 DSEL2·DSEL4·DSEL5, `frame`의 바뀐 글자 painter와 이어진 조각 회귀 판정자 | 좌우 wrap 높이 정렬 제한과는 다른 기능이다 |
 | 3-way 병합 기본 기능 | [병합 계약 S1~S6](../editor-merge-conflicts.md), [merge host](../../src/platform/macos/app_session/editor/merge.zig) | 고르기 토글/스마트 결합 상태 모델은 별도 보류다 |
 
@@ -54,8 +54,8 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 | 같은 파일 두 pane에서 공유 편집 | 일반 로컬 파일의 같은 창 공유 분할 구현·검증 | [공유 분할 명령](editor-shared-split.md), [공유 문서 계획](editor-shared-document.md), [복원 제품 연결](editor-recovery-integration.md). 편집·Undo·뷰별 검색·선택·스크롤·접힘과 재시작 및 실제 한국어 HID의 검사 범위를 각각 기록한다 | 이름 없는/원격/비교/병합 문서의 공유 분할·창 간 동시 공유·경로 alias 통합은 이 완료 범위 밖이다. 외부 변경의 모든 종료 gate를 닫았다는 뜻도 아니다 |
 | 비교 뷰 좌우 독립 찾기 상자 | 구현·검증 완료 | [독립 찾기 계획](editor-diff-find.md). 두 `find.State`와 열별 결과를 유지한다 | 헤드리스·제품 Metal·실제 AppKit/IME 검증 결과는 해당 계획에 기록 |
 | 프로젝트 전체 검색·바꾸기 미리보기 | 남은 기능 + 정책 미결 | 네이티브 후속 표. 파일 안 검색은 있지만 프로젝트 검색 도크·진행/취소·적용 미리보기 경로는 확인되지 않았다 | 검색 범위·제외/무시 규칙·엔진/프로세스·결과 도크·취소·바꾸기 안전 규칙을 결정하고 실제 여러 파일 검증 |
-| 영구 도크 심볼 아웃라인 | 남은 기능 | 후속 표의 목록 UI. `symbols.zig`는 문서 심볼을 공급하고 현재 소비자는 breadcrumb·symbol picker 등이다. 도크 아웃라인 경로는 확인되지 않았다 | 기존 심볼 목록을 재사용하는 도크 배치·선택/추종·문서 전환 계약 |
-| 심볼 선택 중 문서 미리보기 | 구현 | [현재 pane 미리보기](editor-symbol-preview.md). 목록 선택은 임시 표시, Enter는 확정, Esc는 원래 화면 | 도크 아웃라인은 별도 후속 |
+| 영구 도크 심볼 아웃라인 | 구현 | [도크 아웃라인](editor-outline.md). 활성 문서 계층·접힘·현재 커서 강조, 클릭 이동과 문서/뷰/리비전 교체 검사 | diff/merge, 정렬·필터 설정과 접힘의 재시작 보존은 범위 밖 |
+| 심볼 선택 중 문서 미리보기 | 구현 | [현재 pane 미리보기](editor-symbol-preview.md). 목록 선택은 임시 표시, Enter는 확정, Esc는 원래 화면 | 도크 아웃라인은 별도 목록으로 구현 |
 | Markdown 소스 모드의 편집기 선택 | 계약 밖의 정책 미결 | [네이티브 계약 §12](../native-editor.md), [파일 kind 계약](../file-panel-kinds.md). Markdown 소스는 현재 CM6이며 text/diff의 네이티브 이관과 별개다 | 소스도 네이티브로 할지, 웹 모드와의 전환·문서 소유·편집 경험을 어떻게 통일할지 결정 |
 | 언어별 들여쓰기·자동 닫기 문맥 규칙 | 별도 개선 후보, 정책 미결 | 네이티브 계약 §12. 기본 `pairs.zig`·`language.zig`는 있지만 VS Code식 `onEnterRules`·문맥 제외·언어별 정규식 규칙까지 완료된 것은 아니다 | 실제 차이 입력부터 재현하고 grammar별 규칙 소유·엔진을 결정. 검색 PCRE2 채택을 타이핑 규칙 채택으로 해석하지 않는다 |
 | 편집기 plugin 확장점 | 앱 전체 plugin 경계의 별도 결정 | 네이티브 계약 §12: 내부 span/completion provider와 외부 plugin API는 다르다 | 신뢰/권한·수명·확장 API 계약을 해당 이니셔티브에서 결정. 내부 provider 존재를 plugin 지원으로 세지 않는다 |
@@ -102,7 +102,7 @@ Markdown 소스 모드 선택은 웹 읽기/리치 이관과 별도의 미결이
 3. **일반 로컬 파일의 같은 창 공유 문서·분할·재시작은 구현했다.** [공유 분할](editor-shared-split.md)과
    [심볼 미리보기](editor-symbol-preview.md)에 현재 범위와 검증을 기록했다. 교차 창 동시 공유,
    이름 없는 문서·원격·diff/merge 분할, Split in Group은 자동으로 범위를 넓히지 않는다.
-4. 프로젝트 검색과 도크 아웃라인은 새 도크 UX로 각각 연다. 외부 도구 자동 실행은 신뢰 정책 뒤에 둔다.
+4. **도크 아웃라인은 구현했다.** 다음 기능 후보는 프로젝트 전체 검색·바꾸기 미리보기다. 기존 파일 찾기와 구분하며, 외부 도구 자동 실행은 신뢰 정책 뒤에 둔다.
 5. 버퍼 부족은 재현된 반례에 한해 개선한다. B2의 제품 적용·상한 수치·큰 구조 변경을
    다른 기능의 완료 조건으로 묶거나 자동으로 앞당기지 않는다.
 

@@ -41,6 +41,7 @@ pub const ChromeProps = props.ChromeProps;
 pub const Tokens = tokens.Tokens;
 
 pub const components = struct {
+    pub const outline = @import("chrome/components/outline.zig");
     pub const overlay_input = @import("chrome/components/overlay_input.zig"); // find·palette 공유 기반(컴포넌트 아님)
     pub const text_field = @import("chrome/components/text_field.zig");
     pub const inline_edit = @import("chrome/components/inline_edit.zig"); // 인라인 이름 편집의 순수 규칙(키→편집·caret 자리 한 줄·넘칠 때 caret 보이기) — TextField 위

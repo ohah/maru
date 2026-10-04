@@ -1108,3 +1108,12 @@ mise exec -- zig build perf-editor-recovery-reservation -Doptimize=ReleaseFast -
 오류 판정은 macOS의 기본 `test`와 `test-macos-only` CI에 연결한다. 시간 측정만 opt-in이며
 CI 성능 예산에는 추가하지 않는다.
 제품 backup/restore 호출부와 사용자 데이터는 사용하지 않는다. [실측 범위와 결과](plans/editor-recovery-reservation.md)를 따른다.
+
+### 도크 아웃라인
+
+```sh
+mise exec -- zig build test-editor-outline
+python3 tools/editor-outline-app/run.py --output /tmp/maru-outline-app-new
+```
+
+[아웃라인 계획](plans/editor-outline.md)의 모델·기하·문서 수명 검사와 실제 앱 Metal 캡처다. 출력 폴더는 저장소 밖의 새 빈 폴더여야 한다.

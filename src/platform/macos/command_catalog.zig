@@ -36,6 +36,7 @@ pub const entries = [_]Entry{
     .{ .action = .new_tab, .key = "new_tab", .title = "New Workspace", .search_ko = "새 워크스페이스" },
     // 활성 pane에 web(브라우저) Term 생성(4e-5 command 승격 — env 훅 MARU_WEB_PANEL 대체). 기본 키바인딩 ⌘⌥T(default_app_bindings 역스캔으로 메뉴·팔릿에 자동 표시).
     .{ .action = .new_web_tab, .key = "new_web_tab", .title = "New Browser Tab", .search_ko = "새 브라우저 탭" },
+    .{ .action = .show_editor_outline, .key = "show_editor_outline", .title = "Editor: Show Outline", .search_ko = "편집기 아웃라인 함수 클래스 목록" },
     .{ .action = .recover_editor_backups, .key = "recover_editor_backups", .title = "Editor: Recover Unsaved Edits", .search_ko = "편집기 미저장 편집 백업 복구" },
     .{ .action = .new_editor_tab, .key = "new_editor_tab", .title = "New Editor Tab", .search_ko = "새 편집기 탭" },
     .{ .action = .open_file_panel, .key = "open_file_panel", .title = "Open File Panel…", .search_ko = "파일 패널 열기" },

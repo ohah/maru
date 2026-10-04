@@ -50,6 +50,7 @@ macOS 로컬 shell 1개 surface
 - [공유 문서와 독립 편집기 뷰 설계 제안](plans/editor-shared-document.md) — 소유·수명·편집 게시·IME·저장 경계와 구현 단계
 - [공유 편집기 분할 명령](plans/editor-shared-split.md) — 로컬 파일 공유 뷰의 메뉴·팔레트·단축키 연결과 제품 검증
 - [심볼 미리보기](plans/editor-symbol-preview.md) — 현재 pane 표시·취소·확정, 대상 수명 검사와 실제 앱 캡처
+- [도크 아웃라인](plans/editor-outline.md) — 활성 문서 계층·현재 심볼 강조·분할 전환과 클릭 수명
 - [공유 편집기 복원 포맷과 구현 계획](plans/editor-shared-restore.md) — 문서 연결과 뷰 상태, v1 선택적 필드와 v2 비교, downgrade와 복원 실패 경계
 - [복구 ID 예약 후보 실험](plans/editor-recovery-reservation.md) — 실제 owner lease·atomic writer, 실패/중단/정리 경계와 비용 비교; 제품 연결 전 비교 이력
 - [로컬 문서 ID 백업과 공유 뷰 복원](plans/editor-recovery-integration.md) — 제품 writer·checkpoint 연결 및 헤드리스 재실행 검증; GUI 공개 gate는 별도

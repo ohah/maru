@@ -46,6 +46,7 @@ const DockListScroll = AppSession.DockListScroll;
 const RestoredFileEntries = AppSession.RestoredFileEntries;
 const usizeOptEql = AppSession.usizeOptEql;
 const file_panel_ops = @import("file_panel.zig");
+const outline_ops = @import("editor/outline.zig");
 const pane_ops = @import("pane.zig");
 const agent_dock_ops = @import("agent_dock.zig");
 
@@ -490,6 +491,7 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     // 갤러리를 떠나면 도는 스캔을 취소한다 — 안 보는 화면 때문에 3.6 초를 끝까지 돌 이유가 없다.
     if (self.dock.view == .agent_activity and view != .agent_activity) agent_activity_ops.onLeaveView(self);
     self.dock.view = view;
+    self.editor_outline.interaction = .{};
     // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
     // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.
     if (view != .agent_sessions) self.agent_session_dock_interaction = .{};
@@ -543,6 +545,11 @@ pub fn dockLauncherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeP
 /// `취소 → 재요청 → 취소`가 반복된다 — 취소 시 `agent_session_archive_completed_ns`가 갱신되지 않아
 /// TTL 가드도 걸리지 않기 때문이다.
 pub fn onDockViewPresented(self: *AppSession, view: dock_panel.View) void {
+    if (view == .outline) {
+        self.editor_outline.invalidate();
+        if (self.editor_outline.status == .failed) self.editor_outline.key = null;
+        outline_ops.refreshForFocus(self);
+    }
     // 탐색기로 들어오면 `.gitignore` 흐림 질의가 나갈 백엔드를 세운다. **`setDockView` 가 아니라
     // 여기인 이유**는 그쪽이 «같은 뷰면 되돌아가기» 라, 창이 이미 탐색기인 채로 복원되면 안 서기
     // 때문이다. 왜 질의 자리가 아니라 진입 자리인지는 `ensureIgnoreBackend` 주석에 있다.
@@ -557,6 +564,7 @@ pub fn setDockListScrollOffsetPx(self: *AppSession, offset_px: i64) void {
     switch (self.dock.view) {
         .explorer => file_panel_ops.setFileTreeScrollOffsetPx(self, offset_px),
         .source_control => setScmScrollOffsetPx(self, offset_px),
+        .outline => outline_ops.setScroll(self, offset_px),
         else => {},
     }
 }
@@ -566,6 +574,7 @@ pub fn dockListScroll(self: *AppSession) ?DockListScroll {
     const content = dockGeometry(self).tree_content;
     if (content.w == 0 or content.h == 0) return null;
     return switch (self.dock.view) {
+        .outline => .{ .rect = content, .extent = outline_ops.scrollExtent(self), .offset_px = @min(self.editor_outline.scroll.offset_y_px, outline_ops.scrollExtent(self).max_offset_px) },
         .explorer => .{
             .rect = content,
             .extent = file_panel_ops.fileTreeScrollExtent(self),

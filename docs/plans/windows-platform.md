@@ -134,3 +134,9 @@ L2의 owned 저장 이미지·revision/disk CAS와 opened lifetime/요청 순서
 같은 문서 정책으로 연결했다. 공통 11개, native save 61개와 경로 29개 및 공통/native 각각 다섯
 runtime 변이와 별도 두 변이를 검증했다. 일반 입력·GUI 저장·dirty-close·외부 감시와 capability/
 crash 복구·실패 타이밍 전체는 남아 있다. W8.17 완료로 세지 않는다.
+
+읽기 전용 일반 파일의 좌우/Home/End 및 primary modifier 이동·Shift 선택·Ctrl+A/C는
+§2m.147에서 연결했다. 문서 행 기준 선택/caret projection, allocation-failure 소유권,
+실제 창 WM_KEYDOWN 6개/7프레임과 runtime 변이 5회를 검증했다. 일반 쓰기/IME/undo,
+GUI safe-save·dirty-close·감시·edit→disk→reopen, 세로/마우스 입력·가로 caret 추종·랩과
+긴 행/행 projection 예산은 남아 있다. W8.17은 계속 진행 중이다.

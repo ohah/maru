@@ -771,13 +771,14 @@ sys.exit(0 if ok else 1)
 PY
 
 # ── W6d①: 밖에서 끌어 놓기 ─────────────────────────────────────────────────────────────────────────────────
+# (첫 끌기는 앱·sidecar 가 뜬 뒤 9 초 — 화면이 잠긴 때 7 초로는 페이지가 첫 끌기에 답하지 않은 적이 있다.)
 # 진짜 끌기 세션은 사용자 포인터가 필요하다 — 대본 `drag` 이 터미널 view 의 끌기 메서드(draggingEntered·Updated·
 # performDragOperation·Ended·Exited)를 가짜 끌기 정보(판정자 전용 이름의 pasteboard)로 부른다. 그 뒤(Swift → ABI → Zig →
 # sidecar → 페이지)는 진짜 경로다. 돌려준 동작(`osr-test drag … op=`)과 페이지가 받은 것을 본다.
 mkdir -p "$root/drop"
 printf 'HELLO' > "$root/drop/a.txt"
 cat > "$root/dnd.txt" <<SCRIPT
-sleep 7000
+sleep 9000
 drag enter 0.25 0.3 0 0 file $root/drop/a.txt
 sleep 300
 drag move 0.25 0.3 0 0
@@ -842,7 +843,7 @@ sleep 600
 mark exited
 SCRIPT
 : > "$root/requests.log"
-run_app /dnd-app 30000 "$root/dnd.summary" MARU_WEB_OSR_TEST_INPUT="$root/dnd.txt"
+run_app /dnd-app 32000 "$root/dnd.summary" MARU_WEB_OSR_TEST_INPUT="$root/dnd.txt"
 grep -a '^osr-test drag\|^osr-test mark' "$root/app-dnd-app.log" > "$root/dnd.report" || true
 cat "$root/dnd.report"
 python3 - "$root/dnd.report" "$root/requests.log" <<'PY' || fail "dropping onto the Chromium tab did not behave as expected"
@@ -898,7 +899,7 @@ PY
 # view 의 끌기 메서드에 넘긴 뒤(소스는 그 view) 소스의 끝을 부른다. 그 앞(페이지 → sidecar → 창이 가져감 → 제스처를 조용히 끝냄)과
 # 뒤(maru 안 놓기의 source → sidecar → 페이지, 끝 → dragend)는 진짜 경로다.
 cat > "$root/dragout.txt" <<SCRIPT
-sleep 7000
+sleep 9000
 view down 0.25 0.65 0 0
 sleep 80
 view drag 0.25 0.66 0 0
@@ -936,7 +937,7 @@ sleep 900
 mark cancelled
 SCRIPT
 : > "$root/requests.log"
-run_app /dnd-app 22000 "$root/dragout.summary" MARU_WEB_OSR_TEST_INPUT="$root/dragout.txt" MARU_WEB_OSR_TEST_DRAG_OUT=1
+run_app /dnd-app 24000 "$root/dragout.summary" MARU_WEB_OSR_TEST_INPUT="$root/dragout.txt" MARU_WEB_OSR_TEST_DRAG_OUT=1
 grep -a '^osr-test dragout\|^osr-test mark' "$root/app-dnd-app.log" > "$root/dragout.report" || true
 cat "$root/dragout.report"
 python3 - "$root/dragout.report" "$root/requests.log" <<'PY' || fail "dragging out of the Chromium tab did not behave as expected"
@@ -981,7 +982,7 @@ PY
 # 쓴 파일이 서버가 준 바이트 그대로인지, 내려받은 파일 표지(quarantine)가 붙었는지 본다. 같은 이름이 있으면 Chrome 처럼 「cat 2.png」.
 mkdir -p "$root/promise"
 cat > "$root/dragimg.txt" <<SCRIPT
-sleep 7000
+sleep 9000
 view down 0.75 0.58 0 0
 sleep 80
 view drag 0.75 0.59 0 0
@@ -1000,7 +1001,7 @@ dragout promise $root/promise
 sleep 1500
 SCRIPT
 : > "$root/requests.log"
-run_app /dnd-app 16000 "$root/dragimg.summary" MARU_WEB_OSR_TEST_INPUT="$root/dragimg.txt" MARU_WEB_OSR_TEST_DRAG_OUT=1
+run_app /dnd-app 18000 "$root/dragimg.summary" MARU_WEB_OSR_TEST_INPUT="$root/dragimg.txt" MARU_WEB_OSR_TEST_DRAG_OUT=1
 grep -a '^osr-test dragout' "$root/app-dnd-app.log" > "$root/dragimg.report" || true
 cat "$root/dragimg.report"
 python3 - "$root/dragimg.report" "$root/promise" <<'PY' || fail "dragging an image out as a file did not behave as expected"

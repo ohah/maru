@@ -1085,6 +1085,7 @@ counter 상한을 포함해 14개이며 전 할당 실패가 이미지 보호를
 
 §2m.163의 `zig build test-win32-editor-read`는 native 읽기 작업자의 identity·sharing·
 ticket·수명·상한 11개(aggregation 2·native 8·pure 1)를 실행하며 기본 test에도 연결된다.
-`zig build test-win32-editor-host`는 app grant의 읽기 예약/수락을 더해 23개다
-(aggregation 2·native 18·pure 3). 두 gate 모두 `-Doptimize=ReleaseFast`로도 실행한다.
+`zig build test-win32-editor-host`는 app grant의 읽기 예약/수락과 실제 부모 폴더
+감시 구독을 더해 24개다(aggregation 2·native 19·pure 3).
+두 gate 모두 `-Doptimize=ReleaseFast`로도 실행한다.
 `maru win32-editor-document-smoke`는 실제 창의 worker read ticket과 프레임도 검사한다.

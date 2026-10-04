@@ -319,7 +319,8 @@ src/
     windows/            Win32·ConPTY·DirectWrite·D3D11 adapter. editor/의 document.zig는 L2 registry view를
                         붙이고 file_host.zig는 앱 수명의 native grant/controller를 소유한다. identity·transaction·
                         document_grant·save_controller·backup_store는 Windows 파일 권한·저장·복구 I/O 경계다.
-                        directory_watch는 native 비동기 알림과 identity별 공유·상한·debounce를 소유한다.
+                        directory_watch는 native 비동기 알림과 identity별 공유·상한·debounce 및
+                        알림을 살아 있는 문서 구독에 배분하는 검사를 소유한다.
                         file_read_worker는 selected handle 기반 읽기·raw hash와 값 ticket을 프레임 밖에서 만든다.
                         공유 문서·Undo 정책과 플랫폼 중립 경로 선택은 session/editor/와 user_paths에 둔다.
     linux/

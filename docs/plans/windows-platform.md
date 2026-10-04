@@ -233,3 +233,11 @@ selected root/name/자체 I/O를 소유하고 bytes/hash를 프레임 밖에서 
 source/reader scope로 같은 주소·같은 slot 재생성까지 거절한다. read 11개·host 23개의
 Debug/ReleaseFast, 각각 다섯 runtime mutation 검출이 통과했다. 실제 창 fixture에도
 worker read를 연결했다. 일반 앱의 hint 예약과 clean 갱신·dirty 선택 UI, 비동기 저장은 남아 있다.
+
+§2m.164: 문서 grant에서 실제 부모 폴더를 pin해 감시 구독을 만드는 Book 경로와,
+directory 알림을 살아 있는 개별 lease에 배분하는 검사를 추가했다. volume root를
+비재귀 감시하는 오류를 피하며 같은 폴더의 peer 구독도 함께 받는다. 중첩 폴더의
+실제 외부 쓰기·해제된 구독·다른 owner·경로/epoch drift·진행 중 저장·동일 bytes의
+파일 교체를 검사한다. watch 14개·host 24개의 Debug/ReleaseFast와 각 다섯 compiled
+runtime mutation 검출이 통과했다. 일반 앱 프레임 루프의 구독 수명 관리·hint 예약과
+clean 갱신·dirty 선택 UI는 아직 남아 있으며, 이 구독 API만으로 연결 완료를 주장하지 않는다.

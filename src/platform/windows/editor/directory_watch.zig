@@ -162,6 +162,16 @@ pub const Groups = struct {
         return error.StaleWatchLease;
     }
 
+    /// The app routes a directory hint to every still-subscribed document,
+    /// including peers whose lease ID differs from the shared directory ID.
+    /// Resolving membership each time prevents a closed document from being
+    /// revalidated when compacted storage is reused by another directory.
+    pub fn receives(self: *Groups, lease: Lease, group: GroupKey) !bool {
+        const member_index = try self.index(lease);
+        if (group.owner != self) return false;
+        return self.members.items[member_index].group_id == group.id;
+    }
+
     pub fn release(self: *Groups, lease: Lease) !void {
         const member_index = try self.index(lease);
         const group_id = self.members.items[member_index].group_id;
@@ -339,7 +349,12 @@ test "Windows editor directory watch groups deduplicate identity but issue indep
     const second = try groups.acquire(tmp.dir);
     try std.testing.expectEqual(@as(usize, 1), groups.entries.items.len);
     try std.testing.expect(first.id != second.id);
+    const hint: GroupKey = .{ .owner = &groups, .id = first.id };
+    try std.testing.expect(try groups.receives(first, hint));
+    try std.testing.expect(try groups.receives(second, hint));
     try groups.release(first);
+    try std.testing.expectError(error.StaleWatchLease, groups.receives(first, hint));
+    try std.testing.expect(try groups.receives(second, hint));
     try std.testing.expectError(error.StaleWatchLease, groups.release(first));
     try std.testing.expectEqual(@as(usize, 1), groups.entries.items[0].references);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "survivor.txt", .data = "surviving document" });
@@ -363,6 +378,8 @@ test "Windows editor directory watch group capacity counts directories instead o
     try std.testing.expectError(error.TooManyDirectoryWatches, groups.acquire(second.dir));
     try groups.release(peer);
     const fresh = try groups.acquire(second.dir);
+    try std.testing.expect(!(try groups.receives(fresh, .{ .owner = &groups, .id = one.id })));
+    try std.testing.expect(try groups.receives(fresh, .{ .owner = &groups, .id = fresh.id }));
     try std.testing.expectError(error.StaleWatchLease, groups.release(one));
     try groups.release(fresh);
 }
@@ -377,6 +394,8 @@ test "Windows editor directory watch group refuses foreign owner and exhausted g
     defer two.deinit() catch unreachable;
     const lease = try one.acquire(tmp.dir);
     const other = try two.acquire(tmp.dir);
+    try std.testing.expect(!(try two.receives(other, .{ .owner = &one, .id = lease.id })));
+    try std.testing.expectError(error.StaleWatchLease, two.receives(lease, .{ .owner = &two, .id = other.id }));
     try std.testing.expectError(error.StaleWatchLease, two.release(lease));
     one.issued = std.math.maxInt(u64);
     try std.testing.expectError(error.WatchGenerationExhausted, one.acquire(tmp.dir));

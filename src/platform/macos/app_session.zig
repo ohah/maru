@@ -7049,8 +7049,8 @@ pub const AppSession = struct {
     codex_daemon_bindings: maru.session.codex_daemon_attribution.Bindings = .{},
     /// 훅을 띄운 pid 마다 «codex 공유 데몬이었나» — argv 읽기를 이벤트마다 하지 않으려고 기억한다.
     codex_daemon_parents: maru.session.codex_daemon_attribution.ParentVerdicts = .{},
-    /// 마지막으로 «붙이지 않았다» 를 남긴 (세션, 사유)의 해시 — 같은 세션의 도구 이벤트마다 한 줄씩 쌓이지 않게.
-    codex_daemon_last_drop_log: u64 = 0,
+    /// «붙이지 않았다» 를 남긴 (세션, 사유)들 — 같은 세션의 도구 이벤트마다, 두 세션이 번갈아 버려질 때도 한 줄씩 쌓이지 않게.
+    codex_daemon_drop_log: maru.session.codex_daemon_attribution.DropLog = .{},
     /// 그 링의 각 턴이 만진 파일의 **그림자 사본**(계약 §4.4). 링과는 `Snapshot.capture_id` 로 잇는다.
     ///
     /// **힙을 든다** — 이웃 `turn_rings` 가 고정 배열인 것은 스냅샷이 고정 크기이기 때문이고, 파일 내용은

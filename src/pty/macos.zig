@@ -150,6 +150,16 @@ const proc_pidvnodepathinfo: c_int = 9;
 // 오프셋이 틀어져도 조용히 넘어가지 않도록, ⑴ `proc_pidinfo` 반환 바이트가 **정확히 2352**일 때만 읽고
 // ⑵ 아래 "자기 pid의 cwd가 getcwd와 같다" 테스트가 레이아웃 드리프트를 실행 시점에 잡는다.
 const vnodepathinfo_size: c_int = 2352;
+
+// proc_pidinfo + PROC_PIDTBSDINFO(`struct proc_bsdinfo`, <sys/proc_info.h>). 위와 같은 이유로 손으로 미러하지 않고
+// 크기·오프셋 상수로 읽는다: flags·status·xstatus·pid(12)·ppid·uid·gid·ruid·rgid·svuid·svgid·rfu_1(4 B 열둘 = 48) +
+// comm[16] + name[32] = 96, nfiles·pgid·pjobc·e_tdev·e_tpgid·nice(4 B 여섯) = 120, start_tvsec(120)·start_tvusec(128), 합 136.
+// 반환 크기가 정확히 136 이고 그 자리의 pid 가 물은 pid 와 같을 때만 읽는다.
+const proc_pidtbsdinfo: c_int = 3;
+const bsdinfo_size: c_int = 136;
+const bsdinfo_pid_offset: usize = 12;
+const bsdinfo_start_sec_offset: usize = 120;
+const bsdinfo_start_usec_offset: usize = 128;
 const vnodepathinfo_cdir_path_offset: usize = 152;
 const vnodepathinfo_max_path: usize = 1024;
 
@@ -996,6 +1006,20 @@ pub const PtySession = struct {
         return judge(procargs_buf[0..size]);
     }
 
+    /// `pid` 의 **시작 시각**(µs, epoch). pid 재사용을 가르는 데 쓴다 — 같은 pid 라도 시작 시각이 다르면 다른 프로세스다.
+    /// 없는 pid·권한 밖이면 null.
+    pub fn processStartMicros(pid: i32) ?u64 {
+        if (pid <= 0) return null;
+        var info: [bsdinfo_size]u8 = undefined;
+        const rc = proc_pidinfo(pid, proc_pidtbsdinfo, 0, &info, bsdinfo_size);
+        if (rc != bsdinfo_size) return null;
+        // 레이아웃 검사: 그 자리의 pid 가 물은 pid 와 같아야 한다 — 오프셋이 틀어지면 여기서 걸린다.
+        if (std.mem.readInt(u32, info[bsdinfo_pid_offset..][0..4], .little) != @as(u32, @intCast(pid))) return null;
+        const sec = std.mem.readInt(u64, info[bsdinfo_start_sec_offset..][0..8], .little);
+        const usec = std.mem.readInt(u64, info[bsdinfo_start_usec_offset..][0..8], .little);
+        return sec *% std.time.us_per_s +% usec;
+    }
+
     /// 에이전트가 **자식에게 내려주는 세션 신원**을 읽는다 — claude는 `CLAUDE_CODE_SESSION_ID`(그 값이 곧
     /// `<id>.jsonl` 파일명), codex는 `CODEX_THREAD_ID`(rollout 파일명의 uuid이자 `session_meta.id`)다.
     ///
@@ -1256,6 +1280,23 @@ test "processCwdForPid: 자기 pid의 cwd가 getcwd와 정확히 같다(레이�
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const got = processCwdForPid(std.c.getpid(), &buf) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(expected, got);
+}
+
+test "processStartMicros: 자기 pid 의 시작 시각은 지금보다 앞이고 다시 물어도 같다(레이아웃 드리프트 감지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // `proc_bsdinfo` 도 오프셋 상수로 읽는다. 오프셋이 틀리면 pid 자리 검사가 null 을 내거나, 시작 시각 자리에 엉뚱한
+    // 값(0·미래)이 온다 — 둘 다 여기서 걸린다.
+    const me = std.c.getpid();
+    const first = PtySession.processStartMicros(me) orelse return error.TestUnexpectedResult;
+    const again = PtySession.processStartMicros(me) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(first, again);
+    var tv: std.c.timeval = undefined;
+    _ = std.c.gettimeofday(&tv, null);
+    const now_us: u64 = @as(u64, @intCast(tv.sec)) * std.time.us_per_s + @as(u64, @intCast(tv.usec));
+    try std.testing.expect(first > 1_600_000_000 * std.time.us_per_s); // 2020 이후
+    try std.testing.expect(first <= now_us);
+    try std.testing.expect(PtySession.processStartMicros(0) == null);
+    try std.testing.expect(PtySession.processStartMicros(-1) == null);
 }
 
 test "processCwdForPid: 못 읽는 pid와 좁은 버퍼는 null이다(자른 경로를 돌려주지 않는다)" {

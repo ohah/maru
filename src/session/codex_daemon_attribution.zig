@@ -33,10 +33,17 @@ pub const parent_pid_field_max = "\"".len + parent_pid_key.len + "\":".len + 10 
 /// 데몬 판정을 하는 provider. claude 는 공유 데몬이 없고 그 훅 커맨드에는 이 칸 자체가 없다.
 pub const daemon_provider = "codex";
 
-/// KERN_PROCARGS2 원문(`[argc:u32 LE][exec_path\0][\0 패딩][argv0\0]…[argv{argc-1}\0][envp…]`)이 codex 공유 데몬
-/// (`codex app-server … --managed-daemon`, 2026-10-04 실측 argv)인가. **argv 만** 본다 — envp 에 같은 글자가 있어도
-/// 걸리지 않는다. `app-server` 를 IDE 가 stdio 로 띄운 것(`--managed-daemon` 없음)과 데몬 보조
-/// (`app-server daemon pid-update-loop`)는 데몬이 아니다 — 앞의 것은 pane 이 없고 뒤의 것은 훅을 안 돌린다.
+/// KERN_PROCARGS2 원문(`[argc:u32 LE][exec_path\0][\0 패딩][argv0\0]…[argv{argc-1}\0][envp…]`)이 codex 공유 데몬인가.
+/// **argv 만** 본다 — envp 에 같은 글자가 있어도 걸리지 않는다.
+///
+/// 데몬은 두 모양으로 뜬다(codex 0.160 `pid.rs` `command_args`·`pid_start.rs`):
+/// - `codex app-server [--remote-control] --listen unix:// --managed-daemon` — 그 바이너리가 `--managed-daemon --help`
+///   검사를 5 초 안에 통과했을 때(2026-10-04 실측 argv).
+/// - `codex app-server [--remote-control] --listen unix://` — 검사가 실패하거나 늦으면 붙이는 **옛 모양**. 훅은 똑같이
+///   이 프로세스가 돌린다. 그래서 `--managed-daemon` 하나만 보면 이 데몬의 이벤트가 전부 예전 규칙(파일 = pane)으로 샌다.
+///
+/// 데몬이 아닌 것: 데몬 보조(`app-server daemon pid-update-loop` — 훅을 안 돌린다), IDE 가 stdio 로 띄운 app-server
+/// (`--listen stdio://` — pane 이 없다).
 pub fn isManagedDaemonArgs(procargs: []const u8) bool {
     if (procargs.len <= 4) return false;
     const argc: u32 = @as(u32, procargs[0]) | (@as(u32, procargs[1]) << 8) | (@as(u32, procargs[2]) << 16) | (@as(u32, procargs[3]) << 24);
@@ -47,52 +54,111 @@ pub fn isManagedDaemonArgs(procargs: []const u8) bool {
     var saw_codex = false;
     var saw_app_server = false;
     var saw_managed = false;
+    var saw_unix_listen = false;
+    var daemon_subcommand = false;
+    var listen_next = false;
     var i: u32 = 0;
     while (i < argc and off < procargs.len) : (i += 1) {
         const start = off;
         while (off < procargs.len and procargs[off] != 0) off += 1;
         const arg = procargs[start..off];
         if (off < procargs.len) off += 1; // 구분 null 하나만 — 빈 인자도 자리를 센다
+        const after_listen = listen_next;
+        listen_next = false;
         if (i == 0) {
             const base = if (std.mem.lastIndexOfScalar(u8, arg, '/')) |s| arg[s + 1 ..] else arg;
             saw_codex = std.mem.eql(u8, base, "codex");
         } else if (i == 1) {
             saw_app_server = std.mem.eql(u8, arg, "app-server");
+        } else if (i == 2 and std.mem.eql(u8, arg, "daemon")) {
+            daemon_subcommand = true;
         } else if (std.mem.eql(u8, arg, "--managed-daemon")) {
             saw_managed = true;
+        } else if (std.mem.eql(u8, arg, "--listen")) {
+            listen_next = true;
+        } else if (after_listen and std.mem.startsWith(u8, arg, "unix://")) {
+            saw_unix_listen = true;
+        } else if (std.mem.startsWith(u8, arg, "--listen=unix://")) {
+            saw_unix_listen = true;
         }
     }
-    return saw_codex and saw_app_server and saw_managed;
+    return saw_codex and saw_app_server and !daemon_subcommand and (saw_managed or saw_unix_listen);
 }
 
-/// 훅을 띄운 pid 마다 «데몬이었나» 를 기억한다 — argv 읽기(sysctl)를 이벤트마다 하지 않으려고. 고정 크기, 가득 차면
-/// 돌아가며 덮는다. **이미 사라진 pid** 는 여기 없으면 «데몬 아님»(= 예전 규칙)으로 접는다: 따라잡기(backlog) 줄의
-/// 데몬이 이미 죽었으면 그 세션은 끝난 것이고, 모르는 것을 재배정하는 쪽보다 예전대로 두는 쪽이 덜 틀린다.
+/// 훅을 띄운 프로세스마다 «데몬이었나» 를 기억한다 — argv 읽기(sysctl)를 이벤트마다 하지 않으려고. 고정 크기, 가득 차면
+/// 돌아가며 덮는다.
+///
+/// **키는 (pid, 시작 시각)이다.** pid 만이면 그 프로세스가 죽고 같은 pid 를 다른 프로세스가 받았을 때 옛 판정이 그대로
+/// 붙는다 — 데몬이 아닌 pid 가 «데몬» 으로, 또는 그 반대로 뒤집힌다. 시작 시각이 다르면 다른 프로세스다.
+/// 지금 그 pid 의 시작 시각을 못 읽으면(이미 사라졌다) 호출자가 «아니다»(= 예전 규칙)로 접는다.
 pub const ParentVerdicts = struct {
     pub const capacity = 8;
     pids: [capacity]u32 = [_]u32{0} ** capacity,
+    starts: [capacity]u64 = [_]u64{0} ** capacity,
     daemon: [capacity]bool = [_]bool{false} ** capacity,
     next: usize = 0,
 
-    pub fn lookup(self: *const ParentVerdicts, pid: u32) ?bool {
+    pub fn lookup(self: *const ParentVerdicts, pid: u32, start_us: u64) ?bool {
         if (pid == 0) return null;
-        for (self.pids, self.daemon) |p, d| if (p == pid) return d;
+        for (self.pids, self.starts, self.daemon) |p, s, d| {
+            if (p == pid and s == start_us) return d;
+        }
         return null;
     }
 
-    pub fn remember(self: *ParentVerdicts, pid: u32, is_daemon: bool) void {
+    pub fn remember(self: *ParentVerdicts, pid: u32, start_us: u64, is_daemon: bool) void {
         if (pid == 0) return;
-        for (&self.pids, &self.daemon) |*p, *d| {
+        for (&self.pids, &self.starts, &self.daemon) |*p, *s, *d| {
             if (p.* == pid) {
+                s.* = start_us;
                 d.* = is_daemon;
                 return;
             }
         }
         self.pids[self.next] = pid;
+        self.starts[self.next] = start_us;
         self.daemon[self.next] = is_daemon;
         self.next = (self.next + 1) % capacity;
     }
 };
+
+/// 붙이지 않은 (세션, 사유)를 진단에 **한 번씩만** 남기게 하는 작은 집합. 마지막 키 하나만 기억하면 두 세션이 번갈아
+/// 버려질 때 이벤트마다 한 줄씩 쌓인다. 고정 크기, 가득 차면 돌아가며 덮는다.
+pub const DropLog = struct {
+    pub const capacity = 16;
+    keys: [capacity]u64 = [_]u64{0} ** capacity,
+    next: usize = 0,
+
+    /// 처음 보는 키면 기억하고 `true`(= 남겨라).
+    pub fn first(self: *DropLog, key: u64) bool {
+        for (self.keys) |k| if (k == key) return false;
+        self.keys[self.next] = key;
+        self.next = (self.next + 1) % capacity;
+        return true;
+    }
+};
+
+pub fn dropKey(session: []const u8, reason: Reason) u64 {
+    var h = std.hash.Fnv1a_64.init();
+    h.update(session);
+    h.update(@tagName(reason));
+    return h.final() | 1; // 0 은 빈 칸이다
+}
+
+/// 후보가 될 수 있는 Term 인가 — 로컬 터미널에서 codex 가 돈다. **원격 pane 은 아니다**: 그 codex 는 다른 기계의 데몬이
+/// 돌리고, 그 이벤트는 이 경로로 오지 않는다(원격 채널). 원격 pane 을 후보에 넣으면 «로컬 codex pane 하나» 가 «여럿» 이
+/// 되어 묶어야 할 이벤트를 버린다.
+pub const TermFacts = struct { terminal: bool, codex: bool, remote: bool };
+pub fn eligible(t: TermFacts) bool {
+    return t.terminal and t.codex and !t.remote;
+}
+
+/// 그 Term 이 이벤트와 **같은 cwd** 인가. Term cwd 를 모르거나 이벤트에 cwd 가 없으면 아니다(cwd 무관 폴백이 받는다).
+pub fn sameCwdCandidate(term_cwd: ?[]const u8, event_cwd: []const u8) bool {
+    const cwd = term_cwd orelse return false;
+    if (event_cwd.len == 0) return false;
+    return sameDir(cwd, event_cwd);
+}
 
 /// 프롬프트로 후보를 고를 때의 **최소 길이**(공백을 뺀 코드포인트 수).
 ///
@@ -223,10 +289,34 @@ pub const Bindings = struct {
         return e.target;
     }
 
+    /// 묶음을 쓸 수 있으면 그 Term 을 준다(판정 ⑴). 못 쓰면 **풀고** null — 호출자는 새로 판정한다.
+    ///
+    /// - `session_start`: 그 세션이 (다시) 시작됐다. 묶음을 믿지 않는다 — B 에서 돌던 세션 S 를 C 가
+    ///   `codex resume S` 로 열면 S 의 첫 이벤트가 `SessionStart` 이고, 옛 묶음을 쓰면 S 가 B 로 간다.
+    /// - `live`: 지금 codex 가 도는 로컬 Term(`eligible`). 그 안에 없으면 그 Term 은 닫혔거나 codex 를 벗어났다.
+    pub fn resolve(self: *Bindings, session: []const u8, session_start: bool, live: []const Candidate) ?u64 {
+        if (session_start) {
+            self.unbind(session);
+            return null;
+        }
+        const target = self.lookup(session) orelse return null;
+        for (live) |c| if (c.id == target) return target;
+        self.unbind(session);
+        return null;
+    }
+
     /// 묶는다. 이미 있으면 대상을 바꾼다. 담을 수 없는 길이면 묶지 않는다(자르면 다른 세션과 섞인다).
+    ///
+    /// **한 Term 에는 세션 하나만 묶인다.** 그 Term 에 묶여 있던 다른 세션은 푼다 — pane 하나에서 동시에 도는 codex
+    /// 세션은 하나뿐이고(`/new` 는 새 세션으로 갈아탄다), 옛 묶음을 남기면 그 옛 세션을 다른 pane 이 이어 열 때(`resume`)
+    /// 그 이벤트가 이 Term 으로 온다.
     pub fn bind(self: *Bindings, session: []const u8, target: u64) void {
         if (session.len == 0 or session.len > max_session_bytes) return;
         self.clock += 1;
+        for (&self.entries) |*e| {
+            if (e.session_len != 0 and e.target == target and
+                !std.mem.eql(u8, e.session[0..e.session_len], session)) e.session_len = 0;
+        }
         if (self.find(session)) |e| {
             e.target = target;
             e.used = self.clock;
@@ -365,8 +455,15 @@ test "codex 데몬 귀속: 훅의 부모 argv 가 공유 데몬일 때만 데몬
     const bin = "/Users/u/.codex/packages/app-server-daemon/releases/0.160.0-aarch64-apple-darwin/bin/codex";
     // 2026-10-04 실측 argv.
     try testing.expect(isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "--listen", "unix://", "--managed-daemon" }, &.{"HOME=/u"})));
+    // 옛 모양 — `--managed-daemon --help` 검사가 실패·시간 초과하면 이 플래그 없이 뜬다(codex 0.160 `pid_start.rs`).
+    try testing.expect(isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "--listen", "unix://" }, &.{})));
+    try testing.expect(isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "--remote-control", "--listen", "unix://" }, &.{})));
+    try testing.expect(isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "--listen=unix:///tmp/codex.sock" }, &.{})));
+    // `unix://` 가 `--listen` 의 값이 아니면 아니다.
+    try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "unix://", "--listen", "stdio://" }, &.{})));
     // 데몬 보조·IDE 의 stdio app-server·TUI(데몬 안 쓰는 codex 는 훅을 TUI 가 직접 띄운다)는 데몬이 아니다.
     try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "daemon", "pid-update-loop" }, &.{})));
+    try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "daemon", "x", "--listen", "unix://" }, &.{})));
     try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ bin, "app-server", "--listen", "stdio://" }, &.{})));
     try testing.expect(!isManagedDaemonArgs(procargsFixture(&b, &.{ "/n/codex-darwin-arm64/bin/codex", "--dangerously-bypass-approvals-and-sandbox" }, &.{})));
     // envp 의 같은 글자는 argv 가 아니다.
@@ -376,12 +473,64 @@ test "codex 데몬 귀속: 훅의 부모 argv 가 공유 데몬일 때만 데몬
     try testing.expect(!isManagedDaemonArgs(&.{ 3, 0, 0 }));
 
     var v: ParentVerdicts = .{};
-    try testing.expectEqual(@as(?bool, null), v.lookup(63831));
-    v.remember(63831, true);
-    v.remember(65639, false);
-    try testing.expectEqual(@as(?bool, true), v.lookup(63831));
-    try testing.expectEqual(@as(?bool, false), v.lookup(65639));
-    try testing.expectEqual(@as(?bool, null), v.lookup(0)); // pid 칸이 없던 옛 줄
-    for (0..ParentVerdicts.capacity) |i| v.remember(@intCast(1000 + i), false);
-    try testing.expectEqual(@as(?bool, null), v.lookup(63831)); // 돌아가며 덮인다
+    try testing.expectEqual(@as(?bool, null), v.lookup(63831, 100));
+    v.remember(63831, 100, true);
+    v.remember(65639, 200, false);
+    try testing.expectEqual(@as(?bool, true), v.lookup(63831, 100));
+    try testing.expectEqual(@as(?bool, false), v.lookup(65639, 200));
+    // 같은 pid 를 다른 프로세스가 받았다(시작 시각이 다르다) — 옛 판정을 쓰지 않는다.
+    try testing.expectEqual(@as(?bool, null), v.lookup(63831, 101));
+    v.remember(63831, 101, false);
+    try testing.expectEqual(@as(?bool, false), v.lookup(63831, 101));
+    try testing.expectEqual(@as(?bool, null), v.lookup(63831, 100));
+    try testing.expectEqual(@as(?bool, null), v.lookup(0, 0)); // pid 칸이 없던 옛 줄
+    for (0..ParentVerdicts.capacity) |i| v.remember(@intCast(1000 + i), 1, false);
+    try testing.expectEqual(@as(?bool, null), v.lookup(63831, 101)); // 돌아가며 덮인다
+}
+
+test "codex 데몬 귀속: 한 Term 에 세션 하나만 묶이고, SessionStart 나 떠난 Term 이면 묶음을 버리고 다시 판정한다" {
+    const B: u64 = 5;
+    const C: u64 = 7;
+    const live = [_]Candidate{ .{ .id = B }, .{ .id = C } };
+    var b: Bindings = .{};
+    b.bind("S", B);
+    try testing.expectEqual(@as(?u64, B), b.resolve("S", false, &live));
+    // B 가 `/new` — 새 세션 S2 가 B 에 묶이면 옛 S 는 풀린다.
+    b.bind("S2", B);
+    try testing.expectEqual(@as(?u64, B), b.resolve("S2", false, &live));
+    try testing.expectEqual(@as(?u64, null), b.lookup("S"));
+    // (풀리지 않았더라도) C 가 `codex resume S` — S 의 SessionStart 는 묶음을 쓰지 않고 버린다.
+    b.bind("S", B);
+    try testing.expectEqual(@as(?u64, null), b.resolve("S", true, &live));
+    try testing.expectEqual(@as(?u64, null), b.lookup("S"));
+    // 묶인 Term 이 닫혔거나 codex 를 벗어났다(live 에 없다) — 풀고 다시 판정한다.
+    b.bind("S3", C);
+    try testing.expectEqual(@as(?u64, null), b.resolve("S3", false, live[0..1]));
+    try testing.expectEqual(@as(?u64, null), b.lookup("S3"));
+    // 다른 Term 의 묶음은 건드리지 않는다.
+    b.bind("S4", C);
+    b.bind("S5", B);
+    try testing.expectEqual(@as(?u64, C), b.resolve("S4", false, &live));
+}
+
+test "codex 데몬 귀속: 후보 자격은 로컬 codex 터미널만, 같은 cwd 는 둘 다 알 때만, 진단은 (세션, 사유)마다 한 번" {
+    try testing.expect(eligible(.{ .terminal = true, .codex = true, .remote = false }));
+    try testing.expect(!eligible(.{ .terminal = true, .codex = true, .remote = true }));
+    try testing.expect(!eligible(.{ .terminal = true, .codex = false, .remote = false }));
+    try testing.expect(!eligible(.{ .terminal = false, .codex = true, .remote = false }));
+
+    try testing.expect(sameCwdCandidate("/w/payhere-homepage", "/w/payhere-homepage/"));
+    try testing.expect(!sameCwdCandidate("/w/payhere-homepage", "/w/other"));
+    try testing.expect(!sameCwdCandidate(null, "/w/payhere-homepage"));
+    try testing.expect(!sameCwdCandidate("/w/payhere-homepage", ""));
+
+    var log: DropLog = .{};
+    const a = dropKey("S1", .ambiguous_before_prompt);
+    const c = dropKey("S2", .ambiguous_before_prompt);
+    try testing.expect(log.first(a));
+    try testing.expect(log.first(c));
+    // 두 세션이 번갈아 버려져도 각자 한 줄뿐이다.
+    try testing.expect(!log.first(a));
+    try testing.expect(!log.first(c));
+    try testing.expect(log.first(dropKey("S1", .prompt_too_short)));
 }

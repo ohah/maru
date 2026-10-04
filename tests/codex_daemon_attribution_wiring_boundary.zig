@@ -87,7 +87,25 @@ test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하�
     const parent = try fnBody(src, "hookParentIsDaemon");
     _ = try expectOnce(parent, "if (ev.hook_ppid == 0 or !std.mem.eql(u8, ev.provider, attr.daemon_provider)) return false;", "칸 없는 옛 줄");
     _ = try expectOnce(parent, "maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return false;", "argv 판정");
-    _ = try expectOnce(parent, "self.codex_daemon_parents.remember(ev.hook_ppid, verdict);", "판정 기억");
+    // 판정 기억의 키는 (pid, 시작 시각) — pid 만이면 재사용된 pid 에 옛 판정이 붙는다.
+    const started_at = try expectOnce(parent, "const started = maru.pty.PtySession.processStartMicros(pid) orelse return false;", "시작 시각");
+    const lookup_at = try expectOnce(parent, "if (self.codex_daemon_parents.lookup(ev.hook_ppid, started)) |known| return known;", "판정 조회");
+    _ = try expectOnce(parent, "self.codex_daemon_parents.remember(ev.hook_ppid, started, verdict);", "판정 기억");
+    if (!(started_at < lookup_at)) return error.WiringChanged;
+
+    // 후보 자격은 순수 층이 정하고, 세 사실을 **그 Term 에서** 읽어 넘긴다 — 원격 칸이 빠지면 원격 pane 이 후보가 된다.
+    const eligible_at = try expectOnce(route, "if (!attr.eligible(.{ .terminal = t.kind == .terminal, .codex = t.agent_kind == .codex, .remote = isRemoteAgentPane(t) })) continue;", "후보 자격");
+    const any_at = try expectOnce(route, "any_cwd[any_count] = .{ .id = t.surfaceId() };", "cwd 무관 후보");
+    if (!(eligible_at < any_at)) return error.WiringChanged;
+    // 묶음은 그 목록으로 살아 있는지 보고, SessionStart 면 버린다 — 그 판정은 순수 층(`Bindings.resolve`)에 있다.
+    const resolve_at = try expectOnce(route, "const bound = self.codex_daemon_bindings.resolve(sid, ev.kind == .session_start, any_cwd[0..any_count]);", "묶음 조회");
+    if (!(any_at < resolve_at)) return error.WiringChanged;
+    try expectCount(route, "codex_daemon_bindings.lookup(", 0, "검사 없는 묶음 조회");
+    // 같은 cwd 후보도 순수 층이 정하고, 그 판정을 지난 것만 넣는다.
+    const same_at = try expectOnce(route, "if (!attr.sameCwdCandidate(git_ops.termCwd(self, t, &t_cwd_buf), ev_cwd)) continue;", "같은 cwd");
+    const cand_at = try expectOnce(route, "candidates[count] = .{ .id = a.id };", "같은 cwd 후보");
+    if (!(resolve_at < same_at and same_at < cand_at)) return error.WiringChanged;
+
     const decide_at = try expectOnce(route, "const decision = attr.decide(.{", "순수 판정");
     // 판정은 두 후보 목록을 다 받는다 — cwd 무관 목록이 빠지면 `codex -C <dir>` 의 하나뿐인 pane 도 버려진다.
     _ = try expectOnce(route[decide_at..], ".candidates = candidates[0..count], .any_cwd = any_cwd[0..any_count],", "판정 입력");
@@ -98,9 +116,11 @@ test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하�
     _ = try expectOnce(route, ".drop => |reason| { noteDaemonDrop(self, sid, reason); return .dropped; },", "버림 갈래");
     _ = try expectOnce(route, "if (r.target == term.surfaceId()) return .here;", "이 Term 갈래");
     _ = try expectOnce(route, "if (r.bind) self.codex_daemon_bindings.bind(sid, r.target);", "묶음");
-    // 묶인 세션은 그 Term 이 살아 있고 codex 가 돌 때만 쓴다.
-    _ = try expectOnce(route, "if (t.agent_kind == .codex) bound = id;", "묶음 재확인");
+    _ = try expectOnce(route[decide_at..], ".bound = bound,", "판정의 묶음 입력");
     try expectCount(src, "attr.decide(", 1, "판정 호출 수");
+    // 진단은 (세션, 사유)마다 한 번 — 마지막 키 하나가 아니라 작은 집합으로 거른다.
+    const drop = try fnBody(src, "noteDaemonDrop");
+    _ = try expectOnce(drop, "if (!self.codex_daemon_drop_log.first(maru.session.codex_daemon_attribution.dropKey(sid, reason))) return;", "진단 거르기");
     // 이 함수는 신원을 직접 채택하지 않는다 — 채택은 판정이 고른 Term 의 배치 안에서만 일어난다.
     try expectCount(route, "adoptHookSessionIdentity", 0, "판정 함수 안의 신원 채택");
 }
@@ -114,8 +134,22 @@ test "codex 데몬 귀속 — 재배정받은 Term 은 자기 파일이 없어�
 
     const routed = try fnBody(src, "applyRoutedHookEvent");
     _ = try expectOnce(routed, "target.agent_hook_routed = true;", "재배정 표식");
-    _ = try expectOnce(routed, "tb.step(self, target, ev);", "재배정 적용");
+    // 따라잡기는 받는 Term 에도 그 적용 동안 선다 — 회전본 건지기와 같은 되돌림 모양이다.
+    const save_at = try expectOnce(routed, "const restore_catchup = target.hook.backlog_catchup;", "따라잡기 저장");
+    const set_at = try expectOnce(routed, "target.hook.backlog_catchup = restore_catchup or backlog;", "따라잡기 세움");
+    const back_at = try expectOnce(routed, "defer target.hook.backlog_catchup = restore_catchup;", "따라잡기 되돌림");
+    const step_at = try expectOnce(routed, "tb.step(self, target, ev);", "재배정 적용");
+    const finish_at = try expectOnce(routed, "tb.finish(self, target);", "재배정 배치 끝");
+    // 배지는 권위표를 지나야 움직인다 — 훅 자리만 쓰고 끝나면 받는 Term 의 배지가 안 바뀐다.
+    const arb_at = try expectOnce(routed, "arbitrateAgentState(self, target, false);", "재배정 뒤 권위표");
+    if (!(save_at < set_at and set_at < back_at and back_at < step_at and step_at < finish_at and finish_at < arb_at)) return error.WiringChanged;
     _ = try expectOnce(routed, "if (backlog) target.hook.notice.clear();", "따라잡기 중 알림 억제");
+
+    // 회전본 건지기도 귀속을 지난다 — 이 파일에 적힌 남의 세션 이벤트가 여기서 이 Term 에 붙으면 안 된다.
+    const rotated = try fnBody(src, "drainRotatedAgentHookLog");
+    const route_at = try expectOnce(rotated, "switch (routeHookEvent(self, term, ev)) { .here => {}, .elsewhere, .dropped => continue, }", "회전본 귀속");
+    const apply_at = try expectOnce(rotated, "const applied = applyHookEvent(self, term, ev);", "회전본 적용");
+    if (!(route_at < apply_at)) return error.WiringChanged;
 
     const poll = try fnBody(src, "pollAgentHookEvents");
     _ = try expectOnce(poll, "term.agent_hook_log_present = term.agent_hook_routed; return;", "파일 없음 갈래");

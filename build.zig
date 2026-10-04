@@ -6445,9 +6445,11 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"codex 데몬 귀속"},
         });
         const run_codex_daemon_tests = b.addRunArtifact(codex_daemon_tests);
-        run_codex_daemon_tests.addArg("--maru-expect-tests=4");
-        run_codex_daemon_tests.addArg("--maru-expect-passed=4");
+        run_codex_daemon_tests.addArg("--maru-expect-tests=6");
+        run_codex_daemon_tests.addArg("--maru-expect-passed=6");
         codex_daemon_step.dependOn(&run_codex_daemon_tests.step);
+        // check-boundaries 는 Debug 로만 돈다(`boundary_step` 선언 위 규칙) — ReleaseFast 사본은 이 전용 step 에만 남는다.
+        if (codex_daemon_optimize == .Debug) boundary_step.dependOn(&run_codex_daemon_tests.step);
     }
     // 훅이 싣는 칸과 파서가 읽는 칸은 같은 상수에서 나온다 — 두 파일의 판정자를 함께 돌린다.
     const codex_daemon_hook_tests = addProjectTest(b, .{
@@ -6486,7 +6488,10 @@ pub fn build(b: *std.Build) void {
     run_codex_daemon_wiring.addArg("--maru-expect-passed=2");
     run_codex_daemon_wiring.setCwd(b.path("."));
     codex_daemon_step.dependOn(&run_codex_daemon_wiring.step);
-    boundary_step.dependOn(codex_daemon_step);
+    // step 통째로 매달면 루프 안 ReleaseFast 사본까지 check-boundaries 에 붙는다 — Debug 실행만 하나씩 붙인다.
+    boundary_step.dependOn(&run_codex_daemon_hook.step);
+    boundary_step.dependOn(&run_codex_daemon_parse.step);
+    boundary_step.dependOn(&run_codex_daemon_wiring.step);
 
     // 앱 세션의 글리프 배치가 **배치 트랜잭션을 지나는지**(한 입구·배치 앞 begin·교체 성공 뒤에만 commit). 규칙 자체는
     // `renderer.glyph_placement` 의 순수 판정자가 실제 아틀라스·가짜 텍스처로 잰다(`test`). app_session 테스트는

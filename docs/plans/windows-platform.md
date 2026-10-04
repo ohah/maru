@@ -375,3 +375,8 @@ worker 연결과 capability probe·UTF-8 이관 및 전체 잔여 Windows 범위
 소유권을 유지한다. 동기/worker의 Windows root 판정도 공유한다. worker 6개 Debug/ReleaseFast와
 다섯 compiled runtime 변형 검출이 통과했다. 일반 앱의 등록/readonly fallback·UTF-8·닫기
 배선과 전체 잔여 Windows 범위는 계속 진행한다.
+
+§2m.183: app용 worker는 capability 실패 때 bounded readonly 이미지를 만들고 OOM은
+실패로 유지한다. UTF-8·BOM·줄바꿈 해석은 owned raw bytes를 빌리는 Document로 반환한다.
+worker 11개 Debug/ReleaseFast와 다섯 compiled runtime 변형 검출이 통과했다. 일반 앱의
+파일 클릭 연결과 결과 등록·닫기 배선 및 전체 잔여 Windows 범위는 계속 진행한다.

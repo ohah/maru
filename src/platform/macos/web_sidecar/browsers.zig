@@ -95,6 +95,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
 fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
     if (state.registry.byId(value.browser) != null) return fail(writer, value.browser, .duplicate_browser, "browser id already exists");
     if (state.registry.full()) return fail(writer, value.browser, .browser_create_failed, "too many browsers");
+    new_tab.forgetReserved(value.browser); // maru 가 맡긴 번호를 직접 쓴다(W6f)
 
     var window_info = object.zeroed(c.cef_window_info_t);
     window_info.windowless_rendering_enabled = 1;
@@ -112,7 +113,7 @@ fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
     const browser = state.api.browser_host_create_browser_sync(&window_info, client.get(), &url, &settings, null, null);
     if (browser == null) return fail(writer, value.browser, .browser_create_failed, "CEF refused to create the browser");
 
-    register(browser, value.browser, value.size, false) catch |err| return fail(writer, value.browser, .browser_create_failed, switch (err) {
+    register(browser, value.browser, value.size) catch |err| return fail(writer, value.browser, .browser_create_failed, switch (err) {
         error.OutOfMemory => "out of memory",
         // 위에서 확인했으니 오지 않는다 — 와도 새지 않게 닫았다.
         error.Refused => "registry refused the browser",
@@ -127,7 +128,7 @@ fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
 
 /// 만든 브라우저를 그 번호로 등록하고 브라우저마다의 준비를 한다 — maru 가 청해 만든 것과 이어 받은 팝업(W6f)이 함께 쓴다. 넘긴
 /// browser 의 참조 하나는 목록이 쥔다(실패하면 닫고 푼다).
-pub fn register(browser: [*c]c.cef_browser_t, id: BrowserId, size: protocol.message.ViewSize, popup: bool) error{ OutOfMemory, Refused }!void {
+pub fn register(browser: [*c]c.cef_browser_t, id: BrowserId, size: protocol.message.ViewSize) error{ OutOfMemory, Refused }!void {
     const cef_id = browser.*.get_identifier.?(browser);
     const producer = std.heap.c_allocator.create(ring_producer.Producer) catch {
         closeBrowser(browser);
@@ -135,7 +136,7 @@ pub fn register(browser: [*c]c.cef_browser_t, id: BrowserId, size: protocol.mess
         return error.OutOfMemory;
     };
     producer.* = .{ .browser = id, .scale = size.scale };
-    state.registry.add(.{ .id = id, .cef_id = cef_id, .handle = @ptrCast(browser), .size = size, .frames = producer, .popup = popup }) catch {
+    state.registry.add(.{ .id = id, .cef_id = cef_id, .handle = @ptrCast(browser), .size = size, .frames = producer }) catch {
         std.heap.c_allocator.destroy(producer);
         closeBrowser(browser);
         object.release(browser);
@@ -224,6 +225,7 @@ pub fn beginShutdown() void {
 
 /// `on_before_close` 에서 부른다 — 목록이 쥔 참조를 풀고 maru 에 알린다.
 pub fn onClosed(cef_id: c_int) void {
+    new_tab.openerClosed(cef_id); // 그것이 연 기다리는 팝업(W6f)
     if (state.registry.remove(cef_id)) |entry| {
         dialogs.dropBrowser(entry.id);
         const browser: [*c]c.cef_browser_t = @ptrCast(@alignCast(entry.handle));

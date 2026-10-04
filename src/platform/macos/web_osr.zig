@@ -2276,7 +2276,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .open_tab => |v| if (surfaces.getPtr(v.browser)) |s| queueNewTab(gpa, s, v, now_ms),
         // W6f①: maru 는 아직 번호를 맡기지 않는다(`popup_reserve` — W6f② 가 붙인다). 그래도 오면 이어 받을 탭이 없다 — 닫는다(페이지에는
         // 팝업이 닫힌 것으로 보인다). 쥐는 이 없는 브라우저를 남기지 않는다.
-        .popup_created => |v| send(gpa, .{ .destroy_browser = v.browser }),
+        .popup_created => |v| if (surfaces.getPtr(v.browser) == null) send(gpa, .{ .destroy_browser = v.browser }),
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
             if (s.url) |old| gpa.free(old);

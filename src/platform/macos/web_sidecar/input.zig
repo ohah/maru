@@ -18,6 +18,7 @@ const browsers = @import("browsers.zig");
 const registry_mod = @import("registry.zig");
 const input_map = @import("input_map.zig");
 const tooltip = @import("tooltip.zig");
+const new_tab = @import("new_tab.zig");
 
 const message = protocol.message;
 const Message = message.Message;
@@ -48,6 +49,8 @@ pub fn handle(msg: Message) bool {
     switch (msg) {
         .mouse => |value| if (hostOf(value.browser)) |host| {
             defer object.release(host);
+            // 누름은 사용자 활성화다(Chrome 과 같다) — 새 탭 한 장(W6e). 보내기 전에 준다(팝업은 그 뒤 렌더러에서 온다).
+            if (value.kind == .down) new_tab.grant(value.browser);
             mouse(host, value);
             // 포인터가 떠났다 — CEF 도 빈 글을 부르지만, 바쁜 렌더러가 늦거나 빠뜨려도 maru 의 툴팁이 남지 않게(W6b).
             if (value.kind == .leave) tooltip.reset(value.browser);
@@ -66,6 +69,8 @@ pub fn handle(msg: Message) bool {
                 .up => c.KEYEVENT_KEYUP,
                 .char => c.KEYEVENT_CHAR,
             };
+            // 키 누름도 활성화다 — Esc 는 아니다(Chrome 과 같다). W6e 새 탭 한 장.
+            if ((value.kind == .raw_down or value.kind == .down) and value.windows_key_code != 0x1b) new_tab.grant(value.browser);
             event.modifiers = flags(value.modifiers);
             event.windows_key_code = value.windows_key_code;
             event.native_key_code = value.native_key_code;

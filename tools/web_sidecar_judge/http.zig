@@ -5,6 +5,8 @@
 //!   /size         제목을 `w=<innerWidth>` 로, 크기가 바뀔 때마다 다시
 //!   /cookie?v=N   제목을 `cookie=[<document.cookie>]` 로 한 뒤 쿠키 `maru_judge=N` 을 한 시간짜리로 심는다
 //!   /popup        `window.open` 을 부른 뒤 제목을 `popup-tried` 로
+//!   /newtab       새 탭 판정(W6e) — `_blank`·보통·`mailto:` 링크와 `window.open` 단추들(`newtab_check.zig`). `-focus` 는 `_blank`
+//!                 링크에 포커스, `-auto` 는 입력 없이 열기를 시도한다
 //!   /vis          제목을 `vis=<document.visibilityState>` 로, 바뀔 때마다 다시
 //!   /print        `window.print()` 를 부른 뒤 제목을 `print-tried` 로(인쇄 창이 뜨면 그 창이 닫힐 때까지 안 온다)
 //!   /dialog       `alert`·`confirm`·`prompt` 를 부른 뒤 제목을 `dialog-<confirm>-<prompt>` 로
@@ -64,6 +66,8 @@ const Timeval = extern struct { sec: i64, usec: i32 };
 /// 팝업 페이지(`/title?t=opened`)가 실제로 요청된 수. 창 없는 모드에서는 허용된 팝업이 **보이지 않는 브라우저**로
 /// 뜨므로 창 수로는 못 잡는다(변이 실측) — 페이지가 불렸는지로 본다.
 pub var opened_requests = std.atomic.Value(u32).init(0);
+/// 새 탭 판정(W6e)의 주소(`/title?t=nt-…`)가 요청된 수 — sidecar 가 팝업 브라우저를 만들었다면 그 주소를 불렀을 것이다.
+pub var newtab_requests = std.atomic.Value(u32).init(0);
 /// `/flaky.svg` 를 받은 수(W6c) — 첫 요청은 HTML(깨진 이미지), 그 뒤는 진짜 SVG. 못 받은 이미지의 「이미지 복사」가 다시 받으면
 /// 성공하게 만들어, 허용 규칙이 그 명령을 막는지를 판정이 가를 수 있게 한다.
 pub var flaky_requests = std.atomic.Value(u32).init(0);
@@ -162,9 +166,25 @@ fn handle(conn: c_int) void {
     _ = std.c.write(conn, body.ptr, body.len);
 }
 
+/// 새 탭 판정(W6e)의 페이지 — 자리는 `newtab_check.zig` 와 맞춘다(140×30 칸).
+const newtab_page =
+    "<!doctype html><title>loading</title><style>body{margin:0;font:12px sans-serif}a,button{position:absolute;width:120px;height:30px;display:block;box-sizing:border-box;border:1px solid #888;padding:0;margin:0;background:#eee}</style><body>" ++
+    "<a id=ab style='left:0;top:10px' href='/title?t=nt-ab' target=_blank>ab</a>" ++
+    "<a id=pl style='left:140px;top:10px' href='/title?t=nt-pl'>pl</a>" ++
+    "<a id=ml style='left:280px;top:10px' href='mailto:a@b.example'>ml</a>" ++
+    "<button style='left:0;top:60px' onclick=\"window.open('/title?t=nt-w1')\">w1</button>" ++
+    "<button style='left:140px;top:60px' onclick=\"window.open('/title?t=nt-wf','f','width=300,height=200')\">wf</button>" ++
+    "<button style='left:280px;top:60px' onclick=\"for(var i=0;i<10;i++)window.open('/title?t=nt-m'+i)\">m10</button>" ++
+    "<button style='left:0;top:110px' onclick=\"window.open()\">bl</button>" ++
+    "<button style='left:140px;top:110px' onclick=\"window.open('javascript:void(0)')\">js</button>" ++
+    "<a style='left:280px;top:110px' href='data:text/html,hi' target=_blank>dl</a>" ++
+    "<button style='left:0;top:160px' onclick=\"setTimeout(function(){window.open('/title?t=nt-late')},2500)\">late</button>" ++
+    "<button style='left:420px;top:160px' onclick=\"var n=0,t=setInterval(function(){window.open('/title?t=nt-r'+(n++));if(n>11)clearInterval(t)},400)\">rep</button>";
+
 fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/title")) {
         if (std.mem.eql(u8, query, "opened")) _ = opened_requests.fetchAdd(1, .monotonic);
+        if (std.mem.startsWith(u8, query, "nt-")) _ = newtab_requests.fetchAdd(1, .monotonic);
         return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><script>document.title='{s}'</script>", .{query});
     }
     if (std.mem.eql(u8, path, "/size")) {
@@ -184,6 +204,13 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/sel")) return select_page;
     if (std.mem.eql(u8, path, "/tip") or std.mem.eql(u8, path, "/tip2")) return tooltip_page;
     if (std.mem.eql(u8, path, "/cm")) return context_menu_page;
+    if (std.mem.eql(u8, path, "/newtab")) return newtab_page ++ "<script>onload=function(){document.title='nt-ready'}</script>";
+    if (std.mem.eql(u8, path, "/newtab-focus")) return newtab_page ++ "<script>onload=function(){document.getElementById('ab').focus();document.title='nt-focused'}</script>";
+    // 입력 없이 연다 — `window.open`(Chromium 이 막는다), 만든 ⌘ 클릭(제스처 0 으로 sidecar 에 온다 — 착수 전 실측), `click()`.
+    if (std.mem.eql(u8, path, "/newtab-auto")) return newtab_page ++
+        "<script>onload=function(){setTimeout(function(){window.open('/title?t=nt-a1');" ++
+        "document.getElementById('pl').dispatchEvent(new MouseEvent('click',{metaKey:true,bubbles:true,cancelable:true}));" ++
+        "document.getElementById('ab').click();document.title='nt-auto-done'},300)}</script>";
     if (std.mem.eql(u8, path, "/dnd")) return drag_page;
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";

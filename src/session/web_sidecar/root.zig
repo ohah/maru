@@ -15,3 +15,5 @@ pub const stream = @import("stream.zig");
 pub const text = @import("text.zig");
 /// 픽셀 링의 mailbox 규칙(W2) — 원자 워드 하나에 세대·슬롯·dirty.
 pub const mailbox = @import("mailbox.zig");
+/// 페이지가 여는 새 탭의 규칙(W6e) — 앞/뒤·주소·자리.
+pub const new_tab = @import("new_tab.zig");

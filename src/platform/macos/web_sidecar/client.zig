@@ -2,7 +2,7 @@
 //! 알려 주므로 `browsers.state.registry` 에서 maru 의 `BrowserId` 를 찾아 알림을 보낸다.
 //!
 //! **팝업은 막는다**: 창 없는 브라우저라도 `window.open` 의 기본 동작은 네이티브 Chrome 창이다 — maru 가 통제하지
-//! 못하는 창을 sidecar 가 열면 안 된다(탭으로 여는 것은 W3·W6).
+//! 못하는 창을 sidecar 가 열면 안 된다. 새 탭 요청이면 주소만 maru 에 보내 maru 가 탭으로 연다(W6e — `new_tab.zig`).
 //!
 //! **JS 대화상자도 막는다**: `alert`·`confirm`·`prompt` 의 기본 동작도 네이티브 창이고 사용자 제스처 없이 뜬다(적대 검증).
 //! 임시 안전 기본값으로 억제한다 — `alert` 는 바로 돌아오고 `confirm`·`prompt` 는 취소로 끝난다. maru 가 대화상자를
@@ -28,6 +28,7 @@ const tooltip = @import("tooltip.zig");
 const context_menus = @import("context_menu.zig");
 const drag = @import("drag.zig");
 const notifications = @import("notifications.zig");
+const new_tab = @import("new_tab.zig");
 
 var client_obj: c.cef_client_t = undefined;
 var life_span: c.cef_life_span_handler_t = undefined;
@@ -102,6 +103,7 @@ pub fn get() *c.cef_client_t {
         load.on_load_start = &onLoadStart;
         load.on_load_error = &dialogs.onLoadError;
         request.on_render_process_terminated = &onRenderProcessTerminated;
+        request.on_open_urlfrom_tab = &new_tab.onOpenUrlFromTab;
         jsdialog.on_jsdialog = &dialogs.onJsDialog;
         jsdialog.on_before_unload_dialog = &dialogs.onBeforeUnloadDialog;
         jsdialog.on_reset_dialog_state = &dialogs.onResetDialogState;
@@ -345,10 +347,10 @@ fn onBeforePopup(
     browser: [*c]c.cef_browser_t,
     frame: [*c]c.cef_frame_t,
     _: c_int,
+    target_url: [*c]const c.cef_string_t,
     _: [*c]const c.cef_string_t,
-    _: [*c]const c.cef_string_t,
-    _: c.cef_window_open_disposition_t,
-    _: c_int,
+    disposition: c.cef_window_open_disposition_t,
+    user_gesture: c_int,
     _: [*c]const c.cef_popup_features_t,
     _: [*c]c.cef_window_info_t,
     _: [*c][*c]c.cef_client_t,
@@ -358,7 +360,9 @@ fn onBeforePopup(
 ) callconv(.c) c_int {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
-    return 1; // 취소 — 네이티브 창을 열지 않는다.
+    // 새 탭이면 주소를 maru 에 보낸다(W6e). 어느 쪽이든 취소 — 네이티브 창도, 보이지 않는 팝업 브라우저도 만들지 않는다.
+    _ = new_tab.request(browser, target_url, disposition, user_gesture);
+    return 1;
 }
 
 fn onBeforeClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t) callconv(.c) void {

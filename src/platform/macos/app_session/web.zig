@@ -402,11 +402,18 @@ pub fn tickWebOsr(self: *AppSession) void {
     if (web_osr.takeInstallNotice()) self.showNoticeKey(.web_osr_not_installed);
     if (!web_osr.enabled()) return;
     web_osr.pump(self.allocator, @intCast(app_session_mod.monotonicMs()));
+    // W6e: 새 탭을 기다리는 탭들(tick 마다 하나를 연다 — 한 탭이 막혀도 다른 탭의 것은 연다).
+    var new_tab_openers: [8]u64 = undefined;
+    var new_tab_count: usize = 0;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (!isOsrTerm(term)) continue;
                 const sid = term.surfaceId();
+                if (new_tab_count < new_tab_openers.len and web_osr.newTabPending(sid)) {
+                    new_tab_openers[new_tab_count] = sid;
+                    new_tab_count += 1;
+                }
                 if (web_osr.takeNavUpdate(sid)) |nav| setWebNavState(self, sid, nav.can_go_back, nav.can_go_forward, nav.url);
                 if (web_osr.takeGpuNotice(sid)) self.showNoticeKey(.web_osr_gpu_unavailable);
                 // 엔진이 멈췄다 — 이 탭이 있는 창이 한 번 보인다(멈춘 뒤 새로 연 탭도).
@@ -418,6 +425,8 @@ pub fn tickWebOsr(self: *AppSession) void {
             }
         }
     }
+    // W6e: 페이지가 연 새 탭 — tick 마다 하나(탭 목록을 도는 동안 바꾸지 않게 돈 뒤에).
+    for (new_tab_openers[0..new_tab_count]) |opener| if (osrOpenNewTab(self, opener)) break;
     // W4c: 키 대상이 바뀌었으면(탭·pane 전환·오버레이·창 키) 포커스를 옮기고 조합을 확정한다. 트랜잭션 밖 unmark 뒤 확정
     // 글이 안 왔으면 조합을 그대로 확정한다.
     syncOsrKeyTarget(self);
@@ -1112,6 +1121,65 @@ pub fn osrTooltip(self: *AppSession) struct { serial: u64, text: []const u8, rec
     const serial = self.osr_tooltip_seen.observe(sid, if (t) |x| x.generation else 0);
     const layout = if (sid != 0) osr_input.find(self.osr_layouts.items, sid) else null;
     return .{ .serial = serial, .text = if (t) |x| x.text else "", .rect = if (layout) |l| l.rect else null };
+}
+
+// ── W6e: 페이지가 연 새 탭 ─────────────────────────────────────────────────────────────────────────────
+
+/// 한 탭이 이어 연 마지막 새 탭(`osr_new_tab_run`). `active` 는 그때 그 pane 의 활성 탭 — 사용자가 다른 탭으로 옮기면 끝난다.
+pub const OsrNewTabRun = struct { opener: u64, child: u64, active: u64 };
+
+/// 그 탭(`opener`)이 연 새 탭 하나를 그 탭 오른쪽에 만든다(Chrome 처럼 — 이어 연 탭들이 있으면 그 뒤). 주소는 복원 경로와 같은
+/// `pending_url` 로 싣는다(브라우저가 만들어지면 그 주소로 간다). 앞 탭이면 그 탭으로 옮긴다 — 연 탭이 사용자가 보고 있는 탭일 때만
+/// (`new_tab.place`). 그 pane 에서 탭을 끄는 중이면 열지 않고 false(다음 tick — 다른 탭의 요청은 그사이에도 연다).
+fn osrOpenNewTab(self: *AppSession, opener: u64) bool {
+    for (self.tabs.items, 0..) |tab, tab_index| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items, 0..) |term, index| {
+                if (term.surfaceId() != opener) continue;
+                if (tab_ops.tabDragTransaction(self, pane) != null) return false;
+                const request = web_osr.takeNewTab(opener) orelse return false;
+                const visible = tab_index == self.app_window.active_tab and pane == pane_ops.activePane(self) and pane.active_term == index;
+                insertNewTab(self, pane, index, request, visible) catch self.allocator.free(request.url);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: usize, request: web_osr.NewTab, visible: bool) !void {
+    const opener = pane.terms.items[opener_index].surfaceId();
+    const last_child: ?usize = blk: {
+        const run = self.osr_new_tab_run orelse break :blk null;
+        if (run.opener != opener or pane.activeTerm().surfaceId() != run.active) break :blk null;
+        for (pane.terms.items, 0..) |t, i| if (t.surfaceId() == run.child) break :blk i;
+        break :blk null;
+    };
+    const plan = ws.new_tab.place(opener_index, pane.active_term, last_child, request.placement, visible);
+    const term = try createWebTerm(self, .browser); // 페이지가 연 탭 = 비신뢰 browser(WebKit 의 팝업 adopt 와 같다)
+    pane.terms.insert(self.allocator, plan.at, term) catch |err| {
+        term_ops.destroyTerm(self, term);
+        return err;
+    };
+    term.pending_url = request.url; // 이제 탭이 놓는다(`destroyTerm`·소비)
+    if (plan.focus) {
+        pane.active_term += @intFromBool(plan.at <= pane.active_term); // 끼운 자리만큼 민 뒤 옮긴다(focusTerm 은 같은 자리면 일찍 끝난다)
+        self.focusTerm(plan.at);
+        self.osr_new_tab_run = null;
+    } else {
+        pane.active_term = plan.active;
+        self.osr_new_tab_run = .{ .opener = opener, .child = term.surfaceId(), .active = pane.activeTerm().surfaceId() };
+    }
+    self.workspaceChanged(.topology);
+    self.metal_dirty = true;
+    // 판정 모드 전용(`MARU_WEB_OSR_TEST_INPUT` — 스모크 W6e): 새 탭의 자리를 적는다. 주소는 적지 않는다.
+    if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) {
+        var opener_now: usize = 0;
+        for (pane.terms.items, 0..) |t, i| if (t.surfaceId() == opener) {
+            opener_now = i;
+        };
+        std.debug.print("osr-test newtab at={d} tabs={d} opener={d} active={d} placement={s}\n", .{ plan.at, pane.terms.items.len, opener_now, pane.active_term, @tagName(request.placement) });
+    }
 }
 
 /// 이 창이 띄운 우클릭 메뉴(W6c②). 항목은 순수 모듈이 정하고(`web_osr_context_menu`), 자리는 창 backing px 다.
@@ -2031,7 +2099,9 @@ pub fn takeRestoredBrowserNavigate(self: *AppSession) ?WebNavigateRequest {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 const url = term.pending_url orelse continue;
-                if (url.len == 0 or url.len > addr_nav_url_cap) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
+                // OSR 탭은 wire 주소 상한까지(W6e — 페이지가 연 새 탭의 긴 링크가 4 KiB 에서 버려져 빈 탭이 됐다, 적대 검증 1 차).
+                const cap = if (isOsrTerm(term)) ws.wire.max_url_bytes else addr_nav_url_cap;
+                if (url.len == 0 or url.len > cap) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
                     self.allocator.free(url);
                     term.pending_url = null;
                     continue;

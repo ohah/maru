@@ -17,7 +17,7 @@ pub const magic = "MWEB".*;
 ///   버전 불일치 대신 `FrameTooLarge`(규칙 위반 — 재시작)로 보인다(W7a1 적대 검증).
 /// sidecar 는 다른 버전의 hello 를 받으면 제 버전으로 `hello_ack`(0·0) 하나를 보내고 끝내고(exit 18), maru 는 handshake 중
 /// 버전이 다른 frame 을 받으면 다시 띄우지 않고 안내한다(C2).
-pub const version: u16 = 8;
+pub const version: u16 = 9;
 
 /// maru 가 보내는 URL 상한. 사용자가 친 주소·링크를 싣는 자리라 이 크기면 넉넉하고, 고정 decoder 저장소를
 /// 작게 둔다. 이보다 긴 URL(큰 data: URL 등)은 maru 가 보내지 않는다.
@@ -76,6 +76,7 @@ pub const Error = error{
     /// 선택 비트와 글이 어긋남.
     InvalidContextMenu,
     UnknownContextMenuCommand,
+    UnknownNewTabPlacement,
     /// 끌기(W6d①)의 닫힌 필드 위반 — 빈 조각, 쓰지 않는 동작 비트, leave 에 자리·수식키·허용 동작, drop 에 허용 동작,
     /// 받아들이는 동작이 둘 이상.
     InvalidDrag,

@@ -135,6 +135,12 @@ class H(http.server.BaseHTTPRequestHandler):
             body = base64.b64decode(CAT_PNG)
             self.send_response(200); self.send_header('Content-Type', 'image/png'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
             return
+        elif self.path == "/nt-app":
+            # W6e: 위는 보통 링크(가운데 클릭 → 뒤 탭), 아래는 `target=_blank`(클릭 → 앞 탭).
+            body = (b"<!doctype html><title>nt</title><style>html,body{margin:0;height:100%}a{position:absolute;left:0;width:100%;display:block}</style><body>"
+                    b"<a href='/nt-b' style='top:5%;height:40%;background:#ccf'>b</a><a href='/nt-a' target=_blank style='top:55%;height:40%;background:#cfc'>a</a>")
+        elif self.path in ("/nt-a", "/nt-b"):
+            body = b"<!doctype html><title>nt target</title><body>target"
         elif self.path == "/nav-a":
             body = b"<!doctype html><title>a</title><style>html,body{margin:0;height:100%}a{display:block;height:100%}</style><body><a href='/nav-b'>b</a><script>addEventListener('pageshow',function(){new Image().src='/ev?e=shown-a&t='+Date.now()})</script>"
         elif self.path == "/nav-b":
@@ -752,7 +758,7 @@ def t_of(line):
     return int(m.group(1)) if m else 0
 loads = [l for l in requests if l.startswith('/ev?e=load') and t_of(l) < marks.get('reloaded', 0)]
 check(len(loads) == 2, f'picking reload loaded the page again (loads before the mark: {len(loads)})')
-check(len(shown) > 1 and shown[1] == '링크 주소 복사', f'the link menu (no text under the pointer) is copy link address ({shown[1] if len(shown) > 1 else None})')
+check(len(shown) > 1 and shown[1] == '새 탭에서 링크 열기|—|링크 주소 복사', f'the link menu (no text under the pointer) is open link in new tab — copy link address ({shown[1] if len(shown) > 1 else None})')
 edit = re.compile(r'^그림 이모티콘 & 기호\|—\|실행 취소\(off\)\|다시 실행\(off\)\|—\|잘라내기\(off\)\|복사\(off\)\|붙여넣기(\(off\))?\|붙여넣고 스타일 일치시킴(\(off\))?\|모두 선택$')
 check(len(shown) > 2 and bool(edit.match(shown[2])), f'the input menu is emoji — undo · redo — cut · copy · paste · paste and match style · select all ({shown[2] if len(shown) > 2 else None})')
 selection = "'\u2068hello\u2069' 찾기|—|복사|—|음성▸[말하기 시작|말하기 중지(off)]|—|서비스▸[]"
@@ -1026,6 +1032,49 @@ check(got == want and second == want and sorted(os.listdir(folder)) == ['cat 2.p
 q = subprocess.run(['xattr', '-p', 'com.apple.quarantine', path], capture_output=True, text=True)
 # 표지 값은 「플래그;시각;앱;UUID」 — 셸에서 띄운(번들 아닌) 시험 앱은 앱 이름 칸을 macOS 가 비운다. 표지가 있는지만 본다.
 check(q.returncode == 0 and len(q.stdout.strip().split(';')) >= 3, f'the file carries the download quarantine mark — its origin is recorded ({q.stdout.strip()!r})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6e: 페이지가 연 새 탭 ─────────────────────────────────────────────────────────────────────────────
+# 가운데 클릭 두 번(뒤 탭 — 지금 탭 오른쪽에 차례대로, 포커스 그대로), 그다음 `target=_blank` 클릭(앞 탭 — 이어 연 탭들 뒤, 그 탭으로
+# 옮긴다). 앱은 판정 모드에서 새 탭의 자리를 적고(`osr-test newtab`), 새 탭이 그 주소를 불렀는지는 시험 서버가 받은 요청으로 본다.
+cat > "$root/newtab.txt" <<SCRIPT
+sleep 9000
+view down 0.6 0.3 0 0 2
+sleep 60
+view up 0.6 0.3 0 0 2
+sleep 1500
+view down 0.6 0.3 0 0 2
+sleep 60
+view up 0.6 0.3 0 0 2
+sleep 1500
+view down 0.6 0.8 0 0
+sleep 60
+view up 0.6 0.8 0 0
+sleep 3000
+SCRIPT
+: > "$root/requests.log"
+run_app /nt-app 20000 "$root/newtab.summary" MARU_WEB_OSR_TEST_INPUT="$root/newtab.txt"
+grep -a '^osr-test newtab' "$root/app-nt-app.log" > "$root/newtab.report" || true
+cat "$root/newtab.report"
+python3 - "$root/newtab.report" "$root/requests.log" <<'PY' || fail "tabs a page opened did not behave as expected"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+# 연 탭의 자리(o)·처음 탭 수(n)는 pane 에 무엇이 먼저 있었는지에 달렸다(터미널 탭 하나) — 그것에 맞춰 본다.
+fields = [dict(kv.split('=') for kv in l.split()[2:]) for l in report]
+o = int(fields[0]['opener']) if fields else -1
+n = int(fields[0]['tabs']) - 1 if fields else -1
+want = [f'osr-test newtab at={o + 1} tabs={n + 1} opener={o} active={o} placement=background',
+        f'osr-test newtab at={o + 2} tabs={n + 2} opener={o} active={o} placement=background',
+        f'osr-test newtab at={o + 3} tabs={n + 3} opener={o} active={o + 3} placement=foreground']
+check(len(report) == 3 and report == want, f'two middle clicks open background tabs right of the page in order, then a target=_blank link opens a foreground tab after them ({report})')
+check(requests.count('/nt-b') == 2 and requests.count('/nt-a') == 1, f'each new tab loads its address ({[r for r in requests if r.startswith("/nt-")]})')
 sys.exit(0 if ok else 1)
 PY
 

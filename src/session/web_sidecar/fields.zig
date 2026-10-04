@@ -528,7 +528,8 @@ pub fn checkDragOperation(operation: u32) Error!void {
 
 /// 우클릭 메뉴(W6c)의 닫힌 필드 — `message.ContextMenuFlags` 주석.
 pub fn checkContextMenu(menu: u32, flags: message.ContextMenuFlags, selection: []const u8) Error!void {
-    if (menu == 0 or flags._reserved != 0) return error.InvalidContextMenu;
+    if (menu == 0) return error.InvalidContextMenu;
+    if (flags.link_openable and !flags.link) return error.InvalidContextMenu;
     if (flags.image_loaded and !flags.image) return error.InvalidContextMenu;
     if (flags.selection_truncated and !flags.selection) return error.InvalidContextMenu;
     if (flags.selection != (selection.len != 0)) return error.InvalidContextMenu;

@@ -1,0 +1,63 @@
+{
+  "source_parent_commit": "cd38a8df91726bd80eda6bd5daf1829470b19e69",
+  "source_sha256": {
+    "src/platform/macos/app_session/workspace.zig": "3a67ddd39f4e6d337c5042e9db3b4fb7de9b2d601e5695218465c258312cfa5f",
+    "src/i18n.zig": "eb4feb337fe20d404dd0f0bf98a9be5951b3919b33a4b8bcf9ea67d3b93d4c39",
+    "src/platform/macos/app_session/editor/mod.zig": "0c767d73a98231f76b655b5b2c6f402094501407e6cb44f204db8332a8870c5a",
+    "tools/shared-restore-app/run.py": "0e32ccab93bd554b0bb1d5d7918a6d47b0ad4fe9fdb83810a0ec9d826d5fad5e",
+    "tools/shared-restore-app/fixture.zig.inc": "43eaaacba86791ba0009556976fd225bfa9a93cb7d2833757042dcd8f26df920",
+    "tools/shared-restore-app/driver.swift.inc": "728bee3e052705869e5de4ff25506d23809113d2c1a461d72db6eabcc0f55472"
+  },
+  "records": [
+    {
+      "label": "original_reproduction",
+      "path": "/tmp/maru-shared-split-window-repro.log",
+      "sha256": "6393cc9999a5ad1e936fe02dde67489196c9b2ae94767cff14c3a6c830e4bc27",
+      "exit_code": 0
+    },
+    {
+      "label": "guard_debug",
+      "path": "/tmp/maru-shared-split-owner-focused.log",
+      "sha256": "f667eba0f57488d6600bf3b79137795198f794a217663e0bbe186cdbbf001e6f",
+      "exit_code": 0
+    },
+    {
+      "label": "guard_releasefast",
+      "path": "/tmp/maru-shared-split-window-release.log",
+      "sha256": "f667eba0f57488d6600bf3b79137795198f794a217663e0bbe186cdbbf001e6f",
+      "exit_code": 0
+    },
+    {
+      "label": "imports_scan_only",
+      "path": "/tmp/maru-shared-split-move-imports.log",
+      "sha256": "cc7f0bad404ee80a72b7c536add34d874443ea5e0f573f3d38290d3ad7e12ffb",
+      "exit_code": 0
+    },
+    {
+      "label": "rebased_first_commit_boundaries",
+      "path": "/tmp/maru-shared-split-rebase-first-boundaries.log",
+      "sha256": "b008ec6e26d599dd8c3de72c92e5d30100bd70c807e674d13b90b323a754128f",
+      "exit_code": 0
+    },
+    {
+      "label": "rebased_second_commit_boundaries",
+      "path": "/tmp/maru-shared-split-rebase-second-boundaries.log",
+      "sha256": "f1d11770a44d95b0a1716acf23f6297144b899c3f3d66b4de54f2b304717e530",
+      "exit_code": 0
+    },
+    {
+      "label": "documentation",
+      "path": "/tmp/maru-shared-split-final-docs.log",
+      "sha256": "138cc6bc37c88a557a2f33962c6b3185a48e3e8ef0894c0f84bbb655b964a809",
+      "exit_code": 0
+    }
+  ],
+  "releasefast_test_source_sha256": "77a51683a90dd7132fd1a8a2267923acd853f5147976f7498ec832ec4999bdcc",
+  "notes": [
+    "원본 재현은 잘못된 이동 허용 뒤 양쪽 입력 거절을 실제 AppSession에서 확인했다.",
+    "guard_debug는 최종 소스의 집계 로그에서 완료된 공유 분할 19개 검사를 추출했다. 원래 세션의 메모리 해제 뒤 편집도 포함한다.",
+    "ReleaseFast는 세션 deinit 뒤 편집을 검증한 앞선 테스트 사본이다. 실제 allocation destroy 순서를 강화한 최종 검사는 Debug에서 통과했다.",
+    "imports_scan_only는 0/10000 샤드의 imports 93개이며 전체 경계 검사가 아니다. 리베이스한 앞선 두 커밋은 각각 전체 경계 검사를 통과했다.",
+    "창 이동 수정 후 전체 회귀와 전체 경계 및 CI 상태는 PR 본문에서 별도로 보고한다."
+  ]
+}

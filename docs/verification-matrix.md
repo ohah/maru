@@ -3928,13 +3928,14 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 - 상태: 같은 창의 일반 로컬 파일에 공개 명령 연결. `zig build test-editor-shared-split` (Debug / ReleaseFast), 공유 및 전체 editor 집계에 포함한다.
 - 실제 AppSession에서 셸 없는 가로/세로 연결, 새 뷰의 초기 접힘과 독립 상태, Undo와 생존 뷰 닫기, 준비 OOM의 트리/포커스/참조 수 불변, 최근 활성 뷰 재선택과 지원 밖 종류 거절을 검사한다.
 - 네 방향 공개 명령·팔레트 Enter·편집기 전용 `⌘\`·사용자 rebind/unbind/macro·Quick 제한·지원 밖 문서를 검사한다. 직접 분할 요청의 지원 검사와 AppKit 공통 조합 사전 확정을 구분한다.
+- 공유 뷰 일부의 다른 창 이동을 거절하고 preedit·선택·본문·트리를 보존한다. 단일 뷰/전체 공유 뷰의 이동 뒤 원래 창 종료·입력, 같은 창 안 이동을 대조하며, 검사 제거·전체 차단 변이도 런타임 실패한다.
 - 메뉴·AppKit 키 이벤트·팔레트 → 실제 두 pane → checkpoint → 새 프로세스 복원을 작은/큰 문서와 세 창 크기에서 대조한다. 실제 OS 한국어 HID와 로컬 이벤트 주입의 증거 범위는 [공유 분할 명령](plans/editor-shared-split.md)에 기록한다.
 
 ## 에디터 복원 metadata codec
 
 - 상태: 부분 구현. `test-editor-restore-codec` Debug/ReleaseFast 9개 exact-count. `perf-editor-workspace-state`는 codec 부하만 측정한다.
 - 판정: 방향 있는 선택·wrap 상속·접힘·로컬 path payload, 문서 참조, 잘린 입력·개수 부풀리기·기존 커서 상한·OOM 정산.
-- 이 codec gate는 제품 실행 증거가 아니다. 후속 제품 capture/restore와 헤드리스 프로세스 재실행은 아래 「로컬 문서 ID 백업과 공유 뷰 복원」을 따른다. AppKit/IME/GUI gate는 남아 있다. 10개 측정 시나리오의 범위와 미결 정책은 [복원 설계](plans/editor-shared-restore.md)가 소유한다.
+- 이 codec gate는 제품 실행 증거가 아니다. 후속 제품 capture/restore·헤드리스 프로세스 재실행·AppKit/IME/화면 검증은 아래 「로컬 문서 ID 백업과 공유 뷰 복원」을 따른다. 10개 측정 시나리오의 범위와 미결 정책은 [복원 설계](plans/editor-shared-restore.md)가 소유한다.
 
 전체 저장 영향 추가 확인: `tools/perf/workspace_host_impact.py`의 host 본문 실행 assertion 12개,
 기존 checkpoint coordinator 11/11, 파일 게시 17/17. 첫/마지막 창 실패의 전체 캡처 취소와
@@ -4038,7 +4039,7 @@ codec gate만으로 제품 restart 복구 성공을 주장하지 않는다. 후�
 
 상태: 제품 연결 구현, 헤드리스 AppSession·서로 다른 프로세스 검증. 실제 두 pane AppKit 재시작은
 아래 하네스로 점검했고 원문 좌표·지연 접힘 수정 뒤 재시작/리사이즈 검사를 통과했다. 실제 한국어 HID 조합/두 pane 전환 뒤
-저장·재시작은 통과했으며, 공개 분할 명령은 아직 없다.
+저장·재시작은 통과했다. 공개 분할 명령과 그 진입점 검증은 [공유 분할 명령](plans/editor-shared-split.md)을 따른다.
 `zig build test-editor-recovery-restore`는 v2 문서/뷰 참조와 혼합 Term 순서, 실제 백업의 독립 A/B와 공유 A,
 커서/스크롤/wrap, 독립 검색 상태, 저장 충돌, 손상 백업의 창 전체 rollback, 오래된 표시 지문 기본값을 검사한다.
 메모리 할당 실패에서 캡처/복원·저장소의 자원을 반환하고 이전 창/기록을 보존하는지 판정한다.

@@ -102,6 +102,7 @@ export fn maru_shared_restore_fixture_step(command: u32) callconv(.c) i32 {
 }
 
 fn sharedRestoreStep(self: *AppSession, command: u32) !i32 {
+    if (command == 40) return try sharedRestoreRefuseMove(self);
     if (command == 1) return if (try sharedRestoreSeed(self)) 1 else if (shared_restore_split_ready) 2 else 0;
     var views: [2]*app_session_mod.Term = undefined;
     if (sharedRestoreViews(self, &views) != 2) return 0;
@@ -113,5 +114,31 @@ fn sharedRestoreStep(self: *AppSession, command: u32) !i32 {
         return 1;
     }
     try sharedRestoreReport(self, command);
+    return 1;
+}
+
+fn sharedRestoreRefuseMove(self: *AppSession) !i32 {
+    var views: [2]*app_session_mod.Term = undefined;
+    if (sharedRestoreViews(self, &views) != 2) return error.ExpectedTwoViews;
+    const before = editor_ops.contentHash(views[0].rt.editorDocument().opened.?.file.content);
+    if (!self.runAction("move_pane_to_new_workspace")) return error.PromoteFailed;
+    const index = self.app_window.active_tab;
+    const source_tab = self.tabs.items[index];
+    // 목적지는 헤드리스 AppSession이다. 실제 두 NSWindow의 메뉴/드래그 검증으로 세지 않는다.
+    const dst = try self.allocator.create(AppSession);
+    defer self.allocator.destroy(dst);
+    try dst.init(self.io, self.allocator, .{
+        .abi_version = app_session_mod.abi_version, .cols = 80, .rows = 24, .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer dst.deinit();
+    var out: [16]u64 = undefined;
+    if (AppSession.moveWorkspaceToSession(self, dst, index, &out)) |_| return error.MoveUnexpectedlyAccepted else |err| {
+        if (err != error.UnsupportedMove) return err;
+    }
+    if (!self.chrome_host.notice.open or !std.mem.eql(u8, self.chrome_host.notice.message, maru.i18n.t(.ws_move_shared_editor))) return error.ExpectedMoveNotice;
+    if (self.tabs.items.len != 2 or self.tabs.items[index] != source_tab or dst.tabs.items.len != 1) return error.MoveChangedTopology;
+    if (editor_ops.contentHash(views[0].rt.editorDocument().opened.?.file.content) != before) return error.MoveChangedDocument;
+    std.debug.print("SHARED_SPLIT_MOVE refused=true topology_preserved=true body_preserved=true destination=headless-AppSession\n", .{});
     return 1;
 }

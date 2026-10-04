@@ -50123,3 +50123,99 @@ test "editor backup discovery 검색 할당 실패에서 이전 후보를 잘못
     try testing.expectEqualStrings("keep source", pane_ops.activePane(fx.session).activeTerm().rt.editorDocument().opened.?.file.content);
     try testing.expect(backupExists(root, doc));
 }
+
+test "shared editor split 공유 뷰가 다른 창으로 갈라지는 이동은 조합과 구조 변경 전에 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 원본/복사본 어느 쪽을 옮겨도 같은 창이라는 계약을 지켜야 한다.
+    inline for (.{ false, true }) |move_original| {
+        var src = try PaneFixture.init(testing.allocator);
+        defer src.deinit(testing.allocator);
+        var dst = try PaneFixture.init(testing.allocator);
+        defer dst.deinit(testing.allocator);
+        src.term.rt.editor_selection = editor_selection.Selection.at(0);
+        dst.term.rt.editor_selection = editor_selection.Selection.at(0);
+        const s = src.session;
+        try testing.expect(s.runAction("split_editor_right"));
+        if (move_original) try testing.expect(s.activateSurfaceById(src.term.surfaceId()));
+        try testing.expect(s.runAction("move_pane_to_new_workspace"));
+        const index = s.app_window.active_tab;
+        const moving = pane_ops.activePane(s).activeTerm();
+        try testing.expect(@import("../editor_ime.zig").marked(s, "한", .{ .location = 1, .length = 0 }, null));
+        const selection = moving.rt.editor_selection;
+        const moving_tab = s.tabs.items[index];
+        const target_tab = dst.session.tabs.items[0];
+        s.chrome_host.notice = .{};
+        var out = [_]u64{0xaabb} ** 16;
+        try testing.expectError(error.UnsupportedMove, AppSession.moveWorkspaceToSession(s, dst.session, index, &out));
+        try testing.expect(s.chrome_host.notice.open);
+        try testing.expectEqualStrings(maru.i18n.t(.ws_move_shared_editor), s.chrome_host.notice.message);
+        for (out) |id| try testing.expectEqual(@as(u64, 0xaabb), id);
+        try testing.expectEqual(@as(usize, 2), s.tabs.items.len);
+        try testing.expectEqual(@as(usize, 1), dst.session.tabs.items.len);
+        try testing.expect(s.tabs.items[index] == moving_tab and dst.session.tabs.items[0] == target_tab);
+        try testing.expectEqual(index, s.app_window.active_tab);
+        try testing.expectEqualDeep(selection, moving.rt.editor_selection);
+        try testing.expectEqualStrings("한", moving.rt.editor_preedit);
+        try testing.expectEqualStrings("const a = 1;", src.term.rt.editor_lines[0]);
+        s.chrome_host.notice.dismiss();
+        try testing.expect(s.tryCommitComposition());
+        try testing.expect(insertText(s, src.term, "X"));
+        try testing.expectEqualStrings(src.term.rt.editor_lines[0], moving.rt.editor_lines[0]);
+        try testing.expect(insertText(dst.session, dst.term, "Y"));
+    }
+}
+
+test "shared editor split 단일 뷰와 공유 뷰 전체의 창 이동은 편집을 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 문서의 모든 뷰가 함께 옮겨가면 이동 뒤에도 한 coordinator가 전부 갱신할 수 있다.
+    inline for (.{ false, true }) |shared| {
+        var src = try PaneFixture.init(testing.allocator);
+        var source_closed = false;
+        defer {
+            if (!source_closed) {
+                src.session.deinit();
+                testing.allocator.destroy(src.session);
+            }
+            src.dir.cleanup();
+        }
+        var dst = try PaneFixture.init(testing.allocator);
+        defer dst.deinit(testing.allocator);
+        src.term.rt.editor_selection = editor_selection.Selection.at(0);
+        dst.term.rt.editor_selection = editor_selection.Selection.at(0);
+        if (shared) try testing.expect(src.session.runAction("split_editor_right"));
+        const peer = pane_ops.activePane(src.session).activeTerm();
+        var out: [16]u64 = undefined;
+        const result = try AppSession.moveWorkspaceToSession(src.session, dst.session, 0, &out);
+        try testing.expect(result.cross_window and result.source_window_closed);
+        try testing.expectEqual(@as(usize, 0), src.session.tabs.items.len);
+        try testing.expectEqual(@as(usize, 2), dst.session.tabs.items.len);
+        // 빈 원래 창을 먼저 닫아도 옮긴 문서와 뷰는 목적지 소유로 남아야 한다.
+        src.session.deinit();
+        testing.allocator.destroy(src.session);
+        source_closed = true;
+        try testing.expect(insertText(dst.session, src.term, "X"));
+        if (shared) {
+            try testing.expect(insertText(dst.session, peer, "Y"));
+            try testing.expectEqualStrings(src.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
+        }
+        try testing.expectEqualStrings(if (shared) "XYconst a = 1;" else "Xconst a = 1;", src.term.rt.editor_lines[0]);
+    }
+}
+
+test "shared editor split 같은 창의 워크스페이스 이동은 공유 편집을 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(fx.session.runAction("split_editor_right"));
+    try testing.expect(fx.session.runAction("move_pane_to_new_workspace"));
+    const peer = pane_ops.activePane(fx.session).activeTerm();
+    var out: [16]u64 = undefined;
+    const result = try AppSession.moveWorkspaceToSession(fx.session, fx.session, 0, &out);
+    try testing.expect(!result.cross_window and !result.source_window_closed);
+    try testing.expectEqual(@as(usize, 2), fx.session.tabs.items.len);
+    try testing.expect(insertText(fx.session, fx.term, "X"));
+    try testing.expect(insertText(fx.session, peer, "Y"));
+    try testing.expectEqualStrings("XYconst a = 1;", fx.term.rt.editor_lines[0]);
+    try testing.expectEqualStrings(fx.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
+}

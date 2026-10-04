@@ -92,6 +92,8 @@ quick terminal은 이동 단위·대상에서 제외한다 — 싱글톤 dropdow
 
 사이드바 그룹과의 상호작용(§1 결정의 상세): workspace card 이동은 사이드바 그룹 모델([sidebar-groups.md](sidebar-groups.md))과 직접 상호작용한다 — 소속이 탭 순서 파생이라 창을 떠나는 순간 소속·핀 리전이 바뀐다. v1 케이스: (a) 그룹 멤버 이동 = 그룹 암묵 이탈 + source 창 재정규화, (b) `group_start` 마커 이동 = source에서 마커 승계(그룹 잔존, 마지막 멤버면 소멸) + 이동분은 target 최상위 — closeTab/removeFromGroup과 동형(`inheritGroupMarker`), (c) 전역 `pinned` workspace 이동 = target 창의 핀 리전 정책("고정 요소 흡수 불가" 포함)을 그대로 따름, (d) `local_pinned`/`top_level`은 이탈 시 의미를 잃으므로 리셋. **이 정규화 케이스 (a)~(d)는 M3c에서 구현·red test 완료**(정규화 권위를 L2 순수 함수로 리프트) — M1 `WindowGraph` 골격은 group-agnostic이라 그룹 필드를 pass-through로 보존만 했으나, **M3c부터 `WindowGraph.moveWorkspace`가 L2 `group_normalize`로 실제 정규화**한다. 정규화 코어(`inheritGroupMarker`·`normalizePinnedFromGroups`·`effectiveDepthAt`·`clearStaleLocalPins`·`enclosingGroupMarkerIndex`)를 `src/session/group_normalize.zig`에 generic 순수 함수로 올렸고, L4 `app_session`의 그 다섯 메서드는 본문을 L2 위임으로 교체해 `closeTab`/`removeFromGroupForTab`이 같은 코어를 재사용한다(재구현 금지, drag-preview 게이트는 L4 유지). **(d) `top_level`은 명시 `true` set으로 확정**(목적지 append-to-end라 위치-암묵 top-level 불성립 — §8A.4)·pinned-멤버 unpin 포함. 같은 sidebar 안 드래그에는 이미 Cmd=그룹 중첩 제스처가 있으므로, cross-window 드래그가 이 제스처와 충돌하지 않게 M5에서 modifier 의미를 재확인한다.
 
+공유 편집기 문서의 뷰는 한 창에 모여 있어야 한다([공유 뷰 계약](native-editor-layering.md#24-같은-파일을-두-곳에서-본다-2026-08-09-사용자-결정)). `moveWorkspaceToSession`은 이동할 워크스페이스 밖에 같은 문서의 뷰가 남는 창 이동을 조합 정산·탐색기 등록·detach 전에 거절하고 안내한다. 같은 창 안 이동과 문서의 모든 뷰를 함께 옮기는 창 이동은 기존 경로를 유지한다.
+
 ## 5. Native 이벤트 사용 범위
 
 같은 window 내부 이동은 기존 Zig mouse/hit-test 경로를 유지한다. 다른 OS window로 넘어가거나 창 밖 빈 공간에 drop하는 순간부터 AppKit drag-and-drop lifecycle을 사용한다.

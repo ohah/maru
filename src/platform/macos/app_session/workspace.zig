@@ -311,6 +311,12 @@ pub fn moveWorkspaceToSession(src: *AppSession, dst: *AppSession, idx: usize, ou
     if (src != dst) {
         for (src.tabs.items[idx].panes.items) |pane| {
             for (pane.terms.items) |term| {
+                // 공유 편집은 한 창이 모든 뷰를 갱신한다. 닫기와 같은 범위 판정으로 일부 뷰만
+                // 다른 창에 남는 이동을 조합 확정·탐색기 등록·트리 변경 전에 거절한다.
+                if (term.kind == .editor and !src.closesAllEditorDocumentViews(.{ .tab = idx }, term)) {
+                    src.showNoticeKey(.ws_move_shared_editor);
+                    return error.UnsupportedMove;
+                }
                 const entry = term.file_entry orelse continue;
                 if (file_panel_ops.fileEntryForPath(dst, entry.path) != null) {
                     // 거부는 조용하면 안 된다 — ABI는 move_failed로만 돌아가고 Swift는 그걸 그냥 흘린다.

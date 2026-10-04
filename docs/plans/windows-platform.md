@@ -331,3 +331,9 @@ unknown은 200ms backoff로 조회하고 Esc는 명시적 rollback을 요청한�
 mutation 검출이 통과했다. 실제 앱의 1.87MB BOM/CRLF 문서에서 Ctrl+S/Esc 후 원본 보존,
 추가 편집과 Save-close의 본문 저장/종료를 확인했다. commit·commit 실패의 abort·final
 cleanup·conflict overwrite·초기 open I/O와 물리 입력/IME 및 나머지 Windows 범위는 남아 있다.
+
+§2m.176: terminal 정리 worker가 실제 KTM outcome과 committed 이미지 binding/checksum을
+확인하고 SMP 소유의 native handle/pinned buffer를 정리한다. unknown/query 실패는 전체
+소유권을 반환하고 released 결과도 문서 ack가 아니다. native 10개 Debug/ReleaseFast와
+다섯 compiled runtime mutation 검출이 통과했다. controller/앱 연결, commit 승인 왕복·
+실패 abort·conflict overwrite·초기 open 이관과 물리 입력/IME 및 나머지 Windows 범위는 계속 진행한다.

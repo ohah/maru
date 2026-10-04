@@ -9786,7 +9786,7 @@ pub fn transformCase(self: *AppSession, term: *Term, upper: bool) bool {
             self.allocator.free(buf);
             return false;
         };
-        // **길이가 안 변한다**(§3.9b) — 덮는 네 블록의 오프셋이 같은 UTF-8 길이 안에서만 움직인다.
+        // **길이가 안 변한다**(§3.9b) — 덮는 블록의 짝이 같은 UTF-8 길이 안에서만 움직인다.
         // 그래서 자리마다 제자리 인코딩이 성립하고, 선택 범위와 다른 커서가 안 밀린다.
         //
         // **그 불변식을 런타임에서 다시 안 막는다.** `CASE3` 이 `upperCase`·`foldCase` 를 코드포인트
@@ -33104,18 +33104,27 @@ test "CS3 길이가 안 변해 다른 커서가 안 밀린다 — 키릴·그리
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const term = try undoFixture(&fx, allocator, "cs3.zig", "абв αβγ\n");
+    const term = try undoFixture(&fx, allocator, "cs3.zig", "абв αβγ łódź ÿ\n");
     const before_len = term.rt.editorDocument().opened.?.file.content.len;
 
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 6); // "абв"
     try testing.expect(transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("АБВ αβγ\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("АБВ αβγ łódź ÿ\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(before_len, term.rt.editorDocument().opened.?.file.content.len);
 
     term.rt.editor_selection = editor_selection.Selection.fromPoints(7, 13); // "αβγ"
     try testing.expect(transformCase(fx.session, term, true));
-    try testing.expectEqualStrings("АБВ ΑΒΓ\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("АБВ ΑΒΓ łódź ÿ\n", term.rt.editorDocument().opened.?.file.content);
     try testing.expectEqual(before_len, term.rt.editorDocument().opened.?.file.content.len);
+
+    // Latin Extended-A 와 `ÿ`(→ `Ÿ` U+0178, 블록 밖 짝)도 같은 2 byte 안에서 바뀐다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(14, 24); // "łódź ÿ"
+    try testing.expect(transformCase(fx.session, term, true));
+    try testing.expectEqualStrings("АБВ ΑΒΓ ŁÓDŹ Ÿ\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(before_len, term.rt.editorDocument().opened.?.file.content.len);
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(14, 24);
+    try testing.expect(transformCase(fx.session, term, false)); // 소문자로 — 왕복이 원문을 돌려준다
+    try testing.expectEqualStrings("АБВ ΑΒΓ łódź ÿ\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "CS7 멀티 커서면 전부 바뀌고 undo 하나다 (§3.9b)" {

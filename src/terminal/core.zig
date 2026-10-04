@@ -2223,7 +2223,7 @@ test "findMatches: 대소문자 무시 부분일치 + 비겹침 + 절대 좌표"
     try std.testing.expectEqual(@as(usize, 0), matches.items.len);
 }
 
-test "findMatches: 유니코드 대소문자 무시(Latin-1·Greek·Cyrillic foldCase)" {
+test "findMatches: 유니코드 대소문자 무시(Latin-1·Latin Ext-A·Greek·Cyrillic foldCase)" {
     // foldCase 직접 — 각 블록 대문자→소문자, 비-글자/미덮음 블록은 그대로.
     try std.testing.expectEqual(@as(u21, 'a'), selection.foldCase('A'));
     try std.testing.expectEqual(@as(u21, 0x00E9), selection.foldCase(0x00C9)); // É→é
@@ -2234,12 +2234,14 @@ test "findMatches: 유니코드 대소문자 무시(Latin-1·Greek·Cyrillic fol
     try std.testing.expectEqual(@as(u21, 0x0430), selection.foldCase(0x0410)); // А→а
     try std.testing.expectEqual(@as(u21, 0x044F), selection.foldCase(0x042F)); // Я→я
     try std.testing.expectEqual(@as(u21, 0x0450), selection.foldCase(0x0400)); // Ѐ→ѐ
-    try std.testing.expectEqual(@as(u21, 0x0100), selection.foldCase(0x0100)); // Ā 미덮음(Latin Ext-A — 그대로)
+    try std.testing.expectEqual(@as(u21, 0x0101), selection.foldCase(0x0100)); // Ā→ā (Latin Ext-A)
+    try std.testing.expectEqual(@as(u21, 0x0142), selection.foldCase(0x0141)); // Ł→ł (홀수 대문자 블록)
+    try std.testing.expectEqual(@as(u21, 0x017F), selection.foldCase(0x017F)); // ſ 미덮음(왕복 안 됨 — 그대로)
 
     // findMatches 통합 — 악센트/스크립트 대소문자 무시(코드포인트는 \u{}로 명시해 편집기 정규화 회피).
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
     defer core.deinit();
-    try core.write("CAF\u{00C9}\r\n\u{0391}\u{039B}\u{03A6}\u{0391}\r\n\u{041F}\u{0420}\u{0418}\u{0412}\u{0415}\u{0422}");
+    try core.write("CAF\u{00C9}\r\n\u{0391}\u{039B}\u{03A6}\u{0391}\r\n\u{041F}\u{0420}\u{0418}\u{0412}\u{0415}\u{0422}\r\n\u{0141}\u{00D3}D\u{0179}");
     var matches: std.ArrayList(types.Match) = .empty;
     defer matches.deinit(std.testing.allocator);
 
@@ -2248,6 +2250,8 @@ test "findMatches: 유니코드 대소문자 무시(Latin-1·Greek·Cyrillic fol
     try core.findMatches(std.testing.allocator, "\u{03B1}\u{03BB}\u{03C6}\u{03B1}", &matches); // αλφα ↔ ΑΛΦΑ
     try std.testing.expectEqual(@as(usize, 1), matches.items.len);
     try core.findMatches(std.testing.allocator, "\u{043F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442}", &matches); // привет ↔ ПРИВЕТ
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try core.findMatches(std.testing.allocator, "\u{0142}\u{00F3}d\u{017A}", &matches); // łódź ↔ ŁÓDŹ (Latin Ext-A)
     try std.testing.expectEqual(@as(usize, 1), matches.items.len);
 }
 

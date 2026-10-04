@@ -13,7 +13,7 @@
 //! 부르는 다리라 core 잔류(seam), 여기엔 그 선택 부분(`shiftSelectionForEviction`)만 둔다.
 //!
 //! 베이스: 더블클릭 단어·블록 선택은 iTerm2/Terminal.app 관례, URL 휴리스틱은 Maru 독립 설계(http(s) 스킴 +
-//! 괄호 균형 다듬기), 대소문자 무시 검색은 Unicode simple case folding(width.zig와 같은 정책의 오프셋 블록만).
+//! 괄호 균형 다듬기), 대소문자 무시 검색은 Unicode simple case folding(1:1 로 왕복하는 짝만 — `foldCase` 참고).
 //! 단일 출처: docs/plans/terminal-core-decomposition.md §7.
 
 const std = @import("std");
@@ -339,18 +339,24 @@ fn normalizedSelection(self: *const TerminalCore) ?struct { start: types.Selecti
 }
 
 /// 대문자를 소문자로 접는다(findMatches 대소문자 무시 비교용). **베이스 = Unicode simple case folding**,
-/// 단 width.zig와 같은 정책(small first table — 깔끔한 오프셋 블록만, 나머지는 후속)으로 **오프셋이 일정한
-/// 블록만** 알고리즘으로 덮는다:
+/// 단 **1:1 로 왕복하는 짝만** 덮는다(`upperCase` 가 되돌릴 수 있어야 편집기 변환이 원문을 안 바꾼다).
+/// 블록마다 규칙이 일정해 표 없이 알고리즘으로 덮는다:
 ///   - ASCII A-Z(+32)
 ///   - Latin-1 Supplement À-Ö·Ø-Þ(U+00C0–D6·D8–DE, +32; × U+00D7는 글자가 아니라 제외)
 ///   - Greek Α-Ρ·Σ-Ω(U+0391–A1·A3–A9, +32; U+03A2 reserved 제외)
 ///   - Cyrillic А-Я(U+0410–042F, +32) / Ѐ-Џ(U+0400–040F, +80)
-/// **미덮음(후속)**: Latin Extended-A(parity가 U+0139에서 뒤집혀 단일 오프셋 불가 — 표가 필요),
-/// ß→ss·İ 등 1:N·로케일 특수 폴딩. 이들은 표/생성기를 들일 때(docs/font·width 정책과 같은 시점) 확장한다.
+///   - Latin Extended-A(U+0100–017F) — 대문자 바로 다음 코드포인트가 소문자인 짝 61개 + `Ÿ`(U+0178)→`ÿ`(U+00FF).
+///     짝의 홀짝이 U+0139·U+0179 에서 뒤집혀 블록 셋(대문자=짝수)과 둘(대문자=홀수)로 나눈다.
+/// **미덮음**: 왕복이 안 되는 것 — `İ`(U+0130, simple folding 없음)·`ı`(U+0131)·`ĸ`(U+0138)·`ŉ`(U+0149)·
+/// `ſ`(U+017F → `s` 로 접히지만 `s` 를 올리면 `S` 라 짝이 아니다). `ß`→`ss` 같은 1:N 은 UTF-8 길이를 바꿔
+/// 선택이 밀리므로 들이지 않는다(CASE3). 덮는 집합의 기준은 Unicode CaseFolding(C 상태)이다.
 pub fn foldCase(cp: u21) u21 {
     return switch (cp) {
         'A'...'Z' => cp + 32,
         0x00C0...0x00D6, 0x00D8...0x00DE => cp + 32, // Latin-1 À-Ö, Ø-Þ
+        0x0100...0x012F, 0x0132...0x0137, 0x014A...0x0177 => if (cp % 2 == 0) cp + 1 else cp, // Latin Ext-A 대문자=짝수
+        0x0139...0x0148, 0x0179...0x017E => if (cp % 2 == 1) cp + 1 else cp, // Latin Ext-A 대문자=홀수
+        0x0178 => 0x00FF, // Ÿ → ÿ
         0x0391...0x03A1, 0x03A3...0x03A9 => cp + 32, // Greek Α-Ρ, Σ-Ω
         0x0410...0x042F => cp + 32, // Cyrillic А-Я
         0x0400...0x040F => cp + 80, // Cyrillic Ѐ-Џ
@@ -368,6 +374,9 @@ pub fn upperCase(cp: u21) u21 {
     return switch (cp) {
         'a'...'z' => cp - 32,
         0x00E0...0x00F6, 0x00F8...0x00FE => cp - 32, // Latin-1 à-ö, ø-þ
+        0x00FF => 0x0178, // ÿ → Ÿ
+        0x0100...0x012F, 0x0132...0x0137, 0x014A...0x0177 => if (cp % 2 == 1) cp - 1 else cp, // Latin Ext-A 소문자=홀수
+        0x0139...0x0148, 0x0179...0x017E => if (cp % 2 == 0) cp - 1 else cp, // Latin Ext-A 소문자=짝수
         0x03B1...0x03C1, 0x03C3...0x03C9 => cp - 32, // Greek α-ρ, σ-ω
         0x0430...0x044F => cp - 32, // Cyrillic а-я
         0x0450...0x045F => cp - 80, // Cyrillic ѐ-џ
@@ -393,16 +402,46 @@ test "CASE1 대문자 올리기는 foldCase 의 짝이다 — 덮는 블록이 �
     }
 }
 
+test "CASE4 Latin Extended-A 는 Unicode 짝 표와 정확히 같다 — 더도 덜도 아니다" {
+    // 기대 표는 Unicode 데이터(파이썬 `str.lower/upper`, UCD 13.0)에서 뽑은 1:1 왕복 짝 62개다 — 구현의 홀짝
+    // 규칙과 **독립된** 출처라, 블록 경계를 하나 잘못 잡으면 여기서 어긋난다. 「표에 있는 것은 접히고, 블록 안의
+    // 나머지는 그대로」를 함께 재서 남는 쪽으로 새는 변이도 잡는다.
+    const pairs = [_][2]u21{
+        .{ 0x0100, 0x0101 }, .{ 0x0102, 0x0103 }, .{ 0x0104, 0x0105 }, .{ 0x0106, 0x0107 }, .{ 0x0108, 0x0109 }, .{ 0x010A, 0x010B },
+        .{ 0x010C, 0x010D }, .{ 0x010E, 0x010F }, .{ 0x0110, 0x0111 }, .{ 0x0112, 0x0113 }, .{ 0x0114, 0x0115 }, .{ 0x0116, 0x0117 },
+        .{ 0x0118, 0x0119 }, .{ 0x011A, 0x011B }, .{ 0x011C, 0x011D }, .{ 0x011E, 0x011F }, .{ 0x0120, 0x0121 }, .{ 0x0122, 0x0123 },
+        .{ 0x0124, 0x0125 }, .{ 0x0126, 0x0127 }, .{ 0x0128, 0x0129 }, .{ 0x012A, 0x012B }, .{ 0x012C, 0x012D }, .{ 0x012E, 0x012F },
+        .{ 0x0132, 0x0133 }, .{ 0x0134, 0x0135 }, .{ 0x0136, 0x0137 }, .{ 0x0139, 0x013A }, .{ 0x013B, 0x013C }, .{ 0x013D, 0x013E },
+        .{ 0x013F, 0x0140 }, .{ 0x0141, 0x0142 }, .{ 0x0143, 0x0144 }, .{ 0x0145, 0x0146 }, .{ 0x0147, 0x0148 }, .{ 0x014A, 0x014B },
+        .{ 0x014C, 0x014D }, .{ 0x014E, 0x014F }, .{ 0x0150, 0x0151 }, .{ 0x0152, 0x0153 }, .{ 0x0154, 0x0155 }, .{ 0x0156, 0x0157 },
+        .{ 0x0158, 0x0159 }, .{ 0x015A, 0x015B }, .{ 0x015C, 0x015D }, .{ 0x015E, 0x015F }, .{ 0x0160, 0x0161 }, .{ 0x0162, 0x0163 },
+        .{ 0x0164, 0x0165 }, .{ 0x0166, 0x0167 }, .{ 0x0168, 0x0169 }, .{ 0x016A, 0x016B }, .{ 0x016C, 0x016D }, .{ 0x016E, 0x016F },
+        .{ 0x0170, 0x0171 }, .{ 0x0172, 0x0173 }, .{ 0x0174, 0x0175 }, .{ 0x0176, 0x0177 }, .{ 0x0178, 0x00FF }, .{ 0x0179, 0x017A },
+        .{ 0x017B, 0x017C }, .{ 0x017D, 0x017E },
+    };
+    for (pairs) |pr| {
+        try std.testing.expectEqual(pr[1], foldCase(pr[0]));
+        try std.testing.expectEqual(pr[0], upperCase(pr[1]));
+    }
+    var folded: usize = 0;
+    var cp: u21 = 0x0100;
+    while (cp <= 0x017F) : (cp += 1) {
+        if (foldCase(cp) != cp) folded += 1;
+    }
+    try std.testing.expectEqual(pairs.len, folded); // 블록 안에서 접히는 것은 표의 대문자뿐
+}
+
 test "CASE2 덮지 않는 글자는 그대로다 — 한글·CJK·숫자·문장부호 (§3.9b)" {
     // **모르면 안 건드린다.** 문서를 바꾸는 연산이 쓰므로 저하가 「그대로」여야 한다.
-    for ([_]u21{ '가', '힣', 0x4E00, '0', '9', '-', '_', ' ', 0x0100, 0x00DF }) |cp| {
+    // U+00DF `ß`·U+0130 `İ`·U+0131 `ı`·U+017F `ſ` 는 1:N 이거나 짝이 안 맞아 덮지 않는다. U+0180 은 Latin Extended-B.
+    for ([_]u21{ '가', '힣', 0x4E00, '0', '9', '-', '_', ' ', 0x00DF, 0x0130, 0x0131, 0x0138, 0x0149, 0x017F, 0x0180 }) |cp| {
         try std.testing.expectEqual(cp, upperCase(cp));
         try std.testing.expectEqual(cp, foldCase(cp));
     }
 }
 
 test "CASE3 변환이 UTF-8 길이를 안 바꾼다 — 선택이 안 흔들린다 (§3.9b)" {
-    // **길이가 변하면 선택 범위와 다른 커서가 밀린다.** 지금 덮는 네 블록은 같은 길이 안에서만
+    // **길이가 변하면 선택 범위와 다른 커서가 밀린다.** 지금 덮는 블록은 같은 길이 안에서만
     // 움직이므로 그 성질이 성립하고, `ß`→`ss` 같은 1:N 을 들이는 날 깨진다(§3.9b 가 그때 보정
     // 규칙을 함께 정하라고 적어 뒀다).
     var cp: u21 = 0;
@@ -878,7 +917,7 @@ pub fn collectViewportLinks(
 
 /// 스크롤백 + 화면에서 needle을 찾아 절대 좌표 매치를 out에 채운다(out은 호출자 소유). 논리 줄(soft-wrap 이음)
 /// 단위로 스캔해 wrap 경계를 넘는 매치도 잡고, 같은 줄 안에선 비겹침(매치 뒤로 needle 길이만큼 건너뜀). needle이
-/// 비면 무동작. 대소문자 무시는 foldCase(ASCII + Latin-1·Greek·Cyrillic 깔끔한 오프셋 블록 — Latin Ext-A 등은 후속).
+/// 비면 무동작. 대소문자 무시는 foldCase(ASCII·Latin-1·Latin Ext-A·Greek·Cyrillic 의 1:1 짝).
 /// 스크롤백 Find의 기본 평문 경로 — 정규식 opt-in은 findMatchesWithOptions가 맡고 fuzzy는 후속이다.
 /// 베이스: alt에선 active area(현재 화면)만 검색(Ghostty ActiveSearch와 동작 일치 — alt는 sb.count==0이라 자연히).
 pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, out: *std.ArrayList(types.Match)) !void {

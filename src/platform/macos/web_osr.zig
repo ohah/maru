@@ -133,7 +133,21 @@ const Surface = struct {
     dialogs: std.ArrayList(Dialog) = .empty,
     /// 아직 maru 알림으로 내보내지 않은 웹 알림(W5c) — 온 차례대로, 탭마다 `max_notes_per_surface` 까지(넘치면 오래된 것부터 버린다).
     notes: std.ArrayList(WebNote) = .empty,
+    /// 페이지가 연 새 탭(W6e — `open_tab`) — 온 차례대로, `max_new_tabs` 까지. 그 탭이 있는 창의 tick 이 하나씩 꺼내 간다.
+    new_tabs: std.ArrayList(NewTab) = .empty,
 };
+
+/// 페이지가 연 새 탭 하나(W6e). 주소는 걸렀다(`new_tab.urlAllowed`) — 꺼내 간 쪽이 놓는다.
+pub const NewTab = struct {
+    url: []u8,
+    placement: ws.message.NewTabPlacement,
+    arrived_ms: i64,
+};
+
+/// 탭마다 쥐는 새 탭 상한 — sidecar 는 사용자 입력 하나에 하나만 보내므로 넘칠 일이 없다. 넘치면 새 것을 버린다.
+const max_new_tabs = 4;
+/// 이 안에 아무 창도 꺼내 가지 않으면 버린다 — 연 탭이 사라졌거나 창이 멈췄다. 한참 뒤 탭이 갑자기 생기지 않게.
+const new_tab_pickup_ms = 5_000;
 
 pub const Cursor = struct { cursor: ws.message.WebCursor, generation: u32 };
 
@@ -1018,6 +1032,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     drainInbox(gpa, now_ms);
     expireContextMenus(gpa, now_ms);
     expireDragOuts(gpa, now_ms);
+    expireNewTabs(gpa, now_ms);
     receiveRings();
     // 비우는 사이 sidecar 가 끝났거나(`profile_in_use` 로 멈춤) 다시 떴다 — 위의 `read`·`p` 는 옛 프로세스의 것이다.
     // 처음엔 그대로 이어가 옛 EOF 로 새 sidecar 를 또 죽은 것으로 세거나, 비운 optional 을 읽었다(적대 점검).
@@ -1777,6 +1792,43 @@ pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, com
     dropContextMenu(gpa, s);
 }
 
+// ── W6e: 페이지가 연 새 탭 ─────────────────────────────────────────────────────────────────────────────
+
+fn queueNewTab(gpa: std.mem.Allocator, s: *Surface, v: ws.message.OpenTab, now_ms: i64) void {
+    if (!ws.new_tab.urlAllowed(v.url) or s.new_tabs.items.len >= max_new_tabs) return;
+    const url = gpa.dupe(u8, v.url) catch return;
+    s.new_tabs.append(gpa, .{ .url = url, .placement = v.placement, .arrived_ms = now_ms }) catch gpa.free(url);
+}
+
+fn dropNewTabs(gpa: std.mem.Allocator, s: *Surface) void {
+    for (s.new_tabs.items) |t| gpa.free(t.url);
+    s.new_tabs.clearRetainingCapacity();
+}
+
+fn expireNewTabs(gpa: std.mem.Allocator, now_ms: i64) void {
+    for (surfaces.values()) |*s| {
+        var i: usize = 0;
+        while (i < s.new_tabs.items.len) {
+            if (now_ms - s.new_tabs.items[i].arrived_ms > new_tab_pickup_ms) {
+                gpa.free(s.new_tabs.orderedRemove(i).url);
+            } else i += 1;
+        }
+    }
+}
+
+/// 그 탭이 연 새 탭이 기다리는가.
+pub fn newTabPending(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.new_tabs.items.len != 0;
+}
+
+/// 그 탭이 연 새 탭 하나를 꺼낸다(온 차례대로). 주소는 꺼낸 쪽이 같은 할당기로 놓는다.
+pub fn takeNewTab(surface_id: u64) ?NewTab {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (s.new_tabs.items.len == 0) return null;
+    return s.new_tabs.orderedRemove(0);
+}
+
 /// 툴팁 글을 바꾼다(W6b). 빈 글이면 없앤다. 세대는 늘 오른다.
 fn setTooltip(gpa: std.mem.Allocator, s: *Surface, text: []const u8) void {
     if (s.tooltip_text) |old| gpa.free(old);
@@ -1792,6 +1844,8 @@ pub fn tooltip(surface_id: u64) ?struct { text: []const u8, generation: u32 } {
 
 fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     forgetLocationSurface(gpa, s.record.surface_id);
+    dropNewTabs(gpa, s);
+    s.new_tabs.deinit(gpa);
     if (s.tooltip_text) |t| gpa.free(t);
     s.tooltip_text = null;
     dropContextMenu(gpa, s);
@@ -2206,6 +2260,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .drag_file_ready => |v| if (file_fetch) |*f| if (f.surface == v.browser and f.drag == v.drag and f.state == .pending) {
             f.state = if (v.ok and v.size == f.expected and f.contents.items.len == f.expected) .ready else .failed;
         },
+        // W6e: 새 탭 — maru 가 주소를 다시 거른다(sidecar 도 걸렀다). 모르는 탭이면 버린다.
+        .open_tab => |v| if (surfaces.getPtr(v.browser)) |s| queueNewTab(gpa, s, v, now_ms),
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
             if (s.url) |old| gpa.free(old);
@@ -2717,6 +2773,49 @@ test "page drags gather their pieces, are taken by one window, answered once wit
     apply(gpa, .{ .browser_closed = 7 }, 3_000);
     expireDragOuts(gpa, 9_000);
     try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames)); // 버린 것에는 답하지 않는다
+}
+
+test "new tabs a page opens queue per tab in order, only for http(s), at most four, and expire unpicked (W6e)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    try std.testing.expect(!newTabPending(7));
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "https://a.example/1" } }, 0);
+    apply(gpa, .{ .open_tab = .{ .browser = 9, .placement = .foreground, .url = "https://a.example/x" } }, 0); // 모르는 탭
+    // maru 가 다시 거른다 — sidecar 가 걸렀어도.
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "about:blank" } }, 0);
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "file:///etc/hosts" } }, 0);
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "http://b.example/2" } }, 10);
+    try std.testing.expect(newTabPending(7));
+    try std.testing.expect(!newTabPending(9));
+    var first = takeNewTab(7).?;
+    try std.testing.expectEqualStrings("https://a.example/1", first.url);
+    try std.testing.expectEqual(ws.message.NewTabPlacement.foreground, first.placement);
+    gpa.free(first.url);
+    first = takeNewTab(7).?;
+    try std.testing.expectEqualStrings("http://b.example/2", first.url);
+    try std.testing.expectEqual(ws.message.NewTabPlacement.background, first.placement);
+    gpa.free(first.url);
+    try std.testing.expect(takeNewTab(7) == null);
+    // 넷까지만 쥔다.
+    for (0..6) |_| apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://c.example/" } }, 100);
+    try std.testing.expectEqual(@as(usize, max_new_tabs), surfaces.getPtr(7).?.new_tabs.items.len);
+    // 아무 창도 꺼내 가지 않으면 버린다(새로 온 것은 남는다).
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://d.example/" } }, 5_100);
+    expireNewTabs(gpa, 100 + new_tab_pickup_ms);
+    try std.testing.expectEqual(@as(usize, max_new_tabs), surfaces.getPtr(7).?.new_tabs.items.len);
+    expireNewTabs(gpa, 101 + new_tab_pickup_ms);
+    try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(7).?.new_tabs.items.len); // 넘친 d 는 처음부터 버렸다
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://e.example/" } }, 6_000);
+    try std.testing.expect(newTabPending(7)); // 탭이 사라지면 freeSurface 가 놓는다(testing allocator 가 샌 것을 잡는다)
 }
 
 test "dragged image files are fetched only when asked, gathered apart from the drag, checked against the announced size, and failed when the sidecar or browser goes (W6d③)" {

@@ -163,7 +163,11 @@ fn target(entry: *registry_mod.Entry, value: message.DragTarget) void {
             p.clear();
         },
         .drop => if (pendingOf(entry)) |p| {
-            if (p.entered) host.*.drag_target_drop.?(host, &event);
+            if (p.entered) {
+                // 페이지가 받지 않으면 Chromium 이 그 주소로 옮기자고 새 탭 이동으로 부른다 — 지금 탭에서 옮기게 표시한다(W6e).
+                entry.drop_navigation = true;
+                host.*.drag_target_drop.?(host, &event);
+            }
             p.entered = false;
             p.clear();
         },

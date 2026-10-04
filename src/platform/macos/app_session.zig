@@ -6351,6 +6351,8 @@ pub const AppSession = struct {
     osr_tooltip_seen: maru.session.web_osr_input.TooltipSeen = .{},
     /// 이 창이 띄운 Chromium 탭 우클릭 메뉴(W6c② — 창마다 하나). Swift 가 답하면(`osrContextMenuAnswer`) 비운다.
     osr_context_menu: ?web_ops.OsrContextMenu = null,
+    /// 한 탭이 이어 연 새 탭들(W6e — Chrome 처럼 차례대로 놓는다). 연 탭이 그 pane 의 활성 탭으로 남아 있는 동안만 따른다.
+    osr_new_tab_run: ?web_ops.OsrNewTabRun = null,
     /// 밖에서 이 창 view 로 끌어 오는 것(W6d① — 끌기 동안 쥔다)과 enter 를 보낸 탭.
     osr_drag: web_ops.OsrDrag = .{},
     /// 이 창이 돌리는 페이지 끌기(W6d② — macOS 끌기 세션). 세션이 끝나면(`osrDragOutEnd`) 비운다.

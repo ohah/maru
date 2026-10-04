@@ -303,6 +303,11 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeBrowser(&cursor, value.browser);
             try writeUrl(&cursor, value.url);
         },
+        .open_tab => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromEnum(value.placement));
+            try writeUrl(&cursor, value.url);
+        },
         .nav_state => |value| {
             try writeBrowser(&cursor, value.browser);
             try cursor.writeByte(@intFromBool(value.can_go_back));
@@ -612,6 +617,11 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             break :blk .{ .geolocation = value };
         },
         .url_changed => .{ .url_changed = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
+        .open_tab => .{ .open_tab = .{
+            .browser = try readBrowser(&cursor),
+            .placement = std.enums.fromInt(message_mod.NewTabPlacement, try cursor.readByte()) orelse return error.UnknownNewTabPlacement,
+            .url = try readUrl(&cursor),
+        } },
         .nav_state => .{ .nav_state = .{
             .browser = try readBrowser(&cursor),
             .can_go_back = try readBool(&cursor),
@@ -664,7 +674,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  8,  0, // v8, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  9,  0, // v9, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -1093,7 +1103,8 @@ test "context menu messages round trip, flow both ways, and refuse menu 0, reser
     bad.menu = 0;
     try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = bad }, &buf));
     bad = shown;
-    bad.flags._reserved = 1;
+    bad.flags.link = false;
+    bad.flags.link_openable = true;
     try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = bad }, &buf));
     try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = .{ .browser = 7, .menu = 1, .point = .{ .x = 0, .y = 0 }, .flags = .{ .image_loaded = true } } }, &buf));
     try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu = .{ .browser = 7, .menu = 1, .point = .{ .x = 0, .y = 0 }, .flags = .{ .selection_truncated = true } } }, &buf));
@@ -1104,11 +1115,27 @@ test "context menu messages round trip, flow both ways, and refuse menu 0, reser
     try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu_command = .{ .browser = 7, .menu = 0, .command = .cancel } }, &buf));
     // 손으로 만든 frame — 모르는 명령, 쓰지 않는 비트(디코더도 거절한다).
     const command_len = try encode(.{ .context_menu_command = .{ .browser = 7, .menu = 3, .command = .copy_image } }, &buf);
-    buf[command_len - 1] = 14;
+    buf[command_len - 1] = 15;
     try std.testing.expectError(error.UnknownContextMenuCommand, decodeExact(buf[0..command_len]));
     const menu_len = try encode(.{ .context_menu = .{ .browser = 7, .menu = 3, .point = .{ .x = 0, .y = 0 }, .flags = .{} } }, &buf);
-    buf[menu_len - 6] = 0x80; // flags 높은 바이트의 쓰지 않는 비트(15 번 — 뒤는 글 길이 u32)
+    buf[menu_len - 6] = 0x80; // flags 높은 바이트의 15 번 `link_openable` 만 — 링크가 아닌데 열 수 있다(뒤는 글 길이 u32)
     try std.testing.expectError(error.InvalidContextMenu, decodeExact(buf[0..menu_len]));
+}
+
+test "open_tab round-trips with its placement, flows to maru, and refuses an empty url, a control character or an unknown placement" {
+    const value: message_mod.OpenTab = .{ .browser = 7, .placement = .background, .url = "https://a.example/새?q=1" };
+    const back = (try roundTrip(.{ .open_tab = value })).open_tab;
+    try std.testing.expectEqual(value.browser, back.browser);
+    try std.testing.expectEqual(value.placement, back.placement);
+    try std.testing.expectEqualStrings(value.url, back.url);
+    try std.testing.expectEqual(message_mod.NewTabPlacement.foreground, (try roundTrip(.{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "http://b/" } })).open_tab.placement);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.open_tab.direction());
+    var buf: [256]u8 = undefined;
+    try std.testing.expectError(error.EmptyUrl, encode(.{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "https://x/\x1b[2J" } }, &buf));
+    const len = try encode(.{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "http://b/" } }, &buf);
+    buf[prefix_len + common_len + 8] = 2; // browser 뒤 자리 바이트
+    try std.testing.expectError(error.UnknownNewTabPlacement, decodeExact(buf[0..len]));
 }
 
 test "popup_changed round-trips, flows to maru, a hidden popup carries an all-zero rect and generation, a shown one a generation" {
@@ -1270,6 +1297,8 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         // W6d③ 파일 내용 청하기.
         .{ .drag_file_request = .{ .browser = 3, .drag = 4 } },
         .{ .drag_file_ready = .{ .browser = 3, .drag = 4, .size = 122, .ok = true } },
+        // W6e 새 탭.
+        .{ .open_tab = .{ .browser = 3, .placement = .background, .url = "https://a.example/x" } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;

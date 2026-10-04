@@ -36,6 +36,8 @@ const Held = struct {
     flags: Flags,
     link: ?[]u8 = null,
     image: ?[]u8 = null,
+    /// 새 탭에서 열 링크 주소(W6e) — 걸러진 주소이고 http·https 일 때만(`link_openable`).
+    open_link: ?[]u8 = null,
 };
 
 var image_callback: c.cef_download_image_callback_t = undefined;
@@ -114,6 +116,14 @@ fn copyAll(value: c.cef_string_userfree_t, max: usize) ?[]u8 {
     return allocator.dupe(u8, utf8.str[0..utf8.length]) catch null;
 }
 
+/// 새 탭에서 열 수 있는 링크 주소(놓는다) — wire 상한 안, http·https(`new_tab.urlAllowed`). 아니면 null(W6e).
+fn openableLink(value: c.cef_string_userfree_t) ?[]u8 {
+    const url = copyAll(value, protocol.wire.max_url_bytes) orelse return null;
+    if (protocol.new_tab.urlAllowed(url)) return url;
+    allocator.free(url);
+    return null;
+}
+
 /// 선택한 글을 대화상자 글 규칙으로 `out` 에 읽는다(넘치면 글자 경계에서 자르고 `truncated`).
 fn readSelection(value: c.cef_string_userfree_t, out: []u8, truncated: *bool) []const u8 {
     truncated.* = false;
@@ -164,6 +174,8 @@ pub fn onRun(
         copyAll(params.*.get_unfiltered_link_url.?(params), max_address_bytes)
     else
         null;
+    // 새 탭에서 여는 것은 걸러진 주소다(Chrome 과 같다 — 거르기 전 주소는 복사에만 쓴다). http·https 만(W6e).
+    const open_link = if (link != null) openableLink(params.*.get_link_url.?(params)) else null;
     const media_type = params.*.get_media_type.?(params);
     const is_image = media_type == c.CM_MEDIATYPE_IMAGE;
     const image = if (is_image) copyAll(params.*.get_source_url.?(params), max_address_bytes) else null;
@@ -186,17 +198,19 @@ pub fn onRun(
         .can_select_all = edit & c.CM_EDITFLAG_CAN_SELECT_ALL != 0,
         .can_go_back = enabled(model, c.MENU_ID_BACK),
         .can_go_forward = enabled(model, c.MENU_ID_FORWARD),
+        .link_openable = open_link != null,
     };
     const held = allocator.create(Held) catch {
         if (link) |v| allocator.free(v);
         if (image) |v| allocator.free(v);
+        if (open_link) |v| allocator.free(v);
         callback.*.cancel.?(callback);
         object.release(callback);
         return 1;
     };
     last_menu +%= 1;
     if (last_menu == 0) last_menu = 1;
-    held.* = .{ .menu = last_menu, .callback = callback, .flags = flags, .link = link, .image = image };
+    held.* = .{ .menu = last_menu, .callback = callback, .flags = flags, .link = link, .image = image, .open_link = open_link };
     entry.context_menu = held;
     // 알리지 못하면(maru 가 사라졌다) 곧바로 취소로 끝낸다 — 쥔 채 두면 CEF 는 메뉴가 떠 있다고 보고 그 브라우저의 우클릭을 모두
     // 버린다(W6c① 적대 검증).
@@ -262,6 +276,7 @@ fn end(held: *Held, ending: Ending) void {
 fn free(held: *Held) void {
     if (held.link) |v| allocator.free(v);
     if (held.image) |v| allocator.free(v);
+    if (held.open_link) |v| allocator.free(v);
     allocator.destroy(held);
 }
 
@@ -290,7 +305,7 @@ fn cefId(command: Command) ?c_int {
         .paste => c.MENU_ID_PASTE,
         .paste_and_match_style => c.MENU_ID_PASTE_MATCH_STYLE,
         .select_all => c.MENU_ID_SELECT_ALL,
-        .cancel, .copy_link_address, .copy_image_address, .copy_image => null,
+        .cancel, .copy_link_address, .copy_image_address, .copy_image, .open_link_new_tab => null,
     };
 }
 
@@ -311,6 +326,10 @@ pub fn onCommand(value: message.ContextMenuCommand) void {
         .copy_image => if (held.image) |image| {
             image_change_count = pasteboard.changeCount(boardName());
             downloadImage(entry, image);
+        },
+        // 메뉴의 답은 maru 가 띄운 메뉴에서 사용자가 고른 것이다 — 새 탭 한 장을 쓰지 않는다(W6e).
+        .open_link_new_tab => if (held.open_link) |url| {
+            browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .background, .url = url } }) catch {};
         },
         else => {},
     }

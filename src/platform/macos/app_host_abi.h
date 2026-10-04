@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 206u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 207u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2177,7 +2177,7 @@ void maru_macos_app_session_osr_drag_exit(MaruAppHostSession *session);
 int32_t maru_macos_app_session_osr_drag_drop(MaruAppHostSession *session, double x_px, double y_px, int32_t mods);
 /* v206(W6d②): 페이지에서 끌어내기. set_source(maru 안에 놓이는 그 끌기 번호 — 이미 끝난 끌기면 0), out_take(이 창이 가져간 끌기 번호 — 0 이면 없음,
  * 허용 동작·그림 잡은 자리·그림 크기 DIP), out_part(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG·5 파일 이름(안전하게 고친 것 —
- * 이미지 확장자가 아니면 빈 것)·6 파일 내용 — out 이 NULL 이면 길이만, 넘치면 0),
+ * 이미지 확장자가 아니면 빈 것) — out 이 NULL 이면 길이만, 넘치면 0),
  * out_started(세션이 열렸다 — 제스처를 끝낸다), out_end(놓인 자리 backing px — NaN 이면 시작 자리·받은 동작, 0 = 취소). */
 int32_t maru_macos_app_session_osr_drag_set_source(MaruAppHostSession *session, uint32_t drag);
 uint32_t maru_macos_app_session_osr_drag_out_take(MaruAppHostSession *session, uint32_t *allowed, int32_t *hotspot_x, int32_t *hotspot_y,
@@ -2186,6 +2186,11 @@ int32_t maru_macos_app_session_osr_drag_out_part(MaruAppHostSession *session, ui
                                                  size_t *out_len);
 void maru_macos_app_session_osr_drag_out_started(MaruAppHostSession *session, uint32_t drag);
 int32_t maru_macos_app_session_osr_drag_out_end(MaruAppHostSession *session, uint32_t drag, double x_px, double y_px, uint32_t operation);
+/* v207(W6d③): 끌어낸 이미지 파일. out_file_size(받아 둔 내용 크기 — 안전한 이름이 없으면 0), drag_file_request(Finder 가 청할 때 — 끌기가
+ * 끝난 뒤여도 된다, 못 청하면 0), drag_file_poll(0 아직·1 다 왔다(out 이 넉넉하면 옮겨 적고 놓는다, NULL 이면 길이만)·-1 실패). */
+uint32_t maru_macos_app_session_osr_drag_out_file_size(MaruAppHostSession *session, uint32_t drag);
+int32_t maru_macos_app_session_osr_drag_file_request(MaruAppHostSession *session, uint32_t drag);
+int32_t maru_macos_app_session_osr_drag_file_poll(MaruAppHostSession *session, uint32_t drag, uint8_t *out, size_t cap, size_t *out_len);
 /* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
    2 = 뗌, 3(v202 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */

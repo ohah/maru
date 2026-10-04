@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 206), abi_version);
+    try std.testing.expectEqual(@as(u32, 207), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -5068,7 +5068,7 @@ pub export fn maru_macos_app_session_osr_drag_out_take(session: ?*AppSession, al
 }
 
 /// v206(W6d②): 가져간 끌기의 조각(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG, W6d③ 5 파일 이름(안전하게 고친 것 — 이미지 확장자가
-/// 아니면 빈 것)·6 파일 내용(이름이 비면 빈 것)) — `out` 이 null 이면 길이만. 넘치면 0(길이로 다시 부른다).
+/// 아니거나 파일을 받아 두지 않았으면 빈 것)) — `out` 이 null 이면 길이만. 넘치면 0(길이로 다시 부른다).
 pub export fn maru_macos_app_session_osr_drag_out_part(session: ?*AppSession, drag: u32, part: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
     const app = session orelse return 0;
     const which = std.enums.fromInt(session_mod.web_ops.OsrDragOutPart, part) orelse return 0;
@@ -5084,6 +5084,35 @@ pub export fn maru_macos_app_session_osr_drag_out_part(session: ?*AppSession, dr
 pub export fn maru_macos_app_session_osr_drag_out_started(session: ?*AppSession, drag: u32) void {
     const app = session orelse return;
     session_mod.web_ops.osrDragOutStarted(app, drag);
+}
+
+/// v207(W6d③): 가져간 끌기가 받아 둔 이미지 파일 내용의 크기(안전한 이름이 없으면 0 — 파일을 만들지 않는다).
+pub export fn maru_macos_app_session_osr_drag_out_file_size(session: ?*AppSession, drag: u32) u32 {
+    const app = session orelse return 0;
+    return session_mod.web_ops.osrDragOutFileSize(app, drag);
+}
+
+/// v207(W6d③): Finder 가 파일을 청했다 — 그 번호의 내용을 sidecar 에 청한다(끌기가 끝난 뒤여도 된다). 청할 수 없으면 0.
+pub export fn maru_macos_app_session_osr_drag_file_request(session: ?*AppSession, drag: u32) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrDragFileRequest(app, drag));
+}
+
+/// v207(W6d③): 청한 파일 내용 — 0 아직, 1 다 왔다(`out` 이 있고 `cap` 이 넉넉하면 옮겨 적고 놓는다, null 이면 길이만), -1 실패.
+pub export fn maru_macos_app_session_osr_drag_file_poll(session: ?*AppSession, drag: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
+    const app = session orelse return -1;
+    const got = session_mod.web_ops.osrDragFile(drag);
+    switch (got.state) {
+        .pending => return 0,
+        .failed => return -1,
+        .ready => {},
+    }
+    if (out_len) |p| p.* = got.bytes.len;
+    const dest = out orelse return 1;
+    if (cap < got.bytes.len) return 1;
+    @memcpy(dest[0..got.bytes.len], got.bytes);
+    session_mod.web_ops.osrDragFileRelease(app, drag);
+    return 1;
 }
 
 /// v206(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px — NaN 이면 시작 자리, 음수는 정상 좌표)와 받은 동작(`NSDragOperation`,

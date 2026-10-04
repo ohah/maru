@@ -272,6 +272,19 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writePoint(&cursor, value.hotspot);
             try cursor.writeU32(value.image_width);
             try cursor.writeU32(value.image_height);
+            try cursor.writeU32(value.file_size);
+        },
+        .drag_file_request => |value| {
+            if (value.drag == 0) return error.InvalidDrag;
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.drag);
+        },
+        .drag_file_ready => |value| {
+            try fields.checkDragFileReady(value);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.drag);
+            try cursor.writeU32(value.size);
+            try cursor.writeByte(@intFromBool(value.ok));
         },
         .drag_operation => |value| {
             try fields.checkDragOperation(value.operation);
@@ -563,9 +576,21 @@ pub fn decodeExact(frame: []const u8) Error!Message {
                 .hotspot = try readPoint(&cursor),
                 .image_width = try cursor.readU32(),
                 .image_height = try cursor.readU32(),
+                .file_size = try cursor.readU32(),
             };
             try fields.checkDragOut(value);
             break :blk .{ .drag_out = value };
+        },
+        .drag_file_request => blk: {
+            const browser = try readBrowser(&cursor);
+            const drag = try cursor.readU32();
+            if (drag == 0) return error.InvalidDrag;
+            break :blk .{ .drag_file_request = .{ .browser = browser, .drag = drag } };
+        },
+        .drag_file_ready => blk: {
+            const value: message_mod.DragFileReady = .{ .browser = try readBrowser(&cursor), .drag = try cursor.readU32(), .size = try cursor.readU32(), .ok = try readBool(&cursor) };
+            try fields.checkDragFileReady(value);
+            break :blk .{ .drag_file_ready = value };
         },
         .drag_operation => blk: {
             const browser = try readBrowser(&cursor);
@@ -1017,6 +1042,16 @@ test "drag-out messages round trip, flow the right way, and refuse drag 0, unuse
     try std.testing.expectEqualStrings("고양이.png", (try roundTrip(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_name, .bytes = "고양이.png" } })).drag_out_data.bytes);
     try std.testing.expectEqualStrings("\x00\x01\xff", (try roundTrip(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_contents, .bytes = "\x00\x01\xff" } })).drag_out_data.bytes);
     try std.testing.expectError(error.ControlCharacter, encode(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_name, .bytes = "a\x1b.png" } }, &buf));
+    // 파일 내용은 청할 때만 — 청하기와 끝, 크기 상한·실패면 0.
+    try std.testing.expectEqual(@as(u32, 9), (try roundTrip(.{ .drag_file_request = .{ .browser = 7, .drag = 9 } })).drag_file_request.drag);
+    const ready: message_mod.DragFileReady = .{ .browser = 7, .drag = 9, .size = 122, .ok = true };
+    try std.testing.expectEqual(ready, (try roundTrip(.{ .drag_file_ready = ready })).drag_file_ready);
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.drag_file_request.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.drag_file_ready.direction());
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_file_request = .{ .browser = 7, .drag = 0 } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_file_ready = .{ .browser = 7, .drag = 9, .size = 3, .ok = false } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_file_ready = .{ .browser = 7, .drag = 9, .size = message_mod.max_drag_file_bytes + 1, .ok = true } }, &buf));
+    try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_out = .{ .browser = 7, .drag = 1, .allowed = 1, .point = .{ .x = 0, .y = 0 }, .file_size = message_mod.max_drag_file_bytes + 1 } }, &buf));
     const end: message_mod.DragSourceEnd = .{ .browser = 7, .drag = 3, .point = .{ .x = -1, .y = 900 }, .operation = 16 };
     try std.testing.expectEqual(end, (try roundTrip(.{ .drag_source_end = end })).drag_source_end);
     const enter: message_mod.DragTarget = .{ .browser = 7, .kind = .enter, .point = .{ .x = 1, .y = 2 }, .allowed = 1, .source = 3 };
@@ -1231,7 +1266,10 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .image_png, .bytes = "\x89PNG\x00\x01" } },
         .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .file_name, .bytes = "고양이.png" } },
         .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .file_contents, .bytes = "\x00\x89PNG\r\n" } },
-        .{ .drag_out = .{ .browser = 3, .drag = 4, .allowed = 17, .point = .{ .x = 5, .y = 6 }, .hotspot = .{ .x = 2, .y = 3 }, .image_width = 10, .image_height = 8 } },
+        .{ .drag_out = .{ .browser = 3, .drag = 4, .allowed = 17, .point = .{ .x = 5, .y = 6 }, .hotspot = .{ .x = 2, .y = 3 }, .image_width = 10, .image_height = 8, .file_size = 122 } },
+        // W6d③ 파일 내용 청하기.
+        .{ .drag_file_request = .{ .browser = 3, .drag = 4 } },
+        .{ .drag_file_ready = .{ .browser = 3, .drag = 4, .size = 122, .ok = true } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;

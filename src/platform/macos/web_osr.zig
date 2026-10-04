@@ -1559,8 +1559,6 @@ pub const drag_out_pickup_ms: i64 = 1_000;
 /// 조각 상한 — sidecar(`drag.max_text_total`·`max_out_png`)와 같다.
 pub const max_drag_out_text = 1024 * 1024;
 pub const max_drag_out_png = 4 * 1024 * 1024;
-/// 이미지 끌기의 파일 내용 상한(W6d③ — sidecar `drag.max_out_file`).
-pub const max_drag_out_file = 32 * 1024 * 1024;
 
 pub const DragOut = struct {
     drag: u32,
@@ -1569,9 +1567,9 @@ pub const DragOut = struct {
     url: std.ArrayList(u8) = .empty,
     url_title: std.ArrayList(u8) = .empty,
     png: std.ArrayList(u8) = .empty,
-    /// 이미지 끌기면 Chromium 이 정한 파일 이름과 내용(W6d③ — Finder 에 놓으면 그 파일을 만든다).
+    /// 이미지 끌기면 Chromium 이 정한 파일 이름과 sidecar 가 받아 둔 내용의 크기(W6d③ — 내용은 Finder 가 청할 때 `requestDragFile`).
     file_name: std.ArrayList(u8) = .empty,
-    file_contents: std.ArrayList(u8) = .empty,
+    file_size: u32 = 0,
     allowed: u32 = 0,
     point: ws.message.Point = .{ .x = 0, .y = 0 },
     hotspot: ws.message.Point = .{ .x = 0, .y = 0 },
@@ -1591,7 +1589,7 @@ pub const DragOut = struct {
             .url_title => .{ &self.url_title, ws.wire.max_text_bytes },
             .image_png => .{ &self.png, max_drag_out_png },
             .file_name => .{ &self.file_name, ws.wire.max_text_bytes },
-            .file_contents => .{ &self.file_contents, max_drag_out_file },
+            .file_contents => return, // 끌기 조각이 아니다 — `drag_file_request` 의 답(`file_fetch`)
         };
         // 주소·제목·파일 이름은 한 조각이다(마지막 것).
         if (kind == .url or kind == .url_title or kind == .file_name) list.clearRetainingCapacity();
@@ -1606,7 +1604,6 @@ pub const DragOut = struct {
         self.url_title.deinit(gpa);
         self.png.deinit(gpa);
         self.file_name.deinit(gpa);
-        self.file_contents.deinit(gpa);
     }
 };
 
@@ -1632,6 +1629,78 @@ pub fn takeDragOut(surface_id: u64) ?*const DragOut {
     if (!d.ready or d.taken) return null;
     d.taken = true;
     return d;
+}
+
+// ── W6d③: 끌어낸 이미지의 파일 내용(Finder 가 청할 때만) ─────────────────────────────────────────────────────────────
+
+/// 파일을 받아 둔 마지막 끌기(sidecar 도 그것 하나를 쥔다).
+var file_source: ?struct { surface: u64, drag: u32, size: u32 } = null;
+
+pub const FileFetchState = enum { pending, ready, failed };
+
+/// 청한 파일 내용(하나 — Finder 는 놓은 하나를 청한다).
+const FileFetch = struct {
+    surface: u64,
+    drag: u32,
+    expected: u32,
+    contents: std.ArrayList(u8) = .empty,
+    state: FileFetchState = .pending,
+};
+var file_fetch: ?FileFetch = null;
+
+/// 그 번호의 파일 내용을 sidecar 에 청한다(이미 청했으면 그대로). 그 끌기가 파일을 받아 두지 않았거나 sidecar 가 돌지 않으면 false.
+pub fn requestDragFile(gpa: std.mem.Allocator, drag: u32) bool {
+    const src = file_source orelse return false;
+    if (src.drag != drag or drag == 0) return false;
+    if (file_fetch) |f| if (f.drag == drag and f.state != .failed) return true;
+    dropFileFetch(gpa);
+    const s = surfaces.getPtr(src.surface) orelse return false;
+    if (!s.created or state != .running) return false;
+    file_fetch = .{ .surface = src.surface, .drag = drag, .expected = src.size };
+    file_fetch.?.contents.ensureTotalCapacity(gpa, src.size) catch {
+        file_fetch = null;
+        return false;
+    };
+    send(gpa, .{ .drag_file_request = .{ .browser = src.surface, .drag = drag } });
+    return true;
+}
+
+fn fileFetchAdd(gpa: std.mem.Allocator, v: ws.message.DragOutData) void {
+    const f = if (file_fetch) |*f| f else return;
+    if (f.surface != v.browser or f.drag != v.drag or f.state != .pending) return;
+    if (f.contents.items.len + v.bytes.len > f.expected) {
+        f.state = .failed; // 알린 크기보다 많다
+        return;
+    }
+    f.contents.appendSlice(gpa, v.bytes) catch {
+        f.state = .failed;
+    };
+}
+
+fn failFileFetch(surface: u64) void {
+    if (file_fetch) |*f| if (f.surface == surface and f.state == .pending) {
+        f.state = .failed;
+    };
+    if (file_source) |src| if (src.surface == surface) {
+        file_source = null;
+    };
+}
+
+fn dropFileFetch(gpa: std.mem.Allocator) void {
+    if (file_fetch) |*f| f.contents.deinit(gpa);
+    file_fetch = null;
+}
+
+/// 청한 그 번호의 파일 내용 상태. 다 왔으면 `ready` 와 내용(`takeDragFile` 이 놓을 때까지 유효).
+pub fn dragFile(drag: u32) struct { state: FileFetchState, bytes: []const u8 = "" } {
+    const f = file_fetch orelse return .{ .state = .failed };
+    if (f.drag != drag) return .{ .state = .failed };
+    return .{ .state = f.state, .bytes = if (f.state == .ready) f.contents.items else "" };
+}
+
+/// 다 읽었다 — 놓는다.
+pub fn releaseDragFile(gpa: std.mem.Allocator, drag: u32) void {
+    if (file_fetch) |f| if (f.drag == drag) dropFileFetch(gpa);
 }
 
 /// 그 번호의 페이지 끌기가 아직 살아 있는가(어느 탭이든 창이 가져간 채) — 원래 탭이 닫혔거나 sidecar 가 다시 떴거나 창이 닫혀
@@ -1948,6 +2017,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         dropPopup(s); // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게. 새 sidecar 는 세대를 1 부터 세므로 옛 링도 놓는다
         forgetDrag(s); // 새 sidecar 는 그 끌기를 모른다 — enter 없이 drop 을 보내지 않게(W6d①)
         dropDragOut(gpa, s); // 페이지 끌기도 — 답할 곳이 없다(W6d②)
+        failFileFetch(s.record.surface_id); // 청한 파일 내용도 오지 않는다(W6d③)
     }
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
@@ -2098,12 +2168,14 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             dropContextMenu(gpa, s); // 브라우저가 닫히며 CEF 가 메뉴를 거뒀다(W6c② — 닫힘 알림은 sidecar 가 보내지 않는다)
             forgetDrag(s); // 끌기도(W6d①)
             dropDragOut(gpa, s); // sidecar 가 그 끌기를 놓았다(W6d②)
+            failFileFetch(id); // 받아 둔 파일도(W6d③)
         },
         .drag_operation => |v| if (surfaces.getPtr(v.browser)) |s| {
             if (s.drag_entered) s.drag_operation = v.operation;
         },
         // 페이지 끌기의 조각 — 새 번호면 앞 것을 버린다(sidecar 가 앞 끌기를 끝냈다).
-        .drag_out_data => |v| if (surfaces.getPtr(v.browser)) |s| {
+        // 청한 파일 내용의 조각(W6d③) — 끌기와 따로 모은다(끌기는 이미 끝났을 수 있다).
+        .drag_out_data => |v| if (v.kind == .file_contents) fileFetchAdd(gpa, v) else if (surfaces.getPtr(v.browser)) |s| {
             const d = dragOutFor(gpa, s, v.drag) orelse return;
             if (d.ready) return; // `drag_out` 뒤 조각은 규칙 위반이 아니지만 쓰지 않는다
             d.add(gpa, v.kind, v.bytes);
@@ -2117,7 +2189,13 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             d.hotspot = v.hotspot;
             d.image_width = v.image_width;
             d.image_height = v.image_height;
+            d.file_size = v.file_size;
             d.arrived_ms = now_ms;
+            // 파일을 받아 둔 끌기 — sidecar 는 다음 끌기까지 쥐므로 maru 도 그 번호를 기억한다(끌기가 끝난 뒤 Finder 가 청한다).
+            if (v.file_size != 0) file_source = .{ .surface = v.browser, .drag = v.drag, .size = v.file_size };
+        },
+        .drag_file_ready => |v| if (file_fetch) |*f| if (f.surface == v.browser and f.drag == v.drag and f.state == .pending) {
+            f.state = if (v.ok and v.size == f.expected and f.contents.items.len == f.expected) .ready else .failed;
         },
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
@@ -2224,7 +2302,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request => unreachable,
     }
 }
 
@@ -2630,6 +2708,57 @@ test "page drags gather their pieces, are taken by one window, answered once wit
     apply(gpa, .{ .browser_closed = 7 }, 3_000);
     expireDragOuts(gpa, 9_000);
     try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames)); // 버린 것에는 답하지 않는다
+}
+
+test "dragged image files are fetched only when asked, gathered apart from the drag, checked against the announced size, and failed when the sidecar or browser goes (W6d③)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        dropFileFetch(gpa);
+        file_source = null;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    var frames: [8]Message = undefined;
+    // 파일을 받아 둔 끌기 — 내용은 아직 오지 않는다. 청하기 전에는 아무것도 보내지 않는다.
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_name, .bytes = "cat.png" } }, 0);
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 3, .allowed = 1, .point = .{ .x = 0, .y = 0 }, .file_size = 5 } }, 0);
+    try std.testing.expectEqual(@as(u32, 5), surfaces.getPtr(7).?.drag_out.?.file_size);
+    try std.testing.expect(!requestDragFile(gpa, 4)); // 다른 번호
+    // 끌기가 끝난 뒤에도 청할 수 있다(Finder 는 놓은 뒤 청한다).
+    _ = takeDragOut(7);
+    try std.testing.expect(endDragOut(gpa, 7, 3, .{ .x = 0, .y = 0 }, 1));
+    state = .running;
+    state = .starting; // send 가 outbox 에 쌓게(시험) — requestDragFile 은 running 을 본다
+    try std.testing.expect(!requestDragFile(gpa, 3)); // sidecar 가 돌지 않는다
+    state = .running;
+    process = null;
+    try std.testing.expect(requestDragFile(gpa, 3));
+    try std.testing.expect(requestDragFile(gpa, 3)); // 이미 청했다
+    try std.testing.expectEqual(FileFetchState.pending, dragFile(3).state);
+    // 조각은 끌기가 아니라 청한 것에 모인다. 알린 크기와 맞아야 ready.
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_contents, .bytes = "ab" } }, 0);
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_contents, .bytes = "cde" } }, 0);
+    apply(gpa, .{ .drag_file_ready = .{ .browser = 7, .drag = 3, .size = 5, .ok = true } }, 0);
+    try std.testing.expectEqual(FileFetchState.ready, dragFile(3).state);
+    try std.testing.expectEqualStrings("abcde", dragFile(3).bytes);
+    releaseDragFile(gpa, 3);
+    try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state);
+    // 크기가 모자라면 실패. sidecar 가 다시 뜨면 실패.
+    try std.testing.expect(requestDragFile(gpa, 3));
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_contents, .bytes = "ab" } }, 0);
+    apply(gpa, .{ .drag_file_ready = .{ .browser = 7, .drag = 3, .size = 5, .ok = true } }, 0);
+    try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state);
+    try std.testing.expect(requestDragFile(gpa, 3)); // 실패한 것은 다시 청할 수 있다
+    forgetSidecar(gpa);
+    try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state);
+    try std.testing.expect(!requestDragFile(gpa, 3)); // 새 sidecar 는 그 파일을 모른다
+    _ = &frames;
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

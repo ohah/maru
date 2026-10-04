@@ -71809,10 +71809,13 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
     while (li < big.len) : (li += 80) big[li] = '\n';
     session.pasteText(big, false);
 
-    // pasteText는 즉시 반환해야 하고(동결 없음), 잔여는 tick들이 흘려보낸다.
-    var i: usize = 0;
-    while (i < 600 and session.hasPendingPaste()) : (i += 1) {
+    // pasteText는 즉시 반환해야 하고(동결 없음), 잔여는 tick들이 흘려보낸다. 큐가 비는 속도는 자식이 읽는
+    // 속도라 tick 횟수가 아니라 실제 시계로 기다린다 — 쉬지 않는 600 tick 은 부하에서 자식이 스케줄되기 전에
+    // 끝나 빨갰다(2026-10-04 전체 실행). 5 초 상한은 「영영 안 빠진다」를 가르는 선이다.
+    const deadline = std.Io.Clock.awake.now(session.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (session.hasPendingPaste() and std.Io.Clock.awake.now(session.io).nanoseconds < deadline) {
         _ = try session.tick();
+        try std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake);
     }
     // 자식(read 대기 중)이 소비하므로 결국 큐가 빈다.
     try std.testing.expect(!session.hasPendingPaste());

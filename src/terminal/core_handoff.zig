@@ -107,8 +107,11 @@ test "CoreHandoff: 요구자가 있고 signal 이 안 오면 타임아웃 안에
     h.yieldToDemand(std.testing.io);
     const dt = std.Io.Clock.awake.now(std.testing.io).nanoseconds - t0;
     // 상한만 본다 — futex 는 spurious wake 가 허용되어 하한은 계약이 아니다(일찍 깨면 리더가 그냥 계속
-    // 간다, 무해). 타임아웃의 10배 안이면 «유계」다.
-    try std.testing.expect(dt < CoreHandoff.handoff_timeout_ns * 10);
+    // 간다, 무해). 이 판정자가 가르는 것은 「유계로 돌아온다」 대 「영영 선다」다. 선은 위 판정자와 같은
+    // 1 초다 — 예전 선(타임아웃의 10 배 = 10 ms)은 깨어난 스레드가 CPU 를 다시 받는 지연(부하에서 수십 ms)
+    // 안에 있어, 격리 8중 실행 24 회 중 4 회 빨갰다(2026-10-04, 부하 평균 37~49). 1 ms 라는 값 자체는
+    // 상수(`handoff_timeout_ns`)가 소유하고, 시간으로는 잡음보다 작아 재지 못한다.
+    try std.testing.expect(dt < probe_slept_line_ns);
     try std.testing.expect(h.hasDemand());
 }
 

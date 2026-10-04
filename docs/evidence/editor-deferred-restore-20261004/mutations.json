@@ -1,0 +1,122 @@
+{
+  "root": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-deferred-mutations-tfgp0y9y",
+  "command": [
+    "mise",
+    "exec",
+    "--",
+    "zig",
+    "build",
+    "test-editor-recovery-restore",
+    "-Doptimize=ReleaseFast",
+    "-j2"
+  ],
+  "results": [
+    {
+      "name": "visible-index-capture",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "57/74 app_session.editor.mod.test.editor recovery restore 접힌 배열 대신 원문 줄을 저장하고 복원한다...expected 20, found 18",
+        "FAIL (TestExpectedEqual)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-deferred-mutations-tfgp0y9y/visible-index-capture.log",
+      "log_sha256": "453d05ffc12db0724f69208e16246cf751448f5c152b4681f795c640d8764193",
+      "source": "src/platform/macos/app_session/editor/restore.zig",
+      "original": "else editor.topDocLine(term)",
+      "mutation": "else term.rt.editor_first_line",
+      "failed_tests": [
+        "app_session.editor.mod.test.editor recovery restore 접힌 배열 대신 원문 줄을 저장하고 복원한다"
+      ]
+    },
+    {
+      "name": "drop-late-folds",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "FAIL (TestExpectedEqual)",
+        "FAIL (TestExpectedEqual)",
+        "FAIL (TestExpectedEqual)",
+        "FAIL (TestExpectedEqual)",
+        "FAIL (TestExpectedEqual)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-deferred-mutations-tfgp0y9y/drop-late-folds.log",
+      "log_sha256": "d8992e4fdce979e8ef3d197e513a84a776094d1c9e237fa3318a7ddb99696e35",
+      "source": "src/platform/macos/app_session/editor/mod.zig",
+      "original": "kept_len = restoredFoldHeads(term, ranges, folded);",
+      "mutation": "kept_len = 0;",
+      "failed_tests": [
+        "app_session.editor.mod.test.editor recovery restore 늦은 provider와 재저장이 저장된 접힘 의도를 잃지 않는다",
+        "app_session.editor.mod.test.editor recovery restore 사용자의 스크롤과 펼치기가 늦은 응답보다 우선한다",
+        "app_session.editor.mod.test.editor recovery restore 막대와 랩 및 키보드 명령을 늦은 응답이 되돌리지 않는다",
+        "app_session.editor.mod.test.editor recovery restore 공유 뷰는 대기를 독립 소유하고 공유 편집은 모두 무효화한다",
+        "app_session.editor.mod.test.editor recovery restore provider 적용 중 할당 실패도 다음 프레임에서 재시도한다"
+      ]
+    },
+    {
+      "name": "ignore-user-scroll",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "59/74 app_session.editor.mod.test.editor recovery restore 사용자의 스크롤과 펼치기가 늦은 응답보다 우선한다...expected 15, found 20",
+        "FAIL (TestExpectedEqual)",
+        "60/74 app_session.editor.mod.test.editor recovery restore 막대와 랩 및 키보드 명령을 늦은 응답이 되돌리지 않는다...expected 30, found 20",
+        "FAIL (TestExpectedEqual)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-deferred-mutations-tfgp0y9y/ignore-user-scroll.log",
+      "log_sha256": "7be38b2ca82b9c829a5369efd63ad54ffb739cbe68287970b6a39c0291efd6dd",
+      "source": "src/platform/macos/app_session/editor/restore.zig",
+      "original": "value.scroll = null;",
+      "mutation": "value.scroll = value.scroll;",
+      "failed_tests": [
+        "app_session.editor.mod.test.editor recovery restore 사용자의 스크롤과 펼치기가 늦은 응답보다 우선한다",
+        "app_session.editor.mod.test.editor recovery restore 막대와 랩 및 키보드 명령을 늦은 응답이 되돌리지 않는다"
+      ]
+    },
+    {
+      "name": "ignore-user-selection",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true,
+      "runtime_failures": [
+        "59/74 app_session.editor.mod.test.editor recovery restore 사용자의 스크롤과 펼치기가 늦은 응답보다 우선한다...expected 0, found 1",
+        "FAIL (TestExpectedEqual)",
+        "60/74 app_session.editor.mod.test.editor recovery restore 막대와 랩 및 키보드 명령을 늦은 응답이 되돌리지 않는다...expected 0, found 20",
+        "FAIL (TestExpectedEqual)",
+        "61/74 app_session.editor.mod.test.editor recovery restore 임시 provider가 선택을 숨기지 않고 실제 입력은 복원을 취소한다...FAIL (TestUnexpectedResult)",
+        "62/74 app_session.editor.mod.test.editor recovery restore 공유 뷰는 대기를 독립 소유하고 공유 편집은 모두 무효화한다...FAIL (TestUnexpectedResult)"
+      ],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-deferred-mutations-tfgp0y9y/ignore-user-selection.log",
+      "log_sha256": "a6348a1184a24a61ff18258463946cf32f3de85d3c2c08906f87c9454f4db966",
+      "source": "src/platform/macos/app_session/editor/restore.zig",
+      "original": "value.active = false;",
+      "mutation": "value.active = value.active;",
+      "failed_tests": [
+        "app_session.editor.mod.test.editor recovery restore 사용자의 스크롤과 펼치기가 늦은 응답보다 우선한다",
+        "app_session.editor.mod.test.editor recovery restore 막대와 랩 및 키보드 명령을 늦은 응답이 되돌리지 않는다",
+        "app_session.editor.mod.test.editor recovery restore 임시 provider가 선택을 숨기지 않고 실제 입력은 복원을 취소한다",
+        "app_session.editor.mod.test.editor recovery restore 공유 뷰는 대기를 독립 소유하고 공유 편집은 모두 무효화한다"
+      ]
+    },
+    {
+      "name": "equivalent-restore-guard",
+      "expected_pass": true,
+      "exit_code": 0,
+      "expected_observed": true,
+      "runtime_failures": [],
+      "log": "/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-deferred-mutations-tfgp0y9y/equivalent-restore-guard.log",
+      "log_sha256": "534914af5b8f1de4e94063234d88d02f7ecfa9b32909bd29693d05424834812b",
+      "source": "src/platform/macos/app_session/editor/mod.zig",
+      "original": "if (workspace_restore.pending(term) != null) {",
+      "mutation": "if (!(workspace_restore.pending(term) == null)) {",
+      "failed_tests": []
+    }
+  ],
+  "restored_sha256": {
+    "mod": "e34eea6e2aa244f886c8e127f586d35ef448714d263bfc2b24fd939a9e1c4e9a",
+    "restore": "d4beff367eb9f90511c1a3cbaf562473a0ca9c18f67d8004110f432736a526c4"
+  },
+  "scope": "독립 소스 사본에서 같은 집중 복원 검사를 실행했다. 손상 변이는 컴파일 성공 뒤 런타임에서 실패했고, 동치 조건은 통과했다."
+}

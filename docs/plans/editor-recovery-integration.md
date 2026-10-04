@@ -186,6 +186,11 @@ staging·공유 준비의 모든 할당 실패 및 provider 파생 배열 실패
 | NSTextInputClient 콜백·멀티커서·Undo·저장·재시작 | `cat cat` 본문과 두 독립 선택 보존, 입력 검증 실패 0 |
 | 실제 macOS 두벌식 HID·두 pane 전환·저장·재시작 | `L가 R나`가 한 번씩 반영, 두 커서 byte 4/9 보존, 원래 입력 소스 복원 |
 
+보호 코드를 변형해 원문 좌표 저장, 늦은 접힘 적용, 사용자 스크롤 및 선택/IME 취소를
+각각 제거하면 새 회귀 판정자가 런타임 실패를 내는지 확인했다. 같은 뜻의 조건식은 통과했다.
+[변이 결과](../evidence/editor-deferred-restore-20261004/mutations.json)는 변경한 식과 실패한 테스트,
+로그 hash 및 원복한 소스 hash를 담는다.
+
 실제 앱 비교는 접힘 개수뿐 아니라 머리 목록 hash도 검사하며 모든 시나리오의 `issues`가 비었다.
 [구문 분석과 리사이즈](../evidence/editor-deferred-restore-20261004/syntax.json),
 [실제 clangd](../evidence/editor-deferred-restore-20261004/clangd.json),

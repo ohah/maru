@@ -2274,6 +2274,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         // W6e: 새 탭 — maru 가 주소를 다시 거른다(sidecar 도 걸렀다). 모르는 탭이면 버린다.
         .open_tab => |v| if (surfaces.getPtr(v.browser)) |s| queueNewTab(gpa, s, v, now_ms),
+        // W6f①: maru 는 아직 번호를 맡기지 않는다(`popup_reserve` — W6f② 가 붙인다). 그래도 오면 이어 받을 탭이 없다 — 닫는다(페이지에는
+        // 팝업이 닫힌 것으로 보인다). 쥐는 이 없는 브라우저를 남기지 않는다.
+        .popup_created => |v| send(gpa, .{ .destroy_browser = v.browser }),
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
             if (s.url) |old| gpa.free(old);
@@ -2379,7 +2382,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve => unreachable,
     }
 }
 

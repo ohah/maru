@@ -23,6 +23,122 @@ comptime {
     std.debug.assert(rules.disposition.new_window == c.CEF_WOD_NEW_WINDOW);
 }
 
+// ── W6f: 팝업 이어 받기 ─────────────────────────────────────────────────────────────────────────────────────
+// maru 가 맡긴 번호(`popup_reserve`)가 있으면 페이지의 팝업을 창 없는 CEF 브라우저로 만들게 두고(`on_before_popup` 0) 그 번호로
+// 등록한다 — 원래 페이지와 이어진다(착수 전 실측: `window.opener`·`postMessage`·이름 창 재사용·`close`·`document.write`). CEF 는
+// `on_before_popup` 바로 뒤(같은 UI 스레드, 실측 6 ms)에 새 브라우저로 `on_after_created` 를 부르고, 만들지 못하면 연 브라우저로
+// `on_before_popup_aborted` 를 부른다 — 기다리는 팝업을 차례대로 짝짓는다. 이어 받지 않은 팝업 브라우저는 하나도 남기지 않는다.
+
+var reserved: [protocol.message.max_popup_reserve]protocol.message.BrowserId = undefined;
+var reserved_len: usize = 0;
+
+const PendingPopup = struct {
+    opener: protocol.message.BrowserId,
+    opener_cef: c_int,
+    popup_id: c_int,
+    browser: protocol.message.BrowserId,
+    placement: protocol.message.NewTabPlacement,
+    size: protocol.message.ViewSize,
+    url: []u8,
+};
+var pending: [protocol.message.max_popup_reserve]PendingPopup = undefined;
+var pending_len: usize = 0;
+const allocator = std.heap.c_allocator;
+
+/// maru 가 번호를 맡겼다. 이미 쓰는 번호·맡은 번호·넘치는 것은 버린다(maru 의 번호는 다시 쓰이지 않으므로 잃어도 된다).
+pub fn onReserve(id: protocol.message.BrowserId) void {
+    if (browsers.state.registry.byId(id) != null or reserved_len == reserved.len) return;
+    for (reserved[0..reserved_len]) |r| if (r == id) return;
+    for (pending[0..pending_len]) |p| if (p.browser == id) return;
+    reserved[reserved_len] = id;
+    reserved_len += 1;
+}
+
+/// `on_before_popup` — 이어 받을 수 있으면 창 없는 브라우저로 만들게 두고 0, 아니면 주소만 보내고(W6e) 1.
+pub fn beforePopup(
+    browser: [*c]c.cef_browser_t,
+    popup_id: c_int,
+    url: [*c]const c.cef_string_t,
+    disposition: c.cef_window_open_disposition_t,
+    user_gesture: c_int,
+    window_info: [*c]c.cef_window_info_t,
+) c_int {
+    if (reserved_len == 0 or pending_len == pending.len or browser == null or browsers.state.shutting_down) {
+        _ = request(browser, url, disposition, user_gesture);
+        return 1;
+    }
+    const entry = browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) orelse return 1;
+    if (entry.closing) return 1;
+    const placement = rules.placement(@intCast(disposition)) orelse return 1;
+    if (user_gesture == 0 or !entry.new_tab_credit) return 1;
+    var buf: [protocol.wire.max_url_bytes + 4]u8 = undefined;
+    const address = readUrl(url, &buf) orelse "about:blank";
+    if (!rules.popupUrlAllowed(address)) return 1;
+    const owned = allocator.dupe(u8, address) catch return 1;
+    entry.new_tab_credit = false;
+    // 맡긴 차례대로 쓴다.
+    const id = reserved[0];
+    var i: usize = 1;
+    while (i < reserved_len) : (i += 1) reserved[i - 1] = reserved[i];
+    reserved_len -= 1;
+    pending[pending_len] = .{
+        .opener = entry.id,
+        .opener_cef = entry.cef_id,
+        .popup_id = popup_id,
+        .browser = id,
+        .placement = placement,
+        .size = entry.size,
+        .url = owned,
+    };
+    pending_len += 1;
+    // 만들어지는 동안 CEF 가 묻는 크기는 연 탭의 크기로(등록 전이라 목록에 없다 — maru 가 붙인 뒤 맞춘다).
+    browsers.state.creating_size = entry.size;
+    window_info.*.windowless_rendering_enabled = 1;
+    window_info.*.shared_texture_enabled = if (std.c.getenv("MARU_WEB_TEST_CPU_PAINT") != null) 0 else 1;
+    return 0;
+}
+
+fn takePending(index: usize) PendingPopup {
+    const p = pending[index];
+    var i = index;
+    while (i + 1 < pending_len) : (i += 1) pending[i] = pending[i + 1];
+    pending_len -= 1;
+    return p;
+}
+
+/// 만들지 못했다 — 그 번호를 다시 맡긴다.
+pub fn onBeforePopupAborted(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t, popup_id: c_int) callconv(.c) void {
+    const object = @import("object.zig");
+    defer object.releaseArg(browser);
+    if (browser == null) return;
+    const cef_id = browser.*.get_identifier.?(browser);
+    for (pending[0..pending_len], 0..) |p, i| if (p.opener_cef == cef_id and p.popup_id == popup_id) {
+        const taken = takePending(i);
+        allocator.free(taken.url);
+        browsers.state.creating_size = null;
+        onReserve(taken.browser);
+        return;
+    };
+}
+
+/// 새 브라우저가 만들어졌다. maru 가 만든 것(`create_browser` — 등록은 그쪽이 한다)이 아니고 팝업이면 기다리던 첫 팝업으로 등록한다.
+/// 짝이 없는 팝업은 닫는다(쥘 번호가 없다 — 이어 받지 않은 브라우저를 남기지 않는다).
+pub fn onAfterCreated(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t) callconv(.c) void {
+    const object = @import("object.zig");
+    if (browser == null) return;
+    if (browser.*.is_popup.?(browser) == 0 or browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) != null) {
+        object.releaseArg(browser);
+        return;
+    }
+    if (pending_len == 0) return browsers.discard(browser);
+    browsers.state.creating_size = null;
+    const p = takePending(0);
+    defer allocator.free(p.url);
+    // 넘겨받은 참조 하나는 목록이 쥔다(실패하면 `register` 가 닫고 푼다).
+    browsers.register(browser, p.browser, p.size, true) catch return;
+    browsers.state.writer.send(.{ .popup_created = .{ .opener = p.opener, .browser = p.browser, .placement = p.placement, .url = p.url } }) catch {};
+}
+
 /// 사용자 입력이 그 브라우저에 갔다 — 새 탭 한 장을 준다(쌓지 않는다). 앞 놓기의 이동 표시는 끝났다.
 pub fn grant(browser: protocol.message.BrowserId) void {
     const entry = browsers.state.registry.byId(browser) orelse return;

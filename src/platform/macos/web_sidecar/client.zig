@@ -84,6 +84,8 @@ pub fn get() *c.cef_client_t {
         // W5c: helper 의 알림 대리 스크립트가 보내는 프로세스 메시지.
         client_obj.on_process_message_received = &notifications.onProcessMessageReceived;
         life_span.on_before_popup = &onBeforePopup;
+        life_span.on_before_popup_aborted = &new_tab.onBeforePopupAborted;
+        life_span.on_after_created = &new_tab.onAfterCreated;
         life_span.on_before_close = &onBeforeClose;
         render.get_view_rect = &getViewRect;
         render.get_screen_info = &getScreenInfo;
@@ -346,13 +348,13 @@ fn onBeforePopup(
     _: [*c]c.cef_life_span_handler_t,
     browser: [*c]c.cef_browser_t,
     frame: [*c]c.cef_frame_t,
-    _: c_int,
+    popup_id: c_int,
     target_url: [*c]const c.cef_string_t,
     _: [*c]const c.cef_string_t,
     disposition: c.cef_window_open_disposition_t,
     user_gesture: c_int,
     _: [*c]const c.cef_popup_features_t,
-    _: [*c]c.cef_window_info_t,
+    window_info: [*c]c.cef_window_info_t,
     _: [*c][*c]c.cef_client_t,
     _: [*c]c.cef_browser_settings_t,
     _: [*c][*c]c.cef_dictionary_value_t,
@@ -360,9 +362,9 @@ fn onBeforePopup(
 ) callconv(.c) c_int {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
-    // 새 탭이면 주소를 maru 에 보낸다(W6e). 어느 쪽이든 취소 — 네이티브 창도, 보이지 않는 팝업 브라우저도 만들지 않는다.
-    _ = new_tab.request(browser, target_url, disposition, user_gesture);
-    return 1;
+    // maru 가 번호를 맡겼으면 창 없는 팝업 브라우저로 만들게 두고 그 번호로 이어 받는다(W6f — 0). 아니면 주소만 maru 에 보내고(W6e)
+    // 취소한다(1) — 네이티브 창은 어느 쪽이든 만들지 않는다.
+    return new_tab.beforePopup(browser, popup_id, target_url, disposition, user_gesture, window_info);
 }
 
 fn onBeforeClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t) callconv(.c) void {

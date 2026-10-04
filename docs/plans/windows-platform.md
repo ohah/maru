@@ -222,3 +222,8 @@ debounce/hash 재검증, clean 갱신·dirty 선택 연결은 계속 남아 있�
 200 ms trailing debounce를 구현했다. 실제 취소 후 재등록 및 할당 실패 검증을 포함해
 Debug/ReleaseFast 14개, 다섯 group runtime mutation 검출이 통과했다. 앱 연결 및
 identity/hash 재검증, clean 갱신·dirty 선택 연결은 계속 남아 있다.
+
+§2m.162: 복구로 dirty가 된 문서의 목록 append 실패 후 무승인 close가 실패하는 경로를
+제거했다. 앱과 fixture가 같은 slot 선확보 함수를 사용하며 실제 백업의 할당 실패·재시도,
+원본과 레코드 보존을 검사한다. host Debug/ReleaseFast 20개와 다섯 runtime mutation
+검출이 통과했다. 감시 앱 연결과 비동기 내용 재검증은 계속 남아 있다.

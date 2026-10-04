@@ -15,6 +15,8 @@ import statistics
 import subprocess
 import time
 
+from compare import candidate_command
+
 
 def raw_field(value):
     if "text" in value:
@@ -46,16 +48,16 @@ def main():
     environment.update(HOME=str(home), XDG_CONFIG_HOME=str(home), LC_ALL="C")
     environment.pop("RIPGREP_CONFIG_PATH", None)
     common = [str(binary), "--no-config", "--hidden", "--no-require-git",
-              "--no-ignore-parent", "--no-ignore-global", "--crlf", "--json",
-              "--glob", "!**/.git/**", "--glob", "!**/.hg/**",
-              "--glob", "!**/.svn/**"]
+              "--no-ignore-parent", "--no-ignore-global", "--crlf", "--json"]
+    protected = [argument for name in (".git", ".hg", ".svn")
+                 for pattern in (f"!**/{name}", f"!**/{name}/**") for argument in ("--glob", pattern)]
     report = {
         "platform": platform.platform(), "machine": platform.machine(),
         "binary": str(binary), "binary_bytes": binary.stat().st_size,
         "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         "probe_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "version": subprocess.check_output([str(binary), "--version"], text=True),
-        "base_argv": common[1:], "checks": [], "not_exercised": [],
+        "base_argv": common[1:], "protected_argv": protected, "checks": [], "not_exercised": [],
     }
 
     def write(name, data):
@@ -65,7 +67,8 @@ def main():
 
     def run(name, query, *, regex=False, flags=(), cwd=root, env=None):
         command = common + (["--engine", "auto"] if regex else ["--fixed-strings"])
-        command += list(flags) + ["--regexp", query, "--", "."]
+        # rg의 뒤쪽 glob이 앞쪽 glob을 덮는다. 사용자 include 뒤에 고정 제외를 둬야 한다.
+        command += list(flags) + protected + ["--regexp", query, "--", "."]
         start = time.perf_counter()
         result = subprocess.run(command, cwd=cwd, env=env or environment,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
@@ -103,6 +106,7 @@ def main():
         write("local.txt", b"needle\n")
         write("rg-local.txt", b"needle\n")
         write(".git/objects/private", b"needle\n")
+        write(".git/private.drop", b"needle\n")
         write("nested/.gitignore", b"*.txt\n!keep.txt\n")
         write("nested/drop.txt", b"needle\n")
         write("nested/keep.txt", b"needle\n")
@@ -153,6 +157,32 @@ def main():
         check("사용자 ripgrep config 격리", code == 0 and paths(matches) == expected)
         code, matches, _, _ = run("include-override", "needle", flags=["--glob", "**/*.drop"])
         check("명시 include가 ignore를 덮는 실제 우선순위", code == 0 and paths(matches) == {b"bad.drop", b"keep.drop"})
+        write("metadata/.git", b"needle\n")
+        code, matches, _, _ = run("metadata-file", "needle", flags=["--glob", "**/.git"])
+        check("worktree의 .git 메타데이터 파일도 고정 제외", code == 1 and not matches)
+        code, matches, _, _ = run("include-ignore-off", "needle", flags=["--no-ignore", "--glob", "**/*.drop"])
+        check("include·ignore 해제도 고정 VCS 제외를 덮지 않음", code == 0 and paths(matches) == {b"bad.drop", b"keep.drop"})
+        code, matches, _, _ = run("protected-root", "needle", cwd=root / ".git")
+        check("VCS 폴더 자체가 root이면 상대 glob만으로 제외되지 않는 반례", code == 0 and b"private.drop" in paths(matches))
+        write("overlap/.gitignore", b"sub/\n")
+        write("overlap/sub/a.txt", b"needle\n")
+        outer_code, outer_matches, _, _ = run("overlap-outer", "needle", cwd=root / "overlap")
+        inner_code, inner_matches, _, _ = run("overlap-inner", "needle", cwd=root / "overlap/sub")
+        check("겹친 root는 ignore 판정 뒤 경로를 합쳐야 하는 반례",
+              outer_code == 1 and not outer_matches and inner_code == 0 and paths(inner_matches) == {b"a.txt"})
+        changing = output / "changing"
+        changing.mkdir()
+        (changing / "changed.txt").write_bytes(b"absent\n")
+        candidate, used = candidate_command([str(binary), "--no-config", "--no-ignore-parent"], "needle", "literal", True)
+        before = subprocess.run(candidate, cwd=changing, env=environment, capture_output=True, timeout=20)
+        (changing / "changed.txt").write_bytes(b"needle\n")
+        after = subprocess.run(candidate, cwd=changing, env=environment, capture_output=True, timeout=20)
+        report["changed_candidate"] = {"prefilter_used": used, "before_exit": before.returncode,
+                                       "before_paths": os.fsdecode(before.stdout), "after_exit": after.returncode,
+                                       "after_paths": os.fsdecode(after.stdout)}
+        check("선별에서 제외한 파일도 이후 편집으로 일치할 수 있음",
+              used and before.returncode == 1 and not before.stdout and after.returncode == 0 and
+              after.stdout == b"./changed.txt\0")
 
         stress = output / "stress"
         stress.mkdir()
@@ -223,7 +253,7 @@ def main():
         # 출력을 실제로 받은 뒤 취소한다. 시작 전 kill은 검색 중 취소를 증명하지 않는다.
         cancellations = []
         for index in range(3):
-            child = subprocess.Popen(common + ["--regexp", ".", "--", "."], cwd=stress,
+            child = subprocess.Popen(common + protected + ["--regexp", ".", "--", "."], cwd=stress,
                                      env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 with selectors.DefaultSelector() as selector:

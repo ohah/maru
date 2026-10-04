@@ -122,6 +122,7 @@ def main():
         ("common", "filler", "literal", args.files - rare),
         ("absent", "absent-pattern", "literal", 0),
         ("fold", "NEEDLE", "literal-fold", rare),
+        ("common-fold", "FILLER", "literal-fold", args.files - rare),
         ("word", "needle", "word", rare),
         ("unicode", "한글", "literal", args.files),
         ("lookbehind", "(?<=nee)dle", "regex", rare),
@@ -141,7 +142,9 @@ def main():
     report["product_base"] = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
     report["product_source_sha256"] = {
         path: hashlib.sha256((repository / path).read_bytes()).hexdigest()
-        for path in ("src/session/editor/find.zig", "src/session/editor/selection.zig", "src/terminal/selection.zig", "src/regex.zig")
+        for path in ("src/session/editor/find.zig", "src/session/editor/document.zig",
+                     "src/session/editor/line_index.zig", "src/session/editor/selection.zig",
+                     "src/terminal/selection.zig", "src/regex.zig")
     }
     if sys.platform == "darwin":
         report["hardware"] = {key: subprocess.check_output(["sysctl", "-n", key], text=True).strip()

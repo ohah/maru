@@ -1,14 +1,19 @@
 //! 실제 파일 찾기 함수를 그대로 호출하는 비교 도구다. UI·워커·ignore 구현의 측정은 아니다.
 const std = @import("std");
 const find = @import("maru").session.editor.find;
+const document = @import("maru").session.editor.document;
+const line_index = @import("maru").session.editor.line_index;
 
 pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const args = try init.minimal.args.toSlice(a);
     defer a.free(args);
-    if (args.len < 4 or args.len > 5) return error.ExpectedFileListQueryMode;
-    const emit_ranges = args.len == 5 and std.mem.eql(u8, args[4], "--ranges");
-    if (args.len == 5 and !emit_ranges) return error.InvalidOutputOption;
+    if (args.len < 4 or args.len > 6) return error.ExpectedFileListQueryMode;
+    var emit_ranges = false;
+    var raw_bytes = false;
+    for (args[4..]) |arg| {
+        if (std.mem.eql(u8, arg, "--ranges")) emit_ranges = true else if (std.mem.eql(u8, arg, "--raw-bytes")) raw_bytes = true else return error.InvalidOutputOption;
+    }
     const byte_candidate = std.mem.eql(u8, args[3], "byte-candidate");
     if (byte_candidate) {
         if (args[2].len == 0) return error.EmptyLiteralQuery;
@@ -48,8 +53,12 @@ pub fn main(init: std.process.Init) !void {
         files += 1;
         bytes += text.len;
         lines.clearRetainingCapacity();
-        var line_iter = std.mem.splitScalar(u8, text, '\n');
-        while (line_iter.next()) |line| try lines.append(a, std.mem.trimEnd(u8, line, "\r"));
+        // 제품과 같은 BOM·줄 경계를 사용한다. 두 후보가 같은 전처리 오류를 공유하면 대조도 통과한다.
+        // 깨진 byte를 직접 넣는 검사는 명시적으로 분리하며 제품의 파일 열기 성공으로 세지 않는다.
+        const content = if (raw_bytes) text else (try document.open(text, true)).content;
+        var document_lines = try line_index.build(a, content);
+        defer document_lines.deinit();
+        for (document_lines.lines) |line| try lines.append(a, content[line.start..line.contentEnd()]);
         if (byte_candidate) {
             // 유효한 UTF-8·대소문자 구분만 비교한다. Unicode 접기·정규식 동등성은 주장하지 않는다.
             matches.clearRetainingCapacity();

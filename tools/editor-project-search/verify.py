@@ -43,6 +43,11 @@ def main():
         "--name\nwith space.txt": "-- .* $ _ needle\n",
         ".hidden.txt": "needle\n",
         "empty.txt": "",
+        "bom.txt": "\ufeffneedle\r\n",
+        "bom-only.txt": "\ufeff",
+        "double-cr.txt": "needle\r\r\n",
+        "lone-cr.txt": "needle\r",
+        "nul.txt": "\0needle\n",
     }
     randomizer = random.Random(4134)
     alphabet = ["foo", "needle", "NEEDLE", "aaa", "😀", "한글", "é", "$", "_", " ", "\n"]
@@ -67,7 +72,7 @@ def main():
         ]
     ] + [(raw, "needle", "literal"), (raw, "NEEDLE", "literal-fold"), (raw, "foo", "literal")]
     report = {
-        "status": "running", "cases": [],
+        "status": "running", "cases": [], "document_oracles": [],
         "native_sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
         "rg_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         "source_sha256": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
@@ -92,7 +97,8 @@ def main():
     def ranges_for(corpus, names, query, mode, name):
         paths = output / f"{name}.paths"
         paths.write_bytes(b"".join(os.fsencode(corpus) + b"/" + path + b"\0" for path in names))
-        result = run([str(native), str(paths), query, mode, "--ranges"], corpus, name)
+        raw_options = ["--raw-bytes"] if corpus == raw else []
+        result = run([str(native), str(paths), query, mode, "--ranges"] + raw_options, corpus, name)
         assert result.returncode == 0, (name, result.stderr)
         records = [json.loads(line) for line in result.stdout.splitlines()]
         summary = records.pop()
@@ -103,6 +109,26 @@ def main():
         return {os.fsdecode(names[index]): record["ranges"] for index, record in enumerate(records) if record["ranges"]}
 
     try:
+        # 비교 양쪽이 같은 오류를 가져도 실패하도록 제품 계약의 기대 범위를 별도로 고정한다.
+        for index, (filename, query, mode, spans) in enumerate([
+            ("bom.txt", "needle", "literal", [[0, 0, 6]]),
+            ("bom.txt", "^needle$", "regex", [[0, 0, 6]]),
+            ("bom-only.txt", "^$", "regex", [[0, 0, 0]]),
+            ("double-cr.txt", "^needle$", "regex", []),
+            ("lone-cr.txt", "^needle$", "regex", []),
+            ("lone-cr.txt", r"\r$", "regex", [[0, 6, 1]]),
+            ("nul.txt", "needle", "literal", [[0, 1, 6]]),
+        ]):
+            path = "./" + filename
+            observed = ranges_for(valid, [path.encode()], query, mode, f"document-{index}")
+            expected = {path: spans} if spans else {}
+            report["document_oracles"].append({"file": filename, "query": query, "expected": expected, "observed": observed})
+            assert observed == expected, ("제품 문서 계약", filename, observed, expected)
+        invalid_paths = output / "invalid-document.paths"
+        invalid_paths.write_bytes(os.fsencode(raw / "malformed.txt") + b"\0")
+        rejected = run([str(native), str(invalid_paths), "needle", "literal"], raw, "invalid-document")
+        report["invalid_document_rejected"] = rejected.returncode != 0 and b"NotUtf8" in rejected.stderr
+        assert report["invalid_document_rejected"], "제품 경로는 잘못된 UTF-8을 거부해야 함"
         for index, (corpus, query, mode) in enumerate(cases):
             name = f"case-{index}"
             all_paths, _ = paths_for(corpus, query, mode, False, name + "-all")

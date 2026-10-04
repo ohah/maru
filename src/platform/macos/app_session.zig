@@ -2270,6 +2270,9 @@ const TermRuntime = struct {
     editor_total_visual_rows: u32 = 0,
     /// 화면 맨 위에 올 논리 줄. 스크롤 입력이 여기를 움직인다.
     editor_first_line: usize = 0,
+    /// 심볼 미리보기만 소유하는 표시 투영. 저장할 뷰 상태와 분리한다.
+    editor_symbol_preview: ?editor_ops.symbol_preview.Projection = null,
+    editor_symbol_preview_drawing: bool = false,
     /// 접힘 provider가 늦게 준비돼도 원문 위치와 저장된 접힘을 다시 적용하는 뷰별 요청.
     editor_restore: ?editor_ops.workspace_restore.Pending = null,
     /// 접을 수 있는 범위(§4.1f — 들여쓰기 층). **명령이 필요할 때 세어 여기 둔다** — 렌더는 할당하지
@@ -5972,6 +5975,8 @@ pub const AppSession = struct {
     /// 심볼 피커의 굳힌 행(§7.5). **공유 심볼 버퍼의 인덱스가 아니라 값이다** — breadcrumb 이 그
     /// 버퍼를 프레임마다 다시 채우므로 인덱스를 들면 그 수명에 매달린다.
     symbol_picker_rows: symbol_picker.List = .{},
+    /// 굳힌 위치는 목록을 만든 뷰·문서·개정에서만 유효하다. 문서 수명을 연장하지 않는 신원 값이다.
+    symbol_picker_source: ?editor_ops.SymbolPickerSource = null,
     /// 목록 범위 — null 이면 파일 전체, 값이면 그 심볼의 형제만(§7.5).
     symbol_picker_scope: ?symbol_picker.Scope = null,
     /// 형제 목록 프롬프트(부모 이름 + 구분자) — 문서 내용을 빌리지 않는 **사본**이다(§7.5).
@@ -10405,7 +10410,7 @@ pub const AppSession = struct {
         self.chrome_host.find.hide();
         find_ops.clearAllFindMatches(self); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일. 목록은 둘이다)
         self.chrome_host.palette.hide();
-        self.chrome_host.symbol_picker.hide(); // §7.5 — 같은 불변식 아래 산다
+        editor_ops.closeSymbolPicker(self); // §7.5 — 같은 불변식 아래 산다
         if (self.chrome_host.reference_picker.open) {
             self.chrome_host.reference_picker.hide();
             editor_ops.references_client.closed(self); // §8.2l — 행도 함께 놓는다
@@ -13022,7 +13027,7 @@ pub const AppSession = struct {
             .palette_selection_changed => {},
             .palette_accept => self.acceptPalette(), // 선택 명령 해석·닫기·dispatch
             // 심볼 피커(§7.5) — 팔레트와 같은 모양이되 확정이 §5.2 이동으로 간다.
-            .symbol_picker_close => {}, // hide 는 컴포넌트가 이미 했다
+            .symbol_picker_close => editor_ops.closeSymbolPicker(self),
             .symbol_picker_query_changed => editor_ops.recomputeSymbolPicker(self),
             .symbol_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
             .symbol_picker_accept => editor_ops.acceptSymbolPicker(self), // 닫고 나서 간다
@@ -14756,6 +14761,19 @@ pub const AppSession = struct {
         if (self.chrome_host.recovery_picker.open) {
             if (kind == 1 and button == 0) {
                 if (!scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) editor_ops.recovery_ui.click(self, x_px, y_px);
+            }
+            return;
+        }
+        // 미리보기 좌표는 정본 편집 화면의 hit 표와 다르다. 목록 밖 클릭은 취소하고 소비한다.
+        if (self.chrome_host.symbol_picker.open) {
+            if (kind == 1 and button == 0) {
+                if (scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) return;
+                const lay = chrome.components.overlay_input.panelLayout(self.buildChromeProps());
+                const inside = if (lay) |v| x_px >= @as(f64, @floatFromInt(v.x)) and
+                    y_px >= @as(f64, @floatFromInt(v.y)) and
+                    x_px < @as(f64, @floatFromInt(v.x + @as(i32, @intCast(v.panel_cols * v.cw)))) and
+                    y_px < @as(f64, @floatFromInt(v.y + @as(i32, @intCast((1 + @min(self.symbol_picker_rows.rows.items.len, chrome.components.palette.max_visible)) * v.ch)))) else false;
+                if (!inside) editor_ops.closeSymbolPicker(self);
             }
             return;
         }
@@ -23532,6 +23550,7 @@ pub const AppSession = struct {
             const rows = try self.buildPaletteRows(arena); // 카탈로그 행 주입(platform 소유)
             try self.chrome_host.collectPaletteDraws(rows, props, &tokens, arena, &draws);
         }
+        editor_ops.validateSymbolPicker(self);
         if (self.chrome_host.symbol_picker.open) {
             self.followSymbolPickerSelection(); // 팔레트와 같은 역학(§7.5)
             const rows = try self.buildSymbolPickerRows(arena);

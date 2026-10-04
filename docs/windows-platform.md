@@ -11492,3 +11492,51 @@ runtime 실패로 검출됐다. 두 소스의 byte 원복과 두 모드의 정�
 현재 ticket을 확인한다. 기존 편집·native 저장·복구·닫기 스모크도 함께 실행한다. 이 경로는
 worker/app grant의 연결이며 일반 앱의 directory hint→읽기 예약·결과 적용, clean 최소 edit,
 dirty 선택 UI는 아직 연결 전이다. 전체 외부 감시·비동기 저장 완료로 세지 않는다.
+
+### 2m.164 — 실제 부모 폴더 구독과 살아 있는 문서 배분
+
+`Book.subscribeWatch`는 기존 app grant의 lifetime/path/저장 상태를 확인한 뒤
+handle-relative로 파일을 pin하고 전체 identity를 비교한다. 비재귀 감시 대상은 volume root가
+아니라 `Pinned.parent()`다. `Groups.receives`는 directory 알림을 개별 구독에 매핑하므로
+같은 폴더의 서로 다른 lease도 받으며 해제된 lease·다른 owner·재사용 전 group을 거절한다.
+중첩 폴더의 실제 외부 쓰기와 native 구독 해제·cap·identity 변경을 검사했다. 당시 watch 14개,
+host 24개의 Debug/ReleaseFast와 각각 다섯 compiled runtime mutation 검출이 통과했다.
+
+### 2m.165 — clean 외부 변경을 공유 편집 이력으로 게시
+
+`edit_commands.acceptExternal`은 동일 prefix/suffix 사이를 완전한 UTF-8 scalar 경계에서
+한 번 교체한다. 각 view의 현재 selection을 매핑하고 독립 Undo entry를 추가하므로 이전
+이력을 버리지 않는다. 새 변경과 마찬가지로 기존 redo 분기는 정리한다. 포맷만 바뀌면 본문
+이력을 추가하지 않는다. dirty·live save image·uncertain save는 자동 적용하지 않는다.
+본문·selection·이력·BOM/개행 속성·logical saved hash·raw disk hash를 할당 실패에 대해
+함께 보존한다. 입력이 현재 flat storage를 빌린 경우도 hash를 게시 전에 계산해 보호한다.
+`OpenFile.acceptExternal`은 registry와 generational document가 같은 peer만 모은다.
+공통 명령 32개·당시 host 25개·다섯 runtime mutation과 실제 창의 외부 내용 표시 2프레임,
+커서·Undo 검사가 통과했다. 이 fixture만으로 일반 앱 예약 완료를 주장하지 않았다.
+
+### 2m.166 — 일반 앱의 자동 감시와 단일 읽기 예약
+
+일반 `win32-terminal` 프레임 루프가 `external_changes.Coordinator.tick`을 호출한다.
+새 editable view의 실제 부모 폴더 구독과 최초 읽기를 예약해 open→구독 사이 공백을
+재검증한다. directory hint를 live lease에 배분한 뒤 한 번에 하나의 worker 읽기를 예약한다.
+문서 배열의 이동 가능한 포인터를 보관하지 않는다. view가 닫히면 구독을 해제하며 worker가
+늦게 끝나도 이전 lease 결과를 적용하지 않는다. worker는 취소된 owner와 별도로 native
+root/name/I/O를 소유한 채 종료·정산한다.
+
+현재 ticket을 거절한 결과는 다시 예약한다. SourceBusy·SaveBusy·일시적 할당 실패는 200ms
+뒤 재시도하며, cap 또는 영구 실패는 해당 구독을 중단하고 번역된 안내를 표시한다. 원래
+fingerprint와 실제 raw hash가 같을 때만 self-write로 접는다. clean은 공통 편집 경로로
+갱신하고 dirty는 본문·저장 기준을 유지해 안내한다. 동일 hash의 dirty 안내는 합친다.
+기존 notice/confirm이 열려 있으면 새 안내는 binding에 보관하며 닫힌 문서의 안내는 버린다.
+
+최초 구독의 할당 실패도 기존 읽기 결과를 계속 정산한 뒤 200ms 뒤 재시도한다. binding과
+native group 구독 allocation prefix에서 실패 시 미게시·소유권 정산과 실제 재시도를 검사한다.
+host 32개(aggregation 2·native 27·pure 3)의 Debug/ReleaseFast와 다섯 compiled runtime
+mutation 검출이 통과했다. 변형은 native hint 누락·hash 무관 self-write 무시·stale ticket 허용·
+구독 해제 누락·재시도 deadline 무시를 다룬다. 소스는 byte 단위로 원복했다. 실제 일반 앱의
+임시 파일이 외부 내용으로 자동 갱신되는 것과 dirty 본문 보존·저장 충돌 거절·외부 원본을
+유지한 버리기 종료를 확인했다. 창 메시지로 입력했으며 물리 키보드·IME 검증은 아니다.
+
+dirty reload/keep/compare 선택 UI, 비동기 저장·초기 open, read-only/untitled/remote 감시와
+volume unmount·sleep/wake의 전체 soak는 아직 남아 있다. 실패한 구독은 파일을 닫았다 다시
+열어 재시도한다. 이 단계는 모든 외부 감시 시나리오 또는 전체 Windows 지원의 완료가 아니다.

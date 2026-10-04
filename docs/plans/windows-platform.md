@@ -251,3 +251,16 @@ clean 갱신·dirty 선택 UI는 아직 남아 있으며, 이 구독 API만으�
 검출과 실제 창의 외부 내용 표시 2프레임·커서·Undo 검사가 통과했다. 빌드·문서 링크·
 target·전체 경계 검사도 통과했다. 일반 앱의 구독 수명 관리·자동 예약과 dirty 선택 UI는
 계속 남아 있다.
+
+§2m.166: external_changes.Coordinator를 일반 앱 프레임 루프에 연결했다. 새 editable
+view의 부모 폴더를 구독하고 native hint 뒤 단일 worker 읽기를 예약하며 현재 ticket과
+실제 raw hash를 확인한다. 최초 읽기로 open→구독 사이 공백을 좁힌다. 닫힌 view는 구독을
+해제하고 늦은 결과를 버린다. stale read·SourceBusy·SaveBusy·일시적 할당 실패는 200ms
+뒤 재시도하고 cap/영구 실패는 해당 구독을 명시적으로 중단한다. clean은 공통 최소 edit로
+갱신하고 dirty는 본문·저장 기준을 유지하며 안내한다. 같은 hash의 dirty 안내는 합친다.
+기존 notice/confirm이 열려 있으면 새 안내를 대기시킨다. 최초 구독의 할당 실패도 기존 결과를
+정산하며 200ms 뒤 재시도하고 구독 allocation prefix의 소유권 정산을 검사한다.
+host 32개의 Debug/ReleaseFast와
+다섯 compiled runtime mutation 검출이 통과했다. 실제 일반 앱에서 자동 갱신과 dirty 보존·
+저장 충돌 거절·외부 원본을 유지한 버리기 종료를 확인했다. dirty reload/keep/compare 선택,
+비동기 저장·초기 open과 물리 입력·IME는 남아 있다.

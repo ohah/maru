@@ -1086,7 +1086,8 @@ counter 상한을 포함해 14개이며 전 할당 실패가 이미지 보호를
 §2m.163의 `zig build test-win32-editor-read`는 native 읽기 작업자의 identity·sharing·
 ticket·수명·상한 11개(aggregation 2·native 8·pure 1)를 실행하며 기본 test에도 연결된다.
 `zig build test-win32-editor-host`는 app grant의 읽기 예약/수락과 실제 부모 폴더
-감시 구독과 외부 변경 적용 경로를 더해 25개다(aggregation 2·native 20·pure 3).
+감시 구독·외부 변경 적용·일반 앱 자동 예약 경로를 더해 32개다
+(aggregation 2·native 27·pure 3).
 두 gate 모두 `-Doptimize=ReleaseFast`로도 실행한다.
 `maru win32-editor-document-smoke`는 실제 창의 worker read ticket과 프레임도 검사한다.
 
@@ -1095,3 +1096,8 @@ ticket·수명·상한 11개(aggregation 2·native 8·pure 1)를 실행하며 �
 32개(aggregation 21·behavioral 11)다. Debug와 `-Doptimize=ReleaseFast`로 실행한다.
 `maru win32-editor-document-smoke`는 외부 bytes가 표시된 실제 창 2프레임과 커서·Undo도
 검사한다. 이는 일반 앱 프레임 루프의 자동 감시 예약을 검증한 것으로 보지 않는다.
+
+§2m.166은 `test-win32-editor-host`의 자동 예약 판정자에서 실제 native 알림·현재 ticket·
+해제·재시도 deadline·directory cap·충돌 안내 합침을 검사한다. 일반 앱의 임시 파일 자동 갱신과
+dirty 충돌·저장 거절·버리기 종료는 별도의 실제 앱 실행으로 확인한다. posted 이벤트 검증이며
+물리 키보드·IME 또는 dirty reload/keep/compare 선택 완료로 보지 않는다.

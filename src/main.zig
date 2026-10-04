@@ -4567,6 +4567,208 @@ test "Windows editor host external notification worker read and clean edit prese
     try f.expectDisk(raw);
 }
 
+const ExternalChanges = @import("platform/windows/editor/external_changes.zig").Coordinator;
+
+fn waitExternalJob(changes: *ExternalChanges) !void {
+    const io = std.testing.io;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!changes.reader.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ReadDidNotComplete;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "Windows editor host automatic external scheduler applies a real hint and folds only equal raw fingerprints" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try std.testing.expectEqual(@as(usize, 0), f.documents.get(f.views.items[0].document).?.history.undo_len);
+    const raw = "\xef\xbb\xbfexternal\r\n";
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = raw });
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    const state = f.documents.get(f.views.items[0].document).?;
+    while (!std.mem.eql(u8, state.opened.?.file.content, "external\r\n")) {
+        try std.testing.expect(try changes.tick(&f.book, io, f.views.items, std.Io.Clock.awake.now(io).nanoseconds) == null);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ExternalUpdateMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(!state.opened.?.isDirty());
+    try std.testing.expectEqual(@as(usize, 1), state.history.undo_len);
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash(raw), state.opened.?.disk_hash.?);
+    var copied = changes;
+    try std.testing.expectError(error.CopiedExternalCoordinator, copied.tick(&f.book, io, f.views.items, 1));
+    try std.testing.expectError(error.CopiedExternalCoordinator, copied.deinit(io));
+}
+
+test "Windows editor host automatic external scheduler reschedules stale reads without publishing a conflict" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "external\r\n" });
+    var changes = ExternalChanges.init(a);
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 1, .views = f.views.items });
+    try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expect(changes.bindings.items[0].pending);
+    try std.testing.expectEqual(@as(i128, ExternalChanges.retry_ns), changes.bindings.items[0].retry_at);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns) == null);
+    try waitExternalJob(&changes);
+    const notice = (try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns)) orelse return error.MissingExternalConflict;
+    try std.testing.expectEqual(error.DirtyDocument, notice.problem);
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash("\xef\xbb\xbfbase\r\n"), state.opened.?.disk_hash.?);
+}
+
+test "Windows editor host automatic external scheduler drains closed views and cancels their directory subscriptions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try f.book.release(io, f.views.items[0].document, false);
+    f.views.items[0].deinit(std.testing.allocator);
+    f.views.clearRetainingCapacity();
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expectEqual(@as(usize, 0), changes.bindings.items.len);
+    try std.testing.expectEqual(@as(usize, 0), changes.groups.entries.items.len);
+    if (changes.reader.job != null) try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expect(changes.active == null and changes.reader.job == null);
+}
+
+test "Windows editor host automatic external scheduler keeps source-busy retry outside its quiet-period deadline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(io) catch unreachable;
+    const writer = try f.tmp.dir.openFile(io, "file.txt", .{ .mode = .read_write });
+    var held = true;
+    defer if (held) writer.close(io);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expect(changes.bindings.items[0].pending and !changes.bindings.items[0].paused);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns - 1) == null);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    writer.close(io);
+    held = false;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns) == null);
+    try std.testing.expectEqual(@as(u64, 2), changes.reader.issued);
+    try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns) == null);
+    try std.testing.expect(changes.active == null);
+}
+
+test "Windows editor host automatic external scheduler reports directory capacity without starting paused reads" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.tmp.dir.createDir(io, "second", .default_dir);
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "second/file.txt", .data = "second" });
+    try f.views.ensureUnusedCapacity(a, 1);
+    const extra = try f.book.open(io, f.tmp.dir, "second/file.txt", 128);
+    defer _ = f.documents.release(extra) catch unreachable;
+    f.views.appendAssumeCapacity(try editor_document.attach(&f.documents, extra, a));
+    var changes = ExternalChanges.init(a);
+    changes.groups.limit = 1;
+    changes.hold_notices = true;
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expectEqual(@as(usize, 2), changes.bindings.items.len);
+    changes.hold_notices = false;
+    const notice = (try changes.tick(&f.book, io, f.views.items, 0)) orelse return error.MissingWatchCapacityNotice;
+    try std.testing.expectEqual(error.TooManyDirectoryWatches, notice.problem);
+    try std.testing.expectEqual(f.views.items[1].document.id, notice.document.id);
+    try std.testing.expectEqual(@as(usize, 1), changes.groups.entries.items.len);
+    try std.testing.expect(changes.bindings.items[1].paused and changes.bindings.items[1].watch == null);
+    if (changes.reader.job != null) try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try std.testing.expect(changes.active == null);
+}
+
+test "Windows editor host automatic external scheduler coalesces identical dirty conflicts and preserves the save base" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 1, .views = f.views.items });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "external" });
+    var changes = ExternalChanges.init(a);
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try waitExternalJob(&changes);
+    const first = (try changes.tick(&f.book, io, f.views.items, 0)) orelse return error.MissingExternalConflict;
+    try std.testing.expectEqual(error.DirtyDocument, first.problem);
+    const issued = changes.reader.issued;
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "external" });
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (changes.reader.issued == issued or changes.active != null) {
+        try std.testing.expect(try changes.tick(&f.book, io, f.views.items, std.Io.Clock.awake.now(io).nanoseconds) == null);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ExternalHintMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash("\xef\xbb\xbfbase\r\n"), state.opened.?.disk_hash.?);
+    try std.testing.expectEqual(@as(usize, 1), state.history.undo_len);
+}
+
+test "Windows editor host automatic external scheduler allocation failure retries admission without stranding ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        var changes = ExternalChanges.init(failing.allocator());
+        defer changes.deinit(io) catch unreachable;
+        try std.testing.expectError(error.OutOfMemory, changes.tick(&f.book, io, f.views.items, 0));
+        try std.testing.expect(changes.bindings.items.len == 0 and changes.groups.entries.items.len == 0 and changes.reader.job == null);
+        const allocations = failing.alloc_index;
+        failing.fail_index = std.math.maxInt(usize);
+        try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns - 1) == null);
+        try std.testing.expectEqual(allocations, failing.alloc_index);
+        try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns) == null);
+        try std.testing.expect(changes.bindings.items.len == 1 and !changes.bindings.items[0].paused and changes.reader.job != null);
+    }
+    const Check = struct {
+        fn prefix(allocator: std.mem.Allocator, book: *file_host.Book, views: []OpenFile) !void {
+            var changes = ExternalChanges.init(allocator);
+            defer changes.deinit(std.testing.io) catch unreachable;
+            _ = changes.tick(book, std.testing.io, views, 0) catch |err| {
+                try std.testing.expect(changes.bindings.items.len == 0 and changes.groups.entries.items.len == 0 and changes.reader.job == null);
+                try std.testing.expectEqual(@as(i128, ExternalChanges.retry_ns), changes.admission_retry_at);
+                return err;
+            };
+            try std.testing.expect(changes.bindings.items.len == 1 and changes.groups.entries.items.len == 1);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(a, Check.prefix, .{ &f.book, f.views.items });
+}
+
 test "Windows editor host publication allocation failure precedes recovery and preserves retry ownership" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = std.testing.allocator;
@@ -6068,6 +6270,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (file_backups) |*owner| owner.deinit(io);
     }
     var active_view: ActiveView = .{ .terminal = 0 };
+    var file_changes = @import("platform/windows/editor/external_changes.zig").Coordinator.init(allocator);
+    defer file_changes.deinit(io) catch |err| {
+        stderr.print("  warning: editor watcher ownership unresolved at exit({s})\n", .{@errorName(err)}) catch {};
+    };
     var file_opens: usize = 0;
     var file_reopens: usize = 0;
     var file_rejects: usize = 0;
@@ -7362,6 +7568,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (runFileBackups(allocator, io, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, false, null)) |report| {
             reportFileBackups(stderr, report);
         } else |err| stderr.print("  warning: editor backup maintenance failed({s})\n", .{@errorName(err)}) catch {};
+        file_changes.hold_notices = file_notice.open or confirm_state.open;
+        if (file_changes.tick(&editor_files, io, open_files.items, std.Io.Clock.awake.now(io).nanoseconds)) |event| {
+            if (event) |notice| {
+                stderr.print("  editor external change: {s}\n", .{@errorName(notice.problem)}) catch {};
+                file_notice.show(maru.i18n.t(switch (notice.problem) {
+                    error.DirtyDocument => .win_editor_external_changed,
+                    error.TooManyDirectoryWatches => .win_editor_watch_limit,
+                    error.OutOfMemory => .dbg_editor_oom,
+                    error.SaveBusy => .fp_root_busy_retry,
+                    else => .win_editor_watch_paused,
+                }));
+            }
+        } else |err| {
+            stderr.print("  warning: editor external maintenance failed({s})\n", .{@errorName(err)}) catch {};
+            if (!file_notice.open and !confirm_state.open) file_notice.show(maru.i18n.t(if (err == error.OutOfMemory) .dbg_editor_oom else .win_editor_watch_paused));
+        }
         // ── 훑는 중임을 화면에 말한다 ────────────────────────────────────────────────────
         //
         // **중립이 이미 다 갖고 있다** — `loading` 이면 개수 대신 "분석 중" 을 쓰고 해골 줄을 깔며,

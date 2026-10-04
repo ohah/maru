@@ -24,8 +24,11 @@ terminal·file-term·editor-view의 합계이며 브라우저·untitled·remote�
 
 복구한 dirty 백업은 다음 백업·저장·명시적 버리기가 성공할 때까지 유지한다. 디스크와 같은 clean 백업의 삭제도
 새 창 게시 뒤로 미룬다. 삭제는 선택한 inode가 그대로일 때만 수행하여 중간에 게시된 새 백업을 지우지 않는다.
-공유 검색은 빈 독립 상태로 시작한다. 공개 분할 명령·GUI 재시작 gate와 orphan/legacy 복구 UI는
+공유 검색은 빈 독립 상태로 시작한다. 공개 분할 명령·GUI 재시작 gate는
 [공유 복원 계획](plans/editor-shared-restore.md) 및 [실행 검증](plans/editor-recovery-integration.md)을 따른다.
+체크포인트에서 빠진 ID/기존 백업은 별도 `recover_editor_backups` 목록에서 사용자가 골라
+이름 없는 미저장 사본으로 연다. 원본 누락 시에도 이 경로를 사용할 수 있으며, 전체 창 복원의
+실패 정책은 바꾸지 않는다. [백업 발견과 복구](plans/editor-backup-discovery.md)가 이 흐름을 소유한다.
 
 ## 초보자용 설명
 

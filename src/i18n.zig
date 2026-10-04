@@ -690,6 +690,14 @@ const Table = struct {
     /// **신원을 잃은 문서를 이름 없는 문서로 되살렸다**(§3.10 — U4d). 조용히 하면 사용자는 「왜 이
     /// 탭이 생겼지」를 묻는다: 이쪽은 U4b 의 조용한 복원과 달리 **신원이 바뀐다**.
     editor_backup_revived: [:0]const u8,
+    editor_recovery_prompt: [:0]const u8,
+    editor_recovery_scanning: [:0]const u8,
+    editor_recovery_empty: [:0]const u8,
+    editor_recovery_partial: [:0]const u8,
+    editor_recovery_unavailable: [:0]const u8,
+    editor_recovery_failed: [:0]const u8,
+    editor_recovery_opened: [:0]const u8,
+
     /// 원격이 없어 fetch를 누를 수 없다는 진술. **왜 안 되는지 말한다** — 비활성만 두면 고장으로 읽힌다.
     scm_no_remote: [:0]const u8,
     /// fetch가 끝났고 새로 온 것이 없다. 실패와 구별해야 한다 — 그쪽은 stderr가 이유를 말한다.
@@ -1617,6 +1625,13 @@ const en: Table = .{
     .editor_backup_paused = "Large file: unsaved-edit backup paused",
     .editor_backup_restored = "Restored unsaved edits from the last session",
     .editor_backup_revived = "Recovered unsaved edits into a new untitled document (its original is unavailable)",
+    .editor_recovery_prompt = "Recover backup: ",
+    .editor_recovery_scanning = "Finding backups: ",
+    .editor_recovery_empty = "No matching backups: ",
+    .editor_recovery_partial = "Partial results - reopen to retry: ",
+    .editor_recovery_unavailable = "Unavailable",
+    .editor_recovery_failed = "Could not open this backup. It has been preserved. Reopen Recover Unsaved Edits to try again.",
+    .editor_recovery_opened = "Opened a recovered copy as an unsaved document. Choose where to save it with Save As.",
     .scm_no_remote = "This repository has no remote",
     .scm_fetch_done = "Fetched from the remote",
     .scm_menu_push = "Type git push",
@@ -2381,6 +2396,13 @@ const ko: Table = .{
     .editor_backup_paused = "큰 파일: 미저장 백업을 멈췄다",
     .editor_backup_restored = "지난 세션의 저장하지 않은 편집을 되살렸습니다",
     .editor_backup_revived = "원본을 찾을 수 없어 저장하지 않은 편집을 새 이름 없는 문서로 되살렸습니다",
+    .editor_recovery_prompt = "백업 복구: ",
+    .editor_recovery_scanning = "백업 찾는 중: ",
+    .editor_recovery_empty = "일치하는 백업 없음: ",
+    .editor_recovery_partial = "일부 결과 · 다시 열어 재검색: ",
+    .editor_recovery_unavailable = "열 수 없음",
+    .editor_recovery_failed = "백업을 열지 못했습니다. 백업은 보존했습니다. 미저장 편집 복구를 다시 열어 재시도하세요.",
+    .editor_recovery_opened = "복구한 사본을 미저장 문서로 열었습니다. 다른 이름으로 저장에서 저장 위치를 선택하세요.",
     .scm_no_remote = "이 저장소에는 원격이 없습니다",
     .scm_fetch_done = "원격에서 가져왔습니다",
     .scm_menu_push = "git push 넣기",

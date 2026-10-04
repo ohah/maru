@@ -996,13 +996,14 @@ pub fn appendOverlayScrollbar(self: *AppSession, viewport: chrome.draw.Rect, ext
 /// 오버레이 위 휠(SV5d). 팔레트·세팅은 원래 휠이 **없었다** — 목록이 열려 있는데 뒤 터미널이 굴러
 /// 가는 것이 위화감이라, 축이 있으면 델타가 0이어도 소비한다(사이드바 휠과 같은 규율).
 pub fn scrollOverlayByLines(self: *AppSession, lines: i64) bool {
-    if (self.chrome_host.palette.open) {
+    if (self.chrome_host.palette.open or self.chrome_host.recovery_picker.open) {
         const ch = @max(self.cell_height_px, 1);
-        const total = self.palette_filtered.items.len;
+        const total = if (self.chrome_host.recovery_picker.open) self.editor_recovery.shown.items.len else self.palette_filtered.items.len;
         const visible = @min(total, chrome.components.palette.max_visible);
         if (total <= visible or visible == 0) return true; // 안 넘침 — 소비만
         const max_offset: u32 = @intCast((total - visible) * ch);
-        if (self.palette_scroll.scrollByPx(-lines * @as(i64, ch), max_offset)) self.metal_dirty = true;
+        const list_scroll = if (self.chrome_host.recovery_picker.open) &self.editor_recovery.scroll else &self.palette_scroll;
+        if (list_scroll.scrollByPx(-lines * @as(i64, ch), max_offset)) self.metal_dirty = true;
         return true;
     }
     if (self.chrome_host.settings.open) {
@@ -1044,8 +1045,8 @@ pub fn overlayScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.
 /// 지금 열린 오버레이의 스크롤 상한(px). 발행된 막대와 **같은 시점의 값**이라야 드래그가 손가락과 안 어긋난다.
 pub fn overlayMaxOffsetPx(self: *const AppSession) u32 {
     const ch = @max(self.cell_height_px, 1);
-    if (self.chrome_host.palette.open) {
-        const total = self.palette_filtered.items.len;
+    if (self.chrome_host.palette.open or self.chrome_host.recovery_picker.open) {
+        const total = if (self.chrome_host.recovery_picker.open) self.editor_recovery.shown.items.len else self.palette_filtered.items.len;
         const visible = @min(total, chrome.components.palette.max_visible);
         return @intCast((total -| visible) * ch);
     }
@@ -1056,7 +1057,10 @@ pub fn overlayMaxOffsetPx(self: *const AppSession) u32 {
 /// 드래그가 낸 offset을 **지금 열린 오버레이**에 적용한다. 소유자가 갈리면 보이지 않는 목록이 스크롤된다.
 pub fn setOverlayScrollOffsetPx(self: *AppSession, offset_px: u32) void {
     const clamped = @min(offset_px, overlayMaxOffsetPx(self));
-    if (self.chrome_host.palette.open) {
+    if (self.chrome_host.recovery_picker.open) {
+        if (clamped == self.editor_recovery.scroll.offset_y_px) return;
+        self.editor_recovery.scroll.offset_y_px = clamped;
+    } else if (self.chrome_host.palette.open) {
         if (clamped == self.palette_scroll.offset_y_px) return;
         self.palette_scroll.offset_y_px = clamped;
     } else if (self.chrome_host.settings.open) {
@@ -1154,9 +1158,9 @@ pub fn routeOverlayScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) boo
 }
 
 pub fn appendPaletteScrollbar(self: *AppSession) void {
-    if (!self.chrome_host.palette.open) return;
+    if (!self.chrome_host.palette.open and !self.chrome_host.recovery_picker.open) return;
     const lay = chrome.components.overlay_input.panelLayout(self.buildChromeProps()) orelse return;
-    const total = self.palette_filtered.items.len;
+    const total = if (self.chrome_host.recovery_picker.open) self.editor_recovery.shown.items.len else self.palette_filtered.items.len;
     const visible = @min(total, chrome.components.palette.max_visible);
     if (total <= visible or visible == 0) return; // 안 넘침 — 막대 없음
     const max_offset: u32 = @intCast((total - visible) * lay.ch);
@@ -1167,7 +1171,7 @@ pub fn appendPaletteScrollbar(self: *AppSession) void {
         .w = lay.panel_cols * lay.cw,
         .h = @as(u32, @intCast(visible)) * lay.ch,
     }, .{
-        .offset_px = @min(self.palette_scroll.offset_y_px, max_offset),
+        .offset_px = @min(if (self.chrome_host.recovery_picker.open) self.editor_recovery.scroll.offset_y_px else self.palette_scroll.offset_y_px, max_offset),
         .content_h_px = @as(u32, @intCast(total)) * lay.ch,
     });
 }

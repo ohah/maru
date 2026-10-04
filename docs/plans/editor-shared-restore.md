@@ -42,7 +42,9 @@
 [예약 후보 실험](editor-recovery-reservation.md)은 #4107 시점의 비교 근거다.
 flat claim을 선택한 제품의 수명·정리·실패 경계와 실행 결과는 [연결 결과](editor-recovery-integration.md)를 따른다.
 이하 설계 검토에서 '현재 코드', '미연결', '제안'이라고 쓴 부분은 **제품 연결 전 검토 이력**이다.
-현재 계약과 검증 범위는 위 문서와 이 문서 첫 절을 우선한다. orphan/legacy discovery와 새 복구 UI는 별도 미착수다.
+현재 계약과 검증 범위는 위 문서와 이 문서 첫 절을 우선한다. orphan/legacy discovery와 새 복구 UI의
+승인된 정책·구현·실행 검증은 [백업 발견과 복구](editor-backup-discovery.md)가 소유한다.
+아래 추가 검토의 ‘기존 revive가 빈 내용을 지운다’ 등은 구현 전 조사 이력이다.
 
 ## 해결한 문제 — 연결 전 코드의 한계
 

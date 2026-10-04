@@ -5178,6 +5178,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // W6d③: 끌어낸 이미지 파일 — Finder 가 청하면 대리자 대기열에서 이것으로 sidecar 의 내용을 받아 온다(main 에서 청하고 기다린다 —
         // sidecar 의 답은 main 의 tick 이 받는다).
         OsrImagePromiseDelegate.fetch = { [weak self] drag in
+            // main 에서 불리면 아래 main.sync 가 곧바로 죽는다 — AppKit 은 대리자 대기열에서 부른다(문서 계약). 지키지 않으면 실패로.
+            if Thread.isMainThread { return nil }
             var requested = false
             DispatchQueue.main.sync { requested = self?.osrDragFileRequest(drag) ?? false }
             guard requested else { return nil }
@@ -5189,6 +5191,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 if state != 0 { return state == 1 ? data : nil }
                 Thread.sleep(forTimeInterval: 0.05)
             }
+            DispatchQueue.main.sync { self?.osrDragFileRelease(drag) } // 기다리다 그만뒀다 — 버퍼를 놓는다
             return nil
         }
         let abiReady = validateZigBoundary()
@@ -9725,6 +9728,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return maru_macos_app_session_osr_drag_file_request(session, drag) != 0
     }
 
+    func osrDragFileRelease(_ drag: UInt32) {
+        guard let session = appSession ?? windows.first(where: { $0.appSession != nil })?.appSession else { return }
+        maru_macos_app_session_osr_drag_file_release(session, drag)
+    }
+
     /// 청한 파일 내용 — 0 아직·1 다 왔다(내용)·-1 실패.
     func osrDragFilePoll(_ drag: UInt32) -> (Int32, Data?) {
         guard let session = appSession ?? windows.first(where: { $0.appSession != nil })?.appSession else { return (-1, nil) }
@@ -9777,7 +9785,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         if let error {
                             Self.testReport("dragout promise failed \(url.lastPathComponent) \((error as NSError).code)")
                         } else {
-                            Self.testReport("dragout promise wrote \(url.lastPathComponent)")
+                            Self.testReport("dragout promise wrote \(OsrImagePromiseDelegate.written?.lastPathComponent ?? "?")")
                         }
                     }
                 }
@@ -9816,6 +9824,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             osrDragOutTestInfo = nil
             Self.testReport("dragout drop op=\(op.rawValue) done=\(done.rawValue)")
             osrDragOutEnded(at: screen, operation: done)
+        case "finder":
+            // Finder 가 받았다(복사)로 끝낸다 — 그 뒤 Finder 가 파일을 청한다(`promise`).
+            Self.testReport("dragout finder")
+            osrDragOutEnded(at: screen, operation: .copy)
         case "cancel":
             if let info = osrDragOutTestInfo {
                 terminal.draggingExited(info)
@@ -16337,18 +16349,33 @@ final class OsrImagePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
 
     static func write(_ promise: OsrImagePromise, to url: URL) -> Error? {
         guard let contents = fetch?(promise.drag), contents.count == promise.size else { return CocoaError(.fileReadUnknown) }
-        do {
-            try contents.write(to: url, options: .withoutOverwriting)
-        } catch {
-            // 이미 있는 파일은 우리 것이 아니다 — 그대로 둔다. 그 밖의 실패는 반쯤 쓴 것을 지운다.
-            if (error as NSError).code != NSFileWriteFileExistsError { try? FileManager.default.removeItem(at: url) }
-            return error
+        // 같은 이름이 있으면 Chrome 처럼 번호를 붙인다(「cat 2.png」) — 있던 파일은 건드리지 않는다(덮어쓰지 않고 연다).
+        let folder = url.deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent, ext = url.pathExtension
+        var target = url
+        var attempt = 1
+        while true {
+            do {
+                try contents.write(to: target, options: .withoutOverwriting)
+                break
+            } catch {
+                let exists = (error as NSError).code == NSFileWriteFileExistsError
+                // 그 밖의 실패는 반쯤 쓴 것을 지운다.
+                if !exists { try? FileManager.default.removeItem(at: target) }
+                guard exists, attempt < 99 else { return error }
+                attempt += 1
+                target = folder.appendingPathComponent("\(stem) \(attempt)").appendingPathExtension(ext)
+            }
         }
+        written = target
         var props: [String: Any] = ["LSQuarantineType": "LSQuarantineTypeWebDownload", "LSQuarantineAgentName": "maru"]
         if let source = promise.source, ["http", "https"].contains(source.scheme ?? "") { props["LSQuarantineDataURL"] = source }
-        try? (url as NSURL).setResourceValue(props, forKey: .quarantinePropertiesKey)
+        try? (target as NSURL).setResourceValue(props, forKey: .quarantinePropertiesKey)
         return nil
     }
+
+    /// 마지막으로 쓴 파일(판정 모드가 보고한다).
+    nonisolated(unsafe) static var written: URL?
 }
 
 // W6d②: Chromium 탭에서 시작한 끌기의 소스 — 허용 동작은 페이지가 정했고, 끝나면 controller 가 sidecar 에 답한다.

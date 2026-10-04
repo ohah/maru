@@ -1011,7 +1011,10 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     const generation = process_generation;
     const p = if (process) |*p| p else return;
     _ = lsp_process.flush(p, gpa) catch {};
-    const read = lsp_process.readInto(p, gpa, &inbox, 256 * 1024) catch .eof;
+    // 청한 파일 내용을 받는 동안은 한 번에 더 읽는다 — sidecar 는 다 보낼 때까지 CEF 스레드(모든 Chromium 탭)에서 쓰기를 기다린다.
+    // tick 마다 256 KiB 면 32 MiB 에 2 초 넘게 탭이 멈췄다(W6d③ 적대 검증 2 차).
+    const budget: usize = if (fileFetchPending()) 8 * 1024 * 1024 else 256 * 1024;
+    const read = lsp_process.readInto(p, gpa, &inbox, budget) catch .eof;
     drainInbox(gpa, now_ms);
     expireContextMenus(gpa, now_ms);
     expireDragOuts(gpa, now_ms);
@@ -1648,16 +1651,22 @@ const FileFetch = struct {
 };
 var file_fetch: ?FileFetch = null;
 
-/// 그 번호의 파일 내용을 sidecar 에 청한다(이미 청했으면 그대로). 그 끌기가 파일을 받아 두지 않았거나 sidecar 가 돌지 않으면 false.
+fn fileFetchPending() bool {
+    const f = file_fetch orelse return false;
+    return f.state == .pending;
+}
+
+/// 그 번호의 파일 내용을 sidecar 에 청한다(이미 청했으면 그대로). 그 끌기가 파일을 받아 두지 않았거나 그 탭이 없으면 false.
+/// (sidecar 가 다시 뜨면 `file_source` 를 비운다 — 새 sidecar 는 그 파일을 모른다.)
 pub fn requestDragFile(gpa: std.mem.Allocator, drag: u32) bool {
     const src = file_source orelse return false;
     if (src.drag != drag or drag == 0) return false;
     if (file_fetch) |f| if (f.drag == drag and f.state != .failed) return true;
     dropFileFetch(gpa);
     const s = surfaces.getPtr(src.surface) orelse return false;
-    if (!s.created or state != .running) return false;
+    if (!s.created or state == .off or state == .failed) return false;
     file_fetch = .{ .surface = src.surface, .drag = drag, .expected = src.size };
-    file_fetch.?.contents.ensureTotalCapacity(gpa, src.size) catch {
+    file_fetch.?.contents.ensureTotalCapacityPrecise(gpa, src.size) catch {
         file_fetch = null;
         return false;
     };
@@ -1691,14 +1700,14 @@ fn dropFileFetch(gpa: std.mem.Allocator) void {
     file_fetch = null;
 }
 
-/// 청한 그 번호의 파일 내용 상태. 다 왔으면 `ready` 와 내용(`takeDragFile` 이 놓을 때까지 유효).
+/// 청한 그 번호의 파일 내용 상태. 다 왔으면 `ready` 와 내용(`releaseDragFile` 이 놓을 때까지 유효).
 pub fn dragFile(drag: u32) struct { state: FileFetchState, bytes: []const u8 = "" } {
     const f = file_fetch orelse return .{ .state = .failed };
     if (f.drag != drag) return .{ .state = .failed };
     return .{ .state = f.state, .bytes = if (f.state == .ready) f.contents.items else "" };
 }
 
-/// 다 읽었다 — 놓는다.
+/// 다 읽었다·실패했다·기다리다 그만뒀다 — 놓는다.
 pub fn releaseDragFile(gpa: std.mem.Allocator, drag: u32) void {
     if (file_fetch) |f| if (f.drag == drag) dropFileFetch(gpa);
 }
@@ -2730,16 +2739,14 @@ test "dragged image files are fetched only when asked, gathered apart from the d
     apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 3, .allowed = 1, .point = .{ .x = 0, .y = 0 }, .file_size = 5 } }, 0);
     try std.testing.expectEqual(@as(u32, 5), surfaces.getPtr(7).?.drag_out.?.file_size);
     try std.testing.expect(!requestDragFile(gpa, 4)); // 다른 번호
-    // 끌기가 끝난 뒤에도 청할 수 있다(Finder 는 놓은 뒤 청한다).
+    // 끌기가 끝난 뒤에도 청할 수 있다(Finder 는 놓은 뒤 청한다). 청하기는 한 번만 나간다.
     _ = takeDragOut(7);
     try std.testing.expect(endDragOut(gpa, 7, 3, .{ .x = 0, .y = 0 }, 1));
-    state = .running;
-    state = .starting; // send 가 outbox 에 쌓게(시험) — requestDragFile 은 running 을 본다
-    try std.testing.expect(!requestDragFile(gpa, 3)); // sidecar 가 돌지 않는다
-    state = .running;
-    process = null;
+    const before = sentFrames(&frames);
     try std.testing.expect(requestDragFile(gpa, 3));
-    try std.testing.expect(requestDragFile(gpa, 3)); // 이미 청했다
+    try std.testing.expect(requestDragFile(gpa, 3)); // 이미 청했다 — 다시 보내지 않는다
+    try std.testing.expectEqual(before + 1, sentFrames(&frames));
+    try std.testing.expectEqual(@as(u32, 3), frames[before].drag_file_request.drag);
     try std.testing.expectEqual(FileFetchState.pending, dragFile(3).state);
     // 조각은 끌기가 아니라 청한 것에 모인다. 알린 크기와 맞아야 ready.
     apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_contents, .bytes = "ab" } }, 0);
@@ -2749,16 +2756,30 @@ test "dragged image files are fetched only when asked, gathered apart from the d
     try std.testing.expectEqualStrings("abcde", dragFile(3).bytes);
     releaseDragFile(gpa, 3);
     try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state);
-    // 크기가 모자라면 실패. sidecar 가 다시 뜨면 실패.
+    // 크기가 모자라면·넘치면·sidecar 가 실패를 알리면 실패.
     try std.testing.expect(requestDragFile(gpa, 3));
     apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_contents, .bytes = "ab" } }, 0);
     apply(gpa, .{ .drag_file_ready = .{ .browser = 7, .drag = 3, .size = 5, .ok = true } }, 0);
     try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state);
     try std.testing.expect(requestDragFile(gpa, 3)); // 실패한 것은 다시 청할 수 있다
-    forgetSidecar(gpa);
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_contents, .bytes = "abcdef" } }, 0);
+    try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state); // 알린 크기보다 많다
+    try std.testing.expect(requestDragFile(gpa, 3));
+    apply(gpa, .{ .drag_file_ready = .{ .browser = 7, .drag = 3, .size = 0, .ok = false } }, 0);
     try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state);
-    try std.testing.expect(!requestDragFile(gpa, 3)); // 새 sidecar 는 그 파일을 모른다
-    _ = &frames;
+    // 다른 번호의 늦은 조각은 섞이지 않는다.
+    try std.testing.expect(requestDragFile(gpa, 3));
+    apply(gpa, .{ .drag_out_data = .{ .browser = 7, .drag = 2, .kind = .file_contents, .bytes = "zzzzz" } }, 0);
+    try std.testing.expectEqual(@as(usize, 0), file_fetch.?.contents.items.len);
+    // 브라우저가 닫히면·sidecar 가 다시 뜨면 실패하고 다시 청할 수 없다.
+    apply(gpa, .{ .browser_closed = 7 }, 0);
+    try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state);
+    try std.testing.expect(!requestDragFile(gpa, 3));
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 5, .allowed = 1, .point = .{ .x = 0, .y = 0 }, .file_size = 5 } }, 0);
+    try std.testing.expect(requestDragFile(gpa, 5));
+    forgetSidecar(gpa);
+    try std.testing.expectEqual(FileFetchState.failed, dragFile(5).state);
+    try std.testing.expect(!requestDragFile(gpa, 5)); // 새 sidecar 는 그 파일을 모른다
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

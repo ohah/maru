@@ -39,7 +39,7 @@
 //!                        링크로 보지 않아 주소가 없다)
 //!   drag-out-image-big   6 MiB 이미지 — 청하면 조각으로 다 온다
 //!   drag-out-image-cap   40 MiB 이미지(상한 32 MiB 밖) — 크기 0·이름 없음, 청해도 실패, 주소는 간다
-//!   drag-out-image-stale 다음 끌기가 시작되면 앞 끌기의 파일은 놓였다 — 청하면 실패
+//!   drag-out-image-stale 다음 끌기가 파일을 쥔 뒤 앞 끌기의 번호로 청하면 실패(지금 쥔 것을 주면 안 된다)
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -597,14 +597,19 @@ fn imageFileChecks(report: Report, w: *Watch, host: *Host, port: u16) !void {
         const contents = w.out_file.items;
         const ok = started and none_yet and answered and (url_ok or case.y == 124) and switch (case.y) {
             44 => std.mem.eql(u8, name, "cat.png") and out.file_size == http.red_png.len and ready.ok and ready.size == out.file_size and std.mem.eql(u8, contents, http.red_png),
-            124 => std.mem.eql(u8, name, "_.._evil.png") and ready.ok and std.mem.eql(u8, contents, http.red_png),
+            124 => std.mem.eql(u8, name, "_.._evil.png") and out.file_size == http.red_png.len and ready.ok and std.mem.eql(u8, contents, http.red_png),
             204 => std.mem.eql(u8, name, "six.svg") and out.file_size == 6 * 1024 * 1024 and ready.ok and contents.len == 6 * 1024 * 1024 and std.mem.startsWith(u8, contents, "<svg"),
             else => name.len == 0 and out.file_size == 0 and !ready.ok and contents.len == 0,
         };
         report(ok, case.name, std.fmt.bufPrint(&detail, "끌기 {} · 주소 {} · 파일 「{s}」 크기 {d} · 청하기 전 내용 없음 {} · 답 {} ok {} {d} 바이트", .{ started, url_ok, name, out.file_size, none_yet, answered, ready.ok, contents.len }) catch "");
-        if (case.y == 44) last_drag = out.drag;
+        if (case.y == 204) last_drag = out.drag;
     }
-    // 앞 끌기(cat.png)의 파일은 그 뒤 끌기들이 시작되며 놓였다 — 청하면 실패.
+    // 새 끌기가 파일을 쥔 뒤 앞 끌기(six.svg)의 번호로 청하면 실패 — 지금 쥔 것(cat.png)을 주면 안 된다.
+    try w.load(port);
+    w.pump(500);
+    const fresh_before = w.outs;
+    try pressDrag(w, .{ .x = 544, .y = 44 }, .{ .x = 544, .y = 164 }, 0);
+    _ = untilOut(w, fresh_before, 6_000);
     w.file_ready = null;
     try host.send(.{ .drag_file_request = .{ .browser = browser_id, .drag = last_drag } });
     _ = w.until(3_000, {}, struct {
@@ -613,7 +618,9 @@ fn imageFileChecks(report: Report, w: *Watch, host: *Host, port: u16) !void {
         }
     }.f);
     const stale = w.file_ready orelse protocol.message.DragFileReady{ .browser = 0, .drag = 1, .size = 0, .ok = true };
-    report(last_drag != 0 and !stale.ok and stale.drag == last_drag, "drag-out-image-stale", std.fmt.bufPrint(&detail, "앞 끌기 {d} 의 파일 청하기 → ok {}(false 여야)", .{ last_drag, stale.ok }) catch "");
+    const fresh_has_file = if (w.out) |o| o.file_size != 0 else false;
+    if (w.out) |o| try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = o.drag, .point = .{ .x = 0, .y = 0 }, .operation = 0 } });
+    report(last_drag != 0 and fresh_has_file and !stale.ok and stale.drag == last_drag, "drag-out-image-stale", std.fmt.bufPrint(&detail, "새 끌기가 파일을 쥠 {} · 앞 끌기 {d} 의 파일 청하기 → ok {}(false 여야)", .{ fresh_has_file, last_drag, stale.ok }) catch "");
 }
 
 /// 다른 브라우저의 마지막 제목(Watch 는 판정 브라우저 것만 든다 — 그동안 온 메시지에서 찾는다).

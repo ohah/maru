@@ -145,6 +145,17 @@ pub fn dropKey(session: []const u8, reason: Reason) u64 {
     return h.final() | 1; // 0 은 빈 칸이다
 }
 
+/// 이 이벤트가 **세션이 다른 클라이언트에서 다시 열렸을 수 있는** 시작인가 — 그렇다면 묶음을 버리고 다시 판정한다.
+///
+/// `SessionStart` 라도 `source == "compact"` 는 아니다. codex 0.160 은 턴 도중 자동 압축 직후에 **같은 session_id** 로
+/// `SessionStart(source="compact")` 를 낸다(`core/src/session/mod.rs` → `session/turn.rs`). 그 세션은 같은 pane 에서 같은
+/// 턴을 이어 가는 중이라, 그때 묶음을 풀면 같은 cwd 에 codex pane 이 둘일 때 그 턴의 남은 `PostToolUse`·`Stop` 이 전부
+/// «프롬프트 전» 으로 버려져 배지가 «진행 중» 에 박히고 완료 알림이 안 온다. `startup`·`resume`·`clear` 는 다시 판정한다.
+/// `source` 는 payload 원문(이스케이프 미해제)이다 — 비교하는 값에 이스케이프가 없다.
+pub fn sessionRestarted(is_session_start: bool, source: []const u8) bool {
+    return is_session_start and !std.mem.eql(u8, source, "compact");
+}
+
 /// 후보가 될 수 있는 Term 인가 — 로컬 터미널에서 codex 가 돈다. **원격 pane 은 아니다**: 그 codex 는 다른 기계의 데몬이
 /// 돌리고, 그 이벤트는 이 경로로 오지 않는다(원격 채널). 원격 pane 을 후보에 넣으면 «로컬 codex pane 하나» 가 «여럿» 이
 /// 되어 묶어야 할 이벤트를 버린다.
@@ -291,8 +302,8 @@ pub const Bindings = struct {
 
     /// 묶음을 쓸 수 있으면 그 Term 을 준다(판정 ⑴). 못 쓰면 **풀고** null — 호출자는 새로 판정한다.
     ///
-    /// - `session_start`: 그 세션이 (다시) 시작됐다. 묶음을 믿지 않는다 — B 에서 돌던 세션 S 를 C 가
-    ///   `codex resume S` 로 열면 S 의 첫 이벤트가 `SessionStart` 이고, 옛 묶음을 쓰면 S 가 B 로 간다.
+    /// - `session_start`: 그 세션이 (다시) 시작됐다(`sessionRestarted`). 묶음을 믿지 않는다 — B 에서 돌던 세션 S 를
+    ///   C 가 `codex resume S` 로 열면 S 의 첫 이벤트가 `SessionStart` 이고, 옛 묶음을 쓰면 S 가 B 로 간다.
     /// - `live`: 지금 codex 가 도는 로컬 Term(`eligible`). 그 안에 없으면 그 Term 은 닫혔거나 codex 를 벗어났다.
     pub fn resolve(self: *Bindings, session: []const u8, session_start: bool, live: []const Candidate) ?u64 {
         if (session_start) {
@@ -503,6 +514,19 @@ test "codex 데몬 귀속: 한 Term 에 세션 하나만 묶이고, SessionStart
     b.bind("S", B);
     try testing.expectEqual(@as(?u64, null), b.resolve("S", true, &live));
     try testing.expectEqual(@as(?u64, null), b.lookup("S"));
+    // 턴 도중 자동 압축(`SessionStart`, source=compact)은 같은 pane 의 같은 세션이다 — 묶음을 지킨다.
+    // startup·resume·clear 는 다시 판정한다.
+    try testing.expect(!sessionRestarted(true, "compact"));
+    try testing.expect(sessionRestarted(true, "startup"));
+    try testing.expect(sessionRestarted(true, "resume"));
+    try testing.expect(sessionRestarted(true, "clear"));
+    try testing.expect(sessionRestarted(true, ""));
+    try testing.expect(!sessionRestarted(false, "resume"));
+    b.bind("S6", C);
+    try testing.expectEqual(@as(?u64, C), b.resolve("S6", sessionRestarted(true, "compact"), &live));
+    try testing.expectEqual(@as(?u64, C), b.lookup("S6"));
+    try testing.expectEqual(@as(?u64, null), b.resolve("S6", sessionRestarted(true, "resume"), &live));
+    try testing.expectEqual(@as(?u64, null), b.lookup("S6"));
     // 묶인 Term 이 닫혔거나 codex 를 벗어났다(live 에 없다) — 풀고 다시 판정한다.
     b.bind("S3", C);
     try testing.expectEqual(@as(?u64, null), b.resolve("S3", false, live[0..1]));

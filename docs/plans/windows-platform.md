@@ -380,3 +380,9 @@ worker 연결과 capability probe·UTF-8 이관 및 전체 잔여 Windows 범위
 실패로 유지한다. UTF-8·BOM·줄바꿈 해석은 owned raw bytes를 빌리는 Document로 반환한다.
 worker 11개 Debug/ReleaseFast와 다섯 compiled runtime 변형 검출이 통과했다. 일반 앱의
 파일 클릭 연결과 결과 등록·닫기 배선 및 전체 잔여 Windows 범위는 계속 진행한다.
+
+§2m.184: 일반 앱 파일 클릭을 초기 worker에 연결하고 queued Esc/닫기 뒤 결과를 등록한다.
+Book은 cancel·capability·raw CAS·소비와 실패 소유권을 보장하며 앱은 등록/복구 전 뷰 공간을
+예약하고 초기 lease를 정리한다. host 77개 Debug/ReleaseFast와 Book/앱 각각 다섯 compiled
+runtime 변형 검출이 통과했다. 실앱 Save-close·readonly 입력 거절·큰 파일 읽기 중 닫기의
+전체 bytes/정상 종료를 확인했다. 게시 CPU와 복구 I/O, 물리 입력/IME 및 전체 잔여 범위는 남아 있다.

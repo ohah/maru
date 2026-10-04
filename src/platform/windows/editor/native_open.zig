@@ -65,6 +65,7 @@ pub const Snapshot = struct {
     bytes: []u8,
     raw_hash: u64,
     owned: bool = true,
+    capability_verified: bool = false,
 
     pub fn openPath(a: std.mem.Allocator, io: std.Io, path: []const u8, limit: usize) !Snapshot {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
@@ -114,7 +115,9 @@ pub const Snapshot = struct {
         return .{ .allocator = a, .root = owned_root, .relative_path = owned_name, .original = original, .identity = identity, .path = path, .bytes = bytes, .raw_hash = editor.document_state.contentHash(bytes) };
     }
 
-    pub fn probe(self: *const Snapshot, io: std.Io, limit: usize) !void {
+    pub fn probe(self: *Snapshot, io: std.Io, limit: usize) !void {
+        // A failed retry must not retain the permit from an earlier probe.
+        self.capability_verified = false;
         try self.validate();
         var flags: u32 = 0;
         var filesystem: [16]u16 = @splat(0);
@@ -131,6 +134,7 @@ pub const Snapshot = struct {
         try tx.rollback();
         if (try tx.queryOutcome() != .aborted) return error.SaveCapabilityUnavailable;
         try tx.close(io);
+        self.capability_verified = true;
     }
 
     pub fn validate(self: *const Snapshot) !void {

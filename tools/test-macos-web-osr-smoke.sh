@@ -22,7 +22,7 @@ trap cleanup EXIT HUP INT TERM
 
 port=$((20000 + $$ % 20000))
 cat > "$root/server.py" <<'PY'
-import http.server, sys
+import http.server, sys, base64
 log = open(sys.argv[2], 'a', buffering=1)
 # W4b: 페이지가 받은 DOM 이벤트를 `/ev?e=...` 요청으로 알린다(제품에 읽는 훅을 두지 않고 바깥에서 본다).
 TEXT = " ".join(["maru selects this paragraph text by dragging across it"] * 40)
@@ -85,8 +85,10 @@ DND = ("<!doctype html><title>dnd</title><style>html,body{margin:0;height:100%;b
     "#t{position:fixed;left:50%;top:0;width:50%;height:40%;font:28px sans-serif}"
     "#m{position:fixed;left:50%;top:60%;width:50%;height:40%;background:#0000ff}"
     "#n{position:fixed;left:0;top:70%;width:50%;height:30%;background:#ffff00}"
-    "#d{position:fixed;left:0;top:60%;width:50%;height:10%;background:#ff00ff}</style><body>"
-    "<div id=z></div><textarea id=t></textarea><div id=m></div><div id=n></div><div id=d draggable=true></div><script>"
+    "#d{position:fixed;left:0;top:60%;width:50%;height:10%;background:#ff00ff}"
+    "#im{position:fixed;left:50%;top:42%;width:50%;height:16%}</style><body>"
+    "<div id=z></div><textarea id=t></textarea><div id=m></div><div id=n></div><div id=d draggable=true></div>"
+    "<img id=im src='/img/cat.png'><script>"
     "function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}ping('e=load');var over=0;"
     "var z=document.getElementById('z');"
     "z.addEventListener('dragenter',function(e){e.preventDefault();over=0});"
@@ -105,6 +107,7 @@ DND = ("<!doctype html><title>dnd</title><style>html,body{margin:0;height:100%;b
     "n.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='none'});"
     "n.addEventListener('drop',function(e){e.preventDefault();ping('e=ndrop')});"
     "</script>").encode()
+CAT_PNG = "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAQUlEQVR4nO3OQQ0AMBAEofNvupWx8yBBAPfuUvYDISEhoZj9QEhISChmPxASEhKK2Q+EhISEYvYDISEhoZj9oB763xP3eV+LAIgAAAAASUVORK5CYII="
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -127,6 +130,11 @@ class H(http.server.BaseHTTPRequestHandler):
             body = TIP
         elif self.path == "/dnd-app":
             body = DND
+        elif self.path == "/img/cat.png":
+            # W6d③: 끌어내 파일로 만들 이미지(48×48 빨간 PNG).
+            body = base64.b64decode(CAT_PNG)
+            self.send_response(200); self.send_header('Content-Type', 'image/png'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+            return
         elif self.path == "/nav-a":
             body = b"<!doctype html><title>a</title><style>html,body{margin:0;height:100%}a{display:block;height:100%}</style><body><a href='/nav-b'>b</a><script>addEventListener('pageshow',function(){new Image().src='/ev?e=shown-a&t='+Date.now()})</script>"
         elif self.path == "/nav-b":
@@ -964,6 +972,57 @@ check(ends == ['/ev?e=dend&v=move'], f'the source element saw dragend with move 
 check(ev('/ev?e=up', '', 'moved') == [], f'after the drag session starts, a release does not reach the page as mouseup ({ev("/ev?e=up", "", "moved")})')
 cancelled = ev('/ev?e=dend', 'moved', 'cancelled')
 check(drags[4:5] == ['osr-test dragout cancel'] and cancelled == ['/ev?e=dend&v=none'], f'a cancelled drag ends with none ({drags[4:5]} {cancelled})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6d③: 이미지를 끌어내 파일로 ─────────────────────────────────────────────────────────────────────────────
+# 판정 모드는 Finder 대신 대본 `dragout promise <폴더>` 로 파일 약속을 받는다(대리자가 그 폴더의 안전한 이름으로 쓴다). 같은 폴더에 두 번
+# 받아 덮어쓰지 않는지, 쓴 파일이 서버가 준 바이트 그대로인지, 내려받은 파일 표지(quarantine)가 붙었는지 본다.
+mkdir -p "$root/promise"
+cat > "$root/dragimg.txt" <<SCRIPT
+sleep 7000
+view down 0.75 0.58 0 0
+sleep 80
+view drag 0.75 0.59 0 0
+sleep 40
+view drag 0.75 0.6 0 0
+sleep 40
+view drag 0.75 0.61 0 0
+sleep 40
+view drag 0.75 0.62 0 0
+sleep 900
+dragout promise $root/promise
+sleep 200
+dragout promise $root/promise
+sleep 200
+dragout cancel
+sleep 600
+SCRIPT
+: > "$root/requests.log"
+run_app /dnd-app 14000 "$root/dragimg.summary" MARU_WEB_OSR_TEST_INPUT="$root/dragimg.txt" MARU_WEB_OSR_TEST_DRAG_OUT=1
+grep -a '^osr-test dragout' "$root/app-dnd-app.log" > "$root/dragimg.report" || true
+cat "$root/dragimg.report"
+python3 - "$root/dragimg.report" "$root/promise" <<'PY' || fail "dragging an image out as a file did not behave as expected"
+import sys, os, base64, subprocess
+report = [l.strip() for l in open(sys.argv[1])]
+folder = sys.argv[2]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+start = [l for l in report if l.startswith('osr-test dragout start')]
+check(len(start) == 1 and 'file=cat.png bytes=122' in start[0], f'an image drag carries the file to make — its safe name and the served bytes ({start})')
+wrote = [l for l in report if l.startswith('osr-test dragout promise')]
+check(wrote[:1] == ['osr-test dragout promise wrote cat.png'] and len(wrote) == 2 and wrote[1].startswith('osr-test dragout promise failed cat.png'),
+      f'the promise writes the file once and refuses to overwrite it the second time ({wrote})')
+path = os.path.join(folder, 'cat.png')
+want = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAQUlEQVR4nO3OQQ0AMBAEofNvupWx8yBBAPfuUvYDISEhoZj9QEhISChmPxASEhKK2Q+EhISEYvYDISEhoZj9oB763xP3eV+LAIgAAAAASUVORK5CYII=")
+got = open(path, 'rb').read() if os.path.exists(path) else b''
+check(got == want and os.listdir(folder) == ['cat.png'], f'the written file is the served image, byte for byte, and nothing else is in the folder ({len(got)} bytes, {os.listdir(folder)})')
+q = subprocess.run(['xattr', '-p', 'com.apple.quarantine', path], capture_output=True, text=True)
+# 표지 값은 「플래그;시각;앱;UUID」 — 셸에서 띄운(번들 아닌) 시험 앱은 앱 이름 칸을 macOS 가 비운다. 표지가 있는지만 본다.
+check(q.returncode == 0 and len(q.stdout.strip().split(';')) >= 3, f'the file carries the download quarantine mark (opening it asks macOS first) ({q.stdout.strip()!r})')
 sys.exit(0 if ok else 1)
 PY
 

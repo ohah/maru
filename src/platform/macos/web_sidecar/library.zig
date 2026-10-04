@@ -39,6 +39,8 @@ pub const Api = struct {
     process_message_create: *const @TypeOf(c.cef_process_message_create),
     // 밖에서 끌어 놓기(W6d①) — 끌어 온 파일·글을 CEF 에 넘길 drag data.
     drag_data_create: *const @TypeOf(c.cef_drag_data_create),
+    // 이미지 끌기의 파일 내용(W6d③) — drag data 가 쓰는 곳.
+    stream_writer_create_for_handler: *const @TypeOf(c.cef_stream_writer_create_for_handler),
 };
 
 pub const LoadError = error{ FrameworkOpenFailed, SymbolMissing };
@@ -74,6 +76,7 @@ pub fn load(framework_binary: [*:0]const u8) LoadError!Api {
         .v8_context_get_current_context = try find(handle, "cef_v8_context_get_current_context", @TypeOf(c.cef_v8_context_get_current_context)),
         .process_message_create = try find(handle, "cef_process_message_create", @TypeOf(c.cef_process_message_create)),
         .drag_data_create = try find(handle, "cef_drag_data_create", @TypeOf(c.cef_drag_data_create)),
+        .stream_writer_create_for_handler = try find(handle, "cef_stream_writer_create_for_handler", @TypeOf(c.cef_stream_writer_create_for_handler)),
     };
 }
 

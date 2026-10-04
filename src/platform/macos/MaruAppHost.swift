@@ -9603,6 +9603,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 지금 도는 페이지 끌기(앱에 하나 — macOS 끌기 세션도 하나).
     private var osrDragOutSession: OsrDragOutSession?
     private var osrDragOutTestInfo: TestDraggingInfo?
+    private var osrDragOutTestPromise: OsrImagePromise?
     private static let osrDragOutTestMode = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_DRAG_OUT"] != nil
 
     private func drainOsrDragOut() {
@@ -9616,6 +9617,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         osrDragOutSession = nil
         let item = osrDragOutItem(session, drag)
         let mask = NSDragOperation(rawValue: UInt(allowed))
+        // W6d③: 이미지 끌기면 Finder 에 놓을 때 만들 파일(안전한 이름·내용 — 이름 정리·이미지 확장자 판정은 Zig). 끌기 시작 때 받아
+        // 둔다 — Finder 는 놓은 뒤에 파일을 청한다(그때는 끌기가 끝났다).
+        let fileName = osrDragOutString(session, drag, 5)
+        let fileContents = osrDragOutBytes(session, drag, 6)
+        let promise: OsrImagePromise? = fileName.isEmpty || fileContents.isEmpty ? nil
+            : OsrImagePromise(item: item, name: fileName, contents: Data(fileContents), source: URL(string: osrDragOutString(session, drag, 2)))
         if Self.osrDragOutTestMode {
             let pb = NSPasteboard(name: NSPasteboard.Name("maru-test-dragout-\(getpid())"))
             pb.clearContents()
@@ -9624,7 +9631,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let image = osrDragOutImage(session, drag, iw, ih, item)
             let types = (item.types.map { $0.rawValue }).sorted().joined(separator: ",")
             let text = (item.string(forType: .string) ?? "").replacingOccurrences(of: "\n", with: "\\n")
-            Self.testReport("dragout start allowed=\(allowed) types=\(types) text=\(text.prefix(60)) image=\(Int(image.size.width))x\(Int(image.size.height)) png=\(iw)x\(ih)")
+            Self.testReport("dragout start allowed=\(allowed) types=\(types) text=\(text.prefix(60)) image=\(Int(image.size.width))x\(Int(image.size.height)) png=\(iw)x\(ih) file=\(promise?.name ?? "-") bytes=\(promise?.contents.count ?? 0)")
+            osrDragOutTestPromise = promise
             maru_macos_app_session_osr_drag_out_started(session, drag)
             return
         }
@@ -9639,7 +9647,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let origin = iw > 0
             ? NSPoint(x: at.x - CGFloat(hx), y: at.y - (image.size.height - CGFloat(hy)))
             : NSPoint(x: at.x + 8, y: at.y - image.size.height - 8)
-        let dragging = NSDraggingItem(pasteboardWriter: item)
+        let dragging = NSDraggingItem(pasteboardWriter: promise ?? item)
         dragging.setDraggingFrame(NSRect(origin: origin, size: image.size), contents: image)
         osrDragOutSession = OsrDragOutSession(drag: drag, owner: owner, view: view, allowed: mask, pasteboard: nil)
         let started = view.beginDraggingSession(with: [dragging], event: event, source: view)
@@ -9753,6 +9761,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             osrDragOutTestInfo = nil
             Self.testReport("dragout drop op=\(op.rawValue) done=\(done.rawValue)")
             osrDragOutEnded(at: screen, operation: done)
+        case "promise" where line.count >= 3:
+            // dragout promise <폴더> — Finder 가 놓은 뒤 파일을 청하는 것처럼 그 폴더의 이름으로 쓰게 한다(W6d③).
+            guard let promise = osrDragOutTestPromise else { return Self.testReport("dragout promise none") }
+            let url = URL(fileURLWithPath: line[2]).appendingPathComponent(OsrImagePromiseDelegate.shared.filePromiseProvider(promise, fileNameForType: promise.fileType))
+            if let error = OsrImagePromiseDelegate.write(promise, to: url) {
+                Self.testReport("dragout promise failed \(url.lastPathComponent) \((error as NSError).code)")
+            } else {
+                Self.testReport("dragout promise wrote \(url.lastPathComponent)")
+            }
         case "cancel":
             if let info = osrDragOutTestInfo {
                 terminal.draggingExited(info)
@@ -16205,6 +16222,84 @@ private func reportFileTreeTrashOutcome(
 }
 
 // W6c②: 우클릭 메뉴의 「서비스」 — 선택한 글을 보낸다(돌려받지 않는다).
+// W6d③: 끌어낸 이미지 파일 — 파일 약속(Finder 가 놓은 뒤 청한다)과 글·주소·HTML·maru 표지 형식을 함께 싣는다.
+final class OsrImagePromise: NSFilePromiseProvider {
+    private(set) var item = NSPasteboardItem()
+    private(set) var name = ""
+    private(set) var contents = Data()
+    private(set) var source: URL?
+
+    // `NSFilePromiseProvider(fileType:delegate:)` 는 안에서 `init()` 을 부른다 — 서브클래스가 그것을 갖지 않으면 런타임에 죽었다
+    // (시험 앱 실측 — 「unimplemented initializer 'init()'」). 그래서 `init()` 위에 속성으로 채운다.
+    override init() {
+        super.init()
+    }
+
+    convenience init(item: NSPasteboardItem, name: String, contents: Data, source: URL?) {
+        self.init()
+        self.item = item
+        self.name = name
+        self.contents = contents
+        self.source = source
+        fileType = UTType(filenameExtension: (name as NSString).pathExtension)?.identifier ?? UTType.image.identifier
+        delegate = OsrImagePromiseDelegate.shared
+    }
+
+    override func writableTypes(for pasteboard: NSPasteboard) -> [NSPasteboard.PasteboardType] {
+        super.writableTypes(for: pasteboard) + item.types
+    }
+
+    override func writingOptions(forType type: NSPasteboard.PasteboardType, pasteboard: NSPasteboard) -> NSPasteboard.WritingOptions {
+        item.types.contains(type) ? [] : super.writingOptions(forType: type, pasteboard: pasteboard)
+    }
+
+    override func pasteboardPropertyList(forType type: NSPasteboard.PasteboardType) -> Any? {
+        item.types.contains(type) ? item.string(forType: type) : super.pasteboardPropertyList(forType: type)
+    }
+}
+
+/// 파일 약속의 대리자 — 놓인 곳(Finder 가 준 URL)에 내용을 쓴다: 있는 파일은 덮어쓰지 않고, 내려받은 파일 표지(quarantine — 열 때
+/// macOS 가 확인한다, Chrome 과 같다)를 붙인다. 표지를 못 붙이면 파일을 지우고 실패로 답한다.
+final class OsrImagePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
+    static let shared = OsrImagePromiseDelegate()
+    private let queue: OperationQueue = {
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 1
+        q.qualityOfService = .userInitiated
+        return q
+    }()
+
+    func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider, fileNameForType fileType: String) -> String {
+        (filePromiseProvider as? OsrImagePromise)?.name ?? "image.png"
+    }
+
+    func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider, writePromiseTo url: URL, completionHandler: @escaping (Error?) -> Void) {
+        guard let promise = filePromiseProvider as? OsrImagePromise else { return completionHandler(CocoaError(.fileWriteUnknown)) }
+        completionHandler(Self.write(promise, to: url))
+    }
+
+    func operationQueue(for filePromiseProvider: NSFilePromiseProvider) -> OperationQueue {
+        queue
+    }
+
+    static func write(_ promise: OsrImagePromise, to url: URL) -> Error? {
+        do {
+            try promise.contents.write(to: url, options: .withoutOverwriting)
+        } catch {
+            return error
+        }
+        var props: [String: Any] = ["LSQuarantineType": "LSQuarantineTypeWebDownload", "LSQuarantineAgentName": "maru"]
+        if let source = promise.source, ["http", "https"].contains(source.scheme ?? "") { props["LSQuarantineDataURL"] = source }
+        do {
+            try (url as NSURL).setResourceValue(props, forKey: .quarantinePropertiesKey)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            return error
+        }
+        return nil
+    }
+}
+
 // W6d②: Chromium 탭에서 시작한 끌기의 소스 — 허용 동작은 페이지가 정했고, 끝나면 controller 가 sidecar 에 답한다.
 extension MaruMetalTerminalView: NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {

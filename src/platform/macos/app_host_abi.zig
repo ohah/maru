@@ -5067,7 +5067,8 @@ pub export fn maru_macos_app_session_osr_drag_out_take(session: ?*AppSession, al
     return info.drag;
 }
 
-/// v206(W6d②): 가져간 끌기의 조각(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG) — `out` 이 null 이면 길이만. 넘치면 0(길이로 다시 부른다).
+/// v206(W6d②): 가져간 끌기의 조각(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG, W6d③ 5 파일 이름(안전하게 고친 것 — 이미지 확장자가
+/// 아니면 빈 것)·6 파일 내용(이름이 비면 빈 것)) — `out` 이 null 이면 길이만. 넘치면 0(길이로 다시 부른다).
 pub export fn maru_macos_app_session_osr_drag_out_part(session: ?*AppSession, drag: u32, part: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
     const app = session orelse return 0;
     const which = std.enums.fromInt(session_mod.web_ops.OsrDragOutPart, part) orelse return 0;

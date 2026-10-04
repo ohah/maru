@@ -1559,6 +1559,8 @@ pub const drag_out_pickup_ms: i64 = 1_000;
 /// 조각 상한 — sidecar(`drag.max_text_total`·`max_out_png`)와 같다.
 pub const max_drag_out_text = 1024 * 1024;
 pub const max_drag_out_png = 4 * 1024 * 1024;
+/// 이미지 끌기의 파일 내용 상한(W6d③ — sidecar `drag.max_out_file`).
+pub const max_drag_out_file = 32 * 1024 * 1024;
 
 pub const DragOut = struct {
     drag: u32,
@@ -1567,6 +1569,9 @@ pub const DragOut = struct {
     url: std.ArrayList(u8) = .empty,
     url_title: std.ArrayList(u8) = .empty,
     png: std.ArrayList(u8) = .empty,
+    /// 이미지 끌기면 Chromium 이 정한 파일 이름과 내용(W6d③ — Finder 에 놓으면 그 파일을 만든다).
+    file_name: std.ArrayList(u8) = .empty,
+    file_contents: std.ArrayList(u8) = .empty,
     allowed: u32 = 0,
     point: ws.message.Point = .{ .x = 0, .y = 0 },
     hotspot: ws.message.Point = .{ .x = 0, .y = 0 },
@@ -1585,9 +1590,11 @@ pub const DragOut = struct {
             .url => .{ &self.url, ws.wire.max_url_bytes },
             .url_title => .{ &self.url_title, ws.wire.max_text_bytes },
             .image_png => .{ &self.png, max_drag_out_png },
+            .file_name => .{ &self.file_name, ws.wire.max_text_bytes },
+            .file_contents => .{ &self.file_contents, max_drag_out_file },
         };
-        // 주소·제목은 한 조각이다(마지막 것).
-        if (kind == .url or kind == .url_title) list.clearRetainingCapacity();
+        // 주소·제목·파일 이름은 한 조각이다(마지막 것).
+        if (kind == .url or kind == .url_title or kind == .file_name) list.clearRetainingCapacity();
         if (list.items.len + bytes.len > cap) return; // 넘는 조각은 통째로 버린다(조각마다 글자 경계)
         list.appendSlice(gpa, bytes) catch {};
     }
@@ -1598,6 +1605,8 @@ pub const DragOut = struct {
         self.url.deinit(gpa);
         self.url_title.deinit(gpa);
         self.png.deinit(gpa);
+        self.file_name.deinit(gpa);
+        self.file_contents.deinit(gpa);
     }
 };
 

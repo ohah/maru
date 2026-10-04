@@ -11686,3 +11686,22 @@ admission 할당 prefix 및 stale/fresh overwrite source CAS를 검사한다. pr
 아직 일반 앱의 Book/UI 저장 진입점은 동기 API를 사용한다. 완료 poll의 native abort와
 commit·정산도 main thread에서 실행되므로 전체 비동기 저장 완료로 세지 않는다. 이 I/O의
 worker 이관과 승인 왕복, 일반 앱 저장·닫기 연결 및 초기 open 비동기화를 이어서 구현한다.
+
+
+### 2m.172 — 일반 앱의 비동기 저장 준비와 저장 후 닫기
+
+일반 앱 Ctrl+S와 Save-close는 Book.beginSave로 준비 worker를 시작하고 프레임에서
+Book.pollSave를 확인한다. 진행 중에는 키·마우스 입력을 제한하고 Esc는 취소를 요청한다.
+닫기는 committed receipt와 성공한 문서 ack를 확인한 뒤 이어간다. 취소·실패·미확정
+rollback은 닫기 성공으로 취급하지 않는다. 여러 파일은 한 문서씩 준비하도록 예약한다.
+
+host gate 47개(aggregation 2·native 38·pure 7)가 Debug/ReleaseFast에서 통과했다.
+clean 저장 생략, 추가 편집 dirty 보존, 취소 후 disk/backup 보존, source 변경 거절,
+controller 배열 이동과 lease 격리, receipt 이후 닫기와 ack 실패의 닫기 거절을 검사한다.
+clean guard·취소·ack guard·committed guard·닫기 소유권 반환을 제거한 다섯 변형을
+컴파일 성공 후 runtime에서 검출하고 원본 bytes를 복원했다. controller 23개도 통과했다.
+
+격리한 실제 일반 앱에서 대상 창의 입력 큐로 Ctrl+S와 Save-close를 실행하여 BOM·CRLF
+보존 및 저장 후 프로세스 종료를 확인했다. 이는 물리 키보드·IME 검증이 아니다.
+native commit/abort/reconcile/cleanup과 명시적 충돌 overwrite는 아직 main thread에서
+실행한다. 최초 open 비동기화와 다중 파일 닫기의 전체 GUI 검증도 계속 남아 있다.

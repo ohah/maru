@@ -4464,6 +4464,24 @@ fn fileIndexForLease(views: []const OpenFile, lease: maru.session.editor.documen
 
 /// Approve only after native save/close guards and recovery-record deletion.
 /// An error leaves every view/body alive; already removed records are rearmed.
+fn savedCloseTarget(ready: file_host.Book.SaveReady, target: ?FileCloseTarget) ?FileCloseTarget {
+    if (ready != .receipt or ready.receipt.decision != .committed or ready.receipt.acknowledgment_error != null) return null;
+    return target;
+}
+
+fn beginFileCloseSave(book: *file_host.Book, views: []OpenFile, target: FileCloseTarget) !?maru.session.editor.document_registry.Lease {
+    const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
+    if (one) |i| {
+        try book.requireClose(views[i].document, true);
+        if (book.registry.viewCount(views[i].document).? > 1) return null;
+    } else try book.requireIdle();
+    for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        if (try book.beginSave(view.document, 4 << 20)) return view.document;
+    }
+    return null;
+}
+
 fn approveFileClose(io: std.Io, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, action: maru.chrome.components.confirm.Action) !bool {
     if (action == .cancelled or action == .extra) return false;
     const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
@@ -4542,6 +4560,15 @@ const FileCloseFixture = struct {
         try std.testing.expectEqualStrings(expected, bytes);
     }
     fn deinit(self: *FileCloseFixture) void {
+        for (self.book.controllers.items) |*controller| if (controller.preparing != null) {
+            controller.cancelPreparation() catch unreachable;
+            const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+            while (controller.preparing != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native preparation timeout");
+                _ = controller.pollPreparation(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+        };
         for (self.book.controllers.items) |*controller| if (controller.pending != null) {
             _ = controller.abort(std.testing.io) catch unreachable;
         };
@@ -4554,6 +4581,61 @@ const FileCloseFixture = struct {
         std.testing.allocator.destroy(self);
     }
 };
+
+fn awaitAppSave(book: *file_host.Book, view: maru.session.editor.document_registry.Lease) !file_host.Book.SaveReady {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline) {
+        if (try book.pollSave(std.testing.io, view)) |ready| return ready;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.SaveDidNotComplete;
+}
+
+test "Windows editor host async save close releases its view only after the native receipt" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const target: FileCloseTarget = .{ .file = f.views.items[0].document };
+    const selection = try beginFileCloseSave(&f.book, f.views.items, target);
+    try std.testing.expect(selection != null);
+    const selected = selection.?;
+    try std.testing.expect(std.meta.eql(selected, target.file));
+    try std.testing.expectError(error.SaveBusy, approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, target, .confirmed));
+    const ready = try awaitAppSave(&f.book, selected);
+    try std.testing.expect(savedCloseTarget(ready, target) != null);
+    try std.testing.expect((try beginFileCloseSave(&f.book, f.views.items, target)) == null);
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, target, .confirmed));
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows editor host async save close cancellation preserves edits backup and disk" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const selected = (try beginFileCloseSave(&f.book, f.views.items, .window)).?;
+    try f.book.cancelSave(std.testing.io, selected);
+    const ready = try awaitAppSave(&f.book, selected);
+    try std.testing.expect(savedCloseTarget(ready, .window) == null);
+    const state = f.documents.get(selected).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expect(state.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host async close policy refuses aborted unacknowledged and cancelled results" {
+    const receipt: @import("platform/windows/editor/save_controller.zig").Receipt = .{ .decision = .committed, .revision = 1, .sequence = 1 };
+    try std.testing.expect(savedCloseTarget(.{ .receipt = receipt }, .window) != null);
+    try std.testing.expect(savedCloseTarget(.cancelled, .window) == null);
+    var aborted = receipt;
+    aborted.decision = .aborted;
+    try std.testing.expect(savedCloseTarget(.{ .receipt = aborted }, .window) == null);
+    var unacknowledged = receipt;
+    unacknowledged.acknowledgment_error = error.StaleDocument;
+    try std.testing.expect(savedCloseTarget(.{ .receipt = unacknowledged }, .window) == null);
+    try std.testing.expect(savedCloseTarget(.{ .receipt = receipt }, null) == null);
+}
 
 test "Windows editor host external notification worker read and clean edit preserve dirty conflict authority" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
@@ -6835,6 +6917,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var pending_conflict_close: ?FileCloseTarget = null;
     var choice_close: ?struct { document: maru.session.editor.document_registry.Lease, target: FileCloseTarget } = null;
     var choice_notice: ?maru.session.editor.document_registry.Lease = null;
+    var pending_save: ?maru.session.editor.document_registry.Lease = null;
+    var save_close_requested = false;
+    var save_close_target: ?FileCloseTarget = null;
     var file_comparison: ?ExternalComparison = null;
     defer if (file_comparison) |*comparison| comparison.deinit();
     var file_exit_accepted = false;
@@ -10917,6 +11002,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
             .key => |key_ev| {
+                if (pending_save) |lease| {
+                    if (key_ev.key == .escape) {
+                        editor_files.cancelSave(io, lease) catch {};
+                        save_close_target = null;
+                        save_close_requested = false;
+                    }
+                    continue;
+                }
                 if (choice_notice) |lease| {
                     if (key_ev.key == .escape) {
                         try file_changes.cancelChoice(lease);
@@ -11122,6 +11215,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         }
                         continue;
                     }
+                    if (file_host.saveKey(resolver, key_ev)) {
+                        const started = editor_files.beginSave(file_view.document, 4 << 20) catch |err| {
+                            file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                            continue;
+                        };
+                        if (started) {
+                            pending_save = file_view.document;
+                            file_notice.show(maru.i18n.t(.win_editor_saving));
+                        }
+                        continue;
+                    }
                     const maybe_copy = applyFileKey(&editor_files, io, resolver, file_view, key_ev, .{ .now_ms = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms)), .views = open_files.items }) catch |err| {
                         try stderr.print("  warning: editor input failed({s})\n", .{@errorName(err)});
                         if (isFileSaveConflict(err) and file_host.saveKey(resolver, key_ev)) {
@@ -11233,6 +11337,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
             // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
             .mouse => |m| {
+                if (pending_save != null) continue;
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
 
@@ -12993,6 +13098,47 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **마우스로 고른 것을 여기서 실행한다.** 이벤트 루프 안에서 세션을 지우면 그 프레임의
         // 나머지가 사라진 것을 만진다 — 키 갈래는 곧바로 실행해도 되지만(그 뒤에 `continue` 로
         // 프레임을 빠져나간다) 마우스는 다른 처리가 뒤따를 수 있어 한 박자 미룬다.
+        // Consume queued cancellation/close before voting to commit a ready
+        // image. The view and close intent remain alive through native drain.
+        if (pending_save) |lease| {
+            if (close_requested) {
+                editor_files.cancelSave(io, lease) catch {};
+                save_close_requested = true;
+                save_close_target = null;
+                close_requested = false;
+            }
+            const outcome = editor_files.pollSave(io, lease) catch |err| blk: {
+                const idle = (editor_files.saveStatus(lease) catch .closed) == .idle;
+                if (idle) {
+                    pending_save = null;
+                    file_notice.dismiss();
+                    if (isFileSaveConflict(err)) {
+                        pending_file_conflict = lease;
+                        pending_conflict_save = true;
+                        pending_conflict_close = if (save_close_requested) .window else save_close_target;
+                        showFileSaveConflict(&confirm_state);
+                    } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                    save_close_requested = false;
+                    save_close_target = null;
+                }
+                break :blk null;
+            };
+            if (outcome) |ready| {
+                pending_save = null;
+                file_notice.dismiss();
+                if (ready == .receipt) {
+                    if (ready.receipt.acknowledgment_error) |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                    if (ready.receipt.cleanup_error) |err| stderr.print("  warning: editor save cleanup failed({s})\n", .{@errorName(err)}) catch {};
+                }
+                if (savedCloseTarget(ready, save_close_target)) |target| {
+                    pending_file_close = target;
+                    confirm_pending_click = .confirmed;
+                }
+                if (save_close_requested) close_requested = true;
+                save_close_requested = false;
+                save_close_target = null;
+            }
+        }
         if (close_requested and !file_exit_accepted) {
             if (choice_notice) |lease| {
                 try file_changes.cancelChoice(lease);
@@ -13040,6 +13186,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 };
                 pending_conflict_close = null;
             } else if (pending_file_close) |target| {
+                if (act == .confirmed) {
+                    const saving_file = beginFileCloseSave(&editor_files, open_files.items, target) catch |err| {
+                        file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                        confirm_state.dismiss();
+                        pending_file_close = null;
+                        continue;
+                    };
+                    if (saving_file) |lease| {
+                        pending_save = lease;
+                        save_close_target = target;
+                        file_notice.show(maru.i18n.t(.win_editor_saving));
+                        confirm_state.dismiss();
+                        pending_file_close = null;
+                        continue;
+                    }
+                }
                 var conflict_lease: ?maru.session.editor.document_registry.Lease = null;
                 const approved = approveFileClose(io, &editor_files, &file_backups, open_files.items, target, act) catch |err| blk: {
                     stderr.print("  warning: editor close failed({s})\n", .{@errorName(err)}) catch {};

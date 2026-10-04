@@ -1133,3 +1133,10 @@ poisoned native attempt/실패 보존 및 명시적 rollback을 검사한다.
 취소 commit 거절·할당 prefix·overwrite CAS를 검사한다. `-Doptimize=ReleaseFast`로도 실행하고
 `test-win32-save-prepare` 9개를 두 모드에서 함께 회귀 검증한다. 앱 Book/UI는 아직 동기
 진입점이며 완료 poll의 native abort/commit·정산은 main thread라 전체 async E2E로 세지 않는다.
+
+
+§2m.172의 `zig build test-win32-editor-host`는 47개(aggregation 2·native 38·pure 7)다.
+일반 앱의 비동기 준비 진입점, clean 생략·취소·source 실패·controller 이동·lease 격리와
+receipt/ack 이후 닫기를 검사한다. `-Doptimize=ReleaseFast`도 실행한다.
+`test-win32-save-controller` 23개를 회귀 검증하며 실제 앱의 Ctrl+S·Save-close와
+물리 키보드/IME 검증은 구분한다. native commit/abort와 초기 open은 아직 동기 I/O다.

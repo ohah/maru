@@ -233,6 +233,10 @@ test "maru counts one credit per user input it sent, at most four, each living f
     try std.testing.expect(c.take(300) and c.take(300) and !c.take(300));
     for (0..6) |i| c.grant(@intCast(1_000 + i));
     try std.testing.expectEqual(@as(usize, Credits.max_credits), c.len);
+    // 넘치면 가장 오래된 것을 버리고, 쓸 때도 가장 오래된 것부터.
+    try std.testing.expectEqual(@as(i64, 1_002), c.at[0]);
+    try std.testing.expect(c.take(1_010));
+    try std.testing.expectEqual(@as(i64, 1_003), c.at[0]);
     c.grant(10_000);
     try std.testing.expect(c.take(10_000 + activation_ms + Credits.transit_ms)); // 10 000 것만 산다
     try std.testing.expect(!c.take(10_000 + activation_ms + Credits.transit_ms));

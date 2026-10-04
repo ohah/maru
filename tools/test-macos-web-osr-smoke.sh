@@ -978,7 +978,7 @@ PY
 # ── W6d③: 이미지를 끌어내 파일로 ─────────────────────────────────────────────────────────────────────────────
 # 판정 모드는 Finder 대신 대본 `dragout promise <폴더>` 로 파일 약속을 받는다 — 끌기를 끝낸 뒤(Finder 는 놓은 뒤 청한다) 대리자가 그
 # 대기열에서 sidecar 에 내용을 청해(끌기 때는 이름·크기만 왔다) 그 폴더의 안전한 이름으로 쓴다. 같은 폴더에 두 번 받아 덮어쓰지 않는지,
-# 쓴 파일이 서버가 준 바이트 그대로인지, 내려받은 파일 표지(quarantine)가 붙었는지 본다.
+# 쓴 파일이 서버가 준 바이트 그대로인지, 내려받은 파일 표지(quarantine)가 붙었는지 본다. 같은 이름이 있으면 Chrome 처럼 「cat 2.png」.
 mkdir -p "$root/promise"
 cat > "$root/dragimg.txt" <<SCRIPT
 sleep 7000
@@ -992,7 +992,7 @@ view drag 0.75 0.61 0 0
 sleep 40
 view drag 0.75 0.62 0 0
 sleep 900
-dragout cancel
+dragout finder
 sleep 300
 dragout promise $root/promise
 sleep 1500
@@ -1015,12 +1015,13 @@ def check(cond, what):
 start = [l for l in report if l.startswith('osr-test dragout start')]
 check(len(start) == 1 and 'file=cat.png bytes=122' in start[0], f'an image drag carries the file to make — its safe name and the served bytes ({start})')
 wrote = [l for l in report if l.startswith('osr-test dragout promise')]
-check(wrote[:1] == ['osr-test dragout promise wrote cat.png'] and len(wrote) == 2 and wrote[1].startswith('osr-test dragout promise failed cat.png'),
-      f'the promise writes the file once and refuses to overwrite it the second time ({wrote})')
+check(wrote == ['osr-test dragout promise wrote cat.png', 'osr-test dragout promise wrote cat 2.png'],
+      f'the promise writes the file, and a second one with the same name becomes "cat 2.png" — nothing is overwritten ({wrote})')
 path = os.path.join(folder, 'cat.png')
 want = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAQUlEQVR4nO3OQQ0AMBAEofNvupWx8yBBAPfuUvYDISEhoZj9QEhISChmPxASEhKK2Q+EhISEYvYDISEhoZj9oB763xP3eV+LAIgAAAAASUVORK5CYII=")
 got = open(path, 'rb').read() if os.path.exists(path) else b''
-check(got == want and os.listdir(folder) == ['cat.png'], f'the written file is the served image, byte for byte, and nothing else is in the folder ({len(got)} bytes, {os.listdir(folder)})')
+second = open(os.path.join(folder, 'cat 2.png'), 'rb').read() if os.path.exists(os.path.join(folder, 'cat 2.png')) else b''
+check(got == want and second == want and sorted(os.listdir(folder)) == ['cat 2.png', 'cat.png'], f'the written files are the served image, byte for byte, and nothing else is in the folder ({len(got)} {len(second)} bytes, {os.listdir(folder)})')
 q = subprocess.run(['xattr', '-p', 'com.apple.quarantine', path], capture_output=True, text=True)
 # 표지 값은 「플래그;시각;앱;UUID」 — 셸에서 띄운(번들 아닌) 시험 앱은 앱 이름 칸을 macOS 가 비운다. 표지가 있는지만 본다.
 check(q.returncode == 0 and len(q.stdout.strip().split(';')) >= 3, f'the file carries the download quarantine mark — its origin is recorded ({q.stdout.strip()!r})')

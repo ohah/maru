@@ -1466,6 +1466,10 @@ pub const TerminalCore = struct {
     pub fn rebaseActiveAnchors(self: *TerminalCore, old_count: usize, new_count: usize) void {
         kitty.rebaseActiveAnchors(self, old_count, new_count);
     }
+    /// 스크롤 영역 안에서 옮겨진 행의 앵커를 함께 옮긴다. 본문: kitty.shiftRegionAnchors.
+    pub fn shiftRegionAnchors(self: *TerminalCore, first_abs: usize, last_abs: usize, delta: isize, drop_outside: bool) void {
+        kitty.shiftRegionAnchors(self, first_abs, last_abs, delta, drop_outside);
+    }
     /// 스크롤백에 못 들어간 행의 앵커를 정리한다. 본문: kitty.dropLostRowAnchors.
     pub fn dropLostRowAnchors(self: *TerminalCore, abs_row: usize, last_abs: usize) void {
         kitty.dropLostRowAnchors(self, abs_row, last_abs);
@@ -4827,6 +4831,93 @@ test "kitty scroll: alt 화면의 줄바꿈 스크롤에서도 이미지가 줄�
 }
 
 // 스크롤 영역이 맨 아래 줄(상태줄)을 빼면, 영역 밖의 줄은 **움직이지 않는다** — 그 위 이미지도 그대로여야 한다.
+/// 6 행 화면에 `A`..`F` 를 한 줄씩 쓰고(커서는 F 줄), 각 줄 첫 칸에 그 글자를 표지로 하는 placement 를 건다
+/// (placement_id = 글자). 스크롤 뒤 「살아 있는 placement 의 앵커 줄 첫 글자 == 자기 표지」를 본다.
+fn regionScrollFixture(core: *TerminalCore) !void {
+    try core.write("A\r\nB\r\nC\r\nD\r\nE\r\nF");
+    var r: usize = 0;
+    while (r < 6) : (r += 1) {
+        var p = mkSpanPlacement(core.screen.sb.count + r, 0, 1);
+        p.placement_id = 'A' + @as(u32, @intCast(r));
+        try core.kitty_placements.append(std.testing.allocator, p);
+    }
+}
+
+/// 살아 있는 placement 가 모두 자기 표지 글자 위에 있는지, 그리고 어떤 표지가 남았는지(비트 집합) 돌려준다.
+fn regionScrollSurvivors(core: *const TerminalCore) !u32 {
+    var set: u32 = 0;
+    for (core.kitty_placements.items) |p| {
+        const row = p.anchor_row - core.screen.sb.count;
+        try std.testing.expect(row < core.size.rows);
+        try std.testing.expectEqual(@as(u21, @intCast(p.placement_id)), screenFirstCodepoint(core, row));
+        set |= @as(u32, 1) << @intCast(p.placement_id - 'A');
+    }
+    return set;
+}
+
+// 스크롤 영역 위가 0 이 아니면 줄바꿈은 **영역만** 올린다(스크롤백 없음). 영역 안의 이미지는 줄과 함께 올라가고, 영역
+// 위로 밀려난 줄의 이미지는 사라지고, 영역 밖 줄의 이미지는 제자리다. 예전에는 아무것도 안 옮겼다(2026-10-04 재현).
+test "kitty scroll: 위가 0 이 아닌 스크롤 영역의 줄바꿈에서 이미지가 영역과 함께 올라간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
+    defer core.deinit();
+    try regionScrollFixture(&core);
+    try core.write("\x1b[2;5r\x1b[5;1H\n"); // 영역 B..E, 영역 바닥에서 줄바꿈 → B 가 사라지고 C·D·E 가 한 줄 위로
+    try std.testing.expectEqual(@as(u21, 'C'), screenFirstCodepoint(&core, 1));
+    try std.testing.expectEqual(@as(u32, 0b111101), try regionScrollSurvivors(&core)); // B 만 사라졌다
+}
+
+test "kitty scroll: 줄 삽입(IL)은 아래 줄의 이미지를 함께 내리고 영역 밖으로 밀린 줄의 이미지는 지운다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
+    defer core.deinit();
+    try regionScrollFixture(&core);
+    try core.write("\x1b[3;1H\x1b[L"); // C 줄에 한 줄 삽입 → C..E 한 줄 아래로, F 는 밀려 사라짐
+    try std.testing.expectEqual(@as(u21, 'C'), screenFirstCodepoint(&core, 3));
+    try std.testing.expectEqual(@as(u32, 0b011111), try regionScrollSurvivors(&core)); // F 만 사라졌다
+}
+
+test "kitty scroll: 줄 삭제(DL)는 지운 줄의 이미지를 지우고 아래 줄의 이미지를 함께 올린다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
+    defer core.deinit();
+    try regionScrollFixture(&core);
+    try core.write("\x1b[3;1H\x1b[M"); // C 줄 삭제 → D..F 한 줄 위로
+    try std.testing.expectEqual(@as(u21, 'D'), screenFirstCodepoint(&core, 2));
+    try std.testing.expectEqual(@as(u32, 0b111011), try regionScrollSurvivors(&core)); // C 만 사라졌다
+}
+
+test "kitty scroll: 아래로 스크롤(SD)은 이미지를 함께 내리고 바닥으로 밀린 줄의 이미지는 지운다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
+    defer core.deinit();
+    try regionScrollFixture(&core);
+    try core.write("\x1b[T"); // 전체 한 줄 아래로 → F 가 사라진다
+    try std.testing.expectEqual(@as(u21, 'A'), screenFirstCodepoint(&core, 1));
+    try std.testing.expectEqual(@as(u32, 0b011111), try regionScrollSurvivors(&core));
+}
+
+// 영역이 맨 위에서 시작하고 맨 아래 상태줄을 빼면, 줄바꿈은 맨 위 줄을 **스크롤백에 저장**하며 영역만 올린다. 저장되면
+// 스크롤백이 한 줄 늘어 화면 줄의 절대 행이 하나씩 커진다 — 영역 안은 줄이 같이 올라가 앵커가 맞지만, **움직이지 않은
+// 상태줄**은 절대 행이 하나 늘었으니 앵커도 하나 늘어야 한다. 예전에는 상태줄 이미지가 한 줄 위(영역의 마지막 줄)로 갔다.
+test "kitty scroll: 스크롤백에 저장하는 영역 스크롤에서도 영역 밖 상태줄의 이미지는 제자리다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
+    defer core.deinit();
+    core.setMaxScrollback(100);
+    try regionScrollFixture(&core);
+    try core.write("\x1b[1;5r\x1b[5;1H\n"); // 영역 A..E(상태줄 F 제외), A 가 스크롤백으로
+    try std.testing.expectEqual(@as(usize, 1), core.screen.sb.count);
+    try std.testing.expectEqual(@as(u21, 'F'), screenFirstCodepoint(&core, 5));
+    // A 는 스크롤백에 있다 — 화면 판정 밖이라 따로 본다.
+    var on_screen: u32 = 0;
+    for (core.kitty_placements.items) |p| {
+        if (p.anchor_row < core.screen.sb.count) {
+            try std.testing.expectEqual(@as(u32, 'A'), p.placement_id);
+            continue;
+        }
+        const row = p.anchor_row - core.screen.sb.count;
+        try std.testing.expectEqual(@as(u21, @intCast(p.placement_id)), screenFirstCodepoint(&core, row));
+        on_screen |= @as(u32, 1) << @intCast(p.placement_id - 'A');
+    }
+    try std.testing.expectEqual(@as(u32, 0b111110), on_screen);
+}
+
 test "kitty scroll: 스크롤 영역 밖(상태줄)의 이미지는 영역이 스크롤돼도 제자리다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();

@@ -91,6 +91,7 @@ pub fn refreshForFocus(self: *AppSession) void {
         self.editor_outline.interaction = .{};
         return;
     }
+    if (self.anyModalOverlayOpen() or self.chrome_host.notice.open) cancelPointer(self);
     const state = &self.editor_outline;
     const key = currentKey(self);
     if (!std.meta.eql(state.key, key)) {
@@ -161,6 +162,15 @@ pub fn setScroll(self: *AppSession, offset: i64) void {
     }
 }
 
+/// 다른 입력 주인이 이벤트를 가져가면 예전 누름을 재사용하지 않는다.
+pub fn cancelPointer(self: *AppSession) void {
+    const state = &self.editor_outline;
+    if (state.interaction.capture != null or state.interaction.hovered != null or state.interaction.focused != null) {
+        state.interaction = .{};
+        self.metal_dirty = true;
+    }
+}
+
 pub fn clearHover(self: *AppSession) void {
     if (self.editor_outline.interaction.hovered != null) {
         self.editor_outline.interaction.hovered = null;
@@ -180,8 +190,15 @@ pub fn pointer(self: *AppSession, phase: chrome.ui.interaction.UiPointerPhase, x
         state.interaction = .{};
         return;
     };
-    const dispatched = chrome.ui.interaction.dispatch(&state.interaction, .{ .entries = state.entries.items, .generation = state.published_generation }, .{
-        .phase = phase,
+    const tree = chrome.ui.tree.UiRectTree{ .entries = state.entries.items, .generation = state.published_generation };
+    var resolved_phase = phase;
+    // 공통 capture는 바깥 up도 전달한다. 행 활성화는 누른 동작 위에서 놓았을 때만 허용한다.
+    if (phase == .up) if (state.interaction.capture) |capture| {
+        const hit = chrome.ui.interaction.hitAction(tree, x, y);
+        if (hit == null or hit.?.id != capture.id or hit.?.action_id != capture.action_id) resolved_phase = .cancel;
+    };
+    const dispatched = chrome.ui.interaction.dispatch(&state.interaction, tree, .{
+        .phase = resolved_phase,
         .x_px = x,
         .y_px = y,
         .timestamp_ns = 0,

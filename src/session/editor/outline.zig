@@ -11,7 +11,7 @@ pub const Symbol = struct {
 pub const Item = struct {
     symbol: Symbol,
     parent: ?usize = null,
-    depth: u16 = 0,
+    depth: u32 = 0,
     expandable: bool = false,
     collapsed: bool = false,
 };
@@ -77,7 +77,7 @@ pub const Model = struct {
         if (index >= self.items.items.len or !self.items.items[index].expandable) return false;
         self.items.items[index].collapsed = !self.items.items[index].collapsed;
         self.visible.clearRetainingCapacity();
-        var hidden_below: ?u16 = null;
+        var hidden_below: ?u32 = null;
         for (self.items.items, 0..) |item, i| {
             if (hidden_below) |depth| {
                 if (item.depth > depth) continue;
@@ -160,4 +160,75 @@ fn replaceFailure(allocator: std.mem.Allocator) !void {
 
 test "outline replacement allocation failures leave the previous snapshot intact" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, replaceFailure, .{});
+}
+
+test "outline 깊은 계층도 접힘에서 자식을 남기지 않는다" {
+    const n = 65538;
+    const a = std.testing.allocator;
+    const symbols = try a.alloc(Symbol, n);
+    defer a.free(symbols);
+    for (symbols, 0..) |*s, i| s.* = .{ .label = "x", .start = @intCast(i), .end = @intCast(n * 2 - i), .target = @intCast(i) };
+    var model: Model = .{};
+    defer model.deinit(a);
+    try model.replace(a, symbols, n * 2);
+    try std.testing.expect(model.toggle(65535));
+    try std.testing.expectEqual(@as(usize, 65536), model.visible.items.len);
+}
+
+test "outline 섞인 입력과 반복 접힘을 별도 부모 모델과 대조한다" {
+    const n = 127;
+    var canonical: [n]Symbol = undefined;
+    canonical[0] = .{ .label = "same", .start = 0, .end = 1024, .target = 0 };
+    for (1..n) |i| {
+        const parent = canonical[(i - 1) / 2];
+        const middle = parent.start + (parent.end - parent.start) / 2;
+        const start = if (i % 2 == 1) parent.start + 1 else middle;
+        canonical[i] = .{ .label = "same", .start = start, .end = if (i % 2 == 1) middle else parent.end - 1, .target = start };
+    }
+    for (0..5) |seed| {
+        var random = std.Random.DefaultPrng.init(seed);
+        var shuffled = canonical;
+        random.random().shuffle(Symbol, &shuffled);
+        var model: Model = .{};
+        defer model.deinit(std.testing.allocator);
+        try model.replace(std.testing.allocator, &shuffled, 1024);
+        var model_for_id: [n]usize = undefined;
+        var id_for_model: [n]usize = undefined;
+        for (model.items.items, 0..) |item, index| {
+            for (canonical, 0..) |sym, id| if (sym.start == item.symbol.start) {
+                model_for_id[id] = index;
+                id_for_model[index] = id;
+                break;
+            };
+        }
+        var collapsed = [_]bool{false} ** n;
+        for (0..250) |_| {
+            const id = random.random().uintLessThan(usize, n);
+            const expandable = id * 2 + 1 < n;
+            try std.testing.expectEqual(expandable, model.toggle(model_for_id[id]));
+            if (expandable) collapsed[id] = !collapsed[id];
+            var visible: usize = 0;
+            for (model.items.items, 0..) |item, index| {
+                const original = id_for_model[index];
+                var cursor = original;
+                var hidden = false;
+                var depth: u32 = 0;
+                // 오라클은 범위 정렬이나 모델의 depth를 쓰지 않고 생성한 이진 트리의 부모를 따른다.
+                while (cursor != 0) {
+                    cursor = (cursor - 1) / 2;
+                    hidden = hidden or collapsed[cursor];
+                    depth += 1;
+                }
+                try std.testing.expectEqual(depth, item.depth);
+                const parent: ?usize = if (original == 0) null else model_for_id[(original - 1) / 2];
+                try std.testing.expectEqual(parent, item.parent);
+                if (!hidden) {
+                    try std.testing.expect(visible < model.visible.items.len);
+                    try std.testing.expectEqual(index, model.visible.items[visible]);
+                    visible += 1;
+                }
+            }
+            try std.testing.expectEqual(visible, model.visible.items.len);
+        }
+    }
 }

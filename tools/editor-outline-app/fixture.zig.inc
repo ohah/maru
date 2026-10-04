@@ -51,3 +51,12 @@ export fn maru_editor_outline_coordinate(index: u32, disclosure: bool, axis: u32
     const rect = tree.entries[entry].rect;
     return if (axis == 0) rect.x + rect.width / 2 else rect.y + rect.height / 2;
 }
+export fn maru_editor_outline_cancel_probe() callconv(.c) bool {
+    const self = editor_outline_session orelse return false;
+    const term = pane_ops.activePane(self).activeTerm();
+    const selection = term.rt.editor_selection orelse return false;
+    const passed = self.editor_outline.interaction.capture == null and
+        self.editor_nav_back.items.len == 0 and selection.focus == 0;
+    std.debug.print("EDITOR_OUTLINE_CANCEL passed={} caret={d} history={d}\n", .{ passed, selection.focus, self.editor_nav_back.items.len });
+    return passed;
+}

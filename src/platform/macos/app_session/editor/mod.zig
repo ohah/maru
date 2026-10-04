@@ -51050,3 +51050,180 @@ test "OUTLINE10 지난 action은 편집과 도크 재진입 뒤 직접 전달해
     try testing.expectEqualDeep(before, fx.term.rt.editor_selection.?);
     try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
 }
+
+test "OUTLINE11 누른 행 밖에서 놓으면 이동하지 않고 같은 행 클릭은 한 번 이동한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const row = try outlinePoint(&fx, 1);
+    const x = row.x + row.width / 2;
+    const y = row.y + row.height / 2;
+    fx.session.mouse(1, x, y, 0, 0);
+    fx.session.mouse(2, 0, 0, 0, 0);
+    fx.session.mouse(3, 0, 0, 0, 0);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    try testing.expect(!fx.session.mouse_drag_selecting);
+    fx.session.mouse(1, x, y, 0, 0);
+    fx.session.mouse(3, x, y, 0, 0);
+    try testing.expectEqual(@as(usize, fx.session.editor_outline.model.items.items[1].symbol.target), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+}
+
+test "OUTLINE12 모달에 끊긴 누름은 모달이 닫힌 뒤 뒤늦게 놓아도 실행하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const row = try outlinePoint(&fx, 1);
+    const x = row.x + row.width / 2;
+    const y = row.y + row.height / 2;
+    fx.session.mouse(1, x, y, 0, 0);
+    fx.session.showNotice("outline interrupted");
+    fx.session.mouse(3, x, y, 0, 0);
+    fx.session.chrome_host.notice.dismiss();
+    fx.session.mouse(3, x, y, 0, 0);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    fx.session.mouse(1, x, y, 0, 0);
+    fx.session.mouse(3, x, y, 0, 0);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+}
+
+test "OUTLINE13 발행 중 어느 할당이 실패해도 옛 동작을 거두고 재시도할 수 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var reached_success = false;
+    for (0..32) |fail_index| {
+        var fx = try outlineFixture(false);
+        defer fx.deinit(testing.allocator);
+        const row = try outlinePoint(&fx, 1);
+        outline_test_ops.pointer(fx.session, .down, row.x + 70, row.y + 10);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        fx.session.allocator = failing.allocator();
+        const published = outline_test_ops.publish(fx.session);
+        fx.session.allocator = testing.allocator;
+        if (!failing.has_induced_failure) {
+            try testing.expect(published);
+            reached_success = true;
+            break;
+        }
+        try testing.expect(!published);
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_outline.entries.items.len);
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_outline.actions.items.len);
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_outline.accessibility.elements.items.len);
+        try testing.expect(fx.session.editor_outline.interaction.capture == null);
+        outline_test_ops.pointer(fx.session, .up, row.x + 70, row.y + 10);
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+        try testing.expect(outline_test_ops.publish(fx.session));
+        try testing.expect(fx.session.editor_outline.actions.items.len > 0);
+    }
+    try testing.expect(reached_success);
+}
+
+test "OUTLINE14 배치와 배율 및 창 포커스 교체는 이전 누름을 취소한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..4) |change| {
+        var fx = try outlineFixture(false);
+        defer fx.deinit(testing.allocator);
+        const row = try outlinePoint(&fx, 1);
+        const x = row.x + row.width / 2;
+        const y = row.y + row.height / 2;
+        fx.session.mouse(1, x, y, 0, 0);
+        switch (change) {
+            0 => {
+                _ = try fx.session.resize(1500, 900, 1000);
+            },
+            1 => fx.session.dispatchAppAction(.toggle_file_panel_dock_side),
+            2 => {
+                _ = try fx.session.resize(1200, 700, 2000);
+            },
+            3 => {
+                fx.session.focusChanged(false);
+                fx.session.focusChanged(true);
+            },
+            else => unreachable,
+        }
+        fx.session.mouse(3, x, y, 0, 0);
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+        const next = try outlinePoint(&fx, 1);
+        fx.session.mouse(1, next.x + next.width / 2, next.y + next.height / 2, 0, 0);
+        fx.session.mouse(3, next.x + next.width / 2, next.y + next.height / 2, 0, 0);
+        try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+    }
+}
+
+test "OUTLINE15 접근성 스냅숏의 부분 할당 실패는 임시 라벨을 해제한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    var snapshot: @import("../accessibility.zig").Snapshot = .{};
+    defer snapshot.deinit(testing.allocator);
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    snapshot.rebuild(failing.allocator(), fx.session.editor_outline.entries.items, 1);
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try testing.expectEqual(@as(usize, 0), snapshot.elements.items.len);
+    // 기존 소비자는 실패를 무시해도 직전 스냅숏을 잃지 않는다. checked 경로 추가가 이 계약을 바꾸지 않는다.
+    snapshot.rebuild(testing.allocator, fx.session.editor_outline.entries.items, 2);
+    const previous = snapshot.elements.items[0];
+    const count = snapshot.elements.items.len;
+    const labels = std.hash.Wyhash.hash(0, snapshot.strings.items);
+    var next_failure = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    snapshot.rebuild(next_failure.allocator(), fx.session.editor_outline.entries.items, 3);
+    try testing.expect(next_failure.has_induced_failure);
+    try testing.expectEqual(next_failure.allocated_bytes, next_failure.freed_bytes);
+    try testing.expectEqual(@as(u64, 2), snapshot.generation);
+    try testing.expectEqual(count, snapshot.elements.items.len);
+    try testing.expectEqualDeep(previous, snapshot.elements.items[0]);
+    try testing.expectEqual(labels, std.hash.Wyhash.hash(0, snapshot.strings.items));
+}
+
+test "OUTLINE16 실제 심볼 응답은 순번과 편집 버전을 확인하고 빈 응답은 구문 목록을 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const response = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"name":"alpha","kind":12,"range":{"start":{"line":0,"character":0},"end":{"line":1,"character":0}},"selectionRange":{"start":{"line":0,"character":7},"end":{"line":0,"character":12}}}]
+    , .{});
+    defer response.deinit();
+    const lsp = &fx.term.rt.editor_symbols;
+    fx.term.rt.editorDocument().notifications.lsp_version = 1;
+    lsp.waiting = true;
+    lsp.waiting_seq = 42;
+    lsp.waiting_version = 1;
+    symbols_client.onResponse(fx.session, fx.term, 41, response.value, false, .utf8);
+    try testing.expect(lsp.waiting);
+    try testing.expect(outline_test_ops.publish(fx.session));
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_outline.model.items.items.len);
+    symbols_client.onResponse(fx.session, fx.term, 42, response.value, false, .utf8);
+    const row = try outlinePoint(&fx, 0);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_outline.model.items.items.len);
+    try testing.expectEqualStrings("alpha", fx.session.editor_outline.model.items.items[0].symbol.label);
+    outline_test_ops.pointer(fx.session, .down, row.x + 70, row.y + 10);
+    lsp.waiting = true;
+    lsp.waiting_seq = 43;
+    lsp.waiting_version = 1;
+    try testing.expect(insertText(fx.session, fx.term, "// moved\n"));
+    // 서버 프로세스 없이 실제 응답 해석기를 검사한다. 전송 완료한 새 문서 버전만 외부 경계에서 제공한다.
+    fx.term.rt.editorDocument().notifications.lsp_version = 2;
+    const selection = fx.term.rt.editor_selection.?;
+    symbols_client.onResponse(fx.session, fx.term, 43, response.value, false, .utf8);
+    try testing.expectEqual(@as(u64, 1), lsp.dropped_stale);
+    outline_test_ops.pointer(fx.session, .up, row.x + 70, row.y + 10);
+    try testing.expectEqualDeep(selection, fx.term.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_outline.model.items.items.len);
+    try testing.expectEqual(@as(u32, 40), fx.session.editor_outline.model.items.items[1].symbol.target);
+    const empty = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[]", .{});
+    defer empty.deinit();
+    lsp.waiting = true;
+    lsp.waiting_seq = 44;
+    lsp.waiting_version = 2;
+    symbols_client.onResponse(fx.session, fx.term, 44, empty.value, false, .utf8);
+    try testing.expectEqual(@as(u64, 1), lsp.applied_empty);
+    const next = try outlinePoint(&fx, 1);
+    outline_test_ops.pointer(fx.session, .down, next.x + 70, next.y + 10);
+    outline_test_ops.pointer(fx.session, .up, next.x + 70, next.y + 10);
+    try testing.expectEqual(@as(usize, 40), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+}

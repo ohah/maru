@@ -32,12 +32,14 @@
 //!                        1 초 뒤 취소로 답한다), 답하면(none) 다음 끌기가 되고, 앞 번호의 늦은 끝은 버린다
 //!   drag-out-closed      끌기 중 그 브라우저가 닫혀도 host 가 살고 다음 끌기가 된다
 //!
-//! W6d③ 이미지 파일(Finder 에 놓으면 만들 파일):
-//!   drag-out-image-file  PNG 이미지 끌기 — 파일 이름(주소의 이름)과 내용(서버가 준 바이트 그대로)이 오고 주소도 온다
+//! W6d③ 이미지 파일(Finder 에 놓으면 만들 파일 — 내용은 청할 때만):
+//!   drag-out-image-file  PNG 이미지 끌기 — 파일 이름과 크기가 오고 내용은 오지 않는다, 끌기가 끝난 뒤 청하면 내용(서버 바이트 그대로)과
+//!                        끝(크기·성공)이 온다, 주소도 간다
 //!   drag-out-image-name  `Content-Disposition: filename="../../evil.command"` 이미지 — Chromium 이 `_.._evil.png` 로 바꿔 준다(이때는
 //!                        링크로 보지 않아 주소가 없다)
-//!   drag-out-image-big   6 MiB 이미지 — 내용이 조각으로 다 온다
-//!   drag-out-image-cap   40 MiB 이미지(상한 32 MiB 밖) — 파일은 오지 않고 주소만 간다
+//!   drag-out-image-big   6 MiB 이미지 — 청하면 조각으로 다 온다
+//!   drag-out-image-cap   40 MiB 이미지(상한 32 MiB 밖) — 크기 0·이름 없음, 청해도 실패, 주소는 간다
+//!   drag-out-image-stale 다음 끌기가 시작되면 앞 끌기의 파일은 놓였다 — 청하면 실패
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -79,6 +81,7 @@ const Watch = struct {
     out_file_name: std.ArrayList(u8) = .empty,
     out_file: std.ArrayList(u8) = .empty,
     out_piece_drag: u32 = 0,
+    file_ready: ?protocol.message.DragFileReady = null,
 
     fn title(self: *const Watch) []const u8 {
         return self.title_buf[0..self.title_len];
@@ -128,6 +131,9 @@ const Watch = struct {
             .drag_out => |v| {
                 self.out = v;
                 self.outs += 1;
+            },
+            .drag_file_ready => |v| {
+                self.file_ready = v;
             },
             else => {},
         }
@@ -565,6 +571,7 @@ fn imageFileChecks(report: Report, w: *Watch, host: *Host, port: u16) !void {
         .{ .y = 204, .name = "drag-out-image-big" },
         .{ .y = 284, .name = "drag-out-image-cap" },
     };
+    var last_drag: u32 = 0;
     for (cases) |case| {
         try w.load(port);
         // 큰 이미지는 받는 데 시간이 걸린다 — 그림이 뜰 때까지 조금 더.
@@ -572,20 +579,41 @@ fn imageFileChecks(report: Report, w: *Watch, host: *Host, port: u16) !void {
         const before = w.outs;
         try pressDrag(w, .{ .x = 544, .y = case.y }, .{ .x = 544, .y = case.y + 120 }, 0);
         const started = untilOut(w, before, 6_000);
+        const out = w.out orelse protocol.message.DragOut{ .browser = 0, .drag = 0, .allowed = 0, .point = .{ .x = 0, .y = 0 } };
         const name = w.out_file_name.items;
-        const contents = w.out_file.items;
         const url_ok = std.mem.indexOf(u8, w.out_url.items, "/img/") != null;
-        // `Content-Disposition` 으로 이름을 준 이미지는 Chromium 이 링크로 보지 않는다(주소 없음 — 실측). 다른 셋은 주소도 간다.
-        const ok = started and (url_ok or case.y == 124) and switch (case.y) {
-            44 => std.mem.eql(u8, name, "cat.png") and std.mem.eql(u8, contents, http.red_png),
-            124 => std.mem.eql(u8, name, "_.._evil.png") and std.mem.eql(u8, contents, http.red_png),
-            204 => std.mem.eql(u8, name, "six.svg") and contents.len == 6 * 1024 * 1024 and std.mem.startsWith(u8, contents, "<svg"),
-            else => name.len == 0 and contents.len == 0,
-        };
-        if (w.out) |o| try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = o.drag, .point = .{ .x = 0, .y = 0 }, .operation = 0 } });
+        const none_yet = w.out_file.items.len == 0; // 청하기 전에는 내용이 오지 않는다
+        // 끌기를 끝낸 뒤 청한다 — Finder 는 놓은 뒤 청한다.
+        try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = out.drag, .point = .{ .x = 0, .y = 0 }, .operation = 1 } });
         w.pump(200);
-        report(ok, case.name, std.fmt.bufPrint(&detail, "끌기 {} · 주소 {} 「{s}」 · 파일 「{s}」 {d} 바이트", .{ started, url_ok, w.out_url.items, name, contents.len }) catch "");
+        w.file_ready = null;
+        try host.send(.{ .drag_file_request = .{ .browser = browser_id, .drag = out.drag } });
+        const answered = w.until(6_000, {}, struct {
+            fn f(x: *const Watch, _: void) bool {
+                return x.file_ready != null;
+            }
+        }.f);
+        const ready = w.file_ready orelse protocol.message.DragFileReady{ .browser = 0, .drag = 0, .size = 0, .ok = false };
+        const contents = w.out_file.items;
+        const ok = started and none_yet and answered and (url_ok or case.y == 124) and switch (case.y) {
+            44 => std.mem.eql(u8, name, "cat.png") and out.file_size == http.red_png.len and ready.ok and ready.size == out.file_size and std.mem.eql(u8, contents, http.red_png),
+            124 => std.mem.eql(u8, name, "_.._evil.png") and ready.ok and std.mem.eql(u8, contents, http.red_png),
+            204 => std.mem.eql(u8, name, "six.svg") and out.file_size == 6 * 1024 * 1024 and ready.ok and contents.len == 6 * 1024 * 1024 and std.mem.startsWith(u8, contents, "<svg"),
+            else => name.len == 0 and out.file_size == 0 and !ready.ok and contents.len == 0,
+        };
+        report(ok, case.name, std.fmt.bufPrint(&detail, "끌기 {} · 주소 {} · 파일 「{s}」 크기 {d} · 청하기 전 내용 없음 {} · 답 {} ok {} {d} 바이트", .{ started, url_ok, name, out.file_size, none_yet, answered, ready.ok, contents.len }) catch "");
+        if (case.y == 44) last_drag = out.drag;
     }
+    // 앞 끌기(cat.png)의 파일은 그 뒤 끌기들이 시작되며 놓였다 — 청하면 실패.
+    w.file_ready = null;
+    try host.send(.{ .drag_file_request = .{ .browser = browser_id, .drag = last_drag } });
+    _ = w.until(3_000, {}, struct {
+        fn f(x: *const Watch, _: void) bool {
+            return x.file_ready != null;
+        }
+    }.f);
+    const stale = w.file_ready orelse protocol.message.DragFileReady{ .browser = 0, .drag = 1, .size = 0, .ok = true };
+    report(last_drag != 0 and !stale.ok and stale.drag == last_drag, "drag-out-image-stale", std.fmt.bufPrint(&detail, "앞 끌기 {d} 의 파일 청하기 → ok {}(false 여야)", .{ last_drag, stale.ok }) catch "");
 }
 
 /// 다른 브라우저의 마지막 제목(Watch 는 판정 브라우저 것만 든다 — 그동안 온 메시지에서 찾는다).

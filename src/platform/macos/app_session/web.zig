@@ -1304,7 +1304,32 @@ pub fn osrDragOutTake(self: *AppSession) ?OsrDragOutInfo {
     return null;
 }
 
-pub const OsrDragOutPart = enum(u32) { text = 0, html = 1, url = 2, url_title = 3, image_png = 4, file_name = 5, file_contents = 6 };
+pub const OsrDragOutPart = enum(u32) { text = 0, html = 1, url = 2, url_title = 3, image_png = 4, file_name = 5 };
+
+/// Finder 가 파일을 청했다(W6d③) — sidecar 에 그 번호의 내용을 청한다.
+pub fn osrDragFileRequest(self: *AppSession, drag: u32) bool {
+    return web_osr.requestDragFile(self.allocator, drag);
+}
+
+pub const OsrDragFile = struct { state: web_osr.FileFetchState, bytes: []const u8 };
+
+pub fn osrDragFile(drag: u32) OsrDragFile {
+    const got = web_osr.dragFile(drag);
+    return .{ .state = got.state, .bytes = got.bytes };
+}
+
+pub fn osrDragFileRelease(self: *AppSession, drag: u32) void {
+    web_osr.releaseDragFile(self.allocator, drag);
+}
+
+/// 가져간 끌기가 받아 둔 파일 내용의 크기(W6d③ — 안전한 이름이 없으면 0).
+pub fn osrDragOutFileSize(self: *AppSession, drag: u32) u32 {
+    const shown = self.osr_drag_out orelse return 0;
+    if (shown.drag != drag) return 0;
+    const d = web_osr.dragOut(shown.surface, drag) orelse return 0;
+    if (d.file_size == 0 or maru.session.web_osr_drag_file.safeFileName(d.file_name.items, &safe_name_buf) == null) return 0;
+    return d.file_size;
+}
 
 /// 끌어낸 이미지로 만들 파일의 안전한 이름(W6d③ — `web_osr_drag_file`). 이미지 확장자가 아니면 빈 것 — 그러면 파일 내용도 주지 않는다.
 var safe_name_buf: [maru.session.web_osr_drag_file.max_name_bytes]u8 = undefined;
@@ -1320,8 +1345,7 @@ pub fn osrDragOutPart(self: *AppSession, drag: u32, part: OsrDragOutPart) []cons
         .url => d.url.items,
         .url_title => d.url_title.items,
         .image_png => d.png.items,
-        .file_name => maru.session.web_osr_drag_file.safeFileName(d.file_name.items, &safe_name_buf) orelse "",
-        .file_contents => if (maru.session.web_osr_drag_file.safeFileName(d.file_name.items, &safe_name_buf) != null) d.file_contents.items else "",
+        .file_name => if (d.file_size == 0) "" else maru.session.web_osr_drag_file.safeFileName(d.file_name.items, &safe_name_buf) orelse "",
     };
 }
 

@@ -508,6 +508,12 @@ pub fn checkDragOut(value: message.DragOut) Error!void {
     if (value.image_width > max_view_extent or value.image_height > max_view_extent) return error.InvalidDrag;
     if ((value.image_width == 0) != (value.image_height == 0)) return error.InvalidDrag;
     if (value.image_width == 0 and (value.hotspot.x != 0 or value.hotspot.y != 0)) return error.InvalidDrag;
+    if (value.file_size > message.max_drag_file_bytes) return error.InvalidDrag;
+}
+
+/// 파일 내용 끝(W6d③): 번호는 0 이 아니고, 크기는 상한 안이며 실패면 0.
+pub fn checkDragFileReady(value: message.DragFileReady) Error!void {
+    if (value.drag == 0 or value.size > message.max_drag_file_bytes or (!value.ok and value.size != 0)) return error.InvalidDrag;
 }
 
 pub fn checkDragSourceEnd(value: message.DragSourceEnd) Error!void {

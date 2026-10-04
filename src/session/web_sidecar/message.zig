@@ -53,6 +53,9 @@ pub const Tag = enum(u8) {
     /// 페이지에서 시작한 끌기(W6d② — `drag_out`)가 끝났다 — 놓인 자리(그 탭 view DIP)와 받은 동작(0 = 취소). sidecar 는
     /// CEF `drag_source_ended_at`·`drag_source_system_drag_ended` 를 부르고 쥔 끌기 데이터를 놓는다. 끌기 번호가 지금 끌기가 아니면 버린다.
     drag_source_end = 28,
+    /// 끌어낸 이미지의 파일 내용을 청한다(W6d③ — Finder 가 놓은 뒤 파일을 청할 때만). sidecar 는 끌기 시작 때 받아 둔 그 번호의 내용을
+    /// `drag_out_data`(파일 내용) 조각으로 보내고 `drag_file_ready` 로 끝낸다.
+    drag_file_request = 29,
 
     hello_ack = 32,
     browser_created = 33,
@@ -105,6 +108,8 @@ pub const Tag = enum(u8) {
     /// `drag_source_end` 로 답한다(떼기를 이미 했으면 곧바로 취소로). 끌기는 sidecar 에 하나 — 새 끌기가 오면 앞 끌기는 sidecar 가
     /// 취소로 끝냈다.
     drag_out = 54,
+    /// 청한 파일 내용의 끝(W6d③) — 보낸 크기와 성공 여부. 그 번호의 내용이 없으면(다음 끌기가 시작됐다·브라우저가 닫혔다) 실패.
+    drag_file_ready = 55,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -616,8 +621,8 @@ pub const DragTarget = struct {
     allowed: u32 = 0,
 };
 
-/// 페이지가 시작한 끌기의 조각 종류(W6d②). 그림은 PNG 바이트(조각을 이어 붙인다). 이미지 끌기면 파일 이름과 파일 내용(W6d③ —
-/// Finder 에 놓으면 그 파일을 만든다. 이름은 Chromium 이 정한 것, 내용은 바이트 그대로 이어 붙인다).
+/// 페이지가 시작한 끌기의 조각 종류(W6d②). 그림은 PNG 바이트(조각을 이어 붙인다). 이미지 끌기면 파일 이름(W6d③ — Chromium 이
+/// 정한 것, `drag_out` 앞에), 파일 내용은 maru 가 청할 때만(`drag_file_request` — 바이트 그대로 이어 붙인다).
 pub const DragOutDataKind = enum(u8) {
     text = 0,
     html = 1,
@@ -647,6 +652,24 @@ pub const DragOut = struct {
     hotspot: Point = .{ .x = 0, .y = 0 },
     image_width: u32 = 0,
     image_height: u32 = 0,
+    /// 이미지 끌기면 sidecar 가 받아 둔 파일 내용의 크기(W6d③ — `max_drag_file_bytes` 안, 0 = 파일 없음).
+    file_size: u32 = 0,
+};
+
+/// 끌어낸 이미지 파일 내용 상한(W6d③) — 넘으면 파일 없이(주소만) 간다.
+pub const max_drag_file_bytes: u32 = 32 * 1024 * 1024;
+
+pub const DragFileRequest = struct {
+    browser: BrowserId,
+    drag: u32,
+};
+
+pub const DragFileReady = struct {
+    browser: BrowserId,
+    drag: u32,
+    /// 보낸 크기(실패면 0).
+    size: u32,
+    ok: bool,
 };
 
 pub const DragSourceEnd = struct {
@@ -816,6 +839,7 @@ pub const Message = union(Tag) {
     drag_data: DragData,
     drag_target: DragTarget,
     drag_source_end: DragSourceEnd,
+    drag_file_request: DragFileRequest,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -840,6 +864,7 @@ pub const Message = union(Tag) {
     drag_operation: DragOperation,
     drag_out_data: DragOutData,
     drag_out: DragOut,
+    drag_file_ready: DragFileReady,
 };
 
 test "tags split by direction at 32" {

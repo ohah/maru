@@ -976,8 +976,9 @@ sys.exit(0 if ok else 1)
 PY
 
 # ── W6d③: 이미지를 끌어내 파일로 ─────────────────────────────────────────────────────────────────────────────
-# 판정 모드는 Finder 대신 대본 `dragout promise <폴더>` 로 파일 약속을 받는다(대리자가 그 폴더의 안전한 이름으로 쓴다). 같은 폴더에 두 번
-# 받아 덮어쓰지 않는지, 쓴 파일이 서버가 준 바이트 그대로인지, 내려받은 파일 표지(quarantine)가 붙었는지 본다.
+# 판정 모드는 Finder 대신 대본 `dragout promise <폴더>` 로 파일 약속을 받는다 — 끌기를 끝낸 뒤(Finder 는 놓은 뒤 청한다) 대리자가 그
+# 대기열에서 sidecar 에 내용을 청해(끌기 때는 이름·크기만 왔다) 그 폴더의 안전한 이름으로 쓴다. 같은 폴더에 두 번 받아 덮어쓰지 않는지,
+# 쓴 파일이 서버가 준 바이트 그대로인지, 내려받은 파일 표지(quarantine)가 붙었는지 본다.
 mkdir -p "$root/promise"
 cat > "$root/dragimg.txt" <<SCRIPT
 sleep 7000
@@ -991,15 +992,15 @@ view drag 0.75 0.61 0 0
 sleep 40
 view drag 0.75 0.62 0 0
 sleep 900
-dragout promise $root/promise
-sleep 200
-dragout promise $root/promise
-sleep 200
 dragout cancel
-sleep 600
+sleep 300
+dragout promise $root/promise
+sleep 1500
+dragout promise $root/promise
+sleep 1500
 SCRIPT
 : > "$root/requests.log"
-run_app /dnd-app 14000 "$root/dragimg.summary" MARU_WEB_OSR_TEST_INPUT="$root/dragimg.txt" MARU_WEB_OSR_TEST_DRAG_OUT=1
+run_app /dnd-app 16000 "$root/dragimg.summary" MARU_WEB_OSR_TEST_INPUT="$root/dragimg.txt" MARU_WEB_OSR_TEST_DRAG_OUT=1
 grep -a '^osr-test dragout' "$root/app-dnd-app.log" > "$root/dragimg.report" || true
 cat "$root/dragimg.report"
 python3 - "$root/dragimg.report" "$root/promise" <<'PY' || fail "dragging an image out as a file did not behave as expected"
@@ -1022,7 +1023,7 @@ got = open(path, 'rb').read() if os.path.exists(path) else b''
 check(got == want and os.listdir(folder) == ['cat.png'], f'the written file is the served image, byte for byte, and nothing else is in the folder ({len(got)} bytes, {os.listdir(folder)})')
 q = subprocess.run(['xattr', '-p', 'com.apple.quarantine', path], capture_output=True, text=True)
 # 표지 값은 「플래그;시각;앱;UUID」 — 셸에서 띄운(번들 아닌) 시험 앱은 앱 이름 칸을 macOS 가 비운다. 표지가 있는지만 본다.
-check(q.returncode == 0 and len(q.stdout.strip().split(';')) >= 3, f'the file carries the download quarantine mark (opening it asks macOS first) ({q.stdout.strip()!r})')
+check(q.returncode == 0 and len(q.stdout.strip().split(';')) >= 3, f'the file carries the download quarantine mark — its origin is recorded ({q.stdout.strip()!r})')
 sys.exit(0 if ok else 1)
 PY
 

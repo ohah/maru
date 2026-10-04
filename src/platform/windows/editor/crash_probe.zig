@@ -8,6 +8,7 @@ const maru = @import("maru");
 const editor = maru.session.editor;
 const grants = @import("document_grant.zig");
 const controller = @import("save_controller.zig");
+const backups = @import("backup_store.zig");
 const identity = @import("identity.zig");
 const w = std.os.windows;
 const abi = maru.win32_abi;
@@ -33,12 +34,13 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     const executable = args.next() orelse return error.MissingExecutable;
     if (args.next()) |mode| {
-        if (!std.mem.eql(u8, mode, "worker")) return error.InvalidMode;
+        const backup_worker = std.mem.eql(u8, mode, "backup-worker");
+        if (!backup_worker and !std.mem.eql(u8, mode, "worker")) return error.InvalidMode;
         const path = args.next() orelse return error.MissingRoot;
         const checkpoint = std.meta.stringToEnum(Checkpoint, args.next() orelse return error.MissingCheckpoint) orelse return error.InvalidCheckpoint;
         const variant = try std.fmt.parseInt(usize, args.next() orelse return error.MissingVariant, 10);
         if (args.next() != null or variant >= bodies.len) return error.InvalidArguments;
-        try worker(init, path, checkpoint, bodies[variant]);
+        if (backup_worker) try backupWorker(init, path, bodies[variant]) else try worker(init, path, checkpoint, bodies[variant]);
         return error.WorkerReturned;
     }
     const child_exe = try std.Io.Dir.cwd().realPathFileAlloc(init.io, executable, init.gpa);
@@ -49,6 +51,117 @@ pub fn main(init: std.process.Init) !void {
         total += 1;
     };
     std.debug.print("win32_save_crash_ok=true killed_processes={d} checkpoints=6 variants=2 identity=true security=true streams=true retry=true\n", .{total});
+    for (0..bodies.len) |variant| try runBackupOnce(init, child_exe, variant);
+    std.debug.print("win32_backup_crash_ok=true killed_processes=2 recovered_dirty=true original_untouched=true native_save=true external_cas=true\n", .{});
+}
+
+fn backupWorker(init: std.process.Init, path: []const u8, body: []const u8) !void {
+    var root = try std.Io.Dir.openDirAbsolute(init.io, path, .{});
+    defer root.close(init.io);
+    var registry: editor.document_registry.Registry = .{ .allocator = init.gpa };
+    defer registry.deinit() catch unreachable;
+    var opened = try grants.Grant.openExperimental(init.gpa, init.io, root, "file.txt", &registry, 4096);
+    defer opened.grant.deinit(init.io);
+    defer _ = registry.release(opened.view) catch unreachable;
+    try replaceBody(init.gpa, &registry, opened.view, body);
+    var store = try backups.Store.open(init.gpa, root, "backups", 4096);
+    defer store.deinit(init.io);
+    const state = registry.get(opened.view).?;
+    try store.write(init.io, .{ .path = .{ .path = opened.grant.path, .disk_hash = state.opened.?.disk_hash } }, state.opened.?.file.content);
+    stop(init.io, .prepared);
+}
+
+fn runBackupOnce(init: std.process.Init, child_exe: []const u8, variant: usize) !void {
+    const a = init.gpa;
+    const io = init.io;
+    var random: [16]u8 = undefined;
+    try io.randomSecure(&random);
+    var name_buffer: [128]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buffer, ".zig-cache/win32-backup-crash-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDir(io, name, .default_dir);
+    defer cwd.deleteDir(io, name) catch unreachable;
+    var root = try cwd.openDir(io, name, .{});
+    defer root.close(io);
+    try root.writeFile(io, .{ .sub_path = "file.txt", .data = original });
+    defer root.deleteFile(io, "file.txt") catch unreachable;
+    var initial_store = try backups.Store.open(a, root, "backups", 4096);
+    initial_store.deinit(io);
+    defer root.deleteDir(io, "backups") catch unreachable;
+    var root_path: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try root.realPath(io, &root_path);
+    const path = try std.fs.path.join(a, &.{ root_path[0..root_len], "file.txt" });
+    defer a.free(path);
+    const doc: editor.backup.Doc = .{ .path = .{ .path = path, .disk_hash = editor.document_state.contentHash(original) } };
+    var record_name: [editor.backup.max_file_name_len]u8 = undefined;
+    const cleanup_name = try std.fs.path.join(a, &.{ "backups", editor.backup.fileName(&record_name, doc) });
+    defer a.free(cleanup_name);
+    defer root.deleteFile(io, cleanup_name) catch |err| {
+        if (err != error.FileNotFound) unreachable;
+    };
+    var variant_buffer: [8]u8 = undefined;
+    const variant_text = try std.fmt.bufPrint(&variant_buffer, "{d}", .{variant});
+    try killAt(io, &.{ child_exe, "backup-worker", root_path[0..root_len], "prepared", variant_text }, .prepared);
+    const untouched = try root.readFileAlloc(io, "file.txt", a, .limited(4096));
+    defer a.free(untouched);
+    if (!std.mem.eql(u8, original, untouched)) return error.BackupWroteOriginal;
+    const external = "\xef\xbb\xbfexternal-after-crash\r\n";
+    if (variant == 1) try root.writeFile(io, .{ .sub_path = "file.txt", .data = external });
+    var store = try backups.Store.open(a, root, "backups", 4096);
+    defer store.deinit(io);
+    var record = (try store.read(io, doc)) orelse return error.BackupMissingAfterCrash;
+    defer record.deinit();
+    if (!std.mem.eql(u8, bodies[variant], record.parsed.content)) return error.BackupBodyMismatch;
+    var registry: editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var opened = try grants.Grant.openExperimental(a, io, root, "file.txt", &registry, 4096);
+    defer _ = registry.release(opened.view) catch unreachable;
+    var saving = controller.Controller.take(&opened.grant);
+    defer saving.deinit(io) catch unreachable;
+    var view: editor.view_navigation.View = .{};
+    defer view.deinit(a);
+    const views = [_]editor.edit_commands.Participant{.{ .view = &view, .id = opened.view.id }};
+    const state = registry.get(opened.view).?;
+    try backups.restorePath(a, state, &record, &views, 0, 4096);
+    if (!state.opened.?.isDirty() or !std.mem.eql(u8, bodies[variant], state.opened.?.file.content) or state.opened.?.disk_hash != doc.path.disk_hash) return error.BackupRestoreMismatch;
+    if (variant == 0) {
+        try saving.prepare(io, opened.view, 4096);
+        const receipt = try saving.commit(io);
+        if (receipt.decision != .committed or receipt.acknowledgment_error != null or receipt.cleanup_error != null or state.opened.?.isDirty()) return error.BackupSaveMismatch;
+        const expected = try std.mem.concat(a, u8, &.{ "\xef\xbb\xbf", bodies[variant] });
+        defer a.free(expected);
+        const disk = try root.readFileAlloc(io, "file.txt", a, .limited(4096));
+        defer a.free(disk);
+        if (!std.mem.eql(u8, expected, disk)) return error.BackupSaveDiskMismatch;
+        try store.drop(io, doc);
+        if (try store.read(io, doc) != null) return error.BackupNotDropped;
+    } else {
+        if (saving.prepare(io, opened.view, 4096)) |_| return error.BackupOverwroteExternal else |err| {
+            if (err != error.SourceChanged) return err;
+        }
+        if (saving.status() != .idle or !state.opened.?.isDirty()) return error.BackupConflictStateMismatch;
+        var retained = (try store.read(io, doc)) orelse return error.BackupConflictLostRecord;
+        defer retained.deinit();
+        const disk = try root.readFileAlloc(io, "file.txt", a, .limited(4096));
+        defer a.free(disk);
+        if (!std.mem.eql(u8, external, disk)) return error.BackupOverwroteExternal;
+        // Fixture cleanup only: ordinary conflict handling retains this record.
+        try store.drop(io, doc);
+    }
+    std.debug.print("win32_backup_crash_variant={d} killed=true restored_dirty=true original_untouched=true save_or_conflict=true\n", .{variant});
+}
+
+fn killAt(io: std.Io, argv: []const []const u8, checkpoint: Checkpoint) !void {
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .close, .stdout = .pipe, .stderr = .inherit });
+    defer child.kill(io);
+    try waitCheckpoint(&child, checkpoint);
+    const handle = child.id orelse return error.MissingChild;
+    if (!TerminateProcess(handle, exit_code).toBool()) return error.TerminationFailed;
+    if (WaitForSingleObject(handle, deadline_ms) != 0) return error.TerminationTimeout;
+    var code: u32 = 0;
+    if (!GetExitCodeProcess(handle, &code).toBool() or code != exit_code) return error.WrongExitCode;
+    const term = try child.wait(io);
+    if (term != .exited or term.exited != exit_code) return error.WrongTermination;
 }
 
 fn replaceBody(a: std.mem.Allocator, registry: *editor.document_registry.Registry, lease: editor.document_registry.Lease, body: []const u8) !void {

@@ -110,6 +110,36 @@ fn trimSep(p: []const u8) []const u8 {
     return @import("path_shape.zig").trimTrailingSep(p);
 }
 
+/// Recovery content is durable user data, so cache overrides never select its
+/// location. Windows uses its native local-data root, macOS Application Support.
+pub fn editorBackupPathFor(allocator: std.mem.Allocator, os_tag: std.Target.Os.Tag, home: ?[]const u8, localappdata: ?[]const u8) std.mem.Allocator.Error!?[]u8 {
+    if (os_tag == .windows) {
+        const base = usable(.windows, localappdata) orelse return null;
+        const normalized = try @import("path_shape.zig").normalizeSeparatorsFor(.windows, allocator, base);
+        defer allocator.free(normalized);
+        return try std.fmt.allocPrint(allocator, "{s}/maru/editor-backups", .{trimSep(normalized)});
+    }
+    if (os_tag == .macos) {
+        const base = usable(.macos, home) orelse return null;
+        return try std.fmt.allocPrint(allocator, "{s}/Library/Application Support/maru/editor-backups", .{trimSep(base)});
+    }
+    return null;
+}
+
+test "editor backup paths are durable native data roots without a macOS fallback on Windows" {
+    const a = std.testing.allocator;
+    const windows = (try editorBackupPathFor(a, .windows, "/Users/mac", "C:\\Users\\user\\AppData\\Local\\")).?;
+    defer a.free(windows);
+    try std.testing.expectEqualStrings("C:/Users/user/AppData/Local/maru/editor-backups", windows);
+    const macos = (try editorBackupPathFor(a, .macos, "/Users/user/", "C:\\Local")).?;
+    defer a.free(macos);
+    try std.testing.expectEqualStrings("/Users/user/Library/Application Support/maru/editor-backups", macos);
+    try std.testing.expect(try editorBackupPathFor(a, .windows, "/Users/mac", null) == null);
+    try std.testing.expect(try editorBackupPathFor(a, .windows, "C:\\Home", "relative") == null);
+    try std.testing.expect(try editorBackupPathFor(a, .windows, "C:\\Home", "") == null);
+    try std.testing.expect(try editorBackupPathFor(a, .macos, "relative", null) == null);
+}
+
 /// 값이 홈으로 쓸 만한가 — 있고, 비어 있지 않고, **그 OS 기준 절대 경로**여야 한다.
 fn usable(os_tag: std.Target.Os.Tag, value: ?[]const u8) ?[]const u8 {
     const v = value orelse return null;

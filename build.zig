@@ -490,6 +490,19 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/support/artifacts.zig"),
         .target = target,
     });
+
+    // 기존 파일 찾기의 재사용 비용을 실제 파일로 잰다. 제품·기본 check에는 연결하지 않는다.
+    const project_search_probe = b.addExecutable(.{
+        .name = "maru-project-search-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/editor-project-search/native.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+    });
+    b.step("editor-project-search-probe", "Build the opt-in project search comparison probe")
+        .dependOn(&b.addInstallArtifact(project_search_probe, .{}).step);
     const session_host_product_options = b.addOptions();
     session_host_product_options.addOption(bool, "allow_validation_only_restore", false);
     const session_host_build_options_mod = session_host_product_options.createModule();

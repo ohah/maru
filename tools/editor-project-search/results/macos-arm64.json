@@ -1,0 +1,238 @@
+{
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "machine": "arm64",
+  "binary": "설치된 ripgrep 15.2.0 (실험용, 앱 번들 아님)",
+  "binary_bytes": 4030432,
+  "binary_sha256": "7c7d5b09c3a57de864500c65dc2e9c4d2a5e96a3fc7b7d5318480c19887a739b",
+  "probe_sha256": "f47dad812b76d2f8174595dcd0f1b77fbf95ef0c29c28f761fa8550626e0cf8f",
+  "version": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+NEON\nsimd(runtime):+NEON\n\nPCRE2 10.45 is available (JIT is available)\n",
+  "base_argv": [
+    "--no-config",
+    "--hidden",
+    "--no-require-git",
+    "--no-ignore-parent",
+    "--no-ignore-global",
+    "--crlf",
+    "--json",
+    "--glob",
+    "!**/.git/**",
+    "--glob",
+    "!**/.hg/**",
+    "--glob",
+    "!**/.svn/**"
+  ],
+  "checks": [
+    {
+      "name": "숨김 파일·중첩 ignore·되살리기·링크·바이너리·특수 파일명",
+      "passed": true
+    },
+    {
+      "name": "JSON bytes 본문 복호화",
+      "passed": true
+    },
+    {
+      "name": "한글 UTF-8 바이트 위치",
+      "passed": true
+    },
+    {
+      "name": "PCRE2 lookbehind 자동 선택",
+      "passed": true
+    },
+    {
+      "name": "PCRE2 역참조 자동 선택",
+      "passed": true
+    },
+    {
+      "name": "CRLF 줄 끝",
+      "passed": true
+    },
+    {
+      "name": "검색어를 옵션으로 해석하지 않음",
+      "passed": true
+    },
+    {
+      "name": "검색 결과 없음 exit 1",
+      "passed": true
+    },
+    {
+      "name": "잘못된 정규식 exit 2",
+      "passed": true
+    },
+    {
+      "name": "빈 매치 종료와 위치",
+      "passed": true
+    },
+    {
+      "name": "사용자 ripgrep config 격리",
+      "passed": true
+    },
+    {
+      "name": "명시 include가 ignore를 덮는 실제 우선순위",
+      "passed": true
+    },
+    {
+      "name": "실제 파일 검색 1",
+      "passed": true
+    },
+    {
+      "name": "실제 파일 검색 2",
+      "passed": true
+    },
+    {
+      "name": "실제 파일 검색 3",
+      "passed": true
+    },
+    {
+      "name": "실제 파일 검색 4",
+      "passed": true
+    },
+    {
+      "name": "실제 파일 검색 5",
+      "passed": true
+    },
+    {
+      "name": "빈 대안의 엔진 차이를 실제 기존 찾기와 대조",
+      "passed": true
+    },
+    {
+      "name": "PCRE2 강제만으로 빈 대안 반복 규칙이 맞지 않음",
+      "passed": true
+    },
+    {
+      "name": "단어 경계의 엔진 차이를 실제 기존 찾기와 대조",
+      "passed": true
+    },
+    {
+      "name": "후보 목록의 파일 개수 1",
+      "passed": true
+    },
+    {
+      "name": "기존 찾기로 실제 파일 검색 1",
+      "passed": true
+    },
+    {
+      "name": "후보 목록의 파일 개수 2",
+      "passed": true
+    },
+    {
+      "name": "기존 찾기로 실제 파일 검색 2",
+      "passed": true
+    },
+    {
+      "name": "후보 목록의 파일 개수 3",
+      "passed": true
+    },
+    {
+      "name": "기존 찾기로 실제 파일 검색 3",
+      "passed": true
+    },
+    {
+      "name": "후보 목록의 파일 개수 4",
+      "passed": true
+    },
+    {
+      "name": "기존 찾기로 실제 파일 검색 4",
+      "passed": true
+    },
+    {
+      "name": "후보 목록의 파일 개수 5",
+      "passed": true
+    },
+    {
+      "name": "기존 찾기로 실제 파일 검색 5",
+      "passed": true
+    },
+    {
+      "name": "취소 전 실제 출력 1",
+      "passed": true
+    },
+    {
+      "name": "취소 전 출력·실행 중 1",
+      "passed": true
+    },
+    {
+      "name": "취소한 자식 수거 1",
+      "passed": true
+    },
+    {
+      "name": "취소 전 실제 출력 2",
+      "passed": true
+    },
+    {
+      "name": "취소 전 출력·실행 중 2",
+      "passed": true
+    },
+    {
+      "name": "취소한 자식 수거 2",
+      "passed": true
+    },
+    {
+      "name": "취소 전 실제 출력 3",
+      "passed": true
+    },
+    {
+      "name": "취소 전 출력·실행 중 3",
+      "passed": true
+    },
+    {
+      "name": "취소한 자식 수거 3",
+      "passed": true
+    }
+  ],
+  "not_exercised": [
+    "파일 시스템이 잘못된 UTF-8 파일명을 거부함"
+  ],
+  "stress": {
+    "files": 2048,
+    "input_bytes": 67108864,
+    "elapsed_ms": [
+      35.69795799999997,
+      43.76616699999997,
+      31.185832999999995,
+      36.35812499999991,
+      34.982124999999975
+    ],
+    "median_ms": 35.69795799999997,
+    "stdout_bytes": [
+      62893,
+      62897,
+      62905,
+      62936,
+      62947
+    ],
+    "note": "OS 캐시를 비우지 않은 CLI 측정. 앱 지연·메모리 측정이 아님."
+  },
+  "native_binary": "zig-out/bin/maru-project-search-probe",
+  "native_binary_sha256": "e7f7dc38c8450c4f055bb9a68fdc784dab8bcf4de2173cf4d6b67a80f3a3a58f",
+  "listing_and_native": {
+    "elapsed_ms": [
+      430.0356660000001,
+      427.8648330000001,
+      422.5550840000001,
+      422.419667,
+      445.5364580000003
+    ],
+    "median_ms": 427.8648330000001,
+    "matcher_elapsed_ns": [
+      412787458,
+      414470292,
+      407060000,
+      408131041,
+      410583083
+    ],
+    "listing_bytes": [
+      26922,
+      26922,
+      26922,
+      26922,
+      26922
+    ],
+    "note": "rg 목록 + Python 경로 변환 + 순차 파일 읽기/기존 findMatches. 별도 프로세스·목록 파일 비용 포함. 최적화한 제품 워커가 아님."
+  },
+  "cancel_ms": [
+    1.2999579999997124,
+    10.118457999999997,
+    10.526083000000241
+  ],
+  "status": "passed"
+}

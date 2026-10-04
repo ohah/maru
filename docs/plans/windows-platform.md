@@ -227,3 +227,9 @@ identity/hash 재검증, clean 갱신·dirty 선택 연결은 계속 남아 있�
 제거했다. 앱과 fixture가 같은 slot 선확보 함수를 사용하며 실제 백업의 할당 실패·재시도,
 원본과 레코드 보존을 검사한다. host Debug/ReleaseFast 20개와 다섯 runtime mutation
 검출이 통과했다. 감시 앱 연결과 비동기 내용 재검증은 계속 남아 있다.
+
+§2m.163: native 읽기 작업자와 Book의 app grant admission/완료를 연결했다. 작업자는
+selected root/name/자체 I/O를 소유하고 bytes/hash를 프레임 밖에서 얻는다. 비재사용
+source/reader scope로 같은 주소·같은 slot 재생성까지 거절한다. read 11개·host 23개의
+Debug/ReleaseFast, 각각 다섯 runtime mutation 검출이 통과했다. 실제 창 fixture에도
+worker read를 연결했다. 일반 앱의 hint 예약과 clean 갱신·dirty 선택 UI, 비동기 저장은 남아 있다.

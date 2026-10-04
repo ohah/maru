@@ -8,6 +8,7 @@ const grants = @import("document_grant.zig");
 const saving = @import("save_controller.zig");
 const transactions = @import("transaction.zig");
 const identity = @import("identity.zig");
+const reading = @import("file_read_worker.zig");
 const w = std.os.windows;
 extern "kernel32" fn GetVolumeInformationByHandleW(w.HANDLE, ?[*]u16, u32, ?*u32, ?*u32, ?*u32, ?[*]u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
 extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
@@ -73,6 +74,7 @@ pub const Book = struct {
     allocator: std.mem.Allocator,
     registry: *editor.document_registry.Registry,
     controllers: std.ArrayList(saving.Controller) = .empty,
+    read_scope: u64 = 0,
 
     pub fn open(self: *Book, io: std.Io, root: std.Io.Dir, name: []const u8, limit: usize) !editor.document_registry.Lease {
         // Allocate the publication slot first. A successfully probed document
@@ -109,6 +111,32 @@ pub const Book = struct {
             if (std.meta.eql(controller.grant.lease.document, view.document)) return i;
         }
         return error.NoSaveGrant;
+    }
+
+    pub fn readTicket(self: *Book, view: editor.document_registry.Lease) !reading.Ticket {
+        const controller = &self.controllers.items[try self.index(view)];
+        const state = self.registry.get(view).?;
+        if (controller.status() != .idle or state.persistence.uncertain_sequence != null or state.persistence.live_save_images != 0) return error.SaveBusy;
+        if (controller.grant.epoch != state.persistence.epoch) return error.StaleGrant;
+        if (!std.mem.eql(u8, controller.grant.path, state.path orelse return error.GrantPathChanged)) return error.GrantPathChanged;
+        const opened = state.opened orelse return error.MissingDocument;
+        if (self.read_scope == 0) self.read_scope = try reading.issueScope();
+        return .{ .source_id = self.read_scope, .document = view.document, .epoch = state.persistence.epoch, .revision = opened.file.revision, .disk_hash = opened.disk_hash };
+    }
+
+    pub fn submitRead(self: *Book, reader: *reading.Reader, view: editor.document_registry.Lease) !u64 {
+        const ticket = try self.readTicket(view);
+        const grant = &self.controllers.items[try self.index(view)].grant;
+        // Frame-side work only copies the selected handle and counted name.
+        // Path traversal, file reads and raw hashing happen on the worker.
+        return reader.submit(grant.root, grant.relative_path, grant.identity, ticket, reading.max_bytes);
+    }
+
+    pub fn acceptsRead(self: *Book, reader: *const reading.Reader, result: reading.Result, view: editor.document_registry.Lease) !bool {
+        const current = try self.readTicket(view);
+        if (!reader.accepts(result, current)) return false;
+        if (result == .image and !result.image.identity.eql(self.controllers.items[try self.index(view)].grant.identity)) return false;
+        return true;
     }
 
     pub fn save(self: *Book, io: std.Io, view: editor.document_registry.Lease, limit: usize) !?saving.Receipt {
@@ -168,6 +196,7 @@ pub const Book = struct {
         for (self.controllers.items) |*controller| try controller.deinit(io);
         self.controllers.deinit(self.allocator);
         self.controllers = .empty;
+        self.read_scope = 0;
     }
 };
 
@@ -258,6 +287,120 @@ const Fixture = struct {
         std.testing.allocator.destroy(self);
     }
 };
+
+fn awaitRead(reader: *reading.Reader) !reading.Result {
+    const io = std.testing.io;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (try reader.takeResult()) |result| return result;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.ReadDidNotComplete;
+}
+
+test "Windows editor host worker read uses the app grant and refuses content changed after submission" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const old_hash = f.registry.get(view).?.opened.?.disk_hash;
+    var other_registry: editor.document_registry.Registry = .{ .allocator = std.testing.allocator };
+    defer other_registry.deinit() catch unreachable;
+    var other_book: Book = .{ .allocator = std.testing.allocator, .registry = &other_registry };
+    defer other_book.deinit(io) catch unreachable;
+    const other_view = try other_book.open(io, f.tmp.dir, "file.txt", 128);
+    defer _ = other_registry.release(other_view) catch unreachable;
+    // External bytes change in the same object; reading must not acknowledge
+    // them as a save or mutate the app's shared document behind its views.
+    const external = "\xef\xbb\xbfdisk\r\n";
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = external });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var result = try awaitRead(&reader);
+    defer result.deinit();
+    try std.testing.expect(result == .image);
+    try std.testing.expectEqualStrings(external, result.image.bytes);
+    try std.testing.expect(try f.book.acceptsRead(&reader, result, view));
+    try std.testing.expect(!try other_book.acceptsRead(&reader, result, other_view));
+    try std.testing.expectEqual(old_hash, f.registry.get(view).?.opened.?.disk_hash);
+    try std.testing.expectEqualStrings("base\r\n", f.registry.get(view).?.opened.?.file.content);
+    try change(&f.registry, view, "X");
+    try std.testing.expect(!try f.book.acceptsRead(&reader, result, view));
+}
+
+test "Windows editor host worker admission rejects foreign view stale lifetime path drift and prepared save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(io) catch unreachable;
+    var foreign: editor.document_registry.Registry = .{ .allocator = std.testing.allocator };
+    defer foreign.deinit() catch unreachable;
+    var wrong = view;
+    wrong.owner = &foreign;
+    try std.testing.expectError(error.StaleDocument, f.book.submitRead(&reader, wrong));
+    wrong = view;
+    wrong.kind = .read;
+    try std.testing.expectError(error.StaleDocument, f.book.submitRead(&reader, wrong));
+    const state = f.registry.get(view).?;
+    {
+        const epoch = state.persistence.epoch;
+        defer state.persistence.epoch = epoch;
+        state.persistence.epoch += 1;
+        try std.testing.expectError(error.StaleGrant, f.book.submitRead(&reader, view));
+    }
+    {
+        const path = state.path;
+        defer state.path = path;
+        state.path = null;
+        try std.testing.expectError(error.GrantPathChanged, f.book.submitRead(&reader, view));
+    }
+    try f.book.controllers.items[0].prepare(io, view, 128);
+    try std.testing.expectError(error.SaveBusy, f.book.submitRead(&reader, view));
+    try std.testing.expect(reader.job == null and reader.issued == 0);
+    _ = try f.book.controllers.items[0].abort(io);
+}
+
+test "Windows editor host worker completion refuses changed identity released view and recreated ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var result = try awaitRead(&reader);
+    defer result.deinit();
+    try std.testing.expect(result == .image);
+    result.image.identity.file[15] ^= 1;
+    try std.testing.expect(!try f.book.acceptsRead(&reader, result, view));
+    result.image.identity.file[15] ^= 1;
+    try std.testing.expect(try f.book.acceptsRead(&reader, result, view));
+    try f.book.release(io, view, true);
+    _ = try f.registry.release(view);
+    f.views[0] = null;
+    try std.testing.expectError(error.StaleDocument, f.book.acceptsRead(&reader, result, view));
+    try f.book.deinit(io);
+    try std.testing.expectEqual(@as(u64, 0), f.book.read_scope);
+    try f.registry.deinit();
+    f.registry = .{ .allocator = std.testing.allocator };
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.registry };
+    const fresh = try f.open(0);
+    const current = try f.book.readTicket(fresh);
+    // Everything except the source incarnation is deliberately equal, including
+    // the Registry address. Comparing slots, bytes or pointers alone is unsafe.
+    try std.testing.expect(std.meta.eql(result.image.ticket.document, current.document));
+    try std.testing.expectEqual(result.image.ticket.epoch, current.epoch);
+    try std.testing.expectEqual(result.image.ticket.revision, current.revision);
+    try std.testing.expectEqual(result.image.ticket.disk_hash, current.disk_hash);
+    try std.testing.expect(result.image.ticket.source_id != current.source_id);
+    try std.testing.expect(!try f.book.acceptsRead(&reader, result, fresh));
+}
 
 test "Windows editor host refuses uncertain last close and teardown before releasing any other grant" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;

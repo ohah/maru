@@ -1614,6 +1614,17 @@ pub fn build(b: *std.Build) void {
     const run_save_settle_tests = b.addRunArtifact(save_settle_tests);
     run_save_settle_tests.addArg("--maru-expect-tests=7"); // seven actual native ownership/settlement tests
     save_settle_step.dependOn(&run_save_settle_tests.step);
+    const save_cleanup_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/editor/save_cleanup_worker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const save_cleanup_tests = addProjectTest(b, .{ .root_module = save_cleanup_mod, .filters = &.{"Windows save cleanup worker"} });
+    const save_cleanup_step = b.step("test-win32-save-cleanup", "Verify confirmed native cleanup ownership and immutable completion images");
+    const run_save_cleanup_tests = b.addRunArtifact(save_cleanup_tests);
+    run_save_cleanup_tests.addArg("--maru-expect-tests=10"); // ten actual native cleanup/ownership tests
+    save_cleanup_step.dependOn(&run_save_cleanup_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {
         const save_crash_probe = b.addExecutable(.{

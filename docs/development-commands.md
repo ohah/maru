@@ -1156,3 +1156,8 @@ cancel/권한 실패의 worker rollback 정산, unknown backoff·명시적 cance
 정확한 receipt를 검사한다. `-Doptimize=ReleaseFast` 및 controller 28개를 회귀 검증한다.
 실제 앱의 큰 임시 파일에서 Ctrl+S/Esc·추가 편집·Save-close를 별도 확인한다. 대상 입력 큐
 검증은 물리 키보드/IME와 구분하며 commit·final cleanup·초기 open의 worker 이관은 남아 있다.
+
+§2m.176의 `zig build test-win32-save-cleanup`은 native 10개다. 실제 terminal handle 정리,
+KTM query 실패/unknown 소유권 유지·실제 재시도·정리 오류·binding/checksum·SMP 소유권,
+admission 실패·미소비/busy/copied owner와 Request 해제 뒤 이미지를 검사한다.
+`-Doptimize=ReleaseFast`도 실행한다. controller/앱 연결 전이며 결과는 문서 ack가 아니다.

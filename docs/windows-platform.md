@@ -11774,3 +11774,27 @@ unknown backoff와 explicit cancel, 실제 유실 commit 뒤 취소의 committed
 
 native commit와 그 실패 경로의 즉시 abort, final handle cleanup, 명시적 conflict overwrite와
 초기 open은 아직 main-thread I/O다. 이 승인 왕복·worker 이관과 나머지 Windows 범위는 계속 진행한다.
+
+### 2m.176 — 확정 결과의 native 정리와 완료 이미지 worker
+
+`save_cleanup_worker.Worker`는 terminal local phase의 독립 준비 결과를 이동받는다.
+메인 grant의 arena를 worker에서 해제하지 않도록 이미지와 pinned buffers의 SMP allocator
+소유권을 요구한다. 자체 I/O provider로 실제 KTM outcome을 다시 조회하며 local phase만으로
+핸들을 닫거나 committed 결과를 만들지 않는다. unknown/query 실패는 전체 attempt/image와
+uncertain phase를 반환한다. committed 이미지는 native binding과 checksum도 다시 검사한다.
+
+known native decision 뒤 native handle/pinned buffer 정리를 worker에서 실행한다. released
+결과는 handle을 노출하지 않고 독립 이미지·실제 outcome·cleanup 오류를 반환한다. cleanup
+오류는 committed를 aborted로 바꾸지 않는다. native phase가 closed가 아니면 소유권을 반환한다.
+worker는 Registry나 Request를 조회하지 않으며 결과도 문서 ack가 아니다. main owner는
+이미지 토큰과 현재 Request를 대조하고 완료를 정산해야 한다. 미소비 결과가 있으면 deinit을 거절한다.
+
+`test-win32-save-cleanup` native 10개가 Debug/ReleaseFast에서 통과했다. 다른 thread에서
+실제 committed/aborted handle 정리와 디스크 보존, 가짜 terminal phase의 실제 unknown,
+query 실패/재시도, 정리 응답 오류 보존, committed 이미지 변조 거절, allocator 소유권,
+admission 할당 실패·busy/copied owner와 Request 해제 뒤 독립 이미지를 검사한다.
+false abort·unknown close·allocator guard 제거·cleanup 오류 유실·checksum 검사 제거의
+다섯 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다.
+
+이 worker의 controller/앱 연결은 후속 작업이다. 일반 앱의 native commit·그 실패의 즉시
+abort·final cleanup·conflict overwrite·초기 open I/O와 물리 입력/IME 및 나머지 Windows 범위는 계속 남아 있다.

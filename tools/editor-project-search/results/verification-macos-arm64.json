@@ -1,0 +1,394 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "corpus": "valid",
+      "query": "needle",
+      "mode": "literal",
+      "files": 25,
+      "candidates": 21,
+      "prefilter_used": true,
+      "matches": 187,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "NEEDLE",
+      "mode": "literal-fold",
+      "files": 25,
+      "candidates": 21,
+      "prefilter_used": true,
+      "matches": 360,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "needle",
+      "mode": "word",
+      "files": 25,
+      "candidates": 21,
+      "prefilter_used": true,
+      "matches": 8,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "foo",
+      "mode": "word",
+      "files": 25,
+      "candidates": 20,
+      "prefilter_used": true,
+      "matches": 15,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "FOO",
+      "mode": "literal-fold",
+      "files": 25,
+      "candidates": 20,
+      "prefilter_used": true,
+      "matches": 202,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "I",
+      "mode": "literal-fold",
+      "files": 25,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 2,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "k",
+      "mode": "literal-fold",
+      "files": 25,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 2,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "s",
+      "mode": "literal-fold",
+      "files": 25,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 2,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "aa",
+      "mode": "literal",
+      "files": 25,
+      "candidates": 17,
+      "prefilter_used": true,
+      "matches": 235,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "--",
+      "mode": "literal",
+      "files": 25,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": ".*",
+      "mode": "literal",
+      "files": 25,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "$",
+      "mode": "word",
+      "files": 25,
+      "candidates": 18,
+      "prefilter_used": true,
+      "matches": 7,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "_",
+      "mode": "word",
+      "files": 25,
+      "candidates": 18,
+      "prefilter_used": true,
+      "matches": 3,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "absent-pattern",
+      "mode": "literal",
+      "files": 25,
+      "candidates": 0,
+      "prefilter_used": true,
+      "matches": 0,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "한글",
+      "mode": "literal",
+      "files": 25,
+      "candidates": 25,
+      "prefilter_used": false,
+      "matches": 197,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "é",
+      "mode": "literal",
+      "files": 25,
+      "candidates": 25,
+      "prefilter_used": false,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "é",
+      "mode": "literal",
+      "files": 25,
+      "candidates": 25,
+      "prefilter_used": false,
+      "matches": 172,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "^|foo",
+      "mode": "regex",
+      "files": 25,
+      "candidates": 25,
+      "prefilter_used": false,
+      "matches": 417,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "(?<=foo)bar",
+      "mode": "regex",
+      "files": 25,
+      "candidates": 25,
+      "prefilter_used": false,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "(foo)\\1",
+      "mode": "regex",
+      "files": 25,
+      "candidates": 25,
+      "prefilter_used": false,
+      "matches": 17,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "valid",
+      "query": "(?=한)|$",
+      "mode": "regex",
+      "files": 25,
+      "candidates": 25,
+      "prefilter_used": false,
+      "matches": 432,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "raw",
+      "query": "needle",
+      "mode": "literal",
+      "files": 3,
+      "candidates": 3,
+      "prefilter_used": true,
+      "matches": 4,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    },
+    {
+      "corpus": "raw",
+      "query": "NEEDLE",
+      "mode": "literal-fold",
+      "files": 3,
+      "candidates": 3,
+      "prefilter_used": true,
+      "matches": 4,
+      "prefilter_equal": true,
+      "missing_files": []
+    },
+    {
+      "corpus": "raw",
+      "query": "foo",
+      "mode": "literal",
+      "files": 3,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "byte_equal": true
+    }
+  ],
+  "native_sha256": "e7f7dc38c8450c4f055bb9a68fdc784dab8bcf4de2173cf4d6b67a80f3a3a58f",
+  "rg_sha256": "7c7d5b09c3a57de864500c65dc2e9c4d2a5e96a3fc7b7d5318480c19887a739b",
+  "source_sha256": {
+    "native.zig": "b293ef51ac5fbe355e5a71ea8d1a10e2443a9d2f0b3197904a1c5b679cdc6e1a",
+    "compare.py": "99df24e169471d2c45ade65300d36687328ebaabbe94bb320e26cfb3a27288d2",
+    "verify.py": "dd5588b91144713f40b8d7333d83351648114243c1d15b8d85c1736edc5d53d6"
+  },
+  "limits": "합성 자료의 모든 범위 대조. raw 자료는 선별 누락 탐지용이며 제품의 바이너리·인코딩 지원을 뜻하지 않음.",
+  "negative_controls": {
+    "status": "passed",
+    "original_compare_sha256": "99df24e169471d2c45ade65300d36687328ebaabbe94bb320e26cfb3a27288d2",
+    "controls": [
+      {
+        "name": "binary-drop",
+        "change": {
+          "before": ", \"--text\"",
+          "after": ""
+        },
+        "expected_failure": "./binary.bin",
+        "caught": true,
+        "missing_files": [
+          "./binary.bin"
+        ]
+      },
+      {
+        "name": "automatic-decoding",
+        "change": {
+          "before": ", \"--encoding\", \"none\"",
+          "after": ""
+        },
+        "expected_failure": "./bom.bin",
+        "caught": true,
+        "missing_files": [
+          "./bom.bin"
+        ]
+      },
+      {
+        "name": "word-prefilter",
+        "change": {
+          "before": "\"--files-with-matches\", \"--null\"",
+          "after": "\"--files-with-matches\", \"--word-regexp\", \"--null\""
+        },
+        "expected_failure": "./only-substring.txt",
+        "caught": true,
+        "missing_files": [
+          "./bom.bin",
+          "./malformed.txt",
+          "./only-substring.txt",
+          "./overlap.txt",
+          "./random-0.txt",
+          "./random-1.txt",
+          "./random-10.txt",
+          "./random-11.txt",
+          "./random-12.txt",
+          "./random-13.txt",
+          "./random-14.txt",
+          "./random-15.txt",
+          "./random-2.txt",
+          "./random-3.txt",
+          "./random-4.txt",
+          "./random-5.txt",
+          "./random-6.txt",
+          "./random-7.txt",
+          "./random-8.txt",
+          "./random-9.txt"
+        ]
+      },
+      {
+        "name": "case-prefilter",
+        "change": {
+          "before": "[\"--ignore-case\"] if mode == \"literal-fold\" else [\"--case-sensitive\"]",
+          "after": "[\"--case-sensitive\"]"
+        },
+        "expected_failure": "./.hidden.txt",
+        "caught": true,
+        "missing_files": [
+          "./--name\nwith space.txt",
+          "./.hidden.txt",
+          "./anchors.txt",
+          "./binary.bin",
+          "./bom.bin",
+          "./boundary.txt",
+          "./malformed.txt",
+          "./only-substring.txt",
+          "./overlap.txt",
+          "./random-0.txt",
+          "./random-1.txt",
+          "./random-10.txt",
+          "./random-11.txt",
+          "./random-12.txt",
+          "./random-13.txt",
+          "./random-14.txt",
+          "./random-15.txt",
+          "./random-2.txt",
+          "./random-3.txt",
+          "./random-4.txt",
+          "./random-5.txt",
+          "./random-6.txt",
+          "./random-7.txt",
+          "./random-8.txt",
+          "./random-9.txt"
+        ]
+      },
+      {
+        "name": "non-ascii-guard",
+        "change": {
+          "before": "query.isascii()",
+          "after": "True"
+        },
+        "expected_failure": "선별하면 안 되는 검색어",
+        "caught": true,
+        "missing_files": []
+      }
+    ]
+  }
+}

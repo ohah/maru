@@ -1986,7 +1986,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Editor save request"},
     });
     const run_save_request_tests = b.addRunArtifact(save_request_tests);
-    run_save_request_tests.addArg("--maru-expect-tests=45"); // 28 aggregate blocks, 16 save-image cases and main target-invalidation regression
+    run_save_request_tests.addArg("--maru-expect-tests=47"); // 28 aggregate blocks, 18 save-image cases and main target-invalidation regression
     const save_request_step = b.step("test-editor-save-request", "Verify owned save images and document completion CAS");
     save_request_step.dependOn(&run_save_request_tests.step);
     const navigation_tests = addProjectTest(b, .{

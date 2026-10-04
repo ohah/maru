@@ -34,7 +34,7 @@ pub const Opened = struct {
     /// 끝나면 놓는다 — 파일이 `stat`과 read 사이에 줄어들어 생기던 "안 쓰는 꼬리"도 함께 사라진다.
     file: edit_doc.EditableFile,
 
-    /// **마지막으로 디스크와 같았던 내용의 해시.** dirty 판정의 유일한 근거다.
+    /// **마지막으로 디스크와 같았던 내용의 해시.** 저장 이력이 있는 문서의 dirty 근거다.
     ///
     /// **개정 번호가 아니라 내용이다**([file-panel.md](../../../docs/file-panel.md) §1이 소유하는
     /// 계약): *"편집 뒤 undo로 snapshot과 같은 내용에 돌아오면 revision이 더 높아도 clean"*.
@@ -47,6 +47,10 @@ pub const Opened = struct {
     /// 자체는 내용을 그대로 쓴다.
     saved_hash: u64,
 
+    /// 별도 문서로 복구한 사본은 아직 저장한 적이 없다. 빈 본문도 닫기 확인과 백업이 필요하다.
+    /// 해시를 조작하면 우연히 같은 내용으로 돌아온 순간 clean이 되므로 사실을 별도로 기록한다.
+    needs_save: bool = false,
+
     /// **마지막으로 본 «디스크» 내용의 지문**(§3.9d). `saved_hash` 가 「우리 내용」이라면 이것은
     /// 「그때 파일에 있던 것」이다 — 둘은 다른 질문이고, 이 값이 없으면 **연 뒤 남이 고친 것을 알 수
     /// 없다**. 예전에는 그 검사가 아예 없어 `ExternalConflict` 가 네이티브에서 **도달 불가**였다:
@@ -57,7 +61,7 @@ pub const Opened = struct {
 
     /// 지금 내용이 마지막 저장과 다른가.
     pub fn isDirty(self: Opened) bool {
-        return contentHash(self.file.content) != self.saved_hash;
+        return self.needs_save or contentHash(self.file.content) != self.saved_hash;
     }
 
     pub fn deinit(self: *Opened, allocator: std.mem.Allocator) void {

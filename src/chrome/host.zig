@@ -53,6 +53,10 @@ pub const HostAction = union(enum) {
     reference_picker_accept,
     reference_picker_query_changed,
     reference_picker_selection_changed,
+    recovery_picker_close,
+    recovery_picker_accept,
+    recovery_picker_query_changed,
+    recovery_picker_selection_changed,
     context_menu_accept, // 우클릭 메뉴 항목 선택 — platform이 selected→대상 액션(rename) 해석·실행
     context_menu_close,
     context_menu_selection_changed,
@@ -101,6 +105,8 @@ pub const ChromeHost = struct {
     symbol_picker: palette.State = .{},
     /// 참조 피커(tooling §8.2l) — 심볼 피커와 같은 컴포넌트, 오버레이 State 는 각자(§7.5 「오버레이 State 각자」).
     reference_picker: palette.State = .{},
+    /// 백업 선택도 팔레트 컴포넌트를 쓰며 검색과 선택 수명은 독립적이다.
+    recovery_picker: palette.State = .{},
     context_menu: context_menu.State = .{},
     /// 편집기 선택 헬퍼(NSH — docs/send-selection-to-agent.md §6.2). **같은 컴포넌트, 다른 State**
     /// (symbol_picker 선례) — 한 줄짜리 메뉴라 박스·clamp·hit-test 가 그대로 맞고, 새 팝업 UI 를
@@ -130,6 +136,7 @@ pub const ChromeHost = struct {
         self.palette.deinit(allocator);
         self.symbol_picker.deinit(allocator);
         self.reference_picker.deinit(allocator);
+        self.recovery_picker.deinit(allocator);
     }
 
     /// 각 컴포넌트 view를 호출해 (layer, ops) = ChromeDraw를 arena에 빌드한다. 빈(닫힌) 컴포넌트는 건너뛴다.
@@ -192,6 +199,19 @@ pub const ChromeHost = struct {
     ) !void {
         var ops: std.ArrayList(draw.Op) = .empty;
         try palette.view(&self.reference_picker, rows, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = palette.layer, .ops = ops.items });
+    }
+
+    pub fn collectRecoveryPickerDraws(
+        self: *ChromeHost,
+        rows: []const palette.Row,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try palette.view(&self.recovery_picker, rows, p, tk, arena, &ops);
         if (ops.items.len > 0) try out.append(arena, .{ .layer = palette.layer, .ops = ops.items });
     }
 
@@ -322,7 +342,7 @@ pub const ChromeHost = struct {
     /// 단일 출처 — 모달이 열렸으면 거기 타이핑 중이라 Cmd-홀드 힌트는 무의미하고, 동시 오버레이 frame도 피한다.
     pub fn anyModalOpen(self: *const ChromeHost) bool {
         return self.confirm.open or self.notice.open or self.context_menu.open or
-            self.notifications.open or (self.find.open and self.find.input_focused) or self.palette.open or self.settings.open;
+            self.notifications.open or (self.find.open and self.find.input_focused) or self.palette.open or self.recovery_picker.open or self.settings.open;
     }
 
     /// 단축키 힌트 배지 draws. platform이 요소 레이아웃에서 badges(요소 rect + chord)를 빌드해 부른다(palette의 row
@@ -395,6 +415,14 @@ pub const ChromeHost = struct {
                         .accept => .palette_accept,
                         .query_changed => .palette_query_changed,
                         .selection_changed => .palette_selection_changed,
+                    };
+                }
+                if (self.recovery_picker.open) {
+                    return switch (palette.handle(allocator, k, &self.recovery_picker)) {
+                        .close => .recovery_picker_close,
+                        .accept => .recovery_picker_accept,
+                        .query_changed => .recovery_picker_query_changed,
+                        .selection_changed => .recovery_picker_selection_changed,
                     };
                 }
                 if (self.reference_picker.open) {

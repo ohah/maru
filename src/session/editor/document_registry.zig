@@ -36,6 +36,29 @@ pub const Registry = struct {
         return false;
     }
 
+    /// 다른 창에서 쓰는 백업과 복구 중인 원본을 재선택하지 않는다. 경로가 같은 ID는 별개다.
+    pub fn usesBackupName(self: *const Registry, name: []const u8) bool {
+        if (self.hasRecoveryBackupSource(name)) return true;
+        const backup = @import("backup.zig");
+        for (self.slots.items) |slot| {
+            const document = slot.document orelse continue;
+            const state = &document.state;
+            var buffer: [backup.max_file_name_len]u8 = undefined;
+            const doc: backup.Doc = if (state.remote) |remote|
+                .{ .remote = .{ .dest = remote.dest, .path = remote.path } }
+            else if (state.path) |path| blk: {
+                if (state.recovery_id) |id| {
+                    const owned = @import("recovery_id.zig").fileName(id) catch continue;
+                    if (std.mem.eql(u8, &owned, name)) return true;
+                    continue;
+                }
+                break :blk .{ .path = .{ .path = path } };
+            } else if (state.untitled) |untitled| .{ .untitled = untitled.n } else continue;
+            if (std.mem.eql(u8, backup.fileName(&buffer, doc), name)) return true;
+        }
+        return false;
+    }
+
     /// 호출자가 독립 소유한 준비 상태를 성공할 때만 소비한다. get으로 빌린 State를 넘기지 않는다.
     /// 실패하면 호출자의 본문·신원·이력은 그대로다.
     /// resource allocator는 기존 경로/이력의 할당 짝이며 마지막 참조 해제까지 살아 있어야 한다.

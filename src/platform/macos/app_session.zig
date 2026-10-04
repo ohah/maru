@@ -2866,6 +2866,7 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .palette => .{ .routes_text = .palette },
         .symbol_picker => .{ .routes_text = .symbol_picker },
         .reference_picker => .{ .routes_text = .reference_picker }, // §8.2l — 심볼 피커와 같은 컴포넌트·같은 역할
+        .recovery_picker => .{ .routes_text = .recovery_picker },
         .settings => .{ .routes_text = .settings },
         .context_menu, .notifications => .blocks_without_text,
         // **헬퍼는 입력을 안 막는다**(NSH — §6.2). 선택을 마쳤을 뿐인 사용자에게서 키를 뺏으면
@@ -5958,6 +5959,8 @@ pub const AppSession = struct {
     find_selection_at_open: @TypeOf(@as(chrome.components.find.State, .{}).in_selection) = null,
     symbol_picker_scroll: chrome.ui.scroll_area.State = .{},
     symbol_picker_followed_selected: ?usize = null,
+    /// 복구 후보와 검색 결과의 수명은 창마다 독립적이다.
+    editor_recovery: editor_ops.recovery_ui.State = .{},
     /// 참조 피커(tooling §8.2l) — 굳힌 행(값)·프롬프트 버퍼·목록 역학(심볼 피커와 같은 셋).
     reference_picker_rows: reference_picker.Picker = .{},
     reference_picker_prompt: [96]u8 = undefined,
@@ -7371,6 +7374,8 @@ pub const AppSession = struct {
     debug_symbol_picker_tries: u16 = 0,
     debug_palette_opened: bool = false,
     debug_palette_tries: u16 = 0,
+    /// 격리 백업 시각 검증의 단계. 일반 실행은 환경 변수가 없어 진입하지 않는다.
+    debug_recovery_capture_stage: u8 = 0,
     /// 편집 연산 캡처 훅(`MARU_EDIT_OP`)이 이미 걸었는가 — **한 번만** 건다(매 tick 걸면 문서가
     /// 계속 바뀐다). 시도 수는 파일이 열릴 때까지 기다리는 데 쓴다(찾기 훅과 같은 규율).
     debug_edit_op_done: bool = false,
@@ -10109,15 +10114,17 @@ pub const AppSession = struct {
         var drop_lens: [max_close_backup_drops]u8 = undefined;
         var drop_count: usize = 0;
         var drop_owners: [max_close_backup_drops]?*editor_ops.recovery_store.Owner = @splat(null);
+        var drop_legacy: [max_close_backup_drops]bool = @splat(false);
         const Capture = struct {
             owners: *[max_close_backup_drops]?*editor_ops.recovery_store.Owner,
+            legacy: *[max_close_backup_drops]bool,
             names: *[max_close_backup_drops][maru.session.editor.backup.max_file_name_len]u8,
             lens: *[max_close_backup_drops]u8,
             count: *usize,
             session: *AppSession,
             scope: CloseScope = .none,
         };
-        var capture = Capture{ .owners = &drop_owners, .names = &drop_names, .lens = &drop_lens, .count = &drop_count, .session = self };
+        var capture = Capture{ .owners = &drop_owners, .legacy = &drop_legacy, .names = &drop_names, .lens = &drop_lens, .count = &drop_count, .session = self };
         // ⚠️ **에이전트 행 ✕의 좁은 두 범위는 건너뛴다.** `CloseScope` 는 인덱스를 안 실으므로
         // `.term`·`.pane` 은 **활성** pane 기준으로 풀리는데, 그 ✕ 가 닫는 것은 활성과 무관한 Term 이다
         // (아래 인덱스 경로가 그래서 따로 있다). 그 범위를 활성 기준으로 훑으면 **닫지도 않은 문서의
@@ -10136,16 +10143,21 @@ pub const AppSession = struct {
             fn f(c: *Capture, t: *Term) void {
                 if (c.count.* >= max_close_backup_drops) return;
                 if (!c.session.closesAllEditorDocumentViews(c.scope, t)) return;
-                const name = editor_backup_ops.fileNameIfOnDisk(t, &c.names[c.count.*]) orelse return;
+                var name = editor_backup_ops.fileNameIfOnDisk(t, &c.names[c.count.*]) orelse return;
                 for (0..c.count.*) |i| {
                     if (std.mem.eql(u8, name, c.names[i][0..c.lens[i]])) return;
                 }
-                if (editor_backup_ops.identity(t)) |doc| if (doc == .path) {
-                    if (t.rt.editor_recovery) |owner| {
+                if (editor_backup_ops.identity(t)) |doc| {
+                    if (t.rt.editor_recovery) |owner| if (doc == .path or owner.source != null) {
                         owner.selectDrop() catch return;
                         c.owners[c.count.*] = owner.retain();
-                    }
-                };
+                        // source는 fd로, 새 이름 없는 백업은 기존 번호로 정리한다. 둘의 삭제 권한을 섞지 않는다.
+                        if (doc != .path and t.rt.editorDocument().notifications.backup_on_disk) {
+                            name = maru.session.editor.backup.fileName(&c.names[c.count.*], doc);
+                            c.legacy[c.count.*] = true;
+                        }
+                    };
+                }
                 c.lens[c.count.*] = @intCast(name.len);
                 c.count.* += 1;
             }
@@ -10154,6 +10166,7 @@ pub const AppSession = struct {
             if (drop_owners[i]) |owner| {
                 owner.dropSelected() catch {};
                 owner.release();
+                if (drop_legacy[i]) editor_backup_ops.dropName(self, drop_names[i][0..drop_lens[i]]);
             } else editor_backup_ops.dropName(self, drop_names[i][0..drop_lens[i]]);
         };
 
@@ -10375,6 +10388,7 @@ pub const AppSession = struct {
             self.chrome_host.reference_picker.hide();
             editor_ops.references_client.closed(self); // §8.2l — 행도 함께 놓는다
         }
+        editor_ops.recovery_ui.closed(self);
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.file_tree_context_target = null;
@@ -11143,6 +11157,7 @@ pub const AppSession = struct {
             .new_editor_tab => if (!self.tabsBlocked()) {
                 _ = editor_ops.openUntitledInActivePane(self) catch {};
             },
+            .recover_editor_backups => if (!self.tabsBlocked()) editor_ops.recovery_ui.open(self),
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),
             .toggle_file_panel_dock_side => file_panel_ops.toggleFilePanelDockSide(self),
             .toggle_file_panel_focus => file_panel_ops.toggleFilePanelFocus(self),
@@ -12981,6 +12996,10 @@ pub const AppSession = struct {
             .symbol_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
             .symbol_picker_accept => editor_ops.acceptSymbolPicker(self), // 닫고 나서 간다
             .reference_picker_close => editor_ops.references_client.closed(self), // hide 는 컴포넌트가 이미 했다 — 행을 놓는다(§8.2l)
+            .recovery_picker_close => editor_ops.recovery_ui.closed(self),
+            .recovery_picker_query_changed => editor_ops.recovery_ui.recompute(self),
+            .recovery_picker_selection_changed => {},
+            .recovery_picker_accept => editor_ops.recovery_ui.accept(self),
             .reference_picker_query_changed => editor_ops.references_client.recompute(self),
             .reference_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
             .reference_picker_accept => editor_ops.references_client.accept(self), // 닫고 나서 간다
@@ -14071,7 +14090,7 @@ pub const AppSession = struct {
     /// 자동 닫힘 타이머가 없어 아무 입력으로나 닫지 않으면 토스트 동안 입력이 영구히 막히기 때문이다.
     pub fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
-        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or (h.find.open and h.find.input_focused) or h.palette.open or h.symbol_picker.open or h.reference_picker.open or h.settings.open;
+        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or (h.find.open and h.find.input_focused) or h.palette.open or h.symbol_picker.open or h.reference_picker.open or h.recovery_picker.open or h.settings.open;
     }
 
     /// 오버레이 frame 을 **그려야** 하는가. `anyOverlayOpen` 과 갈리는 이유는 **패시브 표면**이다 —
@@ -14694,6 +14713,12 @@ pub const AppSession = struct {
                     self.chrome_host.notifications.hide(); // 패널 밖 클릭 → 닫기
                     self.metal_dirty = true;
                 }
+            }
+            return;
+        }
+        if (self.chrome_host.recovery_picker.open) {
+            if (kind == 1 and button == 0) {
+                if (!scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) editor_ops.recovery_ui.click(self, x_px, y_px);
             }
             return;
         }
@@ -15713,7 +15738,7 @@ pub const AppSession = struct {
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상 진행. viewport_has_blink는
         // need_blink_scan(idle + blink_text)일 때만 스냅샷이 실제 스캔한 값이라, blink_text off면 false로 접혀 안전.
         const text_blinks = self.appearance.blink_text and snap.viewport_has_blink;
-        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.symbol_picker.open or self.chrome_host.reference_picker.open;
+        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.symbol_picker.open or self.chrome_host.reference_picker.open or self.chrome_host.recovery_picker.open;
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
@@ -15833,7 +15858,7 @@ pub const AppSession = struct {
     /// notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, addr_edit, scm_commit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, recovery_picker, addr_edit, scm_commit };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -15846,6 +15871,7 @@ pub const AppSession = struct {
         if (self.chrome_host.find.open and self.chrome_host.find.input_focused) return .find;
         if (self.chrome_host.palette.open) return .palette;
         if (self.chrome_host.symbol_picker.open) return .symbol_picker;
+        if (self.chrome_host.recovery_picker.open) return .recovery_picker;
         if (self.chrome_host.reference_picker.open) return .reference_picker; // §8.2l
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
@@ -15948,6 +15974,10 @@ pub const AppSession = struct {
             },
             .symbol_picker => if (self.chrome_host.symbol_picker.input.commitPreedit(self.allocator)) {
                 editor_ops.recomputeSymbolPicker(self); // 필터가 바뀜(§7.5)
+                self.metal_dirty = true;
+            },
+            .recovery_picker => if (self.chrome_host.recovery_picker.input.commitPreedit(self.allocator)) {
+                editor_ops.recovery_ui.recompute(self);
                 self.metal_dirty = true;
             },
             .reference_picker => if (self.chrome_host.reference_picker.input.commitPreedit(self.allocator)) {
@@ -20506,6 +20536,7 @@ pub const AppSession = struct {
         editor_ops.references_client.tick(self); // §8.2l: 「지금은 못 답한다」 뒤 되묻기
         editor_backup_ops.tick(self); // §3.10: 편집이 멎고 debounce 가 지났으면 미저장 내용을 백업한다
         editor_backup_ops.drainRevivals(self); // §3.10(U4d): 신원을 잃은 문서를 이름 없는 문서로 — 프레임당 하나
+        editor_ops.recovery_ui.tick(self); // 수동 복구 목록은 프레임마다 디렉터리 항목 하나를 검사한다.
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -23469,6 +23500,11 @@ pub const AppSession = struct {
             const rows = try self.buildSymbolPickerRows(arena);
             try self.chrome_host.collectSymbolPickerDraws(rows, props, &tokens, arena, &draws);
         }
+        if (self.chrome_host.recovery_picker.open) {
+            followListSelection(self.chrome_host.recovery_picker.selected, self.editor_recovery.shown.items.len, @max(self.cell_height_px, 1), &self.editor_recovery.scroll, &self.editor_recovery.followed);
+            const rows = try editor_ops.recovery_ui.rows(self, arena);
+            try self.chrome_host.collectRecoveryPickerDraws(rows, props, &tokens, arena, &draws);
+        }
         if (self.chrome_host.reference_picker.open) {
             self.followReferencePickerSelection(); // §8.2l — 같은 역학
             const rows = try self.buildReferencePickerRows(arena);
@@ -24075,6 +24111,7 @@ pub const AppSession = struct {
         self.symbol_picker_rows.deinit(self.allocator);
         self.symbol_picker_prompt.deinit(self.allocator);
         self.reference_picker_rows.deinit(self.allocator);
+        self.editor_recovery.deinit(self.allocator);
         self.editor_nav_back.deinit(self.allocator);
         self.editor_nav_forward.deinit(self.allocator);
         self.editor_find_matches.deinit(self.allocator);
@@ -83749,6 +83786,7 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         // 심볼 피커도 텍스트를 받는 모달이라 터미널이 first responder 를 내줘야 한다(§7.5).
         .symbol_picker,
         .reference_picker,
+        .recovery_picker,
         .addr_edit,
         .scm_commit,
         .file_tree,
@@ -83768,6 +83806,7 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
         .palette => session.chrome_host.palette.open = true,
         .symbol_picker => session.chrome_host.symbol_picker.open = true,
         .reference_picker => session.chrome_host.reference_picker.open = true,
+        .recovery_picker => session.chrome_host.recovery_picker.open = true,
         .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
         .sidebar_search => session.sidebar_search_active = true,
         .addr_edit => session.addr_edit = 1,

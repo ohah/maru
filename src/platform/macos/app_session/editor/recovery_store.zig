@@ -26,6 +26,194 @@ fn privateRoot(stat: posix.Stat) bool {
     return posix.S.ISDIR(stat.mode) and stat.uid == c.getuid() and stat.mode & 0o077 == 0;
 }
 
+/// 발견도 쓰기와 같은 사유 디렉터리 규칙을 따른다. 없으면 만들지 않는다.
+pub fn openRoot(io: std.Io, path: []const u8, iterate: bool) !std.Io.Dir {
+    if (!std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidRoot;
+    const dir = try std.Io.Dir.cwd().openDir(io, path, .{ .follow_symlinks = false, .iterate = iterate });
+    errdefer dir.close(io);
+    if (!privateRoot(try statFd(dir.handle))) return error.UnsafeRoot;
+    return dir;
+}
+
+pub fn validateRoot(root: std.Io.Dir, path: [:0]const u8) !void {
+    const named = try statAt(std.Io.Dir.cwd(), path);
+    if (!privateRoot(named) or !same(named, try statFd(root.handle))) return error.Replaced;
+}
+
+fn readBounded(allocator: std.mem.Allocator, io: std.Io, fd: c.fd_t) ![]u8 {
+    const before = try statFd(fd);
+    if (!posix.S.ISREG(before.mode) or before.uid != c.getuid() or before.nlink != 1 or before.mode & 0o777 != 0o600) return error.UnsafeRecord;
+    if (before.size < 0 or before.size > backup.max_record_bytes) return error.RecordTooLarge;
+    // 길이가 늘어나는 파일도 원래 크기+1까지만 읽는다. 끝없이 자라는 입력에 할당을 맡기지 않는다.
+    const bytes = try allocator.alloc(u8, @as(usize, @intCast(before.size)) + 1);
+    errdefer allocator.free(bytes);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const n = try file.readPositionalAll(io, bytes, 0);
+    if (n != before.size) return error.RecordChanged;
+    const after = try statFd(fd);
+    if (before.size != after.size or !std.meta.eql(before.mtimespec, after.mtimespec) or !std.meta.eql(before.ctimespec, after.ctimespec)) return error.RecordChanged;
+    return bytes;
+}
+
+/// 목록에서 고른 파일의 버전. 같은 이름의 원자 교체와 제자리 내용 변경을 모두 구분한다.
+pub const Version = struct {
+    root_dev: u64,
+    root_ino: u64,
+    file_dev: u64,
+    file_ino: u64,
+    digest: [32]u8,
+
+    pub fn eql(a: Version, b: Version) bool {
+        return std.meta.eql(a, b);
+    }
+};
+
+pub const SourceRecord = struct {
+    bytes: []u8,
+    parsed: backup.Parsed,
+    id: ?Id,
+
+    pub fn deinit(self: *SourceRecord, allocator: std.mem.Allocator) void {
+        self.parsed.deinit(allocator);
+        allocator.free(self.bytes);
+    }
+};
+
+/// 복구할 사본의 권한은 새 문서의 writer와 별개다. 닫기는 원본을 지우지 않는다.
+pub const Source = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    root_path: [:0]u8,
+    name: [:0]u8,
+    fd: c.fd_t,
+    lock: ?OwnerLease = null,
+    lock_path: ?[:0]u8 = null,
+    version: Version,
+
+    pub fn open(allocator: std.mem.Allocator, io: std.Io, root_path: []const u8, name: []const u8) !Source {
+        if (!candidateName(name)) return error.InvalidName;
+        const root = try openRoot(io, root_path, false);
+        errdefer root.close(io);
+        const root_z = try allocator.dupeZ(u8, root_path);
+        errdefer allocator.free(root_z);
+        const name_z = try allocator.dupeZ(u8, name);
+        errdefer allocator.free(name_z);
+        var lock: ?OwnerLease = null;
+        errdefer if (lock) |*lease| lease.deinit();
+        var lock_path: ?[:0]u8 = null;
+        errdefer if (lock_path) |path| allocator.free(path);
+        if (maru.session.editor.recovery_id.fromFileName(name)) |id| {
+            lock_path = try std.fmt.allocPrintSentinel(allocator, "{s}/d-{s}.claim", .{ root_path, id.hex() }, 0);
+            const claim = lock_path.?[root_path.len + 1 .. :0];
+            // acquire는 ENOENT에서 생성한다. 발견은 기존 fd만 채택해 디스크를 수정하지 않는다.
+            const claim_fd = c.openat(root.handle, claim.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(c.mode_t, 0));
+            if (claim_fd < 0) return error.UnownedRecord;
+            defer _ = c.close(claim_fd);
+            lock = try OwnerLease.adoptInheritedExact(claim_fd, lock_path.?);
+        } else |_| {}
+        const fd = c.openat(root.handle, name_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(c.mode_t, 0));
+        if (fd < 0) return if (posix.errno(fd) == .NOENT) error.FileNotFound else error.OpenFailed;
+        errdefer _ = c.close(fd);
+        const bytes = try readBounded(allocator, io, fd);
+        defer allocator.free(bytes);
+        const root_stat = try statFd(root.handle);
+        const file_stat = try statFd(fd);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes[0 .. bytes.len - 1], &digest, .{});
+        var source: Source = .{ .allocator = allocator, .io = io, .root = root, .root_path = root_z, .name = name_z, .fd = fd, .lock = lock, .lock_path = lock_path, .version = .{
+            .root_dev = @intCast(root_stat.dev),
+            .root_ino = root_stat.ino,
+            .file_dev = @intCast(file_stat.dev),
+            .file_ino = file_stat.ino,
+            .digest = digest,
+        } };
+        try source.validateNamespace();
+        return source;
+    }
+
+    pub fn deinit(self: *Source) void {
+        _ = c.close(self.fd);
+        if (self.lock) |*lock| lock.deinit();
+        if (self.lock_path) |path| self.allocator.free(path);
+        self.root.close(self.io);
+        self.allocator.free(self.root_path);
+        self.allocator.free(self.name);
+        self.* = undefined;
+    }
+
+    pub fn belongsTo(self: *Source, dir: std.Io.Dir) !bool {
+        return same(try statFd(self.root.handle), try statFd(dir.handle));
+    }
+
+    fn validateNamespace(self: *Source) !void {
+        const root = try statAt(std.Io.Dir.cwd(), self.root_path);
+        if (!privateRoot(root) or @as(u64, @intCast(root.dev)) != self.version.root_dev or root.ino != self.version.root_ino) return error.Replaced;
+        if (self.lock) |*lock| try lock.revalidatePath(self.lock_path.?);
+        const named = try statAt(self.root, self.name);
+        if (!same(named, try statFd(self.fd))) return error.RecordChanged;
+    }
+
+    pub fn read(self: *Source) !SourceRecord {
+        try self.validateNamespace();
+        const bytes = try readBounded(self.allocator, self.io, self.fd);
+        errdefer self.allocator.free(bytes);
+        const body = bytes[0 .. bytes.len - 1];
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
+        if (!std.mem.eql(u8, &digest, &self.version.digest)) return error.RecordChanged;
+        const id = maru.session.editor.recovery_id.fromFileName(self.name) catch null;
+        var parsed: backup.Parsed = if (id) |identity| blk: {
+            var record = try backup.parseRecovery(self.allocator, body);
+            if (!record.id.eql(identity)) {
+                record.deinit(self.allocator);
+                return error.ForeignRecord;
+            }
+            break :blk .{ .doc = .{ .path = record.doc }, .content = record.content };
+        } else try backup.parse(self.allocator, body);
+        errdefer parsed.deinit(self.allocator);
+        if (parsed.content.len > backup.pause_bytes or !std.unicode.utf8ValidateSlice(parsed.content)) return error.BadRecord;
+        switch (parsed.doc) {
+            .path => |p| if (!validLabel(p.path)) return error.BadRecord,
+            .remote => |r| if (!validLabel(r.dest) or !validLabel(r.path)) return error.BadRecord,
+            .untitled => |n| if (n == 0) return error.BadRecord,
+        }
+        if (id == null) {
+            var buffer: [backup.max_file_name_len]u8 = undefined;
+            if (!std.mem.eql(u8, self.name, backup.fileName(&buffer, parsed.doc))) return error.ForeignRecord;
+        }
+        try self.validateNamespace();
+        return .{ .bytes = bytes, .parsed = parsed, .id = id };
+    }
+
+    /// 새 보호가 성공한 뒤에만 호출한다. 변경된 원본의 삭제 권한으로 확대하지 않는다.
+    pub fn drop(self: *Source) !void {
+        var record = try self.read();
+        defer record.deinit(self.allocator);
+        try self.validateNamespace();
+        try self.root.deleteFile(self.io, self.name);
+        // 본문 삭제는 끝났다. 빈 claim 정리 실패가 원본을 아직 보유한 것으로 되돌리면 안 된다.
+        if (self.lock) |*lock| _ = lock.unlinkOwnedWhileLocked(self.lock_path.?) catch {};
+    }
+};
+
+fn validLabel(bytes: []const u8) bool {
+    return bytes.len > 0 and std.unicode.utf8ValidateSlice(bytes) and std.mem.indexOfScalar(u8, bytes, 0) == null;
+}
+
+pub fn candidateName(name: []const u8) bool {
+    if (maru.session.editor.recovery_id.fromFileName(name)) |_| return true else |_| {}
+    if (name.len < 7 or name.len > backup.max_file_name_len or !std.mem.endsWith(u8, name, ".bak") or name[1] != '-') return false;
+    const digits = name[2 .. name.len - 4];
+    switch (name[0]) {
+        'p', 'r' => if (digits.len != 16) return false,
+        'u' => if (digits.len > 8) return false,
+        else => return false,
+    }
+    for (digits) |ch| if (!std.ascii.isDigit(ch) and !(ch >= 'a' and ch <= 'f')) return false;
+    return true;
+}
+
 pub const Record = struct {
     bytes: []u8,
     parsed: backup.RecoveryRecord,
@@ -45,6 +233,7 @@ pub const Owner = struct {
     reservation: ?Reservation = null,
     restore: bool = false,
     consume_on_publish: bool = false,
+    source: ?Source = null,
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, restored: ?Id) !*Owner {
         const id = restored orelse blk: {
@@ -64,6 +253,7 @@ pub const Owner = struct {
     pub fn release(self: *Owner) void {
         self.refs -= 1;
         if (self.refs != 0) return;
+        if (self.source) |*source| source.deinit();
         if (self.reservation) |*reservation| {
             // 실패한 첫 쓰기가 남긴 빈 예약만 정리한다. 기존 기록과 알 수 없는 파일은 보존한다.
             if (reservation.fresh or reservation.retire_when_empty) reservation.retire() catch {};
@@ -99,12 +289,21 @@ pub const Owner = struct {
         if (self.reservation) |*reservation| try reservation.selectDrop();
     }
     pub fn dropSelected(self: *Owner) !void {
+        try self.dropSource();
         if (self.reservation) |*reservation| try reservation.dropSelected();
         self.consume_on_publish = false;
     }
     pub fn drop(self: *Owner) !void {
         try self.selectDrop();
         try self.dropSelected();
+    }
+
+    pub fn dropSource(self: *Owner) !void {
+        if (self.source) |*source| {
+            try source.drop();
+            source.deinit();
+            self.source = null;
+        }
     }
 };
 
@@ -196,14 +395,9 @@ const Reservation = struct {
         return fd;
     }
     fn readFd(self: *Reservation, fd: c.fd_t) !Record {
-        const before = try statFd(fd);
-        if (before.size < 0 or before.size > backup.max_record_bytes) return error.RecordTooLarge;
-        const bytes = try self.allocator.alloc(u8, @as(usize, @intCast(before.size)) + 1);
+        const bytes = try readBounded(self.allocator, self.io, fd);
         errdefer self.allocator.free(bytes);
-        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
-        const n = try file.readPositionalAll(self.io, bytes, 0);
-        if (n != before.size) return error.RecordChanged;
-        var parsed = try backup.parseRecovery(self.allocator, bytes[0..n]);
+        var parsed = try backup.parseRecovery(self.allocator, bytes[0 .. bytes.len - 1]);
         errdefer parsed.deinit(self.allocator);
         if (!parsed.matches(&self.name, self.id, self.path)) return error.ForeignRecord;
         return .{ .bytes = bytes, .parsed = parsed };

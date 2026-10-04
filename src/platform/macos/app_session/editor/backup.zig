@@ -47,7 +47,7 @@ pub fn identity(term: *const Term) ?backup.Doc {
 }
 
 /// 백업 디렉터리 절대 경로를 `buf` 에 담는다.
-fn dirPath(buf: []u8) ?[]const u8 {
+pub fn dirPath(buf: []u8) ?[]const u8 {
     if (dir_override) |d| {
         if (d.len == 0 or d.len > buf.len) return null;
         @memcpy(buf[0..d.len], d);
@@ -152,6 +152,7 @@ pub fn markClean(self: *AppSession, term: *Term, content: []const u8, previous_i
     // ⚠️ **`&(… orelse …)` 로 잡지 않는다** — 그 형태는 optional 의 «사본»에 포인터를 주므로
     // 저장 해시가 임시 값에 쓰이고 문서는 영원히 dirty 로 남는다(적대적 1회차에서 그 형태를 지웠다).
     term.rt.editorDocument().opened.?.saved_hash = editor_ops.contentHash(content);
+    term.rt.editorDocument().opened.?.needs_save = false;
     dropRecoverySource(self, term);
     if (previous_identity) |prev| {
         if (term.rt.editorDocument().notifications.backup_on_disk) {
@@ -307,6 +308,11 @@ pub fn fileNameIfOnDisk(term: *const Term, buf: *[backup.max_file_name_len]u8) ?
 fn dropRecoverySource(self: *AppSession, term: *Term) void {
     const state = &term.rt.editorDocument().notifications;
     if (state.recovery_backup_len == 0) return;
+    if (term.rt.editor_recovery) |owner| if (owner.source != null) {
+        owner.dropSource() catch return;
+        state.recovery_backup_len = 0;
+        return;
+    };
     dropName(self, state.recovery_backup_name[0..state.recovery_backup_len]);
     state.recovery_backup_len = 0;
 }
@@ -465,7 +471,11 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
     if (parsed.content.len > backup.pause_bytes) return;
     // 내용이 이미 같으면 되살릴 것이 없다 — 레코드만 걷는다(다음 실행이 또 보지 않게).
     if (std.mem.eql(u8, parsed.content, doc.file.content)) {
-        dropConsumed(self, parsed.doc);
+        // 이름 없는 백업은 저장 이력이 없다. 빈 본문을 clean과 혼동해 없애지 않는다.
+        if (want == .untitled) {
+            term.rt.editorDocument().opened.?.needs_save = true;
+            term.rt.editorDocument().notifications.backup_on_disk = true;
+        } else dropConsumed(self, parsed.doc);
         return;
     }
 
@@ -480,6 +490,7 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
     // **한 편집이다** — 통짜로 문서를 갈아치우면 `⌘Z` 로 디스크 내용에 돌아갈 길이 없다(C1a 의
     // 「다시 로드」가 같은 이유로 편집이 됐다). 실패하면 **레코드를 남긴다**: 다음 기회에 또 시도한다.
     if (!editor_ops.applyEditAsOne(self, term, &changes)) return;
+    if (want == .untitled) term.rt.editorDocument().opened.?.needs_save = true;
 
     // **지문은 레코드의 것이다** — 「내가 마지막으로 본 디스크」. 지금 디스크의 지문으로 덮으면 첫
     // 저장이 CAS 를 통과해 **외부 변경을 조용히 지운다**(그것이 §3.10 이 막으려던 그 손실이다).
@@ -544,39 +555,30 @@ fn readAt(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ReadOutcom
 ///
 /// 레코드가 없거나 읽히지 않으면 **아무것도 만들지 않는다**(빈 탭을 만들 이유가 없다).
 pub fn reviveAsUntitled(self: *AppSession, lost: backup.Doc) void {
+    if (lost == .untitled) return; // 번호가 있는 workspace 복원은 restoreUntitled가 담당한다.
     var source_buf: [backup.max_file_name_len]u8 = undefined;
     if (self.editor_documents.hasRecoveryBackupSource(backup.fileName(&source_buf, lost))) return;
-    const record = read(self, lost) orelse return;
-    defer self.allocator.free(record.bytes);
-    var parsed = record.parsed;
-    defer parsed.deinit(self.allocator);
-
-    // 신원 재확인 — 이름이 해시라 남의 레코드를 되살리면 조용히 다른 내용이 뜬다.
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = dirPath(&root_buffer) orelse return;
+    var source: ?editor_ops.recovery_store.Source = editor_ops.recovery_store.Source.open(self.allocator, self.io, root, backup.fileName(&source_buf, lost)) catch return;
+    defer if (source) |*retained| retained.deinit();
+    var record = source.?.read() catch return;
+    defer record.deinit(self.allocator);
+    // 수동 목록과 달리 자동 복구는 요청한 원본이 있다. 파일명 해시가 같아도 정확한 신원을 대조한다.
     switch (lost) {
-        .remote => |w| switch (parsed.doc) {
-            .remote => |r| if (!std.mem.eql(u8, r.dest, w.dest) or !std.mem.eql(u8, r.path, w.path)) return,
-            else => return,
-        },
-        .path => |w| switch (parsed.doc) {
+        .path => |w| switch (record.parsed.doc) {
             .path => |p| if (!std.mem.eql(u8, p.path, w.path)) return,
             else => return,
         },
-        .untitled => return, // 그 갈래는 U4c 가 번호로 되살린다(여기 오면 갈래가 갈린 것이다)
+        .remote => |w| switch (record.parsed.doc) {
+            .remote => |r| if (!std.mem.eql(u8, r.dest, w.dest) or !std.mem.eql(u8, r.path, w.path)) return,
+            else => return,
+        },
+        .untitled => unreachable,
     }
-    // U4b 와 같은 적대적 게이트 — 레코드는 신뢰 입력이 아니다(§3.8).
-    if (!std.unicode.utf8ValidateSlice(parsed.content)) return;
-    if (parsed.content.len > backup.pause_bytes) return;
-    if (parsed.content.len == 0) {
-        dropDoc(self, lost); // 되살릴 내용이 없으면 레코드만 걷는다
-        return;
-    }
-
-    const term = editor_ops.openUntitledInActivePane(self) catch return;
-    var changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = parsed.content }};
-    if (!editor_ops.applyEditAsOne(self, term, &changes)) return; // 못 넣었으면 레코드를 남긴다
-    const state = &term.rt.editorDocument().notifications;
-    const source = backup.fileName(&state.recovery_backup_name, lost);
-    state.recovery_backup_len = @intCast(source.len);
+    // 본문·줄 준비 실패는 원본을 소비하지 않는다. 성공한 source의 수명은 새 문서가 가진다.
+    _ = editor_ops.openRecoveredSource(self, &source.?) catch return;
+    source = null;
     self.showNoticeKey(.editor_backup_revived);
 }
 

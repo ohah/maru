@@ -95,8 +95,9 @@ clean prepare 비용은 ReleaseFast에서 같은 작은 파일을 200회 교차 
 - 공개 분할 명령은 이 단계에서 노출하지 않는다. 실제 두 pane 재시작의 첫 렌더, 배경 pane/폭 변화와
   wrap 정산, 큰 파일의 지연 syntax/LSP 접힘 전환, OS IME 확정 후 복원은 공개 전 별도 gate다.
   현재 저장한 접힘은 준비 시점 provider에 있는 머리만 적용하며 이후 provider 교체의 기존 정책을 따른다.
-- orphan/legacy 열거와 사용자 복구 UI는 후속 단계다. 이전 v1 백업과 checkpoint 밖의 ID 레코드를
-  보존하는 것과 사용자에게 복구 진입점을 제공하는 것은 다르다. 원본 누락도 창 staging을 거절한다.
+- orphan/legacy 열거와 사용자 복구 UI는 [백업 발견과 복구](editor-backup-discovery.md)에서 연결한다.
+  `recover_editor_backups`는 선택한 사본을 별도 미저장 문서로 연다. 원본 누락 시 전체 창
+  staging을 거절하는 기존 정책과 이 수동 복구 경로를 구분한다.
 - untitled/remote/diff의 백업 계약과 Undo/Redo 미직렬화 정책은 유지한다. 창 간 공유를 추가하지 않는다.
 - 기존 `max_close_backup_drops` 한도 밖 기록과 삭제 권한 실패 시 오래된 레코드가 남는 한계는 유지한다.
   ID 분리로 best-effort 정리나 stale-backup 판정 전체가 해결됐다고 주장하지 않는다.

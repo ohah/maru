@@ -61,5 +61,6 @@ test {
     _ = @import("app_session/editor/mod.zig");
     _ = @import("app_session/editor/syntax.zig");
     _ = @import("app_session/editor/diff.zig");
+    _ = @import("app_session/editor/discovery.zig");
     _ = @import("symbol_picker.zig");
 }

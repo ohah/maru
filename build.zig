@@ -5046,7 +5046,7 @@ pub fn build(b: *std.Build) void {
         // 에 걸리므로 `"app_session.editor.mod."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
         // 모듈에 흩어진 판정자를 마저 긁으려고 남긴다. 대가는 시간이다 — 실측 75초 → 97초
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.diff.", "app_session.editor.recovery_store." },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.diff.", "app_session.editor.recovery_store.", "app_session.editor.discovery." },
     });
     // 문서 핸들의 제품 수명과 등록 실패를 빠르게 재현한다. 전체 test-editor에도 같은 판정자가 실린다.
     const document_runtime_tests = addProjectTest(b, .{
@@ -5061,6 +5061,16 @@ pub fn build(b: *std.Build) void {
     run_recovery_restore_tests.setCwd(b.path("."));
     run_recovery_restore_tests.step.dependOn(&install_fake_lsp.step);
     editor_recovery_restore_step.dependOn(&run_recovery_restore_tests.step);
+    const backup_discovery_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{"editor backup discovery"},
+    });
+    const run_backup_discovery_tests = b.addRunArtifact(backup_discovery_tests);
+    run_backup_discovery_tests.setCwd(b.path("."));
+    const backup_discovery_step = b.step("test-editor-backup-discovery", "Run orphan editor backup discovery and recovery judges");
+    backup_discovery_step.dependOn(&run_backup_discovery_tests.step);
+    editor_recovery_restore_step.dependOn(&run_backup_discovery_tests.step);
+    macos_only_test_step.dependOn(&run_backup_discovery_tests.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos and target.result.cpu.arch == builtin.cpu.arch) {
         const recovery_process = b.addSystemCommand(&.{ "python3", "tools/test-editor-recovery-process.py" });
         recovery_process.has_side_effects = true;
@@ -5069,6 +5079,12 @@ pub fn build(b: *std.Build) void {
         recovery_process.step.dependOn(&install_fake_lsp.step);
         editor_recovery_restore_step.dependOn(&recovery_process.step);
         macos_only_test_step.dependOn(&recovery_process.step);
+        const discovery_process = b.addSystemCommand(&.{ "python3", "tools/test-editor-backup-discovery-process.py" });
+        discovery_process.has_side_effects = true;
+        discovery_process.addArtifactArg(backup_discovery_tests);
+        discovery_process.setCwd(b.path("."));
+        backup_discovery_step.dependOn(&discovery_process.step);
+        macos_only_test_step.dependOn(&discovery_process.step);
     }
 
     const shared_view_tests = addProjectTest(b, .{

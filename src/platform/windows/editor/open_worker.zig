@@ -7,15 +7,31 @@ const native = @import("native_open.zig");
 const w = std.os.windows;
 extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
 pub const max_bytes = 4 << 20;
+pub const ReadonlyImage = struct {
+    path: []u8,
+    bytes: []u8,
+    raw_hash: u64,
+
+    fn deinit(self: *ReadonlyImage) void {
+        std.heap.smp_allocator.free(self.path);
+        std.heap.smp_allocator.free(self.bytes);
+    }
+};
 pub const Result = struct {
     snapshot: ?native.Snapshot = null,
+    readonly: ?ReadonlyImage = null,
+    /// Borrowed only from the owned snapshot/readonly bytes in this Result.
+    document: ?maru.session.editor.document.Document = null,
     failure: ?anyerror = null,
     cancelled: bool = false,
     thread_id: std.Thread.Id,
 
     pub fn deinit(self: *Result, io: std.Io) void {
         if (self.snapshot) |*snapshot| snapshot.deinit(io);
+        if (self.readonly) |*image| image.deinit();
         self.snapshot = null;
+        self.readonly = null;
+        self.document = null;
     }
 };
 const Native = struct {
@@ -29,23 +45,52 @@ const Native = struct {
 const Job = struct {
     path: []u8,
     limit: usize,
+    readonly_fallback: bool = false,
     cancel_requested: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
     result: ?Result = null,
 
+    fn readOnly(self: *Job, io: std.Io) !Result {
+        // Capability failure permits viewing, never a weaker editable grant.
+        // Both paths use Windows absolute namespace admission and the same cap.
+        _ = try native.rootForPath(self.path);
+        const a = std.heap.smp_allocator;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, self.path, a, .limited(self.limit));
+        errdefer a.free(bytes);
+        const parsed = try maru.session.editor.document.open(bytes, true);
+        const path = try a.dupe(u8, self.path);
+        return .{ .readonly = .{ .path = path, .bytes = bytes, .raw_hash = maru.session.editor.document_state.contentHash(bytes) }, .document = parsed, .thread_id = std.Thread.getCurrentId() };
+    }
+
     fn perform(self: *Job, io: std.Io, comptime Driver: type) Result {
         const thread_id = std.Thread.getCurrentId();
         if (self.cancel_requested.load(.acquire)) return .{ .cancelled = true, .thread_id = thread_id };
-        var snapshot = Driver.open(self.path, self.limit, io) catch |err| return .{
-            .failure = err,
-            .cancelled = self.cancel_requested.load(.acquire),
-            .thread_id = thread_id,
+        var snapshot = Driver.open(self.path, self.limit, io) catch |err| {
+            if (err == error.OutOfMemory or !self.readonly_fallback) return .{
+                .failure = err,
+                .cancelled = self.cancel_requested.load(.acquire),
+                .thread_id = thread_id,
+            };
+            var fallback = self.readOnly(io) catch |failure| return .{
+                .failure = failure,
+                .cancelled = self.cancel_requested.load(.acquire),
+                .thread_id = thread_id,
+            };
+            if (self.cancel_requested.load(.acquire)) {
+                fallback.deinit(io);
+                return .{ .cancelled = true, .thread_id = thread_id };
+            }
+            return fallback;
+        };
+        const parsed = maru.session.editor.document.open(snapshot.bytes, false) catch |err| {
+            snapshot.deinit(io);
+            return .{ .failure = err, .cancelled = self.cancel_requested.load(.acquire), .thread_id = thread_id };
         };
         if (self.cancel_requested.load(.acquire)) {
             snapshot.deinit(io);
             return .{ .cancelled = true, .thread_id = thread_id };
         }
-        return .{ .snapshot = snapshot, .thread_id = thread_id };
+        return .{ .snapshot = snapshot, .document = parsed, .thread_id = thread_id };
     }
     fn run(self: *Job, comptime Driver: type) void {
         var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
@@ -65,7 +110,15 @@ pub const Worker = struct {
     pub fn start(self: *Worker, path: []const u8, limit: usize) !void {
         return self.startWith(path, limit, Native);
     }
+    pub fn startForApp(self: *Worker, path: []const u8, limit: usize) !void {
+        const kind = maru.session.file_panel_bridge.openKindForPath(path) orelse return error.UnsupportedFileKind;
+        if (kind != .text) return error.NeedsWebPanel;
+        return self.startMode(path, limit, true, Native);
+    }
     fn startWith(self: *Worker, path: []const u8, limit: usize, comptime Driver: type) !void {
+        return self.startMode(path, limit, false, Driver);
+    }
+    fn startMode(self: *Worker, path: []const u8, limit: usize, readonly_fallback: bool, comptime Driver: type) !void {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
         try self.checkOwner();
         if (self.job != null) return error.OpenBusy;
@@ -75,7 +128,7 @@ pub const Worker = struct {
         errdefer std.heap.smp_allocator.free(owned);
         const job = try self.allocator.create(Job);
         errdefer self.allocator.destroy(job);
-        job.* = .{ .path = owned, .limit = limit };
+        job.* = .{ .path = owned, .limit = limit, .readonly_fallback = readonly_fallback };
         const thread = try std.Thread.spawn(.{}, Job.run, .{ job, Driver });
         thread.detach();
         self.address = self;
@@ -257,4 +310,100 @@ test "Windows initial open worker readonly source fails capability before editab
     const bytes = try tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows initial open worker app readonly fallback owns raw BOM bytes and readonly document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+    defer std.testing.allocator.free(wide);
+    try std.testing.expect(SetFileAttributesW(wide, 1).toBool());
+    defer _ = SetFileAttributesW(wide, 0x80);
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startForApp(path, 128);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.failure == null and result.snapshot == null and result.readonly != null);
+    try std.testing.expect(result.document.?.read_only and result.document.?.format.has_bom);
+    try std.testing.expectEqualStrings("base\r\n", result.document.?.content);
+    try std.testing.expectEqualStrings(path, result.readonly.?.path);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", result.readonly.?.bytes);
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash("\xef\xbb\xbfbase\r\n"), result.readonly.?.raw_hash);
+    try std.testing.expect(result.thread_id != std.Thread.getCurrentId());
+}
+
+test "Windows initial open worker rejects invalid UTF8 without publishing native ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "bad\xff" });
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startForApp(path, 128);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expectEqual(@as(?anyerror, error.NotUtf8), result.failure);
+    try std.testing.expect(result.snapshot == null and result.readonly == null and result.document == null);
+}
+
+test "Windows initial open worker parses mixed line endings without normalizing native bytes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    const raw = "\xef\xbb\xbfalpha\r\nbeta\ngamma\r\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = raw });
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startForApp(path, 128);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.failure == null and result.snapshot != null and result.readonly == null);
+    try std.testing.expect(!result.document.?.read_only);
+    try std.testing.expect(result.document.?.format.has_bom and result.document.?.format.mixed_endings);
+    try std.testing.expectEqual(.crlf, result.document.?.format.dominant_ending);
+    try std.testing.expectEqualStrings(raw[3..], result.document.?.content);
+    try std.testing.expectEqualStrings(raw, result.snapshot.?.bytes);
+}
+
+const OutOfMemory = struct {
+    fn open(_: []const u8, _: usize, _: std.Io) !native.Snapshot {
+        return error.OutOfMemory;
+    }
+};
+test "Windows initial open worker app OOM never becomes readonly fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startMode(path, 128, true, OutOfMemory);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), result.failure);
+    try std.testing.expect(result.snapshot == null and result.readonly == null and result.document == null);
+}
+
+test "Windows initial open worker fallback retains read cap and web kind admission" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try std.testing.expectError(error.NeedsWebPanel, worker.startForApp("D:\\fixture.md", 128));
+    try worker.startForApp(path, 6);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.failure != null and result.snapshot == null and result.readonly == null);
 }

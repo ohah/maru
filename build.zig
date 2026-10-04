@@ -1645,7 +1645,7 @@ pub fn build(b: *std.Build) void {
     const editor_open_tests = addProjectTest(b, .{ .root_module = editor_open_mod, .filters = &.{"Windows initial open worker"} });
     const editor_open_step = b.step("test-win32-editor-open", "Verify initial read and capability worker ownership without Registry callbacks");
     const run_editor_open_tests = b.addRunArtifact(editor_open_tests);
-    run_editor_open_tests.addArg("--maru-expect-tests=6");
+    run_editor_open_tests.addArg("--maru-expect-tests=11");
     editor_open_step.dependOn(&run_editor_open_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {

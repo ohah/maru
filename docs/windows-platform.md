@@ -11953,3 +11953,22 @@ bytes 보존, active/late 취소, copied owner, 읽기 상한과 readonly capabi
 probe 생략·active 취소 무시·late 취소 무시·copied owner 허용·admission 상한 생략의 다섯
 compiled runtime 변형을 검출하고 원본 bytes를 복원했다. 일반 앱의 파일 클릭은 아직 동기
 경로를 쓰며 worker 결과의 앱 등록/readonly fallback·UTF-8 처리·닫기 배선은 이어서 진행한다.
+
+### 2m.183 — 초기 worker의 읽기 전용 열기와 문서 해석
+
+`startForApp`은 파일 kind를 먼저 판정하고 text만 worker에 맡긴다. 저장 capability가 없으면
+같은 Windows 절대 경로 정책과 읽기 상한 안에서 읽기 전용 이미지를 만든다. writable grant는
+만들지 않으며 OOM은 읽기 전용 fallback으로 바꾸지 않는다. 기존 strict `start`는 capability
+실패를 오류로 반환하는 계약을 유지한다.
+
+writable/readonly 양쪽의 UTF-8 검증·BOM 제외 본문·줄바꿈 해석은 worker에서 수행한다.
+Result의 Document는 함께 소유한 raw bytes만 빌린다. readonly 이미지는 독립 경로·원본
+bytes·BOM을 포함한 raw hash를 유지한다. 취소와 Result 정리 시 native/readonly 소유권 및
+borrowed Document를 함께 정리한다. UTF-8 아닌 입력은 문서나 native 권한을 게시하지 않는다.
+
+worker 11개가 Debug/ReleaseFast에서 통과했다. readonly BOM/raw CAS, 잘못된 UTF-8,
+mixed line ending 원본 보존, OOM의 fallback 금지와 readonly 읽기 상한·web kind 판정을
+추가했다. OOM fallback 허용·UTF-8 검사 생략·readonly 권한 철회·decoded hash 사용·fallback
+읽기 상한 생략의 다섯 compiled runtime 변형을 검출하고 worker/core 원본 bytes를 복원했다.
+일반 앱 파일 클릭의 worker 연결과 결과 등록·닫기 배선은 계속 남아 있으며 기존 동기 경로는
+아직 문서 준비를 UI 스레드에서 수행한다.

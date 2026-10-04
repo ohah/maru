@@ -6358,6 +6358,41 @@ pub fn build(b: *std.Build) void {
     upgrade_scan_policy_step.dependOn(&run_scan_policy_wiring.step);
     boundary_step.dependOn(upgrade_scan_policy_step);
 
+    // 재접속 job 이 **재시도 없이 끝나거나 다시 들어갈 때마다 한 줄을 남기는가**(2026-10-04: 잠자기 뒤 poison 으로 생긴
+    // 재접속 job 이 조용히 끝나 50분 동안 재접속 줄이 0 이었고, 첫 시도가 왜 실패했는지 가릴 수 없었다). 서식·판정은
+    // std-only leaf 라 PR 에서 돌고, 정산 갈래가 그 기록을 제자리에서 부르는지는 wiring 경계가 잰다.
+    const reconnect_failure_log_step = b.step(
+        "test-reconnect-failure-log",
+        "Every reconnect job that ends without retry or is requeued leaves one diagnostic line",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |failure_log_optimize| {
+        const failure_log_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_failure_log.zig"),
+                .target = target,
+                .optimize = failure_log_optimize,
+            }),
+            .filters = &.{"재접속 실패 로그"},
+        });
+        const run_failure_log_tests = b.addRunArtifact(failure_log_tests);
+        run_failure_log_tests.addArg("--maru-expect-tests=6");
+        run_failure_log_tests.addArg("--maru-expect-passed=6");
+        reconnect_failure_log_step.dependOn(&run_failure_log_tests.step);
+    }
+    const failure_log_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/reconnect_failure_log_wiring_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_failure_log_wiring = b.addRunArtifact(failure_log_wiring_tests);
+    run_failure_log_wiring.addArg("--maru-expect-tests=2");
+    run_failure_log_wiring.addArg("--maru-expect-passed=2");
+    run_failure_log_wiring.setCwd(b.path("."));
+    reconnect_failure_log_step.dependOn(&run_failure_log_wiring.step);
+    boundary_step.dependOn(reconnect_failure_log_step);
+
     // 업그레이드가 실패해도 **살아 있는 host 를 재사용하고, 그런 host 가 없을 때만 새 host 를 띄우는가**(2026-09-30:
     // 교체 실패마다 새 host 를 띄워 host 가 넷이 됐다 — 설계는 「한 로그인 세션에 host 하나」). 판정은 std-only leaf 라
     // PR 에서 돌고, connect 경로·앱 pool 이 그 판정을 spawn 앞 제자리에서 부르는지는 wiring 경계가 잰다.

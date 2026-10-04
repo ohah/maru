@@ -10,6 +10,7 @@ const client_mod = @import("client.zig");
 const framing = @import("framing.zig");
 const host_connect = @import("host_connect.zig");
 const process_identity = @import("process_identity.zig");
+const failure_log = @import("reconnect_failure_log.zig");
 const worker_owner = @import("reconnect_worker_owner.zig");
 
 pub const WorkOrder = struct {
@@ -27,12 +28,29 @@ pub const Completion = struct {
     order: WorkOrder = zero_order,
     result: Outcome = .cancelled,
     candidate: ?client_mod.Client = null,
+    /// 이 시도가 **왜** 그 결과가 됐는지. 워커는 로그를 찍지 않고 여기에 싣기만 하며, 메인의 정산 갈래가
+    /// `reconnect job ended/requeued` 한 줄로 남긴다(`reconnect_failure_log.zig`).
+    detail: failure_log.AttemptDetail = .none,
+    connect_failure: ?host_connect.FailureReason = null,
+    /// 시도를 시작한 순간 데드라인까지 남은 ms(음수면 이미 지남). `deadline_measured` 가 거짓이면 의미 없다.
+    deadline_remaining_ms: i64 = 0,
+    deadline_measured: bool = false,
     seal: [32]u8 = [_]u8{0} ** 32,
     lifecycle: Lifecycle = .pristine,
 
     pub fn outcome(self: *const Completion) !Outcome {
         try self.validate();
         return self.result;
+    }
+
+    /// 정산 갈래가 로그에 싣는 시도 기록. 소비 전후 어느 때나 읽을 수 있다(봉인과 무관한 진단 값).
+    pub fn attempt(self: *const Completion) failure_log.Attempt {
+        return .{
+            .detail = self.detail,
+            .reason = if (self.connect_failure) |reason| @tagName(reason) else "-",
+            .deadline_remaining_ms = self.deadline_remaining_ms,
+            .measured = self.deadline_measured,
+        };
     }
 
     /// Transfers the sole candidate owner. The returned value follows Client's existing
@@ -153,10 +171,19 @@ fn executeIntoWith(
 ) !void {
     if (!std.meta.eql(out.*, Completion{}) or !validOrder(order) or base_cache_dir.len == 0)
         return error.InvalidWorkOrder;
-    if (cancelled.load(.acquire) != 0) return finish(out, order, .cancelled, null);
+    if (cancelled.load(.acquire) != 0) return finish(out, order, .cancelled, null, .{ .detail = .cancelled });
     const expires_at: i128 = order.snapshot.absolute_deadline_ns;
+    // 시도 시작 시점의 잔여 데드라인. 다시 넣은 job 이 낡은 데드라인을 끌고 와 연결도 안 해 보고 끝나는지
+    // (`stale_deadline`) 를 다음 사고 한 줄로 판정하려고 싣는다 — 판정에는 쓰지 않는다.
+    const started: Note = .{
+        .deadline_remaining_ms = failure_log.deadlineRemainingMs(
+            order.snapshot.absolute_deadline_ns,
+            std.Io.Clock.awake.now(io).nanoseconds,
+        ),
+        .deadline_measured = true,
+    };
     const absolute = client_deadline.AbsoluteDeadline.fromAbsolute(io, expires_at) catch
-        return finish(out, order, .deadline_exceeded, null);
+        return finish(out, order, .deadline_exceeded, null, started.with(.deadline_past_before_connect, null));
     const phase = attach_phase_deadline.PhaseDeadline.fromAbsolute(.connect_hello, absolute);
     var connected = connector.connect(
         connector.context,
@@ -167,30 +194,55 @@ fn executeIntoWith(
     );
     if (cancelled.load(.acquire) != 0) {
         if (connected == .connected) connected.connected.deinit();
-        return finish(out, order, .cancelled, null);
+        return finish(out, order, .cancelled, null, started.with(.cancelled, null));
     }
     switch (connected) {
-        .failed => |reason| return finish(out, order, classifyFailure(reason), null),
+        .failed => |reason| return finish(
+            out,
+            order,
+            classifyFailure(reason),
+            null,
+            started.with(.connect_failed, reason),
+        ),
         .connected => |candidate| {
             if (candidate.fd < 0 or candidate.host_id != order.snapshot.host_id or
                 !candidate.runtime_catchup_barrier_v1 or candidate.connection_profile != .gui)
             {
                 var rejected = candidate;
                 rejected.deinit();
-                return finish(out, order, .retry_later, null);
+                return finish(out, order, .retry_later, null, started.with(.candidate_rejected, null));
             }
-            return finish(out, order, .connected, candidate);
+            return finish(out, order, .connected, candidate, started);
         },
     }
 }
 
-fn finish(out: *Completion, order: WorkOrder, result: Outcome, candidate: ?client_mod.Client) void {
+/// 시도 기록(진단 전용). `finish` 가 Completion 에 옮겨 싣는다.
+const Note = struct {
+    detail: failure_log.AttemptDetail = .none,
+    connect_failure: ?host_connect.FailureReason = null,
+    deadline_remaining_ms: i64 = 0,
+    deadline_measured: bool = false,
+
+    fn with(self: Note, detail: failure_log.AttemptDetail, connect_failure: ?host_connect.FailureReason) Note {
+        var out = self;
+        out.detail = detail;
+        out.connect_failure = connect_failure;
+        return out;
+    }
+};
+
+fn finish(out: *Completion, order: WorkOrder, result: Outcome, candidate: ?client_mod.Client, note: Note) void {
     out.* = .{
         .self_addr = @intFromPtr(out),
         .pid = process_identity.currentProcessId(),
         .order = order,
         .result = result,
         .candidate = candidate,
+        .detail = note.detail,
+        .connect_failure = note.connect_failure,
+        .deadline_remaining_ms = note.deadline_remaining_ms,
+        .deadline_measured = note.deadline_measured,
         .lifecycle = .ready,
     };
     out.seal = completionSeal(out);
@@ -211,6 +263,13 @@ fn completionSeal(completion: *const Completion) [32]u8 {
     hasher.update(std.mem.asBytes(&completion.order.snapshot.absolute_deadline_ns));
     const result_raw: u8 = @intFromEnum(completion.result);
     hasher.update(std.mem.asBytes(&result_raw));
+    const detail_raw: u8 = @intFromEnum(completion.detail);
+    hasher.update(std.mem.asBytes(&detail_raw));
+    const failure_raw: u16 = if (completion.connect_failure) |reason| @as(u16, @intFromEnum(reason)) + 1 else 0;
+    hasher.update(std.mem.asBytes(&failure_raw));
+    hasher.update(std.mem.asBytes(&completion.deadline_remaining_ms));
+    const measured_raw: u8 = @intFromBool(completion.deadline_measured);
+    hasher.update(std.mem.asBytes(&measured_raw));
     if (completion.candidate) |*candidate| {
         const digest = candidate.clientProjectionAuthorityDigest();
         hasher.update(&digest);

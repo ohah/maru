@@ -2040,6 +2040,13 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   anchor charge를 건드리지 않음과, 다른 incident·charged·자기 자신으로의 이전을 거부함을 잰다. 수정 전 코드에서 N=8·13은
   `.retry_later`로 red, N=7은 green(대조군)이었다. 경계 `CR6e-c3b2c 경계는`(check-boundaries)이 batch charge 부재, anchor
   bind, 직렬 job 전제, charged==1 검사 두 자리, teardown 직전 이전 네 자리를 고정한다.
+  **재접속 job 실패 로그**(`test-reconnect-failure-log`, check-boundaries — PR 에서 돈다): std-only leaf
+  `reconnect_failure_log.zig` 의 표 테스트 6개(Debug·ReleaseFast)가 데드라인 잔여 부호·포화, `stale_deadline` 판정, host·연결
+  세대별 시도 횟수/경과와 8칸 덮어쓰기, 다시 넣기 줄 1초 간격 상한과 삼킨 수, idle→drained 전이(시작 직후 (0,0) 은 조용히),
+  세 줄의 정확한 서식을 잰다. wiring 경계 2개가 `settleLogicalCompletion` 의 retry_later 갈래 안 다시 넣기 줄과 결속 해제 뒤
+  조건 없는 끝 줄, `progressConnectedOne` 의 retained_terminal 끝 줄, connected 분기 **앞**의 시도 기록 포획, 채택 실패 사유,
+  새 job 입장의 기준 시각, 워커의 연결 전 잔여 데드라인 측정·연결 전 지남·연결 실패 사유·후보 거절과 그 봉인을 문법 자리로
+  고정한다. 수정 전 코드에서 wiring 2개 모두 red. 동작(재시도·데드라인)은 바꾸지 않으며 실제 잠자기 재현 E2E 는 없다.
   **CR6e-c3b2d 재연결 viewport**(같은 step 필터 `CR6e-c3b2d reconnect viewport`·`CR6e-c3b2d mutation denial`, 경계
   `CR6e-c3b2d 경계는`): 관문이 닫힌 동안(observer) 들어온 `resize`가 `layout_size`에 남아 재연결 강제 resize 의 크기가
   되되, host 가 거절할 수 있는 크기(cell 상한 초과·최소 열 미만·cell 증가)는 snapshot 으로 물러남을 잰다. 진단은 같은

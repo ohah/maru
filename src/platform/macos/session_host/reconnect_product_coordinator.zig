@@ -12,6 +12,7 @@ const worker_mod = @import("reconnect_worker_runtime.zig");
 const admission_mod = @import("reconnect_admission_owner.zig");
 const budget_mod = @import("reconnect_resident_budget.zig");
 const backend_mod = @import("remote_term_backend.zig");
+const failure_log = @import("reconnect_failure_log.zig");
 const process_seal = @import("process_seal_service.zig");
 
 pub const PollResult = enum(u8) { idle, connected_ready, logical_completion_ready };
@@ -35,6 +36,11 @@ pub const Coordinator = struct {
     job_receipt: owner_mod.JobReceipt = .{},
     completion_receipt: owner_mod.CompletionReceipt = .{},
     ready: bool = false,
+    /// 진단 전용 — 동작을 바꾸지 않는다. 마지막 물리 시도가 왜 그렇게 끝났는지, host 마다 몇 번 돌았는지,
+    /// 다시 넣기 줄의 간격 상한(`reconnect_failure_log.zig`).
+    last_attempt: failure_log.Attempt = .{},
+    streaks: failure_log.Streaks = .{},
+    requeue_rate: failure_log.RateLimit = .{},
 
     pub fn initInPlace(
         self: *Coordinator,
@@ -137,17 +143,55 @@ pub const Coordinator = struct {
     /// 실측에서 incident 는 `disposition=reconnect`·`sequence=1` 로 admission 조건을 만족했고 소켓도 살아
     /// 있었는데 job 시작 진단이 한 줄도 남지 않았다. admission 이 애초에 안 만들어진 것인지, 만들어졌지만
     /// dispatch 가 집어가지 못한 것인지 가릴 수단이 없어 원인을 좁히지 못했다.
+    ///
+    /// **(0,0) 으로 돌아온 순간도 남긴다(`reconnect turn drained`).** 2026-10-04 23:43 사고에서 `jobs=1` 한 줄 뒤 50분이
+    /// 조용했는데, job 이 아직 살아 있는지 이미 끝났는지를 로그로 가릴 수 없었다 — 끝나는 전이를 찍지 않았기 때문이다.
     fn noteIdleTurn(admission_count: u32, active_jobs: usize) void {
         if (builtin.is_test) return;
         const Last = struct {
-            var admissions: u32 = std.math.maxInt(u32);
-            var jobs: usize = std.math.maxInt(usize);
+            var tracker: failure_log.IdleTracker = .{};
         };
-        if (Last.admissions == admission_count and Last.jobs == active_jobs) return;
-        Last.admissions = admission_count;
-        Last.jobs = active_jobs;
-        if (admission_count == 0 and active_jobs == 0) return; // 할 일이 없는 평시는 남기지 않는다.
-        std.log.warn("reconnect turn idle: admissions={d} jobs={d}", .{ admission_count, active_jobs });
+        const prev_admissions = Last.tracker.admissions orelse 0;
+        const prev_jobs = Last.tracker.jobs orelse 0;
+        switch (Last.tracker.note(admission_count, active_jobs)) {
+            .none => {},
+            .idle => std.log.warn("reconnect turn idle: admissions={d} jobs={d}", .{ admission_count, active_jobs }),
+            .drained => logLine(.info, failure_log.writeDrained, .{ prev_admissions, prev_jobs }),
+        }
+    }
+
+    fn nowNs(self: *const Coordinator) i128 {
+        return std.Io.Clock.awake.now(self.worker.io).nanoseconds;
+    }
+
+    /// 재시도 없이 입장을 정산한 job 을 한 줄로 남긴다. 예전에는 이 갈래가 결속만 풀고 조용히 끝나, 재접속이
+    /// 영영 멈춰도 로그에 아무것도 없었다(2026-10-04).
+    fn noteEnded(self: *Coordinator, snapshot: owner_mod.Snapshot, outcome: []const u8) void {
+        const now = self.nowNs();
+        const summary = self.streaks.end(snapshot.host_id, snapshot.connection_generation, now);
+        if (builtin.is_test) return;
+        logLine(.warn, failure_log.writeEnded, .{failure_log.Ended{
+            .host_id = snapshot.host_id,
+            .outcome = outcome,
+            .attempt = self.last_attempt,
+            .summary = summary,
+            .deadline_remaining_ms = failure_log.deadlineRemainingMs(snapshot.absolute_deadline_ns, now),
+        }});
+    }
+
+    /// `retry_later` 로 같은 스냅샷을 다시 넣었다. 루프가 돌 수 있어 1초에 한 줄로 묶는다.
+    fn noteRequeued(self: *Coordinator, snapshot: owner_mod.Snapshot) void {
+        const now = self.nowNs();
+        const attempts = self.streaks.requeue(snapshot.host_id, snapshot.connection_generation);
+        const suppressed = self.requeue_rate.admit(now) orelse return;
+        if (builtin.is_test) return;
+        logLine(.info, failure_log.writeRequeued, .{failure_log.Requeued{
+            .host_id = snapshot.host_id,
+            .attempt = self.last_attempt,
+            .attempts = attempts,
+            .deadline_remaining_ms = failure_log.deadlineRemainingMs(snapshot.absolute_deadline_ns, now),
+            .suppressed = suppressed,
+        }});
     }
 
     pub fn admit(self: *Coordinator, snapshot: owner_mod.Snapshot) !owner_mod.AdmitResult {
@@ -210,6 +254,7 @@ pub const Coordinator = struct {
         switch (result) {
             .started => {
                 try admissions.consumeScheduled(projection);
+                self.streaks.begin(snapshot.host_id, snapshot.connection_generation, self.nowNs());
                 return .admitted;
             },
             .retry_later => {
@@ -256,6 +301,7 @@ pub const Coordinator = struct {
         const completion = (try self.worker.claimCompletion()) orelse return .idle;
         if (!sameOrder(completion.order, self.job_receipt)) return error.StaleCompletion;
         const outcome = try completion.outcome();
+        self.last_attempt = completion.attempt();
         if (outcome == .connected) return .connected_ready;
         try completion.consumeFailure();
         try self.finishClaimedPhysical(outcome);
@@ -308,10 +354,12 @@ pub const Coordinator = struct {
             try self.consumeLogicalCompletion();
             const result = try self.jobs.admit(snapshot);
             if (result != .admitted) return error.InvalidCoordinator;
+            self.noteRequeued(snapshot);
             return outcome;
         }
         try backend.settleBoundReconnectSnapshot(completion.snapshot, budget);
         try self.consumeLogicalCompletion();
+        self.noteEnded(snapshot, @tagName(outcome));
         return outcome;
     }
 
@@ -340,7 +388,15 @@ pub const Coordinator = struct {
                 candidate_owned = false;
                 break :blk .connected;
             },
-            .busy, .invalid_authority, .failed => .retry_later,
+            .busy, .invalid_authority, .failed => blk: {
+                // 연결은 됐는데 채택을 못 했다 — 다시 넣기 줄에 그 사유를 싣는다.
+                self.last_attempt.detail = switch (adopted) {
+                    .busy => .adopt_busy,
+                    .invalid_authority => .adopt_invalid_authority,
+                    else => .adopt_failed,
+                };
+                break :blk .retry_later;
+            },
         };
         try self.finishConnected(logical_outcome);
         if (logical_outcome == .connected) return .adopted;
@@ -366,9 +422,16 @@ pub const Coordinator = struct {
                 if ((progress == .completed_ready) != (terminal == .completed))
                     return error.InvalidCoordinator;
                 try backend.preflightBoundReconnectSnapshotSettlement(completion.snapshot, budget);
+                const snapshot = completion.snapshot;
                 backend.settleBoundReconnectSnapshotNoFail(completion.snapshot, budget);
                 if (terminal == .completed) backend.finalizeCompletedHostReconnectNoFail();
                 try self.consumeLogicalCompletion();
+                // 성공은 `reconnect job connected` 가 이미 남긴다 — 칸만 비운다. retained_terminal 은 연결 뒤
+                // 일부 runtime 이 남은 채 끝난 것이라 실패 줄로 남긴다.
+                if (terminal == .completed)
+                    _ = self.streaks.end(snapshot.host_id, snapshot.connection_generation, self.nowNs())
+                else
+                    self.noteEnded(snapshot, "retained_terminal");
                 break :blk if (terminal == .completed) .completed else .retained_terminal;
             },
         };
@@ -473,6 +536,20 @@ pub const Coordinator = struct {
             return error.InvalidCoordinator;
     }
 };
+
+/// 진단 한 줄을 스택 버퍼에 서식해 남긴다. 이벤트(정산·전이) 때만 불린다 — 매 frame 경로에는 없다.
+fn logLine(comptime level: std.log.Level, comptime write: anytype, args: anytype) void {
+    var buf: [384]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    @call(.auto, write, .{&w} ++ args) catch {};
+    const line = w.buffered();
+    switch (level) {
+        .err => std.log.err("{s}", .{line}),
+        .warn => std.log.warn("{s}", .{line}),
+        .info => std.log.info("{s}", .{line}),
+        .debug => std.log.debug("{s}", .{line}),
+    }
+}
 
 fn sameOrder(order: issuer.WorkOrder, receipt: owner_mod.JobReceipt) bool {
     return std.meta.eql(order.key, receipt.key) and std.meta.eql(order.snapshot, receipt.snapshot);

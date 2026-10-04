@@ -52,6 +52,8 @@ pub const Entry = struct {
     ime_bounds: ?protocol.message.Rect = null,
     /// 새 탭 한 장(W6e — `new_tab`). maru 가 보낸 누름·키가 주고 새 탭 하나가 쓴다.
     new_tab_credit: bool = false,
+    /// 페이지가 연 팝업을 이어 받아 등록했다(W6f — maru 가 맡긴 번호).
+    popup: bool = false,
     /// 밖에서 끌어 온 것을 놓은 시각(ms, 0 = 없음 — W6e)과 놓은 것(링크 주소 또는 첫 파일 경로 — `drag` 가 놓는다). 페이지가 받지 않은
     /// 놓기는 Chromium 이 `on_open_urlfrom_tab`(앞 탭·제스처 1 — 실측)으로 그 주소를 연다. Chrome 처럼 지금 탭에서 이동시킨다(W6d① 사용자
     /// 결정) — 놓은 뒤 잠깐, 그 주소일 때만(`new_tab.drop_navigation_ms`·`dropMatches`).

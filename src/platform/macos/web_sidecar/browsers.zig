@@ -23,6 +23,7 @@ const context_menus = @import("context_menu.zig");
 const drag = @import("drag.zig");
 const dialogs = @import("dialogs.zig");
 const notifications = @import("notifications.zig");
+const new_tab = @import("new_tab.zig");
 const permissions = @import("permissions.zig");
 
 const Message = protocol.message.Message;
@@ -86,6 +87,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .nav_action => |value| navAction(value, writer),
         .frame_channel => |value| frameChannel(value, writer),
         .context_menu_command => |value| context_menus.onCommand(value),
+        .popup_reserve => |value| new_tab.onReserve(value.browser),
         else => {},
     }
 }
@@ -110,30 +112,45 @@ fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
     const browser = state.api.browser_host_create_browser_sync(&window_info, client.get(), &url, &settings, null, null);
     if (browser == null) return fail(writer, value.browser, .browser_create_failed, "CEF refused to create the browser");
 
-    const cef_id = browser.*.get_identifier.?(browser);
-    const producer = std.heap.c_allocator.create(ring_producer.Producer) catch {
-        closeBrowser(browser);
-        object.release(browser);
-        return fail(writer, value.browser, .browser_create_failed, "out of memory");
-    };
-    producer.* = .{ .browser = value.browser, .scale = value.size.scale };
-    state.registry.add(.{ .id = value.browser, .cef_id = cef_id, .handle = @ptrCast(browser), .size = value.size, .frames = producer }) catch {
-        std.heap.c_allocator.destroy(producer);
-        // 위에서 확인했으니 오지 않는다 — 와도 새지 않게 닫는다.
-        closeBrowser(browser);
-        object.release(browser);
-        return fail(writer, value.browser, .browser_create_failed, "registry refused the browser");
-    };
+    register(browser, value.browser, value.size, false) catch |err| return fail(writer, value.browser, .browser_create_failed, switch (err) {
+        error.OutOfMemory => "out of memory",
+        // 위에서 확인했으니 오지 않는다 — 와도 새지 않게 닫았다.
+        error.Refused => "registry refused the browser",
+    });
     if (value.hidden) {
         const host = browser.*.get_host.?(browser);
         defer object.release(host);
         host.*.was_hidden.?(host, 1);
     }
+    writer.send(.{ .browser_created = value.browser }) catch {};
+}
+
+/// 만든 브라우저를 그 번호로 등록하고 브라우저마다의 준비를 한다 — maru 가 청해 만든 것과 이어 받은 팝업(W6f)이 함께 쓴다. 넘긴
+/// browser 의 참조 하나는 목록이 쥔다(실패하면 닫고 푼다).
+pub fn register(browser: [*c]c.cef_browser_t, id: BrowserId, size: protocol.message.ViewSize, popup: bool) error{ OutOfMemory, Refused }!void {
+    const cef_id = browser.*.get_identifier.?(browser);
+    const producer = std.heap.c_allocator.create(ring_producer.Producer) catch {
+        closeBrowser(browser);
+        object.release(browser);
+        return error.OutOfMemory;
+    };
+    producer.* = .{ .browser = id, .scale = size.scale };
+    state.registry.add(.{ .id = id, .cef_id = cef_id, .handle = @ptrCast(browser), .size = size, .frames = producer, .popup = popup }) catch {
+        std.heap.c_allocator.destroy(producer);
+        closeBrowser(browser);
+        object.release(browser);
+        return error.Refused;
+    };
     // W5b2: 같은 문서에서 위치를 다시 부를 때 멈추지 않게 하는 보정 스크립트(`permissions.zig`).
     permissions.installGeolocationShim(browser);
     // W5c: 웹 알림 대리 스크립트(Page 도메인은 바로 위가 켠다).
     notifications.install(browser);
-    writer.send(.{ .browser_created = value.browser }) catch {};
+}
+
+/// 이어 받지 않는 팝업 브라우저를 닫고 넘겨받은 참조를 푼다(W6f — 쥘 곳이 없다).
+pub fn discard(browser: [*c]c.cef_browser_t) void {
+    closeBrowser(browser);
+    object.release(browser);
 }
 
 fn destroy(browser_id: BrowserId, writer: *events.Writer) void {

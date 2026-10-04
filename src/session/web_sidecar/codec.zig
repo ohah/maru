@@ -274,6 +274,14 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeU32(value.image_height);
             try cursor.writeU32(value.file_size);
         },
+        .popup_reserve => |value| try writeBrowser(&cursor, value.browser),
+        .popup_created => |value| {
+            if (value.opener == value.browser) return error.InvalidPopupAdopt;
+            try writeBrowser(&cursor, value.opener);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromEnum(value.placement));
+            try writeUrl(&cursor, value.url);
+        },
         .drag_file_request => |value| {
             if (value.drag == 0) return error.InvalidDrag;
             try writeBrowser(&cursor, value.browser);
@@ -617,6 +625,17 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             break :blk .{ .geolocation = value };
         },
         .url_changed => .{ .url_changed = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
+        .popup_reserve => .{ .popup_reserve = .{ .browser = try readBrowser(&cursor) } },
+        .popup_created => blk: {
+            const value: message_mod.PopupCreated = .{
+                .opener = try readBrowser(&cursor),
+                .browser = try readBrowser(&cursor),
+                .placement = std.enums.fromInt(message_mod.NewTabPlacement, try cursor.readByte()) orelse return error.UnknownNewTabPlacement,
+                .url = try readUrl(&cursor),
+            };
+            if (value.opener == value.browser) return error.InvalidPopupAdopt;
+            break :blk .{ .popup_created = value };
+        },
         .open_tab => .{ .open_tab = .{
             .browser = try readBrowser(&cursor),
             .placement = std.enums.fromInt(message_mod.NewTabPlacement, try cursor.readByte()) orelse return error.UnknownNewTabPlacement,
@@ -674,7 +693,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  9,  0, // v9, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  10, 0, // v10, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -1138,6 +1157,29 @@ test "open_tab round-trips with its placement, flows to maru, and refuses an emp
     try std.testing.expectError(error.UnknownNewTabPlacement, decodeExact(buf[0..len]));
 }
 
+test "popup_reserve and popup_created round-trip, flow the right way, and refuse a zero id, a popup that is its own opener or an unknown placement" {
+    try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .popup_reserve = .{ .browser = 9 } })).popup_reserve.browser);
+    const created: message_mod.PopupCreated = .{ .opener = 3, .browser = 9, .placement = .background, .url = "https://a.example/login" };
+    const back = (try roundTrip(.{ .popup_created = created })).popup_created;
+    try std.testing.expectEqual(created.opener, back.opener);
+    try std.testing.expectEqual(created.browser, back.browser);
+    try std.testing.expectEqual(created.placement, back.placement);
+    try std.testing.expectEqualStrings(created.url, back.url);
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.popup_reserve.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.popup_created.direction());
+    var buf: [256]u8 = undefined;
+    try std.testing.expectError(error.InvalidBrowserId, encode(.{ .popup_reserve = .{ .browser = 0 } }, &buf));
+    try std.testing.expectError(error.InvalidPopupAdopt, encode(.{ .popup_created = .{ .opener = 9, .browser = 9, .placement = .foreground, .url = "about:blank" } }, &buf));
+    try std.testing.expectError(error.EmptyUrl, encode(.{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .foreground, .url = "" } }, &buf));
+    var len = try encode(.{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .foreground, .url = "about:blank" } }, &buf);
+    buf[prefix_len + common_len + 16] = 2; // 두 번호 뒤 자리 바이트
+    try std.testing.expectError(error.UnknownNewTabPlacement, decodeExact(buf[0..len]));
+    // 손으로 만든 frame — 같은 번호.
+    len = try encode(.{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .foreground, .url = "about:blank" } }, &buf);
+    std.mem.writeInt(u64, buf[prefix_len + common_len + 8 ..][0..8], 3, .big);
+    try std.testing.expectError(error.InvalidPopupAdopt, decodeExact(buf[0..len]));
+}
+
 test "popup_changed round-trips, flows to maru, a hidden popup carries an all-zero rect and generation, a shown one a generation" {
     const shown: message_mod.PopupChanged = .{ .browser = 7, .visible = true, .bounds = .{ .x = 10, .y = 40, .width = 200, .height = 134 }, .first_generation = 3 };
     try std.testing.expectEqual(shown, (try roundTrip(.{ .popup_changed = shown })).popup_changed);
@@ -1299,6 +1341,9 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .drag_file_ready = .{ .browser = 3, .drag = 4, .size = 122, .ok = true } },
         // W6e 새 탭.
         .{ .open_tab = .{ .browser = 3, .placement = .background, .url = "https://a.example/x" } },
+        // W6f 팝업 이어 받기.
+        .{ .popup_reserve = .{ .browser = 9 } },
+        .{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .foreground, .url = "about:blank" } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;

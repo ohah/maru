@@ -56,6 +56,10 @@ pub const Tag = enum(u8) {
     /// 끌어낸 이미지의 파일 내용을 청한다(W6d③ — Finder 가 놓은 뒤 파일을 청할 때만). sidecar 는 끌기 시작 때 받아 둔 그 번호의 내용을
     /// `drag_out_data`(파일 내용) 조각으로 보내고 `drag_file_ready` 로 끝낸다.
     drag_file_request = 29,
+    /// 팝업 브라우저에 쓸 번호 하나를 맡긴다(W6f — maru 의 surface id, 아직 쓰지 않은 것). 페이지가 연 팝업을 sidecar 가 CEF 로 만들게
+    /// 두고 이 번호로 등록한다 — 원래 페이지와 이어진다(`window.opener`·`postMessage`·이름 창·`close`). 맡긴 번호가 없으면 주소만
+    /// 보낸다(`open_tab` — W6e). sidecar 는 `max_popup_reserve` 개까지 쥔다(넘치면 버린다).
+    popup_reserve = 30,
 
     hello_ack = 32,
     browser_created = 33,
@@ -114,6 +118,10 @@ pub const Tag = enum(u8) {
     /// 팝업을 취소하고(창을 만들지 않는다) 주소만 보낸다 — maru 는 그 탭 오른쪽에 새 탭을 만든다. 원래 페이지와는 이어지지 않는다
     /// (`window.opener` 없음 — 이어 받기는 다음 단계). sidecar 는 사용자 입력 하나에 하나만 보낸다.
     open_tab = 56,
+    /// 페이지가 연 팝업을 맡긴 번호(`browser`)로 만들었다(W6f). 그 브라우저는 이미 돌고 있다(`browser_created` 는 오지 않는다) —
+    /// maru 는 연 탭(`opener`) 오른쪽에 그 번호의 탭을 붙이거나, 붙일 수 없으면 `destroy_browser` 로 닫는다(페이지에는 팝업이 닫힌
+    /// 것으로 보인다). 주소는 처음 이동할 곳(빈 팝업은 `about:blank`).
+    popup_created = 57,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -596,6 +604,20 @@ pub const NewTabPlacement = enum(u8) {
     background = 1,
 };
 
+pub const PopupReserve = struct {
+    browser: BrowserId,
+};
+
+/// sidecar 가 쥐는 맡긴 번호 상한(W6f) — 입력 하나에 팝업 하나라 둘이면 넉넉하다. 넘는 것은 버린다(번호는 다시 쓰이지 않는다).
+pub const max_popup_reserve = 4;
+
+pub const PopupCreated = struct {
+    opener: BrowserId,
+    browser: BrowserId,
+    placement: NewTabPlacement,
+    url: []const u8,
+};
+
 pub const OpenTab = struct {
     browser: BrowserId,
     placement: NewTabPlacement,
@@ -863,6 +885,7 @@ pub const Message = union(Tag) {
     drag_target: DragTarget,
     drag_source_end: DragSourceEnd,
     drag_file_request: DragFileRequest,
+    popup_reserve: PopupReserve,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -889,6 +912,7 @@ pub const Message = union(Tag) {
     drag_out: DragOut,
     drag_file_ready: DragFileReady,
     open_tab: OpenTab,
+    popup_created: PopupCreated,
 };
 
 test "tags split by direction at 32" {

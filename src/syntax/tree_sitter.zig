@@ -597,7 +597,13 @@ pub const Provider = struct {
     /// **이름은 `name` 필드에서 꺼낸다.** tree-sitter grammar 는 선언 노드에 그 필드를 두는 것이
     /// 관례다. 없으면 그 심볼은 **건너뛴다** — 이름 없는 항목을 목록에 넣으면 사용자가 고를 수 없다.
     pub fn symbols(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(Symbol)) void {
+        self.symbolsChecked(allocator, out) catch {};
+    }
+
+    /// 도크처럼 오래 보여 주는 목록은 일부만 수집한 결과를 완전한 목록으로 발행하면 안 된다.
+    pub fn symbolsChecked(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(Symbol)) error{OutOfMemory}!void {
         out.clearRetainingCapacity();
+        errdefer out.clearRetainingCapacity();
         const tree = self.tree orelse return;
         const kinds = self.slot.symbol_kinds;
         if (kinds.len == 0) return;
@@ -619,7 +625,7 @@ pub const Provider = struct {
             if (hasKind(kinds, c.ts_node_type(node)) and isSymbolWorthy(node)) {
                 const name_node = symbolNameNode(node);
                 if (!c.ts_node_is_null(name_node)) {
-                    out.append(allocator, .{
+                    try out.append(allocator, .{
                         .name_start = c.ts_node_start_byte(name_node),
                         .name_end = c.ts_node_end_byte(name_node),
                         .start = sb,
@@ -627,7 +633,7 @@ pub const Provider = struct {
                         .start_row = c.ts_node_start_point(node).row,
                         .depth = @intCast(@min(depth, std.math.maxInt(u16))),
                         .kind = std.mem.span(c.ts_node_type(node)),
-                    }) catch return;
+                    });
                     if (depth < stack.len) {
                         stack[depth] = eb;
                         depth += 1;

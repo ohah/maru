@@ -21,6 +21,7 @@ pub const Side = enum { right, bottom };
 /// | `source_control` | `app_session/git.zig` · `followActiveTerminalRepo` |
 /// | `agent_sessions` | `app_session/agent_dock.zig` · `refreshAgentSessionArchiveProjectScopeForFocus` |
 /// | `agent_activity` | `app_session/agent_activity.zig` · `refreshForFocus` |
+/// | `outline` | `app_session/editor/outline.zig` · `refreshForFocus` |
 ///
 /// 이 표를 판정자가 **exhaustive switch 로** 물고 있다(`app_session.zig` — 「도크 뷰는 전부 활성 pane 을
 /// 따라간다」). 값이 늘면 **거기서 컴파일이 깨진다** — 런타임 판정자는 그 사람이 안 돌리면 그만이라,
@@ -31,6 +32,8 @@ pub const View = enum {
     agent_sessions,
     /// IG1: 에이전트와 주고받은 이미지 격자(docs/agent-image-gallery.md). 범위는 **활성 pane**이다.
     agent_activity,
+    /// 활성 편집 문서의 함수·클래스 계층.
+    outline,
 
     /// 뷰 스위처 바의 **슬롯 순서**. 화면 왼쪽부터 이 차례다.
     ///
@@ -43,6 +46,7 @@ pub const View = enum {
             1 => .source_control,
             2 => .agent_sessions,
             3 => .agent_activity,
+            4 => .outline,
             else => null,
         };
     }
@@ -54,6 +58,7 @@ pub const View = enum {
             .source_control => 1,
             .agent_sessions => 2,
             .agent_activity => 3,
+            .outline => 4,
         };
     }
 

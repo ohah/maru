@@ -5046,8 +5046,23 @@ pub fn build(b: *std.Build) void {
         // 에 걸리므로 `"app_session.editor.mod."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
         // 모듈에 흩어진 판정자를 마저 긁으려고 남긴다. 대가는 시간이다 — 실측 75초 → 97초
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.diff.", "app_session.editor.recovery_store.", "app_session.editor.discovery." },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.diff.", "app_session.editor.recovery_store.", "app_session.editor.discovery.", ".test.OUTLINE" },
     });
+    // 아웃라인의 중립 범위·Chrome 기하와 제품 문서 수명을 모두 실행한다.
+    const outline_pure_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/outline_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = &.{".test.outline"} });
+    const run_outline_pure = b.addRunArtifact(outline_pure_tests);
+    run_outline_pure.addArg("--maru-expect-tests=7");
+    const outline_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.OUTLINE"} });
+    const run_outline_host = b.addRunArtifact(outline_host_tests);
+    run_outline_host.setCwd(b.path("."));
+    run_outline_host.addArg("--maru-expect-tests=14");
+    const outline_step = b.step("test-editor-outline", "Run outline model, component and active editor lifetime judges");
+    outline_step.dependOn(&run_outline_pure.step);
+    outline_step.dependOn(&run_outline_host.step);
     // 심볼 목록의 수명과 확정 대상을 실제 편집기에서 검사한다. 전체 test-editor에도 포함된다.
     const symbol_picker_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
@@ -5147,6 +5162,7 @@ pub fn build(b: *std.Build) void {
     editor_test_step.dependOn(&run_editor_tests.step);
     // caret 렌더(`CRT*`)와 왕복 불변식 ①은 chrome 쪽 모듈에 있다 — 15초라 함께 돌린다.
     editor_test_step.dependOn(&run_chrome_ui_tests.step);
+    editor_test_step.dependOn(&run_outline_pure.step);
     // **헤더 밴드(`BAND*`)도 이 고리에서 돈다** — 편집기 파일 Term 의 breadcrumb·심볼 체인을 재는데
     // 이름에 등록된 접두가 없어 위 필터가 안 고르고, 그래서 **빠른 고리에서 0번 돌았다**(적대적 검증
     // 2026-09-09 — 그 자리에 변이를 걸고서야 드러났다). `CRT*` 를 chrome 모듈째 물고 온 것과 같은

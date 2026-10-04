@@ -16,7 +16,7 @@ pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
 /// v1 슬롯 수. 어떤 뷰가 몇 번째인지는 **호출자(session)가 안다** — chrome은 도메인 enum을 모르고 자리만 센다
 /// (레이어 경계: chrome 컴포넌트는 session을 import하지 않는다). 목업의 나머지 칸은 **그리지 않는다** —
 /// 누를 수 없는 아이콘을 띄우지 않는다(§3.5).
-pub const slot_count: usize = 4;
+pub const slot_count: usize = 5;
 
 /// 슬롯 하나의 **기본** 셀 수(테마가 pt 토큰을 안 줄 때 = tui). **아이콘이 2셀**(사이드바 에이전트 아이콘과
 /// 같은 `width=2` — 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로 2칸이면 또렷하고 크다)이고 좌우 여백 1셀씩이라

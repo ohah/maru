@@ -2793,14 +2793,16 @@ test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기
 
 test "workspace: 도크 뷰는 왕복하고 모르는 뷰는 탐색기로 clamp된다" {
     // 뷰는 도크의 **표시 선택**이라, 못 읽는 값을 만나도 창을 버리지 않고 탐색기로 연다(docs/file-explorer.md §3.5).
-    const windows = [_]Window{.{ .tabs = &.{}, .dock = .{ .view = .source_control, .presented = true } }};
-    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-view=source_control") != null);
+    inline for (.{ dock_panel.View.source_control, dock_panel.View.outline }) |view| {
+        const windows = [_]Window{.{ .tabs = &.{}, .dock = .{ .view = view, .presented = true } }};
+        const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+        defer std.testing.allocator.free(text);
+        try std.testing.expect(std.mem.indexOf(u8, text, "dock-view=" ++ @tagName(view)) != null);
 
-    var parsed = try parse(std.testing.allocator, text);
-    defer parsed.deinit();
-    try std.testing.expectEqual(dock_panel.View.source_control, parsed.workspace.windows[0].dock.view);
+        var parsed = try parse(std.testing.allocator, text);
+        defer parsed.deinit();
+        try std.testing.expectEqual(view, parsed.workspace.windows[0].dock.view);
+    }
 
     // 미래 뷰 이름 → 탐색기로 clamp(도크의 나머지 상태는 그대로).
     var future = try parse(std.testing.allocator, header ++ "\nwindow tabs=0 active-tab=0 dock-size=321 dock-view=timeline\n");

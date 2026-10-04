@@ -22,6 +22,8 @@ pub const Action = union(enum) {
     new_editor_tab,
     /// 워크스페이스에서 빠진 미저장 백업의 목록을 연다.
     recover_editor_backups,
+    /// 활성 문서의 계층 목록을 도크에 연다.
+    show_editor_outline,
     // Markdown/HTML 파일 선택창을 열어 현재 창의 전역 도크에 연다. 기본 Cmd+O(macOS Open 관례), 커맨드 팔릿·메뉴와
     // 사용자 keybind에서도 같은 액션을 쓴다. 파일 선택/경로 I/O는 Swift, 종류·도크 라우팅 정책은 Zig가 소유한다.
     open_file_panel,
@@ -313,6 +315,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "new_editor_tab")) return .new_editor_tab;
     if (std.mem.eql(u8, value, "recover_editor_backups")) return .recover_editor_backups;
     if (std.mem.eql(u8, value, "open_file_panel")) return .open_file_panel;
+    if (std.mem.eql(u8, value, "show_editor_outline")) return .show_editor_outline;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
     if (std.mem.eql(u8, value, "toggle_file_panel_focus")) return .toggle_file_panel_focus;
     if (std.mem.eql(u8, value, "toggle_file_panel_mode")) return .toggle_file_panel_mode;

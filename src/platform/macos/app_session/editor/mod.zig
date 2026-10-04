@@ -38056,7 +38056,7 @@ pub const SymbolPickerSource = struct {
     revision: u64,
 };
 
-fn symbolPickerSource(term: *Term) ?SymbolPickerSource {
+pub fn symbolPickerSource(term: *Term) ?SymbolPickerSource {
     if (term.kind != .editor) return null;
     const lease = term.rt.editor_document_lease orelse return null;
     const doc = term.rt.editorDocument().opened orelse return null;
@@ -50825,4 +50825,228 @@ test "shared editor split 같은 창의 워크스페이스 이동은 공유 편�
     try testing.expect(insertText(fx.session, peer, "Y"));
     try testing.expectEqualStrings("XYconst a = 1;", fx.term.rt.editor_lines[0]);
     try testing.expectEqualStrings(fx.term.rt.editor_lines[0], peer.rt.editor_lines[0]);
+}
+
+// 도크 아웃라인은 실제 문서·뷰·공통 입력 경로로 검증한다. 렌더 전용 가짜 목록을 클릭하지 않는다.
+const outline_test_ops = @import("outline.zig");
+fn outlineFixture(many: bool) !PaneFixture {
+    var fx = try PaneFixture.init(testing.allocator);
+    errdefer fx.deinit(testing.allocator);
+    if (many) try symbolPreviewFixture(&fx) else try symbolPickerFixture(&fx);
+    _ = try fx.session.resize(1200, 700, 1000);
+    fx.session.dispatchAppAction(.show_editor_outline);
+    try testing.expect(outline_test_ops.publish(fx.session));
+    return fx;
+}
+fn outlinePoint(fx: *PaneFixture, index: usize) !chrome.ui.layout.UiRect {
+    try testing.expect(outline_test_ops.publish(fx.session));
+    const tree = chrome.ui.tree.UiRectTree{ .entries = fx.session.editor_outline.entries.items };
+    const entry = tree.find(chrome.components.outline.build.rowId(index)) orelse return error.OutlineRowMissing;
+    return tree.entries[entry].rect;
+}
+
+test "OUTLINE1 실제 도크 클릭은 repaint 뒤 한 번 이동하고 문서와 Undo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const state = &fx.session.editor_outline;
+    try testing.expectEqual(@as(usize, 2), state.model.items.items.len);
+    const target = state.model.items.items[1].symbol.target;
+    const revision = fx.term.rt.editorDocument().opened.?.file.revision;
+    const row = try outlinePoint(&fx, 1);
+    const x = row.x + row.width / 2;
+    const y = row.y + row.height / 2;
+    fx.session.mouse(1, x, y, 0, 0);
+    try testing.expect(state.interaction.capture != null);
+    try testing.expect(outline_test_ops.publish(fx.session));
+    fx.session.mouse(3, x, y, 0, 0);
+    try testing.expectEqual(@as(usize, target), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(?usize, 1), state.active);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+    try testing.expectEqual(revision, fx.term.rt.editorDocument().opened.?.file.revision);
+    _ = fx.session.hoverCursor(x, y, 0);
+    try testing.expect(state.interaction.hovered != null);
+    _ = fx.session.hoverCursor(0, 0, 0);
+    try testing.expect(state.interaction.hovered == null);
+    fx.session.mouse(3, x, y, 0, 0);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+}
+
+test "OUTLINE2 누름 뒤 공유 문서 편집은 옛 위치를 실행하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    focusTermForNav(fx.session, fx.term);
+    const row = try outlinePoint(&fx, 1);
+    outline_test_ops.pointer(fx.session, .down, row.x + 70, row.y + 10);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "// moved\n"));
+    const before = fx.term.rt.editor_selection.?;
+    outline_test_ops.pointer(fx.session, .up, row.x + 70, row.y + 10);
+    try testing.expectEqualDeep(before, fx.term.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    try testing.expectEqualStrings("beta", fx.session.editor_outline.model.items.items[1].symbol.label);
+}
+
+test "OUTLINE3 같은 문서의 다른 뷰도 누름 신원을 이어받지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    focusTermForNav(fx.session, fx.term);
+    const row = try outlinePoint(&fx, 1);
+    outline_test_ops.pointer(fx.session, .down, row.x + 70, row.y + 10);
+    focusTermForNav(fx.session, peer);
+    peer.rt.editor_selection = editor_selection.Selection.at(1);
+    outline_test_ops.pointer(fx.session, .up, row.x + 70, row.y + 10);
+    try testing.expectEqual(@as(usize, 1), peer.rt.editor_selection.?.focus);
+    try testing.expectEqual(peer.surfaceId(), fx.session.editor_outline.key.?.source.surface_id);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "OUTLINE4 동일 리비전 LSP 응답 교체도 누름을 취소하고 새 목록을 그린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    fx.term.rt.editorDocument().notifications.lsp_version = 1;
+    const lsp = &fx.term.rt.editor_symbols;
+    lsp.version = 1;
+    lsp.applied = 1;
+    try lsp.list.append(testing.allocator, .{ .name_start = 7, .name_end = 12, .start = 0, .end = 21, .start_row = 0, .depth = 0, .kind = "function" });
+    const row = try outlinePoint(&fx, 0);
+    outline_test_ops.pointer(fx.session, .down, row.x + 70, row.y + 10);
+    lsp.list.items[0] = .{ .name_start = 31, .name_end = 35, .start = 24, .end = 44, .start_row = 2, .depth = 0, .kind = "function" };
+    lsp.applied += 1;
+    outline_test_ops.pointer(fx.session, .up, row.x + 70, row.y + 10);
+    try testing.expectEqualStrings("beta", fx.session.editor_outline.model.items.items[0].symbol.label);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "OUTLINE5 대기와 비편집기는 안내만 남기고 닫힌 도크는 갱신하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const generation = fx.session.editor_outline.generation;
+    fx.term.rt.editor_syntax.pending = true;
+    outline_test_ops.refreshForFocus(fx.session);
+    try testing.expectEqual(outline_test_ops.Status.pending, fx.session.editor_outline.status);
+    try testing.expect(outline_test_ops.publish(fx.session));
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_outline.actions.items.len);
+    outline_test_ops.apply(fx.session, .{ .navigate = 1 }, generation);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    fx.term.rt.editor_syntax.pending = false;
+    fx.term.kind = .terminal;
+    defer fx.term.kind = .editor;
+    outline_test_ops.refreshForFocus(fx.session);
+    try testing.expectEqual(outline_test_ops.Status.not_editor, fx.session.editor_outline.status);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_outline.model.items.items.len);
+    fx.session.dock.collapsed = true;
+    fx.term.kind = .editor;
+    outline_test_ops.refreshForFocus(fx.session);
+    try testing.expectEqual(outline_test_ops.Status.not_editor, fx.session.editor_outline.status);
+}
+
+test "OUTLINE6 접힘은 본문을 움직이지 않고 현재 심볼의 보이는 조상을 강조한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    fx.term = try undoFixture(&fx, testing.allocator, "nested.zig", "pub const Widget = struct {\n pub fn first() void {}\n pub fn second() void {}\n};\n");
+    const doc = fx.term.rt.editorDocument().opened.?;
+    while (fx.term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    outline_test_ops.refreshForFocus(fx.session);
+    const state = &fx.session.editor_outline;
+    try testing.expectEqual(@as(usize, 3), state.model.items.items.len);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(state.model.items.items[2].symbol.target);
+    outline_test_ops.refreshForFocus(fx.session);
+    try testing.expectEqual(@as(?usize, 2), state.active);
+    const selection = fx.term.rt.editor_selection.?;
+    const first_line = fx.term.rt.editor_first_line;
+    outline_test_ops.apply(fx.session, .{ .toggle = 0 }, state.generation);
+    try testing.expectEqualSlices(usize, &.{0}, state.model.visible.items);
+    try testing.expectEqual(@as(?usize, 0), state.active);
+    try testing.expectEqualDeep(selection, fx.term.rt.editor_selection.?);
+    try testing.expectEqual(first_line, fx.term.rt.editor_first_line);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "OUTLINE7 휠과 스크롤바는 같은 범위를 쓰고 스크롤 뒤 옛 누름을 실행하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(true);
+    defer fx.deinit(testing.allocator);
+    const row = try outlinePoint(&fx, 1);
+    outline_test_ops.pointer(fx.session, .down, row.x + 70, row.y + 10);
+    @import("../scroll.zig").scrollWheel(fx.session, -3.5, 0, true, row.x + 70, row.y + 10);
+    try testing.expect(fx.session.editor_outline.scroll.offset_y_px > 0);
+    outline_test_ops.pointer(fx.session, .up, row.x + 70, row.y + 10);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    @import("../dock.zig").setDockListScrollOffsetPx(fx.session, 1000000);
+    try testing.expectEqual(outline_test_ops.scrollExtent(fx.session).max_offset_px, fx.session.editor_outline.scroll.offset_y_px);
+    try testing.expect(outline_test_ops.publish(fx.session));
+    const tree = chrome.ui.tree.UiRectTree{ .entries = fx.session.editor_outline.entries.items };
+    try testing.expect(tree.find(chrome.components.outline.build.rowId(49)) != null);
+    fx.session.dock.side = .bottom;
+    _ = try fx.session.resize(1200, 700, 1000);
+    try testing.expect(outline_test_ops.publish(fx.session));
+    try testing.expect(fx.session.editor_outline.scroll.offset_y_px <= outline_test_ops.scrollExtent(fx.session).max_offset_px);
+}
+
+test "OUTLINE8 생성 실패 뒤 옛 action을 버리고 다시 열면 재시도한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const generation = fx.session.editor_outline.generation;
+    try testing.expect(insertText(fx.session, fx.term, "// edit\n"));
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    outline_test_ops.refreshForFocus(fx.session);
+    fx.session.allocator = testing.allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectEqual(outline_test_ops.Status.failed, fx.session.editor_outline.status);
+    const before = fx.term.rt.editor_selection.?;
+    outline_test_ops.apply(fx.session, .{ .navigate = 1 }, generation);
+    try testing.expectEqualDeep(before, fx.term.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    fx.session.dispatchAppAction(.show_editor_outline);
+    try testing.expectEqual(outline_test_ops.Status.ready, fx.session.editor_outline.status);
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_outline.model.items.items.len);
+}
+
+test "OUTLINE9 조합 중 클릭은 조합을 먼저 확정하고 새 문서 범위로 이동한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(7);
+    fx.session.imeMarked("한");
+    const row = try outlinePoint(&fx, 1);
+    outline_test_ops.pointer(fx.session, .down, row.x + 70, row.y + 10);
+    outline_test_ops.pointer(fx.session, .up, row.x + 70, row.y + 10);
+    const text = fx.term.rt.editorDocument().opened.?.file.content;
+    try testing.expect(std.mem.indexOf(u8, text, "한alpha") != null);
+    const beta = std.mem.indexOf(u8, text, "beta").?;
+    try testing.expectEqual(beta, fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+}
+
+test "OUTLINE10 지난 action은 편집과 도크 재진입 뒤 직접 전달해도 무동작이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try outlineFixture(false);
+    defer fx.deinit(testing.allocator);
+    const old_generation = fx.session.editor_outline.generation;
+    const old_target = fx.session.editor_outline.model.items.items[1].symbol.target;
+    try testing.expect(insertText(fx.session, fx.term, "// moved\n"));
+    const before = fx.term.rt.editor_selection.?;
+    outline_test_ops.apply(fx.session, .{ .navigate = 1 }, old_generation);
+    try testing.expectEqual(old_target + 9, fx.session.editor_outline.model.items.items[1].symbol.target);
+    try testing.expectEqualDeep(before, fx.term.rt.editor_selection.?);
+    const row = try outlinePoint(&fx, 1);
+    outline_test_ops.pointer(fx.session, .down, row.x + 70, row.y + 10);
+    fx.session.dock.collapsed = true;
+    const prior_show = fx.session.editor_outline.generation;
+    fx.session.dispatchAppAction(.show_editor_outline);
+    outline_test_ops.pointer(fx.session, .up, row.x + 70, row.y + 10);
+    outline_test_ops.apply(fx.session, .{ .navigate = 1 }, prior_show);
+    try testing.expectEqualDeep(before, fx.term.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
 }

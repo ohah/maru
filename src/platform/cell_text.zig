@@ -1012,6 +1012,7 @@ fn iconKindForDockView(view: dock_panel.View) file_tree_icon.IconKind {
         .source_control => .git,
         .agent_sessions => .code,
         .agent_activity => .image,
+        .outline => .document,
     };
 }
 

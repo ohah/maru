@@ -52,6 +52,22 @@ pub fn popupUrlAllowed(url: []const u8) bool {
     return urlAllowed(url) or std.mem.eql(u8, url, "about:blank");
 }
 
+/// 새 탭 한 장의 수명(ms) — Chrome 의 일시 활성화와 같은 5 초. 쓰지 않은 장이 오래 남아 나중에 아무 때나 탭을 띄우지 않게(W6f② 적대
+/// 검증 4 차).
+pub const activation_ms: i64 = 5_000;
+
+/// 그 키 누름이 사용자 활성화인가(장을 주는가) — Esc 는 아니다(Chrome 과 같다). maru 는 macOS 키 코드만 싣고 Windows 키 코드는 0 이다
+/// (적대 검증 4 차 — Windows 코드만 보던 검사가 제품에서는 늘 참이었다). 판정자는 Windows 코드를 싣는다 — 둘 다 본다.
+pub fn grantsActivation(kind: message.KeyKind, windows_key_code: i32, native_key_code: i32) bool {
+    if (kind != .raw_down and kind != .down) return false;
+    return windows_key_code != 0x1b and native_key_code != 0x35; // VK_ESCAPE · kVK_Escape
+}
+
+/// 그 장이 아직 쓸 수 있는가(받은 시각 `granted_ms`, 0 이면 없음).
+pub fn creditLive(granted_ms: i64, now_ms: i64) bool {
+    return granted_ms != 0 and now_ms - granted_ms <= activation_ms;
+}
+
 /// 새 탭을 끼울 자리(pane 의 탭 순서). `last_child` 는 같은 탭이 이어 연 마지막 뒤 탭의 자리(없으면 null) — 그것이 연 탭
 /// 오른쪽에 있을 때만 따른다.
 pub fn insertIndex(opener: usize, last_child: ?usize) usize {
@@ -152,6 +168,16 @@ test "an adopted popup may also start blank; other local or script addresses sti
     try std.testing.expect(popupUrlAllowed("about:blank"));
     try std.testing.expect(popupUrlAllowed("https://accounts.example/o/oauth2"));
     for ([_][]const u8{ "", "about:srcdoc", "about:blank#x", "data:text/html,hi", "file:///etc/hosts", "javascript:void(0)", "maru-app://x" }) |url| try std.testing.expect(!popupUrlAllowed(url));
+}
+
+test "a key down grants activation except Escape by either code; a credit lives five seconds" {
+    try std.testing.expect(grantsActivation(.raw_down, 0, 0));
+    try std.testing.expect(grantsActivation(.down, 'A', 0));
+    try std.testing.expect(!grantsActivation(.raw_down, 0, 0x35)); // maru — macOS 코드만
+    try std.testing.expect(!grantsActivation(.raw_down, 0x1b, 0)); // 판정자 — Windows 코드
+    try std.testing.expect(!grantsActivation(.up, 'A', 0) and !grantsActivation(.char, 'a', 0));
+    try std.testing.expect(!creditLive(0, 10));
+    try std.testing.expect(creditLive(1_000, 6_000) and !creditLive(1_000, 6_001));
 }
 
 test "a new tab goes right of its opener, after the tabs that opener already opened" {

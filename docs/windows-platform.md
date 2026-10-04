@@ -11239,3 +11239,26 @@ API 근거는 Microsoft의 [security descriptors](https://learn.microsoft.com/en
 일반 앱의 기본 백업 root 연결·debounce/종료 flush·복원 알림·purge·사라진 원본/untitled/remote 복원,
 stage 쓰기 도중 프로세스 종료의 잔여 파일 정리와 전원 장애 검증은 남아 있다. 일반 사용자 파일은
 읽기 전용이다. capability·GUI Ctrl+S/dirty-close/감시·비동기 I/O와 물리 IME도 계속 진행한다.
+
+### 2m.154 — Windows 백업 수명주기와 입력 통지
+
+`backup_store.identity/noteEdit/maintain`가 네이티브 저장소 위의 문서별 백업 상태를 관리한다.
+Windows `OpenFile.applyKey`는 성공한 본문 revision 변경만 통지한다. 선택 이동·복사·readonly 입력은
+시계를 다시 설정하지 않는다. remote 신원이 local staging 경로보다 먼저이며, shared L2 record와
+2초 debounce를 그대로 사용한다. 같은 문서의 뷰별 사본으로 상태를 나누지 않는다.
+
+`maintain(..., shutdown=false)`는 만기가 지난 문서 하나만 시도한다. 실패도 한 프레임의 몫이다.
+`shutdown=true`는 만기를 기다리지 않고 distinct State 전부를 시도한다. 같은 문서를 여러 뷰가
+가리켜도 실패 후 재시도를 그 flush 안에서 중복 실행하지 않는다. 보고값은 attempted/failed와
+첫 native 오류이며, 쓰기·삭제 실패는 pending과 다음 만기를 유지한다. 성공 전 on_disk를 거짓으로
+바꾸거나 실패를 성공으로 알리지 않는다. clean이면 기존 레코드를 실제 삭제한 뒤 상태를 정리한다.
+상한 초과는 paused를 남기고 마지막 백업을 보존하며, 이후 축소 편집이 다시 만기를 세운다.
+
+집중 gate는 22개(집계 2 + native 19 + 경로 정책 1)다. 추가 native 판정 5개는 만기 재설정,
+프레임 제한과 종료 전 전체 flush, 실제 ACL 실패 뒤 재시도/뷰 중복, clean 삭제 실패, 상한 pause와
+축소 후 재개를 검사한다. 이 다섯 규칙을 각각 제거한 변형은 컴파일 후 runtime 실패로 검출됐고,
+정확한 원복 후 Debug 22개가 통과했다. crash worker도 만기 전 shutdown 유지보수를 호출한다.
+
+일반 앱의 기본 root 생성/소유와 frame/종료 호출, 복원 알림 및 삭제 lifecycle의 앱 연결은 아직
+남아 있다. 입력 통지와 유지보수 API가 존재한다는 것으로 일반 앱 자동 백업을 완료로 간주하지 않는다.
+일반 사용자 파일의 editable grant/GUI 저장·닫기·감시·물리 IME와 다른 W8/W9 잔여도 진행 중이다.

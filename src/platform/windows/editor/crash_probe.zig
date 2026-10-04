@@ -67,7 +67,13 @@ fn backupWorker(init: std.process.Init, path: []const u8, body: []const u8) !voi
     var store = try backups.Store.open(init.gpa, root, "backups", 4096);
     defer store.deinit(init.io);
     const state = registry.get(opened.view).?;
-    try store.write(init.io, .{ .path = .{ .path = opened.grant.path, .disk_hash = state.opened.?.disk_hash } }, state.opened.?.file.content);
+    backups.noteEdit(state, 0);
+    // Shutdown must flush the latest edit before its debounce deadline. The
+    // parent kills after this operation and reads through a fresh native store.
+    const states = [_]*editor.document_state.State{state};
+    const maintenance = backups.maintain(&store, init.io, &states, 1, true);
+    if (maintenance.first_error) |err| return err;
+    if (maintenance.attempted != 1 or state.notifications.backup_dirty or !state.notifications.backup_on_disk) return error.BackupFlushFailed;
     stop(init.io, .prepared);
 }
 

@@ -290,6 +290,75 @@ pub fn restorePath(a: std.mem.Allocator, state: *editor.document_state.State, re
     state.notifications.backup_on_disk = true;
 }
 
+/// Identity belongs to the document, never to a view's cached path. Remote
+/// identity takes precedence over a local staging path, matching the L2 record.
+pub fn identity(state: *const editor.document_state.State) ?backup.Doc {
+    const opened = state.opened orelse return null;
+    if (state.remote) |remote| return .{ .remote = .{ .dest = remote.dest, .path = remote.path } };
+    if (state.path) |path| return .{ .path = .{ .path = path, .disk_hash = opened.disk_hash } };
+    if (state.untitled) |name| return .{ .untitled = name.n };
+    return null;
+}
+
+/// Call only after a successful body revision change. The host supplies its
+/// monotonic clock; selection changes and repeated view paints do not rearm it.
+pub fn noteEdit(state: *editor.document_state.State, now_ns: i128) void {
+    if (identity(state) == null or state.opened.?.file.read_only) return;
+    state.notifications.backup_dirty = true;
+    state.notifications.backup_due_ns = now_ns +| backup.debounce_ns;
+}
+
+pub const Maintenance = struct {
+    attempted: usize = 0,
+    failed: usize = 0,
+    first_error: ?anyerror = null,
+};
+
+/// Per-frame maintenance attempts at most one due document, including failure.
+/// Shutdown attempts every distinct document without waiting for debounce.
+/// Failures remain observable and pending; they never claim bytes are on disk.
+pub fn maintain(store: *Store, io: std.Io, states: []const *editor.document_state.State, now_ns: i128, shutdown: bool) Maintenance {
+    var report: Maintenance = .{};
+    for (states, 0..) |state, index| {
+        var duplicate = false;
+        for (states[0..index]) |previous| if (previous == state) {
+            duplicate = true;
+            break;
+        };
+        if (duplicate or !state.notifications.backup_dirty) continue;
+        if (!shutdown and now_ns < state.notifications.backup_due_ns) continue;
+        report.attempted += 1;
+        settle(store, io, state) catch |err| {
+            // A transient native write/delete failure must not disable recovery.
+            state.notifications.backup_dirty = true;
+            state.notifications.backup_due_ns = now_ns +| backup.debounce_ns;
+            report.failed += 1;
+            if (report.first_error == null) report.first_error = err;
+        };
+        if (!shutdown) break;
+    }
+    return report;
+}
+
+fn settle(store: *Store, io: std.Io, state: *editor.document_state.State) !void {
+    const doc = identity(state) orelse return error.MissingDocument;
+    const opened = &state.opened.?;
+    if (!opened.isDirty()) {
+        if (state.notifications.backup_on_disk) try store.drop(io, doc);
+        state.notifications.backup_on_disk = false;
+        state.notifications.backup_paused = false;
+    } else if (opened.file.content.len > store.limit) {
+        // Retain the last recovery record and expose degraded protection. A new
+        // edit rearms maintenance so shrinking below the cap resumes storage.
+        state.notifications.backup_paused = true;
+    } else {
+        try store.write(io, doc, opened.file.content);
+        state.notifications.backup_on_disk = true;
+        state.notifications.backup_paused = false;
+    }
+    state.notifications.backup_dirty = false;
+}
+
 const a_test = std.testing.allocator;
 const io_test = std.testing.io;
 const doc_test: backup.Doc = .{ .path = .{ .path = "D:\\fixture\\file.zig", .disk_hash = 17 } };
@@ -316,6 +385,141 @@ fn recordCount(store: *Store) !usize {
     var count: usize = 0;
     while (try iterator.next(io_test)) |_| count += 1;
     return count;
+}
+
+fn editFixture(state: *editor.document_state.State, body: []const u8) !void {
+    var view: editor.view_navigation.View = .{};
+    defer view.deinit(a_test);
+    try view.move(a_test, &state.opened.?.file, .select_all, false);
+    const participants = [_]editor.edit_commands.Participant{.{ .view = &view, .id = 1 }};
+    _ = try editor.edit_commands.run(a_test, state, &participants, 0, .{ .insert = body }, .{ .now_ms = 0, .isolate = true });
+}
+
+fn restorePermissions(store: *Store) void {
+    std.debug.assert(NtSetSecurityObject(store.dir.handle, 0x80000004, &store.policy.descriptor) == .SUCCESS);
+}
+
+test "Windows editor backup maintenance rearms debounce only after edits and persists at its deadline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(a_test, tmp.dir, "backups", 128);
+    defer store.deinit(io_test);
+    var state = try testState();
+    defer state.clear(a_test);
+    try editFixture(&state, "changed");
+    noteEdit(&state, 0);
+    noteEdit(&state, 10);
+    const states = [_]*editor.document_state.State{&state};
+    try std.testing.expectEqual(@as(usize, 0), maintain(&store, io_test, &states, backup.debounce_ns, false).attempted);
+    try std.testing.expectEqual(@as(usize, 0), try recordCount(&store));
+    const report = maintain(&store, io_test, &states, backup.debounce_ns + 10, false);
+    try std.testing.expectEqual(@as(usize, 1), report.attempted);
+    try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expect(!state.notifications.backup_dirty and state.notifications.backup_on_disk);
+    try expectBody(&store, identity(&state).?, "changed");
+    try std.testing.expectEqual(@as(usize, 0), maintain(&store, io_test, &states, backup.debounce_ns + 20, false).attempted);
+}
+
+test "Windows editor backup maintenance limits frames and flushes all distinct documents before debounce" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(a_test, tmp.dir, "backups", 128);
+    defer store.deinit(io_test);
+    var first = try testState();
+    defer first.clear(a_test);
+    var second = try testState();
+    defer second.clear(a_test);
+    second.clearPath(a_test);
+    second.path = try a_test.dupe(u8, "D:\\fixture\\other.zig");
+    try editFixture(&first, "first");
+    try editFixture(&second, "second");
+    noteEdit(&first, 0);
+    noteEdit(&second, 0);
+    const states = [_]*editor.document_state.State{ &first, &first, &second };
+    try std.testing.expectEqual(@as(usize, 1), maintain(&store, io_test, &states, backup.debounce_ns, false).attempted);
+    try std.testing.expectEqual(@as(usize, 1), try recordCount(&store));
+    try std.testing.expect(second.notifications.backup_dirty);
+    noteEdit(&first, 20);
+    noteEdit(&second, 20);
+    const report = maintain(&store, io_test, &states, 21, true);
+    try std.testing.expectEqual(@as(usize, 2), report.attempted);
+    try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try expectBody(&store, identity(&first).?, "first");
+    try expectBody(&store, identity(&second).?, "second");
+}
+
+test "Windows editor backup maintenance retains failed writes and does not repeat shared views in shutdown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(a_test, tmp.dir, "backups", 128);
+    defer store.deinit(io_test);
+    var state = try testState();
+    defer state.clear(a_test);
+    try editFixture(&state, "unsaved");
+    noteEdit(&state, 0);
+    try broadPermissions(store.dir.handle);
+    defer restorePermissions(&store);
+    const states = [_]*editor.document_state.State{ &state, &state };
+    const report = maintain(&store, io_test, &states, 10, true);
+    try std.testing.expectEqual(@as(usize, 1), report.attempted);
+    try std.testing.expectEqual(@as(usize, 1), report.failed);
+    try std.testing.expectEqual(error.PrivatePermissions, report.first_error.?);
+    try std.testing.expect(state.notifications.backup_dirty and !state.notifications.backup_on_disk);
+    try std.testing.expectEqual(@as(i128, backup.debounce_ns + 10), state.notifications.backup_due_ns);
+    restorePermissions(&store);
+    try std.testing.expectEqual(@as(usize, 0), maintain(&store, io_test, &states, 11, false).attempted);
+    try std.testing.expectEqual(@as(usize, 0), maintain(&store, io_test, &states, backup.debounce_ns + 10, false).failed);
+    try expectBody(&store, identity(&state).?, "unsaved");
+}
+
+test "Windows editor backup maintenance deletes clean undo records only after native deletion succeeds" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(a_test, tmp.dir, "backups", 128);
+    defer store.deinit(io_test);
+    var state = try testState();
+    defer state.clear(a_test);
+    try store.write(io_test, identity(&state).?, "older dirty");
+    state.notifications.backup_on_disk = true;
+    noteEdit(&state, 0);
+    try broadPermissions(store.dir.handle);
+    defer restorePermissions(&store);
+    const states = [_]*editor.document_state.State{&state};
+    try std.testing.expectEqual(@as(usize, 1), maintain(&store, io_test, &states, 1, true).failed);
+    try std.testing.expect(state.notifications.backup_dirty and state.notifications.backup_on_disk);
+    restorePermissions(&store);
+    try expectBody(&store, identity(&state).?, "older dirty");
+    try std.testing.expectEqual(@as(usize, 0), maintain(&store, io_test, &states, 2, true).failed);
+    try std.testing.expect(!state.notifications.backup_dirty and !state.notifications.backup_on_disk);
+    try std.testing.expect(try store.read(io_test, identity(&state).?) == null);
+}
+
+test "Windows editor backup maintenance exposes cap pause retains old bytes and resumes after shrink" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(a_test, tmp.dir, "backups", 4);
+    defer store.deinit(io_test);
+    var state = try testState();
+    defer state.clear(a_test);
+    try store.write(io_test, identity(&state).?, "old");
+    state.notifications.backup_on_disk = true;
+    try editFixture(&state, "large");
+    noteEdit(&state, 0);
+    const states = [_]*editor.document_state.State{&state};
+    const report = maintain(&store, io_test, &states, 1, true);
+    try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expect(state.notifications.backup_paused and !state.notifications.backup_dirty and state.notifications.backup_on_disk);
+    try expectBody(&store, identity(&state).?, "old");
+    try editFixture(&state, "new");
+    noteEdit(&state, 2);
+    try std.testing.expectEqual(@as(usize, 0), maintain(&store, io_test, &states, 3, true).failed);
+    try std.testing.expect(!state.notifications.backup_paused and state.notifications.backup_on_disk);
+    try expectBody(&store, identity(&state).?, "new");
 }
 fn expectBody(store: *Store, doc: backup.Doc, body: []const u8) !void {
     var record = (try store.read(io_test, doc)) orelse return error.MissingFixtureRecord;

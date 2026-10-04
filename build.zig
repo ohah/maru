@@ -1581,7 +1581,7 @@ pub fn build(b: *std.Build) void {
     const backup_store_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor backup"} });
     const backup_store_step = b.step("test-win32-editor-backup", "Verify private native recovery storage and restored document authority");
     const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
-    run_backup_store_tests.addArg("--maru-expect-tests=17"); // 2 aggregation blocks + 14 native tests + 1 cross-platform path policy
+    run_backup_store_tests.addArg("--maru-expect-tests=22"); // 2 aggregation blocks + 19 native tests + 1 cross-platform path policy
     backup_store_step.dependOn(&run_backup_store_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {

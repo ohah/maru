@@ -177,3 +177,8 @@ native save 또는 외부 CAS 거절, 실제 창 복원/undo 4개 추가 프레�
 compiled/passed count 인자도 이제 실제 검사한다. 일반 백업 root/debounce/종료 flush/복원 알림·
 purge와 missing/untitled/remote 복원, interrupted-stage 정리·capability·GUI 저장/닫기/감시·물리 IME는
 계속 남아 있다. W8.17은 진행 중이다.
+
+§2m.154: Windows 입력의 실제 revision 변경을 백업 debounce에 연결했다. native 저장소 유지보수는
+frame당 하나, shutdown 전체 distinct 문서, 실패 재시도/삭제 성공 후 상태 정리/용량 pause를 다룬다.
+22개 집중 테스트와 이 수명주기 규칙의 runtime 적대적 검증 5회가 통과했다. 일반 root와 frame/종료
+caller 연결, 복원 UI, GUI editable/save/dirty-close/감시·IME는 여전히 W8.17 잔여다.

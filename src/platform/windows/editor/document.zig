@@ -35,6 +35,9 @@ test "Windows editor input: view context matches document identity and readonly 
     _ = try views[0].applyKey(a, .{ .key = .{ .char = 'x' } }, context);
     const state = documents.get(one).?;
     try std.testing.expectEqualStrings("xabc", state.opened.?.file.content);
+    try std.testing.expect(state.notifications.backup_dirty);
+    try std.testing.expectEqual(@as(i128, 100 * std.time.ns_per_ms + editor.backup.debounce_ns), state.notifications.backup_due_ns);
+    try std.testing.expect(!documents.get(two).?.notifications.backup_dirty);
     try std.testing.expectEqual(@as(usize, 1), views[1].navigation.items.items[0].focus);
     try std.testing.expectEqual(@as(usize, 0), views[2].navigation.items.items.len);
     try std.testing.expectEqualStrings("different", documents.get(two).?.opened.?.file.content);
@@ -125,7 +128,10 @@ pub const OpenFile = struct {
                     .redo => .redo,
                     else => unreachable,
                 };
+                const previous_revision = opened.file.revision;
                 _ = try commands.run(a, state, views.items, 0, command, .{ .now_ms = context.now_ms, .isolate = action == .newline or action == .tab });
+                if (opened.file.revision != previous_revision)
+                    @import("backup_store.zig").noteEdit(state, @as(i128, context.now_ms) * std.time.ns_per_ms);
                 if (self.navigation.items.items.len > 0) self.revealCaret(&opened.file);
             },
         }

@@ -1048,3 +1048,8 @@ fixture도 Controller를 호출한다. 일반 GUI·비동기 I/O와 crash 복구
 모든 fixture는 생성한 disposable root를 사용한다. 일반 앱 백업/GUI 연결 잔여는
 [Windows 계약](windows-platform.md) §2m.153에 기록한다. Windows simple runner도 이제
 `--maru-expect-tests`/`--maru-expect-passed` 인자를 읽고 잘못된 숫자·개수를 거절한다.
+
+§2m.154의 `zig build test-win32-editor-backup`는 수명주기 native 판정 5개를 더해 22개다.
+Debounce/frame budget/shutdown distinct flush/실패 재시도/clean 삭제/용량 pause를 실제 저장소로 센다.
+`test-win32-editor-input`는 실제 본문 편집만 백업 시계를 설정하는 연결도 검사한다.
+`test-win32-save-crash`의 backup worker는 직접 write 대신 만기 전 shutdown 유지보수를 사용한다.

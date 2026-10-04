@@ -25616,10 +25616,21 @@ test "client: absolute-deadline nonblocking connect and hello restore blocking m
 
     // Readiness polling is test setup only. The product connect itself gets one absolute budget
     // covering nonblocking connect completion, hello write, and the complete hello_ack read.
-    var attempts: usize = 0;
-    while (attempts < 150 and c.access(socket_path.ptr, c.F_OK) != 0) : (attempts += 1)
-        _ = usleepMs(20);
-    try testing.expect(c.access(socket_path.ptr, c.F_OK) == 0);
+    //
+    // **준비는 「hello 에 답하는가」로 본다**(2026-10-04). daemon 은 socket 을 bind 한 **뒤에** 실행 파일을 해시해 build id
+    // 를 만든다 — socket 파일만 보고 측정을 시작하면 그 해시 시간(143 MiB 테스트 바이너리)이 아래 예산을 먹었다. 16 중
+    // 병렬에서 48 번 중 33 번이 DeadlineExceeded, 1 번이 EndpointAbsent 였다. 확인 연결은 닫고, 측정은 새 연결로 한다.
+    var ready = false;
+    var probe_attempts: usize = 0;
+    while (!ready and probe_attempts < 120) : (probe_attempts += 1) {
+        const probe_deadline = try client_deadline.AbsoluteDeadline.after(testing.io, std.time.ns_per_s);
+        if (Client.connectUntil(allocator, socket_path, .cli_attach, protocol.version_major, probe_deadline)) |probe| {
+            var warmed = probe;
+            warmed.deinit();
+            ready = true;
+        } else |_| _ = usleepMs(50);
+    }
+    try testing.expect(ready);
     const deadline = try client_deadline.AbsoluteDeadline.after(
         testing.io,
         5 * std.time.ns_per_s,

@@ -660,6 +660,11 @@ fn terminateAndReapFixtureChild(pid: c.pid_t) bool {
     }
 }
 
+/// fixture host 를 기다리는 시도 수(20 ms 간격 → 60 s). 예전에는 150(3 s)이었다 — daemon 은 시작할 때 실행 파일(143 MiB
+/// 테스트 바이너리)을 해시하므로, 부하에서 그 3 s 를 넘겨 이 판정자가 「host 가 없다」로 실패했다(2026-10-04: 혼자 돌려도
+/// 3 번 중 1 번, 16 중 병렬에서는 48 번 모두). 기다리는 것은 준비이지 판정 대상이 아니다.
+const fixture_wait_attempts: usize = 3000;
+
 test "product resolver discovers and pins the one host that owns a live runtime" {
     if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
         return error.SkipZigTest;
@@ -699,7 +704,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
 
     var owner_client = blk: {
         var attempt: usize = 0;
-        while (attempt < 150) : (attempt += 1) {
+        while (attempt < fixture_wait_attempts) : (attempt += 1) {
             switch (host_connect.connectExistingHost(testing.allocator, base, host_id)) {
                 .connected => |client| break :blk client,
                 .failed => {},
@@ -750,7 +755,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     };
     for (&blockers) |*blocker| {
         var connect_attempt: usize = 0;
-        while (connect_attempt < 150) : (connect_attempt += 1) {
+        while (connect_attempt < fixture_wait_attempts) : (connect_attempt += 1) {
             switch (host_connect.connectExistingHost(
                 testing.allocator,
                 base,
@@ -775,7 +780,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     const recovery_phase = try testPhase(.resolve);
     var pinned = retry: {
         var attempt: usize = 0;
-        while (attempt < 150) : (attempt += 1) {
+        while (attempt < fixture_wait_attempts) : (attempt += 1) {
             const resolved = resolveProduct(testing.allocator, base, runtime_id, recovery_phase);
             switch (resolved) {
                 .selected => |value| break :retry value,

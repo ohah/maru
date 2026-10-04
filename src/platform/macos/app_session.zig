@@ -69884,16 +69884,20 @@ test "SO6 실제 PTY — 안 보이는 탭의 출력은 사이드바만 요청�
             };
             return error.TestUnexpectedResult;
         }
+        /// 빠른 tick 몇 번으로는 자식이 에코했다는 보장이 없다(부하) — 실제 시계 기한까지 잠깐씩 쉬며 돈다.
         fn tickUntilCount(s: *AppSession, which: AppSession.OutputRedraw, above: u64) !bool {
-            var i: usize = 0;
-            while (i < 400) : (i += 1) {
+            const deadline = std.Io.Clock.awake.now(s.io).nanoseconds + 5 * std.time.ns_per_s;
+            while (true) {
                 _ = try s.tick();
                 if (s.output_redraw_counts[@intFromEnum(which)] > above) return true;
+                if (std.Io.Clock.awake.now(s.io).nanoseconds >= deadline) return false;
+                try std.Io.sleep(s.io, std.Io.Duration.fromMilliseconds(1), .awake);
             }
-            return false;
         }
-        fn quiet(s: *AppSession) !void {
+        fn quiet(s: *AppSession, terms: []const *Term) !void {
             // 시작 출력이 다 빠질 때까지 — 이 판정자가 보는 것은 **보낸 뒤** 의 결정뿐이다.
+            // 고정 tick 수는 자식이 찍었다는 증거가 아니다: 늦게 온 보이는 탭의 첫 줄이 ① 의 «전체» 를 늘린다.
+            for (terms) |term| try waitControlledStartupLine(s, term);
             var i: usize = 0;
             while (i < 60) : (i += 1) _ = try s.tick();
         }
@@ -69904,8 +69908,9 @@ test "SO6 실제 PTY — 안 보이는 탭의 출력은 사이드바만 요청�
     const background_id = background_tab.activePane().activeTerm().surface.id;
     _ = try tab_ops.newTab(session);
     try std.testing.expect(tab_ops.activeTab(session) != background_tab); // 새 탭이 보이는 탭이다
-    const visible_id = tab_ops.activeTab(session).activePane().activeTerm().surface.id;
-    try H.quiet(session);
+    const visible_term = tab_ops.activeTab(session).activePane().activeTerm();
+    const visible_id = visible_term.surface.id;
+    try H.quiet(session, &.{ background_tab.activePane().activeTerm(), visible_term });
 
     // ① 안 보이는 탭에만 한 줄을 보낸다 — 그 에코는 «사이드바» 결정만 낳고 «전체» 는 늘지 않는다.
     const before = session.output_redraw_counts;

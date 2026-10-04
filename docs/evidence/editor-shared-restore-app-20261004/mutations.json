@@ -1,0 +1,23 @@
+{
+  "results": [
+    {
+      "name": "lost-restored-scroll",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true
+    },
+    {
+      "name": "lost-provider-piece",
+      "expected_pass": false,
+      "exit_code": 1,
+      "expected_observed": true
+    },
+    {
+      "name": "equivalent-provider-guard",
+      "expected_pass": true,
+      "exit_code": 0,
+      "expected_observed": true
+    }
+  ],
+  "restored_sha256": "9a076b4cfd4cbfc513155a544d0a74424a2aa990aff9293c4b60e54d4442055e"
+}

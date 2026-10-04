@@ -318,3 +318,9 @@ Registry 없이 실행한다. 실패·unknown 결과도 handle/image/phase를 �
 deinit을 거절한다. native 7개 Debug/ReleaseFast와 다섯 compiled runtime mutant 검출을
 통과했다. controller/앱의 취소·reconcile 연결, native commit 승인 왕복과 cleanup 이관,
 초기 open 및 나머지 Windows 범위는 계속 진행한다. 앱의 비동기 rollback 완료로 세지 않는다.
+
+§2m.174: controller가 settlement worker를 고정 주소에서 시작하고 settling 동안 Request와
+문서 슬롯을 유지한다. 결과 전 busy guard를 적용하며 unknown은 이미지/native 소유권과
+문서 uncertainty를 보유하고 known decision만 ack/abort 정산한다. controller 28개와 worker
+7개 Debug/ReleaseFast 및 다섯 compiled runtime mutation 검출이 통과했다. Book/UI 연결,
+native commit 승인·cleanup 이관과 초기 open 및 나머지 Windows 범위는 계속 진행한다.

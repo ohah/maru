@@ -1172,3 +1172,10 @@ native fence·non-reused scope·문서 수명/경로/권한 보유와 승인 왕
 최종 권한 실패의 rollback/cleanup, later edit와 stale disk acknowledgment, admission
 재시도를 검사한다. Debug와 `-Doptimize=ReleaseFast` 모두 실행한다. controller와 앱 연결을
 각각 다섯 compiled runtime 변형으로 검증했다. native commit 승인 왕복은 아직 후속이다.
+
+§2m.179의 `zig build test-win32-save-commit`은 독립 native 7개다. fresh namespace fence,
+최종 main-thread 승인·scope, copied/busy owner, 취소와 실행 시작 경합, 실제 commit 응답 유실과
+scope exhaustion을 검사한다. Debug와 `-Doptimize=ReleaseFast` 모두 실행하고 다섯 compiled
+runtime 변형을 검출했다. 일반 앱 연결은 host 61개·controller 33개 Debug/ReleaseFast와
+별도의 다섯 compiled runtime 변형으로 검증한다. 승인 대기 중 권한/경로 변경·취소,
+실제 native commit 뒤 늦은 취소와 read/release/teardown busy를 검사한다.

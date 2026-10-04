@@ -11854,3 +11854,45 @@ overwrite·초기 open I/O 이관, 물리 입력/IME와 나머지 Windows 범위
 두 번째는 `59 73 65 63 6F 6E 64 0A`의 전체 bytes로 BOM/CRLF와 LF 보존을 검증했다.
 입력은 소유 HWND에 synthetic WM_CHAR/WM_CLOSE/WM_KEYDOWN을 주입했으며 물리 입력/IME
 검증으로 세지 않는다. 코드 hash·fixture·캡처와 byte proof는 private cache에 보관한다.
+
+### 2m.179 — native commit 승인 왕복과 일반 앱 연결
+
+`save_commit_worker`는 SMP 소유의 prepared attempt/image를 받아 선택 root의 복제 handle과
+relative name을 보유한다. worker가 fresh root-relative 파일을 열고 처음 읽은 full identity와
+native 이미지 binding/source/checksum을 검사한 뒤 ready를 게시한다. 그 fence는 main-thread
+최종 승인과 실제 native commit이 끝날 때까지 유지한다. main owner의 `approve`만 현재
+Grant/Request 권한을 확인하고 non-reused scope와 final-address 승인 값을 게시한다.
+
+worker는 Registry를 조회하지 않고 `Transaction.commitApproved`에서 이미지 binding/checksum과
+일회성 승인을 소비한 뒤 기존 KTM commit을 실행한다. generic byte API의 문서 저장 우회는
+계속 거절한다. 취소와 worker의 실행 시작은 atomic vote로 경합한다. 실행 시작 전 취소는
+prepared 소유권을 반환하며, 시작 뒤 취소는 실제 native 결과를 기다려야 한다. 응답 유실은
+uncertain phase의 전체 attempt/image를 반환하고 문서 ack를 하지 않는다. 동기화 provider는
+job과 함께 고정하고 main의 결과 소비까지 유지해 승인 게시 중 provider가 파괴되지 않는다.
+
+`test-win32-save-commit` native 7개가 Debug/ReleaseFast에서 통과했다. 최종 권한·scope,
+취소/늦은 취소, copied/busy owner, 다른 equal-byte 파일의 namespace fence, 실제 commit
+응답 유실과 scope exhaustion을 검사한다. final authority·native scope·fresh name identity·
+copied owner·late cancel 검사를 깨뜨린 다섯 compiled runtime 변형을 검출하고 원본을 복원했다.
+namespace 변형은 기다리기 timeout 대신 실제 승인 왕복과 native decision으로 검출한다.
+
+일반 앱의 `commitForApp`는 이제 native commit worker를 시작한다. `committing` 동안
+controller의 다른 native 작업과 shutdown은 busy로 거절한다. `pollCommit`만 main에서
+최종 승인을 게시하며, 승인 실패는 primary 오류를 보존하고 worker를 취소한 뒤 rollback과
+cleanup을 거친다. native committed는 늦은 취소에도 cleanup/ack로 진행하고 uncertain은
+전체 소유권을 복원해 실제 결과 조회로 넘긴다. 어떤 단계도 callback 소실을 abort로 세지 않는다.
+
+앱의 pending-save 키/마우스 경계와 Book의 read/release/teardown busy 경계가 승인부터 결과까지
+문서 수명·경로·권한 변경을 제한한다. main에서 Request를 계속 소유하므로 worker는 Registry에
+접근하지 않는다. host 61개·controller 33개·commit worker 7개가 Debug/ReleaseFast에서
+통과했다. 앱의 sync commit 우회·최종 권한 생략·primary 오류 유실·committed의 가짜 cancel·
+committing cleanup busy 생략의 다섯 compiled runtime 변형도 검출하고 원본 bytes를 복원했다.
+앱 연결의 전체 gate·실앱 검증을 이어가며, conflict overwrite·초기 open I/O 이관과 물리 입력/IME,
+나머지 Windows 지원 범위도 계속 남아 있다.
+
+§2m.179의 새 제품 exe에서도 실제 앱을 검증했다. 1,870,003-byte BOM/CRLF 파일을
+편집해 소유 HWND에 Ctrl+S/Esc를 연속 주입하고 원본 전체 bytes가 보존되는 것을 확인했다.
+추가 편집 후 Save-close는 `BOM + XY + base-line CRLF × 170000`의 1,870,005 bytes로
+정확히 저장하고 프로세스를 종료했다. 별도 두 문서 Save-close도 `BOM + Xbase CRLF`와
+`Ysecond LF`의 전체 bytes 및 프로세스 종료로 확인했다. 입력은 synthetic 메시지 주입이며
+물리 키보드/IME로 세지 않는다. 두 fixture의 코드 hash·byte proof·캡처는 private cache에 보관한다.

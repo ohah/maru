@@ -171,6 +171,8 @@ pub const Book = struct {
         const controller = &self.controllers.items[try self.index(view)];
         if (controller.status() == .preparing) {
             try controller.cancelPreparation();
+        } else if (controller.status() == .committing) {
+            try controller.cancelCommit();
         } else if (controller.status() == .closed) {
             return error.ControllerClosed;
         } else if (controller.status() != .idle) {
@@ -181,14 +183,18 @@ pub const Book = struct {
 
     /// Preparation is polled after input dispatch so queued Esc wins before
     /// the final commit vote. Explicit cancel/preparation failure rollback and
-    /// uncertain outcome queries and terminal cleanup use workers. Commit still
-    /// runs on main until the final approval handshake is connected.
+    /// uncertain outcome queries, native commit and terminal cleanup use
+    /// workers; the final live authority vote and document CAS stay on main.
     pub fn pollSave(self: *Book, io: std.Io, view: editor.document_registry.Lease) !?SaveReady {
         const controller = &self.controllers.items[try self.index(view)];
         if (controller.status() == .preparing) {
             const ready = (try controller.pollPreparationForApp(io)) orelse return null;
             if (ready == .cancelled) return .cancelled;
             if (ready == .settling) return null;
+        }
+        if (controller.status() == .committing) {
+            const receipt = (try controller.pollCommit(io)) orelse return null;
+            return .{ .receipt = receipt };
         }
         if (controller.status() == .settling) {
             const failure = controller.pending.?.preparation_error;
@@ -396,6 +402,12 @@ const Fixture = struct {
         };
         for (self.book.controllers.items) |*controller| if (controller.pending != null) {
             const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+            if (controller.committing != null) controller.cancelCommit() catch unreachable;
+            while (controller.committing != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native commit timeout");
+                _ = controller.pollCommit(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
             while (controller.settling != null) {
                 if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native settlement timeout");
                 _ = controller.pollSettlement(std.testing.io) catch {};
@@ -539,6 +551,124 @@ fn readyAppSave(f: *Fixture, view: editor.document_registry.Lease) !*saving.Cont
     return controller;
 }
 
+fn awaitAppCleanup(book: *Book, view: editor.document_registry.Lease) !void {
+    const controller = &book.controllers.items[try book.index(view)];
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (controller.status() == .committing) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.CommitTimeout;
+        try std.testing.expect((try book.pollSave(std.testing.io, view)) == null);
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(saving.Status.cleaning, controller.status());
+}
+
+fn readyAppCommit(f: *Fixture, view: editor.document_registry.Lease) !*saving.Controller {
+    const controller = try readyAppSave(f, view);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expectEqual(saving.Status.committing, controller.status());
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!try controller.committing.?.worker.needsApproval()) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.CommitReadyTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return controller;
+}
+
+test "Windows editor host pending commit fence preserves document lifetime and blocks read close and teardown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppCommit(f, view);
+    try std.testing.expectError(error.SaveBusy, controller.cleanupAsync());
+    try std.testing.expectError(error.SaveBusy, f.book.readTicket(view));
+    try std.testing.expectError(error.SaveBusy, f.book.release(std.testing.io, view, true));
+    try std.testing.expectError(error.SaveBusy, f.book.deinit(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 1), f.registry.get(view).?.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+}
+
+test "Windows editor host queued cancel before final worker approval prevents native commit" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppCommit(f, view);
+    const waiting = controller.committing.?;
+    try f.book.cancelSave(std.testing.io, view);
+    try f.book.cancelSave(std.testing.io, view);
+    try std.testing.expectEqual(waiting, controller.committing.?);
+    try std.testing.expectEqual(Book.SaveReady.cancelled, try awaitSave(&f.book, view));
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.acknowledged);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host worker ready rechecks revoked permission before final vote" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    _ = try readyAppCommit(f, view);
+    f.registry.get(view).?.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host worker ready refuses changed document path before final vote" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    _ = try readyAppCommit(f, view);
+    const state = f.registry.get(view).?;
+    const original_path = state.path;
+    const changed_path = try std.testing.allocator.dupe(u8, "changed-path.txt");
+    state.path = changed_path;
+    defer {
+        state.path = original_path;
+        std.testing.allocator.free(changed_path);
+    }
+    try std.testing.expectError(error.StaleDocument, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host cancel after worker native commit preserves actual receipt and ack" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppCommit(f, view);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!controller.committing.?.worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.CommitReplyTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@import("transaction.zig").Phase.committed, controller.committing.?.worker.job.?.result.?.prepared.attempt.transaction.phase);
+    try f.book.cancelSave(std.testing.io, view);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(ready.receipt.acknowledgment_error == null);
+    try std.testing.expect(!f.registry.get(view).?.opened.?.isDirty());
+}
+
 test "Windows editor host commit waits for native cleanup before publishing saved receipt" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const f = try Fixture.init();
@@ -546,6 +676,8 @@ test "Windows editor host commit waits for native cleanup before publishing save
     const view = try f.open(0);
     const controller = try readyAppSave(f, view);
     try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expectEqual(saving.Status.committing, controller.status());
+    try awaitAppCleanup(&f.book, view);
     try std.testing.expectEqual(saving.Status.cleaning, controller.status());
     try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
     try std.testing.expectEqual(@as(u64, 1), f.registry.get(view).?.persistence.live_save_images);
@@ -565,6 +697,7 @@ test "Windows editor host cancellation during committed cleanup keeps real commi
     const view = try f.open(0);
     const controller = try readyAppSave(f, view);
     try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try awaitAppCleanup(&f.book, view);
     const waiting = controller.cleaning.?;
     try f.book.cancelSave(std.testing.io, view);
     try f.book.cancelSave(std.testing.io, view);
@@ -621,6 +754,7 @@ test "Windows editor host cleanup reports native commit separately from newer di
     const view = try f.open(0);
     _ = try readyAppSave(f, view);
     try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try awaitAppCleanup(&f.book, view);
     const state = f.registry.get(view).?;
     const saved = state.opened.?.saved_hash;
     state.opened.?.disk_hash = editor.document_state.contentHash("newer-observation");

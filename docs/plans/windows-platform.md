@@ -350,3 +350,11 @@ main thread에서 native decision과 문서 CAS를 따로 정산한다. 최종 �
 정리 후 보고하며 늦은 Esc가 이미 committed인 결과를 cancelled로 바꾸지 않는다. controller
 33개·host 56개 Debug/ReleaseFast와 각각 다섯 compiled runtime mutation 검출이 통과했다.
 native commit 승인 왕복·conflict overwrite·초기 open 이관 및 전체 잔여 Windows 범위는 계속 진행한다.
+
+§2m.179: native commit worker가 fresh root-relative fence를 보유한 상태로 main의
+최종 권한/scope 승인을 받고, atomic vote의 취소/실행 시작 경합 뒤 Registry 접근 없이 KTM
+commit을 수행한다. native 7개 Debug/ReleaseFast와 다섯 compiled runtime mutation 검출이
+통과했다. controller/일반 앱을 연결하고 committing의 native 소유권·final vote·취소 경합과
+main Request 수명/Book 변경 제한을 유지한다. host 61개·controller 33개가 두 optimize 모드에서
+통과했고 앱 연결의 별도 다섯 compiled runtime 변형도 검출했다. 전체 gate·실앱 검증을 이어가며
+conflict overwrite·초기 open 이관과 전체 잔여 Windows 범위는 계속 진행한다.

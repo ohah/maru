@@ -1586,7 +1586,7 @@ pub fn build(b: *std.Build) void {
     const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
     const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
-    run_editor_host_tests.addArg("--maru-expect-tests=56"); // 2 aggregation blocks + 47 native tests + 7 pure policies
+    run_editor_host_tests.addArg("--maru-expect-tests=61"); // 2 aggregation blocks + 52 native tests + 7 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
@@ -1625,6 +1625,17 @@ pub fn build(b: *std.Build) void {
     const run_save_cleanup_tests = b.addRunArtifact(save_cleanup_tests);
     run_save_cleanup_tests.addArg("--maru-expect-tests=10"); // ten actual native cleanup/ownership tests
     save_cleanup_step.dependOn(&run_save_cleanup_tests.step);
+    const save_commit_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/editor/save_commit_worker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const save_commit_tests = addProjectTest(b, .{ .root_module = save_commit_mod, .filters = &.{"Windows save commit worker"} });
+    const save_commit_step = b.step("test-win32-save-commit", "Verify fenced native commit votes and cancellation ownership without Registry on worker");
+    const run_save_commit_tests = b.addRunArtifact(save_commit_tests);
+    run_save_commit_tests.addArg("--maru-expect-tests=7"); // seven actual native handshake/ownership tests
+    save_commit_step.dependOn(&run_save_commit_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {
         const save_crash_probe = b.addExecutable(.{
@@ -4227,6 +4238,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(edit_command_step);
     test_step.dependOn(document_grant_step);
     test_step.dependOn(save_controller_step);
+    test_step.dependOn(save_commit_step);
     test_step.dependOn(backup_store_step);
     test_step.dependOn(editor_host_step);
     test_step.dependOn(directory_watch_step);

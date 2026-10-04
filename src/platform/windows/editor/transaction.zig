@@ -218,6 +218,18 @@ pub const Transaction = struct {
         try self.commitDocumentWith(io, request, Native);
     }
 
+    /// Only a final main-thread vote can authorize the worker's bound image.
+    /// The native adapter fences the original grant-relative name before that
+    /// vote; this entry point never reads Registry from the I/O thread.
+    pub fn commitApproved(self: *Transaction, io: std.Io, image: maru.session.editor.save_request.Image, scope: u64, approval: *maru.session.editor.save_request.CommitApproval) !void {
+        if (self.phase != .prepared) return error.InvalidState;
+        const bound = self.request_image orelse return error.DocumentRequestRequired;
+        if (!bound.sameRequest(image) or bound.expected_source_hash != image.expected_source_hash) return error.WrongSaveRequest;
+        try image.validate(self.source_hash);
+        try approval.consume(scope, image);
+        try self.commitWith(io, Native);
+    }
+
     fn commitDocumentWith(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request, comptime Api: type) !void {
         if (self.phase != .prepared) return error.InvalidState;
         try self.checkDocumentRequest(request);

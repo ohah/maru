@@ -328,15 +328,17 @@ src/
                         save_settle_worker는 독립 준비 이미지/attempt를 이동받아 Registry 없이 native rollback/outcome 조회를 실행한다.
                         controller는 고정 주소의 settlement worker를 시작하며 미소비·실패 결과의 소유권을 유지한다.
                         Request/문서 ack는 controller에 남고 일반 앱 Book/UI의 cancel/preparation 오류와 unknown 조회에 연결한다.
-                        native commit·그 실패의 즉시 abort와 final handle cleanup의 worker 이관은 후속 작업이다.
+                        일반 앱은 native commit·실패 rollback·final handle cleanup을 worker에 연결하고 문서 CAS만 main에서 수행한다.
                         save_cleanup_worker는 실제 KTM terminal outcome과 committed binding/checksum을 확인하고 native 정리를 실행한다.
                         unknown/query 실패는 attempt/image를 반환하며 handle을 정리한 결과도 Request ack는 하지 않는다.
+                        save_commit_worker는 fresh root-relative fence를 유지하며 main의 final-address/scope 승인을 받아 native commit한다.
+                        controller의 committing 상태는 원래 Request를 보유하고 취소 경합·unknown 조회와 후속 정리를 정산한다.
                         external_changes는 앱의 감시 구독·단일 읽기 슬롯·재시도·현재 문서 적용과 안내 대기를 소유한다.
                         external_comparison은 현재 편집본과 새 디스크 이미지의 복사본·공통 diff 행 대응·표시 번호/색을 소유한다.
                         공유 문서·Undo·clean 외부 변경의 차분 적용 정책과 플랫폼 중립 경로 선택은
                         session/editor/와 user_paths에 둔다.
                         session/editor/save_request의 CommitApproval은 bytes 없는 final-address/scope/one-use 승인 경계다.
-                        native fence·main-thread 승인 왕복과 문서 변경 제한은 Windows host가 연결한다.
+                        Windows host가 native fence·main-thread 승인 왕복과 문서 변경 제한을 연결한다.
     linux/
   workspace/            project workspace, layout restore, recent workspaces
   observability/        TraceEvent, RenderSnapshot, replayTrace

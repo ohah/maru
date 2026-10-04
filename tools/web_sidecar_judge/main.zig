@@ -364,7 +364,7 @@ fn popupAdoptChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "popupadopt", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
     const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/o", .{profile_root}) catch return report(false, "popupadopt", "프로필 경로가 길다", .{});
-    popupadopt_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "popupadopt", "{s}", .{@errorName(err)});
+    popupadopt_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "popupadopt", "{s}", .{@errorName(err)});
 }
 
 /// 새 탭 판정(W6e) — 프로필은 `<뿌리>/n`.

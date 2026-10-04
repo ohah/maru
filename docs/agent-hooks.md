@@ -1512,21 +1512,30 @@ env(`MARU_HOOK_INSTANCE`·`MARU_HOOK_PANE`)를 물려받는다. 그래서 나중
 
 **데몬 판별.** codex 훅 커맨드만 자기를 띄운 프로세스를 싣는다 — payload 맨 앞에 `"maru_hook_ppid":<$PPID>,`
 (셸 내장 — §4.1 의 «추가 프로세스 0» 을 지킨다). 줄 형식(`<provider>\t<payload>`)은 그대로라 옛 파서는 모르는 키로
-건너뛴다. 그 칸의 최대 길이만큼 상한을 미리 줄인다(꽉 찬 줄이 넘치면 파서가 통째로 버린다). 앱은 그 pid 의 argv 가
-`codex app-server … --managed-daemon` 일 때만 데몬 이벤트로 본다(`isManagedDaemonArgs`, pid 마다 한 번 읽고 기억한다).
-데몬을 안 쓰는 codex 는 훅을 TUI 가 직접 띄우므로 예전 규칙(파일 = pane)이 그대로다.
+건너뛴다. 그 칸의 최대 길이만큼 상한을 미리 줄인다(꽉 찬 줄이 넘치면 파서가 통째로 버린다). 훅 러너는 데몬에서
+`$SHELL -lc` 를 직접 `posix_spawn(SETSID)` 하므로 `$PPID` 가 곧 데몬이다(codex 0.160 소스 확인). 앱은 그 pid 의 argv 가
+데몬 모양일 때만 데몬 이벤트로 본다(`isManagedDaemonArgs`):
+
+- `codex app-server … --managed-daemon` — 실측 모양.
+- `codex app-server [--remote-control] --listen unix://…` — 옛 모양. 데몬 바이너리가 `--managed-daemon --help` 검사를 5 초
+  안에 통과하지 못하면 이 플래그 없이 띄운다(`pid_start.rs`).
+- 데몬 보조(`app-server daemon …`)와 IDE 의 stdio app-server(`--listen stdio://`)는 아니다.
+
+판정은 (pid, 프로세스 시작 시각)마다 한 번 읽고 기억한다 — pid 만이면 재사용된 pid 에 옛 판정이 붙는다. 그 pid 가 이미
+사라졌으면 예전 규칙으로 접는다. 데몬을 안 쓰는 codex 는 훅을 TUI 가 직접 띄우므로 예전 규칙(파일 = pane)이 그대로다.
 
 ⚠️ **제어 터미널로는 못 가른다.** 첫 판은 `/dev/tty` 를 열어 보고 실패하면 데몬으로 봤는데, codex 는 데몬이든 아니든
 훅을 tty 에서 떼어 띄운다(0.156 `detach_from_tty`, 0.160 `ProcessMode::NewSession` —
 `codex-rs/hooks/src/engine/command_runner.rs`). 그러면 데몬을 안 쓰는 codex 이벤트까지 전부 재배정을 탄다.
 
-**귀속.** 표식이 붙은 codex 이벤트는 파일 이름을 믿지 않고 `session_id` 로 Term 을 고른다
-(`src/session/codex_daemon_attribution.zig`):
+**귀속.** 데몬이 돌린 codex 이벤트는 파일 이름을 믿지 않고 `session_id` 로 Term 을 고른다
+(`src/session/codex_daemon_attribution.zig`). 후보는 **로컬** 터미널에서 codex 가 도는 Term 뿐이다(원격 pane 은 아니다):
 
 | 상황 | 결과 |
 | --- | --- |
-| 표식 없음(데몬을 안 쓰는 codex·claude) | 예전 그대로 — 파일의 pane |
-| 이미 묶인 세션(그 Term 이 살아 있고 codex 가 돈다) | 그 Term |
+| 데몬이 돌리지 않은 이벤트(데몬을 안 쓰는 codex·claude) | 예전 그대로 — 파일의 pane |
+| 이미 묶인 세션(그 Term 이 아직 후보이고, 이 이벤트가 `SessionStart` 가 아니다) | 그 Term |
+| 묶인 세션의 `SessionStart`(`codex resume` 등), 또는 묶인 Term 이 닫혔거나 codex 를 벗어났다 | 묶음을 풀고 아래로 다시 판정 |
 | 같은 cwd 에서 codex 가 도는 로컬 Term 이 하나 | 그 Term 에 묶는다 |
 | 여럿 + 프롬프트 제출 + 그 프롬프트가 화면에 보이는 Term 이 **정확히 하나** | 그 Term 에 묶는다 |
 | 여럿 + 프롬프트 전(세션 시작·이어 하기 직후) | 붙이지 않는다 |
@@ -1535,16 +1544,26 @@ env(`MARU_HOOK_INSTANCE`·`MARU_HOOK_PANE`)를 물려받는다. 그래서 나중
 | 같은 cwd 후보가 없음(`codex -C <dir>`) | cwd 무관하게 codex 가 도는 로컬 Term 으로 위 규칙을 그대로 — 하나면 그 Term |
 | codex 가 도는 로컬 Term 이 아예 없음 | 붙이지 않는다 |
 
+**한 Term 에는 세션 하나만 묶인다.** 새 세션을 묶으면 그 Term 에 묶여 있던 다른 세션은 풀린다(`/new`). 그래서 B 에서
+돌던 S 를 C 가 `codex resume S` 로 열어도 S 의 이벤트가 B 로 가지 않는다 — S 의 `SessionStart` 가 묶음도 버린다.
+
 붙이지 않은 이벤트는 어느 Term 에도 적용하지 않는다. 그 pane 들은 화면 관측(§1.1)만으로 배지를 낸다 — **틀린 pane
-에 붙이지 않는 대신 정보가 빠진다.** 진단은 세션·사유당 한 줄(`codex daemon event unattributed`)이다. 재배정받은 Term
-은 자기 파일이 영영 안 생기므로 «재배정으로 훅을 받는다» 표식(`Term.agent_hook_routed`)으로 훅 모드에 남고, 에이전트가
-떠나면 그 표식과 묶음이 함께 풀린다.
+에 붙이지 않는 대신 정보가 빠진다.** 진단은 (세션, 사유)마다 한 줄(`codex daemon event unattributed`, 최근 16 개를
+기억한다)이다. 재배정받은 Term 은 자기 파일이 영영 안 생기므로 «재배정으로 훅을 받는다» 표식(`Term.agent_hook_routed`)
+으로 훅 모드에 남고, 에이전트가 떠나면 그 표식과 묶음이 함께 풀린다. 원래 파일이 따라잡기(backlog) 중이면 재배정도
+따라잡기로 적용한다(알림·before 사본·턴 열림 시각을 «지금» 으로 찍지 않는다). 회전본 건지기도 같은 귀속을 지난다.
 
 **한계.**
 
 - 같은 폴더의 두 pane 에 **같은 프롬프트**를 넣으면 가릴 수 없다. 짧은 프롬프트(「계속」·`/new`)도 마찬가지다.
-- 첫 프롬프트 전의 이벤트(세션 시작)와 화면에 프롬프트가 안 보이는 이어 하기는, 후보가 여럿이면 버려진다.
-- 데몬을 띄운 pane 을 닫으면 그 뒤 모든 codex 세션의 훅이 아무도 안 읽는 파일로 간다(예전에도 같았다).
+- 화면 비교는 프롬프트 앞 **4096 B**(이스케이프를 푼 뒤, 공백을 뺀 값)와 각 후보 화면의 **마지막 48 행**만 본다. 긴
+  프롬프트가 48 행을 넘게 접히거나 그 사이 출력에 밀려 올라가면 일치하지 않아 버려진다.
+- 첫 프롬프트 전의 이벤트(세션 시작)와 화면에 프롬프트가 안 보이는 이어 하기는, 같은 cwd 에 codex pane 이 여럿이면
+  버려진다. **데몬을 띄운 pane(A) 자신의 세션도 데몬 이벤트다** — A 와 B 가 같은 폴더면 A 의 `SessionStart`·이어 하기도
+  12 자 이상 프롬프트가 오기 전까지는 버려진다.
+- 데몬을 띄운 pane 의 파일만 데몬 이벤트를 받는다. 그 pane 을 닫거나, **pane 은 두고 그 안의 codex 만 끝내도**(그 Term 이
+  관측 모드로 내려가 그 파일을 더는 안 읽는다) 다른 pane 들의 세션 이벤트가 아무도 안 읽는 파일로 간다. 데몬은 살아 있어
+  새 codex 를 띄워도 그 파일에 계속 적힌다.
 - 원격(ssh) codex 는 아직 이 규칙을 안 탄다 — 원격 데몬도 첫 클라이언트의 `LC_MARU_PANE`·`TMUX_PANE` 을 물려받는다.
 - **정확한 해법은 둘뿐이다**: codex 가 훅에 클라이언트 신원을 실어 주거나(#48500 의 제안), 사용자가 `codex --no-daemon`
   으로 pane 마다 따로 띄우는 것. 후자는 메모리를 더 쓰고 codex 의 백그라운드 기능이 그 세션을 못 본다(Orca #23900).

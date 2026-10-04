@@ -2621,21 +2621,28 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
     const sid = maru.session.agent_hook_event.decodeInto(&sid_buf, ev.session_id);
     if (sid.len == 0 or sid.len > attr.Bindings.max_session_bytes) return .dropped;
 
-    // ⑴ 이미 묶인 세션 — 그 Term 이 살아 있고 아직 codex 가 돌 때만.
-    var bound: ?u64 = null;
-    if (self.codex_daemon_bindings.lookup(sid)) |id| {
-        if (term_ops.termBySurfaceId(self, id)) |t| {
-            if (t.agent_kind == .codex) bound = id;
-        }
-        if (bound == null) self.codex_daemon_bindings.unbind(sid);
-    }
-
-    // ⑵ 후보: codex 가 도는 로컬 Term 전부(`any_cwd`)와 그중 같은 cwd 인 것(`candidates`). 어느 쪽을 쓸지는 순수 층이
-    // 정한다(같은 cwd 가 비면 cwd 무관 — `codex -C <dir>`). 묶인 세션이면 모을 필요가 없다.
-    var candidates: [16]attr.Candidate = undefined;
-    var count: usize = 0;
+    // ⑴ codex 가 도는 로컬 Term 전부(`any_cwd`). 자격은 순수 층이 정한다(`eligible` — 원격 pane 은 아니다). 필드 읽기뿐이라
+    // 이벤트마다 모아도 싸다 — 묶음이 살아 있는지도 이 목록으로 본다.
     var any_cwd: [16]attr.Candidate = undefined;
     var any_count: usize = 0;
+    collect: for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |t| {
+                if (any_count == any_cwd.len) break :collect;
+                if (!attr.eligible(.{ .terminal = t.kind == .terminal, .codex = t.agent_kind == .codex, .remote = isRemoteAgentPane(t) })) continue;
+                any_cwd[any_count] = .{ .id = t.surfaceId() };
+                any_count += 1;
+            }
+        }
+    }
+
+    // ⑵ 이미 묶인 세션 — 묶인 Term 이 아직 그 목록에 있고 세션이 다시 시작된 것이 아닐 때만(`Bindings.resolve`).
+    const bound = self.codex_daemon_bindings.resolve(sid, ev.kind == .session_start, any_cwd[0..any_count]);
+
+    // ⑶ 같은 cwd 후보. 어느 목록을 쓸지는 순수 층이 정한다(같은 cwd 가 비면 cwd 무관 — `codex -C <dir>`). 묶인 세션이면
+    // 모을 필요가 없다 — cwd 조회는 Term 관측을 새로 고치므로 이벤트마다 하지 않는다.
+    var candidates: [16]attr.Candidate = undefined;
+    var count: usize = 0;
     const prompt_event = ev.kind == .user_prompt_submit;
     var prompt_buf: [4096]u8 = undefined;
     var prompt_compact: []const u8 = "";
@@ -2646,20 +2653,12 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
             var decoded: [4096]u8 = undefined;
             prompt_compact = attr.compact(&prompt_buf, maru.session.agent_hook_event.decodeInto(&decoded, ev.text));
         }
-        collect: for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |t| {
-                    if (any_count == any_cwd.len) break :collect;
-                    if (t.kind != .terminal or t.agent_kind != .codex or isRemoteAgentPane(t)) continue;
-                    any_cwd[any_count] = .{ .id = t.surfaceId() };
-                    any_count += 1;
-                    var t_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const t_cwd = git_ops.termCwd(self, t, &t_cwd_buf) orelse continue;
-                    if (ev_cwd.len == 0 or !attr.sameDir(t_cwd, ev_cwd)) continue;
-                    candidates[count] = .{ .id = t.surfaceId() };
-                    count += 1;
-                }
-            }
+        for (any_cwd[0..any_count]) |a| {
+            const t = term_ops.termBySurfaceId(self, a.id) orelse continue;
+            var t_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (!attr.sameCwdCandidate(git_ops.termCwd(self, t, &t_cwd_buf), ev_cwd)) continue;
+            candidates[count] = .{ .id = a.id };
+            count += 1;
         }
         // 화면은 **후보가 여럿이고 프롬프트일 때만** 읽는다 — 도구 이벤트마다 화면을 덤프하지 않는다. 같은 cwd 후보는
         // cwd 무관 후보의 부분집합이라 한 번 읽고 그 값을 옮긴다.
@@ -2702,15 +2701,17 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
     }
 }
 
-/// 훅을 띄운 프로세스(`maru_hook_ppid`)가 codex 공유 데몬인가. argv 읽기(sysctl)는 pid 마다 한 번이다 — 판정을
-/// 기억한다(`ParentVerdicts`). 칸이 없는 옛 줄·이미 사라진 처음 보는 pid 는 «아니다»(= 예전 규칙)로 접는다.
+/// 훅을 띄운 프로세스(`maru_hook_ppid`)가 codex 공유 데몬인가. argv 읽기(sysctl)는 프로세스마다 한 번이다 — 판정을
+/// (pid, 시작 시각)으로 기억한다(`ParentVerdicts` — pid 만이면 재사용된 pid 에 옛 판정이 붙는다). 칸이 없는 옛 줄·이미
+/// 사라진 pid 는 «아니다»(= 예전 규칙)로 접는다.
 fn hookParentIsDaemon(self: *AppSession, ev: maru.session.agent_hook_event.Event) bool {
     const attr = maru.session.codex_daemon_attribution;
     if (ev.hook_ppid == 0 or !std.mem.eql(u8, ev.provider, attr.daemon_provider)) return false;
-    if (self.codex_daemon_parents.lookup(ev.hook_ppid)) |known| return known;
     const pid = std.math.cast(i32, ev.hook_ppid) orelse return false;
+    const started = maru.pty.PtySession.processStartMicros(pid) orelse return false;
+    if (self.codex_daemon_parents.lookup(ev.hook_ppid, started)) |known| return known;
     const verdict = maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return false;
-    self.codex_daemon_parents.remember(ev.hook_ppid, verdict);
+    self.codex_daemon_parents.remember(ev.hook_ppid, started, verdict);
     return verdict;
 }
 
@@ -2720,6 +2721,12 @@ fn applyRoutedHookEvent(self: *AppSession, target: *Term, ev: maru.session.agent
     // 그 Term 은 자기 파일이 없어도 훅 모드다(`Term.agent_hook_routed` — 안 세우면 다음 tick 에 관측 모드로 떨어진다).
     target.agent_hook_routed = true;
     target.agent_hook_log_present = true;
+    // **원래 파일이 따라잡기(backlog) 중이면 받는 Term 도 그 동안은 따라잡기다**(회전본 건지기와 같은 되돌림 모양). 그
+    // 이벤트는 창이 없던 시간의 것이라 `PreToolUse` 의 before 사본을 뜨면 끝난 턴에 현재 내용이 들어가고, 턴이 열린
+    // 시각(`turn_opened_wall_ns`)에 «지금» 이 찍힌다.
+    const restore_catchup = target.hook.backlog_catchup;
+    target.hook.backlog_catchup = restore_catchup or backlog;
+    defer target.hook.backlog_catchup = restore_catchup;
     var tb: TurnBatch = .{};
     tb.step(self, target, ev);
     tb.finish(self, target);
@@ -2732,12 +2739,7 @@ fn applyRoutedHookEvent(self: *AppSession, target: *Term, ev: maru.session.agent
 /// 붙이지 않은 세션을 **세션·사유당 한 줄** 남긴다(같은 세션의 도구 이벤트마다 쌓이지 않게). 세션 id 만 —
 /// 프롬프트 원문은 남기지 않는다(계약 §7).
 fn noteDaemonDrop(self: *AppSession, sid: []const u8, reason: maru.session.codex_daemon_attribution.Reason) void {
-    var h = std.hash.Fnv1a_64.init();
-    h.update(sid);
-    h.update(@tagName(reason));
-    const key = h.final();
-    if (key == self.codex_daemon_last_drop_log) return;
-    self.codex_daemon_last_drop_log = key;
+    if (!self.codex_daemon_drop_log.first(maru.session.codex_daemon_attribution.dropKey(sid, reason))) return;
     std.log.scoped(.agenthook).info("codex daemon event unattributed: session={s} reason={s}", .{ sid, @tagName(reason) });
 }
 
@@ -3511,6 +3513,12 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
         // 사본은 그렇지 않다 — 없는 것을 지어내는 쪽이 나쁘다.
         const rotated_capture: turn_capture.Id = 0;
         for (events[0..batch.count]) |ev| {
+            // **회전본도 귀속을 지난다** — 공유 데몬이 이 파일에 적은 남의 세션 이벤트가 여기서 이 Term 에 붙으면 안 된다.
+            // 따라잡기 플래그(위)가 서 있어 다른 Term 으로 가는 것도 따라잡기로 적용된다.
+            switch (routeHookEvent(self, term, ev)) {
+                .here => {},
+                .elsewhere, .dropped => continue,
+            }
             const applied = applyHookEvent(self, term, ev);
             if (applied.turn_end) {
                 rotated_turn_end = true;

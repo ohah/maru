@@ -288,3 +288,10 @@ native prepared 이미지와 commit/ack 요청을 full lease·epoch·sequence·r
 공통 요청 18개와 native safe-save 66개가 Debug/ReleaseFast에서 통과했고 source hash·checksum·
 epoch·sequence·lease의 다섯 compiled runtime mutant를 검출했다. native 쓰기·commit의
 worker 이관과 main-thread 승인 왕복, 최초 open 비동기화는 아직 진행 대상이다.
+
+§2m.170: worker가 bytes/name/root 및 자체 I/O를 소유해 실제 native 준비·쓰기·flush를
+실행한다. 결과 commit은 main-thread 원래 grant/request를 다시 검증한다. 새 gate 9개가
+Debug/ReleaseFast에서 통과했고 최초 identity·source hash·checksum·copied owner·상한의
+다섯 compiled runtime mutant와 실패 보존 제거의 추가 변형을 검출했다. 실제 partial write의
+poisoned attempt와 실패를 결과로 유지해 main-thread rollback 정산으로 넘긴다. 일반 앱 배선, 비동기 commit/취소 정산과
+초기 open 이관은 이어서 구현한다. 전체 비동기 저장 완료로 세지 않는다.

@@ -295,3 +295,10 @@ Debug/ReleaseFast에서 통과했고 최초 identity·source hash·checksum·cop
 다섯 compiled runtime mutant와 실패 보존 제거의 추가 변형을 검출했다. 실제 partial write의
 poisoned attempt와 실패를 결과로 유지해 main-thread rollback 정산으로 넘긴다. 일반 앱 배선, 비동기 commit/취소 정산과
 초기 open 이관은 이어서 구현한다. 전체 비동기 저장 완료로 세지 않는다.
+
+§2m.171: controller가 고정 주소의 Preparation에서 worker를 시작하고 preparing 상태에서
+문서 이미지·슬롯을 보유한다. 취소 후에도 결과를 drain하고 rollback 미확정이면 native
+attempt와 두 이미지를 유지한다. 취소 이미지는 commit으로 되살리지 않는다. controller
+23개·worker 9개 Debug/ReleaseFast와 다섯 compiled runtime mutation 검출이 통과했다.
+일반 앱 Book/UI는 아직 동기 저장 API를 사용하며, 비동기 commit/abort·정산과 앱 배선,
+초기 open 이관 및 나머지 Windows 범위는 계속 진행한다.

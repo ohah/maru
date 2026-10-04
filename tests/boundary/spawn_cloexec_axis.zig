@@ -21,6 +21,7 @@ const std = @import("std");
 const Allowed = struct { path: []const u8, count: usize, why: []const u8 };
 
 const allowed = [_]Allowed{
+    .{ .path = "src/platform/windows/editor/crash_probe.zig", .count = 1, .why = "Standalone Windows-only save durability test executable; spawns only its owned checkpoint worker, is not installed or linked into the app, and never receives image-channel descriptors" },
     .{ .path = "src/pty/macos_spawn.zig", .count = 1, .why = "헬퍼 자신 — CLOEXEC_DEFAULT 를 켜고 stdio 만 넘긴다" },
     .{ .path = "src/main.zig", .count = 4, .why = "`maru` CLI 프로세스(`maru terminfo` 의 `system` 선언 하나·호출 셋) — 이미지 채널을 협상하지 않아 받은 fd 가 없다" },
     .{ .path = "src/platform/agent_hook_guard.zig", .count = 1, .why = "`maru agent-hooks guard` CLI 전용 — main.zig에서만 import하며 이미지 채널을 협상하지 않는다. 전용 자식 그룹의 deadline 감시에 표준 spawn을 쓴다" },

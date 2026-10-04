@@ -6,8 +6,10 @@ const builtin = @import("builtin");
 const editor = @import("maru").session.editor;
 const grants = @import("document_grant.zig");
 const transaction = @import("transaction.zig");
+const preparation = @import("save_prepare_worker.zig");
 
-pub const Status = enum { idle, prepared, uncertain, closed };
+pub const Status = enum { idle, preparing, prepared, uncertain, closed };
+pub const PreparationReady = enum { prepared, cancelled };
 pub const Decision = enum { committed, aborted };
 pub const Receipt = struct {
     decision: Decision,
@@ -20,6 +22,14 @@ const Pending = struct {
     request: editor.save_request.Request,
     attempt: grants.Attempt,
     uncertainty_error: ?anyerror = null,
+    preparation_error: ?anyerror = null,
+    native_image: ?struct { allocator: std.mem.Allocator, bytes: []const u8 } = null,
+};
+const Preparation = struct {
+    allocator: std.mem.Allocator,
+    worker: preparation.Worker,
+    request: editor.save_request.Request,
+    cancelled: bool = false,
 };
 
 // Compile-time native boundary: faults in tests still operate on actual files
@@ -42,6 +52,7 @@ const Native = struct {
 pub const Controller = struct {
     grant: grants.Grant,
     pending: ?Pending = null,
+    preparing: ?*Preparation = null,
     last_receipt: ?Receipt = null,
     closed: bool = false,
 
@@ -55,6 +66,7 @@ pub const Controller = struct {
 
     pub fn status(self: *const Controller) Status {
         if (self.closed) return .closed;
+        if (self.preparing != null) return .preparing;
         const pending = self.pending orelse return .idle;
         return if (pending.attempt.transaction.phase == .uncertain) .uncertain else .prepared;
     }
@@ -67,13 +79,92 @@ pub const Controller = struct {
         try self.prepareImage(io, source, limit, observed_hash, Native);
     }
 
+    pub fn prepareAsync(self: *Controller, source: editor.document_registry.Lease, limit: usize) !void {
+        try self.startPreparation(source, limit, null, std.heap.smp_allocator);
+    }
+
+    pub fn prepareOverwriteAsync(self: *Controller, source: editor.document_registry.Lease, limit: usize, observed_hash: u64) !void {
+        try self.startPreparation(source, limit, observed_hash, std.heap.smp_allocator);
+    }
+
+    fn startPreparation(self: *Controller, source: editor.document_registry.Lease, limit: usize, observed_hash: ?u64, worker_allocator: std.mem.Allocator) !void {
+        if (self.closed) return error.ControllerClosed;
+        if (self.pending != null or self.preparing != null) return error.SaveBusy;
+        var request = if (observed_hash) |hash|
+            try editor.save_request.Request.beginOverwrite(self.grant.allocator, self.grant.registry, source, limit, hash)
+        else
+            try editor.save_request.Request.begin(self.grant.allocator, self.grant.registry, source, limit);
+        errdefer request.deinit();
+        // The book may grow/move its controller array while this job runs. Keep
+        // the worker's stable address in a separately owned allocation.
+        const waiting = try worker_allocator.create(Preparation);
+        errdefer worker_allocator.destroy(waiting);
+        waiting.* = .{ .allocator = worker_allocator, .worker = .{ .allocator = worker_allocator }, .request = request };
+        try waiting.worker.submit(&self.grant, &waiting.request, limit);
+        self.preparing = waiting;
+        self.last_receipt = null;
+    }
+
+    pub fn cancelPreparation(self: *Controller) !void {
+        if (self.closed) return error.ControllerClosed;
+        const waiting = self.preparing orelse return error.NoPendingPreparation;
+        // Keep the request and slot until native ownership returns. A cancel
+        // request is neither rollback proof nor permission for a second save.
+        waiting.cancelled = true;
+    }
+
+    pub fn pollPreparation(self: *Controller, io: std.Io) !?PreparationReady {
+        return self.pollPreparationWith(io, Native);
+    }
+
+    fn finishPreparation(self: *Controller, waiting: *Preparation, moved_request: bool) void {
+        std.debug.assert(waiting.worker.job == null);
+        if (!moved_request) waiting.request.deinit();
+        waiting.allocator.destroy(waiting);
+        self.preparing = null;
+    }
+
+    fn pollPreparationWith(self: *Controller, io: std.Io, comptime Driver: type) !?PreparationReady {
+        if (self.closed) return error.ControllerClosed;
+        const waiting = self.preparing orelse return null;
+        const result = (try waiting.worker.takeResult()) orelse return null;
+        const cancelled = waiting.cancelled;
+        switch (result) {
+            .failure => |failure| {
+                self.finishPreparation(waiting, false);
+                if (cancelled) return .cancelled;
+                return failure;
+            },
+            .prepared => |value| {
+                // Move both independent image allocations and native handles.
+                // Even failed preparation stays owned until confirmed rollback.
+                self.pending = .{ .request = waiting.request, .attempt = value.attempt, .native_image = .{ .allocator = value.allocator, .bytes = value.image.bytes }, .preparation_error = if (cancelled) error.SaveCancelled else value.preparation_error };
+                self.finishPreparation(waiting, true);
+                if (cancelled) {
+                    _ = try self.abortWith(io, Driver);
+                    return .cancelled;
+                }
+                const pending = &self.pending.?;
+                if (!value.image.sameRequest(pending.request.image())) pending.preparation_error = error.WrongSaveRequest;
+                if (pending.preparation_error == null) self.grant.validate(&pending.request) catch |failure| {
+                    pending.preparation_error = failure;
+                };
+                if (pending.preparation_error) |failure| {
+                    _ = self.abortWith(io, Driver) catch {};
+                    return failure;
+                }
+                return .prepared;
+            },
+        }
+    }
+
     fn prepareWith(self: *Controller, io: std.Io, source: editor.document_registry.Lease, limit: usize, comptime Driver: type) !void {
         return self.prepareImage(io, source, limit, null, Driver);
     }
 
     fn prepareImage(self: *Controller, io: std.Io, source: editor.document_registry.Lease, limit: usize, observed_hash: ?u64, comptime Driver: type) !void {
         if (self.closed) return error.ControllerClosed;
-        if (self.pending != null) return error.SaveBusy;
+        if (self.pending != null or self.preparing != null) return error.SaveBusy;
         var request = if (observed_hash) |hash|
             try editor.save_request.Request.beginOverwrite(self.grant.allocator, self.grant.registry, source, limit, hash)
         else
@@ -97,7 +188,9 @@ pub const Controller = struct {
     }
     fn commitWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
+        if (self.preparing != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
+        if (pending.preparation_error) |failure| return failure;
         if (pending.attempt.transaction.phase != .prepared) return error.SaveUncertain;
         Driver.commit(&self.grant, io, &pending.attempt, &pending.request) catch |failure| {
             if (pending.attempt.transaction.phase == .uncertain) {
@@ -124,6 +217,7 @@ pub const Controller = struct {
     }
     fn reconcileWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
+        if (self.preparing != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         if (pending.attempt.transaction.phase != .uncertain) return error.InvalidState;
         const outcome = try Driver.reconcile(&pending.attempt);
@@ -136,6 +230,7 @@ pub const Controller = struct {
     }
     fn abortWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
+        if (self.preparing != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         Driver.rollback(&pending.attempt) catch |failure| {
             // Rollback itself queries an uncertain transaction. A lost commit
@@ -167,6 +262,7 @@ pub const Controller = struct {
         pending.attempt.close(io) catch |err| {
             receipt.cleanup_error = err;
         };
+        if (pending.native_image) |image| image.allocator.free(image.bytes);
         pending.request.deinit();
         if (receipt.acknowledgment_error == null)
             @import("backup_store.zig").noteDecision(state, std.Io.Clock.awake.now(io).nanoseconds);
@@ -179,6 +275,7 @@ pub const Controller = struct {
     /// native result. On refusal every handle/image/grant remains owned for retry.
     pub fn deinit(self: *Controller, io: std.Io) !void {
         if (self.closed) return error.ControllerClosed;
+        if (self.preparing != null) return error.SaveBusy;
         if (self.pending) |pending| {
             if (pending.attempt.transaction.phase == .uncertain) {
                 _ = try self.reconcile(io);
@@ -225,6 +322,10 @@ const Fixture = struct {
         try std.testing.expectEqualStrings(text, bytes);
     }
     fn deinit(self: *Fixture) void {
+        if (self.controller.preparing != null) {
+            self.controller.cancelPreparation() catch unreachable;
+            _ = awaitPreparation(&self.controller) catch {};
+        }
         if (!self.controller.closed) self.controller.deinit(std.testing.io) catch @panic("fixture has unresolved save");
         _ = self.registry.release(self.view) catch unreachable;
         self.registry.deinit() catch unreachable;
@@ -232,6 +333,205 @@ const Fixture = struct {
         self.tmp.cleanup();
     }
 };
+
+fn awaitPreparation(controller: *Controller) !PreparationReady {
+    const io = std.testing.io;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (try controller.pollPreparation(io)) |ready| return ready;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.PreparationDidNotComplete;
+}
+
+fn awaitNativePreparation(controller: *Controller) !void {
+    const io = std.testing.io;
+    const job = controller.preparing.?.worker.job.?;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!job.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.PreparationDidNotComplete;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "Windows save controller asynchronous preparation survives controller relocation and keeps later edits dirty" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    try f.controller.startPreparation(f.view, 128, null, a);
+    try std.testing.expectEqual(Status.preparing, f.controller.status());
+    try std.testing.expectError(error.SaveBusy, f.controller.prepare(io, f.view, 128));
+    try std.testing.expectError(error.SaveBusy, f.controller.prepareAsync(f.view, 128));
+    try std.testing.expectError(error.SaveBusy, f.controller.commit(io));
+    try std.testing.expectError(error.SaveBusy, f.controller.abort(io));
+    try std.testing.expectError(error.SaveBusy, f.controller.deinit(io));
+    try std.testing.expect(!f.controller.closed);
+    try f.edit("Y");
+    const state = f.state();
+    const moved = try a.create(Controller);
+    moved.* = f.controller;
+    f.controller = undefined;
+    defer {
+        f.controller = moved.*;
+        a.destroy(moved);
+    }
+    try std.testing.expectEqual(PreparationReady.prepared, try awaitPreparation(moved));
+    try std.testing.expect(moved.pending.?.native_image != null);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    const receipt = try moved.commit(io);
+    try std.testing.expectEqual(Decision.committed, receipt.decision);
+    try std.testing.expectEqual(@as(?anyerror, null), receipt.acknowledgment_error);
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqualStrings("YXbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows save controller asynchronous cancellation drains native ownership before releasing its image" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    const saved = f.state().opened.?.saved_hash;
+    try f.controller.prepareAsync(f.view, 128);
+    try f.controller.cancelPreparation();
+    try std.testing.expectEqual(Status.preparing, f.controller.status());
+    try std.testing.expectEqual(@as(u64, 1), f.state().persistence.live_save_images);
+    try std.testing.expectError(error.SaveBusy, f.controller.prepareAsync(f.view, 128));
+    try std.testing.expectEqual(PreparationReady.cancelled, try awaitPreparation(&f.controller));
+    try std.testing.expectEqual(Status.idle, f.controller.status());
+    try std.testing.expectEqual(Decision.aborted, f.controller.last_receipt.?.decision);
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try std.testing.expectEqual(saved, f.state().opened.?.saved_hash);
+    try std.testing.expect(f.state().opened.?.isDirty());
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows save controller asynchronous source failure preserves state and allows a fresh retry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    const saved = f.state().opened.?.saved_hash;
+    const disk = f.state().opened.?.disk_hash;
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nested/file.txt", .data = "outside" });
+    try f.controller.startPreparation(f.view, 128, null, std.testing.allocator);
+    try std.testing.expectError(error.SourceChanged, awaitPreparation(&f.controller));
+    try std.testing.expectEqual(Status.idle, f.controller.status());
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try std.testing.expectEqual(saved, f.state().opened.?.saved_hash);
+    try std.testing.expectEqual(disk, f.state().opened.?.disk_hash);
+    try f.expectDisk("outside");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nested/file.txt", .data = "\xef\xbb\xbfbase\r\n" });
+    try f.controller.startPreparation(f.view, 128, null, std.testing.allocator);
+    try std.testing.expectEqual(PreparationReady.prepared, try awaitPreparation(&f.controller));
+    _ = try f.controller.commit(std.testing.io);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows save controller asynchronous ready image revalidates a revoked document permission" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    try f.controller.startPreparation(f.view, 128, null, std.testing.allocator);
+    f.state().opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, awaitPreparation(&f.controller));
+    try std.testing.expectEqual(Status.idle, f.controller.status());
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    f.state().opened.?.file.read_only = false;
+}
+
+test "Windows save controller asynchronous failure retains its native image when rollback is unconfirmed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const RefuseRollback = struct {
+        fn rollback(_: *grants.Attempt) !void {
+            return error.RollbackUncertain;
+        }
+    };
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    try f.controller.startPreparation(f.view, 128, null, std.testing.allocator);
+    try awaitNativePreparation(&f.controller);
+    const reply = &f.controller.preparing.?.worker.job.?.result.?.prepared;
+    reply.preparation_error = error.InjectedPreparationFailure;
+    reply.attempt.transaction.phase = .poisoned;
+    try std.testing.expectError(error.InjectedPreparationFailure, f.controller.pollPreparationWith(std.testing.io, RefuseRollback));
+    try std.testing.expectEqual(Status.prepared, f.controller.status());
+    try std.testing.expect(f.controller.pending.?.native_image != null);
+    try std.testing.expectEqual(@as(u64, 1), f.state().persistence.live_save_images);
+    try std.testing.expectEqual(transaction.Outcome.undetermined, try f.controller.pending.?.attempt.transaction.queryOutcome());
+    try std.testing.expectError(error.InjectedPreparationFailure, f.controller.commit(std.testing.io));
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    const receipt = try f.controller.abort(std.testing.io);
+    try std.testing.expectEqual(Decision.aborted, receipt.decision);
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+}
+
+test "Windows save controller asynchronous cancelled image cannot commit after failed rollback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const RefuseRollback = struct {
+        fn rollback(_: *grants.Attempt) !void {
+            return error.RollbackUncertain;
+        }
+    };
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    try f.controller.startPreparation(f.view, 128, null, std.testing.allocator);
+    try awaitNativePreparation(&f.controller);
+    try f.controller.cancelPreparation();
+    try std.testing.expectError(error.RollbackUncertain, f.controller.pollPreparationWith(std.testing.io, RefuseRollback));
+    try std.testing.expectEqual(Status.prepared, f.controller.status());
+    try std.testing.expectError(error.SaveCancelled, f.controller.commit(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 1), f.state().persistence.live_save_images);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    _ = try f.controller.abort(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+}
+
+test "Windows save controller asynchronous admission unwinds all allocation prefixes without publishing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    for (0..4) |prefix| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = prefix });
+        try std.testing.expectError(error.OutOfMemory, f.controller.startPreparation(f.view, 128, null, failing.allocator()));
+        try std.testing.expectEqual(Status.idle, f.controller.status());
+        try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows save controller asynchronous overwrite keeps document CAS separate from fresh native source" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.edit("X");
+    const saved = f.state().opened.?.saved_hash;
+    const disk = f.state().opened.?.disk_hash;
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nested/file.txt", .data = "newer" });
+    try f.controller.prepareOverwriteAsync(f.view, 128, editor.document_state.contentHash("outside"));
+    try std.testing.expectError(error.SourceChanged, awaitPreparation(&f.controller));
+    try std.testing.expectEqual(saved, f.state().opened.?.saved_hash);
+    try std.testing.expectEqual(disk, f.state().opened.?.disk_hash);
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try f.expectDisk("newer");
+    try f.controller.prepareOverwriteAsync(f.view, 128, editor.document_state.contentHash("newer"));
+    try std.testing.expectEqual(PreparationReady.prepared, try awaitPreparation(&f.controller));
+    try std.testing.expectEqual(disk, f.state().opened.?.disk_hash);
+    try std.testing.expectEqual(saved, f.state().opened.?.saved_hash);
+    _ = try f.controller.commit(std.testing.io);
+    try std.testing.expect(!f.state().opened.?.isDirty());
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
 
 const LostReply = struct {
     const rollback = Native.rollback;

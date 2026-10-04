@@ -11660,3 +11660,29 @@ native attempt를 얻은 뒤에는 할당하지 않는다. 쓰기 실패도 `Pre
 이 worker는 아직 일반 앱의 SaveController/UI에 연결 전이다. commit·취소 후 완료 결과를
 비동기로 정산하는 승인 왕복과 일반 앱 배선을 이어서 구현한다. 완료 결과를 main thread에서
 닫으면 native 정리가 동기로 실행될 수 있다. 최초 open 비동기화와 나머지 Windows 범위도 남아 있다.
+
+### 2m.171 — controller의 비동기 준비 소유권과 취소 정산
+
+`Controller.prepareAsync`와 `prepareOverwriteAsync`가 Request를 보유하고 별도 heap의
+`Preparation`에서 저장 worker를 시작한다. controller 배열이 이동해도 worker 주소는 유지된다.
+`preparing` 동안 두 번째 준비·commit·직접 abort·deinit은 SaveBusy로 거절한다. `cancelPreparation`은
+취소 의사만 기록하며 문서 이미지와 슬롯을 즉시 해제하지 않는다.
+
+`pollPreparation`은 아직 결과가 없으면 즉시 null을 반환한다. 결과의 native attempt와 worker
+이미지를 Pending으로 이동하고 Request 토큰과 현재 grant/문서 권한을 다시 검증한다.
+준비 실패나 권한 변경은 기존 abort 정산으로 들어간다. rollback을 확인하지 못하면
+Request·native image·transaction을 모두 보유한다. 취소한 이미지에는 SaveCancelled를 보존하여
+나중에 commit으로 되살리지 않는다. confirmed abort/commit 이후 두 이미지 할당을 정리한다.
+원본 해시 관측과 document CAS는 덮어쓰기에서도 계속 분리하며 ack 전 저장 기준을 바꾸지 않는다.
+
+`test-win32-save-controller`는 23개(aggregation 2·native 21)로 늘었고 Debug/ReleaseFast에서
+통과했다. 실제 controller 재배치, 추가 편집의 dirty 유지, 취소 후 native ownership drain,
+source 실패 후 재시도, 권한 철회, 미확정 rollback의 이미지 보유와 취소 후 commit 거절,
+admission 할당 prefix 및 stale/fresh overwrite source CAS를 검사한다. preparing 상태 숨김,
+취소 무시, ready grant 검증 제거, 취소 commit guard 제거와 rollback 실패를 취소 완료로
+오인하는 다섯 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다. worker 9개도
+두 모드에서 통과했다.
+
+아직 일반 앱의 Book/UI 저장 진입점은 동기 API를 사용한다. 완료 poll의 native abort와
+commit·정산도 main thread에서 실행되므로 전체 비동기 저장 완료로 세지 않는다. 이 I/O의
+worker 이관과 승인 왕복, 일반 앱 저장·닫기 연결 및 초기 open 비동기화를 이어서 구현한다.

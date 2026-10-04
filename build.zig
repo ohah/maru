@@ -1576,7 +1576,7 @@ pub fn build(b: *std.Build) void {
     const save_controller_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows save controller"} });
     const save_controller_step = b.step("test-win32-save-controller", "Verify Windows save ownership, native decisions and failure settlement");
     const run_save_controller_tests = b.addRunArtifact(save_controller_tests);
-    run_save_controller_tests.addArg("--maru-expect-tests=15"); // 2 aggregation blocks and 13 actual native controller tests
+    run_save_controller_tests.addArg("--maru-expect-tests=23"); // 2 aggregation blocks and 21 actual native controller tests
     save_controller_step.dependOn(&run_save_controller_tests.step);
     const backup_store_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor backup"} });
     const backup_store_step = b.step("test-win32-editor-backup", "Verify private native recovery storage and restored document authority");

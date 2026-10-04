@@ -1127,3 +1127,9 @@ worker의 실제 준비·쓰기·flush thread, captured bytes/name 소유권·�
 poisoned native attempt/실패 보존 및 명시적 rollback을 검사한다.
 `-Doptimize=ReleaseFast`로도 실행한다. 일반 앱 SaveController/UI 배선과 worker commit
 승인 왕복은 아직 연결 전이므로 전체 비동기 저장 E2E를 대체하지 않는다.
+
+§2m.171의 `zig build test-win32-save-controller`는 aggregation 2·native 21의 총 23개다.
+비동기 준비의 controller 이동·취소/drain·권한 철회·source retry·미확정 rollback 보유와
+취소 commit 거절·할당 prefix·overwrite CAS를 검사한다. `-Doptimize=ReleaseFast`로도 실행하고
+`test-win32-save-prepare` 9개를 두 모드에서 함께 회귀 검증한다. 앱 Book/UI는 아직 동기
+진입점이며 완료 poll의 native abort/commit·정산은 main thread라 전체 async E2E로 세지 않는다.

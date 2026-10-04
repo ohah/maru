@@ -7194,13 +7194,25 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
         io,
         30 * std.time.ns_per_s,
     );
-    var initial = try client_mod.Client.connectUntil(
-        allocator,
-        socket,
-        .gui,
-        protocol.version_major,
-        initial_connect_deadline,
-    );
+    // **같은 예산 안에서 `EndpointAbsent` 는 다시 시도한다**(2026-10-04). `SocketServer.bind` 는 bind(파일 생성) → chmod →
+    // listen 순서라, 그 틈에 들어간 connect 는 ECONNREFUSED(= EndpointAbsent)다 — 16 중 병렬에서 48 번 중 2 번이 그랬다.
+    // 제품 클라이언트도 이것을 일시적 실패로 보고 다시 시도한다(`admin_client` 의 `.transient`).
+    var initial = while (true) {
+        break client_mod.Client.connectUntil(
+            allocator,
+            socket,
+            .gui,
+            protocol.version_major,
+            initial_connect_deadline,
+        ) catch |err| switch (err) {
+            error.EndpointAbsent => {
+                if (initial_connect_deadline.remainingNs() <= 0) return err;
+                _ = usleep(20 * 1000);
+                continue;
+            },
+            else => return err,
+        };
+    };
     var pool = AdapterPool.init(allocator);
     defer pool.deinit();
     try testing.expectEqual(host_id, try addOwnedClient(&pool, allocator, &initial));

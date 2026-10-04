@@ -15922,14 +15922,26 @@ test "INL10 인레이 힌트 — provider 없으면 아무것도 안 묻고, 오
         }.g));
         try testing.expect(!term.rt.editor_inlay.waiting and term.rt.editor_inlay.dirty);
         _ = frameSyntaxColors(s, term); // 곧바로는 안 묻는다(조용 시계)
-        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+        // 조용 시계는 실제 시계다 — 부하로 드롭과 프레임 사이가 quiet_ms 를 넘으면 되묻는 게 맞다.
+        // 프레임 *뒤* 시각으로 재야 tick 이 본 시각도 창 안이었다는 게 보장된다.
+        if (s.awakeMs() -| term.rt.editor_inlay.last_edit_ms < inlay_client.quiet_ms) {
+            try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+        } else {
+            // 되물은 것도 같은 오류로 버려진다 — 그 뒤 상태는 창 안에서 멈춘 경우와 같다.
+            try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+                fn g(t: *Term) bool {
+                    return !t.rt.editor_inlay.waiting and t.rt.editor_inlay.dropped_error >= 2;
+                }
+            }.g));
+        }
+        const sent_before_edit = s.editor_lsp.sent_inlay;
         try removeMarkerHover(s, term, " // INLERR");
         {
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
         }
         _ = frameSyntaxColors(s, term);
-        try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
+        try testing.expectEqual(sent_before_edit + 1, s.editor_lsp.sent_inlay);
         try testing.expect(inlayApplied(&f, 1));
         try testing.expectEqual(@as(usize, 1), term.rt.editor_inlay.hints.items.items.len);
     }

@@ -12729,10 +12729,13 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
         }
     };
     var deadline_now_ns: i128 = 0;
+    // `controller_deadline_pre` 는 **준비(prepare) 뒤** controller pre 단계에서 마감을 넘긴다 — 주입 시계는 준비가 끝난 뒤에야
+    // 만료 시각으로 옮긴다(아래). 만료 시각은 넉넉해야 한다: 준비는 실제 socket 을 기다리고 그 대기 시간이 「남은 예산」이라,
+    // 예전 값 100(ns)이면 상대 스레드가 응답을 **미리 써 둔 때만** 통과했다(2026-10-04: 부하에서 160 번 중 2 번 DeadlineExceeded).
     const catchup_deadline = if (selected == .controller_deadline_pre)
         client_deadline.AbsoluteDeadline.fromInjected(
             .{ .context = &deadline_now_ns, .now_ns = DeadlineClock.now },
-            100,
+            30 * std.time.ns_per_s,
         )
     else
         try client_deadline.AbsoluteDeadline.after(

@@ -1,0 +1,39 @@
+{
+  "product_commit": "242a570b1761d8fd2a3d05bf798d35e5789c2e8c",
+  "checks": [
+    {
+      "command": "mise exec -- zig build test-editor test-editor-shared-split test-editor-chord-menu -j2",
+      "exit_code": 0,
+      "log": "/tmp/maru-shared-split-final-tests.log",
+      "log_sha256": "c7a771c555e812d939c98676e2c16dc718aa7950a97f280e4a9c3e3bf8797a14",
+      "summaries": [
+        "All 1066 tests passed.",
+        "All 3 tests passed.",
+        "All 576 tests passed.",
+        "All 37 tests passed.",
+        "All 81 tests passed.",
+        "1111 passed; 3 skipped; 0 failed.",
+        "All 16 tests passed."
+      ]
+    },
+    {
+      "command": "mise exec -- zig build macos-app-bundle -j2",
+      "exit_code": 0,
+      "log": "/tmp/maru-shared-split-product-build.log",
+      "log_sha256": "beb47f12c280fa4bbead5f7f53184066a83987cde209be08662b623c8fae745f",
+      "summaries": []
+    },
+    {
+      "command": "mise run check-doc-links check-doc-line-refs check-config-docs",
+      "exit_code": 0,
+      "log": "/tmp/maru-shared-split-final-docs.log",
+      "log_sha256": "138cc6bc37c88a557a2f33962c6b3185a48e3e8ef0894c0f84bbb655b964a809",
+      "summaries": [
+        "All 4 tests passed.",
+        "All 11 tests passed.",
+        "All 3 tests passed."
+      ]
+    }
+  ],
+  "scope": "CI 결과와 앱/OS 실행 증거는 각각 PR 및 인접 manifest를 따른다. 스킵한 테스트를 통과 수에 포함하지 않는다."
+}

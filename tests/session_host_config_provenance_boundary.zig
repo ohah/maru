@@ -65,7 +65,11 @@ test "Session default G1 provenance boundary keeps one parser and the exact G2 c
     // (`maru_macos_workspace_restore_enabled` in app_host_abi.zig) and its same-file test. **Diagnostic only,
     // not a policy owner** — the loader never errors for an unreadable/oversized file, so the toggle logs that
     // provenance; the restore decision still comes from `config.workspace.restore` alone.
-    try std.testing.expectEqual(@as(usize, 22), try countOutsideConfig(allocator, "file_provenance"));
+    //
+    // 23rd (2026-10-04): `logConfigDiagnostics` in app_session/settings.zig, shared by startup and Reload
+    // Config. **Diagnostic only** for the same reason — it logs `config file unreadable|oversize` so a reload
+    // that silently fell back to defaults leaves a line in app.log; no setting is chosen from it.
+    try std.testing.expectEqual(@as(usize, 23), try countOutsideConfig(allocator, "file_provenance"));
 }
 
 fn countOutsideConfig(allocator: std.mem.Allocator, needle: []const u8) !usize {

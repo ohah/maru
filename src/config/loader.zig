@@ -151,6 +151,13 @@ fn hostOsSuffix() ?[]const u8 {
     return null;
 }
 
+/// 한 줄이 낳은 진단들에 그 줄의 키를 찍는다. source 는 호출자 소유라 arena 로 복사한다 — 진단이 없으면 복사도 없다.
+fn stampDiagKey(a: std.mem.Allocator, line_diags: []Diagnostic, key: []const u8) LoadError!void {
+    if (line_diags.len == 0) return;
+    const owned = try a.dupe(u8, key);
+    for (line_diags) |*d| d.key = owned;
+}
+
 /// config 텍스트를 raw Config로 파싱한다(파일시스템 무관, 순수). 알 수 없는 key/잘못된 값은
 /// 기본값 유지 + diagnostic. OOM만 에러.
 ///
@@ -192,6 +199,8 @@ pub fn parseFor(os_tag: std.Target.Os.Tag, allocator: std.mem.Allocator, source:
         };
         const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
         const value = std.mem.trim(u8, line[eq + 1 ..], &std.ascii.whitespace);
+        // 이 줄이 낳은 진단에 키를 찍는다(`Diag.key`) — 진단을 만드는 자리는 수십 곳이라 줄 단위로 한 번에 한다.
+        const diags_before = diags.items.len;
 
         // OS 접미를 떼고 **그 자리에서** 적용한다. 다른 OS 줄은 값을 적용하지 않지만 **키 이름은 검증한다** —
         // 안 그러면 `bogus.setting.macos`가 아무 경고 없이 지나가 doc-vs-key 게이트(tests/config_docs)가
@@ -199,6 +208,7 @@ pub fn parseFor(os_tag: std.Target.Os.Tag, allocator: std.mem.Allocator, source:
         const split = splitOsSuffix(key);
         if (split.os) |os| if (os != host_os) {
             try validateForeignOsKey(os_tag, a, &diags, line_no, split.base);
+            try stampDiagKey(a, diags.items[diags_before..], key);
             continue;
         };
 
@@ -212,6 +222,7 @@ pub fn parseFor(os_tag: std.Target.Os.Tag, allocator: std.mem.Allocator, source:
         }
 
         try applyKey(os_tag, a, &config, &binds, &unbinds, &term_binds, &global_binds, &env_overrides, &diags, line_no, split.base, value);
+        try stampDiagKey(a, diags.items[diags_before..], key);
     }
 
     config.env = try env_overrides.toOwnedSlice(a); // 누적한 env.<KEY>를 Config로(arena 소유)
@@ -1203,6 +1214,37 @@ test "parse: workspace.restore defaults on and can be turned off" {
     defer invalid.deinit();
     try std.testing.expectEqual(true, invalid.config.workspace.restore);
     try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
+}
+
+test "parse: 진단은 그 줄의 키를 싣는다 — 다른 OS 줄 포함, 원문 버퍼가 사라져도 남는다 (앱 로그가 키를 적는다)" {
+    const allocator = std.testing.allocator;
+    const text = try allocator.dupe(u8,
+        \\font.sizee = 14
+        \\workspace.restore = maybe
+        \\font.size = 14
+        \\no equals here
+        \\  bogus.setting.windows = 1
+    );
+    var parsed = parse(allocator, text) catch |err| {
+        allocator.free(text);
+        return err;
+    };
+    defer parsed.deinit();
+    // 키가 원문을 빌리고 있으면 아래 단언이 X 를 읽는다(또는 해제된 메모리) — arena 소유인지가 여기서 갈린다.
+    @memset(text, 'X');
+    allocator.free(text);
+
+    const want = [_]struct { line: usize, key: []const u8 }{
+        .{ .line = 1, .key = "font.sizee" },
+        .{ .line = 2, .key = "workspace.restore" },
+        .{ .line = 4, .key = "" }, // `=` 가 없으면 키도 없다
+        .{ .line = 5, .key = "bogus.setting.windows" }, // 값은 안 보는 다른 OS 줄도 접미째 싣는다
+    };
+    try std.testing.expectEqual(want.len, parsed.diagnostics.len);
+    for (want, parsed.diagnostics) |w, d| {
+        try std.testing.expectEqual(w.line, d.line);
+        try std.testing.expectEqualStrings(w.key, d.key);
+    }
 }
 
 test "parse: removed compatibility settings use the generic unknown-key diagnostic" {

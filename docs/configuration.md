@@ -327,7 +327,12 @@ term-program = ghostty
 - `cursor.shape`/`cursor.blink`가 허용 값이 아님 → 기본 유지.
 - 색이 `#RRGGBB` 형식이 아님 → 기본 색 유지.
 
-`MARU_DEBUG=1`로 실행하면 무시된 줄이 `config line N: ...` 경고로 보인다. (값 의미 검증은
+무시된 줄은 **앱 로그**에 경고로 남는다 — Dock·Finder 로 띄웠으면 `<cache>/maru/app.log`(`$XDG_CACHE_HOME`, 없으면
+`~/.cache`), 터미널에서 띄웠으면 stderr 다. `MARU_DEBUG` 와 무관하다. 형식은 ``config line N `키`: 이유`` 이고
+(`=` 가 없는 줄은 키 없이 `config line N: 이유`), **시작할 때와 메뉴의 Reload Config 때 모두** 찍는다. reload 는
+`config reloaded: diagnostics=N` 한 줄을 덧붙여 진단이 0 이어도 반영됐음을 남긴다. 파일이 있는데 못 읽거나 1 MiB 를
+넘으면 `config file unreadable|oversize (startup|reload) — using defaults` 가 남는다 — 이때 모든 설정이 기본값이다.
+단일 출처는 `app_session/settings.zig` 의 `logConfigDiagnostics` 다. (값 의미 검증은
 `appearance.resolve`와 `appearance.parseHexColor` 단일 출처를 재사용하므로, 로더가 통과시킨 값은
 resolve 단계에서 다시 실패하지 않는다.)
 

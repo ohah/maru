@@ -370,6 +370,16 @@ pub fn identity(state: *const editor.document_state.State) ?backup.Doc {
 /// monotonic clock; selection changes and repeated view paints do not rearm it.
 pub fn noteEdit(state: *editor.document_state.State, now_ns: i128) void {
     if (identity(state) == null or state.opened.?.file.read_only) return;
+    noteDecision(state, now_ns);
+}
+
+/// A native decision can change dirty/fingerprint axes without a new body
+/// revision. Rearm even after rights were revoked: clean record removal and
+/// recovery preservation still need to run; this does not grant write rights.
+pub fn noteDecision(state: *editor.document_state.State, now_ns: i128) void {
+    if (identity(state) == null) return;
+    const opened = state.opened.?;
+    if (!opened.isDirty() and state.persistence.uncertain_sequence == null and !state.notifications.backup_on_disk and !state.notifications.backup_dirty) return;
     state.notifications.backup_dirty = true;
     state.notifications.backup_due_ns = now_ns +| backup.debounce_ns;
 }
@@ -409,7 +419,9 @@ pub fn maintain(store: *Store, io: std.Io, states: []const *editor.document_stat
 fn settle(store: *Store, io: std.Io, state: *editor.document_state.State) !void {
     const doc = identity(state) orelse return error.MissingDocument;
     const opened = &state.opened.?;
-    if (!opened.isDirty()) {
+    // Until native outcome is known, the old saved hash cannot prove that the
+    // current undo body matches disk. Persist it instead of dropping recovery.
+    if (!opened.isDirty() and state.persistence.uncertain_sequence == null) {
         if (state.notifications.backup_on_disk) try store.drop(io, doc);
         state.notifications.backup_on_disk = false;
         state.notifications.backup_paused = false;
@@ -569,6 +581,18 @@ test "Windows editor backup local root allocation prefixes release all native pa
 
 fn restorePermissions(store: *Store) void {
     std.debug.assert(NtSetSecurityObject(store.dir.handle, 0x80000004, &store.policy.descriptor) == .SUCCESS);
+}
+
+test "Windows editor backup native decision avoids unused clean roots and rearms readonly record cleanup" {
+    var state = try testState();
+    defer state.clear(a_test);
+    noteDecision(&state, 10);
+    try std.testing.expect(!state.notifications.backup_dirty);
+    state.opened.?.file.read_only = true;
+    state.notifications.backup_on_disk = true;
+    noteDecision(&state, 20);
+    try std.testing.expect(state.notifications.backup_dirty);
+    try std.testing.expectEqual(@as(i128, 20 + backup.debounce_ns), state.notifications.backup_due_ns);
 }
 
 test "Windows editor backup maintenance rearms debounce only after edits and persists at its deadline" {

@@ -219,6 +219,7 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         "<button style='left:280px;top:10px' onclick=\"window.w.close();setTimeout(function(){r('afterclose='+window.w.closed)},1500)\">cl</button>" ++
         "<button style='left:420px;top:10px' onclick=\"var x=window.open('','_blank');if(x){x.document.write('<title>written</title>');r('wtitle='+x.document.title)}\">bw</button>" ++
         "<button style='left:0;top:60px' onclick=\"for(var i=0;i<10;i++)window.open('/pa-popup?'+i)\">m10</button>" ++
+        "<button style='left:140px;top:60px' onclick=\"window.open('/title?t='+'x'.repeat(40000))\">lg</button>" ++
         "<script>function r(s){document.title+=' '+s}addEventListener('message',function(e){r('msg='+e.data)});onload=function(){document.title='pa ready'}</script>";
     // 이어 받은 팝업 — 원래 페이지에 알리고, 온 화면 단추로 또 연다(중첩).
     if (std.mem.eql(u8, path, "/pa-popup")) return "<!doctype html><title>loading</title><style>body{margin:0}button{position:absolute;left:0;top:0;width:100%;height:100%}</style><body>" ++

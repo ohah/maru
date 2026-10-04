@@ -12,6 +12,8 @@
 //!   adopt-nested        팝업 안의 클릭으로 연 팝업도 이어 받는다(연 탭은 그 팝업 번호)
 //!   adopt-fallback      맡긴 번호가 없으면 주소만(`open_tab` — W6e), 이미 쓰는 번호를 맡겨도 쓰지 않는다
 //!   adopt-no-window     그동안 host 창 0 개
+//!   adopt-long-url      주소 상한(32 KiB)을 넘는 팝업은 번호가 있어도 이어 받지 않는다(빈 팝업으로 접지 않는다 — 적대 검증) — 주소로도 없다
+//!   adopt-shutdown      이어 받은 팝업이 열린 채 shutdown — exit 0 으로 제때 끝난다(팝업도 목록이 닫는다)
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -31,6 +33,7 @@ const nm_point: Point = .{ .x = 200, .y = 25 };
 const cl_point: Point = .{ .x = 340, .y = 25 };
 const bw_point: Point = .{ .x = 480, .y = 25 };
 const m10_point: Point = .{ .x = 60, .y = 75 };
+const lg_point: Point = .{ .x = 200, .y = 75 };
 const blank_point: Point = .{ .x = 520, .y = 360 };
 
 const Created = struct { opener: u64, browser: u64, placement: protocol.message.NewTabPlacement, url: [256]u8 = undefined, url_len: usize = 0 };
@@ -120,10 +123,11 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     var u: [256]u8 = undefined;
 
     var host = try Host.spawn(host_path, profile_arg);
-    defer {
+    var shut_down = false;
+    defer if (!shut_down) {
         host.send(.shutdown) catch {};
         _ = host.wait(wait_ms);
-    }
+    };
     try browsers_check.handshake(&host);
     try host.send(.{ .create_browser = .{ .browser = browser_id, .size = .{ .width = 640, .height = 400, .scale = 1 }, .hidden = false, .url = browsers_check.url(&u, port, "/pa") } });
     var w: Watch = .{ .host = &host };
@@ -220,4 +224,19 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     report(w.created_len == before_fallback and w.open_tabs == tabs_before_fallback + 1, "adopt-fallback", std.fmt.bufPrint(&detail, "팝업 {d} · open_tab {d}", .{ w.created_len - before_fallback, w.open_tabs - tabs_before_fallback }) catch "");
 
     report(windows.ownedBy(host.pid) == 0, "adopt-no-window", std.fmt.bufPrint(&detail, "host 창 {d}", .{windows.ownedBy(host.pid)}) catch "");
+
+    // 너무 긴 주소 — 번호를 맡겨 두어도.
+    try w.reserve(607);
+    w.pump(100);
+    const before_long = w.created_len;
+    const tabs_before_long = w.open_tabs;
+    try w.click(browser_id, lg_point);
+    w.pump(1_200);
+    report(w.created_len == before_long and w.open_tabs == tabs_before_long, "adopt-long-url", std.fmt.bufPrint(&detail, "팝업 {d} · open_tab {d}", .{ w.created_len - before_long, w.open_tabs - tabs_before_long }) catch "");
+
+    const started = os.nowMs();
+    try host.send(.shutdown);
+    const code = host.wait(wait_ms);
+    shut_down = true;
+    report(code != null and code.? == 0 and os.nowMs() - started < 4_000, "adopt-shutdown", std.fmt.bufPrint(&detail, "열린 팝업 {d} 개 · exit {?d} · {d} ms", .{ w.created_len - w.closed_len, code, os.nowMs() - started }) catch "");
 }

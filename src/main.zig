@@ -58,6 +58,7 @@ test {
     _ = @import("platform/windows/editor/document_grant.zig");
     _ = @import("platform/windows/editor/save_controller.zig");
     _ = @import("platform/windows/editor/file_host.zig");
+    _ = @import("platform/windows/editor/directory_watch.zig");
     _ = @import("platform/windows/editor/backup_store.zig");
     _ = scm_surface;
     _ = agent_surface;

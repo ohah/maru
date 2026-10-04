@@ -40,9 +40,6 @@ pub const max_paths = 4096;
 pub const max_text_total = 1024 * 1024;
 /// 페이지 끌기 그림 PNG 상한 — 넘으면 그림 없이 보낸다(maru 가 글 조각 그림을 만든다).
 pub const max_out_png = 4 * 1024 * 1024;
-/// 이미지 끌기의 파일 내용 상한(W6d③) — 넘으면 파일 없이(주소만) 보낸다. 끌기 시작 때 미리 받는다: 놓는 때는 끌기가 끝나 drag data 가
-/// 없을 수 있다(Finder 는 놓은 뒤 파일을 청한다).
-pub const max_out_file = 32 * 1024 * 1024;
 
 /// 페이지가 시작한 끌기(W6d②). drag data 의 참조 하나를 쥔다.
 const Source = struct {
@@ -106,6 +103,7 @@ pub fn handle(msg: message.Message) bool {
         .drag_source_end => |value| if (source) |held| if (held.drag == value.drag and held.browser == value.browser) {
             endSource(value.point, value.operation);
         },
+        .drag_file_request => |value| sendHeldFile(value),
         else => return false,
     }
     return true;
@@ -246,8 +244,8 @@ pub fn onStartDragging(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser
         sendString(entry.id, drag, .url, d.get_link_url.?(d));
         sendString(entry.id, drag, .url_title, d.get_link_title.?(d));
     }
-    sendFile(entry.id, drag, d);
     var out: message.DragOut = .{ .browser = entry.id, .drag = drag, .allowed = @as(u32, @intCast(allowed)) & message.drag_operation_mask, .point = .{ .x = x, .y = y } };
+    out.file_size = holdFile(entry.id, drag, d);
     if (sendImage(entry, drag, d)) |size| {
         out.image_width = size.w;
         out.image_height = size.h;
@@ -308,32 +306,57 @@ fn sendString(browser: message.BrowserId, drag: u32, kind: message.DragOutDataKi
     }
 }
 
-/// 이미지 끌기의 파일 이름과 내용(W6d③). 내용을 `max_out_file` 안에서 다 받았을 때만 이름부터 보낸다 — 이름 정리·이미지 확장자
-/// 판정은 maru 가 한다(`web_osr_drag_file`).
-fn sendFile(browser: message.BrowserId, drag: u32, data: *c.cef_drag_data_t) void {
+/// 이미지 끌기의 파일(W6d③). 내용은 끌기 시작 때 이 프로세스 안에 받아 두고(CEF 가 쥔 바이트를 옮겨 적을 뿐이라 곧바로 끝난다 —
+/// 착수 전 실측 6 MiB 도), 이름만 보낸다. maru 가 Finder 의 청에 따라 `drag_file_request` 를 보내면 그때 조각으로 보낸다 — 끌기마다
+/// 미리 보내면 큰 이미지에서 maru 가 받는 동안 이 스레드(모든 Chromium 탭)가 멈췄다(W6d③ 적대 검증 1 차). 받아 둔 것은 다음
+/// 끌기·그 브라우저 닫힘까지 쥔다(Finder 는 끌기가 끝난 뒤 파일을 청한다). 보낸 크기는 `drag_out.file_size`.
+fn holdFile(browser: message.BrowserId, drag: u32, data: *c.cef_drag_data_t) u32 {
+    dropHeldFile();
     const size = data.get_file_contents.?(data, null);
-    if (size == 0 or size > max_out_file) return;
-    file_buf.clearRetainingCapacity();
-    file_buf.ensureTotalCapacity(allocator, size) catch return;
+    if (size == 0 or size > message.max_drag_file_bytes) return 0;
+    file_buf.ensureTotalCapacity(allocator, size) catch return 0;
     file_overflow = false;
+    defer if (held_file == null) file_buf.clearAndFree(allocator); // 실패 경로에서도 놓는다(적대 검증 1 차)
     const writer = browsers.state.api.stream_writer_create_for_handler(&file_handler);
-    if (writer == null) return;
+    if (writer == null) return 0;
     // 넘긴 writer 의 참조는 CEF 로 옮겨 간다(`object.release_callback_args`) — 풀지 않는다.
     const written = data.get_file_contents.?(data, writer);
-    if (file_overflow or written != size or file_buf.items.len != size) return;
+    if (file_overflow or written != size or file_buf.items.len != size) return 0;
     var name_buf: [protocol.wire.max_text_bytes]u8 = undefined;
     const name_value = data.get_file_name.?(data);
     defer if (name_value != null) browsers.state.api.string_userfree_utf16_free(name_value);
     const name = library.readDialogString(browsers.state.api, name_value, &name_buf);
-    if (name.len == 0) return;
-    browsers.state.writer.send(.{ .drag_out_data = .{ .browser = browser, .drag = drag, .kind = .file_name, .bytes = name } }) catch return;
-    var rest = file_buf.items;
+    if (name.len == 0) return 0;
+    browsers.state.writer.send(.{ .drag_out_data = .{ .browser = browser, .drag = drag, .kind = .file_name, .bytes = name } }) catch return 0;
+    const bytes = file_buf.toOwnedSlice(allocator) catch return 0;
+    held_file = .{ .browser = browser, .drag = drag, .bytes = bytes };
+    return @intCast(size);
+}
+
+/// 받아 둔 파일(W6d③ — 하나).
+var held_file: ?struct { browser: message.BrowserId, drag: u32, bytes: []u8 } = null;
+
+fn dropHeldFile() void {
+    const held = held_file orelse return;
+    held_file = null;
+    allocator.free(held.bytes);
+}
+
+/// maru 가 그 번호의 파일 내용을 청했다 — 조각으로 보내고 끝을 알린다. 없으면(다음 끌기·브라우저 닫힘) 실패로.
+fn sendHeldFile(value: message.DragFileRequest) void {
+    const held = held_file orelse return fileReady(value, 0, false);
+    if (held.drag != value.drag or held.browser != value.browser) return fileReady(value, 0, false);
+    var rest = held.bytes;
     while (rest.len != 0) {
         const n = @min(rest.len, protocol.wire.max_ime_text_bytes);
-        browsers.state.writer.send(.{ .drag_out_data = .{ .browser = browser, .drag = drag, .kind = .file_contents, .bytes = rest[0..n] } }) catch return;
+        browsers.state.writer.send(.{ .drag_out_data = .{ .browser = held.browser, .drag = held.drag, .kind = .file_contents, .bytes = rest[0..n] } }) catch return;
         rest = rest[n..];
     }
-    file_buf.clearAndFree(allocator);
+    fileReady(value, @intCast(held.bytes.len), true);
+}
+
+fn fileReady(value: message.DragFileRequest, size: u32, ok: bool) void {
+    browsers.state.writer.send(.{ .drag_file_ready = .{ .browser = value.browser, .drag = value.drag, .size = size, .ok = ok } }) catch {};
 }
 
 /// 파일 내용을 받는 곳(W6d③ — `cef_stream_writer_create_for_handler`). 정적 객체라 참조 수는 세지 않는다.
@@ -357,7 +380,7 @@ fn fileWrite(_: [*c]c.cef_write_handler_t, ptr: ?*const anyopaque, size: usize, 
         return 0;
     };
     if (ptr == null or total == 0) return 0;
-    if (file_buf.items.len + total > max_out_file) {
+    if (file_buf.items.len + total > message.max_drag_file_bytes) {
         file_overflow = true;
         return 0;
     }
@@ -421,6 +444,7 @@ pub fn reset(entry: *registry_mod.Entry, free: bool) void {
         source = null;
         object.release(@as([*c]c.cef_drag_data_t, held.data));
     };
+    if (free) if (held_file) |held| if (held.browser == entry.id) dropHeldFile();
     const p = pendingOf(entry) orelse return;
     p.clear();
     p.entered = false;

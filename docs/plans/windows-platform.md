@@ -273,3 +273,12 @@ Keep/Cancel은 저장 기준을 바꾸지 않는다. 비교는 소유된 두 본
 실제 앱의 비교·복귀·reload·keep 후 저장 거절·discard를 확인했다. 저장 시점의
 Compare/Overwrite/Reload와 비교 scrollbar drag·크기 변경 UX, 비동기 저장·초기 open,
 물리 입력·IME와 나머지 Windows 지원은 계속 남아 있다.
+
+§2m.168: 저장 시점의 Compare/Overwrite/Reload/Cancel과 성공 후 원래 닫기 대상을 이어가는
+경로를 연결했다. 명시적 overwrite의 관측 native raw hash와 이전 document CAS를 분리해
+실패 전에 저장 기준을 바꾸지 않는다. 최초 native identity·경로·metadata 계약은 유지한다.
+선택 중에는 입력을 잠그고 Esc로 취소하며 늦은 worker 결과를 정산한다. 공통 요청 16개·host
+39개 Debug/ReleaseFast와 overwrite/취소 각 다섯 runtime mutation, native 회귀 66/14/15개가
+통과했다. 일반 앱의 overwrite/compare/reload·닫기와 실제 writer를 유지한 대기/Esc 취소를
+확인했다. native 쓰기·commit 및 초기 open의 UI I/O, 다중 파일 닫기 전체 GUI 검증과 나머지
+Windows 계획은 계속 진행 대상이다.

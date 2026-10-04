@@ -19,8 +19,8 @@ pub const Coordinator = struct {
         notice: ?anyerror = null,
     };
     pub const Event = struct { document: Lease, problem: anyerror };
-    pub const Choice = enum { compare, reload };
-    pub const Request = struct { document: Lease, choice: Choice, retry_at: i128 = 0 };
+    pub const Choice = enum { compare, reload, overwrite };
+    pub const Request = struct { document: Lease, choice: Choice, retry_at: i128 = 0, cancelled: bool = false };
     pub const Completion = struct {
         request: Request,
         result: reading.Result,
@@ -65,7 +65,7 @@ pub const Coordinator = struct {
     /// authority and carries no cached body. One reader still bounds all I/O.
     pub fn requestChoice(self: *Coordinator, target: Lease, choice: Choice) !void {
         try self.check();
-        if (self.requested != null or self.active_choice != null or self.completed != null) return error.ReadBusy;
+        if (self.requested != null or (self.active_choice != null and !self.active_choice.?.cancelled) or self.completed != null) return error.ReadBusy;
         self.requested = .{ .document = target, .choice = choice };
     }
 
@@ -76,6 +76,30 @@ pub const Coordinator = struct {
         const result = self.completed;
         self.completed = null;
         return result;
+    }
+
+    pub fn hasChoice(self: *Coordinator, target: Lease) !bool {
+        try self.check();
+        if (self.requested) |request| if (same(request.document, target)) return true;
+        if (self.active_choice) |request| if (!request.cancelled and same(request.document, target)) return true;
+        if (self.completed) |completion| if (same(completion.request.document, target)) return true;
+        return false;
+    }
+
+    /// Cancellation revokes the action, never the worker's handle ownership.
+    /// Its late result is drained before another read uses the single slot.
+    pub fn cancelChoice(self: *Coordinator, target: Lease) !void {
+        try self.check();
+        if (self.requested) |request| if (same(request.document, target)) {
+            self.requested = null;
+        };
+        if (self.active_choice) |*request| if (same(request.document, target)) {
+            request.cancelled = true;
+        };
+        if (self.completed) |*completion| if (same(completion.request.document, target)) {
+            completion.deinit();
+            self.completed = null;
+        };
     }
 
     /// Admission happens once per new view. A failed watch stays explicitly
@@ -144,6 +168,7 @@ pub const Coordinator = struct {
             self.active = null;
             if (self.active_choice) |request| {
                 self.active_choice = null;
+                if (request.cancelled) break :result_block;
                 if (viewIndex(views, target) == null) break :result_block;
                 if (!(book.acceptsRead(&self.reader, result, target) catch false)) {
                     var retry = request;

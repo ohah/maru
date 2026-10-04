@@ -62,10 +62,22 @@ pub const Controller = struct {
     pub fn prepare(self: *Controller, io: std.Io, source: editor.document_registry.Lease, limit: usize) !void {
         try self.prepareWith(io, source, limit, Native);
     }
+
+    pub fn prepareOverwrite(self: *Controller, io: std.Io, source: editor.document_registry.Lease, limit: usize, observed_hash: u64) !void {
+        try self.prepareImage(io, source, limit, observed_hash, Native);
+    }
+
     fn prepareWith(self: *Controller, io: std.Io, source: editor.document_registry.Lease, limit: usize, comptime Driver: type) !void {
+        return self.prepareImage(io, source, limit, null, Driver);
+    }
+
+    fn prepareImage(self: *Controller, io: std.Io, source: editor.document_registry.Lease, limit: usize, observed_hash: ?u64, comptime Driver: type) !void {
         if (self.closed) return error.ControllerClosed;
         if (self.pending != null) return error.SaveBusy;
-        var request = try editor.save_request.Request.begin(self.grant.allocator, self.grant.registry, source, limit);
+        var request = if (observed_hash) |hash|
+            try editor.save_request.Request.beginOverwrite(self.grant.allocator, self.grant.registry, source, limit, hash)
+        else
+            try editor.save_request.Request.begin(self.grant.allocator, self.grant.registry, source, limit);
         var transferred = false;
         defer if (!transferred) request.deinit();
         const attempt = try self.grant.beginExperimental(io, &request, limit);

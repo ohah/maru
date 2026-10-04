@@ -639,7 +639,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  7,  0, // v7, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  8,  0, // v8, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -1013,6 +1013,10 @@ test "drag-out messages round trip, flow the right way, and refuse drag 0, unuse
     const piece = (try roundTrip(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .image_png, .bytes = "\x89PNG\r\n\x1a\n\x00" } })).drag_out_data;
     try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\n\x00", piece.bytes); // 그림은 바이트 그대로(제어·NUL 포함)
     try std.testing.expectEqualStrings("첫\n둘", (try roundTrip(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .text, .bytes = "첫\n둘" } })).drag_out_data.bytes);
+    // W6d③: 파일 이름은 대화상자 글 규칙(제어 문자 거절), 파일 내용은 바이트 그대로.
+    try std.testing.expectEqualStrings("고양이.png", (try roundTrip(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_name, .bytes = "고양이.png" } })).drag_out_data.bytes);
+    try std.testing.expectEqualStrings("\x00\x01\xff", (try roundTrip(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_contents, .bytes = "\x00\x01\xff" } })).drag_out_data.bytes);
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .drag_out_data = .{ .browser = 7, .drag = 3, .kind = .file_name, .bytes = "a\x1b.png" } }, &buf));
     const end: message_mod.DragSourceEnd = .{ .browser = 7, .drag = 3, .point = .{ .x = -1, .y = 900 }, .operation = 16 };
     try std.testing.expectEqual(end, (try roundTrip(.{ .drag_source_end = end })).drag_source_end);
     const enter: message_mod.DragTarget = .{ .browser = 7, .kind = .enter, .point = .{ .x = 1, .y = 2 }, .allowed = 1, .source = 3 };
@@ -1225,6 +1229,8 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .drag_source_end = .{ .browser = 3, .drag = 4, .point = .{ .x = -5, .y = 6 }, .operation = 16 } },
         .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .text, .bytes = "끌기\n" } },
         .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .image_png, .bytes = "\x89PNG\x00\x01" } },
+        .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .file_name, .bytes = "고양이.png" } },
+        .{ .drag_out_data = .{ .browser = 3, .drag = 4, .kind = .file_contents, .bytes = "\x00\x89PNG\r\n" } },
         .{ .drag_out = .{ .browser = 3, .drag = 4, .allowed = 17, .point = .{ .x = 5, .y = 6 }, .hotspot = .{ .x = 2, .y = 3 }, .image_width = 10, .image_height = 8 } },
     };
     var encoded: [256]u8 = undefined;

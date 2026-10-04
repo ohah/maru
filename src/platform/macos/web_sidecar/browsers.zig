@@ -58,6 +58,7 @@ pub fn init(api: *const library.Api, writer: *events.Writer) void {
     object.staticRefCounted(&ring_retry_task.base);
     ring_retry_task.execute = &retryRings;
     context_menus.init();
+    drag.init();
 }
 
 pub fn handler() dispatch.Handler {

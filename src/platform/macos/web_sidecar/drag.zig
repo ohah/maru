@@ -40,6 +40,9 @@ pub const max_paths = 4096;
 pub const max_text_total = 1024 * 1024;
 /// 페이지 끌기 그림 PNG 상한 — 넘으면 그림 없이 보낸다(maru 가 글 조각 그림을 만든다).
 pub const max_out_png = 4 * 1024 * 1024;
+/// 이미지 끌기의 파일 내용 상한(W6d③) — 넘으면 파일 없이(주소만) 보낸다. 끌기 시작 때 미리 받는다: 놓는 때는 끌기가 끝나 drag data 가
+/// 없을 수 있다(Finder 는 놓은 뒤 파일을 청한다).
+pub const max_out_file = 32 * 1024 * 1024;
 
 /// 페이지가 시작한 끌기(W6d②). drag data 의 참조 하나를 쥔다.
 const Source = struct {
@@ -243,6 +246,7 @@ pub fn onStartDragging(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser
         sendString(entry.id, drag, .url, d.get_link_url.?(d));
         sendString(entry.id, drag, .url_title, d.get_link_title.?(d));
     }
+    sendFile(entry.id, drag, d);
     var out: message.DragOut = .{ .browser = entry.id, .drag = drag, .allowed = @as(u32, @intCast(allowed)) & message.drag_operation_mask, .point = .{ .x = x, .y = y } };
     if (sendImage(entry, drag, d)) |size| {
         out.image_width = size.w;
@@ -302,6 +306,83 @@ fn sendString(browser: message.BrowserId, drag: u32, kind: message.DragOutDataKi
         }
         rest = rest[piece.len..];
     }
+}
+
+/// 이미지 끌기의 파일 이름과 내용(W6d③). 내용을 `max_out_file` 안에서 다 받았을 때만 이름부터 보낸다 — 이름 정리·이미지 확장자
+/// 판정은 maru 가 한다(`web_osr_drag_file`).
+fn sendFile(browser: message.BrowserId, drag: u32, data: *c.cef_drag_data_t) void {
+    const size = data.get_file_contents.?(data, null);
+    if (size == 0 or size > max_out_file) return;
+    file_buf.clearRetainingCapacity();
+    file_buf.ensureTotalCapacity(allocator, size) catch return;
+    file_overflow = false;
+    const writer = browsers.state.api.stream_writer_create_for_handler(&file_handler);
+    if (writer == null) return;
+    // 넘긴 writer 의 참조는 CEF 로 옮겨 간다(`object.release_callback_args`) — 풀지 않는다.
+    const written = data.get_file_contents.?(data, writer);
+    if (file_overflow or written != size or file_buf.items.len != size) return;
+    var name_buf: [protocol.wire.max_text_bytes]u8 = undefined;
+    const name_value = data.get_file_name.?(data);
+    defer if (name_value != null) browsers.state.api.string_userfree_utf16_free(name_value);
+    const name = library.readDialogString(browsers.state.api, name_value, &name_buf);
+    if (name.len == 0) return;
+    browsers.state.writer.send(.{ .drag_out_data = .{ .browser = browser, .drag = drag, .kind = .file_name, .bytes = name } }) catch return;
+    var rest = file_buf.items;
+    while (rest.len != 0) {
+        const n = @min(rest.len, protocol.wire.max_ime_text_bytes);
+        browsers.state.writer.send(.{ .drag_out_data = .{ .browser = browser, .drag = drag, .kind = .file_contents, .bytes = rest[0..n] } }) catch return;
+        rest = rest[n..];
+    }
+    file_buf.clearAndFree(allocator);
+}
+
+/// 파일 내용을 받는 곳(W6d③ — `cef_stream_writer_create_for_handler`). 정적 객체라 참조 수는 세지 않는다.
+var file_handler: c.cef_write_handler_t = undefined;
+var file_buf: std.ArrayList(u8) = .empty;
+var file_overflow = false;
+
+pub fn init() void {
+    file_handler = object.zeroed(c.cef_write_handler_t);
+    object.staticRefCounted(&file_handler.base);
+    file_handler.write = &fileWrite;
+    file_handler.seek = &fileSeek;
+    file_handler.tell = &fileTell;
+    file_handler.flush = &fileFlush;
+    file_handler.may_block = &fileMayBlock;
+}
+
+fn fileWrite(_: [*c]c.cef_write_handler_t, ptr: ?*const anyopaque, size: usize, n: usize) callconv(.c) usize {
+    const total = std.math.mul(usize, size, n) catch {
+        file_overflow = true;
+        return 0;
+    };
+    if (ptr == null or total == 0) return 0;
+    if (file_buf.items.len + total > max_out_file) {
+        file_overflow = true;
+        return 0;
+    }
+    const bytes: [*]const u8 = @ptrCast(ptr.?);
+    file_buf.appendSlice(allocator, bytes[0..total]) catch {
+        file_overflow = true;
+        return 0;
+    };
+    return n;
+}
+
+fn fileSeek(_: [*c]c.cef_write_handler_t, _: i64, _: c_int) callconv(.c) c_int {
+    return -1;
+}
+
+fn fileTell(_: [*c]c.cef_write_handler_t) callconv(.c) i64 {
+    return @intCast(file_buf.items.len);
+}
+
+fn fileFlush(_: [*c]c.cef_write_handler_t) callconv(.c) c_int {
+    return 0;
+}
+
+fn fileMayBlock(_: [*c]c.cef_write_handler_t) callconv(.c) c_int {
+    return 0;
 }
 
 /// 끌기 그림을 그 브라우저의 배율로 PNG 로 만들어 조각으로 보낸다. 보냈으면 그림 크기(DIP).

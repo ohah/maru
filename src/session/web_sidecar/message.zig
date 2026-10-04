@@ -616,13 +616,16 @@ pub const DragTarget = struct {
     allowed: u32 = 0,
 };
 
-/// 페이지가 시작한 끌기의 조각 종류(W6d②). 그림은 PNG 바이트(조각을 이어 붙인다).
+/// 페이지가 시작한 끌기의 조각 종류(W6d②). 그림은 PNG 바이트(조각을 이어 붙인다). 이미지 끌기면 파일 이름과 파일 내용(W6d③ —
+/// Finder 에 놓으면 그 파일을 만든다. 이름은 Chromium 이 정한 것, 내용은 바이트 그대로 이어 붙인다).
 pub const DragOutDataKind = enum(u8) {
     text = 0,
     html = 1,
     url = 2,
     url_title = 3,
     image_png = 4,
+    file_name = 5,
+    file_contents = 6,
 };
 
 pub const DragOutData = struct {

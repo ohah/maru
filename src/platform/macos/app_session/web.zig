@@ -1304,7 +1304,10 @@ pub fn osrDragOutTake(self: *AppSession) ?OsrDragOutInfo {
     return null;
 }
 
-pub const OsrDragOutPart = enum(u32) { text = 0, html = 1, url = 2, url_title = 3, image_png = 4 };
+pub const OsrDragOutPart = enum(u32) { text = 0, html = 1, url = 2, url_title = 3, image_png = 4, file_name = 5, file_contents = 6 };
+
+/// 끌어낸 이미지로 만들 파일의 안전한 이름(W6d③ — `web_osr_drag_file`). 이미지 확장자가 아니면 빈 것 — 그러면 파일 내용도 주지 않는다.
+var safe_name_buf: [maru.session.web_osr_drag_file.max_name_bytes]u8 = undefined;
 
 /// 가져간 끌기의 조각 하나(바이트 그대로). 그 끌기가 아니면 빈 것.
 pub fn osrDragOutPart(self: *AppSession, drag: u32, part: OsrDragOutPart) []const u8 {
@@ -1317,6 +1320,8 @@ pub fn osrDragOutPart(self: *AppSession, drag: u32, part: OsrDragOutPart) []cons
         .url => d.url.items,
         .url_title => d.url_title.items,
         .image_png => d.png.items,
+        .file_name => maru.session.web_osr_drag_file.safeFileName(d.file_name.items, &safe_name_buf) orelse "",
+        .file_contents => if (maru.session.web_osr_drag_file.safeFileName(d.file_name.items, &safe_name_buf) != null) d.file_contents.items else "",
     };
 }
 

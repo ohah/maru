@@ -31,12 +31,20 @@
 //!   drag-out-answer-gates 답하기 전에는 새 끌기가 시작되지 않는다(Chromium 이 앞 끌기를 붙든다 — maru 는 아무 창도 가져가지 않은 끌기를
 //!                        1 초 뒤 취소로 답한다), 답하면(none) 다음 끌기가 되고, 앞 번호의 늦은 끝은 버린다
 //!   drag-out-closed      끌기 중 그 브라우저가 닫혀도 host 가 살고 다음 끌기가 된다
+//!
+//! W6d③ 이미지 파일(Finder 에 놓으면 만들 파일):
+//!   drag-out-image-file  PNG 이미지 끌기 — 파일 이름(주소의 이름)과 내용(서버가 준 바이트 그대로)이 오고 주소도 온다
+//!   drag-out-image-name  `Content-Disposition: filename="../../evil.command"` 이미지 — Chromium 이 `_.._evil.png` 로 바꿔 준다(이때는
+//!                        링크로 보지 않아 주소가 없다)
+//!   drag-out-image-big   6 MiB 이미지 — 내용이 조각으로 다 온다
+//!   drag-out-image-cap   40 MiB 이미지(상한 32 MiB 밖) — 파일은 오지 않고 주소만 간다
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 const os = @import("os.zig");
 const Host = @import("host.zig").Host;
 const browsers_check = @import("browsers_check.zig");
+const http = @import("http.zig");
 
 pub const Report = *const fn (ok: bool, name: []const u8, detail: []const u8) void;
 
@@ -68,6 +76,8 @@ const Watch = struct {
     out_url: std.ArrayList(u8) = .empty,
     out_title: std.ArrayList(u8) = .empty,
     out_png: std.ArrayList(u8) = .empty,
+    out_file_name: std.ArrayList(u8) = .empty,
+    out_file: std.ArrayList(u8) = .empty,
     out_piece_drag: u32 = 0,
 
     fn title(self: *const Watch) []const u8 {
@@ -101,12 +111,16 @@ const Watch = struct {
                     self.out_url.clearRetainingCapacity();
                     self.out_title.clearRetainingCapacity();
                     self.out_png.clearRetainingCapacity();
+                    self.out_file_name.clearRetainingCapacity();
+                    self.out_file.clearRetainingCapacity();
                 }
                 const into = switch (v.kind) {
                     .text => &self.out_text,
                     .url => &self.out_url,
                     .url_title => &self.out_title,
                     .image_png => &self.out_png,
+                    .file_name => &self.out_file_name,
+                    .file_contents => &self.out_file,
                     .html => return,
                 };
                 into.appendSlice(std.heap.c_allocator, v.bytes) catch {};
@@ -380,6 +394,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, r
     report(killed >= 1 and gone and again, "drag-renderer-gone", std.fmt.bufPrint(&detail, "죽인 렌더러 {d} · renderer_gone {} · 새 페이지에 다시 놓기 {}", .{ killed, gone, again }) catch "");
 
     try dragOutChecks(report, &w, &host, port);
+    try imageFileChecks(report, &w, &host, port);
 
     // 없는 브라우저·닫힌 브라우저에 남은 조각.
     try host.send(.{ .drag_data = .{ .browser = 999, .kind = .path, .bytes = file_a } });
@@ -539,6 +554,38 @@ fn dragOutChecks(report: Report, w: *Watch, host: *Host, port: u16) !void {
     if (w.out) |o| try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = o.drag, .point = .{ .x = 0, .y = 0 }, .operation = 0 } });
     w.pump(300);
     report(closing_drag != 0 and after_close, "drag-out-closed", std.fmt.bufPrint(&detail, "닫힌 탭의 끌기 {d} · 그 뒤 끌기 {}", .{ closing_drag, after_close }) catch "");
+}
+
+fn imageFileChecks(report: Report, w: *Watch, host: *Host, port: u16) !void {
+    var detail: [600]u8 = undefined;
+    const Case = struct { y: i32, name: []const u8 };
+    const cases = [_]Case{
+        .{ .y = 44, .name = "drag-out-image-file" },
+        .{ .y = 124, .name = "drag-out-image-name" },
+        .{ .y = 204, .name = "drag-out-image-big" },
+        .{ .y = 284, .name = "drag-out-image-cap" },
+    };
+    for (cases) |case| {
+        try w.load(port);
+        // 큰 이미지는 받는 데 시간이 걸린다 — 그림이 뜰 때까지 조금 더.
+        w.pump(800);
+        const before = w.outs;
+        try pressDrag(w, .{ .x = 544, .y = case.y }, .{ .x = 544, .y = case.y + 120 }, 0);
+        const started = untilOut(w, before, 6_000);
+        const name = w.out_file_name.items;
+        const contents = w.out_file.items;
+        const url_ok = std.mem.indexOf(u8, w.out_url.items, "/img/") != null;
+        // `Content-Disposition` 으로 이름을 준 이미지는 Chromium 이 링크로 보지 않는다(주소 없음 — 실측). 다른 셋은 주소도 간다.
+        const ok = started and (url_ok or case.y == 124) and switch (case.y) {
+            44 => std.mem.eql(u8, name, "cat.png") and std.mem.eql(u8, contents, http.red_png),
+            124 => std.mem.eql(u8, name, "_.._evil.png") and std.mem.eql(u8, contents, http.red_png),
+            204 => std.mem.eql(u8, name, "six.svg") and contents.len == 6 * 1024 * 1024 and std.mem.startsWith(u8, contents, "<svg"),
+            else => name.len == 0 and contents.len == 0,
+        };
+        if (w.out) |o| try host.send(.{ .drag_source_end = .{ .browser = browser_id, .drag = o.drag, .point = .{ .x = 0, .y = 0 }, .operation = 0 } });
+        w.pump(200);
+        report(ok, case.name, std.fmt.bufPrint(&detail, "끌기 {} · 주소 {} 「{s}」 · 파일 「{s}」 {d} 바이트", .{ started, url_ok, w.out_url.items, name, contents.len }) catch "");
+    }
 }
 
 /// 다른 브라우저의 마지막 제목(Watch 는 판정 브라우저 것만 든다 — 그동안 온 메시지에서 찾는다).

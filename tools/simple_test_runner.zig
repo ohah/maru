@@ -102,10 +102,19 @@ fn isolateSessionHostRoot() error{IsolationFailed}!void {
 }
 
 fn optionValue(args: std.process.Args, prefix: []const u8) ?usize {
-    // windows/wasi는 인자 이터레이션 모델이 달라 이 옵션을 읽지 않는다. `comptime if (...) return null;`로 쓰면
-    // 조건이 참인 타깃(=windows)에서 "comptime에 return 불가"로 **컴파일이 깨진다** — macOS에선 조건이 거짓이라
-    // 본문이 평가되지 않아 드러나지 않던 Windows 전용 결함이었다. 조건이 comptime-known이라 평범한 if로도 폴딩된다.
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return null;
+    // Windows supplies UTF-16 arguments. Skipping them silently disabled both
+    // compiled/passed count guards; use the native allocating iterator instead.
+    if (builtin.os.tag == .wasi) return null;
+    if (builtin.os.tag == .windows) {
+        var iterator = args.iterateAllocator(std.heap.page_allocator) catch std.process.exit(1);
+        defer iterator.deinit();
+        _ = iterator.next();
+        while (iterator.next()) |arg| {
+            if (!std.mem.startsWith(u8, arg, prefix)) continue;
+            return std.fmt.parseInt(usize, arg[prefix.len..], 10) catch std.process.exit(1);
+        }
+        return null;
+    }
     var iterator = std.process.Args.Iterator.init(args);
     _ = iterator.next();
     while (iterator.next()) |arg_z| {

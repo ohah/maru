@@ -57,6 +57,7 @@ test {
     _ = @import("platform/windows/editor/transaction.zig");
     _ = @import("platform/windows/editor/document_grant.zig");
     _ = @import("platform/windows/editor/save_controller.zig");
+    _ = @import("platform/windows/editor/backup_store.zig");
     _ = scm_surface;
     _ = agent_surface;
 }
@@ -16822,6 +16823,47 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
     }
     try stdout.writeAll("editor_granted_save_smoke_ok=true window_chars=1 native_commit=true disk_reopen=true asserted_frames=3 persisted_revision=19 dirty=false\n");
     try stdout.print("editor_save_controller_smoke_ok=true decision=committed revision={d} sequence={d} status=idle\n", .{ receipt.revision, receipt.sequence });
+    // Recovery storage is isolated from user backups. An independent native
+    // reader loads its disk record, then both live views paint recovery and undo.
+    const backup_mod = @import("platform/windows/editor/backup_store.zig");
+    var backups = try backup_mod.Store.open(a, fixture_root, "backups", 4 << 20);
+    defer fixture_root.deleteDir(io, "backups") catch unreachable;
+    defer backups.deinit(io);
+    // Drop the known fixture record before closing its root; no tree deletion.
+    const backup_doc: editor.backup.Doc = .{ .path = .{ .path = saving.grant.path, .disk_hash = state.opened.?.disk_hash } };
+    defer backups.drop(io, backup_doc) catch unreachable;
+    // Korean is fixture content for UTF-8 recovery/paint, not a UI message.
+    const recovery_text = "recovered 한글\r\n";
+    try backups.write(io, backup_doc, recovery_text);
+    var backup_reader = try backup_mod.Store.open(a, fixture_root, "backups", 4 << 20);
+    defer backup_reader.deinit(io);
+    var restored = (try backup_reader.read(io, backup_doc)) orelse return error.EditorBackupRecordMissing;
+    defer restored.deinit();
+    const participants = [_]editor.edit_commands.Participant{
+        .{ .view = &views[0].navigation, .id = views[0].document.id },
+        .{ .view = &views[1].navigation, .id = views[1].document.id },
+    };
+    try backup_mod.restorePath(a, state, &restored, &participants, 0, 4 << 20);
+    if (!state.opened.?.isDirty() or !std.mem.eql(u8, state.opened.?.file.content, recovery_text) or state.opened.?.disk_hash != backup_doc.path.disk_hash) return error.EditorBackupRestoreMismatch;
+    for (&views) |*view| {
+        var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+        if (!std.mem.eql(u8, view.text, recovery_text) or built.cells.items.len == 0) return error.EditorBackupPaintMismatch;
+        try host.drawFrame(built.cells.items, 0xFF1E2430);
+    }
+    _ = try editor.edit_commands.run(a, state, &participants, 1, .undo, .{ .now_ms = 1 });
+    if (state.opened.?.isDirty() or !std.mem.eql(u8, state.opened.?.file.content, "X// base\r\n")) return error.EditorBackupUndoMismatch;
+    for (&views) |*view| {
+        var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+        if (!std.mem.eql(u8, view.text, "X// base\r\n") or built.cells.items.len == 0) return error.EditorBackupUndoPaintMismatch;
+        try host.drawFrame(built.cells.items, 0xFF1E2430);
+    }
+    const unchanged = try fixture_root.readFileAlloc(io, "typing-smoke.txt", a, .limited(4 << 20));
+    defer a.free(unchanged);
+    if (!std.mem.eql(u8, unchanged, disk)) return error.EditorBackupWroteOriginal;
+    try backups.drop(io, backup_doc);
+    try stdout.writeAll("editor_backup_smoke_ok=true disk_record=true restored_dirty=true restored_frames=2 undo_frames=2 undo_clean=true original_untouched=true\n");
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.

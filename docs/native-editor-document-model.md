@@ -1768,3 +1768,11 @@ Windows의 실험적 `save_controller.Controller`가 grant와 pending Request/At
 거절한다. native 결정과 문서 ack 거절을 별도 Receipt로 반환해 stale callback을 실제 rollback으로
 오인하지 않는다. L2의 captured-body dirty/sequence/lifetime 계약은 유지한다.
 실제 native 판정과 GUI/비동기/crash 미연결 범위는 [Windows 계약](windows-platform.md) §2m.151에 기록한다.
+
+Windows 미저장 백업은 동일한 L2 record/이름/본문·지문 정책을 사용하고, native Store가 파일 I/O만
+소유한다([Windows 계약](windows-platform.md) §2m.153). 기본 자리는 LOCALAPPDATA 아래 durable
+`maru/editor-backups`이며 macOS Application Support/cache로 폴백하지 않는다. protected DACL을
+생성 시 적용해 owner SID만 허용하고 broad/reparse/hard-linked 저장소를 거절한다. 로컬 path 복원은
+정상 편집 하나와 옛 disk_hash를 유지하므로 undo는 디스크로 돌아가고 외부 변경은 첫 native save
+CAS에서 막힌다. 두 실제 process crash와 실제 창 복원/undo를 검증했지만, 일반 debounce/종료 flush/
+복원 알림·purge·missing/untitled/remote 복원과 interrupted-stage 정리는 아직 host에 연결하지 않았다.

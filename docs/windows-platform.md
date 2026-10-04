@@ -11191,3 +11191,51 @@ Windows API 근거는 Microsoft의 [TerminateProcess](https://learn.microsoft.co
 프로세스 종료 검증이며, 전원 장애·OS crash·커밋 syscall 내부의 모든 실패 타이밍을
 증명하지 않는다. 미저장 본문 백업/재시작 복원, 저장 기능 capability, 일반 GUI 저장·닫기·
 외부 감시·물리 IME도 계속 남아 있다. 일반 파일은 읽기 전용이며 W8.17은 진행 중이다.
+
+### 2m.153 Windows 미저장 백업 저장소와 복원 경계 (2026-10-04)
+
+`platform/windows/editor/backup_store.zig`는 공통 `session.editor.backup`의 포맷·이름을 그대로
+사용한다. `user_paths.editorBackupPathFor`는 Windows에서 `%LOCALAPPDATA%/maru/editor-backups`,
+macOS에서 Application Support를 고른다. Windows 구분자는 기존 공통 normalizer로 정규화하고,
+LOCALAPPDATA가 없거나 상대 경로면 macOS/HOME/cache로 폴백하지 않는다. 환경 읽기와 실제
+기본 위치 연결은 host가 소유한다. 현재 앱 사용자 백업 위치를 열거나 변경하지 않는다.
+
+Store는 host가 고른 parent 아래 한 basename을 native handle-relative로 연다. 현재 process
+TokenUser SID를 owner와 유일한 FILE_ALL_ACCESS ACE로 넣은 protected DACL을 디렉터리·파일
+**생성 시점에** 공급한다. 기존 넓은 권한은 자동으로 고치지 않고 PrivatePermissions로 거절한다.
+읽기·쓰기·삭제 전에 owner/DACL과 root reparse tag를 다시 확인하며, record의 reparse/hard link도
+거절한다. root의 rename/delete 방지는 sharing fence다. parent DELETE 접근까지 요청하면 내부
+rename target open이 STATUS_SHARING_VIOLATION으로 막혔으므로 그 접근은 요청하지 않는다.
+
+백업 본문만 별도 private stage에 write-all/정확한 EOF/flush하고, 같은 pinned root의 counted name에
+native Rename으로 원자 교체한다. 원본 문서 파일은 건드리지 않는다. 실패는 stage의 열린 객체에
+disposition을 설정해 정리하며, 정리 실패도 BackupCleanupFailed로 반환한다. 읽기는 bounded
+handle read 후 공통 parser와 정확한 문서 신원·UTF-8·본문 상한을 검사한다. 손상/다른 신원 레코드는
+삭제하지 않는다. path·untitled·remote 레코드를 저장하며, 현재 restorePath는 열린 로컬 path 문서를
+한 normal edit로 복원하고 모든 live view의 선택을 함께 이동한다. readonly·다른 경로·중복 view를
+거절하고 OOM 때 본문/기록/지문/선택을 유지한다. 백업의 옛 disk_hash를 복원한 뒤 첫 save CAS가
+실제 외부 디스크 변경을 거절한다. undo는 현재 디스크 내용으로 돌아간다.
+
+`test-win32-editor-backup`은 aggregation 2개·native storage/recovery 14개·양 OS 경로 정책 1개,
+합계 17개다. write/read/restore 할당 실패 prefix, 실제 부분 쓰기, DACL 변경, 실제 hard link와 열린
+root의 실제 junction 변경을 검사했다. 적대적 검증 5회는 root privacy 검사 제거·record 신원 검사
+제거·UTF-8 검사 제거·옛 fingerprint 복원 누락·실패 stage 정리 누락을 각각 컴파일 후 runtime에서
+검출했다. 소스는 바이트 단위로 원복했다.
+
+`test-win32-save-crash`에 backup worker 2개를 더했다(기존 save worker 12개와 별도다). dirty 본문을
+실제 백업에 쓴 뒤 TerminateProcess로 죽이고 부모가 새 Store/Registry/grant로 복원한다. 원본이
+변하지 않았으면 explicit native save 뒤 clean/backup drop, 바뀌었으면 SourceChanged/dirty 유지/
+backup 유지와 외부 바이트 보존을 확인한다. 실제 Windows 창 fixture는 기존 96 프레임에 두 view의
+복원 paint 2개와 undo paint 2개를 더해 총 100 프레임을 검증한다. fixture 직접 호출이며 물리 IME나
+일반 재시작 UI 판정은 아니다.
+
+검증 중 Windows simple test runner가 count 인자를 무시하던 결함도 고쳤다. UTF-16 allocating
+iterator로 expected compiled/passed count를 읽으며, 잘못된 개수 두 종류와 잘못된 숫자 형식을
+별도 실제 실행으로 거절했다. WASI 정책은 유지한다.
+
+API 근거는 Microsoft의 [security descriptors](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptors),
+[GetTokenInformation](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation),
+[FILE_RENAME_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)이다.
+일반 앱의 기본 백업 root 연결·debounce/종료 flush·복원 알림·purge·사라진 원본/untitled/remote 복원,
+stage 쓰기 도중 프로세스 종료의 잔여 파일 정리와 전원 장애 검증은 남아 있다. 일반 사용자 파일은
+읽기 전용이다. capability·GUI Ctrl+S/dirty-close/감시·비동기 I/O와 물리 IME도 계속 진행한다.

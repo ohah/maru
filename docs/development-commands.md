@@ -1039,3 +1039,12 @@ fixture도 Controller를 호출한다. 일반 GUI·비동기 I/O와 crash 복구
 앱에 설치하지 않으며 새 cache fixture의 알려진 파일/빈 디렉터리만 정리한다. power loss,
 미저장 편집 백업/복원이나 일반 GUI 저장 완료 판정은 아니다. [Windows 계약](windows-platform.md)
 §2m.152가 실제 검증 범위와 적대적 검증 결과를 소유한다.
+
+`zig build test-win32-editor-backup`은 private Windows 백업 root/파일의 owner-only DACL,
+원자 교체·할당 실패 정리·적대적 record·native junction/hard link·복원 fingerprint CAS와 undo,
+양 OS 기본 경로 정책의 17개 판정을 실행한다. `-Doptimize=ReleaseFast`도 지원한다.
+`test-win32-save-crash`는 기존 12개 save crash 외에 backup crash 2개를 추가로 검증한다.
+실제 창의 `win32-editor-document-smoke`는 disk record의 복원/undo paint 4개를 더해 100 프레임이다.
+모든 fixture는 생성한 disposable root를 사용한다. 일반 앱 백업/GUI 연결 잔여는
+[Windows 계약](windows-platform.md) §2m.153에 기록한다. Windows simple runner도 이제
+`--maru-expect-tests`/`--maru-expect-passed` 인자를 읽고 잘못된 숫자·개수를 거절한다.

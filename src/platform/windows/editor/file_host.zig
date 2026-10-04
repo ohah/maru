@@ -9,6 +9,7 @@ const saving = @import("save_controller.zig");
 const transactions = @import("transaction.zig");
 const identity = @import("identity.zig");
 const reading = @import("file_read_worker.zig");
+const watching = @import("directory_watch.zig");
 const w = std.os.windows;
 extern "kernel32" fn GetVolumeInformationByHandleW(w.HANDLE, ?[*]u16, u32, ?*u32, ?*u32, ?*u32, ?[*]u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
 extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
@@ -130,6 +131,18 @@ pub const Book = struct {
         // Frame-side work only copies the selected handle and counted name.
         // Path traversal, file reads and raw hashing happen on the worker.
         return reader.submit(grant.root, grant.relative_path, grant.identity, ticket, reading.max_bytes);
+    }
+
+    /// Called during document admission, never for each frame. An absolute
+    /// grant may start at the volume root, but a nonrecursive native watcher
+    /// must subscribe to the pinned file's actual parent directory.
+    pub fn subscribeWatch(self: *Book, io: std.Io, groups: *watching.Groups, view: editor.document_registry.Lease) !watching.Lease {
+        _ = try self.readTicket(view);
+        const grant = &self.controllers.items[try self.index(view)].grant;
+        var pinned = try maru.win32_relative_file.open(self.allocator, grant.root, grant.relative_path);
+        defer pinned.deinit(io);
+        if (!grant.identity.eql(try identity.Identity.capture(pinned.original.handle))) return error.IdentityChanged;
+        return groups.acquire(pinned.parent());
     }
 
     pub fn acceptsRead(self: *Book, reader: *const reading.Reader, result: reading.Result, view: editor.document_registry.Lease) !bool {
@@ -296,6 +309,77 @@ fn awaitRead(reader: *reading.Reader) !reading.Result {
         try io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.ReadDidNotComplete;
+}
+
+test "Windows editor host directory subscription pins the nested parent and routes a real external write" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    try f.tmp.dir.createDir(io, "nested", .default_dir);
+    var parent = try f.tmp.dir.openDir(io, "nested", .{});
+    defer parent.close(io);
+    try parent.writeFile(io, .{ .sub_path = "file.txt", .data = "base" });
+    const view = try f.book.open(io, f.tmp.dir, "nested/file.txt", 128);
+    f.views[0] = view;
+    var groups: watching.Groups = .{ .allocator = std.testing.allocator, .limit = 1 };
+    defer groups.deinit() catch unreachable;
+    const lease = try f.book.subscribeWatch(io, &groups, view);
+    const peer = try groups.acquire(parent);
+    try std.testing.expectEqual(@as(usize, 1), groups.entries.items.len);
+    try std.testing.expectError(error.TooManyDirectoryWatches, groups.acquire(f.tmp.dir));
+    try parent.writeFile(io, .{ .sub_path = "file.txt", .data = "external" });
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    var received = false;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (groups.poll(std.Io.Clock.awake.now(io).nanoseconds)) |notice| {
+            try std.testing.expect(notice.problem == null);
+            try std.testing.expect(try groups.receives(lease, notice.group));
+            try std.testing.expect(try groups.receives(peer, notice.group));
+            received = true;
+            break;
+        }
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(received);
+    try std.testing.expectEqualStrings("base", f.registry.get(view).?.opened.?.file.content);
+    try groups.release(lease);
+    try groups.release(peer);
+    var foreign: editor.document_registry.Registry = .{ .allocator = std.testing.allocator };
+    defer foreign.deinit() catch unreachable;
+    var wrong = view;
+    wrong.owner = &foreign;
+    try std.testing.expectError(error.StaleDocument, f.book.subscribeWatch(io, &groups, wrong));
+    const state = f.registry.get(view).?;
+    const path = state.path;
+    state.path = null;
+    const moved = f.book.subscribeWatch(io, &groups, view);
+    state.path = path;
+    if (moved) |unexpected| try groups.release(unexpected) else |_| {}
+    try std.testing.expectError(error.GrantPathChanged, moved);
+    const epoch = state.persistence.epoch;
+    state.persistence.epoch += 1;
+    const stale = f.book.subscribeWatch(io, &groups, view);
+    state.persistence.epoch = epoch;
+    // Close even an unexpectedly admitted subscription before asserting, so
+    // adversarial guard mutations cannot strand a pending native watcher.
+    if (stale) |unexpected| try groups.release(unexpected) else |_| {}
+    try std.testing.expectError(error.StaleGrant, stale);
+    // The preceding external write intentionally diverged from the save base.
+    // Restore it before preparing a save so this assertion isolates admission
+    // during a live transaction rather than failing at the unrelated CAS gate.
+    try parent.writeFile(io, .{ .sub_path = "file.txt", .data = "base" });
+    try f.book.controllers.items[0].prepare(io, view, 128);
+    const busy = f.book.subscribeWatch(io, &groups, view);
+    if (busy) |unexpected| try groups.release(unexpected) else |_| {}
+    _ = try f.book.controllers.items[0].abort(io);
+    try std.testing.expectError(error.SaveBusy, busy);
+    try parent.rename("file.txt", parent, "old.txt", io);
+    try parent.writeFile(io, .{ .sub_path = "file.txt", .data = "external" });
+    const replaced = f.book.subscribeWatch(io, &groups, view);
+    if (replaced) |unexpected| try groups.release(unexpected) else |_| {}
+    try std.testing.expectError(error.IdentityChanged, replaced);
+    try std.testing.expectEqual(@as(usize, 0), groups.entries.items.len);
 }
 
 test "Windows editor host worker read uses the app grant and refuses content changed after submission" {

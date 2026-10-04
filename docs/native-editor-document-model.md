@@ -1786,3 +1786,10 @@ Windows §2m.156은 결과 미정 저장의 Undo가 기존 saved hash와 같아�
 Native 결과/ack 확정이 dirty 및 disk_hash 축을 바꾸면 본문 revision 변경 없이 유지보수를 예약한다.
 실제 commit 응답 유실과 undetermined→rollback의 native 판정이 현재 본문 보존과 확정 뒤 지문
 갱신 또는 clean 삭제를 센다. 백업이 native 결과를 추측하거나 원본 쓰기 권한을 늘리지는 않는다.
+
+저장 이미지가 살아 있는 동안에는 native commit 전에도 Undo 본문을 삭제하지 않는다.
+`Request.begin`은 모든 할당과 lease 발급 성공 뒤 `persistence.live_save_images`를 증가시키고,
+`deinit`은 같은 epoch의 자기 이미지 하나만 해제한다. 겹치는 요청은 각각 보유하며 문서 reload는
+새 수명의 count를 시작한다. 이전 epoch의 해제는 새 문서에 영향을 주지 않는다. 완료 ack 자체는
+이미지를 해제하지 않는다. Windows 백업의 clean 삭제는 이미지 count와 미정 sequence가 모두
+없는 경우에만 가능하다. Controller는 정산한 이미지 해제 뒤 남은 보호 상태로 유지보수를 예약한다.

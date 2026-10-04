@@ -1529,7 +1529,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Editor save request"},
     });
     const run_save_request_tests = b.addRunArtifact(save_request_tests);
-    run_save_request_tests.addArg("--maru-expect-tests=11");
+    run_save_request_tests.addArg("--maru-expect-tests=14");
     const save_request_step = b.step("test-editor-save-request", "Verify owned save images and document completion CAS");
     save_request_step.dependOn(&run_save_request_tests.step);
     const navigation_tests = addProjectTest(b, .{
@@ -1581,7 +1581,7 @@ pub fn build(b: *std.Build) void {
     const backup_store_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor backup"} });
     const backup_store_step = b.step("test-win32-editor-backup", "Verify private native recovery storage and restored document authority");
     const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
-    run_backup_store_tests.addArg("--maru-expect-tests=30"); // 2 aggregation blocks + 26 native tests + 2 pure policy tests
+    run_backup_store_tests.addArg("--maru-expect-tests=32"); // 2 aggregation blocks + 28 native tests + 2 pure policy tests
     backup_store_step.dependOn(&run_backup_store_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {

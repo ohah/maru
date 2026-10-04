@@ -1062,3 +1062,7 @@ shared document/due write/clean deletion을 센다. 일반 사용자 백업 폴�
 §2m.156의 `zig build test-win32-editor-backup`는 30개다. 실제 commit 응답 유실 또는 미정 상태에서
 Undo한 본문을 보존하고, 실제 native 결과 확정 뒤 지문 갱신/clean 삭제를 검증한다.
 Controller의 기존 독립 gate `test-win32-save-controller`는 15개를 유지한다.
+
+§2m.157의 `zig build test-win32-editor-backup`는 prepare 이후 Undo의 실제 commit/abort 두 행을
+추가해 32개다. `zig build test-editor-save-request`는 겹치는 이미지 수명, reload epoch 격리,
+counter 상한을 포함해 14개이며 전 할당 실패가 이미지 보호를 남기지 않는지도 검사한다.

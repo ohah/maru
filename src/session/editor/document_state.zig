@@ -94,6 +94,9 @@ pub const State = struct {
         acknowledged: u64 = 0,
         persisted_revision: ?u64 = null,
         uncertain_sequence: ?u64 = null,
+        /// Owned save images can still become disk even when undo matches the
+        /// old saved hash. Backup cleanup waits until their leases are released.
+        live_save_images: u64 = 0,
     } = .{},
 
     /// 기존 teardown의 본문/뷰 정산 순서를 유지할 수 있도록 본문 해제를 나눈다.
@@ -103,6 +106,7 @@ pub const State = struct {
         self.persistence.epoch +|= 1;
         self.persistence.persisted_revision = null;
         self.persistence.uncertain_sequence = null;
+        self.persistence.live_save_images = 0;
     }
 
     /// 뷰 정산과 경로 정산의 기존 순서를 유지한다. 저장 정책은 호출자 책임이다.

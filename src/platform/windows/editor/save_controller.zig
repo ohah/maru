@@ -149,14 +149,15 @@ pub const Controller = struct {
                 if (err != error.SaveNotCommitted) receipt.acknowledgment_error = err;
             };
         }
-        if (receipt.acknowledgment_error == null) {
-            const state = pending.request.registry.get(pending.request.lease).?;
-            @import("backup_store.zig").noteDecision(state, std.Io.Clock.awake.now(io).nanoseconds);
-        }
+        // The grant still pins this state after the image lease is released.
+        // Rearm using remaining images, not this already settled image.
+        const state = pending.request.registry.get(pending.request.lease).?;
         pending.attempt.close(io) catch |err| {
             receipt.cleanup_error = err;
         };
         pending.request.deinit();
+        if (receipt.acknowledgment_error == null)
+            @import("backup_store.zig").noteDecision(state, std.Io.Clock.awake.now(io).nanoseconds);
         self.pending = null;
         self.last_receipt = receipt;
         return receipt;
@@ -238,7 +239,7 @@ const PendingReply = struct {
     }
 };
 
-fn backupUndoOutcome(comptime Driver: type, decision: Decision) !void {
+fn backupUndoOutcome(comptime Driver: type, decision: Decision, prepared: bool) !void {
     const backups = @import("backup_store.zig");
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -256,8 +257,8 @@ fn backupUndoOutcome(comptime Driver: type, decision: Decision) !void {
     try store.write(io, doc, f.state().opened.?.file.content);
     f.state().notifications.backup_on_disk = true;
     try f.controller.prepare(io, f.view, 128);
-    try std.testing.expectError(error.CommitUncertain, f.controller.commitWith(io, Driver));
-    const sequence = f.state().persistence.uncertain_sequence.?;
+    if (!prepared) try std.testing.expectError(error.CommitUncertain, f.controller.commitWith(io, Driver));
+    const sequence = f.state().persistence.uncertain_sequence;
     var nav: editor.view_navigation.View = .{};
     defer nav.deinit(a);
     const views = [_]editor.edit_commands.Participant{.{ .view = &nav, .id = f.view.id }};
@@ -267,14 +268,14 @@ fn backupUndoOutcome(comptime Driver: type, decision: Decision) !void {
     const states = [_]*editor.document_state.State{f.state()};
     const uncertain = backups.maintain(&store, io, &states, 1, true);
     try std.testing.expectEqual(@as(usize, 0), uncertain.failed);
-    try std.testing.expectEqual(@as(?u64, sequence), f.state().persistence.uncertain_sequence);
+    try std.testing.expectEqual(sequence, f.state().persistence.uncertain_sequence);
     {
         var record = (try store.read(io, doc)) orelse return error.MissingUncertainUndoBackup;
         defer record.deinit();
         try std.testing.expectEqualStrings("base\r\n", record.parsed.content);
         try std.testing.expectEqual(doc.path.disk_hash, record.parsed.doc.path.disk_hash);
     }
-    const receipt = if (decision == .committed) try f.controller.reconcile(io) else try f.controller.abort(io);
+    const receipt = if (decision == .aborted) try f.controller.abort(io) else if (prepared) try f.controller.commit(io) else try f.controller.reconcile(io);
     try std.testing.expectEqual(decision, receipt.decision);
     try std.testing.expect(receipt.acknowledgment_error == null);
     try std.testing.expect(f.state().persistence.uncertain_sequence == null);
@@ -299,12 +300,20 @@ fn backupUndoOutcome(comptime Driver: type, decision: Decision) !void {
 
 test "Windows editor backup preserves clean-looking undo after actual committed save loses its reply" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try backupUndoOutcome(LostReply, .committed);
+    try backupUndoOutcome(LostReply, .committed, false);
 }
 
 test "Windows editor backup preserves clean-looking undo until actual undetermined save rolls back" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try backupUndoOutcome(PendingReply, .aborted);
+    try backupUndoOutcome(PendingReply, .aborted, false);
+}
+test "Windows editor backup preserves post-prepare undo before native commit" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try backupUndoOutcome(Native, .committed, true);
+}
+test "Windows editor backup drops post-prepare undo only after native abort" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try backupUndoOutcome(Native, .aborted, true);
 }
 const PartialWrite = struct {
     fn write(attempt: *grants.Attempt, io: std.Io, _: *const editor.save_request.Request) !void {

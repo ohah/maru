@@ -11316,3 +11316,24 @@ clean root 예약, record identity, 실패 stage 정리를 각각 깨뜨린 5개
 정확한 원복 후 Debug 30개가 통과했다. 기존 native controller gate의 선택 개수 15는 그대로다.
 Prepare 이후 편집을 포함한 더 넓은 crash 시점, 일반 dirty 앱 재실행/복원·닫기·저장 UI 및 물리 IME는
 계속 검증한다. 일반 파일의 readonly 제한과 W8.17 진행 상태는 유지한다.
+
+### 2m.157 — prepare 이후 Undo와 저장 이미지 수명
+
+실제 native prepare 후 commit 전 Undo로 이전 saved hash에 돌아오는 경우에도 백업 삭제를
+재현했다. `uncertain_sequence`만으로는 아직 미정 결과가 발생하지 않은 저장 이미지를 보호하지
+못한다. L2 `Request`가 `persistence.live_save_images`를 epoch별로 추적하고 Windows 백업은
+그 count가 0이며 미정 sequence도 없는 clean 문서만 삭제한다. 모든 fallible 준비 성공 뒤 count를
+증가시키고 이미지 deinit 때 자기 epoch의 하나만 해제한다. 겹치는 요청·완료 후 아직 살아 있는
+이미지·reload와 구 epoch 해제·상한·전 할당 실패를 따로 검사한다. Dirty 및 saved hash 계약은
+바꾸지 않는다. Controller는 정산한 이미지 해제 뒤 유지보수를 예약해 불필요한 clean root 생성도
+피한다. 미정 결과의 native 소유와 종료 거절 계약은 그대로다.
+
+집중 gate는 shared request 14개, Windows backup 32개다. 실제 prepare→Undo→commit 행은 현재
+본문과 확정 disk_hash를 보존하고 prepare→Undo→abort 행은 확정 이후에만 clean record를 삭제한다.
+이는 준비된 저장의 본문 수명 보호이며 일반 editable 파일 UI, 물리 IME, 더 넓은 process crash
+시점과 중단 stage 복구까지 완료로 주장하지 않는다.
+
+이미지 보호를 무시하는 clean 삭제, epoch 구분 없는 이미지 해제, 이미지 count 미해제, reload count
+미초기화, 결정 뒤 재예약 누락의 다섯 변형이 컴파일 후 runtime 실패로 검출됐다. epoch 변형은
+보호 수 1 대신 0을 검출한 뒤 cleanup assertion으로 종료했다. 컴파일 실패를 성공으로 세지 않았고,
+정확한 byte 원복 뒤 shared 14개와 native backup 32개가 다시 통과했다.

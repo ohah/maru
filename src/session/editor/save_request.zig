@@ -32,7 +32,7 @@ pub const Request = struct {
         if (state.persistence.uncertain_sequence != null) return error.SaveUncertain;
         const image_len = std.math.add(usize, opened.file.content.len, if (opened.file.format.has_bom) 3 else 0) catch return error.FileTooLarge;
         if (image_len > limit_bytes) return error.FileTooLarge;
-        if (state.persistence.epoch == std.math.maxInt(u64) or state.persistence.issued == std.math.maxInt(u64)) return error.SaveClockExhausted;
+        if (state.persistence.epoch == std.math.maxInt(u64) or state.persistence.issued == std.math.maxInt(u64) or state.persistence.live_save_images == std.math.maxInt(u64)) return error.SaveClockExhausted;
         const owned_path = try allocator.dupe(u8, path);
         errdefer allocator.free(owned_path);
         const bytes = try opened.file.saveBytes(allocator);
@@ -41,6 +41,7 @@ pub const Request = struct {
         // All fallible preparation is complete. Failed allocation cannot issue
         // a save sequence or leave a hidden reference holding the document alive.
         state.persistence.issued += 1;
+        state.persistence.live_save_images += 1;
         return .{
             .allocator = allocator,
             .registry = registry,
@@ -125,6 +126,14 @@ pub const Request = struct {
     }
 
     pub fn deinit(self: *Request) void {
+        // Reload creates a new lifetime. An old image cannot release a newer
+        // lifetime's protection, even though its registry slot is still alive.
+        if (self.registry.get(self.lease)) |state| {
+            if (state.persistence.epoch == self.epoch) {
+                std.debug.assert(state.persistence.live_save_images > 0);
+                state.persistence.live_save_images -= 1;
+            }
+        }
         self.allocator.free(self.path);
         self.allocator.free(self.bytes);
         _ = self.registry.release(self.lease) catch @panic("save request lease lost");
@@ -133,6 +142,66 @@ pub const Request = struct {
 };
 
 const a = std.testing.allocator;
+test "Editor save request keeps each overlapping image owned through terminal acknowledgment" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    const state = registry.get(lease).?;
+    var first = try Request.begin(a, &registry, lease, 128);
+    var first_owned = true;
+    defer if (first_owned) first.deinit();
+    var second = try Request.begin(a, &registry, lease, 128);
+    var second_owned = true;
+    defer if (second_owned) second.deinit();
+    try std.testing.expectEqual(@as(u64, 2), state.persistence.live_save_images);
+    try second.complete(.committed);
+    try std.testing.expectEqual(@as(u64, 2), state.persistence.live_save_images);
+    second.deinit();
+    second_owned = false;
+    try std.testing.expectEqual(@as(u64, 1), state.persistence.live_save_images);
+    try std.testing.expectError(error.StaleSave, first.complete(.committed));
+    first.deinit();
+    first_owned = false;
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+}
+
+test "Editor save request old lifetime image cannot release replacement lifetime protection" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    const state = registry.get(lease).?;
+    var old = try Request.begin(a, &registry, lease, 128);
+    var old_owned = true;
+    defer if (old_owned) old.deinit();
+    state.clearOpened(a);
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    const file = try @import("edit_doc.zig").EditableFile.init(a, "new", false);
+    state.opened = .{ .file = file, .saved_hash = state_mod.contentHash(file.content), .disk_hash = state_mod.contentHash("new") };
+    var current = try Request.begin(a, &registry, lease, 128);
+    var current_owned = true;
+    defer if (current_owned) current.deinit();
+    old.deinit();
+    old_owned = false;
+    try std.testing.expectEqual(@as(u64, 1), state.persistence.live_save_images);
+    current.deinit();
+    current_owned = false;
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+}
+
+test "Editor save request refuses image counter exhaustion without issuing authority" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    const state = registry.get(lease).?;
+    state.persistence.live_save_images = std.math.maxInt(u64);
+    try expectBeginError(error.SaveClockExhausted, &registry, lease, 128);
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.issued);
+    try std.testing.expectEqual(std.math.maxInt(u64), state.persistence.live_save_images);
+}
+
 fn create(registry: *registry_mod.Registry, bytes: []const u8) !registry_mod.Lease {
     var state: state_mod.State = .{};
     defer state.clear(a);
@@ -266,6 +335,7 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
     defer _ = registry.release(lease) catch unreachable;
     var request = Request.begin(allocator, &registry, lease, 128) catch |err| {
         try std.testing.expectEqual(@as(u64, 0), registry.get(lease).?.persistence.issued);
+        try std.testing.expectEqual(@as(u64, 0), registry.get(lease).?.persistence.live_save_images);
         return err;
     };
     defer request.deinit();

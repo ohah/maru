@@ -8,7 +8,7 @@
 
 ### New Window (멀티 윈도우) — ✅ 구현 완료 (W1·W2·⌘N·R4b 동작; W3/W4 잔여·atlas 공유는 후속)
 
-> **현황(2026-06)**: ⌘N(File > New Window) → `createTerminalWindow`(새 NSWindow + per-window AppSession + Metal 렌더러 + 첫 paint), `tickAppSession`이 `windows` 컬렉션을 매 tick 순회해 **전 창 렌더**, 마지막 일반 창 닫힘 시 앱 종료(D4), 워크스페이스 다중 창 복원(R4b)까지 동작 — 앱에서 확인됨. 아래 설계안(D1~D4·W1·W2)이 그대로 구현됐다. 남은 건 W3/W4 잔여(global hotkey 창 타게팅·창별 config·탭 tear-off)와 atlas 공유(grid-per-size, D2 후속) — 전부 선택적 후속.
+> **현황(2026-06)**: ⌘N(File > New Window) → `createTerminalWindow`(새 NSWindow + per-window AppSession + Metal 렌더러 + 첫 paint), `tickAppSession`이 `windows` 컬렉션을 매 tick 순회해 **전 창 렌더**, 마지막 일반 창 닫힘 시 앱 종료(D4 — `window.quit-after-last-window-closed = false` 면 Dock 에 남는다, 2026-10-04), 워크스페이스 다중 창 복원(R4b)까지 동작 — 앱에서 확인됨. 아래 설계안(D1~D4·W1·W2)이 그대로 구현됐다. 남은 건 W3/W4 잔여(창별 config·탭 tear-off — global hotkey 대상은 첫 창 유지로 결정)와 atlas 공유(grid-per-size, D2 후속) — 전부 선택적 후속.
 
 **베이스**: Ghostty의 App→Surface 소유 모델 — `App`이 `surfaces: ArrayListUnmanaged(*Surface)`를 소유하고, `new_window`가 새 NSWindow(TerminalController) + 새 surface(`ghostty_surface_new`)를 만들며, `SharedGridSet`이 폰트 grid를 ref-count로 창 간 공유, 마지막 창 닫힘은 apprt별 quit 정책(quit-after-last-window-closed), surface별 독립 렌더/IO 스레드.
 

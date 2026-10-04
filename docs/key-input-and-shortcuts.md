@@ -100,12 +100,15 @@ A-Z
 [
 ]
 -
-=
+=  (KeyChord.parse 는 받지만 config 줄에서는 구분자라 `Equal` 로 적는다)
 `
+\
 Esc
 Tab
 Enter
 Space
+Plus   (`+` 키)
+Equal  (`=` 키)
 Backspace
 Delete
 Up
@@ -124,6 +127,7 @@ F1..F24
 - key가 없으면 오류다.
 - 알 수 없는 key 이름은 오류다.
 - `+`는 chord part 구분자라 키 이름으로 직접 쓸 수 없다. 리터럴 `+` 키는 `Plus`로 표기한다(예: `Cmd+Plus`). `Cmd++`처럼 빈 part가 생기는 표기는 오류다.
+- `=`는 config 줄(`keybind = <chord> = <action>`)의 구분자라 chord 안에 글자로 쓰면 첫 `=`에서 잘린다. 리터럴 `=` 키는 `Equal`로 표기하고(예: `Cmd+Equal`), `toConfigString`도 그렇게 저장한다.
 
 예시:
 

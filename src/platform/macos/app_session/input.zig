@@ -1100,6 +1100,23 @@ pub fn unbindBuiltinChords(self: *AppSession, entry: command_catalog.Entry, exce
 
 pub fn rebindActionEntry(self: *AppSession, entry: command_catalog.Entry, chord: config_mod.KeyChord) void {
     const a = self.loaded_config.arena.allocator();
+    // **다른 사용자 바인딩(앱 액션·터미널 매크로)이 이미 이 chord 를 쓰면 적용하지 않는다.** 경고하고 진행하면 라이브는
+    // 먼저 있던 바인딩이 계속 이기고(resolve 는 첫 일치) 파일도 loader 가 첫 줄을 살려 새 줄을 버려, 「덮어씁니다」가
+    // 거짓이 되고 재시작마다 결과가 갈렸다 — `Cmd+Equal = increase_font_size:2` 위에 다른 동작을 녹음하면 닿는다
+    // (적대적 검증). 매크로 추가가 충돌을 거절하는 것(setTerminalMacro validate)과 같은 규칙. 빌트인 chord 는 사용자
+    // 바인딩이 이기므로 아래 경고 후 덮어쓰기가 그대로 맞다.
+    for (self.loaded_config.keybindings) |b| {
+        if (b.chord.eql(chord) and !std.meta.eql(b.action, entry.action)) {
+            settings_ops.settingsMessageOrNotice(self, .set_chord_conflict);
+            return;
+        }
+    }
+    for (self.loaded_config.terminal_bindings) |b| {
+        if (b.chord.eql(chord)) {
+            settings_ops.settingsMessageOrNotice(self, .set_chord_conflict);
+            return;
+        }
+    }
     // 충돌 경고: 이 chord가 **다른 액션**에 이미 묶여 있으면 알린다(rebind는 진행 — 사용자 의도, last-wins). 현재 effective
     // chord(사용자/빌트인) 기준으로 카탈로그 액션을 스캔. 메시지는 스택 버퍼 → showNotice가 복사하므로 안전.
     const resolver_pre = self.loaded_config.keyBindingResolver();

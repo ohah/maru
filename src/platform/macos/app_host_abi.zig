@@ -322,14 +322,48 @@ fn swiftFunctionBody(source: []const u8, start_marker: []const u8) ![]const u8 {
     var i = start + start_marker.len;
     while (std.mem.indexOfPos(u8, source, i, "\n    ")) |nl| {
         const rest = source[nl + 5 ..];
-        if (rest.len > 0 and rest[0] != ' ' and rest[0] != '}' and rest[0] != '/' and rest[0] != '\n') return source[start..nl];
+        // `)` 는 여러 줄 시그니처의 닫는 줄(`    ) {`)이다 — 선언 끝이 아니다.
+        if (rest.len > 0 and rest[0] != ' ' and rest[0] != '}' and rest[0] != ')' and rest[0] != '/' and rest[0] != '\n') return source[start..nl];
         i = nl + 1;
     }
     return error.MissingSwiftFunction;
 }
 
+/// Swift 원문에서 `//` 주석을 걷어낸 사본(줄 수는 유지). 구조 판정자가 주석까지 세면 주석만 바꾼 PR 이 판정을 깨고
+/// (그런 PR 은 CI 영역 게이팅에서 macOS 잡이 건너뛰어 main 에서야 빨개진다), 코드를 주석 처리해도 판정이 통과한다
+/// (적대적 검증). 문자열 리터럴 안의 `//`(URL 등)는 남긴다 — 큰따옴표 안팎만 센다.
+fn swiftCodeWithoutComments(gpa: std.mem.Allocator, source: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try out.append(gpa, '\n');
+        first = false;
+        var in_string = false;
+        var cut: usize = line.len;
+        var k: usize = 0;
+        while (k < line.len) : (k += 1) {
+            const ch = line[k];
+            if (in_string) {
+                if (ch == '\\') {
+                    k += 1;
+                } else if (ch == '"') in_string = false;
+            } else if (ch == '"') {
+                in_string = true;
+            } else if (ch == '/' and k + 1 < line.len and line[k + 1] == '/') {
+                cut = k;
+                break;
+            }
+        }
+        try out.appendSlice(gpa, std.mem.trimEnd(u8, line[0..cut], " "));
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고, 앱 유지면 창 0 개를 저장·응답·종료까지 이어 간다 (window.quit-after-last-window-closed)" {
-    const source = @embedFile("MaruAppHost.swift");
+    const source = try swiftCodeWithoutComments(std.testing.allocator, @embedFile("MaruAppHost.swift"));
+    defer std.testing.allocator.free(source);
     // **허용된 자리를 센다.** 마지막 창에서 `NSApp.terminate` 로 가는 갈래는 셋(빨간 버튼·창 닫힘·셸 종료)이고 모두
     // 설정으로 갈라야 한다. 셸 종료 갈래만 tick fault 를 종료 쪽으로 보낸다(앱 유지 갈래는 레이아웃을 지운다).
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "if windows.count <= 1 && quitsAfterLastWindowClosed(surface) {"));
@@ -337,9 +371,10 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, source, "quitsAfterLastWindowClosed(surface)"));
     // 설정 극성 — 1 이 「종료」다(Zig getter). 뒤집히면 기본값에서 앱이 안 꺼진다.
     const policy = try swiftFunctionBody(source, "    private func quitsAfterLastWindowClosed(_ surface: TerminalSurface) -> Bool {");
-    const pol_incomplete = std.mem.indexOf(u8, policy, "if workspaceRestoreIncomplete { return true }") orelse return error.MissingIncompleteGuard;
-    const pol_session = std.mem.indexOf(u8, policy, "guard let session = surface.appSession else { return true }") orelse return error.MissingSessionGuard;
-    try std.testing.expect(pol_incomplete < pol_session); // 복원 불완전 실행의 마지막 창은 종료(분리)로 — 셸을 살린다
+    try std.testing.expect(std.mem.indexOf(u8, policy, "guard let session = surface.appSession else { return true }") != null);
+    // 판정은 Zig 값 하나뿐이다 — Swift 만 아는 예외(옛 「복원 불완전이면 종료」)를 두면 인앱 닫기(Zig requestClose)와
+    // 빨간 버튼의 결과가 갈렸다(적대적 검증 3 회차).
+    try std.testing.expect(std.mem.indexOf(u8, policy, "workspaceRestoreIncomplete") == null);
     try std.testing.expect(std.mem.indexOf(u8, policy, "return maru_macos_app_session_quit_after_last_window_closed(session) != 0") != null);
 
     const should_close = try swiftFunctionBody(source, "    func windowShouldClose(_ sender: NSWindow) -> Bool {");
@@ -386,7 +421,7 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
 
     // 「창 0 개」 저장은 앱 유지 상태에서만이다(종료 도중의 창 0 개는 여전히 캡처 불가).
     const capture = try swiftFunctionBody(source, "    private func captureWorkspaceSnapshot(useTerminationKeyWindow: Bool, publishedOnly: Bool) -> Data? {");
-    const empty_guard = std.mem.indexOf(u8, capture, "guard openWithoutWindows, windows.isEmpty, workspaceRestoreEnabled else { return nil }") orelse return error.MissingEmptyGuard;
+    const empty_guard = std.mem.indexOf(u8, capture, "guard openWithoutWindows, workspaceRestoreEnabled else { return nil }") orelse return error.MissingEmptyGuard;
     const empty_return = std.mem.indexOf(u8, capture, "return Data((MARU_WORKSPACE_HEADER + \"\\n\").utf8)") orelse return error.MissingEmptyReturn;
     try std.testing.expect(empty_guard < empty_return);
 
@@ -405,11 +440,14 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
     const cr_fail = std.mem.indexOf(u8, create, "if !ok {") orelse return error.MissingFailBranch;
     const cr_clear = std.mem.indexOf(u8, create, "openWithoutWindows = false") orelse return error.MissingClear;
     try std.testing.expect(cr_fail < cr_clear);
+    // 실패 갈래(`return nil`)를 **지난 뒤**다 — 실패 블록 안으로 옮기면 실패에 상태가 꺼지고 성공에 안 꺼진다.
+    try std.testing.expect(std.mem.indexOf(u8, create[cr_fail..cr_clear], "return nil") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, create, "openWithoutWindows = false"));
 
     // Dock 클릭·전역 단축키 둘이 창 0 개에서 빈 새 창을 연다.
     const opener = try swiftFunctionBody(source, "    private func openWindowIfNoneOpen() -> Bool {");
-    try std.testing.expect(std.mem.indexOf(u8, opener, "guard !smokeMode, windows.isEmpty, openWithoutWindows else { return false }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opener, "guard !smokeMode, windows.isEmpty, openWithoutWindows, !workspaceFinalQuitPending else { return false }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opener, "NSApp.activate(ignoringOtherApps: true)") != null); // 다른 앱 뒤에 깔리지 않게
     try std.testing.expect(std.mem.indexOf(u8, opener, "createTerminalWindow(applyingWorkspace: nil)") != null);
     const reopen = try swiftFunctionBody(source, "    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {");
     try std.testing.expect(std.mem.indexOf(u8, reopen, "if openWindowIfNoneOpen() { return false }") != null);
@@ -433,7 +471,52 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
     // 창 0 개 동안 frame-loop 주기도 마지막 config 값을 쓴다.
     const rate = try swiftFunctionBody(source, "    private func configuredFrameLoopRateHz() -> UInt32 {");
     try std.testing.expect(std.mem.indexOf(u8, rate, "else { return lastConfiguredFrameLoopRateHz }") != null);
+    // 창 0 개(quick 도 없음)로 Dock 에 남은 동안은 낮은 주기로 깬다 — 판정이 세션 조회보다 먼저다.
+    const idle_at = std.mem.indexOf(u8, rate, "if windows.isEmpty && quick == nil && openWithoutWindows { return Self.idleFrameLoopRateHz }") orelse return error.MissingIdleRate;
+    const session_at = std.mem.indexOf(u8, rate, "guard let session =") orelse return error.MissingRateSession;
+    try std.testing.expect(idle_at < session_at);
+    const cr_restart = std.mem.indexOf(u8, create, "restartFrameLoopTicksIfNeeded()") orelse return error.MissingRateRestart;
+    try std.testing.expect(cr_clear < cr_restart); // 창이 생기면 곧바로 config 주기로
     try std.testing.expect(std.mem.indexOf(u8, rate, "lastConfiguredFrameLoopRateHz = max(1, maru_macos_app_session_frame_rate_hz(session))") != null);
+
+    // 숨은 quick 이 ⌘Q 대상이면 먼저 보인다(보호 파일 취소 notice 가 화면 밖에 뜨지 않게).
+    // 확인·안내를 띄울 창은 한 도우미로 앞으로 가져온다 — 숨었거나 숨는 중인 quick 은 먼저 보인다. 직접
+    // makeKeyAndOrderFront 하는 자리가 남으면 숨김 frame(화면 밖)에 안 보이는 확인이 뜬다.
+    const bring = try swiftFunctionBody(source, "    private func bringSurfaceForward(_ surface: TerminalSurface) {");
+    const br_cond = std.mem.indexOf(u8, bring, "if surface === quick, let panel = surface.window, !panel.isVisible || quickAnimating {") orelse return error.MissingBringQuick;
+    const br_show = std.mem.indexOf(u8, bring, "showQuickTerminalAnimated(panel)") orelse return error.MissingBringShow;
+    try std.testing.expect(br_cond < br_show);
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, source, "bringSurfaceForward(")); // 정의 1 + ⌘Q 둘·보호 둘·hold 하나
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, should_terminate, "makeKeyAndOrderFront"));
+    try std.testing.expect(std.mem.indexOf(u8, should_terminate, "if let surface = quitConfirmSurface { bringSurfaceForward(surface) }") != null);
+    // 이미 수락돼 마지막 저장 중이면 새 확인 없이 그 종료에 합류한다(그래야 finish/cancel 이 이 보류에 답한다).
+    const join = std.mem.indexOf(u8, should_terminate, "if workspaceFinalQuitPending {") orelse return error.MissingFinalJoin;
+    const join_mark = std.mem.indexOf(u8, should_terminate, "workspaceFinalQuitWasDeferred = true") orelse return error.MissingFinalJoin;
+    const bypass_at = std.mem.indexOf(u8, should_terminate, "if bypassQuitConfirm {") orelse return error.MissingBypass;
+    try std.testing.expect(join < join_mark and join_mark < bypass_at);
+
+    // ⌘Q 확인 모달을 든 세션이 답 없이 사라지면(앱 유지 모드의 마지막 창 닫기·셸 종료·quick 종료) 보류된 종료에
+    // 「취소」로 답한다 — 안 그러면 `quitConfirmPending` 이 남아 이후 ⌘Q·로그아웃이 영영 terminateLater 에 걸린다.
+    const release = try swiftFunctionBody(source, "    private func releaseQuitConfirmHeld(by surface: TerminalSurface) {");
+    try std.testing.expect(std.mem.indexOf(u8, release, "guard quitConfirmPending, quitConfirmSurface === surface, !workspaceFinalQuitPending else { return }") != null);
+    const rel_clear = std.mem.indexOf(u8, release, "quitConfirmPending = false") orelse return error.MissingReleaseClear;
+    const rel_reply = std.mem.indexOf(u8, release, "NSApp.reply(toApplicationShouldTerminate: false)") orelse return error.MissingReleaseReply;
+    try std.testing.expect(rel_clear < rel_reply); // 답하고 상태도 푼다 — 안 풀면 이후 ⌘Q 가 영영 보류에 걸린다
+    try std.testing.expect(std.mem.indexOf(u8, release, "NSApp.reply(toApplicationShouldTerminate: false)") != null);
+    for ([_][]const u8{
+        "    private func teardownWindowSurface(\n",
+        "    private func tearDownQuickTerminalAfterGlobalPreflight() {",
+    }) |marker| {
+        const body = try swiftFunctionBody(source, marker);
+        const rel = std.mem.indexOf(u8, body, "releaseQuitConfirmHeld(by: surface)") orelse return error.MissingQuitRelease;
+        const destroy = std.mem.indexOf(u8, body, "maru_macos_app_session_destroy(session)") orelse return error.MissingDestroy;
+        try std.testing.expect(rel < destroy); // 세션을 부수기 **전에** 답한다
+    }
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "releaseQuitConfirmHeld(by: surface)"));
+    // 모달을 연 자리만 그 창을 기억하고(weak — 닫힌 창을 붙잡지 않게), 모달 없는 보류 셋은 비운다.
+    try std.testing.expect(std.mem.indexOf(u8, source, "private weak var quitConfirmSurface: TerminalSurface?") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "quitConfirmSurface = target"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, should_terminate, "quitConfirmSurface = nil"));
 
     // AppKit 의 자동 종료는 계속 끈다 — 전역 단축키 「숨김」(orderOut)이 앱을 끝내면 안 된다.
     const auto_quit = try swiftFunctionBody(source, "    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {");

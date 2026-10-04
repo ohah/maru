@@ -718,7 +718,7 @@ duplicate key는 마지막 syntactic occurrence의 valid/invalid가 outcome을 �
 | `Quit Maru` (`keep-alive=true`) | 종료 | 일반 persistent runtime 유지·client detach. quick은 항상 local이고 종료 | 기존 dirty 보호 후 teardown/선언적 복원 |
 | `Quit Maru` (`keep-alive=false`) | 종료 | manifest-bound runtime 확인 후 terminate | 기존 dirty 보호 후 teardown/선언적 복원 |
 | `Quit and End All Sessions` | 종료 | 모든 runtime 명시 terminate | 기존 dirty 보호 후 teardown |
-| 마지막 일반 창 닫기 | 앱 전체 quit 경로라면 detach | 유지 | 기존 dirty 보호 적용 |
+| 마지막 일반 창 닫기 | 앱 전체 quit 경로라면 detach(기본 `window.quit-after-last-window-closed = true`). `false`(앱이 Dock 에 남음)면 비마지막 Window 닫기와 같다 — 소속 Term 종료 | 유지 | 기존 dirty 보호 적용 |
 | 비마지막 Window 닫기 | 현재 창 정책 유지 | v1에서는 기존처럼 소속 Term 종료 확인 | 기존 close 정책 유지 |
 | quick toggle/auto-hide | panel 숨김 | local runtime 유지 | surface는 기존 quick 정책 유지. Esc는 terminal input으로 전달 |
 | quick Term/Workspace 명시 close | 해당 quick layout 제거 | 소속 runtime 종료 확인 | 소속 surface close 정책 유지 |

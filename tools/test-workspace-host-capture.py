@@ -44,9 +44,12 @@ h.smokeMode=true;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:fals
 h.workspaceRestoreEnabled=false;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"restore disabled cannot save");h.workspaceRestoreEnabled=true
 h.windows=[];require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"empty inventory cannot save")
 h.openWithoutWindows=true;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==Data((MARU_WORKSPACE_HEADER+"\n").utf8),"app kept open with zero windows saves header only")
-h.workspaceRestoreEnabled=false;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"restore disabled still cannot save zero windows");h.workspaceRestoreEnabled=true;h.openWithoutWindows=false
+h.workspaceRestoreEnabled=false;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"restore disabled still cannot save zero windows");h.workspaceRestoreEnabled=true
+let fresh=Surface(Session("x"));fresh.workspaceCheckpointPublished=false;h.windows=[fresh]
+require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==Data((MARU_WORKSPACE_HEADER+"\n").utf8),"new window not yet published is still the zero-window state")
+h.openWithoutWindows=false;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"unpublished window outside zero-window state cannot save");h.windows=[]
 '''
-post += '\nprecondition(judged == 22);print("capture assertions=22")\n'
+post += '\nprecondition(judged == 24);print("capture assertions=24")\n'
 work = Path(tempfile.mkdtemp(prefix='maru-host-capture-test-'))
 main = work / 'main.swift'
 main.write_text(pre + method + post)

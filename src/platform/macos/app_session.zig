@@ -3654,8 +3654,10 @@ const app_incident_testing = if (builtin.is_test) struct {
 var app_quitting: bool = false;
 // `window.quit-after-last-window-closed` 도 앱 전체 정책이다(마지막 창을 닫을 때 「앱」이 끝나는가). 창마다의
 // `loaded_config` 는 미러라, 창 A 의 설정에서 끄고 A 를 닫은 뒤 마지막 창 B 를 닫으면 B 의 낡은 `true` 로 앱이 끝났다
-// (적대적 검증). 세팅 토글·reload·전체 리셋이 여기를 세우고, 모든 창이 이 값을 먼저 본다. null = 아직 아무도 안 바꿨다 —
-// 각 창은 같은 파일에서 읽은 자기 config 를 본다.
+// (적대적 검증). **세우는 자리는 사용자의 명시 행동뿐이다** — 세팅 토글·행 되돌리기·Reload Config·전체 리셋. 모든 창이
+// 이 값을 먼저 본다. 새 창 생성은 세우지 않는다: 파일 쓰기가 실패한 채 새 창이 옛 파일 값으로 덮으면 사용자 선택이
+// 조용히 사라진다(외부 편집은 Reload Config 로 들인다 — 다른 키와 같다). null = 아직 아무도 안 바꿨다 — 각 창은
+// 같은 파일에서 읽은 자기 config 를 본다.
 var app_quit_after_last_window_closed: ?bool = null;
 
 pub fn appQuitAfterLastWindowClosedOverride() ?bool {
@@ -60936,6 +60938,27 @@ test "close-confirm: 앱 유지 설정은 세팅 토글과 행 되돌리기가 �
     settings_ops.clearConfigDirty(session);
 }
 
+// 앱 전역 「마지막 창 닫으면 종료」를 세우는 자리는 **사용자의 명시 행동 넷**이다 — 세팅 토글·행 ↺·Reload Config·
+// 전체 리셋. 하나라도 빠지면 그 행동 뒤 미러(`currentSectionFields`)가 낡은 전역으로 행을 되돌려, 파일과 이번 실행이
+// 갈린다(적대적 검증: Reload·리셋 자리를 지워도 판정자가 없었다). 자리를 **함수 안에서** 센다.
+test "close-confirm: 앱 유지 설정의 앱 전역 값은 토글·행 되돌리기·Reload·전체 리셋 넷이 세운다" {
+    const src = @embedFile("app_session/settings.zig");
+    const needle = "app_session_mod.setAppQuitAfterLastWindowClosed(";
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, src, needle));
+    for ([_][]const u8{
+        "pub fn toggleSelectedSetting(self: *AppSession) void {",
+        "pub fn resetSelectedSettingRow(self: *AppSession) void {",
+        "pub fn reloadConfig(self: *AppSession) void {",
+        "pub fn resetAllSettings(self: *AppSession) void {",
+    }) |head| {
+        const start = std.mem.indexOf(u8, src, head) orelse return error.MissingSettingsFn;
+        const end = std.mem.indexOfPos(u8, src, start + head.len, "\n}\n") orelse return error.MissingSettingsFnEnd;
+        try std.testing.expect(std.mem.indexOf(u8, src[start..end], needle) != null);
+    }
+    // 새 창 생성은 세우지 않는다(파일 쓰기 실패 중 옛 파일 값이 사용자 선택을 덮는다).
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, @embedFile("app_session.zig"), "        if (app_quit_after_last_window_closed != null)\n            app_quit_after_last_window_closed ="));
+}
+
 test "close-confirm: 풀스크린 TUI(alt 화면)면 셸 통합 없이도 확인 모달을 띄운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -66290,6 +66313,53 @@ test "settings keybind 완전 교체: rebind하면 그 액션 빌트인 chord가
     try std.testing.expect(had_builtin); // next_tab엔 죽일 빌트인이 있었다(테스트 전제)
     // (3) 영속: 빌트인 unbind 지시어가 예약됐다(파일에 keybind = chord = unbind).
     try std.testing.expect(session.config_keybind_unbinds.items.len >= 1);
+}
+
+test "settings keybind 녹음: 다른 사용자 바인딩·터미널 매크로가 쓰는 chord 는 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    defer settings_ops.clearConfigDirty(session);
+
+    // config 에 `keybind = Cmd+Equal = increase_font_size:2` 가 있는 상태(빌트인 Bigger ⌘= 를 사용자가 덮었다).
+    const cmd_eq = try config_mod.KeyChord.parse("Cmd+Equal");
+    const user = [_]config_mod.AppBinding{.{ .chord = cmd_eq, .action = .{ .increase_font_size = 2 } }};
+    session.loaded_config.keybindings = &user;
+
+    // (1) 다른 동작(new_tab)을 ⌘= 로 녹음 → 거절. 경고하고 진행하면 라이브는 먼저 있던 보폭 2 가 이기고, 재시작하면
+    //     loader 가 첫 줄을 살려 새 줄을 버려 「덮어씁니다」가 거짓이었다(적대적 검증).
+    var nt: ?command_catalog.Entry = null;
+    for (command_catalog.entries) |e| if (std.mem.eql(u8, e.key, "new_tab")) {
+        nt = e;
+    };
+    session.chrome_host.notice.dismiss();
+    input_ops.rebindActionEntry(session, nt.?, cmd_eq);
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.keybindings.len); // 그대로
+    try std.testing.expect(session.loaded_config.keybindings[0].action == .increase_font_size);
+    try std.testing.expectEqual(@as(usize, 0), session.config_keybind_rebinds.items.len); // 파일 예약도 없다
+    try std.testing.expect(session.chrome_host.notice.open); // 충돌 안내
+    // 대조군: 빈 chord 로는 그대로 녹음된다.
+    input_ops.rebindActionEntry(session, nt.?, try config_mod.KeyChord.parse("Ctrl+Cmd+K"));
+    try std.testing.expectEqual(@as(usize, 2), session.loaded_config.keybindings.len);
+
+    // (2) 터미널 매크로가 쓰는 chord 도 거절한다 — 라이브는 사용자 바인딩끼리 첫 일치, 파일은 첫 줄이 이겨 갈렸다.
+    const cmd_k = try config_mod.KeyChord.parse("Cmd+K");
+    const macros = [_]config_mod.keybinding.TerminalBinding{.{ .chord = cmd_k, .input = .{ .send_text = "x" } }};
+    session.loaded_config.terminal_bindings = &macros;
+    session.chrome_host.notice.dismiss();
+    input_ops.rebindActionEntry(session, nt.?, cmd_k);
+    try std.testing.expectEqual(@as(usize, 2), session.loaded_config.keybindings.len); // 그대로
+    for (session.loaded_config.keybindings) |b| try std.testing.expect(!b.chord.eql(cmd_k));
+    try std.testing.expect(session.chrome_host.notice.open);
 }
 
 test "settings keybind stale unbind 정리: unbind한 chord를 다시 바인딩하면 unbinds에서 빠지고 옛 줄 제거 예약 (stale unbind)" {

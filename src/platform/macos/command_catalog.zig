@@ -387,6 +387,10 @@ test "chordForAction: 빌트인·사용자·unbind" {
     // 먼저 가로채 사용자 동작 대신 빌트인이 돈다. ⌘= 를 보폭 2 로 묶으면 Bigger(보폭 1)는 남은 빌트인 ⌘⇧+ 만 갖는다.
     const bigger: Action = .{ .increase_font_size = maru.config.action.default_font_size_step };
     try std.testing.expect(chordForAction(builtin_resolver, bigger).?.key.eql(.{ .char = '=' })); // 대조군
+    // Smaller 도 기본 보폭(1)의 빌트인 ⌘- 를 갖는다 — 기본 바인딩의 보폭이 어긋나면 메뉴 단축키가 ⇧⌘- 로 바뀐다.
+    const smaller: Action = .{ .decrease_font_size = maru.config.action.default_font_size_step };
+    const smaller_chord = chordForAction(builtin_resolver, smaller).?;
+    try std.testing.expect(smaller_chord.key.eql(.{ .char = '-' }) and !smaller_chord.modifiers.shift);
     const cmd_eq = try KeyChord.parse("Cmd+=");
     const step_resolver: KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = cmd_eq, .action = .{ .increase_font_size = 2 } }} };
     const bigger_chord = chordForAction(step_resolver, bigger).?;

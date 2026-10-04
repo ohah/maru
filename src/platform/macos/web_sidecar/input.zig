@@ -70,7 +70,7 @@ pub fn handle(msg: Message) bool {
                 .char => c.KEYEVENT_CHAR,
             };
             // 키 누름도 활성화다 — Esc 는 아니다(Chrome 과 같다). W6e 새 탭 한 장.
-            if ((value.kind == .raw_down or value.kind == .down) and value.windows_key_code != 0x1b) new_tab.grant(value.browser);
+            if (protocol.new_tab.grantsActivation(value.kind, value.windows_key_code, value.native_key_code)) new_tab.grant(value.browser);
             event.modifiers = flags(value.modifiers);
             event.windows_key_code = value.windows_key_code;
             event.native_key_code = value.native_key_code;

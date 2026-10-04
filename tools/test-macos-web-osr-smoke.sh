@@ -1081,9 +1081,10 @@ def check(cond, what):
 fields = [dict(kv.split('=') for kv in l.split()[2:]) for l in report]
 o = int(fields[0]['opener']) if fields else -1
 n = int(fields[0]['tabs']) - 1 if fields else -1
-want = [f'osr-test newtab at={o + 1} tabs={n + 1} opener={o} active={o} placement=background',
-        f'osr-test newtab at={o + 2} tabs={n + 2} opener={o} active={o} placement=background',
-        f'osr-test newtab at={o + 3} tabs={n + 3} opener={o} active={o + 3} placement=foreground']
+# 가운데 클릭은 주소로 연 탭, `target=_blank` 는 팝업 브라우저를 이어 받은 탭이다(W6f② — maru 가 번호를 맡겨 둔다).
+want = [f'osr-test newtab at={o + 1} tabs={n + 1} opener={o} active={o} placement=background adopted=false',
+        f'osr-test newtab at={o + 2} tabs={n + 2} opener={o} active={o} placement=background adopted=false',
+        f'osr-test newtab at={o + 3} tabs={n + 3} opener={o} active={o + 3} placement=foreground adopted=true']
 check(len(report) == 3 and report == want, f'two middle clicks open background tabs right of the page in order, then a target=_blank link opens a foreground tab after them ({report})')
 long_b = '/nt-b?q=' + 'x' * 5000
 check(requests.count(long_b) == 2 and requests.count('/nt-a') == 1, f'each new tab loads its address — the 5000-character one too ({[r[:20] + "…" + str(len(r)) for r in requests if r.startswith("/nt-")]})')

@@ -101,7 +101,7 @@ pub fn beforePopup(
     const entry = browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) orelse return 1;
     if (entry.closing) return 1;
     const placement = rules.placement(@intCast(disposition)) orelse return 1;
-    if (user_gesture == 0 or !entry.new_tab_credit) return 1;
+    if (user_gesture == 0 or !rules.creditLive(entry.new_tab_credit_ms, nowMs())) return 1;
     var buf: [protocol.wire.max_url_bytes + 4]u8 = undefined;
     // 빈 주소만 `about:blank` 다(CEF 는 보통 그렇게 준다). 상한을 넘는 주소는 거절한다 — 잘린 주소로 규칙을 보면 안 된다(W6f① 적대
     // 검증 — 「없음」으로 접어 `about:blank` 로 통과시키고 CEF 는 원래의 긴 주소로 열었다).
@@ -109,7 +109,7 @@ pub fn beforePopup(
     const address = if (empty) "about:blank" else readUrl(url, &buf) orelse return 1;
     if (!rules.popupUrlAllowed(address)) return 1;
     const owned = allocator.dupe(u8, address) catch return 1;
-    entry.new_tab_credit = false;
+    entry.new_tab_credit_ms = 0;
     // 맡긴 차례대로 쓴다.
     const id = reserved[0];
     var i: usize = 1;
@@ -191,7 +191,7 @@ pub fn onAfterCreated(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_brows
 /// 사용자 입력이 그 브라우저에 갔다 — 새 탭 한 장을 준다(쌓지 않는다). 앞 놓기의 이동 표시는 끝났다.
 pub fn grant(browser: protocol.message.BrowserId) void {
     const entry = browsers.state.registry.byId(browser) orelse return;
-    entry.new_tab_credit = true;
+    entry.new_tab_credit_ms = nowMs();
 }
 
 /// 놓기 뒤 그 이동을 지금 탭으로 보는 시간. 렌더러의 답은 곧 온다 — 페이지가 놓기를 받아 이동이 없었으면 표시가 남지 않게 짧게
@@ -210,11 +210,11 @@ pub fn request(browser: [*c]c.cef_browser_t, url: [*c]const c.cef_string_t, disp
     const entry = browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) orelse return false;
     if (entry.closing) return false;
     const placement = rules.placement(@intCast(disposition)) orelse return false;
-    if (user_gesture == 0 or !entry.new_tab_credit) return false;
+    if (user_gesture == 0 or !rules.creditLive(entry.new_tab_credit_ms, nowMs())) return false;
     var buf: [protocol.wire.max_url_bytes + 4]u8 = undefined;
     const address = readUrl(url, &buf) orelse return false;
     if (!rules.urlAllowed(address)) return false;
-    entry.new_tab_credit = false;
+    entry.new_tab_credit_ms = 0;
     browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = placement, .url = address } }) catch return false;
     return true;
 }

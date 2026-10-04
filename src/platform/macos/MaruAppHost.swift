@@ -6924,13 +6924,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         maybeRunTabDragSmokeEntry()
         maybeRunSessionHostRecoverySmoke()
         maybeRunSessionHostInputContinuitySmoke()
-        // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
-        if let quick, quick.window?.isVisible == true {
+        // Hidden quick sessions still need to drain PTY notifications and observe shell exit.
+        // Only Metal presentation waits for the panel to become visible.
+        if let quick {
             explicitSurface = quick
             // quick(스크래치 오버레이)은 앱 종료 단위가 아니다 — 항상 비-마지막(0). quick의 마지막 탭을 닫으면 종료
             // 확인이 아니라 quick만 정리된다(tearDownQuickTerminal, 앱은 계속).
             if let s = quick.appSession { maru_macos_app_session_set_last_window(s, 0) }
-            let quickStatus = renderTick()
+            let quickStatus = renderTick(presentMetalFrame: quick.window?.isVisible == true)
             explicitSurface = nil
             if quickStatus == Self.statusOK {
                 _ = quick.protectedTickFaultLatch.record(tickSucceeded: true, currentProtected: false)
@@ -7483,7 +7484,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가
     // explicitSurface로 대상을 정한다. 앱-전역 정책(SessionEnded 종료·summary)은 호출자(tickAppSession)가 한다.
-    private func renderTick() -> Int32 {
+    private func renderTick(presentMetalFrame: Bool = true) -> Int32 {
         guard let appSession else { return Self.statusOK }
         updateDiagnosticTitle()
         updateWindowTitle() // 비-debug일 때 OSC 0/2 제목 또는 cwd basename을 제목줄에 반영
@@ -7513,7 +7514,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // (MARU_SCREENSHOT_DELAY_MS 게이트), 유휴 셸은 generation이 안 바뀌어 여기서 draw가 끊긴다 —
             // 그러면 마감이 지나도 찍을 기회 자체가 없어 프로세스가 영영 안 끝난다(실측: 2500ms 지연에
             // 5분 뒤에도 artifact 없음). 하니스 전용 경로이므로 env 미설정 일반 실행에는 분기가 없다.
-            if summary.metal_generation != lastSeenMetalGeneration || metalNeedsRedraw || screenshotDelayPending {
+            // Keep the last presented generation while hidden so reopening draws the latest frame.
+            if presentMetalFrame && (summary.metal_generation != lastSeenMetalGeneration || metalNeedsRedraw || screenshotDelayPending) {
                 lastSeenMetalGeneration = summary.metal_generation
                 drawMetalFrame()
             }

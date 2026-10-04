@@ -1469,6 +1469,8 @@ workspace는 ID가 담긴 문서 표와 뷰 참조를 저장한다. 구현 순�
   명령 팔레트의 `Editor: Recover Unsaved Edits`(`recover_editor_backups`, 한글 검색어 ‘미저장 편집 복구’)가
   그 기록을 열거하고 선택한 사본을 이름 없는 미저장 문서로 연다. 빈 본문도 복구하며 저장은 Save As로
   사용자가 정한다. 복구 본문은 초기 내용이고 이후 편집부터 Undo 기록을 만든다.
+  백업은 문서 본문을 담으므로 선두 U+FEFF도 내용으로 보존한다. 파일을 처음 열 때의 BOM 해석을
+  다시 적용하지 않는다(`EditableFile.initContent`). 새 백업은 게시 전에 0600 권한을 확정한다.
   실패·손상 항목은 보존하고 목록을 다시 열어 재검색한다. [백업 발견과 복구](plans/editor-backup-discovery.md)가
   read-only 열거, stale 선택 거절, source 수명과 검증을 소유한다.
 - **자리는 `~/Library/Application Support/maru/editor-backups/` 다**(2026-09-22 — `workspace.v1` 의 형제). 파일은 소유자만(`0600`), 쓰기는 **원자 교체**다. **`~/.cache/maru` 가 아닌 이유**: 그 자리는 이름 그대로 「지워도 되는 것」인데(원격 헬퍼·terminfo·드롭은 다시 만들면 된다) 백업을 지우면 **사용자의 편집이 사라진다**. 위 「임시 디렉터리에 두지 않는다」와 같은 근거의 연장이다.

@@ -276,6 +276,8 @@ fn write(self: *AppSession, doc: backup.Doc, content: []const u8) bool {
         .permissions = @enumFromInt(0o600),
     }) catch return false;
     defer af.deinit(self.io);
+    // 생성 권한은 umask로 줄어든다. 새 백업을 다시 읽을 수 있어야 복구 원본을 정리해도 안전하다.
+    af.file.setPermissions(self.io, @enumFromInt(0o600)) catch return false;
     var buf: [4096]u8 = undefined;
     var w = af.file.writer(self.io, &buf);
     w.interface.writeAll(bytes) catch return false;

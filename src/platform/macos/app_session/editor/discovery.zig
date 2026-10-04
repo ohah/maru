@@ -336,3 +336,73 @@ test "editor backup discovery 링크와 잘못된 권한 및 신원을 거절하
     defer testing.allocator.free(remaining);
     try testing.expectEqualStrings(wrong, remaining);
 }
+
+test "editor backup discovery 열린 source의 루트와 claim을 교체해도 새 파일을 지우지 않는다" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const name = try maru.session.editor.recovery_id.fileName(fixture_id);
+    var source = try store.Source.open(testing.allocator, testing.io, fixture.root, &name);
+    defer source.deinit();
+    var claim_buffer: [64]u8 = undefined;
+    const claim = try std.fmt.bufPrint(&claim_buffer, "d-{s}.claim", .{fixture_id.hex()});
+    // 오래된 잠금을 들고 있는 동안 같은 이름에 새 claim이 생겨도 그것은 삭제 권한이 아니다.
+    try fixture.put(claim, "");
+    try testing.expectError(error.InvalidOwnerFile, source.read());
+    try testing.expectError(error.InvalidOwnerFile, source.drop());
+    const root = try store.openRoot(testing.io, fixture.root, false);
+    defer root.close(testing.io);
+    _ = try root.statFile(testing.io, &name, .{});
+    _ = try root.statFile(testing.io, claim, .{});
+
+    var replacement = try store.Source.open(testing.allocator, testing.io, fixture.root, &name);
+    defer replacement.deinit();
+    const moved = try std.fmt.allocPrint(testing.allocator, "{s}-moved", .{fixture.root});
+    defer testing.allocator.free(moved);
+    try std.Io.Dir.cwd().rename(fixture.root, std.Io.Dir.cwd(), moved, testing.io);
+    try std.Io.Dir.cwd().createDir(testing.io, fixture.root, @enumFromInt(0o700));
+    const next = try store.openRoot(testing.io, fixture.root, false);
+    defer next.close(testing.io);
+    try next.writeFile(testing.io, .{ .sub_path = &name, .data = "unrelated replacement" });
+    try testing.expectError(error.Replaced, replacement.read());
+    try testing.expectError(error.Replaced, replacement.drop());
+    const untouched = try next.readFileAlloc(testing.io, &name, testing.allocator, .limited(128));
+    defer testing.allocator.free(untouched);
+    try testing.expectEqualStrings("unrelated replacement", untouched);
+    _ = try root.statFile(testing.io, &name, .{});
+    // 원래 이름을 되돌리면 같은 source를 정리할 수 있다. 전부 삭제를 막는 구현은 통과하지 못한다.
+    try next.deleteFile(testing.io, &name);
+    try std.Io.Dir.cwd().deleteDir(testing.io, fixture.root);
+    try std.Io.Dir.cwd().rename(moved, std.Io.Dir.cwd(), fixture.root, testing.io);
+    try replacement.drop();
+    try testing.expectError(error.FileNotFound, root.statFile(testing.io, &name, .{}));
+}
+
+test "editor backup discovery 과대 파일과 잘못된 UTF8 및 하드링크는 보존하고 다음 후보를 찾는다" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const dir = try store.openRoot(testing.io, fixture.root, false);
+    defer dir.close(testing.io);
+    try fixture.legacy(1, "linked");
+    try testing.expectEqual(@as(c_int, 0), std.c.linkat(dir.handle, "u-1.bak", dir.handle, "alias", 0));
+    try fixture.legacy(2, "\xff");
+    try fixture.put("u-3.bak", "");
+    const oversized = try dir.openFile(testing.io, "u-3.bak", .{ .mode = .read_write });
+    defer oversized.close(testing.io);
+    try oversized.setLength(testing.io, backup.max_record_bytes + 1);
+    try fixture.legacy(4, "valid");
+    var catalog = try Catalog.init(testing.allocator, testing.io, fixture.root);
+    defer catalog.deinit();
+    try finish(&catalog);
+    var failures: usize = 0;
+    var valid: usize = 0;
+    for (catalog.candidates.items, 0..) |candidate, i| {
+        if (candidate.failure != null) {
+            failures += 1;
+            try testing.expectError(error.Unavailable, catalog.select(i));
+        } else valid += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), failures);
+    try testing.expectEqual(@as(usize, 2), valid);
+    for ([_][]const u8{ "u-1.bak", "alias", "u-2.bak", "u-3.bak" }) |name| _ = try dir.statFile(testing.io, name, .{});
+    try testing.expectEqual(backup.max_record_bytes + 1, (try dir.statFile(testing.io, "u-3.bak", .{})).size);
+}

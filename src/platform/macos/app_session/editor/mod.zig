@@ -19714,7 +19714,14 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     try pressKey(&fx, .arrow_down, .{});
     try testing.expectEqualStrings("lazy_import", hl(s));
     try frame(s, leaf, term);
-    try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len); // 아직
+    // 유예는 **강조가 이 항목으로 온 프레임**(`docs_since_ms`)부터 잰다 — 판정자도 같은 기준으로 잰다. 예전에는
+    // 그 다음 프레임 뒤의 `t0` 부터 쟀는데, 부하로 사이 프레임이 늦으면 제품은 옳게 250 ms 를 채웠어도
+    // 「t0 로부터 250 ms 전」이 되어 빨갰다(2026-10-04 전체 실행). 같은 이유로 「아직」은 창 안일 때만 단언한다.
+    // 250 은 계약 값(§8.2g-d, VS Code 와 같다)이라 제품 상수를 따라가지 않는다 — 상수가 0 이 되면 잡혀야 한다.
+    const since = s.editor_completion.docs_since_ms;
+    if (s.awakeMs() -| since < 250) {
+        try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len); // 아직
+    }
     {
         const t0 = s.awakeMs();
         while (completion_client.docsLines(s).len == 0 and s.awakeMs() - t0 < 2000) {
@@ -19722,7 +19729,7 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
             try frame(s, leaf, term);
             _ = usleep(5_000);
         }
-        try testing.expect(s.awakeMs() - t0 >= 250);
+        try testing.expect(s.awakeMs() -| since >= 250);
     }
     try testing.expectEqual(@as(usize, 1), completion_client.docsLines(s).len);
     try testing.expectEqualStrings("…", completion_client.docsLines(s)[0].text);

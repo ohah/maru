@@ -13,6 +13,8 @@
 //!                         누름 하나에 하나 더(사용자 입력은 누름과 Esc 아닌 키 누름뿐 — Chrome 의 활성화와 같다)
 //!   newtab-refused        빈 `window.open()`·`javascript:`·`data:` 링크 → 탭 없음
 //!   newtab-no-gesture     입력 없이 페이지가 연 것(`window.open`·만든 ⌘ 클릭·`click()`) → 탭 없음, 지금 탭도 그대로
+//!   newtab-handled-drop   페이지가 받은 놓기(이동 없음) 뒤 페이지가 만든 ⌘ 클릭 → 지금 탭은 이동하지 않고 그 링크의 새 탭 하나(놓기도
+//!                         Chromium 의 사용자 활성화다 — Chrome 과 같다). 놓기 뒤 지금 탭에서 여는 것은 놓은 그 주소의 이동뿐이다
 //!   newtab-menu           링크 우클릭 메뉴가 `link_openable` 이고 「새 탭에서 링크 열기」 → 뒤 탭. `mailto:` 링크는 열 수 없다
 //!   newtab-no-window      그동안 host 창 0 개, 팝업 주소 요청 0(보이지 않는 팝업 브라우저도 만들지 않았다)
 
@@ -43,6 +45,7 @@ const js_point: Point = .{ .x = 200, .y = 125 };
 const dl_point: Point = .{ .x = 340, .y = 125 };
 const late_point: Point = .{ .x = 60, .y = 175 };
 const rep_point: Point = .{ .x = 480, .y = 175 };
+const dz_point: Point = .{ .x = 480, .y = 100 };
 const blank_point: Point = .{ .x = 520, .y = 360 };
 
 const Opened = struct { placement: Placement, url: [256]u8 = undefined, url_len: usize = 0 };
@@ -251,6 +254,25 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     report(auto_done and w.opened_len == before_auto and stayed, "newtab-no-gesture", std.fmt.bufPrint(&detail, "끝 {} · 새 탭 {d} · 주소 변경 {d}(이동 하나여야) · 제목 「{s}」", .{ auto_done, w.opened_len - before_auto, w.url_changes - auto_changes, w.title() }) catch "");
 
     // 메뉴 — 다시 불러온 페이지에서(입력 없이 연 시도들이 남긴 것이 없게).
+    try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/newtab") } });
+    _ = w.untilTitle("nt-ready", wait_ms);
+    w.pump(300);
+
+    // 페이지가 받은 놓기 — 이동이 없다. 그 뒤 페이지가 만든 ⌘ 클릭은 지금 탭을 옮기지 않는다. 장은 먼저 쥐여 둔다(빈 곳 누름).
+    _ = try w.click(blank_point, .left, .{}, 300);
+    const drop_changes = w.url_changes;
+    const drop_opened = w.opened_len;
+    try host.send(.{ .drag_data = .{ .browser = browser_id, .kind = .text, .bytes = "dropped" } });
+    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .enter, .point = dz_point, .allowed = 1 } });
+    w.pump(120);
+    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .over, .point = dz_point, .allowed = 1 } });
+    w.pump(120);
+    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .over, .point = dz_point, .allowed = 1 } });
+    w.pump(200);
+    try host.send(.{ .drag_target = .{ .browser = browser_id, .kind = .drop, .point = dz_point } });
+    const dropped = w.untilTitle("nt-dropped", 3_000);
+    w.pump(1_000);
+    report(dropped and w.url_changes == drop_changes and w.opened_len == drop_opened + 1 and w.lastIs(.foreground, port, "/title?t=nt-pl"), "newtab-handled-drop", std.fmt.bufPrint(&detail, "놓기 받음 {} · 지금 탭 이동 {d} · 새 탭 {d}", .{ dropped, w.url_changes - drop_changes, w.opened_len - drop_opened }) catch "");
     try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/newtab") } });
     _ = w.untilTitle("nt-ready", wait_ms);
     w.pump(300);

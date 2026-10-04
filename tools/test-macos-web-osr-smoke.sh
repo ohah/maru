@@ -136,7 +136,8 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'image/png'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
             return
         elif self.path == "/nt-app":
-            # W6e: 위는 보통 링크(가운데 클릭 → 뒤 탭 — 5000 자 주소: 복원 경로의 4 KiB 상한에서 버려지지 않는지), 아래는 `target=_blank`(앞 탭).
+            # W6e: 위는 보통 링크(가운데 클릭 → 뒤 탭 — 5000 자 주소: 새 탭의 첫 이동이 4 KiB 에서 버려지지 않는지. 다시 켤 때의 저장은 여전히 4 KiB 까지),
+            # 아래는 `target=_blank`(앞 탭).
             body = (b"<!doctype html><title>nt</title><style>html,body{margin:0;height:100%}a{position:absolute;left:0;width:100%;display:block}</style><body>"
                     b"<a href='/nt-b?q=" + b"x" * 5000 + b"' style='top:5%;height:40%;background:#ccf'>b</a><a href='/nt-a' target=_blank style='top:55%;height:40%;background:#cfc'>a</a>")
         elif self.path == "/nt-a" or self.path.startswith("/nt-b?"):

@@ -179,7 +179,10 @@ const newtab_page =
     "<button style='left:140px;top:110px' onclick=\"window.open('javascript:void(0)')\">js</button>" ++
     "<a style='left:280px;top:110px' href='data:text/html,hi' target=_blank>dl</a>" ++
     "<button style='left:0;top:160px' onclick=\"setTimeout(function(){window.open('/title?t=nt-late')},2500)\">late</button>" ++
-    "<button style='left:420px;top:160px' onclick=\"var n=0,t=setInterval(function(){window.open('/title?t=nt-r'+(n++));if(n>11)clearInterval(t)},400)\">rep</button>";
+    "<button style='left:420px;top:160px' onclick=\"var n=0,t=setInterval(function(){window.open('/title?t=nt-r'+(n++));if(n>11)clearInterval(t)},400)\">rep</button>" ++
+    // 놓기를 받는 칸 — 받은 뒤(이동 없음) 입력 없이 만든 ⌘ 클릭을 보낸다(W6e 적대 검증 2 차 — 놓기 표시가 그 클릭을 지금 탭 이동으로 두지 않게).
+    "<div style='position:absolute;left:420px;top:60px;width:120px;height:80px;background:#fcc' ondragenter='event.preventDefault()' ondragover='event.preventDefault()' " ++
+    "ondrop=\"event.preventDefault();setTimeout(function(){document.getElementById('pl').dispatchEvent(new MouseEvent('click',{metaKey:true,bubbles:true,cancelable:true}));document.title='nt-dropped'},300)\">dz</div>";
 
 fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/title")) {

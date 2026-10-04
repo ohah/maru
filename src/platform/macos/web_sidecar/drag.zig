@@ -32,6 +32,7 @@ const library = @import("library.zig");
 const browsers = @import("browsers.zig");
 const registry_mod = @import("registry.zig");
 const input_map = @import("input_map.zig");
+const new_tab = @import("new_tab.zig");
 
 const message = protocol.message;
 const allocator = std.heap.c_allocator;
@@ -69,6 +70,14 @@ const Pending = struct {
     url_title: ?[]u8 = null,
     /// CEF 에 enter 를 넘겼고 아직 leave·drop 하지 않았다.
     entered: bool = false,
+    /// 이 끌기가 놓이면 Chromium 이 옮길 주소의 짝(W6e) — enter 에서 잡는다(조각은 enter 뒤 비운다). 링크 주소 또는 첫 파일 경로.
+    expect: ?[]u8 = null,
+    expect_is_path: bool = false,
+
+    fn dropExpect(self: *Pending) void {
+        if (self.expect) |e| allocator.free(e);
+        self.expect = null;
+    }
 
     fn clear(self: *Pending) void {
         for (self.paths.items) |p| allocator.free(p);
@@ -150,6 +159,15 @@ fn target(entry: *registry_mod.Entry, value: message.DragTarget) void {
             const p = ensurePending(entry) orelse return;
             // 페이지 끌기 데이터를 고르면 그 사본을 — 번호가 지금 끌기가 아니면(이미 끝났다) 들어가지 않는다.
             const data = if (value.source != 0) sourceCopy(value.source) orelse return else build(p) orelse return;
+            // 놓으면 옮길 주소의 짝 — 링크면 그 주소, 아니면 첫 파일 경로(W6e). CEF 에 넘기기 전에 읽는다.
+            p.dropExpect();
+            if (data.*.is_link.?(data) != 0) {
+                p.expect = copyUserfree(data.*.get_link_url.?(data));
+                p.expect_is_path = false;
+            } else if (value.source == 0 and p.paths.items.len > 0) {
+                p.expect = allocator.dupe(u8, p.paths.items[0]) catch null;
+                p.expect_is_path = true;
+            }
             // 새 끌기 — 첫 동작은 같은 값이어도 다시 알린다.
             entry.drag_operation = null;
             // 넘긴 drag data 의 참조 하나가 CEF 로 옮겨 간다(`object.release_callback_args` 주석) — 우리는 풀지 않는다.
@@ -161,15 +179,21 @@ fn target(entry: *registry_mod.Entry, value: message.DragTarget) void {
             if (p.entered) host.*.drag_target_drag_leave.?(host);
             p.entered = false;
             p.clear();
+            p.dropExpect();
         },
         .drop => if (pendingOf(entry)) |p| {
             if (p.entered) {
-                // 페이지가 받지 않으면 Chromium 이 그 주소로 옮기자고 새 탭 이동으로 부른다 — 지금 탭에서 옮기게 표시한다(W6e).
-                entry.drop_navigation = true;
+                // 페이지가 받지 않으면 Chromium 이 그 주소로 옮기자고 새 탭 이동으로 부른다 — 놓은 것과 시각을 적어 지금 탭에서 옮기게(W6e).
+                forgetDrop(entry);
+                entry.drop_url = p.expect;
+                entry.drop_is_path = p.expect_is_path;
+                p.expect = null;
+                entry.drop_at_ms = new_tab.nowMs();
                 host.*.drag_target_drop.?(host, &event);
             }
             p.entered = false;
             p.clear();
+            p.dropExpect();
         },
     }
 }
@@ -444,7 +468,28 @@ fn sendImage(entry: *registry_mod.Entry, drag: u32, data: *c.cef_drag_data_t) ?s
 }
 
 /// 브라우저가 닫혔다·렌더러가 죽었다 — 쌓은 조각과 끌기 상태를 버린다(닫힘이면 상태도 푼다).
+/// 놓기 뒤 이동의 짝을 놓는다(W6e — 쓰였거나, 시간이 지났거나, 브라우저가 닫힌다).
+pub fn forgetDrop(entry: *registry_mod.Entry) void {
+    if (entry.drop_url) |u| allocator.free(u);
+    entry.drop_url = null;
+    entry.drop_at_ms = 0;
+}
+
+/// CEF 글(userfree)을 놓으며 UTF-8 사본으로(주소 상한 안 — 넘거나 비면 null).
+fn copyUserfree(value: c.cef_string_userfree_t) ?[]u8 {
+    if (value == null) return null;
+    const api = browsers.state.api;
+    defer api.string_userfree_utf16_free(value);
+    if (value.*.str == null or value.*.length == 0) return null;
+    var utf8: c.cef_string_utf8_t = std.mem.zeroes(c.cef_string_utf8_t);
+    _ = api.string_utf16_to_utf8(value.*.str, value.*.length, &utf8);
+    defer api.string_utf8_clear(&utf8);
+    if (utf8.str == null or utf8.length == 0 or utf8.length > protocol.wire.max_url_bytes) return null;
+    return allocator.dupe(u8, utf8.str[0..utf8.length]) catch null;
+}
+
 pub fn reset(entry: *registry_mod.Entry, free: bool) void {
+    if (free) forgetDrop(entry);
     // 닫힌 브라우저의 페이지 끌기 — CEF 에 알릴 곳이 없다. 데이터만 놓는다(maru 의 늦은 끝 알림은 번호가 맞지 않아 버려진다).
     if (free) if (source) |held| if (held.browser == entry.id) {
         source = null;
@@ -453,6 +498,7 @@ pub fn reset(entry: *registry_mod.Entry, free: bool) void {
     if (free) if (held_file) |held| if (held.browser == entry.id) dropHeldFile();
     const p = pendingOf(entry) orelse return;
     p.clear();
+    p.dropExpect();
     p.entered = false;
     entry.drag_operation = null;
     if (free) {

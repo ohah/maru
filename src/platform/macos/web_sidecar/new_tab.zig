@@ -12,6 +12,7 @@ const protocol = @import("web_sidecar_protocol");
 const c = @import("cef.zig").c;
 const library = @import("library.zig");
 const browsers = @import("browsers.zig");
+const drag = @import("drag.zig");
 const rules = protocol.new_tab;
 
 comptime {
@@ -26,7 +27,16 @@ comptime {
 pub fn grant(browser: protocol.message.BrowserId) void {
     const entry = browsers.state.registry.byId(browser) orelse return;
     entry.new_tab_credit = true;
-    entry.drop_navigation = false;
+}
+
+/// 놓기 뒤 그 이동을 지금 탭으로 보는 시간. 렌더러의 답은 곧 온다 — 페이지가 놓기를 받아 이동이 없었으면 표시가 남지 않게 짧게
+/// (W6e 적대 검증 2 차 — 처음엔 다음 입력까지 남아, 그사이 제스처 없는 요청도 지금 탭에서 옮겼다).
+pub const drop_navigation_ms = 2_000;
+
+pub fn nowMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 /// CEF 의 새 탭 요청 하나. 열면(보냈으면) true — 부르는 쪽은 어느 쪽이든 CEF 에는 취소로 답한다.
@@ -68,9 +78,17 @@ pub fn onOpenUrlFromTab(
     if (disposition == c.CEF_WOD_CURRENT_TAB) return 0;
     // 받지 않은 놓기의 이동(W6d① — 착수 전 실측: 빈 곳에 놓은 파일·링크가 앞 탭·제스처 1 로 여기 온다). 처리기가 없던 때처럼 지금
     // 탭에서 옮긴다 — 새 탭이 아니다(Chrome 과 같다).
-    if (browser != null) if (browsers.state.registry.byCefId(browser.*.get_identifier.?(browser))) |entry| if (entry.drop_navigation) {
-        entry.drop_navigation = false;
-        return 0;
+    if (browser != null) if (browsers.state.registry.byCefId(browser.*.get_identifier.?(browser))) |entry| if (entry.drop_at_ms != 0) {
+        if (nowMs() - entry.drop_at_ms > drop_navigation_ms) {
+            drag.forgetDrop(entry);
+        } else if (disposition == c.CEF_WOD_NEW_FOREGROUND_TAB and user_gesture != 0) if (entry.drop_url) |expected| {
+            var buf: [protocol.wire.max_url_bytes + 4]u8 = undefined;
+            const got = readUrl(url, &buf) orelse "";
+            if (rules.dropMatches(expected, entry.drop_is_path, got)) {
+                drag.forgetDrop(entry);
+                return 0;
+            }
+        };
     };
     _ = request(browser, url, disposition, user_gesture);
     return 1;

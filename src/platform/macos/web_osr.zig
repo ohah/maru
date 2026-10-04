@@ -135,6 +135,9 @@ const Surface = struct {
     notes: std.ArrayList(WebNote) = .empty,
     /// 페이지가 연 새 탭(W6e — `open_tab`) — 온 차례대로, `max_new_tabs` 까지. 그 탭이 있는 창의 tick 이 하나씩 꺼내 간다.
     new_tabs: std.ArrayList(NewTab) = .empty,
+    /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」 답이 준다. sidecar 의 `open_tab`
+    /// 하나가 쓴다 — sidecar 도 같은 규칙을 지키지만 maru 는 sidecar 가 보낸 것을 그대로 믿지 않는다(W6e 적대 검증 2 차).
+    new_tab_credit: bool = false,
 };
 
 /// 페이지가 연 새 탭 하나(W6e). 주소는 걸렀다(`new_tab.urlAllowed`) — 꺼내 간 쪽이 놓는다.
@@ -958,6 +961,12 @@ pub fn sendInput(gpa: std.mem.Allocator, message: Message) bool {
     const s = surfaces.getPtr(browser) orelse return false;
     if (!s.created or state != .running) return false;
     switch (message) {
+        .mouse => |m| if (m.kind == .down) {
+            s.new_tab_credit = true;
+        },
+        .key => |k| if ((k.kind == .raw_down or k.kind == .down) and k.windows_key_code != 0x1b) {
+            s.new_tab_credit = true;
+        },
         .ime_set_composition => |m| {
             if (!s.composing) s.ime_bounds = null; // 새 조합 — 옛 사각형을 쓰지 않는다
             s.composing = m.text.len > 0;
@@ -1789,6 +1798,7 @@ pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, com
     // 띄운 그 메뉴에만 답한다 — sidecar 를 다시 띄운 뒤 같은 번호의 새(아직 안 띄운) 메뉴에 옛 창의 늦은 답이 가지 않게(W6c② 적대 검증).
     if (m.menu != menu or !m.shown) return;
     if (!m.closed) send(gpa, .{ .context_menu_command = .{ .browser = surface_id, .menu = menu, .command = command } });
+    if (!m.closed and command == .open_link_new_tab) s.new_tab_credit = true; // 사용자가 메뉴에서 골랐다(W6e)
     dropContextMenu(gpa, s);
 }
 
@@ -1796,6 +1806,8 @@ pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, com
 
 fn queueNewTab(gpa: std.mem.Allocator, s: *Surface, v: ws.message.OpenTab, now_ms: i64) void {
     if (!ws.new_tab.urlAllowed(v.url) or s.new_tabs.items.len >= max_new_tabs) return;
+    if (!s.new_tab_credit) return; // 이 탭에 보낸 사용자 입력이 없다 — sidecar 가 보냈어도 받지 않는다
+    s.new_tab_credit = false;
     const url = gpa.dupe(u8, v.url) catch return;
     s.new_tabs.append(gpa, .{ .url = url, .placement = v.placement, .arrived_ms = now_ms }) catch gpa.free(url);
 }
@@ -2775,7 +2787,7 @@ test "page drags gather their pieces, are taken by one window, answered once wit
     try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames)); // 버린 것에는 답하지 않는다
 }
 
-test "new tabs a page opens queue per tab in order, only for http(s), at most four, and expire unpicked (W6e)" {
+test "new tabs a page opens queue per tab in order, only for http(s), one per user input maru sent, at most four, and expire unpicked (W6e)" {
     const gpa = std.testing.allocator;
     state = .starting;
     defer {
@@ -2788,11 +2800,25 @@ test "new tabs a page opens queue per tab in order, only for http(s), at most fo
     }
     try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
     try std.testing.expect(!newTabPending(7));
+    const s7 = surfaces.getPtr(7).?;
+    // maru 가 이 탭에 사용자 입력을 보내지 않았으면 sidecar 가 보낸 새 탭도 받지 않는다.
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "https://a.example/0" } }, 0);
+    try std.testing.expect(!newTabPending(7));
+    state = .running;
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 1, .y = 1 } } }));
+    try std.testing.expect(sendInput(gpa, .{ .key = .{ .browser = 7, .kind = .raw_down, .windows_key_code = 0x1b, .native_key_code = 0x35, .character = 0x1b, .unmodified_character = 0x1b } }));
+    try std.testing.expect(!s7.new_tab_credit); // 이동·Esc 는 사용자 활성화가 아니다
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .down, .point = .{ .x = 1, .y = 1 }, .click_count = 1 } }));
+    try std.testing.expect(s7.new_tab_credit);
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "https://a.example/1" } }, 0);
     apply(gpa, .{ .open_tab = .{ .browser = 9, .placement = .foreground, .url = "https://a.example/x" } }, 0); // 모르는 탭
     // maru 가 다시 거른다 — sidecar 가 걸렀어도.
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "https://a.example/again" } }, 0); // 장을 썼다
+    s7.new_tab_credit = true;
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "about:blank" } }, 0);
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "file:///etc/hosts" } }, 0);
+    try std.testing.expect(s7.new_tab_credit); // 거른 주소는 장을 쓰지 않는다
+    try std.testing.expect(sendInput(gpa, .{ .key = .{ .browser = 7, .kind = .raw_down, .windows_key_code = 'A', .native_key_code = 0, .character = 'a', .unmodified_character = 'a' } }));
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "http://b.example/2" } }, 10);
     try std.testing.expect(newTabPending(7));
     try std.testing.expect(!newTabPending(9));
@@ -2806,14 +2832,19 @@ test "new tabs a page opens queue per tab in order, only for http(s), at most fo
     gpa.free(first.url);
     try std.testing.expect(takeNewTab(7) == null);
     // 넷까지만 쥔다.
-    for (0..6) |_| apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://c.example/" } }, 100);
+    for (0..6) |_| {
+        s7.new_tab_credit = true;
+        apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://c.example/" } }, 100);
+    }
     try std.testing.expectEqual(@as(usize, max_new_tabs), surfaces.getPtr(7).?.new_tabs.items.len);
     // 아무 창도 꺼내 가지 않으면 버린다(새로 온 것은 남는다).
+    s7.new_tab_credit = true;
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://d.example/" } }, 5_100);
     expireNewTabs(gpa, 100 + new_tab_pickup_ms);
     try std.testing.expectEqual(@as(usize, max_new_tabs), surfaces.getPtr(7).?.new_tabs.items.len);
     expireNewTabs(gpa, 101 + new_tab_pickup_ms);
     try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(7).?.new_tabs.items.len); // 넘친 d 는 처음부터 버렸다
+    s7.new_tab_credit = true;
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://e.example/" } }, 6_000);
     try std.testing.expect(newTabPending(7)); // 탭이 사라지면 freeSurface 가 놓는다(testing allocator 가 샌 것을 잡는다)
 }

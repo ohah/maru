@@ -65,6 +65,34 @@ pub fn place(opener: usize, active: usize, last_child: ?usize, where: Placement,
     return .{ .at = at, .active = if (at <= active) active + 1 else active, .focus = false };
 }
 
+/// 받지 않은 놓기의 이동인가(W6e) — Chromium 이 그 주소로 옮기자고 부른 주소(`got`)가 놓은 것과 같다. 파일이면 `expected` 는 경로이고
+/// `got` 은 `file://` 주소다(퍼센트 인코딩을 풀어 비교한다 — 폴더는 끝에 `/` 가 붙는다). 링크면 같거나 끝에 `/` 하나만 더 붙었다(호스트
+/// 뿐인 주소를 Chromium 이 정규화한다). `javascript:` 링크는 Chromium 이 `about:blank#blocked` 로 바꿔 부른다 — 무해한 막힘 페이지라
+/// 놓은 것과 같게 본다(W6d① 판정 `drag-javascript`). 다른 주소면 놓기 뒤라도 새 탭 요청으로 다룬다(적대 검증 2 차 — 페이지가 받은 놓기도
+/// 사용자 활성화라, 그 뒤 페이지가 만든 ⌘ 클릭이 놓기 이동처럼 지금 탭을 옮겼다).
+pub fn dropMatches(expected: []const u8, is_path: bool, got: []const u8) bool {
+    if (std.mem.eql(u8, got, "about:blank#blocked")) return true;
+    if (!is_path) return std.mem.eql(u8, got, expected) or
+        (got.len == expected.len + 1 and got[got.len - 1] == '/' and std.mem.startsWith(u8, got, expected));
+    const prefix = "file://";
+    if (!std.ascii.startsWithIgnoreCase(got, prefix)) return false;
+    var rest = got[prefix.len..];
+    var i: usize = 0; // expected 안의 자리
+    while (rest.len > 0) {
+        var byte = rest[0];
+        var used: usize = 1;
+        if (byte == '%' and rest.len >= 3) {
+            byte = std.fmt.parseInt(u8, rest[1..3], 16) catch return false;
+            used = 3;
+        }
+        if (i == expected.len) return byte == '/' and rest.len == used; // 폴더 끝 `/`
+        if (expected[i] != byte) return false;
+        i += 1;
+        rest = rest[used..];
+    }
+    return i == expected.len;
+}
+
 test "dispositions map to Chrome's foreground and background tabs, the rest open nothing" {
     try std.testing.expectEqual(Placement.foreground, placement(disposition.new_foreground_tab).?);
     try std.testing.expectEqual(Placement.background, placement(disposition.new_background_tab).?);
@@ -97,6 +125,21 @@ test "a foreground tab takes focus only from the tab the user is looking at; a b
     try std.testing.expectEqual(Insert{ .at = 1, .active = 2, .focus = false }, place(0, 1, null, .background, false));
     // 활성 탭이 끼운 자리 왼쪽이면 그대로.
     try std.testing.expectEqual(Insert{ .at = 5, .active = 1, .focus = false }, place(2, 1, 4, .background, false));
+}
+
+test "a drop's own navigation matches what was dropped — decoded file paths, a canonical trailing slash, Chromium's javascript block; nothing else" {
+    try std.testing.expect(dropMatches("/Users/a/b c/한.html", true, "file:///Users/a/b%20c/%ED%95%9C.html"));
+    try std.testing.expect(dropMatches("/Users/a/dir", true, "file:///Users/a/dir/"));
+    try std.testing.expect(!dropMatches("/Users/a/b.html", true, "file:///Users/a/c.html"));
+    try std.testing.expect(!dropMatches("/Users/a/b.html", true, "file:///Users/a/b.html.evil"));
+    try std.testing.expect(!dropMatches("/Users/a/b.html", true, "https://evil.example/Users/a/b.html"));
+    try std.testing.expect(!dropMatches("/a", true, "file:///a%2"));
+    try std.testing.expect(dropMatches("https://a.example", false, "https://a.example/"));
+    try std.testing.expect(dropMatches("https://a.example/x?q=1", false, "https://a.example/x?q=1"));
+    try std.testing.expect(!dropMatches("https://a.example/x", false, "https://a.example/y"));
+    try std.testing.expect(!dropMatches("https://a.example/x", false, "https://a.example/x/z"));
+    try std.testing.expect(dropMatches("javascript:alert(1)", false, "about:blank#blocked"));
+    try std.testing.expect(!dropMatches("javascript:alert(1)", false, "javascript:alert(1)x"));
 }
 
 test "a new tab goes right of its opener, after the tabs that opener already opened" {

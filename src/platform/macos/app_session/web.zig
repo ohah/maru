@@ -1137,6 +1137,11 @@ fn osrOpenNewTab(self: *AppSession, opener: u64) bool {
             for (pane.terms.items, 0..) |term, index| {
                 if (term.surfaceId() != opener) continue;
                 if (tab_ops.tabDragTransaction(self, pane) != null) return false;
+                // 자리로 잡아 둔 닫기 확인(사이드바 ✕ 등)이 떠 있다 — 끼우면 그 자리가 다른 탭을 가리킨다(W6e 적대 검증 2 차). 닫힌 뒤에.
+                switch (self.pending_confirm) {
+                    .close => |target| if (target != .window) return false,
+                    else => {},
+                }
                 const request = web_osr.takeNewTab(opener) orelse return false;
                 const visible = tab_index == self.app_window.active_tab and pane == pane_ops.activePane(self) and pane.active_term == index;
                 insertNewTab(self, pane, index, request, visible) catch self.allocator.free(request.url);

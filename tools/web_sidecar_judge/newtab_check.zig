@@ -236,7 +236,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     var letter_char = letter;
     letter_char.kind = .char;
     try host.send(.{ .key = letter_char });
-    const esc: protocol.message.Key = .{ .browser = browser_id, .kind = .raw_down, .windows_key_code = 0x1b, .native_key_code = 0x35, .character = 0x1b, .unmodified_character = 0x1b };
+    // maru 처럼 macOS 키 코드만 싣는다(Windows 코드 0 — 제품 경로, W6f② 적대 검증 4 차).
+    const esc: protocol.message.Key = .{ .browser = browser_id, .kind = .raw_down, .windows_key_code = 0, .native_key_code = 0x35, .character = 0x1b, .unmodified_character = 0x1b };
     try host.send(.{ .key = esc });
     var esc_up = esc;
     esc_up.kind = .up;

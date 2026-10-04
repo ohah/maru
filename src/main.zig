@@ -7971,8 +7971,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             },
                             .overwrite => {
-                                if (editor_files.overwrite(io, &file_changes.reader, completion.result, lease, 4 << 20)) |_| {
-                                    succeeded = true;
+                                if (editor_files.beginOverwrite(&file_changes.reader, completion.result, lease, 4 << 20)) |started| {
+                                    if (started) {
+                                        pending_save = lease;
+                                        save_close_target = if (choice_close) |closing| if (std.meta.eql(closing.document, lease)) closing.target else null else null;
+                                        save_close_requested = false;
+                                        file_notice.show(maru.i18n.t(.win_editor_saving));
+                                    } else succeeded = true;
                                 } else |err| {
                                     if (isFileSaveConflict(err)) {
                                         pending_file_conflict = lease;

@@ -358,3 +358,9 @@ commit을 수행한다. native 7개 Debug/ReleaseFast와 다섯 compiled runtime
 main Request 수명/Book 변경 제한을 유지한다. host 61개·controller 33개가 두 optimize 모드에서
 통과했고 앱 연결의 별도 다섯 compiled runtime 변형도 검출했다. 전체 gate·실앱 검증을 이어가며
 conflict overwrite·초기 open 이관과 전체 잔여 Windows 범위는 계속 진행한다.
+
+§2m.180: 일반 앱의 overwrite 선택을 beginOverwrite/prepareOverwriteAsync와 기존 native
+commit/settlement/cleanup worker 흐름에 연결했다. fresh read의 raw hash와 기존 문서 CAS를
+분리하며 Reader/Completion 해제 뒤에도 저장 이미지를 유지한다. 닫기 intent는 committed
+receipt까지 보유한다. host 66개 Debug/ReleaseFast와 다섯 compiled runtime 변형 검출이
+통과했다. 실앱의 충돌 선택/overwrite·전체 gate, 초기 open 이관과 전체 잔여 범위는 계속 진행한다.

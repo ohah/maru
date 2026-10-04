@@ -11896,3 +11896,26 @@ committing cleanup busy 생략의 다섯 compiled runtime 변형도 검출하고
 정확히 저장하고 프로세스를 종료했다. 별도 두 문서 Save-close도 `BOM + Xbase CRLF`와
 `Ysecond LF`의 전체 bytes 및 프로세스 종료로 확인했다. 입력은 synthetic 메시지 주입이며
 물리 키보드/IME로 세지 않는다. 두 fixture의 코드 hash·byte proof·캡처는 private cache에 보관한다.
+
+### 2m.180 — 명시적 덮어쓰기의 비동기 저장 연결
+
+`Book.beginOverwrite`는 현재 Reader scope·ticket·문서 revision과 최초 identity에 맞는
+새 native 읽기만 수락한다. 읽은 raw hash를 `prepareOverwriteAsync`에 넘기고, 기존 문서의
+saved hash/disk CAS는 실제 commit/ack까지 유지한다. 읽기 이미지 bytes를 빌리지 않으므로
+admission 뒤 Completion/Reader를 해제해도 저장의 독립 이미지와 native 소유권은 유지된다.
+
+일반 앱의 overwrite 선택도 pending-save 흐름으로 들어가 준비·commit·rollback·조회·정리를
+worker에서 실행한다. Save-close intent는 실제 committed receipt까지 보유하며 읽기 완료나
+준비 시작만으로 닫기를 승인하지 않는다. 그 뒤 native 변경은 원래 SourceChanged 충돌로
+되돌리고 취소/권한 철회는 confirmed abort 뒤에 보고한다. 기존 동기 API는 별도 호출자를
+위해 유지하며 일반 앱의 overwrite 선택에서는 호출하지 않는다.
+
+host gate 66개가 Debug/ReleaseFast에서 통과했다. 추가 다섯 native 검사는 독립 이미지와
+old CAS, stale read admission 거절, 읽기 뒤 native 변경, 취소의 외부 bytes 보존, final vote의
+권한 재검증을 증명한다. wrong source·stale read 수락·disk CAS 조기 rebase·취소 무시·final
+permission 생략의 다섯 compiled runtime 변형을 검출하고 원본 source bytes를 복원했다.
+새 제품 exe의 실앱에서도 편집 중 외부 변경을 감지한 뒤 Save-close의 충돌 선택에서
+Overwrite를 실행했다. 외부 bytes 대신 편집 내용 `BOM + Xbase CRLF`가 정확히 저장되고
+프로세스가 정상 종료했다. 소유 HWND에 synthetic 메시지를 주입한 검증이며 물리 입력/IME로
+세지 않는다. 코드 hash·전체 byte proof·선택 화면 캡처는 private cache에 보관한다.
+전체 gate를 이어서 검증하며 초기 open I/O 이관, 물리 입력/IME와 나머지 Windows 범위는 남아 있다.

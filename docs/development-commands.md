@@ -1179,3 +1179,8 @@ scope exhaustion을 검사한다. Debug와 `-Doptimize=ReleaseFast` 모두 실�
 runtime 변형을 검출했다. 일반 앱 연결은 host 61개·controller 33개 Debug/ReleaseFast와
 별도의 다섯 compiled runtime 변형으로 검증한다. 승인 대기 중 권한/경로 변경·취소,
 실제 native commit 뒤 늦은 취소와 read/release/teardown busy를 검사한다.
+
+§2m.180의 `test-win32-editor-host`는 66개다. 비동기 overwrite의 새 native source와 old
+문서 CAS, reader 해제 뒤 이미지 수명, stale read·후속 native 변경 거절, 취소·final permission을
+검사한다. Debug/ReleaseFast와 다섯 compiled runtime 변형을 검증했다. 앱 충돌 선택과 전체
+회귀 gate도 실행한다.

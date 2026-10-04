@@ -150,3 +150,11 @@ Writable 문서의 기본 Windows 문자/삭제 입력과 공통 Undo/Redo는 §
 공통 명령 28개·Windows 입력 9개, 실제 창 입력 7개와 history 명령 6개의 두 뷰 26프레임,
 runtime 변이 5회를 검증했다. 일반 파일은 여전히 읽기 전용이며, 일반 입력→native 저장→
 재열기·물리 IME·dirty-close·감시와 capability/crash 복구는 남아 있다. W8.17은 진행 중이다.
+
+최초 읽기 원본의 full ID와 선택 루트·문서 lifetime을 묶는 native grant는 §2m.150에서 구현했다.
+14개 native 판정과 권한 검사 제거 변이 5회, 실제 창 입력→native 커밋→디스크 바이트→일반
+열기 경로의 독립 재열기/paint를 검증했다. 저장은 fixture 직접 호출이며 원래 뷰는 살아 있다.
+저장 시도 부모 DELETE fence는 분리하고, 원본 객체를 전체 128-bit ID로 열어 보관해 편집 중
+일반 폴더 rename을 허용한다. 원래 상대 이름이 없으면 저장을 거절한다. GUI adoption 전
+capability/crash 복구·일반 Ctrl+S/dirty-close/감시/물리 IME 연결은 계속 해결해야 한다.
+일반 파일은 읽기 전용을 유지한다.

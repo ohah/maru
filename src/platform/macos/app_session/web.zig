@@ -130,11 +130,16 @@ pub fn createAdoptedWebTermInActivePane(self: *AppSession) !u64 {
 /// (surface_ptrs·activeSurface 계약 불변). `kind`·`web_panel_kind`는 모델 Term에 저장(라벨·후속 trust 단일 출처).
 /// Pane에 거는 건 호출자(maybeDebugOpenWebPanel·후속 command)가 한다. teardown은 `destroyTerm`이 kind로 분기.
 pub fn createWebTerm(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !*Term {
+    return createWebTermWithId(self, panel_kind, self.surface_ids.next()); // 앱 전역 발급(비재사용) — terminal과 같은 네임스페이스, 유일
+}
+
+/// 이미 발급한 번호로 web Term 을 만든다(W6f② — sidecar 에 맡겨 둔 번호로 이미 도는 팝업 브라우저를 붙인다). 번호는 `surface_ids` 가
+/// 발급한 것이어야 한다(비재사용).
+pub fn createWebTermWithId(self: *AppSession, panel_kind: web_panel_layout.PanelKind, id: u64) !*Term {
     const term = try self.allocator.create(Term);
     errdefer self.allocator.destroy(term);
     term.* = .{ .kind = .web, .web_panel_kind = panel_kind };
 
-    const id = self.surface_ids.next(); // 앱 전역 발급(비재사용) — terminal과 같은 네임스페이스, 유일
     const slot = try self.live_registry.create(id, 0);
     // union web arm 확정 후 sentinel surface를 제자리 init. init 실패 시 슬롯은 아직 uninit이라(surface undefined)
     // removeUninitialized로 deinit 없이 슬롯만 해제한다(remove=web arm deinit은 surface inited 가정이라 못 씀).
@@ -402,14 +407,20 @@ pub fn tickWebOsr(self: *AppSession) void {
     if (web_osr.takeInstallNotice()) self.showNoticeKey(.web_osr_not_installed);
     if (!web_osr.enabled()) return;
     web_osr.pump(self.allocator, @intCast(app_session_mod.monotonicMs()));
+    // W6f②: sidecar 에 팝업 번호를 맡겨 둔다(앱 전역 발급기 — 쓰이지 않으면 버려진다).
+    var wanted = web_osr.popupIdsWanted();
+    while (wanted > 0) : (wanted -= 1) web_osr.reservePopupId(self.allocator, self.surface_ids.next());
     // W6e: 새 탭을 기다리는 탭들(tick 마다 하나를 연다 — 한 탭이 막혀도 다른 탭의 것은 연다).
     var new_tab_openers: [8]u64 = undefined;
     var new_tab_count: usize = 0;
+    // W6f②: 페이지가 닫은 팝업 탭(tick 마다 하나).
+    var page_closed: u64 = 0;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (!isOsrTerm(term)) continue;
                 const sid = term.surfaceId();
+                if (page_closed == 0 and web_osr.takePageClosed(sid)) page_closed = sid;
                 if (new_tab_count < new_tab_openers.len and web_osr.newTabPending(sid)) {
                     new_tab_openers[new_tab_count] = sid;
                     new_tab_count += 1;
@@ -427,6 +438,7 @@ pub fn tickWebOsr(self: *AppSession) void {
     }
     // W6e: 페이지가 연 새 탭 — tick 마다 하나(탭 목록을 도는 동안 바꾸지 않게 돈 뒤에).
     for (new_tab_openers[0..new_tab_count]) |opener| if (osrOpenNewTab(self, opener)) break;
+    if (page_closed != 0) osrClosePageClosedTab(self, page_closed);
     // W4c: 키 대상이 바뀌었으면(탭·pane 전환·오버레이·창 키) 포커스를 옮기고 조합을 확정한다. 트랜잭션 밖 unmark 뒤 확정
     // 글이 안 왔으면 조합을 그대로 확정한다.
     syncOsrKeyTarget(self);
@@ -1144,12 +1156,37 @@ fn osrOpenNewTab(self: *AppSession, opener: u64) bool {
                 }
                 const request = web_osr.takeNewTab(opener) orelse return false;
                 const visible = tab_index == self.app_window.active_tab and pane == pane_ops.activePane(self) and pane.active_term == index;
-                insertNewTab(self, pane, index, request, visible) catch self.allocator.free(request.url);
+                insertNewTab(self, pane, index, request, visible) catch {
+                    if (request.adopt != 0) web_osr.abandonPopup(self.allocator, request.adopt); // 붙이지 못한 팝업은 닫는다(W6f②)
+                    self.allocator.free(request.url);
+                };
                 return true;
             }
         }
     }
     return false;
+}
+
+/// 페이지가 이어 받은 팝업을 닫았다(`window.close` — W6f②) — 그 탭을 닫는다(Chrome 처럼 확인 없이). 자리로 잡아 둔 닫기 확인이 떠
+/// 있으면(빼면 그 자리가 다른 탭을 가리킨다) 다음 tick 에 — 다시 표시한다.
+fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
+    switch (self.pending_confirm) {
+        .close => |target| if (target != .window) return web_osr.markPageClosed(surface_id),
+        else => {},
+    }
+    for (self.tabs.items, 0..) |tab, tab_index| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items, 0..) |term, index| {
+                if (term.surfaceId() != surface_id) continue;
+                if (tab_ops.tabDragTransaction(self, pane) != null) return web_osr.markPageClosed(surface_id);
+                term_ops.closeTermAt(self, tab_index, pane, index);
+                self.workspaceChanged(.topology);
+                self.metal_dirty = true;
+                if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab page-closed\n", .{});
+                return;
+            }
+        }
+    }
 }
 
 fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: usize, request: web_osr.NewTab, visible: bool) !void {
@@ -1161,12 +1198,14 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
         break :blk null;
     };
     const plan = ws.new_tab.place(opener_index, pane.active_term, last_child, request.placement, visible);
-    const term = try createWebTerm(self, .browser); // 페이지가 연 탭 = 비신뢰 browser(WebKit 의 팝업 adopt 와 같다)
+    // 페이지가 연 탭 = 비신뢰 browser(WebKit 의 팝업 adopt 와 같다). 이어 받은 팝업(W6f②)은 sidecar 에 맡긴 그 번호로 — 브라우저는 이미
+    // 돈다(주소를 싣지 않는다).
+    const term = if (request.adopt != 0) try createWebTermWithId(self, .browser, request.adopt) else try createWebTerm(self, .browser);
     pane.terms.insert(self.allocator, plan.at, term) catch |err| {
         term_ops.destroyTerm(self, term);
         return err;
     };
-    term.pending_url = request.url; // 이제 탭이 놓는다(`destroyTerm`·소비)
+    if (request.adopt != 0) self.allocator.free(request.url) else term.pending_url = request.url; // 주소는 이제 탭이 놓는다(`destroyTerm`·소비)
     if (plan.focus) {
         pane.active_term += @intFromBool(plan.at <= pane.active_term); // 끼운 자리만큼 민 뒤 옮긴다(focusTerm 은 같은 자리면 일찍 끝난다)
         self.focusTerm(plan.at);
@@ -1183,7 +1222,7 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
         for (pane.terms.items, 0..) |t, i| if (t.surfaceId() == opener) {
             opener_now = i;
         };
-        std.debug.print("osr-test newtab at={d} tabs={d} opener={d} active={d} placement={s}\n", .{ plan.at, pane.terms.items.len, opener_now, pane.active_term, @tagName(request.placement) });
+        std.debug.print("osr-test newtab at={d} tabs={d} opener={d} active={d} placement={s} adopted={}\n", .{ plan.at, pane.terms.items.len, opener_now, pane.active_term, @tagName(request.placement), request.adopt != 0 });
     }
 }
 

@@ -135,6 +135,10 @@ const Surface = struct {
     notes: std.ArrayList(WebNote) = .empty,
     /// 페이지가 연 새 탭(W6e — `open_tab`) — 온 차례대로, `max_new_tabs` 까지. 그 탭이 있는 창의 tick 이 하나씩 꺼내 간다.
     new_tabs: std.ArrayList(NewTab) = .empty,
+    /// 페이지가 연 팝업을 이어 받은 탭(W6f②). 페이지가 닫으면(`browser_closed` — maru 가 닫지 않았다) 창이 그 탭을 닫는다.
+    adopted_popup: bool = false,
+    /// 페이지가 그 팝업을 닫았다 — 그 탭이 있는 창이 꺼내 가 탭을 닫는다(`takePageClosed`).
+    page_closed: bool = false,
     /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」 답이 준다. sidecar 의 `open_tab`
     /// 하나가 쓴다 — sidecar 도 같은 규칙을 지키지만 maru 는 sidecar 가 보낸 것을 그대로 믿지 않는다(W6e 적대 검증 2 차).
     new_tab_credit: bool = false,
@@ -145,7 +149,20 @@ pub const NewTab = struct {
     url: []u8,
     placement: ws.message.NewTabPlacement,
     arrived_ms: i64,
+    /// 0 이 아니면 이미 도는 팝업 브라우저(W6f② — 그 번호로 탭을 붙인다, 주소는 싣지 않는다). 붙이지 못하면 `abandonPopup`.
+    adopt: u64 = 0,
 };
+
+// ── W6f②: 팝업 이어 받기 ─────────────────────────────────────────────────────────────────────────────────
+// sidecar 가 돌면 쓰지 않은 번호를 `popup_reserve_target` 개 맡겨 둔다(창 tick 이 앱 전역 발급기에서 떼어 준다). 그 번호의 링이
+// `popup_created` 보다 먼저 오면 쥐어 둔다 — 링은 다시 알려지지 않는다(W6f① 적대 검증). 팝업이 오면 그 번호의 기록을 「만들어짐」으로
+// 두고 연 탭의 새 탭 줄에 붙일 번호로 넣는다. 붙이지 못한 팝업(만료·연 탭 사라짐·창이 못 만듦)은 `orphan_popups` 로 미뤄 pump 가
+// 닫는다(표를 도는 중에 지우지 않게).
+const popup_reserve_target = 2;
+const ReservedPopup = struct { id: u64, ring: ?AppRing = null };
+var popup_reserved: [ws.message.max_popup_reserve]ReservedPopup = undefined;
+var popup_reserved_len: usize = 0;
+var orphan_popups: std.ArrayList(u64) = .empty;
 
 /// 탭마다 쥐는 새 탭 상한 — sidecar 는 사용자 입력 하나에 하나만 보내므로 넘칠 일이 없다. 넘치면 새 것을 버린다.
 const max_new_tabs = 4;
@@ -1043,6 +1060,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     expireDragOuts(gpa, now_ms);
     expireNewTabs(gpa, now_ms);
     receiveRings();
+    closeOrphanPopups(gpa);
     // 비우는 사이 sidecar 가 끝났거나(`profile_in_use` 로 멈춤) 다시 떴다 — 위의 `read`·`p` 는 옛 프로세스의 것이다.
     // 처음엔 그대로 이어가 옛 EOF 로 새 sidecar 를 또 죽은 것으로 세거나, 비운 optional 을 읽었다(적대 점검).
     if (process == null or process_generation != generation) return;
@@ -1813,8 +1831,132 @@ fn queueNewTab(gpa: std.mem.Allocator, s: *Surface, v: ws.message.OpenTab, now_m
 }
 
 fn dropNewTabs(gpa: std.mem.Allocator, s: *Surface) void {
-    for (s.new_tabs.items) |t| gpa.free(t.url);
+    for (s.new_tabs.items) |t| {
+        if (t.adopt != 0) abandonPopup(gpa, t.adopt);
+        gpa.free(t.url);
+    }
     s.new_tabs.clearRetainingCapacity();
+}
+
+/// 붙이지 못한 팝업 — pump 가 닫는다(지금 표를 돌고 있을 수 있다).
+pub fn abandonPopup(gpa: std.mem.Allocator, id: u64) void {
+    orphan_popups.append(gpa, id) catch {
+        // 쥘 곳이 없다 — 브라우저만이라도 닫는다(기록은 다음에 같은 번호가 오지 않으니 남아도 그리지 않는다).
+        send(gpa, .{ .destroy_browser = id });
+    };
+}
+
+fn closeOrphanPopups(gpa: std.mem.Allocator) void {
+    while (orphan_popups.pop()) |id| {
+        if (surfaces.contains(id)) destroy(gpa, id) else if (state == .running or state == .starting) send(gpa, .{ .destroy_browser = id });
+    }
+}
+
+/// 맡겨 둘 번호가 몇 개 더 필요한가(sidecar 가 돌 때만).
+pub fn popupIdsWanted() usize {
+    if (state != .running) return 0;
+    return popup_reserve_target -| popup_reserved_len;
+}
+
+/// 번호 하나를 맡긴다(창 tick 이 앱 전역 발급기에서 떼어 준다 — 쓰이지 않으면 버려진다. 번호는 다시 쓰이지 않는다).
+pub fn reservePopupId(gpa: std.mem.Allocator, id: u64) void {
+    if (popup_reserved_len == popup_reserved.len or state != .running) return;
+    popup_reserved[popup_reserved_len] = .{ .id = id };
+    popup_reserved_len += 1;
+    send(gpa, .{ .popup_reserve = .{ .browser = id } });
+}
+
+fn reservedIndex(id: u64) ?usize {
+    for (popup_reserved[0..popup_reserved_len], 0..) |r, i| if (r.id == id) return i;
+    return null;
+}
+
+fn takeReserved(id: u64) ?ReservedPopup {
+    const i = reservedIndex(id) orelse return null;
+    const r = popup_reserved[i];
+    var j = i + 1;
+    while (j < popup_reserved_len) : (j += 1) popup_reserved[j - 1] = popup_reserved[j];
+    popup_reserved_len -= 1;
+    return r;
+}
+
+/// sidecar 가 사라졌다 — 맡긴 번호도 사라졌다(새 sidecar 에 다시 맡긴다).
+fn forgetReserved() void {
+    for (popup_reserved[0..popup_reserved_len]) |r| if (r.ring) |ring| ring.release();
+    popup_reserved_len = 0;
+}
+
+/// sidecar 가 팝업을 맡긴 번호로 만들었다. 연 탭이 알고 그 탭에 사용자 입력을 보냈으면(장) 그 번호의 기록을 「만들어짐」으로 두고
+/// 연 탭의 새 탭 줄에 넣는다 — 아니면 닫는다(페이지에는 팝업이 닫힌 것으로 보인다).
+fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) void {
+    const reserved = takeReserved(v.browser) orelse {
+        // 맡기지 않은 번호 — 이미 있는 탭이면 건드리지 않는다(고장 난 sidecar), 아니면 닫는다.
+        if (!surfaces.contains(v.browser)) send(gpa, .{ .destroy_browser = v.browser });
+        return;
+    };
+    const accepted = blk: {
+        const opener = surfaces.getPtr(v.opener) orelse break :blk false;
+        if (!opener.new_tab_credit or opener.new_tabs.items.len >= max_new_tabs or !ws.new_tab.popupUrlAllowed(v.url)) break :blk false;
+        opener.new_tab_credit = false;
+        break :blk true;
+    };
+    if (!accepted) {
+        if (reserved.ring) |ring| ring.release();
+        send(gpa, .{ .destroy_browser = v.browser });
+        return;
+    }
+    const size = surfaces.getPtr(v.opener).?.record.size;
+    const queued_url = gpa.dupe(u8, v.url) catch null;
+    const last_url = gpa.dupe(u8, v.url) catch null;
+    if (queued_url == null or last_url == null) {
+        if (queued_url) |u| gpa.free(u);
+        if (last_url) |u| gpa.free(u);
+        if (reserved.ring) |ring| ring.release();
+        send(gpa, .{ .destroy_browser = v.browser });
+        return;
+    }
+    // 그 번호의 기록 — sidecar 는 이미 만들었다(`browser_created` 는 오지 않는다). 다시 띄우면 처음 주소로 보통 탭처럼 되살린다.
+    surfaces.put(gpa, v.browser, .{
+        .record = .{ .surface_id = v.browser, .size = size, .hidden = false },
+        .created = true,
+        .last_url = last_url,
+        .adopted_popup = true,
+    }) catch {
+        gpa.free(queued_url.?);
+        gpa.free(last_url.?);
+        if (reserved.ring) |ring| ring.release();
+        send(gpa, .{ .destroy_browser = v.browser });
+        return;
+    };
+    if (reserved.ring) |ring| if (surfaces.getPtr(v.browser).?.view.adopt(ring)) |never_drawn| never_drawn.release();
+    // `put` 이 표를 옮겼을 수 있다 — 연 탭을 다시 찾는다.
+    const opener = surfaces.getPtr(v.opener).?;
+    opener.new_tabs.append(gpa, .{ .url = queued_url.?, .placement = v.placement, .arrived_ms = now_ms, .adopt = v.browser }) catch {
+        gpa.free(queued_url.?);
+        abandonPopup(gpa, v.browser);
+    };
+}
+
+/// 그 팝업이 아직 탭으로 붙기 전이면 줄에서 뺀다(페이지가 곧바로 닫았다). 뺐으면 true.
+fn dropPendingAdopt(gpa: std.mem.Allocator, id: u64) bool {
+    for (surfaces.values()) |*s| for (s.new_tabs.items, 0..) |t, i| if (t.adopt == id) {
+        gpa.free(s.new_tabs.orderedRemove(i).url);
+        return true;
+    };
+    return false;
+}
+
+/// 꺼내 간 창이 지금 닫지 못했다(탭을 끄는 중·닫기 확인) — 다음 tick 에 다시.
+pub fn markPageClosed(surface_id: u64) void {
+    if (surfaces.getPtr(surface_id)) |s| s.page_closed = true;
+}
+
+/// 페이지가 이 탭의 팝업을 닫았는가 — 그 탭이 있는 창이 꺼내 가 탭을 닫는다(한 번).
+pub fn takePageClosed(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    if (!s.page_closed) return false;
+    s.page_closed = false;
+    return true;
 }
 
 fn expireNewTabs(gpa: std.mem.Allocator, now_ms: i64) void {
@@ -1822,7 +1964,9 @@ fn expireNewTabs(gpa: std.mem.Allocator, now_ms: i64) void {
         var i: usize = 0;
         while (i < s.new_tabs.items.len) {
             if (now_ms - s.new_tabs.items[i].arrived_ms > new_tab_pickup_ms) {
-                gpa.free(s.new_tabs.orderedRemove(i).url);
+                const t = s.new_tabs.orderedRemove(i);
+                if (t.adopt != 0) abandonPopup(gpa, t.adopt);
+                gpa.free(t.url);
             } else i += 1;
         }
     }
@@ -2062,6 +2206,7 @@ fn stop(gpa: std.mem.Allocator) void {
     releaseRunCopy(&run_copy);
     state = .off;
     outbox_pending.clearRetainingCapacity();
+    forgetReserved(); // 내린 sidecar 에 맡긴 번호(W6f②)
     var it = surfaces.iterator();
     while (it.next()) |entry| entry.value_ptr.created = false;
 }
@@ -2094,6 +2239,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         dropDragOut(gpa, s); // 페이지 끌기도 — 답할 곳이 없다(W6d②)
         failFileFetch(s.record.surface_id); // 청한 파일 내용도 오지 않는다(W6d③)
     }
+    forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②)
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
 
@@ -2142,6 +2288,12 @@ fn receiveRings() void {
             .ring => |ring| {
                 const app_ring: AppRing = .{ .generation = ring.generation, .control = @ptrFromInt(ring.control_address), .width = ring.width, .height = ring.height, .ring = ring };
                 const s = surfaces.getPtr(ring.browser) orelse {
+                    // 맡긴 번호의 팝업 링이 `popup_created` 보다 먼저 왔다(W6f②) — 쥐어 둔다(다시 알려지지 않는다).
+                    if (!ring.popup) if (reservedIndex(ring.browser)) |i| {
+                        if (popup_reserved[i].ring) |old| old.release();
+                        popup_reserved[i].ring = app_ring;
+                        continue;
+                    };
                     app_ring.release();
                     continue;
                 };
@@ -2238,6 +2390,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.composing = false;
         },
         .browser_closed => |id| if (surfaces.getPtr(id)) |s| {
+            // 페이지가 이어 받은 팝업을 닫았다(W6f② — maru 가 닫은 탭은 이미 표에 없다). 붙기 전이면 줄에서 빼고 기록을 지우고, 붙었으면
+            // 그 탭을 닫게 한다.
+            if (s.adopted_popup) {
+                if (dropPendingAdopt(gpa, id)) abandonPopup(gpa, id) else s.page_closed = true;
+            }
             dropPopup(s); // 닫힘 알림 없이 사라진다(W6a②)
             setTooltip(gpa, s, ""); // 툴팁도(W6b — 방어)
             dropContextMenu(gpa, s); // 브라우저가 닫히며 CEF 가 메뉴를 거뒀다(W6c② — 닫힘 알림은 sidecar 가 보내지 않는다)
@@ -2276,7 +2433,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .open_tab => |v| if (surfaces.getPtr(v.browser)) |s| queueNewTab(gpa, s, v, now_ms),
         // W6f①: maru 는 아직 번호를 맡기지 않는다(`popup_reserve` — W6f② 가 붙인다). 그래도 오면 이어 받을 탭이 없다 — 닫는다(페이지에는
         // 팝업이 닫힌 것으로 보인다). 쥐는 이 없는 브라우저를 남기지 않는다.
-        .popup_created => |v| if (surfaces.getPtr(v.browser) == null) send(gpa, .{ .destroy_browser = v.browser }),
+        .popup_created => |v| adoptPopup(gpa, v, now_ms),
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             const owned = gpa.dupe(u8, v.url) catch return;
             if (s.url) |old| gpa.free(old);
@@ -2850,6 +3007,66 @@ test "new tabs a page opens queue per tab in order, only for http(s), one per us
     s7.new_tab_credit = true;
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://e.example/" } }, 6_000);
     try std.testing.expect(newTabPending(7)); // 탭이 사라지면 freeSurface 가 놓는다(testing allocator 가 샌 것을 잡는다)
+}
+
+test "popups the sidecar made with a reserved id are adopted as tabs of their opener, or closed when they cannot be (W6f②)" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        orphan_popups.deinit(gpa);
+        orphan_popups = .empty;
+        popup_reserved_len = 0;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 300, .height = 200, .scale = 2 }, .hidden = false }, .created = true });
+    try std.testing.expectEqual(@as(usize, 2), popupIdsWanted());
+    reservePopupId(gpa, 100);
+    reservePopupId(gpa, 101);
+    try std.testing.expectEqual(@as(usize, 0), popupIdsWanted());
+    // 맡기지 않은 번호 — 붙이지 않는다(이미 있는 탭이면 건드리지도 않는다).
+    apply(gpa, .{ .popup_created = .{ .opener = 7, .browser = 555, .placement = .foreground, .url = "https://a.example/" } }, 0);
+    apply(gpa, .{ .popup_created = .{ .opener = 555, .browser = 7, .placement = .foreground, .url = "https://a.example/" } }, 0);
+    try std.testing.expect(!surfaces.contains(555) and surfaces.contains(7) and !newTabPending(7));
+    // 연 탭에 사용자 입력을 보내지 않았다 — 닫는다(그 번호는 쓰였다).
+    apply(gpa, .{ .popup_created = .{ .opener = 7, .browser = 100, .placement = .foreground, .url = "https://a.example/" } }, 0);
+    try std.testing.expect(!surfaces.contains(100) and !newTabPending(7));
+    try std.testing.expectEqual(@as(usize, 1), popupIdsWanted());
+    // 누른 뒤 — 「만들어짐」 기록과 연 탭의 줄. 크기는 연 탭의 것.
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .down, .point = .{ .x = 1, .y = 1 }, .click_count = 1 } }));
+    apply(gpa, .{ .popup_created = .{ .opener = 7, .browser = 101, .placement = .background, .url = "about:blank" } }, 0);
+    const p = surfaces.getPtr(101).?;
+    try std.testing.expect(p.created and p.adopted_popup and p.record.size.scale == 2);
+    try std.testing.expectEqualStrings("about:blank", p.last_url.?);
+    const taken = takeNewTab(7).?;
+    try std.testing.expectEqual(@as(u64, 101), taken.adopt);
+    try std.testing.expectEqual(ws.message.NewTabPlacement.background, taken.placement);
+    gpa.free(taken.url);
+    // 붙은 뒤 페이지가 닫았다 — 창이 한 번 꺼내 간다.
+    apply(gpa, .{ .browser_closed = 101 }, 0);
+    try std.testing.expect(takePageClosed(101) and !takePageClosed(101));
+    // 붙기 전에 닫혔다 — 줄에서 빼고 기록을 지운다.
+    reservePopupId(gpa, 102);
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .down, .point = .{ .x = 1, .y = 1 }, .click_count = 1 } }));
+    apply(gpa, .{ .popup_created = .{ .opener = 7, .browser = 102, .placement = .foreground, .url = "https://a.example/b" } }, 0);
+    try std.testing.expect(newTabPending(7));
+    apply(gpa, .{ .browser_closed = 102 }, 0);
+    try std.testing.expect(!newTabPending(7));
+    closeOrphanPopups(gpa);
+    try std.testing.expect(!surfaces.contains(102));
+    // 아무 창도 붙이지 않으면 만료 — 닫는다.
+    reservePopupId(gpa, 103);
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .down, .point = .{ .x = 1, .y = 1 }, .click_count = 1 } }));
+    apply(gpa, .{ .popup_created = .{ .opener = 7, .browser = 103, .placement = .foreground, .url = "https://a.example/c" } }, 0);
+    expireNewTabs(gpa, new_tab_pickup_ms + 1);
+    closeOrphanPopups(gpa);
+    try std.testing.expect(!surfaces.contains(103) and !newTabPending(7));
+    // sidecar 를 잃으면 맡긴 번호도 잊고 다시 맡긴다.
+    reservePopupId(gpa, 104);
+    forgetSidecar(gpa);
+    try std.testing.expectEqual(@as(usize, 2), popupIdsWanted());
 }
 
 test "dragged image files are fetched only when asked, gathered apart from the drag, checked against the announced size, and failed when the sidecar or browser goes (W6d③)" {

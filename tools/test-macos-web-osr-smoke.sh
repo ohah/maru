@@ -140,6 +140,16 @@ class H(http.server.BaseHTTPRequestHandler):
             # 아래는 `target=_blank`(앞 탭).
             body = (b"<!doctype html><title>nt</title><style>html,body{margin:0;height:100%}a{position:absolute;left:0;width:100%;display:block}</style><body>"
                     b"<a href='/nt-b?q=" + b"x" * 5000 + b"' style='top:5%;height:40%;background:#ccf'>b</a><a href='/nt-a' target=_blank style='top:55%;height:40%;background:#cfc'>a</a>")
+        elif self.path in ("/pop-app", "/pop-stay"):
+            # W6f②: 누르면 팝업을 연다 — 팝업이 opener 로 알리면 1.5 초 뒤 닫는다(팝업이 앞 탭이 되어 다시 누를 수 없다). `/pop-stay` 는 닫지
+            # 않는다(그 팝업 탭의 스크린샷).
+            close = b"" if self.path == "/pop-stay" else b"setTimeout(function(){window.w.close();setTimeout(function(){ping('closed-'+window.w.closed)},500)},1500)"
+            body = (b"<!doctype html><title>pop</title><style>html,body{margin:0;height:100%}a{position:absolute;left:0;top:0;width:100%;height:100%;display:block;background:#ccf}</style><body>"
+                    b"<a href='#' onclick=\"window.w=window.open('/pop-child','pc');return false\">open</a>"
+                    b"<script>function ping(e){new Image().src='/ev?e='+e+'&t='+Date.now()}"
+                    b"addEventListener('message',function(m){ping('msg-'+m.data);" + close + b"})</script>")
+        elif self.path == "/pop-child":
+            body = b"<!doctype html><title>child</title><style>html,body{margin:0;height:100%;background:#20a060}</style><body><script>if(window.opener)window.opener.postMessage('hi','*')</script>"
         elif self.path == "/nt-a" or self.path.startswith("/nt-b?"):
             body = b"<!doctype html><title>nt target</title><body>target"
         elif self.path == "/nav-a":
@@ -1077,6 +1087,54 @@ want = [f'osr-test newtab at={o + 1} tabs={n + 1} opener={o} active={o} placemen
 check(len(report) == 3 and report == want, f'two middle clicks open background tabs right of the page in order, then a target=_blank link opens a foreground tab after them ({report})')
 long_b = '/nt-b?q=' + 'x' * 5000
 check(requests.count(long_b) == 2 and requests.count('/nt-a') == 1, f'each new tab loads its address — the 5000-character one too ({[r[:20] + "…" + str(len(r)) for r in requests if r.startswith("/nt-")]})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6f②: 원래 페이지와 이어진 팝업 ─────────────────────────────────────────────────────────────────────────
+# 누르면 `window.open` — sidecar 가 maru 가 맡긴 번호로 팝업 브라우저를 만들고 maru 가 그 번호의 탭을 원래 탭 오른쪽에 붙인다(앞 탭).
+# 팝업은 `window.opener.postMessage` 로 알리고, 원래 페이지는 그것을 받은 뒤 `w.close()` — 그 탭이 닫힌다. 팝업 주소는 팝업 브라우저가
+# 한 번만 부른다(maru 가 다시 옮기지 않는다).
+cat > "$root/popup.txt" <<SCRIPT
+sleep 9000
+view down 0.6 0.5 0 0
+sleep 60
+view up 0.6 0.5 0 0
+sleep 5000
+SCRIPT
+# 먼저 닫지 않는 판 — 붙인 팝업 탭을 찍는다(찍고 나면 앱이 끝난다).
+rm -f "$root/popup.ppm"
+run_app /pop-stay 25000 "$root/popup-stay.summary" MARU_WEB_OSR_TEST_INPUT="$root/popup.txt" MARU_SCREENSHOT="$root/popup.ppm" MARU_SCREENSHOT_DELAY_MS=14000
+: > "$root/requests.log"
+run_app /pop-app 20000 "$root/popup.summary" MARU_WEB_OSR_TEST_INPUT="$root/popup.txt"
+grep -a '^osr-test newtab' "$root/app-pop-app.log" > "$root/popup.report" || true
+cat "$root/popup.report"
+python3 - "$root/popup.report" "$root/requests.log" "$root/popup.ppm" <<'PY' || fail "a popup the page opened did not stay connected to it"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+adopted = [l for l in report if l.startswith('osr-test newtab at=')]
+check(len(adopted) == 1 and 'placement=foreground adopted=true' in adopted[0], f'window.open becomes one foreground tab right of the page, the sidecar\'s own popup browser adopted ({adopted})')
+check(requests.count('/pop-child') == 1, f'the popup page loads once — in the popup browser, not again by maru ({requests.count("/pop-child")})')
+ev = [l for l in requests if l.startswith('/ev?e=')]
+check(any(l.startswith('/ev?e=msg-hi') for l in ev), f'the popup reached the page through window.opener.postMessage ({ev})')
+check(any(l.startswith('/ev?e=closed-true') for l in ev) and any(l.startswith('osr-test newtab page-closed') for l in report), f'the page closed the popup — it sees closed and its tab is closed ({ev}, {report})')
+# 붙인 팝업 탭이 그려진다 — 맡긴 번호의 링이 `popup_created` 보다 먼저 와도 잃지 않는다(초록 바탕이 본문을 채운다).
+green = 0
+try:
+    d = open(sys.argv[3], 'rb').read()
+    _, dims, _, px = d.split(b'\n', 3)
+    w, h = map(int, dims.split())
+    want = bytes.fromhex('20a060')
+    green = sum(1 for i in range(0, w * h * 3, 3) if px[i:i + 3] == want)
+    area = w * h
+except Exception as e:
+    area = 0
+check(area > 0 and green > area // 4, f'the adopted popup tab draws its page (green {green} of {area} px)')
 sys.exit(0 if ok else 1)
 PY
 

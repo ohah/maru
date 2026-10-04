@@ -466,15 +466,15 @@ pub fn checkDragOutData(kind: message.DragOutDataKind, bytes: []const u8) Error!
     switch (kind) {
         .text, .html => try checkImeText(bytes),
         .url => try checkUrl(bytes),
-        .url_title => try checkDialogText(bytes),
-        .image_png => if (bytes.len > max_ime_text_bytes) return error.TextTooLarge,
+        .url_title, .file_name => try checkDialogText(bytes),
+        .image_png, .file_contents => if (bytes.len > max_ime_text_bytes) return error.TextTooLarge,
     }
 }
 
 fn dragOutDataLimit(kind: message.DragOutDataKind) usize {
     return switch (kind) {
-        .url_title => max_text_bytes,
-        .text, .html, .image_png => max_ime_text_bytes,
+        .url_title, .file_name => max_text_bytes,
+        .text, .html, .image_png, .file_contents => max_ime_text_bytes,
         .url => max_url_bytes,
     };
 }

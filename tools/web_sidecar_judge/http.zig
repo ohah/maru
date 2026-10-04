@@ -100,6 +100,44 @@ fn serve(fd: c_int) void {
     }
 }
 
+/// W6d③ 이미지 — 48×48 빨간 PNG(판정자가 끌어낸 파일 내용과 바이트로 대조한다).
+pub const red_png = "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x30\x00\x00\x00\x30\x08\x02\x00\x00\x00\xd8\x60\x6e\xd0\x00\x00\x00\x41\x49\x44\x41\x54\x78\x9c\xed\xce\x41\x0d\x00\x30\x10\x04\xa1\xf3\x6f\xba\x95\xb1\xf3\x20\x41\x00\xf7\xee\x52\xf6\x03\x21\x21\x21\xa1\x98\xfd\x40\x48\x48\x48\x28\x66\x3f\x10\x12\x12\x12\x8a\xd9\x0f\x84\x84\x84\x84\x62\xf6\x03\x21\x21\x21\xa1\x98\xfd\xa0\x1e\xfa\xdf\x13\xf7\x79\x5f\x8b\x00\x88\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+var big_svgs: [2]?[]u8 = .{ null, null };
+
+/// `/img/<종류>/<이름>`(W6d③): `png` PNG, `pngcd` PNG + `Content-Disposition: attachment; filename="../../evil.command"`,
+/// `big6`·`big40` 그만큼 MiB 의 SVG(주석으로 채운다 — 파일 상한 32 MiB 안과 밖).
+fn image(conn: c_int, rest: []const u8) void {
+    var hb: [512]u8 = undefined;
+    var body: []const u8 = red_png;
+    var ctype: []const u8 = "image/png";
+    var extra: []const u8 = "";
+    if (std.mem.startsWith(u8, rest, "pngcd/")) extra = "Content-Disposition: attachment; filename=\"../../evil.command\"\r\n";
+    const big: ?usize = if (std.mem.startsWith(u8, rest, "big6/")) 0 else if (std.mem.startsWith(u8, rest, "big40/")) 1 else null;
+    if (big) |i| {
+        ctype = "image/svg+xml";
+        if (big_svgs[i] == null) {
+            const mib: usize = if (i == 0) 6 else 40;
+            const size = mib * 1024 * 1024;
+            const b = std.heap.c_allocator.alloc(u8, size) catch return;
+            const head_s = "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><rect width='48' height='48' fill='green'/><!--";
+            const tail_s = "--></svg>";
+            @memcpy(b[0..head_s.len], head_s);
+            @memset(b[head_s.len .. size - tail_s.len], 'x');
+            @memcpy(b[size - tail_s.len ..], tail_s);
+            big_svgs[i] = b;
+        }
+        body = big_svgs[i].?;
+    }
+    const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n{s}Connection: close\r\n\r\n", .{ ctype, body.len, extra }) catch return;
+    _ = std.c.write(conn, head.ptr, head.len);
+    var off: usize = 0;
+    while (off < body.len) {
+        const w = std.c.write(conn, body[off..].ptr, body.len - off);
+        if (w <= 0) break;
+        off += @intCast(w);
+    }
+}
+
 fn handle(conn: c_int) void {
     var req: [4096]u8 = undefined;
     const n = std.c.read(conn, &req, req.len);
@@ -110,6 +148,7 @@ fn handle(conn: c_int) void {
     const target = parts.next() orelse return;
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
     const query = if (std.mem.indexOfScalar(u8, target, '=')) |eq| target[eq + 1 ..] else "";
+    if (std.mem.startsWith(u8, path, "/img/")) return image(conn, path["/img/".len..]);
 
     var body_buf: [8192]u8 = undefined;
     const flaky_image = std.mem.eql(u8, path, "/flaky.svg") and flaky_requests.fetchAdd(1, .monotonic) > 0;
@@ -266,6 +305,7 @@ const select_page =
 /// 받는 칸(`z` — 끄는 동안 본 종류·파일 수·읽힌 글 길이, 놓으면 이름:크기·종류·글·주소, 첫 파일 내용, 폴더면 안 이름과 첫 파일 내용), 글 칸(`ta` —
 /// 들어간 값), 이동을 고르는 목록(`L` — 놓인 글|사용자 정의 형식 `application/x-maru`). W6d② 끌어내기: 끌 요소(`d` — 글과 사용자
 /// 정의 형식을 싣는다, `dend` 는 끝난 동작+횟수), 링크(`aend`), 글(`p`), 긴 글(`g` — 「가」 6000 자), 페이지가 받은 mouseup 수(`up`).
+/// W6d③: 오른쪽 위에 이미지 넷(`/img/` — PNG·`Content-Disposition` 이름·6 MiB·40 MiB SVG).
 const drag_page =
     "<!doctype html><title>loading</title><style>html,body{margin:0;font:16px sans-serif;width:640px;height:480px}body>*{position:absolute;margin:0;box-sizing:border-box}</style><body>" ++
     "<div id=z style='left:20px;top:20px;width:280px;height:160px;background:#cfc'>zone</div>" ++
@@ -275,6 +315,10 @@ const drag_page =
     "<a id=a href='/title?t=linked' title='link title' style='left:360px;top:300px;width:120px;height:24px'>a link</a>" ++
     "<p id=p style='left:20px;top:330px;width:300px;height:24px'>select these words</p>" ++
     "<div id=g style='left:20px;top:380px;width:300px;height:40px;overflow:hidden;font-size:4px'>" ++ ("가" ** 6000) ++ "</div>" ++
+    "<img style='left:520px;top:20px;width:48px;height:48px' src='/img/png/cat.png'>" ++
+    "<img style='left:520px;top:100px;width:48px;height:48px' src='/img/pngcd/plain.png'>" ++
+    "<img style='left:520px;top:180px;width:48px;height:48px' src='/img/big6/six.svg'>" ++
+    "<img style='left:520px;top:260px;width:48px;height:48px' src='/img/big40/forty.svg'>" ++
     \\<script>
     \\var S={n:0};function put(k,v){S[k]=v;S.n++;document.title='dnd '+JSON.stringify(S).slice(0,900)}
     \\var z=document.getElementById('z');

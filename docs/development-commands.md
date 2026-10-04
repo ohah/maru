@@ -1066,3 +1066,8 @@ Controller의 기존 독립 gate `test-win32-save-controller`는 15개를 유지
 §2m.157의 `zig build test-win32-editor-backup`는 prepare 이후 Undo의 실제 commit/abort 두 행을
 추가해 32개다. `zig build test-editor-save-request`는 겹치는 이미지 수명, reload epoch 격리,
 counter 상한을 포함해 14개이며 전 할당 실패가 이미지 보호를 남기지 않는지도 검사한다.
+
+§2m.158의 `zig build test-win32-editor-host`는 aggregation 2개·native 14개·순수 정책
+2개, 총 18개다. 앱의 native save grant·닫기 선택·기존 백업 복원과 충돌 보존을 검사한다.
+`zig build test-win32-editor-backup`은 기존 root를 생성하지 않는 조회와 private 레코드
+재열기 두 판정을 더해 34개다. 두 gate는 Windows native 호스트에서 실행한다.

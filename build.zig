@@ -1581,8 +1581,13 @@ pub fn build(b: *std.Build) void {
     const backup_store_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor backup"} });
     const backup_store_step = b.step("test-win32-editor-backup", "Verify private native recovery storage and restored document authority");
     const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
-    run_backup_store_tests.addArg("--maru-expect-tests=32"); // 2 aggregation blocks + 28 native tests + 2 pure policy tests
+    run_backup_store_tests.addArg("--maru-expect-tests=34"); // 2 aggregation blocks + 30 native tests + 2 pure policy tests
     backup_store_step.dependOn(&run_backup_store_tests.step);
+    const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
+    const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
+    const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
+    run_editor_host_tests.addArg("--maru-expect-tests=18"); // 2 aggregation blocks + 14 native tests + 2 pure policies
+    editor_host_step.dependOn(&run_editor_host_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {
         const save_crash_probe = b.addExecutable(.{
@@ -4186,6 +4191,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(document_grant_step);
     test_step.dependOn(save_controller_step);
     test_step.dependOn(backup_store_step);
+    test_step.dependOn(editor_host_step);
     test_step.dependOn(save_crash_step);
     test_step.dependOn(editor_input_step);
     test_step.dependOn(&run_internal_contract_tests.step);

@@ -11337,3 +11337,42 @@ Prepare 이후 편집을 포함한 더 넓은 crash 시점, 일반 dirty 앱 재
 미초기화, 결정 뒤 재예약 누락의 다섯 변형이 컴파일 후 runtime 실패로 검출됐다. epoch 변형은
 보호 수 1 대신 0을 검출한 뒤 cleanup assertion으로 종료했다. 컴파일 실패를 성공으로 세지 않았고,
 정확한 byte 원복 뒤 shared 14개와 native backup 32개가 다시 통과했다.
+
+### 2m.158 — 일반 파일의 native 저장 소유권과 기존 백업 복원
+
+L4 `platform/windows/editor/file_host.zig`의 `Book`이 앱 수명 동안 문서별 grant와
+controller를 소유한다. `document.zig`는 view를 붙이고 `main.zig`는 열기·저장·닫기를
+연결한다. 공유 L2 문서 모델에 Windows 폴더나 API를 넣지 않는다. 일반 파일은 실제
+선택한 handle의 NTFS·transaction 지원·쓰기 가능 여부와 무수정 native rollback probe가
+통과할 때 editable이며, capability가 없으면 기존 readonly 열기로 돌아간다.
+Volume 판정 API의 근거는 [Microsoft GetVolumeInformationByHandleW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew)다.
+
+파일 안의 Ctrl+S는 기존 resolver의 unbind와 rebind를 존중해 native controller로 보낸다.
+마지막 dirty view 또는 창을 닫을 때 저장·버리기·취소를 묻는다. 공유 peer 닫기는 암묵적으로
+저장하지 않으며, prepared/uncertain 소유권이 남으면 teardown을 거절한다. 대상은 배열
+index가 아니라 registry·view id·문서 generation으로 식별한다. 충돌 또는 저장 실패는
+본문과 복구 레코드를 유지한다. 일반 파일 열기는 LOCALAPPDATA의 기존 private root를
+생성 없이 확인하고, 존재하는 레코드를 편집 전에 복원한다. 읽기 실패는 readonly로 제한해
+읽지 못한 레코드를 덮지 않는다. 복원은 기존 disk hash를 유지하고 비모달 상태표시를 사용한다.
+
+집중 host gate 18개는 일반 reopen 복원·외부 변경 CAS, close 선택과 peer 수명, capability,
+할당 실패를 검사한다. Backup gate는 기존 root 무생성 조회 두 행을 더해 34개다.
+Volume guard·peer grant·dirty acceptance·prepared teardown·view capability, cancel·record
+삭제·peer 암묵 저장·save 선택·stable target의 10개 변형은 모두 컴파일 후 runtime 실패로
+검출됐고 정확한 원복 뒤 host 18개가 통과했다. 실제 창의 앱 저장 경로 판정과 물리
+키보드/IME, 일반 앱 프로세스 종료·재실행, 감시·비동기 I/O 및 더 넓은 crash 시점은 별도
+검증 대상이다. W8.17 전체 완료를 뜻하지 않는다.
+
+실제 창 후속 판정은 세 버튼을 D3D11로 그린 뒤 창 Enter/Escape 이벤트로 저장·버리기·취소
+intent를 확인했다(`editor_close_modal_smoke_ok=true`, 3 cases). 물리 입력은 아니다. 외부
+PNG capture는 창 handle을 찾지 못해 두 실행 모두 0장으로 끝났다. 시각 확인은 미검증이며
+UI 완료 주장은 보류한다.
+
+포커스 버튼 실제 PNG 확인에서 라벨이 버튼 위로 이동해 사라지는 결함을 발견했다. 원인은
+modal text를 셀 row/col로 절삭하면서 pixel fill과 origin이 갈린 것이었다. 기존 공유
+RichTextArtifact의 placement와 Windows cellFromGpuGlyph를 사용해 정확한 origin과 색상을
+보존한다. 후속 capture는 process-owned 실제 Maru 창을 선택해 PNG를 확보했고 저장 라벨이
+버튼 안에서 보임을 확인했다. 가로·세로 origin 1px 이동, 라벨 색 변경, 같은 행 span 혼용,
+첫 라벨 glyph 누락의 다섯 변형이 모두 빌드 후 실제 창에서 EditorCloseLabel 오류로 검출됐다.
+공유 lowering 원본을 정확히 복구한 뒤 실제 창의 세 선택이 다시 통과했다. 물리 입력과
+일반 앱 프로세스 종료·재실행은 여전히 남아 있다.

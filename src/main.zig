@@ -57,6 +57,7 @@ test {
     _ = @import("platform/windows/editor/transaction.zig");
     _ = @import("platform/windows/editor/document_grant.zig");
     _ = @import("platform/windows/editor/save_controller.zig");
+    _ = @import("platform/windows/editor/file_host.zig");
     _ = @import("platform/windows/editor/backup_store.zig");
     _ = scm_surface;
     _ = agent_surface;
@@ -4307,6 +4308,293 @@ test "Windows editor input aggregation" {
 const OpenFile = editor_document.OpenFile;
 const OpenOutcome = editor_document.OpenOutcome;
 const openFileFor = editor_document.openFileFor;
+const file_host = @import("platform/windows/editor/file_host.zig");
+const FileCloseTarget = union(enum) { file: maru.session.editor.document_registry.Lease, window };
+
+fn recoverAppFile(book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, view: *OpenFile, local_override: ?[]const u8) !void {
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    const state = book.registry.get(view.document).?;
+    if (state.opened.?.file.read_only) return;
+    if (owner.* == null) {
+        const environment = if (local_override == null) maru.os_env.allocValue(book.allocator, "LOCALAPPDATA") else null;
+        defer if (environment) |value| book.allocator.free(value);
+        const selected = local_override orelse environment;
+        const existing = backups.LocalData.openExisting(book.allocator, io, selected, 4 << 20) catch |err| {
+            // No existing record means editing can create the private store at
+            // its first deadline. Other failures cannot authorize overwriting
+            // recovery data that we have not read successfully.
+            if (err == error.NotFound or err == error.FileNotFound) return;
+            return err;
+        };
+        owner.* = existing;
+    }
+    var record = (try owner.*.?.store.read(io, backups.identity(state).?)) orelse return;
+    defer record.deinit();
+    const peers = [_]maru.session.editor.edit_commands.Participant{.{ .view = &view.navigation, .id = view.document.id }};
+    try backups.restorePath(book.allocator, state, &record, &peers, 0, 4 << 20);
+    try view.refresh(book.allocator);
+    view.recovered = true;
+}
+
+fn openAppFile(book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, path: []const u8, local_override: ?[]const u8) OpenOutcome {
+    var opened = editor_document.openFileForHost(book, io, path);
+    if (opened == .opened) {
+        recoverAppFile(book, io, owner, &opened.opened, local_override) catch |err| {
+            if (err == error.OutOfMemory) {
+                book.release(io, opened.opened.document, true) catch unreachable;
+                opened.opened.deinit(book.allocator);
+                return .out_of_memory;
+            }
+            std.log.warn("editor recovery unavailable; keeping original readonly({s})", .{@errorName(err)});
+            book.registry.get(opened.opened.document).?.opened.?.file.read_only = true;
+        };
+    }
+    return opened;
+}
+
+fn applyFileKey(book: *file_host.Book, io: std.Io, resolver: maru.config.keybinding.KeyBindingResolver, file: *OpenFile, event: maru.terminal.KeyEvent, context: OpenFile.InputContext) !?[]u8 {
+    if (file_host.saveKey(resolver, event)) {
+        const state = book.registry.get(file.document) orelse return error.StaleDocument;
+        if (state.opened.?.file.read_only) return error.ReadOnly;
+        _ = try book.save(io, file.document, 4 << 20);
+        return null;
+    }
+    return file.applyKey(book.allocator, event, context);
+}
+
+fn fileSaveNotice(err: anyerror) maru.i18n.Key {
+    return switch (err) {
+        error.SourceChanged, error.IdentityChanged, error.DiskFingerprintChanged, error.NamespaceChanged => .app_save_external_conflict,
+        error.FileTooLarge => .app_save_too_large,
+        error.ReadOnly, error.NoSaveGrant => .editor_readonly,
+        else => .app_save_failed,
+    };
+}
+
+fn showFileClose(state: *maru.chrome.components.confirm.State) void {
+    state.showChoices(maru.i18n.t(.fp_unsaved_confirm), .{ .primary = maru.i18n.t(.btn_save), .alternate = maru.i18n.t(.btn_discard_changes), .cancel = maru.i18n.t(.common_cancel) });
+}
+
+fn fileIndexForLease(views: []const OpenFile, lease: maru.session.editor.document_registry.Lease) ?usize {
+    for (views, 0..) |view, i| if (view.document.owner == lease.owner and view.document.id == lease.id and std.meta.eql(view.document.document, lease.document)) return i;
+    return null;
+}
+
+/// Approve only after native save/close guards and recovery-record deletion.
+/// An error leaves every view/body alive; already removed records are rearmed.
+fn approveFileClose(io: std.Io, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, action: maru.chrome.components.confirm.Action) !bool {
+    if (action == .cancelled or action == .extra) return false;
+    const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
+    if (one) |i| try book.requireClose(views[i].document, true) else try book.requireIdle();
+    if (one) |i| if (book.registry.viewCount(views[i].document).? > 1) {
+        try book.release(io, views[i].document, true);
+        return true;
+    };
+    if (action == .confirmed) for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        const state = book.registry.get(view.document) orelse return error.StaleDocument;
+        if (!state.opened.?.isDirty()) continue;
+        _ = try book.save(io, view.document, 4 << 20);
+        if (state.opened.?.isDirty()) return error.SaveBusy;
+    };
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    errdefer for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        if (book.registry.get(view.document)) |state| backups.noteDecision(state, 0);
+    };
+    for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        if (one != null and book.registry.viewCount(view.document).? > 1) continue;
+        const state = book.registry.get(view.document) orelse return error.StaleDocument;
+        if (state.notifications.backup_on_disk) {
+            const store = if (owner.*) |*value| &value.store else return error.BackupRootUnavailable;
+            try store.drop(io, backups.identity(state) orelse return error.MissingDocument);
+        }
+        state.notifications.backup_on_disk = false;
+        state.notifications.backup_dirty = false;
+    }
+    if (one) |i| try book.release(io, views[i].document, true);
+    return true;
+}
+
+const FileCloseFixture = struct {
+    tmp: std.testing.TmpDir,
+    documents: maru.session.editor.document_registry.Registry,
+    book: file_host.Book,
+    views: std.ArrayList(OpenFile) = .empty,
+    backups: ?@import("platform/windows/editor/backup_store.zig").LocalData = null,
+
+    fn init() !*FileCloseFixture {
+        const a = std.testing.allocator;
+        const self = try a.create(FileCloseFixture);
+        self.* = .{ .tmp = std.testing.tmpDir(.{}), .documents = .{ .allocator = a }, .book = undefined };
+        self.book = .{ .allocator = a, .registry = &self.documents };
+        errdefer self.deinit();
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase\r\n" });
+        try self.open();
+        return self;
+    }
+    fn open(self: *FileCloseFixture) !void {
+        try self.views.ensureUnusedCapacity(std.testing.allocator, 1);
+        const path = try self.tmp.dir.realPathFileAlloc(std.testing.io, "file.txt", std.testing.allocator);
+        defer std.testing.allocator.free(path);
+        var root: [std.fs.max_path_bytes]u8 = undefined;
+        const root_len = try self.tmp.dir.realPath(std.testing.io, &root);
+        const view = switch (openAppFile(&self.book, std.testing.io, &self.backups, path, root[0..root_len])) {
+            .opened => |value| value,
+            else => return error.FixtureOpenFailed,
+        };
+        self.views.appendAssumeCapacity(view);
+        if (self.documents.get(view.document).?.opened.?.file.read_only) return error.FixtureCapabilityFailed;
+    }
+    fn editAndBackup(self: *FileCloseFixture) !void {
+        const a = std.testing.allocator;
+        if (try applyFileKey(&self.book, std.testing.io, .{}, &self.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = self.views.items })) |copied| a.free(copied);
+        var root: [std.fs.max_path_bytes]u8 = undefined;
+        const root_len = try self.tmp.dir.realPath(std.testing.io, &root);
+        const report = try runFileBackups(a, std.testing.io, &self.backups, self.views.items, 11, true, root[0..root_len]);
+        try std.testing.expectEqual(@as(usize, 0), report.failed);
+        try std.testing.expectEqual(@as(usize, 1), report.attempted);
+    }
+    fn expectDisk(self: *FileCloseFixture, expected: []const u8) !void {
+        const bytes = try self.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectEqualStrings(expected, bytes);
+    }
+    fn deinit(self: *FileCloseFixture) void {
+        for (self.book.controllers.items) |*controller| if (controller.pending != null) {
+            _ = controller.abort(std.testing.io) catch unreachable;
+        };
+        self.book.deinit(std.testing.io) catch unreachable;
+        for (self.views.items) |*view| view.deinit(std.testing.allocator);
+        self.views.deinit(std.testing.allocator);
+        if (self.backups) |*owner| owner.deinit(std.testing.io);
+        self.documents.deinit() catch unreachable;
+        self.tmp.cleanup();
+        std.testing.allocator.destroy(self);
+    }
+};
+
+test "Windows editor host ordinary reopen restores previous backup before allowing native save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try std.testing.expect(f.backups == null);
+    try f.editAndBackup();
+    // Release the old ownership without an accepted discard: durable records
+    // must survive replacement of the application's document context.
+    try f.book.deinit(std.testing.io);
+    for (f.views.items) |*view| view.deinit(std.testing.allocator);
+    f.views.clearRetainingCapacity();
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    try f.open();
+    try std.testing.expect(f.views.items[0].recovered);
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expect(state.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    _ = try f.book.save(std.testing.io, f.views.items[0].document, 4 << 20);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows editor host ordinary restored backup retains external conflict protection" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    try f.book.deinit(std.testing.io);
+    for (f.views.items) |*view| view.deinit(std.testing.allocator);
+    f.views.clearRetainingCapacity();
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "external\r\n" });
+    try f.open();
+    try std.testing.expect(f.views.items[0].recovered);
+    try std.testing.expectError(error.SourceChanged, f.book.save(std.testing.io, f.views.items[0].document, 4 << 20));
+    try std.testing.expect(f.documents.get(f.views.items[0].document).?.opened.?.isDirty());
+    try f.expectDisk("external\r\n");
+}
+
+test "Windows editor host app close cancel preserves edits and save removes recovery before stable target release" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    const state = f.documents.get(lease).?;
+    const doc = @import("platform/windows/editor/backup_store.zig").identity(state).?;
+    try std.testing.expect(!try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .cancelled));
+    try std.testing.expect(state.opened.?.isDirty() and state.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .confirmed));
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+    try std.testing.expect(!state.opened.?.isDirty());
+    var record = try f.backups.?.store.read(std.testing.io, doc);
+    defer if (record) |*value| value.deinit();
+    try std.testing.expect(record == null);
+    var gone = f.views.orderedRemove(0);
+    gone.deinit(std.testing.allocator);
+    try f.open();
+    try std.testing.expectError(error.StaleDocument, approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .alternate));
+    try std.testing.expectEqual(@as(usize, 1), f.book.controllers.items.len);
+}
+
+test "Windows editor host app peer close never implicitly saves and accepted discard removes only last recovery" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    const state = f.documents.get(lease).?;
+    try f.views.ensureUnusedCapacity(std.testing.allocator, 1);
+    f.views.appendAssumeCapacity(try editor_document.attach(&f.documents, lease, std.testing.allocator));
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .confirmed));
+    try std.testing.expect(state.opened.?.isDirty() and state.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    var gone = f.views.orderedRemove(0);
+    gone.deinit(std.testing.allocator);
+    const survivor = f.views.items[0].document;
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = survivor }, .alternate));
+    try std.testing.expect(!state.notifications.backup_on_disk and !state.notifications.backup_dirty);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+}
+
+test "Windows editor host app save-close external conflict retains every view and disk recovery record" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfexternal\r\n" });
+    try std.testing.expectError(error.SourceChanged, approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .window, .confirmed));
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expect(state.opened.?.isDirty() and state.notifications.backup_on_disk);
+    try std.testing.expectEqual(@as(usize, 1), f.book.controllers.items.len);
+    try f.expectDisk("\xef\xbb\xbfexternal\r\n");
+    var record = (try f.backups.?.store.read(std.testing.io, @import("platform/windows/editor/backup_store.zig").identity(state).?)).?;
+    defer record.deinit();
+    try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
+}
+
+test "Windows editor host app window discard refuses an actual undetermined native save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const view = f.views.items[0].document;
+    const controller = &f.book.controllers.items[0];
+    try controller.prepare(std.testing.io, view, 128);
+    controller.pending.?.attempt.transaction.file.close(std.testing.io);
+    controller.pending.?.attempt.transaction.file_open = false;
+    controller.pending.?.attempt.transaction.phase = .uncertain;
+    try std.testing.expectError(error.SaveNotCommitted, controller.pending.?.request.complete(.uncertain));
+    try std.testing.expectError(error.SaveBusy, approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .window, .alternate));
+    try std.testing.expect(f.documents.get(view).?.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
 
 fn maintainFileBackups(a: std.mem.Allocator, io: std.Io, owner: *@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, shutdown: bool) @import("platform/windows/editor/backup_store.zig").Maintenance {
     var states: std.ArrayList(*maru.session.editor.document_state.State) = .empty;
@@ -5625,6 +5913,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var search_chars: usize = 0;
     var editor_documents: maru.session.editor.document_registry.Registry = .{ .allocator = allocator };
     defer editor_documents.deinit() catch unreachable;
+    var editor_files: file_host.Book = .{ .allocator = allocator, .registry = &editor_documents };
+    defer editor_files.deinit(io) catch |err| {
+        stderr.print("  warning: editor native ownership unresolved at exit({s})\n", .{@errorName(err)}) catch {};
+    };
     var open_files: std.ArrayList(OpenFile) = .empty;
     defer {
         for (open_files.items) |*f| f.deinit(allocator);
@@ -5956,6 +6248,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // id 는 단조 증가라 재사용되지 않는다(§2m.78 ⑵ 가 그것을 고쳤다). 승낙할 때 **그 id 를 다시
     // 찾아** 번호를 푼다 — macOS `confirm_accept` 가 범위를 다시 푸는 것과 같은 규율이다.
     var pending_close_id: ?u64 = null;
+    var pending_file_close: ?FileCloseTarget = null;
+    var file_exit_accepted = false;
     var confirm_shows: usize = 0;
     var confirm_accepts: usize = 0;
     var confirm_cancels: usize = 0;
@@ -6733,7 +7027,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 바뀐다** — 창을 키우면 바가 아래로 가고 폭이 넓어진다. 시작에 한 번만 지었더니 창이 커진 뒤
     // 옛 자리(실측 y=574, w=984)에 남아 **화면에서 통째로 사라졌다**. 스모크는 자기 창 크기가
     // 안 변해서 그 상태에서도 초록이었다 — 실기 캡처가 잡았다(2026-08-26).
-    const status_items = buildStatusBarItems(&status_items_buf, scm_status, dock_root, home_dir, &status_cwd_buf);
+    var status_items = buildStatusBarItems(&status_items_buf, scm_status, dock_root, home_dir, &status_cwd_buf);
+    const base_status_items = status_items.len;
     var status_rebuilds: usize = 0;
     rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
@@ -9952,35 +10247,41 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 보이지 않는 곳을 조작하게 된다. 판정은 중립이 소유한다(`confirm.handle`:
                 // Enter/Esc·Y/N·←/→).
                 if (confirm_state.open) {
-                    if (maru.chrome.components.confirm.handle(win32_keys.chromeKeyEvent(key_ev), &confirm_state)) |action| switch (action) {
-                        .confirmed => {
-                            confirm_accepts += 1;
-                            confirm_state.dismiss();
-                            // **지금 다시 푼다** — 담아 둔 번호가 그 사이 밀렸을 수 있다.
-                            if (sessionIndexById(sessions.items, pending_close_id)) |ci| {
-                                switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, true)) {
-                                    .closed => {
-                                        session_closes += 1;
-                                        pump = sessions.items[0].pump;
-                                        if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
-                                        refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
-                                        sidebar_redraws += 1;
-                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
-                                    },
-                                    else => {},
+                    if (maru.chrome.components.confirm.handle(win32_keys.chromeKeyEvent(key_ev), &confirm_state)) |action| {
+                        if (pending_file_close != null) {
+                            if (confirm_pending_click == null) confirm_pending_click = action;
+                            continue;
+                        }
+                        switch (action) {
+                            .confirmed => {
+                                confirm_accepts += 1;
+                                confirm_state.dismiss();
+                                // **지금 다시 푼다** — 담아 둔 번호가 그 사이 밀렸을 수 있다.
+                                if (sessionIndexById(sessions.items, pending_close_id)) |ci| {
+                                    switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, true)) {
+                                        .closed => {
+                                            session_closes += 1;
+                                            pump = sessions.items[0].pump;
+                                            if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
+                                            refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                                            sidebar_redraws += 1;
+                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                        },
+                                        else => {},
+                                    }
                                 }
-                            }
-                            pending_close_id = null;
-                        },
-                        .cancelled => {
-                            confirm_cancels += 1;
-                            confirm_state.dismiss();
-                            pending_close_id = null;
-                        },
-                        // **네 번째 자리는 이 경로에 아직 없다**(저장 충돌은 macOS 편집기의 것이다).
-                        // `alternate` 와 같이 무동작으로 둔다 — 새 행동이 생기면 여기도 함께 정한다.
-                        .alternate, .extra => {},
-                    };
+                                pending_close_id = null;
+                            },
+                            .cancelled => {
+                                confirm_cancels += 1;
+                                confirm_state.dismiss();
+                                pending_close_id = null;
+                            },
+                            // **네 번째 자리는 이 경로에 아직 없다**(저장 충돌은 macOS 편집기의 것이다).
+                            // `alternate` 와 같이 무동작으로 둔다 — 새 행동이 생기면 여기도 함께 정한다.
+                            .alternate, .extra => {},
+                        }
+                    }
                     continue;
                 }
                 // Confirm retains its higher priority. A dismissal gesture belongs
@@ -10113,8 +10414,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (active_view == .file) {
                     keys_while_file += 1;
                     const file_view = &open_files.items[active_view.file];
-                    const maybe_copy = file_view.applyKey(allocator, key_ev, .{ .now_ms = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms)), .views = open_files.items }) catch |err| {
+                    const maybe_copy = applyFileKey(&editor_files, io, resolver, file_view, key_ev, .{ .now_ms = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms)), .views = open_files.items }) catch |err| {
                         try stderr.print("  warning: editor input failed({s})\n", .{@errorName(err)});
+                        file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                         continue;
                     };
                     if (maybe_copy) |text| {
@@ -10497,7 +10799,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
                             .confirmed => confirm_pending_click = .confirmed,
                             .cancelled => confirm_pending_click = .cancelled,
-                            .alternate, .extra => {},
+                            .alternate, .extra => if (pending_file_close != null and confirm_pending_click == null) {
+                                confirm_pending_click = action;
+                            },
                         };
                     }
                     continue;
@@ -10626,6 +10930,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     if (src == .file) {
                                         const fi = src.file;
                                         if (fi < open_files.items.len) {
+                                            editor_files.requireClose(open_files.items[fi].document, false) catch |err| {
+                                                if (err == error.DirtyDocument) {
+                                                    pending_file_close = .{ .file = open_files.items[fi].document };
+                                                    pending_close_id = null;
+                                                    showFileClose(&confirm_state);
+                                                } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                                                break :close_blk;
+                                            };
+                                            _ = approveFileClose(io, &editor_files, &file_backups, open_files.items, .{ .file = open_files.items[fi].document }, .confirmed) catch |err| {
+                                                file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                                                break :close_blk;
+                                            };
                                             var gone = open_files.orderedRemove(fi);
                                             gone.deinit(allocator);
                                             file_closes += 1;
@@ -11066,10 +11382,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (found) |fi| {
                                             file_reopens += 1;
                                             active_view = .{ .file = fi };
-                                        } else switch (openFileFor(&editor_documents, allocator, io, owned)) {
+                                        } else switch (openAppFile(&editor_files, io, &file_backups, owned, null)) {
                                             .opened => |of| {
                                                 open_files.append(allocator, of) catch {
                                                     var tmp = of;
+                                                    editor_files.release(io, tmp.document, false) catch unreachable;
                                                     tmp.deinit(allocator);
                                                     file_rejects += 1;
                                                     last_reject = .out_of_memory;
@@ -11078,6 +11395,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 };
                                                 file_opens += 1;
                                                 active_view = .{ .file = open_files.items.len - 1 };
+                                                if (editor_documents.get(of.document).?.opened.?.file.read_only)
+                                                    file_notice.show(maru.i18n.t(.editor_readonly));
+                                                if (of.recovered and base_status_items < status_items_buf.len) {
+                                                    status_items_buf[base_status_items] = .{ .id = .notifications, .text = maru.i18n.t(.editor_backup_restored) };
+                                                    status_items = status_items_buf[0 .. base_status_items + 1];
+                                                    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                                                }
                                             },
                                             // **못 여는 것을 조용히 넘기지 않고, 이유도 안 뭉갠다.**
                                             // `.md` 는 계약상 WebView 본문이라 W8.6 이 선행이고,
@@ -11919,9 +12243,54 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **마우스로 고른 것을 여기서 실행한다.** 이벤트 루프 안에서 세션을 지우면 그 프레임의
         // 나머지가 사라진 것을 만진다 — 키 갈래는 곧바로 실행해도 되지만(그 뒤에 `continue` 로
         // 프레임을 빠져나간다) 마우스는 다른 처리가 뒤따를 수 있어 한 박자 미룬다.
+        if (close_requested and !file_exit_accepted) {
+            close_requested = false;
+            if (editor_files.requireIdle()) |_| {
+                var dirty_file = false;
+                for (open_files.items) |view| {
+                    const state = editor_documents.get(view.document).?;
+                    dirty_file = dirty_file or state.opened.?.isDirty();
+                }
+                if (dirty_file) {
+                    pending_file_close = .window;
+                    pending_close_id = null;
+                    showFileClose(&confirm_state);
+                } else if (approveFileClose(io, &editor_files, &file_backups, open_files.items, .window, .confirmed)) |_| {
+                    file_exit_accepted = true;
+                    close_requested = true;
+                } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+            } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+        }
         if (confirm_pending_click) |act| {
             confirm_pending_click = null;
-            switch (act) {
+            if (pending_file_close) |target| {
+                const approved = approveFileClose(io, &editor_files, &file_backups, open_files.items, target, act) catch |err| blk: {
+                    stderr.print("  warning: editor close failed({s})\n", .{@errorName(err)}) catch {};
+                    file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                    break :blk false;
+                };
+                confirm_state.dismiss();
+                pending_file_close = null;
+                if (approved) switch (target) {
+                    .window => {
+                        file_exit_accepted = true;
+                        close_requested = true;
+                    },
+                    .file => |lease| if (fileIndexForLease(open_files.items, lease)) |fi| {
+                        var gone = open_files.orderedRemove(fi);
+                        gone.deinit(allocator);
+                        file_closes += 1;
+                        active_view = switch (active_view) {
+                            .file => |current| if (current == fi) ActiveView{ .terminal = app_window.active_tab } else if (current > fi) ActiveView{ .file = current - 1 } else ActiveView{ .file = current },
+                            .terminal => |current| ActiveView{ .terminal = current },
+                        };
+                        refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                        sidebar_reveal_request = true;
+                        sidebar_redraws += 1;
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                    },
+                };
+            } else switch (act) {
                 .confirmed => {
                     confirm_accepts += 1;
                     confirm_state.dismiss();
@@ -16311,20 +16680,16 @@ fn appendModalOpsCells(
     // Both fill and border are lowered, including declared gradients.
     const before = out.items.len;
     try appendPaintOps(allocator, ops, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, 0, 0, out);
-    const colors = maru.renderer.metal_frame.CellColors{
-        .default_fg = blk: {
-            const c = tk.get(.surface_fg);
-            break :blk .{ .r = c.r, .g = c.g, .b = c.b };
-        },
-        .default_bg = blk2: {
-            const c = tk.get(.surface_bg);
-            break :blk2 .{ .r = c.r, .g = c.g, .b = c.b };
-        },
-    };
-    const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
-    defer allocator.free(native);
-    try out.ensureUnusedCapacity(allocator, native.len);
-    for (native) |n| out.appendAssumeCapacity(win32_terminal.cellFromNative(n, p.metrics.cell_width_px, p.metrics.cell_height_px, atlas_w.*, atlas_h.*));
+    // Backgrounds use exact pixel origins. Preserve those same origins for
+    // text: flooring to a terminal row moves dark focus labels above their
+    // contrasting button fill, making them disappear against the panel.
+    var placement = try chrome_draw_lowering.buildRichTextArtifact(allocator, ops, tk, p.metrics.cell_width_px, p.metrics.cell_height_px, cols, rows);
+    defer placement.deinit(allocator);
+    var glyphs: std.ArrayList(maru.renderer.metal_frame.GpuGlyph) = .empty;
+    defer glyphs.deinit(allocator);
+    try placement.appendGpuGlyphs(allocator, frame, renderer_state.atlas.config, p.metrics.cell_width_px, p.metrics.cell_height_px, 0, 0, &glyphs);
+    try out.ensureUnusedCapacity(allocator, glyphs.items.len);
+    for (glyphs.items) |glyph| out.appendAssumeCapacity(win32_terminal.cellFromGpuGlyph(glyph, atlas_w.*, atlas_h.*));
     return out.items.len - before;
 }
 
@@ -16731,8 +17096,8 @@ fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout
     try stdout.print("editor_navigation_smoke_ok=true window_keys={d} frames_presented={d} readonly_revision=0\n", .{ events_seen, frames });
 }
 
-/// Only the fixture document is writable; real window messages exercise the
-/// same input/paint methods as the app without enabling user-file writes.
+/// Exercise the ordinary app opener on a disposable file and backup location.
+/// Window messages then use the same input/paint methods as user documents.
 fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
     const editor = maru.session.editor;
     var documents: editor.document_registry.Registry = .{ .allocator = a };
@@ -16751,15 +17116,23 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
     defer fixture_root.close(io);
     try fixture_root.writeFile(io, .{ .sub_path = "typing-smoke.txt", .data = original });
     defer fixture_root.deleteFile(io, "typing-smoke.txt") catch unreachable;
-    const grant_mod = @import("platform/windows/editor/document_grant.zig");
-    var granted = try grant_mod.Grant.openExperimental(a, io, fixture_root, "typing-smoke.txt", &documents, 4 << 20);
-    var saving = @import("platform/windows/editor/save_controller.zig").Controller.take(&granted.grant);
-    defer saving.deinit(io) catch unreachable;
-    const lease = granted.view;
-    defer _ = documents.release(lease) catch unreachable;
+    var app_files: file_host.Book = .{ .allocator = a, .registry = &documents };
+    defer app_files.deinit(io) catch unreachable;
+    const ordinary_path = try fixture_root.realPathFileAlloc(io, "typing-smoke.txt", a);
+    defer a.free(ordinary_path);
+    var fixture_base: [std.fs.max_path_bytes]u8 = undefined;
+    const fixture_base_len = try fixture_root.realPath(io, &fixture_base);
+    var existing_backups: ?@import("platform/windows/editor/backup_store.zig").LocalData = null;
+    defer if (existing_backups) |*owner| owner.deinit(io);
     var views: [2]OpenFile = undefined;
-    views[0] = try editor_document.attach(&documents, lease, a);
+    views[0] = switch (openAppFile(&app_files, io, &existing_backups, ordinary_path, fixture_base[0..fixture_base_len])) {
+        .opened => |value| value,
+        else => return error.EditorHostOpenFailed,
+    };
     defer views[0].deinit(a);
+    const lease = views[0].document;
+    if (documents.get(lease).?.opened.?.file.read_only or app_files.controllers.items.len != 1) return error.EditorHostCapabilityFailed;
+    const saving = &app_files.controllers.items[0];
     views[1] = try editor_document.attach(&documents, lease, a);
     defer views[1].deinit(a);
     const ops = try a.alloc(maru.chrome.draw.Op, 4096);
@@ -16834,9 +17207,9 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
     if (!std.mem.eql(u8, bytes, original)) return error.EditorTypingFormatMismatch;
     try stdout.print("editor_typing_smoke_ok=true window_keys={d} neutral_history_keys=6 asserted_frames={d} revision={d} dirty=false\n", .{ window_keys, fixtures.len * views.len, state.opened.?.file.revision });
 
-    // Add an actual window character, then exercise the host-owned native save
-    // seam and ordinary readonly reopen. Save is invoked here, not via Ctrl+S;
-    // the product's ordinary GUI controller/capability path is still pending.
+    // Actual window typing enters the ordinary app-opened document. Feed the
+    // neutral Ctrl+S event through the same app key handler; this is not physical
+    // keyboard/IME proof, which remains a separate desktop exercise.
     host.window.postSyntheticChar('X');
     var got_saved_char = false;
     for (0..120) |_| {
@@ -16852,8 +17225,8 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
         try host.drawFrame(&.{}, 0xFF1E2430);
     }
     if (!got_saved_char or !std.mem.eql(u8, state.opened.?.file.content, "X// base\r\n") or !state.opened.?.isDirty()) return error.EditorGrantedInputMismatch;
-    try saving.prepare(io, lease, 4 << 20);
-    const receipt = try saving.commit(io);
+    if (try applyFileKey(&app_files, io, .{}, &views[0], .{ .key = .{ .char = 's' }, .modifiers = ctrl }, .{ .now_ms = 1010, .views = &views })) |copied| a.free(copied);
+    const receipt = saving.last_receipt orelse return error.EditorHostSaveKeyMissing;
     if (receipt.decision != .committed or receipt.acknowledgment_error != null or receipt.cleanup_error != null or saving.status() != .idle) return error.EditorControllerReceiptMismatch;
     if (state.opened.?.isDirty() or state.persistence.persisted_revision != 19) return error.EditorGrantedSaveAckMismatch;
     const disk = try fixture_root.readFileAlloc(io, "typing-smoke.txt", a, .limited(4 << 20));
@@ -16876,6 +17249,7 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
     }
     try stdout.writeAll("editor_granted_save_smoke_ok=true window_chars=1 native_commit=true disk_reopen=true asserted_frames=3 persisted_revision=19 dirty=false\n");
     try stdout.print("editor_save_controller_smoke_ok=true decision=committed revision={d} sequence={d} status=idle\n", .{ receipt.revision, receipt.sequence });
+    try stdout.writeAll("editor_app_save_key_smoke_ok=true ordinary_open=true capability=true neutral_ctrl_s=true native_disk=true physical_keyboard=false\n");
     // Recovery storage is isolated from user backups. An independent native
     // reader loads its disk record, then both live views paint recovery and undo.
     const backup_mod = @import("platform/windows/editor/backup_store.zig");
@@ -16952,6 +17326,70 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
     try backups.drop(io, backup_doc);
     try stdout.writeAll("editor_backup_smoke_ok=true disk_record=true restored_dirty=true restored_frames=2 undo_frames=2 undo_clean=true original_untouched=true\n");
     try stdout.writeAll("editor_backup_lifecycle_smoke_ok=true lazy_root=true shared_views=true before_debounce_flush=true frame_write=true clean_drop=true\n");
+    try runEditorCloseModalFrames(a, host, stdout, &tokens);
+}
+
+/// Render the app's three-choice close UI through its actual D3D lowering.
+/// Posted window keys prove that each displayed choice has the same intent.
+fn runEditorCloseModalFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer, tokens: *const maru.chrome.Tokens) !void {
+    const confirm = maru.chrome.components.confirm;
+    const fixtures = [_]struct { vk: u32, focus: confirm.Focus, action: confirm.Action }{
+        .{ .vk = 0x0d, .focus = .confirm, .action = .confirmed },
+        .{ .vk = 0x0d, .focus = .alternate, .action = .alternate },
+        .{ .vk = 0x1b, .focus = .confirm, .action = .cancelled },
+    };
+    var frame: ?maru.renderer.RenderFrame = null;
+    defer if (frame) |*owned| owned.deinit(a);
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(a);
+    var unpainted: usize = 0;
+    const props = confirmProps(host.initial.width_px, host.initial.height_px, host.cell_w, host.cell_h, 0);
+    for (fixtures) |fixture| {
+        var modal: confirm.State = .{};
+        showFileClose(&modal);
+        modal.focused = fixture.focus;
+        if (!modal.has_alternate or modal.has_extra or modal.cancel_label.len == 0) return error.EditorCloseChoicesMissing;
+        cells.clearRetainingCapacity();
+        const painted = try appendConfirmCells(a, &cells, &modal, props, tokens, &host.renderer_state, .{ .shaper = host.shaper, .rasterizer = host.rasterizer }, host.pipeline, &host.atlas_w, &host.atlas_h, &frame, &unpainted);
+        if (painted == 0 or frame.?.glyph_quad_frame.glyphs.len == 0) return error.EditorCloseModalUnpainted;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var semantic: std.ArrayList(maru.chrome.draw.Op) = .empty;
+        try confirm.view(&modal, props, tokens, arena.allocator(), &semantic);
+        for (semantic.items) |op| {
+            if (op != .text) continue;
+            const expected = tokens.get(op.text.role);
+            var matched = false;
+            for (cells.items) |cell| {
+                if (cell.uv[0] < 0 or cell.rect[0] != @as(f32, @floatFromInt(op.text.origin.x)) or cell.rect[1] != @as(f32, @floatFromInt(op.text.origin.y))) continue;
+                if (@abs(cell.fg[0] - @as(f32, @floatFromInt(expected.r)) / 255) > 0.001 or
+                    @abs(cell.fg[1] - @as(f32, @floatFromInt(expected.g)) / 255) > 0.001 or
+                    @abs(cell.fg[2] - @as(f32, @floatFromInt(expected.b)) / 255) > 0.001) return error.EditorCloseLabelColorMismatch;
+                matched = true;
+                break;
+            }
+            if (!matched) return error.EditorCloseLabelOriginMismatch;
+        }
+        // Several presented frames also let an external capture observe the
+        // real product pixels, without a separate mock rendering path.
+        for (0..60) |_| try host.drawFrame(cells.items, 0xFF1E2430);
+        _ = try host.poll();
+        host.window.postSyntheticVirtualKey(fixture.vk);
+        var received: ?confirm.Action = null;
+        for (0..120) |_| {
+            for (try host.poll()) |event| switch (event) {
+                .key => |key| {
+                    if (confirm.handle(.{ .key = if (key.key == .enter) .enter else if (key.key == .escape) .escape else .other }, &modal)) |action| received = action;
+                },
+                .close_requested => return error.EditorSmokeInterrupted,
+                else => {},
+            };
+            if (received != null) break;
+            try host.drawFrame(cells.items, 0xFF1E2430);
+        }
+        if (received != fixture.action or modal.open) return error.EditorCloseModalIntentMismatch;
+    }
+    try stdout.writeAll("editor_close_modal_smoke_ok=true d3d=true choices=3 window_keys=3 physical_keyboard=false\n");
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.

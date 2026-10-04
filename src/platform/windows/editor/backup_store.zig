@@ -138,6 +138,14 @@ pub const LocalData = struct {
     allocator: std.mem.Allocator,
 
     pub fn open(a: std.mem.Allocator, io: std.Io, localappdata: ?[]const u8, limit: usize) !LocalData {
+        return openWith(a, io, localappdata, limit, true);
+    }
+
+    pub fn openExisting(a: std.mem.Allocator, io: std.Io, localappdata: ?[]const u8, limit: usize) !LocalData {
+        return openWith(a, io, localappdata, limit, false);
+    }
+
+    fn openWith(a: std.mem.Allocator, io: std.Io, localappdata: ?[]const u8, limit: usize, create: bool) !LocalData {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
         const selected = (try maru.user_paths.editorBackupPathFor(a, .windows, null, localappdata)) orelse return error.BackupRootUnavailable;
         defer a.free(selected);
@@ -172,13 +180,13 @@ pub const LocalData = struct {
         while (components.next()) |segment| {
             if (components.peek() == null) {
                 if (!std.mem.eql(u8, segment, "editor-backups")) return error.InvalidPath;
-                const store = try Store.open(a, parents.items[parents.items.len - 1], segment, limit);
+                const store = try Store.openWith(a, parents.items[parents.items.len - 1], segment, limit, create);
                 return .{ .store = store, .parents = parents, .allocator = a };
             }
             const is_app_parent = std.mem.eql(u8, components.rest(), "editor-backups") and std.mem.eql(u8, segment, "maru");
             // Existing configuration parent ACLs are not backup ACLs. Only the
             // final private store applies Policy; no config permissions change.
-            const file = try node(a, parents.items[parents.items.len - 1], segment, null, true, is_app_parent, 0x00100081, false);
+            const file = try node(a, parents.items[parents.items.len - 1], segment, null, true, create and is_app_parent, 0x00100081, false);
             const dir: std.Io.Dir = .{ .handle = file.handle };
             parents.append(a, dir) catch |err| {
                 dir.close(io);
@@ -205,11 +213,15 @@ pub const Store = struct {
     /// The host selects the parent. Existing broad permissions are refused,
     /// never silently changed; the selected root stays pinned against rename.
     pub fn open(a: std.mem.Allocator, parent: std.Io.Dir, name: []const u8, limit: usize) !Store {
+        return openWith(a, parent, name, limit, true);
+    }
+
+    fn openWith(a: std.mem.Allocator, parent: std.Io.Dir, name: []const u8, limit: usize, create: bool) !Store {
         var policy = try Policy.current();
         // A DELETE-access parent plus non-delete sharing prevents Windows'
         // internal rename target open (actual STATUS_SHARING_VIOLATION). Keep
         // the rename fence through sharing, without requesting parent DELETE.
-        const file = try node(a, parent, name, &policy, true, true, 0x001601bf, false);
+        const file = try node(a, parent, name, &policy, true, create, 0x001601bf, false);
         return .{ .allocator = a, .dir = .{ .handle = file.handle }, .policy = policy, .limit = @min(limit, backup.pause_bytes) };
     }
     pub fn deinit(self: *Store, io: std.Io) void {
@@ -477,6 +489,37 @@ fn localFixturePath(tmp: *std.testing.TmpDir, child: []const u8) ![]u8 {
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io_test, &buffer);
     return std.fs.path.join(a_test, &.{ buffer[0..n], child });
+}
+
+test "Windows editor backup existing root lookup never creates missing application folders" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try localFixturePath(&tmp, "");
+    defer a_test.free(path);
+    if (LocalData.openExisting(a_test, io_test, path, 128)) |value| {
+        var unexpected = value;
+        unexpected.deinit(io_test);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.NotFound, err);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(io_test, "maru", .{}));
+}
+
+test "Windows editor backup existing root lookup reads durable records through the private policy" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try localFixturePath(&tmp, "");
+    defer a_test.free(path);
+    {
+        var owner = try LocalData.open(a_test, io_test, path, 128);
+        defer owner.deinit(io_test);
+        try owner.store.write(io_test, doc_test, "previous execution");
+    }
+    var existing = try LocalData.openExisting(a_test, io_test, path, 128);
+    defer existing.deinit(io_test);
+    try existing.store.policy.check(existing.store.dir.handle);
+    try expectBody(&existing.store, doc_test, "previous execution");
 }
 
 test "Windows editor backup local root creates private store without changing its config parent and reopens records" {

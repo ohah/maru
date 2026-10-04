@@ -316,7 +316,10 @@ src/
     ios/                iOS 전용 — UIKit host·Metal 백엔드·CoreText 래스터(`ios_app_host.m`)
     android/            Android 전용 — NativeActivity host·Vulkan 백엔드·JNI 래스터(`android_app_host.c`),
                         IME shim(`MaruActivity.java` — NDK에는 InputConnection 대응물이 없어 Java로 받는다), shaders/(SPIR-V)
-    windows/
+    windows/            Win32·ConPTY·DirectWrite·D3D11 adapter. editor/의 document.zig는 L2 registry view를
+                        붙이고 file_host.zig는 앱 수명의 native grant/controller를 소유한다. identity·transaction·
+                        document_grant·save_controller·backup_store는 Windows 파일 권한·저장·복구 I/O 경계다.
+                        공유 문서·Undo 정책과 플랫폼 중립 경로 선택은 session/editor/와 user_paths에 둔다.
     linux/
   workspace/            project workspace, layout restore, recent workspaces
   observability/        TraceEvent, RenderSnapshot, replayTrace

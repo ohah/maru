@@ -12,8 +12,11 @@
 //!   adopt-nested        팝업 안의 클릭으로 연 팝업도 이어 받는다(연 탭은 그 팝업 번호)
 //!   adopt-fallback      맡긴 번호가 없으면 주소만(`open_tab` — W6e), 이미 쓰는 번호를 맡겨도 쓰지 않는다
 //!   adopt-no-window     그동안 host 창 0 개
+//!   adopt-reserved-taken maru 가 맡긴 번호로 브라우저를 직접 만들면 그 번호는 팝업에 쓰지 않는다 — 주소로 연다(쓰려다 등록이 거절돼
+//!                       팝업이 곧 닫히지 않게)
 //!   adopt-long-url      주소 상한(32 KiB)을 넘는 팝업은 번호가 있어도 이어 받지 않는다(빈 팝업으로 접지 않는다 — 적대 검증) — 주소로도 없다
-//!   adopt-shutdown      이어 받은 팝업이 열린 채 shutdown — exit 0 으로 제때 끝난다(팝업도 목록이 닫는다)
+//!   adopt-shutdown      이어 받은 팝업이 열린 채 shutdown — 모두 닫혀(유예가 다 가기 전에 — host 가 「did not close in time」을 적지
+//!                       않는다) exit 0. 시간으로 재지 않는다 — 닫힌 뒤 CEF 가 끝나는 시간은 부하에 따라 9 초도 걸렸다(실측)
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -118,11 +121,13 @@ const Watch = struct {
     }
 };
 
-pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, port: u16) !void {
+pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, root: []const u8, port: u16) !void {
     var detail: [400]u8 = undefined;
     var u: [256]u8 = undefined;
 
-    var host = try Host.spawn(host_path, profile_arg);
+    var log_buf: [1024]u8 = undefined;
+    const log_path = try std.fmt.bufPrintZ(&log_buf, "{s}/popupadopt-host.log", .{root});
+    var host = try Host.spawnWith(host_path, profile_arg, log_path, &.{});
     var shut_down = false;
     defer if (!shut_down) {
         host.send(.shutdown) catch {};
@@ -225,6 +230,19 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
 
     report(windows.ownedBy(host.pid) == 0, "adopt-no-window", std.fmt.bufPrint(&detail, "host 창 {d}", .{windows.ownedBy(host.pid)}) catch "");
 
+    // 맡긴 번호를 maru 가 직접 쓴다 — 그 번호는 팝업에 쓰지 않는다.
+    try w.reserve(700);
+    w.pump(100);
+    try host.send(.{ .create_browser = .{ .browser = 700, .size = .{ .width = 320, .height = 200, .scale = 1 }, .hidden = true, .url = "about:blank" } });
+    w.pump(1_500);
+    const before_taken = w.created_len;
+    const tabs_before_taken = w.open_tabs;
+    try w.click(browser_id, m10_point);
+    w.pump(1_200);
+    report(w.created_len == before_taken and w.open_tabs == tabs_before_taken + 1 and !w.wasClosed(700), "adopt-reserved-taken", std.fmt.bufPrint(&detail, "팝업 {d} · open_tab {d} · 700 닫힘 {}", .{ w.created_len - before_taken, w.open_tabs - tabs_before_taken, w.wasClosed(700) }) catch "");
+    try host.send(.{ .destroy_browser = 700 });
+    w.pump(500);
+
     // 너무 긴 주소 — 번호를 맡겨 두어도.
     try w.reserve(607);
     w.pump(100);
@@ -234,9 +252,16 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     w.pump(1_200);
     report(w.created_len == before_long and w.open_tabs == tabs_before_long, "adopt-long-url", std.fmt.bufPrint(&detail, "팝업 {d} · open_tab {d}", .{ w.created_len - before_long, w.open_tabs - tabs_before_long }) catch "");
 
-    const started = os.nowMs();
     try host.send(.shutdown);
     const code = host.wait(wait_ms);
     shut_down = true;
-    report(code != null and code.? == 0 and os.nowMs() - started < 4_000, "adopt-shutdown", std.fmt.bufPrint(&detail, "열린 팝업 {d} 개 · exit {?d} · {d} ms", .{ w.created_len - w.closed_len, code, os.nowMs() - started }) catch "");
+    var log_text: [64 * 1024]u8 = undefined;
+    const late = blk: {
+        const f = std.c.open(log_path, .{ .ACCMODE = .RDONLY });
+        if (f < 0) break :blk true;
+        defer _ = std.c.close(f);
+        const n = std.c.read(f, &log_text, log_text.len);
+        break :blk n < 0 or std.mem.indexOf(u8, log_text[0..@intCast(@max(n, 0))], "did not close in time") != null;
+    };
+    report(code != null and code.? == 0 and !late, "adopt-shutdown", std.fmt.bufPrint(&detail, "열린 팝업 {d} 개 · exit {?d} · 유예가 다 감 {}", .{ w.created_len - w.closed_len, code, late }) catch "");
 }

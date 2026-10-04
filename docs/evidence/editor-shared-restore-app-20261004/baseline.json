@@ -1,0 +1,814 @@
+{
+  "app": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-6ja9ohny/snapshot/zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+  "app_sha256": "c1e148f2a07915ba731fbca123677e53b8e36f2bb6d85c2cc1459ebd0b3cc39d",
+  "source_sha256": {
+    "src/platform/macos/app_session/editor/mod.zig": "03748fb9ada690604e5fcdf7924316338ab55b6670b3f4c2af2661f8a21ce70f",
+    "src/platform/macos/app_session/editor/restore.zig": "4fec59bf8a590cf227226655c9f7f17c276b3b37f7e51db852c545161137ca2b",
+    "src/platform/macos/app_session/debug_fixtures.zig": "adf2c7d21640a07ede1fda32437af091005bd9a5a9400b2613874b9785641acf",
+    "src/platform/macos/MaruAppHost.swift": "167e54db7bb256568688a19a8acdf1de4b1ad5fa6b39dd8cd13f194e7eaa820d",
+    "src/platform/macos/EditorIMESmokeDriver.swift": "d2067e82dd652d8c3c2f0789c9e4a6b4c3be3e33989f82c38581c34171070728",
+    "src/platform/macos/maru_metal_renderer.m": "15115b1cf48a0321ee4ada5b08fffa0106c3c0834b08d868e43bac74f1914e62"
+  },
+  "scenarios": [
+    {
+      "name": "small",
+      "phase": "seed",
+      "pid": 77217,
+      "exit_code": 0,
+      "states": [
+        {
+          "label": "10",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "70",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "499",
+          "hit_rows": "27"
+        },
+        {
+          "label": "10",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "93",
+          "doc_line": "96",
+          "piece": "2",
+          "col": "0",
+          "wrap": "true",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "499",
+          "hit_rows": "27"
+        }
+      ],
+      "images": [
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/small/seed/seed.png",
+          "sha256": "8dd2085250b7f1d6d416dc2face3018559b057b1efa53720908d068bf1ad0657"
+        }
+      ]
+    },
+    {
+      "name": "small",
+      "phase": "first",
+      "pid": 77413,
+      "exit_code": 0,
+      "states": [],
+      "images": [
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/small/first/first.png",
+          "sha256": "33023b6d5eff766fd36f43c1f02ceed94672788ab701128df858e6111b7b2cae"
+        }
+      ]
+    },
+    {
+      "name": "small",
+      "phase": "restore",
+      "pid": 77509,
+      "exit_code": 0,
+      "states": [
+        {
+          "label": "20",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "0",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "0",
+          "visible": "499",
+          "hit_rows": "27"
+        },
+        {
+          "label": "20",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "95",
+          "doc_line": "95",
+          "piece": "0",
+          "col": "0",
+          "wrap": "true",
+          "folded": "0",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "502",
+          "hit_rows": "27"
+        },
+        {
+          "label": "21",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "0",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "0",
+          "visible": "499",
+          "hit_rows": "27"
+        },
+        {
+          "label": "21",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "95",
+          "doc_line": "95",
+          "piece": "0",
+          "col": "0",
+          "wrap": "true",
+          "folded": "0",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "502",
+          "hit_rows": "27"
+        },
+        {
+          "label": "22",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "0",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "0",
+          "visible": "499",
+          "hit_rows": "21"
+        },
+        {
+          "label": "22",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "95",
+          "doc_line": "95",
+          "piece": "0",
+          "col": "0",
+          "wrap": "true",
+          "folded": "0",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "502",
+          "hit_rows": "21"
+        },
+        {
+          "label": "23",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "0",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "0",
+          "visible": "499",
+          "hit_rows": "38"
+        },
+        {
+          "label": "23",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "95",
+          "doc_line": "95",
+          "piece": "0",
+          "col": "0",
+          "wrap": "true",
+          "folded": "0",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "502",
+          "hit_rows": "38"
+        }
+      ],
+      "images": [
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/small/restore/narrow.png",
+          "sha256": "7f5a588f4f551d2addadeb411bc5e3a4948de84c36ba689a43b417dfd4775e64"
+        },
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/small/restore/wide.png",
+          "sha256": "fd45b0a339c45c196ec22592429b9695249aa8aea3aa69d42505cc4bb99f1347"
+        },
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/small/restore/restored.png",
+          "sha256": "f11bf25e582526e0979d0918cadf287caab1777569b2cef04f22b79e36f99228"
+        },
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/small/restore/settled.png",
+          "sha256": "3dd13038004e4bb352126034b0c39954cf90f4260ae84050fcf6468077a830ff"
+        }
+      ]
+    },
+    {
+      "name": "large",
+      "phase": "seed",
+      "pid": 77572,
+      "exit_code": 0,
+      "states": [
+        {
+          "label": "10",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "70",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "9999",
+          "hit_rows": "27"
+        },
+        {
+          "label": "10",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "93",
+          "doc_line": "96",
+          "piece": "2",
+          "col": "0",
+          "wrap": "true",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "true",
+          "max_cols": "536",
+          "visible": "9999",
+          "hit_rows": "27"
+        }
+      ],
+      "images": [
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/large/seed/seed.png",
+          "sha256": "f2966ff220538d0a5d785955c1c66f2ab3b4b3bd0cd922e4ee8215a502e22dc7"
+        }
+      ]
+    },
+    {
+      "name": "large",
+      "phase": "first",
+      "pid": 77703,
+      "exit_code": 0,
+      "states": [],
+      "images": [
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/large/first/first.png",
+          "sha256": "7bfa09ff470ead095224059d1e0e8c11cfd55ac4467085597c1e763d38fb3524"
+        }
+      ]
+    },
+    {
+      "name": "large",
+      "phase": "restore",
+      "pid": 77761,
+      "exit_code": 0,
+      "states": [
+        {
+          "label": "20",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "0",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "0",
+          "visible": "9999",
+          "hit_rows": "27"
+        },
+        {
+          "label": "20",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "93",
+          "doc_line": "95",
+          "piece": "0",
+          "col": "0",
+          "wrap": "true",
+          "folded": "1",
+          "fold_source": "indent",
+          "pending": "true",
+          "max_cols": "0",
+          "visible": "10000",
+          "hit_rows": "27"
+        },
+        {
+          "label": "21",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "0",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "0",
+          "visible": "9999",
+          "hit_rows": "27"
+        },
+        {
+          "label": "21",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "95",
+          "doc_line": "95",
+          "piece": "0",
+          "col": "0",
+          "wrap": "true",
+          "folded": "0",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "10002",
+          "hit_rows": "27"
+        },
+        {
+          "label": "22",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "0",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "0",
+          "visible": "9999",
+          "hit_rows": "21"
+        },
+        {
+          "label": "22",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "95",
+          "doc_line": "95",
+          "piece": "0",
+          "col": "0",
+          "wrap": "true",
+          "folded": "0",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "10002",
+          "hit_rows": "21"
+        },
+        {
+          "label": "23",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "0",
+          "wrap": "false",
+          "folded": "1",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "0",
+          "visible": "9999",
+          "hit_rows": "38"
+        },
+        {
+          "label": "23",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "88751cba275bd03a",
+          "bytes": "1207807",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "95",
+          "doc_line": "95",
+          "piece": "0",
+          "col": "0",
+          "wrap": "true",
+          "folded": "0",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "10002",
+          "hit_rows": "38"
+        }
+      ],
+      "images": [
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/large/restore/narrow.png",
+          "sha256": "17aa6ff7024f31abdb5725203281643dc1cd34b0aa080d81bdda6ddcd70f81d2"
+        },
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/large/restore/wide.png",
+          "sha256": "3f898aa0e8f34e97fedf23e179c6a72dd404287c3eb49527be2008d35395e87d"
+        },
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/large/restore/restored.png",
+          "sha256": "f7ee1ccee6328417057efe726f4def9f035140e8517600ac59126a06e96d544a"
+        },
+        {
+          "path": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv/large/restore/settled.png",
+          "sha256": "ea5c7152a4687f5c11a865f9fe3d4083356c407830c47e2e03722217a1ffe5cd"
+        }
+      ]
+    }
+  ],
+  "issues": [
+    {
+      "scenario": "small",
+      "label": "20",
+      "view": "0",
+      "field": "col",
+      "expected": "70",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "20",
+      "view": "1",
+      "field": "folded",
+      "expected": "1",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "20",
+      "view": "1",
+      "field": "doc_line",
+      "expected": "96",
+      "actual": "95"
+    },
+    {
+      "scenario": "small",
+      "label": "20",
+      "view": "1",
+      "field": "piece",
+      "expected": "2",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "21",
+      "view": "0",
+      "field": "col",
+      "expected": "70",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "21",
+      "view": "1",
+      "field": "folded",
+      "expected": "1",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "21",
+      "view": "1",
+      "field": "doc_line",
+      "expected": "96",
+      "actual": "95"
+    },
+    {
+      "scenario": "small",
+      "label": "21",
+      "view": "1",
+      "field": "piece",
+      "expected": "2",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "22",
+      "view": "0",
+      "field": "col",
+      "expected": "70",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "22",
+      "view": "1",
+      "field": "folded",
+      "expected": "1",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "22",
+      "view": "1",
+      "field": "doc_line",
+      "expected": "96",
+      "actual": "95"
+    },
+    {
+      "scenario": "small",
+      "label": "22",
+      "view": "1",
+      "field": "piece",
+      "expected": "2",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "23",
+      "view": "0",
+      "field": "col",
+      "expected": "70",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "23",
+      "view": "1",
+      "field": "folded",
+      "expected": "1",
+      "actual": "0"
+    },
+    {
+      "scenario": "small",
+      "label": "23",
+      "view": "1",
+      "field": "doc_line",
+      "expected": "96",
+      "actual": "95"
+    },
+    {
+      "scenario": "small",
+      "label": "23",
+      "view": "1",
+      "field": "piece",
+      "expected": "2",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "20",
+      "view": "0",
+      "field": "col",
+      "expected": "70",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "20",
+      "view": "1",
+      "field": "doc_line",
+      "expected": "96",
+      "actual": "95"
+    },
+    {
+      "scenario": "large",
+      "label": "20",
+      "view": "1",
+      "field": "piece",
+      "expected": "2",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "21",
+      "view": "0",
+      "field": "col",
+      "expected": "70",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "21",
+      "view": "1",
+      "field": "folded",
+      "expected": "1",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "21",
+      "view": "1",
+      "field": "doc_line",
+      "expected": "96",
+      "actual": "95"
+    },
+    {
+      "scenario": "large",
+      "label": "21",
+      "view": "1",
+      "field": "piece",
+      "expected": "2",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "22",
+      "view": "0",
+      "field": "col",
+      "expected": "70",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "22",
+      "view": "1",
+      "field": "folded",
+      "expected": "1",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "22",
+      "view": "1",
+      "field": "doc_line",
+      "expected": "96",
+      "actual": "95"
+    },
+    {
+      "scenario": "large",
+      "label": "22",
+      "view": "1",
+      "field": "piece",
+      "expected": "2",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "23",
+      "view": "0",
+      "field": "col",
+      "expected": "70",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "23",
+      "view": "1",
+      "field": "folded",
+      "expected": "1",
+      "actual": "0"
+    },
+    {
+      "scenario": "large",
+      "label": "23",
+      "view": "1",
+      "field": "doc_line",
+      "expected": "96",
+      "actual": "95"
+    },
+    {
+      "scenario": "large",
+      "label": "23",
+      "view": "1",
+      "field": "piece",
+      "expected": "2",
+      "actual": "0"
+    }
+  ],
+  "scope": "실제 AppKit 프로세스와 제품 workspace/Metal 경로. 초기 상태와 관측기는 소스 사본에만 주입.",
+  "view_restore_gate_passed": false,
+  "artifact_root": "/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-shared-restore-app-qvfkrhdv",
+  "base_commit": "ae24db6f81e79ae5ed193a72599f0901e404ddb6"
+}

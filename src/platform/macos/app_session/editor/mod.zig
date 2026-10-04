@@ -2368,9 +2368,6 @@ pub fn restoreViewState(self: *AppSession, term: *Term, value: editor.workspace_
     term.rt.editor_extra_selections = extras;
     term.rt.editor_selection = restored_selections[merged.primary];
     term.rt.editor_wrap = value.wrap;
-    term.rt.editor_first_line = @min(value.first_line, term.rt.editor_lines.len -| 1);
-    term.rt.editor_first_piece = if (term.rt.editor_first_line == value.first_line) @min(value.first_piece, @as(u32, @intCast(term.rt.editor_lines[term.rt.editor_first_line].len))) else 0;
-    term.rt.editor_first_col = @min(value.first_col, term.rt.editor_max_columns);
     try ensureFoldRanges(self, term);
     promoteFoldRangesToSyntax(self, term);
     // 현재 provider가 실제로 인정하는 머리만 복원한다. 사라진 접힘을 옆 블록에 옮기지 않는다.
@@ -2382,6 +2379,17 @@ pub fn restoreViewState(self: *AppSession, term: *Term, value: editor.workspace_
         }
     }
     try rebuildVisible(self, term);
+    // 접힘 재구성은 파생 폭과 랩 조각을 지운다. 그 뒤에 저장된 표시 좌표를 적용해야
+    // 첫 프레임부터 보던 위치가 유지된다. first_line은 문서 줄이 아니라 보이는 줄의 첨자다.
+    ensureLineCols(self, term);
+    ensureMaxCols(term, false);
+    const lines = editorLines(term);
+    term.rt.editor_first_line = @min(value.first_line, lines.len -| 1);
+    term.rt.editor_first_piece = if (lines.len > 0 and term.rt.editor_first_line == value.first_line)
+        @min(value.first_piece, @as(u32, @intCast(lines[term.rt.editor_first_line].len)))
+    else
+        0;
+    term.rt.editor_first_col = @min(value.first_col, term.rt.editor_max_columns);
 }
 
 pub const Prepared = struct {
@@ -7633,6 +7641,12 @@ pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.R
     // 승격 전 `max_cols=621 · first_col=538`, 승격 뒤 **둘 다 0**.
     // 편집(`refreshAfterEdit`)·접기(`finishFoldChange`)에서 이미 고친 그 부류의 **세 번째 자리**다.
     const keep = keepFoldView(term);
+    const keep_piece = term.rt.editor_first_piece;
+    defer {
+        // provider 결과만 바뀌고 같은 문서 줄을 계속 보면 랩 조각도 같은 자리다.
+        // 머리줄이 숨겨져 다른 줄로 이동한 경우에는 새 줄의 첫 조각에서 시작한다.
+        if (topDocLine(term) == keep.anchor) term.rt.editor_first_piece = keep_piece;
+    }
     // 단일 뷰는 펼친 상태라 할당이 없지만, 공유 뷰의 유지된 접힘은 파생 배열을 할당한다.
     // 실패하면 전체 줄 표시와 접힘 상태를 함께 펼쳐 낡은 부분집합을 남기지 않는다.
     rebuildVisible(self, term) catch {
@@ -49032,6 +49046,68 @@ fn recoveryRestoreAllocationProbe(allocator: std.mem.Allocator, session: *AppSes
     try testing.expect(first.rt.editorDocument() == second.rt.editorDocument());
     try testing.expectEqual(@as(usize, 1), first.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(usize, 2), second.rt.editor_selection.?.focus);
+}
+
+test "editor recovery restore 접힘 표를 재구성해도 가로 위치와 랩 조각을 잃지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for ([_]bool{ false, true }) |wrap| {
+        var fx = try PaneFixture.init(a);
+        defer fx.deinit(a);
+        const content = ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 60;
+        const term = try undoFixture(&fx, a, "restore-scroll.txt", content);
+        const value: editor.workspace_state.View = .{
+            .index = 0,
+            .document = 0,
+            .primary = editor_selection.Selection.at(0),
+            .first_line = 4,
+            .first_col = if (wrap) 0 else 70,
+            .first_piece = if (wrap) 2 else 0,
+            .wrap = wrap,
+        };
+        try restoreViewState(fx.session, term, value, true);
+        // 값 복원 뒤에 접힘 파생값을 비우면 저장한 가로 위치와 랩 조각까지 0이 된다.
+        // 첫 제품 프레임도 같은 위치를 유지하는지 함께 검사한다.
+        try testing.expectEqual(value.first_col, term.rt.editor_first_col);
+        try testing.expectEqual(value.first_piece, term.rt.editor_first_piece);
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer drawn.dl.deinit(a);
+        try testing.expectEqual(value.first_line, term.rt.editor_first_line);
+        try testing.expectEqual(value.first_col, term.rt.editor_first_col);
+        try testing.expectEqual(value.first_piece, term.rt.editor_first_piece);
+    }
+}
+
+test "editor recovery restore 늦은 접힘 provider가 같은 맨 위 줄의 랩 조각을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const content = ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 60;
+    const term = try undoFixture(&fx, a, "restore-provider.txt", content);
+    _ = try openSharedViewInActivePane(fx.session, term);
+    try restoreViewState(fx.session, term, .{
+        .index = 0,
+        .document = 0,
+        .primary = editor_selection.Selection.at(0),
+        .first_line = 4,
+        .first_piece = 2,
+        .wrap = true,
+    }, true);
+    // 서버가 늦게 준 응답을 제품 수신 경로에 넣는다. 새 범위가 있어도 접지 않은
+    // 맨 위 줄과 본문은 바뀌지 않으므로 조각을 처음으로 되돌릴 이유가 없다.
+    var response = try std.json.parseFromSlice(std.json.Value, a, "[{\"startLine\":0,\"endLine\":2}]", .{});
+    defer response.deinit();
+    term.rt.editorDocument().notifications.lsp_version = 1;
+    term.rt.editor_fold_lsp = .{ .waiting = true, .waiting_seq = 1, .waiting_version = 1 };
+    fold_lsp_client.onResponse(fx.session, term, 1, response.value, false);
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_fold_lsp.applied);
+    try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
+    try testing.expectEqual(@as(usize, 4), topDocLine(term));
+    try testing.expectEqual(@as(u32, 2), term.rt.editor_first_piece);
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(a);
+    try testing.expectEqual(@as(u32, 2), term.rt.editor_first_piece);
 }
 
 test "editor recovery restore 모든 staged 할당 실패에서 문서와 백업 소유를 반환한다" {

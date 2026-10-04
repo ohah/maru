@@ -2,7 +2,10 @@
 
 상태: 로컬 문서 ID 기반 백업과 같은 창의 문서/뷰 capture·restore 연결 구현.
 헤드리스 AppSession 및 별도 프로세스 실행 검증은 [제품 연결 결과](editor-recovery-integration.md)를 따른다.
-실제 AppKit 재시작·IME·비동기 접힘 provider 화면 gate와 사용자용 분할 명령 공개는 남아 있다.
+실제 두 pane AppKit 재시작·리사이즈를 점검했고 스크롤 초기화 두 곳을 수정했다.
+지연 구문/LSP 접힘 provider 복원에서 반례가 재현돼 공개 gate는 아직 통과하지 못했다.
+실제 한국어 HID 조합/두 pane 전환 뒤 저장·재시작은 통과했다. 사용자용 분할 명령 공개는 남아 있다.
+상세 근거는 위 제품 연결 결과를 따른다.
 사용자는 출시 전 단일 v2 포맷과 단계별 구현을 승인했다. Undo/Redo 이력은 저장하지 않는다.
 진행 순서는 [공유 문서 계획](editor-shared-document.md), 계약은
 [문서 모델](../native-editor-document-model.md)과 [workspace 복원](../workspace-restore.md)이 소유한다.

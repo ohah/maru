@@ -92,8 +92,8 @@ clean prepare 비용은 ReleaseFast에서 같은 작은 파일을 200회 교차 
 
 ## 남은 범위
 
-- 공개 분할 명령은 이 단계에서 노출하지 않는다. 실제 두 pane 재시작의 첫 렌더, 배경 pane/폭 변화와
-  wrap 정산, 큰 파일의 지연 syntax/LSP 접힘 전환, OS IME 확정 후 복원은 공개 전 별도 gate다.
+- 공개 분할 명령은 이 단계에서 노출하지 않는다. 아래 실제 두 pane/IME 재시작 점검에서 남은
+  지연 syntax/LSP 접힘 복원 반례를 해결해야 한다.
   현재 저장한 접힘은 준비 시점 provider에 있는 머리만 적용하며 이후 provider 교체의 기존 정책을 따른다.
 - orphan/legacy 열거와 사용자 복구 UI는 [백업 발견과 복구](editor-backup-discovery.md)에서 연결한다.
   `recover_editor_backups`는 선택한 사본을 별도 미저장 문서로 연다. 원본 누락 시 전체 창
@@ -103,6 +103,54 @@ clean prepare 비용은 ReleaseFast에서 같은 작은 파일을 200회 교차 
   ID 분리로 best-effort 정리나 stale-backup 판정 전체가 해결됐다고 주장하지 않는다.
 - 프로세스 강제 중단 시 빈 claim/임시 파일이 남을 수 있다. 일반 GC·tombstone을 도입하지 않는다.
 
+## 두 공유 pane의 실제 재시작 점검
+
+`python3 tools/shared-restore-app/run.py`는 격리된 소스 사본에 초기 상태 준비와 관측기만 붙여
+실제 AppKit 앱을 실행한다. 일반 로컬 문서를 두 pane으로 나누고 서로 다른 선택·스크롤·wrap·접힘을
+둔 뒤 제품 종료/checkpoint 경로를 거쳐 새 프로세스에서 복원한다. 첫 Metal 프레임과 복원 후
+960×600 → 640×480 → 1200×800 화면을 기록한다. `--only-ime`는 기존 실제 한국어 HID 드라이버를
+좌우 pane 전환에 연결하고 저장·종료 뒤 다시 연다. 사용자 HOME·백업·workspace와는 격리한다.
+첫 프레임 캡처 프로세스는 renderer의 one-shot 종료를 쓰며, seed와 restore 프로세스가 실제 AppKit
+정상 종료를 지난다. `--callback-ime`는 실제 NSTextInputClient에 조합/확정·멀티커서·Undo 콜백을
+주입해 저장 후 재시작을 검사한다. 이 경로는 통과했지만 실제 OS 한글 입력기 증거는 아니다.
+
+실행 과정에서 다음 두 결함을 재현해 수정했다.
+
+- `restoreViewState`가 저장한 가로 위치와 wrap 조각을 넣은 **뒤** `rebuildVisible`을 호출해 둘 다
+  0으로 지웠다. 접힘/폭 파생값을 먼저 만든 뒤 보이는 줄 축에 맞춰 위치를 복원한다.
+- 뒤늦은 구문/LSP 접힘 결과의 `installFoldRanges`도 같은 문서 줄을 계속 보는데 wrap 조각을 지웠다.
+  갱신 전후 맨 위 문서 줄이 같으면 그 조각을 보존한다. 실제 LSP 응답 소비 경로와 첫 렌더를
+  회귀 테스트에 포함한다. 이것은 실제 외부 언어 서버의 네트워크/프로세스 검증과 다르다.
+
+**공개 gate는 아직 통과하지 않았다.** 실제 앱에서 약 60 KB 문서는 파싱 완료 시점에 따라,
+약 1.2 MB 문서는 지연 파싱에서 저장한 구문 접힘이 들여쓰기 범위로 복원됐다가 풀리는 현상을
+확인했다. 두 provider의 끝줄이 다르면 기존 보존 정책이 이를 펼친다. 이때 checkpoint의
+`first_line`은 접힌 배열의 첨자인데 들여쓰기/구문 배열이 달라져 맨 위 문서 줄도 바뀔 수 있다.
+내용·선택·독립 wrap과 가로 위치 보존은 이 문제와 구분한다.
+
+`--clangd <실행 파일>`로 실제 Apple clangd 17.0.0도 실행했다. 생성한 C 문서 디렉터리만 격리된
+config의 신뢰 목록에 넣고 서버 시작을 1초 늦췄다. seed는 LSP 범위를 기다려 접은 뒤 저장하고,
+restore는 초기 구문 범위와 실제 `textDocument/foldingRange` 응답 적용 뒤를 각각 기록한다.
+왼쪽 맨 위 문서 줄은 `46 → 47`, 접힘은 두 뷰 모두 `1 → 0`으로 바뀌었다. 오른쪽은 같은 문서 줄
+`96`과 wrap 조각 `2`를 유지해 이번 조각 보존 수정도 실제 서버 전환에서 확인했다. 이 C 문서/서버의
+결과를 모든 언어 서버의 응답 지연/재시작/오류 처리 검증으로 확대하지 않는다.
+
+하네스는 앱의 정상 종료만으로 통과하지 않는다. 본문 hash·선택·dirty·wrap·접힘·맨 위 문서 줄·
+wrap 조각·가로 위치를 종료 전후 대조하고, 차이가 있으면 `manifest.json`의 `issues`와 exit 1을
+남긴다. 재시작 뒤 provider 준비를 기다리는 상태와 문서 기준 스크롤 앵커의 계약을 정해야 하며,
+이 점검에서 임의로 포맷/접힘 정책을 바꾸거나 사용자용 분할 명령을 공개하지 않는다.
+
+증거: [수정 전 앱](../evidence/editor-shared-restore-app-20261004/baseline.json),
+[수정 후 앱과 남은 반례](../evidence/editor-shared-restore-app-20261004/restored.json),
+[입력 콜백 후 재시작](../evidence/editor-shared-restore-app-20261004/callbacks.json),
+[실제 한국어 HID 후 재시작](../evidence/editor-shared-restore-app-20261004/live-ime.json),
+[실제 clangd 지연 준비](../evidence/editor-shared-restore-app-20261004/clangd.json),
+[보호 코드 변이](../evidence/editor-shared-restore-app-20261004/mutations.json).
+실제 OS 한국어 HID에서는 왼쪽 `가` 조합 → 오른쪽 전환/`나` 조합 → 왼쪽 복귀를 실행했다.
+`setMarkedText` 4회, 두 번의 포커스 전환, `L가 R나`의 단일 반영·저장, 원래 입력 소스 복원,
+새 프로세스에서 같은 본문과 두 독립 커서의 복원을 확인했다. 전환 뒤 늦은 OS 콜백은 관측되지
+않았으므로 그 자연 발생/격리까지 입증한 결과로 확대하지 않는다.
+## 단일 문서 잔여 백업의 실제 재시작 대조
 
 실제 AppKit의 단일 문서 v2 재시작도 `python3 tools/test-editor-residual-backup-app.py`로 확인했다.
 서로 다른 앱 프로세스에서 정상 종료 백업 → 복원 후 최신 내용 저장(삭제 권한 실패) → 입력 없는 dirty 재복원을 실행했다.

@@ -1,6 +1,6 @@
 # 공유 문서와 독립 편집기 뷰 — 설계 제안
 
-상태: VS Code 기준 공유 뷰 UX 승인. 정본·이력·안정 handle·내부 공유 편집·문서 통지·IME 확정 승인·반대 뷰 조합 projection과 뷰별 검색 구현 완료. 사용자용 공유 분할 UI와 workspace 복원은 미착수다. 실제 한국어 HID의 A→B→A 전환 회귀는 검사했으며 자연적으로 발생한 늦은 OS callback은 관측하지 못했다. 아래 초기 대조와 구현 기록은 작성 당시 main을 각각 명시한다.
+상태: VS Code 기준 공유 뷰 UX 승인. 정본·이력·안정 handle·내부 공유 편집·문서 통지·IME 확정 승인·반대 뷰 조합 projection과 뷰별 검색 구현 완료. workspace의 문서/뷰 복원과 ID 백업은 [제품 연결](editor-recovery-integration.md)에 구현됐다. 사용자용 공유 분할 UI는 아직 없으며, 실제 두 pane 재시작에서 지연 접힘 복원 반례가 남아 있다. 실제 한국어 HID의 A→B→A 전환 회귀는 검사했으며 자연적으로 발생한 늦은 OS callback은 관측하지 못했다. 아래 초기 대조와 구현 기록은 작성 당시 main을 각각 명시한다.
 사용자는 설계 정리·단계 분해에 이어 2026-10-01 VS Code 기준 UX 채택을 승인했다.
 목표 UX는 [레이어 배치 §2.4a](../native-editor-layering.md)가 소유한다. 공유 뷰의 내부 제품 경로와 별도 뷰별 Metal 캡처를 제공하며, 사용자용 분할 UI는 아직 없다. 계약은 [레이어 배치 §2.4](../native-editor-layering.md),
 [Surface 문서 identity](../editor-surface.md), [탭·split 배치](../tabs-splits-layout.md)가 소유한다.

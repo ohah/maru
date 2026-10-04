@@ -4036,7 +4036,9 @@ codec gate만으로 제품 restart 복구 성공을 주장하지 않는다. 후�
 
 ## 로컬 문서 ID 백업과 공유 뷰 복원
 
-상태: 제품 연결 구현, 헤드리스 AppSession·서로 다른 프로세스 검증. 공개 분할 명령과 AppKit/IME 재시작 화면 gate는 남아 있다.
+상태: 제품 연결 구현, 헤드리스 AppSession·서로 다른 프로세스 검증. 실제 두 pane AppKit 재시작은
+아래 하네스로 점검했으며 지연 접힘 복원의 반례가 남았다. 실제 한국어 HID 조합/두 pane 전환 뒤
+저장·재시작은 통과했으며, 공개 분할 명령은 아직 없다.
 `zig build test-editor-recovery-restore`는 v2 문서/뷰 참조와 혼합 Term 순서, 실제 백업의 독립 A/B와 공유 A,
 커서/스크롤/wrap, 독립 검색 상태, 저장 충돌, 손상 백업의 창 전체 rollback, 오래된 표시 지문 기본값을 검사한다.
 메모리 할당 실패에서 캡처/복원·저장소의 자원을 반환하고 이전 창/기록을 보존하는지 판정한다.
@@ -4057,3 +4059,13 @@ AppKit 실행 파일의 화면·OS IME·물리 전원 차단 검증은 아니다
 정확한 `MARU_EDITOR_RECOVERY_CHECKPOINT_TEST=maru-test-only-v1` 토큰에서만 제품 종료/capture/restore를 통과한다.
 타이핑은 NSTextInputClient와 합성 chord를 쓰며 물리 OS IME 검증은 아니다.
 증거와 fixture 범위는 [제품 연결 결과](plans/editor-recovery-integration.md)를 따른다.
+
+두 pane의 실제 앱 검증은 `python3 tools/shared-restore-app/run.py`다. 같은 정본과 독립 선택·wrap,
+dirty 백업 하나·디스크 불변을 점검하고 첫 Metal 프레임과 세 창 크기를 캡처한다.
+앱이 exit 0이어도 저장 전후 표시 상태가 달라지면 하네스는 exit 1과 `issues`를 남긴다.
+구문 분석이 지연되는 복원에서 접힘이 풀리고 맨 위 문서 줄이 바뀌는 반례가 실제로 검출됐다.
+스크롤 초기화 두 곳의 회귀 및 LSP 응답 소비 경로는 `test-editor-recovery-restore`가 검사한다.
+LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거가 아니다.
+별도로 같은 하네스의 `--clangd <실행 파일>`에서 실제 Apple clangd 17.0.0의 시작을 1초 늦춰
+실행했다. 실제 접힘 응답 적용 뒤 같은 문서 줄의 wrap 조각은 보존됐고, 구문/LSP 범위 차이에 따른
+접힘/맨 위 문서 줄 복원 반례도 검출했다. 모든 언어 서버나 임의의 오류/응답 순서를 검증한 결과는 아니다.

@@ -11972,3 +11972,33 @@ mixed line ending 원본 보존, OOM의 fallback 금지와 readonly 읽기 상�
 읽기 상한 생략의 다섯 compiled runtime 변형을 검출하고 worker/core 원본 bytes를 복원했다.
 일반 앱 파일 클릭의 worker 연결과 결과 등록·닫기 배선은 계속 남아 있으며 기존 동기 경로는
 아직 문서 준비를 UI 스레드에서 수행한다.
+
+### 2m.184 — 일반 앱의 초기 worker 결과 등록과 닫기 연결
+
+`Book.admitOpen`은 취소·실패·중복 소비와 미확인 capability를 거절한다. writable 결과는
+controller 슬롯을 먼저 예약하고 독립 문서/권한으로 등록한다. readonly 결과도 raw hash를
+검사해 읽기 전용 문서를 만들며 save grant를 얻지 않는다. 등록 할당 실패는 결과를 보존하고,
+성공 뒤만 raw 소유권과 borrowed Document를 소비한다. probe 재시도는 이전 성공 표시를
+먼저 지우므로 실패한 재검증이 기존 permit을 되살리지 않는다.
+
+일반 파일 클릭은 이제 `startForApp`으로 읽기/probe/readonly fallback을 제출한다. 프레임은
+queued Esc·닫기를 처리한 뒤 완료 결과를 등록하고 뷰를 붙인다. 읽기 중 키와 앱 마우스
+동작은 차단하되 caption·resize는 유지한다. 창 닫기는 job을 취소하고 실제 drain 뒤 기존
+dirty-close 절차로 돌아간다. 앱 종료 경로도 독립 job을 정산한다. 뷰 슬롯 예약은 등록/복구보다
+앞서며, 복구가 dirty를 만들기 전에 게시 공간을 확보한다. 초기 lease는 뷰 부착 뒤 해제한다.
+
+host 77개가 Debug/ReleaseFast에서 통과했다. worker 결과 해제 뒤 실제 native save,
+cancel/capability 거절, readonly raw CAS와 save 권한 부재, 등록 실패 소유권, probe 재시도,
+앱 뷰 예약·단일 참조·복구·OOM을 검사했다. Book의 cancel·capability·readonly·raw CAS·조기
+소비와 앱의 cancellation 유실·예약 순서·초기 lease 누수·복구 생략·OOM 오분류를 각각 다섯
+compiled runtime 변형으로 검출했다. 모든 원본 bytes를 복원하고 재검증했다.
+
+새 제품 exe의 실제 앱에서 비동기 파일 열기→편집→Save-close가 `BOM + Xbase CRLF`를
+정확히 저장하고 정상 종료했다. 별도 readonly 파일은 입력 시도 뒤 본문과 원본 bytes를
+유지하며 종료했다. 1,870,003-byte 파일 클릭과 WM_CLOSE를 대기 없이 연속 주입한 경우도
+원본 전체 bytes와 정상 종료를 확인했다. 소유 HWND에 synthetic 메시지를 주입한 검증이며
+물리 입력/IME로 세지 않는다. 코드 hash·byte proof·캡처는 private cache에 보관한다.
+
+초기 filesystem 읽기/probe와 worker 문서 해석은 연결됐지만 게시 시 L2 문서 생성의 UTF-8
+재검사·buffer/line index와 뷰/syntax 준비, 복구 저장소 읽기는 아직 UI 스레드에 있다. 이 CPU/
+복구 I/O 이관과 sleep/unmount·물리 입력/IME, 나머지 Windows 지원 범위는 계속 남아 있다.

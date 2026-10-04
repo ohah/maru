@@ -1028,6 +1028,11 @@ worker 11개를 실행한다. off-owner 실행, active/late 취소와 busy 정�
 원본 bytes 보존, 읽기 상한과 readonly capability, app readonly fallback·UTF-8·BOM·혼합
 줄바꿈·OOM 및 web kind admission을 검사한다. `-Doptimize=ReleaseFast`도
 실행한다. 이 gate는 실제 파일/KTM 검사지만 일반 앱 파일 클릭의 비동기 배선 증거는 아니다.
+
+초기 worker의 일반 앱 연결은 Windows 계약 §2m.184가 소유한다.
+`test-win32-editor-host` 77개는 worker 결과의 실제 native 저장, 등록 실패/취소/capability,
+readonly raw CAS·권한, 단일 뷰 참조와 recovery를 포함한다. Debug/ReleaseFast로 검증하고,
+일반 앱 비동기 열기·Save-close·readonly·읽기 중 닫기는 별도 실제 소유 창에서 확인한다.
 `zig build` 뒤 `zig-out/bin/maru.exe win32-editor-document-smoke`는 실제 Windows 창 입력과
 임시 파일 native 커밋→디스크 바이트→일반 읽기 전용 재열기/paint까지 검사한다.
 저장은 fixture 직접 호출이며 원래 뷰는 살아 있다. 일반 Ctrl+S·dirty-close·물리 IME의

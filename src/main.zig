@@ -4393,6 +4393,196 @@ fn openAppFileInto(a: std.mem.Allocator, book: *file_host.Book, io: std.Io, owne
     return opened;
 }
 
+fn initialOpenFailure(err: anyerror) OpenOutcome {
+    return switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        error.NotUtf8, error.UnsupportedFileKind => .unsupported,
+        error.NeedsWebPanel => .needs_web_panel,
+        else => .read_failed,
+    };
+}
+
+fn openAppResultInto(a: std.mem.Allocator, book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: *std.ArrayList(OpenFile), result: *@import("platform/windows/editor/open_worker.zig").Result, local_override: ?[]const u8) OpenOutcome {
+    // Reserve the final view slot before registration/recovery can consume the
+    // result or create a dirty document. A failed admission still owns its image.
+    views.ensureUnusedCapacity(a, 1) catch return .out_of_memory;
+    const lease = book.admitOpen(result) catch |err| return initialOpenFailure(err);
+    defer _ = book.registry.release(lease) catch unreachable;
+    var view = editor_document.attach(book.registry, lease, book.allocator) catch {
+        book.release(io, lease, false) catch unreachable;
+        return .out_of_memory;
+    };
+    recoverAppFile(book, io, owner, &view, local_override) catch |err| {
+        if (err == error.OutOfMemory) {
+            book.release(io, view.document, true) catch unreachable;
+            view.deinit(book.allocator);
+            return .out_of_memory;
+        }
+        std.log.warn("editor recovery unavailable; keeping original readonly({s})", .{@errorName(err)});
+        book.registry.get(view.document).?.opened.?.file.read_only = true;
+    };
+    views.appendAssumeCapacity(view);
+    return .{ .opened = view };
+}
+
+fn drainInitialOpen(worker: *@import("platform/windows/editor/open_worker.zig").Worker, io: std.Io) void {
+    if (worker.job != null) {
+        worker.cancel() catch unreachable;
+        while (true) {
+            if (worker.takeResult() catch unreachable) |value| {
+                var result = value;
+                result.deinit(io);
+                break;
+            }
+            io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+    }
+    worker.deinit() catch unreachable;
+}
+
+fn awaitInitialAppResult(f: *FileCloseFixture, cancel_before_take: bool) !@import("platform/windows/editor/open_worker.zig").Result {
+    const io = std.testing.io;
+    const path = try f.tmp.dir.realPathFileAlloc(io, "file.txt", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var worker: @import("platform/windows/editor/open_worker.zig").Worker = .{ .allocator = std.testing.allocator };
+    defer drainInitialOpen(&worker, io);
+    try worker.startForApp(path, 128);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.OpenTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    if (cancel_before_take) try worker.cancel();
+    return (try worker.takeResult()).?;
+}
+
+fn applyInitialAppResult(f: *FileCloseFixture, a: std.mem.Allocator, result: *@import("platform/windows/editor/open_worker.zig").Result) !OpenOutcome {
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try f.tmp.dir.realPath(std.testing.io, &root);
+    return openAppResultInto(a, &f.book, std.testing.io, &f.backups, &f.views, result, root[0..len]);
+}
+
+fn releaseExtraInitialView(f: *FileCloseFixture, initial_id: u64) void {
+    if (f.views.items.len == 0) return;
+    const view = f.views.items[0].document;
+    if ((f.documents.viewCount(view) orelse 0) > 1) {
+        _ = f.documents.release(.{ .owner = &f.documents, .document = view.document, .id = initial_id, .kind = .view }) catch {};
+    }
+}
+
+test "Windows editor host initial app worker result creates one view and preserves native save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    const initial_id = f.documents.last_reference + 1;
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    const view = outcome.opened.document;
+    const count = f.documents.viewCount(view).?;
+    // Drain a deliberately leaked initial publication lease before assertions.
+    // The tested mutation must fail without leaving Registry teardown busy.
+    if (count > 1) {
+        _ = try f.documents.release(.{ .owner = &f.documents, .document = view.document, .id = initial_id, .kind = .view });
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expect(result.consumed);
+    result.deinit(std.testing.io);
+    if (try applyFileKey(&f.book, std.testing.io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| std.testing.allocator.free(copied);
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (true) {
+        if (try f.book.pollSave(std.testing.io, view)) |ready| {
+            try std.testing.expect(ready == .receipt and ready.receipt.decision == .committed);
+            break;
+        }
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.SaveTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows editor host initial app cancellation and OOM never publish a view" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    var failed: @import("platform/windows/editor/open_worker.zig").Result = .{ .failure = error.OutOfMemory, .thread_id = std.Thread.getCurrentId() };
+    try std.testing.expect((try applyInitialAppResult(f, std.testing.allocator, &failed)) == .out_of_memory);
+    var result = try awaitInitialAppResult(f, true);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect((try applyInitialAppResult(f, std.testing.allocator, &result)) == .read_failed);
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(usize, 0), f.views.items.len);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+}
+
+test "Windows editor host initial app view admission failure retains result for retry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect((try applyInitialAppResult(f, failing.allocator(), &result)) == .out_of_memory);
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(usize, 0), f.views.items.len);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    try std.testing.expect((try applyInitialAppResult(f, std.testing.allocator, &result)) == .opened);
+    try std.testing.expectEqual(@as(usize, 1), f.views.items.len);
+}
+
+test "Windows editor host initial app readonly result stays readonly through view attachment" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    const path = try f.tmp.dir.realPathFileAlloc(std.testing.io, "file.txt", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+    defer std.testing.allocator.free(wide);
+    const Attributes = struct {
+        extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) std.os.windows.BOOL;
+    };
+    try std.testing.expect(Attributes.SetFileAttributesW(wide, 1).toBool());
+    defer _ = Attributes.SetFileAttributesW(wide, 0x80);
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    try std.testing.expect(f.documents.get(outcome.opened.document).?.opened.?.file.read_only);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host initial app result restores backup before exposing recovered view" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    try f.book.deinit(std.testing.io);
+    for (f.views.items) |*view| view.deinit(std.testing.allocator);
+    f.views.deinit(std.testing.allocator);
+    f.views = .empty;
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    try std.testing.expect(outcome.opened.recovered);
+    const state = f.documents.get(outcome.opened.document).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
 fn applyFileKey(book: *file_host.Book, io: std.Io, resolver: maru.config.keybinding.KeyBindingResolver, file: *OpenFile, event: maru.terminal.KeyEvent, context: OpenFile.InputContext) !?[]u8 {
     if (file_host.saveKey(resolver, event)) {
         const state = book.registry.get(file.document) orelse return error.StaleDocument;
@@ -4525,13 +4715,18 @@ const FileCloseFixture = struct {
     backups: ?@import("platform/windows/editor/backup_store.zig").LocalData = null,
 
     fn init() !*FileCloseFixture {
+        const self = try initEmpty();
+        errdefer self.deinit();
+        try self.open();
+        return self;
+    }
+    fn initEmpty() !*FileCloseFixture {
         const a = std.testing.allocator;
         const self = try a.create(FileCloseFixture);
         self.* = .{ .tmp = std.testing.tmpDir(.{}), .documents = .{ .allocator = a }, .book = undefined };
         self.book = .{ .allocator = a, .registry = &self.documents };
         errdefer self.deinit();
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase\r\n" });
-        try self.open();
         return self;
     }
     fn open(self: *FileCloseFixture) !void {
@@ -6936,6 +7131,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var choice_close: ?struct { document: maru.session.editor.document_registry.Lease, target: FileCloseTarget } = null;
     var choice_notice: ?maru.session.editor.document_registry.Lease = null;
     var pending_save: ?maru.session.editor.document_registry.Lease = null;
+    var initial_open: @import("platform/windows/editor/open_worker.zig").Worker = .{ .allocator = allocator };
+    defer drainInitialOpen(&initial_open, io);
+    var initial_open_close_requested = false;
     var save_close_requested = false;
     var save_close_target: ?FileCloseTarget = null;
     var file_comparison: ?ExternalComparison = null;
@@ -11025,6 +11223,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
             .key => |key_ev| {
+                if (initial_open.job != null) {
+                    if (key_ev.key == .escape) {
+                        initial_open.cancel() catch {};
+                        initial_open_close_requested = false;
+                        file_notice.dismiss();
+                    }
+                    continue;
+                }
                 if (pending_save) |lease| {
                     if (key_ev.key == .escape) {
                         editor_files.cancelSave(io, lease) catch {};
@@ -11326,7 +11532,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // IME 조합 미리보기. **중립 계약에 그대로 넣는다** — `renderSnapshot()`이 합성해 주므로
             // Windows 가 미리보기 렌더를 따로 만들지 않는다(§2i).
             .preedit_changed => {
-                if (file_notice.open or confirm_state.open) continue;
+                if (initial_open.job != null or file_notice.open or confirm_state.open) continue;
                 const text = window.preeditText();
                 // **조합은 포커스를 따라간다**(W8.15 잔여). 검색 줄에 치는 동안 미리보기가 터미널로
                 // 가면 사용자는 자기가 친 것을 못 보는데 셸은 그것을 받는다 — 키 입력이 이미 겪은
@@ -11426,6 +11632,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
 
                 // Keep native caption controls available, but block covered app actions.
+                if (initial_open.job != null) continue;
                 if (file_notice.open and !confirm_state.open) continue;
 
                 // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────
@@ -12224,30 +12431,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (found) |fi| {
                                             file_reopens += 1;
                                             active_view = .{ .file = fi };
-                                        } else switch (openAppFileInto(allocator, &editor_files, io, &file_backups, &open_files, owned, null)) {
-                                            .opened => |of| {
-                                                file_opens += 1;
-                                                active_view = .{ .file = open_files.items.len - 1 };
-                                                if (editor_documents.get(of.document).?.opened.?.file.read_only)
-                                                    file_notice.show(maru.i18n.t(.editor_readonly));
-                                                if (of.recovered and base_status_items < status_items_buf.len) {
-                                                    status_items = recoveredStatusItems(&status_items_buf, status_items, base_status_items);
-                                                    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
-                                                }
-                                            },
-                                            // **못 여는 것을 조용히 넘기지 않고, 이유도 안 뭉갠다.**
-                                            // `.md` 는 계약상 WebView 본문이라 W8.6 이 선행이고,
-                                            // 읽기 실패는 결함이거나 4 MiB 상한이다 — 다른 사실이다.
-                                            else => |why| {
+                                        } else {
+                                            initial_open.startForApp(owned, 4 << 20) catch |err| {
+                                                const why = initialOpenFailure(err);
                                                 file_rejects += 1;
                                                 last_reject = std.meta.activeTag(why);
                                                 file_notice.show(maru.i18n.t(OpenOutcome.noticeKey(last_reject).?));
-                                                hbar_drag.end();
-                                                vbar_drag.end();
-                                                hbar_drag_release = false;
-                                                vbar_drag_release = false;
                                                 continue;
-                                            },
+                                            };
+                                            hbar_drag.end();
+                                            vbar_drag.end();
+                                            hbar_drag_release = false;
+                                            vbar_drag_release = false;
+                                            file_notice.show(maru.i18n.t(.scm_loading));
+                                            continue;
                                         }
                                         refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                         // **목록만 고치면 화면은 그대로다.** 실측 캡처에서 편집기는
@@ -13121,6 +13318,48 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **마우스로 고른 것을 여기서 실행한다.** 이벤트 루프 안에서 세션을 지우면 그 프레임의
         // 나머지가 사라진 것을 만진다 — 키 갈래는 곧바로 실행해도 되지만(그 뒤에 `continue` 로
         // 프레임을 빠져나간다) 마우스는 다른 처리가 뒤따를 수 있어 한 박자 미룬다.
+        // Process queued close/Esc before registering a completed initial read.
+        // Caption controls and resize remain live while the independent job drains.
+        if (initial_open.job != null) {
+            if (close_requested) {
+                initial_open.cancel() catch {};
+                initial_open_close_requested = true;
+                close_requested = false;
+            }
+            if (try initial_open.takeResult()) |value| {
+                var result = value;
+                defer result.deinit(io);
+                file_notice.dismiss();
+                if (!result.cancelled) {
+                    switch (openAppResultInto(allocator, &editor_files, io, &file_backups, &open_files, &result, null)) {
+                        .opened => |of| {
+                            file_opens += 1;
+                            active_view = .{ .file = open_files.items.len - 1 };
+                            if (editor_documents.get(of.document).?.opened.?.file.read_only)
+                                file_notice.show(maru.i18n.t(.editor_readonly));
+                            if (of.recovered and base_status_items < status_items_buf.len) {
+                                status_items = recoveredStatusItems(&status_items_buf, status_items, base_status_items);
+                                rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                            }
+                        },
+                        else => |why| {
+                            file_rejects += 1;
+                            last_reject = std.meta.activeTag(why);
+                            file_notice.show(maru.i18n.t(OpenOutcome.noticeKey(last_reject).?));
+                        },
+                    }
+                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                    // **목록만 고치면 화면은 그대로다.** 실측 캡처에서 편집기는
+                    // 떴는데 사이드바에 그 파일 카드가 없었다 — 카드 **수**를
+                    // 보는 판정은 그것을 못 본다(모델은 맞았으니까).
+                    sidebar_redraws += 1;
+                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                    sidebar_reveal_request = true;
+                }
+                if (initial_open_close_requested) close_requested = true;
+                initial_open_close_requested = false;
+            }
+        }
         // Consume queued cancellation/close before voting to commit a ready
         // image. The view and close intent remain alive through native drain.
         if (pending_save) |lease| {

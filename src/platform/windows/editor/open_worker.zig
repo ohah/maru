@@ -12,7 +12,7 @@ pub const ReadonlyImage = struct {
     bytes: []u8,
     raw_hash: u64,
 
-    fn deinit(self: *ReadonlyImage) void {
+    pub fn deinit(self: *ReadonlyImage) void {
         std.heap.smp_allocator.free(self.path);
         std.heap.smp_allocator.free(self.bytes);
     }
@@ -24,6 +24,7 @@ pub const Result = struct {
     document: ?maru.session.editor.document.Document = null,
     failure: ?anyerror = null,
     cancelled: bool = false,
+    consumed: bool = false,
     thread_id: std.Thread.Id,
 
     pub fn deinit(self: *Result, io: std.Io) void {

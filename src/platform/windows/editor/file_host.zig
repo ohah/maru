@@ -10,6 +10,7 @@ const transactions = @import("transaction.zig");
 const identity = @import("identity.zig");
 const reading = @import("file_read_worker.zig");
 const watching = @import("directory_watch.zig");
+const opening = @import("open_worker.zig");
 const w = std.os.windows;
 extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
 
@@ -53,6 +54,38 @@ pub const Book = struct {
     registry: *editor.document_registry.Registry,
     controllers: std.ArrayList(saving.Controller) = .empty,
     read_scope: u64 = 0,
+
+    /// Publish only on the app owner. Failure retains the complete worker result;
+    /// after success its raw bytes cannot outlive the independent document text.
+    pub fn admitOpen(self: *Book, result: *opening.Result) !editor.document_registry.Lease {
+        if (result.consumed) return error.OpenResultConsumed;
+        if (result.cancelled) return error.OpenCancelled;
+        if (result.failure) |err| return err;
+        if (result.document == null or (result.snapshot != null) == (result.readonly != null)) return error.InvalidOpenResult;
+        if (result.snapshot) |*snapshot| {
+            if (!snapshot.capability_verified) return error.SaveCapabilityUnavailable;
+            try self.controllers.ensureUnusedCapacity(self.allocator, 1);
+            var opened = try grants.Grant.publishOpen(self.allocator, self.registry, snapshot);
+            self.controllers.appendAssumeCapacity(saving.Controller.take(&opened.grant));
+            result.snapshot = null;
+            result.document = null;
+            result.consumed = true;
+            return opened.view;
+        }
+        const image = &result.readonly.?;
+        if (editor.document_state.contentHash(image.bytes) != image.raw_hash) return error.OpenImageChanged;
+        var state: editor.document_state.State = .{};
+        defer state.clear(self.allocator);
+        const file = try editor.edit_doc.EditableFile.init(self.allocator, image.bytes, true);
+        state.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content), .disk_hash = image.raw_hash };
+        state.path = try self.allocator.dupe(u8, image.path);
+        const view = try self.registry.create(&state, self.allocator);
+        image.deinit();
+        result.readonly = null;
+        result.document = null;
+        result.consumed = true;
+        return view;
+    }
 
     pub fn open(self: *Book, io: std.Io, root: std.Io.Dir, name: []const u8, limit: usize) !editor.document_registry.Lease {
         // Allocate the publication slot first. A successfully probed document
@@ -1305,4 +1338,153 @@ fn allocationPrefixes(a: std.mem.Allocator) !void {
 test "Windows editor host open allocation prefixes never strand native or document ownership" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationPrefixes, .{});
+}
+
+fn initialResult(root: std.Io.Dir, cancel_before_take: bool) !opening.Result {
+    const io = std.testing.io;
+    var base: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try root.realPath(io, &base);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ base[0..len], "file.txt" });
+    defer std.testing.allocator.free(path);
+    var worker: opening.Worker = .{ .allocator = std.testing.allocator };
+    defer {
+        if (worker.job != null) {
+            worker.cancel() catch unreachable;
+            while (true) {
+                if (worker.takeResult() catch unreachable) |value| {
+                    var result = value;
+                    result.deinit(io);
+                    break;
+                }
+                io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+        }
+        worker.deinit() catch unreachable;
+    }
+    try worker.startForApp(path, 128);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.OpenTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    if (cancel_before_take) try worker.cancel();
+    return (try worker.takeResult()).?;
+}
+
+fn expectAdmissionError(f: *Fixture, result: *opening.Result, expected: anyerror) !void {
+    if (f.book.admitOpen(result)) |view| {
+        // Negative verification must retain the unexpected view for teardown.
+        f.views[0] = view;
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(expected, err);
+}
+
+test "Windows editor host worker admission consumes once and survives result disposal through native save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    const view = try f.book.admitOpen(&result);
+    f.views[0] = view;
+    try std.testing.expect(result.consumed and result.snapshot == null and result.document == null);
+    try std.testing.expectError(error.OpenResultConsumed, f.book.admitOpen(&result));
+    result.deinit(std.testing.io);
+    try change(&f.registry, view, "X");
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt and ready.receipt.decision == .committed);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfXbase\r\n", bytes);
+}
+
+test "Windows editor host cancelled initial worker result never registers a document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, true);
+    defer result.deinit(std.testing.io);
+    try expectAdmissionError(f, &result, error.OpenCancelled);
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
+}
+
+test "Windows editor host uncertified initial snapshot cannot register writable authority" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    result.snapshot.?.capability_verified = false;
+    try expectAdmissionError(f, &result, error.SaveCapabilityUnavailable);
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
+}
+
+test "Windows editor host failed initial capability retry revokes its earlier success" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.snapshot.?.capability_verified);
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    try std.testing.expectError(error.SourceChanged, result.snapshot.?.probe(std.testing.io, 128));
+    try std.testing.expect(!result.snapshot.?.capability_verified);
+    try expectAdmissionError(f, &result, error.SaveCapabilityUnavailable);
+    try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
+}
+
+test "Windows editor host readonly initial result preserves raw CAS and never acquires save authority" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var base: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try f.tmp.dir.realPath(std.testing.io, &base);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ base[0..len], "file.txt" });
+    defer std.testing.allocator.free(path);
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+    defer std.testing.allocator.free(wide);
+    try std.testing.expect(SetFileAttributesW(wide, 1).toBool());
+    defer _ = SetFileAttributesW(wide, 0x80);
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    result.readonly.?.bytes[3] = 'X';
+    try expectAdmissionError(f, &result, error.OpenImageChanged);
+    try std.testing.expect(!result.consumed);
+    result.readonly.?.bytes[3] = 'b';
+    const view = try f.book.admitOpen(&result);
+    f.views[0] = view;
+    const state = f.registry.get(view).?;
+    try std.testing.expect(state.opened.?.file.read_only);
+    try std.testing.expectEqual(@as(?u64, editor.document_state.contentHash("\xef\xbb\xbfbase\r\n")), state.opened.?.disk_hash);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    try std.testing.expectError(error.NoSaveGrant, f.book.beginSave(view, 128));
+    try std.testing.expect(result.consumed and result.readonly == null and result.document == null);
+}
+
+fn admissionAllocationPrefix(a: std.mem.Allocator, root: std.Io.Dir) !void {
+    var registry: editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var book: Book = .{ .allocator = a, .registry = &registry };
+    defer book.deinit(std.testing.io) catch unreachable;
+    var result = try initialResult(root, false);
+    defer result.deinit(std.testing.io);
+    const view = book.admitOpen(&result) catch |err| {
+        try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+        try result.snapshot.?.validate();
+        for (registry.slots.items) |slot| try std.testing.expect(slot.document == null);
+        return err;
+    };
+    defer _ = registry.release(view) catch unreachable;
+    try std.testing.expect(result.consumed);
+}
+
+test "Windows editor host initial result admission allocation failures retain native ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "base" });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, admissionAllocationPrefix, .{tmp.dir});
 }

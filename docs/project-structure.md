@@ -325,6 +325,8 @@ src/
                         종료까지 Job을 보유하고, native Snapshot의 인수·정리 소유권을 반환한다.
                         app용 읽기 전용 이미지는 writable grant 없이 같은 읽기 상한을 유지하고,
                         UTF-8·BOM·줄바꿈 해석 결과는 함께 소유한 raw bytes만 빌린다.
+                        file_host의 admitOpen은 worker 결과를 앱 소유 문서/권한으로 등록하고 취소·capability·
+                        raw CAS 및 소비/실패 소유권을 검사한다. main의 파일 클릭은 이 worker 경로를 사용한다.
                         directory_watch는 native 비동기 알림과 identity별 공유·상한·debounce 및
                         알림을 살아 있는 문서 구독에 배분하는 검사를 소유한다.
                         file_read_worker는 selected handle 기반 읽기·raw hash와 값 ticket을 프레임 밖에서 만든다.

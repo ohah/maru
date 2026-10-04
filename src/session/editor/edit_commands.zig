@@ -168,6 +168,67 @@ pub fn run(a: std.mem.Allocator, state: *state_mod.State, views: []const Partici
     return true;
 }
 
+/// A host admits a current read ticket before calling this main-thread path.
+/// External edits enter history as one isolated replacement, so earlier undo
+/// entries still address the body they were recorded against. Every view maps
+/// its current selection rather than jumping to the replacement's end.
+pub fn acceptExternal(a: std.mem.Allocator, state: *state_mod.State, views: []const Participant, actor: usize, raw: []const u8) !bool {
+    if (actor >= views.len) return error.InvalidSelection;
+    for (views, 0..) |v, i| for (views[0..i]) |earlier| {
+        if (v.id == earlier.id or v.view == earlier.view) return error.InvalidSelection;
+    };
+    const opened = if (state.opened) |*value| value else return error.NoDocument;
+    if (opened.file.read_only) return error.ReadOnly;
+    if (opened.isDirty()) return error.DirtyDocument;
+    if (state.persistence.live_save_images != 0 or state.persistence.uncertain_sequence != null) return error.SaveBusy;
+    const doc = try @import("document.zig").open(raw, false);
+    const old = opened.file.content;
+    const new = doc.content;
+    // Hash before publication: the public byte-oriented API also permits a
+    // caller to supply an image borrowing the document's current flat storage.
+    // Applying a replacement releases that storage.
+    const saved_hash = state_mod.contentHash(new);
+    const disk_hash = state_mod.contentHash(raw);
+    var prefix: usize = 0;
+    while (prefix < @min(old.len, new.len) and old[prefix] == new[prefix]) : (prefix += 1) {}
+    // Equal byte prefixes can end inside distinct multibyte code points.
+    // Pull the replacement back to the start of both complete UTF-8 scalars.
+    while (prefix > 0 and ((prefix < old.len and old[prefix] & 0xc0 == 0x80) or (prefix < new.len and new[prefix] & 0xc0 == 0x80))) prefix -= 1;
+    var suffix: usize = 0;
+    while (suffix < @min(old.len, new.len) - prefix and old[old.len - suffix - 1] == new[new.len - suffix - 1]) : (suffix += 1) {}
+    while (suffix > 0 and ((old[old.len - suffix] & 0xc0 == 0x80) or (new[new.len - suffix] & 0xc0 == 0x80))) suffix -= 1;
+    const changed = prefix != old.len or prefix != new.len;
+    const format_changed = !std.meta.eql(opened.file.format, doc.format);
+    if (changed) {
+        const prepared = try prepare(a, views, actor, 0);
+        defer release(a, prepared);
+        for (prepared) |p| for (p.storage[0..p.count]) |s| {
+            if (s.end() > old.len) return error.OutOfRange;
+        };
+        const before = try a.dupe(selection.Selection, prepared[actor].storage[0..prepared[actor].count]);
+        errdefer a.free(before);
+        try reserve(a, &state.history.undo, state.history.undo_len + 1);
+        const changes = [_]delta.Change{.{ .start = prefix, .end = old.len - suffix, .text = new[prefix .. new.len - suffix] }};
+        var none: selection.Selections = .{ .items = &.{}, .primary = 0 };
+        const inverse = try opened.file.apply(.{ .changes = &changes }, &none);
+        // From body publication onward all operations are nonfallible.
+        for (prepared) |*p| for (p.storage[0..p.count]) |*s| {
+            s.* = shared.mapSelection(.{ .changes = &changes }, s.*);
+        };
+        publish(&opened.file, views, prepared);
+        const h = &state.history;
+        h.edit_group +%= 1;
+        for (h.redo[0..h.redo_len]) |*entry| entry.deinit(a);
+        h.redo_len = 0;
+        append(a, h.undo, &h.undo_len, .{ .inverse = inverse, .sels_before = before, .primary_before = prepared[actor].primary, .group = h.edit_group, .view_id = views[actor].id });
+        h.last_edit_kind = .none;
+    }
+    opened.file.format = doc.format;
+    opened.saved_hash = saved_hash;
+    opened.disk_hash = disk_hash;
+    return changed or format_changed;
+}
+
 fn step(a: std.mem.Allocator, state: *state_mod.State, views: []const Participant, actor: usize, undo: bool) !bool {
     const h = &state.history;
     const from = if (undo) &h.undo else &h.redo;
@@ -226,6 +287,125 @@ fn stepOne(a: std.mem.Allocator, state: *state_mod.State, views: []const Partici
 fn testState(a: std.mem.Allocator, bytes: []const u8) !state_mod.State {
     const file = try File.init(a, bytes, false);
     return .{ .opened = .{ .file = file, .saved_hash = state_mod.contentHash(file.content) } };
+}
+
+test "Editor commands: external minimal replacement maps peers and preserves earlier undo" {
+    const a = std.testing.allocator;
+    var state = try testState(a, "abcdef");
+    defer state.clear(a);
+    var first: navigation.View = .{};
+    defer first.deinit(a);
+    var second: navigation.View = .{};
+    defer second.deinit(a);
+    try first.items.append(a, selection.Selection.at(1));
+    try second.items.append(a, selection.Selection.at(6));
+    const views = [_]Participant{ .{ .view = &first, .id = 1 }, .{ .view = &second, .id = 2 } };
+    _ = try run(a, &state, &views, 0, .{ .insert = "X" }, .{ .now_ms = 1 });
+    state.opened.?.saved_hash = state_mod.contentHash(state.opened.?.file.content);
+    const raw = "\xef\xbb\xbfaXbcYYef\r\n";
+    try std.testing.expect(try acceptExternal(a, &state, &views, 0, raw));
+    try std.testing.expectEqualStrings("aXbcYYef\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(usize, 2), first.items.items[0].focus);
+    try std.testing.expectEqual(@as(usize, 10), second.items.items[0].focus);
+    try std.testing.expectEqual(@as(usize, 2), state.history.undo_len);
+    try std.testing.expect(!state.opened.?.isDirty());
+    try std.testing.expectEqual(state_mod.contentHash(raw), state.opened.?.disk_hash.?);
+    try std.testing.expect(state.opened.?.file.format.has_bom);
+    _ = try run(a, &state, &views, 0, .undo, .{ .now_ms = 2 });
+    try std.testing.expectEqualStrings("aXbcdef", state.opened.?.file.content);
+    try std.testing.expect(state.opened.?.isDirty());
+    _ = try run(a, &state, &views, 0, .undo, .{ .now_ms = 3 });
+    try std.testing.expectEqualStrings("abcdef", state.opened.?.file.content);
+    _ = try run(a, &state, &views, 0, .redo, .{ .now_ms = 4 });
+    _ = try run(a, &state, &views, 0, .redo, .{ .now_ms = 5 });
+    try std.testing.expectEqualStrings("aXbcYYef\r\n", state.opened.?.file.content);
+    try std.testing.expect(!state.opened.?.isDirty());
+}
+
+test "Editor commands: external UTF8 scalar boundaries format-only change and identical image" {
+    const a = std.testing.allocator;
+    var state = try testState(a, "가x");
+    defer state.clear(a);
+    var view: navigation.View = .{};
+    defer view.deinit(a);
+    try view.items.append(a, selection.Selection.at(4));
+    const views = [_]Participant{.{ .view = &view, .id = 1 }};
+    try std.testing.expect(try acceptExternal(a, &state, &views, 0, "각x"));
+    try std.testing.expectEqualStrings("각x", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(usize, 0), state.history.undo[0].inverse.changes[0].start);
+    try std.testing.expectEqual(@as(usize, 3), state.history.undo[0].inverse.changes[0].end);
+    try std.testing.expectEqual(@as(usize, 4), view.items.items[0].focus);
+    try std.testing.expect(try acceptExternal(a, &state, &views, 0, "\xef\xbb\xbf각x"));
+    try std.testing.expectEqual(@as(usize, 1), state.history.undo_len);
+    try std.testing.expectEqual(@as(u64, 1), state.opened.?.file.revision);
+    try std.testing.expect(!try acceptExternal(a, &state, &views, 0, "\xef\xbb\xbf각x"));
+    try std.testing.expectEqual(state_mod.contentHash("\xef\xbb\xbf각x"), state.opened.?.disk_hash.?);
+    _ = try acceptExternal(a, &state, &views, 0, "Āx");
+    _ = try acceptExternal(a, &state, &views, 0, "ŀx");
+    const tail_edit = state.history.undo[state.history.undo_len - 1].inverse.changes[0];
+    try std.testing.expectEqual(@as(usize, 0), tail_edit.start);
+    try std.testing.expectEqual(@as(usize, 2), tail_edit.end);
+    var aliased = try testState(a, "\xef\xbb\xbf\xef\xbb\xbfbody");
+    defer aliased.clear(a);
+    view.items.clearRetainingCapacity();
+    try std.testing.expect(try acceptExternal(a, &aliased, &views, 0, aliased.opened.?.file.content));
+    try std.testing.expectEqualStrings("body", aliased.opened.?.file.content);
+    try std.testing.expectEqual(state_mod.contentHash("\xef\xbb\xbfbody"), aliased.opened.?.disk_hash.?);
+    try std.testing.expect(!aliased.opened.?.isDirty());
+}
+
+test "Editor commands: external update refuses dirty pending uncertain readonly and invalid encoding" {
+    const a = std.testing.allocator;
+    var state = try testState(a, "base");
+    defer state.clear(a);
+    var view: navigation.View = .{};
+    defer view.deinit(a);
+    const views = [_]Participant{.{ .view = &view, .id = 1 }};
+    state.opened.?.saved_hash = 0;
+    try std.testing.expectError(error.DirtyDocument, acceptExternal(a, &state, &views, 0, "disk"));
+    state.opened.?.saved_hash = state_mod.contentHash("base");
+    state.persistence.live_save_images = 1;
+    try std.testing.expectError(error.SaveBusy, acceptExternal(a, &state, &views, 0, "disk"));
+    state.persistence.live_save_images = 0;
+    state.persistence.uncertain_sequence = 1;
+    try std.testing.expectError(error.SaveBusy, acceptExternal(a, &state, &views, 0, "disk"));
+    state.persistence.uncertain_sequence = null;
+    state.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, acceptExternal(a, &state, &views, 0, "disk"));
+    state.opened.?.file.read_only = false;
+    try std.testing.expectError(error.NotUtf8, acceptExternal(a, &state, &views, 0, "\xff"));
+    try std.testing.expectEqualStrings("base", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(usize, 0), state.history.undo_len);
+}
+
+test "Editor commands: external update allocation prefixes preserve complete publication" {
+    const Check = struct {
+        fn runCase(a: std.mem.Allocator) !void {
+            var state = try testState(a, "abcdef");
+            defer state.clear(a);
+            state.opened.?.disk_hash = state_mod.contentHash("abcdef");
+            var view: navigation.View = .{};
+            defer view.deinit(a);
+            try view.items.append(a, selection.Selection.at(6));
+            const views = [_]Participant{.{ .view = &view, .id = 1 }};
+            const raw = "\xef\xbb\xbfabXdef\r\n";
+            _ = acceptExternal(a, &state, &views, 0, raw) catch |err| {
+                try std.testing.expectEqualStrings("abcdef", state.opened.?.file.content);
+                try std.testing.expectEqual(@as(u64, 0), state.opened.?.file.revision);
+                try std.testing.expectEqual(@as(usize, 6), view.items.items[0].focus);
+                try std.testing.expectEqual(@as(usize, 0), state.history.undo_len);
+                try std.testing.expect(!state.opened.?.file.format.has_bom);
+                try std.testing.expectEqual(state_mod.contentHash("abcdef"), state.opened.?.disk_hash.?);
+                try std.testing.expect(!state.opened.?.isDirty());
+                return err;
+            };
+            try std.testing.expectEqualStrings("abXdef\r\n", state.opened.?.file.content);
+            try std.testing.expectEqual(@as(usize, 8), view.items.items[0].focus);
+            try std.testing.expectEqual(@as(usize, 1), state.history.undo_len);
+            try std.testing.expect(!state.opened.?.isDirty());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.runCase, .{});
 }
 
 test "Editor commands: shared typing undo redo restore owner selection and dirty" {

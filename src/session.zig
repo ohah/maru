@@ -165,6 +165,7 @@ pub const editor = struct {
     pub const document_registry = @import("session/editor/document_registry.zig");
     pub const save_request = @import("session/editor/save_request.zig");
     pub const view_navigation = @import("session/editor/view_navigation.zig");
+    pub const edit_commands = @import("session/editor/edit_commands.zig");
     pub const shared_edit = @import("session/editor/shared_edit.zig");
     /// N2: 열/블록 선택의 **파생**(§3.2a — 사각형 하나를 줄마다 selection 으로 푼다). `selection` 이
     /// 원본(`ColumnAnchor`)을 들고 이쪽이 그것을 배열로 편다. `ColumnMap` 을 주입받아 **chrome 을

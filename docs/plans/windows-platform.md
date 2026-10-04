@@ -145,3 +145,8 @@ GUI safe-save·dirty-close·감시·edit→disk→reopen, 세로/마우스 입�
 document-bound 우회를 막고, 새 실제 파일 판정 다섯 개로 경로/readonly/disk/reload/uncertain
 변경을 거절했다. Native root 66개·경로 29개와 runtime 변이 5회가 통과했다.
 일반 편집/저장 연결과 capability·crash 복구·전체 실패 타이밍은 계속 남아 있다.
+
+Writable 문서의 기본 Windows 문자/삭제 입력과 공통 Undo/Redo는 §2m.149에서 연결했다.
+공통 명령 28개·Windows 입력 9개, 실제 창 입력 7개와 history 명령 6개의 두 뷰 26프레임,
+runtime 변이 5회를 검증했다. 일반 파일은 여전히 읽기 전용이며, 일반 입력→native 저장→
+재열기·물리 IME·dirty-close·감시와 capability/crash 복구는 남아 있다. W8.17은 진행 중이다.

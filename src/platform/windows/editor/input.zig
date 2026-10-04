@@ -6,7 +6,7 @@ const editor = maru.session.editor;
 const navigation = editor.view_navigation;
 const KeyEvent = maru.terminal.KeyEvent;
 
-pub const Action = union(enum) { ignored, copy, move: navigation.Command };
+pub const Action = union(enum) { ignored, copy, move: navigation.Command, character: u21, newline, tab, backspace, delete_forward, undo, redo };
 
 pub fn action(event: KeyEvent) Action {
     if (event.event_type == .release or event.modifiers.option) return .ignored;
@@ -18,7 +18,17 @@ pub fn action(event: KeyEvent) Action {
         .arrow_right => .{ .move = if (primary) .word_right else .right },
         .home => .{ .move = if (primary) .document_start else .line_start },
         .end => .{ .move = if (primary) .document_end else .line_end },
-        .char => |cp| if (primary and (cp == 'c' or cp == 'C')) .copy else if (primary and (cp == 'a' or cp == 'A')) .{ .move = .select_all } else .ignored,
+        .char => |cp| if (primary) switch (cp) {
+            'c', 'C' => .copy,
+            'a', 'A' => .{ .move = .select_all },
+            'z', 'Z' => if (event.modifiers.shift) .redo else .undo,
+            'y', 'Y' => .redo,
+            else => .ignored,
+        } else if (cp >= 0x20 and cp != 0x7f and cp <= 0x10ffff and (cp < 0xd800 or cp > 0xdfff)) .{ .character = cp } else .ignored,
+        .enter => if (primary) .ignored else .newline,
+        .tab => if (primary or event.modifiers.shift) .ignored else .tab,
+        .backspace => if (primary) .ignored else .backspace,
+        .delete => if (primary) .ignored else .delete_forward,
         else => .ignored,
     };
 }
@@ -55,7 +65,9 @@ test "Windows editor input: primary modifiers select commands and release never 
     try std.testing.expect(action(.{ .key = .{ .char = 'c' }, .modifiers = .{ .control = true } }) == .copy);
     try std.testing.expect(action(.{ .key = .arrow_right, .event_type = .release }) == .ignored);
     try std.testing.expect(action(.{ .key = .arrow_right, .modifiers = .{ .option = true } }) == .ignored);
-    try std.testing.expect(action(.{ .key = .{ .char = 'x' } }) == .ignored);
+    try std.testing.expectEqual(@as(u21, 'x'), action(.{ .key = .{ .char = 'x' } }).character);
+    try std.testing.expect(action(.{ .key = .{ .char = 'z' }, .modifiers = .{ .control = true } }) == .undo);
+    try std.testing.expect(action(.{ .key = .{ .char = 'Z' }, .modifiers = .{ .command = true, .shift = true } }) == .redo);
 }
 
 test "Windows editor input: readonly copy keeps CRLF and deduplicates empty caret lines" {

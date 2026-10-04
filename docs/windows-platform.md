@@ -11052,3 +11052,31 @@ generic 우회 허용·request binding 제거·최종 문서 권한 검사 제�
 이 경로는 계속 실험적 local NTFS 구현이다. grant/file identity의 문서 연결, capability,
 crash 복구와 전체 실패 타이밍, 일반 편집/GUI 저장·dirty-close·감시·edit→disk→reopen은
 남아 있다. 일반 문서의 읽기 전용 상태를 해제하거나 W8.17 완료로 세지 않는다.
+
+### 2m.149 Windows 편집 입력과 공통 Undo/Redo (2026-10-04)
+
+`session/editor/edit_commands.zig`가 삽입·grapheme 삭제·Undo/Redo를 소유한다.
+호스트는 연결된 뷰 전체와 단조 시각을 제공하며, 명령 계층은 OS·창·렌더러를 호출하지 않는다.
+선택과 history 게시에 필요한 할당을 본문 변경 전에 준비하고, 성공 뒤 반대 뷰의 선택을
+delta로 매핑한다. 500ms 그룹·2048개 상한·멀티 커서와 primary를 보존한다.
+원래 편집한 뷰가 닫혔으면 실행 중인 뷰에 history 선택을 복원한다.
+
+Windows의 writable 문서는 문자·Tab·줄바꿈 형식을 보존하는 Enter·Backspace·Delete·
+Undo/Redo를 이 경로로 보낸다. 일반 사용자 파일의 `read_only`는 계속 유지한다.
+동일 경로라도 다른 DocumentHandle의 뷰에는 편집을 게시하지 않는다.
+
+`test-editor-commands` 28개와 Windows 입력 판정 9개가 통과했다. 삽입과 Undo의
+할당 실패 prefix에서 본문·revision·선택·history 불변을 확인했다.
+실제 Windows 창 fixture는 WM_CHAR/WM_KEYDOWN 7개와 공통 history 명령 6개로
+두 뷰의 26개 프레임을 검사했다. NFD 한글 삭제·CRLF·BOM 보존과 마지막 clean 상태를
+확인했으며 revision은 18이다. 기존 문서/탐색 67개 프레임도 유지한다.
+
+적대적 검증 5회는 Redo 무효화 제거, 반대 뷰 매핑 제거, primary 복원 손실,
+할당 전 history pop, 창 문자 입력 누락을 각각 실행 중 검출했다. 원복 뒤 재검증했다.
+상위 read-only 검사만 제거한 추가 변이는 하위 문서 검사 때문에 쓰기를 허용하지 않았으며,
+이 방어 중복 관찰은 검출 5회에 포함하지 않는다.
+
+이 fixture는 일반 파일의 디스크 저장·재열기나 물리 키보드 IME 판정이 아니다.
+일반 파일 편집 활성화·GUI native save·capability/crash 복구·dirty-close·외부 감시,
+IME preedit/replacement·paste·자동 들여쓰기·word 삭제와 뷰 입력/성능 예산은 남아 있다.
+W8.17은 계속 진행 중이다.

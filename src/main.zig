@@ -10057,7 +10057,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (active_view == .file) {
                     keys_while_file += 1;
                     const file_view = &open_files.items[active_view.file];
-                    const maybe_copy = file_view.applyKey(allocator, key_ev) catch |err| {
+                    const maybe_copy = file_view.applyKey(allocator, key_ev, .{ .now_ms = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms)), .views = open_files.items }) catch |err| {
                         try stderr.print("  warning: editor input failed({s})\n", .{@errorName(err)});
                         continue;
                     };
@@ -16590,6 +16590,7 @@ fn runWin32EditorDocumentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Wri
     }
     try stdout.print("editor_document_smoke_ok=true frames_presented={d}\n", .{frames});
     try runEditorNavigationFrames(allocator, &host, stdout);
+    try runEditorTypingFrames(allocator, &host, stdout);
     try stdout.flush();
 }
 
@@ -16622,7 +16623,7 @@ fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout
         for (0..120) |_| {
             for (try host.poll()) |event| switch (event) {
                 .key => |key| {
-                    if (try view.applyKey(a, key)) |copied| a.free(copied);
+                    if (try view.applyKey(a, key, .{ .now_ms = step, .views = &.{} })) |copied| a.free(copied);
                     events_seen += 1;
                     received = true;
                 },
@@ -16649,7 +16650,7 @@ fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout
     }
     // Modified chords are tested as neutral events: PostMessage does not
     // change GetKeyState. Do not misreport them as physical modifier tests.
-    _ = try view.applyKey(a, .{ .key = .{ .char = 'a' }, .modifiers = .{ .control = true } });
+    _ = try view.applyKey(a, .{ .key = .{ .char = 'a' }, .modifiers = .{ .control = true } }, .{ .now_ms = 100, .views = &.{} });
     view.first_line = 1;
     var selected = try buildComposedEditor(a, EditorHost.fromHost(host), &view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
     defer selected.deinit(a);
@@ -16663,7 +16664,7 @@ fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout
         else => {},
     };
     if (selection_quads != 2) return error.EditorSelectionPaintMissing;
-    const copied = (try view.applyKey(a, .{ .key = .{ .char = 'c' }, .modifiers = .{ .control = true } })) orelse return error.EditorCopyMissing;
+    const copied = (try view.applyKey(a, .{ .key = .{ .char = 'c' }, .modifiers = .{ .control = true } }, .{ .now_ms = 101, .views = &.{} })) orelse return error.EditorCopyMissing;
     defer a.free(copied);
     const state = documents.get(lease).?;
     if (!std.mem.eql(u8, copied, bytes) or !std.mem.eql(u8, state.opened.?.file.content, bytes) or state.opened.?.file.revision != 0 or state.opened.?.isDirty())
@@ -16671,6 +16672,98 @@ fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout
     try host.drawFrame(selected.cells.items, 0xFF1E2430);
     frames += 1;
     try stdout.print("editor_navigation_smoke_ok=true window_keys={d} frames_presented={d} readonly_revision=0\n", .{ events_seen, frames });
+}
+
+/// Only the fixture document is writable; real window messages exercise the
+/// same input/paint methods as the app without enabling user-file writes.
+fn runEditorTypingFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = a };
+    defer documents.deinit() catch unreachable;
+    const original = "\xef\xbb\xbf// base\r\n";
+    var prepared: editor.document_state.State = .{};
+    defer prepared.clear(a);
+    const file = try editor.edit_doc.EditableFile.init(a, original, false);
+    prepared.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content) };
+    prepared.path = try a.dupe(u8, "typing-smoke.txt");
+    const lease = try documents.create(&prepared, a);
+    defer _ = documents.release(lease) catch unreachable;
+    var views: [2]OpenFile = undefined;
+    views[0] = try editor_document.attach(&documents, lease, a);
+    defer views[0].deinit(a);
+    views[1] = try editor_document.attach(&documents, lease, a);
+    defer views[1].deinit(a);
+    const ops = try a.alloc(maru.chrome.draw.Op, 4096);
+    defer a.free(ops);
+    const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+    const Fixture = struct { char: ?u16 = null, vk: ?u32 = null, neutral: ?maru.terminal.KeyEvent = null, expected: []const u8 };
+    const ctrl = maru.terminal.ModifierSet{ .control = true };
+    const ctrl_shift = maru.terminal.ModifierSet{ .control = true, .shift = true };
+    const undo = maru.terminal.KeyEvent{ .key = .{ .char = 'z' }, .modifiers = ctrl };
+    const redo = maru.terminal.KeyEvent{ .key = .{ .char = 'z' }, .modifiers = ctrl_shift };
+    const jamo = "\u{1100}\u{1161}\u{11a8}";
+    const fixtures = [_]Fixture{
+        .{ .char = 'A', .expected = "A// base\r\n" },
+        .{ .vk = 0x0d, .expected = "A\r\n// base\r\n" },
+        .{ .char = 0x1100, .expected = "A\r\n\u{1100}// base\r\n" },
+        .{ .char = 0x1161, .expected = "A\r\n\u{1100}\u{1161}// base\r\n" },
+        .{ .char = 0x11a8, .expected = "A\r\n" ++ jamo ++ "// base\r\n" },
+        .{ .vk = 0x08, .expected = "A\r\n// base\r\n" },
+        .{ .vk = 0x2e, .expected = "A\r\n/ base\r\n" },
+        .{ .neutral = undo, .expected = "A\r\n" ++ jamo ++ "// base\r\n" },
+        .{ .neutral = redo, .expected = "A\r\n/ base\r\n" },
+        .{ .neutral = undo, .expected = "A\r\n" ++ jamo ++ "// base\r\n" },
+        .{ .neutral = undo, .expected = "A\r\n// base\r\n" },
+        .{ .neutral = undo, .expected = "A// base\r\n" },
+        .{ .neutral = undo, .expected = "// base\r\n" },
+    };
+    var window_keys: usize = 0;
+    _ = try host.poll();
+    for (fixtures, 0..) |fixture, index| {
+        const context: OpenFile.InputContext = .{ .now_ms = index * 10, .views = &views };
+        if (fixture.neutral) |key| {
+            if (try views[0].applyKey(a, key, context)) |copied| a.free(copied);
+        } else {
+            if (fixture.char) |cp| host.window.postSyntheticChar(cp);
+            if (fixture.vk) |vk| host.window.postSyntheticVirtualKey(vk);
+            var received = false;
+            for (0..120) |_| {
+                for (try host.poll()) |event| switch (event) {
+                    .key => |key| {
+                        if (try views[0].applyKey(a, key, context)) |copied| a.free(copied);
+                        window_keys += 1;
+                        received = true;
+                    },
+                    .close_requested => return error.EditorSmokeInterrupted,
+                    else => {},
+                };
+                if (received) break;
+                try host.drawFrame(&.{}, 0xFF1E2430);
+            }
+            if (!received) return error.EditorTypingKeyMissing;
+        }
+        const state = documents.get(lease).?;
+        if (!std.mem.eql(u8, state.opened.?.file.content, fixture.expected)) return error.EditorTypingBodyMismatch;
+        if (state.opened.?.isDirty() != (index + 1 != fixtures.len)) return error.EditorTypingDirtyMismatch;
+        // Both projections must refresh from the same body. Selection buffers
+        // are view-owned and already mapped before either view paints.
+        for (&views) |*view| {
+            var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+            defer built.deinit(a);
+            if (view.cached_revision != state.opened.?.file.revision or view.text.ptr != state.opened.?.file.content.ptr) return error.EditorTypingStaleView;
+            const offset = view.navigation.items.items[view.navigation.primary].focus;
+            if (offset > view.text.len) return error.EditorTypingCaretMismatch;
+            const line = state.opened.?.file.lines.lines[state.opened.?.file.lines.lineAt(offset)];
+            if (offset > line.contentEnd() or maru.grapheme.snapToBoundary(view.text[line.start..line.contentEnd()], offset - line.start) != offset - line.start) return error.EditorTypingCaretMismatch;
+            try host.drawFrame(built.cells.items, 0xFF1E2430);
+        }
+    }
+    const state = documents.get(lease).?;
+    if (state.history.undo_len != 0 or state.history.redo_len != 7) return error.EditorTypingHistoryMismatch;
+    const bytes = try state.opened.?.file.saveBytes(a);
+    defer a.free(bytes);
+    if (!std.mem.eql(u8, bytes, original)) return error.EditorTypingFormatMismatch;
+    try stdout.print("editor_typing_smoke_ok=true window_keys={d} neutral_history_keys=6 asserted_frames={d} revision={d} dirty=false\n", .{ window_keys, fixtures.len * views.len, state.opened.?.file.revision });
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.

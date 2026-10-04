@@ -5,6 +5,50 @@ const ts = @import("syntax");
 pub const input = @import("input.zig");
 const selection_projection = @import("selection_projection.zig");
 
+test "Windows editor input: view context matches document identity and readonly keys stay consumed" {
+    const a = std.testing.allocator;
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = a };
+    defer documents.deinit() catch unreachable;
+    var first: editor.document_state.State = .{};
+    defer first.clear(a);
+    const first_file = try editor.edit_doc.EditableFile.init(a, "abc", false);
+    first.opened = .{ .file = first_file, .saved_hash = editor.document_state.contentHash(first_file.content) };
+    first.path = try a.dupe(u8, "same.txt");
+    const one = try documents.create(&first, a);
+    defer _ = documents.release(one) catch unreachable;
+    var second: editor.document_state.State = .{};
+    defer second.clear(a);
+    const second_file = try editor.edit_doc.EditableFile.init(a, "different", false);
+    second.opened = .{ .file = second_file, .saved_hash = editor.document_state.contentHash(second_file.content) };
+    second.path = try a.dupe(u8, "same.txt");
+    const two = try documents.create(&second, a);
+    defer _ = documents.release(two) catch unreachable;
+    var views: [3]OpenFile = undefined;
+    views[0] = try attach(&documents, one, a);
+    defer views[0].deinit(a);
+    views[1] = try attach(&documents, one, a);
+    defer views[1].deinit(a);
+    views[2] = try attach(&documents, two, a);
+    defer views[2].deinit(a);
+    const context: OpenFile.InputContext = .{ .now_ms = 100, .views = &views };
+    _ = try views[0].applyKey(a, .{ .key = .{ .char = 'x' } }, context);
+    const state = documents.get(one).?;
+    try std.testing.expectEqualStrings("xabc", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(usize, 1), views[1].navigation.items.items[0].focus);
+    try std.testing.expectEqual(@as(usize, 0), views[2].navigation.items.items.len);
+    try std.testing.expectEqualStrings("different", documents.get(two).?.opened.?.file.content);
+    state.opened.?.file.read_only = true;
+    _ = try views[0].applyKey(a, .{ .key = .{ .char = 'y' } }, context);
+    _ = try views[0].applyKey(a, .{ .key = .{ .char = 'z' }, .modifiers = .{ .control = true } }, context);
+    try std.testing.expectEqualStrings("xabc", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(u64, 1), state.opened.?.file.revision);
+    try std.testing.expectEqual(@as(usize, 1), state.history.undo_len);
+    const copied = (try views[0].applyKey(a, .{ .key = .{ .char = 'c' }, .modifiers = .{ .control = true } }, context)).?;
+    defer a.free(copied);
+    try std.testing.expectEqualStrings("xabc", copied);
+}
+
 pub const OpenFile = struct {
     /// View data borrows the app-lifetime document lease; body ownership stays in L2.
     documents: *maru.session.editor.document_registry.Registry,
@@ -43,22 +87,57 @@ pub const OpenFile = struct {
 
     /// A file owns every key, including unsupported edit keys. Returning null
     /// means no clipboard write; it never means the event may reach the shell.
-    pub fn applyKey(self: *OpenFile, a: std.mem.Allocator, event: maru.terminal.KeyEvent) !?[]u8 {
+    pub const InputContext = struct { now_ms: u64, views: []OpenFile };
+
+    pub fn applyKey(self: *OpenFile, a: std.mem.Allocator, event: maru.terminal.KeyEvent, context: InputContext) !?[]u8 {
         const state = self.documents.get(self.document) orelse return error.StaleDocument;
-        const opened = &(state.opened orelse return error.NoDocument);
-        switch (input.action(event)) {
+        const opened = if (state.opened) |*value| value else return error.NoDocument;
+        const action = input.action(event);
+        switch (action) {
             .ignored => {},
             .copy => return try input.copy(a, &opened.file, &self.navigation),
             .move => |command| {
                 try self.navigation.move(a, &opened.file, command, event.modifiers.shift);
-                const selected = self.navigation.items.items[self.navigation.primary];
-                const line = opened.file.lines.lineAt(selected.focus);
-                if (line < self.first_line) self.first_line = line;
-                if (line -| self.first_line >= self.navigation_rows)
-                    self.first_line = line -| (self.navigation_rows -| 1);
+                state.history.last_edit_kind = .none;
+                self.revealCaret(&opened.file);
+            },
+            else => {
+                if (opened.file.read_only) return null;
+                const commands = maru.session.editor.edit_commands;
+                var views: std.ArrayList(commands.Participant) = .empty;
+                defer views.deinit(a);
+                try views.append(a, .{ .view = &self.navigation, .id = self.document.id });
+                // The app passes its current file-view list. Match generational
+                // document identity, not path text or a copied view pointer.
+                for (context.views) |*peer| {
+                    if (peer.documents != self.documents or peer.document.id == self.document.id or !std.meta.eql(peer.document.document, self.document.document)) continue;
+                    if (peer.documents.get(peer.document) != state) return error.StaleDocument;
+                    try views.append(a, .{ .view = &peer.navigation, .id = peer.document.id });
+                }
+                var utf8: [4]u8 = undefined;
+                const command: commands.Command = switch (action) {
+                    .character => |cp| .{ .insert = utf8[0..try std.unicode.utf8Encode(cp, &utf8)] },
+                    .newline => .{ .insert = if (opened.file.format.dominant_ending == .crlf) "\r\n" else "\n" },
+                    .tab => .{ .insert = "\t" },
+                    .backspace => .backspace,
+                    .delete_forward => .delete_forward,
+                    .undo => .undo,
+                    .redo => .redo,
+                    else => unreachable,
+                };
+                _ = try commands.run(a, state, views.items, 0, command, .{ .now_ms = context.now_ms, .isolate = action == .newline or action == .tab });
+                if (self.navigation.items.items.len > 0) self.revealCaret(&opened.file);
             },
         }
         return null;
+    }
+
+    fn revealCaret(self: *OpenFile, file: *const maru.session.editor.edit_doc.EditableFile) void {
+        const selected = self.navigation.items.items[self.navigation.primary];
+        const line = file.lines.lineAt(selected.focus);
+        if (line < self.first_line) self.first_line = line;
+        if (line -| self.first_line >= self.navigation_rows)
+            self.first_line = line -| (self.navigation_rows -| 1);
     }
 
     /// Sidebar names may be read before painting refreshes the body projection.

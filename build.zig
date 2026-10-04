@@ -1540,13 +1540,18 @@ pub fn build(b: *std.Build) void {
     const run_navigation_tests = b.addRunArtifact(navigation_tests);
     run_navigation_tests.addArg("--maru-expect-tests=26"); // 21 aggregation blocks and 5 behavioral tests
     navigation_step.dependOn(&run_navigation_tests.step);
+    const edit_command_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Editor commands"} });
+    const edit_command_step = b.step("test-editor-commands", "Verify atomic native editing, shared-view publication and history");
+    const run_edit_command_tests = b.addRunArtifact(edit_command_tests);
+    run_edit_command_tests.addArg("--maru-expect-tests=28"); // 21 aggregation blocks and 7 behavioral tests
+    edit_command_step.dependOn(&run_edit_command_tests.step);
     const editor_input_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
         .filters = &.{"Windows editor input"},
     });
     const editor_input_step = b.step("test-win32-editor-input", "Verify Windows editor key mapping, copy and selection paint projection");
     const run_editor_input_tests = b.addRunArtifact(editor_input_tests);
-    run_editor_input_tests.addArg("--maru-expect-tests=8"); // 3 aggregation blocks and 5 behavioral tests
+    run_editor_input_tests.addArg("--maru-expect-tests=9"); // 3 aggregation blocks and 6 behavioral tests
     editor_input_step.dependOn(&run_editor_input_tests.step);
     const file_open_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
@@ -4147,6 +4152,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(save_request_step);
     test_step.dependOn(navigation_step);
+    test_step.dependOn(edit_command_step);
     test_step.dependOn(editor_input_step);
     test_step.dependOn(&run_internal_contract_tests.step);
     test_step.dependOn(&run_core_tests.step);

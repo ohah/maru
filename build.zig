@@ -2036,6 +2036,11 @@ pub fn build(b: *std.Build) void {
     const run_document_grant_tests = b.addRunArtifact(document_grant_tests);
     run_document_grant_tests.addArg("--maru-expect-tests=14"); // 2 aggregation blocks and 12 native authority tests
     document_grant_step.dependOn(&run_document_grant_tests.step);
+    const save_controller_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows save controller"} });
+    const save_controller_step = b.step("test-win32-save-controller", "Verify Windows save ownership, native decisions and failure settlement");
+    const run_save_controller_tests = b.addRunArtifact(save_controller_tests);
+    run_save_controller_tests.addArg("--maru-expect-tests=15"); // 2 aggregation blocks and 13 actual native controller tests
+    save_controller_step.dependOn(&run_save_controller_tests.step);
     const relative_file_tests = addProjectTest(b, .{
         .root_module = maru_mod,
         .filters = &.{ "Windows safe save", "Windows relative read" },
@@ -5514,6 +5519,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(navigation_step);
     test_step.dependOn(edit_command_step);
     test_step.dependOn(document_grant_step);
+    test_step.dependOn(save_controller_step);
     test_step.dependOn(editor_input_step);
     test_step.dependOn(&run_internal_contract_tests.step);
     test_step.dependOn(&run_core_tests.step);

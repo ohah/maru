@@ -158,3 +158,9 @@ runtime 변이 5회를 검증했다. 일반 파일은 여전히 읽기 전용이
 일반 폴더 rename을 허용한다. 원래 상대 이름이 없으면 저장을 거절한다. GUI adoption 전
 capability/crash 복구·일반 Ctrl+S/dirty-close/감시/물리 IME 연결은 계속 해결해야 한다.
 일반 파일은 읽기 전용을 유지한다.
+
+저장 요청·grant·native Attempt의 단일 pending 소유권과 commit/rollback/uncertain 정산은
+§2m.151의 Controller로 연결했다. 15개 판정, 준비/commit 할당 실패, 적대적 변이 5회와
+실제 창의 Controller→native 저장→독립 일반 재열기를 검증했다. GUI Ctrl+S/dirty-close/
+감시/물리 IME, capability·crash 복구와 비동기 I/O/notice 연결은 계속 남아 있다.
+일반 파일은 읽기 전용이며 W8.17은 진행 중이다.

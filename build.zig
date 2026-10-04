@@ -9059,6 +9059,10 @@ pub fn build(b: *std.Build) void {
     // 훅이 그 계약을 어기면 에이전트 턴이 멈추므로 상시 게이트로 둔다. POSIX 셸만 있으면 도는 검사다.
     const agent_hook_command_check = b.addSystemCommand(&.{ "sh", "tools/check-agent-hook-command.sh" });
     agent_hook_command_check.setCwd(b.path("."));
+    // 8 단계(원격 설치기가 심는 바이트)는 **제품 바이너리**를 돌린다. 방금 빌드한 것을 넘긴다 — 예전에는 스크립트가
+    // `zig-out/bin/maru` 를 직접 읽어, 그 자리에 남은 **낡은 바이너리**로 비교했다(2026-10-04: 10/2 빌드가 10/3 의 훅 커맨드
+    // 변경을 몰라 로컬 `zig build test` 가 매번 빨갰고, CI 는 새로 빌드해서 초록이었다 — 우연히 맞으면 틀린 초록도 된다).
+    agent_hook_command_check.addFileArg(exe.getEmittedBin());
     // 진행 줄을 그대로 흘린다. 기본 정책은 stdout/stderr 를 캡처해 «출력이 있으면 실패»로 보는데,
     // 이 검사는 단계마다 `ok` 를 찍는 것이 진단의 절반이다 — 종료 코드만 본다.
     agent_hook_command_check.stdio = .inherit;

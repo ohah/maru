@@ -8533,6 +8533,19 @@ pub const testing_api = if (builtin.is_test) struct {
         runtime.layout_cell_height_px = 0;
         runtime.mutation_drop_reasons = @splat(null);
         runtime.mutation_drop_lines = 0;
+        // 제품 constructor(`spawnWithConnection`·`attachExistingWithConnection`)가 in-place 로 세우는 값 필드를
+        // 같이 세운다 — `RemoteRuntime = undefined` 에서 시작하므로 필드 기본값이 안 먹는다. 2026-10-05: 선택 bool
+        // 둘을 안 세워 ReleaseFast 에서 쓰레기 바이트가 `selected_text` 요청의 0/1 칸을 넘었고, 인코더가 요청을
+        // 쓰기도 전에 `ProtocolError` 를 냈다(Debug 는 0xAA 의 최하위 비트로 false 가 되어 통과했다). 어느 필드를
+        // 같이 세우는지는 `tests/remote_runtime_fixture_init_boundary.zig` 가 제품 블록과 대조한다.
+        runtime.event_cursor = .{};
+        runtime.close_authority = .{};
+        runtime.shutdown_attempt_authority = .{};
+        runtime.shutdown_current_admin = .{};
+        runtime.selection_all = false;
+        runtime.selection_host_authoritative = false;
+        runtime.requested_cols = 0;
+        runtime.narrowed_cols = 0;
         runtime.generation_owner = .{};
         try runtime.generation_owner.slot.initInPlace(
             allocator,
@@ -8784,11 +8797,7 @@ test "remote runtime fails the shared connection on an immediately consumed fore
     runtime.currentGeneration().attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 7, .role = .controller, .controller_generation = 1 });
     runtime.currentGeneration().event_generation_tracking = .tracked;
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
-    // selected_text 요청은 두 client-local 선택 의도를 JSON bool로 직렬화한다. 이 fixture는
-    // `RemoteRuntime = undefined`에서 시작하므로 제품 constructor의 기본값을 명시하지 않으면
-    // ReleaseFast가 미초기화 비트를 읽어 비결정적인 malformed request를 만들 수 있다.
-    runtime.selection_all = false;
-    runtime.selection_host_authoritative = false;
+    // selected_text 의 두 선택 의도 bool 은 `initializeGenerationForConnection` 이 제품 constructor 와 같이 false 로 세운다.
     runtime.currentGeneration().resize_generation = 0;
     runtime.currentGeneration().resize_baseline_present = false;
     runtime.currentGeneration().observation = .{};
@@ -16215,8 +16224,18 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
     client.notification_delivery_v1 = true;
     var adapter: host_adapter_mod.HostAdapter = undefined;
     var runtime: RemoteRuntime = undefined;
+    // **fixture 가 세우지 않은 칸을 Debug 에서도 쓰레기로 만든다.** Debug 는 `undefined` 를 0xAA 로 채워 bool 을
+    // 최하위 비트(0)로 읽으므로, 선택 bool 을 안 세운 fixture 가 Debug 에서는 통과하고 ReleaseFast 에서만
+    // `selected_text` 가 `ProtocolError` 로 죽었다(2026-10-05, ReleaseFast 잡은 수동 실행에서만 돈다). 0xFF 는
+    // 최하위 비트가 1 이라 같은 누락이 Debug 에서도 아래 단언에 걸린다.
+    @memset(std.mem.asBytes(&runtime), 0xFF);
     try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
     defer deinitGenerationRuntimeAggregateFixture(&runtime, &adapter);
+    // 제품 constructor 가 세우는 값 칸은 fixture 도 같은 값으로 세웠다.
+    try testing.expect(!runtime.selection_all);
+    try testing.expect(!runtime.selection_host_authoritative);
+    try testing.expectEqual(@as(u16, 0), runtime.requested_cols);
+    try testing.expectEqual(@as(u16, 0), runtime.narrowed_cols);
     runtime.currentGeneration().resize_seq = 0;
     runtime.currentGeneration().pump_ended = false;
     if (tag == .clipboard_write) {

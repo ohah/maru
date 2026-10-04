@@ -2047,6 +2047,13 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   조건 없는 끝 줄, `progressConnectedOne` 의 retained_terminal 끝 줄, connected 분기 **앞**의 시도 기록 포획, 채택 실패 사유,
   새 job 입장의 기준 시각, 워커의 연결 전 잔여 데드라인 측정·연결 전 지남·연결 실패 사유·후보 거절과 그 봉인을 문법 자리로
   고정한다. 수정 전 코드에서 wiring 2개 모두 red. 동작(재시도·데드라인)은 바꾸지 않으며 실제 잠자기 재현 E2E 는 없다.
+  **RemoteRuntime 테스트 fixture 초기화**(`test-remote-runtime-fixture-init`, check-boundaries — PR 에서 돈다): 제품
+  constructor(`spawnWithConnection`·`attachExistingWithConnection`)의 in-place 초기화 블록이 대입하는 값 칸 집합을 fixture
+  공통 입구 `initializeTestGeneration` 의 대입 집합과 대조한다. 일부러 안 세우는 칸(판정자별 입력 경로, 신원 owner)은 이유와 함께
+  제외 목록에 두고, 목록이 썩으면(제품이 안 세우거나 fixture 가 이미 세움) red 다. 2026-10-05 선택 bool 둘이 빠져 ReleaseFast 의
+  `2c3e C2 … selected text` 만 `ProtocolError` 로 죽었다 — 수정 전 코드에서 이 판정자는 그 두 칸과 함께 red. 값 판정은 C2
+  하네스가 fixture 앞에서 runtime 을 0xFF 로 독칠하고 칸 값을 단언하는 것(session-host 바이너리, main·수동 실행)이며, 그 독칠
+  자리는 같은 경계가 잠근다.
   **CR6e-c3b2d 재연결 viewport**(같은 step 필터 `CR6e-c3b2d reconnect viewport`·`CR6e-c3b2d mutation denial`, 경계
   `CR6e-c3b2d 경계는`): 관문이 닫힌 동안(observer) 들어온 `resize`가 `layout_size`에 남아 재연결 강제 resize 의 크기가
   되되, host 가 거절할 수 있는 크기(cell 상한 초과·최소 열 미만·cell 증가)는 snapshot 으로 물러남을 잰다. 진단은 같은

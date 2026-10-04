@@ -6514,6 +6514,27 @@ pub fn build(b: *std.Build) void {
     glyph_placement_wiring_step.dependOn(&run_glyph_placement_wiring.step);
     boundary_step.dependOn(glyph_placement_wiring_step);
 
+    // `RemoteRuntime` 테스트 fixture 가 **제품 constructor 가 in-place 로 세우는 값 칸을 빠짐없이 세우는가**(2026-10-05:
+    // 선택 bool 둘을 안 세워 ReleaseFast 에서만 `selected_text` 가 `ProtocolError` 로 죽었다 — 그 잡은 수동 실행 전용이라
+    // 잠복했다). 값 판정자(C2 의 0xFF 독)는 session-host 바이너리라 PR 에서 안 돌아, 칸 집합 대조는 이 글자 판정자가 한다.
+    const remote_runtime_fixture_init_step = b.step(
+        "test-remote-runtime-fixture-init",
+        "RemoteRuntime test fixtures set every value field the product constructor sets in place",
+    );
+    const remote_runtime_fixture_init_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/remote_runtime_fixture_init_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_remote_runtime_fixture_init = b.addRunArtifact(remote_runtime_fixture_init_tests);
+    run_remote_runtime_fixture_init.addArg("--maru-expect-tests=2");
+    run_remote_runtime_fixture_init.addArg("--maru-expect-passed=2");
+    run_remote_runtime_fixture_init.setCwd(b.path("."));
+    remote_runtime_fixture_init_step.dependOn(&run_remote_runtime_fixture_init.step);
+    boundary_step.dependOn(remote_runtime_fixture_init_step);
+
     const session_host_handoff_exhaustive_step = b.step(
         "test-session-host-handoff-exhaustive",
         "Verify every stable handoff core field with valid non-default canonical round trips",

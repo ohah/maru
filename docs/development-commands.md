@@ -2217,3 +2217,13 @@ at every failed allocation prefix. It does not require a native font-shaping dev
 `zig build test-chrome-draw-lowering` checks renderer-neutral projection, layer
 ordering, measured text placement, clips, gradient direction and independent border
 alpha without requiring a native GPU window.
+
+### Windows 문서 원본 권한과 실제 저장 fixture
+
+`zig build test-win32-document-grant`는 최초 읽기 원본의 full file ID와 문서/Registry/epoch/
+경로 결합, 원본 교체 거절과 native 시도/문서 수명·준비 실패 정산의 14개 판정을 실행한다.
+`zig build` 뒤 `zig-out/bin/maru.exe win32-editor-document-smoke`는 실제 Windows 창 입력과
+임시 파일 native 커밋→디스크 바이트→일반 읽기 전용 재열기/paint까지 검사한다.
+저장은 fixture 직접 호출이며 원래 뷰는 살아 있다. 일반 Ctrl+S·dirty-close·물리 IME의
+완료 증거로 사용하지 않는다. full-ID witness·부모 rename/저장 pin 판정과 잔여 범위는
+[Windows 계약](windows-platform.md) §2m.150에 기록한다.

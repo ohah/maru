@@ -1863,3 +1863,10 @@ grant와 원본 file identity는 여전히 native 호스트 책임이다. 이 �
 Windows owned save requests capture both the opened lifetime and the shared
 `State.save_target_epoch`. Target invalidation rejects old write/ack authority
 without requiring a path or content change; epoch saturation refuses new requests.
+
+Windows의 `document_grant.Grant`는 최초 읽기 핸들의 full file ID와 선택된 루트, Registry/
+DocumentHandle/epoch/경로를 별도 native 수명으로 보관한다. 저장 시 상대 이름을 다시 pin해
+최초 ID에 비교하고, 다른 문서나 native 파일이 같은 바이트라는 이유로 승인하지 않는다.
+원본 객체를 전체 ID로 연 witness는 ID 수명을 유지하면서 편집 중 일반 폴더 rename을 허용한다.
+이 실험적 연결과 save-time 부모 pin, 일반 GUI 미연결 범위는
+[Windows 계약](windows-platform.md) §2m.150을 참조한다.

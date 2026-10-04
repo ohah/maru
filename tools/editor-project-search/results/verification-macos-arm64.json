@@ -5,10 +5,10 @@
       "corpus": "valid",
       "query": "needle",
       "mode": "literal",
-      "files": 25,
-      "candidates": 21,
+      "files": 30,
+      "candidates": 25,
       "prefilter_used": true,
-      "matches": 187,
+      "matches": 191,
       "prefilter_equal": true,
       "missing_files": [],
       "byte_equal": true
@@ -17,10 +17,10 @@
       "corpus": "valid",
       "query": "NEEDLE",
       "mode": "literal-fold",
-      "files": 25,
-      "candidates": 21,
+      "files": 30,
+      "candidates": 25,
       "prefilter_used": true,
-      "matches": 360,
+      "matches": 364,
       "prefilter_equal": true,
       "missing_files": []
     },
@@ -28,10 +28,10 @@
       "corpus": "valid",
       "query": "needle",
       "mode": "word",
-      "files": 25,
-      "candidates": 21,
+      "files": 30,
+      "candidates": 25,
       "prefilter_used": true,
-      "matches": 8,
+      "matches": 12,
       "prefilter_equal": true,
       "missing_files": []
     },
@@ -39,7 +39,7 @@
       "corpus": "valid",
       "query": "foo",
       "mode": "word",
-      "files": 25,
+      "files": 30,
       "candidates": 20,
       "prefilter_used": true,
       "matches": 15,
@@ -50,7 +50,7 @@
       "corpus": "valid",
       "query": "FOO",
       "mode": "literal-fold",
-      "files": 25,
+      "files": 30,
       "candidates": 20,
       "prefilter_used": true,
       "matches": 202,
@@ -61,7 +61,7 @@
       "corpus": "valid",
       "query": "I",
       "mode": "literal-fold",
-      "files": 25,
+      "files": 30,
       "candidates": 1,
       "prefilter_used": true,
       "matches": 2,
@@ -72,7 +72,7 @@
       "corpus": "valid",
       "query": "k",
       "mode": "literal-fold",
-      "files": 25,
+      "files": 30,
       "candidates": 1,
       "prefilter_used": true,
       "matches": 2,
@@ -83,7 +83,7 @@
       "corpus": "valid",
       "query": "s",
       "mode": "literal-fold",
-      "files": 25,
+      "files": 30,
       "candidates": 1,
       "prefilter_used": true,
       "matches": 2,
@@ -94,7 +94,7 @@
       "corpus": "valid",
       "query": "aa",
       "mode": "literal",
-      "files": 25,
+      "files": 30,
       "candidates": 17,
       "prefilter_used": true,
       "matches": 235,
@@ -106,7 +106,7 @@
       "corpus": "valid",
       "query": "--",
       "mode": "literal",
-      "files": 25,
+      "files": 30,
       "candidates": 1,
       "prefilter_used": true,
       "matches": 1,
@@ -118,7 +118,7 @@
       "corpus": "valid",
       "query": ".*",
       "mode": "literal",
-      "files": 25,
+      "files": 30,
       "candidates": 1,
       "prefilter_used": true,
       "matches": 1,
@@ -130,7 +130,7 @@
       "corpus": "valid",
       "query": "$",
       "mode": "word",
-      "files": 25,
+      "files": 30,
       "candidates": 18,
       "prefilter_used": true,
       "matches": 7,
@@ -141,7 +141,7 @@
       "corpus": "valid",
       "query": "_",
       "mode": "word",
-      "files": 25,
+      "files": 30,
       "candidates": 18,
       "prefilter_used": true,
       "matches": 3,
@@ -152,7 +152,7 @@
       "corpus": "valid",
       "query": "absent-pattern",
       "mode": "literal",
-      "files": 25,
+      "files": 30,
       "candidates": 0,
       "prefilter_used": true,
       "matches": 0,
@@ -164,8 +164,8 @@
       "corpus": "valid",
       "query": "한글",
       "mode": "literal",
-      "files": 25,
-      "candidates": 25,
+      "files": 30,
+      "candidates": 30,
       "prefilter_used": false,
       "matches": 197,
       "prefilter_equal": true,
@@ -176,8 +176,8 @@
       "corpus": "valid",
       "query": "é",
       "mode": "literal",
-      "files": 25,
-      "candidates": 25,
+      "files": 30,
+      "candidates": 30,
       "prefilter_used": false,
       "matches": 1,
       "prefilter_equal": true,
@@ -188,8 +188,8 @@
       "corpus": "valid",
       "query": "é",
       "mode": "literal",
-      "files": 25,
-      "candidates": 25,
+      "files": 30,
+      "candidates": 30,
       "prefilter_used": false,
       "matches": 172,
       "prefilter_equal": true,
@@ -200,10 +200,10 @@
       "corpus": "valid",
       "query": "^|foo",
       "mode": "regex",
-      "files": 25,
-      "candidates": 25,
+      "files": 30,
+      "candidates": 30,
       "prefilter_used": false,
-      "matches": 417,
+      "matches": 425,
       "prefilter_equal": true,
       "missing_files": []
     },
@@ -211,8 +211,8 @@
       "corpus": "valid",
       "query": "(?<=foo)bar",
       "mode": "regex",
-      "files": 25,
-      "candidates": 25,
+      "files": 30,
+      "candidates": 30,
       "prefilter_used": false,
       "matches": 1,
       "prefilter_equal": true,
@@ -222,8 +222,8 @@
       "corpus": "valid",
       "query": "(foo)\\1",
       "mode": "regex",
-      "files": 25,
-      "candidates": 25,
+      "files": 30,
+      "candidates": 30,
       "prefilter_used": false,
       "matches": 17,
       "prefilter_equal": true,
@@ -233,10 +233,10 @@
       "corpus": "valid",
       "query": "(?=한)|$",
       "mode": "regex",
-      "files": 25,
-      "candidates": 25,
+      "files": 30,
+      "candidates": 30,
       "prefilter_used": false,
-      "matches": 432,
+      "matches": 440,
       "prefilter_equal": true,
       "missing_files": []
     },
@@ -276,17 +276,142 @@
       "byte_equal": true
     }
   ],
-  "native_sha256": "e7f7dc38c8450c4f055bb9a68fdc784dab8bcf4de2173cf4d6b67a80f3a3a58f",
+  "document_oracles": [
+    {
+      "file": "bom.txt",
+      "query": "needle",
+      "expected": {
+        "./bom.txt": [
+          [
+            0,
+            0,
+            6
+          ]
+        ]
+      },
+      "observed": {
+        "./bom.txt": [
+          [
+            0,
+            0,
+            6
+          ]
+        ]
+      }
+    },
+    {
+      "file": "bom.txt",
+      "query": "^needle$",
+      "expected": {
+        "./bom.txt": [
+          [
+            0,
+            0,
+            6
+          ]
+        ]
+      },
+      "observed": {
+        "./bom.txt": [
+          [
+            0,
+            0,
+            6
+          ]
+        ]
+      }
+    },
+    {
+      "file": "bom-only.txt",
+      "query": "^$",
+      "expected": {
+        "./bom-only.txt": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "observed": {
+        "./bom-only.txt": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "file": "double-cr.txt",
+      "query": "^needle$",
+      "expected": {},
+      "observed": {}
+    },
+    {
+      "file": "lone-cr.txt",
+      "query": "^needle$",
+      "expected": {},
+      "observed": {}
+    },
+    {
+      "file": "lone-cr.txt",
+      "query": "\\r$",
+      "expected": {
+        "./lone-cr.txt": [
+          [
+            0,
+            6,
+            1
+          ]
+        ]
+      },
+      "observed": {
+        "./lone-cr.txt": [
+          [
+            0,
+            6,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "file": "nul.txt",
+      "query": "needle",
+      "expected": {
+        "./nul.txt": [
+          [
+            0,
+            1,
+            6
+          ]
+        ]
+      },
+      "observed": {
+        "./nul.txt": [
+          [
+            0,
+            1,
+            6
+          ]
+        ]
+      }
+    }
+  ],
+  "native_sha256": "9de50d7b1b066f589d3417ef53d237c86824372f927c5edfa9b470b08c49c0bb",
   "rg_sha256": "7c7d5b09c3a57de864500c65dc2e9c4d2a5e96a3fc7b7d5318480c19887a739b",
   "source_sha256": {
-    "native.zig": "b293ef51ac5fbe355e5a71ea8d1a10e2443a9d2f0b3197904a1c5b679cdc6e1a",
-    "compare.py": "99df24e169471d2c45ade65300d36687328ebaabbe94bb320e26cfb3a27288d2",
-    "verify.py": "dd5588b91144713f40b8d7333d83351648114243c1d15b8d85c1736edc5d53d6"
+    "native.zig": "ad26b575c5a862e946eb341555ca3c47f6d9e663224ea0b3014ed42cc3ab2572",
+    "compare.py": "a75bc688b2ce65edc4cab9622de4f9a951e1631bdc2706f56f3d6b4c54b556e9",
+    "verify.py": "dcf67d8b56522048c0e79ecd2dac5b8d5dad7046ac8ae195c90151a2151f5b63"
   },
   "limits": "합성 자료의 모든 범위 대조. raw 자료는 선별 누락 탐지용이며 제품의 바이너리·인코딩 지원을 뜻하지 않음.",
+  "invalid_document_rejected": true,
   "negative_controls": {
     "status": "passed",
-    "original_compare_sha256": "99df24e169471d2c45ade65300d36687328ebaabbe94bb320e26cfb3a27288d2",
+    "original_compare_sha256": "a75bc688b2ce65edc4cab9622de4f9a951e1631bdc2706f56f3d6b4c54b556e9",
     "controls": [
       {
         "name": "binary-drop",
@@ -297,7 +422,8 @@
         "expected_failure": "./binary.bin",
         "caught": true,
         "missing_files": [
-          "./binary.bin"
+          "./binary.bin",
+          "./nul.txt"
         ]
       },
       {
@@ -357,8 +483,12 @@
           "./anchors.txt",
           "./binary.bin",
           "./bom.bin",
+          "./bom.txt",
           "./boundary.txt",
+          "./double-cr.txt",
+          "./lone-cr.txt",
           "./malformed.txt",
+          "./nul.txt",
           "./only-substring.txt",
           "./overlap.txt",
           "./random-0.txt",
@@ -389,6 +519,35 @@
         "caught": true,
         "missing_files": []
       }
-    ]
+    ],
+    "old_adapter_control": {
+      "caught": true,
+      "native_sha256": "e7f7dc38c8450c4f055bb9a68fdc784dab8bcf4de2173cf4d6b67a80f3a3a58f",
+      "error": "AssertionError(('제품 문서 계약', 'bom.txt', {'./bom.txt': [[0, 3, 6]]}, {'./bom.txt': [[0, 0, 6]]}))",
+      "document_oracles": [
+        {
+          "file": "bom.txt",
+          "query": "needle",
+          "expected": {
+            "./bom.txt": [
+              [
+                0,
+                0,
+                6
+              ]
+            ]
+          },
+          "observed": {
+            "./bom.txt": [
+              [
+                0,
+                3,
+                6
+              ]
+            ]
+          }
+        }
+      ]
+    }
   }
 }

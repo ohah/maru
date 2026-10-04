@@ -4,7 +4,7 @@
   "binary": "설치된 ripgrep 15.2.0 (실험용, 앱 번들 아님)",
   "binary_bytes": 4030432,
   "binary_sha256": "7c7d5b09c3a57de864500c65dc2e9c4d2a5e96a3fc7b7d5318480c19887a739b",
-  "probe_sha256": "f47dad812b76d2f8174595dcd0f1b77fbf95ef0c29c28f761fa8550626e0cf8f",
+  "probe_sha256": "397714cfe674dedac7f39fda0145d0f3928023d1b2146976d814a0a4cbc729f3",
   "version": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+NEON\nsimd(runtime):+NEON\n\nPCRE2 10.45 is available (JIT is available)\n",
   "base_argv": [
     "--no-config",
@@ -13,11 +13,19 @@
     "--no-ignore-parent",
     "--no-ignore-global",
     "--crlf",
-    "--json",
+    "--json"
+  ],
+  "protected_argv": [
+    "--glob",
+    "!**/.git",
     "--glob",
     "!**/.git/**",
     "--glob",
+    "!**/.hg",
+    "--glob",
     "!**/.hg/**",
+    "--glob",
+    "!**/.svn",
     "--glob",
     "!**/.svn/**"
   ],
@@ -68,6 +76,26 @@
     },
     {
       "name": "명시 include가 ignore를 덮는 실제 우선순위",
+      "passed": true
+    },
+    {
+      "name": "worktree의 .git 메타데이터 파일도 고정 제외",
+      "passed": true
+    },
+    {
+      "name": "include·ignore 해제도 고정 VCS 제외를 덮지 않음",
+      "passed": true
+    },
+    {
+      "name": "VCS 폴더 자체가 root이면 상대 glob만으로 제외되지 않는 반례",
+      "passed": true
+    },
+    {
+      "name": "겹친 root는 ignore 판정 뒤 경로를 합쳐야 하는 반례",
+      "passed": true
+    },
+    {
+      "name": "선별에서 제외한 파일도 이후 편집으로 일치할 수 있음",
       "passed": true
     },
     {
@@ -182,43 +210,50 @@
   "not_exercised": [
     "파일 시스템이 잘못된 UTF-8 파일명을 거부함"
   ],
+  "changed_candidate": {
+    "prefilter_used": true,
+    "before_exit": 1,
+    "before_paths": "",
+    "after_exit": 0,
+    "after_paths": "./changed.txt\u0000"
+  },
   "stress": {
     "files": 2048,
     "input_bytes": 67108864,
     "elapsed_ms": [
-      35.69795799999997,
-      43.76616699999997,
-      31.185832999999995,
-      36.35812499999991,
-      34.982124999999975
+      79.19054200000008,
+      35.46458399999985,
+      49.90162499999995,
+      36.833749999999995,
+      48.44304100000008
     ],
-    "median_ms": 35.69795799999997,
+    "median_ms": 48.44304100000008,
     "stdout_bytes": [
-      62893,
-      62897,
-      62905,
-      62936,
-      62947
+      62917,
+      62916,
+      62947,
+      62951,
+      62857
     ],
     "note": "OS 캐시를 비우지 않은 CLI 측정. 앱 지연·메모리 측정이 아님."
   },
   "native_binary": "zig-out/bin/maru-project-search-probe",
-  "native_binary_sha256": "e7f7dc38c8450c4f055bb9a68fdc784dab8bcf4de2173cf4d6b67a80f3a3a58f",
+  "native_binary_sha256": "9de50d7b1b066f589d3417ef53d237c86824372f927c5edfa9b470b08c49c0bb",
   "listing_and_native": {
     "elapsed_ms": [
-      430.0356660000001,
-      427.8648330000001,
-      422.5550840000001,
-      422.419667,
-      445.5364580000003
+      576.4772499999999,
+      552.6789170000002,
+      581.0336249999999,
+      572.3491250000001,
+      531.1692499999996
     ],
-    "median_ms": 427.8648330000001,
+    "median_ms": 572.3491250000001,
     "matcher_elapsed_ns": [
-      412787458,
-      414470292,
-      407060000,
-      408131041,
-      410583083
+      551991000,
+      530986333,
+      559171958,
+      511289959,
+      496239500
     ],
     "listing_bytes": [
       26922,
@@ -230,9 +265,9 @@
     "note": "rg 목록 + Python 경로 변환 + 순차 파일 읽기/기존 findMatches. 별도 프로세스·목록 파일 비용 포함. 최적화한 제품 워커가 아님."
   },
   "cancel_ms": [
-    1.2999579999997124,
-    10.118457999999997,
-    10.526083000000241
+    41.900207999999495,
+    4.5855420000000535,
+    9.59804100000028
   ],
   "status": "passed"
 }

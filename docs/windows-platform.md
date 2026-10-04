@@ -11030,3 +11030,25 @@ scalar 오른쪽 이동·CRLF 분리·anchor 손실·viewport 행 오인·실제
 edit→disk→reopen 전체 앱 판정이 남아 있다. 위아래/마우스 선택·가로 caret 추종·랩 토글도
 남아 있으며, 긴 단일 행에서 backward grapheme 탐색 비용과 문서 행 projection 메모리 예산은
 후속 검증 대상이다. W8.17 전체 완료로 세지 않는다.
+
+### 2m.148 준비 후 문서 권한 변경을 native 커밋 전에 거절 (2026-10-04)
+
+`writeDocument`의 권한 검사만으로는 준비 후 경로/readonly/disk/lifetime 변경을 막을 수 없었다.
+`commitDocument`는 쓴 request lease·순서·이미지 지문을 먼저 확인하고 source/image 지문과
+L2 `validateForWrite`를 native 파일 핸들을 닫기 직전에 재검사한다. 일반 byte `commit`은
+document-bound prepared transaction을 거절하므로 이 검사를 우회하지 못한다.
+ack도 같은 request binding helper를 사용한다. 이후 편집 revision은 허용하고 실제로 쓴
+owned 이미지의 revision만 저장 완료로 반영한다. 기존 lost-reply/uncertain 정산 계약은 유지한다.
+
+실제 준비된 TxF 쓰기 뒤 경로 변경·readonly 전환·새 disk 관측·opened 재열기·다른 요청의
+uncertain 상태를 각각 판정했다. 거절 직후 phase는 prepared, 파일 fence는 열린 상태,
+KTM 결과는 미결이며 일반 파일에서 읽은 원본은 그대로였다. 명시적 rollback 뒤 원본과
+미저장 편집도 유지했다. 다른 요청/generic commit 우회와 준비 후 source/image 변조도 검사한다.
+
+Native safe-save root는 66개(새 실제 파일 판정 5개), 경로 판정은 29개다.
+generic 우회 허용·request binding 제거·최종 문서 권한 검사 제거·source 확인 제거·image 확인
+제거의 다섯 변이를 모두 runtime 실패로 검출하고 byte 단위 원복 후 정상 판정을 재실행했다.
+
+이 경로는 계속 실험적 local NTFS 구현이다. grant/file identity의 문서 연결, capability,
+crash 복구와 전체 실패 타이밍, 일반 편집/GUI 저장·dirty-close·감시·edit→disk→reopen은
+남아 있다. 일반 문서의 읽기 전용 상태를 해제하거나 W8.17 완료로 세지 않는다.

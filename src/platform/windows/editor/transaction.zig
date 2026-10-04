@@ -178,11 +178,7 @@ pub const Transaction = struct {
     /// A generic byte write or another document's callback cannot acknowledge
     /// this save. A failed/lost native reply remains dirty until reconciliation.
     pub fn acknowledgeDocument(self: *const Transaction, request: *maru.session.editor.save_request.Request) !void {
-        const lease = self.request_lease orelse return error.WrongSaveRequest;
-        if (lease.owner != request.lease.owner or lease.id != request.lease.id or
-            !std.meta.eql(lease.document, request.lease.document) or
-            self.request_sequence != request.sequence or self.request_disk_hash != request.disk_hash)
-            return error.WrongSaveRequest;
+        try self.checkDocumentRequest(request);
         const result: maru.session.editor.save_request.Result = switch (self.phase) {
             .committed => .committed,
             .rolled_back => .aborted,
@@ -190,6 +186,14 @@ pub const Transaction = struct {
             else => return error.SaveNotCommitted,
         };
         return request.complete(result);
+    }
+
+    fn checkDocumentRequest(self: *const Transaction, request: *const maru.session.editor.save_request.Request) !void {
+        const lease = self.request_lease orelse return error.WrongSaveRequest;
+        if (lease.owner != request.lease.owner or lease.id != request.lease.id or
+            !std.meta.eql(lease.document, request.lease.document) or
+            self.request_sequence != request.sequence or self.request_disk_hash != request.disk_hash)
+            return error.WrongSaveRequest;
     }
 
     pub fn write(self: *Transaction, io: std.Io, bytes: []const u8) !void {
@@ -205,7 +209,26 @@ pub const Transaction = struct {
     }
 
     pub fn commit(self: *Transaction, io: std.Io) !void {
+        // A document write cannot bypass its final authority check through the
+        // generic byte API. Invalid phases retain their existing error contract.
+        if (self.phase == .prepared and self.request_lease != null) return error.DocumentRequestRequired;
         try self.commitWith(io, Native);
+    }
+
+    pub fn commitDocument(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request) !void {
+        try self.commitDocumentWith(io, request, Native);
+    }
+
+    fn commitDocumentWith(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request, comptime Api: type) !void {
+        if (self.phase != .prepared) return error.InvalidState;
+        try self.checkDocumentRequest(request);
+        if (request.expected_disk_hash != self.source_hash) return error.DiskFingerprintChanged;
+        if (maru.session.editor.document_state.contentHash(request.bytes) != request.disk_hash) return error.CorruptSaveImage;
+        // Preparation may outlive a reload, changed path, permission or disk
+        // observation. Check immediately before releasing the native file fence.
+        // Later editor revisions remain allowed: the owned image is the save.
+        try request.validateForWrite();
+        try self.commitWith(io, Api);
     }
     // A failed request does not prove rollback. Refuse writes/retries/"saved"
     // until a separate native outcome query or confirmed rollback resolves it.
@@ -346,7 +369,21 @@ test "Windows safe save transaction acknowledges only its committed L2 image and
     try documentEdit(state, "later\n");
     try std.testing.expectError(error.SaveNotCommitted, tx.acknowledgeDocument(&request));
     try std.testing.expect(state.opened.?.isDirty());
-    try tx.commit(io);
+    try std.testing.expectError(error.DocumentRequestRequired, tx.commit(io));
+    try std.testing.expectError(error.WrongSaveRequest, tx.commitDocument(io, &other));
+    // A changed request/source observation must not reinterpret an already
+    // prepared native transaction. Image bytes must still identify that write.
+    request.expected_disk_hash ^= 1;
+    state.opened.?.disk_hash.? ^= 1;
+    try std.testing.expectError(error.DiskFingerprintChanged, tx.commitDocument(io, &request));
+    request.expected_disk_hash ^= 1;
+    state.opened.?.disk_hash.? ^= 1;
+    @constCast(request.bytes)[0] ^= 1;
+    try std.testing.expectError(error.CorruptSaveImage, tx.commitDocument(io, &request));
+    @constCast(request.bytes)[0] ^= 1;
+    try std.testing.expectEqual(Phase.prepared, tx.phase);
+    try std.testing.expect(tx.file_open);
+    try tx.commitDocument(io, &request);
     try std.testing.expectError(error.WrongSaveRequest, tx.acknowledgeDocument(&other));
     try std.testing.expect(state.persistence.persisted_revision == null);
     try tx.acknowledgeDocument(&request);
@@ -389,7 +426,7 @@ fn documentOutcomeFixture(comptime aborted: bool) !void {
             }
         };
         LostReply.committed = false;
-        try std.testing.expectError(error.CommitUncertain, tx.commitWith(io, LostReply));
+        try std.testing.expectError(error.CommitUncertain, tx.commitDocumentWith(io, &request, LostReply));
         try std.testing.expect(LostReply.committed);
     }
     try std.testing.expectError(error.SaveNotCommitted, tx.acknowledgeDocument(&request));
@@ -416,6 +453,78 @@ test "Windows safe save transaction rollback never acknowledges its L2 document"
 test "Windows safe save transaction lost commit reply requires native reconciliation before L2 ack" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try documentOutcomeFixture(false);
+}
+
+const ChangedAuthority = enum { path, read_only, disk, reload, uncertain };
+
+/// Real prepared TxF writes stay invisible and retain their file fence when a
+/// later main-thread observation revokes the document's publication authority.
+fn changedCommitAuthority(comptime changed: ChangedAuthority) !void {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const original = "original-long-content";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = original });
+    var pinned = try maru.win32_relative_file.open(a, tmp.dir, "original.txt");
+    defer pinned.deinit(io);
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try documentFixture(&registry, original);
+    defer _ = registry.release(lease) catch unreachable;
+    const state = registry.get(lease).?;
+    try documentEdit(state, "pending-save");
+    var request = try maru.session.editor.save_request.Request.begin(a, &registry, lease, 128);
+    defer request.deinit();
+    var tx = try beginFixture(a, io, &pinned);
+    defer tx.close(io) catch unreachable;
+    try tx.writeDocument(io, &request);
+    switch (changed) {
+        .path => state.path.?[0] = 'x',
+        .read_only => state.opened.?.file.read_only = true,
+        .disk => state.opened.?.disk_hash = maru.session.editor.document_state.contentHash("external-observation"),
+        .uncertain => state.persistence.uncertain_sequence = request.sequence + 1,
+        .reload => {
+            state.clearOpened(a);
+            const reopened = try maru.session.editor.edit_doc.EditableFile.init(a, original, false);
+            state.opened = .{ .file = reopened, .saved_hash = maru.session.editor.document_state.contentHash(original), .disk_hash = maru.session.editor.document_state.contentHash(original) };
+            try documentEdit(state, "new-lifetime-edit");
+        },
+    }
+    try std.testing.expectError(switch (changed) {
+        .path, .reload => error.StaleDocument,
+        .read_only => error.ReadOnly,
+        .disk => error.DiskFingerprintChanged,
+        .uncertain => error.SaveUncertain,
+    }, tx.commitDocument(io, &request));
+    try std.testing.expectEqual(Phase.prepared, tx.phase);
+    try std.testing.expect(tx.file_open);
+    try std.testing.expectEqual(Outcome.undetermined, try tx.queryOutcome());
+    var bytes: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(original, bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
+    try tx.rollback();
+    try std.testing.expectEqual(Outcome.aborted, try tx.queryOutcome());
+    try std.testing.expectEqualStrings(original, bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
+    try std.testing.expectEqualStrings(if (changed == .reload) "new-lifetime-edit" else "pending-save", state.opened.?.file.content);
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expect(state.persistence.persisted_revision == null);
+}
+
+test "Windows safe save transaction final commit refuses changed document path" {
+    try changedCommitAuthority(.path);
+}
+test "Windows safe save transaction final commit refuses newly readonly document" {
+    try changedCommitAuthority(.read_only);
+}
+test "Windows safe save transaction final commit refuses newer disk observation" {
+    try changedCommitAuthority(.disk);
+}
+test "Windows safe save transaction final commit refuses reopened lifetime" {
+    try changedCommitAuthority(.reload);
+}
+test "Windows safe save transaction final commit refuses another uncertain request" {
+    try changedCommitAuthority(.uncertain);
 }
 
 fn namespaceRaceFixture(comptime transient: bool, comptime restore_attempt: bool) !void {

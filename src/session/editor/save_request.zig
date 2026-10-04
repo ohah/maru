@@ -89,7 +89,7 @@ pub const Request = struct {
         self.acknowledged = true;
     }
 
-    /// Revalidate on the main thread immediately before native writing. Completion
+    /// Revalidate on the main thread immediately before native writing or commit. Completion
     /// checks the same target again, but cannot undo an already committed wrong write.
     pub fn validateForWrite(self: *const Request) !void {
         if (self.acknowledged) return error.AlreadyAcknowledged;

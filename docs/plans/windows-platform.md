@@ -140,3 +140,8 @@ crash 복구·실패 타이밍 전체는 남아 있다. W8.17 완료로 세지 �
 실제 창 WM_KEYDOWN 6개/7프레임과 runtime 변이 5회를 검증했다. 일반 쓰기/IME/undo,
 GUI safe-save·dirty-close·감시·edit→disk→reopen, 세로/마우스 입력·가로 caret 추종·랩과
 긴 행/행 projection 예산은 남아 있다. W8.17은 계속 진행 중이다.
+
+준비 후 문서 권한 변경의 native 커밋 fence는 §2m.148에서 연결했다. 일반 byte commit의
+document-bound 우회를 막고, 새 실제 파일 판정 다섯 개로 경로/readonly/disk/reload/uncertain
+변경을 거절했다. Native root 66개·경로 29개와 runtime 변이 5회가 통과했다.
+일반 편집/저장 연결과 capability·crash 복구·전체 실패 타이밍은 계속 남아 있다.

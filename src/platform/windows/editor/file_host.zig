@@ -62,10 +62,13 @@ pub const Book = struct {
         if (result.cancelled) return error.OpenCancelled;
         if (result.failure) |err| return err;
         if (result.document == null or (result.snapshot != null) == (result.readonly != null)) return error.InvalidOpenResult;
+        const file = result.file orelse return error.InvalidOpenResult;
+        const parsed = result.document.?;
+        if (file.read_only != parsed.read_only or !std.meta.eql(file.format, parsed.format) or !std.mem.eql(u8, file.content, parsed.content)) return error.OpenImageChanged;
         if (result.snapshot) |*snapshot| {
             if (!snapshot.capability_verified) return error.SaveCapabilityUnavailable;
             try self.controllers.ensureUnusedCapacity(self.allocator, 1);
-            var opened = try grants.Grant.publishOpen(self.allocator, self.registry, snapshot);
+            var opened = try grants.Grant.publishPrepared(self.allocator, self.registry, snapshot, &result.file);
             self.controllers.appendAssumeCapacity(saving.Controller.take(&opened.grant));
             result.snapshot = null;
             result.document = null;
@@ -75,11 +78,14 @@ pub const Book = struct {
         const image = &result.readonly.?;
         if (editor.document_state.contentHash(image.bytes) != image.raw_hash) return error.OpenImageChanged;
         var state: editor.document_state.State = .{};
-        defer state.clear(self.allocator);
-        const file = try editor.edit_doc.EditableFile.init(self.allocator, image.bytes, true);
+        defer {
+            state.opened = null;
+            state.clear(self.allocator);
+        }
         state.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content), .disk_hash = image.raw_hash };
         state.path = try self.allocator.dupe(u8, image.path);
         const view = try self.registry.create(&state, self.allocator);
+        result.file = null;
         image.deinit();
         result.readonly = null;
         result.document = null;
@@ -1385,9 +1391,11 @@ test "Windows editor host worker admission consumes once and survives result dis
     defer f.deinit();
     var result = try initialResult(f.tmp.dir, false);
     defer result.deinit(std.testing.io);
+    const prepared_content = result.file.?.content.ptr;
     const view = try f.book.admitOpen(&result);
     f.views[0] = view;
-    try std.testing.expect(result.consumed and result.snapshot == null and result.document == null);
+    try std.testing.expect(result.consumed and result.snapshot == null and result.document == null and result.file == null);
+    try std.testing.expect(f.registry.get(view).?.opened.?.file.content.ptr == prepared_content);
     try std.testing.expectError(error.OpenResultConsumed, f.book.admitOpen(&result));
     result.deinit(std.testing.io);
     try change(&f.registry, view, "X");
@@ -1473,6 +1481,7 @@ fn admissionAllocationPrefix(a: std.mem.Allocator, root: std.Io.Dir) !void {
     defer result.deinit(std.testing.io);
     const view = book.admitOpen(&result) catch |err| {
         try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+        try std.testing.expectEqualStrings("base", result.file.?.content);
         try result.snapshot.?.validate();
         for (registry.slots.items) |slot| try std.testing.expect(slot.document == null);
         return err;
@@ -1487,4 +1496,32 @@ test "Windows editor host initial result admission allocation failures retain na
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "base" });
     try std.testing.checkAllAllocationFailures(std.testing.allocator, admissionAllocationPrefix, .{tmp.dir});
+}
+
+test "Windows editor host rejects altered prepared body format and authority before publication" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    const byte = result.file.?.content[0];
+    result.file.?.content[0] = 'Z';
+    try expectAdmissionError(f, &result, error.OpenImageChanged);
+    result.file.?.content[0] = byte;
+    result.file.?.format.has_bom = false;
+    try expectAdmissionError(f, &result, error.OpenImageChanged);
+    result.file.?.format.has_bom = true;
+    result.file.?.read_only = true;
+    try expectAdmissionError(f, &result, error.OpenImageChanged);
+    result.file.?.read_only = false;
+    const prepared = result.file;
+    result.file = null;
+    defer if (result.file == null) {
+        var owned = prepared.?;
+        owned.deinit();
+    };
+    try expectAdmissionError(f, &result, error.InvalidOpenResult);
+    result.file = prepared;
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
 }

@@ -22,12 +22,16 @@ pub const Result = struct {
     readonly: ?ReadonlyImage = null,
     /// Borrowed only from the owned snapshot/readonly bytes in this Result.
     document: ?maru.session.editor.document.Document = null,
+    /// Independently owned CPU preparation; no Registry or view crosses threads.
+    file: ?maru.session.editor.edit_doc.EditableFile = null,
     failure: ?anyerror = null,
     cancelled: bool = false,
     consumed: bool = false,
     thread_id: std.Thread.Id,
 
     pub fn deinit(self: *Result, io: std.Io) void {
+        if (self.file) |*file| file.deinit();
+        self.file = null;
         if (self.snapshot) |*snapshot| snapshot.deinit(io);
         if (self.readonly) |*image| image.deinit();
         self.snapshot = null;
@@ -60,7 +64,9 @@ const Job = struct {
         errdefer a.free(bytes);
         const parsed = try maru.session.editor.document.open(bytes, true);
         const path = try a.dupe(u8, self.path);
-        return .{ .readonly = .{ .path = path, .bytes = bytes, .raw_hash = maru.session.editor.document_state.contentHash(bytes) }, .document = parsed, .thread_id = std.Thread.getCurrentId() };
+        errdefer a.free(path);
+        const file = try maru.session.editor.edit_doc.EditableFile.init(a, bytes, true);
+        return .{ .readonly = .{ .path = path, .bytes = bytes, .raw_hash = maru.session.editor.document_state.contentHash(bytes) }, .document = parsed, .file = file, .thread_id = std.Thread.getCurrentId() };
     }
 
     fn perform(self: *Job, io: std.Io, comptime Driver: type) Result {
@@ -87,11 +93,16 @@ const Job = struct {
             snapshot.deinit(io);
             return .{ .failure = err, .cancelled = self.cancel_requested.load(.acquire), .thread_id = thread_id };
         };
+        var file = maru.session.editor.edit_doc.EditableFile.init(std.heap.smp_allocator, snapshot.bytes, false) catch |err| {
+            snapshot.deinit(io);
+            return .{ .failure = err, .cancelled = self.cancel_requested.load(.acquire), .thread_id = thread_id };
+        };
         if (self.cancel_requested.load(.acquire)) {
+            file.deinit();
             snapshot.deinit(io);
             return .{ .cancelled = true, .thread_id = thread_id };
         }
-        return .{ .snapshot = snapshot, .document = parsed, .thread_id = thread_id };
+        return .{ .snapshot = snapshot, .document = parsed, .file = file, .thread_id = thread_id };
     }
     fn run(self: *Job, comptime Driver: type) void {
         var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});

@@ -12002,3 +12002,22 @@ compiled runtime 변형으로 검출했다. 모든 원본 bytes를 복원하고 
 초기 filesystem 읽기/probe와 worker 문서 해석은 연결됐지만 게시 시 L2 문서 생성의 UTF-8
 재검사·buffer/line index와 뷰/syntax 준비, 복구 저장소 읽기는 아직 UI 스레드에 있다. 이 CPU/
 복구 I/O 이관과 sleep/unmount·물리 입력/IME, 나머지 Windows 지원 범위는 계속 남아 있다.
+
+### 2m.185 — 초기 본문 버퍼·줄 인덱스의 worker 준비
+
+초기 worker는 raw 이미지 외에 독립 소유 `EditableFile`을 준비한다. UTF-8 해석과 rope,
+평탄 본문, 줄 인덱스 생성은 worker에서 수행하며 Registry나 view를 빌리지 않는다.
+Book은 본문·포맷·readonly 속성을 raw 이미지의 해석과 대조하고 준비한 본문을 재생성하지
+않고 등록한다. 파일 내부 allocator는 thread-safe SMP이며 path/history는 앱 allocator를
+유지한다. Registry 등록 또는 grant 참조 할당 실패는 준비 파일과 native snapshot을 결과에
+남긴다. 성공 뒤만 준비 파일 소유권을 소비하며 취소/미소비 결과는 파일과 raw 이미지를 정리한다.
+
+worker 11개·grant 19개·host 78개가 Debug/ReleaseFast에서 통과했다. 준비 본문 주소의
+보존, 결과 정리 뒤 편집/실제 저장과 등록 할당 실패 소유권, 변경된 본문·포맷·권한 및 누락된
+준비 파일 거절을 검사했다. 본문·포맷·권한 대조 생략, UI 본문 재생성, readonly 준비 권한
+철회를 각각 compiled runtime 변형으로 검출했다. 다섯 회 모두 원본 bytes를 복원했다.
+
+새 제품의 실제 앱에서 열기→편집→Save-close의 전체 `BOM + Xbase CRLF` bytes와 정상
+종료를 확인했다. 소유 HWND의 synthetic 입력이며 물리 입력/IME 증거로 세지 않는다.
+Registry 등록 시 hash/본문 대조, view/syntax CPU 준비와 복구 저장소 읽기는 아직 앱 스레드에
+있다. 이 잔여 비용 및 전체 Windows 지원 범위를 계속 진행한다.

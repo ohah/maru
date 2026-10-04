@@ -137,6 +137,8 @@ const Surface = struct {
     new_tabs: std.ArrayList(NewTab) = .empty,
     /// 페이지가 연 팝업을 이어 받은 탭(W6f②). 페이지가 닫으면(`browser_closed` — maru 가 닫지 않았다) 창이 그 탭을 닫는다.
     adopted_popup: bool = false,
+    /// 그 팝업을 연 탭(W6f② — 페이지가 닫으면 그 탭으로 돌아간다. Chrome 처럼).
+    popup_opener: u64 = 0,
     /// 페이지가 그 팝업을 닫았다 — 그 탭이 있는 창이 꺼내 가 탭을 닫는다(`takePageClosed`).
     page_closed: bool = false,
     /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」 답이 준다. sidecar 의 `open_tab`
@@ -1923,12 +1925,18 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
         return;
     }
     // 그 번호의 기록 — sidecar 는 이미 만들었다(`browser_created` 는 오지 않는다). 다시 띄우면 처음 주소로 보통 탭처럼 되살린다.
+    // 주소창이 첫 `url_changed` 전에도(빈 팝업은 오지 않을 수 있다) 비지 않게 처음 주소를 넣어 둔다.
+    const shown_url = gpa.dupe(u8, v.url) catch null;
     surfaces.put(gpa, v.browser, .{
         .record = .{ .surface_id = v.browser, .size = size, .hidden = false },
         .created = true,
         .last_url = last_url,
+        .url = shown_url,
+        .nav_dirty = shown_url != null,
         .adopted_popup = true,
+        .popup_opener = v.opener,
     }) catch {
+        if (shown_url) |u| gpa.free(u);
         gpa.free(queued_url.?);
         gpa.free(last_url.?);
         if (reserved.ring) |ring| ring.release();
@@ -1960,6 +1968,7 @@ pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.adopted_popup = false;
     s.page_closed = false;
+    s.composing = false; // 닫힌 페이지의 조합은 끝났다(창이 입력기 쪽을 버린다 — `osr_discard_marked`)
     dropDialogs(gpa, s);
     dropNotes(gpa, s);
     for (s.view.clear()) |ring| if (ring) |r| r.release();
@@ -1968,6 +1977,12 @@ pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64) void {
     s.last_url = blank;
     s.created = false;
     if (state == .running or state == .starting) sendCommand(gpa, .{ .create = .{ .browser = surface_id, .size = s.record.size, .hidden = s.record.hidden } });
+}
+
+/// 그 팝업을 연 탭(없으면 0).
+pub fn popupOpener(surface_id: u64) u64 {
+    const s = surfaces.getPtr(surface_id) orelse return 0;
+    return s.popup_opener;
 }
 
 /// 꺼내 간 창이 지금 닫지 못했다(탭을 끄는 중·닫기 확인) — 다음 tick 에 다시.
@@ -2267,6 +2282,9 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         failFileFetch(s.record.surface_id); // 청한 파일 내용도 오지 않는다(W6d③)
     }
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②)
+    // 이어 받은 팝업도 새 sidecar 에서는 보통 탭으로 되살아난다 — 그 번호의 닫힘이 탭을 확인 없이 닫지 않게(W6f② 적대 검증 3 차).
+    // 아직 붙기 전인 것은 줄에 남아 붙는다(줄의 `adopt` 로 안다).
+    for (surfaces.values()) |*s| s.adopted_popup = false;
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
 
@@ -2419,9 +2437,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .browser_closed => |id| if (surfaces.getPtr(id)) |s| {
             // 페이지가 이어 받은 팝업을 닫았다(W6f② — maru 가 닫은 탭은 이미 표에 없다). 붙기 전이면 줄에서 빼고 기록을 지우고, 붙었으면
             // 그 탭을 닫게 한다.
-            if (s.adopted_popup) {
-                if (dropPendingAdopt(gpa, id)) abandonPopup(gpa, id) else s.page_closed = true;
-            }
+            if (dropPendingAdopt(gpa, id)) abandonPopup(gpa, id) else if (s.adopted_popup) s.page_closed = true;
             dropPopup(s); // 닫힘 알림 없이 사라진다(W6a②)
             setTooltip(gpa, s, ""); // 툴팁도(W6b — 방어)
             dropContextMenu(gpa, s); // 브라우저가 닫히며 CEF 가 메뉴를 거뒀다(W6c② — 닫힘 알림은 sidecar 가 보내지 않는다)

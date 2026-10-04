@@ -1568,6 +1568,11 @@ pub fn build(b: *std.Build) void {
     run_safe_save_tests.addArg("--maru-expect-tests=66"); // 2 aggregation blocks, 16 stage, 9 metadata, 7 security, 2 audit-scope, 3 identity, 27 transaction tests
     const safe_save_step = b.step("test-win32-safe-save", "Verify native editor save path and original-file preservation");
     safe_save_step.dependOn(&run_safe_save_tests.step);
+    const document_grant_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows document grant"} });
+    const document_grant_step = b.step("test-win32-document-grant", "Verify native read identity and document-bound save authority");
+    const run_document_grant_tests = b.addRunArtifact(document_grant_tests);
+    run_document_grant_tests.addArg("--maru-expect-tests=14"); // 2 aggregation blocks and 12 native authority tests
+    document_grant_step.dependOn(&run_document_grant_tests.step);
     const relative_file_tests = addProjectTest(b, .{
         .root_module = maru_mod,
         .filters = &.{ "Windows safe save", "Windows relative read" },
@@ -4153,6 +4158,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(save_request_step);
     test_step.dependOn(navigation_step);
     test_step.dependOn(edit_command_step);
+    test_step.dependOn(document_grant_step);
     test_step.dependOn(editor_input_step);
     test_step.dependOn(&run_internal_contract_tests.step);
     test_step.dependOn(&run_core_tests.step);

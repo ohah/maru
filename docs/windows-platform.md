@@ -11080,3 +11080,47 @@ Undo/Redo를 이 경로로 보낸다. 일반 사용자 파일의 `read_only`는 
 일반 파일 편집 활성화·GUI native save·capability/crash 복구·dirty-close·외부 감시,
 IME preedit/replacement·paste·자동 들여쓰기·word 삭제와 뷰 입력/성능 예산은 남아 있다.
 W8.17은 계속 진행 중이다.
+
+### 2m.150 최초 읽기 원본과 문서 수명을 묶은 native grant (2026-10-04)
+
+`platform/windows/editor/document_grant.zig`는 선택된 루트와 상대 경로로 읽은 원본의
+volume + 128-bit file ID, raw disk 지문, 문서 Registry/Handle/epoch와 경로를 함께 보관한다.
+문서 본문은 같은 읽기 핸들에서 얻은 바이트로 생성한다. 동일 경로·동일 내용의 다른 문서나
+다른 Registry, 새 opened lifetime과 변경된 문서 경로의 요청은 native 쓰기 전에 거절한다.
+같은 바이트로 이름이 교체돼도 최초 원본 ID를 새 ID로 바꾸어 승인하지 않는다.
+
+선택한 루트는 [DuplicateHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)의
+SAME_ACCESS 복제 핸들로 독립 소유한다. 원본 객체는
+[OpenFileById](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-openfilebyid)의
+ExtendedFileIdType(전체 128-bit selector)·속성 조회 전용 witness로 유지한다. 열기 뒤 volume과
+128-bit ID 모두 최초 읽기에 비교하며, 지원되지 않을 때 legacy 64-bit로 폴백하지 않는다.
+읽기 중에는 [ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile)의
+쓰기 공유 제한을 적용한다. 편집 수명 동안 부모 DELETE-sharing pin을 유지하지 않는다.
+저장 시도는 상대 이름을 다시 pin하고 최초 ID와 비교한 뒤 transaction을 시작하며,
+커밋 직전에도 grant 안 이름을 다시 pin한다. Attempt 종료는 native transaction을 먼저
+정산하고 부모 핸들을 해제한다. 문서 grant와 저장 시도의 allocator 실패 prefix를 각각 검증한다.
+
+`test-win32-document-grant` 14개(aggregation 2개 + 실제 native 판정 12개)가 Debug·ReleaseFast에서 통과했다.
+원래 view를 닫은 뒤 요청 저장, 선택 루트의 호출자 핸들 종료, 동일 바이트의 원본 교체,
+다른 문서/Registry/lifetime/경로와 다른 native 파일의 커밋 거절, 읽기 상한과 열린 writer,
+준비 할당 실패의 문서/핸들 정산을 검사한다. 원본 witness를 유지한 채 일반 부모 rename과
+원래 grant-relative 이름이 없는 동안 저장 거절, 이름 복원 뒤 저장 준비를 검증한다.
+부모 DELETE-access probe는 편집 중 SUCCESS,
+저장 중 SHARING_VIOLATION, 시도 종료/준비 실패 뒤 SUCCESS다.
+
+실제 Windows 창 fixture는 이제 새 임시 파일을 grant로 연다. 기존 입력·history 26프레임
+뒤 추가 WM_CHAR로 편집하고 native commit/ack, 디스크 BOM·CRLF 바이트 확인과 일반
+`openFileFor`를 통한 독립 문서 재열기/paint 3프레임을 검증한다. persisted revision 19와
+clean 상태를 확인했다. 기존 문서/탐색 67프레임과 합쳐 96프레임이다. 원래 뷰는 재열기 시
+살아 있으며 저장은 fixture에서 직접 호출한다. 일반 Ctrl+S·dirty-close나 물리 IME 판정이 아니다.
+
+적대적 검증 5회는 Registry, DocumentHandle, epoch, 경로와 최종 native 파일 ID 검사를
+각각 제거해 실행 중 실패를 확인했다. 부모 수명 분리와 full-ID witness 적용 뒤 같은 다섯 변이를 다시 실행했고,
+원복한 14개 판정·빌드·실제 창 저장/재열기도 통과했다.
+
+이 witness 선택의 근거는 실제 NTFS rename 검사다. 이름으로 다시 연 원본 핸들은 부모 pin을
+해제하고 속성 조회 전용으로 줄여도 containing-directory rename을 AccessDenied로 막았다.
+ID로 연 원본 witness는 같은 전체 ID를 유지하면서 일반 rename을 허용한다. 독립 native probe와
+제품 14개 gate의 실제 rename 판정으로 확인했다. 원본 ID 재사용 방지는 핸들 수명으로 유지한다.
+실험적 local NTFS/TxF의 capability·crash 복구와 전체 실패 타이밍, 일반 편집/저장 controller,
+dirty-close·감시·물리 IME는 계속 남아 있다. 일반 사용자 파일은 읽기 전용이며 W8.17은 진행 중이다.

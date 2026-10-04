@@ -55,6 +55,7 @@ test {
     _ = @import("platform/windows/editor/audit_scope.zig");
     _ = @import("platform/windows/editor/identity.zig");
     _ = @import("platform/windows/editor/transaction.zig");
+    _ = @import("platform/windows/editor/document_grant.zig");
     _ = scm_surface;
     _ = agent_surface;
 }
@@ -230,7 +231,7 @@ fn dispatch(
         return;
     }
     if (std.mem.eql(u8, command, "win32-editor-document-smoke")) {
-        try runWin32EditorDocumentSmoke(allocator, stdout, stderr);
+        try runWin32EditorDocumentSmoke(io, allocator, stdout, stderr);
         return;
     }
     if (std.mem.eql(u8, command, "win32-file-tree-smoke")) {
@@ -16519,8 +16520,9 @@ fn buildEditorFrame(
 }
 
 /// Exercise the product's composed editor through real DirectWrite/D3D frames.
-/// Only this in-memory fixture is writable; no user file or config is changed.
-fn runWin32EditorDocumentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+/// In-memory fixtures and one new disposable file are writable; ordinary user
+/// files remain readonly and no config is changed.
+fn runWin32EditorDocumentSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (builtin.os.tag != .windows) {
         try stderr.writeAll("maru win32-editor-document-smoke: Windows only\n");
         try stderr.flush();
@@ -16590,7 +16592,7 @@ fn runWin32EditorDocumentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Wri
     }
     try stdout.print("editor_document_smoke_ok=true frames_presented={d}\n", .{frames});
     try runEditorNavigationFrames(allocator, &host, stdout);
-    try runEditorTypingFrames(allocator, &host, stdout);
+    try runEditorTypingFrames(io, allocator, &host, stdout);
     try stdout.flush();
 }
 
@@ -16676,17 +16678,28 @@ fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout
 
 /// Only the fixture document is writable; real window messages exercise the
 /// same input/paint methods as the app without enabling user-file writes.
-fn runEditorTypingFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
+fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
     const editor = maru.session.editor;
     var documents: editor.document_registry.Registry = .{ .allocator = a };
     defer documents.deinit() catch unreachable;
     const original = "\xef\xbb\xbf// base\r\n";
-    var prepared: editor.document_state.State = .{};
-    defer prepared.clear(a);
-    const file = try editor.edit_doc.EditableFile.init(a, original, false);
-    prepared.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content) };
-    prepared.path = try a.dupe(u8, "typing-smoke.txt");
-    const lease = try documents.create(&prepared, a);
+    // Own a newly created disposable root. Cleanup removes only its known
+    // file and empty directory; an existing directory is never reused/deleted.
+    var nonce: [16]u8 = undefined;
+    try io.randomSecure(&nonce);
+    const fixture_path = try std.fmt.allocPrint(a, ".zig-cache/editor-save-smoke-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
+    defer a.free(fixture_path);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDir(io, fixture_path, .default_dir);
+    defer cwd.deleteDir(io, fixture_path) catch unreachable;
+    var fixture_root = try cwd.openDir(io, fixture_path, .{});
+    defer fixture_root.close(io);
+    try fixture_root.writeFile(io, .{ .sub_path = "typing-smoke.txt", .data = original });
+    defer fixture_root.deleteFile(io, "typing-smoke.txt") catch unreachable;
+    const grant_mod = @import("platform/windows/editor/document_grant.zig");
+    var granted = try grant_mod.Grant.openExperimental(a, io, fixture_root, "typing-smoke.txt", &documents, 4 << 20);
+    defer granted.grant.deinit(io);
+    const lease = granted.view;
     defer _ = documents.release(lease) catch unreachable;
     var views: [2]OpenFile = undefined;
     views[0] = try editor_document.attach(&documents, lease, a);
@@ -16764,6 +16777,52 @@ fn runEditorTypingFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout: *s
     defer a.free(bytes);
     if (!std.mem.eql(u8, bytes, original)) return error.EditorTypingFormatMismatch;
     try stdout.print("editor_typing_smoke_ok=true window_keys={d} neutral_history_keys=6 asserted_frames={d} revision={d} dirty=false\n", .{ window_keys, fixtures.len * views.len, state.opened.?.file.revision });
+
+    // Add an actual window character, then exercise the host-owned native save
+    // seam and ordinary readonly reopen. Save is invoked here, not via Ctrl+S;
+    // the product's ordinary GUI controller/capability path is still pending.
+    host.window.postSyntheticChar('X');
+    var got_saved_char = false;
+    for (0..120) |_| {
+        for (try host.poll()) |event| switch (event) {
+            .key => |key| {
+                if (try views[0].applyKey(a, key, .{ .now_ms = 1000, .views = &views })) |copied| a.free(copied);
+                got_saved_char = true;
+            },
+            .close_requested => return error.EditorSmokeInterrupted,
+            else => {},
+        };
+        if (got_saved_char) break;
+        try host.drawFrame(&.{}, 0xFF1E2430);
+    }
+    if (!got_saved_char or !std.mem.eql(u8, state.opened.?.file.content, "X// base\r\n") or !state.opened.?.isDirty()) return error.EditorGrantedInputMismatch;
+    var request = try editor.save_request.Request.begin(a, &documents, lease, 4 << 20);
+    defer request.deinit();
+    var tx = try granted.grant.beginExperimental(io, &request, 4 << 20);
+    defer tx.close(io) catch unreachable;
+    try tx.transaction.writeDocument(io, &request);
+    try granted.grant.commit(io, &tx, &request);
+    try tx.transaction.acknowledgeDocument(&request);
+    if (state.opened.?.isDirty() or state.persistence.persisted_revision != 19) return error.EditorGrantedSaveAckMismatch;
+    const disk = try fixture_root.readFileAlloc(io, "typing-smoke.txt", a, .limited(4 << 20));
+    defer a.free(disk);
+    if (!std.mem.eql(u8, disk, "\xef\xbb\xbfX// base\r\n")) return error.EditorGrantedDiskMismatch;
+    var reopened = switch (openFileFor(&documents, a, io, granted.grant.path)) {
+        .opened => |value| value,
+        else => return error.EditorGrantedReopenFailed,
+    };
+    defer reopened.deinit(a);
+    const reopened_state = documents.get(reopened.document).?;
+    if (!std.mem.eql(u8, reopened.text, "X// base\r\n") or reopened_state.opened.?.isDirty() or !reopened_state.opened.?.file.read_only or !reopened_state.opened.?.file.format.has_bom) return error.EditorGrantedReopenMismatch;
+    const disk_identity = try @import("platform/windows/editor/identity.zig").Identity.capture(granted.grant.original.handle);
+    if (!disk_identity.eql(granted.grant.identity) or !disk_identity.eql(tx.transaction.identity)) return error.EditorGrantedIdentityMismatch;
+    for ([_]*OpenFile{ &views[0], &views[1], &reopened }) |view| {
+        var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+        if (!std.mem.eql(u8, view.text, "X// base\r\n")) return error.EditorGrantedPaintMismatch;
+        try host.drawFrame(built.cells.items, 0xFF1E2430);
+    }
+    try stdout.writeAll("editor_granted_save_smoke_ok=true window_chars=1 native_commit=true disk_reopen=true asserted_frames=3 persisted_revision=19 dirty=false\n");
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.

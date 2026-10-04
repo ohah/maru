@@ -1762,3 +1762,9 @@ DocumentHandle/epoch/경로를 별도 native 수명으로 보관한다. 저장 �
 원본 객체를 전체 ID로 연 witness는 ID 수명을 유지하면서 편집 중 일반 폴더 rename을 허용한다.
 이 실험적 연결과 save-time 부모 pin, 일반 GUI 미연결 범위는
 [Windows 계약](windows-platform.md) §2m.150을 참조한다.
+
+Windows의 실험적 `save_controller.Controller`가 grant와 pending Request/Attempt를 소유한다.
+불확실한 native 결과는 KTM 조회로 정산하기 전까지 요청 이미지를 버리지 않으며, 종료도
+거절한다. native 결정과 문서 ack 거절을 별도 Receipt로 반환해 stale callback을 실제 rollback으로
+오인하지 않는다. L2의 captured-body dirty/sequence/lifetime 계약은 유지한다.
+실제 native 판정과 GUI/비동기/crash 미연결 범위는 [Windows 계약](windows-platform.md) §2m.151에 기록한다.

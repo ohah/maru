@@ -56,6 +56,7 @@ test {
     _ = @import("platform/windows/editor/identity.zig");
     _ = @import("platform/windows/editor/transaction.zig");
     _ = @import("platform/windows/editor/document_grant.zig");
+    _ = @import("platform/windows/editor/save_controller.zig");
     _ = scm_surface;
     _ = agent_surface;
 }
@@ -16698,7 +16699,8 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
     defer fixture_root.deleteFile(io, "typing-smoke.txt") catch unreachable;
     const grant_mod = @import("platform/windows/editor/document_grant.zig");
     var granted = try grant_mod.Grant.openExperimental(a, io, fixture_root, "typing-smoke.txt", &documents, 4 << 20);
-    defer granted.grant.deinit(io);
+    var saving = @import("platform/windows/editor/save_controller.zig").Controller.take(&granted.grant);
+    defer saving.deinit(io) catch unreachable;
     const lease = granted.view;
     defer _ = documents.release(lease) catch unreachable;
     var views: [2]OpenFile = undefined;
@@ -16796,26 +16798,22 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
         try host.drawFrame(&.{}, 0xFF1E2430);
     }
     if (!got_saved_char or !std.mem.eql(u8, state.opened.?.file.content, "X// base\r\n") or !state.opened.?.isDirty()) return error.EditorGrantedInputMismatch;
-    var request = try editor.save_request.Request.begin(a, &documents, lease, 4 << 20);
-    defer request.deinit();
-    var tx = try granted.grant.beginExperimental(io, &request, 4 << 20);
-    defer tx.close(io) catch unreachable;
-    try tx.transaction.writeDocument(io, &request);
-    try granted.grant.commit(io, &tx, &request);
-    try tx.transaction.acknowledgeDocument(&request);
+    try saving.prepare(io, lease, 4 << 20);
+    const receipt = try saving.commit(io);
+    if (receipt.decision != .committed or receipt.acknowledgment_error != null or receipt.cleanup_error != null or saving.status() != .idle) return error.EditorControllerReceiptMismatch;
     if (state.opened.?.isDirty() or state.persistence.persisted_revision != 19) return error.EditorGrantedSaveAckMismatch;
     const disk = try fixture_root.readFileAlloc(io, "typing-smoke.txt", a, .limited(4 << 20));
     defer a.free(disk);
     if (!std.mem.eql(u8, disk, "\xef\xbb\xbfX// base\r\n")) return error.EditorGrantedDiskMismatch;
-    var reopened = switch (openFileFor(&documents, a, io, granted.grant.path)) {
+    var reopened = switch (openFileFor(&documents, a, io, saving.grant.path)) {
         .opened => |value| value,
         else => return error.EditorGrantedReopenFailed,
     };
     defer reopened.deinit(a);
     const reopened_state = documents.get(reopened.document).?;
     if (!std.mem.eql(u8, reopened.text, "X// base\r\n") or reopened_state.opened.?.isDirty() or !reopened_state.opened.?.file.read_only or !reopened_state.opened.?.file.format.has_bom) return error.EditorGrantedReopenMismatch;
-    const disk_identity = try @import("platform/windows/editor/identity.zig").Identity.capture(granted.grant.original.handle);
-    if (!disk_identity.eql(granted.grant.identity) or !disk_identity.eql(tx.transaction.identity)) return error.EditorGrantedIdentityMismatch;
+    const disk_identity = try @import("platform/windows/editor/identity.zig").Identity.capture(saving.grant.original.handle);
+    if (!disk_identity.eql(saving.grant.identity)) return error.EditorGrantedIdentityMismatch;
     for ([_]*OpenFile{ &views[0], &views[1], &reopened }) |view| {
         var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
         defer built.deinit(a);
@@ -16823,6 +16821,7 @@ fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host
         try host.drawFrame(built.cells.items, 0xFF1E2430);
     }
     try stdout.writeAll("editor_granted_save_smoke_ok=true window_chars=1 native_commit=true disk_reopen=true asserted_frames=3 persisted_revision=19 dirty=false\n");
+    try stdout.print("editor_save_controller_smoke_ok=true decision=committed revision={d} sequence={d} status=idle\n", .{ receipt.revision, receipt.sequence });
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.

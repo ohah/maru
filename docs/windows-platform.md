@@ -11124,3 +11124,38 @@ ID로 연 원본 witness는 같은 전체 ID를 유지하면서 일반 rename을
 제품 14개 gate의 실제 rename 판정으로 확인했다. 원본 ID 재사용 방지는 핸들 수명으로 유지한다.
 실험적 local NTFS/TxF의 capability·crash 복구와 전체 실패 타이밍, 일반 편집/저장 controller,
 dirty-close·감시·물리 IME는 계속 남아 있다. 일반 사용자 파일은 읽기 전용이며 W8.17은 진행 중이다.
+
+### 2m.151 Windows 저장 컨트롤러의 소유권과 결과 정산 (2026-10-04)
+
+`platform/windows/editor/save_controller.zig`의 Controller가 문서 grant를 이동 소유하고,
+한 번에 하나의 owned Request와 native Attempt를 보관한다. 준비 중인 저장이 있으면
+두 번째 요청은 새 sequence를 발급하기 전에 SaveBusy다. 본문이 더 편집돼도 저장 이미지는
+바뀌지 않으며, 저장된 이미지의 revision/hash만 ack하고 이후 본문은 dirty로 남긴다.
+
+쓰기·최종 권한 거절은 실제 rollback으로 정산한다. 부분 쓰기는 complete native image에
+binding되지 않았어도 확정 rollback 뒤 owned 요청을 abort한다. 커밋/rollback의 미확정
+응답은 이미지·lease·native 핸들을 유지하고 L2 재저장을 차단한다. KTM 재조회가 실패하거나
+undetermined면 소유권을 버리지 않는다. 종료도 이를 확인하기 전에는 SaveUncertain으로
+거절한다. 이미 커밋된 결과의 응답만 유실됐으면 abort 요청도 실제 committed 결과로 정산한다.
+
+Receipt는 native committed/aborted와 document acknowledgment_error/cleanup_error를
+구분한다. 문서 경로나 lifetime이 바뀌어 ack가 거절돼도 실제 native commit을 rollback이나
+저장 실패로 바꾸어 표시하지 않는다. 확정 결과의 정산 뒤 pending과 요청 lease를 해제한다.
+Controller를 이동하거나 원래 view를 닫아도 보유 요청은 같은 문서를 대상으로 한다.
+
+`test-win32-save-controller`는 aggregation 2개와 실제 native 판정 13개, 합계 15개다.
+실제 부분 쓰기 rollback, 실제 commit 응답 유실 뒤 재조회, 실제 KTM undetermined 상태의
+종료 거절, rollback 응답 실패와 query 응답 유실 후 재시도, 최종 readonly 거절/재저장,
+나중 편집의 dirty 유지, stale ack 분리, 마지막 view 종료와 Controller 이동을 검사한다.
+준비 및 commit-time allocation failure prefix마다 이미지/lease/부모 fence 정산과 원본 바이트
+보존을 확인한다. Fault는 compile-time native boundary에만 있으며 제품 런타임 switch는 없다.
+
+적대적 검증 5회는 busy 거절 제거, uncertainty 표시 제거, undetermined의 committed 취급,
+현재 본문 hash로 ack, 거절된 commit의 abort 누락을 각각 실행 중 검출했다. 원복 후
+15개 판정·빌드·실제 창 재검증이 통과했다. 실제 창 fixture의 기존 96개 프레임과
+native 저장/일반 재열기는 이제 이 Controller를 호출하며 receipt의 committed/revision 19/
+sequence 1/idle을 확인한다. 저장 호출은 fixture 직접 호출이고 원래 view는 살아 있다.
+
+일반 파일은 계속 읽기 전용이다. GUI Ctrl+S·dirty-close·감시·물리 IME와 capability/crash
+복구, 비동기 I/O/GUI notice 배선은 남아 있다. 이 Controller는 현재 main-thread native 호출을
+정산하는 실험적 경계이며 GUI 저장 활성화나 W8.17 완료를 뜻하지 않는다.

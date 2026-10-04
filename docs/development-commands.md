@@ -1025,3 +1025,10 @@ provider 갱신·준비 할당 실패를 집중 실행한다. ReleaseFast는 `-D
 저장은 fixture 직접 호출이며 원래 뷰는 살아 있다. 일반 Ctrl+S·dirty-close·물리 IME의
 완료 증거로 사용하지 않는다. full-ID witness·부모 rename/저장 pin 판정과 잔여 범위는
 [Windows 계약](windows-platform.md) §2m.150에 기록한다.
+
+`zig build test-win32-save-controller`는 grant/이미지/요청 수명과 실제 native 결과 정산의
+15개 판정을 실행한다. 부분 쓰기 rollback·실제 commit 응답 유실·미확정 종료 거절·query
+실패 재시도·준비/commit 할당 실패·마지막 view 종료/Controller 이동을 포함한다.
+`-Doptimize=ReleaseFast`로 같은 판정자를 최적화 모드에서 확인한다. 위 실제 Windows 창
+fixture도 Controller를 호출한다. 일반 GUI·비동기 I/O와 crash 복구 범위는
+[Windows 계약](windows-platform.md) §2m.151을 참조한다.

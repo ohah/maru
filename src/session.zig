@@ -196,6 +196,7 @@ pub const editor = struct {
         pub const origin = @import("session/editor/syntax/origin.zig");
         pub const request = @import("session/editor/syntax/request.zig");
     };
+    pub const save_request = @import("session/editor/save_request.zig");
     pub const shared_edit = @import("session/editor/shared_edit.zig");
     pub const workspace_state = @import("session/editor/workspace_state.zig");
     /// 줄 조작의 순수 판정(§3.9a — L4 에서 옮겼다, 이식 계획 D1 이동 단계 1). `ops/` 폴더는 OS 를 안 부른다

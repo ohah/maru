@@ -128,3 +128,9 @@ macOS adapter에 남는다. Windows persistent host나 W8.17 편집·저장 완�
 제품 begin 경로의 지속·일시적 같은-ID junction fixture와 첫 쓰기 전 namespace fence 판정은
 §2m.145에서 검증했다. safe-save 58개와 경로 29개, 다섯 runtime 변이와 별도 binding 제거 변이가
 통과했다. capability·crash 복구·모든 실패 타이밍·L2 저장 ack와 일반 편집/저장 실앱 연결은 남아 있다.
+
+L2의 owned 저장 이미지·revision/disk CAS와 opened lifetime/요청 순서, 미확정 결과의 재저장 차단은
+§2m.146에서 구현했다. 실험적 native commit/rollback/실제 commit 응답 유실 뒤 재조회 결과를
+같은 문서 정책으로 연결했다. 공통 11개, native save 61개와 경로 29개 및 공통/native 각각 다섯
+runtime 변이와 별도 두 변이를 검증했다. 일반 입력·GUI 저장·dirty-close·외부 감시와 capability/
+crash 복구·실패 타이밍 전체는 남아 있다. W8.17 완료로 세지 않는다.

@@ -4576,6 +4576,11 @@ const FileCloseFixture = struct {
                 _ = controller.pollSettlement(std.testing.io) catch {};
                 std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
             }
+            while (controller.cleaning != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native cleanup timeout");
+                _ = controller.pollCleanup(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
             if (controller.pending == null) continue;
             _ = controller.abort(std.testing.io) catch unreachable;
         };

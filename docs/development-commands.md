@@ -1166,3 +1166,9 @@ admission 실패·미소비/busy/copied owner와 Request 해제 뒤 이미지를
 권한/source/checksum, final address·scope·one-use·전체 binding과 미게시 실패를 검사한다.
 `-Doptimize=ReleaseFast`도 실행한다. 승인 값은 native commit API나 앱 연결 전이며 host의
 native fence·non-reused scope·문서 수명/경로/권한 보유와 승인 왕복은 후속 작업이다.
+
+§2m.178의 `test-win32-save-controller`는 33개, `test-win32-editor-host`는 56개다.
+일반 앱의 terminal 정리 worker 연결, 정리 중 Request/busy, confirmed abort와 늦은 취소,
+최종 권한 실패의 rollback/cleanup, later edit와 stale disk acknowledgment, admission
+재시도를 검사한다. Debug와 `-Doptimize=ReleaseFast` 모두 실행한다. controller와 앱 연결을
+각각 다섯 compiled runtime 변형으로 검증했다. native commit 승인 왕복은 아직 후속이다.

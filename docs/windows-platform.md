@@ -11820,3 +11820,37 @@ native 결과까지 Request와 문서 수명·경로·권한을 보유/제한하
 이 값은 아직 native commit 진입점이나 일반 앱에 연결 전이다. 기존 native commit의 live
 권한 검증과 generic byte API 우회 거절은 그대로 유지한다. native worker의 binding-ready/
 main-thread 승인 왕복과 문서 변경 제한·취소 경합·정리 연결, 나머지 Windows 범위는 계속 진행한다.
+
+### 2m.178 — controller와 일반 앱의 native 정리 결과 정산
+
+`Controller.cleanupAsync`는 SMP 소유의 terminal attempt/image를 정리 worker에 넘기고
+원래 Request는 main thread에 유지한다. `cleaning` 동안 commit·abort·새 준비·shutdown은
+busy로 거절하며, admission 실패는 native 소유권을 바꾸지 않는다. `pollCleanup`은 retained
+결과를 원래 pending으로 되돌린다. released 결과는 실제 native outcome과 요청 binding을
+대조한 뒤 main thread에서 문서 CAS와 backup 정산을 수행한다. cleanup 오류와 문서 ack
+오류는 native commit/abort decision과 구분한다. 추가 편집이나 저장 후 권한 변경은 이미
+committed인 원래 이미지의 정산을 막지 않으며, 오래된 disk CAS는 저장 완료 처리를 거절한다.
+
+controller gate 33개가 Debug/ReleaseFast에서 통과했다. 추가 다섯 native 검사는 Request
+수명/busy, rollback의 dirty 보존, later edit/permission, stale disk ack, admission 실패 후
+재시도를 증명한다. false abort·rollback ack·ack 오류 은폐·현재 본문으로 잘못 rebase·잘못된
+receipt sequence의 다섯 compiled runtime 변형을 검출하고 원본 bytes를 복원했다.
+
+일반 앱의 `commitForApp`와 `pollSettlementForApp`도 terminal cleanup을 worker에 넘긴다.
+정리 admission/query 실패는 terminal 소유권을 유지하고 `finishing`/`uncertain`에서 재시도한다.
+`cleaning` 중 반복 Esc는 기존 job을 바꾸지 않는다. 실제 commit은 늦은 취소에도 committed
+receipt로 정산하고, confirmed abort 뒤에만 취소/원래 오류를 보고한다. 최종 grant 검증 실패는
+rollback worker와 cleanup worker를 거친 뒤 오류를 보고한다. committed cleanup의 stale disk
+CAS는 native commit과 별도 acknowledgment 오류를 반환한다.
+
+host gate 56개 Debug/ReleaseFast와 sync commit cleanup·sync settlement cleanup·정리 중
+취소 busy·committed의 가짜 cancel·권한 오류 조기 보고의 다섯 compiled runtime mutation
+검출이 통과했다. 원본 bytes를 복원하고 controller 33개도 두 optimize 모드에서 재검증했다.
+최종 native commit/경로 재검증은 아직 main thread에서 실행한다. 승인 왕복과 conflict
+overwrite·초기 open I/O 이관, 물리 입력/IME와 나머지 Windows 범위는 계속 남아 있다.
+
+실제 제품 exe의 격리된 두 파일을 각각 편집하고 WM_CLOSE의 Save를 선택해 두 문서 모두
+저장한 뒤 프로세스가 종료되는 것을 확인했다. 첫 파일은 `EF BB BF 58 62 61 73 65 0D 0A`,
+두 번째는 `59 73 65 63 6F 6E 64 0A`의 전체 bytes로 BOM/CRLF와 LF 보존을 검증했다.
+입력은 소유 HWND에 synthetic WM_CHAR/WM_CLOSE/WM_KEYDOWN을 주입했으며 물리 입력/IME
+검증으로 세지 않는다. 코드 hash·fixture·캡처와 byte proof는 private cache에 보관한다.

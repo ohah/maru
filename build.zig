@@ -1576,7 +1576,7 @@ pub fn build(b: *std.Build) void {
     const save_controller_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows save controller"} });
     const save_controller_step = b.step("test-win32-save-controller", "Verify Windows save ownership, native decisions and failure settlement");
     const run_save_controller_tests = b.addRunArtifact(save_controller_tests);
-    run_save_controller_tests.addArg("--maru-expect-tests=28"); // 2 aggregation blocks and 26 actual native controller tests
+    run_save_controller_tests.addArg("--maru-expect-tests=33"); // 2 aggregation blocks and 31 actual native controller tests
     save_controller_step.dependOn(&run_save_controller_tests.step);
     const backup_store_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor backup"} });
     const backup_store_step = b.step("test-win32-editor-backup", "Verify private native recovery storage and restored document authority");
@@ -1586,7 +1586,7 @@ pub fn build(b: *std.Build) void {
     const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
     const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
-    run_editor_host_tests.addArg("--maru-expect-tests=51"); // 2 aggregation blocks + 42 native tests + 7 pure policies
+    run_editor_host_tests.addArg("--maru-expect-tests=56"); // 2 aggregation blocks + 47 native tests + 7 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");

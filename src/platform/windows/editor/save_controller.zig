@@ -8,8 +8,9 @@ const grants = @import("document_grant.zig");
 const transaction = @import("transaction.zig");
 const preparation = @import("save_prepare_worker.zig");
 const settlement = @import("save_settle_worker.zig");
+const cleanup = @import("save_cleanup_worker.zig");
 
-pub const Status = enum { idle, preparing, settling, prepared, uncertain, closed };
+pub const Status = enum { idle, preparing, settling, cleaning, finishing, prepared, uncertain, closed };
 pub const PreparationReady = enum { prepared, settling, cancelled };
 pub const Decision = enum { committed, aborted };
 pub const Receipt = struct {
@@ -36,6 +37,10 @@ const Settlement = struct {
     allocator: std.mem.Allocator,
     worker: settlement.Worker,
 };
+const Cleaning = struct {
+    allocator: std.mem.Allocator,
+    worker: cleanup.Worker,
+};
 
 // Compile-time native boundary: faults in tests still operate on actual files
 // and KTM transactions. No runtime fault switch is installed in the product.
@@ -59,6 +64,7 @@ pub const Controller = struct {
     pending: ?Pending = null,
     preparing: ?*Preparation = null,
     settling: ?*Settlement = null,
+    cleaning: ?*Cleaning = null,
     settlement_retry_after_ns: i128 = 0,
     last_receipt: ?Receipt = null,
     closed: bool = false,
@@ -75,7 +81,9 @@ pub const Controller = struct {
         if (self.closed) return .closed;
         if (self.preparing != null) return .preparing;
         if (self.settling != null) return .settling;
+        if (self.cleaning != null) return .cleaning;
         const pending = self.pending orelse return .idle;
+        if (pending.attempt.transaction.phase == .committed or pending.attempt.transaction.phase == .rolled_back) return .finishing;
         return if (pending.attempt.transaction.phase == .uncertain) .uncertain else .prepared;
     }
 
@@ -97,7 +105,7 @@ pub const Controller = struct {
 
     fn startPreparation(self: *Controller, source: editor.document_registry.Lease, limit: usize, observed_hash: ?u64, worker_allocator: std.mem.Allocator) !void {
         if (self.closed) return error.ControllerClosed;
-        if (self.pending != null or self.preparing != null or self.settling != null) return error.SaveBusy;
+        if (self.pending != null or self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
         var request = if (observed_hash) |hash|
             try editor.save_request.Request.beginOverwrite(self.grant.allocator, self.grant.registry, source, limit, hash)
         else
@@ -129,9 +137,80 @@ pub const Controller = struct {
         try self.startSettlement(.reconcile, std.heap.smp_allocator);
     }
 
+    /// Native ownership moves, but the live Request stays on its owner thread.
+    /// Failed admission leaves the complete terminal attempt available to retry.
+    pub fn cleanupAsync(self: *Controller) !void {
+        try self.startCleanup(std.heap.smp_allocator);
+    }
+
+    fn startCleanup(self: *Controller, allocator: std.mem.Allocator) !void {
+        if (self.closed) return error.ControllerClosed;
+        if (self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
+        const pending = if (self.pending) |*value| value else return error.NoPendingSave;
+        const native_image = pending.native_image orelse return error.NonWorkerOwnedAttempt;
+        const waiting = try allocator.create(Cleaning);
+        errdefer allocator.destroy(waiting);
+        waiting.* = .{ .allocator = allocator, .worker = .{ .allocator = allocator } };
+        var image = pending.request.image();
+        image.bytes = native_image.bytes;
+        var prepared: preparation.Prepared = .{ .allocator = native_image.allocator, .attempt = pending.attempt, .image = image, .thread_id = 0 };
+        try waiting.worker.submit(&prepared);
+        pending.attempt = undefined;
+        pending.native_image = null;
+        self.cleaning = waiting;
+    }
+
+    pub fn pollCleanup(self: *Controller, io: std.Io) !?Receipt {
+        if (self.closed) return error.ControllerClosed;
+        const waiting = self.cleaning orelse return null;
+        var result = (try waiting.worker.takeResult()) orelse return null;
+        waiting.worker.deinit() catch unreachable;
+        waiting.allocator.destroy(waiting);
+        self.cleaning = null;
+        const pending = &self.pending.?;
+        switch (result) {
+            .retained => |value| {
+                pending.attempt = value.prepared.attempt;
+                pending.native_image = .{ .allocator = value.prepared.allocator, .bytes = value.prepared.image.bytes };
+                if (pending.attempt.transaction.phase == .uncertain) self.markUncertain();
+                self.settlement_retry_after_ns = std.Io.Clock.awake.now(io).nanoseconds + 200 * std.time.ns_per_ms;
+                return value.failure;
+            },
+            .released => |*value| {
+                defer value.deinit();
+                const decision: Decision = if (value.outcome == .committed) .committed else .aborted;
+                var receipt: Receipt = .{ .decision = decision, .revision = pending.request.revision, .sequence = pending.request.sequence, .cleanup_error = value.cleanup_error };
+                // Closed handles cannot be queried again. The worker proved KTM
+                // outcome and image binding; compare that image with our still
+                // owned Request before changing document persistence on main.
+                if (decision == .committed) {
+                    if (!value.image.sameRequest(pending.request.image()) or value.image.expected_source_hash != pending.request.expectedSourceHash()) {
+                        receipt.acknowledgment_error = error.WrongSaveRequest;
+                    } else {
+                        pending.request.complete(.committed) catch |failure| {
+                            receipt.acknowledgment_error = failure;
+                        };
+                    }
+                } else {
+                    pending.request.complete(.aborted) catch |failure| {
+                        if (failure != error.SaveNotCommitted) receipt.acknowledgment_error = failure;
+                    };
+                }
+                const state = pending.request.registry.get(pending.request.lease).?;
+                pending.request.deinit();
+                if (receipt.acknowledgment_error == null)
+                    @import("backup_store.zig").noteDecision(state, std.Io.Clock.awake.now(io).nanoseconds);
+                self.pending = null;
+                self.settlement_retry_after_ns = 0;
+                self.last_receipt = receipt;
+                return receipt;
+            },
+        }
+    }
+
     fn startSettlement(self: *Controller, action: settlement.Action, allocator: std.mem.Allocator) !void {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null or self.settling != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         const waiting = try allocator.create(Settlement);
         errdefer allocator.destroy(waiting);
@@ -153,6 +232,14 @@ pub const Controller = struct {
     }
 
     pub fn pollSettlement(self: *Controller, io: std.Io) !?Receipt {
+        return self.pollSettlementUsing(io, false);
+    }
+
+    pub fn pollSettlementForApp(self: *Controller, io: std.Io) !?Receipt {
+        return self.pollSettlementUsing(io, true);
+    }
+
+    fn pollSettlementUsing(self: *Controller, io: std.Io, comptime async_cleanup: bool) !?Receipt {
         if (self.closed) return error.ControllerClosed;
         const waiting = self.settling orelse return null;
         const result = (try waiting.worker.takeResult()) orelse return null;
@@ -168,6 +255,10 @@ pub const Controller = struct {
             return result.failure orelse error.SaveUncertain;
         }
         self.settlement_retry_after_ns = 0;
+        if (async_cleanup) {
+            try self.cleanupAsync();
+            return null;
+        }
         return self.settle(io, if (result.outcome == .committed) .committed else .aborted);
     }
 
@@ -238,7 +329,7 @@ pub const Controller = struct {
 
     fn prepareImage(self: *Controller, io: std.Io, source: editor.document_registry.Lease, limit: usize, observed_hash: ?u64, comptime Driver: type) !void {
         if (self.closed) return error.ControllerClosed;
-        if (self.pending != null or self.preparing != null or self.settling != null) return error.SaveBusy;
+        if (self.pending != null or self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
         var request = if (observed_hash) |hash|
             try editor.save_request.Request.beginOverwrite(self.grant.allocator, self.grant.registry, source, limit, hash)
         else
@@ -260,9 +351,31 @@ pub const Controller = struct {
     pub fn commit(self: *Controller, io: std.Io) !Receipt {
         return self.commitWith(io, Native);
     }
+
+    /// Commit still runs on main until the approval handshake is connected;
+    /// failed authority checks roll back asynchronously and terminal cleanup
+    /// always keeps the owned Request until the worker result is consumed.
+    pub fn commitForApp(self: *Controller, io: std.Io) !?Receipt {
+        if (self.closed) return error.ControllerClosed;
+        if (self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
+        const pending = if (self.pending) |*value| value else return error.NoPendingSave;
+        if (pending.preparation_error) |failure| return failure;
+        if (pending.attempt.transaction.phase != .prepared) return error.SaveUncertain;
+        Native.commit(&self.grant, io, &pending.attempt, &pending.request) catch |failure| {
+            if (pending.attempt.transaction.phase == .uncertain) {
+                self.markUncertain();
+                return failure;
+            }
+            pending.preparation_error = failure;
+            try self.abortAsync();
+            return null;
+        };
+        try self.cleanupAsync();
+        return null;
+    }
     fn commitWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null or self.settling != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         if (pending.preparation_error) |failure| return failure;
         if (pending.attempt.transaction.phase != .prepared) return error.SaveUncertain;
@@ -291,7 +404,7 @@ pub const Controller = struct {
     }
     fn reconcileWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null or self.settling != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         if (pending.attempt.transaction.phase != .uncertain) return error.InvalidState;
         const outcome = try Driver.reconcile(&pending.attempt);
@@ -304,7 +417,7 @@ pub const Controller = struct {
     }
     fn abortWith(self: *Controller, io: std.Io, comptime Driver: type) !Receipt {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null or self.settling != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
         const pending = if (self.pending) |*value| value else return error.NoPendingSave;
         Driver.rollback(&pending.attempt) catch |failure| {
             // Rollback itself queries an uncertain transaction. A lost commit
@@ -350,7 +463,7 @@ pub const Controller = struct {
     /// native result. On refusal every handle/image/grant remains owned for retry.
     pub fn deinit(self: *Controller, io: std.Io) !void {
         if (self.closed) return error.ControllerClosed;
-        if (self.preparing != null or self.settling != null) return error.SaveBusy;
+        if (self.preparing != null or self.settling != null or self.cleaning != null) return error.SaveBusy;
         if (self.pending) |pending| {
             if (pending.attempt.transaction.phase == .uncertain) {
                 _ = try self.reconcile(io);
@@ -1070,6 +1183,116 @@ fn commitAllocationPrefix(a: std.mem.Allocator) !void {
 test "Windows save controller commit allocation failures roll back a prepared native image" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, commitAllocationPrefix, .{});
+}
+
+fn awaitCleanup(controller: *Controller) !Receipt {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline) {
+        if (try controller.pollCleanup(std.testing.io)) |receipt| return receipt;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.CleanupDidNotComplete;
+}
+fn drainCleanup(controller: *Controller) void {
+    if (controller.cleaning != null) _ = awaitCleanup(controller) catch {};
+    std.debug.assert(controller.cleaning == null);
+}
+fn prepareCleanupFixture(f: *Fixture, committed: bool) !void {
+    try f.edit("X");
+    try f.controller.prepareAsync(f.view, 128);
+    try std.testing.expectEqual(PreparationReady.prepared, try awaitPreparation(&f.controller));
+    if (committed) {
+        try Native.commit(&f.controller.grant, std.testing.io, &f.controller.pending.?.attempt, &f.controller.pending.?.request);
+    } else {
+        try f.controller.pending.?.attempt.transaction.rollback();
+    }
+}
+
+test "Windows save controller native cleanup retains request until confirmed committed receipt" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    defer drainCleanup(&f.controller);
+    try prepareCleanupFixture(&f, true);
+    try f.controller.cleanupAsync();
+    try std.testing.expectEqual(Status.cleaning, f.controller.status());
+    try std.testing.expect(f.state().opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 1), f.state().persistence.live_save_images);
+    try std.testing.expectError(error.SaveBusy, f.controller.deinit(std.testing.io));
+    try std.testing.expectError(error.SaveBusy, f.controller.abort(std.testing.io));
+    try std.testing.expectError(error.SaveBusy, f.controller.commit(std.testing.io));
+    const receipt = try awaitCleanup(&f.controller);
+    try std.testing.expectEqual(Decision.committed, receipt.decision);
+    try std.testing.expect(receipt.acknowledgment_error == null);
+    try std.testing.expect(!f.state().opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows save controller native rollback cleanup never acknowledges dirty contents" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    defer drainCleanup(&f.controller);
+    try prepareCleanupFixture(&f, false);
+    try f.controller.cleanupAsync();
+    const receipt = try awaitCleanup(&f.controller);
+    try std.testing.expectEqual(Decision.aborted, receipt.decision);
+    try std.testing.expect(f.state().opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.acknowledged);
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows save controller cleanup acknowledges committed image despite later permission and body edits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    defer drainCleanup(&f.controller);
+    try prepareCleanupFixture(&f, true);
+    try f.edit("Y");
+    f.state().opened.?.file.read_only = true;
+    try f.controller.cleanupAsync();
+    const receipt = try awaitCleanup(&f.controller);
+    try std.testing.expectEqual(Decision.committed, receipt.decision);
+    try std.testing.expect(receipt.acknowledgment_error == null);
+    try std.testing.expect(f.state().opened.?.isDirty());
+    try std.testing.expectEqual(receipt.sequence, f.state().persistence.acknowledged);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows save controller cleanup keeps native commit separate from stale disk acknowledgment" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    defer drainCleanup(&f.controller);
+    try prepareCleanupFixture(&f, true);
+    const saved = f.state().opened.?.saved_hash;
+    f.state().opened.?.disk_hash = editor.document_state.contentHash("new-observation");
+    try f.controller.cleanupAsync();
+    const receipt = try awaitCleanup(&f.controller);
+    try std.testing.expectEqual(Decision.committed, receipt.decision);
+    try std.testing.expect(receipt.acknowledgment_error != null);
+    try std.testing.expectEqual(saved, f.state().opened.?.saved_hash);
+    try std.testing.expectEqual(@as(u64, 0), f.state().persistence.live_save_images);
+    try std.testing.expectEqual(Status.idle, f.controller.status());
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows save controller cleanup admission failure preserves terminal ownership for retry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    defer drainCleanup(&f.controller);
+    try prepareCleanupFixture(&f, true);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, f.controller.startCleanup(failing.allocator()));
+    try std.testing.expect(f.controller.cleaning == null);
+    try std.testing.expect(f.controller.pending.?.native_image != null);
+    try std.testing.expectEqual(transaction.Outcome.committed, try f.controller.pending.?.attempt.transaction.queryOutcome());
+    try std.testing.expectEqual(@as(u64, 1), f.state().persistence.live_save_images);
+    try f.controller.cleanupAsync();
+    try std.testing.expectEqual(Decision.committed, (try awaitCleanup(&f.controller)).decision);
 }
 
 test "Windows save controller pending ownership survives moving the controller" {

@@ -264,3 +264,12 @@ host 32개의 Debug/ReleaseFast와
 다섯 compiled runtime mutation 검출이 통과했다. 실제 일반 앱에서 자동 갱신과 dirty 보존·
 저장 충돌 거절·외부 원본을 유지한 버리기 종료를 확인했다. dirty reload/keep/compare 선택,
 비동기 저장·초기 open과 물리 입력·IME는 남아 있다.
+
+§2m.167: dirty 감시 알림의 Compare/Keep/Reload/Cancel을 일반 앱에 연결했다. Compare와
+Reload는 단일 native reader의 새 읽기를 우선 예약하고 stale revision은 200ms 뒤 재시도한다.
+Keep/Cancel은 저장 기준을 바꾸지 않는다. 비교는 소유된 두 본문과 공통 diff 행 대응·번호·색을
+읽기 전용으로 표시하며 Esc로 돌아간다. Reload는 Undo 가능한 공통 edit로 적용하고 기존
+이력을 보존한다. 공통 34개·host 35개 Debug/ReleaseFast와 각 경로 다섯 runtime mutation,
+실제 앱의 비교·복귀·reload·keep 후 저장 거절·discard를 확인했다. 저장 시점의
+Compare/Overwrite/Reload와 비교 scrollbar drag·크기 변경 UX, 비동기 저장·초기 open,
+물리 입력·IME와 나머지 Windows 지원은 계속 남아 있다.

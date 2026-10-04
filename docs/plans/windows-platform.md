@@ -337,3 +337,9 @@ cleanup·conflict overwrite·초기 open I/O와 물리 입력/IME 및 나머지 
 소유권을 반환하고 released 결과도 문서 ack가 아니다. native 10개 Debug/ReleaseFast와
 다섯 compiled runtime mutation 검출이 통과했다. controller/앱 연결, commit 승인 왕복·
 실패 abort·conflict overwrite·초기 open 이관과 물리 입력/IME 및 나머지 Windows 범위는 계속 진행한다.
+
+§2m.177: 공통 승인 값이 현재 Request의 권한/source/checksum을 재검증하고 final address,
+nonzero host scope와 전체 image binding에 한 번만 소비되도록 결속한다. borrowed bytes와
+Registry 접근·문서 ack가 없다. 요청 23개 Debug/ReleaseFast와 다섯 compiled runtime mutation
+검출이 통과했다. native binding-ready/main-thread 승인 왕복·host의 변경 제한·취소 경합·
+정리 연결은 후속이며 기존 commit 권한 검사를 바꾸거나 async commit 완료로 세지 않는다.

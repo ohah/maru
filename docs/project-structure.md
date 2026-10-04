@@ -335,6 +335,8 @@ src/
                         external_comparison은 현재 편집본과 새 디스크 이미지의 복사본·공통 diff 행 대응·표시 번호/색을 소유한다.
                         공유 문서·Undo·clean 외부 변경의 차분 적용 정책과 플랫폼 중립 경로 선택은
                         session/editor/와 user_paths에 둔다.
+                        session/editor/save_request의 CommitApproval은 bytes 없는 final-address/scope/one-use 승인 경계다.
+                        native fence·main-thread 승인 왕복과 문서 변경 제한은 Windows host가 연결한다.
     linux/
   workspace/            project workspace, layout restore, recent workspaces
   observability/        TraceEvent, RenderSnapshot, replayTrace

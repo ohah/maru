@@ -26,6 +26,27 @@ pub const Image = struct {
             self.sequence == other.sequence and self.disk_hash == other.disk_hash;
     }
 };
+
+/// A main-thread vote for one final-address native job. The host supplies a
+/// non-reused scope and keeps Request plus lifetime/path/permission ownership
+/// pinned until the native decision. This transport never queries Registry,
+/// carries no borrowed bytes, and does not authorize the generic native API.
+pub const CommitApproval = struct {
+    owner: ?*CommitApproval = null,
+    scope: u64 = 0,
+    binding: ?Image = null,
+    consumed: bool = false,
+
+    pub fn consume(self: *CommitApproval, scope: u64, image: Image) !void {
+        const owner = self.owner orelse return error.ApprovalNotIssued;
+        if (owner != self) return error.CopiedCommitApproval;
+        if (self.consumed) return error.ApprovalConsumed;
+        if (scope == 0 or scope != self.scope) return error.WrongApprovalScope;
+        const binding = self.binding orelse return error.ApprovalNotIssued;
+        if (!binding.sameRequest(image) or binding.expected_source_hash != image.expected_source_hash) return error.WrongApprovedRequest;
+        self.consumed = true;
+    }
+};
 pub const Request = struct {
     allocator: std.mem.Allocator,
     registry: *registry_mod.Registry,
@@ -67,6 +88,19 @@ pub const Request = struct {
     pub fn imageForWrite(self: *const Request) !Image {
         try self.validateForWrite();
         return self.image();
+    }
+
+    /// Issue at the final main-thread vote, after native binding is fenced.
+    /// Failure leaves destination untouched. The native adapter still validates
+    /// its own image and root/file identity before consuming this one-use vote.
+    pub fn approveCommit(self: *const Request, scope: u64, native_source_hash: u64, destination: *CommitApproval) !void {
+        if (destination.owner != null) return error.ApprovalAlreadyIssued;
+        if (scope == 0) return error.InvalidApprovalScope;
+        const exported = try self.imageForWrite();
+        try exported.validate(native_source_hash);
+        var binding = exported;
+        binding.bytes = &.{};
+        destination.* = .{ .owner = destination, .scope = scope, .binding = binding };
     }
 
     /// A request lease pins the same document even after its last view closes.
@@ -191,6 +225,122 @@ pub const Request = struct {
 };
 
 const a = std.testing.allocator;
+
+test "Editor save request commit approval rejects revoked permission without publishing a vote" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    var request = try Request.begin(a, &registry, lease, 128);
+    defer request.deinit();
+    var approval: CommitApproval = .{};
+    registry.get(lease).?.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, request.approveCommit(7, request.expectedSourceHash(), &approval));
+    try std.testing.expect(approval.owner == null and approval.binding == null);
+    registry.get(lease).?.opened.?.file.read_only = false;
+    try std.testing.expectError(error.InvalidApprovalScope, request.approveCommit(0, request.expectedSourceHash(), &approval));
+    try request.approveCommit(7, request.expectedSourceHash(), &approval);
+    try std.testing.expectEqual(@as(usize, 0), approval.binding.?.bytes.len);
+    try std.testing.expectError(error.ApprovalAlreadyIssued, request.approveCommit(8, request.expectedSourceHash(), &approval));
+    try std.testing.expectEqual(@as(u64, 1), registry.get(lease).?.persistence.live_save_images);
+    try std.testing.expectEqual(@as(u64, 0), registry.get(lease).?.persistence.acknowledged);
+}
+
+test "Editor save request commit approval is final address scoped and consumed once" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    var request = try Request.begin(a, &registry, lease, 128);
+    defer request.deinit();
+    var approval: CommitApproval = .{};
+    try std.testing.expectError(error.ApprovalNotIssued, approval.consume(11, request.image()));
+    try request.approveCommit(11, request.expectedSourceHash(), &approval);
+    var copied = approval;
+    try std.testing.expectError(error.CopiedCommitApproval, copied.consume(11, request.image()));
+    try std.testing.expectError(error.WrongApprovalScope, approval.consume(12, request.image()));
+    try std.testing.expect(!approval.consumed);
+    try approval.consume(11, request.image());
+    try std.testing.expectError(error.ApprovalConsumed, approval.consume(11, request.image()));
+}
+
+test "Editor save request commit approval binds full lifetime request and native source" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    var request = try Request.beginOverwrite(a, &registry, lease, 128, state_mod.contentHash("outside"));
+    defer request.deinit();
+    var approval: CommitApproval = .{};
+    try request.approveCommit(19, request.expectedSourceHash(), &approval);
+    const image = request.image();
+    var foreign: registry_mod.Registry = .{ .allocator = a };
+    for (0..8) |index| {
+        var other = image;
+        switch (index) {
+            0 => other.epoch ^= 1,
+            1 => other.sequence ^= 1,
+            2 => other.disk_hash ^= 1,
+            3 => other.lease.document.generation ^= 1,
+            4 => other.lease.kind = .read,
+            5 => other.lease.owner = &foreign,
+            6 => other.lease.id ^= 1,
+            7 => other.expected_source_hash ^= 1,
+            else => unreachable,
+        }
+        try std.testing.expectError(error.WrongApprovedRequest, approval.consume(19, other));
+        try std.testing.expect(!approval.consumed);
+    }
+    try approval.consume(19, image);
+}
+
+test "Editor save request commit approval validates source checksum and changed target before issuing" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    var request = try Request.begin(a, &registry, lease, 128);
+    defer request.deinit();
+    const state = registry.get(lease).?;
+    var approval: CommitApproval = .{};
+    try std.testing.expectError(error.DiskFingerprintChanged, request.approveCommit(23, request.expectedSourceHash() ^ 1, &approval));
+    const bytes = @constCast(request.bytes);
+    const original = bytes[0];
+    bytes[0] ^= 1;
+    try std.testing.expectError(error.CorruptSaveImage, request.approveCommit(23, request.expectedSourceHash(), &approval));
+    bytes[0] = original;
+    state.persistence.epoch += 1;
+    try std.testing.expectError(error.StaleDocument, request.approveCommit(23, request.expectedSourceHash(), &approval));
+    state.persistence.epoch -= 1;
+    state.persistence.uncertain_sequence = request.sequence;
+    try std.testing.expectError(error.SaveUncertain, request.approveCommit(23, request.expectedSourceHash(), &approval));
+    state.persistence.uncertain_sequence = null;
+    try std.testing.expect(approval.owner == null and approval.binding == null);
+    try request.approveCommit(23, request.expectedSourceHash(), &approval);
+}
+
+test "Editor save request commit approval transport retains no borrowed byte image" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    var request = try Request.begin(a, &registry, lease, 128);
+    var request_owned = true;
+    defer if (request_owned) request.deinit();
+    var native_image = request.image();
+    const bytes = try a.dupe(u8, native_image.bytes);
+    defer a.free(bytes);
+    native_image.bytes = bytes;
+    var approval: CommitApproval = .{};
+    try request.approveCommit(29, request.expectedSourceHash(), &approval);
+    try std.testing.expectEqual(@as(usize, 0), approval.binding.?.bytes.len);
+    request.deinit();
+    request_owned = false;
+    // Metadata consumption does not inspect the released Request/Registry.
+    // No native commit is attempted: hosts must retain their live authority.
+    try approval.consume(29, native_image);
+    try std.testing.expectEqual(@as(u64, 0), registry.get(lease).?.persistence.acknowledged);
+}
 
 test "Editor save request image transport validates bytes and native source without registry access" {
     var registry: registry_mod.Registry = .{ .allocator = a };

@@ -1529,7 +1529,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Editor save request"},
     });
     const run_save_request_tests = b.addRunArtifact(save_request_tests);
-    run_save_request_tests.addArg("--maru-expect-tests=18");
+    run_save_request_tests.addArg("--maru-expect-tests=23");
     const save_request_step = b.step("test-editor-save-request", "Verify owned save images and document completion CAS");
     save_request_step.dependOn(&run_save_request_tests.step);
     const navigation_tests = addProjectTest(b, .{

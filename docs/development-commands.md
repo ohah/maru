@@ -1161,3 +1161,8 @@ cancel/권한 실패의 worker rollback 정산, unknown backoff·명시적 cance
 KTM query 실패/unknown 소유권 유지·실제 재시도·정리 오류·binding/checksum·SMP 소유권,
 admission 실패·미소비/busy/copied owner와 Request 해제 뒤 이미지를 검사한다.
 `-Doptimize=ReleaseFast`도 실행한다. controller/앱 연결 전이며 결과는 문서 ack가 아니다.
+
+§2m.177의 `zig build test-editor-save-request`는 23개다. 최종 main-thread 승인 발급의 현재
+권한/source/checksum, final address·scope·one-use·전체 binding과 미게시 실패를 검사한다.
+`-Doptimize=ReleaseFast`도 실행한다. 승인 값은 native commit API나 앱 연결 전이며 host의
+native fence·non-reused scope·문서 수명/경로/권한 보유와 승인 왕복은 후속 작업이다.

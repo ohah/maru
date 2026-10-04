@@ -11798,3 +11798,25 @@ false abort·unknown close·allocator guard 제거·cleanup 오류 유실·check
 
 이 worker의 controller/앱 연결은 후속 작업이다. 일반 앱의 native commit·그 실패의 즉시
 abort·final cleanup·conflict overwrite·초기 open I/O와 물리 입력/IME 및 나머지 Windows 범위는 계속 남아 있다.
+
+### 2m.177 — 요청에 묶인 최종 main-thread commit 승인 값
+
+공통 `save_request.CommitApproval`은 최종 주소에 발급하는 한 번의 승인 값이다. 발급 시
+`Request.approveCommit`가 현재 문서 수명·경로·쓰기 권한·uncertainty와 native source hash/
+checksum을 검증한다. 실패는 destination을 바꾸지 않는다. 값은 bytes를 빌리지 않고
+full lease·epoch·sequence·disk hash·expected native source hash와 host scope를 보유한다.
+
+`consume`은 발급된 원래 주소·미소비 상태·동일한 nonzero scope와 전체 요청 binding을
+검사한다. 복사본·다른 native job scope·변조한 lease/epoch/sequence/hash/source와 재사용을
+거절하며 실패한 consume은 승인을 소비하지 않는다. Registry를 조회하거나 문서 ack를 하지 않는다.
+host는 scope를 재사용하지 않고 native binding fence를 먼저 확보해야 한다. 최종 발급부터
+native 결과까지 Request와 문서 수명·경로·권한을 보유/제한하는 연결도 host 책임이다.
+
+공통 요청 gate는 23개로 늘었고 Debug/ReleaseFast에서 통과했다. 새 다섯 검사는 권한 철회와
+미게시 실패, final address/scope/one-use, 전체 binding, source/checksum·epoch·uncertainty,
+빌린 bytes 없는 메타데이터를 검사한다. copied address·one-use·scope·binding·현재 권한
+검사를 제거한 다섯 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다.
+
+이 값은 아직 native commit 진입점이나 일반 앱에 연결 전이다. 기존 native commit의 live
+권한 검증과 generic byte API 우회 거절은 그대로 유지한다. native worker의 binding-ready/
+main-thread 승인 왕복과 문서 변경 제한·취소 경합·정리 연결, 나머지 Windows 범위는 계속 진행한다.

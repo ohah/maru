@@ -1781,3 +1781,8 @@ disposable LOCALAPPDATA base로 부르는 실제 창 검증은 만기 전 lazy r
 clean undo 뒤 삭제를 센다. 일반 dirty 앱 종료·재실행 UI의 종단 검증을 대신하지 않는다.
 복원 알림·accepted-close 삭제·pause 상태바·missing/untitled/remote 복원과 interrupted-stage 정리,
 GUI editable/save/dirty-close/watch·물리 IME 및 실제 UNC share 검증은 여전히 남아 있다.
+
+Windows §2m.156은 결과 미정 저장의 Undo가 기존 saved hash와 같아도 백업을 삭제하지 않는다.
+Native 결과/ack 확정이 dirty 및 disk_hash 축을 바꾸면 본문 revision 변경 없이 유지보수를 예약한다.
+실제 commit 응답 유실과 undetermined→rollback의 native 판정이 현재 본문 보존과 확정 뒤 지문
+갱신 또는 clean 삭제를 센다. 백업이 native 결과를 추측하거나 원본 쓰기 권한을 늘리지는 않는다.

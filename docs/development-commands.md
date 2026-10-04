@@ -1058,3 +1058,7 @@ Debounce/frame budget/shutdown distinct flush/실패 재시도/clean 삭제/용�
 `win32-editor-document-smoke`는 기존 100 프레임과 함께 `editor_backup_lifecycle_smoke_ok=true`를
 요구한다. 앱과 같은 helper를 disposable LOCALAPPDATA base로 실행해 lazy root/만기 전 flush/
 shared document/due write/clean deletion을 센다. 일반 사용자 백업 폴더를 fixture로 쓰지 않는다.
+
+§2m.156의 `zig build test-win32-editor-backup`는 30개다. 실제 commit 응답 유실 또는 미정 상태에서
+Undo한 본문을 보존하고, 실제 native 결과 확정 뒤 지문 갱신/clean 삭제를 검증한다.
+Controller의 기존 독립 gate `test-win32-save-controller`는 15개를 유지한다.

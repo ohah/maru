@@ -11296,3 +11296,23 @@ shutdown 전달 오류, 이른 root open)는 실제 창 실행에서 검출됐�
 실제 UNC share의 권한/이동 경쟁, 복원 알림·accepted-close 삭제·용량 pause의 상태바 표시,
 missing/untitled/remote revival·stage 중단 정리·capability·GUI Ctrl+S/dirty-close/watch와 물리 IME는
 남아 있다. 일반 사용자 파일은 아직 readonly이며 W8.17 및 전체 Windows 작업은 진행 중이다.
+
+### 2m.156 — 미정 저장 뒤 clean처럼 보이는 Undo의 백업 보존
+
+실제 native commit의 응답을 잃었거나 KTM 결과가 미정인 상태에서 Undo로 이전 saved hash에
+돌아오면 `isDirty()`만으로는 디스크와 같음을 증명할 수 없다. 기존 유지보수는 이 경우 레코드를
+삭제했다. 실제 committed-lost-reply와 undetermined 거래를 사용하는 두 판정에서 삭제를 재현했다.
+이제 `uncertain_sequence`가 있으면 clean처럼 보이는 현재 본문도 원래 disk_hash와 함께 보존한다.
+백업 I/O는 미정 sequence를 지우거나 native 결정을 추측하지 않는다.
+
+Controller는 정상 ack/abort 정산 뒤 `noteDecision`을 호출한다. 이때 본문 revision이 바뀌지 않아도
+새 saved hash/disk_hash에 맞춰 유지보수를 예약한다. 실제 commit 확정 뒤 Undo 본문은 dirty이고
+백업 지문은 확정한 commit의 지문으로 갱신한다. 실제 rollback 확정 뒤 clean이면 레코드를 삭제한다.
+Ack가 거절됐을 때는 이 완료 통지를 하지 않는다. `noteDecision`은 readonly record 정리도 예약하지만
+원본 쓰기 권한을 부여하지 않는다. 백업/작업이 없는 clean 문서는 새 root 접근을 예약하지 않는다.
+
+집중 gate는 30개(집계 2 + native 26 + 순수 정책 2)다. 미정 clean 판정, 결정 뒤 재예약, 불필요한
+clean root 예약, record identity, 실패 stage 정리를 각각 깨뜨린 5개 변형이 runtime 실패로 검출됐고
+정확한 원복 후 Debug 30개가 통과했다. 기존 native controller gate의 선택 개수 15는 그대로다.
+Prepare 이후 편집을 포함한 더 넓은 crash 시점, 일반 dirty 앱 재실행/복원·닫기·저장 UI 및 물리 IME는
+계속 검증한다. 일반 파일의 readonly 제한과 W8.17 진행 상태는 유지한다.

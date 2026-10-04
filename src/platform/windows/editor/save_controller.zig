@@ -149,6 +149,10 @@ pub const Controller = struct {
                 if (err != error.SaveNotCommitted) receipt.acknowledgment_error = err;
             };
         }
+        if (receipt.acknowledgment_error == null) {
+            const state = pending.request.registry.get(pending.request.lease).?;
+            @import("backup_store.zig").noteDecision(state, std.Io.Clock.awake.now(io).nanoseconds);
+        }
         pending.attempt.close(io) catch |err| {
             receipt.cleanup_error = err;
         };
@@ -233,6 +237,75 @@ const PendingReply = struct {
         return error.CommitUncertain;
     }
 };
+
+fn backupUndoOutcome(comptime Driver: type, decision: Decision) !void {
+    const backups = @import("backup_store.zig");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    // Resolve the real pending transaction even if an assertion fails. An
+    // undetermined KTM outcome is not safe for Fixture.deinit to discard.
+    defer if (f.controller.pending != null) {
+        _ = f.controller.abort(io) catch @panic("fixture native abort failed");
+    };
+    var store = try backups.Store.open(a, f.tmp.dir, "backups", 128);
+    defer store.deinit(io);
+    try f.edit("X");
+    const doc = backups.identity(f.state()).?;
+    try store.write(io, doc, f.state().opened.?.file.content);
+    f.state().notifications.backup_on_disk = true;
+    try f.controller.prepare(io, f.view, 128);
+    try std.testing.expectError(error.CommitUncertain, f.controller.commitWith(io, Driver));
+    const sequence = f.state().persistence.uncertain_sequence.?;
+    var nav: editor.view_navigation.View = .{};
+    defer nav.deinit(a);
+    const views = [_]editor.edit_commands.Participant{.{ .view = &nav, .id = f.view.id }};
+    _ = try editor.edit_commands.run(a, f.state(), &views, 0, .undo, .{ .now_ms = 101 });
+    try std.testing.expect(!f.state().opened.?.isDirty());
+    backups.noteEdit(f.state(), 0);
+    const states = [_]*editor.document_state.State{f.state()};
+    const uncertain = backups.maintain(&store, io, &states, 1, true);
+    try std.testing.expectEqual(@as(usize, 0), uncertain.failed);
+    try std.testing.expectEqual(@as(?u64, sequence), f.state().persistence.uncertain_sequence);
+    {
+        var record = (try store.read(io, doc)) orelse return error.MissingUncertainUndoBackup;
+        defer record.deinit();
+        try std.testing.expectEqualStrings("base\r\n", record.parsed.content);
+        try std.testing.expectEqual(doc.path.disk_hash, record.parsed.doc.path.disk_hash);
+    }
+    const receipt = if (decision == .committed) try f.controller.reconcile(io) else try f.controller.abort(io);
+    try std.testing.expectEqual(decision, receipt.decision);
+    try std.testing.expect(receipt.acknowledgment_error == null);
+    try std.testing.expect(f.state().persistence.uncertain_sequence == null);
+    try std.testing.expect(f.state().notifications.backup_dirty);
+    const settled = backups.maintain(&store, io, &states, 2, true);
+    try std.testing.expectEqual(@as(usize, 0), settled.failed);
+    if (decision == .committed) {
+        try std.testing.expect(f.state().opened.?.isDirty());
+        var record = (try store.read(io, doc)) orelse return error.MissingConfirmedUndoBackup;
+        defer record.deinit();
+        try std.testing.expectEqualStrings("base\r\n", record.parsed.content);
+        try std.testing.expectEqual(f.state().opened.?.disk_hash, record.parsed.doc.path.disk_hash);
+        try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+    } else {
+        try std.testing.expect(!f.state().opened.?.isDirty());
+        var record = try store.read(io, doc);
+        defer if (record) |*value| value.deinit();
+        try std.testing.expect(record == null);
+        try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    }
+}
+
+test "Windows editor backup preserves clean-looking undo after actual committed save loses its reply" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try backupUndoOutcome(LostReply, .committed);
+}
+
+test "Windows editor backup preserves clean-looking undo until actual undetermined save rolls back" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try backupUndoOutcome(PendingReply, .aborted);
+}
 const PartialWrite = struct {
     fn write(attempt: *grants.Attempt, io: std.Io, _: *const editor.save_request.Request) !void {
         attempt.transaction.phase = .poisoned;

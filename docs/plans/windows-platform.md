@@ -187,3 +187,8 @@ caller 연결, 복원 UI, GUI editable/save/dirty-close/감시·IME는 여전히
 연결했다. 만기 전에는 폴더를 열지 않으며 view lease 해제 전 flush한다. Native 집중 판정은 27개이고
 root 변형 5회 및 실제 창의 앱 helper 변형 5회가 runtime 결함을 검출했다. 실제 UNC share 검증,
 복원 알림·accepted-close 삭제·pause 상태바·dirty 앱 재실행·GUI 저장/감시·IME는 계속 진행한다.
+
+§2m.156: native 결과 미정 동안 Undo가 clean처럼 보여도 백업을 보존하고, 실제 결과/ack 확정 뒤
+revision 변경 없이 유지보수를 재예약한다. 실제 commit-lost-reply 및 undetermined→rollback의
+통합 판정과 clean/readonly 정책 판정을 추가해 30개 집중 gate가 통과했다. 적대적 검증 5회도
+runtime 결함을 검출했다. 더 넓은 prepare/편집/crash 시점과 일반 앱 저장·복원·닫기·IME는 남아 있다.

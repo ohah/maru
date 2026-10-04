@@ -72,6 +72,7 @@ fn probe(grant: *const grants.Grant, io: std.Io, limit: usize) !void {
 }
 
 pub const Book = struct {
+    pub const SaveReady = union(enum) { receipt: saving.Receipt, cancelled };
     allocator: std.mem.Allocator,
     registry: *editor.document_registry.Registry,
     controllers: std.ArrayList(saving.Controller) = .empty,
@@ -150,6 +151,49 @@ pub const Book = struct {
         if (!reader.accepts(result, current)) return false;
         if (result == .image and !result.image.identity.eql(self.controllers.items[try self.index(view)].grant.identity)) return false;
         return true;
+    }
+
+    pub fn beginSave(self: *Book, view: editor.document_registry.Lease, limit: usize) !bool {
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() != .idle) return error.SaveBusy;
+        const state = self.registry.get(view).?;
+        if (!state.opened.?.isDirty()) return false;
+        try controller.prepareAsync(view, limit);
+        return true;
+    }
+
+    pub fn saveStatus(self: *Book, view: editor.document_registry.Lease) !saving.Status {
+        return self.controllers.items[try self.index(view)].status();
+    }
+
+    pub fn cancelSave(self: *Book, io: std.Io, view: editor.document_registry.Lease) !void {
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() == .preparing) {
+            try controller.cancelPreparation();
+        } else if (controller.status() != .idle) {
+            _ = try controller.abort(io);
+        }
+    }
+
+    /// Preparation is polled after input dispatch so queued Esc wins before
+    /// the final commit vote. Native commit/abort still run on the main thread.
+    pub fn pollSave(self: *Book, io: std.Io, view: editor.document_registry.Lease) !?SaveReady {
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() == .preparing) {
+            const ready = (try controller.pollPreparation(io)) orelse return null;
+            if (ready == .cancelled) return .cancelled;
+        }
+        if (controller.status() == .prepared) {
+            if (controller.pending.?.preparation_error) |failure| {
+                _ = try controller.abort(io);
+                if (failure == error.SaveCancelled) return .cancelled;
+                return failure;
+            }
+            return .{ .receipt = try controller.commit(io) };
+        }
+        if (controller.status() == .uncertain) return .{ .receipt = try controller.reconcile(io) };
+        if (controller.last_receipt) |receipt| return .{ .receipt = receipt };
+        return error.NoPendingSave;
     }
 
     pub fn save(self: *Book, io: std.Io, view: editor.document_registry.Lease, limit: usize) !?saving.Receipt {
@@ -304,6 +348,15 @@ const Fixture = struct {
         return view;
     }
     fn deinit(self: *Fixture) void {
+        for (self.book.controllers.items) |*controller| if (controller.preparing != null) {
+            controller.cancelPreparation() catch unreachable;
+            const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+            while (controller.preparing != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native preparation timeout");
+                _ = controller.pollPreparation(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+        };
         for (self.book.controllers.items) |*controller| if (controller.pending != null) {
             _ = controller.abort(std.testing.io) catch @panic("unresolved fixture transaction");
         };
@@ -316,6 +369,94 @@ const Fixture = struct {
         std.testing.allocator.destroy(self);
     }
 };
+
+fn awaitSave(book: *Book, view: editor.document_registry.Lease) !Book.SaveReady {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline) {
+        if (try book.pollSave(std.testing.io, view)) |ready| return ready;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.SaveDidNotComplete;
+}
+
+test "Windows editor host async clean save issues no native request" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try std.testing.expect(!try f.book.beginSave(view, 128));
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.issued);
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+}
+
+test "Windows editor host async save preserves captured bytes and later dirty edits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    try std.testing.expectError(error.SaveBusy, f.book.requireClose(view, true));
+    try std.testing.expectError(error.SaveBusy, f.book.beginSave(view, 128));
+    try change(&f.registry, view, "Y");
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfXbase\r\n", bytes);
+}
+
+test "Windows editor host async queued cancellation wins before the commit vote" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    _ = try f.book.beginSave(view, 128);
+    try f.book.cancelSave(std.testing.io, view);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .cancelled);
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.acknowledged);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host async source conflict retains edits and the old save baseline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    const baseline = f.registry.get(view).?.opened.?.disk_hash;
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    _ = try f.book.beginSave(view, 128);
+    try std.testing.expectError(error.SourceChanged, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+    try std.testing.expectEqual(baseline, f.registry.get(view).?.opened.?.disk_hash);
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+}
+
+test "Windows editor host async publication stays bound across book growth and foreign view polling" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    _ = try f.book.beginSave(view, 128);
+    const other = try f.open(1);
+    try std.testing.expectError(error.NoPendingSave, f.book.pollSave(std.testing.io, other));
+    var stale = view;
+    stale.document.generation ^= 1;
+    try std.testing.expectError(error.StaleDocument, f.book.pollSave(std.testing.io, stale));
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt and ready.receipt.decision == .committed);
+    try std.testing.expect(!f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqualStrings("other", f.registry.get(other).?.opened.?.file.content);
+}
 
 fn awaitRead(reader: *reading.Reader) !reading.Result {
     const io = std.testing.io;

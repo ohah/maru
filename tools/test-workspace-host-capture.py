@@ -43,8 +43,10 @@ for pair in [("한글\n\"\\", "한자\n"), ("", "x")] {
 h.smokeMode=true;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"smoke cannot save");h.smokeMode=false
 h.workspaceRestoreEnabled=false;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"restore disabled cannot save");h.workspaceRestoreEnabled=true
 h.windows=[];require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"empty inventory cannot save")
+h.openWithoutWindows=true;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==Data((MARU_WORKSPACE_HEADER+"\n").utf8),"app kept open with zero windows saves header only")
+h.workspaceRestoreEnabled=false;require(h.captureWorkspaceSnapshot(useTerminationKeyWindow:false,publishedOnly:true)==nil,"restore disabled still cannot save zero windows");h.workspaceRestoreEnabled=true;h.openWithoutWindows=false
 '''
-post += '\nprecondition(judged == 20);print("capture assertions=20")\n'
+post += '\nprecondition(judged == 22);print("capture assertions=22")\n'
 work = Path(tempfile.mkdtemp(prefix='maru-host-capture-test-'))
 main = work / 'main.swift'
 main.write_text(pre + method + post)

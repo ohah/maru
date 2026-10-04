@@ -281,7 +281,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 192;
+// 193: quit_after_last_window_closed getter(config `window.quit-after-last-window-closed`) — Swift 의 마지막 창 닫기·
+// 셸 종료 경로가 앱을 끝낼지 Dock 에 남을지 이 값으로 가른다. 끝에 export 추가 — 구조체 offset 불변.
+pub const abi_version: u32 = 193;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -3648,6 +3650,20 @@ const app_incident_testing = if (builtin.is_test) struct {
 // (§6 app-wide Quit=detach). 윈도우/탭 **명시 close**(destroyTerm/close)는 이 플래그와 무관하게 terminate(destructive)한다.
 // 프로세스 전역 이벤트라 module-var(모든 창의 deinit이 본다). 실 앱은 곧 프로세스 종료라 리셋 불요(테스트만 명시 리셋).
 var app_quitting: bool = false;
+// `window.quit-after-last-window-closed` 도 앱 전체 정책이다(마지막 창을 닫을 때 「앱」이 끝나는가). 창마다의
+// `loaded_config` 는 미러라, 창 A 의 설정에서 끄고 A 를 닫은 뒤 마지막 창 B 를 닫으면 B 의 낡은 `true` 로 앱이 끝났다
+// (적대적 검증). 세팅 토글·reload·전체 리셋이 여기를 세우고, 모든 창이 이 값을 먼저 본다. null = 아직 아무도 안 바꿨다 —
+// 각 창은 같은 파일에서 읽은 자기 config 를 본다.
+var app_quit_after_last_window_closed: ?bool = null;
+
+pub fn appQuitAfterLastWindowClosedOverride() ?bool {
+    return app_quit_after_last_window_closed;
+}
+
+pub fn setAppQuitAfterLastWindowClosed(value: ?bool) void {
+    app_quit_after_last_window_closed = value;
+}
+
 // 설정 GUI는 창별 AppSession에 있지만 이 값은 앱 전체 정책이다. 한 창에서 true→false로 바꾼 뒤 다른 창이 stale
 // config를 들고 있어도 새 Term backend와 Quit teardown이 갈리지 않도록 process-global SSOT로 유지한다.
 // 기존 same-module/submodule fixture가 직접 조작하는 test compatibility mirror. 제품 reader는 반드시
@@ -10037,7 +10053,9 @@ pub const AppSession = struct {
         // 탭·pane이 함께 소멸) Cmd+Q와 **동일하게** 실행 중 명령 유무와 무관하게 "maru를 종료할까요?" 종료 확인을 띄운다
         // (사용자 결정 2026-07). `is_last_window`는 host가 주입한다(리프는 형제 창을 모름) — false면(멀티 창의 비-마지막
         // 창·quick) 아래 일반 닫기 경로로 그 창만 닫는다. 단일 출처: docs/macos-app-host-boundary.md "닫기 확인".
-        if (scope == .session and self.is_last_window) {
+        // `window.quit-after-last-window-closed = false` 면 마지막 창도 앱 종료가 아니다(앱이 Dock 에 남는다) — 비-마지막
+        // 창과 같은 일반 닫기 경로로 내려간다(사용자 결정 2026-10-04).
+        if (scope == .session and self.is_last_window and self.quitsAfterLastWindowClosed()) {
             self.requestAppQuit();
             return;
         }
@@ -14072,6 +14090,12 @@ pub const AppSession = struct {
     /// 입력기 조합 경로로 보낼지(false=조합, true=meta 인코딩) 가른다. config reload로 갱신되는 라이브 값.
     pub fn optionAsMeta(self: *const AppSession) bool {
         return self.option_as_meta;
+    }
+
+    /// 마지막 일반 창을 닫으면 앱도 끝내는가(config `window.quit-after-last-window-closed`, 기본 true). 정책의 단일
+    /// 출처 — 인앱 닫기(`requestClose`)와 host 의 창 닫기·셸 종료 경로(ABI getter)가 같은 값을 본다.
+    pub fn quitsAfterLastWindowClosed(self: *const AppSession) bool {
+        return app_quit_after_last_window_closed orelse self.loaded_config.config.window_quit_after_last_window_closed;
     }
 
     /// 단축키 힌트 config를 ABI용 값으로(Swift 홀드 감지가 읽어 enabled/지연/트리거 모디파이어 결정). modifier:
@@ -24265,6 +24289,9 @@ pub const AppSession = struct {
             if (builtin.is_test and live_app_sessions == 0) {
                 app_keep_alive_after_quit = false;
                 app_keep_alive_bootstrap_owner = .{};
+                // 「마지막 창 닫으면 종료」 앱 전역 값도 되돌린다 — reload·리셋을 부른 앞 test 의 값이 뒤 test 의
+                // 창 config 를 가렸다(실측: 앱 유지 test 가 종료 확인을 받았다).
+                app_quit_after_last_window_closed = null;
                 // **앱 종료 래치도 함께 되돌린다.** 이 셋은 process-global 이고 test 사이에 자동으로 안
                 // 꺼진다. 종료를 흉내 내는 test 가 `app_quit_keep_alive = appKeepAlivePolicyValue()` 로
                 // 값을 잡아 두면 **뒤 test 까지 새어**, 그쪽 `deinit` 이 앱 종료 시퀀스를 타고 자기가 손으로
@@ -60775,6 +60802,127 @@ test "close-confirm: 비-마지막 창(is_last_window=false)에서 세션 닫기
     try std.testing.expect(session.pending_confirm != .quit);
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.ended_seen); // 이 창(세션) 종료 latch — Swift가 이 창만 닫음
+}
+
+// `window.quit-after-last-window-closed = false`(앱이 Dock 에 남는다)면 마지막 창도 앱 종료가 아니다 — 종료 확인 대신
+// 비-마지막 창과 **같은** 일반 닫기다: 실행 중 명령이 없으면 조용히 세션 종료 latch, 있으면 닫기 확인(사용자 결정 2026-10-04).
+test "close-confirm: 앱 유지 설정이면 마지막 창 닫기도 종료 확인 없이 그 창만 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null); // 앞 test 가 남긴 앱 전역 값에 가리지 않게
+    defer setAppQuitAfterLastWindowClosed(null);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    markAllTermsAtPrompt(session);
+    term_ops.closeActiveTerm(session); // 2→1 Term — requestClose(.term_or_pane)가 .session 으로 해석된다
+    session.is_last_window = true;
+    session.loaded_config.config.window_quit_after_last_window_closed = false;
+    try std.testing.expect(!session.quitsAfterLastWindowClosed());
+
+    session.requestClose(.term_or_pane);
+    try std.testing.expect(session.pending_confirm != .quit); // 앱 종료 확인이 아니다
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(session.ended_seen); // 이 창(세션) 종료 latch — Swift 가 이 창만 닫고 앱은 남는다
+}
+
+test "close-confirm: 앱 유지 설정이면 마지막 창이라도 실행 중 명령은 닫기 확인으로 묻는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null); // 앞 test 가 남긴 앱 전역 값에 가리지 않게
+    defer setAppQuitAfterLastWindowClosed(null);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    markAllTermsAtPrompt(session);
+    term_ops.closeActiveTerm(session);
+    pane_ops.activePane(session).activeTerm().surface.core.semantic_state = .command; // 실행 중
+    session.is_last_window = true;
+    session.loaded_config.config.window_quit_after_last_window_closed = false;
+
+    session.requestClose(.term_or_pane);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_confirm == .close); // 종료(.quit)가 아니라 창 닫기 확인
+    try std.testing.expect(!session.ended_seen); // 확정 전엔 안 닫는다
+
+    // 대조군: 기본값(종료)이면 같은 자리에서 앱 종료 확인이다.
+    session.dispatchChromeAction(.confirm_cancel);
+    session.loaded_config.config.window_quit_after_last_window_closed = true;
+    session.requestClose(.term_or_pane);
+    try std.testing.expect(session.pending_confirm == .quit);
+}
+
+// 창마다의 config 는 미러다 — 창 A 에서 끈 「앱 유지」를 다른 창 B 의 마지막 닫기도 따라야 한다(적대적 검증 D).
+test "close-confirm: 앱 유지 설정은 앱 전역이다 — 다른 창에서 바꾼 값을 마지막 창이 따른다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    const a = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(a);
+    defer a.deinit();
+    const b = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(b);
+    defer b.deinit();
+    try std.testing.expect(b.quitsAfterLastWindowClosed()); // 대조군: 기본은 종료
+
+    // 창 A 의 세팅 토글이 세우는 자리(settings.zig)와 같은 setter — B 의 config 미러는 아직 낡은 true 다.
+    setAppQuitAfterLastWindowClosed(false);
+    try std.testing.expect(b.loaded_config.config.window_quit_after_last_window_closed);
+    try std.testing.expect(!b.quitsAfterLastWindowClosed());
+
+    // B 의 마지막 창 닫기도 앱 종료 확인이 아니라 일반 닫기다.
+    markAllTermsAtPrompt(b);
+    term_ops.closeActiveTerm(b);
+    b.is_last_window = true;
+    b.requestClose(.term_or_pane);
+    try std.testing.expect(b.pending_confirm != .quit);
+    try std.testing.expect(b.ended_seen);
+
+    // B 의 세팅 화면은 전역 값을 미러로 다시 맞춘다 — 토글하면 낡은 값에서 뒤집지 않는다.
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    _ = try settings_ops.currentSectionFields(a, scratch.allocator());
+    try std.testing.expect(!a.loaded_config.config.window_quit_after_last_window_closed);
+}
+
+// 세팅 화면의 토글과 행 ↺ 가 **앱 전역 값**을 함께 세운다 — 미러(`currentSectionFields`)가 매 프레임 전역으로 행을
+// 되맞추므로, ↺ 가 창 config 만 바꾸면 행이 다음 프레임에 옛 값으로 돌아가고 이번 실행도 옛 값으로 돈다(적대적 검증 B1).
+test "close-confirm: 앱 유지 설정은 세팅 토글과 행 되돌리기가 앱 전역까지 바꾼다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
+    for (sections, 0..) |entry, si| if (entry.section == .window) {
+        session.chrome_host.settings.section = si;
+    };
+    settings_ops.refreshSettingsFieldCount(session);
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
+    var row: ?usize = null;
+    for (cf.bools, 0..) |b, i| if (std.mem.eql(u8, b.key, "window.quit-after-last-window-closed")) {
+        row = i;
+    };
+    session.chrome_host.settings.selected = row orelse return error.MissingSettingsRow;
+
+    settings_ops.toggleSelectedSetting(session); // 끈다(앱 유지)
+    try std.testing.expectEqual(@as(?bool, false), appQuitAfterLastWindowClosedOverride());
+    try std.testing.expect(!session.quitsAfterLastWindowClosed());
+
+    settings_ops.resetSelectedSettingRow(session); // ↺ — 기본값(종료)
+    try std.testing.expectEqual(@as(?bool, true), appQuitAfterLastWindowClosedOverride());
+    _ = try settings_ops.currentSectionFields(session, scratch.allocator()); // 다음 프레임의 미러
+    try std.testing.expect(session.loaded_config.config.window_quit_after_last_window_closed);
+    try std.testing.expect(session.quitsAfterLastWindowClosed());
+    settings_ops.clearConfigDirty(session);
 }
 
 test "close-confirm: 풀스크린 TUI(alt 화면)면 셸 통합 없이도 확인 모달을 띄운다" {

@@ -1180,11 +1180,28 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
             for (pane.terms.items, 0..) |term, index| {
                 if (term.surfaceId() != surface_id) continue;
                 if (tab_ops.tabDragTransaction(self, pane) != null) return web_osr.markPageClosed(surface_id);
+                // 그 탭에서 입력기가 조합 중이었다 — 버린다(사용자가 닫을 때는 Swift 가 먼저 확정하지만 이 길에는 없다. 안 버리면 남은 조합이
+                // 다음 키 대상에 들어갔다 — W6f② 적대 검증 3 차).
+                if (self.osr_key_target == surface_id and web_osr.composing(surface_id)) self.osr_discard_marked = true;
                 // 그 pane 의 유일한 탭이면 닫지 않는다 — 빈 pane·워크스페이스 닫기·창 닫기로 번진다(마지막 창이면 앱 종료, W6f② 적대
                 // 검증: 해제된 surface 에 써서 죽었다). 페이지의 `window.close` 가 사용자 확인 없이 창을 닫게 두지 않는다. 탭은 빈 보통 탭으로
                 // 남는다(사용자가 닫는다).
-                if (pane.terms.items.len == 1) return web_osr.revivePageClosed(self.allocator, surface_id);
+                if (pane.terms.items.len == 1) {
+                    web_osr.revivePageClosed(self.allocator, surface_id);
+                    setWebNavState(self, surface_id, false, false, ""); // 팝업의 주소·뒤로 상태를 지운다(새 빈 탭)
+                    return;
+                }
+                // 활성 탭이 닫히면 연 탭으로 돌아간다(Chrome 처럼 — 그대로면 오른쪽 이웃으로 갔다, W6f② 적대 검증 3 차). 연 탭이 같은 pane 에
+                // 남아 있을 때만.
+                const opener = web_osr.popupOpener(surface_id);
+                const was_active = pane.active_term == index;
                 term_ops.closeTermAt(self, tab_index, pane, index);
+                if (was_active and opener != 0 and pane.terms.items.len > 0) {
+                    for (pane.terms.items, 0..) |t, i| if (t.surfaceId() == opener) {
+                        if (pane == pane_ops.activePane(self) and tab_index == self.app_window.active_tab) self.focusTerm(i) else pane.active_term = i;
+                        break;
+                    };
+                }
                 self.workspaceChanged(.topology);
                 self.metal_dirty = true;
                 if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab page-closed\n", .{});

@@ -623,7 +623,7 @@ chrome은 프롬프트 밑에 온다”는 박스형 배치를 전제한다. cod
 
 > **아직 구현되지 않았다.** 아래 세 키는 §[화면 region·알림 구현 분해](#화면-region알림-구현-분해)의 **4단계(알림 PR)**
 > 에서 배선할 **계획**이다. 지금 config 파일에 적으면 loader가 `알 수 없는 key — 무시` 진단을 내고 값은 반영되지 않는다
-> (앱 로그에 `config line N: 알 수 없는 key — 무시`로 보인다). 특히 `notifications.agent-complete`는 **예전에 존재했다가
+> (앱 로그에 ``config line N `notifications.agent-complete`: 알 수 없는 key — 무시``로 보인다). 특히 `notifications.agent-complete`는 **예전에 존재했다가
 > 제거된 이름**이라(`refactor(session): provider 세션 연속성 잔여를 제거합니다`) 로더가 "제거된 호환 설정"으로 함께
 > 취급한다 — 4단계에서 다시 도입할 때 그 제거 목록에서 빼야 한다.
 

@@ -5916,6 +5916,8 @@ pub const AppSession = struct {
     // 시작 시 로드한 raw config(~/.config/maru/config). arena가 font.family 문자열을 소유하고,
     // resolve된 appearance.font.family가 그 슬라이스를 빌리므로 세션 동안 살아 있어야 한다.
     loaded_config: config_mod.ParsedConfig = undefined,
+    /// `settings_ops.logConfigDiagnostics` 가 앱 로그에 찍은 config 진단 줄 수(시작 + Reload Config 누적). 판정자 관측용.
+    config_diagnostics_logged: usize = 0,
     // loaded_config가 실제로 초기화됐는지. init 초반(live/surface 생성)이 실패하면 deinit이 아직
     // undefined인 arena를 free하지 않도록, 다른 자원과 같은 *_initialized 가드 패턴을 쓴다.
     config_loaded: bool = false,
@@ -8176,10 +8178,8 @@ pub const AppSession = struct {
         self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
             try config_mod.resolveAppearance(.{});
         self.base_font_size = self.appearance.font.size; // ⌘0 리셋 기준(런타임에 appearance.font.size는 바뀜)
-        // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
-        for (self.loaded_config.diagnostics) |d| {
-            std.log.scoped(.config).warn("config line {d}: {s}", .{ d.line, d.message });
-        }
+        // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게. reload 와 같은 자리.
+        settings_ops.logConfigDiagnostics(self, .startup);
         // 저장된 사이드바 폭(sidebar.width, pt)을 런타임 폭으로 seed한다 — 아래 refreshCellMetrics가 동적 하한으로
         // clamp하고 backing px로 환산한다(단일 출처). config 키가 없으면 기본 180이라 struct 기본값과 같아 현 동작 그대로다.
         self.sidebar_width_pt = self.loaded_config.config.sidebar.width_pt;

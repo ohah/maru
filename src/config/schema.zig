@@ -20,7 +20,11 @@ pub const KeyValue = struct { key: []const u8, value: []const u8 };
 
 /// 비치명 진단(무시된 줄 번호 + 이유). loader가 `Diagnostic`으로 재출력한다(공유 타입 단일 출처 — loader→schema
 /// 단방향이라 여기 둔다). message는 arena 또는 정적 리터럴 소유.
-pub const Diag = struct { line: usize, message: []const u8 };
+///
+/// `key` 는 그 줄의 키(OS 접미 포함, arena 소유)다 — 진단을 만든 자리가 아니라 **파서 루프가 줄 단위로** 찍는다.
+/// 메시지에 키를 섞지 않는 이유: `tests/config_docs/keys.zig` 가 메시지 문자열로 키 실재를 판정한다. 비어 있으면
+/// 키가 없는 줄(`=` 누락)이다. 앱 로그가 「몇째 줄」만으로는 사용자가 줄을 세야 해서 생겼다.
+pub const Diag = struct { line: usize, message: []const u8, key: []const u8 = "" };
 
 // ── 메타 1급 필드를 파싱 ──────────────────────────────────────────────────────────────────────────
 

@@ -2125,6 +2125,42 @@ pub fn applyAppearancePreservingZoom(self: *AppSession, new_appearance: config_m
     self.base_font_size = config_size; // applyAppearance가 줌 포함 크기로 세운 ⌘0 기준을 줌 제외 config 값으로 교정
 }
 
+/// config 진단 한 줄의 앱 로그 문구. 키가 있으면 함께 적는다 — 「몇째 줄」만으로는 사용자가 파일을 열어 줄을
+/// 세야 하고, 알 수 없는 키는 메시지만으로 무엇이 틀렸는지 안 보인다. 순수 함수라 판정자가 문구를 직접 잰다.
+pub fn formatConfigDiagnostic(buf: []u8, d: config_mod.ConfigDiagnostic) []const u8 {
+    return (if (d.key.len > 0)
+        std.fmt.bufPrint(buf, "config line {d} `{s}`: {s}", .{ d.line, d.key, d.message })
+    else
+        std.fmt.bufPrint(buf, "config line {d}: {s}", .{ d.line, d.message })) catch d.message;
+}
+
+/// 설정 파일이 **있는데 못 읽었으면** 그 사유. 로더는 이때도 에러 없이 기본 Config 를 돌려주므로(forgiving)
+/// 모든 설정이 조용히 기본값이 된다. 파일이 없는 것은 정상(사유 없음).
+fn configFileReadIssue(provenance: config_mod.loader.FileProvenance) ?[]const u8 {
+    return switch (provenance) {
+        .missing, .readable => null,
+        .unreadable => "unreadable",
+        .oversize => "oversize",
+    };
+}
+
+/// 앱 로그(GUI 실행이면 `app.log`)에 config 진단을 남긴다. **시작(`init`)과 Reload Config 가 같은 자리를 탄다** —
+/// 2026-10-04 전에는 init 만 찍어, 실행 중 고친 오타·못 읽게 된 파일이 reload 뒤 어디에도 안 남았다(실험 확인).
+/// 지금 `loaded_config` 를 읽는다 — 호출자는 교체를 끝낸 뒤 부른다. 찍은 진단 줄 수를 `config_diagnostics_logged`
+/// 에 더해 판정자가 「이 경로가 실제로 찍었다」를 잰다(로그 자체는 테스트가 가로챌 수 없다).
+pub fn logConfigDiagnostics(self: *AppSession, comptime origin: enum { startup, reload }) void {
+    const log = std.log.scoped(.config);
+    const parsed = &self.loaded_config;
+    if (configFileReadIssue(parsed.file_provenance)) |issue| {
+        log.warn("config file {s} ({s}) — using defaults", .{ issue, @tagName(origin) });
+    }
+    var buf: [512]u8 = undefined;
+    for (parsed.diagnostics) |d| log.warn("{s}", .{formatConfigDiagnostic(&buf, d)});
+    self.config_diagnostics_logged += parsed.diagnostics.len;
+    // reload 는 사용자가 누른 일이라 결과를 한 줄 남긴다 — 진단이 0 이어도 「반영됐다」가 보여야 한다.
+    if (origin == .reload) log.info("config reloaded: diagnostics={d}", .{parsed.diagnostics.len});
+}
+
 /// "Reload Config" 메뉴 — config 파일을 재로드해 재시작 없이 반영한다. 파싱은 forgiving(알 수 없는 key/잘못된
 /// 값은 기본값 유지 + diagnostic), 로드 자체가 실패(OOM 등)하면 무동작이다(기존 config 유지). 적용 순서:
 /// ① 새 Parsed로 loaded_config 교체(옛 arena deinit 후 — appearance가 family 슬라이스를 빌리므로 새 appearance를
@@ -2158,6 +2194,7 @@ pub fn reloadConfig(self: *AppSession) void {
     // 통째로 바꾼 뒤에 버려야 UAF가 없으므로 deinit만 마지막에 남긴다.
     var old_loaded = self.loaded_config;
     self.loaded_config = new_parsed;
+    logConfigDiagnostics(self, .reload);
     applyAppearancePreservingZoom(self, new_appearance);
     old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
     replaceAppKeepAlivePolicyFromReload(self.loaded_config);
@@ -3681,6 +3718,66 @@ test "앵커를 못 잡아도 행 수는 다시 알린다" {
 // 순서에 늘어놓고 그 셋이 서로 맞는지만 봤다. 그러면 정작 **프로덕션 배선**(그 세 줄이 `reloadConfig` 안
 // 어디에 놓였는가)은 무엇을 해도 초록이다 — 적대적 검증이 capture 를 맨 뒤로 옮기고 두 줄을 통째로 지워도
 // 통과하는 것을 보였다. 순서가 이 배선의 전부인데 그 순서를 안 재고 있었다.
+test "config 진단 문구는 줄과 키를 함께 적고, 키 없는 줄은 줄만 적는다" {
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "config line 2 `font.sizee`: 알 수 없는 key — 무시",
+        formatConfigDiagnostic(&buf, .{ .line = 2, .message = "알 수 없는 key — 무시", .key = "font.sizee" }),
+    );
+    try std.testing.expectEqualStrings(
+        "config line 4: '=' 없음",
+        formatConfigDiagnostic(&buf, .{ .line = 4, .message = "'=' 없음" }),
+    );
+}
+
+// Reload Config 는 2026-10-04 전까지 진단을 하나도 안 찍었다 — 실제 앱(격리 HOME)에서 시작 진단은 app.log 에
+// 남는 것을 확인했고, 빈 곳은 reload 뿐이었다. 로그는 테스트가 가로챌 수 없으므로 찍은 줄 수로 잰다.
+test "Reload Config 는 시작과 같이 config 진단을 앱 로그에 찍는다 (실행 중 고친 오타가 사라지지 않는다)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const cfg_path = try std.fmt.allocPrintSentinel(allocator, "{s}/config", .{root}, 0);
+    defer allocator.free(cfg_path);
+
+    const prev = std.c.getenv("MARU_CONFIG");
+    defer if (prev) |v| {
+        _ = app_session_mod.setenv("MARU_CONFIG", v, 1);
+    } else {
+        _ = app_session_mod.unsetenv("MARU_CONFIG");
+    };
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "font.size = 14\n" });
+    try std.testing.expectEqual(@as(c_int, 0), app_session_mod.setenv("MARU_CONFIG", cfg_path.ptr, 1));
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const at_start = session.config_diagnostics_logged; // 테스트 init 은 고정 config 라 파일과 무관하다
+
+    // 실행 중 파일에 오타 둘이 생긴다 → reload 가 둘 다 찍는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "font.sizee = 14\nworkspace.restore = maybe\n" });
+    reloadConfig(session);
+    try std.testing.expectEqual(@as(usize, 2), session.loaded_config.diagnostics.len);
+    try std.testing.expectEqualStrings("font.sizee", session.loaded_config.diagnostics[0].key);
+    try std.testing.expectEqual(at_start + 2, session.config_diagnostics_logged);
+
+    // 고치고 다시 읽으면 더 찍지 않는다 — 옛 진단을 되풀이하지 않는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "font.size = 14\n" });
+    reloadConfig(session);
+    try std.testing.expectEqual(at_start + 2, session.config_diagnostics_logged);
+}
+
 test "파일이 행을 더해도 선택은 같은 설정에 남는다 (reload 축)" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

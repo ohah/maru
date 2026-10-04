@@ -53,7 +53,9 @@ fn snap(file: *const edit_doc.EditableFile, offset: usize) usize {
     return line.start + grapheme.snapToBoundary(file.content[line.start..line.contentEnd()], @min(at, line.contentEnd()) - line.start);
 }
 
-fn destination(file: *const edit_doc.EditableFile, at: usize, command: Command) usize {
+/// Logical movement for a snapped caret. select_all is a view operation and
+/// must be handled by move; editing reuses left/right for grapheme deletion.
+pub fn destination(file: *const edit_doc.EditableFile, at: usize, command: Command) usize {
     const index = file.lines.lineAt(at);
     const line = file.lines.lines[index];
     const bytes = file.content[line.start..line.contentEnd()];

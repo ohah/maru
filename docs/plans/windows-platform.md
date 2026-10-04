@@ -364,3 +364,8 @@ commit/settlement/cleanup worker 흐름에 연결했다. fresh read의 raw hash�
 분리하며 Reader/Completion 해제 뒤에도 저장 이미지를 유지한다. 닫기 intent는 committed
 receipt까지 보유한다. host 66개 Debug/ReleaseFast와 다섯 compiled runtime 변형 검출이
 통과했다. 실앱의 충돌 선택/overwrite·전체 gate, 초기 open 이관과 전체 잔여 범위는 계속 진행한다.
+
+§2m.181: 초기 native 읽기를 Registry를 참조하지 않는 native_open.Snapshot으로 분리했다.
+Grant.publishOpen은 등록 실패 때 Snapshot 소유권을 유지하고 등록 성공 뒤만 소비한다.
+권한 19개 Debug/ReleaseFast와 다섯 compiled runtime 변형 검출이 통과했다. 실제 초기 열기
+worker 연결과 capability probe·UTF-8 이관 및 전체 잔여 Windows 범위는 계속 진행한다.

@@ -1598,6 +1598,11 @@ pub fn build(b: *std.Build) void {
     const run_editor_read_tests = b.addRunArtifact(editor_read_tests);
     run_editor_read_tests.addArg("--maru-expect-tests=11"); // 2 aggregation blocks + 8 native tests + 1 pure policy
     editor_read_step.dependOn(&run_editor_read_tests.step);
+    const save_prepare_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows save preparation worker"} });
+    const save_prepare_step = b.step("test-win32-save-prepare", "Verify worker-owned native save preparation and final document validation");
+    const run_save_prepare_tests = b.addRunArtifact(save_prepare_tests);
+    run_save_prepare_tests.addArg("--maru-expect-tests=9"); // 2 aggregation blocks + 7 native tests
+    save_prepare_step.dependOn(&run_save_prepare_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {
         const save_crash_probe = b.addExecutable(.{

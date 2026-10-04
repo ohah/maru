@@ -165,6 +165,13 @@ pub const Transaction = struct {
     /// exactly one owned L2 image and binds any later ack to that request lease.
     pub fn writeDocument(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request) !void {
         const image = try request.imageForWrite();
+        try self.prepareImage(io, image);
+    }
+
+    /// Native-only preparation. The host validates live authority on the main
+    /// thread before export and again before commit. This cannot commit through
+    /// the generic byte API, and never dereferences the image's opaque lease.
+    pub fn prepareImage(self: *Transaction, io: std.Io, image: maru.session.editor.save_request.Image) !void {
         try image.validate(self.source_hash);
         try self.write(io, image.bytes);
         self.request_image = image;

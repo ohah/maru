@@ -322,6 +322,8 @@ src/
                         directory_watch는 native 비동기 알림과 identity별 공유·상한·debounce 및
                         알림을 살아 있는 문서 구독에 배분하는 검사를 소유한다.
                         file_read_worker는 selected handle 기반 읽기·raw hash와 값 ticket을 프레임 밖에서 만든다.
+                        save_prepare_worker는 bytes/name/root를 소유해 native TxF 준비·쓰기·flush를 worker에서 실행한다.
+                        결과 commit의 main-thread grant/request 재검증은 유지하며 일반 앱 배선은 아직 연결 전이다.
                         external_changes는 앱의 감시 구독·단일 읽기 슬롯·재시도·현재 문서 적용과 안내 대기를 소유한다.
                         external_comparison은 현재 편집본과 새 디스크 이미지의 복사본·공통 diff 행 대응·표시 번호/색을 소유한다.
                         공유 문서·Undo·clean 외부 변경의 차분 적용 정책과 플랫폼 중립 경로 선택은

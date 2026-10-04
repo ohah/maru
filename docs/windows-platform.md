@@ -11629,3 +11629,34 @@ runtime에서 모두 검출했으며 원본 bytes를 복원했다.
 
 이 경계 분리는 worker 이관의 선행 작업이다. 아직 native 쓰기·commit은 UI 스레드에 있으며
 worker 소유권·main-thread commit 승인 왕복과 최초 open의 비동기화는 이어서 구현한다.
+
+### 2m.170 — worker 소유의 native 저장 준비
+
+`save_prepare_worker.Worker`는 main-thread grant/request 검증 뒤 bytes·상대 이름을 복사하고
+선택한 root handle을 duplicate한다. job과 I/O provider는 worker가 소유한다. 문서 Registry나
+살아 있는 Request를 worker에서 조회하지 않으며 이미지의 lease는 opaque 비교 토큰이다.
+최대 4 MiB, 단일 pending/unconsumed 슬롯과 주소 안정 검사를 적용한다. 실패한 admission은
+게시하지 않고 모든 복사본·handle을 정리한다.
+
+worker는 handle-relative 경로를 다시 pin하고 최초 full identity와 raw source hash를 확인한
+뒤 실제 TxF 쓰기·flush를 수행한다. `Transaction.prepareImage`는 불변 이미지만 다루며
+generic commit 우회를 허용하지 않는다. 결과로 bytes와 pinned attempt의 소유권을 이동한다.
+`Prepared.commit`은 main-thread 원래 grant와 현재 Request를 다시 검증하고 기존 commit
+경로로 들어간다. 준비 취소·늦은 미소비 결과는 native cleanup을 수행하고 문서 ack를 하지 않는다.
+정리의 native 실패를 성공한 저장이나 rollback 증거로 삼지 않는다.
+
+새 `test-win32-save-prepare` 9개(aggregation 2·native 7)는 Debug/ReleaseFast에서 통과했다.
+다른 thread ID에서 실제 준비, 준비 중 원본 디스크 유지, 최종 read-only 권한 거절,
+원래 Request 해제 후 bytes/name 소유권, 추가 편집의 dirty 유지, 미소비 결과의 정리와
+admission 할당 실패 prefix를 검사한다. 최초 identity·source hash·checksum·copied owner·
+크기 상한의 다섯 변형과 실패 보존 제거의 추가 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다.
+
+native attempt를 얻은 뒤에는 할당하지 않는다. 쓰기 실패도 `Prepared.preparation_error`와
+실제 poisoned/active attempt를 결과로 전달하고 commit을 거절한다. main-thread controller가
+원래 transaction으로 rollback을 정산할 수 있으며, worker가 실패 결과를 버려 native 소유권을
+잃지 않는다. 실제 partial write 후 undetermined native outcome과 poisoned phase가 유지되고
+명시적 rollback 뒤 aborted로 바뀌는 것을 검사한다.
+
+이 worker는 아직 일반 앱의 SaveController/UI에 연결 전이다. commit·취소 후 완료 결과를
+비동기로 정산하는 승인 왕복과 일반 앱 배선을 이어서 구현한다. 완료 결과를 main thread에서
+닫으면 native 정리가 동기로 실행될 수 있다. 최초 open 비동기화와 나머지 Windows 범위도 남아 있다.

@@ -43,7 +43,7 @@ pub const Completion = struct {
         return self.result;
     }
 
-    /// 정산 갈래가 로그에 싣는 시도 기록. 소비 전후 어느 때나 읽을 수 있다(봉인과 무관한 진단 값).
+    /// 정산 갈래가 로그에 싣는 시도 기록. 소비 전후 어느 때나 읽을 수 있다(진단 값이지만 `completionSeal` 에 함께 봉인된다).
     pub fn attempt(self: *const Completion) failure_log.Attempt {
         return .{
             .detail = self.detail,

@@ -1094,7 +1094,7 @@ PY
 # 누르면 `window.open` — sidecar 가 maru 가 맡긴 번호로 팝업 브라우저를 만들고 maru 가 그 번호의 탭을 원래 탭 오른쪽에 붙인다(앞 탭).
 # 팝업은 `window.opener.postMessage` 로 알리고, 원래 페이지는 그것을 받은 뒤 `w.close()` — 그 탭이 닫힌다. 팝업 주소는 팝업 브라우저가
 # 한 번만 부른다(maru 가 다시 옮기지 않는다).
-cat > "$root/popup.txt" <<SCRIPT
+cat > "$root/adopt.txt" <<SCRIPT
 sleep 9000
 view down 0.6 0.5 0 0
 sleep 60
@@ -1102,13 +1102,13 @@ view up 0.6 0.5 0 0
 sleep 5000
 SCRIPT
 # 먼저 닫지 않는 판 — 붙인 팝업 탭을 찍는다(찍고 나면 앱이 끝난다).
-rm -f "$root/popup.ppm"
-run_app /pop-stay 25000 "$root/popup-stay.summary" MARU_WEB_OSR_TEST_INPUT="$root/popup.txt" MARU_SCREENSHOT="$root/popup.ppm" MARU_SCREENSHOT_DELAY_MS=14000
+rm -f "$root/adopt.ppm"
+run_app /pop-stay 25000 "$root/adopt-stay.summary" MARU_WEB_OSR_TEST_INPUT="$root/adopt.txt" MARU_SCREENSHOT="$root/adopt.ppm" MARU_SCREENSHOT_DELAY_MS=14000
 : > "$root/requests.log"
-run_app /pop-app 20000 "$root/popup.summary" MARU_WEB_OSR_TEST_INPUT="$root/popup.txt"
-grep -a '^osr-test newtab' "$root/app-pop-app.log" > "$root/popup.report" || true
-cat "$root/popup.report"
-python3 - "$root/popup.report" "$root/requests.log" "$root/popup.ppm" <<'PY' || fail "a popup the page opened did not stay connected to it"
+run_app /pop-app 20000 "$root/adopt.summary" MARU_WEB_OSR_TEST_INPUT="$root/adopt.txt"
+grep -a '^osr-test newtab' "$root/app-pop-app.log" > "$root/adopt.report" || true
+cat "$root/adopt.report"
+python3 - "$root/adopt.report" "$root/requests.log" "$root/adopt.ppm" <<'PY' || fail "a popup the page opened did not stay connected to it"
 import sys
 report = [l.strip() for l in open(sys.argv[1])]
 requests = [l.strip() for l in open(sys.argv[2])]

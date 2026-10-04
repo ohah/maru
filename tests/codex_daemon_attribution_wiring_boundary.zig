@@ -89,6 +89,8 @@ test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하�
     _ = try expectOnce(parent, "maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return false;", "argv 판정");
     _ = try expectOnce(parent, "self.codex_daemon_parents.remember(ev.hook_ppid, verdict);", "판정 기억");
     const decide_at = try expectOnce(route, "const decision = attr.decide(.{", "순수 판정");
+    // 판정은 두 후보 목록을 다 받는다 — cwd 무관 목록이 빠지면 `codex -C <dir>` 의 하나뿐인 pane 도 버려진다.
+    _ = try expectOnce(route[decide_at..], ".candidates = candidates[0..count], .any_cwd = any_cwd[0..any_count],", "판정 입력");
     if (!(gate < decide_at)) return error.WiringChanged;
     // 판정 앞에서 `.here` 로 빠지는 길은 게이트 하나뿐이다 — 그 밖의 조기 `.here` 는 판정 우회다.
     try expectCount(route[0..decide_at], "return .here", 1, "판정 앞의 .here");

@@ -2630,9 +2630,12 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
         if (bound == null) self.codex_daemon_bindings.unbind(sid);
     }
 
-    // ⑵ 후보: 같은 cwd 에서 codex 가 도는 로컬 Term. 묶인 세션이면 모을 필요가 없다.
+    // ⑵ 후보: codex 가 도는 로컬 Term 전부(`any_cwd`)와 그중 같은 cwd 인 것(`candidates`). 어느 쪽을 쓸지는 순수 층이
+    // 정한다(같은 cwd 가 비면 cwd 무관 — `codex -C <dir>`). 묶인 세션이면 모을 필요가 없다.
     var candidates: [16]attr.Candidate = undefined;
     var count: usize = 0;
+    var any_cwd: [16]attr.Candidate = undefined;
+    var any_count: usize = 0;
     const prompt_event = ev.kind == .user_prompt_submit;
     var prompt_buf: [4096]u8 = undefined;
     var prompt_compact: []const u8 = "";
@@ -2646,8 +2649,10 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
         collect: for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |t| {
-                    if (count == candidates.len) break :collect;
+                    if (any_count == any_cwd.len) break :collect;
                     if (t.kind != .terminal or t.agent_kind != .codex or isRemoteAgentPane(t)) continue;
+                    any_cwd[any_count] = .{ .id = t.surfaceId() };
+                    any_count += 1;
                     var t_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
                     const t_cwd = git_ops.termCwd(self, t, &t_cwd_buf) orelse continue;
                     if (ev_cwd.len == 0 or !attr.sameDir(t_cwd, ev_cwd)) continue;
@@ -2656,9 +2661,10 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
                 }
             }
         }
-        // 화면은 **후보가 여럿이고 프롬프트일 때만** 읽는다 — 도구 이벤트마다 화면을 덤프하지 않는다.
-        if (count > 1 and prompt_event and attr.longEnough(prompt_compact)) {
-            for (candidates[0..count]) |*c| {
+        // 화면은 **후보가 여럿이고 프롬프트일 때만** 읽는다 — 도구 이벤트마다 화면을 덤프하지 않는다. 같은 cwd 후보는
+        // cwd 무관 후보의 부분집합이라 한 번 읽고 그 값을 옮긴다.
+        if (any_count > 1 and prompt_event and attr.longEnough(prompt_compact)) {
+            for (any_cwd[0..any_count]) |*c| {
                 const t = term_ops.termBySurfaceId(self, c.id) orelse continue;
                 const screen = self.backendFor(t).dumpRecentText(t.rt.handle, self.allocator, agent_screen_tail_rows, agent_screen_tail_bytes) catch continue;
                 defer self.allocator.free(screen);
@@ -2666,12 +2672,18 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
                 defer self.allocator.free(screen_compact);
                 c.shows_prompt = attr.screenShows(attr.compact(screen_compact, screen), prompt_compact);
             }
+            for (candidates[0..count]) |*c| {
+                for (any_cwd[0..any_count]) |a| {
+                    if (a.id == c.id) c.shows_prompt = a.shows_prompt;
+                }
+            }
         }
     }
 
     const decision = attr.decide(.{
         .bound = bound,
         .candidates = candidates[0..count],
+        .any_cwd = any_cwd[0..any_count],
         .prompt_event = prompt_event,
         .prompt_long_enough = attr.longEnough(prompt_compact),
     });

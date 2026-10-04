@@ -413,7 +413,7 @@ pub fn tickWebOsr(self: *AppSession) void {
     // W6e: 새 탭을 기다리는 탭들(tick 마다 하나를 연다 — 한 탭이 막혀도 다른 탭의 것은 연다).
     var new_tab_openers: [8]u64 = undefined;
     var new_tab_count: usize = 0;
-    // W6f②: 페이지가 닫은 팝업 탭(tick 마다 하나).
+    // W6f②: 페이지가 닫은 탭(`window.close` — 이어 받은 팝업 또는 스크립트가 닫을 수 있는 탭, tick 마다 하나).
     var page_closed: u64 = 0;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
@@ -1168,8 +1168,9 @@ fn osrOpenNewTab(self: *AppSession, opener: u64) bool {
     return false;
 }
 
-/// 페이지가 이어 받은 팝업을 닫았다(`window.close` — W6f②) — 그 탭을 닫는다(Chrome 처럼 확인 없이). 자리로 잡아 둔 닫기 확인이 떠
-/// 있으면(빼면 그 자리가 다른 탭을 가리킨다) 다음 tick 에 — 다시 표시한다.
+/// 페이지가 그 탭의 브라우저를 닫았다(`window.close` — maru 가 닫지 않았다, W6f②) — 그 탭을 닫는다(Chrome 처럼 확인 없이). 활성
+/// 탭이었으면 연 탭으로 돌아가고, 그 pane 의 유일한 탭이면 닫지 않고 빈 보통 탭으로 새로 만든다. 자리로 잡아 둔 닫기 확인이 떠 있거나
+/// 탭을 끄는 중이면(빼면 그 자리가 다른 탭을 가리킨다) 다음 tick 에 — 다시 표시한다.
 fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
     switch (self.pending_confirm) {
         .close => |target| if (target != .window) return web_osr.markPageClosed(surface_id),
@@ -1189,6 +1190,7 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
                 if (pane.terms.items.len == 1) {
                     web_osr.revivePageClosed(self.allocator, surface_id);
                     setWebNavState(self, surface_id, false, false, ""); // 팝업의 주소·뒤로 상태를 지운다(새 빈 탭)
+                    if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab page-closed revived\n", .{});
                     return;
                 }
                 // 활성 탭이 닫히면 연 탭으로 돌아간다(Chrome 처럼 — 그대로면 오른쪽 이웃으로 갔다, W6f② 적대 검증 3 차). 연 탭이 같은 pane 에
@@ -1204,7 +1206,10 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
                 }
                 self.workspaceChanged(.topology);
                 self.metal_dirty = true;
-                if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab page-closed\n", .{});
+                if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) {
+                    const active_opener = opener != 0 and pane.terms.items.len > 0 and pane.activeTerm().surfaceId() == opener;
+                    std.debug.print("osr-test newtab page-closed active-opener={}\n", .{active_opener});
+                }
                 return;
             }
         }

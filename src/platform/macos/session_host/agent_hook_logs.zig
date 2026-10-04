@@ -47,7 +47,19 @@ const hook_command = maru.session.agent_hook_command;
 /// host 가 자기 base 를 hello 로 알려 줘야 하고, 그것은 별도 슬라이스다.
 pub fn resolveCacheBase(allocator: std.mem.Allocator) ?[]u8 {
     const home = if (c.getenv("HOME")) |value| std.mem.span(value) else null;
+    // **테스트 빌드는 실제 사용자 홈의 캐시에 host 칸을 만들지 않는다**(2026-10-04). 테스트 바이너리 안에서 도는 host 가
+    // 그대로 `~/.cache/maru/agent-turn-events/host_<pid…>/owner.pid` 를 만들었다 — 앱 호스트 스위트 한 번에 68 개.
+    // 임시 `HOME` 을 세운 테스트(이 경로를 일부러 검증하는 것)는 그대로 돈다 — 막는 것은 **실제 홈**뿐이다.
+    if (builtin.is_test) if (home) |h| if (isRealUserHome(h)) return null;
     return maru.session.agent_hook_command.hookCacheBaseAlloc(allocator, home) catch null;
+}
+
+/// `home` 이 이 사용자의 실제 홈(OS 사용자 DB 의 홈 디렉터리)인가. 모르면 「실제」로 본다 — 테스트에서 이 판정이
+/// 틀리는 쪽이 사용자 캐시를 건드리는 쪽보다 낫다.
+fn isRealUserHome(home: []const u8) bool {
+    const pw = c.getpwuid(c.getuid()) orelse return true;
+    const dir = std.mem.span(pw.dir orelse return true);
+    return std.mem.eql(u8, std.mem.trimEnd(u8, home, "/"), std.mem.trimEnd(u8, dir, "/"));
 }
 
 /// host 가 소유하는 훅 로그 칸의 절대 경로(`<base>/agent-turn-events/host_<hex>`).
@@ -287,6 +299,38 @@ fn testAgeSegment(path: [:0]const u8, seconds: i64) void {
     var times = [2]c.timeval{ past, past };
     _ = c.utimes(path.ptr, &times);
 }
+
+test "테스트 빌드는 실제 사용자 홈의 캐시에 host 칸 경로를 내주지 않고 임시 HOME 에는 내준다" {
+    const allocator = std.testing.allocator;
+    const pw = c.getpwuid(c.getuid()) orelse return error.SkipZigTest;
+    const real_home = std.mem.span(pw.dir orelse return error.SkipZigTest);
+    const saved = c.getenv("HOME");
+    var saved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const saved_copy: ?[:0]const u8 = if (saved) |v| blk: {
+        const text = std.mem.span(v);
+        @memcpy(saved_buf[0..text.len], text);
+        saved_buf[text.len] = 0;
+        break :blk saved_buf[0..text.len :0];
+    } else null;
+    defer if (saved_copy) |v| {
+        _ = setenv("HOME", v.ptr, 1);
+    } else {
+        _ = unsetenv("HOME");
+    };
+
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_z = try std.fmt.bufPrintZ(&real_buf, "{s}", .{real_home});
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", real_z.ptr, 1));
+    try std.testing.expect(resolveCacheBase(allocator) == null);
+
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", "/tmp/maru-agent-hook-logs-fake-home", 1));
+    const base = resolveCacheBase(allocator) orelse return error.TestUnexpectedResult;
+    defer allocator.free(base);
+    try std.testing.expect(std.mem.startsWith(u8, base, "/tmp/maru-agent-hook-logs-fake-home"));
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 test "칸 이름은 계약 모듈이 만드는 이름과 정확히 같다" {
     // 이 파일이 접두나 폭을 손으로 적기 시작하면 GUI 가 읽는 이름과 갈린다 — 그 갈림의 증상은

@@ -182,3 +182,8 @@ purge와 missing/untitled/remote 복원, interrupted-stage 정리·capability·G
 frame당 하나, shutdown 전체 distinct 문서, 실패 재시도/삭제 성공 후 상태 정리/용량 pause를 다룬다.
 22개 집중 테스트와 이 수명주기 규칙의 runtime 적대적 검증 5회가 통과했다. 일반 root와 frame/종료
 caller 연결, 복원 UI, GUI editable/save/dirty-close/감시·IME는 여전히 W8.17 잔여다.
+
+§2m.155: 기본 LOCALAPPDATA root의 native 상위 핸들 소유를 구현하고 일반 앱 frame/종료 호출을
+연결했다. 만기 전에는 폴더를 열지 않으며 view lease 해제 전 flush한다. Native 집중 판정은 27개이고
+root 변형 5회 및 실제 창의 앱 helper 변형 5회가 runtime 결함을 검출했다. 실제 UNC share 검증,
+복원 알림·accepted-close 삭제·pause 상태바·dirty 앱 재실행·GUI 저장/감시·IME는 계속 진행한다.

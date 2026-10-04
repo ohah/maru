@@ -11704,4 +11704,9 @@ clean guard·취소·ack guard·committed guard·닫기 소유권 반환을 제�
 격리한 실제 일반 앱에서 대상 창의 입력 큐로 Ctrl+S와 Save-close를 실행하여 BOM·CRLF
 보존 및 저장 후 프로세스 종료를 확인했다. 이는 물리 키보드·IME 검증이 아니다.
 native commit/abort/reconcile/cleanup과 명시적 충돌 overwrite는 아직 main thread에서
-실행한다. 최초 open 비동기화와 다중 파일 닫기의 전체 GUI 검증도 계속 남아 있다.
+실행한다. 최초 open 비동기화와 다중 파일 닫기의 충돌·취소·할당 실패 GUI 검증은 남아 있다.
+
+다중 파일의 정상 Save-close도 별도 격리한 실제 앱에서 확인했다. 두 문서를 각각 수정한 뒤
+창 닫기의 Save를 선택하여 두 디스크 본문과 프로세스 종료를 대조했다. 첫 문서의 BOM·CRLF와
+둘째 문서의 LF가 모두 보존됐다. 창이 가려져도 대상 HWND의 PrintWindow 캡처로 두 번째
+편집본과 닫기 선택창을 확인했다. 정상 성공 경로의 증거이며 충돌·취소 전체 조합을 대신하지 않는다.

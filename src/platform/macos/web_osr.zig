@@ -3224,6 +3224,7 @@ test "dragged image files are fetched only when asked, gathered apart from the d
     apply(gpa, .{ .browser_closed = 7 }, 0);
     try std.testing.expectEqual(FileFetchState.failed, dragFile(3).state);
     try std.testing.expect(!requestDragFile(gpa, 3));
+    surfaces.getPtr(7).?.created = true; // 닫힌 브라우저로는 청하지 않는다(W6f②) — 다시 만들어졌다고 둔다
     apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 5, .allowed = 1, .point = .{ .x = 0, .y = 0 }, .file_size = 5 } }, 0);
     try std.testing.expect(requestDragFile(gpa, 5));
     forgetSidecar(gpa);

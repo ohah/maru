@@ -272,6 +272,20 @@ pub const Book = struct {
         return receipt;
     }
 
+    /// Retain the document's original saved/disk CAS while preparing against
+    /// the freshly observed native source. Result bytes remain reader-owned;
+    /// the save pipeline owns a separate image before this call returns.
+    pub fn beginOverwrite(self: *Book, reader: *const reading.Reader, result: reading.Result, view: editor.document_registry.Lease, limit: usize) !bool {
+        if (result != .image) return error.MissingOverwriteImage;
+        if (!try self.acceptsRead(reader, result, view)) return error.StaleExternalRead;
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() != .idle) return error.SaveBusy;
+        const state = self.registry.get(view).?;
+        if (!state.opened.?.isDirty()) return false;
+        try controller.prepareOverwriteAsync(view, limit, result.image.raw_hash);
+        return true;
+    }
+
     /// Closing one peer does not revoke the surviving view's save authority.
     /// Last-view discard requires explicit acceptance; pending native ownership
     /// always wins over discard. Backup deletion remains the app's responsibility.
@@ -924,6 +938,134 @@ test "Windows editor host directory subscription pins the nested parent and rout
     if (replaced) |unexpected| try groups.release(unexpected) else |_| {}
     try std.testing.expectError(error.IdentityChanged, replaced);
     try std.testing.expectEqual(@as(usize, 0), groups.entries.items.len);
+}
+
+test "Windows editor host async overwrite owns its image and preserves old document CAS until native ack" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const state = f.registry.get(view).?;
+    const saved = state.opened.?.saved_hash;
+    const disk_hash = state.opened.?.disk_hash;
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    var reader_owned = true;
+    defer if (reader_owned) reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    var fresh_owned = true;
+    defer if (fresh_owned) fresh.deinit();
+    try std.testing.expect(try f.book.beginOverwrite(&reader, fresh, view, 128));
+    fresh.deinit();
+    fresh_owned = false;
+    try reader.deinit(std.testing.io);
+    reader_owned = false;
+    try std.testing.expectEqual(saving.Status.preparing, try f.book.saveStatus(view));
+    try std.testing.expectEqual(saved, state.opened.?.saved_hash);
+    try std.testing.expectEqual(disk_hash, state.opened.?.disk_hash);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(!state.opened.?.isDirty());
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfXbase\r\n", bytes);
+}
+
+test "Windows editor host async overwrite refuses stale read without native admission" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    try change(&f.registry, view, "Y");
+    try std.testing.expectError(error.StaleExternalRead, f.book.beginOverwrite(&reader, fresh, view, 128));
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.live_save_images);
+}
+
+test "Windows editor host async overwrite fences native changes after the fresh read" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    const state = f.registry.get(view).?;
+    const saved = state.opened.?.saved_hash;
+    const disk_hash = state.opened.?.disk_hash;
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "newer" });
+    try std.testing.expect(try f.book.beginOverwrite(&reader, fresh, view, 128));
+    try std.testing.expectError(error.SourceChanged, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saved, state.opened.?.saved_hash);
+    try std.testing.expectEqual(disk_hash, state.opened.?.disk_hash);
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("newer", bytes);
+}
+
+test "Windows editor host async overwrite cancellation preserves the externally observed file" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    try std.testing.expect(try f.book.beginOverwrite(&reader, fresh, view, 128));
+    try f.book.cancelSave(std.testing.io, view);
+    try std.testing.expectEqual(Book.SaveReady.cancelled, try awaitSave(&f.book, view));
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("outside", bytes);
+}
+
+test "Windows editor host async overwrite rechecks permission at final native vote" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    try std.testing.expect(try f.book.beginOverwrite(&reader, fresh, view, 128));
+    const controller = &f.book.controllers.items[0];
+    try awaitNativePreparation(controller);
+    try std.testing.expectEqual(saving.PreparationReady.prepared, (try controller.pollPreparation(std.testing.io)).?);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!try controller.committing.?.worker.needsApproval()) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.CommitReadyTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    f.registry.get(view).?.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, awaitSave(&f.book, view));
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("outside", bytes);
 }
 
 test "Windows editor host explicit overwrite requires fresh read and fences intervening native changes" {

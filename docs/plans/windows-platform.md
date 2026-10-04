@@ -324,3 +324,10 @@ deinit을 거절한다. native 7개 Debug/ReleaseFast와 다섯 compiled runtime
 문서 uncertainty를 보유하고 known decision만 ack/abort 정산한다. controller 28개와 worker
 7개 Debug/ReleaseFast 및 다섯 compiled runtime mutation 검출이 통과했다. Book/UI 연결,
 native commit 승인·cleanup 이관과 초기 open 및 나머지 Windows 범위는 계속 진행한다.
+
+§2m.175: 일반 앱의 준비 취소/오류 rollback과 unknown 결과 조회가 settlement worker를 사용한다.
+unknown은 200ms backoff로 조회하고 Esc는 명시적 rollback을 요청한다. committed는 취소로
+오인하지 않는다. host 51개·controller 28개 Debug/ReleaseFast 및 다섯 compiled runtime
+mutation 검출이 통과했다. 실제 앱의 1.87MB BOM/CRLF 문서에서 Ctrl+S/Esc 후 원본 보존,
+추가 편집과 Save-close의 본문 저장/종료를 확인했다. commit·commit 실패의 abort·final
+cleanup·conflict overwrite·초기 open I/O와 물리 입력/IME 및 나머지 Windows 범위는 남아 있다.

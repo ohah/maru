@@ -4570,6 +4570,13 @@ const FileCloseFixture = struct {
             }
         };
         for (self.book.controllers.items) |*controller| if (controller.pending != null) {
+            const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+            while (controller.settling != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native settlement timeout");
+                _ = controller.pollSettlement(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+            if (controller.pending == null) continue;
             _ = controller.abort(std.testing.io) catch unreachable;
         };
         self.book.deinit(std.testing.io) catch unreachable;

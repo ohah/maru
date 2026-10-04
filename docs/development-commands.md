@@ -1150,3 +1150,9 @@ worker 결과는 문서 ack가 아니며 controller/앱 연결 전이므로 앱�
 비동기 rollback/reconcile의 문서·pending 소유권, busy guard·controller 이동·unknown 보유와
 실제 retry·유실 commit ack·admission 할당 prefix를 검사한다. `-Doptimize=ReleaseFast`와
 `test-win32-save-settle` 7개도 실행한다. Book/UI의 settlement 연결은 별도 후속 작업이다.
+
+§2m.175의 `zig build test-win32-editor-host`는 51개(aggregation 2·native 42·pure 7)다.
+cancel/권한 실패의 worker rollback 정산, unknown backoff·명시적 cancel과 유실 commit 뒤
+정확한 receipt를 검사한다. `-Doptimize=ReleaseFast` 및 controller 28개를 회귀 검증한다.
+실제 앱의 큰 임시 파일에서 Ctrl+S/Esc·추가 편집·Save-close를 별도 확인한다. 대상 입력 큐
+검증은 물리 키보드/IME와 구분하며 commit·final cleanup·초기 open의 worker 이관은 남아 있다.

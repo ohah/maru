@@ -11749,3 +11749,28 @@ rollback 재시도, 실제 commit의 유실 응답과 admission 할당 prefix를
 
 일반 앱 Book/UI는 아직 이 settlement API 연결 전이다. 앱의 취소·reconcile 연결과
 native commit 승인 왕복·cleanup·초기 open 이관 및 나머지 Windows 범위는 이어서 구현한다.
+
+### 2m.175 — 일반 앱의 취소 rollback과 미확정 결과 조회 연결
+
+Book/UI는 준비 완료를 `pollPreparationForApp`으로 받고 취소·준비 오류의 rollback을 worker에
+예약한다. settling 동안 슬롯과 Request를 유지하고 이후 프레임의 `pollSettlement` 결과로
+정산한다. 준비의 권한 오류도 confirmed abort 뒤에 보고하며 취소가 이미 committed된 결과를
+aborted로 바꾸지 않는다. explicit cancel은 진행 중인 조회에도 의사를 기록한다.
+
+unknown 조회는 200ms 뒤 재시도하고 해당 문서의 uncertainty/native 이미지 소유권을 유지한다.
+Esc는 backoff를 기다리지 않고 rollback을 요청한다. 반복 Esc는 이미 소유한 native job을
+교체하지 않는다. known committed 결과는 문서 ack를 거치며 confirmed abort만 취소 UI로 반환한다.
+
+host gate 51개(aggregation 2·native 42·pure 7)와 controller 28개가 Debug/ReleaseFast에서
+통과했다. 추가 host 검사는 취소의 슬롯/이미지 유지·반복 Esc, 권한 오류의 정산 순서,
+unknown backoff와 explicit cancel, 실제 유실 commit 뒤 취소의 committed receipt를 검사한다.
+동기 poll 우회, committed의 false cancel, 준비 오류 숨김, backoff 제거와 cancel marker 제거의
+다섯 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다.
+
+격리한 실제 앱에서 BOM·CRLF의 1,870,003-byte 문서를 편집하고 대상 키 큐의 Ctrl+S/Esc로
+취소했다. 디스크 전체가 원본과 같고 편집본은 유지됐다. 이어 추가 편집과 Save-close에서
+두 편집을 포함한 1,870,005-byte 본문·BOM/CRLF와 프로세스 종료를 확인했다. 가려진 창의
+캡처는 대상 HWND PrintWindow를 사용했다. 이는 물리 키보드/IME 검증이 아니다.
+
+native commit와 그 실패 경로의 즉시 abort, final handle cleanup, 명시적 conflict overwrite와
+초기 open은 아직 main-thread I/O다. 이 승인 왕복·worker 이관과 나머지 Windows 범위는 계속 진행한다.

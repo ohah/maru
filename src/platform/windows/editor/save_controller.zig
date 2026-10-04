@@ -10,7 +10,7 @@ const preparation = @import("save_prepare_worker.zig");
 const settlement = @import("save_settle_worker.zig");
 
 pub const Status = enum { idle, preparing, settling, prepared, uncertain, closed };
-pub const PreparationReady = enum { prepared, cancelled };
+pub const PreparationReady = enum { prepared, settling, cancelled };
 pub const Decision = enum { committed, aborted };
 pub const Receipt = struct {
     decision: Decision,
@@ -59,6 +59,7 @@ pub const Controller = struct {
     pending: ?Pending = null,
     preparing: ?*Preparation = null,
     settling: ?*Settlement = null,
+    settlement_retry_after_ns: i128 = 0,
     last_receipt: ?Receipt = null,
     closed: bool = false,
 
@@ -163,13 +164,19 @@ pub const Controller = struct {
         self.settling = null;
         if (result.outcome == .undetermined) {
             if (pending.attempt.transaction.phase == .uncertain) self.markUncertain();
+            self.settlement_retry_after_ns = std.Io.Clock.awake.now(io).nanoseconds + 200 * std.time.ns_per_ms;
             return result.failure orelse error.SaveUncertain;
         }
+        self.settlement_retry_after_ns = 0;
         return self.settle(io, if (result.outcome == .committed) .committed else .aborted);
     }
 
     pub fn pollPreparation(self: *Controller, io: std.Io) !?PreparationReady {
         return self.pollPreparationWith(io, Native);
+    }
+
+    pub fn pollPreparationForApp(self: *Controller, io: std.Io) !?PreparationReady {
+        return self.pollPreparationUsing(io, Native, true);
     }
 
     fn finishPreparation(self: *Controller, waiting: *Preparation, moved_request: bool) void {
@@ -180,6 +187,10 @@ pub const Controller = struct {
     }
 
     fn pollPreparationWith(self: *Controller, io: std.Io, comptime Driver: type) !?PreparationReady {
+        return self.pollPreparationUsing(io, Driver, false);
+    }
+
+    fn pollPreparationUsing(self: *Controller, io: std.Io, comptime Driver: type, comptime async_abort: bool) !?PreparationReady {
         if (self.closed) return error.ControllerClosed;
         const waiting = self.preparing orelse return null;
         const result = (try waiting.worker.takeResult()) orelse return null;
@@ -196,6 +207,10 @@ pub const Controller = struct {
                 self.pending = .{ .request = waiting.request, .attempt = value.attempt, .native_image = .{ .allocator = value.allocator, .bytes = value.image.bytes }, .preparation_error = if (cancelled) error.SaveCancelled else value.preparation_error };
                 self.finishPreparation(waiting, true);
                 if (cancelled) {
+                    if (async_abort) {
+                        try self.abortAsync();
+                        return .settling;
+                    }
                     _ = try self.abortWith(io, Driver);
                     return .cancelled;
                 }
@@ -205,6 +220,10 @@ pub const Controller = struct {
                     pending.preparation_error = failure;
                 };
                 if (pending.preparation_error) |failure| {
+                    if (async_abort) {
+                        try self.abortAsync();
+                        return .settling;
+                    }
                     _ = self.abortWith(io, Driver) catch {};
                     return failure;
                 }
@@ -322,6 +341,7 @@ pub const Controller = struct {
         if (receipt.acknowledgment_error == null)
             @import("backup_store.zig").noteDecision(state, std.Io.Clock.awake.now(io).nanoseconds);
         self.pending = null;
+        self.settlement_retry_after_ns = 0;
         self.last_receipt = receipt;
         return receipt;
     }

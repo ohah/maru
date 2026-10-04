@@ -11438,3 +11438,23 @@ native 12개, 총 14개다. 다섯 group 변형(중복 감시, 상한 무시, fo
 Debug/ReleaseFast 각각 14개가 통과했다. 파일 생성·쓰기의 연속 알림을 같은 논리 시각에
 먼저 소비한 뒤 quiet-period 경계를 검사한다. 앱 연결과 identity/hash 재검증, clean 최소
 edit 및 dirty 선택 UI는 여전히 후속이며 외부 변경 감시 전체 완료로 세지 않는다.
+
+### 2m.162 — 복구 문서의 앱 목록 등록을 열기 전에 확보
+
+일반 파일 선택과 native host fixture가 같은 openAppFileInto를 사용한다. 기존 경로는
+문서를 연 뒤 목록 append가 실패하면 accepted=false로 닫았다. 복구된 문서는 이미 dirty여서
+이 정리 호출이 DirtyDocument로 거부되고 unreachable에 도달할 수 있었다. 이제 목록의
+추가 slot을 먼저 확보하고 열기·복구가 성공하면 할당 없는 append로 소유권을 전달한다.
+slot 할당 실패는 파일 열기, native grant 발행, 백업 조회 전에 out_of_memory로 반환한다.
+
+실제 private 백업이 있는 문서에서 목록 할당을 실패시켜 등록·grant·backup owner가
+변하지 않는지 검사하고, 재시도로 정확히 한 뷰를 등록해 dirty 본문·CRLF·원본 disk_hash와
+백업 레코드가 유지되는지 확인한다. 원본 BOM/CRLF bytes도 실패 및 복원 전후 동일하다.
+host gate는 aggregation 2·native 15·pure 3, 총 20개이며 Debug/ReleaseFast가 통과했다.
+늦은 slot 확보, 잘못된 실패 tag, 복원 직후 백업 조기 삭제, 복원 생략, disk_hash 교체의
+다섯 변형은 컴파일 후 runtime 실패로 검출됐다. byte 원복 후 두 모드 각각 20개가 통과했다.
+실패한 컴파일 변형은 적대적 검증 횟수에서 제외했다. 새 일반 앱의 별도 LOCALAPPDATA
+fixture에서 파일 선택·X 편집·닫기 취소 후 원본 BOM/CRLF와 백업 유지를 확인했다. 레코드가
+생긴 테스트 프로세스만 강제 종료하고 새 앱에서 같은 파일을 선택해 Xbase와 복원 안내를
+확인했다. 저장 후 닫기는 BOM+Xbase+CRLF를 남기고 앱 종료·백업 삭제까지 확인했다.
+이는 posted window 이벤트 검사이며 물리 키보드/IME 검증은 아니다. 감시 앱 연결도 남아 있다.

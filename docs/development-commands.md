@@ -1079,3 +1079,6 @@ counter 상한을 포함해 14개이며 전 할당 실패가 이미지 보호를
 소유권과 identity별 공유·상한·독립 구독·debounce의 14개 판정(aggregation 2·native 12)을
 실행한다. `-Doptimize=ReleaseFast`로도 실행하며 기본 test에 연결된다.
 앱의 외부 변경 갱신 전체 판정은 아직 아니다(§2m.160–161).
+
+§2m.162의 `zig build test-win32-editor-host`는 복구 전 앱 목록 slot 할당 실패와 재시도를
+포함해 20개다(aggregation 2·native 15·pure 3). Debug/ReleaseFast에서 실행한다.

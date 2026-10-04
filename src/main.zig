@@ -4381,6 +4381,16 @@ fn openAppFile(book: *file_host.Book, io: std.Io, owner: *?@import("platform/win
     return opened;
 }
 
+fn openAppFileInto(a: std.mem.Allocator, book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: *std.ArrayList(OpenFile), path: []const u8, local_override: ?[]const u8) OpenOutcome {
+    // Recovery may make a newly opened document dirty. Reserve its publication
+    // slot first so allocator failure cannot strand that view or invoke dirty
+    // close without a user decision. Durable recovery records stay untouched.
+    views.ensureUnusedCapacity(a, 1) catch return .out_of_memory;
+    const opened = openAppFile(book, io, owner, path, local_override);
+    if (opened == .opened) views.appendAssumeCapacity(opened.opened);
+    return opened;
+}
+
 fn applyFileKey(book: *file_host.Book, io: std.Io, resolver: maru.config.keybinding.KeyBindingResolver, file: *OpenFile, event: maru.terminal.KeyEvent, context: OpenFile.InputContext) !?[]u8 {
     if (file_host.saveKey(resolver, event)) {
         const state = book.registry.get(file.document) orelse return error.StaleDocument;
@@ -4464,16 +4474,14 @@ const FileCloseFixture = struct {
         return self;
     }
     fn open(self: *FileCloseFixture) !void {
-        try self.views.ensureUnusedCapacity(std.testing.allocator, 1);
         const path = try self.tmp.dir.realPathFileAlloc(std.testing.io, "file.txt", std.testing.allocator);
         defer std.testing.allocator.free(path);
         var root: [std.fs.max_path_bytes]u8 = undefined;
         const root_len = try self.tmp.dir.realPath(std.testing.io, &root);
-        const view = switch (openAppFile(&self.book, std.testing.io, &self.backups, path, root[0..root_len])) {
+        const view = switch (openAppFileInto(std.testing.allocator, &self.book, std.testing.io, &self.backups, &self.views, path, root[0..root_len])) {
             .opened => |value| value,
             else => return error.FixtureOpenFailed,
         };
-        self.views.appendAssumeCapacity(view);
         if (self.documents.get(view.document).?.opened.?.file.read_only) return error.FixtureCapabilityFailed;
     }
     fn editAndBackup(self: *FileCloseFixture) !void {
@@ -4503,6 +4511,50 @@ const FileCloseFixture = struct {
         std.testing.allocator.destroy(self);
     }
 };
+
+test "Windows editor host publication allocation failure precedes recovery and preserves retry ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    var doc = backups.identity(f.documents.get(f.views.items[0].document).?).?;
+    // The identity borrows the old document's path; retain it across teardown.
+    const saved_path = try a.dupe(u8, doc.path.path);
+    defer a.free(saved_path);
+    doc.path.path = saved_path;
+    try f.book.deinit(io);
+    for (f.views.items) |*view| view.deinit(a);
+    f.views.deinit(a);
+    f.views = .empty;
+    f.backups.?.deinit(io);
+    f.backups = null;
+    f.book = .{ .allocator = a, .registry = &f.documents };
+    const path = try f.tmp.dir.realPathFileAlloc(io, "file.txt", a);
+    defer a.free(path);
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try f.tmp.dir.realPath(io, &root);
+    var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0 });
+    const rejected = openAppFileInto(failing.allocator(), &f.book, io, &f.backups, &f.views, path, root[0..root_len]);
+    try std.testing.expect(rejected == .out_of_memory);
+    try std.testing.expectEqual(@as(usize, 0), f.views.items.len);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    try std.testing.expect(f.backups == null);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    try f.open();
+    try std.testing.expectEqual(@as(usize, 1), f.views.items.len);
+    try std.testing.expect(f.views.items[0].recovered);
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    var record = (try f.backups.?.store.read(io, doc)) orelse return error.MissingRecoveryRecord;
+    defer record.deinit();
+    try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
+    try std.testing.expectEqual(state.opened.?.disk_hash, record.parsed.doc.path.disk_hash);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
 
 test "Windows editor host ordinary reopen restores previous backup before allowing native save" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
@@ -11411,17 +11463,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (found) |fi| {
                                             file_reopens += 1;
                                             active_view = .{ .file = fi };
-                                        } else switch (openAppFile(&editor_files, io, &file_backups, owned, null)) {
+                                        } else switch (openAppFileInto(allocator, &editor_files, io, &file_backups, &open_files, owned, null)) {
                                             .opened => |of| {
-                                                open_files.append(allocator, of) catch {
-                                                    var tmp = of;
-                                                    editor_files.release(io, tmp.document, false) catch unreachable;
-                                                    tmp.deinit(allocator);
-                                                    file_rejects += 1;
-                                                    last_reject = .out_of_memory;
-                                                    file_notice.show(maru.i18n.t(.win_file_open_memory));
-                                                    continue;
-                                                };
                                                 file_opens += 1;
                                                 active_view = .{ .file = open_files.items.len - 1 };
                                                 if (editor_documents.get(of.document).?.opened.?.file.read_only)

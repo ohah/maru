@@ -70,6 +70,13 @@ test "product-child fixtures require an isolated root and the default suite neve
         runner,
         "if (setenv(\"CFFIXED_USER_HOME\", root.ptr, 1) != 0)",
     ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        runner,
+        "if (setenv(\"HOME\", home.ptr, 1) != 0)",
+    ) != null);
+    // 시작 뒤 setenv 만으로는 std 가 붙잡은 envp 조각이 실제 홈을 계속 본다 — 그 환경으로 다시 exec 해야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, runner, "_ = std.c.execve(@ptrCast(&exe_buf), _NSGetArgv().*, environ);") != null);
     // signed product E2E 자체는 `builtin.is_test == false`로 컴파일된다. 따라서 parent가
     // current-user helper를 부르면 실제 앱 root로 빠지며, exact isolated root helper만 허용한다.
     try std.testing.expect(std.mem.indexOf(u8, signed_upgrade, "socketDirPathUnder") != null);
@@ -90,6 +97,32 @@ test "common runner binds session registry and app workspace to the same pid roo
 
     try std.testing.expectEqualStrings(expected, std.mem.span(session_root));
     try std.testing.expectEqualStrings(expected, std.mem.span(app_home));
+}
+
+// 제품 자식은 `HOME` 에서 캐시를 유도한다 — 러너가 실제 홈을 안 바꾸던 동안 테스트가 띄운 `maru __session-host` 가
+// 실제 `~/.cache/maru/agent-turn-events/` 에 칸을 만들고 그 안을 정리했다(2026-10-04 가짜 HOME 실측: 136 항목).
+// 이 판정자는 **이 프로세스가 받은 환경**을 본다 — 자식은 그것을 그대로 물려받는다.
+test "common runner never leaves the real user HOME to tests or their product children" {
+    if (@import("builtin").os.tag != .macos) return;
+
+    const home = std.mem.span(std.c.getenv("HOME") orelse return error.MissingHome);
+    const pw = std.c.getpwuid(std.c.getuid()) orelse return error.MissingPasswdEntry;
+    const real = std.mem.span(pw.dir orelse return error.MissingPasswdEntry);
+    try std.testing.expect(!std.mem.eql(u8, std.mem.trimEnd(u8, home, "/"), std.mem.trimEnd(u8, real, "/")));
+
+    // HOME 은 session root 와 다른 자리다 — root 안에는 session host 의 것만 둔다. 러너가 바꾼 경우(= 부모가 실제
+    // 홈을 줬다)에는 이미 설정돼 있던 XDG_* 도 새 홈 아래로 옮겼어야 한다.
+    if (std.c.getenv("MARU_SESSION_HOST_ROOT")) |root| {
+        try std.testing.expect(!std.mem.eql(u8, std.mem.trimEnd(u8, home, "/"), std.mem.trimEnd(u8, std.mem.span(root), "/")));
+    }
+    var expected_buf: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrintZ(&expected_buf, "/tmp/maru-home-{d}", .{std.c.getpid()});
+    if (std.mem.eql(u8, home, expected)) {
+        for ([_][*:0]const u8{ "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME" }) |name| {
+            const value = std.mem.span(std.c.getenv(name) orelse continue);
+            try std.testing.expect(std.mem.startsWith(u8, value, home));
+        }
+    }
 }
 
 test "macOS product smoke children bind workspace and session registry to one fixture root" {

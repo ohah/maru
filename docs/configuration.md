@@ -9,7 +9,7 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 >
 > **여기 있는 키와 파일 위치는 데스크톱 것이다.** 모바일은 파일도 스키마도 따로 두고, 파서·resolve
 > 규율만 공유한다 — 무엇을 싣고 어디에 두는지는 [모바일 config](mobile-config.md)가 소유한다.
-> 파일 변경 자동 감지 reload와 남은 bespoke 위젯은 후속 단계다(아래 "범위와 후속" 참조).
+> 파일 변경 자동 감지 reload 는 `behavior.auto-reload`(기본 on, macOS)로 섰다. 남은 bespoke 위젯은 후속 단계다(아래 "범위와 후속" 참조).
 > 수동 reload의 scrollback·ambiguous/emoji width·ANSI palette·default color·cell metric snapshot은 열린
 > in-process terminal과 `runtime_core_command_v1`을 협상한 현재 host-backed terminal에 적용된다. capability
 > 없는 구 host의 기존 runtime은 legacy scroll 외 config command가 degraded no-op이다. 새 host-backed terminal은 같은 snapshot을
@@ -143,6 +143,8 @@ render.frame-rate     = 60
 window.blur           = 0
 # 비활성 split pane 디밍(0~1) — 0=끔, 클수록 흐림
 window.unfocused-dim  = 0.0
+# config 파일이 바뀌면 자동으로 다시 읽기
+behavior.auto-reload = true
 # 마지막 창을 닫으면 앱 종료 — false 면 Dock 에 남는다
 window.quit-after-last-window-closed = true
 # split 경계선 두께(pt) — 0=숨김, 폰트 크기와 무관한 고정 pt
@@ -156,6 +158,7 @@ file-panel.external-link-target = in-app
 | 키 | 타입 | 기본값 | 비고 |
 |---|---|---|---|
 | `ui.language` | `auto`\|`en`\|`ko` | `auto` | **UI 표시 언어.** `auto`는 OS 로케일을 따르고, 해석 실패·미지원 언어는 `en`으로 떨어진다. **기본값이 `auto`인 이유**: 화면이 이미 한국어라 `en`을 기본으로 두면 이 설정이 생기는 순간 한국어 사용자의 화면이 영어로 바뀐다. 바꾸면 **재시작 없이 다음 프레임에** 반영된다. 번역 범위는 앱 안에서 읽고 판단하는 표면(설정·안내·확인)이고 **메뉴바·CLI·로그는 영어 고정**이다 — 단일 출처: [다국어](i18n.md). 그 외 값은 무시 |
+| `behavior.auto-reload` | 불리언 | `true` | **config 파일이 바뀌면 자동으로 다시 읽는다**(외부 편집기 저장 등 — 재시작·Reload Config 메뉴 없이). **폴링하지 않는다**: macOS 는 파일이 든 폴더(심볼릭 링크면 실제 파일의 폴더도)를 FSEvents 로 보고(임시 파일→rename 저장도 잡고 0.5초 안의 연속 저장은 한 번으로 모은다), **앱이 앞으로 올 때 한 번 더 확인한다** — 이 확인이 dotfiles 폴더 링크 재연결처럼 FSEvents 가 못 보는 경우를 메운다. 폴더를 만들지 않고(없으면 활성화 확인만), 홈·`/` 처럼 넓은 폴더는 FSEvents 로 보지 않는다(설정 파일이 홈 바로 아래면 앱으로 돌아올 때만 반영). **config 가 로컬 디스크가 아니면(SMB·NFS·iCloud 등) 자동으로 읽지 않는다** — 파일 접근이 앱을 멈출 수 있어서다(Reload Config 로). 다시 읽을지는 **내용**으로 판정한다 — 그 창이 마지막으로 읽거나 쓴 내용과 같으면(앱 자신의 세팅 화면 저장) 다시 읽지 않고, 다른 창이 세팅 화면에서 바꿔 쓴 값은 이 창도 읽는다. 아직 파일에 안 쓴 세팅 편집이 있으면 기다렸다가 둘 다 반영한다. 파일을 지우면 기본값으로 다시 읽는다. **스크롤백 줄 수가 줄어드는 것은 자동 다시 읽기에선 새로 여는 터미널부터** 적용한다(열린 터미널의 기록을 되돌릴 수 없이 지우지 않게) — 메뉴 Reload Config·세팅에서 스크롤백을 바꿀 때·전체 리셋은 바로 줄인다. `false` 면 Reload Config 메뉴로만 반영. **감시는 macOS host 에만 있다**(다른 OS 는 이 키와 무관하게 Reload Config 로만) |
 | `font.family` | 문자열 | `JetBrains Mono` | 내부 공백 보존. 비어 있으면 무시(기본 유지). **Windows**: 이 폰트가 설치돼 있지 않으면 `Cascadia Mono` → `Consolas` → `Courier New` 순으로 내려간다([windows-platform.md](windows-platform.md) §2e) — 기본값 `JetBrains Mono`는 Windows에 기본 설치되지 않기 때문이다. OS별로 다르게 두려면 접미를 쓴다(`font.family.windows = Cascadia Mono`) |
 | `font.fallback` | 문자열(쉼표 구분) | (없음) | **폴백 폰트** 목록(예: `Apple SD Gothic Neo, Apple Color Emoji`). 주 `font.family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 기본 폴백을 뒤에 잇는다(`kCTFontCascadeListAttribute`). 각 항목은 앞뒤 공백 trim(내부 공백 보존). 잘못된 폰트명은 무시(best-effort). 비어 있으면 CoreText 기본 폴백만. **Windows**: DirectWrite의 자동 cascade가 `IDWriteFactory2` 이후에만 있어 목록을 앱이 든다 — 이 값 뒤에 내장 티어(`Malgun Gothic` → `Noto Sans KR` → `Microsoft YaHei` → `Microsoft JhengHei` → `Yu Gothic` → `Segoe UI Emoji` → `Segoe UI Symbol`)를 잇는다. **비워 둬도 그 티어는 동작한다** — 고정폭 라틴 폰트에 한글이 없어 비워 두면 한글이 빈 칸이 되기 때문이다(§2e 실측) |
 | `font.family-bold` | 문자열 | (없음) | **bold(SGR 1) 글자용 폰트 패밀리**. 비어 있으면(기본) 주 `font.family`의 bold variant를 쓴다(variant가 없으면 regular 폴백 — 굵기를 합성하지 않음). 설정하면 bold cell을 이 패밀리로 그려 본문과 다른 글꼴로 강조할 수 있다. `font.fallback` cascade를 상속해 bold 한글·이모지도 폴백한다. 패밀리를 못 찾으면 주 폰트 bold로 폴백(best-effort) |
@@ -355,5 +358,5 @@ appearance(폰트/테마/커서)·키바인딩(파싱과 app action 실행 — `
 config가 먼저 와야 뒤따르는 설정형 기능이 하드코딩 후 재작업되지 않는다([구현 계획](implementation-plan.md) 참조).
 후속:
 
-- **파일 변경 자동 감지 reload**: 파일 watcher로 변경을 감지해 자동 재-resolve(자동 감지만 후속). 메뉴의 수동 **Reload Config**(파일 재로드해 재시작 없이 적용)·**Reset to Defaults**(확인 모달 후 `session.keep-alive-after-quit`은 보존하고 나머지 config를 내장 기본값으로 되돌려 파일을 덮어씀 — 커맨드 팝업 "Reset All Settings to Defaults"와 같은 통합 리셋)는 구현됨.
+- **파일 변경 자동 감지 reload**: `behavior.auto-reload`(기본 on). macOS 는 FSEvents 가 config 파일이 든 폴더를 보고, 다시 읽을지는 내용 digest 로 Zig 가 판정한다(자기 write-back 은 다시 읽지 않는다). **Windows·Linux·모바일 host 엔 감시가 아직 없다**(그쪽은 Reload Config 만). 메뉴의 수동 **Reload Config**(파일 재로드해 재시작 없이 적용)·**Reset to Defaults**(확인 모달 후 `session.keep-alive-after-quit`은 보존하고 나머지 config를 내장 기본값으로 되돌려 파일을 덮어씀 — 커맨드 팝업 "Reset All Settings to Defaults"와 같은 통합 리셋)는 구현됨.
 - **다른 셸(bash/fish) 통합·ssh 라우팅**(보류, 2026-06): 셸 통합(macOS 편집키·OSC 133/7·`shell-integration.ssh` ssh 라우팅)은 **현재 zsh 전용**(`ZDOTDIR`+`.zshenv` 주입)이다. fish는 vendor `conf.d`로 깔끔히 주입할 수 있으나, bash는 maru가 **login 셸**로 띄워(`login=true`) `--rcfile`이 무시되고 `~/.bash_profile`만 읽어 사용자 설정을 안 깨는 주입이 까다롭다(레퍼런스 동작 비교 + 신중한 검증 필요). 그래서 별도 후속으로 둔다 — bash/fish 사용자는 그때까지 직접 `maru ssh`를 쓴다.

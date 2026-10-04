@@ -267,7 +267,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
   ABI export, snake_case 이름은 호환 유지 — `AppSession.serializeConfig`가 래핑)도 이 `updateForKeys`를 쓴다. GUI도
   같은 경로(바뀐 필드의 키를 넘김). (full-config diff·dirty 비트마스크는 불필요 — 즉시-저장은 키 단위.)
 - **CS-4-0**(ChromeHost pointer) — 슬라이더·색 그리드 선결. ※ 슬라이더는 이후 `input_box`로 대체됨(slider.zig 제거).
-- **S0-2**(자동 reload) — 외부 편집 즉시 반영(선택, GUI와 직교).
+- **S0-2**(자동 reload) ✅ — 외부 편집 즉시 반영(`behavior.auto-reload`, 기본 on). 판정은 내용 digest 라 GUI write-back 과 직교한다(자기 저장은 다시 읽지 않는다). 단일 출처: [settings-page.md](settings-page.md) §2.
 - 위젯 컴포넌트(CS-4-1~3).
 
 ## 8. PR 분해 (CS-4)

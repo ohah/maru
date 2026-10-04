@@ -284,7 +284,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // only for the call; Zig owns reduction and absent-target publication.
 // 193: quit_after_last_window_closed getter(config `window.quit-after-last-window-closed`) — Swift 의 마지막 창 닫기·
 // 셸 종료 경로가 앱을 끝낼지 Dock 에 남을지 이 값으로 가른다. 끝에 export 추가 — 구조체 offset 불변.
-pub const abi_version: u32 = 193;
+// 194: config_file_changed — platform 파일 감시(FSEvents)가 config 파일 변경을 알린다. 다시 읽을지(behavior.auto-reload·
+// 내용 digest 가 이 창이 마지막으로 읽거나 쓴 것과 다른가)는 Zig 가 판정한다. 끝에 export 추가 — 구조체 offset 불변.
+pub const abi_version: u32 = 194;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -5712,6 +5714,10 @@ pub const AppSession = struct {
     pub fn configPath(self: *AppSession) []const u8 {
         return settings_ops.configPath(self);
     }
+    /// 본문 분리: app_session/settings.zig. ABI(파일 감시 알림)가 직접 부르므로 진입만 남긴다.
+    pub fn configFileChanged(self: *AppSession) bool {
+        return settings_ops.configFileChanged(self);
+    }
     /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
     pub fn openFileContentMenu(
         self: *AppSession,
@@ -5725,7 +5731,9 @@ pub const AppSession = struct {
         return settings_ops.quickTerminalConfig(self);
     }
     /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
+    /// 메뉴 Reload Config(ABI) — 사용자가 고른 시점이라 스크롤백 축소도 바로 적용한다.
     pub fn reloadConfig(self: *AppSession) void {
+        self.allow_scrollback_shrink = true;
         return settings_ops.reloadConfig(self);
     }
     /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
@@ -7654,6 +7662,23 @@ pub const AppSession = struct {
     // override·$HOME/.config/maru/config)은 Zig loader(defaultConfigPath)가 단일 출처 — Swift는 Open Config
     // 메뉴에서 이 경로를 받아 파일을 열기만 한다(파일 열기는 OS 동작이라 platform 소유).
     config_path_buffer: ?[]const u8 = null,
+    // config 파일 내용의 digest — 이 창이 **마지막으로 읽었거나 쓴** 내용. 파일 감시(자동 reload)가 변경을 알려도
+    // 이 값과 같으면 다시 읽지 않는다(앱 자신의 write-back 이 자기를 다시 읽지 않게). null = 아직 모른다.
+    config_file_digest: ?u64 = null,
+    // 지금 진행 중인 reloadConfig 가 **자동**(파일 변경 감지)인가. 사용자가 고른 시점이 아니라 편집기 자동 저장의 중간
+    // 값·지운 줄이 닿을 수 있어, 되돌릴 수 없는 적용(스크롤백 축소)을 미룬다. configFileChanged 만 세운다.
+    reload_is_automatic: bool = false,
+    // 사용자가 **그 시점을 고른** 적용인가(메뉴 Reload Config·세팅에서 scrollback.lines 변경·전체 리셋). 이때만 살아 있는
+    // Term 의 스크롤백을 줄인다 — 줄이기는 되돌릴 수 없다. 그 밖의 재적용(자동 reload·다른 키 변경·시스템 외관 자동
+    // 전환의 reapply)은 줄이지 않는다. reapplyScrollback 이 읽고 끈다.
+    allow_scrollback_shrink: bool = false,
+    // serializeConfig 가 만들어 Swift 가 곧 쓸 텍스트의 digest. 파일이 이 내용이 되면 자기 쓰기로 보고 기준선을 옮긴다 —
+    // **쓰기가 실패하면 파일은 기준선 그대로라 다시 읽지 않는다**(먼저 옮기면 실패한 쓰기 뒤 다음 확인이 세팅 변경을
+    // 파일의 옛 값으로 되돌렸다 — 읽기 전용 링크(nix)·디스크 가득 참, 적대적 검증).
+    config_expected_write_digest: ?u64 = null,
+    // 살아 있는 Term 들에 적용된 스크롤백 상한 중 **가장 큰 값**. 자동 reload 의 축소는 이 값보다 작으면 기존 Term 을
+    // 건드리지 않는다(새 Term 부터) — 앞서 미룬 축소가 있으면 기존 Term 은 이 값을 아직 들고 있다.
+    live_scrollback_max: u32 = 0,
     // Cmd+hover 중인 URL 시작 셀의 절대 좌표(밑줄 렌더용). 뷰포트가 아니라 절대 좌표라 스크롤/출력
     // 으로 내용이 움직여도 따라간다(매 frame hoverLinkSpanFor가 현재 뷰포트로 클립).
     hover_url_anchor: ?terminal.SelectionPoint = null,
@@ -8065,11 +8090,16 @@ pub const AppSession = struct {
         // 잡는다). 단위 테스트에서는 개발자의 실제 config를 읽으면 비결정적이라 빈 config로 고정한다
         // (파싱 규칙은 loader 단위 테스트가 본다). loaded_config는 세션 동안 보관(family 슬라이스 빌림).
         // config_loaded 가드를 세워 이후 init 실패가 이 arena를 이중 해제하지 않게 한다.
+        // 자동 reload 의 기준선은 **로더가 읽기 전에** 잡는다(reloadConfig 와 같은 이유 — 읽은 뒤에 잡으면 그 사이 저장이
+        // 기준선과 메모리를 갈라 다음 편집까지 반영되지 않는다). 테스트는 파일이 아니라 텍스트에서 읽으므로 비워 둔다.
+        const pre_load_digest: ?u64 = if (builtin.is_test) null else settings_ops.configFileDigest(self);
         self.loaded_config = if (builtin.is_test)
             try config_mod.parseConfig(allocator, test_config_text)
         else
             try config_mod.loadConfigDefault(io, allocator);
         self.config_loaded = true;
+        self.live_scrollback_max = self.loaded_config.config.scrollback.lines;
+        self.config_file_digest = pre_load_digest;
         // 최초 로드도 언어를 세운다 — reload·GUI 변경 경로(settings.reapplyUiLanguage)만 배선하면 앱을
         // 켜고 아무것도 안 건드린 상태에서 `ui.language` 가 무시된다. 여기서 `self` 는 아직 조립 중이라
         // 헬퍼(`*AppSession` 을 받는다)를 부르지 않고 전역만 직접 세운다 — 이 호출이 읽는 것은 방금
@@ -61019,6 +61049,217 @@ test "close-confirm: 앱 유지 설정의 앱 전역 값은 토글·행 되돌�
     }
     // 새 창 생성은 세우지 않는다(파일 쓰기 실패 중 옛 파일 값이 사용자 선택을 덮는다).
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, @embedFile("app_session.zig"), "        if (app_quit_after_last_window_closed != null)\n            app_quit_after_last_window_closed ="));
+}
+
+// config 자동 reload(behavior.auto-reload, settings-page.md §2 S0-2) — 파일 감시는 알리기만 하고 **판정은 여기**다.
+// 내용이 이 창이 마지막으로 읽거나 쓴 것과 같으면 무동작(앱 자신의 write-back), 다르면 다시 읽는다. 끄면 무동작.
+test "config 자동 reload: 바뀐 내용만 다시 읽고, 자기 write-back·끈 설정·같은 내용은 무동작이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer settings_ops.clearConfigDirty(session);
+
+    // 실제 사용자 config 를 건드리지 않게 tmp 파일로 redirect 한다(reloadConfig 도 configPath 에서 읽는다).
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [4096]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, cfg_path);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "window.quit-after-last-window-closed = true\n" });
+    session.config_file_digest = settings_ops.configFileDigest(session); // 기준선 = 지금 내용
+
+    // (1) 알림이 왔는데 내용이 같다 → 다시 읽지 않는다.
+    try std.testing.expect(!settings_ops.configFileChanged(session));
+
+    // (2) 외부 편집 → 다시 읽는다(새 값이 이 창에 선다).
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "window.quit-after-last-window-closed = false\n" });
+    try std.testing.expect(settings_ops.configFileChanged(session));
+    try std.testing.expect(!session.loaded_config.config.window_quit_after_last_window_closed);
+    try std.testing.expect(!settings_ops.configFileChanged(session)); // 다시 읽은 뒤엔 같은 내용 — 무동작
+
+    // (3) 앱 자신의 write-back: 세팅 화면이 값을 바꿔(dirty) serializeConfig 가 **다른 내용**을 만들고 그대로 쓰면,
+    //     그 창은 다시 읽지 않는다(기준선이 쓴 내용으로 옮겨 갔다).
+    session.loaded_config.config.window_quit_after_last_window_closed = true;
+    settings_ops.markConfigKeyDirty(session, "window.quit-after-last-window-closed");
+    const own = try settings_ops.serializeConfig(session);
+    try std.testing.expect(std.mem.indexOf(u8, own, "window.quit-after-last-window-closed = true") != null); // 정말 바뀐 내용
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = own });
+    try std.testing.expect(!settings_ops.configFileChanged(session));
+
+    // (3a) 쓰기가 **실패**하면(읽기 전용 링크·디스크 가득 참) 파일은 옛 내용 그대로다 — 기준선을 먼저 옮기지 않으므로
+    //      다시 읽지 않고, 세팅 변경이 메모리에 남는다(옛 값으로 되돌아가지 않는다).
+    session.loaded_config.config.window_quit_after_last_window_closed = false;
+    settings_ops.markConfigKeyDirty(session, "window.quit-after-last-window-closed");
+    _ = try settings_ops.serializeConfig(session); // Swift 쓰기가 실패했다고 친다 — 파일은 안 바뀐다
+    try std.testing.expect(!settings_ops.configFileChanged(session));
+    try std.testing.expect(!session.loaded_config.config.window_quit_after_last_window_closed);
+    session.loaded_config.config.window_quit_after_last_window_closed = true; // 파일(own) 값으로 되돌려 아래 단계와 맞춘다
+
+    // (3b) 외부 편집(E) 직후 이 창이 write-back(K) 하면 파일은 E+K 지만 이 창 메모리엔 E 가 없다 — 기준선을 옮기지
+    //      않아 곧 올 알림에 다시 읽고, E 와 K 를 둘 다 갖는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "window.quit-after-last-window-closed = true\nbell.audible = false\n" });
+    session.loaded_config.config.window_quit_after_last_window_closed = false;
+    settings_ops.markConfigKeyDirty(session, "window.quit-after-last-window-closed");
+    const merged = try settings_ops.serializeConfig(session);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = merged });
+    try std.testing.expect(session.loaded_config.config.bell.audible); // 아직 E 를 모른다
+    try std.testing.expect(settings_ops.configFileChanged(session));
+    try std.testing.expect(!session.loaded_config.config.bell.audible); // E
+    try std.testing.expect(!session.loaded_config.config.window_quit_after_last_window_closed); // K
+
+    // (4) 파일을 지우면 빈 내용 — 기본값으로 다시 읽는다.
+    try tmp.dir.deleteFile(io, "config");
+    try std.testing.expect(settings_ops.configFileChanged(session));
+    try std.testing.expect(session.loaded_config.config.window_quit_after_last_window_closed);
+
+    // (5) 끄면 내용이 바뀌어도 다시 읽지 않는다(Reload Config 메뉴만).
+    session.loaded_config.config.behavior_auto_reload = false;
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "behavior.auto-reload = false\nwindow.quit-after-last-window-closed = false\n" });
+    try std.testing.expect(!settings_ops.configFileChanged(session));
+    try std.testing.expect(session.loaded_config.config.window_quit_after_last_window_closed);
+
+    // (6) 꺼진 창이라도 **새 내용이 다시 켜는 것**이면 따른다(다른 창이 세팅 화면에서 켜 쓴 경우).
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "behavior.auto-reload = true\nwindow.quit-after-last-window-closed = false\n" });
+    try std.testing.expect(settings_ops.configFileChanged(session));
+    try std.testing.expect(session.loaded_config.config.behavior_auto_reload);
+    try std.testing.expect(!session.loaded_config.config.window_quit_after_last_window_closed);
+
+    // (7) 전체 리셋이 쓴 파일도 자기 쓰기다 — 다시 읽지 않는다.
+    settings_ops.resetAllSettings(session);
+    try std.testing.expect(!settings_ops.configFileChanged(session));
+}
+
+// reload·digest 는 config 경로를 **캐시하지 않는다**. 캐시가 서면 테스트 쓰기 가드(configWritePath — 버퍼가 null 이면
+// 쓰기 스킵)가 풀려, 뒤따르는 writer(전체 리셋 등)가 실 사용자 config 를 덮는다(적대적 검증 — 자동 reload 가 reload 를
+// configPath() 로 바꾸며 이 가드를 풀 뻔했다).
+test "config reload·digest 는 경로를 캐시하지 않는다 — 실 config 쓰기 가드를 지킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer settings_ops.clearConfigDirty(session);
+    try std.testing.expect(session.config_path_buffer == null);
+    _ = settings_ops.configFileDigest(session);
+    settings_ops.reloadConfig(session);
+    try std.testing.expect(session.config_path_buffer == null);
+    try std.testing.expectEqual(@as(usize, 0), settings_ops.configWritePath(session).len); // 쓰기는 여전히 스킵
+}
+
+// 자동 reload 는 사용자가 고른 시점이 아니다 — 편집기 자동 저장의 중간 값·다른 창의 저장이 닿는다. 그래서 되돌릴 수
+// 없는 적용·열린 UI 상태·쓰지 않은 편집을 지킨다(적대적 검증 엣지 케이스 재검증).
+test "config 자동 reload 가드: 스크롤백 축소는 새 Term 부터, 열린 드롭다운은 닫고, 쓰지 않은 편집은 미룬다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer settings_ops.clearConfigDirty(session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [4096]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, cfg_path);
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // 기준: 메뉴 Reload 로 5000 줄(사용자가 고른 시점 — 바로 적용).
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 5000\n" });
+    session.reloadConfig();
+    try std.testing.expectEqual(@as(u32, 5000), session.live_scrollback_max);
+
+    // (1) 자동 reload 의 축소(편집기가 `50000` 을 치다 `5` 를 저장) — 살아 있는 Term 은 안 줄인다. config 는 5(새 Term).
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 5\n" });
+    try std.testing.expect(settings_ops.configFileChanged(session));
+    try std.testing.expectEqual(@as(u32, 5), session.loaded_config.config.scrollback.lines);
+    try std.testing.expectEqual(@as(u32, 5000), session.live_scrollback_max); // 기존 Term 은 5000 그대로
+    // 미뤄 둔 축소는 **다른 재적용**(다른 키 변경·시스템 외관 자동 전환의 reapply)에서도 적용되지 않는다.
+    settings_ops.reapplyLoadedConfig(session);
+    try std.testing.expectEqual(@as(u32, 5000), session.live_scrollback_max);
+    // 늘어나는 것은 바로 적용한다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 8000\n" });
+    try std.testing.expect(settings_ops.configFileChanged(session));
+    try std.testing.expectEqual(@as(u32, 8000), session.live_scrollback_max);
+    // 건너뛴 뒤의 증가는 가장 큰 값으로 맞춘다(작은 값으로 만든 새 Term 도 줄지 않고 늘어난다).
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 3000\n" });
+    try std.testing.expect(settings_ops.configFileChanged(session));
+    try std.testing.expectEqual(@as(u32, 8000), session.live_scrollback_max);
+    // 대조군: 메뉴 Reload 는 줄이는 것도 바로(사용자가 고른 시점).
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 100\n" });
+    session.reloadConfig();
+    try std.testing.expectEqual(@as(u32, 100), session.live_scrollback_max);
+
+    // (2) 열린 드롭다운의 되돌리기 스냅샷은 옛 arena 를 가리킨다 — reload 가 닫고 버린다(취소가 해제된 메모리를 안 읽게).
+    session.dropdown_snapshot_kind = .font;
+    session.dropdown_snapshot_font = session.loaded_config.config.font.family;
+    session.chrome_host.settings.dropdown.open = true;
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 200\n" });
+    try std.testing.expect(settings_ops.configFileChanged(session));
+    try std.testing.expect(session.dropdown_snapshot_kind == .none);
+    try std.testing.expectEqual(@as(usize, 0), session.dropdown_snapshot_font.len);
+    try std.testing.expect(!session.chrome_host.settings.dropdown.open);
+
+    // (3) 아직 파일에 안 쓴 세팅 편집이 있으면 다시 읽지 않는다(편집이 사라지지 않게). 쓰고 나면 다음 확인이 읽는다.
+    session.loaded_config.config.bell.audible = false;
+    settings_ops.markConfigKeyDirty(session, "bell.audible");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 300\n" });
+    try std.testing.expect(!settings_ops.configFileChanged(session));
+    try std.testing.expect(!session.loaded_config.config.bell.audible); // 편집 그대로
+    const written = try settings_ops.serializeConfig(session); // write-back(외부 편집 300 + 편집 bell=false)
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = written });
+    try std.testing.expect(settings_ops.configFileChanged(session)); // 원본이 기준선과 달라 기준선이 안 옮겨졌다 → 읽는다
+    try std.testing.expectEqual(@as(u32, 300), session.loaded_config.config.scrollback.lines);
+    try std.testing.expect(!session.loaded_config.config.bell.audible);
+}
+
+// write-back 은 원본을 못 읽으면 **쓰지 않는다**(빈 원본으로 보고 바뀐 키만 남겨 덮었다), 심볼릭 링크면 실제 파일에 쓴다.
+test "config write-back: 못 읽는 원본은 덮지 않고, 심볼릭 링크는 끊지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer settings_ops.clearConfigDirty(session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var path_buf: [4096]u8 = undefined;
+
+    // (1) 1 MiB 를 넘는 원본 — serializeConfig 가 실패하고 파일은 그대로다.
+    const big = try allocator.alloc(u8, (1 << 20) + 16);
+    defer allocator.free(big);
+    @memset(big, '#');
+    try tmp.dir.writeFile(io, .{ .sub_path = "big", .data = big });
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/big", .{tmp.sub_path}));
+    settings_ops.markConfigKeyDirty(session, "bell.audible");
+    try std.testing.expectError(error.ConfigUnreadable, settings_ops.serializeConfig(session));
+    try std.testing.expect(!settings_ops.takeConfigDirty(session)); // 매 tick 1 MiB 재시도로 돌지 않게 비운다
+
+    // (2) config 가 심볼릭 링크(dotfiles) — 전체 리셋이 실제 파일에 쓰고 링크는 그대로다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "real", .data = "bell.audible = false\n" });
+    try tmp.dir.symLink(io, "real", "link", .{});
+    allocator.free(session.config_path_buffer.?);
+    session.config_path_buffer = try allocator.dupe(u8, try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/link", .{tmp.sub_path}));
+    settings_ops.resetAllSettings(session);
+    var link_buf: [256]u8 = undefined;
+    const link_n = try tmp.dir.readLink(io, "link", &link_buf);
+    try std.testing.expectEqualStrings("real", link_buf[0..link_n]); // 링크가 살아 있다
+    const real = try tmp.dir.readFileAlloc(io, "real", allocator, .limited(1 << 16));
+    defer allocator.free(real);
+    try std.testing.expect(std.mem.indexOf(u8, real, "bell.audible = false") == null); // 리셋이 실제 파일에 닿았다
 }
 
 test "close-confirm: 풀스크린 TUI(alt 화면)면 셸 통합 없이도 확인 모달을 띄운다" {

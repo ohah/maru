@@ -3795,6 +3795,134 @@ final class MaruTerminalContainerView: NSView {
 // 한 터미널 세션의 per-session 상태 — 창/PTY(appSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
 // 컨트롤러가 메인 창을 `primary`로 들고, quick terminal(후속)이 두 번째 인스턴스가 된다. 세션별 로직은
 // 컨트롤러 메서드가 이 surface의 상태를 읽고 쓰며 수행한다(상태만 여기 — 두 세션이 같은 메서드를 공유).
+private let maruConfigFSEventCallback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, _ in
+    guard let info else { return }
+    let watcher = Unmanaged<MaruConfigFileWatcher>.fromOpaque(info).takeUnretainedValue()
+    let array = unsafeBitCast(eventPaths, to: NSArray.self)
+    let paths = array.compactMap { $0 as? String }
+    let flags = Array(UnsafeBufferPointer(start: eventFlags, count: count))
+    DispatchQueue.main.async { watcher.handle(paths, flags: flags) }
+}
+
+/// config 파일 자동 reload(`behavior.auto-reload`)의 native 감시 — settings-page.md §2 S0-2. **폴링하지 않는다**: 바뀌면
+/// FSEvents 가 알리고, 그 밖엔 앱이 앞으로 올 때(`revalidate`) 한 번 본다 — config 는 보통 다른 앱(편집기)에서 고치고
+/// 돌아오므로, 그 한 번이 FSEvents 가 못 보는 경우(dotfiles 폴더 링크 재연결·끊어진 링크가 나중에 살아남·놓친 이벤트)를
+/// 메운다. 알리기만 하고 판정(내용 digest·설정)은 Zig 가 한다.
+/// 폴더를 보는 이유: 편집기는 흔히 임시 파일에 쓰고 rename 해 저장한다. latency 0.5s 가 연속 저장을 한 번으로 모은다.
+/// **폴더를 만들지 않는다**(없으면 감시 없이 활성화 확인만 — 나중에 생기면 그때 건다). 홈·`/` 처럼 넓은 폴더는
+/// FSEvents 로 보지 않는다(무관한 이벤트가 쏟아진다). **로컬 디스크가 아니면(SMB·NFS·iCloud 등) 아무것도 안 한다** —
+/// 파일 접근이 main 스레드를 몇 초씩 막을 수 있어(끊긴 서버·내려받지 않은 파일) 앱 전환마다 멈추게 된다. 그쪽은
+/// Reload Config 메뉴로 반영한다.
+@MainActor
+final class MaruConfigFileWatcher {
+    private var stream: FSEventStreamRef?
+    private var configPath = ""
+    private var watchedFiles: Set<String> = []
+    private var watchedNames: Set<String> = []
+    private var watchedDirs: Set<String> = []
+    // 설정 경로가 로컬 디스크인가 — 시작할 때 한 번 판정한다(판정 자체가 끊긴 서버에선 막힐 수 있어 매번 하지 않는다).
+    private var configIsLocal = true
+    private let onChange: () -> Void
+
+    init(onChange: @escaping () -> Void) { self.onChange = onChange }
+
+    func start(configPath path: String) {
+        configPath = path
+        let dir = URL(fileURLWithPath: path).standardizedFileURL.deletingLastPathComponent()
+        let values = try? dir.resourceValues(forKeys: [.volumeIsLocalKey])
+        configIsLocal = values?.volumeIsLocal ?? true // 폴더가 아직 없으면 판정 불가 — 기본 경로(로컬)로 본다
+        rebuild()
+    }
+
+    /// 앱이 앞으로 왔다 — 링크·폴더가 바뀌었으면 감시를 다시 걸고, 판정은 Zig 에 한 번 맡긴다(내용이 같으면 무동작).
+    func revalidate() {
+        guard !configPath.isEmpty, configIsLocal else { return }
+        rebuild()
+        onChange()
+    }
+
+    private func rebuild() {
+        guard configIsLocal else { return }
+        let link = URL(fileURLWithPath: configPath).standardizedFileURL
+        let target = link.resolvingSymlinksInPath()
+        // FSEvents 는 /tmp·/var 를 /private 아래 실제 경로로 알린다 — 파일이 지워지면 resolvingSymlinksInPath 가 접두를
+        // 못 떼므로(존재할 때만 뗀다) 두 철자를 다 둔다.
+        var files: Set<String> = [link.path, target.path]
+        for file in files where file.hasPrefix("/tmp/") || file.hasPrefix("/var/") { files.insert("/private" + file) }
+        let names = Set(files.map { ($0 as NSString).lastPathComponent })
+        // 넓은 폴더 — `$HOME`(Zig 경로가 따르는 값)과 계정 홈(NSHomeDirectory 는 $HOME 을 안 따른다) 둘 다, 그리고 `/`.
+        var broad: Set<String> = ["/", URL(fileURLWithPath: NSHomeDirectory()).resolvingSymlinksInPath().path]
+        if let envHome = ProcessInfo.processInfo.environment["HOME"], !envHome.isEmpty {
+            broad.insert(URL(fileURLWithPath: envHome).resolvingSymlinksInPath().path)
+        }
+        let dirs = Set([link, target].map { $0.deletingLastPathComponent().resolvingSymlinksInPath().path }).filter { dir in
+            var isDir: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: dir, isDirectory: &isDir) && isDir.boolValue
+            return exists && !broad.contains(dir)
+        }
+        watchedFiles = files
+        watchedNames = names
+        if dirs == watchedDirs && (stream != nil || dirs.isEmpty) { return }
+        stop()
+        watchedDirs = dirs
+        guard !dirs.isEmpty else { return } // 감시할 폴더가 없다(없거나 넓다) — 활성화 확인만
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents)
+        // 지금부터 받는다 — 다시 걸 때 옛 이벤트를 재생하지 않는다(새 폴더의 이력 전체가 쏟아질 수 있다). 거는 사이의
+        // 틈은 이 직후의 onChange(handle·revalidate)가 메운다(내용 digest 판정).
+        guard let created = FSEventStreamCreate(
+            kCFAllocatorDefault,
+            maruConfigFSEventCallback,
+            &context,
+            Array(dirs).sorted() as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.5,
+            flags
+        ) else { return }
+        FSEventStreamSetDispatchQueue(created, DispatchQueue.main)
+        guard FSEventStreamStart(created) else {
+            FSEventStreamInvalidate(created)
+            FSEventStreamRelease(created)
+            return
+        }
+        stream = created
+    }
+
+    func handle(_ paths: [String], flags: [FSEventStreamEventFlags]) {
+        // 이벤트를 놓쳤다는 신호(coarse)면 어떤 파일이 바뀌었는지 모르니 판정을 Zig 에 맡긴다(내용이 같으면 무동작).
+        let coarseMask = FSEventStreamEventFlags(
+            kFSEventStreamEventFlagMustScanSubDirs |
+                kFSEventStreamEventFlagUserDropped |
+                kFSEventStreamEventFlagKernelDropped
+        )
+        let coarse = flags.contains { ($0 & coarseMask) != 0 }
+        // 파일 이름이 다른 이벤트는 경로 해석(lstat) 없이 문자열로 먼저 거른다.
+        let touched = paths.contains { path in
+            guard watchedNames.contains((path as NSString).lastPathComponent) else { return false }
+            let url = URL(fileURLWithPath: path)
+            return watchedFiles.contains(url.standardizedFileURL.path) || watchedFiles.contains(url.resolvingSymlinksInPath().path)
+        }
+        guard coarse || touched else { return }
+        onChange()
+        rebuild() // 링크가 다른 파일을 가리키게 바뀌었으면(dotfiles 재연결) 새 실제 파일의 폴더로 다시 건다
+    }
+
+    func stop() {
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
+        }
+    }
+}
+
 private let maruFileTreeFSEventCallback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, eventIds in
     guard let info else { return }
     let watcher = Unmanaged<MaruFileTreeWatcher>.fromOpaque(info).takeUnretainedValue()
@@ -4805,6 +4933,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var lastQuickTerminalConfig: MaruAppHostQuickTerminalConfig?
     // 마지막으로 읽은 config frame-loop 주기(Hz). 창 0 개(세션 없음) 동안 쓴다.
     private var lastConfiguredFrameLoopRateHz: UInt32 = 60
+    // config 파일 자동 reload 감시(앱 전역 하나). 판정은 Zig — 이건 알리기만 한다.
+    private var configFileWatcher: MaruConfigFileWatcher?
     private var exitCode: Int32 = 0
     private var latestFrameSummary: MaruAppHostFrameSummary {
         get { activeSurface?.latestFrameSummary ?? MaruAppHostFrameSummary() }
@@ -5124,6 +5254,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if !smokeMode {
             // 전역(OS) 단축키를 OS에 등록한다(앱이 비활성이어도 동작). smoke는 자동 종료라 등록하지 않는다.
             registerGlobalHotkeys()
+            // config 파일 자동 reload(behavior.auto-reload) 감시를 건다. smoke 는 사용자 config 를 안 본다.
+            startConfigFileWatcher()
         }
 
         // The first frame can already expose the cold dock launcher.  Install the fixture driver
@@ -5544,6 +5676,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 한 번에 클리어한다(어느 창을 포커스하든). 배지를 안 띄웠으면 빈 라벨 대입은 무해.
         _ = notification
         NSApp.dockTile.badgeLabel = nil
+        // config 를 다른 앱(편집기)에서 고치고 돌아왔다 — FSEvents 가 못 보는 경우(폴더 링크 재연결·네트워크 드라이브 등)를
+        // 여기서 한 번 메운다. 폴링 대신이다(내용이 같으면 Zig 가 무동작).
+        configFileWatcher?.revalidate()
     }
 
     // macOS 시스템 외관이 다크인지(NSAppearance). NSApp 전역 외관을 light/dark 중 가까운 쪽으로 매칭한다(F2-9).
@@ -10001,6 +10136,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    /// config 파일 자동 reload 감시를 건다(앱 전역 하나). 경로는 Zig 가 단일 출처(MARU_CONFIG·$HOME/.config/maru/config).
+    private func startConfigFileWatcher() {
+        guard let session = appSession else { return }
+        var ptr: UnsafePointer<UInt8>? = nil
+        var len: size_t = 0
+        guard maru_macos_app_session_config_path(session, &ptr, &len) == Self.statusOK,
+              let bytes = ptr, len > 0 else { return }
+        let path = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+        let watcher = configFileWatcher ?? MaruConfigFileWatcher { [weak self] in self?.configFileChanged() }
+        configFileWatcher = watcher
+        watcher.start(configPath: path)
+        // 첫 세션이 읽은 뒤부터 감시를 건 지금까지의 저장은 이벤트가 없다 — 한 번 판정한다(내용이 같으면 무동작).
+        configFileChanged()
+    }
+
+    /// 감시가 config 파일 변경을 알렸다 — 살아 있는 세션(일반 창 + quick)마다 Zig 에 알린다. 다시 읽을지는 Zig 가
+    /// 창마다 판정한다(behavior.auto-reload·내용 digest). 하나라도 다시 읽었으면 Reload Config 메뉴와 같은 platform 쪽
+    /// 재적용(열린 편집기 syntax 색)을 한다. 메뉴바·전역 단축키·frame 주기는 다음 tick 의 drain 이 따라간다.
+    private func configFileChanged() {
+        var sessions = windows.compactMap(\.appSession)
+        if let quickSession = quick?.appSession { sessions.append(quickSession) }
+        var reloaded = false
+        for session in sessions where maru_macos_app_session_config_file_changed(session) != 0 { reloaded = true }
+        if reloaded { refreshFilePanelSyntaxTheme() }
+    }
+
     /// Reload Config — config 파일을 재로드해 재시작 없이 반영한다(폰트·여백·테마·palette·scrollback·bell·page-keys).
     /// 파일 재로드·파싱·재적용은 Zig가 단일 출처로 한다(forgiving — 실패 시 무동작). 여기선 활성 세션에 호출만 한다.
     @objc private func menuReloadConfig(_ sender: Any?) {
@@ -10027,10 +10188,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var textLen: size_t = 0
         guard maru_macos_app_session_serialize_sidebar_config(session, &textPtr, &textLen) == Self.statusOK,
               let textBytes = textPtr, textLen > 0 else { return }
-        let text = String(decoding: UnsafeBufferPointer(start: textBytes, count: textLen), as: UTF8.self)
-        let url = URL(fileURLWithPath: path)
+        // Zig 가 만든 바이트를 그대로 쓴다 — String 왕복은 잘못된 UTF-8(옛 Latin-1 주석 등)을 U+FFFD 로 바꿔, 실제 파일이
+        // Zig 가 기준선으로 세운 내용과 달라지고 자동 reload 가 자기 쓰기를 다시 읽는다.
+        let data = Data(bytes: textBytes, count: textLen)
+        // config 가 심볼릭 링크(dotfiles)면 실제 파일에 쓴다 — 링크 자리에 atomic 으로 쓰면 링크가 일반 파일로 바뀐다.
+        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? text.data(using: .utf8)?.write(to: url, options: .atomic)
+        try? data.write(to: url, options: .atomic)
     }
 
     /// Reset to Defaults — 모든 config를 내장 기본값으로 되돌리고 config 파일을 기본 상태로 덮어쓴다(Zig resetAllSettings 단일 함수 —

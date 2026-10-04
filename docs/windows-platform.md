@@ -10967,3 +10967,34 @@ junction은 실제 부모 핸들 상대 reopen의 `NotFound`로 거부됐다. ta
 일시적 같은-ID junction 판정이 실패함을 확인했다. 이 추가 변이는 앞의 다섯 회와 별도로 센다.
 실험적 TxF 경로의 제한된 경쟁 시퀀스 검증이며, capability·crash 복구·모든 실패 타이밍·L2 저장 ack와
 일반 키보드/IME 편집→디스크 저장→재열기 연결은 계속 진행 대상이다.
+
+### 2m.146 L2 저장 요청과 native 결정의 연결 (2026-10-04)
+
+플랫폼 공통 `session.editor.save_request`에 owned 이미지와 문서 완료 정책을 추가했다.
+request lease, opened epoch, 요청 순서, editor/persisted revision과 body/raw disk 해시를 함께 검증한다.
+호스트 byte 상한을 BOM까지 포함해 할당 전에 검사한다. 원본 file ID·grant·native I/O는 L4 책임을 유지한다.
+공통 파일에는 macOS host나 Windows ABI 의존성이 없다.
+
+실험적 `Transaction.writeDocument`는 main-thread 문서 권위를 쓰기 전에 재검사하고,
+native begin이 확인한 source 지문과 요청의 raw image 지문이 맞을 때만 정확한 이미지 bytes를 쓴다.
+native transaction은 쓴 request lease·순서·raw 해시를 기억한다. `acknowledgeDocument`는
+다른 요청과 일반 byte write를 거부하며 native committed일 때만 L2의 저장 축을 갱신한다.
+prepared는 저장 완료가 아니다. uncertain은 실제 결과 조회 전 재저장을 막고,
+rolled_back은 dirty와 디스크 지문을 보존한다. 새 disk 관측 때문에 ack가 거절돼도 확인된 결과의
+자기 uncertainty는 해제하며 다른 요청의 uncertainty는 해제하지 않는다.
+
+공통 판정 11개에서 저장 중 추가 편집/undo clean, BOM/raw 지문, 같은 이미지의 늦은 ack,
+disk/경로 변경, opened lifetime 교체, 마지막 뷰 닫기, 모든 할당 실패, readonly/remote/상한,
+쓰기 전 권위, uncertain 재시도 차단과 확인된 결과의 정산을 검증했다.
+실제 Windows 판정 세 개는 BOM/CRLF bytes의 commit과 추가 편집 dirty,
+rollback 원본 보존, 실제 commit의 응답 유실 뒤 KTM 재조회 전후 ack 차이를 검사했다.
+safe-save는 기존 경로 판정을 포함해 root 61개이며 별도 경로 판정 29개를 유지한다.
+
+공통 정책에서 현재 본문으로 clean 처리·BOM 없는 disk 해시·disk CAS 생략·늦은 ack 허용·
+lifetime 확인 생략의 다섯 변이를 runtime 실패로 검출했다. uncertainty 게시 생략 변이는 별도로 검출했다.
+native 연결에서도 prepared를 saved로 처리·uncertain을 saved로 처리·다른 요청 ack 허용·
+source 지문 생략·image 지문 생략의 다섯 변이를 검출했다. 쓰기 전 문서 권위 생략은 별도 변이로 검출했다.
+모든 변이는 원복 후 정상 판정을 재실행했다.
+
+일반 GUI 저장은 활성화하지 않았다. capability·crash 복구·실패 타이밍 전체·일반 키보드/IME 입력·
+dirty-close·외부 감시와 편집→디스크 저장→재열기 실앱 연결은 계속 진행 대상이다.

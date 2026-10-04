@@ -1731,3 +1731,27 @@ LSP version과 미저장 백업의 dirty·due·on_disk·paused는 뷰가 아닌
 수락한 닫기 범위 밖에 문서 뷰가 남으면 백업을 보존하며, 같은 문서를 모두 닫을 때는 이름을
 한 번 포착해 정산한다. 앱 종료는 기존 flush와 복원 레코드 보존 정책을 유지한다.
 provider의 실제 배선은 [에디터 tooling](editor-surface-tooling.md)의 공유 정본 절을 참조한다.
+
+### 저장 요청 이미지와 완료 수명 (2026-10-04)
+
+`session.editor.save_request.Request`는 main-thread 문서 정책이다. Registry의 request lease로
+열린 문서 수명을 붙들고 경로·BOM/줄바꿈 보존 bytes·본문 해시·raw disk 해시·요청 revision을
+독립 소유한다. 호스트가 지정한 byte 상한은 BOM까지 포함해 할당 전에 확인한다.
+실패한 준비는 요청 clock을 발급하거나 숨은 lease를 남기지 않는다.
+
+`State.persistence`는 열린 lifetime epoch, issued/acknowledged 순서와 persisted revision을 소유한다.
+`clearOpened`는 epoch를 되감지 않고 다음 lifetime으로 진행한다. 상한 clock은 재사용하지 않는다.
+쓰기 직전과 완료 직후에 같은 문서 lifetime·경로·disk 지문·요청 순서를 검증한다.
+완료는 현재 본문이 아닌 요청 시점의 본문을 saved hash로 삼는다. 저장 중 추가 편집은 dirty이고,
+실제 저장된 내용으로 undo하면 더 높은 revision이어도 clean이다. BOM 포함 raw 해시는 disk 축이다.
+
+native 결과가 uncertain이면 그 문서의 새 요청과 기존 요청의 추가 쓰기를 막는다.
+확인된 commit/abort는 자신의 uncertain 순서만 해제한다. 그 사이 새 disk 관측이나 경로 변경으로
+내용 ack가 거절되더라도 확인된 native 결과의 uncertainty를 영구히 남기지 않는다.
+미확정 요청을 해제하는 것은 rollback 증거가 아니므로 쓰기 차단을 자동 해제하지 않는다.
+호스트는 실제 결과 정산을 수행하며, 프로세스 종료 후 복구와 디스크 권위는 이 L2 정책의 범위 밖이다.
+
+Windows의 실험적 transaction이 `writeDocument`로 정확한 요청 이미지를 쓰고
+`acknowledgeDocument`로 native commit/rollback/reconcile 결과를 전달한다.
+grant와 원본 file identity는 여전히 native 호스트 책임이다. 이 공통 경계는 파일 권한을 발급하거나
+일반 GUI 저장을 활성화하지 않는다. 검증과 잔여 범위는 [Windows 계약](windows-platform.md) §2m.146에 기록한다.

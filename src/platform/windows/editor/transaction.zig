@@ -119,6 +119,10 @@ pub const Transaction = struct {
     file: std.Io.File,
     file_open: bool = true,
     identity: identity_mod.Identity,
+    source_hash: u64,
+    request_lease: ?maru.session.editor.document_registry.Lease = null,
+    request_sequence: u64 = 0,
+    request_disk_hash: u64 = 0,
     phase: Phase = .active,
 
     /// Caller keeps every pinned parent alive until close. The original basename,
@@ -156,7 +160,36 @@ pub const Transaction = struct {
         const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
         try checkBinding(a, io, pinned, identity);
         if (try diskHash(file, io, limit) != expected_hash) return error.SourceChanged;
-        return .{ .transaction = transaction, .file = file, .identity = identity };
+        return .{ .transaction = transaction, .file = file, .identity = identity, .source_hash = expected_hash };
+    }
+
+    /// The host still binds its grant/file identity before begin. This seam writes
+    /// exactly one owned L2 image and binds any later ack to that request lease.
+    pub fn writeDocument(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request) !void {
+        try request.validateForWrite();
+        if (request.expected_disk_hash != self.source_hash) return error.DiskFingerprintChanged;
+        if (maru.session.editor.document_state.contentHash(request.bytes) != request.disk_hash) return error.CorruptSaveImage;
+        try self.write(io, request.bytes);
+        self.request_lease = request.lease;
+        self.request_sequence = request.sequence;
+        self.request_disk_hash = request.disk_hash;
+    }
+
+    /// A generic byte write or another document's callback cannot acknowledge
+    /// this save. A failed/lost native reply remains dirty until reconciliation.
+    pub fn acknowledgeDocument(self: *const Transaction, request: *maru.session.editor.save_request.Request) !void {
+        const lease = self.request_lease orelse return error.WrongSaveRequest;
+        if (lease.owner != request.lease.owner or lease.id != request.lease.id or
+            !std.meta.eql(lease.document, request.lease.document) or
+            self.request_sequence != request.sequence or self.request_disk_hash != request.disk_hash)
+            return error.WrongSaveRequest;
+        const result: maru.session.editor.save_request.Result = switch (self.phase) {
+            .committed => .committed,
+            .rolled_back => .aborted,
+            .uncertain => .uncertain,
+            else => return error.SaveNotCommitted,
+        };
+        return request.complete(result);
     }
 
     pub fn write(self: *Transaction, io: std.Io, bytes: []const u8) !void {
@@ -254,6 +287,135 @@ pub const Transaction = struct {
 
 fn beginFixture(a: std.mem.Allocator, io: std.Io, pinned: *const maru.win32_relative_file.Pinned) !Transaction {
     return Transaction.beginExperimental(a, io, pinned, maru.session.editor.document_state.contentHash("original-long-content"), 64);
+}
+
+fn documentFixture(registry: *maru.session.editor.document_registry.Registry, bytes: []const u8) !maru.session.editor.document_registry.Lease {
+    const a = std.testing.allocator;
+    var state: maru.session.editor.document_state.State = .{};
+    defer state.clear(a);
+    const file = try maru.session.editor.edit_doc.EditableFile.init(a, bytes, false);
+    state.opened = .{ .file = file, .saved_hash = maru.session.editor.document_state.contentHash(file.content), .disk_hash = maru.session.editor.document_state.contentHash(bytes) };
+    state.path = try a.dupe(u8, "original.txt");
+    return registry.create(&state, a);
+}
+
+fn documentEdit(state: *maru.session.editor.document_state.State, bytes: []const u8) !void {
+    var selections: maru.session.editor.selection.Selections = .{ .items = &.{}, .primary = 0 };
+    const changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = state.opened.?.file.content.len, .text = bytes }};
+    var inverse = try state.opened.?.file.apply(.{ .changes = &changes }, &selections);
+    inverse.deinit();
+}
+
+test "Windows safe save transaction acknowledges only its committed L2 image and keeps later edits dirty" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const original = "\xef\xbb\xbforiginal-long-content\r\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = original });
+    var pinned = try maru.win32_relative_file.open(a, tmp.dir, "original.txt");
+    defer pinned.deinit(io);
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try documentFixture(&registry, original);
+    defer _ = registry.release(lease) catch unreachable;
+    const state = registry.get(lease).?;
+    try documentEdit(state, "saved\r\n");
+    var request = try maru.session.editor.save_request.Request.begin(a, &registry, lease, 128);
+    defer request.deinit();
+    var other = try maru.session.editor.save_request.Request.begin(a, &registry, lease, 128);
+    defer other.deinit();
+    var tx = try Transaction.beginExperimental(a, io, &pinned, request.expected_disk_hash, 128);
+    defer tx.close(io) catch unreachable;
+    try std.testing.expectError(error.WrongSaveRequest, tx.acknowledgeDocument(&request));
+    tx.source_hash ^= 1;
+    try std.testing.expectError(error.DiskFingerprintChanged, tx.writeDocument(io, &request));
+    tx.source_hash ^= 1;
+    request.disk_hash ^= 1;
+    try std.testing.expectError(error.CorruptSaveImage, tx.writeDocument(io, &request));
+    request.disk_hash ^= 1;
+    state.path.?[0] = 'x';
+    try std.testing.expectError(error.StaleDocument, tx.writeDocument(io, &request));
+    state.path.?[0] = 'o';
+    state.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, tx.writeDocument(io, &request));
+    state.opened.?.file.read_only = false;
+    try std.testing.expectEqual(Phase.active, tx.phase);
+    try tx.writeDocument(io, &request);
+    try documentEdit(state, "later\n");
+    try std.testing.expectError(error.SaveNotCommitted, tx.acknowledgeDocument(&request));
+    try std.testing.expect(state.opened.?.isDirty());
+    try tx.commit(io);
+    try std.testing.expectError(error.WrongSaveRequest, tx.acknowledgeDocument(&other));
+    try std.testing.expect(state.persistence.persisted_revision == null);
+    try tx.acknowledgeDocument(&request);
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqual(@as(?u64, 1), state.persistence.persisted_revision);
+    var bytes: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("\xef\xbb\xbfsaved\r\n", bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
+    try std.testing.expectEqual(@as(?u64, maru.session.editor.document_state.contentHash("\xef\xbb\xbfsaved\r\n")), state.opened.?.disk_hash);
+    try documentEdit(state, "saved\r\n");
+    try std.testing.expect(!state.opened.?.isDirty());
+}
+
+fn documentOutcomeFixture(comptime aborted: bool) !void {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.txt", .data = "original-long-content" });
+    var pinned = try maru.win32_relative_file.open(a, tmp.dir, "original.txt");
+    defer pinned.deinit(io);
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try documentFixture(&registry, "original-long-content");
+    defer _ = registry.release(lease) catch unreachable;
+    const state = registry.get(lease).?;
+    try documentEdit(state, "saved");
+    var request = try maru.session.editor.save_request.Request.begin(a, &registry, lease, 128);
+    defer request.deinit();
+    var tx = try beginFixture(a, io, &pinned);
+    defer tx.close(io) catch unreachable;
+    try tx.writeDocument(io, &request);
+    if (aborted) {
+        try tx.rollback();
+    } else {
+        const LostReply = struct {
+            var committed: bool = false;
+            fn commit(handle: w.HANDLE) bool {
+                committed = Native.commit(handle);
+                return false;
+            }
+        };
+        LostReply.committed = false;
+        try std.testing.expectError(error.CommitUncertain, tx.commitWith(io, LostReply));
+        try std.testing.expect(LostReply.committed);
+    }
+    try std.testing.expectError(error.SaveNotCommitted, tx.acknowledgeDocument(&request));
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expect(state.persistence.persisted_revision == null);
+    try std.testing.expectEqual(@as(?u64, maru.session.editor.document_state.contentHash("original-long-content")), state.opened.?.disk_hash);
+    if (!aborted) {
+        try std.testing.expectError(error.SaveUncertain, maru.session.editor.save_request.Request.begin(a, &registry, lease, 128));
+        try std.testing.expectError(error.SaveUncertain, tx.writeDocument(io, &request));
+        try std.testing.expectEqual(Outcome.committed, try tx.reconcile());
+        try tx.acknowledgeDocument(&request);
+        try std.testing.expect(!state.opened.?.isDirty());
+        try std.testing.expect(state.persistence.uncertain_sequence == null);
+    }
+    var bytes: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(if (aborted) "original-long-content" else "saved", bytes[0..try pinned.original.readPositionalAll(io, &bytes, 0)]);
+}
+
+test "Windows safe save transaction rollback never acknowledges its L2 document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try documentOutcomeFixture(true);
+}
+
+test "Windows safe save transaction lost commit reply requires native reconciliation before L2 ack" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try documentOutcomeFixture(false);
 }
 
 fn namespaceRaceFixture(comptime transient: bool, comptime restore_attempt: bool) !void {

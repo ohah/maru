@@ -86,11 +86,23 @@ pub const State = struct {
     untitled: ?untitled.Name = null,
     history: history.State = .{},
     notifications: Notifications = .{},
+    /// Save callbacks belong to an opened lifetime and a monotonically issued
+    /// request. Neither a reload nor a late callback can rewind that authority.
+    persistence: struct {
+        epoch: u64 = 0,
+        issued: u64 = 0,
+        acknowledged: u64 = 0,
+        persisted_revision: ?u64 = null,
+        uncertain_sequence: ?u64 = null,
+    } = .{},
 
     /// 기존 teardown의 본문/뷰 정산 순서를 유지할 수 있도록 본문 해제를 나눈다.
     pub fn clearOpened(self: *State, allocator: std.mem.Allocator) void {
         if (self.opened) |*opened| opened.deinit(allocator);
         self.opened = null;
+        self.persistence.epoch +|= 1;
+        self.persistence.persisted_revision = null;
+        self.persistence.uncertain_sequence = null;
     }
 
     /// 뷰 정산과 경로 정산의 기존 순서를 유지한다. 저장 정책은 호출자 책임이다.

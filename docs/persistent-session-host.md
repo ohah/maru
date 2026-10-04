@@ -979,15 +979,16 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   정산 갈래가 결속만 풀고 조용히 끝났고, `retry_later` 다시 넣기도 아무것도 남기지 않아 첫 시도의 실패 사유를 가릴 수 없었다.
   동작은 그대로 두고 진단만 더한다(재시도·데드라인 갱신은 별도 PR).
   - `reconnect job ended: host=… outcome=… reason=<detail>:<connect FailureReason|-> attempts=… age_ms=… deadline_remaining_ms=… stale_deadline=…`
-    — 재시도 없이 입장을 정산하는 갈래(`settleLogicalCompletion` 의 deadline_exceeded·host_gone·cancelled, 연결 뒤 CR5 의
-    `retained_terminal`). warn.
+    — 재시도 없이 입장을 정산하는 갈래(`settleLogicalCompletion` 의 deadline_exceeded·host_gone, 연결 뒤 CR5 의
+    `retained_terminal`). warn. `cancelled` 는 `requestCancelAll`·`requestShutdown`(Quit) 에서만 생기고 그 정산
+    (`settleProductShutdownCompletion`)은 줄을 남기지 않는다 — 종료 중에는 끝 줄이 없는 게 정상이다.
   - `reconnect job requeued: … reason=… attempts=… deadline_remaining_ms=… stale_deadline=… suppressed=…` — `retry_later` 로
     같은 스냅샷을 다시 넣는 갈래. 1초에 한 줄, 그 사이 삼킨 수를 `suppressed` 로 싣는다. info.
   - `reconnect turn drained: admissions=0 jobs=0 (prev …)` — idle 진단이 일이 있던 상태에서 (0,0) 으로 돌아온 순간. info.
   `reason` 은 워커가 시도마다 `Completion` 에 싣는다(워커 스레드는 로그를 찍지 않는다): `deadline_past_before_connect`(연결 전에
   이미 데드라인이 지나 소켓도 안 열었다), `connect_failed:<FailureReason>`, `candidate_rejected`, `adopt_busy`·
   `adopt_invalid_authority`·`adopt_failed`(연결은 됐지만 채택 실패). `stale_deadline=true` 는 「다시 넣은 job 이 처음 정한 데드라인을
-  그대로 끌고 가 연결도 안 해 보고 끝났다」 가설의 직접 증거다. `age_ms` 는 poison 시각이 아니라 첫 입장(admission 시작) 기준이다.
+  그대로 끌고 가 연결도 안 해 보고 끝났다」 가설의 직접 증거다. `age_ms` 는 poison 시각이 아니라 첫 입장(admission 시작) 기준이고, awake 시계라 잠자기 동안은 흐르지 않는다(벽시계보다 작게 나온다).
   판정자는 `test-reconnect-failure-log`(check-boundaries)다.
   e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,

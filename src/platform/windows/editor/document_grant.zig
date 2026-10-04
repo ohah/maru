@@ -47,21 +47,40 @@ pub const Grant = struct {
     /// Only the app owner publishes. Failure leaves the native image and handles
     /// with the caller; success consumes them after every Registry allocation.
     pub fn publishOpen(a: std.mem.Allocator, registry: *registry_mod.Registry, snapshot: *native_open.Snapshot) !Opened {
+        // Reject consumed snapshots before reading bytes for CPU preparation.
         try snapshot.validate();
+        var prepared: ?editor.edit_doc.EditableFile = try editor.edit_doc.EditableFile.init(a, snapshot.bytes, false);
+        defer if (prepared) |*file| file.deinit();
+        return publishPrepared(a, registry, snapshot, &prepared);
+    }
+
+    /// The worker owns the file until every publication allocation succeeds.
+    /// Its allocator stays inside EditableFile; path/history remain app-owned.
+    pub fn publishPrepared(a: std.mem.Allocator, registry: *registry_mod.Registry, snapshot: *native_open.Snapshot, prepared: *?editor.edit_doc.EditableFile) !Opened {
+        try snapshot.validate();
+        const file = prepared.* orelse return error.InvalidOpenResult;
+        if (file.read_only) return error.InvalidOpenResult;
         var state: editor.document_state.State = .{};
-        defer state.clear(a);
-        const file = try editor.edit_doc.EditableFile.init(a, snapshot.bytes, false);
+        defer {
+            // Before Registry.create the file is borrowed from the result.
+            state.opened = null;
+            state.clear(a);
+        }
         state.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content), .disk_hash = snapshot.raw_hash };
         state.path = try a.dupe(u8, snapshot.path);
         const epoch = state.persistence.epoch;
         const view = try registry.create(&state, a);
-        errdefer _ = registry.release(view) catch unreachable;
+        errdefer {
+            registry.get(view).?.opened = null;
+            _ = registry.release(view) catch unreachable;
+        }
         const lease = try registry.retain(view, .request);
         const grant: Grant = .{ .allocator = snapshot.allocator, .registry = registry, .lease = lease, .root = snapshot.root, .relative_path = snapshot.relative_path, .original = snapshot.original, .identity = snapshot.identity, .path = snapshot.path, .epoch = epoch };
         // No fallible work follows ownership transfer. Decoded text is app-owned;
         // raw bytes are no longer borrowed after publication.
         snapshot.allocator.free(snapshot.bytes);
         snapshot.owned = false;
+        prepared.* = null;
         return .{ .view = view, .grant = grant };
     }
 

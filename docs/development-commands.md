@@ -1018,6 +1018,15 @@ A의 독립 caret 보존, 전환 후 600ms 동안 문서·선택 불변과 저�
 provider 갱신·준비 할당 실패를 집중 실행한다. ReleaseFast는 `-Doptimize=ReleaseFast`를 붙인다.
 같은 판정자는 `test-editor-shared`와 전체 editor 집계에도 포함된다.
 
+### 심볼 피커 미리보기와 대상 수명
+
+심볼 피커의 필터·형제 목록·문서/뷰 대상 수명·현재 pane 미리보기는 `mise exec -- zig build test-editor-symbol-picker`로
+집중 검증한다. `-Doptimize=ReleaseFast`도 같은 판정자를 실행하며 전체 `test-editor`에 포함된다.
+구현 범위는 [심볼 미리보기](plans/editor-symbol-preview.md)를 따른다.
+실제 AppKit 키 입력과 Metal 캡처는 `python3 tools/symbol-preview-app/run.py`로 실행한다.
+별도 소스 사본·HOME에서 빌드하며, PNG와 관측 로그·manifest를 출력한다. 한국어 단계는
+NSTextInputClient 콜백 주입이며 실제 OS 입력 소스/HID 검증과 구분한다.
+
 ### 공유 편집기 pane 분할 내부 판정
 
 `mise exec -- zig build test-editor-shared-split`는 셸 없는 공유 pane 준비·접힘 복사·

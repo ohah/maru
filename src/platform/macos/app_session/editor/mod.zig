@@ -934,6 +934,11 @@ pub fn whitespaceModeFor(self: *AppSession) chrome_editor.frame.WhitespaceMode {
 /// 단일 편집기의 장식(§5.1b). 현재 줄은 **설정과 선택**만 보고(포커스와 무관 — VS Code 의 테두리 규칙에 포커스 조건이 없다), 짝 괄호는
 /// 포커스까지 본다(`brackets_client.modeFor`). 활성 줄 번호는 primary caret 의 줄을 **보이는 줄 축**으로 옮긴 것이다.
 fn paneDecorations(self: *AppSession, term: *Term) Decorations {
+    if (term.rt.editor_symbol_preview_drawing) return .{
+        .line_highlight = .line,
+        .active_line = term.rt.editor_symbol_preview.?.target_line,
+        .render_whitespace = whitespaceModeFor(self),
+    };
     const mode: chrome_editor.frame.LineHighlight = switch (self.loaded_config.config.editor.render_line_highlight) {
         .none => .none,
         .gutter => .gutter,
@@ -1847,6 +1852,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **그리기 전에 지금 기하로 위치를 되돌린다.** 창·분할·사이드바가 바뀌면 상한이 줄어드는데,
     // 스크롤 입력이 올 때까지 옛 위치가 남으면 화면이 통째로 빈다(그 함수의 doc — 실측값 포함).
     clampScrollToGeometry(self, term, leaf_rect);
+    const symbol_preview_frame = symbolPreviewFrame(self, term, leaf_rect);
+    defer if (symbol_preview_frame) |saved| saved.finish(term);
 
     // **비교 Term은 문서 대신 판정을 말한다**(N1.5 b·c). 비교가 서면 좌우 두 열이고(c), 아직이거나
     // 보여 줄 수 없으면 그 사실을 한 줄로 말한다 — 조용한 빈 화면을 남기지 않는 것이 §7의 요구다.
@@ -2109,107 +2116,109 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             // transient view, then leave the canonical cache available for the commit frame.
             break :blk buildPaneOps(draw_lines, v.numbers, v.folds, v.total_lines, draw_first, preeditPiece(v, term, wrap), fc, max_cols, null, selection_marks, search_marks, occurrence_marks, projected_current, marker_rows.items, projected_marker_current, colors, &.{}, projected_inlays, carets, widgets, bands, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, projected_mm, projected_diag, sticky, deco, pool);
         }
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term, false), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term, false), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), if (symbol_preview_frame != null) &.{} else conflictWidgets(self, term), if (symbol_preview_frame != null) null else conflictBands(term), symbol_preview_frame == null and self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, if (symbol_preview_frame != null) &.{} else sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
     };
     if (pf.ops_len == 0) return null;
-    // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
-    // 「Result 밖」으로 거부된다).
-    // **창 절대 좌표로 옮겨 싣는다.** `merge_frame` 이 내는 자리는 pane **상대**이고(컴포넌트가
-    // 창을 모른다), 클릭은 **창 좌표**로 온다 — 축이 다른 둘을 그대로 비교하면 「Result 안」 판정이
-    // 우연히 겹치는 만큼만 맞는다(적대적 1회차에서 그 상태였다: 가드를 통째로 지운 변이가 살아남았고,
-    // 판정자도 같은 축 착오를 하고 있어 초록이었다).
-    // 원점은 **여백 안쪽**(`inner`)이다 — 그래야 이 사각이 글자가 실제로 서는 자리를 말한다(S3b-2, 2026-09-15
-    // 정정: 바깥 사각 기준으로 옮겨 4px 앞에 있었고 히트 기하가 그만큼 더해 우연히 맞았다).
-    term.rt.editor_merge_layout = if (pf.merge_layout) |lay| chrome_editor.merge_frame.Layout{
-        .current = if (lay.current) |r| offsetRect(r, inner) else null,
-        .result = offsetRect(lay.result, inner),
-        .incoming = if (lay.incoming) |r| offsetRect(r, inner) else null,
-        .base = if (lay.base) |r| offsetRect(r, inner) else null,
-    } else null;
-    // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
-    // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
-    // 싣는 것과 같은 자리·같은 이유다(*"접힘을 아는 것은 렌더뿐"*).
-    //
-    // **못 담으면 그냥 안 담는다.** 저장소를 못 잡아도 화면은 이미 다 그렸고, 클릭이 그 프레임 동안
-    // 안 될 뿐이다(§2.1 캐시가 "못 잡으면 없이 그린다"와 같은 결).
-    if (term.rt.editor_diff) |st| {
-        // **비교 뷰도 담는다**(§4.1g "비교 뷰"). 7차가 *"좌우가 섞인 배열이라 담아 두면 지뢰"*라 한
-        // 것은 **섞인 하나**를 담는 것에 대한 지적이었고, 렌더가 이미 저장소를 반으로 갈라 각 열이
-        // 자기 몫만 채우므로 갈라 받으면 그 지적이 성립하지 않는다.
-        if (st.view == .compare) {
-            const half = visual_rows.len / 2;
-            const l = visual_rows[0..@min(pf.left_visual_rows, half)];
-            const r = visual_rows[half..][0..@min(pf.right_visual_rows, visual_rows.len - half)];
-            storeDiffHitRows(self, term, leaf_rect, l, r);
+    if (symbol_preview_frame == null) {
+        // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
+        // 「Result 밖」으로 거부된다).
+        // **창 절대 좌표로 옮겨 싣는다.** `merge_frame` 이 내는 자리는 pane **상대**이고(컴포넌트가
+        // 창을 모른다), 클릭은 **창 좌표**로 온다 — 축이 다른 둘을 그대로 비교하면 「Result 안」 판정이
+        // 우연히 겹치는 만큼만 맞는다(적대적 1회차에서 그 상태였다: 가드를 통째로 지운 변이가 살아남았고,
+        // 판정자도 같은 축 착오를 하고 있어 초록이었다).
+        // 원점은 **여백 안쪽**(`inner`)이다 — 그래야 이 사각이 글자가 실제로 서는 자리를 말한다(S3b-2, 2026-09-15
+        // 정정: 바깥 사각 기준으로 옮겨 4px 앞에 있었고 히트 기하가 그만큼 더해 우연히 맞았다).
+        term.rt.editor_merge_layout = if (pf.merge_layout) |lay| chrome_editor.merge_frame.Layout{
+            .current = if (lay.current) |r| offsetRect(r, inner) else null,
+            .result = offsetRect(lay.result, inner),
+            .incoming = if (lay.incoming) |r| offsetRect(r, inner) else null,
+            .base = if (lay.base) |r| offsetRect(r, inner) else null,
+        } else null;
+        // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
+        // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
+        // 싣는 것과 같은 자리·같은 이유다(*"접힘을 아는 것은 렌더뿐"*).
+        //
+        // **못 담으면 그냥 안 담는다.** 저장소를 못 잡아도 화면은 이미 다 그렸고, 클릭이 그 프레임 동안
+        // 안 될 뿐이다(§2.1 캐시가 "못 잡으면 없이 그린다"와 같은 결).
+        if (term.rt.editor_diff) |st| {
+            // **비교 뷰도 담는다**(§4.1g "비교 뷰"). 7차가 *"좌우가 섞인 배열이라 담아 두면 지뢰"*라 한
+            // 것은 **섞인 하나**를 담는 것에 대한 지적이었고, 렌더가 이미 저장소를 반으로 갈라 각 열이
+            // 자기 몫만 채우므로 갈라 받으면 그 지적이 성립하지 않는다.
+            if (st.view == .compare) {
+                const half = visual_rows.len / 2;
+                const l = visual_rows[0..@min(pf.left_visual_rows, half)];
+                const r = visual_rows[half..][0..@min(pf.right_visual_rows, visual_rows.len - half)];
+                storeDiffHitRows(self, term, leaf_rect, l, r);
+            }
+        } else if (term.rt.editor_merge_layout != null) {
+            // **Result 의 행은 스크래치의 «둘째 조각»에 있다**(`merge_frame` 이 넷으로 가른다 — Current·
+            // Result·Incoming·Base 순). 앞에서부터 읽으면 **Current pane 의 행**을 Result 것으로 굳혀,
+            // 위젯 행이 없어지고 짧은 문서에서만 우연히 맞는다(S3b-3a 판정자가 잡았다).
+            const result_part = chrome_editor.merge_frame.splitScratch(scratch, 1);
+            storeHitRows(self, term, leaf_rect, result_part.visual_rows[0..@min(pf.visual_rows, result_part.visual_rows.len)], if (projected) |v| v.total_lines else term.rt.editor_lines.len);
+            // **판 둘의 행과 기하도 같은 순간에 굳힌다**(S3b-3c). 첫째·셋째 조각이 Current·Incoming 이다.
+            const cur_part = chrome_editor.merge_frame.splitScratch(scratch, 0);
+            const inc_part = chrome_editor.merge_frame.splitScratch(scratch, 2);
+            editor_merge_ops.storePaneHits(self, term, .current, cur_part.visual_rows[0..@min(pf.merge_current_visual_rows, cur_part.visual_rows.len)], pf.merge_current_top);
+            editor_merge_ops.storePaneHits(self, term, .incoming, inc_part.visual_rows[0..@min(pf.merge_incoming_visual_rows, inc_part.visual_rows.len)], pf.merge_incoming_top);
+            const base_part = chrome_editor.merge_frame.splitScratch(scratch, 3);
+            editor_merge_ops.storePaneHits(self, term, .base, base_part.visual_rows[0..@min(pf.merge_base_visual_rows, base_part.visual_rows.len)], pf.merge_base_top);
+        } else {
+            storeHitRows(self, term, leaf_rect, visual_rows[0..@min(pf.visual_rows, visual_rows.len)], if (projected) |v| v.total_lines else term.rt.editor_lines.len);
         }
-    } else if (term.rt.editor_merge_layout != null) {
-        // **Result 의 행은 스크래치의 «둘째 조각»에 있다**(`merge_frame` 이 넷으로 가른다 — Current·
-        // Result·Incoming·Base 순). 앞에서부터 읽으면 **Current pane 의 행**을 Result 것으로 굳혀,
-        // 위젯 행이 없어지고 짧은 문서에서만 우연히 맞는다(S3b-3a 판정자가 잡았다).
-        const result_part = chrome_editor.merge_frame.splitScratch(scratch, 1);
-        storeHitRows(self, term, leaf_rect, result_part.visual_rows[0..@min(pf.visual_rows, result_part.visual_rows.len)], if (projected) |v| v.total_lines else term.rt.editor_lines.len);
-        // **판 둘의 행과 기하도 같은 순간에 굳힌다**(S3b-3c). 첫째·셋째 조각이 Current·Incoming 이다.
-        const cur_part = chrome_editor.merge_frame.splitScratch(scratch, 0);
-        const inc_part = chrome_editor.merge_frame.splitScratch(scratch, 2);
-        editor_merge_ops.storePaneHits(self, term, .current, cur_part.visual_rows[0..@min(pf.merge_current_visual_rows, cur_part.visual_rows.len)], pf.merge_current_top);
-        editor_merge_ops.storePaneHits(self, term, .incoming, inc_part.visual_rows[0..@min(pf.merge_incoming_visual_rows, inc_part.visual_rows.len)], pf.merge_incoming_top);
-        const base_part = chrome_editor.merge_frame.splitScratch(scratch, 3);
-        editor_merge_ops.storePaneHits(self, term, .base, base_part.visual_rows[0..@min(pf.merge_base_visual_rows, base_part.visual_rows.len)], pf.merge_base_top);
-    } else {
-        storeHitRows(self, term, leaf_rect, visual_rows[0..@min(pf.visual_rows, visual_rows.len)], if (projected) |v| v.total_lines else term.rt.editor_lines.len);
-    }
-    if (projected) |v| {
-        term.rt.editor_hit_preedit_first = draw_first;
-        for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], 0..) |row, i| {
-            const projected_row = draw_first + row.line;
-            term.rt.editor_hit_lines[i] = @intCast(v.source_index.lineAt(v.sourcePoint(projected_row, 0)));
+        if (projected) |v| {
+            term.rt.editor_hit_preedit_first = draw_first;
+            for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], 0..) |row, i| {
+                const projected_row = draw_first + row.line;
+                term.rt.editor_hit_lines[i] = @intCast(v.source_index.lineAt(v.sourcePoint(projected_row, 0)));
+            }
         }
-    }
-    term.rt.editor_hit_preedit_stamp = if (projected != null) preeditStampWithSession(self, term) else 0;
-    // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
-    term.rt.editor_total_visual_rows = pf.total_visual_rows;
-    // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
-    term.rt.editor_max_top_line = if (projected) |v| blk: {
-        if (v.lines.len == 0) break :blk 0;
-        const offset = v.sourcePoint(@min(pf.max_top_line, v.lines.len - 1), 0);
-        const source = v.source_index.lineAt(offset);
-        break :blk visibleRowOfDocLine(term, @intCast(source)) orelse term.rt.editor_first_line;
-    } else pf.max_top_line;
-    term.rt.editor_max_top_piece = pf.max_top_piece;
+        term.rt.editor_hit_preedit_stamp = if (projected != null) preeditStampWithSession(self, term) else 0;
+        // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
+        term.rt.editor_total_visual_rows = pf.total_visual_rows;
+        // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
+        term.rt.editor_max_top_line = if (projected) |v| blk: {
+            if (v.lines.len == 0) break :blk 0;
+            const offset = v.sourcePoint(@min(pf.max_top_line, v.lines.len - 1), 0);
+            const source = v.source_index.lineAt(offset);
+            break :blk visibleRowOfDocLine(term, @intCast(source)) orelse term.rt.editor_first_line;
+        } else pf.max_top_line;
+        term.rt.editor_max_top_piece = pf.max_top_piece;
 
-    // **낡은 스냅숏으로 놓았던 검색 자리를 여기서 다시 잡는다**(그 필드 doc). 이 시점이면
-    // 스냅숏도 시각 행 수도 이 프레임의 것이다.
-    //
-    // **파생값 대입보다 뒤여야 한다.** 재조준이 접힘을 펴면 `invalidateFoldDerived`가
-    // `total_visual_rows`·`max_top_*`를 0으로 버리는데, 앞에 두면 위 세 줄이 **더 이상 없는
-    // 배치의 값으로 그것을 되살린다**(적대적 검증 2026-08-24 실측: `total_visual=0`인데
-    // `max_top=87`). 그 뒤 막대 드래그는 `max_top_line`만 보고 clamp하므로 없는 자리로 간다.
-    //
-    // **이 순서를 재는 판정자는 없다.** 세 번 시도해 세 번 다 픽스처가 그 상태를 못 만들었고
-    // (재조준을 앞으로 되돌린 뮤턴트가 매번 살아남았다), **판정 안 하는 판정자를 두느니 공백을
-    // 적기로 했다.** 이 슬라이스가 반복한 잘못이 그 반대였다 — 재는 척하는 판정자를 두는 것.
-    // 근거는 실측 하나(위 수치)와 구조뿐이다: 무효화가 대입보다 먼저 나야 살아남는다.
-    //
-    // **비교 Term에서는 안 돈다.** 그쪽 꼬리는 `storeDiffHitRows`가 `editor_diff_hit_*`만 세우고
-    // `editor_hit_geom`을 안 건드리므로, 여기서 신선도를 물으면 **비교 이전 배치의 스냅숏**을
-    // 근거로 삼는다. 오늘은 `isFindTarget`이 막아 무해하지만 그 가드 하나에 걸쳐 두지 않는다.
-    if (term.rt.editor_find_reveal_pending and term.rt.editor_diff == null) {
-        term.rt.editor_find_reveal_pending = false;
-        revealCurrentFindMatch(self, term);
-        // **`metal_dirty`만으로는 부족하다** — 같은 tick 뒤쪽의 소거가 그것을 삼킨다(그 자리 doc).
-        // 이 축은 소거를 지나 살아남아 다음 tick이 새 자리를 그리게 한다. 이것이 없으면 자리는
-        // 맞고 화면은 옛 자리에 멈춘다(적대적 검증 2026-08-24 실측: tick 12번을 더 돌려도).
-        self.reproject_after_frame = true;
+        // **낡은 스냅숏으로 놓았던 검색 자리를 여기서 다시 잡는다**(그 필드 doc). 이 시점이면
+        // 스냅숏도 시각 행 수도 이 프레임의 것이다.
+        //
+        // **파생값 대입보다 뒤여야 한다.** 재조준이 접힘을 펴면 `invalidateFoldDerived`가
+        // `total_visual_rows`·`max_top_*`를 0으로 버리는데, 앞에 두면 위 세 줄이 **더 이상 없는
+        // 배치의 값으로 그것을 되살린다**(적대적 검증 2026-08-24 실측: `total_visual=0`인데
+        // `max_top=87`). 그 뒤 막대 드래그는 `max_top_line`만 보고 clamp하므로 없는 자리로 간다.
+        //
+        // **이 순서를 재는 판정자는 없다.** 세 번 시도해 세 번 다 픽스처가 그 상태를 못 만들었고
+        // (재조준을 앞으로 되돌린 뮤턴트가 매번 살아남았다), **판정 안 하는 판정자를 두느니 공백을
+        // 적기로 했다.** 이 슬라이스가 반복한 잘못이 그 반대였다 — 재는 척하는 판정자를 두는 것.
+        // 근거는 실측 하나(위 수치)와 구조뿐이다: 무효화가 대입보다 먼저 나야 살아남는다.
+        //
+        // **비교 Term에서는 안 돈다.** 그쪽 꼬리는 `storeDiffHitRows`가 `editor_diff_hit_*`만 세우고
+        // `editor_hit_geom`을 안 건드리므로, 여기서 신선도를 물으면 **비교 이전 배치의 스냅숏**을
+        // 근거로 삼는다. 오늘은 `isFindTarget`이 막아 무해하지만 그 가드 하나에 걸쳐 두지 않는다.
+        if (term.rt.editor_find_reveal_pending and term.rt.editor_diff == null) {
+            term.rt.editor_find_reveal_pending = false;
+            revealCurrentFindMatch(self, term);
+            // **`metal_dirty`만으로는 부족하다** — 같은 tick 뒤쪽의 소거가 그것을 삼킨다(그 자리 doc).
+            // 이 축은 소거를 지나 살아남아 다음 tick이 새 자리를 그리게 한다. 이것이 없으면 자리는
+            // 맞고 화면은 옛 자리에 멈춘다(적대적 검증 2026-08-24 실측: tick 12번을 더 돌려도).
+            self.reproject_after_frame = true;
+        }
+        // **막대 기하를 창 좌표로 옮겨 싣는다.** 컴포넌트는 pane 상대(원점 0,0)로 그리고 포인터는 창
+        // 좌표로 오므로, 같은 축에서 비교하지 않으면 보이는 자리와 잡히는 자리가 갈린다. 여백(`inset`)은
+        // 위 `buildPaneOps`가 원점에 건 그 값이다 — 여기서 다시 더해야 실제로 그려진 자리가 된다.
+        term.rt.editor_scrollbar = if (pf.scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
+        storeMinimapHit(self, term, rect, mm_drawn);
+        term.rt.editor_horizontal_scrollbar = if (pf.horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
+        // 비교 뷰 오른쪽 열(단일 편집기는 `null`이라 그대로 비워진다).
+        term.rt.editor_scrollbar_right = if (pf.right_scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
+        term.rt.editor_horizontal_scrollbar_right = if (pf.right_horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
     }
-    // **막대 기하를 창 좌표로 옮겨 싣는다.** 컴포넌트는 pane 상대(원점 0,0)로 그리고 포인터는 창
-    // 좌표로 오므로, 같은 축에서 비교하지 않으면 보이는 자리와 잡히는 자리가 갈린다. 여백(`inset`)은
-    // 위 `buildPaneOps`가 원점에 건 그 값이다 — 여기서 다시 더해야 실제로 그려진 자리가 된다.
-    term.rt.editor_scrollbar = if (pf.scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
-    storeMinimapHit(self, term, rect, mm_drawn);
-    term.rt.editor_horizontal_scrollbar = if (pf.horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
-    // 비교 뷰 오른쪽 열(단일 편집기는 `null`이라 그대로 비워진다).
-    term.rt.editor_scrollbar_right = if (pf.right_scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
-    term.rt.editor_horizontal_scrollbar_right = if (pf.right_horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
     // **아직 다 세지 못했으면 다음 프레임을 부른다**(§2.1 점진 계수). 이 렌더 루프는 dirty가 없으면
     // 투영을 건너뛰므로(idle skip), 이것을 안 세우면 진행이 거기서 멈춰 막대가 근사값인 채로 남는다.
     // 다 세면 더 요청하지 않으므로 idle로 돌아간다.
@@ -3531,7 +3540,11 @@ pub fn copySelection(self: *AppSession) bool {
 ///
 /// 저장소는 `Term.rt`가 들고 재사용한다(프레임마다 잡지 않는다 — 마크가 그러듯).
 fn buildCaretRows(self: *AppSession, term: *Term) ?[]const []const u32 {
-    var iter = selections(term);
+    // 미리보기는 줄 강조의 위치만 제공한다. 실제 caret 그리기는 호출자가 끈다.
+    var iter = if (term.rt.editor_symbol_preview_drawing)
+        SelectionIter{ .primary = editor_selection.Selection.at(term.rt.editor_symbol_preview.?.offset), .extras = &.{} }
+    else
+        selections(term);
     const cursor_count = iter.count();
     if (cursor_count == 0) return null;
     const doc = term.rt.editorDocument().opened orelse return null;
@@ -11045,6 +11058,8 @@ pub fn toggleWrap(self: *AppSession) bool {
 
 /// 편집기 Term이 소유한 것을 놓는다. `destroyTerm`이 kind로 분기해 부른다.
 pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_symbol_preview) |*preview| preview.deinit(self.allocator);
+    term.rt.editor_symbol_preview = null;
     editor_diff_ops.release(self, term); // N1.5 diff 행·줄 배열(entry 버퍼를 빌린다)
     // S3b-1 병합 판(`:1:`·`:2:`·`:3:`)도 **문서와 같은 단위로** 놓는다 — 그 판은 이 문서를 고치려고
     // 읽은 것이라 문서보다 오래 살 이유가 없다. 안 놓으면 워커 allocator 쪽에 세 조각이 남는다.
@@ -37891,6 +37906,154 @@ test "NAV9 스택은 상한에서 오래된 것부터 버린다 — 오래 켠 �
 
 // ── 심볼 피커(§7.5 「피커는 팔레트를 다시 쓴다」) ──────────────────────────────
 
+/// 행의 byte 위치가 가리키는 대상을 고정한다. 같은 문서의 다른 뷰도 선택·이동 이력은 다르다.
+pub const symbol_preview = @import("symbol_preview.zig");
+
+/// 프레임 호출 동안만 표시 축을 바꾼다. early return도 defer로 되돌아가므로 checkpoint와 편집은
+/// 항상 정본 뷰를 본다. 미리보기용 행 캐시는 별도 소유하며 원래 접두합에 덮어쓰지 않는다.
+const SymbolPreviewFrame = struct {
+    first_line: usize,
+    first_piece: u32,
+    first_col: u32,
+    lines: []const []const u8,
+    numbers: []const ?u32,
+    marks: []chrome_editor.gutter.Fold,
+    marks_len: usize,
+    max_cols: u32,
+    row_cache: chrome_editor.frame.RowCache,
+
+    fn finish(self: SymbolPreviewFrame, term: *Term) void {
+        term.rt.editor_symbol_preview.?.row_cache = term.rt.editor_row_cache;
+        term.rt.editor_first_line = self.first_line;
+        term.rt.editor_first_piece = self.first_piece;
+        term.rt.editor_first_col = self.first_col;
+        term.rt.editor_visible_lines = self.lines;
+        term.rt.editor_visible_numbers = self.numbers;
+        term.rt.editor_fold_marks = self.marks;
+        term.rt.editor_fold_marks_len = self.marks_len;
+        term.rt.editor_max_cols = self.max_cols;
+        term.rt.editor_row_cache = self.row_cache;
+        term.rt.editor_symbol_preview_drawing = false;
+    }
+};
+
+fn symbolPreviewFrame(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRect) ?SymbolPreviewFrame {
+    if (!self.chrome_host.symbol_picker.open or self.symbol_picker_source == null) {
+        discardSymbolPreview(self, term);
+        return null;
+    }
+    validateSymbolPicker(self);
+    if (!self.chrome_host.symbol_picker.open) return null;
+    const source = symbolPickerSource(term) orelse return null;
+    if (source.surface_id != self.symbol_picker_source.?.surface_id) {
+        discardSymbolPreview(self, term);
+        return null;
+    }
+    const active = symbolPickerSource(pane_ops.activePane(self).activeTerm());
+    if (active == null or !std.meta.eql(source, active.?) or !std.meta.eql(source, self.symbol_picker_source.?)) {
+        closeSymbolPicker(self);
+        return null;
+    }
+    const idx = self.chrome_host.symbol_picker.selected;
+    if (idx >= self.symbol_picker_rows.rows.items.len or term.rt.editor_diff != null or term.rt.editor_merge != null) return null;
+    const target = self.symbol_picker_rows.rows.items[idx].offset;
+    const doc = term.rt.editorDocument().opened.?;
+    const line = doc.file.lines.lineAt(@min(target, doc.file.content.len));
+    if (term.rt.editor_symbol_preview == null or !term.rt.editor_symbol_preview.?.matches(source.revision, target, term.rt.editor_fold_ranges, foldedHeads(term))) {
+        const prepared = symbol_preview.Projection.init(self.allocator, source.revision, target, line, term.rt.editor_lines, term.rt.editor_fold_ranges, foldedHeads(term)) catch return null;
+        if (term.rt.editor_symbol_preview) |*old| old.deinit(self.allocator);
+        term.rt.editor_symbol_preview = prepared;
+    }
+    const preview = &term.rt.editor_symbol_preview.?;
+    const saved: SymbolPreviewFrame = .{
+        .first_line = term.rt.editor_first_line,
+        .first_piece = term.rt.editor_first_piece,
+        .first_col = term.rt.editor_first_col,
+        .lines = term.rt.editor_visible_lines,
+        .numbers = term.rt.editor_visible_numbers,
+        .marks = term.rt.editor_fold_marks,
+        .marks_len = term.rt.editor_fold_marks_len,
+        .max_cols = term.rt.editor_max_cols,
+        .row_cache = term.rt.editor_row_cache,
+    };
+    term.rt.editor_visible_lines = preview.lines;
+    term.rt.editor_visible_numbers = preview.numbers;
+    term.rt.editor_fold_marks = preview.marks;
+    term.rt.editor_fold_marks_len = preview.marks.len;
+    term.rt.editor_row_cache = preview.row_cache;
+    const body = editorBodyRect(self, leaf_rect, term);
+    const rows = body.h / @max(self.cell_height_px, 1);
+    const cols = @max(visibleCols(self, body, term, false), 1);
+    const ln = doc.file.lines.line(line).?;
+    var map_owner = productColumnMap(term);
+    const map = map_owner.map();
+    const col = map.columnOf(map.ctx, doc.file.content[ln.start..ln.contentEnd()], @min(target, ln.contentEnd()) - ln.start);
+    const wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
+    term.rt.editor_first_line = preview.target_line;
+    term.rt.editor_first_piece = if (wrap) col / cols else 0;
+    term.rt.editor_first_col = if (wrap) 0 else col -| cols / 2;
+    // 논리 줄 수로 가운데를 잡으면 직전의 긴 랩 줄이 대상을 화면 밖으로 민다.
+    // 본문과 같은 조각 수로 위쪽 문맥을 계산한다.
+    var context_rows = rows / 2;
+    while (context_rows > 0) {
+        const within = @min(context_rows, term.rt.editor_first_piece);
+        term.rt.editor_first_piece -= within;
+        context_rows -= within;
+        if (context_rows == 0 or term.rt.editor_first_line == 0) break;
+        term.rt.editor_first_line -= 1;
+        term.rt.editor_first_piece = if (wrap) piecesOfLine(term, term.rt.editor_first_line, cols) - 1 else 0;
+        context_rows -= 1;
+    }
+    term.rt.editor_max_cols = 0;
+    term.rt.editor_symbol_preview_drawing = true;
+    return saved;
+}
+
+fn discardSymbolPreview(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_symbol_preview) |*preview| preview.deinit(self.allocator);
+    term.rt.editor_symbol_preview = null;
+}
+
+/// 원래 pane이 더 이상 그려지지 않아도 오버레이를 닫는다. 입력 때만 검사하면 다른 탭 위에 낡은 목록이 남는다.
+pub fn validateSymbolPicker(self: *AppSession) void {
+    if (!self.chrome_host.symbol_picker.open) return;
+    const original = self.symbol_picker_source orelse return;
+    const active = symbolPickerSource(pane_ops.activePane(self).activeTerm());
+    if (active == null or !std.meta.eql(original, active.?)) closeSymbolPicker(self);
+}
+
+pub fn closeSymbolPicker(self: *AppSession) void {
+    if (self.symbol_picker_source) |source| {
+        if (term_ops.findTermWhere(self, source.surface_id, struct {
+            fn matches(id: u64, term: *Term) bool {
+                return term.surfaceId() == id;
+            }
+        }.matches)) |loc| discardSymbolPreview(self, loc.pane.terms.items[loc.term_index]);
+    }
+    self.chrome_host.symbol_picker.hide();
+    self.symbol_picker_source = null;
+    self.metal_dirty = true;
+}
+
+pub const SymbolPickerSource = struct {
+    surface_id: u64,
+    registry: *const editor.document_registry.Registry,
+    document: editor.document_registry.Handle,
+    revision: u64,
+};
+
+fn symbolPickerSource(term: *Term) ?SymbolPickerSource {
+    if (term.kind != .editor) return null;
+    const lease = term.rt.editor_document_lease orelse return null;
+    const doc = term.rt.editorDocument().opened orelse return null;
+    return .{
+        .surface_id = term.surfaceId(),
+        .registry = lease.owner,
+        .document = lease.document,
+        .revision = doc.file.revision,
+    };
+}
+
 /// 라벨이 쓸 수 있는 표시 폭. **줄 번호 자리를 먼저 뗀다** — `palette.view` 는 제목과 우측 텍스트의
 /// 겹침을 안 보므로, 안 떼면 긴 체인이 줄 번호 위에 겹쳐 그려진다(§7.5).
 fn symbolLabelCols(self: *AppSession) usize {
@@ -37903,11 +38066,18 @@ fn symbolLabelCols(self: *AppSession) usize {
 /// 인덱스를 들지 않는다).
 pub fn recomputeSymbolPicker(self: *AppSession) void {
     const term = pane_ops.activePane(self).activeTerm();
-    if (term.kind != .editor) {
+    const source = symbolPickerSource(term);
+    // 쿼리·파싱 완료 콜백도 원래 대상을 확인한다. 특히 형제 범위의 인덱스를 새 문서에 재사용하면 안 된다.
+    if (source == null or (self.chrome_host.symbol_picker.open and self.symbol_picker_source != null and
+        !std.meta.eql(self.symbol_picker_source.?, source.?)))
+    {
+        closeSymbolPicker(self);
+        self.symbol_picker_source = null;
         self.symbol_picker_rows.clear(self.allocator);
         self.chrome_host.symbol_picker.setResultCount(0);
         return;
     }
+    self.symbol_picker_source = source;
     const doc = term.rt.editorDocument().opened orelse {
         self.symbol_picker_rows.clear(self.allocator);
         self.chrome_host.symbol_picker.setResultCount(0);
@@ -37974,18 +38144,19 @@ pub fn symbolPickerReadiness(self: *AppSession) SymbolPickerReadiness {
 /// 피커를 연다/닫는다. **편집기가 아니거나 심볼이 없으면 열지 않고 알린다**(§7.5).
 pub fn toggleSymbolPicker(self: *AppSession) void {
     if (self.chrome_host.symbol_picker.open) {
-        self.chrome_host.symbol_picker.hide();
+        closeSymbolPicker(self);
         self.metal_dirty = true;
         return;
     }
     self.dismissMessageOverlays(); // 단일-오버레이 불변식
     self.symbol_picker_scope = null; // 전체 범위
+    self.symbol_picker_source = null; // 새로 여는 목록은 현재 문서에서 시작한다.
     self.chrome_host.symbol_picker.show();
     self.chrome_host.symbol_picker.prompt = ""; // 기본 프롬프트로 되돌린다
     recomputeSymbolPicker(self);
     switch (symbolPickerReadiness(self)) {
         .not_editor, .none => {
-            self.chrome_host.symbol_picker.hide();
+            closeSymbolPicker(self);
             self.showNoticeKey(.symbol_picker_empty);
         },
         .pending, .ready => {},
@@ -37998,10 +38169,422 @@ pub fn toggleSymbolPicker(self: *AppSession) void {
 pub fn acceptSymbolPicker(self: *AppSession) void {
     const rows = self.symbol_picker_rows.rows.items;
     const idx = self.chrome_host.symbol_picker.selected;
-    const target: ?u32 = if (idx < rows.len) rows[idx].offset else null;
-    self.chrome_host.symbol_picker.hide();
+    const source = symbolPickerSource(pane_ops.activePane(self).activeTerm());
+    const current = self.chrome_host.symbol_picker.open and source != null and
+        self.symbol_picker_source != null and std.meta.eql(self.symbol_picker_source.?, source.?);
+    const target: ?u32 = if (current and idx < rows.len) rows[idx].offset else null;
+    closeSymbolPicker(self);
+    self.symbol_picker_source = null; // 닫힌 목록의 중복 확정은 이전 위치를 재사용하지 않는다.
     if (target) |off| navigateTo(self, .{ .offset = off }) catch {};
     self.metal_dirty = true;
+}
+
+fn symbolPickerFixture(fx: *PaneFixture) !void {
+    fx.term = try undoFixture(fx, testing.allocator, "symbols.zig", "pub fn alpha() void {}\n\npub fn beta() void {}\n");
+    const doc = fx.term.rt.editorDocument().opened.?;
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1)
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    try testing.expect(!fx.term.rt.editor_syntax.pending);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+}
+
+fn symbolPreviewFixture(fx: *PaneFixture) !void {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for (0..50) |i| {
+        const line = try std.fmt.allocPrint(testing.allocator, "pub fn target{d:0>2}() void {{}}\n\n", .{i});
+        defer testing.allocator.free(line);
+        try text.appendSlice(testing.allocator, line);
+    }
+    fx.term = try undoFixture(fx, testing.allocator, "preview.zig", text.items);
+    const doc = fx.term.rt.editorDocument().opened.?;
+    while (fx.term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.term.rt.editor_wrap = false;
+}
+
+const symbol_preview_rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 320 };
+
+fn symbolPreviewDraw(fx: *PaneFixture) !PaneDraw {
+    fx.session.gpu_quads.clearRetainingCapacity();
+    return appendPaneFrame(fx.session, symbol_preview_rect, fx.term) orelse error.MissingPreviewFrame;
+}
+
+test "SPPREVIEW1 목록 선택은 현재 화면만 이동하고 취소는 원래 화면을 그린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    var initial = try symbolPreviewDraw(&fx);
+    defer initial.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(initial.dl, "target00"));
+    const selection = fx.term.rt.editor_selection;
+    const revision = fx.term.rt.editorDocument().opened.?.file.revision;
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 40;
+    fx.session.dispatchChromeAction(.symbol_picker_selection_changed);
+    var preview = try symbolPreviewDraw(&fx);
+    defer preview.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(preview.dl, "target40"));
+    try testing.expectEqualDeep(selection, fx.term.rt.editor_selection);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    try testing.expectEqual(revision, fx.term.rt.editorDocument().opened.?.file.revision);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    var cancelled = try symbolPreviewDraw(&fx);
+    defer cancelled.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(cancelled.dl, "target00"));
+    try testing.expectEqualDeep(selection, fx.term.rt.editor_selection);
+}
+
+test "SPPREVIEW2 확정 전 checkpoint와 여러 커서를 보존하고 이동 이력은 한 번 쌓는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    fx.term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.fromPoints(5, 9)});
+    const extra = fx.term.rt.editor_extra_selections[0];
+    var initial = try symbolPreviewDraw(&fx);
+    defer initial.dl.deinit(testing.allocator);
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 40;
+    const target = fx.session.symbol_picker_rows.rows.items[40].offset;
+    var preview = try symbolPreviewDraw(&fx);
+    defer preview.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(preview.dl, "target40"));
+    try testing.expectEqualDeep(extra, fx.term.rt.editor_extra_selections[0]);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var capture = workspace_restore.Capture{ .allocator = arena.allocator() };
+    const saved = try capture.view(fx.term, 0);
+    try testing.expectEqual(@as(usize, 0), saved.first_doc_line);
+    try testing.expectEqual(@as(usize, 0), saved.primary.focus);
+    try testing.expectEqualDeep(extra, saved.extras[0]);
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expectEqual(@as(usize, target), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items[0].offset);
+    try testing.expect(fx.term.rt.editor_symbol_preview == null);
+    fx.session.dispatchChromeAction(.symbol_picker_accept);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+}
+
+test "SPPREVIEW3 접힌 안쪽 함수의 표시와 취소는 실제 접힘을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    fx.term = try undoFixture(&fx, testing.allocator, "folded.zig", "pub const Outer = struct {\n    pub fn inner() void {\n        const value = 1;\n        _ = value;\n    }\n};\n");
+    const doc = fx.term.rt.editorDocument().opened.?;
+    while (fx.term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    var initial = try symbolPreviewDraw(&fx);
+    defer initial.dl.deinit(testing.allocator);
+    try testing.expect(foldAll(fx.session));
+    const heads = try testing.allocator.dupe(u32, foldedHeads(fx.term));
+    defer testing.allocator.free(heads);
+    try testing.expect(heads.len > 0);
+    var folded = try symbolPreviewDraw(&fx);
+    defer folded.dl.deinit(testing.allocator);
+    try testing.expect(!drawnHasText(folded.dl, "inner"));
+    toggleSymbolPicker(fx.session);
+    try fx.session.chrome_host.symbol_picker.input.query.appendSlice(testing.allocator, "inner");
+    fx.session.dispatchChromeAction(.symbol_picker_query_changed);
+    var preview = try symbolPreviewDraw(&fx);
+    defer preview.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(preview.dl, "inner"));
+    try testing.expectEqualSlices(u32, heads, foldedHeads(fx.term));
+    fx.session.dismissMessageOverlays();
+    var restored = try symbolPreviewDraw(&fx);
+    defer restored.dl.deinit(testing.allocator);
+    try testing.expect(!drawnHasText(restored.dl, "inner"));
+    try testing.expectEqualSlices(u32, heads, foldedHeads(fx.term));
+}
+
+test "SPPREVIEW4 공유 편집 뒤 미리보기의 낡은 문자열과 위치를 버린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    focusTermForNav(fx.session, fx.term);
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 40;
+    var preview = try symbolPreviewDraw(&fx);
+    defer preview.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(preview.dl, "target40"));
+    try testing.expectEqual(@as(usize, 0), peer.rt.editor_first_line);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "// newest body\n"));
+    const selection = fx.term.rt.editor_selection;
+    var updated = try symbolPreviewDraw(&fx);
+    defer updated.dl.deinit(testing.allocator);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+    try testing.expect(drawnHasText(updated.dl, "target00"));
+    try testing.expect(std.mem.startsWith(u8, fx.term.rt.editorDocument().opened.?.file.content, "// newest body\n"));
+    try testing.expectEqual(@as(usize, 1), fx.term.rt.editor_first_line);
+    try testing.expectEqualDeep(selection, fx.term.rt.editor_selection);
+    try testing.expectEqual(@as(u64, 1), fx.term.rt.editorDocument().opened.?.file.revision);
+}
+
+test "SPPREVIEW5 긴 랩 문맥과 리사이즈에서도 대상이 보이고 원래 조각을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    try text.appendSlice(testing.allocator, "// ");
+    try text.appendNTimes(testing.allocator, 'x', 4000);
+    try text.appendSlice(testing.allocator, "\npub fn destination() void {}\n");
+    fx.term = try undoFixture(&fx, testing.allocator, "wrapped.zig", text.items);
+    const doc = fx.term.rt.editorDocument().opened.?;
+    while (fx.term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    fx.term.rt.editor_wrap = true;
+    fx.term.rt.editor_first_piece = 2;
+    toggleSymbolPicker(fx.session);
+    for ([_]u32{ 800, 400, 1000 }) |width| {
+        var drawn = appendPaneFrame(fx.session, .{ .x = 0, .y = 0, .w = width, .h = 320 }, fx.term) orelse return error.MissingFrame;
+        defer drawn.dl.deinit(testing.allocator);
+        try testing.expect(drawnHasText(drawn.dl, "destination"));
+        try testing.expectEqual(@as(u32, 2), fx.term.rt.editor_first_piece);
+    }
+    closeSymbolPicker(fx.session);
+    try testing.expectEqual(@as(u32, 2), fx.term.rt.editor_first_piece);
+}
+
+test "SPPREVIEW6 빈 결과와 바깥 클릭은 정본 화면을 보존하고 조합은 목록에만 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 40;
+    var preview = try symbolPreviewDraw(&fx);
+    defer preview.dl.deinit(testing.allocator);
+    fx.session.imeBegin();
+    fx.session.imeMarked("ㅎ");
+    try testing.expectEqualStrings("ㅎ", fx.session.chrome_host.symbol_picker.input.preedit.items);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_preedit.len);
+    fx.session.imeInsert("한");
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("한", fx.session.chrome_host.symbol_picker.input.query.items);
+    try testing.expectEqual(@as(usize, 0), fx.session.symbol_picker_rows.rows.items.len);
+    var empty = try symbolPreviewDraw(&fx);
+    defer empty.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(empty.dl, "target00"));
+    fx.session.mouse(1, 0, 310, 0, 0);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(u64, 0), fx.term.rt.editorDocument().opened.?.file.revision);
+}
+
+test "SPPREVIEW7 표시 투영의 모든 할당 실패는 누수 없이 되돌린다" {
+    const Judge = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var p = try symbol_preview.Projection.init(allocator, 7, 4, 1, &.{ "outer", "inner", "end" }, &.{.{ .head = 0, .first_hidden = 1, .last_hidden = 2, .level = 1 }}, &.{0});
+            defer p.deinit(allocator);
+            try testing.expectEqualStrings("inner", p.lines[p.target_line]);
+            try testing.expectEqual(@as(usize, 3), p.lines.len);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Judge.run, .{});
+}
+
+test "SPPREVIEW8 대상 줄을 강조하고 프레임 할당 실패 뒤에도 정본 화면을 지킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    fx.session.loaded_config.config.editor.render_line_highlight = .none;
+    var initial = try symbolPreviewDraw(&fx);
+    defer initial.dl.deinit(testing.allocator);
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 40;
+    var preview = try symbolPreviewDraw(&fx);
+    defer preview.dl.deinit(testing.allocator);
+    const color = fx.session.buildChromeTokens().get(.line_highlight);
+    const border_color = @as(u32, 0xff000000) | (@as(u32, color.r) << 16) | (@as(u32, color.g) << 8) | color.b;
+    var boxes: usize = 0;
+    for (fx.session.gpu_quads.items) |q| {
+        if (q.border_color == border_color and q.border_widths[0] == 2) boxes += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), boxes);
+    const selection = fx.term.rt.editor_selection;
+    // 투영 생성과 DrawList 준비 중 각각 실패시켜 defer 정산도 검증한다.
+    for (0..24) |fail_index| {
+        discardSymbolPreview(fx.session, fx.term);
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        fx.session.allocator = failing.allocator();
+        const draw = symbolPreviewDraw(&fx) catch null;
+        fx.session.allocator = testing.allocator;
+        if (draw) |value| {
+            var dl = value.dl;
+            dl.deinit(testing.allocator);
+        }
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line);
+        try testing.expectEqualDeep(selection, fx.term.rt.editor_selection);
+        try testing.expect(!fx.term.rt.editor_symbol_preview_drawing);
+    }
+    closeSymbolPicker(fx.session);
+    var restored = try symbolPreviewDraw(&fx);
+    defer restored.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(restored.dl, "target00"));
+}
+
+test "SPPREVIEW9 원래 뷰가 그려지지 않는 포커스 전환도 낡은 목록을 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    const owner = fx.term;
+    const peer = try openSharedViewInActivePane(fx.session, owner);
+    focusTermForNav(fx.session, owner);
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 40;
+    var before = try symbolPreviewDraw(&fx);
+    defer before.dl.deinit(testing.allocator);
+    try testing.expect(drawnHasText(before.dl, "target40"));
+    focusTermForNav(fx.session, peer);
+    fx.term = peer;
+    var after = try symbolPreviewDraw(&fx);
+    defer after.dl.deinit(testing.allocator);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+    try testing.expect(owner.rt.editor_symbol_preview == null);
+    try testing.expect(drawnHasText(after.dl, "target00"));
+    try testing.expectEqual(@as(usize, 0), owner.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), peer.rt.editor_selection.?.focus);
+}
+
+test "SPTARGET1 공유 뷰 편집 뒤 낡은 심볼 위치를 확정하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPickerFixture(&fx);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    focusTermForNav(fx.session, fx.term);
+    toggleSymbolPicker(fx.session);
+    try testing.expectEqual(@as(usize, 2), fx.session.symbol_picker_rows.rows.items.len);
+    fx.session.chrome_host.symbol_picker.selected = 1;
+    const old_offset = fx.session.symbol_picker_rows.rows.items[1].offset;
+    // 입력 라우팅을 흉내 내지 않는다. 다른 뷰에 적용되는 문서 편집 API가 정본을 바꾼다.
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "// shifted\n"));
+    const before = fx.term.rt.editor_selection.?;
+    const revision = fx.term.rt.editorDocument().opened.?.file.revision;
+    try testing.expect(before.focus != old_offset);
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expectEqualDeep(before, fx.term.rt.editor_selection.?);
+    try testing.expectEqual(revision, fx.term.rt.editorDocument().opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+}
+
+test "SPTARGET2 같은 문서의 다른 뷰로 전환한 뒤 원래 목록을 적용하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPickerFixture(&fx);
+    const peer = try openSharedViewInActivePane(fx.session, fx.term);
+    focusTermForNav(fx.session, fx.term);
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 1;
+    focusTermForNav(fx.session, peer);
+    peer.rt.editor_selection = editor_selection.Selection.at(1);
+    const before = peer.rt.editor_selection.?;
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expectEqualDeep(before, peer.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "SPTARGET3 다른 파일로 전환한 뒤 이전 파일의 심볼로 이동하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPickerFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 1;
+    const other = try undoFixture(&fx, testing.allocator, "other.txt", "another document with different contents\n");
+    other.rt.editor_selection = editor_selection.Selection.at(1);
+    const before = other.rt.editor_selection.?;
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expectEqualDeep(before, other.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "SPTARGET4 이미 닫힌 심볼 목록의 확정은 무동작이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPickerFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 1;
+    toggleSymbolPicker(fx.session);
+    const before = fx.term.rt.editor_selection.?;
+    acceptSymbolPicker(fx.session);
+    try testing.expectEqualDeep(before, fx.term.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "SPTARGET5 재필터도 다른 뷰의 목록과 형제 범위를 이어받지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |siblings| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try symbolPickerFixture(&fx);
+        const peer = try openSharedViewInActivePane(fx.session, fx.term);
+        focusTermForNav(fx.session, fx.term);
+        if (siblings) openSiblingPicker(fx.session, 0) else toggleSymbolPicker(fx.session);
+        try testing.expect(fx.session.chrome_host.symbol_picker.open);
+        focusTermForNav(fx.session, peer);
+        fx.session.dispatchChromeAction(.symbol_picker_query_changed);
+        try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+        try testing.expectEqual(@as(usize, 0), fx.session.symbol_picker_rows.rows.items.len);
+        try testing.expect(fx.session.symbol_picker_source == null);
+    }
+}
+
+test "SPTARGET6 수정 후 다시 연 목록은 새 위치로 한 번만 이동한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPickerFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const old_offset = fx.session.symbol_picker_rows.rows.items[1].offset;
+    try testing.expect(insertText(fx.session, fx.term, "// shifted\n"));
+    fx.session.dispatchChromeAction(.symbol_picker_query_changed);
+    try testing.expect(!fx.session.chrome_host.symbol_picker.open);
+
+    toggleSymbolPicker(fx.session);
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+    fx.session.chrome_host.symbol_picker.selected = 1;
+    const target = fx.session.symbol_picker_rows.rows.items[1].offset;
+    try testing.expectEqual(old_offset + "// shifted\n".len, target);
+    const from = fx.term.rt.editor_selection.?.focus;
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expectEqual(@as(usize, target), fx.term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+    try testing.expectEqual(from, fx.session.editor_nav_back.items[0].offset);
+    fx.session.dispatchChromeAction(.symbol_picker_accept);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+}
+
+test "SPTARGET7 재필터 할당 실패 뒤 이전 목록의 위치를 사용하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPickerFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    try testing.expect(fx.session.symbol_picker_rows.rows.items.len > 0);
+    fx.session.chrome_host.symbol_picker.selected = 1;
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    recomputeSymbolPicker(fx.session);
+    fx.session.allocator = testing.allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectEqual(@as(usize, 0), fx.session.symbol_picker_rows.rows.items.len);
+    const before = fx.term.rt.editor_selection.?;
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expectEqualDeep(before, fx.term.rt.editor_selection.?);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
 }
 
 test "SP7 피커는 편집기에서만 열린다 — 터미널에는 문서가 없다 (§7.5)" {
@@ -38224,6 +38807,7 @@ pub fn crumbSegmentAt(self: *AppSession, term: *Term, band: maru.session.SplitRe
 pub fn openSiblingPicker(self: *AppSession, sym_idx: usize) void {
     self.dismissMessageOverlays();
     self.symbol_picker_scope = .{ .sibling_of = sym_idx };
+    self.symbol_picker_source = null;
     self.chrome_host.symbol_picker.show();
     // **범위를 프롬프트가 말한다**(§7.5) — 「형제」 같은 관계 이름이 아니라 **부모 이름**을 쓴다.
     // 사용자가 묻는 것은 「왜 이 목록만 나오나」이고, 그 답은 관계가 아니라 **어느 컨테이너 안인가**다.
@@ -38232,7 +38816,7 @@ pub fn openSiblingPicker(self: *AppSession, sym_idx: usize) void {
     recomputeSymbolPicker(self);
     switch (symbolPickerReadiness(self)) {
         .not_editor, .none => {
-            self.chrome_host.symbol_picker.hide();
+            closeSymbolPicker(self);
             self.symbol_picker_scope = null;
             self.showNoticeKey(.symbol_picker_empty);
         },

@@ -5048,6 +5048,15 @@ pub fn build(b: *std.Build) void {
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
         .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.diff.", "app_session.editor.recovery_store.", "app_session.editor.discovery." },
     });
+    // 심볼 목록의 수명과 확정 대상을 실제 편집기에서 검사한다. 전체 test-editor에도 포함된다.
+    const symbol_picker_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{".test.SP"},
+    });
+    const run_symbol_picker_tests = b.addRunArtifact(symbol_picker_tests);
+    run_symbol_picker_tests.setCwd(b.path("."));
+    run_symbol_picker_tests.addArg("--maru-expect-tests=45");
+    b.step("test-editor-symbol-picker", "Run symbol picker filtering and target lifetime judges").dependOn(&run_symbol_picker_tests.step);
     // 문서 핸들의 제품 수명과 등록 실패를 빠르게 재현한다. 전체 test-editor에도 같은 판정자가 실린다.
     const document_runtime_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,

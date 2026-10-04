@@ -1636,6 +1636,17 @@ pub fn build(b: *std.Build) void {
     const run_save_commit_tests = b.addRunArtifact(save_commit_tests);
     run_save_commit_tests.addArg("--maru-expect-tests=7"); // seven actual native handshake/ownership tests
     save_commit_step.dependOn(&run_save_commit_tests.step);
+    const editor_open_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/editor/open_worker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const editor_open_tests = addProjectTest(b, .{ .root_module = editor_open_mod, .filters = &.{"Windows initial open worker"} });
+    const editor_open_step = b.step("test-win32-editor-open", "Verify initial read and capability worker ownership without Registry callbacks");
+    const run_editor_open_tests = b.addRunArtifact(editor_open_tests);
+    run_editor_open_tests.addArg("--maru-expect-tests=6");
+    editor_open_step.dependOn(&run_editor_open_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {
         const save_crash_probe = b.addExecutable(.{
@@ -4237,6 +4248,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(navigation_step);
     test_step.dependOn(edit_command_step);
     test_step.dependOn(document_grant_step);
+    test_step.dependOn(editor_open_step);
     test_step.dependOn(save_controller_step);
     test_step.dependOn(save_commit_step);
     test_step.dependOn(backup_store_step);

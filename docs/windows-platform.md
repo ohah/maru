@@ -11934,3 +11934,22 @@ probe·UTF-8 처리 이관은 후속이며 이번 분리만으로 UI 스레드 I
 disk CAS로 사용·소비된 owner 수락·read limit 생략·쓰기 공유 허용의 다섯 compiled runtime
 변형을 검출했다. 각 변형 뒤 원본 bytes를 복원했다. 부정 검증에서 예기치 않은 성공 또는
 조기 assertion 실패가 생겨도 native grant와 view 참조를 정리하도록 기존 테스트도 보강했다.
+
+### 2m.182 — 초기 읽기·capability probe worker
+
+capability probe를 Snapshot의 native 경계로 옮겼다. Book도 문서 등록 전에 선택 volume,
+fresh 상대 경로와 최초 identity·raw source hash를 검사하고 쓰기 없는 KTM rollback·aborted
+조회·handle 정리를 끝낸다. Windows 절대 경로의 root 판정은 동기/worker 경로가 공유한다.
+
+`open_worker.Worker`는 독립 경로 bytes와 heap Job을 소유하고 자체 I/O context에서 초기
+읽기와 probe를 실행한다. Registry나 borrowed 문서 포인터가 없다. 취소는 실제 작업 종료까지
+Job을 유지하며 active 취소는 Snapshot을 worker에서 정리한다. native 완료 뒤 late 취소도
+앱의 결과 인수 전에 표시하고, 이미 만들어진 Snapshot의 명시적 정리 소유권을 반환한다.
+복사된 Worker나 다른 스레드는 취소·인수·해제를 할 수 없다. done publication은 worker I/O
+정리 뒤의 마지막 Job 접근이며 인수는 acquire 뒤 한 번만 가능하다.
+
+worker 6개가 Debug/ReleaseFast에서 통과했다. 실제 파일/KTM에서 off-owner 실행, 원본 전체
+bytes 보존, active/late 취소, copied owner, 읽기 상한과 readonly capability 거절을 검사했다.
+probe 생략·active 취소 무시·late 취소 무시·copied owner 허용·admission 상한 생략의 다섯
+compiled runtime 변형을 검출하고 원본 bytes를 복원했다. 일반 앱의 파일 클릭은 아직 동기
+경로를 쓰며 worker 결과의 앱 등록/readonly fallback·UTF-8 처리·닫기 배선은 이어서 진행한다.

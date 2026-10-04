@@ -321,6 +321,8 @@ src/
                         document_grant·save_controller·backup_store는 Windows 파일 권한·저장·복구 I/O 경계다.
                         native_open은 Registry를 참조하지 않는 최초 파일 snapshot과 native 소유권을 만들고,
                         document_grant는 앱 스레드에서 이를 문서로 등록한 뒤 권한 소유권을 인수한다.
+                        open_worker는 Registry 없이 초기 읽기·capability probe를 실행하며 취소 뒤 실제
+                        종료까지 Job을 보유하고, native Snapshot의 인수·정리 소유권을 반환한다.
                         directory_watch는 native 비동기 알림과 identity별 공유·상한·debounce 및
                         알림을 살아 있는 문서 구독에 배분하는 검사를 소유한다.
                         file_read_worker는 selected handle 기반 읽기·raw hash와 값 ticket을 프레임 밖에서 만든다.

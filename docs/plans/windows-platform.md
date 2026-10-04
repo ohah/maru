@@ -369,3 +369,9 @@ receipt까지 보유한다. host 66개 Debug/ReleaseFast와 다섯 compiled runt
 Grant.publishOpen은 등록 실패 때 Snapshot 소유권을 유지하고 등록 성공 뒤만 소비한다.
 권한 19개 Debug/ReleaseFast와 다섯 compiled runtime 변형 검출이 통과했다. 실제 초기 열기
 worker 연결과 capability probe·UTF-8 이관 및 전체 잔여 Windows 범위는 계속 진행한다.
+
+§2m.182: 초기 읽기와 등록 전 zero-write capability probe를 Registry 없는 open_worker로
+실행할 수 있다. 독립 Job/경로, 실제 종료 후 정리와 결과 인수, active/late 취소 및 Worker
+소유권을 유지한다. 동기/worker의 Windows root 판정도 공유한다. worker 6개 Debug/ReleaseFast와
+다섯 compiled runtime 변형 검출이 통과했다. 일반 앱의 등록/readonly fallback·UTF-8·닫기
+배선과 전체 잔여 Windows 범위는 계속 진행한다.

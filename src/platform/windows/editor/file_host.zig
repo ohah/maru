@@ -11,15 +11,10 @@ const identity = @import("identity.zig");
 const reading = @import("file_read_worker.zig");
 const watching = @import("directory_watch.zig");
 const w = std.os.windows;
-extern "kernel32" fn GetVolumeInformationByHandleW(w.HANDLE, ?[*]u16, u32, ?*u32, ?*u32, ?*u32, ?[*]u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
 extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
 
-fn acceptsVolume(flags: u32, filesystem: []const u16) bool {
-    // The SDK flags describe the selected handle's volume, never a drive-letter
-    // assumption. Network/other filesystems must not acquire an NTFS save grant.
-    // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew
-    return flags & 0x00200000 != 0 and flags & 0x00080000 == 0 and std.mem.eql(u16, filesystem, std.unicode.utf8ToUtf16LeStringLiteral("NTFS"));
-}
+const native_open = @import("native_open.zig");
+const acceptsVolume = native_open.acceptsVolume;
 
 pub fn saveKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru.terminal.KeyEvent) bool {
     const original = resolver.resolveEditor(event, false);
@@ -52,25 +47,6 @@ test "Windows editor host save chord honors configured unbind and release withou
     try std.testing.expect(ctrl_s.modifiers.control and !ctrl_s.modifiers.command);
 }
 
-fn probe(grant: *const grants.Grant, io: std.Io, limit: usize) !void {
-    var flags: u32 = 0;
-    var filesystem: [16]u16 = @splat(0);
-    if (!GetVolumeInformationByHandleW(grant.original.handle, null, 0, null, null, &flags, &filesystem, filesystem.len).toBool()) return error.SaveCapabilityUnavailable;
-    const end = std.mem.indexOfScalar(u16, &filesystem, 0) orelse return error.SaveCapabilityUnavailable;
-    if (!acceptsVolume(flags, filesystem[0..end])) return error.SaveCapabilityUnavailable;
-    var pinned = try maru.win32_relative_file.open(grant.allocator, grant.root, grant.relative_path);
-    defer pinned.deinit(io);
-    if (!grant.identity.eql(try identity.Identity.capture(pinned.original.handle))) return error.IdentityChanged;
-    const state = grant.registry.get(grant.lease).?;
-    var tx = try transactions.Transaction.beginExperimental(grant.allocator, io, &pinned, state.opened.?.disk_hash.?, limit);
-    // This probe never writes or commits. Even a cleanup failure is reported as
-    // unsupported, rather than enabling edits with an unproved native permit.
-    defer if (tx.phase != .closed) tx.close(io) catch {};
-    try tx.rollback();
-    if (try tx.queryOutcome() != .aborted) return error.SaveCapabilityUnavailable;
-    try tx.close(io);
-}
-
 pub const Book = struct {
     pub const SaveReady = union(enum) { receipt: saving.Receipt, cancelled };
     allocator: std.mem.Allocator,
@@ -82,29 +58,24 @@ pub const Book = struct {
         // Allocate the publication slot first. A successfully probed document
         // cannot be stranded by an allocation after native ownership transfers.
         try self.controllers.ensureUnusedCapacity(self.allocator, 1);
-        var opened = try grants.Grant.openExperimental(self.allocator, io, root, name, self.registry, limit);
+        var snapshot = try native_open.Snapshot.open(self.allocator, io, root, name, limit);
+        defer snapshot.deinit(io);
+        try snapshot.probe(io, limit);
+        var opened = try grants.Grant.publishOpen(self.allocator, self.registry, &snapshot);
         errdefer opened.grant.deinit(io);
         errdefer _ = self.registry.release(opened.view) catch unreachable;
-        try probe(&opened.grant, io, limit);
         self.controllers.appendAssumeCapacity(saving.Controller.take(&opened.grant));
         return opened.view;
     }
 
     pub fn openPath(self: *Book, io: std.Io, path: []const u8, limit: usize) !editor.document_registry.Lease {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
-        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
-        const parsed = std.fs.path.parsePathWindows(u8, path);
-        if (parsed.kind != .drive_absolute and parsed.kind != .unc_absolute) return error.InvalidPath;
-        if (parsed.kind == .unc_absolute) {
-            var components = std.mem.tokenizeAny(u8, parsed.root, "/\\");
-            try maru.win32_relative_file.validateBasename(components.next() orelse return error.InvalidPath);
-            try maru.win32_relative_file.validateBasename(components.next() orelse return error.InvalidPath);
-        }
+        const root_path = try native_open.rootForPath(path);
         // The native grant walks the full suffix relative to this selected root,
         // rejecting reparse points and escapes instead of reopening its dirname.
-        var root = try std.Io.Dir.openDirAbsolute(io, parsed.root, .{ .follow_symlinks = false });
+        var root = try std.Io.Dir.openDirAbsolute(io, root_path, .{ .follow_symlinks = false });
         defer root.close(io);
-        return self.open(io, root, path[parsed.root.len..], limit);
+        return self.open(io, root, path[root_path.len..], limit);
     }
 
     fn index(self: *Book, view: editor.document_registry.Lease) !usize {

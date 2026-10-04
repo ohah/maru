@@ -470,7 +470,14 @@ pass "빈 env"
 echo "8) 원격 설치기(maru agent-hooks)가 심는 바이트는 이 fixture 를 HOME 규칙으로 채운 것과 같다 — 핑퐁의 부재 (RA8)"
 # 로컬 GUI 설치기는 빌더 + HOME 규칙으로 커맨드를 만들고 이 fixture 는 그 빌더에서 나온다. 원격 CLI 가 같은 바이트를
 # 쓰는지는 **제품 바이너리**로만 알 수 있다. 바이너리가 없으면 «못 쟀다» 로 적는다(SKIP — 초록으로 세지 않는다).
-maru_bin="$root/zig-out/bin/maru"
+# 빌드 스텝(`zig build check-agent-hook-command` · `zig build test`)은 **방금 빌드한** 바이너리를 첫 인자로 넘긴다.
+# 손으로 돌릴 때만 `zig-out` 의 것을 쓴다 — 그건 낡았을 수 있다(그 바이너리로 비교해 로컬만 빨갰던 적이 있다).
+if [ -n "${1:-}" ]; then
+  maru_bin="$1"
+else
+  maru_bin="$root/zig-out/bin/maru"
+  [ -x "$maru_bin" ] && echo "  note: 인자 없이 실행 — zig-out/bin/maru 를 쓴다(낡았을 수 있다; zig build check-agent-hook-command 를 권한다)" >&2
+fi
 if [ -x "$maru_bin" ]; then
   cli_home="$work/cli-home"
   mkdir -p "$cli_home/.claude"

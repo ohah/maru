@@ -6415,6 +6415,27 @@ pub fn build(b: *std.Build) void {
     reconnect_failure_log_step.dependOn(&run_failure_log_wiring.step);
     boundary_step.dependOn(reconnect_failure_log_step);
 
+    // 저장된 workspace 를 **읽지 못한 실행이 침묵하지 않고 파일을 보존하는가**(2026-10-05: v1→v2 헤더 변경 뒤 v1 저장본이
+    // `BadHeader` 로 거절됐는데 로그엔 래치 줄 하나뿐이라 host 에 살아 있던 세션 34 개가 사라진 것처럼 보였다). Zig 의
+    // window_count 가 오류 이름을, Swift 의 `count < 0` 갈래가 결과와 래치를 제자리에서 남기는지 글자로 잰다.
+    const workspace_parse_failure_log_step = b.step(
+        "test-workspace-parse-failure-log",
+        "A workspace that fails to parse logs the error name and the preserve-the-file outcome",
+    );
+    const workspace_parse_failure_log_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/workspace_parse_failure_log_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_workspace_parse_failure_log = b.addRunArtifact(workspace_parse_failure_log_tests);
+    run_workspace_parse_failure_log.addArg("--maru-expect-tests=2");
+    run_workspace_parse_failure_log.addArg("--maru-expect-passed=2");
+    run_workspace_parse_failure_log.setCwd(b.path("."));
+    workspace_parse_failure_log_step.dependOn(&run_workspace_parse_failure_log.step);
+    boundary_step.dependOn(workspace_parse_failure_log_step);
+
     // 업그레이드가 실패해도 **살아 있는 host 를 재사용하고, 그런 host 가 없을 때만 새 host 를 띄우는가**(2026-09-30:
     // 교체 실패마다 새 host 를 띄워 host 가 넷이 됐다 — 설계는 「한 로그인 세션에 host 하나」). 판정은 std-only leaf 라
     // PR 에서 돌고, connect 경로·앱 pool 이 그 판정을 spawn 앞 제자리에서 부르는지는 wiring 경계가 잰다.

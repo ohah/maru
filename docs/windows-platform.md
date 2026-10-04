@@ -11159,3 +11159,35 @@ sequence 1/idle을 확인한다. 저장 호출은 fixture 직접 호출이고 �
 일반 파일은 계속 읽기 전용이다. GUI Ctrl+S·dirty-close·감시·물리 IME와 capability/crash
 복구, 비동기 I/O/GUI notice 배선은 남아 있다. 이 Controller는 현재 main-thread native 호출을
 정산하는 실험적 경계이며 GUI 저장 활성화나 W8.17 완료를 뜻하지 않는다.
+
+### 2m.152 저장 프로세스를 실제로 강제 종료한다 (2026-10-04)
+
+`zig build test-win32-save-crash`는 앱에 설치하지 않는 별도 native 판정 실행 파일을
+만든다. 부모가 독점 생성한 무작위 cache 디렉터리에서 worker를 실행하고, 실제 작업을
+마친 checkpoint byte를 익명 pipe로 확인한 뒤 TerminateProcess로 종료한다. 준비가
+끝나기 전에 고정 sleep으로 죽이지 않으며, 10초 deadline으로 checkpoint와 종료를
+감시한다. 종료 요청 후 process object가 signaled이고 지정 exit code인지 확인해야
+디스크를 판정한다. worker의 Zig defer/명시적 rollback은 실행되지 않는다.
+
+checkpoint는 transaction open, 실제 부분 쓰기/EOF 변경/flush, 완전한 이미지 준비,
+transacted file close 뒤 KTM 요청 전, native commit 뒤 문서 ack 전, Controller 정산 뒤의
+6개다. BOM/CRLF를 가진 원본에 짧은 내용과 더 긴 한글 내용을 각각 저장해 총 12개
+프로세스를 종료한다. 첫 네 지점은 원본 바이트, 뒤 두 지점은 정확한 새 저장 바이트가
+남아야 한다. 부모가 독립적으로 volume/128-bit file ID·생성 시각·파일 속성·owner/group/
+DACL과 별도 named stream을 비교하고, 새 grant/controller의 준비·abort와 원본 유지로
+죽은 worker의 writer/parent fence가 남지 않았는지 확인한다. audit SACL 판정은 기존
+native safe-save gate가 계속 소유한다. 삭제는 새로 만든 알려진 파일과 빈 디렉터리뿐이다.
+
+Debug와 ReleaseFast에서 12개 모두 통과했다. 적대적 검증 5회는 실제 body write 누락,
+EOF 조정 누락, KTM 호출 없이 성공 반환, 커밋 뒤 named stream 삭제, 같은 바이트의 다른
+file ID로 교체를 각각 컴파일 후 실행 중 거부했다. 앞 세 변이는 제품 transaction 코드,
+뒤 두 변이는 판정 worker의 실제 파일 손상이다. 전수 소스 바이트 원복 뒤 두 모드를
+재검증했다. 가짜 commit은 native outcome 조회로, 파일 교체는 full ID 비교로 검출한다.
+
+Windows API 근거는 Microsoft의 [TerminateProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess),
+[PeekNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe),
+[TxF 작업 모델](https://learn.microsoft.com/en-us/windows/win32/fileio/how-to-use-transactional-ntfs)이다.
+마지막 transacted handle의 종료/commit 결정과 디스크 결과를 실제로 대조하는 local NTFS
+프로세스 종료 검증이며, 전원 장애·OS crash·커밋 syscall 내부의 모든 실패 타이밍을
+증명하지 않는다. 미저장 본문 백업/재시작 복원, 저장 기능 capability, 일반 GUI 저장·닫기·
+외부 감시·물리 IME도 계속 남아 있다. 일반 파일은 읽기 전용이며 W8.17은 진행 중이다.

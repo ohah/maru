@@ -1032,3 +1032,10 @@ provider 갱신·준비 할당 실패를 집중 실행한다. ReleaseFast는 `-D
 `-Doptimize=ReleaseFast`로 같은 판정자를 최적화 모드에서 확인한다. 위 실제 Windows 창
 fixture도 Controller를 호출한다. 일반 GUI·비동기 I/O와 crash 복구 범위는
 [Windows 계약](windows-platform.md) §2m.151을 참조한다.
+
+`zig build test-win32-save-crash`는 Windows에서 별도 worker를 6개 저장 checkpoint ×
+두 이미지로 강제 종료하고, 부모가 실제 디스크 바이트·file ID·owner/group/DACL·기본
+메타데이터·ADS와 새 저장 준비/abort를 검증한다. `-Doptimize=ReleaseFast`도 지원한다.
+앱에 설치하지 않으며 새 cache fixture의 알려진 파일/빈 디렉터리만 정리한다. power loss,
+미저장 편집 백업/복원이나 일반 GUI 저장 완료 판정은 아니다. [Windows 계약](windows-platform.md)
+§2m.152가 실제 검증 범위와 적대적 검증 결과를 소유한다.

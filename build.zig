@@ -1578,6 +1578,21 @@ pub fn build(b: *std.Build) void {
     const run_save_controller_tests = b.addRunArtifact(save_controller_tests);
     run_save_controller_tests.addArg("--maru-expect-tests=15"); // 2 aggregation blocks and 13 actual native controller tests
     save_controller_step.dependOn(&run_save_controller_tests.step);
+    const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
+    if (target.result.os.tag == .windows) {
+        const save_crash_probe = b.addExecutable(.{
+            .name = "maru-win32-save-crash-probe",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/windows/editor/crash_probe.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_save_crash = b.addRunArtifact(save_crash_probe);
+        run_save_crash.setCwd(b.path("."));
+        save_crash_step.dependOn(&run_save_crash.step);
+    }
     const relative_file_tests = addProjectTest(b, .{
         .root_module = maru_mod,
         .filters = &.{ "Windows safe save", "Windows relative read" },
@@ -4165,6 +4180,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(edit_command_step);
     test_step.dependOn(document_grant_step);
     test_step.dependOn(save_controller_step);
+    test_step.dependOn(save_crash_step);
     test_step.dependOn(editor_input_step);
     test_step.dependOn(&run_internal_contract_tests.step);
     test_step.dependOn(&run_core_tests.step);

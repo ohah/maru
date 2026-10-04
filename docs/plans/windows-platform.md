@@ -164,3 +164,9 @@ capability/crash 복구·일반 Ctrl+S/dirty-close/감시/물리 IME 연결은 �
 실제 창의 Controller→native 저장→독립 일반 재열기를 검증했다. GUI Ctrl+S/dirty-close/
 감시/물리 IME, capability·crash 복구와 비동기 I/O/notice 연결은 계속 남아 있다.
 일반 파일은 읽기 전용이며 W8.17은 진행 중이다.
+
+Windows §2m.152는 6개 native 저장 checkpoint와 두 이미지의 12개 실제 프로세스
+강제 종료를 Debug/ReleaseFast에서 검증했다. 커밋 전 원본/커밋 후 저장 바이트, full ID,
+owner/group/DACL·생성 시각·속성·ADS와 재시작 뒤 새 저장 준비/abort를 확인하고 적대적
+검증 5회를 수행했다. 전원 장애·미저장 백업 복원·capability·일반 GUI 저장/닫기/감시와
+물리 IME 완료를 뜻하지 않는다. W8.17은 계속 진행 중이다.

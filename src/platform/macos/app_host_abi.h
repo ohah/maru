@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 192u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 193u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1276,6 +1276,10 @@ uint32_t maru_macos_app_session_take_mouse_hide(MaruAppHostSession *session);
    0=조합(입력기에 맡겨 특수문자 조합). Swift keyDown이 호출해 Option-단독 키를 입력기 경로(0)/meta 인코딩(1)으로
    가른다. 1회성 신호가 아니라 라이브 config read(reload로 갱신). session null=1(meta 폴백). v73. */
 uint32_t maru_macos_app_session_option_as_meta(MaruAppHostSession *session);
+/* 마지막 일반 창을 닫으면 앱도 끝내는가(config window.quit-after-last-window-closed). 1=종료(기본·현행), 0=Dock 에
+   남는다 — Swift 의 마지막 창 닫기·셸 종료 경로가 NSApp.terminate 대신 그 창만 닫는다. 라이브 config read(reload
+   로 갱신). session null=1(종료 폴백). v193. */
+uint32_t maru_macos_app_session_quit_after_last_window_closed(MaruAppHostSession *session);
 /* 단축키 힌트 홀드 상태머신(keyhint_hold.zig)에 이벤트를 흘리고 Action을 돌려준다. 반환(0=none·1=arm_timer·2=cancel·
    3=show·4=hide): Swift가 1=OS 타이머 시작·2/4=타이머 무효화·3/4=markMetalNeedsRedraw로 매핑(visible 토글은 머신 소유).
    gesture 정책=Zig·OS clock만 Swift. mods_bits=현재 눌린 modifier 비트(shift=1·control=2·option=4·command=8). session

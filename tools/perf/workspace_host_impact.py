@@ -30,7 +30,7 @@ func maru_macos_app_session_workspace_window_count(_ unused:OpaquePointer?,_ p:U
 func safeInt32(_ x:Double)->Int32?{x.isFinite ? Int32(clamping:Int64(x)) : nil}
 final class Host {
  static let statusOK:UInt32=0
- var windows:[Surface]=[];var smokeMode=false;var workspaceRestoreEnabled=true
+ var windows:[Surface]=[];var smokeMode=false;var workspaceRestoreEnabled=true;var openWithoutWindows=false
  var terminationKeyWindow:NSWindow?=nil;var workspaceFileURL:URL?=nil;var workspaceRestoreIncomplete=false
 '''
 post=r'''

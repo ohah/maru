@@ -2809,6 +2809,14 @@ test "workspace: 도크 뷰는 왕복하고 모르는 뷰는 탐색기로 clamp�
     try std.testing.expectEqual(@as(u32, 321), future.workspace.windows[0].dock.size);
 }
 
+test "workspace: 헤더만 있는 저장은 창 0 개다 — 마지막 창을 닫고 Dock 에 남은 앱의 저장 (window.quit-after-last-window-closed)" {
+    // macOS host 가 창 0 개로 Dock 에 남은 동안 이 모양을 커밋하고, 다음 실행의 복원은 count==0 을 「기본 빈 창」으로
+    // 읽는다(MaruAppHost.restoreWorkspace). 오류(-1)로 읽히면 「복원 불완전」 래치가 서서 저장이 멈춘다 — 그 경계를 못 박는다.
+    var parsed = try parse(std.testing.allocator, header ++ "\n");
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.workspace.windows.len);
+}
+
 test "workspace Explorer v137: packed explicit roots and empty presented dock round trip" {
     const roots = [_][]const u8{ "/Users/me/project one", "/tmp/quote\"root" };
     const windows = [_]Window{.{

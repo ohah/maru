@@ -717,6 +717,8 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
             // `loaded_config.config` 는 창마다의 미러다. 재적용 경로가 그 미러를 전역에서 되동기화하므로
             // (`currentSectionFields` 의 첫 문장), 전역을 나중에 세우면 **방금 쓴 새 값이 옛 전역으로
             // 되돌려진다** — 껐는데 켜진 채로 남고 그 값이 파일로 간다. 순서 하나가 그 창을 닫는다.
+            if (std.mem.eql(u8, f.key, "window.quit-after-last-window-closed"))
+                app_session_mod.setAppQuitAfterLastWindowClosed(new_value); // 앱 전역 — 다른 창의 마지막 닫기도 이 값을 본다
             if (std.mem.eql(u8, f.key, "session.keep-alive-after-quit")) {
                 setAppKeepAlivePolicy(new_value);
                 const snapshot = appKeepAliveSnapshot();
@@ -911,6 +913,10 @@ pub fn resetSelectedSettingRow(self: *AppSession) void {
         }
         const dv = defaults.boolFor(key) orelse return;
         if (config_mod.schema.setBool(&self.loaded_config.config, key, dv)) {
+            // 앱 전역 값도 기본으로 — 안 그러면 다음 프레임의 미러(`currentSectionFields`)가 낡은 전역으로 행을
+            // 되돌려, 파일은 기본값인데 이번 실행은 옛 값으로 동작한다(적대적 검증 B1).
+            if (std.mem.eql(u8, key, "window.quit-after-last-window-closed"))
+                app_session_mod.setAppQuitAfterLastWindowClosed(dv);
             if (std.mem.eql(u8, key, "theme.follow-system")) {
                 if (self.loaded_config.config.theme_follow_system) self.applyFollowSystemTheme() else disableFollowSystemTheme(self);
                 refreshSettingsFieldCount(self);
@@ -2155,6 +2161,7 @@ pub fn reloadConfig(self: *AppSession) void {
     applyAppearancePreservingZoom(self, new_appearance);
     old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
     replaceAppKeepAlivePolicyFromReload(self.loaded_config);
+    app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 파일이 정본
     // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
     // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
     self.theme_pre_follow = null;
@@ -2275,6 +2282,7 @@ pub fn resetAllSettings(self: *AppSession) void {
     self.loaded_config.unbinds = &.{};
     self.loaded_config.terminal_bindings = &.{};
     self.loaded_config.global_bindings = &.{};
+    app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 기본값(앱 전역)
     self.theme_pre_follow = null; // 기본값으로 갈았으니 follow-system 복귀 스냅샷(옛 arena slice)도 무효 — 비운다(F2-9 dangling 방지)
     self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
     applyLoadedConfig(self, false); // resolve→apply→behavior 캐시→reapply* 재적용. false=런타임 줌도 config 기본으로(통합 리셋이라 ⌘+/− 확대 해제; resolve-first 안전, reloadConfig 미러 — 리뷰 #827)
@@ -2987,6 +2995,7 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
     // 다른 Window에서 바꾼 앱 전역 policy를 이 창의 설정 스냅샷에도 반영한다. 이 동기화 뒤 field 생성과
     // toggle의 `new_value` 계산이 같은 SSOT를 보므로 stale 창이 값을 되돌리지 않는다.
     self.loaded_config.config.session.keep_alive_after_quit = app_session_mod.appKeepAlivePolicyValue();
+    if (app_session_mod.appQuitAfterLastWindowClosedOverride()) |v| self.loaded_config.config.window_quit_after_last_window_closed = v;
     const sections = try buildSectionList(self, arena);
     const sel_sec: ?config_mod.Section = if (sections.len > 0)
         sections[@min(self.chrome_host.settings.section, sections.len - 1)].section

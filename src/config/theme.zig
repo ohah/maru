@@ -1448,6 +1448,12 @@ pub const Config = struct {
     /// opacity가 없으므로, 셰이더·ABI 불변으로 같은 시각 효과를 낸다. loader가 `window.unfocused-dim` 0~1 range 검증.
     /// (docs/configuration.md·settings-page.md F2-7)
     window_unfocused_dim: f32 = 0.0,
+    /// 마지막 일반 창을 닫으면 앱도 끝낼지. 기본 true(현행 — 사용자 결정 2026-06-14, new-window-and-chrome.md D4).
+    /// false 면 macOS 관례처럼 앱이 Dock 에 남는다: 마지막 창 닫기도 다른 창 닫기와 같은 길(실행 중 명령 확인 →
+    /// 그 창의 셸을 끝낸다)이고, Dock 클릭·⌘N·전역 단축키(창 보이기/토글)가 빈 새 창을 연다(사용자 결정 2026-10-04).
+    /// ⌘Q·메뉴 Quit 은 이 값과 무관하게 앱을 끝낸다. quick 터미널은 「창」으로 세지 않는다.
+    /// 베이스: Ghostty `quit-after-last-window-closed`(같은 이름·뜻). loader 가 `window.quit-after-last-window-closed`.
+    window_quit_after_last_window_closed: bool = true,
     /// split pane 사이 divider(경계선) 두께(논리 pt). 기본 1.0(≈1x에서 1px, 2x Retina에서 2px — 얇은
     /// 헤어라인). 0이면 divider를 안 그린다(숨김). 렌더러가 이 pt를 device px로 환산(× scale_milli/1000, letter-spacing과 동형)해
     /// divider strip(reserved 30 세로·31 가로) 폭에만 쓴다 — 커서 강조선(reserved 2~5)·GPU quad `FocusOwner` border와 **분리**.
@@ -1518,6 +1524,7 @@ pub const Config = struct {
         .window_background_image = Meta{ .key = "window.background-image", .doc = .cfg_window_background_image, .widget = .text, .section = .window, .path_value = true },
         .window_blur = Meta{ .key = "window.blur", .doc = .cfg_window_blur, .range = .{ 0, 100 }, .widget = .number, .section = .window },
         .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = .cfg_window_unfocused_dim, .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
+        .window_quit_after_last_window_closed = Meta{ .key = "window.quit-after-last-window-closed", .doc = .cfg_window_quit_after_last_window_closed, .widget = .toggle, .section = .window },
         .split_divider_thickness = Meta{ .key = "split.divider-thickness", .doc = .cfg_split_divider_thickness, .range = .{ 0.0, 16.0 }, .widget = .number, .section = .window },
         .term = Meta{ .key = "term", .doc = .cfg_term, .widget = .text, .section = .terminal },
         .term_program = Meta{ .key = "term-program", .doc = .cfg_term_program, .widget = .text, .section = .terminal },

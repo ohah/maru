@@ -11,7 +11,8 @@
 //! 믿지 않고 `session_id` 로 귀속한다:
 //!
 //! 1. 이미 묶인 세션이면 그 Term.
-//! 2. 같은 cwd 에서 codex 가 도는 로컬 Term(후보)이 **하나**면 그 Term.
+//! 2. 같은 cwd 에서 codex 가 도는 로컬 Term(후보)이 **하나**면 그 Term. 같은 cwd 후보가 없으면(`codex -C <dir>`)
+//!    cwd 무관하게 codex 가 도는 Term 으로 2·3 을 같은 규칙으로 돌린다.
 //! 3. 여럿이면 **프롬프트 제출** 때 그 프롬프트가 화면에 보이는 후보가 **정확히 하나**일 때만 그 Term.
 //! 4. 나머지는 어느 Term 에도 붙이지 않는다 — 틀린 pane 에 붙이느니 화면 관측만 남긴다.
 //!
@@ -115,7 +116,12 @@ pub const Candidate = struct {
 pub const Input = struct {
     /// 이미 묶인 Term(살아 있고 codex 가 도는 것만 — 호출자가 확인한다).
     bound: ?u64 = null,
+    /// 같은 cwd 에서 codex 가 도는 로컬 Term.
     candidates: []const Candidate = &.{},
+    /// cwd 와 **무관하게** codex 가 도는 로컬 Term. `candidates` 가 비었을 때만 쓴다 — `codex -C <dir>` 처럼 세션 cwd 가
+    /// pane 의 cwd 와 다른 경우다. 이 폴백이 없으면 codex pane 이 하나뿐일 때도 이벤트를 버린다(고치기 전에는 파일의
+    /// pane 에 정확히 붙던 경우다).
+    any_cwd: []const Candidate = &.{},
     /// `UserPromptSubmit` 인가.
     prompt_event: bool = false,
     /// 그 프롬프트가 `min_prompt_codepoints` 를 넘는가(`longEnough`).
@@ -124,7 +130,7 @@ pub const Input = struct {
 
 /// 붙이지 않은 이유. 진단 한 줄에 실린다.
 pub const Reason = enum {
-    /// 같은 cwd 에 codex Term 이 없다(데몬이 maru 밖 클라이언트의 세션을 돌리는 경우 포함).
+    /// codex 가 도는 로컬 Term 이 하나도 없다(데몬이 maru 밖 클라이언트의 세션을 돌리는 경우 포함).
     no_candidate,
     /// 후보가 여럿인데 아직 프롬프트가 안 왔다(세션 시작·이어 하기 직후).
     ambiguous_before_prompt,
@@ -144,12 +150,14 @@ pub const Decision = union(enum) {
 /// 판정. 순서가 곧 계약이다 — 묶인 세션이 먼저, 후보 하나, 프롬프트 유일 일치, 그 밖은 버림.
 pub fn decide(in: Input) Decision {
     if (in.bound) |t| return .{ .route = .{ .target = t, .bind = false } };
-    if (in.candidates.len == 0) return .{ .drop = .no_candidate };
-    if (in.candidates.len == 1) return .{ .route = .{ .target = in.candidates[0].id, .bind = true } };
+    // 같은 cwd 후보가 없으면 cwd 를 안 보는 후보로 **같은 규칙**을 돌린다.
+    const pool = if (in.candidates.len != 0) in.candidates else in.any_cwd;
+    if (pool.len == 0) return .{ .drop = .no_candidate };
+    if (pool.len == 1) return .{ .route = .{ .target = pool[0].id, .bind = true } };
     if (!in.prompt_event) return .{ .drop = .ambiguous_before_prompt };
     if (!in.prompt_long_enough) return .{ .drop = .prompt_too_short };
     var found: ?u64 = null;
-    for (in.candidates) |c| {
+    for (pool) |c| {
         if (!c.shows_prompt) continue;
         if (found != null) return .{ .drop = .prompt_not_unique };
         found = c.id;
@@ -277,6 +285,13 @@ test "codex 데몬 귀속: 판정표 — 묶임이 먼저, 후보 하나, 프롬
         .{ .in = .{ .candidates = &two_one_match, .prompt_event = true, .prompt_long_enough = true }, .want = .{ .route = .{ .target = 90, .bind = true } } },
         .{ .in = .{ .candidates = &two_both, .prompt_event = true, .prompt_long_enough = true }, .want = .{ .drop = .prompt_not_unique } },
         .{ .in = .{ .candidates = &two_none, .prompt_event = true, .prompt_long_enough = true }, .want = .{ .drop = .prompt_not_unique } },
+        // `codex -C <dir>`: 같은 cwd 후보가 없으면 cwd 무관 후보로 같은 규칙 — codex pane 이 하나면 고치기 전처럼 그 pane.
+        .{ .in = .{ .any_cwd = &one }, .want = .{ .route = .{ .target = 90, .bind = true } } },
+        .{ .in = .{ .any_cwd = &two_one_match }, .want = .{ .drop = .ambiguous_before_prompt } },
+        .{ .in = .{ .any_cwd = &two_one_match, .prompt_event = true, .prompt_long_enough = true }, .want = .{ .route = .{ .target = 90, .bind = true } } },
+        .{ .in = .{ .any_cwd = &two_both, .prompt_event = true, .prompt_long_enough = true }, .want = .{ .drop = .prompt_not_unique } },
+        // 같은 cwd 후보가 있으면 폴백을 안 본다 — 다른 폴더의 codex 가 섞이면 하나뿐인 같은 cwd 후보가 «여럿» 이 된다.
+        .{ .in = .{ .candidates = &one, .any_cwd = &two_none }, .want = .{ .route = .{ .target = 90, .bind = true } } },
     };
     for (cases) |c| try testing.expectEqualDeep(c.want, decide(c.in));
 }

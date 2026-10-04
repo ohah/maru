@@ -379,7 +379,7 @@ pub fn noteEdit(state: *editor.document_state.State, now_ns: i128) void {
 pub fn noteDecision(state: *editor.document_state.State, now_ns: i128) void {
     if (identity(state) == null) return;
     const opened = state.opened.?;
-    if (!opened.isDirty() and state.persistence.uncertain_sequence == null and !state.notifications.backup_on_disk and !state.notifications.backup_dirty) return;
+    if (!opened.isDirty() and state.persistence.uncertain_sequence == null and state.persistence.live_save_images == 0 and !state.notifications.backup_on_disk and !state.notifications.backup_dirty) return;
     state.notifications.backup_dirty = true;
     state.notifications.backup_due_ns = now_ns +| backup.debounce_ns;
 }
@@ -419,9 +419,9 @@ pub fn maintain(store: *Store, io: std.Io, states: []const *editor.document_stat
 fn settle(store: *Store, io: std.Io, state: *editor.document_state.State) !void {
     const doc = identity(state) orelse return error.MissingDocument;
     const opened = &state.opened.?;
-    // Until native outcome is known, the old saved hash cannot prove that the
-    // current undo body matches disk. Persist it instead of dropping recovery.
-    if (!opened.isDirty() and state.persistence.uncertain_sequence == null) {
+    // Until every captured image is released and native outcome is known, the
+    // old saved hash cannot prove that the undo body matches disk. Preserve it.
+    if (!opened.isDirty() and state.persistence.uncertain_sequence == null and state.persistence.live_save_images == 0) {
         if (state.notifications.backup_on_disk) try store.drop(io, doc);
         state.notifications.backup_on_disk = false;
         state.notifications.backup_paused = false;

@@ -192,3 +192,11 @@ root 변형 5회 및 실제 창의 앱 helper 변형 5회가 runtime 결함을 �
 revision 변경 없이 유지보수를 재예약한다. 실제 commit-lost-reply 및 undetermined→rollback의
 통합 판정과 clean/readonly 정책 판정을 추가해 30개 집중 gate가 통과했다. 적대적 검증 5회도
 runtime 결함을 검출했다. 더 넓은 prepare/편집/crash 시점과 일반 앱 저장·복원·닫기·IME는 남아 있다.
+
+§2m.157: prepare 후 commit 전 Undo가 백업을 삭제하는 실제 결함을 재현했다. L2 Request가
+소유한 이미지 수를 epoch별로 추적하고 Windows clean 삭제가 그 수명의 끝을 기다리도록 연결한다.
+겹치는 요청·reload 격리·할당 실패·counter 상한, 실제 prepare→Undo→commit/abort를 검증한다.
+일반 앱 editable/save/복원·닫기·감시·IME와 더 넓은 process crash 시점은 계속 진행 중이다.
+
+이미지 보호/epoch 해제/count 해제/reload 초기화/결정 뒤 재예약을 각각 깨뜨린 적대적 검증 5회가
+runtime 결함을 검출했고 원복 후 shared 14개와 Windows backup 32개가 통과했다.

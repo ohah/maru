@@ -106,6 +106,9 @@ pub const State = struct {
         acknowledged: u64 = 0,
         persisted_revision: ?u64 = null,
         uncertain_sequence: ?u64 = null,
+        /// Owned save images can still become disk even when undo matches the
+        /// old saved hash. Backup cleanup waits until their leases are released.
+        live_save_images: u64 = 0,
     } = .{},
 
     pub fn invalidateSaveTarget(self: *State) void {
@@ -120,6 +123,7 @@ pub const State = struct {
         self.persistence.epoch +|= 1;
         self.persistence.persisted_revision = null;
         self.persistence.uncertain_sequence = null;
+        self.persistence.live_save_images = 0;
     }
 
     /// 뷰 정산과 경로 정산의 기존 순서를 유지한다. 저장 정책은 호출자 책임이다.

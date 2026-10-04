@@ -169,6 +169,22 @@ pub const Book = struct {
         return receipt;
     }
 
+    /// Explicit overwrite requires a fresh admitted native read. Its raw hash
+    /// fences the native write; the document keeps its old save base until ack.
+    pub fn overwrite(self: *Book, io: std.Io, reader: *const reading.Reader, result: reading.Result, view: editor.document_registry.Lease, limit: usize) !?saving.Receipt {
+        if (result != .image) return error.MissingOverwriteImage;
+        if (!try self.acceptsRead(reader, result, view)) return error.StaleExternalRead;
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() != .idle) return error.SaveBusy;
+        const state = self.registry.get(view).?;
+        if (!state.opened.?.isDirty()) return null;
+        try controller.prepareOverwrite(io, view, limit, result.image.raw_hash);
+        const receipt = try controller.commit(io);
+        if (receipt.acknowledgment_error) |err| return err;
+        if (receipt.cleanup_error) |err| std.log.warn("editor overwrite committed; cleanup failed({s})", .{@errorName(err)});
+        return receipt;
+    }
+
     /// Closing one peer does not revoke the surviving view's save authority.
     /// Last-view discard requires explicit acceptance; pending native ownership
     /// always wins over discard. Backup deletion remains the app's responsibility.
@@ -380,6 +396,43 @@ test "Windows editor host directory subscription pins the nested parent and rout
     if (replaced) |unexpected| try groups.release(unexpected) else |_| {}
     try std.testing.expectError(error.IdentityChanged, replaced);
     try std.testing.expectEqual(@as(usize, 0), groups.entries.items.len);
+}
+
+test "Windows editor host explicit overwrite requires fresh read and fences intervening native changes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const state = f.registry.get(view).?;
+    const base = state.opened.?.disk_hash;
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "outside" });
+    try std.testing.expectError(error.SourceChanged, f.book.save(io, view, 128));
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var first = try awaitRead(&reader);
+    defer first.deinit();
+    try change(&f.registry, view, "Y");
+    try std.testing.expectError(error.StaleExternalRead, f.book.overwrite(io, &reader, first, view, 128));
+    _ = try f.book.submitRead(&reader, view);
+    var second = try awaitRead(&reader);
+    defer second.deinit();
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "newer" });
+    try std.testing.expectError(error.SourceChanged, f.book.overwrite(io, &reader, second, view, 128));
+    try std.testing.expectEqual(base, state.opened.?.disk_hash);
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    const receipt = (try f.book.overwrite(io, &reader, fresh, view, 128)).?;
+    try std.testing.expectEqual(saving.Decision.committed, receipt.decision);
+    try std.testing.expect(!state.opened.?.isDirty());
+    const disk = try f.tmp.dir.readFileAlloc(io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(disk);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfYXbase\r\n", disk);
 }
 
 test "Windows editor host worker read uses the app grant and refuses content changed after submission" {

@@ -167,7 +167,7 @@ pub const Transaction = struct {
     /// exactly one owned L2 image and binds any later ack to that request lease.
     pub fn writeDocument(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request) !void {
         try request.validateForWrite();
-        if (request.expected_disk_hash != self.source_hash) return error.DiskFingerprintChanged;
+        if (request.expectedSourceHash() != self.source_hash) return error.DiskFingerprintChanged;
         if (maru.session.editor.document_state.contentHash(request.bytes) != request.disk_hash) return error.CorruptSaveImage;
         try self.write(io, request.bytes);
         self.request_lease = request.lease;
@@ -222,7 +222,7 @@ pub const Transaction = struct {
     fn commitDocumentWith(self: *Transaction, io: std.Io, request: *const maru.session.editor.save_request.Request, comptime Api: type) !void {
         if (self.phase != .prepared) return error.InvalidState;
         try self.checkDocumentRequest(request);
-        if (request.expected_disk_hash != self.source_hash) return error.DiskFingerprintChanged;
+        if (request.expectedSourceHash() != self.source_hash) return error.DiskFingerprintChanged;
         if (maru.session.editor.document_state.contentHash(request.bytes) != request.disk_hash) return error.CorruptSaveImage;
         // Preparation may outlive a reload, changed path, permission or disk
         // observation. Check immediately before releasing the native file fence.

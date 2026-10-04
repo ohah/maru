@@ -15,10 +15,26 @@ pub const Request = struct {
     body_hash: u64,
     disk_hash: u64,
     expected_disk_hash: u64,
+    // Explicit overwrite observes a newer native source without rebasing the
+    // document's saved state. Completion still CASes expected_disk_hash.
+    overwrite_disk_hash: ?u64 = null,
     epoch: u64,
     sequence: u64,
     acknowledged: bool = false,
     aborted: bool = false,
+
+    /// Host must obtain the observed fingerprint from a fresh, identity-checked
+    /// read at the explicit overwrite choice. It remains a native CAS operand,
+    /// not permission to bypass identity, path or document lifetime checks.
+    pub fn beginOverwrite(allocator: std.mem.Allocator, registry: *registry_mod.Registry, source: registry_mod.Lease, limit_bytes: usize, observed_hash: u64) !Request {
+        var request = try begin(allocator, registry, source, limit_bytes);
+        request.overwrite_disk_hash = observed_hash;
+        return request;
+    }
+
+    pub fn expectedSourceHash(self: *const Request) u64 {
+        return self.overwrite_disk_hash orelse self.expected_disk_hash;
+    }
 
     /// A request lease pins the same document even after its last view closes.
     /// The image owns BOM/line-ending-preserving bytes, never a mutable view slice.
@@ -222,6 +238,47 @@ fn edit(state: *state_mod.State, bytes: []const u8) !void {
     const changes = [_]@import("delta.zig").Change{.{ .start = 0, .end = state.opened.?.file.content.len, .text = bytes }};
     var inverse = try state.opened.?.file.apply(.{ .changes = &changes }, &selections);
     inverse.deinit();
+}
+
+test "Editor save request explicit overwrite observes native source without rebasing saved state" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    const state = registry.get(lease).?;
+    try edit(state, "mine");
+    const observed = state_mod.contentHash("outside");
+    var request = try Request.beginOverwrite(a, &registry, lease, 128, observed);
+    defer request.deinit();
+    try std.testing.expectEqual(observed, request.expectedSourceHash());
+    try std.testing.expectEqual(state_mod.contentHash("base"), request.expected_disk_hash);
+    try std.testing.expectEqual(@as(?u64, state_mod.contentHash("base")), state.opened.?.disk_hash);
+    try std.testing.expectEqual(state_mod.contentHash("base"), state.opened.?.saved_hash);
+    try request.validateForWrite();
+    try edit(state, "later");
+    try request.complete(.committed);
+    try std.testing.expectEqualStrings("later", state.opened.?.file.content);
+    try std.testing.expectEqual(state_mod.contentHash("mine"), state.opened.?.saved_hash);
+    try std.testing.expectEqual(@as(?u64, state_mod.contentHash("mine")), state.opened.?.disk_hash);
+    try std.testing.expect(state.opened.?.isDirty());
+}
+
+test "Editor save request explicit overwrite preserves CAS and aborted saved axes" {
+    var registry: registry_mod.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    const lease = try create(&registry, "base");
+    defer _ = registry.release(lease) catch unreachable;
+    const state = registry.get(lease).?;
+    try edit(state, "mine");
+    var request = try Request.beginOverwrite(a, &registry, lease, 128, state_mod.contentHash("outside"));
+    defer request.deinit();
+    state.opened.?.disk_hash = state_mod.contentHash("new observation");
+    try std.testing.expectError(error.DiskFingerprintChanged, request.validateForWrite());
+    state.opened.?.disk_hash = request.expected_disk_hash;
+    try std.testing.expectError(error.SaveNotCommitted, request.complete(.aborted));
+    try std.testing.expectEqual(state_mod.contentHash("base"), state.opened.?.saved_hash);
+    try std.testing.expectEqual(@as(?u64, state_mod.contentHash("base")), state.opened.?.disk_hash);
+    try std.testing.expect(state.opened.?.isDirty());
 }
 
 test "Editor save request keeps later edits dirty and distinguishes raw BOM bytes" {

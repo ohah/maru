@@ -4415,6 +4415,47 @@ fn showFileClose(state: *maru.chrome.components.confirm.State) void {
     state.showChoices(maru.i18n.t(.fp_unsaved_confirm), .{ .primary = maru.i18n.t(.btn_save), .alternate = maru.i18n.t(.btn_discard_changes), .cancel = maru.i18n.t(.common_cancel) });
 }
 
+fn beginFileClose(state: *maru.chrome.components.confirm.State, queued: *?maru.chrome.components.confirm.Action) void {
+    // A WM_CLOSE may supersede a conflict choice queued earlier in this same
+    // frame. Its alternate meant Overwrite, never Discard in the new modal.
+    queued.* = null;
+    showFileClose(state);
+}
+
+test "Windows editor host close modal supersession revokes every old action and restores close roles" {
+    const confirm = maru.chrome.components.confirm;
+    for ([_]confirm.Action{ .confirmed, .alternate, .extra, .cancelled }) |old| {
+        var state: confirm.State = .{};
+        showFileSaveConflict(&state);
+        state.focused = .extra;
+        var queued: ?confirm.Action = old;
+        beginFileClose(&state, &queued);
+        try std.testing.expect(queued == null);
+        try std.testing.expect(state.open);
+        try std.testing.expectEqualStrings(maru.i18n.t(.btn_save), state.confirm_label);
+        try std.testing.expectEqualStrings(maru.i18n.t(.btn_discard_changes), state.alternate_label);
+        try std.testing.expectEqualStrings(maru.i18n.t(.common_cancel), state.cancel_label);
+        try std.testing.expect(!state.has_extra);
+        try std.testing.expectEqual(confirm.Focus.confirm, state.focused);
+    }
+}
+
+fn showFileSaveConflict(state: *maru.chrome.components.confirm.State) void {
+    state.showChoices(maru.i18n.t(.win_editor_save_conflict), .{
+        .primary = maru.i18n.t(.btn_compare),
+        .alternate = maru.i18n.t(.btn_overwrite),
+        .extra = maru.i18n.t(.btn_reload),
+        .cancel = maru.i18n.t(.common_cancel),
+    });
+}
+
+fn isFileSaveConflict(err: anyerror) bool {
+    return switch (err) {
+        error.SourceChanged, error.IdentityChanged, error.DiskFingerprintChanged, error.NamespaceChanged => true,
+        else => false,
+    };
+}
+
 fn fileIndexForLease(views: []const OpenFile, lease: maru.session.editor.document_registry.Lease) ?usize {
     for (views, 0..) |view, i| if (view.document.owner == lease.owner and view.document.id == lease.id and std.meta.eql(view.document.document, lease.document)) return i;
     return null;
@@ -4630,6 +4671,58 @@ fn waitExternalJob(changes: *ExternalChanges) !void {
         if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ReadDidNotComplete;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
+}
+
+test "Windows editor host conflict choice cancellation is scoped and queued work never publishes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(std.testing.io) catch unreachable;
+    const lease = f.views.items[0].document;
+    try changes.requestChoice(lease, .overwrite);
+    var foreign = lease;
+    foreign.id += 1;
+    try changes.cancelChoice(foreign);
+    try std.testing.expect(try changes.hasChoice(lease));
+    try changes.cancelChoice(lease);
+    try std.testing.expect(!try changes.hasChoice(lease));
+    try std.testing.expect(changes.requested == null);
+    try std.testing.expect(try changes.takeChoice() == null);
+}
+
+test "Windows editor host cancelled active choice drains before replacement and cancels owned completion" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const lease = f.views.items[0].document;
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 1, .views = f.views.items });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "outside" });
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(io) catch unreachable;
+    try changes.requestChoice(lease, .overwrite);
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try changes.cancelChoice(lease);
+    try std.testing.expect(!try changes.hasChoice(lease));
+    try changes.requestChoice(lease, .compare);
+    try waitExternalJob(&changes);
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try std.testing.expect(try changes.takeChoice() == null);
+    try std.testing.expectEqual(ExternalChanges.Choice.compare, changes.active_choice.?.choice);
+    try waitExternalJob(&changes);
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try std.testing.expect(changes.completed != null);
+    try changes.cancelChoice(lease);
+    try std.testing.expect(!try changes.hasChoice(lease));
+    try std.testing.expect(try changes.takeChoice() == null);
+    const state = f.documents.get(lease).?;
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash("\xef\xbb\xbfbase\r\n"), state.opened.?.disk_hash.?);
+    const raw = try f.tmp.dir.readFileAlloc(io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(raw);
+    try std.testing.expectEqualStrings("outside", raw);
 }
 
 test "Windows editor host explicit conflict choice reads fresh image retries stale typing and reloads undoably" {
@@ -6737,6 +6830,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var pending_close_id: ?u64 = null;
     var pending_file_close: ?FileCloseTarget = null;
     var pending_file_conflict: ?maru.session.editor.document_registry.Lease = null;
+    var pending_conflict_save = false;
+    var pending_conflict_close: ?FileCloseTarget = null;
+    var choice_close: ?struct { document: maru.session.editor.document_registry.Lease, target: FileCloseTarget } = null;
+    var choice_notice: ?maru.session.editor.document_registry.Lease = null;
     var file_comparison: ?ExternalComparison = null;
     defer if (file_comparison) |*comparison| comparison.deinit();
     var file_exit_accepted = false;
@@ -7717,11 +7814,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             reportFileBackups(stderr, report);
         } else |err| stderr.print("  warning: editor backup maintenance failed({s})\n", .{@errorName(err)}) catch {};
         file_changes.hold_notices = file_notice.open or confirm_state.open;
+        if (choice_notice) |lease| if (fileIndexForLease(open_files.items, lease) == null) {
+            try file_changes.cancelChoice(lease);
+            choice_notice = null;
+            choice_close = null;
+            file_notice.dismiss();
+        };
         if (file_changes.tick(&editor_files, io, open_files.items, std.Io.Clock.awake.now(io).nanoseconds)) |event| {
             if (event) |notice| {
                 stderr.print("  editor external change: {s}\n", .{@errorName(notice.problem)}) catch {};
                 if (notice.problem == error.DirtyDocument) {
                     pending_file_conflict = notice.document;
+                    pending_conflict_save = false;
+                    pending_conflict_close = null;
                     confirm_state.showChoices(maru.i18n.t(.win_editor_external_changed), .{
                         .primary = maru.i18n.t(.btn_compare),
                         .alternate = maru.i18n.t(.btn_keep_editing),
@@ -7741,18 +7846,37 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (!file_notice.open and !confirm_state.open) file_notice.show(maru.i18n.t(if (err == error.OutOfMemory) .dbg_editor_oom else .win_editor_watch_paused));
         }
         if (try file_changes.takeChoice()) |value| {
+            if (choice_notice != null) {
+                file_notice.dismiss();
+                choice_notice = null;
+            }
             var completion = value;
             defer completion.deinit();
             const lease = completion.request.document;
             if (fileIndexForLease(open_files.items, lease)) |fi| {
                 if (editor_files.acceptsRead(&file_changes.reader, completion.result, lease) catch false) {
+                    var succeeded = false;
                     switch (completion.result) {
                         .failure => |failure| file_notice.show(maru.i18n.t(fileSaveNotice(failure.problem))),
                         .image => |image| switch (completion.request.choice) {
                             .reload => {
-                                _ = open_files.items[fi].reloadExternal(allocator, open_files.items, image.bytes, std.Io.Clock.awake.now(io).nanoseconds) catch |err| {
+                                if (open_files.items[fi].reloadExternal(allocator, open_files.items, image.bytes, std.Io.Clock.awake.now(io).nanoseconds)) |_| {
+                                    succeeded = true;
+                                } else |err| {
                                     file_notice.show(maru.i18n.t(fileSaveNotice(err)));
-                                };
+                                }
+                            },
+                            .overwrite => {
+                                if (editor_files.overwrite(io, &file_changes.reader, completion.result, lease, 4 << 20)) |_| {
+                                    succeeded = true;
+                                } else |err| {
+                                    if (isFileSaveConflict(err)) {
+                                        pending_file_conflict = lease;
+                                        pending_conflict_save = true;
+                                        pending_conflict_close = if (choice_close) |closing| closing.target else null;
+                                        showFileSaveConflict(&confirm_state);
+                                    } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                                }
                             },
                             .compare => {
                                 const state = editor_files.registry.get(lease).?;
@@ -7764,11 +7888,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             },
                         },
                     }
-                } else file_changes.requestChoice(lease, completion.request.choice) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                    if (choice_close) |closing| if (std.meta.eql(closing.document, lease)) {
+                        if (succeeded) {
+                            pending_file_close = closing.target;
+                            confirm_pending_click = .confirmed;
+                        }
+                        choice_close = null;
+                    };
+                } else if (file_changes.requestChoice(lease, completion.request.choice)) |_| {
+                    choice_notice = lease;
+                    file_notice.show(maru.i18n.t(.win_editor_choice_reading));
+                } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
             }
         }
         if (file_comparison) |*comparison| {
-            if (fileIndexForLease(open_files.items, comparison.document) == null or active_view != .file or
+            if (fileIndexForLease(open_files.items, comparison.document) == null or active_view != .file or active_view.file >= open_files.items.len or
                 !std.meta.eql(open_files.items[active_view.file].document, comparison.document))
             {
                 comparison.deinit();
@@ -10782,6 +10916,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
             .key => |key_ev| {
+                if (choice_notice) |lease| {
+                    if (key_ev.key == .escape) {
+                        try file_changes.cancelChoice(lease);
+                        choice_close = null;
+                        choice_notice = null;
+                        file_notice.dismiss();
+                    }
+                    continue;
+                }
                 // ── 파일을 보는 중에는 키가 셸로 안 간다 (적대적 검증 2회차) ──────────────
                 //
                 // **화면에 문서가 떠 있는데 친 글자가 안 보이는 셸로 들어가면 안 된다.** 사용자는
@@ -10835,6 +10978,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
                 // Confirm retains its higher priority. A dismissal gesture belongs
                 // to Notice and must not also type into an underlying terminal.
+                if (choice_notice != null) continue;
                 if (file_notice.open) {
                     _ = maru.chrome.components.notice.handle(win32_keys.chromeKeyEvent(key_ev), &file_notice);
                     continue;
@@ -10970,9 +11114,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (active_view == .file) {
                     keys_while_file += 1;
                     const file_view = &open_files.items[active_view.file];
+                    if (try file_changes.hasChoice(file_view.document)) {
+                        if (key_ev.key == .escape) {
+                            try file_changes.cancelChoice(file_view.document);
+                            choice_close = null;
+                        }
+                        continue;
+                    }
                     const maybe_copy = applyFileKey(&editor_files, io, resolver, file_view, key_ev, .{ .now_ms = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms)), .views = open_files.items }) catch |err| {
                         try stderr.print("  warning: editor input failed({s})\n", .{@errorName(err)});
-                        file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                        if (isFileSaveConflict(err) and file_host.saveKey(resolver, key_ev)) {
+                            pending_file_conflict = file_view.document;
+                            pending_conflict_save = true;
+                            pending_conflict_close = null;
+                            showFileSaveConflict(&confirm_state);
+                        } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                         continue;
                     };
                     if (maybe_copy) |text| {
@@ -11491,7 +11647,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                     pending_file_conflict = null;
                                                     pending_file_close = .{ .file = open_files.items[fi].document };
                                                     pending_close_id = null;
-                                                    showFileClose(&confirm_state);
+                                                    beginFileClose(&confirm_state, &confirm_pending_click);
                                                 } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                                                 break :close_blk;
                                             };
@@ -12057,6 +12213,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                     continue;
                 }
+                if (active_view == .file and active_view.file < open_files.items.len and try file_changes.hasChoice(open_files.items[active_view.file].document)) continue;
                 if ((m.kind == .wheel or m.kind == .wheel_h) and active_view == .file and active_view.file < open_files.items.len) {
                     const horizontal = m.kind == .wheel_h or (m.mods & win32_mouse.mod_shift) != 0;
                     const notches = if (horizontal) wheel_acc_h.feed(m.wheel_delta) else wheel_acc_editor.feed(m.wheel_delta);
@@ -12836,6 +12993,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 나머지가 사라진 것을 만진다 — 키 갈래는 곧바로 실행해도 되지만(그 뒤에 `continue` 로
         // 프레임을 빠져나간다) 마우스는 다른 처리가 뒤따를 수 있어 한 박자 미룬다.
         if (close_requested and !file_exit_accepted) {
+            if (choice_notice) |lease| {
+                try file_changes.cancelChoice(lease);
+                choice_close = null;
+                choice_notice = null;
+                file_notice.dismiss();
+            }
             close_requested = false;
             if (editor_files.requireIdle()) |_| {
                 var dirty_file = false;
@@ -12847,7 +13010,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     pending_file_conflict = null;
                     pending_file_close = .window;
                     pending_close_id = null;
-                    showFileClose(&confirm_state);
+                    beginFileClose(&confirm_state, &confirm_pending_click);
                 } else if (approveFileClose(io, &editor_files, &file_backups, open_files.items, .window, .confirmed)) |_| {
                     file_exit_accepted = true;
                     close_requested = true;
@@ -12859,19 +13022,48 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (pending_file_conflict) |target| {
                 confirm_state.dismiss();
                 pending_file_conflict = null;
-                if (fileIndexForLease(open_files.items, target) != null) switch (act) {
-                    .confirmed => file_changes.requestChoice(target, .compare) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err))),
-                    .extra => file_changes.requestChoice(target, .reload) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err))),
-                    .alternate, .cancelled => {},
+                const choice: ?ExternalChanges.Choice = switch (act) {
+                    .confirmed => .compare,
+                    .extra => .reload,
+                    .alternate => if (pending_conflict_save) .overwrite else null,
+                    .cancelled => null,
                 };
+                if (fileIndexForLease(open_files.items, target) != null) if (choice) |selected| {
+                    if (file_changes.requestChoice(target, selected)) |_| {
+                        choice_notice = target;
+                        file_notice.show(maru.i18n.t(.win_editor_choice_reading));
+                        if (selected != .compare) if (pending_conflict_close) |closing| {
+                            choice_close = .{ .document = target, .target = closing };
+                        };
+                    } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                };
+                pending_conflict_close = null;
             } else if (pending_file_close) |target| {
+                var conflict_lease: ?maru.session.editor.document_registry.Lease = null;
                 const approved = approveFileClose(io, &editor_files, &file_backups, open_files.items, target, act) catch |err| blk: {
                     stderr.print("  warning: editor close failed({s})\n", .{@errorName(err)}) catch {};
-                    file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                    if (isFileSaveConflict(err)) {
+                        switch (target) {
+                            .file => |lease| conflict_lease = lease,
+                            .window => for (open_files.items) |view| {
+                                if (editor_documents.get(view.document).?.opened.?.isDirty()) {
+                                    conflict_lease = view.document;
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                    if (conflict_lease == null) file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                     break :blk false;
                 };
                 confirm_state.dismiss();
                 pending_file_close = null;
+                if (conflict_lease) |lease| {
+                    pending_file_conflict = lease;
+                    pending_conflict_save = true;
+                    pending_conflict_close = target;
+                    showFileSaveConflict(&confirm_state);
+                }
                 if (approved) switch (target) {
                     .window => {
                         file_exit_accepted = true;

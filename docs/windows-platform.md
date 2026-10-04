@@ -11569,3 +11569,46 @@ filler에는 번호가 없다. 비교 화면은 읽기 전용이며 Esc로 돌�
 저장 시점의 Compare/Overwrite/Reload 선택은 아직 별도 작업이다. 비교의 scrollbar drag,
 매우 긴 줄과 창 축소에 대한 전체 UX 검증, 비동기 저장·초기 open, readonly/untitled/remote
 감시와 volume unmount·sleep/wake soak도 남아 있다. 전체 Windows 지원은 완료되지 않았다.
+
+### 2m.168 — 저장 충돌의 명시적 덮어쓰기와 선택 취소
+
+저장 단축키와 Save-close의 외부 변경 충돌은 Compare/Overwrite/Reload/Cancel로 연결한다.
+기본 Enter는 비교다. 감시 알림의 같은 alternate 자리는 계속 편집으로 유지한다. 비교나
+취소는 원래 닫기 요청을 이어가지 않는다. 성공한 덮어쓰기·reload는 원래 generational
+file/window 닫기 대상을 다시 승인하며, 다른 문서의 다음 충돌은 새 선택으로 처리한다.
+
+`Request.beginOverwrite`는 문서의 이전 `expected_disk_hash`를 유지하고, 새로 관측한
+raw fingerprint만 `overwrite_disk_hash`에 담는다. `expectedSourceHash`는 native CAS의
+피연산자다. document ack CAS는 이전 문서 기준을 계속 검사하므로 실패·abort 전에
+saved hash나 disk hash를 미리 바꾸지 않는다. 성공한 ack는 저장 이미지의 본문을 기준으로
+갱신하며 뒤에 생긴 편집은 dirty로 남긴다.
+
+`Book.overwrite`는 현재 reader의 이미지·scope·lease·epoch·revision·fingerprint를 검증하고
+controller에 관측 raw hash를 넘긴다. grant의 최초 파일 identity와 경로 검증, native
+transaction의 원본/메타데이터 보호는 그대로다. 읽은 뒤 디스크가 다시 바뀌면 native CAS가
+거절한다. hash만 바꿔 재시도하거나 새 파일 identity를 저장 권한으로 삼지 않는다.
+
+선택 읽기 중에는 번역된 대기 안내와 Esc 취소를 제공하고 키·마우스 입력을 잠근다. 따라서
+GUI 입력이 승인 당시 본문을 바꾸지 않는다. queued·active·completed 선택을 exact lease로
+취소한다. active 취소는 action만 철회하며 worker의 핸들을 버리지 않는다. 늦은 결과를
+정산한 뒤 새 선택을 예약하고, 완료 이미지 취소는 소유 bytes를 정리한다. 창 닫기는 먼저
+대기 선택을 취소하고 정상 dirty-close 계약으로 돌아간다.
+
+공통 저장 요청 16개와 host 39개의 Debug/ReleaseFast가 통과했다. 덮어쓰기 모델/native CAS와
+선택 취소에서 각각 다섯 compiled runtime mutation을 검출하고 원본을 byte 단위로 복원했다.
+기존 native safe-save 66개·grant 14개·controller 15개도 통과했다. 실제 일반 앱에서
+Overwrite가 BOM/CRLF 편집본을 저장하고 닫기를 이어가는 것, Compare의 비파괴 표시,
+Reload 후 외부 원본을 유지한 종료를 확인했다. 실제 writable handle을 유지한 읽기 대기 중
+추가 입력이 차단되고 Esc 후 writer가 풀려도 late overwrite/close가 발생하지 않는 것도
+확인했다. posted 창 메시지 검증이며 물리 키보드·IME는 아니다.
+
+덮어쓰기 선택과 WM_CLOSE를 같은 프레임에 넣는 실앱 검증에서, 이전 alternate가 새 닫기
+모달의 Discard로 처리되는 문제를 재현했다. `beginFileClose`가 queued action을 폐기하고
+새 Save/Discard/Cancel 역할을 세우도록 수정했다. 기존 Compare/Overwrite/Reload/Cancel
+선택의 폐기와 새 라벨·포커스를 검사하고 다섯 runtime mutation을 검출했다. 같은 이벤트를
+다시 보내면 앱과 편집본·외부 디스크가 유지되며 새 선택을 요구한다. 이후 명시적 overwrite가
+정상 저장/닫기를 이어가는 것까지 실제 창에서 확인했다.
+
+실제 native 쓰기·commit과 최초 open의 I/O는 아직 UI 스레드에 있다. 이를 옮기는 작업,
+다중 파일 닫기의 전체 GUI 시나리오와 물리 입력·IME, 비교 scrollbar/크기 변경의 전체 UX,
+readonly/untitled/remote 감시 및 나머지 Windows 플랫폼 구현은 계속 남아 있다.

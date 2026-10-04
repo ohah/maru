@@ -1107,3 +1107,11 @@ dirty 충돌·저장 거절·버리기 종료는 별도의 실제 앱 실행으�
 예약·stale 입력 재시도·Undo와 소유된 비교의 행 번호·개행·할당 실패를 더해 35개다
 (aggregation 2·native 28·pure 5). 두 gate는 `-Doptimize=ReleaseFast`로도 실행한다.
 일반 앱의 임시 파일에서 Compare/Keep/Reload·Esc와 저장 충돌 보호를 별도 검증한다.
+
+§2m.168의 `zig build test-editor-save-request`는 명시적 overwrite의 native 관측 해시와
+document CAS·지연 ack·abort 축 보존을 포함해 16개다. `zig build test-win32-editor-host`는
+overwrite의 fresh ticket·디스크 재변경 및 queued/active/completed 취소를 포함해 39개다
+(aggregation 2·native 31·pure 6). 두 gate는 `-Doptimize=ReleaseFast`로도 실행한다.
+`test-win32-safe-save` 66개·`test-win32-document-grant` 14개·`test-win32-save-controller`
+15개를 회귀 검증한다. 실제 앱의 Save-close 충돌 모달과 writable handle을 유지한 대기/Esc
+취소는 별도 격리 파일에서 확인한다.

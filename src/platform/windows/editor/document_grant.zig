@@ -126,7 +126,7 @@ pub const Grant = struct {
         // Re-pin only during the save attempt, then compare with the FIRST read's
         // ID. Capturing a new ID here as the baseline would authorize replacement.
         if (!self.identity.eql(try identity_mod.Identity.capture(pinned.original.handle))) return error.IdentityChanged;
-        const transaction = try transaction_mod.Transaction.beginExperimental(self.allocator, io, &pinned, request.expected_disk_hash, limit);
+        const transaction = try transaction_mod.Transaction.beginExperimental(self.allocator, io, &pinned, request.expectedSourceHash(), limit);
         return .{ .pinned = pinned, .transaction = transaction };
     }
 

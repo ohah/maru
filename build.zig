@@ -1529,7 +1529,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Editor save request"},
     });
     const run_save_request_tests = b.addRunArtifact(save_request_tests);
-    run_save_request_tests.addArg("--maru-expect-tests=14");
+    run_save_request_tests.addArg("--maru-expect-tests=16");
     const save_request_step = b.step("test-editor-save-request", "Verify owned save images and document completion CAS");
     save_request_step.dependOn(&run_save_request_tests.step);
     const navigation_tests = addProjectTest(b, .{
@@ -1586,7 +1586,7 @@ pub fn build(b: *std.Build) void {
     const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
     const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
-    run_editor_host_tests.addArg("--maru-expect-tests=35"); // 2 aggregation blocks + 28 native tests + 5 pure policies
+    run_editor_host_tests.addArg("--maru-expect-tests=39"); // 2 aggregation blocks + 31 native tests + 6 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");

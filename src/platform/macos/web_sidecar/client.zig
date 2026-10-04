@@ -156,6 +156,8 @@ fn entryOf(browser: [*c]c.cef_browser_t) ?*@import("registry.zig").Entry {
 /// 목록에 넣기 전(`create_browser_sync` 안)에 CEF 가 물으면 만드는 중인 크기로 답한다.
 fn sizeOf(browser: [*c]c.cef_browser_t) protocol.message.ViewSize {
     if (entryOf(browser)) |entry| return entry.size;
+    // 만들어지는 팝업(W6f) — 그것을 연 브라우저의 기다리는 팝업 크기.
+    if (new_tab.pendingSize(browser)) |size| return size;
     return browsers.state.creating_size orelse .{ .width = 1, .height = 1, .scale = 1 };
 }
 

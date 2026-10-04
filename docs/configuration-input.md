@@ -244,8 +244,9 @@ keybind = F4 = esc:[2J
   접두사인데 payload가 비었거나(`text:`) `ctrl:`이 글자 한 자가 아니거나 매핑 안 되면 그 줄만 무시(forgiving).
 - **전역 단축키 (`global:`)**: 조합 앞에 `global:`을 붙이면 그 단축키를 **OS 레벨에 등록**해, Maru가
   활성 창이 아니어도 동작한다(`keybind = global:<조합> = <전역 action>`). 전역 action은:
-  - `toggle_window` — 창이 숨김/비활성이면 보이고 앞으로(show + 활성화), 이미 활성+보임이면 숨긴다(토글).
+  - `toggle_window` — 창이 숨김/비활성이면 보이고 앞으로(show + 활성화), 이미 활성+보임이면 숨긴다(토글). 창이 여럿이면 첫 창이 대상이다.
   - `show_window` — 항상 창을 보이고 앞으로 가져온다(숨기지 않음).
+  - 둘 다 창이 하나도 없으면(`window.quit-after-last-window-closed = false` 로 Dock 에 남은 앱) 빈 새 창을 연다.
   - `toggle_quick_terminal` — quick terminal(별도 세션 오버레이 패널, 화면 상단 드롭다운)을 토글한다.
     첫 호출에서 두 번째 셸 세션을 띄우고, 다시 누르면 숨긴다. 화면 위에서 슬라이드해 내려오고/올라가며,
     포커스를 잃으면(다른 창/앱 클릭) 자동으로 숨는다.

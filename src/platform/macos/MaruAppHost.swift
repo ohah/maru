@@ -4195,10 +4195,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 이 창이 마지막 일반 창일 때 닫으면 앱도 끝내는가(config `window.quit-after-last-window-closed`, Zig 단일 출처).
     /// 세션이 없으면(생성 실패·이미 정리) 현행 동작(종료)으로 폴백한다.
     private func quitsAfterLastWindowClosed(_ surface: TerminalSurface) -> Bool {
-        // 복원이 불완전했던 실행은 저장을 안 한다 — 앱 유지 갈래가 셸을 끝내도 저장 파일은 옛 배치를 들고 있어, 다음
-        // 실행이 방금 끝낸 세션을 되살리려다 묘비·알림을 띄운다. 그런 실행의 마지막 창은 지금처럼 종료(분리)로
-        // 보내 셸을 살려 둔다(적대적 검증 C1).
-        if workspaceRestoreIncomplete { return true }
         guard let session = surface.appSession else { return true }
         return maru_macos_app_session_quit_after_last_window_closed(session) != 0
     }
@@ -4210,12 +4206,35 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = loadQuickTerminalConfig()
     }
 
+    /// ⌘Q 확인 모달을 든 세션이 답 없이 사라진다 — 보류된 종료(`.terminateLater`)에 「취소」로 답하고 상태를 푼다.
+    /// 안 그러면 결정을 실어 줄 세션이 없어 `NSApp.reply` 가 영영 안 오고, `quitConfirmPending` 이 남아 이후 ⌘Q·로그아웃이
+    /// 전부 `terminateLater` 에 걸린다(강제 종료만 남는다). 모달에 답하지 않고 그 창을 닫은 것은 「종료하지 않음」으로 읽는다
+    /// — 앱이 남는 설정이면 창 0 개 ⌘Q 로 다시 끝낼 수 있다. 수락돼 마지막 저장 중인 종료는 건드리지 않는다.
+    private func releaseQuitConfirmHeld(by surface: TerminalSurface) {
+        guard quitConfirmPending, quitConfirmSurface === surface, !workspaceFinalQuitPending else { return }
+        quitConfirmPending = false
+        quitConfirmSurface = nil
+        NSApp.reply(toApplicationShouldTerminate: false)
+    }
+
+    /// 확인·안내를 띄울 창을 앞으로 가져온다. quick 이 숨었거나 숨는 중이면 **보인 뒤** 가져온다 — 그냥
+    /// makeKeyAndOrderFront 하면 숨김 frame(가장자리 모드면 화면 밖)에 key 로 떠, 확인·취소 notice 가 안 보이고 보이지
+    /// 않는 패널이 키 입력을 먹는다(적대적 검증). 숨는 애니메이션 중(`quickAnimating`)엔 완료의 orderOut 이 다시 숨긴다.
+    private func bringSurfaceForward(_ surface: TerminalSurface) {
+        if surface === quick, let panel = surface.window, !panel.isVisible || quickAnimating {
+            showQuickTerminalAnimated(panel)
+            return
+        }
+        surface.window?.makeKeyAndOrderFront(nil)
+    }
+
     /// 창 0 개로 Dock 에 남은 앱에 빈 새 창을 연다(Dock 클릭·전역 단축키 창 보이기/토글). 창이 있으면 무동작.
     @discardableResult
     private func openWindowIfNoneOpen() -> Bool {
         // 「앱 유지」로 창 0 개가 된 상태에서만이다. 기본 설정에서도 보호된 파일 패널 때문에 창 0 개로 잠깐 남는
         // 경우가 있는데, 거기서 창을 열면 보호가 풀린 뒤 앱 종료 재시도가 영영 안 온다(적대적 검증 A).
-        guard !smokeMode, windows.isEmpty, openWithoutWindows else { return false }
+        // 마지막 저장 중인 종료(창 0 개 ⌘Q)에 새 창을 열면 곧 함께 사라진다 — 종료가 끝나거나 취소될 때까지 열지 않는다.
+        guard !smokeMode, windows.isEmpty, openWithoutWindows, !workspaceFinalQuitPending else { return false }
         guard createTerminalWindow(applyingWorkspace: nil) != nil else { return false }
         NSApp.activate(ignoringOtherApps: true)
         return true
@@ -4768,6 +4787,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
+    // ⌘Q 확인 모달을 연 창(또는 quick). 그 세션이 답 없이 사라지면 결정이 영영 안 오므로, teardown 이 이걸 보고
+    // 보류된 종료에 「취소」로 답한다(releaseQuitConfirmHeld). 모달 없이 보류만 하는 갈래(마지막 저장)는 nil.
+    // weak — 결정이 끝난 뒤에도 남아 닫힌 창(NSWindow·Metal 뷰)을 다음 ⌘Q 까지 붙잡지 않게.
+    private weak var quitConfirmSurface: TerminalSurface?
     // 마지막 창 닫기·세션 종료·confirm 수락 경로가 **모든 일반 창+quick의 파일 보호를 재확인한 뒤** 세우는
     // 앱-전역 preflight 토큰. applicationShouldTerminate가 같은 종료 요청에 확인을 다시 띄우지 않게 한다.
     private var bypassQuitConfirm = false
@@ -5199,15 +5222,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
         if smokeMode || appLaunchFirstDrawableArmed { return .terminateNow } // 무인 계측은 모달에 막히면 hang
+        if workspaceFinalQuitPending {
+            // 이미 수락돼 마지막 저장 중인 종료가 있다(인앱 확인 수락 등) — 새 확인을 띄우지 않고 그 종료에 합류한다.
+            // 예전엔 아래 갈래가 pending 만 세우고 beginFinal 이 「이미 진행 중」으로 빠져, 저장이 끝나도 아무도 답하지
+            // 않아 이후 ⌘Q·로그아웃이 영영 보류에 걸렸다(적대적 검증). 합류하면 finish/cancel 이 이 보류에 답한다.
+            if !workspaceFinalQuitWasDeferred {
+                workspaceFinalQuitWasDeferred = true
+                quitConfirmPending = true
+                quitConfirmSurface = nil // 모달 없는 보류 — 마지막 저장이 답한다
+            }
+            return .terminateLater
+        }
         if bypassQuitConfirm {
             // 확인 생략 토큰은 checkpoint 생략 토큰이 아니다. 마지막 창/SessionEnded처럼 모달을 이미 통과했거나
             // 필요 없는 종료도 C4 final commit을 거친다. final success 뒤 재진입만 terminateNow다.
             if workspaceFinalQuitApproved || !workspaceCheckpointArmed || windows.isEmpty { return .terminateNow }
             quitConfirmPending = true
+            quitConfirmSurface = nil // 모달 없는 보류 — 마지막 저장이 답한다
             beginFinalWorkspaceCheckpoint(surface: activeSurface, deferredAppKitQuit: true)
             return .terminateLater
         }
-        if quitConfirmPending { return .terminateLater } // 이미 모달이 떠 결정 대기 중 — 중복 요청 무시
+        if quitConfirmPending {
+            // 이미 모달이 떠 결정 대기 중 — 중복 요청은 무시하되 그 모달을 다시 보인다. 모달을 든 quick 이 그사이
+            // 자동 숨김됐으면 로그아웃·재시작이 안 보이는 확인에 막힌다(적대적 검증).
+            if let surface = quitConfirmSurface { bringSurfaceForward(surface) }
+            return .terminateLater
+        }
         // frame-loop tick이 아직 안 도는 런치 초기 에러(tickTimer==nil)거나 세션이 없으면, 모달을 띄워도 결정이
         // 돌아올 수 없으므로 즉시 종료한다. 일반 창이 0개여도 hidden quick은 살아 있을 수 있으므로 activeSurface를
         // 요구하기 전에 전 세션 보호를 찾고, clean quick도 일반 종료 confirm 대상으로 삼는다.
@@ -5219,14 +5259,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if openWithoutWindows, windows.isEmpty, quick?.window?.isVisible != true, protectedFilePanelSurface() == nil {
             guard workspaceCheckpointArmed, !workspaceFinalQuitApproved else { return .terminateNow }
             quitConfirmPending = true
+            quitConfirmSurface = nil // 모달 없는 보류 — 마지막 저장이 답한다
             beginFinalWorkspaceCheckpoint(surface: nil, deferredAppKitQuit: true)
             return .terminateLater
         }
         guard let target = protectedFilePanelSurface() ?? activeSurface ?? quick else { return .terminateNow }
         guard let session = target.appSession else { return .terminateNow }
         quitConfirmPending = true
+        quitConfirmSurface = target
         maru_macos_app_session_request_app_quit(session) // dirty 파일이면 즉시 취소+notice, 아니면 일반 종료 confirm
-        if target.window?.isKeyWindow != true { target.window?.makeKeyAndOrderFront(nil) }
+        if target.window?.isKeyWindow != true { bringSurfaceForward(target) }
         // ⌘Q는 시스템 메뉴 keyEquivalent 경로라 maru keyDown/performKeyEquivalent를 안 거친다 — 브라우저 web 패널이
         // firstResponder를 쥔 채면 첫 Enter가 아직 WKWebView로 샐 수 있으므로, 모달을 연 즉시 터미널로 포커스를 전이한다
         // (다음 renderTick의 self-heal reconcile까지 안 기다림 — dispatchWebPanelAppAction의 동기 reconcile과 같은 규율).
@@ -5252,7 +5294,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     @discardableResult
     private func blockGlobalTerminationForProtectedFilePanels() -> Bool {
         guard let protected = protectedFilePanelSurface(), let session = protected.appSession else { return false }
-        protected.window?.makeKeyAndOrderFront(nil)
+        bringSurfaceForward(protected)
         maru_macos_app_session_request_app_quit(session)
         withSurface(protected) { reconcileWebFocus() }
         return true
@@ -5280,7 +5322,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         if persistentTickFault,
            !surface.protectedTickFaultLatch.record(tickSucceeded: false, currentProtected: true) { return true }
-        surface.window?.makeKeyAndOrderFront(nil)
+        bringSurfaceForward(surface)
         maru_macos_app_session_request_app_quit(session)
         withSurface(surface) { reconcileWebFocus() }
         return true
@@ -6387,6 +6429,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return nil // 창 0 개 상태는 그대로 — Dock 클릭으로 다시 시도한다
         }
         openWithoutWindows = false // 창이 다시 생겼다 — 「창 0 개」 상태가 끝났다
+        restartFrameLoopTicksIfNeeded() // 창 0 개의 낮은 주기에서 곧바로 config 주기로 — 다음 tick(최대 250ms)까지 안 기다린다
         if workspaceCheckpointArmed, let session = surface.appSession {
             surface.workspaceCheckpointPublished = true
             maru_macos_app_session_enable_workspace_checkpoint_mutations(session)
@@ -6673,6 +6716,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         preserveWebPanelsForSummary: Bool = false,
         checkpointRemovalAlreadyCovered: Bool = false
     ) {
+        releaseQuitConfirmHeld(by: surface)
         let removedPublishedWindow = workspaceCheckpointArmed && surface.workspaceCheckpointPublished && !checkpointRemovalAlreadyCovered
         let removedWindowIdentity = surface.window.map(ObjectIdentifier.init)
         if !preserveWebPanelsForSummary { teardownWebPanels(surface) }
@@ -6767,7 +6811,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    /// 창 0 개로 Dock 에 남은 동안의 frame-loop 주기(Hz). 그릴 것이 없고 컨트롤 플레인 요청·workspace 체크포인트만 돌면
+    /// 된다(체크포인트 debounce 500ms·요청 지연 250ms 이내). 이 상태는 앱 유지 설정 전엔 없었다 — 60Hz 로 깨면 Dock 에 남은
+    /// 동안 전력을 쓴다(적대적 검증).
+    private static let idleFrameLoopRateHz: UInt32 = 4
+
     private func configuredFrameLoopRateHz() -> UInt32 {
+        if windows.isEmpty && quick == nil && openWithoutWindows { return Self.idleFrameLoopRateHz }
         // 창 0 개로 Dock 에 남은 동안엔 세션이 없다 — 마지막으로 읽은 값을 쓴다(60 으로 폴백하면 `render.frame-rate`
         // 를 낮춘 사용자도 창이 없는 동안 더 자주 깬다, 적대적 검증 C2).
         guard let session = (activeSurface ?? primary)?.appSession else { return lastConfiguredFrameLoopRateHz }
@@ -7025,8 +7075,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         }
         // 창 0 개로 Dock 에 남은 앱 — 평소 창(또는 보이는 quick)의 renderTick 이 돌리는 workspace 체크포인트를 여기서
-        // 돌린다. 안 돌면 닫은 창이 저장 파일에 남아 다음 실행이 되살린다. 숨은 quick 은 tick 되지 않으니 quick 유무와
-        // 무관하게 「이번 tick 에 아무도 안 돌렸는가」로 가른다(적대적 검증 B).
+        // 돌린다. 안 돌면 닫은 창이 저장 파일에 남아 다음 실행이 되살린다. quick 이 이번 tick 에 돌았는지(보이든 숨든,
+        // 세션이 OK 였는지)에 기대지 않고 「이번 tick 에 아무도 안 돌렸는가」로 가른다(적대적 검증 B).
         if windows.isEmpty && openWithoutWindows && !workspaceCheckpointDrivenThisTick { driveWorkspaceCheckpoint() }
         // 컨트롤 플레인 요청을 메인에서 drain한다(§5 단일 디스패치=메인 marshal). 살아있는 세션 목록(일반 창 + quick)을
         // 넘겨 Zig가 창마다 collectSessionInto로 스냅샷을 조립·auth·dispatch한다(§2 Swift는 열거만). 요청이 없으면 무동작.
@@ -7637,7 +7687,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // custom confirm이 열린 뒤 다른 창에서 편집이 시작될 수 있으므로 실제 AppKit 종료 승인 직전에 전 세션을
             // 다시 검사한다. 발견하면 일반 quit 결정을 폐기하고 해당 창에 notice를 띄운 뒤 fail-closed한다.
             if let protected = protectedFilePanelSurface(), let session = protected.appSession {
-                protected.window?.makeKeyAndOrderFront(nil)
+                bringSurfaceForward(protected)
                 // accepted Quit이 이미 Zig의 app-global detach/end-all latch를 세웠다. 앱을 계속 실행하기 전에 반드시
                 // 되돌린 뒤 새 confirm을 열어 다음 close/Quit이 stale 정책을 쓰지 않게 한다.
                 maru_macos_app_session_cancel_app_quit(session)
@@ -13043,6 +13093,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// applicationShouldTerminate/drainQuitDecision의 all-session preflight를 통과한 뒤에만 직접 호출한다.
     private func tearDownQuickTerminalAfterGlobalPreflight() {
         guard let surface = quick else { return }
+        releaseQuitConfirmHeld(by: surface)
         self.quick = nil
         quickAnimating = false
         quickHideFrame = nil // 재생성 시 stale 숨김 사각형이 새 패널에 새지 않게
@@ -13425,9 +13476,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard !smokeMode else { return nil }
         // 창 0 개로 Dock 에 남은 앱(`window.quit-after-last-window-closed = false`)에게는 「창 없음」이 **올바른 저장**이다
         // — 헤더만 쓴다. 복원은 창 0 개를 「기본 빈 창」으로 읽는다(restoreWorkspace count==0, 사용자 결정 2026-10-04).
-        // 그 밖의 창 0 개(종료 도중·발행 전)는 지금처럼 캡처 불가(nil)다.
+        // 그 밖의 창 0 개(종료 도중)는 지금처럼 캡처 불가(nil)다.
         if checkpointWindows.isEmpty {
-            guard openWithoutWindows, windows.isEmpty, workspaceRestoreEnabled else { return nil }
+            // 창 0 개 상태에서 새 창을 만드는 중이면 그 창은 windows 에 있지만 아직 발행 전이다 — 그 첫 renderTick 의
+            // 캡처도 「창 0 개」가 맞다(발행 뒤 인벤토리 표시가 다시 캡처한다). nil 이면 거짓 「저장 실패」가 뜬다.
+            guard openWithoutWindows, workspaceRestoreEnabled else { return nil }
             return Data((MARU_WORKSPACE_HEADER + "\n").utf8)
         }
         // 복원을 끈 사용자(`workspace.restore = false`·`MARU_NO_WORKSPACE_RESTORE`)는 저장도 막는다 — 안 그러면 복원 안 한

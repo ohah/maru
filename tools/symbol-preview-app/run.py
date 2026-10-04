@@ -98,7 +98,7 @@ def main():
     transcript = (root / "app.log").read_text()
     if code != 0 or "SYMBOL_PREVIEW_FINISH passed=true" not in transcript or document.read_bytes() != original:
         raise RuntimeError("Product verification failed; inspect app.log")
-    expected = ("before", "opened", "filtered", "next-symbol", "cancelled", "korean-query", "accepted")
+    expected = ("before", "opened", "filtered", "next-symbol", "cancelled", "korean-query", "accept-preview", "accepted")
     for label in expected:
         ppm = artifacts / (label + ".ppm")
         if not ppm.exists() or ppm.stat().st_size < 1000:

@@ -391,3 +391,8 @@ runtime 변형 검출이 통과했다. 실앱 Save-close·readonly 입력 거절
 재생성 없이 등록한다. worker 11·grant 19·host 78개 Debug/ReleaseFast와 다섯 compiled
 runtime 변형 검출, 새 실앱의 exact BOM/CRLF Save-close가 통과했다. 게시 시 hash/본문
 대조와 view/syntax CPU, 복구 I/O 및 전체 잔여 Windows 범위는 계속 진행한다.
+
+§2m.186: 일반 초기 open의 private backup 열기/읽기/파싱을 worker에 연결하고 native 경로
+키와 pinned store를 인계한다. worker 15·host 80개 Debug/ReleaseFast와 다섯 compiled
+runtime 변형 검출, 새 실앱 crash/reopen/첫 Save-close의 exact bytes·정상 종료·백업 삭제가
+통과했다. 이력 적용·view/syntax CPU, 주기적 backup write/close 정리 및 전체 잔여 범위는 남아 있다.

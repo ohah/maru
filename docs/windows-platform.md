@@ -12021,3 +12021,31 @@ worker 11개·grant 19개·host 78개가 Debug/ReleaseFast에서 통과했다. �
 종료를 확인했다. 소유 HWND의 synthetic 입력이며 물리 입력/IME 증거로 세지 않는다.
 Registry 등록 시 hash/본문 대조, view/syntax CPU 준비와 복구 저장소 읽기는 아직 앱 스레드에
 있다. 이 잔여 비용 및 전체 Windows 지원 범위를 계속 진행한다.
+
+### 2m.186 — 초기 복구 읽기와 pinned 저장소 인계
+
+일반 앱 파일 클릭은 `startForAppWithRecovery`로 기존 private 저장소의 열기·읽기·파싱도
+worker에서 수행한다. 없는 저장소는 만들지 않으며 unreadable record는 absence로 접지
+않는다. OOM은 열기 실패, 그 외 복구 실패는 기존 원본 readonly 보호로 이어진다. 복구
+레코드는 raw bytes와 parsed identity를 독립 소유하고 기존 disk CAS를 보존한다.
+
+복구 키는 트리 입력이 아니라 native snapshot의 문서 경로다. 실앱 재열기에서 트리의 `/`와
+native 경로 구분자 차이로 레코드를 놓치는 문제를 검출해 수정했다. 기존 백업 포맷과 키는
+바꾸지 않는다. 레코드가 있는 경우 pinned LocalData도 함께 반환하여 첫 저장/닫기에서
+백업을 정리할 수 있게 한다. 앱의 복구 적용은 worker 결과를 사용하며 저장소를 다시 읽지
+않는다. 늦은 취소와 미소비 결과는 record·store·native snapshot을 정산한다.
+
+worker 15개·host 80개가 Debug/ReleaseFast에서 통과했다. 독립 record 수명·late 취소,
+absence의 무생성, malformed record, separator가 다른 native key, 복구 후 외부 변경의
+old CAS 거절과 첫 Save-close의 store 인계/레코드 삭제를 검사했다. 트리 키 조회·오류
+무시·없는 store 생성·store 인계 생략·disk CAS 재설정을 다섯 compiled runtime 변형으로
+검출하고 원본 bytes를 복원해 재검증했다.
+
+새 격리 실앱에서 dirty backup 생성 뒤 소유 process를 강제 종료하고 재시작했다. 파일
+클릭으로 `Xbase`와 복구 표시가 나타났고 첫 Save-close가 정확한 `BOM + Xbase CRLF`를
+저장하고 정상 종료하며 백업을 지웠다. HWND synthetic 입력이며 물리 입력/IME로 세지
+않는다. 실패했던 초기 GUI 시도는 성공 증거로 사용하지 않는다.
+
+복구의 이력 적용과 view/syntax CPU 준비, 게시 시 hash/본문 대조 및 기존 주기적 백업
+쓰기·닫기 정리는 아직 앱 스레드다. 이 비용과 sleep/unmount·물리 입력/IME, 나머지 Windows
+지원 범위를 계속 진행한다.

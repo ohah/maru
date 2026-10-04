@@ -4402,6 +4402,22 @@ fn initialOpenFailure(err: anyerror) OpenOutcome {
     };
 }
 
+fn recoverInitialResult(book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, view: *OpenFile, result: *@import("platform/windows/editor/open_worker.zig").Result, local_override: ?[]const u8) !void {
+    if (!result.recovery_checked) return recoverAppFile(book, io, owner, view, local_override);
+    if (result.recovery_failure) |err| return err;
+    const record = if (result.recovery) |*value| value else return;
+    if (owner.* == null) if (result.recovery_owner) |value| {
+        owner.* = value;
+        result.recovery_owner = null;
+    };
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    const state = book.registry.get(view.document).?;
+    const peers = [_]maru.session.editor.edit_commands.Participant{.{ .view = &view.navigation, .id = view.document.id }};
+    try backups.restorePath(book.allocator, state, record, &peers, 0, 4 << 20);
+    try view.refresh(book.allocator);
+    view.recovered = true;
+}
+
 fn openAppResultInto(a: std.mem.Allocator, book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: *std.ArrayList(OpenFile), result: *@import("platform/windows/editor/open_worker.zig").Result, local_override: ?[]const u8) OpenOutcome {
     // Reserve the final view slot before registration/recovery can consume the
     // result or create a dirty document. A failed admission still owns its image.
@@ -4412,7 +4428,7 @@ fn openAppResultInto(a: std.mem.Allocator, book: *file_host.Book, io: std.Io, ow
         book.release(io, lease, false) catch unreachable;
         return .out_of_memory;
     };
-    recoverAppFile(book, io, owner, &view, local_override) catch |err| {
+    recoverInitialResult(book, io, owner, &view, result, local_override) catch |err| {
         if (err == error.OutOfMemory) {
             book.release(io, view.document, true) catch unreachable;
             view.deinit(book.allocator);
@@ -4441,12 +4457,20 @@ fn drainInitialOpen(worker: *@import("platform/windows/editor/open_worker.zig").
 }
 
 fn awaitInitialAppResult(f: *FileCloseFixture, cancel_before_take: bool) !@import("platform/windows/editor/open_worker.zig").Result {
+    return awaitInitialAppResultMode(f, cancel_before_take, false);
+}
+
+fn awaitInitialAppResultMode(f: *FileCloseFixture, cancel_before_take: bool, recover: bool) !@import("platform/windows/editor/open_worker.zig").Result {
     const io = std.testing.io;
     const path = try f.tmp.dir.realPathFileAlloc(io, "file.txt", std.testing.allocator);
     defer std.testing.allocator.free(path);
     var worker: @import("platform/windows/editor/open_worker.zig").Worker = .{ .allocator = std.testing.allocator };
     defer drainInitialOpen(&worker, io);
-    try worker.startForApp(path, 128);
+    if (recover) {
+        var root: [std.fs.max_path_bytes]u8 = undefined;
+        const len = try f.tmp.dir.realPath(io, &root);
+        try worker.startForAppWithRecovery(path, 128, root[0..len]);
+    } else try worker.startForApp(path, 128);
     const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
     while (!worker.job.?.done.load(.acquire)) {
         if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.OpenTimeout;
@@ -4570,17 +4594,73 @@ test "Windows editor host initial app result restores backup before exposing rec
     f.backups.?.deinit(std.testing.io);
     f.backups = null;
     f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "other\r\n" });
     const initial_id = f.documents.last_reference + 1;
     defer releaseExtraInitialView(f, initial_id);
-    var result = try awaitInitialAppResult(f, false);
+    var result = try awaitInitialAppResultMode(f, false, true);
     defer result.deinit(std.testing.io);
-    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(result.recovery_checked and result.recovery != null);
+    const old_hash = result.recovery.?.parsed.doc.path.disk_hash;
+    try std.testing.expect(old_hash != result.snapshot.?.raw_hash);
+    // An invalid main-thread root proves this result never rereads the store.
+    const outcome = openAppResultInto(std.testing.allocator, &f.book, std.testing.io, &f.backups, &f.views, &result, "C:invalid");
     try std.testing.expect(outcome == .opened);
     try std.testing.expect(outcome.opened.recovered);
     const state = f.documents.get(outcome.opened.document).?;
     try std.testing.expect(state.opened.?.isDirty());
     try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(old_hash, state.opened.?.disk_hash);
+    try std.testing.expect(f.backups != null and result.recovery_owner == null);
+    try std.testing.expect(try f.book.beginSave(outcome.opened.document, 128));
+    try std.testing.expectError(error.SourceChanged, awaitAppSave(&f.book, outcome.opened.document));
+    try f.expectDisk("other\r\n");
+}
+
+test "Windows editor host worker recovery failure keeps original readonly without rereading" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    var result = try awaitInitialAppResultMode(f, false, true);
+    defer result.deinit(std.testing.io);
+    result.recovery_failure = error.BadHeader;
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    const state = f.documents.get(outcome.opened.document).?;
+    try std.testing.expect(state.opened.?.file.read_only and !outcome.opened.recovered);
+    try std.testing.expect(!try f.book.beginSave(outcome.opened.document, 128));
+    try std.testing.expect(f.backups == null);
     try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host worker recovery transfers its store through first save close" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    try f.book.deinit(std.testing.io);
+    for (f.views.items) |*view| view.deinit(std.testing.allocator);
+    f.views.deinit(std.testing.allocator);
+    f.views = .empty;
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    var result = try awaitInitialAppResultMode(f, false, true);
+    defer result.deinit(std.testing.io);
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened and outcome.opened.recovered);
+    try std.testing.expect(try f.book.beginSave(outcome.opened.document, 128));
+    const ready = try awaitAppSave(&f.book, outcome.opened.document);
+    try std.testing.expect(ready == .receipt and ready.receipt.decision == .committed);
+    // No frame maintenance may lazily create the missing owner before close.
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .window, .confirmed));
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    try std.testing.expect(try f.backups.?.store.read(std.testing.io, backups.identity(f.documents.get(outcome.opened.document).?).?) == null);
+    try std.testing.expect(result.recovery_owner == null);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
 }
 
 fn applyFileKey(book: *file_host.Book, io: std.Io, resolver: maru.config.keybinding.KeyBindingResolver, file: *OpenFile, event: maru.terminal.KeyEvent, context: OpenFile.InputContext) !?[]u8 {
@@ -12432,7 +12512,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                             file_reopens += 1;
                                             active_view = .{ .file = fi };
                                         } else {
-                                            initial_open.startForApp(owned, 4 << 20) catch |err| {
+                                            initial_open.startForAppWithRecovery(owned, 4 << 20, null) catch |err| {
                                                 const why = initialOpenFailure(err);
                                                 file_rejects += 1;
                                                 last_reject = std.meta.activeTag(why);

@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const native = @import("native_open.zig");
+const backups = @import("backup_store.zig");
 const w = std.os.windows;
 extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
 pub const max_bytes = 4 << 20;
@@ -24,12 +25,20 @@ pub const Result = struct {
     document: ?maru.session.editor.document.Document = null,
     /// Independently owned CPU preparation; no Registry or view crosses threads.
     file: ?maru.session.editor.edit_doc.EditableFile = null,
+    recovery_checked: bool = false,
+    recovery: ?backups.Record = null,
+    recovery_owner: ?backups.LocalData = null,
+    recovery_failure: ?anyerror = null,
     failure: ?anyerror = null,
     cancelled: bool = false,
     consumed: bool = false,
     thread_id: std.Thread.Id,
 
     pub fn deinit(self: *Result, io: std.Io) void {
+        if (self.recovery) |*record| record.deinit();
+        self.recovery = null;
+        if (self.recovery_owner) |*owner| owner.deinit(io);
+        self.recovery_owner = null;
         if (self.file) |*file| file.deinit();
         self.file = null;
         if (self.snapshot) |*snapshot| snapshot.deinit(io);
@@ -51,6 +60,8 @@ const Job = struct {
     path: []u8,
     limit: usize,
     readonly_fallback: bool = false,
+    recover: bool = false,
+    localappdata: ?[]u8 = null,
     cancel_requested: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
     result: ?Result = null,
@@ -104,9 +115,41 @@ const Job = struct {
         }
         return .{ .snapshot = snapshot, .document = parsed, .file = file, .thread_id = thread_id };
     }
+    fn readRecovery(self: *Job, io: std.Io, result: *Result) !void {
+        result.recovery_checked = true;
+        if (result.failure != null or result.cancelled or result.snapshot == null) return;
+        const a = std.heap.smp_allocator;
+        const environment = if (self.localappdata == null) maru.os_env.allocValue(a, "LOCALAPPDATA") else null;
+        defer if (environment) |value| a.free(value);
+        var owner = backups.LocalData.openExisting(a, io, self.localappdata orelse environment, max_bytes) catch |err| {
+            // Absence is different from unreadable recovery data. Never create
+            // or repair a backup directory merely to open the original file.
+            if (err == error.NotFound or err == error.FileNotFound) return;
+            return err;
+        };
+        var owner_owned = true;
+        defer if (owner_owned) owner.deinit(io);
+        // The native grant's selected path is also the persisted document key.
+        // Tree paths can have different separators; using them loses backups.
+        result.recovery = try owner.store.read(io, .{ .path = .{ .path = result.snapshot.?.path, .disk_hash = result.snapshot.?.raw_hash } });
+        if (result.recovery != null) {
+            // The app needs this pinned store to remove the record on its first
+            // save/close, before any later backup maintenance has run.
+            result.recovery_owner = owner;
+            owner_owned = false;
+        }
+    }
+
     fn run(self: *Job, comptime Driver: type) void {
         var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
         self.result = self.perform(threaded.io(), Driver);
+        if (self.recover) self.readRecovery(threaded.io(), &self.result.?) catch |err| {
+            if (err == error.OutOfMemory) self.result.?.failure = err else self.result.?.recovery_failure = err;
+        };
+        if (self.cancel_requested.load(.acquire)) {
+            self.result.?.deinit(threaded.io());
+            self.result.?.cancelled = true;
+        }
         threaded.deinit();
         // The detached thread never touches Job after this release publication.
         self.done.store(true, .release);
@@ -127,10 +170,18 @@ pub const Worker = struct {
         if (kind != .text) return error.NeedsWebPanel;
         return self.startMode(path, limit, true, Native);
     }
+    pub fn startForAppWithRecovery(self: *Worker, path: []const u8, limit: usize, localappdata: ?[]const u8) !void {
+        const kind = maru.session.file_panel_bridge.openKindForPath(path) orelse return error.UnsupportedFileKind;
+        if (kind != .text) return error.NeedsWebPanel;
+        return self.startRecoveryMode(path, limit, true, true, localappdata, Native);
+    }
     fn startWith(self: *Worker, path: []const u8, limit: usize, comptime Driver: type) !void {
         return self.startMode(path, limit, false, Driver);
     }
     fn startMode(self: *Worker, path: []const u8, limit: usize, readonly_fallback: bool, comptime Driver: type) !void {
+        return self.startRecoveryMode(path, limit, readonly_fallback, false, null, Driver);
+    }
+    fn startRecoveryMode(self: *Worker, path: []const u8, limit: usize, readonly_fallback: bool, recover: bool, localappdata: ?[]const u8, comptime Driver: type) !void {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
         try self.checkOwner();
         if (self.job != null) return error.OpenBusy;
@@ -138,9 +189,12 @@ pub const Worker = struct {
         if (path.len == 0 or path.len > std.fs.max_path_bytes or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
         const owned = try std.heap.smp_allocator.dupe(u8, path);
         errdefer std.heap.smp_allocator.free(owned);
+        if (localappdata) |root| if (root.len > std.fs.max_path_bytes or std.mem.indexOfScalar(u8, root, 0) != null) return error.InvalidPath;
+        const owned_local = if (localappdata) |root| try std.heap.smp_allocator.dupe(u8, root) else null;
+        errdefer if (owned_local) |root| std.heap.smp_allocator.free(root);
         const job = try self.allocator.create(Job);
         errdefer self.allocator.destroy(job);
-        job.* = .{ .path = owned, .limit = limit, .readonly_fallback = readonly_fallback };
+        job.* = .{ .path = owned, .limit = limit, .readonly_fallback = readonly_fallback, .recover = recover, .localappdata = owned_local };
         const thread = try std.Thread.spawn(.{}, Job.run, .{ job, Driver });
         thread.detach();
         self.address = self;
@@ -165,6 +219,7 @@ pub const Worker = struct {
         // work has finished. Return the snapshot for explicit caller disposal.
         if (job.cancel_requested.load(.acquire)) result.cancelled = true;
         std.heap.smp_allocator.free(job.path);
+        if (job.localappdata) |root| std.heap.smp_allocator.free(root);
         self.allocator.destroy(job);
         self.job = null;
         return result;
@@ -418,4 +473,125 @@ test "Windows initial open worker fallback retains read cap and web kind admissi
     var result = try awaitResult(&worker);
     defer result.deinit(std.testing.io);
     try std.testing.expect(result.failure != null and result.snapshot == null and result.readonly == null);
+}
+
+fn recoveryRoot(tmp: *std.testing.TmpDir) ![]u8 {
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &path);
+    return std.testing.allocator.dupe(u8, path[0..len]);
+}
+
+test "Windows initial open worker owns recovery bytes and preserves the original disk baseline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    const root = try recoveryRoot(&tmp);
+    defer std.testing.allocator.free(root);
+    {
+        var owner = try backups.LocalData.open(std.testing.allocator, std.testing.io, root, max_bytes);
+        defer owner.deinit(std.testing.io);
+        try owner.store.write(std.testing.io, .{ .path = .{ .path = path, .disk_hash = 42 } }, "recover\r\n");
+    }
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startForAppWithRecovery(path, 128, root);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.recovery_checked and result.failure == null and result.recovery_failure == null);
+    try std.testing.expect(result.thread_id != std.Thread.getCurrentId());
+    try std.testing.expect(result.recovery != null);
+    try std.testing.expectEqualStrings("recover\r\n", result.recovery.?.parsed.content);
+    try std.testing.expectEqual(@as(u64, 42), result.recovery.?.parsed.doc.path.disk_hash);
+    try std.testing.expect(result.snapshot.?.raw_hash != 42);
+    result.deinit(std.testing.io);
+    try worker.startForAppWithRecovery(path, 128, root);
+    const deadline = std.Io.Clock.awake.now(std.testing.io).addDuration(.fromSeconds(5));
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(std.testing.io).durationTo(deadline).nanoseconds <= 0) return error.OpenTimeout;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try worker.cancel();
+    var cancelled = (try worker.takeResult()).?;
+    defer cancelled.deinit(std.testing.io);
+    try std.testing.expect(cancelled.cancelled and cancelled.recovery != null);
+    try std.testing.expectEqualStrings("recover\r\n", cancelled.recovery.?.parsed.content);
+}
+
+test "Windows initial open worker absence never creates a recovery store" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    const root = try recoveryRoot(&tmp);
+    defer std.testing.allocator.free(root);
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startForAppWithRecovery(path, 128, root);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.recovery_checked and result.failure == null and result.recovery_failure == null and result.recovery == null);
+    if (backups.LocalData.openExisting(std.testing.allocator, std.testing.io, root, max_bytes)) |value| {
+        var owner = value;
+        owner.deinit(std.testing.io);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.NotFound, err);
+}
+
+test "Windows initial open worker distinguishes unreadable recovery from absence" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    const root = try recoveryRoot(&tmp);
+    defer std.testing.allocator.free(root);
+    {
+        var owner = try backups.LocalData.open(std.testing.allocator, std.testing.io, root, max_bytes);
+        defer owner.deinit(std.testing.io);
+        const doc: maru.session.editor.backup.Doc = .{ .path = .{ .path = path, .disk_hash = 42 } };
+        try owner.store.write(std.testing.io, doc, "recover");
+        var name_buffer: [maru.session.editor.backup.max_file_name_len]u8 = undefined;
+        const name = maru.session.editor.backup.fileName(&name_buffer, doc);
+        try owner.store.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "bad" });
+    }
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startForAppWithRecovery(path, 128, root);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.recovery_checked and result.failure == null and result.snapshot != null);
+    try std.testing.expectEqual(@as(?anyerror, error.BadHeader), result.recovery_failure);
+    try std.testing.expect(result.recovery == null);
+}
+
+test "Windows initial open worker recovery uses the native path rather than tree separators" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixturePath(&tmp);
+    defer std.testing.allocator.free(path);
+    for (path) |*byte| if (byte.* == '\\') {
+        byte.* = '/';
+    };
+    const root = try recoveryRoot(&tmp);
+    defer std.testing.allocator.free(root);
+    {
+        var snapshot = try native.Snapshot.openPath(std.testing.allocator, std.testing.io, path, 128);
+        defer snapshot.deinit(std.testing.io);
+        try std.testing.expect(!std.mem.eql(u8, path, snapshot.path));
+        var owner = try backups.LocalData.open(std.testing.allocator, std.testing.io, root, max_bytes);
+        defer owner.deinit(std.testing.io);
+        try owner.store.write(std.testing.io, .{ .path = .{ .path = snapshot.path, .disk_hash = 42 } }, "tree-recovery");
+    }
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startForAppWithRecovery(path, 128, root);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.recovery_checked and result.recovery != null);
+    try std.testing.expectEqualStrings(result.snapshot.?.path, result.recovery.?.parsed.doc.path.path);
+    try std.testing.expectEqualStrings("tree-recovery", result.recovery.?.parsed.content);
 }

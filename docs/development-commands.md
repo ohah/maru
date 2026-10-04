@@ -1197,3 +1197,8 @@ runtime 변형을 검출했다. 일반 앱 연결은 host 61개·controller 33�
 문서 CAS, reader 해제 뒤 이미지 수명, stale read·후속 native 변경 거절, 취소·final permission을
 검사한다. Debug/ReleaseFast와 다섯 compiled runtime 변형을 검증했다. 앱 충돌 선택과 전체
 회귀 gate도 실행한다.
+
+§2m.186의 `test-win32-editor-open`은 15개, `test-win32-editor-host`는 80개다.
+초기 worker의 private backup 읽기·무생성 absence·오류 분류·native path key와 record/store
+소유권, late 취소, 복구의 old CAS 및 첫 Save-close 정리를 Debug/ReleaseFast로 검사한다.
+다섯 compiled runtime 변형과 격리 실앱의 crash/reopen/저장/종료도 검증한다.

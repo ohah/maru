@@ -11399,3 +11399,42 @@ reopened·recovered-notice·conflict-notice PNG와 임시 데이터에 기록했
 한 행을 더해 19개다. 안내 우선순위 누락·base 항목 유실·반복 이동·빈 라벨·잘못된 capacity
 거절의 다섯 변형이 컴파일 후 runtime 실패로 검출됐고 byte 원복 후 Debug/ReleaseFast
 각각 19개가 통과했다. 감시·비동기 I/O 및 물리 입력·더 넓은 crash 범위는 계속 남아 있다.
+
+### 2m.160 — handle-bound 비동기 디렉터리 알림 소유권
+
+Windows L4 editor/directory_watch.zig는 선택한 디렉터리 handle에 상대적인 빈 counted name으로
+같은 객체의 비동기 handle을 열고 full 128-bit identity를 대조한다. ReOpenFile의 directory
+재열기는 실제 ACCESS_DENIED로 실패했고 native 상대 이름 `.`은 OBJECT_NAME_INVALID였다.
+문자열 pathname으로 재열어 경합을 숨기지 않는다. 감시는 현재 디렉터리만 대상으로 하며
+FILE_NAME·DIR_NAME·ATTRIBUTES·SIZE·LAST_WRITE 알림을 사용한다. OVERLAPPED와 16 KiB
+aligned buffer는 heap의 고정 주소에 있고 완료 뒤 먼저 재등록한 후 hint를 반환한다.
+
+근거는 [Microsoft ReadDirectoryChangesW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readdirectorychangesw),
+[CancelIoEx](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)다.
+알림 내용·개수는 파일 변경의 정합성 근거가 아니며 0-byte overflow 완료도 재검증 hint다.
+Cancel 요청 자체는 완료가 아니므로 destroy는 native 완료/취소 결과를 확인한 뒤에만
+buffer·event·handle을 해제한다. 미확정 completion 오류는 owner를 해제하지 않고 반환한다.
+
+집중 gate는 aggregation 2개·native 5개, 총 7개다. idle poll과 cancel drain, 생성/수정 후
+rearm, 호출자 handle 종료, copied owner/겹치는 arm 거절, directory 이동 뒤 같은 객체의
+알림을 검증한다. 가짜 idle hint·rearm 누락·copied poll 허용·완료 hint 누락·delete sharing
+누락의 다섯 변형은 컴파일 후 runtime 실패로 검출됐고 byte 원복 뒤 Debug/ReleaseFast
+각각 7개가 통과했다. 현재는 알림 transport이며 앱의 directory grouping/cap·debounce와
+identity/hash 재검증·clean 최소 edit·dirty 선택 UI 연결은 후속이다. 외부 감시 완료로 세지 않는다.
+
+### 2m.161 — 디렉터리 identity 공유와 독립 구독 수명
+
+같은 full directory identity는 하나의 native watcher를 공유한다. 각 acquire는 별도
+증가 번호를 가진 구독을 발급하므로 이미 해제한 구독으로 다른 문서의 감시를 끊을 수 없다.
+상한은 문서 수가 아니라 서로 다른 디렉터리 수에 적용하며 최대 64개다. 마지막 구독은
+native 취소 완료를 확인한 뒤 제거하고, 정리 실패 시 아직 살아 있는 소유권을 보존한다.
+변경 hint는 마지막 알림 이후 200 ms에 group identity로 발행한다. poll은 파일 읽기나
+hash 계산을 수행하지 않는다. 오류도 group별로 전달하며 순회 시작점을 이동한다.
+
+실제 native 취소 뒤 재등록은 알림 공백을 고려한 전체 재검증 hint를 내고, 할당 실패
+prefix에서도 pending buffer와 handle을 남기지 않는다. 집중 gate는 aggregation 2개와
+native 12개, 총 14개다. 다섯 group 변형(중복 감시, 상한 무시, foreign owner 허용,
+구독 번호 재사용, debounce 생략)은 컴파일 후 runtime 실패로 검출됐고 원본 byte 복원 뒤
+Debug/ReleaseFast 각각 14개가 통과했다. 파일 생성·쓰기의 연속 알림을 같은 논리 시각에
+먼저 소비한 뒤 quiet-period 경계를 검사한다. 앱 연결과 identity/hash 재검증, clean 최소
+edit 및 dirty 선택 UI는 여전히 후속이며 외부 변경 감시 전체 완료로 세지 않는다.

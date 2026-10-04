@@ -212,3 +212,13 @@ runtime 결함을 검출했고 원복 후 shared 14개와 Windows backup 32개�
 복원을 확인했고 실제 외부 충돌과 버리기도 검증했다. 열린 파일 목록의 자동 재구성은 검증
 범위 밖이다. 긴 cwd에 밀리는 비모달 복원 안내를 고쳤고 host 19개 및 5개 runtime mutation
 검출이 통과했다. 물리 키보드/IME·외부 감시·비동기 I/O는 계속 남아 있다.
+
+§2m.160: 고정 주소 OVERLAPPED와 selected-handle identity를 가진 비동기 디렉터리 알림
+transport를 구현했다. native 이동/종료/생성/수정/copy guard 5행과 aggregation을 포함해
+Debug/ReleaseFast 7개, 다섯 runtime mutation 검출이 통과했다. 앱의 directory별 묶음·cap,
+debounce/hash 재검증, clean 갱신·dirty 선택 연결은 계속 남아 있다.
+
+§2m.161: full directory identity 공유, 최대 64개 directory cap, 독립 구독 해제와
+200 ms trailing debounce를 구현했다. 실제 취소 후 재등록 및 할당 실패 검증을 포함해
+Debug/ReleaseFast 14개, 다섯 group runtime mutation 검출이 통과했다. 앱 연결 및
+identity/hash 재검증, clean 갱신·dirty 선택 연결은 계속 남아 있다.

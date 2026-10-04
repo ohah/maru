@@ -1074,3 +1074,8 @@ counter 상한을 포함해 14개이며 전 할당 실패가 이미지 보호를
 
 §2m.159의 `zig build test-win32-editor-host`는 순수 복원 안내 우선순위·반복 항목·상한
 판정 한 행을 더해 19개다(aggregation 2·native 14·pure 3). Debug와 ReleaseFast에서 실행한다.
+
+`zig build test-win32-editor-watch`는 Windows native asynchronous directory notification
+소유권과 identity별 공유·상한·독립 구독·debounce의 14개 판정(aggregation 2·native 12)을
+실행한다. `-Doptimize=ReleaseFast`로도 실행하며 기본 test에 연결된다.
+앱의 외부 변경 갱신 전체 판정은 아직 아니다(§2m.160–161).

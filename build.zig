@@ -1588,6 +1588,11 @@ pub fn build(b: *std.Build) void {
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
     run_editor_host_tests.addArg("--maru-expect-tests=19"); // 2 aggregation blocks + 14 native tests + 3 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
+    const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
+    const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
+    const run_directory_watch_tests = b.addRunArtifact(directory_watch_tests);
+    run_directory_watch_tests.addArg("--maru-expect-tests=14"); // 2 aggregation blocks + 12 native tests
+    directory_watch_step.dependOn(&run_directory_watch_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {
         const save_crash_probe = b.addExecutable(.{
@@ -4192,6 +4197,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(save_controller_step);
     test_step.dependOn(backup_store_step);
     test_step.dependOn(editor_host_step);
+    test_step.dependOn(directory_watch_step);
     test_step.dependOn(save_crash_step);
     test_step.dependOn(editor_input_step);
     test_step.dependOn(&run_internal_contract_tests.step);

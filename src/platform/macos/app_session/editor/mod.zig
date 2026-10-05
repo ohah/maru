@@ -22243,6 +22243,17 @@ fn monotonicMsForTest() u64 {
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
 }
 
+/// 이 **스레드가 CPU 에서 쓴** 시간(ms). 단일 스레드 계산의 재앙 감지선은 이것으로 판정한다 — 벽시계에는 스레드가
+/// CPU 를 **기다린** 시간이 섞인다. 실측 2026-10-05(같은 판정자를 혼자 vs 8 중 병렬): 「가장 긴 줄 세기」 벽시계
+/// 423 → 중앙 881·최대 1,018ms(로그 최대 2,107ms 로 2 초 선을 넘었다), 이 시계 415 → 중앙 507·최대 543ms.
+/// 잡으려는 회귀(같은 일에 CPU 를 몇 배 더 쓴다)는 그대로 보이고 부하 대기만 빠진다. **기다림 자체가 회귀인
+/// 판정자(잠금·I/O·마감)에는 쓰지 않는다** — 그때는 기다린 시간이 신호다(docs/performance-budget.md §원칙).
+fn threadCpuMsForTest() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.THREAD_CPUTIME_ID, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
+
 test "[측정] 가로로 멀리 밀수록 프레임이 느려지는가" {
     // `expandTabs`는 화면 시작 열(`first_col`)까지 **훑고 버린다**. 그러면 오른쪽으로 갈수록 매
     // 프레임 비용이 커진다 — 긴 줄에서 계속 밀면 점점 뻑뻑해지는 상태다.
@@ -22281,6 +22292,7 @@ test "[측정] 가로로 멀리 밀수록 프레임이 느려지는가" {
         var warm = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
         warm.dl.deinit(allocator);
 
+        const c0 = threadCpuMsForTest();
         const t0 = monotonicMsForTest();
         var n: usize = 0;
         while (n < 4) : (n += 1) {
@@ -22288,13 +22300,16 @@ test "[측정] 가로로 멀리 밀수록 프레임이 느려지는가" {
             d.dl.deinit(allocator);
         }
         const t1 = monotonicMsForTest();
-        std.debug.print("\n[측정] first_col={d}(그린 값 {d}): 4프레임 {d}ms\n", .{ col, fx.term.rt.editor_first_col, t1 - t0 });
+        const cpu = threadCpuMsForTest() - c0;
+        std.debug.print("\n[측정] first_col={d}(그린 값 {d}): 4프레임 {d}ms (CPU {d}ms)\n", .{ col, fx.term.rt.editor_first_col, t1 - t0, cpu });
         // 고치기 전 60,000열은 4프레임에 **약 2초**였다. 재앙 감지선이지 예산이 아니다.
         //
         // **지금은 평평해야 한다**(§4.1c 체크포인트). 실측(ReleaseFast, 화면을 20만열 줄로 채운 판):
         // `first_col` 0 에서 0.22ms, 60,000 에서 0.68ms — 같은 자릿수다. 그래서 감지선을 그대로 두고도
         // 15만 열을 하나 더 잰다(옛 상한 10,000 의 열다섯 배 — 그 상수가 살아 있으면 여기 못 온다).
-        try testing.expect(t1 - t0 < 500);
+        // 판정은 CPU 시간이다(`threadCpuMsForTest`) — 벽시계는 8 중 병렬에서 20,000 열이 혼자 60 → 중앙 142·최대 252ms 로
+        // 부풀었고, CPU 시간은 중앙 75·최대 96ms 였다(2026-10-05).
+        try testing.expect(cpu < 500);
     }
 }
 
@@ -22390,12 +22405,18 @@ test "적대적: 유효 UTF-8인 바이너리(NUL 1MB 한 줄)를 열어도 프�
 
     for ([_]bool{ false, true }) |wrap| {
         fx.term.rt.editor_wrap = wrap;
+        const c0 = threadCpuMsForTest();
         const t0 = monotonicMsForTest();
         var d = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
         const t1 = monotonicMsForTest();
-        std.debug.print("\n[적대] NUL 1MB 한 줄 wrap={}: 프레임 {d}ms\n", .{ wrap, t1 - t0 });
-        try testing.expect(t1 - t0 < 200); // 재앙 감지선(실측 1~4ms)
+        const cpu = threadCpuMsForTest() - c0;
+        std.debug.print("\n[적대] NUL 1MB 한 줄 wrap={}: 프레임 {d}ms (CPU {d}ms)\n", .{ wrap, t1 - t0, cpu });
+        // 재앙 감지선 — 판정은 CPU 시간. 실측(Debug, 이 판정자만 따로 돌린 것, 2026-10-05): wrap=false 첫 프레임 CPU
+        // 66~93ms, wrap=true 13~20ms. 예전 주석의 「1~4ms」는 스위트 안에서 앞 판정자들이 캐시를 데워 둔 값이었다 —
+        // 그래서 벽시계 선의 여유가 3 배도 안 됐고, 8 중 병렬에서 벽시계가 중앙 143·최대 243ms 로 48 회 중 4 회 넘었다
+        // (CPU 시간은 최대 97ms).
+        try testing.expect(cpu < 200);
     }
 
     fx.term.rt.editor_wrap = false;
@@ -22403,12 +22424,14 @@ test "적대적: 유효 UTF-8인 바이너리(NUL 1MB 한 줄)를 열어도 프�
     _ = scrollCols(fx.session, fx.term, leaf, -1_000_000, null);
     const t3 = monotonicMsForTest();
     std.debug.print("[적대] NUL 1MB: 끝까지 가로 밀기 {d}ms (first_col={d})\n", .{ t3 - t2, fx.term.rt.editor_first_col });
+    const c4 = threadCpuMsForTest();
     const t4 = monotonicMsForTest();
     var d2 = appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
     d2.dl.deinit(allocator);
     const t5 = monotonicMsForTest();
-    std.debug.print("[적대] NUL 1MB: 밀린 상태 프레임 {d}ms\n", .{t5 - t4});
-    try testing.expect(t5 - t4 < 200); // 실측 1ms
+    const cpu_scrolled = threadCpuMsForTest() - c4;
+    std.debug.print("[적대] NUL 1MB: 밀린 상태 프레임 {d}ms (CPU {d}ms)\n", .{ t5 - t4, cpu_scrolled });
+    try testing.expect(cpu_scrolled < 200); // 실측 CPU 6ms(병렬 최대 16) — 벽시계는 병렬 최대 100ms 까지 튄다
 }
 
 test "한 줄짜리 문서도 조각으로 움직인다 — 예전엔 전혀 못 움직였다" {
@@ -23624,10 +23647,12 @@ test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 �
     fx.term.rt.editor_lines = lines;
     fx.term.rt.editor_max_cols = 0;
 
+    const c0 = threadCpuMsForTest();
     const t0 = monotonicMsForTest();
     ensureMaxCols(fx.term, false);
     const t1 = monotonicMsForTest();
-    std.debug.print("\n[측정] {d}줄 열기의 가장 긴 줄 세기: {d}ms (max_cols={d})\n", .{ n, t1 - t0, fx.term.rt.editor_max_cols });
+    const cpu = threadCpuMsForTest() - c0;
+    std.debug.print("\n[측정] {d}줄 열기의 가장 긴 줄 세기: {d}ms (CPU {d}ms, max_cols={d})\n", .{ n, t1 - t0, cpu, fx.term.rt.editor_max_cols });
     // **재앙 감지선이지 예산이 아니다** — 그래서 자릿수로 둔다. 옛 상한 500ms 는 CI 러너 실측(main 463ms)과
     // 여유가 7% 뿐이라, 코드와 무관한 PR 들이 러너 편차만으로 연달아 빨강이 됐다(511·560·604ms — 2026-08-18).
     // 그 상태의 게이트는 회귀를 알리는 대신 무작위로 울리는 알람이라, 사람이 결과를 안 보게 만든다.
@@ -23638,7 +23663,9 @@ test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 �
     //
     // **제품이 느린 것이 아니다** — 배포가 쓰는 ReleaseFast 에서 같은 일이 42ms 다(실측). 이 테스트가
     // 도는 Debug 가 9배 느릴 뿐이라, 선은 "Debug 를 CI 러너에서 돌렸을 때" 를 기준으로 잡는다.
-    try testing.expect(t1 - t0 < 2000);
+    //
+    // **판정은 CPU 시간이다**(`threadCpuMsForTest` 주석의 실측) — 벽시계는 부하가 걸린 로컬에서 2 초 선을 넘었다.
+    try testing.expect(cpu < 2000);
 }
 
 test "[측정] 큰 문서 전체 접기 — 보이는 줄 다시 만들기" {
@@ -23689,11 +23716,13 @@ test "[측정] 큰 파일을 여는 값 — 범위 세기와 표식 만들기가
         for (0..n) |i| lines[i] = if (nested and i % 2 == 1) "  body" else if (nested) "head:" else "x";
         fx.term.rt.editor_lines = lines;
 
+        const c0 = threadCpuMsForTest();
         const t0 = monotonicMsForTest();
         try ensureFoldRanges(fx.session, fx.term); // 여는 경로가 부르는 그대로
         try rebuildVisible(fx.session, fx.term);
         const t1 = monotonicMsForTest();
-        std.debug.print("\n[측정] {d}줄 열기의 접힘 몫({s}): {d}ms\n", .{ n, if (nested) "블록 6만" else "평평", t1 - t0 });
+        const cpu = threadCpuMsForTest() - c0;
+        std.debug.print("\n[측정] {d}줄 열기의 접힘 몫({s}): {d}ms (CPU {d}ms)\n", .{ n, if (nested) "블록 6만" else "평평", t1 - t0, cpu });
 
         // **여는 것만으로 무는 메모리도 함께 적는다.** 접기를 한 번도 안 누른 사용자까지 이 값을
         // 물기 때문이다 — 큰 파일을 여러 개 띄우면 누적된다. 접은 뒤의 값은 `editor_visible_*`가
@@ -23707,8 +23736,9 @@ test "[측정] 큰 파일을 여는 값 — 범위 세기와 표식 만들기가
             rt.editor_visible_numbers.len * @sizeOf(?u32);
         std.debug.print("[측정] 같은 문서의 접힘 자료구조({s}): {d}KiB\n", .{ if (nested) "접은 뒤" else "평평", held / 1024 });
 
-        // **재앙 감지선이지 예산이 아니다.** 여는 순간이 눈에 띄게 멈추면 여기서 걸린다.
-        try testing.expect(t1 - t0 < 500);
+        // **재앙 감지선이지 예산이 아니다.** 여는 순간이 눈에 띄게 멈추면 여기서 걸린다. 판정은 CPU 시간이다
+        // (`threadCpuMsForTest` — 단일 스레드 계산이라 부하 대기를 빼고 잰다).
+        try testing.expect(cpu < 500);
     }
 }
 

@@ -5,7 +5,7 @@
 //! 값 하나를 더하는 확장이고, `State`는 `current`/`match_count`만 들며 **매치 리스트는 세션 소유**다
 //! — 편집기도 같은 자리에 둔다. 그래서 이 모듈은 리스트를 만들기만 하고 어디에도 걸지 않는다.
 //!
-//! **대소문자 규칙을 터미널과 공유한다**(`terminal.selection.foldCase`). 같은 오버레이에 같은
+//! **대소문자 규칙을 터미널과 공유한다**(`search_case_fold.fold`). 같은 오버레이에 같은
 //! 검색어를 치는데 pane 종류에 따라 대소문자 규칙이 갈리면 사용자는 그것을 결함으로 읽는다 —
 //! §5.1이 정규식 엔진을 두 개 두지 말라고 적은 것과 같은 이유다.
 //!
@@ -21,7 +21,7 @@
 //! 문서에는 soft-wrap이 저장돼 있지 않으므로 대응물이 없다.
 
 const std = @import("std");
-const terminal = @import("../../terminal.zig");
+const search_case_fold = @import("../../search_case_fold.zig");
 /// 낱말 경계의 단일 출처(§3.2) — 더블클릭이 잡는 범위와 같은 것을 쓴다.
 const editor_selection = @import("selection.zig");
 pub const regex = @import("../../regex.zig");
@@ -41,9 +41,8 @@ pub const Match = struct {
     line: u32,
     /// 줄 시작으로부터의 byte offset.
     start: u32,
-    /// 매치 byte 길이. **`needle.len`과 같다고 가정하지 않는다** — 지금 `foldCase`가 덮는 블록은
-    /// 전부 인코딩 길이를 보존하지만, 표가 넓어져 1:N 폴딩(ß→ss)이 들어오면 그 가정이 깨진다.
-    /// 실제로 훑은 만큼을 적어 두면 그날 이 자리가 조용히 틀리지 않는다.
+    /// 매치 byte 길이. **`needle.len`과 같다고 가정하지 않는다** — `K`(3byte)와 `k`(1byte)도 같은 검색 그룹이다.
+    /// 접힌 검색어 길이가 아니라 실제 원문에서 훑은 길이를 보존한다.
     len: u32,
 };
 
@@ -69,7 +68,7 @@ fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8, opts: Options
             const have = line[i];
             if (opts.match_case) {
                 if (have != want) return null;
-            } else if (terminal.selection.foldCase(have) != terminal.selection.foldCase(want)) return null;
+            } else if (search_case_fold.fold(have) != search_case_fold.fold(want)) return null;
             i += 1;
             n += 1;
             continue;
@@ -84,7 +83,7 @@ fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8, opts: Options
         const have = std.unicode.utf8Decode(line[i .. i + hl]) catch return null;
         if (opts.match_case) {
             if (have != want) return null;
-        } else if (terminal.selection.foldCase(have) != terminal.selection.foldCase(want)) return null;
+        } else if (search_case_fold.fold(have) != search_case_fold.fold(want)) return null;
         i += hl;
         n += nl;
     }
@@ -136,7 +135,7 @@ fn stepBytes(s: []const u8, i: usize) usize {
 ///
 /// 기본값 둘 다 `false` 가 **종전 동작**이다: 대소문자 무시, 낱말 경계 안 봄.
 pub const Options = struct {
-    /// 켜면 대소문자를 **가린다**. 끄면 `foldCase` 로 접어 비교한다(터미널과 같은 규칙).
+    /// 켜면 대소문자를 **가린다**. 끄면 `search_case_fold.fold` 로 접어 비교한다(터미널과 같은 규칙).
     match_case: bool = false,
     /// 켜면 매치가 **낱말 하나와 정확히 같을 때만** 센다. 판정은 `selection.wordRangeAt` 이
     /// 소유한다 — 더블클릭이 잡는 그 범위와 **같은 것**이어야 앱 안에 낱말 규칙이 둘 안 생긴다.
@@ -242,7 +241,7 @@ test "FND33 평문 개선은 독립 코드포인트 판정과 모든 범위가 �
                         if (end + hl > line.len) break;
                         const want = try std.unicode.utf8Decode(needle[n .. n + nl]);
                         const have = std.unicode.utf8Decode(line[end .. end + hl]) catch break;
-                        const equal = if (opts.match_case) have == want else terminal.selection.foldCase(have) == terminal.selection.foldCase(want);
+                        const equal = if (opts.match_case) have == want else search_case_fold.fold(have) == search_case_fold.fold(want);
                         if (!equal) break;
                         end += hl;
                         n += nl;
@@ -562,4 +561,38 @@ test "FND10: 정규화는 하지 않는다 — NFD 문서에 NFC 검색어는 �
     var c = try collect(&nfd, "\u{1100}\u{1161}");
     defer c.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), c.items.len);
+}
+
+test "FND34 Unicode 검색은 별칭을 찾고 원문 byte 범위를 보존한다" {
+    const cases = [_]struct { needle: []const u8, body: []const u8, count: usize }{
+        .{ .needle = "k", .body = "k K K", .count = 3 },
+        .{ .needle = "K", .body = "k K K", .count = 3 },
+        .{ .needle = "s", .body = "s S ſ", .count = 3 },
+        .{ .needle = "Σ", .body = "Σ σ ς", .count = 3 },
+        .{ .needle = "ß", .body = "ß ẞ ss", .count = 2 },
+        .{ .needle = "𐐀", .body = "𐐀 𐐨", .count = 2 },
+        .{ .needle = "I", .body = "I i İ ı", .count = 2 },
+    };
+    for (cases) |case| {
+        const lines = [_][]const u8{case.body};
+        var matches = try collect(&lines, case.needle);
+        defer matches.deinit(testing.allocator);
+        try testing.expectEqual(case.count, matches.items.len);
+        for (matches.items) |match| {
+            const text = case.body[match.start..][0..match.len];
+            try testing.expect(std.unicode.utf8ValidateSlice(text));
+            try testing.expect(std.mem.indexOfScalar(u8, text, ' ') == null);
+        }
+    }
+    const lines = [_][]const u8{"K k"};
+    var ranges = try collect(&lines, "k");
+    defer ranges.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0), ranges.items[0].start);
+    try testing.expectEqual(@as(u32, 3), ranges.items[0].len);
+    try testing.expectEqual(@as(u32, 4), ranges.items[1].start);
+    try testing.expectEqual(@as(u32, 1), ranges.items[1].len);
+    var exact = try collectOpts(&lines, "k", .{ .match_case = true });
+    defer exact.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), exact.items.len);
+    try testing.expectEqual(@as(u32, 4), exact.items[0].start);
 }

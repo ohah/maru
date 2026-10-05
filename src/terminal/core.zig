@@ -13879,3 +13879,17 @@ test "2048 in-band resize: 셸 프롬프트의 입력 모드 초기화가 구독
     try core.resize(100, 30);
     try std.testing.expectEqualStrings("", core.pendingResponse());
 }
+
+test "SCF3 터미널 실제 셀 검색은 Unicode 별칭을 찾는다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 30, .rows = 4 });
+    defer core.deinit();
+    try core.write("k K K\r\nΣ σ ς\r\nß ẞ ss");
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(std.testing.allocator);
+    try core.findMatches(std.testing.allocator, "k", &matches);
+    try std.testing.expectEqual(@as(usize, 3), matches.items.len);
+    try core.findMatches(std.testing.allocator, "Σ", &matches);
+    try std.testing.expectEqual(@as(usize, 3), matches.items.len);
+    try core.findMatches(std.testing.allocator, "ß", &matches);
+    try std.testing.expectEqual(@as(usize, 2), matches.items.len);
+}

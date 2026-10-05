@@ -1208,3 +1208,18 @@ test("휠은 버튼 64/65 로 나간다 (less·tmux copy-mode)", async () => {
   expect(out.join("")).toBe("\x1b[<64;3;2M\x1b[<65;3;2M");
   term.dispose();
 });
+
+test("WASM 검색은 Unicode 별칭과 원문의 셀 좌표를 보존한다", async () => {
+  const term = await makeTerminal({ cols: 30, rows: 4 });
+  try {
+    term.write("k K K\r\nΣ σ ς\r\nß ẞ ss");
+    await settle();
+    const kelvin = await term.findMatches("k");
+    expect(kelvin.total).toBe(3);
+    expect(kelvin.matches.map((match) => match.startCol)).toEqual([0, 2, 4]);
+    expect((await term.findMatches("Σ")).total).toBe(3);
+    expect((await term.findMatches("ß")).total).toBe(2);
+  } finally {
+    term.dispose();
+  }
+});

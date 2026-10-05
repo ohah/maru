@@ -144,3 +144,13 @@ Jetendard는 JetBrains Mono Nerd Font Mono와 Pretendard를 결합해 만든 OFL
 2. **원본 무수정 원칙** — 가능하면 원본을 그대로 넣는다. 수정(서브셋·패치)이 필요하면 RFN·상표·라이선스 표기 의무를 먼저 확인한다.
 3. **라이선스 파일 동봉** — 자산 옆에 라이선스 전문을 둔다. 폰트는 `assets/fonts/<Family>/`(`OFL.txt`/`LICENSE.md` — `build.zig` 번들 단계가 패밀리명 프리픽스로 자동 복사), 아이콘처럼 파생 형태로만 배포물에 들어가는 자산은 원본 옆(`assets/icons/LICENSE-*.txt` 등)에 둔다.
 4. **이 문서 갱신**(폰트는 [font-strategy.md](font-strategy.md) 표도) — 이름·버전·라이선스·저작권·출처를 기록한다.
+
+
+## Unicode 검색 데이터
+
+검색용 simple case folding 표는 [Unicode 17.0.0 CaseFolding.txt](https://www.unicode.org/Public/17.0.0/ucd/CaseFolding.txt)의 C/S 데이터를 사용한다.
+라이선스는 Unicode License V3이며 전문은 [assets/unicode/LICENSE.txt](../assets/unicode/LICENSE.txt)에 보존한다.
+macOS 앱에는 `Contents/Resources/Licenses/unicode-LICENSE.txt`로 동봉한다. WASM 검색도 이 표를 사용하므로
+`@maru/core`에는 `licenses/Unicode-LICENSE.txt`를 포함하고 패키지 SPDX에 `Unicode-3.0`을 명시한다.
+별도 런타임 라이브러리는 추가하지 않는다.
+`tools/generate-search-case-fold.py`는 고정 SHA-256의 공식 데이터만 받아 표를 재생성하며 네트워크를 사용하지 않는다.

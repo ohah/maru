@@ -1362,6 +1362,14 @@ pub fn build(b: *std.Build) void {
         .root_module = maru_mod,
     });
     const run_core_tests = b.addRunArtifact(core_tests);
+    // 편집기 전용 스위트는 터미널 판정자를 모으지 않으므로 검색용 접기를 별도로 확인한다.
+    const search_case_fold_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{"SCF"},
+    });
+    const run_search_case_fold_tests = b.addRunArtifact(search_case_fold_tests);
+    run_search_case_fold_tests.addArg("--maru-expect-tests=25"); // SCF1~3과 익명 import 판정자 22개.
+    b.step("test-search-case-fold", "Run Unicode search folding judges").dependOn(&run_search_case_fold_tests.step);
     // The editor-only fast suite does not import terminal.selection tests. Keep an explicit,
     // counted path for the regex cell-mapping judges instead of assuming test-editor ran them.
     const terminal_regex_step = b.step("test-terminal-regex", "Run terminal regex core tests");
@@ -2621,7 +2629,7 @@ pub fn build(b: *std.Build) void {
 
         const macos_app_bundle = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
-            b.fmt("{s}{s}{s}{s}{s}{s}{s}{s}", .{
+            b.fmt("{s}{s}{s}{s}{s}{s}{s}{s}{s}", .{
                 // ⑴ 번들 앞부분(정적)
                 // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
                 // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
@@ -2662,9 +2670,10 @@ pub fn build(b: *std.Build) void {
                 notification_helper_cp,
                 wuffs_license_cp,
                 pcre2_license_cp,
+                "cp assets/unicode/LICENSE.txt zig-out/Maru.app/Contents/Resources/Licenses/unicode-LICENSE.txt; ",
                 grammar_license_cp,
                 // ⑶ 확인 목록도 같은 표에서 — 복사와 검사가 갈리면 검사가 헛돈다.
-                "for lic in tree-sitter-LICENSE wuffs-LICENSE pcre2-LICENCE.md ",
+                "for lic in tree-sitter-LICENSE wuffs-LICENSE pcre2-LICENCE.md unicode-LICENSE.txt ",
                 grammar_license_names,
                 // ⑷ 나머지(정적)
                 "; do " ++

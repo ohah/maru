@@ -13,10 +13,11 @@
 //! 부르는 다리라 core 잔류(seam), 여기엔 그 선택 부분(`shiftSelectionForEviction`)만 둔다.
 //!
 //! 베이스: 더블클릭 단어·블록 선택은 iTerm2/Terminal.app 관례, URL 휴리스틱은 Maru 독립 설계(http(s) 스킴 +
-//! 괄호 균형 다듬기), 대소문자 무시 검색은 Unicode simple case folding(1:1 로 왕복하는 짝만 — `foldCase` 참고).
+//! 괄호 균형 다듬기), 대소문자 무시 검색은 Unicode 17.0.0 simple case folding(C/S — `search_case_fold` 참고).
 //! 단일 출처: docs/plans/terminal-core-decomposition.md §7.
 
 const std = @import("std");
+const search_case_fold = @import("../search_case_fold.zig");
 const core = @import("core.zig");
 const types = @import("types.zig");
 const screen = @import("screen.zig"); // 화면/스크롤백 읽기(absRow·ensureScrollbackRewrapped)
@@ -338,7 +339,8 @@ fn normalizedSelection(self: *const TerminalCore) ?struct { start: types.Selecti
     return .{ .start = h, .end = a };
 }
 
-/// 대문자를 소문자로 접는다(findMatches 대소문자 무시 비교용). **베이스 = Unicode simple case folding**,
+/// 편집 명령에서 대문자를 소문자로 변환한다. 검색용 접기는 `search_case_fold.fold`가 소유한다.
+/// **베이스 = Unicode simple case folding**,
 /// 단 **1:1 로 왕복하는 짝만** 덮는다(`upperCase` 가 되돌릴 수 있어야 편집기 변환이 원문을 안 바꾼다).
 /// 블록마다 규칙이 일정해 표 없이 알고리즘으로 덮는다:
 ///   - ASCII A-Z(+32)
@@ -456,10 +458,10 @@ test "CASE3 변환이 UTF-8 길이를 안 바꾼다 — 선택이 안 흔들린�
     }
 }
 
-/// haystack 앞부분이 needle과 대소문자 무시(foldCase)로 일치하는지/// haystack 앞부분이 needle과 대소문자 무시(foldCase)로 일치하는지(needle.len ≤ haystack.len 가정 — 호출자가 보장).
+/// 검색용 Unicode 접기로 haystack 앞부분이 needle과 일치하는지(needle.len ≤ haystack.len 가정 — 호출자가 보장).
 fn matchAtIgnoreCase(haystack: []const u21, needle: []const u21) bool {
     for (needle, 0..) |n, k| {
-        if (foldCase(haystack[k]) != foldCase(n)) return false;
+        if (search_case_fold.fold(haystack[k]) != search_case_fold.fold(n)) return false;
     }
     return true;
 }
@@ -917,7 +919,7 @@ pub fn collectViewportLinks(
 
 /// 스크롤백 + 화면에서 needle을 찾아 절대 좌표 매치를 out에 채운다(out은 호출자 소유). 논리 줄(soft-wrap 이음)
 /// 단위로 스캔해 wrap 경계를 넘는 매치도 잡고, 같은 줄 안에선 비겹침(매치 뒤로 needle 길이만큼 건너뜀). needle이
-/// 비면 무동작. 대소문자 무시는 foldCase(ASCII·Latin-1·Latin Ext-A·Greek·Cyrillic 의 1:1 짝).
+/// 비면 무동작. 대소문자 무시는 검색용 Unicode simple case folding(C/S)이다.
 /// 스크롤백 Find의 기본 평문 경로 — 정규식 opt-in은 findMatchesWithOptions가 맡고 fuzzy는 후속이다.
 /// 베이스: alt에선 active area(현재 화면)만 검색(Ghostty ActiveSearch와 동작 일치 — alt는 sb.count==0이라 자연히).
 pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, out: *std.ArrayList(types.Match)) !void {
@@ -1522,4 +1524,14 @@ test "지우기: soft-wrap 행 뒤쪽을 비우면 이음에서 빠지고, 가�
         defer allocator.free(text);
         try std.testing.expectEqualStrings("abc   ghijklmnopqrst", text);
     }
+}
+
+test "SCF2 터미널 검색도 Unicode 별칭을 같은 코드포인트로 비교한다" {
+    try std.testing.expect(matchAtIgnoreCase(&.{0x212a}, &.{'k'}));
+    try std.testing.expect(matchAtIgnoreCase(&.{0x3c2}, &.{0x3a3}));
+    try std.testing.expect(matchAtIgnoreCase(&.{0x1e9e}, &.{0xdf}));
+    try std.testing.expect(!matchAtIgnoreCase(&.{0x130}, &.{'i'}));
+    // 검색 확대가 원문 변환 명령까지 바꾸지 않도록 기존 변환도 고정한다.
+    try std.testing.expectEqual(@as(u21, 0x212a), foldCase(0x212a));
+    try std.testing.expectEqual(@as(u21, 0x17f), foldCase(0x17f));
 }

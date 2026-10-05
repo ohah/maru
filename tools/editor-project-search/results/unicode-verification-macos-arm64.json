@@ -1,0 +1,118 @@
+{
+  "status": "local-passed",
+  "unicode_version": "17.0.0",
+  "mapping_count": 1512,
+  "source_sha256": {
+    "src/search_case_fold.zig": "218e9d70c08693e6eccbf9ac53f06af800b9a9ea2c2c97e91f7445edf4ea9d62",
+    "src/session/editor/find.zig": "566694a59cfbdf1c6ffb5e3aa2d372a0bb9e9597a9144f61411fe290b9033902",
+    "src/terminal/selection.zig": "77f557a38b382ce92237a5815f9f32253d4c3238bf24d43ef7536b0795756ffb",
+    "src/terminal/core.zig": "e4962db788f705053707cfbebe58e974c58f0ab9ce3d16dbebded0bf93b6b97f"
+  },
+  "matrix": {
+    "files": 60,
+    "queries": 131,
+    "summary": {
+      "disk-auto": {
+        "equal": 38,
+        "range_mismatch": 91,
+        "error_cases": 2
+      },
+      "disk-pcre2": {
+        "equal": 39,
+        "range_mismatch": 90,
+        "error_cases": 2
+      },
+      "normalized-pcre2": {
+        "equal": 97,
+        "range_mismatch": 32,
+        "error_cases": 2
+      },
+      "normalized-word-filter": {
+        "equal": 116,
+        "range_mismatch": 13,
+        "error_cases": 2
+      }
+    }
+  },
+  "remaining_differences": [
+    {
+      "mode": "literal",
+      "query": ""
+    },
+    {
+      "mode": "literal-fold",
+      "query": ""
+    },
+    {
+      "mode": "regex",
+      "query": "^"
+    },
+    {
+      "mode": "regex",
+      "query": "^$"
+    },
+    {
+      "mode": "regex",
+      "query": "^|foo"
+    },
+    {
+      "mode": "regex",
+      "query": "foo|^"
+    },
+    {
+      "mode": "regex",
+      "query": "(?=foo)|foo"
+    },
+    {
+      "mode": "regex",
+      "query": ".*"
+    },
+    {
+      "mode": "regex",
+      "query": ".*?"
+    },
+    {
+      "mode": "regex",
+      "query": "a*"
+    },
+    {
+      "mode": "regex",
+      "query": "a??"
+    },
+    {
+      "mode": "regex",
+      "query": "(?:foo)?"
+    },
+    {
+      "mode": "regex",
+      "query": "\\Afoo"
+    }
+  ],
+  "mutations": [
+    {
+      "name": "missing-kelvin",
+      "exit": 1,
+      "test_failure_detected": true
+    },
+    {
+      "name": "bad-lower-bound",
+      "exit": 1,
+      "test_failure_detected": true
+    }
+  ],
+  "limits": "별칭·접기 표·실제 함수/셀 검색 검증. 제품 GUI·IME·OS 입력·프로젝트 워커는 검증하지 않음. 문서 전체 정규식은 사용자 선택 후 별도 설계·구현 예정. 동시에 다른 빌드가 실행되어 이번 성능 실험은 전후 성능 판단에 사용하지 않음.",
+  "checks": {
+    "test-editor ReleaseFast": "passed (기존 skip 유지)",
+    "test-search-case-fold ReleaseFast": "25 passed, SCF1~3 실행",
+    "check-boundaries": "passed",
+    "check-doc-links": "passed",
+    "npm-core": "75 passed, WASM 별칭·셀 좌표 포함",
+    "wasm-sync": "passed",
+    "npm-pack": "licenses/Unicode-LICENSE.txt 포함"
+  },
+  "wasm": {
+    "sha256": "0694b1a252e6d01f510ce06da94ec9437286de3e76e530e06fa2032e79ae5e6b",
+    "before_bytes": 266847,
+    "after_bytes": 278822
+  }
+}

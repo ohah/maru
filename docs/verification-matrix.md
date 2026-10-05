@@ -4112,3 +4112,24 @@ active 보정 누락·탭 삭제 누락·ID 색인 오염의 다섯 compiled run
 네 세션의 중간 활성 선택으로 강화해 검출했다. 복원 후 host 84개 Debug/ReleaseFast가
 통과했다. 단축키/마지막 창 연결 자체는 위 실앱 증거로 검증하며 다섯 변형이 그 입력
 연결을 직접 검사한다고 주장하지 않는다. 다른 전역 액션과 플랫폼 결합은 남아 있다.
+
+### §2m.199 Windows 새 터미널 단축키와 공통 생성 경로
+
+Windows 기본 Ctrl+Shift+T(new_term)를 터미널 및 파일 편집 경로에서 실제 생성에
+연결했다. 상단 +와 키보드는 같은 요청 처리와 terminal/session_actions.zig의
+spawnFocused를 사용한다. 최신 활성 core 크기는 lock 아래에서 읽고, 생성 상한을
+먼저 검사하며 Native admission 성공 후에만 활성 탭과 파일/터미널 view를 바꾼다.
+기존 Windows 평면 목록에 new_tab을 new_term으로 임의 합치지 않았다. 워크스페이스
+계층과 다른 전역 액션은 남은 범위다. Native 생성 자체의 UI 스레드 배치도 그대로다.
+
+실제 ConPTY 테스트는 resize 후 새 core 크기, 살아 있는 기존 routing, 서로 다른 ID,
+생성 상한과 실제 SpawnFailed 후 목록/선택/파일 view 보존을 확인한다. 포커스·view·
+최신 크기·상한·실패 전 view publication의 다섯 compiled runtime 변형을 검출했고
+복원 후 host 86개가 Debug/ReleaseFast에서 통과했다. resolver release·unbind·rebind와
+new_tab 구분도 검사한다. 다섯 변형은 생성 계약이며 키 입력 연결 자체는 실앱 증거다.
+
+실앱 PID 45336에서 파일 편집→Ctrl+Shift+T→session 2, 파일 복귀 Xbase 유지,
+파일에서 +→session 3, 터미널에서 Ctrl+Shift+T→session 4를 관찰했다. Save 종료 후
+exact BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다. 종료 직후 capture는 사라진
+창과 경합하여 실패했으므로 증거에서 제외했다. owned HWND 합성 입력이며 물리 입력·
+모든 resize/장기 IME 조합의 검증으로 세지 않는다.

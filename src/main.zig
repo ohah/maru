@@ -4356,6 +4356,7 @@ fn sidebarRowsFor(
 /// pane 탭 스트립이 없다. 사용자 결정(2026-08-27)으로 **이미 있는 전환기**(사이드바 카드)를 쓴다 —
 /// 새 모델을 세우지 않고 §2m.51 이 만든 배선을 그대로 탄다.
 const ActiveView = union(enum) { terminal: usize, file: usize };
+const win_session_actions = @import("platform/windows/terminal/session_actions.zig");
 
 /// 연 파일 하나. **텍스트를 우리가 소유한다** — `lines` 의 슬라이스가 그 안을 가리킨다.
 const editor_document = @import("platform/windows/editor/document.zig");
@@ -7417,6 +7418,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var pending_close_id: ?u64 = null;
     // Resolve the stable target after this input batch; repeated gestures coalesce.
     var queued_session_close_id: ?u64 = null;
+    var queued_new_terms: usize = 0;
     var pending_file_close: ?FileCloseTarget = null;
     var file_close_waiting = false;
     var pending_file_conflict: ?maru.session.editor.document_registry.Lease = null;
@@ -11787,6 +11789,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         }
                         continue;
                     }
+                    if (file_host.newTermKey(resolver, key_ev)) {
+                        queued_new_terms += 1;
+                        app_actions += 1;
+                        continue;
+                    }
                     if (file_host.closeKey(resolver, key_ev)) {
                         requestFileViewClose(allocator, &editor_files, file_view.document, &backup_clean_closes, &pending_file_close, &pending_file_conflict, &confirm_state, &confirm_pending_click) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                         pending_close_id = null;
@@ -11877,6 +11884,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         app_actions += 1;
                         if (action == .close_focused) {
                             if (app_window.active()) |surface| queued_session_close_id = surface.id;
+                        } else if (action == .new_term) {
+                            queued_new_terms += 1;
                         }
                     },
                     .ignored => keys_ignored += 1,
@@ -12300,26 +12309,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                                 continue;
                             }
-                            if (r == .new_workspace and sessions.items.len < max_win_sessions) {
-                                // **지금 크기로 만든다.** 활성 표면의 격자가 창이 아는 최신 값이다.
-                                if (app_window.active()) |a| spawn_opts.size = a.core.size;
-                                if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts)) {
-                                    session_spawns += 1;
-                                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
-                                    // 새 세션을 **바로 활성으로** 만든다 — 만들고 안 보여 주면
-                                    // 눌린 것이 화면에 안 나타난다.
-                                    //
-                                    // **보는 것도 터미널로 돌린다.** `selectTab` 만 하면 파일을 보는
-                                    // 중에 ＋ 를 눌렀을 때 세션은 생기는데 화면은 파일 그대로다 —
-                                    // 위 규칙이 말하는 바로 그 실패다(적대적 검증 1회차 실측).
-                                    _ = app_window.selectTab(sessions.items.len - 1);
-                                    active_view = .{ .terminal = sessions.items.len - 1 };
-                                    sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
-                                } else |_| {
-                                    session_spawn_failures += 1;
-                                }
-                            }
+                            if (r == .new_workspace) queued_new_terms += 1;
                         } else if (next_slot) |s| {
                             sidebar_card_clicks += 1;
                             sidebar_last_slot = s;
@@ -13704,6 +13694,28 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (save_close_requested) close_requested = true;
                 save_close_requested = false;
                 save_close_target = null;
+            }
+        }
+        if (queued_new_terms > 0) {
+            const requests = queued_new_terms;
+            queued_new_terms = 0;
+            if (!confirm_state.open and pending_file_close == null and pending_file_conflict == null) {
+                var spawned = false;
+                for (0..requests) |_| {
+                    const admitted = win_session_actions.spawnFocused(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts, &active_view, max_win_sessions, spawnWinSession) catch |err| {
+                        session_spawn_failures += 1;
+                        stderr.print("  warning: new terminal failed({s})\n", .{@errorName(err)}) catch {};
+                        continue;
+                    };
+                    if (!admitted) break;
+                    session_spawns += 1;
+                    spawned = true;
+                }
+                if (spawned) {
+                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                    sidebar_redraws += 1;
+                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                }
             }
         }
         if (queued_session_close_id) |id| {
@@ -20902,4 +20914,70 @@ test "Windows editor host native terminal close preserves routes identity and ap
     try std.testing.expectEqual(kept_id, window.active().?.id);
     try std.testing.expectEqual(CloseSessionResult.last_session, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, 0, true));
     _ = try runtime.writeInputNonBlocking(kept_id, "");
+}
+
+// Native admission can fail after a PTY has been created. Verify publication
+// against real runtime routes, not a synthetic list of session numbers.
+test "Windows editor host native new terminal publishes fresh size and focus only on success" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.heap.smp_allocator;
+    const io = std.testing.io;
+    var runtime = maru.app.SurfaceRuntime.init(a);
+    defer runtime.deinit();
+    var sessions: std.ArrayList(*WinSession) = .empty;
+    defer {
+        for (sessions.items) |session| {
+            session.live.closeAndDetach(&runtime);
+            session.destroy(a);
+        }
+        sessions.deinit(a);
+    }
+    var tabs: std.ArrayList(*maru.session.surface.Surface) = .empty;
+    defer tabs.deinit(a);
+    var window: maru.session.window.AppWindow = .{ .tabs = &.{} };
+    var next: usize = 0;
+    var view: ActiveView = .{ .file = 99 };
+    const cfg: maru.config.theme.Config = .{};
+    const opts: WinSession.SpawnOptions = .{
+        .io = io,
+        .command = maru.pty.resolveShell("", .cmd),
+        .args = &.{ "/Q", "/K" },
+        .size = .{ .cols = 41, .rows = 12 },
+        .cfg = cfg,
+        .appearance = try maru.config.appearance.resolve(cfg),
+        .cell_w = 9,
+        .cell_h = 19,
+    };
+    try std.testing.expect(try win_session_actions.spawnFocused(a, io, &sessions, &tabs, &window, &runtime, &next, opts, &view, 3, spawnWinSession));
+    const first_id = window.active().?.id;
+    const resized: maru.terminal.Size = .{ .cols = 72, .rows = 24 };
+    try runtime.resize(first_id, resized, io);
+    view = .{ .file = 99 };
+    try std.testing.expect(try win_session_actions.spawnFocused(a, io, &sessions, &tabs, &window, &runtime, &next, opts, &view, 3, spawnWinSession));
+    try std.testing.expectEqual(@as(usize, 1), window.active_tab);
+    try std.testing.expect(view == .terminal and view.terminal == 1);
+    const second_id = window.active().?.id;
+    try std.testing.expect(second_id != first_id);
+    window.active().?.lockCore(io);
+    const actual_size = window.active().?.core.size;
+    window.active().?.unlockCore(io);
+    try std.testing.expectEqualDeep(resized, actual_size);
+    _ = try runtime.writeInputNonBlocking(first_id, "");
+    _ = try runtime.writeInputNonBlocking(second_id, "");
+    view = .{ .file = 99 };
+    try std.testing.expect(!try win_session_actions.spawnFocused(a, io, &sessions, &tabs, &window, &runtime, &next, opts, &view, 2, spawnWinSession));
+    try std.testing.expectEqual(@as(usize, 2), sessions.items.len);
+    try std.testing.expectEqual(second_id, window.active().?.id);
+    try std.testing.expect(view == .file and view.file == 99);
+    var invalid = opts;
+    const missing_command = try std.fmt.allocPrint(a, "{s}.maru-missing-new-terminal-fixture", .{opts.command});
+    defer a.free(missing_command);
+    invalid.command = missing_command;
+    try std.testing.expectError(error.SpawnFailed, win_session_actions.spawnFocused(a, io, &sessions, &tabs, &window, &runtime, &next, invalid, &view, 3, spawnWinSession));
+    try std.testing.expectEqual(@as(usize, 2), sessions.items.len);
+    try std.testing.expectEqual(@as(usize, 2), tabs.items.len);
+    try std.testing.expectEqual(second_id, window.active().?.id);
+    try std.testing.expect(view == .file and view.file == 99);
+    _ = try runtime.writeInputNonBlocking(first_id, "");
+    _ = try runtime.writeInputNonBlocking(second_id, "");
 }

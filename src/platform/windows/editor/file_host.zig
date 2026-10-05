@@ -24,6 +24,12 @@ pub fn closeKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru
     return resolved == .app_action and resolved.app_action == .close_focused;
 }
 
+/// Keep app-key ownership when a file is focused; plain shell Ctrl+T stays distinct.
+pub fn newTermKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru.terminal.KeyEvent) bool {
+    const resolved = resolver.resolveEditorDetailed(event, false);
+    return resolved == .app_action and resolved.app_action == .new_term;
+}
+
 pub fn saveKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru.terminal.KeyEvent) bool {
     const original = resolver.resolveEditor(event, false);
     switch (original) {
@@ -1550,4 +1556,20 @@ test "Windows editor host focused close honors resolver ownership and release" {
     try std.testing.expect(!closeKey(redirected, key));
     const custom: k.KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = try k.KeyChord.parse("Ctrl+W"), .action = .close_focused }} };
     try std.testing.expect(closeKey(custom, shell));
+}
+
+test "Windows editor host new terminal key honors ownership and preserves workspace action" {
+    const k = maru.config.keybinding;
+    const key: maru.terminal.KeyEvent = .{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } };
+    try std.testing.expect(newTermKey(.{}, key));
+    var released = key;
+    released.event_type = .release;
+    try std.testing.expect(!newTermKey(.{}, released));
+    var shell = key;
+    shell.modifiers = .{ .control = true };
+    try std.testing.expect(!newTermKey(.{}, shell));
+    const chord = try k.KeyChord.parse("Cmd+T");
+    try std.testing.expect(!newTermKey(.{ .unbinds = &.{chord} }, key));
+    try std.testing.expect(!newTermKey(.{ .app_bindings = &.{.{ .chord = chord, .action = .new_tab }} }, key));
+    try std.testing.expect(newTermKey(.{ .app_bindings = &.{.{ .chord = try k.KeyChord.parse("Ctrl+T"), .action = .new_term }} }, shell));
 }

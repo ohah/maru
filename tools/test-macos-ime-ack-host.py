@@ -400,6 +400,47 @@ print("failed_cases=\(failures)")
 exit(failures==0 ? 0:1)
 '''
 
+PRESS_TEMPLATE = r"""import Foundation
+import Darwin
+class NSEvent { var clickCount=1; var buttonNumber=0 }
+class NSView { func mouseDown(with event: NSEvent) {}; func otherMouseDown(with event: NSEvent) {} }
+// W6g: 누름의 앞단(창 크롬·URL 클릭)과 추가 버튼도 그 view 의 창 세션(표지 7)에서 불려야 한다 — 창이 뒤에 있을 때의 첫 누름은
+// 그 창이 key 가 되기 전에 온다.
+var currentSurface:Int?=nil
+var calls:[String]=[]
+func at() -> String { currentSurface.map { "@\($0)" } ?? "@none" }
+class Controller {
+ var chromeHit=false; var urlHit=false
+ func surfaceForView(_ v:NSView)->Int? { 7 }
+ func withSurface(_ s:Int?, _ body:()->Void) { let previous=currentSurface; currentSurface=s; defer { currentSurface=previous }; body() }
+ func handleWindowChromeMouseDown(_ e:NSEvent, in v:NSView)->Bool { calls.append("chrome"+at()); return chromeHit }
+ func handleUrlClick(_ e:NSEvent, in v:NSView)->Bool { calls.append("url"+at()); return urlHit }
+ func handleMouse(_ e:NSEvent, kind:Int32, in v:NSView) { calls.append("mouse\(kind)"+at()) }
+ func handleOsrAuxButton(_ e:NSEvent, in v:NSView)->Bool { calls.append("aux"+at()); return true }
+@@CONTROLLER@@
+}
+class MaruMetalTerminalView: NSView {
+ var controller:Controller?=Controller()
+ var lastLeftMouseEvent:NSEvent?
+ func noteOsrTooltipMouseDown() {}
+@@VIEW@@
+}
+var failures=0
+func scenario(_ name:String, _ want:[String], _ body:(MaruMetalTerminalView)->Void) {
+ let v=MaruMetalTerminalView(); calls=[]; body(v)
+ print("\(name) \(calls)")
+ if calls != want { failures+=1 }
+}
+scenario("left", ["chrome@7","url@7","mouse1@7"]) { $0.mouseDown(with: NSEvent()) }
+scenario("chrome", ["chrome@7"]) { $0.controller!.chromeHit=true; $0.mouseDown(with: NSEvent()) }
+scenario("url", ["chrome@7","url@7"]) { $0.controller!.urlHit=true; $0.mouseDown(with: NSEvent()) }
+scenario("double", ["chrome@7","url@7","mouse4@7"]) { let e=NSEvent(); e.clickCount=2; $0.mouseDown(with: e) }
+scenario("aux", ["aux@7"]) { let e=NSEvent(); e.buttonNumber=3; $0.otherMouseDown(with: e) }
+scenario("detached", []) { $0.controller=nil; $0.mouseDown(with: NSEvent()) }
+print("press_failed=\(failures)")
+exit(failures==0 ? 0:1)
+"""
+
 def run(source_path):
     if sys.platform != "darwin":
         raise ValueError("this Swift host harness requires macOS")
@@ -437,11 +478,15 @@ def run(source_path):
     host = host.replace("@@INTERPRET@@", key_down[start:closing_brace(key_mask, opening)])
     mouse = MOUSE_TEMPLATE.replace("@@MOUSE@@", "\n".join(
         extract_method(source, masked, controller, name) for name in ("handleMouse", "handleMouseInSurface")))
+    press = PRESS_TEMPLATE.replace("@@CONTROLLER@@", extract_method(source, masked, controller, "inViewSurface")).replace(
+        "@@VIEW@@", "\n".join(extract_method(source, masked, view, name)
+                               for name in ("mouseDown", "mouseDownInWindowSurface", "otherMouseDown")))
     print(f"source={source_path} sha256={hashlib.sha256(source.encode('utf-8')).hexdigest()}", flush=True)
     with tempfile.TemporaryDirectory(prefix="maru-ime-ack-host-") as directory:
         root = Path(directory)
         for name, code, expected in [("host", host, "PASS checks=253"),
-                                     ("mouse", mouse, "failed_cases=0")]:
+                                     ("mouse", mouse, "failed_cases=0"),
+                                     ("press", press, "press_failed=0")]:
             swift = root / f"{name}.swift"
             binary = root / name
             swift.write_text(code, encoding="utf-8")
@@ -451,6 +496,8 @@ def run(source_path):
                 raise ValueError(f"missing {name} result: {expected}")
             if name == "mouse" and len(result.stdout.splitlines()) != 9:
                 raise ValueError("expected eight mouse scenarios and one result")
+            if name == "press" and len(result.stdout.splitlines()) != 7:
+                raise ValueError("expected six press scenarios and one result")
             print(f"{name}:\n{result.stdout}", end="", flush=True)
 
 

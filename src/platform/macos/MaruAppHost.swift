@@ -8917,6 +8917,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                     Self.testReport("closewindow before=\(before) after=\(self?.windows.count ?? -1)")
                 }
+            case "windowcount":
+                // W6j: 지금 창 수.
+                Self.testReport("windowcount \(windows.count)")
             case "firstwindow":
                 // W6c②: 첫 창을 다시 대상으로(`newwindow` 뒤) — 창이 둘일 때 메뉴가 띄운 창의 것인지 본다.
                 testSurface = windows.first

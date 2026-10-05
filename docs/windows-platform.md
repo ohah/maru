@@ -12194,3 +12194,21 @@ worker thread ID와 store·모든 부모 handle의 INVALID_HANDLE 결과를 확�
 store close 누락·부모 close 누락·잘못된 thread ID·hardlink guard 제거·record identity
 검사 누락의 다섯 compiled runtime 변형을 검출하고 원본을 복원했다. 명시적 close의
 backup 삭제, 프레임 중 드문 extra-root 정리 및 종료 메모리 capture CPU는 아직 남아 있다.
+
+
+### §2m.193 Windows extra-root의 비동기 cleanup 단계
+
+백업 job이 root를 만든 사이 앱이 이미 다른 owner를 보유하면 finish는 redundant root의
+cleanup worker를 시작하고 null을 반환한다. 프레임에서 native close나 join을 하지 않는다.
+독립 SMP owner와 기존 job/request lease를 실제 cleanup 완료까지 유지하고 acquire한
+최종 결과로만 revision/epoch/CAS를 다시 검증한다. 기존 앱 owner를 교체하지 않는다.
+cleanup spawn 실패는 root와 receipt를 보존하고 실제 awake clock의 200ms backoff 후
+재시도한다. 종료 drain도 같은 clock을 사용하므로 고정 now 인자 때문에 재시도가 멈추지 않는다.
+
+`test-win32-backup-worker` 18개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+첫 poll의 pending, 유지된 owner, worker cleanup ID와 닫힌 extra handle, cleanup 중
+revision 변경 및 spawn 실패의 lease/root 보존·backoff·실제 후속 완료를 확인한다.
+close 누락·backoff 제거·동기 조기 ack·epoch/CAS guard 제거의 다섯 compiled runtime
+변형을 검출하고 원본을 복원했다. 컴파일 단계에서 막힌 재귀 ack 변형은 횟수에서 제외했다.
+명시적 파일 닫기의 백업 삭제와 capture/후속 projection CPU 등 전체 잔여 Windows 범위는
+계속 남아 있다. 이 절은 강제 실패를 실제 앱 GUI에서 재현했다고 주장하지 않는다.

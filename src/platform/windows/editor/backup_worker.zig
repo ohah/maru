@@ -85,7 +85,7 @@ const Native = struct {
         try store.drop(io, doc);
     }
 };
-const Result = struct { outcome: Outcome, failure: ?anyerror = null, owner: ?backups.LocalData = null, thread_id: std.Thread.Id };
+const Result = struct { outcome: Outcome, failure: ?anyerror = null, owner: ?backups.LocalData = null, thread_id: std.Thread.Id, cleanup_thread_id: ?std.Thread.Id = null };
 const Job = struct {
     packet: Packet,
     io: std.Io,
@@ -96,6 +96,16 @@ const Job = struct {
     drop_vote: std.atomic.Value(u8) = .init(0), // pending / approve / reject
     done: std.atomic.Value(bool) = .init(false),
     result: ?Result = null,
+    cleanup_retry_at: ?i128 = null,
+
+    // Created roots use the SMP allocator. This second stage retains the job
+    // and registry lease while closing the redundant native owner off-frame.
+    fn cleanup(self: *Job) void {
+        self.result.?.cleanup_thread_id = std.Thread.getCurrentId();
+        self.result.?.owner.?.deinit(self.io);
+        self.result.?.owner = null;
+        self.done.store(true, .release);
+    }
 
     fn run(self: *Job, comptime Driver: type) void {
         const a = std.heap.smp_allocator;
@@ -146,7 +156,7 @@ const Job = struct {
         result.outcome = if (self.packet.mode == .write) .wrote else .dropped;
     }
 };
-pub const Completion = struct { report: backups.Maintenance, outcome: Outcome, thread_id: std.Thread.Id };
+pub const Completion = struct { report: backups.Maintenance, outcome: Outcome, thread_id: std.Thread.Id, cleanup_thread_id: ?std.Thread.Id = null };
 pub const Worker = struct {
     allocator: std.mem.Allocator,
     registry: *Registry,
@@ -211,17 +221,35 @@ pub const Worker = struct {
         try self.check();
         if (self.job) |job| _ = job.drop_vote.cmpxchgStrong(0, 2, .acq_rel, .acquire);
     }
+    const CleanupSpawner = struct {
+        fn spawn(job: *Job) !std.Thread {
+            return std.Thread.spawn(.{}, Job.cleanup, .{job});
+        }
+    };
     pub fn finish(self: *Worker, owner: *?backups.LocalData, now_ns: i128) !?Completion {
+        return self.finishWith(owner, now_ns, CleanupSpawner);
+    }
+    fn finishWith(self: *Worker, owner: *?backups.LocalData, now_ns: i128, comptime Spawner: type) !?Completion {
         try self.check();
         const job = self.job orelse return null;
         if (!job.done.load(.acquire)) return null;
+        if (job.result.?.owner != null and owner.* != null) {
+            // No synchronous native fallback. On spawn failure the receipt and
+            // its owner remain intact, so a later finish can retry safely.
+            const cleanup_now = std.Io.Clock.awake.now(job.io).nanoseconds;
+            if (job.cleanup_retry_at) |due| if (cleanup_now < due) return null;
+            job.done.store(false, .release);
+            const thread = Spawner.spawn(job) catch |failure| {
+                job.cleanup_retry_at = cleanup_now + 200 * std.time.ns_per_ms;
+                job.done.store(true, .release);
+                return failure;
+            };
+            thread.detach();
+            return null;
+        }
         var result = job.result.?;
-        if (result.owner) |*created| {
-            if (owner.* == null) {
-                owner.* = created.*;
-            } else {
-                created.deinit(job.io);
-            }
+        if (result.owner) |created| {
+            owner.* = created;
             result.owner = null;
         }
         var report: backups.Maintenance = .{ .attempted = 1 };
@@ -254,7 +282,7 @@ pub const Worker = struct {
         if (job.localappdata) |root| std.heap.smp_allocator.free(root);
         self.allocator.destroy(job);
         self.job = null;
-        return .{ .report = report, .outcome = result.outcome, .thread_id = result.thread_id };
+        return .{ .report = report, .outcome = result.outcome, .thread_id = result.thread_id, .cleanup_thread_id = result.cleanup_thread_id };
     }
     pub fn deinit(self: *Worker) !void {
         try self.check();
@@ -535,4 +563,88 @@ test "Windows recovery backup worker packet allocation prefixes preserve borrowe
     defer f.deinit();
     try std.testing.checkAllAllocationFailures(std.testing.allocator, capturePrefix, .{ f.state(), f.view });
     try std.testing.expectEqualStrings("changed", f.state().opened.?.file.content);
+}
+
+test "Windows recovery backup worker extra root cleanup retains lease and rechecks revision" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try TestModel.init("changed", false);
+    defer f.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var owner: ?backups.LocalData = null;
+    defer if (owner) |*value| value.deinit(io);
+    var worker = Worker.init(a, &f.registry);
+    defer drain(&worker, &owner);
+    try worker.start(io, f.view, null, root, 128);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const extra_handle = worker.job.?.result.?.owner.?.store.dir.handle;
+    owner = try backups.LocalData.open(a, io, root, 128);
+    const retained_handle = owner.?.store.dir.handle;
+    try std.testing.expect((try worker.finish(&owner, 10)) == null);
+    try std.testing.expect(worker.isBusy());
+    try std.testing.expect(f.state().notifications.backup_dirty);
+    f.state().opened.?.file.revision += 1;
+    const completed = try awaitCompletion(&worker, &owner);
+    try std.testing.expect(completed.cleanup_thread_id != null);
+    try std.testing.expect(completed.cleanup_thread_id.? != std.Thread.getCurrentId());
+    try std.testing.expect(owner.?.store.dir.handle == retained_handle);
+    try std.testing.expect(!worker.isBusy());
+    try std.testing.expect(f.state().notifications.backup_dirty and f.state().notifications.backup_on_disk);
+    const w = std.os.windows;
+    var status: w.IO_STATUS_BLOCK = undefined;
+    var tag: w.FILE.ATTRIBUTE_TAG_INFO = undefined;
+    try std.testing.expectEqual(w.NTSTATUS.INVALID_HANDLE, w.ntdll.NtQueryInformationFile(extra_handle, &status, &tag, @sizeOf(@TypeOf(tag)), .AttributeTag));
+    try expectBody(&owner.?.store, backups.identity(f.state()).?, "changed");
+}
+
+test "Windows recovery backup worker cleanup spawn failure preserves root and backs off" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try TestModel.init("changed", false);
+    defer f.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var owner: ?backups.LocalData = null;
+    defer if (owner) |*value| value.deinit(io);
+    var worker = Worker.init(a, &f.registry);
+    defer drain(&worker, &owner);
+    try worker.start(io, f.view, null, root, 128);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    owner = try backups.LocalData.open(a, io, root, 128);
+    const extra_handle = worker.job.?.result.?.owner.?.store.dir.handle;
+    const FailSpawn = struct {
+        fn spawn(_: *Job) !std.Thread {
+            return error.SystemResources;
+        }
+    };
+    try std.testing.expectError(error.SystemResources, worker.finishWith(&owner, 10, FailSpawn));
+    try std.testing.expect(worker.isBusy() and worker.job.?.done.load(.acquire));
+    try std.testing.expect(f.registry.get(worker.job.?.packet.lease) != null);
+    try std.testing.expect(f.state().notifications.backup_dirty);
+    try std.testing.expect(worker.job.?.result.?.owner.?.store.dir.handle == extra_handle);
+    try std.testing.expect((try worker.finishWith(&owner, 10, FailSpawn)) == null);
+    const w = std.os.windows;
+    var status: w.IO_STATUS_BLOCK = undefined;
+    var tag: w.FILE.ATTRIBUTE_TAG_INFO = undefined;
+    try std.testing.expectEqual(w.NTSTATUS.SUCCESS, w.ntdll.NtQueryInformationFile(extra_handle, &status, &tag, @sizeOf(@TypeOf(tag)), .AttributeTag));
+    const completed = try awaitCompletion(&worker, &owner);
+    try std.testing.expectEqual(Outcome.wrote, completed.outcome);
+    try std.testing.expect(!worker.isBusy());
+    try std.testing.expectEqual(w.NTSTATUS.INVALID_HANDLE, w.ntdll.NtQueryInformationFile(extra_handle, &status, &tag, @sizeOf(@TypeOf(tag)), .AttributeTag));
+    try expectBody(&owner.?.store, backups.identity(f.state()).?, "changed");
 }

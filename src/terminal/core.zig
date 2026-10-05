@@ -13296,31 +13296,40 @@ test "kitty 락 밖 디코드: 플래그가 꺼져 있으면(헤드리스) 오�
 }
 
 /// 정확히 n 번째 alloc 하나만 실패시키고 나머지는 통과시키는 allocator — `FailingAllocator` 는 한 번 실패한
-/// 뒤 모든 할당을 막아 «ENOMEM 응답을 쓰는 append» 까지 죽여 응답을 관찰할 수 없다.
+/// 뒤 모든 할당을 막아 «ENOMEM 응답을 쓰는 append» 까지 죽여 응답을 관찰할 수 없다. `sticky` 면 그 뒤로도 계속
+/// 실패하고(`FailingAllocator` 와 같은 모양), `fail_growth` 면 제자리 확장(resize·remap 으로 늘리기)도 할당 시도로 센다.
 const OneShotFailingAllocator = struct {
     inner: std.mem.Allocator,
     fail_at: usize,
+    sticky: bool = false,
+    fail_growth: bool = false,
     count: usize = 0,
     fired: bool = false,
 
     fn allocator(self: *OneShotFailingAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
+    fn fails(self: *OneShotFailingAllocator) bool {
+        defer self.count += 1;
+        if (self.count == self.fail_at or (self.sticky and self.fired)) {
+            self.fired = true;
+            return true;
+        }
+        return false;
+    }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
-        defer self.count += 1;
-        if (self.count == self.fail_at) {
-            self.fired = true;
-            return null;
-        }
+        if (self.fails()) return null;
         return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.fail_growth and new_len > memory.len and self.fails()) return false;
         return self.inner.vtable.resize(self.inner.ptr, memory, alignment, new_len, ret_addr);
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.fail_growth and new_len > memory.len and self.fails()) return null;
         return self.inner.vtable.remap(self.inner.ptr, memory, alignment, new_len, ret_addr);
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
@@ -13362,6 +13371,138 @@ test "kitty 락 밖 디코드 [적대]: job 생성이 OOM 이면 ENOMEM 을 즉�
         }
     }
     try std.testing.expect(saw_enomem >= 1);
+}
+
+// 위와 같은 훑기를 **청크(m=1) 전송**으로. 청크면 payload 가 누적 버퍼 그 자체라 복사 없이 버퍼를 통째로(capacity 째)
+// 옮긴다 — 실패 가지가 그 버퍼를 `len` 길이로 풀면 할당과 길이가 안 맞는 해제가 된다(2026-10-05 OOM 감사에서 발견:
+// 빈 map 의 `put` 이 실패하는 자리에서 할당기가 «Invalid free» 로 멈췄다. 릴리스 빌드에선 힙 손상).
+test "kitty 락 밖 디코드 [적대]: 청크 전송의 job 생성이 OOM 이어도 옮겨 온 버퍼를 할당 길이로 돌려준다" {
+    const seq = "\x1b_Ga=T,f=24,s=1,v=2,i=7,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\";
+    var fail_at: usize = 0;
+    var saw_enomem: usize = 0;
+    while (fail_at < 12) : (fail_at += 1) {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+        defer core.deinit();
+        var failing: OneShotFailingAllocator = .{ .inner = std.testing.allocator, .fail_at = fail_at };
+        core.allocator = failing.allocator();
+        core.kitty_defer_decode = true;
+        core.write(seq) catch {};
+        core.allocator = std.testing.allocator;
+        if (std.mem.indexOf(u8, core.pendingResponse(), "ENOMEM") != null) {
+            saw_enomem += 1;
+            try std.testing.expect(!core.kitty_images.map.contains(7));
+            try std.testing.expectEqual(@as(usize, 0), core.kitty_pending_jobs.items.len);
+        }
+    }
+    try std.testing.expect(saw_enomem >= 1);
+}
+
+/// OOM 훑기의 작업: `write`·`resize`·과거 보기(지연 재-wrap)·`renderSnapshot` 이 할당하는 자리를 두루 지난다.
+/// 첫 줄은 **빈 map 에서** 청크 kitty 전송을 받는다 — 그래야 지연 디코드의 `map.put` 실패 가지까지 닿는다.
+fn oomSweepWork(core: *TerminalCore) void {
+    const png1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const steps = [_][]const u8{
+        "\x1b_Ga=T,f=24,s=1,v=2,i=7,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\\x1b_Ga=a,i=7,s=3\x1b\\",
+        "hello world\r\nsecond line that is quite long and wraps around the narrow width\r\n",
+        "한글 漢字 wide 😀 👨‍👩‍👧 e\u{301} ❤\u{FE0F} 🇰🇷 \u{1112}\u{1161}\u{11AB}\r\n",
+        "👨‍👩‍👧‍👦a\u{301}b\u{302}c\u{303}d\u{304}e\u{305}f\u{306}g\u{307}h\u{308}i\u{309}\r\n",
+        "\x1b]8;id=x;https://example.com/a\x07link\x1b]8;;\x07 \x1b]8;;https://l2/\x07b\x1b]8;;https://l3/\x07c\x1b]8;;\x07\r\n",
+        "\x1b]0;title one\x07\x1b]2;title two\x07\x1b]7;file://host/tmp/dir\x07\x1b]9;9;\"C:\\x\"\x07\x1b]5379;ssh;user@h\x07",
+        "\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07\x1b]9;notify body\x07\x1b]777;notify;T;B\x07\x1b]9;4;1;50\x07",
+        "\x1b]99;i=1:d=0;Hello\x1b\\\x1b]99;i=1:p=body;World\x1b\\",
+        "\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+        "\x1b]4;1;rgb:ff/00/00\x07\x1b]10;rgb:11/22/33\x07\x1b]11;?\x07\x1b[c\x1b[6n\x1b[>c\x1bP$q m\x1b\\",
+        "\x1b[?1049h\x1b[2J\x1b[Halt 漢字\r\n\x1b_Ga=T,f=24,s=1,v=1,i=4;AAAA\x1b\\\x1b[5;1Hx",
+        "\x1b[?1049l\x1b7\x1b[3;5r\x1b[4H\x1b[2L\x1b[1M\x1b[r\x1b8\x1bH\x1b[3g\t\ttab\r\n\x1b[?2026h sync \x1b[?2026l\x1b[>1u\x1b[<u",
+        "\x1b_Ga=T,f=24,s=1,v=1,i=3;AAAA\x1b\\\x1b_Ga=p,i=3,p=2\x1b\\\x1b_Ga=p,U=1,i=3,c=2,r=1\x1b\\",
+        "\x1b_Ga=T,f=24,s=1,v=1,I=42;AAAA\x1b\\\x1b_Ga=d,d=R,x=1,y=100\x1b\\",
+        "\x1b_Ga=t,f=24,s=1,v=1,i=8;AAAA\x1b\\\x1b_Ga=f,f=24,i=8;AAAA\x1b\\\x1b_Ga=c,i=8,r=1,c=2\x1b\\",
+        "\x1b_Ga=q,f=24,s=1,v=1,i=31;AAAA\x1b\\\x1b_Ga=T,f=24,s=1,v=1,i=12,o=z;eJxjYGAAAAADAAE=\x1b\\",
+        "\x1b_Ga=T,f=100,i=10;" ++ png1 ++ "\x1b\\\x1b_Ga=f,f=100,i=8;" ++ png1 ++ "\x1b\\",
+        "\x1b_Ga=T,f=100,o=z,i=11;eJzrDPBz5+WS4mJgYOD19HAJAtKMIMzBBiTlRY90giVcHEMqbiWnJPyI52dgamdseO2+axJQgsHT1c9lnVNCEwC/+Q/3\x1b\\",
+        "\x1b_Ga=T,f=24,s=1,v=1,i=3;AAAA\x1b\\\x1b_Ga=d,d=A\x1b\\\x1b[38;2;1;2;3;48;5;100mcolor\x1b[0m\r\n",
+    };
+    for (steps, 0..) |seq, i| {
+        core.write(seq) catch {};
+        _ = core.renderSnapshot();
+        switch (i) {
+            1 => core.resize(7, 3) catch {}, // 좁히기(활성 화면 reflow)
+            5 => core.resize(40, 8) catch {},
+            10 => core.resize(10, 5) catch {}, // alt 화면 중(두 그리드 clip/pad)
+            12 => core.resize(8, 4) catch {}, // 화면에 이미지가 있는 채로(앵커 이동)
+            else => {},
+        }
+    }
+    core.setMaxScrollback(5); // 넘치는 스크롤백(페이지 회수·재사용)
+    var n: usize = 0;
+    while (n < 30) : (n += 1) core.write("scroll line 漢字 😀 e\u{301} wraps here and here\r\n") catch {};
+    core.scrollViewport(2); // 과거를 보는 채로 resize(앵커 재-wrap)
+    _ = core.renderSnapshot();
+    core.resize(9, 3) catch {};
+    _ = core.renderSnapshot();
+    core.setMaxScrollback(50);
+    core.resize(31, 7) catch {};
+    core.scrollViewport(100); // 지연 재-wrap
+    _ = core.renderSnapshot();
+    core.scrollToBottom();
+    core.write("\x1bc after reset 😀\r\n") catch {};
+}
+
+// write/resize 경로의 OOM 누수 감사(terminal-core-decomposition §6)를 판정자로 남긴다. 할당(제자리 확장 포함)을
+// 하나씩 옮겨 가며 실패시키고 — 그 하나만(one-shot), 그리고 그 뒤 전부(sticky) — 매번 새 할당기로 init 부터
+// deinit 까지 돌려 **새는 것이 없는지** 본다. 길이가 안 맞는 해제는 할당기가 그 자리에서 멈춘다. 지연 디코드
+// (리더가 켜는 `kitty_defer_decode`)는 할당 경로가 달라 두 모드를 다 본다.
+test "OOM 훑기: write·resize·과거 보기의 어느 할당이 실패해도 새거나 잘못 풀리지 않는다" {
+    const DA = std.heap.DebugAllocator(.{ .stack_trace_frames = 0 });
+    const size: types.Size = .{ .cols = 12, .rows = 4 };
+    for ([_]bool{ false, true }) |defer_decode| {
+        // 실패 없이 한 번 — 이 작업이 할당을 몇 번 시도하는지 센다.
+        var total: usize = 0;
+        {
+            var da: DA = .init;
+            var failing: OneShotFailingAllocator = .{ .inner = da.allocator(), .fail_at = std.math.maxInt(usize), .fail_growth = true };
+            var core = try TerminalCore.init(failing.allocator(), size);
+            core.kitty_defer_decode = defer_decode;
+            const before = failing.count;
+            oomSweepWork(&core);
+            total = failing.count - before;
+            core.deinit();
+            try std.testing.expect(da.deinit() == .ok);
+        }
+        try std.testing.expect(total > 100); // 작업이 실제로 할당 경로를 지난다(작업이 비면 이 판정자는 빈 것)
+        for ([_]bool{ false, true }) |sticky| {
+            var off: usize = 0;
+            while (off < total) : (off += 1) {
+                var da: DA = .init;
+                var failing: OneShotFailingAllocator = .{ .inner = da.allocator(), .fail_at = std.math.maxInt(usize), .sticky = sticky, .fail_growth = true };
+                var core = try TerminalCore.init(failing.allocator(), size);
+                core.kitty_defer_decode = defer_decode;
+                failing.fail_at = failing.count + off;
+                oomSweepWork(&core);
+                try std.testing.expect(failing.fired);
+                failing.fail_at = std.math.maxInt(usize);
+                failing.sticky = false;
+                core.deinit();
+                if (da.deinit() == .leak) {
+                    std.debug.print("\n[OOM 훑기] 누수: defer_decode={} sticky={} off={d}/{d}\n", .{ defer_decode, sticky, off, total });
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
+    }
+    // init 자체의 실패도 새지 않는다.
+    var off: usize = 0;
+    while (true) : (off += 1) {
+        var da: DA = .init;
+        var failing: OneShotFailingAllocator = .{ .inner = da.allocator(), .fail_at = off, .fail_growth = true };
+        if (TerminalCore.init(failing.allocator(), size)) |initialized| {
+            var core = initialized;
+            core.deinit();
+        } else |_| {}
+        try std.testing.expect(da.deinit() == .ok);
+        if (!failing.fired) break;
+    }
+    try std.testing.expect(off > 0);
 }
 
 /// 테스트용 최소 PNG(RGBA 8-bit, 필터 0, zlib): w×h 를 `seed` 로 채운다. 반환은 base64.

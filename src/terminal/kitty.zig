@@ -2142,7 +2142,7 @@ fn deferKittyTransmitInner(self: *TerminalCore, cmd: KittyGraphicsCommand, paylo
             .data = &.{}, // pending — isPending()
             .generation = generation,
         }) catch {
-            self.allocator.free(owned);
+            freeJobPayload(self.allocator, owned, payload_cap); // 옮겨 온 청크 버퍼는 capacity 길이로 돌려준다
             return .enomem;
         };
     }

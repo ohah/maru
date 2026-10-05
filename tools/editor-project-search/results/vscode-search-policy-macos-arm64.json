@@ -1,0 +1,250 @@
+{
+  "status": "verified-focused",
+  "policy": "VS Code default search boundaries and first regex alternative; raw PCRE2 document contract retained",
+  "oracle": {
+    "status": "passed",
+    "cases": 1380,
+    "source_sha256": "5876a3f7e735ab74ee6ab338521f180e560b1839e0f32cdf29823cbb8c68a778",
+    "script_sha256": "6682599f90db58ae49c6d606aa1fe5253176981d67e930b418c9ca3b5fbc3387",
+    "native_sha256": "47679ca784e21b81b02587a75f7a1d3b4c27d12a210686d0ab694ef9af5a33dc",
+    "scope": "actual VS Code Searcher, default separators, single-line subjects, shared regex syntax; no full engine/newline/UI equivalence claim",
+    "differences": []
+  },
+  "range_comparison": {
+    "files": 61,
+    "queries": 183,
+    "summary": {
+      "rg-auto": {
+        "equal": 122,
+        "different": 58,
+        "errors": 3
+      },
+      "rg-pcre2": {
+        "equal": 124,
+        "different": 56,
+        "errors": 3
+      }
+    },
+    "rg_version": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+NEON\nsimd(runtime):+NEON\n\nPCRE2 10.45 is available (JIT is available)\n",
+    "rg_sha256": "7c7d5b09c3a57de864500c65dc2e9c4d2a5e96a3fc7b7d5318480c19887a739b",
+    "native_sha256": "47679ca784e21b81b02587a75f7a1d3b4c27d12a210686d0ab694ef9af5a33dc",
+    "script_sha256": "f48fb9c63c4af0794a34c2e7111c99e122e0bbda7ee304264dbdcc7ca6608111",
+    "product_source_sha256": {
+      "src/session/editor/find.zig": "259c450ecb9bf7134f9b76e40759cad3d8e6376bbc979061903129112457a96b",
+      "src/session/editor/document.zig": "f9558a6e28d44b2b931c862185e53c899c548f6f82f43efdd8787dd0403da092",
+      "src/session/editor/line_index.zig": "f43c8a437936d9f4d9ecd29b8ba533f251d775b9f0181c1538322c019dd9ca5d",
+      "src/session/editor/selection.zig": "672cdb7f51d48f32b05693a048dab13fb2e6fd2936560314ef8fc6ae5bafb1e2",
+      "src/search_case_fold.zig": "218e9d70c08693e6eccbf9ac53f06af800b9a9ea2c2c97e91f7445edf4ea9d62",
+      "src/regex.zig": "77bee364372b0ce81bc857f7db56feae4117c9180339d96e13ceb97e6d81565c"
+    },
+    "examples": [
+      {
+        "mode": "word",
+        "query": "foo",
+        "native_error": "",
+        "rg_error": "",
+        "different_files": 16,
+        "examples": [
+          {
+            "file": "nul",
+            "native": [],
+            "rg": [
+              [
+                1,
+                4
+              ]
+            ]
+          },
+          {
+            "file": "random-03",
+            "native": [],
+            "rg": [
+              [
+                108,
+                111
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "mode": "document-regex",
+        "query": "^|foo",
+        "native_error": "",
+        "rg_error": "",
+        "different_files": 15,
+        "examples": [
+          {
+            "file": "bom",
+            "native": [
+              [
+                0,
+                0
+              ],
+              [
+                5,
+                5
+              ]
+            ],
+            "rg": [
+              [
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "file": "bomonly",
+            "native": [
+              [
+                0,
+                0
+              ]
+            ],
+            "rg": []
+          }
+        ]
+      },
+      {
+        "mode": "document-regex",
+        "query": "^$",
+        "native_error": "",
+        "rg_error": "",
+        "different_files": 15,
+        "examples": [
+          {
+            "file": "bom",
+            "native": [
+              [
+                5,
+                5
+              ]
+            ],
+            "rg": []
+          },
+          {
+            "file": "bomonly",
+            "native": [
+              [
+                0,
+                0
+              ]
+            ],
+            "rg": []
+          }
+        ]
+      },
+      {
+        "mode": "document-regex",
+        "query": "(*LF)^bar$",
+        "native_error": "",
+        "rg_error": "rg: PCRE2: error compiling pattern at offset 7: (*VERB) not recognized or malformed\n",
+        "different_files": 0,
+        "examples": []
+      }
+    ]
+  },
+  "unicode": {
+    "mapping_count": 1512,
+    "data_sha256": "ff8d8fefbf123574205085d6714c36149eb946d717a0c585c27f0f4ef58c4183",
+    "queries": 2994,
+    "native_oracle": "all queries passed Unicode 17 C/S byte ranges"
+  },
+  "unicode_different_queries": 56,
+  "pixel_checks": [
+    {
+      "role": "dollar-boundary",
+      "x": 77,
+      "y": 61,
+      "before": [
+        16,
+        16,
+        16
+      ],
+      "after": [
+        101,
+        85,
+        39
+      ],
+      "expected_change": true
+    },
+    {
+      "role": "emoji-inside-word",
+      "x": 77,
+      "y": 77,
+      "before": [
+        16,
+        16,
+        16
+      ],
+      "after": [
+        16,
+        16,
+        16
+      ],
+      "expected_change": false
+    },
+    {
+      "role": "underscore-inside-word",
+      "x": 77,
+      "y": 93,
+      "before": [
+        16,
+        16,
+        16
+      ],
+      "after": [
+        16,
+        16,
+        16
+      ],
+      "expected_change": false
+    },
+    {
+      "role": "standalone-word",
+      "x": 77,
+      "y": 109,
+      "before": [
+        16,
+        16,
+        16
+      ],
+      "after": [
+        40,
+        36,
+        19
+      ],
+      "expected_change": true
+    }
+  ],
+  "gpu_source_sha256": {
+    "build.zig": "453c50940d05e6346ef046574a48663d423abf4e3d307530a6b5d3d921e54939",
+    "src/session/editor/find.zig": "259c450ecb9bf7134f9b76e40759cad3d8e6376bbc979061903129112457a96b",
+    "src/session/editor/line_index.zig": "f43c8a437936d9f4d9ecd29b8ba533f251d775b9f0181c1538322c019dd9ca5d",
+    "src/regex.zig": "77bee364372b0ce81bc857f7db56feae4117c9180339d96e13ceb97e6d81565c",
+    "src/search_case_fold.zig": "218e9d70c08693e6eccbf9ac53f06af800b9a9ea2c2c97e91f7445edf4ea9d62",
+    "src/chrome/components/editor_view/frame.zig": "86acd9f678c53f2d7d25edb969799d61dd284d4861d6c4a0bbe323320fb3ad3b",
+    "src/platform/macos/app_session.zig": "520cd7afce420345c91b357635ecf2e6f0f8361a8fceb84e702a2e619c95ac79",
+    "src/platform/macos/app_session/editor/mod.zig": "a2fbf77b6667d0222d723c515869b45bc7df895935aea73ff7248e2cb388030d",
+    "src/platform/macos/app_session/editor/shared_edit.zig": "f3a53f00724c5998be8d52cb134f402f25065f4eb09af1974a4d388c6b50c2c3",
+    "src/platform/macos/app_session/editor_ime.zig": "28fe26f22ff3a6aeb7682d008e04543967d9bfe70834a9db587906a28d4251d0",
+    "src/platform/macos/app_session/find.zig": "6d06dc88c3e4c5542563115c8f4501275b13851bb2edbcca7bc60e6b6bb8a955",
+    "src/platform/macos/app_session/term.zig": "331794194826c9dc6f7288733135a2e87b5c48b337f36f002d683fbb9521800f",
+    "src/platform/macos/app_session/pane.zig": "16d3ee835111c3ab59793e76160c3da6fceaf0b71b62b64c236443561a35ca84",
+    "src/platform/macos/app_session/tab.zig": "741ae436330ed332cb0544d4886bd4cde27e80df8675ae1e61ae1d63b497cf73",
+    "src/platform/macos/chrome_lab_smoke.m": "06486e2e7339503aa709fd482ae023431951df1f1479a49753e02a52e5cbd6e1",
+    "src/platform/macos/maru_metal_renderer.m": "4325e14022d996cc2f89ed2471f5553cae66d8446bd6e59de3a631316ad834c5",
+    "src/platform/macos/coretext_frame_builder.zig": "ff013b42a05b98008f960ec834f157379582306e06c2146763e23402df5e25da",
+    "src/platform/macos/coretext_smoke.m": "c86ae80ff8f928aacc977fbc6b3feb4629845b60485f7c8ac8daf9d2b50a6c43",
+    "tools/shared-ime-gpu/capture.py": "f5d7a79ca32f732caa7aecad100e17a8915138a7f179e8e781a6e0a05b7af481",
+    "tools/shared-ime-gpu/word-fixture.zig.inc": "347d846ad9379253792b93e9b3d4a69fb03a4c328663d3a291e7de824d60eeb0"
+  },
+  "gpu_scope": "Real AppSession shared views -> appendPaneFrame -> CoreText -> product Metal offscreen readback",
+  "gpu_limits": "Separate per-view frames. No OS/HID callback or simultaneous multi-pane window evidence.",
+  "artifacts": {
+    "matrix": "zig-out/rg-full-content-review/vscode-contract/contract.json",
+    "oracle": "zig-out/rg-full-content-review/vscode-oracle-final/oracle.json",
+    "gpu": "zig-out/vscode-search-word-gpu/manifest.json"
+  },
+  "limits": "Finite, shared regex syntax and default separators; no full JS/PCRE2 equivalence, custom settings, project worker or OS/IME claim."
+}

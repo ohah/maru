@@ -163,7 +163,7 @@ def main():
                          for label in ['rg-auto', 'rg-pcre2']}
     (output / 'contract.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
     # 확인했던 반례가 사라져도 비교 결과를 무조건 통과시키지 않는다.
-    for mode, query in [('word', 'foo'), ('document-regex', '^|foo')]:
+    for mode, query in [('word', 'foo'), ('document-regex', '^$')]:
         item = next(c for c in report['cases'] if c['mode'] == mode and c['query'] == query)
         assert item['variants']['rg-pcre2']['both_valid'] and not item['variants']['rg-pcre2']['equal'], (mode, query, item)
     if args.unicode_data:

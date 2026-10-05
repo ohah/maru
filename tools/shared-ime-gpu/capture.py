@@ -64,7 +64,7 @@ def unique_replace(text: str, old: str, new: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=("ime", "find", "anchors", "regex"), default="ime")
+    parser.add_argument("--scenario", choices=("ime", "find", "anchors", "regex", "word"), default="ime")
     parser.add_argument("--output", type=Path, help="New or empty evidence directory")
     args = parser.parse_args()
     if sys.platform != "darwin":
@@ -82,7 +82,7 @@ def main() -> None:
     artifacts = output / "artifacts"
     snapshot.mkdir()
     artifacts.mkdir()
-    fixture_path = {"ime": "tools/shared-ime-gpu/fixture.zig.inc", "find": "tools/shared-ime-gpu/find-fixture.zig.inc", "anchors": "tools/shared-ime-gpu/anchors-fixture.zig.inc", "regex": "tools/shared-ime-gpu/regex-fixture.zig.inc"}[args.scenario]
+    fixture_path = {"ime": "tools/shared-ime-gpu/fixture.zig.inc", "find": "tools/shared-ime-gpu/find-fixture.zig.inc", "anchors": "tools/shared-ime-gpu/anchors-fixture.zig.inc", "regex": "tools/shared-ime-gpu/regex-fixture.zig.inc", "word": "tools/shared-ime-gpu/word-fixture.zig.inc"}[args.scenario]
     source_files = tuple(name for name in SOURCE_FILES if name != "tools/shared-ime-gpu/fixture.zig.inc") + (fixture_path,)
     source_hashes = {name: digest(repo / name) for name in source_files}
     subprocess.run(
@@ -109,7 +109,7 @@ def main() -> None:
         stream.write("\n\n" + fixture)
     command = ["mise", "exec", "--", "zig", "build", "test-editor-shared", "-j2"]
     log = output / "capture.log"
-    phases = {"ime": ("before", "marked", "cancelled", "committed"), "find": ("before", "search", "edited", "closed"), "anchors": ("before", "edited", "undo", "redo"), "regex": ("before", "search", "edited", "closed")}[args.scenario]
+    phases = {"ime": ("before", "marked", "cancelled", "committed"), "find": ("before", "search", "edited", "closed"), "anchors": ("before", "edited", "undo", "redo"), "regex": ("before", "search", "edited", "closed"), "word": ("before", "search", "edited", "closed")}[args.scenario]
     revisions = {phase: int(phase == "committed") if args.scenario == "ime" else int(phase in ("edited", "closed")) for phase in phases}
     if args.scenario == "anchors":
         revisions = {"before": 0, "edited": 1, "undo": 2, "redo": 3}
@@ -147,7 +147,7 @@ def main() -> None:
         if image.suffix == ".png" and image.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
             raise RuntimeError(f"Invalid PNG: {image}")
     pixel_checks = []
-    if args.scenario == "regex":
+    if args.scenario in ("regex", "word"):
         # 현재 선택만 보이는 거짓 통과를 막기 위해 비현재 매치 두 줄도 실제 픽셀로 대조한다.
         def pixel(path, x, y):
             header = path.read_bytes().split(b"\n", 3)
@@ -158,12 +158,13 @@ def main() -> None:
                 raise RuntimeError("Invalid PPM pixel bounds")
             at = (y * width + x) * 3
             return list(header[3][at:at + 3])
-        for role, y in (("current-start", 61), ("current-end", 77), ("other-start", 109), ("other-end", 125)):
+        checks = (("current-start", 61, True), ("current-end", 77, True), ("other-start", 109, True), ("other-end", 125, True)) if args.scenario == "regex" else (("dollar-boundary", 61, True), ("emoji-inside-word", 77, False), ("underscore-inside-word", 93, False), ("standalone-word", 109, True))
+        for role, y, should_change in checks:
             before = pixel(artifacts / "before-owner.ppm", 77, y)
             after = pixel(artifacts / "search-owner.ppm", 77, y)
-            if before == after:
-                raise RuntimeError(f"Regex highlight did not change actual pixels: {role}")
-            pixel_checks.append({"role": role, "x": 77, "y": y, "before": before, "after": after})
+            if (before != after) != should_change:
+                raise RuntimeError(f"Search highlight pixel mismatch: {role}")
+            pixel_checks.append({"role": role, "x": 77, "y": y, "before": before, "after": after, "expected_change": should_change})
     manifest = {
         "scope": "Real AppSession shared views -> appendPaneFrame -> CoreText -> product Metal offscreen readback",
         "limits": "Separate per-view frames. No OS/HID callback or simultaneous multi-pane window evidence.",

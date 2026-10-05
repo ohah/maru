@@ -7055,7 +7055,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (flushFileBackupWorker(io, &file_backup_worker, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, null)) |report| {
             reportFileBackups(stderr, report);
         } else |err| stderr.print("  warning: editor backup shutdown failed({s})\n", .{@errorName(err)}) catch {};
-        if (file_backups) |*owner| owner.deinit(io);
+        if (file_backups) |*owner| {
+            if (owner.deinitOnWorker(io)) |_| {} else |err| {
+                stderr.print("  warning: editor backup root cleanup failed({s})\n", .{@errorName(err)}) catch {};
+            }
+        }
     }
     var active_view: ActiveView = .{ .terminal = 0 };
     var file_changes = @import("platform/windows/editor/external_changes.zig").Coordinator.init(allocator);

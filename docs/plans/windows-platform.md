@@ -505,3 +505,27 @@ WM_CLOSE/Save로 exact BOM/Xbase/CRLF 저장, 백업 삭제와 exit code 0을 �
 synthetic owned HWND 증거이며 물리 입력/IME·강제 native 실패 GUI 증거로 세지 않는다.
 Discard의 dirty backup 삭제는 아직 기존 동기 경로다. 전체 잔여 Windows 범위는 완료로
 보지 않으며 capture/후속 projection CPU·플랫폼 결합과 장기 검증도 계속 남아 있다.
+
+
+### §2m.195 Windows Discard의 dirty 백업 삭제 worker 연결
+
+prepareFileCloseBackup은 clean/Save-close와 Discard를 구분한다. Discard packet은
+본문 복사·hash 없이 신원/epoch/revision/CAS와 persistence 상태를 캡처하고 별도 한 번의
+voteDiscard 승인을 기다린다. 일반 clean vote는 이를 승인할 수 없다. Main의 현재 pending
+Discard와 동일 packet의 최신 결합, unknown/live-save 부재를 확인한 뒤 native drop한다.
+거절/버전 변경은 기존 레코드를 보존한다. 승인 후 늦은 편집도 실패 receipt로 이전 close
+intent를 종료하여 새 승인을 요구한다. 이전 요청으로 새 버전을 자동 Discard하지 않는다.
+
+실제 삭제가 끝나도 dirty 본문이 살아 있으면 backup_dirty를 재설정한다. 이후 취소된
+close는 보호를 재시작할 수 있고, 실제 승인한 close만 문서를 해제하며 이 플래그를 정리한다.
+원본 문서에는 쓰지 않는다. 명시적 GUI Discard도 이제 native 삭제를 프레임에서 실행하지
+않으며 실패 시 문서와 보호를 유지한다. 동기 approveFileClose API는 기존 fixture 계약이다.
+
+`test-win32-backup-worker` 22개가 Debug/ReleaseFast에서 통과했다. false consent와 stale
+true consent의 실제 레코드 보존, 실제 삭제와 cancelled protection, 승인 뒤 실제 Y 편집의
+XYbase/CRLF 유지·StaleDocument receipt·원본 보존을 확인한다. consent/binding 제거,
+취소 보호 재설정 제거, 삭제 대신 write, stale intent 실패 제거의 다섯 compiled runtime
+변형을 검출하고 원본을 복원했다. 최종 실제 앱 PID 49900에서 Xbase/CRLF 자동 백업 후
+WM_CLOSE/Discard로 원본 exact BOM/base/CRLF, 백업 삭제 및 exit code 0을 수집했다.
+synthetic owned HWND이며 물리 IME·장기 soak나 강제 stale GUI 재현 증거로 세지 않는다.
+전체 Windows 잔여에는 후속 편집/복구 CPU·플랫폼 결합·키바인딩/브라우저/SSH 등이 남아 있다.

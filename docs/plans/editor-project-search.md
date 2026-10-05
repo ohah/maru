@@ -196,7 +196,8 @@ NUL을 거부하지 않는다. 따라서 rg가 바이너리로 분류한다는 �
 `findMatches`는 대소문자를 구분하는 평문을 `std.mem.indexOfPos`로 찾는다. 검색어 UTF-8 검사 뒤에만 사용하므로
 continuation byte에 새 시작점을 만들지 않는다. 단어 판정은 기존 `selection.wordRangeAt`을 쓰고,
 거절한 후보 뒤에는 다음 코드포인트부터 다시 검사한다. 대소문자 무시는 양쪽 문자가 ASCII일 때의 디코드만 줄이며
-접기 판정은 계속 `terminal.selection.foldCase`를 쓴다. 비ASCII 접기·정규화하지 않는 규칙과 PCRE2 경로는 유지한다.
+현재 검색의 접기 판정은 #4148에서 도입한 `search_case_fold.fold`의 Unicode 17 C/S 매핑을 쓴다.
+이전 비용 비교는 그 변경 전 기록이며 현재 동작·재비교는 아래 절이 소유한다. Unicode 정규화는 하지 않는다.
 
 `FND33`은 독립된 코드포인트 판정으로 유효/깨진 byte·NUL·결합 문자·Unicode 접기·두 토글의 조합 전체를 대조한다.
 CLI의 `--baseline-native`는 수정 전 바이너리와 파일·줄·byte·길이 전체를 대조하고, 비용 비교에서는 정렬된 같은
@@ -339,3 +340,86 @@ Unicode 17.0.0 C/S 전체 1,512개 매핑을 사용한다. 원문 byte·셀 범�
 구현이나 ripgrep 전체 호환성 완료를 뜻하지 않는다. 문서 전체 정규식과 줄별 검색 중 어떤 계약을
 택할지는 논의했고 사용자가 문서 전체 정규식의 설계 후 구현을 선택했다. 기존 줄별 검색·치환은
 Unicode 개선에서 유지하고, [문서 전체 확장](editor-document-regex.md)에서 매치 범위·캡처·치환을 함께 이관한다.
+
+## 문서 전체 검색 계약으로 재비교한 결과
+
+2026-10-05, #4145·#4148·#4153을 포함한 `6119e8de8eb46e378f89c967b25a5dd334d7b5a1`의
+현재 검색을 ripgrep 15.2.0(PCRE2 10.45)과 다시 비교했다. 기존 S0의 줄별 정규식 결과와 구분한다.
+[contract.py](../../tools/editor-project-search/contract.py)는 61개 파일·183개 질의에서 모든 절대 byte 범위를
+대조한다. `document.open`과 같이 유효한 UTF-8 BOM만 제거하며 줄바꿈이나 EOF에 LF를 추가하지 않는다.
+빈 파일·BOM·고립 CR·혼합 줄바꿈·NUL·Unicode·단어 옵션·빈 매치·여러 줄 정규식·오류를 포함한다.
+
+| 실제 CLI 구성 | 같은 범위 | 다른 범위 | 한쪽 이상 오류 |
+|---|---:|---:|---:|
+| rg auto, 정규식 `--multiline --crlf` | 117 | 63 | 3 |
+| rg PCRE2, 정규식 `--multiline --crlf` | 119 | 61 | 3 |
+
+이 숫자는 질의별 판정이며 파일별 건수나 무작위 정규식 전체의 호환률이 아니다.
+두 오류 질의 `[`·`(?<=a+)b`는 양쪽에서 거절됐다. `(*LF)^bar$`는 Maru가 실행하지만 rg는 거절했다.
+rg가 패턴을 감싸는 CLI에서는 시작 위치 전용 newline verb를 덧붙이는 방법이 오류를 냈으므로,
+비교기는 임의의 `(*ANYCRLF)`를 주입하지 않고 실제 `--crlf` 옵션을 쓴다. 원문 directive는 그대로 전달한다.
+[rg 15.2.0 공개 소스](https://github.com/BurntSushi/ripgrep/blob/15.2.0/crates/pcre2/src/matcher.rs#L41-L74)에서
+패턴마다 그룹을 덧붙이는 점을 확인했다. 구현 표현을 복사하지 않고 실제 CLI 거절 원인을 확인하는 데만 사용했다.
+이 자료에서는 `^foo$`·`foo\r?\nbar`·`\Afoo`의 범위가 같았고, 단순히 문서 전체 정규식이라는 이유만으로
+불일치한다고 결론 내리지 않는다.
+
+남는 차이는 다음과 같다.
+
+- 빈 평문 검색: Maru는 0건, rg는 빈 범위를 생성한다. 제품 어댑터에서 빈 질의를 실행하지 않으면 피할 수 있다.
+- 단어 옵션: Maru는 편집기의 단일 낱말과 정확히 같아야 하고 rg는 자체 word 경계를 쓴다.
+  문장부호·emoji·`$`와 여러 줄 정규식의 단어 옵션은 서로 같은 계약이 아니다.
+- 빈 정규식 대안: `^|foo`에서 Maru는 같은 위치의 비어 있지 않은 대안을 우선하고 빈 마지막 줄도 검사한다.
+  rg는 이 자료에서 다른 범위를 보고한다. `--pcre2`만으로 호출자의 반복 정책까지 같아지지 않는다.
+- Unicode 버전: 공식 Unicode 17 C/S 1,512 매핑으로 만든 자료의 2,994개 질의에서 Maru의 **모든 byte 범위가
+  공식 데이터에서 독립 계산한 기대값과 같았다**. 설치된 rg 기본 엔진과는 56개 질의의 범위가 달랐다.
+  비교한 코드포인트는 U+A7CE/U+A7CF·U+A7D2..U+A7D5·U+16EA0..U+16ED3 안의 해당 문자다.
+  특정 엔진 이름이 항상 더 정확하다는 근거가 아니라 이 실행 파일과 데이터 버전의 차이다.
+
+Apple M4 Max·64GiB에서 2,048파일·64MiB, 순서 회전 5회, 캐시 미제거·배경 부하 미격리로 다시 잰 전체 시간 중앙값(ms):
+
+| 검색 | rg 전체 검색 | 목록 + Maru | 후보 선별 + Maru |
+|---|---:|---:|---:|
+| 드문 평문 | 26.16 | 65.43 | 32.78 |
+| 흔한 평문 | 27.90 | 67.23 | 99.95 |
+| 없는 평문 | 26.68 | 61.30 | 30.07 |
+| 드문 대소문자 무시 | 26.46 | 111.38 | 36.76 |
+| 흔한 대소문자 무시 | 28.23 | 111.31 | 141.10 |
+| 단어 단위 | 25.26 | 64.48 | 34.62 |
+| 한글 평문 | 26.95 | 65.75 | 64.99 |
+| lookbehind | 27.93 | 75.93 | 75.79 |
+| 여러 줄 정규식 | 27.86 | 76.50 | 76.27 |
+| 문서 시작 앵커 | 27.94 | 75.28 | 75.23 |
+
+정규식·비ASCII 선별 열은 실제 내용 선별을 사용하지 않는다. 목록 뒤 순차 검색의 비용이다.
+첫 pipe 결과(rg/Maru/선별)는 드문 평문 10.95ms/11.58ms/29.24ms, 흔한 평문은
+3.66ms/13.99ms/49.14ms였다. **전체 완료 시간 개선과 첫 결과 지연 개선을 구분한다.**
+CLI 자식의 RSS·첫 출력이며 앱 UI·취소·불변 사본·외부 수정 경합의 검증이 아니다.
+Maru는 범위 배열을 계산하지만 성능 출력은 개수 중심이고 rg는 JSON 미리보기도 출력하므로 동등한 UI 작업 비용이 아니다.
+
+[재비교 기록](../../tools/editor-project-search/results/document-contract-comparison-macos-arm64.json)은 질의별
+오류·불일치 파일 수·대표 범위와 입력/도구 해시를 보존한다. 전체 범위 원본은 지정한 로컬 산출물에 남긴다.
+[성능 원시 기록](../../tools/editor-project-search/results/current-comparison-macos-arm64.json)은 반복값과 자식 RSS를 보존한다.
+기존 범위 oracle 24개·오류 3개와 후보 선별의 누락 방지/음성 대조도 다시 통과했다.
+좌표를 +1로 변형한 실행 파일은 `contract.py`의 고정 oracle에서 실패하여 비교기의 판정력도 확인했다.
+
+**재비교 후 권고(아직 미채택):** rg는 고정 버전 번들로 파일 목록·ignore에만 사용하고,
+열린 문서와 디스크 내용은 현재 Maru matcher로 일치 판정한다. 초기 worker에는 내용 선별을 넣지 않는다.
+새 worker의 점진 결과·공정한 스케줄링·취소·불변 사본을 먼저 검증하고, 후보 선별은 누락 방지와 첫 결과
+지연이 확인된 경우에만 후속 채택한다. rg의 시스템 PATH를 제품 실행 경로로 사용하지 않는다.
+번들 의존성·초기 선정 범위에 대한 사용자 확인 전에는 이 권고를 구현 완료나 최종 결정으로 표시하지 않는다.
+
+재실행 명령(각 출력 디렉터리는 새 이름이어야 한다):
+
+```sh
+mise exec -- zig build editor-project-search-probe -Doptimize=ReleaseFast
+python3 tools/editor-project-search/contract.py \
+  --native zig-out/bin/maru-project-search-probe \
+  --unicode-data references/unicode/17.0.0/CaseFolding.txt \
+  --output zig-out/project-search-contract-<새이름>
+python3 tools/editor-project-search/compare.py \
+  --native zig-out/bin/maru-project-search-probe --runs 5 \
+  --output zig-out/project-search-current-performance-<새이름>
+```
+
+Unicode 데이터는 [시각 매핑 검색 계약](../native-editor-visual-mapping.md)의 공식 버전/해시와 같은
+로컬 reference를 사용한다. 도구는 rg·데이터를 자동 설치하거나 앱 실행에 연결하지 않는다.

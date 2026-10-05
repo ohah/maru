@@ -163,7 +163,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
             try reply(&host, 46, asked.request, true);
             left = watch(&host, 46, 3000, false);
         }
-        report(asked.dialogs >= 1 and left.closed_ms >= 0, "close-ask-twice", std.fmt.bufPrint(&detail_buf, "질문 {d} 개(마지막 요청 {d}) · 떠나기면 닫힘 {d} ms", .{ asked.dialogs, asked.request, left.closed_ms }) catch "");
+        report(asked.dialogs == 1 and left.closed_ms >= 0, "close-ask-twice", std.fmt.bufPrint(&detail_buf, "질문 {d} 개(마지막 요청 {d}) · 떠나기면 닫힘 {d} ms", .{ asked.dialogs, asked.request, left.closed_ms }) catch "");
     }
 
     // ── 모르는 브라우저 ──

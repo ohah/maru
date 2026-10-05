@@ -41,6 +41,85 @@ pub fn truncateToCols(arena: std.mem.Allocator, bytes: []const u8, max_cols: u32
     return std.fmt.allocPrint(arena, "{s}…", .{bytes[0..end]});
 }
 
+/// `bytes` 가 표시 폭 `max_cols` 칸을 넘으면 **앞과 끝을 남기고 가운데를 `…` 로** 줄여 `buf` 에 쓴다(할당 없음).
+/// 안 넘치면 원본을 그대로 돌려준다(복사 없음). URL·경로처럼 앞(호스트)과 끝(파일·질의)이 둘 다 뜻을 갖는 값을 문장
+/// 안에 넣을 때 쓴다 — 문장 끝에서 자르면 그 뒤의 말(확인 대화상자의 질문)이 함께 사라진다. 앞에 예산의 2/3 를 준다.
+/// 코드포인트 경계로만 자르고(UTF-8 이 깨지지 않는다) 결과 표시 폭은 `max_cols` 이하다. 손상 UTF-8 이거나 `buf` 가
+/// 모자라면 끝을 잘라 `…` 로 마친다(`truncateToCols` 와 같은 모양).
+pub fn elideMiddle(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
+    const total = displayCols(bytes);
+    if (total <= max_cols) return bytes;
+    const ellipsis = "…";
+    const ellipsis_cols = displayCols(ellipsis);
+    if (max_cols < ellipsis_cols or buf.len < ellipsis.len) return "";
+    const budget = max_cols - ellipsis_cols;
+    const head_cols = budget * 2 / 3;
+    const tail_cols = budget - head_cols;
+    const utf8 = std.unicode.Utf8View.init(bytes) catch return copyHeadWithEllipsis(buf, bytes, bytes.len);
+    // 앞: head_cols 칸까지.
+    var it = utf8.iterator();
+    var cols: u32 = 0;
+    var head_end: usize = 0;
+    while (it.nextCodepoint()) |cp| {
+        const w = @max(1, width.cellWidth(cp));
+        if (cols + w > head_cols) break;
+        cols += w;
+        head_end = it.i;
+    }
+    // 끝: 남은 폭이 tail_cols 칸 이하가 되는 첫 코드포인트부터.
+    var tail_start: usize = bytes.len;
+    var consumed: u32 = 0;
+    var it2 = utf8.iterator();
+    while (it2.nextCodepoint()) |cp| {
+        if (total - consumed <= tail_cols) {
+            tail_start = it2.i - (std.unicode.utf8CodepointSequenceLength(cp) catch 1);
+            break;
+        }
+        consumed += @max(1, width.cellWidth(cp));
+    }
+    if (tail_start < head_end) tail_start = head_end;
+    const tail = bytes[tail_start..];
+    if (head_end + ellipsis.len + tail.len > buf.len) return copyHeadWithEllipsis(buf, bytes, head_end);
+    @memcpy(buf[0..head_end], bytes[0..head_end]);
+    @memcpy(buf[head_end..][0..ellipsis.len], ellipsis);
+    @memcpy(buf[head_end + ellipsis.len ..][0..tail.len], tail);
+    return buf[0 .. head_end + ellipsis.len + tail.len];
+}
+
+fn copyHeadWithEllipsis(buf: []u8, bytes: []const u8, head_end: usize) []const u8 {
+    const ellipsis = "…";
+    const room = buf.len - ellipsis.len;
+    var n = @min(head_end, room);
+    while (n > 0 and n < bytes.len and (bytes[n] & 0xC0) == 0x80) n -= 1; // 코드포인트 경계로 되돌린다
+    @memcpy(buf[0..n], bytes[0..n]);
+    @memcpy(buf[n..][0..ellipsis.len], ellipsis);
+    return buf[0 .. n + ellipsis.len];
+}
+
+test "elideMiddle: 앞과 끝을 남기고 가운데를 줄이며, 폭과 UTF-8 을 지킨다" {
+    var buf: [128]u8 = undefined;
+    // 안 넘치면 원본 그대로(복사 없음).
+    const short = "https://example.com/";
+    try std.testing.expect(elideMiddle(&buf, short, 40).ptr == short.ptr);
+    // 넘치면 앞(호스트)과 끝(파일)이 남고 가운데가 「…」.
+    const url = "https://example.com/" ++ "a" ** 300 ++ "/report.pdf";
+    const out = elideMiddle(&buf, url, 40);
+    try std.testing.expect(displayCols(out) <= 40);
+    try std.testing.expect(std.mem.startsWith(u8, out, "https://example.com/"));
+    try std.testing.expect(std.mem.endsWith(u8, out, "report.pdf"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "…") != null);
+    // 한글(2칸) — 코드포인트를 쪼개지 않고 폭 안이다.
+    const hangul = "가" ** 80;
+    const h = elideMiddle(&buf, hangul, 21);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(h));
+    try std.testing.expect(displayCols(h) <= 21);
+    // buf 가 모자라면 앞만 남기고 「…」로 마친다(여전히 유효 UTF-8).
+    var tiny: [12]u8 = undefined;
+    const t = elideMiddle(&tiny, hangul, 40);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(t));
+    try std.testing.expect(std.mem.endsWith(u8, t, "…"));
+}
+
 test "truncateToCols: EAW 폭 기준 자르기 + 말줄임" {
     const a = std.testing.allocator;
     // 안 넘치면 원본 그대로(복사 없음 — free 금지).

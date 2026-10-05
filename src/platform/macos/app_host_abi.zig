@@ -6447,7 +6447,7 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
         // stale 결정(다른 async_id — 도달 어려움): 무시.
     }
     // (2) 미결정: 모달 표시(idempotent — 이미 이 grant 보여주면 no-op·다른 모달 점유면 false로 다음 tick 재시도).
-    var msg_buf: [256]u8 = undefined;
+    var msg_buf: [512]u8 = undefined;
     _ = app.showGrantConfirm(grantPromptMessage(&msg_buf, head, snapshot), head.async_id);
 }
 
@@ -6474,13 +6474,44 @@ fn grantPromptMessage(buf: []u8, e: GrantPromptEntry, snapshot: control_surface.
         .web => |w| w.url orelse "", // WebMeta.url은 ?[]const u8(로드 전 null)
         else => "",
     }) else "";
-    // **표시 문자열이라 키로 든다.** 이 문장은 로그인 토큰 접근을 묻는 동의문인데, 버튼은 이미
-    // 번역돼 있어(`btn_allow`/`btn_deny`) 여기만 한국어면 영어 UI 아래에서 무엇을 허용하는지 못 읽는다.
-    const action = maru.i18n.t(switch (e.scope) {
+    return grantPromptText(buf, e.scope, url);
+}
+
+/// 동의문에 넣는 URL 의 표시 폭 상한(칸). URL 은 길이에 끝이 없는데 문장에서 **질문이 URL 뒤에** 온다
+/// (「…대상: {URL}. 허용하시겠습니까?」). 예전에는 URL 이 길면 문장이 버퍼(256 바이트)에서 조용히 잘려 **질문이
+/// 사라졌다** — 한국어는 URL 이 약 110 바이트만 넘어도(2026-10-05 측정). 앞(호스트)과 끝을 남기고 가운데를 줄인다.
+const grant_prompt_url_cols: u32 = 60;
+
+/// 동의문 한 줄을 만든다(순수 — 판정자가 직접 잰다). **표시 문자열이라 키로 든다.** 이 문장은 로그인 토큰 접근을
+/// 묻는 동의문인데, 버튼은 이미 번역돼 있어(`btn_allow`/`btn_deny`) 여기만 한국어면 영어 UI 아래에서 무엇을
+/// 허용하는지 못 읽는다.
+fn grantPromptText(buf: []u8, scope: control_capability.ScopeClass, url: []const u8) []const u8 {
+    var url_buf: [256]u8 = undefined;
+    const shown = maru.chrome.components.overlay_input.elideMiddle(&url_buf, url, grant_prompt_url_cols);
+    const action = maru.i18n.t(switch (scope) {
         .browser_storage => .grant_scope_storage,
         else => .grant_scope_control,
     });
-    return maru.i18n.format(buf, maru.i18n.t(.grant_prompt), &.{ .{ .s = action }, .{ .s = url } });
+    return maru.i18n.format(buf, maru.i18n.t(.grant_prompt), &.{ .{ .s = action }, .{ .s = shown } });
+}
+
+// 동의문은 질문이 URL 뒤에 온다 — URL 이 길어도 질문이 남아야 사용자가 무엇에 답하는지 안다.
+test "grant 동의문: 아무리 긴 URL 이어도 질문이 남고, 호스트가 보이며, 모달 버퍼 안이다" {
+    const long_url = "https://login.example.com/oauth/authorize?" ++ "state=" ++ "x" ** 1500 ++ "&end=1";
+    const prev = maru.i18n.lang();
+    defer maru.i18n.setLang(prev);
+    for ([_]maru.i18n.Lang{ .en, .ko }) |lang| {
+        maru.i18n.setLang(lang);
+        var buf: [512]u8 = undefined;
+        for ([_]control_capability.ScopeClass{ .browser_storage, .browser }) |scope| {
+            const text = grantPromptText(&buf, scope, long_url);
+            const question = if (lang == .en) "Allow?" else "허용하시겠습니까?";
+            try std.testing.expect(std.mem.endsWith(u8, text, question));
+            try std.testing.expect(std.mem.indexOf(u8, text, "https://login.example.com/") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "…") != null);
+            try std.testing.expect(text.len <= 256); // 모달 버퍼보다 한참 작다 — 버퍼 절단이 질문을 못 지운다
+        }
+    }
 }
 
 /// 5f-0b-3b: 인가·유효한 `browser.subscribe`를 메인에서 즉시 처리한다(async 아님). 연결 outbound(pending에 실림)를

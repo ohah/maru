@@ -6092,7 +6092,9 @@ pub const AppSession = struct {
     notice_message_buf: [notice_message_cap]u8 = undefined,
     // 닫기 확인 모달(confirm)의 메시지 세션 소유 백킹(notice_message_buf와 같은 이유 — confirm.State.message는 slice).
     // 문구가 짧아 256B면 충분.
-    confirm_message_buf: [256]u8 = undefined,
+    // 확인 메시지 사본. 모달은 최대 6 줄로 나눠 그린다(`confirm.max_message_rows`) — 기본 창 안쪽 약 90칸 × 6 줄은
+    // 한글(2칸 3바이트)이면 800 바이트를 넘는다. 256 이던 시절엔 줄 상한보다 버퍼 절단이 먼저 와 잘림이 조용했다.
+    confirm_message_buf: [1024]u8 = undefined,
     // 닫기 확인에서 "닫기"를 확정하면 실행할 보류된 닫기. null=보류 없음. requestClose가 실행 중 명령이 있으면 여기
     // 담고 확인 모달을 열며, confirm_accept가 executeClose로 실행하고 confirm_cancel이 버린다. 단일 출처: 어느 닫기
     // 경로였는지(cascade 정책이 경로마다 다름)를 기억해 확정 시 같은 함수를 다시 부른다.
@@ -10452,9 +10454,16 @@ pub const AppSession = struct {
     /// continuation 바이트(0x80~0xBF) 앞 lead까지 되돌려 한글 등 multibyte가 U+FFFD로 깨지지 않게 자른다(리뷰 발견).
     /// notice·confirm 단일 출처.
     fn copyOverlayMessage(buf: []u8, message: []const u8) []const u8 {
-        const n = terminal.width.truncateToBoundary(message, buf.len); // 멀티바이트 경계 절단(단일 출처)
+        if (message.len <= buf.len) {
+            @memcpy(buf[0..message.len], message);
+            return buf[0..message.len];
+        }
+        // 넘친다 — 끝을 「…」로 바꿔 **잘렸음을 보인다.** 조용히 끊으면 확인 문장의 끝(질문)이 사라진 줄도 모른다.
+        const ellipsis = "…";
+        const n = terminal.width.truncateToBoundary(message, buf.len - ellipsis.len); // 멀티바이트 경계 절단(단일 출처)
         @memcpy(buf[0..n], message[0..n]);
-        return buf[0..n];
+        @memcpy(buf[n..][0..ellipsis.len], ellipsis);
+        return buf[0 .. n + ellipsis.len];
     }
 
     /// confirm을 **제외한** 다른 오버레이(notice/find/palette/context_menu/settings)와 그 platform 부수상태를 닫는다 — 새
@@ -61356,6 +61365,18 @@ test "전체 리셋 전파: 감시 경로만으로는 다른 창의 스크롤백
     try std.testing.expectEqual(@as(u32, 1000), c.live_scrollback_max);
     // 뒤따르는 파일 감시 알림은 c 에서 무동작이다 — 같은 내용을 두 번 읽지 않는다.
     try std.testing.expect(!settings_ops.configFileChanged(c));
+}
+
+// 오버레이 메시지 사본이 버퍼를 넘으면 예전엔 **조용히** 끊었다 — 확인 문장의 끝(질문)이 사라진 줄도 몰랐다(2026-10-05).
+test "오버레이 메시지 사본: 버퍼를 넘으면 끝이 「…」이고 UTF-8 이 깨지지 않으며, 안 넘치면 그대로다" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("짧은 문장", AppSession.copyOverlayMessage(&buf, "짧은 문장"));
+    const long = "가" ** 40; // 120 바이트
+    const out = AppSession.copyOverlayMessage(&buf, long);
+    try std.testing.expect(out.len <= buf.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(out));
+    try std.testing.expect(std.mem.endsWith(u8, out, "…"));
+    try std.testing.expect(std.mem.startsWith(u8, out, "가가가"));
 }
 
 // 전체 리셋은 모든 창의 열린 터미널 스크롤백을 기본 길이로 줄여 넘치는 기록을 지운다(#4158) — 확인 문구가 그것을 말해야

@@ -251,6 +251,14 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
 
 ## 5. 보안·개인정보·관측
 
+상세 worker의 익명화 키는 `os_env.allocValueChecked`로 UTF-8 소유 값으로 읽는다.
+`HOME`·`USERPROFILE`과 `USER`·`USERNAME`을 함께 매칭하고 긴 값부터 치환하므로
+Git Bash와 Windows 로그인 환경이 다르거나 한글 이름이 겹쳐도 한쪽 키를 잃지 않는다.
+Windows 역슬래시·홈 끝 구분자·중첩된 홈의 부모 계정까지 처리하고 드라이브 문자 구문은 유지한다. 환경값 읽기 또는 익명화 할당 실패는
+원문을 표시하지 않고 빈 텍스트와 redacted 플래그로 남긴다. 플래그는 SessionDock Turn
+DTO에 유지되며 paint가 현재 언어의 arch_redacted 문구를 선택한다.
+
+
 - provider log는 민감한 개인 데이터다. 원문·prompt·token·절대 home path를 trace, crash artifact, fixture, analytics, config에 쓰지 않는다. fixture는 synthetic·redacted JSONL만 허용하며 [project-rules.md](project-rules.md)의 redaction 기준을 공유한다.
 - scanner는 no-follow로 열고 fstat identity를 discovery snapshot과 다시 대조한다. parse 중 교체되거나 permission이 바뀐 파일은 stale로 버린다. published record는 앱 실행 중에만 absolute source path와 `(device,inode)`를 함께 보존하며, `로그 보기`는 사용자가 누른 때에만 그 identity를 다시 검사해 OS file reveal API에 넘긴다. 교체·삭제·비정규 파일이면 reveal을 거부한다.
 - resume은 **사용자 로그인 셸을 거쳐** provider를 실행한다. `/usr/bin/env <provider>`를 직접 exec하면

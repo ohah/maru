@@ -680,7 +680,7 @@ const Writer = struct {
                         .assistant => i18n.t(.common_role_assistant),
                     }, .muted_fg, .overline, false, 0);
                     const body_y = turn_y + typography.lineHeightPx(.overline, effectiveScale(self.props.scale_milli)) + spacing.px(.xxs, effectiveScale(self.props.scale_milli));
-                    try self.textAtY(detail, metrics.detail_inset_x, body_y, turn.text, .surface_fg, .body, false, 0);
+                    try self.textAtY(detail, metrics.detail_inset_x, body_y, if (turn.redacted) i18n.t(.arch_redacted) else turn.text, .surface_fg, .body, false, 0);
                 }
             },
             .loading => try self.skeletons(detail),
@@ -2543,4 +2543,58 @@ test "SessionDock never publishes the sort toggle at a width that erases the hea
     // 위 단언이 실제로 실행됐는가. 둘 다 0이 아니어야 이 루프가 경계를 가로지른 것이다.
     try std.testing.expect(published > 0);
     try std.testing.expect(withheld > 0);
+}
+
+test "SessionDock masked turns keep raw bytes out of paint across language changes" {
+    const layout = @import("../../ui/layout.zig");
+    const ids = @import("ids.zig");
+    const before = i18n.lang();
+    defer i18n.setLang(before);
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 960 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 21,
+        .displayed_count = 1,
+        .expanded_identity = 7,
+        .items = &.{.{ .card = .{
+            .identity = 7,
+            .provider = .codex,
+            .title = "fixture",
+            .summary = "fixture",
+            .metadata = .{ .messages = "fixture" },
+            .expanded = .{ .state = .ready, .turns = &.{.{ .role = .assistant, .text = "private fixture text", .redacted = true }} },
+        } }},
+    };
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]layout.Item = undefined;
+    var flex_scratch: [32]layout.FlexScratch = undefined;
+    var child_rects: [32]layout.UiRect = undefined;
+    var actions: [32]ids.Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = fixtureTokens();
+    var ops: [64]draw.Op = undefined;
+    var runs: [48]draw.Run = undefined;
+    var bytes: [4096]u8 = undefined;
+    for ([_]@TypeOf(i18n.lang()){ .en, .ko }) |language| {
+        i18n.setLang(language);
+        const output = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &bytes });
+        var saw_label = false;
+        for (output.ops) |op| switch (op) {
+            .text => |text| for (text.runs) |run| {
+                try std.testing.expect(std.mem.indexOf(u8, run.text, "private fixture") == null);
+                if (std.mem.eql(u8, run.text, i18n.t(.arch_redacted))) saw_label = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(saw_label);
+    }
 }

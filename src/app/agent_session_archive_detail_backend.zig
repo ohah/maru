@@ -223,20 +223,60 @@ fn readSource(state: *WorkerState, source: Source, request_id: u64) Result {
 /// Detail text crosses the worker/main boundary only after the repository-wide
 /// sensitive-content guard and PII anonymizer.  Ambiguous sensitive text is
 /// replaced rather than partially shown; tool payloads never reach this point.
+// Keep all known identity aliases: Git Bash HOME may differ from USERPROFILE.
+const IdentityEnv = struct {
+    values: [4]?[]u8 = .{ null, null, null, null },
+    const keys = [_][:0]const u8{ "HOME", "USERPROFILE", "USER", "USERNAME" };
+
+    fn load(allocator: std.mem.Allocator) !IdentityEnv {
+        return loadWith(allocator, maru.os_env.allocValueChecked);
+    }
+
+    fn loadWith(allocator: std.mem.Allocator, comptime read: anytype) !IdentityEnv {
+        var identity: IdentityEnv = .{};
+        errdefer identity.deinit(allocator);
+        for (keys, 0..) |key, i| identity.values[i] = try read(allocator, key);
+        return identity;
+    }
+
+    fn deinit(self: *IdentityEnv, allocator: std.mem.Allocator) void {
+        for (self.values) |value| if (value) |owned| allocator.free(owned);
+        self.* = .{};
+    }
+};
+
+fn hideTurn(allocator: std.mem.Allocator, turn: *detail.Turn) void {
+    allocator.free(turn.text);
+    turn.text = &.{};
+    turn.redacted = true;
+}
+
 fn redactTurns(allocator: std.mem.Allocator, parsed: *detail.Detail) void {
-    const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else null;
-    const username = if (std.c.getenv("USER")) |value| std.mem.span(value) else null;
+    redactTurnsLoaded(allocator, parsed, IdentityEnv.load(allocator));
+}
+
+fn redactTurnsLoaded(allocator: std.mem.Allocator, parsed: *detail.Detail, loaded: anyerror!IdentityEnv) void {
+    var identity = loaded catch {
+        // Missing aliases are safe; failure to read them must not publish raw text.
+        for (parsed.turns.items) |*turn| hideTurn(allocator, turn);
+        return;
+    };
+    defer identity.deinit(allocator);
+    redactTurnsWith(allocator, parsed, identity);
+}
+
+fn redactTurnsWith(allocator: std.mem.Allocator, parsed: *detail.Detail, identity: IdentityEnv) void {
     for (parsed.turns.items) |*turn| {
-        // 가려야 하는 턴은 **플래그만** 세우고 문장은 안 만든다. 이 함수는 떼어낸 워커에서 돌고, 여기서
-        // `i18n.t()` 로 만든 문장은 그 시점의 언어에 얼어붙어 캐시된다 — 사용자가 나중에 화면 언어를
-        // 바꾸면 이 줄만 옛 언어로 남아 계약 §5.2 를 깬다. 문구는 그리는 쪽(UI 스레드)이 키에서 푼다.
         if (redact.hasSensitiveContent(turn.text)) {
-            allocator.free(turn.text);
-            turn.text = &.{};
-            turn.redacted = true;
+            hideTurn(allocator, turn);
             continue;
         }
-        const next = redact.anonymizeAlloc(allocator, turn.text, .{ .home = home, .username = username }) catch continue;
+        const homes = [_][]const u8{ identity.values[0] orelse "", identity.values[1] orelse "" };
+        const usernames = [_][]const u8{ identity.values[2] orelse "", identity.values[3] orelse "" };
+        const next = redact.anonymizeAlloc(allocator, turn.text, .{ .homes = &homes, .usernames = &usernames }) catch {
+            hideTurn(allocator, turn);
+            continue;
+        };
         allocator.free(turn.text);
         turn.text = next;
     }
@@ -367,4 +407,53 @@ test "detail worker redacts sensitive turns before publication" {
     // 가릴 필요가 없는 턴은 익명화만 거치고 플래그가 안 선다.
     try std.testing.expect(!parsed.turns.items[1].redacted);
     try std.testing.expectEqualStrings("at /Users/user/project", parsed.turns.items[1].text);
+}
+
+test "detail worker identity aliases redact Windows Unicode home and username" {
+    const Reader = struct {
+        fn read(a: std.mem.Allocator, key: [:0]const u8) !?[]u8 {
+            const value: []const u8 = if (std.mem.eql(u8, key, "HOME")) "D:/Profiles/gitlogin" else if (std.mem.eql(u8, key, "USERPROFILE")) "E:\\Homes\\사적인폴더" else if (std.mem.eql(u8, key, "USER")) "gitlogin" else if (std.mem.eql(u8, key, "USERNAME")) "홍길동" else return null;
+            return try a.dupe(u8, value);
+        }
+    };
+    var identity = try IdentityEnv.loadWith(std.testing.allocator, Reader.read);
+    defer identity.deinit(std.testing.allocator);
+    var parsed = try detail.parseTail(std.testing.allocator, .codex,
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"gitlogin D:/Profiles/gitlogin/project 홍길동 E:\\Homes\\사적인폴더\\project"}}
+    , true);
+    defer parsed.deinit(std.testing.allocator);
+    redactTurnsWith(std.testing.allocator, &parsed, identity);
+    try std.testing.expect(!parsed.turns.items[0].redacted);
+    try std.testing.expectEqualStrings("user D:/Profiles/user/project user E:\\Homes\\user\\project", parsed.turns.items[0].text);
+}
+
+test "detail worker anonymizer allocation failure removes raw transcript" {
+    var parsed = try detail.parseTail(std.testing.allocator, .codex,
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"ordinary fixture transcript"}}
+    , true);
+    defer parsed.deinit(std.testing.allocator);
+    var denied = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    redactTurnsWith(denied.allocator(), &parsed, .{});
+    try std.testing.expect(parsed.turns.items[0].redacted);
+    try std.testing.expectEqualStrings("", parsed.turns.items[0].text);
+}
+
+test "detail worker environment lookup failure never publishes raw transcript" {
+    var parsed = try detail.parseTail(std.testing.allocator, .codex,
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"ordinary private fixture"}}
+    , true);
+    defer parsed.deinit(std.testing.allocator);
+    redactTurnsLoaded(std.testing.allocator, &parsed, error.OutOfMemory);
+    try std.testing.expect(parsed.turns.items[0].redacted);
+    try std.testing.expectEqualStrings("", parsed.turns.items[0].text);
+}
+
+test "detail worker partial environment lookup failure frees captured identity" {
+    const Reader = struct {
+        fn read(a: std.mem.Allocator, key: [:0]const u8) !?[]u8 {
+            if (std.mem.eql(u8, key, "HOME")) return try a.dupe(u8, "/home/fixture");
+            return error.OutOfMemory;
+        }
+    };
+    try std.testing.expectError(error.OutOfMemory, IdentityEnv.loadWith(std.testing.allocator, Reader.read));
 }

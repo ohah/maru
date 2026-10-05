@@ -12358,3 +12358,25 @@ ConPTY 생성, heap 고정 surface, Native admission rollback, runtime routing �
 BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다. owned HWND 합성 입력이며
 물리 키보드/IME·긴 시간 경합 증거로 세지 않는다. 워크스페이스 계층, 다른 전역 액션,
 후속 편집/복구 CPU와 전체 플랫폼 결합 범위는 계속 남아 있다.
+
+### §2m.201 Windows 에이전트 상세의 UTF-8 환경과 개인정보 가림
+
+상세 worker의 POSIX HOME/USER·ANSI getenv 의존을 제거했다. os_env의 checked 소유
+API로 HOME/USERPROFILE와 USER/USERNAME을 모두 읽고, 익명화는 모든 alias의 가장
+긴 일치값부터 한 번에 처리한다. 알려진 홈 끝 구분자와 Windows Users 경로도 처리한다.
+환경 읽기/변환·익명화 할당 실패 시 원문을 계속 표시하지 않고 redacted 빈 턴으로 남긴다.
+기존 선택적 allocValue API의 missing/failure 폴백은 유지한다. Windows host가 버리던
+redacted 플래그를 공통 Turn DTO에 전달하고 paint가 현재 언어의 안내 문구를 고른다.
+
+Windows profile·username 누락, 짧은 alias 우선, 익명화 OOM 원문 유지, 환경 OOM을
+missing으로 접는 다섯 compiled runtime 변형을 검출했다. 복원 후 archive/privacy
+52개 중 48개 통과·기존 macOS 전용 4개 제외가 Debug/ReleaseFast에서 동일했다.
+추가 paint 보호 제거 변형도 검출했고 복원한 Chrome UI는 1061개 통과·기존 6개 제외였다.
+같은 DTO를 영어→한국어로 paint할 때 raw fixture가 나오지 않고 현재 번역이 나옴을 검사했다.
+
+최종 실앱 PID 50524의 private HOME/USERPROFILE와 합성 Codex 로그에서 한글 이름·
+중첩된 두 home 폴더와 부모 계정이 user로 바뀌고 secret 대신 [sensitive content hidden]이 표시됨을 확인했다.
+해당 PID 정상 종료 코드 0을 수집했다. 실제 provider/private 이력이나 실제 토큰은 쓰지
+않았으며 owned HWND 합성 입력이다. 같은 앱의 오른쪽 dock divider 폭 조절은 동작했다.
+사용자가 확인한 왼쪽 sidebar 폭 조절 미구현과 resize cursor 미연결을 후속으로 잡는다.
+로그 보기·resume·live focus 버튼 연결과 전체 잔여 Windows 지원은 계속 남아 있다.

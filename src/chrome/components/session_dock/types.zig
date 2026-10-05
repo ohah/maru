@@ -66,6 +66,8 @@ pub const TurnRole = enum { user, assistant };
 pub const Turn = struct {
     role: TurnRole,
     text: []const u8,
+    /// Keep the worker verdict until paint chooses the current localized label.
+    redacted: bool = false,
 };
 
 /// 안정 archive identity가 `Props.expanded_identity`와 같은 카드만 이 값을 실을 수 있다.

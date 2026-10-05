@@ -123,8 +123,16 @@ pub fn build(flags: Flags, visible_text: bool) Menu {
         }
         if (flags.selection) menu.speechAndServices();
     } else if (flags.media_video or flags.media_audio) {
-        // W6h②: Chrome 154 의 미디어 메뉴(재실측 2026-10-05) — 페이지 항목(뒤로 등)은 내지 않는다.
+        // W6h②: Chrome 154 의 미디어 메뉴(재실측 2026-10-05) — 페이지 항목(뒤로 등)은 내지 않는다. 링크 안의 미디어는 링크 묶음이
+        // 먼저다(Chrome 의 링크 묶음 — 미디어 묶음 차례).
         const video = flags.media_video;
+        if (flags.link) {
+            menu.command(flags, .open_link_new_tab, .web_menu_open_link_new_tab);
+            menu.command(flags, .open_link_new_window, .web_menu_open_link_new_window);
+            menu.separator();
+            menu.command(flags, .copy_link_address, .web_menu_copy_link_address);
+            menu.separator();
+        }
         menu.check(flags, .media_loop, .web_menu_media_loop, flags.media_loop);
         menu.check(flags, .media_controls, .web_menu_media_controls, flags.media_controls);
         menu.separator();
@@ -352,6 +360,11 @@ test "a video is loop · show all controls (checked by state, off when they cann
     try std.testing.expectEqual(i18n.Key.web_menu_open_audio_new_tab, audio.items[3].label.?);
     try std.testing.expect(!audio.items[3].enabled and !audio.items[4].enabled);
     for (build(.{ .link = true, .selection = true, .can_copy = true }, true).slice()) |item| try std.testing.expect(!item.checked);
+    // 링크 안의 동영상 — 링크 묶음 — 미디어 묶음.
+    const linked = build(.{ .link = true, .link_openable = true, .media = true, .media_video = true, .media_can_loop = true }, true);
+    try std.testing.expectEqualSlices(Kind, &.{ .command, .command, .separator, .command, .separator, .command, .command, .separator, .command, .command }, kinds(linked, &buf));
+    try std.testing.expectEqual(Command.copy_link_address, linked.items[3].command);
+    try std.testing.expectEqual(Command.media_loop, linked.items[5].command);
 }
 
 test "no flag combination makes a leading, trailing or doubled separator or overflows the list" {

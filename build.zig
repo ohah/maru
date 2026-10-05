@@ -1586,7 +1586,7 @@ pub fn build(b: *std.Build) void {
     const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
     const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
-    run_editor_host_tests.addArg("--maru-expect-tests=86"); // 2 aggregation blocks + 75 native tests + 9 pure policies
+    run_editor_host_tests.addArg("--maru-expect-tests=91"); // 2 aggregation blocks + 78 native tests + 11 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
@@ -4348,7 +4348,7 @@ pub fn build(b: *std.Build) void {
     attachPngCodec(b, marker_preview_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다(위 주석)
     marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
-    run_marker_preview_tests.addArg("--maru-expect-tests=90"); // MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
+    run_marker_preview_tests.addArg("--maru-expect-tests=91"); // MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
     b.step("test-marker-preview", "Run the terminal image-marker preview core judges only (MP1 filter)").dependOn(&run_marker_preview_tests.step);
 
     // 색 구성 통지(DECSET 2031 / DSR 996)의 코어 판정자만 — 위 `test-marker-preview` 와 같은 이유(변이 한 개에 전체 test 6 분을 안 쓴다).

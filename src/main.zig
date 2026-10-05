@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 /// tree-sitter. **root 모듈이 이미 갖고 있다**(build.zig 의 `-Msyntax`) — 편집기 색칠이 쓴다.
 const ts = @import("syntax");
+const win_sidebar = @import("platform/windows/chrome/sidebar.zig");
 /// Shared archive worker; the facade keeps both hosts on one owner type.
 const agent_archive_backend = maru.app.agent_session_archive_backend;
 /// 카드를 펼쳤을 때 읽는 **상세**. 스캔 백엔드와 같은 공통 계층의 파일이고,
@@ -1998,7 +1999,7 @@ test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹�
     var saw_no_dock = false;
     var w: u32 = 40;
     while (w <= 1600) : (w += 37) {
-        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0, 0, 0);
+        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0, 0, 0, null);
         // 창을 넘지 않는다.
         try std.testing.expect(g.terminal.x + g.terminal.w <= w);
         try std.testing.expect(g.dock.x + g.dock.w <= w);
@@ -6471,9 +6472,10 @@ fn dockGeometryFor(
     /// 하단 상태표시줄 높이(px). **창 전폭**이라 작업영역 밖에 살고, `compute` 가 창 높이에서 **먼저**
     /// 깎는다 — 그래서 이 값 하나로 터미널 행·도크·사이드바 뷰포트가 전부 함께 줄어든다(W8.9).
     status_bar_px: u32,
+    tk: ?*const maru.chrome.Tokens,
 ) maru.session.dock_layout.Geometry {
     const dock_layout = maru.session.dock_layout;
-    return dock_layout.compute(.{
+    var result = dock_layout.compute(.{
         .backing_width_px = width_px,
         .backing_height_px = height_px,
         .sidebar_width_px = sidebar_width_px,
@@ -6486,9 +6488,21 @@ fn dockGeometryFor(
         .size_pt = size_pt,
         .visible = visible,
         .view = view,
-        .view_bar_px = cell_h * 2,
+        .view_bar_px = if (titlebar_px == 0) cell_h * 2 else 0,
         .status_bar_px = status_bar_px,
     });
+    if (titlebar_px != 0 and visible) {
+        const grid = winDockViewBarGrid(tk.?, cell_w);
+        const width: u32 = grid.slot_cols * cell_w * @as(u32, maru.chrome.components.dock_view_bar.slot_count);
+        const captions = @max(cell_w * 5, 46) * 3;
+        const right = width_px -| captions;
+        // Hide the complete switcher when a narrow window cannot fit it.
+        result.view_bar = if (right >= sidebar_width_px + width)
+            .{ .x = right - width, .y = 0, .w = width, .h = titlebar_px }
+        else
+            .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    }
+    return result;
 }
 
 /// `win32-terminal-smoke` 의 선택지. **디스패치에서 떼어 낸다** — 저 안에서는 인자 반복자와 stderr 가
@@ -6827,7 +6841,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_keys_consumed: usize = 0;
     // **사이드바 폭은 config 가 정한다**(`sidebar.width`, pt). 배율이 1 이라 pt 가 곧 px 다 —
     // 포트 전체에 DPI 인지가 없다(§2m.35 의 한계와 같은 축).
-    const sidebar_w: u32 = cfg.sidebar.width_pt;
+    var sidebar_w: u32 = cfg.sidebar.width_pt;
     // **지금 클라이언트 크기.** 디바이더 드래그가 기하를 다시 계산할 때 이 값이 필요하다 —
     // `initial` 은 시작 값이라 창을 키운 뒤 쓰면 도크가 옛 창 기준으로 선다.
     // ── 프레임리스 창 (W8.8⒝) ───────────────────────────────────────────────────────────────
@@ -6853,7 +6867,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 
     var client_w = initial.width_px;
     var client_h = initial.height_px;
-    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
+    const chrome_tokens = chromeTokensFor(cfg);
+    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
 
     // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
     // 긴 줄이 도크 아래로 흘러 들어간다(그리는 자리는 잘려도 셸의 줄바꿈이 어긋난다).
@@ -7531,6 +7546,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_click_judgeable = false;
     var dock_click_target_row: usize = 0;
     var divider_drag: ?f64 = null;
+    var sidebar_resize_drag: ?i32 = null;
+    var sidebar_writer = try win_sidebar.Writer.init(io);
+    defer sidebar_writer.deinit();
     var divider_grabs: usize = 0;
     var divider_moves: usize = 0;
     var view_switches: usize = 0;
@@ -7949,7 +7967,6 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     };
 
     // **크롬 색은 테마에서 온다**(§2m.33 이 적어 둔 부채를 갚는다). macOS 와 같은 함수를 지난다.
-    const chrome_tokens = chromeTokensFor(cfg);
 
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
     // 상단 띠(배경 + 캡션 버튼). 호버가 바뀌면 다시 만든다.
@@ -11372,13 +11389,31 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             tree_watch_dirty = true;
             tree_watch_due = std.Io.Clock.awake.now(io).nanoseconds + 200 * std.time.ns_per_ms;
         }
+        sidebar_writer.tick() catch |err| std.log.warn("sidebar config save failed({s})", .{@errorName(err)});
+        if (confirm_state.open or file_notice.open or pending_save != null or file_close_waiting or initial_open.job != null) {
+            sidebar_resize_drag = null;
+            divider_drag = null;
+        }
+        // Use the same divider geometry that routes pointer gestures.
+        window.horizontal_resize_rect = if (dock_visible and !confirm_state.open and !file_notice.open and
+            pending_save == null and !file_close_waiting and initial_open.job == null)
+            .{ .left = @intCast(geom.divider.x), .top = @intCast(geom.divider.y), .right = @intCast(geom.divider.x + geom.divider.w), .bottom = @intCast(geom.divider.y + geom.divider.h) }
+        else
+            null;
+        window.sidebar_resize_rect = if (sidebar_w != 0 and !confirm_state.open and !file_notice.open and
+            pending_save == null and !file_close_waiting and initial_open.job == null)
+            .{ .left = @as(i32, @intCast(sidebar_w)) - 5, .top = @intCast(titlebar_px), .right = @as(i32, @intCast(sidebar_w)) + 5, .bottom = @intCast(client_h -| status_bar_px) }
+        else
+            null;
+        window.caption_buttons_px = caption_buttons_px + geom.view_bar.w;
+        window.horizontal_resize_active = divider_drag != null or sidebar_resize_drag != null;
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
                 try present.resize(r.width_px, r.height_px);
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
                 client_w = r.width_px;
                 client_h = r.height_px;
-                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
+                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
                 rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
@@ -11785,9 +11820,82 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     hbar_drag_release = false;
                     vbar_drag_release = false;
                     editor_bar_file = null;
+                    sidebar_resize_drag = null;
+                    divider_drag = null;
                 }
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
+
+                if (sidebar_resize_drag) |offset| {
+                    if (m.kind == .left_up or m.kind == .capture_lost) {
+                        if (m.kind == .left_up) sidebar_writer.schedule(sidebar_w);
+                        sidebar_resize_drag = null;
+                    } else if (m.kind == .moved) {
+                        const next = win_sidebar.widthForPointer(m.x_px, offset, cell_w);
+                        if (next != sidebar_w) {
+                            sidebar_w = next;
+                            window.setFrameless(titlebar_px, caption_buttons_px, sidebar_w);
+                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
+                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                            // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
+                            if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
+                                resizeAllSessions(&runtime, sessions.items, size, io);
+                                // **리사이즈도 판정한다.** 여기가 없으면 불변식이 **첫 프레임에서만** 지켜진다 —
+                                // `resizeActiveSurface` 가 실패하면(위 `catch {}`) 기하는 바뀌었는데 코어는 옛
+                                // 격자로 남고, 화면은 그럴듯한 채로 셸의 줄바꿈만 어긋난다.
+                                resizes += 1;
+                                // **방금 넘긴 값과 견주면 안 된다** — 그건 언제나 같아서 아무것도 안 잰다
+                                // (실측: 리사이즈 격자를 창에서 유도하는 뮤턴트가 `grid_mismatches=0` 으로
+                                // 통과했다. 화면 숫자는 153x34 로 틀렸는데도). **사각형에서 독립으로** 다시
+                                // 뽑아 견준다.
+                                if (app_window.active()) |a| {
+                                    const want_now = win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h) orelse
+                                        maru.terminal.Size{ .cols = 0, .rows = 0 };
+                                    if (a.core.size.cols != want_now.cols or a.core.size.rows != want_now.rows) grid_mismatches += 1;
+                                }
+                            }
+                            // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                                dock_rebuild_failures += 1;
+                            };
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                            rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
+                        }
+                    }
+                    continue;
+                }
+                if (divider_drag) |off| {
+                    if (m.kind == .left_up or m.kind == .capture_lost) {
+                        divider_drag = null;
+                    } else if (m.kind == .moved) {
+                        const cand = maru.session.dock_layout.sizePtForPointer(
+                            geom,
+                            .right,
+                            @as(f64, @floatFromInt(m.x_px)) + off,
+                            @floatFromInt(m.y_px),
+                            1000,
+                        );
+                        if (cand) |pt| if (pt != dock_size_pt) {
+                            dock_size_pt = pt;
+                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
+                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                            // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
+                            // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
+                            // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
+                            // 1254px, 터미널이 35 열로 쪼그라들었다). macOS 가 같은 자리에서
+                            // `sizePtForEffectiveWidth` 로 되쓰는 이유다.
+                            dock_size_pt = maru.session.dock_layout.sizePtForEffectiveWidth(geom.dock_size_px, 0, 1000);
+                            // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
+                            if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
+                                resizeAllSessions(&runtime, sessions.items, size, io);
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                                dock_rebuild_failures += 1;
+                            };
+                            divider_moves += 1;
+                        };
+                    }
+                    continue;
+                }
 
                 // A captured editor drag must precede every region handler, including titlebar
                 // and dock: releasing outside the pane must not leave a scrollbar captured.
@@ -11825,7 +11933,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 그려지는데 **안 눌린다**: 이 분기가 `continue` 로 삼켜 `regionAt` 까지 못 간다
                 // (실측 2026-08-25: 띠를 합치자마자 `header_clicks` 가 4 → 0 이 됐다).
                 if (titlebar_px != 0 and m.y_px >= 0 and m.y_px < @as(i32, @intCast(titlebar_px)) and
-                    m.x_px >= @as(i32, @intCast(sidebar_w)))
+                    m.x_px >= @as(i32, @intCast(sidebar_w)) and
+                    !(geom.view_bar.w != 0 and m.x_px >= @as(i32, @intCast(geom.view_bar.x)) and
+                        m.x_px < @as(i32, @intCast(geom.view_bar.x + geom.view_bar.w))))
                 {
                     const rects = captionButtonRects(client_w, titlebar_px, caption_btn_w);
                     var hit: ?usize = null;
@@ -11860,6 +11970,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **영역 판정보다 먼저 본다.** 거터는 도크/사이드바 사각형 **안**이라, 나중에 보면
                 // 목록 행 클릭이 막대를 가져간다(중립 doc 이 "탐색기는 스크롤바를 행보다 먼저
                 // 판정한다" 로 그 순서를 정해 뒀다).
+                if (!dragging and bar_drag == null and scm_bar_drag == null and agent_bar_drag == null and m.kind == .left_down and sidebar_w != 0 and
+                    m.y_px >= @as(i32, @intCast(titlebar_px)) and
+                    m.y_px < @as(i32, @intCast(client_h -| status_bar_px)) and
+                    m.x_px >= @as(i32, @intCast(sidebar_w)) - 5 and
+                    m.x_px < @as(i32, @intCast(sidebar_w)) + 5)
+                {
+                    sidebar_resize_drag = @as(i32, @intCast(sidebar_w)) - m.x_px;
+                    continue;
+                }
+
                 if (bar_drag) |drag| {
                     if (m.kind == .moved) {
                         const bar = if (drag.which == .dock) dock_bar else sidebar_bar;
@@ -11993,39 +12113,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 //
                 // **영역 판정보다 먼저다.** 끌다 보면 포인터가 잡기 띠를 벗어나는데, 그때 영역으로
                 // 다시 가르면 막대를 놓치고 터미널에 선택이 생긴다 — 제스처는 시작한 곳이 소유한다.
-                if (divider_drag) |off| {
-                    if (m.kind == .left_up or m.kind == .capture_lost) {
-                        divider_drag = null;
-                    } else if (m.kind == .moved) {
-                        const cand = maru.session.dock_layout.sizePtForPointer(
-                            geom,
-                            .right,
-                            @as(f64, @floatFromInt(m.x_px)) + off,
-                            @floatFromInt(m.y_px),
-                            1000,
-                        );
-                        if (cand) |pt| if (pt != dock_size_pt) {
-                            dock_size_pt = pt;
-                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
-                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
-                            // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
-                            // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
-                            // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
-                            // 1254px, 터미널이 35 열로 쪼그라들었다). macOS 가 같은 자리에서
-                            // `sizePtForEffectiveWidth` 로 되쓰는 이유다.
-                            dock_size_pt = maru.session.dock_layout.sizePtForEffectiveWidth(geom.dock_size_px, 0, 1000);
-                            // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
-                            if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
-                                resizeAllSessions(&runtime, sessions.items, size, io);
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
-                                dock_rebuild_failures += 1;
-                            };
-                            divider_moves += 1;
-                        };
-                    }
-                    continue;
-                }
-
+                // The sidebar gesture owns moves outside its narrow starting band.
+                // Windows has no traffic lights, so its header minimum uses icon cells only.
                 const region = if (dragging)
                     maru.session.dock_layout.Region.terminal
                 else
@@ -12296,7 +12385,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // 돌아왔을 때 지나가기만 해도 목록이 튄다(적대적 검증 4회차).
                                     agent_bar_drag = null;
                                     // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
-                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
+                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
                                     rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         resizeAllSessions(&runtime, sessions.items, size, io);
@@ -13203,7 +13292,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len + sidebar_cells.items.len + titlebar_cells.items.len);
         // **사이드바·도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 그 배경에 덮이면 안 된다.
         cells.appendSliceAssumeCapacity(sidebar_cells.items);
-        cells.appendSliceAssumeCapacity(dock_cells.items);
+        // Titlebar switcher cells are composited after the titlebar background below.
+        for (dock_cells.items) |cell| {
+            if (cell.rect[1] >= @as(f32, @floatFromInt(titlebar_px))) cells.appendAssumeCapacity(cell);
+        }
         // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────────────
         //
         // **내용 위에 얹는다** — 그리는 순서가 z 순서다. 거터는 상시 비워 둔 자리라 겹칠 것이
@@ -13456,6 +13548,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const term_last = cells.items.len;
         // **띠는 맨 위다** — 터미널·도크 위에 얹혀야 캡션 버튼이 안 가려진다.
         cells.appendSlice(allocator, titlebar_cells.items) catch {};
+        for (dock_cells.items) |cell| {
+            if (cell.rect[1] < @as(f32, @floatFromInt(titlebar_px))) cells.append(allocator, cell) catch {};
+        }
         // **상태바도 맨 위다** — 창 전폭이라 터미널·도크 위에 얹힌다(그 아래가 이미 비워져 있다:
         // `compute` 가 창 높이에서 먼저 깎았다).
         cells.appendSlice(allocator, status_cells.items) catch {};
@@ -20829,4 +20924,117 @@ test "Windows editor host native new terminal publishes fresh size and focus onl
     try std.testing.expect(view == .file and view.file == 99);
     _ = try runtime.writeInputNonBlocking(first_id, "");
     _ = try runtime.writeInputNonBlocking(second_id, "");
+}
+
+test "Windows editor host resize cursor preserves client bounds and capture ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var window: win32_window.Window = .{ .hwnd = undefined, .allocator = std.testing.allocator, .horizontal_resize_rect = .{ .left = 500, .top = 38, .right = 510, .bottom = 613 } };
+    try std.testing.expect(window.wantsHorizontalCursor(500, 38, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(510, 38, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(500, 613, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(499, 200, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(505, 200, false));
+    window.capturing = true;
+    try std.testing.expect(!window.wantsHorizontalCursor(600, 200, true));
+    window.horizontal_resize_active = true;
+    try std.testing.expect(window.wantsHorizontalCursor(600, 200, true));
+    window.capturing = false;
+    try std.testing.expect(!window.wantsHorizontalCursor(600, 200, true));
+    window.capturing = true;
+    window.horizontal_resize_rect = .{ .left = 500, .top = 38, .right = 500, .bottom = 613 };
+    try std.testing.expect(!window.wantsHorizontalCursor(600, 200, true));
+    window.horizontal_resize_rect = null;
+    try std.testing.expect(!window.wantsHorizontalCursor(600, 200, true));
+    window.capturing = false;
+    window.sidebar_resize_rect = .{ .left = 175, .top = 38, .right = 185, .bottom = 613 };
+    try std.testing.expect(window.wantsHorizontalCursor(180, 200, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(185, 200, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(180, 613, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(180, 200, false));
+}
+
+test "Windows editor host sidebar width clamps huge pointers and preserves grab offset" {
+    try std.testing.expectEqual(@as(u32, 300), win_sidebar.widthForPointer(297, 3, 9));
+    try std.testing.expectEqual(@as(u32, 120), win_sidebar.widthForPointer(-1000, 0, 9));
+    try std.testing.expectEqual(@as(u32, 260), win_sidebar.widthForPointer(1, 0, 20));
+    try std.testing.expectEqual(@as(u32, 480), win_sidebar.widthForPointer(std.math.maxInt(i32), std.math.maxInt(i32), 9));
+    try std.testing.expectEqual(@as(u32, 480), win_sidebar.widthForPointer(0, 0, std.math.maxInt(u32)));
+}
+
+test "Windows editor host sidebar atomic config preserves comments unrelated keys and refuses oversized source" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const dir = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    const path = try std.fmt.allocPrint(a, "{s}/config", .{dir});
+    defer a.free(path);
+    const source = "# keep comment\nfont.size = 17\nsidebar.width = 180\nfuture.key = keep\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = source });
+    try win_sidebar.writeWidth(a, io, path, 300);
+    const updated = try tmp.dir.readFileAlloc(io, "config", a, .limited(1 << 20));
+    defer a.free(updated);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "# keep comment") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "font.size = 17") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "future.key = keep") != null);
+    var parsed = try maru.config.loader.parse(a, updated);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u32, 300), parsed.config.sidebar.width_pt);
+    try std.testing.expectError(error.InvalidWidth, win_sidebar.writeWidth(a, io, path, 481));
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "sidebar.width = 180\nsidebar.width.macos = 210\nsidebar.width.windows = 220\n" });
+    try win_sidebar.writeWidth(a, io, path, 320);
+    const overrides = try tmp.dir.readFileAlloc(io, "config", a, .limited(1 << 20));
+    defer a.free(overrides);
+    try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width = 180") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width.macos = 210") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width.windows = 320") != null);
+    var file = try tmp.dir.createFile(io, "config", .{});
+    try file.setLength(io, (1 << 20) + 1);
+    file.close(io);
+    try std.testing.expectError(error.StreamTooLong, win_sidebar.writeWidth(a, io, path, 200));
+    const stat = try tmp.dir.statFile(io, "config", .{});
+    try std.testing.expectEqual(@as(u64, (1 << 20) + 1), stat.size);
+}
+
+test "Windows editor host titlebar dock icons share caption line and free content height" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const tk = chromeTokensFor(maru.config.Config{});
+    const geom = dockGeometryFor(1000, 640, 9, 19, true, 0, .explorer, 180, 38, 27, &tk);
+    try std.testing.expectEqual(@as(u32, 0), geom.view_bar.y);
+    try std.testing.expectEqual(@as(u32, 38), geom.view_bar.h);
+    try std.testing.expectEqual(@as(u32, 38), geom.tree_content.y);
+    try std.testing.expectEqual(@as(u32, 862), geom.view_bar.x + geom.view_bar.w);
+    try std.testing.expectEqual(maru.session.dock_layout.Region.view_bar, maru.session.dock_layout.regionAt(geom, @floatFromInt(geom.view_bar.x + 1), 19));
+    const tiny = dockGeometryFor(300, 640, 9, 19, true, 0, .explorer, 180, 38, 27, &tk);
+    try std.testing.expectEqual(@as(u32, 0), tiny.view_bar.w);
+}
+
+test "Windows editor host sidebar writer coalesces releases and drains final width on shutdown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const dir = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    const path = try std.fmt.allocPrint(a, "{s}/config", .{dir});
+    defer a.free(path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "# coalesced\nsidebar.width = 180\n" });
+    var writer: win_sidebar.Writer = .{ .io = io, .path = try std.heap.smp_allocator.dupe(u8, path) };
+    writer.schedule(200);
+    writer.tick() catch |err| {
+        writer.deinit();
+        return err;
+    };
+    writer.schedule(260);
+    writer.schedule(320);
+    writer.deinit();
+    const result = try tmp.dir.readFileAlloc(io, "config", a, .limited(1 << 20));
+    defer a.free(result);
+    var parsed = try maru.config.loader.parse(a, result);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u32, 320), parsed.config.sidebar.width_pt);
+    try std.testing.expect(std.mem.indexOf(u8, result, "# coalesced") != null);
 }

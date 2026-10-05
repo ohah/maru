@@ -655,3 +655,9 @@ Windows `editor/backup_worker.zig`는 주기적 recovery의 독립 body/identity
 native I/O job을 소유한다. Registry ack와 drop 승인은 앱 스레드에 남으며 pinned
 store의 borrowed handle은 actual 완료까지 유지한다. 앱은 close 의도를 보존해
 백업 쓰기 뒤 삭제가 다시 레코드를 생성하는 경쟁을 막는다.
+
+### Windows sidebar chrome 저장 소유
+
+`src/platform/windows/chrome/sidebar.zig`는 sidebar 폭 정책과 비동기 partial config writer를
+소유한다. `main.zig`는 release 요청·완료 polling과 공통 geometry/present 연결을 맡는다.
+Win32 cursor/HTCLIENT 처리는 `src/platform/windows/win32_window.zig`에 남긴다.

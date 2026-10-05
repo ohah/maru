@@ -4173,3 +4173,41 @@ missing으로 접는 다섯 compiled runtime 변형을 검출했다. 복원 후 
 않았으며 owned HWND 합성 입력이다. 같은 앱의 오른쪽 dock divider 폭 조절은 동작했다.
 사용자가 확인한 왼쪽 sidebar 폭 조절 미구현과 resize cursor 미연결을 후속으로 잡는다.
 로그 보기·resume·live focus 버튼 연결과 전체 잔여 Windows 지원은 계속 남아 있다.
+
+## §2m.202 — Windows sidebar 폭·resize cursor·상단 도크 아이콘
+
+Windows sidebar의 고정 폭을 right-edge 드래그로 바꿨다. grab offset을 보존하고 120~480pt와
+header 13cell 최소 폭을 적용한다. macOS 신호등 여백은 Windows에 복사하지 않는다.
+terminal grid·sidebar·titlebar·status/dock geometry를 함께 갱신하며 captured move/up을
+caption보다 먼저 처리한다. modal/open/save가 시작되면 두 divider gesture를 취소한다.
+새 resize band gesture는 scrollbar보다 먼저 판정하되 기존 capture는 뺏지 않는다.
+
+`src/platform/windows/chrome/sidebar.zig`가 폭 정책과 config worker를 소유한다. release만
+저장하고 연속 요청은 최종 폭으로 coalesce한다. 읽기·부분 직렬화·flush/sync·atomic replace는
+worker에서 수행하고 종료 때 drain한다. 주석·미파싱 키를 보존하며 이미 Windows suffix가
+있으면 `sidebar.width.windows`만 바꾼다. editor safe-save의 ACL/CAS 계약과 config atomic
+write는 별개다. config의 동시 외부 편집 CAS는 추가하지 않았다.
+
+사용자 요청대로 explorer/SCM/agent/gallery switcher를 `— □ ×`와 같은 titlebar 줄의 caption
+버튼 왼쪽에 배치했다. 공통 slot geometry를 paint/hit에 사용하고 titlebar 배경 다음에 합성한다.
+switcher는 HTCLIENT, 남은 빈 곳은 창 이동 영역이다. 본문은 제거한 옛 switcher 높이만큼
+확장하며 좁은 창에는 반쯤 표시하지 않고 전 슬롯을 숨긴다. 전체 DPI 지원은 기존 후속 범위다.
+
+cursor의 베이스는 Microsoft Learn
+[Setting the Cursor Image](https://learn.microsoft.com/en-us/windows/win32/learnwin32/setting-the-cursor-image)다.
+HTCLIENT의 WM_SETCURSOR에서 LoadCursorW/SetCursor·IDC_SIZEWE를 사용하고 nonclient는
+DefWindowProc에 맡긴다. native window가 owned hit rect 두 개를 보관하며 capture move에서도
+모양을 유지한다. macOS API/폴더를 Windows 호출 경로에 끌어오지 않는다.
+
+5개 compiled runtime 변형(client guard 제거·capture 소유 가드 제거·grab offset 반전·
+Windows override 무시·switcher를 caption 밑으로 이동)을 모두 검출했다. 복원 후 Debug와
+ReleaseFast host 91개가 통과했다. atomic config·oversize 원문 보존·최종 폭 drain·caption-line
+geometry·좁은 창의 전체 숨김도 검사했다.
+
+최종 실앱 PID 52140의 private config/HOME·owned HWND에서 양쪽 경계 cursor 핸들은
+IDC_SIZEWE, 본문은 IDC_ARROW임을 GetCursorInfo로 확인했다. sidebar 180→300→320,
+상단 줄에서 capture release, Windows override만 320 저장, 주석/base/다른 키 보존과 상단
+agent 아이콘의 뷰 전환을 확인했다. 재시작 PID 47940에서 320 폭을 확인했고 두 PID의 정상
+종료 코드 0을 수집했다. 중간 재시작 PID 51024는 종료 watcher가 close 전에 timeout되어
+exit0 증거로 세지 않았고 fresh 재시작으로 다시 확인했다. 자동 HWND 입력/짧은 포인터 검사이며
+물리 입력 장기 soak로 세지 않는다. 전체 잔여 Windows 기능·agent resume/reveal/live 버튼은 남아 있다.

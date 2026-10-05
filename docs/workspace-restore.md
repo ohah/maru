@@ -658,7 +658,8 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 - custom_name은 트리 내 위치(인덱스)로 round-trip한다(cwd/title과 같은 식별).
 - 자동 제목(surface `title`)은 복원 직후 셸이 OSC를 다시 보내기 전까지의 폴백 표시용으로만 저장·소비한다. custom_name이 있으면 표시 규칙상 자동 제목보다 우선한다.
 - **하위 호환**: additive 스칼라 필드는 key-addressed로 하위호환된다(옛 파일이 그 키의 기본값으로 복원 — 폴백 없음).
-  구조 변경은 스키마 버전을 올리거나 통째 폴백한다(파일은 보존 — 아래 「checkpoint 보호」, self-heal 없음). 현재 unknown trailing line 성공 종료는 legacy 관용성이며
+  구조 변경도 헤더를 올리지 않는다(위 「헤더 정책」). 새 데이터는 v1 안에 additive 줄·필드로 넣고, 옛 reader 가 읽지 못하는
+  downgrade 방향만 문서에 적는다. 실제 parse error 는 통째 폴백한다(파일은 보존 — 아래 「checkpoint 보호」, self-heal 없음). 현재 unknown trailing line 성공 종료는 legacy 관용성이며
   새 block/tree/count의 확장점으로 일반화하지 않는다.
 
 ## 직렬화 전략: 스칼라 필드 key-addressed 파싱
@@ -693,7 +694,9 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 조용히 무시되는 트레이드오프는 optional 속성이라 감수하고, 구조 이상은 required 규칙이 잡는다(미지 키 진단 로그는 후속).
 
 **범위 밖(하위호환 안 되는 변경).** 새 블록 타입 추가·`tree-node` 인코딩 변경·카운트 의미 변경은 지원 포맷으로 쓰지
-않고 스키마 버전을 올린다(`maru.workspace.v1`→`.v2`). known block 내부에서 실제 parse error가 난 경우에만 통째
+않는다 — 그래도 **헤더는 올리지 않는다**(위 「헤더 정책」, 2026-07-08 사용자 결정 845c98459). `maru.workspace.v2` 는
+2026-10-04~05 에 쓰인 파일을 위한 **읽기 별칭**이라 새 버전 이름으로 다시 쓸 수 없다. 구조 변경이 꼭 필요하면 사용자 결정부터
+받는다. known block 내부에서 실제 parse error가 난 경우에만 통째
 fallback한다 — 기본 창으로 시작하고 파일은 덮어쓰지 않는다(「checkpoint 보호」, self-heal 없음). unknown top-level trailing line은 현 parser가 early-success하므로 뒤 Window를 조용히 잃을 수
 있고, 이 관용성을 구조 호환성으로 간주하지 않는다. additive 스칼라 필드는 버전을 안 올린다.
 
@@ -801,8 +804,8 @@ restore가 실패해도 workspace 전체를 버리지 않는다.
 헤더 불일치·known block 내부의 구조/tree/count 검증 실패·손상으로 저장 파일을 **실제로 통째로 파싱 못 하면**,
 **알림(notice) 없이 조용히 기본 단일 창으로 시작**한다. 복원 불가는 사용자 잘못이 아니므로 중앙 모달로 키 입력을
 막지 않는다. 단, v1 parser는 unknown top-level trailing line에서 early-success해 그 뒤 Window를 조용히 버릴 수 있다.
-이는 전체 parse failure/self-heal 경로가 아니며 새 구조의 forward compatibility로 사용할 수 없다. 새 구조는 v2
-reader/migration을 먼저 설계한다. **additive 스칼라 필드 추가는 key-addressed 하위호환이라 여기로 안 떨어진다**.
+이는 전체 parse failure/self-heal 경로가 아니며 새 구조의 forward compatibility로 사용할 수 없다. 새 구조는 헤더
+bump·migration 이 아니라 위 「헤더 정책」을 따르고, 필요하면 사용자 결정을 먼저 받는다. **additive 스칼라 필드 추가는 key-addressed 하위호환이라 여기로 안 떨어진다**.
 일부만 복원 실패(파싱은 됐으나 일부 창 적용 실패)는 이와 별개로 안내할 수 있다.
 
 ## 자동 테스트

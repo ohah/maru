@@ -40,7 +40,8 @@
 헤더 분리, 손상/중복/길이 상한, State 수명과 registry publication, 모든 관련 allocation
 실패를 검사한다. 제품의 일반 로컬 문서는 이제 ID를 발급하고 첫 백업에만 `.claim`을 예약한다.
 `recovery_store.Owner`는 공유 뷰 사이에서 같은 쓰기 소유권을 유지한다. untitled/remote 백업은 기존 계약을 쓴다.
-`workspace`의 v2 문서 표/뷰 참조와 writer 전환은 함께 연결했으며, U4b-15/16은
+`workspace`의 문서 표/뷰 참조와 writer 전환은 함께 연결했으며(당시 `maru.workspace.v2` 헤더로 썼으나 2026-10-05 v1 으로
+복원 — [헤더 정책](../workspace-restore.md#헤더-정책)), U4b-15/16은
 같은 경로의 독립 문서 A/B를 반복 백업하거나 A를 정리해도 B가 보존되는 회귀 판정으로 바꿨다.
 
 [예약 후보 실험](editor-recovery-reservation.md)은 #4107 시점의 비교 근거다.
@@ -205,8 +206,13 @@ restore-incomplete latch로 자동 checkpoint 덮어쓰기를 막아야 한다.
 
 ### 출시 전 단일 포맷과 저장 경계
 
-사용자는 아직 출시 전이므로 하위 버전 호환을 고려하지 않아도 된다고 명시했다.
-v1 reader 유지·migration·구버전 보호를 위한 별도 v2 파일 운영은 이번 설계에서 제거한다.
+> **2026-10-05 철회.** 아래 두 문장(「하위 버전 호환을 고려하지 않아도 된다」, 「v1 reader 유지 … 제거」)은
+> 2026-07-08 사용자 결정(845c98459 — 헤더 `maru.workspace.v1` 유지, bump·v1 거절·migration 없음)과 충돌했다.
+> 이를 근거로 헤더를 v2 로 올린 빌드는 설치 즉시 모든 사용자의 복원을 깼다. 헤더 정책의 단일 출처는
+> [workspace-restore.md 「헤더 정책」](../workspace-restore.md#헤더-정책)이다.
+
+~~사용자는 아직 출시 전이므로 하위 버전 호환을 고려하지 않아도 된다고 명시했다.~~
+~~v1 reader 유지·migration·구버전 보호를 위한 별도 v2 파일 운영은 이번 설계에서 제거한다.~~
 문서/뷰를 나눈 단일 최신 포맷을 사용한다. schema 표기는 포맷 식별 용도이며,
 헤더 변경만으로 저장 파일을 추가하지 않는다. 기존 canonical checkpoint 경로와 단일 소유 lock,
 secure atomic publication을 유지하고 host 헤더 집계를 함께 맞춘다.

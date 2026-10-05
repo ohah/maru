@@ -3128,6 +3128,17 @@ test "a new window opens only right after the menu's open-link-in-new-window ans
     apply(gpa, .{ .context_menu_closed = .{ .browser = 7, .menu = 6 } }, now);
     answerContextMenu(gpa, 7, 6, .open_link_new_window);
     try std.testing.expectEqual(@as(i64, 0), s7.new_window_credit_ms);
+    // W6h②: 「새 탭에서 동영상 열기」 답도 새 탭 장을 주고, 그 메뉴가 열 수 없다고 보인 것(표지 꺼짐)에는 주지 않는다(심층 방어).
+    s7.new_tab_credits = .{};
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 7, .point = .{ .x = 1, .y = 1 }, .flags = .{ .media = true, .media_video = true, .media_openable = true } } }, now);
+    _ = takeContextMenu(7);
+    answerContextMenu(gpa, 7, 7, .open_media_new_tab);
+    try std.testing.expect(s7.new_tab_credits.any());
+    s7.new_tab_credits = .{};
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 8, .point = .{ .x = 1, .y = 1 }, .flags = .{ .media = true, .media_video = true } } }, now);
+    _ = takeContextMenu(7);
+    answerContextMenu(gpa, 7, 8, .open_media_new_tab);
+    try std.testing.expect(!s7.new_tab_credits.any());
     // 메뉴 「새 탭에서 이미지 열기」 답도 새 탭 장을 준다.
     s7.new_tab_credits = .{};
     apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 5, .point = .{ .x = 1, .y = 1 }, .flags = .{ .image = true, .image_openable = true } } }, now);

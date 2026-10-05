@@ -55,7 +55,21 @@ pub fn originOf(url: []const u8) ?[]const u8 {
     const rest = url[sep + 3 ..];
     const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
     if (end == 0) return null;
-    return url[0 .. sep + 3 + end];
+    // 사용자 정보(`u:p@`)는 출처가 아니다(`location.origin` 에 없다 — W6h② 적대 검증 5 회차). 그 뒤만 남긴다.
+    const at = std.mem.lastIndexOfScalar(u8, rest[0..end], '@') orelse return url[0 .. sep + 3 + end];
+    if (at + 1 == end) return null;
+    return originBuf(url[0..sep], rest[at + 1 .. end]);
+}
+
+var origin_scratch: [wire.max_url_bytes]u8 = undefined;
+
+/// 사용자 정보를 뗀 출처를 만든다(한 스레드 — sidecar UI 스레드, 다음 부름까지 유효).
+fn originBuf(scheme: []const u8, host: []const u8) ?[]const u8 {
+    if (scheme.len + 3 + host.len > origin_scratch.len) return null;
+    @memcpy(origin_scratch[0..scheme.len], scheme);
+    @memcpy(origin_scratch[scheme.len .. scheme.len + 3], "://");
+    @memcpy(origin_scratch[scheme.len + 3 .. scheme.len + 3 + host.len], host);
+    return origin_scratch[0 .. scheme.len + 3 + host.len];
 }
 
 test "the origin of a frame url is scheme and authority, only for http and https" {
@@ -64,6 +78,11 @@ test "the origin of a frame url is scheme and authority, only for http and https
     try std.testing.expect(originOf("about:blank") == null);
     try std.testing.expect(originOf("data:text/html,x") == null);
     try std.testing.expect(originOf("https:///x") == null);
+    try std.testing.expectEqualStrings("https://a.example", originOf("https://a.example#x").?);
+    try std.testing.expectEqualStrings("https://a.example", originOf("https://a.example?q").?);
+    try std.testing.expectEqualStrings("http://h.example:81", originOf("http://u:p@h.example:81/v").?);
+    try std.testing.expect(originOf("http://u@/v") == null);
+    try std.testing.expect(originOf("ftp://a.example/") == null);
 }
 
 /// 이어 받는 팝업(W6f)이 처음 갈 수 있는 주소 — 새 탭 주소(`urlAllowed`)에 더해 빈 팝업(`about:blank` — `window.open()` 뒤

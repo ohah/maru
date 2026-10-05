@@ -191,8 +191,8 @@ fn tone(conn: c_int) void {
     _ = std.c.write(conn, &wav, wav.len);
 }
 
-/// W6h② 판정 페이지 — 자리는 `media_check.zig` 와 맞춘다. 0.1 초마다 상태를 제목으로(iframe 은 `postMessage`). `?s=1` 이면 a 를
-/// 우클릭하고 0.2 초 뒤 a·b 의 자리를 바꾼다.
+/// W6h② 판정 페이지 — 자리는 `media_check.zig` 와 맞춘다. 0.1 초마다 상태를 제목으로(iframe 은 `postMessage`). `?s=1` 이면 d1 을
+/// 우클릭하고 0.2 초 뒤 같은 주소의 d1·d2 자리를 바꾼다(주소로는 가를 수 없다 — 우클릭 때 찾아 둔 요소여야 한다).
 const media_page =
     "<!doctype html><title>loading</title><style>body{margin:0}audio,iframe,video{position:absolute;border:0}</style><body>" ++
     "<audio id=a controls src='/dl/tone.wav?a' style='left:10px;top:10px;width:300px;height:40px'></audio>" ++
@@ -210,7 +210,7 @@ const media_page =
     "document.getElementById('x').src='http://localhost:'+location.port+'/media-inner?id=x';" ++
     "var st={},ready=false,swapped=false,a=document.getElementById('a'),b=document.getElementById('b'),v=document.getElementById('v'),d1=document.getElementById('d1'),d2=document.getElementById('d2');" ++
     "addEventListener('message',function(e){st[e.data.id]=e.data.v});" ++
-    "if(location.search.indexOf('s=1')>=0)a.addEventListener('contextmenu',function(){setTimeout(function(){a.style.left='330px';b.style.left='10px';swapped=true},200)});" ++
+    "if(location.search.indexOf('s=1')>=0)d1.addEventListener('contextmenu',function(){setTimeout(function(){d1.style.top='290px';d2.style.top='230px';swapped=true},200)});" ++
     "var c=document.createElement('canvas');c.width=64;c.height=36;var g=c.getContext('2d'),t=0;setInterval(function(){g.fillStyle='hsl('+(t++*9%360)+',70%,50%)';g.fillRect(0,0,64,36)},40);" ++
     "var r=new MediaRecorder(c.captureStream(25),{mimeType:'video/webm'}),parts=[];r.ondataavailable=function(e){parts.push(e.data)};" ++
     "r.onstop=function(){v.src=URL.createObjectURL(new Blob(parts,{type:'video/webm'}));v.onloadedmetadata=function(){ready=true}};r.start();setTimeout(function(){r.stop()},1200);" ++
@@ -307,6 +307,10 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         "<audio id=h controls src='/dl/tone.wav?h'></audio><script>var h=document.getElementById('h');" ++
         "h.addEventListener('contextmenu',function(){setTimeout(function(){history.replaceState(null,'','#t=12')},200)});" ++
         "setInterval(function(){document.title='h '+(+h.loop)+(location.hash?' hashed':'')+(h.readyState>0?'':' wait')},100)</script>";
+    // W6h② 5 회차: 불러오지 못하는 오디오(404 — 오류 상태) — 연속 재생·새 탭이 꺼진다(Chrome — `IN_ERROR`·`CAN_SAVE`).
+    if (std.mem.eql(u8, path, "/media-err")) return "<!doctype html><title>loading</title><style>body{margin:0}audio{position:absolute;left:10px;top:10px;width:300px;height:40px}</style>" ++
+        "<audio id=e controls src='/missing.wav'></audio><script>var e=document.getElementById('e');" ++
+        "setInterval(function(){document.title='e '+(e.error?'error':'wait')},100)</script>";
     if (std.mem.eql(u8, path, "/media-scroll")) return "<!doctype html><title>loading</title><style>body{margin:0;height:3000px}audio{position:absolute;left:10px;width:300px;height:40px}</style>" ++
         "<audio id=s1 controls src='/dl/tone.wav?s' style='top:30px'></audio><audio id=s2 controls src='/dl/tone.wav?s' style='top:530px'></audio><script>" ++
         "onload=function(){scrollTo(0,500);setInterval(function(){document.title='s y'+scrollY+' s'+(+document.getElementById('s1').loop)+(+document.getElementById('s2').loop)},100)}</script>";

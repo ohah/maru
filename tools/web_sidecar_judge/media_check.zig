@@ -1,6 +1,7 @@
 //! W6h② 판정 — 동영상·오디오 우클릭 메뉴(docs/plans/web-osr-backend.md W6). 판정자가 **maru 역할**로 `context_menu` 를 받고
 //! 고른 것을 `context_menu_command` 로 답한다. 페이지 `/media` 는 0.1 초마다 미디어 상태를 제목으로 알린다(`m a<연속 재생> b<…>
-//! f<같은 출처 iframe> x<다른 사이트 iframe> vl<동영상 연속 재생> vc<동영상 제어 기능>` — iframe 은 `postMessage` 로).
+//! f<같은 출처 iframe> x<다른 사이트 iframe> vl<동영상 연속 재생> vc<동영상 제어 기능> d<같은 주소 둘> g<같은 출처 iframe 의 같은 주소 둘>
+//! y<다른 사이트 iframe 의 같은 주소 둘>` — iframe 은 `postMessage` 로, 준비 전이면 ` wait`, `?s=1` 에서 자리를 바꾼 뒤면 ` swapped`).
 //!
 //!   media-audio        오디오 — 미디어·오디오·연속 재생 가능·제어 기능 켜짐·제어 기능 끄기 불가·새 탭·주소 복사 가능. 「연속 재생」을
 //!                      고르면 그 오디오가 켜지고, 다음 메뉴는 연속 재생 켜짐으로 오고 다시 고르면 꺼진다
@@ -15,7 +16,9 @@
 //!                      같다 — 뒤집으면 꺼졌다, W6h② 적대 검증 2 회차)
 //!   media-hash         메뉴가 떠 있는 동안 페이지가 해시를 바꿔도(같은 출처) 「연속 재생」이 그 오디오를 켠다(W6h② 적대 검증 4 회차 — 주소
 //!                      전체로 비교하면 아무 일도 없었다)
-//!   media-shifted      우클릭 뒤 메뉴가 떠 있는 동안 페이지가 두 오디오의 자리를 바꿔도 「연속 재생」은 우클릭한 그 오디오를 켠다
+//!   media-shifted      우클릭 뒤 메뉴가 떠 있는 동안 페이지가 **같은 주소** 두 오디오의 자리를 바꿔도 「연속 재생」은 우클릭한 그 오디오를
+//!                      켠다(우클릭 때 찾아 둔다 — 고를 때 찾으면 다른 것을 켠다)
+//!   media-error        불러오지 못한 오디오(404)는 연속 재생·새 탭이 꺼진다(Chrome — 오류 상태·저장할 수 없음, W6h② 적대 검증 5 회차)
 //!   media-same-src     같은 주소 오디오 둘 중 우클릭한 것만 켠다 — 맨 위 문서와 같은 출처 iframe(DevTools 경로 — 주소로 찾는 보조 경로는 모른다)
 //!   media-cross-dup    다른 사이트 iframe 의 같은 주소 둘은 아무것도 켜지 않는다(사용자 결정 — 둘 이상이면 하지 않는다)
 //!   media-scrolled     500 px 스크롤한 페이지에서 화면에 보이는 오디오를 우클릭하면 그 오디오를 켠다(같은 주소의 위쪽 오디오가 아니다 —
@@ -37,7 +40,6 @@ const Command = protocol.message.ContextMenuCommandKind;
 const Flags = protocol.message.ContextMenuFlags;
 
 const a_point: Point = .{ .x = 100, .y = 30 };
-const b_point: Point = .{ .x = 420, .y = 30 };
 const f_point: Point = .{ .x = 100, .y = 100 };
 const x_point: Point = .{ .x = 100, .y = 180 };
 const v_point: Point = .{ .x = 150, .y = 300 };
@@ -84,6 +86,16 @@ const Watch = struct {
     fn pump(self: *Watch, ms: u32) void {
         const deadline = os.nowMs() + ms;
         while (os.nowMs() < deadline) self.step();
+    }
+
+    /// 제목에 `part` 가 있고 ` wait` 가 없을 때까지(준비된 페이지).
+    fn untilReady(self: *Watch, part: []const u8, ms: u32) bool {
+        const deadline = os.nowMs() + ms;
+        while (os.nowMs() < deadline) {
+            if (std.mem.indexOf(u8, self.title(), part) != null and std.mem.indexOf(u8, self.title(), "wait") == null) return true;
+            self.step();
+        }
+        return false;
     }
 
     /// 제목에 `part`(예: ` a1`)가 들어올 때까지.
@@ -216,7 +228,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     report(dd != null and gg != null and d_ok and g_ok, "media-same-src", std.fmt.bufPrint(&detail, "맨 위 아래 것만 {} · iframe 아래 것만 {} · 제목 「{s}」", .{ d_ok, g_ok, w.title() }) catch "");
     // 다른 사이트 iframe 의 같은 주소 둘 — 보조 경로는 아무것도 하지 않는다.
     const yy = try w.rightClick(y2_point);
-    const y_media = w.flags.media_audio;
+    const y_media = w.flags.media_audio and w.flags.media_can_loop; // 고를 수 있어야 「그대로」가 뜻이 있다
     try w.pick(yy, .media_loop);
     w.pump(1_500);
     const y_none = std.mem.indexOf(u8, w.title(), " y00") != null;
@@ -234,7 +246,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     // 긴 주소 — 아래 것만.
     w.title_len = 0;
     try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/media-long") } });
-    const long_ready = w.untilPart("l 00", wait_ms) and !w.untilPart("wait", 0);
+    const long_ready = w.untilReady("l 00", wait_ms);
     const lg = try w.rightClick(.{ .x = 100, .y = 100 });
     try w.pick(lg, .media_loop);
     const long_ok = w.untilPart("l 01", 3_000);
@@ -243,7 +255,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     // 메뉴가 떠 있는 동안 페이지가 스스로 켠다 — 고른 뒤에도 켜짐.
     w.title_len = 0;
     try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/media-want") } });
-    const want_ready = w.untilPart("w 0", wait_ms) and !w.untilPart("wait", 0);
+    const want_ready = w.untilReady("w 0", wait_ms);
     const wm = try w.rightClick(.{ .x = 100, .y = 30 });
     const shown_off = !w.flags.media_loop;
     const page_on = w.untilPart("w 1", 2_000);
@@ -255,7 +267,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     // 메뉴가 떠 있는 동안 해시가 바뀐다 — 그래도 켠다.
     w.title_len = 0;
     try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/media-hash") } });
-    const hash_ready = w.untilPart("h 0", wait_ms) and !w.untilPart("wait", 0);
+    const hash_ready = w.untilReady("h 0", wait_ms);
     const hm = try w.rightClick(.{ .x = 100, .y = 30 });
     const hashed = w.untilPart(" hashed", 2_000);
     try w.pick(hm, .media_loop);
@@ -265,10 +277,20 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     // 우클릭 뒤 자리가 바뀐다 — 다시 불러와 a 를 우클릭하면 페이지가 0.2 초 뒤 a·b 의 자리를 바꾼다. 0.8 초 뒤 고른다.
     if (!try w.load(port, true)) return error.MediaPageNotReady;
     w.pump(300);
-    const s1 = try w.rightClick(a_point);
+    const s1 = try w.rightClick(.{ .x = 480, .y = 250 }); // d1
     w.pump(800);
     const swapped = w.untilPart(" swapped", 2_000);
     try w.pick(s1, .media_loop);
-    const right_one = w.untilPart(" a1 b0 ", 3_000);
-    report(s1 != null and swapped and right_one, "media-shifted", std.fmt.bufPrint(&detail, "자리 바뀜 {} · 우클릭한 오디오만 켬 {} · 제목 「{s}」", .{ swapped, right_one, w.title() }) catch "");
+    const right_one = w.untilPart(" d10 ", 3_000);
+    report(s1 != null and swapped and right_one, "media-shifted", std.fmt.bufPrint(&detail, "자리 바뀜 {} · 우클릭한 오디오(같은 주소 둘 중)만 켬 {} · 제목 「{s}」", .{ swapped, right_one, w.title() }) catch "");
+
+    // 오류 상태 — 연속 재생·새 탭 꺼짐.
+    w.title_len = 0;
+    try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/media-err") } });
+    const errored = w.untilPart("e error", wait_ms);
+    const em = try w.rightClick(.{ .x = 100, .y = 30 });
+    const ef = w.flags;
+    const err_off = ef.media_audio and !ef.media_can_loop and !ef.media_openable;
+    if (em) |m| try w.pick(m, .cancel);
+    report(errored and em != null and err_off, "media-error", std.fmt.bufPrint(&detail, "오류 {} · 메뉴 {any} · 오디오 {} · 연속 재생 가능 {} · 새 탭 가능 {}", .{ errored, em, ef.media_audio, ef.media_can_loop, ef.media_openable }) catch "");
 }

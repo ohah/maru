@@ -883,6 +883,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // Zig가 소유한다(네이티브 최소화). NSView 좌표는 좌하단 원점이라 y를 뒤집는다.
     override func mouseDown(with event: NSEvent) {
         noteOsrTooltipMouseDown() // W6b: macOS 가 누름에 숨긴다 — 다음 움직임에 다시 단다
+        // W6g: 창이 뒤에 있을 때의 첫 누름(Chromium 본문)은 그 창이 key 가 되기 전에 올 수 있다 — 창 크롬·URL 클릭 판정까지 모두
+        // **이 view 의 창** 세션으로(key 창 세션으로 판정하면 다른 창의 터미널 URL·창 끌기 자리로 샜다, W6g 적대 검증 2 차).
+        guard let controller else { return }
+        controller.inViewSurface(self) { mouseDownInWindowSurface(event) }
+    }
+
+    private func mouseDownInWindowSurface(_ event: NSEvent) {
         // 사이드바 헤더 빈 영역(maru "타이틀바")이면 네이티브 타이틀바처럼: 더블클릭=창 확대(zoom), 단일 down=창 이동
         // (performDrag). 아이콘·검색·터미널 본문은 false라 아래 일반 처리로 흐른다. mouseDownCanMoveWindow=false라
         // AppKit 자동 드래그가 없어 여기서 명시적으로 한다(드래그 영역 hit-test 단일 출처는 Zig).
@@ -930,7 +937,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     override func otherMouseDown(with event: NSEvent) {
         noteOsrTooltipMouseDown()
         if event.buttonNumber >= 3 {
-            _ = controller?.handleOsrAuxButton(event, in: self)
+            // 추가 버튼도 그 view 의 창 세션으로(W6g — 창이 뒤에 있을 때의 첫 누름).
+            controller?.inViewSurface(self) { _ = controller?.handleOsrAuxButton(event, in: self) }
             return
         }
         controller?.handleMouse(event, kind: 1, in: self)
@@ -8116,6 +8124,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return true
     }
 
+    /// 그 view 가 속한 창의 세션으로 `body` 를 돌린다(W6g — 창이 뒤에 있을 때의 첫 누름은 그 창이 key 가 되기 전에 온다).
+    func inViewSurface(_ view: NSView, _ body: () -> Void) {
+        withSurface(surfaceForView(view), body)
+    }
+
     // W6g: 창이 뒤에 있을 때의 첫 누름을 view 에 넘기는가 — **그 view 의 창** 세션으로 묻는다(AppKit 은 클릭된 창이 key 가 아닐 때
     // 묻는다 — key 창의 배치로 판정하면 다른 창의 웹 본문 자리가 이 창의 터미널로 첫 누름을 새게 했다, W6g 적대 검증).
     func osrAcceptsFirstMouse(_ event: NSEvent, in view: NSView) -> Bool {
@@ -8724,15 +8737,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // move, 버튼 0 왼·1 오른·2 가운데·3 이상 뒤로·앞으로). 비활성 앱의 창에 클릭을 보내면 창 활성화가 먹거나 앱을
                 // 앞으로 올려 사용자 포커스를 빼앗으므로 창 hitTest 한 겹만 건너뛴다 — view → Swift → ABI 는 진짜 경로다.
                 testViewMouse(line, view)
-            case "firstview" where line.count >= 6:
-                // firstview 종류 fx fy dx dy [버튼 클릭수] — `view` 를 첫 창의 터미널 view 에(`newwindow` 뒤 대상·키 창은 새 창인 채로).
+            case "lastview" where line.count >= 6:
+                // lastview 종류 fx fy dx dy [버튼 클릭수] — `view` 를 마지막 창의 터미널 view 에(`firstwindow` 뒤 — 대상은 첫 창인 채로).
                 // 누름은 그 view 의 창 세션으로 가야 한다(W6g — 창이 뒤에 있을 때의 첫 누름은 그 창이 key 가 되기 전에 온다).
-                if let first = windows.first?.window, let content = first.contentView { testViewMouse(line, content, in: first) }
+                if let last = windows.last?.window, let content = last.contentView { testViewMouse(line, content, in: last) }
             case "firstmouse" where line.count >= 3:
                 // firstmouse fx fy — 그 자리의 누름을 창이 뒤에 있을 때도 view 에 넘기는가(`acceptsFirstMouse`). 셸에서 띄운 시험 앱은 맨
-                // 앞이 될 수 없어 진짜 첫 누름 대신 AppKit 이 묻는 그 메서드를 같은 사건으로 부른다. 끝에 `first` 면 첫 창의 view 에
-                // 묻는다(`newwindow` 뒤 — 대상·키 창은 새 창인 채로).
-                let target = line.count >= 4 && line[3] == "first" ? windows.first?.window?.contentView : view
+                // 앞이 될 수 없어 진짜 첫 누름 대신 AppKit 이 묻는 그 메서드를 같은 사건으로 부른다. 끝에 `last` 면 마지막 창의 view 에
+                // 묻는다(`firstwindow` 뒤 — 대상은 첫 창인 채로).
+                let target = line.count >= 4 && line[3] == "last" ? windows.last?.window?.contentView : view
                 if let view = target, let terminal = Self.firstTerminalView(in: view.window?.contentView) {
                     let fx = Double(line[1]) ?? 0, fy = Double(line[2]) ?? 0
                     let local = NSPoint(x: fx * view.bounds.width, y: view.bounds.height - fy * view.bounds.height)

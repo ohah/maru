@@ -432,3 +432,19 @@ watcher 설치 여부와 독립적이다. snapshot 적용 후 행 투영 OOM은 
 runtime 변형 모두 검출하고 원본을 복원했다. 지속적인 권한 오류·root 교체의 사용자
 표시 및 장기 soak는 별도 잔여 항목이다. 이번 실패 주입은 테스트 allocator 경로이며
 실앱의 강제 OOM을 재현했다고 주장하지 않는다.
+
+
+### §2m.191 Windows 종료 flush의 worker 연결
+
+실앱 종료 defer는 주기적 in-flight job을 실제 결과까지 drain한 다음, 아직 backup_dirty인
+문서를 한 번씩 worker에 제출한다. 종료에는 debounce를 적용하지 않는다. clean 삭제는
+최신 packet 검증과 vote를 거치고 실제 완료 뒤에만 문서 lease/root를 해제한다.
+실패는 보고하고 다음 문서로 진행하며 동기 store.write fallback이나 무한 재시도를 하지 않는다.
+
+`test-win32-backup-worker` 16개가 Debug/ReleaseFast에서 통과했다. 종료 flush 테스트는
+미래 debounce를 가진 Xbase/CRLF를 즉시 백업하고 원본 BOM/base/CRLF를 보존하며
+완료 시 pending job이 없는지 확인한다. 종료 debounce 복원·flush 생략·본문 손상·epoch
+검증 제거·uncertain clean 판정 손상의 다섯 compiled runtime 결함을 검출한 뒤 원본을 복원했다.
+이는 앱이 호출하는 동일 종료 helper와 네이티브 저장 검증이며 실앱 crash 종료는 flush를
+실행하지 않으므로 이 테스트의 대체 증거로 주장하지 않는다. 명시적 close의 backup 삭제와
+owner/드문 extra-root handle 정리는 아직 동기다. 전체 Windows 지원의 완료를 의미하지 않는다.

@@ -1042,7 +1042,8 @@ pub fn rebuildAgentSessionArchiveFilter(self: *AppSession) void {
     }
     // records는 worker가 마지막 활동 시각 내림차순으로 발행한다. 오래된순은 그 목록을 **뒤집기만**
     // 하면 된다 — 여기서 다시 정렬하면 정렬 키가 두 곳에 생겨 서로 어긋날 수 있다. 그룹은 이 순서를
-    // 따라 projection이 다시 만들므로 그룹 순서와 그룹 안 순서가 함께 뒤집힌다.
+    // 따라 projection이 다시 만든다(그룹 순서 = 목록에 처음 나타난 순서) — 그래서 그룹 안 순서가 뒤집히고, 가장
+    // 오래된 기록의 그룹이 맨 앞에 온다(그룹이 섞여 있으면 그룹 순서 자체가 꼭 거꾸로가 되지는 않는다).
     if (self.agent_session_archive_sort == .oldest_first)
         std.mem.reverse(usize, self.agent_session_archive_filtered_indices.items);
     rebuildAgentSessionArchiveProjection(self);
@@ -1514,6 +1515,8 @@ pub fn buildAgentSessionDockItems(
                         .focus_live_enabled = detail.state == .ready and archiveSessionHasLiveMapping(self, &detail),
                     };
                 };
+                // `identity` 는 record 배열의 자리다. archive smoke 의 카드 probe 가 이것을 그대로 `state` 로 내보낸다(AS6-b
+                // 정렬 fixture 의 «첫 카드» 증거) — 출처에서 나온 id 로 바꾸면 그 경계(신원 비노출)가 깨지므로 probe 도 함께 본다.
                 try out.append(allocator, .{ .card = .{
                     .identity = @intCast(record_index),
                     .provider = switch (parsed.provider) {
@@ -1691,58 +1694,65 @@ pub fn agentSessionDockSmokeProbe(self: *const AppSession) AgentSessionArchiveSm
     if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return .{};
     const content = dock_ops.dockGeometry(self).tree_content;
     for (self.agent_session_dock_actions.items) |action| {
-        switch (action.intent) {
-            .select_card => {},
+        const record = switch (action.intent) {
+            .select_card => |identity| identity,
             else => continue,
-        }
+        };
         if (action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;
-        for (self.agent_session_dock_entries.items) |entry| {
-            const ui_action = entry.action orelse continue;
-            if (ui_action.id != action.action_id) continue;
-            const visible = smokeProbeVisibleRect(entry) orelse continue;
-            return .{
-                .request_id = self.agent_session_dock_snapshot_generation,
-                .generation = self.agent_session_dock_snapshot_generation,
-                .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
-                .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
-                .width_px = visible.width,
-                .height_px = visible.height,
-                .present = true,
-                .enabled = ui_action.enabled,
-            };
-        }
+        var probe = publishedActionSmokeProbe(self, content, action.action_id) orelse continue;
+        // **첫 카드의 스냅샷 서수**(AS6-b) — 정렬 토글 fixture 가 표시 순서가 뒤집혔는지를 보는 증거다. 기록 배열의
+        // 자리일 뿐 제목·세션 ID·경로가 아니다(이 경계를 넘지 않는 것들). 정렬은 표시 층만 뒤집으므로 같은 스냅샷에서
+        // 첫 카드의 서수가 바뀌면 순서가 바뀐 것이다.
+        probe.state = std.math.cast(u32, record) orelse std.math.maxInt(u32);
+        return probe;
     }
     return .{};
+}
+
+/// 이미 그려진 dock action 하나의 보이는 hit rect. 카드·refresh·정렬 토글 probe 가 같은 자리를 읽는다 —
+/// 각자 풀면 그린 자리와 누르는 자리가 갈라진다.
+fn publishedActionSmokeProbe(self: *const AppSession, content: @FieldType(dock_layout.Geometry, "tree_content"), action_id: chrome.ui.tree.UiActionId) ?AgentSessionArchiveSmokeProbe {
+    for (self.agent_session_dock_entries.items) |entry| {
+        const ui_action = entry.action orelse continue;
+        if (ui_action.id != action_id) continue;
+        const visible = smokeProbeVisibleRect(entry) orelse continue;
+        return .{
+            .request_id = self.agent_session_dock_snapshot_generation,
+            .generation = self.agent_session_dock_snapshot_generation,
+            .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
+            .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
+            .width_px = visible.width,
+            .height_px = visible.height,
+            .present = true,
+            .enabled = ui_action.enabled,
+        };
+    }
+    return null;
 }
 
 /// The fixture may locate the refresh hit rect only after the normal component has painted
 /// it. This observer neither requests a scan nor exposes the internal action id.
 pub fn agentSessionDockRefreshSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
-    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return .{};
+    return headerActionSmokeProbe(self, .refresh) orelse .{};
+}
+
+/// 헤더 정렬 토글(AS6-b)의 그려진 hit rect. `state` 는 지금 표시 순서(0 = 최신순, 1 = 오래된순)다 — UI 모드일 뿐
+/// 기록 내용이 아니다. 좁은 도크에서는 토글을 발행하지 않으므로 그때는 `present = false`.
+pub fn agentSessionDockSortToggleSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
+    var probe = headerActionSmokeProbe(self, .toggle_sort) orelse return .{};
+    probe.state = @intFromEnum(self.agent_session_archive_sort);
+    return probe;
+}
+
+fn headerActionSmokeProbe(self: *const AppSession, comptime tag: std.meta.Tag(chrome.components.session_dock.ids.Intent)) ?AgentSessionArchiveSmokeProbe {
+    if (self.dock.view != .agent_sessions or !dock_ops.dockVisible(self)) return null;
     const content = dock_ops.dockGeometry(self).tree_content;
     for (self.agent_session_dock_actions.items) |action| {
-        switch (action.intent) {
-            .refresh => {},
-            else => continue,
-        }
+        if (action.intent != tag) continue;
         if (action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;
-        for (self.agent_session_dock_entries.items) |entry| {
-            const ui_action = entry.action orelse continue;
-            if (ui_action.id != action.action_id) continue;
-            const visible = smokeProbeVisibleRect(entry) orelse continue;
-            return .{
-                .request_id = self.agent_session_dock_snapshot_generation,
-                .generation = self.agent_session_dock_snapshot_generation,
-                .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
-                .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
-                .width_px = visible.width,
-                .height_px = visible.height,
-                .present = true,
-                .enabled = ui_action.enabled,
-            };
-        }
+        if (publishedActionSmokeProbe(self, content, action.action_id)) |probe| return probe;
     }
-    return .{};
+    return null;
 }
 
 /// Reads a fixed SessionDock node from the already-published tree. It deliberately returns

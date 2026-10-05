@@ -4771,6 +4771,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var agentSessionArchiveSmokeAnchorRawTopPreserved = false
     private var agentSessionArchiveSmokeAnchorSnapshotReordered = false
     private var agentSessionArchiveSmokeAnchorNewGenerationPublished = false
+    private var agentSessionArchiveSmokeSortRoundTrip = false
     private var agentSessionArchiveSmokeCaptureList = false
     private var agentSessionArchiveSmokeCaptureLoading = false
     private var agentSessionArchiveSmokeCaptureReady = false
@@ -12223,6 +12224,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         agentSessionArchiveSmokeAnchorRawTopPreserved = driver.anchorRawTopPreserved
         agentSessionArchiveSmokeAnchorSnapshotReordered = driver.anchorSnapshotReordered
         agentSessionArchiveSmokeAnchorNewGenerationPublished = driver.anchorNewGenerationPublished
+        agentSessionArchiveSmokeSortRoundTrip = driver.sortRoundTrip
         guard driver.finished else { return }
         agentSessionArchiveSmokeDriver = driver
         smokeTimer?.invalidate()
@@ -12259,6 +12261,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             ("expanded_card", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD),
             ("resume", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
             ("reveal", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG),
+            ("sort_toggle", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE),
         ]
         var generation: UInt64?
         var rects: [String: Any] = [:]
@@ -13951,6 +13954,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         agent_session_archive_smoke_anchor_raw_top_preserved=\(agentSessionArchiveSmokeAnchorRawTopPreserved)
         agent_session_archive_smoke_anchor_snapshot_reordered=\(agentSessionArchiveSmokeAnchorSnapshotReordered)
         agent_session_archive_smoke_anchor_new_generation_published=\(agentSessionArchiveSmokeAnchorNewGenerationPublished)
+        agent_session_archive_smoke_sort_round_trip=\(agentSessionArchiveSmokeSortRoundTrip)
         agent_session_archive_smoke_capture_list=\(agentSessionArchiveSmokeCaptureList)
         agent_session_archive_smoke_capture_loading=\(agentSessionArchiveSmokeCaptureLoading)
         agent_session_archive_smoke_capture_ready=\(agentSessionArchiveSmokeCaptureReady)

@@ -78,8 +78,8 @@ pub fn build(
     var group_indices: std.StringHashMapUnmanaged(usize) = .empty;
     defer group_indices.deinit(allocator);
 
-    // Input is already newest-first.  First occurrence determines group order;
-    // subsequent entries preserve that chronological order inside the group.
+    // Input order is the caller's (newest-first by default; reversed for oldest-first).
+    // First occurrence determines group order; later entries keep the input order inside the group.
     for (items) |item| {
         const key = if (item.cwd_canonical and item.cwd.len > 0) item.cwd else "";
         const lookup = try group_indices.getOrPut(allocator, key);
@@ -104,7 +104,7 @@ pub fn build(
     }
 
     // Emit each group contiguously.  This second bounded pass preserves the
-    // original newest-first order within a group while keeping its cards under
+    // input order within a group while keeping its cards under
     // the one header users can collapse.
     for (out.groups.items, 0..) |group, group_index| {
         try out.entries.append(allocator, .{ .group = group_index });

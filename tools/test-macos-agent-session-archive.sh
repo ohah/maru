@@ -239,13 +239,13 @@ for combo in 14-scale-1000 14-scale-2000 24-scale-1000 24-scale-2000; do
     test -s "$geometry"
     grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$summary_file"
     grep -Eq '^agent_session_archive_smoke_scenario=font-scale-rects$' "$summary_file"
-    jq -e '.schema == "maru.agent-session.font-scale-rects.v1" and (.snapshot_generation > 0) and (.rects | keys == ["expanded_card", "first_card", "header", "resume", "reveal", "scope_row", "search"]) and all(.rects[]; .raw_px.width > 0 and .raw_px.height > 0)' "$geometry" >/dev/null
+    jq -e '.schema == "maru.agent-session.font-scale-rects.v1" and (.snapshot_generation > 0) and (.rects | keys == ["expanded_card", "first_card", "header", "resume", "reveal", "scope_row", "search", "sort_toggle"]) and all(.rects[]; .raw_px.width > 0 and .raw_px.height > 0)' "$geometry" >/dev/null
 done
 
 # Within a scale terminal font may change only terminal cells, never Chrome dock/action geometry.
 # Across scales the same raw backing rect must be exactly proportional within one low-scale px.
 jq -s -e '
-  def names: ["header", "scope_row", "search", "first_card", "expanded_card", "resume", "reveal"];
+  def names: ["header", "sort_toggle", "scope_row", "search", "first_card", "expanded_card", "resume", "reveal"];
   def fields: ["x", "y", "width", "height"];
   def abs: if . < 0 then -. else . end;
   . as [$f14s1, $f14s2, $f24s1, $f24s2]
@@ -264,6 +264,15 @@ run_scenario font-zoom
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/font-zoom.summary.txt"
 grep -Eq '^agent_session_archive_smoke_scenario=font-zoom$' "$root/font-zoom.summary.txt"
 grep -Eq '^agent_session_archive_smoke_terminal_invariant=true$' "$root/font-zoom.summary.txt"
+
+# AS6-b: the header sort toggle through the physical NSView pointer path — press flips the display order
+# (mode and the first card's opaque snapshot ordinal both change), a second press restores both, and the
+# active terminal / Term count never move. The three codex records give the reversal something to show.
+run_scenario sort-toggle-pointer
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/sort-toggle-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=sort-toggle-pointer$' "$root/sort-toggle-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_sort_round_trip=true$' "$root/sort-toggle-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_terminal_invariant=true$' "$root/sort-toggle-pointer.summary.txt"
 
 run_scenario reveal-recheck-pointer
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-recheck-pointer.summary.txt"

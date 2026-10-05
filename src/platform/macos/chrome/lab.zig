@@ -230,10 +230,8 @@ pub const ScenarioId = enum {
     /// 머리글 한 줄 + 대상 줄들 + 편집 항목이고, **대상 라벨이 이 메뉴에서 가장 긴 줄**이다 —
     /// 위 두 시나리오가 잡으려던 "가장 긴 줄이 테두리에 닿는가" 가 여기서 되살아난다.
     ///
-    /// **선택 강조는 이 캡처가 답하지 못한다.** 그것은 `.fill` op 인데 Lab 의 lowering
-    /// (`appendBackgroundQuads`)은 `.quad` 만 내린다 — 제품은 `metal_lowering` 이 `.fill` 을 셀
-    /// 배경으로 칠하지만 Lab 에는 그 경로가 없다. **랩의 한계이지 제품 결함이 아니다**(토큰을 확인했다 —
-    /// `tab_active_bg` 는 `surface_bg` 와 다른 색이다). 선택 자리는 제품 테스트가 잰다.
+    /// **선택 강조도 이 캡처에 든다**(2026-10-06부터). 강조는 `.fill` op 이고, 예전 Lab 은 `.quad` 만
+    /// 내려 그림에 없었다 — 지금은 스모크의 `appendOverlayFills` 가 제품의 셀 배경과 같은 사각형·색으로 칠한다.
     context_menu_send,
     /// **선택 헬퍼 한 줄**(NSH — send-selection-to-agent.md §6.2). 고르고 손을 떼면 caret 아래 뜨는
     /// 그 상자다. 같은 `context_menu.view` 를 **항목 하나**로 부르는 것이 제품과 같은 경로이며,
@@ -269,10 +267,9 @@ pub const ScenarioId = enum {
     /// `popup_box.place` 를 쓰면서도 세로 정책이 `context_menu` 와 **다른데**(아래 참조) 그 차이를
     /// 보는 그림이 없었다. 여기서 재는 것은 「목록이 control 아래에 차례로 서는가」다.
     ///
-    /// ⚠️ **상자 폭은 못 본다.** Lab 은 `.fill` 을 안 내려 행 배경이 안 그려지고, 폭은 배경으로만
-    /// 보인다(적대 2회차에서 `@max(box_w, anchor.w)` 를 지워도 골든이 통과하는 것을 확인했다).
-    /// control 을 목록보다 넓게 잡아 두는 것은 그 계약을 **재려는 것이 아니라** 앵커에 두께를 주어
-    /// 아래 `below_clamp` 시나리오와 같은 조건을 쓰기 위해서다.
+    /// **상자 폭도 본다**(2026-10-06부터). 폭은 행 배경(`.fill`)으로만 보이는데, 예전 Lab 은 `.fill` 을
+    /// 안 내려 `@max(box_w, anchor.w)` 를 지워도 골든이 통과했다(적대 2회차). control 을 목록보다 넓게
+    /// 잡아 두었으므로, 이제 그 `@max` 가 빠지면 상자가 control 보다 좁아진 것이 그림에 나온다.
     dropdown_open,
     /// 같은 드롭다운을 **창 아래쪽**에서 펼친 것. `below_clamp` 의 본체다 — 아래 공간이 모자라면
     /// **위로 뒤집지 않고 당긴다.** 뒤집으면 목록이 control 위의 다른 행을 덮어 「저 행의 목록인가」로
@@ -1885,10 +1882,9 @@ fn buildDropdownFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
     var state: chrome.components.dropdown.State = .{};
     // 현재값 = 둘째 항목(첫 줄이면 기본값과 구별이 안 된다). 이 값은 **control 라벨**로 그림에 든다.
     //
-    // ⚠️ **선택 강조 자체는 이 캡처가 답하지 못한다**(적대 7회차 실측). 강조는 `.fill` op 인데 Lab 의
-    // lowering 은 `.quad` 만 내린다 — control 라벨을 고정한 채 `selected` 만 옮기는 뮤테이션을 넣으면
-    // 골든이 **그대로 통과한다.** 처음엔 `selected` 를 통째로 바꿔 재고 「잡는다」고 읽을 뻔했는데,
-    // 그때 잡힌 것은 강조가 아니라 **라벨 글자**였다. 강조는 컴포넌트 판정자가 지킨다.
+    // 선택 강조(`.fill`)는 2026-10-06부터 그림에 든다. 그 전에는 Lab 이 `.quad` 만 내려 control 라벨을
+    // 고정한 채 `selected` 만 옮기는 뮤테이션이 골든을 **그대로 통과했다**(적대 7회차) — `selected` 를
+    // 통째로 바꿔 「잡는다」고 읽을 뻔했는데, 그때 잡힌 것은 강조가 아니라 **라벨 글자**였다.
     state.show(items.len, 1);
 
     const p: chrome.props.ChromeProps = .{ .metrics = .{

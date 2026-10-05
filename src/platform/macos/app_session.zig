@@ -23529,7 +23529,9 @@ pub const AppSession = struct {
     /// 반환된 cells는 allocator 소유(호출자가 finishOverlayPrep에 넘겨 frame으로 이전하거나 실패 시 deinit).
     const OverlayRaster = chrome_metal_lowering.OverlayRaster;
 
-    /// 모든 제품 caller는 전용 macOS Chrome lowering leaf를 거친다. 이 경계는 Chrome Lab도 그대로 공유한다.
+    /// 모든 제품 caller는 전용 macOS Chrome lowering leaf를 거친다. Chrome Lab 의 `lab.lowerDraws` 도 이 leaf 를
+    /// 쓰지만, **Lab 픽셀 캡처(`chrome_lab_smoke`)는 이 셀 경로가 아니다** — 도크와 같은 rich 경로로 그리고,
+    /// 오버레이 `.fill` 은 그쪽 `appendOverlayFills` 가 같은 사각형·같은 색 quad 로 낸다.
     fn rasterizeOverlayCells(
         allocator: std.mem.Allocator,
         draws: []const chrome.ChromeDraw,

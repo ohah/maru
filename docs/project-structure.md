@@ -729,3 +729,14 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 
 
 검색 helper의 argv/env/cwd/stdout 준비와 fd 격리는 `src/pty/macos_spawn.zig::captureStdout`이 소유한다. 제품 worker의 스트림·취소·회수는 `src/platform/macos/app_session/editor/search/process.zig`에 남는다. `src/platform/macos/project_search_fd_judges.zig`는 이 제품 runner에 대한 20개 실제 프로세스 회귀의 전용 진입점이다.
+
+Windows 공용 파일 경계: `src/platform/windows/file_identity.zig`는 열린 handle의
+volume/128-bit ID, `src/platform/windows/directory_watch.zig`는 고정 주소 native
+알림 소유권과 nonrecursive/recursive 모드 및 공유 구독을 소유한다. 기존
+`editor/identity.zig`와 `editor/directory_watch.zig`는 호환 re-export 진입점이다.
+파일 트리와 editor가 같은 Windows 구현을 사용하며 macOS 폴더를 경유하지 않는다.
+
+Windows 단독 worker 판정자와 crash probe의 모듈 루트는 platform/windows의
+얇은 aggregation/entry 파일이다. 공용 native import가 editor 밖으로 이동해도
+모듈 경계를 벗어나지 않는다. aggregation test 하나가 추가되어 open 20개,
+settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 유지한다.

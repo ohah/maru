@@ -5428,3 +5428,11 @@ mise exec -- zig test -OReleaseFast --dep array_repeat -Mroot=src/platform/macos
 
 이 검사는 가짜 DevTools 응답의 수명·상한 거절·UTF-8 이름 자르기·객체 묶음 반환을 확인한다.
 실제 Chromium이나 물리 GUI를 실행한 증거로 취급하지 않는다. 제품 동작과 공개 API는 바꾸지 않는다.
+
+### Windows 파일 트리 변경 감시 (§2m.188)
+
+`test-win32-editor-watch` 18개 Debug/ReleaseFast와 다섯 compiled runtime 변형을
+검증했다. 실제 Windows 앱에서 root 파일 생성/삭제와 펼친 하위 폴더 파일 추가/삭제를
+재시작 없이 캡처했고 펼침 상태 유지 및 정상 종료를 확인했다. private fixture와
+synthetic owned HWND 입력을 사용했다. 물리 입력·IME, sleep/unmount·root 교체
+장기 soak와 원격 감시는 미검증이며 이 항목의 완료 주장이 아니다.

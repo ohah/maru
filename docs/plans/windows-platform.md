@@ -401,3 +401,10 @@ runtime 변형 검출, 새 실앱 crash/reopen/첫 Save-close의 exact bytes·�
 lease를 검증해 인계한다. worker 19·host 82개 Debug/ReleaseFast와 다섯 compiled runtime
 변형, 실앱 Zig 색 표시·편집·exact CRLF Save-close를 검증했다. 복구 이력/후속 rebuild,
 편집 rebuild와 주기적 backup I/O 및 전체 잔여 범위는 남아 있다.
+
+
+§2m.188: 검증된 초기 root handle의 재귀 변경 감시를 앱 루프에 연결했다.
+200ms debounce 뒤 펼친 디렉터리를 worker로 재열거하고 OOM hint와 busy 요청을
+보존한다. native watcher/identity는 Windows 공용 경계로 이동했다. watch 18개
+Debug/ReleaseFast, 다섯 compiled runtime 변형, 실제 앱의 root/expanded child
+생성·삭제 및 펼침 상태 유지·정상 종료를 확인했다. 장기 soak와 원격 감시는 남는다.

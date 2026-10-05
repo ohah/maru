@@ -1092,9 +1092,10 @@ LSP `TextEdit[]` → `Delta` 변환(정렬·겹침 거부)과 revision 검증이
 
 #### 접기와 **대칭**이어야 한다
 
-대소문자 축의 단일 출처는 `terminal/selection.zig` 다 — 찾기가 대소문자 무시 비교에 쓰는
-`foldCase`(대문자 → 소문자)가 이미 거기 있고([시각 매핑](native-editor-visual-mapping.md) §5.1 이
-*"대소문자 규칙은 터미널과 공유"*로 못박았다), 이 연산의 「대문자로」는 **그 짝**이다.
+편집용 대소문자 변환의 단일 출처는 `terminal/selection.zig`의 `foldCase`·`upperCase`다.
+이 연산의 「대문자로」는 「소문자로」의 **짝**이다. 검색은 원문을 변경하지 않으므로 별도의
+`search_case_fold.fold`로 Unicode 17.0.0 C/S 매핑 전체를 사용한다([시각 매핑](native-editor-visual-mapping.md) §5.1).
+검색이 같은 글자로 취급해도 원문 변환 명령이 그 글자를 바꾸는 것은 아니다.
 
 - **같은 블록만 덮는다.** `foldCase` 는 *"1:1 로 왕복하는 짝만"* 덮는다 — ASCII `A-Z`, Latin-1
   `À-Ö`·`Ø-Þ`, Latin Extended-A(`Ā`/`ā` 처럼 대문자 바로 다음이 소문자인 짝 61개 + `Ÿ`/`ÿ`), Greek

@@ -1119,3 +1119,5 @@ python3 tools/editor-outline-app/run.py --output /tmp/maru-outline-app-new
 ```
 
 [아웃라인 계획](plans/editor-outline.md)의 모델·기하·문서 수명 검사와 실제 앱 Metal 캡처다. 출력 폴더는 저장소 밖의 새 빈 폴더여야 한다.
+
+Unicode 검색 접기 집중 검증: `mise exec -- zig build test-search-case-fold -Doptimize=ReleaseFast`. `SCF1~3`이 전체 scalar의 표 탐색·편집용 변환 분리·터미널 실제 셀 검색을 확인한다. 표 재생성은 `python3 tools/generate-search-case-fold.py references/unicode/17.0.0/CaseFolding.txt`이며 공식 데이터의 SHA-256이 일치해야 한다.

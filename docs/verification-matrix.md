@@ -9,6 +9,7 @@
 | 영역 | 상태 | 현재 증거 | 남은 gate |
 |---|---|---|---|
 | 공통 평문 matcher 개선 | 구현·로컬 자동 검증 | `FND33` 독립 판정, 수정 전후 전체 범위와 실행 가능한 음성 대조, [같은 자료의 비용 비교](../tools/editor-project-search/results/literal-comparison-macos-arm64.json). `test-editor -Doptimize=ReleaseFast` 실행 | 합성 자료 밖의 모든 파일·Unicode에 대한 증명은 아니며, 프로젝트 worker 취소·사본·도크는 후속 |
+| Unicode 평문 검색 접기 | 구현·집중 자동 검증 | `FND34`, `SCF1~3`, Unicode 17.0.0 C/S 1,512개 매핑과 전체 코드포인트 탐색, [범위 대조·음성 대조](../tools/editor-project-search/results/unicode-verification-macos-arm64.json) | 문서 전체 정규식 확장은 사용자 선택 후 별도 구현 예정. 프로젝트 검색 UI·worker·IME 증거는 아님 |
 | 프로젝트 전체 검색·바꾸기 미리보기 | 제품 구현 전 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/의존성/초기 범위·NUL 선정·불변 사본 확보 방식 확인, worker·변경 감지·열린 문서·검색 도크·제품 취소·IME·앱 RSS·시각 캡처·바꾸기. CLI 통과는 제품 완료의 증거가 아니다 |
 
 ### 영속 세션 P5 세부 상태

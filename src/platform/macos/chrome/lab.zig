@@ -260,6 +260,11 @@ pub const ScenarioId = enum {
     /// 앵커를 모서리 **밖**이 아니라 안쪽 가까이 두는 이유: 밖이면 `anchored_below_workspace` 갈래로
     /// 빠져 다른 계약을 재게 된다. 여기서 재려는 것은 평범한 clamp 다.
     context_menu_bottom_right,
+    /// **상자보다 긴 확인 메시지.** 확인 모달은 메시지를 한 줄로만 그려, 상자보다 길면 글자가 상자 밖으로 나가
+    /// 창 가장자리에서 잘렸다 — 기본 960pt 창에서 LSP 신뢰 확인은 서버 이름 없이도 약 105칸이라 **늘** 넘쳤다
+    /// (2026-10-05 실측). 지금은 상자 안쪽 폭으로 나눠 그린다. 이 그림이 「줄이 상자 안에 드는가」와 「버튼이
+    /// 마지막 줄 아래로 내려가는가」를 증언한다. 문구는 제품의 i18n 키를 읽는다(리터럴이면 캡처 폭이 갈린다).
+    confirm_long_message,
     /// **설정 드롭다운이 펼쳐진 모습.** 이 컴포넌트에는 Lab 시나리오가 **하나도 없었다** — 같은
     /// `popup_box.place` 를 쓰면서도 세로 정책이 `context_menu` 와 **다른데**(아래 참조) 그 차이를
     /// 보는 그림이 없었다. 여기서 재는 것은 「목록이 control 아래에 차례로 서는가」다.
@@ -437,6 +442,7 @@ pub fn buildFrame(
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
+        .confirm_long_message => buildConfirmFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         .editor_merge_panes, .editor_merge_narrow, .editor_merge_caret => buildEditorMergeFrame(scenario, buffers),
@@ -1660,7 +1666,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1804,6 +1810,34 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
         // 메뉴는 자기 hit-test 를 `itemAt` 으로 한다(트리를 안 쓴다) — 빈 트리를 낸다.
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
         .draws = .{ .layer = chrome.components.context_menu.layer, .ops = ops.items },
+    };
+}
+
+/// 상자보다 긴 확인 메시지 한 프레임. **제품과 같은 `confirm.view` 를 부른다** — 메시지와 버튼 라벨만 Lab 이
+/// 고르고, 줄 나누기·상자·버튼 자리는 제품 코드가 정한다. 메시지는 제품이 LSP 서버를 처음 띄울 때 묻는 그
+/// 문구(`lsp_trust_prompt` 에 실행 파일 경로를 채운 것)라, 서버 이름이 길수록 넘치는 실제 경우와 같다.
+fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    const arena = buffers.arena orelse return .{
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..0] },
+    };
+    // arena 에 잡는다 — `view` 는 메시지를 **빌리는** op 을 만들고 그것은 이 함수가 돌아간 뒤에 렌더된다.
+    const message = try std.mem.replaceOwned(u8, arena, maru.i18n.t(.lsp_trust_prompt), "{s}", "/opt/homebrew/bin/rust-analyzer-nightly");
+    var state: chrome.components.confirm.State = .{};
+    state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+    const p: chrome.props.ChromeProps = .{ .metrics = .{
+        .cell_width_px = scenario.cell_w_px,
+        .cell_height_px = scenario.cell_h_px,
+        .sidebar_width_px = 0,
+        .backing_width_px = @intFromFloat(scenario.viewport_px.width),
+        .backing_height_px = @intFromFloat(scenario.viewport_px.height),
+    } };
+    var ops: std.ArrayList(chrome.draw.Op) = .empty;
+    try chrome.components.confirm.view(&state, p, tokens, arena, &ops);
+    return .{
+        // 모달은 자기 hit-test 를 `buttonAtPoint` 로 한다(트리를 안 쓴다) — 빈 트리를 낸다.
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = chrome.components.confirm.layer, .ops = ops.items },
     };
 }
 

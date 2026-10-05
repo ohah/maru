@@ -1596,7 +1596,7 @@ pub fn build(b: *std.Build) void {
     const backup_worker_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows recovery backup worker"} });
     const backup_worker_step = b.step("test-win32-backup-worker", "Verify immutable recovery jobs and current native cleanup approval");
     const run_backup_worker_tests = b.addRunArtifact(backup_worker_tests);
-    run_backup_worker_tests.addArg("--maru-expect-tests=20"); // 2 aggregation blocks + 12 ownership/IO tests + 6 app tests
+    run_backup_worker_tests.addArg("--maru-expect-tests=22"); // 2 aggregation blocks + 12 ownership/IO tests + 8 app tests
     backup_worker_step.dependOn(&run_backup_worker_tests.step);
     const editor_read_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor file read worker"} });
     const editor_read_step = b.step("test-win32-editor-read", "Verify native worker read ownership, sharing fences and stale result tickets");

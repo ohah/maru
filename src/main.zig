@@ -4850,7 +4850,7 @@ fn beginFileCloseSave(book: *file_host.Book, views: []OpenFile, target: FileClos
 
 // A confirmed clean close must wait for native backup deletion. Reuse the
 // immutable worker and its latest clean vote; never delete on the UI thread.
-fn prepareCleanCloseBackup(io: std.Io, worker: *BackupWorker, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, now_ns: i128, retrying: bool) !bool {
+fn prepareFileCloseBackup(io: std.Io, worker: *BackupWorker, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, now_ns: i128, retrying: bool, discard: bool) !bool {
     if (worker.isBusy()) return false;
     const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
     if (one) |i| try book.requireClose(views[i].document, true) else try book.requireIdle();
@@ -4858,12 +4858,12 @@ fn prepareCleanCloseBackup(io: std.Io, worker: *BackupWorker, book: *file_host.B
         if (one != null and one.? != i) continue;
         if (one != null and book.registry.viewCount(view.document).? > 1) continue;
         const state = book.registry.get(view.document) orelse return error.StaleDocument;
-        if (state.opened.?.isDirty()) return error.DirtyDocument;
+        if (!discard and state.opened.?.isDirty()) return error.DirtyDocument;
         if (!state.notifications.backup_on_disk) continue;
         const store = if (owner.*) |*value| &value.store else return error.BackupRootUnavailable;
         if (retrying and state.notifications.backup_dirty and now_ns < state.notifications.backup_due_ns) return false;
         state.notifications.backup_dirty = true;
-        try worker.start(io, view.document, store, null, maru.session.editor.backup.pause_bytes);
+        if (discard) try worker.startDiscard(io, view.document, store) else try worker.start(io, view.document, store, null, maru.session.editor.backup.pause_bytes);
         return false;
     }
     return true;
@@ -13718,6 +13718,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // Votes follow queued input and real save outcomes. A close cannot
         // race an older backup write and recreate a deliberately dropped record.
         try file_backup_worker.voteDrop();
+        try file_backup_worker.voteDiscard(file_close_waiting and pending_file_close != null and confirm_pending_click == .alternate);
         holdBackupWindowClose(file_backup_worker.isBusy(), &backup_window_close_requested, &close_requested);
         if (close_requested and !file_exit_accepted) {
             file_close_waiting = false; // window intent supersedes a file wait
@@ -13799,8 +13800,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         continue;
                     }
                 }
-                if (act == .confirmed) {
-                    const ready = prepareCleanCloseBackup(io, &file_backup_worker, &editor_files, &file_backups, open_files.items, target, std.Io.Clock.awake.now(io).nanoseconds, file_close_waiting) catch |err| {
+                if (act == .confirmed or act == .alternate) {
+                    const ready = prepareFileCloseBackup(io, &file_backup_worker, &editor_files, &file_backups, open_files.items, target, std.Io.Clock.awake.now(io).nanoseconds, file_close_waiting, act == .alternate) catch |err| {
                         file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                         file_close_waiting = false;
                         confirm_state.dismiss();
@@ -13810,7 +13811,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     if (!ready) {
                         file_close_waiting = true;
                         confirm_state.dismiss();
-                        confirm_pending_click = .confirmed;
+                        confirm_pending_click = act;
                         break :close_file;
                     }
                 }
@@ -20659,7 +20660,7 @@ test "Windows recovery backup worker clean close waits for native drop before re
     defer _ = drainFileBackupWorker(io, &worker, &f.backups, 10) catch unreachable;
     const now: i128 = 0;
     try std.testing.expect(state.notifications.backup_due_ns > now);
-    try std.testing.expect(!try prepareCleanCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, now, false));
+    try std.testing.expect(!try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, now, false, false));
     try std.testing.expect(worker.isBusy() and state.notifications.backup_on_disk);
     try std.testing.expect(f.documents.get(lease) != null);
     const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
@@ -20672,7 +20673,7 @@ test "Windows recovery backup worker clean close waits for native drop before re
         if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
         if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
     }
-    try std.testing.expect(try prepareCleanCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, now, false));
+    try std.testing.expect(try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, now, false, false));
     try std.testing.expect(!state.notifications.backup_on_disk);
     f.backups.?.deinit(io);
     f.backups = null; // final close cannot use a native store fallback
@@ -20688,11 +20689,98 @@ test "Windows recovery backup worker clean close refuses dirty body and missing 
     const lease = f.views.items[0].document;
     var worker = BackupWorker.init(std.testing.allocator, &f.documents);
     defer _ = drainFileBackupWorker(std.testing.io, &worker, &f.backups, 10) catch unreachable;
-    try std.testing.expectError(error.DirtyDocument, prepareCleanCloseBackup(std.testing.io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, std.math.maxInt(i128), false));
+    try std.testing.expectError(error.DirtyDocument, prepareFileCloseBackup(std.testing.io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, std.math.maxInt(i128), false, false));
     _ = try f.book.save(std.testing.io, lease, 4 << 20);
     f.backups.?.deinit(std.testing.io);
     f.backups = null;
-    try std.testing.expectError(error.BackupRootUnavailable, prepareCleanCloseBackup(std.testing.io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, std.math.maxInt(i128), false));
+    try std.testing.expectError(error.BackupRootUnavailable, prepareFileCloseBackup(std.testing.io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, std.math.maxInt(i128), false, false));
     try std.testing.expect(f.documents.get(lease).?.notifications.backup_on_disk);
     try std.testing.expect(!worker.isBusy());
+}
+
+test "Windows recovery backup worker discard deletes only with current consent and rearms cancelled protection" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    var worker = BackupWorker.init(std.testing.allocator, &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, 10) catch unreachable;
+    for ([_]bool{ false, true }) |stale| {
+        try std.testing.expect(!try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, 0, false, true));
+        if (stale) f.documents.get(lease).?.opened.?.file.revision += 1;
+        const reject_deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+        while (worker.isBusy()) {
+            try worker.voteDrop();
+            try worker.voteDiscard(stale); // false consent or stale true consent
+            if (try worker.finish(&f.backups, 10)) |completed| {
+                try std.testing.expectEqual(@as(usize, if (stale) 1 else 0), completed.report.failed);
+                if (stale) try std.testing.expectEqual(error.StaleDocument, completed.report.first_error.?);
+            }
+            if (std.Io.Clock.awake.now(io).nanoseconds >= reject_deadline) return error.BackupCompletionMissing;
+            if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(f.documents.get(lease).?.notifications.backup_on_disk);
+        var preserved = (try f.backups.?.store.read(io, @import("platform/windows/editor/backup_store.zig").identity(f.documents.get(lease).?).?)).?;
+        defer preserved.deinit();
+        try std.testing.expectEqualStrings("Xbase\r\n", preserved.parsed.content);
+    }
+    try std.testing.expect(!try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, 0, false, true));
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (worker.isBusy()) {
+        try worker.voteDrop(); // ordinary clean voting cannot approve Discard
+        try worker.voteDiscard(true);
+        _ = try worker.finish(&f.backups, 10);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const state = f.documents.get(lease).?;
+    try std.testing.expect(!state.notifications.backup_on_disk and state.notifications.backup_dirty);
+    try std.testing.expect(state.opened.?.isDirty());
+    const absent = try f.backups.?.store.read(io, @import("platform/windows/editor/backup_store.zig").identity(state).?);
+    if (absent) |record| {
+        var leaked = record;
+        leaked.deinit();
+    }
+    try std.testing.expect(absent == null);
+    try std.testing.expect(!try approveFileClose(io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .cancelled));
+    try std.testing.expect(state.notifications.backup_dirty);
+    try std.testing.expect(try approveFileClose(io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .alternate));
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker post-claim edit revokes discard intent and protects later body" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    var worker = BackupWorker.init(a, &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, 10) catch unreachable;
+    try std.testing.expect(!try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, 0, false, true));
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.ready_drop.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try worker.voteDiscard(true);
+    if (try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'Y' } }, .{ .now_ms = 20, .views = f.views.items })) |copied| a.free(copied);
+    var observed = false;
+    while (worker.isBusy()) {
+        if (try worker.finish(&f.backups, 10)) |completed| {
+            try std.testing.expectEqual(@as(usize, 1), completed.report.failed);
+            try std.testing.expectEqual(error.StaleDocument, completed.report.first_error.?);
+            observed = true;
+        }
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(observed);
+    const state = f.documents.get(lease).?;
+    try std.testing.expect(state.notifications.backup_dirty and !state.notifications.backup_on_disk);
+    try std.testing.expectEqualStrings("XYbase\r\n", state.opened.?.file.content);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
 }

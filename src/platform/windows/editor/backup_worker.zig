@@ -7,7 +7,7 @@ const backups = @import("backup_store.zig");
 const Registry = editor.document_registry.Registry;
 const Lease = editor.document_registry.Lease;
 const State = editor.document_state.State;
-const Mode = enum { write, drop, paused };
+const Mode = enum { write, drop, discard, paused };
 pub const Outcome = enum { wrote, dropped, paused, stale, failed };
 
 const Packet = struct {
@@ -26,7 +26,7 @@ const Packet = struct {
     due_ns: i128,
     on_disk: bool,
 
-    fn capture(a: std.mem.Allocator, state: *const State, lease: Lease, limit: usize) !Packet {
+    fn capture(a: std.mem.Allocator, state: *const State, lease: Lease, limit: usize, discard: bool) !Packet {
         const identity = backups.identity(state) orelse return error.MissingDocument;
         const doc = switch (identity) {
             .path => |path| editor.backup.Doc{ .path = .{ .path = try a.dupe(u8, path.path), .disk_hash = path.disk_hash } },
@@ -39,8 +39,8 @@ const Packet = struct {
         };
         errdefer freeDoc(a, doc);
         const opened = &state.opened.?;
-        const clean = !opened.isDirty() and state.persistence.uncertain_sequence == null and state.persistence.live_save_images == 0;
-        const mode: Mode = if (clean) .drop else if (opened.file.content.len > limit) .paused else .write;
+        const clean = !discard and !opened.isDirty() and state.persistence.uncertain_sequence == null and state.persistence.live_save_images == 0;
+        const mode: Mode = if (discard) .discard else if (clean) .drop else if (opened.file.content.len > limit) .paused else .write;
         const body = if (mode == .write) try a.dupe(u8, opened.file.content) else try a.dupe(u8, "");
         return .{ .allocator = a, .lease = lease, .doc = doc, .body = body, .mode = mode, .epoch = state.persistence.epoch, .revision = opened.file.revision, .saved_hash = opened.saved_hash, .disk_hash = opened.disk_hash, .issued = state.persistence.issued, .uncertain = state.persistence.uncertain_sequence, .live_images = state.persistence.live_save_images, .due_ns = state.notifications.backup_due_ns, .on_disk = state.notifications.backup_on_disk };
     }
@@ -97,6 +97,7 @@ const Job = struct {
     done: std.atomic.Value(bool) = .init(false),
     result: ?Result = null,
     cleanup_retry_at: ?i128 = null,
+    discard_consent: bool = false,
 
     // Created roots use the SMP allocator. This second stage retains the job
     // and registry lease while closing the redundant native owner off-frame.
@@ -118,7 +119,7 @@ const Job = struct {
             result.outcome = .paused;
             return;
         }
-        if (self.packet.mode == .drop) {
+        if ((self.packet.mode == .drop or self.packet.mode == .discard)) {
             // An edit/new save can invalidate clean cleanup after capture. Wait
             // for the app's latest vote; no timeout invents a deletion decision.
             self.ready_drop.store(true, .release);
@@ -147,7 +148,7 @@ const Job = struct {
                 result.failure = failure;
                 return;
             },
-            .drop => Driver.drop(&store.?, self.io, self.packet.doc) catch |failure| {
+            .drop, .discard => Driver.drop(&store.?, self.io, self.packet.doc) catch |failure| {
                 result.failure = failure;
                 return;
             },
@@ -180,6 +181,12 @@ pub const Worker = struct {
         try self.startWith(io, view, borrowed, localappdata, limit, Native);
     }
     fn startWith(self: *Worker, io: std.Io, view: Lease, borrowed: ?*backups.Store, localappdata: ?[]const u8, limit: usize, comptime Driver: type) !void {
+        return self.startMode(io, view, borrowed, localappdata, limit, Driver, false);
+    }
+    pub fn startDiscard(self: *Worker, io: std.Io, view: Lease, borrowed: *backups.Store) !void {
+        return self.startMode(io, view, borrowed, null, borrowed.limit, Native, true);
+    }
+    fn startMode(self: *Worker, io: std.Io, view: Lease, borrowed: ?*backups.Store, localappdata: ?[]const u8, limit: usize, comptime Driver: type, discard: bool) !void {
         try self.check();
         if (self.isBusy()) return error.BackupBusy;
         const a = std.heap.smp_allocator;
@@ -187,7 +194,7 @@ pub const Worker = struct {
         errdefer _ = self.registry.release(lease) catch unreachable;
         const state = self.registry.get(lease) orelse return error.StaleDocument;
         const effective_limit = if (borrowed) |store| store.limit else @min(limit, editor.backup.pause_bytes);
-        var packet = try Packet.capture(a, state, lease, effective_limit);
+        var packet = try Packet.capture(a, state, lease, effective_limit, discard);
         errdefer packet.deinit();
         if (localappdata) |root| if (root.len > std.fs.max_path_bytes or std.mem.indexOfScalar(u8, root, 0) != null) return error.InvalidPath;
         const local = if (localappdata) |root| try a.dupe(u8, root) else null;
@@ -208,12 +215,25 @@ pub const Worker = struct {
     pub fn voteDrop(self: *Worker) !void {
         try self.check();
         const job = self.job orelse return;
+        if (job.packet.mode == .discard) return;
         if (!job.ready_drop.load(.acquire)) return;
         if (job.drop_vote.load(.acquire) != 0) return;
         const state = self.registry.get(job.packet.lease);
         const approved = if (state) |value| job.packet.matches(value) and value.notifications.backup_dirty and
             value.persistence.uncertain_sequence == null and value.persistence.live_save_images == 0 else false;
         _ = job.drop_vote.cmpxchgStrong(0, if (approved) 1 else 2, .acq_rel, .acquire);
+    }
+    /// Only a still-pending explicit Discard intent may approve this packet.
+    pub fn voteDiscard(self: *Worker, consent: bool) !void {
+        try self.check();
+        const job = self.job orelse return;
+        if (job.packet.mode != .discard or !job.ready_drop.load(.acquire)) return;
+        if (job.drop_vote.load(.acquire) != 0) return;
+        job.discard_consent = consent;
+        const state = self.registry.get(job.packet.lease);
+        const valid = if (state) |value| consent and job.packet.matches(value) and
+            value.persistence.uncertain_sequence == null and value.persistence.live_save_images == 0 else false;
+        _ = job.drop_vote.cmpxchgStrong(0, if (valid) 1 else 2, .acq_rel, .acquire);
     }
     /// Teardown rejects an unvoted drop but drains real writes/deletes to their
     /// terminal result before releasing the model lease or borrowed root.
@@ -255,6 +275,14 @@ pub const Worker = struct {
         var report: backups.Maintenance = .{ .attempted = 1 };
         if (self.registry.get(job.packet.lease)) |state| {
             const current = job.packet.matches(state);
+            // A stale Discard receipt cannot authorize a new document version.
+            // Report it to end the app intent; explicit cancellation is quiet.
+            if (job.packet.mode == .discard and job.discard_consent and
+                (result.outcome == .stale or (result.outcome == .dropped and !current)))
+            {
+                report.failed = 1;
+                report.first_error = error.StaleDocument;
+            }
             // A stale receipt still describes actual storage at the same key.
             // Preserve it for close cleanup, but never settle a newer revision.
             if (job.packet.sameKey(state)) switch (result.outcome) {
@@ -263,7 +291,9 @@ pub const Worker = struct {
                 else => {},
             };
             if (current and result.outcome != .failed and result.outcome != .stale) {
-                state.notifications.backup_dirty = false;
+                // A cancelled close after native deletion still owns unsaved
+                // bytes. Rearm protection until the app actually releases it.
+                state.notifications.backup_dirty = job.packet.mode == .discard and state.opened.?.isDirty();
                 state.notifications.backup_paused = result.outcome == .paused;
             } else {
                 state.notifications.backup_dirty = true;
@@ -555,7 +585,7 @@ test "Windows recovery backup worker rejects copied owners busy start and premat
     _ = try awaitCompletion(&worker, &owner);
 }
 fn capturePrefix(a: std.mem.Allocator, state: *const State, lease: Lease) !void {
-    var packet = try Packet.capture(a, state, lease, 128);
+    var packet = try Packet.capture(a, state, lease, 128, false);
     packet.deinit();
 }
 test "Windows recovery backup worker packet allocation prefixes preserve borrowed model ownership" {

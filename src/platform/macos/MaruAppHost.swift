@@ -10168,6 +10168,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = sender
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reload_config(session)
+        // config 는 앱 전체의 것이다 — 나머지 창과 퀵 터미널도 따라온다(창마다 폰트·키바인딩이 갈리지 않게). 활성 창은
+        // 위에서 강제로 읽었고, 나머지는 Zig 가 판정한다(쓰지 않은 세팅 편집은 미루고 같은 내용은 무동작 — auto-reload 와
+        // 무관). 2026-10-05 전에는 활성 창만 읽어, 자동 reload 를 끈 사용자의 다른 창은 옛 설정에 남았다.
+        var sessions = windows.compactMap(\.appSession)
+        if let quickSession = quick?.appSession { sessions.append(quickSession) }
+        for other in sessions where other != session {
+            _ = maru_macos_app_session_reload_config_following_menu(other)
+        }
         // reload가 keybind를 바꾸면 Zig가 rebuildCommandCatalog로 command_catalog_dirty를 세운다 → 다음 tick의 drainMenuDirty가
         // 메뉴바를 다시 빌드한다(여기서 동기 호출하지 않는다 — reset/인앱 경로와 단일 경로로 통일, 멀티창 활성 세션 정합).
         refreshFilePanelSyntaxTheme() // 테마·palette가 바뀌었을 수 있으므로 열린 소스 편집기 syntax 색 갱신(§2.3).

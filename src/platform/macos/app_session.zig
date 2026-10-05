@@ -286,7 +286,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 셸 종료 경로가 앱을 끝낼지 Dock 에 남을지 이 값으로 가른다. 끝에 export 추가 — 구조체 offset 불변.
 // 194: config_file_changed — platform 파일 감시(FSEvents)가 config 파일 변경을 알린다. 다시 읽을지(behavior.auto-reload·
 // 내용 digest 가 이 창이 마지막으로 읽거나 쓴 것과 다른가)는 Zig 가 판정한다. 끝에 export 추가 — 구조체 offset 불변.
-pub const abi_version: u32 = 194;
+pub const abi_version: u32 = 195;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -5718,6 +5718,10 @@ pub const AppSession = struct {
     pub fn configFileChanged(self: *AppSession) bool {
         return settings_ops.configFileChanged(self);
     }
+    /// 본문 분리: app_session/settings.zig. ABI(메뉴 Reload Config 의 다른 창 전파)가 직접 부르므로 진입만 남긴다.
+    pub fn reloadConfigFollowingMenu(self: *AppSession) bool {
+        return settings_ops.reloadConfigFollowingMenu(self);
+    }
     /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
     pub fn openFileContentMenu(
         self: *AppSession,
@@ -5734,6 +5738,9 @@ pub const AppSession = struct {
     /// 메뉴 Reload Config(ABI) — 사용자가 고른 시점이라 스크롤백 축소도 바로 적용한다.
     pub fn reloadConfig(self: *AppSession) void {
         self.allow_scrollback_shrink = true;
+        // reload 가 중간에 빠지면(로드·appearance 실패) 표식을 끄는 `reapplyScrollback` 까지 못 간다 — 남으면 사용자가
+        // 고르지 않은 다음 재적용(시스템 외관 자동 전환 등)이 되돌릴 수 없는 스크롤백 축소를 한다.
+        defer self.allow_scrollback_shrink = false;
         return settings_ops.reloadConfig(self);
     }
     /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
@@ -61220,6 +61227,56 @@ test "config 자동 reload 가드: 스크롤백 축소는 새 Term 부터, 열�
     try std.testing.expect(settings_ops.configFileChanged(session)); // 원본이 기준선과 달라 기준선이 안 옮겨졌다 → 읽는다
     try std.testing.expectEqual(@as(u32, 300), session.loaded_config.config.scrollback.lines);
     try std.testing.expect(!session.loaded_config.config.bell.audible);
+}
+
+// 메뉴 Reload Config 는 활성 창만 다시 읽었다 — 나머지 창은 `reloadConfigFollowingMenu` 로 따라온다(2026-10-05). 자동
+// reload 와 규칙을 나누되 둘이 다르다: auto-reload 설정을 보지 않고, 사용자가 고른 시점이라 스크롤백도 줄인다.
+test "메뉴 Reload 의 다른 창 전파: auto-reload 를 꺼도 따라오고, 같은 내용·쓰지 않은 편집은 건드리지 않고, 축소도 한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer settings_ops.clearConfigDirty(session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [4096]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, cfg_path);
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // 기준: 이 창은 auto-reload 를 끈 채 5000 줄을 읽었다(메뉴가 유일한 동기화 수단인 사용자).
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "behavior.auto-reload = false\nscrollback.lines = 5000\n" });
+    session.reloadConfig();
+    try std.testing.expect(!session.loaded_config.config.behavior_auto_reload);
+    try std.testing.expectEqual(@as(u32, 5000), session.live_scrollback_max);
+    try std.testing.expect(!session.allow_scrollback_shrink); // 메뉴 reload 뒤 표식이 남지 않는다
+
+    // (1) 내용이 같다 → 다시 읽지 않는다(이미 최신인 창).
+    try std.testing.expect(!session.reloadConfigFollowingMenu());
+
+    // (2) 다른 곳에서 파일이 바뀌었다(줄이기 포함). 자동 reload 는 꺼져 있어 따라오지 않지만, 메뉴 전파는 따라온다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "behavior.auto-reload = false\nscrollback.lines = 100\nbell.audible = false\n" });
+    try std.testing.expect(!settings_ops.configFileChanged(session)); // 대조군: 꺼진 auto-reload 는 무동작
+    try std.testing.expect(session.loaded_config.config.bell.audible);
+    try std.testing.expect(session.reloadConfigFollowingMenu());
+    try std.testing.expect(!session.loaded_config.config.bell.audible);
+    // 사용자가 고른 시점이라 살아 있는 Term 의 스크롤백도 줄인다(자동 reload 는 미룬다) — 그리고 표식은 남지 않는다.
+    try std.testing.expectEqual(@as(u32, 100), session.live_scrollback_max);
+    try std.testing.expect(!session.allow_scrollback_shrink);
+    try std.testing.expect(!session.reload_is_automatic);
+    try std.testing.expect(!session.reloadConfigFollowingMenu()); // 따라온 뒤엔 같은 내용 — 무동작
+
+    // (3) 아직 파일에 안 쓴 세팅 편집이 있는 창은 미룬다 — 편집이 사라지지 않는다.
+    session.loaded_config.config.bell.audible = true;
+    settings_ops.markConfigKeyDirty(session, "bell.audible");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "behavior.auto-reload = false\nscrollback.lines = 200\n" });
+    try std.testing.expect(!session.reloadConfigFollowingMenu());
+    try std.testing.expect(session.loaded_config.config.bell.audible); // 편집 그대로
+    try std.testing.expectEqual(@as(u32, 100), session.loaded_config.config.scrollback.lines);
 }
 
 // write-back 은 원본을 못 읽으면 **쓰지 않는다**(빈 원본으로 보고 바뀐 키만 남겨 덮었다), 심볼릭 링크면 실제 파일에 쓴다.

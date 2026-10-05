@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 194u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 195u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1284,6 +1284,10 @@ uint32_t maru_macos_app_session_quit_after_last_window_closed(MaruAppHostSession
    마지막으로 읽거나 쓴 것과 다른가)는 Zig 가 판정하고, 다시 읽었으면 1(Swift 는 그때만 platform 쪽 재적용). session
    null=0. v194. */
 uint32_t maru_macos_app_session_config_file_changed(MaruAppHostSession *session);
+/* 메뉴 Reload Config 를 활성 창이 아닌 창(과 퀵 터미널)에 퍼뜨린다. 활성 창은 reload_config 로 강제로 다시 읽고,
+   나머지는 이것으로 따라온다 — behavior.auto-reload 와 무관하게, 쓰지 않은 세팅 편집이 있으면 미루고 이 창이
+   마지막으로 읽거나 쓴 내용과 같으면 무동작. 다시 읽었으면 1(Swift 는 그때만 platform 쪽 재적용). session null=0. v195. */
+uint32_t maru_macos_app_session_reload_config_following_menu(MaruAppHostSession *session);
 /* 단축키 힌트 홀드 상태머신(keyhint_hold.zig)에 이벤트를 흘리고 Action을 돌려준다. 반환(0=none·1=arm_timer·2=cancel·
    3=show·4=hide): Swift가 1=OS 타이머 시작·2/4=타이머 무효화·3/4=markMetalNeedsRedraw로 매핑(visible 토글은 머신 소유).
    gesture 정책=Zig·OS clock만 Swift. mods_bits=현재 눌린 modifier 비트(shift=1·control=2·option=4·command=8). session

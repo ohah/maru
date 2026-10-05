@@ -2377,6 +2377,7 @@ pub fn resetAllSettings(self: *AppSession) void {
     self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
     self.allow_scrollback_shrink = true; // 전체 리셋 — 사용자가 고른 시점(스크롤백도 기본값으로)
     applyLoadedConfig(self, false); // resolve→apply→behavior 캐시→reapply* 재적용. false=런타임 줌도 config 기본으로(통합 리셋이라 ⌘+/− 확대 해제; resolve-first 안전, reloadConfig 미러 — 리뷰 #827)
+    self.allow_scrollback_shrink = false; // apply 가 중간에 빠져(resolve 실패) 표식이 남으면 다음 자동 재적용이 축소한다
     // **config 파일을 기본 상태로 덮어쓴다**(삭제 아님) → 빈+주석이라 다음 로드는 schema·특수 키·주석 전부 기본값.
     // 부분 갱신(updateForKeys)이 아닌 전체 덮어쓰기인 이유: 기본값 위 override만 쓰는 정책상 (a) 비-schema 키
     // (theme.preset/palette/env/cursor.color/shell.args)가 안 지워지고 (b) 빈 항목까지 40여 줄을 쏟는다(리뷰 #827).
@@ -2755,6 +2756,21 @@ pub fn configFileDigest(self: *AppSession) ?u64 {
 /// 가 꺼졌거나, 내용이 이 창이 마지막으로 읽거나 쓴 것과 같으면(앱 자신의 write-back) 무동작. 다르면 `reloadConfig` —
 /// 다른 창이 세팅 화면에서 바꿔 쓴 값도 이 길로 이 창에 들어온다. 계획: settings-page.md §2 S0-2. 다시 읽었으면 true.
 pub fn configFileChanged(self: *AppSession) bool {
+    return reloadIfConfigFileChanged(self, .watch);
+}
+
+/// 메뉴 Reload Config 를 **다른 창들**에 퍼뜨린다. 메뉴는 활성 창 하나를 강제로 다시 읽고(`reloadConfig`), 나머지 창과
+/// 퀵 터미널은 이것으로 따라온다 — config 는 앱 전체의 것이라 창마다 폰트·키바인딩이 갈리면 안 된다. 2026-10-05 전에는
+/// 활성 창만 읽어, 자동 reload 를 끈 사용자(메뉴가 **유일한** 동기화 수단인 경우)의 다른 창은 옛 설정에 남았다.
+///
+/// 자동 reload 와 규칙을 나눈다 — 쓰지 않은 세팅 편집이 있으면 미루고, 이 창이 마지막으로 읽거나 쓴 내용과 같으면
+/// 무동작이다. 다른 점 둘: `behavior.auto-reload` 를 **보지 않는다**(메뉴는 그 설정과 무관하다), 그리고 **사용자가 고른
+/// 시점**이라 되돌릴 수 없는 적용(스크롤백 축소)도 메뉴의 활성 창과 같이 한다. 다시 읽었으면 true.
+pub fn reloadConfigFollowingMenu(self: *AppSession) bool {
+    return reloadIfConfigFileChanged(self, .menu_sibling);
+}
+
+fn reloadIfConfigFileChanged(self: *AppSession, comptime trigger: enum { watch, menu_sibling }) bool {
     // 아직 파일에 안 쓴 세팅 편집이 있으면 미룬다 — 지금 다시 읽으면 메모리 값이 파일 값으로 돌아가고 write-back 대기열이
     // 비워져 그 편집이 사라진다(적대적 검증). 다음 tick 의 write-back 이 쓰고 나면(원본이 기준선과 다르면 기준선은 그대로)
     // 다음 확인이 다시 읽어 양쪽 변경을 다 갖는다.
@@ -2771,17 +2787,25 @@ pub fn configFileChanged(self: *AppSession) bool {
             return false;
         }
     }
-    if (!self.loaded_config.config.behavior_auto_reload) {
+    if (trigger == .watch and !self.loaded_config.config.behavior_auto_reload) {
         // 이 창에선 꺼져 있다 — 그래도 **새 내용이 켜는 것**이면 따른다. 다른 창이 세팅 화면에서 다시 켜 쓴 경우다:
         // 안 보면 이 창은 꺼진 채 남아(꺼짐은 읽어서 알았는데 켜짐은 못 읽는다) 영영 갈린다(적대적 검증).
         var peek = config_mod.parseConfig(self.allocator, bytes) catch return false;
         defer peek.deinit();
         if (!peek.config.behavior_auto_reload) return false;
     }
-    self.reload_is_automatic = true;
+    self.reload_is_automatic = trigger == .watch;
     defer self.reload_is_automatic = false;
+    if (trigger == .menu_sibling) self.allow_scrollback_shrink = true; // 사용자가 고른 시점 — 메뉴의 활성 창과 같다
+    // reload 가 중간에 빠지면(로드·appearance 실패) 이 표식을 읽고 끄는 `reapplyScrollback` 까지 못 간다 — 남으면 사용자가
+    // 고르지 않은 다음 재적용(시스템 외관 자동 전환 등)이 되돌릴 수 없는 축소를 한다.
+    defer if (trigger == .menu_sibling) {
+        self.allow_scrollback_shrink = false;
+    };
     reloadConfig(self); // 성공하면 기준선(config_file_digest)도 새 내용으로 선다
-    self.config_file_digest = digest; // 파싱 실패로 reload 가 무동작이어도 같은 내용으로 매 알림 다시 읽지 않는다
+    // 자동 reload 는 파싱 실패로 reload 가 무동작이어도 기준선을 옮긴다 — 같은 내용으로 매 알림 다시 읽지 않게. 메뉴는
+    // 옮기지 않는다: 실패한 창은 다음 메뉴 누름에서 다시 시도해야 한다(메뉴는 알림처럼 반복되지 않는다).
+    if (trigger == .watch) self.config_file_digest = digest;
     return true;
 }
 

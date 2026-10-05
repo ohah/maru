@@ -3750,7 +3750,7 @@ pub export fn maru_macos_app_session_window_title(
 }
 
 // 이 창(세션)의 workspace restore 블록(헤더 없는 `window …` 라인)을 직렬화해 돌려준다. Swift가 멀티 창
-// 저장에서 `maru.workspace.v2` 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유(다음 호출/destroy까지
+// 저장에서 `maru.workspace.v1` 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유(다음 호출/destroy까지
 // 유효). 캡처/직렬화 실패(OOM 등)면 *out_len=0(Swift가 그 창을 건너뜀) — best-effort 저장이라 한 창 실패가
 // 전체 저장을 막지 않는다.
 pub export fn maru_macos_app_session_serialize_workspace(
@@ -7907,7 +7907,7 @@ test "Explorer v137 root picker ABI drains typed operations and cancel or invali
 /// 창 하나를 apply 하되 **두 번째 탭의 트리를 망가뜨려** 반드시 실패하게 만드는 workspace. 첫 탭의 pane 꼬리(`pane_tail`)에
 /// 되살릴 문서를 싣는다 — 그 문서는 첫 탭에서 이미 되살아난 뒤 두 번째 탭 실패로 롤백된다.
 fn failingRestoreText(buf: []u8, pane_tail: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "maru.workspace.v2\n" ++
+    return std.fmt.bufPrint(buf, "maru.workspace.v1\n" ++
         "window tabs=2 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"ok\"\n" ++
         "tree-node leaf pane=0\n" ++
@@ -8040,7 +8040,7 @@ test "a new untitled document never takes the number of a record a failed restor
     defer maru_macos_app_session_destroy(session);
     // 문서 1 은 **망가진 탭 뒤**의 탭에 있다 — 그 탭에 닿기 전에 apply 가 실패해 발급기가 1 을 보지 못한다.
     const text =
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
         "window tabs=3 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"ok\"\n" ++
         "tree-node leaf pane=0\n" ++
@@ -8109,7 +8109,7 @@ test "a successful window restore retains the backup record until a replacement 
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     const text =
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"ok\"\n" ++
         "tree-node leaf pane=0\n" ++
@@ -8171,7 +8171,7 @@ test "workspace apply failure names the tab it was building" {
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     const text =
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
         "window tabs=2 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"ok\"\n" ++
         "tree-node leaf pane=0\n" ++
@@ -8222,14 +8222,14 @@ test "workspace restore ABI preserves multi-window count active and apply" {
     // 막히면 파일이 그대로라 다음 실행도 같은 빈 창을 만나 또 막힌다(2026-09-21 실측: 앱을 세 번
     // 껐다 켜는 동안 매번 탭 배치가 사라졌다). `tabs=0` 자체는 dock·explorer 같은 창 속성만 든 창의
     // 정당한 직렬화 형식이라 파서에서 버릴 수 없고, 그래서 **적용 결과**를 갈라야 한다.
-    const empty_text = "maru.workspace.v2\nwindow tabs=0 active-tab=0\n";
+    const empty_text = "maru.workspace.v1\nwindow tabs=0 active-tab=0\n";
     try std.testing.expectEqual(
         @as(c_int, @intFromEnum(Status.workspace_empty)),
         maru_macos_app_session_apply_workspace_window(session1, empty_text.ptr, empty_text.len, 0),
     );
 
     const text =
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=2 active-pane=1 custom-name=\"first\"\n" ++
         "tree-node split vertical ratio=300\n" ++
@@ -8262,7 +8262,7 @@ test "workspace restore ABI preserves multi-window count active and apply" {
 
 test "workspace preflight ABI rejects cross-window duplicate runtime owner before session creation" {
     const text =
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++

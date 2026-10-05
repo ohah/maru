@@ -4,22 +4,35 @@
 
 ## 창 0 개 저장
 
-헤더 줄만 있는 저장(`maru.workspace.v2` 한 줄)은 **창 0 개**다. 복원은 이것을 오류가 아니라 「기본 빈 창으로
+헤더 줄만 있는 저장(`maru.workspace.v1` 한 줄)은 **창 0 개**다. 복원은 이것을 오류가 아니라 「기본 빈 창으로
 시작」으로 읽는다(`restoreWorkspace` 의 count==0). macOS 앱은 `window.quit-after-last-window-closed = false` 로
 마지막 창을 닫고 Dock 에 남은 동안에만 이 모양을 저장한다 — 다음 실행·재열기가 닫은 창을 되살리지 않고 빈 창이
 되도록. 창 0 개 상태에서 새 창을 만드는 중(아직 발행 전)의 캡처도 「창 0 개」다 — 발행 뒤 인벤토리 표시가 다시 캡처한다.
 그 밖의 창 0 개(종료 도중)는 여전히 캡처 불가다. 복원이 불완전했던 실행은 아무것도 쓰지 않으므로(아래 읽기 실패
 보존 규칙과 같음), 그 실행에서 닫은 창의 세션은 다음 실행에 「종료됨」 자리로 보일 수 있다(비-마지막 창 닫기와 같다).
 
+## 헤더 정책
+
+**저장 헤더는 `maru.workspace.v1` 하나이고 올리지 않는다(단일 출처).** 2026-07-08 사용자 결정(845c98459,
+[window-surface-mobility §8A.0·M3e](window-surface-mobility.md)):
+v2 하드 브레이크는 과설계로 기각했다 — **NO 헤더 bump · NO v1 reject · NO 마이그레이션**. 새 데이터는 v1 안의
+additive 스칼라 필드나 additive 줄로 싣는다(아래 「직렬화 전략」). 저장 파일 이름도 `workspace.v1` 그대로다.
+
+- **읽기 전용 옛 헤더 `maru.workspace.v2`.** d097ee4f2(2026-10-04)가 이 결정을 모른 채 헤더를 v2 로 올리고 v1 을
+  거절했다. 그 빌드를 설치한 사용자는 모든 저장본이 `BadHeader` 로 떨어져 매 실행 빈 창을 봤다(2026-10-05 실측 —
+  host 에는 세션 34 개가 살아 있었고, 파일이 보존된 덕분에 헤더 한 줄로 되찾았다). 그 기간에 v2 헤더로 저장된 파일은
+  본문이 v1 + editor 줄·필드라 같은 parser 로 읽고, 다음 저장이 v1 헤더로 되돌린다(`workspace.legacy_read_headers`).
+- **downgrade 방향.** `editor-document` 줄은 d097 이전 reader 가 모르는 줄이라, 그 줄이 있는 파일(로컬 native
+  editor 문서를 연 채 저장)을 옛 앱이 열면 창 블록이 `BadLine` 으로 떨어진다. 새 reader 가 옛 파일을 읽는 방향만
+  약속한다(아래 「하위 호환」과 같은 경계).
+- **판정자.** `test-workspace-header-policy`(check-boundaries)가 writer 헤더가 v1 인지, v1·v2 둘 다 읽히는지 잰다.
+- **읽기 실패.** 그래도 읽지 못하면 기본 창으로 시작하고 「checkpoint 보호」 래치가 파일을 그대로 둔다(덮어쓰지
+  않는다). 앱 로그에 `workspace parse failed: <err>`(Zig)와 `maru: workspace restore skipped — saved workspace did not
+  parse …`(Swift) 두 줄이 남는다 — 이 두 줄이 없던 2026-10-05 에는 래치 줄 하나뿐이라 원인을 파서를 떼어 찾아야 했다.
+
 ## 로컬 편집 문서와 뷰
 
-현재 스키마 헤더는 `maru.workspace.v2`다. 저장 경로는 기존 `workspace.v1`과 같은 잠금·atomic 게시 경계를
-유지한다. 출시 전 단일 포맷이므로 v1 헤더를 추측해서 읽거나 자동 변환하지 않으며, 읽기 실패 보존 규칙을 따른다.
-이 문서의 과거 additive/downgrade 설명은 당시 v1 변경 이력이며 v1↔v2 호환 계약이 아니다.
-그래서 v1 저장본은 파싱 실패(`BadHeader`)로 떨어진다: 기본 창으로 시작하고 「checkpoint 보호」 래치가 파일을 그대로
-둔다 — **자동 변환·덮어쓰기는 없으므로 실행마다 빈 창이 된다.** 앱 로그에 `workspace parse failed: <err>`(Zig)와
-`maru: workspace restore skipped — saved workspace did not parse …`(Swift) 두 줄이 남는다. 2026-10-05 실측: 이 두 줄이
-없던 때는 래치 줄 하나뿐이라 host 에 살아 있던 세션 34개가 「사라진」 것처럼 보였다.
+헤더는 위 「헤더 정책」대로 `maru.workspace.v1` 이다. 저장 경로는 `workspace.v1`과 같은 잠금·atomic 게시 경계를 유지한다.
 
 창은 `editor-document value="..."` 줄에 문서 index·recovery ID·disk/content hash·절대 path를 담고,
 pane의 `editor-view="..."`가 문서 index와 독립 선택·원문 줄 기준 스크롤·wrap·접힌 머리를 참조한다.
@@ -36,7 +49,7 @@ terminal·file-term·editor-view의 합계이며 브라우저·untitled·remote�
 일치하면 UTF-8 선택 경계·줄/열·현재 provider의 접힘을 검증한다. 스크롤은 접힌 표시 배열의
 첨자가 아닌 0-based 원문 줄(`first_doc_line`)로 저장하고, 접힘 배열을 만든 뒤 표시 줄로 변환한다.
 뷰 payload는 `index:document:doc:first_doc_line:first_piece:first_col:wrap:…`로 좌표 종류를
-명시한다. 출시 전 단일 v2이며 `doc` 표식 없는 이전 개발 payload를 새 좌표로 추측해 읽지 않는다.
+명시한다. `doc` 표식 없는 이전 개발 payload를 새 좌표로 추측해 읽지 않는다(뷰 payload 한정 — 헤더는 「헤더 정책」).
 렌더의 기존 wrap/스크롤 정산은 유지한다.
 
 구문 분석·LSP 준비가 늦어도 복원은 창 게시를 기다리게 하지 않는다. 같은 본문 revision에 대해
@@ -175,7 +188,7 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 | 재부팅 증명 없이 host 종료가 긍정적으로 검증됨 | 기존 handle은 ended. 사용자가 `⏎`로 새 shell을 열 수는 있지만 동일 session continuation 아님 |
 | host에만 runtime이 남음 | 삭제하지 않음. primary Window의 `Recovered Sessions`에 노출하고 사용자의 explicit adopt만 허용 |
 
-현재 `maru.workspace.v2`의 terminal `runtime-handle`은 구현됐다. writer는
+현재 `maru.workspace.v1`의 terminal `runtime-handle`은 구현됐다. writer는
 `<host-id>:<runtime-id>`를 함께 쓰고 reader는 길이·lowercase hex·구분자를 fail-closed 검증한다. 옛
 `runtime-id` 단독 파일은 한 번의 attach migration을 위해 읽지만 새 live capture는 bare ID를 만들지 않는다.
 첫 복원의 ended placeholder와 `⏎` 제자리 재생성은 제품 계약이다. P4 R1은
@@ -273,7 +286,7 @@ throwaway host runtime을 하나도 spawn하지 않는다. primary Window 적용
 일반 layout에는 optional scalar만 추가한다.
 
 ```text
-maru.workspace.v2
+maru.workspace.v1
 window tabs=1 active-tab=0 active-window=1
 tab panes=1 active-pane=0 custom-name="work" pinned=0 background-color=0 accent-color=0
 tree-node leaf pane=0
@@ -328,7 +341,7 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 - `runtime-handle`은 secret/capability가 아니다. workspace 파일을 읽은 client도 별도 session-host 인증 없이는 output/input을
   얻지 못한다.
 - `LineFields`가 첫 unknown top-level trailing line에서 성공 종료하는 현재 동작은 legacy 관용성이지 구조 확장점이 아니다.
-  새 block/tree/count가 필요하면 `maru.workspace.v2` reader→current model migration을 설계한다.
+  새 block/tree/count가 필요해도 헤더는 올리지 않는다 — 옛 reader 가 어떻게 떨어지는지 적고 additive 줄로 싣는다(「헤더 정책」).
 - v1의 하위호환 약속은 새 reader가 옛 파일을 읽는 방향이다. 옛 writer는 미지 scalar를 보존하지 않으므로 새 파일을 구 앱에서
   열고 다시 저장하는 downgrade round-trip은 지원하지 않으며 완료 증거로 사용하지 않는다.
 
@@ -576,7 +589,7 @@ read-old/write-new 방식이므로 한 번 저장하면 자연스럽게 사라�
 “영속 session binding wire”를 따른다.
 
 ```text
-maru.workspace.v2
+maru.workspace.v1
 workspace id=<stable-id>
 root /path/to/repo
 
@@ -593,7 +606,7 @@ layout
 ```
 
 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로
-bare 토큰(`maru.workspace.v2`)을 쓰고 `schema=` 접두어를 두지 않는다.
+bare 토큰(`maru.workspace.v1`)을 쓰고 `schema=` 접두어를 두지 않는다.
 
 멀티윈도우와 live surface 소유권은 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다. 현재 v1은 이미
 한 header 아래 Window N개, 각 Window의 workspace order·pane tree·surface metadata, active window와 geometry를 저장한다.

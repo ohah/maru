@@ -6436,6 +6436,37 @@ pub fn build(b: *std.Build) void {
     workspace_parse_failure_log_step.dependOn(&run_workspace_parse_failure_log.step);
     boundary_step.dependOn(workspace_parse_failure_log_step);
 
+    // workspace 저장 헤더가 **`maru.workspace.v1` 하나로 남는가**(2026-07-08 사용자 결정 845c98459 — bump·v1 reject·
+    // 마이그레이션 없음. 2026-10-04 d097ee4f2 가 v2 로 올려 모든 옛 저장본이 거절됐다). 헤더 상수·C define·parser 입구·
+    // 반대 단언 부재를 글자로 재서 PR 필수 잡에 건다. 값(fixture 둘을 읽고 v1 로 다시 쓰는가)은 같은 step 의 필터 실행이 잰다.
+    const workspace_header_policy_step = b.step(
+        "test-workspace-header-policy",
+        "The workspace writer header stays maru.workspace.v1 and the old v2 header is read-only",
+    );
+    const workspace_header_policy_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/workspace_header_policy_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_workspace_header_policy = b.addRunArtifact(workspace_header_policy_tests);
+    run_workspace_header_policy.addArg("--maru-expect-tests=2");
+    run_workspace_header_policy.addArg("--maru-expect-passed=2");
+    run_workspace_header_policy.setCwd(b.path("."));
+    workspace_header_policy_step.dependOn(&run_workspace_header_policy.step);
+    boundary_step.dependOn(&run_workspace_header_policy.step);
+    const workspace_header_values = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{"workspace header policy"},
+    });
+    const run_workspace_header_values = b.addRunArtifact(workspace_header_values);
+    // 25 = 이름이 필터에 걸리는 헤더 정책 판정 3개 + 이 모듈 그래프의 이름 없는 test 블록 22개(필터는 익명 블록을 못 거른다 —
+    // test-cli-relay 와 같은 셈법). 숫자가 틀리면 먼저 세 판정이 다 돌았는지 본다.
+    run_workspace_header_values.addArg("--maru-expect-tests=25");
+    run_workspace_header_values.addArg("--maru-expect-passed=25");
+    workspace_header_policy_step.dependOn(&run_workspace_header_values.step);
+
     // 업그레이드가 실패해도 **살아 있는 host 를 재사용하고, 그런 host 가 없을 때만 새 host 를 띄우는가**(2026-09-30:
     // 교체 실패마다 새 host 를 띄워 host 가 넷이 됐다 — 설계는 「한 로그인 세션에 host 하나」). 판정은 std-only leaf 라
     // PR 에서 돌고, connect 경로·앱 pool 이 그 판정을 spawn 앞 제자리에서 부르는지는 wiring 경계가 잰다.

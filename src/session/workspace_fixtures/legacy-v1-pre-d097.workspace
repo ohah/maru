@@ -1,0 +1,20 @@
+maru.workspace.v1
+window tabs=2 active-tab=1 active-window=1 win-x=0 win-y=61 win-w=1440 win-h=900 dock-size=500 dock-collapsed=1 dock-tree-roots="1:12:/tmp/project" boot-session="a7c9924a-6cb1-4c6b-b004-95d26c1eba3d"
+tab panes=2 active-pane=1 custom-name="server" pinned=1 background-color=0 accent-color=0
+tree-node split vertical ratio=500
+tree-node leaf pane=0
+tree-node leaf pane=1
+pane surfaces=1 active-term=0 custom-name=""
+surface custom-name="" title="zsh" cwd="/tmp/project" command="" cols=80 rows=24
+pane surfaces=2 active-term=1 custom-name="logs"
+surface custom-name="" title="tail" cwd="/tmp/project/log" command="" cols=80 rows=24
+surface custom-name="build" title="" cwd="/tmp/project" command="" cols=80 rows=24
+tab panes=1 active-pane=0 custom-name="" pinned=0 background-color=0 accent-color=0
+tree-node leaf pane=0
+pane surfaces=1 active-term=0 custom-name=""
+surface custom-name="" title="" cwd="/tmp/other" command="" cols=120 rows=40
+window tabs=1 active-tab=0 win-x=100 win-y=100 win-w=800 win-h=600
+tab panes=1 active-pane=0 custom-name="scratch" pinned=0 background-color=0 accent-color=0
+tree-node leaf pane=0
+pane surfaces=1 active-term=0 custom-name=""
+surface custom-name="" title="" cwd="/tmp" command="" cols=80 rows=24

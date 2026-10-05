@@ -1,0 +1,7 @@
+maru.workspace.v2
+window tabs=1 active-tab=0 active-window=1 win-x=0 win-y=61 win-w=1440 win-h=900
+editor-document value="0:01010101010101010101010101010101:11:22:22:/tmp/project/notes.txt"
+tab panes=1 active-pane=0 custom-name="edit" pinned=0 background-color=0 accent-color=0
+tree-node leaf pane=0
+pane surfaces=1 active-term=1 custom-name="" editor-view="1:0:doc:4:0:0:inherit:3:3:3:simple:0:0:"
+surface custom-name="" title="zsh" cwd="/tmp/project" command="" cols=80 rows=24

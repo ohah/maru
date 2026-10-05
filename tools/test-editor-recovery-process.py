@@ -50,7 +50,7 @@ def main():
         assert records[0].read_bytes() == b"damaged"
         assert digest(records[1]) == before[str(records[1])]
         assert checkpoint.read_bytes() == checkpoint_before
-        checkpoint.write_bytes(checkpoint_before.replace(b"maru.workspace.v2", b"maru.workspace.v1", 1))
+        checkpoint.write_bytes(checkpoint_before.replace(b"maru.workspace.v1", b"maru.workspace.v999", 1))
         legacy = checkpoint.read_bytes()
         run("old-format")
         assert checkpoint.read_bytes() == legacy

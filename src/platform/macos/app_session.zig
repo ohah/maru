@@ -52545,7 +52545,7 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     const wins = [_]maru.session.workspace.Window{win};
     const text = try maru.session.workspace.serialize(allocator, .{ .windows = &wins });
     defer allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/tmp/proj\"") != null);
 }
@@ -56812,7 +56812,7 @@ test "하위버전 파일에는 접힘 의도가 없다 — agents-collapsed 없
     // 이 필드를 모르던 버전이 쓴 줄(agents-collapsed 키 없음). Term 2개라 토글 행이 실제로 생기는 구성이다
     // (에이전트 0 + Term 2개 — docs/sidebar-agent-list.md §1). 파서 기본값이 아니라 **화면 행**까지 확인한다.
     const text =
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"legacy\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node leaf pane=0\n" ++
@@ -56879,7 +56879,7 @@ test "legacy provider workspace fields are ignored across multi-window parse app
     // 삭제 전 writer가 만들던 provider 필드는 일반 unknown scalar로만 취급한다. invalid argc와 bare arg도 구조 필드가
     // 아니므로 복원을 막지 않는다. 이 raw fixture 한 곳만 옛 wire spelling을 보존해 history가 제품 모델로 번지는 것을 막는다.
     const text =
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=2 active-pane=1 custom-name=\"my work\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node split vertical ratio=300\n" ++

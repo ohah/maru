@@ -7,7 +7,7 @@
 //!
 //! **포맷은 저장소 관례를 그대로 쓴다**: 첫 줄 bare 헤더 토큰(`schema=` 접두 없음), 그다음 한 줄
 //! `key=value`(따옴표 값은 `text_escape` 단일 출처), 빈 줄 하나, 그 뒤가 **원문 바이트 그대로**다
-//! (`maru.workspace.v2`·`maru.trace.v1` 와 같은 규칙 — 새 escape 규칙을 만들지 않는다).
+//! (`maru.workspace.v1`·`maru.trace.v1` 와 같은 규칙 — 새 escape 규칙을 만들지 않는다).
 //! 본문을 escape 하지 않는 이유: 문서는 8 MiB 까지 오고 escape 하면 사본이 한 벌 더 생긴다.
 
 const std = @import("std");

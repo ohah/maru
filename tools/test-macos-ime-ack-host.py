@@ -370,14 +370,18 @@ class Controller {
  func backingPx(_ p:CGPoint,in view:NSView)->(Double,Double) { (0,0) }
  func modsBits(_ e:NSEvent)->Int32 { 0 }
  func markMetalNeedsRedraw() {}
+ // W6g: 누름은 그 view 의 창 세션으로 간다 — 감싸개가 본문을 꼭 한 번 부르는지 센다.
+ var routes=0
+ func surfaceForView(_ v:NSView)->Int? { routes+=1; return nil }
+ func withSurface(_ s:Int?, _ body:()->Void) { body() }
 @@MOUSE@@
 }
 var failures=0
 for kind:Int32 in [1,4,5] {
  let v=MaruMetalTerminalView(); let c=Controller(); dispatches=0
  c.handleMouse(NSEvent(),kind:kind,in:v)
- print("kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches)")
- if dispatches != 0 { failures+=1 }
+ print("kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches) routes=\(c.routes)")
+ if dispatches != 0 || c.routes != 1 { failures+=1 }
 }
 for kind:Int32 in [1,4,5] {
  let v=MaruMetalTerminalView();v.admitted=true;let c=Controller();dispatches=0
@@ -430,7 +434,8 @@ def run(source_path):
     if opening < 0:
         raise ValueError("missing keyDown interpretation closure")
     host = host.replace("@@INTERPRET@@", key_down[start:closing_brace(key_mask, opening)])
-    mouse = MOUSE_TEMPLATE.replace("@@MOUSE@@", extract_method(source, masked, controller, "handleMouse"))
+    mouse = MOUSE_TEMPLATE.replace("@@MOUSE@@", "\n".join(
+        extract_method(source, masked, controller, name) for name in ("handleMouse", "handleMouseInSurface")))
     print(f"source={source_path} sha256={hashlib.sha256(source.encode('utf-8')).hexdigest()}", flush=True)
     with tempfile.TemporaryDirectory(prefix="maru-ime-ack-host-") as directory:
         root = Path(directory)

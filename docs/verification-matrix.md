@@ -5333,3 +5333,11 @@ PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 �
 `tools/reference-picker-ime`의 실제 두벌식·후보 취소 5회·한자 선택·별도 Enter 이동·에디터 복귀 진단이 통과했다.
 같은 고정 앱에서 서로 다른 후보창 5개의 PNG/hash/독립 OCR도 통과했다. 실제 OS 실행은 references 모드이며 나머지 명령 kind는 공유 호스트 검사로 검증했다.
 위치 응답을 공급하는 fixture는 실제 LSP 서버 통신 검증이 아니다. [계획과 결과](plans/reference-picker-ime.md)를 따른다.
+
+### Windows 파일 트리 변경 감시 (§2m.188)
+
+`test-win32-editor-watch` 18개 Debug/ReleaseFast와 다섯 compiled runtime 변형을
+검증했다. 실제 Windows 앱에서 root 파일 생성/삭제와 펼친 하위 폴더 파일 추가/삭제를
+재시작 없이 캡처했고 펼침 상태 유지 및 정상 종료를 확인했다. private fixture와
+synthetic owned HWND 입력을 사용했다. 물리 입력·IME, sleep/unmount·root 교체
+장기 soak와 원격 감시는 미검증이며 이 항목의 완료 주장이 아니다.

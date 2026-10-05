@@ -29,7 +29,7 @@ A의 저장/버리기 때문에 B의 백업이 덮이거나 삭제되던 path �
 flowchart TD
   P["prepareRecoveryPath: ID + State + Owner"] --> W["Owner.write: 첫 백업에 Reservation"]
   W --> C["Capture.view: 문서 표와 뷰 사본"]
-  C --> S["workspace.serialize: v2 checkpoint"]
+  C --> S["workspace.serialize: v1 checkpoint"]
   S --> V["workspace.parse + validateEditorReferences"]
   V --> R["Staging.createView: 첫 정본 복원, 나머지 retain"]
   R --> A["applyWorkspaceWindow: 새 트리 게시"]
@@ -57,6 +57,7 @@ flowchart TD
 - CI에서 종료 성공 검사 하나가 이전 `v1` 헤더를 요구하는 누락을 찾았다. 실제 앱은 v2 저장과 종료를
   마친 상태였다. 같은 실패를 로컬에서 재현하고 판정을 v2로 수정한 뒤 정상 종료와 저장 실패 시
   종료 취소를 모두 확인했다(`macos-session-host-c4-quit-cancel-smoke -Doptimize=ReleaseFast`).
+  (2026-10-05: 헤더를 v1 으로 복원해 이 판정도 다시 v1 이다 — [헤더 정책](../workspace-restore.md#헤더-정책).)
 
 ## 실행 검증
 
@@ -82,7 +83,7 @@ codec·메타데이터, 실제 AppSession, 플랫폼 파일 소유권 검사를 
 등가 변이는 통과했다. 각 변이 뒤 원본을 되돌렸다. 검토 횟수 대신 검출한 동작을 기록한다.
 
 `tools/test-editor-recovery-process.py`는 실제 AppSession test artifact를 서로 다른 프로세스로 실행한다.
-write 1회와 restore 2회, 손상 record, v1 header 거절을 검사한다. 복원 뒤 다시 백업할 편집을 하지 않아도
+write 1회와 restore 2회, 손상 record, 알 수 없는 헤더(`maru.workspace.v999`) 거절을 검사한다. 복원 뒤 다시 백업할 편집을 하지 않아도
 원본 record가 남으며 디스크/정상 sibling 기록/checkpoint가 보존된다. `test-macos-only` CI에 연결했다.
 이 결과는 AppKit 또는 실제 OS IME 화면 검증과 구분한다.
 

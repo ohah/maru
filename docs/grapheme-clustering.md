@@ -204,7 +204,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 - **HG3a — 렌더·셰이핑 통합 + ObjC ABI(cluster 풀)**: `DrawList.grapheme_pool` + `DrawCell.grapheme_offset/count`(buildDrawList가 `snapshot.graphemes`로 적재), `NativeDrawCell`/`MaruCoreTextDrawCell`에 풀 참조 추가(shape fn에 grapheme_pool 인자), `maru_create_string_for_draw_cell`이 base 뒤에 풀 전체를 CFMutableString으로 무손실 append → CoreText가 NFD 한글 종성·다중 악센트·키캡을 합성. `Cell.combining`은 단일-extra 폴백/색판정 그림자로 잠정 유지. 검증: 실제 CoreText에서 NFD '한'이 완성형 '한'과 동일 glyph_id(폰트 무관).
 - **HG3b — `Cell.combining`·단일-combining hack 제거(pure-B)**: producer가 단일 extra도 `grapheme_store`에 담아(combining 그림자 폐지), `Cell.combining`과 renderer 체인(`DrawCell`/`GlyphRun`/`ShapedGlyphRecord`/`NativeDrawCell`/`CoreTextGlyphRecord`)의 combining 필드, 보정 hack 3곳(`isColorGlyph`는 셰이퍼가 주는 `color_glyph_kind`로 대체·셰이퍼 VS16 재주입·`selection` 복사)과 `width.isKeycapCombining`을 제거한다. 메모리 근거: 단일 combining을 store에 담는 비용은 셀당 ~수십 바이트·append-only로 `link_store`/HG2b와 같은 프로파일이라 실사용에서 무시할 수준 — 컨벤션(`architecture.md` 메모리 전략: "성급한 최적화 금지")상 dual-path보다 단순 균일 모델이 옳다. 반복 cluster의 per-cell 증가는 dedup으로 막았고(§5 HG2a-후속), 화면 밖 cluster까지의 구조적 회수는 보류다(vehicle인 §11 B 불가 — §5 HG2a-후속·§11.8 §595).
 - **HG4 — 검증·fixture**: NFD `ls` 시나리오 recorded-oracle fixture(`tests/fixtures/ansi/nfd_hangul.ansi` ↔ `tests/golden/screen/xterm/nfd_hangul.txt`, `tests/oracle/recorded.zig`의 `nfd_hangul` 케이스) — NFD '한글'이 음절당 한 셀(width 2)로 묶여 dumpUtf8가 자모 6개를 무손실 복원하는지 maru-vs-golden으로 고정. 외부 oracle(libvterm/Alacritty)은 conjoining 자모를 다르게 다룰 수 있어 `cases.zig`가 아니라 recorded로만 둔다(§6). 실제 CoreText 합성은 `test-macos-coretext-smoke`가 NFD '한'≡완성형 '한' glyph로 이미 고정(HG3a). 픽셀 PNG 캡처는 폰트 의존이라 visible 앱 수동 절차로 둔다(§6).
-- **HG-후속 — emoji ZWJ(GB11) + emoji 클러스터 경로 통합**: mode 2027에서 ZWJ 가족(👨‍👩‍👧)을 한 셀(폭 2)로 묶는다(GB11: `Extended_Pictographic Extend* ZWJ × Extended_Pictographic`, 사람마다 다른 스킨톤 포함). skin-tone(GB9 modifier)·국기 RI(GB12/13)·ZWJ(GB11)를 흩어진 특수분기 대신 **단일 `emojiClusterExtends` 판정 + 흡수 + `promoteLastToEmojiWidth`**(RI만 폭 1→2, 나머지 no-op)로 통합한다 — 동작 보존(기존 이모지/국기/스킨톤/키캡 테스트 green). `grapheme.isExtendedPictographic`은 큐레이션 범위(완전한 Extended_Pictographic 속성표는 fixture로 확장). NFD 한글과 달리 **mode 2027 게이팅**(2027 안 켠 앱과 폭 합의가 어긋나지 않게 — skin-tone/RI와 동일 정책). 검증: ZWJ 가족·스킨톤 가족 한 셀·무손실 dump(core 단위), `test-macos-coretext-smoke`가 가족을 컬러 글리프로 셰이핑.
+- **HG-후속 — emoji ZWJ(GB11) + emoji 클러스터 경로 통합**: mode 2027에서 ZWJ 가족(👨‍👩‍👧)을 한 셀(폭 2)로 묶는다(GB11: `Extended_Pictographic Extend* ZWJ × Extended_Pictographic`, 사람마다 다른 스킨톤 포함). skin-tone(GB9 modifier)·국기 RI(GB12/13)·ZWJ(GB11)를 흩어진 특수분기 대신 **단일 `emojiClusterExtends` 판정 + 흡수 + `promoteLastToEmojiWidth`**(RI만 폭 1→2, 나머지 no-op)로 통합한다 — 동작 보존(기존 이모지/국기/스킨톤/키캡 테스트 green). `grapheme.isExtendedPictographic`은 큐레이션 범위(완전한 Extended_Pictographic 속성표는 fixture로 확장). NFD 한글과 달리 **mode 2027 게이팅**(2027 안 켠 앱과 폭 합의가 어긋나지 않게 — skin-tone/RI와 동일 정책). — 이 게이팅은 이후 바뀌었다: 2026-08-20부터 `text.emoji-width=wide`(기본)면 2027 합의 없이도 묶고, `narrow`(opt-in)일 때만 2027에서 묶는다(근거·대가는 [configuration-text.md](configuration-text.md) 「이모지 폭」). 검증: ZWJ 가족·스킨톤 가족 한 셀·무손실 dump(core 단위), `test-macos-coretext-smoke`가 가족을 컬러 글리프로 셰이핑.
 
 각 단계는 작은 PR로 진행한다(progressive enhancement). 베이스 = UAX#29(공개 명세), Ghostty는 동작 비교만(clean-room).
 
@@ -218,6 +218,10 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 - [검증 매트릭스](verification-matrix.md)의 `wide-character` 항목에 NFD 한글 cluster 케이스를 추가한다.
 
 ## 6.1 비-2027 환경에서 ZWJ 이모지가 화면을 어긋나게 하는 증상 — 판정 근거
+
+> **적용 범위(2026-08-20 이후)**: 기본 `text.emoji-width=wide` 는 2027 합의 없이도 ZWJ·스킨톤·국기를 한 셀로
+> 묶는다([configuration-text.md](configuration-text.md) 「이모지 폭」 — 모던 TUI 가 cluster 단위로 세므로 그쪽에 맞췄다).
+> 아래 판정은 **`narrow`(opt-in)** 환경, 즉 코드포인트별 폭을 고른 경우의 근거로 남는다.
 
 **증상.** ZWJ 이모지(가족·직업 등)를 출력하는 TUI에서, **그 줄 이후의 모든 줄**이 어긋난다. 표 테두리가
 밀리고, 줄바꿈 위치가 틀리며, 앱이 "지웠다"고 여기는 칸에 **옛 글자가 남는다**(특히 폭 2 wide 글자가 좌측
@@ -249,7 +253,12 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 
 ## 7. 잔여와 후속
 
-- ZWJ 이모지 시퀀스(GB11)·국기(RI 쌍)·skin-tone은 mode 2027에서 한 셀(폭 2)로 묶여 정확하다(HG-후속 `emojiClusterExtends` 통합). 남은 것(현재 안 함 — 동작 영향 없음): (1) `isExtendedPictographic`의 완전한 Extended_Pictographic 속성표 — 현재 큐레이션 범위가 RI·skin-tone을 과포함하나 `emojiClusterExtends`에서 각자 분기가 먼저 처리해 **무해**하므로, 출력이 바뀌는 실사용 근거가 없으면 도입하지 않는다, (2) mode 2027을 안 켠 환경의 ZWJ 폭 정책(현재 비-2027은 컴포넌트별 폭 — 앱과 합의 없이 묶지 않음, 의도된 정책).
+- ZWJ 이모지 시퀀스(GB11)·국기(RI 쌍)·skin-tone은 mode 2027에서, 그리고 기본 `text.emoji-width=wide` 에서는 2027 없이도 한 셀(폭 2)로 묶여 정확하다(HG-후속 `emojiClusterExtends` 통합). 남은 것:
+  1. **`isExtendedPictographic`의 완전한 Extended_Pictographic 속성표 — 보류(실사용 근거가 생기면).** 지금은 블록 범위 셋(`src/grapheme.zig`)이라 양쪽으로 어긋난다.
+     - **과포함**: RI·skin-tone 등 속성이 아닌 것도 든다. 터미널에서는 `emojiClusterExtends`의 각자 분기가 먼저 처리해 **무해**하다(chrome 의 `clusterEnd` 는 RI 를 따로 거르지 않지만 ZWJ 가 붙은 잘못된 입력에서만 드러난다).
+     - **누락**: 범위 밖 BMP 그림문자(©·®·‼·™·⌚·↔·↕ 등)가 빠진다. **대부분은 출력이 안 바뀐다** — `©️` 같은 VS16 표현은 이 속성을 안 보는 VS16 경로로 묶이고, 표준 ZWJ 시퀀스 대부분(❤️‍🔥·🏳️‍⚧️ 등)은 구성 이모지가 범위 안이다. **출력이 바뀌는 것은 ZWJ 뒤에 범위 밖 그림문자가 오는 표준 시퀀스**뿐이고, 확인된 것은 Unicode 15.1 의 🙂‍↔️(U+1F642 ZWJ U+2194 FE0F)·🙂‍↕️(…U+2195…)다 — 2칸이어야 할 것이 **4칸**(🙂 2칸 + ↔️ 2칸, 글리프 둘)이 된다(2026-10-05 실측, `emoji_wide` 기본).
+     - 그래서 판정은 그대로다: 그 시퀀스가 실제 출력에서 쓰이다 깨진 보고가 생기면 도입한다. 도입할 때는 속성표 전체(Unicode 17 기준 약 156 범위)로 바꾸고, 과포함이 빠지면서 잘못된 입력 흡수가 달라지는 것을 기존 판정자로 확인한다.
+  2. mode 2027을 안 켠 환경의 ZWJ 폭 정책은 `text.emoji-width` 가 정한다 — `wide`(기본)는 묶고 `narrow`(opt-in)는 컴포넌트별 폭(§6.1).
 - IME preedit는 codepoint 단위 렌더다(위 §4 preedit 항목) — 주 타깃 한글 IME가 완성형 marked text를 보내 정상이고, NFD/combining marked text는 조합 중 표시에 한해 미지원(확정 후 PTY 경로가 정상 cluster화). cluster 인지 복제는 그런 IME가 실제로 쓰이는 근거가 생기면 검토한다.
 - 다중 glyph로 셰이핑되는 cluster의 atlas 키잉·배치 정책은 실제 CoreText 결과를 보고 확정한다(현재 base+glyph_id 기준 — NFD 음절·이모지는 합성 후 단일/소수 glyph라 실사용 충돌 없음).
 - 정규화(NFC/NFD)는 **어느 층에도** 도입하지 않는다(§3.1·§3.1a). 터미널은 앱과의 코드포인트 합의 때문에, chrome은 cluster 모델(CG1)로 통일해 정규화가 필요 없어졌기 때문이다. 만약 외부 요구로 입력 정규화가 필요해지면 전략 수정이므로 [PR 체크리스트](pr-checklist.md) 절차에 따라 사용자와 먼저 논의한다.

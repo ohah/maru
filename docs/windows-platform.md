@@ -12147,3 +12147,19 @@ owned HWND이며 물리 입력/IME 검증이 아니다.
 본문 hash/copy와 복구 이력/후속 projection CPU는 아직 앱에 있다. 명시적 close의
 backup drop, shutdown의 최종 일괄 flush와 owner/드문 extra-root handle 정리도 아직
 동기 경로다. 이 절은 주기적 I/O의 이관만 기록하며 전체 잔여 Windows 범위를 완료로 보지 않는다.
+
+
+### §2m.190 Windows 파일 트리 스캔 실패의 원자성 및 재시도
+
+네이티브 목록을 전부 EntryInput으로 변환한 뒤에만 Tree의 staged snapshot을 적용한다.
+변환 OOM을 부분 목록 성공으로 취급하지 않는다. 실패한 scan/result/apply는 기존 노드를
+보존하고 loading을 해제하며 200ms 후 expanded root를 다시 스캔한다. 재시도는 native
+watcher 설치 여부와 독립적이다. snapshot 적용 후 행 투영 OOM은 이미 교체된 노드를
+가리키는 이전 행을 재사용하지 않고 불완전한 행을 비운 뒤 다시 스캔한다.
+
+`test-win32-editor-watch` 21개가 Debug/ReleaseFast에서 통과했다. 새 검증은 변환 OOM의
+기존 목록 보존과 정상 재적용, 실패 결과의 retry, 행 투영 OOM의 안전한 폐기를 포함한다.
+부분 변환 성공, retry 소실, recursive 감시, queue 순서, rearm을 깨뜨린 5개 compiled
+runtime 변형 모두 검출하고 원본을 복원했다. 지속적인 권한 오류·root 교체의 사용자
+표시 및 장기 soak는 별도 잔여 항목이다. 이번 실패 주입은 테스트 allocator 경로이며
+실앱의 강제 OOM을 재현했다고 주장하지 않는다.

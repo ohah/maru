@@ -1591,7 +1591,7 @@ pub fn build(b: *std.Build) void {
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
     const run_directory_watch_tests = b.addRunArtifact(directory_watch_tests);
-    run_directory_watch_tests.addArg("--maru-expect-tests=18"); // 2 aggregation blocks + 16 native/queue tests
+    run_directory_watch_tests.addArg("--maru-expect-tests=21"); // 2 aggregation blocks + 19 native/queue/failure tests
     directory_watch_step.dependOn(&run_directory_watch_tests.step);
     const backup_worker_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows recovery backup worker"} });
     const backup_worker_step = b.step("test-win32-backup-worker", "Verify immutable recovery jobs and current native cleanup approval");

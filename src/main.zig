@@ -3169,6 +3169,17 @@ fn toggleTreeRow(
     return true;
 }
 
+// Convert the entire result before changing the tree: an allocation failure must
+// never turn a complete native listing into an authoritative partial snapshot.
+fn applyTreeScan(allocator: std.mem.Allocator, tree: *maru.session.file_tree.Tree, result: *const file_tree_backend.Result) !void {
+    var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
+    defer inputs.deinit(allocator);
+    try inputs.ensureTotalCapacity(allocator, result.entries.items.len);
+    for (result.entries.items) |e|
+        inputs.appendAssumeCapacity(.{ .name = e.name, .kind = e.kind, .identity = e.identity });
+    try tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items);
+}
+
 /// 와 있는 스캔 결과를 **전부** 받아 트리에 반영한다. 행이 바뀌었으면 `true`.
 ///
 /// 루프가 매 프레임 부른다. **하나만 받고 끝내지 않는다** — 한 프레임에 여러 폴더가 돌아올 수 있고,
@@ -3180,22 +3191,33 @@ fn drainTreeScan(
     backend: ?*file_tree_backend.Backend,
     rows: *std.ArrayList(maru.session.file_tree.Row),
     root_path: []const u8,
+    retry: *bool,
 ) bool {
     const b = backend orelse return false;
     var applied = false;
     while (b.takeResult()) |taken| {
         var result = taken;
         defer result.deinit(allocator, io);
-        if (!result.ok) continue;
-        var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
-        defer inputs.deinit(allocator);
-        for (result.entries.items) |e|
-            inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity }) catch break;
-        tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items) catch continue;
+        if (!result.ok) {
+            tree.failSnapshot(result.path);
+            retry.* = true;
+            continue;
+        }
+        applyTreeScan(allocator, tree, &result) catch {
+            tree.failSnapshot(result.path);
+            retry.* = true;
+            continue;
+        };
         applied = true;
     }
     if (!applied) return false;
-    tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, rows) catch return false;
+    tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, rows) catch {
+        // Rows borrow node strings. After a successful snapshot the old rows
+        // cannot be reused; discard any incomplete projection and retry.
+        rows.clearRetainingCapacity();
+        retry.* = true;
+        return true;
+    };
     cell_text.classifyFileTreeRows(rows.items);
     return true;
 }
@@ -11394,28 +11416,33 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const waiting_first = agent_apply_spin == null;
         const waiting_refresh = agent_refresh_submits > 0 and agent_applies <= ag_refresh_applies_before;
         agent_settling = smoke and agent_backend != null and settle_frames < 6000 and (waiting_first or waiting_refresh);
+        const watch_now = std.Io.Clock.awake.now(io).nanoseconds;
         if (tree_watch) |watch| {
-            const watch_now = std.Io.Clock.awake.now(io).nanoseconds;
             const changed = watch.poll() catch !tree_watch_dirty;
             if (changed) {
                 tree_watch_dirty = true;
                 tree_watch_due = watch_now + 200 * std.time.ns_per_ms;
             }
-            if (tree_watch_dirty and watch_now >= tree_watch_due) {
-                if (dock_tree.invalidateExpanded()) |_| {
-                    tree_watch_dirty = false;
-                } else |_| {
-                    // Keep the hint on allocation failure; retry without losing
-                    // already queued paths or declaring this snapshot current.
-                    tree_watch_due = watch_now + 200 * std.time.ns_per_ms;
-                }
+        }
+        if (tree_watch_dirty and watch_now >= tree_watch_due) {
+            if (dock_tree.invalidateExpanded()) |_| {
+                tree_watch_dirty = false;
+            } else |_| {
+                // Keep the hint on allocation failure; retry without losing
+                // already queued paths or declaring this snapshot current.
+                tree_watch_due = watch_now + 200 * std.time.ns_per_ms;
             }
         }
         if (tree_backend) |*backend| _ = pumpTreeScanRequest(&dock_tree, backend);
-        if (drainTreeScan(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".")) {
+        var tree_scan_retry = false;
+        if (drainTreeScan(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".", &tree_scan_retry)) {
             tree_scan_applied += 1;
             if (tree_expand_submit_spin != null and tree_expand_apply_spin == null) tree_expand_apply_spin = spins;
             rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+        }
+        if (tree_scan_retry) {
+            tree_watch_dirty = true;
+            tree_watch_due = std.Io.Clock.awake.now(io).nanoseconds + 200 * std.time.ns_per_ms;
         }
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
@@ -20469,4 +20496,61 @@ test "Windows recovery backup worker app preserves queued window close and allow
     try std.testing.expect(backupAllowsCloseAction(true, .cancelled));
     try std.testing.expect(backupAllowsCloseAction(true, .extra));
     try std.testing.expect(backupAllowsCloseAction(false, .confirmed));
+}
+
+test "Windows editor directory watch allocation failure never publishes partial listing" {
+    const a = std.testing.allocator;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.addExplicitRoot("C:/selected");
+    try tree.applySnapshot("C:/selected", &.{.{ .name = "old.txt", .kind = .file }});
+    var result: file_tree_backend.Result = .{ .path = try a.dupe(u8, "C:/selected") };
+    defer result.deinit(a, std.testing.io);
+    for ([_][]const u8{ "first.txt", "second.txt" }) |name| {
+        try result.entries.append(a, .{ .name = try a.dupe(u8, name), .kind = .file, .identity = .{ .device = 1, .inode = 1, .kind = 1 } });
+    }
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, applyTreeScan(failing.allocator(), &tree, &result));
+    try std.testing.expectEqual(@as(usize, 1), tree.roots.items[0].children.items.len);
+    try std.testing.expectEqualStrings("old.txt", tree.roots.items[0].children.items[0].name);
+    try applyTreeScan(a, &tree, &result);
+    try std.testing.expectEqual(@as(usize, 2), tree.roots.items[0].children.items.len);
+    try std.testing.expectEqualStrings("first.txt", tree.roots.items[0].children.items[0].name);
+    try std.testing.expectEqualStrings("second.txt", tree.roots.items[0].children.items[1].name);
+}
+
+test "Windows editor directory watch failed result retains snapshot and requests retry" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.addExplicitRoot("C:/selected");
+    try tree.applySnapshot("C:/selected", &.{.{ .name = "old.txt", .kind = .file }});
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    var rows: std.ArrayList(maru.session.file_tree.Row) = .empty;
+    defer rows.deinit(a);
+    backend.pushResultForTest(.{ .path = try a.dupe(u8, "C:/selected"), .ok = false });
+    var retry = false;
+    try std.testing.expect(!drainTreeScan(a, io, &tree, &backend, &rows, "C:/selected", &retry));
+    try std.testing.expect(retry);
+    try std.testing.expectEqualStrings("old.txt", tree.roots.items[0].children.items[0].name);
+}
+
+test "Windows editor directory watch row allocation failure discards incomplete borrowed projection" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.addExplicitRoot("C:/selected");
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    var rows: std.ArrayList(maru.session.file_tree.Row) = .empty;
+    defer rows.deinit(a);
+    backend.pushResultForTest(.{ .path = try a.dupe(u8, "C:/selected"), .ok = true });
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var retry = false;
+    try std.testing.expect(drainTreeScan(failing.allocator(), io, &tree, &backend, &rows, "C:/selected", &retry));
+    try std.testing.expect(retry);
+    try std.testing.expectEqual(@as(usize, 0), rows.items.len);
 }

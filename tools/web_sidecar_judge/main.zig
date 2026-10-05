@@ -369,7 +369,6 @@ fn dragChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     drag_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "drag", "{s}", .{@errorName(err)});
 }
 
-/// 팝업 이어 받기 판정(W6f①) — 프로필은 `<뿌리>/o`.
 /// 동영상·오디오 우클릭 메뉴 판정(W6h②) — 프로필은 `<뿌리>/q`.
 fn mediaChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "media", "HTTP 서버: {s}", .{@errorName(err)});
@@ -378,6 +377,7 @@ fn mediaChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     media_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "media", "{s}", .{@errorName(err)});
 }
 
+/// 팝업 이어 받기 판정(W6f①) — 프로필은 `<뿌리>/o`.
 fn popupAdoptChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "popupadopt", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;

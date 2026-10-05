@@ -8438,8 +8438,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    private func testViewMouse(_ line: [String], _ content: NSView) {
-        guard let window, let terminal = Self.firstTerminalView(in: window.contentView) else { return }
+    private func testViewMouse(_ line: [String], _ content: NSView, in target: NSWindow? = nil) {
+        guard let window = target ?? window, let terminal = Self.firstTerminalView(in: window.contentView) else { return }
         let fx = Double(line[2]) ?? 0, fy = Double(line[3]) ?? 0, dx = Double(line[4]) ?? 0, dy = Double(line[5]) ?? 0
         let button = line.count >= 7 ? (Int(line[6]) ?? 0) : 0
         let clicks = line.count >= 8 ? (Int(line[7]) ?? 1) : 1
@@ -8724,16 +8724,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // move, 버튼 0 왼·1 오른·2 가운데·3 이상 뒤로·앞으로). 비활성 앱의 창에 클릭을 보내면 창 활성화가 먹거나 앱을
                 // 앞으로 올려 사용자 포커스를 빼앗으므로 창 hitTest 한 겹만 건너뛴다 — view → Swift → ABI 는 진짜 경로다.
                 testViewMouse(line, view)
+            case "firstview" where line.count >= 6:
+                // firstview 종류 fx fy dx dy [버튼 클릭수] — `view` 를 첫 창의 터미널 view 에(`newwindow` 뒤 대상·키 창은 새 창인 채로).
+                // 누름은 그 view 의 창 세션으로 가야 한다(W6g — 창이 뒤에 있을 때의 첫 누름은 그 창이 key 가 되기 전에 온다).
+                if let first = windows.first?.window, let content = first.contentView { testViewMouse(line, content, in: first) }
             case "firstmouse" where line.count >= 3:
                 // firstmouse fx fy — 그 자리의 누름을 창이 뒤에 있을 때도 view 에 넘기는가(`acceptsFirstMouse`). 셸에서 띄운 시험 앱은 맨
-                // 앞이 될 수 없어 진짜 첫 누름 대신 AppKit 이 묻는 그 메서드를 같은 사건으로 부른다.
-                if let terminal = Self.firstTerminalView(in: view.window?.contentView) {
+                // 앞이 될 수 없어 진짜 첫 누름 대신 AppKit 이 묻는 그 메서드를 같은 사건으로 부른다. 끝에 `first` 면 첫 창의 view 에
+                // 묻는다(`newwindow` 뒤 — 대상·키 창은 새 창인 채로).
+                let target = line.count >= 4 && line[3] == "first" ? windows.first?.window?.contentView : view
+                if let view = target, let terminal = Self.firstTerminalView(in: view.window?.contentView) {
                     let fx = Double(line[1]) ?? 0, fy = Double(line[2]) ?? 0
                     let local = NSPoint(x: fx * view.bounds.width, y: view.bounds.height - fy * view.bounds.height)
                     let event = NSEvent.mouseEvent(with: .leftMouseDown, location: view.convert(local, to: nil), modifierFlags: [],
                                                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: view.window?.windowNumber ?? 0,
                                                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
-                    Self.testReport("firstmouse \(line[1]) \(line[2]) \(event.map { terminal.acceptsFirstMouse(for: $0) } ?? false)")
+                    let which = line.count >= 4 ? " \(line[3])" : ""
+                    Self.testReport("firstmouse \(line[1]) \(line[2])\(which) \(event.map { terminal.acceptsFirstMouse(for: $0) } ?? false)")
                 }
             case "mark" where line.count >= 2:
                 // mark 이름 — 보고에 시각(ms, 페이지의 Date.now() 와 같은 시계)을 남겨 페이지 이벤트를 단계로 가른다.

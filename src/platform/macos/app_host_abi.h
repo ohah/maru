@@ -96,7 +96,7 @@
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
-#define MARU_WORKSPACE_HEADER "maru.workspace.v2"
+#define MARU_WORKSPACE_HEADER "maru.workspace.v1"
 #define MARU_WORKSPACE_CHECKPOINT_EFFECT_NONE 0u
 #define MARU_WORKSPACE_CHECKPOINT_EFFECT_CAPTURE 1u
 #define MARU_WORKSPACE_CHECKPOINT_EFFECT_WRITE 2u
@@ -1525,7 +1525,7 @@ int32_t maru_macos_app_session_window_title(
 );
 
 /* 이 창(세션)의 workspace restore 블록(헤더 없는 "window ..." 라인; UTF-8). Swift가 멀티 창 저장에서
-   maru.workspace.v2 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
+   maru.workspace.v1 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
    캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장.
    is_active(!=0)=이 창이 저장 시점 key 창(window.isKeyWindow) → active-window=1 옵션-키를 내고 재시작 복원이
    그 창을 다시 focus한다(M3e). false면 키 생략(옛 파일과 flat 동일 — 하위호환).

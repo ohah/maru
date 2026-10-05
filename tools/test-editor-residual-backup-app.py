@@ -65,7 +65,7 @@ try:
         older_body_sha256=hashlib.sha256(older_body).hexdigest(),
         save_newer_succeeded=True, older_backup_retained=True,
         relaunch_dirty_without_typing=True, latest_disk_preserved=True,
-        scope='actual AppKit processes; native editor open hook, smoke keys, normal quit; workspace v2 restore selects the persisted recovery ID')
+        scope='actual AppKit processes; native editor open hook, smoke keys, normal quit; workspace restore selects the persisted recovery ID')
     (work / 'result.json').write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
 finally:

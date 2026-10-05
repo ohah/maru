@@ -1,5 +1,5 @@
 //! Workspace restore 직렬화(R1, writer). 실행 중이던 창/탭/split/터미널 레이아웃과 각 터미널의 cwd·shell을
-//! 다시 열기 위한 **선언적 상태**를 `maru.workspace.v2` 텍스트로 굳힌다 — live PTY/process/grid 내용은 담지
+//! 다시 열기 위한 **선언적 상태**를 `maru.workspace.v1` 텍스트로 굳힌다 — live PTY/process/grid 내용은 담지
 //! 않는다(docs/workspace-restore.md). snapshot/trace와 같은 규칙: 첫 줄 bare 토큰(`schema=` 접두어 없음),
 //! 이후 `<kind> <fields>` 라인, 따옴표 문자열은 `\` `"`·개행 escape. 이 파일은 값 모델과 text reader/writer를
 //! 함께 두고, platform live capture/apply는 이 모델만 소비·생산한다. P4 R2a manifest-wide binding validator는
@@ -22,7 +22,24 @@ const git_command = @import("git_command.zig");
 const agent_session_archive = @import("agent_session_archive.zig");
 const writeEscaped = @import("../text_escape.zig").writeEscaped; // 따옴표 값 escape 단일 출처(trace/snapshot과 공유)
 
-pub const header = "maru.workspace.v2";
+/// 저장 포맷 헤더(첫 줄). **writer 는 언제나 이것을 쓴다 — 올리지 않는다.** 2026-07-08 사용자 결정(845c98459,
+/// docs/window-surface-mobility.md §8A.0): v2 하드 브레이크는 과설계로 기각, 새 데이터는 v1 안의 additive 필드·줄로
+/// 싣는다(NO 헤더 bump · NO v1 reject · NO 마이그레이션). d097ee4f2(2026-10-04)가 이 결정을 모르고 v2 로 올려 모든
+/// 옛 저장본이 `BadHeader` 로 거절됐다 — 사용자에게는 세션 34 개가 「다 날아간」 것으로 보였다(docs/workspace-restore.md).
+/// 판정자 `test-workspace-header-policy` 가 이 값과 아래 읽기 별칭을 못 박는다.
+pub const header = "maru.workspace.v1";
+
+/// 읽기만 받는 옛 헤더. writer 는 쓰지 않는다 — 다음 저장이 `header` 로 되돌린다.
+/// `maru.workspace.v2`: 2026-10-04~05 사이 d097ee4f2 빌드가 쓴 파일. 본문은 v1 + editor 줄·필드(additive)라 같은
+/// parser 로 그대로 읽힌다. 이 목록에서 빼면 그 기간에 저장한 사용자의 워크스페이스가 다시 통째로 거절된다.
+pub const legacy_read_headers = [_][]const u8{"maru.workspace.v2"};
+
+/// parse 가 받는 첫 줄인가 — 현재 헤더 또는 읽기 전용 옛 헤더.
+pub fn isReadableHeader(head: []const u8) bool {
+    if (std.mem.eql(u8, head, header)) return true;
+    for (legacy_read_headers) |legacy| if (std.mem.eql(u8, head, legacy)) return true;
+    return false;
+}
 
 /// 한 탭의 pane 수 sanity 상한. 손상·변조된 복원 파일이 pane_count를 부풀려도 split 트리 노드 상한
 /// (2·pane_count−1)이 거대해져 깊은 재귀로 스택 오버플로가 나지 않게, parseTab이 먼저 이 값으로 가둔다.
@@ -440,7 +457,7 @@ pub fn serialize(allocator: std.mem.Allocator, ws: Workspace) ![]u8 {
 }
 
 /// 한 창(Window) 블록만 직렬화한다(헤더 없음). 멀티 창 저장(R5)에서 각 AppSession이 자기 창 블록을 내고,
-/// Swift가 `maru.workspace.v2` 헤더 하나 아래로 모아 parse 가능한 전체 텍스트를 만든다.
+/// Swift가 `maru.workspace.v1` 헤더 하나 아래로 모아 parse 가능한 전체 텍스트를 만든다.
 pub fn serializeWindow(allocator: std.mem.Allocator, win: Window) ![]u8 {
     try validateRuntimeBindings(allocator, .{ .windows = &.{win} });
     try validateEditorReferences(allocator, .{ .windows = &.{win} });
@@ -729,7 +746,7 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
 }
 
 // ── R1 wire reader/parser ──────────────────────────────────────────────────────
-// maru.workspace.v2 텍스트를 같은 모델로 되읽는다(round-trip). 결과는 arena가 모든 슬라이스·문자열을 소유하므로
+// maru.workspace.v1 텍스트를 같은 모델로 되읽는다(round-trip). 결과는 arena가 모든 슬라이스·문자열을 소유하므로
 // ParsedWorkspace.deinit() 한 번으로 정리한다. split 트리는 writer와 같은 preorder를 재귀로 재구성한다(split는
 // 뒤따르는 두 subtree를 소비). 알 수 없는 trailing 라인은 forgiving하게 멈춘다(window 루프가 안 맞으면 종료).
 
@@ -756,7 +773,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!ParsedWo
 
     var lines = LineIter{ .text = text };
     const head = lines.next() orelse return error.Truncated;
-    if (!std.mem.eql(u8, head, header)) return error.BadHeader;
+    if (!isReadableHeader(head)) return error.BadHeader;
 
     var limits: ParseLimits = .{};
     var windows: std.ArrayList(Window) = .empty;
@@ -1581,7 +1598,7 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
 
-    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "window tabs=1 active-tab=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\" pinned=0 background-color=0 accent-color=0 agents-collapsed=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
@@ -1656,7 +1673,7 @@ test "workspace: 기준이 없으면 그 키를 아예 안 쓴다 (옛 리더가
 test "workspace: 이상한 기준은 **목록 전체**를 버린다(부분 복원을 안 만든다)" {
     // 부분 복원은 "어떤 저장소는 기억됐고 어떤 것은 아니다"를 만드는데, 사용자에게 그 둘은
     // 구별되지 않는다(둘 다 그냥 기본값으로 보인다). 그리고 이 값의 다음 정거장은 git argv다.
-    const base_line = "maru.workspace.v2\nwindow tabs=1 active-tab=0";
+    const base_line = "maru.workspace.v1\nwindow tabs=1 active-tab=0";
     const tail = "\ntab panes=1 active-pane=0 custom-name=\"\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
         "surface custom-name=\"\" title=\"\" cwd=\"/repo/a\" command=\"/bin/zsh\" cols=80 rows=24\n";
@@ -2024,7 +2041,7 @@ test "workspace binding validator: allocation failure와 invalid model은 leak�
 
 test "workspace parse: 전역 duplicate runtime binding은 어떤 소비자 publish 전 BadLine이다" {
     const text =
-        \\maru.workspace.v2
+        \\maru.workspace.v1
         \\window active-tab=0 tabs=1
         \\tab active-pane=0 tree-nodes=1 panes=1 custom-name="" pinned=0 background-color=0 accent-color=0
         \\tree-node leaf pane=0
@@ -2042,7 +2059,7 @@ test "workspace parse: 전역 duplicate runtime binding은 어떤 소비자 publ
 
 test "workspace parse: legacy bare runtime-id는 읽되 다음 저장에서 handle로 위조하지 않는다" {
     const text =
-        \\maru.workspace.v2
+        \\maru.workspace.v1
         \\window active-tab=0 tabs=1 dock-side=right dock-tree-size=256
         \\tab active-pane=0 tree-nodes=1 panes=1 custom-name="" pinned=0 background-color=0 accent-color=0
         \\tree-node leaf pane=0
@@ -2059,7 +2076,7 @@ test "workspace parse: legacy bare runtime-id는 읽되 다음 저장에서 hand
 
 test "workspace parse: ambiguous or malformed persistent runtime identity fails closed" {
     const prefix =
-        \\maru.workspace.v2
+        \\maru.workspace.v1
         \\window active-tab=0 tabs=1 dock-side=right dock-tree-size=256
         \\tab active-pane=0 tree-nodes=1 panes=1 custom-name="" pinned=0 background-color=0 accent-color=0
         \\tree-node leaf pane=0
@@ -2388,8 +2405,9 @@ test "workspace serialize: active=false 창은 active-window 키 생략(옛 파�
     try std.testing.expectEqual(@as(?usize, null), activeWindowIndex(.{ .windows = &windows })); // 활성 창 없음 = null
 }
 
-test "workspace parse: active-window 키가 없으면 active는 전부 false" {
-    // active-window는 최신 포맷에서도 선택적인 표시 정보다. 키가 없으면 active는 전부 false이고
+test "workspace parse: 옛 v1 파일(active-window 키 없음) 하위호환 — 크래시/BadHeader 없이 active 전부 false" {
+    // ⭐ M3e 하위호환의 핵심(사용자가 확인한 "필드 없이 저장 후 버전업 로드 무문제"): active-window 키가 **없는** 옛
+    // maru.workspace.v1 텍스트(멀티 창)를 parse해도 헤더 유지(BadHeader 없음)·정상 로드·active 전부 false·
     // activeWindowIndex==null(현행 동작 = 마지막 생성 창 key). 버림·모달·크래시 없음. 배치(창별 cwd)도 그대로 로드.
     const old =
         header ++ "\n" ++
@@ -2549,8 +2567,10 @@ test "workspace serialize: frame=null 창은 win-* 키 생략(옛 파일 flat �
     try std.testing.expectEqualStrings(text, text2);
 }
 
-test "workspace parse: win-* 키가 없으면 frame은 전부 null" {
-    // 최신 포맷에서도 창 좌표는 선택적이다. 좌표가 없으면 기본 배치를 쓰고 저장된 cwd는 유지한다.
+test "workspace parse: 옛 v1 파일(win-* 키 없음) 하위호환 — 크래시/BadHeader 없이 frame 전부 null" {
+    // ⭐ M3f 하위호환의 핵심: win-x/y/w/h 키가 **없는** 옛 maru.workspace.v1 텍스트를 parse해도 헤더 유지(BadHeader
+    // 없음)·정상 로드·frame 전부 null(복원=cascade 기본 위치). 버림·모달·크래시 없음. 배치(cwd)도 그대로 로드.
+    // active-window 마커가 있는(M3e) 파일에도 win-* 없이 정상(M3e만 있고 M3f 없는 중간 버전 파일 하위호환).
     const old =
         header ++ "\n" ++
         "window tabs=1 active-tab=0 active-window=1\n" ++ // M3e 마커만, win-* 없음(M3f 이전 파일)
@@ -2597,7 +2617,7 @@ test "workspace parse: win-* 키가 있는데 값이 깨지면 BadLine(존재하
 
 test "workspace parse: 구조·escape 해제·forgiving" {
     const text =
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=2 active-pane=1 custom-name=\"my tab\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node split vertical ratio=250\n" ++
@@ -2682,6 +2702,61 @@ test "workspace parse: key-addressed 하위호환·순서무관·미지키 skip�
 
 test "workspace parse: 잘못된 헤더는 에러" {
     try std.testing.expectError(error.BadHeader, parse(std.testing.allocator, "not.a.workspace\nwindow tabs=0 active-tab=0\n"));
+    // 모르는 미래 헤더도 거절한다 — 읽기 별칭은 실제로 쓰인 적 있는 옛 헤더만이다.
+    try std.testing.expectError(error.BadHeader, parse(std.testing.allocator, "maru.workspace.v999\nwindow tabs=0 active-tab=0\n"));
+}
+
+// ── 헤더 정책(docs/workspace-restore.md 「헤더 정책」) ─────────────────────────────────────────────────────────
+// 2026-07-08 사용자 결정(845c98459): 헤더는 v1 하나, bump·v1 reject·마이그레이션 없음. d097ee4f2 가 그것을 v2 로
+// 올려 모든 옛 저장본이 BadHeader 로 떨어졌다. 아래 fixture 둘은 **얼려 둔** 실제 모양이다 — 지금 parser 가 둘 다
+// 읽고, 다시 쓰면 v1 헤더여야 한다. fixture 를 고치지 말 것: 그 모양으로 저장된 사용자 파일이 디스크에 있다.
+
+const legacy_v1_fixture = @embedFile("workspace_fixtures/legacy-v1-pre-d097.workspace");
+const d097_v2_fixture = @embedFile("workspace_fixtures/d097-v2-editor.workspace");
+
+test "workspace header policy: writer 헤더는 v1 이다 — 올리지 않는다" {
+    try std.testing.expectEqualStrings("maru.workspace.v1", header);
+    const text = try serialize(std.testing.allocator, .{ .windows = &.{} });
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("maru.workspace.v1\n", text);
+    // 옛 v2 는 읽기 별칭으로만 남는다 — 빼면 2026-10-04~05 에 저장된 파일이 다시 통째로 거절된다.
+    try std.testing.expect(isReadableHeader("maru.workspace.v1"));
+    try std.testing.expect(isReadableHeader("maru.workspace.v2"));
+}
+
+test "workspace header policy: d097 이전 v1 저장본을 읽고 같은 v1 로 다시 쓴다" {
+    const a = std.testing.allocator;
+    var parsed = try parse(a, legacy_v1_fixture);
+    defer parsed.deinit();
+    const ws = parsed.workspace;
+    try std.testing.expectEqual(@as(usize, 2), ws.windows.len);
+    try std.testing.expectEqual(@as(usize, 2), ws.windows[0].tabs.len);
+    try std.testing.expectEqualStrings("server", ws.windows[0].tabs[0].custom_name);
+    try std.testing.expectEqual(@as(usize, 2), ws.windows[0].tabs[0].panes.len);
+    try std.testing.expectEqualStrings("/tmp/project/log", ws.windows[0].tabs[0].panes[1].surfaces[0].cwd);
+    try std.testing.expect(ws.windows[0].active);
+    try std.testing.expectEqual(@as(usize, 0), ws.windows[0].editor_documents.len);
+    const again = try serialize(a, ws);
+    defer a.free(again);
+    try std.testing.expect(std.mem.startsWith(u8, again, "maru.workspace.v1\n"));
+    var reparsed = try parse(a, again);
+    defer reparsed.deinit();
+    try std.testing.expectEqual(ws.windows.len, reparsed.workspace.windows.len);
+}
+
+test "workspace header policy: d097 이 쓴 v2 저장본(editor 줄 포함)을 읽고 v1 로 다시 쓴다" {
+    const a = std.testing.allocator;
+    var parsed = try parse(a, d097_v2_fixture);
+    defer parsed.deinit();
+    const win = parsed.workspace.windows[0];
+    try std.testing.expectEqual(@as(usize, 1), win.editor_documents.len);
+    try std.testing.expectEqualStrings("/tmp/project/notes.txt", win.editor_documents[0].path);
+    try std.testing.expectEqual(@as(usize, 1), win.tabs[0].panes[0].editor_views.len);
+    const again = try serialize(a, parsed.workspace);
+    defer a.free(again);
+    // 헤더만 v1 로 바뀌고 본문은 바이트 그대로다 — editor 데이터는 v1 안의 additive 줄·필드다.
+    try std.testing.expect(std.mem.startsWith(u8, again, "maru.workspace.v1\n"));
+    try std.testing.expectEqualStrings(d097_v2_fixture["maru.workspace.v2".len..], again["maru.workspace.v1".len..]);
 }
 
 test "workspace parse: 손상 트리는 구조 불변식으로 graceful 차단(크래시 대신 BadLine)" {
@@ -2999,7 +3074,7 @@ test "workspace FP16: file-term이 pane 줄에서 왕복하고 창 줄엔 파일
 
 test "workspace FP16: persisted 인덱스가 중복·범위 밖이거나 active-term이 넘치면 그 창을 폴백한다" {
     const bad_dup =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\" file-term=\"1:markdown:read:9:/tmp/b.md\"\n" ++
@@ -3007,7 +3082,7 @@ test "workspace FP16: persisted 인덱스가 중복·범위 밖이거나 active-
     try std.testing.expectError(error.BadLine, parse(std.testing.allocator, bad_dup));
 
     const bad_range =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"5:markdown:read:9:/tmp/a.md\"\n" ++
@@ -3015,7 +3090,7 @@ test "workspace FP16: persisted 인덱스가 중복·범위 밖이거나 active-
     try std.testing.expectError(error.BadLine, parse(std.testing.allocator, bad_range));
 
     const bad_active =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=9 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\"\n" ++
@@ -3028,7 +3103,7 @@ test "workspace WP-P: browser-term URL이 왕복하고 인덱스 공간을 안 �
     // 인덱스를 재번호하지 않으므로 구버전 리더가 브라우저만 잃고 창은 살린다. 그 성질을 왕복으로 고정한다.
     const a = std.testing.allocator;
     const text =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\" " ++
@@ -3058,7 +3133,7 @@ test "workspace WP-P: 잘못된 browser-term은 record만 버리거나 창을 �
     const a = std.testing.allocator;
     // 빈 URL = 복원할 값 없음 → 그 record만 버린다(창은 살린다). file-term의 UnsupportedDockValue와 같은 관용.
     const empty_url =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" browser-term=\"0:0:\"\n" ++
@@ -3070,7 +3145,7 @@ test "workspace WP-P: 잘못된 browser-term은 record만 버리거나 창을 �
 
     // insert_after가 persisted_total(1)을 넘으면 자리를 만들 수 없다 → 그 창 fail-close.
     const out_of_range =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" browser-term=\"5:20:https://example.com/\"\n" ++
@@ -3079,7 +3154,7 @@ test "workspace WP-P: 잘못된 browser-term은 record만 버리거나 창을 �
 
     // active-browser가 record 수를 넘으면 폴백(가리킬 대상이 없다).
     const bad_active =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" active-browser=2 browser-term=\"0:20:https://example.com/\"\n" ++
@@ -3110,7 +3185,7 @@ test "workspace FP15: media file-term이 read 모드로 왕복한다" {
 
 test "workspace FP16: 모르는 kind의 file-term은 그 항목만 버리고 창은 살린다" {
     const text =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"1:hologram:read:9:/tmp/a.md\"\n" ++
@@ -3192,7 +3267,7 @@ test "RB1-2 깨진 boot-session 은 «없음»으로 읽고 창의 나머지는 
         "boot-session=\"A7C9924A-6CB1-4C6B-B004-95D26C1EBA3D\" boot-session=\"A7C9924A-6CB1-4C6B-B004-95D26C1EBA3D\"", // 중복
     };
     for (cases) |field| {
-        const text = try std.fmt.allocPrint(a, "maru.workspace.v2\nwindow tabs=2 active-tab=1 {s}\n" ++
+        const text = try std.fmt.allocPrint(a, "maru.workspace.v1\nwindow tabs=2 active-tab=1 {s}\n" ++
             "tab panes=1 active-pane=0 custom-name=\"\"\ntree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
             "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n" ++
             "tab panes=1 active-pane=0 custom-name=\"\"\ntree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
@@ -3206,7 +3281,7 @@ test "RB1-2 깨진 boot-session 은 «없음»으로 읽고 창의 나머지는 
         try std.testing.expectEqual(@as(usize, 2), win.tabs.len);
     }
     // 소문자 16진은 같은 UUID 다 — 손으로 고친 파일도 읽는다.
-    const lower = "maru.workspace.v2\nwindow tabs=0 active-tab=0 boot-session=\"a7c9924a-6cb1-4c6b-b004-95d26c1eba3d\"\n";
+    const lower = "maru.workspace.v1\nwindow tabs=0 active-tab=0 boot-session=\"a7c9924a-6cb1-4c6b-b004-95d26c1eba3d\"\n";
     var parsed = try parse(a, lower);
     defer parsed.deinit();
     try std.testing.expectEqualStrings("a7c9924a-6cb1-4c6b-b004-95d26c1eba3d", parsed.workspace.windows[0].boot_session);
@@ -3257,7 +3332,7 @@ test "RB2-2 깨진 agent-resume 은 «없음»으로 읽고 surface 의 나머�
         "agent-kind=\"claude\" agent-session=\"0f6c1a2e-1111-4222-8333-444455556666\"",
     };
     for (cases) |field| {
-        const text = try std.fmt.allocPrint(a, "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        const text = try std.fmt.allocPrint(a, "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
             "tab panes=1 active-pane=0 custom-name=\"\"\ntree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
             "surface custom-name=\"\" title=\"\" cwd=\"/repo\" command=\"\" " ++
             "runtime-handle=\"1234567890abcdef1234567890abcdef:fedcba0987654321fedcba0987654321\" {s} cols=80 rows=24\n", .{field});
@@ -3301,7 +3376,7 @@ test "U4c-6 untitled-term 은 번호만 왕복하고 인덱스 공간을 안 건
     // 내용은 §3.10 의 백업 레코드가 들고, 파일 이름은 그 번호에서 **파생**된다(여기 적지 않는다).
     const a = std.testing.allocator;
     const text =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\" " ++
@@ -3328,7 +3403,7 @@ test "U4c-6 untitled-term 은 번호만 왕복하고 인덱스 공간을 안 건
 test "U4c-7 잘못된 untitled-term 은 record 만 버리거나 창을 폴백한다 · 옛 파일은 조용히 «없음»" {
     const a = std.testing.allocator;
     const head =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n";
     const tail = "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
@@ -3357,7 +3432,7 @@ test "U4d-1 remote-doc-term 은 호스트·경로를 왕복한다 — 값 안의
     const a = std.testing.allocator;
     // 경로에 `:` 와 공백을 넣는다 — 길이를 앞에 두는 규칙이 없으면 필드 경계가 깨진다.
     const text =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" " ++
@@ -3385,7 +3460,7 @@ test "U4d-1 remote-doc-term 은 호스트·경로를 왕복한다 — 값 안의
 test "U4d-2 잘못된 remote-doc-term 은 record 만 버리거나 창을 폴백한다 · 옛 파일은 조용히 «없음»" {
     const a = std.testing.allocator;
     const head =
-        "maru.workspace.v2\nwindow tabs=1 active-tab=0\n" ++
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
         "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n";
     const tail = "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
@@ -3440,7 +3515,14 @@ test "workspace editor restore 문서 공유와 독립 신원 및 혼합 Term �
     const again = try serialize(a, parsed.workspace);
     defer a.free(again);
     try std.testing.expectEqualStrings(text, again);
-    try std.testing.expectError(error.BadHeader, parse(a, "maru.workspace.v1\nwindow tabs=0 active-tab=0\n"));
+    // 같은 본문을 옛 v2 헤더로 읽어도 같은 모델이고, 다시 쓰면 v1 헤더로 돌아온다(읽기 전용 별칭).
+    const v2_text = try std.mem.concat(a, u8, &.{ "maru.workspace.v2", text[header.len..] });
+    defer a.free(v2_text);
+    var from_v2 = try parse(a, v2_text);
+    defer from_v2.deinit();
+    const rewritten = try serialize(a, from_v2.workspace);
+    defer a.free(rewritten);
+    try std.testing.expectEqualStrings(text, rewritten);
 }
 
 test "workspace editor restore 잘못된 참조 중복 자리 창 간 ID 중복은 거절한다" {

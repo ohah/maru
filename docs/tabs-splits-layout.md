@@ -1,7 +1,7 @@
 # 탭 · split(panel) · 레이아웃 전략
 
-> 공유 편집 복원의 스키마는 `maru.workspace.v2`를 사용한다. 저장 파일 경로는 `workspace.v1`을 유지한다.
-> 이 문서에서 v1 additive 호환을 설명하는 부분은 해당 변경 당시의 이력이며 v1↔v2 호환을 보장하지 않는다.
+> 저장 헤더는 `maru.workspace.v1` 하나이고 올리지 않는다(2026-07-08 사용자 결정 — 옛 헤더 `v2` 는 읽기만).
+> 단일 출처는 [workspace 복원 「헤더 정책」](workspace-restore.md#헤더-정책)이다.
 > 문서/뷰 참조와 현재 포맷 계약은 [workspace 복원](workspace-restore.md#로컬-편집-문서와-뷰)을 따른다.
 
 이 문서는 Maru의 탭/split(panel) UI를 어떻게 만들지의 단일 출처다. 목표 UX, 아키텍처 결정(레이아웃 모델과
@@ -176,7 +176,7 @@ Node = leaf(Pane)
 5. **PR4 — 탭 close**(active_tab clamp).
 6. **split 단계(별도, 큼)**: SplitTree 모델 → 멀티-panel 렌더 → split 키/드래그 drop-zone.
 7. **영속 terminal runtime backend(별도, 큼)**: `TermRuntimeBackend` seam → `maru-sessiond` → GUI-process-crash-consistent manifest →
-   개별 `maru attach` 순서. 단일 `maru.workspace.v2`의 Workspace/Term에 Maru binding scalar를 붙이고 cross-window
+   개별 `maru attach` 순서. 단일 `maru.workspace.v1`의 Workspace/Term에 Maru binding scalar를 붙이고 cross-window
    이동은 binding을 보존한다. 제품 완료 범위 P1~P5와 무인 gate는 [영속 터미널 세션 호스트](persistent-session-host.md)
    §13~14를 따른다. tmux-CC 양방향 layout 매핑과 P6 전체 workspace TUI는 이 단계의 완료 조건이 아니다.
 

@@ -1,7 +1,7 @@
 # 영속 터미널 세션 호스트
 
-> 공유 편집 복원의 스키마는 `maru.workspace.v2`를 사용한다. 저장 파일 경로는 `workspace.v1`을 유지한다.
-> 이 문서에서 v1 additive 호환을 설명하는 부분은 해당 변경 당시의 이력이며 v1↔v2 호환을 보장하지 않는다.
+> 저장 헤더는 `maru.workspace.v1` 하나이고 올리지 않는다(2026-07-08 사용자 결정 — 옛 헤더 `v2` 는 읽기만).
+> 단일 출처는 [workspace 복원 「헤더 정책」](workspace-restore.md#헤더-정책)이다.
 > 문서/뷰 참조와 현재 포맷 계약은 [workspace 복원](workspace-restore.md#로컬-편집-문서와-뷰)을 따른다.
 
 이 문서는 Maru GUI가 종료되어도 terminal Term의 PTY·자식 프로세스·화면 상태를 유지하고, 다시 실행한 Maru 또는
@@ -445,7 +445,7 @@ Window 2
 교체 재연결이 확정되지 않은 host 포함, `connect_failed`, lease `unknown`)와 교체가 계속 실패하는 동안의 실행당 비용
 (스캔+prepare 약 1 s)은 [session-host-upgrade](session-host-upgrade.md) 상태 블록이 소유한다.
 
-현재 `maru.workspace.v2`에서 `Window`는 OS 창, `Tab`은 Workspace, `Pane`과 `Surface`는 각각 split leaf와 Term이다.
+현재 `maru.workspace.v1`에서 `Window`는 OS 창, `Tab`은 Workspace, `Pane`과 `Surface`는 각각 split leaf와 Term이다.
 별도 session DB나 창별 workspace 파일을 만들지 않고 기존 단일
 `~/Library/Application Support/maru/workspace.v1` 파일을 그대로 공유한다. 일반 Window/Workspace는 기존
 `runtime-handle`과 P4 R1에서 구현한 `runtime-state` scalar로 Term 슬롯을 연결한다.
@@ -643,7 +643,7 @@ $0.appSession != nil }` 불성립) arm 하지 않고, 세션별 `workspace_check
 일반 layout은 optional scalar만으로 v1을 유지한다. 현재 parser가 첫 unknown top-level trailing line에서 성공 종료하는
 동작은 legacy 관용성이지 새 block 확장점이 아니다. 새 line kind·카운트·tree 변경이 필요해지면 여기서 정한 범위를
 벗어나므로 멈추고
-`maru.workspace.v2` migration/fallback을 사용자와 다시 결정한다.
+사용자와 다시 결정한다 — 헤더는 올리지 않는다([「헤더 정책」](workspace-restore.md#헤더-정책)).
 
 ### 새 Term과 설정
 

@@ -233,7 +233,7 @@ fn runR7Integration(
     defer allocator.free(workspace_path);
     const workspace = try std.fmt.allocPrint(
         allocator,
-        "maru.workspace.v2\n" ++
+        "maru.workspace.v1\n" ++
             "window tabs=2 active-tab=1\n" ++
             "tab panes=1 active-pane=0 custom-name=\"R7-A\"\n" ++
             "tree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++

@@ -21,7 +21,7 @@ A의 저장/버리기 때문에 B의 백업이 덮이거나 삭제되던 path �
   revision을 재확인한다. 메인 스레드의 동기 캡처이며 read lease를 immutable snapshot으로 간주하지 않는다.
 - `Staging`: 첫 뷰만 디스크/백업에서 정본을 만들고 이후 뷰는 retain한다. 같은 path라는 이유로 합치지 않는다.
   검색은 새 빈 독립 상태로 시작한다. 본문 hash가 달라지면 좌표를 기본값으로 시작하고 저하 로그를 남긴다.
-- `workspace.zig`: `maru.workspace.v2`, 창의 `editor-document`와 pane의 `editor-view`를 함께 읽고 쓴다.
+- `workspace.zig`: `maru.workspace.v1` 안에서 창의 `editor-document`와 pane의 `editor-view`를 함께 읽고 쓴다(옛 `v2` 헤더는 읽기만 — [「헤더 정책」](../workspace-restore.md#헤더-정책)).
   파일 경로 `workspace.v1`과 기존 잠금/게시 흐름은 유지한다. v1 자동 변환은 하지 않고 읽기 실패 시 보존한다.
   참조 누락·중복·고아 descriptor, 창 간 중복 ID, file/editor 위치 충돌은 staging 전에 거절한다.
 

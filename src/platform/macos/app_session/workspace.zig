@@ -589,7 +589,7 @@ pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_ac
 
 /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
 /// 캡처는 임시 arena로 하고, 결과 텍스트만 self.allocator로 보관한다(다음 호출/deinit까지 유효 — cwd ABI와
-/// 같은 소유 규칙). Swift가 멀티 창 저장에서 세션마다 호출해 `maru.workspace.v2` 헤더 아래로 모은다.
+/// 같은 소유 규칙). Swift가 멀티 창 저장에서 세션마다 호출해 `maru.workspace.v1` 헤더 아래로 모은다.
 pub fn serializeWorkspaceWindow(self: *AppSession, is_active: bool, frame: ?maru.session.workspace.Frame) ![]const u8 {
     if (self.workspace_buffer) |b| {
         self.allocator.free(b);

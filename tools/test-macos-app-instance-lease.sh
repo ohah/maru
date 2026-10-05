@@ -32,7 +32,7 @@ run_dir=$test_root/run
 workspace_dir="$test_home/Library/Application Support/maru"
 mkdir -p "$workspace_dir" "$run_dir" "$test_root/config" "$test_root/cache" "$session_root"
 lock_path="$test_home/Library/Application Support/maru/workspace.v1.lock"
-printf 'maru.workspace.v2\nsentinel=true\n' >"$workspace_dir/workspace.v1"
+printf 'maru.workspace.v1\nsentinel=true\n' >"$workspace_dir/workspace.v1"
 printf '# sentinel-config\nsession.keep-alive-after-quit = false\n' >"$test_root/config/config.toml"
 printf 'sentinel-cache\n' >"$test_root/cache/sentinel"
 

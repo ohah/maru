@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const search_case_fold = @import("../../search_case_fold.zig");
-/// 낱말 경계의 단일 출처(§3.2) — 더블클릭이 잡는 범위와 같은 것을 쓴다.
+/// 선택 tokenizer는 검색과 별도다. 기존 선택 계약과의 경계를 검사하는 판정자에서만 참조한다.
 const editor_selection = @import("selection.zig");
 pub const regex = @import("../../regex.zig");
 
@@ -92,19 +92,61 @@ fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8, opts: Options
         i += hl;
         n += nl;
     }
-    // **낱말 경계는 마지막에 본다.** 시작과 끝을 다 알아야 「이 범위가 낱말 하나와 같은가」를
-    // 물을 수 있다. 판정은 `selection.wordRangeAt` 이 소유한다(§3.2 더블클릭이 잡는 그 범위) —
-    // 여기서 `isWordByte` 를 다시 쓰면 앱 안에 낱말 규칙이 둘이 된다.
+    // 매치 양끝의 경계는 전체 span이 정해진 뒤 판정한다. 더블클릭 tokenizer와는 별도 계약이다.
     if (opts.whole_word and !isWholeWord(line, from, i)) return null;
     return i;
 }
 
-/// `line[lo..hi]` 가 그 자리의 **낱말과 정확히 같은가**. `occurrence.seedIsWord` 와 같은 판정이고,
-/// 같은 소유자(`selection.wordRangeAt`)를 쓴다.
-fn isWholeWord(line: []const u8, lo: usize, hi: usize) bool {
-    if (lo >= hi or hi > line.len) return false;
-    const w = editor_selection.wordRangeAt(line, lo);
-    return w.lo == lo and w.hi == hi;
+/// VS Code 기본 구분자의 공개 데이터로 승인된 검색 경계를 독립 구현한다.
+/// `_`·비ASCII는 기본 구분자가 아니며 CR/LF는 매치 바깥의 줄 경계에서만 인정한다.
+fn searchSeparator(byte: u8) bool {
+    return switch (byte) {
+        ' ',
+        '\t',
+        '$',
+        '#',
+        '@',
+        '!',
+        '%',
+        '^',
+        '&',
+        '*',
+        '(',
+        ')',
+        '-',
+        '=',
+        '+',
+        '[',
+        ']',
+        '{',
+        '}',
+        '\\',
+        '|',
+        ';',
+        ':',
+        '\'',
+        '"',
+        ',',
+        '.',
+        '<',
+        '>',
+        '/',
+        '?',
+        '`',
+        '~',
+        => true,
+        else => false,
+    };
+}
+
+fn isWholeWord(text: []const u8, lo: usize, hi: usize) bool {
+    if (lo > hi or hi > text.len) return false;
+    const consuming = lo < hi;
+    const left = lo == 0 or searchSeparator(text[lo - 1]) or text[lo - 1] == '\r' or text[lo - 1] == '\n' or
+        (consuming and searchSeparator(text[lo]));
+    const right = hi == text.len or searchSeparator(text[hi]) or text[hi] == '\r' or text[hi] == '\n' or
+        (consuming and searchSeparator(text[hi - 1]));
+    return left and right;
 }
 
 /// 다음 코드포인트 경계까지의 byte 수 — **읽을 수 있을 때만** 그 길이다.
@@ -165,21 +207,18 @@ pub fn findMatches(
             if (!std.unicode.utf8ValidateSlice(line)) return error.InvalidUtf8;
             var from: usize = 0;
             while (from <= line.len) {
-                var span = (try pattern.matchValidated(line, from, false)) orelse break;
-                if (span.start == span.end) {
-                    span = (try pattern.matchNonEmptyAtStart(line, span.start)) orelse span;
-                }
-                if (!opts.whole_word or isWholeWord(line, span.start, span.end)) {
+                const span = (try pattern.matchValidated(line, from, false)) orelse break;
+                const accepted = !opts.whole_word or isWholeWord(line, span.start, span.end);
+                if (accepted) {
                     try out.append(allocator, .{
                         .line = @intCast(li),
                         .start = @intCast(span.start),
                         .len = @intCast(span.end - span.start),
                     });
                 }
+                if (span.end == line.len) break;
                 if (span.end > span.start) {
                     from = span.end;
-                } else if (span.end == line.len) {
-                    break;
                 } else {
                     from = span.end + stepBytes(line, span.end);
                 }
@@ -311,7 +350,7 @@ test "FND31 regex zero-width advances at UTF-8 boundaries and invalid patterns r
     var alternative = try collectOpts(&[_][]const u8{"foo"}, "^|foo", .{ .regex = true });
     defer alternative.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), alternative.items.len);
-    try testing.expectEqual(@as(u32, 3), alternative.items[0].len);
+    try testing.expectEqual(@as(u32, 0), alternative.items[0].len);
     try testing.expectError(error.InvalidPattern, findMatches(testing.allocator, &lines, "[", .{ .regex = true }, &matches));
     try testing.expectEqual(@as(usize, 0), matches.items.len);
 }
@@ -359,7 +398,7 @@ test "FND20 대소문자를 가리면 접힌 짝이 빠진다 — 끄면 종전 
     try testing.expectEqual(@as(u32, 8), upper.items[0].start);
 }
 
-test "FND21 낱말 단위는 안에 박힌 것을 뺀다 — 더블클릭이 잡는 낱말과 같다 (§5.1)" {
+test "FND21 검색 단어 경계는 식별자 안의 부분 일치를 제외한다 (§5.1)" {
     // 이것이 이 옵션의 존재 이유다: `id` 로 찾으면 `width`·`valid`·`invalid` 가 다 걸려
     // 코드에서 식별자를 정확히 찾을 방법이 없었다.
     const lines = [_][]const u8{"id width valid invalid id_x x_id id"};
@@ -375,8 +414,7 @@ test "FND21 낱말 단위는 안에 박힌 것을 뺀다 — 더블클릭이 잡
     try testing.expectEqual(@as(u32, 33), on.items[1].start);
 
     // **`_` 는 낱말 글자다** — `id_x`·`x_id` 는 낱말 하나라 그 안의 `id` 는 안 잡힌다.
-    // 이 규칙을 여기서 새로 정하지 않는다: `selection.wordRangeAt` 이 소유하고
-    // 더블클릭이 잡는 범위와 **같은 것**이다(§3.2).
+    // `_`에 대한 선택 tokenizer의 기존 동작도 보존한다. 검색의 모든 경계가 선택과 같다는 뜻은 아니다.
     const w = editor_selection.wordRangeAt(lines[0], 23);
     try testing.expectEqual(@as(usize, 23), w.lo);
     try testing.expectEqual(@as(usize, 27), w.hi); // `id_x` 통째로
@@ -623,22 +661,24 @@ pub fn findDocumentRegex(allocator: std.mem.Allocator, content: []const u8, need
     defer index.deinit();
     var from: usize = 0;
     while (from <= content.len) {
-        var span = (try pattern.matchValidated(content, from, false)) orelse break;
-        if (span.start == span.end) span = (try pattern.matchNonEmptyAtStart(content, span.start)) orelse span;
+        const span = (try pattern.matchValidated(content, from, false)) orelse break;
         if (span.start > span.end or span.end > content.len) return error.EngineFailure;
         const first_line = index.lineAt(span.start);
         const last_line = index.lineAt(span.end);
         const lo = span.start - index.lines[first_line].start;
         const hi = span.end - index.lines[last_line].start;
-        const whole = first_line == last_line and isWholeWord(content[index.lines[first_line].start..index.lines[first_line].contentEnd()], lo, hi);
-        if (!opts.whole_word or whole) try out.append(allocator, .{
+        const whole = isWholeWord(content, span.start, span.end);
+        const accepted = !opts.whole_word or whole;
+        if (accepted) try out.append(allocator, .{
             .line = @intCast(first_line),
             .start = @intCast(lo),
             .len = @intCast(span.end - span.start),
             .end = .{ .line = @intCast(last_line), .byte = @intCast(hi) },
             .regex_from = @intCast(from),
         });
-        if (span.end > span.start) from = span.end else if (span.end == content.len) break else from = span.end + stepBytes(content, span.end);
+        // VS Code 방향: 소비해 도달한 subject 끝에 빈 매치를 하나 더 만들지 않는다.
+        if (span.end == content.len) break;
+        from = if (span.end > span.start) span.end else span.end + stepBytes(content, span.end);
     }
 }
 
@@ -748,4 +788,65 @@ test "FND38 비교 열 정규식은 빈 로딩 상태와 빈 문서를 구분한
     try testing.expectEqual(@as(usize, 1), matches.items.len);
     try testing.expectEqual(@as(u32, 7), matches.items[0].len);
     try testing.expectEqual(@as(u32, 1), matches.items[0].end.?.line);
+}
+
+// 검색은 더블클릭 낱말과 같아야 한다는 옛 계약 대신, 승인된 VS Code 기본 검색 경계를 고정한다.
+test "FND40 검색 단어 경계는 구분자와 매치 양끝으로 판정한다" {
+    const cases = [_]struct { text: []const u8, query: []const u8, count: usize }{
+        .{ .text = "foo$bar", .query = "foo", .count = 1 },
+        .{ .text = "foo😀bar", .query = "foo", .count = 0 },
+        .{ .text = "foo_bar", .query = "foo", .count = 0 },
+        .{ .text = "한foo글", .query = "foo", .count = 0 },
+        .{ .text = "foo bar", .query = "foo bar", .count = 1 },
+        .{ .text = "--", .query = "-", .count = 2 },
+        .{ .text = "foo\tbar", .query = "foo", .count = 1 },
+        .{ .text = "foo\xc2\xa0bar", .query = "foo", .count = 0 },
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |match_case| {
+            var matches = try collectOpts(&.{case.text}, case.query, .{ .whole_word = true, .match_case = match_case });
+            defer matches.deinit(testing.allocator);
+            try testing.expectEqual(case.count, matches.items.len);
+        }
+    }
+    var out: std.ArrayList(Match) = .empty;
+    defer out.deinit(testing.allocator);
+    try findDocumentRegex(testing.allocator, "foo\r\nbar", "foo\\r?\\nbar", .{ .whole_word = true, .newline = .anycrlf }, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    // 마지막 후보가 단어 필터에서 거절돼도 그 끝에서 빈 후보를 재생성하지 않는다.
+    try findDocumentRegex(testing.allocator, "afoo ", "foo |$", .{ .whole_word = true, .newline = .anycrlf }, &out);
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+// 빈 일치 뒤 Unicode 한 글자를 넘기며, 대안 우선순위·EOF 중복·치환 문맥을 함께 고정한다.
+test "FND41 정규식 빈 일치는 앞 대안을 유지하고 소비한 끝을 중복하지 않는다" {
+    const cases = [_]struct { text: []const u8, query: []const u8, starts: []const u32, lens: []const u32 }{
+        .{ .text = "foo", .query = "^|foo", .starts = &.{0}, .lens = &.{0} },
+        .{ .text = "foo", .query = "foo|^", .starts = &.{0}, .lens = &.{3} },
+        .{ .text = "foo", .query = "foo|$", .starts = &.{0}, .lens = &.{3} },
+        .{ .text = "😀가", .query = ".*?", .starts = &.{ 0, 4, 7 }, .lens = &.{ 0, 0, 0 } },
+        .{ .text = "", .query = "^$", .starts = &.{0}, .lens = &.{0} },
+    };
+    for (cases) |case| {
+        var out: std.ArrayList(Match) = .empty;
+        defer out.deinit(testing.allocator);
+        try findDocumentRegex(testing.allocator, case.text, case.query, .{ .newline = .anycrlf }, &out);
+        try testing.expectEqual(case.starts.len, out.items.len);
+        for (out.items, 0..) |match, i| {
+            try testing.expectEqual(case.starts[i], match.start);
+            try testing.expectEqual(case.lens[i], match.len);
+        }
+        var lines = try collectOpts(&.{case.text}, case.query, .{ .regex = true });
+        defer lines.deinit(testing.allocator);
+        try testing.expectEqual(out.items.len, lines.items.len);
+        for (lines.items, out.items) |line_match, doc_match| {
+            try testing.expectEqual(line_match.start, doc_match.start);
+            try testing.expectEqual(line_match.len, doc_match.len);
+        }
+    }
+    var p = try regex.Pattern.initDocument("^|(?<word>foo)", true, .anycrlf);
+    defer p.deinit();
+    const inserted = try p.expandFrom(testing.allocator, "foo", .{ .start = 0, .end = 0 }, "X", 0);
+    defer testing.allocator.free(inserted);
+    try testing.expectEqualStrings("X", inserted);
 }

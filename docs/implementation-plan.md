@@ -1662,4 +1662,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - 새 코드가 이전 단계의 facade 계약을 깨지 않는가?
 - 자동화할 수 없는 한계를 PR 설명에 보고했는가?
 
+- [VS Code 방향의 편집기 검색 판정](plans/editor-search-policy.md): 기본 단어 구분자·빈 대안 우선순위·EOF 중복과 치환의 승인 계약.
 - [문서 전체 정규식 검색·치환](plans/editor-document-regex.md): 사용자 승인한 원문·ANYCRLF 정책으로 공통 엔진·여러 줄 표시·캡처 치환을 연결한다.

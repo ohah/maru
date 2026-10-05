@@ -1373,10 +1373,10 @@ pub fn build(b: *std.Build) void {
     const editor_document_regex_step = b.step("test-editor-document-regex", "Run whole-document regex judges");
     const document_regex_tests = addProjectTest(b, .{
         .root_module = maru_mod,
-        .filters = &.{ "FND35 문서", "FND36 문서", "FND37 문서", "FND38 비교", "FND39 현재" },
+        .filters = &.{ "FND35 문서", "FND36 문서", "FND37 문서", "FND38 비교", "FND39 현재", "FND40 검색", "FND41 정규식" },
     });
     const run_document_regex_tests = b.addRunArtifact(document_regex_tests);
-    run_document_regex_tests.addArg("--maru-expect-tests=27"); // FND35~39와 익명 import 판정자 22개.
+    run_document_regex_tests.addArg("--maru-expect-tests=29"); // FND35~41과 익명 import 판정자 22개.
     editor_document_regex_step.dependOn(&run_document_regex_tests.step);
     // The editor-only fast suite does not import terminal.selection tests. Keep an explicit,
     // counted path for the regex cell-mapping judges instead of assuming test-editor ran them.
@@ -5206,7 +5206,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"EDREG"},
     });
     const run_document_regex_product_tests = b.addRunArtifact(document_regex_product_tests);
-    run_document_regex_product_tests.addArg("--maru-expect-tests=8"); // EDREG1~4와 익명 import 판정자 4개.
+    run_document_regex_product_tests.addArg("--maru-expect-tests=9"); // EDREG1~5와 익명 import 판정자 4개.
     run_document_regex_product_tests.setCwd(b.path("."));
     run_document_regex_product_tests.step.dependOn(&install_fake_lsp.step);
     editor_document_regex_step.dependOn(&run_document_regex_product_tests.step);

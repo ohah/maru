@@ -1128,4 +1128,6 @@ python3 tools/editor-outline-app/run.py --output /tmp/maru-outline-app-new
 
 Unicode 검색 접기 집중 검증: `mise exec -- zig build test-search-case-fold -Doptimize=ReleaseFast`. `SCF1~3`이 전체 scalar의 표 탐색·편집용 변환 분리·터미널 실제 셀 검색을 확인한다. 표 재생성은 `python3 tools/generate-search-case-fold.py references/unicode/17.0.0/CaseFolding.txt`이며 공식 데이터의 SHA-256이 일치해야 한다.
 
-문서 전체 정규식 집중 검증: `mise exec -- zig build test-editor-document-regex -Doptimize=ReleaseFast`. `FND35~39`과 `EDREG1~4`가 문서 앵커·원문 CRLF 캡처·여러 줄 강조·치환·Undo·공유 변경 후 재검색을 검사한다. 제품 Metal 읽기는 `python3 tools/shared-ime-gpu/capture.py --scenario regex --output /tmp/maru-document-regex-<고유명>`으로 격리 실행한다.
+문서 전체 정규식 집중 검증: `mise exec -- zig build test-editor-document-regex -Doptimize=ReleaseFast`. `FND35~41`과 `EDREG1~5`가 문서 앵커·원문 CRLF 캡처·여러 줄 강조·치환·Undo·공유 변경 후 재검색을 검사한다. 제품 Metal 읽기는 `python3 tools/shared-ime-gpu/capture.py --scenario regex --output /tmp/maru-document-regex-<고유명>`으로 격리 실행한다.
+
+VS Code 기본 검색 경계의 opt-in 오라클: `node tools/editor-project-search/vscode-oracle.mjs zig-out/bin/maru-project-search-probe references/vscode/search-policy/textModelSearch.ts zig-out/vscode-search-oracle-<새이름>`. 지정한 read-only reference의 실제 Searcher를 Node 24+의 TypeScript 변환으로 실행한다. reference는 자동 설치하지 않으며 기본 CI/제품 의존성이 아니다. 공통 문법·단일 줄·기본 단어 구분자에 한정한다. 제품 Metal 캡처는 `python3 tools/shared-ime-gpu/capture.py --scenario word --output zig-out/vscode-search-word-<새이름>`이다. [승인 정책과 검증 범위](plans/editor-search-policy.md)를 본다.

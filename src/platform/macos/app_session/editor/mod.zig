@@ -51390,3 +51390,25 @@ test "EDREG4 제품 프레임은 현재와 나머지 여러 줄 결과의 배경
     try testing.expectEqual(@as(usize, 2), current);
     try testing.expectEqual(@as(usize, 2), normal);
 }
+
+// 승인된 빈 대안 정책을 실제 제품의 단일/전체 치환과 Undo 경계에서 확인한다.
+test "EDREG5 빈 정규식 대안 치환은 삽입하고 Undo로 본문을 복원한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |all| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "empty-regex.txt", "foo");
+        fx.session.surface_initialized = true;
+        find_ops.toggleFind(fx.session);
+        fx.session.chrome_host.find.regex = true;
+        try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "^|foo");
+        try fx.session.chrome_host.find.replace.query.appendSlice(testing.allocator, "X");
+        find_ops.recomputeFind(fx.session);
+        try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
+        try testing.expectEqual(@as(u32, 0), fx.session.editor_find_matches.items[0].len);
+        try testing.expect(if (all) replaceAllMatches(fx.session, term) else replaceCurrentMatch(fx.session, term));
+        try testing.expectEqualStrings("Xfoo", term.rt.editorDocument().opened.?.file.content);
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+    }
+}

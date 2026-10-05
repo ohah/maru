@@ -3590,6 +3590,7 @@ fn takeAgentDetail(
                         .assistant => .assistant,
                     },
                     .text = a.dupe(u8, t.text) catch "",
+                    .redacted = t.redacted,
                 };
             }
             det.arena = arena;

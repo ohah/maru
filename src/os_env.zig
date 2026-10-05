@@ -28,9 +28,9 @@
 //!
 //! ## 무엇을 여기로 옮기고 무엇을 안 옮기는가
 //!
-//! **경로가 될 수 있는 값만** 옮긴다 — `$HOME`·`%LOCALAPPDATA%`·`$MARU_CONFIG`처럼 파일시스템을 가리키는
-//! 것들이다. `MARU_DEBUG`(존재 여부만 봄)나 `USER`(표시용)처럼 경로가 아니고 사실상 ASCII인 값은
-//! 그대로 둔다 — 여기로 옮기면 할당과 해제가 늘 뿐이다.
+//! 경로 값과 개인정보 가림 키는 UTF-8 소유 값으로 읽는다. 경로가 아닌
+//! 사용자 이름도 Windows에서는 한글일 수 있어 USER·USERNAME에 같은 규약이 필요하다.
+//! MARU_DEBUG처럼 존재 여부만 보는 값은 기존 호출을 유지한다.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -48,9 +48,17 @@ const builtin = @import("builtin");
 /// 빈 값을 `null`로 접는 이유: 이 저장소의 소비자들이 전부 "빈 값 = 설정 안 함"으로 다룬다(`MARU_CONFIG`가
 /// 빈 문자열이면 기본 경로를 쓴다). 그 판정을 자리마다 반복하지 않는다.
 pub fn allocValue(gpa: std.mem.Allocator, key: [:0]const u8) ?[]u8 {
+    return allocValueChecked(gpa, key) catch null;
+}
+
+/// Privacy-sensitive consumers must distinguish missing data from allocation failure.
+pub fn allocValueChecked(gpa: std.mem.Allocator, key: [:0]const u8) !?[]u8 {
     if (builtin.os.tag == .windows) {
         const env: std.process.Environ = .{ .block = std.process.Environ.GlobalBlock.global };
-        const value = env.getAlloc(gpa, key) catch return null;
+        const value = env.getAlloc(gpa, key) catch |err| switch (err) {
+            error.EnvironmentVariableMissing => return null,
+            else => return err,
+        };
         if (value.len == 0) {
             gpa.free(value);
             return null;
@@ -61,7 +69,7 @@ pub fn allocValue(gpa: std.mem.Allocator, key: [:0]const u8) ?[]u8 {
     const raw = std.c.getenv(@ptrCast(key.ptr)) orelse return null;
     const span = std.mem.span(raw);
     if (span.len == 0) return null;
-    return gpa.dupe(u8, span) catch null;
+    return try gpa.dupe(u8, span);
 }
 
 const testing = std.testing;
@@ -79,4 +87,10 @@ test "allocValue: 있는 변수는 소유 슬라이스로 오고 UTF-8 이다" {
     try testing.expect(value.len > 0);
     // **이것이 이 모듈의 존재 이유다** — `getenv` 는 Windows 에서 ACP 바이트를 준다.
     try testing.expect(std.unicode.utf8ValidateSlice(value));
+}
+
+test "allocValueChecked keeps allocation failure distinct from missing environment" {
+    try testing.expect(try allocValueChecked(testing.allocator, "MARU_OS_ENV_TEST_ABSENT_KEY_XYZ") == null);
+    var denied = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, allocValueChecked(denied.allocator(), "PATH"));
 }

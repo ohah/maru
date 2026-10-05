@@ -703,3 +703,64 @@ private 실앱 PID 41632에서 정확히 1MiB인 기존 Windows 폭 키 갱신�
 정상 종료 코드 0을 수집했다. 실제 사용자 config는 쓰지 않았고 테스트의 private config는
 원래 상태로 복구했다. 에이전트 도크 버튼은 아직 비활성이다. 다음 단계는 Windows archive
 snapshot의 device=0 fallback을 full native identity와 교체 검증으로 바꾸는 것이다.
+
+
+## §2m.204 — Windows archive 원본 식별과 로그 선택
+
+Windows discovery·reader·cache·partial snapshot·detail·card에 volume serial과 128-bit
+FileIdInfo를 같은 핸들에서 얻어 전달한다. 상위 8바이트·volume·missing identity까지 대조하며
+조회 실패를 device=0 또는 null로 대체하지 않는다. POSIX의 기존 inode/device 계약은 유지한다.
+네이티브 파일 식별은 maru facade가 한 번 소유하고 editor와 recursive watcher가 같은 타입을
+사용한다. 공통 archive DTO는 primitive 값만 보관한다.
+식별 타입의 단일 소유에 따라 기존 safe-save identity 판정 3개는 root artifact에서 maru
+artifact로 이동한다. 전체 95개는 유지하고 각 집계 한계를 66/29에서 63/32로 맞춘다.
+
+상세가 ready이고 원본 증명이 일치할 때만 로그 보기 버튼을 켠다. Windows 전용
+`platform/windows/agents/reveal.zig` worker는 경로를 소유하고 no-follow regular-file 핸들로
+identity를 다시 확인한다. COM STA·SHParseDisplayName·SHOpenFolderAndSelectItems의 PIDL
+경로로 부모 폴더에서 파일을 선택하며, 명령 문자열을 만들지 않는다. busy 중복 요청은 거부하고
+receipt의 request/card identity가 맞을 때만 상태를 갱신한다. 종료는 worker를 drain한다.
+재검증 핸들은 Shell 호출까지 유지하지만, Shell의 namespace 경로 선택 자체가 원자적 CAS라고
+주장하지 않는다. resume와 live focus는 계속 비활성이다.
+
+베이스는 Microsoft Learn의 [FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info),
+[SHParseDisplayName](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shparsedisplayname),
+[SHOpenFolderAndSelectItems](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shopenfolderandselectitems)다.
+SDK Shell32/Ole32 링크만 추가하며 새 runtime package는 없다.
+
+상위 ID 절단·volume 무시·cache identity 무시·detail 검증 제거·Shell 직전 검증 제거의
+5개 compiled runtime 변형을 검출했다. 복원한 archive 56개(Windows 52 pass/4 기존 macOS skip),
+host 94개가 Debug/ReleaseFast에서 통과했다. 이후 §2m.205의 host 추가로 최종 집계는 98개다.
+private 실앱 PID 18808의 실제 버튼에서 합성 로그를 탐색기가 선택한 HWND와 경로를 수집했고,
+같은 PID의 정상 종료 코드 0을 확인했다. 실제 provider 실행이나 사용자 기록 공개는 하지 않았다.
+
+## §2m.205 — 상단 오른쪽 도크 열기·닫기 버튼
+
+사용자 요청에 따라 `— □ ×` 왼쪽에 항상 남는 오른쪽 pane 버튼을 추가했다. 그 왼쪽에는 기존
+네 가지 도크 뷰 아이콘을 놓고, 숨긴 도크에서도 launcher를 HTCLIENT로 유지한다. 좁은 창에는
+sidebar와 caption 영역을 침범하지 않는다. geometry와 press/release 취소 규칙은
+`platform/windows/chrome/dock.zig`가 소유한다. 도크 종류와 드래그한 폭은 유지하고, 열기·닫기는
+기존 resize 경로로 모든 terminal grid와 chrome을 갱신한다. 키보드의 도크 소유권은 놓으며
+기록 스캔은 접을 때 취소하고 agent 도크를 다시 열 때 새 스캔을 요청한다.
+
+기존 macOS `activateFilePanelDockControl`의 collapse/expand·focus release 의미를 따르되,
+Windows의 caption 버튼 위치에 맞춰 배치한다. 새로운 키보드 단축키를 뜻하지 않는다.
+
+caption 겹침·좁은 창 제한 제거·우측 hit 경계 확장·소유하지 않은 release·capture 취소 무시의
+5개 compiled runtime 변형을 검출했다. 복원한 host 98개 Debug/ReleaseFast가 통과했다.
+실앱 PID 18808에서 16회의 toggle, 버튼 밖 release 취소, agent 뷰·400px 폭 유지,
+최종 terminal 870×935/grid 96×49, grid mismatch 0·dock rebuild failure 0과 exit0을 확인했다.
+DwmFlush 뒤 CAPTUREBLT desktop 캡처로 agent 도크를 6회 반복 검사했으며 매회 terminal ink
+579픽셀·sidebar active 색 64가 유지됐다. GDI PrintWindow/동기화 없는 캡처의 빈 영역은 증거에서
+제외했다. 자동 HWND 입력과 짧은 실제 렌더 검사이며 물리 마우스 장기 soak로 세지 않는다.
+
+
+§2m.205의 마지막 실앱 검증에서 launcher press를 caption 위에서 release하면 minimize가
+실행되는 결함을 PID 12624에서 재현했다. launcher의 capture가 caption routing보다 먼저
+release를 소유하도록 수정했다. 최종 PID 3680은 같은 drag에서 IsIconic=false·visible=true,
+caption click 0·launcher toggle 8회·400px 도크 유지·grid mismatch 0·exit0을 확인했다.
+같은 PID의 Shell 로그 선택과 DwmFlush/CAPTUREBLT 캡처 6회도 확인했다.
+
+기존 캐시를 쓴 전체 경계 검사는 C 드라이브 공간 0으로 LLVM 출력 생성/실행 파일 찾기가
+실패했다. 종료된 fixture는 총 200KB여서 충분하지 않았다. 이 작업의 전용 NTFS 빌드 캐시를
+삭제하지 않고 압축해 공간을 확보했고, 최종 빌드와 검증은 별도 전용 캐시에서 실행한다.

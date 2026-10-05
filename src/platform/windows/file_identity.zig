@@ -2,7 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const w = std.os.windows;
-const abi = @import("maru").win32_abi;
+const abi = @import("abi.zig");
 extern "kernel32" fn GetFileInformationByHandleEx(w.HANDLE, u32, *anyopaque, u32) callconv(abi.winapi) w.BOOL;
 pub const Error = error{ UnsupportedPlatform, IdentityQueryFailed };
 

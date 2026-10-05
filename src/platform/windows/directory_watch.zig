@@ -53,7 +53,7 @@ pub const Watcher = struct {
         const opened = w.ntdll.NtCreateFile(&handle, @bitCast(@as(u32, 1)), &attrs, &status, null, .{}, .{ .READ = true, .WRITE = true, .DELETE = true }, .OPEN, .{ .DIRECTORY_FILE = true, .OPEN_REPARSE_POINT = true, .IO = .ASYNCHRONOUS }, null, 0);
         if (opened != .SUCCESS) return error.WatchOpenFailed;
         errdefer _ = CloseHandle(handle);
-        const identity = @import("file_identity.zig").Identity;
+        const identity = maru.win32_file_identity.Identity;
         if (!(try identity.capture(handle)).eql(try identity.capture(dir.handle))) return error.WatchIdentityChanged;
         const event = CreateEventW(null, .TRUE, .FALSE, null) orelse return error.WatchEventFailed;
         errdefer _ = CloseHandle(event);
@@ -126,7 +126,7 @@ pub const Groups = struct {
     const Member = struct { id: u64, group_id: u64 };
     const Entry = struct {
         watcher: *Watcher,
-        identity: @import("file_identity.zig").Identity,
+        identity: maru.win32_file_identity.Identity,
         id: u64,
         references: usize = 1,
         dirty: bool = false,
@@ -143,7 +143,7 @@ pub const Groups = struct {
     cursor: usize = 0,
 
     pub fn acquire(self: *Groups, dir: std.Io.Dir) !Lease {
-        const identity = try @import("file_identity.zig").Identity.capture(dir.handle);
+        const identity = try maru.win32_file_identity.Identity.capture(dir.handle);
         const next = std.math.add(u64, self.issued, 1) catch return error.WatchGenerationExhausted;
         for (self.entries.items) |*entry| if (entry.identity.eql(identity)) {
             const references = std.math.add(usize, entry.references, 1) catch return error.WatchReferenceExhausted;

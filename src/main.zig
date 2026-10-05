@@ -5627,6 +5627,34 @@ fn drainFileBackupWorker(io: std.Io, worker: *BackupWorker, owner: *?@import("pl
     return report;
 }
 
+// Shutdown has no further input producer. Capture each pending document once,
+// ignore its debounce deadline, and drain the actual native receipt before the
+// view lease or borrowed private root can be destroyed. Failure is reported;
+// it never falls back to synchronous writes or loops forever retrying one file.
+fn flushFileBackupWorker(io: std.Io, worker: *BackupWorker, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, local_override: ?[]const u8) !@import("platform/windows/editor/backup_store.zig").Maintenance {
+    var report = try drainFileBackupWorker(io, worker, owner, now_ns);
+    defer worker.deinit() catch unreachable;
+    for (views) |view| {
+        const state = view.documents.get(view.document) orelse continue;
+        if (!state.notifications.backup_dirty) continue;
+        worker.start(io, view.document, if (owner.*) |*value| &value.store else null, local_override, maru.session.editor.backup.pause_bytes) catch |failure| {
+            report.failed += 1;
+            if (report.first_error == null) report.first_error = failure;
+            continue;
+        };
+        while (worker.isBusy()) {
+            try worker.voteDrop();
+            if (try worker.finish(owner, now_ns)) |completed| {
+                report.attempted += completed.report.attempted;
+                report.failed += completed.report.failed;
+                if (report.first_error == null) report.first_error = completed.report.first_error;
+            }
+            if (worker.isBusy()) io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+    }
+    return report;
+}
+
 fn holdBackupWindowClose(busy: bool, deferred: *bool, requested: *bool) void {
     if (requested.* and busy) {
         deferred.* = true;
@@ -7024,8 +7052,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var backup_clean_closes: std.ArrayList(maru.session.editor.document_registry.Lease) = .empty;
     defer backup_clean_closes.deinit(allocator);
     defer {
-        reportFileBackups(stderr, drainFileBackupWorker(io, &file_backup_worker, &file_backups, std.Io.Clock.awake.now(io).nanoseconds) catch unreachable);
-        if (runFileBackups(allocator, io, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, true, null)) |report| {
+        if (flushFileBackupWorker(io, &file_backup_worker, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, null)) |report| {
             reportFileBackups(stderr, report);
         } else |err| stderr.print("  warning: editor backup shutdown failed({s})\n", .{@errorName(err)}) catch {};
         if (file_backups) |*owner| owner.deinit(io);
@@ -20553,4 +20580,28 @@ test "Windows editor directory watch row allocation failure discards incomplete 
     try std.testing.expect(drainTreeScan(failing.allocator(), io, &tree, &backend, &rows, "C:/selected", &retry));
     try std.testing.expect(retry);
     try std.testing.expectEqual(@as(usize, 0), rows.items.len);
+}
+
+test "Windows recovery backup worker shutdown flush bypasses debounce and drains native receipts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const view = &f.views.items[0];
+    if (try applyFileKey(&f.book, io, .{}, view, .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| a.free(copied);
+    const state = f.documents.get(view.document).?;
+    try std.testing.expect(state.notifications.backup_due_ns > 1);
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try f.tmp.dir.realPath(io, &root_buffer)];
+    var worker = BackupWorker.init(a, &f.documents);
+    const report = try flushFileBackupWorker(io, &worker, &f.backups, f.views.items, 1, root);
+    try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expectEqual(@as(usize, 1), report.attempted);
+    try std.testing.expect(!worker.isBusy());
+    try std.testing.expect(state.notifications.backup_on_disk and !state.notifications.backup_dirty);
+    var record = (try f.backups.?.store.read(io, @import("platform/windows/editor/backup_store.zig").identity(state).?)).?;
+    defer record.deinit();
+    try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
 }

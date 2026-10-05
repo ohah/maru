@@ -2146,14 +2146,46 @@ fn configFileReadIssue(provenance: config_mod.loader.FileProvenance) ?[]const u8
     };
 }
 
+/// 같은 진단 보고를 **여러 창이 연달아** 찍지 않게 하는 프로세스 전역 표식. config 는 창마다 읽는다 — 앱을 켤 때
+/// 창마다 `init` 이, 파일이 바뀌면(`behavior.auto-reload`) Swift 가 창 전부와 퀵 터미널의 세션마다 reload 를 부른다.
+/// 그래서 창 셋 + 퀵 터미널이면 저장 한 번에 같은 경고가 넷씩 찍혔다(2026-10-05 확인, `MaruAppHost.swift`
+/// `configFileChanged`). 보고는 같은 파일 내용의 같은 결과라 한 번이면 된다.
+///
+/// 시간 창을 두는 이유: 사용자가 **몇 초 뒤 메뉴로 다시** 읽으면 그 결과는 다시 보여야 한다 — 「같은 내용이면 영원히
+/// 한 번」으로 두면 그 누름이 아무것도 안 남긴다. 창들이 연달아 부르는 간격은 한 런루프 안(ms 단위)이다.
+pub const config_log_dedupe_ms: u64 = 2000;
+pub var config_log_last: struct { fingerprint: u64 = 0, at_ms: u64 = 0, valid: bool = false } = .{};
+
+/// 보고 하나의 지문 — 시점(startup/reload)·파일 읽기 상태·진단(줄·키·메시지) 전부. 하나라도 다르면 다른 보고다.
+fn configReportFingerprint(parsed: *const config_mod.ParsedConfig, origin_name: []const u8, read_issue: ?[]const u8) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(origin_name);
+    h.update(read_issue orelse "");
+    for (parsed.diagnostics) |d| {
+        h.update(std.mem.asBytes(&d.line));
+        h.update(d.key);
+        h.update(&.{0});
+        h.update(d.message);
+        h.update(&.{0});
+    }
+    return h.final();
+}
+
 /// 앱 로그(GUI 실행이면 `app.log`)에 config 진단을 남긴다. **시작(`init`)과 Reload Config 가 같은 자리를 탄다** —
 /// 2026-10-04 전에는 init 만 찍어, 실행 중 고친 오타·못 읽게 된 파일이 reload 뒤 어디에도 안 남았다(실험 확인).
 /// 지금 `loaded_config` 를 읽는다 — 호출자는 교체를 끝낸 뒤 부른다. 찍은 진단 줄 수를 `config_diagnostics_logged`
-/// 에 더해 판정자가 「이 경로가 실제로 찍었다」를 잰다(로그 자체는 테스트가 가로챌 수 없다).
+/// 에 더해 판정자가 「이 경로가 실제로 찍었다」를 잰다(로그 자체는 테스트가 가로챌 수 없다). 다른 창이 방금 같은
+/// 보고를 찍었으면(`config_log_last`) 이 창은 건너뛴다.
 pub fn logConfigDiagnostics(self: *AppSession, comptime origin: enum { startup, reload }) void {
     const log = std.log.scoped(.config);
     const parsed = &self.loaded_config;
-    if (configFileReadIssue(parsed.file_provenance)) |issue| {
+    const now = self.awakeMs();
+    const read_issue = configFileReadIssue(parsed.file_provenance);
+    const fingerprint = configReportFingerprint(parsed, @tagName(origin), read_issue);
+    if (config_log_last.valid and config_log_last.fingerprint == fingerprint and
+        now -| config_log_last.at_ms < config_log_dedupe_ms) return;
+    config_log_last = .{ .fingerprint = fingerprint, .at_ms = now, .valid = true };
+    if (read_issue) |issue| {
         log.warn("config file {s} ({s}) — using defaults", .{ issue, @tagName(origin) });
     }
     var buf: [512]u8 = undefined;
@@ -3891,6 +3923,7 @@ test "Reload Config 는 시작과 같이 config 진단을 앱 로그에 찍는�
         .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    config_log_last = .{}; // 다른 판정자가 방금 찍은 보고에 가려지지 않게(프로세스 전역 표식)
     const at_start = session.config_diagnostics_logged; // 테스트 init 은 고정 config 라 파일과 무관하다
 
     // 실행 중 파일에 오타 둘이 생긴다 → reload 가 둘 다 찍는다.
@@ -3900,10 +3933,23 @@ test "Reload Config 는 시작과 같이 config 진단을 앱 로그에 찍는�
     try std.testing.expectEqualStrings("font.sizee", session.loaded_config.diagnostics[0].key);
     try std.testing.expectEqual(at_start + 2, session.config_diagnostics_logged);
 
+    // 같은 내용을 **곧바로 다시** 읽는다 — 창 여럿이 연달아 reload 하는 모양이다(Swift 가 창마다 부른다).
+    // 같은 보고라 찍지 않는다.
+    reloadConfig(session);
+    try std.testing.expectEqual(at_start + 2, session.config_diagnostics_logged);
+    // 시간 창이 지난 뒤(사용자가 몇 초 뒤 메뉴로 다시 누른 것)에는 다시 찍는다 — 시각만 과거로 돌려 흉내 낸다.
+    config_log_last.at_ms -|= config_log_dedupe_ms;
+    reloadConfig(session);
+    try std.testing.expectEqual(at_start + 4, session.config_diagnostics_logged);
+
     // 고치고 다시 읽으면 더 찍지 않는다 — 옛 진단을 되풀이하지 않는다.
     try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "font.size = 14\n" });
     reloadConfig(session);
-    try std.testing.expectEqual(at_start + 2, session.config_diagnostics_logged);
+    try std.testing.expectEqual(at_start + 4, session.config_diagnostics_logged);
+    // 다른 내용의 진단은 시간 창 안이어도 바로 찍는다 — 지문이 다르다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "font.sizee = 14\n" });
+    reloadConfig(session);
+    try std.testing.expectEqual(at_start + 5, session.config_diagnostics_logged);
 }
 
 test "파일이 행을 더해도 선택은 같은 설정에 남는다 (reload 축)" {

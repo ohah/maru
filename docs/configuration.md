@@ -333,7 +333,7 @@ term-program = ghostty
 무시된 줄은 **앱 로그**에 경고로 남는다 — Dock·Finder 로 띄웠으면 `<cache>/maru/app.log`(`$XDG_CACHE_HOME`, 없으면
 `~/.cache`), 터미널에서 띄웠으면 stderr 다. `MARU_DEBUG` 와 무관하다. 형식은 ``config line N `키`: 이유`` 이고
 (`=` 가 없는 줄은 키 없이 `config line N: 이유`), **시작할 때와 메뉴의 Reload Config 때 모두** 찍는다. reload 는
-`config reloaded: diagnostics=N` 한 줄을 덧붙여 진단이 0 이어도 반영됐음을 남긴다. 파일이 있는데 못 읽거나 1 MiB 를
+`config reloaded: diagnostics=N` 한 줄을 덧붙여 진단이 0 이어도 반영됐음을 남긴다. config 는 창마다 읽으므로(앱 시작 때 창마다, `behavior.auto-reload` 가 파일 변경을 알리면 창 전부와 퀵 터미널마다) **같은 보고는 2 초 안에 한 번만** 찍는다 — 몇 초 뒤 메뉴로 다시 읽으면 다시 찍힌다. 파일이 있는데 못 읽거나 1 MiB 를
 넘으면 `config file unreadable|oversize (startup|reload) — using defaults` 가 남는다 — 이때 모든 설정이 기본값이다.
 단일 출처는 `app_session/settings.zig` 의 `logConfigDiagnostics` 다. (값 의미 검증은
 `appearance.resolve`와 `appearance.parseHexColor` 단일 출처를 재사용하므로, 로더가 통과시킨 값은

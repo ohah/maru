@@ -332,6 +332,10 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/unload")) {
         return "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>var n=0;addEventListener('click',function(){window.onbeforeunload=function(e){e.preventDefault();e.returnValue='leave?';return 'leave?'};document.title='unload-armed-'+(++n)});requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='unload-ready'})})</script>";
     }
+    if (std.mem.eql(u8, path, "/unload-hang")) {
+        // W6j: 클릭하면 떠나기 확인 처리기가 20 초 멈춘다(물어보고 닫기의 시한).
+        return "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>addEventListener('click',function(){window.onbeforeunload=function(e){var t=Date.now();while(Date.now()-t<20000);e.preventDefault();e.returnValue='x';return 'x'};document.title='hang-armed'});requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='hang-ready'})})</script>";
+    }
     if (std.mem.eql(u8, path, "/dialog-reload")) {
         return "<!doctype html><title>loading</title><script>var n=+(sessionStorage.n||0);sessionStorage.n=n+1;if(n<3){alert('again');location.reload()}else document.title='reload-done'</script>";
     }

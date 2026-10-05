@@ -146,7 +146,31 @@ const Surface = struct {
     /// 하나가 쓴다 — 페이지 입력의 새 탭 장으로는 새 창을 받지 않는다(sidecar 가 새 창 자리를 보내도). 한 칸이다 — sidecar 의 답이 오기
     /// 전에 같은 탭에서 또 고르면 앞 것은 쓰지 못한다(드물다 — W6h① 적대 검증에서 받아들임).
     new_window_credit_ms: i64 = 0,
+    /// 사용자의 닫기를 페이지에 물었다(W6j — `askClose`). 창이 `takeCloseAsk` 로 결과를 꺼내 그 탭을 닫거나 둔다.
+    close_ask: CloseAsk = .none,
+    /// 물은(떠나기를 고른 뒤에는 그) 단조 시각 ms — 질문도 닫힘도 없이 `close_ask_wait_ms` 가 지나면 강제로 닫는다.
+    close_ask_since_ms: i64 = 0,
 };
+
+/// 페이지에 물은 닫기의 진행(W6j).
+const CloseAsk = enum {
+    none,
+    /// 물었다 — 질문(`before_unload`)이나 닫힘을 기다린다(시한이 있다).
+    asking,
+    /// 페이지가 물었다 — 사용자가 답할 때까지 기다린다(시한이 없다).
+    asked,
+    /// 닫혔다(묻지 않는 페이지·떠나기) — 창이 그 탭을 닫는다.
+    closed,
+    /// 머물렀다 — 창이 한 번 본다(보고).
+    stayed,
+};
+
+/// 창이 꺼내는 결과(W6j — `takeCloseAsk`).
+pub const CloseAskOutcome = enum { none, waiting, closed, timed_out, stayed };
+
+/// 물은 뒤 질문도 닫힘도 없을 때 기다리는 시간(W6j). 묻지 않는 페이지는 수 ms 안에 닫히고(실측 1~14 ms) 떠나기 확인은 곧바로 온다 —
+/// 떠나기 확인 처리기가 멈춘 페이지는 CEF 가 끝없이 기다려(실측 20 초 처리기에 20 초) maru 가 강제로 닫는다.
+pub const close_ask_wait_ms: i64 = 2000;
 
 /// 페이지가 연 새 탭 하나(W6e). 주소는 걸렀다(`new_tab.urlAllowed`) — 꺼내 간 쪽이 놓는다.
 pub const NewTab = struct {
@@ -1050,6 +1074,49 @@ pub fn cursor(surface_id: u64) ?Cursor {
     return .{ .cursor = s.cursor, .generation = s.cursor_generation };
 }
 
+/// 사용자가 닫는 탭 하나를 페이지에 묻는다(W6j — 떠나기 확인). 물을 수 없으면(sidecar 가 돌지 않는다·브라우저가 아직 없다·
+/// 페이지가 이미 닫혔다) false — 호출자가 곧바로 닫는다. 이미 묻는 중이면 다시 보내지 않는다(CEF 도 한 번만 묻는다).
+pub fn askClose(gpa: std.mem.Allocator, surface_id: u64, now_ms: i64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    if (state != .running or !s.created or s.page_closed) return false;
+    switch (s.close_ask) {
+        .asking, .asked => return true,
+        .none, .closed, .stayed => {},
+    }
+    s.close_ask = .asking;
+    s.close_ask_since_ms = now_ms;
+    send(gpa, .{ .close_asking = surface_id });
+    return true;
+}
+
+/// 물은 닫기의 결과를 꺼낸다(W6j — 창의 tick). `closed`·`timed_out` 이면 창이 그 탭을 닫는다(강제 — `destroy`), `stayed` 는
+/// 보고만 한다. 꺼내면 지운다. sidecar 가 내려갔으면(다시 뜨면 그 페이지를 되살린다) 시한을 기다리지 않는다 — 사용자는 닫기를 골랐다.
+pub fn takeCloseAsk(surface_id: u64, now_ms: i64) CloseAskOutcome {
+    const s = surfaces.getPtr(surface_id) orelse return .none;
+    switch (s.close_ask) {
+        .none => return .none,
+        .asked => return .waiting,
+        .closed => {
+            s.close_ask = .none;
+            return .closed;
+        },
+        .stayed => {
+            s.close_ask = .none;
+            return .stayed;
+        },
+        .asking => {
+            if (state == .running and now_ms - s.close_ask_since_ms < close_ask_wait_ms) return .waiting;
+            s.close_ask = .none;
+            return .timed_out;
+        },
+    }
+}
+
+/// 꺼내 간 창이 지금 닫지 못했다(닫기 확인·탭 끌기 중) — 다음 tick 에 다시(W6j).
+pub fn markCloseAskClosed(surface_id: u64) void {
+    if (surfaces.getPtr(surface_id)) |s| s.close_ask = .closed;
+}
+
 /// Term 이 사라졌다 — 브라우저를 파괴한다. 마지막이면 sidecar 도 내린다.
 pub fn destroy(gpa: std.mem.Allocator, surface_id: u64) void {
     var kv = surfaces.fetchSwapRemove(surface_id) orelse return;
@@ -1377,6 +1444,11 @@ pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: 
     const clamped = ws.text.clampUtf8(text, buf.len);
     @memcpy(buf[0..clamped.len], clamped);
     ws.text.replaceControlKeepLines(buf[0..clamped.len]);
+    // 물은 닫기의 떠나기 확인(W6j): 떠나기면 닫힘을 기다린다(시한 — 안 닫히면 강제), 머무르기면 탭을 둔다.
+    if (d.kind == .before_unload and s.close_ask == .asked) {
+        s.close_ask = if (accept) .asking else .stayed;
+        s.close_ask_since_ms = monotonicNow();
+    }
     removeDialog(gpa, s, token);
     if (s.created) send(gpa, .{ .dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept, .text = buf[0..clamped.len], .suppress = suppress } });
 }
@@ -2319,6 +2391,8 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         forgetDrag(s); // 새 sidecar 는 그 끌기를 모른다 — enter 없이 drop 을 보내지 않게(W6d①)
         dropDragOut(gpa, s); // 페이지 끌기도 — 답할 곳이 없다(W6d②)
         failFileFetch(s.record.surface_id); // 청한 파일 내용도 오지 않는다(W6d③)
+        // 물은 닫기(W6j) — 답할 곳이 없다. 사용자는 닫기를 골랐다(떠나기 확인도 함께 사라졌다) — 창이 닫는다.
+        if (s.close_ask == .asking or s.close_ask == .asked) s.close_ask = .closed;
     }
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②) — 붙은 팝업은 새 sidecar 에서 보통 탭으로 되살아난다
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
@@ -2475,7 +2549,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // 탭 — Blink 규칙). 붙기 전이면 줄에서 빼고, 아니면 창이 그 탭을 닫는다(유일한 탭이면 빈 탭으로 새로). 그대로 두면 죽은 번호의
             // 탭이 남았다(W6f② 적대 검증 4 차).
             s.created = false; // 그 브라우저는 없다 — 입력·이동·포커스를 죽은 번호로 보내지 않는다(W6f② 적대 검증 5 차)
-            if (dropPendingAdopt(gpa, id)) abandonPopup(gpa, id) else s.page_closed = true;
+            // 사용자가 닫기를 물었던 탭이면(W6j) 그 닫기가 끝났다 — 창이 그 탭을 닫는다(페이지가 닫은 것으로 보지 않는다: 유일한 탭이어도
+            // 빈 탭으로 되살리지 않는다).
+            if (s.close_ask == .asking or s.close_ask == .asked) {
+                s.close_ask = .closed;
+            } else if (dropPendingAdopt(gpa, id)) abandonPopup(gpa, id) else s.page_closed = true;
             dropPopup(s); // 닫힘 알림 없이 사라진다(W6a②)
             setTooltip(gpa, s, ""); // 툴팁도(W6b — 방어)
             dropContextMenu(gpa, s); // 브라우저가 닫히며 CEF 가 메뉴를 거뒀다(W6c② — 닫힘 알림은 sidecar 가 보내지 않는다)
@@ -2573,7 +2651,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 .before_unload => .before_unload,
             };
             if (!queueDialog(gpa, v.browser, v.request, kind, v.origin, v.message, v.default_text, "", v.offer_suppress))
-                send(gpa, .{ .dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = kind == .before_unload } });
+                send(gpa, .{ .dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = kind == .before_unload } })
+            else if (kind == .before_unload) if (surfaces.getPtr(v.browser)) |s| {
+                // 물은 닫기에 페이지가 떠나기 확인으로 답했다(W6j) — 사용자가 답할 때까지 시한 없이 기다린다.
+                if (s.close_ask == .asking) s.close_ask = .asked;
+            };
         },
         .file_dialog => |v| {
             const kind: DialogKind = switch (v.mode) {
@@ -2616,12 +2698,17 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .dialog_closed => |v| if (surfaces.getPtr(v.browser)) |s| {
             for (s.dialogs.items) |d| if (d.request == v.request) {
+                // 물은 닫기의 떠나기 확인이 답 없이 치워졌다(렌더러가 죽었다 등 — W6j) — 다시 시한을 센다.
+                if (d.kind == .before_unload and s.close_ask == .asked) {
+                    s.close_ask = .asking;
+                    s.close_ask_since_ms = monotonicNow();
+                }
                 removeDialog(gpa, s, d.token);
                 break;
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking => unreachable,
     }
 }
 
@@ -2689,6 +2776,80 @@ test "dialogs queue per tab, show one at a time, and each answer goes out exactl
     try std.testing.expect(frames[1].dialog_reply.request == 9 and frames[1].dialog_reply.accept);
     try std.testing.expect(frames[2].file_dialog_reply.request == 10 and !frames[2].file_dialog_reply.accept);
     try std.testing.expect(frames[3].dialog_reply.request == 3 and !frames[3].dialog_reply.accept);
+}
+
+test "W6j: a close asked of the page closes, stays or is forced after the wait — never mistaken for a page that closed itself" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count());
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    state = .running; // 보낸 것은 버려진다(sidecar 없음) — 상태만 본다
+    const size: ws.message.ViewSize = .{ .width = 10, .height = 10, .scale = 1 };
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = size, .hidden = false }, .created = true });
+    try surfaces.put(gpa, 8, .{ .record = .{ .surface_id = 8, .size = size, .hidden = false } });
+    // 브라우저가 아직 없거나 모르는 탭이면 묻지 않는다(호출자가 곧바로 닫는다).
+    try std.testing.expect(!askClose(gpa, 8, 0));
+    try std.testing.expect(!askClose(gpa, 99, 0));
+
+    // 묻지 않는 페이지 — 닫힘이 오면 창이 닫는다. 페이지가 닫은 것(`window.close` — 유일한 탭이면 빈 탭으로 되살림)으로 보지 않는다.
+    try std.testing.expect(askClose(gpa, 7, 0));
+    try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, 100));
+    apply(gpa, .{ .browser_closed = 7 }, 0);
+    try std.testing.expect(!takePageClosed(7));
+    try std.testing.expectEqual(CloseAskOutcome.closed, takeCloseAsk(7, 100));
+    try std.testing.expectEqual(CloseAskOutcome.none, takeCloseAsk(7, 100));
+    // 닫힌 브라우저에는 다시 묻지 않는다.
+    try std.testing.expect(!askClose(gpa, 7, 0));
+    surfaces.getPtr(7).?.created = true;
+
+    // 떠나기 확인 — 질문이 오면 시한 없이 기다리고, 머무르기면 둔다(한 번 보고).
+    var t = monotonicNow();
+    try std.testing.expect(askClose(gpa, 7, t));
+    try std.testing.expect(askClose(gpa, 7, t)); // 묻는 중 — 다시 보내지 않는다
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 5, .kind = .before_unload, .origin = "", .message = "" } }, 0);
+    try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, t + close_ask_wait_ms * 10));
+    replyDialog(gpa, 7, nextDialog(7).?.token, false, "", false);
+    try std.testing.expectEqual(CloseAskOutcome.stayed, takeCloseAsk(7, t));
+    try std.testing.expectEqual(CloseAskOutcome.none, takeCloseAsk(7, t));
+
+    // 떠나기 — 닫힘을 기다리고, 시한 안에 안 오면 강제로.
+    t = monotonicNow();
+    try std.testing.expect(askClose(gpa, 7, t));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .before_unload, .origin = "", .message = "" } }, 0);
+    replyDialog(gpa, 7, nextDialog(7).?.token, true, "", false);
+    t = monotonicNow();
+    try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, t));
+    try std.testing.expectEqual(CloseAskOutcome.timed_out, takeCloseAsk(7, t + close_ask_wait_ms + 1));
+
+    // 질문이 답 없이 치워지면(렌더러가 죽음 등) 다시 시한을 센다.
+    try std.testing.expect(askClose(gpa, 7, 0));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 7, .kind = .before_unload, .origin = "", .message = "" } }, 0);
+    apply(gpa, .{ .dialog_closed = .{ .browser = 7, .request = 7 } }, 0);
+    t = monotonicNow();
+    try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, t));
+    try std.testing.expectEqual(CloseAskOutcome.timed_out, takeCloseAsk(7, t + close_ask_wait_ms + 1));
+
+    // 질문도 닫힘도 없으면(처리기가 멈춤) 시한 뒤 강제로.
+    try std.testing.expect(askClose(gpa, 7, 1000));
+    try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, 1000 + close_ask_wait_ms - 1));
+    try std.testing.expectEqual(CloseAskOutcome.timed_out, takeCloseAsk(7, 1000 + close_ask_wait_ms));
+
+    // sidecar 가 죽으면 묻던 닫기는 닫힌다(답할 곳이 없다 — 사용자는 닫기를 골랐다).
+    try std.testing.expect(askClose(gpa, 7, 0));
+    forgetSidecar(gpa);
+    try std.testing.expectEqual(CloseAskOutcome.closed, takeCloseAsk(7, 0));
+    // 엔진이 돌지 않으면 시한을 기다리지 않는다.
+    try std.testing.expect(askClose(gpa, 7, 0));
+    state = .off;
+    try std.testing.expectEqual(CloseAskOutcome.timed_out, takeCloseAsk(7, 0));
+    try std.testing.expect(!askClose(gpa, 7, 0));
 }
 
 test "permission requests share the dialog queue: one answer each, other answers cannot close them, a closing window dismisses" {

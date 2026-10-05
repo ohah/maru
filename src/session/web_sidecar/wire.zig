@@ -17,7 +17,7 @@ pub const magic = "MWEB".*;
 ///   버전 불일치 대신 `FrameTooLarge`(규칙 위반 — 재시작)로 보인다(W7a1 적대 검증).
 /// sidecar 는 다른 버전의 hello 를 받으면 제 버전으로 `hello_ack`(0·0) 하나를 보내고 끝내고(exit 18), maru 는 handshake 중
 /// 버전이 다른 frame 을 받으면 다시 띄우지 않고 안내한다(C2).
-pub const version: u16 = 12;
+pub const version: u16 = 13;
 
 /// maru 가 보내는 URL 상한. 사용자가 친 주소·링크를 싣는 자리라 이 크기면 넉넉하고, 고정 decoder 저장소를
 /// 작게 둔다. 이보다 긴 URL(큰 data: URL 등)은 maru 가 보내지 않는다.

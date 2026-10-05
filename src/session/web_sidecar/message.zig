@@ -60,6 +60,10 @@ pub const Tag = enum(u8) {
     /// 두고 이 번호로 등록한다 — 원래 페이지와 이어진다(`window.opener`·`postMessage`·이름 창·`close`). 맡긴 번호가 없으면 주소만
     /// 보낸다(`open_tab` — W6e). sidecar 는 `max_popup_reserve` 개까지 쥔다(넘치면 버린다).
     popup_reserve = 30,
+    /// 사용자가 그 탭을 닫는다 — 페이지에 묻고 닫는다(W6j — 강제하지 않는 닫기). 떠나기 확인을 건 페이지면 `js_dialog`
+    /// (`before_unload`)가 오고, 머무르기면 브라우저는 그대로다. 묻지 않는 페이지는 곧바로 닫힌다(`browser_closed`). maru 는 답이
+    /// 없으면 `destroy_browser` 로 강제한다. maru → sidecar 의 마지막 번호다.
+    close_asking = 31,
 
     hello_ack = 32,
     browser_created = 33,
@@ -929,6 +933,7 @@ pub const Message = union(Tag) {
     drag_source_end: DragSourceEnd,
     drag_file_request: DragFileRequest,
     popup_reserve: PopupReserve,
+    close_asking: BrowserId,
 
     hello_ack: Hello,
     browser_created: BrowserId,

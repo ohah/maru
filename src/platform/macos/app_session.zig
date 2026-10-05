@@ -9933,7 +9933,7 @@ pub const AppSession = struct {
     /// 닫기 진입점이 실제로 무엇을 teardown하는지 cascade(Term>pane>탭>창)를 **단일 출처**로 해석한다. 판정
     /// (scopeHasRunningJob)과 실행(executeClose)이 이 한 함수를 공유해, 둘이 따로 인코딩돼 갈리는 일(과도하게 넓거나
     /// 좁게 묻기·엉뚱한 대상 닫기)을 막는다.
-    fn resolveCloseScope(self: *AppSession, target: PendingClose) CloseScope {
+    pub fn resolveCloseScope(self: *AppSession, target: PendingClose) CloseScope {
         return switch (target) {
             .active_term => .term,
             .term_or_pane => if (pane_ops.activePane(self).terms.items.len > 1) .term else workspace_ops.resolveWorkspaceScope(self),
@@ -13101,7 +13101,8 @@ pub const AppSession = struct {
                     .file_conflict_reload => |surface_id| file_panel_ops.beginFileConflictReload(self, surface_id),
                     .reset => settings_ops.resetAllSettings(self),
                     .paste => |target_id| self.confirmPendingPaste(target_id),
-                    .close => |target| self.executeClose(target),
+                    // W6j: 닫는 것이 Chromium 탭 하나면 먼저 페이지에 묻는다(떠나기 확인) — 아니면 곧바로 닫는다.
+                    .close => |target| web_ops.closeAskingPage(self, target),
                     .untitled_overwrite => editor_untitled_save_ops.confirmOverwrite(self),
                     // **`primary` = 저쪽**(U3) — 그 pane 이 저쪽이라 물음이 떴으므로 기본이 그것이다.
                     .untitled_where => |surface_id| editor_untitled_save_ops.chooseThere(self, surface_id),

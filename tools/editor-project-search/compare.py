@@ -92,6 +92,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--native", type=Path, required=True)
+    parser.add_argument("--baseline-native", type=Path, help="같은 파일에서 수정 전 바이너리 비용도 측정")
     parser.add_argument("--rg", default=shutil.which("rg"))
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--files", type=int, default=2048)
@@ -109,6 +110,7 @@ def main():
     environment.pop("RIPGREP_CONFIG_PATH", None)
     binary = Path(args.rg).resolve(strict=True)
     native = args.native.resolve(strict=True)
+    baseline = args.baseline_native.resolve(strict=True) if args.baseline_native else None
     base = [str(binary), "--no-config", "--hidden", "--no-require-git",
             "--no-ignore-parent", "--no-ignore-global", "--glob", "!**/.git/**"]
     rare = (args.files + 15) // 16
@@ -138,6 +140,8 @@ def main():
         "cases": {}, "status": "running",
         "limits": "합성 자료·캐시 미제거. 첫 pipe 결과이며 UI 표시 시간이 아님. RSS는 각 CLI 자식의 peak이며 앱·Python 메모리를 포함하지 않음.",
     }
+    if baseline:
+        report["baseline_native_sha256"] = hashlib.sha256(baseline.read_bytes()).hexdigest()
     repository = Path(__file__).resolve().parents[2]
     report["product_base"] = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
     report["product_source_sha256"] = {
@@ -155,6 +159,8 @@ def main():
             variants = ["rg", "native", "prefilter"]
             if mode == "literal":
                 variants.append("byte-candidate")
+            if baseline:
+                variants.append("baseline-native")
             samples = {variant: [] for variant in variants}
             for run_index in range(args.runs):
                 order = variants[run_index % len(variants):] + variants[:run_index % len(variants)]
@@ -174,18 +180,21 @@ def main():
                         listing = execute(command, corpus, environment, artifact.with_name(artifact.name + "-listing"), "listing")
                         assert listing["exit"] in (0, 1)
                         prepare_start = time.perf_counter()
-                        paths = [name for name in listing.pop("stdout").split(b"\0") if name]
+                        # 수정 전후의 첫 결과가 목록 수신 순서 차이로 갈리지 않게 같은 순서를 쓴다.
+                        paths = sorted(name for name in listing.pop("stdout").split(b"\0") if name)
                         paths_file = artifact.with_suffix(".paths")
                         paths_file.write_bytes(b"".join(os.fsencode(corpus) + b"/" + path + b"\0" for path in paths))
                         preceding_ms = listing["elapsed_ms"] + (time.perf_counter() - prepare_start) * 1000
                         native_mode = "byte-candidate" if variant == "byte-candidate" else mode
-                        result = execute([str(native), str(paths_file), query, native_mode], corpus, environment, artifact, "native")
+                        matcher = baseline if variant == "baseline-native" else native
+                        result = execute([str(matcher), str(paths_file), query, native_mode], corpus, environment, artifact, "native")
                         statistics_native = json.loads(result.pop("stdout"))
                         assert result["exit"] == 0 and statistics_native["optimize"] == "ReleaseFast"
                         count = statistics_native["matches"]
                         result.update(elapsed_ms=preceding_ms + result["elapsed_ms"],
                                       selected_files=len(paths), read_bytes=statistics_native["bytes"],
                                       listing_ms=listing["elapsed_ms"], listing_peak_rss_bytes=listing["peak_rss_bytes"],
+                                      native_elapsed_ns=statistics_native["elapsed_ns"],
                                       prefilter_used=prefilter_used)
                         if result["first_ms"] is not None:
                             result["first_ms"] += preceding_ms

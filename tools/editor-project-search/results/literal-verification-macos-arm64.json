@@ -1,0 +1,629 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "corpus": "valid",
+      "query": "needle",
+      "mode": "literal",
+      "files": 31,
+      "candidates": 25,
+      "prefilter_used": true,
+      "matches": 191,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "NEEDLE",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 25,
+      "prefilter_used": true,
+      "matches": 364,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "needle",
+      "mode": "word",
+      "files": 31,
+      "candidates": 25,
+      "prefilter_used": true,
+      "matches": 12,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "foo",
+      "mode": "word",
+      "files": 31,
+      "candidates": 20,
+      "prefilter_used": true,
+      "matches": 15,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "FOO",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 20,
+      "prefilter_used": true,
+      "matches": 202,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "I",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 2,
+      "prefilter_used": true,
+      "matches": 3,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "k",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 2,
+      "prefilter_used": true,
+      "matches": 3,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "s",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 2,
+      "prefilter_used": true,
+      "matches": 3,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "aa",
+      "mode": "literal",
+      "files": 31,
+      "candidates": 17,
+      "prefilter_used": true,
+      "matches": 235,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "--",
+      "mode": "literal",
+      "files": 31,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": ".*",
+      "mode": "literal",
+      "files": 31,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "$",
+      "mode": "word",
+      "files": 31,
+      "candidates": 18,
+      "prefilter_used": true,
+      "matches": 7,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "_",
+      "mode": "word",
+      "files": 31,
+      "candidates": 18,
+      "prefilter_used": true,
+      "matches": 3,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "absent-pattern",
+      "mode": "literal",
+      "files": 31,
+      "candidates": 0,
+      "prefilter_used": true,
+      "matches": 0,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "한글",
+      "mode": "literal",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 197,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "é",
+      "mode": "literal",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 2,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "é",
+      "mode": "literal",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 172,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "^|foo",
+      "mode": "regex",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 427,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "(?<=foo)bar",
+      "mode": "regex",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "é",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 3,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "Ÿ",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 2,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "Σ",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 2,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "А",
+      "mode": "literal-fold",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 2,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "(foo)\\1",
+      "mode": "regex",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 17,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "valid",
+      "query": "(?=한)|$",
+      "mode": "regex",
+      "files": 31,
+      "candidates": 31,
+      "prefilter_used": false,
+      "matches": 442,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "raw",
+      "query": "needle",
+      "mode": "literal",
+      "files": 3,
+      "candidates": 3,
+      "prefilter_used": true,
+      "matches": 4,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    },
+    {
+      "corpus": "raw",
+      "query": "NEEDLE",
+      "mode": "literal-fold",
+      "files": 3,
+      "candidates": 3,
+      "prefilter_used": true,
+      "matches": 4,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true
+    },
+    {
+      "corpus": "raw",
+      "query": "foo",
+      "mode": "literal",
+      "files": 3,
+      "candidates": 1,
+      "prefilter_used": true,
+      "matches": 1,
+      "prefilter_equal": true,
+      "missing_files": [],
+      "baseline_equal": true,
+      "byte_equal": true
+    }
+  ],
+  "document_oracles": [
+    {
+      "file": "bom.txt",
+      "query": "needle",
+      "expected": {
+        "./bom.txt": [
+          [
+            0,
+            0,
+            6
+          ]
+        ]
+      },
+      "observed": {
+        "./bom.txt": [
+          [
+            0,
+            0,
+            6
+          ]
+        ]
+      }
+    },
+    {
+      "file": "bom.txt",
+      "query": "^needle$",
+      "expected": {
+        "./bom.txt": [
+          [
+            0,
+            0,
+            6
+          ]
+        ]
+      },
+      "observed": {
+        "./bom.txt": [
+          [
+            0,
+            0,
+            6
+          ]
+        ]
+      }
+    },
+    {
+      "file": "bom-only.txt",
+      "query": "^$",
+      "expected": {
+        "./bom-only.txt": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "observed": {
+        "./bom-only.txt": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "file": "double-cr.txt",
+      "query": "^needle$",
+      "expected": {},
+      "observed": {}
+    },
+    {
+      "file": "lone-cr.txt",
+      "query": "^needle$",
+      "expected": {},
+      "observed": {}
+    },
+    {
+      "file": "lone-cr.txt",
+      "query": "\\r$",
+      "expected": {
+        "./lone-cr.txt": [
+          [
+            0,
+            6,
+            1
+          ]
+        ]
+      },
+      "observed": {
+        "./lone-cr.txt": [
+          [
+            0,
+            6,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "file": "nul.txt",
+      "query": "needle",
+      "expected": {
+        "./nul.txt": [
+          [
+            0,
+            1,
+            6
+          ]
+        ]
+      },
+      "observed": {
+        "./nul.txt": [
+          [
+            0,
+            1,
+            6
+          ]
+        ]
+      }
+    }
+  ],
+  "native_sha256": "32cf7e17d4597e0d8f6d77d9cab378acc1189058cf31c496eb1d7305721528a3",
+  "rg_sha256": "7c7d5b09c3a57de864500c65dc2e9c4d2a5e96a3fc7b7d5318480c19887a739b",
+  "source_sha256": {
+    "native.zig": "ad26b575c5a862e946eb341555ca3c47f6d9e663224ea0b3014ed42cc3ab2572",
+    "compare.py": "2557e152c5df1e6311067b799575d5afb0c676b5d4958ff657c01b8926227d34",
+    "verify.py": "7c9b78034e2960666b3767300786ea1c74bf11ab5a71da28ee51e3d21cdfb615"
+  },
+  "limits": "합성 자료의 모든 범위 대조. raw 자료는 선별 누락 탐지용이며 제품의 바이너리·인코딩 지원을 뜻하지 않음.",
+  "baseline_native_sha256": "9de50d7b1b066f589d3417ef53d237c86824372f927c5edfa9b470b08c49c0bb",
+  "product_source_sha256": {
+    "src/session/editor/find.zig": "45a6c4c848417b85342bfda901c46d07a7b7db1653f3a2abc3867739eaa6dd9e",
+    "src/session/editor/document.zig": "f9558a6e28d44b2b931c862185e53c899c548f6f82f43efdd8787dd0403da092",
+    "src/session/editor/line_index.zig": "f43c8a437936d9f4d9ecd29b8ba533f251d775b9f0181c1538322c019dd9ca5d",
+    "src/terminal/selection.zig": "c7fbb398eb94a436b39858340b8c32769cdec17295928c18e4ebb4a6481a125d"
+  },
+  "invalid_document_rejected": true,
+  "invalid_query_matches": 0,
+  "baseline_source": {
+    "commit": "a6470cc6dc98d341a125a1004b0cd2b75ff15247",
+    "binary_sha256": "9de50d7b1b066f589d3417ef53d237c86824372f927c5edfa9b470b08c49c0bb",
+    "product_source_sha256": {
+      "src/session/editor/find.zig": "fe573bc153b121f42a846b24887c4f6e9cc480962020d5bb6832cbe434b19ae0",
+      "src/session/editor/document.zig": "f9558a6e28d44b2b931c862185e53c899c548f6f82f43efdd8787dd0403da092",
+      "src/session/editor/line_index.zig": "f43c8a437936d9f4d9ecd29b8ba533f251d775b9f0181c1538322c019dd9ca5d",
+      "src/session/editor/selection.zig": "672cdb7f51d48f32b05693a048dab13fb2e6fd2936560314ef8fc6ae5bafb1e2",
+      "src/terminal/selection.zig": "c7fbb398eb94a436b39858340b8c32769cdec17295928c18e4ebb4a6481a125d",
+      "src/regex.zig": "752798056e8eafa3affbfe81332c528b76cc33532790beb180cd5a609364df3e"
+    }
+  },
+  "negative_controls": {
+    "status": "passed",
+    "original_find_sha256": "45a6c4c848417b85342bfda901c46d07a7b7db1653f3a2abc3867739eaa6dd9e",
+    "controls": [
+      {
+        "name": "overlap",
+        "caught": true,
+        "find_sha256": "6857914ef82216e06e1baecdfccc53687985059caef8fd2612ea065728bd25f9",
+        "native_sha256": "8aa16cdb86cf3f0167c83c4ee02e06ded452aef6cfafc28cf863acd6b7dedf87",
+        "differences": [
+          {
+            "query": "aa",
+            "mode": "literal",
+            "corpus": "valid"
+          }
+        ],
+        "invalid_query_matches": 0
+      },
+      {
+        "name": "whole-word",
+        "caught": true,
+        "find_sha256": "30460f3f602c9e10de65974c594a16f884a95f7a034db22a15cd50837505eef8",
+        "native_sha256": "4b869df7e8bffd5be8045519ece6f74ab1b22873f0f9405e4aa75c14f289a1b8",
+        "differences": [
+          {
+            "query": "needle",
+            "mode": "word",
+            "corpus": "valid"
+          },
+          {
+            "query": "foo",
+            "mode": "word",
+            "corpus": "valid"
+          },
+          {
+            "query": "$",
+            "mode": "word",
+            "corpus": "valid"
+          },
+          {
+            "query": "_",
+            "mode": "word",
+            "corpus": "valid"
+          }
+        ],
+        "invalid_query_matches": 0
+      },
+      {
+        "name": "invalid-needle",
+        "caught": true,
+        "find_sha256": "e998f5d680918acdc2ad62e5d79dced25d16e703ad598a51aecc9e5d84d2699a",
+        "native_sha256": "003658e2ad17e8d3b98bfee775ff7648fc59cfeb47503099e42e964f1a46b040",
+        "differences": [],
+        "invalid_query_matches": 1
+      },
+      {
+        "name": "ascii-fold",
+        "caught": true,
+        "find_sha256": "8312c0c0a5565d925017ea2e5d0cd4d495643580d7c3d495938a48e4eeb75ee1",
+        "native_sha256": "a72c6b2c09877bfc9bb894428d52a2a7e5fc392d274d84f8feb43cc74394b25a",
+        "differences": [
+          {
+            "query": "NEEDLE",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          },
+          {
+            "query": "FOO",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          },
+          {
+            "query": "I",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          },
+          {
+            "query": "k",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          },
+          {
+            "query": "s",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          },
+          {
+            "query": "NEEDLE",
+            "mode": "literal-fold",
+            "corpus": "raw"
+          }
+        ],
+        "invalid_query_matches": 0
+      },
+      {
+        "name": "unicode-fold",
+        "caught": true,
+        "find_sha256": "f78cff897549abdb58ca3a112846395234d4c971ab05e46be01c1ce78afc8e38",
+        "native_sha256": "3c8f9a42d275130f37a34821b4c1096b0bae638ac11ad5e40b79509e06f30a49",
+        "differences": [
+          {
+            "query": "é",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          },
+          {
+            "query": "Ÿ",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          },
+          {
+            "query": "Σ",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          },
+          {
+            "query": "А",
+            "mode": "literal-fold",
+            "corpus": "valid"
+          }
+        ],
+        "invalid_query_matches": 0
+      }
+    ]
+  }
+}

@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 209), abi_version);
+    try std.testing.expectEqual(@as(u32, 210), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -4989,6 +4989,15 @@ pub export fn maru_macos_app_session_osr_context_menu_item(
     if (out_label) |o| @memcpy(o[0..text.len], text);
     if (out_label_len) |p| p.* = text.len;
     return 1;
+}
+
+/// v210(W6h②): 띄운 메뉴 항목의 체크 표시(연속 재생·모든 제어 기능 표시의 지금 상태) — 켜져 있으면 1. 그 메뉴가 아니거나 범위
+/// 밖이면 0.
+pub export fn maru_macos_app_session_osr_context_menu_item_checked(session: ?*AppSession, menu: u32, index: u32) i32 {
+    const app = session orelse return 0;
+    const m = session_mod.web_ops.osrContextMenuShown(app, menu) orelse return 0;
+    if (index >= m.items.len) return 0;
+    return @intFromBool(m.items.items[index].checked);
 }
 
 /// v204(W6c②): 띄운 메뉴의 선택한 글(찾기·음성·서비스 — UTF-8, `cap` 에서 글자 경계로 자른다). 그 메뉴가 아니면 0.

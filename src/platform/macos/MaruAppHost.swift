@@ -10006,6 +10006,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 item.target = self
                 item.tag = Int(kind) * 256 + Int(command)
                 item.isEnabled = enabled != 0
+                // W6h②: 연속 재생·모든 제어 기능 표시의 지금 상태.
+                if maru_macos_app_session_osr_context_menu_item_checked(session, token, UInt32(index)) == 1 { item.state = .on }
                 if kind == 5 { item.isEnabled = osrSpeech?.isSpeaking == true } // 말하기 중지 — 말하는 중에만
             }
             target.addItem(item)
@@ -10141,6 +10143,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         menu.items.map { item -> String in
             if item.isSeparatorItem { return "—" }
             var text = item.title
+            if item.state == .on { text += "✓" }
             if let sub = item.submenu { text += "▸[" + describeOsrMenu(sub) + "]" }
             if item.submenu == nil, !item.isEnabled { text += "(off)" }
             return text

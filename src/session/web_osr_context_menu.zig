@@ -9,7 +9,9 @@
 //! - 선택한 글: '…' 찾기 — 복사 · 「…에서 '…' 검색」 — 음성 ▸ — 서비스 ▸
 //! - 입력 칸: ('…' 찾기 —) 그림 이모티콘 & 기호 — 실행 취소 · 다시 실행 — 잘라내기 · 복사 · 붙여넣기 · 붙여넣고 스타일 일치시킴 ·
 //!   모두 선택 (— 검색 — 음성 ▸ — 서비스 ▸) — 편집 항목은 할 수 없으면 꺼 둔다(Chrome 과 같다)
-//! - 이미지가 아닌 미디어(동영상 등): 항목 없음(Chrome 의 미디어 항목은 아직 없다) — 메뉴를 띄우지 않는다
+//! - 동영상·오디오(W6h②): 연속 재생 ✓ · 모든 제어 기능 표시 ✓ — 새 탭에서 동영상(오디오) 열기 · 동영상(오디오) 주소 복사.
+//!   체크 표시는 지금 상태, 켜고 끌 수 없으면 꺼 둔다(오디오의 제어 기능 — Chrome 154 실측). 동영상 프레임 복사·PIP·저장은 뺀다
+//!   (사용자 결정 2026-10-05 — §7). 그 밖의 미디어(canvas·플러그인): 항목 없음 — 메뉴를 띄우지 않는다
 //!
 //! W6h① 이 더한 것(Chrome 154 한국어 메뉴 재실측 2026-10-05 — 접근성 API): 새 창에서 링크 열기(maru 는 새 창의 웹 탭), 새 탭에서
 //! 이미지 열기, 선택한 글 검색(설정 `browser.search-url` — `web_search`). 시크릿·분할 뷰·저장·인쇄·검사·하이라이트 링크·번역·렌즈는
@@ -49,6 +51,8 @@ pub const Item = struct {
     enabled: bool = true,
     /// 0 은 메뉴, 1 은 바로 앞 하위 메뉴 머리(`speech`) 안.
     depth: u8 = 0,
+    /// 체크 표시(W6h② — 연속 재생·모든 제어 기능 표시의 지금 상태).
+    checked: bool = false,
     /// 정해진 문구. `look_up`·`search` 는 null(선택한 글로 만든다 — `lookUpLabel`·`searchLabel`), `separator` 도 null.
     label: ?i18n.Key = null,
 };
@@ -77,6 +81,10 @@ pub const Menu = struct {
 
     fn command(self: *Menu, flags: Flags, cmd: Command, label: i18n.Key) void {
         self.push(.{ .kind = .command, .command = cmd, .enabled = message.contextMenuAllows(flags, cmd), .label = label });
+    }
+
+    fn check(self: *Menu, flags: Flags, cmd: Command, label: i18n.Key, checked: bool) void {
+        self.push(.{ .kind = .command, .command = cmd, .enabled = message.contextMenuAllows(flags, cmd), .label = label, .checked = checked });
     }
 
     fn speechAndServices(self: *Menu) void {
@@ -114,6 +122,14 @@ pub fn build(flags: Flags, visible_text: bool) Menu {
             menu.push(.{ .kind = .search });
         }
         if (flags.selection) menu.speechAndServices();
+    } else if (flags.media_video or flags.media_audio) {
+        // W6h②: Chrome 154 의 미디어 메뉴(재실측 2026-10-05) — 페이지 항목(뒤로 등)은 내지 않는다.
+        const video = flags.media_video;
+        menu.check(flags, .media_loop, .web_menu_media_loop, flags.media_loop);
+        menu.check(flags, .media_controls, .web_menu_media_controls, flags.media_controls);
+        menu.separator();
+        menu.command(flags, .open_media_new_tab, if (video) .web_menu_open_video_new_tab else .web_menu_open_audio_new_tab);
+        menu.command(flags, .copy_media_address, if (video) .web_menu_copy_video_address else .web_menu_copy_audio_address);
     } else {
         if (flags.link) {
             // Chrome 처럼 링크 열기가 먼저(W6e — 뒤 탭, W6h① — 새 창). http·https 가 아닌 링크(`mailto:` 등)면 꺼 둔다.
@@ -319,6 +335,25 @@ test "a selection outside inputs is look up — copy · search — speech — se
     try std.testing.expectEqual(@as(usize, 0), build(.{ .media = true, .can_go_back = true }, true).len);
 }
 
+test "a video is loop · show all controls (checked by state, off when they cannot change) — open in new tab · copy address; audio says audio (W6h②)" {
+    var buf: [max_items]Kind = undefined;
+    const video = build(.{ .media = true, .media_video = true, .media_loop = true, .media_can_loop = true, .media_can_toggle_controls = true, .media_openable = true, .media_copyable = true, .can_go_back = true }, true);
+    try std.testing.expectEqualSlices(Kind, &.{ .command, .command, .separator, .command, .command }, kinds(video, &buf));
+    try std.testing.expectEqual(Command.media_loop, video.items[0].command);
+    try std.testing.expect(video.items[0].checked and video.items[0].enabled);
+    try std.testing.expectEqual(Command.media_controls, video.items[1].command);
+    try std.testing.expect(!video.items[1].checked and video.items[1].enabled);
+    try std.testing.expectEqual(i18n.Key.web_menu_open_video_new_tab, video.items[3].label.?);
+    try std.testing.expectEqual(i18n.Key.web_menu_copy_video_address, video.items[4].label.?);
+    try std.testing.expect(find(video, .back) == null);
+    // 오디오 — 제어 기능을 끌 수 없으면 꺼 둔다(켜져 있으면 체크는 남는다), `blob:` 처럼 열고 복사할 수 없으면 꺼 둔다.
+    const audio = build(.{ .media = true, .media_audio = true, .media_can_loop = true, .media_controls = true }, true);
+    try std.testing.expect(audio.items[1].checked and !audio.items[1].enabled);
+    try std.testing.expectEqual(i18n.Key.web_menu_open_audio_new_tab, audio.items[3].label.?);
+    try std.testing.expect(!audio.items[3].enabled and !audio.items[4].enabled);
+    for (build(.{ .link = true, .selection = true, .can_copy = true }, true).slice()) |item| try std.testing.expect(!item.checked);
+}
+
 test "no flag combination makes a leading, trailing or doubled separator or overflows the list" {
     var bits: u32 = 0;
     while (bits < (1 << 17)) : (bits += 1) { // 16 번 비트 `image_openable`(W6h①)까지 모두
@@ -327,6 +362,23 @@ test "no flag combination makes a leading, trailing or doubled separator or over
         if (flags.selection_truncated and !flags.selection) continue;
         if (flags.link_openable and !flags.link) continue;
         if (flags.image_openable and !flags.image) continue;
+        try checkMenu(flags);
+    }
+    // W6h② 미디어 비트(17~24) — 미디어와 둘 중 하나와 함께만, 나머지 낮은 비트는 몇 꼴로.
+    var media: u32 = 0;
+    while (media < (1 << 8)) : (media += 1) {
+        for ([_]u32{ 0, 1 << 3, (1 << 3) | (1 << 13), (1 << 3) | (1 << 4) | (1 << 10) }) |low| {
+            var flags: Flags = @bitCast(low | (media << 17));
+            if (flags.media_video and flags.media_audio) continue;
+            flags.media = true;
+            if (!flags.media_video and !flags.media_audio and media >> 2 != 0) continue;
+            try checkMenu(flags);
+        }
+    }
+}
+
+fn checkMenu(flags: Flags) !void {
+    {
         for ([_]bool{ true, false }) |visible_text| { // 보이는 글이 없는 선택(찾기·검색 없음)도
             const menu = build(flags, visible_text);
             const items = menu.slice();
@@ -336,6 +388,7 @@ test "no flag combination makes a leading, trailing or doubled separator or over
             for (items) |item| {
                 if (item.kind == .command) try std.testing.expectEqual(message.contextMenuAllows(flags, item.command), item.enabled);
                 if (item.kind == .search) try std.testing.expect(flags.selection and visible_text);
+                if (item.checked) try std.testing.expect(item.command == .media_loop or item.command == .media_controls);
             }
         }
     }

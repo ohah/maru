@@ -2244,3 +2244,104 @@ test "healthy recovery retains resync behind blocked outbound input" {
     try std.testing.expectEqualStrings("{\"action\":\"resync\"}", ack.payload);
     try std.testing.expect((try parser.next()) == null);
 }
+
+test "healthy recovery coalesces repeated invalidation and preserves sibling routing" {
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var screen = session_host.screen_assembler.ScreenAssembler.initForCodec(allocator, client.screen_codec_version);
+    defer screen.deinit();
+    var resync_needed = false;
+    var drained_bytes: u64 = 0;
+    for ([_]u64{ 7, 8, 7 }) |stream| {
+        const event = try session_host.framing.encodeFrame(allocator, .{ .kind = .event, .stream_id = stream }, "{\"event\":\"snapshot.invalidated\"}");
+        defer allocator.free(event);
+        try std.testing.expectEqual(@as(isize, @intCast(event.len)), c.write(fds[1], event.ptr, event.len));
+    }
+    try std.testing.expect(!try pumpHealthy(&client, 7, &screen, &resync_needed, &drained_bytes));
+    var wire: [256]u8 = undefined;
+    const n = c.recv(fds[1], &wire, wire.len, c.MSG.DONTWAIT);
+    try std.testing.expect(n > 0);
+    var parser = session_host.framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    try parser.push(wire[0..@intCast(n)]);
+    const ack = (try parser.next()) orelse return error.TestUnexpectedResult;
+    defer ack.deinit(allocator);
+    try std.testing.expectEqual(session_host.protocol.Kind.stream_ack, ack.header.kind);
+    try std.testing.expectEqual(@as(u64, 7), ack.header.stream_id);
+    try std.testing.expect((try parser.next()) == null);
+    // Stream 7 must not consume stream 8's recovery authority while sharing the same socket.
+    const sibling = (try client.takeEventForStream(8)) orelse return error.TestUnexpectedResult;
+    defer client.releaseEvent(sibling);
+    try std.testing.expectEqualStrings("{\"event\":\"snapshot.invalidated\"}", sibling.payload);
+    try std.testing.expect((try client.takeEventForStream(7)) == null);
+}
+
+test "healthy pump frees received batches on recovery and decoder errors" {
+    // This gate runs in ReleaseFast, whose default test allocator does not report leaks. Own
+    // an explicit checked allocator so removing either batch cleanup is observable in CI too.
+    var checked: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+    defer std.testing.expect(checked.deinit() == .ok) catch @panic("healthy pump leaked a received batch");
+    const allocator = checked.allocator();
+    // A terminal control event and a completed batch can arrive in one RX turn. The batch must
+    // be freed even if event handling rejects the turn before the assembler sees it.
+    for ([_]bool{ true, false }) |ended| {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var client: session_host.client.Client = .{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = session_host.framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        var screen = session_host.screen_assembler.ScreenAssembler.initForCodec(allocator, client.screen_codec_version);
+        defer screen.deinit();
+        var resync_needed = false;
+        var drained_bytes: u64 = 0;
+        if (ended) {
+            const event = try session_host.framing.encodeFrame(allocator, .{ .kind = .event, .stream_id = 7 }, "{\"event\":\"runtime.ended\"}");
+            defer allocator.free(event);
+            try std.testing.expectEqual(@as(isize, @intCast(event.len)), c.write(fds[1], event.ptr, event.len));
+        }
+        const batch = try session_host.framing.encodeFrame(allocator, .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = session_host.protocol.Flags.end_stream,
+        }, "bad");
+        defer allocator.free(batch);
+        try std.testing.expectEqual(@as(isize, @intCast(batch.len)), c.write(fds[1], batch.ptr, batch.len));
+        try std.testing.expectError(if (ended) error.HealthyObserverEnded else error.Truncated, pumpHealthy(&client, 7, &screen, &resync_needed, &drained_bytes));
+        try std.testing.expectEqual(@as(u64, if (ended) 0 else 3), drained_bytes);
+    }
+}
+
+test "healthy recovery fail closes disconnected ACK instead of silently clearing intent" {
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    var client: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    // The production connector sets this option; a raw socketpair must establish it explicitly.
+    const one: c_int = 1;
+    try std.testing.expectEqual(@as(c_int, 0), c.setsockopt(fds[0], posix.SOL.SOCKET, posix.SO.NOSIGPIPE, &one, @sizeOf(c_int)));
+    try std.testing.expectEqual(@as(c_int, 0), c.close(fds[1]));
+    var resync_needed = true;
+    try std.testing.expectError(error.WriteFailed, pumpHealthyRecovery(&client, 7, &resync_needed));
+    try std.testing.expect(resync_needed);
+    try std.testing.expect(client.unusable);
+}

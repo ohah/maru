@@ -948,9 +948,17 @@ pub fn testHold(gpa: std.mem.Allocator, surface_id: u64) !void {
     try surfaces.put(gpa, surface_id, .{ .record = .{ .surface_id = surface_id, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false } });
 }
 
+/// 시험 전용(W6j): 엔진이 돌고 그 탭의 브라우저가 만들어진 것으로 친다 — 보낸 것은 버려진다(sidecar 없음). 되돌리기는 `testForget`.
+pub fn testRunning(surface_id: u64) void {
+    if (!builtin.is_test) @compileError("test only");
+    state = .running;
+    if (surfaces.getPtr(surface_id)) |s| s.created = true;
+}
+
 pub fn testForget(gpa: std.mem.Allocator) void {
     if (!builtin.is_test) @compileError("test only");
     decided = null;
+    state = .off;
     if (surfaces.count() == 0) {
         surfaces.deinit(gpa);
         surfaces = .empty;

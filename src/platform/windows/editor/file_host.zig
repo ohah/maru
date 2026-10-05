@@ -17,6 +17,13 @@ extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32
 const native_open = @import("native_open.zig");
 const acceptsVolume = native_open.acceptsVolume;
 
+/// App focus-close remains an app action in an editor; never turn an explicit
+/// unbind/macro/release or an editor context action into a close gesture.
+pub fn closeKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru.terminal.KeyEvent) bool {
+    const resolved = resolver.resolveEditorDetailed(event, false);
+    return resolved == .app_action and resolved.app_action == .close_focused;
+}
+
 pub fn saveKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru.terminal.KeyEvent) bool {
     const original = resolver.resolveEditor(event, false);
     switch (original) {
@@ -1524,4 +1531,23 @@ test "Windows editor host rejects altered prepared body format and authority bef
     result.file = prepared;
     try std.testing.expect(!result.consumed and result.snapshot.?.owned);
     try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
+}
+
+test "Windows editor host focused close honors resolver ownership and release" {
+    const k = maru.config.keybinding;
+    const key: maru.terminal.KeyEvent = .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } };
+    try std.testing.expect(closeKey(.{}, key));
+    var released = key;
+    released.event_type = .release;
+    try std.testing.expect(!closeKey(.{}, released));
+    var shell = key;
+    shell.modifiers = .{ .control = true };
+    try std.testing.expect(!closeKey(.{}, shell));
+    const chord = try k.KeyChord.parse("Cmd+W");
+    const blocked: k.KeyBindingResolver = .{ .unbinds = &.{chord} };
+    try std.testing.expect(!closeKey(blocked, key));
+    const redirected: k.KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = chord, .action = .editor_save }} };
+    try std.testing.expect(!closeKey(redirected, key));
+    const custom: k.KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = try k.KeyChord.parse("Ctrl+W"), .action = .close_focused }} };
+    try std.testing.expect(closeKey(custom, shell));
 }

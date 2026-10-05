@@ -12280,3 +12280,18 @@ exact BOM/Xbase/CRLF, 백업 삭제와 exit code 0을 확인했다. synthetic ow
 backup worker 22개가 Debug/ReleaseFast에서 통과했다. caption 순서는 실앱 pending
 계측으로 검증하며 단순 순서 조건을 복사한 unit test를 추가하지 않았다.
 전체 잔여 Windows 지원·후속 편집/복구 CPU와 플랫폼 결합 범위는 계속 남아 있다.
+
+### §2m.197 Windows 파일 편집 중 focused close 단축키
+
+기존 resolver의 close_focused 액션을 파일 편집 경로에서 처리한다. Windows 기본
+Ctrl+Shift+W는 공통 command+W 바인딩을 사용하며 Ctrl+W 셸 입력과 명시적
+unbind·재바인딩·release 소유권을 보존한다. 사이드바 X와 같은 닫기 요청 함수를
+사용해 dirty 문서는 새 확인을 받고 clean 요청은 중복 없는 FIFO에서 재검증한다.
+다른 전역 액션 및 비교 패널의 단축키 연결은 여전히 후속 범위다.
+
+실앱 PID 13352에서 단축키로 닫기 확인, 취소 후 Xbase 유지, 다시 Save하여
+파일만 닫히고 터미널 유지, exact BOM/Xbase/CRLF와 정상 종료 코드 0을 확인했다.
+owned HWND 합성 입력이며 물리 키보드·IME 장기 검증으로 세지 않는다. dispatch
+차단·resolver 무시·이전 consent 유지·중복 요청·dirty 확인 누락의 다섯 compiled
+runtime 변형을 검출했다. 복원 후 host 83개와 backup worker 23개가 Debug와
+ReleaseFast에서 통과했다.

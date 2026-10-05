@@ -4850,6 +4850,18 @@ fn beginFileCloseSave(book: *file_host.Book, views: []OpenFile, target: FileClos
 
 // A confirmed clean close must wait for native backup deletion. Reuse the
 // immutable worker and its latest clean vote; never delete on the UI thread.
+fn requestFileViewClose(allocator: std.mem.Allocator, book: *file_host.Book, lease: maru.session.editor.document_registry.Lease, queue: *std.ArrayList(maru.session.editor.document_registry.Lease), pending: *?FileCloseTarget, conflict: *?maru.session.editor.document_registry.Lease, confirm: *maru.chrome.components.confirm.State, action: *?maru.chrome.components.confirm.Action) !void {
+    book.requireClose(lease, false) catch |failure| {
+        if (failure != error.DirtyDocument) return failure;
+        conflict.* = null;
+        pending.* = .{ .file = lease };
+        beginFileClose(confirm, action);
+        return;
+    };
+    for (queue.items) |previous| if (previous.owner == lease.owner and previous.id == lease.id) return;
+    try queue.append(allocator, lease);
+}
+
 fn prepareFileCloseBackup(io: std.Io, worker: *BackupWorker, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, now_ns: i128, retrying: bool, discard: bool) !bool {
     if (worker.isBusy()) return false;
     const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
@@ -11773,6 +11785,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         }
                         continue;
                     }
+                    if (file_host.closeKey(resolver, key_ev)) {
+                        requestFileViewClose(allocator, &editor_files, file_view.document, &backup_clean_closes, &pending_file_close, &pending_file_conflict, &confirm_state, &confirm_pending_click) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                        pending_close_id = null;
+                        app_actions += 1;
+                        continue;
+                    }
                     if (file_host.saveKey(resolver, key_ev)) {
                         const started = editor_files.beginSave(file_view.document, 4 << 20) catch |err| {
                             file_notice.show(maru.i18n.t(fileSaveNotice(err)));
@@ -12316,22 +12334,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     if (src == .file) {
                                         const fi = src.file;
                                         if (fi < open_files.items.len) {
-                                            editor_files.requireClose(open_files.items[fi].document, false) catch |err| {
-                                                if (err == error.DirtyDocument) {
-                                                    pending_file_conflict = null;
-                                                    pending_file_close = .{ .file = open_files.items[fi].document };
-                                                    pending_close_id = null;
-                                                    beginFileClose(&confirm_state, &confirm_pending_click);
-                                                } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
-                                                break :close_blk;
-                                            };
-                                            const lease = open_files.items[fi].document;
-                                            var queued = false;
-                                            for (backup_clean_closes.items) |previous| if (previous.owner == lease.owner and previous.id == lease.id) {
-                                                queued = true;
-                                                break;
-                                            };
-                                            if (!queued) backup_clean_closes.append(allocator, lease) catch |failure| file_notice.show(maru.i18n.t(fileSaveNotice(failure)));
+                                            requestFileViewClose(allocator, &editor_files, open_files.items[fi].document, &backup_clean_closes, &pending_file_close, &pending_file_conflict, &confirm_state, &confirm_pending_click) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                                            pending_close_id = null;
                                             break :close_blk;
                                         }
                                     } else {
@@ -20793,5 +20797,31 @@ test "Windows recovery backup worker post-claim edit revokes discard intent and 
     const state = f.documents.get(lease).?;
     try std.testing.expect(state.notifications.backup_dirty and !state.notifications.backup_on_disk);
     try std.testing.expectEqualStrings("XYbase\r\n", state.opened.?.file.content);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker focus close shares dirty consent and clean FIFO" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const lease = f.views.items[0].document;
+    var queue: std.ArrayList(maru.session.editor.document_registry.Lease) = .empty;
+    defer queue.deinit(a);
+    var target: ?FileCloseTarget = null;
+    var conflict: ?maru.session.editor.document_registry.Lease = null;
+    var confirm: maru.chrome.components.confirm.State = .{};
+    var action: ?maru.chrome.components.confirm.Action = null;
+    try requestFileViewClose(a, &f.book, lease, &queue, &target, &conflict, &confirm, &action);
+    try requestFileViewClose(a, &f.book, lease, &queue, &target, &conflict, &confirm, &action);
+    try std.testing.expectEqual(@as(usize, 1), queue.items.len);
+    try std.testing.expect(!confirm.open and target == null);
+    queue.clearRetainingCapacity();
+    try f.editAndBackup();
+    action = .alternate;
+    try requestFileViewClose(a, &f.book, lease, &queue, &target, &conflict, &confirm, &action);
+    try std.testing.expect(confirm.open and target != null and action == null);
+    try std.testing.expectEqual(@as(usize, 0), queue.items.len);
+    try std.testing.expect(f.documents.get(lease).?.opened.?.isDirty());
     try f.expectDisk("\xef\xbb\xbfbase\r\n");
 }

@@ -150,6 +150,12 @@ class H(http.server.BaseHTTPRequestHandler):
             # W6i: 페이지마다 다른 번호로 0.3 초마다 `/ev` 를 보낸다(닫힌 창의 페이지가 아직 도는지 본다).
             body = (b"<!doctype html><title>tick</title><body>tick<script>var p=Math.random().toString(36).slice(2,8);"
                     b"setInterval(function(){new Image().src='/ev?e=tick&p='+p+'&t='+Date.now()},300)</script>")
+        elif self.path.startswith("/unload-app"):
+            # W6j: 0.3 초마다 `/ev` 를 보내고, 클릭하면 떠나기 확인을 건다(`?hang` 이면 그 처리기가 6 초 멈춘다).
+            hang = b"var t=Date.now();while(Date.now()-t<6000);" if "hang" in self.path else b""
+            body = (b"<!doctype html><title>unload</title><body style='margin:0;height:100%'>unload<script>var p=Math.random().toString(36).slice(2,8);"
+                    b"function ping(q){new Image().src='/ev?'+q+'&p='+p+'&t='+Date.now()}setInterval(function(){ping('e=tick')},300);"
+                    b"addEventListener('click',function(){window.onbeforeunload=function(e){" + hang + b"e.preventDefault();e.returnValue='x';return 'x'};ping('e=armed')});</script>")
         elif self.path == "/img/cat.png":
             # W6d③: 끌어내 파일로 만들 이미지(48×48 빨간 PNG).
             body = base64.b64decode(CAT_PNG)
@@ -968,6 +974,112 @@ before = {p for p, t in ticks if t < close}
 after = {p for p, t in ticks if close + 1500 < t <= end}
 check(len(first) == 1 and len(before) == 2 and after == first,
       f'both pages ran while the windows were open and only the first window page runs after closing the second ({len(first)} first · {len(before)} before · {len(after)} after, kept the first {after == first} · {len(ticks)} requests)')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6j: 탭 닫기의 떠나기 확인 ───────────────────────────────────────────────────────────────────────────────
+# 웹 탭 하나를 닫으면 maru 확인(「닫을까요?」)이 먼저 뜨고, 받으면 페이지에 묻는다 — 떠나기 확인을 건 페이지면 「나가시겠습니까?」를 한 번
+# 더(W5a sheet), 머무르기면 탭이 남는다(사용자 결정 2026-10-05 — 둘 다, 탭 하나만). 처리기가 없으면 묻지 않고 닫히고, 처리기가 멈추면
+# maru 가 2 초 뒤 강제로 닫는다. ⌘W 는 터미널 view 로 넣고(대본 `key`), maru 확인은 Enter 로 받는다.
+printf 'ui.language = ko\n' > "$root/unload.conf"
+unload_run() { # $1=이름 $2=경로 $3=대본
+    printf '%s\n' "$3" > "$root/unload-$1.txt"
+    : > "$root/requests.log"
+    run_app "$2" 22000 "$root/unload-$1.summary" MARU_WEB_OSR_TEST_INPUT="$root/unload-$1.txt" MARU_CONFIG="$root/unload.conf"
+    # 보고 줄은 요약 출력과 한 줄에 섞일 수 있다 — 줄 중간에서도 찾는다.
+    grep -ao 'osr-test \(pageclose [a-z_]*\|overlay [a-z]*\|mark [a-z0-9]* [0-9]*\|sheet [^|]*|[^|]*\)' "$root/app-${2#/}.log" > "$root/unload-$1.report" || true
+    cp "$root/requests.log" "$root/unload-$1.requests"
+    cat "$root/unload-$1.report"
+}
+unload_run ask /unload-app "sleep 7000
+view down 0.5 0.5 0 0
+view up 0.5 0.5 0 0
+sleep 1000
+view down 0.5 0.5 0 0
+view up 0.5 0.5 0 0
+sleep 800
+mark close1
+key 13 U+77 U+77 32
+sleep 700
+overlay
+key 36 U+D
+sleep 1500
+sheet
+sheet-answer 1
+sleep 2000
+mark close2
+key 13 U+77 U+77 32
+sleep 700
+key 36 U+D
+sleep 1500
+sheet
+sheet-answer 0
+sleep 3000
+mark end"
+unload_run plain /unload-app?plain "sleep 7000
+mark close1
+key 13 U+77 U+77 32
+sleep 700
+overlay
+key 36 U+D
+sleep 2500
+sheet
+mark end"
+unload_run hang /unload-app?hang "sleep 7000
+view down 0.5 0.5 0 0
+view up 0.5 0.5 0 0
+sleep 1000
+view down 0.5 0.5 0 0
+view up 0.5 0.5 0 0
+sleep 800
+mark close1
+key 13 U+77 U+77 32
+sleep 700
+key 36 U+D
+sleep 1000
+sheet
+sleep 2500
+mark end"
+python3 - "$root" <<'PY' || fail "closing a web tab did not ask the page as expected"
+import sys
+root = sys.argv[1]
+def load(name):
+    report = [l.strip() for l in open(f'{root}/unload-{name}.report')]
+    events = []
+    for l in open(f'{root}/unload-{name}.requests'):
+        if l.startswith('/ev?'):
+            events.append(dict(kv.split('=', 1) for kv in l.strip().split('?', 1)[1].split('&') if '=' in kv))
+    marks = {l.split()[2]: int(l.split()[3]) for l in report if l.startswith('osr-test mark ')}
+    return report, events, marks
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+def closes(report): return [l.split()[2] for l in report if l.startswith('osr-test pageclose ')]
+def sheets(report): return [l for l in report if l.startswith('osr-test sheet ')]
+def leave_sheet(line): return line.startswith('osr-test sheet alert ') and ('나가시겠습니까' in line or 'Leave site?' in line)
+
+report, events, marks = load('ask')
+s = sheets(report)
+ticks_between = [e for e in events if e.get('e') == 'tick' and marks.get('close1', 0) + 3000 < int(e['t']) < marks.get('close2', 0)]
+check('osr-test overlay true' in report and closes(report)[:3] == ['asked', 'stayed', 'asked'] and len(s) >= 1 and leave_sheet(s[0])
+      and any(e.get('e') == 'armed' for e in events) and len(ticks_between) >= 3,
+      f'closing a web tab whose page set a leave confirmation shows the maru confirm, then the page question; Stay keeps the tab running ({closes(report)} · {s[:1]} · {len(ticks_between)} ticks after staying)')
+# 닫힌 뒤에는 0.3 초 신호가 끊긴다(떠나기는 close2 + 약 2.2 초).
+late = [e for e in events if e.get('e') == 'tick' and int(e['t']) > marks.get('close2', 0) + 3500]
+check(closes(report) == ['asked', 'stayed', 'asked', 'closed'] and len(s) == 2 and leave_sheet(s[1]) and marks.get('end') and not late,
+      f'closing again and choosing Leave closes the tab ({closes(report)} · {len(s)} sheets · {len(late)} ticks after it closed)')
+
+report, events, marks = load('plain')
+late = [e for e in events if e.get('e') == 'tick' and int(e['t']) > marks.get('close1', 0) + 2500]
+check('osr-test overlay true' in report and closes(report) == ['asked', 'closed'] and sheets(report)[-1:] and sheets(report)[-1].startswith('osr-test sheet none')
+      and marks.get('end') and not late,
+      f'a page without a leave confirmation closes after the maru confirm without a second question ({closes(report)} · {sheets(report)} · {len(late)} ticks after it closed)')
+
+report, events, marks = load('hang')
+check(closes(report) == ['asked', 'timed_out'] and sheets(report)[-1:] and sheets(report)[-1].startswith('osr-test sheet none'),
+      f'a page whose leave handler hangs is closed by maru after the wait, without a question ({closes(report)} · {sheets(report)})')
 sys.exit(0 if ok else 1)
 PY
 

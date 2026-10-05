@@ -61350,6 +61350,19 @@ test "전체 리셋 전파: 감시 경로만으로는 다른 창의 스크롤백
     try std.testing.expect(!settings_ops.configFileChanged(c));
 }
 
+// 전체 리셋은 모든 창의 열린 터미널 스크롤백을 기본 길이로 줄여 넘치는 기록을 지운다(#4158) — 확인 문구가 그것을 말해야
+// 사용자가 알고 고른다. 그런데 확인 모달은 메시지를 **한 줄(row 0)로만** 그리고 줄바꿈이 없어, 창 폭에서 잘리면 끝의
+// 「계속할까요?」가 안 보인다(첫 시안은 149·179 칸이었다 — 2026-10-05). 그래서 폭 상한도 함께 잰다.
+test "전체 리셋 확인 문구는 스크롤백 기록이 지워진다고 말하고, 모달 한 줄 폭을 지킨다" {
+    for ([_]maru.i18n.Lang{ .en, .ko }) |lang| {
+        const message = maru.i18n.tIn(lang, .app_reset_confirm);
+        try std.testing.expect(chrome.components.overlay_input.displayCols(message) <= 90);
+        try std.testing.expect(std.mem.indexOf(u8, message, "config") != null); // 파일 덮어쓰기도 그대로 말한다
+    }
+    try std.testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .app_reset_confirm), "스크롤백") != null);
+    try std.testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .app_reset_confirm), "scrollback") != null);
+}
+
 // write-back 은 원본을 못 읽으면 **쓰지 않는다**(빈 원본으로 보고 바뀐 키만 남겨 덮었다), 심볼릭 링크면 실제 파일에 쓴다.
 test "config write-back: 못 읽는 원본은 덮지 않고, 심볼릭 링크는 끊지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

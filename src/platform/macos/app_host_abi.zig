@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 194), abi_version);
+    try std.testing.expectEqual(@as(u32, 195), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -592,6 +592,26 @@ test "AR1 config 자동 reload 감시: 폴링 없이 FSEvents 와 앱 활성화�
 
 test "config_file_changed ABI: 세션이 없으면 아무것도 안 한다 (v194)" {
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_config_file_changed(null));
+}
+
+test "reload_config_following_menu ABI: 세션이 없으면 아무것도 안 한다 (v195)" {
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_reload_config_following_menu(null));
+}
+
+// 메뉴 Reload Config 는 활성 창 하나만 읽었다 — 자동 reload 를 끈 사용자의 다른 창은 옛 설정에 남았다(2026-10-05).
+test "메뉴 Reload Config: 활성 창은 강제로 읽고, 나머지 창과 퀵 터미널은 Zig 판정으로 따라온다 (v195)" {
+    const source = try swiftCodeWithoutComments(std.testing.allocator, @embedFile("MaruAppHost.swift"));
+    defer std.testing.allocator.free(source);
+    const menu = try swiftFunctionBody(source, "    @objc private func menuReloadConfig(_ sender: Any?) {");
+    const forced = std.mem.indexOf(u8, menu, "_ = maru_macos_app_session_reload_config(session)") orelse return error.MissingForcedReload;
+    const all = std.mem.indexOf(u8, menu, "var sessions = windows.compactMap(\\.appSession)") orelse return error.MissingSessions;
+    const quick_add = std.mem.indexOf(u8, menu, "if let quickSession = quick?.appSession { sessions.append(quickSession) }") orelse return error.MissingQuick;
+    const loop = std.mem.indexOf(u8, menu, "for other in sessions where other != session {") orelse return error.MissingLoop;
+    const follow = std.mem.indexOf(u8, menu, "maru_macos_app_session_reload_config_following_menu(other)") orelse return error.MissingFollow;
+    const refresh = std.mem.indexOf(u8, menu, "refreshFilePanelSyntaxTheme()") orelse return error.MissingRefresh;
+    try std.testing.expect(forced < all and all < quick_add and quick_add < loop and loop < follow and follow < refresh);
+    // 따라오는 경로는 메뉴 한 곳뿐이다 — 자동 reload(config_file_changed)와 섞이지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "maru_macos_app_session_reload_config_following_menu("));
 }
 
 test "CR0b AppHost termination transcript는 session settlement 뒤 incident ABI를 exact 한 번 호출한다" {
@@ -3020,6 +3040,14 @@ pub export fn maru_macos_app_session_option_as_meta(session: ?*AppSession) u32 {
 pub export fn maru_macos_app_session_config_file_changed(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
     return if (app_session.configFileChanged()) 1 else 0;
+}
+
+// 메뉴 Reload Config 를 활성 창이 아닌 창(과 퀵 터미널)에 퍼뜨린다 — 활성 창은 `reload_config` 가 강제로 다시 읽는다.
+// 규칙(auto-reload 무관·쓰지 않은 편집은 미룸·같은 내용은 무동작)은 Zig `reloadConfigFollowingMenu` 가 단일 출처.
+// 다시 읽었으면 1. 세션 null=0. (v195)
+pub export fn maru_macos_app_session_reload_config_following_menu(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.reloadConfigFollowingMenu()) 1 else 0;
 }
 
 // 마지막 일반 창을 닫으면 앱도 끝내는가(config `window.quit-after-last-window-closed`). Swift 의 빨간 버튼·창 닫기·

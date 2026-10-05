@@ -408,3 +408,11 @@ lease를 검증해 인계한다. worker 19·host 82개 Debug/ReleaseFast와 다�
 보존한다. native watcher/identity는 Windows 공용 경계로 이동했다. watch 18개
 Debug/ReleaseFast, 다섯 compiled runtime 변형, 실제 앱의 root/expanded child
 생성·삭제 및 펼침 상태 유지·정상 종료를 확인했다. 장기 soak와 원격 감시는 남는다.
+
+
+§2m.189: 일반 앱의 주기적 backup root 열기·encode/write/flush/publish/drop을 worker에
+연결했다. 독립 bytes/identity와 문서 결합, latest drop 승인, stale ack 거절 및 actual
+완료 뒤 lease/root 정산을 유지한다. 닫기 의도 보존과 clean 닫기 FIFO/새 dirty 확인도
+연결했다. worker 15개 Debug/ReleaseFast와 다섯 compiled runtime 변형, 실제 autosave →
+private crash → file click 복구 → 첫 Save-close의 exact bytes/정상 종료/백업 삭제를 확인했다.
+본문 capture CPU, 복구 이력/후속 rebuild, 명시적 close와 shutdown backup I/O 및 전체 잔여 범위는 남는다.

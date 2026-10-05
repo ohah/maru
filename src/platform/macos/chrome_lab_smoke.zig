@@ -90,6 +90,56 @@ fn faceFor(variant: FontVariant) system_text.Face {
 ///
 /// **이 함수가 정하는 것은 컴포넌트 배경의 층뿐이다.** 하네스가 직접 심는 quad(`sidebar_status_strip`의
 /// under 밴드)는 여기를 안 지나므로, 그런 시나리오는 아래 `quad_layer_exempt`에 이유와 함께 적는다.
+/// **오버레이(`.modal` 층)의 `.fill` 을 Lab 에서도 칠한다.** 제품은 오버레이(확인 모달·컨텍스트 메뉴·드롭다운)를
+/// `metal_lowering.lower` 로 그려 `.fill`(버튼 배경·선택 행 강조)을 셀 배경으로 칠한다. Lab 은 도크와 같은
+/// `appendBackgroundQuads` 만 타서 `.quad` 만 그렸다 — 그래서 선택 강조와 버튼 배경이 캡처·골든에 나오지 않았고,
+/// 확인 모달의 포커스 버튼(강조 배경 위 배경색 글자)은 통째로 안 보였다(2026-10-05). 제품의 셀 배경과 **같은
+/// 사각형·같은 색**을 같은 층의 quad 로 낸다 — 경로는 다르지만 그림은 같다. 도크 층은 제품도 이 경로가 아니므로
+/// 손대지 않는다(제품과 Lab 이 같아야 한다). 커서 역할은 제품도 셀 배경이 아니라 커서 오버레이로 그리므로 뺀다.
+///
+/// **사각형을 1px 키우고 원래 사각형으로 clip 한다.** quad 셰이더는 변마다 `fwidth` 폭 2px 의 AA 띠를 둔다 —
+/// 정수 경계에 놓인 직각 quad 는 가장자리 픽셀이 0.84 만 덮인다. 셀 배경은 경계가 선명하므로, 그대로 내면
+/// 드롭다운처럼 fill 이 맞닿은 행마다 어두운 이음매가 생긴다(실측: 행 68, 이음매 59, 배경 10). 키운 quad 의
+/// 가장자리 띠는 clip 밖이라 버려지고(셰이더가 픽셀 중심으로 discard), 안은 끝까지 완전히 덮인다.
+fn appendOverlayFills(
+    allocator: std.mem.Allocator,
+    draws: chrome.ChromeDraw,
+    tk: *const chrome.Tokens,
+    origin_y_px: u32,
+    out: *std.ArrayList(renderer.metal_frame.GpuQuad),
+    layer: u32,
+) !void {
+    for (draws.ops) |op| switch (op) {
+        .fill => |f| {
+            if (f.role == .cursor or f.rect.w == 0 or f.rect.h == 0) continue;
+            const rgb = tk.get(f.role);
+            const color: u32 = 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+            const x: f32 = @floatFromInt(f.rect.x);
+            const y = @as(f32, @floatFromInt(f.rect.y)) + @as(f32, @floatFromInt(origin_y_px));
+            const w: f32 = @floatFromInt(f.rect.w);
+            const h: f32 = @floatFromInt(f.rect.h);
+            try out.append(allocator, .{
+                .x = x - 1,
+                .y = y - 1,
+                .w = w + 2,
+                .h = h + 2,
+                .corner_radii = .{ 0, 0, 0, 0 },
+                .border_widths = .{ 0, 0, 0, 0 },
+                .fill_color0 = color,
+                .fill_color1 = color,
+                .border_color = 0,
+                .gradient_kind = 0,
+                .layer = layer,
+                .clip_x = x,
+                .clip_y = y,
+                .clip_w = w,
+                .clip_h = h,
+            });
+        },
+        else => {},
+    };
+}
+
 fn labQuadLayer(id: lab.ScenarioId) u32 {
     return switch (id) {
         .editor_gutter,
@@ -475,6 +525,7 @@ pub fn main(init: std.process.Init) !void {
     // **quad·glyph·clip 이 이 값 하나를 쓴다.** 셋 중 하나만 옮기면 캡처가 제품과 다른 그림이 된다.
     const tree_band_h: u32 = if (scenario_id == .file_tree_over_chrome) 34 else 0;
     chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, tree_band_h, &gpu_quads, quad_layer);
+    if (frame.draws.layer == .modal) try appendOverlayFills(allocator, frame.draws, &tokens, tree_band_h, &gpu_quads, quad_layer);
     // **여기까지가 컴포넌트가 낸 quad 다.** 아래에서 하네스가 심는 이웃(사이드바 밴드·상태바 띠)은
     // 컴포넌트 밖 표면이라 다른 층에 앉는다 — 그래서 층 불변식은 이 접두사에만 건다(아래 판정).
     const component_quad_count = gpu_quads.items.len;
@@ -1427,4 +1478,31 @@ test "Chrome Lab summary: 넓은 장면의 창 크기를 그 장면 값으로 �
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"viewport_backing_px\": { \"width\": 1200, \"height\": 720 }") != null);
     // **readback 과 어긋나지 않는다** — 둘이 갈리는 것이 그 결함의 겉모습이었다.
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"width\": 1200, \"height\": 720, \"non_background_pixels\"") != null);
+}
+
+test "Chrome Lab 오버레이 fill: 셀 배경처럼 선명하게 칠하고, 커서 역할과 빈 사각형은 내지 않는다" {
+    // 제품은 오버레이 `.fill` 을 셀 배경으로 칠한다. Lab 이 그것을 빠뜨리면 확인 모달의 포커스 버튼과
+    // 드롭다운의 행 배경이 캡처에서 사라진다(2026-10-06 전까지 그랬다).
+    const tokens = labTokens();
+    const ops = [_]chrome.draw.Op{
+        .{ .fill = .{ .rect = .{ .x = 64, .y = 80, .w = 144, .h = 16 }, .role = .tab_active_bg } },
+        // 커서는 제품도 셀 배경이 아니라 커서 오버레이로 그린다 — Lab 이 칠하면 제품에 없는 블록이 생긴다.
+        .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 16 }, .role = .cursor } },
+        .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = 16 }, .role = .tab_hover_bg } },
+    };
+    var out: std.ArrayList(renderer.metal_frame.GpuQuad) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try appendOverlayFills(std.testing.allocator, .{ .layer = .modal, .ops = &ops }, &tokens, 34, &out, 2);
+
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    const q = out.items[0];
+    // clip 은 원래 사각형(원점 오프셋 포함) 그대로다 — 셰이더가 이 밖을 버려 경계가 셀 배경처럼 선명하다.
+    try std.testing.expectEqual([4]f32{ 64, 114, 144, 16 }, [4]f32{ q.clip_x, q.clip_y, q.clip_w, q.clip_h });
+    // quad 는 사방 1px 크다 — AA 띠(폭 2px)를 clip 밖으로 밀어내야 가장자리 픽셀이 완전히 덮인다.
+    try std.testing.expectEqual([4]f32{ 63, 113, 146, 18 }, [4]f32{ q.x, q.y, q.w, q.h });
+    const rgb = tokens.get(.tab_active_bg);
+    const want: u32 = 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+    try std.testing.expectEqual(want, q.fill_color0);
+    try std.testing.expectEqual(want, q.fill_color1);
+    try std.testing.expectEqual(@as(u32, 2), q.layer);
 }

@@ -1908,6 +1908,9 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         // 마크한다(활성 alt sb는 빈 인스턴스라 무의미 — primary는 saved_sb에 있다). leaveAltScreen이
         // 복원하면 ensureScrollbackRewrapped가 1회 수행한다. 안 그러면 옛 폭 행이 복귀 후 stale로 보인다.
         if (new_cols != old_cols) self.saved_screen.sb.rewrap_pending = true;
+        // 보관된 primary 그리드는 잘렸다(위 clip) — 잘린 셀에 앵커가 있던 primary 이미지도 함께 지운다. 안 지우면
+        // 복귀 뒤 창을 다시 키울 때 내용 없는 빈 행 위에 되살아난다. alt 의 것은 TUI 가 다시 그린다(그대로).
+        self.dropClippedSavedAnchors(self.saved_screen.sb.count, new_rows, new_cols);
         return;
     }
 

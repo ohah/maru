@@ -563,6 +563,36 @@ pub fn moveAnchors(self: *TerminalCore, remaps: []const AnchorRemap, lost_below:
     }
 }
 
+/// alt 화면 중 resize 가 보관된 primary 그리드를 **잘랐다**(clip/pad — reflow 하지 않는다, 왼쪽 위 기준).
+/// - **잘려 나간 행**(새 높이 밖)에 앵커가 있던 primary placement 는 지운다 — 그 행의 내용이 사라졌으니 버려진 행의
+///   앵커와 같은 규율이다. 안 지우면 alt 를 나온 뒤 화면 밖에 남았다가, 창을 다시 키우면 **빈 행 위에** 되살아난다.
+/// - **새 폭 밖의 열**은 지우지 않고 마지막 칸으로 당긴다 — alt 밖 resize 가 그대로 옮기는 줄(커서 줄)에 쓰는 규칙
+///   (`AnchorWalker.endRow` 「같은 열, 넘치면 마지막 칸」)과 같게. 앵커는 보통 내용 뒤 빈칸이라 열이 잘렸다고 이미지를
+///   잃을 이유가 없고, 지우면 vim 안에서 pane 을 나눴다는 이유만으로 이미지가 영영 사라진다.
+/// 스크롤백에 앵커가 있는 것은 그리드가 아니라 그대로 둔다(복귀 뒤 지연 재-wrap 이 옮긴다). 상대 배치(부모가 있는 것)는
+/// 저장된 앵커가 아니라 **부모를 따라** 그려지므로 여기서 판정하지 않고, 부모가 지워졌으면 함께 지운다(명세: 수명이
+/// 부모에 묶인다). alt 화면 자신의 placement 는 건드리지 않는다 — 그 화면은 TUI 가 다시 그린다.
+/// `sb_count` 는 보관된 primary 스크롤백 길이(절대 행 = 스크롤백 + 화면 행).
+pub fn dropClippedSavedAnchors(self: *TerminalCore, sb_count: usize, rows: u16, cols: u16) void {
+    var dropped = false;
+    var i: usize = 0;
+    while (i < self.saved_kitty_placements.items.len) {
+        const p = &self.saved_kitty_placements.items[i];
+        if (p.parent_image_id != 0 or p.anchor_row < sb_count) {
+            i += 1;
+            continue;
+        }
+        if (p.anchor_row - sb_count >= rows) {
+            _ = self.saved_kitty_placements.orderedRemove(i);
+            dropped = true;
+            continue;
+        }
+        if (p.anchor_col >= cols) p.anchor_col = cols - 1;
+        i += 1;
+    }
+    if (dropped) removeOrphanedRelatives(self);
+}
+
 /// 스크롤백 길이가 `old_count` 에서 `new_count` 로 바뀌었다(재-wrap). 활성 화면의 절대 행은 `sb.count + 행` 이라
 /// 그 화면에 앵커가 있는 placement 를 그만큼 민다 — 안 밀면 화면 위 이미지가 길이 차만큼 튄다.
 pub fn rebaseActiveAnchors(self: *TerminalCore, old_count: usize, new_count: usize) void {

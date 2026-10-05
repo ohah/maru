@@ -987,7 +987,7 @@ unload_run() { # $1=이름 $2=경로 $3=대본
     : > "$root/requests.log"
     run_app "$2" 22000 "$root/unload-$1.summary" MARU_WEB_OSR_TEST_INPUT="$root/unload-$1.txt" MARU_CONFIG="$root/unload.conf"
     # 보고 줄은 요약 출력과 한 줄에 섞일 수 있다 — 줄 중간에서도 찾는다.
-    grep -ao 'osr-test \(pageclose [a-z_]*\|overlay [a-z]*\|mark [a-z0-9]* [0-9]*\|sheet [^|]*|[^|]*\)' "$root/app-${2#/}.log" > "$root/unload-$1.report" || true
+    grep -ao 'osr-test \(pageclose [a-z_]*\|overlay [a-z]*\|windowcount [0-9]*\|mark [a-z0-9]* [0-9]*\|sheet [^|]*|[^|]*\)' "$root/app-${2#/}.log" > "$root/unload-$1.report" || true
     cp "$root/requests.log" "$root/unload-$1.requests"
     cat "$root/unload-$1.report"
 }
@@ -1024,6 +1024,22 @@ overlay
 key 36 U+D
 sleep 2500
 sheet
+mark end"
+# 둘째 창에서 터미널 탭을 닫아 웹 탭만 남기고 ⌘W — 창의 마지막 탭이라 물은 뒤 창이 닫힌다(탭을 먼저 부수면 죽었다 — 적대 검증).
+unload_run last /unload-app?last "sleep 6000
+newwindow
+sleep 3000
+action previous_term
+sleep 300
+action close_term
+sleep 1000
+windowcount
+mark close1
+key 13 U+77 U+77 32
+sleep 700
+key 36 U+D
+sleep 2500
+windowcount
 mark end"
 unload_run hang /unload-app?hang "sleep 7000
 view down 0.5 0.5 0 0
@@ -1076,6 +1092,11 @@ late = [e for e in events if e.get('e') == 'tick' and int(e['t']) > marks.get('c
 check('osr-test overlay true' in report and closes(report) == ['asked', 'closed'] and sheets(report)[-1:] and sheets(report)[-1].startswith('osr-test sheet none')
       and marks.get('end') and not late,
       f'a page without a leave confirmation closes after the maru confirm without a second question ({closes(report)} · {sheets(report)} · {len(late)} ticks after it closed)')
+
+report, events, marks = load('last')
+counts = [l.split()[2] for l in report if l.startswith('osr-test windowcount ')]
+check(counts == ['2', '1'] and closes(report) == ['asked', 'closed'],
+      f'closing the only tab of a second window asks the page, then closes that window ({counts} · {closes(report)})')
 
 report, events, marks = load('hang')
 check(closes(report) == ['asked', 'timed_out'] and sheets(report)[-1:] and sheets(report)[-1].startswith('osr-test sheet none'),

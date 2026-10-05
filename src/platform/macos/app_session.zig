@@ -59609,6 +59609,76 @@ test "W6i: 창을 정리하면(deinit) 그 창의 Chromium 탭 브라우저와 �
     try std.testing.expect(!web_osr.owns(sid));
 }
 
+fn w6jSession(allocator: std.mem.Allocator) !*AppSession {
+    const session = try allocator.create(AppSession);
+    errdefer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    return session;
+}
+
+test "W6j: 탭 닫기는 페이지에 묻는 동안 탭을 두고, 닫히면 그 탭만 닫는다 — 여러 탭을 닫는 동작은 묻지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator); // 창 정리(deinit)가 기록을 놓은 뒤에
+    defer session.deinit();
+
+    const pane = pane_ops.activePane(session);
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    try web_osr.testHold(allocator, sid);
+    web_osr.testRunning(sid);
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    // pane·워크스페이스 닫기(⇧⌘W·사이드바 ✕)로는 묻지 않는다 — 여기서는 범위를 풀기만 본다(닫지 않는다).
+    try std.testing.expect(web_ops.singleOsrTermInScope(session, session.resolveCloseScope(.term_or_pane)) == sid);
+    // ⌘W — 묻는다: 탭은 그대로, 페이지의 답을 기다린다.
+    web_ops.closeAskingPage(session, .term_or_pane);
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    try std.testing.expectEqual(web_osr.CloseAskOutcome.waiting, web_osr.takeCloseAsk(sid, 0));
+    // 그사이 다른 탭(터미널)으로 옮겨도 닫히는 것은 물은 탭이다.
+    session.focusTerm(0);
+    web_ops.osrCloseAskedTab(session, sid, .closed);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expect(!web_osr.owns(sid));
+    try std.testing.expect(pane.terms.items[0].kind == .terminal);
+}
+
+test "W6j: 창의 유일한 탭이 Chromium 탭이면 물은 뒤 탭을 부수지 않고 창을 닫는다 — 마지막 창이면 종료 확인으로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    inline for (.{ false, true }) |last| {
+        const session = try w6jSession(allocator);
+        defer allocator.destroy(session);
+        defer web_osr.testForget(allocator);
+        defer session.deinit();
+        const pane = pane_ops.activePane(session);
+        const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+        term_ops.closeTermAt(session, 0, pane, 0); // 터미널 탭을 닫는다 — 웹 탭만 남는다
+        try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+        try web_osr.testHold(allocator, sid);
+        web_osr.testRunning(sid);
+        session.is_last_window = last;
+        web_ops.closeAskingPage(session, .term_or_pane);
+        try std.testing.expectEqual(web_osr.CloseAskOutcome.waiting, web_osr.takeCloseAsk(sid, 0));
+        web_ops.osrCloseAskedTab(session, sid, .closed);
+        // 탭을 먼저 부수지 않는다(창 닫기 latch 가 해제된 surface 에 쓰던 것 — 적대 검증).
+        try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+        if (last) {
+            try std.testing.expect(!session.ended_seen);
+            try std.testing.expect(session.pending_confirm == .quit);
+        } else {
+            try std.testing.expect(session.ended_seen);
+        }
+    }
+}
+
 test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal이면 0 (4g-0 헤드리스)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

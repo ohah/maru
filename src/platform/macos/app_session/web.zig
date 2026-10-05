@@ -1157,7 +1157,9 @@ fn osrOpenNewTab(self: *AppSession, opener: u64) bool {
                 const request = web_osr.takeNewTab(opener) orelse return false;
                 // 메뉴 「새 창에서 링크 열기」(W6h①) — 이 창에 끼우지 않고 Swift 가 새 창을 만든다(`osrTakeNewWindow`).
                 if (request.placement == .new_window) {
-                    if (self.osr_new_windows.items.len >= max_new_windows) {
+                    // 이어 받은 팝업은 새 창이 아니다(코덱이 막는다 — 막지 못했으면 닫는다, W6h① 적대 검증).
+                    if (request.adopt != 0 and web_osr.owns(request.adopt)) web_osr.abandonPopup(self.allocator, request.adopt);
+                    if (request.adopt != 0 or self.osr_new_windows.items.len >= max_new_windows) {
                         self.allocator.free(request.url);
                     } else self.osr_new_windows.append(self.allocator, request.url) catch self.allocator.free(request.url);
                     return true;
@@ -1262,6 +1264,16 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
 
 /// 창 하나가 쥐는 새 창 요청 상한(W6h①) — 메뉴 한 번에 하나라 넉넉하다. 넘는 것은 버린다.
 const max_new_windows = 4;
+
+comptime {
+    // 설정의 기본 검색 틀과 `web_search` 의 기본 틀은 같다(설정 기본값이 쓸 수 없으면 `web_search` 가 그것으로 돌아간다).
+    std.debug.assert(std.mem.eql(u8, (maru.config.theme.BrowserConfig{}).search_url, maru.session.web_search.default_template));
+}
+
+/// 가져가지 않은 「새 창에서 링크 열기」 요청 수(W6h① — Swift 는 있을 때만 버퍼를 만든다).
+pub fn osrNewWindowsPending(self: *const AppSession) usize {
+    return self.osr_new_windows.items.len;
+}
 
 /// 메뉴 「새 창에서 링크 열기」 주소 하나를 가져간다(W6h① — Swift 가 tick 뒤에 새 창을 만든다). 꺼내 간 쪽이 놓는다.
 pub fn osrTakeNewWindow(self: *AppSession) ?[]u8 {

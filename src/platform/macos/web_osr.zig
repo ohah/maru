@@ -139,11 +139,12 @@ const Surface = struct {
     popup_opener: u64 = 0,
     /// 페이지가 그 브라우저를 닫았다(maru 가 닫지 않았다 — `window.close`) — 그 탭이 있는 창이 꺼내 가 탭을 닫는다(`takePageClosed`).
     page_closed: bool = false,
-    /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」 답이 준다. sidecar 의 `open_tab`
+    /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」·「새 탭에서 이미지 열기」(W6h①) 답이 준다. sidecar 의 `open_tab`
     /// 하나가 쓴다 — sidecar 도 같은 규칙을 지키지만 maru 는 sidecar 가 보낸 것을 그대로 믿지 않는다(W6e 적대 검증 2 차).
     new_tab_credits: ws.new_tab.Credits = .{},
     /// 새 창 한 장(W6h①) — 메뉴 「새 창에서 링크 열기」 답만 준다(그때의 단조 시각 ms, 0 은 없음). 자리가 `new_window` 인 `open_tab`
-    /// 하나가 쓴다 — 페이지 입력의 새 탭 장으로는 새 창을 받지 않는다(sidecar 가 새 창 자리를 보내도).
+    /// 하나가 쓴다 — 페이지 입력의 새 탭 장으로는 새 창을 받지 않는다(sidecar 가 새 창 자리를 보내도). 한 칸이다 — sidecar 의 답이 오기
+    /// 전에 같은 탭에서 또 고르면 앞 것은 쓰지 못한다(드물다 — W6h① 적대 검증에서 받아들임).
     new_window_credit_ms: i64 = 0,
 };
 
@@ -3119,6 +3120,13 @@ test "a new window opens only right after the menu's open-link-in-new-window ans
     s7.new_window_credit_ms = 1;
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .new_window, .url = "https://a.example/w4" } }, 1 + ws.new_tab.activation_ms + 1);
     try std.testing.expect(!newTabPending(7));
+    // 닫힌 메뉴(sidecar 가 이미 닫았다)의 답은 장을 주지 않는다.
+    s7.new_window_credit_ms = 0;
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 6, .point = .{ .x = 1, .y = 1 }, .flags = link } }, now);
+    _ = takeContextMenu(7);
+    apply(gpa, .{ .context_menu_closed = .{ .browser = 7, .menu = 6 } }, now);
+    answerContextMenu(gpa, 7, 6, .open_link_new_window);
+    try std.testing.expectEqual(@as(i64, 0), s7.new_window_credit_ms);
     // 메뉴 「새 탭에서 이미지 열기」 답도 새 탭 장을 준다.
     s7.new_tab_credits = .{};
     apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 5, .point = .{ .x = 1, .y = 1 }, .flags = .{ .image = true, .image_openable = true } } }, now);

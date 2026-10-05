@@ -828,7 +828,7 @@ sleep 2500
 PY
 : > "$root/requests.log"
 run_app /cm-app 26000 "$root/mh.summary" MARU_WEB_OSR_TEST_INPUT="$root/mh.txt" MARU_WEB_OSR_TEST_CONTEXT_MENU=1 MARU_CONFIG="$root/mh.conf"
-grep -a '^osr-test menu\|^osr-test newwindow\|^osr-test newtab\|^osr-test mark' "$root/app-cm-app.log" > "$root/mh.report" || true
+grep -a '^osr-test menu\|^osr-test newwindow\|^osr-test newtab\|^osr-test mark\|^osr-test opentab' "$root/app-cm-app.log" > "$root/mh.report" || true
 cat "$root/mh.report"
 python3 - "$root/mh.report" "$root/requests.log" <<'PY' || fail "the W6h① context menu items did not behave as expected"
 import sys
@@ -841,8 +841,11 @@ def check(cond, what):
     print(('PASS ' if cond else 'FAIL ') + what)
     ok = ok and cond
 check(len(shown) == 3 and 'osr-test menu pick-missing' not in ' '.join(report), f'three menus were shown and every pick was found ({shown})')
-check('osr-test newwindow opened windows=2 tab=true' in report and requests.count('/cm-target') == 1,
-      f'open link in new window made a second maru window whose web tab loaded the link ({[l for l in report if "newwindow" in l]} · /cm-target {requests.count("/cm-target")})')
+# 새 창의 세션(Swift 가 적는다)과 탭을 연 세션(Zig 가 적는다)이 같다 — 원래 창에 탭이 생기지 않았다.
+opened = [l for l in report if l.startswith('osr-test newwindow opened ')]
+new_session = opened[0].split('session=')[1] if len(opened) == 1 and 'session=' in opened[0] else None
+check(len(opened) == 1 and opened[0].startswith('osr-test newwindow opened windows=2 tab=true') and f'osr-test opentab session={new_session} opened=true' in report and requests.count('/cm-target') == 1,
+      f'open link in new window made a second maru window whose own web tab loaded the link ({opened} · {[l for l in report if "opentab" in l]} · /cm-target {requests.count("/cm-target")})')
 image_tabs = [l for l in report if l.startswith('osr-test newtab') and 'placement=background' in l]
 # 이미지 우클릭(그 뗌의 `/ev`) 뒤, 검색 전에 그 이미지가 다시 불렸다 — 새 탭이 그 이미지를 연다. (새 창도 시험 페이지를 하나 열어
 # — `MARU_WEB_PANEL` — 이미지가 그 전에도 불린다. 수로 세지 않고 차례로 본다.)

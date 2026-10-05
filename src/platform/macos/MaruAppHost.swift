@@ -8904,6 +8904,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: next))
                     testSurface = surface
                 }
+            case "closewindow":
+                // W6i: 마지막 창을 닫는다(빨간 단추와 같은 길 — windowShouldClose). 1 초 뒤 창 수를 알린다. 대본은 첫 창으로 잇는다.
+                let before = windows.count
+                testSurface = windows.first
+                windows.last?.window?.performClose(nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    Self.testReport("closewindow before=\(before) after=\(self?.windows.count ?? -1)")
+                }
             case "firstwindow":
                 // W6c②: 첫 창을 다시 대상으로(`newwindow` 뒤) — 창이 둘일 때 메뉴가 띄운 창의 것인지 본다.
                 testSurface = windows.first

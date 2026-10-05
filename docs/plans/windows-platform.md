@@ -481,3 +481,27 @@ close 누락·backoff 제거·동기 조기 ack·epoch/CAS guard 제거의 다�
 변형을 검출하고 원본을 복원했다. 컴파일 단계에서 막힌 재귀 ack 변형은 횟수에서 제외했다.
 명시적 파일 닫기의 백업 삭제와 capture/후속 projection CPU 등 전체 잔여 Windows 범위는
 계속 남아 있다. 이 절은 강제 실패를 실제 앱 GUI에서 재현했다고 주장하지 않는다.
+
+
+### §2m.194 Windows clean close/Save-close의 백업 삭제 worker 연결
+
+clean sidebar X는 공통 pending close FIFO로 들어가고, clean window close도 같은 승인
+경로를 지난다. Save-close의 저장 worker 완료 후 prepareCleanCloseBackup이 첫 native
+삭제를 debounce 없이 시작한다. 문서와 request lease는 실제 drop 완료까지 살아 있고
+마지막 close 승인에는 native store fallback이 필요 없다. 여러 문서의 window close는
+한 문서씩 처리한다. 공유 문서의 마지막 view가 아니면 백업을 삭제하지 않는다.
+
+대기 중 키·IME·앱 마우스 입력을 막되 caption 제어를 유지한다. Esc는 pending close와
+보류된 window close를 취소한다. 새 window intent는 이전 file wait를 대체한다. 실패한
+native 삭제는 view/backup 보호를 유지하고 기존 close intent를 종료해 새 요청을 요구한다.
+대기·backoff는 프레임의 render/present를 건너뛰는 busy loop를 만들지 않는다.
+
+`test-win32-backup-worker` 20개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+pending/lease 보존, 다른 thread의 실제 삭제, future debounce 우회, store 없이 최종 view
+해제, dirty/누락 root 거절과 원본 BOM/CRLF를 검사한다. 조기 승인·dirty 승인·epoch/CAS
+제거·uncertain clean 판정 손상의 다섯 compiled runtime 변형을 검출하고 복원했다.
+최종 실제 앱 PID 12964에서 Xbase/CRLF 자동 백업 및 원본 BOM/base/CRLF를 확인한 뒤
+WM_CLOSE/Save로 exact BOM/Xbase/CRLF 저장, 백업 삭제와 exit code 0을 확인했다.
+synthetic owned HWND 증거이며 물리 입력/IME·강제 native 실패 GUI 증거로 세지 않는다.
+Discard의 dirty backup 삭제는 아직 기존 동기 경로다. 전체 잔여 Windows 범위는 완료로
+보지 않으며 capture/후속 projection CPU·플랫폼 결합과 장기 검증도 계속 남아 있다.

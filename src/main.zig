@@ -4848,6 +4848,27 @@ fn beginFileCloseSave(book: *file_host.Book, views: []OpenFile, target: FileClos
     return null;
 }
 
+// A confirmed clean close must wait for native backup deletion. Reuse the
+// immutable worker and its latest clean vote; never delete on the UI thread.
+fn prepareCleanCloseBackup(io: std.Io, worker: *BackupWorker, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, now_ns: i128, retrying: bool) !bool {
+    if (worker.isBusy()) return false;
+    const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
+    if (one) |i| try book.requireClose(views[i].document, true) else try book.requireIdle();
+    for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        if (one != null and book.registry.viewCount(view.document).? > 1) continue;
+        const state = book.registry.get(view.document) orelse return error.StaleDocument;
+        if (state.opened.?.isDirty()) return error.DirtyDocument;
+        if (!state.notifications.backup_on_disk) continue;
+        const store = if (owner.*) |*value| &value.store else return error.BackupRootUnavailable;
+        if (retrying and state.notifications.backup_dirty and now_ns < state.notifications.backup_due_ns) return false;
+        state.notifications.backup_dirty = true;
+        try worker.start(io, view.document, store, null, maru.session.editor.backup.pause_bytes);
+        return false;
+    }
+    return true;
+}
+
 fn approveFileClose(io: std.Io, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, action: maru.chrome.components.confirm.Action) !bool {
     if (action == .cancelled or action == .extra) return false;
     const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
@@ -7383,6 +7404,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 찾아** 번호를 푼다 — macOS `confirm_accept` 가 범위를 다시 푸는 것과 같은 규율이다.
     var pending_close_id: ?u64 = null;
     var pending_file_close: ?FileCloseTarget = null;
+    var file_close_waiting = false;
     var pending_file_conflict: ?maru.session.editor.document_registry.Lease = null;
     var pending_conflict_save = false;
     var pending_conflict_close: ?FileCloseTarget = null;
@@ -8380,8 +8402,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }) {
         if (tickFileBackupWorker(io, &file_backup_worker, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, !confirm_state.open and pending_file_close == null and !close_requested and !backup_window_close_requested and backup_clean_closes.items.len == 0 and save_close_target == null and !save_close_requested, null)) |report| {
             reportFileBackups(stderr, report);
+            if (file_close_waiting and report.failed != 0) {
+                // Failed native deletion never approves a close. Preserve the
+                // view and protection, then require a fresh user close intent.
+                file_close_waiting = false;
+                pending_file_close = null;
+                confirm_pending_click = null;
+                confirm_state.dismiss();
+                file_notice.show(maru.i18n.t(fileSaveNotice(report.first_error orelse error.BackupRootUnavailable)));
+            }
         } else |err| stderr.print("  warning: editor backup maintenance failed({s})\n", .{@errorName(err)}) catch {};
-        file_changes.hold_notices = file_notice.open or confirm_state.open;
+        file_changes.hold_notices = file_close_waiting or file_notice.open or confirm_state.open;
         if (choice_notice) |lease| if (fileIndexForLease(open_files.items, lease) == null) {
             try file_changes.cancelChoice(lease);
             choice_notice = null;
@@ -11512,6 +11543,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
             .key => |key_ev| {
+                if (file_close_waiting) {
+                    if (key_ev.key == .escape) {
+                        confirm_pending_click = .cancelled;
+                        backup_window_close_requested = false;
+                        close_requested = false;
+                    }
+                    continue;
+                }
                 if (initial_open.job != null) {
                     if (key_ev.key == .escape) {
                         initial_open.cancel() catch {};
@@ -11821,7 +11860,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // IME 조합 미리보기. **중립 계약에 그대로 넣는다** — `renderSnapshot()`이 합성해 주므로
             // Windows 가 미리보기 렌더를 따로 만들지 않는다(§2i).
             .preedit_changed => {
-                if (initial_open.job != null or file_notice.open or confirm_state.open) continue;
+                if (file_close_waiting or initial_open.job != null or file_notice.open or confirm_state.open) continue;
                 const text = window.preeditText();
                 // **조합은 포커스를 따라간다**(W8.15 잔여). 검색 줄에 치는 동안 미리보기가 터미널로
                 // 가면 사용자는 자기가 친 것을 못 보는데 셸은 그것을 받는다 — 키 입력이 이미 겪은
@@ -11921,7 +11960,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
 
                 // Keep native caption controls available, but block covered app actions.
-                if (initial_open.job != null) continue;
+                if (file_close_waiting or initial_open.job != null) continue;
                 if (file_notice.open and !confirm_state.open) continue;
 
                 // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────
@@ -12276,38 +12315,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                                                 break :close_blk;
                                             };
-                                            if (file_backup_worker.isBusy()) {
-                                                const lease = open_files.items[fi].document;
-                                                var queued = false;
-                                                for (backup_clean_closes.items) |previous| if (previous.owner == lease.owner and previous.id == lease.id) {
-                                                    queued = true;
-                                                    break;
-                                                };
-                                                if (!queued) backup_clean_closes.append(allocator, lease) catch |failure| file_notice.show(maru.i18n.t(fileSaveNotice(failure)));
-                                                break :close_blk;
-                                            }
-                                            _ = approveFileClose(io, &editor_files, &file_backups, open_files.items, .{ .file = open_files.items[fi].document }, .confirmed) catch |err| {
-                                                file_notice.show(maru.i18n.t(fileSaveNotice(err)));
-                                                break :close_blk;
+                                            const lease = open_files.items[fi].document;
+                                            var queued = false;
+                                            for (backup_clean_closes.items) |previous| if (previous.owner == lease.owner and previous.id == lease.id) {
+                                                queued = true;
+                                                break;
                                             };
-                                            var gone = open_files.orderedRemove(fi);
-                                            gone.deinit(allocator);
-                                            file_closes += 1;
-                                            // **뒤쪽 색인이 하나씩 앞으로 당겨진다.** 보고 있던 것이
-                                            // 그 뒤였다면 따라 당겨야 하고, 닫은 것 자체였다면
-                                            // 터미널로 돌아간다 — 안 그러면 없는 파일을 가리킨다.
-                                            active_view = switch (active_view) {
-                                                .file => |a| if (a == fi)
-                                                    ActiveView{ .terminal = app_window.active_tab }
-                                                else if (a > fi)
-                                                    ActiveView{ .file = a - 1 }
-                                                else
-                                                    ActiveView{ .file = a },
-                                                .terminal => |t| ActiveView{ .terminal = t },
-                                            };
-                                            refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
-                                            sidebar_redraws += 1;
-                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                            if (!queued) backup_clean_closes.append(allocator, lease) catch |failure| file_notice.show(maru.i18n.t(fileSaveNotice(failure)));
+                                            break :close_blk;
                                         }
                                     } else {
                                         // ── 세션을 닫는다 (W8.16) ───────────────────────────
@@ -13705,6 +13720,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try file_backup_worker.voteDrop();
         holdBackupWindowClose(file_backup_worker.isBusy(), &backup_window_close_requested, &close_requested);
         if (close_requested and !file_exit_accepted) {
+            file_close_waiting = false; // window intent supersedes a file wait
             if (choice_notice) |lease| {
                 try file_changes.cancelChoice(lease);
                 choice_close = null;
@@ -13723,10 +13739,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     pending_file_close = .window;
                     pending_close_id = null;
                     beginFileClose(&confirm_state, &confirm_pending_click);
-                } else if (approveFileClose(io, &editor_files, &file_backups, open_files.items, .window, .confirmed)) |_| {
-                    file_exit_accepted = true;
-                    close_requested = true;
-                } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                } else {
+                    pending_file_close = .window;
+                    pending_file_conflict = null;
+                    confirm_pending_click = .confirmed;
+                }
             } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
         }
         if (!file_backup_worker.isBusy() and backup_clean_closes.items.len != 0 and pending_file_close == null and !confirm_state.open and !close_requested) {
@@ -13763,12 +13780,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                 };
                 pending_conflict_close = null;
-            } else if (pending_file_close) |target| {
+            } else if (pending_file_close) |target| close_file: {
                 if (act == .confirmed) {
                     const saving_file = beginFileCloseSave(&editor_files, open_files.items, target) catch |err| {
                         file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                         confirm_state.dismiss();
                         pending_file_close = null;
+                        file_close_waiting = false;
                         continue;
                     };
                     if (saving_file) |lease| {
@@ -13777,9 +13795,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         file_notice.show(maru.i18n.t(.win_editor_saving));
                         confirm_state.dismiss();
                         pending_file_close = null;
+                        file_close_waiting = false;
                         continue;
                     }
                 }
+                if (act == .confirmed) {
+                    const ready = prepareCleanCloseBackup(io, &file_backup_worker, &editor_files, &file_backups, open_files.items, target, std.Io.Clock.awake.now(io).nanoseconds, file_close_waiting) catch |err| {
+                        file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                        file_close_waiting = false;
+                        confirm_state.dismiss();
+                        pending_file_close = null;
+                        break :close_file;
+                    };
+                    if (!ready) {
+                        file_close_waiting = true;
+                        confirm_state.dismiss();
+                        confirm_pending_click = .confirmed;
+                        break :close_file;
+                    }
+                }
+                file_close_waiting = false;
                 var conflict_lease: ?maru.session.editor.document_registry.Lease = null;
                 const approved = approveFileClose(io, &editor_files, &file_backups, open_files.items, target, act) catch |err| blk: {
                     stderr.print("  warning: editor close failed({s})\n", .{@errorName(err)}) catch {};
@@ -20608,4 +20643,56 @@ test "Windows recovery backup worker shutdown flush bypasses debounce and drains
     defer record.deinit();
     try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
     try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker clean close waits for native drop before releasing view" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    _ = try f.book.save(io, lease, 4 << 20);
+    const state = f.documents.get(lease).?;
+    var worker = BackupWorker.init(a, &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, 10) catch unreachable;
+    const now: i128 = 0;
+    try std.testing.expect(state.notifications.backup_due_ns > now);
+    try std.testing.expect(!try prepareCleanCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, now, false));
+    try std.testing.expect(worker.isBusy() and state.notifications.backup_on_disk);
+    try std.testing.expect(f.documents.get(lease) != null);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (worker.isBusy()) {
+        try worker.voteDrop();
+        if (try worker.finish(&f.backups, now)) |completed| {
+            try std.testing.expectEqual(@import("platform/windows/editor/backup_worker.zig").Outcome.dropped, completed.outcome);
+            try std.testing.expect(completed.thread_id != std.Thread.getCurrentId());
+        }
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(try prepareCleanCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, now, false));
+    try std.testing.expect(!state.notifications.backup_on_disk);
+    f.backups.?.deinit(io);
+    f.backups = null; // final close cannot use a native store fallback
+    try std.testing.expect(try approveFileClose(io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .confirmed));
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows recovery backup worker clean close refuses dirty body and missing root" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    var worker = BackupWorker.init(std.testing.allocator, &f.documents);
+    defer _ = drainFileBackupWorker(std.testing.io, &worker, &f.backups, 10) catch unreachable;
+    try std.testing.expectError(error.DirtyDocument, prepareCleanCloseBackup(std.testing.io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, std.math.maxInt(i128), false));
+    _ = try f.book.save(std.testing.io, lease, 4 << 20);
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    try std.testing.expectError(error.BackupRootUnavailable, prepareCleanCloseBackup(std.testing.io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, std.math.maxInt(i128), false));
+    try std.testing.expect(f.documents.get(lease).?.notifications.backup_on_disk);
+    try std.testing.expect(!worker.isBusy());
 }

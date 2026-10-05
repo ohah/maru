@@ -1,0 +1,535 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "name": "absolute-start",
+      "query": "\\Afoo",
+      "ranges": [
+        [
+          0,
+          0,
+          3,
+          0,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "absolute-end",
+      "query": "foo\\z",
+      "ranges": [
+        [
+          1,
+          0,
+          3,
+          1,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "line-anchors",
+      "query": "^foo$",
+      "ranges": [
+        [
+          0,
+          0,
+          3,
+          0,
+          3
+        ],
+        [
+          2,
+          0,
+          3,
+          2,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "mixed-span",
+      "query": "foo\\r?\\nbar",
+      "ranges": [
+        [
+          0,
+          0,
+          8,
+          1,
+          3
+        ],
+        [
+          2,
+          0,
+          7,
+          3,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "cross-lookbehind",
+      "query": "(?<=foo\\r\\n)bar",
+      "ranges": [
+        [
+          1,
+          0,
+          3,
+          1,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "cross-backref",
+      "query": "(foo)\\r?\\n\\1",
+      "ranges": [
+        [
+          0,
+          0,
+          8,
+          1,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "reset-start",
+      "query": "foo\\K\\r?\\nbar",
+      "ranges": [
+        [
+          0,
+          7,
+          5,
+          1,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "search-start",
+      "query": "\\Gfoo",
+      "ranges": [
+        [
+          0,
+          0,
+          3,
+          0,
+          3
+        ],
+        [
+          0,
+          3,
+          3,
+          0,
+          6
+        ]
+      ]
+    },
+    {
+      "name": "dotall",
+      "query": "(?s)foo.bar",
+      "ranges": [
+        [
+          0,
+          0,
+          7,
+          1,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "ordinary-dot",
+      "query": "foo.bar",
+      "ranges": []
+    },
+    {
+      "name": "end-on-next-line",
+      "query": "foo\\r?\\n",
+      "ranges": [
+        [
+          0,
+          0,
+          5,
+          1,
+          0
+        ]
+      ]
+    },
+    {
+      "name": "empty-file",
+      "query": "^$",
+      "ranges": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "name": "empty-final-line",
+      "query": "^$",
+      "ranges": [
+        [
+          1,
+          0,
+          0,
+          1,
+          0
+        ]
+      ]
+    },
+    {
+      "name": "empty-alternative",
+      "query": "^|foo",
+      "ranges": [
+        [
+          0,
+          0,
+          3,
+          0,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "lazy-alternative",
+      "query": ".*?",
+      "ranges": [
+        [
+          0,
+          0,
+          1,
+          0,
+          1
+        ],
+        [
+          0,
+          1,
+          1,
+          0,
+          2
+        ],
+        [
+          0,
+          2,
+          1,
+          0,
+          3
+        ],
+        [
+          0,
+          3,
+          0,
+          0,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "lone-cr-boundary",
+      "query": "^bar$",
+      "ranges": [
+        [
+          0,
+          4,
+          3,
+          0,
+          7
+        ]
+      ]
+    },
+    {
+      "name": "lone-cr-literal",
+      "query": "\\r",
+      "ranges": [
+        [
+          0,
+          3,
+          1,
+          0,
+          4
+        ]
+      ]
+    },
+    {
+      "name": "nul",
+      "query": "foo\\x00bar",
+      "ranges": [
+        [
+          0,
+          0,
+          7,
+          0,
+          7
+        ]
+      ]
+    },
+    {
+      "name": "bom-start",
+      "query": "\\Afoo",
+      "ranges": [
+        [
+          0,
+          0,
+          3,
+          0,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "bom-span",
+      "query": "foo\\r?\\nbar",
+      "ranges": [
+        [
+          0,
+          0,
+          8,
+          1,
+          3
+        ]
+      ]
+    },
+    {
+      "name": "unicode-span",
+      "query": "한글\\r?\\n😀",
+      "ranges": [
+        [
+          0,
+          0,
+          12,
+          1,
+          4
+        ]
+      ]
+    },
+    {
+      "name": "explicit-lf",
+      "query": "(*LF)^bar$",
+      "ranges": []
+    },
+    {
+      "name": "no-multiline",
+      "query": "(?-m)^foo$",
+      "ranges": []
+    },
+    {
+      "name": "empty-query",
+      "query": "",
+      "ranges": []
+    }
+  ],
+  "native_sha256": "dac5e932299867475690876e35d5ec2705481ec10d865d01d33a42e7e50ea880",
+  "limits": "공식 API를 호출하는 실제 바이너리와 독립 기대 범위 대조. 모든 정규식/OS 콜백의 증명은 아님.",
+  "errors": [
+    {
+      "name": "invalid-document",
+      "error": "NotUtf8"
+    },
+    {
+      "name": "invalid-pattern",
+      "error": "InvalidPattern"
+    },
+    {
+      "name": "bounded-backtracking",
+      "error": "MatchLimit"
+    }
+  ],
+  "negative_controls": [
+    {
+      "name": "line-engine",
+      "expected_original": [
+        [
+          0,
+          0,
+          3
+        ]
+      ],
+      "observed": [
+        [
+          0,
+          0,
+          3
+        ],
+        [
+          1,
+          0,
+          3
+        ]
+      ],
+      "detected": true
+    },
+    {
+      "name": "normalized-copy",
+      "expected_original": [
+        [
+          0,
+          0,
+          8
+        ]
+      ],
+      "observed": [
+        [
+          0,
+          0,
+          7
+        ]
+      ],
+      "detected": true
+    }
+  ],
+  "source_sha256": {
+    "src/regex.zig": "77bee364372b0ce81bc857f7db56feae4117c9180339d96e13ceb97e6d81565c",
+    "src/session/editor/find.zig": "7b1c6efb14220a1bcf0b14448a142b38a7693730f083f33a7a2390f72e9583da",
+    "src/session/editor/line_index.zig": "f43c8a437936d9f4d9ecd29b8ba533f251d775b9f0181c1538322c019dd9ca5d",
+    "tools/editor-project-search/native.zig": "407da45ffa3a1fa154112e61e4af3ba3f4e92659911c9f627b51aa0057bf1a33",
+    "tools/editor-project-search/document-verify.py": "4e9059eea965ecbbafbf230f1f8f2d1b299a706fa25c9ad8b57d4cf18013daa4"
+  },
+  "checks": {
+    "focused_core": "27 passed; FND35~39",
+    "focused_product": "8 passed; EDREG1~4",
+    "test-editor ReleaseFast": "passed, existing skips retained",
+    "check-boundaries": "passed",
+    "check-doc-links": "passed",
+    "check-wasm-sync": "passed",
+    "format": "passed"
+  },
+  "capture": {
+    "scope": "Real AppSession shared views -> appendPaneFrame -> CoreText -> product Metal offscreen readback",
+    "limits": "Separate per-view frames. No OS/HID callback or simultaneous multi-pane window evidence.",
+    "source_sha256": {
+      "build.zig": "426c91b12107f91a5a7d4d9989ab9a6fef22c7c4298b070000fa3f856c33cf34",
+      "src/session/editor/find.zig": "7b1c6efb14220a1bcf0b14448a142b38a7693730f083f33a7a2390f72e9583da",
+      "src/session/editor/line_index.zig": "f43c8a437936d9f4d9ecd29b8ba533f251d775b9f0181c1538322c019dd9ca5d",
+      "src/regex.zig": "77bee364372b0ce81bc857f7db56feae4117c9180339d96e13ceb97e6d81565c",
+      "src/search_case_fold.zig": "218e9d70c08693e6eccbf9ac53f06af800b9a9ea2c2c97e91f7445edf4ea9d62",
+      "src/chrome/components/editor_view/frame.zig": "86acd9f678c53f2d7d25edb969799d61dd284d4861d6c4a0bbe323320fb3ad3b",
+      "src/platform/macos/app_session.zig": "4a2ba9d0e5ec7d83c4b76ac6319d8ef7efadd46fd6db13fc626f699e6474d022",
+      "src/platform/macos/app_session/editor/mod.zig": "a9242afd636ffc2dad6b17c1d0f4426821779fc3971353a10ca86fae1133b195",
+      "src/platform/macos/app_session/editor/shared_edit.zig": "f3a53f00724c5998be8d52cb134f402f25065f4eb09af1974a4d388c6b50c2c3",
+      "src/platform/macos/app_session/editor_ime.zig": "28fe26f22ff3a6aeb7682d008e04543967d9bfe70834a9db587906a28d4251d0",
+      "src/platform/macos/app_session/find.zig": "6d06dc88c3e4c5542563115c8f4501275b13851bb2edbcca7bc60e6b6bb8a955",
+      "src/platform/macos/app_session/term.zig": "331794194826c9dc6f7288733135a2e87b5c48b337f36f002d683fbb9521800f",
+      "src/platform/macos/app_session/pane.zig": "16d3ee835111c3ab59793e76160c3da6fceaf0b71b62b64c236443561a35ca84",
+      "src/platform/macos/app_session/tab.zig": "741ae436330ed332cb0544d4886bd4cde27e80df8675ae1e61ae1d63b497cf73",
+      "src/platform/macos/chrome_lab_smoke.m": "06486e2e7339503aa709fd482ae023431951df1f1479a49753e02a52e5cbd6e1",
+      "src/platform/macos/maru_metal_renderer.m": "4325e14022d996cc2f89ed2471f5553cae66d8446bd6e59de3a631316ad834c5",
+      "src/platform/macos/coretext_frame_builder.zig": "ff013b42a05b98008f960ec834f157379582306e06c2146763e23402df5e25da",
+      "src/platform/macos/coretext_smoke.m": "c86ae80ff8f928aacc977fbc6b3feb4629845b60485f7c8ac8daf9d2b50a6c43",
+      "tools/shared-ime-gpu/capture.py": "60990399c924f500a567c9dbb4bcedc007e8e6a8c943032b4c9a2a31447ab9a8",
+      "tools/shared-ime-gpu/regex-fixture.zig.inc": "64331d3d94b1c7f3448f9917e0e11eb5f22c39e4942c7907e9672f5d31f68ddc"
+    },
+    "pixel_checks": [
+      {
+        "role": "current-start",
+        "x": 77,
+        "y": 61,
+        "before": [
+          16,
+          16,
+          16
+        ],
+        "after": [
+          101,
+          85,
+          39
+        ]
+      },
+      {
+        "role": "current-end",
+        "x": 77,
+        "y": 77,
+        "before": [
+          150,
+          150,
+          150
+        ],
+        "after": [
+          182,
+          176,
+          159
+        ]
+      },
+      {
+        "role": "other-start",
+        "x": 77,
+        "y": 109,
+        "before": [
+          16,
+          16,
+          16
+        ],
+        "after": [
+          40,
+          36,
+          19
+        ]
+      },
+      {
+        "role": "other-end",
+        "x": 77,
+        "y": 125,
+        "before": [
+          150,
+          150,
+          150
+        ],
+        "after": [
+          159,
+          157,
+          151
+        ]
+      }
+    ],
+    "artifact_sha256": {
+      "artifacts/before-owner.png": "6ddb6ad00ec70dc91fec1f4a9d79fee8dd7a4ae53ca9daa687f9799c324cd0b7",
+      "artifacts/before-owner.ppm": "31e6795157c3996f9a893fd08f8372c7dff0db39a489acb63686d7638120c1f9",
+      "artifacts/before-peer.png": "6791bbdf48b8c1a07f9dd32958b534e6946ae5a682c1851bcdc88a5308d03598",
+      "artifacts/before-peer.ppm": "b8b80406820e937b3948566059e01fa17b5e307785e0ed792fde880b0fb888b8",
+      "artifacts/search-owner.png": "c24e32b930c07bf1c5ab39e755a5ff26db411919a5ef5f510dae73dcd9b1aa31",
+      "artifacts/search-owner.ppm": "45e5f25591bad417086e220b16a924ca7b43b5d3184e754ce233082010dae85e",
+      "artifacts/search-peer.png": "180e0cdbf118129298373814031d32cc35760fa868cfd4a2fd92144fe12a8fd1",
+      "artifacts/search-peer.ppm": "084074f3a788bf245e9819fbba8c0193e0b277ae912899e08a10a7c5862ec0f3",
+      "artifacts/edited-owner.png": "a6110b726aac494acc47a0038592ba25525b6393da779d6fa6b5c8e3ef22d809",
+      "artifacts/edited-owner.ppm": "4298d86a109ea58b86598823a48984c05b0e0c3c3bdc9d24cba3a09318486057",
+      "artifacts/edited-peer.png": "2899602d192b043c1f0de580621a30ac1b6958903f9657b69ed774e85144eef7",
+      "artifacts/edited-peer.ppm": "6f27c39ef920c9a440d32521858d5e7c27090b6a524cead5d23ffc9e62de5152",
+      "artifacts/closed-owner.png": "232b8fd4eab10d1e57b03b39c2cce91cdee7ae425b0c4ffca035695ae0394475",
+      "artifacts/closed-owner.ppm": "8937a264ed65615d7dad55055e29ed872740e36f5ce70b912ac2f6cbf6c2d87f",
+      "artifacts/closed-peer.png": "2899602d192b043c1f0de580621a30ac1b6958903f9657b69ed774e85144eef7",
+      "artifacts/closed-peer.ppm": "6f27c39ef920c9a440d32521858d5e7c27090b6a524cead5d23ffc9e62de5152"
+    },
+    "fresh_processes": 8
+  },
+  "dense_memory": {
+    "before": {
+      "execution": {
+        "exit": 0,
+        "elapsed_ms": 9.164499999999999,
+        "first_ms": 8.133042,
+        "peak_rss_bytes": 10993664
+      },
+      "matches": 500000
+    },
+    "after": {
+      "execution": {
+        "exit": 0,
+        "elapsed_ms": 7.229084,
+        "first_ms": 7.005667000000003,
+        "peak_rss_bytes": 20660224
+      },
+      "matches": 500000
+    },
+    "limits": "1,000,001byte ASCII 본문·50만 일치의 CLI 자식 최대 RSS. baseline은 a6470cc6 도구이며 시간 차이는 여러 변경을 포함하므로 이 변경만의 속도로 해석하지 않는다. 앱/OS 메모리 상한이나 일반 프로젝트의 소비량을 뜻하지 않는다."
+  },
+  "product_source_sha256": {
+    "src/platform/macos/app_session/find.zig": "6d06dc88c3e4c5542563115c8f4501275b13851bb2edbcca7bc60e6b6bb8a955",
+    "src/platform/macos/app_session/editor/mod.zig": "d668b1f5bfde0b9075250115cfc1990606a21aeed285603465f0c9fb5eb00f6e",
+    "src/chrome/components/editor_view/frame.zig": "86acd9f678c53f2d7d25edb969799d61dd284d4861d6c4a0bbe323320fb3ad3b"
+  }
+}

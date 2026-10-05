@@ -197,14 +197,14 @@ pub fn wantedEditorFindSource(self: *AppSession) u64 {
 /// 그 표식이 없으면 pane을 바꾼 다음 프레임이 남의 좌표를 이 문서에 칠한다.
 fn recomputeViewMatches(self: *AppSession, term: *Term, state: *find_ui.State, matches: *std.ArrayList(maru.session.editor.find.Match)) void {
     state.regex_error = null;
-    maru.session.editor.find.findMatches(
-        self.allocator,
-        editor_ops.findLines(self, term),
-        state.input.query.items,
-        // 같은 PCRE2 토글을 편집기와 스크롤백이 공유한다. 웹은 이 값을 읽지 않는다.
-        .{ .match_case = state.match_case, .whole_word = state.whole_word, .regex = state.regex },
-        matches,
-    ) catch |err| {
+    const opened_doc = term.rt.editorDocument().opened;
+    const result: anyerror!void = if (state.regex and term.rt.editor_diff != null)
+        maru.session.editor.find.findLinesDocumentRegex(self.allocator, editor_ops.findLines(self, term), state.input.query.items, .{ .match_case = state.match_case, .whole_word = state.whole_word, .newline = .anycrlf }, matches)
+    else if (state.regex and opened_doc != null)
+        maru.session.editor.find.findDocumentRegex(self.allocator, opened_doc.?.file.content, state.input.query.items, .{ .match_case = state.match_case, .whole_word = state.whole_word, .newline = .anycrlf }, matches)
+    else
+        maru.session.editor.find.findMatches(self.allocator, editor_ops.findLines(self, term), state.input.query.items, .{ .match_case = state.match_case, .whole_word = state.whole_word, .regex = state.regex }, matches);
+    result catch |err| {
         matches.clearRetainingCapacity();
         if (state.regex) state.regex_error = regexErrorText(err);
     };

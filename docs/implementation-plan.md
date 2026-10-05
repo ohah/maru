@@ -1661,3 +1661,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - 만들 수 없다면 contract test, smoke test, 수동 artifact 중 무엇으로 대체하는가?
 - 새 코드가 이전 단계의 facade 계약을 깨지 않는가?
 - 자동화할 수 없는 한계를 PR 설명에 보고했는가?
+
+- [문서 전체 정규식 검색·치환](plans/editor-document-regex.md): 사용자 승인한 원문·ANYCRLF 정책으로 공통 엔진·여러 줄 표시·캡처 치환을 연결한다.

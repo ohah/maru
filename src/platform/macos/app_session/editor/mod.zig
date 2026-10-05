@@ -1972,7 +1972,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const find_current: ?chrome_editor.frame.CurrentMatch = blk: {
         if (find_marks == null) break :blk null;
         const vm = currentVisibleMatch(self, term) orelse break :blk null;
-        break :blk .{ .line = vm.row, .start = vm.start };
+        break :blk .{ .line = vm.row, .start = vm.start, .end_line = vm.end_row, .end_byte = vm.end_byte };
     };
     // **막대 마커는 「보이는 줄」 축으로 낸다**(§4.1a). 강조(`find_marks`)는 화면 안만 담아서
     // 화면 **밖** 매치가 어디 있는지 말하지 못한다 — 그 답이 이 목록의 존재 이유다.
@@ -2004,10 +2004,14 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const paired_find = self.chrome_host.diff_find_source == term.surfaceId();
     if (paired_find and secondary.open) {
         const matches = term.rt.editor_diff_find_matches.items;
-        secondary_marks = buildFindMarksInto(self, term, matches, &term.rt.editor_diff_find_marks, &term.rt.editor_diff_find_mark_buf);
+        const opposite_texts = if (term.rt.editor_diff) |st|
+            (if (diffSearchSide(self, term) == .left) st.right_texts else st.left_texts)
+        else
+            term.rt.editor_lines;
+        secondary_marks = buildFindMarksInto(self, term, matches, opposite_texts, &term.rt.editor_diff_find_marks, &term.rt.editor_diff_find_mark_buf);
         if (secondary_marks != null and secondary.current < matches.len) {
             const m = matches[secondary.current];
-            secondary_current = .{ .line = m.line, .start = m.start };
+            secondary_current = .{ .line = m.line, .start = m.start, .end_line = if (m.end) |end| end.line else null, .end_byte = if (m.end) |end| end.byte else 0 };
         }
         const n = markerRows(term, matches, secondary.current, &secondary_marker_buf, &secondary_marker_current);
         secondary_markers = secondary_marker_buf[0..n];
@@ -2097,7 +2101,17 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 const at = line.start + m.start;
                 if (at >= v.replacement.start and at < v.replacement.end) break :blk_current null;
                 const p = v.point(v.forward(at)) orelse break :blk_current null;
-                break :blk_current .{ .line = @intCast(p.row), .start = @intCast(p.byte) };
+                var mapped_end_line: ?u32 = null;
+                var mapped_end_byte: u32 = 0;
+                if (m.end_line) |last| end_block: {
+                    const source_end = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, last) orelse break :end_block;
+                    const end_line = v.source_index.line(source_end) orelse break :end_block;
+                    const end_at = end_line.start + m.end_byte;
+                    const endpoint = v.point(v.forward(end_at)) orelse break :end_block;
+                    mapped_end_line = @intCast(endpoint.row);
+                    mapped_end_byte = @intCast(endpoint.byte);
+                }
+                break :blk_current .{ .line = @intCast(p.row), .start = @intCast(p.byte), .end_line = mapped_end_line, .end_byte = mapped_end_byte };
             } else null;
             const sticky = projectSticky(v, a, sticky_client.compute(self, term, pane_rect, wrap));
             const widgets = preedit_view.rowValues(?chrome_editor.content.Widget, v, a, term.rt.editor_visible_numbers, conflictWidgets(self, term), null) catch &.{};
@@ -5174,10 +5188,9 @@ pub fn replaceCurrentMatch(self: *AppSession, term: *Term) bool {
     var expanded: ?[]u8 = null;
     defer if (expanded) |owned| self.allocator.free(owned);
     if (self.chrome_host.find.regex) {
-        var pattern = maru.session.editor.find.regex.Pattern.init(self.chrome_host.find.input.query.items, self.chrome_host.find.match_case) catch return false;
+        var pattern = maru.session.editor.find.regex.Pattern.initDocument(self.chrome_host.find.input.query.items, self.chrome_host.find.match_case, .anycrlf) catch return false;
         defer pattern.deinit();
-        const line = term.rt.editor_lines[match.line];
-        expanded = pattern.expand(self.allocator, line, .{ .start = match.start, .end = match.start + match.len }, self.chrome_host.find.replace.query.items) catch {
+        expanded = pattern.expandFrom(self.allocator, doc.file.content, .{ .start = r.start, .end = r.end }, self.chrome_host.find.replace.query.items, match.regex_from orelse r.start) catch {
             self.chrome_host.find.regex_error = "invalid replace";
             self.metal_dirty = true;
             return false;
@@ -5210,8 +5223,10 @@ pub fn replaceAllMatches(self: *AppSession, term: *Term) bool {
     if (!isFindTarget(self, term)) return false;
     if (self.editor_find_matches.items.len == 0) return false;
 
+    // 같은 불변 원문을 한 번 검증해 매치 수만큼 문서 전체 UTF-8을 반복 검사하지 않는다.
+    if (self.chrome_host.find.regex and !std.unicode.utf8ValidateSlice(doc.file.content)) return false;
     var pattern: ?maru.session.editor.find.regex.Pattern = if (self.chrome_host.find.regex)
-        maru.session.editor.find.regex.Pattern.init(self.chrome_host.find.input.query.items, self.chrome_host.find.match_case) catch return false
+        maru.session.editor.find.regex.Pattern.initDocument(self.chrome_host.find.input.query.items, self.chrome_host.find.match_case, .anycrlf) catch return false
     else
         null;
     defer if (pattern) |*p| p.deinit();
@@ -5226,8 +5241,7 @@ pub fn replaceAllMatches(self: *AppSession, term: *Term) bool {
         const r = matchRange(doc, m) orelse continue;
         var text: []const u8 = self.chrome_host.find.replace.query.items;
         if (pattern) |*p| {
-            const line = term.rt.editor_lines[m.line];
-            const owned = p.expand(self.allocator, line, .{ .start = m.start, .end = m.start + m.len }, text) catch {
+            const owned = p.expandFromValidated(self.allocator, doc.file.content, .{ .start = r.start, .end = r.end }, text, m.regex_from orelse r.start) catch {
                 self.chrome_host.find.regex_error = "invalid replace";
                 self.metal_dirty = true;
                 return false;
@@ -5348,7 +5362,7 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
     selectFindMatch(self, term, match);
 
     // **먼저 편다.** 접힌 채로 보이는 줄을 찾으면 그 줄이 없어 아무 데도 못 간다.
-    const unfolded = revealFoldedLine(self, term, doc_line);
+    const unfolded = revealFoldedRange(self, term, doc_line, if (match.end) |end| end.line else doc_line);
 
     const row = visibleRowOfDocLine(term, doc_line) orelse return; // 폈는데도 없다 — 그릴 것이 없다
 
@@ -5502,6 +5516,10 @@ pub fn setEditorTop(self: *AppSession, term: *Term, line: usize, reason: []const
 /// **한 번만 다시 만든다.** 겹마다 `toggleFoldHead`를 부르면 그때마다 보이는 줄 배열을 다시 만들고
 /// 보던 자리를 되돌리는데, 여기서는 곧바로 다른 자리로 갈 것이라 그 일이 통째로 버려진다.
 fn revealFoldedLine(self: *AppSession, term: *Term, doc_line: u32) bool {
+    return revealFoldedRange(self, term, doc_line, doc_line);
+}
+
+fn revealFoldedRange(self: *AppSession, term: *Term, first_line: u32, last_line: u32) bool {
     workspace_restore.cancel(term);
     if (term.rt.editor_folded_len == 0) return false;
     if (foldsUnavailable(term)) return false;
@@ -5514,7 +5532,7 @@ fn revealFoldedLine(self: *AppSession, term: *Term, doc_line: u32) bool {
     var kept: usize = 0;
     for (term.rt.editor_folded_prev[0..prev_len]) |head| {
         const covers = for (term.rt.editor_fold_ranges) |r| {
-            if (r.head == head) break doc_line >= r.first_hidden and doc_line <= r.last_hidden;
+            if (r.head == head) break first_line <= r.last_hidden and last_line >= r.first_hidden;
         } else false;
         if (covers) continue; // 이 접힘이 그 줄을 숨긴다 — 뺀다
         buf[kept] = head;
@@ -5547,7 +5565,7 @@ pub fn isFindTarget(self: *AppSession, term: *const Term) bool {
 ///
 /// **길이는 담지 않는다.** 부르는 쪽이 필요한 것은 *어느 자리가 현재인가*뿐이고(`frame.CurrentMatch`),
 /// 길이는 이미 `search_marks` 쪽에 있다 — 두 곳에 두면 둘이 다를 수 있다.
-pub const VisibleMatch = struct { row: u32, start: u32 };
+pub const VisibleMatch = struct { row: u32, start: u32, end_row: ?u32 = null, end_byte: u32 = 0 };
 
 /// 문서 줄 → 보이는 줄. 접힘이 없으면 그대로다.
 ///
@@ -5580,8 +5598,8 @@ pub fn currentVisibleMatch(self: *AppSession, term: *Term) ?VisibleMatch {
     const idx = vf.state.current;
     if (idx >= vf.matches.len) return null;
     const m = vf.matches[idx];
-    const row = visibleRowOfDocLine(term, m.line) orelse return null;
-    return .{ .row = row, .start = m.start };
+    const row = if (term.rt.editor_diff != null) m.line else visibleRowOfDocLine(term, m.line) orelse return null;
+    return .{ .row = row, .start = m.start, .end_row = if (m.end) |end| (if (term.rt.editor_diff != null) end.line else visibleRowOfDocLine(term, end.line)) else null, .end_byte = if (m.end) |end| end.byte else 0 };
 }
 
 /// 검색 결과(§5.1)를 **보이는 줄별 byte 범위**로 자른다 — `buildSelectionMarks`와 같은 일이고
@@ -5599,15 +5617,17 @@ pub fn currentVisibleMatch(self: *AppSession, term: *Term) ?VisibleMatch {
 /// (스크롤백 쪽이 `if (find.open)`으로 나머지를 빼는 그 규칙), 목록을 통째로 읽으면 그 구분을
 /// 이 함수 안에서 또 해야 한다 — 부르는 쪽이 슬라이스를 좁히면 규칙이 한 곳에만 남는다.
 fn buildFindMarks(self: *AppSession, term: *Term, matches: []const maru.session.editor.find.Match) ?[]const []const chrome_editor.frame.Mark {
-    return buildFindMarksInto(self, term, matches, &term.rt.editor_find_marks, &term.rt.editor_find_mark_buf);
+    return buildFindMarksInto(self, term, matches, findLines(self, term), &term.rt.editor_find_marks, &term.rt.editor_find_mark_buf);
 }
 
-fn buildFindMarksInto(self: *AppSession, term: *Term, matches: []const maru.session.editor.find.Match, row_storage: *[][]const chrome_editor.frame.Mark, mark_storage: *[]chrome_editor.frame.Mark) ?[]const []const chrome_editor.frame.Mark {
+fn buildFindMarksInto(self: *AppSession, term: *Term, matches: []const maru.session.editor.find.Match, texts: []const []const u8, row_storage: *[][]const chrome_editor.frame.Mark, mark_storage: *[]chrome_editor.frame.Mark) ?[]const []const chrome_editor.frame.Mark {
     if (matches.len == 0) return null;
     const numbers = term.rt.editor_visible_numbers;
     const visible = term.rt.editor_visible_lines;
     const folded = visible.len > 0 and numbers.len > 0;
-    const lines_len = if (term.rt.editor_diff) |st| st.left_texts.len else if (visible.len > 0) visible.len else term.rt.editor_lines.len;
+    const source_doc = if (term.rt.editor_diff == null) term.rt.editorDocument().opened else null;
+    if (term.rt.editor_diff == null and source_doc == null) return null;
+    const lines_len = if (term.rt.editor_diff != null) texts.len else if (visible.len > 0) visible.len else source_doc.?.file.lines.lines.len;
     if (lines_len == 0) return null;
 
     if (row_storage.*.len < lines_len) {
@@ -5615,34 +5635,53 @@ fn buildFindMarksInto(self: *AppSession, term: *Term, matches: []const maru.sess
         if (row_storage.*.len > 0) self.allocator.free(row_storage.*);
         row_storage.* = grown;
     }
-    if (mark_storage.*.len < matches.len) {
-        const grown = self.allocator.alloc(chrome_editor.frame.Mark, matches.len) catch return null;
+    const find = maru.session.editor.find;
+    var required: usize = 0;
+    var mi: usize = 0;
+    for (0..lines_len) |i| {
+        const doc_line: u32 = if (folded) blk: {
+            if (i >= numbers.len) continue;
+            break :blk (numbers[i] orelse continue) - 1;
+        } else @intCast(i);
+        // 원문 검색은 lazy 호환 줄 캐시보다 문서 정본의 길이를 사용해야 한다.
+        const line_len: u32 = if (term.rt.editor_diff != null)
+            @intCast((if (doc_line < texts.len) texts[doc_line] else continue).len)
+        else
+            @intCast((source_doc.?.file.lines.line(doc_line) orelse continue).contentLen());
+        while (mi < matches.len and (matches[mi].end orelse find.Position{ .line = matches[mi].line, .byte = 0 }).line < doc_line) mi += 1;
+        var mj = mi;
+        while (mj < matches.len and matches[mj].line <= doc_line) : (mj += 1) {
+            if (find.segmentForLine(matches[mj], doc_line, line_len) != null)
+                required = std.math.add(usize, required, 1) catch return null;
+        }
+    }
+    if (mark_storage.*.len < required) {
+        const grown = self.allocator.alloc(chrome_editor.frame.Mark, required) catch return null;
         if (mark_storage.*.len > 0) self.allocator.free(mark_storage.*);
         mark_storage.* = grown;
     }
     const rows = row_storage.*[0..lines_len];
     const buf = mark_storage.*;
     @memset(rows, &.{});
-
-    // 보이는 줄을 문서 순서로 훑으며 매치 커서를 민다. 접힘이 켜져 있어도 보이는 줄의 문서 번호는
-    // 오름차순이라(숨은 줄을 건너뛸 뿐) 커서를 되돌릴 일이 없다.
-    var mi: usize = 0;
+    mi = 0;
     var w: usize = 0;
     for (0..lines_len) |i| {
         const doc_line: u32 = if (folded) blk: {
             if (i >= numbers.len) continue;
             break :blk (numbers[i] orelse continue) - 1;
         } else @intCast(i);
-        // 이 줄보다 앞선 매치는 숨은 줄의 것이다 — 건너뛴다.
-        while (mi < matches.len and matches[mi].line < doc_line) mi += 1;
+        // 원문 검색은 lazy 호환 줄 캐시보다 문서 정본의 길이를 사용해야 한다.
+        const line_len: u32 = if (term.rt.editor_diff != null)
+            @intCast((if (doc_line < texts.len) texts[doc_line] else continue).len)
+        else
+            @intCast((source_doc.?.file.lines.line(doc_line) orelse continue).contentLen());
+        while (mi < matches.len and (matches[mi].end orelse find.Position{ .line = matches[mi].line, .byte = 0 }).line < doc_line) mi += 1;
         const from = w;
-        while (mi < matches.len and matches[mi].line == doc_line) : (mi += 1) {
-            // **도달 불가한 방어다.** 위에서 `buf.len >= matches.len`을 보장했고 `w`는 매치당
-            // 최대 1씩만 는다. 그래도 두는 이유는 `editorTabWidth`의 clamp와 같다 — 넘치면
-            // 남의 메모리를 쓰는 것이라 조용한 실패가 최악이고, **도달 불가한 것을 알고 두는
-            // 것과 모르고 두는 것은 다르다**(적대적 검증 2026-08-23이 죽은 가지로 확인).
-            if (w >= buf.len) break;
-            buf[w] = .{ .start = matches[mi].start, .len = matches[mi].len };
+        var mj = mi;
+        while (mj < matches.len and matches[mj].line <= doc_line) : (mj += 1) {
+            const segment = find.segmentForLine(matches[mj], doc_line, line_len) orelse continue;
+            std.debug.assert(w < buf.len);
+            buf[w] = .{ .start = segment.start, .len = segment.len };
             w += 1;
         }
         if (w > from) rows[i] = buf[from..w];
@@ -51256,4 +51295,98 @@ test "OUTLINE16 실제 심볼 응답은 순번과 편집 버전을 확인하고 
     outline_test_ops.pointer(fx.session, .up, next.x + 70, next.y + 10);
     try testing.expectEqual(@as(usize, 40), fx.term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+}
+
+test "EDREG1 문서 정규식은 여러 줄 강조·캡처 치환·Undo를 같은 범위로 처리한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |all| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const before = if (all) "foo\r\nbar\n--\nfoo\nbar" else "prefix\nfoo\r\nbar\nsuffix";
+        const term = try undoFixture(&fx, testing.allocator, "document-regex.txt", before);
+        fx.session.surface_initialized = true;
+        find_ops.toggleFind(fx.session);
+        fx.session.chrome_host.find.regex = true;
+        try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "(?<a>foo\\r?\\n)(?<b>bar)");
+        try fx.session.chrome_host.find.replace.query.appendSlice(testing.allocator, "${b}|${a}");
+        find_ops.recomputeFind(fx.session);
+        try testing.expectEqual(@as(usize, if (all) 2 else 1), fx.session.editor_find_matches.items.len);
+        const first_line: usize = if (all) 0 else 1;
+        const marks = buildFindMarks(fx.session, term, fx.session.editor_find_matches.items).?;
+        try testing.expectEqual(@as(usize, 1), marks[first_line].len);
+        try testing.expectEqual(@as(u32, 3), marks[first_line][0].len);
+        try testing.expectEqual(@as(u32, 3), marks[first_line + 1][0].len);
+        const selected = term.rt.editor_selection.?;
+        try testing.expectEqual(@as(usize, if (all) 0 else 7), selected.start());
+        try testing.expectEqual(@as(usize, if (all) 8 else 15), selected.end());
+        if (all) find_ops.replaceAll(fx.session) else find_ops.replaceOne(fx.session);
+        const expected = if (all) "bar|foo\r\n\n--\nbar|foo\n" else "prefix\nbar|foo\r\n\nsuffix";
+        try testing.expectEqualStrings(expected, term.rt.editorDocument().opened.?.file.content);
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "EDREG2 공유 문서의 여러 줄 정규식 치환은 프레임 전 변경을 다시 검색한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "shared-document-regex.txt", "prefix\nfoo\r\nbar\nsuffix");
+    const peer = try openSharedViewInActivePane(fx.session, term);
+    try testing.expect(fx.session.activateSurfaceById(term.surfaceId()));
+    fx.session.surface_initialized = true;
+    find_ops.toggleFind(fx.session);
+    fx.session.chrome_host.find.regex = true;
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "foo\\r?\\nbar");
+    try fx.session.chrome_host.find.replace.query.appendSlice(testing.allocator, "done");
+    find_ops.recomputeFind(fx.session);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "shift\n"));
+    find_ops.replaceOne(fx.session);
+    try testing.expectEqualStrings("shift\nprefix\ndone\nsuffix", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings(term.rt.editorDocument().opened.?.file.content, peer.rt.editorDocument().opened.?.file.content);
+}
+
+test "EDREG3 여러 줄 강조는 lazy 줄 캐시 대신 원문 길이를 사용한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "regex-cache.txt", "prefix\nfoo\r\nbar\n--\nfoo\nbar\nsuffix\n");
+    var matches: std.ArrayList(maru.session.editor.find.Match) = .empty;
+    defer matches.deinit(testing.allocator);
+    try maru.session.editor.find.findDocumentRegex(testing.allocator, term.rt.editorDocument().opened.?.file.content, "foo\\r?\\nbar", .{ .newline = .anycrlf }, &matches);
+    const original = term.rt.editor_lines;
+    defer term.rt.editor_lines = original;
+    var stale = [_][]const u8{"stale"};
+    term.rt.editor_lines = &stale;
+    const marks = buildFindMarks(fx.session, term, matches.items).?;
+    try testing.expectEqual(@as(u32, 3), marks[1][0].len);
+    try testing.expectEqual(@as(u32, 3), marks[2][0].len);
+    try testing.expectEqual(@as(u32, 3), marks[4][0].len);
+    try testing.expectEqual(@as(u32, 3), marks[5][0].len);
+}
+
+test "EDREG4 제품 프레임은 현재와 나머지 여러 줄 결과의 배경을 모두 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "regex-frame.txt", "prefix\nfoo\r\nbar\n--\nfoo\nbar\nsuffix\n");
+    fx.session.surface_initialized = true;
+    find_ops.toggleFind(fx.session);
+    fx.session.chrome_host.find.regex = true;
+    try fx.session.chrome_host.find.input.query.appendSlice(testing.allocator, "foo\\r?\\nbar");
+    find_ops.recomputeFind(fx.session);
+    var drawn = appendPaneFrame(fx.session, .{ .x = 0, .y = 0, .w = 800, .h = 300 }, term).?;
+    defer drawn.dl.deinit(testing.allocator);
+    // 글자 셀의 배경은 투명하다. 그 아래 독립 quad로 내려간 검색 배경을 검사해야 한다.
+    var current: usize = 0;
+    var normal: usize = 0;
+    for (fx.session.gpu_quads.items) |quad| {
+        if (quad.w != @as(f32, @floatFromInt(3 * fx.session.cell_width_px)) or quad.h != @as(f32, @floatFromInt(fx.session.cell_height_px))) continue;
+        const alpha = quad.fill_color0 >> 24;
+        if (alpha == chrome_editor.frame.search_current_alpha) current += 1;
+        if (alpha == chrome_editor.frame.search_alpha) normal += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), current);
+    try testing.expectEqual(@as(usize, 2), normal);
 }

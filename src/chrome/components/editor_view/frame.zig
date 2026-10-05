@@ -461,7 +461,19 @@ pub const RunTextPool = struct {
 /// 지금 네비게이션이 가리키는 검색 결과 — 줄(`search_marks`와 **같은 축**)과 그 줄 안 시작 byte.
 ///
 /// `Mark`를 쓰지 않는 이유: 길이는 이미 `search_marks` 쪽에 있고, 여기 또 두면 둘이 다를 수 있다.
-pub const CurrentMatch = struct { line: u32, start: u32 };
+pub const CurrentMatch = struct {
+    line: u32,
+    start: u32,
+    end_line: ?u32 = null,
+    end_byte: u32 = 0,
+
+    /// 현재 여러 줄 매치의 각 조각을 같은 역할로 그린다. 끝이 다음 줄 0이면 그 줄은 제외한다.
+    fn includes(self: CurrentMatch, row: u32, start: u32) bool {
+        if (row == self.line) return start == self.start;
+        const last = self.end_line orelse return false;
+        return row > self.line and row <= last and (row < last or self.end_byte > 0) and start == 0;
+    }
+};
 
 /// 비교 본문에서 한 줄이 무엇인가. **`none`은 색을 칠하지 않는다** — context와, 짝을 맞추려 넣은 빈
 /// 행이 여기 든다(빈 행에 색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다).
@@ -2000,10 +2012,10 @@ fn paintCurrentSearchInto(props: Props, layout: geometry.Layout, visual: []const
         for (visual, 0..) |v, i| {
             if (v.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
             const idx = v.docIndex(props.first_line);
-            if (idx != cur.line or idx >= rows.len or idx >= props.lines.len) continue;
+            if (idx >= rows.len or idx >= props.lines.len) continue;
             const marks = rows[idx];
             const k = for (marks, 0..) |m, mi| {
-                if (m.start == cur.start) break mi;
+                if (cur.includes(@intCast(idx), m.start)) break mi;
             } else continue;
             paintRowMarksInto(props, layout, .{
                 .line = props.lines[idx],
@@ -2047,9 +2059,8 @@ fn paintOtherSearchInto(props: Props, layout: geometry.Layout, visual: []const v
         // 엄격히 증가하며, ⑶ 보이는 줄 번호 표에 중복이 없어 같은 문서 줄이 두 행에 실리지 않는다.
         const cur: ?usize = blk: {
             const c = props.search_current orelse break :blk null;
-            if (c.line != idx) break :blk null;
             for (marks, 0..) |m, k| {
-                if (m.start == c.start) break :blk k;
+                if (c.includes(@intCast(idx), m.start)) break :blk k;
             }
             break :blk null;
         };
@@ -7604,4 +7615,33 @@ test "RB8 공백 표시는 run·글자 몫을 쓰지 않는다 — 본문 위에
         try testing.expect(!we.truncated);
         try testing.expect(sameOpContent(ops_e[0..we.ops], ops_w[0..ww.ops]));
     }
+}
+
+test "FND39 현재 여러 줄 매치는 모든 조각을 우선하고 인접 매치를 포함하지 않는다" {
+    const lines = [_][]const u8{ "foo", "bar", "foo" };
+    const first = [_]Mark{.{ .start = 0, .len = 3 }};
+    const second = [_]Mark{.{ .start = 0, .len = 3 }};
+    const third = [_]Mark{.{ .start = 0, .len = 3 }};
+    const rows = [_][]const Mark{ &first, &second, &third };
+    var props = testProps(&lines, false);
+    props.search_marks = &rows;
+    props.search_current = .{ .line = 0, .start = 0, .end_line = 1, .end_byte = 3 };
+    var ops: [256]draw.Op = undefined;
+    var runs: [256]draw.Run = undefined;
+    var text_bytes: [4096]u8 = undefined;
+    var buffers: WideBuffers = .{ .ops = &ops };
+    const written = build(props, buffers.scratch(&runs, &text_bytes));
+    try testing.expect(!written.truncated);
+    var current_count: usize = 0;
+    var normal_count: usize = 0;
+    for (ops[0..written.ops]) |op| {
+        if (op != .quad) continue;
+        if (op.quad.fill_role == .search_match_current) current_count += 1;
+        if (op.quad.fill_role == .search_match) normal_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), current_count);
+    try testing.expectEqual(@as(usize, 1), normal_count);
+    const end_at_zero = CurrentMatch{ .line = 0, .start = 0, .end_line = 1, .end_byte = 0 };
+    try testing.expect(!end_at_zero.includes(1, 0));
+    try testing.expect(!props.search_current.?.includes(1, 1));
 }

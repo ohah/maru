@@ -1370,6 +1370,14 @@ pub fn build(b: *std.Build) void {
     const run_search_case_fold_tests = b.addRunArtifact(search_case_fold_tests);
     run_search_case_fold_tests.addArg("--maru-expect-tests=25"); // SCF1~3과 익명 import 판정자 22개.
     b.step("test-search-case-fold", "Run Unicode search folding judges").dependOn(&run_search_case_fold_tests.step);
+    const editor_document_regex_step = b.step("test-editor-document-regex", "Run whole-document regex judges");
+    const document_regex_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "FND35 문서", "FND36 문서", "FND37 문서", "FND38 비교", "FND39 현재" },
+    });
+    const run_document_regex_tests = b.addRunArtifact(document_regex_tests);
+    run_document_regex_tests.addArg("--maru-expect-tests=27"); // FND35~39와 익명 import 판정자 22개.
+    editor_document_regex_step.dependOn(&run_document_regex_tests.step);
     // The editor-only fast suite does not import terminal.selection tests. Keep an explicit,
     // counted path for the regex cell-mapping judges instead of assuming test-editor ran them.
     const terminal_regex_step = b.step("test-terminal-regex", "Run terminal regex core tests");
@@ -5177,6 +5185,15 @@ pub fn build(b: *std.Build) void {
     run_document_runtime_tests.setCwd(b.path("."));
     run_document_runtime_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-document-runtime", "Run editor document registration and release judges").dependOn(&run_document_runtime_tests.step);
+    const document_regex_product_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{"EDREG"},
+    });
+    const run_document_regex_product_tests = b.addRunArtifact(document_regex_product_tests);
+    run_document_regex_product_tests.addArg("--maru-expect-tests=8"); // EDREG1~4와 익명 import 판정자 4개.
+    run_document_regex_product_tests.setCwd(b.path("."));
+    run_document_regex_product_tests.step.dependOn(&install_fake_lsp.step);
+    editor_document_regex_step.dependOn(&run_document_regex_product_tests.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);

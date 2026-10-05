@@ -2,6 +2,12 @@
 
 Maru 작업에서 사용하는 기본 명령이다.
 
+## WebKit 편집기 자원 검사
+
+- 기본 제품 MergeView 스모크: `mise run test-macos-editor-smoke`.
+- 실제 WebContent 귀속·회수 대조군: `mise run test-macos-editor-resources`. 별도 WKWebView 생성 시점·먼저 종료·대상 뷰 보유·PID 재사용·없는 진단 getter를 검사한다. 보유 대조군의 하위 스모크 실패는 예상 결과이며 상위 검증 명령은 이를 확인하고 성공한다.
+- 진단: `zig-out/maru-macos-editor-smoke/editor.summary.txt`, `zig-out/editor-webcontent-attribution/latest.json`과 실행별 하위 폴더. 대상 PID·시작 시각·회수 시간·오류를 남기며 CI는 실행 attempt별 artifact를 보존한다. 제품 앱에는 테스트 전용 PID getter를 넣지 않는다.
+
 ## 도구
 
 - 도구 설치/선택: `mise install`

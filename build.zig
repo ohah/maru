@@ -2523,6 +2523,7 @@ pub fn build(b: *std.Build) void {
         macos_editor_smoke_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_editor_smoke_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_editor_smoke_compile.addFileArg(b.path("tests/macos_editor_smoke.swift"));
+        macos_editor_smoke_compile.addFileArg(b.path("tests/macos_editor_resources.swift"));
         macos_editor_smoke_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_editor_smoke_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
         macos_editor_smoke_compile.addArgs(&.{
@@ -2551,6 +2552,21 @@ pub fn build(b: *std.Build) void {
         const macos_editor_smoke_step = b.step("test-macos-editor-smoke", "Assert the MergeView product WKWebView gate");
         macos_editor_smoke_step.dependOn(&macos_editor_smoke_run.step);
         macos_only_test_step.dependOn(&macos_editor_smoke_run.step);
+
+        // 시스템 전체 PID 귀속으로 되돌아가면 실제 별도 WKWebView 대조군이 실패한다.
+        // 대상 뷰를 보유하는 대조군도 포함해 회수 검사를 무력화한 false-green을 막는다.
+        const editor_resource_cases = b.addSystemCommand(&.{ "python3", "tools/test-editor-webcontent-attribution.py" });
+        editor_resource_cases.addArgs(&.{
+            "--binary", b.pathFromRoot("zig-out/bin/maru-macos-editor-smoke"),
+            "--assets", b.pathFromRoot("zig-out/maru-macos-editor-smoke/assets"),
+            "--output", b.pathFromRoot("zig-out/editor-webcontent-attribution"),
+        });
+        editor_resource_cases.setCwd(b.path("."));
+        editor_resource_cases.has_side_effects = true;
+        editor_resource_cases.step.dependOn(&macos_editor_smoke_compile.step);
+        editor_resource_cases.step.dependOn(&macos_editor_smoke_assets.step);
+        b.step("test-macos-editor-resources", "Verify actual WKWebView process attribution and reclaim controls").dependOn(&editor_resource_cases.step);
+        macos_only_test_step.dependOn(&editor_resource_cases.step);
 
         // 눈으로 볼 때만 창을 띄운다(기본은 accessory라 CI에서 창이 뜨지 않는다).
         const macos_editor_smoke_display = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-editor-smoke"});

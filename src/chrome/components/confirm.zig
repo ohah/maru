@@ -216,27 +216,27 @@ pub fn view(
     //     라벨은 버튼 패딩만큼 우측에서 시작. arena에 만든 라벨 슬라이스는 view 동안(=lower까지) 유효.
     const confirm_focused = state.focused == .confirm;
     if (g.confirm_fit > 0) {
-        try modal_box.fillCells(box, g.confirm_x, g.btn_row, g.confirm_fit, if (confirm_focused) .focus_accent else .tab_hover_bg, arena, out);
+        try modal_box.fillCells(box, g.confirm_x, g.confirm_row, g.confirm_fit, if (confirm_focused) .focus_accent else .tab_hover_bg, arena, out);
         const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_confirm, state.confirm_label });
-        try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
+        try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), g.confirm_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
     }
     if (state.has_alternate and g.alternate_fit > 0) {
         const focused = state.focused == .alternate;
-        try modal_box.fillCells(box, g.alternate_x, g.btn_row, g.alternate_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
+        try modal_box.fillCells(box, g.alternate_x, g.alternate_row, g.alternate_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
         const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_alternate, state.alternate_label });
-        try modal_box.text(box, g.alternate_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
+        try modal_box.text(box, g.alternate_x + @as(i32, @intCast(btn_pad * box.cw)), g.alternate_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
     if (state.has_extra and g.extra_fit > 0) {
         const focused = state.focused == .extra;
-        try modal_box.fillCells(box, g.extra_x, g.btn_row, g.extra_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
+        try modal_box.fillCells(box, g.extra_x, g.extra_row, g.extra_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
         const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_extra, state.extra_label });
-        try modal_box.text(box, g.extra_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
+        try modal_box.text(box, g.extra_x + @as(i32, @intCast(btn_pad * box.cw)), g.extra_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
     if (g.cancel_fit > 0) {
         const focused = state.focused == .cancel;
-        try modal_box.fillCells(box, g.cancel_x, g.btn_row, g.cancel_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
+        try modal_box.fillCells(box, g.cancel_x, g.cancel_row, g.cancel_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
         const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_cancel, state.cancel_label });
-        try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
+        try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), g.cancel_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
 }
 
@@ -251,7 +251,13 @@ const ellipsis = "…";
 /// view↔hitTest 단일 모델). 박스·각 버튼 x·fit-clamp된 폭(칸; 0이면 너무 좁아 생략)을 돌려준다. null=안 열림/생략 박스.
 const ButtonGeom = struct {
     box: modal_box.Box,
-    btn_row: u32, // 버튼 콘텐츠 행 — 메시지 줄 수와 미리보기(body) 줄 수만큼 아래로 내려간다(view↔hitTest 공유)
+    btn_row: u32, // 버튼 **첫** 행 — 메시지 줄 수와 미리보기(body) 줄 수만큼 아래로 내려간다(view↔hitTest 공유)
+    btn_rows: u32, // 버튼이 차지하는 행 수 — 한 줄에 안 들어가면 순서대로 다음 줄로 넘긴다
+    // 버튼마다 자기 행(btn_row 부터). 없는 버튼(has_alternate/has_extra=false)은 무시된다.
+    confirm_row: u32,
+    alternate_row: u32,
+    extra_row: u32,
+    cancel_row: u32,
     body_row: u32, // 미리보기 첫 행 — 메시지 줄 다음 빈 줄 뒤
     // 메시지를 상자 안쪽 폭으로 나눈 줄들(state.message 를 빌린다). msg_truncated 면 마지막 줄 끝에 「…」.
     msg_lines: [max_message_rows][]const u8,
@@ -294,21 +300,51 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     const m: u32 = wrapped.rows;
     // 콘텐츠 행: 미리보기 없으면 m+2행([0..m)=메시지·m=빈줄·m+1=버튼); 있으면 [0..m)=메시지·m=빈줄·[m+1..m+1+n)=본문·
     // m+1+n=빈줄·m+2+n=버튼. m=1 이면 예전 배치(3행·4+n행) 그대로다.
+    // 버튼도 안쪽 폭에 나눈다 — 순서대로(확인·대안·추가·취소) 채우고, 다음 버튼이 안 들어가면 다음 줄로 넘긴다. 예전에는
+    // 한 줄로만 놓고 넘친 버튼을 잘라 생략했다 — 좁은 창의 종료 확인에서 「종료 및 세션 끝내기」가 잘리고 「취소」가
+    // 사라졌다(실제 앱 캡처, 2026-10-05). 한 줄에 다 들어가면 예전 배치 그대로다.
+    const btn_cols = [4]u32{ default_btn_cols, alternate_btn_cols, extra_btn_cols, cancel_btn_cols };
+    const present = [4]bool{ true, state.has_alternate, state.has_extra, true };
+    var row_of: [4]u32 = .{ 0, 0, 0, 0 };
+    var row_cols: [4]u32 = .{ 0, 0, 0, 0 };
+    var last_row: u32 = 0;
+    for (btn_cols, present, 0..) |cols, here, i| {
+        if (!here) continue;
+        const cur = row_cols[last_row];
+        if (cur > 0 and cur + btn_gap + cols > width_probe.inner_cols) last_row += 1;
+        row_cols[last_row] = if (row_cols[last_row] == 0) cols else row_cols[last_row] + btn_gap + cols;
+        row_of[i] = last_row;
+    }
+    const btn_rows: u32 = last_row + 1;
     const n: u32 = @intCast(state.body.len);
     const body_row: u32 = m + 1;
-    const content_rows: u32 = if (n == 0) m + 2 else m + n + 3;
+    // 콘텐츠 행: [0..m)=메시지·m=빈줄·(미리보기 n줄·빈줄)·버튼 btn_rows줄. btn_rows=1 이면 예전 배치(m+2·m+n+3) 그대로다.
+    const content_rows: u32 = if (n == 0) m + 1 + btn_rows else m + n + 2 + btn_rows;
     const btn_row: u32 = if (n == 0) body_row else body_row + n + 1; // 본문 뒤 빈 줄 다음
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
-    const group_x = modal_box.centerX(box, btn_row_cols);
-    // 버튼이 박스 안쪽 우측 끝을 넘으면(좁은 창/긴 라벨) fill이 rasterize bbox를 패널 밖으로 키운다 → 폭을 clamp하고
-    // 0이면(완전히 밖) 호출자가 버튼을 생략(그땐 키보드 Esc/Y/N). 정상 창은 무변화. inner=[inner_x, inner_x+inner_cols×cw).
+    // 줄마다 가운데. 버튼 하나가 안쪽 폭보다 넓으면(아주 좁은 창/긴 라벨) fill이 rasterize bbox를 패널 밖으로 키운다 →
+    // 폭을 clamp하고 0이면(완전히 밖) 호출자가 그 버튼을 생략(그땐 키보드 Esc/Y/N). inner=[inner_x, inner_x+inner_cols×cw).
     const inner_right = box.inner_x + @as(i32, @intCast(box.inner_cols * box.cw));
-    const alternate_x = group_x + @as(i32, @intCast((default_btn_cols + btn_gap) * box.cw));
-    const extra_x = alternate_x + @as(i32, @intCast((alternate_btn_cols + (if (state.has_alternate) btn_gap else 0)) * box.cw));
-    const cancel_x = extra_x + @as(i32, @intCast((extra_btn_cols + (if (state.has_extra) btn_gap else 0)) * box.cw));
+    var cursor: [4]i32 = undefined;
+    for (&cursor, row_cols) |*c, cols| c.* = modal_box.centerX(box, cols);
+    var xs: [4]i32 = .{ 0, 0, 0, 0 };
+    for (btn_cols, present, 0..) |cols, here, i| {
+        if (!here) continue;
+        xs[i] = cursor[row_of[i]];
+        cursor[row_of[i]] += @intCast((cols + btn_gap) * box.cw);
+    }
+    const group_x = xs[0];
+    const alternate_x = xs[1];
+    const extra_x = xs[2];
+    const cancel_x = xs[3];
     return .{
         .box = box,
         .btn_row = btn_row,
+        .btn_rows = btn_rows,
+        .confirm_row = btn_row + row_of[0],
+        .alternate_row = btn_row + row_of[1],
+        .extra_row = btn_row + row_of[2],
+        .cancel_row = btn_row + row_of[3],
         .body_row = body_row,
         .msg_lines = msg_lines,
         .msg_rows = m,
@@ -406,19 +442,21 @@ pub fn buttonAtPoint(state: *const State, p: props.ChromeProps, tk: *const token
     const fy = @as(f64, @floatFromInt(b.y));
     // 패널 밖 → 취소(바깥 클릭 dismiss).
     if (x_px < fx or x_px >= fx + @as(f64, @floatFromInt(b.w)) or y_px < fy or y_px >= fy + @as(f64, @floatFromInt(b.h))) return .cancelled;
-    // 버튼 행 y 범위 안에서 각 버튼 x 범위(fit 폭) 검사.
-    const ry = @as(f64, @floatFromInt(modal_box.rowY(g.box, g.btn_row)));
+    // 버튼마다 **자기 행**의 y 범위 안에서 x 범위(fit 폭)를 본다 — 버튼이 여러 줄로 나뉠 수 있다(view 와 같은 배치).
     const cw_f = @as(f64, @floatFromInt(g.box.cw));
-    if (y_px >= ry and y_px < ry + @as(f64, @floatFromInt(g.box.ch))) {
-        const cfx = @as(f64, @floatFromInt(g.confirm_x));
-        if (g.confirm_fit > 0 and x_px >= cfx and x_px < cfx + @as(f64, @floatFromInt(g.confirm_fit)) * cw_f) return .confirmed;
-        const afx = @as(f64, @floatFromInt(g.alternate_x));
-        if (g.alternate_fit > 0 and x_px >= afx and x_px < afx + @as(f64, @floatFromInt(g.alternate_fit)) * cw_f) return .alternate;
-        const efx = @as(f64, @floatFromInt(g.extra_x));
-        if (g.extra_fit > 0 and x_px >= efx and x_px < efx + @as(f64, @floatFromInt(g.extra_fit)) * cw_f) return .extra;
-        const xcx = @as(f64, @floatFromInt(g.cancel_x));
-        if (g.cancel_fit > 0 and x_px >= xcx and x_px < xcx + @as(f64, @floatFromInt(g.cancel_fit)) * cw_f) return .cancelled;
-    }
+    const ch_f = @as(f64, @floatFromInt(g.box.ch));
+    const Hit = struct {
+        fn at(box: modal_box.Box, row: u32, x: i32, fit: u32, cw: f64, ch: f64, px: f64, py: f64) bool {
+            if (fit == 0) return false;
+            const ry = @as(f64, @floatFromInt(modal_box.rowY(box, row)));
+            const bx = @as(f64, @floatFromInt(x));
+            return py >= ry and py < ry + ch and px >= bx and px < bx + @as(f64, @floatFromInt(fit)) * cw;
+        }
+    };
+    if (Hit.at(g.box, g.confirm_row, g.confirm_x, g.confirm_fit, cw_f, ch_f, x_px, y_px)) return .confirmed;
+    if (state.has_alternate and Hit.at(g.box, g.alternate_row, g.alternate_x, g.alternate_fit, cw_f, ch_f, x_px, y_px)) return .alternate;
+    if (state.has_extra and Hit.at(g.box, g.extra_row, g.extra_x, g.extra_fit, cw_f, ch_f, x_px, y_px)) return .extra;
+    if (Hit.at(g.box, g.cancel_row, g.cancel_x, g.cancel_fit, cw_f, ch_f, x_px, y_px)) return .cancelled;
     return null; // 패널 안, 버튼 아님 → 소비(무동작)
 }
 
@@ -773,7 +811,7 @@ test "confirm view: 좁은 창에서 버튼 배경이 패널(quad) 밖으로 안
     };
 }
 
-test "confirm view: 네 버튼도 좁은 창에서 패널 밖으로 안 넘친다 — 줄어드는 순서는 뒤에서부터" {
+test "confirm view: 네 버튼은 좁은 창에서 줄을 나눠 다 그려지고, 패널 밖으로 안 넘치며 서로 안 겹친다" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -783,9 +821,9 @@ test "confirm view: 네 버튼도 좁은 창에서 패널 밖으로 안 넘친�
     const msg = "파일이 외부에서 바뀌었습니다. 덮어쓰면 그 변경이, 다시 읽으면 방금 친 것이 사라집니다(되돌리기로 돌아옵니다)";
     const four = Choices{ .primary = "비교", .alternate = "덮어쓰기", .cancel = "계속 편집", .extra = "다시 읽기" };
 
-    // ⑴ **실측**: backing 500px(cw=8 → 62칸)까지는 **넷이 다 그려진다**. 그 아래로는 뒤 버튼이
-    //    생략되고(키는 살아 있다) **어느 폭에서도 패널 밖으로 넘치지 않는다** — 넘치면 rasterize 격자가
-    //    커져 사이드바·터미널을 침범한다(두 버튼 판의 그 회귀와 같은 부류).
+    // ⑴ **어느 폭에서도 넷이 다 그려진다** — 한 줄에 안 들어가면 순서대로 다음 줄로 넘긴다. 예전에는 500px 아래에서
+    //    뒤 버튼이 생략됐다(키만 살아 있었다). 그리고 **어느 폭에서도 패널 밖으로 넘치지 않고** 버튼끼리 겹치지 않는다 —
+    //    넘치면 rasterize 격자가 커져 사이드바·터미널을 침범한다(두 버튼 판의 그 회귀와 같은 부류).
     for ([_]u32{ 2560, 1600, 1200, 900, 700, 500, 360, 200 }) |w| {
         const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = w, .backing_height_px = 600 } };
         var s = State{};
@@ -802,12 +840,22 @@ test "confirm view: 네 버튼도 좁은 창에서 패널 밖으로 안 넘친�
             }
         }
         try std.testing.expect(panel_right > 0);
+        var rects: [4]draw.Rect = undefined;
+        var k: usize = 0;
         for (out.items) |op| {
             if (op == .fill) {
                 try std.testing.expect(op.fill.rect.x + @as(i32, @intCast(op.fill.rect.w)) <= panel_right);
+                if (k < rects.len) rects[k] = op.fill.rect;
+                k += 1;
             }
         }
-        if (w >= 500) try std.testing.expectEqual(@as(usize, 4), buttons);
+        try std.testing.expectEqual(@as(usize, 4), buttons);
+        // 서로 안 겹친다 — 같은 행이면 x 구간이 떨어져 있고, 다른 행이면 y 가 다르다.
+        for (rects[0..4], 0..) |a, i| for (rects[i + 1 .. 4]) |b| {
+            const same_row = a.y == b.y;
+            const apart = a.x + @as(i32, @intCast(a.w)) <= b.x or b.x + @as(i32, @intCast(b.w)) <= a.x;
+            try std.testing.expect(!same_row or apart);
+        };
     }
 
     // ⑵ **줄어들어도 키는 그대로다.** 버튼이 생략된 폭에서도 `R`·Esc 가 그 갈래를 실행한다 —
@@ -871,6 +919,47 @@ test "confirm buttonAtPoint: 그려진 버튼 중심 클릭이 같은 Action —
     try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, centerX(pr), @floatFromInt(pr.y + 2)));
     // 비유한 좌표 방어.
     try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, std.math.nan(f64), 300));
+}
+
+// 좁은 창의 종료 확인(버튼 셋)에서 「종료 및 세션 끝내기」가 잘리고 「취소」가 사라졌다(실제 앱 캡처 420px, 2026-10-05).
+test "confirm view: 버튼이 한 줄에 안 들어가면 다음 줄로 넘기고, 넘긴 버튼도 그 자리에서 눌린다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 180, .backing_width_px = 420, .backing_height_px = 360 } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var s = State{};
+    s.showChoices("maru를 종료할까요? 열린 터미널은 백그라운드에서 유지됩니다.", .{ .primary = "종료", .alternate = "종료 및 세션 끝내기", .cancel = "취소" });
+    const g = buttonGeom(&s, p, &tk).?;
+    try std.testing.expect(g.btn_rows > 1);
+    try std.testing.expect(g.confirm_fit > 0 and g.alternate_fit > 0 and g.cancel_fit > 0); // 셋 다 그려진다
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, p, &tk, arena, &out);
+    var panel: ?draw.Rect = null;
+    for (out.items) |op| if (op == .quad) {
+        panel = op.quad.rect;
+    };
+    const pr = panel.?;
+    // 버튼마다 자기 가운데를 누르면 그 동작이다 — 넘긴 줄의 버튼도 그려진 자리에서 눌린다.
+    const Probe = struct { row: u32, x: i32, fit: u32, want: Action };
+    for ([_]Probe{
+        .{ .row = g.confirm_row, .x = g.confirm_x, .fit = g.confirm_fit, .want = .confirmed },
+        .{ .row = g.alternate_row, .x = g.alternate_x, .fit = g.alternate_fit, .want = .alternate },
+        .{ .row = g.cancel_row, .x = g.cancel_x, .fit = g.cancel_fit, .want = .cancelled },
+    }) |b| {
+        const cx = @as(f64, @floatFromInt(b.x)) + @as(f64, @floatFromInt(b.fit * g.box.cw)) / 2.0;
+        const cy = @as(f64, @floatFromInt(modal_box.rowY(g.box, b.row))) + @as(f64, @floatFromInt(g.box.ch)) / 2.0;
+        try std.testing.expectEqual(@as(?Action, b.want), buttonAtPoint(&s, p, &tk, cx, cy));
+        // 그 버튼은 패널 안이다.
+        try std.testing.expect(b.x >= pr.x and b.x + @as(i32, @intCast(b.fit * g.box.cw)) <= pr.x + @as(i32, @intCast(pr.w)));
+        try std.testing.expect(cy < @as(f64, @floatFromInt(pr.y + @as(i32, @intCast(pr.h)))));
+    }
+    // 한 줄에 다 들어가는 넓은 창에서는 예전 배치 그대로다(한 줄).
+    const wide = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 180, .backing_width_px = 1200, .backing_height_px = 600 } };
+    const gw = buttonGeom(&s, wide, &tk).?;
+    try std.testing.expectEqual(@as(u32, 1), gw.btn_rows);
+    try std.testing.expect(gw.confirm_row == gw.cancel_row and gw.alternate_row == gw.cancel_row);
 }
 
 // 메시지가 상자보다 길면 한 줄로 그려 상자 밖으로 넘쳤다 — 기본 960pt 창(셀 8px·사이드바 180px, 안쪽 약 90칸)에서

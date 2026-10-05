@@ -519,6 +519,17 @@ jobs:
         run: bun install --cwd web --frozen-lockfile
       - name: Run the gates that only exist on macOS
         run: zig build test-macos-only
+      # 실패한 PID의 identity를 남겨 회수 지연과 오집계를 구분할 수 있게 한다.
+      # 재실행은 다른 이름으로 보존한다 — 최초 실패의 근거를 덮어쓰지 않는다.
+      - name: Preserve editor WebContent attribution diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-editor-webcontent-artifacts-${{ github.run_attempt }}
+          path: |
+            zig-out/maru-macos-editor-smoke/editor.summary.txt
+            zig-out/editor-webcontent-attribution/
+          if-no-files-found: warn
       # **원격 SCM 을 실물 SSH 위에서 돈다.** 그 판정자들은 control socket 이 없으면 `SkipZigTest` 라,
       # 이 스텝이 없으면 RS1~RS4 는 CI 에서 **한 줄도 안 돈다** — 실제로 그 축의 결함 여섯이 사람이
       # 손으로 잰 뒤에야 나왔다(docs/plans/remote-scm.md §7·§8·§9.2).

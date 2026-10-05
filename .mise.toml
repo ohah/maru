@@ -172,6 +172,10 @@ run = "zig build macos-editor-smoke"
 description = "Assert the MergeView product WKWebView gate (E0.5A)"
 run = "zig build test-macos-editor-smoke"
 
+[tasks.test-macos-editor-resources]
+description = "Verify actual WKWebView process ownership and reclaim controls"
+run = "zig build test-macos-editor-resources"
+
 [tasks.macos-mermaid-perf]
 description = "Run the native Mermaid performance artifact gate"
 run = "zig build -Doptimize=ReleaseSafe macos-mermaid-perf"

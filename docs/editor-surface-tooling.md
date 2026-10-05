@@ -289,10 +289,35 @@ IME는 synthetic JS/AppKit event만으로 통과 처리하지 않는다. 자동 
 | 유휴 CPU(화면 밖) | 1·2·4개 모두 **0%** |
 | 닫은 뒤 회수 | **0.6~0.7초**에 프로세스·메모리 전부 회수(잔존 0) |
 
-**측정에서 배운 것 둘.**
+### WebContent 자원 귀속과 회수 판정
+
+`tests/macos_editor_resources.swift`의 `EditorResourceProbe`는 각 측정 뷰의 실제 WebContent PID와
+Darwin `proc_pidinfo(PROC_PIDTBSDINFO)`의 시작 시각을 함께 식별자로 사용한다. 같은 시기에 다른 앱이 만든
+프로세스를 포함하지 않으며, 동일 PID가 재사용돼도 다른 시작 시각이면 이전 뷰의 잔존으로 세지 않는다.
+RSS·유휴 CPU도 이 식별자 집합에 속한 프로세스만 집계한다. 독립 configuration을 사용하되 프로세스 수가
+뷰 수와 같다고 가정하지 않고 실제 중복 없는 식별자 수를 기록한다.
+
+공개 WKWebView API는 WebContent PID를 제공하지 않아 **테스트 바이너리에서만** 진단 getter
+`_webProcessIdentifier`를 지원 여부 확인 후 사용한다. 제품 앱에는 이 helper를 링크하지 않는다.
+getter·시작 시각·통계를 관측하지 못하거나 측정 중 대상 프로세스가 바뀌면 `resource_measure_error`로 실패한다.
+이 경우 시스템 전체 신규 PID 집합으로 폴백하거나 실패를 회수 0개로 바꾸지 않는다. OS 업데이트로 진단 getter가
+사라지면 gate의 관측 방법을 갱신해야 하며, 지원하지 않는 환경을 통과로 처리하지 않는다.
+
+닫은 뒤 `reclaim`은 monotonic 시계와 기존 대기 한도를 사용한다. 한도를 넘긴 회차는 이후 프로세스가 사라져도
+timeout으로 판정한다. summary의 `owned_processes_1_view/2_view/4_view`·`remaining_owned_processes`는
+`PID:시작초:시작마이크로초` 형식이며, 회수 시간·RSS·오류를 함께 보존한다. CI는 실패한 실행과 재실행의
+artifact 이름을 `github.run_attempt`로 구분해 최초 실패 기록을 덮어쓰지 않는다.
+
+`mise run test-macos-editor-resources`는 실제 독립 WKWebView를 측정 전·측정 중·첫 표본 후 생성하거나
+먼저 종료하는 경우를 대조한다. 대상 뷰를 실제로 보유하는 대조군은 잔존 1개와 timeout으로 실패해야 한다.
+PID 재사용·없는 getter·잘못된 CPU 값도 별도 검사한다. 산출물은 `zig-out/editor-webcontent-attribution/`에
+있으며 정상 정리 후 별도 WebContent 식별자가 사라졌는지도 확인한다. 이는 재현 가능한 귀속 결함의 검증이고,
+식별자가 기록되지 않았던 과거 CI 실패의 소유자를 소급 확정하는 근거는 아니다.
+
+**과거 실측에서 배운 것 둘.**
 
 - **선형 증가는 configuration을 뷰마다 새로 만든 결과다.** 하니스는 diff 파일 Term이 각자 패널인 제품 형태를 따라
-  뷰마다 별도 `WKWebViewConfiguration`을 쓰고, 그래서 프로세스도 뷰당 하나다(4개=4프로세스). diff를 여러 개 여는
+  뷰마다 별도 `WKWebViewConfiguration`을 썼고, 당시 프로세스도 뷰당 하나였다(4개=4프로세스). diff를 여러 개 여는
   사용이 흔하면 E1에서 **process pool 공유 여부**를 별도로 정해야 한다 — 공유하면 메모리는 줄지만 격리가 약해진다.
 - **"위반 0"은 그 자체로 근거가 아니다.** CSP 헤더가 빠져도 위반 수는 0이므로, 게이트는 모든 계측을 마친 뒤 반드시
   차단돼야 하는 동작을 일부러 시도해 CSP가 살아 있는지와 수집기가 동작하는지를 함께 확인하고, 아니면 초록을 주지 않는다.

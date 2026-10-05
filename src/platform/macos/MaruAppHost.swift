@@ -908,6 +908,14 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         controller?.handleMouse(event, kind: 3, in: self)
     }
 
+    // 창이 뒤에 있을 때의 첫 누름 — Chromium 탭 본문 위면 창을 올리면서 페이지에도 넘긴다(Chrome 처럼: 뒤 창의 링크가 한 번에 눌리고
+    // 이미지가 바로 끌린다). 터미널·탭 막대 등은 macOS 기본(창만 올린다). W6d 실측(2026-10-05)에서 다른 앱 뒤의 이미지 끌기가 창
+    // 올리기에 먹혔다.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        guard let event, let controller else { return false }
+        return controller.osrAcceptsFirstMouse(event, in: self)
+    }
+
     // right/middle 버튼도 reporting용으로 라우팅(handleMouse가 buttonNumber→xterm 변환). tracking이 꺼졌으면
     // Zig가 button!=0을 무시한다(셀렉션은 left만, context 메뉴 없음). down/drag/up = kind 1/2/3.
     override func rightMouseDown(with event: NSEvent) {
@@ -8109,6 +8117,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).
+    func osrAcceptsFirstMouse(_ event: NSEvent, in view: NSView) -> Bool {
+        guard let session = appSession else { return false }
+        let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
+        return maru_macos_app_session_osr_accepts_first_mouse(session, xPx, yPx) == 1
+    }
+
     func handleMouse(_ event: NSEvent, kind: Int32, in view: NSView) {
         guard let session = appSession else { return }
         // 마우스 다운(kind 1/4/5: 단일·더블·트리플)은 텍스트 입력이 아니다 — 조합 중이면 Zig로 넘기기 '전'에 확정한다. 좌·중·우
@@ -8699,6 +8713,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // move, 버튼 0 왼·1 오른·2 가운데·3 이상 뒤로·앞으로). 비활성 앱의 창에 클릭을 보내면 창 활성화가 먹거나 앱을
                 // 앞으로 올려 사용자 포커스를 빼앗으므로 창 hitTest 한 겹만 건너뛴다 — view → Swift → ABI 는 진짜 경로다.
                 testViewMouse(line, view)
+            case "firstmouse" where line.count >= 3:
+                // firstmouse fx fy — 그 자리의 누름을 창이 뒤에 있을 때도 view 에 넘기는가(`acceptsFirstMouse`). 셸에서 띄운 시험 앱은 맨
+                // 앞이 될 수 없어 진짜 첫 누름 대신 AppKit 이 묻는 그 메서드를 같은 사건으로 부른다.
+                if let terminal = Self.firstTerminalView(in: view.window?.contentView) {
+                    let fx = Double(line[1]) ?? 0, fy = Double(line[2]) ?? 0
+                    let local = NSPoint(x: fx * view.bounds.width, y: view.bounds.height - fy * view.bounds.height)
+                    let event = NSEvent.mouseEvent(with: .leftMouseDown, location: view.convert(local, to: nil), modifierFlags: [],
+                                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: view.window?.windowNumber ?? 0,
+                                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+                    Self.testReport("firstmouse \(line[1]) \(line[2]) \(event.map { terminal.acceptsFirstMouse(for: $0) } ?? false)")
+                }
             case "mark" where line.count >= 2:
                 // mark 이름 — 보고에 시각(ms, 페이지의 Date.now() 와 같은 시계)을 남겨 페이지 이벤트를 단계로 가른다.
                 Self.testReport("mark \(line[1]) \(Int64(Date().timeIntervalSince1970 * 1000))")

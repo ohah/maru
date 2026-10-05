@@ -289,7 +289,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 205: W6d① — 밖에서 끌어 놓기(osr_drag_reset·add·update·exit·drop — view 의 끌기 세션을 Chromium 탭 본문에 넘긴다).
 // 206: W6d② — 페이지에서 끌어내기(osr_drag_out_take·part·started·end, osr_drag_set_source — 창이 macOS 끌기 세션을 돌린다).
 // 207: W6d③ — 끌어낸 이미지 파일(osr_drag_out_file_size, osr_drag_file_request·poll — Finder 가 청할 때만 내용을 받는다).
-pub const abi_version: u32 = 207;
+pub const abi_version: u32 = 208;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,

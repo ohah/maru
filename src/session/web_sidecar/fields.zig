@@ -531,6 +531,12 @@ pub fn checkContextMenu(menu: u32, flags: message.ContextMenuFlags, selection: [
     if (menu == 0) return error.InvalidContextMenu;
     if (flags.link_openable and !flags.link) return error.InvalidContextMenu;
     if (flags.image_openable and !flags.image) return error.InvalidContextMenu;
+    // W6h②: 동영상·오디오는 미디어 안의 둘 중 하나, 나머지 미디어 표지는 그중 하나와 함께만.
+    if ((flags.media_video or flags.media_audio) and !flags.media) return error.InvalidContextMenu;
+    if (flags.media_video and flags.media_audio) return error.InvalidContextMenu;
+    const media_detail = flags.media_loop or flags.media_can_loop or flags.media_controls or flags.media_can_toggle_controls or
+        flags.media_openable or flags.media_copyable;
+    if (media_detail and !(flags.media_video or flags.media_audio)) return error.InvalidContextMenu;
     if (flags._reserved != 0) return error.InvalidContextMenu;
     if (flags.image_loaded and !flags.image) return error.InvalidContextMenu;
     if (flags.selection_truncated and !flags.selection) return error.InvalidContextMenu;

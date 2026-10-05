@@ -155,6 +155,7 @@ fn handle(conn: c_int) void {
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
     const query = if (std.mem.indexOfScalar(u8, target, '=')) |eq| target[eq + 1 ..] else "";
     if (std.mem.startsWith(u8, path, "/img/")) return image(conn, path["/img/".len..]);
+    if (std.mem.eql(u8, path, "/dl/tone.wav")) return tone(conn);
 
     var body_buf: [8192]u8 = undefined;
     const flaky_image = std.mem.eql(u8, path, "/flaky.svg") and flaky_requests.fetchAdd(1, .monotonic) > 0;
@@ -167,6 +168,47 @@ fn handle(conn: c_int) void {
     _ = std.c.write(conn, head.ptr, head.len);
     _ = std.c.write(conn, body.ptr, body.len);
 }
+
+/// W6h② 판정의 소리 — 0.2 초 무음 WAV(8 kHz 모노 16 비트).
+fn tone(conn: c_int) void {
+    const samples = 1600;
+    var wav: [44 + samples * 2]u8 = [_]u8{0} ** (44 + samples * 2);
+    @memcpy(wav[0..4], "RIFF");
+    std.mem.writeInt(u32, wav[4..8], 36 + samples * 2, .little);
+    @memcpy(wav[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, wav[16..20], 16, .little);
+    std.mem.writeInt(u16, wav[20..22], 1, .little);
+    std.mem.writeInt(u16, wav[22..24], 1, .little);
+    std.mem.writeInt(u32, wav[24..28], 8000, .little);
+    std.mem.writeInt(u32, wav[28..32], 16000, .little);
+    std.mem.writeInt(u16, wav[32..34], 2, .little);
+    std.mem.writeInt(u16, wav[34..36], 16, .little);
+    @memcpy(wav[36..40], "data");
+    std.mem.writeInt(u32, wav[40..44], samples * 2, .little);
+    var head_buf: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{wav.len}) catch return;
+    _ = std.c.write(conn, head.ptr, head.len);
+    _ = std.c.write(conn, &wav, wav.len);
+}
+
+/// W6h② 판정 페이지 — 자리는 `media_check.zig` 와 맞춘다. 0.1 초마다 상태를 제목으로(iframe 은 `postMessage`). `?s=1` 이면 a 를
+/// 우클릭하고 0.2 초 뒤 a·b 의 자리를 바꾼다.
+const media_page =
+    "<!doctype html><title>loading</title><style>body{margin:0}audio,iframe,video{position:absolute;border:0}</style><body>" ++
+    "<audio id=a controls src='/dl/tone.wav?a' style='left:10px;top:10px;width:300px;height:40px'></audio>" ++
+    "<audio id=b controls src='/dl/tone.wav?b' style='left:330px;top:10px;width:300px;height:40px'></audio>" ++
+    "<iframe src='/media-inner?id=f' style='left:10px;top:70px;width:320px;height:60px'></iframe>" ++
+    "<iframe id=x style='left:10px;top:150px;width:320px;height:60px'></iframe>" ++
+    "<video id=v style='left:10px;top:230px;width:320px;height:180px;background:#000'></video><script>" ++
+    "document.getElementById('x').src='http://localhost:'+location.port+'/media-inner?id=x';" ++
+    "var st={},ready=false,swapped=false,a=document.getElementById('a'),b=document.getElementById('b'),v=document.getElementById('v');" ++
+    "addEventListener('message',function(e){st[e.data.id]=e.data.v});" ++
+    "if(location.search.indexOf('s=1')>=0)a.addEventListener('contextmenu',function(){setTimeout(function(){a.style.left='330px';b.style.left='10px';swapped=true},200)});" ++
+    "var c=document.createElement('canvas');c.width=64;c.height=36;var g=c.getContext('2d'),t=0;setInterval(function(){g.fillStyle='hsl('+(t++*9%360)+',70%,50%)';g.fillRect(0,0,64,36)},40);" ++
+    "var r=new MediaRecorder(c.captureStream(25),{mimeType:'video/webm'}),parts=[];r.ondataavailable=function(e){parts.push(e.data)};" ++
+    "r.onstop=function(){v.src=URL.createObjectURL(new Blob(parts,{type:'video/webm'}));v.onloadedmetadata=function(){ready=true}};r.start();setTimeout(function(){r.stop()},1200);" ++
+    "setInterval(function(){document.title='m a'+(+a.loop)+' b'+(+b.loop)+' f'+(st.f===undefined?'-':st.f)+' x'+(st.x===undefined?'-':st.x)+' vl'+(+v.loop)+' vc'+(+v.controls)+(ready&&st.f!==undefined&&st.x!==undefined?'':' wait')+(swapped?' swapped':'')},100)" ++
+    "</script>";
 
 /// 새 탭 판정(W6e)의 페이지 — 자리는 `newtab_check.zig` 와 맞춘다(140×30 칸).
 const newtab_page =
@@ -236,6 +278,8 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         "document.getElementById('pl').dispatchEvent(new MouseEvent('click',{metaKey:true,bubbles:true,cancelable:true}));" ++
         "document.getElementById('ab').click();document.title='nt-auto-done'},300)}</script>";
     if (std.mem.eql(u8, path, "/dnd")) return drag_page;
+    if (std.mem.eql(u8, path, "/media")) return media_page;
+    if (std.mem.eql(u8, path, "/media-inner")) return std.fmt.bufPrint(buf, "<!doctype html><title>inner</title><style>body{{margin:0}}</style><audio controls src='/dl/tone.wav?{s}' style='width:300px'></audio><script>var m=document.querySelector('audio');setInterval(function(){{parent.postMessage({{id:'{s}',v:+m.loop}},'*')}},100)</script>", .{ query, query });
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
     }

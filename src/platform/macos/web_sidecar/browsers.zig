@@ -238,6 +238,7 @@ pub fn onClosed(cef_id: c_int) void {
         var closing = entry;
         dropPopup(&closing);
         context_menus.drop(&closing);
+        @import("media_menu.zig").forget(cef_id); // W6h②: 미디어 항목의 진행·DevTools 관찰자 등록
         drag.reset(&closing, true);
         state.writer.send(.{ .browser_closed = entry.id }) catch {};
     }

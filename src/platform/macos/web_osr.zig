@@ -1824,7 +1824,7 @@ pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, com
     if (!m.closed) send(gpa, .{ .context_menu_command = .{ .browser = surface_id, .menu = menu, .command = command } });
     // 사용자가 메뉴에서 골랐다(W6e·W6h①) — 그 답이 부를 `open_tab` 하나를 받는다.
     if (!m.closed) switch (command) {
-        .open_link_new_tab, .open_image_new_tab => s.new_tab_credits.grant(monotonicNow()),
+        .open_link_new_tab, .open_image_new_tab, .open_media_new_tab => s.new_tab_credits.grant(monotonicNow()),
         .open_link_new_window => s.new_window_credit_ms = monotonicNow(),
         else => {},
     };

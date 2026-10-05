@@ -18,6 +18,7 @@ const object = @import("object.zig");
 const browsers = @import("browsers.zig");
 const pasteboard = @import("pasteboard.zig");
 const registry_mod = @import("registry.zig");
+const media_menu = @import("media_menu.zig");
 
 const message = protocol.message;
 const Flags = message.ContextMenuFlags;
@@ -40,6 +41,9 @@ const Held = struct {
     open_link: ?[]u8 = null,
     /// 새 탭에서 열 이미지 주소(W6h① — http·https 만, 주소 상한 안).
     open_image: ?[]u8 = null,
+    /// 동영상·오디오의 주소(W6h② — 복사, `blob:` 이 아니고 주소 상한 안)와 새 탭에서 열 주소(http·https 만).
+    media_src: ?[]u8 = null,
+    open_media: ?[]u8 = null,
 };
 
 var image_callback: c.cef_download_image_callback_t = undefined;
@@ -183,6 +187,12 @@ pub fn onRun(
     const image = if (is_image) copyAll(params.*.get_source_url.?(params), max_address_bytes) else null;
     // 새 탭에서 여는 것은 링크처럼 http·https 만(W6h① — `data:`·`blob:` 이미지는 꺼 둔다).
     const open_image = if (image != null) openableLink(params.*.get_source_url.?(params)) else null;
+    // W6h②: 동영상·오디오 — 연속 재생·제어 기능 상태와 주소(Chrome 154 실측: `blob:` 동영상은 주소 복사가 꺼져 있었다).
+    const is_av = media_type == c.CM_MEDIATYPE_VIDEO or media_type == c.CM_MEDIATYPE_AUDIO;
+    const media_state: u32 = if (is_av) @bitCast(params.*.get_media_state_flags.?(params)) else 0;
+    const media_src = if (is_av) copyAll(params.*.get_source_url.?(params), max_address_bytes) else null;
+    const media_copy = if (media_src) |v| !std.ascii.startsWithIgnoreCase(v, "blob:") else false;
+    const open_media = if (media_src != null) openableLink(params.*.get_source_url.?(params)) else null;
     var selection_buf: [protocol.wire.max_text_bytes]u8 = undefined;
     var truncated = false;
     const selection = readSelection(params.*.get_selection_text.?(params), &selection_buf, &truncated);
@@ -204,20 +214,33 @@ pub fn onRun(
         .can_go_forward = enabled(model, c.MENU_ID_FORWARD),
         .link_openable = open_link != null,
         .image_openable = open_image != null,
+        .media_video = media_type == c.CM_MEDIATYPE_VIDEO,
+        .media_audio = media_type == c.CM_MEDIATYPE_AUDIO,
+        .media_loop = media_state & c.CM_MEDIAFLAG_LOOP != 0,
+        .media_can_loop = media_state & c.CM_MEDIAFLAG_CAN_LOOP != 0,
+        .media_controls = media_state & c.CM_MEDIAFLAG_CONTROLS != 0,
+        .media_can_toggle_controls = media_state & c.CM_MEDIAFLAG_CAN_TOGGLE_CONTROLS != 0,
+        .media_openable = open_media != null,
+        .media_copyable = media_copy,
     };
     const held = allocator.create(Held) catch {
         if (link) |v| allocator.free(v);
         if (image) |v| allocator.free(v);
         if (open_link) |v| allocator.free(v);
         if (open_image) |v| allocator.free(v);
+        if (media_src) |v| allocator.free(v);
+        if (open_media) |v| allocator.free(v);
         callback.*.cancel.?(callback);
         object.release(callback);
         return 1;
     };
     last_menu +%= 1;
     if (last_menu == 0) last_menu = 1;
-    held.* = .{ .menu = last_menu, .callback = callback, .flags = flags, .link = link, .image = image, .open_link = open_link, .open_image = open_image };
+    held.* = .{ .menu = last_menu, .callback = callback, .flags = flags, .link = link, .image = image, .open_link = open_link, .open_image = open_image, .media_src = media_src, .open_media = open_media };
     entry.context_menu = held;
+    // 연속 재생·제어 기능을 바꿀 수 있으면 그 자리의 요소를 지금 찾아 둔다(W6h② — 메뉴가 떠 있는 동안 배치가 바뀌어도 그 요소를).
+    if (is_av and (flags.media_can_loop or flags.media_can_toggle_controls))
+        media_menu.locate(browser, frame, held.menu, params.*.get_xcoord.?(params), params.*.get_ycoord.?(params), media_src);
     // 알리지 못하면(maru 가 사라졌다) 곧바로 취소로 끝낸다 — 쥔 채 두면 CEF 는 메뉴가 떠 있다고 보고 그 브라우저의 우클릭을 모두
     // 버린다(W6c① 적대 검증).
     browsers.state.writer.send(.{ .context_menu = .{
@@ -255,6 +278,7 @@ pub fn finish(entry: *registry_mod.Entry, ending: Ending) void {
     entry.context_menu = null;
     end(held, ending);
     browsers.state.writer.send(.{ .context_menu_closed = .{ .browser = entry.id, .menu = held.menu } }) catch {};
+    media_menu.menuEnded(entry.cef_id, held.menu);
     free(held);
 }
 
@@ -284,6 +308,8 @@ fn free(held: *Held) void {
     if (held.image) |v| allocator.free(v);
     if (held.open_link) |v| allocator.free(v);
     if (held.open_image) |v| allocator.free(v);
+    if (held.media_src) |v| allocator.free(v);
+    if (held.open_media) |v| allocator.free(v);
     allocator.destroy(held);
 }
 
@@ -312,7 +338,7 @@ fn cefId(command: Command) ?c_int {
         .paste => c.MENU_ID_PASTE,
         .paste_and_match_style => c.MENU_ID_PASTE_MATCH_STYLE,
         .select_all => c.MENU_ID_SELECT_ALL,
-        .cancel, .copy_link_address, .copy_image_address, .copy_image, .open_link_new_tab, .open_link_new_window, .open_image_new_tab => null,
+        .cancel, .copy_link_address, .copy_image_address, .copy_image, .open_link_new_tab, .open_link_new_window, .open_image_new_tab, .media_loop, .media_controls, .open_media_new_tab, .copy_media_address => null,
     };
 }
 
@@ -341,6 +367,15 @@ pub fn onCommand(value: message.ContextMenuCommand) void {
         // 새 창은 maru 가 띄운다(W6h① — 새 maru 창의 웹 탭). maru 는 그 메뉴에서 이 항목을 고른 직후에만 받는다.
         .open_link_new_window => if (held.open_link) |url| {
             browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .new_window, .url = url } }) catch {};
+        },
+        // W6h②: 미디어 — 연속 재생·제어 기능은 우클릭 때 찾아 둔 요소에(`media_menu`), 새 탭은 뒤(Chrome 과 같다), 주소는 클립보드에.
+        .media_loop => media_menu.act(@ptrCast(@alignCast(entry.handle)), held.menu, .loop),
+        .media_controls => media_menu.act(@ptrCast(@alignCast(entry.handle)), held.menu, .controls),
+        .open_media_new_tab => if (held.open_media) |url| {
+            browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .background, .url = url } }) catch {};
+        },
+        .copy_media_address => if (held.media_src) |src| {
+            _ = pasteboard.writeText(boardName(), src, true);
         },
         // Chrome 「새 탭에서 이미지 열기」는 뒤 탭이다(링크와 같다).
         .open_image_new_tab => if (held.open_image) |url| {

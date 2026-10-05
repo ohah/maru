@@ -537,7 +537,8 @@ pub const TooltipChanged = struct {
 };
 
 /// 우클릭한 자리와 그 자리에서 할 수 있는 일(W6c). 닫힌 필드 — 쓰지 않는 비트는 0, `image_loaded` 는 `image` 와,
-/// `selection_truncated` 는 `selection` 과 함께만, `selection` 은 선택한 글이 있을 때만, `image_openable` 은 `image` 와 함께만.
+/// `selection_truncated` 는 `selection` 과 함께만, `selection` 은 선택한 글이 있을 때만, `image_openable` 은 `image` 와 함께만,
+/// `media_*` 는 `media` 와 함께만이고 `media_video`·`media_audio` 는 둘 중 하나(그 밖의 `media_*` 는 둘 중 하나가 있을 때만).
 pub const ContextMenuFlags = packed struct(u32) {
     link: bool = false,
     image: bool = false,
@@ -561,7 +562,21 @@ pub const ContextMenuFlags = packed struct(u32) {
     link_openable: bool = false,
     /// 이미지를 새 탭에서 열 수 있다(W6h① — 이미지 주소가 http·https 이고 주소 상한 안이다). `image` 일 때만.
     image_openable: bool = false,
-    _reserved: u15 = 0,
+    /// W6h②: 동영상(`<video>`)이다 — 메뉴 문구가 「동영상」.
+    media_video: bool = false,
+    /// W6h②: 오디오(`<audio>`, 소리만 있는 `<video>` 도 — Chromium 이 그렇게 준다)다 — 메뉴 문구가 「오디오」.
+    media_audio: bool = false,
+    /// 연속 재생이 켜져 있다(체크 표시)·켜고 끌 수 있다(Chrome 「연속 재생」 — CEF `CM_MEDIAFLAG_LOOP`·`CAN_LOOP`).
+    media_loop: bool = false,
+    media_can_loop: bool = false,
+    /// 제어 기능이 보인다(체크 표시)·켜고 끌 수 있다(Chrome 「모든 제어 기능 표시」 — `CONTROLS`·`CAN_TOGGLE_CONTROLS`, 오디오는 끌 수 없다).
+    media_controls: bool = false,
+    media_can_toggle_controls: bool = false,
+    /// 미디어 주소를 새 탭에서 열 수 있다(http·https, 주소 상한 안).
+    media_openable: bool = false,
+    /// 미디어 주소를 복사할 수 있다(비지 않았고 `blob:` 이 아니다 — Chrome 154 실측: `blob:` 동영상은 꺼져 있었다).
+    media_copyable: bool = false,
+    _reserved: u7 = 0,
 };
 
 pub const ContextMenu = struct {
@@ -603,6 +618,14 @@ pub const ContextMenuCommandKind = enum(u8) {
     open_link_new_window = 15,
     /// 이미지를 새 탭(뒤)에서 연다(W6h① — Chrome 「새 탭에서 이미지 열기」). `image_openable` 일 때만.
     open_image_new_tab = 16,
+    /// W6h②: 우클릭한 미디어의 연속 재생을 켜고 끈다. `media_can_loop` 일 때만.
+    media_loop = 17,
+    /// W6h②: 우클릭한 미디어의 제어 기능 표시를 켜고 끈다. `media_can_toggle_controls` 일 때만.
+    media_controls = 18,
+    /// W6h②: 미디어 주소를 새 탭(뒤)에서 연다. `media_openable` 일 때만.
+    open_media_new_tab = 19,
+    /// W6h②: 미디어 주소를 복사한다(sidecar 가 클립보드에 쓴다). `media_copyable` 일 때만.
+    copy_media_address = 20,
 };
 
 /// 새 탭을 앞에 둘지(그 탭으로 옮긴다) 뒤에 둘지(W6e — Chrome 과 같다: ⌘·가운데 클릭과 메뉴는 뒤, 그 밖은 앞), 새 창에 둘지
@@ -764,6 +787,10 @@ pub fn contextMenuAllows(flags: ContextMenuFlags, command: ContextMenuCommandKin
         .copy_image => flags.image_loaded,
         .open_link_new_tab, .open_link_new_window => flags.link_openable,
         .open_image_new_tab => flags.image_openable,
+        .media_loop => flags.media_can_loop,
+        .media_controls => flags.media_can_toggle_controls,
+        .open_media_new_tab => flags.media_openable,
+        .copy_media_address => flags.media_copyable,
     };
 }
 

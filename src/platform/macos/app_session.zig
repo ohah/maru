@@ -24232,8 +24232,14 @@ pub const AppSession = struct {
                     term_ops.notifySurfaceClosed(self, term.surface.id);
                     // Chromium 탭이면 sidecar 의 브라우저도 닫는다 — `destroyTerm` 과 같다. 창 닫기가 탭을 먼저 부수지 않는 길(창에
                     // 실행 중 터미널이 없거나 영속 세션이 꺼짐)에서 페이지가 앱이 끝날 때까지 보이지 않게 돌았다(W6i 실측: 닫은 창의
-                    // 페이지가 계속 요청을 보냄). 마지막이면 sidecar 도 내린다.
+                    // 페이지가 계속 요청을 보냄). 마지막이면 sidecar 도 내린다. Chromium 이 아닌 Term 은 표에 없어 아무 일도 없고,
+                    // 앱 종료에서는 sidecar 를 먼저 내려 표가 비어 있다(`shutdownForExit`).
                     web_ops.dropOsrSurface(self, term.surfaceId());
+                    // 아직 부르지 못한 복원 주소(WP-P — `destroyTerm` 이 놓는 것과 같다, W6i 적대 검증: 창 정리에서는 새고 있었다).
+                    if (term.pending_url) |u| {
+                        self.allocator.free(u);
+                        term.pending_url = null;
+                    }
                     // git_branch 캐시 + auto_title 캐시(Term-owned) 해제 — destroyTerm과 같은 규율(deinit은 surface 정리를
                     // config/appearance 해제 앞에 두려 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제).
                     // custom_name·surface는 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.
@@ -59570,6 +59576,36 @@ test "createAdoptedWebTermInActivePane: 활성 pane에 browser web Term 새 탭 
     try std.testing.expectEqual(sid, t.surface_id);
     try std.testing.expect(t.visible);
     try std.testing.expect(t.panel_kind == .browser);
+}
+
+test "W6i: 창을 정리하면(deinit) 그 창의 Chromium 탭 브라우저와 부르지 못한 복원 주소를 놓는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    var live = true;
+    defer if (live) session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    const pane = pane_ops.activePane(session);
+    const term = pane.terms.items[pane.terms.items.len - 1];
+    term.pending_url = try allocator.dupe(u8, "https://example.com/restored"); // 새면 시험 할당자가 잡는다
+    try web_osr.testHold(allocator, sid);
+    defer web_osr.testForget(allocator);
+    try std.testing.expect(web_osr.owns(sid));
+
+    // 창 닫기가 탭을 먼저 부수지 않는 길 — 곧바로 정리한다.
+    live = false;
+    session.deinit();
+    try std.testing.expect(!web_osr.owns(sid));
 }
 
 test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal이면 0 (4g-0 헤드리스)" {

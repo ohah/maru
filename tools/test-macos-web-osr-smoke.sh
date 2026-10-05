@@ -932,6 +932,7 @@ PY
 printf 'ui.language = ko\nsession.keep-alive-after-quit = false\n' > "$root/wclose.conf"
 cat > "$root/wclose.txt" <<'SCRIPT'
 sleep 6000
+mark second
 newwindow
 sleep 3500
 mark close
@@ -959,11 +960,13 @@ def check(cond, what):
     ok = ok and cond
 closed = [l for l in report if l.startswith('osr-test closewindow')]
 check(closed == ['osr-test closewindow before=2 after=1'], f'the second window closed ({closed})')
-close, end = marks.get('close', 0), marks.get('end', 0)
+second, close, end = marks.get('second', 0), marks.get('close', 0), marks.get('end', 0)
+# 첫 창의 페이지는 둘째 창을 열기 전에 이미 돌고 있다 — 닫은 뒤 살아 있어야 하는 것은 그 페이지다(다른 창의 것을 닫지 않는다).
+first = {p for p, t in ticks if 0 < t < second}
 before = {p for p, t in ticks if t < close}
 after = {p for p, t in ticks if close + 1500 < t <= end}
-check(len(before) == 2 and len(after) == 1 and after <= before,
-      f'both pages ran while the windows were open and only one runs after closing one ({len(before)} before · {len(after)} after · {len(ticks)} requests)')
+check(len(first) == 1 and len(before) == 2 and after == first,
+      f'both pages ran while the windows were open and only the first window page runs after closing the second ({len(first)} first · {len(before)} before · {len(after)} after, kept the first {after == first} · {len(ticks)} requests)')
 sys.exit(0 if ok else 1)
 PY
 

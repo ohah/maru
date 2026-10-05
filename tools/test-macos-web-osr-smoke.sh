@@ -942,7 +942,8 @@ mark end
 SCRIPT
 : > "$root/requests.log"
 run_app /tick-app 18000 "$root/wclose.summary" MARU_WEB_OSR_TEST_INPUT="$root/wclose.txt" MARU_CONFIG="$root/wclose.conf"
-grep -a '^osr-test mark\|^osr-test closewindow' "$root/app-tick-app.log" > "$root/wclose.report" || true
+# 보고 줄은 앱의 요약 출력(stdout)과 한 줄에 섞일 수 있다(실측 — `file_osr-test mark …`) — 줄 중간에서도 찾는다.
+grep -ao 'osr-test mark [a-z]* [0-9]*\|osr-test closewindow .*' "$root/app-tick-app.log" > "$root/wclose.report" || true
 cat "$root/wclose.report"
 python3 - "$root/wclose.report" "$root/requests.log" <<'PY' || fail "closing a window did not close its Chromium tab"
 import sys

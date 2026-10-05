@@ -13,6 +13,8 @@
 //!   media-long-src     1.5 KB 주소의 같은 주소 오디오 둘 중 우클릭한 것만 켠다(긴 주소도 DevTools 경로로 — W6h② 적대 검증 1 회차)
 //!   media-want         메뉴가 떠 있는 동안 페이지가 연속 재생을 켜도 「연속 재생」은 메뉴에 보인 체크(꺼짐)의 반대 — 켜짐으로 둔다(Chrome 과
 //!                      같다 — 뒤집으면 꺼졌다, W6h② 적대 검증 2 회차)
+//!   media-hash         메뉴가 떠 있는 동안 페이지가 해시를 바꿔도(같은 출처) 「연속 재생」이 그 오디오를 켠다(W6h② 적대 검증 4 회차 — 주소
+//!                      전체로 비교하면 아무 일도 없었다)
 //!   media-shifted      우클릭 뒤 메뉴가 떠 있는 동안 페이지가 두 오디오의 자리를 바꿔도 「연속 재생」은 우클릭한 그 오디오를 켠다
 //!   media-same-src     같은 주소 오디오 둘 중 우클릭한 것만 켠다 — 맨 위 문서와 같은 출처 iframe(DevTools 경로 — 주소로 찾는 보조 경로는 모른다)
 //!   media-cross-dup    다른 사이트 iframe 의 같은 주소 둘은 아무것도 켜지 않는다(사용자 결정 — 둘 이상이면 하지 않는다)
@@ -249,6 +251,16 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     w.pump(800);
     const still_on = std.mem.indexOf(u8, w.title(), "w 1") != null;
     report(want_ready and wm != null and shown_off and page_on and still_on, "media-want", std.fmt.bufPrint(&detail, "메뉴는 꺼짐 {} · 페이지가 켬 {} · 고른 뒤 켜짐 그대로 {} · 제목 「{s}」", .{ shown_off, page_on, still_on, w.title() }) catch "");
+
+    // 메뉴가 떠 있는 동안 해시가 바뀐다 — 그래도 켠다.
+    w.title_len = 0;
+    try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/media-hash") } });
+    const hash_ready = w.untilPart("h 0", wait_ms) and !w.untilPart("wait", 0);
+    const hm = try w.rightClick(.{ .x = 100, .y = 30 });
+    const hashed = w.untilPart(" hashed", 2_000);
+    try w.pick(hm, .media_loop);
+    const hash_on = w.untilPart("h 1", 3_000);
+    report(hash_ready and hm != null and hashed and hash_on, "media-hash", std.fmt.bufPrint(&detail, "해시 바뀜 {} · 켬 {} · 제목 「{s}」", .{ hashed, hash_on, w.title() }) catch "");
 
     // 우클릭 뒤 자리가 바뀐다 — 다시 불러와 a 를 우클릭하면 페이지가 0.2 초 뒤 a·b 의 자리를 바꾼다. 0.8 초 뒤 고른다.
     if (!try w.load(port, true)) return error.MediaPageNotReady;

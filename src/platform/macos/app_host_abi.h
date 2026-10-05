@@ -2199,6 +2199,7 @@ int32_t maru_macos_app_session_osr_accepts_first_mouse(MaruAppHostSession *sessi
    take_new_window 는 메뉴 「새 창에서 링크 열기」의 주소 하나(cap 보다 길면 버리고 0), Swift 는 tick 뒤에 새 창을 만들고 그 창 세션에
    open_url_tab(http·https)으로 웹 탭을 연다. */
 int32_t maru_macos_app_session_osr_context_menu_search(MaruAppHostSession *session, uint32_t menu);
+uint32_t maru_macos_app_session_osr_new_windows_pending(MaruAppHostSession *session);
 int32_t maru_macos_app_session_osr_take_new_window(MaruAppHostSession *session, uint8_t *out, size_t cap, size_t *out_len);
 int32_t maru_macos_app_session_osr_open_url_tab(MaruAppHostSession *session, const uint8_t *url, size_t len);
 /* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),

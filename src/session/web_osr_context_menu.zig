@@ -9,11 +9,11 @@
 //! - 선택한 글: '…' 찾기 — 복사 · 「…에서 '…' 검색」 — 음성 ▸ — 서비스 ▸
 //! - 입력 칸: ('…' 찾기 —) 그림 이모티콘 & 기호 — 실행 취소 · 다시 실행 — 잘라내기 · 복사 · 붙여넣기 · 붙여넣고 스타일 일치시킴 ·
 //!   모두 선택 (— 검색 — 음성 ▸ — 서비스 ▸) — 편집 항목은 할 수 없으면 꺼 둔다(Chrome 과 같다)
+//! - 이미지가 아닌 미디어(동영상 등): 항목 없음(Chrome 의 미디어 항목은 아직 없다) — 메뉴를 띄우지 않는다
 //!
 //! W6h① 이 더한 것(Chrome 154 한국어 메뉴 재실측 2026-10-05 — 접근성 API): 새 창에서 링크 열기(maru 는 새 창의 웹 탭), 새 탭에서
 //! 이미지 열기, 선택한 글 검색(설정 `browser.search-url` — `web_search`). 시크릿·분할 뷰·저장·인쇄·검사·하이라이트 링크·번역·렌즈는
 //! 뺀다(maru 에 없다 — 결정 D5·§7).
-//! - 이미지가 아닌 미디어(동영상 등): 항목 없음(Chrome 의 미디어 항목은 아직 없다) — 메뉴를 띄우지 않는다
 //!
 //! 명령 항목은 `message.contextMenuAllows` 로 켜고 끈다 — sidecar 도 같은 규칙으로 명령을 거른다.
 
@@ -327,12 +327,17 @@ test "no flag combination makes a leading, trailing or doubled separator or over
         if (flags.selection_truncated and !flags.selection) continue;
         if (flags.link_openable and !flags.link) continue;
         if (flags.image_openable and !flags.image) continue;
-        const menu = build(flags, true);
-        const items = menu.slice();
-        if (items.len == 0) continue;
-        try std.testing.expect(items[0].kind != .separator and items[items.len - 1].kind != .separator);
-        for (items[1..], 0..) |item, i| try std.testing.expect(!(item.kind == .separator and items[i].kind == .separator));
-        for (items) |item| if (item.kind == .command) try std.testing.expectEqual(message.contextMenuAllows(flags, item.command), item.enabled);
+        for ([_]bool{ true, false }) |visible_text| { // 보이는 글이 없는 선택(찾기·검색 없음)도
+            const menu = build(flags, visible_text);
+            const items = menu.slice();
+            if (items.len == 0) continue;
+            try std.testing.expect(items[0].kind != .separator and items[items.len - 1].kind != .separator);
+            for (items[1..], 0..) |item, i| try std.testing.expect(!(item.kind == .separator and items[i].kind == .separator));
+            for (items) |item| {
+                if (item.kind == .command) try std.testing.expectEqual(message.contextMenuAllows(flags, item.command), item.enabled);
+                if (item.kind == .search) try std.testing.expect(flags.selection and visible_text);
+            }
+        }
     }
 }
 

@@ -183,6 +183,11 @@ test "only http and https addresses open a tab — blank popups, local and scrip
     try std.testing.expect(urlAllowed(long[0..wire.max_url_bytes]));
 }
 
+test "no page disposition maps to the new-window placement — only the menu's open-link-in-new-window does (W6h①)" {
+    var d: u32 = 0;
+    while (d < 32) : (d += 1) if (placement(d)) |p| try std.testing.expect(p != .new_window);
+}
+
 test "a foreground tab takes focus only from the tab the user is looking at; a background one keeps the active tab where it is" {
     try std.testing.expectEqual(Insert{ .at = 3, .active = 3, .focus = true }, place(2, 2, null, .foreground, true));
     try std.testing.expectEqual(Insert{ .at = 3, .active = 2, .focus = false }, place(2, 2, null, .background, true));

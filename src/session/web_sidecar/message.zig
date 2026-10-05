@@ -537,8 +537,8 @@ pub const TooltipChanged = struct {
 };
 
 /// 우클릭한 자리와 그 자리에서 할 수 있는 일(W6c). 닫힌 필드 — 쓰지 않는 비트는 0, `image_loaded` 는 `image` 와,
-/// `selection_truncated` 는 `selection` 과 함께만, `selection` 은 선택한 글이 있을 때만.
-pub const ContextMenuFlags = packed struct(u16) {
+/// `selection_truncated` 는 `selection` 과 함께만, `selection` 은 선택한 글이 있을 때만, `image_openable` 은 `image` 와 함께만.
+pub const ContextMenuFlags = packed struct(u32) {
     link: bool = false,
     image: bool = false,
     /// 이미지 픽셀이 있다(「이미지 복사」 — 아직 안 받아진 이미지는 주소만 있다).
@@ -559,6 +559,9 @@ pub const ContextMenuFlags = packed struct(u16) {
     can_go_forward: bool = false,
     /// 링크를 새 탭에서 열 수 있다(W6e — 걸러진 링크 주소가 http·https 이고 주소 상한 안이다). `link` 일 때만.
     link_openable: bool = false,
+    /// 이미지를 새 탭에서 열 수 있다(W6h① — 이미지 주소가 http·https 이고 주소 상한 안이다). `image` 일 때만.
+    image_openable: bool = false,
+    _reserved: u15 = 0,
 };
 
 pub const ContextMenu = struct {
@@ -596,12 +599,18 @@ pub const ContextMenuCommandKind = enum(u8) {
     copy_image = 13,
     /// 링크를 새 탭(뒤)에서 연다(W6e — Chrome 「새 탭에서 링크 열기」). `link_openable` 일 때만.
     open_link_new_tab = 14,
+    /// 링크를 새 창에서 연다(W6h① — Chrome 「새 창에서 링크 열기」, maru 는 새 창의 웹 탭). `link_openable` 일 때만.
+    open_link_new_window = 15,
+    /// 이미지를 새 탭(뒤)에서 연다(W6h① — Chrome 「새 탭에서 이미지 열기」). `image_openable` 일 때만.
+    open_image_new_tab = 16,
 };
 
-/// 새 탭을 앞에 둘지(그 탭으로 옮긴다) 뒤에 둘지(W6e — Chrome 과 같다: ⌘·가운데 클릭과 메뉴는 뒤, 그 밖은 앞).
+/// 새 탭을 앞에 둘지(그 탭으로 옮긴다) 뒤에 둘지(W6e — Chrome 과 같다: ⌘·가운데 클릭과 메뉴는 뒤, 그 밖은 앞), 새 창에 둘지
+/// (W6h① — 우클릭 메뉴 「새 창에서 링크 열기」에서만. 페이지가 연 창은 탭이다 — `new_tab.placement`). 팝업 이어 받기는 새 창이 아니다.
 pub const NewTabPlacement = enum(u8) {
     foreground = 0,
     background = 1,
+    new_window = 2,
 };
 
 pub const PopupReserve = struct {
@@ -753,7 +762,8 @@ pub fn contextMenuAllows(flags: ContextMenuFlags, command: ContextMenuCommandKin
         .copy_link_address => flags.link,
         .copy_image_address => flags.image,
         .copy_image => flags.image_loaded,
-        .open_link_new_tab => flags.link_openable,
+        .open_link_new_tab, .open_link_new_window => flags.link_openable,
+        .open_image_new_tab => flags.image_openable,
     };
 }
 

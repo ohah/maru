@@ -1155,6 +1155,13 @@ fn osrOpenNewTab(self: *AppSession, opener: u64) bool {
                     else => {},
                 }
                 const request = web_osr.takeNewTab(opener) orelse return false;
+                // 메뉴 「새 창에서 링크 열기」(W6h①) — 이 창에 끼우지 않고 Swift 가 새 창을 만든다(`osrTakeNewWindow`).
+                if (request.placement == .new_window) {
+                    if (self.osr_new_windows.items.len >= max_new_windows) {
+                        self.allocator.free(request.url);
+                    } else self.osr_new_windows.append(self.allocator, request.url) catch self.allocator.free(request.url);
+                    return true;
+                }
                 const visible = tab_index == self.app_window.active_tab and pane == pane_ops.activePane(self) and pane.active_term == index;
                 insertNewTab(self, pane, index, request, visible) catch {
                     // 붙이지 못한 팝업은 닫는다(W6f②) — Term 을 만들었다 지웠으면 `destroyTerm` 이 이미 닫았다(두 번 보내지 않게).
@@ -1251,6 +1258,51 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
         };
         std.debug.print("osr-test newtab at={d} tabs={d} opener={d} active={d} placement={s} adopted={}\n", .{ plan.at, pane.terms.items.len, opener_now, pane.active_term, @tagName(request.placement), request.adopt != 0 });
     }
+}
+
+/// 창 하나가 쥐는 새 창 요청 상한(W6h①) — 메뉴 한 번에 하나라 넉넉하다. 넘는 것은 버린다.
+const max_new_windows = 4;
+
+/// 메뉴 「새 창에서 링크 열기」 주소 하나를 가져간다(W6h① — Swift 가 tick 뒤에 새 창을 만든다). 꺼내 간 쪽이 놓는다.
+pub fn osrTakeNewWindow(self: *AppSession) ?[]u8 {
+    if (self.osr_new_windows.items.len == 0) return null;
+    return self.osr_new_windows.orderedRemove(0);
+}
+
+/// 이 창의 활성 pane 에 그 주소의 Chromium 웹 탭을 열고 그 탭으로 옮긴다(W6h① — 「새 창에서 링크 열기」로 만든 새 창). 주소는 새 탭
+/// 규칙(http·https)을 지나야 한다 — 복원 경로와 같은 `pending_url` 로 싣는다.
+pub fn osrOpenUrlTab(self: *AppSession, url: []const u8) bool {
+    if (!ws.new_tab.urlAllowed(url)) return false;
+    const owned = self.allocator.dupe(u8, url) catch return false;
+    const pane = pane_ops.activePane(self);
+    const term = createWebTerm(self, .browser) catch {
+        self.allocator.free(owned);
+        return false;
+    };
+    pane.terms.append(self.allocator, term) catch {
+        term_ops.destroyTerm(self, term);
+        self.allocator.free(owned);
+        return false;
+    };
+    term.pending_url = owned;
+    self.focusTerm(pane.terms.items.len - 1);
+    self.workspaceChanged(.topology);
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 띄운 메뉴에서 「…에서 '…' 검색」을 골랐다(W6h①) — 설정의 검색 틀로 주소를 만들어 그 탭 오른쪽에 앞 탭으로 연다(새 탭 경로).
+/// Swift 는 이것을 부른 뒤 평소처럼 취소로 답한다. 그 메뉴가 아니거나 열 수 없으면 false.
+pub fn osrContextMenuSearch(self: *AppSession, menu: u32) bool {
+    const m = osrContextMenuShown(self, menu) orelse return false;
+    var buf: [ws.wire.max_url_bytes]u8 = undefined;
+    const url = maru.session.web_search.buildUrl(self.loaded_config.config.browser.search_url, web_osr.contextMenuSelection(m.surface, m.menu), &buf) orelse return false;
+    return web_osr.queueSearchTab(self.allocator, m.surface, url);
+}
+
+/// 띄운 메뉴의 「검색」 문구에 넣을 엔진 이름(설정 틀의 호스트).
+pub fn osrSearchEngineName(self: *AppSession) []const u8 {
+    return maru.session.web_search.engineName(self.loaded_config.config.browser.search_url);
 }
 
 /// 이 창이 띄운 우클릭 메뉴(W6c②). 항목은 순수 모듈이 정하고(`web_osr_context_menu`), 자리는 창 backing px 다.

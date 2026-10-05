@@ -17,6 +17,8 @@
 //!                         Chromium 의 사용자 활성화다 — Chrome 과 같다). 놓기 뒤 지금 탭에서 여는 것은 놓은 그 주소의 이동뿐이다
 //!   newtab-drop-window    놓은 링크와 같은 주소의 ⌘ 클릭도 놓기 2.5 초 뒤면 새 탭(놓기 이동은 놓은 뒤 2 초만)
 //!   newtab-menu           링크 우클릭 메뉴가 `link_openable` 이고 「새 탭에서 링크 열기」 → 뒤 탭. `mailto:` 링크는 열 수 없다
+//!   newtab-menu-window-image  링크 메뉴의 「새 창에서 링크 열기」 → `new_window` 자리로 그 링크(W6h①). http 이미지 메뉴는 `image_openable`
+//!                         이고 「새 탭에서 이미지 열기」 → 뒤 탭으로 그 이미지 주소. `data:` 이미지는 열 수 없고 명령을 보내도 탭 없음
 //!   newtab-no-window      그동안 host 창 0 개, 팝업 주소 요청 0(보이지 않는 팝업 브라우저도 만들지 않았다)
 
 const std = @import("std");
@@ -45,6 +47,8 @@ const bl_point: Point = .{ .x = 60, .y = 125 };
 const js_point: Point = .{ .x = 200, .y = 125 };
 const dl_point: Point = .{ .x = 340, .y = 125 };
 const late_point: Point = .{ .x = 60, .y = 175 };
+const img_point: Point = .{ .x = 200, .y = 175 };
+const data_img_point: Point = .{ .x = 340, .y = 175 };
 const rep_point: Point = .{ .x = 480, .y = 175 };
 const dz_point: Point = .{ .x = 480, .y = 100 };
 const dz2_point: Point = .{ .x = 595, .y = 100 };
@@ -314,6 +318,32 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     w.pump(800);
     const mail_ok = mail_menu != 0 and mail_flags.link and !mail_flags.link_openable and w.opened_len == before_mail;
     report(link_menu != 0 and link_openable and menu_ok and mail_ok, "newtab-menu", std.fmt.bufPrint(&detail, "링크 메뉴 {d} 열 수 있음 {} · 새 탭 {d} 뒤 {} · mailto: 열 수 있음 {} 새 탭 {d}", .{ link_menu, link_openable, menu_opened, menu_ok, mail_flags.link_openable, w.opened_len - before_mail }) catch "");
+
+    // W6h①: 새 창에서 링크 열기·새 탭에서 이미지 열기.
+    const win_before = w.menu;
+    _ = try w.click(pl_point, .right, .{}, 800);
+    const win_menu = if (w.menu != win_before) w.menu else 0;
+    const before_win = w.opened_len;
+    if (win_menu != 0) try host.send(.{ .context_menu_command = .{ .browser = browser_id, .menu = win_menu, .command = .open_link_new_window } });
+    w.pump(800);
+    const win_ok = w.opened_len == before_win + 1 and w.lastIs(.new_window, port, "/title?t=nt-pl");
+    const img_before = w.menu;
+    _ = try w.click(img_point, .right, .{}, 800);
+    const img_menu = if (w.menu != img_before) w.menu else 0;
+    const img_flags = w.flags;
+    const before_img = w.opened_len;
+    if (img_menu != 0) try host.send(.{ .context_menu_command = .{ .browser = browser_id, .menu = img_menu, .command = .open_image_new_tab } });
+    w.pump(800);
+    const img_ok = img_flags.image and img_flags.image_openable and w.opened_len == before_img + 1 and w.lastIs(.background, port, "/img/png/nt-image.png");
+    const data_before = w.menu;
+    _ = try w.click(data_img_point, .right, .{}, 800);
+    const data_menu = if (w.menu != data_before) w.menu else 0;
+    const data_flags = w.flags;
+    const before_data = w.opened_len;
+    if (data_menu != 0) try host.send(.{ .context_menu_command = .{ .browser = browser_id, .menu = data_menu, .command = .open_image_new_tab } });
+    w.pump(800);
+    const data_ok = data_menu != 0 and data_flags.image and !data_flags.image_openable and w.opened_len == before_data;
+    report(win_menu != 0 and win_ok and img_menu != 0 and img_ok and data_ok, "newtab-menu-window-image", std.fmt.bufPrint(&detail, "새 창 메뉴 {d} 새 창 자리로 그 링크 {} · 이미지 메뉴 {d} 열 수 있음 {} 뒤 탭 {} · data: 열 수 있음 {} 새 탭 {d}", .{ win_menu, win_ok, img_menu, img_flags.image_openable, img_ok, data_flags.image_openable, w.opened_len - before_data }) catch "");
 
     const host_windows = windows.ownedBy(host.pid);
     const loads = http.newtab_requests.load(.monotonic) - loads_before;

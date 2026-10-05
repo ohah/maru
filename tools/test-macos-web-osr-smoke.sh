@@ -146,6 +146,10 @@ class H(http.server.BaseHTTPRequestHandler):
                     b"<audio id=b controls src='/tone.wav?d' style='left:50%'></audio><script>"
                     b"var a=document.getElementById('a'),b=document.getElementById('b'),last='00';setInterval(function(){var v=''+(+a.loop)+(+b.loop);if(v!==last){last=v;new Image().src='/ev?e=loop&v='+v+'&t='+Date.now()}},100);"
                     b"</script>")
+        elif self.path == "/tick-app":
+            # W6i: 페이지마다 다른 번호로 0.3 초마다 `/ev` 를 보낸다(닫힌 창의 페이지가 아직 도는지 본다).
+            body = (b"<!doctype html><title>tick</title><body>tick<script>var p=Math.random().toString(36).slice(2,8);"
+                    b"setInterval(function(){new Image().src='/ev?e=tick&p='+p+'&t='+Date.now()},300)</script>")
         elif self.path == "/img/cat.png":
             # W6d③: 끌어내 파일로 만들 이미지(48×48 빨간 PNG).
             body = base64.b64decode(CAT_PNG)
@@ -918,6 +922,48 @@ check(len(shown) == 2 and shown[0] == first, f'the audio menu is loop · show al
 loops = [l for l in requests if l.startswith('/ev?e=loop')]
 check(len(loops) == 1 and loops[0].startswith('/ev?e=loop&v=01') and len(shown) == 2 and shown[1].startswith('연속 재생✓|'),
       f'picking loop turned only the right-clicked one of two same-address audios on and the next menu shows it checked ({loops} · {shown[1] if len(shown) > 1 else None})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6i: 닫은 창의 Chromium 탭 ──────────────────────────────────────────────────────────────────────────────
+# 창 둘 중 하나를 닫으면 그 창의 페이지도 닫힌다. 창 닫기가 탭을 먼저 부수지 않는 길(영속 세션을 끔 — 창에 실행 중 터미널이
+# 있어도 host 를 거치지 않는다)에서 닫은 창의 페이지가 앱이 끝날 때까지 보이지 않게 돌았다. 두 창이 같은 시험 페이지를 띄우고
+# (`MARU_WEB_PANEL` — 새 창에도), 닫은 뒤에는 한 페이지만 요청을 보내야 한다.
+printf 'ui.language = ko\nsession.keep-alive-after-quit = false\n' > "$root/wclose.conf"
+cat > "$root/wclose.txt" <<'SCRIPT'
+sleep 6000
+newwindow
+sleep 3500
+mark close
+closewindow
+sleep 5000
+mark end
+SCRIPT
+: > "$root/requests.log"
+run_app /tick-app 18000 "$root/wclose.summary" MARU_WEB_OSR_TEST_INPUT="$root/wclose.txt" MARU_CONFIG="$root/wclose.conf"
+grep -a '^osr-test mark\|^osr-test closewindow' "$root/app-tick-app.log" > "$root/wclose.report" || true
+cat "$root/wclose.report"
+python3 - "$root/wclose.report" "$root/requests.log" <<'PY' || fail "closing a window did not close its Chromium tab"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+ticks = []
+for l in open(sys.argv[2]):
+    if l.startswith('/ev?e=tick&'):
+        q = dict(kv.split('=', 1) for kv in l.strip().split('?', 1)[1].split('&'))
+        ticks.append((q['p'], int(q['t'])))
+marks = {l.split()[2]: int(l.split()[3]) for l in report if l.startswith('osr-test mark ')}
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+closed = [l for l in report if l.startswith('osr-test closewindow')]
+check(closed == ['osr-test closewindow before=2 after=1'], f'the second window closed ({closed})')
+close, end = marks.get('close', 0), marks.get('end', 0)
+before = {p for p, t in ticks if t < close}
+after = {p for p, t in ticks if close + 1500 < t <= end}
+check(len(before) == 2 and len(after) == 1 and after <= before,
+      f'both pages ran while the windows were open and only one runs after closing one ({len(before)} before · {len(after)} after · {len(ticks)} requests)')
 sys.exit(0 if ok else 1)
 PY
 

@@ -24230,6 +24230,10 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     term_ops.notifySurfaceClosed(self, term.surface.id);
+                    // Chromium 탭이면 sidecar 의 브라우저도 닫는다 — `destroyTerm` 과 같다. 창 닫기가 탭을 먼저 부수지 않는 길(창에
+                    // 실행 중 터미널이 없거나 영속 세션이 꺼짐)에서 페이지가 앱이 끝날 때까지 보이지 않게 돌았다(W6i 실측: 닫은 창의
+                    // 페이지가 계속 요청을 보냄). 마지막이면 sidecar 도 내린다.
+                    web_ops.dropOsrSurface(self, term.surfaceId());
                     // git_branch 캐시 + auto_title 캐시(Term-owned) 해제 — destroyTerm과 같은 규율(deinit은 surface 정리를
                     // config/appearance 해제 앞에 두려 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제).
                     // custom_name·surface는 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.

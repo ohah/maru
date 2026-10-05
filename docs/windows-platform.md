@@ -12295,3 +12295,27 @@ owned HWND 합성 입력이며 물리 키보드·IME 장기 검증으로 세지 
 차단·resolver 무시·이전 consent 유지·중복 요청·dirty 확인 누락의 다섯 compiled
 runtime 변형을 검출했다. 복원 후 host 83개와 backup worker 23개가 Debug와
 ReleaseFast에서 통과했다.
+
+### §2m.198 Windows 터미널 focused close와 파일에서 터미널 복귀
+
+터미널 close_focused 액션을 실제 닫기 요청으로 연결했다. 사이드바 X와 키보드는
+stable surface ID를 같은 입력 배치의 요청에 넣고, 배치 뒤에 ID를 다시 풀어 기존
+closeWinSession을 실행한다. 실행 중이면 확인을 받고 마지막 세션은 caption과 같은
+창 닫기 경로로 넘어가 미저장 파일의 저장·취소 계약을 유지한다. 같은 활성 터미널
+카드 클릭을 거르던 조건도 파일 화면에서는 전환을 허용하도록 수정했다.
+
+실앱 PID 30124에서 파일→이미 활성 터미널 복귀, 마지막 세션 닫기 Cancel 후 Xbase
+유지, 다시 Save 후 exact BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다.
+PID 46540에서 두 세션의 busy 확인 Cancel은 둘 다 유지하고 Confirm은 선택한 것만
+제거함을 관찰했으며 마지막 단축키 종료도 exit code 0이었다. owned HWND 합성 입력이며
+물리 키보드·장기 IME 증거로 세지 않는다. PID 44788의 첫 시도는 복귀 버그로 파일만
+닫혔으므로 터미널 종료 증거에서 제외했다. 격리 폴더의 전체 화면 스모크는 필요한
+파일·목록이 없어 일부 판정 불가와 실패였고 전체 통과로 세지 않는다.
+
+실제 ConPTY 네 세션 테스트는 busy 승인, 닫힌 routing 제거, stable ID 재해석,
+탭 목록·활성 세션 정합성과 마지막 세션 보호를 확인한다. 승인 제거·detach 누락·
+active 보정 누락·탭 삭제 누락·ID 색인 오염의 다섯 compiled runtime 변형을 검출했다.
+컴파일 실패인 초기 detach 변형은 제외했고, 세 세션에서 살아남은 active 변형은
+네 세션의 중간 활성 선택으로 강화해 검출했다. 복원 후 host 84개 Debug/ReleaseFast가
+통과했다. 단축키/마지막 창 연결 자체는 위 실앱 증거로 검증하며 다섯 변형이 그 입력
+연결을 직접 검사한다고 주장하지 않는다. 다른 전역 액션과 플랫폼 결합은 남아 있다.

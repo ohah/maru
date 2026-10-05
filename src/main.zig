@@ -6148,8 +6148,8 @@ fn confirmProps(client_w: u32, client_h: u32, cell_w: u32, cell_h: u32, sidebar_
 /// *"실행 중 명령이 있으면 확인 모달을 띄우고 닫기를 보류, 없으면 즉시"* 다. 판정 술어도 중립이
 /// 소유한다(`TerminalCore.cursorIsAtPrompt` — OSC 133 의미 상태로 단위 테스트가 고정한다).
 ///
-/// **Windows 에는 확인 모달이 없다.** 그래서 실행 중이면 **안 닫고 이유를 낸다** — 조용히 죽이면
-/// 사용자가 돌려받을 수 없는 것을 잃는다. 모달이 생기는 날 이 자리에 이어 붙인다.
+/// The caller asks for confirmation when a running session cannot close safely.
+/// Native teardown only follows that approval; the last session uses the window gate.
 const CloseSessionResult = enum {
     closed,
     /// 실행 중인 명령이 있다 — 모달이 선행이다.
@@ -7415,6 +7415,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // id 는 단조 증가라 재사용되지 않는다(§2m.78 ⑵ 가 그것을 고쳤다). 승낙할 때 **그 id 를 다시
     // 찾아** 번호를 푼다 — macOS `confirm_accept` 가 범위를 다시 푸는 것과 같은 규율이다.
     var pending_close_id: ?u64 = null;
+    // Resolve the stable target after this input batch; repeated gestures coalesce.
+    var queued_session_close_id: ?u64 = null;
     var pending_file_close: ?FileCloseTarget = null;
     var file_close_waiting = false;
     var pending_file_conflict: ?maru.session.editor.document_registry.Lease = null;
@@ -11871,8 +11873,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         bytes_to_shell += ti.bytes_len;
                         if (active_view == .file) keys_to_terminal_while_file += 1;
                     },
-                    // 앱 동작은 아직 할 일이 없다(Windows 엔 탭·pane 이 없다 — W8). 센다.
-                    .app_action => app_actions += 1,
+                    .app_action => |action| {
+                        app_actions += 1;
+                        if (action == .close_focused) {
+                            if (app_window.active()) |surface| queued_session_close_id = surface.id;
+                        }
+                    },
                     .ignored => keys_ignored += 1,
                 }
             },
@@ -12341,38 +12347,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     } else {
                                         // ── 세션을 닫는다 (W8.16) ───────────────────────────
                                         //
-                                        // 계약이 정한 그대로다 — 프롬프트면 즉시, 실행 중이면 보류.
-                                        // Windows 에 모달이 없어 **보류 = 안 닫음**이고, 그 사실을
-                                        // 수치로 남긴다(조용히 죽이지 않는다).
-                                        switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, src.session, false)) {
-                                            .closed => {
-                                                session_closes += 1;
-                                                // **pump 를 다시 건다.** 루프는 첫 세션 것을 보는데
-                                                // 그것이 닫혔을 수 있다(포인터로 보므로 값만 바꾸면 된다).
-                                                pump = sessions.items[0].pump;
-                                                // **보고 있던 것이 파일이면 그대로 둔다.** 배경
-                                                // 세션 하나를 닫았다고 문서에서 튕겨 나오면 안 된다
-                                                // (적대적 검증 1회차). 터미널을 보고 있었을 때만
-                                                // 번호를 다시 맞춘다 — 그 번호는 방금 당겨졌다.
-                                                if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
-                                                refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
-                                                sidebar_redraws += 1;
-                                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
-                                            },
-                                            .busy_needs_confirm => {
-                                                // **조용히 죽이지 않고 묻는다.** 여기가 §2m.77 이
-                                                // "모달이 선행" 이라 적어 둔 자리다.
-                                                session_close_busy += 1;
-                                                pending_close_id = if (src.session < sessions.items.len) sessions.items[src.session].surface.id else null;
-                                                confirm_state.show(maru.i18n.t(.app_close_running), .{
-                                                    .confirm = maru.i18n.t(.btn_close),
-                                                    .cancel = maru.i18n.t(.common_cancel),
-                                                });
-                                                confirm_shows += 1;
-                                            },
-                                            .last_session => session_close_last += 1,
-                                            .out_of_range => {},
-                                        }
+                                        // Both mouse and keyboard enqueue a stable surface ID.
+                                        // The shared consumer checks running-session approval.
+                                        if (src.session < sessions.items.len) queued_session_close_id = sessions.items[src.session].surface.id;
                                     }
                                     continue;
                                 }
@@ -12393,7 +12370,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             // **카드를 누르면 그 세션으로 간다.** 판정은 중립이 소유한다
                             // (`AppWindow.selectTab` — 범위 밖이면 false).
                             const ti = sel_src.session;
-                            if (ti != app_window.active_tab and app_window.selectTab(ti)) {
+                            if ((active_view != .terminal or ti != app_window.active_tab) and app_window.selectTab(ti)) {
                                 active_view = .{ .terminal = ti };
                                 tab_switches += 1;
                                 sidebar_redraws += 1;
@@ -13727,6 +13704,46 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (save_close_requested) close_requested = true;
                 save_close_requested = false;
                 save_close_target = null;
+            }
+        }
+        if (queued_session_close_id) |id| {
+            queued_session_close_id = null;
+            // A queued index can name a different surface after a prior close.
+            if (!confirm_state.open and pending_file_close == null and pending_file_conflict == null) {
+                if (sessionIndexById(sessions.items, id)) |ci| {
+                    switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, false)) {
+                        .closed => {
+                            session_closes += 1;
+                            // **pump 를 다시 건다.** 루프는 첫 세션 것을 보는데
+                            // 그것이 닫혔을 수 있다(포인터로 보므로 값만 바꾸면 된다).
+                            pump = sessions.items[0].pump;
+                            // **보고 있던 것이 파일이면 그대로 둔다.** 배경
+                            // 세션 하나를 닫았다고 문서에서 튕겨 나오면 안 된다
+                            // (적대적 검증 1회차). 터미널을 보고 있었을 때만
+                            // 번호를 다시 맞춘다 — 그 번호는 방금 당겨졌다.
+                            if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
+                            refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                            sidebar_redraws += 1;
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                        },
+                        .busy_needs_confirm => {
+                            // **조용히 죽이지 않고 묻는다.** 여기가 §2m.77 이
+                            // "모달이 선행" 이라 적어 둔 자리다.
+                            session_close_busy += 1;
+                            pending_close_id = if (ci < sessions.items.len) sessions.items[ci].surface.id else null;
+                            confirm_state.show(maru.i18n.t(.app_close_running), .{
+                                .confirm = maru.i18n.t(.btn_close),
+                                .cancel = maru.i18n.t(.common_cancel),
+                            });
+                            confirm_shows += 1;
+                        },
+                        .last_session => {
+                            session_close_last += 1;
+                            close_requested = true; // same dirty-file window-close gate as caption
+                        },
+                        .out_of_range => {},
+                    }
+                }
             }
         }
         // Votes follow queued input and real save outcomes. A close cannot
@@ -20824,4 +20841,65 @@ test "Windows recovery backup worker focus close shares dirty consent and clean 
     try std.testing.expectEqual(@as(usize, 0), queue.items.len);
     try std.testing.expect(f.documents.get(lease).?.opened.?.isDirty());
     try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+// Real ConPTY ownership is required here: a list-only fixture cannot detect a
+// dangling runtime route or teardown before the running-session approval.
+test "Windows editor host native terminal close preserves routes identity and approval" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.heap.smp_allocator;
+    const io = std.testing.io;
+    var runtime = maru.app.SurfaceRuntime.init(a);
+    defer runtime.deinit();
+    var sessions: std.ArrayList(*WinSession) = .empty;
+    defer {
+        for (sessions.items) |session| {
+            session.live.closeAndDetach(&runtime);
+            session.destroy(a);
+        }
+        sessions.deinit(a);
+    }
+    var tabs: std.ArrayList(*maru.session.surface.Surface) = .empty;
+    defer tabs.deinit(a);
+    var window: maru.session.window.AppWindow = .{ .tabs = &.{} };
+    var next: usize = 0;
+    const cfg: maru.config.theme.Config = .{};
+    const opts: WinSession.SpawnOptions = .{
+        .io = io,
+        .command = maru.pty.resolveShell("", .cmd),
+        .args = &.{ "/Q", "/K" },
+        .size = .default,
+        .cfg = cfg,
+        .appearance = try maru.config.appearance.resolve(cfg),
+        .cell_w = 9,
+        .cell_h = 19,
+    };
+    for (0..4) |_| try spawnWinSession(a, &sessions, &tabs, &window, &runtime, &next, opts);
+    const first_id = sessions.items[0].surface.id;
+    const target_id = sessions.items[1].surface.id;
+    const kept_id = sessions.items[2].surface.id;
+    const fourth_id = sessions.items[3].surface.id;
+    try std.testing.expect(window.selectTab(2));
+    sessions.items[1].surface.lockCore(io);
+    try sessions.items[1].surface.core.write("\x1b]133;C\x1b\\");
+    sessions.items[1].surface.unlockCore(io);
+    try std.testing.expectEqual(CloseSessionResult.busy_needs_confirm, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, 1, false));
+    try std.testing.expectEqual(@as(usize, 4), sessions.items.len);
+    _ = try runtime.writeInputNonBlocking(target_id, "");
+    try std.testing.expectEqual(CloseSessionResult.closed, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, 0, true));
+    try std.testing.expectError(error.UnknownSurface, runtime.writeInputNonBlocking(first_id, ""));
+    try std.testing.expectEqual(@as(usize, 3), tabs.items.len);
+    try std.testing.expectEqual(kept_id, window.active().?.id);
+    try std.testing.expectEqual(@as(?usize, 0), sessionIndexById(sessions.items, target_id));
+    try std.testing.expect(sessionIndexById(sessions.items, first_id) == null);
+    const current = sessionIndexById(sessions.items, target_id).?;
+    try std.testing.expectEqual(CloseSessionResult.closed, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, current, true));
+    try std.testing.expectError(error.UnknownSurface, runtime.writeInputNonBlocking(target_id, ""));
+    try std.testing.expectEqual(@as(usize, 2), tabs.items.len);
+    try std.testing.expectEqual(kept_id, window.active().?.id);
+    try std.testing.expectEqual(CloseSessionResult.closed, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, sessionIndexById(sessions.items, fourth_id).?, true));
+    try std.testing.expectEqual(@as(usize, 1), tabs.items.len);
+    try std.testing.expectEqual(kept_id, window.active().?.id);
+    try std.testing.expectEqual(CloseSessionResult.last_session, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, 0, true));
+    _ = try runtime.writeInputNonBlocking(kept_id, "");
 }

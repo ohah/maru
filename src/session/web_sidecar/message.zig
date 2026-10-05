@@ -803,6 +803,12 @@ test "context menu commands follow what the menu showed — page items only on t
     try std.testing.expect(!contextMenuAllows(link, .back) and !contextMenuAllows(link, .reload) and !contextMenuAllows(link, .copy_image_address));
     try std.testing.expect(!contextMenuAllows(link, .open_link_new_tab)); // 걸러진 주소가 http·https 가 아니면 새 탭 없음
     try std.testing.expect(contextMenuAllows(.{ .link = true, .link_openable = true }, .open_link_new_tab));
+    // W6h②: 미디어의 복사·열기는 각자의 표지로(`data:` 오디오는 복사만, 열기는 http·https 이고 저장할 수 있을 때만).
+    const data_audio: ContextMenuFlags = .{ .media = true, .media_audio = true, .media_copyable = true };
+    try std.testing.expect(contextMenuAllows(data_audio, .copy_media_address) and !contextMenuAllows(data_audio, .open_media_new_tab));
+    const open_only: ContextMenuFlags = .{ .media = true, .media_video = true, .media_openable = true };
+    try std.testing.expect(!contextMenuAllows(open_only, .copy_media_address) and contextMenuAllows(open_only, .open_media_new_tab));
+    try std.testing.expect(!contextMenuAllows(data_audio, .media_loop) and contextMenuAllows(.{ .media = true, .media_audio = true, .media_can_loop = true }, .media_loop));
     try std.testing.expect(contextMenuAllows(.{ .image = true }, .copy_image_address) and !contextMenuAllows(.{ .image = true }, .copy_image));
     try std.testing.expect(contextMenuAllows(.{ .image = true, .image_loaded = true }, .copy_image));
     const input: ContextMenuFlags = .{ .editable = true, .can_paste = true, .can_select_all = true };

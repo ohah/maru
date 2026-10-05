@@ -3,10 +3,11 @@
 //!
 //! 1. 우클릭할 때 그 자리의 노드를 미리 찾는다 — 메뉴가 떠 있는 동안 배치가 바뀌어도 우클릭한 그 요소를 바꾸게. CEF 가 주는 자리는
 //!    view(화면) 좌표인데 `DOM.getNodeForLocation` 은 **문서** 좌표다(실측 — 500 px 스크롤한 페이지에 view 좌표를 그대로 주면 「No node
-//!    found」, W6h② 적대 검증) — `Page.getLayoutMetrics` 의 스크롤·배율로 바꿔 찾는다(`metrics` → `locate`).
+//!    found」, W6h② 적대 검증) — `Page.getLayoutMetrics` 의 스크롤(과 pinch 배율)로 바꿔 찾는다(`metrics` → `locate`).
 //! 2. 고르면 `DOM.resolveNode` → `Runtime.callFunctionOn` 으로 `loop`·`controls` 를 메뉴에 보인 체크의 반대값으로 둔다(Chrome 과 같다 —
-//!    뒤집지 않는다) — 그 요소가 미디어이고 주소가 메뉴가 알린
-//!    주소와 같을 때만(아니면 3 으로). 쥔 객체는 끝나면 놓는다(`objectGroup`).
+//!    뒤집지 않는다, 2 회차) — 그 요소가 미디어이고, 그 문서가 메뉴가 온 frame 과 같은 출처이고(3·4 회차), 주소가 메뉴가 알린 주소와
+//!    같을 때만(앞 32 KiB 와 길이로 — 1 회차). 아니면 3 으로. 노드를 객체로 못 얻으면(그사이 문서가 바뀌었다) 아무것도 하지 않는다(4 회차).
+//!    쥔 객체는 끝나면 놓는다(`objectGroup`). 우클릭마다 DevTools 호출 둘(배율·노드), 고르면 셋(객체·호출·놓기).
 //! 3. 다른 프로세스의 iframe(다른 사이트)이면 1 은 그 iframe 요소에서 멈춘다(실측) — 메뉴가 온 frame(그 iframe — 실측)에서 메뉴가
 //!    알린 주소와 같은 미디어가 **딱 하나**면 그것을 바꾼다(사용자 결정 2026-10-05 — 둘 이상이면 아무것도 하지 않는다).
 //!
@@ -196,7 +197,8 @@ pub fn forget(cef_id: c_int) void {
     };
 }
 
-/// view(DIP) 자리 → 문서(CSS px) 자리 — 스크롤(`pageX`·`pageY`)과 페이지 배율(`zoom` — CSS 대 DIP)로.
+/// view(DIP) 자리 → 문서(CSS px) 자리 — 스크롤(`pageX`·`pageY`)과 `cssVisualViewport.zoom`(pinch 배율 — maru 는 페이지 확대(⌘+)가 없어
+/// 1 이다)으로.
 fn documentPoint(metrics: ?std.json.Value, x: c_int, y: c_int) struct { x: i64, y: i64 } {
     var page_x: f64 = 0;
     var page_y: f64 = 0;
@@ -233,7 +235,8 @@ fn resolve(browser: [*c]c.cef_browser_t, s: *Slot) void {
 }
 
 fn call(browser: [*c]c.cef_browser_t, s: *Slot, object_id: []const u8) void {
-    // 그 요소가 미디어이고 주소가 메뉴가 알린 주소와 같을 때만 뒤집는다 — 아니면(다른 사이트 iframe 요소·그사이 바뀐 자리) 보조 경로로.
+    // 그 요소가 미디어이고 같은 출처의 문서이고 주소가 메뉴가 알린 주소와 같을 때만 고른 값으로 둔다 — 아니면(다른 사이트 iframe 요소·그사이
+    // 바뀐 자리) 보조 경로로.
     // 주소는 앞부분(`s`)과 전체 길이(`n`)로 본다(긴 `data:` 주소). 주소를 모르면(복사 실패) 확인하지 않는다.
     const src_arg: []const u8 = if (s.src) |b| b else "";
     if (!sendWaiting(browser, s, .call, "\"method\":\"Runtime.callFunctionOn\",\"params\":{{\"objectId\":{f},\"functionDeclaration\":\"function(p,s,n,w,u){{'use strict';try{{if(!(this instanceof HTMLMediaElement))return 'not-media';if(u&&this.ownerDocument.location.origin!==u)return 'other';var c=this.currentSrc;if(n&&(c.length!==n||c.slice(0,s.length)!==s))return 'other';this[p]=w;return 'ok'}}catch(e){{return 'err'}}}}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{f}}},{{\"value\":{d}}},{{\"value\":{}}},{{\"value\":{f}}}],\"returnByValue\":true}}", .{ std.json.fmt(object_id, .{}), @tagName(s.action.?), std.json.fmt(src_arg, .{}), s.src_len, s.want, std.json.fmt(s.doc orelse "", .{}) })) {
@@ -249,7 +252,8 @@ fn releaseObjects(browser: [*c]c.cef_browser_t) void {
     _ = send(browser, json);
 }
 
-/// 메뉴가 온 frame 에서 그 주소의 미디어가 딱 하나면 뒤집는다(다른 프로세스 iframe — 사용자 결정 2026-10-05). 그 뒤 놓는다.
+/// 메뉴가 온 frame 에서(같은 출처일 때만) 그 주소의 미디어가 딱 하나면 고른 값으로 둔다(다른 프로세스 iframe — 사용자 결정 2026-10-05).
+/// 그 뒤 놓는다.
 /// 주소가 없거나(`srcObject` 등) 주소 상한보다 길면 아무것도 하지 않는다. 그림자 DOM 안은 보지 못한다.
 fn fallback(s: *Slot) void {
     defer clearFor(s.cef_id);

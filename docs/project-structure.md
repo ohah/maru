@@ -661,3 +661,9 @@ store의 borrowed handle은 actual 완료까지 유지한다. 앱은 close 의�
 `src/platform/windows/chrome/sidebar.zig`는 sidebar 폭 정책과 비동기 partial config writer를
 소유한다. `main.zig`는 release 요청·완료 polling과 공통 geometry/present 연결을 맡는다.
 Win32 cursor/HTCLIENT 처리는 `src/platform/windows/win32_window.zig`에 남긴다.
+
+
+Windows archive 로그 선택은 `src/platform/windows/agents/reveal.zig`, titlebar 오른쪽 도크
+launcher의 geometry와 클릭 소유권은 `src/platform/windows/chrome/dock.zig`가 맡는다.
+공통 archive 원본 DTO와 OS별 capture 분기는 `src/app/archive_source_identity.zig`에 있고,
+Windows full file identity는 maru facade가 한 번 소유하여 editor·watcher·archive가 공유한다.

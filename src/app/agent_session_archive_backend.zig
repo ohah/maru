@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("../maru.zig");
 const archive = maru.session.agent_session_archive;
+pub const source_identity = @import("archive_source_identity.zig");
 
 /// 후보 수집은 디렉터리 순회와 `stat`뿐이라 개수 상한을 두지 않는다(실측 351개에 2.4 ms). 다만 손상된
 /// 트리에서 무한히 모으지 않도록 방어선만 둔다 — 실사용 규모의 수십 배다.
@@ -64,6 +65,7 @@ pub const Record = struct {
     mtime_ns: i96,
     inode: std.Io.File.INode,
     device: u64,
+    origin: ?source_identity.Identity = null,
     /// 이 세션이 돌린 서브에이전트 transcript 수(Claude 전용, 없으면 0). **파일을 열지 않고 디렉터리
     /// 항목만 세므로** parse 결과가 아니라 스캔 메타데이터다 — 그래서 `Parsed`가 아니라 여기 있고,
     /// 파싱 방식이 바뀌어도 값이 정확하다. Codex는 worker가 별도 파일이 아니라 같은 rollout 트리에
@@ -161,6 +163,7 @@ const Candidate = struct {
     size: usize,
     inode: std.Io.File.INode,
     device: u64,
+    origin: ?source_identity.Identity = null,
     subagent_count: u32 = 0,
 
     fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
@@ -180,6 +183,7 @@ const CacheEntry = struct {
     size: usize,
     inode: std.Io.File.INode,
     device: u64,
+    origin: ?source_identity.Identity = null,
     parsed: archive.Parsed,
 
     fn deinit(self: *CacheEntry, allocator: std.mem.Allocator) void {
@@ -373,6 +377,7 @@ fn publishProgress(state: *State, generation: u64, result: *const Result) void {
             .mtime_ns = record.mtime_ns,
             .inode = record.inode,
             .device = record.device,
+            .origin = record.origin,
             .subagent_count = record.subagent_count,
         });
     }
@@ -442,7 +447,7 @@ fn cachedRecord(state: *State, candidate: Candidate) ?Record {
             owned.deinit(state.allocator);
             return null;
         };
-        return .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device, .subagent_count = candidate.subagent_count };
+        return .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device, .origin = candidate.origin, .subagent_count = candidate.subagent_count };
     }
     return null;
 }
@@ -451,6 +456,7 @@ fn sameCacheIdentity(entry: CacheEntry, candidate: Candidate) bool {
     return entry.provider == candidate.provider and
         entry.device == candidate.device and
         entry.inode == candidate.inode and
+        source_identity.same(entry.origin, candidate.origin) and
         entry.mtime_ns == candidate.mtime_ns and
         entry.size == candidate.size and
         std.mem.eql(u8, entry.source_path, candidate.source_path);
@@ -492,7 +498,7 @@ fn cacheParsed(state: *State, candidate: Candidate, parsed: *const archive.Parse
         owned.deinit(state.allocator);
         return;
     }
-    state.cache.append(state.allocator, .{ .provider = candidate.provider, .source_path = path, .mtime_ns = candidate.mtime_ns, .size = candidate.size, .inode = candidate.inode, .device = candidate.device, .parsed = parsed_copy }) catch {
+    state.cache.append(state.allocator, .{ .provider = candidate.provider, .source_path = path, .mtime_ns = candidate.mtime_ns, .size = candidate.size, .inode = candidate.inode, .device = candidate.device, .origin = candidate.origin, .parsed = parsed_copy }) catch {
         state.allocator.free(path);
         var owned = parsed_copy;
         owned.deinit(state.allocator);
@@ -691,12 +697,22 @@ fn appendCandidate(allocator: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, o
     };
     var transferred = false;
     defer if (!transferred) candidate.deinit(allocator);
-    const stat = dir.statFile(io, open_name, .{ .follow_symlinks = false }) catch return;
+    // Capture discovery stat and full ID from one no-follow handle on Windows.
+    // A 64-bit stat index alone cannot prove a ReFS file's 128-bit identity.
+    const stat = if (comptime builtin.os.tag == .windows) blk: {
+        const probe = dir.openFile(io, open_name, .{ .follow_symlinks = false, .allow_directory = false }) catch return;
+        defer probe.close(io);
+        const value = probe.stat(io) catch return;
+        if (value.kind != .file or value.size == 0) return;
+        candidate.origin = source_identity.capture(probe) catch return;
+        candidate.device = candidate.origin.?.volume;
+        break :blk value;
+    } else dir.statFile(io, open_name, .{ .follow_symlinks = false }) catch return;
     if (stat.kind != .file or stat.size == 0) return;
     candidate.mtime_ns = stat.mtime.nanoseconds;
     candidate.size = @intCast(stat.size);
     candidate.inode = stat.inode;
-    candidate.device = fileDevice(allocator, dir.*, open_name) orelse return;
+    if (comptime builtin.os.tag != .windows) candidate.device = fileDevice(allocator, dir.*, open_name) orelse return;
     if (candidates.items.len < max_candidates_per_provider) {
         candidates.append(allocator, candidate) catch return;
         transferred = true;
@@ -746,6 +762,8 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
     const file = positionalReadable(opened);
     defer file.close(io);
     const stat = file.stat(io) catch return;
+    const origin = source_identity.capture(file) catch return;
+    if (!source_identity.same(origin, candidate.origin)) return;
     if (stat.inode != candidate.inode or openedDevice(file) != candidate.device) return;
     if (stat.kind != .file or stat.size == 0) return;
 
@@ -761,7 +779,7 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
     canonicalizeParsedCwd(state, &parsed);
     cacheParsed(state, candidate, &parsed);
     const path = allocator.dupe(u8, candidate.open_path) catch return;
-    result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device, .subagent_count = candidate.subagent_count }) catch {
+    result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device, .origin = candidate.origin, .subagent_count = candidate.subagent_count }) catch {
         allocator.free(path);
         return;
     };
@@ -878,6 +896,7 @@ fn canonicalizeParsedCwd(state: *State, parsed: *archive.Parsed) void {
 }
 
 fn openedDevice(file: std.Io.File) u64 {
+    if (comptime builtin.os.tag == .windows) return (source_identity.capture(file) catch return std.math.maxInt(u64)).?.volume;
     if (comptime builtin.os.tag != .macos) return 0;
     var stat: std.posix.Stat = undefined;
     if (std.c.fstat(file.handle, &stat) != 0) return std.math.maxInt(u64);
@@ -892,6 +911,7 @@ test "archive cache identity rejects replaced or changed source files" {
     entry.size = 20;
     entry.inode = 30;
     entry.device = 40;
+    entry.origin = null;
     const candidate = Candidate{
         .provider = .codex,
         .open_path = @constCast("/tmp/rollout.jsonl"),
@@ -902,6 +922,15 @@ test "archive cache identity rejects replaced or changed source files" {
         .device = 40,
     };
     try std.testing.expect(sameCacheIdentity(entry, candidate));
+    var native_entry = entry;
+    native_entry.origin = .{ .volume = 40, .file = .{0} ** 16 };
+    var native_candidate = candidate;
+    native_candidate.origin = native_entry.origin;
+    try std.testing.expect(sameCacheIdentity(native_entry, native_candidate));
+    native_candidate.origin.?.file[15] = 1;
+    try std.testing.expect(!sameCacheIdentity(native_entry, native_candidate));
+    native_candidate.origin = null;
+    try std.testing.expect(!sameCacheIdentity(native_entry, native_candidate));
     var replaced = candidate;
     replaced.inode = 31;
     try std.testing.expect(!sameCacheIdentity(entry, replaced));
@@ -1219,4 +1248,55 @@ test "archive scanner refuses a symlinked history directory" {
     var history = try tmp.dir.openDir(io, "history", .{ .iterate = true, .follow_symlinks = false });
     defer history.close(io);
     try std.testing.expect(openChildDirectoryNoFollow(io, history, "project-link") == null);
+}
+
+test "agent_session_archive_backend Windows discovery reader cache and progress retain full source identity" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-origin-fixture\",\"cwd\":\"C:/fixture\",\"source\":\"cli\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Identity fixture ready\"}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "rollout.jsonl", .data = data });
+    var path_buffer: [4096]u8 = undefined;
+    const dir_path = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    const path = try std.fs.path.join(a, &.{ dir_path, "rollout.jsonl" });
+    defer a.free(path);
+    const probe = try tmp.dir.openFile(io, "rollout.jsonl", .{ .follow_symlinks = false });
+    const native = try @import("../platform/windows/file_identity.zig").Identity.capture(probe.handle);
+    probe.close(io);
+    var candidates: std.ArrayList(Candidate) = .empty;
+    defer {
+        for (candidates.items) |*item| item.deinit(a);
+        candidates.deinit(a);
+    }
+    var dir = tmp.dir;
+    var partial = false;
+    appendCandidate(a, io, &dir, "rollout.jsonl", .codex, try a.dupe(u8, path), try a.dupe(u8, "rollout.jsonl"), &candidates, &partial);
+    try std.testing.expectEqual(@as(usize, 1), candidates.items.len);
+    const candidate = candidates.items[0];
+    try std.testing.expectEqual(native.volume, candidate.device);
+    try std.testing.expectEqual(native.volume, candidate.origin.?.volume);
+    try std.testing.expectEqualSlices(u8, &native.file, &candidate.origin.?.file);
+    var backend = try Backend.init(a, io);
+    defer backend.deinit();
+    var result: Result = .{};
+    defer result.deinit(a);
+    appendCandidateFile(backend.state.?, candidate, 1, &result);
+    try std.testing.expectEqual(@as(usize, 1), result.records.items.len);
+    try std.testing.expect(source_identity.same(candidate.origin, result.records.items[0].origin));
+    var cached = cachedRecord(backend.state.?, candidate) orelse return error.TestExpectedEqual;
+    defer cached.deinit(a);
+    try std.testing.expect(source_identity.same(candidate.origin, cached.origin));
+    publishProgress(backend.state.?, 1, &result);
+    var progress = backend.takeResult() orelse return error.TestExpectedEqual;
+    defer progress.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), progress.records.items.len);
+    try std.testing.expect(source_identity.same(candidate.origin, progress.records.items[0].origin));
+    try tmp.dir.rename("rollout.jsonl", tmp.dir, "moved.jsonl", io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "rollout.jsonl", .data = data });
+    var replaced: Result = .{};
+    defer replaced.deinit(a);
+    appendCandidateFile(backend.state.?, candidate, 1, &replaced);
+    try std.testing.expectEqual(@as(usize, 0), replaced.records.items.len);
 }

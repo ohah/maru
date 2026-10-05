@@ -522,6 +522,9 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("dwrite", .{});
         // W7.4c: IME 조합 문자열(`ImmGetCompositionStringW`).
         exe.root_module.linkSystemLibrary("imm32", .{});
+        // Archive reveal selects a Shell PIDL from its COM-initialized worker.
+        exe.root_module.linkSystemLibrary("shell32", .{});
+        exe.root_module.linkSystemLibrary("ole32", .{});
     }
     if (target.result.os.tag == .macos) {
         linkSessionHostNotificationAdapter(b, exe);
@@ -1350,7 +1353,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "agent_session_archive_backend", "agent_session_archive_detail_backend", "os_env", "redact" },
     });
     const run_archive_worker_tests = b.addRunArtifact(archive_worker_tests);
-    run_archive_worker_tests.addArg("--maru-expect-tests=52"); // 31 worker/privacy judges and 21 anonymous aggregation blocks
+    run_archive_worker_tests.addArg("--maru-expect-tests=56"); // 35 worker/privacy/identity judges and 21 anonymous aggregation blocks
     run_archive_worker_tests.setCwd(b.path("."));
     b.step("test-agent-archive-workers", "Verify shared archive worker ownership and history reads").dependOn(&run_archive_worker_tests.step);
 
@@ -1565,7 +1568,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Windows safe save"},
     });
     const run_safe_save_tests = b.addRunArtifact(safe_save_tests);
-    run_safe_save_tests.addArg("--maru-expect-tests=66"); // 2 aggregation blocks, 16 stage, 9 metadata, 7 security, 2 audit-scope, 3 identity, 27 transaction tests
+    run_safe_save_tests.addArg("--maru-expect-tests=63"); // 2 aggregation blocks, 16 stage, 9 metadata, 7 security, 2 audit-scope, 27 transaction tests; identity is owned by maru below
     const safe_save_step = b.step("test-win32-safe-save", "Verify native editor save path and original-file preservation");
     safe_save_step.dependOn(&run_safe_save_tests.step);
     const document_grant_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows document grant"} });
@@ -1586,7 +1589,7 @@ pub fn build(b: *std.Build) void {
     const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
     const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
-    run_editor_host_tests.addArg("--maru-expect-tests=91"); // 2 aggregation blocks + 78 native tests + 11 pure policies
+    run_editor_host_tests.addArg("--maru-expect-tests=98"); // 2 aggregation blocks + 84 native tests + 12 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
@@ -1672,7 +1675,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "Windows safe save", "Windows relative read" },
     });
     const run_relative_file_tests = b.addRunArtifact(relative_file_tests);
-    run_relative_file_tests.addArg("--maru-expect-tests=29"); // 21 aggregation blocks, 5 save path and 3 read path tests
+    run_relative_file_tests.addArg("--maru-expect-tests=32"); // 21 aggregation blocks, 5 save path, 3 read path and 3 full identity tests moved from the root module
     safe_save_step.dependOn(&run_relative_file_tests.step);
 
     const macos_coretext_font_tests = addProjectTest(b, .{
@@ -4348,7 +4351,7 @@ pub fn build(b: *std.Build) void {
     attachPngCodec(b, marker_preview_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다(위 주석)
     marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
-    run_marker_preview_tests.addArg("--maru-expect-tests=91"); // MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
+    run_marker_preview_tests.addArg("--maru-expect-tests=98"); // MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
     b.step("test-marker-preview", "Run the terminal image-marker preview core judges only (MP1 filter)").dependOn(&run_marker_preview_tests.step);
 
     // 색 구성 통지(DECSET 2031 / DSR 996)의 코어 판정자만 — 위 `test-marker-preview` 와 같은 이유(변이 한 개에 전체 test 6 분을 안 쓴다).

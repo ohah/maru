@@ -4,6 +4,8 @@ const maru = @import("maru");
 /// tree-sitter. **root 모듈이 이미 갖고 있다**(build.zig 의 `-Msyntax`) — 편집기 색칠이 쓴다.
 const ts = @import("syntax");
 const win_sidebar = @import("platform/windows/chrome/sidebar.zig");
+const win_dock = @import("platform/windows/chrome/dock.zig");
+const archive_reveal = if (builtin.os.tag == .windows) @import("platform/windows/agents/reveal.zig") else struct {};
 /// Shared archive worker; the facade keeps both hosts on one owner type.
 const agent_archive_backend = maru.app.agent_session_archive_backend;
 /// 카드를 펼쳤을 때 읽는 **상세**. 스캔 백엔드와 같은 공통 계층의 파일이고,
@@ -49,12 +51,13 @@ test {
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;
+    if (comptime builtin.os.tag == .windows) _ = archive_reveal;
     _ = maru.win32_relative_file;
     _ = @import("platform/windows/editor/stage.zig");
     _ = @import("platform/windows/editor/metadata.zig");
     _ = @import("platform/windows/editor/security.zig");
     _ = @import("platform/windows/editor/audit_scope.zig");
-    _ = @import("platform/windows/file_identity.zig");
+    _ = maru.win32_file_identity;
     _ = @import("platform/windows/editor/transaction.zig");
     _ = @import("platform/windows/editor/document_grant.zig");
     _ = @import("platform/windows/editor/save_controller.zig");
@@ -2333,6 +2336,17 @@ fn appendCaptionButtons(
     }
 }
 
+fn appendDockToggle(a: std.mem.Allocator, cells: *std.ArrayList(d3d11_cells.Cell), r: maru.session.split_tree.Rect, visible: bool, tk: *const maru.chrome.Tokens) !void {
+    if (r.w == 0 or r.h == 0) return;
+    const ink = cellColor(tk, .surface_fg);
+    const x = r.x + r.w / 2 -| 8;
+    const y = r.y + r.h / 2 -| 6;
+    try appendRectOutline(a, cells, x, y, 16, 12, ink);
+    // A right-hand pane pictogram matches the existing dock-toggle meaning.
+    try cells.append(a, d3d11_cells.solidCell(@floatFromInt(x + 10), @floatFromInt(y), 1, 12, ink, .{ 0, 0, 0, 0 }));
+    if (visible) try cells.append(a, d3d11_cells.solidCell(@floatFromInt(x + 12), @floatFromInt(y + 2), 2, 8, ink, .{ 0, 0, 0, 0 }));
+}
+
 fn appendRectOutline(allocator: std.mem.Allocator, out: *std.ArrayList(d3d11_cells.Cell), x: u32, y: u32, w: u32, h: u32, ink: [4]f32) !void {
     try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(x), @floatFromInt(y), @floatFromInt(w), 1, ink, .{ 0, 0, 0, 0 }));
     try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(x), @floatFromInt(y + h - 1), @floatFromInt(w), 1, ink, .{ 0, 0, 0, 0 }));
@@ -3384,6 +3398,7 @@ const AgentCard = struct {
     source_path: []const u8,
     inode: std.Io.File.INode,
     device: u64,
+    origin: ?agent_archive_backend.source_identity.Identity = null,
     scan_provider: maru.session.agent_session_archive.Provider,
 };
 
@@ -3399,6 +3414,8 @@ const AgentDetail = struct {
     state: maru.chrome.components.session_dock.types.DetailState = .loading,
     turns: []maru.chrome.components.session_dock.types.Turn = &.{},
     action_records: u32 = 0,
+    proved_origin: ?agent_archive_backend.source_identity.Identity = null,
+    reveal_busy: bool = false,
     arena: ?std.heap.ArenaAllocator = null,
 
     fn clear(self: *AgentDetail) void {
@@ -3406,6 +3423,8 @@ const AgentDetail = struct {
         self.arena = null;
         self.turns = &.{};
         self.action_records = 0;
+        self.proved_origin = null;
+        self.reveal_busy = false;
     }
 };
 
@@ -3469,6 +3488,7 @@ fn requestAgentDetail(
         .source_path = path,
         .inode = card.inode,
         .device = card.device,
+        .origin = card.origin,
     };
     if (!be.submit(source, request_id)) {
         // **거절이면 우리가 돌려준다** — 그 함수 계약이 그렇다(*"Caller owns source on false"*).
@@ -3523,10 +3543,16 @@ fn takeAgentDetail(
             det.arena = arena;
             det.turns = turns;
             det.action_records = parsed.action_records;
+            det.proved_origin = res.origin;
             det.state = .ready;
         },
     }
     return true;
+}
+
+fn canRevealAgentLog(card: AgentCard, det: *const AgentDetail) bool {
+    return det.state == .ready and !det.reveal_busy and card.origin != null and
+        agent_archive_backend.source_identity.same(card.origin, det.proved_origin);
 }
 
 fn agentOpenDetail(det: *const AgentDetail, expanded: ?u64) ?*const AgentDetail {
@@ -3607,10 +3633,10 @@ fn projectAgentItems(
                     .state = od.state,
                     .turns = od.turns,
                     .action_record_count = od.action_records,
-                    // **아직 아무 것도 못 한다.** 버튼을 살려 두면 눌리는데 아무 일도 안 나는
-                    // 죽은 컨트롤이 된다 — 그것이 이 슬라이스가 갚는 결함의 모양이다.
+                    // Reveal is available only after full source identity proof. Resume
+                    // and live focus await their own authority and launch contracts.
                     .resume_enabled = false,
-                    .reveal_enabled = false,
+                    .reveal_enabled = canRevealAgentLog(c, od),
                     .focus_live_enabled = false,
                 };
             } else null;
@@ -3845,6 +3871,7 @@ fn drainAgentItemsInner(
             .source_path = try persist.dupe(u8, rec.source_path),
             .inode = rec.inode,
             .device = rec.device,
+            .origin = rec.origin,
             .scan_provider = p.provider,
         };
     }
@@ -6495,7 +6522,8 @@ fn dockGeometryFor(
         const grid = winDockViewBarGrid(tk.?, cell_w);
         const width: u32 = grid.slot_cols * cell_w * @as(u32, maru.chrome.components.dock_view_bar.slot_count);
         const captions = @max(cell_w * 5, 46) * 3;
-        const right = width_px -| captions;
+        const launcher = win_dock.buttonRect(width_px, sidebar_width_px, titlebar_px, @max(cell_w * 5, 46));
+        const right = width_px -| (captions + launcher.w);
         // Hide the complete switcher when a narrow window cannot fit it.
         result.view_bar = if (right >= sidebar_width_px + width)
             .{ .x = right - width, .y = 0, .w = width, .h = titlebar_px }
@@ -6822,7 +6850,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **기하는 중립이 정한다**(`session/dock_layout.compute`) — macOS 가 쓰는 그 함수다. Windows 가
     // 자기 산수로 다시 나누면 두 플랫폼의 도크 폭·디바이더 두께가 조용히 갈린다.
     // 도크 상태. **⒞ 슬라이스가 이 둘을 움직인다**(디바이더 드래그·숨기기) — 지금은 고정이다.
-    const dock_visible = true;
+    var dock_visible = true;
+    var dock_layout_pending = false;
+    var layout_probe = false;
+    var dock_toggle_gesture: win_dock.Gesture = .{};
+    var dock_toggle_clicks: usize = 0;
     // **⒞ 가 이것을 움직인다** — 디바이더를 끌면 폭이 바뀐다. 0 은 "뷰가 정한 기본 폭" 센티널이다.
     var dock_size_pt: u32 = 0;
     // 도크가 지금 무엇을 보이는가. 뷰 바의 칸을 누르면 바뀐다(W8.7c2).
@@ -7547,6 +7579,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_click_target_row: usize = 0;
     var divider_drag: ?f64 = null;
     var sidebar_resize_drag: ?i32 = null;
+    var reveal_owner: archive_reveal.Owner = .{ .io = io };
+    defer reveal_owner.deinit();
     var sidebar_writer = try win_sidebar.Writer.init(io);
     defer sidebar_writer.deinit();
     var divider_grabs: usize = 0;
@@ -11343,6 +11377,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 agent_detail_pending = false;
             }
         }
+        if (reveal_owner.take()) |receipt| {
+            if (receipt.request_id == agent_detail.request_id and receipt.identity == agent_detail.identity) {
+                agent_detail.reveal_busy = false;
+                if (receipt.failure) |err| {
+                    agent_detail.clear();
+                    agent_detail.state = if (err == error.StaleArchiveSource) .stale else .unavailable;
+                    std.log.warn("archive log reveal failed({s})", .{@errorName(err)});
+                }
+                var pa = std.heap.ArenaAllocator.init(allocator);
+                defer pa.deinit();
+                projectAgentItems(pa.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
+                agent_opts.items = agent_items.items;
+                agent_state.invalidateTree();
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            }
+        }
         if (takeAgentDetail(agent_counting.allocator(), allocator, &agent_detail_be, &agent_detail)) {
             agent_detail_results += 1;
             agent_archive.query = agent_search.query.items;
@@ -11405,10 +11455,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             .{ .left = @as(i32, @intCast(sidebar_w)) - 5, .top = @intCast(titlebar_px), .right = @as(i32, @intCast(sidebar_w)) + 5, .bottom = @intCast(client_h -| status_bar_px) }
         else
             null;
-        window.caption_buttons_px = caption_buttons_px + geom.view_bar.w;
+        const dock_toggle_rect = win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w);
+        window.caption_buttons_px = caption_buttons_px + dock_toggle_rect.w + geom.view_bar.w;
+        // Apply layout changes through the same path as a real window resize.
+        // Queue before poll, never while iterating its borrowed event slice.
+        if (dock_layout_pending) {
+            window.events.push(allocator, .{ .resized = .{ .width_px = client_w, .height_px = client_h } });
+            dock_layout_pending = false;
+        }
         window.horizontal_resize_active = divider_drag != null or sidebar_resize_drag != null;
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
+                layout_probe = true;
                 try present.resize(r.width_px, r.height_px);
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
                 client_w = r.width_px;
@@ -11436,7 +11494,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch |err| {
+                    std.log.warn("Windows sidebar layout rebuild failed({s})", .{@errorName(err)});
+                };
                 rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
@@ -11574,6 +11634,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     switch (key_ev.key) {
                         .escape => {
                             agent_search_focused = false;
+                            agent_opts.search_focused = false;
                             agent_search_focus_changes += 1;
                             changed_a = true;
                         },
@@ -11812,9 +11873,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
             // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
             .mouse => |m| {
+                const pointer_toggle_rect = win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w);
+                if (m.kind == .capture_lost) dock_toggle_gesture.cancel();
                 // Busy work ends an old editor capture before caption routing.
                 // Otherwise a swallowed release can keep the scrollbar grabbed.
                 if (pending_save != null or file_close_waiting or initial_open.job != null) {
+                    dock_toggle_gesture.cancel();
                     hbar_drag.end();
                     vbar_drag.end();
                     hbar_drag_release = false;
@@ -11922,6 +11986,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
 
+                // A launcher press owns its release even over a native caption.
+                // Otherwise dropping that drag on minimize activates another control.
                 // ── 캡션 버튼 (W8.8⒝) ──────────────────────────────────────────────────
                 //
                 // **띠 위는 영역 판정보다 먼저 본다.** 여기서 안 가로채면 캡션 버튼 클릭이
@@ -11934,6 +12000,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // (실측 2026-08-25: 띠를 합치자마자 `header_clicks` 가 4 → 0 이 됐다).
                 if (titlebar_px != 0 and m.y_px >= 0 and m.y_px < @as(i32, @intCast(titlebar_px)) and
                     m.x_px >= @as(i32, @intCast(sidebar_w)) and
+                    !win_dock.contains(pointer_toggle_rect, m.x_px, m.y_px) and
+                    !(dock_toggle_gesture.pressed and m.kind != .left_down) and
                     !(geom.view_bar.w != 0 and m.x_px >= @as(i32, @intCast(geom.view_bar.x)) and
                         m.x_px < @as(i32, @intCast(geom.view_bar.x + geom.view_bar.w))))
                 {
@@ -11946,6 +12014,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         caption_hover = hit;
                         rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
                     }
+                    if (m.kind == .left_up or m.kind == .left_down) dock_toggle_gesture.cancel();
                     if (m.kind == .left_up) if (hit) |i| {
                         caption_clicks += 1;
                         if (pending_save != null) caption_save_clicks += 1;
@@ -11963,7 +12032,41 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 
                 // Keep native caption controls available, but block covered app actions.
                 if (pending_save != null or file_close_waiting or initial_open.job != null) continue;
-                if (file_notice.open and !confirm_state.open) continue;
+                if (file_notice.open and !confirm_state.open) {
+                    dock_toggle_gesture.cancel();
+                    continue;
+                }
+
+                // The launcher owns a complete press/release, including leaving
+                // its rectangle. A modal or stolen capture cancels that ownership.
+                const toggle_hit = win_dock.contains(pointer_toggle_rect, m.x_px, m.y_px);
+                if (confirm_state.open or m.kind == .capture_lost) dock_toggle_gesture.cancel();
+                if (!confirm_state.open and (toggle_hit or dock_toggle_gesture.pressed)) {
+                    switch (m.kind) {
+                        .left_down => dock_toggle_gesture.down(toggle_hit),
+                        .left_up => if (dock_toggle_gesture.up(toggle_hit)) {
+                            // Keep view and explicit width; only visibility changes.
+                            if (dock_visible and dock_size_pt == 0) dock_size_pt = geom.dock_size_px;
+                            dock_visible = !dock_visible;
+                            dock_key_focus = false;
+                            agent_search_focused = false;
+                            divider_drag = null;
+                            agent_bar_drag = null;
+                            dock_toggle_clicks += 1;
+                            dock_layout_pending = true;
+                            if (!dock_visible) {
+                                if (agent_backend) |*b| _ = b.cancel();
+                            } else if (dock_view == .agent_sessions) {
+                                if (agent_backend) |*b| if (home_dir) |home| {
+                                    if (submitAgentScan(agent_counting.allocator(), b, home).len == 0)
+                                        agent_scan_finished = false;
+                                };
+                            }
+                        },
+                        else => {},
+                    }
+                    continue;
+                }
 
                 // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────
                 //
@@ -12470,6 +12573,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 // 인텐트도 렌더도 **중립이 이미 갖고 있었다**(`focus_search`,
                                 // `props.search`·`search_focused`·`search_cursor_visible`) — 없던 것은
                                 // 키의 주인뿐이다.
+                                if (intent == .reveal_log) {
+                                    if (agent_state.expanded_identity) |id| if (id < agent_archive.cards.len and agent_detail.identity == id) {
+                                        const card = agent_archive.cards[id];
+                                        if (canRevealAgentLog(card, &agent_detail)) {
+                                            const source: agent_detail_backend.Source = .{ .provider = card.scan_provider, .source_path = @constCast(card.source_path), .inode = card.inode, .device = card.device, .origin = card.origin };
+                                            const started = reveal_owner.start(source, agent_detail.request_id, id) catch |err| {
+                                                std.log.warn("archive log reveal failed({s})", .{@errorName(err)});
+                                                continue;
+                                            };
+                                            if (started) {
+                                                agent_detail.reveal_busy = true;
+                                                var pa = std.heap.ArenaAllocator.init(allocator);
+                                                defer pa.deinit();
+                                                projectAgentItems(pa.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
+                                                agent_opts.items = agent_items.items;
+                                                agent_state.invalidateTree();
+                                                changed = true;
+                                            }
+                                        }
+                                    };
+                                }
                                 if (intent == .focus_search) {
                                     if (!agent_search_focused) {
                                         agent_search_focused = true;
@@ -13548,6 +13672,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const term_last = cells.items.len;
         // **띠는 맨 위다** — 터미널·도크 위에 얹혀야 캡션 버튼이 안 가려진다.
         cells.appendSlice(allocator, titlebar_cells.items) catch {};
+        appendDockToggle(allocator, &cells, win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w), dock_visible, &chrome_tokens) catch {};
         for (dock_cells.items) |cell| {
             if (cell.rect[1] < @as(f32, @floatFromInt(titlebar_px))) cells.append(allocator, cell) catch {};
         }
@@ -13917,6 +14042,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
 
+        if (layout_probe) {
+            std.log.debug("Windows layout frame native={d} sidebar={d} dock={d} status={d} total={d}", .{ native.len, sidebar_cells.items.len, dock_cells.items.len, status_cells.items.len, cells.items.len });
+            layout_probe = false;
+        }
         try present.beginFrame(clear);
         try pipeline.draw(cells.items, present.width_px, present.height_px);
         try present.present(false);
@@ -13992,6 +14121,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **사이드바 판정**(W8.8⒜1). `term_cells_before_rect` 가 사이드바 침범을 잡는다 — 터미널
     // 사각형이 이제 `x=180` 에서 시작하므로, 원점을 안 찍으면 그 수가 0 이 아니다(§2m.31 이
     // "검증 안 됐다" 고 적어 둔 배선이 여기서 처음 발동한다).
+    try stdout.print("dock_toggle_clicks={d} dock_toggle_visible={}\n", .{ dock_toggle_clicks, win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w).w != 0 });
     try stdout.print("titlebar_px={d} caption_btn_w={d} caption_clicks={d} titlebar_cells={d}\n", .{ titlebar_px, caption_btn_w, caption_clicks, titlebar_cells.items.len });
     try stdout.print("caption_save_clicks={d}\n", .{caption_save_clicks});
     if (caption_judgeable) {
@@ -21025,7 +21155,7 @@ test "Windows editor host titlebar dock icons share caption line and free conten
     try std.testing.expectEqual(@as(u32, 0), geom.view_bar.y);
     try std.testing.expectEqual(@as(u32, 38), geom.view_bar.h);
     try std.testing.expectEqual(@as(u32, 38), geom.tree_content.y);
-    try std.testing.expectEqual(@as(u32, 862), geom.view_bar.x + geom.view_bar.w);
+    try std.testing.expectEqual(@as(u32, 816), geom.view_bar.x + geom.view_bar.w);
     try std.testing.expectEqual(maru.session.dock_layout.Region.view_bar, maru.session.dock_layout.regionAt(geom, @floatFromInt(geom.view_bar.x + 1), 19));
     const tiny = dockGeometryFor(300, 640, 9, 19, true, 0, .explorer, 180, 38, 27, &tk);
     try std.testing.expectEqual(@as(u32, 0), tiny.view_bar.w);
@@ -21057,4 +21187,58 @@ test "Windows editor host sidebar writer coalesces releases and drains final wid
     defer parsed.deinit();
     try std.testing.expectEqual(@as(u32, 320), parsed.config.sidebar.width_pt);
     try std.testing.expect(std.mem.indexOf(u8, result, "# coalesced") != null);
+}
+
+test "Windows editor host archive log action requires matching ready detail witness" {
+    const id: agent_archive_backend.source_identity.Identity = .{ .volume = 2, .file = .{0} ** 16 };
+    const card: AgentCard = .{ .provider = .codex, .title = "fixture", .summary = "", .messages = "", .age = "", .model = "", .source_path = "C:/fixture.jsonl", .inode = 1, .device = 2, .origin = id, .scan_provider = .codex };
+    var det: AgentDetail = .{ .state = .ready, .proved_origin = id };
+    try std.testing.expect(canRevealAgentLog(card, &det));
+    det.reveal_busy = true;
+    try std.testing.expect(!canRevealAgentLog(card, &det));
+    det.reveal_busy = false;
+    det.proved_origin.?.file[15] ^= 1;
+    try std.testing.expect(!canRevealAgentLog(card, &det));
+    det.proved_origin = null;
+    try std.testing.expect(!canRevealAgentLog(card, &det));
+    det.proved_origin = id;
+    det.state = .stale;
+    try std.testing.expect(!canRevealAgentLog(card, &det));
+}
+
+test "Windows editor host dock visibility restores view width and expands every terminal layout" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const tk = chromeTokensFor(maru.config.Config{});
+    for ([_]maru.session.dock_panel.View{ .explorer, .source_control, .agent_sessions, .agent_activity }) |view| {
+        const shown = dockGeometryFor(1600, 1000, 9, 19, true, 400, view, 320, 38, 27, &tk);
+        const hidden = dockGeometryFor(1600, 1000, 9, 19, false, 400, view, 320, 38, 27, &tk);
+        try std.testing.expectEqual(@as(u32, 0), hidden.dock.w);
+        try std.testing.expectEqual(@as(u32, 0), hidden.view_bar.w);
+        try std.testing.expectEqual(@as(u32, 1280), hidden.terminal.w);
+        try std.testing.expect(shown.terminal.w < hidden.terminal.w);
+        const again = dockGeometryFor(1600, 1000, 9, 19, true, 400, view, 320, 38, 27, &tk);
+        try std.testing.expectEqualDeep(shown, again);
+        const button = win_dock.buttonRect(1600, 320, 38, 46);
+        try std.testing.expect(shown.view_bar.x + shown.view_bar.w <= button.x);
+        try std.testing.expect(button.w != 0);
+    }
+}
+
+test "Windows editor host dock launcher paint survives collapsed content without crossing captions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(std.testing.allocator);
+    const tk = chromeTokensFor(maru.config.Config{});
+    const rect = win_dock.buttonRect(1000, 180, 38, 46);
+    try appendDockToggle(std.testing.allocator, &cells, rect, false, &tk);
+    try std.testing.expect(cells.items.len >= 5);
+    const collapsed_len = cells.items.len;
+    for (cells.items) |cell| {
+        try std.testing.expect(cell.rect[0] >= @as(f32, @floatFromInt(rect.x)));
+        try std.testing.expect(cell.rect[0] + cell.rect[2] <= 862);
+        try std.testing.expect(cell.rect[1] >= 0 and cell.rect[1] + cell.rect[3] <= 38);
+    }
+    cells.clearRetainingCapacity();
+    try appendDockToggle(std.testing.allocator, &cells, rect, true, &tk);
+    try std.testing.expectEqual(collapsed_len + 1, cells.items.len);
 }

@@ -4227,3 +4227,14 @@ private 실앱 PID 41632에서 정확히 1MiB인 기존 Windows 폭 키 갱신�
 정상 종료 코드 0을 수집했다. 실제 사용자 config는 쓰지 않았고 테스트의 private config는
 원래 상태로 복구했다. 에이전트 도크 버튼은 아직 비활성이다. 다음 단계는 Windows archive
 snapshot의 device=0 fallback을 full native identity와 교체 검증으로 바꾸는 것이다.
+
+
+### Windows archive 로그 선택과 titlebar 도크 launcher (§2m.204~205)
+
+두 경로 각각 5개 compiled runtime 변형을 검출했다. archive worker 56개(Windows 52 pass,
+기존 macOS skip 4)와 host 98개(Debug/ReleaseFast)를 검증했다. private 실앱 PID 18808의
+Shell 선택·정상 종료 0, 16회 toggle·400px 도크 폭·grid mismatch 0을 수집했다.
+DwmFlush/CAPTUREBLT desktop 캡처 6회에서 terminal/sidebar 유지도 확인했다.
+상세 계약과 근거는 [Windows 플랫폼](windows-platform.md#2m204--windows-archive-원본-식별과-로그-선택),
+진행 기록은 [Windows 구현 계획](plans/windows-platform.md)을 따른다. resume/live focus와
+전체 잔여 Windows 기능·물리 입력 장기 soak는 후속이다.

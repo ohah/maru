@@ -4,11 +4,15 @@
 //! 순서와 문구는 Chrome 154 의 한국어 메뉴 실측을 따른다(사용자 결정 2026-10-02 — Google 서비스·아직 없는 기능을 뺀 것):
 //!
 //! - 빈 곳: 뒤로 · 앞으로 · 새로고침(뒤로·앞으로는 갈 곳이 없으면 꺼 둔다 — Chrome 과 같다)
-//! - 링크: 링크 주소 복사 —(링크 글이 선택됐으면) 복사 — 음성 ▸ — 서비스 ▸
-//! - 이미지: 이미지 복사(픽셀이 없으면 꺼 둔다) · 이미지 주소 복사
-//! - 선택한 글: '…' 찾기 — 복사 — 음성 ▸ — 서비스 ▸
+//! - 링크: 새 탭에서 링크 열기 · 새 창에서 링크 열기 — 링크 주소 복사 —(링크 글이 선택됐으면) 복사 · 검색 — 음성 ▸ — 서비스 ▸
+//! - 이미지: 새 탭에서 이미지 열기 · 이미지 복사(픽셀이 없으면 꺼 둔다) · 이미지 주소 복사(링크 걸린 이미지는 링크 묶음 — 이미지 묶음)
+//! - 선택한 글: '…' 찾기 — 복사 · 「…에서 '…' 검색」 — 음성 ▸ — 서비스 ▸
 //! - 입력 칸: ('…' 찾기 —) 그림 이모티콘 & 기호 — 실행 취소 · 다시 실행 — 잘라내기 · 복사 · 붙여넣기 · 붙여넣고 스타일 일치시킴 ·
-//!   모두 선택 (— 음성 ▸ — 서비스 ▸) — 편집 항목은 할 수 없으면 꺼 둔다(Chrome 과 같다)
+//!   모두 선택 (— 검색 — 음성 ▸ — 서비스 ▸) — 편집 항목은 할 수 없으면 꺼 둔다(Chrome 과 같다)
+//!
+//! W6h① 이 더한 것(Chrome 154 한국어 메뉴 재실측 2026-10-05 — 접근성 API): 새 창에서 링크 열기(maru 는 새 창의 웹 탭), 새 탭에서
+//! 이미지 열기, 선택한 글 검색(설정 `browser.search-url` — `web_search`). 시크릿·분할 뷰·저장·인쇄·검사·하이라이트 링크·번역·렌즈는
+//! 뺀다(maru 에 없다 — 결정 D5·§7).
 //! - 이미지가 아닌 미디어(동영상 등): 항목 없음(Chrome 의 미디어 항목은 아직 없다) — 메뉴를 띄우지 않는다
 //!
 //! 명령 항목은 `message.contextMenuAllows` 로 켜고 끈다 — sidecar 도 같은 규칙으로 명령을 거른다.
@@ -35,6 +39,8 @@ pub const Kind = enum(u8) {
     services = 6,
     /// 「그림 이모티콘 & 기호」 — macOS 문자 뷰어. 고른 글자는 입력기 경로로 그 칸에 들어간다.
     emoji = 7,
+    /// 「…에서 '…' 검색」(W6h①) — maru 가 검색 주소로 새 탭(앞)을 연다. 문구는 `searchLabel`.
+    search = 8,
 };
 
 pub const Item = struct {
@@ -43,7 +49,7 @@ pub const Item = struct {
     enabled: bool = true,
     /// 0 은 메뉴, 1 은 바로 앞 하위 메뉴 머리(`speech`) 안.
     depth: u8 = 0,
-    /// 정해진 문구. `look_up` 은 null(선택한 글로 만든다 — `lookUpLabel`), `separator` 도 null.
+    /// 정해진 문구. `look_up`·`search` 는 null(선택한 글로 만든다 — `lookUpLabel`·`searchLabel`), `separator` 도 null.
     label: ?i18n.Key = null,
 };
 
@@ -83,12 +89,13 @@ pub const Menu = struct {
     }
 };
 
-/// `look_up` 은 「찾기」를 둘지 — 선택한 글에 보이는 글자가 있을 때만(`hasVisibleText` — 빈칸뿐인 선택이면 「''찾기」가 됐다, W6c②
-/// 적대 검증 3 차).
-pub fn build(flags: Flags, look_up: bool) Menu {
+/// `visible_text` 는 선택한 글에 보이는 글자가 있는가(`hasVisibleText` — 빈칸뿐인 선택이면 「''찾기」가 됐다, W6c② 적대 검증 3 차) —
+/// 「찾기」와 「검색」은 그때만 둔다.
+pub fn build(flags: Flags, visible_text: bool) Menu {
     var menu: Menu = .{};
+    const search = flags.selection and visible_text;
     if (flags.editable) {
-        if (flags.selection and look_up) {
+        if (flags.selection and visible_text) {
             menu.push(.{ .kind = .look_up });
             menu.separator();
         }
@@ -102,29 +109,35 @@ pub fn build(flags: Flags, look_up: bool) Menu {
         menu.command(flags, .paste, .web_menu_paste);
         menu.command(flags, .paste_and_match_style, .web_menu_paste_match_style);
         menu.command(flags, .select_all, .web_menu_select_all);
+        if (search) {
+            menu.separator();
+            menu.push(.{ .kind = .search });
+        }
         if (flags.selection) menu.speechAndServices();
     } else {
         if (flags.link) {
-            // Chrome 처럼 링크 열기가 먼저(W6e — 뒤 탭). http·https 가 아닌 링크(`mailto:` 등)면 꺼 둔다.
+            // Chrome 처럼 링크 열기가 먼저(W6e — 뒤 탭, W6h① — 새 창). http·https 가 아닌 링크(`mailto:` 등)면 꺼 둔다.
             menu.command(flags, .open_link_new_tab, .web_menu_open_link_new_tab);
+            menu.command(flags, .open_link_new_window, .web_menu_open_link_new_window);
             menu.separator();
             menu.command(flags, .copy_link_address, .web_menu_copy_link_address);
         }
         if (flags.image) {
             menu.separator();
+            menu.command(flags, .open_image_new_tab, .web_menu_open_image_new_tab);
             menu.command(flags, .copy_image, .web_menu_copy_image);
             menu.command(flags, .copy_image_address, .web_menu_copy_image_address);
         }
         if (flags.selection) {
             // 링크 위의 선택은 링크 글이다(우클릭이 고른다 — 실측) — Chrome 은 그때 「찾기」를 내지 않는다.
-            if (!flags.link and look_up) {
+            if (!flags.link and visible_text) {
                 menu.separator();
                 menu.push(.{ .kind = .look_up });
             }
-            if (message.contextMenuAllows(flags, .copy)) {
-                menu.separator();
-                menu.command(flags, .copy, .web_menu_copy);
-            }
+            // 복사와 검색은 한 묶음이다(Chrome — 복사 · 하이라이트 링크 복사 · 검색).
+            menu.separator();
+            if (message.contextMenuAllows(flags, .copy)) menu.command(flags, .copy, .web_menu_copy);
+            if (search) menu.push(.{ .kind = .search });
             menu.speechAndServices();
         }
         if (!flags.link and !flags.image and !flags.media and !flags.selection) {
@@ -154,6 +167,17 @@ pub const max_look_up_chars = 50;
 /// 적대 검증). 잘못된 UTF-8 바이트는 건너뛴다.
 pub fn lookUpLabel(selection: []const u8, buf: []u8) []const u8 {
     var cleaned: [max_look_up_chars * 4 + 12]u8 = undefined;
+    return i18n.format(buf, i18n.t(.web_menu_look_up), &.{.{ .s = isolate(selection, &cleaned) }});
+}
+
+/// 「…에서 '…' 검색」 문구(W6h①) — 선택한 글은 「찾기」와 같은 규칙으로 정리·줄이고 방향 격리한다. 엔진 이름은 `web_search.engineName`.
+pub fn searchLabel(engine: []const u8, selection: []const u8, buf: []u8) []const u8 {
+    var cleaned: [max_look_up_chars * 4 + 12]u8 = undefined;
+    return i18n.format(buf, i18n.t(.web_menu_search), &.{ .{ .s = engine }, .{ .s = isolate(selection, &cleaned) } });
+}
+
+/// 선택한 글을 메뉴 문구에 넣을 꼴로 — 방향 바꿈·제어·폭 0 글자를 빼고 빈칸을 접고 줄여 FSI … PDI 로 감싼다.
+fn isolate(selection: []const u8, cleaned: *[max_look_up_chars * 4 + 12]u8) []const u8 {
     const fsi = "\u{2068}";
     @memcpy(cleaned[0..fsi.len], fsi);
     var len: usize = fsi.len;
@@ -205,7 +229,7 @@ pub fn lookUpLabel(selection: []const u8, buf: []u8) []const u8 {
     const pdi = "\u{2069}";
     @memcpy(cleaned[len .. len + pdi.len], pdi);
     len += pdi.len;
-    return i18n.format(buf, i18n.t(.web_menu_look_up), &.{.{ .s = cleaned[0..len] }});
+    return cleaned[0..len];
 }
 
 fn isSpace(cp: u21) bool {
@@ -240,27 +264,33 @@ test "the page menu is back · forward · reload with back and forward off when 
     try std.testing.expectEqual(Command.reload, menu.items[2].command);
 }
 
-test "a link with its text selected is open in new tab — copy link address — copy — speech — services, without look up or page items" {
+test "a link with its text selected is open in new tab · new window — copy link address — copy · search — speech — services, without look up or page items" {
     var buf: [max_items]Kind = undefined;
     const menu = build(.{ .link = true, .link_openable = true, .selection = true, .can_copy = true, .can_go_back = true }, true);
-    try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .command, .separator, .command, .separator, .speech, .speech_start, .speech_stop, .separator, .services }, kinds(menu, &buf));
+    try std.testing.expectEqualSlices(Kind, &.{ .command, .command, .separator, .command, .separator, .command, .search, .separator, .speech, .speech_start, .speech_stop, .separator, .services }, kinds(menu, &buf));
     try std.testing.expectEqual(Command.open_link_new_tab, menu.items[0].command);
-    try std.testing.expect(menu.items[0].enabled);
-    try std.testing.expectEqual(Command.copy_link_address, menu.items[2].command);
-    try std.testing.expectEqual(Command.copy, menu.items[4].command);
-    try std.testing.expectEqual(@as(u8, 1), menu.items[7].depth);
-    // http·https 가 아닌 링크(`mailto:`)는 새 탭 열기를 꺼 둔다(W6e).
-    try std.testing.expect(!find(build(.{ .link = true }, true), .open_link_new_tab).?.enabled);
+    try std.testing.expectEqual(Command.open_link_new_window, menu.items[1].command);
+    try std.testing.expect(menu.items[0].enabled and menu.items[1].enabled);
+    try std.testing.expectEqual(Command.copy_link_address, menu.items[3].command);
+    try std.testing.expectEqual(Command.copy, menu.items[5].command);
+    try std.testing.expectEqual(@as(u8, 1), menu.items[9].depth);
+    // http·https 가 아닌 링크(`mailto:`)는 새 탭·새 창 열기를 꺼 둔다(W6e·W6h①).
+    const mail = build(.{ .link = true }, true);
+    try std.testing.expect(!find(mail, .open_link_new_tab).?.enabled and !find(mail, .open_link_new_window).?.enabled);
     try std.testing.expect(find(menu, .back) == null);
 }
 
-test "an image is copy image (off without pixels) and copy image address; a linked image adds copy link address first" {
+test "an image is open image in new tab (off unless http/https) · copy image (off without pixels) · copy image address; a linked image puts the link group first" {
     const loading = build(.{ .image = true }, true);
-    try std.testing.expectEqual(@as(usize, 2), loading.len);
-    try std.testing.expect(!find(loading, .copy_image).?.enabled and find(loading, .copy_image_address).?.enabled);
+    try std.testing.expectEqual(@as(usize, 3), loading.len);
+    try std.testing.expectEqual(Command.open_image_new_tab, loading.items[0].command);
+    try std.testing.expect(!loading.items[0].enabled and !find(loading, .copy_image).?.enabled and find(loading, .copy_image_address).?.enabled);
+    try std.testing.expect(find(build(.{ .image = true, .image_openable = true }, true), .open_image_new_tab).?.enabled);
     var buf: [max_items]Kind = undefined;
-    const linked = build(.{ .link = true, .image = true, .image_loaded = true }, true);
-    try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .command, .separator, .command, .command }, kinds(linked, &buf));
+    const linked = build(.{ .link = true, .link_openable = true, .image = true, .image_loaded = true, .image_openable = true }, true);
+    try std.testing.expectEqualSlices(Kind, &.{ .command, .command, .separator, .command, .separator, .command, .command, .command }, kinds(linked, &buf));
+    try std.testing.expectEqual(Command.copy_link_address, linked.items[3].command);
+    try std.testing.expectEqual(Command.open_image_new_tab, linked.items[5].command);
     try std.testing.expect(find(linked, .copy_image).?.enabled);
 }
 
@@ -273,23 +303,30 @@ test "an input shows emoji and all seven edit items, each off when it cannot run
     const selected = build(.{ .editable = true, .selection = true, .can_copy = true, .can_cut = true }, true);
     try std.testing.expectEqual(Kind.look_up, selected.items[0].kind);
     try std.testing.expectEqual(Kind.services, selected.items[selected.len - 1].kind);
+    // 모두 선택 — 검색 — 음성(Chrome 154 재실측 — W6h①).
+    var at: usize = 0;
+    for (selected.slice(), 0..) |item, i| if (item.kind == .command and item.command == .select_all) {
+        at = i;
+    };
+    try std.testing.expectEqualSlices(Kind, &.{ .command, .separator, .search, .separator, .speech }, kinds(selected, &buf)[at .. at + 5]);
     try std.testing.expect(find(selected, .cut).?.enabled and find(selected, .copy).?.enabled);
 }
 
-test "a selection outside inputs is look up — copy — speech — services; media has no items" {
+test "a selection outside inputs is look up — copy · search — speech — services; media has no items" {
     var buf: [max_items]Kind = undefined;
     const menu = build(.{ .selection = true, .can_copy = true }, true);
-    try std.testing.expectEqualSlices(Kind, &.{ .look_up, .separator, .command, .separator, .speech, .speech_start, .speech_stop, .separator, .services }, kinds(menu, &buf));
+    try std.testing.expectEqualSlices(Kind, &.{ .look_up, .separator, .command, .search, .separator, .speech, .speech_start, .speech_stop, .separator, .services }, kinds(menu, &buf));
     try std.testing.expectEqual(@as(usize, 0), build(.{ .media = true, .can_go_back = true }, true).len);
 }
 
 test "no flag combination makes a leading, trailing or doubled separator or overflows the list" {
     var bits: u32 = 0;
-    while (bits < (1 << 16)) : (bits += 1) { // 15 번 비트 `link_openable`(W6e)까지 모두
-        const flags: Flags = @bitCast(@as(u16, @intCast(bits)));
+    while (bits < (1 << 17)) : (bits += 1) { // 16 번 비트 `image_openable`(W6h①)까지 모두
+        const flags: Flags = @bitCast(bits);
         if (flags.image_loaded and !flags.image) continue;
         if (flags.selection_truncated and !flags.selection) continue;
         if (flags.link_openable and !flags.link) continue;
+        if (flags.image_openable and !flags.image) continue;
         const menu = build(flags, true);
         const items = menu.slice();
         if (items.len == 0) continue;
@@ -306,6 +343,18 @@ test "a selection of only spaces or invisible characters gets no look up item" {
     try std.testing.expect(blank.items[0].kind != .look_up);
     try std.testing.expectEqual(Kind.command, blank.items[0].kind); // 복사가 맨 앞 — 앞 구분선이 남지 않는다
     try std.testing.expect(build(.{ .editable = true, .selection = true }, false).items[0].kind == .emoji);
+    for (blank.slice()) |item| try std.testing.expect(item.kind != .search); // 빈칸뿐이면 검색도 없다
+}
+
+test "the search label names the engine and isolates the selection like look up" {
+    i18n.setLang(.ko);
+    defer i18n.setLang(.en);
+    var buf: [512]u8 = undefined;
+    const fsi = "\u{2068}";
+    const pdi = "\u{2069}";
+    try std.testing.expectEqualStrings("Google에서 '" ++ fsi ++ "ab cd" ++ pdi ++ "' 검색", searchLabel("Google", " \u{202E}ab\ncd ", &buf));
+    i18n.setLang(.en);
+    try std.testing.expectEqualStrings("Search Google for \u{201C}" ++ fsi ++ "word" ++ pdi ++ "\u{201D}", searchLabel("Google", "word", &buf));
 }
 
 test "the look up label drops direction overrides and controls, folds line breaks, and shortens long selections at a character boundary" {

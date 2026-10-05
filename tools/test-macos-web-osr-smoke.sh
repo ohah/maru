@@ -64,13 +64,14 @@ TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;b
 # W6c②: 우클릭 메뉴 — 왼쪽 위 링크 칸(본문 폭 50%·높이 30% — 글이 없는 자리를 누르면 낱말이 골라지지 않는다), 그 아래 입력 칸
 # (글 「abc」 — 오른쪽 빈 자리를 우클릭하면 낱말이 골라지지 않는다), 오른쪽 위 빈 곳, 그 아래 큰 글 「hello world」(두 번 눌러
 # 고른다), 오른쪽 아래는 우클릭하면 0.5 초 뒤 이동하는 칸(메뉴가 떠 있는 채 닫히는지). 불러옴·입력·
-# 오른쪽 뗌을 `/ev` 로 알린다.
+# 오른쪽 뗌을 `/ev` 로 알린다. 왼쪽 아래는 http 이미지(W6h① — 새 탭에서 이미지 열기).
 MENU = ("<!doctype html><title>menu</title><style>html,body{margin:0;height:100%;background:#20a060;font:28px sans-serif}"
     "#l{position:fixed;left:0;top:0;width:50%;height:30%;display:block;background:#ff0000}"
     "#i{position:fixed;left:0;top:45%;width:50%;height:15%;font:28px sans-serif}"
     "#p{position:fixed;left:50%;top:35%;font:60px sans-serif;margin:0}"
     "#n{position:fixed;left:50%;top:60%;width:50%;height:40%;background:#0000ff}</style><body>"
-    "<a id=l href='/cm-target'>link</a><input id=i value='abc'><p id=p>hello world</p><div id=n></div><script>"
+    "<a id=l href='/cm-target'>link</a><input id=i value='abc'><p id=p>hello world</p><div id=n></div>"
+    "<img id=g src='/img/cat.png' style='position:fixed;left:0;top:65%;width:50%;height:30%'><script>"
     "function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}ping('e=load&nt='+performance.getEntriesByType('navigation')[0].type);"
     "document.getElementById('i').addEventListener('input',function(e){ping('e=input&v='+encodeURIComponent(e.target.value))});"
     "addEventListener('mouseup',function(e){if(e.button==2)ping('e=up&b=2')});"
@@ -773,11 +774,11 @@ def t_of(line):
     return int(m.group(1)) if m else 0
 loads = [l for l in requests if l.startswith('/ev?e=load') and t_of(l) < marks.get('reloaded', 0)]
 check(len(loads) == 2, f'picking reload loaded the page again (loads before the mark: {len(loads)})')
-check(len(shown) > 1 and shown[1] == '새 탭에서 링크 열기|—|링크 주소 복사', f'the link menu (no text under the pointer) is open link in new tab — copy link address ({shown[1] if len(shown) > 1 else None})')
+check(len(shown) > 1 and shown[1] == '새 탭에서 링크 열기|새 창에서 링크 열기|—|링크 주소 복사', f'the link menu (no text under the pointer) is open link in new tab · new window — copy link address ({shown[1] if len(shown) > 1 else None})')
 edit = re.compile(r'^그림 이모티콘 & 기호\|—\|실행 취소\(off\)\|다시 실행\(off\)\|—\|잘라내기\(off\)\|복사\(off\)\|붙여넣기(\(off\))?\|붙여넣고 스타일 일치시킴(\(off\))?\|모두 선택$')
 check(len(shown) > 2 and bool(edit.match(shown[2])), f'the input menu is emoji — undo · redo — cut · copy · paste · paste and match style · select all ({shown[2] if len(shown) > 2 else None})')
-selection = "'\u2068hello\u2069' 찾기|—|복사|—|음성▸[말하기 시작|말하기 중지(off)]|—|서비스▸[]"
-check(len(shown) > 3 and shown[3] == selection, f"a selected word is look up — copy — speech ▸ — services ▸ ({shown[3] if len(shown) > 3 else None})")
+selection = "'\u2068hello\u2069' 찾기|—|복사|Google에서 '\u2068hello\u2069' 검색|—|음성▸[말하기 시작|말하기 중지(off)]|—|서비스▸[]"
+check(len(shown) > 3 and shown[3] == selection, f"a selected word is look up — copy · search Google — speech ▸ — services ▸ ({shown[3] if len(shown) > 3 else None})")
 check(any(l.startswith('/ev?e=input&v=z') for l in requests), f'select all from the menu, then z, replaced the field ({[l for l in requests if l.startswith("/ev?e=input")]})')
 cursor = [l for l in report if l.startswith('osr-test cursor')]
 check(len(cursor) == 1 and cursor[0] == 'osr-test cursor hand', f'after a menu that ate the right-button release, hover works again — the link shows the hand cursor ({cursor})')
@@ -788,6 +789,77 @@ two = [l for l in requests if l.startswith('/ev?e=load&nt=reload') and marks.get
 check('osr-test menu items=뒤로(off)|앞으로(off)|새로고침' in report and len(two) == 1,
       f'with a second window open, the menu stays open for its own window and its pick runs (another window tick must not close it) — reloads {len(two)}')
 check(report.count('osr-test menu closed-by-page') == 1 and report[-1] == 'osr-test menu none', f'only the menu open while the page navigates is closed, and nothing stays open ({report[-2:]})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6h①: 우클릭 메뉴 빈칸 — 새 창에서 링크 열기·새 탭에서 이미지 열기·선택한 글 검색 ─────────────────────────────
+# 링크 메뉴의 「새 창에서 링크 열기」는 새 maru 창을 만들어 그 창에 웹 탭으로 연다(사용자 결정 2026-10-05). 이미지 메뉴의 「새 탭에서
+# 이미지 열기」는 뒤 탭으로 그 이미지를, 선택한 글 메뉴의 「…에서 '…' 검색」은 설정 `browser.search-url`(여기서는 이 시험 서버)로
+# 앞 탭을 연다. 문구에 방향 격리 문자(U+2068·U+2069)가 들어가 대본은 파이썬으로 만든다.
+printf 'ui.language = ko\nbrowser.search-url = http://127.0.0.1:%s/search?q=%%s\n' "$port" > "$root/mh.conf"
+python3 - "$root/mh.txt" <<'PY'
+import sys
+fsi, pdi = '⁨', '⁩'
+open(sys.argv[1], 'w', encoding='utf-8').write(f"""sleep 7000
+view down 0.395 0.30 0 0 1
+view up 0.395 0.30 0 0 1
+sleep 900
+menupick 새 창에서 링크 열기
+sleep 4000
+firstwindow
+mark image
+view down 0.395 0.80 0 0 1
+view up 0.395 0.80 0 0 1
+sleep 900
+menupick 새 탭에서 이미지 열기
+sleep 1500
+mark search
+view down 0.655 0.49 0 0
+view up 0.655 0.49 0 0
+view down 0.655 0.49 0 0 0 2
+view up 0.655 0.49 0 0 0 2
+sleep 300
+view down 0.655 0.49 0 0 1
+view up 0.655 0.49 0 0 1
+sleep 900
+menupick 127.0.0.1에서 '{fsi}hello{pdi}' 검색
+sleep 2500
+""")
+PY
+: > "$root/requests.log"
+run_app /cm-app 26000 "$root/mh.summary" MARU_WEB_OSR_TEST_INPUT="$root/mh.txt" MARU_WEB_OSR_TEST_CONTEXT_MENU=1 MARU_CONFIG="$root/mh.conf"
+grep -a '^osr-test menu\|^osr-test newwindow\|^osr-test newtab\|^osr-test mark' "$root/app-cm-app.log" > "$root/mh.report" || true
+cat "$root/mh.report"
+python3 - "$root/mh.report" "$root/requests.log" <<'PY' || fail "the W6h① context menu items did not behave as expected"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+shown = [l[len('osr-test menu shown items='):] for l in report if l.startswith('osr-test menu shown items=')]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+check(len(shown) == 3 and 'osr-test menu pick-missing' not in ' '.join(report), f'three menus were shown and every pick was found ({shown})')
+check('osr-test newwindow opened windows=2 tab=true' in report and requests.count('/cm-target') == 1,
+      f'open link in new window made a second maru window whose web tab loaded the link ({[l for l in report if "newwindow" in l]} · /cm-target {requests.count("/cm-target")})')
+image_tabs = [l for l in report if l.startswith('osr-test newtab') and 'placement=background' in l]
+# 이미지 우클릭(그 뗌의 `/ev`) 뒤, 검색 전에 그 이미지가 다시 불렸다 — 새 탭이 그 이미지를 연다. (새 창도 시험 페이지를 하나 열어
+# — `MARU_WEB_PANEL` — 이미지가 그 전에도 불린다. 수로 세지 않고 차례로 본다.)
+import re
+marks = {l.split()[2]: int(l.split()[3]) for l in report if l.startswith('osr-test mark ')}
+def t_of(line):
+    m = re.search(r'[?&]t=(\d+)', line)
+    return int(m.group(1)) if m else 0
+press = next((i for i, l in enumerate(requests) if l.startswith('/ev?e=up&b=2') and t_of(l) >= marks.get('image', 1 << 62)), None)
+search = next((i for i, l in enumerate(requests) if l.startswith('/search')), len(requests))
+image_loaded = press is not None and '/img/cat.png' in requests[press:search]
+check(len(shown) > 1 and shown[1] == '새 탭에서 이미지 열기|이미지 복사|이미지 주소 복사' and len(image_tabs) == 1 and image_loaded,
+      f'the image menu opens the image in a background tab ({shown[1] if len(shown) > 1 else None} · {image_tabs} · image requested after the right click {image_loaded})')
+label = "127.0.0.1에서 '⁨hello⁩' 검색"
+search_tabs = [l for l in report if l.startswith('osr-test newtab') and 'placement=foreground' in l]
+check(len(shown) > 2 and label in shown[2].split('|') and len(search_tabs) == 1 and '/search?q=hello' in requests,
+      f'the selection menu searches the configured engine in a foreground tab ({shown[2] if len(shown) > 2 else None} · {search_tabs} · {[l for l in requests if l.startswith("/search")]})')
 sys.exit(0 if ok else 1)
 PY
 

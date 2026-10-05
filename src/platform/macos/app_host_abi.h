@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 208u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 209u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2195,6 +2195,12 @@ int32_t maru_macos_app_session_osr_drag_file_poll(MaruAppHostSession *session, u
 void maru_macos_app_session_osr_drag_file_release(MaruAppHostSession *session, uint32_t drag);
 /* v208: 창이 뒤에 있을 때 그 자리(창 backing px)의 첫 누름을 view 에 넘기는가 — Chromium 탭 본문이면 1(Chrome 처럼, `acceptsFirstMouse`). */
 int32_t maru_macos_app_session_osr_accepts_first_mouse(MaruAppHostSession *session, double x_px, double y_px);
+/* v209(W6h①): 우클릭 메뉴 항목 종류 8(「…에서 '…' 검색」) — 고르면 context_menu_search 를 부른 뒤 취소(0)로 답한다(설정의 검색 틀로 새 탭).
+   take_new_window 는 메뉴 「새 창에서 링크 열기」의 주소 하나(cap 보다 길면 버리고 0), Swift 는 tick 뒤에 새 창을 만들고 그 창 세션에
+   open_url_tab(http·https)으로 웹 탭을 연다. */
+int32_t maru_macos_app_session_osr_context_menu_search(MaruAppHostSession *session, uint32_t menu);
+int32_t maru_macos_app_session_osr_take_new_window(MaruAppHostSession *session, uint8_t *out, size_t cap, size_t *out_len);
+int32_t maru_macos_app_session_osr_open_url_tab(MaruAppHostSession *session, const uint8_t *url, size_t len);
 /* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
    2 = 뗌, 3(v202 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */

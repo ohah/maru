@@ -290,7 +290,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 206: W6d② — 페이지에서 끌어내기(osr_drag_out_take·part·started·end, osr_drag_set_source — 창이 macOS 끌기 세션을 돌린다).
 // 207: W6d③ — 끌어낸 이미지 파일(osr_drag_out_file_size, osr_drag_file_request·poll — Finder 가 청할 때만 내용을 받는다).
 // 208: W6g — osr_accepts_first_mouse(창이 뒤에 있을 때 Chromium 본문의 첫 누름도 페이지로 — acceptsFirstMouse).
-pub const abi_version: u32 = 208;
+// 209: W6h① — osr_take_new_window·osr_open_url_tab(메뉴 「새 창에서 링크 열기」), osr_context_menu_search(「…에서 '…' 검색」), 메뉴 항목 종류 8.
+pub const abi_version: u32 = 209;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6354,6 +6355,8 @@ pub const AppSession = struct {
     osr_context_menu: ?web_ops.OsrContextMenu = null,
     /// 한 탭이 이어 연 새 탭들(W6e — Chrome 처럼 차례대로 놓는다). 연 탭이 그 pane 의 활성 탭으로 남아 있는 동안만 따른다.
     osr_new_tab_run: ?web_ops.OsrNewTabRun = null,
+    /// 메뉴 「새 창에서 링크 열기」(W6h①)의 주소들 — Swift 가 tick 뒤에 가져가 새 창을 만들고 그 창에 웹 탭으로 연다(소유 — 꺼내 간 쪽이 놓는다).
+    osr_new_windows: std.ArrayList([]u8) = .empty,
     /// 밖에서 이 창 view 로 끌어 오는 것(W6d① — 끌기 동안 쥔다)과 enter 를 보낸 탭.
     osr_drag: web_ops.OsrDrag = .{},
     /// 이 창이 돌리는 페이지 끌기(W6d② — macOS 끌기 세션). 세션이 끝나면(`osrDragOutEnd`) 비운다.
@@ -23778,6 +23781,8 @@ pub const AppSession = struct {
         // W5a: 이 창이 띄운 Chromium 탭 대화상자는 취소로 답한다(페이지가 영영 멈추지 않게).
         web_osr.cancelDialogsShownBy(self.allocator, @intFromPtr(self));
         web_ops.osrContextMenuDropShown(self); // 띄운 우클릭 메뉴도(W6c②)
+        for (self.osr_new_windows.items) |url| self.allocator.free(url); // 가져가지 않은 새 창 요청(W6h①)
+        self.osr_new_windows.deinit(self.allocator);
         _ = web_ops.osrDragReset(self); // 끌기 중 창이 닫히면 그 탭에 나가기를 보낸다(W6d①)
         // 이 창이 돌리던 페이지 끌기는 취소로 답한다(W6d② — 세션의 끝 알림은 닫힌 창에 오지 않을 수 있다).
         if (self.osr_drag_out) |shown| _ = web_ops.osrDragOutEnd(self, shown.drag, std.math.nan(f64), std.math.nan(f64), 0);

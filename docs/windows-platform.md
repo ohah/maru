@@ -12049,3 +12049,28 @@ old CAS 거절과 첫 Save-close의 store 인계/레코드 삭제를 검사했�
 복구의 이력 적용과 view/syntax CPU 준비, 게시 시 hash/본문 대조 및 기존 주기적 백업
 쓰기·닫기 정리는 아직 앱 스레드다. 이 비용과 sleep/unmount·물리 입력/IME, 나머지 Windows
 지원 범위를 계속 진행한다.
+
+### 2m.187 — 초기 view projection·syntax의 독립 worker 준비
+
+`prepared_view`는 Registry 없이 본문을 빌리는 행 배열·시작 offset·최대 표시 폭과 독립
+syntax parser/tree를 준비한다. 초기 worker가 이 캐시를 만들며 같은 projection/언어 매핑을
+앱의 이후 rebuild도 사용한다. 앱은 현재 본문 allocation·길이·revision을 대조하고 view
+lease 확보 뒤만 캐시를 소비한다. 없는/stale 캐시는 파일 열기 실패이며 UI에서 조용히
+다시 준비하지 않는다. 취소/미소비/OOM은 캐시와 파일을 정산한다.
+
+초기 projection 배열의 allocator는 view에 인계된다. navigation·색 표시 scratch는 기존
+앱 allocator를 유지하고 편집/복구 뒤 refresh는 이전 배열·parser를 폐기한 뒤 앱 캐시로
+재구축한다. attach 실패는 본문 lease 해제 전에 borrowed 캐시를 정리한다. syntax 준비
+실패의 기존 monochrome 정책과 parse 크기 제한은 유지한다.
+
+worker 19개·host 82개가 Debug/ReleaseFast에서 통과했다. UTF-8/CRLF 행·표시 폭,
+다른 allocation/revision 거절, 부분 배열 할당 실패, worker parser의 main-thread highlight
+조회, 행 배열/parser/tree 주소 보존과 결과 해제 뒤 편집/refresh를 검사했다. 본문 결합·
+revision 검사·표시 폭·parser 인계·캐시 소비를 각각 깨뜨린 다섯 compiled runtime 변형을
+검출했다. C 소유권을 의도적으로 누락한 negative case도 정리 뒤 실패하도록 했다.
+
+새 실앱에서 Zig 구문 색 표시, 편집, Save-close의 exact `Xconst value = 1; CRLF`와 정상
+종료를 확인했고 옆의 BOM/CRLF 파일은 유지됐다. 소유 HWND의 synthetic 입력이며 물리
+입력/IME로 세지 않는다. 복구의 이력 적용과 그 뒤 view/syntax rebuild, 이후 편집 rebuild,
+게시 시 hash/본문 대조 및 주기적 backup write/close 정리는 여전히 앱 스레드다. 전체 잔여
+Windows 범위는 계속 진행한다.

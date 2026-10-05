@@ -4424,9 +4424,12 @@ fn openAppResultInto(a: std.mem.Allocator, book: *file_host.Book, io: std.Io, ow
     views.ensureUnusedCapacity(a, 1) catch return .out_of_memory;
     const lease = book.admitOpen(result) catch |err| return initialOpenFailure(err);
     defer _ = book.registry.release(lease) catch unreachable;
-    var view = editor_document.attach(book.registry, lease, book.allocator) catch {
+    var view = editor_document.attachPrepared(book.registry, lease, &result.view_cache) catch |err| {
+        // Drop borrowed caches before releasing the last document body lease.
+        if (result.view_cache) |*cache| cache.deinit();
+        result.view_cache = null;
         book.release(io, lease, false) catch unreachable;
-        return .out_of_memory;
+        return initialOpenFailure(err);
     };
     recoverInitialResult(book, io, owner, &view, result, local_override) catch |err| {
         if (err == error.OutOfMemory) {
@@ -4501,6 +4504,7 @@ test "Windows editor host initial app worker result creates one view and preserv
     var result = try awaitInitialAppResult(f, false);
     defer result.deinit(std.testing.io);
     const initial_id = f.documents.last_reference + 1;
+    const prepared_starts = result.view_cache.?.projection.starts.ptr;
     const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
     try std.testing.expect(outcome == .opened);
     const view = outcome.opened.document;
@@ -4512,8 +4516,13 @@ test "Windows editor host initial app worker result creates one view and preserv
     }
     try std.testing.expectEqual(@as(usize, 1), count);
     try std.testing.expect(result.consumed);
+    try std.testing.expect(result.view_cache == null);
+    try std.testing.expect(f.views.items[0].line_starts.ptr == prepared_starts);
+    try std.testing.expectEqual(@as(u32, 4), f.views.items[0].max_cols);
     result.deinit(std.testing.io);
     if (try applyFileKey(&f.book, std.testing.io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| std.testing.allocator.free(copied);
+    try f.views.items[0].refresh(std.testing.allocator);
+    try std.testing.expect(f.views.items[0].projection_allocator == null);
     try std.testing.expect(try f.book.beginSave(view, 128));
     const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
     while (true) {
@@ -4661,6 +4670,65 @@ test "Windows editor host worker recovery transfers its store through first save
     try std.testing.expect(try f.backups.?.store.read(std.testing.io, backups.identity(f.documents.get(outcome.opened.document).?).?) == null);
     try std.testing.expect(result.recovery_owner == null);
     try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows editor host stale initial view cache fails without a live document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    result.view_cache.?.revision += 1;
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .read_failed);
+    try std.testing.expectEqual(@as(usize, 0), f.views.items.len);
+    try std.testing.expect(result.view_cache == null);
+    for (f.documents.slots.items) |slot| try std.testing.expect(slot.document == null);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host prepared syntax and projection survive result disposal and edit" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    const code = "const value = 1;\r\n";
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.zig", .data = code });
+    const path = try f.tmp.dir.realPathFileAlloc(std.testing.io, "file.zig", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var worker: @import("platform/windows/editor/open_worker.zig").Worker = .{ .allocator = std.testing.allocator };
+    defer drainInitialOpen(&worker, std.testing.io);
+    try worker.startForApp(path, 128);
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.OpenTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    var result = (try worker.takeResult()).?;
+    defer result.deinit(std.testing.io);
+    const syntax = result.view_cache.?.syntax orelse return error.MissingSyntax;
+    const starts = result.view_cache.?.projection.starts.ptr;
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    const moved = f.views.items[0].syntax != null;
+    // Restore deliberately dropped C ownership before a negative assertion.
+    if (!moved) f.views.items[0].syntax = syntax;
+    try std.testing.expect(moved);
+    try std.testing.expect(f.views.items[0].syntax.?.parser == syntax.parser);
+    try std.testing.expect(f.views.items[0].syntax.?.tree == syntax.tree);
+    try std.testing.expect(f.views.items[0].line_starts.ptr == starts);
+    try std.testing.expect(f.views.items[0].projection_allocator != null);
+    result.deinit(std.testing.io);
+    var spans: std.ArrayList(@import("syntax").Span) = .empty;
+    defer spans.deinit(std.testing.allocator);
+    f.views.items[0].syntax.?.spansForRange(std.testing.allocator, f.views.items[0].text, .{ .start = 0, .end = code.len }, &spans);
+    try std.testing.expect(spans.items.len > 0);
+    if (try applyFileKey(&f.book, std.testing.io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| std.testing.allocator.free(copied);
+    try f.views.items[0].refresh(std.testing.allocator);
+    try std.testing.expect(f.views.items[0].projection_allocator == null);
+    try std.testing.expectEqualStrings("Xconst value = 1;\r\n", f.views.items[0].text);
+    try std.testing.expect(f.views.items[0].syntax != null);
 }
 
 fn applyFileKey(book: *file_host.Book, io: std.Io, resolver: maru.config.keybinding.KeyBindingResolver, file: *OpenFile, event: maru.terminal.KeyEvent, context: OpenFile.InputContext) !?[]u8 {

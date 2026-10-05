@@ -1202,3 +1202,8 @@ runtime 변형을 검출했다. 일반 앱 연결은 host 61개·controller 33�
 초기 worker의 private backup 읽기·무생성 absence·오류 분류·native path key와 record/store
 소유권, late 취소, 복구의 old CAS 및 첫 Save-close 정리를 Debug/ReleaseFast로 검사한다.
 다섯 compiled runtime 변형과 격리 실앱의 crash/reopen/저장/종료도 검증한다.
+
+§2m.187의 `test-win32-editor-open`은 19개, `test-win32-editor-host`는 82개다.
+worker projection/syntax의 독립 소유권·본문/revision 결합·행/폭·부분 할당 실패와 main에서의
+parser 조회/인계·편집 refresh를 Debug/ReleaseFast로 검사한다. 다섯 compiled runtime
+변형과 실앱 Zig 색 표시·편집·Save-close의 exact CRLF도 확인한다.

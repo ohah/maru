@@ -327,6 +327,8 @@ src/
                         UTF-8·BOM·줄바꿈 해석 결과는 함께 소유한 raw bytes만 빌린다.
                         독립 EditableFile의 buffer/line index와 초기 복구 record를 worker에서 준비한다.
                         복구는 native 문서 경로를 키로 사용하고 pinned store도 앱에 인계한다.
+                        prepared_view는 초기 projection/syntax를 Registry 없이 준비하고 같은 본문
+                        allocation/revision에만 인계한다. view는 초기 배열 allocator도 인수한다.
                         file_host의 admitOpen은 worker 결과를 앱 소유 문서/권한으로 등록하고 취소·capability·
                         raw CAS 및 소비/실패 소유권을 검사한다. main의 파일 클릭은 이 worker 경로를 사용한다.
                         directory_watch는 native 비동기 알림과 identity별 공유·상한·debounce 및

@@ -1586,7 +1586,7 @@ pub fn build(b: *std.Build) void {
     const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
     const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
-    run_editor_host_tests.addArg("--maru-expect-tests=80"); // 2 aggregation blocks + 71 native tests + 7 pure policies
+    run_editor_host_tests.addArg("--maru-expect-tests=82"); // 2 aggregation blocks + 73 native tests + 7 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
@@ -1640,12 +1640,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/platform/windows/editor/open_worker.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
     });
     const editor_open_tests = addProjectTest(b, .{ .root_module = editor_open_mod, .filters = &.{"Windows initial open worker"} });
     const editor_open_step = b.step("test-win32-editor-open", "Verify initial read and capability worker ownership without Registry callbacks");
     const run_editor_open_tests = b.addRunArtifact(editor_open_tests);
-    run_editor_open_tests.addArg("--maru-expect-tests=15");
+    run_editor_open_tests.addArg("--maru-expect-tests=19");
     editor_open_step.dependOn(&run_editor_open_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {

@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const native = @import("native_open.zig");
 const backups = @import("backup_store.zig");
+const prepared_view = @import("prepared_view.zig");
 const w = std.os.windows;
 extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
 pub const max_bytes = 4 << 20;
@@ -25,6 +26,7 @@ pub const Result = struct {
     document: ?maru.session.editor.document.Document = null,
     /// Independently owned CPU preparation; no Registry or view crosses threads.
     file: ?maru.session.editor.edit_doc.EditableFile = null,
+    view_cache: ?prepared_view.Cache = null,
     recovery_checked: bool = false,
     recovery: ?backups.Record = null,
     recovery_owner: ?backups.LocalData = null,
@@ -35,6 +37,8 @@ pub const Result = struct {
     thread_id: std.Thread.Id,
 
     pub fn deinit(self: *Result, io: std.Io) void {
+        if (self.view_cache) |*cache| cache.deinit();
+        self.view_cache = null;
         if (self.recovery) |*record| record.deinit();
         self.recovery = null;
         if (self.recovery_owner) |*owner| owner.deinit(io);
@@ -145,6 +149,13 @@ const Job = struct {
         self.result = self.perform(threaded.io(), Driver);
         if (self.recover) self.readRecovery(threaded.io(), &self.result.?) catch |err| {
             if (err == error.OutOfMemory) self.result.?.failure = err else self.result.?.recovery_failure = err;
+        };
+        if (self.result.?.failure == null and !self.result.?.cancelled) if (self.result.?.file) |*file| {
+            const path = if (self.result.?.snapshot) |snapshot| snapshot.path else self.result.?.readonly.?.path;
+            self.result.?.view_cache = prepared_view.Cache.init(std.heap.smp_allocator, file, path) catch |err| blk: {
+                self.result.?.failure = err;
+                break :blk null;
+            };
         };
         if (self.cancel_requested.load(.acquire)) {
             self.result.?.deinit(threaded.io());
@@ -594,4 +605,27 @@ test "Windows initial open worker recovery uses the native path rather than tree
     try std.testing.expect(result.recovery_checked and result.recovery != null);
     try std.testing.expectEqualStrings(result.snapshot.?.path, result.recovery.?.parsed.doc.path.path);
     try std.testing.expectEqualStrings("tree-recovery", result.recovery.?.parsed.content);
+}
+
+test "Windows initial open worker prepares syntax for later owner thread queries" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const code = "const value = 1;\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.zig", .data = code });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "file.zig", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var worker: Worker = .{ .allocator = std.testing.allocator };
+    defer drain(&worker);
+    try worker.startForApp(path, 128);
+    var result = try awaitResult(&worker);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.failure == null and result.view_cache != null);
+    try std.testing.expect(result.thread_id != std.Thread.getCurrentId());
+    var provider = if (result.view_cache.?.syntax) |*value| value else return error.MissingSyntax;
+    try std.testing.expect(provider.tree != null);
+    var spans: std.ArrayList(@import("syntax").Span) = .empty;
+    defer spans.deinit(std.testing.allocator);
+    provider.spansForRange(std.testing.allocator, result.file.?.content, .{ .start = 0, .end = code.len }, &spans);
+    try std.testing.expect(spans.items.len > 0);
 }

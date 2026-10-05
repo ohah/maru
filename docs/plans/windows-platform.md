@@ -396,3 +396,8 @@ runtime 변형 검출, 새 실앱의 exact BOM/CRLF Save-close가 통과했다. 
 키와 pinned store를 인계한다. worker 15·host 80개 Debug/ReleaseFast와 다섯 compiled
 runtime 변형 검출, 새 실앱 crash/reopen/첫 Save-close의 exact bytes·정상 종료·백업 삭제가
 통과했다. 이력 적용·view/syntax CPU, 주기적 backup write/close 정리 및 전체 잔여 범위는 남아 있다.
+
+§2m.187: 초기 worker가 독립 projection/syntax 캐시를 준비하고 앱이 allocation/revision과
+lease를 검증해 인계한다. worker 19·host 82개 Debug/ReleaseFast와 다섯 compiled runtime
+변형, 실앱 Zig 색 표시·편집·exact CRLF Save-close를 검증했다. 복구 이력/후속 rebuild,
+편집 rebuild와 주기적 backup I/O 및 전체 잔여 범위는 남아 있다.

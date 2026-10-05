@@ -4,6 +4,7 @@ const maru = @import("maru");
 const ts = @import("syntax");
 pub const input = @import("input.zig");
 const selection_projection = @import("selection_projection.zig");
+const prepared_view = @import("prepared_view.zig");
 
 test "Windows editor input: view context matches document identity and readonly keys stay consumed" {
     const a = std.testing.allocator;
@@ -60,6 +61,8 @@ pub const OpenFile = struct {
     text: []u8,
     lines: std.ArrayList([]const u8),
     line_starts: []usize,
+    /// Initial worker arrays can use SMP while later view caches use the app.
+    projection_allocator: ?std.mem.Allocator = null,
     /// null means rebuilding failed: no borrowed body/line cache may be read.
     cached_revision: ?u64 = 0,
     /// 뷰포트 맨 위 줄. 파일마다 따로 산다 — 파일을 오갈 때 자리를 잃으면 안 된다.
@@ -218,9 +221,11 @@ pub const OpenFile = struct {
         self.color_lines.clearRetainingCapacity();
         self.colors.deinit(allocator);
         self.colors = .{};
-        self.lines.deinit(allocator);
+        const projection_allocator = self.projection_allocator orelse allocator;
+        self.lines.deinit(projection_allocator);
         self.lines = .empty;
-        allocator.free(self.line_starts);
+        projection_allocator.free(self.line_starts);
+        self.projection_allocator = null;
         self.line_starts = @constCast(&.{});
         self.text = @constCast(&.{});
         self.max_cols = 0;
@@ -237,35 +242,15 @@ pub const OpenFile = struct {
         self.color_spans.deinit(allocator);
         self.color_lines.deinit(allocator);
         self.colors.deinit(allocator);
-        self.lines.deinit(allocator);
-        allocator.free(self.line_starts);
+        const projection_allocator = self.projection_allocator orelse allocator;
+        self.lines.deinit(projection_allocator);
+        projection_allocator.free(self.line_starts);
         _ = self.documents.release(self.document) catch unreachable;
     }
 };
 
 /// Only offsets and borrowed line slices belong to the view. L2 owns the body.
-const Projection = struct {
-    lines: std.ArrayList([]const u8),
-    starts: []usize,
-    widest: u32,
-
-    fn init(allocator: std.mem.Allocator, file: *const maru.session.editor.edit_doc.EditableFile) !Projection {
-        const index = file.lines.lines;
-        var lines = try std.ArrayList([]const u8).initCapacity(allocator, index.len);
-        errdefer lines.deinit(allocator);
-        const starts = try allocator.alloc(usize, index.len);
-        errdefer allocator.free(starts);
-        var widest: u32 = 0;
-        for (index, starts) |line, *start| {
-            const content = file.content[line.start..line.contentEnd()];
-            lines.appendAssumeCapacity(content);
-            start.* = line.start;
-            const limit = maru.chrome.components.editor_view.frame.default_max_columns;
-            if (widest < limit) widest = @max(widest, @min(limit, maru.chrome.components.overlay_input.displayCols(content)));
-        }
-        return .{ .lines = lines, .starts = starts, .widest = widest };
-    }
-};
+const Projection = prepared_view.Projection;
 
 /// Attach another independently cached view to the same L2 document.
 /// The caller's lease is unchanged on success and on every allocation failure.
@@ -282,6 +267,30 @@ pub fn attach(documents: *maru.session.editor.document_registry.Registry, source
     };
     errdefer file.deinit(allocator);
     try file.refresh(allocator);
+    return file;
+}
+
+/// Consume the worker cache only after the main-thread view lease allocation.
+pub fn attachPrepared(documents: *maru.session.editor.document_registry.Registry, source: maru.session.editor.document_registry.Lease, cache: *?prepared_view.Cache) !OpenFile {
+    const prepared = if (cache.*) |*value| value else return error.MissingPreparedView;
+    const state = documents.get(source) orelse return error.StaleDocument;
+    const opened = if (state.opened) |*value| value else return error.NoDocument;
+    try prepared.validate(&opened.file);
+    const lease = try documents.retain(source, .view);
+    const file: OpenFile = .{
+        .documents = documents,
+        .document = lease,
+        .path = state.path orelse @constCast(&.{}),
+        .text = opened.file.content,
+        .lines = prepared.projection.lines,
+        .line_starts = prepared.projection.starts,
+        .max_cols = prepared.projection.widest,
+        .projection_allocator = prepared.allocator,
+        .syntax = prepared.syntax,
+        .cached_revision = prepared.revision,
+    };
+    prepared.owned = false;
+    cache.* = null;
     return file;
 }
 
@@ -697,6 +706,5 @@ test "Windows file open refresh after document clearing exposes no old borrows" 
 /// *"값을 늘릴 때 두 곳이 갈리지 않게 호출자가 옮긴다"*), 이름이 1:1 이라 comptime 에 유도한다 —
 /// 손으로 쓴 switch 는 한쪽에 문법이 늘 때 조용히 `.other` 로 떨어진다.
 fn syntaxLanguageFor(g: maru.session.editor.language.Grammar) ts.Language {
-    // Keep main's shared grammar mapping instead of restoring a second reflected table.
-    return ts.languageFor(g);
+    return prepared_view.languageFor(g);
 }

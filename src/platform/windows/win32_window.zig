@@ -217,6 +217,7 @@ const sw_maximize: i32 = 3;
 const sw_restore: i32 = 9;
 const WM_NCCALCSIZE: UINT = 0x0083;
 const WM_NCHITTEST: UINT = 0x0084;
+const WM_SETCURSOR: UINT = 0x0020;
 // `WM_NCHITTEST` 반환값. 창이 프레임을 안 그려도 **OS 가 이 값들로 드래그·리사이즈·더블클릭
 // 최대화를 대신 해 준다** — Electron 의 `-webkit-app-region: drag` 가 하는 일을 Win32 에서는
 // `HTCAPTION` 하나가 한다.
@@ -260,6 +261,7 @@ const GWLP_USERDATA: i32 = -21;
 const CS_HREDRAW: UINT = 0x0002;
 const CS_VREDRAW: UINT = 0x0001;
 const IDC_ARROW: usize = 32512;
+const IDC_SIZEWE: usize = 32644;
 
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(abi.winapi) ATOM;
 extern "user32" fn CreateWindowExW(DWORD, ?[*:0]const u16, ?[*:0]const u16, DWORD, i32, i32, i32, i32, ?HWND, ?HMENU, ?HINSTANCE, ?*anyopaque) callconv(abi.winapi) ?HWND;
@@ -278,6 +280,8 @@ extern "user32" fn ShowWindow(HWND, i32) callconv(abi.winapi) i32;
 extern "user32" fn GetClientRect(HWND, *RECT) callconv(abi.winapi) i32;
 extern "user32" fn SendMessageW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) LRESULT;
 extern "user32" fn LoadCursorW(?HINSTANCE, usize) callconv(abi.winapi) ?HCURSOR;
+extern "user32" fn SetCursor(?HCURSOR) callconv(abi.winapi) ?HCURSOR;
+extern "user32" fn GetCursorPos(*POINT) callconv(abi.winapi) i32;
 extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(abi.winapi) isize;
 extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(abi.winapi) isize;
 /// **`GetAsyncKeyState`가 아니라 이것을 쓴다.** 전자는 "지금 물리적으로 눌려 있는가"라 메시지가 큐에서
@@ -392,6 +396,13 @@ pub const EventQueue = struct {
 
 /// 창 하나. **이벤트를 모아 두고 호출자가 가져간다** — 콜백으로 앱 코드를 부르지 않는다. Win32 `WndProc`은
 /// OS가 재진입시켜 부르는데(모달 resize 루프 등) 그 안에서 앱 정책을 돌리면 재진입이 앱까지 번진다.
+pub const CursorRect = struct {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+};
+
 pub const Window = struct {
     hwnd: HWND,
     /// **프레임리스 창의 드래그 띠 높이**(클라이언트 px). 0 이면 네이티브 캡션을 그대로 쓴다.
@@ -405,6 +416,10 @@ pub const Window = struct {
     titlebar_client_left_px: u32 = 0,
     /// 리사이즈 테두리 두께(px). 프레임을 지우면 OS 테두리가 없어지므로 우리가 폭을 정한다.
     resize_border_px: u32 = 6,
+    /// Owned geometry, refreshed by the host; never borrow a frame buffer here.
+    horizontal_resize_rect: ?CursorRect = null,
+    sidebar_resize_rect: ?CursorRect = null,
+    horizontal_resize_active: bool = false,
     present: PresentTarget = .{},
     /// `WndProc`이 채우고 `poll`이 넘긴다. 창 하나당 하나라 락이 필요 없다(같은 스레드에서만 돈다).
     ///
@@ -513,6 +528,18 @@ pub const Window = struct {
 
     pub fn show(self: *Window) void {
         _ = ShowWindow(self.hwnd, SW_SHOW);
+    }
+
+    /// A resize gesture keeps its cursor outside the band only while this window owns capture.
+    pub fn wantsHorizontalCursor(self: *const Window, x: i32, y: i32, client_hit: bool) bool {
+        if (!client_hit) return false;
+        for ([_]?CursorRect{ self.horizontal_resize_rect, self.sidebar_resize_rect }) |maybe_rect| {
+            const rect = maybe_rect orelse continue;
+            if (rect.left >= rect.right or rect.top >= rect.bottom) continue;
+            if (self.capturing and self.horizontal_resize_active) return true;
+            if (x >= rect.left and x < rect.right and y >= rect.top and y < rect.bottom) return true;
+        }
+        return false;
     }
 
     /// 실제로 창을 닫는다. `close_requested`를 받은 호출자가 정책을 마친 뒤 부른다.
@@ -925,6 +952,21 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
     }
     const self = windowFrom(hwnd);
     switch (msg) {
+        WM_SETCURSOR => {
+            // Nonclient border/caption shapes remain the OS's responsibility.
+            if (self) |w| {
+                var point: POINT = undefined;
+                if (GetCursorPos(&point) != 0 and ScreenToClient(hwnd, &point) != 0 and
+                    w.wantsHorizontalCursor(point.x, point.y, (@as(usize, @bitCast(lparam)) & 0xffff) == HTCLIENT))
+                {
+                    if (LoadCursorW(null, IDC_SIZEWE)) |cursor| {
+                        _ = SetCursor(cursor);
+                        return 1;
+                    }
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
         // ── 프레임리스 창 (W8.8⒝) ────────────────────────────────────────────────────────
         //
         // **`wparam == TRUE` 일 때 0 을 돌려주면 클라이언트가 창 전체를 덮는다** — 캡션이 사라진다.
@@ -991,6 +1033,9 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
                     WM_MBUTTONUP => .middle_up,
                     else => .moved,
                 };
+                if (kind == .moved and w.capturing and w.horizontal_resize_active and w.wantsHorizontalCursor(0, 0, true)) {
+                    if (LoadCursorW(null, IDC_SIZEWE)) |cursor| _ = SetCursor(cursor);
+                }
                 // **왼쪽 버튼 동안 포인터를 잡는다.** 안 잡으면 드래그가 창 밖으로 나가는 순간 메시지가
                 // 끊겨 선택이 거기서 멈추고, 밖에서 버튼을 떼면 `WM_LBUTTONUP`을 **영영 못 받아** 드래그
                 // 상태가 남는다.

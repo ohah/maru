@@ -8905,8 +8905,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     testSurface = surface
                 }
             case "closewindow":
-                // W6i: 마지막 창을 닫는다(빨간 단추와 같은 길 — windowShouldClose). 1 초 뒤 창 수를 알린다. 대본은 첫 창으로 잇는다.
+                // W6i: 창이 둘 이상일 때 맨 뒤(`windows.last`) 창을 닫는다(빨간 단추와 같은 길 — windowShouldClose). 1 초 뒤 창 수를
+                // 알린다. 대본은 첫 창으로 잇는다. 하나뿐이면 닫지 않는다(닫으면 앱 종료 확인으로 가 대본이 멈춘다).
                 let before = windows.count
+                guard before >= 2 else {
+                    Self.testReport("closewindow before=\(before) after=-1")
+                    break
+                }
                 testSurface = windows.first
                 windows.last?.window?.performClose(nil)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in

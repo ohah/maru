@@ -448,3 +448,18 @@ runtime 변형 모두 검출하고 원본을 복원했다. 지속적인 권한 �
 이는 앱이 호출하는 동일 종료 helper와 네이티브 저장 검증이며 실앱 crash 종료는 flush를
 실행하지 않으므로 이 테스트의 대체 증거로 주장하지 않는다. 명시적 close의 backup 삭제와
 owner/드문 extra-root handle 정리는 아직 동기다. 전체 Windows 지원의 완료를 의미하지 않는다.
+
+
+### §2m.192 Windows 종료 backup root handle 정리
+
+종료의 모든 백업 job을 drain한 뒤 LocalData.deinitOnWorker가 별도 스레드에서 private
+store 및 선택된 부모 chain의 native handle을 닫는다. join 완료 후 부모 handle 배열은
+원래 allocator 스레드에서 해제한다. spawn 실패는 owner를 그대로 보존하고 보고하며
+동기 native close fallback을 실행하지 않는다. 종료에는 실제 완료를 기다리며 프레임용
+비동기 cleanup API라고 주장하지 않는다.
+
+`test-win32-editor-backup` 35개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+worker thread ID와 store·모든 부모 handle의 INVALID_HANDLE 결과를 확인한다.
+store close 누락·부모 close 누락·잘못된 thread ID·hardlink guard 제거·record identity
+검사 누락의 다섯 compiled runtime 변형을 검출하고 원본을 복원했다. 명시적 close의
+backup 삭제, 프레임 중 드문 extra-root 정리 및 종료 메모리 capture CPU는 아직 남아 있다.

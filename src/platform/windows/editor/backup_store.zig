@@ -196,6 +196,29 @@ pub const LocalData = struct {
         return error.InvalidPath;
     }
 
+    /// Shutdown only: all borrowed-store jobs must already be drained. Keep
+    /// allocator bookkeeping on its owner thread; only native closes cross the
+    /// thread boundary. Spawn failure leaves the entire owner intact for retry.
+    pub fn deinitOnWorker(self: *LocalData, io: std.Io) !std.Thread.Id {
+        const Cleanup = struct {
+            owner: *LocalData,
+            io: std.Io,
+            thread_id: ?std.Thread.Id = null,
+            fn run(context: *@This()) void {
+                context.thread_id = std.Thread.getCurrentId();
+                context.owner.store.dir.close(context.io);
+                for (context.owner.parents.items) |dir| dir.close(context.io);
+            }
+        };
+        var context: Cleanup = .{ .owner = self, .io = io };
+        const thread = try std.Thread.spawn(.{}, Cleanup.run, .{&context});
+        thread.join(); // native ownership is terminal before freeing its array
+        const thread_id = context.thread_id.?;
+        self.parents.deinit(self.allocator);
+        self.* = undefined;
+        return thread_id;
+    }
+
     pub fn deinit(self: *LocalData, io: std.Io) void {
         self.store.deinit(io);
         for (self.parents.items) |dir| dir.close(io);
@@ -1121,4 +1144,29 @@ test "Windows editor backup refuses a selected directory changed into a native j
     try std.testing.expectError(error.ReparsePoint, store.drop(io_test, doc_test));
     var iterator = target.iterate();
     try std.testing.expect(try iterator.next(io_test) == null);
+}
+
+test "Windows editor backup shutdown closes all root handles on a worker" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var owner = try LocalData.open(a, io, root, 1024);
+    var live = true;
+    defer if (live) owner.deinit(io);
+    var handles: std.ArrayList(w.HANDLE) = .empty;
+    defer handles.deinit(a);
+    try handles.append(a, owner.store.dir.handle);
+    for (owner.parents.items) |dir| try handles.append(a, dir.handle);
+    const thread_id = try owner.deinitOnWorker(io);
+    live = false;
+    try std.testing.expect(thread_id != std.Thread.getCurrentId());
+    for (handles.items) |handle| {
+        var status: w.IO_STATUS_BLOCK = undefined;
+        var tag: w.FILE.ATTRIBUTE_TAG_INFO = undefined;
+        try std.testing.expectEqual(w.NTSTATUS.INVALID_HANDLE, w.ntdll.NtQueryInformationFile(handle, &status, &tag, @sizeOf(@TypeOf(tag)), .AttributeTag));
+    }
 }

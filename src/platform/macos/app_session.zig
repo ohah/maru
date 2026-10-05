@@ -286,7 +286,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 셸 종료 경로가 앱을 끝낼지 Dock 에 남을지 이 값으로 가른다. 끝에 export 추가 — 구조체 offset 불변.
 // 194: config_file_changed — platform 파일 감시(FSEvents)가 config 파일 변경을 알린다. 다시 읽을지(behavior.auto-reload·
 // 내용 digest 가 이 창이 마지막으로 읽거나 쓴 것과 다른가)는 Zig 가 판정한다. 끝에 export 추가 — 구조체 offset 불변.
-pub const abi_version: u32 = 195;
+pub const abi_version: u32 = 196;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -7672,9 +7672,10 @@ pub const AppSession = struct {
     // config 파일 내용의 digest — 이 창이 **마지막으로 읽었거나 쓴** 내용. 파일 감시(자동 reload)가 변경을 알려도
     // 이 값과 같으면 다시 읽지 않는다(앱 자신의 write-back 이 자기를 다시 읽지 않게). null = 아직 모른다.
     config_file_digest: ?u64 = null,
-    // 지금 진행 중인 reloadConfig 가 **자동**(파일 변경 감지)인가. 사용자가 고른 시점이 아니라 편집기 자동 저장의 중간
-    // 값·지운 줄이 닿을 수 있어, 되돌릴 수 없는 적용(스크롤백 축소)을 미룬다. configFileChanged 만 세운다.
-    reload_is_automatic: bool = false,
+    // 전체 리셋(Reset to Defaults·커맨드 팝업)이 config 파일을 **실제로 덮어썼다** — 다른 창과 퀵 터미널도 따라와야 한다.
+    // 리셋은 확인 모달 확정 뒤 이 세션의 tick 안에서 끝나므로 Swift 는 그 시점을 모른다 — tick 마다 거둬 간다(1회성).
+    // 쓰기에 실패했으면 세우지 않는다(파일이 그대로라 다른 창에 바뀔 것이 없다).
+    config_reset_propagate: bool = false,
     // 사용자가 **그 시점을 고른** 적용인가(메뉴 Reload Config·세팅에서 scrollback.lines 변경·전체 리셋). 이때만 살아 있는
     // Term 의 스크롤백을 줄인다 — 줄이기는 되돌릴 수 없다. 그 밖의 재적용(자동 reload·다른 키 변경·시스템 외관 자동
     // 전환의 reapply)은 줄이지 않는다. reapplyScrollback 이 읽고 끈다.
@@ -19003,6 +19004,14 @@ pub const AppSession = struct {
     pub fn takeCommandCatalogDirty(self: *AppSession) bool {
         const was = self.command_catalog_dirty;
         self.command_catalog_dirty = false;
+        return was;
+    }
+
+    /// 전체 리셋이 config 파일을 덮어써 다른 창에 퍼뜨려야 하는지(take_command_catalog_dirty류 1회성). Swift 가 tick 마다
+    /// 불러 1이면 나머지 창과 퀵 터미널에 reload_config_following_menu 를 부른다 — 메뉴 Reload 와 같은 규칙이다.
+    pub fn takeConfigResetPropagate(self: *AppSession) bool {
+        const was = self.config_reset_propagate;
+        self.config_reset_propagate = false;
         return was;
     }
 
@@ -61267,7 +61276,6 @@ test "메뉴 Reload 의 다른 창 전파: auto-reload 를 꺼도 따라오고, 
     // 사용자가 고른 시점이라 살아 있는 Term 의 스크롤백도 줄인다(자동 reload 는 미룬다) — 그리고 표식은 남지 않는다.
     try std.testing.expectEqual(@as(u32, 100), session.live_scrollback_max);
     try std.testing.expect(!session.allow_scrollback_shrink);
-    try std.testing.expect(!session.reload_is_automatic);
     try std.testing.expect(!session.reloadConfigFollowingMenu()); // 따라온 뒤엔 같은 내용 — 무동작
 
     // (3) 아직 파일에 안 쓴 세팅 편집이 있는 창은 미룬다 — 편집이 사라지지 않는다.
@@ -61277,6 +61285,69 @@ test "메뉴 Reload 의 다른 창 전파: auto-reload 를 꺼도 따라오고, 
     try std.testing.expect(!session.reloadConfigFollowingMenu());
     try std.testing.expect(session.loaded_config.config.bell.audible); // 편집 그대로
     try std.testing.expectEqual(@as(u32, 100), session.loaded_config.config.scrollback.lines);
+}
+
+// 전체 리셋은 활성 창에서만 적용된다. 다른 창은 파일 감시로도 따라오지만(리셋한 파일은 auto-reload 를 켜는 내용이라
+// 꺼 둔 창도 「켜는 내용이면 따른다」 규칙을 탄다) **결과가 같지 않았다**: 감시 경로는 자동이라 스크롤백 축소를 미뤄,
+// 리셋한 창은 기본값으로 줄고 다른 창은 큰 값에 남았다(2026-10-05 적대적 검증). 그래서 리셋이 1회성 신호를 세우고 Swift 가
+// 그것을 거둬 나머지 창에 `reloadConfigFollowingMenu`(사용자가 고른 시점 — 줄인다)를 부른다. 세 창으로 그 차이를 잰다.
+test "전체 리셋 전파: 감시 경로만으로는 다른 창의 스크롤백이 리셋을 못 따르고, 리셋 신호로 따라오면 같아진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    var sessions: [3]*AppSession = undefined;
+    var made: usize = 0;
+    defer for (sessions[0..made]) |s| {
+        settings_ops.clearConfigDirty(s);
+        s.deinit();
+        allocator.destroy(s);
+    };
+    while (made < 3) : (made += 1) sessions[made] = try initSmokeSessionTwoTerms(allocator);
+    const a = sessions[0]; // 리셋하는 창
+    const b = sessions[1]; // 파일 감시로만 따라오는 창
+    const c = sessions[2]; // 리셋 신호(Swift drain)로 따라오는 창
+
+    // 쓰기 대상이 없는 리셋(테스트 쓰기 가드 — 쓰기 실패와 같은 갈래)은 신호를 세우지 않는다: 파일이 그대로라 따라올 것이 없다.
+    settings_ops.resetAllSettings(a);
+    try std.testing.expect(!a.takeConfigResetPropagate());
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [4096]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    for (sessions) |s| {
+        if (s.config_path_buffer) |p| allocator.free(p);
+        s.config_path_buffer = try allocator.dupe(u8, cfg_path);
+    }
+    const io = std.Io.Threaded.global_single_threaded.io();
+    // 세 창 모두 auto-reload 를 끈 채 5000 줄·벨 끔을 읽었다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "behavior.auto-reload = false\nscrollback.lines = 5000\nbell.audible = false\n" });
+    for (sessions) |s| {
+        s.reloadConfig();
+        try std.testing.expectEqual(@as(u32, 5000), s.live_scrollback_max);
+    }
+
+    // a 에서 전체 리셋 → 파일을 덮어쓰고(기본 1000 줄) 신호를 **한 번** 세운다. a 는 사용자가 고른 시점이라 줄인다.
+    settings_ops.resetAllSettings(a);
+    try std.testing.expectEqual(@as(u32, 1000), a.live_scrollback_max);
+    try std.testing.expect(a.takeConfigResetPropagate());
+    try std.testing.expect(!a.takeConfigResetPropagate());
+    try std.testing.expect(!a.reloadConfigFollowingMenu()); // 리셋한 창 자신은 자기 쓰기 — 다시 읽지 않는다
+
+    // b: 파일 감시 경로. auto-reload 를 꺼 뒀어도 리셋한 파일이 그것을 켜므로 따라온다 — 그러나 스크롤백은 **안 줄어든다**.
+    try std.testing.expect(settings_ops.configFileChanged(b));
+    try std.testing.expect(b.loaded_config.config.bell.audible);
+    try std.testing.expectEqual(@as(u32, 1000), b.loaded_config.config.scrollback.lines);
+    try std.testing.expectEqual(@as(u32, 5000), b.live_scrollback_max); // a 와 갈린다 — 이 판정자가 막는 차이
+
+    // c: 리셋 신호로 따라온 창 — 메뉴 Reload 와 같은 규칙이라 줄인다. a 와 같아진다.
+    try std.testing.expect(c.reloadConfigFollowingMenu());
+    try std.testing.expect(c.loaded_config.config.bell.audible);
+    try std.testing.expect(c.loaded_config.config.behavior_auto_reload); // 리셋은 auto-reload 도 기본(켜짐)으로
+    try std.testing.expectEqual(@as(u32, 1000), c.live_scrollback_max);
+    // 뒤따르는 파일 감시 알림은 c 에서 무동작이다 — 같은 내용을 두 번 읽지 않는다.
+    try std.testing.expect(!settings_ops.configFileChanged(c));
 }
 
 // write-back 은 원본을 못 읽으면 **쓰지 않는다**(빈 원본으로 보고 바뀐 키만 남겨 덮었다), 심볼릭 링크면 실제 파일에 쓴다.

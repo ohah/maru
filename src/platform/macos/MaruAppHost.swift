@@ -7802,6 +7802,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
             drainGlobalHotkeys() // 글로벌 핫키가 라이브로 바뀌었으면(녹음/해제·reload·reset) OS에 재등록(unregister 후 register).
             drainMenuDirty() // 커맨드 카탈로그가 재빌드됐으면(rebind/unbind·reload·reset 확정) 메뉴바 keyEquivalent 다시 빌드.
+            drainConfigResetPropagation() // 이 세션의 전체 리셋이 config 파일을 덮어썼으면 나머지 창과 퀵 터미널도 따라오게 한다.
             drainFilePanelZoom() // 폰트 크기(⌘+/−·config)가 바뀌었으면 열린 파일 패널 콘텐츠(편집기·프리뷰·HTML/PDF)를 같은 배율로 재적용(§2.3).
             drainQuitDecision(summary) // Cmd+Q 종료 확인 모달이 확정/취소됐으면 NSApp.reply로 종료를 진행/취소한다.
             driveWorkspaceCheckpoint()
@@ -9689,6 +9690,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // drain해 1이면 메뉴바를 다시 빌드한다(NSMenu keyEquivalent를 새 카탈로그로). reset은 확인 모달-확정 후 tick에서
     // 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로다 — 인앱 rebind·멀티창 활성 세션도 같이 커버한다(buildMainMenu는
     // activeSurface 카탈로그를 읽는다). take_global_hotkeys_dirty(drainGlobalHotkeys)와 같은 1회성 신호 패턴.
+    // 전체 리셋(Reset to Defaults·커맨드 팝업)은 확인 모달 확정 뒤 **이 세션의 tick 안에서** 끝나고 config 파일을 덮어쓴다.
+    // 다른 창은 auto-reload 가 꺼져 있으면 그 쓰기를 못 본다 — Zig 가 세운 1회성 신호를 거둬, 메뉴 Reload 와 같은 규칙으로
+    // 퍼뜨린다(쓰지 않은 세팅 편집은 미루고 같은 내용은 무동작). auto-reload 가 켜져 있어도 겹치지 않는다: 여기서 먼저 읽은
+    // 창은 기준선이 새 내용이라 뒤따르는 파일 감시 알림이 무동작이다.
+    private func drainConfigResetPropagation() {
+        guard let session = appSession else { return }
+        guard maru_macos_app_session_take_config_reset_propagate(session) != 0 else { return }
+        var sessions = windows.compactMap(\.appSession)
+        if let quickSession = quick?.appSession { sessions.append(quickSession) }
+        var reloaded = false
+        for other in sessions where other != session {
+            if maru_macos_app_session_reload_config_following_menu(other) != 0 { reloaded = true }
+        }
+        if reloaded { refreshFilePanelSyntaxTheme() }
+    }
+
     private func drainMenuDirty() {
         guard let session = appSession, !smokeMode else { return }
         if maru_macos_app_session_take_command_catalog_dirty(session) != 0 {

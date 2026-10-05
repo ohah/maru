@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 195), abi_version);
+    try std.testing.expectEqual(@as(u32, 196), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -594,6 +594,30 @@ test "config_file_changed ABI: 세션이 없으면 아무것도 안 한다 (v194
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_config_file_changed(null));
 }
 
+test "take_config_reset_propagate ABI: 세션이 없으면 0 (v196)" {
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_config_reset_propagate(null));
+}
+
+// 전체 리셋은 활성 창에서만 적용됐다 — auto-reload 를 끈 사용자의 다른 창은 옛 설정에 남았다(2026-10-05).
+test "전체 리셋 전파: 리셋한 세션의 tick 이 1회성 신호를 거둬 나머지 창과 퀵 터미널을 따라오게 한다 (v196)" {
+    const source = try swiftCodeWithoutComments(std.testing.allocator, @embedFile("MaruAppHost.swift"));
+    defer std.testing.allocator.free(source);
+    // renderTick 의 drain 줄 — 메뉴 재빌드 바로 뒤에 한 번.
+    const tick = try swiftFunctionBody(source, "    private func renderTick(presentMetalFrame: Bool = true) -> Int32 {");
+    const menu_dirty = std.mem.indexOf(u8, tick, "drainMenuDirty()") orelse return error.MissingMenuDirty;
+    const reset_drain = std.mem.indexOf(u8, tick, "drainConfigResetPropagation()") orelse return error.MissingResetDrain;
+    try std.testing.expect(menu_dirty < reset_drain);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "            drainConfigResetPropagation()"));
+    const drain = try swiftFunctionBody(source, "    private func drainConfigResetPropagation() {");
+    const take = std.mem.indexOf(u8, drain, "guard maru_macos_app_session_take_config_reset_propagate(session) != 0 else { return }") orelse return error.MissingTake;
+    const quick_add = std.mem.indexOf(u8, drain, "if let quickSession = quick?.appSession { sessions.append(quickSession) }") orelse return error.MissingQuick;
+    const loop = std.mem.indexOf(u8, drain, "for other in sessions where other != session {") orelse return error.MissingLoop;
+    const follow = std.mem.indexOf(u8, drain, "maru_macos_app_session_reload_config_following_menu(other) != 0") orelse return error.MissingFollow;
+    const refresh = std.mem.indexOf(u8, drain, "if reloaded { refreshFilePanelSyntaxTheme() }") orelse return error.MissingRefresh;
+    try std.testing.expect(take < quick_add and quick_add < loop and loop < follow and follow < refresh);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "maru_macos_app_session_take_config_reset_propagate("));
+}
+
 test "reload_config_following_menu ABI: 세션이 없으면 아무것도 안 한다 (v195)" {
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_reload_config_following_menu(null));
 }
@@ -610,8 +634,8 @@ test "메뉴 Reload Config: 활성 창은 강제로 읽고, 나머지 창과 퀵
     const follow = std.mem.indexOf(u8, menu, "maru_macos_app_session_reload_config_following_menu(other)") orelse return error.MissingFollow;
     const refresh = std.mem.indexOf(u8, menu, "refreshFilePanelSyntaxTheme()") orelse return error.MissingRefresh;
     try std.testing.expect(forced < all and all < quick_add and quick_add < loop and loop < follow and follow < refresh);
-    // 따라오는 경로는 메뉴 한 곳뿐이다 — 자동 reload(config_file_changed)와 섞이지 않는다.
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "maru_macos_app_session_reload_config_following_menu("));
+    // 따라오는 경로는 메뉴 Reload 와 전체 리셋 전파 두 곳뿐이다 — 자동 reload(config_file_changed)와 섞이지 않는다.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "maru_macos_app_session_reload_config_following_menu("));
 }
 
 test "CR0b AppHost termination transcript는 session settlement 뒤 incident ABI를 exact 한 번 호출한다" {
@@ -3048,6 +3072,13 @@ pub export fn maru_macos_app_session_config_file_changed(session: ?*AppSession) 
 pub export fn maru_macos_app_session_reload_config_following_menu(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
     return if (app_session.reloadConfigFollowingMenu()) 1 else 0;
+}
+
+// 전체 리셋이 config 파일을 덮어써 다른 창에 퍼뜨려야 하는지(1회성). 리셋은 확인 모달 확정 뒤 tick 안에서 끝나므로 Swift 가
+// tick 마다 거둔다. 1이면 나머지 창과 퀵 터미널에 reload_config_following_menu. 세션 null=0. (v196)
+pub export fn maru_macos_app_session_take_config_reset_propagate(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeConfigResetPropagate()) 1 else 0;
 }
 
 // 마지막 일반 창을 닫으면 앱도 끝내는가(config `window.quit-after-last-window-closed`). Swift 의 빨간 버튼·창 닫기·

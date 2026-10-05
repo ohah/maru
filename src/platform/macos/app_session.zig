@@ -89934,10 +89934,13 @@ test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
     while (spins < 2000) : (spins += 1) {
         _ = agent_activity_ops.wheelScroll(session, -50, false, 0, 0);
     }
-    const content_h = 200 * row_h;
-    const want_max = content_h -| area.h;
-    // **마지막 줄까지 닿는다.** 끝에서 멈추되 그 끝이 목록의 끝이어야 한다.
+    // **마지막 줄까지 닿는다.** 끝에서 멈추되 그 끝이 목록의 끝이어야 한다 — 상한은 그리는 창과 같은 자다
+    // (온 줄만 그리므로 「마지막 줄이 창의 마지막 자리에 오는 첫 줄」 × 줄 높이). 예전 단언은
+    // `200 × 줄 높이 − 높이` 였는데, 높이가 줄 높이의 배수가 아니면 그 상한에서 **마지막 항목이 안 그려졌다**(C2
+    // 적대적 검증) — 오프셋 값보다 「가장 오래된 항목이 그려지는가」를 함께 본다.
+    const want_max = (200 - rows_fit) * row_h;
     try std.testing.expectEqual(want_max, session.agent_activity.scroll.offset_y_px);
+    try std.testing.expectEqual(@as(usize, 200), agent_activity_ops.listWindow(session).last);
 
     // 판정자는 자기가 깨운 워커를 재우고 끝난다(CI 누수 — 위 헬퍼 주석).
     quietActivityWorkers(session);
@@ -92777,6 +92780,266 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
         const l = agent_activity_ops.gridLayout(session);
         try std.testing.expect(session.agent_activity.scroll.offset_y_px <= l.max_scroll);
     }
+}
+
+// [C2] 갤러리는 최신을 먼저 보이므로 대화 중 새 활동이 오면 **앞에 붙는다**. 스크롤 오프셋은 픽셀이라
+// 그대로 두면 보던 항목이 붙은 수만큼 아래로 밀려 다른 것이 보인다(`agent-activity-view.md` C2).
+// 보던 항목을 정체(`file_index`·`data_offset`)로 다시 찾아 맨 위에 두는지 **격자와 줄 목록 둘 다** 본다 —
+// 둘은 자(행 높이·열 수)가 달라 한쪽만 고치면 두 벌이 된다. 맨 위(오프셋 0)에 있을 때는 새 것이 보여야 한다.
+test "이미지 갤러리: 새 활동이 붙어도 보던 항목이 맨 위에 남는다 — 격자·줄 목록 (C2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+    const Probe = struct {
+        const Key = struct { file: u8, data_offset: u64 };
+        /// 지금 화면 맨 위에 보이는 항목의 정체.
+        fn topKey(sess: *AppSession) Key {
+            const first = if (sess.agent_activity.filter.isGrid())
+                agent_activity_ops.gridLayout(sess).first
+            else
+                agent_activity_ops.listWindow(sess).first;
+            const hit = sess.agent_activity.hits.items[first];
+            return .{ .file = hit.file_index, .data_offset = hit.data_offset };
+        }
+        /// 파일 끝에 이미지 `n` 개를 더 붙이고 갤러리가 그만큼 따라올 때까지 돈다(IG2-a 와 같은 제품 경로).
+        fn grow(sess: *AppSession, dir: std.Io.Dir, line: []const u8, n: usize, path: []const u8) !void {
+            const before = sess.agent_activity.count();
+            {
+                var f = try dir.openFile(sess.io, "s.jsonl", .{ .mode = .write_only });
+                defer f.close(sess.io);
+                const end = (try f.stat(sess.io)).size;
+                for (0..n) |i| _ = try f.writePositional(sess.io, &.{line}, end + i * line.len);
+            }
+            const term = pane_ops.activePane(sess).activeTerm();
+            _ = agent_ops.testApplyHookEvent(sess, term, .{
+                .kind = .user_prompt_submit,
+                .session_id = "S-c2",
+                .turn_key = "turn-next",
+                .transcript_path = path,
+            });
+            var wait = ActivityWait.start(sess.io);
+            while (wait.pending() and sess.agent_activity.count() < before + n) _ = sess.tick() catch {};
+            try std.testing.expectEqual(before + n, sess.agent_activity.count());
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]},\"timestamp\":\"2026-08-30T01:00:00.000Z\"}\n";
+    // 여러 화면을 넘기는 장수 — 격자도 줄 목록도 실제로 굴러야 이 물음이 선다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = one ** 120 });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.hook.image_source.set(path));
+    agent_activity_ops.refresh(session, false);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 120), session.agent_activity.count());
+
+    // ── ① 격자: 몇 행 내려가 본다. 새 이미지 5 장은 열 수의 배수가 아니라 행 경계도 함께 흔든다.
+    agent_activity_ops.setFilter(session, .images);
+    const grid = agent_activity_ops.gridLayout(session);
+    try std.testing.expect(grid.cols > 0 and grid.max_scroll > 0); // 실제로 굴러야 한다(빈 판정자 방지)
+    for (0..4) |_| _ = agent_activity_ops.wheelScroll(session, -1, false, 0, 0);
+    try std.testing.expect(session.agent_activity.scroll.offset_y_px > 0);
+    const grid_key = Probe.topKey(session);
+    try Probe.grow(session, tmp.dir, one, 5, path);
+    {
+        const l = agent_activity_ops.gridLayout(session);
+        const top_row_end = @min(l.first + l.cols, session.agent_activity.count());
+        var found = false;
+        for (session.agent_activity.hits.items[l.first..top_row_end]) |hit| {
+            if (hit.file_index == grid_key.file and hit.data_offset == grid_key.data_offset) found = true;
+        }
+        try std.testing.expect(found); // 보던 이미지가 여전히 맨 윗 행에 있다
+    }
+
+    // ── ② 줄 목록(「전체」): 몇 줄 + 줄 안 몇 픽셀을 내려간다(트랙패드). 줄 안 오프셋도 지켜야 한다.
+    agent_activity_ops.setFilter(session, .all);
+    try std.testing.expect(!session.agent_activity.filter.isGrid());
+    for (0..7) |_| _ = agent_activity_ops.wheelScroll(session, -1, false, 0, 0);
+    _ = agent_activity_ops.wheelScroll(session, -3, true, 0, 0);
+    const row_h = agent_activity_ops.listRowHeightPx(session);
+    const within = session.agent_activity.scroll.offset_y_px % row_h;
+    try std.testing.expect(session.agent_activity.scroll.offset_y_px >= row_h); // 한 줄 이상 내려갔다
+    const list_key = Probe.topKey(session);
+    try Probe.grow(session, tmp.dir, one, 3, path);
+    try std.testing.expectEqual(list_key, Probe.topKey(session));
+    try std.testing.expectEqual(within, session.agent_activity.scroll.offset_y_px % row_h);
+
+    // ── ③ 도크가 넓어 격자 열이 많으면 **격자 상한이 줄 목록 상한보다 작다.** 줄 목록에 격자 자를 대면
+    //     목록 끝 근처를 보던 자리가 다시 만들 때마다 격자 상한까지 끌려 올라간다(B3 와 같은 축).
+    session.dock.size = 2000; // 넓은 창의 넓은 도크 — 격자 11 열
+    _ = try session.resize(2600, 900, 1000);
+    try std.testing.expect(agent_activity_ops.gridLayout(session).max_scroll < agent_activity_ops.listMaxScroll(session)); // 전제
+    for (0..400) |_| _ = agent_activity_ops.wheelScroll(session, -1, false, 0, 0); // 목록 끝까지
+    try std.testing.expect(session.agent_activity.scroll.offset_y_px > agent_activity_ops.gridLayout(session).max_scroll);
+    // 끝까지 굴리면 **가장 오래된 항목까지** 그려진다 — 상한이 그리는 창과 같은 자여야 한다(높이가 줄 높이의 배수가
+    // 아니면 `항목 수 × 줄 높이 − 높이` 상한에서 마지막 하나가 끝내 안 보였다).
+    try std.testing.expect(agent_activity_ops.gridArea(session).h % agent_activity_ops.listRowHeightPx(session) != 0); // 전제
+    try std.testing.expectEqual(session.agent_activity.count(), agent_activity_ops.listWindow(session).last);
+    const wide_key = Probe.topKey(session);
+    try Probe.grow(session, tmp.dir, one, 2, path);
+    try std.testing.expectEqual(wide_key, Probe.topKey(session));
+    // 보던 항목을 **못 찾으면**(파일이 앞에서부터 바뀌어 자리가 전부 옮겨졌다) 상한으로만 끌어내린다 — 그 상한도
+    // 줄 목록의 자여야 한다. 격자 자를 대면 목록 끝을 보던 자리가 격자 상한까지 끌려 올라간다.
+    {
+        const n_now = session.agent_activity.count();
+        const prefix = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"shift\"},\"timestamp\":\"2026-08-30T00:00:00.000Z\"}\n";
+        var rewritten: std.ArrayList(u8) = .empty;
+        defer rewritten.deinit(allocator);
+        try rewritten.appendSlice(allocator, prefix);
+        for (0..n_now + 1) |_| try rewritten.appendSlice(allocator, one);
+        try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = rewritten.items });
+        _ = agent_ops.testApplyHookEvent(session, term, .{
+            .kind = .user_prompt_submit,
+            .session_id = "S-c2",
+            .turn_key = "turn-rewrite",
+            .transcript_path = path,
+        });
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and session.agent_activity.count() < n_now + 1) _ = session.tick() catch {};
+        try std.testing.expectEqual(n_now + 1, session.agent_activity.count());
+        for (session.agent_activity.hits.items) |hit| try std.testing.expect(hit.data_offset != wide_key.data_offset); // 못 찾는 길
+        try std.testing.expect(session.agent_activity.scroll.offset_y_px > agent_activity_ops.gridLayout(session).max_scroll);
+    }
+
+    // ── ④ 보이는 줄을 펼쳐도 줄 목록은 움직이지 않는다 — 격자의 자로 옮기면(B3 와 같은 축) 닫은 뒤 엉뚱한 줄들이 보였다.
+    {
+        const before = session.agent_activity.scroll.offset_y_px;
+        const w = agent_activity_ops.listWindow(session);
+        agent_activity_ops.openAt(session, w.first + 1);
+        try std.testing.expectEqual(before, session.agent_activity.scroll.offset_y_px);
+        session.agent_activity.dropOpen(session.allocator);
+    }
+
+    // ── ⑤ 맨 위 행이 보이면 새 것이 보인다 — 붙잡지 않는다. 「맨 위」는 오프셋 0 이 아니라 **그려진 첫 행**이다:
+    //     행 단위로만 그리므로 몇 픽셀 밀린 오프셋도 화면은 맨 위와 같다(줄 목록·격자 둘 다).
+    session.agent_activity.scroll.offset_y_px = row_h - 1;
+    try std.testing.expectEqual(@as(usize, 0), agent_activity_ops.listWindow(session).first);
+    try Probe.grow(session, tmp.dir, one, 2, path);
+    var newest = session.agent_activity.all_hits.items[0];
+    try std.testing.expectEqual(Probe.Key{ .file = newest.file_index, .data_offset = newest.data_offset }, Probe.topKey(session));
+    agent_activity_ops.setFilter(session, .images);
+    session.agent_activity.scroll.offset_y_px = 5;
+    try std.testing.expectEqual(@as(usize, 0), agent_activity_ops.gridLayout(session).first);
+    try Probe.grow(session, tmp.dir, one, 1, path);
+    newest = session.agent_activity.all_hits.items[0];
+    try std.testing.expectEqual(Probe.Key{ .file = newest.file_index, .data_offset = newest.data_offset }, Probe.topKey(session));
+
+    quietActivityWorkers(session);
+}
+
+// [C2] 같은 어긋남의 두 번째 길목: **본문 검색의 답이 도착할 때**도 목록을 다시 만든다. 본문에서만 걸린
+// 줄이 보던 줄보다 최신이면 앞에 더해져, 오프셋을 그대로 두면 그만큼 다른 줄이 보인다.
+test "활동 뷰: 본문 검색 답이 앞에 줄을 더해도 보던 줄이 맨 위에 남는다 (C2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 오래된 쪽(파일 앞) 60 줄은 **라벨**에 `zeta` 가 있고, 최신 쪽(파일 끝) 5 줄은 **명령에만** 있다 —
+    // 그래서 `Enter` 로 본문까지 넓히면 그 5 줄이 목록 맨 앞(최신 우선)에 더해진다.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+    for (0..65) |i| {
+        const line = if (i < 60)
+            try std.fmt.allocPrint(allocator, "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_L{d}\",\"name\":\"Bash\",\"input\":{{\"command\":\"ls {d}\",\"description\":\"zeta 라벨 {d}\"}}}}]}}}}\n", .{ i, i, i })
+        else
+            try std.fmt.allocPrint(allocator, "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_B{d}\",\"name\":\"Bash\",\"input\":{{\"command\":\"grep -rn zeta {d}\",\"description\":\"작업 {d}\"}}}}]}}}}\n", .{ i, i, i });
+        defer allocator.free(line);
+        try body.appendSlice(allocator, line);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jsonl", .data = body.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/a.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .agent_activity);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.hook.image_source.set(path));
+    agent_activity_ops.refresh(session, false);
+    {
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and !session.agent_activity.built) _ = session.tick() catch {};
+    }
+    session.agent_activity.key_focus = true;
+    agent_activity_ops.setFilter(session, .execs);
+    try std.testing.expectEqual(@as(usize, 65), session.agent_activity.count());
+
+    try std.testing.expect(agent_activity_ops.focusSearch(session));
+    for ("zeta") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 60), session.agent_activity.count()); // 라벨 층만
+
+    // 몇 줄 내려가 본다 — 목록이 실제로 굴러야 이 물음이 선다.
+    try std.testing.expect(agent_activity_ops.listMaxScroll(session) > 0);
+    for (0..6) |_| _ = agent_activity_ops.wheelScroll(session, -1, false, 0, 0);
+    const row_h = agent_activity_ops.listRowHeightPx(session);
+    try std.testing.expect(session.agent_activity.scroll.offset_y_px >= row_h);
+    const first = agent_activity_ops.listWindow(session).first;
+    const top = session.agent_activity.hits.items[first];
+
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    {
+        // 답이 와서 목록이 다시 만들어질 때까지(워커가 바빠 예약됐다가 다음 tick 에 걸리는 길도 기다린다).
+        var wait = ActivityWait.start(session.io);
+        while (wait.pending() and (session.agent_activity.body.awaiting != 0 or session.agent_activity.count() < 65)) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 65), session.agent_activity.count()); // 본문 5 줄이 더해졌다
+    const now = session.agent_activity.hits.items[agent_activity_ops.listWindow(session).first];
+    try std.testing.expectEqual(top.file_index, now.file_index);
+    try std.testing.expectEqual(top.data_offset, now.data_offset);
+
+    quietActivityWorkers(session);
 }
 
 test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 보여준다 (IG13)" {

@@ -1245,13 +1245,15 @@ fn pollBodySearch(self: *AppSession) void {
     // `rebuildFilter` 는 그것을 이미 다룬다 — 이 길만 빠져 있었고, 그래서 결과가 오는 순간
     // **펼쳐 둔 줄이 남의 자리를 가리켰다**(자리가 밀린 만큼 엉뚱한 줄이 펼쳐진 것처럼 보인다).
     const open_key = openKey(self);
+    // 보던 자리도 같은 이유로 잡는다(C2) — 본문에서 걸린 줄이 보던 줄보다 앞(최신)에 더해질 수 있다.
+    const scroll_anchor = captureScrollAnchor(self);
     // 목록을 다시 만든다 — 이제 본문에서 걸린 줄이 더해진다.
     self.agent_activity.applyFilter(self.allocator);
     reattachOpen(self, open_key);
     // 호버도 옛 자리다. 다음 마우스 이동이 다시 잡는다.
     self.agent_activity.hovered = null;
     if (self.agent_activity.filter.holdsImages()) remapTiles(self);
-    clampScroll(self);
+    restoreScrollAnchor(self, scroll_anchor);
     self.metal_dirty = true;
 }
 
@@ -1552,7 +1554,9 @@ pub fn poll(self: *AppSession) void {
         self.agent_activity.body.answered = false;
         self.agent_activity.body.resubmit = true;
     }
-    // 원본이 바뀌었으니 보여줄 목록을 다시 만든다(검색어가 비면 전부).
+    // 원본이 바뀌었으니 보여줄 목록을 다시 만든다(검색어가 비면 전부). 보던 자리는 그 전에 잡는다(C2) —
+    // `hits` 는 아직 옛 목록이다.
+    const scroll_anchor = captureScrollAnchor(self);
     self.agent_activity.applyFilter(self.allocator);
     // **타일은 버리지 않고 새 인덱스에 다시 잇는다.** 자동 갱신이 붙은 뒤로 이 길은 「같은 파일이
     // 자랐다」에도 쓰이는데, 통째로 버리면 대화가 이어지는 내내 격자가 매 턴 비었다 다시 찬다
@@ -1569,10 +1573,10 @@ pub fn poll(self: *AppSession) void {
     // **호버도 옛 인덱스다.** 이미지가 줄면 없는 칸을 가리키고, 안 줄어도 그 자리엔 다른 이미지가
     // 온다(최신 우선이라 순서가 통째로 바뀐다). 다음 마우스 이동이 다시 잡는다.
     self.agent_activity.hovered = null;
-    // **스크롤을 새 상한으로 끌어내린다.** 목록이 줄었는데 옛 위치가 남으면, 위로 굴려도 한동안
-    // 화면이 안 움직인다 — `scrollByPx` 는 내려갈 때만 상한을 보기 때문이다(올라갈 때는 그냥 뺀다).
-    // 리셋이 아니라 clamp 라, 보던 행이 아직 있으면 그 자리에 그대로 있는다.
-    clampScroll(self);
+    // **보던 항목을 다시 맨 위로**(C2). 새 활동은 앞에 붙으므로 픽셀 오프셋을 그대로 두면 붙은 만큼
+    // 다른 것이 보인다. 못 찾으면 새 상한으로 끌어내리기만 한다 — 목록이 줄었는데 옛 위치가 남으면
+    // 위로 굴려도 한동안 화면이 안 움직인다(`scrollByPx` 는 내려갈 때만 상한을 본다).
+    restoreScrollAnchor(self, scroll_anchor);
     self.agent_activity.partial = result.partial;
     self.agent_activity.image_partial = result.image_partial;
     self.agent_activity.activity_partial = result.activity_partial;
@@ -2064,13 +2068,18 @@ pub fn openAt(self: *AppSession, n: usize) void {
     // **격자를 그 칸으로 맞춰 둔다.** 클릭으로 열 때는 이미 보이므로 아무 일도 없고, ←→ 로 멀리
     // 넘어갔을 때만 움직인다 — 그러지 않으면 닫는 순간 격자가 **옛 자리**를 보여주고 방금 보던
     // 이미지가 화면 밖에 있다. 여는 자리 한 곳에서 하므로 두 입구가 갈리지 않는다.
-    self.agent_activity.scroll.offset_y_px = image_grid.scrollToShow(
-        gridArea(self),
-        gridMetrics(self),
-        self.agent_activity.count(),
-        self.agent_activity.scroll.offset_y_px,
-        n,
-    );
+    self.agent_activity.scroll.offset_y_px = if (self.agent_activity.filter.isGrid())
+        image_grid.scrollToShow(
+            gridArea(self),
+            gridMetrics(self),
+            self.agent_activity.count(),
+            self.agent_activity.scroll.offset_y_px,
+            n,
+        )
+    else
+        // **줄 목록은 자기 자로**(B3 와 같은 축). 격자의 `scrollToShow` 는 타일 행 높이·열 수로 계산해, 보이는 줄을
+        // 눌러도 오프셋을 격자 행에 맞춰 옮겼다 — 펼침을 닫으면 엉뚱한 줄들이 보였다.
+        listScrollToShow(self, n);
     self.metal_dirty = true;
     // **활동 항목에는 그림이 없다.** `ensureOpen` 을 부르면 명령 문자열을 이미지로 디코드하려 들어
     // 「열지 못했습니다」가 뜬다(main 이 목록 클릭을 막아 두었던 그 이유다). 대신 그때 받은 바이트를
@@ -3199,10 +3208,85 @@ fn utcOffsetAt(unix_s: i64) i64 {
 
 /// 스크롤 위치를 지금 목록의 상한 안으로 끌어내린다. 목록이 **줄어든** 뒤에 부른다.
 fn clampScroll(self: *AppSession) void {
-    const max = gridLayout(self).max_scroll;
+    const max = maxScroll(self);
     if (self.agent_activity.scroll.offset_y_px > max) {
         self.agent_activity.scroll.offset_y_px = max;
         self.agent_activity.scroll.dropWheelResidue(); // 가는 도중의 잔여는 위치가 확정되면 뜻이 없다
+    }
+}
+
+/// 지금 보이는 모양의 스크롤 상한. **격자와 줄 목록은 자가 다르다**(B3) — 줄 목록에 격자의 상한을 대면
+/// 다시 만들 때마다 보던 자리가 엉뚱하게 끌려 올라가거나 끝까지 못 간다.
+fn maxScroll(self: *const AppSession) u32 {
+    if (self.agent_activity.filter.isGrid()) return gridLayout(self).max_scroll;
+    return listMaxScroll(self);
+}
+
+/// 줄 목록의 스크롤 상한(px). **그리는 창(`listWindow`)과 같은 자로 잰다** — 줄 목록은 온 줄만 그리므로
+/// (`rows_fit = 높이 / 줄 높이`) 상한도 「마지막 줄이 창의 마지막 자리에 오는 첫 줄」 × 줄 높이다. 예전엔
+/// `항목 수 × 줄 높이 − 높이` 였는데, 높이가 줄 높이의 배수가 아니면 그 상한에서 첫 줄이 하나 모자라 **가장 오래된
+/// 항목이 끝내 안 보였다**(창은 `first + rows_fit` 까지만 그린다).
+pub fn listMaxScroll(self: *const AppSession) u32 {
+    const row_h = listRowHeightPx(self);
+    if (row_h == 0) return 0;
+    const rows_fit: usize = gridArea(self).h / row_h;
+    const first_max = self.agent_activity.count() -| rows_fit;
+    return @intCast(@min(@as(u64, first_max) * @as(u64, row_h), @as(u64, std.math.maxInt(u32))));
+}
+
+/// 목록을 다시 만들기 전에 잡아 두는 **보던 자리**(C2). 맨 위에 보이던 항목의 정체와 그 줄 안에서
+/// 내려가 있던 픽셀이다.
+///
+/// **목록은 최신이 먼저다** — 대화가 이어져 새 활동이 오면 앞에 붙는다. 오프셋은 픽셀이라 그대로 두면
+/// 보던 줄이 붙은 수만큼 아래로 밀려 다른 것이 보인다. 정체(`file_index`·`data_offset`)는 배열이
+/// 움직여도 안 변하므로(타일 재연결·펼친 줄 재연결과 같은 키) 다시 찾아 그 자리로 옮긴다.
+///
+/// **맨 위 행이 보이면 잡지 않는다** — 그때는 새로 온 것이 보이는 것이 맞다. 「맨 위」는 오프셋 0 이 아니라
+/// **그려진 첫 행**으로 가른다: 두 모양 다 행 단위로만 그리므로, 트랙패드로 몇 픽셀 밀린 오프셋도 화면은 맨 위와
+/// 똑같다(그것을 붙잡으면 새 항목이 화면 위로 숨는다).
+pub const ScrollAnchor = struct { file: u8, data_offset: u64, within_px: u32 };
+
+pub fn captureScrollAnchor(self: *const AppSession) ?ScrollAnchor {
+    const offset = self.agent_activity.scroll.offset_y_px;
+    if (offset == 0) return null; // 빠른 길 — 아래 첫 행 판정과 같은 답이다
+    const hits = self.agent_activity.hits.items;
+    var first: usize = undefined;
+    var within: u32 = 0;
+    if (self.agent_activity.filter.isGrid()) {
+        const l = gridLayout(self);
+        if (l.cols == 0) return null;
+        first = l.first; // 격자는 행 단위로 스냅한다 — 줄 안 오프셋이 없다
+    } else {
+        const w = listWindow(self);
+        if (w.row_h == 0) return null;
+        first = w.first;
+        within = offset -| @as(u32, @intCast(@min(@as(u64, first) * w.row_h, std.math.maxInt(u32))));
+        within = @min(within, w.row_h -| 1);
+    }
+    if (first == 0 or first >= hits.len) return null; // 맨 위 행이 보인다 — 새 것이 보여야 한다
+    return .{ .file = hits[first].file_index, .data_offset = hits[first].data_offset, .within_px = within };
+}
+
+/// 다시 만든 목록에서 잡아 둔 항목을 찾아 그 줄이 다시 맨 위에 오게 한다. 못 찾으면(걸러졌거나
+/// 퇴출됐다) 상한으로만 끌어내린다 — 보던 것이 없으니 지킬 자리도 없다.
+pub fn restoreScrollAnchor(self: *AppSession, anchor: ?ScrollAnchor) void {
+    const a = anchor orelse return clampScroll(self);
+    const n = for (self.agent_activity.hits.items, 0..) |hit, i| {
+        if (hit.file_index == a.file and hit.data_offset == a.data_offset) break i;
+    } else return clampScroll(self);
+    var target: u64 = undefined;
+    if (self.agent_activity.filter.isGrid()) {
+        const l = gridLayout(self);
+        if (l.cols == 0) return clampScroll(self);
+        const step_y = @as(u64, l.tile_h) + gridMetrics(self).label + gridMetrics(self).gap;
+        target = @as(u64, n / l.cols) * step_y;
+    } else {
+        target = @as(u64, n) * listRowHeightPx(self) + a.within_px;
+    }
+    const placed: u32 = @intCast(@min(target, maxScroll(self)));
+    if (placed != self.agent_activity.scroll.offset_y_px) {
+        self.agent_activity.scroll.offset_y_px = placed;
+        self.agent_activity.scroll.dropWheelResidue(); // 위치가 다시 정해졌다 — 가는 도중의 잔여는 뜻이 없다
     }
 }
 
@@ -3223,14 +3307,9 @@ pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_
     // 실제 높이(항목 수 × 줄 높이)와 다르다. 그대로 쓰면 **끝까지 내려가지 않는다** — 4,084개짜리
     // 세션에서 앞부분만 닿는다. 눈금도 한 줄이어야 「한 칸씩」이 뜻을 갖는다.
     if (!self.agent_activity.filter.isGrid()) {
-        const area = gridArea(self);
         const row_h = listRowHeightPx(self);
         if (row_h == 0) return false;
-        const content_h: u32 = @intCast(@min(
-            @as(u64, self.agent_activity.count()) * @as(u64, row_h),
-            @as(u64, std.math.maxInt(u32)),
-        ));
-        const max_scroll = content_h -| area.h;
+        const max_scroll = listMaxScroll(self);
         if (max_scroll == 0) return false; // 다 보인다 — 이벤트를 삼키지 않는다
         const unit: f64 = if (precise)
             @as(f64, @floatFromInt(if (self.scale_milli > 0) self.scale_milli else 1000)) / 1000.0
@@ -3506,6 +3585,17 @@ pub fn listRowHeightPx(self: *const AppSession) u32 {
 
 /// 줄 사이 여백(px). 촘촘하면 훑기 어렵고 넓으면 한 화면에 몇 줄 못 담는다.
 const list_row_padding_px: u32 = 4;
+
+/// 줄 목록에서 `n` 번째 줄이 보이도록 만드는 오프셋. 이미 보이면 **지금 값 그대로**(격자의 `scrollToShow` 와 같은
+/// 약속 — 보이는데 움직이면 보던 자리가 흔들린다). 위면 그 줄이 첫 줄, 아래면 마지막 줄이 되게.
+fn listScrollToShow(self: *const AppSession, n: usize) u32 {
+    const w = listWindow(self);
+    const offset = self.agent_activity.scroll.offset_y_px;
+    if (w.row_h == 0 or w.rows_fit == 0) return offset;
+    if (n >= w.first and n < w.last) return offset;
+    const first = if (n < w.first) n else n + 1 -| w.rows_fit;
+    return @intCast(@min(@as(u64, first) * w.row_h, listMaxScroll(self)));
+}
 
 /// 줄 목록이 이번 프레임에 **자리를 못 얻는** 수. 하나도 못 그리면 `count()` 와 같다.
 ///

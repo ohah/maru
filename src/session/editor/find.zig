@@ -63,6 +63,17 @@ fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8, opts: Options
     var n: usize = 0;
     while (n < needle_utf8.len) {
         if (i >= line.len) return null;
+        // ASCII는 byte 하나가 코드포인트 하나다. 접기 규칙은 기존 소유자를 그대로 쓴다.
+        if (needle_utf8[n] < 0x80 and line[i] < 0x80) {
+            const want = needle_utf8[n];
+            const have = line[i];
+            if (opts.match_case) {
+                if (have != want) return null;
+            } else if (terminal.selection.foldCase(have) != terminal.selection.foldCase(want)) return null;
+            i += 1;
+            n += 1;
+            continue;
+        }
         const nl = std.unicode.utf8ByteSequenceLength(needle_utf8[n]) catch return null;
         if (n + nl > needle_utf8.len) return null;
         const hl = std.unicode.utf8ByteSequenceLength(line[i]) catch return null;
@@ -105,6 +116,7 @@ fn isWholeWord(line: []const u8, lo: usize, hi: usize) bool {
 ///
 /// 읽을 수 없으면 **1 byte만** 민다. 그러면 못 읽는 byte 하나만 잃고 다음 자리부터 다시 본다.
 fn stepBytes(s: []const u8, i: usize) usize {
+    if (s[i] < 0x80) return 1;
     const n = std.unicode.utf8ByteSequenceLength(s[i]) catch return 1;
     if (i + n > s.len) return 1;
     _ = std.unicode.utf8Decode(s[i .. i + n]) catch return 1;
@@ -129,7 +141,7 @@ pub const Options = struct {
     /// 켜면 매치가 **낱말 하나와 정확히 같을 때만** 센다. 판정은 `selection.wordRangeAt` 이
     /// 소유한다 — 더블클릭이 잡는 그 범위와 **같은 것**이어야 앱 안에 낱말 규칙이 둘 안 생긴다.
     whole_word: bool = false,
-    /// Explicit opt-in. Plain search keeps its existing literal and case-folding contract.
+    /// 명시적으로 켜는 옵션이다. 평문 찾기의 기존 일치·대소문자 규칙은 그대로 쓴다.
     regex: bool = false,
 };
 
@@ -177,6 +189,21 @@ pub fn findMatches(
 
     for (lines, 0..) |line, li| {
         var i: usize = 0;
+        if (opts.match_case) {
+            // 유효한 UTF-8 검색어의 첫 byte는 continuation이 아니다. 깨진 본문에서도
+            // 코드포인트 내부에 시작점을 만들지 않으므로 정확한 byte 탐색을 쓸 수 있다.
+            while (std.mem.indexOfPos(u8, line, i, needle_utf8)) |start| {
+                const end = start + needle_utf8.len;
+                if (!opts.whole_word or isWholeWord(line, start, end)) {
+                    try out.append(allocator, .{ .line = @intCast(li), .start = @intCast(start), .len = @intCast(end - start) });
+                    i = end;
+                } else {
+                    // 거절한 낱말 후보 뒤의 겹친 시작점도 계속 검사한다.
+                    i = start + stepBytes(line, start);
+                }
+            }
+            continue;
+        }
         while (i < line.len) {
             if (matchAt(line, i, needle_utf8, opts)) |end| {
                 try out.append(allocator, .{
@@ -197,6 +224,62 @@ pub fn findMatches(
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "FND33 평문 개선은 독립 코드포인트 판정과 모든 범위가 같다" {
+    const Reference = struct {
+        fn collect(lines: []const []const u8, needle: []const u8, opts: Options) !std.ArrayList(Match) {
+            var out: std.ArrayList(Match) = .empty;
+            errdefer out.deinit(testing.allocator);
+            if (needle.len == 0 or !std.unicode.utf8ValidateSlice(needle)) return out;
+            for (lines, 0..) |line, li| {
+                var start: usize = 0;
+                while (start < line.len) {
+                    var end = start;
+                    var n: usize = 0;
+                    while (n < needle.len and end < line.len) {
+                        const nl = std.unicode.utf8ByteSequenceLength(needle[n]) catch break;
+                        const hl = std.unicode.utf8ByteSequenceLength(line[end]) catch break;
+                        if (end + hl > line.len) break;
+                        const want = try std.unicode.utf8Decode(needle[n .. n + nl]);
+                        const have = std.unicode.utf8Decode(line[end .. end + hl]) catch break;
+                        const equal = if (opts.match_case) have == want else terminal.selection.foldCase(have) == terminal.selection.foldCase(want);
+                        if (!equal) break;
+                        end += hl;
+                        n += nl;
+                    }
+                    if (n == needle.len and (!opts.whole_word or isWholeWord(line, start, end))) {
+                        try out.append(testing.allocator, .{ .line = @intCast(li), .start = @intCast(start), .len = @intCast(end - start) });
+                        start = end;
+                    } else {
+                        // 개선한 stepBytes도 공유하지 않는다. 깨진 byte는 하나만 넘긴다.
+                        const width = std.unicode.utf8ByteSequenceLength(line[start]) catch 1;
+                        start += if (start + width <= line.len and std.unicode.utf8ValidateSlice(line[start .. start + width])) width else 1;
+                    }
+                }
+            }
+            return out;
+        }
+    };
+    var random = std.Random.DefaultPrng.init(0xFAD33);
+    const tokens = [_][]const u8{ "a", "A", "aa", "id", "ID", "_", "$", " ", "한글", "e\u{301}", "é", "É", "Ÿ", "ÿ", "Σ", "σ", "K", "ſ", "İ", "ı", "😀", "\x00", "\xE0", "\xF0", "\x80", "\r" };
+    const queries = [_][]const u8{ "", "a", "aa", "id", "ID", "_", "$", "한글", "e\u{301}", "é", "Ÿ", "Σ", "k", "s", "I", "😀", "\x00", "\r", "\xF0" };
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for (0..32) |_| {
+        text.clearRetainingCapacity();
+        for (0..96) |_| try text.appendSlice(testing.allocator, tokens[random.random().uintLessThan(usize, tokens.len)]);
+        const lines = [_][]const u8{ text.items, "aaa aa", "foo foo😀bar foo_bar", "\xE0abcabc", "aa\xF0target", "\xF0\x9F\x98\x80" };
+        for (queries) |query| {
+            for ([_]Options{ .{}, .{ .match_case = true }, .{ .whole_word = true }, .{ .match_case = true, .whole_word = true } }) |opts| {
+                var expected = try Reference.collect(&lines, query, opts);
+                defer expected.deinit(testing.allocator);
+                var actual = try collectOpts(&lines, query, opts);
+                defer actual.deinit(testing.allocator);
+                try testing.expectEqualSlices(Match, expected.items, actual.items);
+            }
+        }
+    }
+}
 
 test "FND30 regex is opt-in; lookaround, backreference and whole-word use line byte spans" {
     const lines = [_][]const u8{ "a.b ab aab", "한글 한글" };

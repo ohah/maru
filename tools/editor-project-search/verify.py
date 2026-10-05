@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--native", type=Path, required=True)
+    parser.add_argument("--baseline-native", type=Path, help="수정 전 바이너리와 모든 범위를 대조")
     parser.add_argument("--rg", default=shutil.which("rg"))
     args = parser.parse_args()
     if not args.rg:
@@ -28,6 +29,7 @@ def main():
     environment = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home), "LC_ALL": "C"}
     environment.pop("RIPGREP_CONFIG_PATH", None)
     native = args.native.resolve(strict=True)
+    baseline = args.baseline_native.resolve(strict=True) if args.baseline_native else None
     binary = Path(args.rg).resolve(strict=True)
     base = [str(binary), "--no-config", "--hidden", "--no-require-git",
             "--no-ignore-parent", "--no-ignore-global"]
@@ -48,6 +50,7 @@ def main():
         "double-cr.txt": "needle\r\r\n",
         "lone-cr.txt": "needle\r",
         "nul.txt": "\0needle\n",
+        "unicode-case.txt": "é É Ÿ ÿ Σ σ А а K K ſ S İ I\n",
     }
     randomizer = random.Random(4134)
     alphabet = ["foo", "needle", "NEEDLE", "aaa", "😀", "한글", "é", "$", "_", " ", "\n"]
@@ -68,6 +71,7 @@ def main():
             ("--", "literal"), (".*", "literal"), ("$", "word"), ("_", "word"),
             ("absent-pattern", "literal"), ("한글", "literal"), ("é", "literal"),
             ("é", "literal"), ("^|foo", "regex"), ("(?<=foo)bar", "regex"),
+            ("é", "literal-fold"), ("Ÿ", "literal-fold"), ("Σ", "literal-fold"), ("А", "literal-fold"),
             (r"(foo)\1", "regex"), ("(?=한)|$", "regex"),
         ]
     ] + [(raw, "needle", "literal"), (raw, "NEEDLE", "literal-fold"), (raw, "foo", "literal")]
@@ -78,6 +82,14 @@ def main():
         "source_sha256": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                           for name in ("native.zig", "compare.py", "verify.py")},
         "limits": "합성 자료의 모든 범위 대조. raw 자료는 선별 누락 탐지용이며 제품의 바이너리·인코딩 지원을 뜻하지 않음.",
+    }
+    if baseline:
+        report["baseline_native_sha256"] = hashlib.sha256(baseline.read_bytes()).hexdigest()
+    repository = Path(__file__).resolve().parents[2]
+    report["product_source_sha256"] = {
+        path: hashlib.sha256((repository / path).read_bytes()).hexdigest()
+        for path in ("src/session/editor/find.zig", "src/session/editor/document.zig",
+                     "src/session/editor/line_index.zig", "src/terminal/selection.zig")
     }
 
     def run(command, cwd, name):
@@ -94,11 +106,11 @@ def main():
         assert len(names) == len(set(names)), name
         return names, used
 
-    def ranges_for(corpus, names, query, mode, name):
+    def ranges_for(corpus, names, query, mode, name, matcher=native):
         paths = output / f"{name}.paths"
         paths.write_bytes(b"".join(os.fsencode(corpus) + b"/" + path + b"\0" for path in names))
         raw_options = ["--raw-bytes"] if corpus == raw else []
-        result = run([str(native), str(paths), query, mode, "--ranges"] + raw_options, corpus, name)
+        result = run([str(matcher), str(paths), query, mode, "--ranges"] + raw_options, corpus, name)
         assert result.returncode == 0, (name, result.stderr)
         records = [json.loads(line) for line in result.stdout.splitlines()]
         summary = records.pop()
@@ -129,6 +141,10 @@ def main():
         rejected = run([str(native), str(invalid_paths), "needle", "literal"], raw, "invalid-document")
         report["invalid_document_rejected"] = rejected.returncode != 0 and b"NotUtf8" in rejected.stderr
         assert report["invalid_document_rejected"], "제품 경로는 잘못된 UTF-8을 거부해야 함"
+        invalid_query = run([str(native), str(invalid_paths), b"\xf0", "literal", "--raw-bytes"], raw, "invalid-query")
+        assert invalid_query.returncode == 0, invalid_query.stderr
+        report["invalid_query_matches"] = json.loads(invalid_query.stdout)["matches"]
+        assert report["invalid_query_matches"] == 0, "깨진 검색어는 매치 0이어야 함"
         for index, (corpus, query, mode) in enumerate(cases):
             name = f"case-{index}"
             all_paths, _ = paths_for(corpus, query, mode, False, name + "-all")
@@ -139,6 +155,9 @@ def main():
                    "files": len(all_paths), "candidates": len(candidates), "prefilter_used": used,
                    "matches": sum(map(len, expected.values())), "prefilter_equal": expected == filtered,
                    "missing_files": sorted(expected.keys() - filtered.keys())}
+            if baseline:
+                original = ranges_for(corpus, all_paths, query, mode, name + "-baseline", baseline)
+                row["baseline_equal"] = expected == original
             if mode == "literal":
                 byte_ranges = ranges_for(corpus, all_paths, query, "byte-candidate", name + "-byte")
                 row["byte_equal"] = expected == byte_ranges
@@ -147,7 +166,7 @@ def main():
                             ("a\0b", "literal"), ("한글", "literal"), ("foo", "regex")]:
             _, used = candidate_command(base, query, mode, True)
             assert not used, (query, mode, "선별하면 안 되는 검색어")
-        failures = [row for row in report["cases"] if not row["prefilter_equal"] or not row.get("byte_equal", True)]
+        failures = [row for row in report["cases"] if not row["prefilter_equal"] or not row.get("byte_equal", True) or not row.get("baseline_equal", True)]
         assert not failures, failures
         report["status"] = "passed"
     except BaseException as error:

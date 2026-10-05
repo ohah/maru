@@ -1462,6 +1462,10 @@ pub const TerminalCore = struct {
     pub fn moveAnchors(self: *TerminalCore, remaps: []const PlacementAnchorRemap, lost_below: usize) void {
         kitty.moveAnchors(self, remaps, lost_below);
     }
+    /// alt 중 resize 가 잘라 낸 primary 셀의 앵커를 지운다. 본문: kitty.dropClippedSavedAnchors.
+    pub fn dropClippedSavedAnchors(self: *TerminalCore, sb_count: usize, rows: u16, cols: u16) void {
+        kitty.dropClippedSavedAnchors(self, sb_count, rows, cols);
+    }
     /// 스크롤백 길이 변화만큼 활성 화면 앵커를 민다. 본문: kitty.rebaseActiveAnchors.
     pub fn rebaseActiveAnchors(self: *TerminalCore, old_count: usize, new_count: usize) void {
         kitty.rebaseActiveAnchors(self, old_count, new_count);
@@ -4634,6 +4638,64 @@ fn absFirstCodepoint(core: *const TerminalCore, abs: usize) u21 {
         return if (row.len > 0) row[0].codepoint else 0;
     }
     return core.screen.cells[core.index(@intCast(abs - core.screen.sb.count), 0)].codepoint;
+}
+
+test "kitty reflow: alt 화면 중 창을 줄이면 잘려 나간 primary 행의 이미지는 지우고 넘친 열은 마지막 칸으로 — 다시 키워도 빈 행에 안 살아난다" {
+    // alt 중 resize 는 보관된 primary 그리드를 reflow 없이 **자른다**(왼쪽 위 기준). 잘려 나간 행의 내용은 사라졌으니
+    // 거기 앵커가 있던 primary 이미지도 버려진 행과 같은 규율로 지운다. 예전엔 앵커가 그대로 남아, alt 를 나와 창을
+    // 다시 키우면 내용 없는 빈 행 위에 이미지가 되살아났다. 폭 밖으로 넘친 열은 alt 밖 resize 의 커서 줄과 같은 규칙
+    // (마지막 칸)이다 — 지우지 않는다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    core.setMaxScrollback(10);
+    try core.write("s0\r\ns1\r\na0\r\na1\r\na2\r\na3\r\na4\r\na5"); // 스크롤백 2 행 + 화면 6 행
+    const sb = core.screen.sb.count;
+    try std.testing.expectEqual(@as(usize, 2), sb);
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(0, 0, 1)); // 스크롤백 — 그리드가 아니다
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(sb + 2, 9, 1)); // 남는 마지막 행·마지막 열(경계)
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(sb + 3, 0, 1)); // 높이 3 이면 잘리는 첫 행(경계)
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(sb + 0, 15, 1)); // 폭 10 이면 넘치는 열
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(sb + 5, 15, 1)); // 행도 열도 잘린다
+    try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(sb + 1, 10, 1)); // 새 폭과 같은 열(경계)
+    // 상대 배치는 저장 앵커가 아니라 **부모를 따른다**: ⓐ 부모(잘리는 행)가 지워지면 앵커가 남는 행이어도 함께 가고,
+    // ⓑ 부모가 남으면 앵커가 잘리는 행이어도 남는다.
+    var i_cut: usize = 2; // sb+3 — 잘리는 행의 부모
+    core.kitty_placements.items[i_cut].image_id = 70;
+    core.kitty_placements.items[i_cut].placement_id = 1;
+    var child_gone = mkSpanPlacement(sb + 1, 0, 1);
+    child_gone.parent_image_id = 70;
+    child_gone.parent_placement_id = 1;
+    try core.kitty_placements.append(std.testing.allocator, child_gone);
+    i_cut = 1; // sb+2 — 남는 행의 부모
+    core.kitty_placements.items[i_cut].image_id = 71;
+    core.kitty_placements.items[i_cut].placement_id = 1;
+    var child_kept = mkSpanPlacement(sb + 4, 0, 1);
+    child_kept.image_id = 72;
+    child_kept.parent_image_id = 71;
+    child_kept.parent_placement_id = 1;
+    try core.kitty_placements.append(std.testing.allocator, child_kept);
+
+    try core.write("\x1b[?1049h"); // vim 등 — primary 이미지는 보관된다
+    try std.testing.expectEqual(@as(usize, 8), core.saved_kitty_placements.items.len);
+    try core.resize(10, 3);
+    try core.write("\x1b[?1049l");
+    const ps = core.kitty_placements.items;
+    try std.testing.expectEqual(@as(usize, 5), ps.len);
+    try std.testing.expectEqual(@as(usize, 0), ps[0].anchor_row); // 스크롤백 — 그대로
+    try std.testing.expectEqual(sb + 2, ps[1].anchor_row); // 남는 마지막 행·마지막 열 — 그대로
+    try std.testing.expectEqual(@as(u16, 9), ps[1].anchor_col);
+    try std.testing.expectEqual(sb + 0, ps[2].anchor_row);
+    try std.testing.expectEqual(@as(u16, 9), ps[2].anchor_col); // 넘친 열: 지우지 않고 마지막 칸
+    try std.testing.expectEqual(sb + 1, ps[3].anchor_row);
+    try std.testing.expectEqual(@as(u16, 9), ps[3].anchor_col); // 새 폭과 같은 열도 넘친 것이다
+    try std.testing.expectEqual(@as(u32, 72), ps[4].image_id); // ⓑ 남은 부모의 자식
+
+    // 다시 키워도 지운 것은 돌아오지 않고, 남은 앵커는 **내용이 있던 행**에만 있다(잘린 빈 행 위에 안 선다).
+    try core.resize(20, 6);
+    try std.testing.expectEqual(@as(usize, 5), core.kitty_placements.items.len);
+    for (core.kitty_placements.items) |p| {
+        if (p.parent_image_id == 0) try std.testing.expect(p.anchor_row < sb + 3);
+    }
 }
 
 test "kitty reflow: 폭을 넓혀 위 줄이 합쳐지면 이미지도 내용과 함께 올라간다" {

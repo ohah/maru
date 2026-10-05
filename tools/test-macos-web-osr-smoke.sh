@@ -139,10 +139,12 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'audio/wav'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
             return
         elif self.path == "/media-app":
-            # W6h②: 오디오 하나(본문 왼쪽 위 절반) — 연속 재생 상태가 바뀌면 `/ev` 로 알린다.
+            # W6h②: 같은 주소 오디오 둘(본문 위쪽 왼·오른 절반 — 주소로는 어느 것인지 모른다, 우클릭한 자리의 요소를 바꿔야 한다).
+            # 연속 재생 상태가 바뀌면 `/ev` 로 알린다(왼·오른 두 자리 숫자).
             body = (b"<!doctype html><title>media</title><style>html,body{margin:0;height:100%;background:#20a060}"
-                    b"audio{position:fixed;left:0;top:0;width:50%;height:30%}</style><body><audio id=a controls src='/tone.wav?a'></audio><script>"
-                    b"var a=document.getElementById('a'),last=a.loop;setInterval(function(){if(a.loop!==last){last=a.loop;new Image().src='/ev?e=loop&v='+(+a.loop)+'&t='+Date.now()}},100);"
+                    b"audio{position:fixed;top:0;width:50%;height:30%}</style><body><audio id=a controls src='/tone.wav?d' style='left:0'></audio>"
+                    b"<audio id=b controls src='/tone.wav?d' style='left:50%'></audio><script>"
+                    b"var a=document.getElementById('a'),b=document.getElementById('b'),last='00';setInterval(function(){var v=''+(+a.loop)+(+b.loop);if(v!==last){last=v;new Image().src='/ev?e=loop&v='+v+'&t='+Date.now()}},100);"
                     b"</script>")
         elif self.path == "/img/cat.png":
             # W6d③: 끌어내 파일로 만들 이미지(48×48 빨간 PNG).
@@ -881,18 +883,18 @@ PY
 
 # ── W6h②: 동영상·오디오 우클릭 메뉴 ────────────────────────────────────────────────────────────────────────
 # 오디오를 우클릭하면 「연속 재생 · 모든 제어 기능 표시 — 새 탭에서 오디오 열기 · 오디오 주소 복사」(Chrome 154 — 오디오의 제어 기능은
-# 켜져 있고 끌 수 없다: 체크 표시 ✓·(off)). 「연속 재생」을 고르면 그 오디오가 켜지고(sidecar 가 DevTools 로 우클릭한 요소를 바꾼다),
-# 다음 메뉴에는 체크 표시가 붙는다.
+# 켜져 있고 끌 수 없다: 체크 표시 ✓·(off)). 같은 주소 오디오 둘 중 오른쪽을 우클릭해 「연속 재생」을 고르면 그 오디오만 켜지고(sidecar 가
+# DevTools 로 우클릭한 자리의 요소를 바꾼다 — 배율 2 앱의 좌표로), 다음 메뉴에는 체크 표시가 붙는다.
 printf 'ui.language = ko\n' > "$root/media.conf"
 cat > "$root/media.txt" <<'SCRIPT'
 sleep 7000
-view down 0.395 0.30 0 0 1
-view up 0.395 0.30 0 0 1
+view down 0.79 0.30 0 0 1
+view up 0.79 0.30 0 0 1
 sleep 900
 menupick 연속 재생
 sleep 1200
-view down 0.395 0.30 0 0 1
-view up 0.395 0.30 0 0 1
+view down 0.79 0.30 0 0 1
+view up 0.79 0.30 0 0 1
 sleep 900
 menuclose
 sleep 500
@@ -914,8 +916,8 @@ def check(cond, what):
 first = '연속 재생|모든 제어 기능 표시✓(off)|—|새 탭에서 오디오 열기|오디오 주소 복사'
 check(len(shown) == 2 and shown[0] == first, f'the audio menu is loop · show all controls (checked, off for audio) — open audio in new tab · copy audio address ({shown})')
 loops = [l for l in requests if l.startswith('/ev?e=loop')]
-check(len(loops) == 1 and loops[0].startswith('/ev?e=loop&v=1') and len(shown) == 2 and shown[1].startswith('연속 재생✓|'),
-      f'picking loop turned the right-clicked audio on and the next menu shows it checked ({loops} · {shown[1] if len(shown) > 1 else None})')
+check(len(loops) == 1 and loops[0].startswith('/ev?e=loop&v=01') and len(shown) == 2 and shown[1].startswith('연속 재생✓|'),
+      f'picking loop turned only the right-clicked one of two same-address audios on and the next menu shows it checked ({loops} · {shown[1] if len(shown) > 1 else None})')
 sys.exit(0 if ok else 1)
 PY
 

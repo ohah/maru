@@ -199,15 +199,23 @@ const media_page =
     "<audio id=b controls src='/dl/tone.wav?b' style='left:330px;top:10px;width:300px;height:40px'></audio>" ++
     "<iframe src='/media-inner?id=f' style='left:10px;top:70px;width:320px;height:60px'></iframe>" ++
     "<iframe id=x style='left:10px;top:150px;width:320px;height:60px'></iframe>" ++
-    "<video id=v style='left:10px;top:230px;width:320px;height:180px;background:#000'></video><script>" ++
+    "<video id=v style='left:10px;top:230px;width:320px;height:180px;background:#000'></video>" ++
+    // 같은 주소 둘(d1·d2 — 주소로 찾는 보조 경로로는 어느 것인지 모른다, DevTools 경로가 있어야 한다)과 같은 출처 iframe 의 같은 주소 둘,
+    // 다른 사이트 iframe 의 같은 주소 둘(보조 경로는 아무것도 하지 않아야 한다).
+    "<audio id=d1 controls src='/dl/tone.wav?dup' style='left:340px;top:230px;width:290px;height:40px'></audio>" ++
+    "<audio id=d2 controls src='/dl/tone.wav?dup' style='left:340px;top:290px;width:290px;height:40px'></audio>" ++
+    "<iframe src='/media-inner?id=g' style='left:340px;top:70px;width:290px;height:150px'></iframe>" ++
+    "<iframe id=y style='left:10px;top:420px;width:620px;height:55px'></iframe><script>" ++
+    "document.getElementById('y').src='http://localhost:'+location.port+'/media-inner?id=y';" ++
     "document.getElementById('x').src='http://localhost:'+location.port+'/media-inner?id=x';" ++
-    "var st={},ready=false,swapped=false,a=document.getElementById('a'),b=document.getElementById('b'),v=document.getElementById('v');" ++
+    "var st={},ready=false,swapped=false,a=document.getElementById('a'),b=document.getElementById('b'),v=document.getElementById('v'),d1=document.getElementById('d1'),d2=document.getElementById('d2');" ++
     "addEventListener('message',function(e){st[e.data.id]=e.data.v});" ++
     "if(location.search.indexOf('s=1')>=0)a.addEventListener('contextmenu',function(){setTimeout(function(){a.style.left='330px';b.style.left='10px';swapped=true},200)});" ++
     "var c=document.createElement('canvas');c.width=64;c.height=36;var g=c.getContext('2d'),t=0;setInterval(function(){g.fillStyle='hsl('+(t++*9%360)+',70%,50%)';g.fillRect(0,0,64,36)},40);" ++
     "var r=new MediaRecorder(c.captureStream(25),{mimeType:'video/webm'}),parts=[];r.ondataavailable=function(e){parts.push(e.data)};" ++
     "r.onstop=function(){v.src=URL.createObjectURL(new Blob(parts,{type:'video/webm'}));v.onloadedmetadata=function(){ready=true}};r.start();setTimeout(function(){r.stop()},1200);" ++
-    "setInterval(function(){document.title='m a'+(+a.loop)+' b'+(+b.loop)+' f'+(st.f===undefined?'-':st.f)+' x'+(st.x===undefined?'-':st.x)+' vl'+(+v.loop)+' vc'+(+v.controls)+(ready&&st.f!==undefined&&st.x!==undefined?'':' wait')+(swapped?' swapped':'')},100)" ++
+    "function q(k){return st[k]===undefined?'-':st[k]}" ++
+    "setInterval(function(){document.title='m a'+(+a.loop)+' b'+(+b.loop)+' f'+q('f')+' x'+q('x')+' vl'+(+v.loop)+' vc'+(+v.controls)+' d'+(+d1.loop)+(+d2.loop)+' g'+q('g')+' y'+q('y')+(ready&&st.f!==undefined&&st.x!==undefined&&st.g!==undefined&&st.y!==undefined?'':' wait')+(swapped?' swapped':'')},100)" ++
     "</script>";
 
 /// 새 탭 판정(W6e)의 페이지 — 자리는 `newtab_check.zig` 와 맞춘다(140×30 칸).
@@ -279,7 +287,14 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         "document.getElementById('ab').click();document.title='nt-auto-done'},300)}</script>";
     if (std.mem.eql(u8, path, "/dnd")) return drag_page;
     if (std.mem.eql(u8, path, "/media")) return media_page;
-    if (std.mem.eql(u8, path, "/media-inner")) return std.fmt.bufPrint(buf, "<!doctype html><title>inner</title><style>body{{margin:0}}</style><audio controls src='/dl/tone.wav?{s}' style='width:300px'></audio><script>var m=document.querySelector('audio');setInterval(function(){{parent.postMessage({{id:'{s}',v:+m.loop}},'*')}},100)</script>", .{ query, query });
+    // 안쪽 frame — `id=g`·`id=y` 는 같은 주소 오디오 둘(위·아래, 상태는 두 자리 숫자), 그 밖은 하나.
+    if (std.mem.eql(u8, path, "/media-inner")) return std.fmt.bufPrint(buf, "<!doctype html><title>inner</title><style>body{{margin:0}}audio{{display:block;width:280px;height:40px;margin:0 0 20px}}</style>" ++
+        "<audio controls src='/dl/tone.wav?{s}'></audio><script>var two=(location.search.indexOf('id=g')>=0||location.search.indexOf('id=y')>=0);" ++
+        "if(two){{var x=document.createElement('audio');x.controls=true;x.src='/dl/tone.wav?{s}';document.body.appendChild(x)}}" ++
+        "var ms=document.querySelectorAll('audio');setInterval(function(){{var v='';for(var i=0;i<ms.length;i++)v+=(+ms[i].loop);parent.postMessage({{id:'{s}',v:v}},'*')}},100)</script>", .{ query, query, query });
+    if (std.mem.eql(u8, path, "/media-scroll")) return "<!doctype html><title>loading</title><style>body{margin:0;height:3000px}audio{position:absolute;left:10px;width:300px;height:40px}</style>" ++
+        "<audio id=s1 controls src='/dl/tone.wav?s' style='top:30px'></audio><audio id=s2 controls src='/dl/tone.wav?s' style='top:530px'></audio><script>" ++
+        "onload=function(){scrollTo(0,500);setInterval(function(){document.title='s y'+scrollY+' s'+(+document.getElementById('s1').loop)+(+document.getElementById('s2').loop)},100)}</script>";
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
     }

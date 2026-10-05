@@ -1180,31 +1180,28 @@ check('osr-test firstmouse 0.6 0.5 true' in report, f'a first click on the Chrom
 check('osr-test firstmouse 0.6 0.005 false' in report, f'a first click on the window top (not the page) only brings the window forward ({report})')
 sys.exit(0 if ok else 1)
 PY
-# 창이 둘일 때 — 첫 누름은 그 창이 key 가 되기 전에 온다. 새 창(터미널)이 key 인 채로 첫 창의 본문에 묻고 누르면 첫 창의 세션으로
-# 가야 한다(W6g 적대 검증 — key 창의 배치로 판정하면 다른 창의 웹 본문 자리가 이 창의 터미널로 첫 누름을 새게 했다).
-# 알림 토스트가 떠 있으면 넘기지 않는다(누름 경로가 토스트를 닫으며 누름을 삼킨다 — 그 첫 누름에 페이지는 못 받는다).
+# 창이 둘일 때 — 첫 누름은 그 창이 key 가 되기 전에 온다. 대상(명시 세션)은 첫 창으로 두고 그 탭을 터미널로 돌린 뒤(대조: 같은 자리가
+# 0), 둘째 창(같은 시험 페이지)의 본문에 묻고 누르면 둘째 창의 세션으로 가야 한다(W6g 적대 검증 — key 창·첫 창의 배치로 판정하면
+# 다른 창의 웹 본문 자리가 이 창의 터미널로 첫 누름을 새게 했다. 둘째 창을 고른 까닭: 비활성 앱에는 key 창이 없어 세션을 정하지
+# 않으면 첫 창으로 떨어진다 — 첫 창 쪽을 보면 그 잘못도 통과한다, 2 차).
 cat > "$root/firstmouse2.txt" <<SCRIPT
 sleep 9000
 newwindow
-sleep 1500
-firstmouse 0.6 0.5 first
-firstview down 0.6 0.5 0 0
-firstview up 0.6 0.5 0 0
-sleep 800
+sleep 4000
 firstwindow
-config browser.engine = webkit
-menu Reload Config
-sleep 800
-overlay
+action previous_term
+sleep 600
 firstmouse 0.6 0.5
-sleep 300
+firstmouse 0.6 0.5 last
+lastview down 0.6 0.5 0 0
+lastview up 0.6 0.5 0 0
+sleep 800
 SCRIPT
-printf 'browser.engine = chromium\n' > "$root/firstmouse.conf"
 : > "$root/requests.log"
-run_app /input 20000 "$root/firstmouse2.summary" MARU_WEB_OSR_TEST_INPUT="$root/firstmouse2.txt" MARU_CONFIG="$root/firstmouse.conf"
-grep -a '^osr-test firstmouse\|^osr-test overlay' "$root/app-input.log" > "$root/firstmouse2.report" || true
+run_app /input 20000 "$root/firstmouse2.summary" MARU_WEB_OSR_TEST_INPUT="$root/firstmouse2.txt"
+grep -a '^osr-test firstmouse' "$root/app-input.log" > "$root/firstmouse2.report" || true
 cat "$root/firstmouse2.report"
-python3 - "$root/firstmouse2.report" "$root/requests.log" <<'PY' || fail "the first click with two windows or a notice toast did not behave as expected"
+python3 - "$root/firstmouse2.report" "$root/requests.log" <<'PY' || fail "the first click with two windows did not behave as expected"
 import sys
 report = [l.strip() for l in open(sys.argv[1])]
 clicks = [l.strip() for l in open(sys.argv[2]) if l.startswith('/ev?e=click')]
@@ -1213,9 +1210,36 @@ def check(cond, what):
     global ok
     print(('PASS ' if cond else 'FAIL ') + what)
     ok = ok and cond
-check('osr-test firstmouse 0.6 0.5 first true' in report and len(clicks) == 1,
-      f'with another window key, a first click on this window\'s page body is asked and delivered through this window ({report} · clicks {clicks})')
-check('osr-test overlay true' in report and 'osr-test firstmouse 0.6 0.5 false' in report, f'while the notice toast is up, a first click only brings the window forward ({report})')
+check(report == ['osr-test firstmouse 0.6 0.5 false', 'osr-test firstmouse 0.6 0.5 last true'] and len(clicks) == 1,
+      f'with the first window on a terminal tab, a first click on the second window\'s page body is asked and delivered through the second window ({report} · clicks {clicks})')
+sys.exit(0 if ok else 1)
+PY
+# 알림 토스트가 떠 있으면 넘기지 않는다(누름 경로가 토스트를 닫으며 누름을 삼킨다 — 그 첫 누름에 페이지는 못 받는다). 닫은 뒤에는
+# 다시 넘긴다(대조 — 거짓이 다른 까닭이 아니다).
+cat > "$root/firstmouse3.txt" <<SCRIPT
+sleep 9000
+config browser.engine = webkit
+menu Reload Config
+sleep 800
+overlay
+firstmouse 0.6 0.5
+view down 0.6 0.3 -50 0 0 1
+view up 0.6 0.3 -50 0 0 1
+sleep 400
+overlay
+firstmouse 0.6 0.5
+sleep 300
+SCRIPT
+printf 'browser.engine = chromium\n' > "$root/firstmouse.conf"
+run_app /solid 14000 "$root/firstmouse3.summary" MARU_WEB_OSR_TEST_INPUT="$root/firstmouse3.txt" MARU_CONFIG="$root/firstmouse.conf"
+grep -a '^osr-test firstmouse\|^osr-test overlay' "$root/app-solid.log" > "$root/firstmouse3.report" || true
+cat "$root/firstmouse3.report"
+python3 - "$root/firstmouse3.report" <<'PY' || fail "the first click while the notice toast is up did not behave as expected"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+want = ['osr-test overlay true', 'osr-test firstmouse 0.6 0.5 false', 'osr-test overlay false', 'osr-test firstmouse 0.6 0.5 true']
+ok = report == want
+print(('PASS ' if ok else 'FAIL ') + f'while the notice toast is up a first click only brings the window forward, and after it closes the page gets it again ({report})')
 sys.exit(0 if ok else 1)
 PY
 

@@ -2345,3 +2345,122 @@ test "healthy recovery fail closes disconnected ACK instead of silently clearing
     try std.testing.expect(resync_needed);
     try std.testing.expect(client.unusable);
 }
+
+test "healthy local inbox recovery discards stale delta and applies fresh snapshot" {
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var screen = session_host.screen_assembler.ScreenAssembler.initForCodec(allocator, client.screen_codec_version);
+    defer screen.deinit();
+    var resync_needed = false;
+    var drained_bytes: u64 = 0;
+    // Client-side inbox overflow has no host event. Recovery still has to discover its sticky
+    // state, request a fresh base, discard older deltas, and return to valid after that snapshot.
+    _ = try client.screen_inbox.recovery.invalidate(7);
+    try std.testing.expect(!try pumpHealthy(&client, 7, &screen, &resync_needed, &drained_bytes));
+    try std.testing.expect(client.screenRecoveryState(7) == .awaiting_snapshot);
+    try std.testing.expect(!resync_needed);
+    var ack_wire: [128]u8 = undefined;
+    const ack_n = c.recv(fds[1], &ack_wire, ack_wire.len, c.MSG.DONTWAIT);
+    try std.testing.expect(ack_n > 0);
+
+    const meta = try session_host.screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 2, .sequence = 3 }, .{ .cols = 2, .rows = 1 });
+    defer allocator.free(meta);
+    var runs = [_]session_host.screen_stream.Run{.{ .grapheme = "R", .count = 2 }};
+    const row = try session_host.screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = 2, .sequence = 3 }, .{ .row_index = 0, .runs = &runs });
+    defer allocator.free(row);
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    defer snapshot.deinit(allocator);
+    try session_host.screen_stream.appendRecord(&snapshot, allocator, meta);
+    try session_host.screen_stream.appendRecord(&snapshot, allocator, row);
+    const stale = try session_host.framing.encodeFrame(allocator, .{
+        .kind = .delta_chunk,
+        .stream_id = 7,
+        .flags = session_host.protocol.Flags.end_stream,
+    }, "bad stale delta");
+    defer allocator.free(stale);
+    const fresh = try session_host.framing.encodeFrame(allocator, .{
+        .kind = .snapshot_chunk,
+        .stream_id = 7,
+        .flags = session_host.protocol.Flags.end_stream,
+    }, snapshot.items);
+    defer allocator.free(fresh);
+    try std.testing.expectEqual(@as(isize, @intCast(stale.len)), c.write(fds[1], stale.ptr, stale.len));
+    // An incomplete frame is idle, not completion, and must not trigger a duplicate resync ACK.
+    const split = session_host.protocol.header_size + 1;
+    try std.testing.expectEqual(@as(isize, @intCast(split)), c.write(fds[1], fresh.ptr, split));
+    try std.testing.expect(!try pumpHealthy(&client, 7, &screen, &resync_needed, &drained_bytes));
+    try std.testing.expectEqual(@as(u64, 0), drained_bytes);
+    try std.testing.expectEqual(@as(isize, -1), c.recv(fds[1], &ack_wire, ack_wire.len, c.MSG.DONTWAIT));
+    try std.testing.expectEqual(posix.E.AGAIN, posix.errno(-1));
+    try std.testing.expectEqual(@as(isize, @intCast(fresh.len - split)), c.write(fds[1], fresh[split..].ptr, fresh.len - split));
+    try std.testing.expect(try pumpHealthy(&client, 7, &screen, &resync_needed, &drained_bytes));
+    try std.testing.expect(client.screenRecoveryState(7) == .valid);
+    try std.testing.expectEqual(@as(u64, @intCast(snapshot.items.len)), drained_bytes);
+    try std.testing.expect(screenContains(&screen, "RR"));
+    try std.testing.expect(!resync_needed);
+}
+
+test "healthy recovery flushes an admitted fragmented ACK after intent clears" {
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    for (fds) |fd| {
+        const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+        try std.testing.expect(flags >= 0);
+        try std.testing.expectEqual(@as(c_int, 0), c.fcntl(fd, c.F.SETFL, flags | nonblocking));
+    }
+    var filler: [4096]u8 = @splat('x');
+    while (c.send(fds[0], &filler, filler.len, c.MSG.DONTWAIT) > 0) {}
+    try std.testing.expectEqual(posix.E.AGAIN, posix.errno(-1));
+    var resync_needed = true;
+    try pumpHealthyRecovery(&client, 7, &resync_needed);
+    try std.testing.expect(!resync_needed);
+    try std.testing.expect(client.pending_outbound != null);
+    while (c.recv(fds[1], &filler, filler.len, c.MSG.DONTWAIT) > 0) {}
+    try std.testing.expectEqual(posix.E.AGAIN, posix.errno(-1));
+    // Publish a real prefix, then record precisely that accepted prefix in the pending owner.
+    // This makes the partial-write state deterministic without relying on socket buffer sizing.
+    const prefix_len = 7;
+    const expected_len = client.pending_outbound.?.frame.len;
+    var wire: [128]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, prefix_len), c.send(fds[0], client.pending_outbound.?.frame.ptr, prefix_len, c.MSG.DONTWAIT));
+    client.pending_outbound.?.offset = prefix_len;
+    try std.testing.expectEqual(@as(isize, prefix_len), c.recv(fds[1], &wire, prefix_len, c.MSG.DONTWAIT));
+    while (c.send(fds[0], &filler, filler.len, c.MSG.DONTWAIT) > 0) {}
+    try std.testing.expectEqual(posix.E.AGAIN, posix.errno(-1));
+    try pumpHealthyRecovery(&client, 7, &resync_needed);
+    try std.testing.expectEqual(@as(usize, prefix_len), client.pending_outbound.?.offset);
+    while (c.recv(fds[1], &filler, filler.len, c.MSG.DONTWAIT) > 0) {}
+    try std.testing.expectEqual(posix.E.AGAIN, posix.errno(-1));
+    try pumpHealthyRecovery(&client, 7, &resync_needed);
+    try std.testing.expect(client.pending_outbound == null);
+    const tail_n = c.recv(fds[1], wire[prefix_len..].ptr, wire.len - prefix_len, c.MSG.DONTWAIT);
+    try std.testing.expectEqual(@as(isize, @intCast(expected_len - prefix_len)), tail_n);
+    var parser = session_host.framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    try parser.push(wire[0..expected_len]);
+    const ack = (try parser.next()) orelse return error.TestUnexpectedResult;
+    defer ack.deinit(allocator);
+    try std.testing.expectEqual(session_host.protocol.Kind.stream_ack, ack.header.kind);
+    try std.testing.expectEqual(@as(u64, 7), ack.header.stream_id);
+    try std.testing.expectEqualStrings("{\"action\":\"resync\"}", ack.payload);
+    try std.testing.expect((try parser.next()) == null);
+}

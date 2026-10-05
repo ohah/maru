@@ -12,6 +12,8 @@
 //! `controls` 는 속성을 바꾼다 — Chrome 은 페이지가 보지 못하는 내부 값만 바꾼다(차이 — 페이지가 `controls` 를 다시 끄면 따른다).
 //! 응답은 1 ms 안에 같은 UI 스레드로 온다(실측). 메뉴(`context_menu.Held`)는 답하면 곧 끝나므로 진행은 여기 따로 쥔다 — 브라우저마다
 //! 하나(브라우저에 메뉴는 하나다). 메시지 번호는 다른 DevTools 사용처(권한·알림 — 0·20000 부터 오른다)와 섞이지 않게 높은 대역이다.
+//! 관찰자 등록은 첫 미디어 우클릭부터 브라우저가 닫힐 때까지 둔다 — 그동안 그 브라우저의 DevTools 결과가 관찰자를 지난다(CPU 만 —
+//! 콜백 안에서 등록을 놓는 위험을 피했다, W6h② 적대 검증 1 회차).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -40,8 +42,10 @@ const Slot = struct {
     node: i64 = 0,
     /// 고른 것(아직 안 골랐으면 null — 찾기 결과를 받아 두기만 한다).
     action: ?Prop = null,
-    /// 메뉴가 알린 미디어 주소(확인·보조 경로 — 소유).
+    /// 메뉴가 알린 미디어 주소(확인·보조 경로 — 소유). wire 주소 상한까지의 앞부분이고 `src_len` 이 전체 길이다 — 더 긴 주소(`data:`)는
+    /// 앞부분과 길이로 확인하고 보조 경로는 쓰지 않는다(W6h② 적대 검증 1 회차).
     src: ?[]u8 = null,
+    src_len: usize = 0,
     /// 메뉴가 온 frame(보조 경로 — 참조 하나).
     frame: [*c]c.cef_frame_t = null,
 };
@@ -82,6 +86,7 @@ fn ensureObserver(host: [*c]c.cef_browser_host_t, cef_id: c_int) bool {
         observer = object.zeroed(c.cef_dev_tools_message_observer_t);
         object.staticRefCounted(&observer.base);
         observer.on_dev_tools_method_result = &onResult;
+        observer.on_dev_tools_agent_detached = &onDetached;
     }
     for (registrations) |r| if (r) |v| if (v.cef_id == cef_id) return true;
     for (&registrations) |*r| if (r.* == null) {
@@ -103,8 +108,9 @@ fn send(browser: [*c]c.cef_browser_t, json: []const u8) bool {
 /// 보내고 그 번호를 기다린다. 못 보내면 false(부른 쪽이 보조 경로로).
 fn sendWaiting(browser: [*c]c.cef_browser_t, s: *Slot, stage: Stage, comptime fmt: []const u8, args: anytype) bool {
     const id = takeId();
-    var buf: [1024]u8 = undefined;
-    const json = std.fmt.bufPrint(&buf, "{{\"id\":{d}," ++ fmt ++ "}}", .{id} ++ args) catch return false;
+    // 힙에 만든다 — 주소(32 KiB 까지)가 실린다(고정 1 KiB 로는 서명 URL 처럼 긴 주소에서 늘 실패했다, 1 회차).
+    const json = std.fmt.allocPrint(allocator, "{{\"id\":{d}," ++ fmt ++ "}}", .{id} ++ args) catch return false;
+    defer allocator.free(json);
     s.stage = stage;
     s.waiting = id;
     if (send(browser, json)) return true;
@@ -116,14 +122,17 @@ fn sendWaiting(browser: [*c]c.cef_browser_t, s: *Slot, stage: Stage, comptime fm
 /// 모듈이 복사한다, `frame` 은 참조를 하나 더한다.
 pub fn locate(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, menu: u32, x: c_int, y: c_int, src: ?[]const u8) void {
     const cef_id = browser.*.get_identifier.?(browser);
+    // 앞 진행이 노드를 쥐었을 수 있다(고른 뒤 답을 기다리는 사이 다시 우클릭) — 놓고 버린다(1 회차).
+    if (slotOf(cef_id)) |old| if (old.stage == .resolve or old.stage == .call) releaseObjects(browser);
     clearFor(cef_id);
     const slot = for (&slots) |*s| {
         if (s.* == null) break s;
     } else return;
     var v: Slot = .{ .cef_id = cef_id, .menu = menu, .x = x, .y = y };
-    if (src) |b| if (b.len <= protocol.wire.max_url_bytes) {
-        v.src = allocator.dupe(u8, b) catch null;
-    };
+    if (src) |b| {
+        v.src = allocator.dupe(u8, b[0..@min(b.len, protocol.wire.max_url_bytes)]) catch null;
+        if (v.src != null) v.src_len = b.len;
+    }
     if (frame != null) {
         frame.*.base.add_ref.?(&frame.*.base);
         v.frame = frame;
@@ -198,8 +207,12 @@ fn resolve(browser: [*c]c.cef_browser_t, s: *Slot) void {
 
 fn call(browser: [*c]c.cef_browser_t, s: *Slot, object_id: []const u8) void {
     // 그 요소가 미디어이고 주소가 메뉴가 알린 주소와 같을 때만 뒤집는다 — 아니면(다른 사이트 iframe 요소·그사이 바뀐 자리) 보조 경로로.
+    // 주소는 앞부분(`s`)과 전체 길이(`n`)로 본다(긴 `data:` 주소). 주소를 모르면(복사 실패) 확인하지 않는다.
     const src_arg: []const u8 = if (s.src) |b| b else "";
-    if (!sendWaiting(browser, s, .call, "\"method\":\"Runtime.callFunctionOn\",\"params\":{{\"objectId\":{f},\"functionDeclaration\":\"function(p,s){{if(!(this instanceof HTMLMediaElement))return 'not-media';if(s&&this.currentSrc!==s)return 'other';this[p]=!this[p];return 'ok'}}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{f}}}],\"returnByValue\":true}}", .{ std.json.fmt(object_id, .{}), @tagName(s.action.?), std.json.fmt(src_arg, .{}) })) fallback(s);
+    if (!sendWaiting(browser, s, .call, "\"method\":\"Runtime.callFunctionOn\",\"params\":{{\"objectId\":{f},\"functionDeclaration\":\"function(p,s,n){{if(!(this instanceof HTMLMediaElement))return 'not-media';var c=this.currentSrc;if(n&&(c.length!==n||c.slice(0,s.length)!==s))return 'other';this[p]=!this[p];return 'ok'}}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{f}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(object_id, .{}), @tagName(s.action.?), std.json.fmt(src_arg, .{}), s.src_len })) {
+        releaseObjects(browser); // 이미 쥐었다(resolveNode) — 놓는다(1 회차)
+        fallback(s);
+    }
 }
 
 /// 쥔 객체(`maru-media`)를 놓는다 — 답은 기다리지 않는다.
@@ -215,7 +228,7 @@ fn fallback(s: *Slot) void {
     defer clearFor(s.cef_id);
     const prop = s.action orelse return;
     const src = s.src orelse return;
-    if (s.frame == null or src.len == 0) return;
+    if (s.frame == null or src.len == 0 or src.len != s.src_len) return; // 앞부분뿐이면 같은 주소인지 모른다
     var code: std.ArrayList(u8) = .empty;
     defer code.deinit(allocator);
     code.print(allocator, "(function(){{var s={f};var m=[].filter.call(document.querySelectorAll('audio,video'),function(e){{return e.currentSrc===s}});if(m.length===1)m[0].{s}=!m[0].{s}}})()", .{ std.json.fmt(src, .{}), @tagName(prop), @tagName(prop) }) catch return;
@@ -224,6 +237,14 @@ fn fallback(s: *Slot) void {
     defer browsers.state.api.string_utf16_clear(&script);
     var url = std.mem.zeroes(c.cef_string_t);
     s.frame.*.execute_java_script.?(s.frame, &script, &url, 0);
+}
+
+/// DevTools agent 가 떨어졌다(렌더러 사망 등 — 기다리던 답은 오지 않는다) — 그 브라우저의 진행을 놓는다(1 회차). 등록은 브라우저가
+/// 닫힐 때 놓는다(관찰자 콜백 안에서 등록을 놓지 않는다).
+fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    if (browser == null) return;
+    clearFor(browser.*.get_identifier.?(browser));
 }
 
 fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t, id: c_int, success: c_int, result: ?*const anyopaque, size: usize) callconv(.c) void {

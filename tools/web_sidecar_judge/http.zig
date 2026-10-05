@@ -292,6 +292,11 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         "<audio controls src='/dl/tone.wav?{s}'></audio><script>var two=(location.search.indexOf('id=g')>=0||location.search.indexOf('id=y')>=0);" ++
         "if(two){{var x=document.createElement('audio');x.controls=true;x.src='/dl/tone.wav?{s}';document.body.appendChild(x)}}" ++
         "var ms=document.querySelectorAll('audio');setInterval(function(){{var v='';for(var i=0;i<ms.length;i++)v+=(+ms[i].loop);parent.postMessage({{id:'{s}',v:v}},'*')}},100)</script>", .{ query, query, query });
+    // W6h② 1 회차: 1.5 KB 주소의 같은 주소 오디오 둘(서명 URL 처럼 긴 주소 — DevTools 경로가 필요하다).
+    if (std.mem.eql(u8, path, "/media-long")) return "<!doctype html><title>loading</title><style>body{margin:0}audio{position:absolute;left:10px;width:300px;height:40px}</style>" ++
+        "<audio id=l1 controls style='top:10px'></audio><audio id=l2 controls style='top:80px'></audio><script>" ++
+        "var u='/dl/tone.wav?'+new Array(1501).join('x');var l1=document.getElementById('l1'),l2=document.getElementById('l2');l1.src=u;l2.src=u;" ++
+        "setInterval(function(){document.title='l '+(+l1.loop)+(+l2.loop)+(l1.readyState>0&&l2.readyState>0?'':' wait')},100)</script>";
     if (std.mem.eql(u8, path, "/media-scroll")) return "<!doctype html><title>loading</title><style>body{margin:0;height:3000px}audio{position:absolute;left:10px;width:300px;height:40px}</style>" ++
         "<audio id=s1 controls src='/dl/tone.wav?s' style='top:30px'></audio><audio id=s2 controls src='/dl/tone.wav?s' style='top:530px'></audio><script>" ++
         "onload=function(){scrollTo(0,500);setInterval(function(){document.title='s y'+scrollY+' s'+(+document.getElementById('s1').loop)+(+document.getElementById('s2').loop)},100)}</script>";

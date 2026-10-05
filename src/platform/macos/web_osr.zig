@@ -915,6 +915,24 @@ pub fn currentState() State {
 }
 
 /// 이 surface 를 OSR 이 들고 있는가(control-plane 이 「이 엔진은 아직 지원하지 않는다」로 답할 때).
+/// 시험 전용(W6i): sidecar 없이 탭 기록 하나를 두고 Chromium 엔진을 켠 것으로 친다 — 창 정리가 그 기록을 놓는지 본다.
+/// 되돌리기는 `testForget`.
+pub fn testHold(gpa: std.mem.Allocator, surface_id: u64) !void {
+    if (!builtin.is_test) @compileError("test only");
+    gpa_ref = gpa;
+    decided = true;
+    try surfaces.put(gpa, surface_id, .{ .record = .{ .surface_id = surface_id, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false } });
+}
+
+pub fn testForget(gpa: std.mem.Allocator) void {
+    if (!builtin.is_test) @compileError("test only");
+    decided = null;
+    if (surfaces.count() == 0) {
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+    }
+}
+
 pub fn owns(surface_id: u64) bool {
     return surfaces.contains(surface_id);
 }

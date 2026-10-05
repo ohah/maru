@@ -1591,7 +1591,7 @@ pub fn build(b: *std.Build) void {
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
     const run_directory_watch_tests = b.addRunArtifact(directory_watch_tests);
-    run_directory_watch_tests.addArg("--maru-expect-tests=14"); // 2 aggregation blocks + 12 native tests
+    run_directory_watch_tests.addArg("--maru-expect-tests=18"); // 2 aggregation blocks + 16 native/queue tests
     directory_watch_step.dependOn(&run_directory_watch_tests.step);
     const editor_read_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor file read worker"} });
     const editor_read_step = b.step("test-win32-editor-read", "Verify native worker read ownership, sharing fences and stale result tickets");
@@ -1604,7 +1604,7 @@ pub fn build(b: *std.Build) void {
     run_save_prepare_tests.addArg("--maru-expect-tests=9"); // 2 aggregation blocks + 7 native tests
     save_prepare_step.dependOn(&run_save_prepare_tests.step);
     const save_settle_mod = b.createModule(.{
-        .root_source_file = b.path("src/platform/windows/editor/save_settle_worker.zig"),
+        .root_source_file = b.path("src/platform/windows/save_settle_tests.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "maru", .module = maru_mod }},
@@ -1612,10 +1612,10 @@ pub fn build(b: *std.Build) void {
     const save_settle_tests = addProjectTest(b, .{ .root_module = save_settle_mod, .filters = &.{"Windows save settlement worker"} });
     const save_settle_step = b.step("test-win32-save-settle", "Verify worker rollback and native outcome ownership without document callbacks");
     const run_save_settle_tests = b.addRunArtifact(save_settle_tests);
-    run_save_settle_tests.addArg("--maru-expect-tests=7"); // seven actual native ownership/settlement tests
+    run_save_settle_tests.addArg("--maru-expect-tests=8"); // seven actual native ownership/settlement tests
     save_settle_step.dependOn(&run_save_settle_tests.step);
     const save_cleanup_mod = b.createModule(.{
-        .root_source_file = b.path("src/platform/windows/editor/save_cleanup_worker.zig"),
+        .root_source_file = b.path("src/platform/windows/save_cleanup_tests.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "maru", .module = maru_mod }},
@@ -1623,10 +1623,10 @@ pub fn build(b: *std.Build) void {
     const save_cleanup_tests = addProjectTest(b, .{ .root_module = save_cleanup_mod, .filters = &.{"Windows save cleanup worker"} });
     const save_cleanup_step = b.step("test-win32-save-cleanup", "Verify confirmed native cleanup ownership and immutable completion images");
     const run_save_cleanup_tests = b.addRunArtifact(save_cleanup_tests);
-    run_save_cleanup_tests.addArg("--maru-expect-tests=10"); // ten actual native cleanup/ownership tests
+    run_save_cleanup_tests.addArg("--maru-expect-tests=11"); // ten actual native cleanup/ownership tests
     save_cleanup_step.dependOn(&run_save_cleanup_tests.step);
     const save_commit_mod = b.createModule(.{
-        .root_source_file = b.path("src/platform/windows/editor/save_commit_worker.zig"),
+        .root_source_file = b.path("src/platform/windows/save_commit_tests.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "maru", .module = maru_mod }},
@@ -1634,10 +1634,10 @@ pub fn build(b: *std.Build) void {
     const save_commit_tests = addProjectTest(b, .{ .root_module = save_commit_mod, .filters = &.{"Windows save commit worker"} });
     const save_commit_step = b.step("test-win32-save-commit", "Verify fenced native commit votes and cancellation ownership without Registry on worker");
     const run_save_commit_tests = b.addRunArtifact(save_commit_tests);
-    run_save_commit_tests.addArg("--maru-expect-tests=7"); // seven actual native handshake/ownership tests
+    run_save_commit_tests.addArg("--maru-expect-tests=8"); // seven actual native handshake/ownership tests
     save_commit_step.dependOn(&run_save_commit_tests.step);
     const editor_open_mod = b.createModule(.{
-        .root_source_file = b.path("src/platform/windows/editor/open_worker.zig"),
+        .root_source_file = b.path("src/platform/windows/editor_open_tests.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
@@ -1645,14 +1645,14 @@ pub fn build(b: *std.Build) void {
     const editor_open_tests = addProjectTest(b, .{ .root_module = editor_open_mod, .filters = &.{"Windows initial open worker"} });
     const editor_open_step = b.step("test-win32-editor-open", "Verify initial read and capability worker ownership without Registry callbacks");
     const run_editor_open_tests = b.addRunArtifact(editor_open_tests);
-    run_editor_open_tests.addArg("--maru-expect-tests=19");
+    run_editor_open_tests.addArg("--maru-expect-tests=20");
     editor_open_step.dependOn(&run_editor_open_tests.step);
     const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
     if (target.result.os.tag == .windows) {
         const save_crash_probe = b.addExecutable(.{
             .name = "maru-win32-save-crash-probe",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/platform/windows/editor/crash_probe.zig"),
+                .root_source_file = b.path("src/platform/windows/save_crash_probe.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},

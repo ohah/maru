@@ -53,12 +53,12 @@ test {
     _ = @import("platform/windows/editor/metadata.zig");
     _ = @import("platform/windows/editor/security.zig");
     _ = @import("platform/windows/editor/audit_scope.zig");
-    _ = @import("platform/windows/editor/identity.zig");
+    _ = @import("platform/windows/file_identity.zig");
     _ = @import("platform/windows/editor/transaction.zig");
     _ = @import("platform/windows/editor/document_grant.zig");
     _ = @import("platform/windows/editor/save_controller.zig");
     _ = @import("platform/windows/editor/file_host.zig");
-    _ = @import("platform/windows/editor/directory_watch.zig");
+    _ = @import("platform/windows/directory_watch.zig");
     _ = @import("platform/windows/editor/file_read_worker.zig");
     _ = @import("platform/windows/editor/save_prepare_worker.zig");
     _ = @import("platform/windows/editor/backup_store.zig");
@@ -3137,6 +3137,15 @@ fn refreshSidebarCards(
 /// 받는 일은 루프가 매 프레임 하는 `drainTreeScan` 이 한다.
 ///
 /// **접기는 즉시 반영된다** — 요청이 안 생기므로 기다릴 것도 없다.
+fn pumpTreeScanRequest(tree: *maru.session.file_tree.Tree, backend: *file_tree_backend.Backend) bool {
+    const request = tree.takeScanRequest() orelse return false;
+    if (!backend.submitCoalescedDirectory(request, 0)) {
+        tree.returnScanRequest(request);
+        return false;
+    }
+    return true;
+}
+
 fn toggleTreeRow(
     allocator: std.mem.Allocator,
     tree: *maru.session.file_tree.Tree,
@@ -3149,11 +3158,7 @@ fn toggleTreeRow(
 ) bool {
     _ = tree.toggleDirectory(path) catch return false;
     if (backend) |b| {
-        while (tree.takeScanRequest()) |req| {
-            if (!b.submit(req, 0)) {
-                allocator.free(req);
-                break;
-            }
+        if (pumpTreeScanRequest(tree, b)) {
             if (submitted_out) |o| o.* = true;
         }
     }
@@ -7389,6 +7394,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 스캔만 되고 **런타임에 폴더를 펼칠 수가 없다**(트리가 lazy 라 펼칠 때 그때 읽는다).
     var tree_backend: ?file_tree_backend.Backend = file_tree_backend.Backend.init(allocator, io) catch null;
     defer if (tree_backend) |*b| b.deinit();
+    const tree_watch_native = @import("platform/windows/directory_watch.zig");
+    var tree_watch: ?*tree_watch_native.Watcher = null;
+    defer if (tree_watch) |watch| watch.destroy() catch {};
+    var tree_watch_dirty = false;
+    var tree_watch_due: i128 = 0;
     scan: {
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         const root_native = root_buf[0..(std.Io.Dir.cwd().realPath(io, &root_buf) catch break :scan)];
@@ -7401,6 +7411,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         var validated_owned = true;
         defer if (validated_owned) validated.deinit(allocator, io);
         const validated_dir = validated.dir orelse break :scan;
+        // Register before the first enumeration, against the validated object.
+        // Notifications only request fresh backend snapshots, never add rows.
+        tree_watch = tree_watch_native.Watcher.createRecursive(allocator, validated_dir) catch null;
         validated.dir = null;
         const owned = allocator.dupe(u8, root_path) catch break :scan;
         if (!backend.submitValidatedRootScan(owned, 0, validated_dir)) {
@@ -11329,6 +11342,24 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const waiting_first = agent_apply_spin == null;
         const waiting_refresh = agent_refresh_submits > 0 and agent_applies <= ag_refresh_applies_before;
         agent_settling = smoke and agent_backend != null and settle_frames < 6000 and (waiting_first or waiting_refresh);
+        if (tree_watch) |watch| {
+            const watch_now = std.Io.Clock.awake.now(io).nanoseconds;
+            const changed = watch.poll() catch !tree_watch_dirty;
+            if (changed) {
+                tree_watch_dirty = true;
+                tree_watch_due = watch_now + 200 * std.time.ns_per_ms;
+            }
+            if (tree_watch_dirty and watch_now >= tree_watch_due) {
+                if (dock_tree.invalidateExpanded()) |_| {
+                    tree_watch_dirty = false;
+                } else |_| {
+                    // Keep the hint on allocation failure; retry without losing
+                    // already queued paths or declaring this snapshot current.
+                    tree_watch_due = watch_now + 200 * std.time.ns_per_ms;
+                }
+            }
+        }
+        if (tree_backend) |*backend| _ = pumpTreeScanRequest(&dock_tree, backend);
         if (drainTreeScan(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".")) {
             tree_scan_applied += 1;
             if (tree_expand_submit_spin != null and tree_expand_apply_spin == null) tree_expand_apply_spin = spins;
@@ -20177,4 +20208,116 @@ test "TBPROBE 패닉 사유는 stderr 잠금을 거치기 전에 나온다" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf[0..filled], "maru panic: ") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..filled], "tbprobe reason survives") != null);
+}
+
+test "Windows editor directory watch busy scan retains owned request and queue order" {
+    const a = std.testing.allocator;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.requeueScan("C:/selected/first");
+    try tree.requeueScan("C:/selected/second");
+    const request = tree.takeScanRequest().?;
+    const allocation = request.ptr;
+    tree.returnScanRequest(request);
+    const retry = tree.takeScanRequest().?;
+    defer a.free(retry);
+    try std.testing.expect(retry.ptr == allocation);
+    try std.testing.expectEqualStrings("C:/selected/first", retry);
+    const next = tree.takeScanRequest().?;
+    defer a.free(next);
+    try std.testing.expectEqualStrings("C:/selected/second", next);
+    try std.testing.expect(tree.takeScanRequest() == null);
+}
+
+fn drainTreeWatchTestJobs(backend: *file_tree_backend.Backend) void {
+    const io = std.testing.io;
+    const state = backend.state.?;
+    while (true) {
+        state.mutex.lockUncancelable(io);
+        const inflight = state.inflight;
+        state.mutex.unlock(io);
+        while (backend.takeResult()) |taken| {
+            var result = taken;
+            result.deinit(std.testing.allocator, io);
+        }
+        if (inflight == 0) return;
+        io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+    }
+}
+
+test "Windows editor directory watch coalesces queued native scan but permits a different directory" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "other", .default_dir);
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    defer drainTreeWatchTestJobs(&backend);
+    const first = try a.dupe(u8, path);
+    if (!backend.submitCoalescedDirectory(first, 0)) {
+        a.free(first);
+        return error.FirstScanRejected;
+    }
+    const state = backend.state.?;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (true) {
+        state.mutex.lockUncancelable(io);
+        const queued = state.results_len != 0;
+        state.mutex.unlock(io);
+        if (queued) break;
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ScanCompletionMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const duplicate = try a.dupe(u8, path);
+    const duplicate_accepted = backend.submitCoalescedDirectory(duplicate, 0);
+    if (!duplicate_accepted) a.free(duplicate);
+    const other = try std.fs.path.join(a, &.{ path, "other" });
+    const other_accepted = backend.submitCoalescedDirectory(other, 0);
+    if (!other_accepted) a.free(other);
+    var old = backend.takeResult().?;
+    old.deinit(a, io);
+    const fresh = try a.dupe(u8, path);
+    const fresh_accepted = backend.submitCoalescedDirectory(fresh, 0);
+    if (!fresh_accepted) a.free(fresh);
+    // Deferred native draining also runs before any negative assertion unwinds
+    // the fixture. Accepted mutant jobs still own and finish their paths.
+    try std.testing.expect(!duplicate_accepted);
+    try std.testing.expect(other_accepted);
+    try std.testing.expect(fresh_accepted);
+}
+
+test "Windows editor directory watch rejects a reserved same-path worker slot" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    defer drainTreeWatchTestJobs(&backend);
+    const state = backend.state.?;
+    // Model the reserved interval before a worker publishes its result. No
+    // runtime scheduling toggle or filesystem timing is needed for this axis.
+    state.mutex.lockUncancelable(io);
+    state.active[0] = .{ .path = path, .kind = .directory, .was_remote = false };
+    state.inflight += 1;
+    state.mutex.unlock(io);
+    const duplicate = a.dupe(u8, path) catch |failure| {
+        state.mutex.lockUncancelable(io);
+        state.active[0] = null;
+        state.inflight -= 1;
+        state.mutex.unlock(io);
+        return failure;
+    };
+    const accepted = backend.submitCoalescedDirectory(duplicate, 0);
+    if (!accepted) a.free(duplicate);
+    state.mutex.lockUncancelable(io);
+    state.active[0] = null;
+    state.inflight -= 1;
+    state.mutex.unlock(io);
+    try std.testing.expect(!accepted);
 }

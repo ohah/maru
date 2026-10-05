@@ -12074,3 +12074,40 @@ revision 검사·표시 폭·parser 인계·캐시 소비를 각각 깨뜨린 �
 입력/IME로 세지 않는다. 복구의 이력 적용과 그 뒤 view/syntax rebuild, 이후 편집 rebuild,
 게시 시 hash/본문 대조 및 주기적 backup write/close 정리는 여전히 앱 스레드다. 전체 잔여
 Windows 범위는 계속 진행한다.
+
+
+### 2m.188 — 파일 트리의 Windows 재귀 변경 감시
+
+파일 트리의 초기 검증된 디렉터리 handle에 상대적으로 재귀 알림을 등록하고,
+앱 루프가 완료 알림을 소비한다. native 소유자는 `platform/windows/directory_watch.zig`,
+전체 volume/128-bit file ID는 `platform/windows/file_identity.zig`에 둔다. 기존 editor
+진입점은 이 구현을 re-export하며 문서별 감시는 기존 nonrecursive 모드를 유지한다.
+Microsoft ReadDirectoryChangesW의 subtree 옵션과 zero-byte overflow 정책을 따른다.
+알림 payload는 목록의 권위가 아니며 200ms debounce 뒤 펼친 디렉터리를 기존 worker에서
+새로 열거한다. 재스캔 예약이 OOM으로 실패하면 dirty hint를 보존해 재시도한다.
+매 프레임 제출은 하나로 제한하고 backend가 바쁘면 just-taken 요청을 할당 없이
+대기열 선두로 되돌린다. 폴더 토글도 같은 제출 경로를 사용해 busy 때 요청을 잃지 않는다.
+
+`test-win32-editor-watch` 18개가 Debug/ReleaseFast에서 통과했다. 재귀 옵션 해제,
+반환 요청의 순서 변경, active/queued 중복 거절 누락, re-arm 누락의 다섯
+compiled runtime 변형을 검출했다. NTFS의 상위 디렉터리 메타데이터 알림 때문에
+단순 nested create만으로는 재귀 옵션을 구분하지 못했다. 판정자는 완료된 I/O의
+buffer를 re-arm 전에 읽어 깊은 기존 파일의 정확한 이름을 확인하며 제품은 계속
+payload를 해석하지 않는다.
+
+실제 Windows 앱의 소유 HWND를 캡처해 루트 파일 생성/삭제, 폴더 펼치기,
+펼친 폴더의 파일 추가/삭제가 재시작 없이 반영되고 펼침 상태가 유지됨을 확인했다.
+테스트 앱 PID 27492은 정상 종료했다. 물리 입력·IME, sleep/unmount·root 교체
+장기 soak 및 원격 감시는 이 관측의 범위가 아니다.
+
+Windows 단독 worker 판정자와 crash probe의 모듈 루트는 platform/windows의
+얇은 aggregation/entry 파일이다. 공용 native import가 editor 밖으로 이동해도
+모듈 경계를 벗어나지 않는다. aggregation test 하나가 추가되어 open 20개,
+settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 유지한다.
+
+같은 경로는 active worker 또는 미소비 directory 결과가 있으면 재제출을 거절한다.
+다른 경로의 기존 4-slot 병렬성은 유지하며 local/remote namespace는 섞지 않는다.
+queued 결과는 실제 native worker로 확인하고 reserved active slot은 판정자에서
+직접 모델링한다. backend의 active path는 결과 발행과 같은 mutex 안에서 제거하며
+job 할당/spawn 실패도 슬롯을 되돌린다. 이 opt-in API는 Windows 앱이 사용하고
+기존 macOS·remote submit API의 중복 정책은 바꾸지 않는다.

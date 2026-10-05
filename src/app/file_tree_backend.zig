@@ -84,6 +84,7 @@ const RemoteTarget = struct {
 
 const Job = struct {
     state: *State,
+    slot: usize,
     path: []u8,
     kind: ResultKind,
     remote: ?RemoteTarget = null,
@@ -122,6 +123,7 @@ const State = struct {
     mutex: std.Io.Mutex = .init,
     refs: std.atomic.Value(usize) = .init(1), // Backend owner + detached workers
     inflight: usize = 0,
+    active: [max_inflight]?struct { path: []const u8, kind: ResultKind, was_remote: bool } = .{null} ** max_inflight,
     remote_inflight: usize = 0,
     results: [max_results]Result = undefined,
     results_len: usize = 0,
@@ -151,7 +153,7 @@ pub const Backend = struct {
 
     /// true일 때만 path 소유권이 backend로 이동한다. false면 호출자가 tree에 재예약한 뒤 free한다.
     pub fn submit(self: *Backend, path: []u8, expected_root_generation: u64) bool {
-        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, null, null);
+        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, null, null, false);
     }
 
     /// **원격 root 의 디렉터리 스캔**(RF2b). 목적지·control socket 은 복사해 job 이 소유한다.
@@ -175,7 +177,7 @@ pub const Backend = struct {
             return false;
         };
         const remote: RemoteTarget = .{ .dest = dest_owned, .ctl = ctl_owned };
-        if (!self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, null, remote)) {
+        if (!self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, null, remote, false)) {
             remote.deinit(state.allocator);
             return false;
         }
@@ -185,7 +187,7 @@ pub const Backend = struct {
     /// Successful root publish transfers its still-open no-follow directory capability to the first
     /// scan. On false the caller retains both path and dir ownership.
     pub fn submitValidatedRootScan(self: *Backend, path: []u8, expected_root_generation: u64, dir: std.Io.Dir) bool {
-        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, dir, null);
+        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, dir, null, false);
     }
 
     pub fn submitFileHash(self: *Backend, path: []u8) bool {
@@ -200,11 +202,18 @@ pub const Backend = struct {
         root_operation: u32,
         root_validation_round: u8,
     ) bool {
-        return self.submitJobMeta(path, .root_validation, request_id, expected_root_generation, root_operation, root_validation_round, null, null);
+        return self.submitJobMeta(path, .root_validation, request_id, expected_root_generation, root_operation, root_validation_round, null, null, false);
     }
 
     fn submitJob(self: *Backend, path: []u8, kind: ResultKind) bool {
-        return self.submitJobMeta(path, kind, 0, 0, 0, 0, null, null);
+        return self.submitJobMeta(path, kind, 0, 0, 0, 0, null, null, false);
+    }
+
+    /// A single producer applies a taken result before submitting again.
+    /// Prevent overlapping same-path scans and submissions while an earlier
+    /// result is queued, without serializing unrelated directory work.
+    pub fn submitCoalescedDirectory(self: *Backend, path: []u8, generation: u64) bool {
+        return self.submitJobMeta(path, .directory, 0, generation, 0, 0, null, null, true);
     }
 
     fn submitJobMeta(
@@ -217,6 +226,7 @@ pub const Backend = struct {
         root_validation_round: u8,
         validated_dir: ?std.Io.Dir,
         remote: ?RemoteTarget,
+        coalesce_path: bool,
     ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
@@ -226,6 +236,23 @@ pub const Backend = struct {
             state.mutex.unlock(state.io);
             return false;
         }
+        if (coalesce_path) {
+            for (state.active) |entry| if (entry) |active| {
+                if (active.kind == .directory and !active.was_remote and std.mem.eql(u8, active.path, path)) {
+                    state.mutex.unlock(state.io);
+                    return false;
+                }
+            };
+            for (state.results[0..state.results_len]) |result| {
+                if (result.kind == .directory and !result.was_remote and std.mem.eql(u8, result.path, path)) {
+                    state.mutex.unlock(state.io);
+                    return false;
+                }
+            }
+        }
+        var slot: usize = 0;
+        while (state.active[slot] != null) : (slot += 1) {}
+        state.active[slot] = .{ .path = path, .kind = kind, .was_remote = remote != null };
         state.inflight += 1;
         if (remote != null) state.remote_inflight += 1;
         _ = state.refs.fetchAdd(1, .monotonic);
@@ -233,11 +260,12 @@ pub const Backend = struct {
 
         const job = state.allocator.create(Job) catch {
             if (remote != null) decrementRemote(state);
-            finishWithoutResult(state);
+            finishWithoutResult(state, slot);
             return false;
         };
         job.* = .{
             .state = state,
+            .slot = slot,
             .path = path,
             .kind = kind,
             .request_id = request_id,
@@ -250,15 +278,16 @@ pub const Backend = struct {
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             state.allocator.destroy(job);
             if (remote != null) decrementRemote(state);
-            finishWithoutResult(state);
+            finishWithoutResult(state, slot);
             return false;
         };
         thread.detach();
         return true;
     }
 
-    fn finishWithoutResult(state: *State) void {
+    fn finishWithoutResult(state: *State, slot: usize) void {
         state.mutex.lockUncancelable(state.io);
+        state.active[slot] = null;
         state.inflight -= 1;
         state.mutex.unlock(state.io);
         state.release();
@@ -267,6 +296,7 @@ pub const Backend = struct {
     fn worker(job: *Job) void {
         const state = job.state;
         const was_remote = job.remote != null;
+        const slot = job.slot;
         var result = switch (job.kind) {
             .directory => if (job.remote) |remote|
                 remoteScanDirectory(state.allocator, job.path, remote, state.remote_transport.?)
@@ -294,6 +324,7 @@ pub const Backend = struct {
         } else {
             result.deinit(state.allocator, state.io);
         }
+        state.active[slot] = null;
         state.inflight -= 1;
         if (was_remote) state.remote_inflight -= 1;
         state.mutex.unlock(state.io);

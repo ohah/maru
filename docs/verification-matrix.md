@@ -3921,3 +3921,12 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 - 판정: 입력/삭제/숨은 본문·Undo/Redo·중첩/다중 변경·삭제된 머리·provider 범위 변경·OOM 미게시.
 - 시각 증거: `tools/shared-ime-gpu/capture.py --scenario anchors`; 제품 AppSession/CoreText/Metal의 별도 뷰 프레임.
 - 경계: 사용자 split UI·동시 두 pane GUI·실제 OS 입력기는 이 gate의 완료 주장에 포함하지 않는다.
+
+
+### Windows 파일 트리 변경 감시 (§2m.188)
+
+`test-win32-editor-watch` 18개 Debug/ReleaseFast와 다섯 compiled runtime 변형을
+검증했다. 실제 Windows 앱에서 root 파일 생성/삭제와 펼친 하위 폴더 파일 추가/삭제를
+재시작 없이 캡처했고 펼침 상태 유지 및 정상 종료를 확인했다. private fixture와
+synthetic owned HWND 입력을 사용했다. 물리 입력·IME, sleep/unmount·root 교체
+장기 soak와 원격 감시는 미검증이며 이 항목의 완료 주장이 아니다.

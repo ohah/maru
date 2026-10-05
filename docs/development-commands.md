@@ -1207,3 +1207,13 @@ runtime 변형을 검출했다. 일반 앱 연결은 host 61개·controller 33�
 worker projection/syntax의 독립 소유권·본문/revision 결합·행/폭·부분 할당 실패와 main에서의
 parser 조회/인계·편집 refresh를 Debug/ReleaseFast로 검사한다. 다섯 compiled runtime
 변형과 실앱 Zig 색 표시·편집·Save-close의 exact CRLF도 확인한다.
+
+
+§2m.188의 `test-win32-editor-watch`는 18개다. 기존 native 소유권·취소·공유 구독
+검사에 재귀 root의 깊은 파일 알림과 busy 스캔 요청의 주소/순서 보존을 포함한다.
+완료된 native 알림 이름 확인은 판정자만 수행하고 제품의 payload 비권위 정책은 유지한다.
+
+Windows 단독 worker 판정자와 crash probe의 모듈 루트는 platform/windows의
+얇은 aggregation/entry 파일이다. 공용 native import가 editor 밖으로 이동해도
+모듈 경계를 벗어나지 않는다. aggregation test 하나가 추가되어 open 20개,
+settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 유지한다.

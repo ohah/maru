@@ -633,3 +633,15 @@ tools/
 같은 디렉터리의 `fixture.zig.inc`(IME), `find-fixture.zig.inc`(뷰별 찾기),
 `anchors-fixture.zig.inc`(수동 뷰 접힘·스크롤)가 시나리오 입력과 도메인 판정을 소유한다.
 캡처용 테스트는 제품 소스 사본에만 덧붙이고, 일반 빌드나 설치된 앱을 바꾸지 않는다.
+
+
+Windows 공용 파일 경계: `src/platform/windows/file_identity.zig`는 열린 handle의
+volume/128-bit ID, `src/platform/windows/directory_watch.zig`는 고정 주소 native
+알림 소유권과 nonrecursive/recursive 모드 및 공유 구독을 소유한다. 기존
+`editor/identity.zig`와 `editor/directory_watch.zig`는 호환 re-export 진입점이다.
+파일 트리와 editor가 같은 Windows 구현을 사용하며 macOS 폴더를 경유하지 않는다.
+
+Windows 단독 worker 판정자와 crash probe의 모듈 루트는 platform/windows의
+얇은 aggregation/entry 파일이다. 공용 native import가 editor 밖으로 이동해도
+모듈 경계를 벗어나지 않는다. aggregation test 하나가 추가되어 open 20개,
+settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 유지한다.

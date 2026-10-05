@@ -951,6 +951,14 @@ pub const Tree = struct {
         return self.scan_requests.orderedRemove(0);
     }
 
+    /// Return the just-taken request after a busy backend, without allocating.
+    /// No queue mutation may intervene between take and return: removal retained
+    /// the spare slot, so even allocator exhaustion cannot lose the request.
+    pub fn returnScanRequest(self: *Tree, owned: []u8) void {
+        std.debug.assert(self.scan_requests.items.len < self.scan_requests.capacity);
+        self.scan_requests.insertAssumeCapacity(0, owned);
+    }
+
     /// A root picker commit transfers its retained directory capability to the exact first scan path.
     /// Removing by bytes keeps other existing roots queued in stable order for multi-root add.
     pub fn takeScanRequestForPath(self: *Tree, path: []const u8) ?[]u8 {

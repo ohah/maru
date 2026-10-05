@@ -74,6 +74,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
     switch (message) {
         .create_browser => |value| create(value, writer),
         .destroy_browser => |browser| destroy(browser, writer),
+        .close_asking => |browser| askClose(browser, writer),
         .resize => |value| resize(value, writer),
         .set_hidden => |value| if (hostFor(value.browser, writer)) |host| {
             defer object.release(host);
@@ -161,6 +162,20 @@ fn destroy(browser_id: BrowserId, writer: *events.Writer) void {
     permissions.cancelMedia(browser_id);
     entry.closing = true;
     closeBrowser(browserOf(entry));
+}
+
+/// 사용자가 그 탭을 닫는다 — 강제하지 않고 닫는다(W6j). 떠나기 확인을 건 페이지면 CEF 가 `on_before_unload_dialog` 로 묻고(maru 에 —
+/// `dialogs`) 머무르기면 닫기를 그만둔다(브라우저는 그대로 쓸 수 있다). 묻지 않는 페이지(처리기 없음·사용자 동작 없음)는 곧바로 닫힌다
+/// (`on_before_close` → `browser_closed`). 닫히는 중으로 표시하지 않는다 — 표시하면 대화상자가 maru 에 가지 못하고 떠나기로 답한다
+/// (W6j 착수 전 실측). 처리기가 멈추면 CEF 는 끝없이 기다린다(실측 20 초 — maru 가 시한 뒤 `destroy_browser` 로 강제한다).
+fn askClose(browser_id: BrowserId, writer: *events.Writer) void {
+    const entry = state.registry.byId(browser_id) orelse return fail(writer, browser_id, .unknown_browser, "no such browser");
+    if (entry.closing) return;
+    // 떠 있는 JS 대화상자가 렌더러를 막고 있으면 떠나기 확인이 오지 않는다 — 이동처럼 먼저 취소로 답한다.
+    dialogs.cancelFor(browser_id);
+    const host = browserOf(entry).*.get_host.?(browserOf(entry));
+    defer object.release(host);
+    host.*.close_browser.?(host, 0);
 }
 
 fn resize(value: protocol.message.Resize, writer: *events.Writer) void {

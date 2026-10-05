@@ -93,7 +93,7 @@ pub const Dispatcher = struct {
         switch (message) {
             .shutdown => return .quit,
             .hello => return self.violation("second hello"),
-            .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve => {
+            .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking => {
                 self.handler.browser_command(self.handler.context, message, self.writer);
                 return .keep_running;
             },
@@ -157,7 +157,7 @@ fn readEvents(fd: c_int, storage: []u8, out: []Message) ![]Message {
 fn rejectBrowserCommand(_: *anyopaque, message: Message, writer: *events.Writer) void {
     const browser: protocol.message.BrowserId = switch (message) {
         .create_browser => |value| value.browser,
-        .destroy_browser => |browser| browser,
+        .destroy_browser, .close_asking => |browser| browser,
         .resize => |value| value.browser,
         .set_hidden, .set_focus => |value| value.browser,
         .navigate => |value| value.browser,

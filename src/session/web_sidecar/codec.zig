@@ -82,7 +82,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeByte(@intFromBool(value.hidden));
             try writeUrl(&cursor, value.url);
         },
-        .destroy_browser, .browser_created, .browser_closed => |browser| try writeBrowser(&cursor, browser),
+        .destroy_browser, .close_asking, .browser_created, .browser_closed => |browser| try writeBrowser(&cursor, browser),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -373,6 +373,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             .url = try readUrl(&cursor),
         } },
         .destroy_browser => .{ .destroy_browser = try readBrowser(&cursor) },
+        .close_asking => .{ .close_asking = try readBrowser(&cursor) },
         .browser_created => .{ .browser_created = try readBrowser(&cursor) },
         .browser_closed => .{ .browser_closed = try readBrowser(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
@@ -694,7 +695,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  12, 0, // v12, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  13, 0, // v13, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -740,6 +741,7 @@ test "every message round trips" {
     try std.testing.expectEqualStrings("https://example.com/한글", created.create_browser.url);
 
     try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .destroy_browser = 9 })).destroy_browser);
+    try std.testing.expectEqual(@as(u64, 10), (try roundTrip(.{ .close_asking = 10 })).close_asking); // W6j
     const resized = try roundTrip(.{ .resize = .{ .browser = 9, .size = .{ .width = 1, .height = max_view_extent, .scale = 1.0 } } });
     try std.testing.expectEqual(max_view_extent, resized.resize.size.height);
     try std.testing.expect((try roundTrip(.{ .set_hidden = .{ .browser = 9, .value = true } })).set_hidden.value);

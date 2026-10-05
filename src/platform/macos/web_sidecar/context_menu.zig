@@ -192,7 +192,9 @@ pub fn onRun(
     const media_state: u32 = if (is_av) @bitCast(params.*.get_media_state_flags.?(params)) else 0;
     const media_src = if (is_av) copyAll(params.*.get_source_url.?(params), max_address_bytes) else null;
     const media_copy = if (media_src) |v| !std.ascii.startsWithIgnoreCase(v, "blob:") else false;
-    const open_media = if (media_src != null) openableLink(params.*.get_source_url.?(params)) else null;
+    // 새 탭은 저장할 수 있는 미디어만(Chrome — `CM_MEDIAFLAG_CAN_SAVE`: 끝없는 라이브 스트림·HLS·불러오지 못한 주소는 아니다, W6h② 적대
+    // 검증 2 회차) — 그리고 http·https.
+    const open_media = if (media_src != null and media_state & c.CM_MEDIAFLAG_CAN_SAVE != 0) openableLink(params.*.get_source_url.?(params)) else null;
     var selection_buf: [protocol.wire.max_text_bytes]u8 = undefined;
     var truncated = false;
     const selection = readSelection(params.*.get_selection_text.?(params), &selection_buf, &truncated);
@@ -217,7 +219,8 @@ pub fn onRun(
         .media_video = media_type == c.CM_MEDIATYPE_VIDEO,
         .media_audio = media_type == c.CM_MEDIATYPE_AUDIO,
         .media_loop = media_state & c.CM_MEDIAFLAG_LOOP != 0,
-        .media_can_loop = media_state & c.CM_MEDIAFLAG_CAN_LOOP != 0,
+        // 오류 상태면 연속 재생도 끈다(Chrome 과 같다).
+        .media_can_loop = media_state & c.CM_MEDIAFLAG_CAN_LOOP != 0 and media_state & c.CM_MEDIAFLAG_IN_ERROR == 0,
         .media_controls = media_state & c.CM_MEDIAFLAG_CONTROLS != 0,
         .media_can_toggle_controls = media_state & c.CM_MEDIAFLAG_CAN_TOGGLE_CONTROLS != 0,
         .media_openable = open_media != null,
@@ -369,8 +372,8 @@ pub fn onCommand(value: message.ContextMenuCommand) void {
             browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .new_window, .url = url } }) catch {};
         },
         // W6h②: 미디어 — 연속 재생·제어 기능은 우클릭 때 찾아 둔 요소에(`media_menu`), 새 탭은 뒤(Chrome 과 같다), 주소는 클립보드에.
-        .media_loop => media_menu.act(@ptrCast(@alignCast(entry.handle)), held.menu, .loop),
-        .media_controls => media_menu.act(@ptrCast(@alignCast(entry.handle)), held.menu, .controls),
+        .media_loop => media_menu.act(@ptrCast(@alignCast(entry.handle)), held.menu, .loop, !held.flags.media_loop),
+        .media_controls => media_menu.act(@ptrCast(@alignCast(entry.handle)), held.menu, .controls, !held.flags.media_controls),
         .open_media_new_tab => if (held.open_media) |url| {
             browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .background, .url = url } }) catch {};
         },

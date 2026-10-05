@@ -11,6 +11,8 @@
 //!   media-open-copy    오디오의 「새 탭에서 오디오 열기」는 뒤 탭으로 그 주소, 「오디오 주소 복사」는 판정자 전용 클립보드에 그 주소
 //!   media-not-allowed  `blob:` 동영상의 「주소 복사」·「새 탭」은 실행하지 않는다(클립보드 그대로·새 탭 없음)
 //!   media-long-src     1.5 KB 주소의 같은 주소 오디오 둘 중 우클릭한 것만 켠다(긴 주소도 DevTools 경로로 — W6h② 적대 검증 1 회차)
+//!   media-want         메뉴가 떠 있는 동안 페이지가 연속 재생을 켜도 「연속 재생」은 메뉴에 보인 체크(꺼짐)의 반대 — 켜짐으로 둔다(Chrome 과
+//!                      같다 — 뒤집으면 꺼졌다, W6h② 적대 검증 2 회차)
 //!   media-shifted      우클릭 뒤 메뉴가 떠 있는 동안 페이지가 두 오디오의 자리를 바꿔도 「연속 재생」은 우클릭한 그 오디오를 켠다
 //!   media-same-src     같은 주소 오디오 둘 중 우클릭한 것만 켠다 — 맨 위 문서와 같은 출처 iframe(DevTools 경로 — 주소로 찾는 보조 경로는 모른다)
 //!   media-cross-dup    다른 사이트 iframe 의 같은 주소 둘은 아무것도 켜지 않는다(사용자 결정 — 둘 이상이면 하지 않는다)
@@ -235,6 +237,18 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     try w.pick(lg, .media_loop);
     const long_ok = w.untilPart("l 01", 3_000);
     report(long_ready and lg != null and long_ok, "media-long-src", std.fmt.bufPrint(&detail, "준비 {} · 메뉴 {any} · 아래 것만 {} · 제목 「{s}」", .{ long_ready, lg, long_ok, w.title() }) catch "");
+
+    // 메뉴가 떠 있는 동안 페이지가 스스로 켠다 — 고른 뒤에도 켜짐.
+    w.title_len = 0;
+    try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/media-want") } });
+    const want_ready = w.untilPart("w 0", wait_ms) and !w.untilPart("wait", 0);
+    const wm = try w.rightClick(.{ .x = 100, .y = 30 });
+    const shown_off = !w.flags.media_loop;
+    const page_on = w.untilPart("w 1", 2_000);
+    try w.pick(wm, .media_loop);
+    w.pump(800);
+    const still_on = std.mem.indexOf(u8, w.title(), "w 1") != null;
+    report(want_ready and wm != null and shown_off and page_on and still_on, "media-want", std.fmt.bufPrint(&detail, "메뉴는 꺼짐 {} · 페이지가 켬 {} · 고른 뒤 켜짐 그대로 {} · 제목 「{s}」", .{ shown_off, page_on, still_on, w.title() }) catch "");
 
     // 우클릭 뒤 자리가 바뀐다 — 다시 불러와 a 를 우클릭하면 페이지가 0.2 초 뒤 a·b 의 자리를 바꾼다. 0.8 초 뒤 고른다.
     if (!try w.load(port, true)) return error.MediaPageNotReady;

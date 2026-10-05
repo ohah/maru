@@ -529,3 +529,23 @@ XYbase/CRLF 유지·StaleDocument receipt·원본 보존을 확인한다. consen
 WM_CLOSE/Discard로 원본 exact BOM/base/CRLF, 백업 삭제 및 exit code 0을 수집했다.
 synthetic owned HWND이며 물리 IME·장기 soak나 강제 stale GUI 재현 증거로 세지 않는다.
 전체 Windows 잔여에는 후속 편집/복구 CPU·플랫폼 결합·키바인딩/브라우저/SSH 등이 남아 있다.
+
+
+### §2m.196 Windows 저장 pending 중 caption 마우스 제어
+
+mouse의 pending_save 차단을 caption hit 처리 뒤로 옮겼다. native 최소화·최대화·닫기
+경로는 유지하고 편집기/앱 영역 입력은 계속 차단한다. save/close/open busy 마우스는
+이전 편집기 가로·세로 스크롤바 capture와 release 플래그를 해제하므로 삼켜진 release가
+끝나지 않은 drag를 남기지 않는다. 기존 종료 진단에 caption_save_clicks를 추가했다.
+
+최종 실앱 PID 50912에서 실제 Ctrl+S와 caption 닫기 메시지를 연속 전달했다. 저장 pending
+중 처리된 caption_save_clicks=1, 본문을 유지한 close 확인창을 관찰했고 Save 이후
+exact BOM/Xbase/CRLF, 백업 삭제와 exit code 0을 확인했다. synthetic owned HWND이며
+물리 IME·모든 caption/drag 조합의 장기 검증 증거로 세지 않는다.
+
+승인·binding 제거, cancel rearm 제거, 삭제 대신 write, stale intent 실패 제거의 기존
+다섯 compiled runtime 변형을 최종 코드에서 다시 검출했다. 이 다섯은 저장/닫기의
+보호 계약 검사이며 caption 위치 자체의 변형 검사라고 주장하지 않는다. 복원 후
+backup worker 22개가 Debug/ReleaseFast에서 통과했다. caption 순서는 실앱 pending
+계측으로 검증하며 단순 순서 조건을 복사한 unit test를 추가하지 않았다.
+전체 잔여 Windows 지원·후속 편집/복구 CPU와 플랫폼 결합 범위는 계속 남아 있다.

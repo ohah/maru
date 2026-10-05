@@ -131,6 +131,19 @@ class H(http.server.BaseHTTPRequestHandler):
             body = TIP
         elif self.path == "/dnd-app":
             body = DND
+        elif self.path.startswith("/tone.wav"):
+            # W6h②: 0.2 초 무음 WAV(8 kHz 모노 16 비트) — 오디오 우클릭 메뉴.
+            import struct
+            pcm = b"\x00\x00" * 1600
+            body = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 8000, 16000, 2, 16) + b"data" + struct.pack("<I", len(pcm)) + pcm
+            self.send_response(200); self.send_header('Content-Type', 'audio/wav'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+            return
+        elif self.path == "/media-app":
+            # W6h②: 오디오 하나(본문 왼쪽 위 절반) — 연속 재생 상태가 바뀌면 `/ev` 로 알린다.
+            body = (b"<!doctype html><title>media</title><style>html,body{margin:0;height:100%;background:#20a060}"
+                    b"audio{position:fixed;left:0;top:0;width:50%;height:30%}</style><body><audio id=a controls src='/tone.wav?a'></audio><script>"
+                    b"var a=document.getElementById('a'),last=a.loop;setInterval(function(){if(a.loop!==last){last=a.loop;new Image().src='/ev?e=loop&v='+(+a.loop)+'&t='+Date.now()}},100);"
+                    b"</script>")
         elif self.path == "/img/cat.png":
             # W6d③: 끌어내 파일로 만들 이미지(48×48 빨간 PNG).
             body = base64.b64decode(CAT_PNG)
@@ -863,6 +876,46 @@ label = "127.0.0.1에서 '⁨hello⁩' 검색"
 search_tabs = [l for l in report if l.startswith('osr-test newtab') and 'placement=foreground' in l]
 check(len(shown) > 2 and label in shown[2].split('|') and len(search_tabs) == 1 and '/search?q=hello' in requests,
       f'the selection menu searches the configured engine in a foreground tab ({shown[2] if len(shown) > 2 else None} · {search_tabs} · {[l for l in requests if l.startswith("/search")]})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6h②: 동영상·오디오 우클릭 메뉴 ────────────────────────────────────────────────────────────────────────
+# 오디오를 우클릭하면 「연속 재생 · 모든 제어 기능 표시 — 새 탭에서 오디오 열기 · 오디오 주소 복사」(Chrome 154 — 오디오의 제어 기능은
+# 켜져 있고 끌 수 없다: 체크 표시 ✓·(off)). 「연속 재생」을 고르면 그 오디오가 켜지고(sidecar 가 DevTools 로 우클릭한 요소를 바꾼다),
+# 다음 메뉴에는 체크 표시가 붙는다.
+printf 'ui.language = ko\n' > "$root/media.conf"
+cat > "$root/media.txt" <<'SCRIPT'
+sleep 7000
+view down 0.395 0.30 0 0 1
+view up 0.395 0.30 0 0 1
+sleep 900
+menupick 연속 재생
+sleep 1200
+view down 0.395 0.30 0 0 1
+view up 0.395 0.30 0 0 1
+sleep 900
+menuclose
+sleep 500
+SCRIPT
+: > "$root/requests.log"
+run_app /media-app 16000 "$root/media.summary" MARU_WEB_OSR_TEST_INPUT="$root/media.txt" MARU_WEB_OSR_TEST_CONTEXT_MENU=1 MARU_CONFIG="$root/media.conf"
+grep -a '^osr-test menu' "$root/app-media-app.log" > "$root/media.report" || true
+cat "$root/media.report"
+python3 - "$root/media.report" "$root/requests.log" <<'PY' || fail "the media context menu did not behave as expected"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+shown = [l[len('osr-test menu shown items='):] for l in report if l.startswith('osr-test menu shown items=')]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+first = '연속 재생|모든 제어 기능 표시✓(off)|—|새 탭에서 오디오 열기|오디오 주소 복사'
+check(len(shown) == 2 and shown[0] == first, f'the audio menu is loop · show all controls (checked, off for audio) — open audio in new tab · copy audio address ({shown})')
+loops = [l for l in requests if l.startswith('/ev?e=loop')]
+check(len(loops) == 1 and loops[0].startswith('/ev?e=loop&v=1') and len(shown) == 2 and shown[1].startswith('연속 재생✓|'),
+      f'picking loop turned the right-clicked audio on and the next menu shows it checked ({loops} · {shown[1] if len(shown) > 1 else None})')
 sys.exit(0 if ok else 1)
 PY
 

@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 209u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 210u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2202,6 +2202,8 @@ int32_t maru_macos_app_session_osr_context_menu_search(MaruAppHostSession *sessi
 uint32_t maru_macos_app_session_osr_new_windows_pending(MaruAppHostSession *session);
 int32_t maru_macos_app_session_osr_take_new_window(MaruAppHostSession *session, uint8_t *out, size_t cap, size_t *out_len);
 int32_t maru_macos_app_session_osr_open_url_tab(MaruAppHostSession *session, const uint8_t *url, size_t len);
+/* v210(W6h②): 띄운 메뉴 항목의 체크 표시(연속 재생·모든 제어 기능 표시) — 켜져 있으면 1. */
+int32_t maru_macos_app_session_osr_context_menu_item_checked(MaruAppHostSession *session, uint32_t menu, uint32_t index);
 /* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
    2 = 뗌, 3(v202 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */

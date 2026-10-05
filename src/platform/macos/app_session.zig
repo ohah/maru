@@ -291,7 +291,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 207: W6d③ — 끌어낸 이미지 파일(osr_drag_out_file_size, osr_drag_file_request·poll — Finder 가 청할 때만 내용을 받는다).
 // 208: W6g — osr_accepts_first_mouse(창이 뒤에 있을 때 Chromium 본문의 첫 누름도 페이지로 — acceptsFirstMouse).
 // 209: W6h① — osr_take_new_window·osr_open_url_tab(메뉴 「새 창에서 링크 열기」), osr_context_menu_search(「…에서 '…' 검색」), 메뉴 항목 종류 8.
-pub const abi_version: u32 = 209;
+// 210: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
+pub const abi_version: u32 = 210;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,

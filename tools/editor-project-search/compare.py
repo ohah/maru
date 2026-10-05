@@ -127,7 +127,9 @@ def main():
         ("common-fold", "FILLER", "literal-fold", args.files - rare),
         ("word", "needle", "word", rare),
         ("unicode", "한글", "literal", args.files),
-        ("lookbehind", "(?<=nee)dle", "regex", rare),
+        ("lookbehind", "(?<=nee)dle", "document-regex", rare),
+        ("multiline", r"needle 한글\nx", "document-regex", rare),
+        ("document-start", r"\Aneedle", "document-regex", rare),
     ]
     report = {
         "platform": platform.platform(), "files": args.files,
@@ -148,7 +150,7 @@ def main():
         path: hashlib.sha256((repository / path).read_bytes()).hexdigest()
         for path in ("src/session/editor/find.zig", "src/session/editor/document.zig",
                      "src/session/editor/line_index.zig", "src/session/editor/selection.zig",
-                     "src/terminal/selection.zig", "src/regex.zig")
+                     "src/terminal/selection.zig", "src/search_case_fold.zig", "src/regex.zig")
     }
     if sys.platform == "darwin":
         report["hardware"] = {key: subprocess.check_output(["sysctl", "-n", key], text=True).strip()
@@ -167,8 +169,10 @@ def main():
                 for variant in order:
                     artifact = root / f"{name}-{variant}-{run_index}"
                     if variant == "rg":
-                        pattern_flags = ["--engine", "auto"] if mode == "regex" else ["--fixed-strings"]
+                        pattern_flags = ["--engine", "auto"] if mode.startswith("document-regex") else ["--fixed-strings"]
                         flags = ["--ignore-case"] if mode == "literal-fold" else ["--case-sensitive"]
+                        if mode.startswith("document-regex"):
+                            flags.append("--multiline")
                         if mode == "word":
                             flags.append("--word-regexp")
                         result = execute(base + ["--json", "--crlf"] + pattern_flags + flags + ["--regexp", query, "--", "."], corpus, environment, artifact, "rg")

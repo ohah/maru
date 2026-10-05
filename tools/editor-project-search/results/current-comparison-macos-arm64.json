@@ -1,0 +1,2186 @@
+{
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "files": 2048,
+  "input_bytes": 67108864,
+  "runs": 5,
+  "rg_version": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+NEON\nsimd(runtime):+NEON\n\nPCRE2 10.45 is available (JIT is available)\n",
+  "rg_sha256": "7c7d5b09c3a57de864500c65dc2e9c4d2a5e96a3fc7b7d5318480c19887a739b",
+  "native_sha256": "a09228f942c138e1fe6c09294f4c181a46ba0df8cb55b52d741891768ee0c297",
+  "native_source_sha256": "a155146c3876602173462df79d886a73379be0de09fa808284df4f85869bdb98",
+  "compare_sha256": "017ed76e1f6f867d30828e3369901736f9eed7589f9dde5d9bf80464291090d2",
+  "cases": {
+    "rare": {
+      "query": "needle",
+      "mode": "literal",
+      "expected": 128,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 25.236707999999997,
+            "first_ms": 10.674040999999995,
+            "peak_rss_bytes": 6946816,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.08220800000005,
+            "first_ms": 10.954458000000056,
+            "peak_rss_bytes": 6602752,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.15720900000007,
+            "first_ms": 12.05345899999999,
+            "peak_rss_bytes": 6930432,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.81375000000008,
+            "first_ms": 8.4379160000001,
+            "peak_rss_bytes": 6881280,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.329916000000118,
+            "first_ms": 15.499458000000077,
+            "peak_rss_bytes": 6701056,
+            "matches": 128
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 65.99725000000007,
+            "first_ms": 12.013667000000062,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.288459000000026,
+            "listing_peak_rss_bytes": 5193728,
+            "native_elapsed_ns": 53825250,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 64.17275,
+            "first_ms": 10.294332999999988,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.590582999999983,
+            "listing_peak_rss_bytes": 5193728,
+            "native_elapsed_ns": 53720791,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.42920800000007,
+            "first_ms": 11.580292000000103,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.00466700000002,
+            "listing_peak_rss_bytes": 5242880,
+            "native_elapsed_ns": 53642917,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 63.77291600000001,
+            "first_ms": 10.106706999999936,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.5475829999999124,
+            "listing_peak_rss_bytes": 5210112,
+            "native_elapsed_ns": 53545542,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.69854100000018,
+            "first_ms": 11.792375000000188,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.073791000000163,
+            "listing_peak_rss_bytes": 5242880,
+            "native_elapsed_ns": 53724291,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 32.77891599999999,
+            "first_ms": 29.243582999999962,
+            "peak_rss_bytes": 1900544,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 26.227290999999987,
+            "listing_peak_rss_bytes": 6635520,
+            "native_elapsed_ns": 3397542,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.46220799999999,
+            "first_ms": 25.015457999999935,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 22.299791000000013,
+            "listing_peak_rss_bytes": 6668288,
+            "native_elapsed_ns": 3330541,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 32.956293000000024,
+            "first_ms": 29.501542999999963,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 26.618334000000022,
+            "listing_peak_rss_bytes": 6750208,
+            "native_elapsed_ns": 3322500,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 32.510415999999935,
+            "first_ms": 29.038583000000063,
+            "peak_rss_bytes": 1900544,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 26.067000000000064,
+            "listing_peak_rss_bytes": 6766592,
+            "native_elapsed_ns": 3354459,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 34.18304199999999,
+            "first_ms": 30.639375000000022,
+            "peak_rss_bytes": 1867776,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 27.30083300000019,
+            "listing_peak_rss_bytes": 6602752,
+            "native_elapsed_ns": 3409333,
+            "prefilter_used": true,
+            "matches": 128
+          }
+        ],
+        "byte-candidate": [
+          {
+            "exit": 0,
+            "elapsed_ms": 65.89366700000005,
+            "first_ms": 11.919750000000006,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.071625000000026,
+            "listing_peak_rss_bytes": 5177344,
+            "native_elapsed_ns": 53780083,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.82337400000004,
+            "first_ms": 11.622998999999966,
+            "peak_rss_bytes": 2129920,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.964540999999992,
+            "listing_peak_rss_bytes": 5046272,
+            "native_elapsed_ns": 54014792,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.70845899999999,
+            "first_ms": 11.757999999999935,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.9662499999999525,
+            "listing_peak_rss_bytes": 5210112,
+            "native_elapsed_ns": 53765667,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.90570800000006,
+            "first_ms": 11.724292000000027,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.085416000000013,
+            "listing_peak_rss_bytes": 5390336,
+            "native_elapsed_ns": 54003333,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.25170799999991,
+            "first_ms": 10.34658300000002,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.5815409999998575,
+            "listing_peak_rss_bytes": 5144576,
+            "native_elapsed_ns": 54731375,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 26.15720900000007,
+        "native": 65.42920800000007,
+        "prefilter": 32.77891599999999,
+        "byte-candidate": 65.82337400000004
+      },
+      "median_first_ms": {
+        "rg": 10.954458000000056,
+        "native": 11.580292000000103,
+        "prefilter": 29.243582999999962,
+        "byte-candidate": 11.724292000000027
+      }
+    },
+    "common": {
+      "query": "filler",
+      "mode": "literal",
+      "expected": 1920,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 27.89687499999993,
+            "first_ms": 3.7580409999999898,
+            "peak_rss_bytes": 6815744,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.302625000000027,
+            "first_ms": 3.600708000000008,
+            "peak_rss_bytes": 6668288,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.23645799999985,
+            "first_ms": 3.617790999999926,
+            "peak_rss_bytes": 7127040,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.498499999999982,
+            "first_ms": 3.658999999999857,
+            "peak_rss_bytes": 6701056,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 25.807207999999804,
+            "first_ms": 3.8605000000000445,
+            "peak_rss_bytes": 6619136,
+            "matches": 1920
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 74.63374999999982,
+            "first_ms": 13.657665999999846,
+            "peak_rss_bytes": 2129920,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.222415999999955,
+            "listing_peak_rss_bytes": 5259264,
+            "native_elapsed_ns": 62537958,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 67.91545900000017,
+            "first_ms": 13.564542000000124,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.057541999999973,
+            "listing_peak_rss_bytes": 5324800,
+            "native_elapsed_ns": 55920583,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 67.22866699999996,
+            "first_ms": 14.411541999999944,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.68358300000005,
+            "listing_peak_rss_bytes": 5259264,
+            "native_elapsed_ns": 54389833,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 67.19516599999942,
+            "first_ms": 13.994165999999364,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.38304199999973,
+            "listing_peak_rss_bytes": 5046272,
+            "native_elapsed_ns": 54770750,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 67.03416699999964,
+            "first_ms": 14.37508300000001,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.577250000000092,
+            "listing_peak_rss_bytes": 5341184,
+            "native_elapsed_ns": 54292500,
+            "prefilter_used": false,
+            "matches": 1920
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 99.73333399999996,
+            "first_ms": 48.999250999999916,
+            "peak_rss_bytes": 2129920,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 45.07091699999988,
+            "listing_peak_rss_bytes": 6750208,
+            "native_elapsed_ns": 50567166,
+            "prefilter_used": true,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 96.97662500000015,
+            "first_ms": 46.232250000000086,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 42.390833000000015,
+            "listing_peak_rss_bytes": 7077888,
+            "native_elapsed_ns": 50572667,
+            "prefilter_used": true,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 101.07137399999999,
+            "first_ms": 49.46620800000012,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 45.531374999999926,
+            "listing_peak_rss_bytes": 7094272,
+            "native_elapsed_ns": 51515500,
+            "prefilter_used": true,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 101.1656249999997,
+            "first_ms": 49.62283399999956,
+            "peak_rss_bytes": 2064384,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 45.487749999999934,
+            "listing_peak_rss_bytes": 7028736,
+            "native_elapsed_ns": 51382875,
+            "prefilter_used": true,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 99.94574999999983,
+            "first_ms": 49.135874999999714,
+            "peak_rss_bytes": 2064384,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 45.144499999999695,
+            "listing_peak_rss_bytes": 7127040,
+            "native_elapsed_ns": 50638292,
+            "prefilter_used": true,
+            "matches": 1920
+          }
+        ],
+        "byte-candidate": [
+          {
+            "exit": 0,
+            "elapsed_ms": 67.23541700000001,
+            "first_ms": 14.22991699999998,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.709999999999996,
+            "listing_peak_rss_bytes": 5029888,
+            "native_elapsed_ns": 54567791,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.1649999999997,
+            "first_ms": 12.716374999999669,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.640582999999811,
+            "listing_peak_rss_bytes": 5062656,
+            "native_elapsed_ns": 54001375,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 66.19033399999964,
+            "first_ms": 13.008291999999644,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.2298339999998795,
+            "listing_peak_rss_bytes": 5324800,
+            "native_elapsed_ns": 54830916,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 66.78354200000047,
+            "first_ms": 13.63250000000038,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.10716700000036,
+            "listing_peak_rss_bytes": 5160960,
+            "native_elapsed_ns": 54690334,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.62133199999964,
+            "first_ms": 12.527039999999712,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.89104099999982,
+            "listing_peak_rss_bytes": 5095424,
+            "native_elapsed_ns": 54625958,
+            "prefilter_used": false,
+            "matches": 1920
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 27.89687499999993,
+        "native": 67.22866699999996,
+        "prefilter": 99.94574999999983,
+        "byte-candidate": 66.19033399999964
+      },
+      "median_first_ms": {
+        "rg": 3.658999999999857,
+        "native": 13.994165999999364,
+        "prefilter": 49.135874999999714,
+        "byte-candidate": 13.008291999999644
+      }
+    },
+    "absent": {
+      "query": "absent-pattern",
+      "mode": "literal",
+      "expected": 0,
+      "samples": {
+        "rg": [
+          {
+            "exit": 1,
+            "elapsed_ms": 27.397000000000116,
+            "first_ms": null,
+            "peak_rss_bytes": 6602752,
+            "matches": 0
+          },
+          {
+            "exit": 1,
+            "elapsed_ms": 25.395083000000263,
+            "first_ms": null,
+            "peak_rss_bytes": 6635520,
+            "matches": 0
+          },
+          {
+            "exit": 1,
+            "elapsed_ms": 27.62720800000018,
+            "first_ms": null,
+            "peak_rss_bytes": 6619136,
+            "matches": 0
+          },
+          {
+            "exit": 1,
+            "elapsed_ms": 24.805499999999814,
+            "first_ms": null,
+            "peak_rss_bytes": 6684672,
+            "matches": 0
+          },
+          {
+            "exit": 1,
+            "elapsed_ms": 26.682375000000036,
+            "first_ms": null,
+            "peak_rss_bytes": 6799360,
+            "matches": 0
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 60.6407080000002,
+            "first_ms": null,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.257542000000061,
+            "listing_peak_rss_bytes": 5455872,
+            "native_elapsed_ns": 49230583,
+            "prefilter_used": false,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 61.44587499999998,
+            "first_ms": null,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.258917000000032,
+            "listing_peak_rss_bytes": 5226496,
+            "native_elapsed_ns": 49139041,
+            "prefilter_used": false,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 61.296000999999656,
+            "first_ms": null,
+            "peak_rss_bytes": 2129920,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.228541999999894,
+            "listing_peak_rss_bytes": 5423104,
+            "native_elapsed_ns": 48954291,
+            "prefilter_used": false,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 62.00808499999955,
+            "first_ms": null,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.244208999999891,
+            "listing_peak_rss_bytes": 5357568,
+            "native_elapsed_ns": 49764875,
+            "prefilter_used": false,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 60.82120800000013,
+            "first_ms": null,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.692333000000051,
+            "listing_peak_rss_bytes": 5292032,
+            "native_elapsed_ns": 49096834,
+            "prefilter_used": false,
+            "matches": 0
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 30.067791000000454,
+            "first_ms": null,
+            "peak_rss_bytes": 1736704,
+            "selected_files": 0,
+            "read_bytes": 0,
+            "listing_ms": 26.9012080000004,
+            "listing_peak_rss_bytes": 6897664,
+            "native_elapsed_ns": 167,
+            "prefilter_used": true,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 29.35666700000006,
+            "first_ms": null,
+            "peak_rss_bytes": 1736704,
+            "selected_files": 0,
+            "read_bytes": 0,
+            "listing_ms": 26.28275000000002,
+            "listing_peak_rss_bytes": 6930432,
+            "native_elapsed_ns": 166,
+            "prefilter_used": true,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 32.16545800000014,
+            "first_ms": null,
+            "peak_rss_bytes": 1736704,
+            "selected_files": 0,
+            "read_bytes": 0,
+            "listing_ms": 28.897417000000036,
+            "listing_peak_rss_bytes": 6717440,
+            "native_elapsed_ns": 84,
+            "prefilter_used": true,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 30.07866700000017,
+            "first_ms": null,
+            "peak_rss_bytes": 1736704,
+            "selected_files": 0,
+            "read_bytes": 0,
+            "listing_ms": 26.98845900000002,
+            "listing_peak_rss_bytes": 6848512,
+            "native_elapsed_ns": 84,
+            "prefilter_used": true,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 29.52316700000024,
+            "first_ms": null,
+            "peak_rss_bytes": 1736704,
+            "selected_files": 0,
+            "read_bytes": 0,
+            "listing_ms": 26.720083999999922,
+            "listing_peak_rss_bytes": 6914048,
+            "native_elapsed_ns": 125,
+            "prefilter_used": true,
+            "matches": 0
+          }
+        ],
+        "byte-candidate": [
+          {
+            "exit": 0,
+            "elapsed_ms": 61.60062500000008,
+            "first_ms": null,
+            "peak_rss_bytes": 2195456,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.506249999999937,
+            "listing_peak_rss_bytes": 5701632,
+            "native_elapsed_ns": 49153167,
+            "prefilter_used": false,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 60.796499999999035,
+            "first_ms": null,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.029374999999561,
+            "listing_peak_rss_bytes": 5177344,
+            "native_elapsed_ns": 48817667,
+            "prefilter_used": false,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 61.21704199999955,
+            "first_ms": null,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.062916999999725,
+            "listing_peak_rss_bytes": 5275648,
+            "native_elapsed_ns": 49079708,
+            "prefilter_used": false,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 60.01500099999957,
+            "first_ms": null,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.866624999999793,
+            "listing_peak_rss_bytes": 5357568,
+            "native_elapsed_ns": 49153709,
+            "prefilter_used": false,
+            "matches": 0
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 60.832750000000324,
+            "first_ms": null,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.9972080000003665,
+            "listing_peak_rss_bytes": 5259264,
+            "native_elapsed_ns": 48875084,
+            "prefilter_used": false,
+            "matches": 0
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 26.682375000000036,
+        "native": 61.296000999999656,
+        "prefilter": 30.067791000000454,
+        "byte-candidate": 60.832750000000324
+      },
+      "median_first_ms": {
+        "rg": null,
+        "native": null,
+        "prefilter": null,
+        "byte-candidate": null
+      }
+    },
+    "fold": {
+      "query": "NEEDLE",
+      "mode": "literal-fold",
+      "expected": 128,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 26.39045799999984,
+            "first_ms": 9.028000000000258,
+            "peak_rss_bytes": 7356416,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 27.28166700000001,
+            "first_ms": 13.173583000000377,
+            "peak_rss_bytes": 7192576,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.45904099999985,
+            "first_ms": 10.020291000000014,
+            "peak_rss_bytes": 7208960,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.669541000000187,
+            "first_ms": 10.447040999999935,
+            "peak_rss_bytes": 7094272,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 25.988917000000278,
+            "first_ms": 19.495499999999666,
+            "peak_rss_bytes": 7405568,
+            "matches": 128
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 111.0745839999998,
+            "first_ms": 12.238208999999944,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.29995799999983,
+            "listing_peak_rss_bytes": 5357568,
+            "native_elapsed_ns": 98785125,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 111.09054100000026,
+            "first_ms": 11.747999000000231,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.123041000000164,
+            "listing_peak_rss_bytes": 5177344,
+            "native_elapsed_ns": 99166375,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 111.85591799999983,
+            "first_ms": 12.624458999999977,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.692959000000222,
+            "listing_peak_rss_bytes": 5521408,
+            "native_elapsed_ns": 99078333,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 112.73275000000105,
+            "first_ms": 13.623208000000275,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 9.810250000000131,
+            "listing_peak_rss_bytes": 5472256,
+            "native_elapsed_ns": 98977041,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 111.37766800000027,
+            "first_ms": 11.74320999999967,
+            "peak_rss_bytes": 2129920,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.074708999999736,
+            "listing_peak_rss_bytes": 5226496,
+            "native_elapsed_ns": 99495584,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 34.92808299999961,
+            "first_ms": 28.656374999999734,
+            "peak_rss_bytes": 1900544,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 25.747582999999796,
+            "listing_peak_rss_bytes": 7340032,
+            "native_elapsed_ns": 6132209,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 36.207417000000405,
+            "first_ms": 29.98820800000024,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 27.121291999999908,
+            "listing_peak_rss_bytes": 7061504,
+            "native_elapsed_ns": 6118292,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 37.808375000000005,
+            "first_ms": 31.473957999999858,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 28.470249999999808,
+            "listing_peak_rss_bytes": 7290880,
+            "native_elapsed_ns": 6227000,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 36.75908299999975,
+            "first_ms": 30.479792000000394,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 27.47374999999952,
+            "listing_peak_rss_bytes": 7340032,
+            "native_elapsed_ns": 6176458,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 37.05708299999877,
+            "first_ms": 30.7693329999994,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 27.5249999999998,
+            "listing_peak_rss_bytes": 6995968,
+            "native_elapsed_ns": 6178334,
+            "prefilter_used": true,
+            "matches": 128
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 26.45904099999985,
+        "native": 111.37766800000027,
+        "prefilter": 36.75908299999975
+      },
+      "median_first_ms": {
+        "rg": 10.447040999999935,
+        "native": 12.238208999999944,
+        "prefilter": 30.479792000000394
+      }
+    },
+    "common-fold": {
+      "query": "FILLER",
+      "mode": "literal-fold",
+      "expected": 1920,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 29.02079199999985,
+            "first_ms": 3.8484169999994933,
+            "peak_rss_bytes": 7012352,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.23245799999974,
+            "first_ms": 3.761667000000024,
+            "peak_rss_bytes": 6848512,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 27.34012500000027,
+            "first_ms": 3.928208000000488,
+            "peak_rss_bytes": 7192576,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 29.339166999999833,
+            "first_ms": 3.8649170000004673,
+            "peak_rss_bytes": 6995968,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.841582999999503,
+            "first_ms": 3.7367499999998444,
+            "peak_rss_bytes": 7208960,
+            "matches": 1920
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 111.30812400000067,
+            "first_ms": 15.275832000000378,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.32675000000016,
+            "listing_peak_rss_bytes": 5210112,
+            "native_elapsed_ns": 99001334,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 109.74316799999872,
+            "first_ms": 13.703000999998771,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.8843749999993875,
+            "listing_peak_rss_bytes": 5685248,
+            "native_elapsed_ns": 99031125,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 113.28133399999984,
+            "first_ms": 15.779125999999977,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.67666700000047,
+            "listing_peak_rss_bytes": 5226496,
+            "native_elapsed_ns": 100536708,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 113.18800000000007,
+            "first_ms": 15.696042000000077,
+            "peak_rss_bytes": 2129920,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.73249999999981,
+            "listing_peak_rss_bytes": 5292032,
+            "native_elapsed_ns": 100437583,
+            "prefilter_used": false,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 108.56537499999953,
+            "first_ms": 13.783541999999649,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.708749999999597,
+            "listing_peak_rss_bytes": 5275648,
+            "native_elapsed_ns": 97695042,
+            "prefilter_used": false,
+            "matches": 1920
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 141.0975849999998,
+            "first_ms": 48.40029299999937,
+            "peak_rss_bytes": 2064384,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 44.199833999999605,
+            "listing_peak_rss_bytes": 7225344,
+            "native_elapsed_ns": 92556667,
+            "prefilter_used": true,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 138.94670899999983,
+            "first_ms": 46.305417000000126,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 42.32137500000022,
+            "listing_peak_rss_bytes": 7159808,
+            "native_elapsed_ns": 92491250,
+            "prefilter_used": true,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 143.2913330000014,
+            "first_ms": 49.739125000001216,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 45.67970800000065,
+            "listing_peak_rss_bytes": 7176192,
+            "native_elapsed_ns": 93409791,
+            "prefilter_used": true,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 141.13195799999988,
+            "first_ms": 48.240875000000294,
+            "peak_rss_bytes": 2129920,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 43.662791000000034,
+            "listing_peak_rss_bytes": 7028736,
+            "native_elapsed_ns": 92759208,
+            "prefilter_used": true,
+            "matches": 1920
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 139.1860429999996,
+            "first_ms": 47.75595999999993,
+            "peak_rss_bytes": 2064384,
+            "selected_files": 1920,
+            "read_bytes": 62914560,
+            "listing_ms": 43.70166699999967,
+            "listing_peak_rss_bytes": 7438336,
+            "native_elapsed_ns": 91281000,
+            "prefilter_used": true,
+            "matches": 1920
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 28.23245799999974,
+        "native": 111.30812400000067,
+        "prefilter": 141.0975849999998
+      },
+      "median_first_ms": {
+        "rg": 3.8484169999994933,
+        "native": 15.275832000000378,
+        "prefilter": 48.240875000000294
+      }
+    },
+    "word": {
+      "query": "needle",
+      "mode": "word",
+      "expected": 128,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 27.22737499999983,
+            "first_ms": 8.401667000000224,
+            "peak_rss_bytes": 6914048,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.617208000000225,
+            "first_ms": 12.587916000000199,
+            "peak_rss_bytes": 7143424,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 25.259624999999453,
+            "first_ms": 11.394666999999359,
+            "peak_rss_bytes": 7045120,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 23.899290999999323,
+            "first_ms": 10.524082999999962,
+            "peak_rss_bytes": 7159808,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 25.168167000000352,
+            "first_ms": 13.299917000000328,
+            "peak_rss_bytes": 7061504,
+            "matches": 128
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 66.09208299999914,
+            "first_ms": 11.87908299999929,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.215415999999642,
+            "listing_peak_rss_bytes": 5062656,
+            "native_elapsed_ns": 54024875,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.61887500000019,
+            "first_ms": 10.81366699999986,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.901374999999987,
+            "listing_peak_rss_bytes": 5406720,
+            "native_elapsed_ns": 54639500,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 63.81512499999964,
+            "first_ms": 10.339499999999724,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.621333000000007,
+            "listing_peak_rss_bytes": 5242880,
+            "native_elapsed_ns": 53315167,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 64.48412399999981,
+            "first_ms": 10.341248999999664,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.818790999999713,
+            "listing_peak_rss_bytes": 5390336,
+            "native_elapsed_ns": 53977958,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 63.7435850000001,
+            "first_ms": 10.244043000000147,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.443083999999821,
+            "listing_peak_rss_bytes": 5455872,
+            "native_elapsed_ns": 53332750,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 34.4733340000003,
+            "first_ms": 31.0000429999997,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 27.766917000000113,
+            "listing_peak_rss_bytes": 6914048,
+            "native_elapsed_ns": 3361375,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 35.03162500000023,
+            "first_ms": 31.52083300000008,
+            "peak_rss_bytes": 1916928,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 28.453041999999762,
+            "listing_peak_rss_bytes": 7028736,
+            "native_elapsed_ns": 3375958,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 34.2129179999997,
+            "first_ms": 30.793833999999798,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 27.60445899999997,
+            "listing_peak_rss_bytes": 7045120,
+            "native_elapsed_ns": 3292750,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 35.22449999999999,
+            "first_ms": 31.822000000000017,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 28.603500000000004,
+            "listing_peak_rss_bytes": 6717440,
+            "native_elapsed_ns": 3286750,
+            "prefilter_used": true,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 34.624625000001075,
+            "first_ms": 31.198666000000763,
+            "peak_rss_bytes": 1851392,
+            "selected_files": 128,
+            "read_bytes": 4194304,
+            "listing_ms": 28.04429200000058,
+            "listing_peak_rss_bytes": 7110656,
+            "native_elapsed_ns": 3325167,
+            "prefilter_used": true,
+            "matches": 128
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 25.259624999999453,
+        "native": 64.48412399999981,
+        "prefilter": 34.624625000001075
+      },
+      "median_first_ms": {
+        "rg": 11.394666999999359,
+        "native": 10.341248999999664,
+        "prefilter": 31.198666000000763
+      }
+    },
+    "unicode": {
+      "query": "한글",
+      "mode": "literal",
+      "expected": 2048,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 26.77679100000052,
+            "first_ms": 3.584374999999973,
+            "peak_rss_bytes": 6930432,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 27.73062500000023,
+            "first_ms": 4.129875000000283,
+            "peak_rss_bytes": 7110656,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.952415999999424,
+            "first_ms": 3.7298749999994385,
+            "peak_rss_bytes": 7045120,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.014291000000078,
+            "first_ms": 3.3176660000000524,
+            "peak_rss_bytes": 6799360,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.67025000000023,
+            "first_ms": 3.7765830000004996,
+            "peak_rss_bytes": 6733824,
+            "matches": 2048
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 65.82724999999989,
+            "first_ms": 12.174875000000362,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.544750000000434,
+            "listing_peak_rss_bytes": 5177344,
+            "native_elapsed_ns": 53458750,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 64.00845900000007,
+            "first_ms": 10.358749999999972,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.728917000000223,
+            "listing_peak_rss_bytes": 4931584,
+            "native_elapsed_ns": 53469708,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.75287500000027,
+            "first_ms": 10.727208000000488,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.036792000000069,
+            "listing_peak_rss_bytes": 5341184,
+            "native_elapsed_ns": 54855125,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 66.60629200000034,
+            "first_ms": 12.958708000000208,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.522124999999825,
+            "listing_peak_rss_bytes": 5242880,
+            "native_elapsed_ns": 53479042,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 64.49958299999992,
+            "first_ms": 10.765457999999839,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.930207999999993,
+            "listing_peak_rss_bytes": 5210112,
+            "native_elapsed_ns": 53591292,
+            "prefilter_used": false,
+            "matches": 2048
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 64.42933299999964,
+            "first_ms": 10.280082999999607,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.54354200000018,
+            "listing_peak_rss_bytes": 5226496,
+            "native_elapsed_ns": 53972167,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 64.9907919999988,
+            "first_ms": 11.378458999999452,
+            "peak_rss_bytes": 2146304,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.654291999999785,
+            "listing_peak_rss_bytes": 5160960,
+            "native_elapsed_ns": 53463125,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 66.72737499999926,
+            "first_ms": 13.079124999999081,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 9.399999999999409,
+            "listing_peak_rss_bytes": 5619712,
+            "native_elapsed_ns": 53488833,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.02387499999962,
+            "first_ms": 11.407999999999419,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.808083000000465,
+            "listing_peak_rss_bytes": 5373952,
+            "native_elapsed_ns": 53445834,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 64.47345800000015,
+            "first_ms": 10.33583300000096,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.633125000000462,
+            "listing_peak_rss_bytes": 5079040,
+            "native_elapsed_ns": 53967125,
+            "prefilter_used": false,
+            "matches": 2048
+          }
+        ],
+        "byte-candidate": [
+          {
+            "exit": 0,
+            "elapsed_ms": 63.68966600000103,
+            "first_ms": 10.090625000001019,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.590458000000687,
+            "listing_peak_rss_bytes": 5193728,
+            "native_elapsed_ns": 53420708,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.55599999999995,
+            "first_ms": 10.251084000000077,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.52654199999958,
+            "listing_peak_rss_bytes": 5292032,
+            "native_elapsed_ns": 55138209,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.49058199999979,
+            "first_ms": 11.97266499999916,
+            "peak_rss_bytes": 2080768,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.184540999999435,
+            "listing_peak_rss_bytes": 5292032,
+            "native_elapsed_ns": 53336833,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 65.76195899999959,
+            "first_ms": 11.614166999999398,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.8301669999998325,
+            "listing_peak_rss_bytes": 5210112,
+            "native_elapsed_ns": 53979667,
+            "prefilter_used": false,
+            "matches": 2048
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 64.47020900000133,
+            "first_ms": 10.334834000000903,
+            "peak_rss_bytes": 2097152,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.489167000000684,
+            "listing_peak_rss_bytes": 5242880,
+            "native_elapsed_ns": 53961125,
+            "prefilter_used": false,
+            "matches": 2048
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 26.952415999999424,
+        "native": 65.75287500000027,
+        "prefilter": 64.9907919999988,
+        "byte-candidate": 65.49058199999979
+      },
+      "median_first_ms": {
+        "rg": 3.7298749999994385,
+        "native": 10.765457999999839,
+        "prefilter": 11.378458999999452,
+        "byte-candidate": 10.334834000000903
+      }
+    },
+    "lookbehind": {
+      "query": "(?<=nee)dle",
+      "mode": "document-regex",
+      "expected": 128,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 27.698416999999864,
+            "first_ms": 5.6807089999999505,
+            "peak_rss_bytes": 7913472,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.35783299999939,
+            "first_ms": 5.569915999998898,
+            "peak_rss_bytes": 7995392,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 27.996583000000186,
+            "first_ms": 5.130832999999058,
+            "peak_rss_bytes": 7864320,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 27.932417000000598,
+            "first_ms": 5.222707999999798,
+            "peak_rss_bytes": 7798784,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.358082999999866,
+            "first_ms": 9.024165999999667,
+            "peak_rss_bytes": 7831552,
+            "matches": 128
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 76.23308400000005,
+            "first_ms": 12.219458999999766,
+            "peak_rss_bytes": 2375680,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.399959000000123,
+            "listing_peak_rss_bytes": 5259264,
+            "native_elapsed_ns": 63855291,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.70333200000069,
+            "first_ms": 11.874748999999518,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.949457999999687,
+            "listing_peak_rss_bytes": 5455872,
+            "native_elapsed_ns": 63672416,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.78075000000162,
+            "first_ms": 11.970416000000483,
+            "peak_rss_bytes": 2375680,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.265042000001444,
+            "listing_peak_rss_bytes": 5242880,
+            "native_elapsed_ns": 63650083,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.93075099999957,
+            "first_ms": 11.85470899999963,
+            "peak_rss_bytes": 2375680,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.138749999998751,
+            "listing_peak_rss_bytes": 5079040,
+            "native_elapsed_ns": 63925417,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 76.22299999999882,
+            "first_ms": 12.36108300000005,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.03895799999843,
+            "listing_peak_rss_bytes": 5079040,
+            "native_elapsed_ns": 63704000,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 74.16587599999946,
+            "first_ms": 10.334750999999365,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.627708999999982,
+            "listing_peak_rss_bytes": 5079040,
+            "native_elapsed_ns": 63682500,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.79241700000061,
+            "first_ms": 11.846667000000366,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.151791999999602,
+            "listing_peak_rss_bytes": 5062656,
+            "native_elapsed_ns": 63784917,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.80545899999969,
+            "first_ms": 11.92129200000025,
+            "peak_rss_bytes": 2375680,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.190457999999623,
+            "listing_peak_rss_bytes": 5521408,
+            "native_elapsed_ns": 63725375,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 76.20541700000061,
+            "first_ms": 12.129957999999164,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.390999999999593,
+            "listing_peak_rss_bytes": 5521408,
+            "native_elapsed_ns": 63920250,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 74.4614170000002,
+            "first_ms": 10.532874999999109,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.72820800000018,
+            "listing_peak_rss_bytes": 5521408,
+            "native_elapsed_ns": 63787625,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 27.932417000000598,
+        "native": 75.93075099999957,
+        "prefilter": 75.79241700000061
+      },
+      "median_first_ms": {
+        "rg": 5.569915999998898,
+        "native": 11.970416000000483,
+        "prefilter": 11.846667000000366
+      }
+    },
+    "multiline": {
+      "query": "needle 한글\\nx",
+      "mode": "document-regex",
+      "expected": 128,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 27.853166999999956,
+            "first_ms": 12.573042000001422,
+            "peak_rss_bytes": 8257536,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.742833999999107,
+            "first_ms": 12.026249999999905,
+            "peak_rss_bytes": 7864320,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.13437500000049,
+            "first_ms": 17.48037499999988,
+            "peak_rss_bytes": 7929856,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 27.86195900000088,
+            "first_ms": 18.41004200000107,
+            "peak_rss_bytes": 8077312,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 26.867458999999982,
+            "first_ms": 6.163499999999544,
+            "peak_rss_bytes": 8028160,
+            "matches": 128
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 76.7041250000009,
+            "first_ms": 12.729375000001042,
+            "peak_rss_bytes": 2310144,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 9.051458000000068,
+            "listing_peak_rss_bytes": 5128192,
+            "native_elapsed_ns": 63814875,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 76.18987499999896,
+            "first_ms": 12.015625000000085,
+            "peak_rss_bytes": 2310144,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.24925000000043,
+            "listing_peak_rss_bytes": 5144576,
+            "native_elapsed_ns": 64022250,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 76.15537399999894,
+            "first_ms": 11.905540999999076,
+            "peak_rss_bytes": 2310144,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.805915999998803,
+            "listing_peak_rss_bytes": 5324800,
+            "native_elapsed_ns": 64106459,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 78.16795900000173,
+            "first_ms": 13.418793000001372,
+            "peak_rss_bytes": 2359296,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 9.423459000000634,
+            "listing_peak_rss_bytes": 5242880,
+            "native_elapsed_ns": 64520708,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 76.49974999999998,
+            "first_ms": 12.326458000000429,
+            "peak_rss_bytes": 2310144,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.429708000001312,
+            "listing_peak_rss_bytes": 5177344,
+            "native_elapsed_ns": 64019125,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 77.37524999999756,
+            "first_ms": 13.03579199999838,
+            "peak_rss_bytes": 2310144,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 9.032707999999445,
+            "listing_peak_rss_bytes": 5160960,
+            "native_elapsed_ns": 64183041,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.8544170000004,
+            "first_ms": 11.808626000000544,
+            "peak_rss_bytes": 2310144,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.824541999999823,
+            "listing_peak_rss_bytes": 5275648,
+            "native_elapsed_ns": 63883875,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 77.3790000000023,
+            "first_ms": 12.916042000002292,
+            "peak_rss_bytes": 2359296,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 9.160458000000204,
+            "listing_peak_rss_bytes": 5144576,
+            "native_elapsed_ns": 64291250,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 74.91012399999875,
+            "first_ms": 10.81166599999861,
+            "peak_rss_bytes": 2359296,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.959207999999606,
+            "listing_peak_rss_bytes": 5324800,
+            "native_elapsed_ns": 63920292,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 76.2689159999983,
+            "first_ms": 12.49241599999884,
+            "peak_rss_bytes": 2310144,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.497374999999252,
+            "listing_peak_rss_bytes": 5128192,
+            "native_elapsed_ns": 63598458,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 27.86195900000088,
+        "native": 76.49974999999998,
+        "prefilter": 76.2689159999983
+      },
+      "median_first_ms": {
+        "rg": 12.573042000001422,
+        "native": 12.326458000000429,
+        "prefilter": 12.49241599999884
+      }
+    },
+    "document-start": {
+      "query": "\\Aneedle",
+      "mode": "document-regex",
+      "expected": 128,
+      "samples": {
+        "rg": [
+          {
+            "exit": 0,
+            "elapsed_ms": 27.941334000001206,
+            "first_ms": 11.195125000000417,
+            "peak_rss_bytes": 7389184,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 27.693250000000447,
+            "first_ms": 9.712874999999954,
+            "peak_rss_bytes": 7405568,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.292874999999995,
+            "first_ms": 13.785583000000656,
+            "peak_rss_bytes": 7421952,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 28.151333000000278,
+            "first_ms": 16.02054099999961,
+            "peak_rss_bytes": 7602176,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 25.02729199999898,
+            "first_ms": 9.796916999999183,
+            "peak_rss_bytes": 7471104,
+            "matches": 128
+          }
+        ],
+        "native": [
+          {
+            "exit": 0,
+            "elapsed_ms": 74.87220800000216,
+            "first_ms": 12.482375000001156,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.53724999999983,
+            "listing_peak_rss_bytes": 5177344,
+            "native_elapsed_ns": 62245834,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.27975100000006,
+            "first_ms": 12.129000999999917,
+            "peak_rss_bytes": 2375680,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.8820840000002335,
+            "listing_peak_rss_bytes": 5275648,
+            "native_elapsed_ns": 63025292,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.99441799999873,
+            "first_ms": 11.529042999999461,
+            "peak_rss_bytes": 2375680,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.361208999999036,
+            "listing_peak_rss_bytes": 5783552,
+            "native_elapsed_ns": 64314666,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 76.20029100000103,
+            "first_ms": 12.895041000000163,
+            "peak_rss_bytes": 2375680,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.807708000000858,
+            "listing_peak_rss_bytes": 5046272,
+            "native_elapsed_ns": 63150542,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 73.8305429999997,
+            "first_ms": 11.189418000000728,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.925917000000226,
+            "listing_peak_rss_bytes": 5242880,
+            "native_elapsed_ns": 62493500,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ],
+        "prefilter": [
+          {
+            "exit": 0,
+            "elapsed_ms": 74.01274999999963,
+            "first_ms": 11.138666999999103,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 7.025084000000348,
+            "listing_peak_rss_bytes": 5259264,
+            "native_elapsed_ns": 62736041,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.67699999999888,
+            "first_ms": 12.395790999999434,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.394499999999638,
+            "listing_peak_rss_bytes": 5259264,
+            "native_elapsed_ns": 63117792,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 73.73520799999866,
+            "first_ms": 10.771540999998663,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 6.874040999999664,
+            "listing_peak_rss_bytes": 5046272,
+            "native_elapsed_ns": 62825708,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.82387400000101,
+            "first_ms": 12.700791000000322,
+            "peak_rss_bytes": 2375680,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.600250000000642,
+            "listing_peak_rss_bytes": 5341184,
+            "native_elapsed_ns": 62950833,
+            "prefilter_used": false,
+            "matches": 128
+          },
+          {
+            "exit": 0,
+            "elapsed_ms": 75.22683300000033,
+            "first_ms": 12.764499999999401,
+            "peak_rss_bytes": 2326528,
+            "selected_files": 2048,
+            "read_bytes": 67108864,
+            "listing_ms": 8.426500000000559,
+            "listing_peak_rss_bytes": 5324800,
+            "native_elapsed_ns": 62309625,
+            "prefilter_used": false,
+            "matches": 128
+          }
+        ]
+      },
+      "median_ms": {
+        "rg": 27.941334000001206,
+        "native": 75.27975100000006,
+        "prefilter": 75.22683300000033
+      },
+      "median_first_ms": {
+        "rg": 11.195125000000417,
+        "native": 12.129000999999917,
+        "prefilter": 12.395790999999434
+      }
+    }
+  },
+  "status": "passed",
+  "limits": "합성 자료·캐시 미제거. 첫 pipe 결과이며 UI 표시 시간이 아님. RSS는 각 CLI 자식의 peak이며 앱·Python 메모리를 포함하지 않음.",
+  "product_base": "6119e8de8eb46e378f89c967b25a5dd334d7b5a1",
+  "product_source_sha256": {
+    "src/session/editor/find.zig": "7b1c6efb14220a1bcf0b14448a142b38a7693730f083f33a7a2390f72e9583da",
+    "src/session/editor/document.zig": "f9558a6e28d44b2b931c862185e53c899c548f6f82f43efdd8787dd0403da092",
+    "src/session/editor/line_index.zig": "f43c8a437936d9f4d9ecd29b8ba533f251d775b9f0181c1538322c019dd9ca5d",
+    "src/session/editor/selection.zig": "672cdb7f51d48f32b05693a048dab13fb2e6fd2936560314ef8fc6ae5bafb1e2",
+    "src/terminal/selection.zig": "77f557a38b382ce92237a5815f9f32253d4c3238bf24d43ef7536b0795756ffb",
+    "src/search_case_fold.zig": "218e9d70c08693e6eccbf9ac53f06af800b9a9ea2c2c97e91f7445edf4ea9d62",
+    "src/regex.zig": "77bee364372b0ce81bc857f7db56feae4117c9180339d96e13ceb97e6d81565c"
+  },
+  "hardware": {
+    "machdep.cpu.brand_string": "Apple M4 Max",
+    "hw.memsize": "68719476736",
+    "hw.ncpu": "16"
+  }
+}

@@ -8,14 +8,16 @@ pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const args = try init.minimal.args.toSlice(a);
     defer a.free(args);
-    if (args.len < 4 or args.len > 6) return error.ExpectedFileListQueryMode;
+    if (args.len < 4 or args.len > 7) return error.ExpectedFileListQueryMode;
     var emit_ranges = false;
+    var emit_offsets = false;
     var raw_bytes = false;
     for (args[4..]) |arg| {
-        if (std.mem.eql(u8, arg, "--ranges")) emit_ranges = true else if (std.mem.eql(u8, arg, "--raw-bytes")) raw_bytes = true else return error.InvalidOutputOption;
+        if (std.mem.eql(u8, arg, "--ranges")) emit_ranges = true else if (std.mem.eql(u8, arg, "--offsets")) emit_offsets = true else if (std.mem.eql(u8, arg, "--raw-bytes")) raw_bytes = true else return error.InvalidOutputOption;
     }
+    if (emit_ranges and emit_offsets) return error.ConflictingOutputOption;
     const byte_candidate = std.mem.eql(u8, args[3], "byte-candidate");
-    const document_regex = std.mem.eql(u8, args[3], "document-regex");
+    const document_regex = std.mem.startsWith(u8, args[3], "document-regex");
     if (byte_candidate) {
         if (args[2].len == 0) return error.EmptyLiteralQuery;
         _ = try std.unicode.Utf8View.init(args[2]);
@@ -23,12 +25,20 @@ pub fn main(init: std.process.Init) !void {
     }
     const options: find.Options = if (std.mem.eql(u8, args[3], "literal") or byte_candidate)
         .{ .match_case = true }
-    else if (std.mem.eql(u8, args[3], "regex") or document_regex)
+    else if (std.mem.eql(u8, args[3], "regex") or std.mem.eql(u8, args[3], "document-regex"))
         .{ .regex = true, .match_case = true }
+    else if (std.mem.eql(u8, args[3], "document-regex-fold"))
+        .{ .regex = true }
+    else if (std.mem.eql(u8, args[3], "document-regex-word"))
+        .{ .regex = true, .whole_word = true, .match_case = true }
+    else if (std.mem.eql(u8, args[3], "document-regex-word-fold"))
+        .{ .regex = true, .whole_word = true }
     else if (std.mem.eql(u8, args[3], "word"))
         .{ .whole_word = true, .match_case = true }
     else if (std.mem.eql(u8, args[3], "literal-fold"))
         .{}
+    else if (std.mem.eql(u8, args[3], "word-fold"))
+        .{ .whole_word = true }
     else
         return error.InvalidMode;
     // 실험 파일을 읽는 한도다. 제품의 파일 크기 정책을 이 값으로 정하지 않는다.
@@ -57,9 +67,13 @@ pub fn main(init: std.process.Init) !void {
         // 제품과 같은 BOM·줄 경계를 사용한다. 두 후보가 같은 전처리 오류를 공유하면 대조도 통과한다.
         // 깨진 byte를 직접 넣는 검사는 명시적으로 분리하며 제품의 파일 열기 성공으로 세지 않는다.
         const content = if (raw_bytes) text else (try document.open(text, true)).content;
-        var document_lines = try line_index.build(a, content);
-        defer document_lines.deinit();
-        for (document_lines.lines) |line| try lines.append(a, content[line.start..line.contentEnd()]);
+        // 문서 정규식은 helper 자체가 줄 인덱스를 준비한다. 사용하지 않는 전처리를 중복 측정하지 않는다.
+        var document_lines: ?line_index.LineIndex = null;
+        defer if (document_lines) |*index| index.deinit();
+        if (!document_regex or emit_offsets) {
+            document_lines = try line_index.build(a, content);
+            if (!document_regex) for (document_lines.?.lines) |line| try lines.append(a, content[line.start..line.contentEnd()]);
+        }
         if (byte_candidate) {
             // 유효한 UTF-8·대소문자 구분만 비교한다. Unicode 접기·정규식 동등성은 주장하지 않는다.
             matches.clearRetainingCapacity();
@@ -71,16 +85,19 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         } else if (document_regex) {
-            try find.findDocumentRegex(a, content, args[2], .{ .match_case = true, .newline = .anycrlf }, &matches);
+            try find.findDocumentRegex(a, content, args[2], .{ .match_case = options.match_case, .whole_word = options.whole_word, .newline = .anycrlf }, &matches);
         } else {
             try find.findMatches(a, lines.items, args[2], options, &matches);
         }
-        if (emit_ranges) {
+        if (emit_ranges or emit_offsets) {
             // 전체 범위 대조용 출력이다. 기본 성능 측정에는 이 직렬화 비용을 넣지 않는다.
-            try writer.interface.print("{{\"file_index\":{d},\"ranges\":[", .{files - 1});
+            try writer.interface.print("{{\"file_index\":{d},\"{s}\":[", .{ files - 1, if (emit_offsets) "offsets" else "ranges" });
             for (matches.items, 0..) |match, index| {
                 if (index != 0) try writer.interface.writeAll(",");
-                if (document_regex) {
+                if (emit_offsets) {
+                    const lo = document_lines.?.lines[match.line].start + match.start;
+                    try writer.interface.print("[{d},{d}]", .{ lo, lo + match.len });
+                } else if (document_regex) {
                     const end = match.end.?;
                     try writer.interface.print("[{d},{d},{d},{d},{d}]", .{ match.line, match.start, match.len, end.line, end.byte });
                 } else {

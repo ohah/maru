@@ -1,0 +1,7502 @@
+{
+  "status": "completed",
+  "seed": 4145,
+  "files": 61,
+  "queries": 183,
+  "cases": [
+    {
+      "mode": "literal",
+      "query": "foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "bar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "aa",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "needle",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "NEEDLE",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "é",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "É",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "k",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "s",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "I",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "Σ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "ς",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "А",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "Ё",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "ß",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "ffi",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "한글",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "가",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "가",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "😀",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "-",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "--",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "- ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": " ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "\t",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "_",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": ".*",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "absent",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal",
+      "query": "",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 59,
+          "example": [
+            {
+              "file": "bom",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 59,
+          "example": [
+            {
+              "file": "bom",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "bar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "aa",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "needle",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "NEEDLE",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "é",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "É",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "k",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "s",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "I",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "Σ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "ς",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "А",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "Ё",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "ß",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "ffi",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "한글",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "가",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "가",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "😀",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "-",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "--",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "- ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": " ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "\t",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "_",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": ".*",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "absent",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "literal-fold",
+      "query": "",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 59,
+          "example": [
+            {
+              "file": "bom",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 59,
+          "example": [
+            {
+              "file": "bom",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "bar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 14,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [],
+              "rg": [
+                [
+                  82,
+                  85
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 14,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [],
+              "rg": [
+                [
+                  82,
+                  85
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "aa",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 7,
+          "example": [
+            {
+              "file": "random-06",
+              "native": [
+                [
+                  109,
+                  111
+                ]
+              ],
+              "rg": [
+                [
+                  109,
+                  111
+                ],
+                [
+                  113,
+                  115
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 7,
+          "example": [
+            {
+              "file": "random-06",
+              "native": [
+                [
+                  109,
+                  111
+                ]
+              ],
+              "rg": [
+                [
+                  109,
+                  111
+                ],
+                [
+                  113,
+                  115
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "needle",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 14,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  71,
+                  77
+                ]
+              ],
+              "rg": [
+                [
+                  33,
+                  39
+                ],
+                [
+                  71,
+                  77
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 14,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  71,
+                  77
+                ]
+              ],
+              "rg": [
+                [
+                  33,
+                  39
+                ],
+                [
+                  71,
+                  77
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "NEEDLE",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  156,
+                  162
+                ]
+              ],
+              "rg": [
+                [
+                  119,
+                  125
+                ],
+                [
+                  156,
+                  162
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  156,
+                  162
+                ]
+              ],
+              "rg": [
+                [
+                  119,
+                  125
+                ],
+                [
+                  156,
+                  162
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "é",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 14,
+          "example": [
+            {
+              "file": "random-07",
+              "native": [
+                [
+                  55,
+                  57
+                ]
+              ],
+              "rg": [
+                [
+                  41,
+                  43
+                ],
+                [
+                  55,
+                  57
+                ],
+                [
+                  103,
+                  105
+                ],
+                [
+                  119,
+                  121
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 14,
+          "example": [
+            {
+              "file": "random-07",
+              "native": [
+                [
+                  55,
+                  57
+                ]
+              ],
+              "rg": [
+                [
+                  41,
+                  43
+                ],
+                [
+                  55,
+                  57
+                ],
+                [
+                  103,
+                  105
+                ],
+                [
+                  119,
+                  121
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "É",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 10,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  83,
+                  85
+                ]
+              ],
+              "rg": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  83,
+                  85
+                ],
+                [
+                  174,
+                  176
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 10,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  83,
+                  85
+                ]
+              ],
+              "rg": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  83,
+                  85
+                ],
+                [
+                  174,
+                  176
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "k",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 17,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  210,
+                  211
+                ]
+              ],
+              "rg": [
+                [
+                  98,
+                  99
+                ],
+                [
+                  210,
+                  211
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 17,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  210,
+                  211
+                ]
+              ],
+              "rg": [
+                [
+                  98,
+                  99
+                ],
+                [
+                  210,
+                  211
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "s",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "I",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "Σ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "ς",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "А",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "Ё",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "ß",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "ffi",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "한글",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [
+                [
+                  113,
+                  119
+                ],
+                [
+                  180,
+                  186
+                ]
+              ],
+              "rg": [
+                [
+                  113,
+                  119
+                ],
+                [
+                  172,
+                  178
+                ],
+                [
+                  180,
+                  186
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [
+                [
+                  113,
+                  119
+                ],
+                [
+                  180,
+                  186
+                ]
+              ],
+              "rg": [
+                [
+                  113,
+                  119
+                ],
+                [
+                  172,
+                  178
+                ],
+                [
+                  180,
+                  186
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "가",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "가",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "😀",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  163,
+                  167
+                ],
+                [
+                  190,
+                  194
+                ]
+              ],
+              "rg": [
+                [
+                  163,
+                  167
+                ],
+                [
+                  168,
+                  172
+                ],
+                [
+                  190,
+                  194
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  163,
+                  167
+                ],
+                [
+                  190,
+                  194
+                ]
+              ],
+              "rg": [
+                [
+                  163,
+                  167
+                ],
+                [
+                  168,
+                  172
+                ],
+                [
+                  190,
+                  194
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "-",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 46,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  5,
+                  6
+                ],
+                [
+                  6,
+                  7
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 46,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  5,
+                  6
+                ],
+                [
+                  6,
+                  7
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "--",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  5,
+                  7
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  5,
+                  7
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "- ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": " ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 49,
+          "example": [
+            {
+              "file": "case",
+              "native": [
+                [
+                  2,
+                  3
+                ],
+                [
+                  5,
+                  6
+                ],
+                [
+                  8,
+                  9
+                ],
+                [
+                  11,
+                  12
+                ],
+                [
+                  14,
+                  15
+                ],
+                [
+                  17,
+                  18
+                ],
+                [
+                  20,
+                  21
+                ],
+                [
+                  23,
+                  24
+                ],
+                [
+                  26,
+                  27
+                ],
+                [
+                  29,
+                  30
+                ],
+                [
+                  32,
+                  33
+                ],
+                [
+                  35,
+                  36
+                ],
+                [
+                  38,
+                  39
+                ],
+                [
+                  40,
+                  41
+                ],
+                [
+                  42,
+                  43
+                ],
+                [
+                  46,
+                  47
+                ],
+                [
+                  48,
+                  49
+                ],
+                [
+                  50,
+                  51
+                ],
+                [
+                  53,
+                  54
+                ],
+                [
+                  55,
+                  56
+                ],
+                [
+                  57,
+                  58
+                ],
+                [
+                  60,
+                  61
+                ],
+                [
+                  63,
+                  64
+                ],
+                [
+                  66,
+                  67
+                ],
+                [
+                  70,
+                  71
+                ],
+                [
+                  74,
+                  75
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 49,
+          "example": [
+            {
+              "file": "case",
+              "native": [
+                [
+                  2,
+                  3
+                ],
+                [
+                  5,
+                  6
+                ],
+                [
+                  8,
+                  9
+                ],
+                [
+                  11,
+                  12
+                ],
+                [
+                  14,
+                  15
+                ],
+                [
+                  17,
+                  18
+                ],
+                [
+                  20,
+                  21
+                ],
+                [
+                  23,
+                  24
+                ],
+                [
+                  26,
+                  27
+                ],
+                [
+                  29,
+                  30
+                ],
+                [
+                  32,
+                  33
+                ],
+                [
+                  35,
+                  36
+                ],
+                [
+                  38,
+                  39
+                ],
+                [
+                  40,
+                  41
+                ],
+                [
+                  42,
+                  43
+                ],
+                [
+                  46,
+                  47
+                ],
+                [
+                  48,
+                  49
+                ],
+                [
+                  50,
+                  51
+                ],
+                [
+                  53,
+                  54
+                ],
+                [
+                  55,
+                  56
+                ],
+                [
+                  57,
+                  58
+                ],
+                [
+                  60,
+                  61
+                ],
+                [
+                  63,
+                  64
+                ],
+                [
+                  66,
+                  67
+                ],
+                [
+                  70,
+                  71
+                ],
+                [
+                  74,
+                  75
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "\t",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 47,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  10,
+                  11
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 47,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  10,
+                  11
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [],
+              "rg": [
+                [
+                  43,
+                  44
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [],
+              "rg": [
+                [
+                  43,
+                  44
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "_",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 11,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  31,
+                  32
+                ]
+              ],
+              "rg": [
+                [
+                  31,
+                  32
+                ],
+                [
+                  169,
+                  170
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 11,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  31,
+                  32
+                ]
+              ],
+              "rg": [
+                [
+                  31,
+                  32
+                ],
+                [
+                  169,
+                  170
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": ".*",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  14,
+                  16
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  14,
+                  16
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "absent",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word",
+      "query": "",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 56,
+          "example": [
+            {
+              "file": "bom",
+              "native": [],
+              "rg": [
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 56,
+          "example": [
+            {
+              "file": "bom",
+              "native": [],
+              "rg": [
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "bar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 14,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [],
+              "rg": [
+                [
+                  82,
+                  85
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 14,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [],
+              "rg": [
+                [
+                  82,
+                  85
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "aa",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 7,
+          "example": [
+            {
+              "file": "random-06",
+              "native": [
+                [
+                  109,
+                  111
+                ]
+              ],
+              "rg": [
+                [
+                  109,
+                  111
+                ],
+                [
+                  113,
+                  115
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 7,
+          "example": [
+            {
+              "file": "random-06",
+              "native": [
+                [
+                  109,
+                  111
+                ]
+              ],
+              "rg": [
+                [
+                  109,
+                  111
+                ],
+                [
+                  113,
+                  115
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "needle",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 24,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  71,
+                  77
+                ],
+                [
+                  156,
+                  162
+                ]
+              ],
+              "rg": [
+                [
+                  33,
+                  39
+                ],
+                [
+                  71,
+                  77
+                ],
+                [
+                  119,
+                  125
+                ],
+                [
+                  156,
+                  162
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 24,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  71,
+                  77
+                ],
+                [
+                  156,
+                  162
+                ]
+              ],
+              "rg": [
+                [
+                  33,
+                  39
+                ],
+                [
+                  71,
+                  77
+                ],
+                [
+                  119,
+                  125
+                ],
+                [
+                  156,
+                  162
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "NEEDLE",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 24,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  71,
+                  77
+                ],
+                [
+                  156,
+                  162
+                ]
+              ],
+              "rg": [
+                [
+                  33,
+                  39
+                ],
+                [
+                  71,
+                  77
+                ],
+                [
+                  119,
+                  125
+                ],
+                [
+                  156,
+                  162
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 24,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  71,
+                  77
+                ],
+                [
+                  156,
+                  162
+                ]
+              ],
+              "rg": [
+                [
+                  33,
+                  39
+                ],
+                [
+                  71,
+                  77
+                ],
+                [
+                  119,
+                  125
+                ],
+                [
+                  156,
+                  162
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "é",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 21,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  80,
+                  82
+                ],
+                [
+                  83,
+                  85
+                ]
+              ],
+              "rg": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  80,
+                  82
+                ],
+                [
+                  83,
+                  85
+                ],
+                [
+                  174,
+                  176
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 21,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  80,
+                  82
+                ],
+                [
+                  83,
+                  85
+                ]
+              ],
+              "rg": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  80,
+                  82
+                ],
+                [
+                  83,
+                  85
+                ],
+                [
+                  174,
+                  176
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "É",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 21,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  80,
+                  82
+                ],
+                [
+                  83,
+                  85
+                ]
+              ],
+              "rg": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  80,
+                  82
+                ],
+                [
+                  83,
+                  85
+                ],
+                [
+                  174,
+                  176
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 21,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  80,
+                  82
+                ],
+                [
+                  83,
+                  85
+                ]
+              ],
+              "rg": [
+                [
+                  14,
+                  16
+                ],
+                [
+                  80,
+                  82
+                ],
+                [
+                  83,
+                  85
+                ],
+                [
+                  174,
+                  176
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "k",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 22,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  210,
+                  211
+                ]
+              ],
+              "rg": [
+                [
+                  98,
+                  99
+                ],
+                [
+                  210,
+                  211
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 22,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  210,
+                  211
+                ]
+              ],
+              "rg": [
+                [
+                  98,
+                  99
+                ],
+                [
+                  210,
+                  211
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "s",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "I",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "Σ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "ς",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "А",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "Ё",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "ß",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "ffi",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "한글",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [
+                [
+                  113,
+                  119
+                ],
+                [
+                  180,
+                  186
+                ]
+              ],
+              "rg": [
+                [
+                  113,
+                  119
+                ],
+                [
+                  172,
+                  178
+                ],
+                [
+                  180,
+                  186
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [
+                [
+                  113,
+                  119
+                ],
+                [
+                  180,
+                  186
+                ]
+              ],
+              "rg": [
+                [
+                  113,
+                  119
+                ],
+                [
+                  172,
+                  178
+                ],
+                [
+                  180,
+                  186
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "가",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "가",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "😀",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  163,
+                  167
+                ],
+                [
+                  190,
+                  194
+                ]
+              ],
+              "rg": [
+                [
+                  163,
+                  167
+                ],
+                [
+                  168,
+                  172
+                ],
+                [
+                  190,
+                  194
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  163,
+                  167
+                ],
+                [
+                  190,
+                  194
+                ]
+              ],
+              "rg": [
+                [
+                  163,
+                  167
+                ],
+                [
+                  168,
+                  172
+                ],
+                [
+                  190,
+                  194
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "-",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 46,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  5,
+                  6
+                ],
+                [
+                  6,
+                  7
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 46,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  5,
+                  6
+                ],
+                [
+                  6,
+                  7
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "--",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  5,
+                  7
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  5,
+                  7
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "- ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [
+                [
+                  1,
+                  3
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": " ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 49,
+          "example": [
+            {
+              "file": "case",
+              "native": [
+                [
+                  2,
+                  3
+                ],
+                [
+                  5,
+                  6
+                ],
+                [
+                  8,
+                  9
+                ],
+                [
+                  11,
+                  12
+                ],
+                [
+                  14,
+                  15
+                ],
+                [
+                  17,
+                  18
+                ],
+                [
+                  20,
+                  21
+                ],
+                [
+                  23,
+                  24
+                ],
+                [
+                  26,
+                  27
+                ],
+                [
+                  29,
+                  30
+                ],
+                [
+                  32,
+                  33
+                ],
+                [
+                  35,
+                  36
+                ],
+                [
+                  38,
+                  39
+                ],
+                [
+                  40,
+                  41
+                ],
+                [
+                  42,
+                  43
+                ],
+                [
+                  46,
+                  47
+                ],
+                [
+                  48,
+                  49
+                ],
+                [
+                  50,
+                  51
+                ],
+                [
+                  53,
+                  54
+                ],
+                [
+                  55,
+                  56
+                ],
+                [
+                  57,
+                  58
+                ],
+                [
+                  60,
+                  61
+                ],
+                [
+                  63,
+                  64
+                ],
+                [
+                  66,
+                  67
+                ],
+                [
+                  70,
+                  71
+                ],
+                [
+                  74,
+                  75
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 49,
+          "example": [
+            {
+              "file": "case",
+              "native": [
+                [
+                  2,
+                  3
+                ],
+                [
+                  5,
+                  6
+                ],
+                [
+                  8,
+                  9
+                ],
+                [
+                  11,
+                  12
+                ],
+                [
+                  14,
+                  15
+                ],
+                [
+                  17,
+                  18
+                ],
+                [
+                  20,
+                  21
+                ],
+                [
+                  23,
+                  24
+                ],
+                [
+                  26,
+                  27
+                ],
+                [
+                  29,
+                  30
+                ],
+                [
+                  32,
+                  33
+                ],
+                [
+                  35,
+                  36
+                ],
+                [
+                  38,
+                  39
+                ],
+                [
+                  40,
+                  41
+                ],
+                [
+                  42,
+                  43
+                ],
+                [
+                  46,
+                  47
+                ],
+                [
+                  48,
+                  49
+                ],
+                [
+                  50,
+                  51
+                ],
+                [
+                  53,
+                  54
+                ],
+                [
+                  55,
+                  56
+                ],
+                [
+                  57,
+                  58
+                ],
+                [
+                  60,
+                  61
+                ],
+                [
+                  63,
+                  64
+                ],
+                [
+                  66,
+                  67
+                ],
+                [
+                  70,
+                  71
+                ],
+                [
+                  74,
+                  75
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "\t",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 47,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  10,
+                  11
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 47,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  10,
+                  11
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [],
+              "rg": [
+                [
+                  43,
+                  44
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 9,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [],
+              "rg": [
+                [
+                  43,
+                  44
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "_",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 11,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  31,
+                  32
+                ]
+              ],
+              "rg": [
+                [
+                  31,
+                  32
+                ],
+                [
+                  169,
+                  170
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 11,
+          "example": [
+            {
+              "file": "random-00",
+              "native": [
+                [
+                  31,
+                  32
+                ]
+              ],
+              "rg": [
+                [
+                  31,
+                  32
+                ],
+                [
+                  169,
+                  170
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": ".*",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  14,
+                  16
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "punctuation",
+              "native": [],
+              "rg": [
+                [
+                  14,
+                  16
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "absent",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "word-fold",
+      "query": "",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 56,
+          "example": [
+            {
+              "file": "bom",
+              "native": [],
+              "rg": [
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 56,
+          "example": [
+            {
+              "file": "bom",
+              "native": [],
+              "rg": [
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "^foo$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "^",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 17,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 15,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  3,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "^$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 17,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 15,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "^|foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 35,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 34,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "foo|^",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 17,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 15,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?=foo)",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?=foo)|foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 57,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 57,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "foo|(?=foo)",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": ".*",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": ".*?",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  1
+                ],
+                [
+                  1,
+                  2
+                ],
+                [
+                  2,
+                  3
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  1
+                ],
+                [
+                  1,
+                  2
+                ],
+                [
+                  2,
+                  3
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": ".+?",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "a*",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "a+",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "a??",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  1
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?:foo)?",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 61,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  3,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  4,
+                  4
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "foo|foobar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\bfoo\\b",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\w+",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\W+",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\s+",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\S+",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\r$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 13,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  3,
+                  4
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\x00",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\p{L}+",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\p{Greek}+",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "unicode",
+              "native": [
+                [
+                  15,
+                  17
+                ]
+              ],
+              "rg": []
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?<=foo)bar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "foo(?=bar)",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(foo)\\1",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(a+)\\1",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?i)k",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?i)é",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?i)Σ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?i)ß",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?m)^foo$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "foo\\r?\\nbar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\Afoo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "foo\\z",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "foo\\Kbar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "\\Gfoo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?s)foo.bar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(*LF)^bar$",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 2,
+          "both_valid": false,
+          "equal": false,
+          "error": "rg: regex could not be compiled with either the default regex engine or with PCRE2.\n\ndefault regex engine error:\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nregex parse error:\n    (?:(*LF)^bar$)\n        ^\nerror: repetition operator missing expression\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\nPCRE2 regex engine error:\nPCRE2: error compiling pattern at offset 7: (*VERB) not recognized or malformed\n",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 2,
+          "both_valid": false,
+          "equal": false,
+          "error": "rg: PCRE2: error compiling pattern at offset 7: (*VERB) not recognized or malformed\n",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "[",
+      "native_exit": 1,
+      "native_error": "error: InvalidPattern\n",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 2,
+          "both_valid": false,
+          "equal": false,
+          "error": "rg: regex could not be compiled with either the default regex engine or with PCRE2.\n\ndefault regex engine error:\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nregex parse error:\n    (?:(?m)[)\n           ^\nerror: unclosed character class\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\nPCRE2 regex engine error:\nPCRE2: error compiling pattern at offset 9: missing terminating ] for character class\n",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 2,
+          "both_valid": false,
+          "equal": false,
+          "error": "rg: PCRE2: error compiling pattern at offset 9: missing terminating ] for character class\n",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex",
+      "query": "(?<=a+)b",
+      "native_exit": 1,
+      "native_error": "error: InvalidPattern\n",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 2,
+          "both_valid": false,
+          "equal": false,
+          "error": "rg: regex could not be compiled with either the default regex engine or with PCRE2.\n\ndefault regex engine error:\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nregex parse error:\n    (?:(?m)(?<=a+)b)\n           ^^^^\nerror: look-around, including look-ahead and look-behind, is not supported\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\nPCRE2 regex engine error:\nPCRE2: error compiling pattern at offset 7: length of lookbehind assertion is not limited\n",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 2,
+          "both_valid": false,
+          "equal": false,
+          "error": "rg: PCRE2: error compiling pattern at offset 7: length of lookbehind assertion is not limited\n",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-fold",
+      "query": "foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-fold",
+      "query": "FOO",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-fold",
+      "query": "k",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-fold",
+      "query": "Σ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-fold",
+      "query": "foo\\r?\\nbar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-fold",
+      "query": "^|foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 35,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 34,
+          "example": [
+            {
+              "file": "bom",
+              "native": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  0
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word",
+      "query": "foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word",
+      "query": "FOO",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 1,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word",
+      "query": "k",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 17,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  210,
+                  211
+                ]
+              ],
+              "rg": [
+                [
+                  98,
+                  99
+                ],
+                [
+                  210,
+                  211
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 17,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  210,
+                  211
+                ]
+              ],
+              "rg": [
+                [
+                  98,
+                  99
+                ],
+                [
+                  210,
+                  211
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word",
+      "query": "Σ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word",
+      "query": "foo\\r?\\nbar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "mixed",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  8
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "mixed",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  8
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word",
+      "query": "^|foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 54,
+          "example": [
+            {
+              "file": "crlf",
+              "native": [
+                [
+                  0,
+                  3
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 54,
+          "example": [
+            {
+              "file": "crlf",
+              "native": [
+                [
+                  0,
+                  3
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ],
+                [
+                  6,
+                  6
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word-fold",
+      "query": "foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word-fold",
+      "query": "FOO",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 12,
+          "example": [
+            {
+              "file": "random-05",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  3
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word-fold",
+      "query": "k",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 22,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  210,
+                  211
+                ]
+              ],
+              "rg": [
+                [
+                  98,
+                  99
+                ],
+                [
+                  210,
+                  211
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 22,
+          "example": [
+            {
+              "file": "random-01",
+              "native": [
+                [
+                  210,
+                  211
+                ]
+              ],
+              "rg": [
+                [
+                  98,
+                  99
+                ],
+                [
+                  210,
+                  211
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word-fold",
+      "query": "Σ",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": true,
+          "error": "",
+          "different_files": 0,
+          "example": []
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word-fold",
+      "query": "foo\\r?\\nbar",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "mixed",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  8
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 1,
+          "example": [
+            {
+              "file": "mixed",
+              "native": [],
+              "rg": [
+                [
+                  0,
+                  8
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "mode": "document-regex-word-fold",
+      "query": "^|foo",
+      "native_exit": 0,
+      "native_error": "",
+      "variants": {
+        "rg-auto": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 54,
+          "example": [
+            {
+              "file": "crlf",
+              "native": [
+                [
+                  0,
+                  3
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ]
+              ]
+            }
+          ]
+        },
+        "rg-pcre2": {
+          "rg_exit": 0,
+          "both_valid": true,
+          "equal": false,
+          "error": "",
+          "different_files": 54,
+          "example": [
+            {
+              "file": "crlf",
+              "native": [
+                [
+                  0,
+                  3
+                ]
+              ],
+              "rg": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  5
+                ],
+                [
+                  6,
+                  6
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "native_sha256": "a09228f942c138e1fe6c09294f4c181a46ba0df8cb55b52d741891768ee0c297",
+  "rg_sha256": "7c7d5b09c3a57de864500c65dc2e9c4d2a5e96a3fc7b7d5318480c19887a739b",
+  "rg_version": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+NEON\nsimd(runtime):+NEON\n\nPCRE2 10.45 is available (JIT is available)\n",
+  "script_sha256": "21e46448fe789e26042b8c7aebca515ed43a0dd3fc0dd5bae01362ea6131d6c6",
+  "scope": "동일 document.open bytes의 모든 절대 byte 범위. BOM만 제거하고 원문 줄바꿈/EOF를 보존한다. 유한 자료의 대조이며 모든 정규식 동등성·제품 worker·IME·파일 선정의 검증은 아니다.",
+  "product_source_sha256": {
+    "src/session/editor/find.zig": "7b1c6efb14220a1bcf0b14448a142b38a7693730f083f33a7a2390f72e9583da",
+    "src/session/editor/document.zig": "f9558a6e28d44b2b931c862185e53c899c548f6f82f43efdd8787dd0403da092",
+    "src/session/editor/line_index.zig": "f43c8a437936d9f4d9ecd29b8ba533f251d775b9f0181c1538322c019dd9ca5d",
+    "src/session/editor/selection.zig": "672cdb7f51d48f32b05693a048dab13fb2e6fd2936560314ef8fc6ae5bafb1e2",
+    "src/search_case_fold.zig": "218e9d70c08693e6eccbf9ac53f06af800b9a9ea2c2c97e91f7445edf4ea9d62",
+    "src/regex.zig": "77bee364372b0ce81bc857f7db56feae4117c9180339d96e13ceb97e6d81565c"
+  },
+  "oracles": [
+    {
+      "file": "lf",
+      "query": "^$",
+      "mode": "document-regex",
+      "expected": [
+        [
+          4,
+          4
+        ],
+        [
+          5,
+          5
+        ]
+      ]
+    },
+    {
+      "file": "empty",
+      "query": "^$",
+      "mode": "document-regex",
+      "expected": [
+        [
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "file": "bom",
+      "query": "\\Afoo",
+      "mode": "document-regex",
+      "expected": [
+        [
+          0,
+          3
+        ]
+      ]
+    },
+    {
+      "file": "cr",
+      "query": "^foo$",
+      "mode": "document-regex",
+      "expected": [
+        [
+          0,
+          3
+        ]
+      ]
+    },
+    {
+      "file": "mixed",
+      "query": "foo\\r?\\nbar",
+      "mode": "document-regex",
+      "expected": [
+        [
+          0,
+          8
+        ]
+      ]
+    },
+    {
+      "file": "case",
+      "query": "k",
+      "mode": "literal-fold",
+      "expected": [
+        [
+          39,
+          40
+        ],
+        [
+          41,
+          42
+        ],
+        [
+          43,
+          46
+        ]
+      ]
+    }
+  ],
+  "summary": {
+    "rg-auto": {
+      "equal": 117,
+      "different": 63,
+      "errors": 3
+    },
+    "rg-pcre2": {
+      "equal": 119,
+      "different": 61,
+      "errors": 3
+    }
+  },
+  "unicode": {
+    "mapping_count": 1512,
+    "data_sha256": "ff8d8fefbf123574205085d6714c36149eb946d717a0c585c27f0f4ef58c4183",
+    "queries": 2994,
+    "native_oracle": "all queries passed Unicode 17 C/S byte ranges",
+    "different_queries": 56,
+    "different_codepoints": [
+      42958,
+      42959,
+      42962,
+      42963,
+      42964,
+      42965,
+      93856,
+      93857,
+      93858,
+      93859,
+      93860,
+      93861,
+      93862,
+      93863,
+      93864,
+      93865,
+      93866,
+      93867,
+      93868,
+      93869,
+      93870,
+      93871,
+      93872,
+      93873,
+      93874,
+      93875,
+      93876,
+      93877,
+      93878,
+      93879,
+      93880,
+      93883,
+      93884,
+      93885,
+      93886,
+      93887,
+      93888,
+      93889,
+      93890,
+      93891,
+      93892,
+      93893,
+      93894,
+      93895,
+      93896,
+      93897,
+      93898,
+      93899,
+      93900,
+      93901,
+      93902,
+      93903,
+      93904,
+      93905,
+      93906,
+      93907
+    ],
+    "examples": [
+      {
+        "query_codepoint": 42958,
+        "native": {
+          "all-unicode-pairs": [
+            [
+              7668,
+              7671
+            ],
+            [
+              7672,
+              7675
+            ]
+          ]
+        },
+        "rg": {
+          "all-unicode-pairs": [
+            [
+              7668,
+              7671
+            ]
+          ]
+        }
+      },
+      {
+        "query_codepoint": 42959,
+        "native": {
+          "all-unicode-pairs": [
+            [
+              7668,
+              7671
+            ],
+            [
+              7672,
+              7675
+            ]
+          ]
+        },
+        "rg": {
+          "all-unicode-pairs": [
+            [
+              7672,
+              7675
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "artifact_note": "Full offsets retained locally; committed report keeps counts and one example per query. Counts are query-level comparisons, not a general compatibility rate.",
+  "negative_control": {
+    "mutation": "native emitted byte offsets shifted by +1",
+    "outcome": "independent lf ^$ oracle rejected",
+    "artifact": "zig-out/rg-full-content-review/wrong-offset-negative.log"
+  }
+}

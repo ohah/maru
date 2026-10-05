@@ -364,36 +364,37 @@ class NSEvent { var locationInWindow=CGPoint.zero; var buttonNumber=0 }
 class NSView { func convert(_ p: CGPoint, from: NSView?) -> CGPoint { p } }
 class MaruMetalTerminalView: NSView { var attempts=0; var admitted=false; func commitMarkedTextIfComposing() -> Bool { attempts+=1; return admitted } }
 var dispatches=0
-func maru_macos_app_session_mouse(_ session: UnsafeMutableRawPointer, _ kind:Int32, _ x:Double, _ y:Double, _ button:Int32, _ mods:Int32) -> Int32 { dispatches+=1; return 0 }
+// W6g: 누름은 그 view 의 창 세션으로 간다 — 보낼 때의 세션이 그 view 의 것(표지 7)인지 본다.
+var currentSurface:Int?=nil
+var dispatchedIn:[Int?]=[]
+func maru_macos_app_session_mouse(_ session: UnsafeMutableRawPointer, _ kind:Int32, _ x:Double, _ y:Double, _ button:Int32, _ mods:Int32) -> Int32 { dispatches+=1; dispatchedIn.append(currentSurface); return 0 }
 class Controller {
  var appSession:UnsafeMutableRawPointer?=UnsafeMutableRawPointer(bitPattern:1)
  func backingPx(_ p:CGPoint,in view:NSView)->(Double,Double) { (0,0) }
  func modsBits(_ e:NSEvent)->Int32 { 0 }
  func markMetalNeedsRedraw() {}
- // W6g: 누름은 그 view 의 창 세션으로 간다 — 감싸개가 본문을 꼭 한 번 부르는지 센다.
- var routes=0
- func surfaceForView(_ v:NSView)->Int? { routes+=1; return nil }
- func withSurface(_ s:Int?, _ body:()->Void) { body() }
+ func surfaceForView(_ v:NSView)->Int? { 7 }
+ func withSurface(_ s:Int?, _ body:()->Void) { let previous=currentSurface; currentSurface=s; defer { currentSurface=previous }; body() }
 @@MOUSE@@
 }
 var failures=0
 for kind:Int32 in [1,4,5] {
  let v=MaruMetalTerminalView(); let c=Controller(); dispatches=0
  c.handleMouse(NSEvent(),kind:kind,in:v)
- print("kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches) routes=\(c.routes)")
- if dispatches != 0 || c.routes != 1 { failures+=1 }
+ print("kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches)")
+ if dispatches != 0 { failures+=1 }
 }
 for kind:Int32 in [1,4,5] {
  let v=MaruMetalTerminalView();v.admitted=true;let c=Controller();dispatches=0
  c.handleMouse(NSEvent(),kind:kind,in:v)
- print("admitted kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches)")
- if v.attempts != 1 || dispatches != 1 { failures+=1 }
+ print("admitted kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches) surface=\(String(describing: dispatchedIn.last ?? nil))")
+ if v.attempts != 1 || dispatches != 1 || dispatchedIn.last != 7 { failures+=1 }
 }
 for kind:Int32 in [2,3] {
  let v=MaruMetalTerminalView();let c=Controller();dispatches=0
  c.handleMouse(NSEvent(),kind:kind,in:v)
- print("motion kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches)")
- if v.attempts != 0 || dispatches != 1 { failures+=1 }
+ print("motion kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches) surface=\(String(describing: dispatchedIn.last ?? nil))")
+ if v.attempts != 0 || dispatches != 1 || dispatchedIn.last != 7 { failures+=1 }
 }
 print("failed_cases=\(failures)")
 exit(failures==0 ? 0:1)

@@ -11,6 +11,10 @@
 //!   media-open-copy    오디오의 「새 탭에서 오디오 열기」는 뒤 탭으로 그 주소, 「오디오 주소 복사」는 판정자 전용 클립보드에 그 주소
 //!   media-not-allowed  `blob:` 동영상의 「주소 복사」·「새 탭」은 실행하지 않는다(클립보드 그대로·새 탭 없음)
 //!   media-shifted      우클릭 뒤 메뉴가 떠 있는 동안 페이지가 두 오디오의 자리를 바꿔도 「연속 재생」은 우클릭한 그 오디오를 켠다
+//!   media-same-src     같은 주소 오디오 둘 중 우클릭한 것만 켠다 — 맨 위 문서와 같은 출처 iframe(DevTools 경로 — 주소로 찾는 보조 경로는 모른다)
+//!   media-cross-dup    다른 사이트 iframe 의 같은 주소 둘은 아무것도 켜지 않는다(사용자 결정 — 둘 이상이면 하지 않는다)
+//!   media-scrolled     500 px 스크롤한 페이지에서 화면에 보이는 오디오를 우클릭하면 그 오디오를 켠다(같은 주소의 위쪽 오디오가 아니다 —
+//!                      CEF 의 view 좌표를 문서 좌표로 바꾼다, W6h② 적대 검증)
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -32,6 +36,9 @@ const b_point: Point = .{ .x = 420, .y = 30 };
 const f_point: Point = .{ .x = 100, .y = 100 };
 const x_point: Point = .{ .x = 100, .y = 180 };
 const v_point: Point = .{ .x = 150, .y = 300 };
+const d2_point: Point = .{ .x = 480, .y = 310 };
+const g2_point: Point = .{ .x = 480, .y = 70 + 60 + 20 };
+const y2_point: Point = .{ .x = 150, .y = 420 + 20 };
 
 const Watch = struct {
     host: *Host,
@@ -193,6 +200,31 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     const copied = pasteboard.readText(board, pasteboard.string_type, &read_buf) orelse "";
     const copied_ok = std.mem.eql(u8, copied, want);
     report(opened_ok and copied_ok, "media-open-copy", std.fmt.bufPrint(&detail, "새 탭 뒤 {} 「{s}」 · 복사 「{s}」", .{ opened_ok, w.opened_url[0..w.opened_len], copied }) catch "");
+
+    // 같은 주소 둘 — 아래 것(d2)과 같은 출처 iframe 의 아래 것(g 의 둘째)만.
+    const dd = try w.rightClick(d2_point);
+    try w.pick(dd, .media_loop);
+    const d_ok = w.untilPart(" d01 ", 3_000);
+    const gg = try w.rightClick(g2_point);
+    try w.pick(gg, .media_loop);
+    const g_ok = w.untilPart(" g01 ", 3_000);
+    report(dd != null and gg != null and d_ok and g_ok, "media-same-src", std.fmt.bufPrint(&detail, "맨 위 아래 것만 {} · iframe 아래 것만 {} · 제목 「{s}」", .{ d_ok, g_ok, w.title() }) catch "");
+    // 다른 사이트 iframe 의 같은 주소 둘 — 보조 경로는 아무것도 하지 않는다.
+    const yy = try w.rightClick(y2_point);
+    const y_media = w.flags.media_audio;
+    try w.pick(yy, .media_loop);
+    w.pump(1_500);
+    const y_none = std.mem.indexOf(u8, w.title(), " y00") != null;
+    report(yy != null and y_media and y_none, "media-cross-dup", std.fmt.bufPrint(&detail, "메뉴 {any} · 오디오 {} · 둘 다 그대로 {} · 제목 「{s}」", .{ yy, y_media, y_none, w.title() }) catch "");
+
+    // 스크롤한 페이지 — 화면 (100,45) 에 보이는 것은 문서 545 의 아래 오디오다.
+    w.title_len = 0;
+    try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/media-scroll") } });
+    const scrolled = w.untilPart("s y500 s00", wait_ms);
+    const sc = try w.rightClick(.{ .x = 100, .y = 45 });
+    try w.pick(sc, .media_loop);
+    const low_only = w.untilPart(" s01", 3_000);
+    report(scrolled and sc != null and low_only, "media-scrolled", std.fmt.bufPrint(&detail, "스크롤 {} · 메뉴 {any} · 보이는 아래 오디오만 {} · 제목 「{s}」", .{ scrolled, sc, low_only, w.title() }) catch "");
 
     // 우클릭 뒤 자리가 바뀐다 — 다시 불러와 a 를 우클릭하면 페이지가 0.2 초 뒤 a·b 의 자리를 바꾼다. 0.8 초 뒤 고른다.
     if (!try w.load(port, true)) return error.MediaPageNotReady;

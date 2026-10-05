@@ -777,7 +777,7 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 31; // 방향 범위 안이지만 정의되지 않은 tag
+    bad[10] = 58; // 정의되지 않은 tag(maru → sidecar 의 0~31 은 W6j 의 `close_asking` 으로 다 찼다)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;

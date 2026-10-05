@@ -1190,17 +1190,15 @@ fn osrOpenNewTab(self: *AppSession, opener: u64) bool {
     return false;
 }
 
-/// 페이지가 그 탭의 브라우저를 닫았다(`window.close` — maru 가 닫지 않았다, W6f②) — 그 탭을 닫는다(Chrome 처럼 확인 없이). 활성
-/// 탭이었으면 연 탭으로 돌아가고, 그 pane 의 유일한 탭이면 닫지 않고 빈 보통 탭으로 새로 만든다. 자리로 잡아 둔 닫기 확인이 떠 있거나
-/// 탭을 끄는 중이면(빼면 그 자리가 다른 탭을 가리킨다) 다음 tick 에 — 다시 표시한다.
-/// 사용자가 닫는다(확인을 지났다 — W6j). 닫는 것이 Chromium 탭 하나뿐이면 먼저 페이지에 묻는다 — 떠나기 확인을 건 페이지면 「나가시겠습니까?」
-/// 를 한 번 더(W5a 대화상자), 머무르기면 탭이 남는다. 묻지 않는 페이지는 곧바로 닫힌다(sidecar 의 `browser_closed` 뒤 창의 tick 이
-/// `osrCloseAskedTab`). 여러 탭(pane·워크스페이스·창)은 묻지 않는다(사용자 결정 2026-10-05 — 「둘 다, 탭 하나만」). 물을 수 없으면
-/// (sidecar 가 돌지 않는다 등) 곧바로 닫는다.
+/// 사용자가 닫는다(확인을 지났다 — W6j). **탭 닫기**(⌘W·탭 ✕)로 닫는 것이 Chromium 탭 하나뿐이면 먼저 페이지에 묻는다 — 떠나기 확인을 건
+/// 페이지면 「나가시겠습니까?」를 한 번 더(W5a 대화상자), 머무르기면 탭이 남는다. 묻지 않는 페이지는 곧바로 닫힌다(sidecar 의
+/// `browser_closed` 뒤 창의 tick 이 `osrCloseAskedTab`). pane·워크스페이스·창 닫기(⇧⌘W·사이드바 ✕·빨간 단추)는 묻지 않는다(사용자
+/// 결정 2026-10-05 — 「둘 다, 탭 하나만」; 사이드바 ✕ 는 뒤쪽 워크스페이스도 닫아 질문이 보이지 않은 채 기다렸다 — 적대 검증). 물을 수
+/// 없으면(sidecar 가 돌지 않는다 등) 곧바로 닫는다.
 pub fn closeAskingPage(self: *AppSession, target: app_session_mod.PendingClose) void {
     switch (target) {
-        .agent_term, .window => {},
-        .pane_or_tab, .term_or_pane, .tab_index, .active_term => if (singleOsrTermInScope(self, self.resolveCloseScope(target))) |sid| {
+        .agent_term, .window, .pane_or_tab, .tab_index => {},
+        .term_or_pane, .active_term => if (singleOsrTermInScope(self, self.resolveCloseScope(target))) |sid| {
             if (web_osr.askClose(self.allocator, sid, @intCast(app_session_mod.monotonicMs()))) {
                 if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test pageclose asked\n", .{});
                 return;
@@ -1211,7 +1209,7 @@ pub fn closeAskingPage(self: *AppSession, target: app_session_mod.PendingClose) 
 }
 
 /// 그 범위가 Term 하나뿐이고 그것이 Chromium 탭이면 그 surface(W6j — 물을 닫기). 아니면 null.
-fn singleOsrTermInScope(self: *AppSession, scope: CloseScope) ?u64 {
+pub fn singleOsrTermInScope(self: *AppSession, scope: CloseScope) ?u64 {
     const pane = switch (scope) {
         .none => return null,
         .term => pane_ops.activePane(self),
@@ -1237,10 +1235,12 @@ fn singleOsrTermInScope(self: *AppSession, scope: CloseScope) ?u64 {
     return if (isOsrTerm(term)) term.surfaceId() else null;
 }
 
-/// 페이지에 물은 닫기가 끝났다(닫혔다·시한이 지났다 — W6j) — 그 탭을 닫는다(사용자가 고른 닫기다: 유일한 탭이면 pane·워크스페이스로
-/// 번진다 — `closeTermAt`). 물은 뒤 다른 탭으로 옮겼어도 그 탭만 닫는다(활성 기준으로 다시 풀지 않는다). 닫기 확인이 떠 있거나 탭을
-/// 끄는 중이면 다음 tick 에.
-fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.CloseAskOutcome) void {
+/// 페이지에 물은 닫기가 끝났다(닫혔다·시한이 지났다 — W6j) — 그 탭을 닫는다(사용자가 고른 닫기다: pane 의 유일한 탭이면 pane·워크스페이스
+/// 로 번진다 — `closeTermAt`). 창의 마지막 탭이면 탭을 부수지 않고 창을 닫는다(`executeClose` 의 `.session` 과 같다 — 먼저 부수면 창
+/// 닫기 latch 가 해제된 surface 에 쓰고 빈 pane 을 읽어 죽었다, 적대 검증). 그사이 마지막 창이 됐으면 앱 종료 확인으로 보낸다(종료 확인을
+/// 건너뛰지 않는다). 물은 뒤 다른 탭으로 옮겼어도 그 탭만 닫는다(활성 기준으로 다시 풀지 않는다). 닫기 확인이 떠 있거나 탭을 끄는 중이면
+/// 다음 tick 에.
+pub fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.CloseAskOutcome) void {
     switch (self.pending_confirm) {
         .close => return web_osr.markCloseAskClosed(surface_id),
         else => {},
@@ -1252,6 +1252,17 @@ fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.CloseAs
                 if (tab_ops.tabDragTransaction(self, pane) != null) return web_osr.markCloseAskClosed(surface_id);
                 if (self.osr_key_target == surface_id and web_osr.composing(surface_id)) self.osr_discard_marked = true;
                 if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test pageclose {s}\n", .{@tagName(outcome)});
+                if (self.tabs.items.len == 1 and tab.panes.items.len == 1 and pane.terms.items.len == 1) {
+                    if (self.is_last_window) {
+                        // 브라우저가 닫혔으면 빈 탭으로 둔다(종료를 그만두면 남는 탭 — 죽은 번호로 입력을 보내지 않게).
+                        if (outcome == .closed) {
+                            web_osr.revivePageClosed(self.allocator, surface_id);
+                            setWebNavState(self, surface_id, false, false, "");
+                        }
+                        self.requestAppQuit();
+                    } else if (!file_panel_ops.blockSessionExitForFilePanels(self)) self.latchSessionClose();
+                    return;
+                }
                 term_ops.closeTermAt(self, tab_index, pane, index);
                 self.workspaceChanged(.topology);
                 self.metal_dirty = true;
@@ -1261,6 +1272,9 @@ fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.CloseAs
     }
 }
 
+/// 페이지가 그 탭의 브라우저를 닫았다(`window.close` — maru 가 닫지 않았다, W6f②) — 그 탭을 닫는다(Chrome 처럼 확인 없이). 활성
+/// 탭이었으면 연 탭으로 돌아가고, 그 pane 의 유일한 탭이면 닫지 않고 빈 보통 탭으로 새로 만든다. 자리로 잡아 둔 닫기 확인이 떠 있거나
+/// 탭을 끄는 중이면(빼면 그 자리가 다른 탭을 가리킨다) 다음 tick 에 — 다시 표시한다.
 fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
     switch (self.pending_confirm) {
         .close => |target| if (target != .window) return web_osr.markPageClosed(surface_id),

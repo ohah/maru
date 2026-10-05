@@ -2698,11 +2698,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .dialog_closed => |v| if (surfaces.getPtr(v.browser)) |s| {
             for (s.dialogs.items) |d| if (d.request == v.request) {
-                // 물은 닫기의 떠나기 확인이 답 없이 치워졌다(렌더러가 죽었다 등 — W6j) — 다시 시한을 센다.
-                if (d.kind == .before_unload and s.close_ask == .asked) {
-                    s.close_ask = .asking;
-                    s.close_ask_since_ms = monotonicNow();
-                }
+                // 물은 닫기의 떠나기 확인이 답 없이 치워졌다(W6j) — 그사이 사용자가 그 탭을 옮겨 가게 했거나(sidecar 가 이동·새로고침 전에
+                // 머무르기로 답한다 — `cancelFor`) 렌더러가 죽었다. 닫기는 그만둔다(탭을 둔다) — 시한으로 강제하면 사용자가 고르지 않은
+                // 떠나기가 되고 이동을 잃었다(적대 검증). 브라우저가 그래도 닫히면 페이지가 닫은 탭으로 처리된다.
+                if (d.kind == .before_unload and s.close_ask == .asked) s.close_ask = .stayed;
                 removeDialog(gpa, s, d.token);
                 break;
             };
@@ -2828,10 +2827,26 @@ test "W6j: a close asked of the page closes, stays or is forced after the wait �
     try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, t));
     try std.testing.expectEqual(CloseAskOutcome.timed_out, takeCloseAsk(7, t + close_ask_wait_ms + 1));
 
-    // 질문이 답 없이 치워지면(렌더러가 죽음 등) 다시 시한을 센다.
+    // 질문이 답 없이 치워지면(사용자가 이동하게 함·렌더러가 죽음) 닫기를 그만둔다 — 강제하지 않는다.
     try std.testing.expect(askClose(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 7, .kind = .before_unload, .origin = "", .message = "" } }, 0);
     apply(gpa, .{ .dialog_closed = .{ .browser = 7, .request = 7 } }, 0);
+    try std.testing.expectEqual(CloseAskOutcome.stayed, takeCloseAsk(7, monotonicNow() + close_ask_wait_ms * 10));
+
+    // 떠나기 뒤 닫힘이 오면 닫힌다.
+    try std.testing.expect(askClose(gpa, 7, 0));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 8, .kind = .before_unload, .origin = "", .message = "" } }, 0);
+    replyDialog(gpa, 7, nextDialog(7).?.token, true, "", false);
+    apply(gpa, .{ .browser_closed = 7 }, 0);
+    try std.testing.expect(!takePageClosed(7));
+    try std.testing.expectEqual(CloseAskOutcome.closed, takeCloseAsk(7, 0));
+    surfaces.getPtr(7).?.created = true;
+
+    // 창이 닫히며 띄운 질문을 떠나기로 답하면(`cancelDialogsShownBy`) 닫힘을 기다린다.
+    try std.testing.expect(askClose(gpa, 7, 0));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 9, .kind = .before_unload, .origin = "", .message = "" } }, 0);
+    markDialogShown(7, nextDialog(7).?.token, 11);
+    cancelDialogsShownBy(gpa, 11);
     t = monotonicNow();
     try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, t));
     try std.testing.expectEqual(CloseAskOutcome.timed_out, takeCloseAsk(7, t + close_ask_wait_ms + 1));

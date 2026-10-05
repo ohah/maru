@@ -1156,6 +1156,31 @@ check(area > 0 and green > area // 4, f'the adopted popup tab draws its page (gr
 sys.exit(0 if ok else 1)
 PY
 
+# ── W6g: 창이 뒤에 있을 때의 첫 누름 ─────────────────────────────────────────────────────────────────────────
+# Chromium 탭 본문 위의 첫 누름은 창을 올리면서 페이지에도 간다(Chrome 처럼 — 사용자 결정 2026-10-05), 탭 막대 쪽은 macOS 기본(창만).
+# 셸에서 띄운 앱은 맨 앞이 될 수 없어 대본 `firstmouse` 가 AppKit 이 묻는 `acceptsFirstMouse` 를 같은 사건으로 부른다.
+cat > "$root/firstmouse.txt" <<SCRIPT
+sleep 9000
+firstmouse 0.6 0.5
+firstmouse 0.6 0.005
+sleep 500
+SCRIPT
+run_app /solid 14000 "$root/firstmouse.summary" MARU_WEB_OSR_TEST_INPUT="$root/firstmouse.txt"
+grep -a '^osr-test firstmouse' "$root/app-solid.log" > "$root/firstmouse.report" || true
+cat "$root/firstmouse.report"
+python3 - "$root/firstmouse.report" <<'PY' || fail "the first click on a window in the background did not behave as expected"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+check('osr-test firstmouse 0.6 0.5 true' in report, f'a first click on the Chromium page body also reaches the page (acceptsFirstMouse) ({report})')
+check('osr-test firstmouse 0.6 0.005 false' in report, f'a first click on the window top (not the page) only brings the window forward ({report})')
+sys.exit(0 if ok else 1)
+PY
+
 # ── W4d①: 설정 `browser.engine` ─────────────────────────────────────────────────────────────────────────────
 # 개발용 환경변수 없이 설정으로 켠다. 설치 위치는 `$HOMEBREW_PREFIX/opt/maru-chromium/libexec` 를 먼저 본다 — 가짜 prefix 에
 # brew 와 같은 모양(`Cellar/maru-chromium/<버전>/libexec` 실제 파일 + `opt/maru-chromium` 링크)으로 설치물을 두어 「설치됨」을,

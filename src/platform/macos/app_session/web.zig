@@ -1539,6 +1539,13 @@ pub fn osrDragAdd(self: *AppSession, kind: OsrDragKind, bytes: []const u8) bool 
     return true;
 }
 
+/// 창이 뒤에 있을 때의 첫 누름을 그 자리에도 넘기는가 — Chromium 탭 본문이면 그렇다(Chrome 과 같다: 뒤 창의 링크가 한 번에 눌리고
+/// 이미지가 바로 끌린다. 사용자 결정 2026-10-05 — W6d 실측에서 다른 앱 뒤의 maru 창 이미지 끌기가 창 올리기에 먹혔다). 터미널·탭
+/// 막대·사이드바·divider 띠·모달이 열린 때는 아니다(macOS 기본 — 창만 올린다).
+pub fn osrAcceptsFirstMouse(self: *AppSession, x_px: f64, y_px: f64) bool {
+    return osrDragHit(self, x_px, y_px) != null;
+}
+
 /// 그 자리가 Chromium 탭 본문인가(모달 오버레이가 열려 있으면 아니다).
 fn osrDragHit(self: *AppSession, x_px: f64, y_px: f64) ?app_session_mod.OsrLayout {
     if (self.osr_layouts.items.len == 0 or self.anyModalOverlayOpen()) return null;

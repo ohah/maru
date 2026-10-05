@@ -2417,6 +2417,8 @@ pub fn resetAllSettings(self: *AppSession) void {
         }
     }
     if (wrote) {
+        // 다른 창은 auto-reload 가 꺼져 있으면 이 쓰기를 못 본다 — Swift 가 거둬 메뉴 Reload 처럼 퍼뜨린다(2026-10-05).
+        self.config_reset_propagate = true;
         commitAppKeepAliveReset();
         const snapshot = appKeepAliveSnapshot();
         self.loaded_config.session_keep_alive_provenance = snapshot.provenance;
@@ -2794,8 +2796,8 @@ fn reloadIfConfigFileChanged(self: *AppSession, comptime trigger: enum { watch, 
         defer peek.deinit();
         if (!peek.config.behavior_auto_reload) return false;
     }
-    self.reload_is_automatic = trigger == .watch;
-    defer self.reload_is_automatic = false;
+    // 자동 reload(.watch)는 `allow_scrollback_shrink` 를 세우지 않는다 — 그것이 되돌릴 수 없는 축소를 미루는 **유일한**
+    // 장치다(편집기 자동 저장의 중간 값·지운 줄이 닿을 수 있다). 예전의 `reload_is_automatic` 표식은 읽는 곳이 없어 걷었다.
     if (trigger == .menu_sibling) self.allow_scrollback_shrink = true; // 사용자가 고른 시점 — 메뉴의 활성 창과 같다
     // reload 가 중간에 빠지면(로드·appearance 실패) 이 표식을 읽고 끄는 `reapplyScrollback` 까지 못 간다 — 남으면 사용자가
     // 고르지 않은 다음 재적용(시스템 외관 자동 전환 등)이 되돌릴 수 없는 축소를 한다.

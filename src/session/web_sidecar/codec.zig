@@ -228,7 +228,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeBrowser(&cursor, value.browser);
             try cursor.writeU32(value.menu);
             try writePoint(&cursor, value.point);
-            try cursor.writeU16(@bitCast(value.flags));
+            try cursor.writeU32(@bitCast(value.flags));
             try writeDialogText(&cursor, value.selection);
         },
         .context_menu_closed => |value| {
@@ -276,7 +276,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .popup_reserve => |value| try writeBrowser(&cursor, value.browser),
         .popup_created => |value| {
-            if (value.opener == value.browser) return error.InvalidPopupAdopt;
+            if (value.opener == value.browser or value.placement == .new_window) return error.InvalidPopupAdopt;
             try writeBrowser(&cursor, value.opener);
             try writeBrowser(&cursor, value.browser);
             try cursor.writeByte(@intFromEnum(value.placement));
@@ -535,7 +535,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             const browser = try readBrowser(&cursor);
             const menu = try cursor.readU32();
             const point = try readPoint(&cursor);
-            const flags: message_mod.ContextMenuFlags = @bitCast(try cursor.readU16());
+            const flags: message_mod.ContextMenuFlags = @bitCast(try cursor.readU32());
             const selection = try readDialogText(&cursor);
             try fields.checkContextMenu(menu, flags, selection);
             break :blk .{ .context_menu = .{ .browser = browser, .menu = menu, .point = point, .flags = flags, .selection = selection } };
@@ -633,7 +633,8 @@ pub fn decodeExact(frame: []const u8) Error!Message {
                 .placement = std.enums.fromInt(message_mod.NewTabPlacement, try cursor.readByte()) orelse return error.UnknownNewTabPlacement,
                 .url = try readUrl(&cursor),
             };
-            if (value.opener == value.browser) return error.InvalidPopupAdopt;
+            // 이어 받은 팝업은 연 탭 곁의 탭이다 — 새 창 자리는 메뉴의 「새 창에서 링크 열기」에만 있다(W6h①).
+            if (value.opener == value.browser or value.placement == .new_window) return error.InvalidPopupAdopt;
             break :blk .{ .popup_created = value };
         },
         .open_tab => .{ .open_tab = .{
@@ -693,7 +694,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  10, 0, // v10, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  11, 0, // v11, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -1134,11 +1135,22 @@ test "context menu messages round trip, flow both ways, and refuse menu 0, reser
     try std.testing.expectError(error.InvalidContextMenu, encode(.{ .context_menu_command = .{ .browser = 7, .menu = 0, .command = .cancel } }, &buf));
     // 손으로 만든 frame — 모르는 명령, 쓰지 않는 비트(디코더도 거절한다).
     const command_len = try encode(.{ .context_menu_command = .{ .browser = 7, .menu = 3, .command = .copy_image } }, &buf);
-    buf[command_len - 1] = 15;
+    buf[command_len - 1] = 17;
     try std.testing.expectError(error.UnknownContextMenuCommand, decodeExact(buf[0..command_len]));
     const menu_len = try encode(.{ .context_menu = .{ .browser = 7, .menu = 3, .point = .{ .x = 0, .y = 0 }, .flags = .{} } }, &buf);
-    buf[menu_len - 6] = 0x80; // flags 높은 바이트의 15 번 `link_openable` 만 — 링크가 아닌데 열 수 있다(뒤는 글 길이 u32)
+    buf[menu_len - 6] = 0x80; // flags(u32, 빅엔디언) 15 번 `link_openable` 만 — 링크가 아닌데 열 수 있다(뒤는 글 길이 u32)
     try std.testing.expectError(error.InvalidContextMenu, decodeExact(buf[0..menu_len]));
+    buf[menu_len - 6] = 0;
+    buf[menu_len - 7] = 0x01; // 16 번 `image_openable` 만 — 이미지가 아닌데 열 수 있다(W6h①)
+    try std.testing.expectError(error.InvalidContextMenu, decodeExact(buf[0..menu_len]));
+    buf[menu_len - 7] = 0;
+    buf[menu_len - 8] = 0x01; // 쓰지 않는 24 번
+    try std.testing.expectError(error.InvalidContextMenu, decodeExact(buf[0..menu_len]));
+    buf[menu_len - 8] = 0;
+    _ = try decodeExact(buf[0..menu_len]);
+    const image_menu = (try roundTrip(.{ .context_menu = .{ .browser = 7, .menu = 4, .point = .{ .x = 0, .y = 0 }, .flags = .{ .image = true, .image_openable = true } } })).context_menu;
+    try std.testing.expect(image_menu.flags.image_openable);
+    try std.testing.expectEqual(message_mod.ContextMenuCommandKind.open_image_new_tab, (try roundTrip(.{ .context_menu_command = .{ .browser = 7, .menu = 4, .command = .open_image_new_tab } })).context_menu_command.command);
 }
 
 test "open_tab round-trips with its placement, flows to maru, and refuses an empty url, a control character or an unknown placement" {
@@ -1153,8 +1165,9 @@ test "open_tab round-trips with its placement, flows to maru, and refuses an emp
     try std.testing.expectError(error.EmptyUrl, encode(.{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "" } }, &buf));
     try std.testing.expectError(error.ControlCharacter, encode(.{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "https://x/\x1b[2J" } }, &buf));
     const len = try encode(.{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "http://b/" } }, &buf);
-    buf[prefix_len + common_len + 8] = 2; // browser 뒤 자리 바이트
+    buf[prefix_len + common_len + 8] = 3; // browser 뒤 자리 바이트
     try std.testing.expectError(error.UnknownNewTabPlacement, decodeExact(buf[0..len]));
+    try std.testing.expectEqual(message_mod.NewTabPlacement.new_window, (try roundTrip(.{ .open_tab = .{ .browser = 7, .placement = .new_window, .url = "http://b/" } })).open_tab.placement);
 }
 
 test "popup_reserve and popup_created round-trip, flow the right way, and refuse a zero id, a popup that is its own opener or an unknown placement" {
@@ -1171,9 +1184,12 @@ test "popup_reserve and popup_created round-trip, flow the right way, and refuse
     try std.testing.expectError(error.InvalidBrowserId, encode(.{ .popup_reserve = .{ .browser = 0 } }, &buf));
     try std.testing.expectError(error.InvalidPopupAdopt, encode(.{ .popup_created = .{ .opener = 9, .browser = 9, .placement = .foreground, .url = "about:blank" } }, &buf));
     try std.testing.expectError(error.EmptyUrl, encode(.{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .foreground, .url = "" } }, &buf));
+    try std.testing.expectError(error.InvalidPopupAdopt, encode(.{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .new_window, .url = "about:blank" } }, &buf));
     var len = try encode(.{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .foreground, .url = "about:blank" } }, &buf);
-    buf[prefix_len + common_len + 16] = 2; // 두 번호 뒤 자리 바이트
+    buf[prefix_len + common_len + 16] = 3; // 두 번호 뒤 자리 바이트
     try std.testing.expectError(error.UnknownNewTabPlacement, decodeExact(buf[0..len]));
+    buf[prefix_len + common_len + 16] = 2; // 새 창 자리 — 이어 받은 팝업은 새 창이 아니다(W6h①)
+    try std.testing.expectError(error.InvalidPopupAdopt, decodeExact(buf[0..len]));
     // 손으로 만든 frame — 같은 번호.
     len = try encode(.{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .foreground, .url = "about:blank" } }, &buf);
     std.mem.writeInt(u64, buf[prefix_len + common_len + 8 ..][0..8], 3, .big);

@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 208), abi_version);
+    try std.testing.expectEqual(@as(u32, 209), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -4957,7 +4957,7 @@ pub export fn maru_macos_app_session_osr_context_menu_take(session: ?*AppSession
 }
 
 /// v204(W6c②): 띄운 메뉴의 항목 하나 — 종류(0 명령·1 구분선·2 찾기·3 음성 하위 메뉴·4 말하기 시작·5 말하기 중지·6 서비스 하위
-/// 메뉴·7 이모티콘), 명령(`ContextMenuCommandKind`), 켜짐, 깊이(1 은 바로 앞 하위 메뉴 안), 문구(UTF-8 — `cap` 에서 글자 경계로
+/// 메뉴·7 이모티콘·8 검색 — v209), 명령(`ContextMenuCommandKind`), 켜짐, 깊이(1 은 바로 앞 하위 메뉴 안), 문구(UTF-8 — `cap` 에서 글자 경계로
 /// 자른다). 그 메뉴가 아니거나 범위 밖이면 0.
 pub export fn maru_macos_app_session_osr_context_menu_item(
     session: ?*AppSession,
@@ -4980,9 +4980,11 @@ pub export fn maru_macos_app_session_osr_context_menu_item(
     if (out_enabled) |p| p.* = @intFromBool(item.enabled);
     if (out_depth) |p| p.* = item.depth;
     var buf: [1024]u8 = undefined;
-    const label: []const u8 = if (item.kind == .look_up)
-        maru.session.web_osr_context_menu.lookUpLabel(session_mod.web_ops.osrContextMenuSelection(app, menu), &buf)
-    else if (item.label) |key| maru.i18n.t(key) else "";
+    const label: []const u8 = switch (item.kind) {
+        .look_up => maru.session.web_osr_context_menu.lookUpLabel(session_mod.web_ops.osrContextMenuSelection(app, menu), &buf),
+        .search => maru.session.web_osr_context_menu.searchLabel(session_mod.web_ops.osrSearchEngineName(app), session_mod.web_ops.osrContextMenuSelection(app, menu), &buf),
+        else => if (item.label) |key| maru.i18n.t(key) else "",
+    };
     const text = maru.session.web_sidecar.text.clampUtf8(label, label_cap);
     if (out_label) |o| @memcpy(o[0..text.len], text);
     if (out_label_len) |p| p.* = text.len;
@@ -4997,6 +4999,33 @@ pub export fn maru_macos_app_session_osr_context_menu_selection(session: ?*AppSe
     if (out) |o| @memcpy(o[0..text.len], text);
     if (out_len) |p| p.* = text.len;
     return 1;
+}
+
+/// v209(W6h①): 띄운 메뉴에서 「…에서 '…' 검색」(종류 8)을 골랐다 — 설정의 검색 틀로 새 탭(앞)을 연다. Swift 는 이것을 부른 **뒤**
+/// 평소처럼 취소(0)로 답한다. 그 메뉴가 아니거나 열 수 없으면 0.
+pub export fn maru_macos_app_session_osr_context_menu_search(session: ?*AppSession, menu: u32) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrContextMenuSearch(app, menu));
+}
+
+/// v209(W6h①): 메뉴 「새 창에서 링크 열기」의 주소 하나를 가져간다(UTF-8, 1). `cap` 보다 길면 버리고 0 — Swift 는 wire 주소 상한
+/// (32 KiB)만큼 준다. Swift 는 tick 뒤에 새 창을 만들고 그 창 세션에 `osr_open_url_tab` 으로 연다.
+pub export fn maru_macos_app_session_osr_take_new_window(session: ?*AppSession, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
+    const app = session orelse return 0;
+    const url = session_mod.web_ops.osrTakeNewWindow(app) orelse return 0;
+    defer app.allocator.free(url);
+    const o = out orelse return 0;
+    if (url.len > cap) return 0;
+    @memcpy(o[0..url.len], url);
+    if (out_len) |p| p.* = url.len;
+    return 1;
+}
+
+/// v209(W6h①): 이 창의 활성 pane 에 그 주소(http·https)의 Chromium 웹 탭을 열고 그 탭으로 옮긴다. 열었으면 1.
+pub export fn maru_macos_app_session_osr_open_url_tab(session: ?*AppSession, url: ?[*]const u8, len: usize) i32 {
+    const app = session orelse return 0;
+    const p = url orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrOpenUrlTab(app, p[0..len]));
 }
 
 /// v204(W6c②): 띄운 메뉴가 아직 열려 있어야 하면 1 — 0 이면(페이지가 이동했거나 탭이 닫혀 sidecar 가 닫았다) Swift 가 메뉴를 거둔다.

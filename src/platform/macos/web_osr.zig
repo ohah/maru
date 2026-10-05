@@ -142,6 +142,9 @@ const Surface = struct {
     /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」 답이 준다. sidecar 의 `open_tab`
     /// 하나가 쓴다 — sidecar 도 같은 규칙을 지키지만 maru 는 sidecar 가 보낸 것을 그대로 믿지 않는다(W6e 적대 검증 2 차).
     new_tab_credits: ws.new_tab.Credits = .{},
+    /// 새 창 한 장(W6h①) — 메뉴 「새 창에서 링크 열기」 답만 준다(그때의 단조 시각 ms, 0 은 없음). 자리가 `new_window` 인 `open_tab`
+    /// 하나가 쓴다 — 페이지 입력의 새 탭 장으로는 새 창을 받지 않는다(sidecar 가 새 창 자리를 보내도).
+    new_window_credit_ms: i64 = 0,
 };
 
 /// 페이지가 연 새 탭 하나(W6e). 주소는 걸렀다(`new_tab.urlAllowed`) — 꺼내 간 쪽이 놓는다.
@@ -1818,7 +1821,12 @@ pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, com
     // 띄운 그 메뉴에만 답한다 — sidecar 를 다시 띄운 뒤 같은 번호의 새(아직 안 띄운) 메뉴에 옛 창의 늦은 답이 가지 않게(W6c② 적대 검증).
     if (m.menu != menu or !m.shown) return;
     if (!m.closed) send(gpa, .{ .context_menu_command = .{ .browser = surface_id, .menu = menu, .command = command } });
-    if (!m.closed and command == .open_link_new_tab) s.new_tab_credits.grant(monotonicNow()); // 사용자가 메뉴에서 골랐다(W6e)
+    // 사용자가 메뉴에서 골랐다(W6e·W6h①) — 그 답이 부를 `open_tab` 하나를 받는다.
+    if (!m.closed) switch (command) {
+        .open_link_new_tab, .open_image_new_tab => s.new_tab_credits.grant(monotonicNow()),
+        .open_link_new_window => s.new_window_credit_ms = monotonicNow(),
+        else => {},
+    };
     dropContextMenu(gpa, s);
 }
 
@@ -1826,10 +1834,26 @@ pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, com
 
 fn queueNewTab(gpa: std.mem.Allocator, s: *Surface, v: ws.message.OpenTab, now_ms: i64) void {
     if (!ws.new_tab.urlAllowed(v.url) or s.new_tabs.items.len >= max_new_tabs) return;
-    // 이 탭에 보낸 사용자 입력이 없다(5 초 안) — sidecar 가 보냈어도 받지 않는다.
-    if (!s.new_tab_credits.take(now_ms)) return;
+    if (v.placement == .new_window) {
+        // 새 창은 메뉴 「새 창에서 링크 열기」를 고른 직후에만(W6h①) — 한 번 쓴다.
+        if (!ws.new_tab.creditLive(s.new_window_credit_ms, now_ms)) return;
+        s.new_window_credit_ms = 0;
+    } else if (!s.new_tab_credits.take(now_ms)) return; // 이 탭에 보낸 사용자 입력이 없다(5 초 안) — sidecar 가 보냈어도 받지 않는다.
     const url = gpa.dupe(u8, v.url) catch return;
     s.new_tabs.append(gpa, .{ .url = url, .placement = v.placement, .arrived_ms = now_ms }) catch gpa.free(url);
+}
+
+/// 우클릭 메뉴 「…에서 '…' 검색」(W6h①) — maru 가 만든 검색 주소를 그 탭의 새 탭 줄에 앞 탭으로 넣는다(사용자가 maru 의 메뉴에서
+/// 골랐다 — 장을 쓰지 않는다). 그 탭이 없거나 주소가 새 탭 규칙에 맞지 않거나 줄이 차면 false.
+pub fn queueSearchTab(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    if (!ws.new_tab.urlAllowed(url) or s.new_tabs.items.len >= max_new_tabs) return false;
+    const owned = gpa.dupe(u8, url) catch return false;
+    s.new_tabs.append(gpa, .{ .url = owned, .placement = .foreground, .arrived_ms = monotonicNow() }) catch {
+        gpa.free(owned);
+        return false;
+    };
+    return true;
 }
 
 fn dropNewTabs(gpa: std.mem.Allocator, s: *Surface) void {
@@ -3045,6 +3069,71 @@ test "new tabs a page opens queue per tab in order, only for http(s), one per us
     s7.new_tab_credits.grant(6_000);
     apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .background, .url = "https://e.example/" } }, 6_000);
     try std.testing.expect(newTabPending(7)); // 탭이 사라지면 freeSurface 가 놓는다(testing allocator 가 샌 것을 잡는다)
+}
+
+test "a new window opens only right after the menu's open-link-in-new-window answer, once; page input and the new-tab menu never admit one (W6h①)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    state = .running;
+    const s7 = surfaces.getPtr(7).?;
+    const now = monotonicNow();
+    // 페이지 입력의 장으로는 새 창을 받지 않는다.
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .down, .point = .{ .x = 1, .y = 1 }, .click_count = 1 } }));
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .new_window, .url = "https://a.example/w0" } }, now);
+    try std.testing.expect(!newTabPending(7));
+    try std.testing.expect(s7.new_tab_credits.any()); // 새 창 자리는 새 탭 장을 쓰지 않는다
+    // 메뉴를 받고 띄운 뒤 「새 창에서 링크 열기」로 답한다.
+    const link: ws.message.ContextMenuFlags = .{ .link = true, .link_openable = true };
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 3, .point = .{ .x = 1, .y = 1 }, .flags = link } }, now);
+    try std.testing.expect(takeContextMenu(7) != null);
+    answerContextMenu(gpa, 7, 3, .open_link_new_window);
+    try std.testing.expect(s7.new_window_credit_ms != 0);
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .new_window, .url = "file:///etc/hosts" } }, monotonicNow()); // 거른 주소는 장을 쓰지 않는다
+    try std.testing.expect(s7.new_window_credit_ms != 0);
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .new_window, .url = "https://a.example/w1" } }, monotonicNow());
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .new_window, .url = "https://a.example/w2" } }, monotonicNow()); // 한 번만
+    var got = takeNewTab(7).?;
+    try std.testing.expectEqualStrings("https://a.example/w1", got.url);
+    try std.testing.expectEqual(ws.message.NewTabPlacement.new_window, got.placement);
+    gpa.free(got.url);
+    // 새 탭 장 하나는 아직 남았다(새 창이 쓰지 않았다) — 그것을 쓰고 비운다.
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .foreground, .url = "https://a.example/t" } }, monotonicNow());
+    got = takeNewTab(7).?;
+    gpa.free(got.url);
+    try std.testing.expect(!newTabPending(7));
+    // 메뉴 「새 탭에서 링크 열기」 답은 새 탭 장이지 새 창 장이 아니다. 오래된 새 창 장은 쓰지 못한다.
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 4, .point = .{ .x = 1, .y = 1 }, .flags = link } }, now);
+    _ = takeContextMenu(7);
+    answerContextMenu(gpa, 7, 4, .open_link_new_tab);
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .new_window, .url = "https://a.example/w3" } }, monotonicNow());
+    try std.testing.expect(!newTabPending(7));
+    s7.new_window_credit_ms = 1;
+    apply(gpa, .{ .open_tab = .{ .browser = 7, .placement = .new_window, .url = "https://a.example/w4" } }, 1 + ws.new_tab.activation_ms + 1);
+    try std.testing.expect(!newTabPending(7));
+    // 메뉴 「새 탭에서 이미지 열기」 답도 새 탭 장을 준다.
+    s7.new_tab_credits = .{};
+    apply(gpa, .{ .context_menu = .{ .browser = 7, .menu = 5, .point = .{ .x = 1, .y = 1 }, .flags = .{ .image = true, .image_openable = true } } }, now);
+    _ = takeContextMenu(7);
+    answerContextMenu(gpa, 7, 5, .open_image_new_tab);
+    try std.testing.expect(s7.new_tab_credits.any());
+    // 검색 탭은 maru 가 넣는다 — 장 없이, 앞 탭, 새 탭 주소 규칙대로.
+    s7.new_tab_credits = .{};
+    try std.testing.expect(queueSearchTab(gpa, 7, "https://www.google.com/search?q=a"));
+    try std.testing.expect(!queueSearchTab(gpa, 7, "javascript:alert(1)"));
+    try std.testing.expect(!queueSearchTab(gpa, 9, "https://www.google.com/search?q=a"));
+    got = takeNewTab(7).?;
+    try std.testing.expectEqual(ws.message.NewTabPlacement.foreground, got.placement);
+    try std.testing.expectEqualStrings("https://www.google.com/search?q=a", got.url);
+    gpa.free(got.url);
 }
 
 test "popups the sidecar made with a reserved id are adopted as tabs of their opener, or closed when they cannot be (W6f②)" {

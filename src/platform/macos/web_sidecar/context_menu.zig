@@ -38,6 +38,8 @@ const Held = struct {
     image: ?[]u8 = null,
     /// 새 탭에서 열 링크 주소(W6e) — 걸러진 주소이고 http·https 일 때만(`link_openable`).
     open_link: ?[]u8 = null,
+    /// 새 탭에서 열 이미지 주소(W6h① — http·https 만, 주소 상한 안).
+    open_image: ?[]u8 = null,
 };
 
 var image_callback: c.cef_download_image_callback_t = undefined;
@@ -179,6 +181,8 @@ pub fn onRun(
     const media_type = params.*.get_media_type.?(params);
     const is_image = media_type == c.CM_MEDIATYPE_IMAGE;
     const image = if (is_image) copyAll(params.*.get_source_url.?(params), max_address_bytes) else null;
+    // 새 탭에서 여는 것은 링크처럼 http·https 만(W6h① — `data:`·`blob:` 이미지는 꺼 둔다).
+    const open_image = if (image != null) openableLink(params.*.get_source_url.?(params)) else null;
     var selection_buf: [protocol.wire.max_text_bytes]u8 = undefined;
     var truncated = false;
     const selection = readSelection(params.*.get_selection_text.?(params), &selection_buf, &truncated);
@@ -199,18 +203,20 @@ pub fn onRun(
         .can_go_back = enabled(model, c.MENU_ID_BACK),
         .can_go_forward = enabled(model, c.MENU_ID_FORWARD),
         .link_openable = open_link != null,
+        .image_openable = open_image != null,
     };
     const held = allocator.create(Held) catch {
         if (link) |v| allocator.free(v);
         if (image) |v| allocator.free(v);
         if (open_link) |v| allocator.free(v);
+        if (open_image) |v| allocator.free(v);
         callback.*.cancel.?(callback);
         object.release(callback);
         return 1;
     };
     last_menu +%= 1;
     if (last_menu == 0) last_menu = 1;
-    held.* = .{ .menu = last_menu, .callback = callback, .flags = flags, .link = link, .image = image, .open_link = open_link };
+    held.* = .{ .menu = last_menu, .callback = callback, .flags = flags, .link = link, .image = image, .open_link = open_link, .open_image = open_image };
     entry.context_menu = held;
     // 알리지 못하면(maru 가 사라졌다) 곧바로 취소로 끝낸다 — 쥔 채 두면 CEF 는 메뉴가 떠 있다고 보고 그 브라우저의 우클릭을 모두
     // 버린다(W6c① 적대 검증).
@@ -277,6 +283,7 @@ fn free(held: *Held) void {
     if (held.link) |v| allocator.free(v);
     if (held.image) |v| allocator.free(v);
     if (held.open_link) |v| allocator.free(v);
+    if (held.open_image) |v| allocator.free(v);
     allocator.destroy(held);
 }
 
@@ -305,7 +312,7 @@ fn cefId(command: Command) ?c_int {
         .paste => c.MENU_ID_PASTE,
         .paste_and_match_style => c.MENU_ID_PASTE_MATCH_STYLE,
         .select_all => c.MENU_ID_SELECT_ALL,
-        .cancel, .copy_link_address, .copy_image_address, .copy_image, .open_link_new_tab => null,
+        .cancel, .copy_link_address, .copy_image_address, .copy_image, .open_link_new_tab, .open_link_new_window, .open_image_new_tab => null,
     };
 }
 
@@ -329,6 +336,14 @@ pub fn onCommand(value: message.ContextMenuCommand) void {
         },
         // 메뉴의 답은 maru 가 띄운 메뉴에서 사용자가 고른 것이다 — 새 탭 한 장을 쓰지 않는다(W6e).
         .open_link_new_tab => if (held.open_link) |url| {
+            browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .background, .url = url } }) catch {};
+        },
+        // 새 창은 maru 가 띄운다(W6h① — 새 maru 창의 웹 탭). maru 는 그 메뉴에서 이 항목을 고른 직후에만 받는다.
+        .open_link_new_window => if (held.open_link) |url| {
+            browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .new_window, .url = url } }) catch {};
+        },
+        // Chrome 「새 탭에서 이미지 열기」는 뒤 탭이다(링크와 같다).
+        .open_image_new_tab => if (held.open_image) |url| {
             browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .background, .url = url } }) catch {};
         },
         else => {},

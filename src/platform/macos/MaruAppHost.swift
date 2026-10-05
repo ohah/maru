@@ -7852,6 +7852,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
             drainOsrTooltip() // W6b: hover 중인 Chromium 탭의 툴팁 글이 바뀌었으면 macOS 툴팁을 다시 단다.
             drainOsrContextMenu() // W6c②: Chromium 탭 우클릭 메뉴 — tick 이 끝난 뒤 macOS 메뉴로 띄우고, 페이지가 닫으면 거둔다.
+            drainOsrNewWindows() // W6h①: 메뉴 「새 창에서 링크 열기」 — tick 이 끝난 뒤 새 창을 만들고 그 창에 웹 탭으로 연다.
             drainOsrDragOut() // W6d②: Chromium 탭에서 시작한 끌기 — 누른 채면 macOS 끌기 세션으로.
             drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
             drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
@@ -9897,6 +9898,33 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    /// W6h①: 이 창의 세션이 쥔 「새 창에서 링크 열기」 주소를 가져가 tick 뒤에 새 창을 만든다(tick 안에서 창을 만들지 않는다 — 세션
+    /// 생성이 tick 을 다시 부른다).
+    private func drainOsrNewWindows() {
+        guard let session = appSession else { return }
+        var buffer = [UInt8](repeating: 0, count: 32 * 1024) // wire 주소 상한
+        var length = 0
+        while buffer.withUnsafeMutableBufferPointer({ maru_macos_app_session_osr_take_new_window(session, $0.baseAddress, $0.count, &length) }) == 1 {
+            let url = Array(buffer[0..<length])
+            DispatchQueue.main.async { [weak self] in self?.openOsrNewWindow(url) }
+        }
+    }
+
+    /// 새 maru 창(New Window 와 같은 공장)을 만들고 그 창의 활성 pane 에 그 주소의 Chromium 탭을 연다(W6h① — 사용자 결정 2026-10-05:
+    /// Chrome 의 새 창처럼). 창의 기본 터미널 탭은 그대로 둔다.
+    private func openOsrNewWindow(_ url: [UInt8]) {
+        guard let surface = createTerminalWindow(applyingWorkspace: nil), let session = surface.appSession else {
+            if Self.osrContextMenuTestMode { Self.testReport("newwindow failed") }
+            return
+        }
+        var opened = false
+        withSurface(surface) {
+            opened = url.withUnsafeBufferPointer { maru_macos_app_session_osr_open_url_tab(session, $0.baseAddress, $0.count) } == 1
+            markMetalNeedsRedraw()
+        }
+        if Self.osrContextMenuTestMode { Self.testReport("newwindow opened windows=\(windows.count) tab=\(opened)") }
+    }
+
     private func drainOsrContextMenu() {
         guard let session = appSession, let view = metalTerminalView, let owner = activeSurface else { return }
         if let shown = osrContextMenu {
@@ -10068,6 +10096,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         switch choice?.kind {
         case 0: command = choice?.command ?? 0
         case 2: view.showDefinition(for: NSAttributedString(string: shown.selection), at: shown.point)
+        // 검색(W6h①) — 답하기 **전에**(답이 메뉴를 비운다) maru 가 검색 탭을 넣는다. sidecar 에는 취소로 답한다.
+        case 8: _ = maru_macos_app_session_osr_context_menu_search(session, shown.token)
         case 4:
             let speech = osrSpeech ?? NSSpeechSynthesizer()
             osrSpeech = speech

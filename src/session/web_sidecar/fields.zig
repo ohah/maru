@@ -530,6 +530,8 @@ pub fn checkDragOperation(operation: u32) Error!void {
 pub fn checkContextMenu(menu: u32, flags: message.ContextMenuFlags, selection: []const u8) Error!void {
     if (menu == 0) return error.InvalidContextMenu;
     if (flags.link_openable and !flags.link) return error.InvalidContextMenu;
+    if (flags.image_openable and !flags.image) return error.InvalidContextMenu;
+    if (flags._reserved != 0) return error.InvalidContextMenu;
     if (flags.image_loaded and !flags.image) return error.InvalidContextMenu;
     if (flags.selection_truncated and !flags.selection) return error.InvalidContextMenu;
     if (flags.selection != (selection.len != 0)) return error.InvalidContextMenu;

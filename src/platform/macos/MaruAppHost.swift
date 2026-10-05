@@ -8116,14 +8116,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return true
     }
 
-    // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).
+    // W6g: 창이 뒤에 있을 때의 첫 누름을 view 에 넘기는가 — **그 view 의 창** 세션으로 묻는다(AppKit 은 클릭된 창이 key 가 아닐 때
+    // 묻는다 — key 창의 배치로 판정하면 다른 창의 웹 본문 자리가 이 창의 터미널로 첫 누름을 새게 했다, W6g 적대 검증).
     func osrAcceptsFirstMouse(_ event: NSEvent, in view: NSView) -> Bool {
-        guard let session = appSession else { return false }
-        let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
-        return maru_macos_app_session_osr_accepts_first_mouse(session, xPx, yPx) == 1
+        var accepts = false
+        withSurface(surfaceForView(view)) {
+            guard let session = appSession else { return }
+            let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
+            accepts = maru_macos_app_session_osr_accepts_first_mouse(session, xPx, yPx) == 1
+        }
+        return accepts
     }
 
+    // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up). 그 view 의 창 세션으로 —
+    // 창이 뒤에 있을 때의 첫 누름(W6g)은 그 창이 아직 key 가 아닐 때 온다.
     func handleMouse(_ event: NSEvent, kind: Int32, in view: NSView) {
+        withSurface(surfaceForView(view)) { handleMouseInSurface(event, kind: kind, in: view) }
+    }
+
+    private func handleMouseInSurface(_ event: NSEvent, kind: Int32, in view: NSView) {
         guard let session = appSession else { return }
         // 마우스 다운(kind 1/4/5: 단일·더블·트리플)은 텍스트 입력이 아니다 — 조합 중이면 Zig로 넘기기 '전'에 확정한다. 좌·중·우
         // 다운이 모두 여기로 모이고(rightMouseDown/otherMouseDown 포함), 사이드바 카드·탭 바의 탭/Term 전환은

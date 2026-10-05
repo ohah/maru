@@ -1690,10 +1690,10 @@ pub fn build(b: *std.Build) void {
     // The common archive workers must remain runnable after leaving macOS paths.
     const archive_worker_tests = addProjectTest(b, .{
         .root_module = maru_mod,
-        .filters = &.{ "agent_session_archive_backend", "agent_session_archive_detail_backend" },
+        .filters = &.{ "agent_session_archive_backend", "agent_session_archive_detail_backend", "os_env", "redact" },
     });
     const run_archive_worker_tests = b.addRunArtifact(archive_worker_tests);
-    run_archive_worker_tests.addArg("--maru-expect-tests=43"); // 15 worker judges and 28 anonymous aggregation blocks on the current module graph
+    run_archive_worker_tests.addArg("--maru-expect-tests=60"); // 31 worker/privacy judges and 29 anonymous aggregation blocks, including terminal.screen
     run_archive_worker_tests.setCwd(b.path("."));
     b.step("test-agent-archive-workers", "Verify shared archive worker ownership and history reads").dependOn(&run_archive_worker_tests.step);
 

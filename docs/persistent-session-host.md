@@ -7197,6 +7197,9 @@ connection만 닫는다. exact cap/cap+1은 named constants에서 테스트한�
 - screen soft limit를 넘으면 그 subscription만 `snapshot.invalidated`로 전환한다. queue가 4 MiB low-water 아래로
   내려가고 client가 resync를 요청하기 전에는 새 snapshot을 반복 생성하지 않는다. control reserve까지 소진되면 해당
   connection만 fail-close하고 runtime은 유지한다.
+- slow-observer process driver의 controller·healthy observer도 화면 배치와 control event를 함께 비운다.
+  `snapshot.invalidated`를 받으면 nonblocking resync ACK를 보내고, outbound가 막힌 동안 복구 의도를 유지한다.
+  의도적으로 멈춘 slow observer는 복구하지 않는다. 화면 배치가 없는 turn도 control event와 outbound를 진행한다.
 
 reactor 도입 뒤 upgrade의 `active_connections==0`은 단순 accept-loop 바깥 상태로는 성립하지 않는다.
 `prepare accepted`의 linearization은 global frame admission close다. 그 전에 dispatch된 non-upgrade operation이 0인지

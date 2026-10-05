@@ -463,6 +463,7 @@ pub fn main(init: std.process.Init) !void {
     const controller_initial = try controller.readSnapshot(controller_stream);
     defer allocator.free(controller_initial);
     try controller_screen.applySnapshot(controller_initial);
+    var controller_resync_needed = false;
     var controller_drained: u64 = controller_initial.len;
 
     stage = "slow connect";
@@ -505,12 +506,14 @@ pub fn main(init: std.process.Init) !void {
     const healthy_initial = try healthy.readSnapshot(healthy_stream);
     defer allocator.free(healthy_initial);
     try healthy_screen.applySnapshot(healthy_initial);
+    var healthy_resync_needed = false;
     var healthy_drained: u64 = healthy_initial.len;
     stage = "ready marker";
     try waitForMarker(
         &healthy,
         healthy_stream,
         &healthy_screen,
+        &healthy_resync_needed,
         "MARU_SLOW_OBSERVER_READY",
         &healthy_drained,
         deadline_ns,
@@ -527,12 +530,14 @@ pub fn main(init: std.process.Init) !void {
         &controller,
         controller_stream,
         &controller_screen,
+        &controller_resync_needed,
         &controller_drained,
     )) {}
     while (try pumpHealthy(
         &healthy,
         healthy_stream,
         &healthy_screen,
+        &healthy_resync_needed,
         &healthy_drained,
     )) {}
     while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
@@ -552,12 +557,14 @@ pub fn main(init: std.process.Init) !void {
             &controller,
             controller_stream,
             &controller_screen,
+            &controller_resync_needed,
             &controller_drained,
         )) {}
         while (try pumpHealthy(
             &healthy,
             healthy_stream,
             &healthy_screen,
+            &healthy_resync_needed,
             &healthy_drained,
         )) {}
         while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
@@ -860,8 +867,8 @@ pub fn main(init: std.process.Init) !void {
     while (metadata_change_after.metadata_producer_visits < metadata_change_before.metadata_producer_visits + 3 or
         metadata_change_after.observation_materializations < metadata_change_before.observation_materializations + 1)
     {
-        _ = try pumpHealthy(&controller, controller_stream, &controller_screen, &controller_drained);
-        _ = try pumpHealthy(&healthy, healthy_stream, &healthy_screen, &healthy_drained);
+        _ = try pumpHealthy(&controller, controller_stream, &controller_screen, &controller_resync_needed, &controller_drained);
+        _ = try pumpHealthy(&healthy, healthy_stream, &healthy_screen, &healthy_resync_needed, &healthy_drained);
         while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
         _ = usleep(2_000);
         metadata_change_after = try probe(
@@ -930,6 +937,7 @@ pub fn main(init: std.process.Init) !void {
             &healthy,
             healthy_stream,
             &healthy_screen,
+            &healthy_resync_needed,
             wake_marker[1 .. wake_marker.len - 1],
             &healthy_drained,
             deadline_ns,
@@ -947,6 +955,7 @@ pub fn main(init: std.process.Init) !void {
             &controller,
             controller_stream,
             &controller_screen,
+            &controller_resync_needed,
             &controller_drained,
         )) {}
         while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
@@ -996,12 +1005,14 @@ pub fn main(init: std.process.Init) !void {
             &controller,
             controller_stream,
             &controller_screen,
+            &controller_resync_needed,
             &controller_drained,
         );
         _ = try pumpHealthy(
             &healthy,
             healthy_stream,
             &healthy_screen,
+            &healthy_resync_needed,
             &healthy_drained,
         );
         while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
@@ -1018,12 +1029,14 @@ pub fn main(init: std.process.Init) !void {
             &controller,
             controller_stream,
             &controller_screen,
+            &controller_resync_needed,
             &controller_drained,
         );
         _ = try pumpHealthy(
             &healthy,
             healthy_stream,
             &healthy_screen,
+            &healthy_resync_needed,
             &healthy_drained,
         );
         while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
@@ -1071,6 +1084,7 @@ pub fn main(init: std.process.Init) !void {
                 &controller,
                 controller_stream,
                 &controller_screen,
+                &controller_resync_needed,
                 &controller_drained,
             );
             stage = "pressure healthy drain";
@@ -1078,6 +1092,7 @@ pub fn main(init: std.process.Init) !void {
                 &healthy,
                 healthy_stream,
                 &healthy_screen,
+                &healthy_resync_needed,
                 &healthy_drained,
             )) healthy_progress_batches += 1;
             try maybeSample(allocator, &pressure_samples, host_identity, init.io);
@@ -1111,12 +1126,14 @@ pub fn main(init: std.process.Init) !void {
             &controller,
             controller_stream,
             &controller_screen,
+            &controller_resync_needed,
             &controller_drained,
         );
         if (try pumpHealthy(
             &healthy,
             healthy_stream,
             &healthy_screen,
+            &healthy_resync_needed,
             &healthy_drained,
         )) healthy_progress_batches += 1;
         marker_seen = screenContains(&healthy_screen, nonce_hex[0..]);
@@ -1133,12 +1150,14 @@ pub fn main(init: std.process.Init) !void {
             &controller,
             controller_stream,
             &controller_screen,
+            &controller_resync_needed,
             &controller_drained,
         ) catch {};
         _ = pumpHealthy(
             &healthy,
             healthy_stream,
             &healthy_screen,
+            &healthy_resync_needed,
             &healthy_drained,
         ) catch {};
         try maybeSample(allocator, &pressure_samples, host_identity, init.io);
@@ -1173,12 +1192,14 @@ pub fn main(init: std.process.Init) !void {
             &controller,
             controller_stream,
             &controller_screen,
+            &controller_resync_needed,
             &controller_drained,
         ) catch {};
         _ = pumpHealthy(
             &healthy,
             healthy_stream,
             &healthy_screen,
+            &healthy_resync_needed,
             &healthy_drained,
         ) catch {};
         child_report = try probe(
@@ -1536,9 +1557,19 @@ fn pumpHealthy(
     client: *session_host.client.Client,
     stream_id: u64,
     assembler: *session_host.screen_assembler.ScreenAssembler,
+    resync_needed: *bool,
     drained_bytes: *u64,
 ) !bool {
-    const batch = (try client.readStreamBatch(stream_id)) orelse return false;
+    // readStreamBatch buffers control events even when it returns no screen batch. A pressured
+    // healthy observer can also be invalidated; without its resync ACK the host correctly stops
+    // deltas forever. Keep intent across a busy outbound slot, as the product frame pump does.
+    try pumpHealthyRecovery(client, stream_id, resync_needed);
+    const maybe_batch = try client.readStreamBatch(stream_id);
+    pumpHealthyRecovery(client, stream_id, resync_needed) catch |err| {
+        if (maybe_batch) |batch| batch.deinit();
+        return err;
+    };
+    const batch = maybe_batch orelse return false;
     defer batch.deinit();
     drained_bytes.* += batch.bytes.len;
     if (batch.is_snapshot)
@@ -1548,10 +1579,30 @@ fn pumpHealthy(
     return true;
 }
 
+fn pumpHealthyRecovery(client: *session_host.client.Client, stream_id: u64, resync_needed: *bool) !void {
+    while (try client.takeEventForStream(stream_id)) |event| {
+        defer client.releaseEvent(event);
+        const verdict = event.preflight orelse return error.MissingEventPreflight;
+        switch (verdict) {
+            .accepted => |accepted| switch (accepted.event) {
+                .invalidated => resync_needed.* = true,
+                .ended, .revoked => return error.HealthyObserverEnded,
+                .metadata, .resized => {},
+            },
+            .unknown => {},
+            else => return error.InvalidHealthyEvent,
+        }
+    }
+    if (client.screenRecoveryState(stream_id) == .needs_resync) resync_needed.* = true;
+    _ = try client.pumpPendingOutput();
+    if (resync_needed.* and try client.sendResyncNonBlocking(stream_id)) resync_needed.* = false;
+}
+
 fn waitForMarker(
     client: *session_host.client.Client,
     stream_id: u64,
     assembler: *session_host.screen_assembler.ScreenAssembler,
+    resync_needed: *bool,
     marker: []const u8,
     drained_bytes: *u64,
     deadline_ns: u64,
@@ -1559,7 +1610,7 @@ fn waitForMarker(
 ) !void {
     while (monotonicNow(io) < deadline_ns) {
         if (screenContains(assembler, marker)) return;
-        const progressed = try pumpHealthy(client, stream_id, assembler, drained_bytes);
+        const progressed = try pumpHealthy(client, stream_id, assembler, resync_needed, drained_bytes);
         // Timestamp success in the same observation turn that applied the marker. Sleeping after
         // progress adds a deterministic 2 ms harness delay to the product latency measurement.
         if (screenContains(assembler, marker)) return;
@@ -1578,7 +1629,7 @@ fn waitForMarker(
             );
             var readable = c.pollfd{
                 .fd = client.fd,
-                .events = c.POLL.IN,
+                .events = c.POLL.IN | (if (client.pending_outbound != null) @as(c_short, c.POLL.OUT) else 0),
                 .revents = 0,
             };
             const rc = c.poll(
@@ -2105,4 +2156,91 @@ test "failure cleanup removes only the fixture socket lock and directory" {
     cleanupSessionDirectory(dir, socket);
     const rc = c.access(dir.ptr, c.F_OK);
     try std.testing.expect(rc != 0 and posix.errno(rc) == .NOENT);
+}
+
+test "healthy pump acknowledges invalidation even without a screen batch" {
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var screen = session_host.screen_assembler.ScreenAssembler.initForCodec(allocator, client.screen_codec_version);
+    defer screen.deinit();
+    var resync_needed = false;
+    var drained_bytes: u64 = 0;
+    const event = try session_host.framing.encodeFrame(allocator, .{
+        .kind = .event,
+        .stream_id = 7,
+    }, "{\"event\":\"snapshot.invalidated\"}");
+    defer allocator.free(event);
+    try std.testing.expectEqual(@as(isize, @intCast(event.len)), c.write(fds[1], event.ptr, event.len));
+    try std.testing.expect(!try pumpHealthy(&client, 7, &screen, &resync_needed, &drained_bytes));
+    try std.testing.expect(!resync_needed);
+    try std.testing.expectEqual(@as(u64, 0), drained_bytes);
+    var ack: [128]u8 = undefined;
+    const n = c.recv(fds[1], &ack, ack.len, c.MSG.DONTWAIT);
+    try std.testing.expect(n >= session_host.protocol.header_size);
+    const header = try session_host.protocol.Header.decode(ack[0..session_host.protocol.header_size]);
+    try std.testing.expectEqual(session_host.protocol.Kind.stream_ack, header.kind);
+    try std.testing.expectEqual(@as(u64, 7), header.stream_id);
+    try std.testing.expectEqualStrings("{\"action\":\"resync\"}", ack[session_host.protocol.header_size..@intCast(n)]);
+    // Consuming the control event must not enqueue the ACK again on an idle turn.
+    try std.testing.expect(!try pumpHealthy(&client, 7, &screen, &resync_needed, &drained_bytes));
+    try std.testing.expectEqual(@as(isize, -1), c.recv(fds[1], &ack, ack.len, c.MSG.DONTWAIT));
+    try std.testing.expectEqual(posix.E.AGAIN, posix.errno(-1));
+}
+
+test "healthy recovery retains resync behind blocked outbound input" {
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    // Darwin requires O_NONBLOCK as well as MSG_DONTWAIT for these raw saturation probes.
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    for (fds) |fd| {
+        const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+        try std.testing.expect(flags >= 0);
+        try std.testing.expectEqual(@as(c_int, 0), c.fcntl(fd, c.F.SETFL, flags | nonblocking));
+    }
+    // Fill the real socket, then admit input to the shared pending slot. Recovery must retain
+    // its intent until that older input can flush, rather than losing or overtaking the ACK.
+    var filler: [4096]u8 = @splat('x');
+    while (c.send(fds[0], &filler, filler.len, c.MSG.DONTWAIT) > 0) {}
+    try std.testing.expectEqual(posix.E.AGAIN, posix.errno(-1));
+    try std.testing.expectEqual(@as(usize, 5), try client.sendInputNonBlocking(7, "older"));
+    var resync_needed = true;
+    try pumpHealthyRecovery(&client, 7, &resync_needed);
+    try std.testing.expect(resync_needed);
+    while (c.recv(fds[1], &filler, filler.len, c.MSG.DONTWAIT) > 0) {}
+    try std.testing.expectEqual(posix.E.AGAIN, posix.errno(-1));
+    try pumpHealthyRecovery(&client, 7, &resync_needed);
+    try std.testing.expect(!resync_needed);
+    var wire: [256]u8 = undefined;
+    const n = c.recv(fds[1], &wire, wire.len, c.MSG.DONTWAIT);
+    try std.testing.expect(n > 0);
+    var parser = session_host.framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    try parser.push(wire[0..@intCast(n)]);
+    const input = (try parser.next()) orelse return error.TestUnexpectedResult;
+    defer input.deinit(allocator);
+    try std.testing.expectEqual(session_host.protocol.Kind.input_bytes, input.header.kind);
+    try std.testing.expectEqualStrings("older", input.payload);
+    const ack = (try parser.next()) orelse return error.TestUnexpectedResult;
+    defer ack.deinit(allocator);
+    try std.testing.expectEqual(session_host.protocol.Kind.stream_ack, ack.header.kind);
+    try std.testing.expectEqualStrings("{\"action\":\"resync\"}", ack.payload);
+    try std.testing.expect((try parser.next()) == null);
 }

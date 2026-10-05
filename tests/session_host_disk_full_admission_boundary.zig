@@ -45,29 +45,36 @@ test "disk full admission gate uses real ENOSPC before product budget prepare" {
     try std.testing.expect(std.mem.indexOf(u8, process_test, "host.info") != null);
     try std.testing.expect(std.mem.indexOf(u8, process_test, "host.upgrade.prepare") == null);
 
-    const fixture_name = "processArmedPreclosedDiskFullAdmissionFixture(";
-    try std.testing.expectEqual(@as(usize, 1), count(coordinator, fixture_name));
-    const fixture_start = std.mem.indexOf(u8, coordinator, "pub fn " ++ fixture_name) orelse
+    // Resolve the actual function body, so a declaration or a neighboring helper cannot satisfy
+    // the ordering gate. The ENOSPC fixture must finish before the unchanged product clock starts.
+    const coordinator_z = try allocator.dupeZ(u8, coordinator);
+    defer allocator.free(coordinator_z);
+    var tree = try std.zig.Ast.parse(allocator, coordinator_z, .zig);
+    defer tree.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+    const fixture = fixture: {
+        for (tree.rootDecls()) |node| {
+            if (tree.nodeTag(node) != .fn_decl) continue;
+            var buffer: [1]std.zig.Ast.Node.Index = undefined;
+            const proto = tree.fullFnProto(&buffer, node) orelse continue;
+            const name = proto.name_token orelse continue;
+            if (std.mem.eql(u8, tree.tokenSlice(name), "processArmedPreclosedDiskFullAdmissionFixture"))
+                break :fixture tree.getNodeSource(node);
+        }
         return error.MissingCoordinatorFixture;
-    const fixture_tail = coordinator[fixture_start..];
-    const fixture_end = std.mem.indexOf(u8, fixture_tail, "\nfn processArmedMode") orelse
-        return error.MissingCoordinatorFixtureEnd;
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        fixture_tail[0..fixture_end],
-        "@compileError(\"disk full admission fixture is test-only\")",
-    ) != null);
-    const fill = std.mem.indexOf(u8, coordinator, "fillOwnerVolumeUntilEnospcForFixture(") orelse
+    };
+    try std.testing.expect(std.mem.indexOf(u8, fixture, "@compileError(\"disk full admission fixture is test-only\")") != null);
+    const cleanup = std.mem.indexOf(u8, fixture, "defer removeDiskFullFixture(ctx.owner_dir, attempt_id)") orelse
+        return error.MissingFixtureCleanup;
+    const fill = std.mem.indexOf(u8, fixture, "fillOwnerVolumeUntilEnospcForFixture(ctx.owner_dir, attempt_id) catch return .invariant_violation") orelse
         return error.MissingRealDiskFill;
-    const prepare = std.mem.indexOf(u8, coordinator, "budget_admission.prepare(") orelse
-        return error.MissingBudgetPrepare;
-    try std.testing.expect(fill < prepare);
+    const deadline = std.mem.indexOf(u8, fixture, "Deadline.after(ctx.io, upgrade_limits.pause_budget_ns)") orelse
+        return error.MissingProductDeadline;
+    const execute = std.mem.indexOf(u8, fixture, "return processArmedWithDeadlineHooks(ctx, attempt_id, deadline, true, null)") orelse
+        return error.MissingProductAdmission;
+    try std.testing.expect(cleanup < fill and fill < deadline and deadline < execute);
+    try std.testing.expect(std.mem.indexOf(u8, coordinator, "budget_admission.prepare(") != null);
     try std.testing.expect(std.mem.indexOf(u8, coordinator, "posix.E.NOSPC") != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        coordinator,
-        "defer if (disk_full_fixture_active) removeDiskFullFixture(ctx.owner_dir, attempt_id)",
-    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, process_test, ".disk-full-fixture-") != null);
     try std.testing.expect(std.mem.indexOf(u8, process_test, "runtime.terminate") != null);
 

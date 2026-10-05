@@ -2595,7 +2595,8 @@ flowchart TD
 
   `test-session-host-upgrade-disk-full-admission` 집중 gate는 user-owned HFS+ disk image에 실제 fork daemon의 owner
   directory를 만들고 제품 target staging이 끝난 뒤에만 coordinator-private typed fixture로 같은 volume의 bounded
-  incompressible filler를 실제 kernel `ENOSPC`까지 쓴다. 그 다음 호출은 synthetic error가 아니라 제품
+  incompressible filler를 실제 kernel `ENOSPC`까지 쓴다. ENOSPC 준비가 끝난 뒤 제품의 absolute pause deadline을
+  생성해 fixture I/O 지연이 admission 오류를 deadline 오류로 바꾸지 않게 한다. 그 다음 호출은 synthetic error가 아니라 제품
   `budget_admission.prepare`여야 하며, two-copy `F_PREALLOCATE` 또는 durable probe write가 실패해 reader pause 전에
   `resumed/state_too_large`로 끝나야 한다. 부모는 accepted reply 뒤 새 제품 connection에서 terminal attempt status를
   읽고, accepted drain의 기존 sibling은 typed 폐쇄되지만 새 연결의 daemon PID·listener·`host.info`·exact runtime

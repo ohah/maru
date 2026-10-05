@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 196), abi_version);
+    try std.testing.expectEqual(@as(u32, 197), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1998,6 +1998,7 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_probe(
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW => .archive_scope_row,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SEARCH => .archive_search,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD => .archive_expanded_card,
+        c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE => .archive_sort_toggle,
         else => return @intFromEnum(Status.invalid_config),
     };
     const probe = app_session.agentSessionArchiveSmokeProbe(typed_target);
@@ -7647,6 +7648,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_scope_row));
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SEARCH), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_search));
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_expanded_card));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_sort_toggle));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostAgentSessionArchiveSmokeProbe), @sizeOf(AgentSessionArchiveSmokeProbe));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostAgentSessionArchiveSmokeProbe), @alignOf(AgentSessionArchiveSmokeProbe));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostAgentSessionArchiveSmokeProbe, "request_id"), @offsetOf(AgentSessionArchiveSmokeProbe, "request_id"));

@@ -3457,7 +3457,8 @@ fn projectAgentItems(
     out.clearRetainingCapacity();
     if (archive.view_items.len == 0) return;
     // **뒤집는 것은 투영 앞이다.** 투영이 "첫 등장 순서" 로 그룹을 만들므로(그 함수의 주석), 뒤에서
-    // 항목만 뒤집으면 그룹 머리와 카드가 어긋난다 — 그룹 순서까지 함께 뒤집혀야 한다.
+    // 항목만 뒤집으면 그룹 머리와 카드가 어긋난다. 앞에서 뒤집으면 그룹 안 순서가 뒤집히고 가장 오래된 기록의 그룹이
+    // 맨 앞에 온다(그룹이 섞여 있으면 그룹 순서 자체가 꼭 거꾸로가 되지는 않는다 — Mac `rebuildAgentSessionArchiveFilter` 와 같다).
     const ordered: []const maru.session.agent_session_archive_view.Item = switch (archive.sort) {
         .newest_first => archive.view_items,
         .oldest_first => blk: {

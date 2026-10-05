@@ -21,6 +21,7 @@ final class AgentSessionArchiveSmokeDriver {
         case fontScaleRects = "font-scale-rects"
         case fontZoom = "font-zoom"
         case claudeResumePointer = "claude-resume-pointer"
+        case sortTogglePointer = "sort-toggle-pointer"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
             guard let raw = environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"] else { return nil }
@@ -81,6 +82,8 @@ final class AgentSessionArchiveSmokeDriver {
         case waitForFontZoomIncrease
         case waitForFontZoomReset
         case waitForFontZoomDecrease
+        case waitForSortFlip
+        case waitForSortRestore
         case invokeAction
         case waitForAction
         case succeeded
@@ -114,6 +117,14 @@ final class AgentSessionArchiveSmokeDriver {
     private(set) var anchorRawTopPreserved = false
     private(set) var anchorSnapshotReordered = false
     private(set) var anchorNewGenerationPublished = false
+    /// AS6-b: the header toggle was pressed twice through the ordinary pointer path, the display order
+    /// flipped (mode and first-card ordinal both changed) and then came back to the original pair.
+    private(set) var sortRoundTrip = false
+    private var sortBefore: (order: UInt32, firstCard: UInt32)?
+    /// The header slots are fixed width, so neither the toggle nor refresh may move when the label flips
+    /// (최신순 ↔ 오래된순). These are copies of published rects, never action tokens.
+    private var sortToggleRect: MaruAppHostAgentSessionArchiveSmokeProbe?
+    private var sortRefreshRect: MaruAppHostAgentSessionArchiveSmokeProbe?
 
     init?(
         scenario: Scenario? = Scenario(environment: ProcessInfo.processInfo.environment),
@@ -183,6 +194,37 @@ final class AgentSessionArchiveSmokeDriver {
 
         case .waitForCard:
             guard let card = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD), card.present != 0, card.enabled != 0 else { return }
+            if scenario == .sortTogglePointer {
+                // The toggle is pressed through the same published hit rect and NSView mouse path as a user.
+                // The witness is the mode (`state`) plus the first visible card's opaque snapshot ordinal —
+                // reversing the display order of the same snapshot must change which record is first.
+                guard let toggle = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE),
+                      toggle.present != 0, toggle.enabled != 0,
+                      let refresh = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH), refresh.present != 0
+                else { return }
+                // A cold process starts newest first under the default `.all` scope with no search, so the mode is 0 and
+                // the first card is the newest record (ordinal 0). Anything else is a fixture/product change: fail loudly.
+                guard toggle.state == 0 else {
+                    fail("sort_initial_mode")
+                    return
+                }
+                guard card.state == 0 else {
+                    fail("sort_initial_first_card")
+                    return
+                }
+                guard let baseline = sessionInvariant(), baseline.activeSurfaceId != 0, baseline.termCount != 0 else {
+                    fail("terminal_baseline")
+                    return
+                }
+                terminalBaseline = baseline
+                sortBefore = (toggle.state, card.state)
+                sortToggleRect = toggle
+                sortRefreshRect = refresh
+                guard click(toggle) else { fail("sort_toggle_click") ; return }
+                stage = .waitForSortFlip
+                paintRequested = true
+                return
+            }
             // Capture the fully published SessionDock before the ordinary card click leaves the
             // list. This is visual evidence for the right-dock list geometry, not an alternate
             // activation path: the next two lines still arm the detail gate and use the same
@@ -208,6 +250,46 @@ final class AgentSessionArchiveSmokeDriver {
 
         case .waitForGate:
             if gateReached() { stage = .observeLoading }
+
+        case .waitForSortFlip:
+            guard let before = sortBefore,
+                  let toggle = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE), toggle.present != 0,
+                  let card = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD), card.present != 0
+            else { return }
+            guard toggle.state != before.order, card.state != before.firstCard else { return }
+            // Refresh is read from the same published frame as the toggle; absent means "not yet", not "moved".
+            guard let refresh = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH), refresh.present != 0 else { return }
+            guard headerSlotsUnmoved(toggle: toggle, refresh: refresh) else {
+                fail("sort_header_moved")
+                return
+            }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("sort_toggle_changed_terminal")
+                return
+            }
+            guard click(toggle) else { fail("sort_toggle_click_back") ; return }
+            stage = .waitForSortRestore
+            paintRequested = true
+
+        case .waitForSortRestore:
+            guard let before = sortBefore,
+                  let toggle = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE), toggle.present != 0,
+                  let card = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD), card.present != 0
+            else { return }
+            guard toggle.state == before.order, card.state == before.firstCard else { return }
+            // Refresh is read from the same published frame as the toggle; absent means "not yet", not "moved".
+            guard let refresh = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH), refresh.present != 0 else { return }
+            guard headerSlotsUnmoved(toggle: toggle, refresh: refresh) else {
+                fail("sort_header_moved")
+                return
+            }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("sort_toggle_changed_terminal")
+                return
+            }
+            terminalInvariantSatisfied = true
+            sortRoundTrip = true
+            stage = .succeeded
 
         case .observeLoading:
             guard let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME) else { return }
@@ -559,6 +641,9 @@ final class AgentSessionArchiveSmokeDriver {
             case .fontScaleRects, .fontZoom:
                 fail("font_scale_unreachable_action")
                 return
+            case .sortTogglePointer:
+                fail("sort_toggle_unreachable_action")
+                return
             case .resumePointer, .claudeResumePointer:
                 guard let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
                       detail.present != 0, detail.enabled != 0,
@@ -594,6 +679,9 @@ final class AgentSessionArchiveSmokeDriver {
             case .fontScaleRects, .fontZoom:
                 fail("font_scale_unreachable_wait")
                 return
+            case .sortTogglePointer:
+                fail("sort_toggle_unreachable_wait")
+                return
             case .resumePointer, .resumeKeyboard, .claudeResumePointer:
                 guard fakeResumeVerdict() else { return }
             case .revealPointer, .revealKeyboard:
@@ -617,6 +705,17 @@ final class AgentSessionArchiveSmokeDriver {
     private func fail(_ reason: String) {
         failure = reason
         stage = .failed
+    }
+
+    private func headerSlotsUnmoved(
+        toggle: MaruAppHostAgentSessionArchiveSmokeProbe,
+        refresh: MaruAppHostAgentSessionArchiveSmokeProbe
+    ) -> Bool {
+        guard let beforeToggle = sortToggleRect, let beforeRefresh = sortRefreshRect else { return false }
+        func same(_ a: MaruAppHostAgentSessionArchiveSmokeProbe, _ b: MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool {
+            a.x_px == b.x_px && a.y_px == b.y_px && a.width_px == b.width_px && a.height_px == b.height_px
+        }
+        return same(beforeToggle, toggle) && same(beforeRefresh, refresh)
     }
 
     private func matchesTerminalBaseline(_ observed: TerminalInvariant?) -> Bool {

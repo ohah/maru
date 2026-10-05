@@ -286,7 +286,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 셸 종료 경로가 앱을 끝낼지 Dock 에 남을지 이 값으로 가른다. 끝에 export 추가 — 구조체 offset 불변.
 // 194: config_file_changed — platform 파일 감시(FSEvents)가 config 파일 변경을 알린다. 다시 읽을지(behavior.auto-reload·
 // 내용 digest 가 이 창이 마지막으로 읽거나 쓴 것과 다른가)는 Zig 가 판정한다. 끝에 export 추가 — 구조체 offset 불변.
-pub const abi_version: u32 = 196;
+pub const abi_version: u32 = 197;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2018,9 +2018,12 @@ pub const CommandKind = enum(u32) {
 };
 
 /// AS4-c fixture가 실제로 paint되어 pointer 입력에 쓰이는 capability만 읽기 위해 쓰는
-/// 내부 target vocabulary다. provider source, action payload, 세션 제목/ID/경로는 이
-/// 경계를 절대 통과하지 않는다.
+/// 내부 target vocabulary다. provider source, 실행 가능한 action token, 세션 제목/ID/경로는 이
+/// 경계를 절대 통과하지 않는다. 예외 하나: `session_dock_card` 의 `state` 는 첫 카드의 **스냅샷 배열 서수**
+/// (record 목록에서의 자리)다 — 정렬 토글 fixture(AS6-b)가 표시 순서가 바뀌었는지 보는 증거이고, 그 값으로는
+/// 어떤 export 도 부를 수 없다(action 은 published action id + generation 으로만 풀린다).
 pub const AgentSessionArchiveSmokeProbeTarget = enum(u32) {
+    /// `state` = 첫 보이는 카드의 스냅샷 배열 서수(위 예외).
     session_dock_card = 1,
     archive_resume = 2,
     archive_reveal_log = 3,
@@ -2037,11 +2040,15 @@ pub const AgentSessionArchiveSmokeProbeTarget = enum(u32) {
     archive_search = 10,
     /// Fixture-only un-clipped root of the currently expanded identity-bound card.
     archive_expanded_card = 11,
+    /// Fixture-only published hit rect of the header sort toggle (AS6-b). `state` is the current display
+    /// order (0 = newest first, 1 = oldest first) — a UI mode, not source identity or capability.
+    archive_sort_toggle = 12,
 };
 
 /// Published tree에서 나온 backing-pixel capability snapshot이다. `present=false`면 다른
 /// 필드가 stale일 수 있으므로 consumer는 읽지 않는다. host ABI는 이 타입을 즉시
-/// fixed-width record로 복사할 뿐, source-derived 값이나 action identity를 추가하지 않는다.
+/// fixed-width record로 복사할 뿐, source-derived 값이나 action identity를 추가하지 않는다(`state` 의 뜻은
+/// target 마다 다르다 — `AgentSessionArchiveSmokeProbeTarget` 의 각 항목 주석).
 pub const AgentSessionArchiveSmokeProbe = struct {
     request_id: u64 = 0,
     /// Published SessionDock frame generation; only the scroll-anchor fixture compares this
@@ -8845,6 +8852,7 @@ pub const AppSession = struct {
             .archive_scope_row => return agent_dock.agentSessionDockNodeSmokeProbe(self, chrome.components.session_dock.build.NodeIds.scope_row),
             .archive_search => return agent_dock.agentSessionDockNodeSmokeProbe(self, chrome.components.session_dock.build.NodeIds.search),
             .archive_expanded_card => return agent_dock.agentSessionDockExpandedCardSmokeProbe(self),
+            .archive_sort_toggle => return agent_dock.agentSessionDockSortToggleSmokeProbe(self),
         }
     }
 
@@ -83704,6 +83712,85 @@ fn dockWheelFixture(allocator: std.mem.Allocator) !*AppSession {
     try session.agent_session_archive_projection.entries.append(allocator, .{ .group = 0 });
     for (0..card_count) |index| try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
     return session;
+}
+
+// 정렬 토글(AS6-b)은 표시 목록을 뒤집고, projection 이 그 순서로 그룹을 다시 만든다(그룹 순서 = 처음 나타난 순서).
+// 그래서 ⑴ 그룹 안 순서가 뒤집히고 ⑵ 가장 오래된 기록의 그룹이 맨 앞에 온다. AppKit `sort-toggle-pointer` 는 실제
+// pointer 왕복을 보지만 그 픽스처는 그룹이 하나라 이 둘을 못 본다(적대적 검증 1·4회차) — 여기서 그룹 둘로 잰다.
+// 섞인 경우(a, b, a)도 함께 둔다: 그때는 그룹 순서가 거꾸로가 아니라 «가장 오래된 기록의 그룹이 앞» 이다.
+test "정렬 토글은 그룹 안 순서를 뒤집고 가장 오래된 기록의 그룹을 앞에 두며, 다시 토글하면 돌아온다 (AS6-b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const Shape = struct {
+        const Want = union(enum) { group: []const u8, card: usize };
+        fn expect(sess: *AppSession, want: []const Want) !void {
+            const entries = sess.agent_session_archive_projection.entries.items;
+            try std.testing.expectEqual(want.len, entries.len);
+            for (want, entries) |w, e| switch (w) {
+                .group => |key| try std.testing.expectEqualStrings(key, sess.agent_session_archive_projection.groups.items[e.group].key),
+                .card => |record| try std.testing.expectEqual(record, e.card),
+            };
+        }
+    };
+    // record 는 최신순으로 온다. cwds[i] 가 record i 의 그룹이다.
+    for ([_][]const []const u8{ &.{ "/work/a", "/work/a", "/work/b" }, &.{ "/work/a", "/work/b", "/work/a" } }, 0..) |cwds, case| {
+        const session = try initDockedRoutingSession(allocator, .right);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        for (cwds, 0..) |cwd, index| {
+            try appendFixtureArchiveRecordN(session, allocator, index);
+            const parsed = &session.agent_session_archive_records.items[index].parsed;
+            const owned = try allocator.dupe(u8, cwd); // 새 것을 먼저 잡고 옛 것을 푼다 — 실패해도 이중 해제가 없다
+            allocator.free(parsed.cwd);
+            parsed.cwd = owned;
+        }
+        agent_dock.rebuildAgentSessionArchiveFilter(session);
+        const newest: []const Shape.Want = if (case == 0)
+            &.{ .{ .group = "/work/a" }, .{ .card = 0 }, .{ .card = 1 }, .{ .group = "/work/b" }, .{ .card = 2 } }
+        else
+            &.{ .{ .group = "/work/a" }, .{ .card = 0 }, .{ .card = 2 }, .{ .group = "/work/b" }, .{ .card = 1 } };
+        try Shape.expect(session, newest);
+
+        agent_dock.toggleAgentSessionArchiveSort(session);
+        try std.testing.expectEqual(chrome.components.session_dock.types.SortOrder.oldest_first, session.agent_session_archive_sort);
+        // 가장 오래된 기록(2)의 그룹이 맨 앞, 그룹 안은 뒤집혔다. 그룹 안만 뒤집거나 표시를 안 뒤집으면 여기서 갈린다.
+        if (case == 0) {
+            try Shape.expect(session, &.{ .{ .group = "/work/b" }, .{ .card = 2 }, .{ .group = "/work/a" }, .{ .card = 1 }, .{ .card = 0 } });
+        } else {
+            try Shape.expect(session, &.{ .{ .group = "/work/a" }, .{ .card = 2 }, .{ .card = 0 }, .{ .group = "/work/b" }, .{ .card = 1 } });
+        }
+
+        agent_dock.toggleAgentSessionArchiveSort(session);
+        try Shape.expect(session, newest);
+    }
+}
+
+// 정렬 토글(AS6-b)의 나머지 약속 둘: ⑴ 목록 순서가 통째로 바뀌므로 보던 자리를 복원하지 않고 **맨 위로** 보낸다
+// (`toggleAgentSessionArchiveSort` 주석), ⑵ 뒤집는 것은 **표시 층**뿐이다 — 스캔 결과(`agent_session_archive_records`,
+// 최신순)는 그대로다. 둘 다 이 판정자 전에는 아무도 안 봤다(적대적 검증 3회차). 맨 위로 보내는 것이 «원래 0 이라서»
+// 통과하지 않게, 넘치는 목록에서 실제로 내려간 뒤 누른다.
+test "정렬 토글은 맨 위로 스크롤하고, 스캔 결과의 순서는 건드리지 않는다 (AS6-b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const count = 40;
+    for (0..count) |index| try appendFixtureArchiveRecordN(session, allocator, index);
+    agent_dock.rebuildAgentSessionArchiveFilter(session);
+    const max_offset = agent_dock.agentSessionDockScrollProjection(session).max_offset_px;
+    try std.testing.expect(max_offset > 0); // 전제 — 넘치지 않으면 「맨 위로」를 못 잰다
+    agent_dock.setAgentSessionDockScrollOffset(session, max_offset / 2);
+    try std.testing.expect(session.agent_session_archive_scroll.offset_y_px > 0);
+
+    agent_dock.toggleAgentSessionArchiveSort(session);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
+    for (session.agent_session_archive_records.items, 0..) |record, index| {
+        var want_buf: [32]u8 = undefined;
+        const want = try std.fmt.bufPrint(&want_buf, "fixture-session-{d}", .{index});
+        try std.testing.expectEqualStrings(want, record.parsed.session_id);
+    }
+    try std.testing.expectEqual(@as(usize, count - 1), session.agent_session_archive_filtered_indices.items[0]); // 표시는 뒤집혔다
 }
 
 /// 실제 발행 경로로 도크 tree를 publish해 스크롤바 기하가 생기게 한다. 기존 드래그 테스트는

@@ -734,7 +734,7 @@ jobs:
       - name: checkpoint Quit 성공·취소 스모크
         if: ${{ !cancelled() }}
         run: mise run macos-session-host-c4-quit-cancel-smoke
-      # 격리 HOME 의 cold AppKit 프로세스 15개가 synthetic·redacted JSONL 만 읽는다 — 실제 provider
+      # 격리 HOME 의 cold AppKit 프로세스 16개가 synthetic·redacted JSONL 만 읽는다 — 실제 provider
       # 바이너리·계정·네트워크·사용자 이력에는 닿지 않는다(docs/plans/agent-session-list.md AS4-c).
       # 판정은 fake provider 가 남긴 verdict 와 rect JSON 이고 summary 에 원문·세션 id·경로는 안 남는다.
       - name: 에이전트 세션 기록 도크 스모크

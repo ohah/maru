@@ -8106,6 +8106,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var status_cwd_buf: [512]u8 = undefined;
     var caption_hover: ?usize = null;
     var caption_clicks: usize = 0;
+    var caption_save_clicks: usize = 0;
     // 캡션 버튼 **동작** 판정(W8.8⒝). `caption_clicks` 만으로는 속 빈다 — 스모크가 그 자리를 아예
     // 안 눌러서 0 이었고, 0 은 "버튼이 죽었다" 와 구별이 안 된다.
     var caption_judgeable = false;
@@ -11894,7 +11895,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
             // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
             .mouse => |m| {
-                if (pending_save != null) continue;
+                // Busy work ends an old editor capture before caption routing.
+                // Otherwise a swallowed release can keep the scrollbar grabbed.
+                if (pending_save != null or file_close_waiting or initial_open.job != null) {
+                    hbar_drag.end();
+                    vbar_drag.end();
+                    hbar_drag_release = false;
+                    vbar_drag_release = false;
+                    editor_bar_file = null;
+                }
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
 
@@ -11947,6 +11956,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                     if (m.kind == .left_up) if (hit) |i| {
                         caption_clicks += 1;
+                        if (pending_save != null) caption_save_clicks += 1;
                         switch (i) {
                             0 => window.minimize(),
                             1 => window.toggleMaximize(),
@@ -11960,7 +11970,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
 
                 // Keep native caption controls available, but block covered app actions.
-                if (file_close_waiting or initial_open.job != null) continue;
+                if (pending_save != null or file_close_waiting or initial_open.job != null) continue;
                 if (file_notice.open and !confirm_state.open) continue;
 
                 // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────
@@ -14006,6 +14016,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 사각형이 이제 `x=180` 에서 시작하므로, 원점을 안 찍으면 그 수가 0 이 아니다(§2m.31 이
     // "검증 안 됐다" 고 적어 둔 배선이 여기서 처음 발동한다).
     try stdout.print("titlebar_px={d} caption_btn_w={d} caption_clicks={d} titlebar_cells={d}\n", .{ titlebar_px, caption_btn_w, caption_clicks, titlebar_cells.items.len });
+    try stdout.print("caption_save_clicks={d}\n", .{caption_save_clicks});
     if (caption_judgeable) {
         // **동어반복이 아니다**: 내가 보낸 좌표를 되읽는 것이 아니라 **OS 의 창 상태**
         // (`IsZoomed`)를 읽는다. 히트테스트·라우팅·`toggleMaximize` 가 전부 이어져야 뒤집힌다.

@@ -3930,3 +3930,13 @@ manifest다. 각 뷰의 개별 offscreen 프레임이며 동시 pane GUI나 실�
 재시작 없이 캡처했고 펼침 상태 유지 및 정상 종료를 확인했다. private fixture와
 synthetic owned HWND 입력을 사용했다. 물리 입력·IME, sleep/unmount·root 교체
 장기 soak와 원격 감시는 미검증이며 이 항목의 완료 주장이 아니다.
+
+
+### Windows 주기적 backup worker (§2m.189)
+
+`test-win32-backup-worker` 15개 Debug/ReleaseFast와 다섯 compiled runtime 변형을
+검증했다. private 실제 앱에서 자동 백업의 durable bytes/원본 보존, owned PID의 강제
+종료와 재시작 후 파일 클릭 복구, 첫 Save-close의 BOM/Xbase/CRLF·정상 종료·백업 삭제를
+확인했다. 초기 잘못된 활성 화면 입력은 성공에서 제외했다. synthetic HWND만 사용했다.
+물리 입력/IME·긴 UNC/권한 변경/대형 다중 파일 닫기 soak, capture/복구 CPU와 close/shutdown
+I/O 이관은 남아 있으며 이 증거로 완료를 주장하지 않는다.

@@ -62,6 +62,7 @@ test {
     _ = @import("platform/windows/editor/file_read_worker.zig");
     _ = @import("platform/windows/editor/save_prepare_worker.zig");
     _ = @import("platform/windows/editor/backup_store.zig");
+    _ = @import("platform/windows/editor/backup_worker.zig");
     _ = scm_surface;
     _ = agent_surface;
 }
@@ -5572,6 +5573,52 @@ test "Windows editor host app window discard refuses an actual undetermined nati
     try f.expectDisk("\xef\xbb\xbfbase\r\n");
 }
 
+const BackupWorker = @import("platform/windows/editor/backup_worker.zig").Worker;
+
+fn tickFileBackupWorker(io: std.Io, worker: *BackupWorker, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, allow_start: bool, local_override: ?[]const u8) !@import("platform/windows/editor/backup_store.zig").Maintenance {
+    if (try worker.finish(owner, now_ns)) |completed| return completed.report;
+    if (worker.isBusy() or !allow_start) return .{};
+    for (views) |view| {
+        const state = view.documents.get(view.document) orelse continue;
+        if (!state.notifications.backup_dirty or now_ns < state.notifications.backup_due_ns) continue;
+        worker.start(io, view.document, if (owner.*) |*value| &value.store else null, local_override, maru.session.editor.backup.pause_bytes) catch |failure| {
+            state.notifications.backup_due_ns = now_ns +| maru.session.editor.backup.debounce_ns;
+            return failure;
+        };
+        break; // one due document, with no synchronous fallback on failure
+    }
+    return .{};
+}
+
+fn drainFileBackupWorker(io: std.Io, worker: *BackupWorker, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, now_ns: i128) !@import("platform/windows/editor/backup_store.zig").Maintenance {
+    try worker.rejectDrop();
+    var report: @import("platform/windows/editor/backup_store.zig").Maintenance = .{};
+    while (worker.isBusy()) {
+        if (try worker.finish(owner, now_ns)) |completed| {
+            report.attempted += completed.report.attempted;
+            report.failed += completed.report.failed;
+            if (report.first_error == null) report.first_error = completed.report.first_error;
+        }
+        if (worker.isBusy()) io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try worker.deinit();
+    return report;
+}
+
+fn holdBackupWindowClose(busy: bool, deferred: *bool, requested: *bool) void {
+    if (requested.* and busy) {
+        deferred.* = true;
+        requested.* = false;
+    }
+    if (deferred.* and !busy) {
+        deferred.* = false;
+        requested.* = true;
+    }
+}
+fn backupAllowsCloseAction(busy: bool, action: maru.chrome.components.confirm.Action) bool {
+    return !busy or action == .cancelled or action == .extra;
+}
+
 fn maintainFileBackups(a: std.mem.Allocator, io: std.Io, owner: *@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, shutdown: bool) @import("platform/windows/editor/backup_store.zig").Maintenance {
     var states: std.ArrayList(*maru.session.editor.document_state.State) = .empty;
     defer states.deinit(a);
@@ -6950,7 +6997,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // Register after the view cleanup so shutdown flush runs while document
     // leases are alive. No pending edits means no user backup directory access.
     var file_backups: ?@import("platform/windows/editor/backup_store.zig").LocalData = null;
+    var file_backup_worker = BackupWorker.init(allocator, &editor_documents);
+    var backup_window_close_requested = false;
+    var backup_clean_closes: std.ArrayList(maru.session.editor.document_registry.Lease) = .empty;
+    defer backup_clean_closes.deinit(allocator);
     defer {
+        reportFileBackups(stderr, drainFileBackupWorker(io, &file_backup_worker, &file_backups, std.Io.Clock.awake.now(io).nanoseconds) catch unreachable);
         if (runFileBackups(allocator, io, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, true, null)) |report| {
             reportFileBackups(stderr, report);
         } else |err| stderr.print("  warning: editor backup shutdown failed({s})\n", .{@errorName(err)}) catch {};
@@ -8273,7 +8325,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         frames_total += 1;
         if (agent_settling) settle_frames += 1 else spins += 1;
     }) {
-        if (runFileBackups(allocator, io, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, false, null)) |report| {
+        if (tickFileBackupWorker(io, &file_backup_worker, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, !confirm_state.open and pending_file_close == null and !close_requested and !backup_window_close_requested and backup_clean_closes.items.len == 0 and save_close_target == null and !save_close_requested, null)) |report| {
             reportFileBackups(stderr, report);
         } else |err| stderr.print("  warning: editor backup maintenance failed({s})\n", .{@errorName(err)}) catch {};
         file_changes.hold_notices = file_notice.open or confirm_state.open;
@@ -12166,6 +12218,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                                                 break :close_blk;
                                             };
+                                            if (file_backup_worker.isBusy()) {
+                                                const lease = open_files.items[fi].document;
+                                                var queued = false;
+                                                for (backup_clean_closes.items) |previous| if (previous.owner == lease.owner and previous.id == lease.id) {
+                                                    queued = true;
+                                                    break;
+                                                };
+                                                if (!queued) backup_clean_closes.append(allocator, lease) catch |failure| file_notice.show(maru.i18n.t(fileSaveNotice(failure)));
+                                                break :close_blk;
+                                            }
                                             _ = approveFileClose(io, &editor_files, &file_backups, open_files.items, .{ .file = open_files.items[fi].document }, .confirmed) catch |err| {
                                                 file_notice.show(maru.i18n.t(fileSaveNotice(err)));
                                                 break :close_blk;
@@ -13580,6 +13642,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 save_close_target = null;
             }
         }
+        // Votes follow queued input and real save outcomes. A close cannot
+        // race an older backup write and recreate a deliberately dropped record.
+        try file_backup_worker.voteDrop();
+        holdBackupWindowClose(file_backup_worker.isBusy(), &backup_window_close_requested, &close_requested);
         if (close_requested and !file_exit_accepted) {
             if (choice_notice) |lease| {
                 try file_changes.cancelChoice(lease);
@@ -13605,7 +13671,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
             } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
         }
-        if (confirm_pending_click) |act| {
+        if (!file_backup_worker.isBusy() and backup_clean_closes.items.len != 0 and pending_file_close == null and !confirm_state.open and !close_requested) {
+            const lease = backup_clean_closes.orderedRemove(0);
+            if (fileIndexForLease(open_files.items, lease)) |fi| {
+                pending_file_close = .{ .file = lease };
+                pending_file_conflict = null;
+                confirm_pending_click = null;
+                // A formerly clean close is not consent to save later edits.
+                if (editor_documents.get(open_files.items[fi].document).?.opened.?.isDirty()) {
+                    beginFileClose(&confirm_state, &confirm_pending_click);
+                } else confirm_pending_click = .confirmed;
+            }
+        }
+        if (confirm_pending_click != null and backupAllowsCloseAction(file_backup_worker.isBusy(), confirm_pending_click.?)) {
+            const act = confirm_pending_click.?;
             confirm_pending_click = null;
             if (pending_file_conflict) |target| {
                 confirm_state.dismiss();
@@ -20320,4 +20399,74 @@ test "Windows editor directory watch rejects a reserved same-path worker slot" {
     state.inflight -= 1;
     state.mutex.unlock(io);
     try std.testing.expect(!accepted);
+}
+
+test "Windows recovery backup worker app debounce starts one native job and adopts its durable root" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const state = f.documents.get(f.views.items[0].document).?;
+    if (try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| a.free(copied);
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try f.tmp.dir.realPath(io, &root_buffer)];
+    var worker = BackupWorker.init(a, &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, 20) catch unreachable;
+    const due = state.notifications.backup_due_ns;
+    _ = try tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due - 1, true, root);
+    try std.testing.expect(!worker.isBusy() and f.backups == null);
+    _ = try tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due, false, root);
+    try std.testing.expect(!worker.isBusy() and f.backups == null);
+    _ = try tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due, true, root);
+    try std.testing.expect(worker.isBusy() and state.notifications.backup_dirty);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (worker.isBusy()) {
+        _ = try tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due, false, root);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.AppBackupCompletionMissing;
+        if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(f.backups != null and state.notifications.backup_on_disk and !state.notifications.backup_dirty);
+    var record = (try f.backups.?.store.read(io, @import("platform/windows/editor/backup_store.zig").identity(state).?)).?;
+    defer record.deinit();
+    try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker app start failure retries without synchronous storage fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    if (try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| a.free(copied);
+    const state = f.documents.get(f.views.items[0].document).?;
+    const due = state.notifications.backup_due_ns;
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try f.tmp.dir.realPath(io, &root_buffer)];
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var worker = BackupWorker.init(failing.allocator(), &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, due) catch unreachable;
+    try std.testing.expectError(error.OutOfMemory, tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due, true, root));
+    try std.testing.expect(!worker.isBusy() and f.backups == null);
+    try std.testing.expect(state.notifications.backup_dirty and !state.notifications.backup_on_disk);
+    try std.testing.expectEqual(due + maru.session.editor.backup.debounce_ns, state.notifications.backup_due_ns);
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.openDir(io, "maru", .{}));
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker app preserves queued window close and allows immediate Cancel" {
+    var deferred = false;
+    var requested = true;
+    holdBackupWindowClose(true, &deferred, &requested);
+    try std.testing.expect(deferred and !requested);
+    holdBackupWindowClose(true, &deferred, &requested);
+    try std.testing.expect(deferred and !requested);
+    holdBackupWindowClose(false, &deferred, &requested);
+    try std.testing.expect(!deferred and requested);
+    try std.testing.expect(!backupAllowsCloseAction(true, .confirmed));
+    try std.testing.expect(!backupAllowsCloseAction(true, .alternate));
+    try std.testing.expect(backupAllowsCloseAction(true, .cancelled));
+    try std.testing.expect(backupAllowsCloseAction(true, .extra));
+    try std.testing.expect(backupAllowsCloseAction(false, .confirmed));
 }

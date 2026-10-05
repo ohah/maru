@@ -12111,3 +12111,39 @@ queued 결과는 실제 native worker로 확인하고 reserved active slot은 �
 직접 모델링한다. backend의 active path는 결과 발행과 같은 mutex 안에서 제거하며
 job 할당/spawn 실패도 슬롯을 되돌린다. 이 opt-in API는 Windows 앱이 사용하고
 기존 macOS·remote submit API의 중복 정책은 바꾸지 않는다.
+
+
+### 2m.189 — 주기적 복구 백업의 native worker 연결
+
+일반 앱 루프의 주기적 백업을 `editor/backup_worker.zig`에 연결했다. 본문/신원 사본과
+문서 lease·epoch·revision·saved/raw hash·save issued/uncertain/live-image 및 백업 시점을
+고정한다. Registry는 앱만 접근하며 worker는 SMP 배열과 pinned store의 immutable
+policy/handle 값으로 private root 열기·레코드 encode/write/flush/publish/drop을 수행한다.
+기존 root는 실제 완료까지 빌리고, 새 root는 worker에서 열어 앱에 인계한다.
+
+2초 debounce, 한 worker/문서씩, 기존 store의 실제 크기 상한과 pause/기존 레코드 보존을
+유지한다. 시작/쓰기 실패는 pending과 2초 재시도를 남기며 동기 fallback은 없다.
+stale write receipt도 같은 key의 실제 on-disk 상태를 반영하지만 최신 문서를 완료로
+표시하지 않는다. clean 삭제는 queued 입력과 실제 save 결과 뒤의 한 번짜리 앱 승인을
+기다린다. epoch/revision/CAS/새 save 이미지가 바뀌면 거절한다. teardown은 미승인 drop을
+거절하고 실제 종료 뒤만 body/문서 lease/root를 정리한다.
+
+백업 중 창 닫기는 보존해 완료 뒤 처리한다. clean 파일 닫기는 중복을 제거한 FIFO에
+보관하고, 그 사이 새 편집이 생겼으면 저장 확인을 새로 요구한다. Cancel은 즉시 처리하며
+close/save-close 의도가 남아 있으면 다음 주기적 job을 시작하지 않는다.
+
+`test-win32-backup-worker` 15개가 Debug/ReleaseFast에서 통과했다. frozen 본문,
+stale epoch/revision/CAS, old raw hash의 레코드, 실제 worker thread와 private root 인계,
+실패/backoff/no sync fallback, unknown/live-save clean undo 보존, 삭제 승인/거절,
+pause 및 소유권/부분 할당 실패와 앱 debounce/close 보존을 검사한다. 본문·epoch·raw CAS·
+실패 ack·uncertain clean 판정을 깨뜨린 다섯 compiled runtime 변형을 검출하고 원본을 복원했다.
+
+실제 앱 PID 16112에서 자동 백업의 exact `Xbase CRLF`와 원본 BOM/base/CRLF 보존을 확인한
+뒤 private fixture 앱만 강제 종료했다. PID 48976으로 재시작해 파일 클릭 후 복구 본문과
+안내를 캡처했고 첫 Save-close에서 exact BOM/Xbase/CRLF, 정상 종료 및 백업 삭제를 확인했다.
+첫 입력 시 활성 화면이 터미널로 바뀐 시도는 성공 증거에서 제외했다. 입력은 synthetic
+owned HWND이며 물리 입력/IME 검증이 아니다.
+
+본문 hash/copy와 복구 이력/후속 projection CPU는 아직 앱에 있다. 명시적 close의
+backup drop, shutdown의 최종 일괄 flush와 owner/드문 extra-root handle 정리도 아직
+동기 경로다. 이 절은 주기적 I/O의 이관만 기록하며 전체 잔여 Windows 범위를 완료로 보지 않는다.

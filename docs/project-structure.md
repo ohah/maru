@@ -645,3 +645,9 @@ Windows 단독 worker 판정자와 crash probe의 모듈 루트는 platform/wind
 얇은 aggregation/entry 파일이다. 공용 native import가 editor 밖으로 이동해도
 모듈 경계를 벗어나지 않는다. aggregation test 하나가 추가되어 open 20개,
 settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 유지한다.
+
+
+Windows `editor/backup_worker.zig`는 주기적 recovery의 독립 body/identity 이미지와
+native I/O job을 소유한다. Registry ack와 drop 승인은 앱 스레드에 남으며 pinned
+store의 borrowed handle은 actual 완료까지 유지한다. 앱은 close 의도를 보존해
+백업 쓰기 뒤 삭제가 다시 레코드를 생성하는 경쟁을 막는다.

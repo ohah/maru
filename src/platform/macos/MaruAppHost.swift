@@ -9901,7 +9901,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// W6h①: 이 창의 세션이 쥔 「새 창에서 링크 열기」 주소를 가져가 tick 뒤에 새 창을 만든다(tick 안에서 창을 만들지 않는다 — 세션
     /// 생성이 tick 을 다시 부른다).
     private func drainOsrNewWindows() {
-        guard let session = appSession else { return }
+        guard let session = appSession, maru_macos_app_session_osr_new_windows_pending(session) > 0 else { return }
         var buffer = [UInt8](repeating: 0, count: 32 * 1024) // wire 주소 상한
         var length = 0
         while buffer.withUnsafeMutableBufferPointer({ maru_macos_app_session_osr_take_new_window(session, $0.baseAddress, $0.count, &length) }) == 1 {
@@ -9922,7 +9922,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             opened = url.withUnsafeBufferPointer { maru_macos_app_session_osr_open_url_tab(session, $0.baseAddress, $0.count) } == 1
             markMetalNeedsRedraw()
         }
-        if Self.osrContextMenuTestMode { Self.testReport("newwindow opened windows=\(windows.count) tab=\(opened)") }
+        if Self.osrContextMenuTestMode {
+            Self.testReport("newwindow opened windows=\(windows.count) tab=\(opened) session=\(UInt(bitPattern: session))")
+        }
     }
 
     private func drainOsrContextMenu() {

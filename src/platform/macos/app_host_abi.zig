@@ -5008,6 +5008,12 @@ pub export fn maru_macos_app_session_osr_context_menu_search(session: ?*AppSessi
     return @intFromBool(session_mod.web_ops.osrContextMenuSearch(app, menu));
 }
 
+/// v209(W6h①): 가져가지 않은 「새 창에서 링크 열기」 요청 수 — Swift 는 0 이 아닐 때만 버퍼를 만들어 `take_new_window` 를 부른다.
+pub export fn maru_macos_app_session_osr_new_windows_pending(session: ?*AppSession) u32 {
+    const app = session orelse return 0;
+    return @intCast(session_mod.web_ops.osrNewWindowsPending(app));
+}
+
 /// v209(W6h①): 메뉴 「새 창에서 링크 열기」의 주소 하나를 가져간다(UTF-8, 1). `cap` 보다 길면 버리고 0 — Swift 는 wire 주소 상한
 /// (32 KiB)만큼 준다. Swift 는 tick 뒤에 새 창을 만들고 그 창 세션에 `osr_open_url_tab` 으로 연다.
 pub export fn maru_macos_app_session_osr_take_new_window(session: ?*AppSession, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
@@ -5025,7 +5031,10 @@ pub export fn maru_macos_app_session_osr_take_new_window(session: ?*AppSession, 
 pub export fn maru_macos_app_session_osr_open_url_tab(session: ?*AppSession, url: ?[*]const u8, len: usize) i32 {
     const app = session orelse return 0;
     const p = url orelse return 0;
-    return @intFromBool(session_mod.web_ops.osrOpenUrlTab(app, p[0..len]));
+    const opened = session_mod.web_ops.osrOpenUrlTab(app, p[0..len]);
+    // 판정 모드 전용(스모크 W6h①): 연 세션(창)을 적는다 — 스모크가 새 창의 세션과 맞춰 본다. 주소는 적지 않는다.
+    if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test opentab session={d} opened={}\n", .{ @intFromPtr(app), opened });
+    return @intFromBool(opened);
 }
 
 /// v204(W6c②): 띄운 메뉴가 아직 열려 있어야 하면 1 — 0 이면(페이지가 이동했거나 탭이 닫혀 sidecar 가 닫았다) Swift 가 메뉴를 거둔다.

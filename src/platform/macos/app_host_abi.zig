@@ -5119,13 +5119,13 @@ pub export fn maru_macos_app_session_osr_drag_file_poll(session: ?*AppSession, d
     return 1;
 }
 
-/// v207(W6d③): 청한 파일 내용을 기다리다 그만뒀다 — 놓는다.
-/// v208: 창이 뒤에 있을 때 그 자리(창 backing px)의 첫 누름을 view 에 넘기는가 — Chromium 탭 본문이면 1(`acceptsFirstMouse`).
+/// v208(W6g): 창이 뒤에 있을 때 그 자리(창 backing px)의 첫 누름을 view 에 넘기는가 — Chromium 탭 본문이면 1(`acceptsFirstMouse`).
 pub export fn maru_macos_app_session_osr_accepts_first_mouse(session: ?*AppSession, x_px: f64, y_px: f64) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrAcceptsFirstMouse(app, x_px, y_px));
 }
 
+/// v207(W6d③): 청한 파일 내용을 기다리다 그만뒀다 — 놓는다.
 pub export fn maru_macos_app_session_osr_drag_file_release(session: ?*AppSession, drag: u32) void {
     const app = session orelse return;
     session_mod.web_ops.osrDragFileRelease(app, drag);

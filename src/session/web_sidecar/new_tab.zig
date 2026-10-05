@@ -46,6 +46,26 @@ pub fn urlAllowed(url: []const u8) bool {
     return true;
 }
 
+/// http·https 주소의 출처(W6h② — 미디어 메뉴가 바꾸는 요소의 문서 출처 확인)(`scheme://host[:port]`) — 브라우저의 `location.origin` 과 같은 꼴(소문자 스킴·호스트는 GURL 이 이미
+/// 정규화했다). 그 밖의 주소는 null.
+pub fn originOf(url: []const u8) ?[]const u8 {
+    const sep = std.mem.indexOf(u8, url, "://") orelse return null;
+    const scheme = url[0..sep];
+    if (!std.mem.eql(u8, scheme, "http") and !std.mem.eql(u8, scheme, "https")) return null;
+    const rest = url[sep + 3 ..];
+    const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    if (end == 0) return null;
+    return url[0 .. sep + 3 + end];
+}
+
+test "the origin of a frame url is scheme and authority, only for http and https" {
+    try std.testing.expectEqualStrings("https://a.example", originOf("https://a.example/v?x#t=10").?);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080", originOf("http://127.0.0.1:8080").?);
+    try std.testing.expect(originOf("about:blank") == null);
+    try std.testing.expect(originOf("data:text/html,x") == null);
+    try std.testing.expect(originOf("https:///x") == null);
+}
+
 /// 이어 받는 팝업(W6f)이 처음 갈 수 있는 주소 — 새 탭 주소(`urlAllowed`)에 더해 빈 팝업(`about:blank` — `window.open()` 뒤
 /// `document.write` 로 채운다, 착수 전 실측: 이어지면 된다). CEF 는 빈 주소·`javascript:` 를 `about:blank` 로 준다(W6e 실측).
 pub fn popupUrlAllowed(url: []const u8) bool {

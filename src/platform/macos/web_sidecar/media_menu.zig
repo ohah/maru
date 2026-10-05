@@ -50,8 +50,9 @@ const Slot = struct {
     /// 앞부분과 길이로 확인하고 보조 경로는 쓰지 않는다(W6h② 적대 검증 1 회차).
     src: ?[]u8 = null,
     src_len: usize = 0,
-    /// 메뉴가 온 frame 의 문서 주소(소유 — 그 문서의 요소만 바꾼다: 같은 프로세스의 다른 출처 iframe 을 그 자리로 옮겨도, W6h② 적대 검증
-    /// 3 회차).
+    /// 메뉴가 온 frame 의 출처(`scheme://host[:port]`, 소유 — 그 출처의 문서 요소만 바꾼다: 같은 프로세스의 다른 출처 iframe 을 그 자리로
+    /// 옮겨도, W6h② 적대 검증 3 회차). 주소 전체가 아니라 출처다 — 메뉴가 떠 있는 동안 플레이어가 해시·경로를 바꿔도 되게(4 회차).
+    /// http·https 가 아니면(빈 문서·`data:` 등) null — 확인하지 않는다.
     doc: ?[]u8 = null,
     /// 메뉴가 온 frame(보조 경로 — 참조 하나).
     frame: [*c]c.cef_frame_t = null,
@@ -152,7 +153,9 @@ pub fn locate(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, menu: u32,
             var utf8 = std.mem.zeroes(c.cef_string_utf8_t);
             _ = browsers.state.api.string_utf16_to_utf8(url.*.str, url.*.length, &utf8);
             defer browsers.state.api.string_utf8_clear(&utf8);
-            if (utf8.str != null and utf8.length <= protocol.wire.max_url_bytes) v.doc = allocator.dupe(u8, utf8.str[0..utf8.length]) catch null;
+            if (utf8.str != null) if (protocol.new_tab.originOf(utf8.str[0..utf8.length])) |o| {
+                v.doc = allocator.dupe(u8, o) catch null;
+            };
         }
     }
     // 진행을 먼저 쥔다 — DevTools 를 못 쓰면(관찰자 등록 실패) 고를 때 보조 경로만 돈다.
@@ -177,6 +180,11 @@ pub fn act(browser: [*c]c.cef_browser_t, menu: u32, prop: Prop, want: bool) void
 /// 메뉴가 끝났다 — 고르지 않았으면 쥔 것을 놓는다(고른 것은 진행을 마치고 놓는다).
 pub fn menuEnded(cef_id: c_int, menu: u32) void {
     for (&slots) |*s| if (s.*) |v| if (v.cef_id == cef_id and v.menu == menu and v.action == null) clear(s);
+}
+
+/// 렌더러가 죽었다 — 그 브라우저의 진행을 놓는다(기다리던 답이 새 렌더러로 다시 가거나 오지 않을 수 있다, 4 회차). 등록은 둔다.
+pub fn rendererGone(cef_id: c_int) void {
+    clearFor(cef_id);
 }
 
 /// 닫히는 브라우저 — 진행과 관찰자 등록을 놓는다.
@@ -228,7 +236,7 @@ fn call(browser: [*c]c.cef_browser_t, s: *Slot, object_id: []const u8) void {
     // 그 요소가 미디어이고 주소가 메뉴가 알린 주소와 같을 때만 뒤집는다 — 아니면(다른 사이트 iframe 요소·그사이 바뀐 자리) 보조 경로로.
     // 주소는 앞부분(`s`)과 전체 길이(`n`)로 본다(긴 `data:` 주소). 주소를 모르면(복사 실패) 확인하지 않는다.
     const src_arg: []const u8 = if (s.src) |b| b else "";
-    if (!sendWaiting(browser, s, .call, "\"method\":\"Runtime.callFunctionOn\",\"params\":{{\"objectId\":{f},\"functionDeclaration\":\"function(p,s,n,w,u){{'use strict';try{{if(!(this instanceof HTMLMediaElement))return 'not-media';if(u&&this.ownerDocument.URL!==u)return 'other';var c=this.currentSrc;if(n&&(c.length!==n||c.slice(0,s.length)!==s))return 'other';this[p]=w;return 'ok'}}catch(e){{return 'err'}}}}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{f}}},{{\"value\":{d}}},{{\"value\":{}}},{{\"value\":{f}}}],\"returnByValue\":true}}", .{ std.json.fmt(object_id, .{}), @tagName(s.action.?), std.json.fmt(src_arg, .{}), s.src_len, s.want, std.json.fmt(s.doc orelse "", .{}) })) {
+    if (!sendWaiting(browser, s, .call, "\"method\":\"Runtime.callFunctionOn\",\"params\":{{\"objectId\":{f},\"functionDeclaration\":\"function(p,s,n,w,u){{'use strict';try{{if(!(this instanceof HTMLMediaElement))return 'not-media';if(u&&this.ownerDocument.location.origin!==u)return 'other';var c=this.currentSrc;if(n&&(c.length!==n||c.slice(0,s.length)!==s))return 'other';this[p]=w;return 'ok'}}catch(e){{return 'err'}}}}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{f}}},{{\"value\":{d}}},{{\"value\":{}}},{{\"value\":{f}}}],\"returnByValue\":true}}", .{ std.json.fmt(object_id, .{}), @tagName(s.action.?), std.json.fmt(src_arg, .{}), s.src_len, s.want, std.json.fmt(s.doc orelse "", .{}) })) {
         releaseObjects(browser); // 이미 쥐었다(resolveNode) — 놓는다(1 회차)
         fallback(s);
     }
@@ -250,7 +258,7 @@ fn fallback(s: *Slot) void {
     if (s.frame == null or src.len == 0 or src.len != s.src_len) return; // 앞부분뿐이면 같은 주소인지 모른다
     var code: std.ArrayList(u8) = .empty;
     defer code.deinit(allocator);
-    code.print(allocator, "(function(){{'use strict';try{{var u={f};if(u&&location.href!==u)return;var s={f};var m=[].filter.call(document.querySelectorAll('audio,video'),function(e){{return e.currentSrc===s}});if(m.length===1)m[0].{s}={}}}catch(e){{}}}})()", .{ std.json.fmt(s.doc orelse "", .{}), std.json.fmt(src, .{}), @tagName(prop), s.want }) catch return;
+    code.print(allocator, "(function(){{'use strict';try{{var u={f};if(u&&location.origin!==u)return;var s={f};var m=[].filter.call(document.querySelectorAll('audio,video'),function(e){{return e.currentSrc===s}});if(m.length===1)m[0].{s}={}}}catch(e){{}}}})()", .{ std.json.fmt(s.doc orelse "", .{}), std.json.fmt(src, .{}), @tagName(prop), s.want }) catch return;
     var script = std.mem.zeroes(c.cef_string_t);
     library.setString(browsers.state.api, &script, code.items);
     defer browsers.state.api.string_utf16_clear(&script);
@@ -258,8 +266,8 @@ fn fallback(s: *Slot) void {
     s.frame.*.execute_java_script.?(s.frame, &script, &url, 0);
 }
 
-/// DevTools agent 가 떨어졌다(렌더러 사망 등 — 기다리던 답은 오지 않는다) — 그 브라우저의 진행을 놓는다(1 회차). 등록은 브라우저가
-/// 닫힐 때 놓는다(관찰자 콜백 안에서 등록을 놓지 않는다).
+/// DevTools agent 가 떨어졌다(기다리던 답은 오지 않는다 — 렌더러가 죽을 때는 오지 않는 것으로 보여 `rendererGone` 이 따로 놓는다, 4 회차)
+/// — 그 브라우저의 진행을 놓는다(1 회차). 등록은 브라우저가 닫힐 때 놓는다(관찰자 콜백 안에서 등록을 놓지 않는다).
 fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t) callconv(.c) void {
     defer object.releaseArg(browser);
     if (browser == null) return;
@@ -297,7 +305,9 @@ fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browse
                 const oid = o.object.get("objectId") orelse break :blk null;
                 break :blk if (oid == .string) oid.string else null;
             };
-            if (object_id) |oid| call(browser, s, oid) else fallback(s);
+            // 노드를 못 얻었다(그사이 문서가 바뀌었다 — 같은 주소로 다시 불러온 새 문서의 요소를 보조 경로로 바꾸지 않게, 4 회차): 하지 않는다.
+            // 보조 경로가 필요한 다른 사이트 iframe 은 iframe 요소로 얻어져 `call` 에서 갈린다.
+            if (object_id) |oid| call(browser, s, oid) else clearFor(s.cef_id);
         },
         .call => {
             const ok = blk: {

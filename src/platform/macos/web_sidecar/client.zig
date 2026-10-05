@@ -320,6 +320,7 @@ fn onLoadEnd(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [
 fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, status: c.cef_termination_status_t, _: c_int, _: [*c]const c.cef_string_t) callconv(.c) void {
     defer object.releaseArg(browser);
     const entry = entryOf(browser) orelse return;
+    @import("media_menu.zig").rendererGone(entry.cef_id); // W6h②: 미디어 메뉴의 진행(4 회차)
     const reason: protocol.message.RendererGoneReason = switch (status) {
         c.TS_PROCESS_WAS_KILLED => .killed,
         c.TS_PROCESS_CRASHED => .crashed,

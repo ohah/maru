@@ -302,6 +302,11 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         "<audio id=w controls src='/dl/tone.wav?w'></audio><script>var w=document.getElementById('w');" ++
         "w.addEventListener('contextmenu',function(){setTimeout(function(){w.loop=true},200)});" ++
         "setInterval(function(){document.title='w '+(+w.loop)+(w.readyState>0?'':' wait')},100)</script>";
+    // W6h② 4 회차: 우클릭하면 0.2 초 뒤 플레이어처럼 해시를 바꾼다 — 같은 출처라 「연속 재생」은 그대로 된다.
+    if (std.mem.eql(u8, path, "/media-hash")) return "<!doctype html><title>loading</title><style>body{margin:0}audio{position:absolute;left:10px;top:10px;width:300px;height:40px}</style>" ++
+        "<audio id=h controls src='/dl/tone.wav?h'></audio><script>var h=document.getElementById('h');" ++
+        "h.addEventListener('contextmenu',function(){setTimeout(function(){history.replaceState(null,'','#t=12')},200)});" ++
+        "setInterval(function(){document.title='h '+(+h.loop)+(location.hash?' hashed':'')+(h.readyState>0?'':' wait')},100)</script>";
     if (std.mem.eql(u8, path, "/media-scroll")) return "<!doctype html><title>loading</title><style>body{margin:0;height:3000px}audio{position:absolute;left:10px;width:300px;height:40px}</style>" ++
         "<audio id=s1 controls src='/dl/tone.wav?s' style='top:30px'></audio><audio id=s2 controls src='/dl/tone.wav?s' style='top:530px'></audio><script>" ++
         "onload=function(){scrollTo(0,500);setInterval(function(){document.title='s y'+scrollY+' s'+(+document.getElementById('s1').loop)+(+document.getElementById('s2').loop)},100)}</script>";

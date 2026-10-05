@@ -10,6 +10,7 @@
 //!   media-video        `blob:` 동영상 — 미디어·동영상·제어 기능 끄기 가능, 새 탭·주소 복사는 불가. 「모든 제어 기능 표시」가 제어 기능을 켠다
 //!   media-open-copy    오디오의 「새 탭에서 오디오 열기」는 뒤 탭으로 그 주소, 「오디오 주소 복사」는 판정자 전용 클립보드에 그 주소
 //!   media-not-allowed  `blob:` 동영상의 「주소 복사」·「새 탭」은 실행하지 않는다(클립보드 그대로·새 탭 없음)
+//!   media-long-src     1.5 KB 주소의 같은 주소 오디오 둘 중 우클릭한 것만 켠다(긴 주소도 DevTools 경로로 — W6h② 적대 검증 1 회차)
 //!   media-shifted      우클릭 뒤 메뉴가 떠 있는 동안 페이지가 두 오디오의 자리를 바꿔도 「연속 재생」은 우클릭한 그 오디오를 켠다
 //!   media-same-src     같은 주소 오디오 둘 중 우클릭한 것만 켠다 — 맨 위 문서와 같은 출처 iframe(DevTools 경로 — 주소로 찾는 보조 경로는 모른다)
 //!   media-cross-dup    다른 사이트 iframe 의 같은 주소 둘은 아무것도 켜지 않는다(사용자 결정 — 둘 이상이면 하지 않는다)
@@ -225,6 +226,15 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     try w.pick(sc, .media_loop);
     const low_only = w.untilPart(" s01", 3_000);
     report(scrolled and sc != null and low_only, "media-scrolled", std.fmt.bufPrint(&detail, "스크롤 {} · 메뉴 {any} · 보이는 아래 오디오만 {} · 제목 「{s}」", .{ scrolled, sc, low_only, w.title() }) catch "");
+
+    // 긴 주소 — 아래 것만.
+    w.title_len = 0;
+    try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, "/media-long") } });
+    const long_ready = w.untilPart("l 00", wait_ms) and !w.untilPart("wait", 0);
+    const lg = try w.rightClick(.{ .x = 100, .y = 100 });
+    try w.pick(lg, .media_loop);
+    const long_ok = w.untilPart("l 01", 3_000);
+    report(long_ready and lg != null and long_ok, "media-long-src", std.fmt.bufPrint(&detail, "준비 {} · 메뉴 {any} · 아래 것만 {} · 제목 「{s}」", .{ long_ready, lg, long_ok, w.title() }) catch "");
 
     // 우클릭 뒤 자리가 바뀐다 — 다시 불러와 a 를 우클릭하면 페이지가 0.2 초 뒤 a·b 의 자리를 바꾼다. 0.8 초 뒤 고른다.
     if (!try w.load(port, true)) return error.MediaPageNotReady;

@@ -12418,3 +12418,19 @@ agent 아이콘의 뷰 전환을 확인했다. 재시작 PID 47940에서 320 폭
 종료 코드 0을 수집했다. 중간 재시작 PID 51024는 종료 watcher가 close 전에 timeout되어
 exit0 증거로 세지 않았고 fresh 재시작으로 다시 확인했다. 자동 HWND 입력/짧은 포인터 검사이며
 물리 입력 장기 soak로 세지 않는다. 전체 잔여 Windows 기능·agent resume/reveal/live 버튼은 남아 있다.
+
+## §2m.203 — sidebar config 입력·출력 크기 경계
+
+loader의 1MiB 한계에 맞춰 config writer가 입력은 정확히 1MiB까지 받고, 부분 갱신한
+결과도 1MiB 이하인지 atomic file 생성 전에 검사한다. std.Io.Limit은 도달해도 거부하므로
+입력에는 한계+1을 넘긴다. 누락 키를 추가해 출력이 커지는 경우에는 StreamTooLong을
+반환하고 원본을 보존한다. 이전 코드가 한계 바로 아래 원문에 키를 추가해 unreadable
+config를 만드는 실패를 실제 native 테스트로 재현했다.
+
+출력 guard 제거·입력 exclusive 한계 회귀·Windows override 무시·주석 버림·폭 검증 제거의
+다섯 compiled runtime 변형을 검출했다. 복원 후 host 91개 Debug/ReleaseFast가 통과했다.
+private 실앱 PID 41632에서 정확히 1MiB인 기존 Windows 폭 키 갱신을 확인했다. PID 51216은
+키 append로 한계를 넘는 요청을 실제 worker가 거부하고 원본 바이트를 보존했다. 두 PID
+정상 종료 코드 0을 수집했다. 실제 사용자 config는 쓰지 않았고 테스트의 private config는
+원래 상태로 복구했다. 에이전트 도크 버튼은 아직 비활성이다. 다음 단계는 Windows archive
+snapshot의 device=0 fallback을 full native identity와 교체 검증으로 바꾸는 것이다.

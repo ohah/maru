@@ -20990,6 +20990,26 @@ test "Windows editor host sidebar atomic config preserves comments unrelated key
     try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width = 180") != null);
     try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width.macos = 210") != null);
     try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width.windows = 320") != null);
+    // A valid source at the loader limit must not become an unreadable config
+    // merely because the writer appends the missing sidebar key.
+    const limit_source = try a.alloc(u8, 1 << 20);
+    defer a.free(limit_source);
+    @memset(limit_source, 'a');
+    const valid_prefix = "sidebar.width = 180\n#";
+    @memcpy(limit_source[0..valid_prefix.len], valid_prefix);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = limit_source });
+    try win_sidebar.writeWidth(a, io, path, 300);
+    const exact_limit = try tmp.dir.readFileAlloc(io, "config", a, .limited((1 << 20) + 1));
+    defer a.free(exact_limit);
+    try std.testing.expectEqual(@as(usize, 1 << 20), exact_limit.len);
+    try std.testing.expect(std.mem.startsWith(u8, exact_limit, "sidebar.width = 300\n#"));
+    @memset(limit_source, 'a');
+    limit_source[0] = '#';
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = limit_source });
+    try std.testing.expectError(error.StreamTooLong, win_sidebar.writeWidth(a, io, path, 200));
+    const unchanged = try tmp.dir.readFileAlloc(io, "config", a, .limited((1 << 20) + 1));
+    defer a.free(unchanged);
+    try std.testing.expectEqualSlices(u8, limit_source, unchanged);
     var file = try tmp.dir.createFile(io, "config", .{});
     try file.setLength(io, (1 << 20) + 1);
     file.close(io);

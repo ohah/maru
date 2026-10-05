@@ -9,7 +9,7 @@ pub fn widthForPointer(x: i32, offset: i32, cell_width: u32) u32 {
 
 pub fn writeWidth(a: std.mem.Allocator, io: std.Io, path: []const u8, width: u32) !void {
     if (width < 120 or width > 480) return error.InvalidWidth;
-    const original = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch |err| switch (err) {
+    const original = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited((1 << 20) + 1)) catch |err| switch (err) {
         error.FileNotFound => try a.dupe(u8, ""),
         else => return err,
     };
@@ -32,6 +32,8 @@ pub fn writeWidth(a: std.mem.Allocator, io: std.Io, path: []const u8, width: u32
     else
         try maru.config.serialize.updateForKeys(a, original, parsed.config, &.{"sidebar.width"});
     defer a.free(updated);
+    // Keep the written file readable by the loader, including newly appended keys.
+    if (updated.len > (1 << 20)) return error.StreamTooLong;
     var atomic = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .make_path = true, .replace = true });
     defer atomic.deinit(io);
     var buffer: [4096]u8 = undefined;

@@ -378,7 +378,8 @@ pub fn onCommand(value: message.ContextMenuCommand) void {
             browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .background, .url = url } }) catch {};
         },
         .copy_media_address => if (held.media_src) |src| {
-            _ = pasteboard.writeText(boardName(), src, true);
+            // URL 형식은 http·https 일 때만(거대한 `data:` 주소를 URL 로 싣지 않는다 — 3 회차).
+            _ = pasteboard.writeText(boardName(), src, held.open_media != null);
         },
         // Chrome 「새 탭에서 이미지 열기」는 뒤 탭이다(링크와 같다).
         .open_image_new_tab => if (held.open_image) |url| {

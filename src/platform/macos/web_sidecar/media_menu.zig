@@ -50,6 +50,9 @@ const Slot = struct {
     /// 앞부분과 길이로 확인하고 보조 경로는 쓰지 않는다(W6h② 적대 검증 1 회차).
     src: ?[]u8 = null,
     src_len: usize = 0,
+    /// 메뉴가 온 frame 의 문서 주소(소유 — 그 문서의 요소만 바꾼다: 같은 프로세스의 다른 출처 iframe 을 그 자리로 옮겨도, W6h② 적대 검증
+    /// 3 회차).
+    doc: ?[]u8 = null,
     /// 메뉴가 온 frame(보조 경로 — 참조 하나).
     frame: [*c]c.cef_frame_t = null,
 };
@@ -59,6 +62,8 @@ var slots: [registry_mod.capacity]?Slot = @splat(null);
 var registrations: [registry_mod.capacity]?struct { cef_id: c_int, reg: [*c]c.cef_registration_t } = @splat(null);
 var observer: c.cef_dev_tools_message_observer_t = undefined;
 var observer_ready = false;
+/// 읽는 응답 상한 — 우리가 묻는 것(배율·노드 번호·객체 번호·짧은 결과)은 이보다 훨씬 작다.
+const max_result_bytes = 64 * 1024;
 /// 이 모듈의 메시지 번호 — 다른 사용처와 겹치지 않는 대역(1 << 30 부터).
 var next_id: c_int = 1 << 30;
 
@@ -76,6 +81,7 @@ fn slotOf(cef_id: c_int) ?*Slot {
 fn clear(s: *?Slot) void {
     const v = s.* orelse return;
     if (v.src) |b| allocator.free(b);
+    if (v.doc) |b| allocator.free(b);
     if (v.frame != null) object.release(v.frame);
     s.* = null;
 }
@@ -140,6 +146,14 @@ pub fn locate(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, menu: u32,
     if (frame != null) {
         frame.*.base.add_ref.?(&frame.*.base);
         v.frame = frame;
+        const url = frame.*.get_url.?(frame);
+        if (url != null) {
+            defer browsers.state.api.string_userfree_utf16_free(url);
+            var utf8 = std.mem.zeroes(c.cef_string_utf8_t);
+            _ = browsers.state.api.string_utf16_to_utf8(url.*.str, url.*.length, &utf8);
+            defer browsers.state.api.string_utf8_clear(&utf8);
+            if (utf8.str != null and utf8.length <= protocol.wire.max_url_bytes) v.doc = allocator.dupe(u8, utf8.str[0..utf8.length]) catch null;
+        }
     }
     // 진행을 먼저 쥔다 — DevTools 를 못 쓰면(관찰자 등록 실패) 고를 때 보조 경로만 돈다.
     slot.* = v;
@@ -214,7 +228,7 @@ fn call(browser: [*c]c.cef_browser_t, s: *Slot, object_id: []const u8) void {
     // 그 요소가 미디어이고 주소가 메뉴가 알린 주소와 같을 때만 뒤집는다 — 아니면(다른 사이트 iframe 요소·그사이 바뀐 자리) 보조 경로로.
     // 주소는 앞부분(`s`)과 전체 길이(`n`)로 본다(긴 `data:` 주소). 주소를 모르면(복사 실패) 확인하지 않는다.
     const src_arg: []const u8 = if (s.src) |b| b else "";
-    if (!sendWaiting(browser, s, .call, "\"method\":\"Runtime.callFunctionOn\",\"params\":{{\"objectId\":{f},\"functionDeclaration\":\"function(p,s,n,w){{if(!(this instanceof HTMLMediaElement))return 'not-media';var c=this.currentSrc;if(n&&(c.length!==n||c.slice(0,s.length)!==s))return 'other';this[p]=w;return 'ok'}}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{f}}},{{\"value\":{d}}},{{\"value\":{}}}],\"returnByValue\":true}}", .{ std.json.fmt(object_id, .{}), @tagName(s.action.?), std.json.fmt(src_arg, .{}), s.src_len, s.want })) {
+    if (!sendWaiting(browser, s, .call, "\"method\":\"Runtime.callFunctionOn\",\"params\":{{\"objectId\":{f},\"functionDeclaration\":\"function(p,s,n,w,u){{'use strict';try{{if(!(this instanceof HTMLMediaElement))return 'not-media';if(u&&this.ownerDocument.URL!==u)return 'other';var c=this.currentSrc;if(n&&(c.length!==n||c.slice(0,s.length)!==s))return 'other';this[p]=w;return 'ok'}}catch(e){{return 'err'}}}}\",\"arguments\":[{{\"value\":\"{s}\"}},{{\"value\":{f}}},{{\"value\":{d}}},{{\"value\":{}}},{{\"value\":{f}}}],\"returnByValue\":true}}", .{ std.json.fmt(object_id, .{}), @tagName(s.action.?), std.json.fmt(src_arg, .{}), s.src_len, s.want, std.json.fmt(s.doc orelse "", .{}) })) {
         releaseObjects(browser); // 이미 쥐었다(resolveNode) — 놓는다(1 회차)
         fallback(s);
     }
@@ -236,7 +250,7 @@ fn fallback(s: *Slot) void {
     if (s.frame == null or src.len == 0 or src.len != s.src_len) return; // 앞부분뿐이면 같은 주소인지 모른다
     var code: std.ArrayList(u8) = .empty;
     defer code.deinit(allocator);
-    code.print(allocator, "(function(){{var s={f};var m=[].filter.call(document.querySelectorAll('audio,video'),function(e){{return e.currentSrc===s}});if(m.length===1)m[0].{s}={}}})()", .{ std.json.fmt(src, .{}), @tagName(prop), s.want }) catch return;
+    code.print(allocator, "(function(){{'use strict';try{{var u={f};if(u&&location.href!==u)return;var s={f};var m=[].filter.call(document.querySelectorAll('audio,video'),function(e){{return e.currentSrc===s}});if(m.length===1)m[0].{s}={}}}catch(e){{}}}})()", .{ std.json.fmt(s.doc orelse "", .{}), std.json.fmt(src, .{}), @tagName(prop), s.want }) catch return;
     var script = std.mem.zeroes(c.cef_string_t);
     library.setString(browsers.state.api, &script, code.items);
     defer browsers.state.api.string_utf16_clear(&script);
@@ -258,8 +272,9 @@ fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browse
     const s = slotOf(browser.*.get_identifier.?(browser)) orelse return;
     if (s.waiting != id) return;
     s.waiting = 0;
-    const bytes: []const u8 = if (result) |r| @as([*]const u8, @ptrCast(r))[0..size] else "";
-    const parsed = if (success != 0) std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch null else null;
+    // 응답 크기는 페이지가 정할 수 있다(거대한 `id` 의 노드 설명 등) — 상한을 넘으면 읽지 않고 실패로(3 회차).
+    const bytes: []const u8 = if (result != null and size <= max_result_bytes) @as([*]const u8, @ptrCast(result.?))[0..size] else "";
+    const parsed = if (success != 0 and bytes.len != 0) std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch null else null;
     defer if (parsed) |p| p.deinit();
     const value: ?std.json.Value = if (parsed) |p| p.value else null;
     switch (s.stage) {

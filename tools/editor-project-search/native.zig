@@ -15,6 +15,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--ranges")) emit_ranges = true else if (std.mem.eql(u8, arg, "--raw-bytes")) raw_bytes = true else return error.InvalidOutputOption;
     }
     const byte_candidate = std.mem.eql(u8, args[3], "byte-candidate");
+    const document_regex = std.mem.eql(u8, args[3], "document-regex");
     if (byte_candidate) {
         if (args[2].len == 0) return error.EmptyLiteralQuery;
         _ = try std.unicode.Utf8View.init(args[2]);
@@ -22,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const options: find.Options = if (std.mem.eql(u8, args[3], "literal") or byte_candidate)
         .{ .match_case = true }
-    else if (std.mem.eql(u8, args[3], "regex"))
+    else if (std.mem.eql(u8, args[3], "regex") or document_regex)
         .{ .regex = true, .match_case = true }
     else if (std.mem.eql(u8, args[3], "word"))
         .{ .whole_word = true, .match_case = true }
@@ -69,6 +70,8 @@ pub fn main(init: std.process.Init) !void {
                     from = offset + args[2].len;
                 }
             }
+        } else if (document_regex) {
+            try find.findDocumentRegex(a, content, args[2], .{ .match_case = true, .newline = .anycrlf }, &matches);
         } else {
             try find.findMatches(a, lines.items, args[2], options, &matches);
         }
@@ -77,7 +80,12 @@ pub fn main(init: std.process.Init) !void {
             try writer.interface.print("{{\"file_index\":{d},\"ranges\":[", .{files - 1});
             for (matches.items, 0..) |match, index| {
                 if (index != 0) try writer.interface.writeAll(",");
-                try writer.interface.print("[{d},{d},{d}]", .{ match.line, match.start, match.len });
+                if (document_regex) {
+                    const end = match.end.?;
+                    try writer.interface.print("[{d},{d},{d},{d},{d}]", .{ match.line, match.start, match.len, end.line, end.byte });
+                } else {
+                    try writer.interface.print("[{d},{d},{d}]", .{ match.line, match.start, match.len });
+                }
             }
             try writer.interface.writeAll("]}\n");
         }

@@ -16,9 +16,8 @@
 //! **터미널 스크롤백 검색도 상한이 없다** — 같은 오버레이가 두 규칙을 갖지 않는다.
 //! 할당이 실패하면 매치 0으로 떨어진다(호출자가 `catch`로 비운다) — 크래시가 아니라 저하다.
 //!
-//! **줄을 넘는 매치는 없다.** 검색 입력이 한 줄이라 개행을 담을 수 없고, 터미널 쪽이 줄을 잇는
-//! 것은 soft-wrap(한 논리 줄이 여러 행으로 접힌 것)을 되돌리는 일이지 **다른 줄을 잇는 것이 아니다**.
-//! 문서에는 soft-wrap이 저장돼 있지 않으므로 대응물이 없다.
+//! 평문과 호환 줄 API는 줄을 넘지 않는다. 편집기의 문서 전체 정규식은 `findDocumentRegex`가
+//! 원문 subject와 여러 줄 끝 위치를 사용한다. 터미널의 soft-wrap 논리 줄 복원은 별도 계약이다.
 
 const std = @import("std");
 const search_case_fold = @import("../../search_case_fold.zig");
@@ -31,6 +30,8 @@ pub const regex = @import("../../regex.zig");
 ///
 /// **문서 offset으로 두지 않는 이유**: 매치를 그리려면 결국 줄로 잘라야 하는데(선택이 `buildSelectionMarks`
 /// 에서 그러듯), 매치는 애초에 한 줄 안에서만 난다 — 합쳤다 다시 자르면 자르는 코드만 는다.
+pub const Position = struct { line: u32, byte: u32 };
+
 pub const Match = struct {
     /// **`findMatches` 에 넘긴 줄 배열의 인덱스**(0-based).
     ///
@@ -44,6 +45,10 @@ pub const Match = struct {
     /// 매치 byte 길이. **`needle.len`과 같다고 가정하지 않는다** — `K`(3byte)와 `k`(1byte)도 같은 검색 그룹이다.
     /// 접힌 검색어 길이가 아니라 실제 원문에서 훑은 길이를 보존한다.
     len: u32,
+    /// 문서 정규식은 여러 줄을 포함할 수 있다. 기존 줄별·평문 매치는 null이다.
+    end: ?Position = null,
+    /// 원문 전체 정규식의 재매치 시작점. \K·\G의 캡처 문맥을 보존한다.
+    regex_from: ?u32 = null,
 };
 
 /// `line`의 `from`(byte)에서 needle이 시작하는가. 맞으면 매치 **끝 byte**, 아니면 `null`.
@@ -595,4 +600,152 @@ test "FND34 Unicode 검색은 별칭을 찾고 원문 byte 범위를 보존한�
     defer exact.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), exact.items.len);
     try testing.expectEqual(@as(u32, 4), exact.items[0].start);
+}
+
+pub const DocumentRegexOptions = struct {
+    match_case: bool = false,
+    whole_word: bool = false,
+    newline: regex.Newline,
+};
+
+/// 원문 전체가 정규식 subject다. 캡처·치환과 선택 범위가 같은 byte 축을 사용한다.
+/// 터미널의 논리 줄 API와 구분해 편집기 문서 계약을 확장한다.
+pub fn findDocumentRegex(allocator: std.mem.Allocator, content: []const u8, needle: []const u8, opts: DocumentRegexOptions, out: *std.ArrayList(Match)) !void {
+    out.clearRetainingCapacity();
+    errdefer out.clearRetainingCapacity();
+    if (needle.len == 0) return;
+    if (content.len >= std.math.maxInt(u32)) return error.DocumentTooLarge;
+    if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidUtf8;
+    var pattern = try regex.Pattern.initDocument(needle, opts.match_case, opts.newline);
+    defer pattern.deinit();
+    const line_index = @import("line_index.zig");
+    var index = try line_index.build(allocator, content);
+    defer index.deinit();
+    var from: usize = 0;
+    while (from <= content.len) {
+        var span = (try pattern.matchValidated(content, from, false)) orelse break;
+        if (span.start == span.end) span = (try pattern.matchNonEmptyAtStart(content, span.start)) orelse span;
+        if (span.start > span.end or span.end > content.len) return error.EngineFailure;
+        const first_line = index.lineAt(span.start);
+        const last_line = index.lineAt(span.end);
+        const lo = span.start - index.lines[first_line].start;
+        const hi = span.end - index.lines[last_line].start;
+        const whole = first_line == last_line and isWholeWord(content[index.lines[first_line].start..index.lines[first_line].contentEnd()], lo, hi);
+        if (!opts.whole_word or whole) try out.append(allocator, .{
+            .line = @intCast(first_line),
+            .start = @intCast(lo),
+            .len = @intCast(span.end - span.start),
+            .end = .{ .line = @intCast(last_line), .byte = @intCast(hi) },
+            .regex_from = @intCast(from),
+        });
+        if (span.end > span.start) from = span.end else if (span.end == content.len) break else from = span.end + stepBytes(content, span.end);
+    }
+}
+
+/// 원문 범위를 줄 안의 표시 범위로 자른다. CRLF와 줄 끝 byte는 글자로 칠하지 않는다.
+pub fn segmentForLine(match: Match, line: u32, content_len: u32) ?struct { start: u32, len: u32 } {
+    const end = match.end orelse Position{ .line = match.line, .byte = std.math.add(u32, match.start, match.len) catch return null };
+    if (line < match.line or line > end.line) return null;
+    const lo = @min(if (line == match.line) match.start else 0, content_len);
+    const hi = @min(if (line == end.line) end.byte else content_len, content_len);
+    if (lo > hi or (lo == hi and match.len != 0)) return null;
+    return .{ .start = lo, .len = hi - lo };
+}
+
+test "FND35 문서 정규식은 원문 앵커와 여러 줄 범위를 함께 보존한다" {
+    const content = "foo\r\nbar\nfoo";
+    var out: std.ArrayList(Match) = .empty;
+    defer out.deinit(testing.allocator);
+    try findDocumentRegex(testing.allocator, content, "\\Afoo", .{ .newline = .anycrlf }, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try findDocumentRegex(testing.allocator, content, "foo\\z", .{ .newline = .anycrlf }, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u32, 2), out.items[0].line);
+    try findDocumentRegex(testing.allocator, content, "^foo$", .{ .newline = .anycrlf }, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try findDocumentRegex(testing.allocator, content, "foo\\r?\\nbar", .{ .newline = .anycrlf }, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u32, 8), out.items[0].len);
+    try testing.expectEqual(@as(u32, 1), out.items[0].end.?.line);
+    try testing.expectEqual(@as(u32, 3), out.items[0].end.?.byte);
+    try testing.expectEqual(@as(u32, 3), segmentForLine(out.items[0], 0, 3).?.len);
+    try testing.expectEqual(@as(u32, 3), segmentForLine(out.items[0], 1, 3).?.len);
+    try testing.expect(segmentForLine(out.items[0], 2, 3) == null);
+    // 혼합 줄바꿈의 캡처는 정규화한 사본이 아니라 같은 원문으로 치환한다.
+    var pattern = try regex.Pattern.initDocument("(foo\\r?\\n)(bar)", true, .anycrlf);
+    defer pattern.deinit();
+    const replacement = try pattern.expand(testing.allocator, content, .{ .start = 0, .end = 8 }, "$2:$1");
+    defer testing.allocator.free(replacement);
+    try testing.expectEqualStrings("bar:foo\r\n", replacement);
+}
+
+test "FND36 문서 정규식의 빈 파일·UTF-8·할당 실패는 경계를 보존한다" {
+    var out: std.ArrayList(Match) = .empty;
+    defer out.deinit(testing.allocator);
+    try findDocumentRegex(testing.allocator, "", "^$", .{ .newline = .lf }, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u32, 0), out.items[0].len);
+    try findDocumentRegex(testing.allocator, "foo\n", "^$", .{ .newline = .anycrlf }, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u32, 1), out.items[0].line);
+    try testing.expectError(error.InvalidUtf8, findDocumentRegex(testing.allocator, "\xff", "foo", .{ .newline = .lf }, &out));
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+    const Check = struct {
+        fn run(a: std.mem.Allocator) !void {
+            var matches: std.ArrayList(Match) = .empty;
+            defer matches.deinit(a);
+            try findDocumentRegex(a, "한글\r\nfoo", "한글\\r?\\nfoo", .{ .newline = .anycrlf }, &matches);
+            try testing.expectEqual(@as(usize, 1), matches.items.len);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+}
+
+test "FND37 문서 치환은 K 앵커의 원래 검색 시작점과 큰 캡처를 보존한다" {
+    const content = "pad foo\r\nbar";
+    var matches: std.ArrayList(Match) = .empty;
+    defer matches.deinit(testing.allocator);
+    const query = "foo\\K(\\r?\\nbar)";
+    try findDocumentRegex(testing.allocator, content, query, .{ .newline = .anycrlf }, &matches);
+    try testing.expectEqual(@as(usize, 1), matches.items.len);
+    var pattern = try regex.Pattern.initDocument(query, true, .anycrlf);
+    defer pattern.deinit();
+    const replacement = try pattern.expandFrom(testing.allocator, content, .{ .start = 7, .end = content.len }, "$1", matches.items[0].regex_from.?);
+    defer testing.allocator.free(replacement);
+    try testing.expectEqualStrings("\r\nbar", replacement);
+    const large = try testing.allocator.alloc(u8, 4096);
+    defer testing.allocator.free(large);
+    @memset(large, 'x');
+    var capture = try regex.Pattern.initDocument("(x+)", true, .lf);
+    defer capture.deinit();
+    const expanded = try capture.expandFrom(testing.allocator, large, .{ .start = 0, .end = large.len }, "$1$1", 0);
+    defer testing.allocator.free(expanded);
+    try testing.expectEqual(@as(usize, 8192), expanded.len);
+}
+
+/// 비교 뷰의 읽기 전용 열은 파일 원문이 없으므로 줄 사이를 LF로 잇는다.
+/// 줄 목록이 없는 로딩 상태와 내용이 빈 문서 한 줄은 구분한다.
+pub fn findLinesDocumentRegex(allocator: std.mem.Allocator, lines: []const []const u8, needle: []const u8, opts: DocumentRegexOptions, out: *std.ArrayList(Match)) !void {
+    out.clearRetainingCapacity();
+    if (lines.len == 0 or needle.len == 0) return;
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(allocator);
+    for (lines, 0..) |line, i| {
+        if (i != 0) try content.append(allocator, '\n');
+        try content.appendSlice(allocator, line);
+    }
+    try findDocumentRegex(allocator, content.items, needle, opts, out);
+}
+
+test "FND38 비교 열 정규식은 빈 로딩 상태와 빈 문서를 구분한다" {
+    var matches: std.ArrayList(Match) = .empty;
+    defer matches.deinit(testing.allocator);
+    try findLinesDocumentRegex(testing.allocator, &.{}, "^$", .{ .newline = .anycrlf }, &matches);
+    try testing.expectEqual(@as(usize, 0), matches.items.len);
+    try findLinesDocumentRegex(testing.allocator, &.{""}, "^$", .{ .newline = .anycrlf }, &matches);
+    try testing.expectEqual(@as(usize, 1), matches.items.len);
+    try findLinesDocumentRegex(testing.allocator, &.{ "foo", "bar" }, "foo\\nbar", .{ .newline = .anycrlf }, &matches);
+    try testing.expectEqual(@as(usize, 1), matches.items.len);
+    try testing.expectEqual(@as(u32, 7), matches.items[0].len);
+    try testing.expectEqual(@as(u32, 1), matches.items[0].end.?.line);
 }

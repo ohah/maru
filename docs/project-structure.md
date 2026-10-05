@@ -351,6 +351,10 @@ src/
                         session/editor/와 user_paths에 둔다.
                         session/editor/save_request의 CommitApproval은 bytes 없는 final-address/scope/one-use 승인 경계다.
                         Windows host가 native fence·main-thread 승인 왕복과 문서 변경 제한을 연결한다.
+                        terminal/session.zig는 heap-pinned Surface·ConPTY·runtime routing의 생성/닫기와
+                        admission rollback을 소유하고, session_actions.zig는 생성 상한·최신 크기·성공 후
+                        focus publication을 묶는다. main은 기존 세션 호출 진입점을 이 구현에 연결하며
+                        공통 core config 적용은 compile-time callback으로 전달한다.
     linux/
   workspace/            project workspace, layout restore, recent workspaces
   observability/        TraceEvent, RenderSnapshot, replayTrace

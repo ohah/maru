@@ -12340,3 +12340,21 @@ new_tab 구분도 검사한다. 다섯 변형은 생성 계약이며 키 입력 
 exact BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다. 종료 직후 capture는 사라진
 창과 경합하여 실패했으므로 증거에서 제외했다. owned HWND 합성 입력이며 물리 입력·
 모든 resize/장기 IME 조합의 검증으로 세지 않는다.
+
+### §2m.200 Windows 터미널 세션 소유권의 플랫폼 폴더 경계
+
+main.zig의 WinSession·spawnWinSession·closeWinSession·stable ID 조회 실제 구현을
+platform/windows/terminal/session.zig로 이동했다. 기존 Main 호출 이름과 타입은 alias/
+얇은 wrapper로 유지하고 공통 core config는 compile-time callback으로 전달한다.
+ConPTY 생성, heap 고정 surface, Native admission rollback, runtime routing 해제와
+탭/활성 보정이 같은 Windows 책임 파일에 있다. public facade 경로·새 runtime 의존성·
+기존 확인 계약은 변경하지 않는다. 모든 main/platform 결합을 정리했다고 주장하지 않는다.
+
+이동한 파일에 승인 제거·detach 누락·활성 보정 누락·탭 삭제 누락·ID 색인 오염의
+다섯 compiled runtime 변형을 넣어 실제 ConPTY 소유권 테스트가 모두 검출함을 확인했다.
+복원 후 기존 host 86개가 Debug/ReleaseFast에서 통과했다. 실앱 PID 44080에서
+파일 Xbase 편집→새 터미널, busy close Cancel 유지와 Confirm 후 선택 세션 제거,
+파일 Xbase 보존 및 마지막 터미널의 미저장 창 보호를 관찰했다. Save 후 exact
+BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다. owned HWND 합성 입력이며
+물리 키보드/IME·긴 시간 경합 증거로 세지 않는다. 워크스페이스 계층, 다른 전역 액션,
+후속 편집/복구 CPU와 전체 플랫폼 결합 범위는 계속 남아 있다.

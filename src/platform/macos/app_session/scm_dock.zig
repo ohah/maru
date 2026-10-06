@@ -838,8 +838,8 @@ fn shellNoticeFor(
     if (snap.capture_id == 0) return null;
     const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return null;
     if (turn.shell_calls == 0) return null;
-    // **여유를 크게 둔다.** `i18n.format` 은 넘치면 **바이트 단위로 자르므로** UTF-8 중간에서 끊겨
-    // U+FFFD 가 뜬다. 지금 한국어 문구가 ~110 B 라 128 로는 번역자가 몇 글자만 더해도 깨진다.
+    // **여유를 크게 둔다.** `i18n.format` 은 넘치면 글자 경계에서 자르고 「…」로 끝낸다 — 문장이 잘려 보인다.
+    // 지금 한국어 문구가 ~110 B 라 128 로는 번역자가 몇 글자만 더해도 잘린다.
     var buf: [256]u8 = undefined;
     const text = maru.i18n.format(&buf, maru.i18n.t(.scm_turn_shell_notice), &.{.{ .d = @intCast(turn.shell_calls) }});
     return arena.dupe(u8, text) catch null;

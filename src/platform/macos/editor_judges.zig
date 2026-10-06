@@ -33,6 +33,7 @@ test "LOOP1 빠른 고리가 편집기 영역 모듈을 통째로 고른다 — 
     const build_src = @embedFile("build_zig_src");
     const required = [_][]const u8{
         "\"app_session.editor.mod.\"", // editor/mod.zig — 제품 진입 파일 전체
+        "\"app_session.editor.hover.\"", // editor/hover.zig — 호버 문장(진단 i18n) 판정자
         "\"app_session.editor.diff.\"", // editor/diff.zig — 비교 파일 전체
         "\"session.editor.\"", // selection.zig·motion.zig 등 L2 순수 모듈
         "\"platform.cell_text.\"", // 밴드 라벨·마디 열 범위

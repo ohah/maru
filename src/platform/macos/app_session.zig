@@ -23821,7 +23821,8 @@ pub const AppSession = struct {
     /// 값이 끼는 문장용 — `key`를 §6.3 보간으로 채운 뒤 같은 경로로 보낸다.
     /// 버퍼가 모자라면 `i18n.format`이 UTF-8 경계에서 자르고, `showNotice`가 다시 복사한다.
     pub fn showNoticeFmt(self: *AppSession, key: maru.i18n.Key, args: []const maru.i18n.Arg) void {
-        // notice 버퍼와 같은 크기 — 여기서 더 크게 만들어 봐야 `copyOverlayMessage`가 다시 자른다.
+        // notice 버퍼와 같은 크기 — 여기서 더 크게 만들어 봐야 `copyOverlayMessage`가 다시 자른다. 넘치면 `format`이
+        // 글자 경계에서 자르고 「…」로 끝낸다(§6.3).
         // 경로처럼 긴 값이 끼는 자리(파일 트리 수동 복구 안내)가 있어 256 으로는 모자랐다.
         var buf: [512]u8 = undefined;
         self.showNotice(maru.i18n.format(&buf, maru.i18n.t(key), args));
@@ -62824,6 +62825,35 @@ test "알림 패널 우클릭·중클릭은 카드 ✕ 를 눌러도 지우지 �
     session.mouse(1, at[0], at[1], 0, 0); // 좌클릭 — 대조: 이 자리가 정말 ✕ 다
     session.mouse(3, at[0], at[1], 0, 0);
     try std.testing.expectEqual(before - 1, session.notification_history.items.len);
+}
+
+// 보간 notice 가 버퍼를 넘치면 **잘렸음을 보인다**(`i18n.format` 의 「…」). 예전엔 「…」 없이 조용히 끊어, notice 가
+// 줄을 나눠 끝까지 보이게 된 뒤로 중간이 잘린 문장이 완결된 것처럼 읽혔다 — LSP 오류 메시지처럼 길이에 끝이 없는 인자.
+test "showNoticeFmt: 버퍼를 넘치는 보간 notice 는 글자를 깨지 않고 「…」로 끝난다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 한글이 섞인 아주 긴 서버 오류 — 512 바이트를 넉넉히 넘는다.
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    for (0..80) |_| try long.appendSlice(allocator, "심볼을 찾을 수 없음 ");
+    session.showNoticeFmt(.rn_error, &.{.{ .s = long.items }});
+    const msg = session.chrome_host.notice.message;
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expect(std.mem.endsWith(u8, msg, "…"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(msg));
+    try std.testing.expect(msg.len <= notice_message_cap);
+    // 틀의 앞부분은 남는다 — 「…」는 보간이 낸 것이다(틀 앞의 고정 문구가 그대로 있다).
+    const prefix = maru.i18n.t(.rn_error)[0 .. std.mem.indexOf(u8, maru.i18n.t(.rn_error), "{0}") orelse 0];
+    try std.testing.expect(std.mem.startsWith(u8, msg, prefix));
+
+    // 대조: 짧은 오류는 그대로다(「…」 없음).
+    session.showNoticeFmt(.rn_error, &.{.{ .s = "unknown symbol" }});
+    try std.testing.expect(!std.mem.endsWith(u8, session.chrome_host.notice.message, "…"));
+    try std.testing.expect(std.mem.indexOf(u8, session.chrome_host.notice.message, "unknown symbol") != null);
 }
 
 // 닫기 확인 모달 마우스 게이트(code-review 후속): (1) **확인 버튼 바로 위**에서 우/중클릭은 버튼을 활성 안 하고

@@ -3122,7 +3122,7 @@ pub fn settingsMessageOrNotice(self: *AppSession, message: maru.i18n.Key) void {
 
 /// 값이 끼어드는 문장용 — `key`를 §6.3 보간으로 채운 뒤 같은 경로로 보낸다.
 ///
-/// 버퍼가 모자라면 `i18n.format`이 UTF-8 경계에서 자르므로 별도 폴백 문장을 두지 않는다. 여기 끼는 값은
+/// 버퍼가 모자라면 `i18n.format`이 UTF-8 경계에서 자르고 「…」로 끝내므로 별도 폴백 문장을 두지 않는다. 여기 끼는 값은
 /// 명령 이름(영문 카탈로그 title)이라 짧고, 잘린 문장보다 짧은 대체 문장이 더 낫다고 볼 근거가 없다.
 pub fn settingsMessageOrNoticeFmt(self: *AppSession, key: maru.i18n.Key, args: []const maru.i18n.Arg) void {
     var buf: [192]u8 = undefined;

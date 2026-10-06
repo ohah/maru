@@ -15144,7 +15144,8 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var dir = testing.tmpDir(.{});
     defer dir.cleanup();
-    // `fn f(` — 닫는 괄호가 없어 MISSING 이 선다. 뒤 줄은 멀쩡하다.
+    // `fn f(` — 닫는 괄호가 없는 구문 오류. tree-sitter 는 여기서 MISSING 이 아니라 **ERROR**(메시지 없음)를 낸다 —
+    // 그래서 호버는 「구문 오류」 문장이다(MISSING 의 「빠짐: ‹토큰›」은 `hover.diagnosticText` 판정자가 직접 잰다). 뒤 줄은 멀쩡하다.
     try dir.dir.writeFile(testing.io, .{ .sub_path = "e.zig", .data = "fn f( void {}\nconst ok = 1;\n" });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
@@ -15164,7 +15165,7 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     try testing.expectEqual(maru.session.editor.diagnostic.Source.syntax, first.source);
     const Ctx = struct { fx: *PaneFixture };
     const ctx: Ctx = .{ .fx = &fx };
-    // ⑴ 진단 자리에 머물면 서버 없이도 열린다 — 문장은 i18n(「빠짐: ‹토큰›」 또는 「구문 오류」).
+    // ⑴ 진단 자리에 머물면 서버 없이도 열린다 — 문장은 i18n(이 픽스처에선 「구문 오류」).
     const pd = pointerAtOffset(term, first.start) orelse return error.NoPointer;
     _ = fx.session.hoverCursor(pd.x, pd.y, 0);
     try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
@@ -15182,6 +15183,10 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
         else
             maru.i18n.t(.diag_syntax_error);
         try testing.expectEqualStrings(want, lines[0].text); // 평문 — 아이콘·꼬리표 없음
+        // 기대값을 같은 `format` 으로 지으면 틀이 틀려도 같이 틀린다 — 기대 토큰이 **실제로 들어갔는지** 따로 본다
+        // (틀이 `{s}` 였을 때 「빠짐: {s}」가 그대로 떴고 위 비교는 통과했다).
+        // 이 픽스처는 ERROR(메시지 없음)를 낸다 — MISSING 의 기대 토큰 문장은 `hover.diagnosticText` 판정자가 직접 잰다.
+        try testing.expect(std.mem.indexOf(u8, lines[0].text, "{0}") == null and std.mem.indexOf(u8, lines[0].text, "{s}") == null);
         try testing.expectEqual(maru.chrome.tokens.ColorRole.surface_fg, lines[0].role);
     }
     hover_client.hide(fx.session);

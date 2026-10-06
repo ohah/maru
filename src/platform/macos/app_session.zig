@@ -18090,6 +18090,14 @@ pub const AppSession = struct {
         editor_ops.hover_client.notePointer(self, x_px, y_px);
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
         // 둔다 — 안 그러면 모달 뒤 버튼/슬롯이 호버에 반응해 강조되며(모달 위로 비침) UI가 깨져 보인다(모달 게이트).
+        // 열려 있어도 notice·confirm 때문에 **안 그리는** 패널(`notificationPanelDrawn`)은 호버하지 않고 강조도 비운다 —
+        // 보이지 않는 카드 위에서 손가락 커서가 뜨고 강조가 바뀌었고, 메시지가 닫히면 그 낡은 강조가 다음 이동 전까지
+        // 다시 보였다. confirm 게이트보다 **앞**이라야 confirm 쪽도 비운다. 모달 규율은 그대로라 뒤 호버도 끈다.
+        if (self.chrome_host.notifications.open and !notificationPanelDrawn(self)) {
+            self.clearAllHover();
+            notification_ops.setHoveredNotification(self, null);
+            return .default;
+        }
         if (self.chrome_host.confirm.open) return .default;
         // 알림 센터 패널이 열려 있으면 호버를 패널에 라우팅한다(최상위 모달 — 사이드바/탭/divider/터미널보다 먼저, 클릭
         // 라우팅 mouse()의 게이트와 짝). 카드/✕ 위면 그 카드를 hovered로 강조(tab_hover_bg) + pointingHand, 헤더 액션
@@ -23623,6 +23631,16 @@ pub const AppSession = struct {
         return rows;
     }
 
+    /// 이 프레임에 알림 패널을 **그리는가**. 열려 있어도 notice·confirm 이 떠 있으면 안 그린다 — 상태는 그대로 두므로
+    /// 메시지가 닫히면 패널이 다시 보인다(공존은 의도다: 판정자 「notice 토스트와 알림 패널 공존 …」, 입력은 메시지를
+    /// 먼저 닫는다). 오버레이 raster 는 bounding box 하나라 둘을 함께 내면 겹쳐 그려진다 — 먼저 모인 메시지 글자가 패널
+    /// 위로 비치고, 넘친 패널의 프레임 clip(셀 scissor)이 그리드 **전체**에 걸려 메시지 상자 안 글자가 잘리며, 먼저 온 메시지가
+    /// 모달 배경 자리를 가져가 패널이 패딩·그림자 없는 위젯 quad 로 내려갔다(2026-10-06 사용자 지적, ML3b 전체 창 캡처).
+    /// 편집기 선택 헬퍼(아래 `draws.items.len == 0` 게이트)와 같은 규율이다. 막대·말풍선 caret 도 이 값을 따른다.
+    fn notificationPanelDrawn(self: *const AppSession) bool {
+        return self.chrome_host.notifications.open and !self.chrome_host.notice.open and !self.chrome_host.confirm.open;
+    }
+
     /// chrome 오버레이 frame(최상위). chrome_host에서 열린 컴포넌트(Notice·Find·Palette)의 ChromeDraw를 수집해(실제
     /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
@@ -23692,8 +23710,10 @@ pub const AppSession = struct {
             // 다음 프레임들의 hoverCursor coarse 게이트가 쓸 패널 content rect를 캐시한다(이미 빌드한 notif_items 재사용 —
             // 추가 비용 없음). 게이트가 이 rect로 "포인터가 패널 밖이면 빌드 스킵"을 판정한다(notif_panel_rect 주석 참조).
             self.notif_panel_rect = chrome.components.notifications.panelRect(&self.chrome_host.notifications, notif_items, props);
-            self.notif_scroll_view = chrome.components.notifications.scrollView(&self.chrome_host.notifications, notif_items, props);
-            try self.chrome_host.collectNotificationsDraws(notif_items, props, &tokens, arena, &draws);
+            if (notificationPanelDrawn(self)) {
+                self.notif_scroll_view = chrome.components.notifications.scrollView(&self.chrome_host.notifications, notif_items, props);
+                try self.chrome_host.collectNotificationsDraws(notif_items, props, &tokens, arena, &draws);
+            }
         }
         self.settings_search_caret = null; // 세팅 안 열림/검색 아님이면 없음(imeCursorRect가 터미널 커서로 폴백)
         self.settings_scroll_view = null; // 세팅이 닫히면 막대도 없다 — 남기면 다음 프레임에 stale 막대가 뜬다
@@ -23746,7 +23766,7 @@ pub const AppSession = struct {
         raster.gpu_shadows.deinit(self.allocator);
         // 말풍선 caret(GPU 삼각형, gradient_kind=3) — 패널 배경 quad '뒤'에 append해 패널 상단 테두리를 caret 폭만큼
         // 덮어 'bubble을 연다'. 벨 바로 아래(빈 버퍼 행)에서 위로 뾰족. 패널이 세로 clamp로 밀렸거나 벨이 가로 밖이면 생략.
-        if (self.chrome_host.notifications.open) notification_ops.appendNotificationCaret(self, notif_items, props, &tokens);
+        if (notificationPanelDrawn(self)) notification_ops.appendNotificationCaret(self, notif_items, props, &tokens);
         // finishOverlayPrep이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
         // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).
         errdefer raster.cells.deinit(self.allocator);
@@ -62438,8 +62458,8 @@ test "리셋 토스트를 닫는 키(⌘T)는 소비되어 새 텀을 만들지 
 }
 
 // 회귀(code-review #10): **알림 패널과 notice 토스트가 공존할 때, 입력은 notice를 먼저 닫고 패널은 유지된다**.
-// showNotice/openNotificationPanel은 서로를 안 닫아 (예: 패널을 본 채 백그라운드 에이전트-완료 notice가 뜨면) 둘이
-// 겹친다. 토스트는 패널 위에 그려지므로, 닫기 입력이 패널 분기보다 **먼저** notice를 닫아야 패널 뒤로 안 갇힌다
+// showNotice는 패널을 안 닫아 (예: 패널을 본 채 비동기 notice — host 연결 실패 재통지 등 — 가 뜨면) 둘이 공존한다. 그 동안 그리는
+// 것은 토스트뿐이므로(패널은 `notificationPanelDrawn` 이 숨긴다), 닫기 입력이 패널 분기보다 **먼저** notice를 닫아야 한다
 // (mouse()/scrollWheel은 notice 블록을 notifications 분기 앞에, 키는 host.zig 우선순위 Notice>Notifications).
 test "notice 토스트와 알림 패널 공존: 입력이 notice를 먼저 닫고 패널은 유지(회귀)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -62476,6 +62496,108 @@ test "notice 토스트와 알림 패널 공존: 입력이 notice를 먼저 닫�
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'a' } });
     try std.testing.expect(!session.chrome_host.notice.open);
     try std.testing.expect(session.chrome_host.notifications.open);
+}
+
+// 위 공존을 **그리는** 쪽. 오버레이 raster 는 상자 하나라 notice/confirm 과 패널을 함께 내면 겹쳐 그려진다 — notice 글자가
+// 패널 위로 비치고, 패널의 프레임 clip 이 그리드 전체에 걸려 notice 상자 안 글자가 잘리고, 패널은 모달 배경 자리를 잃는다
+// (2026-10-06 사용자 지적). 메시지가 떠 있는 동안은 패널을 **안 그리고** 상태는 둔다 — 메시지가 닫히면 다시 보인다.
+test "notice·confirm 이 떠 있는 프레임엔 알림 패널을 안 그리고(clip·막대·caret 포함), 닫히면 다시 그린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 넘치게 쌓는다 — 스크롤이 생겨야 패널이 프레임 clip 과 막대를 낸다(이 판정자가 보는 두 가지).
+    for (0..40) |_| {
+        const title = allocator.dupe(u8, "Q") catch break;
+        const body = allocator.dupe(u8, "b") catch break;
+        session.notification_history.append(allocator, .{ .title = title, .body = body, .surface_id = 0, .timestamp_ns = 0 }) catch break;
+    }
+    notification_ops.openNotificationPanel(session);
+    if (!session.chrome_host.notifications.open) return error.PanelDidNotOpen;
+
+    const Seen = struct { clip: bool, panel_text: bool, message_text: bool, caret: bool, bar: bool };
+    const frame = struct {
+        fn run(s: *AppSession, a: std.mem.Allocator) !Seen {
+            s.overlay_quads.clearRetainingCapacity();
+            const prep = (try s.buildChromeOverlayPrep()) orelse return error.NoOverlay;
+            var dl = prep.dl;
+            defer dl.deinit(a);
+            var seen: Seen = .{ .clip = prep.placement.clip_rect != null, .panel_text = false, .message_text = false, .caret = false, .bar = s.notif_scroll_view != null };
+            for (dl.cells) |c| {
+                if (c.codepoint == 'Q') seen.panel_text = true;
+                if (c.codepoint == 'X') seen.message_text = true;
+            }
+            for (s.overlay_quads.items) |q| if (q.gradient_kind == 3) {
+                seen.caret = true; // 말풍선 caret(위 삼각형) — 패널 몫
+            };
+            return seen;
+        }
+    };
+
+    // 대조: 패널만 — 네 가지가 모두 난다(안 나면 아래 「없다」 단언은 공짜다).
+    const alone = try frame.run(session, allocator);
+    try std.testing.expect(alone.clip and alone.panel_text and alone.caret and alone.bar);
+    // 호버도 대조 — 첫 카드 본문줄 위를 가리키면 그 카드가 잡힌다(프레임이 `notif_panel_rect` 를 채운 뒤).
+    const pr = session.notif_panel_rect orelse return error.NoPanelRect;
+    const hover_x: f64 = @floatFromInt(pr.x + @as(i32, @intCast(pr.w / 3)));
+    const hover_y: f64 = @floatFromInt(pr.y + @as(i32, @intCast(session.cell_height_px * 2 + session.cell_height_px / 2)));
+    try std.testing.expect(session.hoverCursor(hover_x, hover_y, 0) != .default);
+    try std.testing.expect(session.chrome_host.notifications.hovered != null);
+
+    // notice — 패널 몫은 하나도 없고 notice 글자는 잘리지 않고 그려진다. 패널 상태는 남는다.
+    session.showNotice("XX");
+    const with_notice = try frame.run(session, allocator);
+    try std.testing.expect(!with_notice.clip and !with_notice.panel_text and !with_notice.caret and !with_notice.bar);
+    try std.testing.expect(with_notice.message_text);
+    try std.testing.expect(session.chrome_host.notifications.open);
+    // 안 그리는 패널은 호버도 안 받는다 — 보이지 않는 카드 위에서 손가락 커서가 뜨고 강조가 바뀌면 안 된다.
+    try std.testing.expectEqual(CursorKind.default, session.hoverCursor(hover_x, hover_y, 0));
+    try std.testing.expect(session.chrome_host.notifications.hovered == null);
+
+    // 닫히면 같은 패널이 다시 그려진다.
+    session.chrome_host.notice.dismiss();
+    const after_notice = try frame.run(session, allocator);
+    try std.testing.expect(after_notice.clip and after_notice.panel_text and after_notice.caret and after_notice.bar);
+
+    // confirm 도 같은 규율(입력 우선순위 Confirm > Notifications). 그 전에 잡힌 호버 강조도 비운다 — 안 비우면
+    // confirm 이 닫힌 뒤 낡은 카드 강조가 다음 이동 전까지 다시 보인다.
+    try std.testing.expect(session.hoverCursor(hover_x, hover_y, 0) != .default);
+    try std.testing.expect(session.chrome_host.notifications.hovered != null);
+    session.chrome_host.confirm.show("XX", .{ .confirm = "y", .cancel = "n" });
+    const with_confirm = try frame.run(session, allocator);
+    try std.testing.expect(!with_confirm.clip and !with_confirm.panel_text and !with_confirm.caret and !with_confirm.bar);
+    try std.testing.expect(with_confirm.message_text);
+    try std.testing.expect(session.chrome_host.notifications.open);
+    try std.testing.expectEqual(CursorKind.default, session.hoverCursor(hover_x, hover_y, 0));
+    try std.testing.expect(session.chrome_host.notifications.hovered == null);
+}
+
+// 포커스 없는 찾기 바·참조 피커는 모달이 아니라 종 클릭을 막지 않는다 — 그대로 두면 패널과 한 오버레이 그리드에 겹쳐
+// 그려지고, 패널이 넘쳐 프레임 clip 을 내면 그것이 그리드 전체에 걸려 **그 글자가 통째로 잘린다**. 다른 오버레이를 여는
+// 경로와 같은 함수(`dismissMessageOverlays`)로 먼저 내린다.
+test "알림 패널을 열면 모달이 아닌 다른 오버레이(찾기 바·참조 피커)를 내린다 (단일-오버레이 불변식)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    _ = notification_ops.pushNotificationHistory(session, "Maru", "b", 0);
+    session.chrome_host.find.show();
+    session.chrome_host.find.input_focused = false; // 편집기를 눌러 포커스만 잃은 상태 — 모달이 아니다
+    try std.testing.expect(!session.chrome_host.anyModalOpen()); // 그래서 종 클릭이 패널까지 간다(전제)
+    notification_ops.openNotificationPanel(session);
+    try std.testing.expect(session.chrome_host.notifications.open);
+    try std.testing.expect(!session.chrome_host.find.open);
+    session.chrome_host.notifications.hide();
+
+    session.chrome_host.reference_picker.show();
+    try std.testing.expect(!session.chrome_host.anyModalOpen()); // 참조 피커도 모달 집합 밖이다(전제)
+    notification_ops.openNotificationPanel(session);
+    try std.testing.expect(session.chrome_host.notifications.open);
+    try std.testing.expect(!session.chrome_host.reference_picker.open);
 }
 
 // 닫기 확인 모달 마우스 게이트(code-review 후속): (1) **확인 버튼 바로 위**에서 우/중클릭은 버튼을 활성 안 하고

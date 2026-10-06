@@ -76638,6 +76638,48 @@ test "PANE-UAF 탭 목록 안의 탭을 파괴할 때 뒤 Term 의 정리가 이
     try std.testing.expectEqual(@as(usize, 3), pane_ops.activePane(session).terms.items.len);
 }
 
+test "TAB-UAF 창 닫기가 탭을 하나씩 풀 때 뒤 탭의 정리가 이미 푼 앞 탭을 읽지 않는다" {
+    // 2026-10-06 실측: 창 닫기(`destroyAllTabsForApprovedWindowClose`)가 `for (self.tabs.items) |tab| destroyTabStandalone`
+    // 로 탭을 풀면서 목록에서는 안 뺐다. 뒤 탭의 `destroyTerm` → `invalidateCompareFor` 가 모든 탭을 훑다 **해제된 앞 탭**의
+    // `panes` 를 읽었고, 그 자리를 JSON 문자열이 차지하고 있어 SIGSEGV 로 죽었다. PANE-UAF 와 같은 꼴의 한 단계 위다.
+    // 재사용을 막고 푼 자리를 0xaa 로 덮는 할당기로 결정적으로 잰다 — 고치기 전에는 0xaa… 포인터를 따라가 죽는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var q: QuarantineAllocator = .{ .backing = allocator };
+    defer q.deinit();
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try tab_ops.newTab(session);
+    _ = try tab_ops.newTab(session);
+    try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
+    session.allocator = q.allocator();
+    defer session.allocator = allocator;
+    tab_ops.destroyAllTabsForApprovedWindowClose(session);
+    try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
+}
+
+test "TAB-UAF 복원이 옛 탭 여럿을 갈아 끼울 때 뒤 탭의 정리가 이미 푼 앞 탭을 읽지 않는다" {
+    // `applyWorkspaceWindow` 의 옛 탭 teardown 도 같은 꼴이었다(창 닫기와 같은 `for (self.tabs.items)`). PANE-UAF 판정자는
+    // 탭이 하나라 이 단계를 못 봤다 — 탭을 셋으로 둔다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var q: QuarantineAllocator = .{ .backing = allocator };
+    defer q.deinit();
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try tab_ops.newTab(session);
+    _ = try tab_ops.newTab(session);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    session.allocator = q.allocator();
+    defer session.allocator = allocator;
+    try workspace_ops.applyWorkspaceWindow(session, win);
+    try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
+}
+
 test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저는 자리를 비운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

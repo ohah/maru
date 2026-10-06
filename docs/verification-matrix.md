@@ -2059,6 +2059,13 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   조건 없는 끝 줄, `progressConnectedOne` 의 retained_terminal 끝 줄, connected 분기 **앞**의 시도 기록 포획, 채택 실패 사유,
   새 job 입장의 기준 시각, 워커의 연결 전 잔여 데드라인 측정·연결 전 지남·연결 실패 사유·후보 거절과 그 봉인을 문법 자리로
   고정한다. 수정 전 코드에서 wiring 2개 모두 red. 동작(재시도·데드라인)은 바꾸지 않으며 실제 잠자기 재현 E2E 는 없다.
+  **teardown 이 푼 것을 살아 있는 목록에 남기지 않는다(TAB-UAF)**(`test-teardown-live-list`, check-boundaries — PR 에서 돈다):
+  `destroyTerm` 이 저장 충돌 비교를 정리하려고 모든 탭·pane·Term 을 훑으므로(`invalidateCompareFor`), 푼 탭·pane 이 목록에
+  남으면 뒤 정리가 해제된 메모리를 읽는다(2026-10-06 창 닫기 SIGSEGV). std-only 경계 2개가 app_session 전체에서
+  `for (<목록>.items) |x| … destroy…` 꼴이 없음(아직 게시되지 않은 목록의 errdefer 셋과 제자리 교체 한 곳만 (파일, 함수, 목록)
+  단위로 이유와 함께 허용, 쓰이지 않는 허용 항목은 실패)과, 창 닫기·복원·탭·pane 네 teardown 이 「목록에서 먼저 빼고 푼다」
+  꼴임을 잰다. 값 판정자 `TAB-UAF` 둘(창 닫기·복원, 탭 셋)은 푼 자리를 0xaa 로 덮는 격리 할당기로 ABI suite 에서 돈다
+  (전용 `test-teardown-uaf`, PR 의 `test-macos-app-host-abi`). 수정 전 코드에서 경계 2개 red.
   **RemoteRuntime 테스트 fixture 초기화**(`test-remote-runtime-fixture-init`, check-boundaries — PR 에서 돈다): 제품
   constructor(`spawnWithConnection`·`attachExistingWithConnection`)의 in-place 초기화 블록이 대입하는 값 칸 집합을 fixture
   공통 입구 `initializeTestGeneration` 의 대입 집합과 대조한다. 일부러 안 세우는 칸(판정자별 입력 경로, 신원 owner)은 이유와 함께

@@ -119,6 +119,23 @@ test "PSE1 JSON ranges own multiline UTF8 and CRLF bytes" {
 test "PSE2 external byte spans cannot split UTF8 or traverse roots" {
     const a = std.testing.allocator;
     try std.testing.expectError(error.UnknownEvent, parse(a, "{\"type\":\"unexpected\"}"));
+    // 좌표 overflow·역순·범위 초과·절대 경로는 외부 입력 오류다.
+    const mutations = [_]struct { before: []const u8, after: []const u8 }{
+        .{ .before = "\"line_number\":2", .after = "\"line_number\":4294967297" },
+        .{ .before = "\"line_number\":2", .after = "\"line_number\":0" },
+        .{ .before = "\"start\":0", .after = "\"start\":9" },
+        .{ .before = "\"end\":8", .after = "\"end\":999" },
+        .{ .before = "./a.zig", .after = "/a.zig" },
+    };
+    for (mutations) |mutation| {
+        const invalid = try std.mem.replaceOwned(u8, a, sample, mutation.before, mutation.after);
+        defer a.free(invalid);
+        if (parse(a, invalid)) |value| {
+            var unexpected = value;
+            unexpected.match.deinit(a);
+            return error.AcceptedInvalidEvent;
+        } else |_| {}
+    }
     const broken = try std.mem.replaceOwned(u8, a, sample, "\"start\":0", "\"start\":1");
     defer a.free(broken);
     try std.testing.expectError(error.MalformedEvent, parse(a, broken));

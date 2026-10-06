@@ -48,6 +48,7 @@ app="$work/Maru.app"
 helper_rel="Contents/Helpers/MaruMermaidRenderer.app"
 helper_bin_rel="$helper_rel/Contents/MacOS/maru-mermaid-renderer"
 notification_helper_rel="Contents/Helpers/maru-session-host-notification-center-helper"
+ripgrep_helper_rel="Contents/Helpers/rg"
 for bin in maru-macos-app maru; do
     lipo -create \
         "$work/arm.app/Contents/MacOS/$bin" \
@@ -73,7 +74,8 @@ for universal_bin in \
     "$app/Contents/MacOS/maru-macos-app" \
     "$app/Contents/MacOS/maru" \
     "$app/$helper_bin_rel" \
-    "$app/$notification_helper_rel"
+    "$app/$notification_helper_rel" \
+    "$app/$ripgrep_helper_rel"
 do
     archs=$(lipo -archs "$universal_bin")
     case "$archs" in
@@ -90,6 +92,7 @@ codesign --force --options runtime --timestamp \
     --entitlements src/platform/macos/MaruMermaidRenderer.entitlements \
     --sign "$SIGN_ID" "$app/$helper_rel"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/$notification_helper_rel"
+codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/$ripgrep_helper_rel"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru-macos-app"
 # RW2b 감시자(Resources/remote-watch/<variant>/maru-remote-watch). **번들 서명은 이들을 봉인만 하고

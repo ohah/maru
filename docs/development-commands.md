@@ -144,6 +144,9 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 
 ## 빌드와 테스트
 
+- 승인한 프로젝트 검색 기반: `zig build prepare-ripgrep`은 offline 공식 사본을 검증·universal helper를 준비한다(macOS). `zig build test-editor-project-search`는 argv/JSON/분할/OOM 경계를 검사한다. 실제 helper 검증은 `zig build test-macos-project-search-adapter -Doptimize=ReleaseFast`이며 macOS-only CI에도 연결된다. `zig-out/editor-project-search-adapter/latest.json`과 고유 `run-*/verification.json`을 남긴다. `macos-app-bundle`이 helper·notices·서명을 묶는다. 제품 worker/도크 완료의 증거가 아니며 [채택 구성과 단계](plans/editor-project-search.md)를 본다.
+
+
 - 프로젝트 검색 후보의 opt-in 실측: `zig build editor-project-search-probe -Doptimize=ReleaseFast` 후 `python3 tools/editor-project-search/probe.py --native zig-out/bin/maru-project-search-probe --output zig-out/project-search-probe-<새이름>`. 설치된 rg와 실제 합성 파일을 사용하며 기본 CI/제품에는 연결하지 않는다. `verify.py`는 같은 인자로 전체 일치 범위를 대조하고, `compare.py`는 후보별 첫 결과·전체 시간·자식 프로세스 RSS를 비교한다. 성능 측정은 빌드/스트레스와 분리한다. 명령·결과·미검증 항목은 [검색 설계](plans/editor-project-search.md)를 본다.
   수정 전 바이너리를 보존했다면 `verify.py`·`compare.py`에 `--baseline-native <수정전바이너리>`를 추가해 같은 자료의 전체 범위·비용을 대조한다. 비교기는 경로를 정렬해 수정 전후에 같은 순서로 읽고, 바이너리 해시를 각각 남긴다.
 - 터미널 스크롤백 PCRE2 검색의 soft-wrap·hard break·UTF-8 셀 좌표·스크롤백 재배치·역추적 한도를 집중 검증: `zig build test-terminal-regex`. 코어 테스트 6개를 개수로 고정한다(`test-editor`는 터미널 코어 테스트를 포함하지 않는다). macOS 찾기 UI·실제 원격 호스트 테스트는 기존 `test-macos-app-host-abi` 스위트가 소유한다.

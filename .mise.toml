@@ -541,3 +541,11 @@ run = "sh tools/ssh/smoke.sh"
 [tasks.ssh-client-smoke]
 description = "Built-in SSH client real-server smoke — spins up a throwaway sshd, transfers 8MiB (skips if no sshd; MARU_SSH_SMOKE_REQUIRE=1 turns skip into failure)."
 run = ["zig build ssh-client-smoke", "sh tools/ssh/client_smoke.sh"]
+
+[tasks.test-editor-project-search]
+description = "Verify project search argv and JSON protocol"
+run = "zig build test-editor-project-search"
+
+[tasks.test-macos-project-search-adapter]
+description = "Verify bundled ripgrep with actual adapter fixtures"
+run = "zig build test-macos-project-search-adapter"

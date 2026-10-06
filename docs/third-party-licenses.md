@@ -39,7 +39,31 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 - **목록을 손으로 적지 않는다.** `build.zig`의 grammar 표가 복사 명령과 **확인 목록을 함께** 만든다 — 손으로 적으면 언어를 늘릴 때 한쪽만 빠지고, 그 누락은 아무 테스트도 안 깨뜨린다(재배포 의무의 성질이다). 빠지면 번들이 `error: bundled code library license missing or empty: … — 재배포 의무`로 **소리 내어 죽는다**.
 - **한 저장소가 두 grammar 를 내면 라이선스는 하나다**(TypeScript/TSX). 표가 dep 단위로 중복을 걷는다.
 - **wuffs 는 `.app` 뿐 아니라 wasm 배포물에도 들어간다.** `packages/core/wasm/maru-vt.wasm` 이 PNG 디코더를 품는다(실측 brotli 53 KB → 88 KB) — 그 배포 경로의 attribution 은 웹 패키지 쪽 라이선스 표기가 함께 진다. 동봉 파일은 `Resources/Licenses/wuffs-LICENSE` 하나이고, 그 한 파일에 MIT·Apache-2.0 **전문이 둘 다** 들어 있어 어느 쪽을 택하든 의무가 끝난다.
-- 이것들이 [project-rules.md](project-rules.md) §의존성의 "런타임 의존성 기본 0"에 대한 **예외 세 건**이며, 각각 그 문서가 요구한 사용자 논의를 거쳤다(tree-sitter 2026-08-09, wuffs 2026-09-14, PCRE2 2026-09-28).
+- 이것들이 [project-rules.md](project-rules.md) §의존성의 "런타임 의존성 기본 0"에 대한 **예외 네 건**이며, 각각 그 문서가 요구한 사용자 논의를 거쳤다(tree-sitter 2026-08-09, wuffs 2026-09-14, PCRE2 2026-09-28, ripgrep 2026-10-07).
+
+## 프로젝트 검색 helper — ripgrep
+
+2026-10-07 사용자가 VS Code 방식과 ripgrep 사용을 승인했다. 공식 [15.2.0 배포물](https://github.com/BurntSushi/ripgrep/releases/tag/15.2.0)의
+arm64·x86_64 macOS 아카이브와 바이너리를 `vendor/ripgrep/15.2.0/manifest.json`의 SHA-256으로 고정한다.
+`tools/build-ripgrep.py`는 다운로드 없이 검증·추출·universal 결합·ad-hoc 서명을 하고, `.app`은
+`Contents/Helpers/rg` 하나와 `Resources/Licenses/ripgrep-*` notices를 동봉한다.
+release universal 스크립트도 helper의 두 아키텍처와 안쪽부터의 hardened runtime 서명을 확인한다.
+
+rg는 MIT/Unlicense 이중 라이선스이며 공식 배포본의 COPYING·LICENSE-MIT·UNLICENSE를 보존한다.
+정적 PCRE2 10.45의 BSD 전문, 바이너리에서 확인한 Rust commit의 MIT 전문도 추가했다.
+상류 Cargo.lock의 registry 패키지 48개의 notices 108개와 source crate checksum 인벤토리를 보존한다.
+이 목록은 build/dev/타 플랫폼 패키지까지 포함한 상위 집합이며 모두 macOS에 링크됐다는 뜻은 아니다.
+UEFI 전용 getrandom 분기의 r-efi는 macOS 바이너리에 링크되지 않아 제외했다.
+각 license의 hash 검증·복사 목록은 manifest 한 곳에서 나오며 실제 앱의 114파일과 대조했다.
+
+실측한 universal helper는 8,465,840byte(서명된 개발 산출물)이며 원본 두 아카이브 합계는 3,642,568byte다.
+동적 라이브러리는 macOS 시스템 libiconv/libSystem이고 Homebrew PCRE2를 요구하지 않는다.
+arm64 minimum OS는 11.0, x86_64는 10.12로 앱의 macOS 11 하한을 충족한다.
+Hardened runtime ad-hoc 서명한 실제 helper에서도 PCRE2 lookbehind 실행을 확인했다.
+Developer ID 공증은 기존 release 작업에서 실행하며 이번 로컬 검사로 공증 완료를 주장하지 않는다.
+
+버전 변경 시 공식 아카이브/실행 파일·Cargo.lock·Rust/PCRE2 notices를 다시 확인하고 manifest와
+license-inventory를 함께 갱신한다. 버전·라이선스·한쪽 아키텍처가 빠지면 준비가 실패한다.
 
 ## 번들 폰트
 

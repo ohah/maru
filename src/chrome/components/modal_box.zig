@@ -10,6 +10,7 @@ const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) 공유 — 박스 폭을 placeText와 같은 폭 규약으로 잡는다
+const text_layout = @import("../text_layout.zig"); // decodeCodepoint — 깨진 UTF-8 을 렌더러와 같은 단위로 걷는다
 
 /// 이 박스가 그리는 레이어(최상위 모달). notice/confirm이 그대로 재노출한다.
 pub const layer = draw.Layer.modal;
@@ -100,6 +101,91 @@ pub fn fillCells(box: Box, x: i32, row: u32, cols: u32, role: tokens.ColorRole, 
     try out.append(arena, .{ .fill = .{ .rect = .{ .x = x, .y = rowY(box, row), .w = cols * box.cw, .h = box.ch }, .role = role } });
 }
 
+/// 한 줄이 차지할 수 있는 줄 수 상한. 브라우저 권한 확인처럼 URL 이 그대로 들어간 메시지는 길이에 끝이 없다 —
+/// 상한이 없으면 상자가 창을 덮는다. 넘치면 마지막 줄이 「…」로 끝난다.
+pub const max_wrap_rows: u32 = 6;
+pub const ellipsis = "…";
+
+pub const Wrapped = struct { rows: u32, truncated: bool };
+
+/// 줄바꿈(`\n`)으로 나눈 조각 중 가장 넓은 것의 표시 폭 — 상자 폭을 이것으로 잰다. 메시지 전체로 재면 `\n` 이
+/// 섞인 문구(LSP 오류 메시지가 그대로 끼는 notice)가 줄은 짧아도 상자만 작업영역 폭까지 넓어졌다.
+pub fn widestLineCols(message: []const u8) u32 {
+    var widest: u32 = 0;
+    var it = std.mem.splitScalar(u8, message, '\n');
+    while (it.next()) |seg| widest = @max(widest, overlay_input.displayCols(std.mem.trim(u8, seg, " \r")));
+    return widest;
+}
+
+/// 메시지를 `cols` 칸(표시 폭 — 한글 2칸) 줄로 나눠 `out` 에 담는다. 공백에서 끊고, 공백 없이 긴 토큰(URL·경로·
+/// 실행 파일 이름)은 글자 경계에서 자른다. 줄이 `out.len` 을 넘으면 마지막 줄을 「…」 자리만큼 줄이고 truncated.
+/// 슬라이스는 message 를 빌린다(할당 없음 — view 와 hitTest 가 프레임마다 부른다). 빈 메시지도 한 줄(빈 줄)이다.
+/// confirm(메시지)과 notice(`view`)가 함께 쓴다 — 줄바꿈 규칙을 두 벌 두면 한쪽이 낡는다.
+pub fn wrapLine(message: []const u8, cols: u32, out: *[max_wrap_rows][]const u8) Wrapped {
+    if (cols == 0) {
+        out[0] = message; // 상자가 한 칸도 없다 — 나눌 수 없으니 예전처럼 한 줄(호출자가 상자를 생략하는 갈래와 같다)
+        return .{ .rows = 1, .truncated = false };
+    }
+    const ellipsis_cols = overlay_input.displayCols(ellipsis);
+    var rows: u32 = 0;
+    var rest = std.mem.trim(u8, message, " ");
+    while (rest.len > 0) {
+        const last_slot = rows + 1 == max_wrap_rows;
+        // 마지막 자리에서 다 안 들어가면 「…」 를 붙일 자리를 남긴다 — 먼저 전부 들어가는지 보고, 아니면 줄인 폭으로 다시.
+        const nl = std.mem.indexOfScalar(u8, rest, '\n');
+        // `\r\n` 은 줄바꿈 하나다 — `\r` 을 줄 안의 한 칸으로 세면 딱 맞는 줄의 마지막 낱말이 다음 줄로 밀렸다.
+        const seg_end = if (nl) |n| (if (n > 0 and rest[n - 1] == '\r') n - 1 else n) else rest.len;
+        // 「전부 들어간다」 = 이 줄이 폭 안이고 그 뒤에 **남는 글자가 없다**. 메시지 끝의 줄바꿈 하나 때문에 마지막 자리에서
+        // 들어가는 줄을 「…」 자리만큼 잘라 내지 않는다.
+        const nothing_after = if (nl) |n| std.mem.trim(u8, rest[n + 1 ..], " \r\n").len == 0 else true;
+        const full_fits = overlay_input.displayCols(rest[0..seg_end]) <= cols and nothing_after;
+        const limit = if (last_slot and !full_fits) cols -| ellipsis_cols else cols;
+        var width: u32 = 0;
+        var fit_end: usize = 0;
+        var last_space: ?usize = null;
+        var i: usize = 0;
+        while (i < seg_end) {
+            // 렌더러(`placeText` — `text_layout.decodeCodepoint`)와 같은 단위로 걷는다. lead 바이트의 길이로만 묶으면 깨진
+            // 바이트 뒤의 온전한 글자가 그 덩어리에 먹혀, 줄이 그 글자 **중간**에서 끊겼다.
+            const end = @min(i + text_layout.decodeCodepoint(rest, i).advance, seg_end);
+            const w = overlay_input.displayCols(rest[i..end]);
+            if (width + w > limit) break;
+            width += w;
+            if (rest[i] == ' ') last_space = i;
+            i = end;
+            fit_end = i;
+        }
+        var line_end = fit_end;
+        var next = fit_end;
+        if (fit_end < seg_end) {
+            if (rest[fit_end] == ' ') {
+                next = fit_end + 1; // 넘친 글자가 공백이면 여기서 딱 끊긴다
+            } else if (last_space) |sp| {
+                if (sp > 0) {
+                    line_end = sp;
+                    next = sp + 1;
+                }
+            }
+            if (line_end == 0) {
+                // 첫 글자부터 폭을 넘는다(아주 좁은 상자의 2칸 글자) — 그 글자 하나를 한 줄로 내 무한 반복을 막는다.
+                line_end = @min(text_layout.decodeCodepoint(rest, 0).advance, seg_end);
+                next = line_end;
+            }
+        } else if (nl) |n| {
+            next = n + 1; // 줄바꿈 문자(`\r\n` 이면 둘 다)까지 먹는다
+        }
+        out[rows] = std.mem.trimEnd(u8, rest[0..line_end], " \r"); // CRLF 의 \r 은 칸을 차지하는 글자로 남기지 않는다
+        rows += 1;
+        rest = std.mem.trimStart(u8, rest[next..], " ");
+        if (rows == max_wrap_rows) return .{ .rows = rows, .truncated = rest.len > 0 };
+    }
+    if (rows == 0) {
+        out[0] = "";
+        rows = 1;
+    }
+    return .{ .rows = rows, .truncated = false };
+}
+
 /// lines를 중앙 모달 박스로 그린다(notice용 — 줄 텍스트만, 좌측 정렬). 빈 lines면 무동작(호출자 열림 가드).
 /// 박스 기하는 layout/frame 단일 출처에 위임한다. ops·runs 슬라이스는 호출자가 준 frame arena가 소유한다.
 pub fn view(
@@ -111,10 +197,26 @@ pub fn view(
 ) !void {
     if (lines.len == 0) return;
     var content_cols: u32 = 0;
-    for (lines) |ln| content_cols = @max(content_cols, overlay_input.displayCols(ln.text)); // EAW 표시폭(placeText와 동일 규약)
-    const box = layout(content_cols, @intCast(lines.len), p, tk) orelse return;
+    for (lines) |ln| content_cols = @max(content_cols, widestLineCols(ln.text)); // EAW 표시폭(placeText와 동일 규약)
+    // 폭은 행 수와 무관하다 — 한 행으로 재서 상자 안쪽 폭을 얻고, 그 폭으로 줄마다 나눈 뒤 실제 행 수로 다시 잰다.
+    // 안 나누면 작업영역보다 긴 줄(host 연결 실패 안내처럼 원인 코드가 끼는 notice)이 상자 밖으로 넘쳐 창 가장자리에서
+    // 잘렸다(2026-10-06 실제 앱 캡처). 안쪽 폭에 들어가는 줄은 한 줄 그대로다(앞뒤 공백을 걷고 `\n` 에서 나누는 것 외에는).
+    // 규칙은 confirm 과 같은 `wrapLine`.
+    const width_probe = layout(content_cols, 1, p, tk) orelse return;
+    const Piece = struct { text: []const u8, role: tokens.ColorRole };
+    var pieces: std.ArrayList(Piece) = .empty;
+    for (lines) |ln| {
+        var wrapped_lines: [max_wrap_rows][]const u8 = undefined;
+        const w = wrapLine(ln.text, width_probe.inner_cols, &wrapped_lines);
+        for (wrapped_lines[0..w.rows], 0..) |part, i| {
+            const last_cut = w.truncated and i + 1 == w.rows;
+            const shown = if (last_cut) try std.fmt.allocPrint(arena, "{s}{s}", .{ part, ellipsis }) else part;
+            try pieces.append(arena, .{ .text = shown, .role = ln.role });
+        }
+    }
+    const box = layout(content_cols, @intCast(pieces.items.len), p, tk) orelse return;
     try frame(box, p, arena, out);
-    for (lines, 0..) |ln, i| try text(box, box.inner_x, @intCast(i), ln.text, ln.role, arena, out);
+    for (pieces.items, 0..) |piece, i| try text(box, box.inner_x, @intCast(i), piece.text, piece.role, arena, out);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -234,19 +336,38 @@ test "modal_box: rich 패딩이어도 확장 박스(box_w + 2*pad)가 터미널 
     try std.testing.expect(box.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
     try std.testing.expect(box.x + @as(i32, @intCast(box.w + pad)) <= @as(i32, @intCast(sidebar + term_w_px)));
 
+    // 긴 줄은 안쪽 폭에서 나뉜다(`wrapLine`) — 폭 clamp 된 상자 안에 조각이 여럿이다.
+    const rows1 = out.items.len - 1;
+    try std.testing.expect(rows1 > 1);
+
     // 2줄(confirm 류)도 같은 폭 clamp가 걸린다 — 다줄 box_h 증가가 폭/중앙배치를 깨지 않는지(rich 패딩 조합) 확인.
     out.clearRetainingCapacity();
     try view(&.{
         .{ .text = "this is a fairly long message to force the width clamp", .role = .surface_fg },
         .{ .text = "Enter to close   Esc to cancel", .role = .muted_fg },
     }, p, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 3), out.items.len); // quad+text+text
+    const rows2 = out.items.len - 1;
+    try std.testing.expect(rows2 > rows1); // 둘째 줄이 조각을 더한다
     const ch = p.metrics.cell_height_px; // 16
     const box2 = out.items[0].quad.rect;
     try std.testing.expect(box2.w + 2 * pad <= term_w_px); // 폭 clamp 동일
     try std.testing.expect(box2.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
-    try std.testing.expect(box2.h == box.h + ch); // 2줄 박스가 1줄보다 정확히 한 줄(ch) 큼
-    try std.testing.expect(out.items[2].text.origin.y == out.items[1].text.origin.y + @as(i32, @intCast(ch))); // 둘째 줄 = 첫째 + ch
+    try std.testing.expect(box2.h == box.h + @as(u32, @intCast(rows2 - rows1)) * ch); // 더한 조각 수만큼 정확히 커진다
+    for (out.items[2..], 2..) |op, i| // 조각은 한 줄(ch)씩 아래로 — 첫째 줄 조각 다음에 둘째 줄이 이어진다
+        try std.testing.expect(op.text.origin.y == out.items[i - 1].text.origin.y + @as(i32, @intCast(ch)));
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[out.items.len - 1].text.role); // 마지막 조각은 둘째 줄
+    // 조각마다 안쪽 폭 안이다 — 나눌 폭을 패딩·사이드바를 빼기 전 값으로 잡으면 여기서 넘친다. 둘째 줄도 나뉘어
+    // 내용이 다 남는다(첫 줄만 나누면 둘째 줄 한 조각이 안쪽을 넘는다).
+    const margin: i32 = @intCast(tk.space.modal_margin_cells);
+    const inner_left = box2.x + margin * 8;
+    const inner_right = box2.x + @as(i32, @intCast(box2.w)) - margin * 8;
+    var second: std.ArrayList(u8) = .empty;
+    for (out.items[1..]) |op| {
+        try std.testing.expectEqual(inner_left, op.text.origin.x);
+        try std.testing.expect(op.text.origin.x + @as(i32, @intCast(overlay_input.displayCols(op.text.runs[0].text))) * 8 <= inner_right);
+        if (op.text.role == .muted_fg) for (op.text.runs[0].text) |b| if (b != ' ') try second.append(arena, b);
+    }
+    try std.testing.expectEqualStrings("EntertocloseEsctocancel", second.items);
 }
 
 test "modal_box: 박스가 뷰포트보다 높으면 y를 0으로 clamp (상단/제목 화면 위로 안 잘림 — 리뷰 #823)" {
@@ -300,4 +421,29 @@ test "modal_box: authoritative zero-size workspace fails closed instead of using
         .workspace_present = true,
     } };
     try std.testing.expectEqual(@as(?Box, null), layout(20, 4, p, &tk));
+}
+
+// `wrapLine` 의 가장자리 셋을 정확한 입력으로 못박는다(notice·confirm 공유 규칙).
+test "modal_box wrapLine: 깨진 바이트·CR·끝 줄바꿈 — 글자를 반으로 가르지 않고, CR 은 칸이 아니며, 끝 줄바꿈은 「…」가 아니다" {
+    var out: [max_wrap_rows][]const u8 = undefined;
+    // ① 깨진 lead(E0) 뒤의 온전한 「가」(EA B0 80) — 렌더러처럼 E0 하나만 깨진 글자(1칸)로 보고 「가」는 통째로 다음 줄.
+    //    lead 길이로 E0 EA B0 을 묶으면 「가」가 두 줄로 갈렸다.
+    const broken = wrapLine("ab\xE0\xEA\xB0\x80", 3, &out);
+    try std.testing.expectEqual(@as(u32, 2), broken.rows);
+    try std.testing.expectEqualStrings("ab\xE0", out[0]);
+    try std.testing.expectEqualStrings("\xEA\xB0\x80", out[1]);
+    // ② 줄 끝의 CR 은 남기지 않는다(줄바꿈 없이 끝나는 CR 도).
+    const cr = wrapLine("abc\r", 10, &out);
+    try std.testing.expectEqual(@as(u32, 1), cr.rows);
+    try std.testing.expectEqualStrings("abc", out[0]);
+    // ③ 여섯째 줄이 딱 맞고 메시지가 줄바꿈 하나로 끝나면 잘린 것이 아니다 — 「…」 자리만큼 줄이지 않는다.
+    const tail = wrapLine("aaaaa bbbbb ccccc ddddd eeeee fffff\n", 5, &out);
+    try std.testing.expectEqual(@as(u32, 6), tail.rows);
+    try std.testing.expect(!tail.truncated);
+    try std.testing.expectEqualStrings("fffff", out[5]);
+    // 대조: 정말 더 남으면 잘리고 「…」 자리를 비운다.
+    const more = wrapLine("aaaaa bbbbb ccccc ddddd eeeee fffff\nggggg", 5, &out);
+    try std.testing.expect(more.truncated);
+    try std.testing.expect(overlay_input.displayCols(out[5]) + overlay_input.displayCols(ellipsis) <= 5);
+    try std.testing.expectEqualStrings("ffff", out[5]); // 「…」 자리(1칸)만 비우고 나머지는 채운다
 }

@@ -15906,7 +15906,7 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     try testing.expectEqual(@as(u32, 19), term.rt.editor_inlay.hints.items.items[1].offset);
     try testing.expectEqual(@as(u64, 2), term.rt.editor_inlay.generation);
     _ = frameSyntaxColors(s, term);
-    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+    _ = try quietFrameAsked(s, term.rt.editor_inlay.last_edit_ms, quiet_contract_ms, s.editor_lsp.sent_inlay, 1);
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
@@ -15982,11 +15982,8 @@ test "INL10 인레이 힌트 — provider 없으면 아무것도 안 묻고, 오
         }.g));
         try testing.expect(!term.rt.editor_inlay.waiting and term.rt.editor_inlay.dirty);
         _ = frameSyntaxColors(s, term); // 곧바로는 안 묻는다(조용 시계)
-        // 조용 시계는 실제 시계다 — 부하로 드롭과 프레임 사이가 quiet_ms 를 넘으면 되묻는 게 맞다.
-        // 프레임 *뒤* 시각으로 재야 tick 이 본 시각도 창 안이었다는 게 보장된다.
-        if (s.awakeMs() -| term.rt.editor_inlay.last_edit_ms < inlay_client.quiet_ms) {
-            try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
-        } else {
+        // 조용 시계는 실제 시계다 — 부하로 드롭과 프레임 사이가 quiet_ms 를 넘으면 되묻는 게 맞다(`quietFrameAsked`).
+        if (try quietFrameAsked(s, term.rt.editor_inlay.last_edit_ms, quiet_contract_ms, s.editor_lsp.sent_inlay, 1)) {
             // 되물은 것도 같은 오류로 버려진다 — 그 뒤 상태는 창 안에서 멈춘 경우와 같다.
             try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
                 fn g(t: *Term) bool {
@@ -16235,7 +16232,7 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
     term.rt.editor_selection = .{ .anchor_start = body, .anchor_end = body, .focus = body };
     try testing.expect(std.mem.endsWith(u8, headerBreadcrumb(s, term, "sy.c"), "beta"));
     _ = frameSyntaxColors(s, term); // 120 ms 안엔 안 묻는다
-    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
+    _ = try quietFrameAsked(s, term.rt.editor_symbols.last_edit_ms, quiet_contract_ms, s.editor_lsp.sent_symbols, 1);
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
@@ -16328,12 +16325,20 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
             }
         }.g));
         try testing.expect(f.term.rt.editor_symbols.dirty);
-        _ = frameSyntaxColors(s, f.term); // 곧바로는 안 묻는다
-        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
+        _ = frameSyntaxColors(s, f.term); // 곧바로는 안 묻는다(`quietFrameAsked` — 부하로 창을 넘었으면 묻는 게 맞다)
+        if (try quietFrameAsked(s, f.term.rt.editor_symbols.last_edit_ms, quiet_contract_ms, s.editor_lsp.sent_symbols, 1)) {
+            // 되물은 것도 같은 오류로 버려진다 — 그 드롭을 받은 뒤가 창 안에서 멈춘 경우와 같은 상태다.
+            try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
+                fn g(t: *Term) bool {
+                    return !t.rt.editor_symbols.waiting and t.rt.editor_symbols.dropped_error >= 2;
+                }
+            }.g));
+        }
+        const sent_before_quiet = s.editor_lsp.sent_symbols;
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
         _ = frameSyntaxColors(s, f.term);
-        try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_symbols);
+        try testing.expectEqual(sent_before_quiet + 1, s.editor_lsp.sent_symbols);
     }
     // ⑸ 이름이 문서와 다른 항목(`DSYBAD`) — 그 항목만 버리고 나머지는 든다(자기 검산).
     {
@@ -16372,7 +16377,7 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     term.rt.editor_selection = .{ .anchor_start = first + 1, .anchor_end = first + 1, .focus = first + 1 };
     highlight_client.onCaretMove(s, term);
     _ = frameSyntaxColors(s, term);
-    try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_highlight); // 150 ms 조용 전
+    _ = try quietFrameAsked(s, term.rt.editor_highlight.last_move_ms, highlight_quiet_contract_ms, s.editor_lsp.sent_highlight, 0); // 150 ms 조용 전
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
@@ -22274,6 +22279,30 @@ test "[측정] 첫 가로 휠이 문서 전체를 훑는 비용" {
         std.debug.print("[측정] {d}줄: 두 번째 휠 {d}ms (걸음 {d})\n", .{ n, t3 - t2, chrome_editor.content.total_steps });
         try testing.expectEqual(@as(usize, 0), chrome_editor.content.total_steps);
     }
+}
+
+/// 조용 시계 창 길이의 **계약 값**(§8.2n — 인레이·심볼 120 ms, 문서 하이라이트 150 ms). 판정자는 제품 상수를 따라가지 않는다
+/// — 따라가면 그 상수가 0 이 되는 회귀(조용 시계 없이 곧바로 묻는다)에서 판정도 함께 0 이 되어 통과한다. 옛 `expectEqual(1)`
+/// 은 그것을 잡았다.
+const quiet_contract_ms: u64 = 120;
+const highlight_quiet_contract_ms: u64 = 150;
+
+/// 조용 시계(quiet window) 판정 — **부하에 안전하게**. 편집·이동·오류 드롭 뒤 첫 프레임에서 「아직 안 묻는다」를 무조건
+/// 단언하면, 부하로 그 사이가 창 길이(120~150 ms)를 넘을 때 제품은 옳게 묻는데 판정자가 빨갰다. 시간을 가정하지 않고
+/// **일어난 일**로 판정한다:
+///   · 안 물었다 — 옳다(창 안이었거나 tick 이 경계 직전에 봤다). 「끝내 안 묻는」 회귀는 뒤따르는 「조용해진 뒤 묻는다」
+///     단언이 잡는다.
+///   · 물었다 — tick 이 본 시각이 창 밖이었다는 뜻이다. 판정자가 **프레임 뒤에** 잰 시각은 그보다 늦으므로 반드시 창 밖이어야
+///     한다 — 「창을 무시하고 바로 묻는」 회귀는 여기서 잡힌다. 요청은 정확히 하나 늘어야 한다.
+/// 「물었는가」를 돌려준다 — 오류 경로는 그 되묻기도 버려지므로 호출자가 다음 셈을 맞춘다(적대적 검증 2026-10-06 — INL10 의
+/// else 갈래가 「물었을 것」을 가정하고 오지 않을 두 번째 드롭을 3 초 기다리다 빨갰다).
+///
+/// 창 길이는 **계약 값**으로 받는다(`quiet_contract_ms`) — 제품 상수를 넘기면 그 상수가 0 이 되는 회귀가 판정을 통과한다.
+fn quietFrameAsked(s: *AppSession, since_ms: u64, quiet_ms: u64, sent_now: u64, sent_before: u64) !bool {
+    if (sent_now == sent_before) return false;
+    try testing.expect(s.awakeMs() -| since_ms >= quiet_ms);
+    try testing.expectEqual(sent_before + 1, sent_now);
+    return true;
 }
 
 fn monotonicMsForTest() u64 {

@@ -1823,9 +1823,9 @@ fn osrDragHit(self: *AppSession, x_px: f64, y_px: f64) ?app_session_mod.OsrLayou
     return osr_input.hit(self.osr_layouts.items, x_px, y_px);
 }
 
-/// 그 자리가 Chromium 탭 본문인가(W6l② — 끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로 만든다). 실은 것이 없어도 본다.
+/// 이 끌기를 실었고(`loaded`) 그 자리가 Chromium 탭 본문인가(W6l② — 끌어 온 그림 데이터를 본문에 들어올 때만 파일로 만든다).
 pub fn osrDragOverBody(self: *AppSession, x_px: f64, y_px: f64) bool {
-    return osrDragHit(self, x_px, y_px) != null;
+    return self.osr_drag.loaded and osrDragHit(self, x_px, y_px) != null;
 }
 
 /// 끌기가 그 자리에 왔다(들어옴·움직임). 본문이면 그 탭에 enter(처음이거나 다른 탭에서 옮겨 왔으면 — 옛 탭에는 나가기)나

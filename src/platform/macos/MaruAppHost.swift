@@ -8433,9 +8433,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 pb.setString(rest.dropFirst().joined(separator: " "), forType: .URL)
             } else if rest.first == "text" {
                 pb.setString(rest.dropFirst().joined(separator: " ").replacingOccurrences(of: "\\n", with: "\n"), forType: .string)
-            } else if rest.first == "png" || rest.first == "pngtext", let path = rest.dropFirst().first, let data = FileManager.default.contents(atPath: path) {
-                // W6l②: 그림 데이터(파일 형식 없이 — 다른 앱이 그림 자체를 끌 때처럼). pngtext 는 글도 함께(그림을 붙이지 않는다).
-                pb.setData(data, forType: .png)
+            } else if ["png", "pngtext", "tiff"].contains(rest.first ?? ""), let path = rest.dropFirst().first, let data = FileManager.default.contents(atPath: path) {
+                // W6l②: 그림 데이터(파일 형식 없이 — 다른 앱이 그림 자체를 끌 때처럼). pngtext 는 글도 함께(그림을 붙이지 않는다), tiff 는
+                // 스크린샷처럼 TIFF 로만.
+                if rest.first == "tiff", let tiff = NSBitmapImageRep(data: data)?.tiffRepresentation {
+                    pb.setData(tiff, forType: .tiff)
+                } else {
+                    pb.setData(data, forType: .png)
+                }
                 if rest.first == "pngtext" { pb.setString("caption", forType: .string) }
             }
             let info = TestDraggingInfo(window: window, pasteboard: pb)
@@ -10373,6 +10378,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 아닌 URL)와 제목, 글, HTML. Chrome 처럼 있는 것은 모두 싣는다(파일과 함께 온 글도 — 페이지가 고른다). 이 창에 Chromium
     /// 탭 본문이 없으면 읽지 않는다.
     func beginOsrDrag(_ info: any NSDraggingInfo, in view: NSView) {
+        // 앞선 끌기의 그림 대기는 버린다(다른 창·앱에서 끝난 끌기는 끝 알림이 오지 않을 수 있다 — W6l② 적대 검증).
+        osrDragImagePending = false
+        osrDragImagePasteboard = nil
         withSurface(surfaceForView(view)) {
             guard let session = appSession, maru_macos_app_session_osr_drag_reset(session) != 0 else { return }
             let pb = info.draggingPasteboard
@@ -10411,18 +10419,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             if let text = pb.string(forType: .string) { add(1, text) }
             if let html = pb.string(forType: .html) { add(2, html) }
-            // W6l②(사용자 결정 2026-10-06 — 「둘 다 파일로」의 이미지 데이터): 그림만 있는 끌기(다른 앱이 그림 자체를 끌었다 — 파일·
-            // 주소·글 없이 PNG·TIFF)는 페이지가 빈 drop 을 받았다(§7 실측). 본문에 처음 들어올 때 PNG 파일로 만들어 싣는다
-            // (`osrDragUpdate` — 터미널 위를 지나가기만 하는 끌기는 변환도 파일도 만들지 않는다).
-            osrDragImagePending = files == 0 && pb.string(forType: .URL) == nil && pb.string(forType: .string) == nil
-                && pb.string(forType: .html) == nil && pb.availableType(from: [.png, .tiff]) != nil
+            // W6l②(사용자 결정 2026-10-06 — 「둘 다 파일로」의 그림 데이터): 그림만 있는 끌기(다른 앱이 그림 자체를 끌었다 — 파일·
+            // 주소·글 없이 PNG·TIFF)는 페이지가 빈 drop 을 받았다(§7 실측). 포인터가 본문에 들어올 때(이 view 에 들어온 끌기마다 한 번)
+            // PNG 파일로 만들어 싣는다(`osrDragUpdate` — 터미널 위를 지나가기만 하는 끌기는 변환도 파일도 만들지 않는다). 파일 약속이 있는
+            // 끌기(사진·메일 — 미리보기 그림을 함께 실을 수 있다)는 원본 대신 미리보기가 가지 않게 제외한다(약속은 W6l③).
+            let link = pb.string(forType: .URL).flatMap { URL(string: $0) }
+            let promised = !Set(pb.types ?? []).isDisjoint(with: NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) })
+            osrDragImagePending = files == 0 && !promised && (link == nil || link!.isFileURL)
+                && (pb.string(forType: .string) ?? "").isEmpty && (pb.string(forType: .html) ?? "").isEmpty
+                && pb.availableType(from: [.png, .tiff]) != nil
             osrDragImagePasteboard = osrDragImagePending ? pb : nil
         }
     }
 
-    /// W6l②: 그림만 있는 끌기 — 본문에 처음 들어올 때 파일로 만들어 실을 것(끌기마다 한 번).
+    /// W6l②: 그림만 있는 끌기 — 본문에 들어올 때 파일로 만들어 실을 것(이 view 에 들어온 끌기마다 한 번).
     private var osrDragImagePending = false
     private var osrDragImagePasteboard: NSPasteboard?
+    /// 만든 그림 파일의 폴더와 페이지가 받았는지 — 받지 않고 끝나면 지운다(끌고 지나가기만 한 그림을 남기지 않게).
+    private var osrDragImageDir: URL?
+    private var osrDragImageDropped = false
 
     private func loadOsrDragImage(_ session: OpaquePointer, x: Double, y: Double) {
         guard osrDragImagePending, let pb = osrDragImagePasteboard else { return }
@@ -10430,6 +10445,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         osrDragImagePending = false
         osrDragImagePasteboard = nil
         guard let png = clipboardImagePng(pb), let path = saveDroppedImage(png) else { return }
+        osrDragImageDir = URL(fileURLWithPath: path).deletingLastPathComponent()
+        osrDragImageDropped = false
         var bytes = Array(path.utf8)
         _ = bytes.withUnsafeMutableBufferPointer { maru_macos_app_session_osr_drag_add(session, 0, $0.baseAddress, $0.count) }
     }
@@ -10448,6 +10465,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func osrDragExit(in view: NSView) {
+        osrDragImagePending = false // 다시 들어오면 `beginOsrDrag` 가 다시 정한다
+        osrDragImagePasteboard = nil
         withSurface(surfaceForView(view)) {
             guard let session = appSession else { return }
             maru_macos_app_session_osr_drag_exit(session)
@@ -10461,6 +10480,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard let session = appSession else { return }
             let (xPx, yPx) = backingPx(view.convert(info.draggingLocation, from: nil), in: view)
             result = maru_macos_app_session_osr_drag_drop(session, xPx, yPx, osrDragMods())
+            if result > 0 { osrDragImageDropped = true } // 페이지가 받았다 — 그 파일을 나중에 읽을 수 있다(지우지 않는다)
             if result > 0 { markMetalNeedsRedraw() }
         }
         return result < 0 ? nil : result > 0
@@ -10470,6 +10490,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func endOsrDrag(in view: NSView) {
         osrDragImagePending = false
         osrDragImagePasteboard = nil
+        if let dir = osrDragImageDir, !osrDragImageDropped { try? FileManager.default.removeItem(at: dir) }
+        osrDragImageDir = nil
+        osrDragImageDropped = false
         withSurface(surfaceForView(view)) {
             guard let session = appSession else { return }
             _ = maru_macos_app_session_osr_drag_reset(session)

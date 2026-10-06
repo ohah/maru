@@ -2077,13 +2077,14 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   allowlist 이고 낡으면 실패한다. `pumpScreenInternal` 의 `frame_malformed` 네 자리가 모두 단계·오류 이름을 남기는지도 잰다.
   수정 전 코드에서 wiring 모두 red. 실제 재접속으로 얼린 창을 재현하는 E2E 는 없다.
   **재접속 닫기 미룸**(`test-term-close-deferral`, check-boundaries — PR 에서 돈다): std-only leaf `term_close_deferral.zig`
-  의 표 테스트 4개가 「진행 중인 job 이 행으로 붙든 runtime 만 붙든 것」(retained-terminal 은 아님), 붙든 runtime 은 닫기를
+  의 표 테스트가 「진행 중인 job 이 행으로 붙든 runtime 만 붙든 것」(retained-terminal 은 아님), 붙든 runtime 은 닫기를
   보내지 않고 미룸, 첫 시도의 「아직」만 불변식 위반이고 재시도의 「아직」은 다음 tick, 닫기→제거→해제 순서를 잰다. wiring
   경계 4개는 문장 전체가 아니라 **자리와 순서**를 잰다: `destroyTerm` 의 판정·backend 맡김이 `closeAndDetach`·`remove` 앞이고
   예전 두 panic 이 첫 시도 판정 뒤에만 있는지, `closeTermAt` 의 닫기 조건에 붙듦 판정이 있는지, Session teardown(창의 마지막 탭
-  ⌘W 경로) pass 1 이 붙든 runtime 을 닫기 전에 건너뛰고 pass 2 가 빼는 대신 맡기는지, tick·teardown 첫머리가 맡은 닫기를 다시
-  묻고 reap 이 「아직」인 종료를 들고 다시 finish 하는지, backend 세 입구가 맵·close 소유권보다 먼저 붙듦을 묻고 맡은 닫기가
-  붙듦 → 닫기 → 제거 → 목록에서 빼기 순서인지. 수정 전 코드에서 wiring 4개 모두 red. 실제 재접속 중 ⌘W 를 재현하는 값
+  ⌘W 경로) pass 1 이 붙든 runtime 을 닫기 전에 건너뛰고 pass 2 가 빼는 대신 맡기는지, 재접속 tick·teardown 첫머리가 맡은 닫기를 다시
+  묻는지(재접속 tick 은 창이 0 개여도 돌고 coordinator 준비 검사보다 앞에서 묻는다), reap 이 「아직」인 종료를 들고 다시
+  finish 하는지, backend 세 입구가 맵·close 소유권보다 먼저 붙듦을 묻고 맡은 닫기가 앱 quit shutdown 판정 → 붙듦 → 닫기 →
+  제거 → 목록에서 빼기 순서인지. leaf 표는 5개(앱 quit shutdown 이 시작되면 목록이 멈춤 포함). 수정 전 코드에서 wiring 4개 모두 red. 실제 재접속 중 ⌘W 를 재현하는 값
   테스트는 없다 — job 픽스처가 실제 daemon host 를 띄운다(`runActualReconnectCoordinatorFixture`).
   **RemoteRuntime 테스트 fixture 초기화**(`test-remote-runtime-fixture-init`, check-boundaries — PR 에서 돈다): 제품
   constructor(`spawnWithConnection`·`attachExistingWithConnection`)의 in-place 초기화 블록이 대입하는 값 칸 집합을 fixture

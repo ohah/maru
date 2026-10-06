@@ -196,26 +196,23 @@ test "재접속 닫기 미룸: Session teardown 은 붙든 runtime 을 닫지도
     try expectOrder(pass1_panic, pass2_cond, "AppSession.deinit pass 2", "맡김 판정이 pass 2 가 아닌 자리에 있다");
 }
 
-test "재접속 닫기 미룸: tick 이 맡긴 닫기를 다시 묻고, 끝을 한 번만 보는 drain 은 「아직」인 종료를 들고 다시 finish 한다" {
+test "재접속 닫기 미룸: 창이 0 개여도 도는 재접속 tick 이 맡긴 닫기를 다시 묻고, drain 은 「아직」인 종료를 들고 다시 finish 한다" {
     const a = std.testing.allocator;
     const raw = try read(a, app_session_path);
     defer a.free(raw);
     const app = try normalize(a, raw);
     defer a.free(app);
 
-    // tick 과 teardown 두 자리뿐이다.
-    const n = countAll(app, "term_ops.advanceReconnectDeferredCloses()");
-    if (n != 2) {
-        std.debug.print("advanceReconnectDeferredCloses 호출이 {d} 곳 — tick 과 Session teardown 두 곳이어야 한다\n", .{n});
-        return error.WiringChanged;
-    }
-    const tick_at = std.mem.indexOf(u8, app, "term_ops.advanceReconnectDeferredCloses();").?;
-    const window_at = try findOnce(app, "workspace_ops.advancePendingWindowClose(self);", "AppSession tick");
-    // tick 쪽 호출이 창 닫기 진행과 같은 tick 함수 안이다(바로 앞, 사이에 함수 경계가 없다).
-    if (tick_at >= window_at or std.mem.indexOf(u8, app[tick_at..window_at], " fn ") != null) {
-        std.debug.print("AppSession tick: 맡긴 닫기를 창 닫기 진행과 같은 tick 에서 묻지 않는다\n", .{});
-        return error.WiringChanged;
-    }
+    // 앱 전역 재접속 tick(Swift tickAppSession 이 창 유무 guard **앞**에서 매 frame 부른다): backend 가 있으면 coordinator
+    // 준비 여부와 무관하게 묻는다 — 판정이 coordinator 준비 검사보다 앞이다.
+    const tick = try bodyAfter(app, "pub fn tickReconnectProductCoordinator()");
+    const backend_at = try find(tick, "const backend =", "tickReconnectProductCoordinator");
+    const advance_at = try findOnce(tick, "backend.advanceReconnectDeferredCloses()", "tickReconnectProductCoordinator");
+    const ready_at = try find(tick, "app_reconnect_product_coordinator.ready", "tickReconnectProductCoordinator");
+    try expectOrder(backend_at, advance_at, "tickReconnectProductCoordinator", "backend 를 얻기 전에 묻는다");
+    try expectOrder(advance_at, ready_at, "tickReconnectProductCoordinator", "coordinator 가 준비되지 않으면 맡긴 닫기가 멈춘다");
+    // 창 tick 은 묻지 않는다(창이 0 개면 멈춘다) — AppSession 쪽 호출은 Session teardown 한 곳뿐이다.
+    _ = try findOnce(app, "term_ops.advanceReconnectDeferredCloses()", "AppSession");
 
     // 끝 보고는 한 번뿐이다 — 「아직」이면 Term 에 들고, 다음 tick 의 판정이 그것을 다시 쓴다.
     const reap = try findOnce(app, "finishAfterTermination(term.rt.handle) == .event_pending", "AppSession reap");
@@ -256,9 +253,12 @@ test "재접속 닫기 미룸: backend 는 붙든 행을 닫지도 빼지도 않
         "host_failure_complete 가 retained_terminal 로 접히지 않는다",
     );
 
-    // 맡은 닫기: 붙듦을 먼저 묻고, 닫기 → 제거가 끝난 handle 만 뺀다.
+    // 맡은 닫기: 앱 quit 의 shutdown 이 시작되면 멈춘다(quit 이 그 runtime 의 ordinal 을 소유한다). 그다음 붙듦을 먼저 묻고,
+    // 닫기 → 제거가 끝난 handle 만 뺀다.
     const advance = try bodyAfter(src, "pub fn advanceReconnectDeferredCloses(");
+    const quit_at = try findOnce(advance, "term_close_deferral.queueMayAdvance(self.app_quit_shutdown_deadline_ns != 0)", "advanceReconnectDeferredCloses");
     const admit_at = try findOnce(advance, "term_close_deferral.admit(self.reconnectJobHoldsRuntime(handle))", "advanceReconnectDeferredCloses");
+    try expectOrder(quit_at, try find(advance, "while (", "advanceReconnectDeferredCloses"), "advanceReconnectDeferredCloses", "앱 quit 판정이 목록 순회 안에 있다");
     const close_at = try findOnce(advance, "self.requestRuntimeClose(handle,", "advanceReconnectDeferredCloses");
     const remove_at = try findOnce(advance, "remove(self, handle)", "advanceReconnectDeferredCloses");
     try expectOrder(admit_at, close_at, "advanceReconnectDeferredCloses", "job 이 붙든 채 닫는다");

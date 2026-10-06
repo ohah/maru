@@ -20689,8 +20689,6 @@ pub const AppSession = struct {
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
-        // 재접속 job 이 붙들어 backend 에 맡긴 runtime 닫기를 마저 한다(`term_close_deferral`). backend 는 앱 전역이다.
-        term_ops.advanceReconnectDeferredCloses();
         workspace_ops.advancePendingWindowClose(self);
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
@@ -23933,8 +23931,10 @@ pub const AppSession = struct {
     pub fn deinit(self: *AppSession) void {
         // backend 에 맡긴 미룬 닫기를 **다른 무엇을 풀기 전에** 한 번 더 묻는다. 앱 quit 은 Session teardown 전에 재접속
         // job 을 취소하므로(`maru_macos_reconnect_product_shutdown`) 첫 창의 teardown 이 아래 앱 quit 의 routing
-        // tombstone·연결 terminalize **앞에서** 앱 전역 목록을 비운다. 남은 것은 backend 가 계속 든다(다음 tick, 또는
-        // 프로세스 끝의 backend deinit 이 terminate·회수한다).
+        // tombstone·연결 terminalize **앞에서** 앱 전역 목록을 닫는다. 그때도 정산이 「아직」인 runtime 은 그대로 남는다 —
+        // quit shutdown 이 시작되면 목록은 멈추고(`queueMayAdvance`), 남은 runtime 이 있으면 backend 의 process
+        // settlement 가 성립하지 않아 backend deinit 도 돌지 않는다. 그 셸은 host 에 남아 다음 실행의 Recovered
+        // Sessions 로 보인다(docs/persistent-session-host.md).
         term_ops.advanceReconnectDeferredCloses();
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);
@@ -24658,6 +24658,9 @@ pub fn tickReconnectProductCoordinator() ReconnectProductTurnOutcome {
         return .inactive;
     };
     defer backend.maintenanceEventTick();
+    // 재접속 job 이 붙들어 backend 에 맡긴 runtime 닫기를 마저 한다(`term_close_deferral`). 이 tick 은 창이 0 개여도
+    // (Dock 에 남은 앱) 매 frame 돌고, coordinator 가 이번 turn 에 job 을 끝냈으면 같은 frame 에 닫는다(defer).
+    defer backend.advanceReconnectDeferredCloses();
     if (!app_reconnect_product_coordinator.ready) {
         noteReconnectTickState(.coordinator_not_ready);
         return .inactive;

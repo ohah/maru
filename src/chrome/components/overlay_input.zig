@@ -9,15 +9,24 @@ const std = @import("std");
 const draw = @import("../draw.zig");
 const props = @import("../props.zig");
 const width = @import("../../width.zig"); // Unicode 셀 폭(EAW) — 한글/CJK=2칸.
+// 손상 UTF-8 해석의 단일 출처 — 깨진 바이트 하나 = U+FFFD 한 칸. 도크 rich 경로(`chrome_draw_lowering`)와
+// 오버레이 셀 경로(`metal_lowering.placeText`)가 같은 디코더를 써야 폭 셈과 그림이 갈리지 않는다.
+const text_layout = @import("../text_layout.zig");
 
 /// UTF-8 바이트열의 **표시 폭**(셀 칸 수) = Σ max(1, cellWidth(cp)). 한글/CJK는 2칸, 결합 문자는 1칸으로 친다
 /// (placeText·coretext_frame_builder의 `@max(1, cellWidth)`와 같은 규약). 코드포인트 수가 아니다 — 한글을 1칸으로
 /// 세면 caret/우측정렬이 글자 중간에 박혀 잘려 보인다(회귀의 루트커즈). caret 위치·바인딩 우측정렬에 쓴다.
 pub fn displayCols(bytes: []const u8) u32 {
-    const utf8 = std.unicode.Utf8View.init(bytes) catch return @intCast(bytes.len); // 손상 UTF-8은 바이트 수로 폴백
-    var it = utf8.iterator();
+    // **손상 바이트는 하나당 한 칸이다**(U+FFFD — `text_layout.decodeCodepoint`). 예전에는 문자열 하나에 깨진
+    // 바이트가 하나라도 있으면 **전체를 바이트 수로** 셌다 — 「한\xff」가 4칸이 되어, 그것을 「�」 섞어 그리는
+    // 도크와 폭이 갈렸고, 오버레이는 그 run 을 아예 안 그렸다(`placeText`).
     var cols: u32 = 0;
-    while (it.nextCodepoint()) |cp| cols += @max(1, width.cellWidth(cp));
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const d = text_layout.decodeCodepoint(bytes, i);
+        cols += @max(1, width.cellWidth(d.cp));
+        i += d.advance;
+    }
     return cols;
 }
 
@@ -28,15 +37,15 @@ pub fn truncateToCols(arena: std.mem.Allocator, bytes: []const u8, max_cols: u32
     if (displayCols(bytes) <= max_cols) return bytes;
     if (max_cols == 0) return "";
     const budget = max_cols - 1; // "…" 1칸 자리를 남긴다
-    const utf8 = std.unicode.Utf8View.init(bytes) catch return bytes; // 손상 UTF-8은 자르지 않음(원본)
-    var it = utf8.iterator();
+    // 손상 UTF-8 도 같은 디코더로 자른다 — 예전에는 원본을 그대로 돌려줘 폭 상한을 넘겼다.
     var cols: u32 = 0;
     var end: usize = 0;
-    while (it.nextCodepoint()) |cp| {
-        const w = @max(1, width.cellWidth(cp));
+    while (end < bytes.len) {
+        const d = text_layout.decodeCodepoint(bytes, end);
+        const w = @max(1, width.cellWidth(d.cp));
         if (cols + w > budget) break;
         cols += w;
-        end = it.i; // 이 코드포인트 끝(다음 시작) — 포함 경계
+        end += d.advance; // 이 글자 끝(다음 시작) — 포함 경계
     }
     return std.fmt.allocPrint(arena, "{s}…", .{bytes[0..end]});
 }
@@ -44,8 +53,8 @@ pub fn truncateToCols(arena: std.mem.Allocator, bytes: []const u8, max_cols: u32
 /// `bytes` 가 표시 폭 `max_cols` 칸을 넘으면 **앞과 끝을 남기고 가운데를 `…` 로** 줄여 `buf` 에 쓴다(할당 없음).
 /// 안 넘치면 원본을 그대로 돌려준다(복사 없음). URL·경로처럼 앞(호스트)과 끝(파일·질의)이 둘 다 뜻을 갖는 값을 문장
 /// 안에 넣을 때 쓴다 — 문장 끝에서 자르면 그 뒤의 말(확인 대화상자의 질문)이 함께 사라진다. 앞에 예산의 2/3 를 준다.
-/// 코드포인트 경계로만 자르고(UTF-8 이 깨지지 않는다) 결과 표시 폭은 `max_cols` 이하다. 손상 UTF-8 이거나 `buf` 가
-/// 모자라면 끝을 잘라 `…` 로 마친다(`truncateToCols` 와 같은 모양).
+/// 코드포인트 경계로만 자르고(정상 UTF-8 이 깨지지 않는다) 결과 표시 폭은 `max_cols` 이하다. 손상 바이트는 `displayCols`
+/// 와 같이 하나당 한 칸으로 센다. `buf` 가 모자라면 끝을 잘라 `…` 로 마친다(`truncateToCols` 와 같은 모양).
 pub fn elideMiddle(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
     const total = displayCols(bytes);
     if (total <= max_cols) return bytes;
@@ -55,30 +64,31 @@ pub fn elideMiddle(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
     const budget = max_cols - ellipsis_cols;
     const head_cols = budget * 2 / 3;
     const tail_cols = budget - head_cols;
-    // **손상 UTF-8 도 폭을 지킨다**(적대적 ADV2). `displayCols` 는 손상 바이트열을 **바이트 수**로 센다 — 앞을
-    // 남긴 결과도 손상이면 그 규칙으로 세이므로, 앞은 `max_cols - "…".len` 바이트까지만 남긴다. 예전에는
-    // 원문 전체 뒤에 「…」를 붙여 폭이 하나도 안 줄었다(퍼징 18,663 건 중 16,095 건 초과).
-    const utf8 = std.unicode.Utf8View.init(bytes) catch return copyHeadWithEllipsis(buf, bytes, max_cols -| ellipsis.len);
+    // 손상 UTF-8 도 같은 디코더로 센다(깨진 바이트 하나 = 한 칸). 그래서 앞·끝을 자르는 경계가 정상 입력과
+    // 같은 규칙이고, 결과 폭도 같은 셈법으로 상한 안이다(예전 손상 입력 특례 — ADV2 — 는 필요 없어졌다).
+    //
     // 앞: head_cols 칸까지.
-    var it = utf8.iterator();
     var cols: u32 = 0;
     var head_end: usize = 0;
-    while (it.nextCodepoint()) |cp| {
-        const w = @max(1, width.cellWidth(cp));
+    while (head_end < bytes.len) {
+        const d = text_layout.decodeCodepoint(bytes, head_end);
+        const w = @max(1, width.cellWidth(d.cp));
         if (cols + w > head_cols) break;
         cols += w;
-        head_end = it.i;
+        head_end += d.advance;
     }
-    // 끝: 남은 폭이 tail_cols 칸 이하가 되는 첫 코드포인트부터.
+    // 끝: 남은 폭이 tail_cols 칸 이하가 되는 첫 글자부터.
     var tail_start: usize = bytes.len;
     var consumed: u32 = 0;
-    var it2 = utf8.iterator();
-    while (it2.nextCodepoint()) |cp| {
+    var k: usize = 0;
+    while (k < bytes.len) {
         if (total - consumed <= tail_cols) {
-            tail_start = it2.i - (std.unicode.utf8CodepointSequenceLength(cp) catch 1);
+            tail_start = k;
             break;
         }
-        consumed += @max(1, width.cellWidth(cp));
+        const d = text_layout.decodeCodepoint(bytes, k);
+        consumed += @max(1, width.cellWidth(d.cp));
+        k += d.advance;
     }
     if (tail_start < head_end) tail_start = head_end;
     const tail = bytes[tail_start..];
@@ -164,15 +174,14 @@ test "truncateToCols: EAW 폭 기준 자르기 + 말줄임" {
 /// 단일 줄 편집 입력(find·palette·사이드바 검색)이 caret(문자열 끝)를 따라 가로 스크롤하게 하는 tail 창의 단일 출처.
 pub fn tailWindow(bytes: []const u8, max_cols: u32) struct { text: []const u8, truncated: bool } {
     if (displayCols(bytes) <= max_cols) return .{ .text = bytes, .truncated = false };
-    const utf8 = std.unicode.Utf8View.init(bytes) catch return .{ .text = bytes, .truncated = false }; // 손상 UTF-8은 안 자름(원본)
-    // 앞에서부터 코드포인트를 버려 남은 뒤쪽 표시폭이 max_cols 이하가 되는 첫 시작 바이트를 찾는다(displayCols와 같은 셈법).
+    // 앞에서부터 글자를 버려 남은 뒤쪽 표시폭이 max_cols 이하가 되는 첫 시작 바이트를 찾는다(displayCols와 같은 셈법 —
+    // 손상 바이트도 같은 디코더로 하나당 한 칸이다. 예전에는 손상 입력을 안 잘라 폭 상한을 넘겼다).
     var remaining = displayCols(bytes);
-    var it = utf8.iterator();
     var start: usize = 0;
-    while (remaining > max_cols) {
-        const cp = it.nextCodepoint() orelse break;
-        remaining -= @max(1, width.cellWidth(cp));
-        start = it.i; // 이 코드포인트 끝(= 다음 시작) — 여기부터가 보이는 tail
+    while (remaining > max_cols and start < bytes.len) {
+        const d = text_layout.decodeCodepoint(bytes, start);
+        remaining -= @max(1, width.cellWidth(d.cp));
+        start += d.advance; // 이 글자 끝(= 다음 시작) — 여기부터가 보이는 tail
     }
     return .{ .text = bytes[start..], .truncated = true };
 }
@@ -667,4 +676,51 @@ test "elideMiddle: 손상 UTF-8 이어도 결과 폭이 상한을 넘지 않는�
         if (std.unicode.utf8ValidateSlice(bytes)) try std.testing.expect(std.unicode.utf8ValidateSlice(o)) else invalid_seen += 1;
     }
     try std.testing.expect(invalid_seen > 1000); // 손상 경로를 실제로 탔다
+}
+
+test "손상 바이트는 하나당 한 칸이고, 자르기 셋이 같은 셈법으로 폭 상한을 지킨다" {
+    // 예전에는 깨진 바이트가 하나라도 있으면 **전체를 바이트 수로** 셌고(「한\xff」= 4칸), 자르기 셋은 손상 입력을
+    // **안 잘랐다** — 오버레이 셀 경로는 그 run 을 아예 안 그렸다. 지금은 도크와 같은 디코더(U+FFFD 한 칸)다.
+    try std.testing.expectEqual(@as(u32, 3), displayCols("한\xff"));
+    try std.testing.expectEqual(@as(u32, 5), displayCols("ab\xffcd"));
+    try std.testing.expectEqual(@as(u32, 2), displayCols("\xe2\x80")); // 끊긴 시퀀스 = 바이트마다 한 칸
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(7);
+    const r = prng.random();
+    const pieces = [_][]const u8{ "a", "한", "🙂", "e\u{301}", "…", "\xff", "\xc3", "\xe2\x80", "\x80", "ｗ", " " };
+    var invalid_seen: usize = 0;
+    var cut: usize = 0;
+    for (0..3000) |_| {
+        _ = arena_state.reset(.retain_capacity);
+        var src: [300]u8 = undefined;
+        var n: usize = 0;
+        for (0..r.intRangeAtMost(usize, 0, 50)) |_| {
+            const pc = pieces[r.intRangeLessThan(usize, 0, pieces.len)];
+            if (n + pc.len > src.len) break;
+            @memcpy(src[n..][0..pc.len], pc);
+            n += pc.len;
+        }
+        const bytes = src[0..n];
+        const max: u32 = r.intRangeAtMost(u32, 1, 40);
+        const valid = std.unicode.utf8ValidateSlice(bytes);
+        if (!valid) invalid_seen += 1;
+        if (displayCols(bytes) > max) cut += 1;
+
+        const head = try truncateToCols(arena_state.allocator(), bytes, max);
+        try std.testing.expect(displayCols(head) <= max);
+        const tail = tailWindow(bytes, max).text;
+        try std.testing.expect(displayCols(tail) <= max);
+        var buf: [303]u8 = undefined;
+        const mid = elideMiddle(buf[0 .. n + 3], bytes, max);
+        try std.testing.expect(displayCols(mid) <= max);
+        if (valid) {
+            try std.testing.expect(std.unicode.utf8ValidateSlice(head));
+            try std.testing.expect(std.unicode.utf8ValidateSlice(tail));
+            try std.testing.expect(std.unicode.utf8ValidateSlice(mid));
+        }
+    }
+    // 두 경로를 실제로 탔는지 센다 — 0 이면 이 판정자는 아무것도 지키지 않는다.
+    try std.testing.expect(invalid_seen > 1000 and cut > 1000);
 }

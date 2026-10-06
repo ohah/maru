@@ -332,6 +332,8 @@ Windows PID를 이 신뢰 도메인에 넣는 것은 **세션 호스트 이식�
 
 알고리즘("앞을 버려 뒤를 폭 안에")은 같아도 세는 단위가 달라 그대로는 한 함수가 못 된다. 폭 모드를 인자로 받는 dual-mode 함수는 **중립 모듈 안에 dual-path를 다시 들이는 것**이라 채택하지 않는다(§3.1a가 dual-path보다 균일 모델을 택한 근거와 같다).
 
+**손상 바이트의 해석은 이미 하나다**(2026-10-06). 단위는 갈려도, 깨진 UTF-8 바이트 하나를 **U+FFFD 한 칸**으로 읽는 규칙은 양쪽이 같은 디코더(`text_layout.decodeCodepoint`)를 쓴다 — `overlay_input` 의 `displayCols`·`truncateToCols`·`tailWindow`·`elideMiddle` 과 오버레이 raster 의 `metal_lowering.placeText` 가 그것으로 센다. 그 전에는 오버레이 쪽이 셋으로 갈려 있었다: 폭은 문자열 **전체를 바이트 수로** 세고, 자르기는 손상 입력을 **안 잘랐고**, `placeText` 는 그 run 을 **통째로 버리고 열도 안 밀었다**. 그래서 OSC 0/2 제목(바이트 그대로 저장된다)에 깨진 바이트가 하나라도 있으면 도크에서는 「�」가 섞여 보이는 같은 문자열이 메뉴·모달에서는 사라지고, 같은 줄의 뒤 run 이 그 자리로 당겨졌다.
+
 **벽 ② 오버레이 raster 그리드가 cluster를 표현하지 못한다.** `tailWindow`의 소비처(find·palette·사이드바 검색)는 `app_session.placeText`가 그리는데, 그 그리드는 `cp: []u21` — **셀당 코드포인트 하나**다. `DrawCell.grapheme_offset/count` + `DrawList.grapheme_pool` 같은 자리가 없어 cluster를 담을 수 없다. 지금 어긋나 보이지 않는 이유는 레이아웃과 렌더가 **같은 방식으로 틀려** 일관되기 때문이다.
 
 **따라서 순서는 이렇다.**

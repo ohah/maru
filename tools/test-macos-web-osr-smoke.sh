@@ -986,6 +986,47 @@ check(len(first) == 1 and len(before) == 2 and after == first,
 sys.exit(0 if ok else 1)
 PY
 
+# ── W6l①: 링크를 탭 막대·주소 띠에 놓기 ───────────────────────────────────────────────────────────────────────
+# 링크를 주소 띠에 놓으면 그 탭이, 웹 pane 의 빈 탭 막대에 놓으면 새 웹 탭이, 웹 탭 머리에 놓으면 그 탭이 그 주소를 부른다(Chrome 처럼 —
+# 사용자 결정 2026-10-06). 허용하지 않는 주소(`javascript:`)는 거절된다. 자리는 Zig 의 hit-test 로 찾는다(대본 `droplink`).
+printf 'ui.language = ko\n' > "$root/linkdrop.conf"
+cat > "$root/linkdrop.txt" <<SCRIPT
+sleep 7000
+droplink band http://127.0.0.1:$port/ld-band
+sleep 2000
+droplink emptybar http://127.0.0.1:$port/ld-new
+sleep 2500
+droplink webtab http://127.0.0.1:$port/ld-tab
+sleep 2000
+droplink band javascript:alert(1)
+sleep 800
+SCRIPT
+: > "$root/requests.log"
+run_app /osr-smoke 18000 "$root/linkdrop.summary" MARU_WEB_OSR_TEST_INPUT="$root/linkdrop.txt" MARU_CONFIG="$root/linkdrop.conf"
+grep -ao 'osr-test droplink [a-z]* [^ ]* ok=[a-z]*\|osr-test droplink none [a-z]*' "$root/app-osr-smoke.log" > "$root/linkdrop.report" || true
+cat "$root/linkdrop.report"
+python3 - "$root/linkdrop.report" "$root/requests.log" <<'PY' || fail "dropping a link on the tab bar or address bar did not open it as expected"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+def dropped(zone): return [l for l in report if l.startswith(f'osr-test droplink {zone} ')]
+order = [r for r in requests if r in ('/ld-band', '/ld-new', '/ld-tab')]
+check(dropped('band')[:1] and dropped('band')[0].endswith('ok=true') and '/ld-band' in requests,
+      f'a link dropped on the address band loads in that tab ({dropped("band")[:1]} · {order})')
+check(dropped('emptybar')[:1] and dropped('emptybar')[0].endswith('ok=true') and '/ld-new' in requests,
+      f'a link dropped on empty tab bar space of a web pane opens a new web tab ({dropped("emptybar")} · {order})')
+check(dropped('webtab')[:1] and dropped('webtab')[0].endswith('ok=true') and '/ld-tab' in requests and order == ['/ld-band', '/ld-new', '/ld-tab'],
+      f'a link dropped on a web tab header loads in that tab ({dropped("webtab")} · {order})')
+check(len(dropped('band')) == 2 and dropped('band')[1].endswith('ok=false') and not any('alert' in r for r in requests),
+      f'a javascript: link is refused ({dropped("band")})')
+sys.exit(0 if ok else 1)
+PY
+
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
 # 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그
 # sheet 를 취소로 닫는다(사용자 결정 2026-10-06). alert 를 띄운 채 시험 시간이 끝나도 앱이 제때 끝나야 한다 — 끝나지 않으면 감시가

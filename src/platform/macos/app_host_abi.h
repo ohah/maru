@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 210u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 211u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1013,6 +1013,17 @@ int32_t maru_macos_app_session_route_drop(
     double x_px,
     double y_px
 );
+/* v211(W6l①): 링크(파일 아님)를 놓았다 — 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠면 그 탭에서 열거나 새 웹 탭으로 연다(http·https).
+   route_drop 과 같은 3-상태: 1 열었다 · 0 해당 없음(호스트는 기존 경로로) · -1 거부(삽입 금지). */
+int32_t maru_macos_app_session_drop_url(
+    MaruAppHostSession *session,
+    double x_px,
+    double y_px,
+    const uint8_t *url,
+    size_t url_len
+);
+/* 시험 전용(v211, W6l① 스모크): 활성 pane 의 웹 탭 머리·빈 탭 막대·주소 띠 한 점(backing px, 없으면 -1) — x,y 셋. */
+int32_t maru_macos_app_session_test_url_drop_points(MaruAppHostSession *session, double out[6]);
 /* 드래그앤드롭한 파일 경로들(NUL 구분). maru ssh 원격이면 control socket으로 업로드 후 원격 절대경로를
    paste하고, 로컬이면 경로를 셸 이스케이프해 paste한다(분기는 Zig). Swift는 fileURL 드롭일 때만 부른다
    (웹 URL·텍스트는 paste_text 유지). (v68) */

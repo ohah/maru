@@ -1004,9 +1004,12 @@ alert_exit() { # $1=이름 $2=경로
         echo "FAIL the app with a page alert open did not exit ($1 — still running ${waited} s after start, smoke 12 s)"
         return 1
     fi
+    # 끝난 것이 죽은 것이 아니어야 한다(종료 코드 0 — 적대 검증).
+    alert_rc=0; wait "$alert_pid" || alert_rc=$?
     shown=$(grep -ao 'osr-test sheet alert' "$root/app-alert-$1.log" | head -1)
     if [ -z "$shown" ]; then echo "FAIL no alert sheet was open when the smoke time ended ($1)"; return 1; fi
-    echo "PASS the app with a page alert open exits when asked to quit ($1 — ${waited} s, the sheet was shown)"
+    if [ "$alert_rc" != 0 ]; then echo "FAIL the app with a page alert open ended with status $alert_rc ($1)"; return 1; fi
+    echo "PASS the app with a page alert open exits cleanly when asked to quit ($1 — ${waited} s, the sheet was shown)"
 }
 alert_exit once /alert-app || fail "the app did not exit with a page alert open"
 alert_exit loop /alert-app?loop || fail "the app did not exit with a page that keeps opening alerts"

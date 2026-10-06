@@ -250,9 +250,14 @@ fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, 
         // op 색 하나로 덮였다. **캡처 하네스가 그 기능을 원리상 못 밟는 상태**였고, 그래서
         // 골든 게이트도 색 회귀를 잡을 수 없었다(2026-08-28 실측).
         const color: terminal.Color = .{ .rgb = tk.get(run.role orelse t.role) };
-        const view = std.unicode.Utf8View.init(run.text) catch continue;
-        var it = view.iterator();
-        while (it.nextCodepoint()) |codepoint| {
+        // **깨진 바이트는 하나당 U+FFFD 한 칸으로 그린다**(`text_layout.decodeCodepoint` — 도크 rich 경로와 같은
+        // 디코더). 예전에는 `Utf8View.init` 이 실패한 run 을 통째로 버리고 열도 안 밀어, 깨진 바이트가 섞인
+        // 라벨(OSC 0/2 제목은 바이트 그대로다)이 메뉴·모달에서 사라지고 같은 줄의 뒤 run 이 그 자리로 당겨졌다.
+        var bi: usize = 0;
+        while (bi < run.text.len) {
+            const d = chrome.text_layout.decodeCodepoint(run.text, bi);
+            bi += d.advance;
+            const codepoint = d.cp;
             // wide 문자는 한 DrawCell의 width=2로 남기고 continuation cell은 emit하지 않는다. 그렇지 않으면
             // continuation의 배경 quad가 CoreText glyph의 오른쪽 절반을 덮어 한글/CJK가 잘린다.
             const width: u2 = if (t.wide_icons and renderer.icon_glyph.isRegisteredIcon(codepoint))
@@ -506,4 +511,66 @@ test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 
     try std.testing.expect(seen_bottom >= 12 * 32 * 3); // 아래 경계 카드는 늘 무언가 보인다
     // 화면마다 카드 사이 선이 여러 개 실제로 있었다(빈 집합이면 위 집합 비교는 공짜다).
     try std.testing.expect(dividers_checked >= 12 * 32 * 2 * 3 * 5);
+}
+
+test "오버레이 셀 경로: 깨진 UTF-8 은 건너뛰지 않고 U+FFFD 로 그리며, 뒤 run 의 열을 밀지 않는다" {
+    // 이 경로는 `Utf8View.init` 이 실패한 run 을 **통째로 버렸고 열도 안 밀었다** — 깨진 바이트가 하나라도
+    // 섞인 라벨(OSC 0/2 제목은 바이트 그대로 저장된다)이 메뉴·모달에서 **사라지고**, 같은 줄의 뒤 run 이
+    // 그 자리로 당겨졌다. 도크 rich 경로(`text_layout.decodeCodepoint`)는 같은 문자열을 「�」 섞어 그린다 —
+    // 두 경로가 같은 규칙(깨진 바이트 하나 = U+FFFD 한 칸)을 쓴다.
+    const tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 9, .g = 9, .b = 9 }) };
+    const runs = [_]chrome.draw.Run{ .{ .text = "ab\xffcd" }, .{ .text = "Z" } };
+    const ops = [_]chrome.draw.Op{
+        .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 80, .h = 16 }, .role = .surface_bg } },
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg } },
+    };
+    var raster = try lower(std.testing.allocator, &.{.{ .layer = .modal, .ops = &ops }}, &tk, 8, 16, false);
+    defer {
+        raster.cells.deinit(std.testing.allocator);
+        raster.gpu_quads.deinit(std.testing.allocator);
+        raster.gpu_shadows.deinit(std.testing.allocator);
+    }
+    var at: [10]u21 = .{0} ** 10;
+    for (raster.cells.items) |c| if (c.row == 0 and c.col < at.len) {
+        at[c.col] = c.codepoint;
+    };
+    try std.testing.expectEqualSlices(u21, &.{ 'a', 'b', 0xFFFD, 'c', 'd', 'Z' }, at[0..6]);
+}
+
+test "오버레이 셀 경로가 전진한 칸 수는 `overlay_input.displayCols` 와 같다 — 깨진 바이트가 섞여도" {
+    // 컴포넌트는 `displayCols` 로 상자·패딩·버튼 자리를 재고, 이 경로는 글자를 그 칸에 놓는다. 둘이 다른 셈법을
+    // 쓰면 깨진 라벨 하나가 같은 줄의 다음 run 을 밀거나 당긴다(예전: 셈은 바이트 수, 그림은 run 생략).
+    const tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 9, .g = 9, .b = 9 }) };
+    var prng = std.Random.DefaultPrng.init(11);
+    const r = prng.random();
+    const pieces = [_][]const u8{ "a", "한", "e\u{301}", "…", "\xff", "\xc3", "\xe2\x80", "\x80", "ｗ" };
+    var invalid_seen: usize = 0;
+    for (0..400) |_| {
+        var src: [120]u8 = undefined;
+        var n: usize = 0;
+        for (0..r.intRangeAtMost(usize, 0, 20)) |_| {
+            const pc = pieces[r.intRangeLessThan(usize, 0, pieces.len)];
+            if (n + pc.len > src.len) break;
+            @memcpy(src[n..][0..pc.len], pc);
+            n += pc.len;
+        }
+        if (!std.unicode.utf8ValidateSlice(src[0..n])) invalid_seen += 1;
+        const runs = [_]chrome.draw.Run{ .{ .text = src[0..n] }, .{ .text = "Z" } };
+        const ops = [_]chrome.draw.Op{
+            .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 8 * 64, .h = 16 }, .role = .surface_bg } },
+            .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg } },
+        };
+        var raster = try lower(std.testing.allocator, &.{.{ .layer = .modal, .ops = &ops }}, &tk, 8, 16, false);
+        defer {
+            raster.cells.deinit(std.testing.allocator);
+            raster.gpu_quads.deinit(std.testing.allocator);
+            raster.gpu_shadows.deinit(std.testing.allocator);
+        }
+        var z_col: ?u16 = null;
+        for (raster.cells.items) |c| if (c.row == 0 and c.codepoint == 'Z') {
+            z_col = c.col;
+        };
+        try std.testing.expectEqual(@as(?u16, @intCast(chrome.components.overlay_input.displayCols(src[0..n]))), z_col);
+    }
+    try std.testing.expect(invalid_seen > 200);
 }

@@ -7950,6 +7950,12 @@ pub const RemoteRuntime = struct {
         // RPC can be issued; local owner teardown must proceed without dereferencing the terminal
         // attachment or attempting to restore the old graph.
         if (self.currentAttachmentTerminal()) return;
+        // 재접속이 얼린 동안(은퇴 준비) 탭 닫기·runtime deinit 이 오면 아래 RPC 가 payload 를 읽다 abort 한다.
+        // 얼린 attachment 로는 terminate 를 보낼 권위가 없다 — 보내지 않는다(host 의 shell 은 인벤토리에 남는다).
+        if (self.freezeAction(.terminate) != .proceed) {
+            logFrozenSkip("terminate");
+            return;
+        }
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"runtime_id\":\"{s}\"}}", .{self.runtime_id_hex}) catch return;
         // terminate는 runtime 자체를 파괴하므로 input/control blocking flush OOM에서 retained mutation을 의미상 대체하는
@@ -7989,12 +7995,22 @@ pub const RemoteRuntime = struct {
         );
     }
 
+    /// 재접속이 attachment 를 얼린 동안 들어온 detach·terminate 를 **보내지 않았다**는 한 줄. 연결 수명 문제가
+    /// 아니므로 `logDetachIncomplete` 와 섞지 않는다 — controller lease 는 옛 연결이 닫힐 때 host 가 EOF 로 회수한다.
+    fn logFrozenSkip(op: []const u8) void {
+        if (builtin.is_test) return;
+        std.log.warn(
+            "remote runtime {s} skipped: attachment frozen by reconnect (host reclaims the controller lease on connection EOF)",
+            .{op},
+        );
+    }
+
     fn detachBestEffort(self: *RemoteRuntime) void {
         if (self.currentAttachmentTerminal()) return;
-        // 재접속이 얼린 동안(은퇴 준비·정리 중) 탭을 닫으면 아래 `streamId()` 가 payload 를 읽다 abort 한다.
-        // 그 창에는 보낼 연결이 없다 — 옛 연결은 재접속이 닫을 때 EOF 로 controller lease 를 회수한다.
+        // 재접속이 얼린 동안(은퇴 준비) client 쪽 회수가 오면 아래 `streamId()` 가 payload 를 읽다 abort 한다.
+        // 그 창에는 보낼 연결이 없다 — 옛 연결은 재접속이 닫을 때 host 가 EOF 로 controller lease 를 회수한다.
         if (self.freezeAction(.detach) != .proceed) {
-            logDetachIncomplete("attachment_not_live", error.AdminBusy);
+            logFrozenSkip("detach");
             return;
         }
         if (self.currentGeneration().attachment.streamId() == 0) return;

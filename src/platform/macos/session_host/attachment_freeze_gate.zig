@@ -27,8 +27,10 @@ pub const Op = enum {
     pump,
     /// 관측·선택·링크·검색·resync 같은 비변경 RPC. 첫 줄에서 `streamId()` 로 payload 를 읽는다.
     read_rpc,
-    /// 탭 닫기의 best-effort detach. 연결이 교체되는 중이라 보낼 곳이 없다.
+    /// client 쪽만 회수하는 best-effort detach. 연결이 교체되는 중이라 보낼 곳이 없다.
     detach,
+    /// runtime 파괴 RPC(`terminate` — 탭 닫기의 close 경로, runtime deinit). 얼린 attachment 로는 보낼 권위가 없다.
+    terminate,
 };
 
 pub const Action = enum {
@@ -40,7 +42,8 @@ pub const Action = enum {
     /// 지금은 받을 수 없다 — `error.AdminBusy`. `admitRuntimeOperation` 이 원래 내던 거절과 같은 이름이라 호출부가
     /// 이미 처리한다(관측 probe 는 다음 주기에 다시 묻는다).
     busy,
-    /// 아무것도 보내지 않고 돌아간다. 옛 연결의 controller lease 는 재접속이 연결을 닫을 때 EOF 로 회수된다.
+    /// 아무것도 보내지 않고 돌아간다. 옛 연결의 controller lease 는 재접속이 연결을 닫을 때 host 가 EOF 로
+    /// 회수한다. terminate 를 건너뛴 runtime 은 host 에 남는다(인벤토리로 다시 보인다) — abort 보다 낫다.
     skip,
 };
 
@@ -49,7 +52,7 @@ pub fn decide(live: bool, op: Op) Action {
     return switch (op) {
         .pump => .idle,
         .read_rpc => .busy,
-        .detach => .skip,
+        .detach, .terminate => .skip,
     };
 }
 
@@ -63,9 +66,10 @@ test "재접속 얼림 관문: live 가 아니면 drain 은 세션을 끝내지 
     try std.testing.expectEqual(Action.idle, decide(false, .pump));
 }
 
-test "재접속 얼림 관문: live 가 아니면 비변경 RPC 는 바쁨으로 거절하고 detach 는 보내지 않는다" {
+test "재접속 얼림 관문: live 가 아니면 비변경 RPC 는 바쁨으로 거절하고 detach·terminate 는 보내지 않는다" {
     try std.testing.expectEqual(Action.busy, decide(false, .read_rpc));
     try std.testing.expectEqual(Action.skip, decide(false, .detach));
+    try std.testing.expectEqual(Action.skip, decide(false, .terminate));
 }
 
 test "재접속 얼림 관문: live 가 아닌데 진행하는 연산은 없다" {

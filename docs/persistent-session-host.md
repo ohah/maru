@@ -998,10 +998,18 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   앱이 죽었다. 유지보수 펌프는 live 가 아닌 runtime 을 건너뛰었지만, 그러면 프레임 요약이 없어 창 drain 이 직접 펌프했다.
   이제 관문은 하나의 판정(`attachment_freeze_gate.decide`, live 는 `GenerationAttachment.isLive` 하나)에서 나온다: drain
   (`pumpDelta`)은 `.idle` 로 이번 프레임만 쉬고 세션을 끝내지 않는다, 비변경 RPC(관측·선택·링크·검색·resync)는
-  `AdminBusy` 로 거절한다, 탭 닫기의 detach 는 보내지 않는다(옛 연결은 재접속이 닫을 때 EOF 로 lease 를 회수한다). 변경 계열은
+  `AdminBusy` 로 거절한다, client 쪽 회수의 detach 와 runtime 파괴의 terminate(탭 닫기의 close 경로·runtime deinit)는 보내지
+  않고 `remote runtime <op> skipped: attachment frozen by reconnect …` 한 줄을 남긴다 — controller lease 는 옛 연결이 닫힐 때
+  host 가 EOF 로 회수하고, terminate 를 건너뛴 shell 은 host 에 남아 인벤토리로 다시 보인다. 변경 계열은
   `mutationAllowed`(이미 `isLive` 를 본다)가 막는다. 화면 배치 해석 실패로 `frame_malformed` 를 낼 때는
   `remote screen batch malformed: stage=<decoded_cells|recovery_snapshot|snapshot|delta> err=<이름> stream=… bytes=…` 를 남긴다.
-  판정자는 `test-attachment-freeze-gate`(check-boundaries)다.
+  판정자는 `test-attachment-freeze-gate`(check-boundaries)다 — 수명 입구(`admitRuntimeOperation`·
+  `admitDestructiveRuntimeOperation`) 뒤 관문 없이 payload 에 닿는 함수를 payload 도우미·간접 사슬을 코드에서 유도해 찾는다.
+  **남은 구멍:** 재접속 job 이 진행 중(`connected` 부터 종료 요약 전까지)인 runtime 의 탭을 닫으면 close 는 끝나고 `remove` 가
+  job 이 붙든 runtime 을 맵에서 뺀다 — 다음 전이의 `runtimes.get` 이 실패해 proof loss 로 앱이 끝난다(이 수정 이전부터 있던
+  것). close 를 미루면(`.event_pending`) 되지만, 사용자 닫기(⌘W → `closeActiveTerm`/`closeActivePane`/`closeTab` →
+  `destroyTerm`)는 미룬 close 를 다시 부르지 않고 `@panic("term destruction bypassed a pending close operation")` 한다 —
+  창 닫기(`advanceWindowClose`)와 `closeTermAt` 만 미룬 close 를 받는다. 미루기는 AppSession 쪽 재시도 경로가 생긴 뒤의 일이다.
   e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,
   외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는

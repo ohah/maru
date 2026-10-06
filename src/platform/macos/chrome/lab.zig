@@ -268,6 +268,11 @@ pub const ScenarioId = enum {
     /// 「넷 다 그려지는가」와 「넘긴 줄도 가운데 정렬되고 패널 안에 드는가」를 증언한다. 포커스는 `primary`
     /// (비교)라 그 버튼만 강조 배경이다 — Lab 이 오버레이 `.fill` 을 칠하므로(#4172) 그것도 보인다.
     confirm_save_conflict,
+    /// **좁고 낮은 창의 붙여넣기 경고**(미리보기 7줄). 상자가 작업영역보다 높으면 위를 지키고 아래가 잘리는데, 잘리는
+    /// 것이 버튼 행이었다 — 그래서 미리보기부터, 그다음 메시지 줄을 줄여 버튼 행을 화면 안에 둔다. 버튼 하나가 상자보다
+    /// 넓으면 배경만 잘리고 라벨 글자는 패널 밖으로 나갔다 — 라벨은 그 버튼 칸에서 「…」로 줄인다(적대적 검증 2026-10-06).
+    /// 이 그림이 셋을 함께 증언한다: 버튼 행이 보이는가 · 라벨이 패널 안인가 · 줄인 메시지가 「…」로 끝나는가.
+    confirm_paste_narrow,
     /// **상자보다 긴 notice.** notice 는 줄을 한 줄로만 그려 상자 폭(작업영역으로 clamp)보다 길면 글자가 상자 밖으로
     /// 나가 창 가장자리에서 잘렸다 — host 연결 실패 안내는 원인 코드가 끼어 기본 창에서도 넘쳤다(2026-10-06 실제 앱
     /// 캡처, 「이번 세션의 터미」에서 끊김). 지금은 confirm 과 같은 `modal_box.wrapLine` 으로 나눈다. 문구는 제품의
@@ -449,7 +454,7 @@ pub fn buildFrame(
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
-        .confirm_long_message, .confirm_save_conflict => buildConfirmFrame(scenario, tokens, buffers),
+        .confirm_long_message, .confirm_save_conflict, .confirm_paste_narrow => buildConfirmFrame(scenario, tokens, buffers),
         .notice_long_message => buildNoticeFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
@@ -1674,7 +1679,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_save_conflict, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1840,6 +1845,11 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
             .extra = maru.i18n.t(.btn_reload),
             .cancel = maru.i18n.t(.btn_keep_editing),
         });
+    } else if (scenario.id == .confirm_paste_narrow) {
+        // 제품 붙여넣기 경고와 같은 키(`term.zig` — `showConfirmKeys(.paste, …, .{ .confirm = .btn_paste })`, 취소는 기본
+        // `common_cancel`). 미리보기는 `buildPastePreview` 가 내는 모양처럼 줄 단위다.
+        state.show(maru.i18n.t(.term_paste_confirm), .{ .confirm = maru.i18n.t(.btn_paste), .cancel = maru.i18n.t(.common_cancel) });
+        state.body = &.{ "cd ~/work/maru", "git fetch origin", "git rebase origin/main", "zig build test", "echo done", "ls -la", "exit" };
     } else {
         const message = try std.mem.replaceOwned(u8, arena, maru.i18n.t(.lsp_trust_prompt), "{s}", "/opt/homebrew/bin/rust-analyzer-nightly");
         state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });

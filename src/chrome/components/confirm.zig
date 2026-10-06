@@ -197,17 +197,19 @@ pub fn view(
     //     2026-10-05 실측). 상한을 넘으면 마지막 줄이 「…」로 끝난다.
     for (g.msg_lines[0..g.msg_rows], 0..) |line, i| {
         const last_cut = g.msg_truncated and i + 1 == g.msg_rows;
-        const shown = if (last_cut) try std.fmt.allocPrint(arena, "{s}{s}", .{ line, modal_box.ellipsis }) else line;
+        // 줄 수를 줄여 자른 마지막 줄은 폭이 꽉 찼을 수 있다 — 「…」를 붙인 뒤 안쪽 폭으로 다시 맞춘다.
+        const shown = if (last_cut) try overlay_input.truncateToCols(arena, try std.fmt.allocPrint(arena, "{s}{s}", .{ line, modal_box.ellipsis }), box.inner_cols) else line;
         try modal_box.text(box, modal_box.centerX(box, overlay_input.displayCols(shown)), @intCast(i), shown, .surface_fg, arena, out);
     }
 
     // (1.5) 본문 미리보기(있으면) — 메시지 아래 빈 줄 다음부터 좌측 정렬. 각 줄에 은은한 배경 fill(tab_hover_bg)을
     //       inner 폭만큼 깔아 인셋 패널처럼 보이게 하고, 그 위에 muted 텍스트를 놓는다(painter order: fill→text).
     //       Ghostty의 스크롤 텍스트 뷰를 셀-그리드로 근사한 것 — 붙여넣을 내용을 눈으로 확인하고 결정하게 한다.
-    for (state.body, 0..) |line, i| {
+    // 미리보기 줄도 안쪽 폭에서 끝을 줄인다 — 예전에는 그대로 그려 좁은 상자에서 글자가 패널 밖으로 나갔다(적대적 검증).
+    for (state.body[0..g.body_rows], 0..) |line, i| {
         const row = g.body_row + @as(u32, @intCast(i));
         try modal_box.fillCells(box, box.inner_x, row, box.inner_cols, .tab_hover_bg, arena, out);
-        try modal_box.text(box, box.inner_x, row, line, .muted_fg, arena, out);
+        try modal_box.text(box, box.inner_x, row, try overlay_input.truncateToCols(arena, line, box.inner_cols), .muted_fg, arena, out);
     }
 
     // (2) 버튼 행(g.btn_row — 미리보기 줄 수만큼 아래로 내려감) — **포커스된 버튼이 accent**(focus_accent + 대비색 surface_bg 라벨)로 강조되고, 나머지는 은은한 배경
@@ -217,30 +219,38 @@ pub fn view(
     const confirm_focused = state.focused == .confirm;
     if (g.confirm_fit > 0) {
         try modal_box.fillCells(box, g.confirm_x, g.confirm_row, g.confirm_fit, if (confirm_focused) .focus_accent else .tab_hover_bg, arena, out);
-        const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_confirm, state.confirm_label });
+        const t = try buttonLabel(arena, key_confirm, state.confirm_label, g.confirm_fit);
         try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), g.confirm_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
     }
     if (state.has_alternate and g.alternate_fit > 0) {
         const focused = state.focused == .alternate;
         try modal_box.fillCells(box, g.alternate_x, g.alternate_row, g.alternate_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
-        const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_alternate, state.alternate_label });
+        const t = try buttonLabel(arena, key_alternate, state.alternate_label, g.alternate_fit);
         try modal_box.text(box, g.alternate_x + @as(i32, @intCast(btn_pad * box.cw)), g.alternate_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
     if (state.has_extra and g.extra_fit > 0) {
         const focused = state.focused == .extra;
         try modal_box.fillCells(box, g.extra_x, g.extra_row, g.extra_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
-        const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_extra, state.extra_label });
+        const t = try buttonLabel(arena, key_extra, state.extra_label, g.extra_fit);
         try modal_box.text(box, g.extra_x + @as(i32, @intCast(btn_pad * box.cw)), g.extra_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
     if (g.cancel_fit > 0) {
         const focused = state.focused == .cancel;
         try modal_box.fillCells(box, g.cancel_x, g.cancel_row, g.cancel_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
-        const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_cancel, state.cancel_label });
+        const t = try buttonLabel(arena, key_cancel, state.cancel_label, g.cancel_fit);
         try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), g.cancel_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
 }
 
 const btn_pad: u32 = 1; // 버튼 라벨 좌우 패딩(배경이 라벨을 감싸 버튼처럼)
+
+/// 버튼 라벨 `[키] 라벨` — 배경이 잘린 폭(`fit` 칸)에서 좌우 패딩을 뺀 자리에 맞춰 끝을 「…」로 줄인다. 예전에는 배경만
+/// 상자 안으로 잘리고(`fitButtonCols`) 라벨은 그대로 그려 **글자가 패널 밖으로** 나갔다(적대적 검증 퍼징 5,000 회 중
+/// 1,293 건 — 좁은 창·큰 글꼴의 「[Y] 덮어쓰기」 등). 들어가면 그대로다.
+fn buttonLabel(arena: std.mem.Allocator, key: []const u8, label: []const u8, fit: u32) ![]const u8 {
+    const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key, label });
+    return overlay_input.truncateToCols(arena, t, fit -| 2 * btn_pad);
+}
 const btn_gap: u32 = 2; // 두 버튼 사이 간격(칸)
 
 /// 버튼 행 기하 — view(그리기)와 buttonAtPoint(클릭 hit-test)가 공유하는 **단일 레이아웃**(chrome 계약 §5.4의
@@ -255,6 +265,7 @@ const ButtonGeom = struct {
     extra_row: u32,
     cancel_row: u32,
     body_row: u32, // 미리보기 첫 행 — 메시지 줄 다음 빈 줄 뒤
+    body_rows: u32, // 그릴 미리보기 줄 수 — 상자가 작업영역보다 높으면 state.body 보다 적다(버튼 행이 화면 안에 남게)
     // 메시지를 상자 안쪽 폭으로 나눈 줄들(state.message 를 빌린다). msg_truncated 면 마지막 줄 끝에 「…」.
     msg_lines: [modal_box.max_wrap_rows][]const u8,
     msg_rows: u32,
@@ -293,7 +304,8 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     const width_probe = modal_box.layout(content_cols, 1, p, tk) orelse return null;
     var msg_lines: [modal_box.max_wrap_rows][]const u8 = undefined;
     const wrapped = modal_box.wrapLine(state.message, width_probe.inner_cols, &msg_lines);
-    const m: u32 = wrapped.rows;
+    var m: u32 = wrapped.rows;
+    var msg_truncated = wrapped.truncated;
     // 콘텐츠 행: 미리보기 없으면 m+2행([0..m)=메시지·m=빈줄·m+1=버튼); 있으면 [0..m)=메시지·m=빈줄·[m+1..m+1+n)=본문·
     // m+1+n=빈줄·m+2+n=버튼. m=1 이면 예전 배치(3행·4+n행) 그대로다.
     // 버튼도 안쪽 폭에 나눈다 — 순서대로(확인·대안·추가·취소) 채우고, 다음 버튼이 안 들어가면 다음 줄로 넘긴다. 예전에는
@@ -312,10 +324,30 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         row_of[i] = last_row;
     }
     const btn_rows: u32 = last_row + 1;
-    const n: u32 = @intCast(state.body.len);
+    var n: u32 = @intCast(state.body.len);
+    // **버튼 행은 화면 안에 있어야 한다**(적대적 검증 2026-10-06). 상자는 작업영역보다 높으면 위를 지키고 아래가 잘린다
+    // (`modal_box.layout` 의 y clamp) — 잘리는 것이 버튼 행이다. 메시지를 줄바꿈하게 된 뒤로 상자가 높아져, 420×240 창의
+    // 붙여넣기 경고(메시지 5줄 + 미리보기 7줄)에서 취소 버튼이 y=240 으로 화면 밖이었다. 들어가는 행 수를 넘으면 미리보기
+    // 줄부터, 그다음 메시지 줄을 줄인다(메시지는 한 줄은 남기고 마지막 줄을 「…」로 — view). 그래도 안 되면(한두 줄짜리
+    // 창) 예전처럼 둔다.
+    const fit_rows: u32 = blk: {
+        const ws = props.workspaceRect(p.metrics);
+        const ch = @max(p.metrics.cell_height_px, 1);
+        break :blk ((ws.h -| 2 * @as(u32, p.shape.modal_padding_px)) / ch) -| 2; // 위아래 여백 한 줄씩
+    };
+    const rowsFor = struct {
+        fn f(msg: u32, body: u32, btns: u32) u32 {
+            return if (body == 0) msg + 1 + btns else msg + body + 2 + btns;
+        }
+    }.f;
+    while (rowsFor(m, n, btn_rows) > fit_rows and n > 0) n -= 1;
+    while (rowsFor(m, n, btn_rows) > fit_rows and m > 1) {
+        m -= 1;
+        msg_truncated = true;
+    }
     const body_row: u32 = m + 1;
     // 콘텐츠 행: [0..m)=메시지·m=빈줄·(미리보기 n줄·빈줄)·버튼 btn_rows줄. btn_rows=1 이면 예전 배치(m+2·m+n+3) 그대로다.
-    const content_rows: u32 = if (n == 0) m + 1 + btn_rows else m + n + 2 + btn_rows;
+    const content_rows: u32 = rowsFor(m, n, btn_rows);
     const btn_row: u32 = if (n == 0) body_row else body_row + n + 1; // 본문 뒤 빈 줄 다음
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     // 줄마다 가운데. 버튼 하나가 안쪽 폭보다 넓으면(아주 좁은 창/긴 라벨) fill이 rasterize bbox를 패널 밖으로 키운다 →
@@ -342,9 +374,10 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         .extra_row = btn_row + row_of[2],
         .cancel_row = btn_row + row_of[3],
         .body_row = body_row,
+        .body_rows = n,
         .msg_lines = msg_lines,
         .msg_rows = m,
-        .msg_truncated = wrapped.truncated,
+        .msg_truncated = msg_truncated,
         .confirm_x = group_x,
         .confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right),
         .alternate_x = alternate_x,
@@ -1019,4 +1052,159 @@ test "confirm wrap: 짧은 메시지는 예전 배치 그대로고, 미리보기
     try std.testing.expectEqual(@as(u32, 2), g.msg_rows);
     try std.testing.expectEqual(@as(u32, 3), g.body_row);
     try std.testing.expectEqual(@as(u32, 7), g.btn_row);
+}
+
+fn testTokens() tokens.Tokens {
+    const Rgb = @import("../../color.zig").Rgb;
+    return tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+}
+
+test "낮은 창에서도 버튼 행은 화면 안이다 — 미리보기부터, 그다음 메시지 줄을 줄이고 마지막 줄은 「…」로 끝난다" {
+    // 실측(적대적 검증 2026-10-06): 420×240 창의 영어 붙여넣기 경고 + 미리보기 7줄이 상자 272px 이 되어, 취소 버튼이
+    // y=240(화면 밖)이었다. 메시지를 줄바꿈하게 된 뒤(#4163) 상자가 높아져 생긴 자리다.
+    const tk = testTokens();
+    const msg = "This paste contains multiple lines and may run commands as soon as it is pasted into the terminal. Paste anyway?";
+    const body = [_][]const u8{ "line1", "line2", "line3", "line4", "line5", "line6", "line7" };
+    // 공백 없는 긴 토큰은 줄을 안쪽 폭까지 **꽉** 채운다 — 줄인 마지막 줄에 「…」를 그냥 붙이면 한 칸 넘친다.
+    const full_lines = "x" ** 500;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    for ([_][]const u8{ msg, full_lines }) |message| for ([_]u32{ 120, 160, 200, 240, 272, 360 }) |h| {
+        const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 180, .backing_width_px = 420, .backing_height_px = h } };
+        var st: State = .{};
+        st.show(message, .{ .confirm = "Paste", .cancel = "Cancel" });
+        st.body = &body;
+        const g = buttonGeom(&st, p, &tk) orelse return error.TestUnexpectedResult;
+        const ws = props.workspaceRect(p.metrics);
+        const cancel_y = modal_box.rowY(g.box, g.cancel_row);
+        try std.testing.expect(cancel_y + 16 <= @as(i32, @intCast(ws.y + ws.h)));
+        // 그 자리를 실제로 누르면 취소다(그림과 클릭이 같은 배치).
+        const cx: f64 = @as(f64, @floatFromInt(g.cancel_x)) + 8;
+        try std.testing.expectEqual(@as(?Action, .cancelled), buttonAtPoint(&st, p, &tk, cx, @as(f64, @floatFromInt(cancel_y)) + 8));
+        if (h >= 360 and message.ptr == msg.ptr) try std.testing.expectEqual(@as(u32, 7), g.body_rows); // 들어가면 예전 그대로다
+        if (g.msg_truncated) {
+            // 메시지를 줄였으면 마지막 줄은 「…」로 끝나고 안쪽 폭 안이다.
+            _ = arena_state.reset(.retain_capacity);
+            var ops: std.ArrayList(draw.Op) = .empty;
+            try view(&st, p, &tk, arena_state.allocator(), &ops);
+            var last: []const u8 = "";
+            for (ops.items) |op| switch (op) {
+                .text => |t| if (t.origin.y == modal_box.rowY(g.box, g.msg_rows - 1)) {
+                    last = t.runs[0].text;
+                },
+                else => {},
+            };
+            try std.testing.expect(std.mem.endsWith(u8, last, modal_box.ellipsis));
+            try std.testing.expect(overlay_input.displayCols(last) <= g.box.inner_cols);
+        }
+    };
+}
+
+test "상자보다 넓은 버튼의 라벨은 그 버튼 칸에서 「…」로 줄어 패널 안에 든다" {
+    // 예전에는 배경만 상자 안으로 잘리고 라벨은 그대로 그려 글자가 패널 밖으로 나갔다(퍼징 5,000 회 중 1,293 건).
+    const tk = testTokens();
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 15, .cell_height_px = 30, .sidebar_width_px = 102, .backing_width_px = 287, .backing_height_px = 900 } };
+    var st: State = .{};
+    st.showChoices("파일이 외부에서 바뀌었습니다.", .{ .primary = "덮어쓰기", .alternate = "다시 읽기", .cancel = "계속 편집" });
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var ops: std.ArrayList(draw.Op) = .empty;
+    try view(&st, p, &tk, arena_state.allocator(), &ops);
+    const g = buttonGeom(&st, p, &tk).?;
+    const right = g.box.rect.x + @as(i32, @intCast(g.box.rect.w));
+    var cut: usize = 0;
+    for (ops.items) |op| switch (op) {
+        .text => |t| {
+            var cols: u32 = 0;
+            for (t.runs) |r| cols += overlay_input.displayCols(r.text);
+            try std.testing.expect(t.origin.x + @as(i32, @intCast(cols * 15)) <= right);
+            if (std.mem.startsWith(u8, t.runs[0].text, "[") and std.mem.endsWith(u8, t.runs[0].text, "…")) cut += 1;
+        },
+        else => {},
+    };
+    try std.testing.expect(cut >= 1); // 실제로 줄인 라벨이 있었다 — 이 판정자가 그 길을 탔다
+}
+
+test "확인 모달 성질: 어떤 창·글꼴·메시지·버튼·미리보기에서도 글자는 패널 안, 자리가 있으면 버튼 행은 화면 안, 클릭은 그 버튼" {
+    const tk = testTokens();
+    var prng = std.Random.DefaultPrng.init(0xBEEF);
+    const r = prng.random();
+    const pieces = [_][]const u8{ "a", "abc ", "한", "글자 ", "🙂", " ", "\n", "e\u{301}", "\xff", "\xe2", "…", "ｗ", "/opt/x/y" };
+    const labels = [_][]const u8{ "OK", "실행", "덮어쓰기", "다시 읽기", "계속 편집", "Overwrite anyway", "x" ** 30, "한" ** 12 };
+    const preview = [_][]const u8{ "echo hi", "rm -rf ./build && make " ++ "y" ** 60, "한글 줄", "" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var short_windows: usize = 0;
+    for (0..3000) |_| {
+        _ = arena_state.reset(.retain_capacity);
+        const arena = arena_state.allocator();
+        var b: std.ArrayList(u8) = .empty;
+        for (0..r.intRangeAtMost(usize, 0, 60)) |_| try b.appendSlice(arena, pieces[r.intRangeLessThan(usize, 0, pieces.len)]);
+        const cw = r.intRangeAtMost(u32, 4, 20);
+        const ch = r.intRangeAtMost(u32, 8, 40);
+        const bw = r.intRangeAtMost(u32, 100, 2400);
+        const bh = r.intRangeAtMost(u32, 60, 1600);
+        const p = props.ChromeProps{ .metrics = .{ .cell_width_px = cw, .cell_height_px = ch, .sidebar_width_px = r.intRangeAtMost(u32, 0, bw / 2), .backing_width_px = bw, .backing_height_px = bh } };
+        var st: State = .{};
+        const pick = struct {
+            fn f(rr: std.Random) []const u8 {
+                return labels[rr.intRangeLessThan(usize, 0, labels.len)];
+            }
+        }.f;
+        if (r.boolean()) {
+            st.show(b.items, .{ .confirm = pick(r), .cancel = pick(r) });
+        } else {
+            st.showChoices(b.items, .{ .primary = pick(r), .alternate = pick(r), .extra = if (r.boolean()) pick(r) else null, .cancel = pick(r) });
+        }
+        st.body = preview[0..r.intRangeAtMost(usize, 0, preview.len)];
+        const g = buttonGeom(&st, p, &tk) orelse continue;
+        if (g.box.inner_cols == 0) continue; // 한 칸도 없는 상자 — 키보드만(예전과 같다)
+        const rect = g.box.rect;
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try view(&st, p, &tk, arena, &ops);
+        for (ops.items) |op| switch (op) {
+            .text => |t| {
+                var cols: u32 = 0;
+                for (t.runs) |run| cols += overlay_input.displayCols(run.text);
+                // 1칸 상자에 2칸 글자 하나는 어쩔 수 없다(wrapLine 이 그 글자를 한 줄로 낸다) — 그 밖에는 패널 안이다.
+                if (cols > 2 or g.box.inner_cols >= 2)
+                    try std.testing.expect(t.origin.x >= rect.x and t.origin.x + @as(i32, @intCast(cols * cw)) <= rect.x + @as(i32, @intCast(rect.w)));
+            },
+            else => {},
+        };
+        const ws = props.workspaceRect(p.metrics);
+        const ws_bottom: i32 = @intCast(ws.y + ws.h);
+        const fits = (ws.h / ch) -| 2 >= g.btn_rows + 2; // 메시지 한 줄 + 빈 줄 + 버튼 행이 들어갈 창
+        if (!fits) short_windows += 1;
+        const Btn = struct { a: Action, row: u32, x: i32, fit: u32 };
+        var btns: [4]Btn = undefined;
+        var nb: usize = 0;
+        btns[nb] = .{ .a = .confirmed, .row = g.confirm_row, .x = g.confirm_x, .fit = g.confirm_fit };
+        nb += 1;
+        if (st.has_alternate) {
+            btns[nb] = .{ .a = .alternate, .row = g.alternate_row, .x = g.alternate_x, .fit = g.alternate_fit };
+            nb += 1;
+        }
+        if (st.has_extra) {
+            btns[nb] = .{ .a = .extra, .row = g.extra_row, .x = g.extra_x, .fit = g.extra_fit };
+            nb += 1;
+        }
+        btns[nb] = .{ .a = .cancelled, .row = g.cancel_row, .x = g.cancel_x, .fit = g.cancel_fit };
+        nb += 1;
+        for (btns[0..nb], 0..) |bt, i| {
+            try std.testing.expect(bt.fit > 0); // 버튼은 생략되지 않는다(#4169)
+            const y = modal_box.rowY(g.box, bt.row);
+            if (fits) try std.testing.expect(y + @as(i32, @intCast(ch)) <= ws_bottom);
+            const cx: f64 = @as(f64, @floatFromInt(bt.x)) + @as(f64, @floatFromInt(bt.fit * cw)) / 2;
+            const cy: f64 = @as(f64, @floatFromInt(y)) + @as(f64, @floatFromInt(ch)) / 2;
+            try std.testing.expectEqual(@as(?Action, bt.a), buttonAtPoint(&st, p, &tk, cx, cy));
+            for (btns[0..i]) |o| {
+                if (o.row != bt.row) continue;
+                const a1 = bt.x + @as(i32, @intCast(bt.fit * cw));
+                const b1 = o.x + @as(i32, @intCast(o.fit * cw));
+                try std.testing.expect(!(bt.x < b1 and o.x < a1));
+            }
+        }
+    }
+    try std.testing.expect(short_windows < 3000); // 낮은 창만 나온 퍼징이 아니다
 }

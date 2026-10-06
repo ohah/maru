@@ -51,6 +51,7 @@ const reconnect_worker_owner = @import("reconnect_worker_owner.zig");
 const host_reconnect_runtime_ledger = @import("host_reconnect_runtime_ledger.zig");
 const host_reconnect_runtime_transaction = @import("host_reconnect_runtime_transaction.zig");
 const host_reconnect_window_transaction = @import("host_reconnect_window_transaction.zig");
+const term_close_deferral = @import("term_close_deferral.zig");
 const user_action_queue = @import("user_action_queue.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 라우팅
 
@@ -4911,6 +4912,8 @@ pub const RemoteTermBackend = struct {
 
     fn remove(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.RemoveProgress {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        // 진행 중인 재접속 job 이 이 행을 붙들었으면 맵에서 빼지 않는다 — 빼면 job 의 다음 전이가 proof loss 다.
+        if (self.reconnectJobHoldsRuntime(handle)) return .event_pending;
         if (self.close_operation_owner.active) return .event_pending;
         const entry = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.close_runtime_absent);
         if (!close_authority.valid(&entry.runtime.close_authority))
@@ -4940,12 +4943,40 @@ pub const RemoteTermBackend = struct {
         return .removed;
     }
 
+    /// 진행 중인 재접속 job 이 이 runtime 을 행으로 붙들었는가(`term_close_deferral.holdsRuntime`).
+    ///
+    /// 붙든 동안 runtime 을 닫거나 맵에서 빼면 앱이 끝난다 — 얼림 구간에는 attachment `deinit` 이 abort 하고, 커밋 뒤에는
+    /// job 의 다음 전이가 proof loss 다. 실패로 끝나 보관된 job(`host_failure_complete`)은 더 전이하지 않으므로 붙든
+    /// 것으로 치지 않는다.
+    pub fn reconnectJobHoldsRuntime(self: *const RemoteTermBackend, handle: RuntimeHandle) bool {
+        const job = self.host_reconnect_job orelse return false;
+        const phase: term_close_deferral.JobPhase =
+            if (job.state_raw == @intFromEnum(HostReconnectJobState.idle))
+                .none
+            else if (job.state_raw == @intFromEnum(HostReconnectJobState.host_failure_complete))
+                .retained_terminal
+            else
+                .in_flight;
+        const rows = job.runtimeRowsSlice() orelse return false;
+        var in_rows = false;
+        for (rows) |row| {
+            if (row.identity.runtime_handle == handle) {
+                in_rows = true;
+                break;
+            }
+        }
+        return term_close_deferral.holdsRuntime(phase, in_rows);
+    }
+
     fn requestRuntimeClose(
         self: *RemoteTermBackend,
         handle: RuntimeHandle,
         kind: close_authority.CloseRequestKind,
         disposition: close_authority.CloseDisposition,
     ) term_backend.CloseProgress {
+        // 진행 중인 재접속 job 이 이 행을 붙들었으면 close authority 를 한 칸도 움직이지 않는다 — routing tombstone·
+        // terminate·settle 모두 job 이 끝난 뒤에 처음부터 한다(창 닫기·exit reap 은 이 「아직」을 tick 마다 다시 묻는다).
+        if (self.reconnectJobHoldsRuntime(handle)) return .event_pending;
         if (self.close_operation_owner.active) return .event_pending;
         const entry = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.close_runtime_absent);
         const authority = &entry.runtime.close_authority;
@@ -4999,6 +5030,7 @@ pub const RemoteTermBackend = struct {
     /// window graph가 어떤 target도 변경하기 전에 모든 remote runtime의 event readiness를 읽는다.
     /// 실제 authority/ticket/routing publication은 이 read-only 통과 뒤 AppSession의 commit suffix만 수행한다.
     pub fn windowCloseReadiness(self: *const RemoteTermBackend, handle: RuntimeHandle) term_backend.CloseProgress {
+        if (self.reconnectJobHoldsRuntime(handle)) return .event_pending;
         if (self.close_operation_owner.active) return .event_pending;
         const entry = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.close_runtime_absent);
         const authority = &entry.runtime.close_authority;

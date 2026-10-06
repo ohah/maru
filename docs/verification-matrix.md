@@ -2076,6 +2076,15 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   넓힌다. 근거가 있는 예외(재접속 job 자신의 후보 세대 전이, 유지보수 tick 의 live 필터 뒤 `hasBufferedFrameWork`)는 이유를 단
   allowlist 이고 낡으면 실패한다. `pumpScreenInternal` 의 `frame_malformed` 네 자리가 모두 단계·오류 이름을 남기는지도 잰다.
   수정 전 코드에서 wiring 모두 red. 실제 재접속으로 얼린 창을 재현하는 E2E 는 없다.
+  **재접속 닫기 미룸**(`test-term-close-deferral`, check-boundaries — PR 에서 돈다): std-only leaf `term_close_deferral.zig`
+  의 표 테스트 4개가 「진행 중인 job 이 행으로 붙든 runtime 만 붙든 것」(retained-terminal 은 아님), 붙든 runtime 은 닫기를
+  보내지 않고 미룸, 첫 시도의 「아직」만 불변식 위반이고 재시도의 「아직」은 다음 tick, 닫기→제거→해제 순서를 잰다. wiring
+  경계 4개가 `destroyTerm` 의 미룸 판정이 `closeAndDetach`·`remove` **앞**에 있고 예전 두 panic 이 첫 시도 판정을 지나는지,
+  재시도가 붙듦을 먼저 묻고 끝난 Term 을 목록에서 **먼저 빼고** 푸는지(teardown 정리도 같고 abort 가 없는지), tick 이 창 닫기
+  진행보다 먼저 목록을 비우고 창 닫기는 목록이 빌 때까지 기다리며 Session teardown 첫 문장이 정리인지, backend
+  `remove`·`requestRuntimeClose`·`windowCloseReadiness` 첫 문장이 붙듦 관문이고 `host_failure_complete` 가 retained-terminal 로
+  접히는지를 고정한다. 수정 전 코드에서 wiring 4개 모두 red. 실제 재접속 중 ⌘W 를 재현하는 값 테스트는 없다 — job 픽스처가
+  실제 daemon host 를 띄운다(`runActualReconnectCoordinatorFixture`).
   **RemoteRuntime 테스트 fixture 초기화**(`test-remote-runtime-fixture-init`, check-boundaries — PR 에서 돈다): 제품
   constructor(`spawnWithConnection`·`attachExistingWithConnection`)의 in-place 초기화 블록이 대입하는 값 칸 집합을 fixture
   공통 입구 `initializeTestGeneration` 의 대입 집합과 대조한다. 일부러 안 세우는 칸(판정자별 입력 경로, 신원 owner)은 이유와 함께

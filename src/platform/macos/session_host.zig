@@ -99,6 +99,7 @@ pub const user_action_queue = @import("session_host/user_action_queue.zig");
 // 창 닫기 graph는 syscall이나 backend 포인터를 갖지 않는 scalar 권위 leaf라 ABI 교차 빌드에서도 같은
 // 저장 형식과 전이를 검사한다. 실제 RemoteRuntime 실행 경로만 아래 macOS 전용 barrel에 남긴다.
 pub const pending_term_close_graph = @import("session_host/pending_term_close_graph.zig");
+pub const term_close_deferral = @import("session_host/term_close_deferral.zig");
 pub const pending_app_quit_shutdown = @import("session_host/pending_app_quit_shutdown.zig");
 pub const incident_publisher_registry = if (builtin.os.tag == .macos)
     @import("session_host/incident_publisher_registry.zig")

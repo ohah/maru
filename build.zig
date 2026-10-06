@@ -6550,6 +6550,39 @@ pub fn build(b: *std.Build) void {
     run_workspace_header_values.addArg("--maru-expect-passed=25");
     workspace_header_policy_step.dependOn(&run_workspace_header_values.step);
 
+    // 재접속 job 이 붙든 runtime 의 Term 을 사용자가 닫을 때 backend 닫기를 **미루는가**(얼림 구간에는 runtime deinit 이
+    // abort 하고, 커밋 뒤에는 job 의 다음 전이가 proof loss 였다). 판정은 std-only leaf 라 PR 에서 돌고, destroyTerm·
+    // tick·창 닫기·teardown·backend 관문이 그 판정을 제자리에서 부르는지는 wiring 경계가 잰다.
+    const close_deferral_step = b.step(
+        "test-term-close-deferral",
+        "A user close never tears down a runtime held by an in-flight reconnect job; the close resumes after the job",
+    );
+    const close_deferral_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/term_close_deferral.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"재접속 닫기 미룸"},
+    });
+    const run_close_deferral_tests = b.addRunArtifact(close_deferral_tests);
+    run_close_deferral_tests.addArg("--maru-expect-tests=4");
+    run_close_deferral_tests.addArg("--maru-expect-passed=4");
+    close_deferral_step.dependOn(&run_close_deferral_tests.step);
+    const close_deferral_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/term_close_deferral_wiring_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_close_deferral_wiring = b.addRunArtifact(close_deferral_wiring_tests);
+    run_close_deferral_wiring.addArg("--maru-expect-tests=4");
+    run_close_deferral_wiring.addArg("--maru-expect-passed=4");
+    run_close_deferral_wiring.setCwd(b.path("."));
+    close_deferral_step.dependOn(&run_close_deferral_wiring.step);
+    boundary_step.dependOn(close_deferral_step);
+
     // 탭·pane·Term 을 풀 때 **푼 것을 살아 있는 목록에 남기지 않는가**(TAB-UAF — 2026-10-06 창 닫기 SIGSEGV). `destroyTerm`
     // 이 모든 탭을 훑으므로 푼 탭이 `self.tabs` 에 남으면 뒤 탭의 정리가 해제된 메모리를 읽는다. 값 판정자는 ABI suite
     // (`test-teardown-uaf`)에 있고, 여기는 app_session 전체의 루프 꼴과 네 teardown 자리를 글자로 잰다(std-only, PR).

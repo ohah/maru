@@ -1895,6 +1895,23 @@ pub fn build(b: *std.Build) void {
     );
     macos_terminal_gate_step.dependOn(&run_macos_terminal_gate_tests.step);
 
+    // **teardown UAF 값 판정자**(TAB-UAF·PANE-UAF). 전체 ABI suite 가 PR 에서 이것들을 돌리지만 샤드로 도는 무거운
+    // 스텝이라, 탭·pane·Term 해제 순서를 고칠 때 빠르게 되먹이도록 전용 step 을 둔다. 글자 판정(푼 것을 목록에 남기는
+    // 루프 금지)은 `test-teardown-live-list`(check-boundaries)가 PR 에서 잰다.
+    const macos_teardown_uaf_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "TAB-UAF", "PANE-UAF" },
+    });
+    const run_macos_teardown_uaf_tests = b.addRunArtifact(macos_teardown_uaf_tests);
+    // 8 = TAB-UAF 둘 + PANE-UAF 하나 + 각 모듈이 자동 생성하는 `test_0` 다섯(필터와 무관하게 늘 컴파일된다).
+    run_macos_teardown_uaf_tests.addArg("--maru-expect-tests=8");
+    run_macos_teardown_uaf_tests.setCwd(b.path("."));
+    const macos_teardown_uaf_step = b.step(
+        "test-teardown-uaf",
+        "Validate that closing a window or restoring tabs never reads an already-freed tab, pane, or Term",
+    );
+    macos_teardown_uaf_step.dependOn(&run_macos_teardown_uaf_tests.step);
+
     // **3-way 병합 모드**(S3b-1 — docs/editor-merge-conflicts.md §5 S3b). 전체 ABI suite 는 샤드로
     // 도는 무거운 스텝이라 전용 step 을 둔다(위와 같은 이유 — 빠른 되먹임 + 무관한 flake 분리).
     const macos_editor_merge_tests = addProjectTest(b, .{
@@ -6499,6 +6516,27 @@ pub fn build(b: *std.Build) void {
     run_workspace_header_values.addArg("--maru-expect-tests=25");
     run_workspace_header_values.addArg("--maru-expect-passed=25");
     workspace_header_policy_step.dependOn(&run_workspace_header_values.step);
+
+    // 탭·pane·Term 을 풀 때 **푼 것을 살아 있는 목록에 남기지 않는가**(TAB-UAF — 2026-10-06 창 닫기 SIGSEGV). `destroyTerm`
+    // 이 모든 탭을 훑으므로 푼 탭이 `self.tabs` 에 남으면 뒤 탭의 정리가 해제된 메모리를 읽는다. 값 판정자는 ABI suite
+    // (`test-teardown-uaf`)에 있고, 여기는 app_session 전체의 루프 꼴과 네 teardown 자리를 글자로 잰다(std-only, PR).
+    const teardown_live_list_step = b.step(
+        "test-teardown-live-list",
+        "Tab, pane and Term teardown removes each entry from its live list before destroying it",
+    );
+    const teardown_live_list_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/teardown_live_list_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_teardown_live_list = b.addRunArtifact(teardown_live_list_tests);
+    run_teardown_live_list.addArg("--maru-expect-tests=2");
+    run_teardown_live_list.addArg("--maru-expect-passed=2");
+    run_teardown_live_list.setCwd(b.path("."));
+    teardown_live_list_step.dependOn(&run_teardown_live_list.step);
+    boundary_step.dependOn(teardown_live_list_step);
 
     // 업그레이드가 실패해도 **살아 있는 host 를 재사용하고, 그런 host 가 없을 때만 새 host 를 띄우는가**(2026-09-30:
     // 교체 실패마다 새 host 를 띄워 host 가 넷이 됐다 — 설계는 「한 로그인 세션에 host 하나」). 판정은 std-only leaf 라

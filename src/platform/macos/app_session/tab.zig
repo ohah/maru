@@ -590,7 +590,10 @@ pub fn closeTab(self: *AppSession, index: usize) void {
 /// `closeTab`처럼 latch만 남기지 않고 실제 topology를 비워, native window teardown이 direct backend close를 우회하지 않는다.
 pub fn destroyAllTabsForApprovedWindowClose(self: *AppSession) void {
     self.cancelPointerGesture();
-    for (self.tabs.items) |tab| destroyTabStandalone(self, tab);
+    // **하나 풀 때마다 목록에서 먼저 뺀다**(closeTab 과 같은 순서) — `destroyTerm` 은 저장 충돌 비교를 정리하려고 모든
+    // 탭·pane·Term 을 훑는데(`invalidateCompareFor`), 푼 탭이 `self.tabs` 에 남아 있으면 **뒤 탭의 정리가 앞 탭의 해제된
+    // 메모리를 읽는다**(TAB-UAF, 2026-10-06 실측: 창 닫기 중 SIGSEGV — 푼 자리를 JSON 문자열이 차지해 포인터로 읽혔다).
+    while (self.tabs.items.len > 0) destroyTabStandalone(self, self.tabs.orderedRemove(0));
     self.tabs.clearRetainingCapacity();
     self.surface_ptrs.clearRetainingCapacity();
     self.app_window.tabs = self.surface_ptrs.items;
@@ -1556,7 +1559,9 @@ pub fn destroyTabStandalone(self: *AppSession, tab: *Tab) void {
             self.chrome_host.context_menu.hide();
         }
     }
-    for (tab.panes.items) |pane| pane_ops.destroyPane(self, pane);
+    // 푼 pane 을 목록에 남기지 않는다 — PANE-UAF(Term)·TAB-UAF(탭)와 같은 규율. 지금 호출자는 모두 탭을 `self.tabs` 에서
+    // 뺀 뒤 부르지만, 그 순서가 바뀌어도 형제 pane 의 정리가 해제된 pane 을 읽지 않게 한다.
+    while (tab.panes.items.len > 0) pane_ops.destroyPane(self, tab.panes.orderedRemove(0));
     // 트리를 통째 해제하기 전에, divider_drag가 이 트리 소속 split이면 표적 null(다른 탭 트리를 가리키면 유지 —
     // 무관한 탭 close가 진행 중 divider 드래그를 안 끊는다). collapse 경로의 invalidateForFreedSplit과 같은 규율.
     if (self.divider_capture_split) |captured| {

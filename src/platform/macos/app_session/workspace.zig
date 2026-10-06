@@ -808,7 +808,8 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     }
 
     // 3) 기존 탭 teardown(closeTab의 teardown과 같은 순서 — 마지막-탭 latch는 안 탄다) 후 새 탭 설치.
-    for (self.tabs.items) |tab| tab_ops.destroyTabStandalone(self, tab);
+    // 하나 풀 때마다 목록에서 먼저 뺀다(TAB-UAF — `destroyAllTabsForApprovedWindowClose` 와 같은 이유).
+    while (self.tabs.items.len > 0) tab_ops.destroyTabStandalone(self, self.tabs.orderedRemove(0));
     self.tabs.clearRetainingCapacity();
     self.surface_ptrs.clearRetainingCapacity();
     for (new_tabs.items) |tab| {

@@ -6492,8 +6492,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_freeze_gate_wiring = b.addRunArtifact(freeze_gate_wiring_tests);
-    run_freeze_gate_wiring.addArg("--maru-expect-tests=3");
-    run_freeze_gate_wiring.addArg("--maru-expect-passed=3");
+    run_freeze_gate_wiring.addArg("--maru-expect-tests=4");
+    run_freeze_gate_wiring.addArg("--maru-expect-passed=4");
     run_freeze_gate_wiring.setCwd(b.path("."));
     freeze_gate_step.dependOn(&run_freeze_gate_wiring.step);
     boundary_step.dependOn(freeze_gate_step);

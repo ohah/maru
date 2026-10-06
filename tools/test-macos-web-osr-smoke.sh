@@ -1029,10 +1029,19 @@ drag move 0.5 0.51 0 0
 sleep 300
 drag drop 0.5 0.51 0 0
 sleep 1000
+mark tiffed
+drag enter 0.5 0.5 0 0 tiff $root/drop2/pic.png
+sleep 300
+drag move 0.5 0.5 0 0
+sleep 300
+drag move 0.5 0.51 0 0
+sleep 300
+drag drop 0.5 0.51 0 0
+sleep 1000
 mark end
 SCRIPT
 : > "$root/requests.log"
-run_app /upload-app 18000 "$root/imgdrop.summary" MARU_WEB_OSR_TEST_INPUT="$root/imgdrop.txt"
+run_app /upload-app 22000 "$root/imgdrop.summary" MARU_WEB_OSR_TEST_INPUT="$root/imgdrop.txt"
 grep -ao 'osr-test drag [a-z]* [^ ]*\|osr-test mark [a-z]* [0-9]*' "$root/app-upload-app.log" > "$root/imgdrop.report" || true
 cat "$root/imgdrop.report"
 python3 - "$root/imgdrop.report" "$root/requests.log" "$(wc -c < "$root/drop2/pic.png" | tr -d ' ')" <<'PY' || fail "dropping image data did not give an upload field the image file"
@@ -1049,8 +1058,10 @@ uploads = [urllib.parse.unquote(r.split('names=', 1)[1].split('&', 1)[0]) for r 
 drops = [l for l in report if l.startswith('osr-test drag drop')]
 check(uploads[:1] == [f'image.png:{png_size}'] and drops[:1] and drops[0].startswith('osr-test drag drop op=1'),
       f'image data alone dropped on an upload field arrives as the file image.png ({uploads} · {drops[:1]})')
-check(len(uploads) == 1 and len(drops) == 2 and not drops[1].startswith('osr-test drag drop op=1'),
+check(len(drops) == 3 and not drops[1].startswith('osr-test drag drop op=1') and len(uploads) == 2,
       f'image data that comes with text is not turned into a file — the upload field does not take it ({uploads} · {drops})')
+check(len(uploads) == 2 and uploads[1].startswith('image.png:') and uploads[1] != 'image.png:0' and drops[2].startswith('osr-test drag drop op=1'),
+      f'TIFF-only image data (a screenshot) arrives as image.png too ({uploads} · {drops})')
 sys.exit(0 if ok else 1)
 PY
 

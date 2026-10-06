@@ -154,6 +154,10 @@ class H(http.server.BaseHTTPRequestHandler):
             # W6k: 뜬 뒤 1.5 초에 alert 를 띄운다(`?loop` 이면 끝없이).
             again = b"for(;;)" if "loop" in self.path else b""
             body = b"<!doctype html><title>alert</title><body>alert<script>setTimeout(function(){" + again + b"alert('hold')},1500)</script>"
+        elif self.path.startswith("/ld-"):
+            # W6l①: 놓은 링크가 연 페이지 — 0.3 초마다 자기 경로로 `/ev` 를 보낸다(어느 탭이 남고 바뀌었는지 가른다).
+            body = (b"<!doctype html><title>ld</title><body>ld<script>setInterval(function(){new Image().src='/ev?e=alive&u="
+                    + self.path.encode() + b"&t='+Date.now()},300)</script>")
         elif self.path.startswith("/unload-app"):
             # W6j: 0.3 초마다 `/ev` 를 보내고, 클릭하면 떠나기 확인을 건다(`?hang` 이면 그 처리기가 6 초 멈춘다).
             hang = b"var t=Date.now();while(Date.now()-t<6000);" if "hang" in self.path else b""
@@ -994,16 +998,21 @@ cat > "$root/linkdrop.txt" <<SCRIPT
 sleep 7000
 droplink band http://127.0.0.1:$port/ld-band
 sleep 2000
+mark newtab
 droplink emptybar http://127.0.0.1:$port/ld-new
-sleep 2500
+sleep 4000
+mark webtab
 droplink webtab http://127.0.0.1:$port/ld-tab
-sleep 2000
+sleep 4000
+mark js
 droplink band javascript:alert(1)
-sleep 800
+sleep 4000
+mark end
 SCRIPT
 : > "$root/requests.log"
-run_app /osr-smoke 18000 "$root/linkdrop.summary" MARU_WEB_OSR_TEST_INPUT="$root/linkdrop.txt" MARU_CONFIG="$root/linkdrop.conf"
-grep -ao 'osr-test droplink [a-z]* [^ ]* ok=[a-z]*\|osr-test droplink none [a-z]*' "$root/app-osr-smoke.log" > "$root/linkdrop.report" || true
+# 숨은 탭은 신호가 1 초에 한 번이라 구간마다 4 초를 둔다(대본 약 22 초).
+run_app /osr-smoke 28000 "$root/linkdrop.summary" MARU_WEB_OSR_TEST_INPUT="$root/linkdrop.txt" MARU_CONFIG="$root/linkdrop.conf"
+grep -ao 'osr-test droplink [a-z]* [^ ]* ok=[a-z]*\|osr-test droplink none [a-z]*\|osr-test mark [a-z]* [0-9]*' "$root/app-osr-smoke.log" > "$root/linkdrop.report" || true
 cat "$root/linkdrop.report"
 python3 - "$root/linkdrop.report" "$root/requests.log" <<'PY' || fail "dropping a link on the tab bar or address bar did not open it as expected"
 import sys
@@ -1015,15 +1024,25 @@ def check(cond, what):
     print(('PASS ' if cond else 'FAIL ') + what)
     ok = ok and cond
 def dropped(zone): return [l for l in report if l.startswith(f'osr-test droplink {zone} ')]
+marks = {l.split()[2]: int(l.split()[3]) for l in report if l.startswith('osr-test mark ')}
 order = [r for r in requests if r in ('/ld-band', '/ld-new', '/ld-tab')]
-check(dropped('band')[:1] and dropped('band')[0].endswith('ok=true') and '/ld-band' in requests,
+# 살아 있는 페이지(0.3 초 신호) — 시점 사이에 어느 경로의 페이지가 돌고 있었나.
+alive = []
+for r in requests:
+    if r.startswith('/ev?e=alive&'):
+        q = dict(kv.split('=', 1) for kv in r.split('?', 1)[1].split('&'))
+        alive.append((q['u'], int(q['t'])))
+def running(lo, hi): return {u for u, t in alive if marks.get(lo, 0) + 1200 < t < marks.get(hi, 0)}
+check(dropped('band')[:1] and dropped('band')[0].endswith('ok=true') and any(u == '/ld-band' and t < marks.get('newtab', 0) for u, t in alive),
       f'a link dropped on the address band loads in that tab ({dropped("band")[:1]} · {order})')
-check(dropped('emptybar')[:1] and dropped('emptybar')[0].endswith('ok=true') and '/ld-new' in requests,
-      f'a link dropped on empty tab bar space of a web pane opens a new web tab ({dropped("emptybar")} · {order})')
-check(dropped('webtab')[:1] and dropped('webtab')[0].endswith('ok=true') and '/ld-tab' in requests and order == ['/ld-band', '/ld-new', '/ld-tab'],
-      f'a link dropped on a web tab header loads in that tab ({dropped("webtab")} · {order})')
-check(len(dropped('band')) == 2 and dropped('band')[1].endswith('ok=false') and not any('alert' in r for r in requests),
-      f'a javascript: link is refused ({dropped("band")})')
+# 새 탭: 앞 페이지(/ld-band)는 남고 /ld-new 가 함께 돈다(기존 탭을 바꾸지 않았다).
+check(dropped('emptybar')[:1] and dropped('emptybar')[0].endswith('ok=true') and running('newtab', 'webtab') == {'/ld-band', '/ld-new'},
+      f'a link dropped on empty tab bar space of a web pane opens a new web tab — the first page keeps running ({dropped("emptybar")} · {sorted(running("newtab", "webtab"))})')
+# 웹 탭 머리(첫 웹 탭 — 활성이 아니다): 그 탭이 /ld-tab 으로 바뀌고 새 탭(/ld-new)은 그대로.
+check(dropped('webtab')[:1] and dropped('webtab')[0].endswith('ok=true') and running('webtab', 'js') == {'/ld-new', '/ld-tab'} and order == ['/ld-band', '/ld-new', '/ld-tab'],
+      f'a link dropped on a web tab header loads in that tab, not the active one ({dropped("webtab")} · {sorted(running("webtab", "js"))})')
+check(len(dropped('band')) == 2 and dropped('band')[1].endswith('ok=false') and running('js', 'end') == {'/ld-new', '/ld-tab'},
+      f'a javascript: link is refused and nothing navigates ({dropped("band")} · {sorted(running("js", "end"))})')
 sys.exit(0 if ok else 1)
 PY
 

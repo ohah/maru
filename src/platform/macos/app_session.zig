@@ -35476,9 +35476,22 @@ test "W6l①: 링크를 웹 탭 머리에 놓으면 그 탭에서, 웹 pane 의 
     const opened = pane.terms.items[2];
     try std.testing.expect(web_ops.isBrowserTerm(opened));
     try std.testing.expectEqualStrings("https://example.com/c", opened.pending_url.?);
-    // 활성 Term 이 터미널이면 빈 탭 막대는 해당 없음(지금처럼).
+    // 활성 Term 이 터미널이면 빈 탭 막대·주소 띠 자리는 해당 없음(지금처럼).
     term_ops.focusTerm(session, 0);
     try std.testing.expectEqual(AppSession.DropRoute.not_applicable, web_ops.dropUrlAt(session, ex, bar_y, "https://example.com/d"));
+    try std.testing.expectEqual(AppSession.DropRoute.not_applicable, web_ops.dropUrlAt(session, band_x, band_y, "https://example.com/d"));
+    // 손잡이·이름 칸은 빈 탭 막대가 아니다(활성이 웹이어도).
+    term_ops.focusTerm(session, 1);
+    if (pb.tabs.x > pb.full.x) {
+        const grip_x: f64 = @floatFromInt(pb.full.x + (pb.tabs.x - pb.full.x) / 2);
+        try std.testing.expectEqual(AppSession.DropRoute.not_applicable, web_ops.dropUrlAt(session, grip_x, bar_y, "https://example.com/g"));
+    }
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    // 아직 부르지 못한 복원 주소는 놓은 주소에 진다(같은 tick 에 덮지 않게).
+    pane.terms.items[1].pending_url = try allocator.dupe(u8, "https://example.com/restored");
+    try std.testing.expectEqual(AppSession.DropRoute.routed, web_ops.dropUrlAt(session, wx, bar_y, "https://example.com/f"));
+    try std.testing.expect(pane.terms.items[1].pending_url == null);
+    session.addr_navigate_pending = null;
     // 모달이 열려 있으면 거부.
     session.chrome_host.settings.open = true;
     try std.testing.expectEqual(AppSession.DropRoute.refused, web_ops.dropUrlAt(session, wx, bar_y, "https://example.com/e"));

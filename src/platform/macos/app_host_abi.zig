@@ -6485,15 +6485,67 @@ fn grantPromptMessage(buf: []u8, e: GrantPromptEntry, snapshot: control_surface.
 
 /// 동의문에 넣는 URL 의 표시 폭 상한(칸). URL 은 길이에 끝이 없는데 문장에서 **질문이 URL 뒤에** 온다
 /// (「…대상: {URL}. 허용하시겠습니까?」). 예전에는 URL 이 길면 문장이 버퍼(256 바이트)에서 조용히 잘려 **질문이
-/// 사라졌다** — 한국어는 URL 이 약 110 바이트만 넘어도(2026-10-05 측정). 앞(호스트)과 끝을 남기고 가운데를 줄인다.
+/// 사라졌다** — 한국어는 URL 이 약 110 바이트만 넘어도(2026-10-05 측정). 줄이는 규칙은 `grantPromptUrl` 이 정한다.
 const grant_prompt_url_cols: u32 = 60;
+
+/// 동의문에 실을 URL — **스킴과 호스트는 줄이지 않는다.** 예전에는 URL 전체의 가운데를 줄여(앞 2/3 · 끝 1/3), 호스트가
+/// 길면 그 **오른쪽 끝(등록 도메인)이 잘렸다** — `https://accounts.google.com.session-verify-portal-x91.attacker.io/…`
+/// 가 `https://accounts.google.com.session-ver…` 로 보여 실제 대상(attacker.io)이 안 보였다(적대적 검증 2026-10-06).
+/// 권한은 그 탭에 묶여 이후 그 탭에서 여는 사이트까지 열리므로, 사용자가 읽는 「어느 사이트인가」가 틀리면 안 된다.
+///
+/// 규칙(브라우저 주소창의 관례와 같다):
+///   · `user:pass@` 는 버린다 — 진짜 호스트는 `@` 뒤다. 남기면 앞부분이 다른 사이트처럼 읽힌다.
+///   · 호스트가 너무 길면 **왼쪽을** 「…」로 줄인다 — 등록 도메인은 오른쪽 끝이다.
+///   · 경로·질의·조각은 남은 칸에서 가운데를 줄인다. 칸이 없으면 「…」 하나로 「뒤가 있다」만 보인다.
+///   · `://` 가 없으면(빈 URL·`about:blank` 등) 예전처럼 가운데를 줄인다.
+fn grantPromptUrl(buf: []u8, url: []const u8, max_cols: u32) []const u8 {
+    const oi = maru.chrome.components.overlay_input;
+    const sep = std.mem.indexOf(u8, url, "://") orelse return oi.elideMiddle(buf, url, max_cols);
+    const scheme = url[0 .. sep + 3];
+    const rest = url[sep + 3 ..];
+    const auth_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    const authority = rest[0..auth_end];
+    const host = if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| authority[at + 1 ..] else authority;
+    const tail = rest[auth_end..];
+    const ellipsis = "…";
+    const scheme_cols = oi.displayCols(scheme);
+    if (scheme_cols + 2 > max_cols) return oi.elideMiddle(buf, url, max_cols); // 스킴만으로 칸이 없다 — 비정상 입력
+    // 꼬리가 있으면 「…」 한 칸은 남긴다 — 호스트가 칸을 다 먹어도 「뒤가 더 있다」가 보이게.
+    const host_budget = max_cols -| scheme_cols -| @as(u32, if (tail.len > 0) 1 else 0);
+    var w: usize = 0;
+    const put = struct {
+        fn f(b: []u8, at: *usize, bytes: []const u8) bool {
+            if (at.* + bytes.len > b.len) return false;
+            @memcpy(b[at.*..][0..bytes.len], bytes);
+            at.* += bytes.len;
+            return true;
+        }
+    }.f;
+    if (!put(buf, &w, scheme)) return oi.elideMiddle(buf, url, max_cols);
+    var used = scheme_cols;
+    if (oi.displayCols(host) <= host_budget) {
+        if (!put(buf, &w, host)) return oi.elideMiddle(buf, url, max_cols);
+        used += oi.displayCols(host);
+    } else if (host_budget > 0) {
+        const right = oi.tailWindow(host, host_budget - 1).text; // 「…」 한 칸 + 등록 도메인 쪽
+        if (!put(buf, &w, ellipsis) or !put(buf, &w, right)) return oi.elideMiddle(buf, url, max_cols);
+        used += 1 + oi.displayCols(right);
+    }
+    if (tail.len > 0) {
+        var tail_buf: [256]u8 = undefined;
+        const room = max_cols -| used;
+        const shown_tail = if (room == 0) "" else oi.elideMiddle(&tail_buf, tail, room);
+        if (!put(buf, &w, shown_tail)) return oi.elideMiddle(buf, url, max_cols);
+    }
+    return buf[0..w];
+}
 
 /// 동의문 한 줄을 만든다(순수 — 판정자가 직접 잰다). **표시 문자열이라 키로 든다.** 이 문장은 로그인 토큰 접근을
 /// 묻는 동의문인데, 버튼은 이미 번역돼 있어(`btn_allow`/`btn_deny`) 여기만 한국어면 영어 UI 아래에서 무엇을
 /// 허용하는지 못 읽는다.
 fn grantPromptText(buf: []u8, scope: control_capability.ScopeClass, url: []const u8) []const u8 {
     var url_buf: [256]u8 = undefined;
-    const shown = maru.chrome.components.overlay_input.elideMiddle(&url_buf, url, grant_prompt_url_cols);
+    const shown = grantPromptUrl(&url_buf, url, grant_prompt_url_cols);
     const action = maru.i18n.t(switch (scope) {
         .browser_storage => .grant_scope_storage,
         else => .grant_scope_control,
@@ -6517,6 +6569,45 @@ test "grant 동의문: 아무리 긴 URL 이어도 질문이 남고, 호스트�
             try std.testing.expect(std.mem.indexOf(u8, text, "…") != null);
             try std.testing.expect(text.len <= 256); // 모달 버퍼보다 한참 작다 — 버퍼 절단이 질문을 못 지운다
         }
+    }
+}
+
+test "grant 동의문 URL: 호스트는 줄이지 않고, 너무 길면 왼쪽을 줄여 등록 도메인이 남으며, user@ 는 버린다" {
+    const max = grant_prompt_url_cols;
+    const oi = maru.chrome.components.overlay_input;
+    var buf: [256]u8 = undefined;
+    // ① 실제 대상이 오른쪽 끝에 있는 닮은꼴 호스트 — 예전 출력 `https://accounts.google.com.session-ver…` 는 attacker.io 를 숨겼다.
+    const look_alike = "https://accounts.google.com.session-verify-portal-x91.attacker.io/oauth/authorize?client_id=1";
+    const shown_a = grantPromptUrl(&buf, look_alike, max);
+    try std.testing.expect(oi.displayCols(shown_a) <= max);
+    try std.testing.expect(std.mem.startsWith(u8, shown_a, "https://"));
+    try std.testing.expect(std.mem.indexOf(u8, shown_a, "x91.attacker.io") != null);
+    // ② userinfo — 진짜 호스트는 `@` 뒤다. 앞부분을 남기면 다른 사이트처럼 읽힌다.
+    const userinfo = "https://docs-preview.example-wiki.org-session-xx@accounts.google.com/x";
+    try std.testing.expectEqualStrings("https://accounts.google.com/x", grantPromptUrl(&buf, userinfo, max));
+    // ③ 짧은 호스트 + 긴 경로 — 호스트·포트는 통째로, 경로만 가운데가 준다.
+    const long_path = "http://localhost:3000/" ++ "a" ** 200 ++ "/report.pdf";
+    const shown_c = grantPromptUrl(&buf, long_path, max);
+    try std.testing.expect(oi.displayCols(shown_c) <= max);
+    try std.testing.expect(std.mem.startsWith(u8, shown_c, "http://localhost:3000/"));
+    try std.testing.expect(std.mem.endsWith(u8, shown_c, "report.pdf"));
+    // ④ 짧으면 그대로다.
+    try std.testing.expectEqualStrings("https://example.com/a?b=1", grantPromptUrl(&buf, "https://example.com/a?b=1", max));
+    // ⑤ 스킴이 없으면 예전처럼 가운데를 줄인다.
+    try std.testing.expectEqualStrings("about:blank", grantPromptUrl(&buf, "about:blank", max));
+
+    // 성질: 어떤 호스트·경로 길이에서도 폭은 상한 안이고, 호스트의 **오른쪽 끝 12칸**은 언제나 보인다.
+    var prng = std.Random.DefaultPrng.init(3);
+    const r = prng.random();
+    for (0..2000) |_| {
+        var host_buf: [120]u8 = undefined;
+        const hl = r.intRangeAtMost(usize, 12, host_buf.len);
+        for (host_buf[0..hl]) |*ch| ch.* = "abcdefghijklmnopqrstuvwxyz.-"[r.intRangeLessThan(usize, 0, 28)];
+        var url_buf: [400]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "https://{s}{s}", .{ host_buf[0..hl], ("/p" ** 40)[0..r.intRangeAtMost(usize, 0, 80)] }) catch unreachable;
+        const shown = grantPromptUrl(&buf, url, max);
+        try std.testing.expect(oi.displayCols(shown) <= max);
+        try std.testing.expect(std.mem.indexOf(u8, shown, host_buf[hl - 12 .. hl]) != null);
     }
 }
 

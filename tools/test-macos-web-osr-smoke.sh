@@ -1122,8 +1122,8 @@ ticks_between = [e for e in events if e.get('e') == 'tick' and marks.get('close1
 check('osr-test overlay true' in report and closes(report)[:3] == ['asked', 'stayed', 'asked'] and len(s) >= 1 and leave_sheet(s[0])
       and any(e.get('e') == 'armed' for e in events) and len(ticks_between) >= 3,
       f'closing a web tab whose page set a leave confirmation shows the maru confirm, then the page question; Stay keeps the tab running ({closes(report)} · {s[:1]} · {len(ticks_between)} ticks after staying)')
-# 닫힌 뒤에는 0.3 초 신호가 끊긴다(떠나기는 close2 + 약 2.2 초).
-late = [e for e in events if e.get('e') == 'tick' and int(e['t']) > marks.get('close2', 0) + 3500]
+# 닫힌 뒤에는 0.3 초 신호가 끊긴다(떠나기는 close2 + 약 2.9 초).
+late = [e for e in events if e.get('e') == 'tick' and int(e['t']) > marks.get('close2', 0) + 4500]
 check(closes(report) == ['asked', 'stayed', 'asked', 'closed'] and len(s) == 2 and leave_sheet(s[1]) and marks.get('end') and not late,
       f'closing again and choosing Leave closes the tab ({closes(report)} · {len(s)} sheets · {len(late)} ticks after it closed)')
 

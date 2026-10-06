@@ -41,6 +41,11 @@ cases = [
     ('exclude', {'a.txt': b'foo\n', 'skip/a.txt': b'foo\n'}, 'foo', 'literal', ['--exclude', 'skip/**'], {'a.txt': [(0, 0, 0, 3)]}),
     ('defaults', {'.git/a': b'foo\n', 'node_modules/a': b'foo\n', 'bower_components/a': b'foo\n', '.visible': b'foo\n', 'a.code-search': b'foo\n'}, 'foo', 'literal', [], {'.visible': [(0, 0, 0, 3)]}),
     ('brace-include', {'src/a/one.txt': b'foo\n', 'src/b/two.txt': b'foo\n', 'src/c/three.txt': b'foo\n'}, 'foo', 'literal', ['--include', 'src/{a,b}'], {'src/a/one.txt': [(0, 0, 0, 3)], 'src/b/two.txt': [(0, 0, 0, 3)]}),
+    ('literal-metacharacters', {'a.txt': b'a[0].* a0zzz\n'}, 'a[0].*', 'literal', [], {'a.txt': [(0, 0, 0, 6)]}),
+    ('include-exclude-priority', {'src/a.zig': b'foo\n', 'src/b.zig': b'foo\n'}, 'foo', 'literal', ['--include', 'src/*.zig', '--exclude', 'src/b.zig'], {'src/a.zig': [(0, 0, 0, 3)]}),
+    ('ignore-disabled', {'.gitignore': b'a.txt\n', 'a.txt': b'foo\n'}, 'foo', 'literal', ['--no-ignore'], {'a.txt': [(0, 0, 0, 3)]}),
+    ('filename-newline', {'a\nb.txt': b'foo\n'}, 'foo', 'literal', [], {'a\nb.txt': [(0, 0, 0, 3)]}),
+    ('unicode-ranges', {'a.txt': '😀가foo\nfoo'.encode()}, 'foo', 'literal', [], {'a.txt': [(0, 7, 0, 10), (1, 0, 1, 3)]}),
     ('empty-results', {'a.txt': b'foo\n'}, 'absent', 'literal', [], {}),
 ]
 try:

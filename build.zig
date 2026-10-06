@@ -3203,7 +3203,7 @@ pub fn build(b: *std.Build) void {
                 "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit finished' \"$success_log\")\" -eq 1; " ++
                 "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit cancelled' \"$success_log\" || true)\" -eq 0; " ++
                 "test \"$(/usr/bin/stat -f '%i' \"$success_checkpoint\")\" != \"$success_inode\"; " ++
-                "/usr/bin/grep -Eq '^maru\\.workspace\\.v2$' \"$success_checkpoint\"; " ++
+                "/usr/bin/grep -Eq '^maru\\.workspace\\.v1$' \"$success_checkpoint\"; " ++
                 "cmp -s \"$success_before\" \"$success_checkpoint.bak\"; test ! -e \"$success_parent/.workspace.v1.bak.tmp\"; test ! -e \"$success_parent/.workspace.v1.tmp\"; " ++
                 "root=zig-out/maru-macos-app/session-host-c4-home; session_root=\"/tmp/maru-product-c4-failure-$$\"; parent=\"$root/Library/Application Support/maru\"; " ++
                 "checkpoint=\"$parent/workspace.v1\"; lease=\"$parent/workspace.v1.lock\"; log=\"$root/app.stderr\"; " ++

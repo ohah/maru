@@ -777,11 +777,13 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         if (blocker.*) |*client| client.deinit();
         blocker.* = null;
     }
-    const recovery_phase = try testPhase(.resolve);
     var pinned = retry: {
         var attempt: usize = 0;
         while (attempt < fixture_wait_attempts) : (attempt += 1) {
-            const resolved = resolveProduct(testing.allocator, base, runtime_id, recovery_phase);
+            // **시도마다 새 phase 다.** phase 는 만든 순간부터 `attach_phase_deadline.budget_ns`(5 s)가 흐르는데, 예전에는
+            // 루프 밖에서 한 번만 만들어 5 초 뒤 모든 시도가 만료된 phase 로 즉시 실패했다 — 「3000 회 × 20 ms ≈ 60 s 를
+            // 기다린다」는 상한이 실제로는 5 초였다(적대적 검증 2026-10-06). 부하로 복구가 5~60 초 걸리면 빨갰다.
+            const resolved = resolveProduct(testing.allocator, base, runtime_id, try testPhase(.resolve));
             switch (resolved) {
                 .selected => |value| break :retry value,
                 .failed => {},

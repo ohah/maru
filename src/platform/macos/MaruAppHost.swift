@@ -5440,7 +5440,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 창 닫기와 달리 실행 중 명령 유무와 무관하게 항상 묻는다(사용자 결정 2026-06). 단일 출처: docs/macos-app-host-boundary.md.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
-        if smokeMode || appLaunchFirstDrawableArmed { holdOsrDialogsForExit(); return .terminateNow } // 무인 계측은 모달에 막히면 hang
+        if smokeMode || appLaunchFirstDrawableArmed { holdOsrDialogsForExit() } // W6k — 아래 줄은 L1 경계 시험이 그대로 고정한다
+        if smokeMode || appLaunchFirstDrawableArmed { return .terminateNow } // 무인 계측은 모달에 막히면 hang
         if bypassQuitConfirm {
             // 확인 생략 토큰은 checkpoint 생략 토큰이 아니다. 마지막 창/SessionEnded처럼 모달을 이미 통과했거나
             // 필요 없는 종료도 C4 final commit을 거친다. final success 뒤 재진입만 terminateNow다.

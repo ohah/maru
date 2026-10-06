@@ -17993,7 +17993,8 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return .text;
         // 호버 박스의 포인터 추적(tooling §8.2b) — 정지 시간은 tick 이 잰다. 열려 있으면 sticky 판정(낱말·상자 밖이면 닫힘).
         editor_ops.hover_client.notePointer(self, x_px, y_px);
-        // W4b: Chromium(OSR) 탭 본문 위면 이동을 그 탭에 보내고 페이지 커서를 쓴다. 오버레이가 열렸거나 본문 밖이면 hover 하던
+        // W4b: Chromium(OSR) 탭 본문 위면 이동을 그 탭에 보내고 페이지 커서를 쓴다. 모달 오버레이가 열렸거나(안내 토스트는 아니다 — W6n)
+        // 본문 밖이면 hover 하던
         // 탭에 leave 를 보내고(null) 아래 일반 hover 로 흐른다.
         if (web_ops.osrHover(self, x_px, y_px, mods)) |kind| return kind;
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만

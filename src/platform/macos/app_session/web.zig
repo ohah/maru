@@ -938,7 +938,8 @@ pub fn osrCaptureLost(self: *AppSession, surface_id: u64) void {
     _ = web_osr.sendInput(self.allocator, .{ .capture_lost = surface_id });
 }
 
-/// 버튼 없는 이동(hover). 본문 위면 그 탭에 이동을 보내고 페이지 커서를 돌려준다. 오버레이가 열렸거나 본문 밖이면 hover
+/// 버튼 없는 이동(hover). 본문 위면 그 탭에 이동을 보내고 페이지 커서를 돌려준다. 모달 오버레이가 열렸거나(안내 토스트는 아니다 —
+/// W6n) 본문 밖이면 hover
 /// 하던 탭에 leave 를 보내고 null. 본문으로 들어오면 창의 일반 hover 를 창 밖 좌표로 한 번 돌려 다른 강조(사이드바·탭·
 /// 상태바·도크)를 모두 내린다 — 본문 위에서는 일반 hover 가 돌지 않아 곧장 들어오면 강조가 남는다(적대 검증).
 /// Chromium 탭 제스처 중(끄는 중 수식키를 눌러 hover 가 불린 경우)에는 아무것도 보내지 않는다 — 버튼 비트가 빠진 move 나
@@ -1815,7 +1816,7 @@ pub fn osrDragAdd(self: *AppSession, kind: OsrDragKind, bytes: []const u8) bool 
 /// 이름 바꾸기·주소창 편집 중이었다면 그것을 끝낸다.
 pub fn osrAcceptsFirstMouse(self: *AppSession, x_px: f64, y_px: f64) bool {
     // 알림 토스트를 포함한 오버레이가 떠 있으면 아니다 — 누름 경로는 토스트를 닫으며 누름을 삼킨다(그 첫 누름에 토스트만 사라지고
-    // 페이지는 못 받았다 — W6g 적대 검증). 호버·추가 버튼과 같은 기준.
+    // 페이지는 못 받았다 — W6g 적대 검증). 추가 버튼과 같은 기준(hover 는 토스트를 세지 않는다 — W6n: 이동은 토스트를 닫지 않는다).
     if (self.osr_layouts.items.len == 0 or self.anyOverlayOpen()) return false;
     return osr_input.hit(self.osr_layouts.items, x_px, y_px) != null;
 }

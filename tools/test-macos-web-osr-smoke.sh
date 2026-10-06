@@ -1023,7 +1023,8 @@ printf 'ui.language = ko\n' > "$root/unload.conf"
 unload_run() { # $1=이름 $2=경로 $3=대본
     printf '%s\n' "$3" > "$root/unload-$1.txt"
     : > "$root/requests.log"
-    run_app "$2" 22000 "$root/unload-$1.summary" MARU_WEB_OSR_TEST_INPUT="$root/unload-$1.txt" MARU_CONFIG="$root/unload.conf"
+    # 대본이 약 21 초 — 끝 표시(`mark end`) 전에 앱이 끝나지 않게 26 초.
+    run_app "$2" 26000 "$root/unload-$1.summary" MARU_WEB_OSR_TEST_INPUT="$root/unload-$1.txt" MARU_CONFIG="$root/unload.conf"
     # 보고 줄은 요약 출력과 한 줄에 섞일 수 있다 — 줄 중간에서도 찾는다.
     grep -ao 'osr-test \(pageclose [a-z_]*\|overlay [a-z]*\|windowcount [0-9]*\|mark [a-z0-9]* [0-9]*\|sheet [^|]*|[^|]*\)' "$root/app-${2#/}.log" > "$root/unload-$1.report" || true
     cp "$root/requests.log" "$root/unload-$1.requests"

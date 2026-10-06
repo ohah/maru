@@ -14810,6 +14810,9 @@ pub const AppSession = struct {
         if (self.chrome_host.notifications.open) {
             if (kind == 1) {
                 if (notification_ops.notificationHitAt(self, x_px, y_px)) |hit| {
+                    // 패널 안 동작은 **좌클릭만** 한다 — 버튼을 안 봐서 ✕ 위 우클릭·중클릭도 그 카드를 지웠다(되돌릴 수
+                    // 없는 삭제). 확인 모달의 버튼 게이트와 같은 규율이다. 패널 밖은 어느 버튼이든 닫는다(아래).
+                    if (button != 0) return;
                     switch (hit) {
                         .card => |idx| {
                             self.chrome_host.notifications.selected = idx;
@@ -62598,6 +62601,49 @@ test "알림 패널을 열면 모달이 아닌 다른 오버레이(찾기 바·�
     notification_ops.openNotificationPanel(session);
     try std.testing.expect(session.chrome_host.notifications.open);
     try std.testing.expect(!session.chrome_host.reference_picker.open);
+}
+
+// 알림 카드 ✕ 는 되돌릴 수 없는 삭제라 **좌클릭만** 한다 — 버튼을 안 봐서 ✕ 위 우클릭·중클릭도 그 카드를 지웠다.
+// 실제 `mouse()` 경로를 탄다(✕ 자리는 같은 hitTest 단일 출처에서 찾는다).
+test "알림 패널 우클릭·중클릭은 카드 ✕ 를 눌러도 지우지 않고, 좌클릭만 지운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    _ = notification_ops.pushNotificationHistory(session, "Maru", "a", 0);
+    _ = notification_ops.pushNotificationHistory(session, "Maru", "b", 0);
+    notification_ops.openNotificationPanel(session);
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const pr = chrome.components.notifications.panelRect(&session.chrome_host.notifications, try notification_ops.buildNotificationItems(session, arena_state.allocator()), session.buildChromeProps()) orelse return error.NoPanelRect;
+    // ✕ 자리를 찾는다 — 패널을 훑어 처음 `.close` 로 풀리는 점.
+    var close_xy: ?[2]f64 = null;
+    var y: i32 = pr.y;
+    outer: while (y < pr.y + @as(i32, @intCast(pr.h))) : (y += 1) {
+        var x: i32 = pr.x;
+        while (x < pr.x + @as(i32, @intCast(pr.w))) : (x += 1) {
+            const xf: f64 = @floatFromInt(x);
+            const yf: f64 = @floatFromInt(y);
+            if (notification_ops.notificationHitAt(session, xf, yf)) |hit| if (hit == .close) {
+                close_xy = .{ xf, yf };
+                break :outer;
+            };
+        }
+    }
+    const at = close_xy orelse return error.NoCloseZone;
+    const before = session.notification_history.items.len;
+    // 버튼 번호는 xterm 규약(호스트가 바꿔 보낸다): 0=좌·1=중·2=우. kind 1=down·3=up.
+    session.mouse(1, at[0], at[1], 2, 0); // 우클릭
+    session.mouse(3, at[0], at[1], 2, 0);
+    session.mouse(1, at[0], at[1], 1, 0); // 중클릭
+    session.mouse(3, at[0], at[1], 1, 0);
+    try std.testing.expectEqual(before, session.notification_history.items.len);
+    try std.testing.expect(session.chrome_host.notifications.open); // 패널 안 클릭은 닫지도 않는다
+    session.mouse(1, at[0], at[1], 0, 0); // 좌클릭 — 대조: 이 자리가 정말 ✕ 다
+    session.mouse(3, at[0], at[1], 0, 0);
+    try std.testing.expectEqual(before - 1, session.notification_history.items.len);
 }
 
 // 닫기 확인 모달 마우스 게이트(code-review 후속): (1) **확인 버튼 바로 위**에서 우/중클릭은 버튼을 활성 안 하고

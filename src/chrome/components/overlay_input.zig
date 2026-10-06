@@ -55,7 +55,10 @@ pub fn elideMiddle(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
     const budget = max_cols - ellipsis_cols;
     const head_cols = budget * 2 / 3;
     const tail_cols = budget - head_cols;
-    const utf8 = std.unicode.Utf8View.init(bytes) catch return copyHeadWithEllipsis(buf, bytes, bytes.len);
+    // **손상 UTF-8 도 폭을 지킨다**(적대적 ADV2). `displayCols` 는 손상 바이트열을 **바이트 수**로 센다 — 앞을
+    // 남긴 결과도 손상이면 그 규칙으로 세이므로, 앞은 `max_cols - "…".len` 바이트까지만 남긴다. 예전에는
+    // 원문 전체 뒤에 「…」를 붙여 폭이 하나도 안 줄었다(퍼징 18,663 건 중 16,095 건 초과).
+    const utf8 = std.unicode.Utf8View.init(bytes) catch return copyHeadWithEllipsis(buf, bytes, max_cols -| ellipsis.len);
     // 앞: head_cols 칸까지.
     var it = utf8.iterator();
     var cols: u32 = 0;
@@ -630,4 +633,38 @@ test "paneTopRightBox: 콘텐츠가 영역보다 크면 폭·높이를 clamp (�
 
     // 영역이 0칸(폭<셀)이면 null.
     try std.testing.expect(paneTopRightBox(.{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 4, .backing_height_px = 600 } }, 10, 3) == null);
+}
+
+test "elideMiddle: 손상 UTF-8 이어도 결과 폭이 상한을 넘지 않는다 (적대적 ADV2)" {
+    // 예전에는 손상 바이트열이면 원문 **전체** 뒤에 「…」를 붙여 폭이 하나도 안 줄었다(퍼징 18,663 건 중 16,095 건).
+    var buf: [64]u8 = undefined;
+    const bad = "abc\xffdefghijklmnopqrstuvwxyz0123456789";
+    const out = elideMiddle(buf[0 .. bad.len + 3], bad, 10);
+    try std.testing.expect(displayCols(out) <= 10);
+    try std.testing.expect(std.mem.startsWith(u8, out, "abc"));
+    // 상한이 「…」 바이트 수보다 작아도 넘지 않는다.
+    try std.testing.expect(displayCols(elideMiddle(buf[0 .. bad.len + 3], bad, 2)) <= 2);
+
+    // 성질: 섞인 입력 전부에서 폭 상한, 정상 입력이면 UTF-8 유지.
+    var prng = std.Random.DefaultPrng.init(42);
+    const r = prng.random();
+    const pieces = [_][]const u8{ "a", "한", "🙂", "e\u{301}", "\u{FE0F}", "…", "\xff", "\xc3", "\xe2\x80", "ｗ", "\u{200D}", " " };
+    var invalid_seen: usize = 0;
+    for (0..3000) |_| {
+        var src: [400]u8 = undefined;
+        var n: usize = 0;
+        for (0..r.intRangeAtMost(usize, 0, 60)) |_| {
+            const pc = pieces[r.intRangeLessThan(usize, 0, pieces.len)];
+            if (n + pc.len > src.len) break;
+            @memcpy(src[n..][0..pc.len], pc);
+            n += pc.len;
+        }
+        const bytes = src[0..n];
+        const max: u32 = r.intRangeAtMost(u32, 0, 40);
+        var obuf: [403]u8 = undefined;
+        const o = elideMiddle(obuf[0 .. n + 3], bytes, max);
+        try std.testing.expect(displayCols(o) <= max or displayCols(bytes) <= max);
+        if (std.unicode.utf8ValidateSlice(bytes)) try std.testing.expect(std.unicode.utf8ValidateSlice(o)) else invalid_seen += 1;
+    }
+    try std.testing.expect(invalid_seen > 1000); // 손상 경로를 실제로 탔다
 }

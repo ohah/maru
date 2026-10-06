@@ -23686,25 +23686,51 @@ test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 �
     fx.term.rt.editor_lines = lines;
     fx.term.rt.editor_max_cols = 0;
 
+    // **일의 양은 걸음 수로 판정한다 — 기계 속도와 무관하다**(docs/performance-budget.md §원칙: 선이 실측과 회귀
+    // 사이에 안 서면 벽시계 대신 호출 수·복잡도를 센다). 한 줄을 세는 걸음 수를 먼저 재 두면, 여는 경로가 문서를
+    // **한 번만** 훑는가를 정확히 물을 수 있다 — 같은 일을 1.5배만 더 해도 러너·빌드 모드와 상관없이 빨개진다.
+    // 아래 시간 선은 걸음당 비용이 커지는 회귀를 잡는 재앙 감지선으로 남는다.
+    chrome_editor.content.total_steps = 0;
+    const one_line_cols = chrome_editor.content.lineColumnsUpTo(lines[0], fx.term.rt.editor_tab_width, fx.term.rt.editor_max_columns);
+    const steps_per_line = chrome_editor.content.total_steps;
+    chrome_editor.content.total_steps = 0;
+
     const c0 = threadCpuMsForTest();
     const t0 = monotonicMsForTest();
     ensureMaxCols(fx.term, false);
     const t1 = monotonicMsForTest();
     const cpu = threadCpuMsForTest() - c0;
-    std.debug.print("\n[측정] {d}줄 열기의 가장 긴 줄 세기: {d}ms (CPU {d}ms, max_cols={d})\n", .{ n, t1 - t0, cpu, fx.term.rt.editor_max_cols });
-    // **재앙 감지선이지 예산이 아니다** — 그래서 자릿수로 둔다. 옛 상한 500ms 는 CI 러너 실측(main 463ms)과
-    // 여유가 7% 뿐이라, 코드와 무관한 PR 들이 러너 편차만으로 연달아 빨강이 됐다(511·560·604ms — 2026-08-18).
-    // 그 상태의 게이트는 회귀를 알리는 대신 무작위로 울리는 알람이라, 사람이 결과를 안 보게 만든다.
-    // 고치기 전 이 경로는 **초 단위**였고 이 선이 잡으려는 것도 그 자릿수다.
+    const steps = chrome_editor.content.total_steps;
+    const line_ms: u64 = if (builtin.mode == .Debug) 2000 else 300;
+    // 단언보다 **먼저** 찍는다 — 빨개진 CI 로그에서 그 값이 있어야 어느 판정이 왜 걸렸는지 읽힌다.
+    std.debug.print("\n[측정] {d}줄 열기의 가장 긴 줄 세기: {d}ms (CPU {d}ms, 선 {d}ms, 걸음 {d}/{d}, max_cols={d})\n", .{ n, t1 - t0, cpu, line_ms, steps, steps_per_line * n, fx.term.rt.editor_max_cols });
+    try testing.expectEqual(one_line_cols, fx.term.rt.editor_max_cols); // 답이 맞아야 걸음 수가 뜻을 갖는다
+    try testing.expectEqual(steps_per_line * n, steps);
+    // **재앙 감지선이지 예산이 아니다.** 옛 상한 500ms 는 CI 러너 실측(main 463ms)과 여유가 7% 뿐이라, 코드와
+    // 무관한 PR 들이 러너 편차만으로 연달아 빨강이 됐다(511·560·604ms — 2026-08-18). 그 상태의 게이트는 회귀를
+    // 알리는 대신 무작위로 울리는 알람이라, 사람이 결과를 안 보게 만든다.
+    //
+    // **선은 빌드 모드마다 따로다 — 같은 값이면 ReleaseFast 에서는 아무것도 못 잡는다**(2026-10-06 실측). 이
+    // 테스트는 두 잡에서 돈다: PR 이 타는 `file explorer macOS product path`(Debug)와 main 의
+    // `editor macOS (ReleaseFast)`. 2,000ms 하나였을 때 ReleaseFast 는 10배 회귀(로컬 520~557ms)도 통과했다 —
+    // 잡으려면 약 37배가 필요했다. 두 모드가 **같은 감지 성능**을 갖게 맞춘다:
+    //
+    // | 모드 | 선 | CI CPU(표본) | 오경보 여유 | 어떤 러너에서도 잡는 회귀 |
+    // |---|---|---|---|---|
+    // | Debug | 2,000ms | 501~941ms, 중앙 690(45) | 2.1배 | 4.0배 이상(중앙 러너 2.9배) |
+    // | ReleaseFast | 300ms | 66~115ms, 중앙 75(18) | 2.6배 | 4.5배 이상 |
+    //
+    // **비용은 일의 양에 비례한다**(로컬 Debug: 기준 375 · 3배 일 1,120 · 10배 일 3,700ms). 「같은 일을 더
+    // 한다」는 위 걸음 수 판정이 정확히 잡으므로, 이 선이 따로 지키는 것은 **걸음 하나가 비싸지는** 회귀다. ⚠️ **줄마다 힙 할당을 넣거나 cluster 단위로 세게 바꾸는 변이는 이 선이 못 잡는다**
+    // — 실측 +2%·−5% 라 비용이 거의 안 변한다(시간 대부분이 줄 셈 루프다). 예전 주석의 「고치기 전 이 경로는
+    // 초 단위였다」는 이 경로(짧은 줄 12만 개)의 실측이 아니었다 — 그 초 단위는 5MB 한 줄 문서의 셈 상한
+    // 이야기다(651a195a6).
     //
     // 같은 파일의 다른 측정선(4프레임·접기)은 **건드리지 않는다** — 같은 러너 실측이 14~37ms 라 500ms
-    // 상한과의 여유가 90% 넘는다. 문제는 "500 이라는 값"이 아니라 **여유가 없어진 이 한 자리**다.
-    //
-    // **제품이 느린 것이 아니다** — 배포가 쓰는 ReleaseFast 에서 같은 일이 42ms 다(실측). 이 테스트가
-    // 도는 Debug 가 9배 느릴 뿐이라, 선은 "Debug 를 CI 러너에서 돌렸을 때" 를 기준으로 잡는다.
+    // 상한과의 여유가 90% 넘는다.
     //
     // **판정은 CPU 시간이다**(`threadCpuMsForTest` 주석의 실측) — 벽시계는 부하가 걸린 로컬에서 2 초 선을 넘었다.
-    try testing.expect(cpu < 2000);
+    try testing.expect(cpu < line_ms);
 }
 
 test "[측정] 큰 문서 전체 접기 — 보이는 줄 다시 만들기" {

@@ -1433,7 +1433,7 @@ pub fn surfaceClipboardWriteRejected(self: *AppSession) void {
     const rejected = s.core.takeClipboardWriteRejected();
     s.unlockCore(self.io);
     if (!rejected) return;
-    // 값이 끼는 문장 — §6.3 보간 진입점. 버퍼 부족은 `i18n.format`이 UTF-8 경계 절단으로 흡수하므로
+    // 값이 끼는 문장 — §6.3 보간 진입점. 버퍼 부족은 `i18n.format`이 UTF-8 경계 절단(+「…」)으로 흡수하므로
     // 옛 `catch <짧은 폴백>` 은 필요 없다(끼는 값이 숫자라 길이가 사실상 고정이다).
     const mb = terminal.clipboard_max_bytes / 1_000_000;
     self.showNoticeFmt(.term_clipboard_too_large, &.{.{ .d = @intCast(mb) }});

@@ -261,14 +261,7 @@ fn buildDiagnosticLines(self: *AppSession, term: *Term, offset: u32) error{OutOf
     }.f);
     var buf: [512]u8 = undefined;
     for (covering[0..n]) |d| {
-        const text: []const u8 = switch (d.source) {
-            .syntax => if (d.message.len > 0)
-                maru.i18n.format(&buf, maru.i18n.t(.diag_missing), &.{.{ .s = d.message }})
-            else
-                maru.i18n.t(.diag_syntax_error),
-            .lsp, .lint => firstLine(d.message),
-        };
-        try appendLine(self, text, .surface_fg);
+        try appendLine(self, diagnosticText(d, &buf), .surface_fg);
         const source: []const u8 = if (d.source == .syntax) "" else server_name;
         if (source.len == 0 and d.code.len == 0) continue;
         var src_buf: [256]u8 = undefined;
@@ -281,6 +274,34 @@ fn buildDiagnosticLines(self: *AppSession, term: *Term, offset: u32) error{OutOf
             // 남기는 이유는 계약(§8.2b 「코드만이면 `(코드)`」)이 린트를 위해 그 모양을 정해 뒀기 때문이다.
             std.fmt.bufPrint(&src_buf, " ({s})", .{d.code}) catch continue;
         try appendLine(self, src_line, .muted_fg);
+    }
+}
+
+/// 진단 한 개의 호버 문장(메시지 줄). 구문 오류는 i18n 문장 — 기대 토큰이 있으면(tree-sitter MISSING) `diag_missing`
+/// 에 끼우고, 없으면(ERROR) 고정 문장. 서버·린트 진단은 메시지 첫 줄 그대로.
+fn diagnosticText(d: diagnostic.Diagnostic, buf: []u8) []const u8 {
+    return switch (d.source) {
+        .syntax => if (d.message.len > 0)
+            maru.i18n.format(buf, maru.i18n.t(.diag_missing), &.{.{ .s = d.message }})
+        else
+            maru.i18n.t(.diag_syntax_error),
+        .lsp, .lint => firstLine(d.message),
+    };
+}
+
+// 구문 오류의 MISSING 진단 호버는 **기대 토큰을 실제로 보인다** — 틀이 `{s}` 였을 때 `format` 이 자리표시자로 안 봐
+// 「빠짐: {s}」가 그대로 떴다. 제품 호버 판정자(HOVB2)는 픽스처가 ERROR(메시지 없음)를 내 이 갈래를 타지 않았다.
+test "diagnosticText: 구문 오류 MISSING 은 기대 토큰을 끼운 i18n 문장이다 — 원문 자리표시자가 남지 않는다" {
+    var buf: [512]u8 = undefined;
+    inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |lang| {
+        const saved = maru.i18n.lang();
+        maru.i18n.setLang(lang);
+        defer maru.i18n.setLang(saved);
+        const missing = diagnosticText(.{ .start = 0, .end = 1, .severity = .@"error", .source = .syntax, .message = ")" }, &buf);
+        try std.testing.expect(std.mem.indexOf(u8, missing, ")") != null);
+        try std.testing.expect(std.mem.indexOfScalar(u8, missing, '{') == null);
+        const err = diagnosticText(.{ .start = 0, .end = 1, .severity = .@"error", .source = .syntax, .message = "" }, &buf);
+        try std.testing.expectEqualStrings(maru.i18n.t(.diag_syntax_error), err);
     }
 }
 

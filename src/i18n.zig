@@ -566,7 +566,7 @@ const Table = struct {
     cfg_editor_quick_suggestions: [:0]const u8,
     /// 호버 박스의 구문 오류 문장(visual-mapping §5.4 「메시지는 재료」 — 문장은 표시 자리가 만든다).
     diag_syntax_error: [:0]const u8,
-    /// `{s}` = 기대 토큰.
+    /// `{0}` = 기대 토큰. (`{s}` 로 두었더니 `format` 이 자리표시자로 안 봐 호버에 「빠짐: {s}」가 그대로 떴다.)
     diag_missing: [:0]const u8,
     cfg_editor_cursor_shape: [:0]const u8,
     cfg_statusbar_show: [:0]const u8,
@@ -1790,7 +1790,7 @@ const en: Table = .{
     .cfg_editor_parameter_hints = "Parameter hints (signature while typing a call)",
     .cfg_editor_quick_suggestions = "Quick suggestions (completion list while typing)",
     .diag_syntax_error = "Syntax error",
-    .diag_missing = "Missing: {s}",
+    .diag_missing = "Missing: {0}",
     .cfg_editor_cursor_shape = "Caret shape",
     .cfg_statusbar_show = "Show the bottom status bar",
     .cfg_quick_height_fraction = "Thickness ratio (of the screen)",
@@ -2568,7 +2568,7 @@ const ko: Table = .{
     .cfg_editor_parameter_hints = "시그니처 힌트(호출을 칠 때 매개변수 안내)",
     .cfg_editor_quick_suggestions = "자동완성(타이핑하면 완성 목록)",
     .diag_syntax_error = "구문 오류",
-    .diag_missing = "빠짐: {s}",
+    .diag_missing = "빠짐: {0}",
     .cfg_editor_cursor_shape = "커서 모양",
     .cfg_statusbar_show = "하단 상태표시줄 표시",
     .cfg_quick_height_fraction = "두께 비율(화면 대비)",
@@ -2737,44 +2737,73 @@ pub const Arg = union(enum) {
 /// 아니고, 호출부 수백 곳에 에러 처리를 물리면 그 자체가 부채가 된다.
 ///   - 범위 밖 인덱스(`{9}`인데 인자 2개) → **원문 그대로** 남긴다. 무엇이 잘못됐는지 화면에 보인다.
 ///   - 자리표시자가 아닌 중괄호(`{abc}`) → 그대로 복사한다.
-///   - 버퍼 부족 → UTF-8 경계에서 자른다(`width.truncateToBoundary` — 깨진 바이트를 남기지 않는다).
+///   - 버퍼 부족 → UTF-8 경계에서 자르고 끝을 「…」로 바꿔 **잘렸음을 보인다**(틀의 글자든 인자든). 조용히 끊으면
+///     중간이 잘린 문장이 완결된 것처럼 읽힌다 — notice 가 줄을 나눠 끝까지 보이게 된 뒤로 실제로 그렇게 보였다
+///     (LSP 오류·경로처럼 길이에 끝이 없는 인자). 버퍼가 「…」(3바이트)보다 작으면 경계에서 자르기만 한다.
 pub fn format(buf: []u8, template: []const u8, args: []const Arg) []u8 {
     var w: usize = 0;
     var i: usize = 0;
-    while (i < template.len) {
+    var truncated = false;
+    while (i < template.len and !truncated) {
         if (template[i] == '{') {
             if (std.mem.indexOfScalarPos(u8, template, i, '}')) |close| {
                 if (std.fmt.parseInt(usize, template[i + 1 .. close], 10)) |idx| {
-                    if (idx < args.len) {
-                        w += writeArg(buf[w..], args[idx]);
-                    } else {
-                        // 인자 부족 — 원문을 남겨 번역 실수가 화면에 드러나게 한다.
-                        w += appendTruncated(buf[w..], template[i .. close + 1]);
-                    }
+                    // 인자 부족이면 원문을 남겨 번역 실수가 화면에 드러나게 한다.
+                    const piece: Piece = if (idx < args.len) argPiece(args[idx]) else .{ .bytes = template[i .. close + 1] };
+                    var tmp: [24]u8 = undefined;
+                    const src = piece.slice(&tmp);
+                    const n = appendTruncated(buf[w..], src);
+                    w += n;
+                    truncated = n < src.len;
                     i = close + 1;
                     continue;
                 } else |_| {}
             }
         }
-        // 자리표시자가 아닌 바이트는 그대로. 여기서 잘리면 더 쓸 공간이 없다는 뜻이라 멈춘다.
-        if (w >= buf.len) break;
-        buf[w] = template[i];
-        w += 1;
-        i += 1;
+        // 자리표시자가 아닌 글자는 그대로 — **글자 단위로** 옮긴다. 바이트 단위로 옮기면 버퍼가 다중 바이트 글자(한국어
+        // 틀) 중간에서 차 깨진 바이트가 남았다.
+        const end = i + codepointLen(template, i);
+        const n = appendTruncated(buf[w..], template[i..end]);
+        w += n;
+        truncated = n < end - i;
+        i = end;
     }
-    return buf[0..w];
+    if (!truncated) return buf[0..w];
+    const ellipsis = "…";
+    if (buf.len < ellipsis.len) return buf[0..w];
+    const keep = width.truncateToBoundary(buf[0..w], buf.len - ellipsis.len);
+    @memcpy(buf[keep..][0..ellipsis.len], ellipsis);
+    return buf[0 .. keep + ellipsis.len];
 }
 
-fn writeArg(dst: []u8, arg: Arg) usize {
-    switch (arg) {
-        .s => |v| return appendTruncated(dst, v),
-        .d => |v| {
-            // 숫자 포맷의 틀은 리터럴이라 std.fmt을 쓸 수 있다(런타임 틀이 아니다).
-            var tmp: [24]u8 = undefined;
-            const printed = std.fmt.bufPrint(&tmp, "{d}", .{v}) catch return 0;
-            return appendTruncated(dst, printed);
-        },
+/// `bytes[i]` 에서 시작하는 글자 하나의 바이트 수. 온전하지 않은 바이트는 **1**이다 — lead 길이만 믿고 묶으면 깨진
+/// 바이트 뒤의 `{` 를 삼켜 자리표시자가 원문으로 남았다(렌더러 `text_layout.decodeCodepoint` 와 같은 단위).
+fn codepointLen(bytes: []const u8, i: usize) usize {
+    const len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch return 1;
+    if (i + len > bytes.len) return 1;
+    _ = std.unicode.utf8Decode(bytes[i .. i + len]) catch return 1;
+    return len;
+}
+
+/// 자리에 들어갈 바이트 — 문자열 인자는 그대로, 숫자는 작은 임시 버퍼에 찍는다.
+const Piece = union(enum) {
+    bytes: []const u8,
+    number: i64,
+
+    fn slice(self: Piece, tmp: *[24]u8) []const u8 {
+        return switch (self) {
+            .bytes => |b| b,
+            // 숫자 포맷의 틀은 리터럴이라 std.fmt을 쓸 수 있다(런타임 틀이 아니다). i64 는 24바이트에 늘 들어간다.
+            .number => |v| std.fmt.bufPrint(tmp, "{d}", .{v}) catch unreachable,
+        };
     }
+};
+
+fn argPiece(arg: Arg) Piece {
+    return switch (arg) {
+        .s => |v| .{ .bytes = v },
+        .d => |v| .{ .number = v },
+    };
 }
 
 /// `src`를 `dst`에 쓰되 공간이 모자라면 UTF-8 경계에서 자른다. 쓴 바이트 수를 돌려준다.
@@ -2910,6 +2939,45 @@ test "언어 테이블은 자리표시자 집합이 같아야 한다 — 번역�
     }
 }
 
+test "`{s}` 는 `fillName` 이 채우는 LSP 문구에만 있다 — 나머지 중괄호는 전부 `format` 의 `{0}` 꼴이다" {
+    // 보간 문법은 `{0}`·`{1}` 하나다(§6.3). 숫자가 아닌 중괄호(`{s}`·`{d}`·`{}`·`{name}`)는 `format` 이 자리표시자로
+    // 보지 않아 **원문 그대로** 남는다 — `diag_missing` 이 그래서 호버에 「빠짐: {s}」를 그렸다. LSP 문구만은 따로
+    // `editor/lsp.zig` `fillName` 이 **첫 `{s}` 하나**를 찾아 채운다(그 경로를 `format` 으로 합치는 것은 후속).
+    // 금지된 모양을 세는 대신 **허용된 모양**을 센다: 허용 키는 `{s}` 정확히 하나 외의 중괄호가 없고, 나머지 키는
+    // 모든 `{…}` 안이 정수다. (`\u{…}` 이스케이프는 comptime 에 이미 글자로 풀려 여기 오지 않는다.)
+    @setEvalBranchQuota(20_000); // 두 겹 `inline for`(키 × 두 언어)를 펼친다 — 기본 한도 1000 을 넘는다
+    const allowed = [_][]const u8{ "lsp_trust_prompt", "lsp_status_missing", "lsp_status_asking", "lsp_status_starting", "lsp_status_restarting", "lsp_status_failed", "lsp_status_denied" };
+    var fill_name_keys: usize = 0;
+    inline for (@typeInfo(Table).@"struct".fields) |f| {
+        inline for (.{ en, ko }) |tbl| {
+            const v: []const u8 = @field(tbl, f.name);
+            var is_allowed = false;
+            for (allowed) |name| is_allowed = is_allowed or std.mem.eql(u8, name, f.name);
+            var s_count: usize = 0;
+            var i: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, v, i, '{')) |open| {
+                const close = std.mem.indexOfScalarPos(u8, v, open, '}') orelse break;
+                const inner = v[open + 1 .. close];
+                const ok = if (is_allowed)
+                    std.mem.eql(u8, inner, "s")
+                else if (std.fmt.parseInt(usize, inner, 10)) |_| true else |_| false;
+                if (!ok) {
+                    std.debug.print("자리표시자 모양: .{s} = \"{s}\" — `{{{s}}}` (허용 키는 `{{s}}` 하나, 나머지는 `{{0}}` 꼴)\n", .{ f.name, v, inner });
+                    return error.TestUnexpectedResult;
+                }
+                if (is_allowed) s_count += 1;
+                i = close + 1;
+            }
+            if (is_allowed) {
+                // `fillName` 은 첫 `{s}` 하나만 채운다 — 없거나 둘이면 이름이 빠지거나 둘째가 원문으로 남는다.
+                try testing.expectEqual(@as(usize, 1), s_count);
+                fill_name_keys += 1;
+            }
+        }
+    }
+    try testing.expectEqual(allowed.len * 2, fill_name_keys); // 허용 목록은 실제 키다(두 언어) — 이름이 낡으면 여기서 드러난다
+}
+
 test "영어 테이블에 한글이 남아 있지 않다 — 옮기다 만 항목을 잡는다" {
     // 리터럴을 키로 옮길 때 `en` 쪽에 원문을 그대로 붙여 두는 실수가 가장 흔하다.
     inline for (@typeInfo(Table).@"struct".fields) |f| {
@@ -3010,17 +3078,50 @@ test "보간: 자리표시자가 아닌 중괄호는 그대로 복사한다" {
     try testing.expectEqualStrings("여는 { 만", format(&buf, "여는 { 만", &.{}));
 }
 
-test "보간: 버퍼가 모자라면 UTF-8 경계에서 자른다 — 깨진 바이트를 남기지 않는다" {
-    // "가"는 3바이트다. 4바이트 버퍼에 "가나"를 넣으면 첫 글자만 남아야 하고,
-    // 두 번째 글자의 앞 1바이트가 남아 화면에 U+FFFD가 뜨면 안 된다.
-    var small: [4]u8 = undefined;
-    const out = format(&small, "{0}", &.{.{ .s = "가나" }});
-    try testing.expectEqualStrings("가", out);
+test "보간: 버퍼가 모자라면 UTF-8 경계에서 자르고 「…」로 잘렸음을 보인다 — 깨진 바이트를 남기지 않는다" {
+    // "가"는 3바이트다. 7바이트 버퍼에 "가나다"를 넣으면 「…」(3바이트) 자리를 남기고 「가」까지 — 「가…」.
+    // 두 번째 글자의 앞 바이트가 남아 화면에 U+FFFD가 뜨면 안 되고, 잘렸다는 것이 보여야 한다.
+    var small: [7]u8 = undefined;
+    const out = format(&small, "{0}", &.{.{ .s = "가나다" }});
+    try testing.expectEqualStrings("가…", out);
     try testing.expect(std.unicode.utf8ValidateSlice(out));
 
-    // 틀의 리터럴 부분도 같은 규율을 따른다(공간이 없으면 멈춘다).
+    // 틀의 리터럴 부분도 같은 규율이다 — 한국어 틀이 다중 바이트 글자 중간에서 끊기지 않고 「…」로 끝난다.
+    var mid: [8]u8 = undefined;
+    const t_out = format(&mid, "가나다라 {0}", &.{.{ .s = "x" }});
+    try testing.expectEqualStrings("가…", t_out);
+    for (0..32) |n| {
+        // 모든 버퍼 크기에서 깨진 바이트가 없다(틀·인자·숫자 어디서 끊겨도).
+        var b: [32]u8 = undefined;
+        const r = format(b[0..n], "경로 {0} 를 {1}번 열 수 없습니다", &.{ .{ .s = "/tmp/한글.txt" }, .{ .d = 12345 } });
+        try testing.expect(std.unicode.utf8ValidateSlice(r));
+        try testing.expect(r.len <= n);
+    }
+
+    // 「…」보다 작은 버퍼는 경계에서 자르기만 한다.
     var tiny: [2]u8 = undefined;
-    try testing.expect(std.unicode.utf8ValidateSlice(format(&tiny, "ab{0}", &.{.{ .s = "cd" }})));
+    try testing.expectEqualStrings("ab", format(&tiny, "ab{0}", &.{.{ .s = "cd" }}));
+
+    // 잘린 자리가 숫자든 원문으로 남는 범위 밖 번호든 같다 — 「…」로 끝난다.
+    var num6: [6]u8 = undefined;
+    try testing.expectEqualStrings("n=1…", format(&num6, "n={0}", &.{.{ .d = 12345 }})); // 「…」 3바이트를 남기고 채운다
+    var raw5: [5]u8 = undefined;
+    try testing.expectEqualStrings("ab…", format(&raw5, "abc{9}", &.{}));
+    // 「…」 자리는 **버퍼 끝** 기준으로 비운다 — 이미 쓴 길이 기준이면 ASCII 뒤 다중 바이트에서 칸을 남겼다.
+    var mixed: [7]u8 = undefined;
+    try testing.expectEqualStrings("abcd…", format(&mixed, "abcde가", &.{}));
+    // 잘린 뒤에는 멈춘다 — 작은 버퍼에서 못 들어간 글자를 건너뛰고 뒤 글자를 넣지 않는다.
+    var two: [2]u8 = undefined;
+    try testing.expectEqualStrings("", format(&two, "가a", &.{}));
+    // 깨진 바이트는 한 글자(1바이트)로 걷는다 — 뒤의 자리표시자를 삼키지 않는다.
+    var wide: [16]u8 = undefined;
+    try testing.expectEqualStrings("\xE0X", format(&wide, "\xE0{0}", &.{.{ .s = "X" }}));
+
+    // 딱 맞으면 잘린 것이 아니다 — 「…」를 붙이지 않는다.
+    var exact: [6]u8 = undefined;
+    try testing.expectEqualStrings("가나", format(&exact, "{0}", &.{.{ .s = "가나" }}));
+    var exact_num: [7]u8 = undefined;
+    try testing.expectEqualStrings("n=12345", format(&exact_num, "n={0}", &.{.{ .d = 12345 }}));
 }
 
 test "보간: 자리표시자 문법의 경계 — 닫히지 않음·빈 중괄호·음수·거대 인덱스" {

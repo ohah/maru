@@ -2066,6 +2066,13 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   단위로 이유와 함께 허용, 쓰이지 않는 허용 항목은 실패)과, 창 닫기·복원·탭·pane 네 teardown 이 「목록에서 먼저 빼고 푼다」
   꼴임을 잰다. 값 판정자 `TAB-UAF` 둘(창 닫기·복원, 탭 셋)은 푼 자리를 0xaa 로 덮는 격리 할당기로 ABI suite 에서 돈다
   (전용 `test-teardown-uaf`, PR 의 `test-macos-app-host-abi`). 수정 전 코드에서 경계 2개 red.
+  **재접속 얼림 관문**(`test-attachment-freeze-gate`, check-boundaries — PR 에서 돈다): std-only leaf
+  `attachment_freeze_gate.zig` 의 표 테스트 4개가 live 면 진행, live 가 아니면 drain 은 `.idle`·비변경 RPC 는 바쁨·detach 는
+  생략이고 진행하는 연산이 없음을 잰다. wiring 경계 3개가 `freezeAction` 이 `isLive`(`attachmentLive`) 하나만 보는지,
+  `pumpDelta` 의 관문이 수명 관문 뒤·`statePtr()`·poison 캡처 무장·attachment 분기 앞에 있는지, 관측·선택·링크·검색·resync
+  입구와 detach 가 첫 payload 읽기 앞에서 관문을 지나는지, 그리고 `self` 함수 중 수명 관문만 지나 곧바로 payload 를 읽는 것이
+  없는지(새 RPC 도 이름이 불린다)를 고정한다. `pumpScreenInternal` 의 `frame_malformed` 네 자리가 모두 단계·오류 이름을 남기는지도
+  잰다. 수정 전 코드에서 wiring 3개 모두 red. 실제 재접속으로 얼린 창을 재현하는 E2E 는 없다.
   **RemoteRuntime 테스트 fixture 초기화**(`test-remote-runtime-fixture-init`, check-boundaries — PR 에서 돈다): 제품
   constructor(`spawnWithConnection`·`attachExistingWithConnection`)의 in-place 초기화 블록이 대입하는 값 칸 집합을 fixture
   공통 입구 `initializeTestGeneration` 의 대입 집합과 대조한다. 일부러 안 세우는 칸(판정자별 입력 경로, 신원 owner)은 이유와 함께

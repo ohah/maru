@@ -990,6 +990,18 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   `adopt_invalid_authority`·`adopt_failed`(연결은 됐지만 채택 실패). `stale_deadline=true` 는 「다시 넣은 job 이 처음 정한 데드라인을
   그대로 끌고 가 연결도 안 해 보고 끝났다」 가설의 직접 증거다. `age_ms` 는 poison 시각이 아니라 첫 입장(admission 시작) 기준이고, awake 시계라 잠자기 동안은 흐르지 않는다(벽시계보다 작게 나온다).
   판정자는 `test-reconnect-failure-log`(check-boundaries)다.
+  **재접속이 얼린 attachment 는 아무도 읽지 않는다(2026-10-05).** 재접속은 여러 프레임에 걸친다 — `connected` 다음 전이가
+  host 의 모든 runtime 을 `retirement_prepared` 로 얼리고, 커밋 뒤에는 새 세대가 runtime 마다 게시될 때까지 현재 세대가
+  `cleaning`/`terminal` 로 남는다. 그 창에도 runtime 은 `backend.runtimes` 에 있어 창 drain·관측 probe·사용자 조작이 부를 수
+  있고, payload 접근(`payloadMut`/`payloadConst`)은 live 가 아니면 abort 한다. 실측: `frame_malformed` poison → `reconnect job
+  connected` → 같은 프레임의 창 drain 이 `pumpDelta` → `statePtr()` 에서 `generation attachment is not live … lifecycle_raw=7` 로
+  앱이 죽었다. 유지보수 펌프는 live 가 아닌 runtime 을 건너뛰었지만, 그러면 프레임 요약이 없어 창 drain 이 직접 펌프했다.
+  이제 관문은 하나의 판정(`attachment_freeze_gate.decide`, live 는 `GenerationAttachment.isLive` 하나)에서 나온다: drain
+  (`pumpDelta`)은 `.idle` 로 이번 프레임만 쉬고 세션을 끝내지 않는다, 비변경 RPC(관측·선택·링크·검색·resync)는
+  `AdminBusy` 로 거절한다, 탭 닫기의 detach 는 보내지 않는다(옛 연결은 재접속이 닫을 때 EOF 로 lease 를 회수한다). 변경 계열은
+  `mutationAllowed`(이미 `isLive` 를 본다)가 막는다. 화면 배치 해석 실패로 `frame_malformed` 를 낼 때는
+  `remote screen batch malformed: stage=<decoded_cells|recovery_snapshot|snapshot|delta> err=<이름> stream=… bytes=…` 를 남긴다.
+  판정자는 `test-attachment-freeze-gate`(check-boundaries)다.
   e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,
   외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는

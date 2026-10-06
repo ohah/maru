@@ -6465,6 +6465,39 @@ pub fn build(b: *std.Build) void {
     reconnect_failure_log_step.dependOn(&run_failure_log_wiring.step);
     boundary_step.dependOn(reconnect_failure_log_step);
 
+    // 재접속이 attachment 를 **얼린 동안** payload 에 닿는 자리가 모두 관문을 지나는가(2026-10-05: frame_malformed
+    // poison → 재접속 → 같은 프레임의 창 drain 이 `retirement_prepared` 세대의 payload 를 읽다 앱이 abort 했다).
+    // 판정은 std-only leaf 라 PR 에서 돌고, 관문이 payload 읽기 앞에 있는지는 wiring 경계가 잰다.
+    const freeze_gate_step = b.step(
+        "test-attachment-freeze-gate",
+        "Reconnect-frozen attachments are never read by drain, read RPCs or detach",
+    );
+    const freeze_gate_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/attachment_freeze_gate.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"재접속 얼림 관문"},
+    });
+    const run_freeze_gate_tests = b.addRunArtifact(freeze_gate_tests);
+    run_freeze_gate_tests.addArg("--maru-expect-tests=4");
+    run_freeze_gate_tests.addArg("--maru-expect-passed=4");
+    freeze_gate_step.dependOn(&run_freeze_gate_tests.step);
+    const freeze_gate_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/attachment_freeze_gate_wiring_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_freeze_gate_wiring = b.addRunArtifact(freeze_gate_wiring_tests);
+    run_freeze_gate_wiring.addArg("--maru-expect-tests=3");
+    run_freeze_gate_wiring.addArg("--maru-expect-passed=3");
+    run_freeze_gate_wiring.setCwd(b.path("."));
+    freeze_gate_step.dependOn(&run_freeze_gate_wiring.step);
+    boundary_step.dependOn(freeze_gate_step);
+
     // 저장된 workspace 를 **읽지 못한 실행이 침묵하지 않고 파일을 보존하는가**(2026-10-05: v1→v2 헤더 변경 뒤 v1 저장본이
     // `BadHeader` 로 거절됐는데 로그엔 래치 줄 하나뿐이라 host 에 살아 있던 세션 34 개가 사라진 것처럼 보였다). Zig 의
     // window_count 가 오류 이름을, Swift 의 `count < 0` 갈래가 결과와 래치를 제자리에서 남기는지 글자로 잰다.

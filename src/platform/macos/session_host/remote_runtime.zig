@@ -43,6 +43,7 @@ const reconnect_mutation_seal = @import("reconnect_mutation_seal.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const generation_attachment_mod = @import("generation_attachment.zig");
+const attachment_freeze_gate = @import("attachment_freeze_gate.zig");
 const generation_contract = @import("generation_attachment_contract.zig");
 const generation_event_contract_mod = @import("generation_event_contract.zig");
 const pending_event_preparation_mod = @import("pending_event_preparation.zig");
@@ -4334,6 +4335,17 @@ pub const RemoteRuntime = struct {
         };
     }
 
+    /// 재접속이 이 runtime 의 attachment 를 얼린 동안 `op` 가 무엇을 하는가(`attachment_freeze_gate`).
+    /// live 판정은 `backend_api.attachmentLive` → `GenerationAttachment.isLive` 하나에서만 나온다.
+    ///
+    /// 비변경 RPC(관측·선택·링크·검색·resync)는 수명 관문(`admitRuntimeOperation`) 바로 뒤에서 `.read_rpc` 로
+    /// 묻는다 — 수명 관문은 attachment 생애주기를 보지 않아, 재접속이 얼린 창에서 그대로 지나 첫 줄의
+    /// `streamId()` 가 payload 를 읽다 abort 했다. 얼린 동안은 같은 `AdminBusy` 로 거절한다. 변경 계열은
+    /// `mutationAllowed` 가 이미 `isLive` 를 본다.
+    fn freezeAction(self: *const RemoteRuntime, op: attachment_freeze_gate.Op) attachment_freeze_gate.Action {
+        return attachment_freeze_gate.decide(backend_api.attachmentLive(self), op);
+    }
+
     fn admitDestructiveRuntimeOperation(self: *const RemoteRuntime) void {
         self.admitRuntimeOperation() catch
             process_seal_service.fatalIntegrity(.destructive_reentry);
@@ -5950,6 +5962,10 @@ pub const RemoteRuntime = struct {
     ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!PumpResult {
         client_idle_pump_evidence.recordPumpDelta();
         try self.admitRuntimeOperation();
+        // **재접속이 얼린 attachment 는 펌프하지 않는다**(2026-10-05 abort). 유지보수 펌프가 live 가 아닌 runtime 을
+        // 건너뛰면 프레임 요약이 없어 창 drain 이 여기로 직접 온다 — 아래 `statePtr()` 가 payload 를 읽기 전에 멈춘다.
+        // 세션은 끝내지 않는다(오류가 아니라 `.idle`): 새 세대가 게시되면 다음 프레임부터 이어서 펌프한다.
+        if (self.freezeAction(.pump) != .proceed) return .idle;
         switch (self.currentGeneration().attachment) {
             .legacy => return self.pumpDeltaInner(),
             .generation => {},
@@ -6684,6 +6700,7 @@ pub const RemoteRuntime = struct {
     /// 받아 generation을 리셋해 복구한다(delta는 base_generation이 현재라 stale client를 못 고쳐 snapshot이 유일한 복구). 응답 무시.
     pub fn requestResync(self: *RemoteRuntime) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
+        if (self.freezeAction(.read_rpc) != .proceed) return error.AdminBusy;
         var buf: [64]u8 = undefined;
         const encoded = control_response_wire.encodeParams(&buf, .{ .resync = .{
             .stream_id = self.currentGeneration().attachment.streamId(),
@@ -6701,6 +6718,7 @@ pub const RemoteRuntime = struct {
     /// 응답을 만든 시점의 full-state다.
     pub fn refreshObservation(self: *RemoteRuntime) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
+        if (self.freezeAction(.read_rpc) != .proceed) return error.AdminBusy;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.currentGeneration().attachment.streamId()}) catch return error.OutOfMemory;
         var before = self.currentGeneration().observation.revision;
@@ -6758,6 +6776,7 @@ pub const RemoteRuntime = struct {
     /// 보이는 선택을 추출한다. 반환 텍스트는 caller 소유(빈 선택/오류면 null). `block`은 std.fmt가 true/false로 찍어 유효 JSON.
     pub fn selectedText(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
         try self.admitRuntimeOperation();
+        if (self.freezeAction(.read_rpc) != .proceed) return error.AdminBusy;
         if (!self.connectionCapabilities().runtime_selected_text or self.attachedAsObserver())
             return self.selectedTextFromProjection(span);
         var buf: [208]u8 = undefined;
@@ -6843,6 +6862,7 @@ pub const RemoteRuntime = struct {
 
     pub fn linkAt(self: *RemoteRuntime, row: u16, col: u16, scopes: u8) client_mod.ClientError!?RemoteLink {
         try self.admitRuntimeOperation();
+        if (self.freezeAction(.read_rpc) != .proceed) return error.AdminBusy;
         if (!self.connectionCapabilities().runtime_link_at) return null;
         var buf: [160]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"row\":{d},\"col\":{d},\"scopes\":{d}}}", .{ self.currentGeneration().attachment.streamId(), row, col, scopes }) catch return error.OutOfMemory;
@@ -7060,6 +7080,7 @@ pub const RemoteRuntime = struct {
 
     pub fn find(self: *RemoteRuntime, query: []const u8, cur_index: u32, scroll: bool, regex: bool, out_spans: *std.ArrayList(terminal.SelectionSpan)) client_mod.ClientError!FindResult {
         try self.admitRuntimeOperation();
+        if (self.freezeAction(.read_rpc) != .proceed) return error.AdminBusy;
         if (scroll and !self.gateMutation(.find_scroll)) return error.Unauthorized;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
         var mutation_active = false;
@@ -7970,6 +7991,12 @@ pub const RemoteRuntime = struct {
 
     fn detachBestEffort(self: *RemoteRuntime) void {
         if (self.currentAttachmentTerminal()) return;
+        // 재접속이 얼린 동안(은퇴 준비·정리 중) 탭을 닫으면 아래 `streamId()` 가 payload 를 읽다 abort 한다.
+        // 그 창에는 보낼 연결이 없다 — 옛 연결은 재접속이 닫을 때 EOF 로 controller lease 를 회수한다.
+        if (self.freezeAction(.detach) != .proceed) {
+            logDetachIncomplete("attachment_not_live", error.AdminBusy);
+            return;
+        }
         if (self.currentGeneration().attachment.streamId() == 0) return;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.currentGeneration().attachment.streamId()}) catch return;

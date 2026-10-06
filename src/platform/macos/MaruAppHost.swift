@@ -8467,6 +8467,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    private func testDropLink(_ zone: String, _ url: String, _ content: NSView) {
+        guard let window, let terminal = Self.firstTerminalView(in: window.contentView), let session = appSession else { return }
+        var points = [Double](repeating: -1, count: 6)
+        _ = points.withUnsafeMutableBufferPointer { maru_macos_app_session_test_url_drop_points(session, $0.baseAddress) }
+        let index = ["webtab": 0, "emptybar": 2, "band": 4][zone] ?? -1
+        guard index >= 0, points[index] >= 0 else { return Self.testReport("droplink none \(zone)") }
+        let scale = archiveSmokeRenderScale(window)
+        let local = NSPoint(x: points[index] / scale, y: terminal.bounds.height - points[index + 1] / scale)
+        let pb = NSPasteboard(name: NSPasteboard.Name("maru-test-drag-\(getpid())"))
+        pb.clearContents()
+        pb.setString(url, forType: .URL)
+        let info = TestDraggingInfo(window: window, pasteboard: pb)
+        info.location = terminal.convert(local, to: nil)
+        _ = terminal.draggingEntered(info)
+        let op = terminal.draggingUpdated(info)
+        let ok = !op.isEmpty && terminal.prepareForDragOperation(info) && terminal.performDragOperation(info)
+        terminal.draggingEnded(info)
+        Self.testReport("droplink \(zone) op=\(op.rawValue) ok=\(ok)")
+    }
+
     private func testViewMouse(_ line: [String], _ content: NSView, in target: NSWindow? = nil) {
         guard let window = target ?? window, let terminal = Self.firstTerminalView(in: window.contentView) else { return }
         let fx = Double(line[2]) ?? 0, fy = Double(line[3]) ?? 0, dx = Double(line[4]) ?? 0, dy = Double(line[5]) ?? 0
@@ -8791,6 +8811,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // performDragOperation·Ended·Exited)를 가짜 끌기 정보로 부른다(진짜 끌기 세션은 사용자 포인터가 필요하다).
                 // 단계 enter(끌어 온 것을 판정자 전용 이름의 pasteboard 에 쓴다)·move·drop·exit. 돌려준 동작을 보고한다.
                 testDrag(line, view)
+            case "droplink" where line.count >= 3:
+                // W6l①: droplink webtab|emptybar|band 주소 — 그 자리(Zig 의 hit-test 로 찾은 한 점)에 링크만 담은 끌기를 놓는다(`drag` 와 같은
+                // 가짜 끌기 정보). 자리를 못 찾으면 droplink none.
+                testDropLink(line[1], line[2], view)
             case "menupick" where line.count >= 2:
                 testPickOsrContextMenu(line.dropFirst().joined(separator: " "))
             case "menuclose":
@@ -10447,6 +10471,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 활성 pane에만 들어간다. 좌표는 창 좌표(draggingLocation)를 마우스 경로와 같은 backingPx로 환산해
             // 넘기고, pane 판정·가드는 좌표계 권위를 가진 Zig가 한다(routeDropAtPoint).
             let (xPx, yPx) = backingPx(view.convert(windowPoint, from: nil), in: view)
+            // W6l①: 링크(파일 아님)를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열거나 새 웹 탭으로(Chrome 처럼 —
+            // 사용자 결정 2026-10-06). 0 이면 해당 없음 — 아래 기존 경로(터미널에 넣기)로.
+            if let link = Self.dropLink(pb) {
+                let bytes = Array(link.utf8)
+                let opened = bytes.withUnsafeBufferPointer { maru_macos_app_session_drop_url(session, xPx, yPx, $0.baseAddress, $0.count) }
+                if opened != 0 {
+                    if opened > 0 { markMetalNeedsRedraw(); inserted = true }
+                    return
+                }
+            }
             let route = maru_macos_app_session_route_drop(session, xPx, yPx)
             // **-1 = 거부**(모달/오버레이 열림·대상이 web pane): 내용을 삽입하지 **않는다**. 거부를 무시하고
             // 삽입하면 활성 pane에 들어가 — 애초에 막으려던 오삽입이 그대로 일어난다(code-review).
@@ -10455,6 +10489,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             inserted = handleDrop(pb)
         }
         return inserted
+    }
+
+    /// 놓은 링크(W6l①) — 파일이 아닌 주소 하나(`public.url`). 없으면 nil.
+    private static func dropLink(_ pb: NSPasteboard) -> String? {
+        guard let url = pb.string(forType: .URL), !url.isEmpty, !url.lowercased().hasPrefix("file:") else { return nil }
+        return url
     }
 
     /// 이 pasteboard에 **삽입할 내용이 있는가** — 포커스를 옮기기 전에 값싸게 판정한다(빈 드롭이 pane 포커스만

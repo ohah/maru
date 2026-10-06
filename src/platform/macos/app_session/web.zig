@@ -56,6 +56,11 @@ const tab_ops = @import("tab.zig");
 const terminal = app_session_mod.terminal;
 const web_panel_layout = app_session_mod.web_panel_layout;
 const workspace_ops = @import("workspace.zig");
+const sidebar_ops = @import("sidebar.zig");
+const settings_ops = @import("settings.zig");
+const Model = app_session_mod.Model;
+const Pane = app_session_mod.Pane;
+const PaneTree = app_session_mod.PaneTree;
 
 /// 주소창 편집 밴드(탭 바 바로 아래)가 포인트를 포함하는가 — mouse-down 클릭-어웨이(cancelAddrEdit)가 "자기 밴드
 /// 재클릭(caret 재배치·nav 버튼)"만 살리게 판정한다(그 외 클릭이면 false → 편집 취소). 편집 아님/밴드 없음이면 false.
@@ -1374,6 +1379,99 @@ pub fn osrNewWindowsPending(self: *const AppSession) usize {
 pub fn osrTakeNewWindow(self: *AppSession) ?[]u8 {
     if (self.osr_new_windows.items.len == 0) return null;
     return self.osr_new_windows.orderedRemove(0);
+}
+
+/// 링크를 놓은 자리(W6l① — 사용자 결정 2026-10-06 「Chrome 처럼」): 웹 탭 머리면 그 탭, 활성 Term 이 웹인 pane 의 빈 탭 막대(‹ › + 와
+/// 마지막 탭 뒤 포함)면 새 웹 탭, 웹 탭의 주소 띠면 그 탭. 터미널 탭 머리·터미널 pane·본문은 해당 없음(지금처럼 셸에 넣는다 —
+/// 본문은 페이지가 먼저 받는다).
+const UrlDrop = union(enum) {
+    navigate: struct { pane: *Pane, index: usize },
+    new_tab: *Pane,
+};
+
+fn urlDropTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?UrlDrop {
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(self.allocator);
+    tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return null;
+    const pane = Model.paneAtPoint(leaf_rects.items, x_px, y_px) orelse return null;
+    if (pane.terms.items.len == 0) return null;
+    const rect = for (leaf_rects.items) |lr| {
+        if (lr.leaf == pane) break lr.rect;
+    } else return null;
+    const pb = pane_ops.paneBar(self, rect, pane) orelse return null;
+    const active = pane.active_term;
+    const active_is_web = active < pane.terms.items.len and isBrowserTerm(pane.terms.items[active]);
+    if (layout_math.pointInRect(x_px, y_px, pb.full)) {
+        if (term_ops.dropTermIndexAt(self, pane, leaf_rects.items, x_px, y_px)) |index| {
+            return if (isBrowserTerm(pane.terms.items[index])) .{ .navigate = .{ .pane = pane, .index = index } } else null;
+        }
+        return if (active_is_web) .{ .new_tab = pane } else null;
+    }
+    // 주소 띠 — 탭 바 바로 아래, 같은 높이(클릭 경로와 같은 자리).
+    const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + pb.full.h, .w = pb.full.w, .h = pb.full.h };
+    if (active_is_web and layout_math.pointInRect(x_px, y_px, band)) return .{ .navigate = .{ .pane = pane, .index = active } };
+    return null;
+}
+
+/// 시험 전용(W6l① 스모크 — 대본 `droplink`): 활성 pane 의 웹 탭 머리 한 점·빈 탭 막대 한 점·주소 띠 가운데(backing px, 왼쪽 위 원점).
+/// 각각 없으면 -1. 클릭·놓기와 같은 hit-test 로 찾는다(기하를 따로 계산하지 않는다).
+pub fn urlDropTestPoints(self: *AppSession) [6]f64 {
+    var out: [6]f64 = @splat(-1);
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(self.allocator);
+    tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch return out;
+    const pane = pane_ops.activePane(self);
+    const rect = for (leaf_rects.items) |lr| {
+        if (lr.leaf == pane) break lr.rect;
+    } else return out;
+    const pb = pane_ops.paneBar(self, rect, pane) orelse return out;
+    const bar_y: f64 = @floatFromInt(pb.tabs.y + pb.tabs.h / 2);
+    var seen_tab = false;
+    var px: u32 = pb.tabs.x;
+    while (px < pb.tabs.x + pb.tabs.w) : (px += 2) {
+        const fx: f64 = @floatFromInt(px);
+        if (term_ops.dropTermIndexAt(self, pane, leaf_rects.items, fx, bar_y)) |hit| {
+            seen_tab = true;
+            if (out[0] < 0 and isBrowserTerm(pane.terms.items[hit])) {
+                out[0] = fx;
+                out[1] = bar_y;
+            }
+        } else if (seen_tab and out[2] < 0) {
+            out[2] = fx;
+            out[3] = bar_y;
+        }
+    }
+    out[4] = @floatFromInt(pb.full.x + pb.full.w / 2);
+    out[5] = @floatFromInt(pb.full.y + pb.full.h + pb.full.h / 2);
+    return out;
+}
+
+/// 링크를 놓았다(W6l①) — 그 자리가 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠면 그 탭에서 열거나 새 웹 탭으로 연다(주소는 새 탭 규칙 —
+/// http·https). 모달이 열려 있거나 허용하지 않는 주소면 거부(셸로 새지 않게), 그 밖의 자리는 해당 없음(호스트가 기존 경로로).
+pub fn dropUrlAt(self: *AppSession, x_px: f64, y_px: f64, url: []const u8) AppSession.DropRoute {
+    if (!self.surface_initialized or self.tabs.items.len == 0) return .not_applicable;
+    if (self.anyModalOverlayOpen()) return .refused;
+    if (sidebar_ops.inSidebar(self, x_px)) return .not_applicable;
+    const target = urlDropTargetAt(self, x_px, y_px) orelse return .not_applicable;
+    if (!ws.new_tab.urlAllowed(url) or url.len > self.addr_navigate_url_buf.len) return .refused;
+    if (self.rename != null) settings_ops.commitRename(self);
+    if (self.addr_edit != null) cancelAddrEdit(self, false);
+    switch (target) {
+        .navigate => |t| {
+            if (!pane_ops.focusPaneByPtr(self, t.pane)) return .not_applicable;
+            term_ops.focusTerm(self, t.index);
+            // 주소창의 이동과 같은 길 — Chromium 탭은 sidecar 로, WebKit 탭은 Swift 로(`takeWebAddrNavigate`).
+            @memcpy(self.addr_navigate_url_buf[0..url.len], url);
+            self.addr_navigate_url_len = url.len;
+            self.addr_navigate_pending = t.pane.terms.items[t.index].surfaceId();
+        },
+        .new_tab => |p| {
+            if (!pane_ops.focusPaneByPtr(self, p)) return .not_applicable;
+            if (!osrOpenUrlTab(self, url)) return .refused;
+        },
+    }
+    self.metal_dirty = true;
+    return .routed;
 }
 
 /// 이 창의 활성 pane 에 그 주소의 Chromium 웹 탭을 열고 그 탭으로 옮긴다(W6h① — 「새 창에서 링크 열기」로 만든 새 창). 주소는 새 탭

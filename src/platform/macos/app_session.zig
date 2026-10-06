@@ -292,7 +292,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 208: W6g — osr_accepts_first_mouse(창이 뒤에 있을 때 Chromium 본문의 첫 누름도 페이지로 — acceptsFirstMouse).
 // 209: W6h① — osr_take_new_window·osr_open_url_tab(메뉴 「새 창에서 링크 열기」), osr_context_menu_search(「…에서 '…' 검색」), 메뉴 항목 종류 8.
 // 210: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
-pub const abi_version: u32 = 210;
+// 211: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
+pub const abi_version: u32 = 211;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -16368,7 +16369,7 @@ pub const AppSession = struct {
 
     /// 드롭 라우팅 판정 결과 — **"거부"와 "해당 없음"을 구분한다**(둘 다 0으로 접으면, 거부해 놓고 호스트가 그냥
     /// 활성 pane에 삽입해 버려 애초에 막으려던 오삽입이 그대로 일어난다 — code-review).
-    const DropRoute = enum(i32) {
+    pub const DropRoute = enum(i32) {
         /// 드롭 자체를 **거부**한다 — 호스트는 내용을 삽입하면 안 된다(포커스도 안 옮겼다).
         refused = -1,
         /// 라우팅 대상이 아니다(사이드바·pane 밖) — 호스트는 기존대로 **활성 pane**에 삽입한다(기존 동작 보존).
@@ -35404,6 +35405,84 @@ test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (
     try std.testing.expect(term_ops.dropTermIndexAt(session, pane, leaf_rects.items, body_x, body_y) == null);
     try std.testing.expectEqual(AppSession.DropRoute.routed, session.routeDropAtPoint(body_x, body_y));
     try std.testing.expectEqual(@as(usize, 1), pane.active_term); // 불변
+}
+
+test "W6l①: 링크를 웹 탭 머리에 놓으면 그 탭에서, 웹 pane 의 빈 탭 막대에 놓으면 새 웹 탭으로, 주소 띠에 놓으면 그 탭에서 연다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 900;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // 터미널 탭 0 + 웹 탭 1(활성).
+    const pane = pane_ops.activePane(session);
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane.active_term);
+
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(allocator);
+    try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &leaf_rects);
+    const rect = leaf_rects.items[0].rect;
+    const pb = pane_ops.paneBar(session, rect, pane) orelse return error.SkipZigTest;
+    const bar_y: f64 = @floatFromInt(pb.tabs.y + pb.tabs.h / 2);
+    var term_x: ?f64 = null;
+    var web_x: ?f64 = null;
+    var empty_x: ?f64 = null;
+    var px: u32 = pb.tabs.x;
+    while (px < pb.tabs.x + pb.tabs.w) : (px += 2) {
+        const fx: f64 = @floatFromInt(px);
+        if (term_ops.dropTermIndexAt(session, pane, leaf_rects.items, fx, bar_y)) |hit| {
+            if (hit == 0 and term_x == null) term_x = fx;
+            if (hit == 1 and web_x == null) web_x = fx;
+        } else if (web_x != null and empty_x == null) empty_x = fx; // 마지막 탭 뒤의 빈 자리
+    }
+    const tx = term_x orelse return error.SkipZigTest;
+    const wx = web_x orelse return error.SkipZigTest;
+    const ex = empty_x orelse return error.SkipZigTest;
+    const band_y: f64 = @floatFromInt(pb.full.y + pb.full.h + pb.full.h / 2);
+    const band_x: f64 = @floatFromInt(pb.full.x + pb.full.w / 2);
+
+    // 터미널 탭 머리 — 해당 없음(지금처럼 셸에 넣는다).
+    try std.testing.expectEqual(AppSession.DropRoute.not_applicable, web_ops.dropUrlAt(session, tx, bar_y, "https://example.com/a"));
+    // 허용하지 않는 주소는 웹 자리에서 거부한다(셸로 새지 않게).
+    try std.testing.expectEqual(AppSession.DropRoute.refused, web_ops.dropUrlAt(session, wx, bar_y, "javascript:alert(1)"));
+    try std.testing.expect(session.addr_navigate_pending == null);
+    // 웹 탭 머리 — 그 탭에서 연다(주소창이 쓰는 이동 경로).
+    term_ops.focusTerm(session, 0);
+    try std.testing.expectEqual(AppSession.DropRoute.routed, web_ops.dropUrlAt(session, wx, bar_y, "https://example.com/a"));
+    try std.testing.expectEqual(@as(?u64, sid), session.addr_navigate_pending);
+    try std.testing.expectEqualStrings("https://example.com/a", session.addr_navigate_url_buf[0..session.addr_navigate_url_len]);
+    try std.testing.expectEqual(@as(usize, 1), pane.active_term);
+    session.addr_navigate_pending = null;
+    // 주소 띠 — 활성 웹 탭에서 연다.
+    try std.testing.expectEqual(AppSession.DropRoute.routed, web_ops.dropUrlAt(session, band_x, band_y, "https://example.com/b"));
+    try std.testing.expectEqual(@as(?u64, sid), session.addr_navigate_pending);
+    session.addr_navigate_pending = null;
+    // 빈 탭 막대(활성 Term 이 웹) — 새 웹 탭.
+    try std.testing.expectEqual(AppSession.DropRoute.routed, web_ops.dropUrlAt(session, ex, bar_y, "https://example.com/c"));
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane.active_term);
+    const opened = pane.terms.items[2];
+    try std.testing.expect(web_ops.isBrowserTerm(opened));
+    try std.testing.expectEqualStrings("https://example.com/c", opened.pending_url.?);
+    // 활성 Term 이 터미널이면 빈 탭 막대는 해당 없음(지금처럼).
+    term_ops.focusTerm(session, 0);
+    try std.testing.expectEqual(AppSession.DropRoute.not_applicable, web_ops.dropUrlAt(session, ex, bar_y, "https://example.com/d"));
+    // 모달이 열려 있으면 거부.
+    session.chrome_host.settings.open = true;
+    try std.testing.expectEqual(AppSession.DropRoute.refused, web_ops.dropUrlAt(session, wx, bar_y, "https://example.com/e"));
+    session.chrome_host.settings.open = false;
 }
 
 test "드롭 라우팅 거부: 오버레이/모달 중 + web pane은 refused — 호스트가 삽입도 못 하게 한다" {

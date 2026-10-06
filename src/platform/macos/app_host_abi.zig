@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 210), abi_version);
+    try std.testing.expectEqual(@as(u32, 211), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -2001,6 +2001,28 @@ pub export fn maru_macos_app_session_route_drop(
 ) c_int {
     const app_session = session orelse return 0;
     return @intFromEnum(app_session.routeDropAtPoint(x_px, y_px));
+}
+
+// W6l①(v211): 링크(파일 아님)를 놓았다 — 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠면 그 탭에서 열거나 새 웹 탭으로 연다.
+// route_drop 과 같은 3-상태: 1 열었다 · 0 해당 없음(호스트는 기존 경로로) · -1 거부(삽입 금지 — 모달·허용하지 않는 주소).
+pub export fn maru_macos_app_session_drop_url(
+    session: ?*AppSession,
+    x_px: f64,
+    y_px: f64,
+    url_ptr: [*c]const u8,
+    url_len: usize,
+) c_int {
+    const app_session = session orelse return 0;
+    if (url_ptr == null or url_len == 0) return 0;
+    return @intFromEnum(session_mod.web_ops.dropUrlAt(app_session, x_px, y_px, url_ptr[0..url_len]));
+}
+
+// 시험 전용(W6l① 스모크 — 대본 `droplink`): 활성 pane 의 웹 탭 머리·빈 탭 막대·주소 띠 한 점(backing px, 없으면 -1) 여섯 값.
+pub export fn maru_macos_app_session_test_url_drop_points(session: ?*AppSession, out: ?*[6]f64) c_int {
+    const app_session = session orelse return 0;
+    const dest = out orelse return 0;
+    dest.* = session_mod.web_ops.urlDropTestPoints(app_session);
+    return 1;
 }
 
 // 드래그앤드롭한 파일 경로들(NUL '\0' 구분). maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드

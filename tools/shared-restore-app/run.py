@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def replace_once(text, old, new):
@@ -126,9 +127,28 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
     with (output / "app.stderr.txt").open("wb") as log:
         child = subprocess.Popen([str(app)], env=env, stdout=log, stderr=log, start_new_session=True)
         try:
-            code = child.wait(timeout=65)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
+            if phase == "close":
+                deadline = time.monotonic() + 65
+                acknowledged = False
+                expected_backup = "// 미저장 복원 검증\n".encode() + document.read_bytes()
+                while child.poll() is None:
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired([str(app)], 65)
+                    trace = (output / "app.stderr.txt").read_text()
+                    if not acknowledged and "SHARED_CLOSE event=one_closed " in trace:
+                        records = list((root / "backups").glob("*.bak"))
+                        assert len(records) == 1, "closing one view removed shared backup"
+                        assert records[0].read_bytes().split(b"\n\n", 1)[1] == expected_backup
+                        (output / "one-close-verified").write_text("backup body verified\n")
+                        acknowledged = True
+                    time.sleep(0.02)
+                code = child.returncode
+                assert acknowledged, "close probe never reached independent backup check"
+            else:
+                code = child.wait(timeout=65)
+        except BaseException:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
             child.wait()
             raise
         finally:
@@ -155,6 +175,9 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
     states = [dict(re.findall(r"(\w+)=(\S+)", line.split("SHARED_RESTORE ", 1)[1]))
               for line in transcript.splitlines() if "SHARED_RESTORE label=" in line]
     result = dict(phase=phase, pid=child.pid, exit_code=code, states=states, images=images)
+    if phase == "close":
+        result["close_events"] = [dict(re.findall(r"(\w+)=(\S+)", line.split("SHARED_CLOSE ", 1)[1]))
+                                  for line in transcript.splitlines() if line.startswith("SHARED_CLOSE event=")]
     if phase in ("seed", "move-refusal"):
         result.update(split_entry=split_entry, split_transport="AppKit-local")
     elif ime or callbacks:
@@ -168,6 +191,7 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--app", type=Path, help="이미 빌드한 이 하네스의 실행 파일")
     parser.add_argument("--move-refusal", action="store_true", help="공유 뷰 일부의 창 이동 거절과 실제 Metal 안내 화면만 검사")
+    parser.add_argument("--close-views", action="store_true", help="복원된 공유 뷰 일부 닫기·마지막 취소·저장 후 닫기 AppKit 검사")
     parser.add_argument("--live-ime", action="store_true")
     parser.add_argument("--only-ime", action="store_true", help="작은/큰 파일 검증을 생략하고 실제 IME와 재시작만 실행")
     parser.add_argument("--callback-ime", action="store_true", help="OS 입력기 대신 실제 NSTextInputClient 콜백만 주입해 재시작 확인")
@@ -175,6 +199,8 @@ def main():
                         help="새 뷰를 만드는 실제 AppKit 진입점. 키는 창 로컬 NSEvent이며 OS HID와 구별합니다")
     parser.add_argument("--clangd", type=Path, help="실제 clangd 실행 파일로 C 문서 복원 검사. 서버 시작을 1초 늦춘다")
     args = parser.parse_args()
+    if args.close_views and (args.live_ime or args.only_ime or args.callback_ime or args.clangd or args.move_refusal):
+        parser.error("닫기 검증은 별도로 실행합니다")
     if args.clangd and (args.live_ime or args.only_ime or args.callback_ime):
         parser.error("clangd와 IME 시나리오는 별도로 실행합니다")
     if args.move_refusal and (args.live_ime or args.only_ime or args.callback_ime or args.clangd):
@@ -219,7 +245,7 @@ def main():
         os.environ["PATH"] = str(shim) + os.pathsep + os.environ["PATH"]
         report["language_server"] = dict(path=str(server), version=version, sha256=sha(server),
                                          startup_delay_ms=1000, launcher_sha256=sha(launcher))
-    scenes = (("move", 100),) if args.move_refusal else (("clangd", 100),) if args.clangd else (("small", 100), ("large", 2000))
+    scenes = (("close", 100),) if args.close_views else (("move", 100),) if args.move_refusal else (("clangd", 100),) if args.clangd else (("small", 100), ("large", 2000))
     for name, blocks in (() if args.only_ime or args.callback_ime else scenes):
         root = output / name
         root.mkdir()
@@ -234,9 +260,22 @@ def main():
             (f"\nint sample{i}(void) {{\n    int value = {i};\n    return value;\n}}\n" if args.clangd else
              f"\npub fn sample{i}() void {{\n    const value = {i};\n    _ = value;\n}}\n") for i in range(blocks)))
         original = document.read_bytes()
-        for phase in (("move-refusal",) if args.move_refusal else ("seed", "first", "restore")):
+        for phase in (("seed", "close") if args.close_views else ("move-refusal",) if args.move_refusal else ("seed", "first", "restore")):
             report["scenarios"].append(dict(name=name, **run(app, root, phase, document,
                 first=phase == "first", wait_lsp=args.clangd is not None, split_entry=args.split_entry)))
+        if args.close_views:
+            seed = next(s for s in report["scenarios"] if s["phase"] == "seed")
+            closed = next(s for s in report["scenarios"] if s["phase"] == "close")
+            events = closed["close_events"]
+            assert [e["event"] for e in events] == ["one_closed", "last_prompt", "cancelled", "saved", "last_closed"]
+            assert [e["count"] for e in events] == ["1", "1", "1", "1", "0"]
+            assert [e["dirty"] for e in events[:-1]] == ["true", "true", "true", "false"]
+            assert all(e["hash"] == seed["states"][0]["hash"] for e in events[:-1])
+            expected_body = "// 미저장 복원 검증\n".encode() + original
+            assert document.read_bytes() == expected_body, "save did not preserve shared text"
+            assert not list((root / "backups").glob("*.bak")), "saved/closed document left backup"
+            report["close_views_gate_passed"] = True
+            continue
         if not args.move_refusal:
             report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
         assert document.read_bytes() == original
@@ -254,7 +293,7 @@ def main():
         report["scenarios"].append(dict(name=name, **run(app, root, "restore", document)))
         report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
         report["ime_input"] = "native-callback-injection" if args.callback_ime else "OS-Korean-HID"
-    report["move_refusal_gate_passed" if args.move_refusal else "view_restore_gate_passed"] = not report["issues"]
+    report["close_views_gate_passed" if args.close_views else "move_refusal_gate_passed" if args.move_refusal else "view_restore_gate_passed"] = not report["issues"]
     (output / "manifest.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(output / "manifest.json", flush=True)
     if report["issues"]:

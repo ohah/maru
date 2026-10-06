@@ -72,11 +72,58 @@ extension MaruAppHostController {
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
+    /// Local AppKit chords deliberately use the same bypass as existing conflict smokes.
+    /// This is separate from the real Korean HID round trip, not a physical Escape assertion.
+    private func runSharedClose(window: NSWindow, now: TimeInterval) {
+        guard now >= SharedRestoreRun.next, let view = primary?.view else { return }
+        func key(_ code: UInt16, _ text: String) -> Bool {
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command],
+                timestamp: now, windowNumber: window.windowNumber, context: nil,
+                characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code) else { return false }
+            view.keyDown(with: event)
+            return true
+        }
+        var ok = true
+        switch SharedRestoreRun.stage {
+        case 0:
+            let ready = sharedRestoreFixtureStep(50)
+            if ready == 0 { return }
+            if ready == 2 {
+                // Recovery notice consumes the first key; dismiss it explicitly before closing.
+                if !key(53, "\u{1b}") { finishSharedRestore(false); return }
+                SharedRestoreRun.next = now + 0.5
+                return
+            }
+            ok = ready == 1 && captureSharedRestore("before-close") && key(13, "w")
+        case 1:
+            ok = sharedRestoreFixtureStep(51) == 1 && captureSharedRestore("one-closed")
+        case 2:
+            // The independent parent checks the backup before any last-view close or save.
+            guard let output = ProcessInfo.processInfo.environment["MARU_SHARED_RESTORE_OUTPUT"],
+                  FileManager.default.fileExists(atPath: output + "/one-close-verified") else { return }
+            ok = key(13, "w")
+        case 3:
+            ok = sharedRestoreFixtureStep(52) == 1 && captureSharedRestore("last-prompt") && key(53, "\u{1b}")
+        case 4:
+            ok = sharedRestoreFixtureStep(53) == 1 && captureSharedRestore("cancelled") && key(1, "s")
+        case 5:
+            ok = sharedRestoreFixtureStep(54) == 1 && captureSharedRestore("saved") && key(13, "w")
+        default:
+            ok = sharedRestoreFixtureStep(55) == 1 && captureSharedRestore("last-closed")
+            finishSharedRestore(ok)
+            return
+        }
+        if !ok { finishSharedRestore(false); return }
+        SharedRestoreRun.stage += 1
+        SharedRestoreRun.next = now + 0.5
+    }
+
     private func maybeRunSharedRestore() {
         guard let phase = ProcessInfo.processInfo.environment["MARU_SHARED_RESTORE_PHASE"],
               phase != "ime", SharedRestoreRun.stage < 99,
               let window = primary?.window else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        if phase == "close" { runSharedClose(window: window, now: now); return }
         if phase == "seed" || phase == "move-refusal" {
             if SharedRestoreRun.stage == 0 {
                 let ready = sharedRestoreFixtureStep(1)

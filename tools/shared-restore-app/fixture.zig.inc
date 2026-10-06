@@ -103,6 +103,7 @@ export fn maru_shared_restore_fixture_step(command: u32) callconv(.c) i32 {
 
 fn sharedRestoreStep(self: *AppSession, command: u32) !i32 {
     if (command == 40) return try sharedRestoreRefuseMove(self);
+    if (command >= 50 and command <= 55) return try sharedRestoreCloseProbe(self, command);
     if (command == 1) return if (try sharedRestoreSeed(self)) 1 else if (shared_restore_split_ready) 2 else 0;
     var views: [2]*app_session_mod.Term = undefined;
     if (sharedRestoreViews(self, &views) != 2) return 0;
@@ -140,5 +141,54 @@ fn sharedRestoreRefuseMove(self: *AppSession) !i32 {
     if (self.tabs.items.len != 2 or self.tabs.items[index] != source_tab or dst.tabs.items.len != 1) return error.MoveChangedTopology;
     if (editor_ops.contentHash(views[0].rt.editorDocument().opened.?.file.content) != before) return error.MoveChangedDocument;
     std.debug.print("SHARED_SPLIT_MOVE refused=true topology_preserved=true body_preserved=true destination=headless-AppSession\n", .{});
+    return 1;
+}
+
+
+// These probes observe close results; the Swift driver dispatches every close/cancel/save key.
+var shared_close_hash: u64 = 0;
+var shared_close_survivor: u64 = 0;
+var shared_close_selection: ?maru.session.editor.selection.Selection = null;
+
+fn sharedRestoreCloseProbe(self: *AppSession, command: u32) !i32 {
+    var views: [2]*app_session_mod.Term = undefined;
+    const count = sharedRestoreViews(self, &views);
+    if (command == 50) {
+        if (count != 2) return 0;
+        if (self.chrome_host.notice.open) return 2;
+        shared_close_hash = editor_ops.contentHash(views[0].rt.editorDocument().opened.?.file.content);
+        shared_close_survivor = views[0].surfaceId();
+        shared_close_selection = views[0].rt.editor_selection;
+        // Initial input target only: closing the peer must preserve the other view.
+        if (!self.activateSurfaceById(views[1].surfaceId())) return error.FocusFailed;
+        return 1;
+    }
+    if (command == 55) {
+        if (count != 0 or self.pending_confirm != .none) return error.LastViewNotClosed;
+        std.debug.print("SHARED_CLOSE event=last_closed count=0\n", .{});
+        return 1;
+    }
+    if (count != 1 or views[0].surfaceId() != shared_close_survivor) {
+        std.debug.print("SHARED_CLOSE_MISMATCH command={d} count={d} survivor={d} expected={d} pending={s} focus={s} active={d}\n", .{
+            command, count, if (count > 0) views[0].surfaceId() else 0, shared_close_survivor,
+            @tagName(self.pending_confirm), @tagName(self.focus_owner), pane_ops.activePane(self).activeTerm().surfaceId(),
+        });
+        return error.SurvivorMissing;
+    }
+    const survivor = views[0];
+    const doc = survivor.rt.editorDocument().opened.?;
+    if (editor_ops.contentHash(doc.file.content) != shared_close_hash) return error.CloseChangedDocument;
+    if (!std.meta.eql(survivor.rt.editor_selection, shared_close_selection)) return error.CloseChangedSelection;
+    if (pane_ops.activePane(self).activeTerm() != survivor) return error.SurvivorNotFocused;
+    if (command == 52) {
+        if (self.pending_confirm != .close or !doc.isDirty()) return error.MissingDirtyCloseConfirmation;
+    } else {
+        if (self.pending_confirm != .none) return error.UnexpectedCloseConfirmation;
+        if (doc.isDirty() != (command != 54)) return error.UnexpectedDirtyState;
+    }
+    std.debug.print("SHARED_CLOSE event={s} count=1 hash={x} dirty={any}\n", .{
+        switch (command) { 51 => "one_closed", 52 => "last_prompt", 53 => "cancelled", 54 => "saved", else => return error.UnknownCloseProbe },
+        shared_close_hash, doc.isDirty(),
+    });
     return 1;
 }

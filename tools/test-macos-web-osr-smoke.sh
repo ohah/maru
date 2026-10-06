@@ -1017,7 +1017,8 @@ alert_exit loop /alert-app?loop || fail "the app did not exit with a page that k
 # ── W6j: 탭 닫기의 떠나기 확인 ───────────────────────────────────────────────────────────────────────────────
 # 웹 탭 하나를 닫으면 maru 확인(「닫을까요?」)이 먼저 뜨고, 받으면 페이지에 묻는다 — 떠나기 확인을 건 페이지면 「나가시겠습니까?」를 한 번
 # 더(W5a sheet), 머무르기면 탭이 남는다(사용자 결정 2026-10-05 — 둘 다, 탭 하나만). 처리기가 없으면 묻지 않고 닫히고, 처리기가 멈추면
-# maru 가 2 초 뒤 강제로 닫는다. ⌘W 는 터미널 view 로 넣고(대본 `key`), maru 확인은 Enter 로 받는다.
+# maru 가 2 초 뒤 강제로 닫는다. ⌘W 는 터미널 view 로 넣고(대본 `key`), maru 확인은 Enter 로 받는다. 질문 sheet 는 뜬 뒤 0.5 초 단추를
+# 막으므로(W5a 입력 보호) 본 뒤 0.7 초 기다렸다 답한다 — sheet 가 늦게 뜨면 답이 무시되고 다음 Enter 가 「떠나기」가 됐다.
 printf 'ui.language = ko\n' > "$root/unload.conf"
 unload_run() { # $1=이름 $2=경로 $3=대본
     printf '%s\n' "$3" > "$root/unload-$1.txt"
@@ -1042,6 +1043,7 @@ overlay
 key 36 U+D
 sleep 1500
 sheet
+sleep 700
 sheet-answer 1
 sleep 2000
 mark close2
@@ -1050,6 +1052,7 @@ sleep 700
 key 36 U+D
 sleep 1500
 sheet
+sleep 700
 sheet-answer 0
 sleep 3000
 mark end"

@@ -2226,6 +2226,16 @@ pub fn reloadConfig(self: *AppSession) void {
         config_mod.loadConfigFile(self.io, self.allocator, explicit)
     else
         config_mod.loadConfigDefault(self.io, self.allocator)) catch return; // 실패 시 무동작(forgiving)
+    // **파일이 있는데 못 읽으면(권한·내려받지 않은 iCloud 파일·1 MiB 초과) 지금 설정을 버리지 않는다**(2026-10-06 · 사용자
+    // 결정). 로더는 그때 기본값을 돌려준다 — 시작할 때는 그것이 맞지만(지킬 설정이 없다), 실행 중 다시 읽기에서 그대로 쓰면
+    // 일시적인 읽기 오류 하나로 설정이 통째로 기본값이 됐다. 게다가 메뉴 Reload 를 누른 창만 그랬다 — 다른 창은 감시용
+    // 읽기(`readConfigFileForWatch`)가 실패해 옛 설정을 지켜 창들이 갈렸다(적대적 검증: chmod 000 에서 활성 창은 기본값,
+    // 다른 창은 옛 값). 지운 파일(`missing`)은 다르다 — 「기본값으로 돌아간다」가 사용자가 고른 뜻이라 그대로 읽는다.
+    if (configFileReadIssue(new_parsed.file_provenance)) |issue| {
+        std.log.scoped(.config).warn("config file {s} (reload) — keeping current settings", .{issue});
+        new_parsed.deinit();
+        return;
+    }
     // 새 config로 appearance를 먼저 resolve한 뒤에 옛 loaded_config를 버린다 — resolve가 실패하면 옛
     // appearance·loaded_config를 그대로 보존해 use-after-free(옛 arena의 family를 빌린 appearance)를 막는다.
     const new_appearance = config_mod.resolveAppearance(new_parsed.config) catch {

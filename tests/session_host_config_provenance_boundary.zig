@@ -69,7 +69,13 @@ test "Session default G1 provenance boundary keeps one parser and the exact G2 c
     // 23rd (2026-10-04): `logConfigDiagnostics` in app_session/settings.zig, shared by startup and Reload
     // Config. **Diagnostic only** for the same reason — it logs `config file unreadable|oversize` so a reload
     // that silently fell back to defaults leaves a line in app.log; no setting is chosen from it.
-    try std.testing.expectEqual(@as(usize, 23), try countOutsideConfig(allocator, "file_provenance"));
+    //
+    // 24th (2026-10-06): `reloadConfig` in app_session/settings.zig. **This one is a policy owner, on purpose**
+    // — and only for *reload*: when the file exists but is unreadable or oversized, the loader returns defaults,
+    // and reload now refuses to apply that parse and keeps the current settings (user decision). Startup still
+    // takes the loader's defaults (nothing to keep), and a deleted file (`missing`) still reloads as defaults.
+    // It chooses whether to *apply* a parse, never a setting value — the values still come from the one parser.
+    try std.testing.expectEqual(@as(usize, 24), try countOutsideConfig(allocator, "file_provenance"));
 }
 
 fn countOutsideConfig(allocator: std.mem.Allocator, needle: []const u8) !usize {

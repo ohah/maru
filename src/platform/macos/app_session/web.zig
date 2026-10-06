@@ -1381,9 +1381,10 @@ pub fn osrTakeNewWindow(self: *AppSession) ?[]u8 {
     return self.osr_new_windows.orderedRemove(0);
 }
 
-/// 링크를 놓은 자리(W6l① — 사용자 결정 2026-10-06 「Chrome 처럼」): 웹 탭 머리면 그 탭, 활성 Term 이 웹인 pane 의 빈 탭 막대(‹ › + 와
-/// 마지막 탭 뒤 포함)면 새 웹 탭, 웹 탭의 주소 띠면 그 탭. 터미널 탭 머리·터미널 pane·본문은 해당 없음(지금처럼 셸에 넣는다 —
-/// 본문은 페이지가 먼저 받는다).
+/// 링크를 놓은 자리(W6l① — 사용자 결정 2026-10-06 「Chrome 처럼」): 웹(브라우저) 탭 머리면 그 탭, 활성 Term 이 브라우저인 pane 의 빈 탭
+/// 막대(‹ › + 와 마지막 탭 뒤 — 왼쪽 손잡이·이름 칸은 아니다: 클릭으로는 pane 끌기·이름 바꾸기 자리)면 새 웹 탭, 브라우저 탭의 주소 띠면
+/// 그 탭. 터미널 탭 머리·터미널 pane·본문은 해당 없음(지금처럼 셸에 넣는다 — 본문은 페이지가 먼저 받는다). 마크다운·HTML 파일 탭은
+/// 브라우저가 아니다(주소 띠도 없다 — 클릭 경로와 같다).
 const UrlDrop = union(enum) {
     navigate: struct { pane: *Pane, index: usize },
     new_tab: *Pane,
@@ -1405,6 +1406,7 @@ fn urlDropTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?UrlDrop {
         if (term_ops.dropTermIndexAt(self, pane, leaf_rects.items, x_px, y_px)) |index| {
             return if (isBrowserTerm(pane.terms.items[index])) .{ .navigate = .{ .pane = pane, .index = index } } else null;
         }
+        if (x_px < @as(f64, @floatFromInt(pb.tabs.x))) return null; // 손잡이·이름 칸
         return if (active_is_web) .{ .new_tab = pane } else null;
     }
     // 주소 띠 — 탭 바 바로 아래, 같은 높이(클릭 경로와 같은 자리).
@@ -1453,6 +1455,8 @@ pub fn dropUrlAt(self: *AppSession, x_px: f64, y_px: f64, url: []const u8) AppSe
     if (self.anyModalOverlayOpen()) return .refused;
     if (sidebar_ops.inSidebar(self, x_px)) return .not_applicable;
     const target = urlDropTargetAt(self, x_px, y_px) orelse return .not_applicable;
+    // 안내 토스트는 닫고 진행한다 — 놓기 라우팅(`routeDropAtPoint`)과 같다.
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
     if (!ws.new_tab.urlAllowed(url) or url.len > self.addr_navigate_url_buf.len) return .refused;
     if (self.rename != null) settings_ops.commitRename(self);
     if (self.addr_edit != null) cancelAddrEdit(self, false);
@@ -1460,10 +1464,16 @@ pub fn dropUrlAt(self: *AppSession, x_px: f64, y_px: f64, url: []const u8) AppSe
         .navigate => |t| {
             if (!pane_ops.focusPaneByPtr(self, t.pane)) return .not_applicable;
             term_ops.focusTerm(self, t.index);
-            // 주소창의 이동과 같은 길 — Chromium 탭은 sidecar 로, WebKit 탭은 Swift 로(`takeWebAddrNavigate`).
+            // 주소창의 이동과 같은 길 — Chromium 탭은 sidecar 로, WebKit 탭은 Swift 로(`takeWebAddrNavigate`). 아직 부르지 못한 복원
+            // 주소가 있으면 버린다 — 같은 tick 에 그것이 뒤따라 가 놓은 주소를 덮었다(적대 검증).
+            const term = t.pane.terms.items[t.index];
+            if (term.pending_url) |u| {
+                self.allocator.free(u);
+                term.pending_url = null;
+            }
             @memcpy(self.addr_navigate_url_buf[0..url.len], url);
             self.addr_navigate_url_len = url.len;
-            self.addr_navigate_pending = t.pane.terms.items[t.index].surfaceId();
+            self.addr_navigate_pending = term.surfaceId();
         },
         .new_tab => |p| {
             if (!pane_ops.focusPaneByPtr(self, p)) return .not_applicable;
@@ -1474,8 +1484,8 @@ pub fn dropUrlAt(self: *AppSession, x_px: f64, y_px: f64, url: []const u8) AppSe
     return .routed;
 }
 
-/// 이 창의 활성 pane 에 그 주소의 Chromium 웹 탭을 열고 그 탭으로 옮긴다(W6h① — 「새 창에서 링크 열기」로 만든 새 창). 주소는 새 탭
-/// 규칙(http·https)을 지나야 한다 — 복원 경로와 같은 `pending_url` 로 싣는다.
+/// 이 창의 활성 pane 에 그 주소의 웹 탭을 열고 그 탭으로 옮긴다(W6h① — 「새 창에서 링크 열기」로 만든 새 창, W6l① — 빈 탭 막대에 놓은 링크).
+/// 엔진이 꺼져 있으면 WebKit 탭이다. 주소는 새 탭 규칙(http·https)을 지나야 한다 — 복원 경로와 같은 `pending_url` 로 싣는다.
 pub fn osrOpenUrlTab(self: *AppSession, url: []const u8) bool {
     if (!ws.new_tab.urlAllowed(url)) return false;
     const owned = self.allocator.dupe(u8, url) catch return false;

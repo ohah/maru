@@ -663,6 +663,10 @@ pub fn collapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
 /// caret이 들어갈 자리). 항목은 collect 시점에 히스토리에서 빌드(buildNotificationItems) — show엔 개수만 준다(키 nav clamp).
 pub fn openNotificationPanel(self: *AppSession) void {
     if (self.cell_width_px == 0) return;
+    // 단일-오버레이 불변식(`dismissMessageOverlays` 주석) — 포커스 없는 찾기 바·참조 피커는 모달이 아니라 종 클릭을 막지
+    // 않아, 떠 있으면 패널과 한 그리드에 겹쳐 그려지고 (패널이 넘쳐 프레임 clip 을 내면) 그 글자가 잘린다. 다른 오버레이를
+    // 여는 경로(심볼 피커·참조 피커)와 같은 함수로 내린다 — 팔레트를 열 때처럼 ⌘G 로 이어 가던 검색도 함께 끝난다.
+    self.dismissMessageOverlays();
     // rich 모달 배경 quad는 lowering(rasterizeOverlayCells)이 content rect를 사방 modal_padding_px만큼 outset하므로
     // **보이는** 패널 상단 = content_top − mp. mp를 더해 보이는 상단을 원하는 줄에 맞춘다(안 더하면 패널이 벨/띠에 붙음).
     const mp: u32 = self.buildChromeTokens().space.modal_padding_px;

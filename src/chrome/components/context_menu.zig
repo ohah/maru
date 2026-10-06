@@ -161,9 +161,8 @@ pub fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeP
     // 체크 열은 **모든 줄 앞에** 붙으므로 가장 긴 줄에 더한다 — 안 더하면 그 줄이 우측 패딩을
     // 먹고 테두리에 닿는다(`itemAt` 도 이 rect 를 쓰므로 히트 영역까지 어긋난다).
     // **넓은 도메인에서 곱하고 좁힌다**(A46). `(cols) * cw` 는 u32 곱이라 라벨이 극단적으로 길면
-    // 오버플로로 터진다 — 폭은 어차피 workspace 로 clamp 되므로 포화시켜도 결과가 같다.
+    // 오버플로로 터진다 — 아래에서 workspace 폭으로 자르므로 포화시켜도 결과가 같다.
     const box_w_wide: u64 = @as(u64, max_cols + state.markCols() + 2) * @as(u64, cw); // 좌우 1칸 패딩
-    const box_w: u32 = @intCast(@min(box_w_wide, @as(u64, std.math.maxInt(u32))));
     const box_h = @as(u32, @intCast(items.len)) * ch;
     // 자리는 **공유 프리미티브**가 정한다(`popup_box`) — 우클릭 메뉴·드롭다운·이미지 프리뷰가 같은
     // clamp 를 각자 복사해 갖고 있던 것을 한 곳으로 모았다(docs/chrome-strategy.md §5.4).
@@ -175,6 +174,13 @@ pub fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeP
     // 안 봤던** 자리다 — 프리미티브를 안전하게 만들어도 그 앞에서 터지면 소용없다.
     const ws_bottom: i64 = @as(i64, workspace.y) + @as(i64, workspace.h);
     const anchored_below_workspace = @as(i64, state.anchor_y) >= ws_bottom;
+    // **폭은 설 자리로 자른다.** `popup_box.place` 는 폭을 줄이지 않아(A34), 가장 긴 줄이 workspace 보다
+    // 길면 상자가 좌단을 지킨 채 **창 오른쪽 밖으로** 나갔다 — 우측 테두리·패딩·라벨 끝이 잘린다.
+    // 「선택 영역 보내기」의 대상 라벨(`이름 — 폴더 (브랜치)`)이 좁은 창에서 실제로 그랬다(Lab
+    // `context-menu-send` 480px 실측: 상자가 x=479 까지). 셀 배수로 내려 라벨 열과 패딩이 칸에 맞게 한다.
+    // 자른 만큼의 라벨은 `view` 가 가운데를 「…」로 줄여 그린다(`labelCols`).
+    const max_w = (popup_box.maxBoxWidth(anchored_below_workspace, p) / cw) * cw;
+    const box_w: u32 = @intCast(@min(box_w_wide, @as(u64, max_w)));
     const placed = popup_box.place(box_w, box_h, .{
         .anchor = .{ .x = state.anchor_x, .y = state.anchor_y, .w = 0, .h = 0 },
         .vertical = .at_anchor,
@@ -183,6 +189,12 @@ pub fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeP
     const x = placed.rect.x;
     const y = placed.rect.y;
     return .{ .x = x, .y = y, .w = box_w, .h = box_h };
+}
+
+/// 상자 안에서 **라벨이 쓸 수 있는 칸**(좌우 패딩·체크 열을 뺀 것). `menuRect` 가 폭을 자르면 가장 긴
+/// 라벨보다 작아지고, 넘는 라벨은 `view` 가 이 폭으로 줄인다. 상자와 같은 출처라 라벨이 테두리를 넘지 않는다.
+fn labelCols(state: *const State, rect: draw.Rect, cw: u32) u32 {
+    return (rect.w / @max(cw, 1)) -| (2 + state.markCols());
 }
 
 /// 마우스 px가 메뉴 박스 안의 어느 항목 행인지([0, item_count)). 박스 밖이면 null(호출자가 close). view와 같은
@@ -220,7 +232,14 @@ pub fn view(
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
     try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
-    for (items, 0..) |it, i| {
+    const label_cols = labelCols(state, rect, cw);
+    for (items, 0..) |raw, i| {
+        // **상자보다 긴 라벨은 가운데를 줄인다.** 끝을 자르면 브랜치 이름·`(브랜치)` 처럼 줄을 가르는
+        // 꼬리가 사라진다 — 앞(이름)과 끝(구별점)을 남긴다. 짧은 라벨은 그대로 빌린다(할당 없음).
+        const it: []const u8 = if (overlay_input.displayCols(raw) <= label_cols) raw else blk: {
+            const buf = try arena.alloc(u8, raw.len + "…".len);
+            break :blk overlay_input.elideMiddle(buf, raw, label_cols);
+        };
         const row_y = rect.y + @as(i32, @intCast(i)) * @as(i32, @intCast(ch));
         if (i == state.selected and state.selectable(i)) {
             // 선택 행 강조 — palette 선택행과 같은 tab_active_bg. 텍스트가 그 위에 그려진다.
@@ -521,4 +540,105 @@ test "context_menu menuRect: 손상된 workspace·거대한 라벨에 안 터진
     p.metrics.workspace_y_px = 0;
     p.metrics.cell_width_px = std.math.maxInt(u16);
     _ = menuRect(&state, &items, p);
+}
+
+test "가장 긴 줄이 창보다 길면 상자는 설 자리로 잘리고, 그 라벨은 가운데가 「…」로 줄어 테두리 안에 든다" {
+    // Lab `context-menu-send`(480px) 실측: 대상 라벨이 상자를 창 오른쪽 끝(x=479)까지 밀어 우측
+    // edge_gap·패딩·테두리가 사라졌다. `popup_box.place` 는 폭을 줄이지 않으므로(A34) 메뉴가 잘라야 한다.
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 480,
+        .backing_height_px = 720,
+    } };
+    const long_label = "◆ Claude — ~/Documents/workspace/maru (feat/send-selection-to-agent-panel)";
+    const items = [_][]const u8{ "선택 영역 보내기", long_label, "○ 셸 — ~/work", "복사" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cw: i32 = 8;
+    const ws = props.workspaceRect(p.metrics);
+    const ws_right: i32 = @intCast(ws.x + ws.w);
+
+    // 체크 열 없는 메뉴와 있는 메뉴 — 라벨 폭은 체크 열만큼 더 좁아야 한다.
+    for ([_]?u64{ null, 0b0010 }) |mask| {
+        var s: State = .{};
+        s.showWithHeaders(24, 24, items.len, 1);
+        s.checked_mask = mask;
+        const rect = menuRect(&s, &items, p) orelse return error.TestUnexpectedResult;
+        const right = rect.x + @as(i32, @intCast(rect.w));
+        // 네 방향 edge_gap 이 산다 — 오른쪽도 한 셀 떨어진다.
+        try std.testing.expect(rect.x >= ws.x + cw);
+        try std.testing.expect(right <= ws_right - cw);
+        // 칸에 맞는 폭이라 패딩·체크 열·라벨 열이 셀 경계에 선다.
+        try std.testing.expectEqual(@as(u32, 0), rect.w % 8);
+
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try view(&s, &items, p, &tk, arena, &ops);
+        var row: usize = 0;
+        for (ops.items) |op| switch (op) {
+            .text => |t| {
+                var cols: u32 = 0;
+                for (t.runs) |r| cols += overlay_input.displayCols(r.text);
+                // 좌패딩 1칸 뒤에서 시작해 우패딩 1칸 앞에서 끝난다 — 테두리에 닿지 않는다.
+                try std.testing.expectEqual(rect.x + cw, t.origin.x);
+                try std.testing.expect(t.origin.x + @as(i32, @intCast(cols)) * cw <= right - cw);
+                const label = t.runs[t.runs.len - 1].text;
+                if (row == 1) {
+                    // 앞(이름)과 끝(구별점)이 남고 가운데가 줄었다.
+                    try std.testing.expect(std.mem.indexOf(u8, label, "…") != null);
+                    try std.testing.expect(std.mem.startsWith(u8, label, "◆ Claude"));
+                    try std.testing.expect(std.mem.endsWith(u8, label, "panel)"));
+                    try std.testing.expect(std.unicode.utf8ValidateSlice(label));
+                } else {
+                    // 짧은 라벨은 그대로 빌린다 — 줄이지도 복사하지도 않는다.
+                    try std.testing.expectEqual(items[row].ptr, label.ptr);
+                }
+                row += 1;
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(items.len, row);
+
+        // 클릭은 그려진 상자를 따른다 — 잘린 우단 바로 안은 그 행, 우단부터는 밖이다.
+        const right_f: f64 = @floatFromInt(right);
+        const row1_y: f64 = @floatFromInt(rect.y + 16 + 8);
+        try std.testing.expectEqual(@as(?usize, 1), itemAt(&s, &items, p, right_f - 1, row1_y));
+        try std.testing.expectEqual(@as(?usize, null), itemAt(&s, &items, p, right_f, row1_y));
+    }
+
+    // 짧은 메뉴는 예전 폭 그대로다 — 자르기는 넘칠 때만 걸린다.
+    var short: State = .{};
+    const short_items = [_][]const u8{ "Rename", "Close" };
+    short.show(24, 24, short_items.len);
+    try std.testing.expectEqual(@as(u32, (6 + 2) * 8), (menuRect(&short, &short_items, p) orelse return error.TestUnexpectedResult).w);
+}
+
+test "상태바 앵커 메뉴도 창 폭으로 잘린다 — 좌단 경계가 사이드바가 아니라 창 왼쪽이어도" {
+    // `anchor_below_workspace` 는 좌단 경계를 사이드바 오른쪽이 아니라 창 왼쪽으로 바꾼다. 상한이 그 경계를
+    // 따로 세면(복사본) 상태바 메뉴만 상한이 사이드바 폭만큼 틀린다 — `popup_box` 의 한 출처를 쓴다.
+    const bar_h: u32 = 26;
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 200,
+        .backing_width_px = 480,
+        .backing_height_px = 600,
+        .workspace_present = true,
+        .workspace_x_px = 200,
+        .workspace_y_px = 0,
+        .workspace_width_px = 280,
+        .workspace_height_px = 600 - bar_h,
+    } };
+    const items = [_][]const u8{"x" ** 120};
+    var s: State = .{};
+    s.show(10, @intCast(600 - bar_h), items.len); // 상태바 왼쪽 항목
+    const rect = menuRect(&s, &items, p) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i32, 8), rect.x); // 사이드바로 밀지 않는다(기존 계약)
+    try std.testing.expectEqual(@as(i32, 480 - 8), rect.x + @as(i32, @intCast(rect.w))); // 창 우단에서 한 셀
+    // 사이드바 위로도 펼 수 있으므로, 상한은 사이드바 폭을 빼지 않는다(workspace 280 보다 넓다).
+    try std.testing.expectEqual(@as(u32, 464), rect.w);
 }

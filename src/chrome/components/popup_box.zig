@@ -61,6 +61,36 @@ pub const Result = struct {
     flipped_up: bool = false,
 };
 
+/// 상자 **좌단이 설 수 있는 가장 왼쪽**과 **우단이 닿을 수 있는 가장 오른쪽**(px, i64). `place` 와
+/// `maxBoxWidth` 의 단일 출처다 — 둘이 경계를 각자 세면, 상한으로 자른 상자가 `place` 에서 다시 넘친다.
+const HorizontalBounds = struct { left: i64, right: i64 };
+
+fn horizontalBounds(anchor_below_workspace: bool, p: props.ChromeProps) ?HorizontalBounds {
+    const m = p.metrics;
+    const cw = @max(m.cell_width_px, 1);
+    const ws = props.workspaceRect(m);
+    // `place` 와 같은 가드 — 양쪽에서 한 셀씩 빼므로 두 셀이 필요하다(A32). 곱하지 않고 뺀다(A35).
+    if (ws.w < cw or ws.w - cw < cw) return null;
+    const wsx: i64 = ws.x;
+    const cw_r: i64 = cw;
+    // 좌단은 사이드바 오른쪽으로 — 팝업은 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다.
+    // 단 앵커가 workspace 아래(상태바)면 그 규칙을 쓰지 않는다(`Placement.anchor_below_workspace` 주석).
+    return .{
+        .left = (if (anchor_below_workspace) 0 else wsx) + cw_r,
+        .right = wsx + @as(i64, ws.w) - cw_r,
+    };
+}
+
+/// 이 자리에 **넘치지 않고** 설 수 있는 가장 넓은 상자(px). 자리가 없으면 0.
+///
+/// `place` 는 폭을 줄이지 않는다 — 상자가 workspace 보다 넓으면 좌단을 지키고 오른쪽으로 넘친다(A34).
+/// 그 규칙은 그림처럼 **줄일 수 없는** 상자에는 맞지만, 글자 목록은 줄일 수 있다. 줄일 수 있는 상자는
+/// 이 값으로 먼저 자르고 그 폭에 맞게 그린다(`context_menu` — 긴 대상 라벨이 창 오른쪽 밖으로 나가던 자리).
+pub fn maxBoxWidth(anchor_below_workspace: bool, p: props.ChromeProps) u32 {
+    const b = horizontalBounds(anchor_below_workspace, p) orelse return 0;
+    return @intCast(std.math.clamp(b.right - b.left, 0, std.math.maxInt(u32)));
+}
+
 /// 상자 크기(px)와 앵커로 자리를 정한다. workspace가 한 셀보다 좁으면 null.
 ///
 /// **가장자리에 딱 붙이지 않는다.** 붙이면 그쪽 테두리가 창 경계와 겹쳐 안 보이고, 반대쪽만 둥근 모서리가
@@ -91,19 +121,15 @@ pub fn place(box_w: u32, box_h: u32, pl: Placement, p: props.ChromeProps) ?Resul
     // ⚠️ A35 판정자(`cell_width_px = maxInt(u32)`)가 통과했던 것은 **위 가드가 먼저 걸렸기 때문**이지
     // 이 아래가 안전해서가 아니었다 — 한 경로를 막고 「막았다」고 읽으면 나머지가 그대로 남는다.
     const R = i64;
-    const wsx: R = ws.x;
-    const wsw: R = ws.w;
     const wsy: R = ws.y;
     const wsh: R = ws.h;
-    const cw_r: R = cw;
     const ch_r: R = ch;
 
-    const right_bound: R = wsx + wsw - cw_r;
+    const hb = horizontalBounds(pl.anchor_below_workspace, p) orelse return null;
+    const right_bound: R = hb.right;
     const bottom_bound: R = wsy + wsh - ch_r;
     const top_bound: R = wsy + ch_r;
-    // 좌단은 사이드바 오른쪽으로 — 팝업은 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다.
-    // 단 앵커가 workspace 아래(상태바)면 그 규칙을 쓰지 않는다(위 `anchor_below_workspace` 주석).
-    const left_bound: R = (if (pl.anchor_below_workspace) 0 else wsx) + cw_r;
+    const left_bound: R = hb.left;
 
     const bw: R = box_w;
     const bh: R = box_h;

@@ -4986,9 +4986,11 @@ pub const RemoteTermBackend = struct {
         });
     }
 
-    /// 미룬 닫기를 한 번씩 다시 묻는다(창 tick·Session teardown 첫머리). job 이 아직 붙들었거나 정산이 「아직」이면
+    /// 미룬 닫기를 한 번씩 다시 묻는다(앱 전역 재접속 tick — 창이 0 개여도 돈다 — 와 Session teardown 첫머리). job 이 아직 붙들었거나 정산이 「아직」이면
     /// 목록에 둔다. 다 닫힌 handle 만 뺀다. 이미 맵에 없는 handle(다른 경로가 회수했다)은 그냥 뺀다.
     pub fn advanceReconnectDeferredCloses(self: *RemoteTermBackend) void {
+        // 앱 quit 의 shutdown 이 시작되면 남은 runtime 은 quit 이 소유한다(`term_close_deferral.queueMayAdvance`).
+        if (!term_close_deferral.queueMayAdvance(self.app_quit_shutdown_deadline_ns != 0)) return;
         var index: usize = 0;
         while (index < self.reconnect_deferred_closes.items.len) {
             const handle = self.reconnect_deferred_closes.items[index];

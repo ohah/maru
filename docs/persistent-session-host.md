@@ -1019,17 +1019,23 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   - `destroyTerm` 과 Session teardown(pass 1 은 닫기를 건너뛰고, pass 2 는 빼는 대신)은 붙든 runtime 의 닫기·제거를
     **backend 에 맡긴다**(`closeRuntimeAfterReconnect`). Term 은 backend 를 가리키지 않으므로(surface 는 runtime 번들 소유)
     바로 풀리고 탭·창은 바로 사라진다. 맡는 쪽이 앱 전역 backend 라 그 뒤 창이 닫히거나 합쳐져도 닫기를 잃지 않는다.
-  - backend `advanceReconnectDeferredCloses` 가 창 tick 마다, 그리고 Session teardown 첫머리에서 job 이 놓은 runtime 을 이미
-    시작된 close 종류 그대로(없으면 `close_and_detach`) 닫고 제거가 끝난 handle 만 뺀다. 미룸·재개는 `remote runtime close
+  - backend `advanceReconnectDeferredCloses` 가 앱 전역 재접속 tick(`tickReconnectProductCoordinator` — Swift 가 창 유무
+    guard 앞에서 매 frame 부르므로 창이 0 개로 Dock 에 남은 앱에서도 돈다)과 Session teardown 첫머리에서 job 이 놓은 runtime 을
+    이미 시작된 close 종류 그대로(없으면 `close_and_detach`) 닫고 제거가 끝난 handle 만 뺀다. 미룸·재개는 `remote runtime close
     deferred: …`·`… resumed: …` 한 줄씩 남긴다.
+  - 앱 quit 의 shutdown 이 시작되면(`app_quit_shutdown_deadline_ns`) 목록은 멈춘다(`queueMayAdvance`). 「종료 및 세션 끝내기」는
+    그때 남은 runtime 전부에 ordinal 을 매겨 terminate·제거하므로 미룬 runtime 도 그 안에서 끝난다 — 목록이 그 중 하나를 따로
+    닫아 빼면 quit 이 그 ordinal 을 찾다(`appQuitRowForTicket`) proof loss 다.
   - `closeTermAt`(에이전트 행 ✕·exit reap)은 붙든 runtime 에 닫기를 보내지 않고 `destroyTerm` 으로 간다 — 예전처럼 「아직」으로
     돌아가 ✕ 가 무시되지 않는다.
   - 원격 drain 은 끝(exit)을 한 번만 보고하므로, `finishAfterTermination` 이 「아직」이면 그 끝을 `TermRuntime.pending_termination`
     에 들고 다음 tick 에 다시 finish 한다.
-  **남은 것:** 앱 quit 은 Session teardown 전에 재접속 job 을 취소하므로(`maru_macos_reconnect_product_shutdown`) 첫 창의
-  teardown 첫머리가 앱 전역 목록을 비운다(연결 terminalize **앞**). 그 시점에도 닫기 정산이 「아직」인 runtime 은 연결이 닫힌 뒤
-  프로세스 끝의 backend `deinit` 이 terminate 를 보내지만 best-effort 라, host 에 셸이 남아 다음 실행의 Recovered Sessions 로 보일
-  수 있다. 창이 하나도 없이 앱만 살아 있는 동안에는 tick 이 없어 job 도, 맡은 닫기도 다음 창이 뜰 때까지 멈춘다.
+  **남은 것:** 기본 「종료」(keep-alive)는 Session teardown 전에 재접속 job 을 취소하므로(`maru_macos_reconnect_product_shutdown`)
+  첫 창의 teardown 첫머리가 연결 terminalize **앞에서** 목록을 닫는다. 그 시점에도 닫기 정산이 「아직」인 runtime 은 남는다 —
+  quit shutdown 이 시작되면 목록이 멈추고, runtime 이 남아 있으면 backend 의 process settlement(`readyForProcessSettlement`)가
+  성립하지 않아 backend `deinit` 도 돌지 않는다. 그 셸은 host 에 남아 다음 실행의 Recovered Sessions 로 보인다. 「종료 및 세션
+  끝내기」 시작 순간에 미룬 runtime 의 close 가 이미 진행 중(pristine 이 아님)이면 `prepareAppQuitEndAll` 이 거절해 proof loss
+  다 — 다른 close 가 진행 중일 때와 같은, 이 수정 이전부터의 제약이다.
   판정자는 `test-term-close-deferral`(check-boundaries)다 — 판정 leaf 표와, destroyTerm·closeTermAt·Session teardown·tick·
   reap 재시도·backend 관문과 맡은 닫기 순서를 자리와 순서로 잰다.
   e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.

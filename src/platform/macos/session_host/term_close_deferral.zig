@@ -43,6 +43,13 @@ pub fn holdsRuntime(phase: JobPhase, in_rows: bool) bool {
     return in_rows and phase == .in_flight;
 }
 
+/// backend 가 맡은 미룬 닫기를 지금 진행해도 되는가. 앱 quit 의 shutdown 이 시작됐으면(`app_quit_shutdown_deadline_ns`)
+/// 그 runtime 들은 quit 이 소유한다 — 「종료 및 세션 끝내기」는 남은 runtime 전부에 ordinal 을 매겨 terminate·제거하는데,
+/// 미룬 닫기가 그 중 하나를 따로 닫아 빼면 quit 이 그 ordinal 을 찾다 proof loss 로 끝난다.
+pub fn queueMayAdvance(app_quit_shutdown_started: bool) bool {
+    return !app_quit_shutdown_started;
+}
+
 /// 판정을 부르는 자리. 첫 시도는 `destroyTerm` 안(사용자 닫기·정리), 재시도는 backend 가 맡은 미룬 닫기다.
 pub const Attempt = enum { first, retry };
 
@@ -99,6 +106,11 @@ test "재접속 닫기 미룸: 첫 시도의 「아직」은 불변식 위반, �
     try std.testing.expectEqual(Action.defer_teardown, afterClose(.retry, false));
     try std.testing.expectEqual(Action.invariant_violation, afterRemove(.first, false));
     try std.testing.expectEqual(Action.defer_teardown, afterRemove(.retry, false));
+}
+
+test "재접속 닫기 미룸: 앱 quit 의 shutdown 이 시작되면 미룬 닫기는 멈추고 quit 이 그 runtime 을 맡는다" {
+    try std.testing.expect(queueMayAdvance(false));
+    try std.testing.expect(!queueMayAdvance(true));
 }
 
 test "재접속 닫기 미룸: 닫기가 끝나면 제거로, 제거가 끝나면 해제로 간다 — 첫 시도와 재시도가 같다" {

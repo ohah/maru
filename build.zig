@@ -6566,8 +6566,8 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"재접속 닫기 미룸"},
     });
     const run_close_deferral_tests = b.addRunArtifact(close_deferral_tests);
-    run_close_deferral_tests.addArg("--maru-expect-tests=4");
-    run_close_deferral_tests.addArg("--maru-expect-passed=4");
+    run_close_deferral_tests.addArg("--maru-expect-tests=5");
+    run_close_deferral_tests.addArg("--maru-expect-passed=5");
     close_deferral_step.dependOn(&run_close_deferral_tests.step);
     const close_deferral_wiring_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

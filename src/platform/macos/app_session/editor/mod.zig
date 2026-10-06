@@ -23683,6 +23683,10 @@ test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 �
     const lines = try allocator.alloc([]const u8, n);
     defer allocator.free(lines);
     for (lines) |*l| l.* = "const x = 1; // 평범한 길이의 줄이다";
+    // **가장 긴 줄은 하나뿐이고 가운데에 있다** — 줄이 전부 같으면 「가장 긴 줄」 답 단언이 장식이 된다:
+    // `max` 를 `min` 으로 바꾸거나 첫 줄만 보는 변이도 같은 값을 낸다(적대적 검증 실측 — 그 변이가 통과했다).
+    const longest = "const longest = 1; // 이 줄이 가장 길다 — 답은 이 줄의 폭이다";
+    lines[n / 2] = longest;
     fx.term.rt.editor_lines = lines;
     fx.term.rt.editor_max_cols = 0;
 
@@ -23690,10 +23694,17 @@ test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 �
     // 사이에 안 서면 벽시계 대신 호출 수·복잡도를 센다). 한 줄을 세는 걸음 수를 먼저 재 두면, 여는 경로가 문서를
     // **한 번만** 훑는가를 정확히 물을 수 있다 — 같은 일을 1.5배만 더 해도 러너·빌드 모드와 상관없이 빨개진다.
     // 아래 시간 선은 걸음당 비용이 커지는 회귀를 잡는 재앙 감지선으로 남는다.
+    const tab_w = fx.term.rt.editor_tab_width;
+    const limit = fx.term.rt.editor_max_columns;
     chrome_editor.content.total_steps = 0;
-    const one_line_cols = chrome_editor.content.lineColumnsUpTo(lines[0], fx.term.rt.editor_tab_width, fx.term.rt.editor_max_columns);
-    const steps_per_line = chrome_editor.content.total_steps;
+    const plain_cols = chrome_editor.content.lineColumnsUpTo(lines[0], tab_w, limit);
+    const plain_steps = chrome_editor.content.total_steps;
     chrome_editor.content.total_steps = 0;
+    const longest_cols = chrome_editor.content.lineColumnsUpTo(longest, tab_w, limit);
+    const longest_steps = chrome_editor.content.total_steps;
+    chrome_editor.content.total_steps = 0;
+    try testing.expect(longest_cols > plain_cols); // 픽스처가 뜻대로 섰다
+    const want_steps = plain_steps * (n - 1) + longest_steps; // 문서를 한 번 훑은 걸음 수
 
     const c0 = threadCpuMsForTest();
     const t0 = monotonicMsForTest();
@@ -23703,9 +23714,9 @@ test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 �
     const steps = chrome_editor.content.total_steps;
     const line_ms: u64 = if (builtin.mode == .Debug) 2000 else 300;
     // 단언보다 **먼저** 찍는다 — 빨개진 CI 로그에서 그 값이 있어야 어느 판정이 왜 걸렸는지 읽힌다.
-    std.debug.print("\n[측정] {d}줄 열기의 가장 긴 줄 세기: {d}ms (CPU {d}ms, 선 {d}ms, 걸음 {d}/{d}, max_cols={d})\n", .{ n, t1 - t0, cpu, line_ms, steps, steps_per_line * n, fx.term.rt.editor_max_cols });
-    try testing.expectEqual(one_line_cols, fx.term.rt.editor_max_cols); // 답이 맞아야 걸음 수가 뜻을 갖는다
-    try testing.expectEqual(steps_per_line * n, steps);
+    std.debug.print("\n[측정] {d}줄 열기의 가장 긴 줄 세기: {d}ms (CPU {d}ms, 선 {d}ms, 걸음 {d}/{d}, max_cols={d})\n", .{ n, t1 - t0, cpu, line_ms, steps, want_steps, fx.term.rt.editor_max_cols });
+    try testing.expectEqual(longest_cols, fx.term.rt.editor_max_cols); // 답이 맞아야 걸음 수가 뜻을 갖는다
+    try testing.expectEqual(want_steps, steps);
     // **재앙 감지선이지 예산이 아니다.** 옛 상한 500ms 는 CI 러너 실측(main 463ms)과 여유가 7% 뿐이라, 코드와
     // 무관한 PR 들이 러너 편차만으로 연달아 빨강이 됐다(511·560·604ms — 2026-08-18). 그 상태의 게이트는 회귀를
     // 알리는 대신 무작위로 울리는 알람이라, 사람이 결과를 안 보게 만든다.

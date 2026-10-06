@@ -61514,6 +61514,64 @@ test "전체 리셋: 다른 창의 ⌘+/− 확대도 풀린다 — 감시가 �
     try std.testing.expectEqual(settings_ops.config_reset_generation, late.config_reset_seen);
 }
 
+test "못 읽는 config 로는 설정을 버리지 않는다 — 메뉴 Reload 뒤에도 모든 창이 지금 설정이고, 지운 파일은 기본값이다" {
+    // 예전에는 메뉴 Reload 를 누른 창만 기본값이 되고(로더는 못 읽으면 기본값을 준다) 다른 창은 감시용 읽기가 실패해 옛 설정을
+    // 지켰다 — chmod 000 에서 활성 창 벨 켜짐·1000 줄, 다른 창 벨 꺼짐·5000 줄(적대적 검증 2026-10-06).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ss: [2]*AppSession = undefined;
+    var path_buf: [4096]u8 = undefined;
+    try configFollowFixture(allocator, &ss, &tmp, &path_buf);
+    defer for (ss) |s| {
+        settings_ops.clearConfigDirty(s);
+        s.deinit();
+        allocator.destroy(s);
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const kept = "bell.audible = false\nscrollback.lines = 5000\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = kept });
+    for (ss) |s| s.reloadConfig();
+    const cfg_path = ss[0].config_path_buffer.?;
+    const cz = try allocator.dupeZ(u8, cfg_path);
+    defer allocator.free(cz);
+
+    // ① 권한 없음 — 메뉴 Reload(활성 창 강제 + 다른 창 전파) 뒤에도 두 창 모두 지금 설정이다.
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(cz.ptr, 0));
+    ss[0].reloadConfig();
+    _ = ss[1].reloadConfigFollowingMenu();
+    for (ss) |s| {
+        try std.testing.expect(!s.loaded_config.config.bell.audible);
+        try std.testing.expectEqual(@as(u32, 5000), s.loaded_config.config.scrollback.lines);
+        try std.testing.expectEqual(@as(u32, 5000), s.live_scrollback_max);
+    }
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(cz.ptr, 0o644));
+
+    // ② 1 MiB 를 넘는 파일 — 같다(로더가 크기에서 거른다).
+    const big = try allocator.alloc(u8, (1 << 20) + 64);
+    defer allocator.free(big);
+    @memset(big, '#');
+    big[big.len - 1] = '\n';
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = big });
+    ss[0].reloadConfig();
+    try std.testing.expect(!ss[0].loaded_config.config.bell.audible);
+    try std.testing.expectEqual(@as(u32, 5000), ss[0].loaded_config.config.scrollback.lines);
+
+    // ③ 다시 읽을 수 있게 되면 평소처럼 읽는다 — 갇히지 않는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "bell.audible = false\nscrollback.lines = 2000\n" });
+    ss[0].reloadConfig();
+    try std.testing.expectEqual(@as(u32, 2000), ss[0].loaded_config.config.scrollback.lines);
+
+    // ④ 지운 파일은 「기본값으로 돌아간다」가 사용자가 고른 뜻이다 — 예전처럼 기본값으로 읽는다.
+    try tmp.dir.deleteFile(io, "config");
+    ss[0].reloadConfig();
+    try std.testing.expect(ss[0].loaded_config.config.bell.audible);
+    try std.testing.expectEqual(@as(u32, 1000), ss[0].loaded_config.config.scrollback.lines);
+}
+
 // 오버레이 메시지 사본이 버퍼를 넘으면 예전엔 **조용히** 끊었다 — 확인 문장의 끝(질문)이 사라진 줄도 몰랐다(2026-10-05).
 test "오버레이 메시지 사본: 버퍼를 넘으면 끝이 「…」이고 UTF-8 이 깨지지 않으며, 안 넘치면 그대로다" {
     var buf: [64]u8 = undefined;

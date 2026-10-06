@@ -124,10 +124,6 @@ fn collectWindowCloseTargets(
 }
 
 fn advanceWindowClose(self: *AppSession) maru.app.term_runtime_backend.CloseProgress {
-    // 재접속 job 이 붙들어 미룬 Term 닫기가 남아 있으면 창을 닫지 않는다 — 창이 먼저 닫히면 그 Term 을 마저 닫을
-    // tick 이 없다(AppSession 이 deinit 된다). job 이 끝나면 tick 이 목록을 비우고 이 갈래를 지난다.
-    term_ops.advanceDeferredTermCloses(self);
-    if (self.deferred_term_closes.items.len != 0) return .event_pending;
     if (builtin.os.tag != .macos or app_session_mod.app_remote_backend == null) {
         for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
             if (!windowCloseGraphTarget(term, true)) continue;

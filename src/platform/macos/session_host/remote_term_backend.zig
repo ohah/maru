@@ -1325,6 +1325,10 @@ pub const RemoteTermBackend = struct {
     not_live_skip_reported: bool = false,
     singleton_owner: RemoteBackendSingletonOwner = .{},
     host_reconnect_job: ?*HostReconnectJob = null,
+    /// 사용자가 Term 을 닫았지만 진행 중인 재접속 job 이 runtime 을 붙들어 닫기·제거를 미룬 handle
+    /// (`term_close_deferral`). AppSession 의 Term 은 이미 풀렸다 — 그 뒤의 창 닫기·창 합치기·Session teardown 과
+    /// 무관하게 backend 가 job 이 놓은 뒤 마저 닫는다(`advanceReconnectDeferredCloses`).
+    reconnect_deferred_closes: std.ArrayList(RuntimeHandle) = .empty,
     host_reconnect_preparing: bool = false,
     next_host_reconnect_job_generation: u64 = 0,
     shutdown_reclaim_host_id: u128 = 0,
@@ -1621,6 +1625,8 @@ pub const RemoteTermBackend = struct {
             self.shutdown_reclaim_host_id = 0;
         }
         self.runtimes.deinit(self.allocator);
+        // 미룬 닫기의 runtime 은 위 순회가 다른 runtime 과 함께 terminate·회수했다 — handle 목록만 남는다.
+        self.reconnect_deferred_closes.deinit(self.allocator);
         if (self.reserved_runtime_count != 0 or self.close_operation_owner.active)
             process_seal.fatalIntegrity(.proof_loss);
         if (self.paused_paste_budget.initialized()) self.paused_paste_budget.deinit();
@@ -4966,6 +4972,61 @@ pub const RemoteTermBackend = struct {
             }
         }
         return term_close_deferral.holdsRuntime(phase, in_rows);
+    }
+
+    /// Term 이 사라진 뒤 job 이 놓으면 닫을 runtime 을 맡는다. 같은 handle 은 한 번만 담는다.
+    pub fn closeRuntimeAfterReconnect(self: *RemoteTermBackend, handle: RuntimeHandle) void {
+        if (!self.runtimes.contains(handle)) process_seal.fatalIntegrity(.close_runtime_absent);
+        for (self.reconnect_deferred_closes.items) |queued| if (queued == handle) return;
+        self.reconnect_deferred_closes.append(self.allocator, handle) catch
+            process_seal.fatalIntegrity(.proof_loss);
+        std.log.info("remote runtime close deferred: reconnect job holds handle={d} pending={d}", .{
+            handle,
+            self.reconnect_deferred_closes.items.len,
+        });
+    }
+
+    /// 미룬 닫기를 한 번씩 다시 묻는다(창 tick·Session teardown 첫머리). job 이 아직 붙들었거나 정산이 「아직」이면
+    /// 목록에 둔다. 다 닫힌 handle 만 뺀다. 이미 맵에 없는 handle(다른 경로가 회수했다)은 그냥 뺀다.
+    pub fn advanceReconnectDeferredCloses(self: *RemoteTermBackend) void {
+        var index: usize = 0;
+        while (index < self.reconnect_deferred_closes.items.len) {
+            const handle = self.reconnect_deferred_closes.items[index];
+            const entry = self.runtimes.get(handle) orelse {
+                _ = self.reconnect_deferred_closes.orderedRemove(index);
+                continue;
+            };
+            if (term_close_deferral.admit(self.reconnectJobHoldsRuntime(handle)) == .defer_teardown) {
+                index += 1;
+                continue;
+            }
+            // 이미 시작된 close 가 있으면 그 종류 그대로 잇는다 — 다른 종류로 다시 부르면 authority 가 proof loss 다.
+            const authority = &entry.runtime.close_authority;
+            const pristine = authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.pristine);
+            const kind: close_authority.CloseRequestKind = if (pristine) .close_and_detach else switch (authority.request_kind_raw) {
+                1...3 => @enumFromInt(authority.request_kind_raw),
+                else => process_seal.fatalIntegrity(.proof_loss),
+            };
+            const disposition: close_authority.CloseDisposition = if (pristine) .terminate_host else switch (authority.disposition_raw) {
+                1...2 => @enumFromInt(authority.disposition_raw),
+                else => process_seal.fatalIntegrity(.proof_loss),
+            };
+            if (term_close_deferral.afterClose(.retry, self.requestRuntimeClose(handle, kind, disposition) == .complete) ==
+                .defer_teardown)
+            {
+                index += 1;
+                continue;
+            }
+            if (term_close_deferral.afterRemove(.retry, remove(self, handle) == .removed) != .finish) {
+                index += 1;
+                continue;
+            }
+            _ = self.reconnect_deferred_closes.orderedRemove(index);
+            std.log.info("remote runtime close resumed: handle={d} pending={d}", .{
+                handle,
+                self.reconnect_deferred_closes.items.len,
+            });
+        }
     }
 
     fn requestRuntimeClose(

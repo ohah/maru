@@ -231,9 +231,9 @@ fn paintRectBg(bg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin
 fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, tk: *const chrome.Tokens) void {
     // 이 경로는 셀 격자에 찍으므로 부분 클립이 불가능하다. 대신 셀 단위로 판정한다 — 같은 행의 배경
     // quad는 GPU가 픽셀 단위로 자르는데 글자만 그대로 남으면 배경 반쪽에 글자가 떠 있는 그림이 된다.
-    // ⚠️ 이 남김/버림 규칙(origin 이 clip 안 · 행 = trunc)은 알림 패널의 강조 배경이 **그대로 따라 쓴다**
-    // (`components/notifications.zig` view — clip 이 없는 `.fill` 을 줄마다 같은 조건으로 낸다). 바꾸면 그쪽도
-    // 함께 — 판정자 「알림 패널: 걸친 카드의 강조 배경은 …」이 실제 배치된 글자 행과 비교해 어긋남을 잡는다.
+    // ⚠️ 이 남김/버림 규칙(origin 이 clip 안 · 행 = trunc)을 알림 패널이 **그대로 옮겨 쓴다**
+    // (`components/notifications.zig` `placedRow` — 강조 배경·카드 구분선·클릭/호버 hitTest 가 모두 그것을 부른다). 바꾸면
+    // 그쪽도 함께 — 판정자 「알림 패널: 걸친 카드의 강조 배경은 …」이 실제 배치된 글자 행과 비교해 셋의 어긋남을 잡는다.
     if (t.clip) |clip| {
         if (t.origin.y < clip.y or t.origin.y >= clip.y + @as(i32, @intCast(clip.h))) return;
         if (t.origin.x < clip.x or t.origin.x >= clip.x + @as(i32, @intCast(clip.w))) return;
@@ -378,9 +378,11 @@ test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 
     var seen_top: usize = 0;
     var seen_bottom: usize = 0;
     var dividers_checked: usize = 0;
+    var hits_checked: usize = 0;
+    var empty_rows_checked: usize = 0;
     // 기하를 바꿔 돈다 — 패널 y 가 0 이고 셀 높이·뷰포트가 한 가지면 «rect.y 를 빼먹은» 공식이나 바닥 경계 off-by-one 이
     // 출력 바이트까지 같아 통과했다(적대적 검증). 제품 패널 y 는 `2ch + modal padding` 이라 행 배수가 아니다.
-    for ([_]u32{ 16, 17 }) |ch| for ([_]i32{ 0, 7 }) |anchor_y| for ([_]u32{ 300, 303, 305 }) |backing_h| {
+    for ([_]u32{ 16, 17 }) |ch| for ([_]i32{ 0, 7 }) |anchor_y| for ([_]u32{ 300, 303, 305 }) |backing_h| for ([_]i32{ 0, 13 }) |anchor_x| {
         const p = chrome.props.ChromeProps{ .metrics = .{ .cell_width_px = cw, .cell_height_px = ch, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = backing_h, .overlay_scroll_gutter_px = gutter_px } };
         const card_px: u32 = 2 * ch;
         var shift: u32 = 0;
@@ -393,7 +395,7 @@ test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 
                     var s: notifications.State = .{};
                     var items_buf: [count]notifications.Item = undefined;
                     for (&items_buf, 0..) |*it, i| it.* = .{ .title = title_utf8[i][0..title_len[i]], .body = body_utf8[i][0..body_len[i]], .relative_time = "now", .is_read = true, .is_alive = true };
-                    s.show(0, anchor_y, count);
+                    s.show(anchor_x, anchor_y, count);
                     s.scroll.offset_y_px = card_px + shift;
                     const sv = notifications.scrollView(&s, &items_buf, p) orelse return error.NotScrollable;
                     try std.testing.expectEqual(card_px + shift, sv.offset_px); // 상한에 안 깎였다(전제)
@@ -428,7 +430,9 @@ test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 
                     // 카드별로 출력에 실제로 놓인 제목·본문 행(없으면 null).
                     var title_row: [count]?u16 = @splat(null);
                     var body_row: [count]?u16 = @splat(null);
+                    var close_col: ?u16 = null; // ✕ 칸(본문줄 우측 끝) — 클릭 판정을 «그린 자리»에서 잰다
                     for (raster.cells.items) |c| {
+                        if (c.codepoint == 0x2715) close_col = c.col;
                         const bg = c.style.background;
                         const lit = bg == .rgb and bg.rgb.b == 0 and (bg.rgb.r == 200 or bg.rgb.g == 200);
                         if (lit) {
@@ -499,6 +503,56 @@ test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 
                     std.mem.sort(i32, actual_lines[0..actual_n], {}, std.sort.asc(i32));
                     try std.testing.expectEqualSlices(i32, expected_lines[0..expected_n], actual_lines[0..actual_n]);
                     dividers_checked += expected_n;
+                    // **보이는 줄 == 눌리는 줄** — 뷰포트 안 모든 픽셀 행에서 `hitTest` 가 그 행에 실제로 놓인 줄의 카드를
+                    // 돌려주고(✕ 칸은 본문줄일 때만 ✕), 아무 줄도 안 놓인 행(바닥에 걸쳐 글자를 안 그린 줄)은 background
+                    // 다. 기대값은 출력 셀에서 구한다. 예전엔 픽셀 카드 경계로 풀어, 걸친 상태에서 다음 카드 제목줄 위쪽
+                    // 띠가 앞 카드로 잡혔다(그 자리 우측 끝 클릭 = 앞 카드 삭제). 강조 유무와 무관하니 강조 없음에서만 잰다.
+                    if (mode == 2 and top_edge) { // 화면이 강조·대상 글자와 무관하므로 한 번만 잰다
+                        const Owner = struct { card: usize, line: u1 };
+                        var owner: [64]?Owner = @splat(null);
+                        for (0..count) |i| {
+                            if (title_row[i]) |r| {
+                                try std.testing.expect(owner[r] == null);
+                                owner[r] = .{ .card = i, .line = 0 };
+                            }
+                            if (body_row[i]) |r| {
+                                try std.testing.expect(owner[r] == null);
+                                owner[r] = .{ .card = i, .line = 1 };
+                            }
+                        }
+                        // 열 경계도 **그린 것**에서 구한다: ✕ 글자 칸, 카드 폭 = 헤더 구분선 폭(카드 배경·구분선과 같은 값),
+                        // 그 오른쪽은 스크롤바 gutter(막대만 그려진 자리 — 카드가 아니다).
+                        const cw_i: i32 = @intCast(cw);
+                        const close_c: i32 = close_col orelse return error.NoCloseGlyph;
+                        var card_right: ?i32 = null;
+                        for (raster.gpu_quads.items) |q| if (q.h == 1 and @as(i32, @intFromFloat(q.y)) == sv.viewport.y - 1) {
+                            card_right = @divTrunc(@as(i32, @intFromFloat(q.w)), cw_i);
+                        };
+                        const card_cols: i32 = card_right orelse return error.NoHeaderDivider;
+                        const panel_cols: i32 = @divTrunc(@as(i32, @intCast(sv.viewport.w)), cw_i);
+                        try std.testing.expect(close_c + 1 < card_cols and card_cols < panel_cols); // 전제: ✕ 오른쪽 여백·gutter 가 있다
+                        // 본문 끝·✕ 바로 왼쪽·✕·카드 끝 칸·gutter 첫 칸·패널 끝 칸.
+                        const cols = [_]i32{ 0, close_c - 1, close_c, card_cols - 1, card_cols, panel_cols - 1 };
+                        var y: i32 = sv.viewport.y;
+                        while (y < vp_bottom) : (y += 1) {
+                            const o = owner[@intCast(@divTrunc(y - oy, ch_i))];
+                            if (o == null) empty_rows_checked += 1;
+                            // 정수 좌표와 반 픽셀(트랙패드는 소수 좌표를 준다).
+                            for ([_]f64{ 0, 0.5 }) |dy| for (cols) |c| {
+                                const xf: f64 = @as(f64, @floatFromInt(ox + c * cw_i)) + 0.5;
+                                const yf: f64 = @as(f64, @floatFromInt(y)) + dy;
+                                const hit = notifications.hitTest(&s, &items_buf, p, xf, yf) orelse return error.HitOutsidePanel;
+                                const want: notifications.Hit = if (c >= card_cols)
+                                    .background
+                                else if (o) |ow|
+                                    (if (ow.line == 1 and c >= close_c) notifications.Hit{ .close = ow.card } else notifications.Hit{ .card = ow.card })
+                                else
+                                    .background;
+                                try std.testing.expectEqual(want, hit);
+                                hits_checked += 1;
+                            };
+                        }
+                    }
                     if (text_rows.count() > 0) {
                         if (top_edge) seen_top += 1 else seen_bottom += 1;
                     }
@@ -506,11 +560,14 @@ test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 
             }
         }
     };
-    // 기하 12 가지 × 위 걸침이 글자를 남기는 걸침(0..ch) × 선택/호버/없음 — 대략 12 × 17 × 3.
-    try std.testing.expect(seen_top >= 12 * 16 * 3);
-    try std.testing.expect(seen_bottom >= 12 * 32 * 3); // 아래 경계 카드는 늘 무언가 보인다
+    // 기하 24 가지(패널 x 0·13 포함) × 위 걸침이 글자를 남기는 걸침(0..ch) × 선택/호버/없음 — 대략 24 × 17 × 3.
+    try std.testing.expect(seen_top >= 24 * 16 * 3);
+    try std.testing.expect(seen_bottom >= 24 * 32 * 3); // 아래 경계 카드는 늘 무언가 보인다
     // 화면마다 카드 사이 선이 여러 개 실제로 있었다(빈 집합이면 위 집합 비교는 공짜다).
-    try std.testing.expect(dividers_checked >= 12 * 32 * 2 * 3 * 5);
+    try std.testing.expect(dividers_checked >= 24 * 32 * 2 * 3 * 5);
+    // 클릭 판정을 실제로 쟀다 — 뷰포트 픽셀 행 전부, 그중 «줄이 안 놓인 빈 띠»도 있었다(없으면 background 단언은 공짜).
+    try std.testing.expect(hits_checked >= 24 * 32 * 200 * 2 * 6);
+    try std.testing.expect(empty_rows_checked > 0);
 }
 
 test "오버레이 셀 경로: 깨진 UTF-8 은 건너뛰지 않고 U+FFFD 로 그리며, 뒤 run 의 열을 밀지 않는다" {

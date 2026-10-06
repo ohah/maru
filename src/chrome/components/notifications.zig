@@ -438,9 +438,27 @@ pub fn scrollView(state: *const State, items: []const Item, p: props.ChromeProps
     };
 }
 
-/// 마우스 px를 패널 안의 동작으로 해석한다/// 마우스 px를 패널 안의 동작으로 해석한다(박스 밖이면 null → 호출자가 닫기). view와 같은 layout을 써서 "보이는 ==
+/// 콘텐츠 줄 `line_idx`(= 카드 × `card_rows` + 줄)가 **놓이는 셀 행**(패널 `rect.y` 기준). 안 놓이면 null.
+///
+/// 이 패널의 «글자가 남는가·어느 행인가» 규칙의 유일한 사본이다 — 모달 셀 격자 lowering(`metal_lowering.placeText`)이
+/// 글자를 남기는 조건(origin 이 `card_clip` 안)과 행(`trunc((y − 격자 원점)/ch)`, 격자 원점 = `rect.y`)을 그대로 옮겼다.
+/// 강조 배경·구분선(view)과 클릭·호버(`hitTest`)가 모두 이것을 부른다 — 스크롤은 픽셀인데 글자는 행에 내림으로 붙으므로,
+/// 셋이 각자 픽셀로 풀면 «보이는 줄»과 어긋난다(강조가 헤더를 칠하고, 선이 제목줄을 가로지르고, 클릭이 한 줄 위 카드를
+/// 잡았다 — 2026-10-06). 스크롤이 없으면 offset 0·뷰포트 = 카드 높이 합이라 모든 줄이 제자리에 놓인다.
+/// 전제: 오버레이 격자 원점 = 패널 `rect.y` — 패널이 프레임의 유일한 오버레이일 때 참이다(`notificationPanelDrawn`·
+/// 패널을 열 때 `dismissMessageOverlays`). 다른 상자가 같은 raster 에 섞여 원점이 위로 가면 이 행이 글자 행과 갈린다.
+fn placedRow(l: Layout, line_idx: usize) ?u32 {
+    const offset: i64 = @intCast(l.first * l.card_h + l.origin_shift_px);
+    const ch: i64 = l.ch;
+    const y_rel = @as(i64, @intCast(line_idx)) * ch - offset; // 카드 영역 위끝(헤더 바닥) 기준 origin
+    if (y_rel < 0 or y_rel >= l.viewport_h_px) return null; // card_clip 밖 — 글자를 안 남긴다
+    return @intCast(@divTrunc(@as(i64, l.header_h) + y_rel, ch));
+}
+
+/// 마우스 px를 패널 안의 동작으로 해석한다(박스 밖이면 null → 호출자가 닫기). view와 같은 layout을 써서 "보이는 ==
 /// 클릭되는". 세로: 상단 헤더(액션)·그 아래 카드 영역(visible × 2행). 헤더 우측은 모두읽음/지우기, 헤더 좌측(제목)·
-/// 카드 영역 아래 빈 여백·빈 상태 본문은 background(닫지 않음). 카드 안에서 본문줄(line 1) 우측 끝 1칸은 ✕(삭제) zone.
+/// 카드 영역 아래 빈 여백·빈 상태 본문·스크롤바 gutter 는 background(닫지 않음). 카드 안에서 본문줄(line 1) 우측의 ✕ 칸과
+/// 그 오른쪽 여백 1칸(카드 폭 끝까지)은 ✕(삭제) zone. 줄은 글자가 놓인 셀 행으로 가른다(`placedRow`).
 pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x_px: f64, y_px: f64) ?Hit {
     if (!state.open or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     const l = layout(state, items, p) orelse return null;
@@ -450,7 +468,6 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
     if (x_px < x0 or x_px >= x0 + @as(f64, @floatFromInt(rect.w))) return null;
     if (y_px < y0 or y_px >= y0 + @as(f64, @floatFromInt(rect.h))) return null;
     const cw: f64 = @floatFromInt(l.cw);
-    const card_h: f64 = @floatFromInt(l.card_h);
     const rel_y = y_px - y0;
     const col: u32 = @intFromFloat((x_px - x0) / cw);
 
@@ -467,20 +484,27 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
     // 빈 목록: 헤더 아래 본문(일러스트)은 background(닫지 않음 — 박스 밖만 닫기).
     if (items.len == 0) return .background;
 
-    // 카드 영역(헤더 아래): 보이는 vis번째 → 실제 인덱스 first+vis + 본문줄 우측 ✕인지.
+    // 카드 영역(헤더 아래): 포인터 행에 놓인 줄 → 그 카드 + 본문줄 우측 ✕인지.
     const rel_card_y = rel_y - @as(f64, @floatFromInt(l.header_h));
     const card_area_h = @as(f64, @floatFromInt(l.viewport_h_px));
     if (rel_card_y >= card_area_h) return .background; // 카드 아래 빈 여백(최소 높이 gap) — 무시
 
-    // 창이 픽셀로 밀렸으므로 클릭 y에 그 몫을 되더해야 **보이는 카드 == 클릭되는 카드**가 유지된다.
-    // 이 한 줄을 빼면 부분 카드가 걸린 순간부터 클릭이 한 장씩 어긋난다(SV5a).
-    const content_y = rel_card_y + @as(f64, @floatFromInt(l.origin_shift_px));
-    const vis_idx: usize = @min(@as(usize, @intFromFloat(content_y / card_h)), l.visible -| 1);
-    const card_idx = l.first + vis_idx;
-    const within = content_y - @as(f64, @floatFromInt(vis_idx)) * card_h;
-    const line: u32 = @intFromFloat(within / @as(f64, @floatFromInt(l.ch))); // 0=제목줄, 1=본문줄
-    if (line >= 1 and col >= l.card_cols -| 2) return .{ .close = card_idx }; // 본문줄 우측 끝 ✕ (그린 자리와 같은 폭)
-    return .{ .card = card_idx };
+    // **보이는 줄 == 눌리는 줄** — 포인터가 있는 셀 행에 실제로 놓인 줄(`placedRow`)을 찾는다. 픽셀 카드 경계로 풀면
+    // 걸친 상태(`offset mod ch ≠ 0`)에서 다음 카드 제목줄 위쪽 띠가 앞 카드로 잡혀, 호버 강조가 틀린 카드에 뜨고 그 자리
+    // 우측 끝 클릭이 **앞 카드의 ✕(삭제)** 로 풀렸다. 줄이 안 놓인 행(바닥에 걸쳐 글자를 안 그린 줄)은 빈 띠다.
+    // 스크롤바 gutter(`card_cols` 오른쪽)는 카드가 아니다 — 막대만 그려진 자리라, 본문줄 높이에서 막대를 누르면 ✕ 로
+    // 풀려 그 카드가 지워졌다.
+    if (col >= l.card_cols) return .background;
+    const row: u32 = @intFromFloat(rel_y / @as(f64, @floatFromInt(l.ch)));
+    const first_line = l.first * card_rows;
+    for (first_line..first_line + l.visible * card_rows) |line_idx| {
+        if (placedRow(l, line_idx) != row) continue;
+        const card_idx = line_idx / card_rows;
+        const line = line_idx % card_rows; // 0=제목줄, 1=본문줄
+        if (line >= 1 and col >= l.card_cols -| 2) return .{ .close = card_idx }; // 본문줄 우측 끝 ✕ (그린 자리와 같은 폭)
+        return .{ .card = card_idx };
+    }
+    return .background;
 }
 
 /// 헤더 우측 액션 버튼(모두 읽음/지우기)을 그린다 — confirm 버튼 관용구(셀 fill 배경 + 라벨, 토큰 색). enabled면
@@ -608,7 +632,7 @@ pub fn view(
         // 생략한다(같은 칸에 두 번 칠하지 않음). 두 강조의 rect는 role만 다르므로 역할만 고르고 fill은 한 번만 낸다(중복 제거).
         const bg_role: ?tokens.ColorRole = if (i == state.selected) .tab_active_bg else if (state.hovered == i) .tab_hover_bg else null;
         if (bg_role) |role| {
-            if (card_clip) |clip| {
+            if (card_clip != null) {
                 // **강조 배경은 글자와 같은 규칙으로 행마다 낸다.** `.fill` 은 clip 을 안 들고 셀 행 단위(`trunc(y/ch)`)로
                 // 내려가며, 카드 프레임 clip 은 패널 전체(헤더 포함)라 막지 못한다 — 카드 하나를 통째로 내면 위로 걸친
                 // 카드의 첫 행이 **헤더 행**으로 내림돼 헤더 한 줄이 카드색이 됐다(1px 만 밀려도, 2026-10-06 실측 ML3b).
@@ -617,9 +641,8 @@ pub fn view(
                 // `card_clip` 안)을 그대로 써서 제목줄·본문줄을 각각 한 행씩 칠한다 — 칠한 행 == 글자가 놓인 행.
                 // 줄 위치는 글자와 같다 — 제목줄(점·제목·시간)이 `card_y`, 본문줄(본문·✕)이 `card_y + ch`(카드 = `card_rows` 줄).
                 for (0..card_rows) |line| {
-                    const line_y = card_y + @as(i32, @intCast(line)) * ch;
-                    if (line_y < clip.y or line_y >= clip.y + @as(i32, @intCast(clip.h))) continue;
-                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = line_y, .w = card_w, .h = l.ch }, .role = role } });
+                    const r = placedRow(l, i * card_rows + line) orelse continue;
+                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = rect.y + @as(i32, @intCast(r)) * ch, .w = card_w, .h = l.ch }, .role = role } });
                 }
             } else {
                 try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = card_w, .h = l.card_h }, .role = role } });
@@ -663,22 +686,16 @@ pub fn view(
         // 경계를 분명히 보이게 한다(사용자 피드백 — 예전엔 마지막 카드를 무조건 건너뛰었다). 마지막 카드 아래 선은 카드↔
         // 빈 여백 경계를 가르되, gap이 없으면(스크롤/딱 맞음) 패널 하단 테두리와 겹치므로 생략한다. `.rule`은 macOS no-op이라 `.fill`.
         if (vis + 1 < l.visible or has_gap_below) {
-            if (card_clip) |clip| {
-                // **구분선은 두 카드의 글자 줄 사이에 긋는다 — 카드의 픽셀 바닥이 아니다.** 글자와 강조 배경은 셀 행으로
-                // 내려가(`trunc((y − rect.y)/ch)`) 카드가 `s` px 걸치면 행 경계에 붙는데, 1px 선은 GPU quad 라 픽셀
-                // 그대로 남아 **다음 카드 제목줄 안 `s − 1` px 자리**를 가로질렀다(「● Maru … 방금」 위 취소선, 2026-10-06
-                // 사용자 지적 — 전체 창 캡처). 그래서 다음 카드 제목줄이 놓일 행을 글자와 같은 식으로 구해 그 바로 위 픽셀에
-                // 긋는다(= 이 카드 본문줄 행의 바닥).
-                //
-                // 긋는 조건은 **선 위아래 두 줄이 다 놓일 때**다(글자 규칙 — origin 이 clip 안, `placeText`). 1px 선은 셀
-                // scissor 를 안 받아 아래 줄이 clip 밖인데 그으면 패널 **밖**에 그어졌고(아래로 걸친 카드, ML3b 적대적 검증),
-                // 경계에 딱 맞으면 내용 맨 아래 픽셀에 붙어 테두리와 이중선이 됐다. 위 줄(본문줄)은 clip 위끝이 헤더 바닥 =
-                // 행 경계라 「선이 clip 안」이면 놓여 있다 — 위로 지나간 카드의 선은 헤더 구분선 자리로 떨어져 여기서 걸러진다.
-                const next_title_y = card_y + card_h_i;
-                const next_row = @divFloor(next_title_y - rect.y, ch);
-                const divider_y = rect.y + next_row * ch - 1;
-                if (divider_y >= clip.y and next_title_y < clip.y + @as(i32, @intCast(clip.h)))
+            if (card_clip != null) {
+                // **구분선은 두 카드의 글자 줄 사이에, 둘 다 놓일 때만 긋는다**(`placedRow`). 1px 선은 GPU quad 라 픽셀 자리에
+                // 남고 셀 scissor 도 안 받는다 — 카드의 픽셀 바닥에 그으면 걸친 만큼 다음 카드 제목줄 안을 가로질렀고(「● Maru
+                // … 방금」 위 취소선, 2026-10-06 사용자 지적), 아래 줄이 뷰포트 밖인데 그으면 패널 밖이나 바닥 테두리에 붙은
+                // 이중선이 됐다. 다음 카드 제목줄이 놓인 행 바로 위 픽셀(= 이 카드 본문줄 행의 바닥)이다.
+                const body_line = i * card_rows + card_rows - 1;
+                if (placedRow(l, body_line) != null) if (placedRow(l, body_line + 1)) |next_row| {
+                    const divider_y = rect.y + @as(i32, @intCast(next_row)) * ch - 1;
                     try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = divider_y, .w = card_w, .h = 1 }, .role = .divider } });
+                };
             } else {
                 // 스크롤이 없으면 카드가 행 경계에서 시작해(`origin_shift_px` 0, 헤더 = 행 정수배) 픽셀 바닥 = 행 바닥이다.
                 try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = card_w, .h = 1 }, .role = .divider } });
@@ -1176,4 +1193,25 @@ test "알림 패널 최소 폭은 라벨에서 나온다 — 상수가 아니다
 
     // 영어 라벨이 한국어보다 넓으므로(EAW 를 세어도) 최소 폭이 더 커야 한다.
     try std.testing.expect(en_cols > ko_cols);
+}
+
+test "notifications hitTest: 상한을 넘은 offset(삭제 뒤 clamp 전)도 그려진 것과 같은 상한 offset 으로 푼다" {
+    // 카드를 지우면 `setItemCount` 는 scroll 을 깎지 않아 state offset 이 상한을 넘을 수 있다. view 는 `layout` 이 깎은
+    // 값으로 그리므로 hitTest 도 그 값이어야 한다 — 날 값을 쓰면 줄이 아래로 밀려 다른 카드를 지운다.
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 300 } };
+    var items: [40]Item = undefined;
+    for (&items) |*it| it.* = .{ .title = "t", .body = "b", .relative_time = "now", .is_read = true, .is_alive = true };
+    var over: State = .{};
+    over.show(0, 0, items.len);
+    const sv = scrollView(&over, &items, p) orelse return error.NotScrollable;
+    const max = sv.content_h_px - sv.viewport.h;
+    var at_max = over;
+    at_max.scroll.offset_y_px = max;
+    over.scroll.offset_y_px = max + 32 + 3;
+    var y: i32 = sv.viewport.y;
+    while (y < sv.viewport.y + @as(i32, @intCast(sv.viewport.h))) : (y += 1) {
+        const yf: f64 = @floatFromInt(y);
+        try std.testing.expectEqual(hitTest(&at_max, &items, p, 12, yf), hitTest(&over, &items, p, 12, yf));
+        try std.testing.expectEqual(hitTest(&at_max, &items, p, @floatFromInt(sv.viewport.w - 30), yf), hitTest(&over, &items, p, @floatFromInt(sv.viewport.w - 30), yf));
+    }
 }

@@ -179,8 +179,13 @@ pub fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeP
     // 「선택 영역 보내기」의 대상 라벨(`이름 — 폴더 (브랜치)`)이 좁은 창에서 실제로 그랬다(Lab
     // `context-menu-send` 480px 실측: 상자가 x=479 까지). 셀 배수로 내려 라벨 열과 패딩이 칸에 맞게 한다.
     // 자른 만큼의 라벨은 `view` 가 가운데를 「…」로 줄여 그린다(`labelCols`).
+    //
+    // **그래도 라벨 한 칸은 남긴다**(적대적 ADV1). workspace 가 세 셀보다 좁으면 상한이 0 이 되는데, 폭 0
+    // 상자는 체크 표시만 상자 밖에 남기고 `itemAt` 이 어디도 안 눌러 **메뉴를 못 쓰게** 된다. 그렇게 좁은
+    // 창에서는 예전처럼 넘치는 쪽이 낫다 — 대신 글자는 늘 상자 안에 든다(`labelCols` ≥ 1).
+    const min_w_wide: u64 = @as(u64, state.markCols() + 2 + 1) * @as(u64, cw);
     const max_w = (popup_box.maxBoxWidth(anchored_below_workspace, p) / cw) * cw;
-    const box_w: u32 = @intCast(@min(box_w_wide, @as(u64, max_w)));
+    const box_w: u32 = @intCast(@min(@min(box_w_wide, @max(@as(u64, max_w), min_w_wide)), @as(u64, std.math.maxInt(u32))));
     const placed = popup_box.place(box_w, box_h, .{
         .anchor = .{ .x = state.anchor_x, .y = state.anchor_y, .w = 0, .h = 0 },
         .vertical = .at_anchor,
@@ -641,4 +646,129 @@ test "상태바 앵커 메뉴도 창 폭으로 잘린다 — 좌단 경계가 �
     try std.testing.expectEqual(@as(i32, 480 - 8), rect.x + @as(i32, @intCast(rect.w))); // 창 우단에서 한 셀
     // 사이드바 위로도 펼 수 있으므로, 상한은 사이드바 폭을 빼지 않는다(workspace 280 보다 넓다).
     try std.testing.expectEqual(@as(u32, 464), rect.w);
+}
+
+test "꼭 맞는 라벨은 줄이지 않는다 — 자르지 않은 메뉴의 가장 긴 줄은 원문 그대로다" {
+    // 자르지 않은 메뉴에서는 라벨 칸 = 가장 긴 라벨의 폭이다. `labelCols` 가 패딩·체크 열을 한 칸만 더 빼도
+    // **모든 메뉴의 가장 긴 줄이 「…」로 줄어든다** — 이 판정자가 그것을 잡는다(적대적 5회차 실측).
+    // (비교를 `<=` 에서 `<` 로 바꾸는 뮤테이션은 살아남지만 동등 뮤턴트다 — `elideMiddle` 이 꼭 맞는 입력을
+    // 원문 그대로 돌려주므로 그림이 같다.)
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 600 } };
+    const items = [_][]const u8{ "이름 바꾸기", "탭 닫기" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    for ([_]?u64{ null, 0b01 }) |mask| {
+        var s: State = .{};
+        s.show(100, 50, items.len);
+        s.checked_mask = mask;
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try view(&s, &items, p, &tk, arena_state.allocator(), &ops);
+        var row: usize = 0;
+        for (ops.items) |op| switch (op) {
+            .text => |t| {
+                try std.testing.expectEqual(items[row].ptr, t.runs[t.runs.len - 1].text.ptr);
+                row += 1;
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(items.len, row);
+    }
+}
+
+test "workspace 가 아주 좁아도 라벨 한 칸은 남고, 체크 표시는 상자 안이며, 메뉴가 눌린다 (적대적 ADV1)" {
+    // 상한만 따르면 workspace 가 세 셀보다 좁을 때 폭이 0 이 된다 — 체크 표시만 상자 밖에 남고 `itemAt` 이
+    // 어디도 안 눌러 메뉴를 못 쓴다. 그런 창에서는 넘치되(예전과 같다) 글자는 상자 안에 든다.
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 20, .backing_height_px = 600 } };
+    const items = [_][]const u8{ "브랜치 표시", "폴더 표시" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var s: State = .{};
+    s.show(0, 40, items.len);
+    s.checked_mask = 0b01;
+    const rect = menuRect(&s, &items, p) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, (2 + 2 + 1) * 8), rect.w); // 패딩 둘 + 체크 열 + 라벨 한 칸
+    var ops: std.ArrayList(draw.Op) = .empty;
+    try view(&s, &items, p, &tk, arena_state.allocator(), &ops);
+    const right = rect.x + @as(i32, @intCast(rect.w));
+    for (ops.items) |op| switch (op) {
+        .text => |t| {
+            var cols: u32 = 0;
+            for (t.runs) |r| cols += overlay_input.displayCols(r.text);
+            try std.testing.expect(t.origin.x + @as(i32, @intCast(cols)) * 8 <= right - 8);
+        },
+        else => {},
+    };
+    const mid_x: f64 = @floatFromInt(rect.x + @as(i32, @intCast(rect.w / 2)));
+    try std.testing.expectEqual(@as(?usize, 1), itemAt(&s, &items, p, mid_x, @floatFromInt(rect.y + 16 + 4)));
+}
+
+test "기하 성질: 어떤 창·앵커·라벨에서도 자리가 있으면 상자는 창 안, 글자는 언제나 테두리 안" {
+    // 위 ADV1 결함을 찾아낸 퍼징이다(20,000 회로 찾고, 상시 판정은 3,000 회). 고정 시드라 결정적이다.
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const r = prng.random();
+    const pieces = [_][]const u8{ "a", "abc", "한", "글자", "—", "~/Documents/", "(feat/x)", "🙂", "✓", " ", "…", "e\u{301}", "ｗ" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var capped: usize = 0;
+    for (0..3000) |_| {
+        _ = arena_state.reset(.retain_capacity);
+        const arena = arena_state.allocator();
+        const cw: u32 = r.intRangeAtMost(u32, 1, 24);
+        const bw: u32 = r.intRangeAtMost(u32, 0, 2400);
+        const bh: u32 = r.intRangeAtMost(u32, 0, 1600);
+        const sb: u32 = r.intRangeAtMost(u32, 0, bw);
+        var p = props.ChromeProps{ .metrics = .{ .cell_width_px = cw, .cell_height_px = r.intRangeAtMost(u32, 1, 40), .sidebar_width_px = sb, .backing_width_px = bw, .backing_height_px = bh } };
+        if (r.boolean()) { // 상태바가 있는 창 — 상태바 앵커(`anchor_below_workspace`)가 생긴다
+            p.metrics.workspace_present = true;
+            p.metrics.workspace_x_px = sb;
+            p.metrics.workspace_y_px = 0;
+            p.metrics.workspace_width_px = bw - sb;
+            p.metrics.workspace_height_px = bh - r.intRangeAtMost(u32, 0, bh);
+        }
+        const n = r.intRangeAtMost(usize, 1, 6);
+        var items_buf: [6][]const u8 = undefined;
+        var natural: u32 = 0;
+        for (0..n) |i| {
+            var b: std.ArrayList(u8) = .empty;
+            for (0..r.intRangeAtMost(usize, 0, 40)) |_| try b.appendSlice(arena, pieces[r.intRangeLessThan(usize, 0, pieces.len)]);
+            items_buf[i] = b.items;
+            natural = @max(natural, overlay_input.displayCols(b.items));
+        }
+        const items = items_buf[0..n];
+        var st: State = .{};
+        const ay: i32 = r.intRangeAtMost(i32, -200, @as(i32, @intCast(bh)) + 200);
+        st.showWithHeaders(r.intRangeAtMost(i32, -200, @as(i32, @intCast(bw)) + 200), ay, n, r.intRangeAtMost(usize, 0, 1));
+        if (r.boolean()) st.checked_mask = r.int(u64);
+        const rect = menuRect(&st, items, p) orelse continue;
+        const ws = props.workspaceRect(p.metrics);
+        const below = @as(i64, ay) >= @as(i64, ws.y) + @as(i64, ws.h);
+        const left: i64 = (if (below) 0 else @as(i64, ws.x)) + cw;
+        const right_lim: i64 = @as(i64, ws.x) + @as(i64, ws.w) - cw;
+        const right: i64 = @as(i64, rect.x) + rect.w;
+        const min_w: i64 = @as(i64, st.markCols() + 3) * cw;
+        if (@divTrunc(right_lim - left, cw) * cw >= min_w) {
+            try std.testing.expect(rect.x >= left and right <= right_lim);
+        }
+        try std.testing.expectEqual(@as(u32, 0), rect.w % cw);
+        if (@as(u64, natural + st.markCols() + 2) * cw > rect.w) capped += 1;
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try view(&st, items, p, &tk, arena, &ops);
+        for (ops.items) |op| switch (op) {
+            .text => |t| {
+                var cols: u32 = 0;
+                for (t.runs) |run| cols += overlay_input.displayCols(run.text);
+                try std.testing.expect(@as(i64, t.origin.x) + @as(i64, cols) * cw <= right - cw);
+                try std.testing.expect(std.unicode.utf8ValidateSlice(t.runs[t.runs.len - 1].text));
+            },
+            else => {},
+        };
+    }
+    // 자르기 경로를 실제로 탔는지 센다 — 0 이면 이 판정자는 아무것도 지키지 않는다.
+    try std.testing.expect(capped > 1000);
 }

@@ -4998,9 +4998,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
-    /// W6k: 시험 모드의 끝(`expireSmokeTimer`) — 끝나는 동안 새 Chromium 탭 대화상자를 띄우지 않는다(잇달아 alert 를 띄우는
-    /// 페이지가 닫은 자리에 곧바로 새 sheet 를 세워 AppKit 이 종료를 진행하지 않았다). 그 길은 곧바로 끝나므로 풀지 않는다 — 사용자
-    /// 종료는 `quitConfirmPending` 이 같은 일을 하고 취소되면 풀린다.
+    /// W6k: 종료가 정해졌다(시험 모드의 끝·확인을 받은 종료·확인 없는 종료) — 끝나는 동안 새 Chromium 탭 대화상자를 띄우지
+    /// 않는다(잇달아 alert 를 띄우는 페이지가 닫은 자리에 곧바로 새 sheet 를 세워 종료가 진행되지 않았다). 정해진 종료는 끝나므로
+    /// 풀지 않는다 — 「종료할까요?」가 떠 있는 동안은 `quitConfirmPending` 이 같은 일을 하고 취소되면 풀린다.
     private var osrDialogsHeldForExit = false
     // 마지막 창 닫기·세션 종료·confirm 수락 경로가 **모든 일반 창+quick의 파일 보호를 재확인한 뒤** 세우는
     // 앱-전역 preflight 토큰. applicationShouldTerminate가 같은 종료 요청에 확인을 다시 띄우지 않게 한다.
@@ -5440,12 +5440,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 창 닫기와 달리 실행 중 명령 유무와 무관하게 항상 묻는다(사용자 결정 2026-06). 단일 출처: docs/macos-app-host-boundary.md.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
-        dismissOsrSheetsForQuit()
-        if smokeMode || appLaunchFirstDrawableArmed { return .terminateNow } // 무인 계측은 모달에 막히면 hang
+        if smokeMode || appLaunchFirstDrawableArmed { holdOsrDialogsForExit(); return .terminateNow } // 무인 계측은 모달에 막히면 hang
         if bypassQuitConfirm {
             // 확인 생략 토큰은 checkpoint 생략 토큰이 아니다. 마지막 창/SessionEnded처럼 모달을 이미 통과했거나
             // 필요 없는 종료도 C4 final commit을 거친다. final success 뒤 재진입만 terminateNow다.
-            if workspaceFinalQuitApproved || !workspaceCheckpointArmed || windows.isEmpty { return .terminateNow }
+            if workspaceFinalQuitApproved || !workspaceCheckpointArmed || windows.isEmpty { holdOsrDialogsForExit(); return .terminateNow }
+            dismissOsrSheetsForQuit() // checkpoint 를 기다리는 동안은 `quitConfirmPending` 이 새 대화상자를 보류한다
             quitConfirmPending = true
             beginFinalWorkspaceCheckpoint(surface: activeSurface, deferredAppKitQuit: true)
             return .terminateLater
@@ -5454,9 +5454,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // frame-loop tick이 아직 안 도는 런치 초기 에러(tickTimer==nil)거나 세션이 없으면, 모달을 띄워도 결정이
         // 돌아올 수 없으므로 즉시 종료한다. 일반 창이 0개여도 hidden quick은 살아 있을 수 있으므로 activeSurface를
         // 요구하기 전에 전 세션 보호를 찾고, clean quick도 일반 종료 confirm 대상으로 삼는다.
-        guard tickTimer != nil else { return .terminateNow }
-        guard let target = protectedFilePanelSurface() ?? activeSurface ?? quick else { return .terminateNow }
-        guard let session = target.appSession else { return .terminateNow }
+        guard tickTimer != nil else { holdOsrDialogsForExit(); return .terminateNow }
+        let protected = protectedFilePanelSurface()
+        guard let target = protected ?? activeSurface ?? quick else { holdOsrDialogsForExit(); return .terminateNow }
+        guard let session = target.appSession else { holdOsrDialogsForExit(); return .terminateNow }
+        // W6k: 종료 확인이 뜰 때만 페이지 대화상자를 치운다 — 저장 안 한 파일 패널이 있으면 Zig 가 곧바로 거절하고 확인은 뜨지
+        // 않는다(그때 치우면 종료하지 않는데 대화상자만 사라진다 — 적대 검증).
+        if protected == nil { dismissOsrSheetsForQuit() }
         quitConfirmPending = true
         maru_macos_app_session_request_app_quit(session) // dirty 파일이면 즉시 취소+notice, 아니면 일반 종료 confirm
         if target.window?.isKeyWindow != true { target.window?.makeKeyAndOrderFront(nil) }
@@ -9102,6 +9106,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let alert: NSAlert?
         let field: NSTextField?
         var dismissed = false
+        /// 권한 질문(W5b) — 종료로 치우면 「무시」로 답한다(W6k).
+        var permission = false
 
         init(surfaceID: UInt64, token: UInt64, sheet: NSWindow, alert: NSAlert?, field: NSTextField?) {
             self.surfaceID = surfaceID
@@ -9167,9 +9173,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 않았다. 답은 각 sheet 의 끝 처리기가 취소로 보낸다(페이지는 취소한 대화상자로 본다 — 떠나기 확인은 머무르기, 권한은 닫기). 종료를
     /// 그만두면 페이지는 이어서 돈다.
     private func dismissOsrSheetsForQuit() {
-        // 끝 처리기가 표에서 지운다 — 미리 떠 둔다.
-        for open in Array(osrDialogSheets.values) { open.sheet.sheetParent?.endSheet(open.sheet, returnCode: .cancel) }
+        // 끝 처리기가 표에서 지운다 — 미리 떠 둔다. 권한 질문은 「무시」로(.abort — 「닫기」는 Chromium 이 쌓아 그 사이트를 한동안
+        // 자동 차단한다 — Chrome 도 종료로 사라진 질문은 무시로 적는다, 적대 검증).
+        for open in Array(osrDialogSheets.values) {
+            open.sheet.sheetParent?.endSheet(open.sheet, returnCode: open.permission ? .abort : .cancel)
+        }
+        // macOS 안내(마지막으로 띄운 것 — 다른 창의 것은 그 창이 닫힐 때 사라진다).
         if let alert = osrBlockedAlert, let parent = alert.window.sheetParent { parent.endSheet(alert.window, returnCode: .cancel) }
+    }
+
+    /// 종료가 정해졌다 — 새 대화상자를 보류하고 떠 있는 것을 치운다(W6k).
+    private func holdOsrDialogsForExit() {
+        osrDialogsHeldForExit = true
+        dismissOsrSheetsForQuit()
     }
 
     private func drainOsrDialog() {
@@ -9278,6 +9294,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         alert.window.initialFirstResponder = close
         let key = ObjectIdentifier(window)
         let open = OsrDialogSheet(surfaceID: sid, token: token, sheet: alert.window, alert: alert, field: nil)
+        open.permission = true
         osrDialogSheets[key] = open
         alert.beginSheetModal(for: window) { [weak self, weak window] response in
             guard let self else { return }
@@ -9307,6 +9324,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
             case .alertSecondButtonReturn:
                 self.replyOsrPermission(window: window, sid: sid, token: token, result: MARU_OSR_PERMISSION_DENY)
+            case .abort: // 종료로 치웠다(W6k) — 기억하지도 쌓지도 않는다
+                self.replyOsrPermission(window: window, sid: sid, token: token, result: MARU_OSR_PERMISSION_IGNORE)
             default:
                 self.replyOsrPermission(window: window, sid: sid, token: token, result: MARU_OSR_PERMISSION_DISMISS)
             }
@@ -9474,7 +9493,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// macOS 가 Maru 의 장치 사용을 막았다 — 시스템 설정의 그 항목으로 안내한다.
     private func showMacAccessBlocked(window: NSWindow, device: OsrDevice) {
         Self.testNote("macos-blocked \(device.rawValue)")
-        guard window.attachedSheet == nil else { return }
+        guard window.attachedSheet == nil, !quitConfirmPending, !osrDialogsHeldForExit else { return } // 종료 중에는 띄우지 않는다(W6k)
         let alert = NSAlert()
         alert.messageText = Self.osrDialogString(6, device.rawValue)
         alert.addButton(withTitle: Self.osrDialogString(7))
@@ -13092,8 +13111,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
         // 창에 sheet 가 붙어 있으면 AppKit 이 종료를 진행하지 않았다(W6k 실측 — alert 가 떠 있으면 시험 앱이 끝나지 않았다).
-        osrDialogsHeldForExit = true
-        dismissOsrSheetsForQuit()
+        holdOsrDialogsForExit()
         NSApp.terminate(nil)
     }
 
@@ -15631,6 +15649,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             bypassQuitConfirm = true
             if deferredAppKitQuit {
                 quitConfirmPending = false
+                holdOsrDialogsForExit()
                 NSApp.reply(toApplicationShouldTerminate: true)
             } else { NSApp.terminate(nil) }
             return
@@ -15654,6 +15673,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             bypassQuitConfirm = true
             if deferredAppKitQuit {
                 quitConfirmPending = false
+                holdOsrDialogsForExit()
                 NSApp.reply(toApplicationShouldTerminate: true)
             } else { NSApp.terminate(nil) }
             return
@@ -15709,6 +15729,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if workspaceFinalQuitWasDeferred {
             workspaceFinalQuitWasDeferred = false
             quitConfirmPending = false
+            holdOsrDialogsForExit()
             NSApp.reply(toApplicationShouldTerminate: true)
         } else {
             NSApp.terminate(nil)

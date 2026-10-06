@@ -1131,3 +1131,13 @@ Unicode 검색 접기 집중 검증: `mise exec -- zig build test-search-case-fo
 문서 전체 정규식 집중 검증: `mise exec -- zig build test-editor-document-regex -Doptimize=ReleaseFast`. `FND35~41`과 `EDREG1~5`가 문서 앵커·원문 CRLF 캡처·여러 줄 강조·치환·Undo·공유 변경 후 재검색을 검사한다. 제품 Metal 읽기는 `python3 tools/shared-ime-gpu/capture.py --scenario regex --output /tmp/maru-document-regex-<고유명>`으로 격리 실행한다.
 
 VS Code 기본 검색 경계의 opt-in 오라클: `node tools/editor-project-search/vscode-oracle.mjs zig-out/bin/maru-project-search-probe references/vscode/search-policy/textModelSearch.ts zig-out/vscode-search-oracle-<새이름>`. 지정한 read-only reference의 실제 Searcher를 Node 24+의 TypeScript 변환으로 실행한다. reference는 자동 설치하지 않으며 기본 CI/제품 의존성이 아니다. 공통 문법·단일 줄·기본 단어 구분자에 한정한다. 제품 Metal 캡처는 `python3 tools/shared-ime-gpu/capture.py --scenario word --output zig-out/vscode-search-word-<새이름>`이다. [승인 정책과 검증 범위](plans/editor-search-policy.md)를 본다.
+
+
+### 공유 뷰의 실제 AppKit 닫기 검증
+
+`python3 tools/shared-restore-app/run.py --close-views --output <새 빈 디렉터리>`는
+공유 dirty 문서를 정상 종료/복원한 뒤 Cmd+W로 한쪽을 닫고 마지막 닫기 취소,
+Cmd+S 후 마지막 닫기를 검사한다. 부모가 첫 닫기 뒤 백업 본문을 확인하기 전에는
+다음 닫기를 진행하지 않는다. 저장 바이트·백업 정리·관측 상태와 실제 Metal 캡처를
+manifest에 남긴다. 로컬 합성 NSEvent이며 실제 한국어 HID는 별도 `--live-ime`다.
+배포 코드나 사용자 데이터를 바꾸지 않는 opt-in 소스 사본 검사다.

@@ -1,0 +1,24 @@
+{
+  "base_head": "920f3ad86",
+  "scope": "Existing shared split/restart behavior revalidated; AppKit-local close/cancel/save with independent parent backup check added. Korean composing keys use real HID in separate restart scenario. Natural late callback not reproduced.",
+  "source_sha256": {
+    "tools/shared-restore-app/run.py": "31cb6df81d2982b2a535b15ad99c9b3a12f22c17e622d46c784b8afa8690bf8c",
+    "tools/shared-restore-app/driver.swift.inc": "9e0c25f507deb0bc85617e2f6339d72278756362b18edc7efd835e8e551c9fe9",
+    "tools/shared-restore-app/fixture.zig.inc": "b8fe263186b056f58b0683d5ca5f3cdfdaa2c285ccba15b02970dfccb106d813"
+  },
+  "artifact_sha256": {
+    "before-close.png": "c58880c33fcbfcd8ea48ce5298ed99017e5607098b3bcc2d956ea368eaab7364",
+    "controls.json": "bbeb33354023bcafb1f41ce4d752cca13fe1ce7cbc2f00d5370258ced3f74ed6",
+    "app.stderr.txt": "6ab37e03c485f47700623e0f2522ffcdc1d793e9601259bace258ba264309c67",
+    "one-close-verified": "636899231ee5732bc2613c2104b2941545d4546696477c5c3f5450e9b3b1a060",
+    "close.json": "39d23c4e4c9b6deb9f9fcd1434259b0fba44d7806e67f4e1efe3394c98a65610",
+    "cancelled.png": "3d2c7b9130ddb11509b16f7dca4df4251c109abe5adc672fb3693eefe53e8773",
+    "saved.png": "65011c33318d0491eb3e7fe67793dac691472a77b84fb9b5fa3b280258268a46",
+    "restored-two-panes.png": "494246e4f5e06c4e7c3a135be0ed9bef00d7278aab858462448fb03c141cf68e",
+    "last-prompt.png": "5523113ff232c01931e000dba33391f39062a1e8829838102c04bb1823bd6f93",
+    "restart.json": "8a0b08970823aef8743cbc03926da05434eafddbe5661d687045e1a345da14ef",
+    "one-closed.png": "6975b28736348a1a8359a5cbda4d009a9ad4592743ef7ef917462cc3f1602f0e",
+    "last-closed.png": "779d27b00d3e13b847587bfbe18e6855b734f22ee2aa71606c5f6ae83a399035",
+    "live-ime.txt": "07c5dabda04430109b3bf3fd9bbedc9add5a60847477109cacc6d7bbd7b72ec0"
+  }
+}

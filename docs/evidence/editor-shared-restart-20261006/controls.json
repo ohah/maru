@@ -1,0 +1,18 @@
+{
+  "controls": [
+    {
+      "control": "missing_backup_observation",
+      "rejected": true,
+      "reason": "closing one view removed shared backup",
+      "artifact_root": "/private/tmp/maru-shared-close-controls-fku981lx/missing_backup_observation"
+    },
+    {
+      "control": "wrong_backup_body_observation",
+      "rejected": true,
+      "reason": "backup body mismatch",
+      "artifact_root": "/private/tmp/maru-shared-close-controls-fku981lx/wrong_backup_body_observation"
+    }
+  ],
+  "scope": "Parent observation corruption only; disk backups untouched; owned children reaped on rejection",
+  "runner_sha256": "31cb6df81d2982b2a535b15ad99c9b3a12f22c17e622d46c784b8afa8690bf8c"
+}

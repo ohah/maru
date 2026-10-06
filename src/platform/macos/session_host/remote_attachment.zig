@@ -2,6 +2,7 @@
 //! Connection transport와 GUI Surface를 소유하지 않으며 strict host result/event를 attachment-local state로 접는다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const protocol = @import("protocol.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const client_mod = @import("client.zig");
@@ -14,6 +15,19 @@ const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("maru").session.screen_assembler;
 const screen_stream = @import("maru").session.screen_stream;
 const catchup_stage_contract = @import("catchup_stage_contract.zig");
+
+/// 화면 배치를 해석하지 못해 연결을 `frame_malformed` 로 닫을 때 **어느 단계에서 무슨 오류였는지** 남긴다.
+///
+/// poison 줄(`client poison: reason=frame_malformed`)은 사유 이름만 싣고, 그 아래 해석 오류는 버려졌다.
+/// 2026-10-05 19:07 실측: 이 자리의 poison 이 재접속을 일으켰고 그 재접속이 앱 abort 로 이어졌는데, 무엇이 깨졌는지
+/// 로그로는 가릴 수 없었다(return address 를 `atos` 로 풀어서야 `pumpScreenInternal` 인 것을 알았다).
+fn logScreenBatchMalformed(stage: []const u8, err: anyerror, stream_id: u64, bytes: usize) void {
+    if (builtin.is_test) return;
+    std.log.scoped(.session_host).err(
+        "remote screen batch malformed: stage={s} err={s} stream={d} bytes={d}",
+        .{ stage, @errorName(err), stream_id, bytes },
+    );
+}
 
 pub const AttachmentBatchLease = union(enum) {
     untracked: client_mod.StreamBatch,
@@ -514,6 +528,7 @@ pub const RemoteAttachment = struct {
                 batch.bytes,
                 screen.assembler.expected_codec_version,
             ) catch |err| {
+                logScreenBatchMalformed("decoded_cells", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, .frame_malformed);
                 const released = self.releaseOrRetain(lease, transport);
                 self.compactConsumedBatches();
@@ -556,6 +571,8 @@ pub const RemoteAttachment = struct {
             defer if (prepared_screen_live) prepared_screen.deinit();
             prepared_screen.prepareRecoveryFrontierFrom(screen);
             prepared_screen.applySnapshot(batch.bytes, io) catch |err| {
+                if (err != error.OutOfMemory)
+                    logScreenBatchMalformed("recovery_snapshot", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
                     .local_resource_exhausted
                 else
@@ -597,6 +614,8 @@ pub const RemoteAttachment = struct {
         }
         if (batch.is_snapshot) {
             screen.applySnapshot(batch.bytes, io) catch |err| {
+                if (err != error.OutOfMemory)
+                    logScreenBatchMalformed("snapshot", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
                     .local_resource_exhausted
                 else
@@ -610,6 +629,8 @@ pub const RemoteAttachment = struct {
             };
         } else {
             screen.applyDelta(batch.bytes, io) catch |err| {
+                if (err != error.OutOfMemory)
+                    logScreenBatchMalformed("delta", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
                     .local_resource_exhausted
                 else

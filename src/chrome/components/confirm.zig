@@ -192,12 +192,12 @@ pub fn view(
     const box = g.box;
     try modal_box.frame(box, p, arena, out);
 
-    // (1) 메시지 — 줄마다 중앙, row 0부터 g.msg_rows 줄. 상자 안쪽 폭에 맞춰 나눈다(`wrapMessage`) — 한 줄로만 그리면
+    // (1) 메시지 — 줄마다 중앙, row 0부터 g.msg_rows 줄. 상자 안쪽 폭에 맞춰 나눈다(`modal_box.wrapLine`) — 한 줄로만 그리면
     //     넘치는 글자가 상자 밖으로 나가 창 가장자리에서 잘렸다(기본 960pt 창에서 영어 붙여넣기·원격 삭제·LSP 신뢰 확인,
     //     2026-10-05 실측). 상한을 넘으면 마지막 줄이 「…」로 끝난다.
     for (g.msg_lines[0..g.msg_rows], 0..) |line, i| {
         const last_cut = g.msg_truncated and i + 1 == g.msg_rows;
-        const shown = if (last_cut) try std.fmt.allocPrint(arena, "{s}{s}", .{ line, ellipsis }) else line;
+        const shown = if (last_cut) try std.fmt.allocPrint(arena, "{s}{s}", .{ line, modal_box.ellipsis }) else line;
         try modal_box.text(box, modal_box.centerX(box, overlay_input.displayCols(shown)), @intCast(i), shown, .surface_fg, arena, out);
     }
 
@@ -242,10 +242,6 @@ pub fn view(
 
 const btn_pad: u32 = 1; // 버튼 라벨 좌우 패딩(배경이 라벨을 감싸 버튼처럼)
 const btn_gap: u32 = 2; // 두 버튼 사이 간격(칸)
-/// 메시지가 차지할 수 있는 줄 수 상한. 브라우저 권한 확인처럼 URL 이 그대로 들어간 메시지는 길이에 끝이 없다 —
-/// 상한이 없으면 상자가 창을 덮는다. 넘치면 마지막 줄이 「…」로 끝난다.
-const max_message_rows: u32 = 6;
-const ellipsis = "…";
 
 /// 버튼 행 기하 — view(그리기)와 buttonAtPoint(클릭 hit-test)가 공유하는 **단일 레이아웃**(chrome 계약 §5.4의
 /// view↔hitTest 단일 모델). 박스·각 버튼 x·fit-clamp된 폭(칸; 0이면 너무 좁아 생략)을 돌려준다. null=안 열림/생략 박스.
@@ -260,7 +256,7 @@ const ButtonGeom = struct {
     cancel_row: u32,
     body_row: u32, // 미리보기 첫 행 — 메시지 줄 다음 빈 줄 뒤
     // 메시지를 상자 안쪽 폭으로 나눈 줄들(state.message 를 빌린다). msg_truncated 면 마지막 줄 끝에 「…」.
-    msg_lines: [max_message_rows][]const u8,
+    msg_lines: [modal_box.max_wrap_rows][]const u8,
     msg_rows: u32,
     msg_truncated: bool,
     confirm_x: i32,
@@ -290,13 +286,13 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     const btn_row_cols = default_btn_cols + btn_gap + alternate_btn_cols +
         (if (state.has_alternate) btn_gap else 0) + extra_btn_cols +
         (if (state.has_extra) btn_gap else 0) + cancel_btn_cols;
-    var content_cols = @max(overlay_input.displayCols(state.message), btn_row_cols);
+    var content_cols = @max(modal_box.widestLineCols(state.message), btn_row_cols);
     for (state.body) |line| content_cols = @max(content_cols, overlay_input.displayCols(line)); // 미리보기 줄도 폭에 반영
     // 폭은 행 수와 무관하다 — 먼저 한 행으로 재서 상자 안쪽 폭을 얻고, 그 폭으로 메시지를 나눈 뒤 실제 행 수로 다시 잰다.
     // 메시지가 안쪽 폭에 들어가면 한 줄 그대로다(짧은 확인은 예전 모양 그대로).
     const width_probe = modal_box.layout(content_cols, 1, p, tk) orelse return null;
-    var msg_lines: [max_message_rows][]const u8 = undefined;
-    const wrapped = wrapMessage(state.message, width_probe.inner_cols, &msg_lines);
+    var msg_lines: [modal_box.max_wrap_rows][]const u8 = undefined;
+    const wrapped = modal_box.wrapLine(state.message, width_probe.inner_cols, &msg_lines);
     const m: u32 = wrapped.rows;
     // 콘텐츠 행: 미리보기 없으면 m+2행([0..m)=메시지·m=빈줄·m+1=버튼); 있으면 [0..m)=메시지·m=빈줄·[m+1..m+1+n)=본문·
     // m+1+n=빈줄·m+2+n=버튼. m=1 이면 예전 배치(3행·4+n행) 그대로다.
@@ -358,72 +354,6 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         .cancel_x = cancel_x,
         .cancel_fit = fitButtonCols(cancel_x, cancel_btn_cols, box.cw, inner_right),
     };
-}
-
-const Wrapped = struct { rows: u32, truncated: bool };
-
-/// 메시지를 `cols` 칸(표시 폭 — 한글 2칸) 줄로 나눠 `out` 에 담는다. 공백에서 끊고, 공백 없이 긴 토큰(URL·경로·
-/// 실행 파일 이름)은 글자 경계에서 자른다. 줄이 `out.len` 을 넘으면 마지막 줄을 「…」 자리만큼 줄이고 truncated.
-/// 슬라이스는 message 를 빌린다(할당 없음 — view 와 hitTest 가 프레임마다 부른다). 빈 메시지도 한 줄(빈 줄)이다.
-fn wrapMessage(message: []const u8, cols: u32, out: *[max_message_rows][]const u8) Wrapped {
-    if (cols == 0) {
-        out[0] = message; // 상자가 한 칸도 없다 — 나눌 수 없으니 예전처럼 한 줄(호출자가 상자를 생략하는 갈래와 같다)
-        return .{ .rows = 1, .truncated = false };
-    }
-    const ellipsis_cols = overlay_input.displayCols(ellipsis);
-    var rows: u32 = 0;
-    var rest = std.mem.trim(u8, message, " ");
-    while (rest.len > 0) {
-        const last_slot = rows + 1 == max_message_rows;
-        // 마지막 자리에서 다 안 들어가면 「…」 를 붙일 자리를 남긴다 — 먼저 전부 들어가는지 보고, 아니면 줄인 폭으로 다시.
-        const nl = std.mem.indexOfScalar(u8, rest, '\n');
-        const seg_end = nl orelse rest.len;
-        const full_fits = overlay_input.displayCols(rest[0..seg_end]) <= cols and nl == null;
-        const limit = if (last_slot and !full_fits) cols -| ellipsis_cols else cols;
-        var width: u32 = 0;
-        var fit_end: usize = 0;
-        var last_space: ?usize = null;
-        var i: usize = 0;
-        while (i < seg_end) {
-            const len = std.unicode.utf8ByteSequenceLength(rest[i]) catch 1;
-            const end = @min(i + len, seg_end);
-            const w = overlay_input.displayCols(rest[i..end]);
-            if (width + w > limit) break;
-            width += w;
-            if (rest[i] == ' ') last_space = i;
-            i = end;
-            fit_end = i;
-        }
-        var line_end = fit_end;
-        var next = fit_end;
-        if (fit_end < seg_end) {
-            if (rest[fit_end] == ' ') {
-                next = fit_end + 1; // 넘친 글자가 공백이면 여기서 딱 끊긴다
-            } else if (last_space) |sp| {
-                if (sp > 0) {
-                    line_end = sp;
-                    next = sp + 1;
-                }
-            }
-            if (line_end == 0) {
-                // 첫 글자부터 폭을 넘는다(아주 좁은 상자의 2칸 글자) — 그 글자 하나를 한 줄로 내 무한 반복을 막는다.
-                const len = std.unicode.utf8ByteSequenceLength(rest[0]) catch 1;
-                line_end = @min(len, seg_end);
-                next = line_end;
-            }
-        } else if (nl != null) {
-            next = seg_end + 1; // 줄바꿈 문자까지 먹는다
-        }
-        out[rows] = std.mem.trimEnd(u8, rest[0..line_end], " ");
-        rows += 1;
-        rest = std.mem.trimStart(u8, rest[next..], " ");
-        if (rows == max_message_rows) return .{ .rows = rows, .truncated = rest.len > 0 };
-    }
-    if (rows == 0) {
-        out[0] = "";
-        rows = 1;
-    }
-    return .{ .rows = rows, .truncated = false };
 }
 
 /// 마우스 클릭(backing px) hit-test — 확인 버튼 위면 confirmed, 취소 버튼 위면 cancelled, **패널 밖이면 cancelled**
@@ -1051,7 +981,7 @@ test "confirm wrap: 공백 없는 긴 토큰은 글자 경계에서 자르고, �
     const url = "Allow access to https://example.com/" ++ "a" ** 2000 ++ " ?";
     s.show(url, .{ .confirm = "ok", .cancel = "no" });
     g = buttonGeom(&s, p, &tk).?;
-    try std.testing.expectEqual(max_message_rows, g.msg_rows);
+    try std.testing.expectEqual(modal_box.max_wrap_rows, g.msg_rows);
     try std.testing.expect(g.msg_truncated);
     var out: std.ArrayList(draw.Op) = .empty;
     try view(&s, p, &tk, arena, &out);
@@ -1066,7 +996,7 @@ test "confirm wrap: 공백 없는 긴 토큰은 글자 경계에서 자르고, �
         }
     };
     const shown = last_line.?;
-    try std.testing.expect(std.mem.endsWith(u8, shown, ellipsis));
+    try std.testing.expect(std.mem.endsWith(u8, shown, modal_box.ellipsis));
     try std.testing.expect(overlay_input.displayCols(shown) <= g.box.inner_cols);
 }
 

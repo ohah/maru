@@ -6095,7 +6095,7 @@ pub const AppSession = struct {
     notice_message_buf: [notice_message_cap]u8 = undefined,
     // 닫기 확인 모달(confirm)의 메시지 세션 소유 백킹(notice_message_buf와 같은 이유 — confirm.State.message는 slice).
     // 문구가 짧아 256B면 충분.
-    // 확인 메시지 사본. 모달은 최대 6 줄로 나눠 그린다(`confirm.max_message_rows`) — 기본 창 안쪽 약 90칸 × 6 줄은
+    // 확인 메시지 사본. 모달은 최대 6 줄로 나눠 그린다(`modal_box.max_wrap_rows`) — 기본 창 안쪽 약 90칸 × 6 줄은
     // 한글(2칸 3바이트)이면 800 바이트를 넘는다. 256 이던 시절엔 줄 상한보다 버퍼 절단이 먼저 와 잘림이 조용했다.
     confirm_message_buf: [1024]u8 = undefined,
     // 닫기 확인에서 "닫기"를 확정하면 실행할 보류된 닫기. null=보류 없음. requestClose가 실행 중 명령이 있으면 여기

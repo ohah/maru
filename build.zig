@@ -503,6 +503,45 @@ pub fn build(b: *std.Build) void {
     });
     b.step("editor-project-search-probe", "Build the opt-in project search comparison probe")
         .dependOn(&b.addInstallArtifact(project_search_probe, .{}).step);
+    const project_search_module = b.createModule(.{
+        .root_source_file = b.path("src/session/editor/search/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const project_search_adapter = b.addExecutable(.{
+        .name = "maru-project-search-adapter",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/editor-project-search/adapter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "project_search", .module = project_search_module }},
+        }),
+    });
+    const project_search_adapter_install = b.addInstallArtifact(project_search_adapter, .{});
+    b.step("editor-project-search-adapter", "Build actual ripgrep protocol probe").dependOn(&project_search_adapter_install.step);
+    const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
+    const run_project_search_tests = b.addRunArtifact(project_search_tests);
+    run_project_search_tests.addArg("--maru-expect-tests=6");
+    b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
+    const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });
+    ripgrep_prepare.setCwd(b.path("."));
+    ripgrep_prepare.has_side_effects = true;
+    b.step("prepare-ripgrep", "Verify offline ripgrep assets and build the universal helper").dependOn(&ripgrep_prepare.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        const adapter_cases = b.addSystemCommand(&.{
+            "python3",      "tools/editor-project-search/adapter-verify.py",
+            "--adapter",    "zig-out/bin/maru-project-search-adapter",
+            "--rg",         "zig-out/ripgrep/rg",
+            "--output",     "zig-out/editor-project-search-adapter",
+            "--repeatable",
+        });
+        adapter_cases.setCwd(b.path("."));
+        adapter_cases.has_side_effects = true;
+        adapter_cases.step.dependOn(&ripgrep_prepare.step);
+        adapter_cases.step.dependOn(&project_search_adapter_install.step);
+        b.step("test-macos-project-search-adapter", "Run offline helper and actual search adapter fixtures").dependOn(&adapter_cases.step);
+        macos_only_test_step.dependOn(&adapter_cases.step);
+    }
     const session_host_product_options = b.addOptions();
     session_host_product_options.addOption(bool, "allow_validation_only_restore", false);
     const session_host_build_options_mod = session_host_product_options.createModule();
@@ -2683,6 +2722,9 @@ pub fn build(b: *std.Build) void {
                     "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Helpers zig-out/Maru.app/Contents/Resources/Fonts; " ++
                     "cp zig-out/bin/maru-macos-app zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
                     "cp -R zig-out/MaruMermaidRenderer.app zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
+                    "cp zig-out/ripgrep/rg zig-out/Maru.app/Contents/Helpers/rg; " ++
+                    "mkdir -p zig-out/Maru.app/Contents/Resources/Licenses; " ++
+                    "cp zig-out/ripgrep/Licenses/* zig-out/Maru.app/Contents/Resources/Licenses/; " ++
                     // 원격 감시자(RW2b) — 네 변종을 Resources 에 싣는다. **없으면 빌드를 세운다**:
                     // 조용히 빠지면 그 아키텍처 원격만 감시가 안 되고, 증상은 「원격만 갱신이 안 된다」라
                     // 이 트랙이 고치려던 모양 그대로다(폰트 라이선스 검사와 같은 규율).
@@ -2753,6 +2795,7 @@ pub fn build(b: *std.Build) void {
                     // 개발/CI bundle도 release와 같은 inside-out 순서를 검증한다. ad-hoc 서명이라 비밀/인증서는 필요 없다.
                     "codesign --force --sign - --entitlements src/platform/macos/MaruMermaidRenderer.entitlements zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
                     "codesign --force --sign - zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; " ++
+                    "codesign --force --sign - zig-out/Maru.app/Contents/Helpers/rg; " ++
                     "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru; " ++
                     "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
                     "codesign --force --sign - zig-out/Maru.app; " ++
@@ -2778,6 +2821,7 @@ pub fn build(b: *std.Build) void {
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
         macos_app_bundle.step.dependOn(remote_watch_step); // 번들이 싣는 것을 먼저 만든다(RW2b)
         macos_app_bundle.step.dependOn(&macos_mermaid_helper_bundle.step);
+        macos_app_bundle.step.dependOn(&ripgrep_prepare.step);
         // web/dist·폰트 같은 입력은 zig build가 추적하는 인자가 아니라, side effect를 선언하지 않으면
         // "인자가 그대로다"라는 이유로 이 스텝이 통째로 스킵된다. 그러면 web을 고치고 앱을 빌드해도 번들 안
         // Resources/web은 옛 bundle.js로 남아, 제품이 조용히 구버전 웹앱을 실행한다(실제로 겪었다).

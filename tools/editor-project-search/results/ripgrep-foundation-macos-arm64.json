@@ -1,0 +1,282 @@
+{
+  "scope": "S1a dependency and protocol foundation only; no app worker/dock/open snapshot/IME/preview budget/cancel proof",
+  "base_commit": "e4ace7d12b000e6ffdf9bbadef1bc39a0f3013d4",
+  "helper_version": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+NEON\nsimd(runtime):+NEON\n\nPCRE2 10.45 is available (JIT is available)\n",
+  "universal_helper_bytes": 8465840,
+  "vendor_manifest_sha256": "1483c5e72b963ef2f1c3266b157d23a25811819567894d452763990f75c42e29",
+  "fixture": {
+    "status": "passed",
+    "cases": [
+      {
+        "name": "query-flags",
+        "expected": {
+          "a.txt": [
+            [
+              0,
+              3,
+              0,
+              5
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "case-fold",
+        "expected": {
+          "a.txt": [
+            [
+              0,
+              0,
+              0,
+              3
+            ],
+            [
+              0,
+              4,
+              0,
+              7
+            ],
+            [
+              0,
+              8,
+              0,
+              11
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "word",
+        "expected": {
+          "a.txt": [
+            [
+              0,
+              0,
+              0,
+              3
+            ],
+            [
+              0,
+              8,
+              0,
+              11
+            ],
+            [
+              0,
+              27,
+              0,
+              30
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "pcre-fallback",
+        "expected": {
+          "a.txt": [
+            [
+              0,
+              3,
+              0,
+              6
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "multiline",
+        "expected": {
+          "a.txt": [
+            [
+              0,
+              0,
+              1,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "bom",
+        "expected": {
+          "a.txt": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "local-ignore",
+        "expected": {
+          "b.txt": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "include",
+        "expected": {
+          "src/a.zig": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "include-directory",
+        "expected": {
+          "src/a.zig": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ],
+          "src/deep/a.txt": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "case-insensitive-glob",
+        "expected": {
+          "src/a.zig": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "exclude",
+        "expected": {
+          "a.txt": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "defaults",
+        "expected": {
+          ".visible": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "brace-include",
+        "expected": {
+          "src/a/one.txt": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ],
+          "src/b/two.txt": [
+            [
+              0,
+              0,
+              0,
+              3
+            ]
+          ]
+        },
+        "exit": 0
+      },
+      {
+        "name": "empty-results",
+        "expected": {},
+        "exit": 0
+      },
+      {
+        "name": "symlink-follows-outside-logical-root",
+        "exit": 0
+      },
+      {
+        "name": "invalid-regex-rejected",
+        "exit": 1
+      }
+    ],
+    "adapter_sha256": "91259b4127da11188ffb595cea51eee66952c1b92822c3e85831e39682f62dcb",
+    "rg_sha256": "44b08bb5d667490ba0dbe196befeadbecfcb67bf610d0146e415eb5a7effaa41",
+    "scope": "actual offline helper, argv, JSON fragments and disk ranges; not app worker/IME/UI/cancel evidence"
+  },
+  "negative_vendor": [
+    {
+      "case": "archive",
+      "error": "ripgrep archive digest mismatch: ripgrep-15.2.0-aarch64-apple-darwin.tar.gz",
+      "universal_written": false
+    },
+    {
+      "case": "license",
+      "error": "ripgrep license digest mismatch: LICENSE-MIT",
+      "universal_written": false
+    },
+    {
+      "case": "missing-arch",
+      "error": "[Errno 2] No such file or directory: 'zig-out/project-search-implementation/negative-vendor/missing-arch/vendor/ripgrep-15.2.0-x86_64-apple-darwin.tar.gz'",
+      "universal_written": false
+    }
+  ],
+  "source_sha256": {
+    "src/session/editor/search/query.zig": "777115a6a01d6e27354fd0bf1b332d1dab43def87a26225e71858b453d39fd49",
+    "src/session/editor/search/event.zig": "04a74fd15a99a0561ad1948c0739d8270466063818d36cb75784ef177287a48c",
+    "src/session/editor/search/stream.zig": "6857f39eec06ef401b9e4f452cdb67e5a7a3c4b924c08cb2e476d34e0e8ce5ca",
+    "tools/build-ripgrep.py": "e296fd337aa86768984cd4307871682eabfbba2742fc9c8708c253b3bfd8094c",
+    "tools/editor-project-search/adapter.zig": "4ccad3b3aa4923cd9b648c0717be109be8ff5cd1f0f6fb7945af5d8fd6af39da",
+    "tools/editor-project-search/adapter-verify.py": "bb321b3382a8ecad8b259b4d87ab98ec364739c6087d7263266875d29629b891"
+  },
+  "bundle_validation": {
+    "helper_in_actual_app": true,
+    "notices_files_verified": 114,
+    "codesign_strict_deep": true,
+    "hardened_ad_hoc_pcre2_lookbehind": true,
+    "developer_id_notarization": false
+  }
+}

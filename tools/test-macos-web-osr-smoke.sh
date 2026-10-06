@@ -150,6 +150,10 @@ class H(http.server.BaseHTTPRequestHandler):
             # W6i: 페이지마다 다른 번호로 0.3 초마다 `/ev` 를 보낸다(닫힌 창의 페이지가 아직 도는지 본다).
             body = (b"<!doctype html><title>tick</title><body>tick<script>var p=Math.random().toString(36).slice(2,8);"
                     b"setInterval(function(){new Image().src='/ev?e=tick&p='+p+'&t='+Date.now()},300)</script>")
+        elif self.path.startswith("/alert-app"):
+            # W6k: 뜬 뒤 1.5 초에 alert 를 띄운다(`?loop` 이면 끝없이).
+            again = b"for(;;)" if "loop" in self.path else b""
+            body = b"<!doctype html><title>alert</title><body>alert<script>setTimeout(function(){" + again + b"alert('hold')},1500)</script>"
         elif self.path.startswith("/unload-app"):
             # W6j: 0.3 초마다 `/ev` 를 보내고, 클릭하면 떠나기 확인을 건다(`?hang` 이면 그 처리기가 6 초 멈춘다).
             hang = b"var t=Date.now();while(Date.now()-t<6000);" if "hang" in self.path else b""
@@ -981,6 +985,31 @@ check(len(first) == 1 and len(before) == 2 and after == first,
       f'both pages ran while the windows were open and only the first window page runs after closing the second ({len(first)} first · {len(before)} before · {len(after)} after, kept the first {after == first} · {len(ticks)} requests)')
 sys.exit(0 if ok else 1)
 PY
+
+# ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
+# 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그
+# sheet 를 취소로 닫는다(사용자 결정 2026-10-06). alert 를 띄운 채 시험 시간이 끝나도 앱이 제때 끝나야 한다 — 끝나지 않으면 감시가
+# 끄고 실패로 본다(이 단계가 멈추지 않게).
+alert_exit() { # $1=이름 $2=경로
+    printf 'sleep 9000\nsheet\n' > "$root/alert-$1.txt"
+    rm -rf "$root/home" && mkdir -p "$root/home"
+    env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+        MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port$2" \
+        MARU_MACOS_APP_SMOKE_MS=12000 MARU_WEB_OSR_TEST_INPUT="$root/alert-$1.txt" "$app" > "$root/app-alert-$1.log" 2>&1 &
+    alert_pid=$!
+    waited=0
+    while kill -0 "$alert_pid" 2>/dev/null && [ "$waited" -lt 45 ]; do sleep 1; waited=$((waited + 1)); done
+    if kill -0 "$alert_pid" 2>/dev/null; then
+        kill "$alert_pid" 2>/dev/null; sleep 2; kill -KILL "$alert_pid" 2>/dev/null || true
+        echo "FAIL the app with a page alert open did not exit ($1 — still running ${waited} s after start, smoke 12 s)"
+        return 1
+    fi
+    shown=$(grep -ao 'osr-test sheet alert' "$root/app-alert-$1.log" | head -1)
+    if [ -z "$shown" ]; then echo "FAIL no alert sheet was open when the smoke time ended ($1)"; return 1; fi
+    echo "PASS the app with a page alert open exits when asked to quit ($1 — ${waited} s, the sheet was shown)"
+}
+alert_exit once /alert-app || fail "the app did not exit with a page alert open"
+alert_exit loop /alert-app?loop || fail "the app did not exit with a page that keeps opening alerts"
 
 # ── W6j: 탭 닫기의 떠나기 확인 ───────────────────────────────────────────────────────────────────────────────
 # 웹 탭 하나를 닫으면 maru 확인(「닫을까요?」)이 먼저 뜨고, 받으면 페이지에 묻는다 — 떠나기 확인을 건 페이지면 「나가시겠습니까?」를 한 번

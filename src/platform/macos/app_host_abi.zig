@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 211), abi_version);
+    try std.testing.expectEqual(@as(u32, 212), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -5104,6 +5104,12 @@ pub export fn maru_macos_app_session_osr_drag_add(session: ?*AppSession, kind: u
 pub export fn maru_macos_app_session_osr_drag_update(session: ?*AppSession, x_px: f64, y_px: f64, mods: i32, allowed: u32) i32 {
     const app = session orelse return -1;
     return session_mod.web_ops.osrDragUpdate(app, x_px, y_px, mods, allowed);
+}
+
+/// v212(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다(enter 전에 실어야 한다).
+pub export fn maru_macos_app_session_osr_drag_over_body(session: ?*AppSession, x_px: f64, y_px: f64) c_int {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrDragOverBody(app, x_px, y_px));
 }
 
 pub export fn maru_macos_app_session_osr_drag_exit(session: ?*AppSession) void {

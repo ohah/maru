@@ -8433,6 +8433,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 pb.setString(rest.dropFirst().joined(separator: " "), forType: .URL)
             } else if rest.first == "text" {
                 pb.setString(rest.dropFirst().joined(separator: " ").replacingOccurrences(of: "\\n", with: "\n"), forType: .string)
+            } else if rest.first == "png" || rest.first == "pngtext", let path = rest.dropFirst().first, let data = FileManager.default.contents(atPath: path) {
+                // W6l②: 그림 데이터(파일 형식 없이 — 다른 앱이 그림 자체를 끌 때처럼). pngtext 는 글도 함께(그림을 붙이지 않는다).
+                pb.setData(data, forType: .png)
+                if rest.first == "pngtext" { pb.setString("caption", forType: .string) }
             }
             let info = TestDraggingInfo(window: window, pasteboard: pb)
             info.location = inWindow
@@ -10396,7 +10400,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             // 옛 형식(경로 목록 하나 — 항목마다 file-url 이 없는 옛 Cocoa·Java 앱)도 파일 형식이다(W6d① 적대 검증 2 차).
             if files == 0, let paths = pb.propertyList(forType: NSPasteboard.PasteboardType("NSFilenamesPboardType")) as? [String] {
-                for path in paths where path.hasPrefix("/") { add(0, path) }
+                for path in paths where path.hasPrefix("/") {
+                    add(0, path)
+                    files += 1
+                }
             }
             if let link = pb.string(forType: .URL), let url = URL(string: link), !url.isFileURL {
                 add(3, link)
@@ -10404,7 +10411,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             if let text = pb.string(forType: .string) { add(1, text) }
             if let html = pb.string(forType: .html) { add(2, html) }
+            // W6l②(사용자 결정 2026-10-06 — 「둘 다 파일로」의 이미지 데이터): 그림만 있는 끌기(다른 앱이 그림 자체를 끌었다 — 파일·
+            // 주소·글 없이 PNG·TIFF)는 페이지가 빈 drop 을 받았다(§7 실측). 본문에 처음 들어올 때 PNG 파일로 만들어 싣는다
+            // (`osrDragUpdate` — 터미널 위를 지나가기만 하는 끌기는 변환도 파일도 만들지 않는다).
+            osrDragImagePending = files == 0 && pb.string(forType: .URL) == nil && pb.string(forType: .string) == nil
+                && pb.string(forType: .html) == nil && pb.availableType(from: [.png, .tiff]) != nil
+            osrDragImagePasteboard = osrDragImagePending ? pb : nil
         }
+    }
+
+    /// W6l②: 그림만 있는 끌기 — 본문에 처음 들어올 때 파일로 만들어 실을 것(끌기마다 한 번).
+    private var osrDragImagePending = false
+    private var osrDragImagePasteboard: NSPasteboard?
+
+    private func loadOsrDragImage(_ session: OpaquePointer, x: Double, y: Double) {
+        guard osrDragImagePending, let pb = osrDragImagePasteboard else { return }
+        guard maru_macos_app_session_osr_drag_over_body(session, x, y) != 0 else { return }
+        osrDragImagePending = false
+        osrDragImagePasteboard = nil
+        guard let png = clipboardImagePng(pb), let path = saveDroppedImage(png) else { return }
+        var bytes = Array(path.utf8)
+        _ = bytes.withUnsafeMutableBufferPointer { maru_macos_app_session_osr_drag_add(session, 0, $0.baseAddress, $0.count) }
     }
 
     /// 그 자리가 Chromium 탭 본문이면 페이지가 받아들이는 동작, 아니면 nil(터미널 드롭 경로).
@@ -10414,6 +10441,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard let session = appSession else { return }
             let (xPx, yPx) = backingPx(view.convert(info.draggingLocation, from: nil), in: view)
             let allowed = UInt32(truncatingIfNeeded: info.draggingSourceOperationMask.rawValue)
+            loadOsrDragImage(session, x: xPx, y: yPx) // W6l② — enter 전에 실는다
             result = maru_macos_app_session_osr_drag_update(session, xPx, yPx, osrDragMods(), allowed)
         }
         return result < 0 ? nil : NSDragOperation(rawValue: UInt(result))
@@ -10440,6 +10468,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 끌기가 끝났다(놓았든 취소했든) — 실은 것을 비운다(남은 enter 가 있으면 나가기).
     func endOsrDrag(in view: NSView) {
+        osrDragImagePending = false
+        osrDragImagePasteboard = nil
         withSurface(surfaceForView(view)) {
             guard let session = appSession else { return }
             _ = maru_macos_app_session_osr_drag_reset(session)
@@ -10561,6 +10591,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         }
         return nil
+    }
+
+    /// W6l②: 끌어 온 그림을 `maru-paste/<새 이름>/image.png` 로 저장한다 — 페이지에는 `image.png` 로 보인다(UUID 이름 대신). 앱을 시작할 때 비운다.
+    private func saveDroppedImage(_ data: Data) -> String? {
+        let dir = Self.pasteImageDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("image.png")
+            try data.write(to: url, options: .atomic)
+            return url.path
+        } catch {
+            return nil
+        }
     }
 
     /// PNG 데이터를 pasteImageDir에 UUID 이름으로 **atomic** 저장하고 경로를 돌려준다(로컬 이미지 paste/drop용 —

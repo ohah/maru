@@ -154,6 +154,14 @@ class H(http.server.BaseHTTPRequestHandler):
             # W6k: 뜬 뒤 1.5 초에 alert 를 띄운다(`?loop` 이면 끝없이).
             again = b"for(;;)" if "loop" in self.path else b""
             body = b"<!doctype html><title>alert</title><body>alert<script>setTimeout(function(){" + again + b"alert('hold')},1500)</script>"
+        elif self.path == "/upload-app":
+            # W6l②: 보통의 업로드 칸 — 끌기에 파일(`Files`)이 있을 때만 받는다(dragover 에서 types 를 본다). 받으면 이름·크기를 알린다.
+            body = (b"<!doctype html><title>upload</title><style>html,body{margin:0;height:100%;background:#ddd}</style><body><script>"
+                    b"function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}"
+                    b"function files(e){return [].indexOf.call(e.dataTransfer.types,'Files')>=0}"
+                    b"addEventListener('dragover',function(e){if(files(e)){e.preventDefault();e.dataTransfer.dropEffect='copy'}});"
+                    b"addEventListener('drop',function(e){e.preventDefault();var f=e.dataTransfer.files,n=[];for(var i=0;i<f.length;i++)n.push(f[i].name+':'+f[i].size);"
+                    b"ping('e=upload&names='+encodeURIComponent(n.join(',')))});ping('e=ready')</script>")
         elif self.path.startswith("/ld-"):
             # W6l①: 놓은 링크가 연 페이지 — 0.3 초마다 자기 경로로 `/ev` 를 보낸다(어느 탭이 남고 바뀌었는지 가른다).
             body = (b"<!doctype html><title>ld</title><body>ld<script>setInterval(function(){new Image().src='/ev?e=alive&u="
@@ -987,6 +995,62 @@ before = {p for p, t in ticks if t < close}
 after = {p for p, t in ticks if close + 1500 < t <= end}
 check(len(first) == 1 and len(before) == 2 and after == first,
       f'both pages ran while the windows were open and only the first window page runs after closing the second ({len(first)} first · {len(before)} before · {len(after)} after, kept the first {after == first} · {len(ticks)} requests)')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6l②: 그림 데이터를 파일로 놓기 ──────────────────────────────────────────────────────────────────────────
+# 그림만 있는 끌기(다른 앱이 그림 자체를 끌 때 — 파일·주소·글 없이 PNG)는 본문에 들어올 때 `image.png` 파일이 된다(사용자 결정 2026-10-06).
+# 보통의 업로드 칸(끌기에 Files 가 있을 때만 받는다)이 그 파일을 받는다. 글이 함께 있으면 그림을 붙이지 않는다 — 업로드 칸은 받지 않는다.
+mkdir -p "$root/drop2"
+python3 - "$root/drop2/pic.png" <<'PY'
+import sys, zlib, struct
+w, h = 4, 3
+raw = b''.join(b'\x00' + b'\xff\x00\x00' * w for _ in range(h))
+def chunk(t, d): return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+open(sys.argv[1], 'wb').write(png)
+PY
+cat > "$root/imgdrop.txt" <<SCRIPT
+sleep 8000
+drag enter 0.5 0.5 0 0 png $root/drop2/pic.png
+sleep 300
+drag move 0.5 0.5 0 0
+sleep 300
+drag move 0.5 0.51 0 0
+sleep 300
+drag drop 0.5 0.51 0 0
+sleep 1000
+mark mixed
+drag enter 0.5 0.5 0 0 pngtext $root/drop2/pic.png
+sleep 300
+drag move 0.5 0.5 0 0
+sleep 300
+drag move 0.5 0.51 0 0
+sleep 300
+drag drop 0.5 0.51 0 0
+sleep 1000
+mark end
+SCRIPT
+: > "$root/requests.log"
+run_app /upload-app 18000 "$root/imgdrop.summary" MARU_WEB_OSR_TEST_INPUT="$root/imgdrop.txt"
+grep -ao 'osr-test drag [a-z]* [^ ]*\|osr-test mark [a-z]* [0-9]*' "$root/app-upload-app.log" > "$root/imgdrop.report" || true
+cat "$root/imgdrop.report"
+python3 - "$root/imgdrop.report" "$root/requests.log" "$(wc -c < "$root/drop2/pic.png" | tr -d ' ')" <<'PY' || fail "dropping image data did not give an upload field the image file"
+import sys, urllib.parse
+report = [l.strip() for l in open(sys.argv[1])]
+requests = [l.strip() for l in open(sys.argv[2])]
+png_size = sys.argv[3]
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+uploads = [urllib.parse.unquote(r.split('names=', 1)[1].split('&', 1)[0]) for r in requests if r.startswith('/ev?e=upload&')]
+drops = [l for l in report if l.startswith('osr-test drag drop')]
+check(uploads[:1] == [f'image.png:{png_size}'] and drops[:1] and drops[0].startswith('osr-test drag drop op=1'),
+      f'image data alone dropped on an upload field arrives as the file image.png ({uploads} · {drops[:1]})')
+check(len(uploads) == 1 and len(drops) == 2 and not drops[1].startswith('osr-test drag drop op=1'),
+      f'image data that comes with text is not turned into a file — the upload field does not take it ({uploads} · {drops})')
 sys.exit(0 if ok else 1)
 PY
 

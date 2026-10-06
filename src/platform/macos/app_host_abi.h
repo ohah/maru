@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 211u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 212u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1022,6 +1022,8 @@ int32_t maru_macos_app_session_drop_url(
     const uint8_t *url,
     size_t url_len
 );
+/* v212(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다. */
+int32_t maru_macos_app_session_osr_drag_over_body(MaruAppHostSession *session, double x_px, double y_px);
 /* 시험 전용(v211, W6l① 스모크): 활성 pane 의 웹 탭 머리·빈 탭 막대·주소 띠 한 점(backing px, 없으면 -1) — x,y 셋. */
 int32_t maru_macos_app_session_test_url_drop_points(MaruAppHostSession *session, double out[6]);
 /* 드래그앤드롭한 파일 경로들(NUL 구분). maru ssh 원격이면 control socket으로 업로드 후 원격 절대경로를

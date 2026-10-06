@@ -7688,6 +7688,9 @@ pub const AppSession = struct {
     // 리셋은 확인 모달 확정 뒤 이 세션의 tick 안에서 끝나므로 Swift 는 그 시점을 모른다 — tick 마다 거둬 간다(1회성).
     // 쓰기에 실패했으면 세우지 않는다(파일이 그대로라 다른 창에 바뀔 것이 없다).
     config_reset_propagate: bool = false,
+    // 이 창이 따른 전체 리셋의 세대(`settings.config_reset_generation`). 그보다 뒤처지면 메뉴 전파가 리셋을 마저 따른다
+    // (줌까지). 창을 만들 때 지금 세대로 선다 — 리셋 뒤에 연 창은 따를 리셋이 없다.
+    config_reset_seen: u64 = 0,
     // 사용자가 **그 시점을 고른** 적용인가(메뉴 Reload Config·세팅에서 scrollback.lines 변경·전체 리셋). 이때만 살아 있는
     // Term 의 스크롤백을 줄인다 — 줄이기는 되돌릴 수 없다. 그 밖의 재적용(자동 reload·다른 키 변경·시스템 외관 자동
     // 전환의 reapply)은 줄이지 않는다. reapplyScrollback 이 읽고 끈다.
@@ -8120,6 +8123,7 @@ pub const AppSession = struct {
         self.config_loaded = true;
         self.live_scrollback_max = self.loaded_config.config.scrollback.lines;
         self.config_file_digest = pre_load_digest;
+        self.config_reset_seen = settings_ops.config_reset_generation; // 리셋 뒤에 연 창은 따를 리셋이 없다
         // 최초 로드도 언어를 세운다 — reload·GUI 변경 경로(settings.reapplyUiLanguage)만 배선하면 앱을
         // 켜고 아무것도 안 건드린 상태에서 `ui.language` 가 무시된다. 여기서 `self` 는 아직 조립 중이라
         // 헬퍼(`*AppSession` 을 받는다)를 부르지 않고 전역만 직접 세운다 — 이 호출이 읽는 것은 방금
@@ -61415,6 +61419,99 @@ test "전체 리셋 전파: 감시 경로만으로는 다른 창의 스크롤백
     try std.testing.expectEqual(@as(u32, 1000), c.live_scrollback_max);
     // 뒤따르는 파일 감시 알림은 c 에서 무동작이다 — 같은 내용을 두 번 읽지 않는다.
     try std.testing.expect(!settings_ops.configFileChanged(c));
+}
+
+// 창들이 같은 config 를 따르는지는 「같은 내용을 읽었나」가 아니라 「사용자가 고른 적용을 다 했나」로 갈린다(적대적 검증
+// 2026-10-06). 파일 감시가 먼저 읽으면 자동이라 축소를 미루고 기준선만 옮겨, 뒤따르는 메뉴 전파가 「같은 내용」이라 건너뛰었다.
+fn configFollowFixture(allocator: std.mem.Allocator, sessions: []*AppSession, tmp: *std.testing.TmpDir, path_buf: []u8) !void {
+    for (sessions) |*s| s.* = try initSmokeSessionTwoTerms(allocator);
+    const cfg_path = try std.fmt.bufPrint(path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    for (sessions) |s| {
+        if (s.config_path_buffer) |p| allocator.free(p);
+        s.config_path_buffer = try allocator.dupe(u8, cfg_path);
+    }
+}
+
+test "메뉴 Reload: 파일 감시가 먼저 읽은 내용이어도 다른 창이 미뤄 둔 축소를 마저 한다 — 갚을 것이 없으면 무동작" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ss: [2]*AppSession = undefined;
+    var path_buf: [4096]u8 = undefined;
+    try configFollowFixture(allocator, &ss, &tmp, &path_buf);
+    defer for (ss) |s| {
+        settings_ops.clearConfigDirty(s);
+        s.deinit();
+        allocator.destroy(s);
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 5000\n" });
+    for (ss) |s| s.reloadConfig();
+    // 사용자가 줄여 저장 → 파일 감시가 두 창을 다시 읽는다(auto-reload 기본 켜짐). 자동이라 둘 다 축소를 미룬다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 1000\n" });
+    for (ss) |s| try std.testing.expect(settings_ops.configFileChanged(s));
+    for (ss) |s| try std.testing.expectEqual(@as(u32, 5000), s.live_scrollback_max);
+    // 메뉴 Reload: 활성 창은 강제, 다른 창은 전파. 예전에는 다른 창이 「같은 내용」이라 5000 에 남았다.
+    ss[0].reloadConfig();
+    try std.testing.expect(ss[1].reloadConfigFollowingMenu());
+    for (ss) |s| try std.testing.expectEqual(@as(u32, 1000), s.live_scrollback_max);
+    try std.testing.expect(!ss[1].allow_scrollback_shrink);
+    // 다 갚았다 — 같은 내용의 다음 전파는 예전처럼 무동작이다.
+    try std.testing.expect(!ss[1].reloadConfigFollowingMenu());
+}
+
+test "전체 리셋: 다른 창의 ⌘+/− 확대도 풀린다 — 감시가 리셋 파일을 먼저 읽었어도, 리셋 뒤에 연 창은 건드리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ss: [3]*AppSession = undefined;
+    var path_buf: [4096]u8 = undefined;
+    try configFollowFixture(allocator, &ss, &tmp, &path_buf);
+    defer for (ss) |s| {
+        settings_ops.clearConfigDirty(s);
+        s.deinit();
+        allocator.destroy(s);
+    };
+    const a = ss[0]; // 리셋하는 창
+    const b = ss[1]; // 리셋 신호로 따라오는 창
+    const c = ss[2]; // 파일 감시가 먼저 읽은 뒤 리셋 신호를 받는 창
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "scrollback.lines = 5000\n" });
+    for (ss) |s| s.reloadConfig();
+    const base = a.appearance.font.size;
+    for (ss) |s| s.dispatchAppAction(.{ .increase_font_size = font_size_step * 4 });
+    for (ss) |s| try std.testing.expect(s.appearance.font.size > base);
+
+    settings_ops.resetAllSettings(a);
+    try std.testing.expect(a.takeConfigResetPropagate());
+    try std.testing.expectEqual(base, a.appearance.font.size); // 리셋한 창은 확대를 푼다(예전부터)
+    // b: 신호로 따라온다 — 예전에는 파일만 다시 읽고 확대는 남았다(실측 a 14pt · b 18pt).
+    try std.testing.expect(b.reloadConfigFollowingMenu());
+    try std.testing.expectEqual(base, b.appearance.font.size);
+    try std.testing.expectEqual(@as(u32, 1000), b.live_scrollback_max);
+    // c: 감시가 리셋한 파일을 먼저 읽었다(자동 — 확대·축소는 미룬다). 뒤따르는 신호가 「같은 내용」이어도 마저 따른다.
+    try std.testing.expect(settings_ops.configFileChanged(c));
+    try std.testing.expect(c.appearance.font.size > base);
+    try std.testing.expect(c.reloadConfigFollowingMenu());
+    try std.testing.expectEqual(base, c.appearance.font.size);
+    try std.testing.expectEqual(@as(u32, 1000), c.live_scrollback_max);
+    // 다 따랐다 — 다음 전파는 무동작이고, 그 사이 다시 키운 확대는 건드리지 않는다.
+    c.dispatchAppAction(.{ .increase_font_size = font_size_step });
+    try std.testing.expect(!c.reloadConfigFollowingMenu());
+    try std.testing.expectEqual(base + font_size_step, c.appearance.font.size);
+
+    // 리셋 뒤에 연 창은 따를 리셋이 없다 — 같은 내용의 전파는 무동작이다.
+    const late = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(late);
+    defer late.deinit();
+    defer settings_ops.clearConfigDirty(late);
+    try std.testing.expectEqual(settings_ops.config_reset_generation, late.config_reset_seen);
 }
 
 // 오버레이 메시지 사본이 버퍼를 넘으면 예전엔 **조용히** 끊었다 — 확인 문장의 끝(질문)이 사라진 줄도 몰랐다(2026-10-05).

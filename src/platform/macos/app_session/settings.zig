@@ -2154,6 +2154,15 @@ fn configFileReadIssue(provenance: config_mod.loader.FileProvenance) ?[]const u8
 /// 시간 창을 두는 이유: 사용자가 **몇 초 뒤 메뉴로 다시** 읽으면 그 결과는 다시 보여야 한다 — 「같은 내용이면 영원히
 /// 한 번」으로 두면 그 누름이 아무것도 안 남긴다. 창들이 연달아 부르는 간격은 한 런루프 안(ms 단위)이다.
 pub const config_log_dedupe_ms: u64 = 2000;
+
+/// 앱 전역 **리셋 세대** — 전체 리셋이 config 파일을 실제로 덮어쓸 때마다 하나씩 오른다. 창마다 「본 세대」
+/// (`AppSession.config_reset_seen`)를 들고, 그보다 뒤처진 창은 리셋을 **아직 다 따르지 않은** 것이다.
+///
+/// 왜 내용 digest 만으로는 모자라나(적대적 검증 2026-10-06): 리셋은 파일 내용만이 아니라 **⌘+/− 확대도 푼다**. 다른
+/// 창이 파일을 다시 읽어도(reload 는 줌을 보존한다) 확대는 남았다 — 리셋한 창 14pt, 다른 창 18pt. 그리고 그 다른 창이
+/// 파일 감시로 먼저 새 내용을 읽었으면 뒤따르는 리셋 신호(`reloadConfigFollowingMenu`)는 「같은 내용」이라 아무것도
+/// 안 했다. 세대가 「리셋을 따랐는가」를 내용과 따로 든다.
+pub var config_reset_generation: u64 = 0;
 pub var config_log_last: struct { fingerprint: u64 = 0, at_ms: u64 = 0, valid: bool = false } = .{};
 
 /// 보고 하나의 지문 — 시점(startup/reload)·파일 읽기 상태·진단(줄·키·메시지) 전부. 하나라도 다르면 다른 보고다.
@@ -2419,6 +2428,8 @@ pub fn resetAllSettings(self: *AppSession) void {
     if (wrote) {
         // 다른 창은 auto-reload 가 꺼져 있으면 이 쓰기를 못 본다 — Swift 가 거둬 메뉴 Reload 처럼 퍼뜨린다(2026-10-05).
         self.config_reset_propagate = true;
+        config_reset_generation +%= 1; // 다른 창이 「리셋을 따랐는가」를 내용과 따로 판정한다(위 선언 주석)
+        self.config_reset_seen = config_reset_generation; // 이 창은 방금 리셋 전체(줌 포함)를 적용했다
         commitAppKeepAliveReset();
         const snapshot = appKeepAliveSnapshot();
         self.loaded_config.session_keep_alive_provenance = snapshot.provenance;
@@ -2780,7 +2791,14 @@ fn reloadIfConfigFileChanged(self: *AppSession, comptime trigger: enum { watch, 
     const bytes = readConfigFileForWatch(self) orelse return false;
     defer self.allocator.free(bytes);
     const digest = std.hash.Wyhash.hash(0, bytes);
-    if (self.config_file_digest) |seen| if (seen == digest) return false;
+    // **같은 내용이어도 메뉴 전파는 갚지 않은 적용을 마저 한다**(적대적 검증 2026-10-06). digest 는 「마지막으로 **본**
+    // 내용」이지 「적용을 마친 상태」가 아니다 — 파일 감시가 먼저 새 내용을 읽으면 자동이라 스크롤백 축소를 미루고 기준선만
+    // 옮긴다. 그 뒤 사용자가 메뉴 Reload 를 누르면 활성 창은 줄고 이 창은 「이미 본 내용」이라 건너뛰어 갈렸다(실측: 활성
+    // 1000 · 이 창 5000). 리셋도 같다(`config_reset_generation`). 갚을 것이 없으면 예전처럼 무동작이다.
+    const reset_owed = config_reset_generation != self.config_reset_seen;
+    const shrink_owed = self.live_scrollback_max > self.loaded_config.config.scrollback.lines;
+    const owed = trigger == .menu_sibling and (reset_owed or shrink_owed);
+    if (self.config_file_digest) |seen| if (seen == digest and !owed) return false;
     // 이 창이 방금 쓴 내용이 파일에 닿았다 — 자기 쓰기다. 기준선을 옮기고 다시 읽지 않는다.
     if (self.config_expected_write_digest) |expected| {
         if (expected == digest) {
@@ -2805,6 +2823,12 @@ fn reloadIfConfigFileChanged(self: *AppSession, comptime trigger: enum { watch, 
         self.allow_scrollback_shrink = false;
     };
     reloadConfig(self); // 성공하면 기준선(config_file_digest)도 새 내용으로 선다
+    if (trigger == .menu_sibling and reset_owed) {
+        // 리셋을 따라온 창 — 리셋한 창처럼 런타임 줌도 config 기본 크기로(⌘0 과 같은 경로). reload 는 줌을 보존하므로
+        // 여기서 따로 푼다. 자동 경로(.watch)는 사용자가 고른 시점이 아니라 풀지 않는다 — 뒤따르는 리셋 신호가 푼다.
+        self.dispatchAppAction(.reset_font_size);
+        self.config_reset_seen = config_reset_generation;
+    }
     // 자동 reload 는 파싱 실패로 reload 가 무동작이어도 기준선을 옮긴다 — 같은 내용으로 매 알림 다시 읽지 않게. 메뉴는
     // 옮기지 않는다: 실패한 창은 다음 메뉴 누름에서 다시 시도해야 한다(메뉴는 알림처럼 반복되지 않는다).
     if (trigger == .watch) self.config_file_digest = digest;

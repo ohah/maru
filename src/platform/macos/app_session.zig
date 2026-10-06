@@ -293,7 +293,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 209: W6h① — osr_take_new_window·osr_open_url_tab(메뉴 「새 창에서 링크 열기」), osr_context_menu_search(「…에서 '…' 검색」), 메뉴 항목 종류 8.
 // 210: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
 // 211: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
-pub const abi_version: u32 = 211;
+// 212: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
+pub const abi_version: u32 = 212;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,

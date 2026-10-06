@@ -5250,6 +5250,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 보류된 종료에 「취소」로 답한다(releaseQuitConfirmHeld). 모달 없이 보류만 하는 갈래(마지막 저장)는 nil.
     // weak — 결정이 끝난 뒤에도 남아 닫힌 창(NSWindow·Metal 뷰)을 다음 ⌘Q 까지 붙잡지 않게.
     private weak var quitConfirmSurface: TerminalSurface?
+    /// W6k: 시험 모드의 끝(`expireSmokeTimer`) — 끝나는 동안 새 Chromium 탭 대화상자를 띄우지 않는다(잇달아 alert 를 띄우는
+    /// 페이지가 닫은 자리에 곧바로 새 sheet 를 세워 AppKit 이 종료를 진행하지 않았다). 그 길은 곧바로 끝나므로 풀지 않는다 — 사용자
+    /// 종료는 `quitConfirmPending` 이 같은 일을 하고 취소되면 풀린다.
+    private var osrDialogsHeldForExit = false
     // 마지막 창 닫기·세션 종료·confirm 수락 경로가 **모든 일반 창+quick의 파일 보호를 재확인한 뒤** 세우는
     // 앱-전역 preflight 토큰. applicationShouldTerminate가 같은 종료 요청에 확인을 다시 띄우지 않게 한다.
     private var bypassQuitConfirm = false
@@ -5737,6 +5741,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
+        dismissOsrSheetsForQuit() // W6k: 페이지 대화상자부터 치운다(그 sheet 가 종료를 막는다)
         if smokeMode || appLaunchFirstDrawableArmed { return finishProjectSearchBeforeTermination() } // 무인 계측은 모달에 막히면 hang
         if workspaceFinalQuitPending {
             // 이미 수락돼 마지막 저장 중인 종료가 있다(인앱 확인 수락 등) — 새 확인을 띄우지 않고 그 종료에 합류한다.
@@ -9611,6 +9616,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return String(decoding: UnsafeBufferPointer(start: ptr, count: len), as: UTF8.self)
     }
 
+    /// W6k: 종료를 고르면 Chromium 탭이 띄운 sheet(대화상자·권한·열기 창·폴더 확인·macOS 안내)를 취소로 닫는다 — 사용자 결정
+    /// 2026-10-06(Chrome 도 종료하며 대화상자를 치운다). 떠 있으면 Return 이 sheet 로 가 「종료할까요?」가 키를 받지 못해 종료가 멈춘
+    /// 것처럼 보였고(실측 — 대화상자에 답한 뒤에도 Return 이 종료 확인에 닿지 않았다), 시험 모드의 종료(`NSApp.terminate`)도 끝나지
+    /// 않았다. 답은 각 sheet 의 끝 처리기가 취소로 보낸다(페이지는 취소한 대화상자로 본다 — 떠나기 확인은 머무르기, 권한은 닫기). 종료를
+    /// 그만두면 페이지는 이어서 돈다.
+    private func dismissOsrSheetsForQuit() {
+        // 끝 처리기가 표에서 지운다 — 미리 떠 둔다.
+        for open in Array(osrDialogSheets.values) { open.sheet.sheetParent?.endSheet(open.sheet, returnCode: .cancel) }
+        if let alert = osrBlockedAlert, let parent = alert.window.sheetParent { parent.endSheet(alert.window, returnCode: .cancel) }
+    }
+
     private func drainOsrDialog() {
         guard let session = appSession, let window else { return }
         let key = ObjectIdentifier(window)
@@ -9621,6 +9637,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 창에 다른 sheet(macOS 안내 등)가 붙어 있으면 다음 요청을 가져오지 않는다 — 새 sheet 가 그 뒤에 줄을 서면 입력 보호
         // (0.5 초)가 보이기 전에 끝나, 안내를 닫는 클릭이 뒤이어 뜬 권한 sheet 의 허용에 떨어졌다(적대 검증).
         guard window.attachedSheet == nil else { return }
+        // 「종료할까요?」가 떠 있는 동안은 새 대화상자를 띄우지 않는다(W6k — 잇달아 alert 를 띄우는 페이지가 다시 Return 을 가로채지
+        // 않게). 요청은 기다리고, 종료를 그만두면 뜬다.
+        guard !quitConfirmPending, !osrDialogsHeldForExit else { return }
         var dialog = MaruAppHostOsrDialog()
         guard maru_macos_app_session_take_osr_dialog(session, &dialog) != 0 else { return }
         let sid = dialog.surface_id
@@ -13589,6 +13608,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             failSessionHostRecoverySmoke("auto-reconnect-timeout")
             return
         }
+        // 창에 sheet 가 붙어 있으면 AppKit 이 종료를 진행하지 않았다(W6k 실측 — alert 가 떠 있으면 시험 앱이 끝나지 않았다).
+        osrDialogsHeldForExit = true
+        dismissOsrSheetsForQuit()
         NSApp.terminate(nil)
     }
 

@@ -1005,15 +1005,30 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   `remote screen batch malformed: stage=<decoded_cells|recovery_snapshot|snapshot|delta> err=<이름> stream=… bytes=…` 를 남긴다.
   판정자는 `test-attachment-freeze-gate`(check-boundaries)다 — 수명 입구(`admitRuntimeOperation`·
   `admitDestructiveRuntimeOperation`) 뒤 관문 없이 payload 에 닿는 함수를 payload 도우미·간접 사슬을 코드에서 유도해 찾는다.
-  **남은 구멍:** 재접속 job 이 진행 중(`connected` 부터 종료 요약 전까지)인 runtime 의 탭을 닫으면 close 는 끝나고 `remove` 가
-  job 이 붙든 runtime 을 맵에서 뺀다 — 다음 전이의 `runtimes.get` 이 실패해 proof loss 로 앱이 끝난다(이 수정 이전부터 있던
-  것). **얼림 구간(`retirement_prepared`, prepare 부터 commit 까지 약 2 프레임)에 닫으면 더 이르다:** terminate 는 관문이
-  건너뛰어(`… skipped: attachment frozen by reconnect` 한 줄) payload 를 읽지 않지만, 같은 `destroyTerm` 안의 `remove` →
-  `destroyRuntimeEntry` → `GenerationAttachment.deinit` 의 `tryDeinit` 이 `.retirement_prepared` 에서 `.busy` 라
-  `teardown invariant violated` 로 abort 한다 — abort 자리가 `payloadMut` 에서 teardown 으로 옮겨졌을 뿐 같은 사용자 동작·
-  같은 빈도다. close 를 미루면(`.event_pending`) 되지만, 사용자 닫기(⌘W → `closeActiveTerm`/`closeActivePane`/`closeTab` →
-  `destroyTerm`)는 미룬 close 를 다시 부르지 않고 `@panic("term destruction bypassed a pending close operation")` 한다 —
-  창 닫기(`advanceWindowClose`)와 `closeTermAt` 만 미룬 close 를 받는다. 미루기는 AppSession 쪽 재시도 경로가 생긴 뒤의 일이다.
+  **job 이 붙든 runtime 의 탭 닫기는 미룬다(`term_close_deferral`, 2026-10-06).** 예전에는 재접속 job 이 진행 중
+  (`connected` 부터 완료 요약 정산 전까지)인 runtime 의 탭을 ⌘W 로 닫으면 두 갈래로 앱이 끝났다 — 얼림 구간
+  (`retirement_prepared`)에는 같은 `destroyTerm` 안의 `remove` → `GenerationAttachment.deinit` 의 `tryDeinit` 이 `.busy` 라
+  `teardown invariant violated` 로, 커밋 뒤에는 `remove` 가 job 이 붙든 행을 맵에서 빼 다음 전이의 `runtimes.get` 이
+  `fatalIntegrity(.proof_loss)` 로. 사용자 닫기(⌘W → `closeActiveTerm`/`closeActivePane`/`closeTab` → `destroyTerm`)는 Term
+  을 트리에서 이미 뺀 뒤라 backend 의 「아직」을 다시 부를 자리가 없었다(`@panic("term destruction bypassed a pending close
+  operation")`). 이제:
+  - backend `reconnectJobHoldsRuntime(handle)` 이 「진행 중인 job 이 이 행을 붙들었는가」의 단일 출처다. 실패로 끝나 보관된
+    job(`host_failure_complete`)은 더 전이하지 않으므로 붙든 것으로 치지 않는다 — 거기까지 미루면 ⌘W 가 영영 안 닫힌다.
+  - 붙든 동안 `closeAndDetach`/`close`/`finishAfterTermination`(`requestRuntimeClose`)·`remove`·`windowCloseReadiness` 는 close
+    authority 를 한 칸도 움직이지 않고 `.event_pending` 이다. 창 닫기와 exit reap(`closeTermAt`)은 원래 이 「아직」을 tick 마다
+    다시 묻는다.
+  - `destroyTerm` 은 닫기를 보내기 **전에** 묻고, 붙든 runtime 이면 UI 정리(포인터 barrier·surface 닫힘 통지·편집기 해제)만
+    끝낸 뒤 Term 을 `AppSession.deferred_term_closes` 에 넘긴다. 탭은 바로 사라진다. tick(`advanceDeferredTermCloses`, 창 닫기
+    진행보다 먼저)이 job 이 놓은 뒤 평소 순서(`closeAndDetach` → `remove`)로 닫고, 끝난 Term 은 목록에서 **먼저 빼고** 푼다.
+    재시도의 「아직」은 다음 tick 으로 미룬다(첫 시도의 「아직」만 예전 불변식 위반이다). 미룸과 재개는 각각
+    `term close deferred: …`·`term close resumed: …` 한 줄을 남긴다.
+  - 창 닫기(`advanceWindowClose`)는 미룬 목록이 빌 때까지 `.event_pending` 이다 — 창이 먼저 닫히면 마저 닫을 tick 이 없다.
+  - Session teardown(`AppSession.deinit` 첫 문장)이 한 번 더 묻는다. 앱 quit 은 Session teardown 전에 재접속 job 을
+    취소하므로(`maru_macos_reconnect_product_shutdown`) 보통 다 닫힌다. 그래도 남은 것(닫기 정산이 한 번에 안 끝났다)은
+    abort 하지 않고 `term close still deferred at session teardown` 한 줄과 함께 Term 만 푼다 — Term 은 backend 를 가리키지
+    않고(surface 는 runtime 번들 소유) runtime 은 backend 가 든다.
+  판정자는 `test-term-close-deferral`(check-boundaries)다 — 판정 leaf 표와, destroyTerm·재시도·tick·창 닫기·teardown·backend
+  관문이 그 판정을 제자리(닫기를 보내기 전)에서 부르는지를 잰다.
   e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.
   mutation seal·authority/retry/close effect의 실제 제품 결속,
   외부 reconnect ingress, close 경쟁, app-global count/byte budget과 peak RSS 결합 전에는

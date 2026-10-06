@@ -6126,6 +6126,10 @@ pub const AppSession = struct {
     close_session_generation: u64 = 1,
     next_window_close_graph_generation: u64 = 0,
     pending_window_close_graph: PendingTermCloseGraph = .{},
+    /// 사용자가 닫았지만 진행 중인 재접속 job 이 runtime 을 붙들어 backend 닫기를 미룬 Term
+    /// (`session_host.term_close_deferral`). 트리·UI 에서는 이미 빠졌고, tick 이 job 이 끝난 뒤 닫고 푼다.
+    /// 창 닫기는 이 목록이 빌 때까지 기다리고, deinit 은 남은 것을 불변식 위반으로 본다.
+    deferred_term_closes: std.ArrayList(*Term) = .empty,
     // CR5d-2: one Window action at a time is sealed against this heap-pinned AppSession and the
     // app-global backend job.  The graph generation advances at every cross-window surgery so a
     // gesture prepared in the old Window cannot act on the moved Term.
@@ -20686,6 +20690,8 @@ pub const AppSession = struct {
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
+        // 재접속 job 이 붙들어 미룬 Term 닫기를 마저 한다 — 창 닫기보다 먼저(창 닫기는 이 목록이 빌 때까지 기다린다).
+        term_ops.advanceDeferredTermCloses(self);
         workspace_ops.advancePendingWindowClose(self);
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
@@ -23920,6 +23926,12 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        // 재접속 job 이 붙들어 미룬 Term 닫기를 **다른 무엇을 풀기 전에**(backend·편집기 상태가 다 살아 있을 때) 마저
+        // 한다. 창 닫기는 이 목록이 빌 때까지 기다리고, 앱 quit 은 Session teardown 전에 재접속 job 을 취소하므로
+        // (`maru_macos_reconnect_product_shutdown`) 보통 여기서 다 닫힌다. 그래도 남는 것은(닫기 정산이 한 번에 안
+        // 끝났다) abort 하지 않는다 — Term 은 backend 를 가리키지 않으므로 Term 만 풀고 runtime 은 backend 가 든다.
+        term_ops.drainDeferredTermClosesForTeardown(self);
+        self.deferred_term_closes.deinit(self.allocator);
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);

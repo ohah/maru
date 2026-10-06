@@ -466,7 +466,8 @@ pub fn tickWebOsr(self: *AppSession) void {
     if (self.osr_hover_surface != 0) {
         // 포인터를 움직이지 않은 채 hover 가 끝났다 — 키보드로 오버레이를 열었거나 탭을 바꿨거나 탭이 닫혔다. leave 를 보내
         // 페이지의 `:hover` 를 풀고, 커서는 화살표로 돌린다(페이지가 커서를 숨겼으면 포인터가 안 보인 채 남는다 — 적대 검증).
-        if (self.anyOverlayOpen() or osr_input.find(self.osr_layouts.items, self.osr_hover_surface) == null) {
+        // 모달만 — 안내 토스트는 hover 를 풀지 않는다(`osrHover` 와 같은 판정, W6n).
+        if (self.anyModalOverlayOpen() or osr_input.find(self.osr_layouts.items, self.osr_hover_surface) == null) {
             if (self.pointer_gesture_owner != .web_osr) {
                 osrLeave(self, -1, -1, 0);
                 self.osr_cursor_pending = .default;
@@ -947,7 +948,9 @@ pub fn osrHover(self: *AppSession, x_px: f64, y_px: f64, mods: i32) ?app_session
         const c = web_osr.cursor(self.pointer_gesture_owner.web_osr.surface_id) orelse return .default;
         return cursorKindOf(c.cursor);
     }
-    const layout: ?app_session_mod.OsrLayout = if (self.anyOverlayOpen()) null else osr_input.hit(self.osr_layouts.items, x_px, y_px);
+    // 입력을 막는 모달(확인·설정·팔레트·메뉴 등)이 열려 있으면 hover 를 보내지 않는다. 안내 토스트는 막지 않는다(W6n — 토스트가 떠
+    // 있는 동안 링크 강조·툴팁이 사라졌다. WebKit 탭은 원래 토스트와 상관없이 hover 를 받는다). 누름은 여전히 토스트를 먼저 닫는다.
+    const layout: ?app_session_mod.OsrLayout = if (self.anyModalOverlayOpen()) null else osr_input.hit(self.osr_layouts.items, x_px, y_px);
     const now: u64 = if (layout) |l| l.surface_id else 0;
     if (self.osr_hover_surface != 0 and self.osr_hover_surface != now) osrLeave(self, x_px, y_px, mods);
     const l = layout orelse return null;

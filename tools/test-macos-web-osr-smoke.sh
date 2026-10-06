@@ -1121,6 +1121,39 @@ check(len(dropped('band')) == 2 and dropped('band')[1].endswith('ok=false') and 
 sys.exit(0 if ok else 1)
 PY
 
+# ── W6n: 안내 토스트가 떠 있는 동안의 hover ────────────────────────────────────────────────────────────────────
+# 안내 토스트(입력을 막지 않는 알림)가 떠 있는 동안에도 hover 가 페이지로 가 툴팁이 달린다(W4b 의 오버레이 문이 토스트도 세어 사라졌다 —
+# WebKit 탭은 원래 받는다). 토스트는 그대로 떠 있다(누름이 먼저 닫는다 — tester 가 본다). 설정의 엔진을 바꿔 다시 불러오면 토스트가 뜬다.
+printf 'browser.engine = chromium\n' > "$root/toasttip.conf"
+cat > "$root/toasttip.txt" <<'SCRIPT'
+sleep 7000
+config browser.engine = webkit
+menu Reload Config
+sleep 800
+overlay
+hover 0.40 0.33 0 0
+sleep 300
+hover 0.41 0.33 0 0
+sleep 300
+hover 0.42 0.34 0 0
+sleep 1000
+tooltip
+overlay
+SCRIPT
+: > "$root/requests.log"
+run_app /tip-app 14000 "$root/toasttip.summary" MARU_WEB_OSR_TEST_INPUT="$root/toasttip.txt" MARU_CONFIG="$root/toasttip.conf"
+grep -ao 'osr-test overlay [a-z]*\|osr-test tooltip active=[a-z]*' "$root/app-tip-app.log" > "$root/toasttip.report" || true
+cat "$root/toasttip.report"
+python3 - "$root/toasttip.report" <<'PY' || fail "hover did not reach the page while a notice toast was up"
+import sys
+report = [l.strip() for l in open(sys.argv[1])]
+ov = [l.split()[2] for l in report if l.startswith('osr-test overlay ')]
+tips = [l for l in report if l.startswith('osr-test tooltip ')]
+ok = ov == ['true', 'true'] and tips == ['osr-test tooltip active=true']
+print(('PASS ' if ok else 'FAIL ') + f'hover reaches the page and its tooltip shows while a notice toast is up, and the toast stays ({ov} · {tips})')
+sys.exit(0 if ok else 1)
+PY
+
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
 # 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그
 # sheet 를 취소로 닫는다(사용자 결정 2026-10-06). alert 를 띄운 채 시험 시간이 끝나도 앱이 제때 끝나야 한다 — 끝나지 않으면 감시가

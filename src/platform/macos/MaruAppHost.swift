@@ -5002,6 +5002,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 않는다(잇달아 alert 를 띄우는 페이지가 닫은 자리에 곧바로 새 sheet 를 세워 종료가 진행되지 않았다). 정해진 종료는 끝나므로
     /// 풀지 않는다 — 「종료할까요?」가 떠 있는 동안은 `quitConfirmPending` 이 같은 일을 하고 취소되면 풀린다.
     private var osrDialogsHeldForExit = false
+    /// W6k: 메뉴 종료가 대화상자를 치우고 종료 위임을 기다리는 동안(`quitFromMenu`) — 새 대화상자를 띄우지 않는다.
+    private var osrQuitRequested = false
     // 마지막 창 닫기·세션 종료·confirm 수락 경로가 **모든 일반 창+quick의 파일 보호를 재확인한 뒤** 세우는
     // 앱-전역 preflight 토큰. applicationShouldTerminate가 같은 종료 요청에 확인을 다시 띄우지 않게 한다.
     private var bypassQuitConfirm = false
@@ -5440,6 +5442,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 창 닫기와 달리 실행 중 명령 유무와 무관하게 항상 묻는다(사용자 결정 2026-06). 단일 출처: docs/macos-app-host-boundary.md.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
+        osrQuitRequested = false // 여기서부터는 `quitConfirmPending`·정해진 종료의 보류가 잇는다(W6k)
         if smokeMode || appLaunchFirstDrawableArmed { holdOsrDialogsForExit() } // W6k — 아래 줄은 L1 경계 시험이 그대로 고정한다
         if smokeMode || appLaunchFirstDrawableArmed { return .terminateNow } // 무인 계측은 모달에 막히면 hang
         if bypassQuitConfirm {
@@ -9183,6 +9186,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let alert = osrBlockedAlert, let parent = alert.window.sheetParent { parent.endSheet(alert.window, returnCode: .cancel) }
     }
 
+    /// 메뉴 「Quit maru」(⌘Q) — 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 `terminate:` 를 받고도 종료 위임을 부르지 않았다
+    /// (W6k 실측 — 위임 안의 치우기가 닿지 않았다). 먼저 치우고 부른다. 저장 안 한 파일 패널이 있으면 종료가 곧바로 거절되므로
+    /// 치우지 않는다(위임과 같은 규칙).
+    /// sheet 를 닫은 같은 순간의 `terminate:` 도 AppKit 이 무시했다(실측 — sheet 의 끝은 다음 실행 루프에서 마무리된다). 다음 루프로
+    /// 미루고, 그사이 잇달아 alert 를 띄우는 페이지가 새 sheet 를 세우지 않게 보류한다(`osrQuitRequested` — 종료 위임이 받으면 풀고,
+    /// 위임이 오지 않으면 2 초 뒤 푼다: 대화상자가 영영 막히지 않게).
+    @objc func quitFromMenu(_ sender: Any?) {
+        if protectedFilePanelSurface() == nil {
+            osrQuitRequested = true
+            dismissOsrSheetsForQuit()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.osrQuitRequested = false }
+        }
+        DispatchQueue.main.async { NSApp.terminate(sender) }
+    }
+
     /// 종료가 정해졌다 — 새 대화상자를 보류하고 떠 있는 것을 치운다(W6k).
     private func holdOsrDialogsForExit() {
         osrDialogsHeldForExit = true
@@ -9201,7 +9219,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard window.attachedSheet == nil else { return }
         // 「종료할까요?」가 떠 있는 동안은 새 대화상자를 띄우지 않는다(W6k — 잇달아 alert 를 띄우는 페이지가 다시 Return 을 가로채지
         // 않게). 요청은 기다리고, 종료를 그만두면 뜬다.
-        guard !quitConfirmPending, !osrDialogsHeldForExit else { return }
+        guard !quitConfirmPending, !osrDialogsHeldForExit, !osrQuitRequested else { return }
         var dialog = MaruAppHostOsrDialog()
         guard maru_macos_app_session_take_osr_dialog(session, &dialog) != 0 else { return }
         let sid = dialog.surface_id
@@ -9494,7 +9512,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// macOS 가 Maru 의 장치 사용을 막았다 — 시스템 설정의 그 항목으로 안내한다.
     private func showMacAccessBlocked(window: NSWindow, device: OsrDevice) {
         Self.testNote("macos-blocked \(device.rawValue)")
-        guard window.attachedSheet == nil, !quitConfirmPending, !osrDialogsHeldForExit else { return } // 종료 중에는 띄우지 않는다(W6k)
+        guard window.attachedSheet == nil, !quitConfirmPending, !osrDialogsHeldForExit, !osrQuitRequested else { return } // 종료 중에는 띄우지 않는다(W6k)
         let alert = NSAlert()
         alert.messageText = Self.osrDialogString(6, device.rawValue)
         alert.addButton(withTitle: Self.osrDialogString(7))
@@ -11906,7 +11924,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         app.addItem(nativeMenuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option]))
         app.addItem(nativeMenuItem("Show All", #selector(NSApplication.unhideAllApplications(_:)), key: "", mods: []))
         app.addItem(.separator())
-        app.addItem(nativeMenuItem("Quit maru", #selector(NSApplication.terminate(_:)), key: "q"))
+        app.addItem(nativeMenuItem("Quit maru", #selector(quitFromMenu(_:)), key: "q", target: self))
         attachSubmenu(mainMenu, "maru", app)
 
         // File — New Window(⌘N)는 네이티브(NSWindow 생성은 OS 소유라 Zig in-session 액션이 아니다). new_term/

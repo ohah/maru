@@ -937,7 +937,7 @@ PY
 # (`MARU_WEB_PANEL` — 새 창에도), 닫은 뒤에는 한 페이지만 요청을 보내야 한다.
 printf 'ui.language = ko\nsession.keep-alive-after-quit = false\n' > "$root/wclose.conf"
 cat > "$root/wclose.txt" <<'SCRIPT'
-sleep 6000
+sleep 8000
 mark second
 newwindow
 sleep 3500
@@ -968,8 +968,13 @@ def check(cond, what):
 closed = [l for l in report if l.startswith('osr-test closewindow')]
 check(closed == ['osr-test closewindow before=2 after=1'], f'the second window closed ({closed})')
 second, close, end = marks.get('second', 0), marks.get('close', 0), marks.get('end', 0)
-# 첫 창의 페이지는 둘째 창을 열기 전에 이미 돌고 있다 — 닫은 뒤 살아 있어야 하는 것은 그 페이지다(다른 창의 것을 닫지 않는다).
-first = {p for p, t in ticks if 0 < t < second}
+# 첫 창의 페이지는 가장 먼저 요청한 페이지다(화면이 잠기면 둘째 창을 열 때까지 아직 안 떴을 수 있다 — 시각으로 가르지 않는다).
+# 다른 페이지는 둘째 창을 연 뒤에 처음 요청해야 한다. 닫은 뒤 살아 있어야 하는 것은 첫 창의 페이지다(다른 창의 것을 닫지 않는다).
+starts = {}
+for p, t in ticks:
+    starts[p] = min(starts.get(p, t), t)
+order = sorted(starts, key=starts.get)
+first = set(order[:1]) if len(order) == 2 and starts[order[1]] > second > 0 else set()
 before = {p for p, t in ticks if t < close}
 after = {p for p, t in ticks if close + 1500 < t <= end}
 check(len(first) == 1 and len(before) == 2 and after == first,

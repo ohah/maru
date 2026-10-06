@@ -5741,7 +5741,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
-        if smokeMode || appLaunchFirstDrawableArmed { holdOsrDialogsForExit(); return finishProjectSearchBeforeTermination() } // 무인 계측은 모달에 막히면 hang
+        if smokeMode || appLaunchFirstDrawableArmed { holdOsrDialogsForExit() } // W6k — 아래 줄은 L1 경계 시험이 그대로 고정한다
+        if smokeMode || appLaunchFirstDrawableArmed { return finishProjectSearchBeforeTermination() } // 무인 계측은 모달에 막히면 hang
         if workspaceFinalQuitPending {
             // 이미 수락돼 마지막 저장 중인 종료가 있다(인앱 확인 수락 등) — 새 확인을 띄우지 않고 그 종료에 합류한다.
             // 예전엔 아래 갈래가 pending 만 세우고 beginFinal 이 「이미 진행 중」으로 빠져, 저장이 끝나도 아무도 답하지

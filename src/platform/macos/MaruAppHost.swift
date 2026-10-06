@@ -5004,6 +5004,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var osrDialogsHeldForExit = false
     /// W6k: 메뉴 종료가 대화상자를 치우고 종료 위임을 기다리는 동안(`quitFromMenu`) — 새 대화상자를 띄우지 않는다.
     private var osrQuitRequested = false
+    /// 그 보류의 차례 — 앞선 종료의 2 초 해제가 새 보류를 풀지 않게.
+    private var osrQuitRequestGeneration: UInt64 = 0
     // 마지막 창 닫기·세션 종료·confirm 수락 경로가 **모든 일반 창+quick의 파일 보호를 재확인한 뒤** 세우는
     // 앱-전역 preflight 토큰. applicationShouldTerminate가 같은 종료 요청에 확인을 다시 띄우지 않게 한다.
     private var bypassQuitConfirm = false
@@ -5436,7 +5438,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    // Cmd+Q/메뉴 "Quit maru"/Dock·로그아웃에 의한 앱 전체 종료. AppKit terminate:는 windowShouldClose를 거치지
+    // Cmd+Q/메뉴 "Quit maru"(`quitFromMenu` 를 거쳐 — W6k)/Dock·로그아웃에 의한 앱 전체 종료. AppKit terminate:는 windowShouldClose를 거치지
     // 않으므로 여기서 가로채, 활성 창 세션에 "maru를 종료할까요?" 확인 모달을 띄우고 .terminateLater로 보류한다.
     // 모달 결정은 다음 tick FrameSummary.quit_decision으로 와 drainQuitDecision이 NSApp.reply로 종료를 진행/취소한다.
     // 창 닫기와 달리 실행 중 명령 유무와 무관하게 항상 묻는다(사용자 결정 2026-06). 단일 출처: docs/macos-app-host-boundary.md.
@@ -9186,17 +9188,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let alert = osrBlockedAlert, let parent = alert.window.sheetParent { parent.endSheet(alert.window, returnCode: .cancel) }
     }
 
-    /// 메뉴 「Quit maru」(⌘Q) — 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 `terminate:` 를 받고도 종료 위임을 부르지 않았다
-    /// (W6k 실측 — 위임 안의 치우기가 닿지 않았다). 먼저 치우고 부른다. 저장 안 한 파일 패널이 있으면 종료가 곧바로 거절되므로
-    /// 치우지 않는다(위임과 같은 규칙).
-    /// sheet 를 닫은 같은 순간의 `terminate:` 도 AppKit 이 무시했다(실측 — sheet 의 끝은 다음 실행 루프에서 마무리된다). 다음 루프로
-    /// 미루고, 그사이 잇달아 alert 를 띄우는 페이지가 새 sheet 를 세우지 않게 보류한다(`osrQuitRequested` — 종료 위임이 받으면 풀고,
-    /// 위임이 오지 않으면 2 초 뒤 푼다: 대화상자가 영영 막히지 않게).
+    /// 메뉴 「Quit maru」(⌘Q — W6k). 실측(2026-10-06, 앱이 맨 앞·접근성으로 메뉴를 누름): 페이지 대화상자 sheet 가 떠 있으면
+    /// `terminate:` 를 보내도 종료 위임이 불리지 않았고(위임 안의 치우기가 닿지 않았다), sheet 를 닫은 같은 차례의 `terminate:` 도
+    /// 위임에 닿지 않아 잇달아 alert 를 띄우는 페이지가 다시 sheet 를 세웠다(시험 모드 — 앱이 비활성 — 에서는 같은 차례의
+    /// `terminate:` 로 끝났다; 차이의 원인은 밝히지 못했다). 그래서 sheet 가 있으면 치우고 새 대화상자를 보류한 뒤 다음 차례에
+    /// 부른다(위임이 받으면 보류를 풀고, 위임이 오지 않으면 2 초 뒤 푼다 — 대화상자가 영영 막히지 않게). 저장 안 한 파일 패널이 있어도
+    /// 치운다 — 안 치우면 위임이 불리지 않아 거절 안내도 보이지 않는다. sheet 가 없으면 예전처럼 곧바로 부르고, 「종료할까요?」가
+    /// 떠 있으면 아무것도 하지 않는다(두 번째 ⌘Q 를 줄에 남겼다가 취소 뒤 다시 묻지 않게 — 적대 검증).
     @objc func quitFromMenu(_ sender: Any?) {
-        if protectedFilePanelSurface() == nil {
-            osrQuitRequested = true
-            dismissOsrSheetsForQuit()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.osrQuitRequested = false }
+        if quitConfirmPending { return }
+        guard !osrDialogSheets.isEmpty || osrBlockedAlert?.window.sheetParent != nil else {
+            NSApp.terminate(sender)
+            return
+        }
+        osrQuitRequested = true
+        osrQuitRequestGeneration &+= 1
+        let generation = osrQuitRequestGeneration
+        dismissOsrSheetsForQuit()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            if self?.osrQuitRequestGeneration == generation { self?.osrQuitRequested = false }
         }
         DispatchQueue.main.async { NSApp.terminate(sender) }
     }
@@ -12041,7 +12051,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return item
     }
 
-    /// 네이티브 셀렉터 메뉴 항목. target=nil이면 responder chain(terminate:/performMiniaturize: 등 표준 동작),
+    /// 네이티브 셀렉터 메뉴 항목. target=nil이면 responder chain(performMiniaturize: 등 표준 동작),
     /// target=self면 컨트롤러의 @objc 핸들러(copy/paste/fullscreen). 기본 modifier는 ⌘.
     private func nativeMenuItem(_ title: String, _ action: Selector, key: String, mods: NSEvent.ModifierFlags = .command, target: AnyObject? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)

@@ -263,6 +263,11 @@ pub const ScenarioId = enum {
     /// (2026-10-05 실측). 지금은 상자 안쪽 폭으로 나눠 그린다. 이 그림이 「줄이 상자 안에 드는가」와 「버튼이
     /// 마지막 줄 아래로 내려가는가」를 증언한다. 문구는 제품의 i18n 키를 읽는다(리터럴이면 캡처 폭이 갈린다).
     confirm_long_message,
+    /// **버튼 넷짜리 확인 상자**(편집기 저장 충돌 — 비교·덮어쓰기·다시 읽기·계속 편집). 상자 안쪽 폭에 버튼이
+    /// 한 줄로 안 들어가면 다음 줄로 넘긴다(#4169 — 그 전에는 넘친 버튼을 **아예 안 그렸다**). 이 그림이
+    /// 「넷 다 그려지는가」와 「넘긴 줄도 가운데 정렬되고 패널 안에 드는가」를 증언한다. 포커스는 `primary`
+    /// (비교)라 그 버튼만 강조 배경이다 — Lab 이 오버레이 `.fill` 을 칠하므로(#4172) 그것도 보인다.
+    confirm_save_conflict,
     /// **설정 드롭다운이 펼쳐진 모습.** 이 컴포넌트에는 Lab 시나리오가 **하나도 없었다** — 같은
     /// `popup_box.place` 를 쓰면서도 세로 정책이 `context_menu` 와 **다른데**(아래 참조) 그 차이를
     /// 보는 그림이 없었다. 여기서 재는 것은 「목록이 control 아래에 차례로 서는가」다.
@@ -439,7 +444,7 @@ pub fn buildFrame(
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
-        .confirm_long_message => buildConfirmFrame(scenario, tokens, buffers),
+        .confirm_long_message, .confirm_save_conflict => buildConfirmFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         .editor_merge_panes, .editor_merge_narrow, .editor_merge_caret => buildEditorMergeFrame(scenario, buffers),
@@ -1663,7 +1668,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_save_conflict, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1819,9 +1824,20 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
         .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..0] },
     };
     // arena 에 잡는다 — `view` 는 메시지를 **빌리는** op 을 만들고 그것은 이 함수가 돌아간 뒤에 렌더된다.
-    const message = try std.mem.replaceOwned(u8, arena, maru.i18n.t(.lsp_trust_prompt), "{s}", "/opt/homebrew/bin/rust-analyzer-nightly");
     var state: chrome.components.confirm.State = .{};
-    state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+    if (scenario.id == .confirm_save_conflict) {
+        // 제품 `editor/conflict.zig` `ask` 와 같은 키·같은 자리다(primary=비교 · alternate=덮어쓰기 ·
+        // extra=다시 읽기 · cancel=계속 편집). 리터럴이면 캡처 폭이 제품과 갈린다.
+        state.showChoices(maru.i18n.t(.editor_save_conflict_choose), .{
+            .primary = maru.i18n.t(.btn_compare),
+            .alternate = maru.i18n.t(.btn_overwrite),
+            .extra = maru.i18n.t(.btn_reload),
+            .cancel = maru.i18n.t(.btn_keep_editing),
+        });
+    } else {
+        const message = try std.mem.replaceOwned(u8, arena, maru.i18n.t(.lsp_trust_prompt), "{s}", "/opt/homebrew/bin/rust-analyzer-nightly");
+        state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+    }
     const p: chrome.props.ChromeProps = .{ .metrics = .{
         .cell_width_px = scenario.cell_w_px,
         .cell_height_px = scenario.cell_h_px,

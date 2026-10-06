@@ -348,7 +348,9 @@ pub fn hasClosablePty(term: *const Term) bool {
 pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
     const tab = self.tabs.items[tab_index];
     const target = pane.terms.items[term_index];
-    if (hasClosablePty(target)) {
+    // job 이 붙든 runtime 이면 여기서 닫기를 보내지 않는다 — 「아직」으로 돌아가면 ✕ 가 무시되고 다시 부를 자리도
+    // 없다. 아래 `destroyTerm` 이 backend 에 맡기고 Term 은 지금 사라진다.
+    if (hasClosablePty(target) and !reconnectHoldsTermRuntime(target)) {
         if (self.backendFor(target).closeAndDetach(target.rt.handle) == .event_pending) return;
         target.rt.close_complete = true;
     }
@@ -887,27 +889,28 @@ fn destroyTermWithAbandonBackend(
             if (app_session_mod.app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
         } else {
             // **재접속 job 이 이 runtime 을 붙든 동안은 backend 에 닫기를 보내지 않는다**(`term_close_deferral`).
-            // 사용자 닫기는 Term 을 트리에서 이미 뺐으므로 UI 에서는 사라졌다 — backend 닫기·제거와 heap 해제만
-            // 미룬 목록으로 넘기고 tick 이 job 이 끝난 뒤 마저 한다. 여기서 그대로 닫으면 얼림 구간에는 runtime
-            // `deinit` 이 abort 하고, 커밋 뒤에는 job 의 다음 전이가 proof loss 로 앱을 끝낸다.
+            // 여기서 그대로 닫으면 얼림 구간에는 runtime `deinit` 이 abort 하고, 커밋 뒤에는 job 의 다음 전이가 proof
+            // loss 로 앱을 끝낸다. 닫기·제거는 backend 가 맡아 job 이 놓은 뒤 마저 한다 — Term 은 backend 를 가리키지
+            // 않으므로(surface 는 runtime 번들 소유) 아래 꼬리가 Term 을 지금 풀어도 된다. 창이 곧 닫혀도 잃지 않는다.
             if (close_deferral.admit(reconnectHoldsTermRuntime(term)) == .defer_teardown) {
-                deferTermTeardown(self, term);
-                return;
-            }
-            if (!term.rt.close_complete and self.runtime_initialized and
+                handOffRuntimeCloseToBackend(term);
+            } else if (!term.rt.close_complete and self.runtime_initialized and
                 close_deferral.afterClose(.first, self.backendFor(term).closeAndDetach(term.rt.handle) == .complete) ==
                     .invariant_violation)
+            {
                 @panic("term destruction bypassed a pending close operation");
-            if (close_deferral.afterRemove(.first, self.backendFor(term).remove(term.rt.handle) == .removed) ==
+            } else if (close_deferral.afterRemove(.first, self.backendFor(term).remove(term.rt.handle) == .removed) ==
                 .invariant_violation)
+            {
                 @panic("term destruction lost its terminal runtime");
+            }
         }
         term.rt.live_initialized = false;
     }
     freeTermOwned(self, term);
 }
 
-/// backend 가 손을 뗀 Term 이 소유한 나머지를 풀고 heap 을 해제한다 — `destroyTerm` 의 꼬리이자 미룬 닫기의 끝.
+/// backend 가 손을 뗀(또는 backend 에 맡긴) Term 이 소유한 나머지를 풀고 heap 을 해제한다 — `destroyTerm` 의 꼬리.
 fn freeTermOwned(self: *AppSession, term: *Term) void {
     releaseTermFileEntry(self, term);
     // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
@@ -922,67 +925,28 @@ fn freeTermOwned(self: *AppSession, term: *Term) void {
 }
 
 /// 진행 중인 재접속 job 이 이 Term 의 원격 runtime 을 붙들었는가. 로컬 PTY·원격 backend 없음이면 false.
-fn reconnectHoldsTermRuntime(term: *const Term) bool {
+pub fn reconnectHoldsTermRuntime(term: *const Term) bool {
     if (is_macos and term.surface.remote != null) {
         if (app_session_mod.app_remote_backend) |*rb| return rb.reconnectJobHoldsRuntime(term.rt.handle);
     }
     return false;
 }
 
-/// 트리에서 이미 빠진 Term 의 backend 닫기를 미룬다. UI 쪽 정리(포인터 barrier·surface 닫힘 통지·편집기 해제)는
-/// `destroyTerm` 이 이미 끝냈다 — 이 목록의 Term 은 어떤 UI 도 가리키지 않고 backend 닫기만 기다린다.
-fn deferTermTeardown(self: *AppSession, term: *Term) void {
-    self.deferred_term_closes.append(self.allocator, term) catch
-        app_session_mod.session_host.pending_term_close_graph.fatalProofLoss();
-    std.log.info("term close deferred: reconnect job holds remote runtime handle={d} pending={d}", .{
-        term.rt.handle,
-        self.deferred_term_closes.items.len,
-    });
+/// job 이 붙든 runtime 의 닫기·제거를 backend 에 맡긴다. 그 뒤 Term 은 이 runtime 을 다시 만지지 않는다
+/// (`destroyTerm` 꼬리·Session teardown pass 2). 원격 Term 이 아니면 여기 올 수 없다.
+pub fn handOffRuntimeCloseToBackend(term: *Term) void {
+    if (is_macos and term.surface.remote != null) {
+        if (app_session_mod.app_remote_backend) |*rb| return rb.closeRuntimeAfterReconnect(term.rt.handle);
+    }
+    app_session_mod.session_host.pending_term_close_graph.fatalProofLoss();
 }
 
-/// 미룬 Term 닫기를 한 번씩 다시 묻는다(tick·창 닫기·deinit). job 이 아직 붙들었거나 backend 가 「아직」이면
-/// 목록에 둔다. 다 끝난 Term 은 **목록에서 먼저 빼고** 푼다(해제된 Term 이 목록에 남지 않게).
-pub fn advanceDeferredTermCloses(self: *AppSession) void {
-    var index: usize = 0;
-    while (index < self.deferred_term_closes.items.len) {
-        const term = self.deferred_term_closes.items[index];
-        if (!retryDeferredTermClose(self, term)) {
-            index += 1;
-            continue;
-        }
-        const done = self.deferred_term_closes.orderedRemove(index);
-        std.log.info("term close resumed: remote runtime handle={d} pending={d}", .{
-            done.rt.handle,
-            self.deferred_term_closes.items.len,
-        });
-        freeTermOwned(self, done);
+/// backend 가 맡은 미룬 닫기를 한 번씩 다시 묻는다(창 tick·Session teardown 첫머리). backend 는 앱 전역이라 어느 창의
+/// tick 이 불러도 같다.
+pub fn advanceReconnectDeferredCloses() void {
+    if (is_macos) {
+        if (app_session_mod.app_remote_backend) |*rb| rb.advanceReconnectDeferredCloses();
     }
-}
-
-/// Session teardown 의 마지막 시도. 한 번 더 묻고, 그래도 남은 Term 은 한 줄 남기고 Term 만 푼다 — backend runtime
-/// entry 는 Term 을 가리키지 않으므로(surface 는 runtime 번들 소유) Term heap 해제는 안전하다. abort 보다 낫다.
-pub fn drainDeferredTermClosesForTeardown(self: *AppSession) void {
-    advanceDeferredTermCloses(self);
-    while (self.deferred_term_closes.items.len > 0) {
-        const left = self.deferred_term_closes.orderedRemove(0);
-        std.log.warn("term close still deferred at session teardown: remote runtime handle={d} stays with the backend", .{
-            left.rt.handle,
-        });
-        freeTermOwned(self, left);
-    }
-}
-
-fn retryDeferredTermClose(self: *AppSession, term: *Term) bool {
-    if (close_deferral.admit(reconnectHoldsTermRuntime(term)) == .defer_teardown) return false;
-    if (!term.rt.close_complete and self.runtime_initialized) {
-        if (close_deferral.afterClose(.retry, self.backendFor(term).closeAndDetach(term.rt.handle) == .complete) ==
-            .defer_teardown) return false;
-        term.rt.close_complete = true;
-    }
-    if (close_deferral.afterRemove(.retry, self.backendFor(term).remove(term.rt.handle) == .removed) != .finish)
-        return false;
-    term.rt.live_initialized = false;
-    return true;
 }
 
 /// platform 관찰 훅을 설치한다. 세션/Term 소유권은 바뀌지 않고, callback은 teardown을 시작한 같은 메인 스레드에서

@@ -1,21 +1,20 @@
-//! 재접속 job 이 붙든 runtime 의 Term 을 사용자가 닫을 때 backend 닫기를 **미루는** 배선을 못 박는다.
+//! 재접속 job 이 붙든 runtime 의 Term 을 닫을 때 backend 닫기를 **미루는** 배선을 못 박는다.
 //!
 //! ## 무엇이 있었나
 //!
 //! 재접속 job 은 host 의 runtime 행을 붙든 채 여러 프레임에 걸쳐 전이한다. 그 사이 ⌘W 로 탭을 닫으면
 //! `destroyTerm` 이 같은 호출 안에서 `closeAndDetach` → `remove` 까지 갔다 — 얼림 구간에는 runtime `deinit` 의
 //! `tryDeinit` 이 `.busy` 라 `teardown invariant violated` 로, 커밋 뒤에는 job 의 다음 전이가 사라진 행을 찾다
-//! `fatalIntegrity(.proof_loss)` 로 앱이 끝났다. backend 가 「아직」을 돌려줘도 사용자 닫기는 Term 을 트리에서 이미
-//! 뺀 뒤라 다시 부를 자리가 없어 `@panic` 이었다.
+//! `fatalIntegrity(.proof_loss)` 로 앱이 끝났다. 창의 마지막 탭(⌘W → `latchSessionClose` → Session teardown)은
+//! `destroyTerm` 을 거치지 않고 teardown pass 1·2 가 같은 일을 했다.
 //!
-//! 판정(`term_close_deferral.zig`)은 순수 테스트가 잰다. 판정을 부르는 자리는 backend·AppSession 을 써서 PR 에서
-//! 못 돌리므로 — **닫기를 보내기 전에** 판정이 있는지, 미룬 Term 을 tick·창 닫기·teardown 이 마저 닫는지를 여기서
-//! 글자로 잰다.
+//! 판정(`term_close_deferral.zig`)은 순수 테스트가 잰다. 판정을 부르는 자리는 backend·AppSession 을 써서 PR 에서 못
+//! 돌리므로 여기서 **자리와 순서**를 잰다 — 판정이 닫기·제거 호출보다 앞에 있는가, 붙든 갈래가 backend 에 맡기는가,
+//! 맡긴 닫기를 tick 과 teardown 이 다시 묻는가. 문장 전체를 글자로 잠그지 않는다(표현을 바꿔도 의도가 같으면 통과).
 
 const std = @import("std");
 
 const term_path = "src/platform/macos/app_session/term.zig";
-const workspace_path = "src/platform/macos/app_session/workspace.zig";
 const app_session_path = "src/platform/macos/app_session.zig";
 const backend_path = "src/platform/macos/session_host/remote_term_backend.zig";
 
@@ -52,7 +51,14 @@ fn countAll(haystack: []const u8, needle: []const u8) usize {
     return n;
 }
 
-fn expectOnce(haystack: []const u8, needle: []const u8, what: []const u8) !usize {
+fn find(haystack: []const u8, needle: []const u8, what: []const u8) !usize {
+    return std.mem.indexOf(u8, haystack, needle) orelse {
+        std.debug.print("{s}: «{s}» 가 없다\n", .{ what, needle });
+        return error.WiringChanged;
+    };
+}
+
+fn findOnce(haystack: []const u8, needle: []const u8, what: []const u8) !usize {
     const n = countAll(haystack, needle);
     if (n != 1) {
         std.debug.print("{s}: «{s}» 가 {d} 번 — 한 번이어야 한다\n", .{ what, needle, n });
@@ -61,13 +67,9 @@ fn expectOnce(haystack: []const u8, needle: []const u8, what: []const u8) !usize
     return std.mem.indexOf(u8, haystack, needle).?;
 }
 
-fn expectBefore(haystack: []const u8, first: usize, needle: []const u8, what: []const u8) !void {
-    const at = std.mem.indexOf(u8, haystack, needle) orelse {
-        std.debug.print("{s}: «{s}» 가 없다\n", .{ what, needle });
-        return error.WiringChanged;
-    };
-    if (first >= at) {
-        std.debug.print("{s}: 판정이 «{s}» 보다 뒤에 있다 — 닫기를 보낸 뒤에는 이미 늦다\n", .{ what, needle });
+fn expectOrder(first: usize, second: usize, what: []const u8, msg: []const u8) !void {
+    if (first >= second) {
+        std.debug.print("{s}: {s}\n", .{ what, msg });
         return error.WiringChanged;
     }
 }
@@ -94,12 +96,25 @@ fn bodyAfter(src: []const u8, header: []const u8) ![]const u8 {
     return error.FunctionMissing;
 }
 
-const defer_gate_first =
-    "if (close_deferral.admit(reconnectHoldsTermRuntime(term)) == .defer_teardown) { deferTermTeardown(self, term); return; }";
-const defer_gate_retry =
-    "if (close_deferral.admit(reconnectHoldsTermRuntime(term)) == .defer_teardown) return false;";
+/// `at` 에서 시작하는 `if (…)` 의 조건 괄호 안 — 괄호 짝으로 끊는다.
+fn ifCondition(src: []const u8, at: usize) ![]const u8 {
+    const open = std.mem.indexOfScalarPos(u8, src, at, '(') orelse return error.WiringChanged;
+    var depth: usize = 0;
+    var i = open;
+    while (i < src.len) : (i += 1) {
+        switch (src[i]) {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return src[open + 1 .. i];
+            },
+            else => {},
+        }
+    }
+    return error.WiringChanged;
+}
 
-test "재접속 닫기 미룸: destroyTerm 은 job 이 붙든 runtime 에 닫기를 보내기 전에 미룬다" {
+test "재접속 닫기 미룸: destroyTerm·closeTermAt 은 job 이 붙든 runtime 에 닫기를 보내기 전에 backend 에 맡긴다" {
     const a = std.testing.allocator;
     const raw = try read(a, term_path);
     defer a.free(raw);
@@ -107,114 +122,118 @@ test "재접속 닫기 미룸: destroyTerm 은 job 이 붙든 runtime 에 닫기
     defer a.free(src);
 
     const destroy = try bodyAfter(src, "fn destroyTermWithAbandonBackend(");
-    const gate_at = try expectOnce(destroy, defer_gate_first, "destroyTermWithAbandonBackend");
-    try expectBefore(destroy, gate_at, "closeAndDetach(term.rt.handle)", "destroyTermWithAbandonBackend");
-    try expectBefore(destroy, gate_at, ".remove(term.rt.handle)", "destroyTermWithAbandonBackend");
-    // 미루지 않은 첫 시도의 「아직」만 예전 불변식 위반이다 — 조건까지 판정 하나를 지난다.
-    _ = try expectOnce(
-        destroy,
-        "close_deferral.afterClose(.first, self.backendFor(term).closeAndDetach(term.rt.handle) == .complete) == .invariant_violation) @panic(\"term destruction bypassed a pending close operation\");",
-        "destroyTermWithAbandonBackend",
+    const admit_at = try findOnce(destroy, "close_deferral.admit(reconnectHoldsTermRuntime(term))", "destroyTerm");
+    const handoff_at = try findOnce(destroy, "handOffRuntimeCloseToBackend(term)", "destroyTerm");
+    try expectOrder(admit_at, handoff_at, "destroyTerm", "맡기는 자리가 판정보다 앞에 있다");
+    // 판정과 맡김은 닫기·제거 호출보다 앞이다 — 닫기를 보낸 뒤에는 이미 늦다.
+    try expectOrder(handoff_at, try find(destroy, "closeAndDetach(term.rt.handle)", "destroyTerm"), "destroyTerm", "닫기를 판정보다 먼저 보낸다");
+    try expectOrder(handoff_at, try find(destroy, ".remove(term.rt.handle)", "destroyTerm"), "destroyTerm", "제거를 판정보다 먼저 한다");
+    // 예전 두 panic 은 첫 시도 판정의 위반 갈래에만 남는다.
+    try expectOrder(
+        try findOnce(destroy, "close_deferral.afterClose(.first,", "destroyTerm"),
+        try findOnce(destroy, "term destruction bypassed a pending close operation", "destroyTerm"),
+        "destroyTerm",
+        "닫기 panic 이 첫 시도 판정 앞에 있다",
     );
-    _ = try expectOnce(
-        destroy,
-        "close_deferral.afterRemove(.first, self.backendFor(term).remove(term.rt.handle) == .removed) == .invariant_violation) @panic(\"term destruction lost its terminal runtime\");",
-        "destroyTermWithAbandonBackend",
+    try expectOrder(
+        try findOnce(destroy, "close_deferral.afterRemove(.first,", "destroyTerm"),
+        try findOnce(destroy, "term destruction lost its terminal runtime", "destroyTerm"),
+        "destroyTerm",
+        "제거 panic 이 첫 시도 판정 앞에 있다",
     );
-    // 미룬 Term 을 푸는 꼬리는 하나다 — 미룬 갈래는 그 앞에서 돌아간다.
-    _ = try expectOnce(destroy, "freeTermOwned(self, term);", "destroyTermWithAbandonBackend");
 
-    const holds = try bodyAfter(src, "fn reconnectHoldsTermRuntime(");
-    _ = try expectOnce(holds, "return rb.reconnectJobHoldsRuntime(term.rt.handle);", "reconnectHoldsTermRuntime");
+    // closeTermAt(에이전트 행 ✕·exit reap): 붙든 runtime 이면 닫기를 보내지 않고 destroyTerm 으로 간다(✕ 가 무시되지 않게).
+    const close_at = try bodyAfter(src, "pub fn closeTermAt(");
+    const close_call = try find(close_at, "closeAndDetach(target.rt.handle)", "closeTermAt");
+    const if_at = std.mem.lastIndexOf(u8, close_at[0..close_call], "if (") orelse return error.WiringChanged;
+    const outer_if = std.mem.lastIndexOf(u8, close_at[0..if_at], "if (") orelse return error.WiringChanged;
+    const cond = try ifCondition(close_at, outer_if);
+    if (std.mem.indexOf(u8, cond, "!reconnectHoldsTermRuntime(target)") == null) {
+        std.debug.print("closeTermAt: 닫기 조건에 재접속 붙듦 판정이 없다 — «{s}»\n", .{cond});
+        return error.WiringChanged;
+    }
+
+    const holds = try bodyAfter(src, "pub fn reconnectHoldsTermRuntime(");
+    _ = try findOnce(holds, "reconnectJobHoldsRuntime(term.rt.handle)", "reconnectHoldsTermRuntime");
+    const handoff = try bodyAfter(src, "pub fn handOffRuntimeCloseToBackend(");
+    _ = try findOnce(handoff, "closeRuntimeAfterReconnect(term.rt.handle)", "handOffRuntimeCloseToBackend");
 }
 
-test "재접속 닫기 미룸: 미룬 Term 은 job 이 놓은 뒤에만 닫고, 목록에서 먼저 빼고 푼다" {
+test "재접속 닫기 미룸: Session teardown 은 붙든 runtime 을 닫지도 빼지도 않고 backend 에 맡긴다" {
     const a = std.testing.allocator;
-    const raw = try read(a, term_path);
+    const raw = try read(a, app_session_path);
     defer a.free(raw);
-    const src = try normalize(a, raw);
-    defer a.free(src);
-
-    const retry = try bodyAfter(src, "fn retryDeferredTermClose(");
-    const gate_at = try expectOnce(retry, defer_gate_retry, "retryDeferredTermClose");
-    try expectBefore(retry, gate_at, "closeAndDetach(term.rt.handle)", "retryDeferredTermClose");
-    try expectBefore(retry, gate_at, ".remove(term.rt.handle)", "retryDeferredTermClose");
-    _ = try expectOnce(
-        retry,
-        "close_deferral.afterClose(.retry, self.backendFor(term).closeAndDetach(term.rt.handle) == .complete) == .defer_teardown) return false;",
-        "retryDeferredTermClose",
-    );
-    _ = try expectOnce(
-        retry,
-        "close_deferral.afterRemove(.retry, self.backendFor(term).remove(term.rt.handle) == .removed) != .finish) return false;",
-        "retryDeferredTermClose",
-    );
-
-    const advance = try bodyAfter(src, "pub fn advanceDeferredTermCloses(");
-    _ = try expectOnce(advance, "if (!retryDeferredTermClose(self, term)) {", "advanceDeferredTermCloses");
-    const take_at = try expectOnce(advance, "self.deferred_term_closes.orderedRemove(index);", "advanceDeferredTermCloses");
-    // 해제는 한 자리뿐이고 목록에서 뺀 Term 에만 한다 — 목록에 남은 채 풀면 다음 순회가 해제된 Term 을 읽는다.
-    const free_at = try expectOnce(advance, "freeTermOwned(", "advanceDeferredTermCloses");
-    try expectBefore(advance, take_at, "freeTermOwned(self, done);", "advanceDeferredTermCloses");
-    if (free_at < take_at) {
-        std.debug.print("advanceDeferredTermCloses: 목록에서 빼기 전에 푼다\n", .{});
-        return error.WiringChanged;
-    }
-
-    const drain = try bodyAfter(src, "pub fn drainDeferredTermClosesForTeardown(");
-    const first_at = try expectOnce(drain, "advanceDeferredTermCloses(self);", "drainDeferredTermClosesForTeardown");
-    const drain_take_at = try expectOnce(drain, "self.deferred_term_closes.orderedRemove(0);", "drainDeferredTermClosesForTeardown");
-    try expectBefore(drain, first_at, "self.deferred_term_closes.orderedRemove(0);", "drainDeferredTermClosesForTeardown");
-    const drain_free_at = try expectOnce(drain, "freeTermOwned(", "drainDeferredTermClosesForTeardown");
-    if (drain_free_at < drain_take_at) {
-        std.debug.print("drainDeferredTermClosesForTeardown: 목록에서 빼기 전에 푼다\n", .{});
-        return error.WiringChanged;
-    }
-    if (std.mem.indexOf(u8, drain, "@panic(") != null) {
-        std.debug.print("drainDeferredTermClosesForTeardown: teardown 이 남은 미룬 닫기로 abort 한다\n", .{});
-        return error.WiringChanged;
-    }
-}
-
-test "재접속 닫기 미룸: tick·창 닫기·Session teardown 이 미룬 목록을 마저 닫는다" {
-    const a = std.testing.allocator;
-
-    const app_raw = try read(a, app_session_path);
-    defer a.free(app_raw);
-    const app = try normalize(a, app_raw);
+    const app = try normalize(a, raw);
     defer a.free(app);
-    // tick: 창 닫기보다 먼저 — 창 닫기는 이 목록이 빌 때까지 기다린다.
-    _ = try expectOnce(
-        app,
-        "term_ops.advanceDeferredTermCloses(self); workspace_ops.advancePendingWindowClose(self);",
-        "AppSession tick",
-    );
-    // teardown: 다른 무엇을 풀기 전에, abort 없이.
-    const deinit = try bodyAfter(app, "pub fn deinit(self: *AppSession) void");
-    if (!std.mem.startsWith(u8, deinit, "term_ops.drainDeferredTermClosesForTeardown(self); self.deferred_term_closes.deinit(self.allocator);")) {
-        std.debug.print("AppSession.deinit: 첫 문장이 미룬 닫기 정리가 아니다\n", .{});
-        return error.WiringChanged;
-    }
 
-    const ws_raw = try read(a, workspace_path);
-    defer a.free(ws_raw);
-    const ws = try normalize(a, ws_raw);
-    defer a.free(ws);
-    const close = try bodyAfter(ws, "fn advanceWindowClose(");
-    if (!std.mem.startsWith(u8, close, "term_ops.advanceDeferredTermCloses(self); if (self.deferred_term_closes.items.len != 0) return .event_pending;")) {
-        std.debug.print("advanceWindowClose: 미룬 닫기가 남았는데 창을 닫을 수 있다\n", .{});
+    const deinit = try bodyAfter(app, "pub fn deinit(self: *AppSession) void");
+    // 첫머리: 맡긴 닫기를 다른 무엇(앱 quit 의 routing tombstone 포함)보다 먼저 다시 묻는다.
+    const advance_at = try findOnce(deinit, "term_ops.advanceReconnectDeferredCloses()", "AppSession.deinit");
+    try expectOrder(advance_at, try find(deinit, "beginAppQuitShutdown(", "AppSession.deinit"), "AppSession.deinit", "맡긴 닫기를 앱 quit 시작 뒤에 묻는다");
+
+    // pass 1: 붙든 runtime 은 닫기를 보내지 않는다 — 판정이 닫기 호출과 panic 보다 앞이다.
+    const pass1_panic = try findOnce(deinit, "process teardown reached an active terminal close operation", "AppSession.deinit");
+    const pass1_close = std.mem.lastIndexOf(u8, deinit[0..pass1_panic], "closeAndDetach(term.rt.handle)") orelse
         return error.WiringChanged;
-    }
+    const pass1_skip = std.mem.lastIndexOf(u8, deinit[0..pass1_close], "if (term_ops.reconnectHoldsTermRuntime(term)) continue;") orelse {
+        std.debug.print("AppSession.deinit pass 1: 붙든 runtime 을 건너뛰지 않고 닫는다\n", .{});
+        return error.WiringChanged;
+    };
+    const pass1_loop = std.mem.lastIndexOf(u8, deinit[0..pass1_close], "for (pane.terms.items) |term|") orelse
+        return error.WiringChanged;
+    try expectOrder(pass1_loop, pass1_skip, "AppSession.deinit pass 1", "건너뛰기가 같은 순회 안에 없다");
+
+    // pass 2: 붙든 runtime 은 빼지 않고 backend 에 맡긴다 — 그 갈래가 remove 갈래 앞이다.
+    const pass2_panic = try findOnce(deinit, "approved window teardown lost its terminal runtime", "AppSession.deinit");
+    const pass2_remove = std.mem.lastIndexOf(u8, deinit[0..pass2_panic], ".remove(term.rt.handle)") orelse
+        return error.WiringChanged;
+    const pass2_handoff = std.mem.lastIndexOf(u8, deinit[0..pass2_remove], "term_ops.handOffRuntimeCloseToBackend(term)") orelse {
+        std.debug.print("AppSession.deinit pass 2: 붙든 runtime 을 맡기지 않고 뺀다\n", .{});
+        return error.WiringChanged;
+    };
+    const pass2_cond = std.mem.lastIndexOf(u8, deinit[0..pass2_handoff], "term_ops.reconnectHoldsTermRuntime(term)") orelse
+        return error.WiringChanged;
+    try expectOrder(pass1_panic, pass2_cond, "AppSession.deinit pass 2", "맡김 판정이 pass 2 가 아닌 자리에 있다");
 }
 
-test "재접속 닫기 미룸: backend 는 job 이 붙든 행을 닫지도 빼지도 않는다" {
+test "재접속 닫기 미룸: tick 이 맡긴 닫기를 다시 묻고, 끝을 한 번만 보는 drain 은 「아직」인 종료를 들고 다시 finish 한다" {
+    const a = std.testing.allocator;
+    const raw = try read(a, app_session_path);
+    defer a.free(raw);
+    const app = try normalize(a, raw);
+    defer a.free(app);
+
+    // tick 과 teardown 두 자리뿐이다.
+    const n = countAll(app, "term_ops.advanceReconnectDeferredCloses()");
+    if (n != 2) {
+        std.debug.print("advanceReconnectDeferredCloses 호출이 {d} 곳 — tick 과 Session teardown 두 곳이어야 한다\n", .{n});
+        return error.WiringChanged;
+    }
+    const tick_at = std.mem.indexOf(u8, app, "term_ops.advanceReconnectDeferredCloses();").?;
+    const window_at = try findOnce(app, "workspace_ops.advancePendingWindowClose(self);", "AppSession tick");
+    // tick 쪽 호출이 창 닫기 진행과 같은 tick 함수 안이다(바로 앞, 사이에 함수 경계가 없다).
+    if (tick_at >= window_at or std.mem.indexOf(u8, app[tick_at..window_at], " fn ") != null) {
+        std.debug.print("AppSession tick: 맡긴 닫기를 창 닫기 진행과 같은 tick 에서 묻지 않는다\n", .{});
+        return error.WiringChanged;
+    }
+
+    // 끝 보고는 한 번뿐이다 — 「아직」이면 Term 에 들고, 다음 tick 의 판정이 그것을 다시 쓴다.
+    const reap = try findOnce(app, "finishAfterTermination(term.rt.handle) == .event_pending", "AppSession reap");
+    const retry_source = try findOnce(app, "ds.ended orelse term.rt.pending_termination", "AppSession reap");
+    try expectOrder(retry_source, reap, "AppSession reap", "들고 있던 종료를 finish 뒤에 읽는다");
+    const keep_at = try find(app[reap..], "term.rt.pending_termination = ended;", "AppSession reap");
+    const continue_at = try find(app[reap..], "continue;", "AppSession reap");
+    try expectOrder(keep_at, continue_at, "AppSession reap", "「아직」인 종료를 들지 않고 건너뛴다");
+}
+
+test "재접속 닫기 미룸: backend 는 붙든 행을 닫지도 빼지도 않고, 맡은 닫기는 job 이 놓은 뒤 이어서 닫는다" {
     const a = std.testing.allocator;
     const raw = try read(a, backend_path);
     defer a.free(raw);
     const src = try normalize(a, raw);
     defer a.free(src);
 
-    const guard = "if (self.reconnectJobHoldsRuntime(handle)) return .event_pending;";
+    // 세 입구 모두 맵·authority 를 만지기 전에 붙듦을 묻는다.
     const headers = [_][]const u8{
         "fn remove(ctx: *anyopaque, handle: RuntimeHandle) maru.app.term_runtime_backend.RemoveProgress",
         "fn requestRuntimeClose(",
@@ -222,23 +241,30 @@ test "재접속 닫기 미룸: backend 는 job 이 붙든 행을 닫지도 빼�
     };
     for (headers) |header| {
         const body = try bodyAfter(src, header);
-        // remove 는 첫 줄이 ctx 캐스트다 — 그 다음 문장이어야 한다.
-        const rest = if (std.mem.startsWith(u8, body, "const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));"))
-            std.mem.trimStart(u8, body["const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));".len..], " ")
-        else
-            body;
-        if (!std.mem.startsWith(u8, rest, guard)) {
-            std.debug.print("«{s}»: 첫 문장이 재접속 붙듦 관문이 아니다\n", .{header});
-            return error.WiringChanged;
-        }
+        const guard = try find(body, "self.reconnectJobHoldsRuntime(handle)) return .event_pending", header);
+        try expectOrder(guard, try find(body, "self.runtimes.get(handle)", header), header, "맵을 읽은 뒤에 붙듦을 묻는다");
+        try expectOrder(guard, try find(body, "close_operation_owner.active", header), header, "close 소유권을 본 뒤에 붙듦을 묻는다");
     }
 
     const holds = try bodyAfter(src, "pub fn reconnectJobHoldsRuntime(");
-    _ = try expectOnce(holds, "return term_close_deferral.holdsRuntime(phase, in_rows);", "reconnectJobHoldsRuntime");
-    // 실패로 끝나 보관 중인 job 은 붙든 것이 아니다 — 여기서 갈리면 ⌘W 가 영영 안 닫힌다.
-    _ = try expectOnce(
-        holds,
-        "else if (job.state_raw == @intFromEnum(HostReconnectJobState.host_failure_complete)) .retained_terminal",
+    _ = try findOnce(holds, "term_close_deferral.holdsRuntime(", "reconnectJobHoldsRuntime");
+    // 실패로 끝나 보관 중인 job 은 retained-terminal 로 접힌다 — 붙든 것으로 치면 ⌘W 가 영영 안 닫힌다.
+    try expectOrder(
+        try findOnce(holds, "HostReconnectJobState.host_failure_complete", "reconnectJobHoldsRuntime"),
+        try findOnce(holds, ".retained_terminal", "reconnectJobHoldsRuntime"),
         "reconnectJobHoldsRuntime",
+        "host_failure_complete 가 retained_terminal 로 접히지 않는다",
     );
+
+    // 맡은 닫기: 붙듦을 먼저 묻고, 닫기 → 제거가 끝난 handle 만 뺀다.
+    const advance = try bodyAfter(src, "pub fn advanceReconnectDeferredCloses(");
+    const admit_at = try findOnce(advance, "term_close_deferral.admit(self.reconnectJobHoldsRuntime(handle))", "advanceReconnectDeferredCloses");
+    const close_at = try findOnce(advance, "self.requestRuntimeClose(handle,", "advanceReconnectDeferredCloses");
+    const remove_at = try findOnce(advance, "remove(self, handle)", "advanceReconnectDeferredCloses");
+    try expectOrder(admit_at, close_at, "advanceReconnectDeferredCloses", "job 이 붙든 채 닫는다");
+    try expectOrder(close_at, remove_at, "advanceReconnectDeferredCloses", "닫기 전에 뺀다");
+    const done_at = std.mem.lastIndexOf(u8, advance, "self.reconnect_deferred_closes.orderedRemove(index)") orelse
+        return error.WiringChanged;
+    try expectOrder(remove_at, done_at, "advanceReconnectDeferredCloses", "제거가 끝나기 전에 목록에서 뺀다");
+    _ = try findOnce(advance, "term_close_deferral.afterRemove(.retry,", "advanceReconnectDeferredCloses");
 }

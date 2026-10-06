@@ -2197,6 +2197,9 @@ const TermRuntime = struct {
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
+    // 끝(exit)을 관측했지만 backend 의 finishAfterTermination 이 「아직」이라 다음 tick 에 다시 finish 할 종료. 원격 drain 은
+    // 끝을 한 번만 보고하므로 여기 들고 있어야 재시도된다(재접속 job 이 runtime 을 붙든 동안이 그 경우다).
+    pending_termination: ?app.RuntimePumpTermination = null,
     // backend close가 complete를 게시했지만 layout/remove suffix는 아직 실행 전일 수 있다. 이 래치가 있어야
     // topology를 보존한 재시도와 destroy 단계가 같은 close request를 두 번 발행하지 않는다.
     close_complete: bool = false,
@@ -6126,10 +6129,6 @@ pub const AppSession = struct {
     close_session_generation: u64 = 1,
     next_window_close_graph_generation: u64 = 0,
     pending_window_close_graph: PendingTermCloseGraph = .{},
-    /// 사용자가 닫았지만 진행 중인 재접속 job 이 runtime 을 붙들어 backend 닫기를 미룬 Term
-    /// (`session_host.term_close_deferral`). 트리·UI 에서는 이미 빠졌고, tick 이 job 이 끝난 뒤 닫고 푼다.
-    /// 창 닫기는 이 목록이 빌 때까지 기다리고, deinit 은 남은 것을 불변식 위반으로 본다.
-    deferred_term_closes: std.ArrayList(*Term) = .empty,
     // CR5d-2: one Window action at a time is sealed against this heap-pinned AppSession and the
     // app-global backend job.  The graph generation advances at every cross-window surgery so a
     // gesture prepared in the old Window cannot act on the moved Term.
@@ -20690,8 +20689,8 @@ pub const AppSession = struct {
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
-        // 재접속 job 이 붙들어 미룬 Term 닫기를 마저 한다 — 창 닫기보다 먼저(창 닫기는 이 목록이 빌 때까지 기다린다).
-        term_ops.advanceDeferredTermCloses(self);
+        // 재접속 job 이 붙들어 backend 에 맡긴 runtime 닫기를 마저 한다(`term_close_deferral`). backend 는 앱 전역이다.
+        term_ops.advanceReconnectDeferredCloses();
         workspace_ops.advancePendingWindowClose(self);
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
@@ -20865,10 +20864,16 @@ pub const AppSession = struct {
                     // pty_reader가 reapIfExited로 자식이 살아있음을 확인하고 방출)는 finishAfterTermination(→session.close
                     // →shutdownChild로 산 셸을 죽인다)·terminated·reap을 타지 않는다. 셸에서 claude 실행 중 Ctrl+C가
                     // 유발한 일시적 write 오류가 read_error로 잡혀 좌측 워크스페이스 탭을 통째로 닫던 버그의 수정.
-                    if (ds.ended) |ended| {
+                    // 원격 drain 은 끝을 **한 번만** 보고한다(그 뒤 `pumpEnded` 면 빈 요약). backend 가 「아직」이면 그
+                    // 끝을 Term 에 들고 다음 tick 에 다시 finish 한다 — 안 그러면 재접속 job 중 끝난 셸의 탭이 영영 안 닫힌다.
+                    if (ds.ended orelse term.rt.pending_termination) |ended| {
                         if (terminationClosesWorkspace(ended)) {
                             if (!term.rt.terminated) {
-                                if (self.backendFor(term).finishAfterTermination(term.rt.handle) == .event_pending) continue;
+                                if (self.backendFor(term).finishAfterTermination(term.rt.handle) == .event_pending) {
+                                    term.rt.pending_termination = ended;
+                                    continue;
+                                }
+                                term.rt.pending_termination = null;
                                 term.rt.close_complete = true;
                                 term.rt.terminated = true;
                                 // 이 Term의 uptime(spawn→exit, ms) — 비정상 시작 사망 grace 판정(holdOnStartupExit)이 쓴다.
@@ -23926,12 +23931,11 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
-        // 재접속 job 이 붙들어 미룬 Term 닫기를 **다른 무엇을 풀기 전에**(backend·편집기 상태가 다 살아 있을 때) 마저
-        // 한다. 창 닫기는 이 목록이 빌 때까지 기다리고, 앱 quit 은 Session teardown 전에 재접속 job 을 취소하므로
-        // (`maru_macos_reconnect_product_shutdown`) 보통 여기서 다 닫힌다. 그래도 남는 것은(닫기 정산이 한 번에 안
-        // 끝났다) abort 하지 않는다 — Term 은 backend 를 가리키지 않으므로 Term 만 풀고 runtime 은 backend 가 든다.
-        term_ops.drainDeferredTermClosesForTeardown(self);
-        self.deferred_term_closes.deinit(self.allocator);
+        // backend 에 맡긴 미룬 닫기를 **다른 무엇을 풀기 전에** 한 번 더 묻는다. 앱 quit 은 Session teardown 전에 재접속
+        // job 을 취소하므로(`maru_macos_reconnect_product_shutdown`) 첫 창의 teardown 이 아래 앱 quit 의 routing
+        // tombstone·연결 terminalize **앞에서** 앱 전역 목록을 비운다. 남은 것은 backend 가 계속 든다(다음 tick, 또는
+        // 프로세스 끝의 backend deinit 이 terminate·회수한다).
+        term_ops.advanceReconnectDeferredCloses();
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);
@@ -24349,6 +24353,9 @@ pub const AppSession = struct {
                         // 남겨야 재실행 시 재접속한다(detach는 아래 pass 2 detachTerm이 client-side만 회수). 단 P4 "종료 및 세션
                         // 끝내기"(app_quit_end_all)면 skip 안 하고 종료한다. 그 외(in-process·명시 창 close)도 기존대로 closeAndDetach.
                         if (self.shouldDetachRemoteOnAppQuit(term)) continue;
+                        // 재접속 job 이 붙든 runtime 은 닫기를 보내지 않는다 — 「아직」이 돌아와 아래 panic 에 닿는다.
+                        // pass 2 가 backend 에 맡긴다(`term_close_deferral`).
+                        if (term_ops.reconnectHoldsTermRuntime(term)) continue;
                         if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending)
                             @panic("process teardown reached an active terminal close operation");
                     }
@@ -24404,6 +24411,9 @@ pub const AppSession = struct {
                         // destructive). 공유 backend는 어느 쪽도 안 닫는다.
                         if (self.shouldDetachRemoteOnAppQuit(term)) {
                             if (app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
+                        } else if (term_ops.reconnectHoldsTermRuntime(term)) {
+                            // job 이 붙든 runtime 을 빼면 job 의 다음 전이가 proof loss 다 — backend 가 job 뒤에 닫는다.
+                            term_ops.handOffRuntimeCloseToBackend(term);
                         } else {
                             if (self.backendFor(term).remove(term.rt.handle) != .removed)
                                 @panic("approved window teardown lost its terminal runtime");

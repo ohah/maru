@@ -16,9 +16,11 @@
 //!
 //! ## 판정
 //!
-//! job 이 그 runtime 을 붙든 동안은 backend 에 닫기를 **보내지 않는다**. Term 은 UI 에서 바로 사라지고(트리에서 이미
-//! 빠졌다), backend 닫기·제거와 Term heap 해제만 AppSession 의 미룬 목록으로 넘어가 tick 마다 다시 묻는다. job 이
-//! 끝나면(완료든 실패든) 그때 평소 순서로 닫는다.
+//! job 이 그 runtime 을 붙든 동안은 backend 에 닫기를 **보내지 않는다**. Term 은 UI 에서 바로 사라지고 바로 풀린다 —
+//! Term 은 backend 를 가리키지 않는다(surface 는 runtime 번들 소유). runtime 의 닫기·제거만 **backend 가 맡아**
+//! (`RemoteTermBackend.closeRuntimeAfterReconnect`) 창 tick 마다 다시 묻고, job 이 끝나면(완료든 실패든) 평소 순서로
+//! 닫는다. 맡는 쪽이 앱 전역 backend 라 그 뒤 창이 닫히거나(⌘W 로 마지막 탭 → Session teardown) 다른 창으로 합쳐져도
+//! 닫기를 잃지 않는다. Session teardown 도 job 이 붙든 runtime 은 같은 자리에 맡긴다.
 //!
 //! 「붙들었는가」는 job 이 **진행 중**일 때만이다. 실패로 끝난 job(`host_failure_complete`, retained-terminal)은
 //! 다음 재접속 전까지 backend 가 들고 있지만 더는 전이하지 않고 그 attachment 는 이미 terminal 이다 — 거기까지
@@ -41,13 +43,13 @@ pub fn holdsRuntime(phase: JobPhase, in_rows: bool) bool {
     return in_rows and phase == .in_flight;
 }
 
-/// 판정을 부르는 자리. 첫 시도는 `destroyTerm` 안(사용자 닫기·정리), 재시도는 미룬 목록의 tick 이다.
+/// 판정을 부르는 자리. 첫 시도는 `destroyTerm` 안(사용자 닫기·정리), 재시도는 backend 가 맡은 미룬 닫기다.
 pub const Attempt = enum { first, retry };
 
 pub const Action = enum {
     /// 지금 backend 를 부른다(닫기면 `closeAndDetach`, 제거면 `remove`) / 다음 단계로 간다.
     proceed,
-    /// 이번에는 backend 에 아무것도 보내지 않고 미룬 목록에 둔다(재시도면 목록에 그대로 둔다).
+    /// 이번에는 닫기를 보내지 않고 backend 의 미룬 닫기에 둔다(재시도면 거기 그대로 둔다).
     defer_teardown,
     /// backend 제거까지 끝났다 — Term heap 을 푼다.
     finish,

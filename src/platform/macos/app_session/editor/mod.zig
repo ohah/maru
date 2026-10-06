@@ -45151,9 +45151,18 @@ fn openBracketFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []co
     fx.session.backing_width_px = 1200;
     fx.session.backing_height_px = 800;
     _ = try fx.session.tick();
-    // 트리를 끝까지 판다(작은 문서라 한 번이면 되지만, 여는 파싱이 끊겼으면 여기서 잇는다).
+    // **파싱과 괄호 목록을 결정적으로 끝낸다.** 괄호 색은 파싱이 끝나고 목록이 완성돼야 서는데, 여는 파싱은 4 ms(벽시계)
+    // 예산에서 끊긴다(§2.1a). 예전에는 「`tick()` 을 50 번」 기다렸지만 **연달아 부른 tick 은 첫 번째만 파싱을 잇는다** —
+    // 예산을 400 µs 로 줄인 실측에서 50 번 뒤에도 `pending` 이었다. 그래서 부하 걸린 CI 러너에서 여는 파싱이 덜 끝나면 판정자의
+    // 첫 캡처 프레임이 괄호 색 없이 그려졌다(BPP2 CI 실패 2026-10-06: `expected 255, found 232` — bracket_pair_1 이 아니라
+    // 무색. 예산 ≤ 200 µs 로 같은 자리·같은 값이 결정적으로 재현된다). 로컬은 여는 파싱이 한 번에 끝나 늘 통과했다.
+    // 다른 판정자들이 쓰는 그 방식으로 직접 끝까지 판다. 괄호 훑기를 따로 재는 판정자(BPP3·BRP12)는 이 뒤에 목록을 버리거나
+    // 스스로 다시 만들므로 여기서 완성해도 그 뜻이 안 바뀐다.
+    const content = term.rt.editorDocument().opened.?.file.content;
     var rounds: usize = 0;
-    while (term.rt.editor_syntax.pending and rounds < 50) : (rounds += 1) _ = try fx.session.tick();
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, content);
+    try testing.expect(!term.rt.editor_syntax.pending);
+    try syntax_color.finishBrackets(&term.rt.editor_syntax, fx.session.allocator, content);
     return term;
 }
 

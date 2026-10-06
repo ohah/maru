@@ -1007,7 +1007,11 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   `admitDestructiveRuntimeOperation`) 뒤 관문 없이 payload 에 닿는 함수를 payload 도우미·간접 사슬을 코드에서 유도해 찾는다.
   **남은 구멍:** 재접속 job 이 진행 중(`connected` 부터 종료 요약 전까지)인 runtime 의 탭을 닫으면 close 는 끝나고 `remove` 가
   job 이 붙든 runtime 을 맵에서 뺀다 — 다음 전이의 `runtimes.get` 이 실패해 proof loss 로 앱이 끝난다(이 수정 이전부터 있던
-  것). close 를 미루면(`.event_pending`) 되지만, 사용자 닫기(⌘W → `closeActiveTerm`/`closeActivePane`/`closeTab` →
+  것). **얼림 구간(`retirement_prepared`, prepare 부터 commit 까지 약 2 프레임)에 닫으면 더 이르다:** terminate 는 관문이
+  건너뛰어(`… skipped: attachment frozen by reconnect` 한 줄) payload 를 읽지 않지만, 같은 `destroyTerm` 안의 `remove` →
+  `destroyRuntimeEntry` → `GenerationAttachment.deinit` 의 `tryDeinit` 이 `.retirement_prepared` 에서 `.busy` 라
+  `teardown invariant violated` 로 abort 한다 — abort 자리가 `payloadMut` 에서 teardown 으로 옮겨졌을 뿐 같은 사용자 동작·
+  같은 빈도다. close 를 미루면(`.event_pending`) 되지만, 사용자 닫기(⌘W → `closeActiveTerm`/`closeActivePane`/`closeTab` →
   `destroyTerm`)는 미룬 close 를 다시 부르지 않고 `@panic("term destruction bypassed a pending close operation")` 한다 —
   창 닫기(`advanceWindowClose`)와 `closeTermAt` 만 미룬 close 를 받는다. 미루기는 AppSession 쪽 재시도 경로가 생긴 뒤의 일이다.
   e3c1은 sole coordinator drain, e3c2는 direct-release consumer receipt, e3c3은 termination/abandon과 close 경쟁·mixed outcome을 순서대로 연다. 실제 direct-release socket issuer는 CR4가 소유한다.

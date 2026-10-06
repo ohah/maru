@@ -304,8 +304,8 @@ fn scrollWindow(total: usize, m: props.CellMetrics) ScrollWindow {
 }
 
 /// 패널 레이아웃(스크롤 윈도우 포함) — **view·hitTest·panelRect 단일 출처**라 "보이는 카드 == 클릭되는 카드". 상단에
-/// 헤더 밴드(제목+액션, sticky)를 두고 그 아래에서 카드가 스크롤한다. 카드가 화면 가용 높이를 넘으면 카드 단위로 스크롤
-/// (부분 카드 클리핑 인프라가 없어 — draw.Op에 scissor 없음 — 통째 카드만 보인다). 폭은 [min,max] cap.
+/// 헤더 밴드(제목+액션, sticky)를 두고 그 아래에서 카드가 스크롤한다. 카드가 화면 가용 높이를 넘으면 픽셀 offset 으로
+/// 흐르고(SV5a — 첫 카드는 `origin_shift_px` 만큼 밀려 걸친다), 걸친 몫은 view 의 clip 이 자른다. 폭은 [min,max] cap.
 const Layout = struct {
     rect: draw.Rect, // 패널 박스(px) — 화면 안으로 clamp됨
     cw: u32,
@@ -324,7 +324,7 @@ const Layout = struct {
     origin_shift_px: u32, // 첫 카드가 뷰포트 위로 밀린 픽셀(0이면 카드 경계에 딱 맞음)
     viewport_h_px: u32, // 헤더 아래 카드가 흐르는 높이 — clip과 창 계산이 함께 쓴다
     visible: usize, // 보이는 카드 수(≤ total)
-    scrollable: bool, // total > visible — 스크롤바·휠 활성
+    scrollable: bool, // 카드 전체 높이 > 뷰포트 높이 — 스크롤바·휠 활성
 };
 
 /// 패널 레이아웃을 계산한다(폭·높이·스크롤 윈도우·위치 clamp). cell 0이면 null. anchor에서 시작하되 화면(backing)
@@ -516,7 +516,7 @@ fn appendCentered(l: Layout, arena: std.mem.Allocator, out: *std.ArrayList(draw.
 }
 
 /// 패널(배경 quad + 헤더 밴드 + 보이는 카드 윈도우 또는 빈 상태 일러스트 + 스크롤바)을 `out`에 append한다. 안 열렸으면
-/// 무동작. 카드가 화면을 넘으면 items[first..first+visible]만 그린다(카드 단위 스크롤). 순수: state·items·props·tokens만
+/// 무동작. 카드가 화면을 넘으면 items[first..first+visible]만 그린다(픽셀 offset — 첫 카드는 걸칠 수 있다). 순수: state·items·props·tokens만
 /// 읽는다. ops·runs는 호출자 frame arena 소유. 색: surface_bg(박스)·surface_fg(제목·살아있는 글자)·muted_fg(닫힌
 /// surface·시간·액션·부제·스크롤바)·tab_active_bg(선택행)·tab_hover_bg(호버행·액션 버튼 배경)·focus_accent(테두리·안읽음 점)·divider(구분선).
 pub fn view(
@@ -570,8 +570,8 @@ pub fn view(
     // 둥근 테두리(배경 quad corner_radii/border) 위로 1px 선이 겹쳐 보인다(리뷰 지적). gap이 있으면 surface_bg 여백 안에 떨어져 안전.
     const card_area_bottom = body_top + @as(i32, @intCast(l.viewport_h_px));
     const has_gap_below = card_area_bottom < rect.y + @as(i32, @intCast(rect.h));
-    // 카드가 픽셀로 흐른다(SV5a): 창 첫 카드는 `origin_shift_px`만큼 위로 밀려 부분만 보이고, 그 몫과
-    // 바닥에 걸친 카드는 이 clip이 자른다. clip은 **그리지 않으므로** 카드 op보다 먼저 한 번만 낸다.
+    // 카드가 픽셀로 흐른다(SV5a): 창 첫 카드는 `origin_shift_px`만큼 위로 밀려 부분만 보인다. 글자·강조는 아래
+    // `card_clip` 규칙이 행 단위로 거르고, 바닥에 걸친 행의 픽셀은 이 clip 이 자른다. clip은 **그리지 않으므로** 카드 op보다 먼저 한 번만 낸다.
     // 스크롤바 gutter를 **상시** 예약한다(SV5a-2). 막대가 공용 경로로 옮겨 오면서 8px pill이 됐는데,
     // 카드 밴드가 패널 폭을 다 먹으면 그 위를 덮어 **안 읽은 카드의 밝은 배경에 막대가 묻힌다**(실측).
     // 사이드바·팔레트가 세운 것과 같은 규율이고, 여기서도 밴드와 우측 요소가 이 폭 하나를 함께 쓴다.
@@ -592,7 +592,7 @@ pub fn view(
     // 글자를 버리는 판정은 이 필드를 본다(draw.zig `Text.clip` 주석이 그 계약이다). 두 채널을 혼동해
     // 이 필드를 안 실었더니 카드 글자가 패널 박스를 넘어 그대로 찍혔다.
     //
-    // 셀 단위라 origin이 밖이면 **행 통째로** 버린다 — 부분 행의 픽셀 잘림은 배경 quad가 담당한다.
+    // 셀 단위라 origin이 밖이면 **행 통째로** 버린다 — 부분 행의 픽셀 잘림은 위 프레임 `.clip`(셀 scissor)이 한다.
     const card_clip: ?draw.Rect = if (l.scrollable)
         .{ .x = rect.x, .y = body_top, .w = rect.w, .h = l.viewport_h_px }
     else
@@ -608,7 +608,22 @@ pub fn view(
         // 생략한다(같은 칸에 두 번 칠하지 않음). 두 강조의 rect는 role만 다르므로 역할만 고르고 fill은 한 번만 낸다(중복 제거).
         const bg_role: ?tokens.ColorRole = if (i == state.selected) .tab_active_bg else if (state.hovered == i) .tab_hover_bg else null;
         if (bg_role) |role| {
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = card_w, .h = l.card_h }, .role = role } });
+            if (card_clip) |clip| {
+                // **강조 배경은 글자와 같은 규칙으로 행마다 낸다.** `.fill` 은 clip 을 안 들고 셀 행 단위(`trunc(y/ch)`)로
+                // 내려가며, 카드 프레임 clip 은 패널 전체(헤더 포함)라 막지 못한다 — 카드 하나를 통째로 내면 위로 걸친
+                // 카드의 첫 행이 **헤더 행**으로 내림돼 헤더 한 줄이 카드색이 됐다(1px 만 밀려도, 2026-10-06 실측 ML3b).
+                // 뷰포트 사각형으로 자르는 것도 틀리다: 아래로 걸친 행은 글자가 남는데(origin 이 뷰포트 안) 잘린 배경의
+                // `trunc` 끝이 그 행을 빼 버린다. 그래서 글자가 행을 남기는 조건(`placeText` — 그 줄의 origin y 가
+                // `card_clip` 안)을 그대로 써서 제목줄·본문줄을 각각 한 행씩 칠한다 — 칠한 행 == 글자가 놓인 행.
+                // 줄 위치는 글자와 같다 — 제목줄(점·제목·시간)이 `card_y`, 본문줄(본문·✕)이 `card_y + ch`(카드 = `card_rows` 줄).
+                for (0..card_rows) |line| {
+                    const line_y = card_y + @as(i32, @intCast(line)) * ch;
+                    if (line_y < clip.y or line_y >= clip.y + @as(i32, @intCast(clip.h))) continue;
+                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = line_y, .w = card_w, .h = l.ch }, .role = role } });
+                }
+            } else {
+                try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = card_w, .h = l.card_h }, .role = role } });
+            }
         }
         // 제목줄: 안읽음 점(●) + 제목(말줄임) + 우측정렬 상대시간.
         if (!it.is_read) {
@@ -648,7 +663,26 @@ pub fn view(
         // 경계를 분명히 보이게 한다(사용자 피드백 — 예전엔 마지막 카드를 무조건 건너뛰었다). 마지막 카드 아래 선은 카드↔
         // 빈 여백 경계를 가르되, gap이 없으면(스크롤/딱 맞음) 패널 하단 테두리와 겹치므로 생략한다. `.rule`은 macOS no-op이라 `.fill`.
         if (vis + 1 < l.visible or has_gap_below) {
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = card_w, .h = 1 }, .role = .divider } });
+            if (card_clip) |clip| {
+                // **구분선은 두 카드의 글자 줄 사이에 긋는다 — 카드의 픽셀 바닥이 아니다.** 글자와 강조 배경은 셀 행으로
+                // 내려가(`trunc((y − rect.y)/ch)`) 카드가 `s` px 걸치면 행 경계에 붙는데, 1px 선은 GPU quad 라 픽셀
+                // 그대로 남아 **다음 카드 제목줄 안 `s − 1` px 자리**를 가로질렀다(「● Maru … 방금」 위 취소선, 2026-10-06
+                // 사용자 지적 — 전체 창 캡처). 그래서 다음 카드 제목줄이 놓일 행을 글자와 같은 식으로 구해 그 바로 위 픽셀에
+                // 긋는다(= 이 카드 본문줄 행의 바닥).
+                //
+                // 긋는 조건은 **선 위아래 두 줄이 다 놓일 때**다(글자 규칙 — origin 이 clip 안, `placeText`). 1px 선은 셀
+                // scissor 를 안 받아 아래 줄이 clip 밖인데 그으면 패널 **밖**에 그어졌고(아래로 걸친 카드, ML3b 적대적 검증),
+                // 경계에 딱 맞으면 내용 맨 아래 픽셀에 붙어 테두리와 이중선이 됐다. 위 줄(본문줄)은 clip 위끝이 헤더 바닥 =
+                // 행 경계라 「선이 clip 안」이면 놓여 있다 — 위로 지나간 카드의 선은 헤더 구분선 자리로 떨어져 여기서 걸러진다.
+                const next_title_y = card_y + card_h_i;
+                const next_row = @divFloor(next_title_y - rect.y, ch);
+                const divider_y = rect.y + next_row * ch - 1;
+                if (divider_y >= clip.y and next_title_y < clip.y + @as(i32, @intCast(clip.h)))
+                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = divider_y, .w = card_w, .h = 1 }, .role = .divider } });
+            } else {
+                // 스크롤이 없으면 카드가 행 경계에서 시작해(`origin_shift_px` 0, 헤더 = 행 정수배) 픽셀 바닥 = 행 바닥이다.
+                try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = card_w, .h = 1 }, .role = .divider } });
+            }
         }
     }
 }

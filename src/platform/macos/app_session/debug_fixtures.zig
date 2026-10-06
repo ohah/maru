@@ -707,6 +707,16 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             const k = std.fmt.parseInt(usize, std.mem.span(hv), 10) catch seed; // 비숫자 → seed(=범위 밖)로 무시
             if (k < seed) self.chrome_host.notifications.hovered = k;
         }
+        // MARU_NOTIF_SCROLL_PX=P — 카드 목록을 P backing 픽셀 내린 채로 연다(같은 하위 옵션). 카드 경계에 안 맞는 값이면
+        // 맨 위 카드가 **반쯤 걸친** 상태가 된다. 제품에서 그 상태는 휠·트랙패드(둘 다 카드 단위)가 아니라 목록 끝의 상한
+        // clamp·키보드 선택의 바닥 맞춤(`ensureSelectedVisible`)·창 크기 변경에서 생긴다 — 그것을 한 번에 세워 걸친 카드의
+        // 그리기(강조 배경이 헤더를 칠하던 ML3b 결함 등)를 스크린샷으로 self-verify 하는 debug-gate다. 그리기 상한은 view 가
+        // 깎는다(저장값은 그대로). 비숫자면 무시. 미설정이면 무동작.
+        if (std.c.getenv("MARU_NOTIF_SCROLL_PX")) |sv| {
+            if (std.fmt.parseInt(u32, std.mem.span(sv), 10)) |px| {
+                self.chrome_host.notifications.scroll.offset_y_px = px;
+            } else |_| {}
+        }
     }
     // MARU_OPEN_NOTIFICATIONS_EMPTY=1 — 알림 0개로 패널을 연다(빈 상태 일러스트: 아이콘+제목+부제를 헤드리스
     // 스크린샷으로 self-verify하는 debug-gate). MARU_OPEN_NOTIFICATIONS와 배타(둘 다면 위에서 이미 시드됨).

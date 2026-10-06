@@ -46,7 +46,10 @@ pub fn lower(
     var max_x: i32 = std.math.minInt(i32);
     var max_y: i32 = std.math.minInt(i32);
     var have_box = false;
+    // 프레임 clip(`.clip` op)이 있는가 — 있으면 격자를 그 clip 끝까지 **올림**으로 덮는다(아래 rows).
+    var frame_clip = false;
     for (draws) |d| for (d.ops) |op| {
+        if (op == .clip) frame_clip = true;
         const rect: ?chrome.draw.Rect = switch (op) {
             .fill => |f| f.rect,
             .border => |b| b.rect,
@@ -65,7 +68,12 @@ pub fn lower(
     const origin_x: u32 = if (min_x < 0) 0 else @intCast(min_x);
     const origin_y: u32 = if (min_y < 0) 0 else @intCast(min_y);
     const cols_u = @as(u32, @intCast(@max(max_x - min_x, 0))) / cw;
-    const rows_u = @as(u32, @intCast(@max(max_y - min_y, 0))) / ch;
+    // 행 수는 보통 내림이다(상자 밖으로 셀을 안 낸다). **프레임 clip 이 있으면 올림** — 그 overlay 는 마지막 걸친 행을
+    // clip 이 픽셀로 잘라 보이게 하는 계약이다(알림 패널: 뷰포트 바닥에 걸친 카드 줄, `docs/notifications.md`). 내림이면 그
+    // 행이 격자에 없어 글자가 통째로 사라졌다 — 예전엔 패널 밖에 잘못 그어지던 구분선이 상자를 우연히 늘려 줘서만 보였다.
+    // 넘친 몫은 같은 clip(셀 scissor, v169)이 자르므로 상자 밖에 그려지지 않는다.
+    const span_y: u32 = @intCast(@max(max_y - min_y, 0));
+    const rows_u = if (frame_clip) std.math.divCeil(u32, span_y, ch) catch unreachable else span_y / ch;
     if (cols_u == 0 or rows_u == 0) return error.TooSmall;
     const cols: u16 = @intCast(@min(cols_u, @as(u32, std.math.maxInt(u16))));
     const rows: u16 = @intCast(@min(rows_u, @as(u32, std.math.maxInt(u16))));
@@ -223,6 +231,9 @@ fn paintRectBg(bg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin
 fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, tk: *const chrome.Tokens) void {
     // 이 경로는 셀 격자에 찍으므로 부분 클립이 불가능하다. 대신 셀 단위로 판정한다 — 같은 행의 배경
     // quad는 GPU가 픽셀 단위로 자르는데 글자만 그대로 남으면 배경 반쪽에 글자가 떠 있는 그림이 된다.
+    // ⚠️ 이 남김/버림 규칙(origin 이 clip 안 · 행 = trunc)은 알림 패널의 강조 배경이 **그대로 따라 쓴다**
+    // (`components/notifications.zig` view — clip 이 없는 `.fill` 을 줄마다 같은 조건으로 낸다). 바꾸면 그쪽도
+    // 함께 — 판정자 「알림 패널: 걸친 카드의 강조 배경은 …」이 실제 배치된 글자 행과 비교해 어긋남을 잡는다.
     if (t.clip) |clip| {
         if (t.origin.y < clip.y or t.origin.y >= clip.y + @as(i32, @intCast(clip.h))) return;
         if (t.origin.x < clip.x or t.origin.x >= clip.x + @as(i32, @intCast(clip.w))) return;
@@ -331,4 +342,168 @@ test "EF31 independent find panels each retain their background and shadow" {
         try std.testing.expectEqual(raster.gpu_quads.items[0].h, raster.gpu_quads.items[1].h);
         try std.testing.expectEqual(@as(usize, 0), raster.cells.items.len);
     }
+}
+
+// ML3b 경계: 알림 패널을 스크롤해 카드가 뷰포트 경계(위·아래)에 걸치면, 그 카드의 강조 배경(선택·호버)은 **헤더와
+// 뷰포트 밖을 칠하지 않고**, 칠한 행은 그 카드의 글자가 놓인 행과 **같아야** 한다. `.fill` 은 셀 행 단위(`trunc`)로
+// 내려가고 카드 프레임 clip 은 패널 전체(헤더 포함)라, 컴포넌트가 배경을 글자와 같은 규칙(줄마다, origin 이 뷰포트
+// 안일 때만)으로 내지 않으면 위로 걸친 카드의 첫 행이 헤더 행으로 내림돼 헤더 한 줄이 통째로 카드색이 됐다(2026-10-06
+// 실측 — 1px 만 밀려도). 뷰포트 사각형으로 자르면 이번엔 아래로 걸친 줄의 배경이 빠진다. 제품과 같은 lowering 을 탄다.
+test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 칠하지 않고, 그 카드 글자가 놓인 행만 칠한다 (ML3b)" {
+    const notifications = chrome.components.notifications;
+    var pal = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 10, .g = 10, .b = 10 });
+    pal.set(.tab_active_bg, .{ .r = 200, .g = 0, .b = 0 });
+    pal.set(.tab_hover_bg, .{ .r = 0, .g = 200, .b = 0 });
+    const tk = chrome.Tokens{ .palette = pal };
+    const cw: u32 = 8;
+    const gutter_px: u32 = 24; // 카드 폭 < 패널 폭 — 강조가 gutter 까지 칠하면 잡힌다
+    // 넘치게 — 카드를 실제로 걸치게 하려면 스크롤 상한이 카드 한 장보다 커야 한다.
+    const count = 40;
+    // **카드마다 다른 글자**다(제목 U+0100+i, 본문 U+0180+i). 모두 같은 글자면 구분선이 «남의 카드» 본문 행 바닥에
+    // 있어도 통과한다. 출력 셀에서 카드별 제목·본문 행을 읽어 «선이 있어야 할 자리»를 제품 공식과 **따로** 구한다.
+    var title_utf8: [count][4]u8 = undefined;
+    var body_utf8: [count][4]u8 = undefined;
+    var title_len: [count]u3 = undefined;
+    var body_len: [count]u3 = undefined;
+    for (0..count) |i| {
+        title_len[i] = try std.unicode.utf8Encode(@intCast(0x100 + i), &title_utf8[i]);
+        body_len[i] = try std.unicode.utf8Encode(@intCast(0x180 + i), &body_utf8[i]);
+    }
+    // 경계마다 «그 카드 글자가 실제로 보인» 경우를 센다 — 둘 다 빈 집합이면 `lit == text` 는 그냥 참이다.
+    var seen_top: usize = 0;
+    var seen_bottom: usize = 0;
+    var dividers_checked: usize = 0;
+    // 기하를 바꿔 돈다 — 패널 y 가 0 이고 셀 높이·뷰포트가 한 가지면 «rect.y 를 빼먹은» 공식이나 바닥 경계 off-by-one 이
+    // 출력 바이트까지 같아 통과했다(적대적 검증). 제품 패널 y 는 `2ch + modal padding` 이라 행 배수가 아니다.
+    for ([_]u32{ 16, 17 }) |ch| for ([_]i32{ 0, 7 }) |anchor_y| for ([_]u32{ 300, 303, 305 }) |backing_h| {
+        const p = chrome.props.ChromeProps{ .metrics = .{ .cell_width_px = cw, .cell_height_px = ch, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = backing_h, .overlay_scroll_gutter_px = gutter_px } };
+        const card_px: u32 = 2 * ch;
+        var shift: u32 = 0;
+        while (shift < card_px) : (shift += 1) {
+            // 위(맨 위 카드)와 아래(맨 아래 카드) 경계를 따로 본다.
+            for ([_]bool{ true, false }) |top_edge| {
+                // 0 = 선택, 1 = 호버, 2 = 강조 없음(강조 fill 이 상자를 늘려 걸친 행을 «우연히» 살리는 일이 없는 경우 —
+                // 사용자가 가장 흔히 보는 상태다).
+                for ([_]u8{ 0, 1, 2 }) |mode| {
+                    var s: notifications.State = .{};
+                    var items_buf: [count]notifications.Item = undefined;
+                    for (&items_buf, 0..) |*it, i| it.* = .{ .title = title_utf8[i][0..title_len[i]], .body = body_utf8[i][0..body_len[i]], .relative_time = "now", .is_read = true, .is_alive = true };
+                    s.show(0, anchor_y, count);
+                    s.scroll.offset_y_px = card_px + shift;
+                    const sv = notifications.scrollView(&s, &items_buf, p) orelse return error.NotScrollable;
+                    try std.testing.expectEqual(card_px + shift, sv.offset_px); // 상한에 안 깎였다(전제)
+                    const target: usize = if (top_edge) 1 else (card_px + shift + sv.viewport.h - 1) / card_px; // 걸친 카드
+                    items_buf[target].title = "Q";
+                    items_buf[target].body = "W";
+                    s.selected = 0; // 화면 위로 지나간 카드 — 선택색이 다른 경우의 판정에 섞이지 않게
+                    switch (mode) {
+                        0 => s.selected = target,
+                        1 => s.hovered = target,
+                        else => {},
+                    }
+                    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+                    defer arena_state.deinit();
+                    var out: std.ArrayList(chrome.draw.Op) = .empty;
+                    try notifications.view(&s, &items_buf, p, &tk, arena_state.allocator(), &out);
+                    var raster = try lower(std.testing.allocator, &.{.{ .layer = .modal, .ops = out.items }}, &tk, cw, ch, false);
+                    defer {
+                        raster.cells.deinit(std.testing.allocator);
+                        raster.gpu_quads.deinit(std.testing.allocator);
+                        raster.gpu_shadows.deinit(std.testing.allocator);
+                    }
+                    try std.testing.expectEqual(@as(u32, @intCast(anchor_y)), raster.origin_y); // 격자 원점 = 패널 y(전제 — 행 배수가 아닐 수 있다)
+                    const ch_i: i32 = @intCast(ch);
+                    const ox: i32 = @intCast(raster.origin_x);
+                    const oy: i32 = @intCast(raster.origin_y);
+                    const vp_bottom = sv.viewport.y + @as(i32, @intCast(sv.viewport.h));
+                    const first_row = @divTrunc(sv.viewport.y - oy, ch_i); // 헤더 바로 아래 행
+                    const end_row = @divTrunc(vp_bottom - oy, ch_i);
+                    var lit_rows = std.StaticBitSet(64).initEmpty();
+                    var text_rows = std.StaticBitSet(64).initEmpty();
+                    // 카드별로 출력에 실제로 놓인 제목·본문 행(없으면 null).
+                    var title_row: [count]?u16 = @splat(null);
+                    var body_row: [count]?u16 = @splat(null);
+                    for (raster.cells.items) |c| {
+                        const bg = c.style.background;
+                        const lit = bg == .rgb and bg.rgb.b == 0 and (bg.rgb.r == 200 or bg.rgb.g == 200);
+                        if (lit) {
+                            try std.testing.expect(@as(i32, c.row) >= first_row); // 헤더를 칠하지 않는다
+                            try std.testing.expect(@as(i32, c.row) <= end_row); // 뷰포트 아래로 안 나간다
+                            // gutter(스크롤바 자리)를 칠하지 않는다 — 카드 폭은 패널 폭에서 gutter 를 뺀 것 이하다.
+                            try std.testing.expect(ox + (@as(i32, c.col) + 1) * @as(i32, @intCast(cw)) <= sv.viewport.x + @as(i32, @intCast(sv.viewport.w - gutter_px)));
+                            lit_rows.set(c.row);
+                        }
+                        switch (c.codepoint) {
+                            'Q' => {
+                                text_rows.set(c.row);
+                                title_row[target] = c.row;
+                            },
+                            'W' => {
+                                text_rows.set(c.row);
+                                body_row[target] = c.row;
+                            },
+                            0x100...0x100 + count - 1 => title_row[c.codepoint - 0x100] = c.row,
+                            0x180...0x180 + count - 1 => body_row[c.codepoint - 0x180] = c.row,
+                            else => {},
+                        }
+                    }
+                    // 칠한 행 == 그 카드 글자가 놓인 행(둘 다 같은 뷰포트로 잘린다). 걸친 몫이 셀보다 작아 글자가
+                    // 하나도 안 남으면 칠한 행도 없다.
+                    if (mode == 2) {
+                        try std.testing.expectEqual(@as(usize, 0), lit_rows.count()); // 강조 없음
+                    } else try std.testing.expect(lit_rows.eql(text_rows));
+                    // 뷰포트 안에 origin 이 있는 그 카드의 줄은 **실제로 그려진다** — 바닥에 걸친 반쪽 줄 포함(프레임 clip 이
+                    // 픽셀로 자른다). 격자가 그 행을 안 덮으면 글자가 통째로 사라진다.
+                    {
+                        const card_y: i32 = sv.viewport.y + @as(i32, @intCast(target * card_px)) - @as(i32, @intCast(card_px + shift));
+                        var expected: usize = 0;
+                        for ([_]i32{ card_y, card_y + ch_i }) |line_y| {
+                            if (line_y >= sv.viewport.y and line_y < vp_bottom) expected += 1;
+                        }
+                        try std.testing.expectEqual(expected, text_rows.count());
+                    }
+                    // 카드 구분선(1px GPU quad — 셀 scissor 를 안 받는다)은 **두 카드의 글자 줄 사이에, 정확히 하나씩**
+                    // 그어진다: 카드 i 의 본문 행과 카드 i+1 의 제목 행이 **둘 다** 출력에 놓였으면 그 사이 픽셀(제목 행 바로 위)에.
+                    // 기대 집합은 제품 공식이 아니라 출력 셀에서 구한다. 예전엔 선이 카드 픽셀 바닥이라 걸친 만큼 제목줄을
+                    // 가로질렀고(2026-10-06 사용자 지적, 「● Maru」 취소선), 아래 줄이 뷰포트 밖이면 패널 밖·바닥 테두리에 붙었다.
+                    var expected_lines: [count]i32 = undefined;
+                    var expected_n: usize = 0;
+                    for (0..count - 1) |i| {
+                        const b = body_row[i] orelse continue;
+                        const t = title_row[i + 1] orelse continue;
+                        try std.testing.expectEqual(b + 1, t); // 줄이 행에 빈틈없이 놓인다(전제)
+                        expected_lines[expected_n] = oy + @as(i32, t) * ch_i - 1;
+                        expected_n += 1;
+                    }
+                    var actual_lines: [count]i32 = undefined;
+                    var actual_n: usize = 0;
+                    var header_lines: usize = 0;
+                    for (raster.gpu_quads.items) |q| {
+                        if (q.h != 1) continue;
+                        const qy: i32 = @intFromFloat(q.y);
+                        if (qy == sv.viewport.y - 1) { // 헤더 구분선 — 위로 지나간 카드의 선이 이 자리에 겹쳐 그어지면 안 된다
+                            header_lines += 1;
+                            continue;
+                        }
+                        try std.testing.expect(qy >= sv.viewport.y and qy < vp_bottom); // 뷰포트 안
+                        if (actual_n == count) return error.TooManyDividers;
+                        actual_lines[actual_n] = qy;
+                        actual_n += 1;
+                    }
+                    try std.testing.expectEqual(@as(usize, 1), header_lines);
+                    std.mem.sort(i32, actual_lines[0..actual_n], {}, std.sort.asc(i32));
+                    try std.testing.expectEqualSlices(i32, expected_lines[0..expected_n], actual_lines[0..actual_n]);
+                    dividers_checked += expected_n;
+                    if (text_rows.count() > 0) {
+                        if (top_edge) seen_top += 1 else seen_bottom += 1;
+                    }
+                }
+            }
+        }
+    };
+    // 기하 12 가지 × 위 걸침이 글자를 남기는 걸침(0..ch) × 선택/호버/없음 — 대략 12 × 17 × 3.
+    try std.testing.expect(seen_top >= 12 * 16 * 3);
+    try std.testing.expect(seen_bottom >= 12 * 32 * 3); // 아래 경계 카드는 늘 무언가 보인다
+    // 화면마다 카드 사이 선이 여러 개 실제로 있었다(빈 집합이면 위 집합 비교는 공짜다).
+    try std.testing.expect(dividers_checked >= 12 * 32 * 2 * 3 * 5);
 }

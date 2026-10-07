@@ -2952,7 +2952,10 @@ test "번역 틀의 중괄호는 전부 `format` 의 `{0}` 꼴이다 — 숫자�
             const v: []const u8 = @field(tbl, f.name);
             var i: usize = 0;
             while (std.mem.indexOfScalarPos(u8, v, i, '{')) |open| {
-                const close = std.mem.indexOfScalarPos(u8, v, open, '}') orelse break;
+                const close = std.mem.indexOfScalarPos(u8, v, open, '}') orelse {
+                    std.debug.print("닫히지 않은 중괄호: .{s} = \"{s}\"\n", .{ f.name, v });
+                    return error.TestUnexpectedResult; // `format` 은 `{0` 을 원문으로 남기고 값을 빠뜨린다
+                };
                 const inner = v[open + 1 .. close];
                 _ = std.fmt.parseInt(usize, inner, 10) catch {
                     std.debug.print("자리표시자 모양: .{s} = \"{s}\" — `{{{s}}}` 대신 `{{0}}` 꼴을 쓴다\n", .{ f.name, v, inner });

@@ -916,8 +916,9 @@ pub fn noteEdited(term: *Term) void {
 }
 
 /// 상태바 문구(§8.2a) — phase 마다 하나. 보간은 i18n §6.3 진입점 `i18n.format` 하나다. 넘치면 `format` 이 「…」로 자른다(서버
-/// 이름은 고정 표 `session/lsp/servers.zig` 의 짧은 이름이다).
-pub fn statusText(view: StatusView, buf: []u8) []const u8 {
+/// 이름은 고정 표 `session/lsp/servers.zig` 의 짧은 이름이다). 버퍼는 `status_text_cap` 로 **타입에 박는다** — 부르는 쪽이 다른 크기를
+/// 쓰면 컴파일되지 않아, 판정자(LSPB10)가 잰 크기가 곧 제품 크기다.
+pub fn statusText(view: StatusView, buf: *[status_text_cap]u8) []const u8 {
     const key: maru.i18n.Key = switch (view.phase) {
         .missing => .lsp_status_missing,
         .asking => .lsp_status_asking,
@@ -933,6 +934,9 @@ pub fn statusText(view: StatusView, buf: []u8) []const u8 {
 // ── 상태바·클릭 ───────────────────────────────────────────────────────────────
 
 pub const StatusView = struct { phase: Phase, exe: []const u8 };
+
+/// 상태바 문구 버퍼 크기 — `statusText` 의 인자 타입이다(상태바·판정자가 같은 크기를 쓸 수밖에 없다).
+pub const status_text_cap = 128;
 
 /// 활성 편집기 Term 의 서버 상태(상태바 항목 — §8.2a). 서버 이름표가 없거나 root 밖이면 `null`(항목 없음).
 pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {

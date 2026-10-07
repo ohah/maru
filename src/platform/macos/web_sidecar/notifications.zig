@@ -34,8 +34,8 @@ const BrowserId = message.BrowserId;
 /// `showNotification` 이 권한이 있을 때 돌려준 Promise 의 `constructor` 를 읽고(then 의 species), 누르기 이벤트는 `isTrusted`
 /// 가 false 다.
 ///
-/// 제안 목록(W6m① — `datalist.script_part`)도 이 스크립트 안에서 돈다 — 숨긴 `send` 를 꺼내 지우는 것은 한 번뿐이라 둘이 같은
-/// `send` 를 나눠 쓴다(알림은 `Notification` 이 없는 문서 — secure context 가 아닌 http — 에서 빠지고, 제안 목록은 그래도 돈다).
+/// 제안 목록(W6m)은 여기 없다 — 렌더러가 주 프레임 문서가 생길 때 직접 돌린다(`renderer.runDatalistScript` — 이 스크립트는 새
+/// 탭의 첫 문서에 빠질 수 있다).
 const proxy_script = "(function(){var send=window." ++ renderer.stash_name ++ ";try{delete window." ++ renderer.stash_name ++ "}catch(e){}" ++
     "if(typeof send!=='function')return;" ++
     "(function(){var N=window.Notification;if(typeof N!=='function')return;" ++
@@ -50,7 +50,7 @@ const proxy_script = "(function(){var send=window." ++ renderer.stash_name ++ ";
     "SP.showNotification=new Proxy(SP.showNotification,{__proto__:null,apply:function(f,self,a){var r=A(f,self,a);" ++
     "try{if(ok())A(T,r,[function(){relay(a[0],a[1],0)},function(){}])}catch(e){}return r}})}" ++
     "send(function(n){var x=live[n];if(x)try{A(D,x,[new E('click')])}catch(e){}})})();" ++
-    datalist.script_part ++ "})()";
+    "})()";
 
 comptime {
     @setEvalBranchQuota(100_000);

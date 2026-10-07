@@ -461,6 +461,12 @@ pub fn tickWebOsr(self: *AppSession) void {
     // 글이 안 왔으면 조합을 그대로 확정한다.
     syncOsrKeyTarget(self);
     if (self.osr_key_target != 0 and self.osr_ime_surface == 0) flushUnmark(self, self.osr_key_target);
+    // W6m②: 키 대상 탭의 제안 목록이 바뀌었으면(열림·닫힘·새 목록) 오버레이를 다시 짠다.
+    const dl_seen = [2]u64{ self.osr_key_target, if (self.osr_key_target != 0) web_osr.datalistGeneration(self.osr_key_target) else 0 };
+    if (dl_seen[0] != self.osr_datalist_seen[0] or dl_seen[1] != self.osr_datalist_seen[1]) {
+        self.osr_datalist_seen = dl_seen;
+        self.metal_dirty = true;
+    }
     // W4b: hover 중인 탭의 커서가 바뀌었으면(페이지는 이동을 처리한 **뒤** 커서를 알린다) Swift 가 포인터를 다시 움직이지
     // 않아도 바꾸게 세운다 — 안 그러면 멈춘 자리의 커서가 한 박자 전 것으로 남는다.
     if (self.osr_hover_surface != 0) {

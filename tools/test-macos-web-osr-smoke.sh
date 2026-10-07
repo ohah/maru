@@ -1236,14 +1236,20 @@ for y in range(0, h, 2):
         if i % 3 == 0: xs.append(i // 3); ys.append(y)
         i = row.find(red, i + 3)
 if not xs: print('FAIL no red field in the screenshot'); sys.exit(1)
+# 목록은 칸 왼쪽 끝 아래에 글 너비만큼 뜬다(칸보다 좁다 — Chrome 과 같다) — 칸 왼쪽 아래 작은 상자를 잰다. 칸 아래 멀리(목록
+# 밖)는 초록이어야 한다(목록이 칸 전체를 덮는 등 엉뚱한 자리에 그리지 않았다).
 x0, x1, y1 = min(xs) + 4, max(xs) - 4, max(ys)
-total = other = 0
-for y in range(y1 + 4, min(h, y1 + 4 + 60)):
-    for x in range(x0, x1):
-        total += 1
-        if px[(y * w + x) * 3:(y * w + x) * 3 + 3] != green: other += 1
-ok = total > 0 and other / total > 0.3
-print(('PASS ' if ok else 'FAIL ') + f'the suggestions are drawn under the field (non-page pixels in the band below {other}/{total})')
+def ratio(ax, bx, ay, by):
+    total = other = 0
+    for y in range(ay, min(h, by)):
+        for x in range(ax, bx):
+            total += 1
+            if px[(y * w + x) * 3:(y * w + x) * 3 + 3] != green: other += 1
+    return other / max(total, 1)
+near = ratio(x0, x0 + 50, y1 + 16, y1 + 70)
+far = ratio(x1 - 60, x1, y1 + 16, y1 + 70)
+ok = near > 0.6 and far < 0.05
+print(('PASS ' if ok else 'FAIL ') + f'the suggestions are drawn under the left of the field (list box {near:.2f} drawn · beyond its width {far:.2f})')
 sys.exit(0 if ok else 1)
 PY
 : > "$root/requests.log"

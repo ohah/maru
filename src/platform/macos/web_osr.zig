@@ -2228,6 +2228,12 @@ fn dropDatalist(gpa: std.mem.Allocator, s: *Surface) void {
     s.popup_redraw = true;
 }
 
+/// 이 탭의 제안 목록 세대(W6m② — 열림·닫힘·새 목록마다 오른다, 닫혀 있어도 읽는다).
+pub fn datalistGeneration(surface_id: u64) u32 {
+    const s = surfaces.getPtr(surface_id) orelse return 0;
+    return s.datalist_generation;
+}
+
 /// 이 탭의 지금 제안 목록과 세대(W6m②).
 pub fn datalist(surface_id: u64) ?struct { d: *const Datalist, generation: u32 } {
     const s = surfaces.getPtr(surface_id) orelse return null;

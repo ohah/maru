@@ -21,6 +21,7 @@ const std = @import("std");
 const c = @import("cef.zig").c;
 const object = @import("object.zig");
 const library = @import("library.zig");
+const datalist_page = @import("datalist_page.zig");
 
 pub const notify_message = "maru.notify";
 pub const click_message = "maru.notify.click";
@@ -156,6 +157,36 @@ fn onContextCreated(_: [*c]c.cef_render_process_handler_t, browser: [*c]c.cef_br
     if (send_fn == null) return;
     // 넘긴 값의 참조는 CEF 로 옮겨 간다. 지울 수 있게(대리 스크립트가 `delete`) DONTDELETE 는 주지 않는다.
     _ = global.*.set_value_bykey.?(global, &name, send_fn, c.V8_PROPERTY_ATTRIBUTE_DONTENUM);
+    // W6m②: 제안 목록 대리 스크립트는 여기서 — 주 프레임 문서가 생길 때, 페이지 스크립트보다 먼저 — 돌린다. DevTools 로 넣는
+    // 알림 스크립트는 브라우저를 만든 뒤에야 등록할 수 있어 새 탭의 첫 문서가 그보다 먼저 커밋되면 빠진다(앱의 첫 문서가 그
+    // 경쟁에 져 목록이 오지 않았다 — 실측). 제안 목록은 표준 DOM 만 쓰므로 이 시점에 돌 수 있다(알림은 secure context 의 API 가
+    // 이 뒤에 설치돼 여기서는 감쌀 수 없다). `send` 는 전역에 두지 않고 인자로 넘긴다.
+    if (frame.*.is_main.?(frame) != 0) runDatalistScript(context);
+}
+
+const datalist_wrapper = "(function(send){" ++ datalist_page.script_part ++ "})";
+
+fn runDatalistScript(context: [*c]c.cef_v8_context_t) void {
+    const api = api_ref.?;
+    var code = std.mem.zeroes(c.cef_string_t);
+    setString(&code, datalist_wrapper);
+    defer api.string_utf16_clear(&code);
+    var script_url = std.mem.zeroes(c.cef_string_t);
+    var fn_value: [*c]c.cef_v8_value_t = null;
+    var exception: [*c]c.cef_v8_exception_t = null;
+    const ok = context.*.eval.?(context, &code, &script_url, 0, &fn_value, &exception);
+    if (exception != null) object.release(exception);
+    if (ok == 0 or fn_value == null) return;
+    defer object.release(fn_value);
+    if (fn_value.*.is_function.?(fn_value) == 0) return;
+    var name = std.mem.zeroes(c.cef_string_t);
+    setString(&name, "send");
+    defer api.string_utf16_clear(&name);
+    // 넘긴 인자의 참조는 CEF 로 옮겨 간다(누르기 경로와 같다).
+    const send_fn = api.v8_value_create_function(&name, &send_handler) orelse return;
+    const args = [_][*c]c.cef_v8_value_t{send_fn};
+    const result = fn_value.*.execute_function.?(fn_value, null, 1, &args);
+    if (result != null) object.release(result);
 }
 
 /// 대리 스크립트가 돌 문서인가 — 부모를 따라 주 프레임까지 이 프로세스에서 이어지고(CEF 는 부모가 다른 프로세스면 null 을

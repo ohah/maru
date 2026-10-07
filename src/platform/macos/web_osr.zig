@@ -537,6 +537,15 @@ test "datalist is owned per surface, replaced by a newer list, closed only by it
     try std.testing.expect(datalist(7) == null);
 }
 
+test "a page click inside the datalist field keeps the list, outside closes it (W6m②)" {
+    const r: ws.message.Rect = .{ .x = 10, .y = 20, .width = 100, .height = 30 };
+    try std.testing.expect(pointInRect(.{ .x = 10, .y = 20 }, r));
+    try std.testing.expect(pointInRect(.{ .x = 109, .y = 49 }, r));
+    try std.testing.expect(!pointInRect(.{ .x = 110, .y = 20 }, r));
+    try std.testing.expect(!pointInRect(.{ .x = 10, .y = 50 }, r));
+    try std.testing.expect(!pointInRect(.{ .x = 9, .y = 30 }, r));
+}
+
 test "tooltip text is owned per surface, cleared by an empty text, and each change bumps the generation (W6b)" {
     const gpa = std.testing.allocator;
     var s: Surface = .{ .record = .{ .surface_id = 1, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false } };
@@ -1091,9 +1100,10 @@ pub fn sendInput(gpa: std.mem.Allocator, message: Message) bool {
         .mouse => |m| if (m.kind == .down) {
             s.new_tab_credits.grant(monotonicNow());
             s.last_user_input_ms = monotonicNow();
-            // W6m②: 본문 누름은 열린 제안 목록을 닫는다(Chrome 도 팝업 밖 누름에 닫는다) — 대리 스크립트의 닫기에만 기대면 그
-            // 처리기를 지운 페이지(`document.open`)의 목록이 남았다(적대 검증 4 차). 칸을 누른 것이면 페이지가 다시 보낸다.
-            dropDatalist(gpa, s);
+            // W6m②: 칸 밖 본문 누름은 열린 제안 목록을 닫는다(Chrome 도 팝업 밖 누름에 닫는다) — 대리 스크립트의 닫기에만 기대면
+            // 그 처리기를 지운 페이지(`document.open`)의 목록이 남았다(적대 검증 4 차). 칸 안은 두다 — 닫으면 페이지가 다시 보낼
+            // 때까지 창이 숨었다 뜨며 깜빡였다(5 차).
+            if (s.datalist) |d| if (!pointInRect(m.point, d.field)) dropDatalist(gpa, s);
         },
         .key => |k| {
             s.last_user_input_ms = monotonicNow();
@@ -1765,6 +1775,7 @@ pub fn dragDrop(gpa: std.mem.Allocator, surface_id: u64, point: ws.message.Point
     const s = surfaces.getPtr(surface_id) orelse return false;
     if (!s.drag_entered) return false;
     forgetDrag(s);
+    s.last_user_input_ms = monotonicNow(); // W6m②: 놓은 글의 `input` 에 따른 제안 목록도 받는다(적대 검증 5 차)
     send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .drop, .point = point, .modifiers = modifiers } });
     return true;
 }
@@ -1989,7 +2000,10 @@ pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, com
     const m = s.context_menu orelse return;
     // 띄운 그 메뉴에만 답한다 — sidecar 를 다시 띄운 뒤 같은 번호의 새(아직 안 띄운) 메뉴에 옛 창의 늦은 답이 가지 않게(W6c② 적대 검증).
     if (m.menu != menu or !m.shown) return;
-    if (!m.closed) send(gpa, .{ .context_menu_command = .{ .browser = surface_id, .menu = menu, .command = command } });
+    if (!m.closed) {
+        s.last_user_input_ms = monotonicNow(); // W6m②: 메뉴의 붙여넣기·맞춤법 교정이 낸 `input` 의 제안 목록도 받는다(적대 검증 5 차)
+        send(gpa, .{ .context_menu_command = .{ .browser = surface_id, .menu = menu, .command = command } });
+    }
     // 사용자가 메뉴에서 골랐다(W6e·W6h①) — 그 답이 부를 `open_tab` 하나를 받는다.
     // 그 메뉴가 보인 대로 할 수 있는 명령에만(심층 방어 — 꺼진 항목은 Swift 에서 고를 수 없다, W6h② 적대 검증 3 회차).
     if (!m.closed and ws.message.contextMenuAllows(m.flags, command)) switch (command) {
@@ -2236,6 +2250,12 @@ pub const Datalist = struct {
 };
 
 const datalist_user_window_ms = 1000;
+
+fn pointInRect(p: ws.message.Point, r: ws.message.Rect) bool {
+    const px: i64 = p.x;
+    const py: i64 = p.y;
+    return px >= r.x and py >= r.y and px < @as(i64, r.x) + r.width and py < @as(i64, r.y) + r.height;
+}
 
 fn setDatalist(gpa: std.mem.Allocator, s: *Surface, v: ws.message.DatalistShow) void {
     dropDatalist(gpa, s);

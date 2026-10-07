@@ -22,6 +22,7 @@ pub fn main(init: std.process.Init) !void {
         for (models.items) |*captured| captured.deinit(a);
         models.deinit(a);
     }
+    var execution_ms: i64 = 10_000;
     var mutate = false;
     var stale = false;
     var includes: std.ArrayList([]const u8) = .empty;
@@ -38,6 +39,12 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= argv.len) return error.MissingGlob;
             if (include) try includes.append(a, argv[i]) else try excludes.append(a, argv[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, argv[i], "--execution-ms")) {
+            i += 1;
+            if (i >= argv.len) return error.Arguments;
+            execution_ms = try std.fmt.parseInt(i64, argv[i], 10);
             continue;
         }
         if (std.mem.eql(u8, argv[i], "--glob-case")) {
@@ -81,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     var backend: api.Backend = .{ .a = a, .io = init.io };
     defer backend.deinit();
     const started = std.Io.Timestamp.now(init.io, .awake);
-    const budget: api.Budget = .{ .timing = .{ .execution_ms = 10_000, .reap_ms = 1000 }, .snapshot_bytes = 64 * 1024 * 1024, .preview_bytes = 256 };
+    const budget: api.Budget = .{ .timing = .{ .execution_ms = execution_ms, .reap_ms = 1000 }, .snapshot_bytes = 64 * 1024 * 1024, .preview_bytes = 256 };
     if (std.mem.eql(u8, argv[1], "@bundle")) {
         try backend.startBundled(argv[2], argv[3], opts, &state, &models, budget);
     } else try backend.start(argv[1], argv[2], argv[3], opts, &state, &models, budget);

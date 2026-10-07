@@ -62,11 +62,12 @@ try:
     rows,s=run('immutable-model-after-edit',root,'changed-after-capture',occupied=('--mutate','--model','a.txt','foo'))
     assert s['status']=='complete' and s['matches']==0
     scope=out/'scope';scope.mkdir()
-    names=['src/a.zig','src/deep/b.zig','other/c.zig','src/a.txt','src/b.txt','src/c.txt','top.zig','a.zig/inside.txt','a[0].txt','axb.txt','src/a/deep/b.txt','a.txt','b.txt','n.txt','t.txt','f.txt','r.txt','v.txt','dir/a.txt','deep/dir/a.txt','汉.txt','😀.txt']
+    names=['src/a.zig','src/deep/b.zig','other/c.zig','src/a.txt','src/b.txt','src/c.txt','top.zig','a.zig/inside.txt','a[0].txt','axb.txt','src/a/deep/b.txt','a.txt','b.txt','n.txt','t.txt','f.txt','r.txt','v.txt','dir/a.txt','deep/dir/a.txt','汉.txt','😀.txt','a/b/c.txt','a].txt',r'\.txt',r'\a].txt','-.txt','].txt']
     for name in names:
         file=scope/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text('foo\n')
     glob_cases=[['--include','**b.txt'],['--include','src/**b.txt'],['--include','**/b.txt'],['--include','{src,other}/**/*.zig'],['--include','**/*.{zig,txt}'],['--include','**/{a,b}.txt'],['--include','[^a]*.txt'],['--include','src/[!c].txt'],['--include','[[]*.txt'],['--include',r'\axb.txt'],['--include','src/a**b.txt'],['--include','src/*.zig'],['--include','src'],['--include','**/*.zig'],['--include','src/{a,b}.txt'],['--include','src/[ab].txt'],['--exclude','src/**'],['--include','src/**','--exclude','src/deep/**'],['--include',r'a\[0\].txt'],['--include','SRC/*.ZIG','--glob-case']]
     glob_cases += [['--include',pattern] for pattern in [r'[\a].txt',r'[\b].txt',r'[\n].txt',r'[\t].txt',r'[\f].txt',r'[\r].txt',r'[\v].txt','{**/a.txt,b.txt}','**/{**/a.txt,b.txt}','[😀汉].txt','**/?.txt']]
+    glob_cases += [['--include',pattern] for pattern in ['**/{a/**,dir/**}','{,dir/}a.txt',r'[\-a].txt',r'[\]a].txt','{a.txt,}','{,}','{**/a.txt,{,dir/**}}']]
     for n,flags in enumerate(glob_cases):
         disk,ds=run(f'glob-disk-{n}',scope,'foo',occupied=flags)
         models=[]
@@ -124,6 +125,19 @@ try:
         assert s['status']==status and s['failure']==failure,(name,s)
     rg=Path('/usr/bin/true')
     rows,s=run('empty-success-output-rejected',root,'foo');assert s['status']=='failed' and s['failure']=='IncompleteOutput'
+    sleepy=out/'deadline-helper';sleepy.write_text('#!/usr/bin/python3\nimport json,time\nprint('+repr(summary_line)+',flush=True)\ntime.sleep(5)\n');sleepy.chmod(0o755);rg=sleepy
+    rows,s=run('execution-deadline',root,'foo',occupied=('--execution-ms','100'))
+    assert s['status']=='partial' and s['failure'] is None and s['stats']['elapsed_ms']<1000
+    hostile_more=[
+        ('empty-exit-one','sys.exit(1)',-1,'failed','IncompleteOutput'),
+        ('truncated-eof','sys.stdout.write(\'{"type":"summary"\');sys.stdout.flush()',-1,'failed','IncompleteEvent'),
+        ('stderr-flood',f'os.write(2,b"x"*1048576)\nprint({summary_line!r},flush=True)',-1,'complete',None),
+        ('continuous-stdout','while True: os.write(1,b\'{"type":"begin"}\\n\'*100)',100,'cancelled',None),
+    ]
+    for name,body,cancel,status,failure in hostile_more:
+        fake=out/(name+'-helper');fake.write_text('#!/usr/bin/python3\nimport sys,time,os\n'+body+'\n');fake.chmod(0o755);rg=fake
+        rows,s=run(name,root,'foo',cancel=cancel)
+        assert s['status']==status and s['failure']==failure,(name,s)
     rg=original_rg
     report['status']='passed'  
 except Exception as e:

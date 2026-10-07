@@ -6539,6 +6539,28 @@ pub fn build(b: *std.Build) void {
     reconnect_failure_log_step.dependOn(&run_failure_log_wiring.step);
     boundary_step.dependOn(reconnect_failure_log_step);
 
+    // 재접속 job 을 **언제 다시 시도하나**(2026-10-04·10-07: 잠자기 뒤 첫 시도가 `deadline_exceeded` 로 끝나면 재시도도
+    // 데드라인 갱신도 없어 앱을 다시 띄울 때까지 GUI 가 안 붙었다). 대기·새 데드라인 값은 std-only leaf 라 PR 에서 돈다.
+    const reconnect_retry_policy_step = b.step(
+        "test-reconnect-retry-policy",
+        "Requeued reconnect jobs back off and carry a fresh connect deadline",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |retry_policy_optimize| {
+        const retry_policy_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_retry_policy.zig"),
+                .target = target,
+                .optimize = retry_policy_optimize,
+            }),
+            .filters = &.{"재접속 재시도 정책"},
+        });
+        const run_retry_policy_tests = b.addRunArtifact(retry_policy_tests);
+        run_retry_policy_tests.addArg("--maru-expect-tests=4");
+        run_retry_policy_tests.addArg("--maru-expect-passed=4");
+        reconnect_retry_policy_step.dependOn(&run_retry_policy_tests.step);
+    }
+    boundary_step.dependOn(reconnect_retry_policy_step);
+
     // 재접속이 attachment 를 **얼린 동안** payload 에 닿는 자리가 모두 관문을 지나는가(2026-10-05: frame_malformed
     // poison → 재접속 → 같은 프레임의 창 drain 이 `retirement_prepared` 세대의 payload 를 읽다 앱이 abort 했다).
     // 판정은 std-only leaf 라 PR 에서 돌고, 관문이 payload 읽기 앞에 있는지는 wiring 경계가 잰다.
@@ -9161,7 +9183,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR6e-c1"},
         });
         const run_reconnect_worker_owner_tests = b.addRunArtifact(reconnect_worker_owner_tests);
-        run_reconnect_worker_owner_tests.addArg("--maru-expect-tests=13");
+        run_reconnect_worker_owner_tests.addArg("--maru-expect-tests=14");
         session_host_reconnect_worker_owner_step.dependOn(&run_reconnect_worker_owner_tests.step);
 
         const reconnect_worker_owner_boundary_tests = addProjectTest(b, .{

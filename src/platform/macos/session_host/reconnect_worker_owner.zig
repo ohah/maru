@@ -80,6 +80,8 @@ const Slot = struct {
     outcome: Outcome = .cancelled,
     coalesced_incidents: u32 = 0,
     cancel_requested: bool = false,
+    /// 다시 넣은 job 은 이 시각(awake ns) 전에는 claim 되지 않는다(`deferQueued`). 0 은 「바로」.
+    not_before_ns: i128 = 0,
 };
 
 pub const Owner = struct {
@@ -174,9 +176,15 @@ pub const Owner = struct {
     }
 
     pub fn claim(self: *Owner, out: *JobReceipt) !void {
+        return self.claimReady(out, std.math.maxInt(i128));
+    }
+
+    /// `claim` 과 같되 대기 중(`not_before_ns > now_ns`)인 job 은 건너뛴다. 대기하는 host 하나가 다른 host 의 새
+    /// job 을 막지 않도록 slot 마다 따진다.
+    pub fn claimReady(self: *Owner, out: *JobReceipt, now_ns: i128) !void {
         try self.validate();
         if (!std.meta.eql(out.*, JobReceipt{})) return error.InvalidReceipt;
-        for (&self.slots, 0..) |*slot, index| if (slot.state == .queued) {
+        for (&self.slots, 0..) |*slot, index| if (slot.state == .queued and slot.not_before_ns <= now_ns) {
             slot.state = .running;
             out.* = .{
                 .self_addr = @intFromPtr(out),
@@ -202,6 +210,18 @@ pub const Owner = struct {
         slot.outcome = if (slot.cancel_requested) .cancelled else outcome;
         slot.state = .completed;
         receipt.lifecycle = .consumed;
+    }
+
+    /// 방금 다시 넣은(아직 아무도 합류하지 않은) queued job 을 `not_before_ns` 까지 미룬다. 재시도 간격은
+    /// `reconnect_retry_policy.zig` 가 정한다 — 이 없이 다시 넣으면 매 frame 재시도가 돈다.
+    pub fn deferQueued(self: *Owner, key: Key, snapshot: Snapshot, not_before_ns: i128) !void {
+        try self.validate();
+        if (key.slot >= max_jobs) return error.StaleReceipt;
+        const slot = &self.slots[key.slot];
+        if (slot.state != .queued or slot.generation != key.generation or
+            slot.coalesced_incidents != 1 or !std.meta.eql(slot.snapshot, snapshot))
+            return error.StaleReceipt;
+        slot.not_before_ns = not_before_ns;
     }
 
     /// Physical-lane submission is the only fallible suffix after claim. Returning that exact
@@ -368,6 +388,54 @@ test "CR6e-c1 reconnect worker owner admits claims settles and consumes exact on
     try std.testing.expectEqual(Outcome.connected, completion.outcome);
     try owner.consumeCompletion(&completion);
     try std.testing.expectError(error.InvalidReceipt, owner.consumeCompletion(&completion));
+    try std.testing.expectEqual(@as(usize, 0), try owner.activeCount());
+}
+
+// 재시도 간격(2026-10-07): 다시 넣은 job 은 정해진 시각 전에는 worker 로 안 간다. 그 대기가 **다른 host** 의 새 job 을
+// 막으면 안 되고, Quit 취소는 대기 중인 job 도 바로 끝내야 한다.
+test "CR6e-c1 deferred retry is claimed only after its time and never blocks another host" {
+    var owner: Owner = .{};
+    try owner.initInPlace(9);
+    const retry = fixture(1, 1);
+    const key = switch (try owner.admit(retry)) {
+        .admitted => |value| value,
+        .coalesced => return error.TestUnexpectedResult,
+    };
+    try owner.deferQueued(key, retry, 500);
+    // 합류한 incident 가 있거나 snapshot 이 다르면 미룰 수 없다.
+    var other_snapshot = retry;
+    other_snapshot.absolute_deadline_ns += 1;
+    try std.testing.expectError(error.StaleReceipt, owner.deferQueued(key, other_snapshot, 600));
+
+    var job: JobReceipt = .{};
+    try std.testing.expectError(error.NotFound, owner.claimReady(&job, 499));
+    _ = try owner.admit(fixture(2, 1));
+    try owner.claimReady(&job, 499);
+    try std.testing.expectEqual(@as(u128, 2), job.snapshot.host_id);
+    try owner.settle(&job, .connected);
+    try owner.resetConsumedJobReceipt(&job);
+
+    try owner.claimReady(&job, 500);
+    try std.testing.expectEqual(@as(u128, 1), job.snapshot.host_id);
+    try owner.returnClaimedToQueued(&job);
+
+    // 대기 중인 queued job 도 Quit 은 바로 취소로 끝낸다.
+    try owner.requestCancelAll();
+    var completion: CompletionReceipt = .{};
+    var cancelled: usize = 0;
+    while (true) {
+        owner.takeCompletion(&completion) catch |err| switch (err) {
+            error.NotFound => break,
+            else => return err,
+        };
+        if (completion.snapshot.host_id == 1) {
+            try std.testing.expectEqual(Outcome.cancelled, completion.outcome);
+            cancelled += 1;
+        }
+        try owner.consumeCompletion(&completion);
+        try owner.resetConsumedCompletionReceipt(&completion);
+    }
+    try std.testing.expectEqual(@as(usize, 1), cancelled);
     try std.testing.expectEqual(@as(usize, 0), try owner.activeCount());
 }
 

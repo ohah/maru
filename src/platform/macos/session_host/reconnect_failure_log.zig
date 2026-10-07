@@ -8,12 +8,14 @@
 //! 「첫 시도가 왜 실패했나」(호스트가 옛 연결을 아직 안 치워 거절했나, 다시 넣은 job 이 낡은 데드라인을 그대로
 //! 끌고 가 연결도 안 해 보고 끝났나)를 가릴 수 없었다.
 //!
-//! 이 leaf 는 **동작을 바꾸지 않는다.** 재접속을 다시 걸거나 데드라인을 갱신하는 것은 별도 PR 이다. 여기는 다음
-//! 사고가 그 둘 중 무엇인지 한 줄로 판정하게 하는 기록만 만든다:
+//! 이 leaf 는 **동작을 바꾸지 않는다.** 재접속을 다시 걸고 데드라인을 갱신하는 정책은 `reconnect_retry_policy.zig`
+//! 가 소유한다(2026-10-07 — 이 기록이 그 사고를 「첫 시도가 5 초 안에 연결을 못 마쳤다」로 판정했다). 여기는
+//! 사고를 한 줄로 판정하게 하는 기록만 만든다:
 //!
-//! - `reconnect job ended: …` — 재시도 없이 입장을 정산하는 갈래(`deadline_exceeded`·`host_gone`·`cancelled`,
+//! - `reconnect job ended: …` — 재시도 없이 입장을 정산하는 갈래(`host_gone`·`cancelled`·연속 상한을 넘긴 `retry_later`,
 //!   그리고 연결은 됐지만 CR5 가 `retained_terminal` 로 끝난 것).
-//! - `reconnect job requeued: …` — `retry_later` 로 같은 스냅샷을 다시 넣는 갈래. 루프가 돌 수 있어 간격 상한을 둔다.
+//! - `reconnect job requeued: …` — `retry_later`·`deadline_exceeded` 로 같은 신원을 새 데드라인과 대기로 다시 넣는
+//!   갈래. 루프가 돌 수 있어 간격 상한을 둔다.
 //! - `reconnect turn drained: …` — idle 진단이 (0,N) 을 찍은 뒤 job 이 사라져 (0,0) 이 된 순간. 예전에는 이 전이를
 //!   찍지 않아 「job 이 아직 있나, 이미 끝났나」를 로그로 알 수 없었다.
 //!
@@ -191,20 +193,27 @@ pub fn writeEnded(w: *std.Io.Writer, e: Ended) std.Io.Writer.Error!void {
 
 pub const Requeued = struct {
     host_id: u128,
+    /// 다시 넣게 만든 결과 — `retry_later` 또는(2026-10-07 부터) `deadline_exceeded`.
+    outcome: []const u8,
     attempt: Attempt,
     attempts: u32,
+    /// 다음 시도까지의 대기(`reconnect_retry_policy.backoffNs`). 이 줄이 이어지는데 값이 30000 에 붙어 있으면 host 가
+    /// 오래 응답하지 않는 것이다.
+    retry_in_ms: u64,
     deadline_remaining_ms: i64,
     suppressed: u32,
 };
 
 pub fn writeRequeued(w: *std.Io.Writer, r: Requeued) std.Io.Writer.Error!void {
     try w.print(
-        "reconnect job requeued: host={x:0>32} reason={s}:{s} attempts={d} deadline_remaining_ms={d} stale_deadline={} suppressed={d}",
+        "reconnect job requeued: host={x:0>32} outcome={s} reason={s}:{s} attempts={d} retry_in_ms={d} deadline_remaining_ms={d} stale_deadline={} suppressed={d}",
         .{
             r.host_id,
+            r.outcome,
             @tagName(r.attempt.detail),
             r.attempt.reason,
             r.attempts,
+            r.retry_in_ms,
             r.deadline_remaining_ms,
             r.attempt.staleDeadline(),
             r.suppressed,
@@ -299,12 +308,14 @@ test "재접속 실패 로그: 줄 서식은 사고 판정에 필요한 칸을 �
         }}),
     );
     try std.testing.expectEqualStrings(
-        "reconnect job requeued: host=3c4386f58a7ddc5cd9fc12fdec618687 reason=connect_failed:handshake_failed attempts=1 deadline_remaining_ms=4200 stale_deadline=false suppressed=0",
+        "reconnect job requeued: host=3c4386f58a7ddc5cd9fc12fdec618687 outcome=deadline_exceeded reason=connect_failed:deadline_exceeded attempts=1 retry_in_ms=1000 deadline_remaining_ms=6000 stale_deadline=false suppressed=0",
         try render(writeRequeued, .{Requeued{
             .host_id = host,
-            .attempt = .{ .detail = .connect_failed, .reason = "handshake_failed", .measured = true, .deadline_remaining_ms = 4200 },
+            .outcome = "deadline_exceeded",
+            .attempt = .{ .detail = .connect_failed, .reason = "deadline_exceeded", .measured = true, .deadline_remaining_ms = 4200 },
             .attempts = 1,
-            .deadline_remaining_ms = 4200,
+            .retry_in_ms = 1000,
+            .deadline_remaining_ms = 6000,
             .suppressed = 0,
         }}),
     );

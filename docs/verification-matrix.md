@@ -2059,7 +2059,17 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   세 줄의 정확한 서식을 잰다. wiring 경계 2개가 `settleLogicalCompletion` 의 retry_later 갈래 안 다시 넣기 줄과 결속 해제 뒤
   조건 없는 끝 줄, `progressConnectedOne` 의 retained_terminal 끝 줄, connected 분기 **앞**의 시도 기록 포획, 채택 실패 사유,
   새 job 입장의 기준 시각, 워커의 연결 전 잔여 데드라인 측정·연결 전 지남·연결 실패 사유·후보 거절과 그 봉인을 문법 자리로
-  고정한다. 수정 전 코드에서 wiring 2개 모두 red. 동작(재시도·데드라인)은 바꾸지 않으며 실제 잠자기 재현 E2E 는 없다.
+  고정한다. 수정 전 코드에서 wiring 2개 모두 red. 실제 잠자기 재현 E2E 는 없다.
+  **잠자기 뒤 재접속을 포기하지 않는다**(`test-reconnect-retry-policy`, check-boundaries — PR 에서 돈다, 2026-10-07): std-only
+  leaf `reconnect_retry_policy.zig` 의 표 테스트 4개(Debug·ReleaseFast)가 대기 1·2·4·8·16·30 초와 포화, 새 데드라인이 대기
+  뒤에도 접속 예산 5 초 전체를 남김(0 데드라인 금지), host 별 연속 횟수와 리셋, 시간 초과는 끝없이·그 밖의 실패는 연속 6 번까지를
+  잰다. 위 wiring 경계가 `deadline_exceeded`→시간 초과·`retry_later`→그 밖의 실패 분류(`host_gone` 은 다시 넣는 조건에 없음),
+  새 데드라인 대입 → `deferQueued` → 다시 넣기 줄의 순서, 종결 갈래의 횟수 리셋, `dispatchOne` 이 `claimReady` 만 쓰는 것을
+  고정한다 — 분류를 바꾸거나 데드라인 대입을 지우는 변이가 각각 red. `test-session-host-reconnect-worker-owner` 가 대기 중 job 의
+  claim 거부·다른 host job 의 통과·Quit 취소를, `CR6e-c3b2b` 의 coordinator 판정자(main 잡)가 지난 데드라인 → `deadline_exceeded`
+  다시 넣기(결속·lease 유지, 새 데드라인 ≥ 대기 + 5 초, 대기 중 dispatch 0) → 실재하지 않는 host 의 `invalid_manifest`(→ `retry_later`)
+  6 번 다시 넣기 → 7 번째에 종결(lease 0)을 잰다. 수정 전 분류(`deadline_exceeded` 종결)와 낡은 데드라인 재사용 두 변이에서 그
+  판정자가 red(로컬에서 그 한 테스트만 골라 실행 — daemon 을 띄우지 않고 `/tmp/session-host` 만 읽는다). 실제 잠자기 재현 E2E 는 없다.
   **teardown 이 푼 것을 살아 있는 목록에 남기지 않는다(TAB-UAF)**(`test-teardown-live-list`, check-boundaries — PR 에서 돈다):
   `destroyTerm` 이 저장 충돌 비교를 정리하려고 모든 탭·pane·Term 을 훑으므로(`invalidateCompareFor`), 푼 탭·pane 이 목록에
   남으면 뒤 정리가 해제된 메모리를 읽는다(2026-10-06 창 닫기 SIGSEGV). std-only 경계 2개가 app_session 전체에서

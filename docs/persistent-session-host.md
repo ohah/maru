@@ -977,19 +977,37 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   **재접속 job 의 끝은 반드시 한 줄을 남긴다(2026-10-05).** 2026-10-04 23:43 잠자기 뒤 `read_timeout` poison 으로 job 이
   하나 생겼고(`reconnect turn idle: admissions=0 jobs=1`) 그 뒤 50분 동안 재접속 줄이 0이었다 — `deadline_exceeded`·`host_gone`
   정산 갈래가 결속만 풀고 조용히 끝났고, `retry_later` 다시 넣기도 아무것도 남기지 않아 첫 시도의 실패 사유를 가릴 수 없었다.
-  동작은 그대로 두고 진단만 더한다(재시도·데드라인 갱신은 별도 PR).
+  이때는 동작은 그대로 두고 진단만 더했다 — 재시도·데드라인 갱신은 2026-10-07 에 들어갔다(아래 「잠자기 뒤 재접속을 포기하지 않는다」).
   - `reconnect job ended: host=… outcome=… reason=<detail>:<connect FailureReason|-> attempts=… age_ms=… deadline_remaining_ms=… stale_deadline=…`
-    — 재시도 없이 입장을 정산하는 갈래(`settleLogicalCompletion` 의 deadline_exceeded·host_gone, 연결 뒤 CR5 의
+    — 재시도 없이 입장을 정산하는 갈래(`settleLogicalCompletion` 의 host_gone·cancelled, 연속 상한을 넘긴 retry_later, 연결 뒤 CR5 의
     `retained_terminal`). warn. `cancelled` 는 `requestCancelAll`·`requestShutdown`(Quit) 에서만 생기고 그 정산
     (`settleProductShutdownCompletion`)은 줄을 남기지 않는다 — 종료 중에는 끝 줄이 없는 게 정상이다.
-  - `reconnect job requeued: … reason=… attempts=… deadline_remaining_ms=… stale_deadline=… suppressed=…` — `retry_later` 로
-    같은 스냅샷을 다시 넣는 갈래. 1초에 한 줄, 그 사이 삼킨 수를 `suppressed` 로 싣는다. info.
+  - `reconnect job requeued: … outcome=… reason=… attempts=… retry_in_ms=… deadline_remaining_ms=… stale_deadline=… suppressed=…`
+    — `retry_later`·`deadline_exceeded` 로 같은 신원을 **새 데드라인과 대기**로 다시 넣는 갈래(아래 「잠자기 뒤 재접속을
+    포기하지 않는다」). `retry_in_ms` 는 다음 시도까지의 대기다. 1초에 한 줄, 그 사이 삼킨 수를 `suppressed` 로 싣는다. info.
   - `reconnect turn drained: admissions=0 jobs=0 (prev …)` — idle 진단이 일이 있던 상태에서 (0,0) 으로 돌아온 순간. info.
   `reason` 은 워커가 시도마다 `Completion` 에 싣는다(워커 스레드는 로그를 찍지 않는다): `deadline_past_before_connect`(연결 전에
   이미 데드라인이 지나 소켓도 안 열었다), `connect_failed:<FailureReason>`, `candidate_rejected`, `adopt_busy`·
   `adopt_invalid_authority`·`adopt_failed`(연결은 됐지만 채택 실패). `stale_deadline=true` 는 「다시 넣은 job 이 처음 정한 데드라인을
   그대로 끌고 가 연결도 안 해 보고 끝났다」 가설의 직접 증거다. `age_ms` 는 poison 시각이 아니라 첫 입장(admission 시작) 기준이고, awake 시계라 잠자기 동안은 흐르지 않는다(벽시계보다 작게 나온다).
   판정자는 `test-reconnect-failure-log`(check-boundaries)다.
+  **잠자기 뒤 재접속을 포기하지 않는다(2026-10-07).** 같은 사고가 다시 났다 — 덮개를 닫으며 외부 모니터가 빠져 창 resize RPC 가
+  나간 직후 잠들었고, DarkWake 중 `read_timeout` poison 뒤 첫 시도가 `reconnect job ended: outcome=deadline_exceeded
+  reason=connect_failed:deadline_exceeded attempts=1 … stale_deadline=false` 로 끝났다. host 는 `poll` 에서 멀쩡히 기다리는데
+  GUI 는 앱 재시작까지 안 붙었다. 위 기록이 원인을 둘로 확정했다: ① `deadline_exceeded` 가 종결이었고, ② `retry_later` 도
+  처음 받은 5 초 데드라인을 끌고 가 그 5 초가 지나면 결국 `deadline_exceeded` 로 끝났다. poison 은 연결마다 첫 번만
+  admission 을 만들므로 그 뒤 새 job 은 없다. 이제 `settleLogicalCompletion` 은 다시 넣을 때 **신원은 그대로, 데드라인은
+  새로**(`now + 대기 + 접속 예산 5 초`) 주고, 대기(1·2·4·8·16·30 초, 연결 성공 시 처음으로)가 끝나기 전에는 dispatch 하지
+  않는다(`Owner.deferQueued`·`claimReady` — host 마다 따로라 한 host 의 대기가 다른 host 의 새 job 을 막지 않는다). 무엇을
+  얼마나 다시 거나는 실패 종류로 가른다: **시간 초과**(`deadline_exceeded`)는 횟수 제한 없이, **그 밖의 실패**(`retry_later`)는
+  연속 6 번(대기 합 61 초)까지만 다시 걸고 그다음은 예전처럼 결속을 풀고 끝낸다. 상한이 필요한 이유: 재접속 worker 의
+  `connectExistingHostUntil` 은 manifest 가 없어도 `host_gone` 이 아니라 `invalid_manifest`(→ `retry_later`)를 낸다 — 예전에는
+  모든 재시도가 첫 5 초를 나눠 써서 상한이 저절로 있었고, 데드라인을 새로 주면서 그 상한을 명시로 옮겼다. 그 밖의 종결은
+  `host_gone`(host 가 사라졌다는 긍정적 증거)·`cancelled`(Quit). 값은 `reconnect_retry_policy.zig`(std-only,
+  `test-reconnect-retry-policy` 가 check-boundaries 에서 잰다)가 소유한다. runtime 에 묶인 admission 신원에는 데드라인이 없어
+  다시 넣어도 결속·resident lease 는 그대로 유효하다. `attach_phase_deadline` 의 「한 phase 안의 재시도는 같은 데드라인」
+  원칙은 그대로다 — 대기 뒤 다시 넣은 job 은 **새 phase** 다. **한계**: host 프로세스는 살아 있는데 영영 응답하지 않으면 30 초마다
+  한 번씩 끝없이 시도한다(UI 는 `reconnecting` 에 머문다).
   **재접속이 얼린 attachment 는 아무도 읽지 않는다(2026-10-05).** 재접속은 여러 프레임에 걸친다 — `connected` 다음 전이가
   host 의 모든 runtime 을 `retirement_prepared` 로 얼리고, 커밋 뒤에는 새 세대가 runtime 마다 게시될 때까지 현재 세대가
   `cleaning`/`terminal` 로 남는다. 그 창에도 runtime 은 `backend.runtimes` 에 있어 창 drain·관측 probe·사용자 조작이 부를 수
@@ -6351,8 +6369,9 @@ issuer는 HostPool membership·runtime set·제품 generation을 읽거나 게�
 move-by-convention 이전한다.
 main이 exact completion을 claim하기 전까지 worker completion이 유일한 fd/parser/buffer owner다. copied/moved/stale
 completion의 take와 duplicate take는 mutation 0으로 거부하며, abandon과 connect 반환 뒤 관측된 cancel은 남은
-candidate를 exact once 닫는다. `host_gone`과 `deadline_exceeded`는 각각 terminal typed outcome이고, 그 밖의 connect/hello 실패는
-`retry_later`로 보존한다. c2 green은 worker 실행 함수와 소유권 이동의 증거일 뿐, frame-thread block 0·Quit join·자동
+candidate를 exact once 닫는다. c2는 `host_gone`·`deadline_exceeded`를 각각 typed outcome으로, 그 밖의 connect/hello 실패는
+`retry_later`로 보고한다. 그중 무엇을 종결로 볼지는 c3b2 coordinator가 정한다 — `host_gone`은 종결, `deadline_exceeded`는
+횟수 제한 없이, `retry_later`는 연속 상한까지 새 데드라인·대기로 다시 넣는다(2026-10-07, 위 「잠자기 뒤 재접속을 포기하지 않는다」). c2 green은 worker 실행 함수와 소유권 이동의 증거일 뿐, frame-thread block 0·Quit join·자동
 reconnect 제품 배선의 증거가 아니다.
 
 CR6e-c는 c1 bounded job/completion owner, c2 worker connect issuer, c3 main-thread CR5 publication과 actual AppKit
@@ -6385,8 +6404,9 @@ frame owner는 한 turn에 completion을 먼저 exact claim·settle한 뒤 새 a
 CR5 단계는 job의 closed state에 따라 전진한다. 성공·stale·typed failure·terminal host-wide failure는 모두 같은 bound
 incident identity를 재검증한 제품 release leaf로 host admission당 하나인 reconnect resident lease(CR6e-c3b2c)와 admission mirror를 exact once
 정산한다. 새 connection publication 뒤 old connection generation이 더는 current와 일치하지 않는다는 이유로 이 정산을
-생략하거나 test-only release를 호출하면 안 된다. `retry_later`만 fresh incident publication 권위를 만들지 않고 기존
-bound admission을 유지한 채 동일 sealed c1 snapshot을 queued로 되돌려 후속 frame이 같은 요청을 재시도한다.
+생략하거나 test-only release를 호출하면 안 된다. `deadline_exceeded`와 연속 상한 안의 `retry_later`는 fresh incident
+publication 권위를 만들지 않고 기존 bound admission을 유지한 채, 같은 incident 신원에 데드라인만 새로 준 c1 snapshot을 대기와
+함께 queued로 되돌려 대기가 끝난 frame이 같은 요청을 재시도한다(`reconnect_retry_policy.zig`).
 
 App Quit은 다음 세로 순서를 지킨다.
 

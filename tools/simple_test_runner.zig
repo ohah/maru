@@ -121,8 +121,9 @@ fn isolateSessionHostRoot() error{IsolationFailed}!void {
         return error.IsolationFailed;
     if (setenv("CFFIXED_USER_HOME", root.ptr, 1) != 0)
         return error.IsolationFailed;
-    const real_home = homeIsRealUserHome();
-    if (real_home or xdgNeedsIsolation()) try reexecWithIsolatedHome(real_home);
+    // 실제 홈이거나 **쓸 수 없는 홈**(빈 값·루트 — `runner_home.homeUnusable`)이면 새 임시 홈을 세운다.
+    const replace_home = homeIsRealUserHome() or homeUnusable();
+    if (replace_home or xdgNeedsIsolation()) try reexecWithIsolatedHome(replace_home);
 }
 
 /// 격리를 못 세웠다 — **사유를 찍고** 실패한다. 예전에는 `exit(1)` 만 남아 mkdtemp·경로 길이·execve 중 무엇이 틀렸는지
@@ -180,7 +181,10 @@ fn reexecWithIsolatedHome(replace_home: bool) error{IsolationFailed}!void {
         const value = runner_home.xdgPath(&buf, home, x.sub) catch return isolationFail("XDG path too long");
         if (setenv(x.name, value.ptr, 1) != 0) return isolationFail("setenv XDG");
     }
-    if (homeIsRealUserHome() or xdgNeedsIsolation()) return isolationFail("rewritten environment would re-exec again");
+    // 사유를 가른다 — 사용자 DB(getpwuid)를 못 읽으면 `homeIsRealUserHome` 은 어떤 HOME 이든 「실제」로 보므로(안전한 쪽),
+    // 임시 홈으로 바꾼 뒤에도 참이다. 그때 「XDG 가 수렴 안 함」으로 찍으면 진짜 원인을 가린다(적대적 검증 2026-10-07).
+    if (homeIsRealUserHome()) return isolationFail("HOME still reads as the real home after rewrite (user DB unreadable?)");
+    if (homeUnusable() or xdgNeedsIsolation()) return isolationFail("rewritten environment would re-exec again");
     var exe_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     var exe_len: u32 = std.fs.max_path_bytes;
     if (std.c._NSGetExecutablePath(&exe_buf, &exe_len) != 0) return isolationFail("executable path");
@@ -198,6 +202,11 @@ fn xdgNeedsIsolation() bool {
         if (runner_home.xdgNeedsMove(value, home)) return true;
     }
     return false;
+}
+
+/// 지금 `HOME` 이 설정돼 있지만 격리 기준으로 쓸 수 없는가(`runner_home.homeUnusable` — 빈 값·루트). 없는 것은 아니다.
+fn homeUnusable() bool {
+    return runner_home.homeUnusable(std.mem.span(getenv("HOME") orelse return false));
 }
 
 /// 지금 `HOME` 이 이 사용자의 실제 홈(OS 사용자 DB)인가. **없으면 아니다** — 명시 환경으로 자기 자신을 다시 띄우는

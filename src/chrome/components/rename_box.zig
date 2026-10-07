@@ -52,8 +52,10 @@ pub fn boxRect(state: *const State, text: []const u8, p: props.ChromeProps) ?dra
         .anchor = .{ .x = state.anchor_x, .y = state.anchor_y, .w = 0, .h = state.anchor_h },
         .vertical = .below_flip_up,
         .gap_px = p.shape.modal_padding_px,
-        // 입력 상자(`input_box`)는 rich 모양에서 둥근 패널 quad 를 내고, 그것이 이 draw 의 첫 둥근 quad 라 사방 패딩만큼
-        // 커져 그려진다 — 경계 여백도 보이는 테두리에서 센다(적대적 검증 2026-10-07: 「패널 없음」으로 잘못 분류됐었다).
+        // 입력 상자(`input_box`)는 rich 모양에서 둥근 패널 quad 를 낸다. 그 프레임에 다른 오버레이가 없으면 그것이 **프레임의**
+        // 첫 둥근 quad 라 사방 패딩만큼 커져 그려진다(`metal_lowering` 의 판정은 draw 가 아니라 프레임 단위다 — 다른 오버레이가
+        // 먼저 오면 위젯 quad 가 되어 이 여백이 빈 자리로 남을 뿐 넘치지는 않는다). 경계 여백은 보이는 테두리에서 센다
+        // (적대적 검증 2026-10-07: 「패널 없음」으로 잘못 분류됐었다).
         .visible_outset_px = p.shape.modal_padding_px,
     }, p) orelse return null;
     return .{ .x = placed.rect.x, .y = placed.rect.y, .w = box_w, .h = ch };

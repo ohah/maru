@@ -80,7 +80,10 @@ test "product-child fixtures require an isolated root and the default suite neve
     try std.testing.expect(std.mem.indexOf(u8, runner, "mkdtemp(template.ptr) orelse return isolationFail(\"mkdtemp\")") != null);
     // exec 전에 「고친 환경이면 다시 exec 할 일이 없다」를 확인한다 — 판정과 고침이 어긋나면 끝없는 self-exec 가 된다
     // (`HOME=/` 에서 실제로 그랬다, 2026-10-07). 판정 함수 자체는 `tools/test_runner_home.zig` 의 판정자가 본다.
-    try std.testing.expect(std.mem.indexOf(u8, runner, "if (homeIsRealUserHome() or xdgNeedsIsolation()) return isolationFail(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner, "if (homeIsRealUserHome()) return isolationFail(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner, "if (homeUnusable() or xdgNeedsIsolation()) return isolationFail(") != null);
+    // 빈 값·루트 HOME 은 실제 홈처럼 새 임시 홈으로 바꾼다 — 루트는 실제 캐시 XDG 까지 「홈 아래」로 읽어 샜다(2026-10-07).
+    try std.testing.expect(std.mem.indexOf(u8, runner, "const replace_home = homeIsRealUserHome() or homeUnusable();") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner, "const runner_home = @import(\"test_runner_home.zig\");") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner, "std.c.E.EXIST") == null);
     // 시작 뒤 setenv 만으로는 std 가 붙잡은 envp 조각이 실제 홈을 계속 본다 — 그 환경으로 다시 exec 해야 한다.

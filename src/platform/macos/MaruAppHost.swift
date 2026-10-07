@@ -8418,6 +8418,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 대본의 끌기(W6d①) — 한 끌기가 enter 부터 drop·exit 까지 같은 가짜 정보를 쓴다.
     private var testDragInfo: TestDraggingInfo?
+    /// 시험 전용(W6m②) — `dlremember` 가 기억한 목록 행 자리(창 backing px).
+    private var testDatalistPoint: (Double, Double)?
 
     private func testDrag(_ line: [String], _ content: NSView) {
         guard let window, let terminal = Self.firstTerminalView(in: window.contentView) else { return }
@@ -8833,6 +8835,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 var count: Int32 = 0, selected: Int32 = -1
                 let open = maru_macos_app_session_osr_datalist_test_state(session, 0, &x, &y, &count, &selected)
                 Self.testReport("datalist open=\(open != 0) count=\(count) selected=\(selected)")
+            case "dlmouse" where line.count >= 4, "dlremember" where line.count >= 2:
+                // W6m②: dlmouse 행 종류 버튼 — 그린 목록의 그 행 가운데에 마우스 사건 하나(대본 mouse 와 같은 ABI). dlremember 행 — 그
+                // 자리를 기억해 둔다(목록이 닫힌 뒤 dlclicklast 가 누른다).
+                var x = -1.0, y = -1.0
+                var count: Int32 = 0, selected: Int32 = -1
+                guard maru_macos_app_session_osr_datalist_test_state(session, UInt32(line[1]) ?? 0, &x, &y, &count, &selected) != 0 else {
+                    Self.testReport("dl-miss")
+                    break
+                }
+                if line[0] == "dlremember" {
+                    testDatalistPoint = (x, y)
+                } else {
+                    _ = maru_macos_app_session_mouse(session, Int32(line[2]) ?? 0, x, y, Int32(line[3]) ?? 0, 0)
+                }
+            case "dlclicklast":
+                if let (x, y) = testDatalistPoint {
+                    _ = maru_macos_app_session_mouse(session, 1, x, y, 0, 0)
+                    _ = maru_macos_app_session_mouse(session, 3, x, y, 0, 0)
+                } else {
+                    Self.testReport("dl-miss")
+                }
             case "dlhover" where line.count >= 2, "dlclick" where line.count >= 2:
                 // W6m②: 그린 목록의 그 행 가운데에 hover·누름(대본의 hover·mouse 와 같은 ABI) — 목록이 없으면 dl-miss.
                 var x = -1.0, y = -1.0

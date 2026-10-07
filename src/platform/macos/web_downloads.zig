@@ -1,0 +1,636 @@
+//! Chromium 탭의 다운로드(W10a), maru 쪽 — 앱 전역(sidecar 가 하나). sidecar 가 `download_begin` 을 보내면 받을 경로를 maru 가 정해
+//! `download_decide` 로 답하고, 진행(`download_update`)을 목록 창(Swift — `OsrDownloadsWindow.swift`)에 보인다.
+//!
+//! 사용자 결정(2026-10-08): 묻지 않고 `~/Downloads` 에 저장(같은 이름은 `이름 (1).확장자` — 「매번 묻기」 설정은 W10b), 진행은
+//! 목록 창, 받는 중 종료·탭 닫기는 W10c. 페이지가 사용자 동작 없이 내려받게 한 「실행될 수 있는 파일」(`.command`·`.pkg`·`.dmg`·
+//! `.webloc` 등 — Gatekeeper 를 피해 간 전례가 있는 종류)은 저장하지 않고 보류해 묻는다(사용자 결정).
+//!
+//! 파일은 이렇게 다룬다(W10a 설계 적대 검토):
+//! - 받는 동안은 `이름.maru-part`(maru 가 `O_CREAT|O_EXCL|O_NOFOLLOW` 로 미리 만든 빈 파일 — Chromium 은 그 경로를 덮어쓴다, 실측) —
+//!   받는 동안 Chromium 은 최종 이름 그대로 파일을 키우고 격리 표지는 완료 때에야 붙인다(실측). 그래서 비정상 종료 뒤 잘린 파일이
+//!   완성본처럼, 표지 없이 남을 수 있었다. 완료되면 `renameatx_np(RENAME_EXCL)` 로 최종 이름으로 옮긴다(표지는 inode 에 붙어 함께 간다).
+//! - 이름이 겹치는지는 파일 시스템이 정한다 — APFS 는 대소문자·정규화를 가리지 않고, 끊긴 심볼릭 링크는 stat 으로 「없음」이다.
+//!   최종 이름이 있으면(lstat — 끊긴 링크도) 다음 번호, 임시 파일을 O_EXCL 로 못 만들면 다음 번호.
+//! - 파일 작업은 메인 스레드 밖에서(첫 쓰기에 macOS 가 「다운로드 폴더 접근」을 물으면 그 시스템 호출이 막힌다 — 앱이 멈추지 않게).
+//! - sidecar 가 죽으면 진행 중이던 것을 「엔진이 다시 시작됨」으로 끝내고 임시 파일을 지운다. 다운로드 번호는 sidecar 마다 1 부터라
+//!   세대로 가린다(옛 행의 취소가 새 sidecar 의 다른 다운로드를 취소하지 않게).
+
+const std = @import("std");
+const maru = @import("maru");
+const web_osr = @import("web_osr.zig");
+
+const ws = maru.session.web_sidecar;
+const message = ws.message;
+
+pub const State = enum(u8) {
+    /// 경로를 만드는 중(작업 스레드).
+    preparing = 0,
+    /// 실행될 수 있는 파일 — 사용자가 받기·버리기를 고를 때까지 sidecar 가 붙든다.
+    held = 1,
+    active = 2,
+    /// 중단(Chromium 이 스스로 다시 받기도 한다 — 다시 받기를 누를 수 있다).
+    interrupted = 3,
+    done = 4,
+    canceled = 5,
+    /// 경로를 못 만들었거나 완료 뒤 옮기지 못했다.
+    failed = 6,
+    /// 탭이 닫혀 멈췄다(CEF 는 그 다운로드를 알림 없이 멈추고 파일을 지운다 — 실측).
+    tab_closed = 7,
+    /// sidecar 가 다시 시작됐다.
+    engine_restarted = 8,
+    /// 동시 다운로드 상한을 넘었다.
+    too_many = 9,
+};
+
+pub fn finished(state: State) bool {
+    return switch (state) {
+        .done, .canceled, .failed, .tab_closed, .engine_restarted, .too_many => true,
+        .preparing, .held, .active, .interrupted => false,
+    };
+}
+
+pub const max_name_bytes = message.max_download_name_bytes;
+pub const max_path_bytes = 1024;
+pub const part_suffix = ".maru-part";
+/// 이 실행 동안 쥐는 기록 상한 — 넘치면 끝난 옛것부터 버린다.
+const max_entries = 500;
+/// 동시 진행 상한 — 앱 전체·탭 하나(넘으면 받지 않고 행에 남긴다 — 페이지가 다운로드를 쏟아내는 것을 막는다).
+const max_active_app = 32;
+const max_active_tab = 8;
+/// 「사용자 동작으로 시작한 다운로드」로 보는 창(그 탭에 보낸 마지막 사용자 입력 뒤) — 서버가 첨부를 늦게 돌려줘도 들게 넉넉히.
+const user_gesture_window_ms: i64 = 3000;
+
+pub const Entry = struct {
+    /// maru 가 매기는 0 이 아닌 번호(앱 수명 동안 유일).
+    key: u64,
+    /// sidecar 세대와 그 sidecar 의 다운로드 번호.
+    generation: u32,
+    download: u32,
+    browser: u64,
+    state: State,
+    risky: bool,
+    received: i64 = 0,
+    total: i64 = -1,
+    reason: u16 = 0,
+    name_buf: [max_name_bytes]u8 = undefined,
+    name_len: usize = 0,
+    final_buf: [max_path_bytes]u8 = undefined,
+    final_len: usize = 0,
+    part_buf: [max_path_bytes]u8 = undefined,
+    part_len: usize = 0,
+
+    pub fn name(self: *const Entry) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+    /// 목록에 보일 이름 — 받을 파일을 정했으면 그 파일 이름(같은 이름이 있어 「(1)」을 붙였으면 그것 — Chrome 처럼), 아니면 제안 이름.
+    pub fn displayName(self: *const Entry) []const u8 {
+        if (self.final_len == 0) return self.name();
+        return std.fs.path.basename(self.finalPath());
+    }
+    pub fn finalPath(self: *const Entry) []const u8 {
+        return self.final_buf[0..self.final_len];
+    }
+    pub fn partPath(self: *const Entry) []const u8 {
+        return self.part_buf[0..self.part_len];
+    }
+};
+
+var entries: std.ArrayListUnmanaged(Entry) = .empty;
+var next_key: u64 = 1;
+/// sidecar 세대 — 다시 뜰 때마다 오른다(`sidecarLost`).
+var sidecar_generation: u32 = 1;
+/// 목록이 바뀔 때마다 오른다(Swift 가 다시 읽는다).
+var list_generation: u64 = 1;
+/// 사용자 동작으로 시작했거나 보류한 새 다운로드 — Swift 가 터미널 창이 키면 목록 창을 앞으로 낸다.
+var show_request: u64 = 0;
+var show_surface: u64 = 0;
+
+fn allocator() std.mem.Allocator {
+    return std.heap.c_allocator;
+}
+
+fn changed() void {
+    list_generation +%= 1;
+}
+
+fn entryOfKey(key: u64) ?*Entry {
+    for (entries.items) |*e| if (e.key == key) return e;
+    return null;
+}
+
+fn entryOfDownload(sidecar_gen: u32, download: u32) ?*Entry {
+    for (entries.items) |*e| if (e.generation == sidecar_gen and e.download == download) return e;
+    return null;
+}
+
+// ── 이름(순수) ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// 보이지 않거나 방향을 바꾸는 글자(이름이 다른 확장자처럼 보이게 하는 데 쓰인다 — `사진\u{202E}gpj.exe`)와 Finder 가 `/` 로 보이는
+/// `:` 를 `_` 로. sidecar 가 다듬은 이름(제어 문자·`/` 없음)을 다시 다듬는다.
+fn isTroublesome(cp: u21) bool {
+    return switch (cp) {
+        ':', '/', 0x061C, 0x200B...0x200F, 0x2028...0x202E, 0x2066...0x2069, 0xFEFF, 0xFFF9...0xFFFB => true,
+        else => cp < 0x20 or cp == 0x7f,
+    };
+}
+
+/// 제안 이름을 저장할 파일 이름으로(`out` 안): 문제 글자는 `_`, 앞뒤 공백·점은 지운다, 비면 `download`. 번호·임시 꼬리가 붙을
+/// 자리(`reserve` 바이트)를 남기고 확장자를 지키며 글자 경계에서 자른다.
+pub fn sanitizeName(raw: []const u8, reserve: usize, out: []u8) []const u8 {
+    var len: usize = 0;
+    const view = std.unicode.Utf8View.init(raw) catch return fallbackName(out);
+    var it = view.iterator();
+    while (it.nextCodepointSlice()) |slice| {
+        const cp = std.unicode.utf8Decode(slice) catch continue;
+        const piece: []const u8 = if (isTroublesome(cp)) "_" else slice;
+        if (len + piece.len > out.len) break;
+        @memcpy(out[len..][0..piece.len], piece);
+        len += piece.len;
+    }
+    var start: usize = 0;
+    while (start < len and (out[start] == ' ' or out[start] == '.')) start += 1;
+    var end = len;
+    while (end > start and (out[end - 1] == ' ' or out[end - 1] == '.')) end -= 1;
+    if (end == start) return fallbackName(out);
+    std.mem.copyForwards(u8, out[0 .. end - start], out[start..end]);
+    len = end - start;
+    const limit = max_name_bytes -| reserve;
+    if (len > limit) {
+        const ext = extensionOf(out[0..len]);
+        const keep_ext = ext.len < limit / 2;
+        const stem_room = if (keep_ext) limit - ext.len else limit;
+        var cut = utf8Floor(out[0..len], stem_room);
+        if (keep_ext) {
+            std.mem.copyForwards(u8, out[cut .. cut + ext.len], out[len - ext.len .. len]);
+            cut += ext.len;
+        }
+        len = cut;
+    }
+    return out[0..len];
+}
+
+fn fallbackName(out: []u8) []const u8 {
+    const fallback = "download";
+    @memcpy(out[0..fallback.len], fallback);
+    return out[0..fallback.len];
+}
+
+/// `n` 바이트 안의 글자 경계.
+fn utf8Floor(bytes: []const u8, n: usize) usize {
+    var cut = @min(n, bytes.len);
+    while (cut > 0 and cut < bytes.len and (bytes[cut] & 0xC0) == 0x80) cut -= 1;
+    return cut;
+}
+
+const compound_extensions = [_][]const u8{ ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".app.zip" };
+
+/// 확장자(점 포함) — 겹 확장자(`.tar.gz`)는 통째로(Chrome 도 `a (1).tar.gz`), 앞 점만 있는 이름(`.bashrc`)은 없음.
+pub fn extensionOf(file_name: []const u8) []const u8 {
+    for (compound_extensions) |ext| {
+        if (file_name.len > ext.len and std.ascii.endsWithIgnoreCase(file_name, ext)) return file_name[file_name.len - ext.len ..];
+    }
+    const dot = std.mem.lastIndexOfScalar(u8, file_name, '.') orelse return "";
+    if (dot == 0) return "";
+    return file_name[dot..];
+}
+
+/// `n` 번째 후보 — 0 은 그대로, 그 밖은 `이름 (n).확장자`.
+pub fn numberedName(file_name: []const u8, n: u32, out: []u8) []const u8 {
+    if (n == 0) {
+        @memcpy(out[0..file_name.len], file_name);
+        return out[0..file_name.len];
+    }
+    const ext = extensionOf(file_name);
+    const stem = file_name[0 .. file_name.len - ext.len];
+    return std.fmt.bufPrint(out, "{s} ({d}){s}", .{ stem, n, ext }) catch out[0..0];
+}
+
+/// 실행될 수 있는 파일(열면 무언가 돌거나 설치되거나 다른 것을 연다) — 사용자 동작 없이 받게 하면 보류한다.
+const risky_extensions = [_][]const u8{
+    ".command",    ".terminal", ".tool",     ".webloc", ".inetloc",  ".fileloc",      ".pkg",         ".mpkg", ".dmg",
+    ".app",        ".app.zip",  ".workflow", ".action", ".scpt",     ".scptd",        ".applescript", ".jar",  ".sh",
+    ".zsh",        ".bash",     ".csh",      ".ksh",    ".prefpane", ".mobileconfig", ".kext",        ".osax", ".definition",
+    ".safariextz", ".url",
+};
+
+pub fn isRisky(file_name: []const u8) bool {
+    for (risky_extensions) |ext| {
+        if (file_name.len > ext.len and std.ascii.endsWithIgnoreCase(file_name, ext)) return true;
+    }
+    return false;
+}
+
+// ── 경로 만들기(작업 스레드) ───────────────────────────────────────────────────────────────────────────
+
+const Prepared = struct {
+    key: u64,
+    ok: bool,
+    final_buf: [max_path_bytes]u8 = undefined,
+    final_len: usize = 0,
+    part_buf: [max_path_bytes]u8 = undefined,
+    part_len: usize = 0,
+};
+
+/// 작업 스레드와 메인 스레드가 함께 쓴다(짧은 구간만 — pthread 뮤텍스, 세션 밖이라 `std.Io` 가 없다).
+var prepared_mutex: std.c.pthread_mutex_t = .{};
+var prepared: std.ArrayListUnmanaged(Prepared) = .empty;
+
+const Job = struct {
+    key: u64,
+    dir_buf: [max_path_bytes]u8,
+    dir_len: usize,
+    name_buf: [max_name_bytes]u8,
+    name_len: usize,
+};
+
+fn startPrepare(e: *const Entry) bool {
+    const home = std.c.getenv("HOME") orelse return false;
+    const job = allocator().create(Job) catch return false;
+    const dir = std.fmt.bufPrint(&job.dir_buf, "{s}/Downloads", .{std.mem.span(home)}) catch {
+        allocator().destroy(job);
+        return false;
+    };
+    job.key = e.key;
+    job.dir_len = dir.len;
+    @memcpy(job.name_buf[0..e.name_len], e.name());
+    job.name_len = e.name_len;
+    const thread = std.Thread.spawn(.{}, runPrepare, .{job}) catch {
+        allocator().destroy(job);
+        return false;
+    };
+    thread.detach();
+    return true;
+}
+
+fn runPrepare(job: *Job) void {
+    defer allocator().destroy(job);
+    var result: Prepared = .{ .key = job.key, .ok = false };
+    prepare(job.dir_buf[0..job.dir_len], job.name_buf[0..job.name_len], &result);
+    _ = std.c.pthread_mutex_lock(&prepared_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&prepared_mutex);
+    prepared.append(allocator(), result) catch {};
+}
+
+extern "c" fn renameatx_np(fromfd: c_int, from: [*:0]const u8, tofd: c_int, to: [*:0]const u8, flags: c_uint) c_int;
+const at_fdcwd: c_int = -2;
+const rename_excl: c_uint = 0x00000004;
+
+fn exists(path_z: [*:0]const u8) bool {
+    var st: std.c.Stat = undefined;
+    return std.c.fstatat(at_fdcwd, path_z, &st, std.c.AT.SYMLINK_NOFOLLOW) == 0; // 링크를 따라가지 않는다 — 끊긴 링크도 「있음」
+}
+
+/// 다운로드 폴더(없으면 만든다)에 겹치지 않는 최종 이름을 고르고 그 임시 파일을 O_EXCL 로 만든다.
+pub fn prepare(dir: []const u8, file_name: []const u8, out: *Prepared) void {
+    var dir_z_buf: [max_path_bytes + 1]u8 = undefined;
+    const dir_z = std.fmt.bufPrintZ(&dir_z_buf, "{s}", .{dir}) catch return;
+    _ = std.c.mkdir(dir_z, 0o755);
+    var n: u32 = 0;
+    while (n < 100) : (n += 1) {
+        var name_buf: [max_name_bytes + 16]u8 = undefined;
+        const candidate = numberedName(file_name, n, &name_buf);
+        if (candidate.len == 0 or candidate.len + part_suffix.len > max_name_bytes) return;
+        const final = std.fmt.bufPrintZ(&out.final_buf, "{s}/{s}", .{ dir, candidate }) catch return;
+        if (exists(final)) continue;
+        const part = std.fmt.bufPrintZ(&out.part_buf, "{s}{s}", .{ final, part_suffix }) catch return;
+        const fd = std.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
+        if (fd < 0) {
+            if (std.c._errno().* == @intFromEnum(std.c.E.EXIST)) continue;
+            return;
+        }
+        _ = std.c.close(fd);
+        out.final_len = final.len;
+        out.part_len = part.len;
+        out.ok = true;
+        return;
+    }
+}
+
+/// 완료 — 임시 파일을 최종 이름으로(겹치면 다음 번호). 옮긴 최종 경로를 `e` 에 적는다.
+fn finalize(e: *Entry) bool {
+    var part_z: [max_path_bytes + 1]u8 = undefined;
+    const part = std.fmt.bufPrintZ(&part_z, "{s}", .{e.partPath()}) catch return false;
+    const dir_end = std.mem.lastIndexOfScalar(u8, e.finalPath(), '/') orelse return false;
+    const dir = e.finalPath()[0..dir_end];
+    const file_name = e.finalPath()[dir_end + 1 ..];
+    var n: u32 = 0;
+    while (n < 100) : (n += 1) {
+        var name_buf: [max_name_bytes + 16]u8 = undefined;
+        const candidate = numberedName(file_name, n, &name_buf);
+        if (candidate.len == 0) return false;
+        var target_buf: [max_path_bytes + 1]u8 = undefined;
+        const target = std.fmt.bufPrintZ(&target_buf, "{s}/{s}", .{ dir, candidate }) catch return false;
+        if (renameatx_np(at_fdcwd, part, at_fdcwd, target, rename_excl) == 0) {
+            @memcpy(e.final_buf[0..target.len], target);
+            e.final_len = target.len;
+            return true;
+        }
+        if (std.c._errno().* != @intFromEnum(std.c.E.EXIST)) return false;
+    }
+    return false;
+}
+
+fn unlinkPart(e: *const Entry) void {
+    if (e.part_len == 0) return;
+    var part_z: [max_path_bytes + 1]u8 = undefined;
+    const part = std.fmt.bufPrintZ(&part_z, "{s}", .{e.partPath()}) catch return;
+    _ = std.c.unlink(part);
+}
+
+// ── sidecar 로 보낼 것 — maru 의 gpa 로 `pump` 안에서 보낸다(ABI 는 세션 밖이라 gpa 가 없다) ─────────────────────
+
+const Outgoing = struct { key: u64, kind: enum { decide_path, decide_cancel, cancel, resume_download } };
+var outgoing: std.ArrayListUnmanaged(Outgoing) = .empty;
+
+fn queue(key: u64, kind: @FieldType(Outgoing, "kind")) void {
+    outgoing.append(allocator(), .{ .key = key, .kind = kind }) catch {};
+}
+
+// ── sidecar 메시지(`web_osr.apply`) ───────────────────────────────────────────────────────────────────
+
+fn activeCount(browser: ?u64) usize {
+    var n: usize = 0;
+    for (entries.items) |e| {
+        if (finished(e.state)) continue;
+        if (browser) |b| if (e.browser != b) continue;
+        n += 1;
+    }
+    return n;
+}
+
+fn makeRoom() void {
+    if (entries.items.len < max_entries) return;
+    for (entries.items, 0..) |e, i| if (finished(e.state)) {
+        _ = entries.orderedRemove(i);
+        return;
+    };
+}
+
+/// 새 다운로드. 받아들일 수 없으면(기록이 꽉 참·같은 번호) false — 부른 쪽이 곧바로 받지 않는다고 답한다.
+pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
+    makeRoom();
+    if (entries.items.len >= max_entries or entryOfDownload(sidecar_generation, v.download) != null) return false;
+    var e: Entry = .{ .key = next_key, .generation = sidecar_generation, .download = v.download, .browser = v.browser, .state = .preparing, .risky = false, .total = v.total };
+    next_key += 1;
+    e.name_len = sanitizeName(v.name, part_suffix.len + 8, &e.name_buf).len;
+    e.risky = isRisky(e.name());
+    const by_user = web_osr.recentUserInput(v.browser, user_gesture_window_ms, now_ms);
+    if (activeCount(null) >= max_active_app or activeCount(v.browser) >= max_active_tab) {
+        e.state = .too_many;
+        entries.append(allocator(), e) catch return false;
+        queue(e.key, .decide_cancel);
+        changed();
+        return true;
+    }
+    if (e.risky and !by_user) {
+        e.state = .held;
+    } else if (!startPrepare(&e)) {
+        e.state = .failed;
+        queue(e.key, .decide_cancel);
+    }
+    entries.append(allocator(), e) catch return false;
+    // 사용자가 시작한 것과 보류한 것 — 보류는 목록에서 「받기」를 눌러야 받으니, 목록이 보이지 않으면 모르고 지나간다. 창을 낼지는
+    // Swift 가 정한다(maru 가 앞에 있고 터미널 창이 키일 때만, 키는 빼앗지 않는다).
+    if (by_user or e.state == .held) {
+        show_request +%= 1;
+        show_surface = v.browser;
+    }
+    changed();
+    return true;
+}
+
+pub fn onUpdate(v: message.DownloadUpdate) void {
+    const e = entryOfDownload(sidecar_generation, v.download) orelse return;
+    if (e.browser != v.browser or finished(e.state)) return;
+    e.received = v.received;
+    e.total = v.total;
+    e.reason = v.reason;
+    switch (v.state) {
+        // CEF 는 경로를 정하기 전에도 진행 갱신을 보낸다(실측) — 경로를 만드는 중·보류 중이면 상태를 두고 양만 적는다(여기서 받는 중으로
+        // 바꾸면 만든 경로가 「그 사이 끝났다」로 버려져 다운로드가 결정 없이 멈췄다 — 첫 실행에서 잡았다).
+        .in_progress => if (e.state == .interrupted) {
+            e.state = .active;
+        },
+        .interrupted => if (e.state == .active) {
+            e.state = .interrupted;
+        },
+        .complete => {
+            e.state = if (finalize(e)) .done else .failed;
+        },
+        .canceled => {
+            e.state = .canceled;
+            unlinkPart(e);
+        },
+        .browser_closed => {
+            e.state = .tab_closed;
+            unlinkPart(e);
+        },
+    }
+    changed();
+}
+
+/// sidecar 를 잃었다 — 진행 중이던 것을 끝내고 임시 파일을 지운다. 새 sidecar 의 번호와 섞이지 않게 세대를 올린다.
+pub fn sidecarLost() void {
+    var any = false;
+    for (entries.items) |*e| {
+        if (finished(e.state)) continue;
+        e.state = .engine_restarted;
+        unlinkPart(e);
+        any = true;
+    }
+    sidecar_generation +%= 1;
+    if (sidecar_generation == 0) sidecar_generation = 1;
+    outgoing.clearRetainingCapacity();
+    if (any) changed();
+}
+
+/// `pump` 에서 — 작업 스레드가 만든 경로를 반영하고, 쌓인 것을 sidecar 로 보낸다.
+pub fn drain(gpa: std.mem.Allocator) void {
+    {
+        _ = std.c.pthread_mutex_lock(&prepared_mutex);
+        defer _ = std.c.pthread_mutex_unlock(&prepared_mutex);
+        for (prepared.items) |*p| {
+            const e = entryOfKey(p.key) orelse {
+                if (p.ok) {
+                    var part_z: [max_path_bytes + 1]u8 = undefined;
+                    if (std.fmt.bufPrintZ(&part_z, "{s}", .{p.part_buf[0..p.part_len]})) |z| _ = std.c.unlink(z) else |_| {}
+                }
+                continue;
+            };
+            if (e.state != .preparing) {
+                if (p.ok) { // 그 사이 끝났다(엔진 재시작 등) — 만든 임시 파일을 지운다
+                    @memcpy(e.part_buf[0..p.part_len], p.part_buf[0..p.part_len]);
+                    e.part_len = p.part_len;
+                    unlinkPart(e);
+                }
+                continue;
+            }
+            if (!p.ok) {
+                e.state = .failed;
+                queue(e.key, .decide_cancel);
+            } else {
+                @memcpy(e.final_buf[0..p.final_len], p.final_buf[0..p.final_len]);
+                e.final_len = p.final_len;
+                @memcpy(e.part_buf[0..p.part_len], p.part_buf[0..p.part_len]);
+                e.part_len = p.part_len;
+                e.state = .active;
+                queue(e.key, .decide_path);
+            }
+            changed();
+        }
+        prepared.clearRetainingCapacity();
+    }
+    for (outgoing.items) |o| {
+        const e = entryOfKey(o.key) orelse continue;
+        if (e.generation != sidecar_generation) continue;
+        const msg: message.Message = switch (o.kind) {
+            .decide_path => .{ .download_decide = .{ .browser = e.browser, .download = e.download, .path = e.partPath() } },
+            .decide_cancel => .{ .download_decide = .{ .browser = e.browser, .download = e.download, .path = "" } },
+            .cancel => .{ .download_control = .{ .browser = e.browser, .download = e.download, .action = .cancel } },
+            .resume_download => .{ .download_control = .{ .browser = e.browser, .download = e.download, .action = .resume_download } },
+        };
+        web_osr.sendToSidecar(gpa, msg);
+    }
+    outgoing.clearRetainingCapacity();
+}
+
+// ── 목록 창(Swift ABI) ────────────────────────────────────────────────────────────────────────────────
+
+pub const Action = enum(u32) { cancel = 0, resume_download = 1, accept = 2, discard = 3, remove = 4 };
+
+/// 사용자가 목록 창에서 눌렀다. 받아들였으면 true.
+pub fn act(key: u64, action: Action) bool {
+    const e = entryOfKey(key) orelse return false;
+    switch (action) {
+        .cancel => switch (e.state) {
+            .active, .interrupted => queue(key, .cancel),
+            .preparing => {
+                e.state = .canceled;
+                queue(key, .decide_cancel);
+                changed();
+            },
+            else => return false,
+        },
+        .resume_download => {
+            if (e.state != .interrupted) return false;
+            queue(key, .resume_download);
+        },
+        .accept => {
+            if (e.state != .held) return false;
+            e.state = .preparing;
+            if (!startPrepare(e)) {
+                e.state = .failed;
+                queue(key, .decide_cancel);
+            }
+            changed();
+        },
+        .discard => {
+            if (e.state != .held) return false;
+            e.state = .canceled;
+            queue(key, .decide_cancel);
+            changed();
+        },
+        .remove => {
+            if (!finished(e.state)) return false;
+            for (entries.items, 0..) |x, i| if (x.key == key) {
+                _ = entries.orderedRemove(i);
+                break;
+            };
+            changed();
+        },
+    }
+    return true;
+}
+
+pub fn clearFinished() void {
+    var i: usize = 0;
+    var any = false;
+    while (i < entries.items.len) {
+        if (finished(entries.items[i].state)) {
+            _ = entries.orderedRemove(i);
+            any = true;
+        } else i += 1;
+    }
+    if (any) changed();
+}
+
+pub fn generation() u64 {
+    return list_generation;
+}
+
+pub fn count() usize {
+    return entries.items.len;
+}
+
+pub fn at(index: usize) ?*const Entry {
+    if (index >= entries.items.len) return null;
+    return &entries.items[index];
+}
+
+/// 받는 중(끝나지 않은) 수 — W10c 의 종료 확인.
+pub fn activeTotal() usize {
+    return activeCount(null);
+}
+
+/// 새 「사용자 동작으로 시작한 다운로드」가 있었으면 그 번호(바뀌면 새 요청)와 탭.
+pub fn showRequest(out_surface: *u64) u64 {
+    out_surface.* = show_surface;
+    return show_request;
+}
+
+// ── 시험 ───────────────────────────────────────────────────────────────────────────────────────────────
+
+test "download names are sanitized, keep their extension when cut, and number before the extension (W10a)" {
+    var buf: [max_name_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("a_b.txt", sanitizeName("a:b.txt", 0, &buf));
+    try std.testing.expectEqualStrings("사진_gpj.exe", sanitizeName("사진\u{202E}gpj.exe", 0, &buf));
+    try std.testing.expectEqualStrings("hidden", sanitizeName("..hidden. ", 0, &buf));
+    try std.testing.expectEqualStrings("download", sanitizeName(" . ", 0, &buf));
+    try std.testing.expectEqualStrings("download", sanitizeName("\xff", 0, &buf));
+    const long = sanitizeName(("가" ** 100) ++ ".pdf", 20, &buf);
+    try std.testing.expect(long.len <= max_name_bytes - 20);
+    try std.testing.expect(std.mem.endsWith(u8, long, ".pdf"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(long));
+    var out: [max_name_bytes + 16]u8 = undefined;
+    try std.testing.expectEqualStrings("a (1).txt", numberedName("a.txt", 1, &out));
+    try std.testing.expectEqualStrings("a (2).tar.gz", numberedName("a.tar.gz", 2, &out));
+    try std.testing.expectEqualStrings(".bashrc (1)", numberedName(".bashrc", 1, &out));
+    try std.testing.expectEqualStrings("README (3)", numberedName("README", 3, &out));
+    try std.testing.expect(isRisky("Setup.PKG"));
+    try std.testing.expect(isRisky("x.app.zip"));
+    try std.testing.expect(!isRisky("photo.zip"));
+    try std.testing.expect(!isRisky(".command"));
+}
+
+test "prepare picks a name the file system has free — case, dangling symlinks and in-flight parts all count (W10a)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &dir_buf);
+    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "old" });
+    var first: Prepared = .{ .key = 1, .ok = false };
+    prepare(dir, "A.TXT", &first); // 대소문자만 다르다(APFS 기본은 가리지 않는다) — 번호로
+    try std.testing.expect(first.ok);
+    try std.testing.expect(std.mem.endsWith(u8, first.final_buf[0..first.final_len], "A (1).TXT"));
+    var second: Prepared = .{ .key = 2, .ok = false };
+    prepare(dir, "a.txt", &second); // 받는 중인 임시 파일(`A (1).TXT.maru-part`)도 자리를 차지한다
+    try std.testing.expect(second.ok);
+    try std.testing.expect(std.mem.endsWith(u8, second.final_buf[0..second.final_len], "a (2).txt"));
+    try tmp.dir.symLink("/nonexistent/target", "b.txt", .{}); // 끊긴 링크 — 따라가지 않는다
+    var third: Prepared = .{ .key = 3, .ok = false };
+    prepare(dir, "b.txt", &third);
+    try std.testing.expect(third.ok);
+    try std.testing.expect(std.mem.endsWith(u8, third.final_buf[0..third.final_len], "b (1).txt"));
+    // 완료 — 임시 파일을 최종 이름으로, 그 사이 누가 최종 이름을 만들었으면 다음 번호로.
+    var e: Entry = .{ .key = 9, .generation = 1, .download = 1, .browser = 1, .state = .active, .risky = false };
+    @memcpy(e.final_buf[0..third.final_len], third.final_buf[0..third.final_len]);
+    e.final_len = third.final_len;
+    @memcpy(e.part_buf[0..third.part_len], third.part_buf[0..third.part_len]);
+    e.part_len = third.part_len;
+    try tmp.dir.writeFile(.{ .sub_path = "b (1).txt", .data = "raced" });
+    try std.testing.expect(finalize(&e));
+    try std.testing.expect(std.mem.endsWith(u8, e.finalPath(), "b (2).txt"));
+    const raced = try tmp.dir.readFileAlloc(std.testing.allocator, "b (1).txt", 16);
+    defer std.testing.allocator.free(raced);
+    try std.testing.expectEqualStrings("raced", raced); // 덮어쓰지 않았다
+}

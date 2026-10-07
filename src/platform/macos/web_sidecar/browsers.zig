@@ -90,6 +90,8 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .context_menu_command => |value| context_menus.onCommand(value),
         .popup_reserve => |value| new_tab.onReserve(value.browser),
         .datalist_pick => |value| @import("datalist.zig").pick(value),
+        .download_decide => |value| @import("downloads.zig").decide(value),
+        .download_control => |value| @import("downloads.zig").control(value),
         else => {},
     }
 }
@@ -258,6 +260,7 @@ pub fn onClosed(cef_id: c_int) void {
         context_menus.drop(&closing);
         @import("media_menu.zig").forget(cef_id); // W6h②: 미디어 항목의 진행·DevTools 관찰자 등록
         drag.reset(&closing, true);
+        @import("downloads.zig").browserClosed(entry.id); // W10a: 닫힌 브라우저의 다운로드는 CEF 가 알림 없이 멈춘다
         state.writer.send(.{ .browser_closed = entry.id }) catch {};
     }
     if (state.shutting_down and state.registry.count() == 0) quit();

@@ -1357,6 +1357,26 @@ const Table = struct {
     pick_dock_file: [:0]const u8,
     pick_explorer_folder: [:0]const u8,
     pick_workspace_folder: [:0]const u8,
+    // ── Chromium 탭 다운로드 목록 창 (W10a) ── Swift 는 문장을 만들지 않는다(§7.2) — `maru_macos_downloads_text` 로 받는다.
+    dl_window_title: [:0]const u8,
+    dl_state_preparing: [:0]const u8,
+    dl_state_held: [:0]const u8,
+    dl_state_active: [:0]const u8,
+    dl_state_interrupted: [:0]const u8,
+    dl_state_done: [:0]const u8,
+    dl_state_canceled: [:0]const u8,
+    dl_state_failed: [:0]const u8,
+    dl_state_tab_closed: [:0]const u8,
+    dl_state_engine_restarted: [:0]const u8,
+    dl_state_too_many: [:0]const u8,
+    dl_state_missing: [:0]const u8,
+    dl_button_cancel: [:0]const u8,
+    dl_button_retry: [:0]const u8,
+    dl_button_keep: [:0]const u8,
+    dl_button_discard: [:0]const u8,
+    dl_button_reveal: [:0]const u8,
+    dl_button_clear: [:0]const u8,
+    dl_empty: [:0]const u8,
 
     // ── 언어 선택 (I4b) ──
     // `auto` 만 키로 둔다 — 아래 `preferenceLabel` 참고.
@@ -2068,6 +2088,25 @@ const en: Table = .{
     .pick_dock_file = "Choose a file to open in the dock (Markdown, HTML, SVG, text/code, images, media, PDF)",
     .pick_explorer_folder = "Choose a folder to open in the explorer",
     .pick_workspace_folder = "Choose a folder to add to the workspace",
+    .dl_window_title = "Downloads",
+    .dl_state_preparing = "Preparing…",
+    .dl_state_held = "Held — this file could run code. Download it?",
+    .dl_state_active = "Downloading",
+    .dl_state_interrupted = "Interrupted",
+    .dl_state_done = "Done",
+    .dl_state_canceled = "Canceled",
+    .dl_state_failed = "Failed",
+    .dl_state_tab_closed = "Stopped — the tab was closed",
+    .dl_state_engine_restarted = "Stopped — the browser engine restarted",
+    .dl_state_too_many = "Not downloaded — too many at once",
+    .dl_state_missing = "Removed from disk",
+    .dl_button_cancel = "Cancel",
+    .dl_button_retry = "Retry",
+    .dl_button_keep = "Download",
+    .dl_button_discard = "Discard",
+    .dl_button_reveal = "Show in Finder",
+    .dl_button_clear = "Clear Finished",
+    .dl_empty = "No downloads",
     .scm_show_all_more = "Show all ({0} more)",
     .scm_load_more = "Load more commits",
     .scm_commit_placeholder = "Commit message…",
@@ -3063,6 +3102,25 @@ const ko: Table = .{
     .pick_dock_file = "도크에서 열 파일을 고르세요 (Markdown·HTML·SVG·텍스트/코드·이미지·미디어·PDF)",
     .pick_explorer_folder = "탐색기에서 열 폴더를 고르세요",
     .pick_workspace_folder = "작업공간에 추가할 폴더를 고르세요",
+    .dl_window_title = "다운로드",
+    .dl_state_preparing = "준비 중…",
+    .dl_state_held = "보류됨 — 실행될 수 있는 파일입니다. 받을까요?",
+    .dl_state_active = "받는 중",
+    .dl_state_interrupted = "중단됨",
+    .dl_state_done = "완료",
+    .dl_state_canceled = "취소됨",
+    .dl_state_failed = "실패",
+    .dl_state_tab_closed = "멈춤 — 탭이 닫혔습니다",
+    .dl_state_engine_restarted = "멈춤 — 브라우저 엔진이 다시 시작됐습니다",
+    .dl_state_too_many = "받지 않음 — 한꺼번에 너무 많습니다",
+    .dl_state_missing = "파일이 없습니다",
+    .dl_button_cancel = "취소",
+    .dl_button_retry = "다시 시도",
+    .dl_button_keep = "받기",
+    .dl_button_discard = "버리기",
+    .dl_button_reveal = "Finder에서 보기",
+    .dl_button_clear = "끝난 것 지우기",
+    .dl_empty = "다운로드가 없습니다",
     .scm_show_all_more = "모두 보기 ({0}개 더)",
     .scm_load_more = "커밋 더 보기",
     .scm_commit_placeholder = "커밋 메시지…",
@@ -3460,6 +3518,7 @@ pub fn t(key: Key) [:0]const u8 {
 /// `[:0]const u8`은 chrome의 `[]const u8` 소비자로 그대로 coerce되고 ABI가 요구하는 널 종단도 만족해
 /// 양쪽에 하나의 타입으로 통한다(계약 §3.1).
 pub fn tIn(l: Lang, key: Key) [:0]const u8 {
+    @setEvalBranchQuota(20_000); // `inline else` 가 키마다 갈래를 펼친다 — 키가 1000 을 넘었다(`Key` 의 한도와 같은 까닭)
     const tbl: *const Table = switch (l) {
         .en => &en,
         .ko => &ko,
@@ -3650,6 +3709,7 @@ pub fn applyPreference(pref: Preference) void {
 const testing = std.testing;
 
 test "언어 테이블은 모든 키를 채운다 — 누락은 컴파일에 잡히므로 여기서는 값이 비지 않음을 본다" {
+    @setEvalBranchQuota(20_000); // 키가 1000 을 넘었다 — `Key` 의 한도와 같은 까닭
     // `Table`에 기본값이 없어 필드를 빠뜨리면 이 파일이 컴파일되지 않는다. 그 구조가 지켜지는 한
     // 런타임에 남는 실패는 "빈 문자열을 넣었다"뿐이라 그것만 본다.
     inline for (@typeInfo(Table).@"struct".fields) |f| {
@@ -3681,6 +3741,7 @@ fn placeholderSet(s: []const u8, out: *[8]u8) []const u8 {
 }
 
 test "언어 테이블은 자리표시자 집합이 같아야 한다 — 번역이 값을 잃거나 더하면 화면이 틀린다" {
+    @setEvalBranchQuota(20_000); // 키가 1000 을 넘었다 — `Key` 의 한도와 같은 까닭
     // 번역자가 `{0}`을 빠뜨리면 값이 사라지고, 없던 `{1}`을 넣으면 원문이 그대로 남는다(§6.3).
     // 둘 다 그 언어에서만 나타나므로 사람이 두 테이블을 나란히 보지 않으면 못 잡는다.
     inline for (@typeInfo(Table).@"struct".fields) |f| {
@@ -3726,6 +3787,7 @@ test "번역 틀의 중괄호는 전부 `format` 의 `{0}` 꼴이다 — 숫자�
 }
 
 test "영어 테이블에 한글이 남아 있지 않다 — 옮기다 만 항목을 잡는다" {
+    @setEvalBranchQuota(20_000); // 키가 1000 을 넘었다 — `Key` 의 한도와 같은 까닭
     // 리터럴을 키로 옮길 때 `en` 쪽에 원문을 그대로 붙여 두는 실수가 가장 흔하다.
     inline for (@typeInfo(Table).@"struct".fields) |f| {
         const v = @field(en, f.name);
@@ -3740,6 +3802,7 @@ test "영어 테이블에 한글이 남아 있지 않다 — 옮기다 만 항�
 }
 
 test "한국어 테이블에는 한글이 있다 — 번역을 빠뜨리고 영어를 복사한 항목을 잡는다" {
+    @setEvalBranchQuota(20_000); // 키가 1000 을 넘었다 — `Key` 의 한도와 같은 까닭
     inline for (@typeInfo(Table).@"struct".fields) |f| {
         const v = @field(ko, f.name);
         var has = false;

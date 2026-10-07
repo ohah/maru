@@ -156,6 +156,7 @@ fn handle(conn: c_int) void {
     const query = if (std.mem.indexOfScalar(u8, target, '=')) |eq| target[eq + 1 ..] else "";
     if (std.mem.startsWith(u8, path, "/img/")) return image(conn, path["/img/".len..]);
     if (std.mem.eql(u8, path, "/dl/tone.wav")) return tone(conn);
+    if (std.mem.startsWith(u8, path, "/dl/f/")) return download(conn, path["/dl/f/".len..]);
 
     var body_buf: [8192]u8 = undefined;
     const flaky_image = std.mem.eql(u8, path, "/flaky.svg") and flaky_requests.fetchAdd(1, .monotonic) > 0;
@@ -167,6 +168,48 @@ fn handle(conn: c_int) void {
     const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nCache-Control: no-store\r\n{s}Connection: close\r\n\r\n", .{ content_type, body.len, csp }) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
     _ = std.c.write(conn, body.ptr, body.len);
+}
+
+/// W10a 판정의 받을 파일(`download_check.zig`) — 첨부로 내려 보낸다.
+pub const download_body = "maru-download-report\n" ** 40;
+/// `slow` 의 크기와 조각 — 64 KiB 를 0.1 초마다(약 5 초). 받는 동안 진행 갱신·취소·닫기를 본다.
+pub const slow_bytes: usize = 50 * slow_chunk;
+const slow_chunk: usize = 64 * 1024;
+
+/// `/dl/f/<종류>`: `attach` 첨부 report.txt, `ctl` 제어 문자·`/`·`..` 를 품은 `filename*` 이름, `slow` 느린 3 MiB slow.bin
+/// (한 스레드 서버를 묶지 않게 따로 스레드에서 보낸다).
+fn download(conn: c_int, kind: []const u8) void {
+    var hb: [512]u8 = undefined;
+    if (std.mem.eql(u8, kind, "slow")) {
+        const own = std.c.dup(conn);
+        if (own < 0) return;
+        const thread = std.Thread.spawn(.{}, slowDownload, .{own}) catch {
+            _ = std.c.close(own);
+            return;
+        };
+        thread.detach();
+        return;
+    }
+    const disposition = if (std.mem.eql(u8, kind, "ctl"))
+        "attachment; filename*=UTF-8''a%01b%0Ac%2F..%2Fd.txt"
+    else
+        "attachment; filename=\"report.txt\"";
+    const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nContent-Disposition: {s}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{ download_body.len, disposition }) catch return;
+    _ = std.c.write(conn, head.ptr, head.len);
+    _ = std.c.write(conn, download_body.ptr, download_body.len);
+}
+
+fn slowDownload(conn: c_int) void {
+    defer _ = std.c.close(conn);
+    var hb: [320]u8 = undefined;
+    const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nContent-Disposition: attachment; filename=\"slow.bin\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{slow_bytes}) catch return;
+    _ = std.c.write(conn, head.ptr, head.len);
+    const chunk = [_]u8{'s'} ** slow_chunk;
+    var sent: usize = 0;
+    while (sent < slow_bytes) : (sent += slow_chunk) {
+        if (std.c.write(conn, &chunk, chunk.len) != @as(isize, @intCast(chunk.len))) return; // 받는 쪽이 끊었다
+        @import("os.zig").sleepMs(100);
+    }
 }
 
 /// W6h② 판정의 소리 — 0.2 초 무음 WAV(8 kHz 모노 16 비트).
@@ -395,6 +438,12 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/dialog-loop")) {
         return "<!doctype html><title>loading</title><script>for(var i=0;i<5;i++)alert('loop '+i);document.title='loop-done'</script>";
     }
+    // W10a: 불러지면 제목을 `dlp-ready` 로 바꾸고 0.3 초 뒤 받는다(begin 이 제목 대기에 묻히지 않게 — 사용자 동작 없이 — 첫 자동 다운로드는 Chromium 이 묻지 않는다). `?a=attach|ctl|slow|data|two`.
+    // `data` 는 5000 바이트 data: 주소(주소 상한 2048 을 넘는다), `two` 는 0.6 초 간격으로 둘(둘째는 「여러 파일 받기」 권한을 묻는다).
+    if (std.mem.eql(u8, path, "/dlp")) return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><body><script>" ++
+        "function go(h,n){{var a=document.createElement('a');a.href=h;if(n)a.download=n;document.body.appendChild(a);a.click()}}" ++
+        "onload=function(){{document.title='dlp-ready';setTimeout(function(){{var k='{s}';if(k==='data')go('data:text/plain,'+'x'.repeat(5000),'big.txt');" ++
+        "else if(k==='two'){{go('/dl/f/attach');setTimeout(function(){{go('/dl/f/ctl')}},600)}}else go('/dl/f/'+k)}},300)}}</script>", .{query});
     if (std.mem.eql(u8, path, "/file")) return filePage("accept=\"image/*,.txt\"", buf);
     if (std.mem.eql(u8, path, "/files")) return filePage("multiple", buf);
     if (std.mem.eql(u8, path, "/folder")) return filePage("webkitdirectory", buf);

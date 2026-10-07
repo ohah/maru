@@ -19,6 +19,7 @@ const ring_receiver = @import("web_sidecar/ring_receiver.zig");
 const iosurface = @import("web_sidecar/iosurface.zig");
 
 const ws = maru.session.web_sidecar;
+const web_downloads = @import("web_downloads.zig");
 const plan = maru.session.web_osr_plan;
 const mailbox = ws.mailbox;
 const osr_input = maru.session.web_osr_input;
@@ -1235,6 +1236,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     const budget: usize = if (fileFetchPending()) 8 * 1024 * 1024 else 256 * 1024;
     const read = lsp_process.readInto(p, gpa, &inbox, budget) catch .eof;
     drainInbox(gpa, now_ms);
+    web_downloads.drain(gpa); // W10a: 작업 스레드가 만든 경로·목록 창의 누름을 sidecar 로
     expireContextMenus(gpa, now_ms);
     expireDragOuts(gpa, now_ms);
     expireNewTabs(gpa, now_ms);
@@ -2558,6 +2560,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         if (s.close_ask == .asking or s.close_ask == .asked) s.close_ask = .closed;
     }
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②) — 붙은 팝업은 새 sidecar 에서 보통 탭으로 되살아난다
+    web_downloads.sidecarLost(); // 받던 다운로드는 끝났다(W10a) — 임시 파일을 지우고 새 sidecar 의 번호와 섞이지 않게
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
 
@@ -2633,6 +2636,17 @@ fn sendCommand(gpa: std.mem.Allocator, command: plan.Command) void {
 }
 
 /// 보낸다 — handshake 전이면 쥐었다가 hello_ack 에 보낸다.
+/// 다운로드(W10a — `web_downloads`)가 sidecar 로 보낸다.
+pub fn sendToSidecar(gpa: std.mem.Allocator, message: Message) void {
+    send(gpa, message);
+}
+
+/// 이 탭에 `window_ms` 안에 사용자 입력(누름·키·조합·편집 명령·메뉴 답·끌어 놓기)을 보냈는가(W10a — 사용자 동작으로 시작한 다운로드).
+pub fn recentUserInput(surface_id: u64, window_ms: i64, now_ms: i64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return now_ms - s.last_user_input_ms <= window_ms;
+}
+
 fn send(gpa: std.mem.Allocator, message: Message) void {
     var frame: [ws.wire.max_frame_bytes]u8 = undefined;
     const len = ws.codec.encode(message, &frame) catch return; // maru 가 만든 값이 codec 규칙을 어기면 보내지 않는다
@@ -2843,6 +2857,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .web_notification => |v| queueNote(gpa, v),
         // W6m②: 제안 목록 — 그 탭이 키 대상인 창이 그린다. 닫기는 그 목록 번호일 때만(0 이면 어느 것이든).
         .datalist_show => |v| if (surfaces.getPtr(v.browser)) |s| setDatalist(gpa, s, v),
+        // W10a: 다운로드 — 경로는 maru 가 정한다(`web_downloads`). 받아들일 수 없으면 곧바로 받지 않는다고 답한다.
+        .download_begin => |v| if (surfaces.getPtr(v.browser) == null or !web_downloads.onBegin(v, monotonicNow())) {
+            send(gpa, .{ .download_decide = .{ .browser = v.browser, .download = v.download, .path = "" } });
+        },
+        .download_update => |v| web_downloads.onUpdate(v),
         .datalist_hide => |v| if (surfaces.getPtr(v.browser)) |s| if (s.datalist) |d| if (v.list == 0 or v.list == d.list) dropDatalist(gpa, s),
         // W6c②: 우클릭 메뉴 — 그 탭이 보이는 창이 가져가 띄운다. 모르는 탭이거나 담을 항목이 없으면(동영상 자리) 곧바로 취소한다.
         // 앞 메뉴가 남았으면(생기지 않는다 — CEF 는 메뉴가 떠 있는 동안 새 메뉴를 만들지 않는다) 그것은 취소로 끝낸다.
@@ -2875,7 +2894,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .datalist_pick => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .datalist_pick, .download_decide, .download_control => unreachable,
     }
 }
 

@@ -293,7 +293,10 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
 /// 쪽 처리로 넘긴다(그쪽이 인자 참조를 놓는다).
 fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, transition: c.cef_transition_type_t) callconv(.c) void {
     if (frame != null and frame.*.is_main.?(frame) != 0) {
-        if (entryOf(browser)) |entry| tooltip.reset(entry.id);
+        if (entryOf(browser)) |entry| {
+            tooltip.reset(entry.id);
+            @import("datalist.zig").reset(entry.id); // W6m①: 옛 문서의 제안 목록
+        }
     }
     dialogs.onLoadStart(handler, browser, frame, transition);
 }
@@ -342,6 +345,7 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
     // 통과했다). 거두지 않는 버전이어도 콜백이 쥔 채 남지 않게(거두기가 먼저 왔으면 쥔 것이 없어 아무 일도 없다).
     context_menus.finish(entry, .cancel);
     drag.reset(entry, false);
+    @import("datalist.zig").reset(entry.id); // W6m①: 죽은 페이지의 제안 목록
     browsers.state.writer.send(.{ .renderer_gone = .{ .browser = entry.id, .reason = reason } }) catch {};
     dialogs.rendererGone(entry.id);
     permissions.rendererGone(entry.id);

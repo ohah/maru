@@ -18,6 +18,7 @@ const library = @import("library.zig");
 const browsers = @import("browsers.zig");
 const dialogs = @import("dialogs.zig");
 const renderer = @import("renderer.zig");
+const datalist = @import("datalist.zig");
 
 const message = protocol.message;
 const BrowserId = message.BrowserId;
@@ -32,8 +33,12 @@ const BrowserId = message.BrowserId;
 /// `Notification.prototype.constructor` 가 감싼 생성자와 다르며, 잘못 부를 때의 예외 `stack` 에 Proxy 프레임이 보이고,
 /// `showNotification` 이 권한이 있을 때 돌려준 Promise 의 `constructor` 를 읽고(then 의 species), 누르기 이벤트는 `isTrusted`
 /// 가 false 다.
+///
+/// 제안 목록(W6m① — `datalist.script_part`)도 이 스크립트 안에서 돈다 — 숨긴 `send` 를 꺼내 지우는 것은 한 번뿐이라 둘이 같은
+/// `send` 를 나눠 쓴다(알림은 `Notification` 이 없는 문서 — secure context 가 아닌 http — 에서 빠지고, 제안 목록은 그래도 돈다).
 const proxy_script = "(function(){var send=window." ++ renderer.stash_name ++ ";try{delete window." ++ renderer.stash_name ++ "}catch(e){}" ++
-    "var N=window.Notification;if(typeof send!=='function'||typeof N!=='function')return;" ++
+    "if(typeof send!=='function')return;" ++
+    "(function(){var N=window.Notification;if(typeof N!=='function')return;" ++
     "var R=Reflect.construct,A=Reflect.apply,J=JSON.stringify,S=String,E=Event,T=Promise.prototype.then,D=EventTarget.prototype.dispatchEvent," ++
     "PD=Object.getOwnPropertyDescriptor(N,'permission'),PG=PD&&PD.get,seq=0,live={};" ++
     "function ok(){try{return A(PG,N,[])==='granted'}catch(e){return false}}" ++
@@ -44,7 +49,8 @@ const proxy_script = "(function(){var send=window." ++ renderer.stash_name ++ ";
     "if(window.ServiceWorkerRegistration){var SP=ServiceWorkerRegistration.prototype;" ++
     "SP.showNotification=new Proxy(SP.showNotification,{__proto__:null,apply:function(f,self,a){var r=A(f,self,a);" ++
     "try{if(ok())A(T,r,[function(){relay(a[0],a[1],0)},function(){}])}catch(e){}return r}})}" ++
-    "send(function(n){var x=live[n];if(x)try{A(D,x,[new E('click')])}catch(e){}})})()";
+    "send(function(n){var x=live[n];if(x)try{A(D,x,[new E('click')])}catch(e){}})})();" ++
+    datalist.script_part ++ "})()";
 
 comptime {
     @setEvalBranchQuota(20_000);
@@ -173,7 +179,7 @@ fn admit(id: BrowserId) bool {
     return true;
 }
 
-/// client 의 `on_process_message_received` — 렌더러의 알림(`maru.notify`)만 본다.
+/// client 의 `on_process_message_received` — 렌더러의 알림(`maru.notify`)과 제안 목록(`maru.datalist` — W6m①)만 본다.
 pub fn onProcessMessageReceived(_: [*c]c.cef_client_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, source: c.cef_process_id_t, msg: [*c]c.cef_process_message_t) callconv(.c) c_int {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
@@ -184,7 +190,14 @@ pub fn onProcessMessageReceived(_: [*c]c.cef_client_t, browser: [*c]c.cef_browse
     if (name == null) return 0;
     defer api.string_userfree_utf16_free(name);
     var name_buf: [32]u8 = undefined;
-    if (!std.mem.eql(u8, library.readString(api, name, &name_buf), renderer.notify_message)) return 0;
+    const name_text = library.readString(api, name, &name_buf);
+    if (std.mem.eql(u8, name_text, renderer.datalist_message)) {
+        const id = dialogs.browserId(browser) orelse return 1;
+        const entry = browsers.state.registry.byId(id) orelse return 1;
+        datalist.onMessage(id, frame, msg, entry.size);
+        return 1;
+    }
+    if (!std.mem.eql(u8, name_text, renderer.notify_message)) return 0;
     const id = dialogs.browserId(browser) orelse return 1;
     relay(id, browser, frame, msg);
     return 1;

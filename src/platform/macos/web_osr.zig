@@ -2684,6 +2684,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             send(gpa, .{ .permission_reply = .{ .browser = v.browser, .request = v.request, .result = if (allowed) .accept else .ignore } });
         },
         .web_notification => |v| queueNote(gpa, v),
+        // W6m①: 제안 목록 — sidecar 가 보내기까지만 왔다. 그리기·고르기(`datalist_pick`)는 W6m② 가 한다.
+        .datalist_show, .datalist_hide => {},
         // W6c②: 우클릭 메뉴 — 그 탭이 보이는 창이 가져가 띄운다. 모르는 탭이거나 담을 항목이 없으면(동영상 자리) 곧바로 취소한다.
         // 앞 메뉴가 남았으면(생기지 않는다 — CEF 는 메뉴가 떠 있는 동안 새 메뉴를 만들지 않는다) 그것은 취소로 끝낸다.
         .context_menu => |v| {
@@ -2715,7 +2717,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .datalist_pick => unreachable,
     }
 }
 

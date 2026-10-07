@@ -89,6 +89,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .frame_channel => |value| frameChannel(value, writer),
         .context_menu_command => |value| context_menus.onCommand(value),
         .popup_reserve => |value| new_tab.onReserve(value.browser),
+        .datalist_pick => |value| @import("datalist.zig").pick(value),
         else => {},
     }
 }

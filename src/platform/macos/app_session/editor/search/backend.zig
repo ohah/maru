@@ -140,6 +140,9 @@ pub const Backend = struct {
     closed: bool = false,
     /// 제품 호출 경로는 고정 앱 번들 helper만 사용한다.
     pub fn startBundled(self: *Backend, root: []const u8, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
+        // 닫힌 요청과 재사용 대기는 번들 조회·할당보다 먼저 같은 상태 오류를 반환한다.
+        if (self.closed) return error.Closed;
+        if (self.active != null) return error.Busy;
         const helper = try @import("helper.zig").locate(self.a, self.io);
         defer self.a.free(helper);
         return self.start(helper, root, query, opts, state, models, budget);

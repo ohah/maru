@@ -17,20 +17,25 @@ pub const Pattern = struct {
     context: *c.pcre2_match_context_8,
 
     pub fn init(pattern: []const u8, match_case: bool) Error!Pattern {
-        return initWithMode(pattern, match_case, null);
+        return initWithMode(pattern, match_case, null, true);
     }
 
     /// 문서 전체를 같은 subject로 검색하면 문서 앵커와 줄 앵커를 함께 처리할 수 있다.
     pub fn initDocument(pattern: []const u8, match_case: bool, newline: Newline) Error!Pattern {
-        return initWithMode(pattern, match_case, newline);
+        return initWithMode(pattern, match_case, newline, true);
     }
 
-    fn initWithMode(pattern: []const u8, match_case: bool, newline: ?Newline) Error!Pattern {
+    /// 파일 glob은 ripgrep과 동일하게 UTF-8 코드포인트가 아닌 원문 바이트를 판정한다.
+    pub fn initBytes(pattern: []const u8, match_case: bool) Error!Pattern {
+        return initWithMode(pattern, match_case, null, false);
+    }
+
+    fn initWithMode(pattern: []const u8, match_case: bool, newline: ?Newline, utf: bool) Error!Pattern {
         if (!std.unicode.utf8ValidateSlice(pattern)) return error.InvalidUtf8;
         var error_code: c_int = 0;
         var error_offset: usize = 0;
         // 마지막 개행 뒤의 빈 편집기 줄에도 ^가 있어야 하므로 문서 모드는 ALT_CIRCUMFLEX를 켠다.
-        const options: u32 = c.PCRE2_UTF | c.PCRE2_UCP |
+        const options: u32 = (if (utf) @as(u32, c.PCRE2_UTF | c.PCRE2_UCP) else 0) |
             (if (match_case) @as(u32, 0) else c.PCRE2_CASELESS) |
             (if (newline != null) @as(u32, c.PCRE2_MULTILINE | c.PCRE2_ALT_CIRCUMFLEX) else 0);
         const compile_context = if (newline != null)

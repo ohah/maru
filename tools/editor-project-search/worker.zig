@@ -7,6 +7,10 @@ pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const argv = try init.minimal.args.toSlice(a);
     defer a.free(argv);
+    if (argv.len == 4 and std.mem.eql(u8, argv[1], "--audit-ownership")) {
+        try @import("ownership.zig").run(a, init.io, argv[2], argv[3]);
+        return;
+    }
     if (argv.len < 6) return error.Arguments;
     const cancel_ms = try std.fmt.parseInt(i64, argv[4], 10);
     const bytes = try std.fmt.parseInt(usize, argv[5], 10);

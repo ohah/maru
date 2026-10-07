@@ -22,6 +22,7 @@ pub fn main(init: std.process.Init) !void {
         for (models.items) |*captured| captured.deinit(a);
         models.deinit(a);
     }
+    var snapshot_bytes: usize = 64 * 1024 * 1024;
     var execution_ms: i64 = 10_000;
     var mutate = false;
     var stale = false;
@@ -39,6 +40,14 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= argv.len) return error.MissingGlob;
             if (include) try includes.append(a, argv[i]) else try excludes.append(a, argv[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, argv[i], "--snapshot-bytes") or std.mem.eql(u8, argv[i], "--matches")) {
+            const snapshot_limit = std.mem.eql(u8, argv[i], "--snapshot-bytes");
+            i += 1;
+            if (i >= argv.len) return error.Arguments;
+            const limit = try std.fmt.parseInt(usize, argv[i], 10);
+            if (snapshot_limit) snapshot_bytes = limit else state.limits.matches = limit;
             continue;
         }
         if (std.mem.eql(u8, argv[i], "--execution-ms")) {
@@ -78,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
             var file = try editor.edit_doc.EditableFile.init(a, owned orelse argv[i + 2], false);
             defer file.deinit();
             const shared = std.mem.eql(u8, argv[i], "--shared");
-            _ = try api.model.captureUnique(a, &state, &models, argv[i + 1], .{ .owner = 1, .slot = if (shared) 0 else models.items.len, .generation = 1 }, 0, &file, &retained, 64 * 1024 * 1024);
+            _ = try api.model.captureUnique(a, &state, &models, argv[i + 1], .{ .owner = 1, .slot = if (shared) 0 else models.items.len, .generation = 1 }, 0, &file, &retained, snapshot_bytes);
             if (mutate) _ = try file.buf.insert(0, "changed-after-capture");
             i += 2;
         } else try state.occupy(a, argv[i]);
@@ -88,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
     var backend: api.Backend = .{ .a = a, .io = init.io };
     defer backend.deinit();
     const started = std.Io.Timestamp.now(init.io, .awake);
-    const budget: api.Budget = .{ .timing = .{ .execution_ms = execution_ms, .reap_ms = 1000 }, .snapshot_bytes = 64 * 1024 * 1024, .preview_bytes = 256 };
+    const budget: api.Budget = .{ .timing = .{ .execution_ms = execution_ms, .reap_ms = 1000 }, .snapshot_bytes = snapshot_bytes, .preview_bytes = 256 };
     if (std.mem.eql(u8, argv[1], "@bundle")) {
         try backend.startBundled(argv[2], argv[3], opts, &state, &models, budget);
     } else try backend.start(argv[1], argv[2], argv[3], opts, &state, &models, budget);

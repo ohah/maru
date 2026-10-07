@@ -67,6 +67,8 @@ var log_err_count: std.atomic.Value(usize) = .init(0);
 var is_fuzz_test: bool = false;
 const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
+const runner_home = @import("test_runner_home.zig");
+
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
@@ -93,16 +95,17 @@ extern var environ: [*:null]?[*:0]u8;
 /// 안의 죽은 host 칸을 **지우는 정리까지** 돌았다. 셸은 `~/.bash_history` 를, terminfo 는 `~/.cache/maru/terminfo`
 /// 를 썼다. 예전에는 「PTY·shell fixture 의 의미가 달라진다」며 두었으나, 전체 `zig build test` 를 가짜 `HOME` 으로
 /// 돌려 새로 빨개지는 판정자가 0 개임을 실측했다. 이미 다른 곳을 가리키는 `HOME`(앱 스모크 빌드 스텝의
-/// fixture home)은 그 스텝의 격리이므로 그대로 둔다. 이미 설정된 `XDG_*` 는 **어느 경우든** 지금 `HOME` 아래로
-/// 옮긴다 — 부모 셸의 `XDG_CACHE_HOME` 이 실제 캐시를 가리키면 `HOME` 만 옮겨서는 소용없다(`reexecWithIsolatedHome`).
+/// fixture home)은 그 스텝의 격리이므로 그대로 둔다. `XDG_*` 는 **어느 경우든** 지금 `HOME` 아래로 옮기거나 채운다 — 부모 셸의 `XDG_CACHE_HOME` 이 실제 캐시를 가리키면 `HOME` 만 옮겨서는 소용없다(`reexecWithIsolatedHome`).
 /// 예전에는 `HOME` 을 바꿀 때만 옮겨서, fixture home 을 받은 스텝은 셸의 실제 `XDG_*` 를 그대로 물려받았다(2026-10-06 재현).
 ///
 /// ⚠️ **login(1) 로 감싼 셸은 이 격리 밖이다**(2026-10-06 재현). macOS PTY 의 login 래퍼(`/usr/bin/login -flp <user>
-/// /bin/bash … exec -l <shell>`)는 `-p` 로 나머지 환경(`XDG_*` 포함)은 지키지만 **`HOME` 은 사용자 DB 의 실제 홈으로 다시
-/// 정한다.** 그래서 `login = true` 로 PTY 를 띄우는 판정자(`pty/macos.zig` 의 login wrapper 판정자들)와 앱 스모크의
-/// 대화형 셸은 실제 홈의 시작 파일(`~/.profile`·`~/.zshrc` …)을 읽고 로그인 기록을 갱신하며, 대화형 셸은 사용자 설정에
-/// 따라 history 를 실제 홈에 쓸 수 있다. 제품 자식(`maru __session-host`)과 `controlled_smoke`(`/bin/sh -c`, login 아님)는
-/// 격리가 그대로 먹는다. **이 격리를 믿고 login 셸 판정자가 실제 홈에 쓰는 일을 만들지 않는다.**
+/// /bin/bash … exec -l <shell>`)는 `-p` 로 나머지 환경(`XDG_*` 포함)은 지키지만 **`HOME`·`USER`·`LOGNAME`·`SHELL` 은
+/// 사용자 DB 값으로 다시 정한다**(2026-10-07 실측). 그래서 `login = true` 로 PTY 를 띄우는 판정자(`pty/macos.zig` 의 login
+/// wrapper 판정자들)와 앱 스모크의 대화형 셸은 실제 홈의 시작 파일(`~/.profile`·`~/.zshrc` …)을 읽고 로그인 기록을
+/// 갱신하며, 대화형 셸은 사용자 설정에 따라 history 같은 **`HOME` 기준** 파일을 실제 홈에 쓸 수 있다. 러너가 네 `XDG_*` 를
+/// **비어 있어도** 격리 홈 아래로 채워 두므로(`runner_home.xdgNeedsMove`) XDG 를 따르는 쓰기는 그 셸 안에서도 격리 홈에
+/// 남는다. 제품 자식(`maru __session-host`)과 `controlled_smoke`(`/bin/sh -c`, login 아님)는 격리가 그대로 먹는다.
+/// **이 격리를 믿고 login 셸 판정자가 실제 홈에 쓰는 일을 만들지 않는다.**
 /// 어느 주입이든 실패하면 test process는 시작하지 않는다. 라이브러리의 `builtin.is_test` 기본값은 이
 /// process만 보호하며, 환경을 못 받은 제품 child는 사용자 공용 namespace와 workspace로 돌아가므로 여기서
 /// 계속 실행할 안전한 fallback은 없다.
@@ -119,11 +122,18 @@ fn isolateSessionHostRoot() error{IsolationFailed}!void {
     if (setenv("CFFIXED_USER_HOME", root.ptr, 1) != 0)
         return error.IsolationFailed;
     const real_home = homeIsRealUserHome();
-    if (real_home or xdgOutsideHome()) try reexecWithIsolatedHome(real_home);
+    if (real_home or xdgNeedsIsolation()) try reexecWithIsolatedHome(real_home);
+}
+
+/// 격리를 못 세웠다 — **사유를 찍고** 실패한다. 예전에는 `exit(1)` 만 남아 mkdtemp·경로 길이·execve 중 무엇이 틀렸는지
+/// 알 수 없었다(적대적 검증 2026-10-07).
+fn isolationFail(comptime why: []const u8) error{IsolationFailed} {
+    std.debug.print("maru test runner: HOME/XDG isolation failed: " ++ why ++ "\n", .{});
+    return error.IsolationFailed;
 }
 
 /// `replace_home` 이면 실제 홈 대신 새 임시 홈(`/tmp/maru-home-<pid>-XXXXXX`)을 세우고, 아니면 지금 `HOME` 을 둔 채
-/// 그 밖을 가리키는 `XDG_*` 만 옮겨서 **이 바이너리를 그 환경으로 다시 exec 한다.**
+/// 비었거나 그 밖을 가리키는 `XDG_*` 만 홈 아래로 고쳐서 **이 바이너리를 그 환경으로 다시 exec 한다.**
 ///
 /// 왜 exec 인가: 시작 뒤 `setenv` 로만 바꾸면 libc 의 `environ` 은 새 값을, std 가 시작 때 붙잡은 envp 조각
 /// (`init.environ` → `testing.environ`·`testing.io_instance`·debug Io)은 **실제 홈**을 본다. 한 프로세스 안에서
@@ -134,10 +144,13 @@ fn isolateSessionHostRoot() error{IsolationFailed}!void {
 /// `_NSGetArgc` 로 fixture 게이트를 판단하는 판정자들도 영향이 없다.
 ///
 /// `XDG_*` 는 **지우지 않고**(macOS libc 의 `unsetenv` 는 배열을 제자리에서 줄여 std 의 조각 훑기를 죽인다 —
-/// `std_environ_view.zig`), 이미 설정된 것만 홈 아래로 바꾼다. 없는 것은 `HOME` 에서 유도된다.
+/// `std_environ_view.zig`), 홈 아래로 **쓰기만** 한다(없던 것은 새로 채운다 — login 셸 때문, 위 주석).
 /// session root 와 같은 자리는 쓰지 않는다 — root 안에는 session host 의 것만 둔다. 이름은 `maru-<태그>-<pid>-…`
-/// 꼴이라 `tools/clean-tmp-fixtures.sh` 가 앞에서부터 pid 를 읽어 거둔다. exec 된 쪽은 홈이 실제가 아니고 `XDG_*` 가
-/// 모두 홈 아래라 다시 돌지 않는다.
+/// 꼴이라 `tools/clean-tmp-fixtures.sh` 가 앞에서부터 pid 를 읽어 거둔다.
+///
+/// **exec 전에 「다시 exec 할 일이 없다」를 확인한다.** exec 된 쪽은 같은 판정을 다시 하므로, 고친 환경이 그 판정을
+/// 통과하지 못하면 **끝없이 자기 자신을 exec 한다** — 실제로 `HOME=/` 에서 그랬다(`runner_home.pathUnder`). 판정과
+/// 고침이 어긋나는 결함이 또 생겨도 루프가 아니라 사유 있는 실패가 되게 한다.
 ///
 /// **임시 홈은 `mkdtemp` 로 실행마다 새로 만든다**(2026-10-07). 예전에는 `/tmp/maru-home-<pid>` 를 `mkdir` 하고
 /// `EEXIST` 를 받아들였다 — ① pid 가 재사용되면 이전 실행이 남긴 `~/.cache/maru`(죽은 host 칸·terminfo)를 물려받아
@@ -148,55 +161,43 @@ fn reexecWithIsolatedHome(replace_home: bool) error{IsolationFailed}!void {
     var home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     const home: [:0]const u8 = if (replace_home) blk: {
         const template = std.fmt.bufPrintZ(&home_buf, "/tmp/maru-home-{d}-XXXXXX", .{std.c.getpid()}) catch
-            return error.IsolationFailed;
+            return isolationFail("temp home template too long");
         // 셸이 `cd ~` 하고 제품이 `~/.cache/maru` 를 만들 수 있게 미리 세운다.
-        const made = mkdtemp(template.ptr) orelse return error.IsolationFailed;
+        const made = mkdtemp(template.ptr) orelse return isolationFail("mkdtemp");
         if (setenv("HOME", made, 1) != 0)
-            return error.IsolationFailed;
+            return isolationFail("setenv HOME");
         break :blk template;
     } else blk: {
         // **복사해 둔다** — 아래 `setenv` 가 환경 배열을 재할당해도 기준 홈이 흔들리지 않게.
-        const current = std.mem.span(getenv("HOME") orelse return error.IsolationFailed);
-        break :blk std.fmt.bufPrintZ(&home_buf, "{s}", .{current}) catch return error.IsolationFailed;
+        const current = std.mem.span(getenv("HOME") orelse return isolationFail("HOME unset"));
+        break :blk std.fmt.bufPrintZ(&home_buf, "{s}", .{current}) catch return isolationFail("HOME too long");
     };
-    const xdg = [_]struct { name: [*:0]const u8, sub: []const u8 }{
-        .{ .name = "XDG_CACHE_HOME", .sub = ".cache" },
-        .{ .name = "XDG_CONFIG_HOME", .sub = ".config" },
-        .{ .name = "XDG_DATA_HOME", .sub = ".local/share" },
-        .{ .name = "XDG_STATE_HOME", .sub = ".local/state" },
-    };
-    for (xdg) |x| {
-        const current = getenv(x.name) orelse continue;
-        if (!replace_home and pathUnder(std.mem.span(current), home)) continue; // fixture 가 자기 홈 아래에 둔 것은 그대로
+    for (runner_home.xdg_vars) |x| {
+        const current: ?[]const u8 = if (getenv(x.name)) |v| std.mem.span(v) else null;
+        // fixture 가 자기 홈 아래에 둔 것은 그대로. 실제 홈을 바꿀 때는 무엇이든 새 홈 아래로.
+        if (!replace_home and !runner_home.xdgNeedsMove(current, home)) continue;
         var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-        const value = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ home, x.sub }) catch return error.IsolationFailed;
-        if (setenv(x.name, value.ptr, 1) != 0) return error.IsolationFailed;
+        const value = runner_home.xdgPath(&buf, home, x.sub) catch return isolationFail("XDG path too long");
+        if (setenv(x.name, value.ptr, 1) != 0) return isolationFail("setenv XDG");
     }
+    if (homeIsRealUserHome() or xdgNeedsIsolation()) return isolationFail("rewritten environment would re-exec again");
     var exe_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     var exe_len: u32 = std.fs.max_path_bytes;
-    if (std.c._NSGetExecutablePath(&exe_buf, &exe_len) != 0) return error.IsolationFailed;
+    if (std.c._NSGetExecutablePath(&exe_buf, &exe_len) != 0) return isolationFail("executable path");
     _ = std.c.execve(@ptrCast(&exe_buf), _NSGetArgv().*, environ);
-    return error.IsolationFailed; // execve 는 성공하면 돌아오지 않는다
+    return isolationFail("execve"); // execve 는 성공하면 돌아오지 않는다
 }
 
-/// 이미 설정된 `XDG_*` 중 지금 `HOME` 밖을 가리키는 것이 있는가. `HOME` 이 없으면 아니다 — 명시 환경으로 자기 자신을
-/// 다시 띄우는 fixture 자식들이고(`homeIsRealUserHome` 과 같은 규칙), 옮길 기준 홈도 없다.
-fn xdgOutsideHome() bool {
+/// 네 `XDG_*` 중 비었거나 지금 `HOME` 밖을 가리키는 것이 있는가(`runner_home.xdgNeedsMove`). `HOME` 이 없거나 비면
+/// 아니다 — 명시 환경으로 자기 자신을 다시 띄우는 fixture 자식들이고(`homeIsRealUserHome` 과 같은 규칙), 옮길 기준 홈도 없다.
+fn xdgNeedsIsolation() bool {
     const home = std.mem.span(getenv("HOME") orelse return false);
-    for ([_][*:0]const u8{ "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME" }) |name| {
-        const value = std.mem.span(getenv(name) orelse continue);
-        if (!pathUnder(value, home)) return true;
+    if (home.len == 0) return false;
+    for (runner_home.xdg_vars) |x| {
+        const value: ?[]const u8 = if (getenv(x.name)) |v| std.mem.span(v) else null;
+        if (runner_home.xdgNeedsMove(value, home)) return true;
     }
     return false;
-}
-
-/// `path` 가 `dir` 자신이거나 그 아래인가 — 끝 `/` 는 무시하고 **경로 칸 단위**로 본다(`/tmp/h` 는 `/tmp/home` 의 조상이 아니다).
-fn pathUnder(path: []const u8, dir: []const u8) bool {
-    const p = std.mem.trimEnd(u8, path, "/");
-    const d = std.mem.trimEnd(u8, dir, "/");
-    if (d.len == 0) return false;
-    if (!std.mem.startsWith(u8, p, d)) return false;
-    return p.len == d.len or p[d.len] == '/';
 }
 
 /// 지금 `HOME` 이 이 사용자의 실제 홈(OS 사용자 DB)인가. **없으면 아니다** — 명시 환경으로 자기 자신을 다시 띄우는

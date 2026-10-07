@@ -7526,7 +7526,7 @@ host의 handle 하나가 실제 checkpoint 전체를 대체해, 살아 있는 �
 캐시를 유도하므로, 예전처럼 두면 테스트가 띄운 `maru __session-host`가 실제 `~/.cache/maru/agent-turn-events/`에
 칸을 만들고 그 안의 죽은 host 칸을 정리했다. 전체 `zig build test`를 가짜 `HOME`으로 돌려 새로 실패하는 판정자가
 없음을 확인했다. 이미 다른 곳을 가리키는 `HOME`(앱 스모크 빌드 스텝의 fixture home)은 그 스텝의 격리라 그대로 두되, 그 밖을 가리키는
-`XDG_*`는 그 `HOME` 아래로 옮긴다(2026-10-07). login(1)로 감싼 셸은 예외다 — login이 `HOME`을 실제 홈으로 다시 정한다
+`XDG_*`는 비었거나 그 밖이면 그 `HOME` 아래로 채우거나 옮긴다(2026-10-07). login(1)로 감싼 셸은 예외다 — login이 `HOME`(과 `USER`·`LOGNAME`·`SHELL`)을 실제 값으로 다시 정한다
 (범위는 `docs/development-commands.md`와 러너 주석).
 
 Unix socket은 macOS `sockaddr_un.sun_path`의

@@ -1,0 +1,92 @@
+[
+  {
+    "mode": "close",
+    "round": 1,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "close",
+    "round": 2,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "close",
+    "round": 3,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "close",
+    "round": 4,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "close",
+    "round": 5,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "switch",
+    "round": 1,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "switch",
+    "round": 2,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "switch",
+    "round": 3,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "switch",
+    "round": 4,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  },
+  {
+    "mode": "switch",
+    "round": 5,
+    "runner_exit": 1,
+    "independent_candidate_pixels": true,
+    "window_owner_handoffs": true,
+    "saved_body": "L韓 R韓",
+    "full_runner_passed": false
+  }
+]

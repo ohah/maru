@@ -167,3 +167,23 @@ command 31은 생존 editor 하나·저장된 정본 `L가 R나`·커서 byte 4�
 분석기의 실행 변이 6개는 실패하고 동등 구현 2개는 통과했다. 이 결과는 자연 발생한
 늦은 OS 콜백의 재현 또는 그 콜백의 안전성 검증으로 세지 않는다. 따라서 배포 제품의
 입력 owner 구조나 IME admission 정책은 이번 작업에서 변경하지 않았다.
+
+### 한자 후보창 handoff 검증 준비 — 2026-10-07
+
+격리 사본에만 `candidate-driver.swift.inc`를 붙여 실제 두벌식 `한`·Option+Return 후보
+요청·pane 전환 또는 peer 닫기를 실행하도록 준비했다. 후보창은 전후 WindowServer
+목록의 새 app-owned layer 20 창, PNG SHA 및 독립 Vision OCR의 한자 3행 이상으로
+입증한다. `candidate_artifact.py`는 창의 열림/닫힘·owner roundtrip·키·capture binding을
+확인하고, 부모는 실제 arrival trace의 owner/key와 묶는다. 숨겨진 후보창이 다음 관측에서
+같은 WindowServer ID를 재사용하는 것은 허용하며 capture 파일은 관측 index로 구분한다.
+
+초기 fixture의 단계 범위를 수정하고, 실제 macOS 콜백이 첫 한자 후보 `韓`으로
+변환하는 것을 확인해 검증 기대값을 맞췄다. 최종 빌드로 후보창 전환과 닫기를 각각
+5회 통과했고 전환의 재시작 복원도 통과했다. [현재 결과](../evidence/editor-ime-candidate-20261007/verification-current.json)와
+[회차별 결과](../evidence/editor-ime-candidate-20261007/final-rounds.json)를 참조한다.
+
+SSH 직접 실행의 TCC 책임 귀속을 피하려고 임시 GUI launchd job에서 LaunchServices로
+같은 앱을 실행한다. GUI job 삭제·프로세스 UID/경로/시작 시각·waiter와 실제 앱 수명
+분리 회귀 모음은 통과했다. 실제 HOME 대조군이 사용자 workspace 파일에 남긴 테스트
+뷰는 직전 백업과 byte-identical하게 복구했고, 이후 모든 실행은 격리 HOME을 사용한다.
+배포 제품 입력 코드와 기존 owner 정책은 바꾸지 않았다.

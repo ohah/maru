@@ -1,0 +1,1 @@
+Recovered exact immediately preceding workspace.v1.bak under nonblocking lease and byte-equality concurrency fences. Before/after snapshots preserved outside repository. Restored SHA a14fac03d45cfcd3886576bcfe717634ba1a523b7db0f77cb0111eb3aca781d0; bytes 1076

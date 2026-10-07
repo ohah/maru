@@ -1,0 +1,21 @@
+..
+======================================================================
+FAIL: test_corruption_rejected (__main__.CandidateTests) (path=['rows', 0, 'popup_closed'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/user/Documents/workspace/maru-ime-candidate-adversarial-20261007/allow-retained-popup/test_candidate_artifact.py", line 49, in test_corruption_rejected
+    with self.subTest(path=path), self.assertRaises((ValueError,KeyError)): validate(change(path,value),False)
+AssertionError: (<class 'ValueError'>, <class 'KeyError'>) not raised
+
+======================================================================
+FAIL: test_corruption_rejected (__main__.CandidateTests) (path=['rows', 0, 'closed', 'windows'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/user/Documents/workspace/maru-ime-candidate-adversarial-20261007/allow-retained-popup/test_candidate_artifact.py", line 49, in test_corruption_rejected
+    with self.subTest(path=path), self.assertRaises((ValueError,KeyError)): validate(change(path,value),False)
+AssertionError: (<class 'ValueError'>, <class 'KeyError'>) not raised
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+FAILED (failures=2)

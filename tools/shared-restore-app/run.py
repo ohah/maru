@@ -253,6 +253,9 @@ def main():
         (root / "backups").mkdir(mode=0o700)
         (root / "config").write_text("session.keep-alive-after-quit = false\n" + ("ui.language = ko\n" if args.move_refusal else ""))
         if args.clangd:
+            # An output below another Git checkout otherwise inherits its parent's LSP root.
+            # Give only this generated fixture its own root; never trust the user's parent repo.
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True, timeout=15)
             # 생성한 C 문서 디렉터리만 격리 config의 신뢰 목록에 넣는다.
             (root / "lsp-trust").write_text(f"allow\t{root}\n")
         document = root / ("sample.c" if args.clangd else "sample.zig")

@@ -32,6 +32,14 @@ pub fn pathUnder(path: []const u8, dir: []const u8) bool {
     return p.len == d.len or p[d.len] == '/';
 }
 
+/// 이 `HOME` 은 격리 기준으로 **쓸 수 없는가** — 비었거나 루트(`/`·`//` …)면 그렇다. 러너는 이때 실제 홈일 때처럼 새 임시 홈을
+/// 세운다. 루트는 모든 절대 경로의 조상이라(`pathUnder`) 실제 캐시를 가리키는 XDG 도 「홈 아래」로 읽혀 **그대로 샜다**
+/// (적대적 검증 2026-10-07 재현 — 예전에는 무한 self-exec, 그 고침 뒤에는 조용한 누출). 빈 값도 기준이 없어 XDG 를 못 옮겼다.
+/// `HOME` 이 **아예 없는** 것은 다르다 — 명시 환경으로 자기 자신을 다시 띄우는 fixture 자식들이 「HOME 없음」을 일부러 시험한다.
+pub fn homeUnusable(home: []const u8) bool {
+    return std.mem.trimEnd(u8, home, "/").len == 0;
+}
+
 /// 이 XDG 값을 `home` 아래로 **새로 써야 하는가** — 비어 있거나(설정 안 됨) 홈 밖이면 그렇다.
 ///
 /// **비어 있어도 쓴다.** login(1) 래퍼는 `HOME` 을 실제 홈으로 다시 정하지만 `XDG_*` 는 지킨다 — 비어 있던 XDG 는 그 셸
@@ -73,5 +81,8 @@ test "runner home judgement: path ancestry is per path segment, root contains ev
     }
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("/.cache", try xdgPath(&buf, "/", ".cache"));
+    // 쓸 수 없는 홈 — 비었거나 루트. 러너가 새 임시 홈을 세운다(루트는 실제 캐시 XDG 도 「아래」로 읽어 샜다).
+    for ([_][]const u8{ "", "/", "//", "///" }) |home| try std.testing.expect(homeUnusable(home));
+    for ([_][]const u8{ "/tmp/home", "/tmp/home/", "relative", "/a" }) |home| try std.testing.expect(!homeUnusable(home));
     try std.testing.expectEqualStrings("/tmp/h/.local/state", try xdgPath(&buf, "/tmp/h/", ".local/state"));
 }

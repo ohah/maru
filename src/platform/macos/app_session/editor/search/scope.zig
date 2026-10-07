@@ -64,7 +64,8 @@ fn translate(a: std.mem.Allocator, input: []const u8) ![]u8 {
     // anchorGlob이 고정하지 않는 slash 없는 ** 패턴은 어느 깊이의 파일명에도 적용된다.
     if (std.mem.startsWith(u8, input, "**") and std.mem.indexOfScalar(u8, input, '/') == null) try out.appendSlice(a, "(?:.*/)?");
     var i: usize = if (input[0] == '/') 1 else 0;
-    var braces: usize = 0;
+    var branches: std.ArrayList(usize) = .empty;
+    defer branches.deinit(a);
     while (i < input.len) : (i += 1) {
         const byte = input[i];
         switch (byte) {
@@ -75,20 +76,29 @@ fn translate(a: std.mem.Allocator, input: []const u8) ![]u8 {
                     if (component_start and i + 1 < input.len and input[i + 1] == '/') {
                         i += 1;
                         try out.appendSlice(a, "(?:.*/)?");
-                    } else if (component_start and i + 1 == input.len) try out.appendSlice(a, ".*") else try out.appendSlice(a, "[^/]*");
+                    } else if (component_start and (i + 1 == input.len or input[i + 1] == '}' or input[i + 1] == ',')) try out.appendSlice(a, ".*") else try out.appendSlice(a, "[^/]*");
                 } else try out.appendSlice(a, "[^/]*");
             },
             '?' => try out.appendSlice(a, "[^/]"),
             '{' => {
-                braces += 1;
                 try out.appendSlice(a, "(?:");
+                try branches.append(a, out.items.len);
             },
             '}' => {
-                if (braces == 0) return error.InvalidGlob;
-                braces -= 1;
+                if (branches.items.len == 0) return error.InvalidGlob;
+                if (out.items.len == branches.items[branches.items.len - 1]) try out.appendSlice(a, "(?!)");
+                _ = branches.pop();
                 try out.append(a, ')');
             },
-            ',' => if (braces > 0) try out.append(a, '|') else try out.append(a, byte),
+            ',' => {
+                if (branches.items.len > 0) {
+                    const last = branches.items.len - 1;
+                    // glob의 빈 대안은 빈 문자열 매치가 아니라 무시되는 선택지다.
+                    if (out.items.len == branches.items[last]) try out.appendSlice(a, "(?!)");
+                    try out.append(a, '|');
+                    branches.items[last] = out.items.len;
+                } else try out.append(a, byte);
+            },
             '[' => {
                 try out.append(a, '[');
                 i += 1;
@@ -99,11 +109,8 @@ fn translate(a: std.mem.Allocator, input: []const u8) ![]u8 {
                 }
                 const first = i;
                 while (i < input.len and (input[i] != ']' or i == first)) : (i += 1) {
-                    if (input[i] == '\\') {
-                        i += 1;
-                        if (i >= input.len) return error.InvalidGlob;
-                        if (std.mem.indexOfScalar(u8, "\\\\-]^", input[i]) != null) try out.append(a, '\\');
-                    }
+                    // 클래스 안의 역슬래시는 literal이며 다음 문자를 소비하지 않는다.
+                    if (input[i] == '\\') try out.append(a, '\\');
                     try out.append(a, input[i]);
                 }
                 if (i >= input.len) return error.InvalidGlob;
@@ -121,7 +128,7 @@ fn translate(a: std.mem.Allocator, input: []const u8) ![]u8 {
             },
         }
     }
-    if (braces != 0) return error.InvalidGlob;
+    if (branches.items.len != 0) return error.InvalidGlob;
     try out.appendSlice(a, "\\z");
     return out.toOwnedSlice(a);
 }

@@ -62,13 +62,33 @@ pub fn run(a: std.mem.Allocator, io: std.Io, helper: []const u8, root: []const u
     try std.testing.expectError(error.CallbackFailure, api.model.run(a, &captured, "\xf0\x9f\x98\x80", .{}, &control, 1024, 3, &sink, Sink.accept));
     control.cancelled.store(true, .release);
     try std.testing.expectError(error.Cancelled, api.model.run(a, &captured, "foo", .{}, &control, 1024, 3, &sink, Sink.accept));
+    try std.testing.expectError(error.SnapshotBudget, api.model.run(a, &captured, "foo", .{}, &control, 6, 3, &sink, Sink.accept));
+    {
+        var limited: search.request.State = .{ .identity = identity, .limits = state.limits };
+        defer limited.deinit(a);
+        var selected: std.ArrayList(api.model.Captured) = .empty;
+        defer {
+            for (selected.items) |*item| item.deinit(a);
+            selected.deinit(a);
+        }
+        var retained: usize = 0;
+        try std.testing.expect(!try api.model.captureUnique(a, &limited, &selected, "excluded.txt", document, 7, &file, &retained, 6));
+        try std.testing.expect(limited.occupied.contains("excluded.txt"));
+        try std.testing.expectEqual(@as(usize, 1), limited.excluded);
+        try std.testing.expectEqual(@as(usize, 0), retained);
+        try std.testing.expect(try api.model.captureUnique(a, &limited, &selected, "a.txt", document, 7, &file, &retained, 7));
+        try std.testing.expectEqual(@as(usize, 7), retained);
+        try std.testing.expect(!try api.model.captureUnique(a, &limited, &selected, "b.txt", .{ .owner = 2, .slot = 1, .generation = 1 }, 7, &file, &retained, 7));
+        try std.testing.expectEqual(@as(usize, 1), selected.items.len);
+        try std.testing.expectEqual(@as(usize, 2), limited.excluded);
+    }
     var backend: api.Backend = .{ .a = a, .io = io };
     defer backend.deinit();
     var models: std.ArrayList(api.model.Captured) = .empty;
     defer models.deinit(a);
     for (0..8) |n| {
         state.identity.request = n + 1;
-        try backend.start(helper, root, "absent", .{}, &state, &models, budget);
+        try backend.start(helper, root, if (n % 4 == 1) "foo" else "absent", .{}, &state, &models, budget);
         try std.testing.expectError(error.Busy, backend.start(helper, root, "absent", .{}, &state, &models, budget));
         try std.testing.expectError(error.Busy, backend.startBundled(root, "absent", .{}, &state, &models, budget));
         if (n % 4 == 0) backend.cancel();
@@ -84,7 +104,17 @@ pub fn run(a: std.mem.Allocator, io: std.Io, helper: []const u8, root: []const u
         if (backend.stats().?.child_pid != null) try std.testing.expect(backend.stats().?.reaped);
         if (backend.take(completion.identity)) |value| {
             var batch = value;
-            batch.deinit(a);
+            defer batch.deinit(a);
+            try std.testing.expectEqual(@as(usize, 3), batch.matches);
+            var total: usize = 0;
+            for (batch.rows.items) |row| total += row.match.ranges.len;
+            try std.testing.expectEqual(@as(usize, 3), total);
+            if (backend.take(completion.identity)) |second| {
+                var empty = second;
+                defer empty.deinit(a);
+                try std.testing.expectEqual(@as(usize, 0), empty.rows.items.len);
+                try std.testing.expectEqual(@as(usize, 3), empty.matches);
+            } else return error.MissingBatch;
         }
         try std.testing.expect(backend.reset());
     }

@@ -14415,6 +14415,9 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
 
 /// LSP 판정자 공용: 가짜 서버 경로. `zig-out/bin/maru-fake-lsp` — `test-editor` 가 설치 단계에 의존한다(cwd 는 저장소 루트).
 const fake_lsp_path = "zig-out/bin/maru-fake-lsp";
+const lsp_process = @import("../../lsp_process.zig");
+/// 그 pid 의 프로세스 그룹(LSPB11·15 — 서버가 제 그룹의 우두머리인지 본다).
+extern "c" fn getpgid(pid: std.c.pid_t) std.c.pid_t;
 extern "c" fn usleep(usec: c_uint) c_int;
 
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]u8;
@@ -14895,6 +14898,472 @@ test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣
             texts[i] = text;
         }
         for (texts, 0..) |a, i| for (texts[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a, b));
+    }
+}
+
+/// LSPB11~15 공용 — 가짜 서버(신뢰는 하니스로 허용) + root 의 `a.c` 하나. `knobs` 는 서버를 띄우기 **전에** 거는 가짜 서버 스위치
+/// (`tools/fake_lsp.zig` 머리 주석)이고 `deinit` 이 걷는다. 픽스처가 이미 연 `doc.zig` 의 서버(zls 자리)도 같은 가짜로 뜨므로, 판정은
+/// **`a.c` 의 클라이언트**(clangd 자리)를 이름으로 골라 한다.
+const LifeFx = struct {
+    fx: PaneFixture,
+    root: []const u8 = "",
+    root_buf: [std.fs.max_path_bytes]u8 = undefined,
+    fake_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+    cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+    path: []const u8 = "",
+    term: *Term = undefined,
+
+    fn init(self: *LifeFx, allocator: std.mem.Allocator, text: []const u8, knobs: []const [2][:0]const u8) !void {
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+        _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&self.fake_z, "{s}", .{fake})).ptr, 1);
+        self.root = self.root_buf[0..try self.fx.dir.dir.realPath(testing.io, &self.root_buf)];
+        _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&self.cfg_z, "{s}/config", .{self.root})).ptr, 1);
+        if (self.fx.session.config_path_buffer) |b| allocator.free(b);
+        self.fx.session.config_path_buffer = null;
+        self.fx.session.editor_lsp.auto_trust_answer = .allow;
+        for (knobs) |k| _ = setenv(k[0].ptr, k[1].ptr, 1);
+        try self.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "a.c", .data = text });
+        self.path = try std.fs.path.join(allocator, &.{ self.root, "a.c" });
+        self.fx.session.git_repo = @constCast(self.root);
+        self.term = try openPathInActivePane(self.fx.session, self.path);
+        self.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 }; // 편집 판정자가 쓸 caret(문서 머리)
+    }
+
+    /// `init` 이 중간에 실패해도 부를 수 있다 — 판정자는 `init` **전에** `defer deinit` 를 건다(환경 스위치·가짜 서버·손자가 같은 샤드의
+    /// 다음 판정자로 새지 않게).
+    fn deinit(self: *LifeFx, allocator: std.mem.Allocator, knobs: []const [2][:0]const u8) void {
+        for (knobs) |k| _ = unsetenv(k[0].ptr);
+        if (self.path.len > 0) allocator.free(self.path);
+        _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+        _ = unsetenv("MARU_CONFIG");
+        self.fx.session.git_repo = null;
+        self.fx.deinit(allocator);
+    }
+
+    fn clientOpt(self: *LifeFx) ?*lsp_client.Client {
+        for (self.fx.session.editor_lsp.clients.items) |*c| if (std.mem.eql(u8, c.server.exe, "clangd")) return c;
+        return null;
+    }
+
+    fn client(self: *LifeFx) *lsp_client.Client {
+        return self.clientOpt().?;
+    }
+
+    /// 그 서버가 띄운 손자의 pid 를 읽는다(서버가 `<디렉터리>/gc-<서버 pid>` 에 적을 때까지 잠깐 기다린다).
+    fn readGrandchild(self: *LifeFx, server_pid: std.c.pid_t) !std.c.pid_t {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "gc-{d}", .{server_pid});
+        var tries: usize = 0;
+        while (tries < 300) : (tries += 1) {
+            const bytes = self.fx.dir.dir.readFileAlloc(testing.io, name, testing.allocator, .limited(64)) catch {
+                _ = usleep(10_000);
+                continue;
+            };
+            defer testing.allocator.free(bytes);
+            const t = std.mem.trim(u8, bytes, " \n");
+            if (t.len == 0) {
+                _ = usleep(10_000);
+                continue;
+            }
+            return std.fmt.parseInt(std.c.pid_t, t, 10);
+        }
+        return error.NoGrandchild;
+    }
+};
+
+const LifeCtx = struct { lf: *LifeFx };
+
+/// 이 프로세스에 열린 fd 수(0..1023) — 내리기가 fd 를 새지 않는지 앞뒤로 잰다.
+fn openFdCount() usize {
+    var n: usize = 0;
+    var fd: c_int = 0;
+    while (fd < 1024) : (fd += 1) {
+        if (std.c.fcntl(fd, std.c.F.GETFD, @as(c_int, 0)) != -1) n += 1;
+    }
+    return n;
+}
+
+/// 그 pid 가 사라질 때까지(고아 좀비는 launchd 가 곧 거둔다) 최대 3 초. 사라졌으면 `true`.
+fn processGone(pid: std.c.pid_t) bool {
+    var tries: usize = 0;
+    while (tries < 300) : (tries += 1) {
+        if (std.c.kill(pid, @enumFromInt(0)) != 0) return true;
+        _ = usleep(10_000);
+    }
+    return false;
+}
+
+test "LSPB11 서버를 내리면 그 프로세스 그룹째 내려 서버가 띄운 빌드(손자)가 고아로 남지 않는다 — 죽어서 재시작할 때도, 앱을 끌 때도 (§8.2a 수명·재시작)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var lf: LifeFx = .{ .fx = try PaneFixture.init(allocator) };
+    var gc_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    var root_probe: [std.fs.max_path_bytes]u8 = undefined;
+    const gc_dir = try std.fmt.bufPrintZ(&gc_buf, "{s}", .{root_probe[0..try lf.fx.dir.dir.realPath(testing.io, &root_probe)]});
+    const knobs = [_][2][:0]const u8{.{ "MARU_FAKE_LSP_GRANDCHILD", gc_dir }};
+    defer lf.deinit(allocator, &knobs);
+    try lf.init(allocator, "int x;\n", &knobs);
+    const ready = struct {
+        fn f(c: LifeCtx) bool {
+            const cl = c.lf.clientOpt() orelse return false;
+            return cl.phase == .ready;
+        }
+    }.f;
+    try testing.expect(pumpLspUntil(&lf.fx, 3000, LifeCtx{ .lf = &lf }, ready));
+    const server_pid = lf.client().proc.?.pid;
+    try testing.expectEqual(server_pid, getpgid(server_pid)); // 서버가 제 그룹의 우두머리다
+    // ⑴ **죽어서 재시작** — `BOOM` 에 서버가 exit 1. 손자가 stdout 을 쥐고 있어 EOF 는 오지 않는다 — 거두기로 알아채고 그룹째 내린다.
+    const gc1 = try lf.readGrandchild(server_pid);
+    try testing.expect(insertText(lf.fx.session, lf.term, "BOOM "));
+    try testing.expect(pumpLspUntil(&lf.fx, 3000, LifeCtx{ .lf = &lf }, struct {
+        fn f(c: LifeCtx) bool {
+            return c.lf.client().phase == .restarting and c.lf.client().proc == null;
+        }
+    }.f));
+    try testing.expect(processGone(gc1)); // 손자도 갔다(그룹째)
+    try removeMarkerHover(lf.fx.session, lf.term, "BOOM ");
+    try testing.expect(pumpLspUntil(&lf.fx, 4000, LifeCtx{ .lf = &lf }, ready));
+    // ⑵ **앱 종료** — stdin 을 닫아 서버가 스스로 내려가게 하고, 그룹에 남은 손자까지 거둔다.
+    const server2 = lf.client().proc.?.pid;
+    try testing.expect(server2 != server_pid);
+    const gc2 = try lf.readGrandchild(server2);
+    lsp_client.deinit(lf.fx.session);
+    try testing.expectEqual(@as(usize, 0), lf.fx.session.editor_lsp.clients.items.len);
+    try testing.expect(processGone(server2));
+    try testing.expect(processGone(gc2));
+    // 죽이기 전에 stdin 을 닫았다 — 서버가 EOF 를 보고 스스로 내려갔다(실서버는 이때 제 빌드를 정리한다).
+    var eof_name: [32]u8 = undefined;
+    try lf.fx.dir.dir.access(testing.io, try std.fmt.bufPrint(&eof_name, "eof-{d}", .{server2}), .{});
+}
+
+test "LSPB12 initialize 에 답이 없으면 시한 뒤 재시작 경로로, 거절하면 「실패 — 다시」로 선다 — 「시작 중」에 영원히 남지 않는다 (§8.2a 수명·재시작)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // ⑴ 답이 없다 — 시한을 **시각 필드로** 넘긴다(벽시계로 30 초를 기다리지 않는다).
+    {
+        var lf: LifeFx = .{ .fx = try PaneFixture.init(allocator) };
+        const knobs = [_][2][:0]const u8{.{ "MARU_FAKE_LSP_INIT", "silent" }};
+        defer lf.deinit(allocator, &knobs);
+        try lf.init(allocator, "int x;\n", &knobs);
+        try testing.expect(pumpLspUntil(&lf.fx, 3000, LifeCtx{ .lf = &lf }, struct {
+            fn f(c: LifeCtx) bool {
+                const cl = c.lf.clientOpt() orelse return false;
+                return cl.phase == .starting and cl.proc != null;
+            }
+        }.f));
+        lsp_client.pump(lf.fx.session);
+        try testing.expectEqual(lsp_client.Phase.starting, lf.client().phase); // 시한 전에는 기다린다
+        const pid = lf.client().proc.?.pid;
+        lf.client().started_at_ms -|= lsp_client.initialize_timeout_ms;
+        lsp_client.pump(lf.fx.session);
+        try testing.expectEqual(lsp_client.Phase.restarting, lf.client().phase);
+        try testing.expectEqual(@as(u8, 1), lf.client().restarts); // 세 번이면 「실패」 — 재시작 예산을 쓴다
+        try testing.expect(lf.client().proc == null);
+        try testing.expect(processGone(pid)); // 멈춘 서버를 남기지 않는다
+        // 다시 띄운 서버는 **새로** 잰다 — 옛 시각을 물려받으면 뜨자마자 또 시한에 걸려 예산을 다 쓴다.
+        lf.client().retry_at_ms = 0;
+        lsp_client.pump(lf.fx.session);
+        try testing.expect(lf.client().proc != null);
+        lsp_client.pump(lf.fx.session);
+        try testing.expectEqual(lsp_client.Phase.starting, lf.client().phase);
+        try testing.expectEqual(@as(u8, 1), lf.client().restarts);
+    }
+    // ⑵ 거절한다 — 다시 띄워도 같은 답이라 곧장 「실패」(클릭으로 재시도).
+    {
+        var lf: LifeFx = .{ .fx = try PaneFixture.init(allocator) };
+        const knobs = [_][2][:0]const u8{.{ "MARU_FAKE_LSP_INIT", "error" }};
+        defer lf.deinit(allocator, &knobs);
+        try lf.init(allocator, "int x;\n", &knobs);
+        try testing.expect(pumpLspUntil(&lf.fx, 3000, LifeCtx{ .lf = &lf }, struct {
+            fn f(c: LifeCtx) bool {
+                const cl = c.lf.clientOpt() orelse return false;
+                return cl.phase == .failed;
+            }
+        }.f));
+        try testing.expect(lf.client().proc == null);
+        try testing.expectEqual(lsp_client.Phase.failed, lsp_client.statusFor(lf.fx.session, lf.term).?.phase);
+    }
+}
+
+test "LSPB13 서버가 stdin 을 안 읽으면 전문 didChange 를 쌓지 않고 최신 하나로 합치며, 밀린 것이 상한을 넘으면 죽은 서버로 보고 재시작한다 (§8.2a 수명·재시작)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var lf: LifeFx = .{ .fx = try PaneFixture.init(allocator) };
+    const knobs = [_][2][:0]const u8{.{ "MARU_FAKE_LSP_STOPREAD", "1" }};
+    // 파이프(64 KB)를 넘는 문서 — didOpen 하나로 쓰기가 밀린다.
+    const big = try allocator.alloc(u8, 300 * 1024);
+    defer allocator.free(big);
+    for (big, 0..) |*b, i| b.* = if (i % 64 == 63) '\n' else 'x';
+    defer lf.deinit(allocator, &knobs);
+    try lf.init(allocator, big, &knobs);
+    try testing.expect(pumpLspUntil(&lf.fx, 3000, LifeCtx{ .lf = &lf }, struct {
+        fn f(c: LifeCtx) bool {
+            const cl = c.lf.clientOpt() orelse return false;
+            return cl.phase == .ready and cl.docs.items.len == 1 and cl.proc.?.pending_out.items.len > 0;
+        }
+    }.f));
+    const changes_before = lf.fx.session.editor_lsp.sent_changes;
+    // ⑴ 편집 스무 번 — 밀린 동안엔 새 didChange 를 안 쌓는다. 밀린 양은 전문 하나 남짓에서 늘지 않는다. **공백**을 넣는다 — 낱말
+    //    글자는 completion 요청을 부르고, 위치 요청 직전 동기화는 밀려 있어도 보낸다(`.now` — 그 요청의 위치가 맞아야 한다).
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        try testing.expect(insertText(lf.fx.session, lf.term, " "));
+        lsp_client.pump(lf.fx.session);
+    }
+    try testing.expectEqual(changes_before, lf.fx.session.editor_lsp.sent_changes);
+    try testing.expect(lf.client().proc.?.pending_out.items.len <= big.len + 4096);
+    try testing.expectEqual(lsp_client.Phase.ready, lf.client().phase);
+    // 위치 요청 직전 동기화는 밀려 있어도 **보낸다** — 그 요청의 위치가 지금 본문 기준이어야 한다.
+    _ = lsp_client.requestHover(lf.fx.session, lf.term, 0);
+    try testing.expectEqual(changes_before + 1, lf.fx.session.editor_lsp.sent_changes);
+    // ⑵ 그래도 밀린 것이 상한을 넘으면(위치 요청 직전처럼 꼭 보내야 하는 쓰기가 쌓였다) — 더 쌓지 않고 죽은 서버로 본다.
+    const pid = lf.client().proc.?.pid;
+    const filler = try allocator.alloc(u8, lsp_process.max_pending_bytes);
+    defer allocator.free(filler);
+    @memset(filler, ' ');
+    try testing.expect(!(try lsp_process.write(&lf.client().proc.?, allocator, filler)));
+    try testing.expect(lf.client().proc.?.stalled);
+    try testing.expect(lf.client().proc.?.pending_out.items.len <= lsp_process.max_pending_bytes); // 통째로 거절 — 반쪽 프레임이 없다
+    // 그 문서가 응답을 기다리던 중이었다고 하자 — 서버를 내리면 그 기다림을 놓고 다시 묻게 해야 한다(응답은 안 온다 — 안 놓으면
+    // semantic 색·인레이가 다시는 요청되지 않는다).
+    lf.term.rt.editor_semantic.waiting = true;
+    lf.term.rt.editor_inlay.waiting = true;
+    lf.term.rt.editor_highlight.waiting = true;
+    lf.fx.session.editor_completion.waiting = true; // 자동완성은 세션에 하나 — 이 문서의 요청이었다
+    lf.fx.session.editor_completion.waiting_surface = lf.term.surfaceId();
+    lsp_client.pump(lf.fx.session);
+    try testing.expectEqual(lsp_client.Phase.restarting, lf.client().phase);
+    try testing.expect(!lf.term.rt.editor_semantic.waiting and lf.term.rt.editor_semantic.dirty);
+    try testing.expect(!lf.term.rt.editor_inlay.waiting and lf.term.rt.editor_inlay.dirty);
+    try testing.expect(!lf.fx.session.editor_completion.waiting);
+    try testing.expect(!lf.term.rt.editor_highlight.waiting);
+    try testing.expect(lf.client().proc == null);
+    try testing.expect(processGone(pid));
+}
+
+test "LSPB14 lsp.enabled 를 끄면 떠 있는 서버를 내리고 그 진단을 걷는다; 다시 켜면 다시 뜬다 (§8.2a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var lf: LifeFx = .{ .fx = try PaneFixture.init(allocator) };
+    var gc_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    var root_probe: [std.fs.max_path_bytes]u8 = undefined;
+    const gc_dir = try std.fmt.bufPrintZ(&gc_buf, "{s}", .{root_probe[0..try lf.fx.dir.dir.realPath(testing.io, &root_probe)]});
+    const knobs = [_][2][:0]const u8{.{ "MARU_FAKE_LSP_GRANDCHILD", gc_dir }};
+    defer lf.deinit(allocator, &knobs);
+    try lf.init(allocator, "int x;\n", &knobs);
+    const diagnosed = struct {
+        fn f(c: LifeCtx) bool {
+            const cl = c.lf.clientOpt() orelse return false;
+            return cl.phase == .ready and c.lf.term.rt.editor_diagnostics.lsp.items.len > 0;
+        }
+    }.f;
+    try testing.expect(pumpLspUntil(&lf.fx, 3000, LifeCtx{ .lf = &lf }, diagnosed));
+    const pid = lf.client().proc.?.pid;
+    lf.term.rt.editor_symbols.waiting = true; // 응답을 기다리던 중 — 끄면 놓는다(다시 켜면 다시 묻는다)
+    // 자동완성은 세션에 하나 — **다른 문서**(여기서 내리는 서버의 문서가 아니다)를 기다리던 것은 놓지 않는다.
+    lf.fx.session.editor_completion.waiting = true;
+    lf.fx.session.editor_completion.waiting_surface = lf.term.surfaceId() +% 0x5eed;
+    lf.term.rt.editor_fold_lsp.waiting = true;
+    lf.fx.session.loaded_config.config.lsp.enabled = false;
+    lsp_client.pump(lf.fx.session);
+    try testing.expectEqual(@as(usize, 0), lf.fx.session.editor_lsp.clients.items.len);
+    // 세션 종료와 같은 길 — stdin 을 먼저 닫아 서버가 스스로 내려갔고(EOF 표식), 그룹에 남은 손자까지 거뒀다.
+    var eof_name: [32]u8 = undefined;
+    try lf.fx.dir.dir.access(testing.io, try std.fmt.bufPrint(&eof_name, "eof-{d}", .{pid}), .{});
+    try testing.expect(processGone(try lf.readGrandchild(pid)));
+    try testing.expect(!lf.term.rt.editor_symbols.waiting and lf.term.rt.editor_symbols.dirty);
+    try testing.expect(!lf.term.rt.editor_fold_lsp.waiting and lf.term.rt.editor_fold_lsp.dirty);
+    try testing.expect(lf.fx.session.editor_completion.waiting);
+    lf.fx.session.editor_completion.waiting = false;
+    try testing.expect(processGone(pid));
+    try testing.expectEqual(@as(usize, 0), lf.term.rt.editor_diagnostics.lsp.items.len); // 낡은 서버 진단이 남지 않는다
+    try testing.expect(lsp_client.statusFor(lf.fx.session, lf.term) == null);
+    lf.fx.session.loaded_config.config.lsp.enabled = true;
+    try testing.expect(pumpLspUntil(&lf.fx, 3000, LifeCtx{ .lf = &lf }, diagnosed));
+    // 마지막 자리 — 내리기를 거치지 않고 상태만 정리해도(판정자들이 그렇게 쓴다) 떠 있는 서버를 남기지 않는다.
+    const pid2 = lf.client().proc.?.pid;
+    lf.fx.session.editor_lsp.deinit(allocator);
+    lf.fx.session.editor_lsp = .{};
+    try testing.expect(processGone(pid2));
+}
+
+test "LSPB15 서버 자식은 제 프로세스 그룹을 세우고, root 로 chdir 하지 못하면 실행하지 않는다 (§8.2a·§8.1 canonical cwd)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // ⑴ 있는 root — `pwd` 가 그 root 를 말한다(작업 디렉터리가 root 다).
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(testing.io, &root_buf)];
+    const readAll = struct {
+        fn f(p: *lsp_process.Process, out: *std.ArrayList(u8)) !void {
+            var tries: usize = 0;
+            while (tries < 300) : (tries += 1) {
+                const r = try lsp_process.readInto(p, testing.allocator, out, 1 << 16);
+                if (r == .eof) return;
+                _ = usleep(10_000);
+            }
+            return error.NoEof;
+        }
+    }.f;
+    const fds_before = openFdCount();
+    {
+        // 그룹은 **살아 있는** 자식으로 잰다 — 이미 끝난(좀비) 자식에는 getpgid 가 ESRCH 를 낼 수 있다.
+        var sleeper = try lsp_process.spawn(allocator, "/bin/sleep", &.{"5"}, root);
+        defer {
+            lsp_process.stopNow(&sleeper, allocator);
+        }
+        try testing.expectEqual(sleeper.pid, getpgid(sleeper.pid));
+    }
+    {
+        var p = try lsp_process.spawn(allocator, "/bin/pwd", &.{}, root);
+        defer {
+            lsp_process.stopNow(&p, allocator);
+        }
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(allocator);
+        try readAll(&p, &out);
+        try testing.expectEqualStrings(root, std.mem.trimEnd(u8, out.items, "\n"));
+    }
+    // ⑵ 없는 root — 앱의 작업 디렉터리에서 엉뚱하게 돌지 않는다: 아무것도 출력하지 않고 끝난다.
+    {
+        var p = try lsp_process.spawn(allocator, "/bin/pwd", &.{}, "/nonexistent-maru-lsp-root");
+        defer {
+            lsp_process.stopNow(&p, allocator);
+        }
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(allocator);
+        try readAll(&p, &out);
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+    try testing.expectEqual(fds_before, openFdCount()); // 내리기가 파이프 fd 를 새지 않는다
+    // ⑶ 밀린 쓰기는 **순서대로 한 번씩** 나간다 — `cat` 이 받은 그대로 돌려준다. 파이프(64 KB)를 넘겨 밀리게 한다.
+    {
+        var p = try lsp_process.spawn(allocator, "/bin/cat", &.{}, root);
+        defer lsp_process.stopNow(&p, allocator);
+        const total = 1 << 20;
+        const sent = try allocator.alloc(u8, total);
+        defer allocator.free(sent);
+        for (sent, 0..) |*b, i| b.* = @truncate(i *% 7 +% i / 251);
+        try testing.expect(try lsp_process.write(&p, allocator, sent));
+        try testing.expect(p.pending_out.items.len > 0); // 밀렸다
+        var echoed: std.ArrayList(u8) = .empty;
+        defer echoed.deinit(allocator);
+        var spins: usize = 0;
+        while (echoed.items.len < total and spins < 5000) : (spins += 1) {
+            try testing.expect(try lsp_process.flush(&p, allocator));
+            _ = try lsp_process.readInto(&p, allocator, &echoed, 1 << 20);
+            if (echoed.items.len < total) _ = usleep(1_000);
+        }
+        try testing.expectEqual(@as(usize, total), echoed.items.len);
+        try testing.expect(std.mem.eql(u8, sent, echoed.items));
+    }
+}
+
+test "LSPB16 제품의 내리기는 메인 스레드를 막지 않는다 — 떼어 낸 서버를 거두기 스레드가 EOF 유예 뒤 그룹째 내린다 (§8.2a 수명·재시작)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // EOF 를 무시하는 「서버」 — 손자 하나를 띄우고 그 pid 를 알린 뒤 기다리기만 한다(stdin 을 안 읽는다).
+    const fds_before = openFdCount();
+    var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "sleep 300 & echo $!; wait" }, "/");
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var tries: usize = 0;
+    while (std.mem.indexOfScalar(u8, out.items, '\n') == null and tries < 300) : (tries += 1) {
+        _ = try lsp_process.readInto(&p, allocator, &out, 1 << 10);
+        _ = usleep(10_000);
+    }
+    const gc = try std.fmt.parseInt(std.c.pid_t, std.mem.trim(u8, out.items, " \n"), 10);
+    const leader = p.pid;
+    var items = [_]lsp_process.Lowering{lsp_process.handOff(&p, allocator)};
+    const t0 = std.Io.Clock.awake.now(testing.io).nanoseconds;
+    lsp_process.lowerDetached(&items, 50);
+    const blocked_ms = @divFloor(std.Io.Clock.awake.now(testing.io).nanoseconds - t0, std.time.ns_per_ms);
+    try testing.expect(blocked_ms < 50); // 유예(50 ms)를 이 자리에서 기다리지 않았다 — 스레드의 몫이다
+    try testing.expect(processGone(leader)); // EOF 를 무시해도 유예 뒤 그룹째
+    try testing.expect(processGone(gc));
+    // 거두기 스레드도 fd 를 닫는다(거둔 뒤 닫으므로 잠깐 기다린다).
+    var fd_tries: usize = 0;
+    while (openFdCount() != fds_before and fd_tries < 300) : (fd_tries += 1) _ = usleep(10_000);
+    try testing.expectEqual(fds_before, openFdCount());
+    // 갈림: 앱 종료가 확정됐으면(창이 내려갔다) 이 자리에서 기다리고, 아니면 스레드에 맡긴다(판정자는 늘 이 자리).
+    try testing.expect(lsp_client.lowerWaitsInPlace(true, false));
+    try testing.expect(!lsp_client.lowerWaitsInPlace(false, false));
+    try testing.expect(lsp_client.lowerWaitsInPlace(false, true));
+}
+
+test "LSPB17 신뢰를 묻는 중에 lsp.enabled 를 끄면 모달을 내리고 기억하지 않는다 — 다시 켜면 다시 묻는다 (§8.2a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var lf: LifeFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer lf.deinit(allocator, &.{});
+    try lf.init(allocator, "int x;\n", &.{});
+    lf.fx.session.editor_lsp.auto_trust_answer = null; // 하니스 허용을 떼어 실제 모달로 묻게
+    lsp_client.pump(lf.fx.session);
+    try testing.expect(lf.fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(lf.fx.session.chrome_host.confirm.open);
+    lf.fx.session.loaded_config.config.lsp.enabled = false;
+    lsp_client.pump(lf.fx.session);
+    try testing.expect(lf.fx.session.pending_confirm == .none); // 답할 서버가 없다 — 모달을 내린다
+    try testing.expect(!lf.fx.session.chrome_host.confirm.open);
+    try testing.expect(lf.fx.session.editor_lsp.asking_root == null);
+    lf.fx.session.loaded_config.config.lsp.enabled = true;
+    lsp_client.pump(lf.fx.session);
+    try testing.expect(lf.fx.session.pending_confirm == .lsp_trust); // 기억하지 않았다 — 다시 묻는다
+}
+
+test "LSPB18 내리기는 EOF 유예를 지키고 그동안 stdout 을 비우며, 거두기 스레드는 호출자의 메모리를 들고 가지 않고, 이미 거둔 서버는 그대로 넘긴다 (§8.2a 수명·재시작)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(testing.io, &root_buf)];
+    var mark_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // ⑴ 유예를 지킨다 — EOF 뒤 0.2 초 걸려 정리하고 끝나는 서버는 죽이기 전에 끝난다(표식이 남는다).
+    {
+        const mark = try std.fmt.bufPrint(&mark_buf, "{s}/graceful", .{root});
+        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "read x; sleep 0.2; : > \"$0\"", mark }, root);
+        var l = lsp_process.handOff(&p, allocator);
+        lsp_process.lowerAll((&l)[0..1], 2000);
+        try tmp.dir.access(testing.io, "graceful", .{});
+    }
+    // ⑵ 유예 동안 stdout 을 비운다 — EOF 뒤 파이프(64 KB)를 넘게 쓰고 끝나는 서버가 쓰다 멈추지 않는다.
+    {
+        const mark = try std.fmt.bufPrint(&mark_buf, "{s}/drained", .{root});
+        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "cat >/dev/null; head -c 300000 /dev/zero; : > \"$0\"", mark }, root);
+        var l = lsp_process.handOff(&p, allocator);
+        lsp_process.lowerAll((&l)[0..1], 2000);
+        try tmp.dir.access(testing.io, "drained", .{});
+    }
+    // ⑶ 거두기 스레드는 **제 사본**을 든다 — 돌아온 뒤 호출자가 그 자리를 덮어도 서버를 내린다.
+    {
+        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "sleep 300 & echo $!; wait" }, root);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(allocator);
+        var tries: usize = 0;
+        while (std.mem.indexOfScalar(u8, out.items, '\n') == null and tries < 300) : (tries += 1) {
+            _ = try lsp_process.readInto(&p, allocator, &out, 1 << 10);
+            _ = usleep(10_000);
+        }
+        const gc = try std.fmt.parseInt(std.c.pid_t, std.mem.trim(u8, out.items, " \n"), 10);
+        const leader = p.pid;
+        var items = [_]lsp_process.Lowering{lsp_process.handOff(&p, allocator)};
+        lsp_process.lowerDetached(&items, 50);
+        items[0] = .{ .pid = std.math.maxInt(std.c.pid_t), .out_fd = -1, .reaped = true };
+        try testing.expect(processGone(leader));
+        try testing.expect(processGone(gc));
+    }
+    // ⑷ 이미 거둔 서버는 그 사실을 들고 넘어간다 — 같은 pid 를 다시 기다리거나 신호하지 않게.
+    {
+        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "exit 0" }, root);
+        var tries: usize = 0;
+        while (!lsp_process.reapIfExited(&p) and tries < 300) : (tries += 1) _ = usleep(10_000);
+        try testing.expect(p.reaped);
+        var l = lsp_process.handOff(&p, allocator);
+        try testing.expect(l.reaped);
+        lsp_process.lowerAll((&l)[0..1], 0);
     }
 }
 

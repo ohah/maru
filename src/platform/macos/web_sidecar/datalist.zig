@@ -5,7 +5,7 @@
 //!
 //! 규칙은 Chrome 154 실측(§7)을 따른다: 칸을 누르거나(왼쪽 누름) ↓ 를 치면 지금 값으로 거른 목록, 글자를 치면 다시 거른 목록,
 //! 지워서 빈 칸이 되거나 일치가 없으면 닫는다. 거르기는 값·레이블에서 대소문자를 무시한 부분 일치, 순서는 원래대로, `disabled`
-//! 와 빈 값은 뺀다. 칸이 초점을 잃거나 스크롤·창 크기 바뀜·페이지 떠남이면 닫는다. 고르면 그 값을 넣고 `input`·`change` 를
+//! 와 빈 값은 뺀다. 칸이 초점을 잃거나 그 칸을 품은 스크롤·창 크기 바뀜·페이지 떠남이면 닫는다. 고르면 그 값을 넣고 `input`·`change` 를
 //! 보낸 뒤 닫는다(`isTrusted` 는 false — 대리 스크립트가 보낸 사건이다, 드러나는 차이).
 //!
 //! 렌더러의 말은 믿지 않는다 — 주 프레임에서 온 것만(iframe 은 W6m③), 항목은 글 규칙으로 다듬고 상한 안에서, 칸 자리는 view 와
@@ -52,6 +52,13 @@ const Heard = struct {
 var heard: [64]?Heard = [_]?Heard{null} ** 64;
 const retired_ms: i64 = 1000;
 
+fn heardOf(id: BrowserId) ?*Heard {
+    for (&heard) |*slot| {
+        if (slot.*) |*h| if (h.browser == id) return h;
+    }
+    return null;
+}
+
 fn heardFor(id: BrowserId) ?*Heard {
     var free: ?*?Heard = null;
     for (&heard) |*slot| {
@@ -87,6 +94,7 @@ fn isCurrentMain(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
     const b = main.*.get_identifier.?(main);
     if (b == null) return false;
     defer api.string_userfree_utf16_free(b);
+    if (a.*.length == 0 or a.*.str == null or b.*.str == null) return false;
     return a.*.length == b.*.length and std.mem.eql(u16, a.*.str[0..a.*.length], b.*.str[0..b.*.length]);
 }
 
@@ -202,9 +210,12 @@ pub fn pick(value: message.DatalistPick) void {
 
 /// 주 프레임에 새 문서가 오거나(이동·오류 페이지) 렌더러가 죽었다 — 떠 있던 목록을 닫는다(옛 문서는 닫기를 보내지 못한다).
 pub fn reset(id: BrowserId) void {
-    if (heardFor(id)) |h| if (h.has_last) {
+    // 한 번만 은퇴시킨다 — 그대로 두면 다음 새 문서마다 같은 옛 표식을 다시 은퇴시켜, 뒤로 가기 캐시가 되살린 그 문서의 처음
+    // 1 초를 막았다(적대 검증 2 차). 목록을 쓴 적 없는 브라우저에는 칸을 잡지 않는다.
+    if (heardOf(id)) |h| if (h.has_last) {
         h.retired = h.last;
         h.retired_at_ms = nowMs();
+        h.has_last = false;
     };
     const slot = shownFor(id) orelse return;
     const list_id = slot.*.?.list;

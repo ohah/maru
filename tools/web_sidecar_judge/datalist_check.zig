@@ -10,12 +10,15 @@
 //!   dl-pick             고른 번호의 값이 칸에 들어가고 페이지가 `input`·`change` 를 받고, 목록은 닫힌다
 //!   dl-pick-stale       옛 목록 번호·범위 밖 번호의 고르기는 아무것도 바꾸지 않는다(지금 목록은 여섯 — 받아들여지면 다른 값이
 //!                       보인다), 범위 밖을 거절한 대리 스크립트는 목록을 닫는다
-//!   dl-blur             목록이 붙지 않은 칸을 누르면 닫고, 그때 페이지가 보낸 가짜 `input` 은 목록을 열지 않는다
-//!   dl-types            `type=search` 칸도 연다, `type=date` 에 붙은 목록·readonly 칸은 열지 않는다
-//!   dl-scroll           칸과 상관없는 상자의 스크롤은 목록을 두고, 문서 스크롤은 닫는다
+//!   dl-blur             목록이 붙지 않은 칸을 누르면 닫고, 그때 페이지가 보낸 가짜 `input` 은 목록을 열지 않는다; Tab 으로
+//!                       초점이 옮겨 가도 닫는다(누르기 없이 — `focusout`)
+//!   dl-types            `type=search` 칸도 연다, `type=date` 에 붙은 목록·readonly 칸은 열지 않는다(열린 목록을 닫기만 한다)
+//!   dl-scroll           칸과 상관없는 상자의 스크롤은 목록을 두고(상자가 스크롤된 것은 페이지가 알린다), 문서 스크롤은 닫는다,
+//!                       좁은 칸에 긴 값을 쳐 칸 자신이 가로로 스크롤돼도 목록은 남는다
 //!   dl-navigation       목록이 떠 있는 채 페이지를 옮기면 닫힌다(옛 문서의 pagehide 와 sidecar 의 `on_load_start` 둘 다 닫는다)
 //!   dl-cap              옵션 300 개는 앞 256 개까지
-//!   dl-long             레이블 600 자 옵션 256 개도 뜬다 — 보이는 레이블은 512 에서 자르고 모은 글 한도에서 앞쪽만
+//!   dl-long             레이블 600 자 옵션 256 개도 뜬다 — 보이는 레이블은 512 에서 자르고 모은 글 한도에서 앞 45 개(자르지
+//!                       않으면 39 개)
 //!   dl-iframe           같은 출처 http iframe 안의 칸은 아직 열지 않는다(W6m③), 같은 페이지 주 프레임 칸은 연다
 //!   dl-renderer-gone    목록이 떠 있는 채 렌더러가 죽으면 sidecar 가 닫는다(죽은 문서는 닫기를 보내지 못한다)
 const std = @import("std");
@@ -118,15 +121,6 @@ fn watchPick(host: *Host, input_title: []const u8, change_title: []const u8, ms:
         }
     }
     return seen;
-}
-
-fn waitTitlePrefix(host: *Host, prefix: []const u8, ms: u32) bool {
-    const deadline = os.nowMs() + ms;
-    while (os.nowMs() < deadline) {
-        const message = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return false) orelse return false;
-        if (message == .title_changed and message.title_changed.browser == id and std.mem.startsWith(u8, message.title_changed.text, prefix)) return true;
-    }
-    return false;
 }
 
 /// 그 자리로 옮긴 뒤 누른다(이동 없는 합성 클릭은 Chromium 이 다르게 다룬다 — §7 날짜 실측).
@@ -249,25 +243,39 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     // ── 초점이 옮겨 가면 닫힘 ──
     try click(&host, 100, 120); // b — 페이지가 a 에 가짜 input 을 보낸다
     const blurred = watch(&host, 3000, 600);
-    report(blurred.kind == .hide and blurred.messages == 1, "dl-blur", std.fmt.bufPrint(&detail_buf, "{s} · 알림 {d}(닫힘 하나 — 가짜 input 이 열면 둘)", .{ @tagName(blurred.kind), blurred.messages }) catch "");
+    // Tab — 누르기 없이 초점만 옮긴다(`focusout` 이 닫는다).
+    try click(&host, 100, 20);
+    const before_tab = watch(&host, 3000, 300);
+    try rawKey(&host, 0x09, 48, 9);
+    const tabbed = watch(&host, 2000, 300);
+    report(blurred.kind == .hide and blurred.messages == 1 and before_tab.kind == .show and tabbed.kind == .hide, "dl-blur", std.fmt.bufPrint(&detail_buf, "누르기 {s} · 알림 {d}(닫힘 하나 — 가짜 input 이 열면 둘) · Tab 전 {s} · Tab 뒤 {s}", .{ @tagName(blurred.kind), blurred.messages, @tagName(before_tab.kind), @tagName(tabbed.kind) }) catch "");
 
     // ── 칸 종류 ──
     try click(&host, 100, 220); // type=search
     const search = watch(&host, 3000, 300);
     try click(&host, 100, 320); // type=date(목록이 붙었지만 이 길이 아니다) — search 의 목록은 닫힌다
     const date = watch(&host, 1500, 300);
-    try click(&host, 420, 20); // readonly
+    try click(&host, 100, 20); // a 를 열어 두고
+    _ = watch(&host, 3000, 300);
+    try click(&host, 420, 20); // readonly — 열린 목록을 닫기만 한다(열면 마지막이 show)
     const readonly = watch(&host, 1500, 300);
-    report(search.kind == .show and search.count == 7 and search.field.y == 200 and date.kind == .hide and readonly.kind == .none, "dl-types", std.fmt.bufPrint(&detail_buf, "search {s}({d}, y {d}) · date {s} · readonly {s}", .{ @tagName(search.kind), search.count, search.field.y, @tagName(date.kind), @tagName(readonly.kind) }) catch "");
+    report(search.kind == .show and search.count == 7 and search.field.y == 200 and date.kind == .hide and readonly.kind == .hide, "dl-types", std.fmt.bufPrint(&detail_buf, "search {s}({d}, y {d}) · date {s} · readonly {s}", .{ @tagName(search.kind), search.count, search.field.y, @tagName(date.kind), @tagName(readonly.kind) }) catch "");
 
     // ── 스크롤 ──
     try click(&host, 100, 20);
     const before_scroll = watch(&host, 3000, 300);
     try host.send(.{ .wheel = .{ .browser = id, .point = .{ .x = 450, .y = 140 }, .delta_x = 0, .delta_y = -120 } }); // 상자 f 안
-    const box_scroll = watch(&host, 1200, 300);
+    const box_scrolled = waitTitle(&host, "f-scrolled", 1500);
+    const box_scroll = watch(&host, 800, 300);
     try host.send(.{ .wheel = .{ .browser = id, .point = .{ .x = 450, .y = 350 }, .delta_x = 0, .delta_y = -120 } }); // 문서
     const doc_scroll = watch(&host, 2000, 300);
-    report(before_scroll.kind == .show and box_scroll.kind == .none and doc_scroll.kind == .hide, "dl-scroll", std.fmt.bufPrint(&detail_buf, "열림 {s} · 상자 스크롤 뒤 {s}(none 이어야) · 문서 스크롤 뒤 {s}", .{ @tagName(before_scroll.kind), @tagName(box_scroll.kind), @tagName(doc_scroll.kind) }) catch "");
+    // 좁은 칸 g(60 px)에 긴 값을 친다 — 칸이 가로로 스크롤돼도 목록은 남는다.
+    try click(&host, 350, 220);
+    _ = watch(&host, 1500, 300);
+    for (0..12) |_| try typeChar(&host, 0, 'a');
+    const self_scrolled = waitTitle(&host, "g-scrolled", 1500);
+    const long_typed = watch(&host, 1500, 400);
+    report(before_scroll.kind == .show and box_scrolled and box_scroll.kind == .none and doc_scroll.kind == .hide and self_scrolled and long_typed.kind == .show, "dl-scroll", std.fmt.bufPrint(&detail_buf, "열림 {s} · 상자 스크롤됨 {} 뒤 {s}(none 이어야) · 문서 스크롤 뒤 {s} · 좁은 칸 스크롤됨 {} 뒤 {s}(show 여야)", .{ @tagName(before_scroll.kind), box_scrolled, @tagName(box_scroll.kind), @tagName(doc_scroll.kind), self_scrolled, @tagName(long_typed.kind) }) catch "");
 
     // ── 이동하면 닫힘 ──
     try click(&host, 100, 20);
@@ -298,7 +306,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
             first_value_ok = std.mem.eql(u8, item.value, "v0");
         }
     }
-    report(long.kind == .show and long.count > 10 and long.count < 256 and label_len == 512 and first_value_ok, "dl-long", std.fmt.bufPrint(&detail_buf, "{s} · 개수 {d} · 첫 레이블 {d} 바이트 · 첫 값 v0 {}", .{ @tagName(long.kind), long.count, label_len, first_value_ok }) catch "");
+    report(long.kind == .show and long.count == 45 and label_len == 512 and first_value_ok, "dl-long", std.fmt.bufPrint(&detail_buf, "{s} · 개수 {d} · 첫 레이블 {d} 바이트 · 첫 값 v0 {}", .{ @tagName(long.kind), long.count, label_len, first_value_ok }) catch "");
 
     // ── iframe 은 아직 — 같은 페이지 주 프레임 칸은 연다 ──
     try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(&u, port, "/datalist-frame") } });

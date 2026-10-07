@@ -14793,6 +14793,19 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
         try testing.expectEqual(@as(usize, 1), matched);
     }
     try testing.expect(std.mem.indexOfScalar(u8, fx.session.chrome_host.confirm.message, '{') == null);
+    // **신뢰 시트**(tooling §8.1 — 계획 WT1): 무엇을 신뢰하는지(이 저장소의 언어 서버 전체 + root 경로)와 무엇이 일어날 수 있는지를
+    // 안내 줄로 밝힌다. 경로 줄은 가운데를 줄이는 자리, 나머지는 번역 표의 문장 그대로다.
+    {
+        // 순서가 곧 우선순위다(높이가 모자라면 끝부터 준다) — 대가가 맨 앞, 경로 줄이 맨 끝.
+        const notes = fx.session.chrome_host.confirm.notes;
+        try testing.expectEqual(@as(usize, 5), notes.len);
+        try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_privileges), notes[0].text);
+        try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_build), notes[1].text);
+        try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_scope), notes[2].text);
+        try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_shim), notes[3].text);
+        try testing.expect(notes[4].fit == .path);
+        try testing.expect(std.mem.endsWith(u8, notes[4].text, std.fs.path.basename(fx.session.editor_lsp.asking_root.?))); // 묻는 root
+    }
     fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
     fx.session.dispatchChromeAction(.confirm_cancel);
     try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(fx.session, term).?.phase);
@@ -15365,6 +15378,72 @@ test "LSPB18 내리기는 EOF 유예를 지키고 그동안 stdout 을 비우며
         var l = lsp_process.handOff(&p, allocator);
         try testing.expect(l.reaped);
         lsp_process.lowerAll((&l)[0..1], 0);
+    }
+}
+
+test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에서 경고 안내가 「…」 없이 끝까지 서고 버튼이 화면 안에 그려진다 (§8.1·계획 WT1)" {
+    const ch = maru.chrome;
+    const confirm = ch.components.confirm;
+    const saved = maru.i18n.lang();
+    defer maru.i18n.setLang(saved);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = ch.tokens.Tokens{ .palette = std.EnumArray(ch.tokens.ColorRole, maru.color.Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |l| {
+        maru.i18n.setLang(l);
+        // 제품 `gateTrust`·`setTrustSheetNotes` 와 같은 키·같은 자리(안내 목록 자체는 LSPB2 가 제품 경로에서 고정한다).
+        const warnings = [_][]const u8{ maru.i18n.t(.lsp_trust_note_privileges), maru.i18n.t(.lsp_trust_note_build), maru.i18n.t(.lsp_trust_note_scope), maru.i18n.t(.lsp_trust_note_shim) };
+        var root_buf: [256]u8 = undefined;
+        const root_line = maru.i18n.format(&root_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = "~/Documents/workspace/maru/.claude/worktrees/lsp-trust-sheet" }});
+        const notes = [_]confirm.Note{ .{ .text = warnings[0] }, .{ .text = warnings[1] }, .{ .text = warnings[2] }, .{ .text = warnings[3] }, .{ .text = root_line, .fit = .path } };
+        var msg_buf: [512]u8 = undefined;
+        // 서버 이름은 고정 표에서 가장 긴 것 — 질문이 가장 길어지는 경우.
+        const message = maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = "typescript-language-server" }});
+        // 낮은 창(퀵 터미널·큰 글꼴과 같은 높이)에서는 안내가 끝부터 준다 — 그래도 **맨 앞의 대가**(사용자 권한·격리 없음·저장소 밖)는
+        // 끝까지 남는다(예전 순서는 경로 줄이 맨 앞이라 경고 넷이 먼저 사라졌다 — 적대적 검증).
+        for ([_]u32{ 480, 320 }) |w| {
+            var low: confirm.State = .{};
+            low.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+            low.notes = &notes;
+            const lp: ch.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = w, .backing_height_px = 260 } };
+            var lout: std.ArrayList(ch.draw.Op) = .empty;
+            try confirm.view(&low, lp, &tk, arena, &lout);
+            var ljoined: std.ArrayList(u8) = .empty;
+            for (lout.items) |op| if (op == .text and op.text.role == .surface_fg) {
+                try ljoined.appendSlice(arena, op.text.runs[0].text);
+                try ljoined.append(arena, ' ');
+            };
+            var it = std.mem.tokenizeScalar(u8, warnings[0], ' ');
+            while (it.next()) |word| try testing.expect(std.mem.indexOf(u8, ljoined.items, word) != null);
+        }
+        for ([_]u32{ 480, 320 }) |w| {
+            var st: confirm.State = .{};
+            st.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+            st.notes = &notes;
+            const p: ch.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = w, .backing_height_px = 480 } };
+            var out: std.ArrayList(ch.draw.Op) = .empty;
+            try confirm.view(&st, p, &tk, arena, &out);
+            var joined: std.ArrayList(u8) = .empty;
+            var saw_buttons = false;
+            const root_prefix = root_line[0..std.mem.indexOfScalar(u8, root_line, ' ').?];
+            for (out.items) |op| if (op == .text) {
+                const txt = op.text.runs[0].text;
+                if (std.mem.startsWith(u8, txt, "[Y]")) {
+                    saw_buttons = true;
+                    try testing.expect(op.text.origin.y + 16 <= 480); // 버튼 행이 화면 안
+                }
+                if (op.text.role != .surface_fg or std.mem.startsWith(u8, txt, "[") or std.mem.startsWith(u8, txt, root_prefix)) continue;
+                try testing.expect(std.mem.indexOf(u8, txt, "…") == null); // 경고 안내는 잘리지 않는다
+                try joined.appendSlice(arena, txt);
+                try joined.append(arena, ' ');
+            };
+            try testing.expect(saw_buttons);
+            for (warnings) |warning| {
+                var it = std.mem.tokenizeScalar(u8, warning, ' ');
+                while (it.next()) |word| try testing.expect(std.mem.indexOf(u8, joined.items, word) != null);
+            }
+        }
     }
 }
 

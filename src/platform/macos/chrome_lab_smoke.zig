@@ -38,6 +38,8 @@ fn viewportFor(id: lab.ScenarioId) chrome.ui.layout.UiSize {
         .context_menu_bottom_right => .{ .width = 1200, .height = 720 },
         // 좁고 낮은 창 — 버튼이 상자보다 넓고, 상자가 작업영역보다 높아지는 조건(`ScenarioId.confirm_paste_narrow`).
         .confirm_paste_narrow => .{ .width = 136, .height = 260 },
+        // 좁은 창의 신뢰 시트 — 경고 문장이 줄바꿈되어도 잘리지 않는지(`ScenarioId.confirm_lsp_trust_narrow`).
+        .confirm_lsp_trust_narrow => .{ .width = 320, .height = 480 },
         else => viewport,
     };
 }
@@ -875,7 +877,7 @@ pub fn main(init: std.process.Init) !void {
         const rect = (switch (scenario_id) {
             .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
-            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .confirm_long_message, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diagnostics, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
+            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diagnostics, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
@@ -1160,6 +1162,8 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "context-menu-send-helper")) return .context_menu_send_helper;
     if (std.mem.eql(u8, raw, "context-menu-bottom-right")) return .context_menu_bottom_right;
     if (std.mem.eql(u8, raw, "confirm-long-message")) return .confirm_long_message;
+    if (std.mem.eql(u8, raw, "confirm-lsp-trust")) return .confirm_lsp_trust;
+    if (std.mem.eql(u8, raw, "confirm-lsp-trust-narrow")) return .confirm_lsp_trust_narrow;
     if (std.mem.eql(u8, raw, "confirm-save-conflict")) return .confirm_save_conflict;
     if (std.mem.eql(u8, raw, "confirm-paste-narrow")) return .confirm_paste_narrow;
     if (std.mem.eql(u8, raw, "notice-long-message")) return .notice_long_message;
@@ -1194,6 +1198,8 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .context_menu_send_helper => "context-menu-send-helper",
         .context_menu_bottom_right => "context-menu-bottom-right",
         .confirm_long_message => "confirm-long-message",
+        .confirm_lsp_trust => "confirm-lsp-trust",
+        .confirm_lsp_trust_narrow => "confirm-lsp-trust-narrow",
         .confirm_save_conflict => "confirm-save-conflict",
         .confirm_paste_narrow => "confirm-paste-narrow",
         .notice_long_message => "notice-long-message",

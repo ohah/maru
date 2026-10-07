@@ -259,10 +259,15 @@ pub const ScenarioId = enum {
     /// 빠져 다른 계약을 재게 된다. 여기서 재려는 것은 평범한 clamp 다.
     context_menu_bottom_right,
     /// **상자보다 긴 확인 메시지.** 확인 모달은 메시지를 한 줄로만 그려, 상자보다 길면 글자가 상자 밖으로 나가
-    /// 창 가장자리에서 잘렸다 — 기본 960pt 창에서 LSP 신뢰 확인은 서버 이름 없이도 약 105칸이라 **늘** 넘쳤다
-    /// (2026-10-05 실측). 지금은 상자 안쪽 폭으로 나눠 그린다. 이 그림이 「줄이 상자 안에 드는가」와 「버튼이
-    /// 마지막 줄 아래로 내려가는가」를 증언한다. 문구는 제품의 i18n 키를 읽는다(리터럴이면 캡처 폭이 갈린다).
+    /// 창 가장자리에서 잘렸다(2026-10-05 실측). 지금은 상자 안쪽 폭으로 나눠 그린다. 이 그림이 「줄이 상자 안에
+    /// 드는가」와 「버튼이 마지막 줄 아래로 내려가는가」를 증언한다. 문구는 제품의 브라우저 권한 동의문(i18n 키 +
+    /// 제품이 줄이는 폭의 URL)이다 — 예전에는 LSP 신뢰 확인 문구였는데, 그 확인은 신뢰 시트(`confirm_lsp_trust`)가 됐다.
     confirm_long_message,
+    /// **신뢰 시트**(tooling §8.1 — 계획 WT1): 질문 아래에 안내 줄(root 경로 + 무엇이 일어날 수 있는지)을 줄바꿈해
+    /// 그린다. 기본 폭에서 경고 문장이 하나도 잘리지 않는지, 경로 줄이 가운데에서 줄어드는지를 증언한다.
+    confirm_lsp_trust,
+    /// **좁은 창의 신뢰 시트**(320×480). 경고 문장이 여러 줄로 나뉘되 「…」 없이 끝까지 서고, 버튼 행이 화면 안에 남는지.
+    confirm_lsp_trust_narrow,
     /// **버튼 넷짜리 확인 상자**(편집기 저장 충돌 — 비교·덮어쓰기·다시 읽기·계속 편집). 상자 안쪽 폭에 버튼이
     /// 한 줄로 안 들어가면 다음 줄로 넘긴다(#4169 — 그 전에는 넘친 버튼을 **아예 안 그렸다**). 이 그림이
     /// 「넷 다 그려지는가」와 「넘긴 줄도 가운데 정렬되고 패널 안에 드는가」를 증언한다. 포커스는 `primary`
@@ -454,7 +459,7 @@ pub fn buildFrame(
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
-        .confirm_long_message, .confirm_save_conflict, .confirm_paste_narrow => buildConfirmFrame(scenario, tokens, buffers),
+        .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow => buildConfirmFrame(scenario, tokens, buffers),
         .notice_long_message => buildNoticeFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
@@ -1679,7 +1684,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1834,10 +1839,8 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
     };
 }
 
-/// 상자보다 긴 확인 메시지 한 프레임. **제품과 같은 `confirm.view` 를 부른다** — 메시지와 버튼 라벨만 Lab 이
-/// 고르고, 줄 나누기·상자·버튼 자리는 제품 코드가 정한다. 메시지는 제품이 LSP 서버를 처음 띄울 때 묻는 그
-/// 문구(`lsp_trust_prompt`)다. 제품은 `{0}` 에 **서버 이름**(고정 표 — 최대 26자)을 넣지만, 여기서는 줄 나눔을 넉넉히
-/// 재려고 긴 경로를 넣는다 — 이 길이는 제품에서 나오지 않는다(틀만으로도 기본 창에서 넘친다는 것이 실제 경우다).
+/// 확인 모달 한 프레임. **제품과 같은 `confirm.view` 를 부른다** — 메시지·안내·버튼 라벨만 Lab 이 고르고, 줄 나누기·
+/// 상자·버튼 자리는 제품 코드가 정한다. 문구는 전부 제품의 i18n 키다(리터럴이면 캡처 폭이 갈린다).
 fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
     const arena = buffers.arena orelse return .{
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
@@ -1859,10 +1862,25 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
         // `common_cancel`). 미리보기는 `buildPastePreview` 가 내는 모양처럼 줄 단위다.
         state.show(maru.i18n.t(.term_paste_confirm), .{ .confirm = maru.i18n.t(.btn_paste), .cancel = maru.i18n.t(.common_cancel) });
         state.body = &.{ "cd ~/work/maru", "git fetch origin", "git rebase origin/main", "zig build test", "echo done", "ls -la", "exit" };
-    } else {
+    } else if (scenario.id == .confirm_lsp_trust or scenario.id == .confirm_lsp_trust_narrow) {
+        // 제품 `editor/lsp.zig` `gateTrust`·`setTrustSheetNotes` 와 같은 키·같은 자리다(질문 + 안내 다섯 줄, 경로 줄은 가운데를 줄인다).
         var msg_buf: [512]u8 = undefined;
-        const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = "/opt/homebrew/bin/rust-analyzer-nightly" }}));
+        const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = "rust-analyzer" }}));
         state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+        var root_buf: [256]u8 = undefined;
+        const root_line = try arena.dupe(u8, maru.i18n.format(&root_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = "~/Documents/workspace/maru/.claude/worktrees/lsp-trust-sheet" }}));
+        const notes = try arena.alloc(chrome.components.confirm.Note, 5);
+        notes[0] = .{ .text = maru.i18n.t(.lsp_trust_note_privileges) };
+        notes[1] = .{ .text = maru.i18n.t(.lsp_trust_note_build) };
+        notes[2] = .{ .text = maru.i18n.t(.lsp_trust_note_scope) };
+        notes[3] = .{ .text = maru.i18n.t(.lsp_trust_note_shim) };
+        notes[4] = .{ .text = root_line, .fit = .path };
+        state.notes = notes;
+    } else {
+        // 제품 브라우저 권한 동의문(`app_host_abi.zig` `grantPromptText`)과 같은 키·같은 버튼이다. URL 은 제품이 줄이는 폭 안의 길이다.
+        var msg_buf: [512]u8 = undefined;
+        const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.grant_prompt), &.{ .{ .s = maru.i18n.t(.grant_scope_storage) }, .{ .s = "https://accounts.example.com/signin/continue" } }));
+        state.show(message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
     }
     const p: chrome.props.ChromeProps = .{ .metrics = .{
         .cell_width_px = scenario.cell_w_px,

@@ -195,6 +195,10 @@ pub const State = struct {
     trust_loaded: bool = false,
     /// 묻는 중인 root(모달의 주인). 답이 오면 그 root 의 클라이언트가 움직인다.
     asking_root: ?[]u8 = null,
+    /// 신뢰 시트의 안내 줄(`setTrustSheetNotes`) — 모달이 빌려 그리므로 모달이 떠 있는 동안 여기 산다. 경로 줄만 버퍼를 쓰고
+    /// 나머지는 번역 표의 정적 문장이다.
+    trust_root_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
+    trust_notes: [5]maru.chrome.components.confirm.Note = undefined,
     /// 판정자가 켜는 스위치 — 프롬프트 없이 이 답으로 간주한다(하니스 전용). `null` 이면 정상(모달).
     auto_trust_answer: ?lsp.trust.Decision = null,
     /// 판정자 관측: 보낸 didChange 수·받은 publishDiagnostics 수·거부한 서버 요청 수.
@@ -374,6 +378,26 @@ pub fn dismissTrustPrompt(self: *AppSession) void {
         c.phase = .restarting;
         c.trust_pending = true; // 띄우지 않는다 — 다음 gate 가 다시 묻는다
     }
+}
+
+/// 신뢰 시트의 안내 줄(tooling §8.1 「sandbox 하지 못하는 한계를 확인 UX 에 명시」 — 계획 WT1). 무엇을 신뢰하는지(이 저장소의
+/// 언어 서버 **전체** + root 경로 — 결정은 root 단위로 기억된다)와 무엇이 일어날 수 있는지(사용자 권한·격리 없음·저장소 밖·빌드
+/// 스크립트·툴체인 다운로드·shim)를 밝힌다. 예전 문구(「‹서버› 를 실행할까요? … 설정을 읽고 빌드를 실행할 수 있습니다」)는 서버
+/// 하나를 묻는 것처럼, 영향이 저장소 안에 머무는 것처럼 읽혔다. 경로 줄은 모달이 가운데를 줄인다(뿌리·잎을 남긴다).
+fn setTrustSheetNotes(self: *AppSession, root: []const u8) void {
+    const st = &self.editor_lsp;
+    var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_line = maru.i18n.format(&st.trust_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = app_session_mod.homeTildeInto(root, &shown_buf) }});
+    // **순서가 곧 우선순위다** — 높이가 모자라면 모달이 안내를 끝부터 줄인다. 대가(사용자 권한·격리 없음·저장소 밖)를 맨 앞에,
+    // 경로 줄을 맨 끝에 둔다(경로가 먼저 사라지고 경고는 남는다).
+    st.trust_notes = .{
+        .{ .text = maru.i18n.t(.lsp_trust_note_privileges) },
+        .{ .text = maru.i18n.t(.lsp_trust_note_build) },
+        .{ .text = maru.i18n.t(.lsp_trust_note_scope) },
+        .{ .text = maru.i18n.t(.lsp_trust_note_shim) },
+        .{ .text = root_line, .fit = .path },
+    };
+    self.chrome_host.confirm.notes = &st.trust_notes;
 }
 
 /// 신뢰 모달의 답(`confirm_accept` / 사용자의 취소) — `app_session` 의 pending_confirm 갈래가 부른다.
@@ -933,6 +957,7 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         var msg_buf: [512]u8 = undefined;
         const text = maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = c.server.exe }});
         self.showConfirmText(.lsp_trust, text, .{ .confirm = .lsp_trust_allow, .cancel = .lsp_trust_deny });
+        setTrustSheetNotes(self, c.root); // `show` 가 안내를 비우므로 그 뒤에 채운다
         return;
     };
     c.trust_pending = false;

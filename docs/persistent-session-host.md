@@ -8229,6 +8229,39 @@ tick_collect_oom 으로 닫을 때」. 이것들은 실제 collect·tick 을 돌
 라 원인을 재현하지 않고, session-host 잡이라 main 에서만 돈다. 스트림 격리는 `connection_turn.zig` 의 「tick 은 frontier 가 어긋난 스트림만 무효화하고 연결을 살려 resync 로
 복구한다」·「tick 은 resync 스냅샷까지 frontier 가 어긋나면 무한 재시도 대신 닫는다」가 잰다(in-process, main 잡).
 
+### 12.8 `tick_partial_write_stalled` — 앱이 멈췄나, host 가 폭주했나 (2026-10-07)
+
+**무엇이 있었나.** 18:59:46 에 GUI 가 끊겼다. host 가 먼저 닫았고(`why=partial_timeout
+site=tick_partial_write_stalled pending_out=28`), 앱은 그 뒤 RPC 직전 확인(`ingestReadableOutOfBandEvidence`)에서
+EOF 를 만나 `client poison: reason=connection_eof` 를 남겼다. 직전 host `maru-metrics` 의 rss 는 144MB → 232MB 로
+뛰었다.
+
+**무엇을 못 갈랐나.** §12.3 이 이 이름을 「client 가 안 빼간다 — 배압」으로 갈랐지만, 그 안에 기한이 둘이다 —
+진행 없음 10 초(`partial_deadline_ns`)와 전체 30 초(`partial_absolute_deadline_ns`). 고칠 곳이 반대다:
+
+| 기한 | 뜻 | 의심할 곳 |
+| --- | --- | --- |
+| `no_progress` | 앱이 10 초 동안 한 바이트도 안 빼갔다 | **앱 메인 스레드** — host 소켓은 메인 tick 에서만 읽힌다 |
+| `absolute` | 빼가긴 했지만 30 초 내내 못 따라갔다 | **host 생산량** — 투영·resync 폭주 |
+
+게다가 두 로그 모두 **줄에 시각이 없어** 앱 메인이 그 순간 멈춰 있었는지 맞춰 볼 수 없었다.
+
+**남기는 줄.**
+
+- host — 닫기 직전 `session host partial stall: dir= expiry= since_progress_ms= since_start_ms= pending_bytes=
+  resident_bytes= chunks= at_unix=`(`connection_turn.zig` `notePartialStall`). 값은 `Slot.partialExpiry`·
+  `Slot.partialStall` 이 내고 `connection_slot.zig` 의 순수 테스트가 두 기한을 따로 넘겨 이름을 잰다.
+- 앱 — `main tick stall: gap_ms= tick_ms= reconnect_ms= windows_ms= rest_ms= active= hidden= visible= suppressed=
+  at_unix=`(`MaruAppHost.swift` `noteMainTickTiming`). tick 사이가 2 초 이상(`gap_ms` — tick **밖**이 메인을 잡음)
+  이거나 tick 하나가 1 초 이상(`tick_ms` — tick **안**의 단계별 분해)일 때만, 10 초에 한 줄.
+
+**읽는 법.** host 줄의 `at_unix` 와 앱 `client poison … at_unix=`·`main tick stall … at_unix=` 를 맞붙인다.
+`expiry=no_progress` 인데 그 무렵 앱 줄이 없으면 앱 메인은 돌고 있었다 — 그때는 메인 tick 이 소켓을 읽고도 못
+빼간 이유(드레인 예산)를 본다. `gap_ms` 가 크고 `visible=0` 이면 App Nap 을 의심한다.
+
+**한계.** host 줄은 **새 host 이미지**가 자리잡은 뒤부터 찍힌다(업그레이드 전 옛 host 는 안 찍는다). 원인은
+아직 모른다 — 이 절은 다음 재현에서 둘 중 하나를 고르게 하는 계측이다.
+
 ### P0 — 문서 결정
 
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.

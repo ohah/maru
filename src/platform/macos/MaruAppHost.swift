@@ -4558,6 +4558,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostReconnectTickIdle: UInt64 = 0
     private var sessionHostReconnectTickProgressed: UInt64 = 0
     private var sessionHostReconnectTickMaxElapsedNs: UInt64 = 0
+    // 메인 tick 정체 감시(`noteMainTickTiming`). host 소켓은 메인 tick 에서만 읽으므로 이 값이 곧 「앱이 host 를
+    // 얼마나 오래 안 빼갔나」다.
+    private var mainTickLastEndNs: UInt64 = 0
+    private var mainTickLastLogNs: UInt64 = 0
+    private var mainTickSuppressed: UInt64 = 0
+    private static let mainTickGapLogNs: UInt64 = 2_000_000_000
+    private static let mainTickSlowLogNs: UInt64 = 1_000_000_000
+    private static let mainTickLogIntervalNs: UInt64 = 10_000_000_000
     private var sessionHostReconnectBlockingOperations: UInt32 = 0
     private var sessionHostReconnectPreShutdownReady = false
     private var sessionHostReconnectPreShutdownRuntimeCount: UInt32 = 0
@@ -7165,14 +7173,64 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    /// tick 정체 감시의 시계. 재접속 스모크 계측(`tickAppSession` 안의 `DispatchTime` 두 자리 —
+    /// `session_host_reconnect_frame_quit_order_boundary` 가 센다)과 섞이지 않게 따로 부른다.
+    private static func mainTickNowNs() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
+
+    /// 메인 tick 이 늦게 오거나(gap) 오래 걸리면(tick) 한 줄 남긴다.
+    ///
+    /// **왜 필요한가.** 앱은 host 소켓을 메인 tick 에서만 읽는다(위 Timer·DispatchSourceRead 둘 다 메인 큐).
+    /// host 는 앱이 10 초 동안 안 빼가면 연결을 끊는다(`site=tick_partial_write_stalled`). 2026-10-07 18:59 에
+    /// 그렇게 GUI 가 끊겼는데 app.log 줄에는 시각이 없어 「그때 앱 메인이 멈췄나」를 끝내 확인하지 못했다.
+    /// - `gap_ms`: 앞 tick 끝 → 이번 tick 시작. 크면 **tick 밖**(키·마우스 핸들러의 동기 RPC, AppKit, App Nap 등)이
+    ///   메인을 잡았다.
+    /// - `tick_ms` 와 그 분해(`reconnect_ms` = host drain 포함, `windows_ms` = 창별 renderTick, `rest_ms` = 컨트롤
+    ///   플레인·브라우저·Mermaid): 크면 **tick 안**의 어느 단계가 잡았다.
+    /// - `active`/`hidden`/`visible`: App Nap 이 끼어들 수 있는 상태였는지.
+    /// - `at_unix`: host 로그 `session host partial stall ... at_unix=` 와 앱 `client poison ... at_unix=` 에 맞붙인다.
+    ///
+    /// `DispatchTime` 은 시스템 잠자기 동안 안 흐르므로 덮개를 닫았다 연 것은 gap 으로 안 잡힌다. 정상 tick 은
+    /// 한 줄도 안 남기고, 이상이 계속돼도 10 초에 한 줄로 묶어 `suppressed` 로 센다.
+    private func noteMainTickTiming(startNs: UInt64, reconnectEndNs: UInt64, windowsEndNs: UInt64) {
+        let endNs = Self.mainTickNowNs()
+        let gapNs = mainTickLastEndNs != 0 && startNs > mainTickLastEndNs ? startNs - mainTickLastEndNs : 0
+        mainTickLastEndNs = endNs
+        let tickNs = endNs > startNs ? endNs - startNs : 0
+        guard gapNs >= Self.mainTickGapLogNs || tickNs >= Self.mainTickSlowLogNs else { return }
+        if mainTickLastLogNs != 0 && endNs - mainTickLastLogNs < Self.mainTickLogIntervalNs {
+            mainTickSuppressed += 1
+            return
+        }
+        mainTickLastLogNs = endNs
+        // 단계 경계가 안 찍혔으면(창 0 개라 guard 로 일찍 나감 등) 그 단계는 0 으로 둔다.
+        func spanMs(_ from: UInt64, _ to: UInt64) -> UInt64 { from != 0 && to > from ? (to - from) / 1_000_000 : 0 }
+        let reconnectMs = spanMs(startNs, reconnectEndNs)
+        let windowsMs = spanMs(reconnectEndNs, windowsEndNs)
+        let restMs = spanMs(windowsEndNs != 0 ? windowsEndNs : reconnectEndNs, endNs)
+        let visible = windows.first?.window?.occlusionState.contains(.visible) == true ? 1 : 0
+        let atUnix = Int(Date().timeIntervalSince1970)
+        fputs(
+            "main tick stall: gap_ms=\(gapNs / 1_000_000) tick_ms=\(tickNs / 1_000_000) reconnect_ms=\(reconnectMs) windows_ms=\(windowsMs) rest_ms=\(restMs) active=\(NSApp.isActive ? 1 : 0) hidden=\(NSApp.isHidden ? 1 : 0) visible=\(visible) suppressed=\(mainTickSuppressed) at_unix=\(atUnix)\n",
+            stderr
+        )
+        mainTickSuppressed = 0
+    }
+
     // 타이머가 매 frame 부른다 — primary(메인 창)를 먼저 tick하고(셸 종료/fault는 앱-전역 종료로),
     // quick terminal이 보이면 그것도 tick한다(quick 셸 종료/fault는 quick만 닫고 앱은 계속). 각 surface를
     // explicitSurface로 지정해, 세션별 forwarder(window/appSession/메트릭/draw)가 그 surface를 대상으로 돈다.
     private func tickAppSession() {
+        let tickStartedNs = Self.mainTickNowNs()
+        var tickReconnectEndNs: UInt64 = 0
+        var tickWindowsEndNs: UInt64 = 0
+        defer {
+            noteMainTickTiming(startNs: tickStartedNs, reconnectEndNs: tickReconnectEndNs, windowsEndNs: tickWindowsEndNs)
+        }
         workspaceCheckpointDrivenThisTick = false
         refreshSessionHostWakeSources()
         let reconnectStartedNs = isSessionHostAutoReconnectSmokeMode ? DispatchTime.now().uptimeNanoseconds : 0
         let reconnectOutcome = maru_macos_reconnect_product_tick()
+        tickReconnectEndNs = Self.mainTickNowNs()
         if reconnectStartedNs != 0 {
             let reconnectFinishedNs = DispatchTime.now().uptimeNanoseconds
             let elapsed = reconnectFinishedNs >= reconnectStartedNs ? reconnectFinishedNs - reconnectStartedNs : 0
@@ -7226,6 +7284,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // 닫을 창 처리(마지막 창이면 앱 종료 — 그 경우 아래 quick tick은 건너뛴다).
         for entry in toClose { closeWindowOrQuit(entry.surface, faulted: entry.faulted) }
+        tickWindowsEndNs = Self.mainTickNowNs()
         maybeRunAgentSessionArchiveSmoke()
         maybeRunEditorSaveConflictSmoke()
         maybeRunEditorIMESmoke()

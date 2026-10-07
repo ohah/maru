@@ -220,6 +220,35 @@ fn noteStreamFrontierResync(stream: subscription_identity.LocalStreamId) void {
     host_log.line("session host stream resync after frontier mismatch: stream={d} -> snapshot.invalidated", .{stream});
 }
 
+/// 정체로 닫기 **직전** 한 줄. 바로 뒤의 `closed client connection ... site=tick_partial_*_stalled` 줄은
+/// 「정체로 닫았다」까지만 말한다. 2026-10-07 18:59 GUI 끊김에서 그 줄만으로는
+/// ① 두 기한(진행 없음 10 초 / 전체 30 초) 중 어느 것인지, ② 얼마나 쌓였는지, ③ 언제인지를 몰라
+/// 「앱이 멈췄나 host 가 폭주했나」를 가르지 못했다(host 로그 줄에는 시각이 없다).
+/// `at_unix` 는 앱 로그의 `client poison ... at_unix=` 와 같은 시계라 두 줄을 맞붙일 수 있다.
+/// 연결마다 닫기는 한 번이라 소음이 아니다.
+fn notePartialStall(
+    direction: slot_mod.Slot.PartialDirection,
+    expiry: slot_mod.Slot.PartialExpiry,
+    stall: slot_mod.Slot.PartialStall,
+) void {
+    if (builtin.is_test) return;
+    var wall: std.c.timespec = undefined;
+    const at: i64 = if (std.c.clock_gettime(.REALTIME, &wall) == 0) wall.sec else 0;
+    host_log.line(
+        "session host partial stall: dir={s} expiry={s} since_progress_ms={d} since_start_ms={d} pending_bytes={d} resident_bytes={d} chunks={d} at_unix={d}",
+        .{
+            @tagName(direction),
+            @tagName(expiry),
+            stall.since_progress_ns / std.time.ns_per_ms,
+            stall.since_start_ns / std.time.ns_per_ms,
+            stall.pending_bytes,
+            stall.resident_bytes,
+            stall.chunks,
+            at,
+        },
+    );
+}
+
 fn noteResyncSweepBlocked(now: ResyncSweepBlock) void {
     if (builtin.is_test) return;
     if (last_sweep_block) |prev| if (std.meta.eql(prev, now)) return;
@@ -780,10 +809,14 @@ pub const Client = struct {
             return self.beginCloseAt("tick_unattached_idle", .partial_timeout);
         // read 와 write 도 가른다. write 정체는 **client 가 안 빼간다**(배압)이고 read 정체는
         // **client 가 안 보낸다**로, 의심할 쪽이 서로 반대다.
-        if (slot.partialExpired(.write, now_ns))
+        if (slot.partialExpiry(.write, now_ns)) |expiry| {
+            notePartialStall(.write, expiry, slot.partialStall(.write, now_ns));
             return self.failPendingUpgradeAt("tick_partial_write_stalled", .partial_timeout);
-        if (slot.partialExpired(.read, now_ns))
+        }
+        if (slot.partialExpiry(.read, now_ns)) |expiry| {
+            notePartialStall(.read, expiry, slot.partialStall(.read, now_ns));
             return self.failPendingUpgradeAt("tick_partial_read_stalled", .partial_timeout);
+        }
         if (self.close_after_flush != null) return;
         var lease = if (self.admission_gate) |gate| gate.tryEnter() orelse return else null;
         defer if (lease) |*held| held.release();

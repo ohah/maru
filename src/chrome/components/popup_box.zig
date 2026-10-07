@@ -53,9 +53,11 @@ pub const Placement = struct {
     /// 그려지는 상자가 이 rect 보다 **사방으로 얼마나 큰가**(px). 경계 여백(한 셀)은 **보이는** 테두리에서 센다.
     ///
     /// ⚠️ rich 토큰의 모달 lowering 은 오버레이의 첫 둥근 quad 를 `modal_padding_px`(12)만큼 키워 그린다
-    /// (`metal_lowering.appendModalQuad`). 그 값을 모르고 rect 만 한 셀(8) 띄우면 보이는 패널이 workspace 를
-    /// 4px 넘어 **테두리가 창 끝에 먹혔다** — 우하단 우클릭 메뉴·긴 「보내기」 메뉴에서 실측(2026-10-07, Lab 이
-    /// 제품 모양으로 그리기 시작하면서 드러났다). 그 quad 를 내는 호출자만 `p.shape.modal_padding_px` 를 준다 —
+    /// (`metal_lowering.appendModalQuad`). 그 12px 는 **배율과 무관한 고정 backing px** 라, 그 값을 모르고 rect 만 한 셀
+    /// 띄우면 결과가 셀 크기에 따라 갈렸다. 셀 폭이 12px 보다 좁으면(1배율 화면 — Lab·헤드리스 캡처의 8px) 보이는 패널이
+    /// 넘쳐 **오른쪽 테두리가 창 끝에 먹혔다** — 우하단 우클릭 메뉴·긴 「보내기」 메뉴에서 실측(2026-10-07, Lab 이 제품
+    /// 모양으로 그리기 시작하면서 드러났고, 실제 앱 1배율 캡처로도 확인). 셀이 그보다 크면(Retina 기본 글꼴 ≈16px, 셀
+    /// 높이 16~18px) 넘치지는 않아도 여백이 한 셀보다 좁았다. 그 quad 를 내는 호출자만 `p.shape.modal_padding_px` 를 준다 —
     /// `context_menu`·`hover_box`·`suggest_docs`·`rename_box`(입력 상자 `input_box` 가 그 quad 를 낸다 — 처음에 「패널
     /// 없음」으로 잘못 분류했다, 적대적 검증 2026-10-07). 패널 quad 가 없는 상자(드롭다운·자동완성 목록)와 pane
     /// 오버레이(이미지 프리뷰)는 0 이다. **판단은 그 컴포넌트 파일만 보지 말고 그것이 부르는 그리기 함수까지 본다.**
@@ -457,8 +459,8 @@ test "PBX1 placeBeside — 오른쪽(위 맞춤) → 왼쪽 → 아래 → 위 �
 }
 
 test "PBX2 visible_outset_px — 사방으로 커져 그려지는 패널은 **보이는 테두리**가 경계에서 한 셀 떨어진다(place·maxBoxWidth·placeBeside)" {
-    // rich 모달 lowering 은 패널 quad 를 사방 12px 키운다. 그것을 모르면 rect 는 한 셀(8) 띄워도 보이는 패널이
-    // 4px 넘쳐 테두리가 창 끝에 먹혔다(2026-10-07 Lab 실측 — 우하단 우클릭 메뉴).
+    // rich 모달 lowering 은 패널 quad 를 사방 12px 키운다. 그것을 모르면 rect 는 한 셀(8 — 1배율) 띄워도 보이는 패널이
+    // 4px 넘쳐 오른쪽 테두리가 창 끝에 먹혔다(2026-10-07 Lab·실제 앱 1배율 실측 — 우하단 우클릭 메뉴).
     const p = metricsOf(800, 400);
     const pad: u32 = 12;
     // 우하단 구석을 누른다 — rect 우단 = 800 − 8 − 12, 하단 = 400 − 16 − 12.

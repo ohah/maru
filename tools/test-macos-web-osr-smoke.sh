@@ -1424,8 +1424,8 @@ PY
 # 맞춘다(앱 스크린샷에는 네이티브 창이 담기지 않는다). 파란 칸에서 고르면 그 값이 iframe 칸에 들어간다(창이 거두어진다).
 cat > "$root/dlf.txt" <<'SCRIPT'
 sleep 7000
-mouse 1 0.40 0.30 0 0 0
-mouse 3 0.40 0.30 0 0 0
+mouse 1 0.40 0.20 0 0 0
+mouse 3 0.40 0.20 0 0 0
 sleep 1500
 datalist
 mouse 1 0.40 0.58 0 0 0

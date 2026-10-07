@@ -57,6 +57,7 @@ pub fn handle(msg: Message) bool {
         },
         .wheel => |value| if (hostOf(value.browser)) |host| {
             defer object.release(host);
+            @import("datalist.zig").onScrolled(value.browser); // W6m③: 바깥 스크롤 상자도 iframe 목록의 원점을 낡게 한다
             var event = mouseEvent(value.point, value.modifiers);
             host.*.send_mouse_wheel_event.?(host, &event, value.delta_x, value.delta_y);
         },

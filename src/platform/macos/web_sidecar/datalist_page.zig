@@ -16,8 +16,12 @@ const message = protocol.message;
 /// (사용자 결정 2026-10-07 — `attachShadow` 바꿔치기의 흔적: toString·오류 stack). iframe 안의 칸 — 그 프레임의 viewport 기준
 /// 사각형을 그 viewport 로 자르고, **신뢰된 포인터 사건의 `screenX − clientX`**(CEF OSR 에서 screen 좌표는 주 view 의 좌표다 —
 /// 같은·다른 출처 iframe 에서 내용 상자 원점과 px 단위로 같았다, 실측)를 더해 주 view 기준으로 보낸다. 포인터가 그 프레임에 한 번도
-/// 오지 않았으면(Tab 으로만 들어옴) 보이지 않는다. 그 값을 잰 뒤의 시간(`a`)을 함께 보내 sidecar 가 최상위 스크롤 뒤의 낡은 자리를
-/// 버린다. 바깥 프레임과 메시지를 주고받지 않는다(적대 검토 — 페이지가 엿보거나 위조할 수 있다).
+/// 오지 않았으면(Tab 으로만 들어옴) 보이지 않는다. 연이은 포인터 사건의 screen 차이와 client 차이가 다르면(부모가 iframe 을
+/// 확대·회전했거나 최상위가 pinch 확대됐다 — 원점이 포인터 자리마다 달라진다) 원점을 버린다(적대 리뷰 1 회차). 그 값을 잰 뒤의
+/// 시간(`a`)을 함께 보내 sidecar 가 스크롤 뒤의 낡은 자리를 버린다. 휠은 원점을 재지 않는다(휠이 바깥 상자를 굴리면 굴리기 전 값이
+/// 남는다). 바깥 프레임과 메시지를 주고받지 않는다(적대 검토 — 페이지가 엿보거나 위조할 수 있다). 초점은 그 문서가 실제로 초점을
+/// 가졌을 때만(`hasFocus` — 다른 프레임에 사용자가 치는 동안 iframe 이 스스로 칸에 글을 넣어 목록을 띄우지 못하게, sidecar 도 초점
+/// 프레임을 본다). 누름으로 연 목록은 `m` 으로 알린다(누름 처리 중에는 초점이 아직 옮겨 가지 않았다).
 ///
 /// 페이지가 바꿔 놓을 수 있는 것은 우리가 아는 길에서 부르지 않는다: 판정·읽기·넣기에 쓰는 getter/setter·함수(`type`·`list`·
 /// `value`·`readOnly`·`disabled`, `options`·길이, 옵션의 `value`·`label`·`disabled`, 사각형·`visualViewport`, `activeElement`,
@@ -44,7 +48,8 @@ pub const script_part = "(function(){" ++
     // W6m③ — 사건의 진짜 대상·shadow root·포인터 좌표·프레임 viewport·시계.
     "CP=Event.prototype.composedPath,RN=Node.prototype.getRootNode,PN=G(Node.prototype,'parentNode').get,SRP=ShadowRoot.prototype,SH=G(SRP,'host').get,SA=G(SRP,'activeElement').get," ++
     "SX=G(MP,'screenX').get,SY=G(MP,'screenY').get,CX=G(MP,'clientX').get,CY=G(MP,'clientY').get,IW=G(W,'innerWidth').get,IH=G(W,'innerHeight').get," ++
-    "PF=performance,PW=Performance.prototype.now,MX=Math.max,MN=Math.min,MR=Math.round,WS=WeakSet,WA=WS.prototype.add,WH=WS.prototype.has,roots=new WS(),ox=0,oy=0,ot=-1," ++
+    "PF=performance,PW=Performance.prototype.now,MX=Math.max,MN=Math.min,MR=Math.round,MA=Math.abs,WS=WeakSet,WA=WS.prototype.add,WH=WS.prototype.has,roots=new WS(),ox=0,oy=0,ot=-1,last=null,scaled=false," ++
+    "HF=Document.prototype.hasFocus,byPress=false," ++
     "K={__proto__:null,text:1,search:1,url:1,tel:1,email:1,number:1},cur=null,ver=0,vals=null,busy=false;" ++
     "function arr(){return SP([],null)}" ++
     "function real(e){try{return e.isTrusted===true}catch(x){return false}}" ++
@@ -58,14 +63,17 @@ pub const script_part = "(function(){" ++
     // 사건의 진짜 대상 — 열린 shadow 안이면 그 안의 것(window 에서 `target` 은 host 다).
     "function tgt(e){var p=A(CP,e,[]);return p.length?p[0]:null}" ++
     // 초점 — 칸의 root 를 따라 올라가며 각 shadow root 의 `activeElement` 가 그 아래 것이고, 끝에 문서의 `activeElement` 가 바깥 host.
-    "function focused(t){try{var n=t,r=A(RN,n,[]);while(r!==D){if(A(SA,r,[])!==n)return false;n=A(SH,r,[]);r=A(RN,n,[])}return A(AE,D,[])===n}catch(e){return false}}" ++
+    "function focused(t){try{if(!A(HF,D,[]))return false;var n=t,r=A(RN,n,[]);while(r!==D){if(A(SA,r,[])!==n)return false;n=A(SH,r,[]);r=A(RN,n,[])}return A(AE,D,[])===n}catch(e){return false}}" ++
     // g 가 t 를 품는가 — shadow 경계를 넘어(부모가 없으면 host 로).
     "function holds(g,t){var n=t;while(n){if(n===g)return true;var p=A(PN,n,[]);if(!p){try{p=A(SH,n,[])}catch(x){p=null}}n=p}return false}" ++
     // 보인 칸의 shadow root 마다 스크롤 수신자를 한 번 단다(스크롤은 composed 가 아니다).
     "function watch(t){try{var r=A(RN,t,[]);while(r!==D){if(!A(WH,roots,[r])){A(WA,roots,[r]);A(AL,r,['scroll',onScroll,true])}r=A(RN,A(SH,r,[]),[])}}catch(e){}}" ++
     "function onScroll(e){try{var g=tgt(e);if(cur&&g!==cur&&holds(g,cur))hide()}catch(x){}}" ++
     // iframe 의 원점 — 신뢰된 포인터 사건의 screen − client(주 view 기준 이 프레임 viewport 의 왼쪽 위).
-    "function seen(e){if(main||!real(e))return;try{ox=A(SX,e,[])-A(CX,e,[]);oy=A(SY,e,[])-A(CY,e,[]);ot=A(PW,PF,[])}catch(x){}}" ++
+    // 확대 판정은 4 px 넘게 움직인 쌍으로만 한다 — 제자리 쌍(누르기 직전의 같은 자리 움직임)은 차이가 둘 다 0 이라 확대를 가리지 못했다
+    // (적대 리뷰 1 회차 판정 — 확대한 iframe 에서 누르기가 틀린 원점을 다시 세웠다). 확대로 판정되면 큰 쌍이 맞을 때까지 원점을 쓰지 않는다.
+    "function seen(e){if(main||!real(e))return;try{var sx=A(SX,e,[]),sy=A(SY,e,[]),cx=A(CX,e,[]),cy=A(CY,e,[]),p=last;last=arr();last[0]=sx;last[1]=sy;last[2]=cx;last[3]=cy;" ++
+    "if(p&&(MA(cx-p[2])>4||MA(cy-p[3])>4))scaled=MA((sx-p[0])-(cx-p[2]))>1||MA((sy-p[1])-(cy-p[3]))>1;if(scaled){ot=-1;return}ox=sx-cx;oy=sy-cy;ot=A(PW,PF,[])}catch(x){}}" ++
     "function hide(){if(!cur)return;cur=null;vals=null;try{send('dl',J({__proto__:null,t:0,v:ver}))}catch(e){}}" ++
     "function show(t){try{var l=A(LG,t,[]);if(!l)return hide();var q=words(A(LC,S(A(VG,t,[])),[])),os=A(OG,l,[]),n=A(CL,os,[]),it=arr(),vs=arr(),k=0,used=0;" ++
     "for(var i=0;i<n&&k<256;i++){var o=os[i];if(A(OD,o,[]))continue;var v=S(A(OV,o,[])),b=S(A(OL,o,[]));if(v==='')continue;" ++
@@ -78,10 +86,10 @@ pub const script_part = "(function(){" ++
     "else{if(ot<0)return hide();var x0=MX(x,0),y0=MX(y,0),x1=MN(x+w,A(IW,W,[])),y1=MN(y+h,A(IH,W,[]));if(x1<=x0||y1<=y0)return hide();" ++
     "rr[0]=x0+ox;rr[1]=y0+oy;rr[2]=x1-x0;rr[3]=y1-y0;age=MR(A(PW,PF,[])-ot)}" ++
     "cur=t;vals=vs;ver++;watch(t);" ++
-    "send('dl',J({__proto__:null,t:1,v:ver,r:rr,i:it,a:age}))}catch(e){}}" ++
+    "send('dl',J({__proto__:null,t:1,v:ver,r:rr,i:it,a:age,m:byPress?1:0}))}catch(e){}}" ++
     "function on(type,f){A(AL,W,[type,f,true])}" ++
-    "on('mousemove',seen);A(AL,W,['wheel',seen,{__proto__:null,capture:true,passive:true}]);" ++
-    "on('mousedown',function(e){try{seen(e);if(busy||!real(e))return;var t=fieldOf(tgt(e));if(t&&A(MB,e,[])===0&&!A(MC,e,[]))show(t);else hide()}catch(x){}});" ++
+    "on('mousemove',seen);" ++
+    "on('mousedown',function(e){try{seen(e);if(busy||!real(e))return;var t=fieldOf(tgt(e));if(t&&A(MB,e,[])===0&&!A(MC,e,[])){byPress=true;try{show(t)}finally{byPress=false}}else hide()}catch(x){}});" ++
     "on('input',function(e){try{if(busy||!real(e))return;var t=fieldOf(tgt(e));if(!t||!focused(t))return;if(S(A(VG,t,[]))==='')return hide();show(t)}catch(x){}});" ++
     "on('keydown',function(e){try{if(busy||!real(e)||A(KK,e,[])!=='ArrowDown'||A(KA,e,[])||A(KC,e,[])||A(KM,e,[]))return;var t=fieldOf(tgt(e));if(t&&focused(t))show(t)}catch(x){}});" ++
     "on('focusout',function(e){try{if(cur&&tgt(e)===cur)hide()}catch(x){}});" ++
@@ -105,7 +113,8 @@ comptime {
 pub const Parsed = union(enum) {
     hide: i32,
     /// `age_ms` — iframe 이 원점(포인터 사건)을 잰 뒤 지난 시간(주 프레임은 0). sidecar 가 최상위 스크롤 뒤의 낡은 자리를 버린다.
-    show: struct { version: i32, field: message.Rect, count: u16, items: []const u8, age_ms: u32 = 0 },
+    /// `by_press` — 누름으로 연 목록(그 프레임에 아직 초점이 없을 수 있다 — sidecar 의 초점 프레임 확인을 건너뛴다).
+    show: struct { version: i32, field: message.Rect, count: u16, items: []const u8, age_ms: u32 = 0, by_press: bool = false },
 };
 
 /// `{t:0,v}` 는 닫기, `{t:1,v,r:[x,y,w,h],i:[[값,레이블],…]}` 는 보이기. 항목 글이 UTF-8 이 아니면(대리 스크립트가 아닌 것이
@@ -164,8 +173,14 @@ fn parseValue(root: std.json.Value, view: message.ViewSize, items_buf: []u8) ?Pa
         if (age != .integer or age.integer < 0) return null;
         age_ms = @intCast(@min(age.integer, std.math.maxInt(u32)));
     }
+    var by_press = false;
+    if (root.object.get("m")) |m| {
+        if (m != .integer or (m.integer != 0 and m.integer != 1)) return null;
+        by_press = m.integer == 1;
+    }
     return .{ .show = .{
         .age_ms = age_ms,
+        .by_press = by_press,
         .version = version,
         .field = .{ .x = @intFromFloat(@round(x)), .y = @intFromFloat(@round(y)), .width = @intFromFloat(@round(w)), .height = @intFromFloat(@round(h)) },
         .count = builder.count,
@@ -214,10 +229,14 @@ test "datalist payload: malformed, out of view, empty, or non-UTF-8 lists are no
     try std.testing.expect(parse("{\"t\":1,\"v\":1,\"r\":[0,0,-1,10],\"i\":[[\"a\",\"\"]]}", test_view, &buf) == null); // 음수 크기
 }
 
-test "datalist payload: an iframe's origin age is kept, a missing age is 0, and a malformed age drops the list (W6m③)" {
+test "datalist payload: an iframe's origin age and the opened-by-press mark are kept, missing ones default, malformed ones drop the list (W6m③)" {
     var buf: [message.max_datalist_bytes]u8 = undefined;
     try std.testing.expectEqual(@as(u32, 250), parse("{\"t\":1,\"v\":1,\"r\":[0,0,10,10],\"i\":[[\"a\",\"\"]],\"a\":250}", test_view, &buf).?.show.age_ms);
     try std.testing.expectEqual(@as(u32, 0), parse("{\"t\":1,\"v\":1,\"r\":[0,0,10,10],\"i\":[[\"a\",\"\"]]}", test_view, &buf).?.show.age_ms);
     try std.testing.expect(parse("{\"t\":1,\"v\":1,\"r\":[0,0,10,10],\"i\":[[\"a\",\"\"]],\"a\":-1}", test_view, &buf) == null);
     try std.testing.expect(parse("{\"t\":1,\"v\":1,\"r\":[0,0,10,10],\"i\":[[\"a\",\"\"]],\"a\":1.5}", test_view, &buf) == null);
+    // 누름으로 연 목록(`m`) — 0·1 만.
+    try std.testing.expect(parse("{\"t\":1,\"v\":1,\"r\":[0,0,10,10],\"i\":[[\"a\",\"\"]],\"m\":1}", test_view, &buf).?.show.by_press);
+    try std.testing.expect(!parse("{\"t\":1,\"v\":1,\"r\":[0,0,10,10],\"i\":[[\"a\",\"\"]]}", test_view, &buf).?.show.by_press);
+    try std.testing.expect(parse("{\"t\":1,\"v\":1,\"r\":[0,0,10,10],\"i\":[[\"a\",\"\"]],\"m\":2}", test_view, &buf) == null);
 }

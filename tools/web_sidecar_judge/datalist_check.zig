@@ -24,13 +24,20 @@
 //!   dl-shadow-blur      Tab 으로 shadow 밖으로 나가면 닫는다(`focusout` 은 window 에서 host 로 보인다 — 진짜 대상으로 본다)
 //!   dl-shadow-scroll    shadow 안 스크롤 상자가 칸을 품고 스크롤하면 닫는다(스크롤은 composed 가 아니다 — root 에 단 수신자)
 //!   dl-shadow-none      shadow 안 칸의 목록이 바깥(light DOM)에 있으면 열지 않는다(Chrome 과 같다), 선언형 닫힌 shadow 는 하지 않는다
-//!   dl-iframe-keys      포인터가 한 번도 오지 않은 iframe 의 칸은 Tab·글자로 들어가도 열지 않는다(원점을 모른다), 그 위로 포인터가
+//!   dl-shadow-nested    shadow 안의 shadow 안 칸도 연다 — 글자 거르기(초점을 두 겹 따라 본다)와 Tab 닫기
+//!   dl-shadow-doc       문서가 스크롤하면 shadow 안 칸의 목록도 닫는다(품음을 shadow 경계 너머로 본다)
+//!   dl-iframe-keys      포인터가 한 번도 오지 않은 iframe 의 칸은 Tab·글자로 들어가도 열지 않는다(원점을 모른다 — 페이지가 보낸
+//!                       가짜 포인터 사건은 세지 않는다), 그 위로 포인터가
 //!                       지나간 뒤의 ↓ 는 연다 — 칸 사각형은 iframe 내용 상자 원점(60,160)만큼 옮겨진다
 //!   dl-iframe           같은 출처 iframe 안의 칸을 누르면 연다(사각형 60,160 300x40), 고르면 그 프레임 칸에 들어간다; 주 프레임 칸도 연다
 //!   dl-iframe-scroll    최상위 문서가 스크롤하면 iframe 목록은 닫히고, 그 뒤 포인터 없이 ↓ 는 열지 않으며(원점이 낡았다), 포인터가
 //!                       지나간 뒤에는 새 자리(위로 옮겨짐)로 연다
 //!   dl-xframe           다른 출처 iframe(localhost — OOPIF) 안의 칸도 같은 자리로 열고 고르면 그 칸에 들어간다
 //!   dl-iframe-removed   목록이 떠 있는 iframe 을 페이지가 떼어 내면 닫힌다
+//!   dl-iframe-nav       목록이 떠 있는 iframe 이 다른 문서로 가면 닫힌다
+//!   dl-iframe-steal     사용자가 바깥 칸에 치는 동안 다른 출처 iframe 이 스스로 칸에 초점을 주고 글을 넣어도 그 목록은 뜨지 않는다
+//!                       (초점 프레임·`hasFocus`)
+//!   dl-iframe-scaled    부모가 1.5 배로 키운 iframe 은 원점을 믿지 않아 열지 않는다(screen 차이와 client 차이가 다르다)
 //!   dl-renderer-gone    목록이 떠 있는 채 렌더러가 죽으면 sidecar 가 닫는다(죽은 문서는 닫기를 보내지 못한다)
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -370,6 +377,19 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     const sh_light = watch(&host, 2000, 300);
     try click(&host, 100, 220); // 선언형 닫힌 shadow
     const sh_closed = watch(&host, 2000, 300);
+    try click(&host, 100, 340); // 중첩 shadow
+    const nested = watch(&host, 3000, 300);
+    try typeChar(&host, 15, 'r');
+    const nested_r = watch(&host, 3000, 400);
+    const nested_r_text = nested_r.describe(&b_buf);
+    try rawKey(&host, 0x09, 48, 9);
+    const nested_tab = watch(&host, 2000, 300);
+    report(nested.kind == .show and nested.field.y == 320 and nested.count == 2 and nested_r.kind == .show and std.mem.eql(u8, nested_r_text, "apricot") and nested_tab.kind == .hide, "dl-shadow-nested", std.fmt.bufPrint(&detail_buf, "{s}(y {d}, {d}) · r → {s} · Tab 뒤 {s}", .{ @tagName(nested.kind), nested.field.y, nested.count, nested_r_text, @tagName(nested_tab.kind) }) catch "");
+    try click(&host, 100, 20);
+    const sh_doc_open = watch(&host, 3000, 300);
+    try host.send(.{ .wheel = .{ .browser = id, .point = .{ .x = 500, .y = 300 }, .delta_x = 0, .delta_y = -120 } }); // 문서(상자 밖)
+    const sh_doc_scroll = watch(&host, 2000, 300);
+    report(sh_doc_open.kind == .show and sh_doc_scroll.kind == .hide, "dl-shadow-doc", std.fmt.bufPrint(&detail_buf, "{s} · 문서 스크롤 뒤 {s}", .{ @tagName(sh_doc_open.kind), @tagName(sh_doc_scroll.kind) }) catch "");
     report(sh_light.kind != .show and sh_closed.kind != .show, "dl-shadow-none", std.fmt.bufPrint(&detail_buf, "바깥 목록 {s} · 닫힌 shadow {s}", .{ @tagName(sh_light.kind), @tagName(sh_closed.kind) }) catch "");
 
     // ── W6m③: 같은 출처 iframe — 먼저 포인터 없이(Tab 으로만) ──
@@ -398,7 +418,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     const stale_open = watch(&host, 2000, 300);
     // 스크롤한 만큼 위로 옮겨진 칸 위를 지나간다(페이지가 알린 scrollY — 칸은 iframe 내용 원점 160 에서 시작).
     const sy = @max(top_scroll.sy, stale_open.sy);
+    // 움직임 둘 — 스크롤을 사이에 둔 첫 움직임은 앞 움직임과 screen·client 차이가 달라 원점을 버리고(확대 판정), 다음 움직임이 다시 잰다.
     try host.send(.{ .mouse = .{ .browser = id, .kind = .move, .point = .{ .x = 200, .y = 180 - sy } } });
+    os.sleepMs(100);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .move, .point = .{ .x = 210, .y = 182 - sy } } });
     os.sleepMs(200);
     try rawKey(&host, 0x28, 125, 0xf701);
     const moved = watch(&host, 3000, 300);
@@ -416,9 +439,16 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
         try host.send(.{ .datalist_pick = .{ .browser = id, .list = framed.list, .index = 1 } });
         frame_pick = watchPick(&host, "in-input:b", "in-change:b", 3000);
     }
+    try click(&host, 100, 180);
+    _ = watch(&host, 2000, 300);
+    try clear(&host, 3);
+    try typeChar(&host, 45, 'n'); // nut — 0.4 초 뒤 그 iframe 이 다른 문서로 간다
+    const nut = watch(&host, 1000, 100);
+    const navigated = watch(&host, 3000, 300);
+    report(nut.kind == .show and navigated.kind == .hide, "dl-iframe-nav", std.fmt.bufPrint(&detail_buf, "n {s} · 이동 뒤 {s}", .{ @tagName(nut.kind), @tagName(navigated.kind) }) catch "");
     try click(&host, 550, 220); // 주 프레임 칸
     const main_field = watch(&host, 3000, 300);
-    report(framed.kind == .show and framed.field.x == 60 and framed.field.y == 160 and framed.field.width == 300 and framed.field.height == 40 and framed.count == 3 and
+    report(framed.kind == .show and framed.field.x == 60 and framed.field.y == 160 and framed.field.width == 300 and framed.field.height == 40 and framed.count == 4 and
         frame_pick.input and frame_pick.change and frame_pick.hidden and main_field.kind == .show and main_field.count == 2, "dl-iframe", std.fmt.bufPrint(&detail_buf, "iframe {s}({d}) 칸 {d},{d} {d}x{d} · 고름 input {} change {} 닫힘 {} · 주 프레임 {s}({d})", .{ @tagName(framed.kind), framed.count, framed.field.x, framed.field.y, framed.field.width, framed.field.height, frame_pick.input, frame_pick.change, frame_pick.hidden, @tagName(main_field.kind), main_field.count }) catch "");
 
     // ── 다른 출처 iframe(localhost — OOPIF) ──
@@ -435,11 +465,41 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     }
     report(xframed.kind == .show and xframed.field.x == 60 and xframed.field.y == 160 and xframed.field.width == 300 and xframed.field.height == 40 and
         xframe_pick.input and xframe_pick.change and xframe_pick.hidden, "dl-xframe", std.fmt.bufPrint(&detail_buf, "{s}({d}) 칸 {d},{d} {d}x{d} · 고름 input {} change {} 닫힘 {}", .{ @tagName(xframed.kind), xframed.count, xframed.field.x, xframed.field.y, xframed.field.width, xframed.field.height, xframe_pick.input, xframe_pick.change, xframe_pick.hidden }) catch "");
+    // 바깥 칸에 치는 동안 iframe 이 스스로 넣는다 — 오는 목록은 모두 바깥 칸(x 480)의 것이어야 한다.
+    try click(&host, 550, 220);
+    _ = watch(&host, 2000, 300);
+    try clear(&host, 2);
+    var foreign: u32 = 0;
+    var own: u32 = 0;
+    try typeChar(&host, 0, 'a'); // 바깥 칸 keydown → 바깥 페이지가 iframe 에 'steal'
+    const steal_deadline = os.nowMs() + 2500;
+    while (os.nowMs() < steal_deadline) {
+        const message = (host.next(@intCast(@max(steal_deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (message == .datalist_show and message.datalist_show.browser == id) {
+            if (message.datalist_show.field.x == 60) foreign += 1 else own += 1;
+        }
+    }
+    report(foreign == 0 and own >= 1, "dl-iframe-steal", std.fmt.bufPrint(&detail_buf, "바깥 칸 목록 {d} · iframe 목록 {d}", .{ own, foreign }) catch "");
+    try click(&host, 100, 180); // 다시 iframe 칸으로
+    _ = watch(&host, 2000, 300);
     try clear(&host, 3);
     try typeChar(&host, 6, 'z'); // zebra — 0.4 초 뒤 바깥 페이지가 iframe 을 떼어 낸다
     const zebra = watch(&host, 1000, 100);
     const removed = watch(&host, 3000, 300);
     report(zebra.kind == .show and removed.kind == .hide, "dl-iframe-removed", std.fmt.bufPrint(&detail_buf, "z {s} · 떼어 낸 뒤 {s}", .{ @tagName(zebra.kind), @tagName(removed.kind) }) catch "");
+
+    // ── 확대한 iframe — 원점을 믿지 않는다 ──
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(&u, port, "/datalist-zframe") } });
+    _ = waitTitle(&host, "dl-frame-ready", 10_000);
+    try host.send(.{ .set_focus = .{ .browser = id, .value = true } });
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .move, .point = .{ .x = 150, .y = 200 } } });
+    os.sleepMs(100);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .move, .point = .{ .x = 200, .y = 230 } } });
+    os.sleepMs(100);
+    try click(&host, 150, 200); // 1.5 배 — 칸은 (65,165)~(515,225)
+    const scaled = watch(&host, 2500, 300);
+    report(scaled.kind != .show, "dl-iframe-scaled", std.fmt.bufPrint(&detail_buf, "{s} 칸 {d},{d} {d}x{d}", .{ @tagName(scaled.kind), scaled.field.x, scaled.field.y, scaled.field.width, scaled.field.height }) catch "");
 
     // 렌더러 죽음 판정이 쓸 주 프레임 목록
     try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(&u, port, "/datalist-frame") } });

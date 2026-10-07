@@ -10422,7 +10422,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // W6l②(사용자 결정 2026-10-06 — 「둘 다 파일로」의 그림 데이터): 그림만 있는 끌기(다른 앱이 그림 자체를 끌었다 — 파일·
             // 주소·글 없이 PNG·TIFF)는 페이지가 빈 drop 을 받았다(§7 실측). 포인터가 본문에 들어올 때(이 view 에 들어온 끌기마다 한 번)
             // PNG 파일로 만들어 싣는다(`osrDragUpdate` — 터미널 위를 지나가기만 하는 끌기는 변환도 파일도 만들지 않는다). 파일 약속이 있는
-            // 끌기(사진·메일 — 미리보기 그림을 함께 실을 수 있다)는 원본 대신 미리보기가 가지 않게 제외한다(약속은 W6l③).
+            // 끌기(사진·메일 — 미리보기 그림을 함께 실을 수 있다)는 원본 대신 미리보기가 가지 않게 제외한다(약속 자체는 Chrome 처럼 받지 않는다 — W6l③).
             let link = pb.string(forType: .URL).flatMap { URL(string: $0) }
             let promised = !Set(pb.types ?? []).isDisjoint(with: NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) })
             osrDragImagePending = files == 0 && !promised && (link == nil || link!.isFileURL)
@@ -16634,7 +16634,7 @@ final class OsrImagePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
 
     static func write(_ promise: OsrImagePromise, to url: URL) -> Error? {
         guard let contents = fetch?(promise.drag), contents.count == promise.size else { return CocoaError(.fileReadUnknown) }
-        // 같은 이름이 있으면 Chrome 처럼 번호를 붙인다(「cat 2.png」) — 있던 파일은 건드리지 않는다(덮어쓰지 않고 연다).
+        // 같은 이름이 있으면 번호를 붙인다(「cat 2.png」, 덮어쓰지 않고 연다) — Finder 는 그 놓기를 먼저 거절한다(Chrome 도 같다 — W6d 재실측).
         let folder = url.deletingLastPathComponent()
         let stem = url.deletingPathExtension().lastPathComponent, ext = url.pathExtension
         var target = url

@@ -108,8 +108,9 @@ receipt 파일로 이후 진행을 허용한다. 마지막 dirty 뷰의 확인·
 닫기·취소·저장 키는 창 로컬 NSEvent이며 물리 HID 입력 검증으로 세지 않는다.
 관측기와 초기 상태는 저장소 밖 소스 사본에만 붙이며 배포 코드/ABI를 변경하지 않는다.
 
-[이번 실행 기록과 화면](../evidence/editor-shared-restart-20261006/verification.json)은
+[이번 실행 기록과 캡처 해시](../evidence/editor-shared-restart-20261006/verification.json)은
 8개 앱 프로세스·두 닫기 프로세스, 소스/산출물 해시와 부모 관측 대조군을 묶는다.
+PNG 원본은 저장소 자산으로 커밋하지 않고 PR 첨부로 보관한다.
 백업 없음/잘못된 본문 관측 대조군은 모두 거부됐으며 실제 백업/원본 파일은 보존했다.
 
 

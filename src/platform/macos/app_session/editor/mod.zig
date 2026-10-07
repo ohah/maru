@@ -14501,6 +14501,12 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
         }
     }.f));
     try testing.expectEqual(lsp_client.Phase.ready, lsp_client.statusFor(fx.session, term).?.phase);
+    {
+        // 연결된 상태의 상태바 문구는 서버 이름 그대로다(보간 진입점 하나 — `{0}`).
+        const ready_view = lsp_client.statusFor(fx.session, term).?;
+        var rbuf: [128]u8 = undefined;
+        try testing.expectEqualStrings(ready_view.exe, lsp_client.statusText(ready_view, &rbuf));
+    }
     try testing.expectEqual(maru.session.editor.lsp.rpc.PositionEncoding.utf8, fx.session.editor_lsp.clients.items[cidx].encoding); // utf-8 을 골랐다
     {
         const d = term.rt.editor_diagnostics.lsp.items[0];
@@ -14747,7 +14753,7 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     try testing.expectEqual(lsp_client.Phase.missing, view.phase);
     try testing.expectEqualStrings("clangd", view.exe);
     var tbuf: [128]u8 = undefined;
-    const text = lsp_client.statusText(view, &tbuf) orelse return error.NoText;
+    const text = lsp_client.statusText(view, &tbuf);
     try testing.expect(std.mem.indexOf(u8, text, "clangd") != null);
     // ⑵ 누르면 **새 탭**이 생기고 설치 명령이 입력된다 — Enter 는 아니다(마지막 byte 가 개행이 아니다).
     const tabs_before = fx.session.tabs.items.len;
@@ -14764,6 +14770,15 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     _ = tab_ops.switchTab(fx.session, 0);
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    // 묻는 문장에는 **서버 이름**이 들어가고 원문 자리표시자가 남지 않는다.
+    {
+        var named = false; // 묻는 중인 클라이언트(탭 0 의 문서)의 서버 이름이 문장에 있다
+        for (fx.session.editor_lsp.clients.items) |c| if (c.phase == .asking) {
+            named = named or std.mem.indexOf(u8, fx.session.chrome_host.confirm.message, c.server.exe) != null;
+        };
+        try testing.expect(named);
+    }
+    try testing.expect(std.mem.indexOfScalar(u8, fx.session.chrome_host.confirm.message, '{') == null);
     fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
     fx.session.dispatchChromeAction(.confirm_cancel);
     try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(fx.session, term).?.phase);
@@ -14831,6 +14846,29 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .none);
     fx.session.loaded_config.config.lsp.enabled = true;
+}
+
+test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣고 원문 자리표시자를 남기지 않는다 (§8.2a)" {
+    // 번역 틀에서 `{0}` 이 빠지면 상태바가 「시작 중」만 보여 어느 서버인지 모른다 — 언어 대칭 판정자는 양쪽이 같이 빠지면 못 잡는다.
+    const saved = maru.i18n.lang();
+    defer maru.i18n.setLang(saved);
+    var exe: []const u8 = ""; // 내장 표에서 가장 긴 이름 — 표가 늘어도 그대로 따라간다
+    for (std.enums.values(maru.session.editor.language.Grammar)) |g| {
+        for (maru.session.editor.lsp.servers.candidatesFor(g)) |s| if (s.exe.len > exe.len) {
+            exe = s.exe;
+        };
+    }
+    try testing.expect(exe.len > 0);
+    var buf: [128]u8 = undefined; // 제품 상태바(`status_bar.zig`)와 같은 크기
+    inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |l| {
+        maru.i18n.setLang(l);
+        inline for (std.meta.fields(lsp_client.Phase)) |f| {
+            const text = lsp_client.statusText(.{ .phase = @enumFromInt(f.value), .exe = exe }, &buf);
+            try testing.expect(std.mem.indexOf(u8, text, exe) != null);
+            try testing.expect(std.mem.indexOfScalar(u8, text, '{') == null);
+            try testing.expect(std.mem.indexOf(u8, text, "…") == null);
+        }
+    }
 }
 
 /// 포인터 픽셀 — 그 offset 의 글자 셀 **가운데**(hover 판정자용). 그 줄이 안 그려졌으면 `null`.

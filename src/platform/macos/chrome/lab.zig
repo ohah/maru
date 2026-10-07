@@ -1836,7 +1836,8 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
 
 /// 상자보다 긴 확인 메시지 한 프레임. **제품과 같은 `confirm.view` 를 부른다** — 메시지와 버튼 라벨만 Lab 이
 /// 고르고, 줄 나누기·상자·버튼 자리는 제품 코드가 정한다. 메시지는 제품이 LSP 서버를 처음 띄울 때 묻는 그
-/// 문구(`lsp_trust_prompt` 에 실행 파일 경로를 채운 것)라, 서버 이름이 길수록 넘치는 실제 경우와 같다.
+/// 문구(`lsp_trust_prompt`)다. 제품은 `{0}` 에 **서버 이름**(고정 표 — 최대 26자)을 넣지만, 여기서는 줄 나눔을 넉넉히
+/// 재려고 긴 경로를 넣는다 — 이 길이는 제품에서 나오지 않는다(틀만으로도 기본 창에서 넘친다는 것이 실제 경우다).
 fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
     const arena = buffers.arena orelse return .{
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
@@ -1859,7 +1860,8 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
         state.show(maru.i18n.t(.term_paste_confirm), .{ .confirm = maru.i18n.t(.btn_paste), .cancel = maru.i18n.t(.common_cancel) });
         state.body = &.{ "cd ~/work/maru", "git fetch origin", "git rebase origin/main", "zig build test", "echo done", "ls -la", "exit" };
     } else {
-        const message = try std.mem.replaceOwned(u8, arena, maru.i18n.t(.lsp_trust_prompt), "{s}", "/opt/homebrew/bin/rust-analyzer-nightly");
+        var msg_buf: [512]u8 = undefined;
+        const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = "/opt/homebrew/bin/rust-analyzer-nightly" }}));
         state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
     }
     const p: chrome.props.ChromeProps = .{ .metrics = .{

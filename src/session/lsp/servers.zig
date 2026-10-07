@@ -1,11 +1,11 @@
-//! 언어 → 언어 서버 **내장 표**(docs/editor-surface-tooling.md §8.2a 「서버 찾기」·「설치 안내」). PATH 에서 실행 파일 이름으로 찾고,
+//! 언어 → 언어 서버 **내장 표**(docs/editor-surface-tooling.md §8.2a 「서버 찾기」·「설치 안내」). 실행 파일 이름으로 찾고(PATH → 통상 설치 위치 — 찾기는 플랫폼 층),
 //! 없으면 설치 명령을 새 터미널 탭에 **입력만** 한다(§8.1a — Enter 는 사용자). config override 는 2단.
 
 const std = @import("std");
 const language = @import("../editor/language.zig");
 
 pub const Server = struct {
-    /// PATH 에서 찾을 실행 파일 이름(argv[0]).
+    /// 찾을 실행 파일 이름(argv[0]).
     exe: []const u8,
     /// 나머지 인자(`--stdio` 등).
     args: []const []const u8,
@@ -19,7 +19,7 @@ const stdio = [_][]const u8{"--stdio"};
 const lsp_stdio = [_][]const u8{ "--lsp", "--stdio" };
 const none = [_][]const u8{};
 
-/// TS 계열의 후보 셋(§8.2a 「서버 찾기」, 2026-09-20 사용자 결정 「tsgo 도 되어야」) — PATH 에 있는 **첫** 것을 쓴다. `language_id` 는 문법마다
+/// TS 계열의 후보 셋(§8.2a 「서버 찾기」, 2026-09-20 사용자 결정 「tsgo 도 되어야」) — 찾아지는 **첫** 것을 쓴다. `language_id` 는 문법마다
 /// 다르므로 `candidatesFor` 가 채워 낸다.
 const ts_native_install = "npm i -g @typescript/native-preview";
 const ts_legacy_install = "npm i -g typescript-language-server typescript@5";
@@ -57,7 +57,7 @@ pub fn forGrammar(g: language.Grammar) ?Server {
     return if (c.len == 0) null else c[0];
 }
 
-/// 후보 중 PATH 에 있는 **첫** 것; 하나도 없으면 첫 후보(「없음」의 이름·설치 명령이 그것). `installed` 는 실행 파일 이름으로 묻는다(순수 — 판정자가 표를 끼운다).
+/// 후보 중 찾아지는 **첫** 것; 하나도 없으면 첫 후보(「없음」의 이름·설치 명령이 그것). `installed` 는 실행 파일 이름으로 묻는다(순수 — 판정자가 표를 끼운다).
 pub fn resolve(g: language.Grammar, ctx: anytype, comptime installed: fn (@TypeOf(ctx), []const u8) bool) ?Server {
     const c = candidatesFor(g);
     if (c.len == 0) return null;

@@ -90,4 +90,5 @@ E0.5A~E4 단계와 각 단계의 종료 gate다. 계약은 [에디터 Surface](.
 - git stage/unstage, 파괴적 discard UX
 - TextMate/WASM
 - 증분 대형 문서 전송과 virtualized diff
+- LSP 신뢰 모달에 찾아 낸 실행 파일 경로·버전 표시(tooling §8.1 「해결된 executable 표시」·「실제 executable/version을 사용자 및 trace에 노출」) — 지금 모달은 서버 이름만 보인다(§8.2a). 경로가 들어오면 넘칠 때 `i18n.format` 이 문장 끝부터 「…」로 자르므로 **경고 문장(설정을 읽고 빌드를 실행할 수 있다)이 가장 먼저** 사라지고, 그다음 경로 뒤 꼬리(「를 실행할까요?」·「for this workspace?」), 더 길면 경로 끝이다(앞머리 「이 저장소에서」·「Run」은 남는다) — 그때 경로를 중간 생략할지 정한다.
 - 다중 root·동시 여러 repository, remote/SSH workspace. 단일 linked worktree의 `.git` file 처리는 E1 범위다.

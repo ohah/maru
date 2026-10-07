@@ -3,7 +3,7 @@
 //! io 없는 자리에서 못 쓴다). 오래 사는 자식이라 **읽기는 비차단 fd 를 세션 tick 에서 drain** 하고(원격 스트리머와 같은 모양), 쓰기는
 //! 작은 메시지라 그 자리에서 다 쓴다(파이프 버퍼 64 KB — 전문 didChange 가 그보다 크면 막히지 않게 `EAGAIN` 이면 남긴다).
 //!
-//! **PATH 탐색은 우리가 한다**(`session.git_locate.candidates` 와 같은 순회) — execve 는 절대 경로를 받는다. 못 찾으면 `null` 이고
+//! **찾기는 우리가 한다**(`session.git_locate.candidates` 와 같은 순회 — PATH 다음 통상 설치 위치) — execve 는 절대 경로를 받는다. 못 찾으면 `null` 이고
 //! 그것이 곧 「없음 — 설치」다.
 
 const std = @import("std");
@@ -28,7 +28,7 @@ pub const Process = struct {
     }
 };
 
-/// PATH 에서 실행 파일을 찾는다(절대 경로 → `buf` 안). 없으면 `null`. `MARU_LSP_SERVER_OVERRIDE` 가 있으면 **그 경로를 이름과
+/// PATH, 그다음 통상 설치 위치(`git_locate.fallback_dirs`)에서 실행 파일을 찾는다(절대 경로 → `buf` 안). 없으면 `null`. `MARU_LSP_SERVER_OVERRIDE` 가 있으면 **그 경로를 이름과
 /// 무관하게** 쓴다 — 판정자가 가짜 서버를 끼우는 자리(하니스 전용; 제품 사용자가 켤 이유가 없다).
 pub fn locate(exe: []const u8, buf: []u8) ?[]const u8 {
     if (comptime builtin.os.tag == .windows) return null;

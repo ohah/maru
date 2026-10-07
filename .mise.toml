@@ -549,3 +549,7 @@ run = "zig build test-editor-project-search"
 [tasks.test-macos-project-search-adapter]
 description = "Verify bundled ripgrep with actual adapter fixtures"
 run = "zig build test-macos-project-search-adapter"
+
+[tasks.test-macos-project-search-worker]
+description = "실제 프로젝트 검색 worker·불변 문서·취소·부분 결과 검증"
+run = "zig build test-macos-project-search-worker"

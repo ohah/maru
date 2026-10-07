@@ -517,11 +517,29 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "project_search", .module = project_search_module }},
         }),
     });
+    const project_search_backend_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/app_session/editor/search/backend.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const project_search_worker = b.addExecutable(.{
+        .name = "maru-project-search-worker",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/editor-project-search/worker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "search_backend", .module = project_search_backend_module } },
+        }),
+    });
+    const project_search_worker_install = b.addInstallArtifact(project_search_worker, .{});
+    b.step("editor-project-search-worker", "Build actual background search lifecycle probe").dependOn(&project_search_worker_install.step);
     const project_search_adapter_install = b.addInstallArtifact(project_search_adapter, .{});
     b.step("editor-project-search-adapter", "Build actual ripgrep protocol probe").dependOn(&project_search_adapter_install.step);
     const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
     const run_project_search_tests = b.addRunArtifact(project_search_tests);
-    run_project_search_tests.addArg("--maru-expect-tests=6");
+    run_project_search_tests.addArg("--maru-expect-tests=8");
     b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
     const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });
     ripgrep_prepare.setCwd(b.path("."));
@@ -541,6 +559,18 @@ pub fn build(b: *std.Build) void {
         adapter_cases.step.dependOn(&project_search_adapter_install.step);
         b.step("test-macos-project-search-adapter", "Run offline helper and actual search adapter fixtures").dependOn(&adapter_cases.step);
         macos_only_test_step.dependOn(&adapter_cases.step);
+        const worker_cases = b.addSystemCommand(&.{
+            "python3",  "tools/editor-project-search/worker-verify.py",
+            "--worker", "zig-out/bin/maru-project-search-worker",
+            "--rg",     "zig-out/ripgrep/rg",
+            "--output", "zig-out/editor-project-search-worker",
+        });
+        worker_cases.setCwd(b.path("."));
+        worker_cases.has_side_effects = true;
+        worker_cases.step.dependOn(&ripgrep_prepare.step);
+        worker_cases.step.dependOn(&project_search_worker_install.step);
+        b.step("test-macos-project-search-worker", "Run background search ownership and cancellation fixtures").dependOn(&worker_cases.step);
+        macos_only_test_step.dependOn(&worker_cases.step);
     }
     const session_host_product_options = b.addOptions();
     session_host_product_options.addOption(bool, "allow_validation_only_restore", false);

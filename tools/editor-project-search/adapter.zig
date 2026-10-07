@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
                     try self.writer.writeAll("\n");
                     self.matches += match.ranges.len;
                 },
-                .other => {},
+                .other, .summary => {},
             }
         }
     };

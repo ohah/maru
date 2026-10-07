@@ -6,13 +6,15 @@ pub const Match = struct {
     path: []u8,
     text: []u8,
     ranges: []Range,
+    text_start: Position = .{ .line = 0, .byte = 0 },
+    text_truncated: bool = false,
     pub fn deinit(self: *Match, a: std.mem.Allocator) void {
         a.free(self.path);
         a.free(self.text);
         a.free(self.ranges);
     }
 };
-pub const Event = union(enum) { match: Match, other };
+pub const Event = union(enum) { match: Match, summary: usize, other };
 fn field(value: std.json.Value, name: []const u8) !std.json.Value {
     if (value != .object) return error.MalformedEvent;
     return value.object.get(name) orelse error.MalformedEvent;
@@ -57,8 +59,12 @@ pub fn parse(a: std.mem.Allocator, json: []const u8) !Event {
     defer parsed.deinit();
     const kind = try field(parsed.value, "type");
     if (kind != .string) return error.MalformedEvent;
+    if (std.mem.eql(u8, kind.string, "summary")) {
+        const data = try field(parsed.value, "data");
+        return .{ .summary = try integer(try field(try field(data, "stats"), "matches")) };
+    }
     if (!std.mem.eql(u8, kind.string, "match")) {
-        for ([_][]const u8{ "begin", "end", "summary", "context" }) |known| {
+        for ([_][]const u8{ "begin", "end", "context" }) |known| {
             if (std.mem.eql(u8, kind.string, known)) return .other;
         }
         return error.UnknownEvent;
@@ -87,7 +93,7 @@ pub fn parse(a: std.mem.Allocator, json: []const u8) !Event {
         if (!std.mem.eql(u8, text[lo..hi], reported)) return error.MalformedEvent;
         range.* = .{ .start = try position(text, lo, number - 1), .end = try position(text, hi, number - 1) };
     }
-    return .{ .match = .{ .path = path, .text = text, .ranges = ranges } };
+    return .{ .match = .{ .path = path, .text = text, .ranges = ranges, .text_start = try position(text, 0, number - 1) } };
 }
 
 const sample =
@@ -99,6 +105,7 @@ test "PSE1 JSON ranges own multiline UTF8 and CRLF bytes" {
     var event = try parse(a, sample);
     defer event.match.deinit(a);
     try std.testing.expectEqual(Position{ .line = 1, .byte = 0 }, event.match.ranges[0].start);
+    try std.testing.expectEqual(Position{ .line = 1, .byte = 0 }, event.match.text_start);
     try std.testing.expectEqual(Position{ .line = 2, .byte = 3 }, event.match.ranges[0].end);
     try std.testing.expectError(error.MalformedEvent, parse(a, "{\"type\":\"match\"}"));
     const encoded = "{\"type\":\"match\",\"data\":{\"path\":{\"bytes\":\"eC50eHQ=\"},\"lines\":{\"bytes\":\"6rCAZm9vCg==\"},\"line_number\":1,\"submatches\":[{\"start\":3,\"end\":6,\"match\":{\"bytes\":\"Zm9v\"}}]}}";
@@ -119,6 +126,9 @@ test "PSE1 JSON ranges own multiline UTF8 and CRLF bytes" {
 test "PSE2 external byte spans cannot split UTF8 or traverse roots" {
     const a = std.testing.allocator;
     try std.testing.expectError(error.UnknownEvent, parse(a, "{\"type\":\"unexpected\"}"));
+    try std.testing.expectError(error.MalformedEvent, parse(a, "{\"type\":\"summary\"}"));
+    const summary = try parse(a, "{\"type\":\"summary\",\"data\":{\"stats\":{\"matches\":0}}}");
+    try std.testing.expectEqual(@as(usize, 0), summary.summary);
     // 좌표 overflow·역순·범위 초과·절대 경로는 외부 입력 오류다.
     const mutations = [_]struct { before: []const u8, after: []const u8 }{
         .{ .before = "\"line_number\":2", .after = "\"line_number\":4294967297" },

@@ -4,6 +4,7 @@ const std = @import("std");
 
 // VS Code 데스크톱 files.exclude + search.exclude의 공개 기본값이다.
 pub const default_excludes = [_][]const u8{ "**/.git", "**/.svn", "**/.hg", "**/CVS", "**/.DS_Store", "**/Thumbs.db", "**/node_modules", "**/bower_components", "**/*.code-search" };
+pub const fixed_vcs_excludes = [_][]const u8{ "**/.git", "**/.svn", "**/.hg", "**/CVS" };
 pub const Options = struct {
     match_case: bool = false,
     whole_word: bool = false,
@@ -137,6 +138,8 @@ pub fn build(a: std.mem.Allocator, exe: []const u8, query: []const u8, opts: Opt
         if (glob.len == 0 or std.mem.indexOfScalar(u8, glob, 0) != null) return error.InvalidExclude;
         try addGlob(&args, a, glob, true);
     }
+    // 사용자 include·exclude·ignore 해제보다 항상 마지막에 VCS 내부 제외를 적용한다.
+    for (fixed_vcs_excludes) |glob| try addGlob(&args, a, glob, true);
     const multiline = opts.multiline or isMultiline(query, opts.regex);
     if (multiline) try args.add(a, "--multiline");
     if (opts.regex or opts.whole_word or multiline) {

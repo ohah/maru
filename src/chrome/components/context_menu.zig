@@ -184,12 +184,14 @@ pub fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeP
     // 상자는 체크 표시만 상자 밖에 남기고 `itemAt` 이 어디도 안 눌러 **메뉴를 못 쓰게** 된다. 그렇게 좁은
     // 창에서는 예전처럼 넘치는 쪽이 낫다 — 대신 글자는 늘 상자 안에 든다(`labelCols` ≥ 1).
     const min_w_wide: u64 = @as(u64, state.markCols() + 2 + 1) * @as(u64, cw);
-    const max_w = (popup_box.maxBoxWidth(anchored_below_workspace, p) / cw) * cw;
+    const max_w = (popup_box.maxBoxWidth(anchored_below_workspace, p.shape.modal_padding_px, p) / cw) * cw;
     const box_w: u32 = @intCast(@min(@min(box_w_wide, @max(@as(u64, max_w), min_w_wide)), @as(u64, std.math.maxInt(u32))));
     const placed = popup_box.place(box_w, box_h, .{
         .anchor = .{ .x = state.anchor_x, .y = state.anchor_y, .w = 0, .h = 0 },
         .vertical = .at_anchor,
         .anchor_below_workspace = anchored_below_workspace,
+        // 패널 quad 는 사방 `modal_padding_px` 만큼 커져 그려진다 — 경계 여백은 보이는 테두리에서 센다.
+        .visible_outset_px = p.shape.modal_padding_px,
     }, p) orelse return null;
     const x = placed.rect.x;
     const y = placed.rect.y;

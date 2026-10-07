@@ -8,6 +8,7 @@ const maru = @import("maru");
 const lab = @import("chrome/lab.zig");
 const bridge = @import("chrome/lab_smoke_bridge.zig");
 const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
+const metal_lowering = @import("chrome/metal_lowering.zig");
 const system_text = @import("chrome/system_text.zig");
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
@@ -92,54 +93,100 @@ fn faceFor(variant: FontVariant) system_text.Face {
 ///
 /// **이 함수가 정하는 것은 컴포넌트 배경의 층뿐이다.** 하네스가 직접 심는 quad(`sidebar_status_strip`의
 /// under 밴드)는 여기를 안 지나므로, 그런 시나리오는 아래 `quad_layer_exempt`에 이유와 함께 적는다.
-/// **오버레이(`.modal` 층)의 `.fill` 을 Lab 에서도 칠한다.** 제품은 오버레이(확인 모달·컨텍스트 메뉴·드롭다운)를
-/// `metal_lowering.lower` 로 그려 `.fill`(버튼 배경·선택 행 강조)을 셀 배경으로 칠한다. Lab 은 도크와 같은
-/// `appendBackgroundQuads` 만 타서 `.quad` 만 그렸다 — 그래서 선택 강조와 버튼 배경이 캡처·골든에 나오지 않았고,
-/// 확인 모달의 포커스 버튼(강조 배경 위 배경색 글자)은 통째로 안 보였다(2026-10-05). 제품의 셀 배경과 **같은
-/// 사각형·같은 색**을 같은 층의 quad 로 낸다 — 경로는 다르지만 그림은 같다. 도크 층은 제품도 이 경로가 아니므로
-/// 손대지 않는다(제품과 Lab 이 같아야 한다). 커서 역할은 제품도 셀 배경이 아니라 커서 오버레이로 그리므로 뺀다.
+/// **오버레이(`.modal` 층)는 제품 lowering(`metal_lowering.lower`)이 낸 것을 그대로 그린다.** 제품은 오버레이(확인
+/// 모달·컨텍스트 메뉴·드롭다운)를 이 함수로 셀 격자 + GPU quad 로 내리고, `.m` 이 **over quad(layer 1·3, 배열 순서) →
+/// 모달 셀(셀마다 배경 → 글자)** 순서로 합성한다(`maru_draw_overlay_layer`). 예전 Lab 은 도크와 같은
+/// `appendBackgroundQuads`(+ `.fill` 을 사각형 그대로 칠하는 별도 함수)로 lowering 규칙을 **따로 흉내 냈고**, 실제로
+/// 첫 둥근 quad 를 `modal_padding_px` 만큼 키우는 규칙과 `.border` 를 칠하는 규칙이 빠져 있었다. 그 차이는 오버레이
+/// 시나리오가 props 의 `shape` 를 비워(패딩 0·모서리 0) 둥근 패널 자체가 없었던 탓에 골든에서 가려져 있었다
+/// (`lab.overlayShape` · 2026-10-07). 흉내를 그만두고 제품 함수의 결과를 그대로 쓴다.
 ///
-/// **사각형을 1px 키우고 원래 사각형으로 clip 한다.** quad 셰이더는 변마다 `fwidth` 폭 2px 의 AA 띠를 둔다 —
-/// 정수 경계에 놓인 직각 quad 는 가장자리 픽셀이 0.84 만 덮인다. 셀 배경은 경계가 선명하므로, 그대로 내면
-/// 드롭다운처럼 fill 이 맞닿은 행마다 어두운 이음매가 생긴다(실측: 행 68, 이음매 59, 배경 10). 키운 quad 의
-/// 가장자리 띠는 clip 밖이라 버려지고(셰이더가 픽셀 중심으로 discard), 안은 끝까지 완전히 덮인다.
-fn appendOverlayFills(
+/// Lab 의 quad 는 전부 텍스트 아래 버킷(`quad_layer`)에 앉고 글자는 rich 경로가 맨 위에 그리므로, **배열 순서가 곧
+/// 제품의 painter 순서**가 되게 쌓는다: ① lowering 의 GPU quad 전부(제품 over 버킷과 같은 순서) ② 셀 배경(제품의
+/// 모달 셀 패스 — `.default` 배경은 투명이라 안 낸다). 셀 배경은 경계가 선명하므로 1px 키우고 정확한 사각형으로
+/// clip 한다(quad 셰이더의 2px AA 띠가 clip 밖으로 버려진다 — 그대로 내면 맞닿은 행마다 어두운 이음매가 생겼다:
+/// 행 68, 이음매 59, 배경 10). 제품 셀 scissor(`clip_rect`)도 같은 clip 에 교차한다.
+///
+/// **그림자는 못 옮긴다.** `.m` 은 그림자를 overlay pass 에서 그리는데 Lab 의 글자(rich glyph)는 그보다 앞 터미널
+/// pass 끝에 그려진다 — 넘기면 그림자가 패널과 글자를 덮는다. 그래서 Lab 캡처는 그림자만 빠진 제품 그림이다.
+///
+/// `transparent_default` 는 제품과 같은 `false` 다(제품은 단축키 배지에만 `true` 를 준다).
+fn appendOverlayProductLowering(
     allocator: std.mem.Allocator,
     draws: chrome.ChromeDraw,
     tk: *const chrome.Tokens,
+    cw: u32,
+    ch: u32,
     origin_y_px: u32,
     out: *std.ArrayList(renderer.metal_frame.GpuQuad),
     layer: u32,
 ) !void {
-    for (draws.ops) |op| switch (op) {
-        .fill => |f| {
-            if (f.role == .cursor or f.rect.w == 0 or f.rect.h == 0) continue;
-            const rgb = tk.get(f.role);
-            const color: u32 = 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
-            const x: f32 = @floatFromInt(f.rect.x);
-            const y = @as(f32, @floatFromInt(f.rect.y)) + @as(f32, @floatFromInt(origin_y_px));
-            const w: f32 = @floatFromInt(f.rect.w);
-            const h: f32 = @floatFromInt(f.rect.h);
-            try out.append(allocator, .{
-                .x = x - 1,
-                .y = y - 1,
-                .w = w + 2,
-                .h = h + 2,
-                .corner_radii = .{ 0, 0, 0, 0 },
-                .border_widths = .{ 0, 0, 0, 0 },
-                .fill_color0 = color,
-                .fill_color1 = color,
-                .border_color = 0,
-                .gradient_kind = 0,
-                .layer = layer,
-                .clip_x = x,
-                .clip_y = y,
-                .clip_w = w,
-                .clip_h = h,
-            });
-        },
-        else => {},
-    };
+    var raster = try metal_lowering.lower(allocator, &.{draws}, tk, cw, ch, false);
+    defer {
+        raster.cells.deinit(allocator);
+        raster.gpu_quads.deinit(allocator);
+        raster.gpu_shadows.deinit(allocator);
+    }
+    const dy: f32 = @floatFromInt(origin_y_px);
+    for (raster.gpu_quads.items) |q| {
+        var moved = q;
+        moved.layer = layer;
+        moved.y += dy;
+        if (moved.clip_w != 0) moved.clip_y += dy;
+        try out.append(allocator, moved);
+    }
+    const cells = raster.cells.items;
+    var i: usize = 0;
+    while (i < cells.len) {
+        const first = cells[i];
+        const rgb = switch (first.style.background) {
+            .rgb => |c| c,
+            else => {
+                i += 1;
+                continue;
+            },
+        };
+        // 같은 행·같은 색으로 **이어지는** 셀을 한 사각형으로 묶는다(빈 칸으로 끊긴 곳은 따로 낸다).
+        var end_col: u32 = @as(u32, first.col) + first.width;
+        var j = i + 1;
+        while (j < cells.len and cells[j].row == first.row and cells[j].col == end_col and
+            std.meta.eql(cells[j].style.background, first.style.background)) : (j += 1)
+            end_col = @as(u32, cells[j].col) + cells[j].width;
+        i = j;
+        var x0: i64 = @as(i64, raster.origin_x) + @as(i64, first.col) * cw;
+        var y0: i64 = @as(i64, raster.origin_y) + @as(i64, first.row) * ch;
+        var x1: i64 = @as(i64, raster.origin_x) + @as(i64, end_col) * cw;
+        var y1: i64 = y0 + ch;
+        if (raster.clip_rect) |c| {
+            x0 = @max(x0, c.x);
+            y0 = @max(y0, c.y);
+            x1 = @min(x1, @as(i64, c.x) + c.w);
+            y1 = @min(y1, @as(i64, c.y) + c.h);
+        }
+        if (x1 <= x0 or y1 <= y0) continue;
+        const color: u32 = 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+        const x: f32 = @floatFromInt(x0);
+        const y = @as(f32, @floatFromInt(y0)) + dy;
+        const w: f32 = @floatFromInt(x1 - x0);
+        const h: f32 = @floatFromInt(y1 - y0);
+        try out.append(allocator, .{
+            .x = x - 1,
+            .y = y - 1,
+            .w = w + 2,
+            .h = h + 2,
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = color,
+            .fill_color1 = color,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = layer,
+            .clip_x = x,
+            .clip_y = y,
+            .clip_w = w,
+            .clip_h = h,
+        });
+    }
 }
 
 fn labQuadLayer(id: lab.ScenarioId) u32 {
@@ -526,8 +573,11 @@ pub fn main(init: std.process.Init) !void {
     //
     // **quad·glyph·clip 이 이 값 하나를 쓴다.** 셋 중 하나만 옮기면 캡처가 제품과 다른 그림이 된다.
     const tree_band_h: u32 = if (scenario_id == .file_tree_over_chrome) 34 else 0;
-    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, tree_band_h, &gpu_quads, quad_layer);
-    if (frame.draws.layer == .modal) try appendOverlayFills(allocator, frame.draws, &tokens, tree_band_h, &gpu_quads, quad_layer);
+    // 오버레이는 제품 lowering 그대로(위 `appendOverlayProductLowering`), 나머지는 제품 도크와 같은 경로다.
+    if (frame.draws.layer == .modal) {
+        const lowering_cell = cellSizeFor(scenario_id);
+        try appendOverlayProductLowering(allocator, frame.draws, &tokens, lowering_cell.w, lowering_cell.h, tree_band_h, &gpu_quads, quad_layer);
+    } else chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, tree_band_h, &gpu_quads, quad_layer);
     // **여기까지가 컴포넌트가 낸 quad 다.** 아래에서 하네스가 심는 이웃(사이드바 밴드·상태바 띠)은
     // 컴포넌트 밖 표면이라 다른 층에 앉는다 — 그래서 층 불변식은 이 접두사에만 건다(아래 판정).
     const component_quad_count = gpu_quads.items.len;
@@ -1488,29 +1538,35 @@ test "Chrome Lab summary: 넓은 장면의 창 크기를 그 장면 값으로 �
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"width\": 1200, \"height\": 720, \"non_background_pixels\"") != null);
 }
 
-test "Chrome Lab 오버레이 fill: 셀 배경처럼 선명하게 칠하고, 커서 역할과 빈 사각형은 내지 않는다" {
-    // 제품은 오버레이 `.fill` 을 셀 배경으로 칠한다. Lab 이 그것을 빠뜨리면 확인 모달의 포커스 버튼과
-    // 드롭다운의 행 배경이 캡처에서 사라진다(2026-10-06 전까지 그랬다).
+test "Chrome Lab 오버레이: 제품 lowering 의 패널 quad(패딩만큼 키움) 뒤에 셀 배경을 선명하게 쌓고, 커서와 투명 셀은 내지 않는다" {
+    // 예전 Lab 은 패널 quad 를 키우지 않고 `.fill` 을 사각형 그대로 칠해, 선택 행 강조가 메뉴 테두리를 덮었다 —
+    // 제품은 테두리가 강조 바깥 `modal_padding_px` 에 있다. 배열 순서가 painter 순서다(패널 → 셀 배경 → 글자).
     const tokens = labTokens();
     const ops = [_]chrome.draw.Op{
-        .{ .fill = .{ .rect = .{ .x = 64, .y = 80, .w = 144, .h = 16 }, .role = .tab_active_bg } },
+        .{ .clip = .{ .x = 40, .y = 40, .w = 100, .h = 64 } },
+        .{ .quad = .{ .rect = .{ .x = 40, .y = 40, .w = 160, .h = 64 }, .fill_role = .surface_bg, .border_role = .focus_accent, .border_widths = .{ 1, 1, 1, 1 }, .corner_radii = .{ 8, 8, 8, 8 } } },
+        .{ .fill = .{ .rect = .{ .x = 40, .y = 56, .w = 160, .h = 16 }, .role = .tab_active_bg } },
         // 커서는 제품도 셀 배경이 아니라 커서 오버레이로 그린다 — Lab 이 칠하면 제품에 없는 블록이 생긴다.
-        .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 16 }, .role = .cursor } },
-        .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = 16 }, .role = .tab_hover_bg } },
+        .{ .fill = .{ .rect = .{ .x = 40, .y = 88, .w = 8, .h = 16 }, .role = .cursor } },
     };
     var out: std.ArrayList(renderer.metal_frame.GpuQuad) = .empty;
     defer out.deinit(std.testing.allocator);
-    try appendOverlayFills(std.testing.allocator, .{ .layer = .modal, .ops = &ops }, &tokens, 34, &out, 2);
+    try appendOverlayProductLowering(std.testing.allocator, .{ .layer = .modal, .ops = &ops }, &tokens, 8, 16, 34, &out, 2);
 
-    try std.testing.expectEqual(@as(usize, 1), out.items.len);
-    const q = out.items[0];
-    // clip 은 원래 사각형(원점 오프셋 포함) 그대로다 — 셰이더가 이 밖을 버려 경계가 셀 배경처럼 선명하다.
-    try std.testing.expectEqual([4]f32{ 64, 114, 144, 16 }, [4]f32{ q.clip_x, q.clip_y, q.clip_w, q.clip_h });
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    const panel = out.items[0];
+    const pad: f32 = @floatFromInt(tokens.space.modal_padding_px);
+    try std.testing.expect(pad > 0);
+    try std.testing.expectEqual([4]f32{ 40 - pad, 40 - pad + 34, 160 + 2 * pad, 64 + 2 * pad }, [4]f32{ panel.x, panel.y, panel.w, panel.h });
+    try std.testing.expectEqual(@as(u32, 2), panel.layer);
+    const row = out.items[1];
+    // clip 은 셀 사각형(원점 오프셋 포함)을 프레임 clip 에 교차한 것이다 — 셰이더가 이 밖을 버려 경계가 셀 배경처럼 선명하다.
+    try std.testing.expectEqual([4]f32{ 40, 56 + 34, 100, 16 }, [4]f32{ row.clip_x, row.clip_y, row.clip_w, row.clip_h });
     // quad 는 사방 1px 크다 — AA 띠(폭 2px)를 clip 밖으로 밀어내야 가장자리 픽셀이 완전히 덮인다.
-    try std.testing.expectEqual([4]f32{ 63, 113, 146, 18 }, [4]f32{ q.x, q.y, q.w, q.h });
+    try std.testing.expectEqual([4]f32{ 39, 56 + 34 - 1, 102, 18 }, [4]f32{ row.x, row.y, row.w, row.h });
     const rgb = tokens.get(.tab_active_bg);
     const want: u32 = 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
-    try std.testing.expectEqual(want, q.fill_color0);
-    try std.testing.expectEqual(want, q.fill_color1);
-    try std.testing.expectEqual(@as(u32, 2), q.layer);
+    try std.testing.expectEqual(want, row.fill_color0);
+    try std.testing.expectEqual(want, row.fill_color1);
+    try std.testing.expectEqual(@as(u32, 2), row.layer);
 }

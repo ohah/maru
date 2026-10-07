@@ -1234,11 +1234,13 @@ datalist
 key 125 U+F701
 sleep 1500
 datalist
+key 36 U+D
+sleep 500
+datalist
 key 125 U+F701
 sleep 300
 datalist
 key 53 U+1B
-key 36 U+D
 sleep 1000
 SCRIPT
 : > "$root/requests.log"
@@ -1314,9 +1316,9 @@ md = [r for r in sreq if r.startswith('/ev?e=md')]
 check(stale[:2] == ['osr-test datalist open=true count=5 selected=2', 'osr-test datalist open=true count=5 selected=2'] and stale[2:] == ['osr-test datalist open=false count=0 selected=-1']
       and not any(r.startswith('/ev?e=change') for r in sreq) and md[-1:] == ['/ev?e=md&b=0'] and len(md) == 2,
       f'a right click on a row picks nothing and does not reach the page, and after the page closes the list a click where it was reaches the page ({stale} · {sreq})')
-check(esc == ['osr-test datalist open=false count=0 selected=-1', 'osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=0']
-      and kd == ['/ev?e=kd&k=ArrowDown', '/ev?e=kd&k=Enter'],
-      f'Esc closes only the list, ↓ on the closed field reaches the page and reopens it, Enter with nothing highlighted reaches the page ({esc} · {kd})')
+check(esc == ['osr-test datalist open=false count=0 selected=-1', 'osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=0']
+      and kd == ['/ev?e=kd&k=ArrowDown', '/ev?e=kd&k=Enter'] and not any(r.startswith('/ev?e=change') for r in ereq),
+      f'Esc closes only the list, ↓ on the closed field reaches the page and reopens it, Enter on the open list with nothing highlighted reaches the page and picks nothing ({esc} · {kd})')
 sys.exit(0 if ok else 1)
 PY
 

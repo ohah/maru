@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 212), abi_version);
+    try std.testing.expectEqual(@as(u32, 213), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -5104,6 +5104,23 @@ pub export fn maru_macos_app_session_osr_drag_add(session: ?*AppSession, kind: u
 pub export fn maru_macos_app_session_osr_drag_update(session: ?*AppSession, x_px: f64, y_px: f64, mods: i32, allowed: u32) i32 {
     const app = session orelse return -1;
     return session_mod.web_ops.osrDragUpdate(app, x_px, y_px, mods, allowed);
+}
+
+/// 시험 전용(v213, W6m② 스모크): 그린 제안 목록의 항목 수·강조(없으면 -1)와 `row` 번째 행 가운데(창 backing px). 그렸으면 1.
+pub export fn maru_macos_app_session_osr_datalist_test_state(session: ?*AppSession, row: u32, out_x: ?*f64, out_y: ?*f64, out_count: ?*i32, out_selected: ?*i32) i32 {
+    const app = session orelse return 0;
+    const st = session_mod.web_ops.datalistTestState(app, row);
+    if (out_x) |p| p.* = st.x;
+    if (out_y) |p| p.* = st.y;
+    if (out_count) |p| p.* = @intCast(@min(st.count, std.math.maxInt(i32)));
+    if (out_selected) |p| p.* = if (st.selected) |s| @intCast(@min(s, std.math.maxInt(i32))) else -1;
+    return @intFromBool(st.open);
+}
+
+/// v213(W6m②): 키 대상 Chromium 탭에 제안 목록이 열려 있으면 ↑↓·Enter·Esc 를 목록이 먹는다(1 — Swift 는 페이지에 보내지 않는다).
+pub export fn maru_macos_app_session_osr_datalist_key(session: ?*AppSession, key_code: u16, mods: i32) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrDatalistKey(app, key_code, mods));
 }
 
 /// v212(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다(enter 전에 실어야 한다).

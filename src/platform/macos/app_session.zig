@@ -294,7 +294,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 210: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
 // 211: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
 // 212: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
-pub const abi_version: u32 = 212;
+// 213: W6m② — osr_datalist_key(열린 제안 목록이 ↑↓·Enter·Esc 를 먹는다).
+pub const abi_version: u32 = 213;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6369,6 +6370,8 @@ pub const AppSession = struct {
     osr_cursor_pending: ?CursorKind = null,
     /// W4c: 지금 키 포커스를 준 Chromium 탭(0 = 없음). 바뀌면 `syncOsrKeyTarget` 이 포커스를 옮긴다.
     osr_key_target: u64 = 0,
+    /// W6m②: 이 창이 그리는 제안 목록(키 대상 탭의 것) — 강조·스크롤과 마지막으로 그린 상자(누르기·hover·휠이 쓴다).
+    osr_datalist: web_ops.OsrDatalist = .{},
     /// W4c: 트랜잭션 밖에서 조합이 비워졌다(unmarkText — Apple 의미는 「확정」). 곧 확정 글이 오면 그 글이 조합을 대신하고,
     /// 안 오면 다음 tick 에 조합을 그대로 확정한다.
     osr_unmark_pending: bool = false,
@@ -14152,7 +14155,8 @@ pub const AppSession = struct {
         return self.anyOverlayOpen() or self.chrome_host.find.open or self.chrome_host.find_secondary.open or self.chrome_host.key_hints.visible or
             self.chrome_host.send_helper.open or self.chrome_host.hover_box.open or
             (self.rename != null and self.rename.? == .symbol) or // 심볼 상자(§8.2f)는 프레임이 앵커를 세워야 열린다 — 상태로 묻는다
-            self.editor_completion.active; // 완성 팝업(§8.2g)도 같다
+            self.editor_completion.active or // 완성 팝업(§8.2g)도 같다
+            web_ops.datalistWanted(self); // Chromium 탭 제안 목록(W6m②)도 — 키 대상 탭에 목록이 있으면
     }
 
     /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
@@ -23615,6 +23619,11 @@ pub const AppSession = struct {
         } else if (draws.items.len == 0 and editor_ops.hover_client.refresh(self)) {
             try self.chrome_host.collectHoverBoxDraws(editor_ops.hover_client.lines(self), props, &tokens, arena, &draws);
         }
+        // W6m②: Chromium 탭의 제안 목록 — 같은 상자 규율(다른 오버레이가 낼 것이 있으면 이 프레임엔 안 그린다, 목록은 남는다).
+        // 키 대상 탭의 것만이라 편집기 자동완성과 함께 뜨지 않는다.
+        if (draws.items.len == 0) {
+            _ = try web_ops.datalistDraws(self, props, &tokens, arena, &draws);
+        } else self.osr_datalist.box = null;
         // 단축키 힌트(재설계): 모달이 안 열렸고 key_hints.visible면 **각 chrome 요소 우상단에 단축키 배지**를 빌드한다
         // (한 박스 HUD가 아니라 요소별 배지 — 사용자 요청). 모달이 열렸으면(위에서 draws 채워짐) 배지는 억제(모달 우선).
         // 배지는 요소 위 흩어진 곳만 칠하므로 아래 rasterize를 transparent_default로 해 나머지가 chrome/터미널이 비치게 한다.

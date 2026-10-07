@@ -43,7 +43,7 @@ pub fn boxRect(state: *const State, lines: []const Line, beside: draw.Rect, p: p
     const sz = hover_box.size(lines) orelse return null;
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
-    const placed = popup_box.placeBeside(sz.cols * cw, sz.rows * ch, beside, gap_cols * cw, p) orelse return null;
+    const placed = popup_box.placeBeside(sz.cols * cw, sz.rows * ch, beside, gap_cols * cw, p.shape.modal_padding_px, p) orelse return null;
     return placed.rect;
 }
 
@@ -64,6 +64,20 @@ const testing = std.testing;
 
 fn testProps() props.ChromeProps {
     return .{ .metrics = .{ .cell_width_px = 10, .cell_height_px = 20, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 } };
+}
+
+test "SGD2 패딩 — 문서 패널은 보이는 테두리(사방 패딩만큼 키운 것)가 목록과 한 칸 떨어진다(동·서)" {
+    // rich lowering 은 문서 패널 quad 를 사방 12px 키워 그린다(목록에는 패널 quad 가 없다). 간격을 rect 에서 세면
+    // 보이는 패널이 목록을 2px 덮는다(간격 10 < 패딩 12 — `popup_box.placeBeside` visible_outset_px, 2026-10-07).
+    var p = testProps();
+    p.shape.modal_padding_px = 12;
+    const lines = [_]Line{.{ .text = "fn lazy() -> i32" }};
+    var st = State{};
+    st.toggle();
+    const east = boxRect(&st, &lines, .{ .x = 300, .y = 200, .w = 400, .h = 60 }, p).?;
+    try testing.expectEqual(@as(i32, 300 + 400 + 10), east.x - 12); // 보이는 좌단 = 목록 우단 + 한 칸
+    const west = boxRect(&st, &lines, .{ .x = 900, .y = 200, .w = 290, .h = 60 }, p).?; // 오른쪽엔 자리가 없다
+    try testing.expectEqual(@as(i32, 900 - 10), west.x + @as(i32, @intCast(west.w)) + 12); // 보이는 우단 = 목록 좌단 − 한 칸
 }
 
 test "SGD1 문서 패널 — 펼쳐야 서고, 목록 상자 오른쪽 한 칸 옆 위 맞춤, 크기는 hover_box 규칙, 줄은 rect 안에, 휠은 넘칠 때만, 자리 없으면 왼쪽 (§8.2g-d)" {

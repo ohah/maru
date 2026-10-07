@@ -231,7 +231,7 @@ pub const ScenarioId = enum {
     /// 위 두 시나리오가 잡으려던 "가장 긴 줄이 테두리에 닿는가" 가 여기서 되살아난다.
     ///
     /// **선택 강조도 이 캡처에 든다**(2026-10-06부터). 강조는 `.fill` op 이고, 예전 Lab 은 `.quad` 만
-    /// 내려 그림에 없었다 — 지금은 스모크의 `appendOverlayFills` 가 제품의 셀 배경과 같은 사각형·색으로 칠한다.
+    /// 내려 그림에 없었다 — 지금은 스모크가 오버레이를 제품 lowering 그대로 그린다(`appendOverlayProductLowering`).
     context_menu_send,
     /// **선택 헬퍼 한 줄**(NSH — send-selection-to-agent.md §6.2). 고르고 손을 떼면 caret 아래 뜨는
     /// 그 상자다. 같은 `context_menu.view` 를 **항목 하나**로 부르는 것이 제품과 같은 경로이며,
@@ -1726,6 +1726,14 @@ const commit_fixture_message = "fix: 커밋 상자를 그린다\n\n랩이 켜져
 /// caret 오프셋 — 둘째(빈) 줄 다음 본문 안이다.
 const commit_fixture_caret: usize = 40;
 
+/// 오버레이 시나리오의 박스 모양 — **제품 `buildChromeProps` 와 같은 투영**(토큰의 `space` 에서). 예전에는 이 필드를
+/// 비워 기본값(모서리 0·테두리 0·패딩 0 = TUI 모양)으로 그렸다: rich 토큰을 쓰는 제품은 둥근 패널·1px 테두리·
+/// 사방 12px 패딩인데 Lab 캡처와 골든은 직각 셀 밴드였고, 그래서 선택 행 강조가 상자 끝까지 닿아 보였다
+/// (2026-10-07 골든 픽셀로 확인 — 행 y=12 가 x 8..127 을 테두리 없이 채웠다).
+fn overlayShape(tokens: *const chrome.Tokens) chrome.props.ShapeTokens {
+    return .{ .corner_radius_px = tokens.space.corner_radius_px, .border_width_px = tokens.space.border_width_px, .modal_padding_px = tokens.space.modal_padding_px };
+}
+
 /// 체크 열이 있는 컨텍스트 메뉴 한 프레임. **제품과 같은 `context_menu.view` 를 부른다** — 조합을 Lab 이
 /// 따로 들면 캡처가 제품을 예고하지 못한다(재는 쪽과 그리는 쪽이 갈렸던 것이 바로 이 컴포넌트다).
 ///
@@ -1814,7 +1822,7 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
         .sidebar_width_px = 0,
         .backing_width_px = @intFromFloat(scenario.viewport_px.width),
         .backing_height_px = @intFromFloat(scenario.viewport_px.height),
-    } };
+    }, .shape = overlayShape(tokens) };
 
     var ops: std.ArrayList(chrome.draw.Op) = .empty;
     try chrome.components.context_menu.view(&state, items, p, tokens, arena, &ops);
@@ -1860,7 +1868,7 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
         .sidebar_width_px = 0,
         .backing_width_px = @intFromFloat(scenario.viewport_px.width),
         .backing_height_px = @intFromFloat(scenario.viewport_px.height),
-    } };
+    }, .shape = overlayShape(tokens) };
     var ops: std.ArrayList(chrome.draw.Op) = .empty;
     try chrome.components.confirm.view(&state, p, tokens, arena, &ops);
     return .{
@@ -1888,7 +1896,7 @@ fn buildNoticeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: F
         .sidebar_width_px = 0,
         .backing_width_px = @intFromFloat(scenario.viewport_px.width),
         .backing_height_px = @intFromFloat(scenario.viewport_px.height),
-    } };
+    }, .shape = overlayShape(tokens) };
     var ops: std.ArrayList(chrome.draw.Op) = .empty;
     try chrome.components.notice.view(&state, p, tokens, arena, &ops);
     return .{
@@ -1953,7 +1961,7 @@ fn buildDropdownFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
         .sidebar_width_px = 0,
         .backing_width_px = @intFromFloat(scenario.viewport_px.width),
         .backing_height_px = @intFromFloat(scenario.viewport_px.height),
-    } };
+    }, .shape = overlayShape(tokens) };
 
     var ops: std.ArrayList(chrome.draw.Op) = .empty;
     // control 먼저(닫힌 모습), 그 위에 목록 — 제품 순서(`settings.view` 가 폼을 그린 뒤 팝업을 얹는다)다.

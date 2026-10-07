@@ -23544,8 +23544,8 @@ pub const AppSession = struct {
     const OverlayRaster = chrome_metal_lowering.OverlayRaster;
 
     /// 모든 제품 caller는 전용 macOS Chrome lowering leaf를 거친다. Chrome Lab 의 `lab.lowerDraws` 도 이 leaf 를
-    /// 쓰지만, **Lab 픽셀 캡처(`chrome_lab_smoke`)는 이 셀 경로가 아니다** — 도크와 같은 rich 경로로 그리고,
-    /// 오버레이 `.fill` 은 그쪽 `appendOverlayFills` 가 같은 사각형·같은 색 quad 로 낸다.
+    /// 쓴다. **Lab 픽셀 캡처(`chrome_lab_smoke`)도 이 결과를 쓴다** — quad 는 그대로, 셀 배경은 같은 사각형·같은 색 quad 로
+    /// 옮기고(`appendOverlayProductLowering`), 글자만 도크와 같은 rich 경로로 그린다.
     fn rasterizeOverlayCells(
         allocator: std.mem.Allocator,
         draws: []const chrome.ChromeDraw,
@@ -48411,8 +48411,11 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     // 「작아서 clamp 없음」이라고 적었는데, 팝업이 가장자리에서 한 셀 떨어지게 되자(edge_gap 네 방향)
     // 그 전제가 깨져 **메뉴 밖을 눌렀다.** 「누른 자리」와 「뜬 자리」는 clamp 가 끼면 다른 값이다.
     const menu_items = settings_ops.contextMenuItems(session);
-    const menu_props = chrome.props.ChromeProps{ .metrics = session.buildCellMetrics() };
-    const menu_rect = chrome.components.context_menu.menuRect(&session.chrome_host.context_menu, menu_items, menu_props).?;
+    //
+    // **제품이 쓰는 props 그대로 묻는다**(`buildChromeProps` — 클릭 판정 `itemAt` 이 쓰는 것). 예전에는 `metrics` 만 채운
+    // props 로 다시 셌는데, 모양(`shape`)이 빠진 그 값은 패딩을 모르는 다른 자리를 준다 — 메뉴가 보이는 테두리를 경계에서
+    // 한 셀 띄우게 되자(`popup_box.Placement.visible_outset_px`, 2026-10-07) 그 차이로 메뉴 밖을 눌렀다.
+    const menu_rect = chrome.components.context_menu.menuRect(&session.chrome_host.context_menu, menu_items, session.buildChromeProps()).?;
     const mx: f64 = @floatFromInt(menu_rect.x + 1);
     const my: f64 = @floatFromInt(menu_rect.y + 1);
     session.mouse(1, mx, my, 0, 0);

@@ -89,13 +89,24 @@ flowchart TD
   reveal, filesystem, provider 실행을 절대 호출하지 않는다.
 - macOS Metal Lab smoke는 drawable readback PPM, PR 첨부용 PNG, machine-readable
   summary를 `zig-out/maru-macos-chrome-lab/<scenario>.{ppm,png,json}`에 남긴다.
-  **오버레이(`.modal` 층)의 `.fill`도 그림에 나온다**(2026-10-06부터). 제품은 오버레이를
-  `metal_lowering`으로 그려 `.fill`(버튼 배경·선택 행 강조)을 셀 배경으로 칠하는데, Lab 캡처는 도크와
-  같은 rich 경로라 예전에는 `.quad`만 내렸다 — 그래서 2026-09-15 실측에서 `@max(box_w, anchor.w)`를
-  지워도, 선택 행을 옮겨도 드롭다운 골든이 **통과했고**, 확인 모달의 포커스 버튼(강조 배경 위 배경색
-  글자)은 통째로 안 보였다. 지금은 스모크의 `appendOverlayFills`가 같은 사각형·같은 색을 quad로 낸다
-  (커서 역할은 제품도 커서 오버레이로 그리므로 뺀다). quad 셰이더는 변마다 폭 2px의 AA 띠를 두므로,
-  사각형을 1px 키우고 원래 사각형으로 clip해 셀 배경처럼 경계가 선명하게 한다.
+  **오버레이(`.modal` 층)는 제품 lowering 결과 그대로 그린다**(2026-10-07부터). 제품은 오버레이를
+  `metal_lowering.lower`로 셀 격자 + GPU quad로 내리고, `.m`이 over quad(layer 1·3, 배열 순서) →
+  모달 셀(셀마다 배경 → 글자) 순서로 합성한다. 스모크의 `appendOverlayProductLowering`은 그 quad를 같은
+  순서로 싣고 셀 배경(`.default`가 아닌 것)을 같은 사각형·같은 색 quad로 옮긴다 — Lab의 quad는 전부
+  텍스트 아래 버킷이고 글자는 rich 경로가 맨 위에 그리므로 **배열 순서가 곧 제품의 painter 순서**다.
+  quad 셰이더는 변마다 폭 2px의 AA 띠를 두므로, 셀 배경은 1px 키우고 정확한 사각형(+ 제품 셀 scissor인
+  `clip_rect`)으로 clip해 경계가 선명하게 한다.
+
+  예전 두 단계의 사각지대: ① 2026-10-06 전에는 `.quad`만 내려 `.fill`(버튼 배경·선택 행 강조)이
+  안 나왔다 — `@max(box_w, anchor.w)`를 지워도 드롭다운 골든이 **통과했고**, 확인 모달의 포커스 버튼은
+  통째로 안 보였다. ② 2026-10-07 전에는 오버레이 시나리오가 props의 `shape`를 비워(모서리 0·테두리 0·
+  패딩 0 = TUI 모양) 제품의 rich 모양(둥근 패널·1px 테두리·사방 12px 패딩)이 아니었다. 그래서 「패딩
+  12px이 경계 여백 한 셀(8px)보다 커서 우하단 메뉴의 테두리가 창 끝에 먹힌다」는 제품 결함이 골든에
+  안 보였다(지금은 `popup_box.Placement.visible_outset_px`로 고쳤다 — `docs/chrome-strategy.md` §5.4).
+
+  ⚠️ **그림자는 안 그린다.** `.m`은 그림자를 overlay pass에서 그리는데 Lab의 글자(rich glyph)는 그보다
+  앞인 터미널 pass 끝에 그려진다 — 넘기면 그림자가 패널과 글자를 덮는다. Lab 캡처는 그림자만 빠진 제품
+  그림이다.
 
   ⚠️ **남은 차이 하나 — 글자가 가려지지 않는다.** 제품의 셀 격자에서는 나중 text op의 공백이 앞
   글리프를 **덮어쓴다**(드롭다운이 control 위로 당겨질 때 그 공백 패딩이 control 글자를 지운다). Lab의

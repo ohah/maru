@@ -93,6 +93,8 @@ pub fn boxRect(state: *const State, lines: []const Line, p: props.ChromeProps) ?
         .anchor = .{ .x = state.anchor_x, .y = state.anchor_y, .w = 0, .h = state.anchor_h },
         .vertical = .below_flip_up,
         .gap_px = p.shape.modal_padding_px,
+        // 같은 이유로 workspace 경계 여백도 보이는 테두리에서 센다(`Placement.visible_outset_px`).
+        .visible_outset_px = p.shape.modal_padding_px,
     }, p) orelse return null;
     return .{ .x = placed.rect.x, .y = placed.rect.y, .w = box_w, .h = box_h };
 }
@@ -210,6 +212,21 @@ test "HOVX1 크기 — 가장 긴 줄 + 좌우 1칸, 폭 80·높이 12 상한; �
     try testing.expectEqualStrings("가나", clipLine("가나다", 5)); // 5칸에 2칸 글자 셋은 안 든다 — 둘
     try testing.expectEqualStrings("ab", clipLine("ab", 80));
     try testing.expect(size(&.{}) == null);
+}
+
+test "HOVX5 구석 — 보이는 상자(패딩만큼 키운 것)가 workspace 경계에서 한 셀 떨어진다" {
+    // rich lowering 은 상자를 사방 12px 키워 그린다. 경계 여백(한 셀 10px)을 rect 에서 세면 보이는 상자가 2px 넘쳐
+    // 테두리가 창 끝에 먹힌다(`popup_box.Placement.visible_outset_px` — 2026-10-07).
+    var st: State = .{};
+    st.show(1190, 790, 20); // 우하단 구석 — 아래가 없어 위로 뒤집힌다
+    const lines = [_]Line{.{ .text = "fn very_long_signature_name(a: i32) i32" }};
+    var p = testProps();
+    p.shape.modal_padding_px = 12;
+    const v = visibleRect(&st, &lines, p).?;
+    try testing.expectEqual(@as(i32, 1200 - 10), v.x + @as(i32, @intCast(v.w)));
+    try testing.expectEqual(@as(i32, 790), v.y + @as(i32, @intCast(v.h))); // 위로 뒤집혀 보이는 하단이 앵커 줄 위에 닿는다(HOVX2 와 같은 간격 계약)
+    st.show(0, 0, 20); // 좌상단 — 보이는 좌단이 한 셀 안쪽
+    try testing.expectEqual(@as(i32, 10), visibleRect(&st, &lines, p).?.x);
 }
 
 test "HOVX2 스크롤 — 넘치는 만큼만, 보이는 줄은 scroll_rows 부터 12줄; contains 는 boxRect 그대로" {

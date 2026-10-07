@@ -50,6 +50,14 @@ pub const Placement = struct {
     /// `workspace.x`로 밀면 누른 자리와 뜬 자리가 화면 절반만큼 떨어진다(사용자 제보). 그 항목 위에는
     /// 덮을 사이드바 chrome이 애초에 없다.
     anchor_below_workspace: bool = false,
+    /// 그려지는 상자가 이 rect 보다 **사방으로 얼마나 큰가**(px). 경계 여백(한 셀)은 **보이는** 테두리에서 센다.
+    ///
+    /// ⚠️ rich 토큰의 모달 lowering 은 오버레이의 첫 둥근 quad 를 `modal_padding_px`(12)만큼 키워 그린다
+    /// (`metal_lowering.appendModalQuad`). 그 값을 모르고 rect 만 한 셀(8) 띄우면 보이는 패널이 workspace 를
+    /// 4px 넘어 **테두리가 창 끝에 먹혔다** — 우하단 우클릭 메뉴·긴 「보내기」 메뉴에서 실측(2026-10-07, Lab 이
+    /// 제품 모양으로 그리기 시작하면서 드러났다). 그 quad 를 내는 호출자만 `p.shape.modal_padding_px` 를 준다 —
+    /// 패널 quad 가 없는 상자(드롭다운·이름 바꾸기·자동완성 목록)와 pane 오버레이(이미지 프리뷰)는 0 이다.
+    visible_outset_px: u32 = 0,
 };
 
 pub const Result = struct {
@@ -65,7 +73,7 @@ pub const Result = struct {
 /// `maxBoxWidth` 의 단일 출처다 — 둘이 경계를 각자 세면, 상한으로 자른 상자가 `place` 에서 다시 넘친다.
 const HorizontalBounds = struct { left: i64, right: i64 };
 
-fn horizontalBounds(anchor_below_workspace: bool, p: props.ChromeProps) ?HorizontalBounds {
+fn horizontalBounds(anchor_below_workspace: bool, outset_px: u32, p: props.ChromeProps) ?HorizontalBounds {
     const m = p.metrics;
     const cw = @max(m.cell_width_px, 1);
     const ws = props.workspaceRect(m);
@@ -73,11 +81,12 @@ fn horizontalBounds(anchor_below_workspace: bool, p: props.ChromeProps) ?Horizon
     if (ws.w < cw or ws.w - cw < cw) return null;
     const wsx: i64 = ws.x;
     const cw_r: i64 = cw;
+    const out: i64 = outset_px;
     // 좌단은 사이드바 오른쪽으로 — 팝업은 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다.
     // 단 앵커가 workspace 아래(상태바)면 그 규칙을 쓰지 않는다(`Placement.anchor_below_workspace` 주석).
     return .{
-        .left = (if (anchor_below_workspace) 0 else wsx) + cw_r,
-        .right = wsx + @as(i64, ws.w) - cw_r,
+        .left = (if (anchor_below_workspace) 0 else wsx) + cw_r + out,
+        .right = wsx + @as(i64, ws.w) - cw_r - out,
     };
 }
 
@@ -86,8 +95,8 @@ fn horizontalBounds(anchor_below_workspace: bool, p: props.ChromeProps) ?Horizon
 /// `place` 는 폭을 줄이지 않는다 — 상자가 workspace 보다 넓으면 좌단을 지키고 오른쪽으로 넘친다(A34).
 /// 그 규칙은 그림처럼 **줄일 수 없는** 상자에는 맞지만, 글자 목록은 줄일 수 있다. 줄일 수 있는 상자는
 /// 이 값으로 먼저 자르고 그 폭에 맞게 그린다(`context_menu` — 긴 대상 라벨이 창 오른쪽 밖으로 나가던 자리).
-pub fn maxBoxWidth(anchor_below_workspace: bool, p: props.ChromeProps) u32 {
-    const b = horizontalBounds(anchor_below_workspace, p) orelse return 0;
+pub fn maxBoxWidth(anchor_below_workspace: bool, visible_outset_px: u32, p: props.ChromeProps) u32 {
+    const b = horizontalBounds(anchor_below_workspace, visible_outset_px, p) orelse return 0;
     return @intCast(std.math.clamp(b.right - b.left, 0, std.math.maxInt(u32)));
 }
 
@@ -125,10 +134,11 @@ pub fn place(box_w: u32, box_h: u32, pl: Placement, p: props.ChromeProps) ?Resul
     const wsh: R = ws.h;
     const ch_r: R = ch;
 
-    const hb = horizontalBounds(pl.anchor_below_workspace, p) orelse return null;
+    const hb = horizontalBounds(pl.anchor_below_workspace, pl.visible_outset_px, p) orelse return null;
+    const out: R = pl.visible_outset_px;
     const right_bound: R = hb.right;
-    const bottom_bound: R = wsy + wsh - ch_r;
-    const top_bound: R = wsy + ch_r;
+    const bottom_bound: R = wsy + wsh - ch_r - out;
+    const top_bound: R = wsy + ch_r + out;
     const left_bound: R = hb.left;
 
     const bw: R = box_w;
@@ -178,7 +188,8 @@ pub const BesideResult = struct { rect: draw.Rect, side: Side };
 
 /// 상자를 **다른 상자 옆**에 둔다(§8.2g-d 문서 패널): 오른쪽(위 맞춤) → 안 들어가면 왼쪽 → 그것도 안 되면 아래 → 그것도 안 되면 위,
 /// 그것도 안 되면 아래에 두고 당긴다. 네 방향 모두 workspace 안쪽 한 셀을 남기고, `place` 와 같은 i64 도메인·같은 가드.
-pub fn placeBeside(box_w: u32, box_h: u32, beside: draw.Rect, gap_px: u32, p: props.ChromeProps) ?BesideResult {
+/// `visible_outset_px` 는 `Placement.visible_outset_px` 와 같다 — 경계 여백도, `beside` 와의 간격도 **보이는** 테두리에서 센다.
+pub fn placeBeside(box_w: u32, box_h: u32, beside: draw.Rect, gap_px: u32, visible_outset_px: u32, p: props.ChromeProps) ?BesideResult {
     const m = p.metrics;
     const cw = @max(m.cell_width_px, 1);
     const ch = @max(m.cell_height_px, 1);
@@ -186,17 +197,18 @@ pub fn placeBeside(box_w: u32, box_h: u32, beside: draw.Rect, gap_px: u32, p: pr
     if (ws.w < cw or ws.w - cw < cw) return null;
     if (ws.h < ch or ws.h - ch < ch) return null;
     const R = i64;
-    const right_bound: R = @as(R, ws.x) + @as(R, ws.w) - @as(R, cw);
-    const bottom_bound: R = @as(R, ws.y) + @as(R, ws.h) - @as(R, ch);
-    const top_bound: R = @as(R, ws.y) + @as(R, ch);
-    const left_bound: R = @as(R, ws.x) + @as(R, cw);
+    const out: R = visible_outset_px;
+    const right_bound: R = @as(R, ws.x) + @as(R, ws.w) - @as(R, cw) - out;
+    const bottom_bound: R = @as(R, ws.y) + @as(R, ws.h) - @as(R, ch) - out;
+    const top_bound: R = @as(R, ws.y) + @as(R, ch) + out;
+    const left_bound: R = @as(R, ws.x) + @as(R, cw) + out;
     const bw: R = box_w;
     const bh: R = box_h;
     const ax: R = beside.x;
     const ay: R = beside.y;
     const aw: R = beside.w;
     const ah: R = beside.h;
-    const gap: R = gap_px;
+    const gap: R = @as(R, gap_px) + out;
     var side: Side = .east;
     var x: R = ax + aw + gap;
     var y: R = ay;
@@ -391,52 +403,83 @@ test "PBX1 placeBeside — 오른쪽(위 맞춤) → 왼쪽 → 아래 → 위 �
     const p = metricsOf(800, 400); // 셀 8×16, workspace 전체
     const box = draw.Rect{ .x = 100, .y = 100, .w = 200, .h = 80 };
     // 동 — x = 100+200+8, y 그대로.
-    const e = placeBeside(160, 64, box, 8, p).?;
+    const e = placeBeside(160, 64, box, 8, 0, p).?;
     try testing.expectEqual(popup_box_side(.east), e.side);
     try testing.expectEqual(@as(i32, 308), e.rect.x);
     try testing.expectEqual(@as(i32, 100), e.rect.y);
     // 서 — 오른쪽에 자리가 없다(500+200+8+160 > 792) 그러나 왼쪽엔 든다(500-8-160 = 332 ≥ 8).
     const right_box = draw.Rect{ .x = 500, .y = 100, .w = 200, .h = 80 };
-    const w = placeBeside(160, 64, right_box, 8, p).?;
+    const w = placeBeside(160, 64, right_box, 8, 0, p).?;
     try testing.expectEqual(popup_box_side(.west), w.side);
     try testing.expectEqual(@as(i32, 500 - 8 - 160), w.rect.x);
     try testing.expectEqual(@as(i32, 100), w.rect.y);
     // 남 — 왼쪽도 안 된다(100-8-700 < 8) → 아래(y = 100+80+8), x 는 상자와 같다.
-    const s = placeBeside(700, 64, box, 8, p).?;
+    const s = placeBeside(700, 64, box, 8, 0, p).?;
     try testing.expectEqual(popup_box_side(.south), s.side);
     try testing.expectEqual(@as(i32, 188), s.rect.y);
     try testing.expectEqual(@as(i32, 792 - 700), s.rect.x); // 상자 왼쪽에 맞추되 우단 한 셀 안으로 당긴다
     // 북 — 아래도 안 들어간다(188+250 > 384) 그러나 위엔 든다(100-8-80 = 12 ≥ 16? 아니 → 당김). 위가 드는 경우: 상자를 더 아래로.
     const low = draw.Rect{ .x = 100, .y = 300, .w = 200, .h = 80 };
-    const n = placeBeside(700, 200, low, 8, p).?;
+    const n = placeBeside(700, 200, low, 8, 0, p).?;
     try testing.expectEqual(popup_box_side(.north), n.side);
     try testing.expectEqual(@as(i32, 300 - 8 - 200), n.rect.y);
     // 아무 데도 안 들어가면 아래에 두고 당긴다 — 좌·상이 이긴다.
-    const huge = placeBeside(700, 500, box, 8, p).?;
+    const huge = placeBeside(700, 500, box, 8, 0, p).?;
     try testing.expectEqual(popup_box_side(.south), huge.side);
     try testing.expectEqual(@as(i32, 16), huge.rect.y);
     // 동인데 세로로 넘치면 당긴다.
-    const tall = placeBeside(160, 300, low, 8, p).?;
+    const tall = placeBeside(160, 300, low, 8, 0, p).?;
     try testing.expectEqual(popup_box_side(.east), tall.side);
     try testing.expectEqual(@as(i32, 384 - 300), tall.rect.y);
     // **경계값 — 딱 맞으면 그 자리다**(적대적 5회차 C1~C4: 넉넉한 사례만 재면 `>`/`>=` 를 못 가른다).
-    const east_exact = placeBeside(792 - 308, 64, box, 8, p).?; // 308 + 484 = 792 = 우측 경계
+    const east_exact = placeBeside(792 - 308, 64, box, 8, 0, p).?; // 308 + 484 = 792 = 우측 경계
     try testing.expectEqual(popup_box_side(.east), east_exact.side);
     try testing.expectEqual(@as(i32, 308), east_exact.rect.x);
     const west_box = draw.Rect{ .x = 500, .y = 100, .w = 200, .h = 80 };
-    const west_exact = placeBeside(484, 64, west_box, 8, p).?; // 500 - 8 - 484 = 8 = 좌측 경계
+    const west_exact = placeBeside(484, 64, west_box, 8, 0, p).?; // 500 - 8 - 484 = 8 = 좌측 경계
     try testing.expectEqual(popup_box_side(.west), west_exact.side);
     try testing.expectEqual(@as(i32, 8), west_exact.rect.x);
     const mid = draw.Rect{ .x = 100, .y = 200, .w = 200, .h = 80 };
-    const south_exact = placeBeside(700, 96, mid, 8, p).?; // 288 + 96 = 384 = 하단 경계 — 북도 들지만(200-8-96 = 96) 남이 먼저
+    const south_exact = placeBeside(700, 96, mid, 8, 0, p).?; // 288 + 96 = 384 = 하단 경계 — 북도 들지만(200-8-96 = 96) 남이 먼저
     try testing.expectEqual(popup_box_side(.south), south_exact.side);
     try testing.expectEqual(@as(i32, 288), south_exact.rect.y);
-    const north_exact = placeBeside(700, 176, mid, 8, p).?; // 남은 안 든다(288+176 > 384), 200 - 8 - 176 = 16 = 상단 경계
+    const north_exact = placeBeside(700, 176, mid, 8, 0, p).?; // 남은 안 든다(288+176 > 384), 200 - 8 - 176 = 16 = 상단 경계
     try testing.expectEqual(popup_box_side(.north), north_exact.side);
     try testing.expectEqual(@as(i32, 16), north_exact.rect.y);
     // 극단값·손상 메트릭.
-    _ = placeBeside(std.math.maxInt(u32), std.math.maxInt(u32), .{ .x = std.math.maxInt(i32), .y = std.math.minInt(i32), .w = std.math.maxInt(u32), .h = std.math.maxInt(u32) }, std.math.maxInt(u32), p);
-    try testing.expect(placeBeside(10, 10, box, 0, metricsOf(8, 16)) == null);
+    _ = placeBeside(std.math.maxInt(u32), std.math.maxInt(u32), .{ .x = std.math.maxInt(i32), .y = std.math.minInt(i32), .w = std.math.maxInt(u32), .h = std.math.maxInt(u32) }, std.math.maxInt(u32), std.math.maxInt(u32), p);
+    try testing.expect(placeBeside(10, 10, box, 0, 0, metricsOf(8, 16)) == null);
+}
+
+test "PBX2 visible_outset_px — 사방으로 커져 그려지는 패널은 **보이는 테두리**가 경계에서 한 셀 떨어진다(place·maxBoxWidth·placeBeside)" {
+    // rich 모달 lowering 은 패널 quad 를 사방 12px 키운다. 그것을 모르면 rect 는 한 셀(8) 띄워도 보이는 패널이
+    // 4px 넘쳐 테두리가 창 끝에 먹혔다(2026-10-07 Lab 실측 — 우하단 우클릭 메뉴).
+    const p = metricsOf(800, 400);
+    const pad: u32 = 12;
+    // 우하단 구석을 누른다 — rect 우단 = 800 − 8 − 12, 하단 = 400 − 16 − 12.
+    const br = place(120, 32, .{ .anchor = .{ .x = 790, .y = 390, .w = 0, .h = 0 }, .visible_outset_px = pad }, p).?;
+    try testing.expectEqual(@as(i32, 800 - 8 - 12 - 120), br.rect.x);
+    try testing.expectEqual(@as(i32, 400 - 16 - 12 - 32), br.rect.y);
+    // 좌상단 구석도 같다 — 보이는 좌·상 테두리가 한 셀 안쪽이다.
+    const tl = place(120, 32, .{ .anchor = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .visible_outset_px = pad }, p).?;
+    try testing.expectEqual(@as(i32, 8 + 12), tl.rect.x);
+    try testing.expectEqual(@as(i32, 16 + 12), tl.rect.y);
+    // 0 이면 예전과 같다 — 패널 quad 가 없는 상자(드롭다운 등)는 그대로다.
+    const flat = place(120, 32, .{ .anchor = .{ .x = 790, .y = 390, .w = 0, .h = 0 } }, p).?;
+    try testing.expectEqual(@as(i32, 800 - 8 - 120), flat.rect.x);
+    // 상한도 보이는 폭에서 센다 — 그 폭으로 자른 상자가 `place` 에서 다시 넘치지 않는다.
+    try testing.expectEqual(@as(u32, 800 - 16 - 24), maxBoxWidth(false, pad, p));
+    try testing.expectEqual(@as(u32, 800 - 16), maxBoxWidth(false, 0, p));
+    // 옆 상자와의 간격도 보이는 테두리에서 센다 — 동: 308 + 12, 서: 500 − 8 − 12 − 160.
+    const box = draw.Rect{ .x = 100, .y = 100, .w = 200, .h = 80 };
+    try testing.expectEqual(@as(i32, 300 + 8 + 12), placeBeside(160, 64, box, 8, pad, p).?.rect.x);
+    const right_box = draw.Rect{ .x = 500, .y = 100, .w = 200, .h = 80 };
+    const w = placeBeside(160, 64, right_box, 8, pad, p).?;
+    try testing.expectEqual(popup_box_side(.west), w.side);
+    try testing.expectEqual(@as(i32, 500 - 8 - 12 - 160), w.rect.x);
+    // 동쪽 자리는 보이는 우단으로 판정한다 — 0 이면 딱 드는 폭(792 − 308 = 484)이 여백을 넣으면 안 든다.
+    try testing.expectEqual(popup_box_side(.east), placeBeside(484, 64, box, 8, 0, p).?.side);
+    try testing.expect(placeBeside(484, 64, box, 8, pad, p).?.side != .east);
 }
 
 fn popup_box_side(s: Side) Side {

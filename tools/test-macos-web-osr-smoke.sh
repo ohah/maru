@@ -71,6 +71,14 @@ DL = ("<!doctype html><title>dl</title><style>html,body{margin:0;height:100%;bac
 # 목록이 있어도 띄울 탭이 없어 판정이 아무것도 보지 못한다) 2.5 초 뒤에 넣는다(누름은 1 초 창 밖).
 DLAUTO = DL.replace(b"</script>", b"a.addEventListener('input',function(e){ping('e=in&tr='+e.isTrusted)});var armed=false;"
     b"document.addEventListener('mousedown',function(){if(armed)return;armed=true;setTimeout(function(){a.focus();document.execCommand('insertText',false,'a')},2500)});</script>")
+# W6m③: 열린 shadow DOM 안의 빨간 칸(본문 왼쪽 위 폭 50%·높이 30%)과, 다른 출처 iframe(localhost — 본문 위 40%~80%) 안의 파란 칸
+# (iframe 의 위쪽 절반). 둘 다 목록이 붙어 있다.
+DLF = ("<!doctype html><title>dlf</title><style>html,body{margin:0;height:100%;background:#20a060}#h{position:fixed;left:0;top:0;width:50%;height:30%}"
+    "iframe{position:fixed;left:0;top:40%;width:50%;height:40%;border:0}</style><body><div id=h></div><iframe id=x></iframe><script>"
+    "var r=document.getElementById('h').attachShadow({mode:'open'});r.innerHTML='<input list=l style=width:100%;height:100%;border:0;padding:0;margin:0;display:block;background:#ff0000;font:20px/1 sans-serif><datalist id=l><option value=apple><option value=avocado></datalist>';"
+    "document.getElementById('x').src='http://localhost:'+location.port+'/dlf-inner'</script>").encode()
+DLF_INNER = (b"<!doctype html><title>in</title><style>html,body{margin:0;height:100%;background:#20a060}input{width:100%;height:50%;border:0;padding:0;margin:0;display:block;background:#0000ff;font:20px sans-serif}</style>"
+    b"<input list=l><datalist id=l><option value=blueberry><option value=banana></datalist>")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -143,6 +151,10 @@ class H(http.server.BaseHTTPRequestHandler):
             body = DL
         elif self.path == "/dl-auto":
             body = DLAUTO
+        elif self.path == "/dlf-app":
+            body = DLF
+        elif self.path == "/dlf-inner":
+            body = DLF_INNER
         elif self.path.startswith("/cm-app"):
             body = MENU
         elif self.path == "/tip-app":
@@ -1403,6 +1415,56 @@ if shot and isinstance(shot[0], dict) and 'atx' in shot[0] and os.path.exists(sp
           f'the window sits at the bottom-left corner of the field in the screenshot (window {ax},{ay} · field {min(xs) if xs else None},{max(ys) + 1 if ys else None})')
 else:
     check(False, f'the placement run reported the window and took a screenshot ({shot})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W6m③: shadow DOM·다른 출처 iframe 안의 칸 ────────────────────────────────────────────────────────────────
+# 열린 shadow DOM 안의 빨간 칸을 누르면 그 칸 바로 아래에 목록 창, 다른 출처 iframe(OOPIF) 안의 파란 칸을 누르면(그 프레임은 누름의
+# screen − client 로 자기 원점을 안다) 그 칸 바로 아래에 목록 창 — 스크린샷의 빨강·파랑 칸 왼쪽 아래와 창 왼쪽 위(view backing px)를
+# 맞춘다(앱 스크린샷에는 네이티브 창이 담기지 않는다). 파란 칸에서 고르면 그 값이 iframe 칸에 들어간다(창이 거두어진다).
+cat > "$root/dlf.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.30 0 0 0
+mouse 3 0.40 0.30 0 0 0
+sleep 1500
+datalist
+mouse 1 0.40 0.58 0 0 0
+mouse 3 0.40 0.58 0 0 0
+sleep 1500
+datalist
+SCRIPT
+: > "$root/requests.log"
+run_app /dlf-app 20000 "$root/dlf.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlf.txt" MARU_SCREENSHOT="$root/dlf.ppm" MARU_SCREENSHOT_DELAY_MS=11000
+grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dlf-app.log" | sed 's/ *$//' > "$root/dlf.report" || true
+python3 - "$root" <<'PY' || fail "the datalist window did not open under a field inside shadow DOM or a cross-origin iframe"
+import sys, os
+root = sys.argv[1]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+rep = [dict(kv.split('=', 1) for kv in l.split()[2:] if '=' in kv) for l in open(os.path.join(root, 'dlf.report')) if l.strip()]
+d = open(os.path.join(root, 'dlf.ppm'), 'rb').read() if os.path.exists(os.path.join(root, 'dlf.ppm')) else b''
+def bbox(rgb):
+    if not d: return None
+    _, dims, _, px = d.split(b'\n', 3)
+    w, h = map(int, dims.split())
+    xs, ys = [], []
+    for y in range(h):
+        row = px[y * w * 3:(y + 1) * w * 3]
+        i = row.find(rgb)
+        while i != -1:
+            if i % 3 == 0: xs.append(i // 3); ys.append(y)
+            i = row.find(rgb, i + 3)
+    return (min(xs), max(ys) + 1) if xs else None
+def placed(r, box):
+    return box is not None and r.get('win') == 'shown' and abs(int(r.get('atx', -99)) - box[0]) <= 3 and abs(int(r.get('aty', -99)) - box[1]) <= 3
+red, blue = bbox(bytes.fromhex('ff0000')), bbox(bytes.fromhex('0000ff'))
+sh = rep[0] if rep else {}
+fr = rep[1] if len(rep) > 1 else {}
+check(sh.get('count') == '2' and sh.get('first') == 'apple' and placed(sh, red), f'a field inside an open shadow root opens the list right under it ({sh} · field {red})')
+check(fr.get('count') == '2' and fr.get('first') == 'blueberry' and placed(fr, blue), f'a field inside a cross-origin iframe opens the list right under it ({fr} · field {blue})')
 sys.exit(0 if ok else 1)
 PY
 

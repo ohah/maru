@@ -7,7 +7,7 @@ const protocol = @import("web_sidecar_protocol");
 const message = protocol.message;
 
 /// 제안 목록 대리 스크립트 — 렌더러가 주 프레임 문서가 생길 때 `(function(send){…})` 로 감싸 돌린다(`renderer.runDatalistScript` —
-/// 페이지 스크립트보다 먼저, `send` 는 인자로). 큰따옴표·역슬래시 없이 쓴다(주석 검사가 지킨다). 주 프레임에서만 돈다.
+/// 페이지 스크립트보다 먼저, `send` 는 인자로). 큰따옴표·역슬래시 없이 쓴다(아래 comptime 검사가 지킨다). 주 프레임에서만 돈다.
 ///
 /// 페이지가 바꿔 놓을 수 있는 것은 우리가 아는 길에서 부르지 않는다: 판정·읽기·넣기에 쓰는 getter/setter·함수(`type`·`list`·
 /// `value`·`readOnly`·`disabled`, `options`·길이, 옵션의 `value`·`label`·`disabled`, 사각형·`visualViewport`, `activeElement`,

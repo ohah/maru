@@ -1212,15 +1212,37 @@ mouse 3 0.40 0.33 0 0 0
 sleep 1500
 dlhover 2
 datalist
-mouse 1 0.23 0.58 0 0 2
-mouse 3 0.23 0.58 0 0 2
+dlremember 2
+dlmouse 2 1 2
+dlmouse 2 3 2
 sleep 300
 datalist
 wheel 0.80 0.80 0 0 -3
 sleep 1500
 datalist
-mouse 1 0.23 0.58 0 0 0
-mouse 3 0.23 0.58 0 0 0
+dlclicklast
+sleep 1000
+SCRIPT
+# 행 위에서 누르고 상자 밖에서 떼면 고르지 않는다(목록은 남는다). hover 로 생긴 강조는 상자를 벗어나면 지워지고, 그때 Enter 는
+# 페이지로 간다(지나가며 남은 강조를 고르지 않는다) — 적대 검증 2 차.
+cat > "$root/dl-press.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.33 0 0 0
+mouse 3 0.40 0.33 0 0 0
+sleep 1500
+dlmouse 1 1 0
+sleep 200
+datalist
+mouse 3 0.80 0.80 0 0 0
+sleep 300
+datalist
+dlhover 2
+sleep 200
+datalist
+hover 0.80 0.80 0 0
+sleep 300
+datalist
+key 36 U+D
 sleep 1000
 SCRIPT
 cat > "$root/dl-esc.txt" <<'SCRIPT'
@@ -1244,7 +1266,7 @@ key 53 U+1B
 sleep 1000
 SCRIPT
 : > "$root/requests.log"
-run_app /dl-app 30000 "$root/dl-shot.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-shot.txt" MARU_SCREENSHOT="$root/dl-shot.ppm" MARU_SCREENSHOT_DELAY_MS=9500
+run_app /dl-app 30000 "$root/dl-shot.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-shot.txt" MARU_SCREENSHOT="$root/dl-shot.ppm" MARU_SCREENSHOT_DELAY_MS=11000
 python3 - "$root/dl-shot.ppm" <<'PY' || fail "the datalist suggestions were not drawn under the field"
 import sys
 d = open(sys.argv[1], 'rb').read()
@@ -1288,6 +1310,10 @@ run_app /dl-app 14000 "$root/dl-esc.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-e
 grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-esc.report" || true
 cp "$root/requests.log" "$root/dl-esc.requests"
 : > "$root/requests.log"
+run_app /dl-app 14000 "$root/dl-press.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-press.txt"
+grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-press.report" || true
+cp "$root/requests.log" "$root/dl-press.requests"
+: > "$root/requests.log"
 run_app /dl-app 14000 "$root/dl-stale.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-stale.txt"
 grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-stale.report" || true
 cp "$root/requests.log" "$root/dl-stale.requests"
@@ -1316,6 +1342,10 @@ md = [r for r in sreq if r.startswith('/ev?e=md')]
 check(stale[:2] == ['osr-test datalist open=true count=5 selected=2', 'osr-test datalist open=true count=5 selected=2'] and stale[2:] == ['osr-test datalist open=false count=0 selected=-1']
       and not any(r.startswith('/ev?e=change') for r in sreq) and md[-1:] == ['/ev?e=md&b=0'] and len(md) == 2,
       f'a right click on a row picks nothing and does not reach the page, and after the page closes the list a click where it was reaches the page ({stale} · {sreq})')
+press = lines('dl-press.report'); preq = ev('dl-press.requests')
+check(press == ['osr-test datalist open=true count=5 selected=1', 'osr-test datalist open=true count=5 selected=1', 'osr-test datalist open=true count=5 selected=2', 'osr-test datalist open=true count=5 selected=-1']
+      and not any(r.startswith('/ev?e=change') for r in preq) and '/ev?e=kd&k=Enter' in preq,
+      f'a press on a row released outside the list picks nothing, a hover highlight clears when the pointer leaves, and Enter then reaches the page ({press} · {preq})')
 check(esc == ['osr-test datalist open=false count=0 selected=-1', 'osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=0']
       and kd == ['/ev?e=kd&k=ArrowDown', '/ev?e=kd&k=Enter'] and not any(r.startswith('/ev?e=change') for r in ereq),
       f'Esc closes only the list, ↓ on the closed field reaches the page and reopens it, Enter on the open list with nothing highlighted reaches the page and picks nothing ({esc} · {kd})')

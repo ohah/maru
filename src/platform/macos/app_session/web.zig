@@ -914,7 +914,7 @@ pub fn osrMouseDown(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_bu
 /// 버튼만 떼고, 눌린 버튼이 모두 떼어지면 끝난다. 탭이 이 창의 배치에서 사라졌으면(닫힘·숨김·다른 창으로) 제스처를 끝내고
 /// capture 를 놓게 한다.
 pub fn osrGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, mods: i32, xterm_button: i32) bool {
-    if (datalistGesture(self, kind, x_px, y_px, xterm_button, mods)) return true; // W6m②: 목록 위에서 시작한 누름
+    if (datalistGesture(self, kind, x_px, y_px, xterm_button)) return true; // W6m②: 목록 위에서 시작한 누름
     if (self.pointer_gesture_owner != .web_osr) return false;
     const g = self.pointer_gesture_owner.web_osr;
     const layout = osr_input.find(self.osr_layouts.items, g.surface_id) orelse {
@@ -1944,6 +1944,10 @@ pub const OsrDatalist = struct {
     wheel_acc: f64 = 0,
 };
 
+/// 목록 위에서 시작한 누름 — 그 버튼의 끌기·뗌만 붙잡는다. 고르기는 누를 때 정한다(왼쪽이고 ⌃ 아님 — ⌃ 를 먼저 떼고 버튼을 떼도
+/// 고르지 않는다, 적대 검증).
+pub const OsrDatalistPress = struct { button: i32, pick: bool };
+
 /// 그린 목록이 지금도 그 목록인가 — 키 대상 탭이 같고, 그 탭의 목록 세대가 그린 때와 같고, 이번에 그렸다.
 fn datalistLive(self: *AppSession) bool {
     const dl = self.osr_datalist;
@@ -2022,13 +2026,26 @@ pub fn datalistDraws(self: *AppSession, props: chrome.props.ChromeProps, tk: *co
         .scroll = self.osr_datalist.scroll,
     };
     const shown = rows[0..n];
-    // 본문이 너무 작아 상자가 들어가지 않으면 그리지 않는다(그때는 키도 먹지 않는다 — `datalistLive`).
-    const box = suggest_box.boxRect(&st, shown, inner) orelse return false;
+    // 상자는 본문 안에 다 들어갈 때만 그린다 — 자리 정하기(`popup_box.place`)는 본문보다 큰 상자를 오른쪽·아래로 넘치게 둔다(적대
+    // 검증 2 차 — 좁은 split 에서 이웃 pane 위에 페이지가 정한 글이 그려졌다). 넘치면 레이블을 빼 보고, 그래도 넘치면 그리지 않는다
+    // (그때는 키도 먹지 않는다 — `datalistLive`; 칸은 페이지 몫으로 남는다).
+    var box = suggest_box.boxRect(&st, shown, inner) orelse return false;
+    if (!rectInside(box, body)) {
+        for (shown) |*r| r.detail = "";
+        box = suggest_box.boxRect(&st, shown, inner) orelse return false;
+        if (!rectInside(box, body)) return false;
+    }
     try chrome.ChromeHost.collectWebSuggestDraws(&st, shown, inner, tk, arena, draws);
     self.osr_datalist.box = box;
     self.osr_datalist.row_h = @max(props.metrics.cell_height_px, 1);
     self.osr_datalist.count = n;
     return self.osr_datalist.box != null;
+}
+
+fn rectInside(r: chrome.draw.Rect, body: osr_input.Rect) bool {
+    const rx: i64 = r.x;
+    const ry: i64 = r.y;
+    return rx >= body.x and ry >= body.y and rx + r.w <= @as(i64, body.x) + body.w and ry + r.h <= @as(i64, body.y) + body.h;
 }
 
 fn datalistSelect(self: *AppSession, index: usize, by_hover: bool) void {
@@ -2046,13 +2063,9 @@ fn datalistScroll(self: *AppSession, delta_y: f64, precise: bool) void {
     const dl = &self.osr_datalist;
     const visible = @min(dl.count, suggest_box.max_rows);
     const last = dl.count -| visible;
-    var steps: i64 = 0;
-    if (precise) {
-        const unit: f64 = @floatFromInt(@max(dl.row_h, 1));
-        dl.wheel_acc += delta_y;
-        while (dl.wheel_acc >= unit) : (dl.wheel_acc -= unit) steps -= 1;
-        while (dl.wheel_acc <= -unit) : (dl.wheel_acc += unit) steps += 1;
-    } else if (delta_y > 0) steps = -1 else if (delta_y < 0) steps = 1;
+    // 터미널 스크롤과 같은 환산(정밀 델타는 pt — 행 높이를 배율로 나눈 만큼마다 한 줄, 비유한값은 거른다 — 적대 검증 2 차).
+    const lines = maru.session.input_math.wheelDeltaToLines(&dl.wheel_acc, delta_y, precise, @max(dl.row_h, 1), self.scale_milli);
+    const steps: i64 = -@as(i64, lines);
     const before = dl.scroll;
     if (steps < 0) dl.scroll -|= @intCast(-steps) else dl.scroll = @min(dl.scroll + @as(usize, @intCast(steps)), last);
     if (dl.scroll != before) self.metal_dirty = true;
@@ -2113,17 +2126,22 @@ fn datalistBoxContains(self: *AppSession, x_px: f64, y_px: f64) bool {
 /// 왼쪽 **뗌**에서 한다(Chrome 처럼).
 fn datalistMouseDown(self: *AppSession, x_px: f64, y_px: f64, xterm_button: i32, mods: i32) bool {
     if (!datalistBoxContains(self, x_px, y_px)) return false;
-    self.osr_datalist_press = true;
-    if (xterm_button == 0 and mods & 16 == 0) if (datalistRowAt(self, x_px, y_px)) |row| datalistSelect(self, row, false);
+    // 다른 제스처가 살아 있으면(페이지에서 왼쪽을 누른 채 목록 위에서 오른쪽) 붙잡지 않는다 — 그 제스처의 뗌을 가로채 행을 고르지 않게.
+    if (self.osr_datalist_press != null or self.pointer_gesture_owner != .none) return true;
+    const pick = xterm_button == 0 and mods & 16 == 0;
+    self.osr_datalist_press = .{ .button = xterm_button, .pick = pick };
+    if (pick) if (datalistRowAt(self, x_px, y_px)) |row| datalistSelect(self, row, false);
     return true;
 }
 
-/// 목록 위에서 시작한 누름의 끌기·뗌 — 삼키고, 왼쪽 뗌이 행 위면 그 행을 고른다.
-fn datalistGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_button: i32, mods: i32) bool {
-    if (!self.osr_datalist_press) return false;
-    if (kind != 3) return true;
-    self.osr_datalist_press = false;
-    if (xterm_button != 0 or mods & 16 != 0) return true;
+/// 목록 위에서 시작한 누름의 끌기·뗌 — 그 버튼의 것만 삼키고(다른 버튼은 아래로), 고를 수 있는 누름의 뗌이 행 위면 그 행을 고른다.
+/// 상자 밖에서 떼면 고르지 않는다(목록은 남는다).
+fn datalistGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_button: i32) bool {
+    const press = self.osr_datalist_press orelse return false;
+    if (kind == 2) return true; // 끌기 — 페이지·이웃 pane 으로 보내지 않는다(버튼을 싣지 않는 경로도 있어 누름이 살아 있는 동안 모두)
+    if (xterm_button != press.button) return false;
+    self.osr_datalist_press = null;
+    if (!press.pick) return true;
     const row = datalistRowAt(self, x_px, y_px) orelse return true;
     const t = syncDatalist(self) orelse return true;
     _ = web_osr.datalistPick(self.allocator, t.sid, t.d.list, row);

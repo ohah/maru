@@ -16,9 +16,10 @@
 //! 보낸다(`datalist_page.zig`). 그 원점은 바깥이 스크롤하면 낡는다 — 최상위 문서의 스크롤(`on_scroll_offset_changed`)과 maru 가
 //! 보낸 휠(바깥 스크롤 상자도 — 최상위 스크롤 알림은 그것을 모른다, 적대 리뷰 1 회차)에 떠 있는 iframe 목록을 닫고(그 iframe 의
 //! 스크립트는 바깥 스크롤을 모른다), 원점을 잰 뒤에 그런 스크롤이 있었으면(`a` 로 계산) 보이지 않는다(`onScrolled`). 키보드·
-//! 스크립트로 바깥 상자만 굴리면 모른다(문서의 남은 것). 글자·↓ 로 연 목록은 지금 초점을 가진 프레임에서 온 것만 받는다 — 사용자가
-//! 다른 프레임에 치는 동안 광고 iframe 이 스스로 칸에 글을 넣어(`execCommand` 의 `input` 은 isTrusted 다) 목록을 띄우지 못하게
-//! (적대 리뷰 1 회차; 누름으로 연 목록은 그 누름을 받은 프레임이라 건너뛴다 — 누름 처리 중에는 초점이 아직 옮겨 가지 않았다).
+//! 스크립트로 바깥 상자만 굴리면 모른다(문서의 남은 것). 원점을 잰 때와 스크롤 시각은 다른 프로세스의 것이라(렌더러는 사건을
+//! rAF 에 맞춰 늦게 처리하기도 한다) 스크롤 뒤 `scroll_grace_ms` 안에 잰 원점도 낡은 것으로 본다(적대 리뷰 2 회차). 다른 프레임에
+//! 사용자가 치는 동안 iframe 이 스스로 칸에 글을 넣어 여는 목록은 스크립트가 막는다(그 프레임이 받은 신뢰된 키 누름 — 초점 프레임
+//! 확인은 초점을 가져간 iframe 을 가리지 못했고 경쟁도 있었다, 적대 리뷰 2 회차).
 //! iframe 이 다른 문서로 가거나 떨어져 나가면 그 프레임의 목록을 닫는다(떨어진 프레임의 `pagehide` 닫기는 프레임이 무효라 버려진다).
 
 const std = @import("std");
@@ -127,21 +128,8 @@ fn isLiveSubframe(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
     return false;
 }
 
-/// 지금 초점을 가진 프레임이 그것인가.
-fn isFocusedFrame(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
-    const api = browsers.state.api;
-    const focused = browser.*.get_focused_frame.?(browser);
-    if (focused == null) return false;
-    defer object.release(focused);
-    const a = frame.*.get_identifier.?(frame);
-    if (a == null) return false;
-    defer api.string_userfree_utf16_free(a);
-    const b = focused.*.get_identifier.?(focused);
-    if (b == null) return false;
-    defer api.string_userfree_utf16_free(b);
-    if (a.*.length == 0 or a.*.str == null or b.*.str == null) return false;
-    return a.*.length == b.*.length and std.mem.eql(u16, a.*.str[0..a.*.length], b.*.str[0..b.*.length]);
-}
+/// 바깥 스크롤 뒤 이만큼 안에 잰 원점도 낡은 것으로 본다(위 머리 주석).
+const scroll_grace_ms: i64 = 300;
 
 fn frameIdEquals(api: *const library.Api, frame: [*c]c.cef_frame_t, entry: *const Shown) bool {
     const id = frame.*.get_identifier.?(frame);
@@ -206,12 +194,10 @@ pub fn onMessage(id: BrowserId, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_f
     switch (parsed) {
         .hide => closeFor(id, token),
         .show => |s| {
-            // 글자·↓ 로 연 목록은 초점을 가진 프레임에서 온 것만(위 머리 주석).
-            if (!s.by_press and !isFocusedFrame(browser, frame)) return closeFor(id, token);
             // iframe 의 원점을 잰 뒤에 바깥이 스크롤했다 — 자리가 낡았을 수 있어 보이지 않는다(포인터를 움직이면 다시 잰다).
             if (!main) {
                 const scrolled = scrolledAt(id);
-                if (scrolled != 0 and nowMs() - @as(i64, s.age_ms) <= scrolled) return closeFor(id, token);
+                if (scrolled != 0 and nowMs() - @as(i64, s.age_ms) <= scrolled + scroll_grace_ms) return closeFor(id, token);
             }
             const slot = shownFor(id) orelse freeSlot() orelse return;
             const list_id = next_list;

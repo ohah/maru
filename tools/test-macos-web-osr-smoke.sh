@@ -1421,7 +1421,8 @@ PY
 # ── W6m③: shadow DOM·다른 출처 iframe 안의 칸 ────────────────────────────────────────────────────────────────
 # 열린 shadow DOM 안의 빨간 칸을 누르면 그 칸 바로 아래에 목록 창, 다른 출처 iframe(OOPIF) 안의 파란 칸을 누르면(그 프레임은 누름의
 # screen − client 로 자기 원점을 안다) 그 칸 바로 아래에 목록 창 — 스크린샷의 빨강·파랑 칸 왼쪽 아래와 창 왼쪽 위(view backing px)를
-# 맞춘다(앱 스크린샷에는 네이티브 창이 담기지 않는다). 파란 칸에서 고르면 그 값이 iframe 칸에 들어간다(창이 거두어진다).
+# 맞춘다(앱 스크린샷에는 네이티브 창이 담기지 않는다). 파란 칸에 글자(maru 의 키 경로 — iframe 이 받은 신뢰된 키 누름)를 치면 다시
+# 거른 목록이 그 자리에 뜬다.
 cat > "$root/dlf.txt" <<'SCRIPT'
 sleep 7000
 mouse 1 0.40 0.20 0 0 0
@@ -1432,9 +1433,12 @@ mouse 1 0.40 0.58 0 0 0
 mouse 3 0.40 0.58 0 0 0
 sleep 1500
 datalist
+key 11 U+62
+sleep 1000
+datalist
 SCRIPT
 : > "$root/requests.log"
-run_app /dlf-app 20000 "$root/dlf.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlf.txt" MARU_SCREENSHOT="$root/dlf.ppm" MARU_SCREENSHOT_DELAY_MS=11000
+run_app /dlf-app 24000 "$root/dlf.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlf.txt" MARU_SCREENSHOT="$root/dlf.ppm" MARU_SCREENSHOT_DELAY_MS=13500 # 스크린샷은 대본이 끝난 뒤(찍으면 앱이 끝난다)
 grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dlf-app.log" | sed 's/ *$//' > "$root/dlf.report" || true
 python3 - "$root" <<'PY' || fail "the datalist window did not open under a field inside shadow DOM or a cross-origin iframe"
 import sys, os
@@ -1465,6 +1469,8 @@ sh = rep[0] if rep else {}
 fr = rep[1] if len(rep) > 1 else {}
 check(sh.get('count') == '2' and sh.get('first') == 'apple' and placed(sh, red), f'a field inside an open shadow root opens the list right under it ({sh} · field {red})')
 check(fr.get('count') == '2' and fr.get('first') == 'blueberry' and placed(fr, blue), f'a field inside a cross-origin iframe opens the list right under it ({fr} · field {blue})')
+ty = rep[2] if len(rep) > 2 else {}
+check(ty.get('count') == '2' and ty.get('first') == 'blueberry' and placed(ty, blue), f'typing in the cross-origin iframe field refilters the list at the same place ({ty})')
 sys.exit(0 if ok else 1)
 PY
 

@@ -61,10 +61,11 @@ pub const script_part = "(function(){if(window!==window.top)return;" ++
     // 긴 값을 칠 때 가로로 스크롤된다(`contains` 는 자기 자신에도 참이다 — 적대 검증 2 차).
     "on('scroll',function(e){try{var g=A(ET,e,[]);if(cur&&g!==cur&&A(NC,g,[cur]))hide()}catch(x){}});on('resize',function(){hide()});on('pagehide',function(){hide()});" ++
     // 고르기 — 같은 판이고 그 칸에 아직 초점이 있고 쓸 수 있을 때만 넣는다. 넣는 동안 우리 `input` 처리기는 다시 보이지 않는다.
-    // 넣었든 거절했든 닫는다.
+    // 넣었든 거절했든 닫는다 — 단 판이 다르면 닫지 않는다: 그 사이 새 목록이 나갔으므로 닫기가 새 목록을 닫았다(글자를 치고 곧바로
+    // Enter — 옛 목록의 고르기가 거절되며 새 목록까지 사라졌다, 적대 검증 3 차).
     "send('dl',function(v,i){var ok=false;try{ok=v===ver&&!!cur&&focused(cur)&&fieldOf(cur)===cur&&i>=0&&i<vals.length}catch(x){}" ++
     "if(ok){var t=cur;busy=true;try{A(VS,t,[vals[i]]);A(DE,t,[new E('input',{__proto__:null,bubbles:true})]);A(DE,t,[new E('change',{__proto__:null,bubbles:true})])}catch(x){}busy=false}" ++
-    "hide()})" ++
+    "if(v===ver)hide()})" ++
     "})();";
 
 comptime {

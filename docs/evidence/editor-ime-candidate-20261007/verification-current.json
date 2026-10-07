@@ -1,0 +1,25 @@
+{
+  "status": "passed",
+  "actual_candidate_rounds_passed": 5,
+  "screen_recording": "GUI app allowed; current code requirement matches",
+  "input_permission": "GUI input permission accepted after registration",
+  "app_sha256": "0c7451ca7fc5fc865106095807cdb8940009966840d0939af1fd91f47cf7f134",
+  "gui_launch": "temporary GUI-domain job and LaunchServices; same signed app staged in cache; HOME remains isolated",
+  "user_workspace_recovery": "Restored byte-identical immediately preceding backup under nonblocking lease and concurrency fences; preserved before/after outside repository",
+  "source_sha256": {
+    "tools/shared-restore-app/run.py": "2fd9acaf38106202f3a410fec2a8f6a7180f652eb6a8c64ccad15a69860b5fb1",
+    "tools/shared-restore-app/gui_launch.py": "9f2429dce557806f761c13b5bc211a4f8ca27af8c86386623b974fbc1b28dfcc",
+    "tools/shared-restore-app/candidate-driver.swift.inc": "9995fd53921ffbe6712d0d5a1dbf3ddb526fde7997330a80c5c131cd300f53de",
+    "tools/shared-restore-app/candidate_artifact.py": "212f0bf0fca0a080d46d62bee921bf7c6cac61a6cb060c9c9f77ac5dd73ba133",
+    "tools/shared-restore-app/verify-candidate-handoffs.swift": "afc93ff9ad7bc25ad2b5ae53c08bc9fc5da7c0f2410f8b643bf7bd014dae75c3"
+  },
+  "independent_real_observations": {
+    "close": 5,
+    "switch": 5
+  },
+  "full_runner_passed": true,
+  "final_rounds": {
+    "close": 5,
+    "switch_with_restart": 5
+  }
+}

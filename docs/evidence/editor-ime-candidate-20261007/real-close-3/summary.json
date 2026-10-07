@@ -1,0 +1,24 @@
+{
+  "app_pid": 16958,
+  "rows": [
+    {
+      "source_owner": 2,
+      "target_owner": 3,
+      "key_code": 124,
+      "window_id": 18549,
+      "popup_closed": true,
+      "capture_sha256": "611d88098e082403a70df41863729fd3e079ac7c5c076ae16839bc5817935a76",
+      "hanja_rows": 6
+    },
+    {
+      "source_owner": 3,
+      "target_owner": 2,
+      "key_code": 13,
+      "window_id": 18550,
+      "popup_closed": true,
+      "capture_sha256": "4b72ff59fc1eab1cbc89f7593082bc379d607ac9be698f20c3b73726804a59de",
+      "hanja_rows": 7
+    }
+  ],
+  "raw_artifact_sha256": "aa62453d4342c320cc337a0e97a59e11e5056c4e3724795e81b91928497a6832"
+}

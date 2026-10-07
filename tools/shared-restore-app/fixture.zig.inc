@@ -108,7 +108,8 @@ fn sharedRestoreStep(self: *AppSession, command: u32) !i32 {
         if (sharedRestoreViews(self, &surviving) != 1) return error.ExpectedOneView;
         const term = surviving[0];
         const doc = term.rt.editorDocument().opened.?;
-        if (doc.isDirty() or !std.mem.eql(u8, doc.file.content, "L가 R나")) return error.CloseIMEBody;
+        const expected_body: []const u8 = if (std.c.getenv("MARU_SHARED_RESTORE_IME_CANDIDATE") != null) "L韓 R韓" else "L가 R나";
+        if (doc.isDirty() or !std.mem.eql(u8, doc.file.content, expected_body)) return error.CloseIMEBody;
         const selection = term.rt.editor_selection orelse return error.MissingSelection;
         if (selection.anchor_start != 4 or selection.focus != 4) return error.CloseIMESelection;
         if (pane_ops.activePane(self).activeTerm() != term or self.pending_confirm != .none) return error.CloseIMEFocus;

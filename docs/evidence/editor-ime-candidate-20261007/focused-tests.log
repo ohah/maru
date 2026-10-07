@@ -1,0 +1,159 @@
+1/19 editor_judges.test_0...OK
+2/19 app_session.editor.mod.test.shared editor split 공개 명령은 네 방향으로 같은 문서의 뷰를 만든다...OK
+3/19 app_session.editor.mod.test.shared editor split 기본 키는 편집기에서만 실행되고 메뉴 표시는 사용자 설정을 따른다...OK
+4/19 app_session.editor.mod.test.shared editor split 팔레트 선택은 실행되고 모달과 Quick 창 제한은 지킨다...OK
+5/19 app_session.editor.mod.test.shared editor split 공개 명령은 비교 병합 원격과 비편집기를 공유하지 않는다...OK
+6/19 app_session.editor.mod.test.shared editor split 지원 밖 문서의 공개 명령은 조합도 정산하지 않는다...OK
+7/19 app_session.editor.mod.test.shared editor split creates only an editor pane and retains shared Undo after close...OK
+8/19 app_session.editor.mod.test.shared editor split copies folds without coupling subsequent view state...OK
+9/19 app_session.editor.mod.test.shared editor split allocation failures retain tree focus and document references...OK
+10/19 app_session.editor.mod.test.shared editor split closing a dirty peer requires confirmation only for the last view...OK
+11/19 app_session.editor.mod.test.shared editor split reopening selects the recently focused surviving view...OK
+12/19 app_session.editor.mod.test.shared editor split rejects unsupported documents without publishing a pane...OK
+13/19 app_session.editor.mod.test.shared editor split retains rejected composition and commits it once before copying the view...OK
+14/19 app_session.editor.mod.test.shared editor split 공유 뷰가 다른 창으로 갈라지는 이동은 조합과 구조 변경 전에 거절한다...OK
+15/19 app_session.editor.mod.test.shared editor split 단일 뷰와 공유 뷰 전체의 창 이동은 편집을 유지한다...OK
+16/19 app_session.editor.mod.test.shared editor split 같은 창의 워크스페이스 이동은 공유 편집을 유지한다...OK
+17/19 app_session.test_0...OK
+18/19 session_host.test_0...OK
+19/19 session_host.test_1...OK
+All 19 tests passed.
+recovery_process phase=write pid=91826 documents=2 views=3
+recovery_process phase=restore pid=91849 independent=true shared=true selection=true
+recovery_process phase=restore pid=91860 independent=true shared=true selection=true
+recovery_process record_preserved=true disk_unchanged=true invalid_window_preserved=true legacy_preserved=true
+1/74 editor_judges.test_0...OK
+2/74 app_session.editor.mod.test.U1m 이름 없는 문서만 있는 pane 은 «그 문서로» 복원된다 — placeholder 가 아니다(U4c 가 고쳤다)...OK
+3/74 app_session.editor.mod.test.U2i 저장하면 workspace 저장 시퀀스에 든다 — 다음 실행에 그 파일이 돌아온다...OK
+4/74 app_session.editor.mod.test.U4a-1 편집은 곧 백업이 아니다 — 만기 전에는 없고, 만기 뒤에 생긴다...OK
+5/74 app_session.editor.mod.test.U4a-2 레코드는 그 문서다 — 신원과 내용이 되읽힌다...OK
+6/74 app_session.editor.mod.test.U4a-3 저장하면 사라진다 — 미저장 편집이 없으니 백업도 없다...OK
+7/74 app_session.editor.mod.test.U4a-4 undo 로 clean 이 되면 지운다 — 디스크와 같은 내용을 dirty 로 되살리지 않는다...OK
+8/74 app_session.editor.mod.test.U4a-5 큰 문서는 백업하지 않고 그 사실을 남긴다 — 조용히 멈추지 않는다...OK
+9/74 app_session.editor.mod.test.U4a-6 이름이 붙으면 옛 신원의 백업이 사라진다...OK
+10/74 app_session.editor.mod.test.U4a-7 비교 뷰는 백업하지 않는다 — 편집이 아니다...OK
+11/74 app_session.editor.mod.test.U4a-8 수락된 닫기는 지우고, 앱 종료는 남긴다...OK
+12/74 app_session.editor.mod.test.U4a-9 저장이 끝나도 여전히 dirty 면 보호를 놓지 않는다...OK
+13/74 app_session.editor.mod.test.U4a-10 쓸 수 없으면 다음 만기에 다시 시도한다 — 한 번 실패로 포기하지 않는다...OK
+14/74 app_session.editor.mod.test.U4a-11 백업 파일은 소유자만 읽는다...OK
+15/74 app_session.editor.mod.test.U4a-12 에이전트 행 ✕ 는 활성 문서의 백업을 지우지 않는다 — 닫지도 않은 문서다...OK
+16/74 app_session.editor.mod.test.U4a-13 한 프레임은 한 문서만 쓰고, 종료는 전부 쓴다...OK
+17/74 app_session.editor.mod.test.U4b-1 지난 세션의 편집이 조용히 되살아난다 — dirty 로, 알림 한 줄과 함께...OK
+18/74 app_session.editor.mod.test.U4b-2 디스크가 그 사이 바뀌어도 «묻지 않는다» — 첫 저장이 충돌로 갈린다...OK
+19/74 app_session.editor.mod.test.U4b-3 되돌리기가 디스크 내용을 되살린다 — 한 편집으로 넣었으므로...OK
+20/74 app_session.editor.mod.test.U4b-4 내용이 같으면 되살릴 것이 없다 — clean 이고 알림도 없고 레코드는 걷힌다...OK
+21/74 app_session.editor.mod.test.U4b-5 잘린 v1 path 백업은 새 복구 ID에 배정하지 않고 보존한다...OK
+22/74 app_session.editor.mod.test.U4b-6 다른 경로를 담은 v1 path 백업도 새 복구 ID에 배정하지 않는다...OK
+23/74 app_session.editor.mod.test.U4b-7 이름 없는 문서를 열 때는 건드리지 않는다 — 그 갈래는 이 슬라이스가 아니다...OK
+24/74 app_session.editor.mod.test.U4b-8 되살린 문서는 다시 보호된다 — 시계가 서고 다음 만기에 레코드가 돌아온다...OK
+25/74 app_session.editor.mod.test.U4b-9 잘못된 본문과 큰 본문을 가진 v1 백업은 그대로 보존한다...OK
+26/74 app_session.editor.mod.test.U4c-1 이름 없는 문서가 번호와 내용으로 돌아온다 — dirty 로...OK
+27/74 app_session.editor.mod.test.U4c-2 복원이 번호 발급기를 그 위로 올린다 — 새 문서가 겹치지 않는다...OK
+28/74 app_session.editor.mod.test.U4c-3 레코드가 없으면 빈 문서로 돌아온다 — 탭은 사용자가 만든 것이다...OK
+29/74 app_session.editor.mod.test.U4c-4 섞인 pane 의 순서가 보존된다 — 이름 없는 문서는 인덱스 공간 밖이다...OK
+30/74 app_session.editor.mod.test.U4c-5 되살린 문서만 레코드를 삼킨다 — 새로 만든 문서는 빈 문서다...OK
+31/74 app_session.editor.mod.test.U4c-8 새 이름 없는 문서는 checkpoint 를 «persisted_surface 로» 더럽힌다...OK
+32/74 app_session.editor.mod.test.U4d-3 저쪽에 저장한 문서는 workspace 에 «신원」으로 실린다...OK
+33/74 app_session.editor.mod.test.U4d-4 저쪽 신원 문서는 새 이름 없는 문서로 되살아난다 — 알림과 함께, 프레임당 하나...OK
+34/74 app_session.editor.mod.test.U4d-5 원본이 사라진 경로 문서도 같은 규칙으로 되살아난다 — 그 자리는 dock prune 이다...[app] (warn): workspace restore dropped: kind=file-panel-entry reason=missing path=/Users/user/Documents/workspace/maru-ime-candidate-20261007/.zig-cache/tmp/s55J5EbMlvF34I3R/deleted.txt
+OK
+35/74 app_session.editor.mod.test.U4d-6 레코드가 없으면 아무것도 만들지 않는다 — 빈 탭을 만들 이유가 없다...OK
+36/74 app_session.editor.mod.test.SHVIEW17 수락한 한 뷰 닫기는 살아 있는 문서 백업을 지우지 않는다...OK
+37/74 app_session.editor.mod.test.U4b-12 recovery keeps the original backup across a second open without a backup tick...OK
+38/74 app_session.editor.mod.test.U4b-13 recovery flush positive control keeps unsaved content across a second open...OK
+39/74 app_session.editor.mod.test.U4b-14 retained local recovery survives staging commit and clears on clean undo or discard...OK
+40/74 app_session.editor.mod.test.U4d-7 복구 원본은 실패 때 보존하고 재백업 저장 버리기가 성공하면 정리한다...OK
+41/74 app_session.editor.mod.test.U4b-15 같은 경로의 독립 문서는 반복 백업해도 서로 덮어쓰지 않는다...OK
+42/74 app_session.editor.mod.test.U4b-16 독립 A를 버려도 같은 경로의 B 백업과 내용은 남는다...OK
+43/74 app_session.editor.mod.test.U4d-8 빈 복구도 미저장 문서로 열고 원본을 보존한다...OK
+44/74 app_session.editor.mod.test.U4d-9 revival queue drops overflow and consumes a failed read without restoring...revival_queue ninth_not_queued=true failed_read_removed=true source_directory_preserved=true
+OK
+45/74 app_session.editor.mod.test.U4b-17 accepted tab close removes 64 backups but leaves the 65th...accepted_tab_close documents=64 surviving_backups=0
+accepted_tab_close documents=65 surviving_backups=1
+OK
+46/74 app_session.editor.mod.test.U4b-18 successful save leaves an older backup when directory permissions deny deletion...save_delete_denied save_success=true clean=true old_backup_preserved=true backup_flag=false
+residual_backup_reopen older_content_restored=true dirty=true save_external_conflict=true latest_disk_preserved=true
+OK
+47/74 app_session.editor.mod.test.editor recovery restore 독립 A B와 공유 A 뷰를 실제 백업과 checkpoint로 복원한다...OK
+48/74 app_session.editor.mod.test.editor recovery restore clean open은 백업 루트가 없어도 파일을 만들지 않는다...OK
+49/74 app_session.editor.mod.test.editor recovery restore 손상 백업은 기존 창과 원본을 보존한다...OK
+50/74 app_session.editor.mod.test.editor recovery restore 더 최신 백업은 본문만 복원하고 오래된 뷰 좌표를 버린다...[app] (warn): editor restore degraded: document=0 reason=content-changed
+[app] (warn): editor restore degraded: document=0 reason=content-changed
+OK
+51/74 app_session.editor.mod.test.editor recovery restore clean open 비용을 이전 준비 경로와 교차 실측한다...SKIP
+52/74 app_session.editor.mod.test.editor recovery restore process 저장과 복원을 서로 다른 실행에서 검증한다...SKIP
+53/74 app_session.editor.mod.test.editor recovery restore 캡처 OOM은 문서와 뷰 및 예약 상태를 바꾸지 않는다...OK
+54/74 app_session.editor.mod.test.editor recovery restore 접힘과 UTF-8 선택을 독립 뷰에 적용한다...OK
+55/74 app_session.editor.mod.test.editor recovery restore 접힘 표를 재구성해도 가로 위치와 랩 조각을 잃지 않는다...OK
+56/74 app_session.editor.mod.test.editor recovery restore 늦은 접힘 provider가 같은 맨 위 줄의 랩 조각을 보존한다...OK
+57/74 app_session.editor.mod.test.editor recovery restore 접힌 배열 대신 원문 줄을 저장하고 복원한다...OK
+58/74 app_session.editor.mod.test.editor recovery restore 늦은 provider와 재저장이 저장된 접힘 의도를 잃지 않는다...OK
+59/74 app_session.editor.mod.test.editor recovery restore 사용자의 스크롤과 펼치기가 늦은 응답보다 우선한다...OK
+60/74 app_session.editor.mod.test.editor recovery restore 막대와 랩 및 키보드 명령을 늦은 응답이 되돌리지 않는다...OK
+61/74 app_session.editor.mod.test.editor recovery restore 임시 provider가 선택을 숨기지 않고 실제 입력은 복원을 취소한다...OK
+62/74 app_session.editor.mod.test.editor recovery restore 공유 뷰는 대기를 독립 소유하고 공유 편집은 모두 무효화한다...OK
+63/74 app_session.editor.mod.test.editor recovery restore provider 적용 중 할당 실패도 다음 프레임에서 재시도한다...OK
+64/74 app_session.editor.mod.test.editor recovery restore 모든 staged 할당 실패에서 문서와 백업 소유를 반환한다...editor_restore_oom allocation_points=49 rejected=49 prior_window_and_record_preserved=true
+OK
+65/74 app_session.editor.mod.test.editor recovery restore 보호된 창 닫기는 살아 있는 문서의 백업을 지우지 않는다...OK
+66/74 app_session.test_0...OK
+67/74 app_session.editor.backup.test.U4b-10 backup reader distinguishes absent invalid and valid records without deleting source...OK
+68/74 app_session.editor.backup.test.U4b-11 backup reader allocation failure is not absence or corruption...OK
+69/74 session_host.test_0...OK
+70/74 session_host.test_1...OK
+71/74 app_session.editor.recovery_store.test.editor recovery restore 저장소는 빈 본문 재열기와 지연 삭제의 이전 버전을 구분한다...OK
+72/74 app_session.editor.recovery_store.test.editor recovery restore 예약 경로를 바꾸면 이전 소유자는 쓰기와 삭제를 거절한다...OK
+73/74 app_session.editor.recovery_store.test.editor recovery restore 저장소의 모든 할당 실패에서 소유 자원을 반환한다...OK
+74/74 app_session.editor.recovery_store.test.editor recovery restore 다른 ID나 경로의 레코드를 읽거나 덮거나 지우지 않는다...OK
+72 passed; 2 skipped; 0 failed.
+1/24 editor_judges.test_0...OK
+2/24 app_session.editor.mod.test.editor backup discovery 제품 목록에서 빈 사본을 열고 재백업과 재시작 후에도 미저장 상태를 유지한다...OK
+3/24 app_session.editor.mod.test.editor backup discovery 제품 복구는 원본 교체를 지우지 않고 명시적 닫기만 선택한 사본을 버린다...OK
+4/24 app_session.editor.mod.test.editor backup discovery 제품 준비 OOM은 빈 탭과 원본 삭제를 남기지 않는다...OK
+5/24 app_session.editor.mod.test.editor backup discovery process 백업 뒤 강제 종료하고 checkpoint 없이 복구한다...SKIP
+6/24 app_session.editor.mod.test.editor backup discovery 목록은 한글 조합과 휠 및 보이는 행 클릭을 같은 후보에 적용한다...OK
+7/24 app_session.editor.mod.test.editor backup discovery 재백업은 제한적인 umask에서도 다시 읽을 수 있다...OK
+8/24 app_session.editor.mod.test.editor backup discovery 복구 본문의 선두 문자와 줄바꿈은 재백업에서도 그대로다...OK
+9/24 app_session.editor.mod.test.editor backup discovery 재백업의 IO와 할당 실패 뒤에도 원본을 보존하고 재시도한다...OK
+10/24 app_session.editor.mod.test.editor backup discovery 빈 사본의 저장 취소와 실패는 보존하고 성공은 선택한 ID만 정리한다...OK
+11/24 app_session.editor.mod.test.editor backup discovery 스크롤된 마지막 행 클릭과 취소는 화면의 후보만 처리한다...OK
+12/24 app_session.editor.mod.test.editor backup discovery 검색 할당 실패에서 이전 후보를 잘못 열지 않는다...OK
+13/24 app_session.editor.discovery.test.editor backup discovery 체크포인트 없이 남은 독립 ID와 빈 레거시 백업을 찾는다...OK
+14/24 app_session.editor.discovery.test.editor backup discovery 손상과 읽기 실패가 뒤 후보를 막지 않고 재검색은 회복한다...OK
+15/24 app_session.editor.discovery.test.editor backup discovery 오래된 선택과 지연 삭제는 교체된 백업을 보존한다...OK
+16/24 app_session.editor.discovery.test.editor backup discovery 사용 중 claim과 없는 claim을 바꾸지 않는다...OK
+17/24 app_session.editor.discovery.test.editor backup discovery 모든 할당 실패는 부분 결과와 원본을 보존한다...OK
+18/24 app_session.editor.discovery.test.editor backup discovery 부분 열거 뒤 루트 교체는 완료로 표시하지 않는다...OK
+19/24 app_session.editor.discovery.test.editor backup discovery 링크와 잘못된 권한 및 신원을 거절하고 제자리 변경도 삭제하지 않는다...OK
+20/24 app_session.editor.discovery.test.editor backup discovery 열린 source의 루트와 claim을 교체해도 새 파일을 지우지 않는다...OK
+21/24 app_session.editor.discovery.test.editor backup discovery 과대 파일과 잘못된 UTF8 및 하드링크는 보존하고 다음 후보를 찾는다...OK
+22/24 app_session.test_0...OK
+23/24 session_host.test_0...OK
+24/24 session_host.test_1...OK
+23 passed; 1 skipped; 0 failed.
+1/25 maru.test_0...OK
+2/25 app.test_0...OK
+3/25 chrome.test_0...OK
+4/25 cli.test_0...OK
+5/25 config.test_0...OK
+6/25 observability.test_0...OK
+7/25 plugin.test_0...OK
+8/25 pty.test_0...OK
+9/25 renderer.test_0...OK
+10/25 session.test_0...OK
+11/25 terminal.test_0...OK
+12/25 session.group_normalize.test_0...OK
+13/25 session.control_dispatch.test_0...OK
+14/25 session.control_capability.test_0...OK
+15/25 session.control_capture.test_0...OK
+16/25 session.control_browser.test_0...OK
+17/25 session.control_pane_grant.test_0...OK
+18/25 session.workspace.test.workspace editor restore 문서 공유와 독립 신원 및 혼합 Term 순서가 왕복한다...OK
+19/25 session.workspace.test.workspace editor restore 잘못된 참조 중복 자리 창 간 ID 중복은 거절한다...OK
+20/25 session.workspace.test.workspace editor restore codec 모든 할당 실패를 누수 없이 반환한다...OK
+21/25 cli.sessions.test_0...OK
+22/25 cli.browser.test_0...OK
+23/25 chrome.components.outline.test_0...OK
+24/25 chrome.components.scm_dock.test_0...OK
+25/25 terminal.screen.test_0...OK
+All 25 tests passed.

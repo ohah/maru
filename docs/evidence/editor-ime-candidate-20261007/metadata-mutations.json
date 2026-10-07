@@ -1,0 +1,58 @@
+[
+  {
+    "name": "allow-unopened",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "source_sha256": "48877b7a07bfde9d664218b734407aaa216c5d1e6b479e26282b16210fa82596"
+  },
+  {
+    "name": "allow-retained-popup",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "source_sha256": "09fa07d2166df96fc2cc37f0798d882cf1f2f9a354d99c8b130efc66a779a363"
+  },
+  {
+    "name": "allow-mismatched-window",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "source_sha256": "65e8e8a083b84e2e238c39cea05096297da4dfef6e5af89c63e4368e2c335e74"
+  },
+  {
+    "name": "allow-other-owner",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "source_sha256": "1c9e4dafdba7be7ae3d3020cf030329f36a035cdbf8c055641fbd9d024ee5eb2"
+  },
+  {
+    "name": "allow-path-traversal",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "source_sha256": "35f075a5ac8c23d61acdc32d4c000b911769d6d26075bd10cd966625563b400d"
+  },
+  {
+    "name": "allow-wrong-source",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "source_sha256": "b13f8da15d0c69821199322bba723ede1d8721d7b560a5fb2ee2e37f49577d4d"
+  },
+  {
+    "name": "equivalent-fresh",
+    "expected_pass": true,
+    "exit": 0,
+    "matched": true,
+    "source_sha256": "936594b1919a7fd9c1a6a0315100aefe3a59de783493500f8e1e2c750cef858f"
+  },
+  {
+    "name": "equivalent-source",
+    "expected_pass": true,
+    "exit": 0,
+    "matched": true,
+    "source_sha256": "a42a2d09478140f01f2b1266464888ab165172fadb8d6ef077fc172b1fcdbb41"
+  }
+]

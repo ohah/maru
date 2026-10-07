@@ -1,0 +1,77 @@
+{
+  "rows": [
+    {
+      "round": 1,
+      "name": "normal",
+      "exit": 1,
+      "expected_pass": false,
+      "matched": true
+    },
+    {
+      "round": 1,
+      "name": "trust-producer",
+      "exit": 0,
+      "expected_pass": true,
+      "matched": true
+    },
+    {
+      "round": 2,
+      "name": "normal",
+      "exit": 1,
+      "expected_pass": false,
+      "matched": true
+    },
+    {
+      "round": 2,
+      "name": "trust-producer",
+      "exit": 0,
+      "expected_pass": true,
+      "matched": true
+    },
+    {
+      "round": 3,
+      "name": "normal",
+      "exit": 1,
+      "expected_pass": false,
+      "matched": true
+    },
+    {
+      "round": 3,
+      "name": "trust-producer",
+      "exit": 0,
+      "expected_pass": true,
+      "matched": true
+    },
+    {
+      "round": 4,
+      "name": "normal",
+      "exit": 1,
+      "expected_pass": false,
+      "matched": true
+    },
+    {
+      "round": 4,
+      "name": "trust-producer",
+      "exit": 0,
+      "expected_pass": true,
+      "matched": true
+    },
+    {
+      "round": 5,
+      "name": "normal",
+      "exit": 1,
+      "expected_pass": false,
+      "matched": true
+    },
+    {
+      "round": 5,
+      "name": "trust-producer",
+      "exit": 0,
+      "expected_pass": true,
+      "matched": true
+    }
+  ],
+  "source_sha256": "afc93ff9ad7bc25ad2b5ae53c08bc9fc5da7c0f2410f8b643bf7bd014dae75c3",
+  "mutant_source_sha256": "8e90e9dcbf39d2f7c84c36ece60783087545097e209c89fb8b30e5b53c71c569",
+  "scope": "Controlled blank PNGs with matching hashes and forged producer OCR counts. Not actual OS candidate evidence."
+}

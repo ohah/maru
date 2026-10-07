@@ -1,0 +1,16 @@
+{
+  "base_commit": "e625d000406771db5c046d83ad333359a3fff052",
+  "app": "/Users/user/Documents/workspace/maru-ime-candidate-build-20261007/snapshot/zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+  "app_sha256": "dae3946aea32ce7ca0041d4e724be9aba9dce2e476c90e97b5fc7704baf60225",
+  "status": "awaiting_screen_recording_permission",
+  "actual_candidate_rounds_passed": 0,
+  "metadata_rounds_passed": 5,
+  "controlled_blank_pixel_rounds_rejected": 5,
+  "scope": "Controlled verifier evidence is not actual OS candidate evidence. Actual source composition reached three marked callbacks but stopped at candidate_screen_recording_permission. No candidate gate passed yet.",
+  "source_sha256": {
+    "tools/shared-restore-app/run.py": "86fdc1fbcf4f5934dbaecca690d51c28cfede29adaa7e611ba1476c93388689f",
+    "tools/shared-restore-app/candidate-driver.swift.inc": "4dbad25f55453ac8fb2e7f8a0b3e6c397381b9a118b9c38166e47d0340d8789a",
+    "tools/shared-restore-app/candidate_artifact.py": "212f0bf0fca0a080d46d62bee921bf7c6cac61a6cb060c9c9f77ac5dd73ba133",
+    "tools/shared-restore-app/verify-candidate-handoffs.swift": "afc93ff9ad7bc25ad2b5ae53c08bc9fc5da7c0f2410f8b643bf7bd014dae75c3"
+  }
+}

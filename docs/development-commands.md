@@ -1163,6 +1163,20 @@ arrival, 기존/새 owner와 다음 정상 키의 콜백을 구분하는 분석�
 트랜잭션 ID가 없으므로 이 숫자만으로 이전 owner의 stale callback이라고 판정하지 않는다.
 값 0도 자연 발생한 늦은 콜백을 처리할 수 있다는 증거로 세지 않는다.
 
+`python3 tools/shared-restore-app/run.py --ime-candidate --output <새 빈 디렉터리>`는
+실제 두벌식 `한`의 한자 후보창을 확인한 뒤 공유 pane A→B→A로 전환한다.
+`--ime-close`를 함께 주면 두 번째 후보창을 연 상태에서 HID Cmd+W로 peer를 닫는다.
+실제 앱의 화면 기록 권한이 필요하며, 권한이 없거나 후보창을 입증하지 못하면 실패한다.
+2026-10-07 수정 빌드의 전환·닫기 gate는 각각 5회 통과했다. macOS가 첫 후보
+`韓`으로 변환하므로 저장 본문은 `L韓 R韓`으로 검사한다. `test_candidate_artifact.py`는 별도 메타데이터 판정자 검사이며 OS 재현 증거가 아니다.
+
+후보 GUI 검증은 `gui_launch.py`가 같은 서명의 앱을 캐시에 보존하고 현재 UID의 GUI
+domain에 임시 job을 등록해 LaunchServices로 실행한다. 입력/HOME/config/state는 계속
+격리하며 실제 HOME으로 권한 문제를 우회하지 않는다. 원격 직접 실행은 TCC가 SSH
+wrapper에 귀속시킬 수 있다. 출력은 `~/.cache/...` 같은 보호 폴더 밖의 새 빈 경로를
+지정한다. job은 종료 후 제거되고 실제 앱의 UID·실행 경로·시작 시각으로 종료 대상이
+고정된다. `python3 tools/shared-restore-app/test_gui_launch.py`는 이 소유권/수명 검사다.
+
 ## 프로젝트 검색 worker
 
 - `mise run test-macos-project-search-worker`: 실제 backend API·helper·불변 모델·취소·부분 결과 fixture.

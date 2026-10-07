@@ -3,8 +3,8 @@
 //!
 //!   dl-click-all        초점 없던 칸을 누르면 `disabled` 를 뺀 전부가 원래 순서로 — 값과 레이블(label 속성, 없으면 옵션 글,
 //!                       값과 같으면 빈 레이블), 칸 사각형은 view DIP
-//!   dl-filter           글자를 치면 값·레이블에서 대소문자를 무시한 부분 일치로 다시 거른다(`pi` → Apple pie·pineapple,
-//!                       `ow` → 레이블 yellow fruit 의 banana)
+//!   dl-filter           글자를 치면 빈칸으로 나눈 단어마다 값·레이블에서 대소문자를 무시한 부분 일치로 다시 거른다(`pi` →
+//!                       Apple pie·pineapple, `ow` → 레이블 yellow fruit 의 banana, `ban yel` → 값과 레이블에 나뉜 banana, 빈칸만 → 전부)
 //!   dl-closes           지워서 빈 칸이 되거나 일치가 없으면 닫는다
 //!   dl-arrowdown        빈 칸에서 ↓ 는 전부를 연다
 //!   dl-pick             고른 번호의 값이 칸에 들어가고 페이지가 `input`·`change` 를 받고, 목록은 닫힌다
@@ -197,9 +197,22 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     try typeChar(&host, 13, 'w');
     const ow = watch(&host, 3000, 400);
     const ow_text = ow.describe(&b_buf);
-    report(pi.kind == .show and std.mem.eql(u8, pi_text, "Apple pie,pineapple") and ow.kind == .show and std.mem.eql(u8, ow_text, "banana|yellow fruit"), "dl-filter", std.fmt.bufPrint(&detail_buf, "pi → {s} · ow → {s}", .{ pi_text, ow_text }) catch "");
+    // 여러 단어 — 단어마다 값이나 레이블에(`ban yel` → 값 banana·레이블 yellow fruit), 빈칸만이면 전부.
+    try clear(&host, 2);
+    for ("ban yel") |ch| try typeChar(&host, if (ch == ' ') 49 else 0, ch);
+    const by = watch(&host, 3000, 400);
+    var by_buf: [512]u8 = undefined;
+    const by_text = by.describe(&by_buf);
+    try clear(&host, 7);
+    try typeChar(&host, 49, ' ');
+    const blank = watch(&host, 3000, 400);
+    report(pi.kind == .show and std.mem.eql(u8, pi_text, "Apple pie,pineapple") and ow.kind == .show and std.mem.eql(u8, ow_text, "banana|yellow fruit") and
+        by.kind == .show and std.mem.eql(u8, by_text, "banana|yellow fruit") and blank.kind == .show and blank.count == 7, "dl-filter", std.fmt.bufPrint(&detail_buf, "pi → {s} · ow → {s} · ban yel → {s} · 빈칸 → {s}({d})", .{ pi_text, ow_text, by_text, @tagName(blank.kind), blank.count }) catch "");
+    try clear(&host, 1);
 
     // ── 일치 없음·빈 칸이면 닫힘 ──
+    try typeChar(&host, 31, 'o'); // 연다(banana·APRICOT)
+    _ = watch(&host, 3000, 300);
     try typeChar(&host, 12, 'q');
     const none = watch(&host, 3000, 300);
     try clear(&host, 3);
@@ -207,7 +220,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     const reopened = watch(&host, 3000, 300);
     try backspace(&host, 1);
     const emptied = watch(&host, 3000, 300);
-    report(none.kind == .hide and reopened.kind == .show and emptied.kind == .hide, "dl-closes", std.fmt.bufPrint(&detail_buf, "owq → {s} · p → {s} · 빈 칸 → {s}", .{ @tagName(none.kind), @tagName(reopened.kind), @tagName(emptied.kind) }) catch "");
+    report(none.kind == .hide and reopened.kind == .show and emptied.kind == .hide, "dl-closes", std.fmt.bufPrint(&detail_buf, "oq → {s} · p → {s} · 빈 칸 → {s}", .{ @tagName(none.kind), @tagName(reopened.kind), @tagName(emptied.kind) }) catch "");
 
     // ── ↓ 는 전부를 연다 ──
     try rawKey(&host, 0x28, 125, 0xF701);

@@ -53,7 +53,7 @@ const proxy_script = "(function(){var send=window." ++ renderer.stash_name ++ ";
     datalist.script_part ++ "})()";
 
 comptime {
-    @setEvalBranchQuota(20_000);
+    @setEvalBranchQuota(100_000);
     std.debug.assert(std.mem.indexOfAny(u8, proxy_script, "\"\\\n") == null);
 }
 

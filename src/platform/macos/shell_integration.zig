@@ -23,6 +23,7 @@
 //! 동작만 비교하고 zsh 함수·env 게이트는 직접 작성했다.
 
 const std = @import("std");
+const test_env = @import("test_env.zig"); // 테스트의 환경 변수 되돌리기(값 복사)
 
 /// 셸 종류(통합 방식이 셸마다 다르다). 지금은 zsh만 구현하고, 그 외는 통합 없이 그대로 띄운다.
 pub const Shell = enum { zsh, other };
@@ -204,15 +205,9 @@ test "셸 통합: 파일이 사라져도 setupZsh가 다시 만든다(멱등)" {
     // 사용자 캐시를 건드리지 않도록 XDG_CACHE_HOME을 임시 디렉터리로 돌린다.
     var tmp_buf: [128]u8 = undefined;
     const tmp = try std.fmt.bufPrintZ(&tmp_buf, "/tmp/maru-shellint-test-{d}", .{std.c.getpid()});
-    const saved = std.c.getenv("XDG_CACHE_HOME");
+    const saved = test_env.Saved.save("XDG_CACHE_HOME");
     if (setenv("XDG_CACHE_HOME", tmp.ptr, 1) != 0) return error.SkipZigTest;
-    defer {
-        if (saved) |old| {
-            _ = setenv("XDG_CACHE_HOME", old, 1);
-        } else {
-            _ = unsetenv("XDG_CACHE_HOME");
-        }
-    }
+    defer saved.restore();
 
     const dir = setupZsh(io, allocator) orelse return error.SkipZigTest;
     defer allocator.free(dir);

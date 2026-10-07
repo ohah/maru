@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_env = @import("test_env.zig"); // 테스트의 환경 변수 되돌리기(값 복사)
 const debug_fixtures = @import("app_session/debug_fixtures.zig");
 /// N1: 네이티브 편집기의 platform 쪽(파일 읽기·권한). L2는 OS를 모르므로 여기서 읽어 넘긴다.
 const editor_ops = @import("app_session/editor/mod.zig");
@@ -26229,13 +26230,9 @@ test "RS1: 규격을 넘는 경로는 제품 경로에서도 굳는다 — 헬�
 
     // 103 바이트 규격을 넘기려면 home 이 길면 된다(`<home>/.cache/maru/ctl-<hash>`).
     const long_home = "/" ++ ("h" ** 200);
-    const saved = std.c.getenv("HOME");
+    const saved = test_env.Saved.save("HOME");
     _ = setenv("HOME", long_home, 1);
-    defer if (saved) |v| {
-        _ = setenv("HOME", v, 1);
-    } else {
-        _ = unsetenv("HOME");
-    };
+    defer saved.restore();
 
     var host: AppSession.RemoteAgentHost = .{};
     defer host.pending.deinit(a);
@@ -38783,11 +38780,9 @@ test "에이전트 대화: codex는 cwd를 몰라도 신원만으로 rollout을 
     var home_z: [std.fs.max_path_bytes:0]u8 = undefined;
     @memcpy(home_z[0..home.len], home);
     home_z[home.len] = 0;
-    const prev_home = std.c.getenv("HOME");
+    const prev_home = test_env.Saved.save("HOME");
     _ = setenv("HOME", home_z[0..home.len :0].ptr, 1);
-    defer if (prev_home) |ph| {
-        _ = setenv("HOME", ph, 1);
-    };
+    defer prev_home.restore();
 
     const term = session.tabs.items[0].panes.items[0].terms.items[0];
     term.agent_kind = .codex;
@@ -41068,20 +41063,12 @@ test "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리�
     // **바꾼 env 를 되돌린다.** 이 테스트는 tmp 를 가리키게 해 놓고 그 tmp 를 **지우고 나간다** — 되돌리지
     // 않으면 뒤 테스트들이 «없는 디렉터리» 를 HOME/캐시로 물려받는다. 그 피해는 조용하다: 자기 env 를 안
     // 세우는 테스트(턴 스냅샷 계열)가 캡처에 실패해 «링이 안 채워진다» 로만 나타난다.
-    const prev_home = std.c.getenv("HOME");
-    const prev_cache = std.c.getenv("XDG_CACHE_HOME");
-    const prev_config = std.c.getenv("MARU_CONFIG");
-    defer {
-        if (prev_home) |v| {
-            _ = setenv("HOME", v, 1);
-        } else _ = unsetenv("HOME");
-        if (prev_cache) |v| {
-            _ = setenv("XDG_CACHE_HOME", v, 1);
-        } else _ = unsetenv("XDG_CACHE_HOME");
-        if (prev_config) |v| {
-            _ = setenv("MARU_CONFIG", v, 1);
-        } else _ = unsetenv("MARU_CONFIG");
-    }
+    const prev_home = test_env.Saved.save("HOME");
+    defer prev_home.restore();
+    const prev_cache = test_env.Saved.save("XDG_CACHE_HOME");
+    defer prev_cache.restore();
+    const prev_config = test_env.Saved.save("MARU_CONFIG");
+    defer prev_config.restore();
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
@@ -42521,25 +42508,13 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
         const cache_root = cache_buf[0..try cache_tmp.dir.realPath(io, &cache_buf)];
         const cache_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{cache_root}, 0);
         defer allocator.free(cache_z);
-        const prev_cache = std.c.getenv("XDG_CACHE_HOME");
+        const prev_cache = test_env.Saved.save("XDG_CACHE_HOME");
         _ = setenv("XDG_CACHE_HOME", cache_z.ptr, 1);
-        defer {
-            if (prev_cache) |v| {
-                _ = setenv("XDG_CACHE_HOME", v, 1);
-            } else {
-                _ = unsetenv("XDG_CACHE_HOME");
-            }
-        }
+        defer prev_cache.restore();
         // **훅 로그는 HOME 만 본다**(RA8) — XDG 만 격리하면 실제 `~/.cache/maru` 에 쓴다. HOME 도 같은 자리로 돌린다.
-        const prev_home = std.c.getenv("HOME");
+        const prev_home = test_env.Saved.save("HOME");
         _ = setenv("HOME", cache_z.ptr, 1);
-        defer {
-            if (prev_home) |v| {
-                _ = setenv("HOME", v, 1);
-            } else {
-                _ = unsetenv("HOME");
-            }
-        }
+        defer prev_home.restore();
 
         var base_buf: [96]u8 = undefined;
         const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-ah7-app-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
@@ -92174,15 +92149,11 @@ test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8
     defer allocator.free(child_path);
 
     // `buildChain` 은 HOME 아래 `.codex/sessions` 만 본다 — 그 홈을 이 tmp 로 돌려놓는다.
-    const saved_home = std.c.getenv("HOME");
+    const saved_home = test_env.Saved.save("HOME");
     const home_z = try allocator.dupeZ(u8, home);
     defer allocator.free(home_z);
     _ = setenv("HOME", home_z.ptr, 1);
-    defer if (saved_home) |h| {
-        _ = setenv("HOME", h, 1);
-    } else {
-        _ = unsetenv("HOME");
-    };
+    defer saved_home.restore();
 
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);

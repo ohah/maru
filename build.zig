@@ -7975,6 +7975,20 @@ pub fn build(b: *std.Build) void {
     recipe_cache_step.dependOn(&run_recipe_cache.step);
     boundary_step.dependOn(&run_recipe_cache.step);
 
+    // 테스트는 환경 변수를 `getenv` 포인터로 되돌리지 않는다 — 값을 복사한다(`src/platform/macos/test_env.zig`).
+    const test_env_restore_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/test_env_restore_copies_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_test_env_restore = b.addRunArtifact(test_env_restore_tests);
+    run_test_env_restore.addArg("--maru-expect-tests=1");
+    run_test_env_restore.addArg("--maru-expect-passed=1");
+    run_test_env_restore.setCwd(b.path("."));
+    boundary_step.dependOn(&run_test_env_restore.step);
+
     // 빈 드레인 건너뛰기의 전제 — 이벤트를 큐에 넣는 모든 제품 자리가 enqueue 세대를 올린다.
     const event_enqueue_epoch_step = b.step(
         "test-event-enqueue-epoch",

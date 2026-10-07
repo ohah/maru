@@ -21,6 +21,7 @@
 //! `reapplyConfigPalette`·`paletteCellHex`만 가져오고 `togglePalette`·`acceptPalette`는 두고 왔다.
 
 const std = @import("std");
+const test_env = @import("../test_env.zig"); // 테스트의 환경 변수 되돌리기(값 복사)
 const builtin = @import("builtin");
 const maru = @import("maru");
 
@@ -3993,12 +3994,8 @@ test "Reload Config 는 시작과 같이 config 진단을 앱 로그에 찍는�
     const cfg_path = try std.fmt.allocPrintSentinel(allocator, "{s}/config", .{root}, 0);
     defer allocator.free(cfg_path);
 
-    const prev = std.c.getenv("MARU_CONFIG");
-    defer if (prev) |v| {
-        _ = app_session_mod.setenv("MARU_CONFIG", v, 1);
-    } else {
-        _ = app_session_mod.unsetenv("MARU_CONFIG");
-    };
+    const prev = test_env.Saved.save("MARU_CONFIG");
+    defer prev.restore();
     try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "font.size = 14\n" });
     try std.testing.expectEqual(@as(c_int, 0), app_session_mod.setenv("MARU_CONFIG", cfg_path.ptr, 1));
 
@@ -4054,12 +4051,8 @@ test "파일이 행을 더해도 선택은 같은 설정에 남는다 (reload �
     const cfg_path = try std.fmt.allocPrintSentinel(allocator, "{s}/config", .{root}, 0);
     defer allocator.free(cfg_path);
 
-    const prev = std.c.getenv("MARU_CONFIG");
-    defer if (prev) |v| {
-        _ = app_session_mod.setenv("MARU_CONFIG", v, 1);
-    } else {
-        _ = app_session_mod.unsetenv("MARU_CONFIG");
-    };
+    const prev = test_env.Saved.save("MARU_CONFIG");
+    defer prev.restore();
     try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "env.ZZZ_LAST = 1\n" });
     try std.testing.expectEqual(@as(c_int, 0), app_session_mod.setenv("MARU_CONFIG", cfg_path.ptr, 1));
 

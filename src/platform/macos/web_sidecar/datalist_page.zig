@@ -18,7 +18,8 @@ const message = protocol.message;
 /// 규칙(Chrome 154 실측 §7 — 재지 않은 것은 W6m 문단에): 사용자의 사건만(`isTrusted` — 폼 라이브러리가 보낸 가짜 `input` 은
 /// 아니다), 초점이 있는 글 칸(`readOnly`·`disabled` 는 아니다)에서. 왼쪽 누름(⌃ 누름은 macOS 의 우클릭이다)·↓·글자로 지금 값을
 /// 거른 목록을 보이고, 다른 곳을 누르거나 빈 칸·일치 없음·초점 잃음·그 칸을 품은 스크롤·창 크기 바뀜·`pagehide` 면 닫는다.
-/// 보이는 글은 512 단위에서(대리 쌍을 가르지 않고) 자르고 모두 합쳐 24000 단위에서 멈춘다 — 넣을 값은 원래 값을 쥔다.
+/// 보이는 글은 512 단위에서(대리 쌍을 가르지 않고) 자르고 JSON 으로 늘어난 길이(제어 문자 6·따옴표·역슬래시 2)를 모두 합쳐
+/// 24000 단위에서 멈춘다 — 넣을 값은 원래 값을 쥔다.
 pub const script_part = "(function(){if(window!==window.top)return;" ++
     "var A=Reflect.apply,J=JSON.stringify,S=String,G=Object.getOwnPropertyDescriptor,SP=Object.setPrototypeOf,E=Event,W=window,D=document," ++
     "IP=HTMLInputElement.prototype,TG=G(IP,'type').get,LG=G(IP,'list').get,VD=G(IP,'value'),VG=VD.get,VS=VD.set,RO=G(IP,'readOnly').get,DI=G(IP,'disabled').get," ++
@@ -33,6 +34,7 @@ pub const script_part = "(function(){if(window!==window.top)return;" ++
     "function arr(){return SP([],null)}" ++
     "function real(e){try{return e.isTrusted===true}catch(x){return false}}" ++
     // 보이는 글 — 512 단위에서 자르되 대리 쌍의 앞쪽에서 끝나지 않게.
+    "function cost(s){var n=s.length+2;for(var i=0;i<s.length;i++){var c=A(CC,s,[i]);if(c<32)n+=5;else if(c===34||c===92)n++}return n}" ++
     "function cut(s){if(s.length<=512)return s;s=A(SL,s,[0,512]);var c=A(CC,s,[511]);return c>=55296&&c<=56319?A(SL,s,[0,511]):s}" ++
     // 제안 목록이 붙은, 쓸 수 있는 글 칸이면 그 칸(아니면 null). getter 를 다른 객체에 부르면 던진다 — 그것으로 종류를 가린다.
     "function fieldOf(t){try{return K[A(TG,t,[])]===1&&!A(RO,t,[])&&!A(DI,t,[])&&A(LG,t,[])?t:null}catch(e){return null}}" ++
@@ -41,7 +43,7 @@ pub const script_part = "(function(){if(window!==window.top)return;" ++
     "function show(t){try{var l=A(LG,t,[]);if(!l)return hide();var q=A(LC,S(A(VG,t,[])),[]),os=A(OG,l,[]),n=A(CL,os,[]),it=arr(),vs=arr(),k=0,used=0;" ++
     "for(var i=0;i<n&&k<256;i++){var o=os[i];if(A(OD,o,[]))continue;var v=S(A(OV,o,[])),b=S(A(OL,o,[]));if(v==='')continue;" ++
     "if(q!==''&&A(IX,A(LC,v,[]),[q])<0&&A(IX,A(LC,b,[]),[q])<0)continue;" ++
-    "var p=arr();p[0]=cut(v);p[1]=cut(b);used+=p[0].length+p[1].length+8;if(used>24000)break;it[k]=p;vs[k]=v;k++}" ++
+    "var p=arr();p[0]=cut(v);p[1]=cut(b);used+=cost(p[0])+cost(p[1])+4;if(used>24000)break;it[k]=p;vs[k]=v;k++}" ++
     "if(!k)return hide();" ++
     "var r=A(BR,t,[]),ox=0,oy=0,s=1;if(VV){ox=A(VL,VV,[]);oy=A(VT,VV,[]);s=A(VC,VV,[])}" ++
     "var rr=arr();rr[0]=(A(RX,r,[])-ox)*s;rr[1]=(A(RY,r,[])-oy)*s;rr[2]=A(RW,r,[])*s;rr[3]=A(RH,r,[])*s;" ++
@@ -52,8 +54,9 @@ pub const script_part = "(function(){if(window!==window.top)return;" ++
     "on('input',function(e){try{if(busy||!real(e))return;var t=fieldOf(A(ET,e,[]));if(!t||!focused(t))return;if(S(A(VG,t,[]))==='')return hide();show(t)}catch(x){}});" ++
     "on('keydown',function(e){try{if(busy||!real(e)||A(KK,e,[])!=='ArrowDown'||A(KA,e,[])||A(KC,e,[])||A(KM,e,[]))return;var t=fieldOf(A(ET,e,[]));if(t&&focused(t))show(t)}catch(x){}});" ++
     "on('focusout',function(e){try{if(cur&&A(ET,e,[])===cur)hide()}catch(x){}});" ++
-    // 스크롤은 그 칸을 품은 것(문서·조상)일 때만 — 캡처라 페이지의 다른 상자(채팅 기록·캐러셀)의 스크롤도 온다.
-    "on('scroll',function(e){try{if(cur&&A(NC,A(ET,e,[]),[cur]))hide()}catch(x){}});on('resize',function(){hide()});on('pagehide',function(){hide()});" ++
+    // 스크롤은 그 칸을 품은 것(문서·조상)일 때만 — 캡처라 페이지의 다른 상자(채팅 기록·캐러셀)의 스크롤도 오고, 칸 자신도
+    // 긴 값을 칠 때 가로로 스크롤된다(`contains` 는 자기 자신에도 참이다 — 적대 검증 2 차).
+    "on('scroll',function(e){try{var g=A(ET,e,[]);if(cur&&g!==cur&&A(NC,g,[cur]))hide()}catch(x){}});on('resize',function(){hide()});on('pagehide',function(){hide()});" ++
     // 고르기 — 같은 판이고 그 칸에 아직 초점이 있고 쓸 수 있을 때만 넣는다. 넣는 동안 우리 `input` 처리기는 다시 보이지 않는다.
     // 넣었든 거절했든 닫는다.
     "send('dl',function(v,i){var ok=false;try{ok=v===ver&&!!cur&&focused(cur)&&fieldOf(cur)===cur&&i>=0&&i<vals.length}catch(x){}" ++

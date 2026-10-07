@@ -336,9 +336,11 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         "#f{position:fixed;left:320px;top:100px;width:300px;height:80px;overflow:scroll}</style><body>" ++
         "<input id=a list=l style='top:0'><input id=b style='top:100px'><input id=c type=search list=l style='top:200px'><input id=d type=date list=l style='top:300px'>" ++
         "<input id=e readonly list=l style='top:0;left:320px'><div id=f><div style='height:1000px'>scroll</div></div>" ++
+        "<input id=g list=k style='top:200px;left:320px;width:60px'><datalist id=k><option value='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'></datalist>" ++
         "<datalist id=l><option value='apple'><option value='Apple pie'><option value='pineapple'><option value=''>empty value</option><option value='banana' label='yellow fruit'><option value='APRICOT'>" ++
         "<option value='cherry'>Cherry text</option><option value='avocado' disabled><option value='grape' label='purple'>purple text</option></datalist>" ++
         "<script>['input','change'].forEach(function(t){document.addEventListener(t,function(e){document.title=t+':'+e.target.id+':'+e.target.value},true)});" ++
+        "document.getElementById('f').addEventListener('scroll',function(){document.title='f-scrolled'});document.getElementById('g').addEventListener('scroll',function(){document.title='g-scrolled'});" ++
         "document.getElementById('b').addEventListener('mousedown',function(){var a=document.getElementById('a');a.value='p';a.dispatchEvent(new Event('input',{bubbles:true}))});document.title='dl-ready'</script>";
     if (std.mem.eql(u8, path, "/datalist-many")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;top:0;width:300px;height:40px}</style><body><input id=a list=l><datalist id=l></datalist>" ++
         "<script>var l=document.getElementById('l');for(var i=0;i<300;i++){var o=document.createElement('option');o.value='item '+i;l.appendChild(o)}document.title='dl-many-ready'</script>";

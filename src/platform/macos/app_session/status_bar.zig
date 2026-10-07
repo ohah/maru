@@ -725,18 +725,17 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
             if (rn < max_status_bar_right_items) {
                 if (editor_ops.lsp_client.statusFor(self, active_term)) |view| {
                     var lsp_buf: [128]u8 = undefined;
-                    if (editor_ops.lsp_client.statusText(view, &lsp_buf)) |text| {
-                        const icon: ?u21 = switch (view.phase) {
-                            .ready => null,
-                            .missing, .denied, .failed => icons.codepoint(.bell),
-                            .asking, .starting, .restarting => icons.codepoint(.hourglass),
-                        };
-                        if (buildStatusBarItem(self, icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {
-                            right_frames[rn] = dl;
-                            right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                            right_ids[rn] = .editor_lsp;
-                            rn += 1;
-                        }
+                    const text = editor_ops.lsp_client.statusText(view, &lsp_buf);
+                    const icon: ?u21 = switch (view.phase) {
+                        .ready => null,
+                        .missing, .denied, .failed => icons.codepoint(.bell),
+                        .asking, .starting, .restarting => icons.codepoint(.hourglass),
+                    };
+                    if (buildStatusBarItem(self, icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {
+                        right_frames[rn] = dl;
+                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                        right_ids[rn] = .editor_lsp;
+                        rn += 1;
                     }
                 }
             }

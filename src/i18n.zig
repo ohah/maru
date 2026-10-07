@@ -517,11 +517,11 @@ const Table = struct {
     cfg_editor_bracket_pair_colorization_independent_pools: [:0]const u8,
     cfg_editor_diagnostics: [:0]const u8,
     cfg_lsp_enabled: [:0]const u8,
-    /// LSP 신뢰 프롬프트(§8.2a) — `{s}` 는 서버 실행 파일 이름.
+    /// LSP 신뢰 프롬프트(§8.2a) — `{0}` 은 서버 실행 파일 이름.
     lsp_trust_prompt: [:0]const u8,
     lsp_trust_allow: [:0]const u8,
     lsp_trust_deny: [:0]const u8,
-    /// 상태바 항목(§8.2a) — `{s}` 는 서버 이름.
+    /// 상태바 항목(§8.2a) — `{0}` 은 서버 이름.
     lsp_status_missing: [:0]const u8,
     lsp_status_asking: [:0]const u8,
     lsp_status_starting: [:0]const u8,
@@ -1751,15 +1751,15 @@ const en: Table = .{
     .cfg_editor_bracket_pair_colorization_independent_pools = "Count bracket pair colors separately for each bracket type",
     .cfg_editor_diagnostics = "Show diagnostics (syntax errors: squiggle, gutter, markers)",
     .cfg_lsp_enabled = "Use language servers (asks once per workspace)",
-    .lsp_trust_prompt = "Run {s} for this workspace? A language server can read the workspace's configuration and run its build.",
+    .lsp_trust_prompt = "Run {0} for this workspace? A language server can read the workspace's configuration and run its build.",
     .lsp_trust_allow = "Run",
     .lsp_trust_deny = "Don't run",
-    .lsp_status_missing = "{s} not found — install",
-    .lsp_status_asking = "{s}: waiting for permission",
-    .lsp_status_starting = "{s}: starting",
-    .lsp_status_restarting = "{s}: restarting",
-    .lsp_status_failed = "{s} failed — retry",
-    .lsp_status_denied = "{s} not allowed — ask again",
+    .lsp_status_missing = "{0} not found — install",
+    .lsp_status_asking = "{0}: waiting for permission",
+    .lsp_status_starting = "{0}: starting",
+    .lsp_status_restarting = "{0}: restarting",
+    .lsp_status_failed = "{0} failed — retry",
+    .lsp_status_denied = "{0} not allowed — ask again",
     .nav_no_definition = "No definition found",
     .nav_outside_root = "Not opened — outside the workspace root: {0}",
     .ref_none = "No references found",
@@ -2529,15 +2529,15 @@ const ko: Table = .{
     .cfg_editor_bracket_pair_colorization_independent_pools = "괄호 종류마다 단계를 따로 센다",
     .cfg_editor_diagnostics = "진단 표시(구문 오류 — 물결 밑줄·gutter·마커)",
     .cfg_lsp_enabled = "언어 서버 사용(워크스페이스마다 한 번 묻는다)",
-    .lsp_trust_prompt = "이 저장소에서 {s} 를 실행할까요? 언어 서버는 저장소의 설정을 읽고 빌드를 실행할 수 있습니다.",
+    .lsp_trust_prompt = "이 저장소에서 {0} 를 실행할까요? 언어 서버는 저장소의 설정을 읽고 빌드를 실행할 수 있습니다.",
     .lsp_trust_allow = "실행",
     .lsp_trust_deny = "실행 안 함",
-    .lsp_status_missing = "{s} 없음 — 설치",
-    .lsp_status_asking = "{s}: 허락 대기",
-    .lsp_status_starting = "{s}: 시작 중",
-    .lsp_status_restarting = "{s}: 다시 시작 중",
-    .lsp_status_failed = "{s} 실패 — 다시",
-    .lsp_status_denied = "{s} 거부됨 — 다시 묻기",
+    .lsp_status_missing = "{0} 없음 — 설치",
+    .lsp_status_asking = "{0}: 허락 대기",
+    .lsp_status_starting = "{0}: 시작 중",
+    .lsp_status_restarting = "{0}: 다시 시작 중",
+    .lsp_status_failed = "{0} 실패 — 다시",
+    .lsp_status_denied = "{0} 거부됨 — 다시 묻기",
     .nav_no_definition = "정의를 찾지 못했습니다",
     .nav_outside_root = "루트 밖이라 열지 않습니다 — {0}",
     .ref_none = "참조를 찾지 못했습니다",
@@ -2939,43 +2939,31 @@ test "언어 테이블은 자리표시자 집합이 같아야 한다 — 번역�
     }
 }
 
-test "`{s}` 는 `fillName` 이 채우는 LSP 문구에만 있다 — 나머지 중괄호는 전부 `format` 의 `{0}` 꼴이다" {
+test "번역 틀의 중괄호는 전부 `format` 의 `{0}` 꼴이다 — 숫자가 아니면 화면에 원문으로 남는다" {
     // 보간 문법은 `{0}`·`{1}` 하나다(§6.3). 숫자가 아닌 중괄호(`{s}`·`{d}`·`{}`·`{name}`)는 `format` 이 자리표시자로
-    // 보지 않아 **원문 그대로** 남는다 — `diag_missing` 이 그래서 호버에 「빠짐: {s}」를 그렸다. LSP 문구만은 따로
-    // `editor/lsp.zig` `fillName` 이 **첫 `{s}` 하나**를 찾아 채운다(그 경로를 `format` 으로 합치는 것은 후속).
-    // 금지된 모양을 세는 대신 **허용된 모양**을 센다: 허용 키는 `{s}` 정확히 하나 외의 중괄호가 없고, 나머지 키는
-    // 모든 `{…}` 안이 정수다. (`\u{…}` 이스케이프는 comptime 에 이미 글자로 풀려 여기 오지 않는다.)
+    // 보지 않아 **원문 그대로** 남는다 — `diag_missing` 이 그래서 호버에 「빠짐: {s}」를 그렸다. LSP 문구는 한때 `{s}` 를
+    // 따로 찾아 채우는 두 번째 경로(`fillName`)를 썼고, 지금은 `format` 하나로 합쳤다(§6.3 「진입점 하나」에 예외가 없다).
+    // 금지된 모양을 세는 대신 **허용된 모양**(안이 정수)만 통과시킨다.
+    // (`\u{…}` 이스케이프는 comptime 에 이미 글자로 풀려 여기 오지 않는다.)
     @setEvalBranchQuota(20_000); // 두 겹 `inline for`(키 × 두 언어)를 펼친다 — 기본 한도 1000 을 넘는다
-    const allowed = [_][]const u8{ "lsp_trust_prompt", "lsp_status_missing", "lsp_status_asking", "lsp_status_starting", "lsp_status_restarting", "lsp_status_failed", "lsp_status_denied" };
-    var fill_name_keys: usize = 0;
+    var placeholders: usize = 0;
     inline for (@typeInfo(Table).@"struct".fields) |f| {
         inline for (.{ en, ko }) |tbl| {
             const v: []const u8 = @field(tbl, f.name);
-            var is_allowed = false;
-            for (allowed) |name| is_allowed = is_allowed or std.mem.eql(u8, name, f.name);
-            var s_count: usize = 0;
             var i: usize = 0;
             while (std.mem.indexOfScalarPos(u8, v, i, '{')) |open| {
                 const close = std.mem.indexOfScalarPos(u8, v, open, '}') orelse break;
                 const inner = v[open + 1 .. close];
-                const ok = if (is_allowed)
-                    std.mem.eql(u8, inner, "s")
-                else if (std.fmt.parseInt(usize, inner, 10)) |_| true else |_| false;
-                if (!ok) {
-                    std.debug.print("자리표시자 모양: .{s} = \"{s}\" — `{{{s}}}` (허용 키는 `{{s}}` 하나, 나머지는 `{{0}}` 꼴)\n", .{ f.name, v, inner });
+                _ = std.fmt.parseInt(usize, inner, 10) catch {
+                    std.debug.print("자리표시자 모양: .{s} = \"{s}\" — `{{{s}}}` 대신 `{{0}}` 꼴을 쓴다\n", .{ f.name, v, inner });
                     return error.TestUnexpectedResult;
-                }
-                if (is_allowed) s_count += 1;
+                };
+                placeholders += 1;
                 i = close + 1;
-            }
-            if (is_allowed) {
-                // `fillName` 은 첫 `{s}` 하나만 채운다 — 없거나 둘이면 이름이 빠지거나 둘째가 원문으로 남는다.
-                try testing.expectEqual(@as(usize, 1), s_count);
-                fill_name_keys += 1;
             }
         }
     }
-    try testing.expectEqual(allowed.len * 2, fill_name_keys); // 허용 목록은 실제 키다(두 언어) — 이름이 낡으면 여기서 드러난다
+    try testing.expect(placeholders > 100); // 실제로 훑었다(빈 집합이면 위 단언은 공짜다)
 }
 
 test "영어 테이블에 한글이 남아 있지 않다 — 옮기다 만 항목을 잡는다" {

@@ -4,7 +4,7 @@
 //! JSON-RPC 갈래 ④ 열린 편집기 Term 의 동기화(didOpen / 이 프레임에 바뀐 문서의 didChange 한 번)를 돈다. 스레드는 없다 — 원격
 //! 에이전트 스트리머와 같은 결이다.
 //!
-//! **신뢰가 먼저다.** 서버가 PATH 에 있어도 그 root 의 결정이 없으면 confirm 모달로 묻고(`pending_confirm = .lsp_trust`), 답을
+//! **신뢰가 먼저다.** 서버를 찾아도 그 root 의 결정이 없으면 confirm 모달로 묻고(`pending_confirm = .lsp_trust`), 답을
 //! `~/.config/maru/lsp-trust` 에 root 별로 적는다. 거부한 root 는 안 띄우고 안 묻는다 — 상태바 항목을 누르면 다시 묻는다.
 
 const std = @import("std");
@@ -39,7 +39,7 @@ const editor_smart_select = @import("smart_select.zig");
 const editor_code_action = @import("code_action.zig");
 
 pub const Phase = enum {
-    /// 실행 파일이 PATH 에 없다 — 상태바 「설치」.
+    /// 실행 파일을 못 찾았다(PATH·통상 설치 위치) — 상태바 「설치」.
     missing,
     /// 신뢰를 묻는 중(모달이 떠 있다).
     asking,
@@ -177,7 +177,7 @@ pub const TrustEntry = struct { root: []u8, decision: lsp.trust.Decision };
 
 pub const State = struct {
     clients: std.ArrayList(Client) = .empty,
-    /// 문법마다 고른 서버(§8.2a 「서버 찾기」 — PATH 에 있는 첫 후보). 세션 동안 기억하고, 「없음」이면 gate 가 다시 고른다.
+    /// 문법마다 고른 서버(§8.2a 「서버 찾기」 — 찾아지는 첫 후보). 세션 동안 기억하고, 「없음」이면 gate 가 다시 고른다.
     resolved: std.EnumArray(maru.session.editor.language.Grammar, ?lsp.servers.Server) = .initFill(null),
     trust: std.ArrayList(TrustEntry) = .empty,
     trust_loaded: bool = false,
@@ -393,8 +393,8 @@ fn clientFor(self: *AppSession, root: []const u8, server: lsp.servers.Server) ?*
     return null;
 }
 
-/// 그 문법의 서버 — 후보 중 PATH 에 있는 첫 것(한 번 고르면 세션 동안 그대로). 이름표가 없으면 `null`. `forGrammar` 대신 **여기**를 쓴다 —
-/// 후보가 여럿인 언어(TS 계열)에서 PATH 를 안 보면 없는 것을 띄우려 든다.
+/// 그 문법의 서버 — 후보 중 찾아지는 첫 것(한 번 고르면 세션 동안 그대로). 이름표가 없으면 `null`. `forGrammar` 대신 **여기**를 쓴다 —
+/// 후보가 여럿인 언어(TS 계열)에서 찾아보지 않으면 없는 것을 띄우려 든다.
 pub fn serverFor(self: *AppSession, g: maru.session.editor.language.Grammar) ?lsp.servers.Server {
     if (self.editor_lsp.resolved.get(g)) |s| return s;
     const picked = lsp.servers.resolve(g, {}, struct {
@@ -846,7 +846,7 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         self.editor_lsp.asking_root = owned;
         c.phase = .asking;
         var msg_buf: [512]u8 = undefined;
-        const text = fillName(maru.i18n.t(.lsp_trust_prompt), c.server.exe, &msg_buf) orelse return;
+        const text = maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = c.server.exe }});
         self.showConfirmText(.lsp_trust, text, .{ .confirm = .lsp_trust_allow, .cancel = .lsp_trust_deny });
         return;
     };
@@ -915,23 +915,9 @@ pub fn noteEdited(term: *Term) void {
     term.rt.editorDocument().notifications.lsp_version += 1;
 }
 
-/// i18n 문장의 첫 `{s}` 에 이름을 끼운다(서식 문자열이 런타임이라 `bufPrint` 를 못 쓴다). `{s}` 가 없으면 그대로.
-pub fn fillName(template: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, template, "{s}") orelse {
-        if (template.len > buf.len) return null;
-        @memcpy(buf[0..template.len], template);
-        return buf[0..template.len];
-    };
-    const total = template.len - 3 + name.len;
-    if (total > buf.len) return null;
-    @memcpy(buf[0..at], template[0..at]);
-    @memcpy(buf[at..][0..name.len], name);
-    @memcpy(buf[at + name.len ..][0 .. template.len - at - 3], template[at + 3 ..]);
-    return buf[0..total];
-}
-
-/// 상태바 문구(§8.2a) — phase 마다 하나.
-pub fn statusText(view: StatusView, buf: []u8) ?[]const u8 {
+/// 상태바 문구(§8.2a) — phase 마다 하나. 보간은 i18n §6.3 진입점 `i18n.format` 하나다. 넘치면 `format` 이 「…」로 자른다(서버
+/// 이름은 고정 표 `session/lsp/servers.zig` 의 짧은 이름이다).
+pub fn statusText(view: StatusView, buf: []u8) []const u8 {
     const key: maru.i18n.Key = switch (view.phase) {
         .missing => .lsp_status_missing,
         .asking => .lsp_status_asking,
@@ -939,9 +925,9 @@ pub fn statusText(view: StatusView, buf: []u8) ?[]const u8 {
         .restarting => .lsp_status_restarting,
         .failed => .lsp_status_failed,
         .denied => .lsp_status_denied,
-        .ready => return fillName("{s}", view.exe, buf),
+        .ready => return maru.i18n.format(buf, "{0}", &.{.{ .s = view.exe }}),
     };
-    return fillName(maru.i18n.t(key), view.exe, buf);
+    return maru.i18n.format(buf, maru.i18n.t(key), &.{.{ .s = view.exe }});
 }
 
 // ── 상태바·클릭 ───────────────────────────────────────────────────────────────

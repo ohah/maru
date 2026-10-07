@@ -114,10 +114,9 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
             popup?.pointer(row: rowAt(event))
         }
 
-        override func mouseEntered(with event: NSEvent) {
-            NSCursor.arrow.set()
-            popup?.pointer(row: rowAt(event))
-        }
+        /// 들어옴만으로는 강조하지 않는다 — 멈춘 포인터 아래에 목록이 뜨면 들어옴이 와서, 손대지 않은 행이 강조된 채 Enter 가 그 행을
+        /// 골랐다(적대 검증 3 차). 강조는 움직일 때.
+        override func mouseEntered(with event: NSEvent) { NSCursor.arrow.set() }
 
         override func mouseExited(with event: NSEvent) { popup?.pointer(row: -1) }
 
@@ -172,8 +171,9 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     private(set) var selected = -1
     /// 실린 목록의 크기(실을 때만 잰다 — tick 마다 항목 글을 다시 재지 않게, 적대 검증).
     private var size = NSSize.zero
-    /// 자리가 없어 띄우지 못한 목록과 칸 — 같으면 tick 마다 항목을 다시 읽고 재지 않는다(적대 검증 2 차).
-    private var rejected: (generation: UInt32, field: NSRect)?
+    /// 자리가 없어 띄우지 못한 목록과 칸(과 그 화면의 쓸 수 있는 영역 — Dock·화면 배치가 바뀌면 다시 해 본다) — 같으면 tick 마다
+    /// 항목을 다시 읽고 재지 않는다(적대 검증 2·3 차).
+    private var rejected: (generation: UInt32, field: NSRect, visible: NSRect)?
     /// hover 로 바뀌는 강조는 굴리지 않는다 — 휠 뒤 반쯤 보이는 행을 강조하며 목록이 한 번 더 튀었다(적대 검증 2 차).
     private var hovering = false
     /// 마지막 자리 — 칸 아래(`below`)인가 위인가(판정 보고용).
@@ -229,7 +229,6 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
         scroll.translatesAutoresizingMaskIntoConstraints = false
         effect.addSubview(scroll)
         NSLayoutConstraint.activate([
@@ -254,9 +253,9 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
             size = contentSize()
             self.selected = -2 // 아래에서 다시 칠한다
         }
-        guard place(size: size, field: field, screen: Self.screen(for: field) ?? parent.screen ?? NSScreen.main) else {
+        guard place(size: size, field: field, visible: Self.visibleFrame(for: field, parent: parent)) else {
             hide()
-            rejected = (generation, field)
+            rejected = (generation, field, Self.visibleFrame(for: field, parent: parent))
             return false
         }
         rejected = nil
@@ -276,9 +275,13 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     }
 
     /// 이 목록·칸 자리는 이미 띄우지 못했다(칸이 움직이거나 목록이 바뀌면 다시 해 본다).
-    func isRejected(generation: UInt32, field: NSRect) -> Bool {
+    func isRejected(generation: UInt32, field: NSRect, parent: NSWindow) -> Bool {
         guard let rejected else { return false }
-        return rejected.generation == generation && rejected.field == field
+        return rejected.generation == generation && rejected.field == field && rejected.visible == Self.visibleFrame(for: field, parent: parent)
+    }
+
+    private static func visibleFrame(for field: NSRect, parent: NSWindow) -> NSRect {
+        (screen(for: field) ?? parent.screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
     }
 
     /// 칸이 있는 화면 — 창이 여러 화면에 걸치면 `parent.screen` 은 창이 가장 많이 놓인 화면이라 칸과 먼 화면 가장자리에 붙었다(적대 검증).
@@ -388,13 +391,14 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     }
 
     /// 칸 바로 아래, 왼쪽을 맞춘다. 화면 아래로 넘치면 칸 위로 올리고(위가 더 넓으면), 둘 다 좁으면 넓은 쪽에 높이를 줄여 둔다.
-    /// 오른쪽으로 넘치면 왼쪽으로 민다. 어느 쪽에도 한 줄이 들어가지 않으면(칸이 화면 끝에 걸림) false — 화면 밖에 두지 않는다.
+    /// 오른쪽으로 넘치면 왼쪽으로 민다. 칸이 화면 밖이거나 어느 쪽에도 한 줄이 들어가지 않으면(칸이 화면 끝에 걸림) false — 화면 밖에
+    /// 두지 않는다(화면 밖 칸의 목록이 보이지 않은 채 키를 먹었다 — 적대 검증 3 차).
     ///
     /// 자리는 화면으로만 묶고 탭 본문으로 묶지 않는다 — Chrome·Safari 의 목록도 페이지 밖(브라우저 UI·창 밖)으로 나온다(사용자 결정
     /// 「WebKit 처럼 네이티브 창」). 오버레이 판은 본문 안에만 그렸다(maru 가 그리는 글이 다른 pane 을 덮으면 maru UI 처럼 보여서).
     /// 네이티브 창은 그림자 진 메뉴 모양으로 칸에 붙어 떠 페이지 것임이 드러난다.
-    private func place(size: NSSize, field: NSRect, screen: NSScreen?) -> Bool {
-        let visible = screen?.visibleFrame ?? NSRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
+    private func place(size: NSSize, field: NSRect, visible: NSRect) -> Bool {
+        guard field.intersects(visible) else { return false }
         var width = min(size.width, max(visible.width, Self.minWidth))
         width = min(width, 600)
         let below = field.minY - visible.minY

@@ -5526,6 +5526,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             _ = surface.protectedTickFaultLatch.record(tickSucceeded: true, currentProtected: false)
             return false
         }
+        // W6m②: tick 이 돌지 않는 동안 목록 창이 옛 내용으로 남지 않게 거두고, 키도 먹지 않게 한다(적대 검증 3 차).
+        surface.osrDatalistPopup?.hide()
+        maru_macos_app_session_osr_datalist_shown(session, 0)
         if persistentTickFault,
            !surface.protectedTickFaultLatch.record(tickSucceeded: false, currentProtected: true) { return true }
         surface.window?.makeKeyAndOrderFront(nil)
@@ -9833,7 +9836,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
         let popup = owner.osrDatalistPopup ?? makeOsrDatalistPopup(owner)
-        if popup.isRejected(generation: generation, field: target.field) { // 자리가 없어 이미 못 띄웠다 — 다시 읽고 재지 않는다
+        if popup.isRejected(generation: generation, field: target.field, parent: target.window) { // 자리가 없어 이미 못 띄웠다 — 다시 읽고 재지 않는다
             maru_macos_app_session_osr_datalist_shown(session, 0)
             return
         }

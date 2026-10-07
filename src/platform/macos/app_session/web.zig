@@ -2039,7 +2039,8 @@ pub fn osrDatalistKey(self: *AppSession, key_code: u16, mods: i32) bool {
         126 => datalistSelect(self, if (dl.selected) |s| (s + n - 1) % n else n - 1, n, false), // ↑
         36, 76 => { // Return·keypad Enter — 강조가 없으면 페이지로(폼 제출)
             const s = dl.selected orelse return false;
-            _ = web_osr.datalistPick(self.allocator, t.sid, t.d.list, s);
+            // 보내지 못했으면(브라우저가 아직 서지 않음) Enter 는 페이지로 — 먹고 아무것도 넣지 않으면 키가 사라진다(적대 검증 3 차).
+            if (!web_osr.datalistPick(self.allocator, t.sid, t.d.list, s)) return false;
             self.osr_datalist = .{};
         },
         53 => { // Esc — 목록만 닫는다

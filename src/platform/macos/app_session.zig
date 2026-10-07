@@ -294,7 +294,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 210: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
 // 211: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
 // 212: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
-// 213: W6m② — osr_datalist_key(열린 제안 목록이 ↑↓·Enter·Esc 를 먹는다).
+// 213: W6m② — osr_datalist_state·item·shown·hover·pick(제안 목록을 칸 아래 네이티브 창으로 — Zig 가 목록·강조를 쥐고 Swift 가
+// 띄운 세대를 알린다), osr_datalist_key(띄운 목록이 ↑↓·Enter·Esc 를 먹는다).
 pub const abi_version: u32 = 213;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과

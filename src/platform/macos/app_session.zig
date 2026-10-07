@@ -6372,6 +6372,9 @@ pub const AppSession = struct {
     osr_key_target: u64 = 0,
     /// W6m②: 이 창이 그리는 제안 목록(키 대상 탭의 것) — 강조·스크롤과 마지막으로 그린 상자(누르기·hover·휠이 쓴다).
     osr_datalist: web_ops.OsrDatalist = .{},
+    /// W6m②: 마지막으로 본 (키 대상 탭, 그 탭의 목록 세대) — 바뀌면 오버레이를 다시 짠다(웹 프레임의 「세대만 올림」은 오버레이를
+    /// 다시 짜지 않아, 목록이 바뀌어도 페이지가 다시 그리지 않으면 화면에 안 나타났다 — 실측).
+    osr_datalist_seen: [2]u64 = .{ 0, 0 },
     /// W4c: 트랜잭션 밖에서 조합이 비워졌다(unmarkText — Apple 의미는 「확정」). 곧 확정 글이 오면 그 글이 조합을 대신하고,
     /// 안 오면 다음 tick 에 조합을 그대로 확정한다.
     osr_unmark_pending: bool = false,

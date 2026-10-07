@@ -6375,8 +6375,9 @@ pub const AppSession = struct {
     /// W6m②: 마지막으로 본 (키 대상 탭, 그 탭의 목록 세대) — 바뀌면 오버레이를 다시 짠다(웹 프레임의 「세대만 올림」은 오버레이를
     /// 다시 짜지 않아, 목록이 바뀌어도 페이지가 다시 그리지 않으면 화면에 안 나타났다 — 실측).
     osr_datalist_seen: [2]u64 = .{ 0, 0 },
-    /// W6m②: 목록 위에서 시작한 누름 — 뗌까지 붙잡는다(`web_ops.osrGesture` 가 먼저 본다).
-    osr_datalist_press: bool = false,
+    /// W6m②: 목록 위에서 시작한 누름(그 버튼과, 고를 수 있는 누름인가) — 그 버튼의 뗌까지 붙잡는다(`web_ops.osrGesture` 가 먼저
+    /// 본다). 뗌을 잃으면 다음 왼쪽 누름의 제스처 취소(`cancelPointerGesture`)가 푼다.
+    osr_datalist_press: ?web_ops.OsrDatalistPress = null,
     /// W4c: 트랜잭션 밖에서 조합이 비워졌다(unmarkText — Apple 의미는 「확정」). 곧 확정 글이 오면 그 글이 조합을 대신하고,
     /// 안 오면 다음 tick 에 조합을 그대로 확정한다.
     osr_unmark_pending: bool = false,
@@ -8363,6 +8364,7 @@ pub const AppSession = struct {
         };
         // Chromium 탭 제스처를 끊는다(뗌을 잃고 새로 눌렀다 등) — 페이지가 잡은 마우스 capture 를 놓게 한다(C5 모달 에지).
         if (self.pointer_gesture_owner == .web_osr) web_ops.osrCaptureLost(self, self.pointer_gesture_owner.web_osr.surface_id);
+        self.osr_datalist_press = null; // W6m②: 목록 위 누름의 뗌을 잃었다 — 다른 제스처의 끌기·뗌을 삼키지 않게
         self.clearPointerGesture();
         if (tab_drag_pane) |pane| term_ops.ensureActiveTermVisible(self, pane);
     }

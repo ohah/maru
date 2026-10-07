@@ -525,6 +525,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
                 _ = controller?.osrKey(event, phase: 3)
                 return
             }
+            // W6m②: 열린 제안 목록이 ↑↓·Enter·Esc 를 먹는다(Zig 가 판정 — 수식키·조합 중이면 아니다). 페이지에는 가지 않는다
+            // (Chrome 도 열린 목록의 ↓·Esc 를 페이지에 보내지 않는다 — §7 실측).
+            if !hasMarkedText(), controller?.osrDatalistKey(event) == true { return }
             let osrChord = event.modifierFlags.intersection([.command, .control])
             if !osrChord.isEmpty || Self.directEncodeKeyCodes.contains(event.keyCode) {
                 guard commitMarkedTextIfComposing() else { return }
@@ -8824,6 +8827,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // W6l①: droplink webtab|emptybar|band 주소 — 그 자리(Zig 의 hit-test 로 찾은 한 점)에 링크만 담은 끌기를 놓는다(`drag` 와 같은
                 // 가짜 끌기 정보). 자리를 못 찾으면 droplink none.
                 testDropLink(line[1], line[2], view)
+            case "datalist":
+                // W6m②: 그린 제안 목록 — 열림·항목 수·강조(없으면 -1).
+                var x = -1.0, y = -1.0
+                var count: Int32 = 0, selected: Int32 = -1
+                let open = maru_macos_app_session_osr_datalist_test_state(session, 0, &x, &y, &count, &selected)
+                Self.testReport("datalist open=\(open != 0) count=\(count) selected=\(selected)")
+            case "dlhover" where line.count >= 2, "dlclick" where line.count >= 2:
+                // W6m②: 그린 목록의 그 행 가운데에 hover·누름(대본의 hover·mouse 와 같은 ABI) — 목록이 없으면 dl-miss.
+                var x = -1.0, y = -1.0
+                var count: Int32 = 0, selected: Int32 = -1
+                guard maru_macos_app_session_osr_datalist_test_state(session, UInt32(line[1]) ?? 0, &x, &y, &count, &selected) != 0 else {
+                    Self.testReport("dl-miss")
+                    break
+                }
+                if line[0] == "dlhover" {
+                    var kind: Int32 = 0
+                    _ = maru_macos_app_session_hover(session, x, y, 0, &kind)
+                } else {
+                    _ = maru_macos_app_session_mouse(session, 1, x, y, 0, 0)
+                    _ = maru_macos_app_session_mouse(session, 3, x, y, 0, 0)
+                }
             case "menupick" where line.count >= 2:
                 testPickOsrContextMenu(line.dropFirst().joined(separator: " "))
             case "menuclose":
@@ -9052,6 +9076,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     var osrKeyboardState: Int32 {
         guard let session = appSession else { return 0 }
         return maru_macos_app_session_osr_keyboard_active(session)
+    }
+
+    /// W6m②: 열린 제안 목록의 키면 목록이 먹는다(true — 페이지로 보내지 않는다).
+    func osrDatalistKey(_ event: NSEvent) -> Bool {
+        guard let session = appSession else { return false }
+        let flags = event.modifierFlags
+        var bits: Int32 = 0
+        if flags.contains(.shift) { bits |= 4 }
+        if flags.contains(.option) { bits |= 8 }
+        if flags.contains(.control) { bits |= 16 }
+        if flags.contains(.command) { bits |= 32 }
+        return maru_macos_app_session_osr_datalist_key(session, event.keyCode, bits) != 0
     }
 
     /// phase 0 = 지금 키 누름(chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠, 2 = 뗌, 3 = 열린 팝업 위젯의 키(누름 + 글자).

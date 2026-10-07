@@ -71,7 +71,11 @@ fn translate(a: std.mem.Allocator, input: []const u8) ![]u8 {
         switch (byte) {
             '*' => {
                 if (i + 1 < input.len and input[i + 1] == '*') {
-                    const component_start = i == 0 or input[i - 1] == '/' or input[i - 1] == '{' or input[i - 1] == ',';
+                    // 문자열의 쉼표·이스케이프한 중괄호는 대안 경계가 아니다.
+                    // 빈 대안 시작의 **는 뒤에 /가 있을 때만 재귀 prefix다.
+                    const branch_start = branches.items.len > 0 and branches.items[branches.items.len - 1] == out.items.len;
+                    const component_start = i == 0 or input[i - 1] == '/' or
+                        (branch_start and i + 2 < input.len and input[i + 2] == '/');
                     i += 1;
                     if (component_start and i + 1 < input.len and input[i + 1] == '/') {
                         i += 1;

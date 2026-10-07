@@ -31,13 +31,15 @@ worker도 문서 resource allocator를 사용하므로 실제 제품 연결에�
 
 디스크와 모델은 동일 `query.build` argv의 glob을 판정한다. 모델에는 ignore 파일을 적용하지 않는다.
 `scope.fromArgs`는 명시적 glob과 고정 VCS 제외를 소비한다. 디스크 traversal용 wildcard prefix도 실제 판정에
-영향을 주므로 raw include만 따로 해석하지 않는다. 실제 rg와 38개 패턴을 대조했다. glob은 바이트 모드로 판정하며 문자 클래스의 이스케이프를
-정규식 제어 문자로 바꾸지 않으며 클래스 안의 역슬래시 자체도 보존한다. 빈 중괄호 대안은 매치로 받지 않고, 대안 끝의 `**`는 하위 경로까지 판정한다. 중괄호 대안의 시작에서도 `**/`가 0개 이상의 경로를 허용한다. 모든 glob·JavaScript
+영향을 주므로 raw include만 따로 해석하지 않는다. 실제 rg와 46개 glob 조건을 대조했다. glob은 바이트 모드로 판정하며 문자 클래스의 이스케이프를
+정규식 제어 문자로 바꾸지 않으며 클래스 안의 역슬래시 자체도 보존한다. 빈 중괄호 대안은 매치로 받지 않는다. `**`가 재귀 경로를 뜻하는지는 실제 성분·대안 경계로 판정한다. 일반 쉼표나 이스케이프한 `{`는 대안 경계가 아니다. 중괄호 대안의 시작에서도 `**/`가 0개 이상의 경로를 허용한다. 모든 glob·JavaScript
 정규식 의미의 완전 호환 판정은 아니다. Unicode escape/CRLF AST 변환의 기존 S1b gate는 유지한다.
 
 추가 실패 경로 검증 기록은 [별도 실행 기록](../../tools/editor-project-search/results/ripgrep-worker-adversarial-macos-arm64.json)에 남겼다. 기존 RSS 기록은 당시 측정값으로 보존한다.
 
-최신 [glob·수명 검증 기록](../../tools/editor-project-search/results/ripgrep-worker-glob-lifecycle-macos-arm64.json)은 추가 사례를 담고, 전체 115개 사례는 CI artifact로 보존한다.
+이전 [glob·수명 검증 기록](../../tools/editor-project-search/results/ripgrep-worker-glob-lifecycle-macos-arm64.json)은 추가 사례를 담고, 전체 115개 사례는 CI artifact로 보존한다.
+
+최신 [경로·예산 검증 기록](../../tools/editor-project-search/results/ripgrep-worker-path-budgets-macos-arm64.json)은 추가 사례를 담고, 전체 141개 사례는 CI artifact로 보존한다. macOS에서 대소문자 별칭으로 합쳐지는 파일은 서로 다른 접미어로 분리하여 glob 비교의 독립 파일 집합을 유지했다.
 
 ## 실행 증거와 예산
 
@@ -49,12 +51,13 @@ zig build test-editor-project-search -Doptimize=ReleaseFast
 python3 tools/editor-project-search/worker-measure.py --worker zig-out/bin/maru-project-search-worker --rg zig-out/ripgrep/rg --output zig-out/editor-project-search-worker
 ```
 
-실제 backend API를 쓰는 115개 합성 실행 사례와 L2 판정자 8개를 검사했다. 고정 앱 번들 locator,
+실제 backend API를 쓰는 141개 합성 실행 사례와 L2 판정자 8개를 검사했다. 고정 앱 번들 locator,
 0건 점유·공유 중복 제거·독립 문서·Unicode 좌표·원본 편집 뒤 불변성·glob 대조·20,000건 상한·취소,
 FIFO 건너뛰기·symlink 순환의 부분 실패·VCS root 거부·root 교체·잘못된 helper 출력 후 수거를 포함한다.
 별도 `ownership.zig` 실행은 캡처·literal/regex 검색의 모든 Zig 할당 실패 지점, 3-byte 미리보기에서
 4-byte 문자를 자르지 않는 동작, 콜백 거부·오류, 취소와 요청 재사용, request/models 세대 불일치를 검사한다.
 모델 합산 예산의 정확한 경계와 초과 경로 점유, 결과 batch의 단일 전달과 누적 count 유지도 검사한다.
+시작 전 query/helper 검증 실패에서도 호출자의 모델·점유·신원 소유권을 보존한다. 모델 결과 예산 0·결과 수 1·본문 예산 0과 빈 snapshot의 경계를 실제 worker에서도 확인한다.
 C PCRE2 allocator의 실패나 실제 앱 종료를 재현했다는 뜻은 아니다. 닫힘·실행 중 상태는 번들 조회보다 먼저 판정한다.
 프로브의 `--execution-ms`로 실행 기한을 짧게 주입하고 수거를 검사한다. stderr 대량 출력·계속되는 stdout·불완전 EOF·exit 1도 완료로 오인하거나 취소를 막지 않는지 검사한다.
 helper 중복 summary·불완전 JSON 취소·signal·exit 2·stdout만 닫고 살아 있는 자식도 검사한다.

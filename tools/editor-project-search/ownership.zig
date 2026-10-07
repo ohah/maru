@@ -85,7 +85,18 @@ pub fn run(a: std.mem.Allocator, io: std.Io, helper: []const u8, root: []const u
     var backend: api.Backend = .{ .a = a, .io = io };
     defer backend.deinit();
     var models: std.ArrayList(api.model.Captured) = .empty;
-    defer models.deinit(a);
+    defer {
+        for (models.items) |*item| item.deinit(a);
+        models.deinit(a);
+    }
+    var retained_before_start: usize = 0;
+    _ = try api.model.captureUnique(a, &state, &models, "a.txt", document, 7, &file, &retained_before_start, 1024);
+    try std.testing.expectError(error.UntrustedExecutable, backend.start("relative-helper", root, "foo", .{}, &state, &models, budget));
+    try std.testing.expectError(error.EmptyQuery, backend.start(helper, root, "", .{}, &state, &models, budget));
+    try std.testing.expectEqual(@as(usize, 1), models.items.len);
+    try std.testing.expect(state.occupied.contains("a.txt"));
+    try std.testing.expectEqual(identity, state.identity);
+    try std.testing.expect(backend.active == null);
     for (0..8) |n| {
         state.identity.request = n + 1;
         try backend.start(helper, root, if (n % 4 == 1) "foo" else "absent", .{}, &state, &models, budget);

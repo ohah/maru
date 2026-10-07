@@ -61,13 +61,23 @@ try:
     assert s['status']=='complete' and s['matches']==1 and rows[0]['ranges'][0]=={'start':{'line':0,'byte':0},'end':{'line':0,'byte':0}}
     rows,s=run('immutable-model-after-edit',root,'changed-after-capture',occupied=('--mutate','--model','a.txt','foo'))
     assert s['status']=='complete' and s['matches']==0
+    rows,s=run('model-result-budget-zero',root,'foo',budget=0,occupied=('--model','a.txt','foo'))
+    assert s['status']=='partial' and not rows and s['stats']['child_pid'] is None
+    rows,s=run('model-match-cap',root,'foo',occupied=('--matches','1','--model','a.txt','foo foo'))
+    assert s['status']=='partial' and s['matches']==1 and len(rows)==1 and s['stats']['child_pid'] is None
+    rows,s=run('excluded-model-keeps-disk-occupied',root,'foo',occupied=('--snapshot-bytes','0','--model','a.txt','foo'))
+    assert s['status']=='partial' and s['excluded']==1 and s['matches']==1 and all(r['path'].removeprefix('./')=='b.txt' for r in rows)
+    rows,s=run('empty-model-zero-snapshot-budget',root,'^$',occupied=('--snapshot-bytes','0','--regex','--model','a.txt',''))
+    assert s['status']=='complete' and s['excluded']==0 and s['matches']==1
     scope=out/'scope';scope.mkdir()
-    names=['src/a.zig','src/deep/b.zig','other/c.zig','src/a.txt','src/b.txt','src/c.txt','top.zig','a.zig/inside.txt','a[0].txt','axb.txt','src/a/deep/b.txt','a.txt','b.txt','n.txt','t.txt','f.txt','r.txt','v.txt','dir/a.txt','deep/dir/a.txt','汉.txt','😀.txt','a/b/c.txt','a].txt',r'\.txt',r'\a].txt','-.txt','].txt']
+    names=['src/a.zig','src/deep/b.zig','other/c.zig','src/a.txt','src/b.txt','src/c.txt','top.zig','a.zig/inside.txt','a[0].txt','axb.txt','src/a/deep/b.txt','a.txt','b.txt','n.txt','t.txt','f.txt','r.txt','v.txt','dir/a.txt','deep/dir/a.txt','汉.txt','😀.txt','a/b/c.txt','a].txt',r'\.txt',r'\a].txt','-.txt','].txt','foo,x/a.txt','foo,x/deep/a.txt','x{a/a.txt','x{a/deep/a.txt','x,a/a.txt','x,a/deep/a.txt','abc/deep/a.txt','σ-one.txt','Σ-two.txt']
     for name in names:
         file=scope/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text('foo\n')
     glob_cases=[['--include','**b.txt'],['--include','src/**b.txt'],['--include','**/b.txt'],['--include','{src,other}/**/*.zig'],['--include','**/*.{zig,txt}'],['--include','**/{a,b}.txt'],['--include','[^a]*.txt'],['--include','src/[!c].txt'],['--include','[[]*.txt'],['--include',r'\axb.txt'],['--include','src/a**b.txt'],['--include','src/*.zig'],['--include','src'],['--include','**/*.zig'],['--include','src/{a,b}.txt'],['--include','src/[ab].txt'],['--exclude','src/**'],['--include','src/**','--exclude','src/deep/**'],['--include',r'a\[0\].txt'],['--include','SRC/*.ZIG','--glob-case']]
     glob_cases += [['--include',pattern] for pattern in [r'[\a].txt',r'[\b].txt',r'[\n].txt',r'[\t].txt',r'[\f].txt',r'[\r].txt',r'[\v].txt','{**/a.txt,b.txt}','**/{**/a.txt,b.txt}','[😀汉].txt','**/?.txt']]
     glob_cases += [['--include',pattern] for pattern in ['**/{a/**,dir/**}','{,dir/}a.txt',r'[\-a].txt',r'[\]a].txt','{a.txt,}','{,}','{**/a.txt,{,dir/**}}']]
+    glob_cases += [['--include',pattern] for pattern in ['foo,**/a.txt',r'x\{**/a.txt','x,**/a.txt','a{**,b}/a.txt','**/*σ*.txt','**/*Σ*.txt']]
+    glob_cases += [['--include',pattern,'--glob-case'] for pattern in ['**/*σ*.txt','**/*Σ*.txt']]
     for n,flags in enumerate(glob_cases):
         disk,ds=run(f'glob-disk-{n}',scope,'foo',occupied=flags)
         models=[]
@@ -138,6 +148,20 @@ try:
         fake=out/(name+'-helper');fake.write_text('#!/usr/bin/python3\nimport sys,time,os\n'+body+'\n');fake.chmod(0o755);rg=fake
         rows,s=run(name,root,'foo',cancel=cancel)
         assert s['status']==status and s['failure']==failure,(name,s)
+    base_event={'type':'match','data':{'path':{'text':'a.txt'},'lines':{'text':'😀foo'},'line_number':1,'submatches':[{'start':4,'end':7,'match':{'text':'foo'}}]}}
+    import copy
+    corrupted=[]
+    for name,change,error in [
+        ('outside-root-path',('path',{'text':'./../a.txt'}),'InvalidPath'),
+        ('nul-path',('path',{'text':'a\0.txt'}),'InvalidPath'),
+        ('invalid-body-utf8',('lines',{'bytes':'/w=='}),'InvalidUtf8'),
+    ]:
+        event=copy.deepcopy(base_event);event['data'][change[0]]=change[1];corrupted.append((name,event,error))
+    for name,start,end,text in [('half-codepoint',1,7,'foo'),('out-of-range',4,100,'foo'),('wrong-match-body',4,7,'bar')]:
+        event=copy.deepcopy(base_event);event['data']['submatches']=[{'start':start,'end':end,'match':{'text':text}}];corrupted.append((name,event,'MalformedEvent'))
+    for name,event,error in corrupted:
+        fake=out/(name+'-helper');fake.write_text('#!/usr/bin/python3\nimport time\nprint('+repr(json.dumps(event))+',flush=True)\ntime.sleep(5)\n');fake.chmod(0o755);rg=fake
+        rows,s=run(name,root,'foo');assert not rows and s['status']=='failed' and s['failure']==error,(name,s)
     rg=original_rg
     report['status']='passed'  
 except Exception as e:

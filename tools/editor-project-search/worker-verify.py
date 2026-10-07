@@ -23,6 +23,10 @@ def run(name,root,query,cancel=-1,budget=8*1024*1024,occupied=()):
 report={'status':'running','cases':cases,'worker_sha256':hashlib.sha256(worker.read_bytes()).hexdigest(),'rg_sha256':hashlib.sha256(rg.read_bytes()).hexdigest()}
 try:
     root=out/'files';root.mkdir();(root/'a.txt').write_text('foo\nfoo\n');(root/'b.txt').write_text('foo\n')
+    ownership=subprocess.run([str(worker),'--audit-ownership',str(rg),str(root)],capture_output=True,timeout=30)
+    (out/'ownership.stdout').write_bytes(ownership.stdout);(out/'ownership.stderr').write_bytes(ownership.stderr)
+    assert ownership.returncode==0,ownership.stderr.decode(errors='replace')
+    report['ownership_audit']='passed'
     rows,s=run('normal',root,'foo');assert s['status']=='complete' and s['matches']==3
     rows,s=run('occupied-zero',root,'foo',occupied=('a.txt',));assert s['matches']==1 and all(row['path'].removeprefix('./')!='a.txt' for row in rows)
     rows,s=run('budget',root,'foo',budget=0);assert s['status']=='partial' and s['matches']==0
@@ -58,10 +62,11 @@ try:
     rows,s=run('immutable-model-after-edit',root,'changed-after-capture',occupied=('--mutate','--model','a.txt','foo'))
     assert s['status']=='complete' and s['matches']==0
     scope=out/'scope';scope.mkdir()
-    names=['src/a.zig','src/deep/b.zig','other/c.zig','src/a.txt','src/b.txt','src/c.txt','top.zig','a.zig/inside.txt','a[0].txt','axb.txt','src/a/deep/b.txt']
+    names=['src/a.zig','src/deep/b.zig','other/c.zig','src/a.txt','src/b.txt','src/c.txt','top.zig','a.zig/inside.txt','a[0].txt','axb.txt','src/a/deep/b.txt','a.txt','b.txt','n.txt','t.txt','f.txt','r.txt','v.txt','dir/a.txt','deep/dir/a.txt','汉.txt','😀.txt']
     for name in names:
         file=scope/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text('foo\n')
     glob_cases=[['--include','**b.txt'],['--include','src/**b.txt'],['--include','**/b.txt'],['--include','{src,other}/**/*.zig'],['--include','**/*.{zig,txt}'],['--include','**/{a,b}.txt'],['--include','[^a]*.txt'],['--include','src/[!c].txt'],['--include','[[]*.txt'],['--include',r'\axb.txt'],['--include','src/a**b.txt'],['--include','src/*.zig'],['--include','src'],['--include','**/*.zig'],['--include','src/{a,b}.txt'],['--include','src/[ab].txt'],['--exclude','src/**'],['--include','src/**','--exclude','src/deep/**'],['--include',r'a\[0\].txt'],['--include','SRC/*.ZIG','--glob-case']]
+    glob_cases += [['--include',pattern] for pattern in [r'[\a].txt',r'[\b].txt',r'[\n].txt',r'[\t].txt',r'[\f].txt',r'[\r].txt',r'[\v].txt','{**/a.txt,b.txt}','**/{**/a.txt,b.txt}','[😀汉].txt','**/?.txt']]
     for n,flags in enumerate(glob_cases):
         disk,ds=run(f'glob-disk-{n}',scope,'foo',occupied=flags)
         models=[]
@@ -105,6 +110,18 @@ try:
     mismatch=out/'mismatch-helper';mismatch.write_text('#!/usr/bin/python3\nimport json,time\nprint(json.dumps({"type":"summary","data":{"stats":{"matches":1}}}),flush=True)\ntime.sleep(5)\n');mismatch.chmod(0o755)
     rg=mismatch
     rows,s=run('summary-count-mismatch-reaped',root,'foo');assert s['status']=='failed' and s['failure']=='SummaryMismatch'
+    summary_line=json.dumps({'type':'summary','data':{'stats':{'matches':0}}})
+    hostile=[
+        ('duplicate-summary',f'print({summary_line!r},flush=True)\nprint({summary_line!r},flush=True)\ntime.sleep(5)', 'failed','EventAfterSummary'),
+        ('truncated-json','sys.stdout.write(\'{"type":"summary"\');sys.stdout.flush()\ntime.sleep(5)', 'cancelled',None),
+        ('signal-after-summary',f'print({summary_line!r},flush=True)\nos.kill(os.getpid(),9)', 'failed','HelperTerminated'),
+        ('error-exit-after-summary',f'print({summary_line!r},flush=True)\nsys.exit(2)', 'partial',None),
+        ('closed-stdout-live-child',f'print({summary_line!r},flush=True)\nos.close(1)\ntime.sleep(5)', 'cancelled',None),
+    ]
+    for name,body,status,failure in hostile:
+        fake=out/(name+'-helper');fake.write_text('#!/usr/bin/python3\nimport sys,time,os\n'+body+'\n');fake.chmod(0o755);rg=fake
+        rows,s=run(name,root,'foo',cancel=100 if status=='cancelled' else -1)
+        assert s['status']==status and s['failure']==failure,(name,s)
     rg=Path('/usr/bin/true')
     rows,s=run('empty-success-output-rejected',root,'foo');assert s['status']=='failed' and s['failure']=='IncompleteOutput'
     rg=original_rg

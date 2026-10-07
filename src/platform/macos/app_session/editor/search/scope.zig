@@ -52,7 +52,7 @@ fn matches(rule: *Rule, path: []const u8) !bool {
 fn append(a: std.mem.Allocator, out: *std.ArrayList(Rule), glob: []const u8, descendants: bool, ignore_case: bool) !void {
     const converted = try translate(a, glob);
     defer a.free(converted);
-    var pattern = try regex.Pattern.initDocument(converted, !ignore_case, .anycrlf);
+    var pattern = try regex.Pattern.initBytes(converted, !ignore_case);
     errdefer pattern.deinit();
     try out.append(a, .{ .pattern = pattern, .descendants = descendants });
 }
@@ -70,7 +70,7 @@ fn translate(a: std.mem.Allocator, input: []const u8) ![]u8 {
         switch (byte) {
             '*' => {
                 if (i + 1 < input.len and input[i + 1] == '*') {
-                    const component_start = i == 0 or input[i - 1] == '/';
+                    const component_start = i == 0 or input[i - 1] == '/' or input[i - 1] == '{' or input[i - 1] == ',';
                     i += 1;
                     if (component_start and i + 1 < input.len and input[i + 1] == '/') {
                         i += 1;
@@ -100,9 +100,9 @@ fn translate(a: std.mem.Allocator, input: []const u8) ![]u8 {
                 const first = i;
                 while (i < input.len and (input[i] != ']' or i == first)) : (i += 1) {
                     if (input[i] == '\\') {
-                        try out.append(a, '\\');
                         i += 1;
                         if (i >= input.len) return error.InvalidGlob;
+                        if (std.mem.indexOfScalar(u8, "\\\\-]^", input[i]) != null) try out.append(a, '\\');
                     }
                     try out.append(a, input[i]);
                 }

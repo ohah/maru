@@ -31,8 +31,11 @@ worker도 문서 resource allocator를 사용하므로 실제 제품 연결에�
 
 디스크와 모델은 동일 `query.build` argv의 glob을 판정한다. 모델에는 ignore 파일을 적용하지 않는다.
 `scope.fromArgs`는 명시적 glob과 고정 VCS 제외를 소비한다. 디스크 traversal용 wildcard prefix도 실제 판정에
-영향을 주므로 raw include만 따로 해석하지 않는다. 실제 rg와 20개 패턴을 대조했다. 모든 glob·JavaScript
+영향을 주므로 raw include만 따로 해석하지 않는다. 실제 rg와 31개 패턴을 대조했다. glob은 바이트 모드로 판정하며 문자 클래스의 이스케이프를
+정규식 제어 문자로 바꾸지 않는다. 중괄호 대안의 시작에서도 `**/`가 0개 이상의 경로를 허용한다. 모든 glob·JavaScript
 정규식 의미의 완전 호환 판정은 아니다. Unicode escape/CRLF AST 변환의 기존 S1b gate는 유지한다.
+
+추가 실패 경로 검증 기록은 [별도 실행 기록](../../tools/editor-project-search/results/ripgrep-worker-adversarial-macos-arm64.json)에 남겼다. 기존 RSS 기록은 당시 측정값으로 보존한다.
 
 ## 실행 증거와 예산
 
@@ -44,9 +47,13 @@ zig build test-editor-project-search -Doptimize=ReleaseFast
 python3 tools/editor-project-search/worker-measure.py --worker zig-out/bin/maru-project-search-worker --rg zig-out/ripgrep/rg --output zig-out/editor-project-search-worker
 ```
 
-실제 backend API를 쓰는 69개 합성 실행 사례와 L2 판정자 8개를 검사했다. 고정 앱 번들 locator,
+실제 backend API를 쓰는 96개 합성 실행 사례와 L2 판정자 8개를 검사했다. 고정 앱 번들 locator,
 0건 점유·공유 중복 제거·독립 문서·Unicode 좌표·원본 편집 뒤 불변성·glob 대조·20,000건 상한·취소,
 FIFO 건너뛰기·symlink 순환의 부분 실패·VCS root 거부·root 교체·잘못된 helper 출력 후 수거를 포함한다.
+별도 `ownership.zig` 실행은 캡처·literal/regex 검색의 모든 Zig 할당 실패 지점, 3-byte 미리보기에서
+4-byte 문자를 자르지 않는 동작, 콜백 거부·오류, 취소와 요청 재사용, request/models 세대 불일치를 검사한다.
+C PCRE2 allocator의 실패나 실제 앱 종료를 재현했다는 뜻은 아니다. 닫힘·실행 중 상태는 번들 조회보다 먼저 판정한다.
+helper 중복 summary·불완전 JSON 취소·signal·exit 2·stdout만 닫고 살아 있는 자식도 검사한다.
 각 helper PID는 `waitpid` 수거와 실행 뒤 생존 조회를 함께 확인한다.
 
 측정은 macOS arm64 ReleaseFast 단독 프로브이며 Maru 앱 RSS가 아니다. 문서 최초 생성 비용도 포함한다.

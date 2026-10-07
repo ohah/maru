@@ -15,6 +15,7 @@ const message = protocol.message;
 /// `JSON.stringify`)는 먼저 쥐고, 보내는 객체·배열과 사건 초기값은 원형이 없게 만든다(`toJSON`·`Array.prototype` 의 번호 setter·
 /// `Object.prototype` 에 둔 값이 끼어들지 않게 — 적대 검증). `isTrusted` 는 사건 자신의 바꿀 수 없는 속성이라 그대로 읽는다.
 ///
+/// 거르기는 친 글을 빈칸으로 나눈 단어마다 값이나 레이블에 들어 있어야 한다(대소문자 무시, 낱말 중간도 — 단어가 없으면 전부).
 /// 규칙(Chrome 154 실측 §7 — 재지 않은 것은 W6m 문단에): 사용자의 사건만(`isTrusted` — 폼 라이브러리가 보낸 가짜 `input` 은
 /// 아니다), 초점이 있는 글 칸(`readOnly`·`disabled` 는 아니다)에서. 왼쪽 누름(⌃ 누름은 macOS 의 우클릭이다)·↓·글자로 지금 값을
 /// 거른 목록을 보이고, 다른 곳을 누르거나 빈 칸·일치 없음·초점 잃음·그 칸을 품은 스크롤·창 크기 바뀜·`pagehide` 면 닫는다.
@@ -34,15 +35,17 @@ pub const script_part = "(function(){if(window!==window.top)return;" ++
     "function arr(){return SP([],null)}" ++
     "function real(e){try{return e.isTrusted===true}catch(x){return false}}" ++
     // 보이는 글 — 512 단위에서 자르되 대리 쌍의 앞쪽에서 끝나지 않게.
+    // 거르기 단어 — 빈칸(공백·탭·줄바꿈·NBSP)으로 나눈다. 단어가 없으면(빈칸만) 전부(Chrome 154 실측 2026-10-07).
+    "function words(s){var w=arr(),k=0,st=-1;for(var i=0;i<=s.length;i++){var c=i<s.length?A(CC,s,[i]):32;if(c<=32||c===160){if(st>=0){w[k++]=A(SL,s,[st,i]);st=-1}}else if(st<0)st=i}return w}" ++
     "function cost(s){var n=s.length+2;for(var i=0;i<s.length;i++){var c=A(CC,s,[i]);if(c<32)n+=5;else if(c===34||c===92)n++}return n}" ++
     "function cut(s){if(s.length<=512)return s;s=A(SL,s,[0,512]);var c=A(CC,s,[511]);return c>=55296&&c<=56319?A(SL,s,[0,511]):s}" ++
     // 제안 목록이 붙은, 쓸 수 있는 글 칸이면 그 칸(아니면 null). getter 를 다른 객체에 부르면 던진다 — 그것으로 종류를 가린다.
     "function fieldOf(t){try{return K[A(TG,t,[])]===1&&!A(RO,t,[])&&!A(DI,t,[])&&A(LG,t,[])?t:null}catch(e){return null}}" ++
     "function focused(t){try{return A(AE,D,[])===t}catch(e){return false}}" ++
     "function hide(){if(!cur)return;cur=null;vals=null;try{send('dl',J({__proto__:null,t:0,v:ver}))}catch(e){}}" ++
-    "function show(t){try{var l=A(LG,t,[]);if(!l)return hide();var q=A(LC,S(A(VG,t,[])),[]),os=A(OG,l,[]),n=A(CL,os,[]),it=arr(),vs=arr(),k=0,used=0;" ++
+    "function show(t){try{var l=A(LG,t,[]);if(!l)return hide();var q=words(A(LC,S(A(VG,t,[])),[])),os=A(OG,l,[]),n=A(CL,os,[]),it=arr(),vs=arr(),k=0,used=0;" ++
     "for(var i=0;i<n&&k<256;i++){var o=os[i];if(A(OD,o,[]))continue;var v=S(A(OV,o,[])),b=S(A(OL,o,[]));if(v==='')continue;" ++
-    "if(q!==''&&A(IX,A(LC,v,[]),[q])<0&&A(IX,A(LC,b,[]),[q])<0)continue;" ++
+    "var lv=A(LC,v,[]),lb=A(LC,b,[]),hit=true;for(var j=0;j<q.length;j++)if(A(IX,lv,[q[j]])<0&&A(IX,lb,[q[j]])<0){hit=false;break}if(!hit)continue;" ++
     "var p=arr();p[0]=cut(v);p[1]=cut(b);used+=cost(p[0])+cost(p[1])+4;if(used>24000)break;it[k]=p;vs[k]=v;k++}" ++
     "if(!k)return hide();" ++
     "var r=A(BR,t,[]),ox=0,oy=0,s=1;if(VV){ox=A(VL,VV,[]);oy=A(VT,VV,[]);s=A(VC,VV,[])}" ++
@@ -65,7 +68,7 @@ pub const script_part = "(function(){if(window!==window.top)return;" ++
     "})();";
 
 comptime {
-    @setEvalBranchQuota(20_000);
+    @setEvalBranchQuota(100_000);
     std.debug.assert(std.mem.indexOfAny(u8, script_part, "\"\\\n") == null);
 }
 

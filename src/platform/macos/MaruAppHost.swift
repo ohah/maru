@@ -8839,11 +8839,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 var field = [Double](repeating: 0, count: 4)
                 let open = maru_macos_app_session_osr_datalist_state(session, &generation, &count, &selected, &field)
                 var report = "datalist open=\(open != 0) count=\(count) selected=\(selected)"
-                if let popup = activeSurface?.osrDatalistPopup, popup.isShown {
+                if let popup = activeSurface?.osrDatalistPopup, popup.isShown, let window, let terminal = metalTerminalView {
                     let f = popup.fieldOnScreen, frame = popup.frame
                     let below = popup.placedBelow && abs(frame.maxY - f.minY) < 0.5
                     let left = abs(frame.minX - f.minX) < 0.5
-                    report += " win=shown rows=\(popup.items.count) sel=\(popup.selected) below=\(below) left=\(left) first=\(popup.items.first?.value ?? "")"
+                    // 창 왼쪽 위를 화면 → 창 → view 로 되돌려 backing px 로(앞으로 간 변환과 따로 — 판정이 스크린샷의 칸과 맞춘다).
+                    let corner = terminal.convert(window.convertPoint(fromScreen: NSPoint(x: frame.minX, y: frame.maxY)), from: nil)
+                    let backing = Double(window.backingScaleFactor)
+                    let atY = terminal.isFlipped ? corner.y : terminal.bounds.height - corner.y
+                    report += " win=shown rows=\(popup.items.count) sel=\(popup.tableSelectedRow) below=\(below) left=\(left)"
+                        + " clip=\(popup.testClippedRows()) first=\(popup.items.first?.value ?? "")"
+                        + " atx=\(Int((Double(corner.x) * backing).rounded())) aty=\(Int((Double(atY) * backing).rounded()))"
                 } else {
                     report += " win=hidden"
                 }
@@ -9840,8 +9846,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return
             }
         }
-        popup.show(generation: generation, items: items, selected: Int(selected), field: target.field, parent: target.window)
-        maru_macos_app_session_osr_datalist_shown(session, generation)
+        let shown = popup.show(generation: generation, items: items, selected: Int(selected), field: target.field, parent: target.window)
+        maru_macos_app_session_osr_datalist_shown(session, shown ? generation : 0)
     }
 
     /// 칸 사각형(view backing px, 왼쪽 위 원점 — Zig 가 그 탭 본문 안으로 잘랐다) → 화면 좌표. 창이 안 보이거나 칸이 본문 밖이면 nil.
@@ -15632,6 +15638,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: panel)
         }
         surface.window?.orderOut(nil)
+        surface.osrDatalistPopup?.hide() // W6m②: quick 은 보일 때만 tick 이 돌아 거둘 기회가 없다(적대 검증)
+        surface.osrDatalistPopup = nil
         teardownWebPanels(surface)
         surface.fileTreeWatcher.stop()
         if let session = surface.appSession {

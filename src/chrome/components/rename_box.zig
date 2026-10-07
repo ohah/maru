@@ -52,6 +52,9 @@ pub fn boxRect(state: *const State, text: []const u8, p: props.ChromeProps) ?dra
         .anchor = .{ .x = state.anchor_x, .y = state.anchor_y, .w = 0, .h = state.anchor_h },
         .vertical = .below_flip_up,
         .gap_px = p.shape.modal_padding_px,
+        // 입력 상자(`input_box`)는 rich 모양에서 둥근 패널 quad 를 내고, 그것이 이 draw 의 첫 둥근 quad 라 사방 패딩만큼
+        // 커져 그려진다 — 경계 여백도 보이는 테두리에서 센다(적대적 검증 2026-10-07: 「패널 없음」으로 잘못 분류됐었다).
+        .visible_outset_px = p.shape.modal_padding_px,
     }, p) orelse return null;
     return .{ .x = placed.rect.x, .y = placed.rect.y, .w = box_w, .h = ch };
 }
@@ -117,6 +120,20 @@ test "RNB1 rename_box — 닫히면 무동작, 열리면 앵커 아래 입력 �
     try testing.expect(has_quad and has_text and has_caret);
     const long = "a_very_long_identifier_name_x";
     try testing.expectEqual(@as(u32, (29 + 3) * 10), boxRect(&st, long, p).?.w);
+}
+
+test "RNB4 rename_box — 오른쪽 끝 낱말에서 연 상자도 **보이는 테두리**가 창 끝에서 한 셀 떨어진다" {
+    // 입력 상자는 rich 모양에서 둥근 패널 quad 를 내고 lowering 이 그것을 사방 패딩만큼 키운다. rect 를 한 셀(10)만 띄우면
+    // 보이는 패널이 2px 넘쳐 테두리가 창 끝에 먹혔다(적대적 검증 2026-10-07 — `popup_box.Placement.visible_outset_px`).
+    var p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 10, .cell_height_px = 20, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 } };
+    p.shape.border_width_px = 1;
+    p.shape.modal_padding_px = 12;
+    var st = State{};
+    st.show(1190, 200, 20);
+    const r = boxRect(&st, "add", p).?;
+    try testing.expectEqual(@as(i32, 1200 - 10), r.x + @as(i32, @intCast(r.w)) + 12); // 보이는 우단 = 창 끝 − 한 셀
+    st.show(0, 200, 20);
+    try testing.expectEqual(@as(i32, 10), boxRect(&st, "add", p).?.x - 12); // 보이는 좌단 = 한 셀
 }
 
 test "RNB2 rename_box — caret 은 편집 위치에 그린다(끝 고정이 아니다)" {

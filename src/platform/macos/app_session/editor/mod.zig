@@ -9271,7 +9271,7 @@ pub fn showSendHelper(self: *AppSession, term: *Term) void {
     @memcpy(self.send_helper_label_buf[0..header.len], header);
     self.send_helper_items[0] = self.send_helper_label_buf[0..header.len];
 
-    const anchor = sendHelperAnchor(term, doc, sel) orelse return;
+    const anchor = sendHelperAnchor(term, doc, sel, self.buildChromeProps().shape.modal_padding_px) orelse return;
     self.chrome_host.send_helper.show(anchor.x, anchor.y, 1);
     self.send_helper_source = term.surface.id;
     self.metal_dirty = true;
@@ -9283,10 +9283,12 @@ pub fn showSendHelper(self: *AppSession, term: *Term) void {
 }
 
 /// 선택 focus 가 그려진 자리 **바로 아래**(px, 창 좌표). 그 줄이 화면에 없으면 `null`.
+/// `modal_padding_px` 는 rich lowering 이 패널을 사방으로 키우는 폭이다(`ChromeProps.shape`) — 아래 주석.
 fn sendHelperAnchor(
     term: *Term,
     doc: Opened,
     sel: maru.session.editor.selection.Selection,
+    modal_padding_px: u32,
 ) ?struct { x: i32, y: i32 } {
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null; // 아직 안 그렸다 — 그 프레임에는 좌표가 없다
@@ -9313,7 +9315,12 @@ fn sendHelperAnchor(
     ) orelse return null;
     // **한 줄 아래**에 띄운다 — caret 줄 위에 겹치면 방금 고른 글자를 가린다. 화면 아래 끝이면
     // 컴포넌트의 `menuRect` 가 위로 당긴다(가장자리 clamp 는 그쪽 단일 출처다).
-    return .{ .x = a.x_px, .y = a.y_px + @as(i32, geom.cell_h_px) };
+    //
+    // **보이는 패널이 기준이다.** rich lowering 은 상자를 사방 `modal_padding_px`(12) 키워 그린다 — rect 를 줄 바로
+    // 아래에 두면 보이는 패널이 고른 줄의 아래 12px(16px 중 3/4)을 덮었다(적대적 검증 2026-10-07). 우클릭 메뉴는
+    // 누른 자리가 곧 좌상단이라(`popup_box` `at_anchor` 는 간격을 안 쓴다) 앵커를 그만큼 내린다 — `hover_box` 가
+    // `gap_px = modal_padding_px` 로 같은 문제를 푼 것과 같은 계약이다.
+    return .{ .x = a.x_px, .y = a.y_px + @as(i32, geom.cell_h_px) + @as(i32, @intCast(modal_padding_px)) };
 }
 
 /// 헬퍼를 내린다. 열려 있지 않았으면 무동작(다시 그리지도 않는다).
@@ -9379,7 +9386,7 @@ pub fn refreshSendHelper(self: *AppSession) bool {
         hideSendHelper(self);
         return false;
     };
-    const anchor = sendHelperAnchor(term, doc, sel) orelse {
+    const anchor = sendHelperAnchor(term, doc, sel, self.buildChromeProps().shape.modal_padding_px) orelse {
         hideSendHelper(self); // 그 줄이 화면 밖으로 굴러갔다
         return false;
     };
@@ -39774,7 +39781,7 @@ test "NSH 고른 뒤에만 뜬다 — caret 만 있는 클릭에는 안 뜬다" 
     try testing.expectEqual(h.fx.term.surface.id, h.fx.session.send_helper_source);
 }
 
-test "NSH 앵커는 고른 끝의 **한 줄 아래**다 — 방금 고른 글자를 안 가린다" {
+test "NSH 앵커는 고른 끝의 **한 줄 아래**다 — 방금 고른 글자를 **보이는 패널**도 안 가린다" {
     // 겹쳐 뜨면 상자가 고른 자리를 덮는다. 그리고 좌표는 **그 프레임이 굳힌 기하**에서 나와야
     // 한다(클릭 경로와 같은 계약) — live 값으로 다시 구하면 보이는 자리와 갈린다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -39790,9 +39797,14 @@ test "NSH 앵커는 고른 끝의 **한 줄 아래**다 — 방금 고른 글자
 
     const geom = h.fx.term.rt.editor_hit_geom;
     const want_x = geom.body_x + @as(i32, @intCast(geom.content_left_px)) + 5 * @as(i32, geom.cell_w_px);
-    const want_y = geom.body_y + @as(i32, geom.cell_h_px); // 0 번 행 + 한 줄
+    // 0 번 행 + 한 줄 + 패널 패딩 — rich lowering 이 상자를 사방 패딩만큼 키워 그리므로, 보이는 패널의 윗변이 줄 아래 끝에 선다.
+    const pad = h.fx.session.buildChromeProps().shape.modal_padding_px;
+    try testing.expect(pad > 0); // 전제: 제품 토큰이 패딩을 준다 — 0 이면 위 계약이 간격을 안 잰다
+    const want_y = geom.body_y + @as(i32, geom.cell_h_px) + @as(i32, @intCast(pad));
     try testing.expectEqual(want_x, h.fx.session.chrome_host.send_helper.anchor_x);
     try testing.expectEqual(want_y, h.fx.session.chrome_host.send_helper.anchor_y);
+    const menu = chrome.components.context_menu.menuRect(&h.fx.session.chrome_host.send_helper, sendHelperItems(h.fx.session), h.fx.session.buildChromeProps()).?;
+    try testing.expectEqual(geom.body_y + @as(i32, geom.cell_h_px), menu.y - @as(i32, @intCast(pad))); // 보이는 윗변 = 고른 줄 아래 끝
 }
 
 test "NSH 보낼 곳이 없으면 안 뜬다 — 눌러도 아무 일 없는 상자를 만들지 않는다" {

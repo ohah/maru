@@ -36,7 +36,15 @@ pub fn headEnd(bytes: []const u8, budget_cols: u32, max_bytes: usize) usize {
 /// 홀로 붙어 보였다(가운데 줄임에서 폭 35 개 중 17 개, 적대적 검증). 덜 남기는 쪽이라 폭 상한은 그대로 지켜진다.
 fn tailStart(bytes: []const u8, i: usize) usize {
     const floor = grapheme.snapToBoundary(bytes, i);
-    return if (floor == i) i else grapheme.clusterEnd(bytes, floor);
+    var start = if (floor == i) i else grapheme.clusterEnd(bytes, floor);
+    // **맨 앞의 확장 부호도 건너뛴다.** 묶음 규칙은 손상 바이트를 1 바이트 묶음으로 끊으므로 `"\xff\u{301}"` 의 U+0301 은
+    // 경계에서 **새 묶음을 시작한다** — 경계로 올려도 그 부호가 「…」 뒤에 홀로 붙었다(적대적 검증 2026-10-07 재현).
+    while (start < bytes.len) {
+        const d = text_layout.decodeCodepoint(bytes, start);
+        if (!grapheme.isExtendOrZwj(d.cp)) break;
+        start += d.advance;
+    }
+    return start;
 }
 
 /// UTF-8 바이트열의 **표시 폭**(셀 칸 수) = Σ max(1, cellWidth(cp)). 한글/CJK는 2칸, 결합 문자는 1칸으로 친다
@@ -114,9 +122,29 @@ fn copyHeadWithEllipsis(buf: []u8, bytes: []const u8, head_end: usize) []const u
     const room = buf.len - ellipsis.len;
     var n = @min(head_end, room);
     while (n > 0 and n < bytes.len and (bytes[n] & 0xC0) == 0x80) n -= 1; // 코드포인트 경계로 되돌린다
+    // 그리고 **글자 묶음 경계로 내린다** — 버퍼가 모자란 이 경로만 코드포인트에서 멈춰 `e\u{301}` 를 `e…` 로 갈랐다
+    // (`headEnd` 와 같은 규칙, 적대적 검증 2026-10-07 재현).
+    n = grapheme.snapToBoundary(bytes, n);
     @memcpy(buf[0..n], bytes[0..n]);
     @memcpy(buf[n..][0..ellipsis.len], ellipsis);
     return buf[0 .. n + ellipsis.len];
+}
+
+test "elideMiddle·tailWindow: 버퍼가 모자란 경로도 묶음을 가르지 않고, 손상 바이트 뒤 결합 부호를 「…」 뒤에 홀로 두지 않는다" {
+    // 버퍼가 모자라면 앞만 남기고 「…」로 마치는 경로(`copyHeadWithEllipsis`)가 코드포인트에서 멈춰 결합 부호를 떼었다.
+    var small: [4]u8 = undefined;
+    const head_only = elideMiddle(&small, "e\u{301}" ** 30, 40);
+    try std.testing.expect(!std.mem.startsWith(u8, head_only, "e…")); // `e` 만 남기고 부호를 떼지 않는다
+    try std.testing.expect(std.mem.endsWith(u8, head_only, "…"));
+    // 손상 바이트는 1 바이트 묶음이라 그 뒤의 결합 부호가 새 묶음을 시작한다 — 꼬리 맨 앞이면 건너뛴다.
+    var buf: [512]u8 = undefined;
+    const out = elideMiddle(&buf, "\xff\u{301}" ** 40, 10);
+    const cut = std.mem.indexOf(u8, out, "…").?;
+    try std.testing.expect(!std.mem.startsWith(u8, out[cut + "…".len ..], "\u{301}"));
+    try std.testing.expect(displayCols(out) <= 10);
+    const tail = tailWindow("\xff\u{301}" ** 40, 5);
+    try std.testing.expect(tail.truncated and !std.mem.startsWith(u8, tail.text, "\u{301}"));
+    try std.testing.expect(displayCols(tail.text) <= 5);
 }
 
 test "elideMiddle: 앞과 끝을 남기고 가운데를 줄이며, 폭과 UTF-8 을 지킨다" {

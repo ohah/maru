@@ -8,8 +8,14 @@
 //! 와 빈 값은 뺀다. 칸이 초점을 잃거나 그 칸을 품은 스크롤·창 크기 바뀜·페이지 떠남이면 닫는다. 고르면 그 값을 넣고 `input`·`change` 를
 //! 보낸 뒤 닫는다(`isTrusted` 는 false — 대리 스크립트가 보낸 사건이다, 드러나는 차이).
 //!
-//! 렌더러의 말은 믿지 않는다 — 주 프레임에서 온 것만(iframe 은 W6m③), 항목은 글 규칙으로 다듬고 상한 안에서, 칸 자리는 view 와
-//! 겹칠 때만 보낸다(maru 가 그 pane 안으로 다시 자른다). 고르기는 maru 가 받은 목록 번호(`list`)로만 그 문서(표식)에 돌려보낸다.
+//! 렌더러의 말은 믿지 않는다 — 지금 주 프레임이나 그 브라우저의 살아 있는 iframe 에서 온 것만, 항목은 글 규칙으로 다듬고 상한
+//! 안에서, 칸 자리는 view 와 겹칠 때만 보낸다(maru 가 그 pane 안으로 다시 자른다). 고르기는 maru 가 받은 목록 번호(`list`)로만 그
+//! 프레임의 그 문서(표식)에 돌려보낸다.
+//!
+//! W6m③: iframe(같은·다른 출처)의 대리 스크립트는 칸 사각형을 신뢰된 포인터 사건으로 잰 프레임 원점으로 주 view 기준으로 옮겨
+//! 보낸다(`datalist_page.zig`). 그 원점은 최상위 문서가 스크롤하면 낡는다 — 원점을 잰 뒤에 최상위가 스크롤했으면(`a` 로 계산)
+//! 보이지 않고, 떠 있는 iframe 목록은 최상위 스크롤에 닫는다(`onTopScroll` — 그 iframe 의 스크립트는 바깥 스크롤을 모른다).
+//! iframe 이 다른 문서로 가거나 떨어져 나가면 그 프레임의 목록을 닫는다(떨어진 프레임의 `pagehide` 닫기는 프레임이 무효라 버려진다).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -34,6 +40,8 @@ const Shown = struct {
     frame_len: usize = 0,
     token_buf: [16]u8 = undefined,
     version: i32,
+    /// 주 프레임의 목록인가(아니면 iframe — 최상위 스크롤에 닫는다).
+    main: bool = true,
 };
 var shown: [64]?Shown = [_]?Shown{null} ** 64;
 var next_list: u32 = 1;
@@ -48,6 +56,8 @@ const Heard = struct {
     has_last: bool = false,
     retired: [16]u8 = undefined,
     retired_at_ms: i64 = 0,
+    /// 마지막으로 최상위 문서가 스크롤한 때(W6m③ — iframe 원점이 낡았는가).
+    scrolled_at_ms: i64 = 0,
 };
 var heard: [64]?Heard = [_]?Heard{null} ** 64;
 const retired_ms: i64 = 1000;
@@ -98,6 +108,24 @@ fn isCurrentMain(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
     return a.*.length == b.*.length and std.mem.eql(u16, a.*.str[0..a.*.length], b.*.str[0..b.*.length]);
 }
 
+/// 그 브라우저의 살아 있는 iframe 인가(W6m③).
+fn isLiveSubframe(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
+    if (frame.*.is_valid.?(frame) == 0 or frame.*.is_main.?(frame) != 0) return false;
+    const owner = frame.*.get_browser.?(frame);
+    if (owner == null) return false;
+    defer object.release(owner);
+    return owner.*.get_identifier.?(owner) == browser.*.get_identifier.?(browser);
+}
+
+fn frameIdEquals(api: *const library.Api, frame: [*c]c.cef_frame_t, entry: *const Shown) bool {
+    const id = frame.*.get_identifier.?(frame);
+    if (id == null) return false;
+    defer api.string_userfree_utf16_free(id);
+    var buf: [max_frame_id_bytes]u8 = undefined;
+    const text = library.readString(api, id, &buf);
+    return text.len == entry.frame_len and std.mem.eql(u8, text, entry.frame_buf[0..entry.frame_len]);
+}
+
 fn shownFor(id: BrowserId) ?*?Shown {
     for (&shown) |*slot| {
         if (slot.*) |s| if (s.browser == id) return slot;
@@ -113,8 +141,11 @@ fn freeSlot() ?*?Shown {
 /// client 의 `on_process_message_received` 에서 — 렌더러의 `maru.datalist`.
 pub fn onMessage(id: BrowserId, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, msg: [*c]c.cef_process_message_t, view: message.ViewSize) void {
     const api = browsers.state.api;
-    // 지금 주 프레임만(W6m①) — 같은 프로세스의 iframe 문서도 스크립트가 돌지만 자리를 주 프레임 view 로 옮기지 못한다(W6m③).
-    if (!isCurrentMain(browser, frame)) return;
+    // 지금 주 프레임이나 그 브라우저의 살아 있는 iframe(W6m③).
+    const main = frame.*.is_main.?(frame) != 0;
+    if (main) {
+        if (!isCurrentMain(browser, frame)) return;
+    } else if (!isLiveSubframe(browser, frame)) return;
     const list = msg.*.get_argument_list.?(msg);
     if (list == null) return;
     defer object.release(list);
@@ -129,11 +160,13 @@ pub fn onMessage(id: BrowserId, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_f
     if (token.len != 16) return;
     _ = std.fmt.parseInt(u64, token, 16) catch return;
     const h = heardFor(id);
-    // 떠난 문서가 늦게 보낸 것 — 버린다(위 `Heard`).
-    if (h) |x| if (x.retired_at_ms != 0 and nowMs() - x.retired_at_ms < retired_ms and std.mem.eql(u8, &x.retired, token)) return;
-    if (h) |x| {
-        @memcpy(&x.last, token[0..16]);
-        x.has_last = true;
+    // 떠난 문서가 늦게 보낸 것 — 버린다(위 `Heard` — 주 프레임 문서만 센다: iframe 의 표식이 `last` 를 덮으면 주 프레임 은퇴가 빗나간다).
+    if (main) {
+        if (h) |x| if (x.retired_at_ms != 0 and nowMs() - x.retired_at_ms < retired_ms and std.mem.eql(u8, &x.retired, token)) return;
+        if (h) |x| {
+            @memcpy(&x.last, token[0..16]);
+            x.has_last = true;
+        }
     }
     // 넘치는 글은 버리지 않고 닫는다 — 버리면 maru 에 옛 목록이 남는다(렌더러도 넘치면 닫기로 바꿔 보낸다).
     if (payload_str.*.length > renderer.max_datalist_payload_units) return closeFor(id, token);
@@ -147,11 +180,13 @@ pub fn onMessage(id: BrowserId, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_f
     switch (parsed) {
         .hide => closeFor(id, token),
         .show => |s| {
+            // iframe 의 원점을 잰 뒤에 최상위가 스크롤했다 — 자리가 낡았을 수 있어 보이지 않는다(포인터를 움직이면 다시 잰다).
+            if (!main) if (h) |x| if (x.scrolled_at_ms != 0 and nowMs() - @as(i64, s.age_ms) <= x.scrolled_at_ms) return closeFor(id, token);
             const slot = shownFor(id) orelse freeSlot() orelse return;
             const list_id = next_list;
             next_list +%= 1;
             if (next_list == 0) next_list = 1;
-            var entry: Shown = .{ .browser = id, .list = list_id, .version = s.version };
+            var entry: Shown = .{ .browser = id, .list = list_id, .version = s.version, .main = main };
             const frame_id = frame.*.get_identifier.?(frame);
             if (frame_id == null) return;
             defer api.string_userfree_utf16_free(frame_id);
@@ -218,6 +253,29 @@ pub fn reset(id: BrowserId) void {
         h.has_last = false;
     };
     const slot = shownFor(id) orelse return;
+    const list_id = slot.*.?.list;
+    slot.* = null;
+    browsers.state.writer.send(.{ .datalist_hide = .{ .browser = id, .list = list_id } }) catch {};
+}
+
+/// 최상위 문서가 스크롤했다(W6m③ — render handler 의 `on_scroll_offset_changed`). iframe 의 목록은 닫는다 — 그 iframe 의 스크립트는
+/// 바깥 스크롤을 몰라 목록이 옛 자리에 남는다(주 프레임 목록은 그 스크립트가 문서 스크롤에 닫는다). 그 뒤 iframe 이 낡은 원점으로
+/// 보내는 목록은 받지 않는다(`onMessage`).
+pub fn onTopScroll(id: BrowserId) void {
+    if (heardFor(id)) |h| h.scrolled_at_ms = nowMs();
+    const slot = shownFor(id) orelse return;
+    if (slot.*.?.main) return;
+    const list_id = slot.*.?.list;
+    slot.* = null;
+    browsers.state.writer.send(.{ .datalist_hide = .{ .browser = id, .list = list_id } }) catch {};
+}
+
+/// iframe 이 다른 문서로 가거나(`on_load_start`) 떨어져 나갔다(`on_frame_detached`) — 그 프레임의 목록을 닫는다(W6m③). 떨어진
+/// 프레임에서 오는 대리 스크립트의 닫기는 프레임이 무효라 버려진다.
+pub fn closeFrame(id: BrowserId, frame: [*c]c.cef_frame_t) void {
+    const slot = shownFor(id) orelse return;
+    if (slot.*.?.main) return; // 주 프레임은 `reset`
+    if (!frameIdEquals(browsers.state.api, frame, &slot.*.?)) return;
     const list_id = slot.*.?.list;
     slot.* = null;
     browsers.state.writer.send(.{ .datalist_hide = .{ .browser = id, .list = list_id } }) catch {};

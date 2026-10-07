@@ -5106,15 +5106,48 @@ pub export fn maru_macos_app_session_osr_drag_update(session: ?*AppSession, x_px
     return session_mod.web_ops.osrDragUpdate(app, x_px, y_px, mods, allowed);
 }
 
-/// 시험 전용(v213, W6m② 스모크): 그린 제안 목록의 항목 수·강조(없으면 -1)와 `row` 번째 행 가운데(창 backing px). 그렸으면 1.
-pub export fn maru_macos_app_session_osr_datalist_test_state(session: ?*AppSession, row: u32, out_x: ?*f64, out_y: ?*f64, out_count: ?*i32, out_selected: ?*i32) i32 {
+/// v213(W6m②): 이 창이 띄울 제안 목록(키 대상 Chromium 탭의 것) — 세대·항목 수·강조(없으면 -1)·칸 사각형(view backing px, 왼쪽 위
+/// 원점 — 그 탭 본문 안으로 자름). Swift 가 tick 마다 읽어 네이티브 창(테두리 없는 자식 창 안의 표)으로 띄운다. 띄울 것이 있으면 1.
+pub export fn maru_macos_app_session_osr_datalist_state(session: ?*AppSession, out_generation: ?*u32, out_count: ?*u32, out_selected: ?*i32, out_field: ?*[4]f64) i32 {
     const app = session orelse return 0;
-    const st = session_mod.web_ops.datalistTestState(app, row);
-    if (out_x) |p| p.* = st.x;
-    if (out_y) |p| p.* = st.y;
-    if (out_count) |p| p.* = @intCast(@min(st.count, std.math.maxInt(i32)));
-    if (out_selected) |p| p.* = if (st.selected) |s| @intCast(@min(s, std.math.maxInt(i32))) else -1;
+    const st = session_mod.web_ops.datalistState(app);
+    if (out_generation) |p| p.* = st.generation;
+    if (out_count) |p| p.* = st.count;
+    if (out_selected) |p| p.* = st.selected;
+    if (out_field) |p| p.* = st.field;
     return @intFromBool(st.open);
+}
+
+/// v213(W6m②): 그 세대 목록의 `index` 번째 항목 — 값과 레이블(값과 같으면 빈 글)을 UTF-8 로(각 512 바이트 안 — sidecar 가 자른다).
+/// 버퍼가 작으면 글자 경계에서 자른다. 세대가 지금 목록이 아니거나 범위 밖이면 0.
+pub export fn maru_macos_app_session_osr_datalist_item(session: ?*AppSession, generation: u32, index: u32, out_value: ?[*]u8, value_cap: usize, out_value_len: ?*usize, out_label: ?[*]u8, label_cap: usize, out_label_len: ?*usize) i32 {
+    const app = session orelse return 0;
+    const item = session_mod.web_ops.datalistItem(app, generation, index) orelse return 0;
+    const v = maru.session.web_sidecar.text.clampUtf8(item.value, value_cap);
+    const l = maru.session.web_sidecar.text.clampUtf8(item.label, label_cap);
+    if (out_value) |p| @memcpy(p[0..v.len], v);
+    if (out_value_len) |p| p.* = v.len;
+    if (out_label) |p| @memcpy(p[0..l.len], l);
+    if (out_label_len) |p| p.* = l.len;
+    return 1;
+}
+
+/// v213(W6m②): Swift 가 띄운(0 = 거둔) 목록의 세대 — 키는 띄운 그 목록에서만 먹는다.
+pub export fn maru_macos_app_session_osr_datalist_shown(session: ?*AppSession, generation: u32) void {
+    const app = session orelse return;
+    session_mod.web_ops.datalistShown(app, generation);
+}
+
+/// v213(W6m②): 네이티브 창의 행 위 hover(-1 = 창을 떠남).
+pub export fn maru_macos_app_session_osr_datalist_hover(session: ?*AppSession, generation: u32, index: i32) void {
+    const app = session orelse return;
+    session_mod.web_ops.datalistHover(app, generation, index);
+}
+
+/// v213(W6m②): 네이티브 창의 행을 눌렀다 — 그 목록이 아직 띄운 그것이면 고른다(1).
+pub export fn maru_macos_app_session_osr_datalist_pick(session: ?*AppSession, generation: u32, index: u32) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.datalistPickIndex(app, generation, index));
 }
 
 /// v213(W6m②): 키 대상 Chromium 탭에 제안 목록이 열려 있으면 ↑↓·Enter·Esc 를 목록이 먹는다(1 — Swift 는 페이지에 보내지 않는다).

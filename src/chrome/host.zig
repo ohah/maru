@@ -286,21 +286,6 @@ pub const ChromeHost = struct {
         }
     }
 
-    /// Chromium 탭의 제안 목록(datalist — W6m②) — 편집기 자동완성과 같은 상자를 쓰되 상태는 platform 이 따로 쥔다(편집기의
-    /// `suggest_box` 를 건드리지 않는다). 닫힘이면 무동작.
-    pub fn collectWebSuggestDraws(
-        state: *const suggest_box.State,
-        rows: []const suggest_box.Row,
-        p: props.ChromeProps,
-        tk: *const tokens.Tokens,
-        arena: std.mem.Allocator,
-        out: *std.ArrayList(draw.ChromeDraw),
-    ) !void {
-        var ops: std.ArrayList(draw.Op) = .empty;
-        try suggest_box.view(state, rows, p, tk, arena, &ops);
-        if (ops.items.len > 0) try out.append(arena, .{ .layer = suggest_box.layer, .ops = ops.items });
-    }
-
     /// notifications도 카드(Item)를 platform이 히스토리에서 빌드해 주입해야 그릴 수 있다(palette/context_menu와
     /// 동형). 닫힘이면 무동작(빈 out).
     pub fn collectNotificationsDraws(

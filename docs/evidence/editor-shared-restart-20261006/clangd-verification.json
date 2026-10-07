@@ -1,0 +1,9 @@
+{
+  "scope": "Screen unlocked; generated C fixture has its own Git root and exact-root trust. Three real AppKit processes with delayed real clangd folding; zero restore differences.",
+  "runner_sha256": "a815b42c659cc3b10e351b96e53f6e2e5255400691b165bd8ab3f1b83e0c5b9c",
+  "artifact_sha256": {
+    "clangd-20261007.json": "0e8a6a6b4fe740743f3c08ee620f099951385a57cb0ffa0d24acb05459e5da30",
+    "clangd-first.png": "f400b3318c6891622a75f6ea3b05a4de50192fc8df66627613e04eb5ac95ee2a",
+    "clangd-settled.png": "b37c76d3bdcaa3338d816348bf5d74464299c5757c0d9bd75f5a1dae812d3541"
+  }
+}

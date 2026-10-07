@@ -1,0 +1,150 @@
+{
+  "pr": 4185,
+  "storage": "Uploaded to PR #4185 body using gh pr edit --attach; no PNG assets in repository tree.",
+  "captures": [
+    {
+      "path": "before-close.png",
+      "sha256": "c58880c33fcbfcd8ea48ce5298ed99017e5607098b3bcc2d956ea368eaab7364",
+      "bytes": 89050,
+      "attachment_url": "https://github.com/user-attachments/assets/6161b880-3b7f-486b-b7e7-df8190c4adac"
+    },
+    {
+      "path": "clangd-first.png",
+      "sha256": "f400b3318c6891622a75f6ea3b05a4de50192fc8df66627613e04eb5ac95ee2a",
+      "bytes": 86389,
+      "attachment_url": "https://github.com/user-attachments/assets/4c2076a1-9f3b-4436-bcdd-c9bb10defe98"
+    },
+    {
+      "path": "cancelled.png",
+      "sha256": "3d2c7b9130ddb11509b16f7dca4df4251c109abe5adc672fb3693eefe53e8773",
+      "bytes": 57782,
+      "attachment_url": "https://github.com/user-attachments/assets/b745d961-0e04-485b-aeef-2c10ba42c045"
+    },
+    {
+      "path": "saved.png",
+      "sha256": "65011c33318d0491eb3e7fe67793dac691472a77b84fb9b5fa3b280258268a46",
+      "bytes": 57598,
+      "attachment_url": "https://github.com/user-attachments/assets/ece4c2bf-a695-4f4f-9b3f-e71f0ee67016"
+    },
+    {
+      "path": "restored-two-panes.png",
+      "sha256": "494246e4f5e06c4e7c3a135be0ed9bef00d7278aab858462448fb03c141cf68e",
+      "bytes": 89662,
+      "attachment_url": "https://github.com/user-attachments/assets/e3440ba2-46ea-4c68-9fde-cb45f1b992d9"
+    },
+    {
+      "path": "last-prompt.png",
+      "sha256": "5523113ff232c01931e000dba33391f39062a1e8829838102c04bb1823bd6f93",
+      "bytes": 65163,
+      "attachment_url": "https://github.com/user-attachments/assets/b315c404-a903-469f-83c2-98e0542ae1a1"
+    },
+    {
+      "path": "one-closed.png",
+      "sha256": "6975b28736348a1a8359a5cbda4d009a9ad4592743ef7ef917462cc3f1602f0e",
+      "bytes": 57026,
+      "attachment_url": "https://github.com/user-attachments/assets/f5abceb8-6784-4019-9335-bada4e150506"
+    },
+    {
+      "path": "clangd-settled.png",
+      "sha256": "b37c76d3bdcaa3338d816348bf5d74464299c5757c0d9bd75f5a1dae812d3541",
+      "bytes": 87641,
+      "attachment_url": "https://github.com/user-attachments/assets/8ed9b0f5-ef60-4a7a-abbe-71cdbd08e711"
+    },
+    {
+      "path": "last-closed.png",
+      "sha256": "779d27b00d3e13b847587bfbe18e6855b734f22ee2aa71606c5f6ae83a399035",
+      "bytes": 38325,
+      "attachment_url": "https://github.com/user-attachments/assets/1a03e8ba-0c54-403e-8a98-b7409d7eaaf7"
+    },
+    {
+      "path": "adversarial-20261007/r5-close/seed/before-split.png",
+      "sha256": "ede6afd9f67e960636d8727f65b15aeb5995300ef38f0f109ccf372464883a16",
+      "bytes": 92395,
+      "attachment_url": "https://github.com/user-attachments/assets/9bf92296-7ab7-4220-b060-9b2a4aef07d3"
+    },
+    {
+      "path": "adversarial-20261007/r5-close/seed/seed.png",
+      "sha256": "c41385f0b4e3b713a0e63344491e1394a813bc809d6ff18ce4f1b414e1674fab",
+      "bytes": 88793,
+      "attachment_url": "https://github.com/user-attachments/assets/f0d39d85-2be0-4162-8ace-67b653f26387"
+    },
+    {
+      "path": "adversarial-20261007/r5-close/close/before-close.png",
+      "sha256": "65aade28456ca3d898f1896f800156a467c1327d4d782e42a83d1a2357542c38",
+      "bytes": 88982,
+      "attachment_url": "https://github.com/user-attachments/assets/97c320fd-1a96-493c-83fb-6a94ff549724"
+    },
+    {
+      "path": "adversarial-20261007/r5-close/close/cancelled.png",
+      "sha256": "6bb2fe2eddd884203591dcf371f8e28441d5554a084438d5158fa927e92d185e",
+      "bytes": 57911,
+      "attachment_url": "https://github.com/user-attachments/assets/8e806547-9825-44ff-9aca-17aea1fc67ff"
+    },
+    {
+      "path": "adversarial-20261007/r5-close/close/saved.png",
+      "sha256": "78d55be710292c592ad2f849ab15434eab73f6a8aef9dfd320f35e06b4cf784d",
+      "bytes": 57774,
+      "attachment_url": "https://github.com/user-attachments/assets/cd72dccd-a50b-4fd9-9fb3-82267cadeb3a"
+    },
+    {
+      "path": "adversarial-20261007/r5-close/close/last-prompt.png",
+      "sha256": "b92bdca8293da91ff12b1037a56b925f4aef2554410e5b84e16454bcb46ead73",
+      "bytes": 65295,
+      "attachment_url": "https://github.com/user-attachments/assets/21fa591d-d8c7-44c5-b2e5-9baf08de6aa9"
+    },
+    {
+      "path": "adversarial-20261007/r5-close/close/one-closed.png",
+      "sha256": "2cdf1757aefe8dec226b3384d75a0a069090670193babd2200bf9a3e3cfbe49f",
+      "bytes": 57050,
+      "attachment_url": "https://github.com/user-attachments/assets/de08156c-1c29-4b33-889b-1d1056d71818"
+    },
+    {
+      "path": "adversarial-20261007/r5-close/close/last-closed.png",
+      "sha256": "24851e8d7aee79faabbfa141963cb81068b1a2f16873c79e827bec1abf49fc3a",
+      "bytes": 38306,
+      "attachment_url": "https://github.com/user-attachments/assets/4597bb85-5646-4d46-9689-e627533839c0"
+    },
+    {
+      "path": "adversarial-20261007/r5-clangd/seed/before-split.png",
+      "sha256": "c5901fc3f8b3b5fb23d621d1e80360109c25cc90188c8ae11a9738aa4ee5fa2a",
+      "bytes": 90648,
+      "attachment_url": "https://github.com/user-attachments/assets/40c6c86d-00ef-4d77-beb9-1fd42aa3680f"
+    },
+    {
+      "path": "adversarial-20261007/r5-clangd/seed/seed.png",
+      "sha256": "1ab803e8f83e526868f22d7045e5f613053226409d6f84e9fae5392bce06cb1f",
+      "bytes": 87443,
+      "attachment_url": "https://github.com/user-attachments/assets/ccc666c3-9601-42a5-9e0f-b240413eabf2"
+    },
+    {
+      "path": "adversarial-20261007/r5-clangd/first/first.png",
+      "sha256": "f400b3318c6891622a75f6ea3b05a4de50192fc8df66627613e04eb5ac95ee2a",
+      "bytes": 86389,
+      "attachment_url": "https://github.com/user-attachments/assets/16149466-b8f8-4d36-aab0-b39da9ea334f"
+    },
+    {
+      "path": "adversarial-20261007/r5-clangd/restore/restored.png",
+      "sha256": "661e0d6db6a870822cba8ad8573de205f66b967ca21f7c67dbb7122b717a6250",
+      "bytes": 88610,
+      "attachment_url": "https://github.com/user-attachments/assets/11ba2a31-955d-4727-9a88-c8d143040c01"
+    },
+    {
+      "path": "adversarial-20261007/r5-clangd/restore/narrow.png",
+      "sha256": "b96dc6c1942e7051e33d20954d955b49f3b3726604c9a91227275214ad688a34",
+      "bytes": 57345,
+      "attachment_url": "https://github.com/user-attachments/assets/1029b259-b31d-4293-9754-20e061e03051"
+    },
+    {
+      "path": "adversarial-20261007/r5-clangd/restore/wide.png",
+      "sha256": "0a5f0a64a58cfc49c1cab6590515f613000da063c7ab41c10e28bc5a0c26b8e6",
+      "bytes": 142225,
+      "attachment_url": "https://github.com/user-attachments/assets/794740a6-922c-4ca8-8b1e-7751a8b4f232"
+    },
+    {
+      "path": "adversarial-20261007/r5-clangd/restore/settled.png",
+      "sha256": "b37c76d3bdcaa3338d816348bf5d74464299c5757c0d9bd75f5a1dae812d3541",
+      "bytes": 87641,
+      "attachment_url": "https://github.com/user-attachments/assets/ea6fcf67-a597-4cc0-aa2b-bb45f2547118"
+    }
+  ]
+}

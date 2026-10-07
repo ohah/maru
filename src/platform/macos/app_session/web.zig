@@ -1909,6 +1909,10 @@ pub const OsrDatalist = struct {
     hover: bool = false,
     /// Swift 가 띄운 목록의 세대(0 = 띄우지 않음) — 키는 띄운 그 목록에서만 먹는다.
     shown_generation: u32 = 0,
+    /// 항목 읽기 자리(다음 번호와 그 바이트 자리) — Swift 가 0 번부터 차례로 읽으므로 처음부터 다시 훑지 않는다(적대 검증 4 차 —
+    /// 항목마다 처음부터 훑어 256 개면 다시 실을 때마다 3 만 번 넘게 검사했다).
+    item_index: usize = 0,
+    item_pos: usize = 0,
 };
 
 const DatalistTarget = struct { sid: u64, d: *const web_osr.Datalist, generation: u32, layout: app_session_mod.OsrLayout };
@@ -1978,10 +1982,16 @@ pub fn datalistState(self: *AppSession) DatalistState {
 pub fn datalistItem(self: *AppSession, generation: u32, index: usize) ?ws.fields.DatalistItem {
     const t = syncDatalist(self) orelse return null;
     if (t.generation != generation) return null;
-    var it: ws.fields.DatalistItems = .{ .bytes = t.d.items };
-    var n: usize = 0;
+    const dl = &self.osr_datalist;
+    const from_cursor = index >= dl.item_index;
+    var it: ws.fields.DatalistItems = .{ .bytes = t.d.items, .pos = if (from_cursor) dl.item_pos else 0 };
+    var n: usize = if (from_cursor) dl.item_index else 0;
     while (it.next() catch null) |item| : (n += 1) {
-        if (n == index) return item;
+        if (n == index) {
+            dl.item_index = n + 1;
+            dl.item_pos = it.pos;
+            return item;
+        }
     }
     return null;
 }

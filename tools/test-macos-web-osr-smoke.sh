@@ -66,6 +66,10 @@ DL = ("<!doctype html><title>dl</title><style>html,body{margin:0;height:100%;bac
     "a.addEventListener('change',function(){ping('e=change&v='+a.value)});a.addEventListener('keydown',function(e){ping('e=kd&k='+e.key)});"
     "a.addEventListener('keyup',function(e){ping('e=ku&k='+e.key)});document.addEventListener('mousedown',function(e){ping('e=md&b='+e.button)});"
     "</script>").encode()
+# W6m②: 사용자가 손대지 않았는데 페이지가 스스로 칸에 글을 넣는다(`execCommand` — Chrome 은 그 `input` 을 isTrusted 로 낸다) —
+# maru 는 최근 사용자 입력이 없는 탭의 목록을 받지 않는다(적대 검증 4 차).
+DLAUTO = DL.replace(b"</script>", b"a.addEventListener('input',function(e){ping('e=in&tr='+e.isTrusted)});"
+    b"setTimeout(function(){a.focus();document.execCommand('insertText',false,'a')},6000);</script>")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -136,6 +140,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = SEL
         elif self.path == "/dl-app":
             body = DL
+        elif self.path == "/dl-auto":
+            body = DLAUTO
         elif self.path.startswith("/cm-app"):
             body = MENU
         elif self.path == "/tip-app":
@@ -1245,6 +1251,10 @@ key 53 U+1B
 sleep 1500
 datalist
 SCRIPT
+cat > "$root/dl-auto.txt" <<'SCRIPT'
+sleep 9000
+datalist
+SCRIPT
 cat > "$root/dl-shot.txt" <<'SCRIPT'
 sleep 7000
 mouse 1 0.40 0.33 0 0 0
@@ -1280,6 +1290,10 @@ for dl in keys mouse esc press palette; do
   grep -ao 'osr-test datalist [a-z0-9= -]*\|osr-test dl-miss\|osr-test dlsnap ok' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-$dl.report" || true
   cp "$root/requests.log" "$root/dl-$dl.requests"
 done
+: > "$root/requests.log"
+run_app /dl-auto 12000 "$root/dl-auto.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-auto.txt"
+grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-auto.log" | sed 's/ *$//' > "$root/dl-auto.report" || true
+cp "$root/requests.log" "$root/dl-auto.requests"
 : > "$root/requests.log"
 run_app /dl-app 20000 "$root/dl-shot.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-shot.txt" MARU_SCREENSHOT="$root/dl-shot.ppm" MARU_SCREENSHOT_DELAY_MS=11000
 grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-shot.report" || true
@@ -1361,6 +1375,9 @@ kd = [r for r in ereq if r.startswith('/ev?e=kd')]
 check(same(esc, [closed, shown(-1), shown(-1), shown(0)])
       and kd == ['/ev?e=kd&k=ArrowDown', '/ev?e=kd&k=Enter'] and not any(r.startswith('/ev?e=change') for r in ereq),
       f'Esc closes only the list, ↓ on the closed field reaches the page and reopens it, Enter on the open list with nothing highlighted reaches the page and picks nothing ({esc} · {kd})')
+auto = lines('dl-auto.report'); areq = ev('dl-auto.requests')
+check(same(auto, [closed]) and '/ev?e=in&tr=true' in areq,
+      f'a list the page opens by itself (execCommand — a trusted input event) without user input does not show ({auto} · {areq})')
 pal = lines('dl-palette.report')
 check(same(pal, [shown(-1), closed, closed]), f'opening the command palette hides the window and closing it does not bring the list back ({pal})')
 # 자리 — 스크린샷의 빨간 칸(왼쪽 아래)과 창 왼쪽 위(view backing px)가 맞는가. 보고의 below·left 는 같은 변환끼리의 비교라 따로 본다.

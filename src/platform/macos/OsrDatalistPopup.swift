@@ -40,8 +40,12 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
 
         init(font: NSFont) {
             super.init(frame: .zero)
+            clipsToBounds = true
+            // 한 줄로만 — 페이지가 정한 글의 줄 나눔 문자(U+2028 등)가 행 밖으로 넘쳐 이웃 행 위에 겹치지 않게(적대 검증 4 차).
             for field in [valueField, labelField] {
                 field.font = font
+                field.usesSingleLineMode = true
+                field.maximumNumberOfLines = 1
                 field.lineBreakMode = .byTruncatingTail
                 field.translatesAutoresizingMaskIntoConstraints = false
                 addSubview(field)

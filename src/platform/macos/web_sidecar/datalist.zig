@@ -38,6 +38,58 @@ const Shown = struct {
 var shown: [64]?Shown = [_]?Shown{null} ** 64;
 var next_list: u32 = 1;
 
+/// 브라우저마다 마지막으로 들은 문서 표식과, 주 프레임에 새 문서가 온 때 그 표식(떠난 문서). 떠난 문서가 이동 직전에 보낸 보이기가
+/// 닫기(`reset`) 뒤에 도착하면 옛 표식으로 목록이 다시 서고, 새 문서의 닫기는 표식이 달라 그것을 닫지 못한다(적대 검증) — 새
+/// 문서가 온 뒤 잠깐(`retired_ms`)은 떠난 표식의 보이기를 버린다. 잠깐만인 것은 뒤로 가기 캐시가 같은 문서(같은 표식)를 되살리기
+/// 때문이다. 시험하지 못한 방어다(판정자로 그 경쟁을 만들지 못했다).
+const Heard = struct {
+    browser: BrowserId,
+    last: [16]u8 = undefined,
+    has_last: bool = false,
+    retired: [16]u8 = undefined,
+    retired_at_ms: i64 = 0,
+};
+var heard: [64]?Heard = [_]?Heard{null} ** 64;
+const retired_ms: i64 = 1000;
+
+fn heardFor(id: BrowserId) ?*Heard {
+    var free: ?*?Heard = null;
+    for (&heard) |*slot| {
+        if (slot.*) |*h| {
+            if (h.browser == id) return h;
+        } else if (free == null) free = slot;
+    }
+    const slot = free orelse return null;
+    slot.* = .{ .browser = id };
+    return &slot.*.?;
+}
+
+fn nowMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+}
+
+/// 렌더러 글을 읽는 버퍼 — UI 스레드에서만 쓴다(메시지마다 할당하지 않게).
+var payload_buf: [renderer.max_datalist_payload_units * 3]u8 = undefined;
+var items_buf: [message.max_datalist_bytes]u8 = undefined;
+
+/// 그 프레임이 지금 그 브라우저의 주 프레임인가(떠나는 문서의 프레임이 아닌가).
+fn isCurrentMain(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
+    if (frame.*.is_valid.?(frame) == 0 or frame.*.is_main.?(frame) == 0) return false;
+    const api = browsers.state.api;
+    const main = browser.*.get_main_frame.?(browser);
+    if (main == null) return false;
+    defer object.release(main);
+    const a = frame.*.get_identifier.?(frame);
+    if (a == null) return false;
+    defer api.string_userfree_utf16_free(a);
+    const b = main.*.get_identifier.?(main);
+    if (b == null) return false;
+    defer api.string_userfree_utf16_free(b);
+    return a.*.length == b.*.length and std.mem.eql(u16, a.*.str[0..a.*.length], b.*.str[0..b.*.length]);
+}
+
 fn shownFor(id: BrowserId) ?*?Shown {
     for (&shown) |*slot| {
         if (slot.*) |s| if (s.browser == id) return slot;
@@ -51,10 +103,10 @@ fn freeSlot() ?*?Shown {
 }
 
 /// client 의 `on_process_message_received` 에서 — 렌더러의 `maru.datalist`.
-pub fn onMessage(id: BrowserId, frame: [*c]c.cef_frame_t, msg: [*c]c.cef_process_message_t, view: message.ViewSize) void {
+pub fn onMessage(id: BrowserId, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, msg: [*c]c.cef_process_message_t, view: message.ViewSize) void {
     const api = browsers.state.api;
-    // 주 프레임만(W6m①) — 같은 프로세스의 iframe 문서도 스크립트가 돌지만 자리를 주 프레임 view 로 옮기지 못한다(W6m③).
-    if (frame.*.is_main.?(frame) == 0) return;
+    // 지금 주 프레임만(W6m①) — 같은 프로세스의 iframe 문서도 스크립트가 돌지만 자리를 주 프레임 view 로 옮기지 못한다(W6m③).
+    if (!isCurrentMain(browser, frame)) return;
     const list = msg.*.get_argument_list.?(msg);
     if (list == null) return;
     defer object.release(list);
@@ -68,12 +120,17 @@ pub fn onMessage(id: BrowserId, frame: [*c]c.cef_frame_t, msg: [*c]c.cef_process
     const token = library.readString(api, token_str, &token_buf);
     if (token.len != 16) return;
     _ = std.fmt.parseInt(u64, token, 16) catch return;
-    if (payload_str.*.length > renderer.max_datalist_payload_units) return;
-    const payload_buf = std.heap.c_allocator.alloc(u8, renderer.max_datalist_payload_units * 3) catch return;
-    defer std.heap.c_allocator.free(payload_buf);
-    const payload = library.readString(api, payload_str, payload_buf);
-    if (payload.len >= payload_buf.len) return;
-    var items_buf: [message.max_datalist_bytes]u8 = undefined;
+    const h = heardFor(id);
+    // 떠난 문서가 늦게 보낸 것 — 버린다(위 `Heard`).
+    if (h) |x| if (x.retired_at_ms != 0 and nowMs() - x.retired_at_ms < retired_ms and std.mem.eql(u8, &x.retired, token)) return;
+    if (h) |x| {
+        @memcpy(&x.last, token[0..16]);
+        x.has_last = true;
+    }
+    // 넘치는 글은 버리지 않고 닫는다 — 버리면 maru 에 옛 목록이 남는다(렌더러도 넘치면 닫기로 바꿔 보낸다).
+    if (payload_str.*.length > renderer.max_datalist_payload_units) return closeFor(id, token);
+    const payload = library.readString(api, payload_str, &payload_buf);
+    if (payload.len >= payload_buf.len) return closeFor(id, token);
     const parsed = page.parse(payload, view, &items_buf) orelse {
         // 보일 수 없는 목록(view 밖·항목 없음·모양이 틀림) — 그 문서의 목록이 떠 있었으면 닫는다.
         closeFor(id, token);
@@ -145,6 +202,10 @@ pub fn pick(value: message.DatalistPick) void {
 
 /// 주 프레임에 새 문서가 오거나(이동·오류 페이지) 렌더러가 죽었다 — 떠 있던 목록을 닫는다(옛 문서는 닫기를 보내지 못한다).
 pub fn reset(id: BrowserId) void {
+    if (heardFor(id)) |h| if (h.has_last) {
+        h.retired = h.last;
+        h.retired_at_ms = nowMs();
+    };
     const slot = shownFor(id) orelse return;
     const list_id = slot.*.?.list;
     slot.* = null;
@@ -154,4 +215,9 @@ pub fn reset(id: BrowserId) void {
 /// 브라우저가 닫혔다 — 알릴 곳이 없으니 기록만 놓는다(maru 는 그 탭의 목록을 함께 버린다).
 pub fn forgetBrowser(id: BrowserId) void {
     if (shownFor(id)) |slot| slot.* = null;
+    for (&heard) |*slot| {
+        if (slot.*) |x| if (x.browser == id) {
+            slot.* = null;
+        };
+    }
 }

@@ -34,9 +34,13 @@ pub const stash_name = "__maruNotifySend";
 /// 적대 검증).
 const max_payload_units = 8 * 1024;
 const calls_per_second = 10;
-/// 제안 목록(W6m①) — 항목 256 개(값·레이블)가 들어가는 글 상한과 문서마다 1 초에 받는 호출 수(키 반복이 초당 30 남짓).
+/// 제안 목록(W6m①) — 글 상한과 문서마다 1 초에 받는 보이기 수(키 반복이 초당 30 남짓)·닫기 수. 닫기(짧은 글)는 따로 센다 —
+/// 보이기에 막혀 닫기가 사라지면 maru 에 옛 목록이 남는다(적대 검증). 넘치거나 막힌 보이기는 닫기로 바꿔 보낸다.
 pub const max_datalist_payload_units = 64 * 1024;
 const datalist_calls_per_second = 60;
+const datalist_hides_per_second = 120;
+const datalist_hide_max_units = 32;
+const datalist_hide_payload = "{\"t\":0,\"v\":0}";
 
 var api_ref: ?*const library.Api = null;
 var app: c.cef_app_t = undefined;
@@ -57,6 +61,7 @@ const Document = struct {
     pick: [*c]c.cef_v8_value_t = null,
     dl_window_start_ms: i64 = 0,
     dl_window_calls: u32 = 0,
+    dl_hide_calls: u32 = 0,
 };
 var documents: [128]?Document = [_]?Document{null} ** 128;
 
@@ -272,10 +277,28 @@ fn execute(
         if (now_dl - doc.dl_window_start_ms >= 1000) {
             doc.dl_window_start_ms = now_dl;
             doc.dl_window_calls = 0;
+            doc.dl_hide_calls = 0;
         }
-        if (doc.dl_window_calls >= datalist_calls_per_second) return 1;
-        doc.dl_window_calls += 1;
-        forward(frame, datalist_message, value, max_datalist_payload_units, doc.token);
+        const payload = value.*.get_string_value.?(value);
+        if (payload == null) return 1;
+        defer api.string_userfree_utf16_free(payload);
+        const short = payload.*.length < datalist_hide_max_units;
+        if (!short and payload.*.length <= max_datalist_payload_units and doc.dl_window_calls < datalist_calls_per_second) {
+            doc.dl_window_calls += 1;
+            forward(frame, datalist_message, payload, doc.token);
+            return 1;
+        }
+        // 닫기이거나, 넘치거나 막힌 보이기 — 닫기로(닫기도 상한 안에서).
+        if (doc.dl_hide_calls >= datalist_hides_per_second) return 1;
+        doc.dl_hide_calls += 1;
+        if (short) {
+            forward(frame, datalist_message, payload, doc.token);
+        } else {
+            var hide_text = std.mem.zeroes(c.cef_string_t);
+            setString(&hide_text, datalist_hide_payload);
+            defer api.string_utf16_clear(&hide_text);
+            forward(frame, datalist_message, &hide_text, doc.token);
+        }
         return 1;
     }
     const arg = arguments[0];
@@ -295,7 +318,11 @@ fn execute(
     }
     if (doc.window_calls >= calls_per_second) return 1;
     doc.window_calls += 1;
-    forward(frame, notify_message, arg, max_payload_units, doc.token);
+    const payload = arg.*.get_string_value.?(arg);
+    if (payload == null) return 1;
+    defer api.string_userfree_utf16_free(payload);
+    if (payload.*.length > max_payload_units) return 1;
+    forward(frame, notify_message, payload, doc.token);
     return 1;
 }
 
@@ -309,13 +336,9 @@ fn isKind(value: [*c]c.cef_v8_value_t, kind: []const u8) bool {
     return std.mem.eql(u8, library.readString(api_ref.?, text, &buf), kind);
 }
 
-/// 글 하나를 그 문서의 표식과 함께 브라우저 프로세스로 보낸다(상한을 넘으면 보내지 않는다).
-fn forward(frame: [*c]c.cef_frame_t, name_text: []const u8, value: [*c]c.cef_v8_value_t, max_units: usize, doc_token: u64) void {
+/// 글 하나를 그 문서의 표식과 함께 브라우저 프로세스로 보낸다(상한은 호출자가 본다).
+fn forward(frame: [*c]c.cef_frame_t, name_text: []const u8, payload: [*c]const c.cef_string_t, doc_token: u64) void {
     const api = api_ref.?;
-    const payload = value.*.get_string_value.?(value);
-    if (payload == null) return;
-    defer api.string_userfree_utf16_free(payload);
-    if (payload.*.length > max_units) return;
     var name = std.mem.zeroes(c.cef_string_t);
     setString(&name, name_text);
     defer api.string_utf16_clear(&name);

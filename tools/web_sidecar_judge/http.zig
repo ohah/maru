@@ -329,17 +329,26 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/dialog-hold")) {
         return "<!doctype html><title>loading</title><script>alert('hold');document.title='after-hold'</script>";
     }
-    // W6m①: 제안 목록 — a(목록)·b(목록 없음)·c(email + 목록)·d(date + 목록), 300×40 칸을 100 px 간격으로. 입력·고르기의 `input`·
+    // W6m①: 제안 목록 — 왼쪽 열 a(목록)·b(목록 없음 — 누르면 페이지가 a 에 가짜 `input` 을 보낸다)·c(search + 목록)·d(date + 목록),
+    // 오른쪽 열 e(readonly + 목록)·f(안이 스크롤되는 상자). 300×40 칸을 100 px 간격으로, 문서도 스크롤된다. 입력·고르기의 `input`·
     // `change` 는 제목으로 보인다(`종류:칸:값`).
-    if (std.mem.eql(u8, path, "/datalist")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;width:300px;height:40px;font-size:20px;border:0;padding:0}</style><body>" ++
-        "<input id=a list=l style='top:0'><input id=b style='top:100px'><input id=c type=email list=l style='top:200px'><input id=d type=date list=l style='top:300px'>" ++
+    if (std.mem.eql(u8, path, "/datalist")) return "<!doctype html><title>loading</title><style>html,body{margin:0}body{height:3000px}input{position:fixed;left:0;width:300px;height:40px;font-size:20px;border:0;padding:0}" ++
+        "#f{position:fixed;left:320px;top:100px;width:300px;height:80px;overflow:scroll}</style><body>" ++
+        "<input id=a list=l style='top:0'><input id=b style='top:100px'><input id=c type=search list=l style='top:200px'><input id=d type=date list=l style='top:300px'>" ++
+        "<input id=e readonly list=l style='top:0;left:320px'><div id=f><div style='height:1000px'>scroll</div></div>" ++
         "<datalist id=l><option value='apple'><option value='Apple pie'><option value='pineapple'><option value=''>empty value</option><option value='banana' label='yellow fruit'><option value='APRICOT'>" ++
         "<option value='cherry'>Cherry text</option><option value='avocado' disabled><option value='grape' label='purple'>purple text</option></datalist>" ++
-        "<script>['input','change'].forEach(function(t){document.addEventListener(t,function(e){document.title=t+':'+e.target.id+':'+e.target.value},true)});document.title='dl-ready'</script>";
+        "<script>['input','change'].forEach(function(t){document.addEventListener(t,function(e){document.title=t+':'+e.target.id+':'+e.target.value},true)});" ++
+        "document.getElementById('b').addEventListener('mousedown',function(){var a=document.getElementById('a');a.value='p';a.dispatchEvent(new Event('input',{bubbles:true}))});document.title='dl-ready'</script>";
     if (std.mem.eql(u8, path, "/datalist-many")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;top:0;width:300px;height:40px}</style><body><input id=a list=l><datalist id=l></datalist>" ++
         "<script>var l=document.getElementById('l');for(var i=0;i<300;i++){var o=document.createElement('option');o.value='item '+i;l.appendChild(o)}document.title='dl-many-ready'</script>";
-    if (std.mem.eql(u8, path, "/datalist-frame")) return "<!doctype html><title>loading</title><style>html,body{margin:0}iframe{position:fixed;left:0;top:0;width:400px;height:100px;border:0}</style><body>" ++
-        "<iframe srcdoc=\"<style>html,body{margin:0}input{width:300px;height:40px}</style><input list=l><datalist id=l><option value=a><option value=b></datalist>\" onload=\"document.title='dl-frame-ready'\"></iframe>";
+    // 레이블 600 자 옵션 256 개 — 보이는 글을 자르고 모아 둔 한도에서 멈춘다(적대 검증 — 글 상한을 넘어 목록이 아예 안 떴다).
+    if (std.mem.eql(u8, path, "/datalist-long")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;top:0;width:300px;height:40px}</style><body><input id=a list=l><datalist id=l></datalist>" ++
+        "<script>var l=document.getElementById('l'),x='x'.repeat(600);for(var i=0;i<256;i++){var o=document.createElement('option');o.value='v'+i;o.label=x;l.appendChild(o)}document.title='dl-long-ready'</script>";
+    // 같은 출처 http iframe(스크립트가 돈다 — srcdoc 은 http 가 아니라 처음부터 빠져 판정이 저절로 통과했다)과 주 프레임 칸(양성 대조).
+    if (std.mem.eql(u8, path, "/datalist-frame")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;top:200px;width:300px;height:40px}iframe{position:fixed;left:0;top:0;width:400px;height:100px;border:0}</style><body>" ++
+        "<input id=m list=l><datalist id=l><option value=a><option value=b></datalist><iframe src='/datalist-inner' onload=\"document.title='dl-frame-ready'\"></iframe>";
+    if (std.mem.eql(u8, path, "/datalist-inner")) return "<!doctype html><title>inner</title><style>html,body{margin:0}input{width:300px;height:40px}</style><input list=l><datalist id=l><option value=a><option value=b></datalist>";
     if (std.mem.eql(u8, path, "/unload")) {
         return "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>var n=0;addEventListener('click',function(){window.onbeforeunload=function(e){e.preventDefault();e.returnValue='leave?';return 'leave?'};document.title='unload-armed-'+(++n)});requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='unload-ready'})})</script>";
     }

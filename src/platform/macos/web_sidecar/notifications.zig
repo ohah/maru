@@ -194,7 +194,7 @@ pub fn onProcessMessageReceived(_: [*c]c.cef_client_t, browser: [*c]c.cef_browse
     if (std.mem.eql(u8, name_text, renderer.datalist_message)) {
         const id = dialogs.browserId(browser) orelse return 1;
         const entry = browsers.state.registry.byId(id) orelse return 1;
-        datalist.onMessage(id, frame, msg, entry.size);
+        datalist.onMessage(id, browser, frame, msg, entry.size);
         return 1;
     }
     if (!std.mem.eql(u8, name_text, renderer.notify_message)) return 0;

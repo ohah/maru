@@ -67,9 +67,10 @@ DL = ("<!doctype html><title>dl</title><style>html,body{margin:0;height:100%;bac
     "a.addEventListener('keyup',function(e){ping('e=ku&k='+e.key)});document.addEventListener('mousedown',function(e){ping('e=md&b='+e.button)});"
     "</script>").encode()
 # W6m②: 사용자가 손대지 않았는데 페이지가 스스로 칸에 글을 넣는다(`execCommand` — Chrome 은 그 `input` 을 isTrusted 로 낸다) —
-# maru 는 최근 사용자 입력이 없는 탭의 목록을 받지 않는다(적대 검증 4 차).
-DLAUTO = DL.replace(b"</script>", b"a.addEventListener('input',function(e){ping('e=in&tr='+e.isTrusted)});"
-    b"setTimeout(function(){a.focus();document.execCommand('insertText',false,'a')},6000);</script>")
+# maru 는 최근 사용자 입력이 없는 탭의 목록을 받지 않는다(적대 검증 4 차). 본문을 한 번 눌러(탭이 키 대상이 되게 — 안 누르면
+# 목록이 있어도 띄울 탭이 없어 판정이 아무것도 보지 못한다) 2.5 초 뒤에 넣는다(누름은 1 초 창 밖).
+DLAUTO = DL.replace(b"</script>", b"a.addEventListener('input',function(e){ping('e=in&tr='+e.isTrusted)});var armed=false;"
+    b"document.addEventListener('mousedown',function(){if(armed)return;armed=true;setTimeout(function(){a.focus();document.execCommand('insertText',false,'a')},2500)});</script>")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -1252,7 +1253,10 @@ sleep 1500
 datalist
 SCRIPT
 cat > "$root/dl-auto.txt" <<'SCRIPT'
-sleep 9000
+sleep 7000
+mouse 1 0.80 0.80 0 0 0
+mouse 3 0.80 0.80 0 0 0
+sleep 4000
 datalist
 SCRIPT
 cat > "$root/dl-shot.txt" <<'SCRIPT'
@@ -1291,7 +1295,7 @@ for dl in keys mouse esc press palette; do
   cp "$root/requests.log" "$root/dl-$dl.requests"
 done
 : > "$root/requests.log"
-run_app /dl-auto 12000 "$root/dl-auto.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-auto.txt"
+run_app /dl-auto 14000 "$root/dl-auto.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-auto.txt"
 grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-auto.log" | sed 's/ *$//' > "$root/dl-auto.report" || true
 cp "$root/requests.log" "$root/dl-auto.requests"
 : > "$root/requests.log"
@@ -1376,7 +1380,7 @@ check(same(esc, [closed, shown(-1), shown(-1), shown(0)])
       and kd == ['/ev?e=kd&k=ArrowDown', '/ev?e=kd&k=Enter'] and not any(r.startswith('/ev?e=change') for r in ereq),
       f'Esc closes only the list, ↓ on the closed field reaches the page and reopens it, Enter on the open list with nothing highlighted reaches the page and picks nothing ({esc} · {kd})')
 auto = lines('dl-auto.report'); areq = ev('dl-auto.requests')
-check(same(auto, [closed]) and '/ev?e=in&tr=true' in areq,
+check(same(auto, [closed]) and '/ev?e=in&tr=true' in areq and '/ev?e=md&b=0' in areq,
       f'a list the page opens by itself (execCommand — a trusted input event) without user input does not show ({auto} · {areq})')
 pal = lines('dl-palette.report')
 check(same(pal, [shown(-1), closed, closed]), f'opening the command palette hides the window and closing it does not bring the list back ({pal})')

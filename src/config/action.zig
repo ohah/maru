@@ -115,6 +115,9 @@ pub const Action = union(enum) {
     // 세팅 화면(⌘,)을 토글한다(config-gui.md CS-4). 앱 UI 상태(chrome settings 컴포넌트)라 dispatchAppAction이
     // 열고/닫는다. ⌘,는 macOS Settings 관례 — 기존 "Open Config…"(파일 열기) 메뉴의 ⌘, keyEquivalent를 양보받는다.
     toggle_settings,
+    // Chromium 탭의 다운로드 목록 창(W10a)을 연다(이미 열려 있으면 앞으로). 창은 Swift 가 띄운다(앱 전역 창 하나) — dispatchAppAction 은
+    // 요청만 세운다. 기본 키바인딩 ⇧⌘J(⌥⌘L 은 `toggle_find_in_selection` 이 쓴다), 메뉴 「보기 > 다운로드」·커맨드 팝업.
+    show_downloads,
     // 스크롤백 Find(⌘F)를 토글한다. 앱 UI 상태(chrome find 컴포넌트)라 dispatchAppAction이 열고/닫는다.
     // 모달이 열린 동안 키는 검색 입력으로 라우팅된다(handleKeyEvent). **카탈로그에 넣어 커맨드 팝업에 노출한다**
     // (선택 시 acceptPalette가 팝업을 닫고 Find를 연다) — 자기 토글이라 재귀인 toggle_command_palette와 달리 Find는
@@ -314,6 +317,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "clear_screen")) return .clear_screen;
     if (std.mem.eql(u8, value, "toggle_command_palette")) return .toggle_command_palette;
     if (std.mem.eql(u8, value, "toggle_settings")) return .toggle_settings;
+    if (std.mem.eql(u8, value, "show_downloads")) return .show_downloads;
     if (std.mem.eql(u8, value, "install_cli")) return .install_cli;
     if (std.mem.eql(u8, value, "toggle_find")) return .toggle_find;
     if (std.mem.eql(u8, value, "toggle_find_replace")) return .toggle_find_replace;

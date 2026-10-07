@@ -84,6 +84,7 @@ pub fn get() *c.cef_client_t {
         client_obj.get_dialog_handler = &getFileDialog;
         client_obj.get_context_menu_handler = &getContextMenu;
         client_obj.get_permission_handler = &getPermission;
+        client_obj.get_download_handler = &getDownload;
         client_obj.get_frame_handler = &getFrameHandler;
         // W5c: helper 의 알림 대리 스크립트가 보내는 프로세스 메시지.
         client_obj.on_process_message_received = &notifications.onProcessMessageReceived;
@@ -167,6 +168,9 @@ fn getFileDialog(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_dialog_handler_t 
 }
 fn getContextMenu(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_context_menu_handler_t {
     return &context_menu;
+}
+fn getDownload(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_download_handler_t {
+    return @import("downloads.zig").get(); // W10a
 }
 fn getPermission(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_permission_handler_t {
     return &permission;

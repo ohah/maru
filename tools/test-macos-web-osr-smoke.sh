@@ -79,6 +79,13 @@ DLF = ("<!doctype html><title>dlf</title><style>html,body{margin:0;height:100%;b
     "document.getElementById('x').src='http://localhost:'+location.port+'/dlf-inner'</script>").encode()
 DLF_INNER = (b"<!doctype html><title>in</title><style>html,body{margin:0;height:100%;background:#20a060}input{width:100%;height:50%;border:0;padding:0;margin:0;display:block;background:#0000ff;font:20px sans-serif}</style>"
     b"<input list=l><datalist id=l><option value=blueberry><option value=banana></datalist>")
+# W10a: 다운로드 — 위에서부터 60pt 칸 셋: `download` 속성 링크(「hello world.txt」), 첨부(`report.txt`), 느린 3 MB 첨부(`big.zip`,
+# 0.3 초마다 100 KB — 받는 중에 취소한다). DLW_AUTO 는 사용자 동작 없이 1.5 초 뒤 실행될 수 있는 파일(`run me.command`)을 받는다.
+DLW = (b"<!doctype html><title>dlw</title><style>a{position:fixed;left:0;width:300px;height:60px;display:block;background:#f00}</style><body>"
+    b"<a href='/dlw-file' download='hello world.txt' style='top:0'>A</a><a href='/dlw-att' style='top:80px;background:#00f'>B</a>"
+    b"<a href='/dlw-big' style='top:160px;background:#0f0'>C</a>")
+DLW_AUTO = (b"<!doctype html><title>dlw auto</title><body><script>setTimeout(function(){var a=document.createElement('a');a.href='/dlw-file';"
+    b"a.download='run me.command';document.body.appendChild(a);a.click()},1500)</script>")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -157,6 +164,28 @@ class H(http.server.BaseHTTPRequestHandler):
             body = DLF_INNER
         elif self.path.startswith("/cm-app"):
             body = MENU
+        elif self.path == "/dlw-app":
+            body = DLW
+        elif self.path == "/dlw-auto":
+            body = DLW_AUTO
+        elif self.path in ("/dlw-file", "/dlw-att"):
+            att = self.path == "/dlw-att"
+            body = b"attached\n" if att else b"hello\n"
+            self.send_response(200); self.send_header('Content-Type', 'text/plain' if att else 'application/octet-stream'); self.send_header('Content-Length', str(len(body)))
+            if att: self.send_header('Content-Disposition', 'attachment; filename="report.txt"')
+            self.end_headers(); self.wfile.write(body)
+            return
+        elif self.path == "/dlw-big":
+            # 한 스레드 서버 — 받는 쪽이 취소해 끊으면 쓰기가 실패해 이 요청만 끝난다(그동안 다른 요청은 기다린다).
+            import time
+            self.send_response(200); self.send_header('Content-Type', 'application/zip'); self.send_header('Content-Length', str(30 * 104858))
+            self.send_header('Content-Disposition', 'attachment; filename="big.zip"'); self.end_headers()
+            try:
+                for _ in range(30):
+                    self.wfile.write(b'x' * 104858); self.wfile.flush(); time.sleep(0.3)
+            except OSError:
+                pass
+            return
         elif self.path == "/tip-app":
             body = TIP
         elif self.path == "/dnd-app":
@@ -1492,6 +1521,96 @@ check(sh.get('count') == '2' and sh.get('first') == 'apple' and placed(sh, red),
 check(fr.get('count') == '2' and fr.get('first') == 'blueberry' and placed(fr, blue), f'a field inside a cross-origin iframe opens the list right under it ({fr} · field {blue})')
 ty = rep[2] if len(rep) > 2 else {}
 check(ty.get('count') == '2' and ty.get('first') == 'blueberry' and placed(ty, blue), f'typing in the cross-origin iframe field refilters the list at the same place ({ty})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W10a: 다운로드 ───────────────────────────────────────────────────────────────────────────────────────────
+# 누른 링크의 다운로드는 `~/Downloads` 에 받는다 — 같은 이름이면 「(1)」을 붙이고, 끝나면 Chromium 이 격리 표지를 붙이며 받는 동안의
+# 임시 파일(`.maru-part`)은 남지 않는다. 사용자가 시작했으니 목록 창이 뜬다. 받는 중 취소(목록의 취소 단추와 같은 길)하면 그 파일은
+# 지워진다. 페이지가 스스로 받으려는 실행될 수 있는 파일은 보류해(목록 창은 뜬다) 받기를 누르기 전에는 디스크에 없다.
+cat > "$root/dlw.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0 0 338 142 0
+mouse 3 0 0 338 142 0
+sleep 1500
+mouse 1 0 0 338 142 0
+mouse 3 0 0 338 142 0
+sleep 1500
+mouse 1 0 0 338 222 0
+mouse 3 0 0 338 222 0
+sleep 1500
+mouse 1 0 0 338 302 0
+mouse 3 0 0 338 302 0
+sleep 1500
+downloads
+dlact 3 0
+sleep 1500
+downloads
+SCRIPT
+cat > "$root/dlw-auto.txt" <<'SCRIPT'
+sleep 9000
+downloads
+dlact 0 2
+sleep 1500
+downloads
+SCRIPT
+dl_check() { # $1=이름 — 대본의 목록 보고와 `~/Downloads` 를 남긴다
+    grep -ao 'osr-test downloads* [^|]*\(|[^|]*\)\{0,6\}' "$root/app-$1.log" | sed 's/^osr-test //' > "$root/$1.report" || true
+    ls -A "$root/home/Downloads" > "$root/$1.files" 2>/dev/null || true
+    for f in "$root/home/Downloads"/*; do
+        [ -f "$f" ] && printf '%s\t%s\n' "$(basename "$f")" "$(xattr -p com.apple.quarantine "$f" 2>/dev/null | cut -c1-4)"
+    done > "$root/$1.quarantine"
+    cat "$root/$1.report"
+}
+: > "$root/requests.log"
+run_app /dlw-app 22000 "$root/dlw.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlw.txt"
+dl_check dlw-app
+python3 - "$root" dlw-app <<'PY' || fail "link downloads did not land in ~/Downloads as expected"
+import sys, os
+root, name = sys.argv[1], sys.argv[2]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+lines = [l.strip() for l in open(os.path.join(root, name + '.report')) if l.strip()]
+heads = [l for l in lines if l.startswith('downloads ')]
+rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download ')]
+first, last = rows[:len(rows) // 2], rows[len(rows) // 2:]
+files = sorted(l.strip() for l in open(os.path.join(root, name + '.files')) if l.strip())
+quarantine = dict(l.rstrip('\n').split('\t') for l in open(os.path.join(root, name + '.quarantine')) if '\t' in l)
+by = {r[1]: r for r in last}  # 행 이름은 받은 파일 이름(같은 이름이면 번호가 붙은 것)
+check(len(heads) == 2 and 'window=true' in heads[0], f'clicked downloads show the list window ({heads})')
+check(all(by.get(n, [''] * 7)[2] == '4' and by.get(n, [''] * 7)[6] == n for n in ('hello world.txt', 'hello world (1).txt')),
+      f'the same name twice is numbered, both done and listed under their file names ({last})')
+check(by.get('report.txt', [''] * 7)[2] == '4', f'an attachment is done under its server name ({by.get("report.txt")})')
+big0 = [r for r in first if r[1] == 'big.zip']
+check(bool(big0) and big0[0][2] == '2' and by.get('big.zip', [''] * 7)[2] == '5', f'the slow download was active, then canceled ({big0} → {by.get("big.zip")})')
+check(files == ['hello world (1).txt', 'hello world.txt', 'report.txt'], f'~/Downloads holds exactly the finished files — no part file, no canceled file ({files})')
+check(all(quarantine.get(f) == '0281' for f in files), f'every finished file carries the quarantine mark ({quarantine})')
+sys.exit(0 if ok else 1)
+PY
+
+: > "$root/requests.log"
+run_app /dlw-auto 16000 "$root/dlw-auto.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlw-auto.txt"
+dl_check dlw-auto
+python3 - "$root" dlw-auto <<'PY' || fail "a page-started runnable download was not held until the user took it"
+import sys, os
+root, name = sys.argv[1], sys.argv[2]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+lines = [l.strip() for l in open(os.path.join(root, name + '.report')) if l.strip()]
+heads = [l for l in lines if l.startswith('downloads ')]
+rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download ')]
+files = sorted(l.strip() for l in open(os.path.join(root, name + '.files')) if l.strip())
+quarantine = dict(l.rstrip('\n').split('\t') for l in open(os.path.join(root, name + '.quarantine')) if '\t' in l)
+check(len(rows) == 2 and rows[0][1] == 'run me.command' and rows[0][2] == '1' and rows[0][5] == '1' and rows[0][6] == '', f'held, risky, no file yet ({rows[:1]})')
+check(len(heads) == 2 and 'window=true' in heads[0], f'a held download brings the list window forward ({heads})')
+check(len(rows) == 2 and rows[1][2] == '4' and rows[1][6] == 'run me.command', f'taking it downloads it ({rows[1:]})')
+check(files == ['run me.command'] and quarantine.get('run me.command') == '0281', f'saved with the quarantine mark ({files} · {quarantine})')
 sys.exit(0 if ok else 1)
 PY
 

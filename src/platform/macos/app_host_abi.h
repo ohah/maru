@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 213u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 214u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1036,6 +1036,34 @@ void maru_macos_app_session_osr_datalist_shown(MaruAppHostSession *session, uint
 void maru_macos_app_session_osr_datalist_hover(MaruAppHostSession *session, uint32_t generation, int32_t index);
 /* v213(W6m②): 네이티브 창의 행을 눌렀다 — 그 목록이 아직 띄운 그것이면 고른다(1). */
 int32_t maru_macos_app_session_osr_datalist_pick(MaruAppHostSession *session, uint32_t generation, uint32_t index);
+/* v214(W10a): Chromium 탭 다운로드 목록 — 앱 전역(세션 밖). 상태(state)는 0 경로 만드는 중·1 보류(실행될 수 있는 파일)·2 받는 중·
+   3 중단·4 완료·5 취소·6 실패·7 탭이 닫힘·8 엔진 재시작·9 동시 다운로드 상한. 이름·경로는 UTF-8(길이로). */
+typedef struct MaruDownloadRow {
+    uint64_t key;
+    uint32_t state;
+    uint32_t risky;
+    int64_t received;
+    int64_t total;
+    uint32_t reason;
+    uint32_t name_len;
+    uint32_t path_len;
+    uint8_t name[256];
+    uint8_t path[1024];
+} MaruDownloadRow;
+uint64_t maru_macos_downloads_generation(void);
+uint32_t maru_macos_downloads_count(void);
+int32_t maru_macos_downloads_row(uint32_t index, MaruDownloadRow *out);
+/* 0 취소·1 다시 받기·2 보류한 것 받기·3 보류한 것 버리기·4 끝난 것을 목록에서 지우기. 받아들였으면 1. */
+int32_t maru_macos_downloads_act(uint64_t key, uint32_t action);
+void maru_macos_downloads_clear_finished(void);
+/* 사용자 동작으로 시작한 새 다운로드의 요청 번호(바뀌면 새 요청)와 그 탭. */
+uint64_t maru_macos_downloads_show_request(uint64_t *out_surface);
+uint32_t maru_macos_downloads_active(void);
+/* 목록 창의 문장(현재 UI 언어 — 정적, 해제하지 않는다). 0 창 제목, 1~11 상태(준비 중·보류·받는 중·중단·완료·취소·실패·탭 닫힘·
+   엔진 재시작·너무 많음·파일 없음), 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록. */
+const char *maru_macos_downloads_text(uint32_t kind);
+/* `show_downloads` 액션(⇧⌘J·메뉴·팔레트)이 목록 창을 청했으면 1(one-shot). */
+int32_t maru_macos_app_session_take_show_downloads_request(MaruAppHostSession *session);
 /* v212(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다. */
 int32_t maru_macos_app_session_osr_drag_over_body(MaruAppHostSession *session, double x_px, double y_px);
 /* 시험 전용(v211, W6l① 스모크): 활성 pane 의 웹 탭 머리·빈 탭 막대·주소 띠 한 점(backing px, 없으면 -1) — x,y 셋. */

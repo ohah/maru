@@ -7886,6 +7886,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
             drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
             drainOsrDatalist() // W6m②: 키 대상 Chromium 탭의 제안 목록을 칸 아래 네이티브 창으로 — sheet 를 붙인 뒤에 본다(sheet 위에 남지 않게).
+            drainDownloads() // W10a: Chromium 탭 다운로드 — 목록 창을 고치고, 새 다운로드·⇧⌘J 에 창을 낸다.
             drainOsrLocation() // W5b2: 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다.
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
@@ -8865,6 +8866,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // W6m②: dlmouse 행 단계 — 띄운 창의 그 행 가운데(-1 이면 창 밖)에 합성 사건 하나를 진짜 처리기로(단계 move·exit·down·up).
                 // 창이 없으면 dl-miss.
                 if activeSurface?.osrDatalistPopup?.testMouse(row: Int(line[1]) ?? -1, phase: line[2]) != true {
+                    Self.testReport("dl-miss")
+                }
+            case "downloads":
+                // W10a: 다운로드 목록 — 행마다 이름|상태|받은 양|크기|위험|파일 이름(경로의 끝)|목록 창 보임.
+                let rows = readDownloadRows()
+                Self.testReport("downloads count=\(rows.count) window=\(downloadsWindow?.window.isVisible == true)")
+                for (index, row) in rows.enumerated() {
+                    Self.testReport("download \(index)|\(row.name)|\(row.state)|\(row.received)|\(row.total)|\(row.risky ? 1 : 0)|\((row.path as NSString).lastPathComponent)")
+                }
+            case "dlact" where line.count >= 3:
+                // W10a: dlact 행 동작 — 목록 창의 그 행 단추(0 취소·1 다시 받기·2 받기·3 버리기·4 지우기)와 같은 길.
+                if let index = Int(line[1]), let raw = UInt32(line[2]), let action = OsrDownloadsWindow.Action(rawValue: raw),
+                   ensureDownloadsWindow().testAct(index: index, action: action) {
+                } else {
                     Self.testReport("dl-miss")
                 }
             case "dlsnap" where line.count >= 2:
@@ -9902,6 +9917,71 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         owner.osrDatalistPopup = popup
         return popup
+    }
+
+    // ── W10a: Chromium 탭 다운로드 목록 창 ──
+    // 목록은 Zig 가 앱 전역으로 쥔다(`web_downloads.zig`). 창은 하나 — 처음 필요할 때 만든다. tick 은 창마다 돌지만 세대 비교만 해 싸다.
+    private var downloadsWindow: OsrDownloadsWindow?
+    private var downloadsSeenGeneration: UInt64 = 0
+    private var downloadsSeenShow: UInt64 = 0
+    private var downloadsAnnounced = Set<UInt64>()
+    private var downloadRows: [OsrDownloadsWindow.Row] = []
+    private static let downloadsTestMode = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_INPUT"] != nil
+
+    private func ensureDownloadsWindow() -> OsrDownloadsWindow {
+        if let window = downloadsWindow { return window }
+        let window = OsrDownloadsWindow(text: { String(cString: maru_macos_downloads_text($0)) })
+        window.onAct = { key, action in _ = maru_macos_downloads_act(key, action.rawValue) }
+        window.onClearFinished = { maru_macos_downloads_clear_finished() }
+        window.update(generation: downloadsSeenGeneration, rows: downloadRows)
+        downloadsWindow = window
+        return window
+    }
+
+    private func readDownloadRows() -> [OsrDownloadsWindow.Row] {
+        let count = maru_macos_downloads_count()
+        var rows: [OsrDownloadsWindow.Row] = []
+        rows.reserveCapacity(Int(count))
+        var raw = MaruDownloadRow()
+        for index in 0..<count {
+            guard maru_macos_downloads_row(index, &raw) != 0 else { continue }
+            let name = withUnsafeBytes(of: raw.name) { String(decoding: $0.prefix(Int(raw.name_len)), as: UTF8.self) }
+            let path = withUnsafeBytes(of: raw.path) { String(decoding: $0.prefix(Int(raw.path_len)), as: UTF8.self) }
+            rows.append(.init(key: raw.key, state: raw.state, risky: raw.risky != 0, received: raw.received, total: raw.total, name: name, path: path))
+        }
+        return rows
+    }
+
+    private func drainDownloads() {
+        // ⇧⌘J·메뉴·팔레트 — 사용자가 직접 열었다(키 창으로).
+        if let session = appSession, maru_macos_app_session_take_show_downloads_request(session) != 0 {
+            ensureDownloadsWindow().showFront(makeKey: true)
+        }
+        let generation = maru_macos_downloads_generation()
+        if generation != downloadsSeenGeneration {
+            downloadsSeenGeneration = generation
+            downloadRows = readDownloadRows()
+            downloadsWindow?.update(generation: generation, rows: downloadRows)
+            // 끝난 다운로드는 Dock 의 다운로드 스택을 튕긴다(Safari·Chrome 처럼 — 시험 모드에서는 실제 Dock 을 건드리지 않는다).
+            for row in downloadRows where row.state == OsrDownloadsWindow.State.done.rawValue && !downloadsAnnounced.contains(row.key) {
+                downloadsAnnounced.insert(row.key)
+                if !Self.downloadsTestMode && !row.path.isEmpty {
+                    DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: row.path)
+                }
+            }
+        }
+        // 사용자 동작으로 시작했거나 보류한(실행될 수 있는 파일을 페이지가 스스로 받으려 한) 새 다운로드 — maru 가 앞에 있고 터미널
+        // 창이 키일 때만 목록 창을 낸다(키는 빼앗지 않는다). 페이지가 스스로 시작한 보통 파일·다른 앱을 쓰는 동안에는 내지 않는다
+        // (W10a 설계 적대 검토).
+        var surface: UInt64 = 0
+        let request = maru_macos_downloads_show_request(&surface)
+        if request != downloadsSeenShow {
+            downloadsSeenShow = request
+            if NSApp.isActive || Self.downloadsTestMode, let key = NSApp.keyWindow ?? (Self.downloadsTestMode ? window : nil),
+               windows.contains(where: { $0.window === key }) || quick?.window === key {
+                ensureDownloadsWindow().showFront(makeKey: false)
+            }
+        }
     }
 
     // ── W6c②: Chromium 탭 우클릭 메뉴 ──
@@ -12338,7 +12418,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 메뉴에서 고른 Zig 액션을 활성 세션에 디스패치한다 — action_key(representedObject) 바이트를 run_action으로.
     /// appSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
     @objc private func runCatalogAction(_ sender: NSMenuItem) {
-        guard let key = sender.representedObject as? String, let session = appSession else { return }
+        guard let key = sender.representedObject as? String else { return }
+        // W10a: 다운로드 목록 창이 키면 메뉴의 터미널 동작을 그 창에 보내지 않는다 — 활성 surface 는 키 터미널 창이 없으면 첫 창으로
+        // 떨어져 ⌘W 가 첫 창의 탭(받는 중인 웹 탭일 수도)을 닫았다(설계 적대 검토). ⌘W 는 그 창을 닫는다.
+        if let downloads = downloadsWindow, NSApp.keyWindow === downloads.window {
+            if key == "close_focused" || key == "close_term" || key == "close_tab" {
+                downloads.window.performClose(nil)
+            }
+            return
+        }
+        guard let session = appSession else { return }
         if key == "select_all", Self.forwardEditToSheet(#selector(NSText.selectAll(_:)), sender) { return }
         if isSessionHostAutoReconnectSmokeMode, key == "select_all" {
             sessionHostAutoReconnectSelectMenuActions += 1

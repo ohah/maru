@@ -94,7 +94,8 @@ keybind = F4 = esc:[2J
   (찾기를 **바꾸기 줄과 함께** 연다 — 빌트인 `⌥⌘F`. 이미 열려 있으면 닫지 않고 바꾸기 줄만 켜므로
   `⌘F`로 친 검색어가 살아 있다. 바꾸기는 **편집기 문서에서만** 동작한다 — 스크롤백·웹 페이지는
   읽기 전용이라 그 대상에서는 줄이 뜨지 않는다)·`find_next`·
-  `find_previous`·`toggle_command_palette`·`toggle_settings`(세팅 화면 ⌘,)·`reset_settings`
+  `find_previous`·`toggle_command_palette`·`toggle_settings`(세팅 화면 ⌘,)·`show_downloads`(Chromium 탭의 다운로드 목록 창 ⇧⌘J —
+  다른 액션처럼 키바인딩으로 바꾸거나 끌 수 있다)·`reset_settings`
   (설정을 기본값으로 되돌리는 통합 리셋 — 커맨드 팝업 "Reset All Settings to Defaults". 단
   `session.keep-alive-after-quit`은 위 소유권 예외대로 현재 값을 보존·materialize하고, 나머지 config 파일의
   schema·특수 키·주석은 내장 기본 상태로 돌린다).

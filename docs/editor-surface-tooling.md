@@ -336,14 +336,17 @@ PID 재사용·없는 getter·잘못된 CPU 값도 별도 검사한다. 산출�
 
 formatter/linter와 LSP는 모두 저장소의 config/plugin/binary를 실행할 수 있다. `tool_execute`가 없는 workspace에서는 자동 실행하지 않는다.
 
-- trusted workspace 확인과 도구별 allowlist/해결된 executable 표시
-- shell 없이 argv 실행, canonical cwd=root, 최소화한 environment
+- **저장소(workspace) 단위 신뢰 하나** — LSP·포매터·린터·작업을 함께 덮는다. 서버·도구별로 묻지 않는다(2026-10-07 사용자 승인). 위험의 단위는 「저장소가 정한 코드가 사용자 권한으로 돈다」이고 도구별 허락은 묻는 횟수만 늘린다 — VS Code·JetBrains·Zed 와 같은 단위다
+- 해결된 executable 표시
+- 도구는 shell 없이 argv 로 실행한다(셸은 사용자 환경을 담는 데만 쓴다). canonical cwd=root. environment 는 **사용자 셸 환경에서 maru 내부·터미널 세션 변수를 뺀 것**이고 PATH 는 절대 경로 항목만이다(2026-10-07 사용자 승인). 사용자 셸 환경을 얻으려면 사용자의 셸 설정 파일을 실행한다 — 끄는 스위치는 [계획](plans/workspace-trust.md#결정-대기)이 정한다. 최소화하지 않는 이유: 서버는 사용자 권한으로 돌아 환경을 줄여도 `~` 아래 파일을 그대로 읽고, 허용 목록은 기본값을 바꾼 툴체인 설정을 깨뜨린다. 격리가 필요해지면 OS 샌드박스의 일이다
 - timeout, stdout/stderr byte 상한, child/process-group 상한, cancellation/kill/reap
 - config discovery 결과와 실제 executable/version을 사용자 및 trace에 노출
 - 포맷 결과는 곧바로 저장하지 않고 현재 revision에 대한 text edits로 반환
 - tool이 root 밖 파일을 읽거나 쓰는 것을 OS 수준에서 sandbox하지 못하는 초기 버전의 한계를 확인 UX에 명시
 
 포맷/린트를 “LSP보다 가볍다”는 이유로 보안 단계를 앞당기지 않는다. 필요성이 확인되면 저장 Phase 뒤 선택적으로 연다.
+
+지금 코드와 이 계약 사이의 차이와 그것을 메우는 단계는 [워크스페이스 신뢰와 도구 환경 구현 계획](plans/workspace-trust.md)이 소유한다.
 
 ### 8.1a 언어 서버는 번들하지 않고 설치를 안내한다 (2026-08-10 사용자 결정)
 
@@ -397,15 +400,15 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 `spawnAgentEvents`·`setNonBlockingFd`). LSP 도 그 결로 간다 — 스레드를 새로 두지 않는다.
 
 **사용자 결정(2026-09-17).** ① 서버는 **번들하지 않는다**(§8.1a 그대로 — clangd 하나가 55.5 MB, 앱 실행 파일과 맞먹는다). ② 서버가
-있으면 **워크스페이스마다 한 번 묻고 기억**한다(VS Code Workspace Trust 의 모양 — §8.1 의 「trusted workspace」가 이것이다). ③ 없으면
+있으면 **워크스페이스마다 한 번 묻고 기억**한다(VS Code Workspace Trust 의 모양 — §8.1 의 「저장소 단위 신뢰」가 이것이다). ③ 없으면
 **상태바에 설치 안내**를 띄우고 누르면 새 터미널 탭에 설치 명령을 **입력만** 한다(§8.1a 흐름 4 — Enter 는 사용자).
 
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **범위(1단)** | transport(Content-Length·JSON-RPC 2.0) · 수명(`initialize`/`initialized`/`shutdown`/`exit`, 죽으면 backoff 재시작 1·2·4s 세 번) · `didOpen`/`didChange`(**Full sync**, 프레임당 한 번 최신 본문)/`didClose` · `publishDiagnostics` → §5.4 의 목록에 `.lsp` 출처로 합침 · 신뢰 프롬프트·기억 · 상태바 항목 · 설치 안내 | 진단이 오늘 표시 자리를 갖는 유일한 결과다. completion·hover·definition·semantic tokens·inlay 는 2단(표시 자리 §8.2·§8.3 이 먼저) |
 | **하지 않는 것(1단)** | 서버→클라이언트 요청(`workspace/applyEdit`·`executeCommand`·`showDocument`·파일 생성/이름/삭제·`workspace/configuration`)은 **전부 거부**(`MethodNotFound` 응답 — 예외 하나: `workspace/inlayHint/refresh` 는 2026-09-22 §8.2n 에서 `null` 로 받는다) · 증분 동기화 · 여러 root · ~~`didSave`~~(**2026-09-21 §8.2k 에서 섰다** — 「진단은 didChange 로 온다」가 rust-analyzer 실측에 뒤집혔다: rustc 진단은 저장에만 다시 돈다) | §8.2 「기본 거부하고 method 별 승인」— 승인 UI 가 없으니 1단은 거부만 |
-| **서버 찾기** | 언어(§3.7a `Grammar`) → 실행 파일 이름 **내장 표**: zig→`zls` · c/cpp→`clangd` · typescript/javascript/tsx→**후보 셋을 차례로**(2026-09-20 사용자 결정 「tsgo 도 되어야」): `tsgo --lsp --stdio`(TypeScript 7 네이티브 — `@typescript/native-preview`) → `typescript-language-server --stdio`(TS 5 계열) → `tsc --lsp --stdio`(`npm i -g typescript`@7 의 `tsc` 가 같은 네이티브 LSP; TS 5 의 `tsc` 는 `--lsp` 를 몰라 곧 죽고 backoff 뒤 「실패」로 선다). 찾아지는 **첫 후보**를 고르고 세션 동안 기억한다(`(root, exe)` 키); 하나도 없으면 첫 후보의 이름·설치 명령으로 「없음」. 「없음」인 채 다른 후보가 설치되면 다음 gate 가 그것으로 바꾼다 · rust→`rust-analyzer` · python→`pyright-langserver --stdio` · go→`gopls` · 나머지 없음. **PATH → 통상 설치 위치**(`session.git_locate` 의 `fallback_dirs` — `/opt/homebrew/bin`·`/usr/local/bin`·`/Library/Developer/CommandLineTools/usr/bin`·`/usr/bin`) 순으로 우리가 찾고, 찾은 절대 경로를 execve 한다(`lsp_process.locate`). Finder 로 띄운 앱은 PATH 가 짧아 통상 위치가 brew·시스템 설치를 받쳐 주지만, 사용자 홈 아래 설치(`~/.cargo/bin`·`~/go/bin`·nvm 의 npm 전역 등)는 덮지 못해 그 서버는 「없음」이다. 설치 명령도 같은 표(brew·npm) | §8.1a 「내장 기본값 + config override」— override 는 2단(설정 키가 언어 수 × 2 라 표시 슬라이스가 커진다; 1단은 내장 표만, `lsp.enabled` 토글 하나) |
-| **신뢰** | 파일을 열어 서버가 필요하고 찾아지면 **confirm 모달**: 「이 저장소에서 ‹서버› 를 실행할까요? 언어 서버는 저장소의 설정을 읽고 빌드를 실행할 수 있습니다.」 — 허용/거부. 모달은 서버 **이름**만 보인다 — 찾아 낸 실행 파일 경로·버전 표시(§8.1 「해결된 executable 표시」·「실제 executable/version을 사용자 및 trace에 노출」)는 1단 계약 밖이다([계획 후속 backlog](plans/editor-surface.md#후속-backlog)). 답은 `~/.config/maru/lsp-trust`(줄마다 `allow\t‹root›` / `deny\t‹root›`)에 **root 별로** 기억. 거부하면 그 root 에서는 안 묻고 안 띄운다 — 상태바 항목을 누르면 다시 묻는다 | §8.1 「trusted workspace 확인」. zls 는 build_on_save 로 `zig build`(빌드 스크립트 실행), TS 서버는 node_modules 플러그인 — 저장소를 열기만 해도 코드가 도는 것을 사용자가 알고 허락해야 한다. 거부를 기억하는 이유는 「열 때마다 묻는 모달」이 곧 사용자를 허용으로 몰기 때문 |
+| **서버 찾기** | 언어(§3.7a `Grammar`) → 실행 파일 이름 **내장 표**: zig→`zls` · c/cpp→`clangd` · typescript/javascript/tsx→**후보 셋을 차례로**(2026-09-20 사용자 결정 「tsgo 도 되어야」): `tsgo --lsp --stdio`(TypeScript 7 네이티브 — `@typescript/native-preview`) → `typescript-language-server --stdio`(TS 5 계열) → `tsc --lsp --stdio`(`npm i -g typescript`@7 의 `tsc` 가 같은 네이티브 LSP; TS 5 의 `tsc` 는 `--lsp` 를 몰라 곧 죽고 backoff 뒤 「실패」로 선다). 찾아지는 **첫 후보**를 고르고 세션 동안 기억한다(`(root, exe)` 키); 하나도 없으면 첫 후보의 이름·설치 명령으로 「없음」. 「없음」인 채 다른 후보가 설치되면 다음 gate 가 그것으로 바꾼다 · rust→`rust-analyzer` · python→`pyright-langserver --stdio` · go→`gopls` · 나머지 없음. **PATH → 통상 설치 위치**(`session.git_locate` 의 `fallback_dirs` — `/opt/homebrew/bin`·`/usr/local/bin`·`/Library/Developer/CommandLineTools/usr/bin`·`/usr/bin`) 순으로 우리가 찾고, 찾은 절대 경로를 execve 한다(`lsp_process.locate`). Finder 로 띄운 앱은 PATH 가 짧아 통상 위치가 brew·시스템 설치를 받쳐 주지만, 사용자 홈 아래 설치(`~/.cargo/bin`·`~/go/bin`·nvm 의 npm 전역 등)는 덮지 못해 그 서버는 「없음」이다(§8.1 의 환경 계약과의 차이 — [계획](plans/workspace-trust.md) WT3). 설치 명령도 같은 표(brew·npm) | §8.1a 「내장 기본값 + config override」— override 는 2단(설정 키가 언어 수 × 2 라 표시 슬라이스가 커진다; 1단은 내장 표만, `lsp.enabled` 토글 하나) |
+| **신뢰** | 파일을 열어 서버가 필요하고 찾아지면 **confirm 모달**: 「이 저장소에서 ‹서버› 를 실행할까요? 언어 서버는 저장소의 설정을 읽고 빌드를 실행할 수 있습니다.」 — 허용/거부. 모달은 서버 **이름**만 보인다 — 찾아 낸 실행 파일 경로·버전 표시(§8.1 「해결된 executable 표시」·「실제 executable/version을 사용자 및 trace에 노출」)는 1단 계약 밖이다([워크스페이스 신뢰 계획](plans/workspace-trust.md) WT1·WT5). 답은 `~/.config/maru/lsp-trust`(줄마다 `allow\t‹root›` / `deny\t‹root›`)에 **root 별로** 기억. 거부하면 그 root 에서는 안 묻고 안 띄운다 — 상태바 항목을 누르면 다시 묻는다 | §8.1 「저장소(workspace) 단위 신뢰 하나」. zls 는 build_on_save 로 `zig build`(빌드 스크립트 실행), TS 서버는 node_modules 플러그인 — 저장소를 열기만 해도 코드가 도는 것을 사용자가 알고 허락해야 한다. 거부를 기억하는 이유는 「열 때마다 묻는 모달」이 곧 사용자를 허용으로 몰기 때문 |
 | **root** | 그 Term 의 문서가 속한 **워크스페이스 root**(파일 트리의 root — `withinNavRoot` 가 쓰는 그것). 서버는 `(root, 언어)` 마다 하나. root 밖 문서는 서버를 안 띄운다 | §8.2 「root 밖 URI」 규칙의 전제 — 경계가 root 다 |
 | **상태바** | 새 항목 `editor_lsp`(편집기 묶음, `editor_degraded` 바로 뒤 — 저하 계열이라 앞쪽): 「‹서버› 없음 — 설치」(클릭 → 새 탭 + 명령 입력) · 「‹서버›: 허락 대기」 · 「‹서버›: 시작 중」 · 「‹서버›: 다시 시작 중」(띄우기 직전, 또는 죽어서 backoff 를 기다림) · 「‹서버›」(연결) · 「‹서버› 실패 — 다시」(클릭 → 재시작) · 「‹서버› 거부됨 — 다시 묻기」(클릭 → 프롬프트). 언어에 서버 이름표가 없으면 항목 없음 | layering §2.2 「조용히 줄어들면 버그로 읽는다」. §8.1a 흐름 2·3·4 |
 | **설치 안내** | 클릭 → `newTab` + `sendTextAsKeys(명령)` — **Enter 는 안 보낸다**. 명령: `brew install zls` · `brew install llvm`(clangd — Xcode 가 있으면 이미 `/usr/bin/clangd`) · `npm i -g @typescript/native-preview`(tsgo; TS 5 계열을 쓰려면 `npm i -g typescript-language-server typescript@5` — `typescript`@7 은 `tsserver.js` 가 없어 그 서버가 initialize 에서 죽는다) · `rustup component add rust-analyzer` · `npm i -g pyright` · `go install golang.org/x/tools/gopls@latest` | §8.1a 「입력까지만 하고 실행하지 않는 것이 경계다」 |

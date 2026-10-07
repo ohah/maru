@@ -12,6 +12,32 @@ const width = @import("../../width.zig"); // Unicode 셀 폭(EAW) — 한글/CJK
 // 손상 UTF-8 해석의 단일 출처 — 깨진 바이트 하나 = U+FFFD 한 칸. 도크 rich 경로(`chrome_draw_lowering`)와
 // 오버레이 셀 경로(`metal_lowering.placeText`)가 같은 디코더를 써야 폭 셈과 그림이 갈리지 않는다.
 const text_layout = @import("../text_layout.zig");
+// 글자 묶음(grapheme cluster) 경계 — 자르기가 결합 부호·ZWJ 이모지·국기 쌍을 가르지 않게 한다.
+const grapheme = @import("../../grapheme.zig");
+
+/// **앞을 남기는 자르기의 끝**(바이트) — 표시 폭 `budget_cols` 칸과 `max_bytes` 바이트 안에 드는 가장 긴 앞부분이고,
+/// 글자 묶음 경계로 **내린다**. 예전에는 코드포인트 경계에서 끊어 `e\u{301}` 의 결합 부호처럼 묶음의 뒷부분을 떼어
+/// 냈다(적대적 검증 2026-10-06). 폭은 그대로 `displayCols` 셈법이다(§7.9.1 — 단위 통합은 별도).
+/// `truncateToCols`·`elideMiddle`·`app_session.truncateColsInto` 가 함께 쓴다.
+pub fn headEnd(bytes: []const u8, budget_cols: u32, max_bytes: usize) usize {
+    var cols: u32 = 0;
+    var end: usize = 0;
+    while (end < bytes.len) {
+        const d = text_layout.decodeCodepoint(bytes, end);
+        const w = @max(1, width.cellWidth(d.cp));
+        if (cols + w > budget_cols or end + d.advance > max_bytes) break;
+        cols += w;
+        end += d.advance;
+    }
+    return grapheme.snapToBoundary(bytes, end);
+}
+
+/// **끝을 남기는 자르기의 시작**을 글자 묶음 경계로 **올린다** — 꼬리가 결합 부호로 시작하면 그 부호가 「…」나 빈칸에
+/// 홀로 붙어 보였다(가운데 줄임에서 폭 35 개 중 17 개, 적대적 검증). 덜 남기는 쪽이라 폭 상한은 그대로 지켜진다.
+fn tailStart(bytes: []const u8, i: usize) usize {
+    const floor = grapheme.snapToBoundary(bytes, i);
+    return if (floor == i) i else grapheme.clusterEnd(bytes, floor);
+}
 
 /// UTF-8 바이트열의 **표시 폭**(셀 칸 수) = Σ max(1, cellWidth(cp)). 한글/CJK는 2칸, 결합 문자는 1칸으로 친다
 /// (placeText·coretext_frame_builder의 `@max(1, cellWidth)`와 같은 규약). 코드포인트 수가 아니다 — 한글을 1칸으로
@@ -36,17 +62,8 @@ pub fn displayCols(bytes: []const u8) u32 {
 pub fn truncateToCols(arena: std.mem.Allocator, bytes: []const u8, max_cols: u32) ![]const u8 {
     if (displayCols(bytes) <= max_cols) return bytes;
     if (max_cols == 0) return "";
-    const budget = max_cols - 1; // "…" 1칸 자리를 남긴다
-    // 손상 UTF-8 도 같은 디코더로 자른다 — 예전에는 원본을 그대로 돌려줘 폭 상한을 넘겼다.
-    var cols: u32 = 0;
-    var end: usize = 0;
-    while (end < bytes.len) {
-        const d = text_layout.decodeCodepoint(bytes, end);
-        const w = @max(1, width.cellWidth(d.cp));
-        if (cols + w > budget) break;
-        cols += w;
-        end += d.advance; // 이 글자 끝(다음 시작) — 포함 경계
-    }
+    // "…" 1칸 자리를 남긴다. 손상 UTF-8 도 같은 디코더로 자른다 — 예전에는 원본을 그대로 돌려줘 폭 상한을 넘겼다.
+    const end = headEnd(bytes, max_cols - 1, bytes.len);
     return std.fmt.allocPrint(arena, "{s}…", .{bytes[0..end]});
 }
 
@@ -67,16 +84,8 @@ pub fn elideMiddle(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
     // 손상 UTF-8 도 같은 디코더로 센다(깨진 바이트 하나 = 한 칸). 그래서 앞·끝을 자르는 경계가 정상 입력과
     // 같은 규칙이고, 결과 폭도 같은 셈법으로 상한 안이다(예전 손상 입력 특례 — ADV2 — 는 필요 없어졌다).
     //
-    // 앞: head_cols 칸까지.
-    var cols: u32 = 0;
-    var head_end: usize = 0;
-    while (head_end < bytes.len) {
-        const d = text_layout.decodeCodepoint(bytes, head_end);
-        const w = @max(1, width.cellWidth(d.cp));
-        if (cols + w > head_cols) break;
-        cols += w;
-        head_end += d.advance;
-    }
+    // 앞: head_cols 칸까지(글자 묶음 경계로 내린다 — `headEnd`).
+    const head_end = headEnd(bytes, head_cols, bytes.len);
     // 끝: 남은 폭이 tail_cols 칸 이하가 되는 첫 글자부터.
     var tail_start: usize = bytes.len;
     var consumed: u32 = 0;
@@ -90,6 +99,7 @@ pub fn elideMiddle(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
         consumed += @max(1, width.cellWidth(d.cp));
         k += d.advance;
     }
+    tail_start = tailStart(bytes, tail_start); // 글자 묶음을 가르지 않는다 — 꼬리는 올린다(결합 부호가 「…」 뒤에 홀로 남지 않게)
     if (tail_start < head_end) tail_start = head_end;
     const tail = bytes[tail_start..];
     if (head_end + ellipsis.len + tail.len > buf.len) return copyHeadWithEllipsis(buf, bytes, head_end);
@@ -183,7 +193,8 @@ pub fn tailWindow(bytes: []const u8, max_cols: u32) struct { text: []const u8, t
         remaining -= @max(1, width.cellWidth(d.cp));
         start += d.advance; // 이 글자 끝(= 다음 시작) — 여기부터가 보이는 tail
     }
-    return .{ .text = bytes[start..], .truncated = true };
+    // 글자 묶음을 가르지 않는다 — 보이는 꼬리가 결합 부호로 시작하지 않게 시작을 올린다(`tailStart`).
+    return .{ .text = bytes[tailStart(bytes, start)..], .truncated = true };
 }
 
 test "tailWindow: 뒤쪽을 폭 안에 남기고(무 alloc) 앞이 잘리면 truncated" {
@@ -723,4 +734,61 @@ test "손상 바이트는 하나당 한 칸이고, 자르기 셋이 같은 셈�
     }
     // 두 경로를 실제로 탔는지 센다 — 0 이면 이 판정자는 아무것도 지키지 않는다.
     try std.testing.expect(invalid_seen > 1000 and cut > 1000);
+}
+
+test "자르기 셋은 글자 묶음을 가르지 않는다 — 결합 부호·ZWJ 이모지·국기·분해형 한글, 폭 상한도 그대로" {
+    // 예전에는 코드포인트 경계에서 끊어, 가운데 줄임의 꼬리가 결합 부호로 시작했다(`e\u{301}` × 30 에서 폭 35 개 중 17 개).
+    var buf: [256]u8 = undefined;
+    const accents = "e\u{301}" ** 30;
+    var m: u32 = 5;
+    while (m < 40) : (m += 1) {
+        const out = elideMiddle(&buf, accents, m);
+        const at = std.mem.indexOf(u8, out, "…") orelse continue;
+        try std.testing.expect(!std.mem.startsWith(u8, out[at + "…".len ..], "\u{301}"));
+    }
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(21);
+    const r = prng.random();
+    const pieces = [_][]const u8{ "a", "e\u{301}", "한", "\u{1112}\u{1161}\u{11AB}", "👨\u{200D}👩\u{200D}👧", "🇰🇷", "☺\u{FE0F}", " ", "\xff", "ｗ" };
+    var cut: usize = 0;
+    for (0..3000) |_| {
+        _ = arena_state.reset(.retain_capacity);
+        var src: [400]u8 = undefined;
+        var n: usize = 0;
+        for (0..r.intRangeAtMost(usize, 0, 40)) |_| {
+            const pc = pieces[r.intRangeLessThan(usize, 0, pieces.len)];
+            if (n + pc.len > src.len) break;
+            @memcpy(src[n..][0..pc.len], pc);
+            n += pc.len;
+        }
+        const bytes = src[0..n];
+        const max: u32 = r.intRangeAtMost(u32, 2, 40);
+        if (displayCols(bytes) > max) cut += 1;
+        // 앞을 남기는 쪽 — 끝이 묶음 경계다.
+        const head = try truncateToCols(arena_state.allocator(), bytes, max);
+        try std.testing.expect(displayCols(head) <= max);
+        if (head.ptr != bytes.ptr) {
+            const e = head.len - "…".len;
+            try std.testing.expectEqual(e, grapheme.snapToBoundary(bytes, e));
+        }
+        // 끝을 남기는 쪽 — 시작이 묶음 경계다.
+        const tail = tailWindow(bytes, max).text;
+        try std.testing.expect(displayCols(tail) <= max);
+        const t0 = bytes.len - tail.len;
+        try std.testing.expectEqual(t0, grapheme.snapToBoundary(bytes, t0));
+        // 가운데 줄임 — 앞의 끝과 꼬리의 시작 둘 다 묶음 경계다.
+        var obuf: [403]u8 = undefined;
+        const mid = elideMiddle(obuf[0 .. n + 3], bytes, max);
+        try std.testing.expect(displayCols(mid) <= max);
+        if (std.mem.indexOf(u8, mid, "…")) |at| if (mid.ptr != bytes.ptr and std.mem.startsWith(u8, bytes, mid[0..at])) {
+            try std.testing.expectEqual(at, grapheme.snapToBoundary(bytes, at));
+            const rest = mid[at + "…".len ..];
+            try std.testing.expect(std.mem.endsWith(u8, bytes, rest));
+            const ts = bytes.len - rest.len;
+            try std.testing.expectEqual(ts, grapheme.snapToBoundary(bytes, ts));
+        };
+    }
+    try std.testing.expect(cut > 1000); // 자르기 경로를 실제로 탔다
 }

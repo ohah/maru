@@ -1355,32 +1355,22 @@ pub fn resourceHostLabel() []const u8 {
 
 /// `bytes`를 표시 칸 `max_cols` 안으로 줄여 `buf`에 쓴다(EAW 기준 — 한글 한 자 2칸). 넘치면 끝에 `…`.
 /// `overlay_input.truncateToCols`는 arena를 받는데 여기는 tick 경로라 할당을 피한다 — 같은 규칙을 버퍼에 쓴다.
+///
+/// **앞부분 셈은 `overlay_input.headEnd` 하나다**(적대적 검증 2026-10-06). 예전에는 `Utf8View` 로 따로 걸어 깨진 바이트가 하나라도
+/// 있으면 **빈 문자열**을 냈고(OSC 0/2 제목은 바이트 그대로라 에이전트 메뉴·리소스 팝오버의 이름 칸이 비었다), 버퍼가 원문보다
+/// 작으면 바이트 수로 잘라 글자 중간을 갈랐다. 지금은 깨진 바이트를 한 칸(U+FFFD)으로 세고, 글자 묶음 경계에서 끊는다.
 pub fn truncateColsInto(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
-    if (chrome.components.overlay_input.displayCols(bytes) <= max_cols) {
-        const n = @min(bytes.len, buf.len);
-        @memcpy(buf[0..n], bytes[0..n]);
-        return buf[0..n];
-    }
-    if (max_cols == 0) return buf[0..0];
-    const budget = max_cols - 1; // `…` 1칸
-    const view = std.unicode.Utf8View.init(bytes) catch return buf[0..0];
-    var it = view.iterator();
-    var cols: u32 = 0;
-    var end: usize = 0;
-    while (it.nextCodepoint()) |cp| {
-        const w = @max(1, maru.terminal.width.cellWidth(cp));
-        if (cols + w > budget) break;
-        cols += w;
-        end = it.i;
-    }
-    const n = @min(end, buf.len -| 3);
-    @memcpy(buf[0..n], bytes[0..n]);
+    const oi = chrome.components.overlay_input;
     const ell = "\u{2026}";
-    if (n + ell.len <= buf.len) {
-        @memcpy(buf[n..][0..ell.len], ell);
-        return buf[0 .. n + ell.len];
+    if (oi.displayCols(bytes) <= max_cols and bytes.len <= buf.len) {
+        @memcpy(buf[0..bytes.len], bytes);
+        return buf[0..bytes.len];
     }
-    return buf[0..n];
+    if (max_cols == 0 or buf.len < ell.len) return buf[0..0];
+    const n = oi.headEnd(bytes, max_cols - 1, buf.len - ell.len); // `…` 1칸·3바이트 자리를 남긴다
+    @memcpy(buf[0..n], bytes[0..n]);
+    @memcpy(buf[n..][0..ell.len], ell);
+    return buf[0 .. n + ell.len];
 }
 
 /// `src`를 `dst`에 담기는 만큼만 복사하고 쓴 바이트 수를 돌려준다(고정 버퍼 조립용 — 넘치면 자른다).
@@ -61583,6 +61573,29 @@ test "오버레이 메시지 사본: 버퍼를 넘으면 끝이 「…」이고 
     try std.testing.expect(std.unicode.utf8ValidateSlice(out));
     try std.testing.expect(std.mem.endsWith(u8, out, "…"));
     try std.testing.expect(std.mem.startsWith(u8, out, "가가가"));
+}
+
+test "truncateColsInto: 깨진 바이트가 든 이름도 빈칸이 아니고, 작은 버퍼에서도 글자를 가르지 않는다" {
+    // 예전에는 `Utf8View` 로 따로 걸어 깨진 바이트가 하나라도 있으면 빈 문자열을 냈다 — OSC 0/2 제목은 바이트 그대로라
+    // 에이전트 메뉴·리소스 팝오버의 이름 칸이 비었다(적대적 검증 실측: 길이 0).
+    const oi = chrome.components.overlay_input;
+    var buf: [256]u8 = undefined;
+    const broken = "caf\xe9 " ++ "a" ** 60;
+    const shown = truncateColsInto(&buf, broken, 20);
+    try std.testing.expect(shown.len > 0);
+    try std.testing.expect(oi.displayCols(shown) <= 20);
+    try std.testing.expect(std.mem.startsWith(u8, shown, "caf\xe9 "));
+    try std.testing.expect(std.mem.endsWith(u8, shown, "\u{2026}"));
+    // 버퍼가 원문보다 작으면 — 예전에는 바이트 수로 잘라 한글을 반으로 갈랐다.
+    var small: [8]u8 = undefined;
+    const ko = truncateColsInto(&small, "가나다라마바사", 40);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(ko));
+    try std.testing.expect(std.mem.endsWith(u8, ko, "\u{2026}"));
+    // 들어가면 그대로다.
+    try std.testing.expectEqualStrings("짧은 이름", truncateColsInto(&buf, "짧은 이름", 40));
+    // 결합 부호를 떼어 내지 않는다 — 끝이 글자 묶음 경계다.
+    const acc = truncateColsInto(&buf, "e\u{301}" ** 10, 6);
+    try std.testing.expect(!std.mem.endsWith(u8, acc[0 .. acc.len - "\u{2026}".len], "e"));
 }
 
 // 전체 리셋은 모든 창의 열린 터미널 스크롤백을 기본 길이로 줄여 넘치는 기록을 지운다(#4158) — 확인 문구가 그것을 말해야

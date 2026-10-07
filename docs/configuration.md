@@ -332,8 +332,8 @@ term-program = ghostty
 
 무시된 줄은 **앱 로그**에 경고로 남는다 — Dock·Finder 로 띄웠으면 `<cache>/maru/app.log`(`$XDG_CACHE_HOME`, 없으면
 `~/.cache`), 터미널에서 띄웠으면 stderr 다. `MARU_DEBUG` 와 무관하다. 형식은 ``config line N `키`: 이유`` 이고
-(`=` 가 없는 줄은 키 없이 `config line N: 이유`), **시작할 때와 메뉴의 Reload Config 때 모두** 찍는다. reload 는
-`config reloaded: diagnostics=N` 한 줄을 덧붙여 진단이 0 이어도 반영됐음을 남긴다. config 는 창마다 읽으므로(앱 시작 때 창마다, `behavior.auto-reload` 가 파일 변경을 알리면 창 전부와 퀵 터미널마다) **같은 보고는 2 초 안에 한 번만** 찍는다 — 몇 초 뒤 메뉴로 다시 읽으면 다시 찍힌다. 파일이 있는데 못 읽거나 1 MiB 를
+(`=` 가 없는 줄, 그리고 `=` 왼쪽이 키 모양이 아닌 줄 — 토큰을 잘못 붙여 넣은 줄처럼 — 은 키를 찍지 않고 `config line N: 이유`. 키 모양은 `[A-Za-z0-9._-]` 글자에 점이 있고(또는 `keybind`) 점으로 나눈 조각이 32 자 이하인 것이다 — 그래야 비밀값이 로그에 남지 않는다), **시작할 때와 메뉴의 Reload Config 때 모두** 찍는다. reload 는
+`config reloaded: diagnostics=N` 한 줄을 덧붙여 진단이 0 이어도 반영됐음을 남긴다. config 는 창마다 읽으므로(앱 시작 때 창마다, `behavior.auto-reload` 가 파일 변경을 알리면 창 전부와 퀵 터미널마다) **같은 사건을 여러 창이 연달아 보고하면 2 초 안에 한 번만** 찍는다 — 보고가 같다는 것은 진단·읽기 상태뿐 아니라 **파일 내용**과 **사용자가 고른 reload(메뉴)인가**까지 같다는 뜻이라, 자동 다시 읽기 직후 누른 메뉴 Reload 나 2 초 안의 다른 저장은 각자 찍힌다. 파일이 있는데 못 읽거나 1 MiB 를
 넘으면, **시작할 때는** `config file unreadable|oversize (startup) — using defaults` 가 남고 모든 설정이 기본값이다. **실행 중
 다시 읽을 때**(Reload Config·자동 다시 읽기)는 지금 설정을 그대로 두고 `config file unreadable|oversize (reload) — keeping
 current settings` 를 남긴다 — 일시적인 읽기 오류(권한·내려받지 않은 iCloud 파일)로 설정을 통째로 잃지 않고, 모든 창이 같은

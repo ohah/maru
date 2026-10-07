@@ -61598,17 +61598,77 @@ test "truncateColsInto: 깨진 바이트가 든 이름도 빈칸이 아니고, �
     try std.testing.expect(!std.mem.endsWith(u8, acc[0 .. acc.len - "\u{2026}".len], "e"));
 }
 
-// 전체 리셋은 모든 창의 열린 터미널 스크롤백을 기본 길이로 줄여 넘치는 기록을 지운다(#4158) — 확인 문구가 그것을 말해야
-// 사용자가 알고 고른다. 그런데 확인 모달은 메시지를 **한 줄(row 0)로만** 그리고 줄바꿈이 없어, 창 폭에서 잘리면 끝의
-// 「계속할까요?」가 안 보인다(첫 시안은 149·179 칸이었다 — 2026-10-05). 그래서 폭 상한도 함께 잰다.
-test "전체 리셋 확인 문구는 스크롤백 기록이 지워진다고 말하고, 모달 한 줄 폭을 지킨다" {
+// 전체 리셋은 모든 창의 열린 터미널 스크롤백을 기본 길이로 줄여 **넘치는** 기록을 지운다(#4158) — 확인 문구가 그것을 말해야
+// 사용자가 알고 고른다. 무조건 「지운다」고 하면 과장이다(기본 길이 안의 기록은 남는다 — 적대적 검증 2026-10-06 이 영어
+// 「Older scrollback is discarded too」를 그렇게 읽었다). 예전 판정자의 90 칸 상한은 「확인 모달은 한 줄로만 그린다」에서
+// 나왔는데, 모달이 메시지를 상자 안에서 나누게 된 뒤(#4163)로는 근거가 없어 뺐다.
+test "전체 리셋 확인 문구는 기본 길이를 넘는 스크롤백이 지워진다고 말하고, 파일 덮어쓰기도 말한다" {
     for ([_]maru.i18n.Lang{ .en, .ko }) |lang| {
         const message = maru.i18n.tIn(lang, .app_reset_confirm);
-        try std.testing.expect(chrome.components.overlay_input.displayCols(message) <= 90);
         try std.testing.expect(std.mem.indexOf(u8, message, "config") != null); // 파일 덮어쓰기도 그대로 말한다
     }
-    try std.testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .app_reset_confirm), "스크롤백") != null);
-    try std.testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .app_reset_confirm), "scrollback") != null);
+    try std.testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .app_reset_confirm), "넘치는 스크롤백") != null);
+    try std.testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .app_reset_confirm), "Scrollback beyond the default length") != null);
+}
+
+test "config 보고 중복 억제: 여러 창의 같은 사건은 한 줄이고, 바로 누른 메뉴 Reload·내용이 다른 저장은 각자 남는다" {
+    // 예전 지문에는 파일 내용·트리거가 없어, 감시가 찍은 직후의 메뉴 Reload 와 2 초 안의 다른 저장이 app.log 에서 빠졌다
+    // (적대적 검증 실측: 둘 다 0 줄). 진단 하나가 생기는 config 로 센다 — 찍으면 `config_diagnostics_logged` 가 하나 는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    setAppQuitAfterLastWindowClosed(null);
+    defer setAppQuitAfterLastWindowClosed(null);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ss: [2]*AppSession = undefined;
+    var path_buf: [4096]u8 = undefined;
+    try configFollowFixture(allocator, &ss, &tmp, &path_buf);
+    defer for (ss) |s| {
+        settings_ops.clearConfigDirty(s);
+        s.deinit();
+        allocator.destroy(s);
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const logged = struct {
+        fn f(sessions: []*AppSession) usize {
+            var n: usize = 0;
+            for (sessions) |s| n += s.config_diagnostics_logged;
+            return n;
+        }
+    }.f;
+    settings_ops.config_log_last = .{};
+    const base = logged(&ss);
+    // ① 파일 감시 — 두 창이 같은 사건을 연달아 본다: 한 줄.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "unknown.key = 1\n" });
+    for (ss) |s| _ = settings_ops.configFileChanged(s);
+    try std.testing.expectEqual(base + 1, logged(&ss));
+    // ② 2 초 안의 다른 저장(같은 진단 + 다른 키 값) — 트리거도 같은 자동이고 **내용만** 다르다: 한 줄.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "unknown.key = 1\nbell.audible = false\n" });
+    for (ss) |s| _ = settings_ops.configFileChanged(s);
+    try std.testing.expectEqual(base + 2, logged(&ss));
+    try std.testing.expect(!ss[1].loaded_config.config.bell.audible); // 실제로 반영된 저장이었다
+    // ③ 곧바로 누른 메뉴 Reload(활성 창 + 전파) — 내용은 같고 **사용자가 고른** 사건이라 다시 한 줄. 전파는 같은 사건이라
+    //    더하지 않는다.
+    ss[0].reloadConfig();
+    _ = ss[1].reloadConfigFollowingMenu();
+    try std.testing.expectEqual(base + 3, logged(&ss));
+}
+
+test "config 진단은 키 모양일 때만 키를 찍는다 — 잘못 붙여 넣은 토큰이 app.log 에 남지 않는다" {
+    var buf: [512]u8 = undefined;
+    const D = config_mod.ConfigDiagnostic;
+    const msg = "알 수 없는 key — 무시";
+    // 가린다: 끝이 `=` 인 base64(로더는 `=` 왼쪽을 키로 든다), 점이 든 JWT, 공백·기호가 든 것.
+    for ([_][]const u8{ "c2VjcmV0dG9rZW4", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0", "sk live 123", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }) |k| {
+        const out = settings_ops.formatConfigDiagnostic(&buf, D{ .line = 3, .key = k, .message = msg });
+        try std.testing.expect(std.mem.indexOf(u8, out, k) == null);
+        try std.testing.expect(std.mem.startsWith(u8, out, "config line 3: "));
+    }
+    // 찍는다: 오타 키(고치려면 보여야 한다), 점 없는 유일한 키, env 키.
+    for ([_][]const u8{ "scrollbak.lines", "keybind", "env.HTTP_PROXY", "font.family.macos" }) |k| {
+        const out = settings_ops.formatConfigDiagnostic(&buf, D{ .line = 3, .key = k, .message = msg });
+        try std.testing.expect(std.mem.indexOf(u8, out, k) != null);
+    }
 }
 
 // write-back 은 원본을 못 읽으면 **쓰지 않는다**(빈 원본으로 보고 바뀐 키만 남겨 덮었다), 심볼릭 링크면 실제 파일에 쓴다.

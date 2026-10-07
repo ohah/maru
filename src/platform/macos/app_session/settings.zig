@@ -2130,10 +2130,23 @@ pub fn applyAppearancePreservingZoom(self: *AppSession, new_appearance: config_m
 /// config 진단 한 줄의 앱 로그 문구. 키가 있으면 함께 적는다 — 「몇째 줄」만으로는 사용자가 파일을 열어 줄을
 /// 세야 하고, 알 수 없는 키는 메시지만으로 무엇이 틀렸는지 안 보인다. 순수 함수라 판정자가 문구를 직접 잰다.
 pub fn formatConfigDiagnostic(buf: []u8, d: config_mod.ConfigDiagnostic) []const u8 {
-    return (if (d.key.len > 0)
+    return (if (d.key.len > 0 and looksLikeConfigKey(d.key))
         std.fmt.bufPrint(buf, "config line {d} `{s}`: {s}", .{ d.line, d.key, d.message })
     else
         std.fmt.bufPrint(buf, "config line {d}: {s}", .{ d.line, d.message })) catch d.message;
+}
+
+/// 진단에 키를 **원문 그대로** 찍어도 되는가 — 키 모양일 때만이다(적대적 검증 2026-10-06). 로더는 `=` 왼쪽 전체를 키로 들고
+/// 오므로, 토큰을 잘못 붙여 넣은 줄(`c2VjcmV0dG9rZW4=` 처럼 끝이 `=` 인 base64)은 그 값이 app.log 에 그대로 남았다. 오타
+/// (`scrollbak.lines`)는 찍어야 고칠 수 있으므로, 키의 모양을 본다: 글자는 `[A-Za-z0-9._-]`, 점이 있거나 점 없는 유일한 키
+/// `keybind`, 점으로 나눈 조각마다 32 자 이하(JWT 처럼 점이 든 토큰은 조각이 길다). 아니면 키 없이 줄 번호만 찍는다.
+fn looksLikeConfigKey(key: []const u8) bool {
+    if (key.len == 0 or key.len > 96) return false;
+    for (key) |c| if (!(std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_')) return false;
+    if (std.mem.indexOfScalar(u8, key, '.') == null and !std.mem.eql(u8, key, "keybind")) return false;
+    var it = std.mem.splitScalar(u8, key, '.');
+    while (it.next()) |seg| if (seg.len == 0 or seg.len > 32) return false;
+    return true;
 }
 
 /// 설정 파일이 **있는데 못 읽었으면** 그 사유. 로더는 이때도 에러 없이 기본 Config 를 돌려주므로(forgiving)
@@ -2165,11 +2178,19 @@ pub const config_log_dedupe_ms: u64 = 2000;
 pub var config_reset_generation: u64 = 0;
 pub var config_log_last: struct { fingerprint: u64 = 0, at_ms: u64 = 0, valid: bool = false } = .{};
 
-/// 보고 하나의 지문 — 시점(startup/reload)·파일 읽기 상태·진단(줄·키·메시지) 전부. 하나라도 다르면 다른 보고다.
-fn configReportFingerprint(parsed: *const config_mod.ParsedConfig, origin_name: []const u8, read_issue: ?[]const u8) u64 {
+/// 보고 하나의 지문 — 시점(startup/reload)·파일 읽기 상태·진단(줄·키·메시지) 전부, 그리고 **파일 내용**과 **사용자가 고른
+/// reload 인가**. 하나라도 다르면 다른 보고다.
+///
+/// 내용·트리거가 빠져 있던 때는(적대적 검증 2026-10-06) 2 초 안의 두 사건이 같은 보고로 합쳐졌다 — 파일 감시가 찍은 직후
+/// 사용자가 누른 메뉴 Reload 의 확인 줄과, 내용이 다른 두 번째 저장의 줄이 app.log 에서 빠졌다(실측: 둘 다 0 줄). 이 억제가
+/// 막으려던 것은 **같은 사건을 여러 창이 연달아** 보고하는 것이고, 그때는 내용도 트리거도 같다.
+fn configReportFingerprint(parsed: *const config_mod.ParsedConfig, origin_name: []const u8, read_issue: ?[]const u8, content_digest: ?u64, user_chosen: bool) u64 {
     var h = std.hash.Wyhash.init(0);
     h.update(origin_name);
     h.update(read_issue orelse "");
+    const digest: u64 = content_digest orelse 0;
+    h.update(std.mem.asBytes(&digest));
+    h.update(&.{@intFromBool(user_chosen)});
     for (parsed.diagnostics) |d| {
         h.update(std.mem.asBytes(&d.line));
         h.update(d.key);
@@ -2190,7 +2211,8 @@ pub fn logConfigDiagnostics(self: *AppSession, comptime origin: enum { startup, 
     const parsed = &self.loaded_config;
     const now = self.awakeMs();
     const read_issue = configFileReadIssue(parsed.file_provenance);
-    const fingerprint = configReportFingerprint(parsed, @tagName(origin), read_issue);
+    // `allow_scrollback_shrink` 가 「사용자가 그 시점을 고른 적용」의 표식이다(메뉴 Reload 의 활성 창·전파 — 자동 reload 는 안 세운다).
+    const fingerprint = configReportFingerprint(parsed, @tagName(origin), read_issue, self.config_file_digest, self.allow_scrollback_shrink);
     if (config_log_last.valid and config_log_last.fingerprint == fingerprint and
         now -| config_log_last.at_ms < config_log_dedupe_ms) return;
     config_log_last = .{ .fingerprint = fingerprint, .at_ms = now, .valid = true };
@@ -2265,11 +2287,11 @@ pub fn reloadConfig(self: *AppSession) void {
     }
     var old_loaded = self.loaded_config;
     self.loaded_config = new_parsed;
+    self.config_file_digest = pre_load_digest; // 자동 reload 기준선 — 로더가 읽기 직전의 내용(로그 지문도 이것을 읽는다)
     logConfigDiagnostics(self, .reload);
     applyAppearancePreservingZoom(self, new_appearance);
     old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
     replaceAppKeepAlivePolicyFromReload(self.loaded_config);
-    self.config_file_digest = pre_load_digest; // 자동 reload 기준선 — 로더가 읽기 직전의 내용
     app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 파일이 정본
     // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
     // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.

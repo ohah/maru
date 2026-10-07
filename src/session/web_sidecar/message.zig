@@ -2,8 +2,8 @@
 
 const std = @import("std");
 
-/// 0~31 은 maru → sidecar, 32~ 는 sidecar → maru. 받는 쪽은 `StreamingDecoder` 의 방향으로 거꾸로 온
-/// frame 을 거절한다.
+/// 0~31 과 128~191 은 maru → sidecar, 32~127 과 192~ 는 sidecar → maru(0~31 이 찬 뒤 W6m① 이 둘째 구간을 열었다). 받는 쪽은
+/// `StreamingDecoder` 의 방향으로 거꾸로 온 frame 을 거절한다.
 pub const Tag = enum(u8) {
     hello = 0,
     create_browser = 1,
@@ -63,7 +63,7 @@ pub const Tag = enum(u8) {
     /// 사용자가 그 탭을 닫는다 — 페이지에 묻고 닫는다(W6j — 강제하지 않는 닫기). 떠나기 확인을 건 페이지면 `js_dialog`
     /// (`before_unload`)가 오고, 머무르기면 브라우저는 그대로다. 묻지 않는 페이지는 곧바로 닫힌다(`browser_closed`). 질문도 닫힘도
     /// 없으면(처리기가 멈춤) maru 가 시한 뒤 `destroy_browser` 로 강제한다 — 질문이 떠 있는 동안은 사용자를 기다린다. maru → sidecar 의
-    /// 마지막 번호다.
+    /// 첫 구간의 마지막 번호다.
     close_asking = 31,
 
     hello_ack = 32,
@@ -127,9 +127,20 @@ pub const Tag = enum(u8) {
     /// maru 는 연 탭(`opener`) 오른쪽에 그 번호의 탭을 붙이거나, 붙일 수 없으면 `destroy_browser` 로 닫는다(페이지에는 팝업이 닫힌
     /// 것으로 보인다). 주소는 처음 이동할 곳(빈 팝업은 `about:blank`).
     popup_created = 57,
+    /// 제안 목록(datalist)이 붙은 칸의 목록을 보이라(W6m① — CEF Alloy 에는 Chromium 의 datalist 팝업이 없다, §7 실측). 대리
+    /// 스크립트가 칸을 누르거나·↓·글자를 칠 때 거른 항목(값·레이블)을 보낸다 — 같은 칸이 다시 거르면 새 `list` 번호로 다시 온다.
+    /// 사각형은 그 탭 view DIP(칸 자리 — sidecar 가 view 안으로 자른다), 항목은 `datalist_items` 덩어리.
+    datalist_show = 58,
+    /// 그 목록을 닫으라(칸이 초점을 잃음·일치 없음·빈 칸·페이지 이동·고름). `list` 가 0 이면 그 브라우저의 어느 목록이든.
+    datalist_hide = 59,
+
+    /// 사용자가 제안 목록의 한 항목을 골랐다(W6m①). `list` 는 마지막으로 받은 `datalist_show` 의 번호다 — sidecar 는 그 번호가
+    /// 지금 목록이 아니면 버리고, 맞으면 그 문서의 대리 스크립트가 칸에 값을 넣고 `input`·`change` 를 보낸다. 둘째 구간의 첫 번호.
+    datalist_pick = 128,
 
     pub fn direction(self: Tag) Direction {
-        return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
+        const v = @intFromEnum(self);
+        return if (v < 32 or (v >= 128 and v < 192)) .to_sidecar else .to_maru;
     }
 };
 
@@ -895,6 +906,35 @@ pub const RendererGone = struct {
     reason: RendererGoneReason,
 };
 
+/// 제안 목록 상한(W6m①) — 항목 수, 값·레이블 하나의 바이트(넘으면 sidecar 가 글자 경계에서 자른다 — 넣을 값은 대리 스크립트가
+/// 쥔 원래 값이라 보이는 글만 짧아진다), 덩어리 전체 바이트(frame 상한 안).
+pub const max_datalist_items: u16 = 256;
+pub const max_datalist_text_bytes: usize = 512;
+pub const max_datalist_bytes: usize = 24 * 1024;
+
+pub const DatalistShow = struct {
+    browser: BrowserId,
+    /// sidecar 가 매기는 0 이 아닌 번호 — 보일 때마다 새로.
+    list: u32,
+    /// 칸의 사각형(view DIP).
+    field: Rect,
+    count: u16,
+    /// `count` 개의 `[u16 값 길이][값][u16 레이블 길이][레이블]` — 값은 비지 않고, 레이블은 값과 다를 때만(아니면 빈 글).
+    /// 글은 UTF-8, 제어 문자 없음. `fields.checkDatalistItems` 가 본다.
+    items: []const u8,
+};
+
+pub const DatalistHide = struct {
+    browser: BrowserId,
+    list: u32,
+};
+
+pub const DatalistPick = struct {
+    browser: BrowserId,
+    list: u32,
+    index: u16,
+};
+
 /// `browser` 가 0 이면 브라우저에 묶이지 않은 실패(초기화·프로필)다.
 pub const Failure = struct {
     browser: BrowserId,
@@ -962,12 +1002,18 @@ pub const Message = union(Tag) {
     drag_file_ready: DragFileReady,
     open_tab: OpenTab,
     popup_created: PopupCreated,
+    datalist_show: DatalistShow,
+    datalist_hide: DatalistHide,
+
+    datalist_pick: DatalistPick,
 };
 
-test "tags split by direction at 32" {
+test "tags split by direction — 0..31 and 128..191 go to the sidecar" {
     inline for (std.meta.fields(Tag)) |field| {
         const tag: Tag = @enumFromInt(field.value);
-        const expected: Direction = if (field.value < 32) .to_sidecar else .to_maru;
+        const expected: Direction = if (field.value < 32 or (field.value >= 128 and field.value < 192)) .to_sidecar else .to_maru;
         try std.testing.expectEqual(expected, tag.direction());
     }
+    try std.testing.expectEqual(Direction.to_sidecar, Tag.datalist_pick.direction());
+    try std.testing.expectEqual(Direction.to_maru, Tag.datalist_show.direction());
 }

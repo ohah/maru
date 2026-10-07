@@ -12,6 +12,10 @@
 //! 전에 커밋한 첫 문서 — 에서 페이지가 `send` 를 직접 불러도 그 페이지 자신의 출처·권한으로 판정된다). 문서마다 무작위 표식을 붙여, 알림을 누를 때 그 문서가 아직 그 프레임에 있을
 //! 때만 누른다(이동한 뒤의 옛 알림이 새 문서의 알림을 누르지 않게). DevTools Runtime 도메인·바인딩은 쓰지 않는다(적대
 //! 검증 — 봇 탐지 신호·실행 컨텍스트 표).
+//!
+//! 제안 목록(datalist — W6m①)도 같은 `send` 를 쓴다: `send('dl', json)` 은 `maru.datalist` 로 보내고(빈도는 알림과 따로 센다 —
+//! 글자를 칠 때마다 온다), `send('dl', function)` 은 「고르기」 함수(문서마다 처음 한 번). 브라우저가 `maru.datalist.pick` 을 보내면
+//! 그 문서(표식)의 고르기 함수를 (판, 번호)로 부른다 — 판·초점은 대리 스크립트가 본다.
 
 const std = @import("std");
 const c = @import("cef.zig").c;
@@ -20,6 +24,8 @@ const library = @import("library.zig");
 
 pub const notify_message = "maru.notify";
 pub const click_message = "maru.notify.click";
+pub const datalist_message = "maru.datalist";
+pub const datalist_pick_message = "maru.datalist.pick";
 
 /// `send` 를 숨겨 두는 전역 이름 — 대리 스크립트가 꺼내 지운다(`notifications.zig` 와 같은 값).
 pub const stash_name = "__maruNotifySend";
@@ -28,6 +34,9 @@ pub const stash_name = "__maruNotifySend";
 /// 적대 검증).
 const max_payload_units = 8 * 1024;
 const calls_per_second = 10;
+/// 제안 목록(W6m①) — 항목 256 개(값·레이블)가 들어가는 글 상한과 문서마다 1 초에 받는 호출 수(키 반복이 초당 30 남짓).
+pub const max_datalist_payload_units = 64 * 1024;
+const datalist_calls_per_second = 60;
 
 var api_ref: ?*const library.Api = null;
 var app: c.cef_app_t = undefined;
@@ -44,6 +53,10 @@ const Document = struct {
     click: [*c]c.cef_v8_value_t = null,
     window_start_ms: i64 = 0,
     window_calls: u32 = 0,
+    /// 제안 목록의 고르기 함수(W6m①)와 그 빈도 제한.
+    pick: [*c]c.cef_v8_value_t = null,
+    dl_window_start_ms: i64 = 0,
+    dl_window_calls: u32 = 0,
 };
 var documents: [128]?Document = [_]?Document{null} ** 128;
 
@@ -205,6 +218,7 @@ fn onContextReleased(_: [*c]c.cef_render_process_handler_t, browser: [*c]c.cef_b
 
 fn releaseDocument(doc: *Document) void {
     if (doc.click != null) object.release(doc.click);
+    if (doc.pick != null) object.release(doc.pick);
     object.release(doc.context);
     for (&documents) |*slot| {
         if (slot.*) |*d| if (d == doc) {
@@ -231,8 +245,8 @@ fn execute(
     defer for (0..count) |i| {
         if (kept != i) object.releaseArg(arguments[i]);
     };
-    if (count != 1 or arguments[0] == null) return 1;
-    const arg = arguments[0];
+    if (count < 1 or count > 2) return 1;
+    for (0..count) |i| if (arguments[i] == null) return 1;
     const api = api_ref.?;
     const context = api.v8_context_get_current_context();
     if (context == null) return 1;
@@ -242,6 +256,29 @@ fn execute(
     defer object.release(frame);
     const doc = documentOf(frameKey(frame)) orelse return 1;
     if (!isDocumentContext(doc, context)) return 1;
+    if (count == 2) {
+        // `send('dl', …)` — 제안 목록(W6m①).
+        if (!isKind(arguments[0], "dl")) return 1;
+        const value = arguments[1];
+        if (value.*.is_function.?(value) != 0) {
+            if (doc.pick == null) {
+                doc.pick = value;
+                kept = 1;
+            }
+            return 1;
+        }
+        if (value.*.is_string.?(value) == 0) return 1;
+        const now_dl = nowMs();
+        if (now_dl - doc.dl_window_start_ms >= 1000) {
+            doc.dl_window_start_ms = now_dl;
+            doc.dl_window_calls = 0;
+        }
+        if (doc.dl_window_calls >= datalist_calls_per_second) return 1;
+        doc.dl_window_calls += 1;
+        forward(frame, datalist_message, value, max_datalist_payload_units, doc.token);
+        return 1;
+    }
+    const arg = arguments[0];
     // 「누르기」 함수 — 문서마다 처음 한 번만(대리 스크립트가 페이지 스크립트보다 먼저 넘긴다).
     if (arg.*.is_function.?(arg) != 0) {
         if (doc.click == null) {
@@ -258,29 +295,45 @@ fn execute(
     }
     if (doc.window_calls >= calls_per_second) return 1;
     doc.window_calls += 1;
-    const payload = arg.*.get_string_value.?(arg);
-    if (payload == null) return 1;
+    forward(frame, notify_message, arg, max_payload_units, doc.token);
+    return 1;
+}
+
+/// 그 V8 글이 `kind` 인가.
+fn isKind(value: [*c]c.cef_v8_value_t, kind: []const u8) bool {
+    if (value.*.is_string.?(value) == 0) return false;
+    const text = value.*.get_string_value.?(value);
+    if (text == null) return false;
+    defer api_ref.?.string_userfree_utf16_free(text);
+    var buf: [8]u8 = undefined;
+    return std.mem.eql(u8, library.readString(api_ref.?, text, &buf), kind);
+}
+
+/// 글 하나를 그 문서의 표식과 함께 브라우저 프로세스로 보낸다(상한을 넘으면 보내지 않는다).
+fn forward(frame: [*c]c.cef_frame_t, name_text: []const u8, value: [*c]c.cef_v8_value_t, max_units: usize, doc_token: u64) void {
+    const api = api_ref.?;
+    const payload = value.*.get_string_value.?(value);
+    if (payload == null) return;
     defer api.string_userfree_utf16_free(payload);
-    if (payload.*.length > max_payload_units) return 1;
+    if (payload.*.length > max_units) return;
     var name = std.mem.zeroes(c.cef_string_t);
-    setString(&name, notify_message);
+    setString(&name, name_text);
     defer api.string_utf16_clear(&name);
-    const message = api.process_message_create(&name) orelse return 1;
+    const message = api.process_message_create(&name) orelse return;
     const list = message.*.get_argument_list.?(message);
     if (list == null) {
         object.release(message);
-        return 1;
+        return;
     }
     defer object.release(list);
     _ = list.*.set_string.?(list, 0, payload);
     var token_buf: [16]u8 = undefined;
     var token = std.mem.zeroes(c.cef_string_t);
-    setString(&token, std.fmt.bufPrint(&token_buf, "{x:0>16}", .{doc.token}) catch unreachable);
+    setString(&token, std.fmt.bufPrint(&token_buf, "{x:0>16}", .{doc_token}) catch unreachable);
     defer api.string_utf16_clear(&token);
     _ = list.*.set_string.?(list, 1, &token);
     // 넘긴 메시지의 참조는 CEF 로 옮겨 간다.
     frame.*.send_process_message.?(frame, c.PID_BROWSER, message);
-    return 1;
 }
 
 /// 브라우저 프로세스가 누르라고 했다 — 그 프레임의 **그 문서**(표식이 같을 때)의 알림만 누른다.
@@ -294,7 +347,9 @@ fn onProcessMessageReceived(_: [*c]c.cef_render_process_handler_t, browser: [*c]
     if (name == null) return 0;
     defer api.string_userfree_utf16_free(name);
     var name_buf: [32]u8 = undefined;
-    if (!std.mem.eql(u8, library.readString(api, name, &name_buf), click_message)) return 0;
+    const name_text = library.readString(api, name, &name_buf);
+    if (std.mem.eql(u8, name_text, datalist_pick_message)) return pickReceived(frame, message);
+    if (!std.mem.eql(u8, name_text, click_message)) return 0;
     const list = message.*.get_argument_list.?(message);
     if (list == null) return 1;
     defer object.release(list);
@@ -320,6 +375,40 @@ fn onProcessMessageReceived(_: [*c]c.cef_render_process_handler_t, browser: [*c]
     const args = [_][*c]c.cef_v8_value_t{arg};
     addRef(context);
     const result = click.*.execute_function_with_context.?(click, context, null, 1, &args);
+    if (result != null) object.release(result);
+    return 1;
+}
+
+/// 브라우저 프로세스가 고르라고 했다(W6m①) — 그 프레임의 **그 문서**(표식)의 고르기 함수를 (판, 번호)로 부른다.
+fn pickReceived(frame: [*c]c.cef_frame_t, message: [*c]c.cef_process_message_t) c_int {
+    const api = api_ref.?;
+    const list = message.*.get_argument_list.?(message);
+    if (list == null) return 1;
+    defer object.release(list);
+    const version = list.*.get_int.?(list, 0);
+    const index = list.*.get_int.?(list, 1);
+    const token_text = list.*.get_string.?(list, 2);
+    if (token_text == null) return 1;
+    defer api.string_userfree_utf16_free(token_text);
+    var token_buf: [32]u8 = undefined;
+    const token = std.fmt.parseInt(u64, library.readString(api, token_text, &token_buf), 16) catch return 1;
+    const doc = documentOf(frameKey(frame)) orelse return 1;
+    if (doc.token != token or doc.pick == null or index < 0) return 1;
+    // 누르기와 같다 — 페이지 코드가 돌다 문서가 풀려도 쓰지 않게 따로 잡고, 부른 뒤에는 `doc` 를 다시 보지 않는다.
+    const context = doc.context;
+    const pick = doc.pick;
+    addRef(context);
+    defer object.release(context);
+    addRef(pick);
+    defer object.release(pick);
+    const version_arg = api.v8_value_create_int(version) orelse return 1;
+    const index_arg = api.v8_value_create_int(index) orelse {
+        object.release(version_arg);
+        return 1;
+    };
+    const args = [_][*c]c.cef_v8_value_t{ version_arg, index_arg };
+    addRef(context);
+    const result = pick.*.execute_function_with_context.?(pick, context, null, 2, &args);
     if (result != null) object.release(result);
     return 1;
 }

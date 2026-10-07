@@ -329,6 +329,17 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/dialog-hold")) {
         return "<!doctype html><title>loading</title><script>alert('hold');document.title='after-hold'</script>";
     }
+    // W6m①: 제안 목록 — a(목록)·b(목록 없음)·c(email + 목록)·d(date + 목록), 300×40 칸을 100 px 간격으로. 입력·고르기의 `input`·
+    // `change` 는 제목으로 보인다(`종류:칸:값`).
+    if (std.mem.eql(u8, path, "/datalist")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;width:300px;height:40px;font-size:20px;border:0;padding:0}</style><body>" ++
+        "<input id=a list=l style='top:0'><input id=b style='top:100px'><input id=c type=email list=l style='top:200px'><input id=d type=date list=l style='top:300px'>" ++
+        "<datalist id=l><option value='apple'><option value='Apple pie'><option value='pineapple'><option value=''>empty value</option><option value='banana' label='yellow fruit'><option value='APRICOT'>" ++
+        "<option value='cherry'>Cherry text</option><option value='avocado' disabled><option value='grape' label='purple'>purple text</option></datalist>" ++
+        "<script>['input','change'].forEach(function(t){document.addEventListener(t,function(e){document.title=t+':'+e.target.id+':'+e.target.value},true)});document.title='dl-ready'</script>";
+    if (std.mem.eql(u8, path, "/datalist-many")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;top:0;width:300px;height:40px}</style><body><input id=a list=l><datalist id=l></datalist>" ++
+        "<script>var l=document.getElementById('l');for(var i=0;i<300;i++){var o=document.createElement('option');o.value='item '+i;l.appendChild(o)}document.title='dl-many-ready'</script>";
+    if (std.mem.eql(u8, path, "/datalist-frame")) return "<!doctype html><title>loading</title><style>html,body{margin:0}iframe{position:fixed;left:0;top:0;width:400px;height:100px;border:0}</style><body>" ++
+        "<iframe srcdoc=\"<style>html,body{margin:0}input{width:300px;height:40px}</style><input list=l><datalist id=l><option value=a><option value=b></datalist>\" onload=\"document.title='dl-frame-ready'\"></iframe>";
     if (std.mem.eql(u8, path, "/unload")) {
         return "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>var n=0;addEventListener('click',function(){window.onbeforeunload=function(e){e.preventDefault();e.returnValue='leave?';return 'leave?'};document.title='unload-armed-'+(++n)});requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='unload-ready'})})</script>";
     }

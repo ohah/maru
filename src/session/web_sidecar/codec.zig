@@ -223,6 +223,26 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             if (value.notification == 0) return error.InvalidNotification;
             try cursor.writeU32(value.notification);
         },
+        .datalist_show => |value| {
+            try writeBrowser(&cursor, value.browser);
+            if (value.list == 0) return error.InvalidDatalist;
+            try cursor.writeU32(value.list);
+            try writeRect(&cursor, value.field);
+            try fields.checkDatalistItems(value.count, value.items);
+            try cursor.writeU16(value.count);
+            try cursor.writeU32(@intCast(value.items.len));
+            try cursor.writeBytes(value.items);
+        },
+        .datalist_hide => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.list);
+        },
+        .datalist_pick => |value| {
+            try writeBrowser(&cursor, value.browser);
+            if (value.list == 0 or value.index >= message_mod.max_datalist_items) return error.InvalidDatalist;
+            try cursor.writeU32(value.list);
+            try cursor.writeU16(value.index);
+        },
         .context_menu => |value| {
             try fields.checkContextMenu(value.menu, value.flags, value.selection);
             try writeBrowser(&cursor, value.browser);
@@ -526,6 +546,26 @@ pub fn decodeExact(frame: []const u8) Error!Message {
                 .body = try readDialogText(&cursor),
             } };
         },
+        .datalist_show => blk: {
+            const browser = try readBrowser(&cursor);
+            const list = try cursor.readU32();
+            if (list == 0) return error.InvalidDatalist;
+            const field = try readRect(&cursor);
+            const count = try cursor.readU16();
+            const len = try cursor.readU32();
+            if (len > message_mod.max_datalist_bytes) return error.InvalidDatalist;
+            const items = try cursor.readBytes(len);
+            try fields.checkDatalistItems(count, items);
+            break :blk .{ .datalist_show = .{ .browser = browser, .list = list, .field = field, .count = count, .items = items } };
+        },
+        .datalist_hide => .{ .datalist_hide = .{ .browser = try readBrowser(&cursor), .list = try cursor.readU32() } },
+        .datalist_pick => blk: {
+            const browser = try readBrowser(&cursor);
+            const list = try cursor.readU32();
+            const index = try cursor.readU16();
+            if (list == 0 or index >= message_mod.max_datalist_items) return error.InvalidDatalist;
+            break :blk .{ .datalist_pick = .{ .browser = browser, .list = list, .index = index } };
+        },
         .web_notification_click => blk: {
             const browser = try readBrowser(&cursor);
             const notification = try cursor.readU32();
@@ -695,7 +735,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  13, 0, // v13, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  14, 0, // v14, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -777,7 +817,9 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 58; // 정의되지 않은 tag(maru → sidecar 의 0~31 은 W6j 의 `close_asking` 으로 다 찼다)
+    bad[10] = 60; // 정의되지 않은 tag(sidecar → maru 는 W6m① 의 `datalist_hide` 59 까지)
+    try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
+    bad[10] = 129; // 둘째 구간(maru → sidecar)도 `datalist_pick` 128 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
@@ -1369,6 +1411,11 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         // W6f 팝업 이어 받기.
         .{ .popup_reserve = .{ .browser = 9 } },
         .{ .popup_created = .{ .opener = 3, .browser = 9, .placement = .foreground, .url = "about:blank" } },
+        // W6m① 제안 목록.
+        .{ .datalist_show = .{ .browser = 3, .list = 2, .field = .{ .x = 0, .y = 40, .width = 300, .height = 40 }, .count = 2, .items = "\x00\x05apple\x00\x00\x00\x06banana\x00\x0cyellow fruit" } },
+        .{ .datalist_hide = .{ .browser = 3, .list = 2 } },
+        .{ .datalist_hide = .{ .browser = 3, .list = 0 } },
+        .{ .datalist_pick = .{ .browser = 3, .list = 2, .index = 1 } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;
@@ -1577,4 +1624,80 @@ test "geolocation round trips and its numbers fail closed" {
 comptime {
     // 가장 큰 대화상자 frame(글 셋 상한)도 frame 상한 안에 든다.
     std.debug.assert(prefix_len + common_len + 8 + 4 + 2 + 3 * (4 + max_text_bytes) <= max_frame_bytes);
+}
+
+// ── 제안 목록(W6m①) ───────────────────────────────────────────────────────────────────────────────────────
+
+comptime {
+    // 가장 큰 제안 목록 frame 도 frame 상한 안에 든다.
+    std.debug.assert(prefix_len + common_len + 8 + 4 + 16 + 2 + 4 + message_mod.max_datalist_bytes <= max_frame_bytes);
+}
+
+test "datalist messages round trip — Korean, empty label, the builder's blob" {
+    var blob: [256]u8 = undefined;
+    var builder: fields.DatalistBuilder = .{ .buf = &blob };
+    try std.testing.expect(builder.add("apple", "apple")); // 값과 같은 레이블은 비운다
+    try std.testing.expect(builder.add("사과", "빨간 과일"));
+    try std.testing.expect(builder.add("", "빈 값은 건너뛴다")); // 빈 값 — 쌓지 않지만 다음 항목은 받는다
+    try std.testing.expectEqual(@as(u16, 2), builder.count);
+    const shown = (try roundTrip(.{ .datalist_show = .{ .browser = 7, .list = 3, .field = .{ .x = -2, .y = 40, .width = 300, .height = 40 }, .count = builder.count, .items = builder.items() } })).datalist_show;
+    try std.testing.expectEqual(@as(u32, 3), shown.list);
+    try std.testing.expectEqual(@as(i32, -2), shown.field.x);
+    var it: fields.DatalistItems = .{ .bytes = shown.items };
+    const first = (try it.next()).?;
+    try std.testing.expectEqualStrings("apple", first.value);
+    try std.testing.expectEqualStrings("", first.label);
+    const second = (try it.next()).?;
+    try std.testing.expectEqualStrings("사과", second.value);
+    try std.testing.expectEqualStrings("빨간 과일", second.label);
+    try std.testing.expect((try it.next()) == null);
+    try std.testing.expectEqual(@as(u32, 3), (try roundTrip(.{ .datalist_hide = .{ .browser = 7, .list = 3 } })).datalist_hide.list);
+    const pick = (try roundTrip(.{ .datalist_pick = .{ .browser = 7, .list = 3, .index = 1 } })).datalist_pick;
+    try std.testing.expectEqual(@as(u16, 1), pick.index);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.datalist_show.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.datalist_hide.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.datalist_pick.direction());
+}
+
+test "datalist closed fields fail closed" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    const one = "\x00\x01a\x00\x00";
+    const field: message_mod.Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    // 목록 번호 0 · 항목 0 개 · 개수와 덩어리가 어긋남 · 남는 바이트 · 빈 값 · 값과 같은 레이블 · 제어 문자 · 잘린 UTF-8.
+    try std.testing.expectError(error.InvalidDatalist, encode(.{ .datalist_show = .{ .browser = 1, .list = 0, .field = field, .count = 1, .items = one } }, &buf));
+    try std.testing.expectError(error.InvalidDatalist, encode(.{ .datalist_show = .{ .browser = 1, .list = 1, .field = field, .count = 0, .items = "" } }, &buf));
+    try std.testing.expectError(error.InvalidDatalist, encode(.{ .datalist_show = .{ .browser = 1, .list = 1, .field = field, .count = 2, .items = one } }, &buf));
+    try std.testing.expectError(error.InvalidLength, encode(.{ .datalist_show = .{ .browser = 1, .list = 1, .field = field, .count = 1, .items = one ++ "\x00" } }, &buf));
+    try std.testing.expectError(error.InvalidDatalist, encode(.{ .datalist_show = .{ .browser = 1, .list = 1, .field = field, .count = 1, .items = "\x00\x00\x00\x00" } }, &buf));
+    try std.testing.expectError(error.InvalidDatalist, encode(.{ .datalist_show = .{ .browser = 1, .list = 1, .field = field, .count = 1, .items = "\x00\x01a\x00\x01a" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .datalist_show = .{ .browser = 1, .list = 1, .field = field, .count = 1, .items = "\x00\x02a\x1b\x00\x00" } }, &buf));
+    try std.testing.expectError(error.InvalidUtf8, encode(.{ .datalist_show = .{ .browser = 1, .list = 1, .field = field, .count = 1, .items = "\x00\x01\xea\x00\x00" } }, &buf));
+    // 고른 번호는 상한 밖이면 안 된다, 목록 번호 0 도.
+    try std.testing.expectError(error.InvalidDatalist, encode(.{ .datalist_pick = .{ .browser = 1, .list = 1, .index = message_mod.max_datalist_items } }, &buf));
+    try std.testing.expectError(error.InvalidDatalist, encode(.{ .datalist_pick = .{ .browser = 1, .list = 0, .index = 0 } }, &buf));
+    // 상한: 항목 수 · 글 하나의 길이.
+    var many: [message_mod.max_datalist_bytes]u8 = undefined;
+    var builder: fields.DatalistBuilder = .{ .buf = &many };
+    var n: u32 = 0;
+    while (n < message_mod.max_datalist_items + 10) : (n += 1) _ = builder.add("x", "");
+    try std.testing.expectEqual(message_mod.max_datalist_items, builder.count);
+    try std.testing.expect(!builder.add("y", ""));
+    // 긴 글은 글자 경계에서 자르고(건너뛰지 않는다 — 번호가 어긋나지 않게), 제어 문자는 공백, 다듬어 값과 같아진 레이블은 비운다.
+    const long = "가" ** (message_mod.max_datalist_text_bytes / 3 + 1);
+    var room: [2 * message_mod.max_datalist_text_bytes + 8]u8 = undefined;
+    var clamp: fields.DatalistBuilder = .{ .buf = &room };
+    try std.testing.expect(clamp.add(long, "a\x01b"));
+    try std.testing.expect(clamp.add("a\x07", "a "));
+    try std.testing.expectEqual(@as(u16, 2), clamp.count);
+    var it: fields.DatalistItems = .{ .bytes = clamp.items() };
+    const cut = (try it.next()).?;
+    try std.testing.expect(cut.value.len <= message_mod.max_datalist_text_bytes and cut.value.len % 3 == 0);
+    try std.testing.expectEqualStrings("a b", cut.label);
+    try std.testing.expectEqualStrings("", (try it.next()).?.label);
+    try fields.checkDatalistItems(clamp.count, clamp.items());
+    // 덩어리 바이트 상한 — 버퍼가 차면 false.
+    var tiny: [8]u8 = undefined;
+    var full: fields.DatalistBuilder = .{ .buf = &tiny };
+    try std.testing.expect(full.add("ab", ""));
+    try std.testing.expect(!full.add("cd", ""));
 }

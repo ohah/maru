@@ -5,6 +5,7 @@
 const std = @import("std");
 const wire = @import("wire.zig");
 const message = @import("message.zig");
+const text_mod = @import("text.zig");
 
 const Cursor = wire.Cursor;
 const ReadCursor = wire.ReadCursor;
@@ -342,6 +343,79 @@ pub fn readHello(cursor: *ReadCursor) Error!Hello {
 /// C0 제어 문자와 DEL. 제목·설명은 웹 페이지가 통제하는 글이라 ESC·OSC·NUL 이 maru 의 UI·로그·터미널 제목으로
 /// 흘러가면 주입이 된다(적대 검증) — sidecar 는 `text.replaceControl` 로 치환해 보내고, 받는 쪽은 남아 있으면 거절한다.
 /// URL 은 제어 문자를 퍼센트 인코딩해야 하므로 날것이 있으면 거절한다.
+/// 제안 목록의 한 항목(W6m①) — 값은 비지 않고, 레이블은 값과 다를 때만(아니면 빈 글).
+pub const DatalistItem = struct { value: []const u8, label: []const u8 };
+
+fn checkDatalistText(text: []const u8) Error!void {
+    if (text.len > message.max_datalist_text_bytes) return error.InvalidDatalist;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    if (hasControl(text)) return error.ControlCharacter;
+}
+
+/// 덩어리를 앞에서부터 읽는다 — `[u16 값 길이][값][u16 레이블 길이][레이블]` 의 연속. 항목마다 글 규칙을 본다.
+pub const DatalistItems = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+
+    pub fn next(self: *DatalistItems) Error!?DatalistItem {
+        if (self.pos == self.bytes.len) return null;
+        var cursor = ReadCursor{ .bytes = self.bytes, .pos = self.pos };
+        const value = try cursor.readBytes(try cursor.readU16());
+        const label = try cursor.readBytes(try cursor.readU16());
+        self.pos = cursor.pos;
+        if (value.len == 0 or std.mem.eql(u8, value, label)) return error.InvalidDatalist;
+        try checkDatalistText(value);
+        try checkDatalistText(label);
+        return .{ .value = value, .label = label };
+    }
+};
+
+/// 덩어리 전체(W6m①): 1 개 이상 `max_datalist_items` 개 이하, `max_datalist_bytes` 안, 정확히 `count` 개로 끝난다.
+pub fn checkDatalistItems(count: u16, items: []const u8) Error!void {
+    if (count == 0 or count > message.max_datalist_items or items.len > message.max_datalist_bytes) return error.InvalidDatalist;
+    var it: DatalistItems = .{ .bytes = items };
+    var seen: u16 = 0;
+    while (try it.next()) |_| {
+        if (seen == count) return error.InvalidDatalist;
+        seen += 1;
+    }
+    if (seen != count) return error.InvalidDatalist;
+}
+
+/// sidecar 쪽 — 호출자 버퍼에 덩어리를 쌓는다. 글은 글자 경계에서 `max_datalist_text_bytes` 로 자르고 제어 문자는 공백으로 —
+/// 빈 값만 건너뛴다(대리 스크립트도 빈 값을 건너뛴다: 고른 번호가 스크립트가 쥔 항목과 같은 차례여야 한다). 상한(개수·
+/// 바이트)에 닿으면 false 를 돌려주고 더 쌓지 않는다(뒤 항목만 빠져 앞 항목의 번호는 그대로다).
+pub const DatalistBuilder = struct {
+    buf: []u8,
+    len: usize = 0,
+    count: u16 = 0,
+
+    pub fn add(self: *DatalistBuilder, value_in: []const u8, label_in: []const u8) bool {
+        if (self.count >= message.max_datalist_items) return false;
+        const value = text_mod.clampUtf8(value_in, message.max_datalist_text_bytes);
+        if (value.len == 0) return true;
+        const label = text_mod.clampUtf8(label_in, message.max_datalist_text_bytes);
+        if (self.len + 2 + value.len + 2 + label.len > @min(self.buf.len, message.max_datalist_bytes)) return false;
+        const value_at = self.len + 2;
+        @memcpy(self.buf[value_at..][0..value.len], value);
+        text_mod.replaceControl(self.buf[value_at..][0..value.len]);
+        const label_at = value_at + value.len + 2;
+        @memcpy(self.buf[label_at..][0..label.len], label);
+        text_mod.replaceControl(self.buf[label_at..][0..label.len]);
+        // 다듬은 뒤 값과 같은 레이블은 비운다(닫힌 필드 — 레이블은 값과 다를 때만).
+        const label_len = if (std.mem.eql(u8, self.buf[value_at..][0..value.len], self.buf[label_at..][0..label.len])) 0 else label.len;
+        std.mem.writeInt(u16, self.buf[self.len..][0..2], @intCast(value.len), .big);
+        std.mem.writeInt(u16, self.buf[value_at + value.len ..][0..2], @intCast(label_len), .big);
+        self.len = label_at + label_len;
+        self.count += 1;
+        return true;
+    }
+
+    pub fn items(self: *const DatalistBuilder) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 fn hasControl(bytes: []const u8) bool {
     for (bytes) |byte| if (byte < 0x20 or byte == 0x7f) return true;
     return false;

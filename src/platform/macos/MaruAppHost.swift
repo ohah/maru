@@ -5743,6 +5743,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // leave 를 보낸다(페이지의 `:hover` 가 열린 채 남지 않게). 커서는 건드리지 않는다(이제 다른 창·앱의 것이다).
         var cursorKind: Int32 = 0
         _ = maru_macos_app_session_hover(session, -1, -1, 0, &cursorKind)
+        // W6m②: tick 은 키 창만 목록 창을 고친다 — 떠나는 창의 것은 여기서 거둔다(다른 maru 창으로 옮기면 옛 목록 창이 남았다 —
+        // 적대 검증 5 차). 페이지도 초점을 잃어 목록을 닫는다.
+        surface.osrDatalistPopup?.hide()
+        maru_macos_app_session_osr_datalist_shown(session, 0)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -7876,12 +7880,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
             drainOsrTooltip() // W6b: hover 중인 Chromium 탭의 툴팁 글이 바뀌었으면 macOS 툴팁을 다시 단다.
-            drainOsrDatalist() // W6m②: 키 대상 Chromium 탭의 제안 목록을 칸 아래 네이티브 창으로 띄우거나 고치거나 거둔다.
             drainOsrContextMenu() // W6c②: Chromium 탭 우클릭 메뉴 — tick 이 끝난 뒤 macOS 메뉴로 띄우고, 페이지가 닫으면 거둔다.
             drainOsrNewWindows() // W6h①: 메뉴 「새 창에서 링크 열기」 — tick 이 끝난 뒤 새 창을 만들고 그 창에 웹 탭으로 연다.
             drainOsrDragOut() // W6d②: Chromium 탭에서 시작한 끌기 — 누른 채면 macOS 끌기 세션으로.
             drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
             drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
+            drainOsrDatalist() // W6m②: 키 대상 Chromium 탭의 제안 목록을 칸 아래 네이티브 창으로 — sheet 를 붙인 뒤에 본다(sheet 위에 남지 않게).
             drainOsrLocation() // W5b2: 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다.
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.

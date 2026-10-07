@@ -1,7 +1,8 @@
 //! helper(렌더러 프로세스)의 CEF app — 웹 알림 중계의 렌더러 쪽(W5c — C6). Chromium 은 웹 알림을 OS 로 보내지 않는다(실측).
 //!
 //! 새 문서의 주 세계가 생길 때(`on_context_created`) 네이티브 함수 `send` 를 전역 `stash_name` 에 숨겨(열거되지 않게) 둔다 —
-//! 대리 스크립트가 돌 문서(주 프레임까지 이 프로세스로 이어지는 http(s)·불투명하지 않은 출처의 문서)에만(`relayable`).
+//! 대리 스크립트가 돌 문서(주 프레임까지 이 프로세스로 이어지는 http(s)·불투명하지 않은 출처의 문서)에만(`httpDocument` 이고
+//! `inProcessChain`).
 //! 대리 스크립트는 sidecar 가 DevTools `Page.addScriptToEvaluateOnNewDocument` 로 넣는다(`notifications.zig`) — secure context
 //! 에만 있는 `Notification`·`ServiceWorkerRegistration` 은 컨텍스트가 생길 때가 아니라 그 뒤에 설치되므로(실측 — 여기와 그
 //! microtask·`on_load_start` 에서는 `undefined`) 이 처리기 안에서는 감쌀 수 없다. 대리 스크립트는 페이지 스크립트보다 먼저
@@ -57,6 +58,9 @@ const Document = struct {
     frame: u64,
     token: u64,
     context: [*c]c.cef_v8_context_t,
+    /// 알림 대리 스크립트가 도는 문서(`inProcessChain` — 숨긴 `send` 를 둔다). 아니면 제안 목록만(W6m③ — 다른 출처 iframe 도).
+    notify: bool = false,
+    main: bool = false,
     /// 대리 스크립트가 넘기기 전에는 null.
     click: [*c]c.cef_v8_value_t = null,
     window_start_ms: i64 = 0,
@@ -67,7 +71,9 @@ const Document = struct {
     dl_window_calls: u32 = 0,
     dl_hide_calls: u32 = 0,
 };
-var documents: [128]?Document = [_]?Document{null} ** 128;
+var documents: [256]?Document = [_]?Document{null} ** 256;
+/// iframe 문서는 이만큼까지만 — 광고 iframe 이 표를 다 채워 새 주 프레임 문서(알림 중계)가 밀려나지 않게(W6m③ 적대 검토).
+const max_subframe_documents = 192;
 
 extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
 
@@ -129,10 +135,11 @@ fn setString(value: *c.cef_string_t, text: []const u8) void {
     library.setString(api_ref.?, value, text);
 }
 
-/// 새 문서의 주 세계 — 대리 스크립트가 돌 문서면 표에 올리고 `send` 를 숨겨 둔다. 표가 차면 그 문서는 중계하지 않는다(닫혀
-/// 실패). 대리 스크립트는 브라우저의 DevTools(주 프레임의 대상)가 넣으므로 **주 프레임까지 이 프로세스로 이어지는 프레임**의
-/// http(s) 문서에만 돈다 — 다른 사이트의 iframe(OOPIF)과 그 안의 프레임·`about:blank`·불투명 출처(sandbox) 문서에는 숨기지
-/// 않는다. 숨기면 꺼내 지울 스크립트가 없어 페이지에 그대로 보인다(적대 검증 — 탐지 신호).
+/// 새 문서의 주 세계 — http(s)·불투명하지 않은 출처의 문서면 표에 올리고 제안 목록 대리 스크립트를 돌린다(주 프레임과 iframe —
+/// W6m③). 표가 차면(iframe 은 `max_subframe_documents` 까지) 그 문서는 중계하지 않는다(닫혀 실패). 알림 `send` 는 더 좁게 —
+/// 알림 대리 스크립트는 브라우저의 DevTools(주 프레임의 대상)가 넣으므로 **주 프레임까지 이 프로세스로 이어지는 프레임**에만
+/// 숨긴다(다른 사이트의 iframe(OOPIF)과 그 안의 프레임에는 숨기지 않는다 — 꺼내 지울 스크립트가 없어 페이지에 그대로 보인다,
+/// 적대 검증 — 탐지 신호).
 fn onContextCreated(_: [*c]c.cef_render_process_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, context: [*c]c.cef_v8_context_t) callconv(.c) void {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
@@ -147,14 +154,31 @@ fn onContextCreated(_: [*c]c.cef_render_process_handler_t, browser: [*c]c.cef_br
     const global = context.*.get_global.?(context);
     if (global == null) return;
     defer object.release(global);
-    if (!relayable(frame, global)) return;
+    if (!httpDocument(frame, global)) return;
+    const main = frame.*.is_main.?(frame) != 0;
+    if (!main) {
+        var subframes: usize = 0;
+        for (&documents) |*slot| {
+            if (slot.*) |d| if (!d.main) {
+                subframes += 1;
+            };
+        }
+        if (subframes >= max_subframe_documents) return;
+    }
     const slot = for (&documents) |*slot| {
         if (slot.* == null) break slot;
     } else return;
     kept = true;
     var token: u64 = 0;
     arc4random_buf(@ptrCast(&token), @sizeOf(u64));
-    slot.* = .{ .frame = key, .token = token | 1, .context = context };
+    const notify = inProcessChain(frame);
+    slot.* = .{ .frame = key, .token = token | 1, .context = context, .notify = notify, .main = main };
+    // W6m②·③: 제안 목록 대리 스크립트는 여기서 — 문서가 생길 때, 페이지 스크립트보다 먼저 — 돌린다(주 프레임과 iframe 모두).
+    // DevTools 로 넣는 알림 스크립트는 브라우저를 만든 뒤에야 등록할 수 있어 새 탭의 첫 문서가 그보다 먼저 커밋되면 빠진다(앱의 첫
+    // 문서가 그 경쟁에 져 목록이 오지 않았다 — 실측). 제안 목록은 표준 DOM 만 쓰므로 이 시점에 돌 수 있다. `send` 는 전역에 두지
+    // 않고 인자로 넘긴다.
+    runDatalistScript(context, main);
+    if (!notify) return;
     const api = api_ref.?;
     var name = std.mem.zeroes(c.cef_string_t);
     setString(&name, stash_name);
@@ -163,17 +187,12 @@ fn onContextCreated(_: [*c]c.cef_render_process_handler_t, browser: [*c]c.cef_br
     if (send_fn == null) return;
     // 넘긴 값의 참조는 CEF 로 옮겨 간다. 지울 수 있게(대리 스크립트가 `delete`) DONTDELETE 는 주지 않는다.
     _ = global.*.set_value_bykey.?(global, &name, send_fn, c.V8_PROPERTY_ATTRIBUTE_DONTENUM);
-    // W6m②: 제안 목록 대리 스크립트는 여기서 — 주 프레임 문서가 생길 때, 페이지 스크립트보다 먼저 — 돌린다. DevTools 로 넣는
-    // 알림 스크립트는 브라우저를 만든 뒤에야 등록할 수 있어 새 탭의 첫 문서가 그보다 먼저 커밋되면 빠진다(앱의 첫 문서가 그
-    // 경쟁에 져 목록이 오지 않았다 — 실측). 제안 목록은 표준 DOM 만 쓰므로 이 시점에 돌 수 있다(알림은 secure context 의 API 가
-    // 이 뒤에 설치돼 여기서는 감쌀 수 없다). `send` 는 전역에 두지 않고 인자로 넘긴다.
-    if (frame.*.is_main.?(frame) != 0) runDatalistScript(context);
 }
 
 // 엄격 모드 — 고르기 중 페이지의 `input`·`change` 처리기가 `caller` 로 우리 함수를 꺼내지 못하게(적대 검증 4 차).
-const datalist_wrapper = "(function(send){'use strict';" ++ datalist_page.script_part ++ "})";
+const datalist_wrapper = "(function(send,main){'use strict';" ++ datalist_page.script_part ++ "})";
 
-fn runDatalistScript(context: [*c]c.cef_v8_context_t) void {
+fn runDatalistScript(context: [*c]c.cef_v8_context_t, main: bool) void {
     const api = api_ref.?;
     var code = std.mem.zeroes(c.cef_string_t);
     setString(&code, datalist_wrapper);
@@ -191,16 +210,20 @@ fn runDatalistScript(context: [*c]c.cef_v8_context_t) void {
     defer api.string_utf16_clear(&name);
     // 넘긴 인자의 참조는 CEF 로 옮겨 간다(누르기 경로와 같다).
     const send_fn = api.v8_value_create_function(&name, &datalist_send_handler) orelse return;
-    const args = [_][*c]c.cef_v8_value_t{send_fn};
-    const result = fn_value.*.execute_function.?(fn_value, null, 1, &args);
+    const main_value = api.v8_value_create_int(@intFromBool(main)) orelse { // 1 = 주 프레임
+        object.release(send_fn);
+        return;
+    };
+    const args = [_][*c]c.cef_v8_value_t{ send_fn, main_value };
+    const result = fn_value.*.execute_function.?(fn_value, null, 2, &args);
     if (result != null) object.release(result);
 }
 
 /// 대리 스크립트가 돌 문서인가 — 부모를 따라 주 프레임까지 이 프로세스에서 이어지고(CEF 는 부모가 다른 프로세스면 null 을
 /// 준다 — 그 사이에 OOPIF 가 끼면 끊긴다), 주소가 http(s) 이고, 출처가 불투명하지 않다(전역 `origin` — 페이지 스크립트가 돌기
 /// 전이라 바꿔 놓을 수 없다. 스크립트를 컴파일하지 않고 네이티브 getter 를 읽는다).
-fn relayable(frame: [*c]c.cef_frame_t, global: [*c]c.cef_v8_value_t) bool {
-    const api = api_ref.?;
+/// 주 프레임까지 이 프로세스로 이어지는가(알림 대리 스크립트가 도는 프레임 — 다른 사이트의 iframe(OOPIF)과 그 안은 아니다).
+fn inProcessChain(frame: [*c]c.cef_frame_t) bool {
     if (frame.*.is_main.?(frame) == 0) {
         var current = frame.*.get_parent.?(frame);
         while (true) {
@@ -214,6 +237,12 @@ fn relayable(frame: [*c]c.cef_frame_t, global: [*c]c.cef_v8_value_t) bool {
             current = next;
         }
     }
+    return true;
+}
+
+/// http(s) 주소이고 출처가 불투명하지 않은 문서(`about:blank`·`srcdoc`·sandbox·data 는 아니다).
+fn httpDocument(frame: [*c]c.cef_frame_t, global: [*c]c.cef_v8_value_t) bool {
+    const api = api_ref.?;
     const url = frame.*.get_url.?(frame);
     if (url == null) return false;
     defer api.string_userfree_utf16_free(url);
@@ -318,6 +347,7 @@ fn handleSend(datalist: bool, this: [*c]c.cef_v8_value_t, count: usize, argument
     defer object.release(frame);
     const doc = documentOf(frameKey(frame)) orelse return 1;
     if (!isDocumentContext(doc, context)) return 1;
+    if (!datalist and !doc.notify) return 1; // 알림 send 는 숨겨 둔 문서에서만
     if (count == 2) {
         // `send('dl', …)` — 제안 목록(W6m①).
         if (!isKind(arguments[0], "dl")) return 1;

@@ -242,6 +242,10 @@ const newtab_page =
     "<div style='position:absolute;left:560px;top:60px;width:70px;height:80px;background:#cfc' ondragenter='event.preventDefault()' ondragover='event.preventDefault()' " ++
     "ondrop=\"event.preventDefault();setTimeout(function(){document.getElementById('pl').dispatchEvent(new MouseEvent('click',{metaKey:true,bubbles:true,cancelable:true}));document.title='nt-dropped-late'},2500)\">dz2</div>";
 
+const frame_page_head = "<!doctype html><title>loading</title><style>html,body{margin:0}body{height:3000px}#m{position:fixed;left:480px;top:200px;width:150px;height:40px}" ++
+    "iframe{position:absolute;left:50px;top:150px;width:400px;height:300px;border:4px solid #000;padding:6px}</style><body><input id=m list=l><datalist id=l><option value=a><option value=b></datalist>";
+const frame_page_tail = "<script>addEventListener('scroll',function(){document.title='sy:'+scrollY});addEventListener('message',function(e){if(e.data==='remove'){var x=document.getElementById('x');if(x)x.remove();document.title='removed'}else if(typeof e.data==='string')document.title=e.data})</script>";
+
 fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/title")) {
         if (std.mem.eql(u8, query, "opened")) _ = opened_requests.fetchAdd(1, .monotonic);
@@ -348,9 +352,27 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/datalist-long")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;top:0;width:300px;height:40px}</style><body><input id=a list=l><datalist id=l></datalist>" ++
         "<script>var l=document.getElementById('l'),x='x'.repeat(600);for(var i=0;i<256;i++){var o=document.createElement('option');o.value='v'+i;o.label=x;l.appendChild(o)}document.title='dl-long-ready'</script>";
     // 같은 출처 http iframe(스크립트가 돈다 — srcdoc 은 http 가 아니라 처음부터 빠져 판정이 저절로 통과했다)과 주 프레임 칸(양성 대조).
-    if (std.mem.eql(u8, path, "/datalist-frame")) return "<!doctype html><title>loading</title><style>html,body{margin:0}input{position:fixed;left:0;top:200px;width:300px;height:40px}iframe{position:fixed;left:0;top:0;width:400px;height:100px;border:0}</style><body>" ++
-        "<input id=m list=l><datalist id=l><option value=a><option value=b></datalist><iframe src='/datalist-inner' onload=\"document.title='dl-frame-ready'\"></iframe>";
-    if (std.mem.eql(u8, path, "/datalist-inner")) return "<!doctype html><title>inner</title><style>html,body{margin:0}input{width:300px;height:40px}</style><input list=l><datalist id=l><option value=a><option value=b></datalist>";
+    // W6m③: iframe 안의 칸 — 내용 상자 원점은 (60,160)(left 50·top 150 + 테두리 4 + 안쪽 여백 6), 문서는 길다(최상위 스크롤).
+    // 같은 출처(`/datalist-frame`)와 다른 출처(`/datalist-xframe` — localhost)는 같은 모양. 안쪽 칸의 input·change 와 「떼어 내기」는
+    // 바깥에 postMessage 로 알린다(바깥 페이지가 제목으로 — 다른 출처도). 주 프레임 칸은 오른쪽(480,200).
+    if (std.mem.eql(u8, path, "/datalist-frame") or std.mem.eql(u8, path, "/datalist-xframe")) {
+        const cross = std.mem.eql(u8, path, "/datalist-xframe");
+        return if (cross) frame_page_head ++ "<iframe id=x></iframe><script>var x=document.getElementById('x');x.onload=function(){document.title='dl-frame-ready'};x.src='http://localhost:'+location.port+'/datalist-inner'</script>" ++ frame_page_tail else frame_page_head ++ "<iframe id=x src='/datalist-inner' onload=\"document.title='dl-frame-ready'\"></iframe>" ++ frame_page_tail;
+    }
+    if (std.mem.eql(u8, path, "/datalist-inner")) return "<!doctype html><title>inner</title><style>html,body{margin:0}input{width:300px;height:40px;border:0;padding:0}</style><input id=f list=l><datalist id=l><option value=a><option value=b><option value=zebra></datalist>" ++
+        "<script>var f=document.getElementById('f');function tell(m){parent.postMessage(m,'*')}f.addEventListener('input',function(){tell('in-input:'+f.value);if(f.value==='z')setTimeout(function(){tell('remove')},400)});f.addEventListener('change',function(){tell('in-change:'+f.value)})</script>";
+    // W6m③: 열린 shadow DOM — h(0,0) 안의 칸과 목록, s2(0,60) 안의 스크롤 상자 속 칸, s3(0,140) 안의 칸은 목록이 바깥(light DOM)에
+    // 있다(Chrome 도 안 연다), s4(0,200) 는 선언형 닫힌 shadow(하지 않는다 — 사용자 결정). 그 뒤 칸 t(0,260) 는 Tab 이 갈 곳. host 의
+    // input(composed)과 안쪽 칸의 change 를 제목으로.
+    if (std.mem.eql(u8, path, "/datalist-shadow")) return "<!doctype html><title>loading</title><style>html,body{margin:0}div.h{position:absolute;left:0;width:320px}#t{position:absolute;left:0;top:260px;width:300px;height:40px}</style><body>" ++
+        "<div class=h id=h style='top:0;height:40px'></div><div class=h id=s2 style='top:60px;height:60px'></div><div class=h id=s3 style='top:140px;height:40px'></div>" ++
+        "<div class=h style='top:200px;height:40px'><template shadowrootmode=closed><input list=l4 style='width:300px;height:40px;border:0;padding:0'><datalist id=l4><option value=apple></datalist></template></div>" ++
+        "<input id=t><datalist id=lx><option value=apple></datalist><script>var I='width:300px;height:40px;border:0;padding:0;margin:0;display:block';" ++
+        "var h=document.getElementById('h'),r=h.attachShadow({mode:'open'});r.innerHTML='<input id=f list=l style='+I+'><datalist id=l><option value=apple><option value=apricot></datalist>';" ++
+        "h.addEventListener('input',function(){document.title='host-input:'+r.getElementById('f').value});r.getElementById('f').addEventListener('change',function(e){document.title='sh-change:'+e.target.value});" ++
+        "var r2=document.getElementById('s2').attachShadow({mode:'open'});r2.innerHTML='<div id=box style=height:60px;width:320px;overflow:auto><input list=l2 style='+I+'><div style=height:400px></div></div><datalist id=l2><option value=apple></datalist>';" ++
+        "var r3=document.getElementById('s3').attachShadow({mode:'open'});r3.innerHTML='<input list=lx style='+I+'>';" ++
+        "requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='dl-shadow-ready'})})</script>";
     if (std.mem.eql(u8, path, "/unload")) {
         return "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>var n=0;addEventListener('click',function(){window.onbeforeunload=function(e){e.preventDefault();e.returnValue='leave?';return 'leave?'};document.title='unload-armed-'+(++n)});requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='unload-ready'})})</script>";
     }

@@ -40,6 +40,7 @@ var jsdialog: c.cef_jsdialog_handler_t = undefined;
 var file_dialog: c.cef_dialog_handler_t = undefined;
 var context_menu: c.cef_context_menu_handler_t = undefined;
 var permission: c.cef_permission_handler_t = undefined;
+var frame_handler: c.cef_frame_handler_t = undefined;
 var title_task: c.cef_task_t = undefined;
 var title_flush_posted = false;
 var ready = false;
@@ -68,6 +69,8 @@ pub fn get() *c.cef_client_t {
         object.staticRefCounted(&context_menu.base);
         permission = object.zeroed(c.cef_permission_handler_t);
         object.staticRefCounted(&permission.base);
+        frame_handler = object.zeroed(c.cef_frame_handler_t);
+        object.staticRefCounted(&frame_handler.base);
         title_task = object.zeroed(c.cef_task_t);
         object.staticRefCounted(&title_task.base);
         title_task.execute = &flushTitles;
@@ -81,6 +84,7 @@ pub fn get() *c.cef_client_t {
         client_obj.get_dialog_handler = &getFileDialog;
         client_obj.get_context_menu_handler = &getContextMenu;
         client_obj.get_permission_handler = &getPermission;
+        client_obj.get_frame_handler = &getFrameHandler;
         // W5c: helper 의 알림 대리 스크립트가 보내는 프로세스 메시지.
         client_obj.on_process_message_received = &notifications.onProcessMessageReceived;
         life_span.on_before_popup = &onBeforePopup;
@@ -96,6 +100,8 @@ pub fn get() *c.cef_client_t {
         render.on_ime_composition_range_changed = &input.onImeCompositionRangeChanged;
         render.update_drag_cursor = &drag.onUpdateDragCursor;
         render.start_dragging = &drag.onStartDragging;
+        render.on_scroll_offset_changed = &onScrollOffsetChanged;
+        frame_handler.on_frame_detached = &onFrameDetached;
         display.on_title_change = &onTitleChange;
         display.on_address_change = &onAddressChange;
         display.on_cursor_change = &input.onCursorChange;
@@ -118,6 +124,24 @@ pub fn get() *c.cef_client_t {
         permission.on_request_media_access_permission = &permissions.onRequestMediaAccessPermission;
     }
     return &client_obj;
+}
+
+fn getFrameHandler(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_frame_handler_t {
+    return &frame_handler;
+}
+
+/// 최상위 문서가 스크롤했다 — iframe 의 제안 목록을 닫는다(W6m③).
+fn onScrollOffsetChanged(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, _: f64, _: f64) callconv(.c) void {
+    defer object.releaseArg(browser);
+    if (entryOf(browser)) |entry| @import("datalist.zig").onTopScroll(entry.id);
+}
+
+/// 프레임이 렌더러와 끊겼다(떨어져 나감·뒤로 가기 캐시) — 그 iframe 의 제안 목록을 닫는다(W6m③).
+fn onFrameDetached(_: [*c]c.cef_frame_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    if (frame == null) return;
+    if (entryOf(browser)) |entry| @import("datalist.zig").closeFrame(entry.id, frame);
 }
 
 fn getLifeSpan(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_life_span_handler_t {
@@ -297,6 +321,8 @@ fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, 
             tooltip.reset(entry.id);
             @import("datalist.zig").reset(entry.id); // W6m①: 옛 문서의 제안 목록
         }
+    } else if (frame != null) {
+        if (entryOf(browser)) |entry| @import("datalist.zig").closeFrame(entry.id, frame); // W6m③: iframe 의 옛 문서의 목록
     }
     dialogs.onLoadStart(handler, browser, frame, transition);
 }

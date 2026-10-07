@@ -7,6 +7,10 @@
 //! `deadline_exceeded`·`host_gone` 으로 끝나는 갈래는 입장 결속만 풀고 조용히 사라졌고, `retry_later` 로 다시 넣는
 //! 갈래도 아무것도 남기지 않아 「첫 시도가 왜 실패했나」를 가릴 수 없었다.
 //!
+//! 2026-10-07 같은 사고가 다시 났고, 이 기록이 원인을 「첫 시도가 5 초 안에 연결을 못 마쳤는데 `deadline_exceeded` 가
+//! 종결이라 다시 안 걸었다」로 판정했다. 그 뒤로 `deadline_exceeded` 는 새 데드라인·대기로 다시 넣는다
+//! (`reconnect_retry_policy.zig`) — 이 판정자는 그 배선도 함께 잰다.
+//!
 //! 서식·판정(`reconnect_failure_log.zig`)은 순수 테스트가 잰다. 정산 갈래는 backend·워커 스레드를 써서 PR 에서
 //! 못 돌린다 — 그래서 각 갈래가 그 기록을 **제자리에서, 조건 없이** 부르는지를 여기서 글자로 잰다.
 
@@ -75,22 +79,48 @@ test "재접속 job 이 재시도 없이 끝나거나 다시 들어가는 모든
     const src = try normalize(a, raw);
     defer a.free(src);
 
-    // ① 논리 정산: retry_later 갈래는 다시 넣은 **뒤, 그 갈래 안에서** 다시 넣기 줄을, 나머지(deadline_exceeded·
-    //    host_gone·cancelled)는 결속을 푼 **뒤 조건 없이** 끝 줄을 남긴다. 한 자리라 outcome 별 조건을 끼우면
-    //    아래 연속 문장이 깨진다 — 「deadline_exceeded 만 빼기」 같은 변형도 여기서 잡힌다.
+    // ① 논리 정산: 다시 넣는 갈래(retry_later·deadline_exceeded)는 **새 데드라인**을 싣고 대기를 건 뒤, 그 갈래
+    //    안에서 다시 넣기 줄을 남긴다. 나머지(host_gone·cancelled)는 결속을 푼 **뒤 조건 없이** 끝 줄을 남긴다.
+    //    2026-10-07: deadline_exceeded 가 종결이었고 다시 넣어도 처음 5 초 데드라인을 끌고 가, 잠자기 뒤 GUI 가
+    //    앱 재시작까지 안 붙었다. 「deadline_exceeded 를 다시 빼기」·「데드라인 갱신 빼기」·「대기 빼기」가 여기서 잡힌다.
     const settle = try fnBody(src, "settleLogicalCompletion");
-    _ = try expectOnce(
+    // 시간 초과는 끝없이(timeout), retry_later 는 연속 상한까지(other) — 값은 `reconnect_retry_policy.zig` 가 잰다.
+    const kinds = try expectOnce(
         settle,
-        "if (outcome == .retry_later) { try self.consumeLogicalCompletion(); const result = try self.jobs.admit(snapshot); if (result != .admitted) return error.InvalidCoordinator; self.noteRequeued(snapshot); return outcome; }",
-        "retry_later 갈래가 다시 넣은 뒤 그 자리에서 다시 넣기 줄을 남긴다",
+        "const retry_kind: ?retry_policy.Failure = switch (outcome) { .deadline_exceeded => .timeout, .retry_later => .other, else => null, };",
+        "deadline_exceeded 는 시간 초과로, retry_later 는 그 밖의 실패로 다시 넣는 갈래에 들어간다",
     );
+    const retry_open = try expectOnce(
+        settle,
+        "if (retries) |retry_number| { try self.consumeLogicalCompletion();",
+        "정책이 허락한 실패만 다시 넣는다",
+    );
+    if (kinds > retry_open) return error.WiringChanged;
+    const fresh = try expectOnce(
+        settle,
+        "next.absolute_deadline_ns = retry.absolute_deadline_ns;",
+        "다시 넣는 job 은 새 데드라인을 싣는다",
+    );
+    const deferred = try expectOnce(
+        settle,
+        "try self.jobs.deferQueued(key, next, retry.not_before_ns); self.noteRequeued(next, @tagName(outcome), retry.backoff_ns); return outcome; }",
+        "다시 넣은 뒤 대기를 걸고 그 자리에서 다시 넣기 줄을 남긴다",
+    );
+    if (!(retry_open < fresh and fresh < deferred)) return error.WiringChanged;
     _ = try expectOnce(
         settle,
-        "try backend.settleBoundReconnectSnapshot(completion.snapshot, budget); try self.consumeLogicalCompletion(); self.noteEnded(snapshot, @tagName(outcome)); return outcome; }",
-        "재시도 없는 정산이 결속을 푼 뒤 조건 없이 끝 줄을 남긴다",
+        "self.retry_streak.reset(snapshot.host_id); try backend.settleBoundReconnectSnapshot(completion.snapshot, budget); try self.consumeLogicalCompletion(); self.noteEnded(snapshot, @tagName(outcome)); return outcome; }",
+        "재시도 없는 정산이 횟수를 비우고 결속을 푼 뒤 조건 없이 끝 줄을 남긴다",
     );
     try expectCount(settle, "self.noteEnded(", 1, "끝 줄은 정산 갈래 하나에만");
-    try expectCount(settle, "self.noteRequeued(", 1, "다시 넣기 줄은 retry_later 갈래 하나에만");
+    try expectCount(settle, "self.noteRequeued(", 1, "다시 넣기 줄은 다시 넣는 갈래 하나에만");
+    // 영구 실패는 host_gone 하나다 — 다시 넣는 조건에 끼면 사라진 host 를 30 초마다 영원히 두드린다.
+    try expectCount(settle, ".host_gone", 0, "host_gone 은 다시 넣는 조건에 없다");
+
+    // ①' 대기는 dispatch 가 지킨다 — 대기 없는 claim 이 남으면 다시 넣은 job 이 매 frame 나간다.
+    const dispatch = try fnBody(src, "dispatchOne");
+    _ = try expectOnce(dispatch, "self.jobs.claimReady(&self.job_receipt, self.nowNs())", "dispatch 가 대기를 지킨다");
+    try expectCount(src, "self.jobs.claim(", 0, "대기를 무시하는 claim 은 coordinator 에 없다");
 
     // ② 연결 뒤 CR5 가 retained_terminal 로 끝나면 실패 줄, completed 면 칸만 비운다.
     const progress = try fnBody(src, "progressConnectedOne");

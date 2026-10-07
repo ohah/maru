@@ -13,6 +13,8 @@ const admission_mod = @import("reconnect_admission_owner.zig");
 const budget_mod = @import("reconnect_resident_budget.zig");
 const backend_mod = @import("remote_term_backend.zig");
 const failure_log = @import("reconnect_failure_log.zig");
+const retry_policy = @import("reconnect_retry_policy.zig");
+const attach_phase_deadline = @import("attach_phase_deadline.zig");
 const process_seal = @import("process_seal_service.zig");
 
 pub const PollResult = enum(u8) { idle, connected_ready, logical_completion_ready };
@@ -41,6 +43,8 @@ pub const Coordinator = struct {
     last_attempt: failure_log.Attempt = .{},
     streaks: failure_log.Streaks = .{},
     requeue_rate: failure_log.RateLimit = .{},
+    /// **동작을 정한다** — 위 진단 필드와 다르다. 다시 넣을 때의 대기 순번(`reconnect_retry_policy.zig`).
+    retry_streak: retry_policy.Streak = .{},
 
     pub fn initInPlace(
         self: *Coordinator,
@@ -179,16 +183,18 @@ pub const Coordinator = struct {
         }});
     }
 
-    /// `retry_later` 로 같은 스냅샷을 다시 넣었다. 루프가 돌 수 있어 1초에 한 줄로 묶는다.
-    fn noteRequeued(self: *Coordinator, snapshot: owner_mod.Snapshot) void {
+    /// 같은 신원을 새 데드라인·대기로 다시 넣었다. 루프가 돌 수 있어 1초에 한 줄로 묶는다.
+    fn noteRequeued(self: *Coordinator, snapshot: owner_mod.Snapshot, outcome: []const u8, backoff_ns: u64) void {
         const now = self.nowNs();
         const attempts = self.streaks.requeue(snapshot.host_id, snapshot.connection_generation);
         const suppressed = self.requeue_rate.admit(now) orelse return;
         if (builtin.is_test) return;
         logLine(.info, failure_log.writeRequeued, .{failure_log.Requeued{
             .host_id = snapshot.host_id,
+            .outcome = outcome,
             .attempt = self.last_attempt,
             .attempts = attempts,
+            .retry_in_ms = backoff_ns / std.time.ns_per_ms,
             .deadline_remaining_ms = failure_log.deadlineRemainingMs(snapshot.absolute_deadline_ns, now),
             .suppressed = suppressed,
         }});
@@ -277,7 +283,8 @@ pub const Coordinator = struct {
             !std.meta.eql(self.completion_receipt, owner_mod.CompletionReceipt{}))
             return false;
         if (try self.worker.stateSnapshot() != .idle) return false;
-        self.jobs.claim(&self.job_receipt) catch |err| switch (err) {
+        // 다시 넣은 job 은 대기가 끝나야 나간다(`deferQueued`). 대기 중인 job 만 남았으면 이번 turn 은 쉰다.
+        self.jobs.claimReady(&self.job_receipt, self.nowNs()) catch |err| switch (err) {
             error.NotFound => return false,
             else => return err,
         };
@@ -350,13 +357,32 @@ pub const Coordinator = struct {
         if (completion.outcome == .connected) return error.InvalidOutcome;
         const outcome = completion.outcome;
         const snapshot = completion.snapshot;
-        if (outcome == .retry_later) {
+        // 다시 넣는 갈래(2026-10-07). 잠자기·DarkWake 로 5 초 안에 연결을 못 마친 것(`deadline_exceeded`)을 영구 실패로
+        // 굳히면, poison 은 연결마다 첫 번만 admission 을 만드므로 앱을 다시 띄울 때까지 안 붙는다. 그래서 시간 초과는
+        // 끝없이, 그 밖의 실패(`retry_later` — manifest 없음 등)는 연속 상한까지만 다시 걸고, 상한을 넘거나 `host_gone`·
+        // `cancelled` 면 아래 종결로 간다(`reconnect_retry_policy.zig`). 다시 넣을 때 데드라인을 **새로** 주지 않으면 처음
+        // 받은 5 초를 끌고 가 연결도 안 해 보고 끝난다 — 신원은 그대로, 데드라인과 대기만 바꾼다. runtime 에 묶인 admission
+        // 신원(`matchesBoundReconnectIdentity`)에는 데드라인이 없어 결속·resident lease 는 그대로 유효하다.
+        const retry_kind: ?retry_policy.Failure = switch (outcome) {
+            .deadline_exceeded => .timeout,
+            .retry_later => .other,
+            else => null,
+        };
+        const retries: ?u32 = if (retry_kind) |kind| self.retry_streak.fail(snapshot.host_id, kind) else null;
+        if (retries) |retry_number| {
             try self.consumeLogicalCompletion();
-            const result = try self.jobs.admit(snapshot);
-            if (result != .admitted) return error.InvalidCoordinator;
-            self.noteRequeued(snapshot);
+            const retry = retry_policy.schedule(self.nowNs(), attach_phase_deadline.budget_ns, retry_number);
+            var next = snapshot;
+            next.absolute_deadline_ns = retry.absolute_deadline_ns;
+            const key = switch (try self.jobs.admit(next)) {
+                .admitted => |value| value,
+                .coalesced => return error.InvalidCoordinator,
+            };
+            try self.jobs.deferQueued(key, next, retry.not_before_ns);
+            self.noteRequeued(next, @tagName(outcome), retry.backoff_ns);
             return outcome;
         }
+        self.retry_streak.reset(snapshot.host_id);
         try backend.settleBoundReconnectSnapshot(completion.snapshot, budget);
         try self.consumeLogicalCompletion();
         self.noteEnded(snapshot, @tagName(outcome));
@@ -386,6 +412,7 @@ pub const Coordinator = struct {
         const logical_outcome: owner_mod.Outcome = switch (adopted) {
             .connected => blk: {
                 candidate_owned = false;
+                self.retry_streak.reset(snapshot.host_id);
                 break :blk .connected;
             },
             .busy, .invalid_authority, .failed => blk: {
@@ -680,7 +707,7 @@ test "CR6e-c3b2a admission reservation binds once and coalesces on the first ide
     try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixture.runtime, &budget);
 }
 
-test "CR6e-c3b2b failed completion releases every bound admission before logical consume" {
+test "CR6e-c3b2b deadline failure requeues with a fresh deadline and a bounded run of other failures releases every bound admission" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const host_adapter = @import("host_adapter.zig");
     const remote_runtime = @import("remote_runtime.zig");
@@ -721,10 +748,48 @@ test "CR6e-c3b2b failed completion releases every bound admission before logical
     );
     try std.testing.expect(try coordinator.dispatchOne());
     while (try coordinator.pollCompletion() == .idle) std.Thread.yield() catch {};
+    // 2026-10-07: 데드라인 초과는 영구 실패가 아니다 — 결속을 그대로 둔 채 **새 데드라인**과 대기로 다시 넣는다.
     try std.testing.expectEqual(
         owner_mod.Outcome.deadline_exceeded,
         try coordinator.settleLogicalCompletion(&backend, &budget),
     );
+    try std.testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
+    try std.testing.expect(remote_runtime.testing_api.hasChargedReconnectAdmission(&fixture.runtime));
+    try std.testing.expectError(error.NotFound, coordinator.logicalCompletion());
+    try std.testing.expectEqual(@as(usize, 1), try coordinator.jobs.activeCount());
+    const requeued = for (coordinator.jobs.slots) |slot| {
+        if (slot.state == .queued) break slot;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(requeued.not_before_ns > coordinator.nowNs());
+    try std.testing.expect(@as(i128, requeued.snapshot.absolute_deadline_ns) >=
+        requeued.not_before_ns + attach_phase_deadline.budget_ns);
+    // 대기 중에는 worker 로 안 나간다.
+    try std.testing.expect(!try coordinator.dispatchOne());
+
+    // 대기를 끝낸 것으로 치고 다시 보낸다. 이 host 는 실재하지 않아 매번 manifest 가 없다 — 재접속 worker 의
+    // 기존 host 연결 경로는 그것을 `host_gone` 이 아니라 `invalid_manifest`(→ `retry_later`)로 낸다. 시간 초과가
+    // 아닌 실패라 연속 상한(`max_other_failures`)까지만 다시 넣고, 그다음은 모든 결속을 풀고 끝난다 — 상한이 없으면
+    // 사라진 host 를 영원히 두드린다.
+    var other_attempts: u32 = 0;
+    while (try coordinator.jobs.activeCount() != 0) {
+        if (other_attempts > retry_policy.max_other_failures) return error.TestUnexpectedResult;
+        for (&coordinator.jobs.slots) |*slot| {
+            if (slot.state == .queued) slot.not_before_ns = 0;
+        }
+        try std.testing.expect(try coordinator.dispatchOne());
+        while (try coordinator.pollCompletion() == .idle) std.Thread.yield() catch {};
+        try std.testing.expectEqual(
+            owner_mod.Outcome.retry_later,
+            try coordinator.settleLogicalCompletion(&backend, &budget),
+        );
+        other_attempts += 1;
+        if (other_attempts <= retry_policy.max_other_failures) {
+            // 상한 전에는 결속·lease 를 쥔 채 대기 중이다.
+            try std.testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
+            try std.testing.expect(!try coordinator.dispatchOne());
+        }
+    }
+    try std.testing.expectEqual(retry_policy.max_other_failures + 1, other_attempts);
     try std.testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
     try std.testing.expect(!remote_runtime.testing_api.hasChargedReconnectAdmission(&fixture.runtime));
     try std.testing.expectError(error.NotFound, coordinator.logicalCompletion());

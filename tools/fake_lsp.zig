@@ -36,6 +36,13 @@
 //!   `codeAction/resolve` → 첫 줄에 `// lazy` 를 넣는 edit; `RESOLVEFAIL` → 오류; `RESOLVEEMPTY` → edit 없는 응답. capability `codeActionProvider{resolveProvider: true}`(`MARU_FAKE_LSP_NOACTCAP=1` 이면 없음).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
+//! - 수명 판정자(§8.2a 「수명·재시작」)용 환경 스위치:
+//!   `MARU_FAKE_LSP_GRANDCHILD=<디렉터리>` — 시작하자마자 `/bin/sleep` 손자를 하나 띄우고(서버의 stdin/stdout 을 물려받아 **파이프를
+//!   열어 둔다** — 실서버의 `zig build`·`cargo check` 와 같은 모양) 그 pid 를 `<디렉터리>/gc-<서버 pid>` 에 적는다(서버가 여럿 떠도
+//!   섞이지 않게). 서버를 내릴 때 손자가 남는지 본다. stdin 에서 EOF 를 보면 `<디렉터리>/eof-<서버 pid>` 를 남기고 끝난다 — 클라이언트가
+//!   죽이기 **전에** stdin 을 닫아 스스로 내려갈 기회를 줬는지 본다.
+//!   `MARU_FAKE_LSP_INIT=silent` — `initialize` 에 답하지 않는다 · `=error` — 오류로 답한다.
+//!   `MARU_FAKE_LSP_STOPREAD=1` — `initialize` 에 답한 뒤 stdin 을 **더 읽지 않는다**(멈춘 서버 — 클라이언트의 쓰기가 밀린다).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
 
 const std = @import("std");
@@ -90,21 +97,67 @@ fn int(v: ?std.json.Value) ?i64 {
 
 extern "c" fn usleep(us: c_uint) c_int;
 
+/// `MARU_FAKE_LSP_GRANDCHILD` — 손자를 띄우고 pid 를 적는다. 손자는 fd 0·1 을 그대로 물려받는다(파이프의 끝을 쥔다).
+fn spawnGrandchild(dir: [*:0]const u8) void {
+    const pid = std.c.fork();
+    if (pid < 0) std.c._exit(3);
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "300" };
+        _ = std.c.execve("/bin/sleep", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    var buf: [32]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}\n", .{pid}) catch std.c._exit(3);
+    var path_buf: [4096]u8 = undefined;
+    const pid_path = std.fmt.bufPrintZ(&path_buf, "{s}/gc-{d}", .{ std.mem.span(dir), std.c.getpid() }) catch std.c._exit(3);
+    // 임시 이름에 쓰고 옮긴다 — 읽는 쪽이 반쯤 쓴 파일을 보지 않게.
+    var tmp_buf: [4096]u8 = undefined;
+    const tmp_path = std.fmt.bufPrintZ(&tmp_buf, "{s}.tmp", .{pid_path}) catch std.c._exit(3);
+    const fd = std.c.open(tmp_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    if (fd < 0) std.c._exit(3);
+    _ = std.c.write(fd, text.ptr, text.len);
+    _ = std.c.close(fd);
+    if (std.c.rename(tmp_path, pid_path) != 0) std.c._exit(3);
+}
+
+/// stdin EOF 를 봤다는 표식(`<디렉터리>/eof-<pid>`) — 빈 파일 하나.
+fn markEof(dir: [*:0]const u8) void {
+    var path_buf: [4096]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/eof-{d}", .{ std.mem.span(dir), std.c.getpid() }) catch return;
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    if (fd >= 0) _ = std.c.close(fd);
+}
+
+/// `MARU_FAKE_LSP_STOPREAD` — initialize 에 답한 뒤 서버가 stdin 읽기를 멈춘다.
+var stop_reading = false;
+
 pub fn main() void {
     const allocator = std.heap.c_allocator;
     const noise = "fake: stderr noise\n";
     _ = std.c.write(2, noise.ptr, noise.len);
+    if (std.c.getenv("MARU_FAKE_LSP_GRANDCHILD")) |pid_path| spawnGrandchild(pid_path);
     var inbuf: std.ArrayList(u8) = .empty;
     var chunk: [16 * 1024]u8 = undefined;
     while (true) {
+        if (stop_reading) {
+            // 살아는 있되 stdin 을 안 읽는다 — 클라이언트가 그룹째 죽일 때까지. 판정자 프로세스가 죽어 고아가 되면(부모가 launchd)
+            // EOF 를 볼 길이 없으니 스스로 끝난다.
+            if (std.c.getppid() == 1) std.c._exit(0);
+            _ = usleep(100_000);
+            continue;
+        }
         const n = std.c.read(0, &chunk, chunk.len);
-        if (n <= 0) std.c._exit(0);
+        if (n <= 0) {
+            if (n == 0) if (std.c.getenv("MARU_FAKE_LSP_GRANDCHILD")) |dir| markEof(dir);
+            std.c._exit(0);
+        }
         inbuf.appendSlice(allocator, chunk[0..@intCast(n)]) catch std.c._exit(2);
         while (nextFrame(inbuf.items)) |f| {
             handle(allocator, f.body);
             const rest = inbuf.items.len - f.consumed;
             std.mem.copyForwards(u8, inbuf.items[0..rest], inbuf.items[f.consumed..]);
             inbuf.shrinkRetainingCapacity(rest);
+            if (stop_reading) break;
         }
     }
 }
@@ -1299,6 +1352,17 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         return;
     };
     if (std.mem.eql(u8, method, "initialize")) {
+        if (std.c.getenv("MARU_FAKE_LSP_INIT")) |m| {
+            const mode = std.mem.span(m);
+            if (std.mem.eql(u8, mode, "silent")) return; // 답하지 않는다 — 클라이언트의 initialize 시한
+            if (std.mem.eql(u8, mode, "error")) { // 거절한다 — 클라이언트는 「실패」로 서야 한다
+                sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32603), .message = "fake: refuse initialize" } });
+                return;
+            }
+        }
+        defer if (std.c.getenv("MARU_FAKE_LSP_STOPREAD") != null) {
+            stop_reading = true;
+        };
         var inlay_caps: std.json.ObjectMap = .empty;
         inlay_caps.put(allocator, "resolveProvider", .{ .bool = true }) catch return;
         defer inlay_caps.deinit(allocator);

@@ -3658,6 +3658,11 @@ const app_incident_testing = if (builtin.is_test) struct {
 // (§6 app-wide Quit=detach). 윈도우/탭 **명시 close**(destroyTerm/close)는 이 플래그와 무관하게 terminate(destructive)한다.
 // 프로세스 전역 이벤트라 module-var(모든 창의 deinit이 본다). 실 앱은 곧 프로세스 종료라 리셋 불요(테스트만 명시 리셋).
 var app_quitting: bool = false;
+/// 앱 종료가 확정됐나(`app_quitting`) — 언어 서버 정리가 「창이 이미 내려간 종료라 잠깐 기다려도 된다」를 이것으로 가른다
+/// (editor/lsp.zig `lowerServers`).
+pub fn appQuitting() bool {
+    return app_quitting;
+}
 // `window.quit-after-last-window-closed` 도 앱 전체 정책이다(마지막 창을 닫을 때 「앱」이 끝나는가). 창마다의
 // `loaded_config` 는 미러라, 창 A 의 설정에서 끄고 A 를 닫은 뒤 마지막 창 B 를 닫으면 B 의 낡은 `true` 로 앱이 끝났다
 // (적대적 검증). **세우는 자리는 사용자의 명시 행동뿐이다** — 세팅 토글·행 되돌리기·Reload Config·전체 리셋. 모든 창이

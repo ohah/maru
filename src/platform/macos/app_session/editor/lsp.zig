@@ -62,6 +62,20 @@ const read_budget_per_tick: usize = 1 << 20;
 /// 마지막 문서가 닫힌 뒤 서버를 얼마나 살려 두나(§8.2a).
 pub const idle_shutdown_ms: u64 = 30_000;
 const kill_grace_ms: u64 = 5_000;
+/// `initialize` 응답을 기다리는 상한(§8.2a 「수명·재시작」). 실서버는 색인을 응답 **뒤에** 하므로 응답 자체는 빠르다 — 넘기면 멈춘
+/// 서버로 보고 재시작 경로(backoff → 「실패」)를 탄다. 없으면 답하지 않는 서버가 상태바 「시작 중」에 영원히 남고, 그 상태는
+/// 클릭으로도 못 푼다.
+pub const initialize_timeout_ms: u64 = 30_000;
+/// 세션 종료(창 닫기·앱 종료)·`lsp.enabled` 끄기에서 서버가 stdin EOF 를 보고 스스로 내려가기를 기다리는 상한 — 그 세션의 서버
+/// **합쳐서**. 넘기면 그룹째 SIGKILL 한다(그 뒤 거두기는 서버마다 `lsp_process.reap_after_kill_ms`). 이 기다림은 거두기 스레드가
+/// 하고(`lowerOffMain`), 앱 종료가 확정됐을 때만 이 자리에서 한다(§8.2a).
+pub const quit_grace_ms: u64 = 500;
+
+comptime {
+    // 밀린 쓰기 상한은 바쁜 서버가 못 읽는 사이의 편집 몇 번(위치 요청 직전 동기화는 편집마다 전문을 보낸다)을 담아야 한다 —
+    // 문서 상한의 몇 배여야 정상 서버를 「멈췄다」로 오판하지 않는다(`lsp_process.max_pending_bytes`).
+    std.debug.assert(lsp_process.max_pending_bytes >= 8 * max_sync_bytes);
+}
 
 const OpenDoc = struct {
     surface_id: u64,
@@ -100,6 +114,8 @@ pub const Client = struct {
     idle_since_ms: u64 = 0,
     /// `shutdown` 을 보낸 시각(0 = 아니다). 응답이 오거나 시간이 지나면 `exit`/SIGKILL.
     shutdown_at_ms: u64 = 0,
+    /// 이번 프로세스를 띄운 시각 — `.starting` 이 `initialize_timeout_ms` 를 넘기는지 잰다.
+    started_at_ms: u64 = 0,
     /// 신뢰 결정을 기다린다(이 root 의 모달이 떠 있거나, 다른 root 의 모달이 먼저다) — 띄우지 않는다.
     trust_pending: bool = false,
     /// 마지막으로 보낸 hover 요청의 seq(§8.2b — 응답은 `editor_hover` 가 「지금 기다리는 seq」와 대조한다).
@@ -155,11 +171,7 @@ pub const Client = struct {
     inlay_supported: bool = false,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
-        if (self.proc) |*p| {
-            lsp_process.kill(p, .KILL);
-            lsp_process.reapBlocking(p);
-            p.deinit(allocator);
-        }
+        if (self.proc) |*p| lsp_process.stopNow(p, allocator); // 그룹째 — 서버가 띄운 빌드까지(보통은 `lowerServers` 가 먼저 내렸다)
         self.semantic_caps.deinit(allocator);
         for (self.docs.items) |d| d.release(allocator);
         self.docs.deinit(allocator);
@@ -442,6 +454,7 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
     c.inbuf.clearRetainingCapacity();
     c.encoding = .utf16;
     c.shutdown_at_ms = 0;
+    c.started_at_ms = now_ms;
     c.phase = .starting;
     // 열려 있던 문서는 다시 열어야 한다(새 프로세스는 모른다).
     for (c.docs.items) |*d| d.sent_version = 0;
@@ -465,12 +478,60 @@ fn scheduleRestart(self: *AppSession, c: *Client, now_ms: u64) void {
 
 fn dropProcess(self: *AppSession, c: *Client) void {
     if (c.proc) |*p| {
-        lsp_process.kill(p, .KILL);
-        lsp_process.reapBlocking(p);
-        p.deinit(self.allocator);
+        // 곧바로 그룹째 내린다 — 서버만 죽이면 그 빌드(zig build·cargo check)가 고아로 남는다. 거두기는 메인 스레드 밖에서.
+        var l = lsp_process.handOff(p, self.allocator);
+        lowerOffMain(self, (&l)[0..1], 0);
         c.proc = null;
+        releaseWaiting(self, c);
     }
     c.inbuf.clearRetainingCapacity();
+}
+
+/// 떼어 낸 서버들을 내린다. 제품에서는 **메인 스레드를 막지 않는다**(detach 된 거두기 스레드 — 창 닫기·끄기·죽은 서버) — 다만 앱
+/// 종료가 확정됐으면 창이 이미 내려갔고 곧 프로세스가 끝나므로 이 자리에서 기다린다(스레드가 끝나기 전에 앱이 끝나면 그룹 SIGKILL 이
+/// 안 간다). 판정자도 이 자리에서 기다린다(거두기가 판정자보다 오래 살지 않게 — `detached_worker_wait` 의 규율).
+fn lowerOffMain(self: *AppSession, items: []lsp_process.Lowering, grace_ms: u64) void {
+    _ = self;
+    if (lowerWaitsInPlace(app_session_mod.appQuitting(), builtin.is_test)) lsp_process.lowerAll(items, grace_ms) else lsp_process.lowerDetached(items, grace_ms);
+}
+
+/// 내리기를 이 자리에서 기다리나(위 `lowerOffMain` 의 갈림 — 판정자가 앱 종료 갈래를 따로 잴 수 있게 떼어 둔다).
+pub fn lowerWaitsInPlace(app_quitting: bool, in_test: bool) bool {
+    return app_quitting or in_test;
+}
+
+/// 서버가 내려갔다 — 그 서버의 응답을 기다리던 요청을 놓는다. 응답은 오지 않으므로, 안 놓으면 그 문서의 semantic 색·인레이·
+/// 심볼·접기·같은 낱말 강조·자동완성이 **다시는 요청되지 않는다**(각 모듈은 기다리는 동안 새 요청을 막고, 응답에서만 그 막음을
+/// 푼다). 문서마다 다시 그리는 넷은 `dirty` 로 두어 다음 서버가 뜨면 다시 묻게 하고, 강조는 caret 의 조용 시계가, 자동완성은 다음
+/// 타이핑이 다시 묻는다(시한이 있는 hover·smart select, `hide` 가 푸는 signature, 막지 않는 나머지는 해당 없다).
+fn releaseWaiting(self: *AppSession, c: *Client) void {
+    for (c.docs.items) |d| for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (!d.matches(term)) continue;
+        const rt = &term.rt;
+        if (rt.editor_semantic.waiting) {
+            rt.editor_semantic.waiting = false;
+            rt.editor_semantic.dirty = true;
+        }
+        if (rt.editor_inlay.waiting) {
+            rt.editor_inlay.waiting = false;
+            rt.editor_inlay.dirty = true;
+        }
+        if (rt.editor_symbols.waiting) {
+            rt.editor_symbols.waiting = false;
+            rt.editor_symbols.dirty = true;
+        }
+        if (rt.editor_fold_lsp.waiting) {
+            rt.editor_fold_lsp.waiting = false;
+            rt.editor_fold_lsp.dirty = true;
+        }
+        rt.editor_highlight.waiting = false; // 강조는 caret 의 조용 시계가 다시 묻는다
+        // 자동완성은 세션에 하나 — 기다리던 것이 **이 문서**의 요청일 때만 놓는다(다른 서버의 응답을 버리지 않게).
+        const comp = &self.editor_completion;
+        if (comp.waiting and comp.waiting_surface == term.surfaceId()) {
+            comp.waiting = false;
+            comp.dirty = false;
+        }
+    };
 }
 
 fn fileUriBuf(path: []const u8, buf: []u8) ?[]const u8 {
@@ -507,7 +568,11 @@ fn send(self: *AppSession, c: *Client, body: []const u8) bool {
 
 /// 세션 tick — `AppSession.tick` 이 부른다.
 pub fn pump(self: *AppSession) void {
-    if (!self.loaded_config.config.lsp.enabled) return;
+    if (!self.loaded_config.config.lsp.enabled) {
+        // 꺼졌다 — 떠 있는 서버를 내린다. 그대로 두면 아무도 stdout 을 안 읽는 서버가 앱 종료까지 남는다.
+        if (self.editor_lsp.clients.items.len > 0) stopAll(self);
+        return;
+    }
     const now_ms = self.awakeMs();
     syncDocuments(self, now_ms);
     var i: usize = 0;
@@ -524,6 +589,11 @@ fn pumpClient(self: *AppSession, c: *Client, now_ms: u64) void {
         .missing, .asking, .denied, .failed => return,
     }
     const p = &(c.proc orelse return);
+    // 밀린 쓰기가 상한을 넘었다 — 서버가 stdin 을 안 읽는다. 죽은 것으로 보고 재시작 경로로(§8.2a).
+    if (p.stalled) {
+        onDied(self, c, now_ms);
+        return;
+    }
     // 유휴 종료(§8.2a): 마지막 문서가 닫힌 지 30 초면 shutdown → exit. 응답이 없으면 5 초 뒤 SIGKILL.
     if (c.docs.items.len == 0 and c.idle_since_ms != 0 and c.shutdown_at_ms == 0 and now_ms - c.idle_since_ms >= idle_shutdown_ms) {
         const msg = lsp.rpc.shutdownRequest(self.allocator) catch return;
@@ -548,6 +618,13 @@ fn pumpClient(self: *AppSession, c: *Client, now_ms: u64) void {
         return;
     }
     drainFrames(self, c, now_ms);
+    // `initialize` 에 답이 없다 — 멈춘 서버로 보고 재시작 경로로(`initialize_timeout_ms`). 이 tick 에 읽은 것을 **다 처리한 뒤**
+    // 판정한다 — 메인 스레드가 오래 멈췄다 깨어난 tick 에 이미 와 있는 응답을 버리고 죽이지 않게.
+    if (c.proc != null and c.phase == .starting and now_ms -| c.started_at_ms >= initialize_timeout_ms) {
+        dropProcess(self, c);
+        scheduleRestart(self, c, now_ms);
+        self.metal_dirty = true;
+    }
 }
 
 fn onDied(self: *AppSession, c: *Client, now_ms: u64) void {
@@ -575,10 +652,11 @@ fn drainFrames(self: *AppSession, c: *Client, now_ms: u64) void {
             return;
         } orelse break;
         handleFrame(self, c, frame.body);
+        // handleFrame 이 죽였을 수 있다(initialize 거절 등) — 그러면 `inbuf` 도 비었으니 프레임을 당기기 **전에** 나간다.
+        if (c.proc == null) return;
         const rest = c.inbuf.items.len - frame.consumed;
         std.mem.copyForwards(u8, c.inbuf.items[0..rest], c.inbuf.items[frame.consumed..]);
         c.inbuf.shrinkRetainingCapacity(rest);
-        if (c.proc == null) return; // handleFrame 이 죽였을 수 있다
     }
 }
 
@@ -588,7 +666,14 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
     switch (lsp.rpc.classify(parsed.value)) {
         .response => |r| switch (r.id) {
             .initialize => {
-                if (r.is_error) return; // 다음 tick 의 읽기가 EOF 를 보거나, 서버가 살아 있으면 그대로 둔다(진단은 안 온다)
+                if (r.is_error) {
+                    // 서버가 initialize 를 **거절**했다 — 다시 띄워도 같은 답이라 재시작하지 않고 「실패 — 다시」로 선다(클릭으로 재시도).
+                    // 그대로 두면 살아 있는 서버가 「시작 중」에 영원히 남는다.
+                    dropProcess(self, c);
+                    c.phase = .failed;
+                    self.metal_dirty = true;
+                    return;
+                }
                 c.encoding = lsp.rpc.positionEncodingFromResult(r.result);
                 c.signature_triggers = lsp.rpc.signatureTriggersFromResult(r.result); // §8.2d — 트리거 글자는 서버가 준다
                 c.formatting_supported = lsp.rpc.formattingSupported(r.result); // §8.2e
@@ -784,7 +869,7 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
                 if (c.retry_at_ms == std.math.maxInt(u64)) c.retry_at_ms = 0; // 잠들어 있던 서버를 깨운다
                 gateTrust(self, c);
                 if (c.phase != .ready) continue;
-                syncOne(self, c, term);
+                syncOne(self, c, term, .coalesce);
             }
         }
     }
@@ -854,13 +939,19 @@ fn gateTrust(self: *AppSession, c: *Client) void {
     if (decision == .deny) c.phase = .denied;
 }
 
-fn syncOne(self: *AppSession, c: *Client, term: *Term) void {
+/// 밀린 쓰기가 있을 때 전문 didChange 를 어떻게 하나. `.coalesce` 는 tick 의 동기화 — 밀린 것이 빠질 때까지 **새로 쌓지 않는다**
+/// (Full sync 라 나중의 전문 하나가 앞의 것들을 대신한다; §8.2a 「프레임당 한 번 최신 본문」). `.now` 는 위치 요청 직전 — 서버가
+/// 지금 본문을 알아야 그 요청의 위치가 맞으므로 밀려 있어도 보낸다.
+const SyncMode = enum { coalesce, now };
+
+fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
     const opened = term.rt.editorDocument().opened orelse return;
     if (opened.file.content.len > max_sync_bytes) return; // §8.2a: 상한 넘는 문서는 안 보낸다
     const version: u64 = term.rt.editorDocument().notifications.lsp_version;
     if (c.findDoc(term)) |d| {
         d.surface_id = term.surfaceId(); // 한 뷰 종료 뒤에도 살아 있는 대표를 갱신한다.
         if (d.sent_version == version) return;
+        if (mode == .coalesce and d.sent_version != 0) if (c.proc) |p| if (p.pending_out.items.len > 0) return; // 밀린 것이 빠진 뒤의 tick 에 최신 본문으로
         if (d.sent_version == 0) {
             const msg = lsp.rpc.didOpen(self.allocator, d.uri, c.server.language_id, @intCast(version), opened.file.content) catch return;
             defer self.allocator.free(msg);
@@ -955,7 +1046,7 @@ pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {
 /// 번이지만(§8.2a), 요청이 나가는 순간에는 밀린 didChange 를 그 자리에서 보낸다.
 fn flushDocument(self: *AppSession, c: *Client, term: *Term) void {
     if (c.phase != .ready) return;
-    syncOne(self, c, term);
+    syncOne(self, c, term, .now);
 }
 
 /// 그 Term 의 문서를 연 **ready** 클라이언트(있으면). 호버(§8.2b)가 「서버가 있는가」를 이것으로 묻는다.
@@ -1453,7 +1544,52 @@ pub fn noteTermClosing(self: *AppSession, term: *Term) void {
     _ = term;
 }
 
-/// 앱 종료 — 서버들을 거둔다(§8.2a: shutdown 을 기다리지 않는다 — 종료 경로는 짧아야 한다).
+/// 세션 종료(창 닫기·앱 종료) — 서버들을 내린다(§8.2a). stdin 을 닫아 스스로 내려가게 하고(서버가 제 자식을 정리할 기회) **합쳐**
+/// `quit_grace_ms` 뒤 남은 것을 그룹째 죽인다 — 거두기 스레드가(`lowerOffMain`), 앱 종료가 확정됐으면 이 자리에서. `shutdown` 요청은
+/// 보내지 않는다 — 응답을 기다리는 왕복이 종료 경로를 늘린다.
 pub fn deinit(self: *AppSession) void {
+    lowerServers(self);
     self.editor_lsp.deinit(self.allocator);
+}
+
+fn lowerServers(self: *AppSession) void {
+    var items: std.ArrayList(lsp_process.Lowering) = .empty;
+    defer items.deinit(self.allocator);
+    for (self.editor_lsp.clients.items) |*c| if (c.proc) |*p| {
+        const l = lsp_process.handOff(p, self.allocator); // stdin 을 닫는다 — 스스로 내려갈 기회
+        c.proc = null;
+        c.inbuf.clearRetainingCapacity();
+        releaseWaiting(self, c);
+        items.append(self.allocator, l) catch {
+            var one = l;
+            lowerOffMain(self, (&one)[0..1], 0); // 목록을 못 늘리면 이것만 곧바로 내린다
+            continue;
+        };
+    };
+    lowerOffMain(self, items.items, quit_grace_ms);
+}
+
+/// `lsp.enabled` 가 꺼졌다 — 서버를 전부 내리고(세션 종료와 같이 EOF 먼저, 합쳐 `quit_grace_ms` 까지) 클라이언트를 버린다. 그 서버가 낸 진단도 걷는다(낡은 밑줄이 남지 않게). 신뢰
+/// 결정·서버 선택은 남긴다(다시 켜면 묻지 않고 같은 서버로 뜬다).
+fn stopAll(self: *AppSession) void {
+    const st = &self.editor_lsp;
+    lowerServers(self); // 세션 종료와 같은 길 — stdin 을 닫아 스스로 내려가게 하고 남은 것을 그룹째, 기다림을 놓는다
+    for (st.clients.items) |*c| {
+        for (c.docs.items) |d| for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (!d.matches(term)) continue;
+            const diags = &term.rt.editor_diagnostics;
+            diags.lsp.clearRetainingCapacity();
+            diags.lsp_messages.clearRetainingCapacity();
+            diags.lsp_dirty = true;
+        };
+        c.deinit(self.allocator);
+    }
+    st.clients.clearRetainingCapacity();
+    if (self.pending_confirm == .lsp_trust) {
+        // 묻던 모달도 내린다 — 답할 서버가 없다. 기억하지 않는다(다시 켜면 다시 묻는다).
+        self.chrome_host.confirm.dismiss();
+        self.pending_confirm = .none;
+    }
+    dismissTrustPrompt(self);
+    self.metal_dirty = true;
 }

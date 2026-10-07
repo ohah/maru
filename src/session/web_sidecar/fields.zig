@@ -340,9 +340,6 @@ pub fn readHello(cursor: *ReadCursor) Error!Hello {
     return .{ .instance = try cursor.readU64(), .nonce = try cursor.readU64() };
 }
 
-/// C0 제어 문자와 DEL. 제목·설명은 웹 페이지가 통제하는 글이라 ESC·OSC·NUL 이 maru 의 UI·로그·터미널 제목으로
-/// 흘러가면 주입이 된다(적대 검증) — sidecar 는 `text.replaceControl` 로 치환해 보내고, 받는 쪽은 남아 있으면 거절한다.
-/// URL 은 제어 문자를 퍼센트 인코딩해야 하므로 날것이 있으면 거절한다.
 /// 제안 목록의 한 항목(W6m①) — 값은 비지 않고, 레이블은 값과 다를 때만(아니면 빈 글).
 pub const DatalistItem = struct { value: []const u8, label: []const u8 };
 
@@ -416,6 +413,9 @@ pub const DatalistBuilder = struct {
     }
 };
 
+/// C0 제어 문자와 DEL. 제목·설명은 웹 페이지가 통제하는 글이라 ESC·OSC·NUL 이 maru 의 UI·로그·터미널 제목으로
+/// 흘러가면 주입이 된다(적대 검증) — sidecar 는 `text.replaceControl` 로 치환해 보내고, 받는 쪽은 남아 있으면 거절한다.
+/// URL 은 제어 문자를 퍼센트 인코딩해야 하므로 날것이 있으면 거절한다.
 fn hasControl(bytes: []const u8) bool {
     for (bytes) |byte| if (byte < 0x20 or byte == 0x7f) return true;
     return false;

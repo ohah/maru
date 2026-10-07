@@ -9833,6 +9833,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
         let popup = owner.osrDatalistPopup ?? makeOsrDatalistPopup(owner)
+        if popup.isRejected(generation: generation, field: target.field) { // 자리가 없어 이미 못 띄웠다 — 다시 읽고 재지 않는다
+            maru_macos_app_session_osr_datalist_shown(session, 0)
+            return
+        }
         var items = popup.items
         if popup.generation != generation || !popup.isShown {
             items = []

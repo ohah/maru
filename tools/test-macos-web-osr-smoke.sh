@@ -1331,22 +1331,22 @@ def png(path):
                 line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
         rows.append(bytes(line)); prev = line
     return w, h, bpp, rows
-def accent(path):
-    # 첫 행(위 여백 아래) 띠에서 강조색(파랑 계열) 화소의 비율.
-    w, h, bpp, rows = png(path)
-    sy = h / 118.0 if h else 1
-    band = [r for r in rows[int(8 * sy):int(22 * sy)]]
+def changed(a, b, top, bottom):
+    # 두 스냅숏의 한 행 띠(pt — 위 여백 4, 행 22)에서 색이 크게 달라진 화소의 비율. 강조색은 시스템 설정을 따르므로 색 대신 차이를 본다.
+    wa, ha, pa, ra = a; wb, hb, pb, rb = b
+    if (wa, ha) != (wb, hb): return 1.0
+    sy = ha / 118.0
     hit = total = 0
-    for r in band:
-        for x in range(int(w * 0.15), int(w * 0.85)):
-            R, G, B = r[x * bpp], r[x * bpp + 1], r[x * bpp + 2]
+    for y in range(int(top * sy), int(bottom * sy)):
+        for x in range(int(wa * 0.15), int(wa * 0.85)):
             total += 1
-            hit += B > R + 60 and B > 140
+            hit += sum(abs(ra[y][x * pa + i] - rb[y][x * pb + i]) for i in range(3)) > 60
     return hit / max(total, 1)
 pngs = [os.path.join(root, n) for n in ('dl-popup.png', 'dl-popup-selected.png')]
 if all(os.path.exists(p) for p in pngs):
-    plain, sel = accent(pngs[0]), accent(pngs[1])
-    check(plain < 0.05 and sel > 0.4, f'the window draws the highlighted first row in the accent colour only once ↓ highlights it (snapshots: {plain:.2f} before · {sel:.2f} after)')
+    a, b = png(pngs[0]), png(pngs[1])
+    first, third = changed(a, b, 8, 22), changed(a, b, 52, 66)
+    check(first > 0.4 and third < 0.05, f'the window paints the first row as highlighted only once ↓ highlights it and leaves the other rows alone (snapshots differ: first row {first:.2f} · third row {third:.2f})')
 else:
     check(False, 'the list window snapshots exist (dl-popup.png · dl-popup-selected.png)')
 mouse = lines('dl-mouse.report'); mreq = ev('dl-mouse.requests')

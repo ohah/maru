@@ -172,6 +172,10 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     private(set) var selected = -1
     /// 실린 목록의 크기(실을 때만 잰다 — tick 마다 항목 글을 다시 재지 않게, 적대 검증).
     private var size = NSSize.zero
+    /// 자리가 없어 띄우지 못한 목록과 칸 — 같으면 tick 마다 항목을 다시 읽고 재지 않는다(적대 검증 2 차).
+    private var rejected: (generation: UInt32, field: NSRect)?
+    /// hover 로 바뀌는 강조는 굴리지 않는다 — 휠 뒤 반쯤 보이는 행을 강조하며 목록이 한 번 더 튀었다(적대 검증 2 차).
+    private var hovering = false
     /// 마지막 자리 — 칸 아래(`below`)인가 위인가(판정 보고용).
     private(set) var placedBelow = true
     /// 칸(화면 좌표) — 판정 보고용.
@@ -240,7 +244,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     /// 어디에도 한 줄이 들어가지 않으면 띄우지 않는다(false).
     @discardableResult
     func show(generation: UInt32, items: [Item], selected: Int, field: NSRect, parent: NSWindow) -> Bool {
-        let reload = generation != self.generation || items != self.items || !panel.isVisible
+        let reload = generation != self.generation || items != self.items
         self.generation = generation
         self.items = items
         fieldOnScreen = field
@@ -252,8 +256,10 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         }
         guard place(size: size, field: field, screen: Self.screen(for: field) ?? parent.screen ?? NSScreen.main) else {
             hide()
+            rejected = (generation, field)
             return false
         }
+        rejected = nil
         if self.parent !== parent {
             self.parent?.removeChildWindow(panel)
             self.parent = parent
@@ -269,6 +275,12 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         return true
     }
 
+    /// 이 목록·칸 자리는 이미 띄우지 못했다(칸이 움직이거나 목록이 바뀌면 다시 해 본다).
+    func isRejected(generation: UInt32, field: NSRect) -> Bool {
+        guard let rejected else { return false }
+        return rejected.generation == generation && rejected.field == field
+    }
+
     /// 칸이 있는 화면 — 창이 여러 화면에 걸치면 `parent.screen` 은 창이 가장 많이 놓인 화면이라 칸과 먼 화면 가장자리에 붙었다(적대 검증).
     private static func screen(for field: NSRect) -> NSScreen? {
         let center = NSPoint(x: field.midX, y: field.midY)
@@ -277,12 +289,12 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     /// 거둔다.
     func hide() {
+        table.cancelPress()
+        selected = -2 // 다시 띄우면 표의 강조를 다시 칠한다
         guard panel.isVisible || parent != nil else { return }
         parent?.removeChildWindow(panel)
         parent = nil
         panel.orderOut(nil)
-        selected = -1
-        table.cancelPress()
     }
 
     /// 강조를 바꾼다(-1 = 없음). 보이게 굴린다 — 키로 옮긴 강조가 창 밖이면 따라간다.
@@ -291,7 +303,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         selected = index
         if index >= 0, index < items.count {
             table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-            table.scrollRowToVisible(index)
+            if !hovering { table.scrollRowToVisible(index) }
         } else {
             table.deselectAll(nil)
         }
@@ -341,6 +353,8 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     // ── 포인터(표가 부른다) ──
     fileprivate func pointer(row: Int) {
+        hovering = true
+        defer { hovering = false }
         onHover?(generation, row >= 0 && row < items.count ? row : -1)
     }
 
@@ -366,7 +380,10 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
             widest = max(widest, w + Self.fieldPadding * 2)
         }
         let rows = min(items.count, Self.maxVisibleRows)
-        let width = max(Self.minWidth, widest + Self.textInset * 2 + 2)
+        // 「스크롤 막대 항상 보기」면 막대가 자리를 차지한다(넘치는 목록만).
+        let scroller = items.count > Self.maxVisibleRows && scroll.scrollerStyle == .legacy
+            ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
+        let width = max(Self.minWidth, widest + Self.textInset * 2 + 2 + scroller)
         return NSSize(width: width, height: CGFloat(rows) * Self.rowHeight + Self.verticalPadding * 2)
     }
 

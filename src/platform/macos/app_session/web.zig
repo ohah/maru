@@ -1986,9 +1986,14 @@ pub fn datalistItem(self: *AppSession, generation: u32, index: usize) ?ws.fields
     return null;
 }
 
-/// Swift 가 띄운(또는 거둔 — 0) 목록의 세대.
+/// Swift 가 띄운(또는 거둔 — 0) 목록의 세대. 거두면 hover 로 생긴 강조를 지운다 — 창이 숨을 때(자리 없음·quick 숨김)는 창을 떠나는
+/// 움직임이 오지 않아, 다시 뜬 목록에 포인터가 없는 행이 강조된 채 Enter 가 그 행을 골랐다(적대 검증 2 차).
 pub fn datalistShown(self: *AppSession, generation: u32) void {
     self.osr_datalist.shown_generation = generation;
+    if (generation == 0 and self.osr_datalist.hover) {
+        self.osr_datalist.selected = null;
+        self.osr_datalist.hover = false;
+    }
 }
 
 fn datalistSelect(self: *AppSession, index: usize, count: usize, by_hover: bool) void {

@@ -9,6 +9,7 @@
 //! (§3.5 — 여는 것을 막는 이유는 UTF-8 아님 하나뿐이다), 로그·생성 파일을 못 여는 편집기는 쓸 수 없다.
 
 const std = @import("std");
+const test_env = @import("../../test_env.zig"); // 테스트의 환경 변수 되돌리기(값 복사)
 const maru = @import("maru");
 
 const editor = maru.session.editor;
@@ -25533,12 +25534,8 @@ test "init이 MARU_NATIVE_TEXT를 읽는다 — 안 읽으면 훅이 아무 일�
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
 
-    const had = std.c.getenv("MARU_NATIVE_TEXT");
-    defer if (had) |old_value| {
-        _ = setenv("MARU_NATIVE_TEXT", old_value, 1);
-    } else {
-        _ = unsetenv("MARU_NATIVE_TEXT");
-    };
+    const had = test_env.Saved.save("MARU_NATIVE_TEXT");
+    defer had.restore();
     _ = setenv("MARU_NATIVE_TEXT", "1", 1);
     try testing.expect(nativeTextFromEnv()); // 전제: 환경이 켜졌다
 
@@ -25560,12 +25557,8 @@ test "훅 기본은 켬이고 0으로 되돌릴 수 있다 — 되돌릴 길이 
     // 파일을 고칠 수 없게 만들고, `0`이 유일한 편집 수단이다 — 그 값이 안 먹으면 사용자는 되돌릴
     // 길을 잃는다. 그래서 기본값과 되돌림을 **한 테스트에서 함께** 고정한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const had = std.c.getenv("MARU_NATIVE_TEXT");
-    defer if (had) |old_value| {
-        _ = setenv("MARU_NATIVE_TEXT", old_value, 1);
-    } else {
-        _ = unsetenv("MARU_NATIVE_TEXT");
-    };
+    const had = test_env.Saved.save("MARU_NATIVE_TEXT");
+    defer had.restore();
     _ = unsetenv("MARU_NATIVE_TEXT");
     try testing.expect(nativeTextFromEnv());
     _ = setenv("MARU_NATIVE_TEXT", "0", 1);
@@ -26704,12 +26697,8 @@ test "TAB1: config의 탭 폭이 문서를 열 때와 재적용 때 편집기에
         const cfg_z = try allocator.dupeZ(u8, cfg);
         defer allocator.free(cfg_z);
 
-        const had = std.c.getenv("MARU_CONFIG");
-        defer if (had) |old| {
-            _ = setenv("MARU_CONFIG", old, 1);
-        } else {
-            _ = unsetenv("MARU_CONFIG");
-        };
+        const had = test_env.Saved.save("MARU_CONFIG");
+        defer had.restore();
         _ = setenv("MARU_CONFIG", cfg_z.ptr, 1);
 
         // 지금 값은 4다(⑵에서 그렇게 뒀다) — 8로 바뀌어야 재로드가 닿은 것이다.
@@ -32256,12 +32245,8 @@ test "DHS11 줄 끝 너머 몫은 설정이 정한다 — 키·기본값·끄기
     defer allocator.free(cfg);
     const cfg_z = try allocator.dupeZ(u8, cfg);
     defer allocator.free(cfg_z);
-    const had = std.c.getenv("MARU_CONFIG");
-    defer if (had) |old| {
-        _ = setenv("MARU_CONFIG", old, 1);
-    } else {
-        _ = unsetenv("MARU_CONFIG");
-    };
+    const had = test_env.Saved.save("MARU_CONFIG");
+    defer had.restore();
     _ = setenv("MARU_CONFIG", cfg_z.ptr, 1);
     settings_ops.reloadConfig(fx.session);
     try testing.expectEqual(@as(u32, 9), fx.session.loaded_config.config.editor.scroll_beyond_last_column);

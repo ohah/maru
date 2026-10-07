@@ -9,6 +9,7 @@
 //! 그래야 규칙이 화면 없이 검사된다(둘 다 순수 모듈이고 테스트가 붙어 있다).
 
 const std = @import("std");
+const test_env = @import("../../test_env.zig"); // 테스트의 환경 변수 되돌리기(값 복사)
 const maru = @import("maru");
 
 const diff = maru.session.editor.diff;
@@ -1059,12 +1060,8 @@ test "init이 훅을 읽는다 — 안 읽으면 MARU_NATIVE_DIFF가 아무 일�
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
 
-    const had = std.c.getenv("MARU_NATIVE_DIFF");
-    defer if (had) |old_value| {
-        _ = setenv("MARU_NATIVE_DIFF", old_value, 1);
-    } else {
-        _ = unsetenv("MARU_NATIVE_DIFF");
-    };
+    const had = test_env.Saved.save("MARU_NATIVE_DIFF");
+    defer had.restore();
     _ = setenv("MARU_NATIVE_DIFF", "1", 1);
     try testing.expect(nativeDiffFromEnv()); // 전제: 환경이 켜졌다
 

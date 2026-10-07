@@ -128,8 +128,10 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     //  배선. step 통째로 매달면 ReleaseFast 사본까지 붙어(그때는 이 수에 안 잡혔다) 실행마다 하나씩 붙인다.
     // +1(2026-10-05): `workspace_header_policy_boundary` — 저장 헤더가 v1 하나로 남고 옛 v2 는 읽기만 하는지(2026-07-08
     //  사용자 결정, d097 이 뒤집어 v1 저장본이 전부 거절됐다) 잰다. 같은 step 의 값 실행은 maru 모듈 필터라 여기 안 매단다.
-    try std.testing.expectEqual(@as(usize, 217), old_count);
-    try std.testing.expectEqual(@as(usize, 218), new_count);
+    // +1(2026-10-07): `test_env_restore_copies_boundary` — 테스트가 환경 변수를 `getenv` 포인터로 되돌리지 않는지(값 복사,
+    //  `src/platform/macos/test_env.zig`) 소스를 센다. 포인터로 되돌리면 macOS libc 의 제자리 덮어쓰기로 복원이 실패했다.
+    try std.testing.expectEqual(@as(usize, 218), old_count);
+    try std.testing.expectEqual(@as(usize, 219), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0

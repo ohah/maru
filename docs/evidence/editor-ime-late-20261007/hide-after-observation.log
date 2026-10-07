@@ -1,0 +1,13 @@
+F....
+======================================================================
+FAIL: test_after_observation_and_old_owner_are_separate (__main__.HandoffTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/mutations/hide-after-observation/test_ime_handoffs.py", line 26, in test_after_observation_and_old_owner_are_separate
+    self.assertEqual(len(result[0]['after_observed_arrivals']), 1)
+AssertionError: 0 != 1
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.000s
+
+FAILED (failures=1)

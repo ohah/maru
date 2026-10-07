@@ -143,3 +143,27 @@ Git 저장소를 초기화해 root와 허용 경로를 일치시켰다. 부모 �
 제어용 자식의 1픽셀 PPM은 판정자 대조군용이며 실제 Metal 캡처로 간주하지 않는다.
 실제 앱은 이전에 빌드한 동일 fixture를 재사용했고 각 manifest에 앱·runner·제품 사본
 SHA를 기록했다. 제품 런타임 변경 및 자연 발생한 늦은 OS 콜백 검증은 이번 범위에 없다.
+
+### 전환·조합 중 닫기의 실제 IME 관측 — 2026-10-07
+
+공유 pane A→B→A 전환과 A→B→peer 닫기를 각각 5회 실행한다. 닫기 명령은
+실제 HID Cmd+W이며, 기존 fixture의 공개 분할·본문 준비만 재사용한다.
+검증 사본의 `EditorIMESmokeDriver`에 close 분기를 주입하고 `fixture.zig.inc`의
+command 31은 생존 editor 하나·저장된 정본 `L가 R나`·커서 byte 4·active owner·
+확인창 없음만 읽는다. 배포 제품 입력 코드와 ABI는 바꾸지 않는다.
+
+`ime_handoffs.py`는 실제 `callback_arrival`을 전환 HID 전송 시각부터 다음 정상 입력
+직전까지 읽는다. 드라이버가 새 owner를 관측하기 전 구간도 빠뜨리지 않는다.
+`new_owner_arrivals`와 `after_observed_arrivals`를 분리하며, 이 로그만으로 콜백의
+원래 owner를 역추정하지 않는다. 필드 누락·owner 불변·미완료 전환·역전된 시각은 거부한다.
+반복 실행 및 분석기/실제 앱 대조군 결과는 별도 evidence에 기록한다. PNG는 PR 본문에
+`gh pr edit --attach`로 올리고 저장소에는 JSON·로그·캡처 해시만 보관한다.
+
+[실행 증거](../evidence/editor-ime-late-20261007/verification.json): 동일 최종 runner로
+전환·닫기 각각 5회, 총 15개 실제 앱 프로세스가 통과했다. 조합 `setMarkedText`는
+각 입력 실행에서 4회였고 handoff 새 owner 도착 및 드라이버 관측 이후 도착은 모두 0건이었다.
+조합 중 닫기 뒤의 저장된 본문·커서·백업 정리도 유지됐다. Cmd+W를 focus_pane_left로
+바꾼 실제 앱은 ExpectedOneView로 실패했고 close_focused 명시는 통과했다.
+분석기의 실행 변이 6개는 실패하고 동등 구현 2개는 통과했다. 이 결과는 자연 발생한
+늦은 OS 콜백의 재현 또는 그 콜백의 안전성 검증으로 세지 않는다. 따라서 배포 제품의
+입력 owner 구조나 IME admission 정책은 이번 작업에서 변경하지 않았다.

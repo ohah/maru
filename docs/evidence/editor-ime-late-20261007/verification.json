@@ -1,0 +1,104 @@
+{
+  "base_commit": "cdbcf9cdcbd15d68551ff2484dda636e75513d4b",
+  "runner_sha256": "1d258b59aeabd39601896cbe5521799fe2bfb66ad212c4a321dc4c9f8f6f647d",
+  "analyzer_sha256": "708e6ac059684a7d8ab0044f6f7b8f29a9bffbd7c42f6bd0783005cd125ab1eb",
+  "rounds": [
+    {
+      "round": 1,
+      "mode": "switch",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/final-switch-1",
+      "pid": 29772,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 1,
+      "mode": "close",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/final-close-1",
+      "pid": 29964,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 2,
+      "mode": "switch",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/final-switch-2",
+      "pid": 30041,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 2,
+      "mode": "close",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/final-close-2",
+      "pid": 30299,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 3,
+      "mode": "switch",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/switch-3",
+      "pid": 25789,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 3,
+      "mode": "close",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/close-3",
+      "pid": 25916,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 4,
+      "mode": "switch",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/switch-4",
+      "pid": 25994,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 4,
+      "mode": "close",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/close-4",
+      "pid": 26284,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 5,
+      "mode": "switch",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/switch-5",
+      "pid": 26479,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    },
+    {
+      "round": 5,
+      "mode": "close",
+      "output": "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/close-5",
+      "pid": 26777,
+      "new_owner_arrivals": 0,
+      "after_observed_arrivals": 0,
+      "passed": true
+    }
+  ],
+  "app_processes": 15,
+  "distinct_pids": 15,
+  "new_owner_arrivals": 0,
+  "after_observed_arrivals": 0,
+  "natural_late_callback_reproduced": false,
+  "product_source_changed": false,
+  "scope": "Five actual HID composing focus-switch runs with restart; five actual HID composing peer-close runs without restart. Counts of arrivals are observations, not proof of stale callback origin or safety for unobserved late OS callbacks."
+}

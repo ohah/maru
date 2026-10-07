@@ -1,0 +1,58 @@
+[
+  {
+    "name": "ignore-before-observation",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "sha256": "b8b2fe8e9663228b531f77c134096f2746b8fa9e89f030822d4d2d56ff780d83"
+  },
+  {
+    "name": "hide-new-owner",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "sha256": "f37dc3e7abc5a2571d1f7f4fce69ca005928177abd2de402d099f833bb282acc"
+  },
+  {
+    "name": "hide-after-observation",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "sha256": "01d1bb8bc9d1362502104a310f3aac9c9367c1f3ca6cc65a692565d5eac56b22"
+  },
+  {
+    "name": "count-following-key",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "sha256": "a15634583b6b346ddc3f0944952b369efedafc57adb44b9c3110f9ec471ff84f"
+  },
+  {
+    "name": "allow-same-owner",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "sha256": "c37a9279780c8605ef909c8a376a14b2ac0e49f891b74bb7d69d4d0181767f33"
+  },
+  {
+    "name": "allow-incomplete",
+    "expected_pass": false,
+    "exit": 1,
+    "matched": true,
+    "sha256": "d3bc54a7cf017efedcc027e69dbacc5826e140c16d1c06bb1b4fd31031a5b98d"
+  },
+  {
+    "name": "equivalent-new-owner",
+    "expected_pass": true,
+    "exit": 0,
+    "matched": true,
+    "sha256": "25ff4dcb5475fd395e338dfe9888059b13c15caeda799dd30c178e0323b27f49"
+  },
+  {
+    "name": "equivalent-observed",
+    "expected_pass": true,
+    "exit": 0,
+    "matched": true,
+    "sha256": "0f78dbfe0188a5da26c12437a74702b3f203bf6fe60d6fa83ad9c469a916fbfa"
+  }
+]

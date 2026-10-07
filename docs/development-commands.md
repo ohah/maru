@@ -1149,3 +1149,16 @@ manifest에 남긴다. 로컬 합성 NSEvent이며 실제 한국어 HID는 별�
 및 `python3 -O tools/shared-restore-app/test_runner.py`로 실행한다. 잘못된 관측,
 백업 누락·중복·본문 손상, 실패한 자식의 종료/회수, 외부 Git 환경변수의 격리를
 검사한다. 제어용 자식은 실제 AppKit/Metal 증거가 아니다.
+
+`python3 tools/shared-restore-app/run.py --ime-close --output <새 빈 디렉터리>`는
+공개 공유 분할로 만든 두 pane에서 실제 두벌식 A→B 조합 뒤 HID Cmd+W로 composing
+peer를 닫는다. 생존 뷰의 본문 `L가 R나`·커서 byte 4·뷰 하나·저장 후 clean/백업 정리를
+독립 backend probe와 부모 프로세스로 확인한다. 재시작 검사는 이 옵션에 포함하지 않는다.
+앱은 격리 사본으로 빌드하고 입력 소스를 복원한다. `--app`에는 동일 하네스로 빌드한 앱을
+재사용할 수 있다. 도착 로그가 없는 이전 빌드는 실제 IME 판정에서 거부한다.
+
+`python3 tools/shared-restore-app/test_ime_handoffs.py`는 관측 tick 이전/이후의 callback
+arrival, 기존/새 owner와 다음 정상 키의 콜백을 구분하는 분석기를 검사한다.
+분석기의 `new_owner_arrivals`는 handoff 구간의 새 owner 도착 수다. AppKit 콜백에 원래
+트랜잭션 ID가 없으므로 이 숫자만으로 이전 owner의 stale callback이라고 판정하지 않는다.
+값 0도 자연 발생한 늦은 콜백을 처리할 수 있다는 증거로 세지 않는다.

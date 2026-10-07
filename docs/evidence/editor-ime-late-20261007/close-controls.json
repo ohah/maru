@@ -1,0 +1,14 @@
+[
+  {
+    "name": "close-disabled",
+    "expected_pass": false,
+    "passed": false,
+    "expected_one_view_rejected": true
+  },
+  {
+    "name": "close-equivalent",
+    "expected_pass": true,
+    "passed": true,
+    "expected_one_view_rejected": false
+  }
+]

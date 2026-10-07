@@ -1,0 +1,25 @@
+..F..
+======================================================================
+FAIL: test_following_key_callbacks_do_not_count_as_handoff (__main__.HandoffTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/mutations/count-following-key/test_ime_handoffs.py", line 30, in test_following_key_callbacks_do_not_count_as_handoff
+    self.assertEqual(result[0]['callbacks'], [])
+AssertionError: Lists differ: [{'owner': 3, 'captured': 'none', 'time': [127 chars]se'}] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+{'owner': 3, 'captured': 'none', 'time': 3.1, 'accepted': 'true', 'line': '[IME] callback_arrival insertText accepted=true t=3.1 gen=3 captured=none owner=3 discard=false'}
+
++ []
+- [{'accepted': 'true',
+-   'captured': 'none',
+-   'line': '[IME] callback_arrival insertText accepted=true t=3.1 gen=3 '
+-           'captured=none owner=3 discard=false',
+-   'owner': 3,
+-   'time': 3.1}]
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.001s
+
+FAILED (failures=1)

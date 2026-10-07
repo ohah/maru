@@ -1,0 +1,21 @@
+FF...
+======================================================================
+FAIL: test_after_observation_and_old_owner_are_separate (__main__.HandoffTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/mutations/hide-new-owner/test_ime_handoffs.py", line 25, in test_after_observation_and_old_owner_are_separate
+    self.assertEqual(len(result[0]['new_owner_arrivals']), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_callback_before_driver_observation_is_visible (__main__.HandoffTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/mutations/hide-new-owner/test_ime_handoffs.py", line 19, in test_callback_before_driver_observation_is_visible
+    self.assertEqual(len(result[0]['new_owner_arrivals']), 1)
+AssertionError: 0 != 1
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.000s
+
+FAILED (failures=2)

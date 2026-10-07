@@ -102,6 +102,19 @@ export fn maru_shared_restore_fixture_step(command: u32) callconv(.c) i32 {
 }
 
 fn sharedRestoreStep(self: *AppSession, command: u32) !i32 {
+    if (command == 31) {
+        // Read-only independent postcondition after the real HID close and save.
+        var surviving: [2]*app_session_mod.Term = undefined;
+        if (sharedRestoreViews(self, &surviving) != 1) return error.ExpectedOneView;
+        const term = surviving[0];
+        const doc = term.rt.editorDocument().opened.?;
+        if (doc.isDirty() or !std.mem.eql(u8, doc.file.content, "L가 R나")) return error.CloseIMEBody;
+        const selection = term.rt.editor_selection orelse return error.MissingSelection;
+        if (selection.anchor_start != 4 or selection.focus != 4) return error.CloseIMESelection;
+        if (pane_ops.activePane(self).activeTerm() != term or self.pending_confirm != .none) return error.CloseIMEFocus;
+        std.debug.print("SHARED_IME_CLOSE count=1 clean=true bytes=9 surface={d} caret=4\n", .{term.surfaceId()});
+        return 1;
+    }
     if (command == 40) return try sharedRestoreRefuseMove(self);
     if (command >= 50 and command <= 55) return try sharedRestoreCloseProbe(self, command);
     if (command == 1) return if (try sharedRestoreSeed(self)) 1 else if (shared_restore_split_ready) 2 else 0;

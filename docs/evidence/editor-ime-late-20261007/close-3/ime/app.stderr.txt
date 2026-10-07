@@ -1,0 +1,660 @@
+warning(app): maru build: mtime=1791336988 pid=25916
+[IME] ? selectedRange -> (빈 NSRange — 터미널 구현) t=659229.5137732917 gen=0 captured=none owner=1 discard=false
+warning: reconnect tick inactive: not_owner_thread
+[IME_FIXTURE] source=2 peer=3
+maru.macos-app.v1
+visible_ui=true
+swift_host=true
+abi_ready=true
+app_instance_lease_status=0
+placeholder_window=true
+terminal_surface=true
+terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer
+metal_renderer_created=true
+metal_frames_drawn=1
+app_launch_first_drawable_armed=false
+app_launch_first_drawable_smoke_mode=true
+app_launch_first_drawable_start_ns=0
+app_launch_first_drawable_submit_ns=0
+app_launch_first_drawable_latency_ns=0
+app_session_status=0
+frame_loop_ticks=0
+frame_loop_last_tick_index=0
+output_events=3
+exit_events=0
+key_events=0
+terminal_input_events=0
+terminal_input_bytes=0
+app_key_events=0
+ignored_key_events=0
+resize_events=1
+close_events=0
+process_state=0
+frame_prepared=false
+frame_consistent=false
+glyph_uv_ready=false
+glyph_raster_ready=false
+glyph_count=0
+draw_cells=0
+atlas_entries=0
+surface_cols=2
+surface_rows=1
+final_frame_ended=false
+smoke_mode=true
+smoke_duration_ms=45000
+session_host_r2a_checkpoint_smoke=false
+session_host_r2a_checkpoint_preflight_count=0
+session_host_r2a_checkpoint_restore_incomplete=false
+session_host_recovery_smoke_stage=0
+session_host_recovery_smoke_row_present=false
+session_host_recovery_smoke_click_dispatched=false
+session_host_recovery_smoke_remote_published=false
+session_host_recovery_smoke_marker_present=false
+session_host_recovery_smoke_async_wake_marker_present=false
+session_host_recovery_smoke_wake_handler_count=0
+session_host_recovery_smoke_async_wake_handler_started_ns=0
+session_host_recovery_smoke_async_wake_applied_ns=0
+session_host_recovery_smoke_async_wake_apply_latency_ns=0
+session_host_recovery_smoke_before_capture=false
+session_host_recovery_smoke_after_capture=false
+session_host_auto_reconnect_trigger_published=false
+session_host_auto_reconnect_marker_present=false
+session_host_auto_reconnect_historical_count=0
+session_host_auto_reconnect_historical_before_count=0
+session_host_auto_reconnect_disconnect_after_count=0
+session_host_auto_reconnect_input_count=0
+session_host_auto_reconnect_input_dispatch_ns=0
+session_host_auto_reconnect_frame_submit_ns=0
+session_host_auto_reconnect_input_frame_latency_ns=0
+session_host_auto_reconnect_copy_count=0
+session_host_auto_reconnect_select_menu_actions=0
+session_host_auto_reconnect_copy_menu_actions=0
+session_host_auto_reconnect_copy_bytes=0
+session_host_auto_reconnect_resize_count=0
+session_host_auto_reconnect_sibling_live_before=false
+session_host_auto_reconnect_sibling_live_after=false
+session_host_auto_reconnect_sibling_controller_before=false
+session_host_auto_reconnect_sibling_controller_after=false
+session_host_reconnect_tick_inactive=1
+session_host_reconnect_tick_idle=0
+session_host_reconnect_tick_progressed=0
+session_host_reconnect_tick_max_elapsed_ns=0
+session_host_reconnect_blocking_operations=0
+session_host_reconnect_pre_shutdown_ready=false
+session_host_reconnect_pre_shutdown_runtime_count=0
+session_host_reconnect_final_worker=0
+session_host_reconnect_final_jobs=0
+session_host_reconnect_final_completion=0
+session_host_reconnect_final_cr5_jobs=0
+session_host_reconnect_final_admissions=0
+session_host_reconnect_final_resident_leases=0
+session_host_reconnect_final_backend_runtimes=0
+session_host_recovery_smoke_failure=
+session_host_recovery_smoke_prepare_outcome=0
+session_host_recovery_smoke_keep_alive_enabled=false
+session_host_recovery_smoke_discovered_candidates=0
+session_host_recovery_smoke_ready_adapters=0
+session_host_recovery_smoke_inventory_runtimes=0
+session_host_recovery_smoke_configured_keep_alive=false
+session_host_recovery_smoke_live_session_count=0
+session_host_recovery_smoke_target_activation_dispatched=false
+session_host_recovery_smoke_target_rows=0
+session_host_recovery_smoke_tabs=0
+session_host_recovery_smoke_surface_initialized=false
+session_host_recovery_smoke_active_remote_observed=false
+session_host_recovery_smoke_marker_observed=false
+session_host_recovery_smoke_launch_ns=659229373051583
+session_host_recovery_smoke_row_ns=0
+session_host_recovery_smoke_click_ns=0
+session_host_recovery_smoke_remote_visible_ns=0
+session_host_recovery_smoke_summary_ns=659229556137458
+session_host_reco[IME] ? attributedSubstring editor loc=0 len=3 t=659229.6807654584 gen=0 captured=none owner=2 discard=false
+[IME] keyDown mods=[Cmd ] t=659229.7111221667 gen=0 captured=none owner=2 discard=false text="" [U+F702] len=1 keyCode=123
+[IME] ? hasMarkedText editor -> false t=659229.7111854583 gen=0 captured=none owner=2 discard=false
+[IME] admission_begin t=659229.7111911667 gen=0 captured=none owner=2 discard=false
+[IME] admission_accepted t=659229.7111995417 gen=1 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=3 t=659229.815513625 gen=1 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659229.8155433751 gen=1 captured=none owner=2 discard=false
+[IME] ? markedRange editor -> loc=0 len=0 t=659229.8155496668 gen=1 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659229.8155541667 gen=1 captured=none owner=2 discard=false
+[IME] keyDown mods=[] t=659229.8167990834 gen=1 captured=none owner=2 discard=false text="" [U+F703] len=1 keyCode=124
+[IME] interpret_begin t=659229.8168462084 gen=1 captured=1 owner=2 discard=false
+2026-10-07 10:38:05.408 maru-macos-app[25916:62204306] TSM AdjustCapsLockLEDForKeyTransitionHandling - _ISSetPhysicalKeyboardCapsLockLED Inhibit
+[IME] ? selectedRange editor -> loc=0 len=0 t=659229.8177635417 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659229.817968125 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659229.8181611251 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659229.818169625 gen=1 captured=1 owner=2 discard=false
+[IME] callback_arrival doCommand accepted=true t=659229.8182860834 gen=1 captured=1 owner=2 discard=false
+[IME] doCommand:moveRight: t=659229.81829375 gen=1 captured=1 owner=2 discard=false
+[IME] interpret_end t=659229.818338125 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659229.8183621668 gen=1 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=3 t=659229.9462372917 gen=1 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=1 len=0 t=659229.9462670834 gen=1 captured=none owner=2 discard=false
+[IME] ? markedRange editor -> loc=1 len=0 t=659229.9462738751 gen=1 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659229.9462790834 gen=1 captured=none owner=2 discard=false
+[IME] keyDown mods=[] t=659229.9479519584 gen=1 captured=none owner=2 discard=false text="ㄱ" [U+3131] len=1 keyCode=15
+[IME] interpret_begin t=659229.9479832083 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=1 len=0 t=659229.9486455834 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=1 len=0 t=659229.9491194168 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659229.9493045417 gen=1 captured=1 owner=2 discard=false
+[IME] callback_arrival setMarkedText accepted=true t=659229.9494176251 gen=1 captured=1 owner=2 discard=false
+[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=659229.9494614584 gen=1 captured=1 owner=2 discard=false text="ㄱ" [U+3131] len=1
+2026-10-07 10:38:05.541 maru-macos-app[25916:62204306] error messaging the mach port for IMKCFRunLoopWakeUpReliable
+[IME] interpret_end t=659229.9498027083 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=659229.9498297917 gen=1 captured=none owner=2 discard=false
+workspace checkpoint: effect kind=1 notice=0 reason=0 snapshot=-1
+workspace checkpoint: effect kind=2 notice=0 reason=0 snapshot=939
+workspace checkpoint: write dispatched: bytes=939 preserve_previous=false reason=0
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.0664214584 gen=1 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659230.0664409584 gen=1 captured=none owner=2 discard=false
+[IME] ? markedRange editor -> loc=1 len=1 t=659230.0664455834 gen=1 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=659230.0664554584 gen=1 captured=none owner=2 discard=false
+[IME] keyDown mods=[] t=659230.0679109584 gen=1 captured=none owner=2 discard=false text="ㅏ" [U+314F] len=1 keyCode=40
+[IME] interpret_begin t=659230.0679540833 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659230.0685230417 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659230.0686998334 gen=1 captured=1 owner=2 discard=false
+[IME] ? attributedSubstring editor loc=1 len=1 t=659230.0689070417 gen=1 captured=1 owner=2 discard=false
+[IME] ? attributedSubstring editor loc=1 len=1 t=659230.0689379167 gen=1 captured=1 owner=2 discard=false
+[IME] ? attributedSubstring editor loc=1 len=1 t=659230.0689596666 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659230.069219 gen=1 captured=1 owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659230.0693448334 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=659230.0696469584 gen=1 captured=1 owner=2 discard=false
+[IME] callback_arrival setMarkedText accepted=true t=659230.0696732918 gen=1 captured=1 owner=2 discard=false
+[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=659230.0696826667 gen=1 captured=1 owner=2 discard=false text="가" [U+AC00] len=1
+[IME] interpret_end t=659230.0698818751 gen=1 captured=1 owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=659230.0698982084 gen=1 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.1972869167 gen=1 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659230.1973236251 gen=1 captured=none owner=2 discard=false
+[IME] ? markedRange editor -> loc=1 len=1 t=659230.1973307917 gen=1 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> true t=659230.1973365834 gen=1 captured=none owner=2 discard=false
+[IME_FOCUS] post code=124 owner=2 t=659230.1975544584
+[IME] ? hasMarkedText editor -> true t=659230.2012912501 gen=1 captured=none owner=2 discard=false
+[IME] admission_begin t=659230.2013089583 gen=1 captured=none owner=2 discard=false
+[IME] admission_accepted t=659230.201403375 gen=2 captured=none owner=2 discard=false
+[IME_FOCUS] observed owner=3 t=659230.3301657917
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.3303065833 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.3303284167 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.3303418334 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=659230.3303479584 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.4625250833 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.4625473333 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=659230.4625540001 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.5957017917 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.59572025 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=659230.5957267084 gen=2 captured=none owner=3 discard=false
+workspace checkpoint: effect kind=1 notice=0 reason=0 snapshot=-1
+workspace checkpoint: effect kind=2 notice=0 reason=0 snapshot=938
+workspace checkpoint: write dispatched: bytes=938 preserve_previous=false reason=0
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.7157151668 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.7157296251 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=659230.7157363751 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.8475112917 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.8475290417 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=659230.8475347917 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.9811052084 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.9811222918 gen=2 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=659230.9811284167 gen=2 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=659230.981139 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.9811458334 gen=2 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=0 len=0 t=659230.9811500834 gen=2 captured=none owner=3 discard=false
+[IME] keyDown mods=[Cmd ] t=659230.9829227501 gen=2 captured=none owner=3 discard=false text="" [U+F703] len=1 keyCode=124
+[IME] ? hasMarkedText editor -> false t=659230.98296175 gen=2 captured=none owner=3 discard=false
+[IME] admission_begin t=659230.9829672917 gen=2 captured=none owner=3 discard=false
+[IME] admission_accepted t=659230.982973875 gen=3 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=4 t=659231.1128838334 gen=3 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=4 len=0 t=659231.1129052084 gen=3 captured=none owner=3 discard=false
+[IME] ? markedRange editor -> loc=4 len=0 t=659231.112911 gen=3 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=659231.1129155834 gen=3 captured=none owner=3 discard=false
+[IME] keyDown mods=[] t=659231.1145045417 gen=3 captured=none owner=3 discard=false text="ㄴ" [U+3134] len=1 keyCode=1
+[IME] interpret_begin t=659231.1145375001 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=4 len=0 t=659231.1151171667 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=4 len=0 t=659231.1155648334 gen=3 captured=3 owner=3 discard=false
+[IME] ? hasMarkedText editor -> false t=659231.1157842084 gen=3 captured=3 owner=3 discard=false
+[IME] callback_arrival setMarkedText accepted=true t=659231.1158946251 gen=3 captured=3 owner=3 discard=false
+[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=659231.1159295833 gen=3 captured=3 owner=3 discard=false text="ㄴ" [U+3134] len=1
+[IME] interpret_end t=659231.116204625 gen=3 captured=3 owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=659231.1162349167 gen=3 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659231.2487485834 gen=3 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=659231.2487827917 gen=3 captured=none owner=3 discard=false
+[IME] ? markedRange editor -> loc=4 len=1 t=659231.2487890833 gen=3 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=659231.248793875 gen=3 captured=none owner=3 discard=false
+[IME] keyDown mods=[] t=659231.2505033334 gen=3 captured=none owner=3 discard=false text="ㅏ" [U+314F] len=1 keyCode=40
+[IME] interpret_begin t=659231.2505382501 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=659231.2513242083 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=659231.2515327918 gen=3 captured=3 owner=3 discard=false
+[IME] ? attributedSubstring editor loc=4 len=1 t=659231.251746375 gen=3 captured=3 owner=3 discard=false
+[IME] ? attributedSubstring editor loc=4 len=1 t=659231.25176825 gen=3 captured=3 owner=3 discard=false
+[IME] ? attributedSubstring editor loc=4 len=1 t=659231.2517895 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=659231.2520235834 gen=3 captured=3 owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=659231.2521372084 gen=3 captured=3 owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=659231.252401 gen=3 captured=3 owner=3 discard=false
+[IME] callback_arrival setMarkedText accepted=true t=659231.25242275 gen=3 captured=3 owner=3 discard=false
+[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=659231.2524313334 gen=3 captured=3 owner=3 discard=false text="나" [U+B098] len=1
+[IME] interpret_end t=659231.2526161667 gen=3 captured=3 owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=659231.2526329583 gen=3 captured=none owner=3 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659231.3821984167 gen=3 captured=none owner=3 discard=false
+[IME] ? selectedRange editor -> loc=5 len=0 t=659231.3822249584 gen=3 captured=none owner=3 discard=false
+[IME] ? markedRange editor -> loc=4 len=1 t=659231.3822316667 gen=3 captured=none owner=3 discard=false
+[IME] ? hasMarkedText editor -> true t=659231.3822372917 gen=3 captured=none owner=3 discard=false
+[IME_FOCUS] post code=13 owner=3 t=659231.3824742084
+[IME] keyDown mods=[Cmd ] t=659231.3837251667 gen=3 captured=none owner=3 discard=false text="w" [U+0077] len=1 keyCode=13
+[IME] ? hasMarkedText editor -> true t=659231.3837496667 gen=3 captured=none owner=3 discard=false
+[IME] admission_begin t=659231.3837536251 gen=3 captured=none owner=3 discard=false
+[IME] admission_accepted t=659231.3838353751 gen=4 captured=none owner=3 discard=false
+[IME_FOCUS] observed owner=2 t=659231.5132097084
+[IME] ? selectedRange editor -> loc=2 len=0 t=659231.5133197918 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659231.5133385417 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659231.513346625 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659231.5133517501 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659231.6489724168 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659231.649001125 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659231.6490070834 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659231.7799879584 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659231.7800126667 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659231.7800185417 gen=4 captured=none owner=2 discard=false
+workspace checkpoint: effect kind=1 notice=0 reason=0 snapshot=-1
+workspace checkpoint: effect kind=2 notice=0 reason=0 snapshot=780
+workspace checkpoint: write dispatched: bytes=780 preserve_previous=false reason=0
+[IME] ? attributedSubstring editor loc=0 len=5 t=659231.9160390834 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659231.9160514167 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659231.9160565 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659232.0484017084 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659232.0484311667 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659232.0484368334 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659232.1809002501 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659232.18094 gen=4 captured=none owner=2 discard=false
+[IME] ? hasMarkedText editor -> false t=659232.1809459167 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659232.1809537084 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659232.1809585 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659232.1809621251 gen=4 captured=none owner=2 discard=false
+[IME] ? selectedRange editor -> loc=2 len=0 t=659232.1812631667 gen=4 captured=none owner=2 discard=false
+[IME] ? attributedSubstring editor loc=0 len=5 t=659232.181271875 gen=4 captured=none owner=2 discard=false
+[IME] keyDown mods=[Cmd ] t=659232.181296125 gen=4 captured=none owner=2 discard=false text="s" [U+0073] len=1 keyCode=1
+[IME] ? hasMarkedText editor -> false t=659232.1813179584 gen=4 captured=none owner=2 discard=false
+[IME] admission_begin t=659232.1813208751 gen=4 captured=none owner=2 discard=false
+[IME] admission_accepted t=659232.1813245417 gen=5 captured=none owner=2 discard=false
+late_focus_source=2
+late_focus_peer=3
+late_focus_shared_seed=true
+late_focus_source_start_text_actual=L R
+late_focus_source_start_text=true
+late_focus_source_start_caret_actual=0,0
+late_focus_source_start_caret=true
+late_focus_source_start_marked_actual=0,0
+late_focus_source_start_has_marked=false
+late_focus_source_start_range_consistency=true
+late_focus_source_start_hid_received=true
+late_focus_source_start_callbacks=
+late_focus_source_start_callback_observed=true
+late_focus_source_position_text_actual=L R
+late_focus_source_position_text=true
+late_focus_source_position_caret_actual=1,0
+late_focus_source_position_caret=true
+late_focus_source_position_marked_actual=1,0
+late_focus_source_position_has_marked=false
+late_focus_source_position_range_consistency=true
+late_focus_source_position_hid_received=true
+late_focus_source_position_callbacks=[IME] doCommand:moveRight: t=659229.81829375 gen=1 captured=1 owner=2 discard=false
+late_focus_source_position_callback_observed=true
+late_focus_source_initial_text_actual=Lㄱ R
+late_focus_source_initial_text=true
+late_focus_source_initial_caret_actual=2,0
+late_focus_source_initial_caret=true
+late_focus_source_initial_marked_actual=1,1
+late_focus_source_initial_has_marked=true
+late_focus_source_initial_range_consistency=true
+late_focus_source_initial_hid_received=true
+late_focus_source_initial_callbacks=[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=659229.9494614584 gen=1 captured=1 owner=2 discard=false
+late_focus_source_initial_callback_observed=true
+late_focus_source_syllable_text_actual=L가 R
+late_focus_source_syllable_text=true
+late_focus_source_syllable_caret_actual=2,0
+late_focus_source_syllable_caret=true
+late_focus_source_syllable_marked_actual=1,1
+late_focus_source_syllable_has_marked=true
+late_focus_source_syllable_range_consistency=true
+late_focus_source_syllable_hid_received=true
+late_focus_source_syllable_callbacks=[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=659230.0696826667 gen=1 captured=1 owner=2 discard=false
+late_focus_source_syllable_callback_observed=true
+late_focus_source_before_switch=true
+late_focus_peer_owner=3
+late_focus_peer_settled_document_selection=true
+late_focus_peer_text_actual=L가 R
+late_focus_peer_caret_actual=0,0
+late_focus_peer_switch_callbacks=
+late_focus_peer_callbacks_after_observed_cutover=0
+late_focus_peer_end_text_actual=L가 R
+late_focus_peer_end_text=true
+late_focus_peer_end_caret_actual=4,0
+late_focus_peer_end_caret=true
+late_focus_peer_end_marked_actual=4,0
+late_focus_peer_end_has_marked=false
+late_focus_peer_end_range_consistency=true
+late_focus_peer_end_hid_received=true
+late_focus_peer_end_callbacks=
+late_focus_peer_end_callback_observed=true
+late_focus_peer_initial_text_actual=L가 Rㄴ
+late_focus_peer_initial_text=true
+late_focus_peer_initial_caret_actual=5,0
+late_focus_peer_initial_caret=true
+late_focus_peer_initial_marked_actual=4,1
+late_focus_peer_initial_has_marked=true
+late_focus_peer_initial_range_consistency=true
+late_focus_peer_initial_hid_received=true
+late_focus_peer_initial_callbacks=[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=659231.1159295833 gen=3 captured=3 owner=3 discard=false
+late_focus_peer_initial_callback_observed=true
+late_focus_peer_syllable_text_actual=L가 R나
+late_focus_peer_syllable_text=true
+late_focus_peer_syllable_caret_actual=5,0
+late_focus_peer_syllable_caret=true
+late_focus_peer_syllable_marked_actual=4,1
+late_focus_peer_syllable_has_marked=true
+late_focus_peer_syllable_range_consistency=true
+late_focus_peer_syllable_hid_received=true
+late_focus_peer_syllable_callbacks=[IME] setMarkedText selected={1, 0} replacement={9223372036854775807, 0} t=659231.2524313334 gen=3 captured=3 owner=3 discard=false
+late_focus_peer_syllable_callback_observed=true
+late_focus_peer_before_return=true
+late_focus_return_owner=2
+late_focus_return_settled_document_selection=true
+late_focus_return_text_actual=L가 R나
+late_focus_return_caret_actual=2,0
+late_focus_return_switch_callbacks=
+late_focus_return_callbacks_after_observed_cutover=0
+late_focus_source_caret_preserved_actual=2,0
+late_focus_source_caret_preserved=true
+late_focus_shared_exact_once=true
+late_focus_shared_saved=true
+live_view_source_restored=true
+live_input_source_restore=restored
+live_global_source_restored=true
+live_callback_setMarkedText_count=4
+live_callback_insertText_count=0
+live_callback_explicit_replacement_count=0
+live_callback_protocol=marked
+late_focus_os_callback_count_after_observed_cutover=0
+late_focus_os_callback_observed=false
+failure_count=0
+failures=
+SHARED_IME_CLOSE count=1 clean=true bytes=9 surface=2 caret=4
+MARU_SCREENSHOT: 960x600 PPM 캡처 → /Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/close-3/korean/ime/ime-committed.ppm
+workspace checkpoint: final-quit requested status=0 allows_failure=false restore_incomplete=false
+workspace checkpoint: effect kind=1 notice=0 reason=1 snapshot=-1
+workspace checkpoint: effect kind=2 notice=0 reason=1 snapshot=779
+workspace checkpoint: write dispatched: bytes=779 preserve_previous=false reason=1
+workspace checkpoint: effect kind=4 notice=0 reason=0 snapshot=-1
+workspace checkpoint: final-quit finished — quit proceeds
+very_smoke_baseline_iteration=disabled
+session_host_input_smoke_stage=0
+session_host_input_smoke_historical_count=0
+session_host_input_smoke_ime_count=0
+session_host_input_smoke_clipboard_count=0
+session_host_input_smoke_marked_callbacks=0
+session_host_input_smoke_insert_callbacks=0
+session_host_input_smoke_historical_clipboard_preserved=false
+session_host_input_smoke_view_source_restored=false
+session_host_input_smoke_global_source_selected=false
+session_host_input_smoke_global_source_restored=false
+session_host_input_smoke_post_event_access=false
+session_host_input_smoke_source_record_cleared=false
+session_host_input_smoke_app_active=false
+session_host_input_smoke_first_responder=false
+session_host_input_smoke_frontmost_pid=0
+session_host_input_smoke_failure=
+session_host_input_smoke_candidate_failure=
+session_host_input_smoke_candidate_phase=0
+session_host_input_smoke_candidate_rows=0
+session_host_input_smoke_manual_input=false
+session_host_input_smoke_manual_return_observed=false
+session_host_input_smoke_callback_has_marked_text=unobserved
+session_host_input_smoke_callback_has_input_context=unobserved
+agent_session_archive_smoke_stage=disabled
+agent_session_archive_smoke_failure=
+agent_session_archive_smoke_content_size=
+agent_session_archive_smoke_scroll_point=
+agent_session_archive_smoke_scenario=disabled
+editor_save_conflict_smoke_stage=disabled
+editor_save_conflict_smoke_failure=
+editor_save_conflict_smoke_scenario=disabled
+agent_session_archive_smoke_fake_resume_verdict=false
+agent_session_archive_smoke_reveal_allowed_count=0
+agent_session_archive_smoke_reveal_rejected_count=0
+agent_session_archive_smoke_stale_reveal_count=0
+agent_session_archive_smoke_claude_model_present=0
+agent_session_archive_smoke_terminal_invariant=false
+agent_session_archive_smoke_scroll_dispatched=false
+agent_session_archive_smoke_anchor_before_present=false
+agent_session_archive_smoke_anchor_after_present=false
+agent_session_archive_smoke_anchor_raw_top_preserved=false
+agent_session_archive_smoke_anchor_snapshot_reordered=false
+agent_session_archive_smoke_anchor_new_generation_published=false
+agent_session_archive_smoke_sort_round_trip=false
+agent_session_archive_smoke_capture_list=false
+agent_session_archive_smoke_capture_loading=false
+agent_session_archive_smoke_capture_ready=false
+agent_session_archive_smoke_capture_stale=false
+agent_session_archive_smoke_capture_scroll_anchor_before=false
+agent_session_archive_smoke_capture_scroll_anchor_after=false
+agent_session_archive_smoke_capture_list_artifact=
+agent_session_archive_smoke_capture_loading_artifact=
+agent_session_archive_smoke_capture_ready_artifact=
+agent_session_archive_smoke_capture_stale_artifact=
+agent_session_archive_smoke_capture_scroll_anchor_before_artifact=
+agent_session_archive_smoke_capture_scroll_anchor_after_artifact=
+mermaid_pending_replies=0
+mermaid_product_tick_calls=0
+mermaid_product_work_ticks=0
+mermaid_product_tick_pump_calls=0
+mermaid_product_tick_drain_calls=0
+mermaid_product_completion_drain_max=0
+mermaid_product_tick_max_elapsed_us=0
+mermaid_product_accepted_svg_bytes_max=0
+mermaid_pump_calls=0
+mermaid_helper_starts=0
+mermaid_hello_frames=0
+mermaid_request_frames=0
+mermaid_terminal_results=0
+mermaid_stale_results=0
+mermaid_accepted_results=0
+mermaid_deadline_expirations=0
+quit_hide_windows_ms=0.0
+quit_mermaid_ms=0.0
+quit_control_stop_ms=0.0
+quit_save_workspace_ms=0.0
+quit_teardown_ms=0.0
+quit_total_ms=0.0
+web_app_asset_root=/Users/yoonhb/Documents/workspace/maru-ime-close-build-20261007/snapshot/zig-out/Maru.app/Contents/Resources/web
+web_app_resolve_index=123
+web_app_resolve_traversal=-1
+web_app_resolve_missing=-2
+artifacts written to /Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/close-3/korean/ime/
+maru.macos-app.v1
+visible_ui=true
+swift_host=true
+abi_ready=true
+app_instance_lease_status=0
+placeholder_window=true
+terminal_surface=true
+terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer
+metal_renderer_created=true
+metal_frames_drawn=18
+app_launch_first_drawable_armed=false
+app_launch_first_drawable_smoke_mode=true
+app_launch_first_drawable_start_ns=0
+app_launch_first_drawable_submit_ns=0
+app_launch_first_drawable_latency_ns=0
+app_session_status=0
+frame_loop_ticks=0
+frame_loop_last_tick_index=0
+output_events=13
+exit_events=0
+key_events=10
+terminal_input_events=0
+terminal_input_bytes=0
+app_key_events=9
+ignored_key_events=1
+resize_events=1
+close_events=1
+process_state=2
+frame_prepared=false
+frame_consistent=false
+glyph_uv_ready=false
+glyph_raster_ready=false
+glyph_count=0
+draw_cells=0
+atlas_entries=0
+surface_cols=2
+surface_rows=1
+final_frame_ended=true
+smoke_mode=true
+smoke_duration_ms=45000
+session_host_r2a_checkpoint_smoke=false
+session_host_r2a_checkpoint_preflight_count=0
+session_host_r2a_checkpoint_restore_incomplete=false
+session_host_recovery_smoke_stage=0
+session_host_recovery_smoke_row_present=false
+session_host_recovery_smoke_click_dispatched=false
+session_host_recovery_smoke_remote_published=false
+session_host_recovery_smoke_marker_present=false
+session_host_recovery_smoke_async_wake_marker_present=false
+session_host_recovery_smoke_wake_handler_count=0
+session_host_recovery_smoke_async_wake_handler_started_ns=0
+session_host_recovery_smoke_async_wake_applied_ns=0
+session_host_recovery_smoke_async_wake_apply_latency_ns=0
+session_host_recovery_smoke_before_capture=false
+session_host_recovery_smoke_after_capture=false
+session_host_auto_reconnect_trigger_published=false
+session_host_auto_reconnect_marker_present=false
+session_host_auto_reconnect_historical_count=0
+session_host_auto_reconnect_historical_before_count=0
+session_host_auto_reconnect_disconnect_after_count=0
+session_host_auto_reconnect_input_count=0
+session_host_auto_reconnect_input_dispatch_ns=0
+session_host_auto_reconnect_frame_submit_ns=0
+session_host_auto_reconnect_input_frame_latency_ns=0
+session_host_auto_reconnect_copy_count=0
+session_host_auto_reconnect_select_menu_actions=0
+session_host_auto_reconnect_copy_menu_actions=0
+session_host_auto_reconnect_copy_bytes=0
+session_host_auto_reconnect_resize_count=0
+session_host_auto_reconnect_sibling_live_before=false
+session_host_auto_reconnect_sibling_live_after=false
+session_host_auto_reconnect_sibling_controller_before=false
+session_host_auto_reconnect_sibling_controller_after=false
+session_host_reconnect_tick_inactive=171
+session_host_reconnect_tick_idle=0
+session_host_reconnect_tick_progressed=0
+session_host_reconnect_tick_max_elapsed_ns=0
+session_host_reconnect_blocking_operations=0
+session_host_reconnect_pre_shutdown_ready=false
+session_host_reconnect_pre_shutdown_runtime_count=0
+session_host_reconnect_final_worker=0
+session_host_reconnect_final_jobs=0
+session_host_reconnect_final_completion=0
+session_host_reconnect_final_cr5_jobs=0
+session_host_reconnect_final_admissions=0
+session_host_reconnect_final_resident_leases=0
+session_host_reconnect_final_backend_runtimes=0
+session_host_recovery_smoke_failure=
+session_host_recovery_smoke_prepare_outcome=0
+session_host_recovery_smoke_keep_alive_enabled=false
+session_host_recovery_smoke_discovered_candidates=0
+session_host_recovery_smoke_ready_adapters=0
+session_host_recovery_smoke_inventory_runtimes=0
+session_host_recovery_smoke_configured_keep_alive=false
+session_host_recovery_smoke_live_session_count=0
+session_host_recovery_smoke_target_activation_dispatched=false
+session_host_recovery_smoke_target_rows=0
+session_host_recovery_smoke_tabs=0
+session_host_recovery_smoke_surface_initialized=false
+session_host_recovery_smoke_active_remote_observed=false
+session_host_recovery_smoke_marker_observed=false
+session_host_recovery_smoke_launch_ns=659229373051583
+session_host_recovery_smoke_row_ns=0
+session_host_recovery_smoke_click_ns=0
+session_host_recovery_smoke_remote_visible_ns=0
+session_host_recovery_smoke_summary_ns=659232408503666
+session_host_recovery_smoke_baseline_iteration=disabled
+session_host_input_smoke_stage=0
+session_host_input_smoke_historical_count=0
+session_host_input_smoke_ime_count=0
+session_host_input_smoke_clipboard_count=0
+session_host_input_smoke_marked_callbacks=0
+session_host_input_smoke_insert_callbacks=0
+session_host_input_smoke_historical_clipboard_preserve=== maru app exit pid=25916 via=exit ===
+d=false
+session_host_input_smoke_view_source_restored=false
+session_host_input_smoke_global_source_selected=false
+session_host_input_smoke_global_source_restored=false
+session_host_input_smoke_post_event_access=false
+session_host_input_smoke_source_record_cleared=false
+session_host_input_smoke_app_active=false
+session_host_input_smoke_first_responder=false
+session_host_input_smoke_frontmost_pid=0
+session_host_input_smoke_failure=
+session_host_input_smoke_candidate_failure=
+session_host_input_smoke_candidate_phase=0
+session_host_input_smoke_candidate_rows=0
+session_host_input_smoke_manual_input=false
+session_host_input_smoke_manual_return_observed=false
+session_host_input_smoke_callback_has_marked_text=unobserved
+session_host_input_smoke_callback_has_input_context=unobserved
+agent_session_archive_smoke_stage=disabled
+agent_session_archive_smoke_failure=
+agent_session_archive_smoke_content_size=
+agent_session_archive_smoke_scroll_point=
+agent_session_archive_smoke_scenario=disabled
+editor_save_conflict_smoke_stage=disabled
+editor_save_conflict_smoke_failure=
+editor_save_conflict_smoke_scenario=disabled
+agent_session_archive_smoke_fake_resume_verdict=false
+agent_session_archive_smoke_reveal_allowed_count=0
+agent_session_archive_smoke_reveal_rejected_count=0
+agent_session_archive_smoke_stale_reveal_count=0
+agent_session_archive_smoke_claude_model_present=0
+agent_session_archive_smoke_terminal_invariant=false
+agent_session_archive_smoke_scroll_dispatched=false
+agent_session_archive_smoke_anchor_before_present=false
+agent_session_archive_smoke_anchor_after_present=false
+agent_session_archive_smoke_anchor_raw_top_preserved=false
+agent_session_archive_smoke_anchor_snapshot_reordered=false
+agent_session_archive_smoke_anchor_new_generation_published=false
+agent_session_archive_smoke_sort_round_trip=false
+agent_session_archive_smoke_capture_list=false
+agent_session_archive_smoke_capture_loading=false
+agent_session_archive_smoke_capture_ready=false
+agent_session_archive_smoke_capture_stale=false
+agent_session_archive_smoke_capture_scroll_anchor_before=false
+agent_session_archive_smoke_capture_scroll_anchor_after=false
+agent_session_archive_smoke_capture_list_artifact=
+agent_session_archive_smoke_capture_loading_artifact=
+agent_session_archive_smoke_capture_ready_artifact=
+agent_session_archive_smoke_capture_stale_artifact=
+agent_session_archive_smoke_capture_scroll_anchor_before_artifact=
+agent_session_archive_smoke_capture_scroll_anchor_after_artifact=
+mermaid_pending_replies=0
+mermaid_product_tick_calls=171
+mermaid_product_work_ticks=0
+mermaid_product_tick_pump_calls=0
+mermaid_product_tick_drain_calls=0
+mermaid_product_completion_drain_max=0
+mermaid_product_tick_max_elapsed_us=0
+mermaid_product_accepted_svg_bytes_max=0
+mermaid_pump_calls=0
+mermaid_helper_starts=0
+mermaid_hello_frames=0
+mermaid_request_frames=0
+mermaid_terminal_results=0
+mermaid_stale_results=0
+mermaid_accepted_results=0
+mermaid_deadline_expirations=0
+quit_hide_windows_ms=39.0
+quit_mermaid_ms=0.1
+quit_control_stop_ms=0.0
+quit_save_workspace_ms=0.0
+quit_teardown_ms=14.5
+quit_total_ms=53.7
+web_app_asset_root=/Users/yoonhb/Documents/workspace/maru-ime-close-build-20261007/snapshot/zig-out/Maru.app/Contents/Resources/web
+web_app_resolve_index=123
+web_app_resolve_traversal=-1
+web_app_resolve_missing=-2
+artifacts written to /Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/close-3/korean/ime/

@@ -57,11 +57,11 @@ SEL = ("<!doctype html><title>sel</title><style>html,body{margin:0;height:100%;b
     "var a=document.getElementById('a');a.addEventListener('focus',function(){new Image().src='/ev?e=focus&id=a&t='+Date.now()});"
     "a.addEventListener('change',function(){new Image().src='/ev?e=change&v='+a.value+'&t='+Date.now()});"
     "</script>").encode()
-# W6m②: 제안 목록 — select 페이지와 같은 자리(본문 폭 50%·높이 40%)의 빨간 글 칸에 옵션 다섯(하나는 레이블). 페이지는
-# change·keydown 을 알린다.
+# W6m②: 제안 목록 — select 페이지와 같은 자리(본문 폭 50%·높이 40%)의 빨간 글 칸에 옵션 다섯(둘은 레이블 — 하나는 가장 넓은
+# 행). 페이지는 change·keydown 을 알린다.
 DL = ("<!doctype html><title>dl</title><style>html,body{margin:0;height:100%;background:#20a060}body{height:3000px}"
     "input{position:fixed;left:0;top:0;width:50%;height:40%;border:0;background:#ff0000;font:20px sans-serif}</style><body>"
-    "<input id=a list=l autocomplete=off><datalist id=l><option value=apple><option value=banana><option value=cherry label='red fruit'><option value=date><option value=elder></datalist><script>"
+    "<input id=a list=l autocomplete=off><datalist id=l><option value=apple><option value=banana><option value=cherry label='red fruit'><option value=date><option value='elderberry wine' label='a longer label'></datalist><script>"
     "var a=document.getElementById('a');function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}"
     "a.addEventListener('change',function(){ping('e=change&v='+a.value)});a.addEventListener('keydown',function(e){ping('e=kd&k='+e.key)});"
     "a.addEventListener('keyup',function(e){ping('e=ku&k='+e.key)});document.addEventListener('mousedown',function(e){ping('e=md&b='+e.button)});"
@@ -1170,8 +1170,9 @@ PY
 # 띄운다. 처음에는 아무것도 강조하지 않고(Chrome 154 실측), ↓↓↑ 로 옮긴 강조를 Enter 가 고르면 그 값이 페이지에 들어간다(change).
 # 행 위의 움직임은 강조, 같은 행에서 누르고 떼면 고른다(대본 `dlmouse` — 창의 진짜 사건 처리기에 합성 사건). Esc 는 목록만 닫고
 # 페이지에 가지 않으며, 닫힌 뒤의 ↓ 는 페이지가 받아 다시 연다. 열린 목록의 ↓ 는 페이지에 가지 않는다. 강조 없는 Enter 는 페이지로
-# 간다(폼 제출). 대본 `datalist` 가 Zig 의 상태와 띄운 창(보임·행 수·강조·자리·첫 값)을 적는다 — 앱 스크린샷은 Metal 화면만 찍어
-# 네이티브 창이 담기지 않는다.
+# 간다(폼 제출). 대본 `datalist` 가 Zig 의 상태와 띄운 창(보임·행 수·표가 실제로 강조한 행·칸 아래인가·왼쪽 맞춤·잘린 행 수·첫
+# 값·창 왼쪽 위의 view backing px)을 적는다. 앱 스크린샷은 Metal 화면만 찍어 네이티브 창이 담기지 않는다 — 그래서 스크린샷의 빨간
+# 칸 왼쪽 아래와 창 왼쪽 위를 맞춰 자리를 따로 확인하고(dl-shot), 창 내용은 `dlsnap` 으로 받아 강조 색을 본다.
 cat > "$root/dl-keys.txt" <<SCRIPT
 sleep 7000
 mouse 1 0.40 0.33 0 0 0
@@ -1229,6 +1230,28 @@ wheel 0.80 0.80 0 0 -3
 sleep 1500
 datalist
 SCRIPT
+# 팔레트가 열리면 키 대상이 바뀌어 창을 거두고, 페이지는 초점을 잃어 목록을 닫는다 — 팔레트를 닫아도 다시 뜨지 않는다(Chrome 도
+# 창이 초점을 되찾았다고 목록을 다시 띄우지 않는다).
+cat > "$root/dl-palette.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.33 0 0 0
+mouse 3 0.40 0.33 0 0 0
+sleep 1500
+datalist
+action toggle_command_palette
+sleep 500
+datalist
+key 53 U+1B
+sleep 1500
+datalist
+SCRIPT
+cat > "$root/dl-shot.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.33 0 0 0
+mouse 3 0.40 0.33 0 0 0
+sleep 1500
+datalist
+SCRIPT
 cat > "$root/dl-esc.txt" <<'SCRIPT'
 sleep 7000
 mouse 1 0.40 0.33 0 0 0
@@ -1251,14 +1274,17 @@ sleep 1000
 SCRIPT
 : > "$root/requests.log"
 rm -f "$root/dl-popup.png" "$root/dl-popup-selected.png"
-for dl in keys mouse esc press; do
+for dl in keys mouse esc press palette; do
   : > "$root/requests.log"
   run_app /dl-app 14000 "$root/dl-$dl.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-$dl.txt"
   grep -ao 'osr-test datalist [a-z0-9= -]*\|osr-test dl-miss\|osr-test dlsnap ok' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-$dl.report" || true
   cp "$root/requests.log" "$root/dl-$dl.requests"
 done
+: > "$root/requests.log"
+run_app /dl-app 20000 "$root/dl-shot.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-shot.txt" MARU_SCREENSHOT="$root/dl-shot.ppm" MARU_SCREENSHOT_DELAY_MS=11000
+grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-shot.report" || true
 python3 - "$root" <<'PY' || fail "the datalist window, keys, mouse or Esc did not behave like Chrome"
-import sys, os
+import sys, os, zlib, struct
 root = sys.argv[1]
 def lines(name): return [l.strip() for l in open(os.path.join(root, name)) if l.strip()]
 def ev(name): return [l.split('&t=')[0] for l in lines(name) if l.startswith('/ev')]
@@ -1267,27 +1293,95 @@ def check(c, m):
     global ok
     ok = ok and c
     print(('PASS ' if c else 'FAIL ') + m)
-def shown(sel): return f'osr-test datalist open=true count=5 selected={sel} win=shown rows=5 sel={sel} below=true left=true first=apple'
-closed = 'osr-test datalist open=false count=0 selected=-1 win=hidden'
+def parse(l): return dict(kv.split('=', 1) for kv in l.split()[2:] if '=' in kv) if l.startswith('osr-test datalist') else l
+def shown(sel): return {'open': 'true', 'count': '5', 'selected': str(sel), 'win': 'shown', 'rows': '5', 'sel': str(sel), 'below': 'true', 'left': 'true', 'clip': '0', 'first': 'apple'}
+closed = {'open': 'false', 'count': '0', 'selected': '-1', 'win': 'hidden'}
+def same(got, want):
+    if len(got) != len(want): return False
+    for g, w in zip(got, want):
+        g = parse(g)
+        if isinstance(w, dict):
+            if not isinstance(g, dict) or {k: g.get(k) for k in w} != w: return False
+        elif g != w: return False
+    return True
 keys = lines('dl-keys.report'); kreq = ev('dl-keys.requests')
-check(keys == [shown(-1), 'osr-test dlsnap ok', shown(0), 'osr-test dlsnap ok', shown(0), closed],
-      f'the list window opens right under the field with its left edge aligned and nothing highlighted, ↓↓↑ moves the highlight and Enter picks it ({keys})')
+check(same(keys, [shown(-1), 'osr-test dlsnap ok', shown(0), 'osr-test dlsnap ok', shown(0), closed]),
+      f'the list window opens right under the field with its left edge aligned, no row clipped and nothing highlighted, ↓↓↑ moves the table highlight and Enter picks it ({keys})')
 check('/ev?e=change&v=apple' in kreq and not any('k=Arrow' in r for r in kreq) and not any('k=Enter' in r for r in kreq),
       f'the picked value reaches the page, and ↓·↑·Enter on the open list do not ({kreq})')
+def png(path):
+    d = open(path, 'rb').read()
+    assert d[:8] == b'\x89PNG\r\n\x1a\n'
+    i, idat, w = 8, b'', 0
+    while i < len(d):
+        n, t = struct.unpack('>I4s', d[i:i + 8]); c = d[i + 8:i + 8 + n]; i += 12 + n
+        if t == b'IHDR': w, h, depth, ctype = struct.unpack('>IIBB', c[:10]); assert depth == 8 and ctype in (2, 6)
+        elif t == b'IDAT': idat += c
+    bpp = 4 if ctype == 6 else 3
+    raw = zlib.decompress(idat); stride = w * bpp; rows = []; prev = bytearray(stride); p = 0
+    for _ in range(h):
+        f = raw[p]; line = bytearray(raw[p + 1:p + 1 + stride]); p += 1 + stride
+        for x in range(stride):
+            a = line[x - bpp] if x >= bpp else 0; b = prev[x]; c = prev[x - bpp] if x >= bpp else 0
+            if f == 1: line[x] = (line[x] + a) & 255
+            elif f == 2: line[x] = (line[x] + b) & 255
+            elif f == 3: line[x] = (line[x] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(bytes(line)); prev = line
+    return w, h, bpp, rows
+def accent(path):
+    # 첫 행(위 여백 아래) 띠에서 강조색(파랑 계열) 화소의 비율.
+    w, h, bpp, rows = png(path)
+    sy = h / 118.0 if h else 1
+    band = [r for r in rows[int(8 * sy):int(22 * sy)]]
+    hit = total = 0
+    for r in band:
+        for x in range(int(w * 0.15), int(w * 0.85)):
+            R, G, B = r[x * bpp], r[x * bpp + 1], r[x * bpp + 2]
+            total += 1
+            hit += B > R + 60 and B > 140
+    return hit / max(total, 1)
 pngs = [os.path.join(root, n) for n in ('dl-popup.png', 'dl-popup-selected.png')]
-check(all(os.path.exists(p) and os.path.getsize(p) > 1000 for p in pngs), 'the list window draws its rows (snapshots dl-popup.png · dl-popup-selected.png)')
+if all(os.path.exists(p) for p in pngs):
+    plain, sel = accent(pngs[0]), accent(pngs[1])
+    check(plain < 0.05 and sel > 0.4, f'the window draws the highlighted first row in the accent colour only once ↓ highlights it (snapshots: {plain:.2f} before · {sel:.2f} after)')
+else:
+    check(False, 'the list window snapshots exist (dl-popup.png · dl-popup-selected.png)')
 mouse = lines('dl-mouse.report'); mreq = ev('dl-mouse.requests')
-check(mouse == [shown(2), closed, 'osr-test dl-miss'] and '/ev?e=change&v=date' in mreq,
+check(same(mouse, [shown(2), closed, 'osr-test dl-miss']) and '/ev?e=change&v=date' in mreq,
       f'moving over a row highlights it, a click on a row picks it and the window goes away ({mouse} · {mreq})')
 press = lines('dl-press.report'); preq = ev('dl-press.requests')
-check(press == [shown(-1), shown(2), shown(-1), closed]
+check(same(press, [shown(-1), shown(2), shown(-1), closed])
       and not any(r.startswith('/ev?e=change') for r in preq) and '/ev?e=kd&k=Enter' in preq,
       f'a press on a row released outside the window picks nothing, a hover highlight clears when the pointer leaves so Enter reaches the page, and a page-side close hides the window ({press} · {preq})')
 esc = lines('dl-esc.report'); ereq = ev('dl-esc.requests')
 kd = [r for r in ereq if r.startswith('/ev?e=kd')]
-check(esc == [closed, shown(-1), shown(-1), shown(0)]
+check(same(esc, [closed, shown(-1), shown(-1), shown(0)])
       and kd == ['/ev?e=kd&k=ArrowDown', '/ev?e=kd&k=Enter'] and not any(r.startswith('/ev?e=change') for r in ereq),
       f'Esc closes only the list, ↓ on the closed field reaches the page and reopens it, Enter on the open list with nothing highlighted reaches the page and picks nothing ({esc} · {kd})')
+pal = lines('dl-palette.report')
+check(same(pal, [shown(-1), closed, closed]), f'opening the command palette hides the window and closing it does not bring the list back ({pal})')
+# 자리 — 스크린샷의 빨간 칸(왼쪽 아래)과 창 왼쪽 위(view backing px)가 맞는가. 보고의 below·left 는 같은 변환끼리의 비교라 따로 본다.
+shot = [parse(l) for l in lines('dl-shot.report')]
+spath = os.path.join(root, 'dl-shot.ppm')
+if shot and isinstance(shot[0], dict) and 'atx' in shot[0] and os.path.exists(spath):
+    d = open(spath, 'rb').read()
+    _, dims, _, px = d.split(b'\n', 3)
+    w, h = map(int, dims.split())
+    red = bytes.fromhex('ff0000'); xs, ys = [], []
+    for y in range(h):
+        row = px[y * w * 3:(y + 1) * w * 3]
+        i = row.find(red)
+        while i != -1:
+            if i % 3 == 0: xs.append(i // 3); ys.append(y)
+            i = row.find(red, i + 3)
+    ax, ay = int(shot[0]['atx']), int(shot[0]['aty'])
+    check(bool(xs) and abs(ax - min(xs)) <= 3 and abs(ay - (max(ys) + 1)) <= 3,
+          f'the window sits at the bottom-left corner of the field in the screenshot (window {ax},{ay} · field {min(xs) if xs else None},{max(ys) + 1 if ys else None})')
+else:
+    check(False, f'the placement run reported the window and took a screenshot ({shot})')
 sys.exit(0 if ok else 1)
 PY
 

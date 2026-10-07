@@ -36,6 +36,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     private final class Cell: NSTableCellView {
         let valueField = NSTextField(labelWithString: "")
         let labelField = NSTextField(labelWithString: "")
+        private var gap: NSLayoutConstraint!
 
         init(font: NSFont) {
             super.init(frame: .zero)
@@ -48,18 +49,31 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
             valueField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             labelField.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
             labelField.alignment = .right
+            gap = labelField.leadingAnchor.constraint(greaterThanOrEqualTo: valueField.trailingAnchor, constant: OsrDatalistPopup.labelGap)
             NSLayoutConstraint.activate([
+                gap,
                 valueField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: OsrDatalistPopup.textInset),
                 valueField.centerYAnchor.constraint(equalTo: centerYAnchor),
                 labelField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -OsrDatalistPopup.textInset),
                 labelField.centerYAnchor.constraint(equalTo: centerYAnchor),
-                labelField.leadingAnchor.constraint(greaterThanOrEqualTo: valueField.trailingAnchor, constant: OsrDatalistPopup.labelGap),
             ])
             applyColors()
         }
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError("unused") }
+
+        func set(_ item: Item) {
+            valueField.stringValue = item.value
+            labelField.stringValue = item.label
+            gap.constant = item.label.isEmpty ? 0 : OsrDatalistPopup.labelGap
+        }
+
+        /// 값이나 레이블이 잘렸는가(시험 전용 — 너비 계산 확인).
+        var clipped: Bool {
+            layoutSubtreeIfNeeded()
+            return [valueField, labelField].contains { !$0.stringValue.isEmpty && $0.frame.width + 0.5 < $0.intrinsicContentSize.width }
+        }
 
         override var backgroundStyle: NSView.BackgroundStyle {
             didSet { applyColors() }
@@ -72,11 +86,14 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         }
     }
 
-    /// 포인터를 받는 표 — 키는 받지 않는다. 행 위에서 누르고 그 행에서 떼야 고른다(밖에서 떼면 고르지 않는다 — 목록은 남는다).
-    /// 오른쪽·⌃ 누름은 삼킨다(목록에는 메뉴가 없다).
+    /// 포인터를 받는 표 — 키는 받지 않는다. 행 위에서 누르고 같은 목록의 그 행에서 떼야 고른다(밖에서 떼면 고르지 않는다 — 목록은
+    /// 남는다; 누른 채 목록이 바뀌면 고르지 않는다 — 적대 검증). 오른쪽·⌃ 누름은 삼킨다(목록에는 메뉴가 없다). 커서는 화살표다
+    /// (아래 페이지의 커서가 남지 않게).
     private final class Table: NSTableView {
         weak var popup: OsrDatalistPopup?
-        private var pressedRow = -1
+        private var pressed: (row: Int, generation: UInt32)?
+
+        func cancelPress() { pressed = nil }
 
         override var acceptsFirstResponder: Bool { false }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -92,25 +109,45 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
             row(at: convert(event.locationInWindow, from: nil))
         }
 
-        override func mouseMoved(with event: NSEvent) { popup?.pointer(row: rowAt(event)) }
-        override func mouseEntered(with event: NSEvent) { popup?.pointer(row: rowAt(event)) }
+        override func mouseMoved(with event: NSEvent) {
+            NSCursor.arrow.set()
+            popup?.pointer(row: rowAt(event))
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            NSCursor.arrow.set()
+            popup?.pointer(row: rowAt(event))
+        }
+
         override func mouseExited(with event: NSEvent) { popup?.pointer(row: -1) }
 
         override func mouseDown(with event: NSEvent) {
-            pressedRow = event.modifierFlags.contains(.control) ? -1 : rowAt(event)
+            let row = rowAt(event)
+            pressed = event.modifierFlags.contains(.control) || row < 0 ? nil : (row, popup?.generation ?? 0)
         }
 
         override func mouseDragged(with event: NSEvent) {}
 
         override func mouseUp(with event: NSEvent) {
             let row = rowAt(event)
-            defer { pressedRow = -1 }
-            if pressedRow >= 0, row == pressedRow { popup?.pick(row: row) }
+            defer { pressed = nil }
+            if let pressed, row == pressed.row, pressed.generation == popup?.generation { popup?.pick(row: row) }
         }
 
         override func rightMouseDown(with event: NSEvent) {}
         override func otherMouseDown(with event: NSEvent) {}
         override func menu(for event: NSEvent) -> NSMenu? { nil }
+    }
+
+    /// 휠로 굴린 뒤 포인터 아래 행으로 강조를 옮긴다 — 포인터를 멈춘 채 굴리면 움직임이 오지 않아 강조가 옛 행에 남고, 그때 Enter 가
+    /// 포인터 아래가 아닌 행을 골랐다(적대 검증). 키로 굴린 것(`scrollRowToVisible`)은 강조를 옮기지 않는다.
+    private final class Scroll: NSScrollView {
+        weak var popup: OsrDatalistPopup?
+
+        override func scrollWheel(with event: NSEvent) {
+            super.scrollWheel(with: event)
+            popup?.pointerAfterScroll()
+        }
     }
 
     static let rowHeight: CGFloat = 22
@@ -119,6 +156,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     static let textInset: CGFloat = 12
     static let labelGap: CGFloat = 16
     static let minWidth: CGFloat = 120
+    static let fieldPadding: CGFloat = 3
 
     /// 행 위 hover(행 번호 — -1 은 창을 떠남)와 행 고르기. 세대는 띄운 목록의 것.
     var onHover: ((UInt32, Int) -> Void)?
@@ -126,12 +164,14 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     private let panel: Panel
     private let table = Table()
-    private let scroll = NSScrollView()
+    private let scroll = Scroll()
     private let font = NSFont.menuFont(ofSize: 0)
     private weak var parent: NSWindow?
     private(set) var items: [Item] = []
     private(set) var generation: UInt32 = 0
     private(set) var selected = -1
+    /// 실린 목록의 크기(실을 때만 잰다 — tick 마다 항목 글을 다시 재지 않게, 적대 검증).
+    private var size = NSSize.zero
     /// 마지막 자리 — 칸 아래(`below`)인가 위인가(판정 보고용).
     private(set) var placedBelow = true
     /// 칸(화면 좌표) — 판정 보고용.
@@ -139,6 +179,8 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     var isShown: Bool { panel.isVisible }
     var frame: NSRect { panel.frame }
+    /// 표가 실제로 강조한 행(시험 보고용 — Zig 가 정한 강조가 표까지 갔는가).
+    var tableSelectedRow: Int { table.selectedRow }
 
     override init() {
         panel = Panel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.borderless, .nonactivatingPanel],
@@ -151,6 +193,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.animationBehavior = .none
+        panel.collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle]
 
         let effect = NSVisualEffectView()
         effect.material = .menu
@@ -175,6 +218,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         table.dataSource = self
         table.delegate = self
         table.popup = self
+        scroll.popup = self
 
         scroll.documentView = table
         scroll.drawsBackground = false
@@ -192,29 +236,43 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         ])
     }
 
-    /// 목록을 띄운다(이미 떠 있으면 고친다). `field` 는 칸의 화면 좌표. 목록이 바뀌었을 때만 항목을 다시 싣는다.
-    func show(generation: UInt32, items: [Item], selected: Int, field: NSRect, parent: NSWindow) {
+    /// 목록을 띄운다(이미 떠 있으면 고친다). `field` 는 칸의 화면 좌표. 목록이 바뀌었을 때만 항목을 다시 싣고 크기를 잰다. 칸 위·아래
+    /// 어디에도 한 줄이 들어가지 않으면 띄우지 않는다(false).
+    @discardableResult
+    func show(generation: UInt32, items: [Item], selected: Int, field: NSRect, parent: NSWindow) -> Bool {
         let reload = generation != self.generation || items != self.items || !panel.isVisible
         self.generation = generation
         self.items = items
         fieldOnScreen = field
         if reload {
             table.reloadData()
+            table.cancelPress()
+            size = contentSize()
             self.selected = -2 // 아래에서 다시 칠한다
         }
-        let size = contentSize()
-        place(size: size, field: field, screen: parent.screen ?? NSScreen.main)
+        guard place(size: size, field: field, screen: Self.screen(for: field) ?? parent.screen ?? NSScreen.main) else {
+            hide()
+            return false
+        }
         if self.parent !== parent {
             self.parent?.removeChildWindow(panel)
             self.parent = parent
         }
-        panel.appearance = parent.effectiveAppearance
+        if panel.appearance?.name != parent.effectiveAppearance.name { panel.appearance = parent.effectiveAppearance }
+        if panel.level != parent.level { panel.level = parent.level }
         if !panel.isVisible || panel.parent !== parent {
             parent.addChildWindow(panel, ordered: .above)
             panel.orderFront(nil)
         }
         setSelected(selected)
         if reload { panel.invalidateShadow() }
+        return true
+    }
+
+    /// 칸이 있는 화면 — 창이 여러 화면에 걸치면 `parent.screen` 은 창이 가장 많이 놓인 화면이라 칸과 먼 화면 가장자리에 붙었다(적대 검증).
+    private static func screen(for field: NSRect) -> NSScreen? {
+        let center = NSPoint(x: field.midX, y: field.midY)
+        return NSScreen.screens.first { $0.frame.contains(center) }
     }
 
     /// 거둔다.
@@ -224,6 +282,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         parent = nil
         panel.orderOut(nil)
         selected = -1
+        table.cancelPress()
     }
 
     /// 강조를 바꾼다(-1 = 없음). 보이게 굴린다 — 키로 옮긴 강조가 창 밖이면 따라간다.
@@ -267,6 +326,11 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         return true
     }
 
+    /// 시험 전용 — 값·레이블이 잘린 행 수(너비 계산 확인).
+    func testClippedRows() -> Int {
+        (0..<items.count).filter { (table.view(atColumn: 0, row: $0, makeIfNecessary: true) as? Cell)?.clipped == true }.count
+    }
+
     /// 시험 전용(대본 `dlsnap`) — 창 내용을 PNG 로(뒤 창을 비추는 배경은 빠진다 — 글·강조만 본다).
     func testSnapshot(to path: String) -> Bool {
         guard panel.isVisible, let view = panel.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
@@ -280,6 +344,12 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         onHover?(generation, row >= 0 && row < items.count ? row : -1)
     }
 
+    fileprivate func pointerAfterScroll() {
+        let point = table.convert(panel.mouseLocationOutsideOfEventStream, from: nil)
+        guard table.visibleRect.contains(point) else { return }
+        pointer(row: table.row(at: point))
+    }
+
     fileprivate func pick(row: Int) {
         guard row >= 0, row < items.count else { return }
         onPick?(generation, row)
@@ -289,27 +359,33 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     private func contentSize() -> NSSize {
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         var widest: CGFloat = 0
+        // 글 칸(NSTextField)은 글 양옆에 안쪽 여백이 있다 — 칸마다 `fieldPadding`. 빈 레이블 칸도 자리를 차지한다.
         for item in items {
-            var w = ceil((item.value as NSString).size(withAttributes: attributes).width)
+            var w = ceil((item.value as NSString).size(withAttributes: attributes).width) + Self.fieldPadding * 2
             if !item.label.isEmpty { w += Self.labelGap + ceil((item.label as NSString).size(withAttributes: attributes).width) }
-            widest = max(widest, w)
+            widest = max(widest, w + Self.fieldPadding * 2)
         }
         let rows = min(items.count, Self.maxVisibleRows)
-        let width = max(Self.minWidth, widest + Self.textInset * 2 + 4)
+        let width = max(Self.minWidth, widest + Self.textInset * 2 + 2)
         return NSSize(width: width, height: CGFloat(rows) * Self.rowHeight + Self.verticalPadding * 2)
     }
 
     /// 칸 바로 아래, 왼쪽을 맞춘다. 화면 아래로 넘치면 칸 위로 올리고(위가 더 넓으면), 둘 다 좁으면 넓은 쪽에 높이를 줄여 둔다.
-    /// 오른쪽으로 넘치면 왼쪽으로 민다.
-    private func place(size: NSSize, field: NSRect, screen: NSScreen?) {
+    /// 오른쪽으로 넘치면 왼쪽으로 민다. 어느 쪽에도 한 줄이 들어가지 않으면(칸이 화면 끝에 걸림) false — 화면 밖에 두지 않는다.
+    ///
+    /// 자리는 화면으로만 묶고 탭 본문으로 묶지 않는다 — Chrome·Safari 의 목록도 페이지 밖(브라우저 UI·창 밖)으로 나온다(사용자 결정
+    /// 「WebKit 처럼 네이티브 창」). 오버레이 판은 본문 안에만 그렸다(maru 가 그리는 글이 다른 pane 을 덮으면 maru UI 처럼 보여서).
+    /// 네이티브 창은 그림자 진 메뉴 모양으로 칸에 붙어 떠 페이지 것임이 드러난다.
+    private func place(size: NSSize, field: NSRect, screen: NSScreen?) -> Bool {
         let visible = screen?.visibleFrame ?? NSRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
         var width = min(size.width, max(visible.width, Self.minWidth))
         width = min(width, 600)
         let below = field.minY - visible.minY
         let above = visible.maxY - field.maxY
-        var height = size.height
-        placedBelow = below >= height || below >= above
-        height = min(height, max(placedBelow ? below : above, Self.rowHeight + Self.verticalPadding * 2))
+        let minHeight = Self.rowHeight + Self.verticalPadding * 2
+        guard max(below, above) >= minHeight else { return false }
+        placedBelow = below >= size.height || below >= above
+        let height = min(size.height, placedBelow ? below : above)
         var x = field.minX
         if x + width > visible.maxX { x = visible.maxX - width }
         x = max(x, visible.minX)
@@ -317,6 +393,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         let frame = NSRect(x: x, y: y, width: width, height: height)
         if panel.frame != frame { panel.setFrame(frame, display: true) }
         table.tableColumns.first?.width = width
+        return true
     }
 
     // ── 표 ──
@@ -331,9 +408,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
             made.identifier = id
             return made
         }()
-        let item = items[row]
-        cell.valueField.stringValue = item.value
-        cell.labelField.stringValue = item.label
+        cell.set(items[row])
         return cell
     }
 }

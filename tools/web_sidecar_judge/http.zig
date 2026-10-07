@@ -244,7 +244,7 @@ const newtab_page =
 
 const frame_page_head = "<!doctype html><title>loading</title><style>html,body{margin:0}body{height:3000px}#m{position:fixed;left:480px;top:200px;width:150px;height:40px}" ++
     "iframe{position:absolute;left:50px;top:150px;width:400px;height:300px;border:4px solid #000;padding:6px}</style><body><input id=m list=l><datalist id=l><option value=a><option value=b></datalist>";
-const frame_page_tail = "<script>document.getElementById('m').addEventListener('keydown',function(e){if(e.key!=='a')return;var x=document.getElementById('x');if(x)x.contentWindow.postMessage('steal','*')});addEventListener('scroll',function(){document.title='sy:'+scrollY});addEventListener('message',function(e){if(e.data==='remove'){var x=document.getElementById('x');if(x)x.remove();document.title='removed'}else if(typeof e.data==='string')document.title=e.data})</script>";
+const frame_page_tail = "<script>addEventListener('message',function(e){if(e.data==='scrollme')scrollBy(0,100)});document.getElementById('m').addEventListener('keydown',function(e){if(e.key!=='a')return;var x=document.getElementById('x');if(x)x.contentWindow.postMessage('steal','*')});addEventListener('scroll',function(){document.title='sy:'+scrollY});addEventListener('message',function(e){if(e.data==='remove'){var x=document.getElementById('x');if(x)x.remove();document.title='removed'}else if(typeof e.data==='string')document.title=e.data})</script>";
 
 fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/title")) {
@@ -360,12 +360,13 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         const cross = std.mem.eql(u8, path, "/datalist-xframe");
         return if (cross) frame_page_head ++ "<iframe id=x></iframe><script>var x=document.getElementById('x');x.onload=function(){document.title='dl-frame-ready'};x.src='http://localhost:'+location.port+'/datalist-inner'</script>" ++ frame_page_tail else frame_page_head ++ "<iframe id=x src='/datalist-inner' onload=\"document.title='dl-frame-ready'\"></iframe>" ++ frame_page_tail;
     }
-    if (std.mem.eql(u8, path, "/datalist-inner")) return "<!doctype html><title>inner</title><style>html,body{margin:0}input{width:300px;height:40px;border:0;padding:0}</style><input id=f list=l><datalist id=l><option value=a><option value=b><option value=zebra><option value=nut></datalist>" ++
-        "<script>var f=document.getElementById('f');function tell(m){parent.postMessage(m,'*')}f.addEventListener('input',function(){tell('in-input:'+f.value);if(f.value==='z')setTimeout(function(){tell('remove')},400);if(f.value==='n')setTimeout(function(){location.href='/datalist-inner?moved'},400)});f.addEventListener('change',function(){tell('in-change:'+f.value)});" ++
+    if (std.mem.eql(u8, path, "/datalist-inner")) return "<!doctype html><title>inner</title><style>html,body{margin:0}input{width:300px;height:40px;border:0;padding:0}</style><input id=f list=l><datalist id=l><option value=a><option value=b><option value=zebra><option value=nut><option value=scroll></datalist>" ++
+        "<script>var f=document.getElementById('f');function tell(m){parent.postMessage(m,'*')}f.addEventListener('input',function(){tell('in-input:'+f.value);if(f.value==='z')setTimeout(function(){tell('remove')},400);if(f.value==='n')setTimeout(function(){location.href='/datalist-inner?moved'},400);if(f.value==='s')setTimeout(function(){tell('scrollme')},400)});f.addEventListener('change',function(){tell('in-change:'+f.value)});" ++
         // 페이지가 보낸 가짜 포인터 사건 — 원점을 (500,500) 으로 속이려 한다(대리 스크립트는 신뢰된 사건만 본다).
         "dispatchEvent(new MouseEvent('mousemove',{screenX:500,screenY:500,clientX:0,clientY:0,bubbles:true}));" ++
-        // 바깥이 시키면 스스로 초점을 주고 글을 넣는다(사용자가 바깥에 치는 동안 — 목록이 뜨면 안 된다).
-        "addEventListener('message',function(e){if(e.data==='steal')setTimeout(function(){f.focus();document.execCommand('insertText',false,'a')},300)})</script>";
+        // 바깥이 시키면 스스로 초점을 주고 칸을 비운 뒤 일치하는 글(b — b·zebra)을 넣고, 그 결과(초점·값)를 알린다(사용자가 바깥에 치는
+        // 동안 — 목록이 뜨면 안 된다).
+        "addEventListener('message',function(e){if(e.data==='steal')setTimeout(function(){f.focus();f.value='';document.execCommand('insertText',false,'b');tell('stolen:'+document.hasFocus()+':'+(document.activeElement===f)+':'+f.value)},300)})</script>";
     // W6m③: 열린 shadow DOM — h(0,0) 안의 칸과 목록, s2(0,60) 안의 스크롤 상자 속 칸, s3(0,140) 안의 칸은 목록이 바깥(light DOM)에
     // 있다(Chrome 도 안 연다), s4(0,200) 는 선언형 닫힌 shadow(하지 않는다 — 사용자 결정). 그 뒤 칸 t(0,260) 는 Tab 이 갈 곳. host 의
     // input(composed)과 안쪽 칸의 change 를 제목으로.

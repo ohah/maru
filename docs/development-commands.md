@@ -1141,3 +1141,8 @@ Cmd+S 후 마지막 닫기를 검사한다. 부모가 첫 닫기 뒤 백업 본�
 다음 닫기를 진행하지 않는다. 저장 바이트·백업 정리·관측 상태와 실제 Metal 캡처를
 manifest에 남긴다. 로컬 합성 NSEvent이며 실제 한국어 HID는 별도 `--live-ime`다.
 배포 코드나 사용자 데이터를 바꾸지 않는 opt-in 소스 사본 검사다.
+
+공유 복원 판정자 자체의 회귀 검사는 `python3 tools/shared-restore-app/test_runner.py`
+및 `python3 -O tools/shared-restore-app/test_runner.py`로 실행한다. 잘못된 관측,
+백업 누락·중복·본문 손상, 실패한 자식의 종료/회수, 외부 Git 환경변수의 격리를
+검사한다. 제어용 자식은 실제 AppKit/Metal 증거가 아니다.

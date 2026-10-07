@@ -1,0 +1,13 @@
+.F.
+======================================================================
+FAIL: test_git_discovery_environment_isolation (__main__.RunnerTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r4-git-root/test_runner.py", line 108, in test_git_discovery_environment_isolation
+    self.assertEqual(Path(top).resolve(),root.resolve())
+AssertionError: Posix[27 chars]51/mr5cjhg13v324f1vgg9m237c0000gn/T/tmp359dszbk/outer') != Posix[27 chars]51/mr5cjhg13v324f1vgg9m237c0000gn/T/tmp359dszbk/outer/GIT_DIR')
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.413s
+
+FAILED (failures=1)

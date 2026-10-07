@@ -1,0 +1,29 @@
+{
+  "rounds": [
+    {
+      "round": 1,
+      "exit": 0
+    },
+    {
+      "round": 2,
+      "exit": 0
+    },
+    {
+      "round": 3,
+      "exit": 0
+    },
+    {
+      "round": 4,
+      "exit": 0
+    },
+    {
+      "round": 5,
+      "exit": 0
+    }
+  ],
+  "optimized_exit": 0,
+  "runner_sha256": "9a83a3e786aca0100ca2d9dfa39b5541b588f0831050091c89cf2dbb483150be",
+  "test_sha256": "311268ac0021a777da24aa5445084825f1f7bc97e196cfdf145eb29724d5bbae",
+  "mutation_controls": 10,
+  "scope": "Controlled verifier failures are separate from real AppKit close and delayed clangd restoration. No natural late OS callback claim."
+}

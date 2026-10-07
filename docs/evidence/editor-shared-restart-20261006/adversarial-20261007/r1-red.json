@@ -1,0 +1,62 @@
+[
+  {
+    "mutation": "hash",
+    "rejected": true
+  },
+  {
+    "mutation": "bytes",
+    "rejected": true
+  },
+  {
+    "mutation": "dirty",
+    "rejected": true
+  },
+  {
+    "mutation": "anchor",
+    "rejected": true
+  },
+  {
+    "mutation": "focus",
+    "rejected": true
+  },
+  {
+    "mutation": "wrap",
+    "rejected": true
+  },
+  {
+    "mutation": "folded",
+    "rejected": true
+  },
+  {
+    "mutation": "fold_heads_hash",
+    "rejected": true
+  },
+  {
+    "mutation": "doc_line",
+    "rejected": true
+  },
+  {
+    "mutation": "piece",
+    "rejected": true
+  },
+  {
+    "mutation": "col",
+    "rejected": true
+  },
+  {
+    "mutation": "shared",
+    "rejected": true
+  },
+  {
+    "mutation": "hit_rows",
+    "rejected": true
+  },
+  {
+    "mutation": "negative_hit_rows_-1",
+    "rejected": false
+  },
+  {
+    "mutation": "negative_hit_rows_-999",
+    "rejected": false
+  }
+]

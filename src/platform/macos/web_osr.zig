@@ -116,6 +116,10 @@ const Surface = struct {
     /// 다시 싣는다.
     datalist: ?Datalist = null,
     datalist_generation: u32 = 0,
+    /// 마지막으로 이 탭에 보낸 사용자 입력(누름·키·조합·편집 명령 — 단조 ms). 제안 목록은 그 뒤 `datalist_user_window_ms` 안에서만
+    /// 받는다 — 대리 스크립트도 사용자 사건에만 보이기를 보내지만, 페이지가 그 경로를 흉내 내도(알림용 `send` 가 남은 첫 문서·
+    /// `execCommand` 의 `input`) 사용자가 손대지 않은 네이티브 창이 뜨지 않게(W6m② 적대 검증 4 차).
+    last_user_input_ms: i64 = std.math.minInt(i64) / 2,
     /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
     /// 브라우저가 닫히면 푼다 — 새 sidecar 는 그 끌기를 모른다.
     drag_entered: bool = false,
@@ -499,6 +503,10 @@ test "datalist is owned per surface, replaced by a newer list, closed only by it
     }
     try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 300, .height = 200, .scale = 2 }, .hidden = false }, .created = true });
     const items = "\x00\x05apple\x00\x00";
+    // 사용자가 손대지 않은 탭의 목록은 받지 않는다(적대 검증 4 차).
+    apply(gpa, .{ .datalist_show = .{ .browser = 7, .list = 2, .field = .{ .x = 0, .y = 0, .width = 300, .height = 40 }, .count = 1, .items = items } }, 0);
+    try std.testing.expect(datalist(7) == null);
+    surfaces.getPtr(7).?.last_user_input_ms = monotonicNow();
     apply(gpa, .{ .datalist_show = .{ .browser = 7, .list = 3, .field = .{ .x = 0, .y = 0, .width = 300, .height = 40 }, .count = 1, .items = items } }, 0);
     const first = datalist(7).?;
     try std.testing.expectEqual(@as(u32, 3), first.d.list);
@@ -1080,13 +1088,27 @@ pub fn sendInput(gpa: std.mem.Allocator, message: Message) bool {
     const s = surfaces.getPtr(browser) orelse return false;
     if (!s.created or state != .running) return false;
     switch (message) {
-        .mouse => |m| if (m.kind == .down) s.new_tab_credits.grant(monotonicNow()),
-        .key => |k| if (ws.new_tab.grantsActivation(k.kind, k.windows_key_code, k.native_key_code)) s.new_tab_credits.grant(monotonicNow()),
+        .mouse => |m| if (m.kind == .down) {
+            s.new_tab_credits.grant(monotonicNow());
+            s.last_user_input_ms = monotonicNow();
+            // W6m②: 본문 누름은 열린 제안 목록을 닫는다(Chrome 도 팝업 밖 누름에 닫는다) — 대리 스크립트의 닫기에만 기대면 그
+            // 처리기를 지운 페이지(`document.open`)의 목록이 남았다(적대 검증 4 차). 칸을 누른 것이면 페이지가 다시 보낸다.
+            dropDatalist(gpa, s);
+        },
+        .key => |k| {
+            s.last_user_input_ms = monotonicNow();
+            if (ws.new_tab.grantsActivation(k.kind, k.windows_key_code, k.native_key_code)) s.new_tab_credits.grant(monotonicNow());
+        },
+        .edit_command => s.last_user_input_ms = monotonicNow(),
         .ime_set_composition => |m| {
+            s.last_user_input_ms = monotonicNow();
             if (!s.composing) s.ime_bounds = null; // 새 조합 — 옛 사각형을 쓰지 않는다
             s.composing = m.text.len > 0;
         },
-        .ime_commit_text, .ime_finish_composing => s.composing = false,
+        .ime_commit_text, .ime_finish_composing => {
+            s.last_user_input_ms = monotonicNow();
+            s.composing = false;
+        },
         .ime_cancel_composition => {
             if (!s.composing) return false; // 조합이 없으면 취소는 선택을 지운다 — 보내지 않는다
             s.composing = false;
@@ -2213,8 +2235,12 @@ pub const Datalist = struct {
     items: []u8,
 };
 
+const datalist_user_window_ms = 1000;
+
 fn setDatalist(gpa: std.mem.Allocator, s: *Surface, v: ws.message.DatalistShow) void {
     dropDatalist(gpa, s);
+    // 사용자가 이 탭에 손댄 직후가 아니면 받지 않는다(옛 목록도 닫힌 채로) — `last_user_input_ms` 참고.
+    if (monotonicNow() - s.last_user_input_ms > datalist_user_window_ms) return;
     const items = gpa.dupe(u8, v.items) catch return;
     s.datalist = .{ .list = v.list, .field = v.field, .count = v.count, .items = items };
     s.datalist_generation = nextDatalistGeneration();

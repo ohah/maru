@@ -13,8 +13,10 @@
 //! 때만 누른다(이동한 뒤의 옛 알림이 새 문서의 알림을 누르지 않게). DevTools Runtime 도메인·바인딩은 쓰지 않는다(적대
 //! 검증 — 봇 탐지 신호·실행 컨텍스트 표).
 //!
-//! 제안 목록(datalist — W6m①)도 같은 `send` 를 쓴다: `send('dl', json)` 은 `maru.datalist` 로 보내고(빈도는 알림과 따로 센다 —
-//! 글자를 칠 때마다 온다), `send('dl', function)` 은 「고르기」 함수(문서마다 처음 한 번). 브라우저가 `maru.datalist.pick` 을 보내면
+//! 제안 목록(datalist — W6m①)은 따로 만든 `send`(인자로만 넘겨 전역에 두지 않는다 — `datalist_send_handler`)를 쓴다:
+//! `send('dl', json)` 은 `maru.datalist` 로 보내고(빈도는 알림과 따로 센다 — 글자를 칠 때마다 온다), `send('dl', function)` 은
+//! 「고르기」 함수(문서마다 처음 한 번). 전역에 숨긴 알림용 `send` 는 `'dl'` 을 받지 않는다 — 알림 스크립트가 첫 문서 경쟁에 지면
+//! 그 함수가 페이지에 남아, 페이지가 사용자 사건 없이 네이티브 목록 창을 띄울 수 있었다(W6m② 적대 검증 4 차). 브라우저가 `maru.datalist.pick` 을 보내면
 //! 그 문서(표식)의 고르기 함수를 (판, 번호)로 부른다 — 판·초점은 대리 스크립트가 본다.
 
 const std = @import("std");
@@ -47,6 +49,7 @@ var api_ref: ?*const library.Api = null;
 var app: c.cef_app_t = undefined;
 var render_handler: c.cef_render_process_handler_t = undefined;
 var send_handler: c.cef_v8_handler_t = undefined;
+var datalist_send_handler: c.cef_v8_handler_t = undefined;
 var ready = false;
 
 /// 문서(주 세계 컨텍스트)마다 — 프레임 식별자의 해시, 무작위 표식, 컨텍스트와 누르기 함수(참조를 쥔다), 빈도 제한.
@@ -83,6 +86,9 @@ pub fn get(api: *const library.Api) *c.cef_app_t {
         send_handler = object.zeroed(c.cef_v8_handler_t);
         object.staticRefCounted(&send_handler.base);
         send_handler.execute = &execute;
+        datalist_send_handler = object.zeroed(c.cef_v8_handler_t);
+        object.staticRefCounted(&datalist_send_handler.base);
+        datalist_send_handler.execute = &executeDatalist;
     }
     return &app;
 }
@@ -164,7 +170,8 @@ fn onContextCreated(_: [*c]c.cef_render_process_handler_t, browser: [*c]c.cef_br
     if (frame.*.is_main.?(frame) != 0) runDatalistScript(context);
 }
 
-const datalist_wrapper = "(function(send){" ++ datalist_page.script_part ++ "})";
+// 엄격 모드 — 고르기 중 페이지의 `input`·`change` 처리기가 `caller` 로 우리 함수를 꺼내지 못하게(적대 검증 4 차).
+const datalist_wrapper = "(function(send){'use strict';" ++ datalist_page.script_part ++ "})";
 
 fn runDatalistScript(context: [*c]c.cef_v8_context_t) void {
     const api = api_ref.?;
@@ -183,7 +190,7 @@ fn runDatalistScript(context: [*c]c.cef_v8_context_t) void {
     setString(&name, "send");
     defer api.string_utf16_clear(&name);
     // 넘긴 인자의 참조는 CEF 로 옮겨 간다(누르기 경로와 같다).
-    const send_fn = api.v8_value_create_function(&name, &send_handler) orelse return;
+    const send_fn = api.v8_value_create_function(&name, &datalist_send_handler) orelse return;
     const args = [_][*c]c.cef_v8_value_t{send_fn};
     const result = fn_value.*.execute_function.?(fn_value, null, 1, &args);
     if (result != null) object.release(result);
@@ -264,7 +271,8 @@ fn releaseDocument(doc: *Document) void {
     }
 }
 
-/// 대리 스크립트의 `send(json)` — 그 문서의 표식을 붙여 브라우저 프로세스로 보낸다. `send(function)` 은 누르기 함수.
+/// 알림 대리 스크립트의 `send(json)` — 그 문서의 표식을 붙여 브라우저 프로세스로 보낸다. `send(function)` 은 누르기 함수.
+/// 인자 둘(`'dl'`)은 받지 않는다 — 제안 목록은 `executeDatalist` 만.
 fn execute(
     _: [*c]c.cef_v8_handler_t,
     _: [*c]const c.cef_string_t,
@@ -274,14 +282,32 @@ fn execute(
     retval: [*c][*c]c.cef_v8_value_t,
     _: [*c]c.cef_string_t,
 ) callconv(.c) c_int {
-    object.releaseArg(this);
     _ = retval;
+    return handleSend(false, this, count, arguments);
+}
+
+/// 제안 목록 대리 스크립트의 `send('dl', …)` — 인자 둘만.
+fn executeDatalist(
+    _: [*c]c.cef_v8_handler_t,
+    _: [*c]const c.cef_string_t,
+    this: [*c]c.cef_v8_value_t,
+    count: usize,
+    arguments: [*c]const [*c]c.cef_v8_value_t,
+    retval: [*c][*c]c.cef_v8_value_t,
+    _: [*c]c.cef_string_t,
+) callconv(.c) c_int {
+    _ = retval;
+    return handleSend(true, this, count, arguments);
+}
+
+fn handleSend(datalist: bool, this: [*c]c.cef_v8_value_t, count: usize, arguments: [*c]const [*c]c.cef_v8_value_t) c_int {
+    object.releaseArg(this);
     // 인자마다 참조가 하나씩 넘어온다 — 쥐는 누르기 함수 밖은 다 쓰고 푼다.
     var kept: ?usize = null;
     defer for (0..count) |i| {
         if (kept != i) object.releaseArg(arguments[i]);
     };
-    if (count < 1 or count > 2) return 1;
+    if (count != @as(usize, if (datalist) 2 else 1)) return 1;
     for (0..count) |i| if (arguments[i] == null) return 1;
     const api = api_ref.?;
     const context = api.v8_context_get_current_context();

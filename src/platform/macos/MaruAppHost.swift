@@ -9859,7 +9859,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 칸 사각형(view backing px, 왼쪽 위 원점 — Zig 가 그 탭 본문 안으로 잘랐다) → 화면 좌표. 창이 안 보이거나 칸이 본문 밖이면 nil.
     private func osrDatalistFieldOnScreen(_ owner: TerminalSurface, _ px: [Double]) -> (field: NSRect, window: NSWindow)? {
-        guard let window = owner.window, window.isVisible, !window.isMiniaturized,
+        // sheet(권한·JS 대화상자·파일 선택)가 붙어 있으면 띄우지 않는다 — 자식 창이 sheet 위에 와 페이지가 정한 글로 출처 문구를
+        // 덮을 수 있었다(적대 검증 4 차).
+        guard let window = owner.window, window.isVisible, !window.isMiniaturized, window.attachedSheet == nil,
               let view = (window.contentView as? MaruTerminalContainerView)?.terminalView else { return nil }
         let scale = archiveSmokeRenderScale(window)
         let w = CGFloat(px[2]) / scale, h = CGFloat(px[3]) / scale

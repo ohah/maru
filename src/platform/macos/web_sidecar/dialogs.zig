@@ -264,6 +264,7 @@ pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
     // 오류 페이지로 문서가 바뀌었다 — `on_load_start` 가 없으니 툴팁 기억도 여기서 비운다(W6b 적대 검증 — 연결이 거부된 링크
     // 위에 포인터를 둔 채 열면 옛 링크의 툴팁이 오류 페이지 위에 남았다).
     tooltip.reset(id);
+    @import("datalist.zig").reset(id); // W6m①: 같은 까닭으로 제안 목록도
 }
 
 /// 렌더러가 죽었다 — 그 페이지의 JS 대화상자는 답할 곳이 없다(CEF 가 상태 비우기를 부르지 않을 수 있다 — 적대 검증). 콜백을
@@ -412,6 +413,7 @@ pub fn dropBrowser(id: BrowserId) void {
     forgetPage(id);
     permissions.forgetBrowser(id);
     @import("notifications.zig").forgetBrowser(id);
+    @import("datalist.zig").forgetBrowser(id);
 }
 
 /// 종료 — 모든 요청을 놓는다.

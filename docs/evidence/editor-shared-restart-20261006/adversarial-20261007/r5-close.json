@@ -1,0 +1,155 @@
+{
+  "app": "/Users/yoonhb/Documents/workspace/maru-shared-restart-artifacts-20261006/snapshot/zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+  "app_sha256": "2685c690afb3454112184254f44d5f2c69accdd8184af3f55a6862e06be9a1cb",
+  "runner_sha256": "9a83a3e786aca0100ca2d9dfa39b5541b588f0831050091c89cf2dbb483150be",
+  "split_entry": "keyboard",
+  "source_sha256": {
+    "src/platform/macos/app_session/editor/mod.zig": "1369555d0ab7205582932204a362fb5b88e47f3bf039efd3ce705bf5227a19bc",
+    "src/platform/macos/app_session/editor/restore.zig": "d4beff367eb9f90511c1a3cbaf562473a0ca9c18f67d8004110f432736a526c4",
+    "src/platform/macos/app_session.zig": "75bef431d4ac3d29f9491a46d34f711e3d6e716f3304e6798b93f29e1ae46b9a",
+    "src/platform/macos/app_session/pane.zig": "16d3ee835111c3ab59793e76160c3da6fceaf0b71b62b64c236443561a35ca84",
+    "src/platform/macos/app_session/workspace.zig": "3a67ddd39f4e6d337c5042e9db3b4fb7de9b2d601e5695218465c258312cfa5f",
+    "src/i18n.zig": "57938a188832a6004d22b52f04f1e36642acb552e7f804c2181f94c2c7594064",
+    "src/config/action.zig": "2776ce9ee9ef4f935092c84b36b7c288d63a8639b7294da64c1eddc9751353d2",
+    "src/config/keybinding.zig": "aa6f9bd5c983dd1ea7e47ca2586c2d7f2b9f3f44d11a30e29238ba71f92dfdca",
+    "src/platform/macos/command_catalog.zig": "b148f1cdd3f68842089b7757afa954ca8f76600b9e82545009fe77feee8b2489",
+    "src/platform/macos/app_session/debug_fixtures.zig": "4b5e29d266d4856a47704871840b97d3834181b3fc15258f70d63256f68beb52",
+    "src/platform/macos/MaruAppHost.swift": "ba056f19457a6dab1d83cbe8e70f1532131b85be8d2e0e66e7c7d3930cf0e4fd",
+    "src/platform/macos/EditorIMESmokeDriver.swift": "d2067e82dd652d8c3c2f0789c9e4a6b4c3be3e33989f82c38581c34171070728",
+    "src/platform/macos/maru_metal_renderer.m": "15115b1cf48a0321ee4ada5b08fffa0106c3c0834b08d868e43bac74f1914e62"
+  },
+  "scenarios": [
+    {
+      "name": "close",
+      "phase": "seed",
+      "pid": 50915,
+      "exit_code": 0,
+      "states": [
+        {
+          "label": "10",
+          "view": "0",
+          "shared": "true",
+          "surface": "2",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "5518",
+          "focus": "5528",
+          "line": "43",
+          "doc_line": "46",
+          "piece": "0",
+          "col": "70",
+          "wrap": "false",
+          "folded": "1",
+          "fold_heads_hash": "faf2be979bb9c833",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "499",
+          "hit_rows": "27"
+        },
+        {
+          "label": "10",
+          "view": "1",
+          "shared": "true",
+          "surface": "3",
+          "hash": "a0c25e043653c8e8",
+          "bytes": "60107",
+          "dirty": "true",
+          "anchor": "11526",
+          "focus": "11536",
+          "line": "93",
+          "doc_line": "96",
+          "piece": "2",
+          "col": "0",
+          "wrap": "true",
+          "folded": "1",
+          "fold_heads_hash": "960e12c49591e09a",
+          "fold_source": "syntax",
+          "pending": "false",
+          "max_cols": "536",
+          "visible": "499",
+          "hit_rows": "27"
+        }
+      ],
+      "images": [
+        {
+          "path": "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-close/close/seed/before-split.png",
+          "sha256": "ede6afd9f67e960636d8727f65b15aeb5995300ef38f0f109ccf372464883a16"
+        },
+        {
+          "path": "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-close/close/seed/seed.png",
+          "sha256": "c41385f0b4e3b713a0e63344491e1394a813bc809d6ff18ce4f1b414e1674fab"
+        }
+      ],
+      "split_entry": "keyboard",
+      "split_transport": "AppKit-local"
+    },
+    {
+      "name": "close",
+      "phase": "close",
+      "pid": 50974,
+      "exit_code": 0,
+      "states": [],
+      "images": [
+        {
+          "path": "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-close/close/close/before-close.png",
+          "sha256": "65aade28456ca3d898f1896f800156a467c1327d4d782e42a83d1a2357542c38"
+        },
+        {
+          "path": "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-close/close/close/saved.png",
+          "sha256": "78d55be710292c592ad2f849ab15434eab73f6a8aef9dfd320f35e06b4cf784d"
+        },
+        {
+          "path": "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-close/close/close/cancelled.png",
+          "sha256": "6bb2fe2eddd884203591dcf371f8e28441d5554a084438d5158fa927e92d185e"
+        },
+        {
+          "path": "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-close/close/close/last-prompt.png",
+          "sha256": "b92bdca8293da91ff12b1037a56b925f4aef2554410e5b84e16454bcb46ead73"
+        },
+        {
+          "path": "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-close/close/close/last-closed.png",
+          "sha256": "24851e8d7aee79faabbfa141963cb81068b1a2f16873c79e827bec1abf49fc3a"
+        },
+        {
+          "path": "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-close/close/close/one-closed.png",
+          "sha256": "2cdf1757aefe8dec226b3384d75a0a069090670193babd2200bf9a3e3cfbe49f"
+        }
+      ],
+      "close_events": [
+        {
+          "event": "one_closed",
+          "count": "1",
+          "hash": "a0c25e043653c8e8",
+          "dirty": "true"
+        },
+        {
+          "event": "last_prompt",
+          "count": "1",
+          "hash": "a0c25e043653c8e8",
+          "dirty": "true"
+        },
+        {
+          "event": "cancelled",
+          "count": "1",
+          "hash": "a0c25e043653c8e8",
+          "dirty": "true"
+        },
+        {
+          "event": "saved",
+          "count": "1",
+          "hash": "a0c25e043653c8e8",
+          "dirty": "false"
+        },
+        {
+          "event": "last_closed",
+          "count": "0"
+        }
+      ]
+    }
+  ],
+  "issues": [],
+  "scope": "실제 AppKit 프로세스와 제품 workspace/Metal 경로. 초기 상태와 관측기는 소스 사본에만 주입.",
+  "close_views_gate_passed": true
+}

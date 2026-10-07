@@ -19,6 +19,19 @@ import tempfile
 import time
 
 
+def require(condition, message=None):
+    """Keep validation active under Python optimization as well."""
+    if not condition:
+        raise AssertionError(message)
+
+
+def prepare_lsp_root(root):
+    # Git discovery overrides must not redirect this owned fixture to another repo.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    subprocess.run(["git", "init", "--quiet", str(root)], env=env, check=True, timeout=15)
+    (root / "lsp-trust").write_text(f"allow\t{root}\n")
+
+
 def replace_once(text, old, new):
     if text.count(old) != 1:
         raise RuntimeError(f"주입 지점은 정확히 하나여야 합니다: {old!r}")
@@ -46,7 +59,7 @@ def compare_states(name, scenarios):
             if actual[key] != before[key]:
                 issues.append(dict(scenario=name, label=actual["label"], view=actual["view"],
                                    field=key, expected=before[key], actual=actual[key]))
-        if actual["shared"] != "true" or int(actual["hit_rows"]) == 0:
+        if actual["shared"] != "true" or int(actual["hit_rows"]) <= 0:
             issues.append(dict(scenario=name, field="shared_visible_frame", actual=actual))
     return issues
 
@@ -137,13 +150,13 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
                     trace = (output / "app.stderr.txt").read_text()
                     if not acknowledged and "SHARED_CLOSE event=one_closed " in trace:
                         records = list((root / "backups").glob("*.bak"))
-                        assert len(records) == 1, "closing one view removed shared backup"
-                        assert records[0].read_bytes().split(b"\n\n", 1)[1] == expected_backup
+                        require(len(records) == 1, 'closing one view removed shared backup')
+                        require(records[0].read_bytes().split(b'\n\n', 1)[1] == expected_backup)
                         (output / "one-close-verified").write_text("backup body verified\n")
                         acknowledged = True
                     time.sleep(0.02)
                 code = child.returncode
-                assert acknowledged, "close probe never reached independent backup check"
+                require(acknowledged, 'close probe never reached independent backup check')
             else:
                 code = child.wait(timeout=65)
         except BaseException:
@@ -156,22 +169,22 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
                 subprocess.run([str(restorer), str(output / "input-source.json")],
                                stdout=log, stderr=log, check=True, timeout=15)
     transcript = (output / "app.stderr.txt").read_text()
-    assert code == 0 and "SHARED_RESTORE_ERROR" not in transcript, (phase, code, str(output))
+    require(code == 0 and 'SHARED_RESTORE_ERROR' not in transcript, (phase, code, str(output)))
     if not first and not ime and not callbacks:
-        assert "SHARED_RESTORE_FINISH success=true" in transcript, str(output)
+        require('SHARED_RESTORE_FINISH success=true' in transcript, str(output))
     if phase in ("seed", "move-refusal"):
-        assert f"SHARED_SPLIT_ENTRY entry={split_entry} transport=AppKit-local" in transcript, str(output)
+        require(f'SHARED_SPLIT_ENTRY entry={split_entry} transport=AppKit-local' in transcript, str(output))
     if phase == "move-refusal":
-        assert "SHARED_SPLIT_MOVE refused=true topology_preserved=true body_preserved=true" in transcript, str(output)
+        require('SHARED_SPLIT_MOVE refused=true topology_preserved=true body_preserved=true' in transcript, str(output))
     if ime or callbacks:
-        assert "failure_count=0\n" in (output / "ime.txt").read_text(), str(output)
-        assert document.read_bytes() == ("L가 R나" if ime else "cat cat").encode()
+        require('failure_count=0\n' in (output / 'ime.txt').read_text(), str(output))
+        require(document.read_bytes() == ('L가 R나' if ime else 'cat cat').encode())
     images = []
     for ppm in output.glob("*.ppm"):
         png = ppm.with_suffix(".png")
         subprocess.run(["sips", "-s", "format", "png", str(ppm), "--out", str(png)], check=True, capture_output=True)
         images.append(dict(path=str(png), sha256=sha(png)))
-    assert images, str(output)
+    require(images, str(output))
     states = [dict(re.findall(r"(\w+)=(\S+)", line.split("SHARED_RESTORE ", 1)[1]))
               for line in transcript.splitlines() if "SHARED_RESTORE label=" in line]
     result = dict(phase=phase, pid=child.pid, exit_code=code, states=states, images=images)
@@ -255,9 +268,7 @@ def main():
         if args.clangd:
             # An output below another Git checkout otherwise inherits its parent's LSP root.
             # Give only this generated fixture its own root; never trust the user's parent repo.
-            subprocess.run(["git", "init", "--quiet", str(root)], check=True, timeout=15)
-            # 생성한 C 문서 디렉터리만 격리 config의 신뢰 목록에 넣는다.
-            (root / "lsp-trust").write_text(f"allow\t{root}\n")
+            prepare_lsp_root(root)
         document = root / ("sample.c" if args.clangd else "sample.zig")
         document.write_text("".join(f"// marker-{i:05d} " + "abcdefghij" * 52 +
             (f"\nint sample{i}(void) {{\n    int value = {i};\n    return value;\n}}\n" if args.clangd else
@@ -270,19 +281,19 @@ def main():
             seed = next(s for s in report["scenarios"] if s["phase"] == "seed")
             closed = next(s for s in report["scenarios"] if s["phase"] == "close")
             events = closed["close_events"]
-            assert [e["event"] for e in events] == ["one_closed", "last_prompt", "cancelled", "saved", "last_closed"]
-            assert [e["count"] for e in events] == ["1", "1", "1", "1", "0"]
-            assert [e["dirty"] for e in events[:-1]] == ["true", "true", "true", "false"]
-            assert all(e["hash"] == seed["states"][0]["hash"] for e in events[:-1])
+            require([e['event'] for e in events] == ['one_closed', 'last_prompt', 'cancelled', 'saved', 'last_closed'])
+            require([e['count'] for e in events] == ['1', '1', '1', '1', '0'])
+            require([e['dirty'] for e in events[:-1]] == ['true', 'true', 'true', 'false'])
+            require(all((e['hash'] == seed['states'][0]['hash'] for e in events[:-1])))
             expected_body = "// 미저장 복원 검증\n".encode() + original
-            assert document.read_bytes() == expected_body, "save did not preserve shared text"
-            assert not list((root / "backups").glob("*.bak")), "saved/closed document left backup"
+            require(document.read_bytes() == expected_body, 'save did not preserve shared text')
+            require(not list((root / 'backups').glob('*.bak')), 'saved/closed document left backup')
             report["close_views_gate_passed"] = True
             continue
         if not args.move_refusal:
             report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
-        assert document.read_bytes() == original
-        assert len(list((root / "backups").glob("*.bak"))) == 1
+        require(document.read_bytes() == original)
+        require(len(list((root / 'backups').glob('*.bak'))) == 1)
     if args.live_ime or args.only_ime or args.callback_ime:
         name = "callbacks" if args.callback_ime else "korean"
         root = output / name

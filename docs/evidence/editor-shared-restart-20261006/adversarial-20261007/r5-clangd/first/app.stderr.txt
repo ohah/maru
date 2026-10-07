@@ -1,0 +1,3 @@
+warning(app): maru build: mtime=1791278590 pid=51938
+MARU_SCREENSHOT: 960x600 PPM 캡처 → /Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r5-clangd/clangd/first/first.ppm
+=== maru app exit pid=51938 via=exit ===

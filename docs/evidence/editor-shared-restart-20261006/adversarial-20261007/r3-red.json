@@ -1,0 +1,12 @@
+[
+  {
+    "mode": "normal",
+    "exit": 1,
+    "receipt_created": false
+  },
+  {
+    "mode": "optimized",
+    "exit": 0,
+    "receipt_created": true
+  }
+]

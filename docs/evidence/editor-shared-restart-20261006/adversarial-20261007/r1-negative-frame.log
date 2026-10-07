@@ -1,0 +1,13 @@
+..F
+======================================================================
+FAIL: test_restore_corruption (__main__.RunnerTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r1-negative-frame/test_runner.py", line 38, in test_restore_corruption
+    self.assertTrue(runner.compare_states(count, data))
+AssertionError: [] is not true
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.659s
+
+FAILED (failures=1)

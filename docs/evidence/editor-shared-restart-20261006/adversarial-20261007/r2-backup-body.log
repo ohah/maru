@@ -1,0 +1,21 @@
+..
+======================================================================
+FAIL: test_backup_and_process_guards_under_optimization (__main__.RunnerTests) (optimized=False, backup='wrong')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r2-backup-body/test_runner.py", line 86, in test_backup_and_process_guards_under_optimization
+    self.assertEqual((root/'close/one-close-verified').exists(), backup == 'valid')
+AssertionError: True != False
+
+======================================================================
+FAIL: test_backup_and_process_guards_under_optimization (__main__.RunnerTests) (optimized=True, backup='wrong')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r2-backup-body/test_runner.py", line 86, in test_backup_and_process_guards_under_optimization
+    self.assertEqual((root/'close/one-close-verified').exists(), backup == 'valid')
+AssertionError: True != False
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.477s
+
+FAILED (failures=2)

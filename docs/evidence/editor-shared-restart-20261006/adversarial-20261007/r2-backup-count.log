@@ -1,0 +1,37 @@
+..
+======================================================================
+FAIL: test_backup_and_process_guards_under_optimization (__main__.RunnerTests) (optimized=False, backup='missing')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r2-backup-count/test_runner.py", line 85, in test_backup_and_process_guards_under_optimization
+    self.assertIn(b'AssertionError', result.stderr)
+AssertionError: b'AssertionError' not found in b'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r2-backup-count/run.py", line 154, in run\n    require(records[0].read_bytes().split(b\'\\n\\n\', 1)[1] == expected_backup)\nIndexError: list index out of range\n'
+
+======================================================================
+FAIL: test_backup_and_process_guards_under_optimization (__main__.RunnerTests) (optimized=False, backup='extra')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r2-backup-count/test_runner.py", line 86, in test_backup_and_process_guards_under_optimization
+    self.assertEqual((root/'close/one-close-verified').exists(), backup == 'valid')
+AssertionError: True != False
+
+======================================================================
+FAIL: test_backup_and_process_guards_under_optimization (__main__.RunnerTests) (optimized=True, backup='missing')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r2-backup-count/test_runner.py", line 85, in test_backup_and_process_guards_under_optimization
+    self.assertIn(b'AssertionError', result.stderr)
+AssertionError: b'AssertionError' not found in b'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r2-backup-count/run.py", line 154, in run\n    require(records[0].read_bytes().split(b\'\\n\\n\', 1)[1] == expected_backup)\nIndexError: list index out of range\n'
+
+======================================================================
+FAIL: test_backup_and_process_guards_under_optimization (__main__.RunnerTests) (optimized=True, backup='extra')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r2-backup-count/test_runner.py", line 86, in test_backup_and_process_guards_under_optimization
+    self.assertEqual((root/'close/one-close-verified').exists(), backup == 'valid')
+AssertionError: True != False
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.491s
+
+FAILED (failures=4)

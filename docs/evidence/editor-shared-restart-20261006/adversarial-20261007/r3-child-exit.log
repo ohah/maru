@@ -1,0 +1,21 @@
+..
+======================================================================
+FAIL: test_backup_and_process_guards_under_optimization (__main__.RunnerTests) (optimized=False, backup='valid')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r3-child-exit/test_runner.py", line 84, in test_backup_and_process_guards_under_optimization
+    self.assertNotEqual(result.returncode, 0)
+AssertionError: 0 == 0
+
+======================================================================
+FAIL: test_backup_and_process_guards_under_optimization (__main__.RunnerTests) (optimized=True, backup='valid')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-shared-adversarial-20261007/r3-child-exit/test_runner.py", line 84, in test_backup_and_process_guards_under_optimization
+    self.assertNotEqual(result.returncode, 0)
+AssertionError: 0 == 0
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.495s
+
+FAILED (failures=2)

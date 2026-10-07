@@ -1251,6 +1251,24 @@ datalist
 SCRIPT
 # 팔레트가 열리면 키 대상이 바뀌어 창을 거두고, 페이지는 초점을 잃어 목록을 닫는다 — 팔레트를 닫아도 다시 뜨지 않는다(Chrome 도
 # 창이 초점을 되찾았다고 목록을 다시 띄우지 않는다).
+# 뜬 직후(0.5 초 안)의 누르기는 고르지 않는다(페이지가 누를 자리에 목록을 띄워 누름을 고르기로 바꾸지 못하게 — W6m③ 적대 리뷰 3 회차),
+# 그 뒤의 누르기는 고른다.
+cat > "$root/dl-early.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.33 0 0 0
+mouse 3 0.40 0.33 0 0 0
+sleep 250
+datalist
+dlmouse 1 down
+dlmouse 1 up
+sleep 50
+datalist
+sleep 900
+dlmouse 1 down
+dlmouse 1 up
+sleep 1000
+datalist
+SCRIPT
 cat > "$root/dl-palette.txt" <<'SCRIPT'
 sleep 7000
 mouse 1 0.40 0.33 0 0 0
@@ -1300,7 +1318,7 @@ sleep 1000
 SCRIPT
 : > "$root/requests.log"
 rm -f "$root/dl-popup.png" "$root/dl-popup-selected.png"
-for dl in keys mouse esc press palette; do
+for dl in keys mouse esc press palette early; do
   : > "$root/requests.log"
   run_app /dl-app 14000 "$root/dl-$dl.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-$dl.txt"
   grep -ao 'osr-test datalist [a-z0-9= -]*\|osr-test dl-miss\|osr-test dlsnap ok' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-$dl.report" || true
@@ -1394,6 +1412,9 @@ check(same(esc, [closed, shown(-1), shown(-1), shown(0)])
 auto = lines('dl-auto.report'); areq = ev('dl-auto.requests')
 check(same(auto, [closed]) and '/ev?e=in&tr=true' in areq and '/ev?e=md&b=0' in areq,
       f'a list the page opens by itself (execCommand — a trusted input event) without user input does not show ({auto} · {areq})')
+early = lines('dl-early.report'); erq = ev('dl-early.requests')
+check(same(early, [shown(-1), shown(-1), closed]) and erq.count('/ev?e=change&v=banana') == 1,
+      f'a click right after the window appears does not pick, a later click does ({early} · {erq})')
 pal = lines('dl-palette.report')
 check(same(pal, [shown(-1), closed, closed]), f'opening the command palette hides the window and closing it does not bring the list back ({pal})')
 # 자리 — 스크린샷의 빨간 칸(왼쪽 아래)과 창 왼쪽 위(view backing px)가 맞는가. 보고의 below·left 는 같은 변환끼리의 비교라 따로 본다.

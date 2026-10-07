@@ -180,6 +180,10 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     private var rejected: (generation: UInt32, field: NSRect, visible: NSRect)?
     /// hover 로 바뀌는 강조는 굴리지 않는다 — 휠 뒤 반쯤 보이는 행을 강조하며 목록이 한 번 더 튀었다(적대 검증 2 차).
     private var hovering = false
+    /// 창을 띄운 때 — 뜬 뒤 `earlyClickGuard` 안의 고르기는 버린다(Chrome 의 자동 완성 팝업처럼 — 페이지가 누를 자리에 목록을 띄워
+    /// 사용자의 누름을 고르기로 바꾸지 못하게, W6m③ 적대 리뷰 3 회차). 강조(hover)는 그대로.
+    private var shownAt: CFTimeInterval = 0
+    static let earlyClickGuard: CFTimeInterval = 0.5
     /// 마지막 자리 — 칸 아래(`below`)인가 위인가(판정 보고용).
     private(set) var placedBelow = true
     /// 칸(화면 좌표) — 판정 보고용.
@@ -270,6 +274,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
         if panel.appearance?.name != parent.effectiveAppearance.name { panel.appearance = parent.effectiveAppearance }
         if panel.level != parent.level { panel.level = parent.level }
         if !panel.isVisible || panel.parent !== parent {
+            if !panel.isVisible { shownAt = CACurrentMediaTime() }
             parent.addChildWindow(panel, ordered: .above)
             panel.orderFront(nil)
         }
@@ -372,7 +377,7 @@ final class OsrDatalistPopup: NSObject, NSTableViewDataSource, NSTableViewDelega
     }
 
     fileprivate func pick(row: Int) {
-        guard row >= 0, row < items.count else { return }
+        guard row >= 0, row < items.count, CACurrentMediaTime() - shownAt >= Self.earlyClickGuard else { return }
         onPick?(generation, row)
     }
 

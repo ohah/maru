@@ -58,11 +58,12 @@ SEL = ("<!doctype html><title>sel</title><style>html,body{margin:0;height:100%;b
     "a.addEventListener('change',function(){new Image().src='/ev?e=change&v='+a.value+'&t='+Date.now()});"
     "</script>").encode()
 # W6m②: 제안 목록 — select 페이지와 같은 자리(본문 폭 50%·높이 40%)의 빨간 글 칸에 옵션 다섯. 페이지는 change·keydown 을 알린다.
-DL = ("<!doctype html><title>dl</title><style>html,body{margin:0;height:100%;background:#20a060}"
+DL = ("<!doctype html><title>dl</title><style>html,body{margin:0;height:100%;background:#20a060}body{height:3000px}"
     "input{position:fixed;left:0;top:0;width:50%;height:40%;border:0;background:#ff0000;font:20px sans-serif}</style><body>"
     "<input id=a list=l autocomplete=off><datalist id=l><option value=apple><option value=banana><option value=cherry><option value=date><option value=elder></datalist><script>"
     "var a=document.getElementById('a');function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}"
     "a.addEventListener('change',function(){ping('e=change&v='+a.value)});a.addEventListener('keydown',function(e){ping('e=kd&k='+e.key)});"
+    "a.addEventListener('keyup',function(e){ping('e=ku&k='+e.key)});document.addEventListener('mousedown',function(e){ping('e=md&b='+e.button)});"
     "</script>").encode()
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
@@ -1202,6 +1203,26 @@ dlclick 3
 sleep 1000
 datalist
 SCRIPT
+# 페이지 쪽에서 닫힌 뒤(문서 스크롤 — 대리 스크립트가 닫는다; 글자는 입력 소스에 따라 조합이 돼 쓰지 않는다) 상자가 있던 자리의 누름은 페이지로 간다(남은 자리가 입력을 먹지 않는다), 행 위의 오른쪽
+# 누름은 고르지 않는다(목록은 남는다) — 적대 검증.
+cat > "$root/dl-stale.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.40 0.33 0 0 0
+mouse 3 0.40 0.33 0 0 0
+sleep 1500
+dlhover 2
+datalist
+mouse 1 0.23 0.58 0 0 2
+mouse 3 0.23 0.58 0 0 2
+sleep 300
+datalist
+wheel 0.80 0.80 0 0 -3
+sleep 1500
+datalist
+mouse 1 0.23 0.58 0 0 0
+mouse 3 0.23 0.58 0 0 0
+sleep 1000
+SCRIPT
 cat > "$root/dl-esc.txt" <<'SCRIPT'
 sleep 7000
 mouse 1 0.40 0.33 0 0 0
@@ -1264,6 +1285,10 @@ cp "$root/requests.log" "$root/dl-mouse.requests"
 run_app /dl-app 14000 "$root/dl-esc.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-esc.txt"
 grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-esc.report" || true
 cp "$root/requests.log" "$root/dl-esc.requests"
+: > "$root/requests.log"
+run_app /dl-app 14000 "$root/dl-stale.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-stale.txt"
+grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-stale.report" || true
+cp "$root/requests.log" "$root/dl-stale.requests"
 python3 - "$root" <<'PY' || fail "the datalist keys, mouse or Esc did not behave like Chrome"
 import sys, os
 root = sys.argv[1]
@@ -1277,13 +1302,18 @@ def check(c, m):
 keys = lines('dl-keys.report'); kreq = ev('dl-keys.requests')
 check(keys == ['osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=0', 'osr-test datalist open=true count=5 selected=0', 'osr-test datalist open=false count=0 selected=-1'],
       f'the list opens with nothing highlighted, ↓↓↑ moves the highlight and Enter picks it ({keys})')
-check('/ev?e=change&v=apple' in kreq and not any('e=kd&k=Arrow' in r for r in kreq) and not any('e=kd&k=Enter' in r for r in kreq),
+check('/ev?e=change&v=apple' in kreq and not any('k=Arrow' in r for r in kreq) and not any('k=Enter' in r for r in kreq),
       f'the picked value reaches the page, and ↓·↑·Enter on the open list do not ({kreq})')
 mouse = lines('dl-mouse.report'); mreq = ev('dl-mouse.requests')
 check(mouse == ['osr-test datalist open=true count=5 selected=2', 'osr-test datalist open=false count=0 selected=-1'] and '/ev?e=change&v=date' in mreq,
       f'hovering a row highlights it and clicking a row picks it ({mouse} · {mreq})')
 esc = lines('dl-esc.report'); ereq = ev('dl-esc.requests')
 kd = [r for r in ereq if r.startswith('/ev?e=kd')]
+stale = lines('dl-stale.report'); sreq = ev('dl-stale.requests')
+md = [r for r in sreq if r.startswith('/ev?e=md')]
+check(stale[:2] == ['osr-test datalist open=true count=5 selected=2', 'osr-test datalist open=true count=5 selected=2'] and stale[2:] == ['osr-test datalist open=false count=0 selected=-1']
+      and not any(r.startswith('/ev?e=change') for r in sreq) and md[-1:] == ['/ev?e=md&b=0'] and len(md) == 2,
+      f'a right click on a row picks nothing and does not reach the page, and after the page closes the list a click where it was reaches the page ({stale} · {sreq})')
 check(esc == ['osr-test datalist open=false count=0 selected=-1', 'osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=0']
       and kd == ['/ev?e=kd&k=ArrowDown', '/ev?e=kd&k=Enter'],
       f'Esc closes only the list, ↓ on the closed field reaches the page and reopens it, Enter with nothing highlighted reaches the page ({esc} · {kd})')

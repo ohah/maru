@@ -57,6 +57,8 @@ pub const Entry = struct {
     /// 결정) — 놓은 뒤 잠깐, 그 주소일 때만(`new_tab.drop_navigation_ms`·`dropMatches`).
     drop_at_ms: i64 = 0,
     drop_url: ?[]u8 = null,
+    /// 바깥이 마지막으로 스크롤한 때(W6m③ — 단조 ms, 0 = 없음). iframe 의 제안 목록 원점이 낡았는가(`datalist.onScrolled`).
+    datalist_scrolled_ms: i64 = 0,
     drop_is_path: bool = false,
 };
 

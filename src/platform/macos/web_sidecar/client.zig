@@ -133,7 +133,7 @@ fn getFrameHandler(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_frame_handler_t
 /// 최상위 문서가 스크롤했다 — iframe 의 제안 목록을 닫는다(W6m③).
 fn onScrollOffsetChanged(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, _: f64, _: f64) callconv(.c) void {
     defer object.releaseArg(browser);
-    if (entryOf(browser)) |entry| @import("datalist.zig").onTopScroll(entry.id);
+    if (entryOf(browser)) |entry| @import("datalist.zig").onScrolled(entry.id);
 }
 
 /// 프레임이 렌더러와 끊겼다(떨어져 나감·뒤로 가기 캐시) — 그 iframe 의 제안 목록을 닫는다(W6m③).

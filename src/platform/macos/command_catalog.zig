@@ -165,6 +165,8 @@ pub const entries = [_]Entry{
     .{ .action = .install_cli, .key = "install_cli", .title = "Install CLI", .search_ko = "명령줄 도구 설치" },
     // 모든 설정을 내장 기본값으로 초기화(통합 리셋). 기본 키바인딩 없음 — 팝업이 발견 경로.
     .{ .action = .reset_settings, .key = "reset_settings", .title = "Reset All Settings to Defaults", .search_ko = "모든 설정 기본값으로 초기화" },
+    // Chromium 탭 다운로드 목록 창(W10a — ⇧⌘J).
+    .{ .action = .show_downloads, .key = "show_downloads", .title = "Downloads", .search_ko = "다운로드 목록" },
 };
 
 /// 전역(OS) 단축키 카탈로그 한 항목(정적). in-app `Entry`와 평행하되 action이 GlobalAction이다. action_key는

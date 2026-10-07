@@ -133,10 +133,22 @@ pub const Tag = enum(u8) {
     datalist_show = 58,
     /// 그 목록을 닫으라(칸이 초점을 잃음·일치 없음·빈 칸·페이지 이동·고름). `list` 가 0 이면 그 브라우저의 어느 목록이든.
     datalist_hide = 59,
+    /// 페이지가 파일을 내려받으려 한다(W10a — `on_before_download`). sidecar 는 maru 의 `download_decide` 까지 그 다운로드를 붙든다.
+    /// 주소는 보이기만 하고(판단에 쓰지 않는다 — sidecar 가 글자 경계에서 자른다), 이름은 서버·페이지가 정한 것을 sidecar 가 다듬은
+    /// 파일 이름 하나다(maru 가 다시 다듬고 경로는 maru 만 정한다).
+    download_begin = 60,
+    /// 다운로드의 진행·끝(W10a — `on_download_updated`). 진행은 다운로드마다 초당 4 번까지, 상태가 바뀌면 늘. `interrupted` 는
+    /// 끝이 아니다(Chromium 이 스스로 다시 받기도 한다 — 실측 이유 38). `browser_closed` 는 탭이 닫혀 멈춘 것(CEF 는 알리지 않는다
+    /// — 실측, sidecar 가 알린다).
+    download_update = 61,
 
     /// 사용자가 제안 목록의 한 항목을 골랐다(W6m①). `list` 는 마지막으로 받은 `datalist_show` 의 번호다 — sidecar 는 그 번호가
     /// 지금 목록이 아니면 버리고, 맞으면 그 문서의 대리 스크립트가 칸에 값을 넣고 `input`·`change` 를 보낸다. 둘째 구간의 첫 번호.
     datalist_pick = 128,
+    /// maru 가 다운로드를 받을 경로를 정했다(W10a). 빈 경로는 받지 않는다(취소). 경로는 maru 가 미리 만든 임시 파일이다.
+    download_decide = 129,
+    /// 사용자가 다운로드를 취소하거나 다시 받으라 했다(W10a).
+    download_control = 130,
 
     pub fn direction(self: Tag) Direction {
         const v = @intFromEnum(self);
@@ -935,6 +947,62 @@ pub const DatalistPick = struct {
     index: u16,
 };
 
+/// 다운로드 상한(W10a) — 보이는 주소, 제안 이름(APFS 이름 하나 255 바이트), MIME. 넘치면 sidecar 가 글자 경계에서 자른다.
+pub const max_download_url_bytes: usize = 2048;
+pub const max_download_name_bytes: usize = 255;
+pub const max_download_mime_bytes: usize = 127;
+
+pub const DownloadBegin = struct {
+    browser: BrowserId,
+    /// sidecar 수명 동안 유일한 0 이 아닌 번호(CEF 다운로드 id).
+    download: u32,
+    /// 보이는 주소 — 비어도 된다(판단에 쓰지 않는다).
+    url: []const u8,
+    /// 제안 파일 이름 — 비지 않고, `/` 와 제어 문자가 없고, `.`·`..` 가 아니다.
+    name: []const u8,
+    mime: []const u8,
+    /// 크기(바이트), -1 은 모름.
+    total: i64,
+};
+
+pub const DownloadState = enum(u8) {
+    in_progress = 0,
+    complete = 1,
+    canceled = 2,
+    interrupted = 3,
+    browser_closed = 4,
+};
+
+pub const DownloadUpdate = struct {
+    browser: BrowserId,
+    download: u32,
+    state: DownloadState,
+    /// 받은 양(0 이상) — 크기보다 클 수 있다(서버가 길이를 거짓으로 알린다).
+    received: i64,
+    /// -1 은 모름.
+    total: i64,
+    /// CEF 중단 이유(0 = 없음).
+    reason: u16,
+};
+
+pub const DownloadDecide = struct {
+    browser: BrowserId,
+    download: u32,
+    /// 빈 글 = 받지 않는다(취소), 아니면 절대 경로.
+    path: []const u8,
+};
+
+pub const DownloadAction = enum(u8) {
+    cancel = 0,
+    resume_download = 1,
+};
+
+pub const DownloadControl = struct {
+    browser: BrowserId,
+    download: u32,
+    action: DownloadAction,
+};
+
 /// `browser` 가 0 이면 브라우저에 묶이지 않은 실패(초기화·프로필)다.
 pub const Failure = struct {
     browser: BrowserId,
@@ -1004,8 +1072,12 @@ pub const Message = union(Tag) {
     popup_created: PopupCreated,
     datalist_show: DatalistShow,
     datalist_hide: DatalistHide,
+    download_begin: DownloadBegin,
+    download_update: DownloadUpdate,
 
     datalist_pick: DatalistPick,
+    download_decide: DownloadDecide,
+    download_control: DownloadControl,
 };
 
 test "tags split by direction — 0..31 and 128..191 go to the sidecar" {

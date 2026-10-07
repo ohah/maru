@@ -243,6 +243,36 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeU32(value.list);
             try cursor.writeU16(value.index);
         },
+        .download_begin => |value| {
+            try fields.checkDownloadBegin(value);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.download);
+            try writeDownloadText(&cursor, value.url);
+            try writeDownloadText(&cursor, value.name);
+            try writeDownloadText(&cursor, value.mime);
+            try cursor.writeU64(@bitCast(value.total));
+        },
+        .download_update => |value| {
+            try fields.checkDownloadUpdate(value);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.download);
+            try cursor.writeByte(@intFromEnum(value.state));
+            try cursor.writeU64(@bitCast(value.received));
+            try cursor.writeU64(@bitCast(value.total));
+            try cursor.writeU16(value.reason);
+        },
+        .download_decide => |value| {
+            try fields.checkDownloadDecide(value);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.download);
+            try writeDownloadText(&cursor, value.path);
+        },
+        .download_control => |value| {
+            try writeBrowser(&cursor, value.browser);
+            if (value.download == 0) return error.InvalidDownload;
+            try cursor.writeU32(value.download);
+            try cursor.writeByte(@intFromEnum(value.action));
+        },
         .context_menu => |value| {
             try fields.checkContextMenu(value.menu, value.flags, value.selection);
             try writeBrowser(&cursor, value.browser);
@@ -566,6 +596,46 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             if (list == 0 or index >= message_mod.max_datalist_items) return error.InvalidDatalist;
             break :blk .{ .datalist_pick = .{ .browser = browser, .list = list, .index = index } };
         },
+        .download_begin => blk: {
+            const value: message_mod.DownloadBegin = .{
+                .browser = try readBrowser(&cursor),
+                .download = try cursor.readU32(),
+                .url = try readDownloadText(&cursor, message_mod.max_download_url_bytes),
+                .name = try readDownloadText(&cursor, message_mod.max_download_name_bytes),
+                .mime = try readDownloadText(&cursor, message_mod.max_download_mime_bytes),
+                .total = @bitCast(try cursor.readU64()),
+            };
+            try fields.checkDownloadBegin(value);
+            break :blk .{ .download_begin = value };
+        },
+        .download_update => blk: {
+            const value: message_mod.DownloadUpdate = .{
+                .browser = try readBrowser(&cursor),
+                .download = try cursor.readU32(),
+                .state = std.enums.fromInt(message_mod.DownloadState, try cursor.readByte()) orelse return error.InvalidDownload,
+                .received = @bitCast(try cursor.readU64()),
+                .total = @bitCast(try cursor.readU64()),
+                .reason = try cursor.readU16(),
+            };
+            try fields.checkDownloadUpdate(value);
+            break :blk .{ .download_update = value };
+        },
+        .download_decide => blk: {
+            const value: message_mod.DownloadDecide = .{
+                .browser = try readBrowser(&cursor),
+                .download = try cursor.readU32(),
+                .path = try readDownloadText(&cursor, wire.max_text_bytes),
+            };
+            try fields.checkDownloadDecide(value);
+            break :blk .{ .download_decide = value };
+        },
+        .download_control => blk: {
+            const browser = try readBrowser(&cursor);
+            const download = try cursor.readU32();
+            const action = std.enums.fromInt(message_mod.DownloadAction, try cursor.readByte()) orelse return error.InvalidDownload;
+            if (download == 0) return error.InvalidDownload;
+            break :blk .{ .download_control = .{ .browser = browser, .download = download, .action = action } };
+        },
         .web_notification_click => blk: {
             const browser = try readBrowser(&cursor);
             const notification = try cursor.readU32();
@@ -708,6 +778,19 @@ pub fn decodeExact(frame: []const u8) Error!Message {
     return message;
 }
 
+/// 다운로드 글(W10a) — `[u32 길이][바이트]`, 모양 검사는 메시지 검사(`fields.checkDownload*`)가 한다. 길이만으로 거절할 수 있으면
+/// 본문을 읽기 전에.
+fn writeDownloadText(cursor: *wire.Cursor, text: []const u8) Error!void {
+    try cursor.writeU32(@intCast(text.len));
+    try cursor.writeBytes(text);
+}
+
+fn readDownloadText(cursor: *wire.ReadCursor, max: usize) Error![]const u8 {
+    const len = try cursor.readU32();
+    if (len > max) return error.InvalidDownload;
+    return cursor.readBytes(len);
+}
+
 // 가장 큰 frame(create_browser + URL 상한)이 frame 상한 안에 든다 — 상수를 바꿔 이 둘이 어긋나면 컴파일이 멈춘다.
 comptime {
     const largest = prefix_len + common_len + 8 + 12 + 1 + 4 + max_url_bytes;
@@ -735,7 +818,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  14, 0, // v14, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  15, 0, // v15, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -817,9 +900,9 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 60; // 정의되지 않은 tag(sidecar → maru 는 W6m① 의 `datalist_hide` 59 까지)
+    bad[10] = 62; // 정의되지 않은 tag(sidecar → maru 는 W10a 의 `download_update` 61 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
-    bad[10] = 129; // 둘째 구간(maru → sidecar)도 `datalist_pick` 128 뒤는 비었다
+    bad[10] = 131; // 둘째 구간(maru → sidecar)도 `download_control` 130 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
@@ -1416,6 +1499,13 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .datalist_hide = .{ .browser = 3, .list = 2 } },
         .{ .datalist_hide = .{ .browser = 3, .list = 0 } },
         .{ .datalist_pick = .{ .browser = 3, .list = 2, .index = 1 } },
+        // W10a 다운로드.
+        .{ .download_begin = .{ .browser = 3, .download = 5, .url = "https://a.example/f.zip", .name = "보고서.zip", .mime = "application/zip", .total = 1234 } },
+        .{ .download_begin = .{ .browser = 3, .download = 5, .url = "", .name = "x", .mime = "", .total = -1 } },
+        .{ .download_update = .{ .browser = 3, .download = 5, .state = .interrupted, .received = 99, .total = -1, .reason = 38 } },
+        .{ .download_decide = .{ .browser = 3, .download = 5, .path = "/Users/a/Downloads/f.zip.maru-part" } },
+        .{ .download_decide = .{ .browser = 3, .download = 5, .path = "" } },
+        .{ .download_control = .{ .browser = 3, .download = 5, .action = .resume_download } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;
@@ -1700,4 +1790,53 @@ test "datalist closed fields fail closed" {
     var full: fields.DatalistBuilder = .{ .buf = &tiny };
     try std.testing.expect(full.add("ab", ""));
     try std.testing.expect(!full.add("cd", ""));
+}
+
+// ── 다운로드(W10a) ─────────────────────────────────────────────────────────────────────────────────────────
+
+comptime {
+    // 가장 큰 다운로드 frame(주소·이름·MIME 상한)도 frame 상한 안에 든다.
+    std.debug.assert(prefix_len + common_len + 8 + 4 + 3 * 4 + message_mod.max_download_url_bytes + message_mod.max_download_name_bytes + message_mod.max_download_mime_bytes + 8 <= max_frame_bytes);
+}
+
+test "download messages round trip, flow the right way, and fail closed (W10a)" {
+    const begin = (try roundTrip(.{ .download_begin = .{ .browser = 7, .download = 3, .url = "https://a/새.zip", .name = "새 파일.zip", .mime = "application/zip", .total = -1 } })).download_begin;
+    try std.testing.expectEqualStrings("새 파일.zip", begin.name);
+    try std.testing.expectEqual(@as(i64, -1), begin.total);
+    const update = (try roundTrip(.{ .download_update = .{ .browser = 7, .download = 3, .state = .browser_closed, .received = 5, .total = 4, .reason = 0 } })).download_update;
+    try std.testing.expectEqual(message_mod.DownloadState.browser_closed, update.state);
+    try std.testing.expectEqual(@as(i64, 5), update.received); // 크기보다 많이 받아도 된다(서버가 길이를 거짓으로)
+    try std.testing.expectEqualStrings("", (try roundTrip(.{ .download_decide = .{ .browser = 7, .download = 3, .path = "" } })).download_decide.path);
+    try std.testing.expectEqual(message_mod.DownloadAction.cancel, (try roundTrip(.{ .download_control = .{ .browser = 7, .download = 3, .action = .cancel } })).download_control.action);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.download_begin.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.download_update.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.download_decide.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.download_control.direction());
+
+    var buf: [max_frame_bytes]u8 = undefined;
+    const ok: message_mod.DownloadBegin = .{ .browser = 1, .download = 1, .url = "", .name = "a", .mime = "", .total = 0 };
+    var bad = ok;
+    bad.download = 0;
+    try std.testing.expectError(error.InvalidDownload, encode(.{ .download_begin = bad }, &buf));
+    for ([_][]const u8{ "", ".", "..", "a/b" }) |name| {
+        bad = ok;
+        bad.name = name;
+        try std.testing.expectError(error.InvalidDownload, encode(.{ .download_begin = bad }, &buf));
+    }
+    bad = ok;
+    bad.name = "a\x0d";
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .download_begin = bad }, &buf));
+    bad = ok;
+    bad.total = -2;
+    try std.testing.expectError(error.InvalidDownload, encode(.{ .download_begin = bad }, &buf));
+    bad = ok;
+    bad.name = "a" ** (message_mod.max_download_name_bytes + 1);
+    try std.testing.expectError(error.InvalidDownload, encode(.{ .download_begin = bad }, &buf));
+    try std.testing.expectError(error.InvalidDownload, encode(.{ .download_update = .{ .browser = 1, .download = 1, .state = .complete, .received = -1, .total = 0, .reason = 0 } }, &buf));
+    try std.testing.expectError(error.InvalidPath, encode(.{ .download_decide = .{ .browser = 1, .download = 1, .path = "relative" } }, &buf));
+    try std.testing.expectError(error.InvalidDownload, encode(.{ .download_control = .{ .browser = 1, .download = 0, .action = .cancel } }, &buf));
+    // 모르는 상태·동작은 decode 가 거절한다.
+    const len = try encode(.{ .download_update = .{ .browser = 1, .download = 1, .state = .complete, .received = 0, .total = 0, .reason = 0 } }, &buf);
+    buf[prefix_len + common_len + 8 + 4] = 9;
+    try std.testing.expectError(error.InvalidDownload, decodeExact(buf[0..len]));
 }

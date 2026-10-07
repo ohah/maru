@@ -437,6 +437,7 @@ pub const default_app_bindings = [_]AppBinding{
     // Cmd+,: 세팅 화면 토글(macOS Settings 관례 — System Settings/대부분 앱). 콤마 키, Cmd만(Shift 없음). 기존
     // "Open Config…" 메뉴는 ⌘, keyEquivalent를 양보(Swift에서 제거)하고 메뉴 클릭으로만 남는다(config-gui §10).
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = ',' } }, .action = .toggle_settings },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'J' } }, .action = .show_downloads }, // Cmd+Shift+J: 다운로드 목록(W10a)
     // Cmd+F: 스크롤백 Find 토글(macOS 보편 Find 단축키 — Terminal.app/iTerm2/브라우저 관례). 'f'→'F' fold,
     // 모디파이어 정확 비교(셸 Ctrl+F[커서 전진]와 안 겹친다). Find 열림 동안엔 handleKeyEvent가 키를 검색 입력으로
     // 가로채 이 경로 안 탄다(Enter=다음 매치, Shift+Enter=이전, Esc=닫기).

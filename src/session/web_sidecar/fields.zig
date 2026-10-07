@@ -616,3 +616,62 @@ pub fn checkContextMenu(menu: u32, flags: message.ContextMenuFlags, selection: [
     if (flags.selection_truncated and !flags.selection) return error.InvalidContextMenu;
     if (flags.selection != (selection.len != 0)) return error.InvalidContextMenu;
 }
+
+/// 다운로드(W10a) 글 — UTF-8, 제어 문자 없음, 상한 안(비어도 되는지는 부르는 쪽).
+fn checkDownloadText(text: []const u8, max: usize) Error!void {
+    if (text.len > max) return error.InvalidDownload;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    if (hasControl(text)) return error.ControlCharacter;
+}
+
+pub fn checkDownloadBegin(value: message.DownloadBegin) Error!void {
+    if (value.download == 0 or value.total < -1) return error.InvalidDownload;
+    try checkDownloadText(value.url, message.max_download_url_bytes);
+    try checkDownloadText(value.mime, message.max_download_mime_bytes);
+    try checkDownloadText(value.name, message.max_download_name_bytes);
+    if (value.name.len == 0 or std.mem.indexOfScalar(u8, value.name, '/') != null or
+        std.mem.eql(u8, value.name, ".") or std.mem.eql(u8, value.name, "..")) return error.InvalidDownload;
+}
+
+pub fn checkDownloadUpdate(value: message.DownloadUpdate) Error!void {
+    if (value.download == 0 or value.received < 0 or value.total < -1) return error.InvalidDownload;
+}
+
+pub fn checkDownloadDecide(value: message.DownloadDecide) Error!void {
+    if (value.download == 0) return error.InvalidDownload;
+    if (value.path.len != 0) try checkPath(value.path);
+}
+
+/// sidecar 쪽 — 서버·페이지가 정한 글을 보낼 수 있게 다듬는다(W10a): 글자 경계에서 `max` 로 자르고 제어 문자는 공백으로. 고칠 수
+/// 없는 UTF-8 이면 빈 글. 결과는 `out` 안.
+pub fn tidyDownloadText(text: []const u8, max: usize, out: []u8) []const u8 {
+    const clamped = text_mod.clampUtf8(text, @min(max, out.len));
+    @memcpy(out[0..clamped.len], clamped);
+    text_mod.replaceControl(out[0..clamped.len]);
+    return out[0..clamped.len];
+}
+
+/// sidecar 쪽 — 제안 이름을 파일 이름 하나로(W10a): 다듬고 `/` 는 `_` 로, 비거나 `.`·`..` 면 `download`.
+pub fn tidyDownloadName(name: []const u8, out: []u8) []const u8 {
+    const tidy = tidyDownloadText(name, message.max_download_name_bytes, out);
+    for (out[0..tidy.len]) |*byte| if (byte.* == '/') {
+        byte.* = '_';
+    };
+    if (tidy.len == 0 or std.mem.eql(u8, tidy, ".") or std.mem.eql(u8, tidy, "..")) {
+        const fallback = "download";
+        @memcpy(out[0..fallback.len], fallback);
+        return out[0..fallback.len];
+    }
+    return out[0..tidy.len];
+}
+
+test "download names are tidied into one file name (W10a)" {
+    var buf: [message.max_download_name_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("a_b c.txt", tidyDownloadName("a/b\x0dc.txt", &buf));
+    try std.testing.expectEqualStrings("download", tidyDownloadName("..", &buf));
+    try std.testing.expectEqualStrings("download", tidyDownloadName("", &buf));
+    try std.testing.expectEqualStrings("download", tidyDownloadName("\xff\xfe", &buf)); // 고칠 수 없는 UTF-8
+    const long = "가" ** 100; // 300 바이트 — 글자 경계(255 → 255 = 85 글자)에서
+    try std.testing.expectEqual(@as(usize, 255), tidyDownloadName(long, &buf).len);
+    try checkDownloadBegin(.{ .browser = 1, .download = 1, .url = "", .name = tidyDownloadName("x/y", &buf), .mime = "", .total = -1 });
+}

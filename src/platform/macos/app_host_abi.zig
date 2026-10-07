@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 213), abi_version);
+    try std.testing.expectEqual(@as(u32, 214), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -5154,6 +5154,113 @@ pub export fn maru_macos_app_session_osr_datalist_pick(session: ?*AppSession, ge
 pub export fn maru_macos_app_session_osr_datalist_key(session: ?*AppSession, key_code: u16, mods: i32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrDatalistKey(app, key_code, mods));
+}
+
+// ── v214(W10a): Chromium 탭 다운로드 목록 — 앱 전역(sidecar 가 하나라 세션 밖) ──
+
+/// 목록 행 하나 — 이름·경로는 UTF-8(NUL 없음, 길이로).
+pub const MaruDownloadRow = extern struct {
+    key: u64,
+    /// `web_downloads.State` 의 값.
+    state: u32,
+    /// 실행될 수 있는 파일(열기 대신 Finder 에서 보기).
+    risky: u32,
+    received: i64,
+    /// -1 = 모름.
+    total: i64,
+    reason: u32,
+    name_len: u32,
+    path_len: u32,
+    name: [256]u8,
+    /// 최종 경로(받는 중이면 받을 자리, 끝나면 옮긴 자리 — 경로를 정하기 전이면 비었다).
+    path: [1024]u8,
+};
+
+/// 목록이 바뀔 때마다 오른다.
+pub export fn maru_macos_downloads_generation() u64 {
+    return session_mod.web_downloads.generation();
+}
+
+pub export fn maru_macos_downloads_count() u32 {
+    return @intCast(session_mod.web_downloads.count());
+}
+
+/// `index` 번째 행(오래된 것부터). 없으면 0.
+pub export fn maru_macos_downloads_row(index: u32, out: ?*MaruDownloadRow) i32 {
+    const row = out orelse return 0;
+    const e = session_mod.web_downloads.at(index) orelse return 0;
+    row.key = e.key;
+    row.state = @intFromEnum(e.state);
+    row.risky = @intFromBool(e.risky);
+    row.received = e.received;
+    row.total = e.total;
+    row.reason = e.reason;
+    const name = e.displayName();
+    row.name_len = @intCast(@min(name.len, row.name.len));
+    @memcpy(row.name[0..row.name_len], name[0..row.name_len]);
+    const path = e.finalPath();
+    row.path_len = @intCast(@min(path.len, row.path.len));
+    @memcpy(row.path[0..row.path_len], path[0..row.path_len]);
+    return 1;
+}
+
+/// 목록 창의 누름 — 0 취소·1 다시 받기·2 (보류한 것) 받기·3 (보류한 것) 버리기·4 (끝난 것) 목록에서 지우기. 받아들였으면 1.
+pub export fn maru_macos_downloads_act(key: u64, action: u32) i32 {
+    const kind = std.enums.fromInt(session_mod.web_downloads.Action, action) orelse return 0;
+    return @intFromBool(session_mod.web_downloads.act(key, kind));
+}
+
+/// 끝난 것을 목록에서 지운다(파일은 지우지 않는다).
+pub export fn maru_macos_downloads_clear_finished() void {
+    session_mod.web_downloads.clearFinished();
+}
+
+/// 사용자 동작으로 시작한 새 다운로드의 요청 번호(바뀌면 새 요청 — 목록 창을 앞으로)와 그 탭.
+pub export fn maru_macos_downloads_show_request(out_surface: ?*u64) u64 {
+    var surface: u64 = 0;
+    const request = session_mod.web_downloads.showRequest(&surface);
+    if (out_surface) |p| p.* = surface;
+    return request;
+}
+
+/// 목록 창의 문장(현재 UI 언어 — Swift 는 문장을 만들지 않는다, docs/i18n.md §7.2). 정적 널종단 — 해제하지 않는다. 0 창 제목,
+/// 1~11 상태(1 준비 중·2 보류·3 받는 중·4 중단·5 완료·6 취소·7 실패·8 탭 닫힘·9 엔진 재시작·10 너무 많음·11 파일 없음),
+/// 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록. 모르는 종류는 빈 글.
+pub export fn maru_macos_downloads_text(kind: u32) [*:0]const u8 {
+    const key: maru.i18n.Key = switch (kind) {
+        0 => .dl_window_title,
+        1 => .dl_state_preparing,
+        2 => .dl_state_held,
+        3 => .dl_state_active,
+        4 => .dl_state_interrupted,
+        5 => .dl_state_done,
+        6 => .dl_state_canceled,
+        7 => .dl_state_failed,
+        8 => .dl_state_tab_closed,
+        9 => .dl_state_engine_restarted,
+        10 => .dl_state_too_many,
+        11 => .dl_state_missing,
+        12 => .dl_button_cancel,
+        13 => .dl_button_retry,
+        14 => .dl_button_keep,
+        15 => .dl_button_discard,
+        16 => .dl_button_reveal,
+        17 => .dl_button_clear,
+        18 => .dl_empty,
+        else => return "",
+    };
+    return maru.i18n.t(key).ptr;
+}
+
+/// 받는 중(끝나지 않은) 다운로드 수.
+pub export fn maru_macos_downloads_active() u32 {
+    return @intCast(session_mod.web_downloads.activeTotal());
+}
+
+/// `show_downloads` 액션이 다운로드 목록 창을 청했으면 1(one-shot).
+pub export fn maru_macos_app_session_take_show_downloads_request(session: ?*AppSession) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(app.takeShowDownloadsRequest());
 }
 
 /// v212(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다(enter 전에 실어야 한다).

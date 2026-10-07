@@ -14,6 +14,7 @@ const notification_ops = @import("app_session/notification.zig");
 pub const input_ops = @import("app_session/input.zig");
 pub const web_ops = @import("app_session/web.zig");
 pub const web_osr = @import("web_osr.zig");
+pub const web_downloads = @import("web_downloads.zig");
 pub const workspace_ops = @import("app_session/workspace.zig");
 pub const session_host_window_ops = if (builtin.os.tag == .macos)
     @import("app_session/session_host_window.zig")
@@ -95,6 +96,7 @@ test {
     _ = @import("chrome/lab.zig");
     _ = @import("chrome/chrome_draw_lowering.zig");
     _ = @import("app_session/turn_store.zig"); // AT7: 턴 링 디스크 저장소의 판정자(배선 전에는 여기서만 분석된다)
+    _ = @import("web_downloads.zig"); // W10a: 다운로드 이름·경로 규칙의 판정자(새 이름 없는 블록은 필터 묶음의 시험 수를 늘린다)
 }
 pub const agent_session_archive_view = maru.session.agent_session_archive_view;
 pub const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
@@ -294,9 +296,11 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 210: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
 // 211: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
 // 212: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
+// 214: W10a — downloads_*(Chromium 탭 다운로드 목록 — 앱 전역: 세대·행·누름·끝난 것 지우기·보이기 요청·받는 중 수),
+// take_show_downloads_request(`show_downloads` 액션).
 // 213: W6m② — osr_datalist_state·item·shown·hover·pick(제안 목록을 칸 아래 네이티브 창으로 — Zig 가 목록·강조를 쥐고 Swift 가
 // 띄운 세대를 알린다), osr_datalist_key(띄운 목록이 ↑↓·Enter·Esc 를 먹는다).
-pub const abi_version: u32 = 213;
+pub const abi_version: u32 = 214;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6043,6 +6047,8 @@ pub const AppSession = struct {
     // `open_file_panel` 액션(Cmd+O·팔릿·메뉴)이 요청한 Markdown/HTML NSOpenPanel. 배경 PNG picker와 목적/필터가
     // 다르므로 별도 one-shot으로 두되 take/provide ABI 패턴은 재사용한다.
     file_panel_pick_pending: bool = false,
+    /// `show_downloads` 액션의 다운로드 목록 창 요청(W10a — Swift 가 tick 에서 가져간다).
+    show_downloads_pending: bool = false,
     // 사용자 클릭 외부 링크(파일 패널 문서 안 링크 + 터미널 화면 링크)를 platform에 넘기는 단일 pending. 정책
     // (config·강제 열기·대상 패널 선택)과 browser Term 생성은 Zig가 결정하고, Swift는 system open 또는 WKWebView
     // navigate만 수행한다. drain 전 연속 요청은 Busy로 거부해 URL 덮어쓰기나 목적지 없는 빈 browser 탭을 만들지 않는다.
@@ -11298,6 +11304,7 @@ pub const AppSession = struct {
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
             .toggle_settings => settings_ops.toggleSettings(self),
+            .show_downloads => self.show_downloads_pending = true, // W10a: 다운로드 목록 창 — Swift 가 띄운다
             .install_cli => self.installCli(), // maru CLI를 PATH에 symlink(결과 notice)
             // Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState). **여는 UI는 하나이고, 질의가
             // 가는 곳만 갈린다** — 활성 탭이 터미널이면 스크롤백, 웹(마크다운 뷰어·browser)이면 그 페이지다
@@ -18627,6 +18634,13 @@ pub const AppSession = struct {
     pub fn takeFilePickRequest(self: *AppSession) bool {
         const pending = self.file_pick_pending;
         self.file_pick_pending = false;
+        return pending;
+    }
+
+    /// `show_downloads` 액션이 요청한 다운로드 목록 창 one-shot(W10a).
+    pub fn takeShowDownloadsRequest(self: *AppSession) bool {
+        const pending = self.show_downloads_pending;
+        self.show_downloads_pending = false;
         return pending;
     }
 

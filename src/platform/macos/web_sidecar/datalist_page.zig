@@ -23,8 +23,10 @@ const message = protocol.message;
 /// 않는다(휠이 바깥 상자를 굴리면 굴리기 전 값이 남는다 — 기준점만 놓는다). 바깥 프레임과 메시지를 주고받지 않는다(적대 검토 —
 /// 페이지가 엿보거나 위조할 수 있다). iframe 에서 글자로 여는 목록은 그 문서가 1 초 안에 신뢰된 키 누름을 받았을 때만 — 사용자가 다른
 /// 프레임에 치는 동안 iframe 이 스스로 초점을 가져가 칸에 글을 넣어도(`execCommand` 의 `input` 은 isTrusted 다, 초점도 그 프레임이
-/// 된다) 키 누름은 만들지 못한다(적대 리뷰 2 회차 — 초점 확인만으로는 가리지 못했다). 그래서 iframe 칸에 붙여넣기·끌어 놓기로 넣은
-/// 글에는 목록이 뜨지 않는다(문서의 남은 것). 초점은 그 문서가 실제로 초점을 가졌을 때만 본다(`hasFocus`).
+/// 된다) 키 누름은 만들지 못한다(적대 리뷰 2 회차 — 초점 확인만으로는 가리지 못했다). 입력기 조합(`composition*` — maru 는 조합 중인
+/// 키를 keydown 으로 보내지 않는다)·붙여넣기·끌어 놓기의 신뢰된 사건도 센다(페이지는 이것들을 isTrusted 로 만들지 못한다 — 3 회차).
+/// 문을 지나지 못한 글자는 그 칸에 떠 있던 목록을 닫는다(옛 항목이 남지 않게). 초점은 그 문서가 실제로 초점을 가졌을 때만 본다
+/// (`hasFocus`).
 ///
 /// 페이지가 바꿔 놓을 수 있는 것은 우리가 아는 길에서 부르지 않는다: 판정·읽기·넣기에 쓰는 getter/setter·함수(`type`·`list`·
 /// `value`·`readOnly`·`disabled`, `options`·길이, 옵션의 `value`·`label`·`disabled`, 사각형·`visualViewport`, `activeElement`,
@@ -52,7 +54,7 @@ pub const script_part = "(function(){" ++
     "CP=Event.prototype.composedPath,RN=Node.prototype.getRootNode,PN=G(Node.prototype,'parentNode').get,SRP=ShadowRoot.prototype,SH=G(SRP,'host').get,SA=G(SRP,'activeElement').get," ++
     "SX=G(MP,'screenX').get,SY=G(MP,'screenY').get,CX=G(MP,'clientX').get,CY=G(MP,'clientY').get,IW=G(W,'innerWidth').get,IH=G(W,'innerHeight').get," ++
     "PF=performance,PW=Performance.prototype.now,MX=Math.max,MN=Math.min,MR=Math.round,MA=Math.abs,WS=WeakSet,WA=WS.prototype.add,WH=WS.prototype.has,roots=new WS(),ox=0,oy=0,ot=-1," ++
-    "anchored=false,asx=0,asy=0,acx=0,acy=0,lt=-1e9,scaled=false,kt=-1e9,HF=Document.prototype.hasFocus," ++
+    "anchored=false,asx=0,asy=0,acx=0,acy=0,lt=-1e9,scaled=false,hits=0,kt=-1e9,HF=Document.prototype.hasFocus," ++
     "K={__proto__:null,text:1,search:1,url:1,tel:1,email:1,number:1},cur=null,ver=0,vals=null,busy=false;" ++
     "function arr(){return SP([],null)}" ++
     "function real(e){try{return e.isTrusted===true}catch(x){return false}}" ++
@@ -78,8 +80,11 @@ pub const script_part = "(function(){" ++
     // 기준점으로 둔다. 확대로 판정되면 다음 판정까지 원점을 쓰지 않는다.
     "function seen(e){if(main||!real(e))return;try{var sx=A(SX,e,[]),sy=A(SY,e,[]),cx=A(CX,e,[]),cy=A(CY,e,[]),now=A(PW,PF,[]);if(now-lt>300)anchored=false;lt=now;" ++
     "if(!anchored){anchored=true;asx=sx;asy=sy;acx=cx;acy=cy}else{var dsx=sx-asx,dsy=sy-asy,dcx=cx-acx,dcy=cy-acy;" ++
-    "if(MA(dsx)<=1&&MA(dsy)<=1){if(MA(dcx)>1||MA(dcy)>1){scaled=false;asx=sx;asy=sy;acx=cx;acy=cy}}" ++
-    "else if(MA(dcx)>=20||MA(dcy)>=20){scaled=MA(dsx-dcx)>1||MA(dsy-dcy)>1;asx=sx;asy=sy;acx=cx;acy=cy}}" ++
+    // 포인터가 그대로(screen 차이 0 — 정수 DIP)인데 client 만 바뀌었다 — 프레임이 옮겨졌다. 기준점만 새로 놓고 확대 판정은 두다(축소한
+    // iframe 에서 천천히 움직이면 screen 차이 1 에 client 차이 2 가 되어 확대를 지울 수 있었다 — 3 회차). 확대는 두 번 이어서 판정돼야
+    // 남긴다(바깥 스크롤 애니메이션 중 한 번 움직인 것으로 남지 않게 — 3 회차), 맞는 판정 하나면 지운다.
+    "if(dsx===0&&dsy===0){if(dcx!==0||dcy!==0){asx=sx;asy=sy;acx=cx;acy=cy}}" ++
+    "else if(MA(dcx)>=20||MA(dcy)>=20){if(MA(dsx-dcx)>1||MA(dsy-dcy)>1){hits++;scaled=hits>=2}else{hits=0;scaled=false}asx=sx;asy=sy;acx=cx;acy=cy}}" ++
     "if(scaled){ot=-1;return}ox=sx-cx;oy=sy-cy;ot=now}catch(x){}}" ++
     "function hide(){if(!cur)return;cur=null;vals=null;try{send('dl',J({__proto__:null,t:0,v:ver}))}catch(e){}}" ++
     "function show(t){try{var l=A(LG,t,[]);if(!l)return hide();var q=words(A(LC,S(A(VG,t,[])),[])),os=A(OG,l,[]),n=A(CL,os,[]),it=arr(),vs=arr(),k=0,used=0;" ++
@@ -96,9 +101,9 @@ pub const script_part = "(function(){" ++
     "send('dl',J({__proto__:null,t:1,v:ver,r:rr,i:it,a:age}))}catch(e){}}" ++
     "function on(type,f){A(AL,W,[type,f,true])}" ++
     "on('mousemove',seen);A(AL,W,['wheel',function(e){if(real(e))anchored=false},{__proto__:null,capture:true,passive:true}]);" ++
-    "on('keydown',function(e){if(real(e))kt=A(PW,PF,[])});" ++
+    "function typed(e){if(real(e))kt=A(PW,PF,[])}on('keydown',typed);on('compositionstart',typed);on('compositionupdate',typed);on('compositionend',typed);on('paste',typed);on('drop',typed);" ++
     "on('mousedown',function(e){try{seen(e);if(busy||!real(e))return;var t=fieldOf(tgt(e));if(t&&A(MB,e,[])===0&&!A(MC,e,[]))show(t);else hide()}catch(x){}});" ++
-    "on('input',function(e){try{if(busy||!real(e))return;var t=fieldOf(tgt(e));if(!t||!focused(t))return;if(!main&&A(PW,PF,[])-kt>1000)return;if(S(A(VG,t,[]))==='')return hide();show(t)}catch(x){}});" ++
+    "on('input',function(e){try{if(busy||!real(e))return;var t=fieldOf(tgt(e));if(!t||!focused(t))return;if(!main&&A(PW,PF,[])-kt>1000){if(cur===t)hide();return}if(S(A(VG,t,[]))==='')return hide();show(t)}catch(x){}});" ++
     "on('keydown',function(e){try{if(busy||!real(e)||A(KK,e,[])!=='ArrowDown'||A(KA,e,[])||A(KC,e,[])||A(KM,e,[]))return;var t=fieldOf(tgt(e));if(t&&focused(t))show(t)}catch(x){}});" ++
     "on('focusout',function(e){try{if(cur&&tgt(e)===cur)hide()}catch(x){}});" ++
     // 스크롤은 그 칸을 품은 것(문서·조상)일 때만 — 캡처라 페이지의 다른 상자(채팅 기록·캐러셀)의 스크롤도 오고, 칸 자신도

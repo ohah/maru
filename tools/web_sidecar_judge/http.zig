@@ -362,8 +362,9 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     }
     if (std.mem.eql(u8, path, "/datalist-inner")) return "<!doctype html><title>inner</title><style>html,body{margin:0}input{width:300px;height:40px;border:0;padding:0}</style><input id=f list=l><datalist id=l><option value=a><option value=b><option value=zebra><option value=nut><option value=scroll></datalist>" ++
         "<script>var f=document.getElementById('f');function tell(m){parent.postMessage(m,'*')}f.addEventListener('input',function(){tell('in-input:'+f.value);if(f.value==='z')setTimeout(function(){tell('remove')},400);if(f.value==='n')setTimeout(function(){location.href='/datalist-inner?moved'},400);if(f.value==='s')setTimeout(function(){tell('scrollme')},400)});f.addEventListener('change',function(){tell('in-change:'+f.value)});" ++
-        // 페이지가 보낸 가짜 포인터 사건 — 원점을 (500,500) 으로 속이려 한다(대리 스크립트는 신뢰된 사건만 본다).
-        "dispatchEvent(new MouseEvent('mousemove',{screenX:500,screenY:500,clientX:0,clientY:0,bubbles:true}));" ++
+        // 페이지가 보낸 가짜 포인터 사건 — 원점을 view 안의 (300,100) 으로 속이려 한다(대리 스크립트는 신뢰된 사건만 본다 — view 밖이면
+        // 받아들여도 sidecar 가 버려 가리지 못했다, 변이 1 묶음).
+        "dispatchEvent(new MouseEvent('mousemove',{screenX:300,screenY:100,clientX:0,clientY:0,bubbles:true}));" ++
         // 바깥이 시키면 스스로 초점을 주고 칸을 비운 뒤 일치하는 글(b — b·zebra)을 넣고, 그 결과(초점·값)를 알린다(사용자가 바깥에 치는
         // 동안 — 목록이 뜨면 안 된다).
         "addEventListener('message',function(e){if(e.data==='steal')setTimeout(function(){f.focus();f.value='';document.execCommand('insertText',false,'b');tell('stolen:'+document.hasFocus()+':'+(document.activeElement===f)+':'+f.value)},300)})</script>";

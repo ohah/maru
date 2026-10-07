@@ -34,6 +34,7 @@
 //!                       지나간 뒤에는 새 자리(위로 옮겨짐)로 연다
 //!   dl-xframe           다른 출처 iframe(localhost — OOPIF) 안의 칸도 같은 자리로 열고 고르면 그 칸에 들어간다
 //!   dl-iframe-removed   목록이 떠 있는 iframe 을 페이지가 떼어 내면 닫힌다
+//!   dl-iframe-ime       iframe 칸에 키 누름 없이 입력기 조합·확정만으로 넣은 글도 목록을 다시 거른다(조합 사건을 사용자 입력으로 센다)
 //!   dl-iframe-nav       목록이 떠 있는 iframe 이 다른 문서로 가면 닫힌다
 //!   dl-iframe-steal     사용자가 바깥 칸에 치는 동안 다른 출처 iframe 이 스스로 칸에 초점을 주고 글을 넣어도(넣었다는 알림이 와야
 //!                       한다 — 초점·값) 그 목록은 뜨지 않는다(그 프레임이 받은 신뢰된 키 누름이 없다)
@@ -434,6 +435,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     os.sleepMs(400);
     try host.send(.{ .wheel = .{ .browser = id, .point = .{ .x = 200, .y = 170 }, .delta_x = 0, .delta_y = 120 } });
     _ = watch(&host, 1500, 300);
+    os.sleepMs(1200); // 부드러운 스크롤 애니메이션이 끝날 때까지 — 그 사이의 누르기는 원점이 낡은 것으로 본다(문서의 남은 것)
     try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 200, .y = 170 }, .click_count = 1 } });
     try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 200, .y = 170 }, .click_count = 1 } });
     const still_click = watch(&host, 3000, 300);
@@ -451,6 +453,16 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
         try host.send(.{ .datalist_pick = .{ .browser = id, .list = framed.list, .index = 1 } });
         frame_pick = watchPick(&host, "in-input:b", "in-change:b", 3000);
     }
+    // 입력기 조합 — maru 는 조합 중인 키를 keydown 으로 보내지 않는다. 키 누름 없이(1.2 초 기다려 앞 지우기의 키 누름이 지난 뒤) 조합·확정만으로
+    // 넣은 글도 그 iframe 의 목록을 다시 거른다(조합 사건을 사용자 입력으로 센다).
+    try click(&host, 100, 180);
+    _ = watch(&host, 2000, 300);
+    try clear(&host, 3);
+    os.sleepMs(1200);
+    try host.send(.{ .ime_set_composition = .{ .browser = id, .text = "b", .selection = .{ .start = 1, .end = 1 } } });
+    try host.send(.{ .ime_commit_text = .{ .browser = id, .text = "b" } });
+    const ime = watch(&host, 3000, 400);
+    report(ime.kind == .show and ime.count == 2 and ime.field.x == 60, "dl-iframe-ime", std.fmt.bufPrint(&detail_buf, "{s}({d}) 칸 {d},{d}", .{ @tagName(ime.kind), ime.count, ime.field.x, ime.field.y }) catch "");
     try click(&host, 100, 180);
     _ = watch(&host, 2000, 300);
     try clear(&host, 3);

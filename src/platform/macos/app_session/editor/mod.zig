@@ -14504,7 +14504,7 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     {
         // 연결된 상태의 상태바 문구는 서버 이름 그대로다(보간 진입점 하나 — `{0}`).
         const ready_view = lsp_client.statusFor(fx.session, term).?;
-        var rbuf: [128]u8 = undefined;
+        var rbuf: [lsp_client.status_text_cap]u8 = undefined;
         try testing.expectEqualStrings(ready_view.exe, lsp_client.statusText(ready_view, &rbuf));
     }
     try testing.expectEqual(maru.session.editor.lsp.rpc.PositionEncoding.utf8, fx.session.editor_lsp.clients.items[cidx].encoding); // utf-8 을 골랐다
@@ -14752,7 +14752,7 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     const view = lsp_client.statusFor(fx.session, term) orelse return error.NoStatus;
     try testing.expectEqual(lsp_client.Phase.missing, view.phase);
     try testing.expectEqualStrings("clangd", view.exe);
-    var tbuf: [128]u8 = undefined;
+    var tbuf: [lsp_client.status_text_cap]u8 = undefined;
     const text = lsp_client.statusText(view, &tbuf);
     try testing.expect(std.mem.indexOf(u8, text, "clangd") != null);
     // ⑵ 누르면 **새 탭**이 생기고 설치 명령이 입력된다 — Enter 는 아니다(마지막 byte 가 개행이 아니다).
@@ -14770,13 +14770,16 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     _ = tab_ops.switchTab(fx.session, 0);
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .lsp_trust);
-    // 묻는 문장에는 **서버 이름**이 들어가고 원문 자리표시자가 남지 않는다.
+    // 묻는 문장은 **신뢰 확인 틀에 묻는 서버의 이름을 채운 것 그대로**다(다른 틀·잘림·자리표시자 원문이 아니다). 같은 root 의
+    // 서버 둘이 함께 「묻는 중」이라(그 모달 하나가 둘의 답이다) 어느 쪽이 먼저 물었는지는 탭 순서에 달렸다 — 그중 하나와 같으면 된다.
     {
-        var named = false; // 묻는 중인 클라이언트(탭 0 의 문서)의 서버 이름이 문장에 있다
+        var matched: usize = 0;
         for (fx.session.editor_lsp.clients.items) |c| if (c.phase == .asking) {
-            named = named or std.mem.indexOf(u8, fx.session.chrome_host.confirm.message, c.server.exe) != null;
+            var want_buf: [512]u8 = undefined;
+            const want = maru.i18n.format(&want_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = c.server.exe }});
+            if (std.mem.eql(u8, fx.session.chrome_host.confirm.message, want)) matched += 1;
         };
-        try testing.expect(named);
+        try testing.expectEqual(@as(usize, 1), matched);
     }
     try testing.expect(std.mem.indexOfScalar(u8, fx.session.chrome_host.confirm.message, '{') == null);
     fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
@@ -14850,6 +14853,7 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
 
 test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣고 원문 자리표시자를 남기지 않는다 (§8.2a)" {
     // 번역 틀에서 `{0}` 이 빠지면 상태바가 「시작 중」만 보여 어느 서버인지 모른다 — 언어 대칭 판정자는 양쪽이 같이 빠지면 못 잡는다.
+    // phase 마다 제 문구(§8.2a 상태바 행)를 내고, 일곱 문구가 서로 달라야 사용자가 상태를 가린다.
     const saved = maru.i18n.lang();
     defer maru.i18n.setLang(saved);
     var exe: []const u8 = ""; // 내장 표에서 가장 긴 이름 — 표가 늘어도 그대로 따라간다
@@ -14859,15 +14863,31 @@ test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣
         };
     }
     try testing.expect(exe.len > 0);
-    var buf: [128]u8 = undefined; // 제품 상태바(`status_bar.zig`)와 같은 크기
+    const phases = comptime std.enums.values(lsp_client.Phase);
     inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |l| {
         maru.i18n.setLang(l);
-        inline for (std.meta.fields(lsp_client.Phase)) |f| {
-            const text = lsp_client.statusText(.{ .phase = @enumFromInt(f.value), .exe = exe }, &buf);
+        var bufs: [phases.len][lsp_client.status_text_cap]u8 = undefined; // 제품 상태바와 같은 크기(인자 타입)
+        var texts: [phases.len][]const u8 = undefined;
+        for (phases, 0..) |phase, i| {
+            const text = lsp_client.statusText(.{ .phase = phase, .exe = exe }, &bufs[i]);
             try testing.expect(std.mem.indexOf(u8, text, exe) != null);
             try testing.expect(std.mem.indexOfScalar(u8, text, '{') == null);
             try testing.expect(std.mem.indexOf(u8, text, "…") == null);
+            const key: ?maru.i18n.Key = switch (phase) {
+                .missing => .lsp_status_missing,
+                .asking => .lsp_status_asking,
+                .starting => .lsp_status_starting,
+                .restarting => .lsp_status_restarting,
+                .failed => .lsp_status_failed,
+                .denied => .lsp_status_denied,
+                .ready => null, // 연결되면 이름만
+            };
+            var want_buf: [lsp_client.status_text_cap]u8 = undefined;
+            const want = if (key) |k| maru.i18n.format(&want_buf, maru.i18n.t(k), &.{.{ .s = exe }}) else exe;
+            try testing.expectEqualStrings(want, text);
+            texts[i] = text;
         }
+        for (texts, 0..) |a, i| for (texts[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a, b));
     }
 }
 

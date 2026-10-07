@@ -724,7 +724,7 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
             // ①-c **언어 서버 상태**(tooling §8.2a): 서버 이름표가 있는 문서에만. 저하 계열이라 여기(앞쪽).
             if (rn < max_status_bar_right_items) {
                 if (editor_ops.lsp_client.statusFor(self, active_term)) |view| {
-                    var lsp_buf: [128]u8 = undefined;
+                    var lsp_buf: [editor_ops.lsp_client.status_text_cap]u8 = undefined;
                     const text = editor_ops.lsp_client.statusText(view, &lsp_buf);
                     const icon: ?u21 = switch (view.phase) {
                         .ready => null,

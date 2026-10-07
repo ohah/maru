@@ -111,6 +111,10 @@ const Surface = struct {
     tooltip_generation: u32 = 0,
     /// sidecar 가 알린 우클릭 메뉴(W6c② — 하나). 그 탭이 보이는 창의 tick 이 가져가 macOS 메뉴로 띄운다.
     context_menu: ?ContextMenu = null,
+    /// 페이지의 제안 목록(W6m② — `datalist_show`, 하나). 닫히면(`datalist_hide`·고름·Esc·브라우저·sidecar 가 사라짐) null.
+    /// 바뀔 때마다 세대가 오른다 — 창이 선택을 처음으로 되돌리고 다시 그린다(`popup_redraw` 도 세운다).
+    datalist: ?Datalist = null,
+    datalist_generation: u32 = 0,
     /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
     /// 브라우저가 닫히면 푼다 — 새 sidecar 는 그 끌기를 모른다.
     drag_entered: bool = false,
@@ -479,6 +483,49 @@ pub fn decide(config_wants_chromium: bool) void {
         var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
         if (install.runCacheRoot(&cache_buf, install.hardenedRuntime())) |root| install.sweepRunCopies(root);
     }
+}
+
+test "datalist is owned per surface, replaced by a newer list, closed only by its own list, picked once (W6m②)" {
+    const gpa = std.testing.allocator;
+    // `.starting` — 보내는 것이 outbox 에 남아 frame 으로 본다.
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.clearAndFree(gpa);
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 300, .height = 200, .scale = 2 }, .hidden = false }, .created = true });
+    const items = "\x00\x05apple\x00\x00";
+    apply(gpa, .{ .datalist_show = .{ .browser = 7, .list = 3, .field = .{ .x = 0, .y = 0, .width = 300, .height = 40 }, .count = 1, .items = items } }, 0);
+    const first = datalist(7).?;
+    try std.testing.expectEqual(@as(u32, 3), first.d.list);
+    const gen = first.generation;
+    apply(gpa, .{ .datalist_show = .{ .browser = 7, .list = 4, .field = .{ .x = 0, .y = 0, .width = 300, .height = 40 }, .count = 1, .items = items } }, 0);
+    try std.testing.expectEqual(@as(u32, 4), datalist(7).?.d.list);
+    try std.testing.expect(datalist(7).?.generation != gen);
+    // 옛 목록의 닫기는 지금 목록을 닫지 않는다.
+    apply(gpa, .{ .datalist_hide = .{ .browser = 7, .list = 3 } }, 0);
+    try std.testing.expect(datalist(7) != null);
+    // 옛 번호·범위 밖 고르기는 보내지 않는다, 맞는 고르기는 한 번만.
+    try std.testing.expect(!datalistPick(gpa, 7, 3, 0));
+    try std.testing.expect(!datalistPick(gpa, 7, 4, 1));
+    try std.testing.expect(datalistPick(gpa, 7, 4, 0));
+    try std.testing.expect(datalist(7) == null);
+    var frames: [8]Message = undefined;
+    const sent = frames[0..sentFrames(&frames)];
+    try std.testing.expectEqual(@as(usize, 1), sent.len);
+    try std.testing.expectEqual(@as(u32, 4), sent[0].datalist_pick.list);
+    try std.testing.expectEqual(@as(u16, 0), sent[0].datalist_pick.index);
+    try std.testing.expect(!datalistPick(gpa, 7, 4, 0));
+    // 렌더러가 죽으면 닫힌다, 0 번 닫기는 어느 목록이든.
+    apply(gpa, .{ .datalist_show = .{ .browser = 7, .list = 5, .field = .{ .x = 0, .y = 0, .width = 300, .height = 40 }, .count = 1, .items = items } }, 0);
+    apply(gpa, .{ .renderer_gone = .{ .browser = 7, .reason = .crashed } }, 0);
+    try std.testing.expect(datalist(7) == null);
+    apply(gpa, .{ .datalist_show = .{ .browser = 7, .list = 6, .field = .{ .x = 0, .y = 0, .width = 300, .height = 40 }, .count = 1, .items = items } }, 0);
+    apply(gpa, .{ .datalist_hide = .{ .browser = 7, .list = 0 } }, 0);
+    try std.testing.expect(datalist(7) == null);
 }
 
 test "tooltip text is owned per surface, cleared by an empty text, and each change bumps the generation (W6b)" {
@@ -2156,12 +2203,63 @@ pub fn tooltip(surface_id: u64) ?struct { text: []const u8, generation: u32 } {
     return .{ .text = s.tooltip_text orelse "", .generation = s.tooltip_generation };
 }
 
+/// 제안 목록 하나(W6m②) — 항목 덩어리는 복사해 쥔다(sidecar 가 보낸 모양은 decode 가 검증했다 — `ws.fields.DatalistItems` 로 읽는다).
+pub const Datalist = struct {
+    list: u32,
+    /// 칸 사각형(그 탭 view DIP).
+    field: ws.message.Rect,
+    count: u16,
+    items: []u8,
+};
+
+fn setDatalist(gpa: std.mem.Allocator, s: *Surface, v: ws.message.DatalistShow) void {
+    dropDatalist(gpa, s);
+    const items = gpa.dupe(u8, v.items) catch return;
+    s.datalist = .{ .list = v.list, .field = v.field, .count = v.count, .items = items };
+    s.datalist_generation +%= 1;
+    s.popup_redraw = true;
+}
+
+fn dropDatalist(gpa: std.mem.Allocator, s: *Surface) void {
+    const d = s.datalist orelse return;
+    gpa.free(d.items);
+    s.datalist = null;
+    s.datalist_generation +%= 1;
+    s.popup_redraw = true;
+}
+
+/// 이 탭의 지금 제안 목록과 세대(W6m②).
+pub fn datalist(surface_id: u64) ?struct { d: *const Datalist, generation: u32 } {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (s.datalist == null) return null;
+    return .{ .d = &s.datalist.?, .generation = s.datalist_generation };
+}
+
+/// 사용자가 골랐다(W6m②) — 지금 목록이고 번호가 안이면 sidecar 에 보내고 목록을 닫는다(대리 스크립트도 넣은 뒤 닫기를 보낸다 —
+/// 먼저 닫아 같은 목록을 두 번 고르지 않게). 보냈으면 true.
+pub fn datalistPick(gpa: std.mem.Allocator, surface_id: u64, list: u32, index: usize) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    const d = s.datalist orelse return false;
+    if (d.list != list or index >= d.count or !s.created) return false;
+    send(gpa, .{ .datalist_pick = .{ .browser = surface_id, .list = list, .index = @intCast(index) } });
+    dropDatalist(gpa, s);
+    return true;
+}
+
+/// maru 쪽에서 닫는다(W6m② — Esc). 페이지에는 알리지 않는다 — Chrome 도 Esc 는 목록만 닫고 페이지에 키를 보내지 않는다(§7 실측).
+/// 대리 스크립트는 그 칸을 쥔 채라 다음 ↓·글자에 다시 보낸다(Chrome 과 같다).
+pub fn datalistDismiss(gpa: std.mem.Allocator, surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    dropDatalist(gpa, s);
+}
+
 fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     forgetLocationSurface(gpa, s.record.surface_id);
     dropNewTabs(gpa, s);
     s.new_tabs.deinit(gpa);
     if (s.tooltip_text) |t| gpa.free(t);
     s.tooltip_text = null;
+    dropDatalist(gpa, s);
     dropContextMenu(gpa, s);
     dropDragOut(gpa, s);
     if (s.last_url) |u| gpa.free(u);
@@ -2394,6 +2492,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         dropDialogs(gpa, s);
         dropNotes(gpa, s);
         setTooltip(gpa, s, ""); // 죽은 sidecar 의 툴팁은 끝났다(W6b)
+        dropDatalist(gpa, s); // 제안 목록도 — 고르기를 받을 문서가 없다(W6m②)
         dropContextMenu(gpa, s); // 그 메뉴의 콜백도 사라졌다 — 답하지 않는다(W6c②)
         dropPopup(s); // 닫힘 알림은 오지 않는다 — 다시 뜬 sidecar 의 브라우저에 옛 팝업이 남지 않게. 새 sidecar 는 세대를 1 부터 세므로 옛 링도 놓는다
         forgetDrag(s); // 새 sidecar 는 그 끌기를 모른다 — enter 없이 drop 을 보내지 않게(W6d①)
@@ -2564,6 +2663,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             } else if (dropPendingAdopt(gpa, id)) abandonPopup(gpa, id) else s.page_closed = true;
             dropPopup(s); // 닫힘 알림 없이 사라진다(W6a②)
             setTooltip(gpa, s, ""); // 툴팁도(W6b — 방어)
+            dropDatalist(gpa, s); // 제안 목록도(W6m② — sidecar 는 브라우저가 닫히면 알리지 않는다)
             dropContextMenu(gpa, s); // 브라우저가 닫히며 CEF 가 메뉴를 거뒀다(W6c② — 닫힘 알림은 sidecar 가 보내지 않는다)
             forgetDrag(s); // 끌기도(W6d①)
             dropDragOut(gpa, s); // sidecar 가 그 끌기를 놓았다(W6d②)
@@ -2630,6 +2730,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         // 렌더러가 죽으면 그 페이지의 툴팁도 끝났다(CEF 가 빈 글을 부르지 않을 수 있다).
         .renderer_gone => |v| if (surfaces.getPtr(v.browser)) |s| {
             setTooltip(gpa, s, ""); // 메뉴는 sidecar 가 닫음을 보낸다(W6c①)
+            dropDatalist(gpa, s); // sidecar 도 닫기를 보내지만(W6m①) 먼저 닫는다
             // sidecar 도 그 끌기를 잊었다 — 남겨 두면 죽은 페이지의 옛 동작을 돌려주고 놓기를 받았다고 답했다(W6d① 적대 검증 1 차).
             // 창은 다음 움직임에 다시 enter 한다(`dragEntered`).
             forgetDrag(s);
@@ -2684,8 +2785,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             send(gpa, .{ .permission_reply = .{ .browser = v.browser, .request = v.request, .result = if (allowed) .accept else .ignore } });
         },
         .web_notification => |v| queueNote(gpa, v),
-        // W6m①: 제안 목록 — sidecar 가 보내기까지만 왔다. 그리기·고르기(`datalist_pick`)는 W6m② 가 한다.
-        .datalist_show, .datalist_hide => {},
+        // W6m②: 제안 목록 — 그 탭이 키 대상인 창이 그린다. 닫기는 그 목록 번호일 때만(0 이면 어느 것이든).
+        .datalist_show => |v| if (surfaces.getPtr(v.browser)) |s| setDatalist(gpa, s, v),
+        .datalist_hide => |v| if (surfaces.getPtr(v.browser)) |s| if (s.datalist) |d| if (v.list == 0 or v.list == d.list) dropDatalist(gpa, s),
         // W6c②: 우클릭 메뉴 — 그 탭이 보이는 창이 가져가 띄운다. 모르는 탭이거나 담을 항목이 없으면(동영상 자리) 곧바로 취소한다.
         // 앞 메뉴가 남았으면(생기지 않는다 — CEF 는 메뉴가 떠 있는 동안 새 메뉴를 만들지 않는다) 그것은 취소로 끝낸다.
         .context_menu => |v| {

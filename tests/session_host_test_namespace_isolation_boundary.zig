@@ -77,7 +77,11 @@ test "product-child fixtures require an isolated root and the default suite neve
     ) != null);
     // 임시 홈은 실행마다 새로 만든다(`mkdtemp`). 있던 자리(`EEXIST`)를 받아들이면 pid 재사용 때 이전 실행의 캐시를
     // 물려받고, 다른 사용자가 미리 둔 디렉터리·심볼릭 링크를 홈으로 쓴다.
-    try std.testing.expect(std.mem.indexOf(u8, runner, "mkdtemp(template.ptr) orelse return error.IsolationFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner, "mkdtemp(template.ptr) orelse return isolationFail(\"mkdtemp\")") != null);
+    // exec 전에 「고친 환경이면 다시 exec 할 일이 없다」를 확인한다 — 판정과 고침이 어긋나면 끝없는 self-exec 가 된다
+    // (`HOME=/` 에서 실제로 그랬다, 2026-10-07). 판정 함수 자체는 `tools/test_runner_home.zig` 의 판정자가 본다.
+    try std.testing.expect(std.mem.indexOf(u8, runner, "if (homeIsRealUserHome() or xdgNeedsIsolation()) return isolationFail(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner, "const runner_home = @import(\"test_runner_home.zig\");") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner, "std.c.E.EXIST") == null);
     // 시작 뒤 setenv 만으로는 std 가 붙잡은 envp 조각이 실제 홈을 계속 본다 — 그 환경으로 다시 exec 해야 한다.
     try std.testing.expect(std.mem.indexOf(u8, runner, "_ = std.c.execve(@ptrCast(&exe_buf), _NSGetArgv().*, environ);") != null);
@@ -118,11 +122,15 @@ test "common runner never leaves the real user HOME to tests or their product ch
     if (std.c.getenv("MARU_SESSION_HOST_ROOT")) |root| {
         try std.testing.expect(!std.mem.eql(u8, std.mem.trimEnd(u8, home, "/"), std.mem.trimEnd(u8, std.mem.span(root), "/")));
     }
-    // 이미 설정된 XDG_* 는 **언제나** 지금 HOME 아래다 — 러너가 HOME 을 바꾼 경우만이 아니다. 예전에는 fixture home 을
-    // 받은 스텝이 셸의 실제 `XDG_CACHE_HOME` 을 그대로 물려받았다(2026-10-06 재현). 칸 단위로 본다(`/tmp/h` ⊄ `/tmp/home`).
+    // 네 XDG_* 는 **언제나 설정돼 있고** 지금 HOME 아래다 — 러너가 HOME 을 바꾼 경우만이 아니다. 예전에는 fixture home 을
+    // 받은 스텝이 셸의 실제 `XDG_CACHE_HOME` 을 그대로 물려받았다(2026-10-06 재현). **비어 있어도 채운다** — login(1) 래퍼는
+    // HOME 을 실제 홈으로 되돌리지만 XDG 는 지키므로, 비어 있던 XDG 는 그 셸 안에서 실제 홈으로 유도된다. 그리고 비어 있는
+    // 것을 건너뛰면 이 판정은 XDG 를 안 두는 CI 러너에서 **아무것도 안 본다**(적대적 검증 2026-10-07).
+    // 판정 함수(`tools/test_runner_home.zig` 의 `pathUnder`)는 그 파일의 판정자가 따로 본다 — 러너가 그 파일을 import 해
+    // 이 모듈에 다시 넣을 수 없다(「file exists in modules」). 여기서는 결과를 칸 단위로 다시 센다.
     const home_dir = std.mem.trimEnd(u8, home, "/");
     for ([_][*:0]const u8{ "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME" }) |name| {
-        const value = std.mem.trimEnd(u8, std.mem.span(std.c.getenv(name) orelse continue), "/");
+        const value = std.mem.trimEnd(u8, std.mem.span(std.c.getenv(name) orelse return error.XdgUnset), "/");
         try std.testing.expect(std.mem.startsWith(u8, value, home_dir));
         try std.testing.expect(value.len == home_dir.len or value[home_dir.len] == '/');
     }

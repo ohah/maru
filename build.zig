@@ -8436,6 +8436,16 @@ pub fn build(b: *std.Build) void {
     run_session_host_test_namespace_isolation_boundary_tests.addArg("--maru-expect-tests=5");
     run_session_host_test_namespace_isolation_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_test_namespace_isolation_boundary_tests.step);
+    // 공용 러너의 HOME·XDG 판정(순수 함수). **기본 러너로 돈다** — 공용 러너가 이 파일을 import 하므로, 그 러너로 이
+    // 파일을 테스트하면 같은 파일이 두 모듈에 들어가 컴파일이 막힌다. 순수 함수라 격리 환경이 필요 없다.
+    const test_runner_home_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/test_runner_home.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    boundary_step.dependOn(&b.addRunArtifact(test_runner_home_tests).step);
     const session_host_legacy_metadata_consumers_step = b.step(
         "test-session-host-legacy-metadata-consumers",
         "Verify P3-e4d-2b frozen N-1 hello, attach, and fail-closed metadata consumers",

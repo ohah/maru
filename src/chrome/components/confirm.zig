@@ -13,6 +13,7 @@ const props = @import("../props.zig");
 const input = @import("../input.zig");
 const modal_box = @import("modal_box.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) — 중앙 정렬·박스 폭 계산
+const text_layout = @import("../text_layout.zig"); // elidePathMiddle — 경로 안내 줄을 뿌리·잎을 남기고 가운데에서 줄인다
 
 /// 이 컴포넌트가 그리는 레이어(최상위 모달, modal_box 공유 — notice와 동일). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = modal_box.layer;
@@ -56,6 +57,23 @@ pub const Choices = struct {
     extra: ?[]const u8 = null,
 };
 
+/// 메시지와 버튼 사이에 그리는 **안내 줄** — 신뢰 시트처럼 확인의 대가를 밝히는 문장(tooling §8.1 「sandbox 하지 못하는
+/// 한계를 확인 UX 에 명시」). 경고 문장은 잘리면 뜻이 사라지므로 안쪽 폭으로 **줄바꿈**하고(`wrap`), 경로처럼 한 줄로
+/// 둘 값은 **가운데를 줄인다**(`path` — 뿌리와 잎을 남긴다). 붙여넣기 미리보기(`body` — 코드처럼 배경을 깔고 끝을 자른다)와
+/// 달리 배경 없이 본문 글자색으로 그린다.
+pub const Note = struct {
+    text: []const u8,
+    fit: Fit = .wrap,
+
+    pub const Fit = enum { wrap, path };
+};
+
+/// 안내 줄이 줄바꿈 뒤 차지할 수 있는 행 수 상한 — 넘으면 마지막 줄이 「…」로 끝난다(상자가 창을 덮지 않게).
+pub const max_note_rows: u32 = 24;
+
+/// 그릴 안내 한 행 — 원문을 빌린다. `path` 면 그릴 때 가운데를 줄이고, `cut` 이면 끝에 「…」를 붙인다.
+const NoteLine = struct { text: []const u8, path: bool = false, cut: bool = false };
+
 /// 어느 버튼에 포커스가 있나(←/→로 이동). Enter가 포커스된 버튼을 실행한다. 열 때마다 기본 = confirm(Enter=확정 유지).
 pub const Focus = enum { confirm, alternate, extra, cancel };
 
@@ -76,6 +94,8 @@ pub const State = struct {
     // 메시지와 버튼 사이에 그릴 **본문 미리보기 줄들**(비면 없음 — 기존 동작). Ghostty의 붙여넣기 확인창이 내용을
     // 스크롤 뷰로 보여주는 것의 셀-그리드 근사(앞 몇 줄 + 요약). 슬라이스는 host가 세션 소유 버퍼로 준다(message와 동형).
     body: []const []const u8 = &.{},
+    // 메시지 아래에 그릴 **안내 줄들**(비면 없음 — 기존 동작). 슬라이스는 host 가 세션 소유 버퍼로 준다(body 와 같다).
+    notes: []const Note = &.{},
 
     pub fn show(self: *State, message: []const u8, buttons: Buttons) void {
         self.message = message;
@@ -87,6 +107,7 @@ pub const State = struct {
         self.has_extra = false;
         self.focused = .confirm; // 열 때마다 기본 포커스 = 확정 버튼(Enter=확정, ←/→로 이동)
         self.body = &.{}; // 이전 확인이 남긴 미리보기가 새 모달에 새지 않게 리셋(붙여넣기 경로가 show 뒤 다시 주입)
+        self.notes = &.{}; // 안내 줄도 같다(신뢰 시트가 show 뒤 다시 주입)
         self.open = true;
     }
 
@@ -100,6 +121,7 @@ pub const State = struct {
         self.has_extra = choices.extra != null;
         self.focused = .confirm;
         self.body = &.{};
+        self.notes = &.{};
         self.open = true;
     }
 
@@ -202,6 +224,19 @@ pub fn view(
         try modal_box.text(box, modal_box.centerX(box, overlay_input.displayCols(shown)), @intCast(i), shown, .surface_fg, arena, out);
     }
 
+    // (1.25) 안내 줄(있으면) — 메시지 아래 빈 줄 다음부터 좌측 정렬, 본문 글자색. 줄바꿈은 buttonGeom 이 이미 했다 — 여기서는
+    //      경로 줄의 가운데를 줄이고, 높이가 모자라 잘린 마지막 줄에 「…」를 붙인 뒤 안쪽 폭으로 다시 맞춘다.
+    for (g.note_lines[0..g.note_rows], 0..) |nl, i| {
+        const row = g.note_row + @as(u32, @intCast(i));
+        var shown: []const u8 = nl.text;
+        if (nl.path) {
+            const buf = try arena.alloc(u8, nl.text.len + 8);
+            shown = text_layout.elidePathMiddle(nl.text, box.inner_cols, null, buf);
+        }
+        if (nl.cut) shown = try std.fmt.allocPrint(arena, "{s}{s}", .{ shown, modal_box.ellipsis });
+        try modal_box.text(box, box.inner_x, row, try overlay_input.truncateToCols(arena, shown, box.inner_cols), .surface_fg, arena, out);
+    }
+
     // (1.5) 본문 미리보기(있으면) — 메시지 아래 빈 줄 다음부터 좌측 정렬. 각 줄에 은은한 배경 fill(tab_hover_bg)을
     //       inner 폭만큼 깔아 인셋 패널처럼 보이게 하고, 그 위에 muted 텍스트를 놓는다(painter order: fill→text).
     //       Ghostty의 스크롤 텍스트 뷰를 셀-그리드로 근사한 것 — 붙여넣을 내용을 눈으로 확인하고 결정하게 한다.
@@ -264,7 +299,10 @@ const ButtonGeom = struct {
     alternate_row: u32,
     extra_row: u32,
     cancel_row: u32,
-    body_row: u32, // 미리보기 첫 행 — 메시지 줄 다음 빈 줄 뒤
+    note_row: u32, // 안내 첫 행 — 메시지 줄 다음 빈 줄 뒤
+    note_rows: u32, // 그릴 안내 행 수 — 상자가 작업영역보다 높으면 줄바꿈된 행보다 적다(마지막 행이 「…」)
+    note_lines: [max_note_rows]NoteLine,
+    body_row: u32, // 미리보기 첫 행 — 메시지(와 안내) 다음 빈 줄 뒤
     body_rows: u32, // 그릴 미리보기 줄 수 — 상자가 작업영역보다 높으면 state.body 보다 적다(버튼 행이 화면 안에 남게)
     // 메시지를 상자 안쪽 폭으로 나눈 줄들(state.message 를 빌린다). msg_truncated 면 마지막 줄 끝에 「…」.
     msg_lines: [modal_box.max_wrap_rows][]const u8,
@@ -299,6 +337,11 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         (if (state.has_extra) btn_gap else 0) + cancel_btn_cols;
     var content_cols = @max(modal_box.widestLineCols(state.message), btn_row_cols);
     for (state.body) |line| content_cols = @max(content_cols, overlay_input.displayCols(line)); // 미리보기 줄도 폭에 반영
+    // 안내 줄도 폭에 반영 — 넓은 창에서는 한 줄씩 그대로 서게(좁으면 아래에서 줄바꿈한다).
+    for (state.notes) |note| content_cols = @max(content_cols, switch (note.fit) {
+        .wrap => modal_box.widestLineCols(note.text),
+        .path => overlay_input.displayCols(note.text),
+    });
     // 폭은 행 수와 무관하다 — 먼저 한 행으로 재서 상자 안쪽 폭을 얻고, 그 폭으로 메시지를 나눈 뒤 실제 행 수로 다시 잰다.
     // 메시지가 안쪽 폭에 들어가면 한 줄 그대로다(짧은 확인은 예전 모양 그대로).
     const width_probe = modal_box.layout(content_cols, 1, p, tk) orelse return null;
@@ -306,6 +349,34 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     const wrapped = modal_box.wrapLine(state.message, width_probe.inner_cols, &msg_lines);
     var m: u32 = wrapped.rows;
     var msg_truncated = wrapped.truncated;
+    // 안내 줄을 같은 안쪽 폭으로 나눈다 — 경로 줄은 한 행(그릴 때 가운데를 줄인다), 문장은 `wrapLine`(메시지와 같은 규칙).
+    var note_lines: [max_note_rows]NoteLine = undefined;
+    var notes_all: u32 = 0;
+    var notes_overflow = false;
+    note_loop: for (state.notes) |note| switch (note.fit) {
+        .path => {
+            if (notes_all == max_note_rows) {
+                notes_overflow = true;
+                break :note_loop;
+            }
+            note_lines[notes_all] = .{ .text = note.text, .path = true };
+            notes_all += 1;
+        },
+        .wrap => {
+            var parts: [modal_box.max_wrap_rows][]const u8 = undefined;
+            const w = modal_box.wrapLine(note.text, width_probe.inner_cols, &parts);
+            for (parts[0..w.rows], 0..) |line, i| {
+                if (notes_all == max_note_rows) {
+                    notes_overflow = true;
+                    break :note_loop;
+                }
+                note_lines[notes_all] = .{ .text = line, .cut = w.truncated and i + 1 == w.rows };
+                notes_all += 1;
+            }
+        },
+    };
+    if (notes_overflow and notes_all > 0) note_lines[notes_all - 1].cut = true;
+    var k: u32 = notes_all;
     // 콘텐츠 행: 미리보기 없으면 m+2행([0..m)=메시지·m=빈줄·m+1=버튼); 있으면 [0..m)=메시지·m=빈줄·[m+1..m+1+n)=본문·
     // m+1+n=빈줄·m+2+n=버튼. m=1 이면 예전 배치(3행·4+n행) 그대로다.
     // 버튼도 안쪽 폭에 나눈다 — 순서대로(확인·대안·추가·취소) 채우고, 다음 버튼이 안 들어가면 다음 줄로 넘긴다. 예전에는
@@ -336,18 +407,23 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         break :blk ((ws.h -| 2 * @as(u32, p.shape.modal_padding_px)) / ch) -| 2; // 위아래 여백 한 줄씩
     };
     const rowsFor = struct {
-        fn f(msg: u32, body: u32, btns: u32) u32 {
-            return if (body == 0) msg + 1 + btns else msg + body + 2 + btns;
+        fn f(msg: u32, notes: u32, body: u32, btns: u32) u32 {
+            return msg + (if (notes == 0) 0 else notes + 1) + (if (body == 0) 0 else body + 1) + 1 + btns;
         }
     }.f;
-    while (rowsFor(m, n, btn_rows) > fit_rows and n > 0) n -= 1;
-    while (rowsFor(m, n, btn_rows) > fit_rows and m > 1) {
+    // 줄이는 순서: 미리보기(내용을 다 안 봐도 결정할 수 있다) → 안내(끝부터, 한 행은 남긴다) → 메시지(한 행은 남긴다).
+    // 안내는 확인의 대가를 밝히는 문장이라 미리보기보다 늦게 줄인다.
+    while (rowsFor(m, k, n, btn_rows) > fit_rows and n > 0) n -= 1;
+    while (rowsFor(m, k, n, btn_rows) > fit_rows and k > 1) k -= 1;
+    while (rowsFor(m, k, n, btn_rows) > fit_rows and m > 1) {
         m -= 1;
         msg_truncated = true;
     }
-    const body_row: u32 = m + 1;
-    // 콘텐츠 행: [0..m)=메시지·m=빈줄·(미리보기 n줄·빈줄)·버튼 btn_rows줄. btn_rows=1 이면 예전 배치(m+2·m+n+3) 그대로다.
-    const content_rows: u32 = rowsFor(m, n, btn_rows);
+    if (k > 0 and k < notes_all) note_lines[k - 1].cut = true;
+    const note_row: u32 = m + 1;
+    const body_row: u32 = if (k == 0) m + 1 else m + 1 + k + 1;
+    // 콘텐츠 행: [0..m)=메시지·m=빈줄·(안내 k줄·빈줄)·(미리보기 n줄·빈줄)·버튼 btn_rows줄. 안내·미리보기가 없으면 예전 배치 그대로다.
+    const content_rows: u32 = rowsFor(m, k, n, btn_rows);
     const btn_row: u32 = if (n == 0) body_row else body_row + n + 1; // 본문 뒤 빈 줄 다음
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     // 줄마다 가운데. 버튼 하나가 안쪽 폭보다 넓으면(아주 좁은 창/긴 라벨) fill이 rasterize bbox를 패널 밖으로 키운다 →
@@ -373,6 +449,9 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         .alternate_row = btn_row + row_of[1],
         .extra_row = btn_row + row_of[2],
         .cancel_row = btn_row + row_of[3],
+        .note_row = note_row,
+        .note_rows = k,
+        .note_lines = note_lines,
         .body_row = body_row,
         .body_rows = n,
         .msg_lines = msg_lines,
@@ -1132,6 +1211,7 @@ test "확인 모달 성질: 어떤 창·글꼴·메시지·버튼·미리보기�
     const pieces = [_][]const u8{ "a", "abc ", "한", "글자 ", "🙂", " ", "\n", "e\u{301}", "\xff", "\xe2", "…", "ｗ", "/opt/x/y" };
     const labels = [_][]const u8{ "OK", "실행", "덮어쓰기", "다시 읽기", "계속 편집", "Overwrite anyway", "x" ** 30, "한" ** 12 };
     const preview = [_][]const u8{ "echo hi", "rm -rf ./build && make " ++ "y" ** 60, "한글 줄", "" };
+    const note_pool = [_]Note{ .{ .text = "• 서버는 사용자 권한으로 격리 없이 실행되며, 저장소 밖 파일에 닿을 수 있습니다." }, .{ .text = "~/a/b/c/" ++ "d" ** 40 ++ "/leaf", .fit = .path }, .{ .text = "x" ** 90 }, .{ .text = "" }, .{ .text = "한 🙂 \xff" } };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var short_windows: usize = 0;
@@ -1157,6 +1237,7 @@ test "확인 모달 성질: 어떤 창·글꼴·메시지·버튼·미리보기�
             st.showChoices(b.items, .{ .primary = pick(r), .alternate = pick(r), .extra = if (r.boolean()) pick(r) else null, .cancel = pick(r) });
         }
         st.body = preview[0..r.intRangeAtMost(usize, 0, preview.len)];
+        st.notes = note_pool[0..r.intRangeAtMost(usize, 0, note_pool.len)];
         const g = buttonGeom(&st, p, &tk) orelse continue;
         if (g.box.inner_cols == 0) continue; // 한 칸도 없는 상자 — 키보드만(예전과 같다)
         const rect = g.box.rect;
@@ -1174,7 +1255,8 @@ test "확인 모달 성질: 어떤 창·글꼴·메시지·버튼·미리보기�
         };
         const ws = props.workspaceRect(p.metrics);
         const ws_bottom: i32 = @intCast(ws.y + ws.h);
-        const fits = (ws.h / ch) -| 2 >= g.btn_rows + 2; // 메시지 한 줄 + 빈 줄 + 버튼 행이 들어갈 창
+        // 메시지 한 줄 + 빈 줄 + (안내 한 줄 + 빈 줄) + 버튼 행이 들어갈 창 — 안내는 한 행까지만 줄인다.
+        const fits = (ws.h / ch) -| 2 >= g.btn_rows + 2 + @as(u32, if (st.notes.len > 0) 2 else 0);
         if (!fits) short_windows += 1;
         const Btn = struct { a: Action, row: u32, x: i32, fit: u32 };
         var btns: [4]Btn = undefined;
@@ -1207,4 +1289,113 @@ test "확인 모달 성질: 어떤 창·글꼴·메시지·버튼·미리보기�
         }
     }
     try std.testing.expect(short_windows < 3000); // 낮은 창만 나온 퍼징이 아니다
+}
+
+/// 안내 줄 판정자 공용 — 그 상태를 그린 op 들에서 텍스트만 행(y) 순서대로 모은다.
+fn testTexts(arena: std.mem.Allocator, ops: []const draw.Op) ![]const draw.Op.Text {
+    var list: std.ArrayList(draw.Op.Text) = .empty;
+    for (ops) |op| if (op == .text) try list.append(arena, op.text);
+    return list.items;
+}
+
+fn testProps(w: u32, h: u32) props.ChromeProps {
+    return .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = w, .backing_height_px = h } };
+}
+
+test "confirm 안내 줄: 메시지 아래·버튼 위에 본문 글자색으로 서고, 좁은 창에서는 줄바꿈해 낱말을 하나도 잃지 않는다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const notes = [_]Note{
+        .{ .text = "• runs with your user privileges and no sandbox" },
+        .{ .text = "• may reach files outside the workspace, the network, and ssh-agent" },
+    };
+    for ([_]u32{ 800, 260 }) |width| {
+        var s = State{};
+        s.show("Run language servers?", .{ .confirm = "Run", .cancel = "Don't run" });
+        s.notes = &notes;
+        var out: std.ArrayList(draw.Op) = .empty;
+        try view(&s, testProps(width, 600), &tk, arena, &out);
+        const texts = try testTexts(arena, out.items);
+        var msg_y: i32 = -1;
+        var btn_y: i32 = -1;
+        var joined: std.ArrayList(u8) = .empty;
+        for (texts) |t| {
+            const txt = t.runs[0].text;
+            if (std.mem.eql(u8, txt, "Run language servers?")) msg_y = t.origin.y;
+            if (std.mem.startsWith(u8, txt, "[Y]")) btn_y = t.origin.y;
+            if (t.role == .surface_fg and !std.mem.startsWith(u8, txt, "[") and !std.mem.eql(u8, txt, "Run language servers?")) {
+                try std.testing.expect(t.origin.y > msg_y); // 메시지 아래
+                try joined.appendSlice(arena, txt);
+                try joined.append(arena, ' ');
+            }
+        }
+        try std.testing.expect(btn_y > msg_y);
+        for (texts) |t| if (t.role == .surface_fg and !std.mem.startsWith(u8, t.runs[0].text, "[") and t.origin.y > msg_y) try std.testing.expect(t.origin.y < btn_y); // 버튼 위
+        // 낱말을 하나도 잃지 않는다 — 줄바꿈만 했다(「…」 없음).
+        for (notes) |note| {
+            var it = std.mem.tokenizeScalar(u8, note.text, ' ');
+            while (it.next()) |word| try std.testing.expect(std.mem.indexOf(u8, joined.items, word) != null);
+        }
+        try std.testing.expect(std.mem.indexOf(u8, joined.items, modal_box.ellipsis) == null);
+    }
+}
+
+test "confirm 안내 줄: 높이가 모자라면 미리보기를 먼저 줄이고, 그래도 모자라면 안내를 끝부터 줄여 마지막 줄을 「…」로 끝낸다 — 버튼은 화면 안" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const notes = [_]Note{ .{ .text = "• one" }, .{ .text = "• two" }, .{ .text = "• three" }, .{ .text = "• four" }, .{ .text = "• five" } };
+    const body = [_][]const u8{ "a", "b", "c" };
+    var s = State{};
+    s.show("Q?", .{ .confirm = "Y", .cancel = "N" });
+    s.notes = &notes;
+    s.body = &body;
+    // 넉넉하면 다 선다.
+    const roomy = buttonGeom(&s, testProps(400, 600), &tk).?;
+    try std.testing.expectEqual(@as(u32, 5), roomy.note_rows);
+    try std.testing.expectEqual(@as(u32, 3), roomy.body_rows);
+    // 미리보기가 먼저 준다 — 안내는 그대로.
+    var h: u32 = 600;
+    var saw_body_cut_with_notes_whole = false;
+    while (h > 64) : (h -= 16) {
+        const g = buttonGeom(&s, testProps(400, h), &tk) orelse break;
+        if (g.body_rows < 3 and g.note_rows == 5) saw_body_cut_with_notes_whole = true;
+        if (g.note_rows < 5) try std.testing.expectEqual(@as(u32, 0), g.body_rows); // 안내가 줄면 미리보기는 이미 0
+        if (g.note_rows < 5 and g.note_rows > 0) try std.testing.expect(g.note_lines[g.note_rows - 1].cut);
+        // 버튼 행은 화면 안 — 상자 아래 끝이 작업영역 안이다(줄일 것이 더 없는 극단 — 안내·메시지 한 행씩 — 은 빼고).
+        const ws = props.workspaceRect(testProps(400, h).metrics);
+        if (g.note_rows > 1 or g.msg_rows > 1 or g.body_rows > 0) try std.testing.expect(g.box.rect.y + @as(i32, @intCast(g.box.rect.h)) <= @as(i32, @intCast(ws.y + ws.h)));
+    }
+    try std.testing.expect(saw_body_cut_with_notes_whole);
+}
+
+test "confirm 안내 줄: 경로 줄은 줄바꿈하지 않고 가운데를 줄여 뿌리와 잎을 남긴다; show 는 이전 안내를 비운다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const path = "~/workspace/very/deeply/nested/directory/structure/maru";
+    const notes = [_]Note{.{ .text = path, .fit = .path }};
+    var s = State{};
+    s.show("Q?", .{ .confirm = "Y", .cancel = "N" });
+    s.notes = &notes;
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, testProps(260, 600), &tk, arena, &out);
+    const g = buttonGeom(&s, testProps(260, 600), &tk).?;
+    try std.testing.expectEqual(@as(u32, 1), g.note_rows); // 한 행
+    var found = false;
+    for (try testTexts(arena, out.items)) |t| {
+        const txt = t.runs[0].text;
+        if (std.mem.startsWith(u8, txt, "~/") and std.mem.endsWith(u8, txt, "/maru")) {
+            found = true;
+            try std.testing.expect(std.mem.indexOf(u8, txt, "…") != null);
+            try std.testing.expect(overlay_input.displayCols(txt) <= g.box.inner_cols);
+        }
+    }
+    try std.testing.expect(found);
+    s.show("Again?", .{ .confirm = "Y", .cancel = "N" });
+    try std.testing.expectEqual(@as(usize, 0), s.notes.len);
 }

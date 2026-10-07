@@ -1714,11 +1714,38 @@ pub fn sidebarCwdPath(self: *AppSession, term: *Term) ![]const u8 {
     // 로컬에서 열려다 실패한다. `host:path`는 scp/rsync 관례라 원격임이 즉시 읽힌다.
     if (termCwdIsRemote(term))
         return std.fmt.allocPrint(allocator, "{s}:{s}", .{ termDisplayHost(term), cwd });
-    const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
-    // $HOME 정확 경계(home 자체 또는 home/ 하위)일 때만 "~"로 — "/Users/xyz"가 "/Users/x"로 잘못 잡히지 않게.
-    if (home.len > 0 and std.mem.startsWith(u8, cwd, home) and (cwd.len == home.len or cwd[home.len] == '/'))
-        return std.fmt.allocPrint(allocator, "~{s}", .{cwd[home.len..]});
-    return allocator.dupe(u8, cwd);
+    var shown_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    return allocator.dupe(u8, homeTildeInto(cwd, &shown_buf));
+}
+
+/// 보이는 경로의 `~` 줄임 — 사이드바 cwd 와 LSP 신뢰 시트가 함께 쓴다(같은 경로가 두 자리에서 다르게 줄면 안 된다).
+pub fn homeTildeInto(path: []const u8, buf: []u8) []const u8 {
+    return homeTilde(path, if (std.c.getenv("HOME")) |h| std.mem.span(h) else "", buf);
+}
+
+/// `home` 정확 경계(home 자체 또는 home/ 하위)일 때만 「~」로 줄인다 — 「/Users/xyz」가 「/Users/x」로 잘못 잡히지 않게.
+/// `home` 끝의 `/` 는 무시하고, 그러고 나서 비면(`/`·빈 값) 줄이지 않는다(모든 경로가 「~」로 시작해 버린다). 버퍼가 모자라면 그대로.
+pub fn homeTilde(path: []const u8, home_raw: []const u8, buf: []u8) []const u8 {
+    const home = std.mem.trimEnd(u8, home_raw, "/");
+    if (home.len == 0 or !std.mem.startsWith(u8, path, home)) return path;
+    if (path.len != home.len and path[home.len] != '/') return path;
+    const rest = path[home.len..];
+    if (1 + rest.len > buf.len) return path;
+    buf[0] = '~';
+    @memcpy(buf[1..][0..rest.len], rest);
+    return buf[0 .. 1 + rest.len];
+}
+
+test "homeTilde: 정확 경계에서만 「~」 — 하위·자체·끝 슬래시 HOME, 접두만 같은 형제·루트 HOME 은 그대로" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("~/a/b", homeTilde("/Users/x/a/b", "/Users/x", &buf));
+    try std.testing.expectEqualStrings("~", homeTilde("/Users/x", "/Users/x", &buf));
+    try std.testing.expectEqualStrings("~/a", homeTilde("/Users/x/a", "/Users/x/", &buf));
+    try std.testing.expectEqualStrings("/Users/xyz/a", homeTilde("/Users/xyz/a", "/Users/x", &buf));
+    try std.testing.expectEqualStrings("/etc", homeTilde("/etc", "/", &buf));
+    try std.testing.expectEqualStrings("/etc", homeTilde("/etc", "", &buf));
+    var tiny: [2]u8 = undefined;
+    try std.testing.expectEqualStrings("/Users/x/abc", homeTilde("/Users/x/abc", "/Users/x", &tiny)); // 버퍼가 모자라면 그대로
 }
 
 // 순수 레이아웃 기하(layout_math.PaddingPx·gridFromBacking·gridFromRectPx·ptToPx)는 session/layout_math.zig로 이동(b1).

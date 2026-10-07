@@ -7,40 +7,58 @@ const protocol = @import("web_sidecar_protocol");
 const message = protocol.message;
 
 /// 대리 스크립트의 datalist 부분 — `send` 를 꺼낸 바깥 함수 안에서 돈다(`notifications.proxy_script`). 큰따옴표·역슬래시 없이
-/// 쓴다(JSON 문자열에 그대로 넣는다). 판정·읽기·넣기에 쓰는 것(`type`·`list`·`value` 의 getter/setter, `options`·길이, 옵션의
-/// `value`·`label`·`disabled`, 사각형·`visualViewport` getter, `activeElement`, 사건 getter, `toLowerCase`·`indexOf`,
-/// `addEventListener`·`dispatchEvent`·`Event`·`JSON.stringify`)은 먼저 쥔다 — 페이지가 바꿔 놓아도 거르기·넣기가 페이지 코드를
-/// 부르지 않는다. 배열은 `push` 대신 길이 자리에 넣는다(페이지가 `Array.prototype.push` 를 바꿀 수 있다). 주 프레임에서만 돈다.
+/// 쓴다(JSON 문자열에 그대로 넣는다). 주 프레임에서만 돈다.
+///
+/// 페이지가 바꿔 놓을 수 있는 것은 우리가 아는 길에서 부르지 않는다: 판정·읽기·넣기에 쓰는 getter/setter·함수(`type`·`list`·
+/// `value`·`readOnly`·`disabled`, `options`·길이, 옵션의 `value`·`label`·`disabled`, 사각형·`visualViewport`, `activeElement`,
+/// 사건의 `target`·`button`·`ctrlKey`·`key`·수식키, `contains`, 글 함수, `addEventListener`·`dispatchEvent`·`Event`·
+/// `JSON.stringify`)는 먼저 쥐고, 보내는 객체·배열과 사건 초기값은 원형이 없게 만든다(`toJSON`·`Array.prototype` 의 번호 setter·
+/// `Object.prototype` 에 둔 값이 끼어들지 않게 — 적대 검증). `isTrusted` 는 사건 자신의 바꿀 수 없는 속성이라 그대로 읽는다.
+///
+/// 규칙(Chrome 154 실측 §7 — 재지 않은 것은 W6m 문단에): 사용자의 사건만(`isTrusted` — 폼 라이브러리가 보낸 가짜 `input` 은
+/// 아니다), 초점이 있는 글 칸(`readOnly`·`disabled` 는 아니다)에서. 왼쪽 누름(⌃ 누름은 macOS 의 우클릭이다)·↓·글자로 지금 값을
+/// 거른 목록을 보이고, 다른 곳을 누르거나 빈 칸·일치 없음·초점 잃음·그 칸을 품은 스크롤·창 크기 바뀜·`pagehide` 면 닫는다.
+/// 보이는 글은 512 단위에서(대리 쌍을 가르지 않고) 자르고 모두 합쳐 24000 단위에서 멈춘다 — 넣을 값은 원래 값을 쥔다.
 pub const script_part = "(function(){if(window!==window.top)return;" ++
-    "var A=Reflect.apply,J=JSON.stringify,S=String,G=Object.getOwnPropertyDescriptor,E=Event,W=window,D=document," ++
-    "IP=HTMLInputElement.prototype,TG=G(IP,'type').get,LG=G(IP,'list').get,VD=G(IP,'value'),VG=VD.get,VS=VD.set," ++
+    "var A=Reflect.apply,J=JSON.stringify,S=String,G=Object.getOwnPropertyDescriptor,SP=Object.setPrototypeOf,E=Event,W=window,D=document," ++
+    "IP=HTMLInputElement.prototype,TG=G(IP,'type').get,LG=G(IP,'list').get,VD=G(IP,'value'),VG=VD.get,VS=VD.set,RO=G(IP,'readOnly').get,DI=G(IP,'disabled').get," ++
     "OG=G(HTMLDataListElement.prototype,'options').get,CL=G(HTMLCollection.prototype,'length').get," ++
     "OP=HTMLOptionElement.prototype,OV=G(OP,'value').get,OL=G(OP,'label').get,OD=G(OP,'disabled').get," ++
     "BR=Element.prototype.getBoundingClientRect,RP=DOMRectReadOnly.prototype,RX=G(RP,'x').get,RY=G(RP,'y').get,RW=G(RP,'width').get,RH=G(RP,'height').get," ++
     "VV=W.visualViewport,VP=VV?VisualViewport.prototype:null,VL=VP&&G(VP,'offsetLeft').get,VT=VP&&G(VP,'offsetTop').get,VC=VP&&G(VP,'scale').get," ++
-    "AE=G(Document.prototype,'activeElement').get,ET=G(Event.prototype,'target').get,MB=G(MouseEvent.prototype,'button').get," ++
-    "KP=KeyboardEvent.prototype,KK=G(KP,'key').get,KA=G(KP,'altKey').get,KC=G(KP,'ctrlKey').get,KM=G(KP,'metaKey').get," ++
-    "AL=EventTarget.prototype.addEventListener,DE=EventTarget.prototype.dispatchEvent,LC=S.prototype.toLowerCase,IX=S.prototype.indexOf," ++
-    "K={text:1,search:1,url:1,tel:1,email:1,number:1},cur=null,ver=0,vals=[],busy=false;" ++
-    // 제안 목록이 붙은 글 칸이면 그 칸(아니면 null). getter 를 다른 객체에 부르면 던진다 — 그것으로 종류를 가린다.
-    "function fieldOf(t){try{return K[A(TG,t,[])]&&A(LG,t,[])?t:null}catch(e){return null}}" ++
-    "function hide(){if(!cur)return;cur=null;vals=[];try{send('dl',J({t:0,v:ver}))}catch(e){}}" ++
-    "function show(t){try{var l=A(LG,t,[]);if(!l)return hide();var q=A(LC,S(A(VG,t,[])),[]),os=A(OG,l,[]),n=A(CL,os,[]),it=[],vs=[];" ++
-    "for(var i=0;i<n&&it.length<256;i++){var o=os[i];if(A(OD,o,[]))continue;var v=S(A(OV,o,[])),b=S(A(OL,o,[]));if(v==='')continue;" ++
-    "if(q!==''&&A(IX,A(LC,v,[]),[q])<0&&A(IX,A(LC,b,[]),[q])<0)continue;it[it.length]=[v,b];vs[vs.length]=v}" ++
-    "if(!it.length)return hide();" ++
+    "AE=G(Document.prototype,'activeElement').get,ET=G(Event.prototype,'target').get,MP=MouseEvent.prototype,MB=G(MP,'button').get,MC=G(MP,'ctrlKey').get," ++
+    "KP=KeyboardEvent.prototype,KK=G(KP,'key').get,KA=G(KP,'altKey').get,KC=G(KP,'ctrlKey').get,KM=G(KP,'metaKey').get,NC=Node.prototype.contains," ++
+    "AL=EventTarget.prototype.addEventListener,DE=EventTarget.prototype.dispatchEvent,SR=S.prototype,LC=SR.toLowerCase,IX=SR.indexOf,SL=SR.slice,CC=SR.charCodeAt," ++
+    "K={__proto__:null,text:1,search:1,url:1,tel:1,email:1,number:1},cur=null,ver=0,vals=null,busy=false;" ++
+    "function arr(){return SP([],null)}" ++
+    "function real(e){try{return e.isTrusted===true}catch(x){return false}}" ++
+    // 보이는 글 — 512 단위에서 자르되 대리 쌍의 앞쪽에서 끝나지 않게.
+    "function cut(s){if(s.length<=512)return s;s=A(SL,s,[0,512]);var c=A(CC,s,[511]);return c>=55296&&c<=56319?A(SL,s,[0,511]):s}" ++
+    // 제안 목록이 붙은, 쓸 수 있는 글 칸이면 그 칸(아니면 null). getter 를 다른 객체에 부르면 던진다 — 그것으로 종류를 가린다.
+    "function fieldOf(t){try{return K[A(TG,t,[])]===1&&!A(RO,t,[])&&!A(DI,t,[])&&A(LG,t,[])?t:null}catch(e){return null}}" ++
+    "function focused(t){try{return A(AE,D,[])===t}catch(e){return false}}" ++
+    "function hide(){if(!cur)return;cur=null;vals=null;try{send('dl',J({__proto__:null,t:0,v:ver}))}catch(e){}}" ++
+    "function show(t){try{var l=A(LG,t,[]);if(!l)return hide();var q=A(LC,S(A(VG,t,[])),[]),os=A(OG,l,[]),n=A(CL,os,[]),it=arr(),vs=arr(),k=0,used=0;" ++
+    "for(var i=0;i<n&&k<256;i++){var o=os[i];if(A(OD,o,[]))continue;var v=S(A(OV,o,[])),b=S(A(OL,o,[]));if(v==='')continue;" ++
+    "if(q!==''&&A(IX,A(LC,v,[]),[q])<0&&A(IX,A(LC,b,[]),[q])<0)continue;" ++
+    "var p=arr();p[0]=cut(v);p[1]=cut(b);used+=p[0].length+p[1].length+8;if(used>24000)break;it[k]=p;vs[k]=v;k++}" ++
+    "if(!k)return hide();" ++
     "var r=A(BR,t,[]),ox=0,oy=0,s=1;if(VV){ox=A(VL,VV,[]);oy=A(VT,VV,[]);s=A(VC,VV,[])}" ++
+    "var rr=arr();rr[0]=(A(RX,r,[])-ox)*s;rr[1]=(A(RY,r,[])-oy)*s;rr[2]=A(RW,r,[])*s;rr[3]=A(RH,r,[])*s;" ++
     "cur=t;vals=vs;ver++;" ++
-    "send('dl',J({t:1,v:ver,r:[(A(RX,r,[])-ox)*s,(A(RY,r,[])-oy)*s,A(RW,r,[])*s,A(RH,r,[])*s],i:it}))}catch(e){}}" ++
+    "send('dl',J({__proto__:null,t:1,v:ver,r:rr,i:it}))}catch(e){}}" ++
     "function on(type,f){A(AL,W,[type,f,true])}" ++
-    "on('mousedown',function(e){try{if(busy||A(MB,e,[])!==0)return;var t=fieldOf(A(ET,e,[]));if(t)show(t)}catch(x){}});" ++
-    "on('input',function(e){try{if(busy)return;var t=fieldOf(A(ET,e,[]));if(!t)return;if(S(A(VG,t,[]))==='')return hide();show(t)}catch(x){}});" ++
-    "on('keydown',function(e){try{if(busy||A(KK,e,[])!=='ArrowDown'||A(KA,e,[])||A(KC,e,[])||A(KM,e,[]))return;var t=fieldOf(A(ET,e,[]));if(t)show(t)}catch(x){}});" ++
+    "on('mousedown',function(e){try{if(busy||!real(e))return;var t=fieldOf(A(ET,e,[]));if(t&&A(MB,e,[])===0&&!A(MC,e,[]))show(t);else hide()}catch(x){}});" ++
+    "on('input',function(e){try{if(busy||!real(e))return;var t=fieldOf(A(ET,e,[]));if(!t||!focused(t))return;if(S(A(VG,t,[]))==='')return hide();show(t)}catch(x){}});" ++
+    "on('keydown',function(e){try{if(busy||!real(e)||A(KK,e,[])!=='ArrowDown'||A(KA,e,[])||A(KC,e,[])||A(KM,e,[]))return;var t=fieldOf(A(ET,e,[]));if(t&&focused(t))show(t)}catch(x){}});" ++
     "on('focusout',function(e){try{if(cur&&A(ET,e,[])===cur)hide()}catch(x){}});" ++
-    "on('scroll',function(){hide()});on('resize',function(){hide()});on('pagehide',function(){hide()});" ++
-    // 고르기 — 같은 목록(번호)이고 그 칸에 아직 초점이 있을 때만. 넣는 동안 우리 `input` 처리기는 다시 보이지 않는다.
-    "send('dl',function(v,i){try{if(v!==ver||!cur||A(AE,D,[])!==cur||!(i>=0&&i<vals.length))return;var t=cur;busy=true;" ++
-    "A(VS,t,[vals[i]]);A(DE,t,[new E('input',{bubbles:true})]);A(DE,t,[new E('change',{bubbles:true})])}catch(x){}finally{busy=false}hide()})" ++
+    // 스크롤은 그 칸을 품은 것(문서·조상)일 때만 — 캡처라 페이지의 다른 상자(채팅 기록·캐러셀)의 스크롤도 온다.
+    "on('scroll',function(e){try{if(cur&&A(NC,A(ET,e,[]),[cur]))hide()}catch(x){}});on('resize',function(){hide()});on('pagehide',function(){hide()});" ++
+    // 고르기 — 같은 판이고 그 칸에 아직 초점이 있고 쓸 수 있을 때만 넣는다. 넣는 동안 우리 `input` 처리기는 다시 보이지 않는다.
+    // 넣었든 거절했든 닫는다.
+    "send('dl',function(v,i){var ok=false;try{ok=v===ver&&!!cur&&focused(cur)&&fieldOf(cur)===cur&&i>=0&&i<vals.length}catch(x){}" ++
+    "if(ok){var t=cur;busy=true;try{A(VS,t,[vals[i]]);A(DE,t,[new E('input',{__proto__:null,bubbles:true})]);A(DE,t,[new E('change',{__proto__:null,bubbles:true})])}catch(x){}busy=false}" ++
+    "hide()})" ++
     "})();";
 
 comptime {

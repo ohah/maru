@@ -112,7 +112,8 @@ const Surface = struct {
     /// sidecar 가 알린 우클릭 메뉴(W6c② — 하나). 그 탭이 보이는 창의 tick 이 가져가 macOS 메뉴로 띄운다.
     context_menu: ?ContextMenu = null,
     /// 페이지의 제안 목록(W6m② — `datalist_show`, 하나). 닫히면(`datalist_hide`·고름·Esc·브라우저·sidecar 가 사라짐) null.
-    /// 바뀔 때마다 세대가 오른다 — 창이 선택을 처음으로 되돌리고 다시 그린다(`popup_redraw` 도 세운다).
+    /// 바뀔 때마다 새 세대를 받는다(`nextDatalistGeneration` — 앱 전체에서 겹치지 않는다) — 창이 강조를 처음으로 되돌리고 띄운 목록을
+    /// 다시 싣는다.
     datalist: ?Datalist = null,
     datalist_generation: u32 = 0,
     /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
@@ -2216,22 +2217,25 @@ fn setDatalist(gpa: std.mem.Allocator, s: *Surface, v: ws.message.DatalistShow) 
     dropDatalist(gpa, s);
     const items = gpa.dupe(u8, v.items) catch return;
     s.datalist = .{ .list = v.list, .field = v.field, .count = v.count, .items = items };
-    s.datalist_generation +%= 1;
-    s.popup_redraw = true;
+    s.datalist_generation = nextDatalistGeneration();
 }
 
 fn dropDatalist(gpa: std.mem.Allocator, s: *Surface) void {
     const d = s.datalist orelse return;
     gpa.free(d.items);
     s.datalist = null;
-    s.datalist_generation +%= 1;
-    s.popup_redraw = true;
+    s.datalist_generation = nextDatalistGeneration();
 }
 
-/// 이 탭의 제안 목록 세대(W6m② — 열림·닫힘·새 목록마다 오른다, 닫혀 있어도 읽는다).
-pub fn datalistGeneration(surface_id: u64) u32 {
-    const s = surfaces.getPtr(surface_id) orelse return 0;
-    return s.datalist_generation;
+/// 목록 세대는 탭마다가 아니라 앱 전체에서 센다 — 키 대상이 한 tick 사이에 다른 탭의 같은 세대 목록으로 바뀌면 Swift 가 띄운 옛
+/// 탭의 항목을 새 탭의 목록으로 알고 그 번호를 고를 수 있다(네이티브 창은 세대로만 같은 목록인지 본다). 0 은 쓰지 않는다
+/// (「띄우지 않음」).
+var datalist_generation_seq: u32 = 0;
+
+fn nextDatalistGeneration() u32 {
+    datalist_generation_seq +%= 1;
+    if (datalist_generation_seq == 0) datalist_generation_seq = 1;
+    return datalist_generation_seq;
 }
 
 /// 이 탭의 지금 제안 목록과 세대(W6m②).

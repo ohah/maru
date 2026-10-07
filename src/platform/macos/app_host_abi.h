@@ -1025,8 +1025,17 @@ int32_t maru_macos_app_session_drop_url(
 /* v213(W6m②): 키 대상 Chromium 탭에 제안 목록이 열려 있을 때의 키(↑↓·Enter·Esc — 수식키 없이, 조합 중 아님)면 목록이 먹고 1.
    Swift 는 입력기에 넘기기 전에 묻는다 — 1 이면 그 키를 페이지에 보내지 않는다. mods 는 osr_key 와 같은 비트. */
 int32_t maru_macos_app_session_osr_datalist_key(MaruAppHostSession *session, uint16_t key_code, int32_t mods);
-/* 시험 전용(v213, W6m② 스모크): 그린 제안 목록의 항목 수·강조(없으면 -1)와 row 번째 행 가운데(창 backing px). 그렸으면 1. */
-int32_t maru_macos_app_session_osr_datalist_test_state(MaruAppHostSession *session, uint32_t row, double *out_x, double *out_y, int32_t *out_count, int32_t *out_selected);
+/* v213(W6m②): 이 창이 띄울 제안 목록 — 세대·항목 수·강조(없으면 -1)·칸 사각형(view backing px, 왼쪽 위 원점 x·y·w·h). 있으면 1.
+   Swift 는 tick 마다 읽어 칸 바로 아래에 네이티브 창(테두리 없는 자식 창 안의 표)으로 띄운다. */
+int32_t maru_macos_app_session_osr_datalist_state(MaruAppHostSession *session, uint32_t *out_generation, uint32_t *out_count, int32_t *out_selected, double out_field[4]);
+/* v213(W6m②): 그 세대 목록의 index 번째 항목 — 값과 레이블(UTF-8, 버퍼에 맞춰 글자 경계에서 자름). 없으면 0. */
+int32_t maru_macos_app_session_osr_datalist_item(MaruAppHostSession *session, uint32_t generation, uint32_t index, uint8_t *out_value, size_t value_cap, size_t *out_value_len, uint8_t *out_label, size_t label_cap, size_t *out_label_len);
+/* v213(W6m②): Swift 가 띄운(0 = 거둔) 목록의 세대. */
+void maru_macos_app_session_osr_datalist_shown(MaruAppHostSession *session, uint32_t generation);
+/* v213(W6m②): 네이티브 창의 행 위 hover(-1 = 창을 떠남). */
+void maru_macos_app_session_osr_datalist_hover(MaruAppHostSession *session, uint32_t generation, int32_t index);
+/* v213(W6m②): 네이티브 창의 행을 눌렀다 — 그 목록이 아직 띄운 그것이면 고른다(1). */
+int32_t maru_macos_app_session_osr_datalist_pick(MaruAppHostSession *session, uint32_t generation, uint32_t index);
 /* v212(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다. */
 int32_t maru_macos_app_session_osr_drag_over_body(MaruAppHostSession *session, double x_px, double y_px);
 /* 시험 전용(v211, W6l① 스모크): 활성 pane 의 웹 탭 머리·빈 탭 막대·주소 띠 한 점(backing px, 없으면 -1) — x,y 셋. */

@@ -4221,6 +4221,8 @@ final class TerminalSurface {
     var appSessionStatus: Int32 = 0
     var lastWindowTitle = ""
     var protectedTickFaultLatch = FilePanelProtectedTickFaultLatch()
+    /// W6m②: 이 창의 Chromium 탭 제안 목록 창(처음 띄울 때 만든다).
+    var osrDatalistPopup: OsrDatalistPopup?
 
     // Metal terminal view = 창 컨테이너(contentView)의 터미널 자식 뷰(Phase 4b-2). window가 살아 있는 동안 유효.
     var view: MaruMetalTerminalView? {
@@ -6929,6 +6931,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     ) {
         let removedPublishedWindow = workspaceCheckpointArmed && surface.workspaceCheckpointPublished && !checkpointRemovalAlreadyCovered
         let removedWindowIdentity = surface.window.map(ObjectIdentifier.init)
+        surface.osrDatalistPopup?.hide() // W6m②: 자식 창을 떼어 둔다(창이 닫히면 tick 이 더 오지 않는다)
+        surface.osrDatalistPopup = nil
         if !preserveWebPanelsForSummary { teardownWebPanels(surface) }
         surface.fileTreeWatcher.stop()
         if let session = surface.appSession {
@@ -7869,6 +7873,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
             drainOsrTooltip() // W6b: hover 중인 Chromium 탭의 툴팁 글이 바뀌었으면 macOS 툴팁을 다시 단다.
+            drainOsrDatalist() // W6m②: 키 대상 Chromium 탭의 제안 목록을 칸 아래 네이티브 창으로 띄우거나 고치거나 거둔다.
             drainOsrContextMenu() // W6c②: Chromium 탭 우클릭 메뉴 — tick 이 끝난 뒤 macOS 메뉴로 띄우고, 페이지가 닫으면 거둔다.
             drainOsrNewWindows() // W6h①: 메뉴 「새 창에서 링크 열기」 — tick 이 끝난 뒤 새 창을 만들고 그 창에 웹 탭으로 연다.
             drainOsrDragOut() // W6d②: Chromium 탭에서 시작한 끌기 — 누른 채면 macOS 끌기 세션으로.
@@ -8418,8 +8423,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 대본의 끌기(W6d①) — 한 끌기가 enter 부터 drop·exit 까지 같은 가짜 정보를 쓴다.
     private var testDragInfo: TestDraggingInfo?
-    /// 시험 전용(W6m②) — `dlremember` 가 기억한 목록 행 자리(창 backing px).
-    private var testDatalistPoint: (Double, Double)?
 
     private func testDrag(_ line: [String], _ content: NSView) {
         guard let window, let terminal = Self.firstTerminalView(in: window.contentView) else { return }
@@ -8830,47 +8833,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // 가짜 끌기 정보). 자리를 못 찾으면 droplink none.
                 testDropLink(line[1], line[2], view)
             case "datalist":
-                // W6m②: 그린 제안 목록 — 열림·항목 수·강조(없으면 -1).
-                var x = -1.0, y = -1.0
-                var count: Int32 = 0, selected: Int32 = -1
-                let open = maru_macos_app_session_osr_datalist_test_state(session, 0, &x, &y, &count, &selected)
-                Self.testReport("datalist open=\(open != 0) count=\(count) selected=\(selected)")
-            case "dlmouse" where line.count >= 4, "dlremember" where line.count >= 2:
-                // W6m②: dlmouse 행 종류 버튼 — 그린 목록의 그 행 가운데에 마우스 사건 하나(대본 mouse 와 같은 ABI). dlremember 행 — 그
-                // 자리를 기억해 둔다(목록이 닫힌 뒤 dlclicklast 가 누른다).
-                var x = -1.0, y = -1.0
-                var count: Int32 = 0, selected: Int32 = -1
-                guard maru_macos_app_session_osr_datalist_test_state(session, UInt32(line[1]) ?? 0, &x, &y, &count, &selected) != 0 else {
-                    Self.testReport("dl-miss")
-                    break
-                }
-                if line[0] == "dlremember" {
-                    testDatalistPoint = (x, y)
+                // W6m②: 제안 목록 — Zig 의 열림·항목 수·강조(없으면 -1)와, 띄운 네이티브 창(보임·행 수·표의 강조·칸 아래인가·왼쪽을
+                // 칸에 맞췄나·첫 값).
+                var generation: UInt32 = 0, count: UInt32 = 0, selected: Int32 = -1
+                var field = [Double](repeating: 0, count: 4)
+                let open = maru_macos_app_session_osr_datalist_state(session, &generation, &count, &selected, &field)
+                var report = "datalist open=\(open != 0) count=\(count) selected=\(selected)"
+                if let popup = activeSurface?.osrDatalistPopup, popup.isShown {
+                    let f = popup.fieldOnScreen, frame = popup.frame
+                    let below = popup.placedBelow && abs(frame.maxY - f.minY) < 0.5
+                    let left = abs(frame.minX - f.minX) < 0.5
+                    report += " win=shown rows=\(popup.items.count) sel=\(popup.selected) below=\(below) left=\(left) first=\(popup.items.first?.value ?? "")"
                 } else {
-                    _ = maru_macos_app_session_mouse(session, Int32(line[2]) ?? 0, x, y, Int32(line[3]) ?? 0, 0)
+                    report += " win=hidden"
                 }
-            case "dlclicklast":
-                if let (x, y) = testDatalistPoint {
-                    _ = maru_macos_app_session_mouse(session, 1, x, y, 0, 0)
-                    _ = maru_macos_app_session_mouse(session, 3, x, y, 0, 0)
-                } else {
+                Self.testReport(report)
+            case "dlmouse" where line.count >= 3:
+                // W6m②: dlmouse 행 단계 — 띄운 창의 그 행 가운데(-1 이면 창 밖)에 합성 사건 하나를 진짜 처리기로(단계 move·exit·down·up).
+                // 창이 없으면 dl-miss.
+                if activeSurface?.osrDatalistPopup?.testMouse(row: Int(line[1]) ?? -1, phase: line[2]) != true {
                     Self.testReport("dl-miss")
                 }
-            case "dlhover" where line.count >= 2, "dlclick" where line.count >= 2:
-                // W6m②: 그린 목록의 그 행 가운데에 hover·누름(대본의 hover·mouse 와 같은 ABI) — 목록이 없으면 dl-miss.
-                var x = -1.0, y = -1.0
-                var count: Int32 = 0, selected: Int32 = -1
-                guard maru_macos_app_session_osr_datalist_test_state(session, UInt32(line[1]) ?? 0, &x, &y, &count, &selected) != 0 else {
-                    Self.testReport("dl-miss")
-                    break
-                }
-                if line[0] == "dlhover" {
-                    var kind: Int32 = 0
-                    _ = maru_macos_app_session_hover(session, x, y, 0, &kind)
-                } else {
-                    _ = maru_macos_app_session_mouse(session, 1, x, y, 0, 0)
-                    _ = maru_macos_app_session_mouse(session, 3, x, y, 0, 0)
-                }
+            case "dlsnap" where line.count >= 2:
+                // W6m②: 띄운 창 내용을 그 경로에 PNG 로(창이 없으면 dl-miss).
+                Self.testReport(activeSurface?.osrDatalistPopup?.testSnapshot(to: line[1]) == true ? "dlsnap ok" : "dl-miss")
             case "menupick" where line.count >= 2:
                 testPickOsrContextMenu(line.dropFirst().joined(separator: " "))
             case "menuclose":
@@ -9110,7 +9096,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if flags.contains(.option) { bits |= 8 }
         if flags.contains(.control) { bits |= 16 }
         if flags.contains(.command) { bits |= 32 }
-        return maru_macos_app_session_osr_datalist_key(session, event.keyCode, bits) != 0
+        guard maru_macos_app_session_osr_datalist_key(session, event.keyCode, bits) != 0 else { return false }
+        if let owner = activeSurface { refreshOsrDatalist(owner) } // 강조·닫힘을 다음 tick 을 기다리지 않고 그린다
+        return true
     }
 
     /// phase 0 = 지금 키 누름(chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠, 2 = 뗌, 3 = 열린 팝업 위젯의 키(누름 + 글자).
@@ -9811,6 +9799,90 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         } else {
             view.refitOsrTooltip(rect)
         }
+    }
+
+    // ── W6m②: Chromium 탭의 제안 목록(datalist) ──
+    // 목록과 강조는 Zig 가 쥔다(키 대상 탭의 것). 여기서는 tick 마다 읽어 칸 바로 아래의 네이티브 창(`OsrDatalistPopup`)에 반영하고,
+    // 띄운 세대를 알린다 — 키(↑↓·Enter·Esc)는 띄운 그 목록에서만 먹는다. 창이 숨었거나 칸이 탭 본문 밖이면 거둔다.
+    private var osrDatalistValueBuffer = [UInt8](repeating: 0, count: 1024)
+    private var osrDatalistLabelBuffer = [UInt8](repeating: 0, count: 1024)
+
+    private func drainOsrDatalist() {
+        guard let owner = activeSurface else { return }
+        refreshOsrDatalist(owner)
+    }
+
+    private func refreshOsrDatalist(_ owner: TerminalSurface) {
+        guard let session = owner.appSession else {
+            owner.osrDatalistPopup?.hide()
+            return
+        }
+        var generation: UInt32 = 0, count: UInt32 = 0, selected: Int32 = -1
+        var field = [Double](repeating: 0, count: 4)
+        let open = maru_macos_app_session_osr_datalist_state(session, &generation, &count, &selected, &field)
+        let target = open != 0 && count > 0 ? osrDatalistFieldOnScreen(owner, field) : nil
+        guard let target else {
+            owner.osrDatalistPopup?.hide()
+            maru_macos_app_session_osr_datalist_shown(session, 0)
+            return
+        }
+        let popup = owner.osrDatalistPopup ?? makeOsrDatalistPopup(owner)
+        var items = popup.items
+        if popup.generation != generation || !popup.isShown {
+            items = []
+            for index in 0..<count {
+                guard let item = osrDatalistItem(session, generation, index) else { break }
+                items.append(item)
+            }
+            guard items.count == Int(count) else {
+                popup.hide()
+                maru_macos_app_session_osr_datalist_shown(session, 0)
+                return
+            }
+        }
+        popup.show(generation: generation, items: items, selected: Int(selected), field: target.field, parent: target.window)
+        maru_macos_app_session_osr_datalist_shown(session, generation)
+    }
+
+    /// 칸 사각형(view backing px, 왼쪽 위 원점 — Zig 가 그 탭 본문 안으로 잘랐다) → 화면 좌표. 창이 안 보이거나 칸이 본문 밖이면 nil.
+    private func osrDatalistFieldOnScreen(_ owner: TerminalSurface, _ px: [Double]) -> (field: NSRect, window: NSWindow)? {
+        guard let window = owner.window, window.isVisible, !window.isMiniaturized,
+              let view = (window.contentView as? MaruTerminalContainerView)?.terminalView else { return nil }
+        let scale = archiveSmokeRenderScale(window)
+        let w = CGFloat(px[2]) / scale, h = CGFloat(px[3]) / scale
+        guard w > 0, h > 0 else { return nil }
+        let inView = NSRect(x: CGFloat(px[0]) / scale, y: view.bounds.height - CGFloat(px[1]) / scale - h, width: w, height: h)
+        return (window.convertToScreen(view.convert(inView, to: nil)), window)
+    }
+
+    private func osrDatalistItem(_ session: OpaquePointer, _ generation: UInt32, _ index: UInt32) -> OsrDatalistPopup.Item? {
+        var valueLength = 0, labelLength = 0
+        let got = osrDatalistValueBuffer.withUnsafeMutableBufferPointer { value in
+            osrDatalistLabelBuffer.withUnsafeMutableBufferPointer { label in
+                maru_macos_app_session_osr_datalist_item(session, generation, index, value.baseAddress, value.count, &valueLength,
+                                                          label.baseAddress, label.count, &labelLength)
+            }
+        }
+        guard got != 0 else { return nil }
+        return OsrDatalistPopup.Item(value: String(decoding: osrDatalistValueBuffer[0..<valueLength], as: UTF8.self),
+                                     label: String(decoding: osrDatalistLabelBuffer[0..<labelLength], as: UTF8.self))
+    }
+
+    /// 창의 포인터는 그 창(owner)의 세션으로 알린다 — tick 의 활성 창이 아니다.
+    private func makeOsrDatalistPopup(_ owner: TerminalSurface) -> OsrDatalistPopup {
+        let popup = OsrDatalistPopup()
+        popup.onHover = { [weak self, weak owner] generation, index in
+            guard let self, let owner, let session = owner.appSession else { return }
+            maru_macos_app_session_osr_datalist_hover(session, generation, Int32(index))
+            self.refreshOsrDatalist(owner)
+        }
+        popup.onPick = { [weak self, weak owner] generation, index in
+            guard let self, let owner, let session = owner.appSession else { return }
+            _ = maru_macos_app_session_osr_datalist_pick(session, generation, UInt32(index))
+            self.refreshOsrDatalist(owner)
+        }
+        owner.osrDatalistPopup = popup
+        return popup
     }
 
     // ── W6c②: Chromium 탭 우클릭 메뉴 ──

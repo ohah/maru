@@ -461,13 +461,6 @@ pub fn tickWebOsr(self: *AppSession) void {
     // 글이 안 왔으면 조합을 그대로 확정한다.
     syncOsrKeyTarget(self);
     if (self.osr_key_target != 0 and self.osr_ime_surface == 0) flushUnmark(self, self.osr_key_target);
-    // W6m②: 키 대상 탭의 제안 목록이 바뀌었으면(열림·닫힘·새 목록) 오버레이를 다시 짠다.
-    const dl_seen = [2]u64{ self.osr_key_target, if (self.osr_key_target != 0) web_osr.datalistGeneration(self.osr_key_target) else 0 };
-    if (dl_seen[0] != self.osr_datalist_seen[0] or dl_seen[1] != self.osr_datalist_seen[1]) {
-        self.osr_datalist_seen = dl_seen;
-        self.osr_datalist = .{}; // 남은 상자 자리가 입력을 먹지 않게(다시 그리면 새로 선다)
-        self.metal_dirty = true;
-    }
     // W4b: hover 중인 탭의 커서가 바뀌었으면(페이지는 이동을 처리한 **뒤** 커서를 알린다) Swift 가 포인터를 다시 움직이지
     // 않아도 바꾸게 세운다 — 안 그러면 멈춘 자리의 커서가 한 박자 전 것으로 남는다.
     if (self.osr_hover_surface != 0) {
@@ -877,8 +870,6 @@ fn osrDip(self: *AppSession, layout: app_session_mod.OsrLayout, x_px: f64, y_px:
 /// 오른쪽) 주인을 바꾸지 않고 그 버튼의 down 만 보탠다. 본문이 아니면 false(아래 일반 라우팅으로).
 pub fn osrMouseDown(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_button: i32, mods: i32) bool {
     if (self.osr_layouts.items.len == 0) return false;
-    // W6m②: 열린 제안 목록 위의 누름은 목록 몫이다(본문 밖으로 나온 상자도).
-    if (osr_input.clickCount(kind) != null and datalistMouseDown(self, x_px, y_px, xterm_button, mods)) return true;
     const count = osr_input.clickCount(kind) orelse return false;
     // 제스처가 살아 있으면(왼쪽으로 끄는 중 다른 버튼) 누른 자리가 본문 밖이어도 그 탭이 받는다 — 페이지가 capture 를 쥐고 있다.
     const owned: ?app_session_mod.OsrLayout = if (self.pointer_gesture_owner == .web_osr) osr_input.find(self.osr_layouts.items, self.pointer_gesture_owner.web_osr.surface_id) else null;
@@ -914,7 +905,6 @@ pub fn osrMouseDown(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_bu
 /// 버튼만 떼고, 눌린 버튼이 모두 떼어지면 끝난다. 탭이 이 창의 배치에서 사라졌으면(닫힘·숨김·다른 창으로) 제스처를 끝내고
 /// capture 를 놓게 한다.
 pub fn osrGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, mods: i32, xterm_button: i32) bool {
-    if (datalistGesture(self, kind, x_px, y_px, xterm_button)) return true; // W6m②: 목록 위에서 시작한 누름
     if (self.pointer_gesture_owner != .web_osr) return false;
     const g = self.pointer_gesture_owner.web_osr;
     const layout = osr_input.find(self.osr_layouts.items, g.surface_id) orelse {
@@ -959,18 +949,6 @@ pub fn osrHover(self: *AppSession, x_px: f64, y_px: f64, mods: i32) ?app_session
         const c = web_osr.cursor(self.pointer_gesture_owner.web_osr.surface_id) orelse return .default;
         return cursorKindOf(c.cursor);
     }
-    // W6m②: 열린 제안 목록 위 — 그 행을 강조하고(Chrome 처럼) 페이지에는 보내지 않는다(hover 하던 탭은 leave).
-    if (!self.anyModalOverlayOpen() and datalistBoxContains(self, x_px, y_px)) {
-        if (self.osr_hover_surface != 0) osrLeave(self, x_px, y_px, mods);
-        if (datalistRowAt(self, x_px, y_px)) |row| if (self.osr_datalist.selected != row) datalistSelect(self, row, true);
-        return .default;
-    }
-    // 상자를 떠났다 — hover 로 생긴 강조는 지운다(지나가며 남은 강조를 폼을 내려던 Enter 가 고르지 않게).
-    if (self.osr_datalist.hover and self.osr_datalist.selected != null) {
-        self.osr_datalist.selected = null;
-        self.osr_datalist.hover = false;
-        self.metal_dirty = true;
-    }
     // 입력을 막는 모달(확인·설정·팔레트·메뉴 등)이 열려 있으면 hover 를 보내지 않는다. 안내 토스트는 막지 않는다(W6n — 토스트가 떠
     // 있는 동안 링크 강조·툴팁이 사라졌다. WebKit 탭은 원래 토스트와 상관없이 hover 를 받는다). 누름은 여전히 토스트를 먼저 닫는다.
     const layout: ?app_session_mod.OsrLayout = if (self.anyModalOverlayOpen()) null else osr_input.hit(self.osr_layouts.items, x_px, y_px);
@@ -1000,11 +978,6 @@ fn osrLeave(self: *AppSession, x_px: f64, y_px: f64, mods: i32) void {
 /// 본문 위의 휠(오버레이 게이트 뒤). 본문이 아니면 false.
 pub fn osrWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) bool {
     if (self.osr_layouts.items.len == 0) return false;
-    // W6m②: 열린 제안 목록 위의 휠은 목록을 스크롤한다(강조는 그대로).
-    if (datalistBoxContains(self, x_px, y_px)) {
-        datalistScroll(self, delta_y, precise);
-        return true;
-    }
     const layout = osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
     _ = web_osr.sendInput(self.allocator, .{ .wheel = .{
         .browser = layout.surface_id,
@@ -1919,42 +1892,24 @@ pub fn osrDragDrop(self: *AppSession, x_px: f64, y_px: f64, mods: i32) i32 {
 }
 
 // ── W6m②: 제안 목록(datalist) ─────────────────────────────────────────────────────────────────────────
-// sidecar 가 보낸 목록(`web_osr.datalist`)을 키 대상 탭의 칸 아래에 편집기 자동완성 상자로 그린다. Chrome 154 실측(§7)대로 처음에는
-// 아무 항목도 강조하지 않고, ↓ 는 첫 항목·↑ 는 끝 항목부터, 강조한 채 Enter 나 누르기로 고른다(sidecar 가 그 문서에 넣는다). Esc 는
-// 목록만 닫는다. 이 키들은 페이지에 가지 않는다(Chrome 도 열린 목록의 ↓·Esc 를 페이지에 보내지 않는다). 강조가 없으면 Enter 는
-// 페이지로 간다(폼 제출). 조합 중이면 키는 입력기 몫이다.
-
-const suggest_box = chrome.components.suggest_box;
+// sidecar 가 보낸 목록(`web_osr.datalist`)을 Swift 가 칸 바로 아래에 macOS 네이티브 창(키 초점을 갖지 않는 테두리 없는 자식 창 안의 표 —
+// WebKit·Safari 의 datalist 와 같은 방식)으로 띄운다(사용자 결정 2026-10-07). maru 오버레이로 그리던 첫 구현은 편집기 자동완성 상자를
+// 빌려 고정폭 글꼴·떠 있는 간격·들여쓰기가 남았다. Zig 는 키 대상 탭의 목록과 강조를 쥐고, Swift 는 tick 마다 읽어 창에 반영하며
+// (`datalistState`·`datalistItem`) 띄운 목록의 세대를 알린다(`datalistShown`). Chrome 154 실측(§7)대로 처음에는 아무것도 강조하지
+// 않고, ↓ 는 첫 항목·↑ 는 끝 항목부터, 강조한 채 Enter 나 행 누르기로 고르고(sidecar 가 그 문서에 넣는다), Esc 는 목록만 닫는다 —
+// 이 키들은 띄워져 있을 때만 먹고 페이지에 보내지 않는다. 강조가 없으면 Enter 는 페이지로 간다(폼 제출). 조합 중이면 입력기 몫이다.
+// 마우스는 그 창이 받는다(창 밖의 누름은 페이지로 가 대리 스크립트가 닫는다).
 
 pub const OsrDatalist = struct {
     surface: u64 = 0,
     generation: u32 = 0,
     /// 강조한 항목 — null 이면 없음(처음).
     selected: ?usize = null,
-    /// 창의 첫 행.
-    scroll: usize = 0,
-    count: usize = 0,
-    /// 마지막으로 그린 상자(창 backing px)와 행 높이 — 이번 프레임에 그리지 않았으면 null. 판정은 `datalistLive` 를 거친다(목록이
-    /// 페이지 쪽에서 닫혔는데 남은 자리가 휠·hover·누름을 먹지 않게 — 적대 검증).
-    box: ?chrome.draw.Rect = null,
-    row_h: u32 = 0,
-    /// 강조가 hover 로 생겼다 — 포인터가 상자를 떠나면 지운다(키로 옮긴 강조는 둔다).
+    /// 강조가 hover 로 생겼다 — 포인터가 창을 떠나면 지운다(키로 옮긴 강조는 둔다).
     hover: bool = false,
-    /// 트랙패드 정밀 스크롤의 쌓인 양.
-    wheel_acc: f64 = 0,
+    /// Swift 가 띄운 목록의 세대(0 = 띄우지 않음) — 키는 띄운 그 목록에서만 먹는다.
+    shown_generation: u32 = 0,
 };
-
-/// 목록 위에서 시작한 누름 — 그 버튼의 끌기·뗌만 붙잡는다. 고르기는 누를 때 정한다(왼쪽이고 ⌃ 아님 — ⌃ 를 먼저 떼고 버튼을 떼도
-/// 고르지 않는다, 적대 검증).
-pub const OsrDatalistPress = struct { button: i32, pick: bool };
-
-/// 그린 목록이 지금도 그 목록인가 — 키 대상 탭이 같고, 그 탭의 목록 세대가 그린 때와 같고, 이번에 그렸다.
-fn datalistLive(self: *AppSession) bool {
-    const dl = self.osr_datalist;
-    if (dl.box == null or dl.surface == 0 or dl.surface != self.osr_key_target) return false;
-    const got = web_osr.datalist(dl.surface) orelse return false;
-    return got.generation == dl.generation;
-}
 
 const DatalistTarget = struct { sid: u64, d: *const web_osr.Datalist, generation: u32, layout: app_session_mod.OsrLayout };
 
@@ -1973,196 +1928,122 @@ fn syncDatalist(self: *AppSession) ?DatalistTarget {
         return null;
     };
     if (sid != self.osr_datalist.surface or got.generation != self.osr_datalist.generation) {
-        self.osr_datalist = .{ .surface = sid, .generation = got.generation, .count = got.d.count };
+        self.osr_datalist = .{ .surface = sid, .generation = got.generation };
     }
     return .{ .sid = sid, .d = got.d, .generation = got.generation, .layout = layout };
 }
 
-/// 오버레이 프레임을 그려야 하는가(`overlayFrameNeeded` — 그 문을 지나야 `datalistDraws` 가 불린다). 키 대상 탭에 목록이 있으면.
-pub fn datalistWanted(self: *const AppSession) bool {
-    return self.osr_key_target != 0 and web_osr.datalist(self.osr_key_target) != null;
+/// 띄운 그 목록인가(Swift 가 이 세대를 띄웠다고 알렸다).
+fn datalistLive(self: *AppSession) ?DatalistTarget {
+    const t = syncDatalist(self) orelse return null;
+    return if (self.osr_datalist.shown_generation == t.generation) t else null;
 }
 
-/// 칸 아래(안 들어가면 위)에 목록 상자를 낸다. 그렸으면 true.
-pub fn datalistDraws(self: *AppSession, props: chrome.props.ChromeProps, tk: *const chrome.tokens.Tokens, arena: std.mem.Allocator, draws: *std.ArrayList(chrome.ChromeDraw)) !bool {
-    self.osr_datalist.box = null;
-    const t = syncDatalist(self) orelse return false;
-    const rows = try arena.alloc(suggest_box.Row, t.d.count);
-    var it: ws.fields.DatalistItems = .{ .bytes = t.d.items };
-    var n: usize = 0;
-    while (it.next() catch null) |item| {
-        if (n == rows.len) break;
-        rows[n] = .{ .label = item.value, .detail = item.label };
-        n += 1;
-    }
-    if (n == 0) return false;
+pub const DatalistState = struct {
+    open: bool = false,
+    generation: u32 = 0,
+    count: u32 = 0,
+    /// -1 = 없음.
+    selected: i32 = -1,
+    /// 칸 사각형(창 view 의 backing px, 왼쪽 위 원점) — 그 탭 본문 안으로 자른다.
+    field: [4]f64 = .{ 0, 0, 0, 0 },
+};
+
+/// Swift 가 tick 마다 읽는다 — 띄울 목록(키 대상 탭의 것)과 칸 자리.
+pub fn datalistState(self: *AppSession) DatalistState {
+    const t = syncDatalist(self) orelse return .{};
     const scale: f64 = if (self.scale_milli == 0) 1.0 else @as(f64, @floatFromInt(self.scale_milli)) / 1000.0;
     const f = t.d.field;
     const body = t.layout.rect;
-    // 칸은 본문 안으로 자르고(본문 밖에서 시작하는 큰 칸·스크롤로 반쯤 가려진 칸), 상자는 **그 탭 본문 안에만** 놓는다 — 작업
-    // 영역 전체에 놓으면 주소 띠·탭 막대·다른 pane 을 페이지가 정한 글로 덮을 수 있었다(적대 검증 — 위장).
     const bx: f64 = @floatFromInt(body.x);
     const by: f64 = @floatFromInt(body.y);
     const bw: f64 = @floatFromInt(body.w);
     const bh: f64 = @floatFromInt(body.h);
-    const top = std.math.clamp(by + @as(f64, @floatFromInt(f.y)) * scale, by, by + bh);
-    const bottom = std.math.clamp(by + (@as(f64, @floatFromInt(f.y)) + @as(f64, @floatFromInt(f.height))) * scale, by, by + bh);
-    const left = std.math.clamp(bx + @as(f64, @floatFromInt(f.x)) * scale, bx, bx + bw);
-    const ax: i32 = @intFromFloat(@round(left));
-    const ay: i32 = @intFromFloat(@round(top));
-    const ah: u32 = @intFromFloat(@round(bottom - top));
-    var inner = props;
-    inner.metrics.workspace_present = true;
-    inner.metrics.workspace_x_px = body.x;
-    inner.metrics.workspace_y_px = body.y;
-    inner.metrics.workspace_width_px = body.w;
-    inner.metrics.workspace_height_px = body.h;
-    const st: suggest_box.State = .{
+    const fx: f64 = @floatFromInt(f.x);
+    const fy: f64 = @floatFromInt(f.y);
+    const left = std.math.clamp(bx + fx * scale, bx, bx + bw);
+    const right = std.math.clamp(bx + (fx + @as(f64, @floatFromInt(f.width))) * scale, bx, bx + bw);
+    const top = std.math.clamp(by + fy * scale, by, by + bh);
+    const bottom = std.math.clamp(by + (fy + @as(f64, @floatFromInt(f.height))) * scale, by, by + bh);
+    return .{
         .open = true,
-        .anchor_x = ax,
-        .anchor_y = ay,
-        .anchor_h = ah,
-        .selected = self.osr_datalist.selected orelse std.math.maxInt(usize),
-        .scroll = self.osr_datalist.scroll,
+        .generation = t.generation,
+        .count = t.d.count,
+        .selected = if (self.osr_datalist.selected) |s| @intCast(@min(s, std.math.maxInt(i32))) else -1,
+        .field = .{ left, top, right - left, bottom - top },
     };
-    const shown = rows[0..n];
-    // 상자는 본문 안에 다 들어갈 때만 그린다 — 자리 정하기(`popup_box.place`)는 본문보다 큰 상자를 오른쪽·아래로 넘치게 둔다(적대
-    // 검증 2 차 — 좁은 split 에서 이웃 pane 위에 페이지가 정한 글이 그려졌다). 넘치면 레이블을 빼 보고, 그래도 넘치면 그리지 않는다
-    // (그때는 키도 먹지 않는다 — `datalistLive`; 칸은 페이지 몫으로 남는다).
-    var box = suggest_box.boxRect(&st, shown, inner) orelse return false;
-    if (!rectInside(box, body)) {
-        for (shown) |*r| r.detail = "";
-        box = suggest_box.boxRect(&st, shown, inner) orelse return false;
-        if (!rectInside(box, body)) return false;
+}
+
+/// 그 목록의 `index` 번째 항목(값과 레이블 — 레이블은 값과 다를 때만, 아니면 빈 글).
+pub fn datalistItem(self: *AppSession, generation: u32, index: usize) ?ws.fields.DatalistItem {
+    const t = syncDatalist(self) orelse return null;
+    if (t.generation != generation) return null;
+    var it: ws.fields.DatalistItems = .{ .bytes = t.d.items };
+    var n: usize = 0;
+    while (it.next() catch null) |item| : (n += 1) {
+        if (n == index) return item;
     }
-    try chrome.ChromeHost.collectWebSuggestDraws(&st, shown, inner, tk, arena, draws);
-    self.osr_datalist.box = box;
-    self.osr_datalist.row_h = @max(props.metrics.cell_height_px, 1);
-    self.osr_datalist.count = n;
-    return self.osr_datalist.box != null;
+    return null;
 }
 
-fn rectInside(r: chrome.draw.Rect, body: osr_input.Rect) bool {
-    const rx: i64 = r.x;
-    const ry: i64 = r.y;
-    return rx >= body.x and ry >= body.y and rx + r.w <= @as(i64, body.x) + body.w and ry + r.h <= @as(i64, body.y) + body.h;
+/// Swift 가 띄운(또는 거둔 — 0) 목록의 세대.
+pub fn datalistShown(self: *AppSession, generation: u32) void {
+    self.osr_datalist.shown_generation = generation;
 }
 
-fn datalistSelect(self: *AppSession, index: usize, by_hover: bool) void {
-    const dl = &self.osr_datalist;
-    if (dl.count == 0) return;
-    dl.hover = by_hover;
-    dl.selected = @min(index, dl.count - 1);
-    dl.scroll = chrome.components.overlay_input.windowStart(dl.count, suggest_box.max_rows, dl.selected.?, dl.scroll);
-    self.metal_dirty = true;
+fn datalistSelect(self: *AppSession, index: usize, count: usize, by_hover: bool) void {
+    if (count == 0) return;
+    self.osr_datalist.hover = by_hover;
+    self.osr_datalist.selected = @min(index, count - 1);
 }
 
-/// 목록 창을 굴린다 — 휠 한 칸이 한 줄, 트랙패드 정밀 스크롤은 행 높이만큼 쌓일 때마다 한 줄(한 번 쓸어 관성까지 수십 번 와도
-/// 목록 끝까지 튀지 않게 — 적대 검증). 위로 굴리면 앞 항목.
-fn datalistScroll(self: *AppSession, delta_y: f64, precise: bool) void {
-    const dl = &self.osr_datalist;
-    const visible = @min(dl.count, suggest_box.max_rows);
-    const last = dl.count -| visible;
-    // 터미널 스크롤과 같은 환산(정밀 델타는 pt — 행 높이를 배율로 나눈 만큼마다 한 줄, 비유한값은 거른다 — 적대 검증 2 차).
-    const lines = maru.session.input_math.wheelDeltaToLines(&dl.wheel_acc, delta_y, precise, @max(dl.row_h, 1), self.scale_milli);
-    const steps: i64 = -@as(i64, lines);
-    const before = dl.scroll;
-    if (steps < 0) dl.scroll -|= @intCast(-steps) else dl.scroll = @min(dl.scroll + @as(usize, @intCast(steps)), last);
-    if (dl.scroll != before) self.metal_dirty = true;
+/// 창 위의 hover(행 번호, -1 = 창을 떠남) — 그 행을 강조한다(Chrome 처럼). 떠나면 hover 로 생긴 강조만 지운다.
+pub fn datalistHover(self: *AppSession, generation: u32, index: i64) void {
+    const t = datalistLive(self) orelse return;
+    if (t.generation != generation) return;
+    if (index < 0) {
+        if (self.osr_datalist.hover) {
+            self.osr_datalist.selected = null;
+            self.osr_datalist.hover = false;
+        }
+        return;
+    }
+    if (index < t.d.count) datalistSelect(self, @intCast(index), t.d.count, true);
 }
 
-/// 키 대상 탭에 열린 목록이 있을 때의 키(Swift 가 입력기에 넘기기 전에 묻는다). 먹었으면 true — 페이지로 보내지 않는다.
-/// 수식키가 있거나 조합 중이면 먹지 않는다.
+/// 창의 행을 눌렀다 — 그 목록(세대)이 아직 띄운 그것이면 고른다.
+pub fn datalistPickIndex(self: *AppSession, generation: u32, index: usize) bool {
+    const t = datalistLive(self) orelse return false;
+    if (t.generation != generation or index >= t.d.count) return false;
+    const picked = web_osr.datalistPick(self.allocator, t.sid, t.d.list, index);
+    self.osr_datalist = .{};
+    return picked;
+}
+
+/// 키 대상 탭에 띄운 목록이 있을 때의 키(Swift 가 입력기에 넘기기 전에 묻는다). 먹었으면 true — 페이지로 보내지 않는다.
+/// 수식키가 있거나 조합 중이면 먹지 않는다. 띄우지 않은 목록(창이 아직 안 섰다 — 다른 창이 키 창이다 등)은 키를 먹지 않는다.
 pub fn osrDatalistKey(self: *AppSession, key_code: u16, mods: i32) bool {
     if (mods & (4 | 8 | 16 | 32) != 0) return false;
-    const t = syncDatalist(self) orelse return false;
+    const t = datalistLive(self) orelse return false;
     if (web_osr.composing(t.sid)) return false;
-    // 화면에 없는 목록(다른 오버레이가 그 프레임을 가졌다·본문이 작다)은 키를 먹지 않는다 — 보이지 않는 항목을 Enter 가 고르지 않게.
-    if (!datalistLive(self)) return false;
     const dl = &self.osr_datalist;
     const n: usize = t.d.count;
     if (n == 0) return false;
     switch (key_code) {
-        125 => datalistSelect(self, if (dl.selected) |s| (s + 1) % n else 0, false), // ↓
-        126 => datalistSelect(self, if (dl.selected) |s| (s + n - 1) % n else n - 1, false), // ↑
+        125 => datalistSelect(self, if (dl.selected) |s| (s + 1) % n else 0, n, false), // ↓
+        126 => datalistSelect(self, if (dl.selected) |s| (s + n - 1) % n else n - 1, n, false), // ↑
         36, 76 => { // Return·keypad Enter — 강조가 없으면 페이지로(폼 제출)
             const s = dl.selected orelse return false;
             _ = web_osr.datalistPick(self.allocator, t.sid, t.d.list, s);
             self.osr_datalist = .{};
-            self.metal_dirty = true;
         },
         53 => { // Esc — 목록만 닫는다
             web_osr.datalistDismiss(self.allocator, t.sid);
             self.osr_datalist = .{};
-            self.metal_dirty = true;
         },
         else => return false,
     }
     return true;
-}
-
-/// 그 자리가 그린 목록 상자 안이면 행 번호(창 안의 행 + 스크롤).
-fn datalistRowAt(self: *AppSession, x_px: f64, y_px: f64) ?usize {
-    if (!datalistLive(self)) return null;
-    const box = self.osr_datalist.box orelse return null;
-    if (self.osr_datalist.row_h == 0) return null;
-    const x: i64 = @intFromFloat(@floor(x_px));
-    const y: i64 = @intFromFloat(@floor(y_px));
-    if (x < box.x or y < box.y or x >= @as(i64, box.x) + box.w or y >= @as(i64, box.y) + box.h) return null;
-    const row: usize = @intCast(@divFloor(y - box.y, self.osr_datalist.row_h));
-    const index = self.osr_datalist.scroll + row;
-    return if (index < self.osr_datalist.count) index else null;
-}
-
-fn datalistBoxContains(self: *AppSession, x_px: f64, y_px: f64) bool {
-    if (!datalistLive(self)) return false;
-    const box = self.osr_datalist.box orelse return false;
-    return x_px >= @as(f64, @floatFromInt(box.x)) and y_px >= @as(f64, @floatFromInt(box.y)) and
-        x_px < @as(f64, @floatFromInt(box.x)) + @as(f64, @floatFromInt(box.w)) and y_px < @as(f64, @floatFromInt(box.y)) + @as(f64, @floatFromInt(box.h));
-}
-
-/// 목록 상자 위의 누름 — 어떤 버튼이든 먹고(페이지·이웃 pane 으로 가지 않는다) 뗌까지 붙잡는다(`osr_datalist_press` — 고르면
-/// 상자가 사라져 같은 클릭의 끌기·뗌이 아래로 샜다, 적대 검증). 왼쪽(⌃ 아님 — macOS 의 우클릭) 누름은 그 행을 강조하고, 고르기는
-/// 왼쪽 **뗌**에서 한다(Chrome 처럼).
-fn datalistMouseDown(self: *AppSession, x_px: f64, y_px: f64, xterm_button: i32, mods: i32) bool {
-    if (!datalistBoxContains(self, x_px, y_px)) return false;
-    // 다른 제스처가 살아 있으면(페이지에서 왼쪽을 누른 채 목록 위에서 오른쪽) 붙잡지 않는다 — 그 제스처의 뗌을 가로채 행을 고르지 않게.
-    if (self.osr_datalist_press != null or self.pointer_gesture_owner != .none) return true;
-    const pick = xterm_button == 0 and mods & 16 == 0;
-    self.osr_datalist_press = .{ .button = xterm_button, .pick = pick };
-    if (pick) if (datalistRowAt(self, x_px, y_px)) |row| datalistSelect(self, row, false);
-    return true;
-}
-
-/// 목록 위에서 시작한 누름의 끌기·뗌 — 그 버튼의 것만 삼키고(다른 버튼은 아래로), 고를 수 있는 누름의 뗌이 행 위면 그 행을 고른다.
-/// 상자 밖에서 떼면 고르지 않는다(목록은 남는다).
-fn datalistGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_button: i32) bool {
-    const press = self.osr_datalist_press orelse return false;
-    if (kind == 2) return true; // 끌기 — 페이지·이웃 pane 으로 보내지 않는다(버튼을 싣지 않는 경로도 있어 누름이 살아 있는 동안 모두)
-    if (xterm_button != press.button) return false;
-    self.osr_datalist_press = null;
-    if (!press.pick) return true;
-    const row = datalistRowAt(self, x_px, y_px) orelse return true;
-    const t = syncDatalist(self) orelse return true;
-    _ = web_osr.datalistPick(self.allocator, t.sid, t.d.list, row);
-    self.osr_datalist = .{};
-    self.metal_dirty = true;
-    return true;
-}
-
-/// 시험 전용(W6m② 스모크): 마지막으로 그린 목록 — 항목 수·강조와 `row` 번째 행 가운데(창 backing px). 그리지 않았으면 열림 false.
-pub fn datalistTestState(self: *AppSession, row: usize) struct { open: bool, count: usize, selected: ?usize, x: f64, y: f64 } {
-    const dl = self.osr_datalist;
-    const box = dl.box orelse return .{ .open = false, .count = 0, .selected = null, .x = -1, .y = -1 };
-    const vis: f64 = @floatFromInt(row -| dl.scroll);
-    const rh: f64 = @floatFromInt(dl.row_h);
-    return .{
-        .open = true,
-        .count = dl.count,
-        .selected = dl.selected,
-        .x = @as(f64, @floatFromInt(box.x)) + @as(f64, @floatFromInt(box.w)) / 2,
-        .y = @as(f64, @floatFromInt(box.y)) + vis * rh + rh / 2,
-    };
 }
 
 /// 키 대상 탭에 팝업 위젯이 열려 있는가(W6a②). 열린 목록은 편집할 수 없어 입력기 조합이 갈 곳이 없다 — 조합이 서면 그 뒤의

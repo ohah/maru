@@ -85,7 +85,7 @@ def prepare(repo, snapshot):
     text = replace_once(text, '        smokeMode && ProcessInfo.processInfo.environment["MARU_EDITOR_IME_SMOKE"] == "1"',
                         '        (smokeMode || isEditorRecoveryCheckpointTest) && ProcessInfo.processInfo.environment["MARU_EDITOR_IME_SMOKE"] == "1"')
     text = replace_once(text, "        if driver.finished {\n            if !driver.failures.isEmpty { exitCode = 1 }",
-                        "        if driver.finished {\n            bypassQuitConfirm = true\n            _ = sharedRestoreFixtureStep(30)\n            if !captureSharedRestore(\"ime-committed\") { exitCode = 1 }\n            if !driver.failures.isEmpty { exitCode = 1 }")
+                        "        if driver.finished {\n            bypassQuitConfirm = true\n            let closePeer = ProcessInfo.processInfo.environment[\"MARU_SHARED_RESTORE_IME_CLOSE\"] == \"1\"\n            if sharedRestoreFixtureStep(closePeer ? 31 : 30) != 1 { exitCode = 1 }\n            if !captureSharedRestore(\"ime-committed\") { exitCode = 1 }\n            if !driver.failures.isEmpty { exitCode = 1 }")
     host.write_text(text + "\n" + (repo / "tools/shared-restore-app/driver.swift.inc").read_text())
     renderer = snapshot / "src/platform/macos/maru_metal_renderer.m"
     renderer.write_text(replace_once(renderer.read_text(), "    static const char *const gates[] = {",
@@ -102,10 +102,18 @@ def prepare(repo, snapshot):
     ime = snapshot / "src/platform/macos/EditorIMESmokeDriver.swift"
     text = replace_once(ime.read_text(), "beginLateSwitch(code: 30,", "beginLateSwitch(code: 124,")
     text = replace_once(text, "beginLateSwitch(code: 33,", "beginLateSwitch(code: 123,")
+    # Only the copied driver closes a composing peer; product callback code stays intact.
+    text = replace_once(text, "private func beginLateSwitch(code: UInt16, view:",
+                        "private func beginLateSwitch(code: UInt16, flags: CGEventFlags = [.maskCommand, .maskAlternate], view:")
+    text = replace_once(text, "return post(code, view: view, window: window, flags: [.maskCommand, .maskAlternate])",
+                        "return post(code, view: view, window: window, flags: flags)")
+    text = replace_once(text, "guard beginLateSwitch(code: 123, view: view, window: window) else",
+                        'let closePeer = ProcessInfo.processInfo.environment["MARU_SHARED_RESTORE_IME_CLOSE"] == "1"\n'
+                        '            guard beginLateSwitch(code: closePeer ? 13 : 123, flags: closePeer ? [.maskCommand] : [.maskCommand, .maskAlternate], view: view, window: window) else')
     ime.write_text(text)
 
 
-def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, wait_lsp=False, split_entry="keyboard"):
+def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, wait_lsp=False, split_entry="keyboard", ime_close=False):
     output = root / phase
     output.mkdir()
     env = {k: v for k, v in os.environ.items() if not k.startswith("MARU_")}
@@ -124,6 +132,8 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
         env["MARU_SCREENSHOT"] = str(output / "first.ppm")
     if wait_lsp:
         env["MARU_SHARED_RESTORE_WAIT_LSP"] = "1"
+    if ime_close:
+        env["MARU_SHARED_RESTORE_IME_CLOSE"] = "1"
     if ime or callbacks:
         env.update(MARU_IME_DEBUG="1", MARU_EDITOR_IME_SMOKE="1", MARU_EDITOR_IME_SMOKE_LIVE="1" if ime else "0",
             MARU_EDITOR_IME_LATE_FOCUS="1", MARU_EDITOR_IME_SMOKE_OUT=str(output / "ime.txt"),
@@ -188,6 +198,16 @@ def run(app, root, phase, document, *, first=False, ime=False, callbacks=False, 
     states = [dict(re.findall(r"(\w+)=(\S+)", line.split("SHARED_RESTORE ", 1)[1]))
               for line in transcript.splitlines() if "SHARED_RESTORE label=" in line]
     result = dict(phase=phase, pid=child.pid, exit_code=code, states=states, images=images)
+    if ime:
+        from ime_handoffs import analyze
+        # Arrival records include rejected callbacks and the pre-observation handoff gap.
+        require(transcript.count("[IME] callback_arrival setMarkedText ") >= 4,
+                "app lacks live callback arrival evidence")
+        result["ime_handoffs"] = analyze(transcript)
+        require(len(result["ime_handoffs"]) == 2, "expected A→B→A or A→B→close")
+        result["ime_close"] = ime_close
+        result["handoff_new_owner_arrivals"] = sum(len(h["new_owner_arrivals"]) for h in result["ime_handoffs"])
+        result["handoff_after_observed_arrivals"] = sum(len(h["after_observed_arrivals"]) for h in result["ime_handoffs"])
     if phase == "close":
         result["close_events"] = [dict(re.findall(r"(\w+)=(\S+)", line.split("SHARED_CLOSE ", 1)[1]))
                                   for line in transcript.splitlines() if line.startswith("SHARED_CLOSE event=")]
@@ -206,12 +226,17 @@ def main():
     parser.add_argument("--move-refusal", action="store_true", help="공유 뷰 일부의 창 이동 거절과 실제 Metal 안내 화면만 검사")
     parser.add_argument("--close-views", action="store_true", help="복원된 공유 뷰 일부 닫기·마지막 취소·저장 후 닫기 AppKit 검사")
     parser.add_argument("--live-ime", action="store_true")
+    parser.add_argument("--ime-close", action="store_true", help="실제 두벌식 조합 중 peer 닫기와 생존 뷰 본문·선택 검사")
     parser.add_argument("--only-ime", action="store_true", help="작은/큰 파일 검증을 생략하고 실제 IME와 재시작만 실행")
     parser.add_argument("--callback-ime", action="store_true", help="OS 입력기 대신 실제 NSTextInputClient 콜백만 주입해 재시작 확인")
     parser.add_argument("--split-entry", choices=("keyboard", "menu", "palette"), default="keyboard",
                         help="새 뷰를 만드는 실제 AppKit 진입점. 키는 창 로컬 NSEvent이며 OS HID와 구별합니다")
     parser.add_argument("--clangd", type=Path, help="실제 clangd 실행 파일로 C 문서 복원 검사. 서버 시작을 1초 늦춘다")
     args = parser.parse_args()
+    if args.ime_close:
+        if args.close_views or args.move_refusal or args.clangd or args.callback_ime:
+            parser.error("IME 닫기는 별도로 실행합니다")
+        args.only_ime = True
     if args.close_views and (args.live_ime or args.only_ime or args.callback_ime or args.clangd or args.move_refusal):
         parser.error("닫기 검증은 별도로 실행합니다")
     if args.clangd and (args.live_ime or args.only_ime or args.callback_ime):
@@ -294,6 +319,8 @@ def main():
             report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
         require(document.read_bytes() == original)
         require(len(list((root / 'backups').glob('*.bak'))) == 1)
+    if args.live_ime or args.only_ime:
+        report["handoff_analyzer_sha256"] = sha(Path(__file__).with_name("ime_handoffs.py"))
     if args.live_ime or args.only_ime or args.callback_ime:
         name = "callbacks" if args.callback_ime else "korean"
         root = output / name
@@ -303,11 +330,16 @@ def main():
         (root / "config").write_text("session.keep-alive-after-quit = false\n" + ("ui.language = ko\n" if args.move_refusal else ""))
         document = root / "document.txt"
         document.write_text("ab😀한cd" if args.callback_ime else "L R")
-        report["scenarios"].append(dict(name=name, **run(app, root, "ime", document, ime=not args.callback_ime, callbacks=args.callback_ime)))
-        report["scenarios"].append(dict(name=name, **run(app, root, "restore", document)))
-        report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
+        report["scenarios"].append(dict(name=name, **run(app, root, "ime", document, ime=not args.callback_ime, callbacks=args.callback_ime, ime_close=args.ime_close)))
+        if args.ime_close:
+            require("SHARED_IME_CLOSE count=1 clean=true bytes=9" in (root / "ime/app.stderr.txt").read_text())
+            require(not list((root / "backups").glob("*.bak")), "saved survivor left dirty backup")
+            report["ime_close_gate_passed"] = True
+        else:
+            report["scenarios"].append(dict(name=name, **run(app, root, "restore", document)))
+            report["issues"].extend(compare_states(name, [s for s in report["scenarios"] if s["name"] == name]))
         report["ime_input"] = "native-callback-injection" if args.callback_ime else "OS-Korean-HID"
-    report["close_views_gate_passed" if args.close_views else "move_refusal_gate_passed" if args.move_refusal else "view_restore_gate_passed"] = not report["issues"]
+    report["ime_close_gate_passed" if args.ime_close else "close_views_gate_passed" if args.close_views else "move_refusal_gate_passed" if args.move_refusal else "view_restore_gate_passed"] = not report["issues"]
     (output / "manifest.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(output / "manifest.json", flush=True)
     if report["issues"]:

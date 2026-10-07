@@ -1,0 +1,13 @@
+....
+======================================================================
+FAIL: test_missing_changed_owner_and_inverted_time_are_rejected (__main__.HandoffTests) (text='[IME_FOCUS] post code=124 owner=2 t=1.0\n[IME_FOCUS] observed owner=2 t=2.0\n')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/mutations/allow-same-owner/test_ime_handoffs.py", line 35, in test_missing_changed_owner_and_inverted_time_are_rejected
+    with self.subTest(text=text), self.assertRaises(ValueError): analyze(text)
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.000s
+
+FAILED (failures=1)

@@ -1,0 +1,29 @@
+FF..
+======================================================================
+FAIL: test_after_observation_and_old_owner_are_separate (__main__.HandoffTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/mutations/ignore-before-observation/test_ime_handoffs.py", line 24, in test_after_observation_and_old_owner_are_separate
+    self.assertEqual(len(result[0]['callbacks']), 2)
+AssertionError: 1 != 2
+
+======================================================================
+FAIL: test_callback_before_driver_observation_is_visible (__main__.HandoffTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/mutations/ignore-before-observation/test_ime_handoffs.py", line 19, in test_callback_before_driver_observation_is_visible
+    self.assertEqual(len(result[0]['new_owner_arrivals']), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_changed_owner_and_inverted_time_are_rejected (__main__.HandoffTests) (text='[IME_FOCUS] post code=124 owner=2 t=1.0\n[IME] callback_arrival insertText accepted=true t=0.5 gen=3 captured=none owner=3 discard=false\n[IME_FOCUS] observed owner=3 t=2.0\n')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/yoonhb/Documents/workspace/maru-ime-late-repeated-20261007/mutations/ignore-before-observation/test_ime_handoffs.py", line 35, in test_missing_changed_owner_and_inverted_time_are_rejected
+    with self.subTest(text=text), self.assertRaises(ValueError): analyze(text)
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.000s
+
+FAILED (failures=3)

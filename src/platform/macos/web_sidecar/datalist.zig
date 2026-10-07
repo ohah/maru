@@ -13,8 +13,12 @@
 //! 프레임의 그 문서(표식)에 돌려보낸다.
 //!
 //! W6m③: iframe(같은·다른 출처)의 대리 스크립트는 칸 사각형을 신뢰된 포인터 사건으로 잰 프레임 원점으로 주 view 기준으로 옮겨
-//! 보낸다(`datalist_page.zig`). 그 원점은 최상위 문서가 스크롤하면 낡는다 — 원점을 잰 뒤에 최상위가 스크롤했으면(`a` 로 계산)
-//! 보이지 않고, 떠 있는 iframe 목록은 최상위 스크롤에 닫는다(`onTopScroll` — 그 iframe 의 스크립트는 바깥 스크롤을 모른다).
+//! 보낸다(`datalist_page.zig`). 그 원점은 바깥이 스크롤하면 낡는다 — 최상위 문서의 스크롤(`on_scroll_offset_changed`)과 maru 가
+//! 보낸 휠(바깥 스크롤 상자도 — 최상위 스크롤 알림은 그것을 모른다, 적대 리뷰 1 회차)에 떠 있는 iframe 목록을 닫고(그 iframe 의
+//! 스크립트는 바깥 스크롤을 모른다), 원점을 잰 뒤에 그런 스크롤이 있었으면(`a` 로 계산) 보이지 않는다(`onScrolled`). 키보드·
+//! 스크립트로 바깥 상자만 굴리면 모른다(문서의 남은 것). 글자·↓ 로 연 목록은 지금 초점을 가진 프레임에서 온 것만 받는다 — 사용자가
+//! 다른 프레임에 치는 동안 광고 iframe 이 스스로 칸에 글을 넣어(`execCommand` 의 `input` 은 isTrusted 다) 목록을 띄우지 못하게
+//! (적대 리뷰 1 회차; 누름으로 연 목록은 그 누름을 받은 프레임이라 건너뛴다 — 누름 처리 중에는 초점이 아직 옮겨 가지 않았다).
 //! iframe 이 다른 문서로 가거나 떨어져 나가면 그 프레임의 목록을 닫는다(떨어진 프레임의 `pagehide` 닫기는 프레임이 무효라 버려진다).
 
 const std = @import("std");
@@ -56,8 +60,6 @@ const Heard = struct {
     has_last: bool = false,
     retired: [16]u8 = undefined,
     retired_at_ms: i64 = 0,
-    /// 마지막으로 최상위 문서가 스크롤한 때(W6m③ — iframe 원점이 낡았는가).
-    scrolled_at_ms: i64 = 0,
 };
 var heard: [64]?Heard = [_]?Heard{null} ** 64;
 const retired_ms: i64 = 1000;
@@ -108,13 +110,37 @@ fn isCurrentMain(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
     return a.*.length == b.*.length and std.mem.eql(u16, a.*.str[0..a.*.length], b.*.str[0..b.*.length]);
 }
 
-/// 그 브라우저의 살아 있는 iframe 인가(W6m③).
+/// 그 브라우저의 살아 있는 iframe 인가(W6m③) — 부모를 따라 올라간 주 프레임이 지금 그 브라우저의 주 프레임이어야 한다(떠나는 문서의
+/// iframe 이 주 프레임 이동 뒤에 보낸 것을 받지 않게 — 적대 리뷰 1 회차).
 fn isLiveSubframe(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
     if (frame.*.is_valid.?(frame) == 0 or frame.*.is_main.?(frame) != 0) return false;
-    const owner = frame.*.get_browser.?(frame);
-    if (owner == null) return false;
-    defer object.release(owner);
-    return owner.*.get_identifier.?(owner) == browser.*.get_identifier.?(browser);
+    var current = frame.*.get_parent.?(frame);
+    while (current != null) {
+        if (current.*.is_main.?(current) != 0) {
+            defer object.release(current);
+            return isCurrentMain(browser, current);
+        }
+        const next = current.*.get_parent.?(current);
+        object.release(current);
+        current = next;
+    }
+    return false;
+}
+
+/// 지금 초점을 가진 프레임이 그것인가.
+fn isFocusedFrame(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) bool {
+    const api = browsers.state.api;
+    const focused = browser.*.get_focused_frame.?(browser);
+    if (focused == null) return false;
+    defer object.release(focused);
+    const a = frame.*.get_identifier.?(frame);
+    if (a == null) return false;
+    defer api.string_userfree_utf16_free(a);
+    const b = focused.*.get_identifier.?(focused);
+    if (b == null) return false;
+    defer api.string_userfree_utf16_free(b);
+    if (a.*.length == 0 or a.*.str == null or b.*.str == null) return false;
+    return a.*.length == b.*.length and std.mem.eql(u16, a.*.str[0..a.*.length], b.*.str[0..b.*.length]);
 }
 
 fn frameIdEquals(api: *const library.Api, frame: [*c]c.cef_frame_t, entry: *const Shown) bool {
@@ -180,8 +206,13 @@ pub fn onMessage(id: BrowserId, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_f
     switch (parsed) {
         .hide => closeFor(id, token),
         .show => |s| {
-            // iframe 의 원점을 잰 뒤에 최상위가 스크롤했다 — 자리가 낡았을 수 있어 보이지 않는다(포인터를 움직이면 다시 잰다).
-            if (!main) if (h) |x| if (x.scrolled_at_ms != 0 and nowMs() - @as(i64, s.age_ms) <= x.scrolled_at_ms) return closeFor(id, token);
+            // 글자·↓ 로 연 목록은 초점을 가진 프레임에서 온 것만(위 머리 주석).
+            if (!s.by_press and !isFocusedFrame(browser, frame)) return closeFor(id, token);
+            // iframe 의 원점을 잰 뒤에 바깥이 스크롤했다 — 자리가 낡았을 수 있어 보이지 않는다(포인터를 움직이면 다시 잰다).
+            if (!main) {
+                const scrolled = scrolledAt(id);
+                if (scrolled != 0 and nowMs() - @as(i64, s.age_ms) <= scrolled) return closeFor(id, token);
+            }
             const slot = shownFor(id) orelse freeSlot() orelse return;
             const list_id = next_list;
             next_list +%= 1;
@@ -258,11 +289,17 @@ pub fn reset(id: BrowserId) void {
     browsers.state.writer.send(.{ .datalist_hide = .{ .browser = id, .list = list_id } }) catch {};
 }
 
-/// 최상위 문서가 스크롤했다(W6m③ — render handler 의 `on_scroll_offset_changed`). iframe 의 목록은 닫는다 — 그 iframe 의 스크립트는
-/// 바깥 스크롤을 몰라 목록이 옛 자리에 남는다(주 프레임 목록은 그 스크립트가 문서 스크롤에 닫는다). 그 뒤 iframe 이 낡은 원점으로
-/// 보내는 목록은 받지 않는다(`onMessage`).
-pub fn onTopScroll(id: BrowserId) void {
-    if (heardFor(id)) |h| h.scrolled_at_ms = nowMs();
+fn scrolledAt(id: BrowserId) i64 {
+    const entry = browsers.state.registry.byId(id) orelse return 0;
+    return entry.datalist_scrolled_ms;
+}
+
+/// 바깥이 스크롤했을 수 있다(W6m③ — 최상위 문서의 `on_scroll_offset_changed`, maru 가 보낸 휠). iframe 의 목록은 닫는다 — 그
+/// iframe 의 스크립트는 바깥 스크롤을 몰라 목록이 옛 자리에 남는다(주 프레임 목록은 그 스크립트가 문서·상자 스크롤에 닫는다). 그 뒤
+/// iframe 이 낡은 원점으로 보내는 목록은 받지 않는다(`onMessage`). 시각은 브라우저 기록에 둔다(목록을 쓴 적 없는 탭도 — 표 칸을
+/// 잡지 않는다, 적대 리뷰 1 회차).
+pub fn onScrolled(id: BrowserId) void {
+    if (browsers.state.registry.byId(id)) |entry| entry.datalist_scrolled_ms = nowMs();
     const slot = shownFor(id) orelse return;
     if (slot.*.?.main) return;
     const list_id = slot.*.?.list;

@@ -7520,12 +7520,14 @@ binary의 실제 실행은 이 불변식을 만족할 수 없으므로 일반 `t
 `maru-macos-app`이 사용자의 `~/Library/Application Support/maru/workspace.v1`을 읽거나 교체하지 못하게 한다.
 session-host root만 옮기고 workspace home을 그대로 두면 테스트 host 자체는 격리되어도 자식 앱 종료 시 그 격리
 host의 handle 하나가 실제 checkpoint 전체를 대체해, 살아 있는 제품 host/runtime의 재접속 정보가 사라진다.
-격리 home 주입에 실패해도 테스트를 시작하지 않는다. `HOME`은 **실제 사용자 홈일 때만** PID별 임시 홈(`/tmp/maru-home-<pid>`, session root와 다른 자리)으로 바꾸고
+격리 home 주입에 실패해도 테스트를 시작하지 않는다. `HOME`은 **실제 사용자 홈일 때만** 실행마다 새로 만든 임시 홈(`mkdtemp` — `/tmp/maru-home-<pid>-XXXXXX`, session root와 다른 자리)으로 바꾸고
 이미 설정된 `XDG_CACHE_HOME`·`XDG_CONFIG_HOME`·`XDG_DATA_HOME`·`XDG_STATE_HOME`도 그 아래로 옮긴 뒤 그 환경으로
 자기 자신을 다시 exec 한다(2026-10-04, pid 유지). 제품 자식은 `HOME`에서
 캐시를 유도하므로, 예전처럼 두면 테스트가 띄운 `maru __session-host`가 실제 `~/.cache/maru/agent-turn-events/`에
 칸을 만들고 그 안의 죽은 host 칸을 정리했다. 전체 `zig build test`를 가짜 `HOME`으로 돌려 새로 실패하는 판정자가
-없음을 확인했다. 이미 다른 곳을 가리키는 `HOME`(앱 스모크 빌드 스텝의 fixture home)은 그 스텝의 격리라 그대로 둔다.
+없음을 확인했다. 이미 다른 곳을 가리키는 `HOME`(앱 스모크 빌드 스텝의 fixture home)은 그 스텝의 격리라 그대로 두되, 그 밖을 가리키는
+`XDG_*`는 그 `HOME` 아래로 옮긴다(2026-10-07). login(1)로 감싼 셸은 예외다 — login이 `HOME`을 실제 홈으로 다시 정한다
+(범위는 `docs/development-commands.md`와 러너 주석).
 
 Unix socket은 macOS `sockaddr_un.sun_path`의
 NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는

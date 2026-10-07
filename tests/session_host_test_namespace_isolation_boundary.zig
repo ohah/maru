@@ -73,8 +73,12 @@ test "product-child fixtures require an isolated root and the default suite neve
     try std.testing.expect(std.mem.indexOf(
         u8,
         runner,
-        "if (setenv(\"HOME\", home.ptr, 1) != 0)",
+        "if (setenv(\"HOME\", made, 1) != 0)",
     ) != null);
+    // 임시 홈은 실행마다 새로 만든다(`mkdtemp`). 있던 자리(`EEXIST`)를 받아들이면 pid 재사용 때 이전 실행의 캐시를
+    // 물려받고, 다른 사용자가 미리 둔 디렉터리·심볼릭 링크를 홈으로 쓴다.
+    try std.testing.expect(std.mem.indexOf(u8, runner, "mkdtemp(template.ptr) orelse return error.IsolationFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner, "std.c.E.EXIST") == null);
     // 시작 뒤 setenv 만으로는 std 가 붙잡은 envp 조각이 실제 홈을 계속 본다 — 그 환경으로 다시 exec 해야 한다.
     try std.testing.expect(std.mem.indexOf(u8, runner, "_ = std.c.execve(@ptrCast(&exe_buf), _NSGetArgv().*, environ);") != null);
     // signed product E2E 자체는 `builtin.is_test == false`로 컴파일된다. 따라서 parent가
@@ -110,18 +114,32 @@ test "common runner never leaves the real user HOME to tests or their product ch
     const real = std.mem.span(pw.dir orelse return error.MissingPasswdEntry);
     try std.testing.expect(!std.mem.eql(u8, std.mem.trimEnd(u8, home, "/"), std.mem.trimEnd(u8, real, "/")));
 
-    // HOME 은 session root 와 다른 자리다 — root 안에는 session host 의 것만 둔다. 러너가 바꾼 경우(= 부모가 실제
-    // 홈을 줬다)에는 이미 설정돼 있던 XDG_* 도 새 홈 아래로 옮겼어야 한다.
+    // HOME 은 session root 와 다른 자리다 — root 안에는 session host 의 것만 둔다.
     if (std.c.getenv("MARU_SESSION_HOST_ROOT")) |root| {
         try std.testing.expect(!std.mem.eql(u8, std.mem.trimEnd(u8, home, "/"), std.mem.trimEnd(u8, std.mem.span(root), "/")));
     }
-    var expected_buf: [64]u8 = undefined;
-    const expected = try std.fmt.bufPrintZ(&expected_buf, "/tmp/maru-home-{d}", .{std.c.getpid()});
-    if (std.mem.eql(u8, home, expected)) {
-        for ([_][*:0]const u8{ "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME" }) |name| {
-            const value = std.mem.span(std.c.getenv(name) orelse continue);
-            try std.testing.expect(std.mem.startsWith(u8, value, home));
-        }
+    // 이미 설정된 XDG_* 는 **언제나** 지금 HOME 아래다 — 러너가 HOME 을 바꾼 경우만이 아니다. 예전에는 fixture home 을
+    // 받은 스텝이 셸의 실제 `XDG_CACHE_HOME` 을 그대로 물려받았다(2026-10-06 재현). 칸 단위로 본다(`/tmp/h` ⊄ `/tmp/home`).
+    const home_dir = std.mem.trimEnd(u8, home, "/");
+    for ([_][*:0]const u8{ "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME" }) |name| {
+        const value = std.mem.trimEnd(u8, std.mem.span(std.c.getenv(name) orelse continue), "/");
+        try std.testing.expect(std.mem.startsWith(u8, value, home_dir));
+        try std.testing.expect(value.len == home_dir.len or value[home_dir.len] == '/');
+    }
+    // 러너가 세운 임시 홈이면 **이 실행이 새로 만든 자리**다 — 이 사용자 소유의 0700 디렉터리이고 심볼릭 링크가 아니며,
+    // 이름에 pid 뒤 무작위 꼬리가 붙는다(`mkdtemp`). 예전에는 `/tmp/maru-home-<pid>` 의 `EEXIST` 를 받아들여 pid 재사용 때
+    // 이전 실행의 캐시를 물려받았고, 다른 사용자가 미리 둔 디렉터리·링크도 그대로 홈으로 썼다.
+    var prefix_buf: [64]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&prefix_buf, "/tmp/maru-home-{d}", .{std.c.getpid()});
+    if (std.mem.startsWith(u8, home, prefix)) {
+        try std.testing.expect(home.len > prefix.len + 1 and home[prefix.len] == '-');
+        var home_z_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const home_z = try std.fmt.bufPrintZ(&home_z_buf, "{s}", .{home});
+        var info: std.posix.Stat = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, home_z.ptr, &info, std.posix.AT.SYMLINK_NOFOLLOW));
+        try std.testing.expect(std.posix.S.ISDIR(info.mode));
+        try std.testing.expectEqual(std.c.getuid(), info.uid);
+        try std.testing.expectEqual(@as(@TypeOf(info.mode), 0o700), info.mode & 0o777);
     }
 }
 

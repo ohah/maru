@@ -63,9 +63,13 @@ pub const Match = struct {
 ///   2. **할당이 사라진다.** 검색어는 입력 상자 한 줄이라 짧고, 매번 다시 디코드해도 비용이
 ///      후보 위치당 needle 길이뿐이다 — 순진한 부분 문자열 탐색이 원래 하는 그 일이다.
 fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8, opts: Options) ?usize {
+    return matchAtControlled(line, from, needle_utf8, opts, null) catch unreachable;
+}
+fn matchAtControlled(line: []const u8, from: usize, needle_utf8: []const u8, opts: Options, cancelled: ?*const std.atomic.Value(bool)) error{Cancelled}!?usize {
     var i = from;
     var n: usize = 0;
     while (n < needle_utf8.len) {
+        if (cancelled) |flag| if (flag.load(.acquire)) return error.Cancelled;
         if (i >= line.len) return null;
         // ASCII는 byte 하나가 코드포인트 하나다. 접기 규칙은 기존 소유자를 그대로 쓴다.
         if (needle_utf8[n] < 0x80 and line[i] < 0x80) {
@@ -95,6 +99,22 @@ fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8, opts: Options
     // 매치 양끝의 경계는 전체 span이 정해진 뒤 판정한다. 더블클릭 tokenizer와는 별도 계약이다.
     if (opts.whole_word and !isWholeWord(line, from, i)) return null;
     return i;
+}
+
+/// 불변 본문에서 제한된 시작 위치만 검사한다. worker는 호출 사이에 취소를 확인한다.
+/// 매치 끝과 단어 문맥은 원문에서 검사하므로 배치 경계가 결과를 바꾸지 않는다.
+pub fn nextLiteralBatch(content: []const u8, needle: []const u8, opts: Options, from: *usize, scan_bytes: usize, cancelled: *const std.atomic.Value(bool)) error{Cancelled}!?regex.Span {
+    if (needle.len == 0 or scan_bytes == 0) return null;
+    const until = from.* +| scan_bytes;
+    while (from.* < content.len and from.* < until) {
+        const start = from.*;
+        if (try matchAtControlled(content, start, needle, opts, cancelled)) |end| {
+            from.* = end;
+            return .{ .start = start, .end = end };
+        }
+        from.* += stepBytes(content, from.*);
+    }
+    return null;
 }
 
 /// VS Code 기본 구분자의 공개 데이터로 승인된 검색 경계를 독립 구현한다.
@@ -139,7 +159,7 @@ fn searchSeparator(byte: u8) bool {
     };
 }
 
-fn isWholeWord(text: []const u8, lo: usize, hi: usize) bool {
+pub fn isWholeWord(text: []const u8, lo: usize, hi: usize) bool {
     if (lo > hi or hi > text.len) return false;
     const consuming = lo < hi;
     const left = lo == 0 or searchSeparator(text[lo - 1]) or text[lo - 1] == '\r' or text[lo - 1] == '\n' or
@@ -319,6 +339,23 @@ test "FND33 평문 개선은 독립 코드포인트 판정과 모든 범위가 �
                 var actual = try collectOpts(&lines, query, opts);
                 defer actual.deinit(testing.allocator);
                 try testing.expectEqualSlices(Match, expected.items, actual.items);
+                if (query.len > 0 and std.unicode.utf8ValidateSlice(query)) {
+                    var batched: std.ArrayList(Match) = .empty;
+                    defer batched.deinit(testing.allocator);
+                    var cancelled: std.atomic.Value(bool) = .init(false);
+                    for (lines, 0..) |line, li| {
+                        var from: usize = 0;
+                        while (from < line.len) {
+                            if (try nextLiteralBatch(line, query, opts, &from, 7, &cancelled)) |span| {
+                                try batched.append(testing.allocator, .{ .line = @intCast(li), .start = @intCast(span.start), .len = @intCast(span.end - span.start) });
+                            }
+                        }
+                    }
+                    try testing.expectEqualSlices(Match, expected.items, batched.items);
+                    cancelled.store(true, .release);
+                    var from: usize = 0;
+                    try testing.expectError(error.Cancelled, nextLiteralBatch("foo", "foo", opts, &from, 1, &cancelled));
+                }
             }
         }
     }

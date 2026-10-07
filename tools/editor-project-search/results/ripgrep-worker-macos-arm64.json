@@ -1,0 +1,1617 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "name": "normal",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90462,
+          "reaped": true,
+          "bytes": 1363,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 6,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 11
+    },
+    {
+      "name": "occupied-zero",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90466,
+          "reaped": true,
+          "bytes": 1362,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 3,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 8
+    },
+    {
+      "name": "budget",
+      "summary": {
+        "status": "partial",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90468,
+          "reaped": true,
+          "bytes": 635,
+          "reads": 1,
+          "first_output_ms": 1,
+          "elapsed_ms": 1,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": "ResultBudget"
+      },
+      "wall_ms": 8
+    },
+    {
+      "name": "pre-cancel",
+      "summary": {
+        "status": "cancelled",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": null,
+          "reaped": false,
+          "bytes": 0,
+          "reads": 0,
+          "first_output_ms": null,
+          "elapsed_ms": 0,
+          "exit": null
+        },
+        "cancel_latency_ms": 1,
+        "failure": null
+      },
+      "wall_ms": 4
+    },
+    {
+      "name": "normalized-open-model-zero",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90471,
+          "reaped": true,
+          "bytes": 1362,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "model-zero-overrides-disk",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90473,
+          "reaped": true,
+          "bytes": 1362,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "independent-models-same-path",
+      "summary": {
+        "status": "complete",
+        "matches": 4,
+        "excluded": 0,
+        "batches": 2,
+        "stats": {
+          "child_pid": 90475,
+          "reaped": true,
+          "bytes": 1362,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 4,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 9
+    },
+    {
+      "name": "model-unicode-coordinates",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 2,
+        "stats": {
+          "child_pid": 90477,
+          "reaped": true,
+          "bytes": 1362,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 4,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 9
+    },
+    {
+      "name": "shared-model-once",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 2,
+        "stats": {
+          "child_pid": 90479,
+          "reaped": true,
+          "bytes": 1362,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "vcs-root-rejected",
+      "summary": {
+        "status": "failed",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": null,
+          "reaped": false,
+          "bytes": 0,
+          "reads": 0,
+          "first_output_ms": null,
+          "elapsed_ms": 0,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": "VcsRoot"
+      },
+      "wall_ms": 4
+    },
+    {
+      "name": "vcs-logical-root-alias-rejected",
+      "summary": {
+        "status": "failed",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": null,
+          "reaped": false,
+          "bytes": 0,
+          "reads": 0,
+          "first_output_ms": null,
+          "elapsed_ms": 0,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": "VcsRoot"
+      },
+      "wall_ms": 4
+    },
+    {
+      "name": "model-fold",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90483,
+          "reaped": true,
+          "bytes": 260,
+          "reads": 1,
+          "first_output_ms": 4,
+          "elapsed_ms": 10,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "model-word-policy",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 2,
+        "stats": {
+          "child_pid": 90485,
+          "reaped": true,
+          "bytes": 1363,
+          "reads": 3,
+          "first_output_ms": 2,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "model-full-document-regex",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90487,
+          "reaped": true,
+          "bytes": 260,
+          "reads": 1,
+          "first_output_ms": 4,
+          "elapsed_ms": 11,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "model-empty-first-alternative",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 2,
+        "stats": {
+          "child_pid": 90489,
+          "reaped": true,
+          "bytes": 1354,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "empty-model-regex-EOF",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90491,
+          "reaped": true,
+          "bytes": 260,
+          "reads": 1,
+          "first_output_ms": 4,
+          "elapsed_ms": 11,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "immutable-model-after-edit",
+      "summary": {
+        "status": "complete",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90493,
+          "reaped": true,
+          "bytes": 260,
+          "reads": 1,
+          "first_output_ms": 4,
+          "elapsed_ms": 11,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 17
+    },
+    {
+      "name": "glob-disk-0",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90495,
+          "reaped": true,
+          "bytes": 1706,
+          "reads": 4,
+          "first_output_ms": 1,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-model-0",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90497,
+          "reaped": true,
+          "bytes": 1706,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-1",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90499,
+          "reaped": true,
+          "bytes": 737,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "glob-model-1",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90501,
+          "reaped": true,
+          "bytes": 737,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "glob-disk-2",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90504,
+          "reaped": true,
+          "bytes": 1235,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "glob-model-2",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90506,
+          "reaped": true,
+          "bytes": 1235,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-3",
+      "summary": {
+        "status": "complete",
+        "matches": 7,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90510,
+          "reaped": true,
+          "bytes": 3638,
+          "reads": 8,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-model-3",
+      "summary": {
+        "status": "complete",
+        "matches": 7,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90512,
+          "reaped": true,
+          "bytes": 3638,
+          "reads": 8,
+          "first_output_ms": 2,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-4",
+      "summary": {
+        "status": "complete",
+        "matches": 11,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90515,
+          "reaped": true,
+          "bytes": 5552,
+          "reads": 12,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 17
+    },
+    {
+      "name": "glob-model-4",
+      "summary": {
+        "status": "complete",
+        "matches": 11,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90519,
+          "reaped": true,
+          "bytes": 5552,
+          "reads": 12,
+          "first_output_ms": 2,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 13
+    },
+    {
+      "name": "glob-disk-5",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90522,
+          "reaped": true,
+          "bytes": 1712,
+          "reads": 4,
+          "first_output_ms": 1,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-model-5",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90527,
+          "reaped": true,
+          "bytes": 1712,
+          "reads": 4,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "glob-disk-6",
+      "summary": {
+        "status": "complete",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90529,
+          "reaped": true,
+          "bytes": 256,
+          "reads": 1,
+          "first_output_ms": 6,
+          "elapsed_ms": 12,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 17
+    },
+    {
+      "name": "glob-model-6",
+      "summary": {
+        "status": "complete",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90531,
+          "reaped": true,
+          "bytes": 256,
+          "reads": 1,
+          "first_output_ms": 4,
+          "elapsed_ms": 10,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-7",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90534,
+          "reaped": true,
+          "bytes": 1214,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-model-7",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90536,
+          "reaped": true,
+          "bytes": 1214,
+          "reads": 3,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-8",
+      "summary": {
+        "status": "complete",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90538,
+          "reaped": true,
+          "bytes": 256,
+          "reads": 1,
+          "first_output_ms": 5,
+          "elapsed_ms": 11,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 17
+    },
+    {
+      "name": "glob-model-8",
+      "summary": {
+        "status": "complete",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90540,
+          "reaped": true,
+          "bytes": 256,
+          "reads": 1,
+          "first_output_ms": 3,
+          "elapsed_ms": 10,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "glob-disk-9",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90542,
+          "reaped": true,
+          "bytes": 733,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-model-9",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90545,
+          "reaped": true,
+          "bytes": 731,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "glob-disk-10",
+      "summary": {
+        "status": "complete",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90547,
+          "reaped": true,
+          "bytes": 256,
+          "reads": 1,
+          "first_output_ms": 5,
+          "elapsed_ms": 11,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "glob-model-10",
+      "summary": {
+        "status": "complete",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90549,
+          "reaped": true,
+          "bytes": 256,
+          "reads": 1,
+          "first_output_ms": 4,
+          "elapsed_ms": 11,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-11",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90551,
+          "reaped": true,
+          "bytes": 737,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 17
+    },
+    {
+      "name": "glob-model-11",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90554,
+          "reaped": true,
+          "bytes": 737,
+          "reads": 2,
+          "first_output_ms": 1,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-12",
+      "summary": {
+        "status": "complete",
+        "matches": 6,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90557,
+          "reaped": true,
+          "bytes": 3157,
+          "reads": 7,
+          "first_output_ms": 1,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "glob-model-12",
+      "summary": {
+        "status": "complete",
+        "matches": 6,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90559,
+          "reaped": true,
+          "bytes": 3156,
+          "reads": 7,
+          "first_output_ms": 2,
+          "elapsed_ms": 3,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 8
+    },
+    {
+      "name": "glob-disk-13",
+      "summary": {
+        "status": "complete",
+        "matches": 4,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90561,
+          "reaped": true,
+          "bytes": 2182,
+          "reads": 5,
+          "first_output_ms": 1,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-model-13",
+      "summary": {
+        "status": "complete",
+        "matches": 4,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90563,
+          "reaped": true,
+          "bytes": 2182,
+          "reads": 5,
+          "first_output_ms": 2,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "glob-disk-14",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90566,
+          "reaped": true,
+          "bytes": 1214,
+          "reads": 3,
+          "first_output_ms": 1,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "glob-model-14",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90568,
+          "reaped": true,
+          "bytes": 1215,
+          "reads": 3,
+          "first_output_ms": 2,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "glob-disk-15",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90570,
+          "reaped": true,
+          "bytes": 1214,
+          "reads": 3,
+          "first_output_ms": 2,
+          "elapsed_ms": 3,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 8
+    },
+    {
+      "name": "glob-model-15",
+      "summary": {
+        "status": "complete",
+        "matches": 2,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90572,
+          "reaped": true,
+          "bytes": 1214,
+          "reads": 3,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-16",
+      "summary": {
+        "status": "complete",
+        "matches": 5,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90577,
+          "reaped": true,
+          "bytes": 2656,
+          "reads": 6,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "glob-model-16",
+      "summary": {
+        "status": "complete",
+        "matches": 5,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90580,
+          "reaped": true,
+          "bytes": 2656,
+          "reads": 6,
+          "first_output_ms": 1,
+          "elapsed_ms": 4,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 9
+    },
+    {
+      "name": "glob-disk-17",
+      "summary": {
+        "status": "complete",
+        "matches": 5,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90582,
+          "reaped": true,
+          "bytes": 2665,
+          "reads": 6,
+          "first_output_ms": 1,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 14
+    },
+    {
+      "name": "glob-model-17",
+      "summary": {
+        "status": "complete",
+        "matches": 5,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90585,
+          "reaped": true,
+          "bytes": 2665,
+          "reads": 6,
+          "first_output_ms": 1,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "glob-disk-18",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90587,
+          "reaped": true,
+          "bytes": 734,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 5,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 9
+    },
+    {
+      "name": "glob-model-18",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90589,
+          "reaped": true,
+          "bytes": 734,
+          "reads": 2,
+          "first_output_ms": 1,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "glob-disk-19",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90591,
+          "reaped": true,
+          "bytes": 739,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 11,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "glob-model-19",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90594,
+          "reaped": true,
+          "bytes": 737,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 10,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "ignored-open-model",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90596,
+          "reaped": true,
+          "bytes": 259,
+          "reads": 1,
+          "first_output_ms": 6,
+          "elapsed_ms": 11,
+          "exit": 1
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 17
+    },
+    {
+      "name": "result-cap",
+      "summary": {
+        "status": "partial",
+        "matches": 20000,
+        "excluded": 0,
+        "batches": 17,
+        "stats": {
+          "child_pid": 90598,
+          "reaped": true,
+          "bytes": 3653632,
+          "reads": 223,
+          "first_output_ms": 211,
+          "elapsed_ms": 235,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": "ResultBudget"
+      },
+      "wall_ms": 297
+    },
+    {
+      "name": "stale-root-generation",
+      "summary": {
+        "status": "cancelled",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90602,
+          "reaped": true,
+          "bytes": 0,
+          "reads": 0,
+          "first_output_ms": null,
+          "elapsed_ms": 12,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 17
+    },
+    {
+      "name": "large-cancel",
+      "summary": {
+        "status": "cancelled",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90604,
+          "reaped": true,
+          "bytes": 0,
+          "reads": 0,
+          "first_output_ms": null,
+          "elapsed_ms": 12,
+          "exit": null
+        },
+        "cancel_latency_ms": 12,
+        "failure": null
+      },
+      "wall_ms": 17
+    },
+    {
+      "name": "symlink-cycle",
+      "summary": {
+        "status": "partial",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90606,
+          "reaped": true,
+          "bytes": 725,
+          "reads": 2,
+          "first_output_ms": 2,
+          "elapsed_ms": 10,
+          "exit": 2
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 16
+    },
+    {
+      "name": "fifo-skipped",
+      "summary": {
+        "status": "complete",
+        "matches": 1,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90608,
+          "reaped": true,
+          "bytes": 725,
+          "reads": 2,
+          "first_output_ms": 1,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 15
+    },
+    {
+      "name": "bundle-helper",
+      "summary": {
+        "status": "complete",
+        "matches": 3,
+        "excluded": 0,
+        "batches": 1,
+        "stats": {
+          "child_pid": 90611,
+          "reaped": true,
+          "bytes": 1365,
+          "reads": 3,
+          "first_output_ms": 3,
+          "elapsed_ms": 9,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": null
+      },
+      "wall_ms": 193
+    },
+    {
+      "name": "malformed-helper-reaped",
+      "summary": {
+        "status": "failed",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90613,
+          "reaped": true,
+          "bytes": 22,
+          "reads": 1,
+          "first_output_ms": 148,
+          "elapsed_ms": 148,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": "UnknownEvent"
+      },
+      "wall_ms": 155
+    },
+    {
+      "name": "oversized-event-partial-reaped",
+      "summary": {
+        "status": "partial",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90615,
+          "reaped": true,
+          "bytes": 4210688,
+          "reads": 257,
+          "first_output_ms": 161,
+          "elapsed_ms": 162,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": "EventTooLarge"
+      },
+      "wall_ms": 168
+    },
+    {
+      "name": "root-replaced-rejected",
+      "summary": {
+        "status": "failed",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90620,
+          "reaped": true,
+          "bytes": 55,
+          "reads": 1,
+          "first_output_ms": 240,
+          "elapsed_ms": 247,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": "RootChanged"
+      },
+      "wall_ms": 252
+    },
+    {
+      "name": "summary-count-mismatch-reaped",
+      "summary": {
+        "status": "failed",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90630,
+          "reaped": true,
+          "bytes": 55,
+          "reads": 1,
+          "first_output_ms": 159,
+          "elapsed_ms": 159,
+          "exit": null
+        },
+        "cancel_latency_ms": null,
+        "failure": "SummaryMismatch"
+      },
+      "wall_ms": 165
+    },
+    {
+      "name": "empty-success-output-rejected",
+      "summary": {
+        "status": "failed",
+        "matches": 0,
+        "excluded": 0,
+        "batches": 0,
+        "stats": {
+          "child_pid": 90633,
+          "reaped": true,
+          "bytes": 0,
+          "reads": 0,
+          "first_output_ms": null,
+          "elapsed_ms": 6,
+          "exit": 0
+        },
+        "cancel_latency_ms": null,
+        "failure": "IncompleteOutput"
+      },
+      "wall_ms": 12
+    }
+  ],
+  "worker_sha256": "373eef4f5d599f2b122a6988e3ee8a3b183787900cb5bab251e51239f6283a0b",
+  "rg_sha256": "44b08bb5d667490ba0dbe196befeadbecfcb67bf610d0146e415eb5a7effaa41",
+  "measurement": {
+    "scope": "standalone actual backend; includes native file initialization, not Maru GUI RSS or all filesystem cancellation guarantee",
+    "records": [
+      {
+        "model_bytes": 1048576,
+        "cancel_after_ms": -1,
+        "first_match_wall_ms": 8.9,
+        "wall_ms": 19.81,
+        "peak_probe_rss_bytes": 6275072,
+        "summary": {
+          "status": "complete",
+          "matches": 2,
+          "excluded": 0,
+          "batches": 2,
+          "stats": {
+            "child_pid": 69245,
+            "reaped": true,
+            "bytes": 734,
+            "reads": 2,
+            "first_output_ms": 1,
+            "elapsed_ms": 10,
+            "exit": 0
+          },
+          "cancel_latency_ms": null,
+          "failure": null
+        }
+      },
+      {
+        "model_bytes": 1048576,
+        "cancel_after_ms": 1,
+        "first_match_wall_ms": null,
+        "wall_ms": 7.05,
+        "peak_probe_rss_bytes": 6209536,
+        "summary": {
+          "status": "cancelled",
+          "matches": 0,
+          "excluded": 0,
+          "batches": 0,
+          "stats": {
+            "child_pid": null,
+            "reaped": false,
+            "bytes": 0,
+            "reads": 0,
+            "first_output_ms": null,
+            "elapsed_ms": 0,
+            "exit": null
+          },
+          "cancel_latency_ms": 1,
+          "failure": null
+        }
+      },
+      {
+        "model_bytes": 16777216,
+        "cancel_after_ms": -1,
+        "first_match_wall_ms": 48.14,
+        "wall_ms": 61.55,
+        "peak_probe_rss_bytes": 55230464,
+        "summary": {
+          "status": "complete",
+          "matches": 2,
+          "excluded": 0,
+          "batches": 2,
+          "stats": {
+            "child_pid": 69251,
+            "reaped": true,
+            "bytes": 734,
+            "reads": 2,
+            "first_output_ms": 2,
+            "elapsed_ms": 9,
+            "exit": 0
+          },
+          "cancel_latency_ms": null,
+          "failure": null
+        }
+      },
+      {
+        "model_bytes": 16777216,
+        "cancel_after_ms": 1,
+        "first_match_wall_ms": null,
+        "wall_ms": 17.22,
+        "peak_probe_rss_bytes": 55181312,
+        "summary": {
+          "status": "cancelled",
+          "matches": 0,
+          "excluded": 0,
+          "batches": 0,
+          "stats": {
+            "child_pid": null,
+            "reaped": false,
+            "bytes": 0,
+            "reads": 0,
+            "first_output_ms": null,
+            "elapsed_ms": 0,
+            "exit": null
+          },
+          "cancel_latency_ms": 2,
+          "failure": null
+        }
+      },
+      {
+        "model_bytes": 33554432,
+        "cancel_after_ms": -1,
+        "first_match_wall_ms": 90.42,
+        "wall_ms": 106.82,
+        "peak_probe_rss_bytes": 107347968,
+        "summary": {
+          "status": "complete",
+          "matches": 2,
+          "excluded": 0,
+          "batches": 2,
+          "stats": {
+            "child_pid": 69256,
+            "reaped": true,
+            "bytes": 734,
+            "reads": 2,
+            "first_output_ms": 2,
+            "elapsed_ms": 10,
+            "exit": 0
+          },
+          "cancel_latency_ms": null,
+          "failure": null
+        }
+      },
+      {
+        "model_bytes": 33554432,
+        "cancel_after_ms": 1,
+        "first_match_wall_ms": null,
+        "wall_ms": 25.64,
+        "peak_probe_rss_bytes": 107282432,
+        "summary": {
+          "status": "cancelled",
+          "matches": 0,
+          "excluded": 0,
+          "batches": 0,
+          "stats": {
+            "child_pid": null,
+            "reaped": false,
+            "bytes": 0,
+            "reads": 0,
+            "first_output_ms": null,
+            "elapsed_ms": 0,
+            "exit": null
+          },
+          "cancel_latency_ms": 2,
+          "failure": null
+        }
+      }
+    ]
+  },
+  "scope": "Actual backend API with staged immutable native files and synthetic roots. AppSession document enumeration, watcher registration/overflow, real IME, app shutdown and GUI RSS are not validated.",
+  "sources_sha256": {
+    "src/session/editor/search/request.zig": "9633660a8db72231ad7ae69715755a5a0db8a057ada9aff810f971f3a99c331e",
+    "src/session/editor/search/event.zig": "127867c6ef02c4660a256cae042b8a15a744bc3cfde260be99ad054f6527bacd",
+    "src/session/editor/search/query.zig": "366fe1538b92a0c8c75c56bd2b4e066fc98171774a886b867f06e31bcf197745",
+    "src/session/editor/find.zig": "d23a3e9544b25164bd943bed624daccbce35d84fe4bd2166024d85d965afd61a",
+    "src/platform/macos/app_session/editor/search/model.zig": "100695e4915bb01f2d475cbd036fbace0573fe16fa5e80194c1edc9c31550c12",
+    "src/platform/macos/app_session/editor/search/scope.zig": "a6a76ffe0cef4403698bbf3c22d382020ed5d9ee95f2a7f18981e57460bf3fe2",
+    "src/platform/macos/app_session/editor/search/process.zig": "652d2967bfdcad901bd2f206a8aad641c840db2e59851e0387d6289fa62dc343",
+    "src/platform/macos/app_session/editor/search/backend.zig": "ea10702d530d9a6374c1ea57a1ebf00e2ee5eedb049164c2fdfeaf15ab48674c",
+    "src/platform/macos/app_session/editor/search/helper.zig": "dd716f98ad4c45efbaf171a222eb72049a82c8d39f67b498d612e20d3ad2612b"
+  }
+}

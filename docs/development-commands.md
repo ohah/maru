@@ -1162,3 +1162,9 @@ arrival, 기존/새 owner와 다음 정상 키의 콜백을 구분하는 분석�
 분석기의 `new_owner_arrivals`는 handoff 구간의 새 owner 도착 수다. AppKit 콜백에 원래
 트랜잭션 ID가 없으므로 이 숫자만으로 이전 owner의 stale callback이라고 판정하지 않는다.
 값 0도 자연 발생한 늦은 콜백을 처리할 수 있다는 증거로 세지 않는다.
+
+## 프로젝트 검색 worker
+
+- `mise run test-macos-project-search-worker`: 실제 backend API·helper·불변 모델·취소·부분 결과 fixture.
+- `zig build test-editor-project-search -Doptimize=ReleaseFast`: 요청 세대·점유·예산·argv/JSON/분할 판정자.
+- 실행 증거와 제품 연결의 남은 gate는 [worker 계획](plans/editor-project-search-worker.md)을 따른다.

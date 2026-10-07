@@ -1,6 +1,6 @@
 # 프로젝트 전체 검색과 바꾸기 미리보기
 
-상태: **2026-10-07 엔진/의존성 채택 완료. 번들·argv·JSON 프로토콜 기반 구현, 제품 worker·도크는 미연결.**
+상태: **2026-10-07 엔진/의존성 채택 완료. 번들·argv·JSON·worker 백엔드 구현·합성 실행 검증, 앱 문서/감시·도크는 미연결.**
 사용자가 “VS Code와 동일하게, ripgrep 써도 됩니다”라고 승인했다. 다시 번들 채택 승인을 묻지 않는다.
 2026-10-06 승인한 [편집기 검색 정책](editor-search-policy.md)은 유지한다.
 
@@ -9,7 +9,7 @@
 - **디스크 본문 검색도 rg가 실행한다.** 고정 공식 15.2.0 helper를 번들에 넣고 shell 없이 실행하며
   정규식은 `--engine=auto`, 출력은 JSON, 사용자 rg config는 `--no-config`로 배제한다.
 - **열린 문서는 dirty 여부와 무관하게 현재 편집 모델을 검색해 우선한다.** 0건/사본 실패도 경로 점유를
-  유지하여 디스크의 옛 결과를 되살리지 않는다. 이 배선·불변 사본·세대 검증은 S1b에서 구현한다.
+  유지하여 디스크의 옛 결과를 되살리지 않는다. 불변 사본·점유·worker 세대 API는 구현했으며 실제 앱 문서/IME 배선은 S1b의 후속 gate다.
 - 기본값은 VS Code commit `24a41178148f72f49e4ac0756ddb3b5347429a91`의
   [공식 설정](https://github.com/microsoft/vscode/blob/24a41178148f72f49e4ac0756ddb3b5347429a91/src/vs/workbench/contrib/search/browser/search.common.contribution.ts):
   local ignore=true, parent/global ignore=false, follow symlinks=true, search on type=true,
@@ -348,11 +348,13 @@ CLI의 `--baseline-native`는 수정 전 바이너리와 파일·줄·byte·길�
 | 단계 | 범위 | 완료 조건 |
 |---|---|---|
 | S0 | 후보 실측·설계 | 엔진/번들/default 채택 완료(2026-10-07). 불변 사본·실행/출력 예산은 S1b gate |
-| S1a | rg 번들·argv·JSON 기반 | 이번 기반 구현. 공식 양 아키텍처·해시·라이선스·서명과 실제 helper/parser fixture 검증 |
+| S1a | rg 번들·argv·JSON 기반 | #4196 메인 머지 완료. 공식 양 아키텍처·해시·라이선스·서명과 실제 helper/parser fixture 검증 |
 | S1b | 디스크 rg + 열린 모델·경로 선정·worker | 디스크 helper 취소와 열린 모델 검색·출처/좌표 검증, 불변 사본 소유권·기본 옵션 비용, root별 glob·VCS root 거부·FIFO 교체, helper 수명·부분 실패·제외 후보/ignore 변경·감시 overflow 검증 |
 | S2 | 검색 도크·열린 문서·클릭 이동 | 우측/하단·좁은 폭·배율·스크롤·공유/독립 문서·0건 덮어쓰기·IME Enter·root 변경·낡은 클릭·실제 여러 파일 이동을 제품 앱에서 검증. Metal PNG를 PR 본문에 첨부 |
 | S3 | 바꾸기 미리보기 | 선택한 파일/일치별 전후 diff. 표시 revision과 원본 bytes를 고정하고 미리보기 뒤 변경은 충돌로 표시 |
 | S4 | 선택 적용 | 열린 문서는 Undo와 IME, 디스크는 외부 변경·저장 실패·권한·원자 저장을 검증. 여러 파일 실패/부분 성공·재시도·되돌리기 정책을 별도 승인한 뒤 연결 |
+
+S1b 백엔드의 구현·실행 증거와 실제 앱 연결의 남은 gate는 [worker와 불변 문서](editor-project-search-worker.md)에 둔다. 백엔드 프로브의 통과를 S1b 전체 완료로 표시하지 않는다.
 
 S1/S2는 바꾸기를 실행하지 않는다. S4도 여러 파일 전체의 원자적 성공이나 crash 이후 Undo 보존을 약속하지 않는다.
 최종 저장은 기존 파일 저장/복구 계약을 재사용하되, 이미 구현된 `WorkspaceEdit`의 존재만으로 이 gate를 닫지 않는다.

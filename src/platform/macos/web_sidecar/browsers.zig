@@ -182,6 +182,8 @@ fn askClose(browser_id: BrowserId, writer: *events.Writer) void {
 fn resize(value: protocol.message.Resize, writer: *events.Writer) void {
     const entry = state.registry.byId(value.browser) orelse return fail(writer, value.browser, .unknown_browser, "no such browser");
     const scale_changed = entry.size.scale != value.size.scale;
+    // W6m③: 크기가 바뀌면 가운데 맞춤 배치 등에서 iframe 이 옮겨진다 — iframe 의 제안 목록을 닫고 원점을 낡게 한다(적대 리뷰 3 회차).
+    if (scale_changed or entry.size.width != value.size.width or entry.size.height != value.size.height) @import("datalist.zig").onScrolled(value.browser);
     entry.size = value.size;
     producerOf(entry).scale = value.size.scale;
     // 배율이 바뀌면 CEF 가 열린 팝업을 닫는다(W6a① 적대 검증 4 차 실측) — 그래도 남은 팝업 링이 옛 배율을 싣지 않게.

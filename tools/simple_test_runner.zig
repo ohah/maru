@@ -90,7 +90,8 @@ extern var environ: [*:null]?[*:0]u8;
 /// PID root로 덮어쓴다. 같은 이유로 AppKit/Foundation이 workspace checkpoint 위치를 정할 때 보는
 /// `CFFIXED_USER_HOME`도 덮어쓴다.
 ///
-/// **`HOME` 은 실제 사용자 홈일 때만 실행마다 새 임시 홈(`/tmp/maru-home-<pid>-XXXXXX`)으로 바꾼다**(2026-10-04). 제품 자식은 `HOME` 에서 캐시를
+/// **`HOME` 은 실제 사용자 홈이거나 쓸 수 없는 홈(빈 값·루트 — `runner_home.homeUnusable`, 2026-10-07)일 때만 실행마다 새 임시 홈
+/// (`/tmp/maru-home-<pid>-XXXXXX`)으로 바꾼다**(2026-10-04). 제품 자식은 `HOME` 에서 캐시를
 /// 유도한다 — 테스트가 띄운 `maru __session-host` 가 실제 `~/.cache/maru/agent-turn-events/` 에 칸을 만들고 그
 /// 안의 죽은 host 칸을 **지우는 정리까지** 돌았다. 셸은 `~/.bash_history` 를, terminfo 는 `~/.cache/maru/terminfo`
 /// 를 썼다. 예전에는 「PTY·shell fixture 의 의미가 달라진다」며 두었으나, 전체 `zig build test` 를 가짜 `HOME` 으로
@@ -192,8 +193,9 @@ fn reexecWithIsolatedHome(replace_home: bool) error{IsolationFailed}!void {
     return isolationFail("execve"); // execve 는 성공하면 돌아오지 않는다
 }
 
-/// 네 `XDG_*` 중 비었거나 지금 `HOME` 밖을 가리키는 것이 있는가(`runner_home.xdgNeedsMove`). `HOME` 이 없거나 비면
-/// 아니다 — 명시 환경으로 자기 자신을 다시 띄우는 fixture 자식들이고(`homeIsRealUserHome` 과 같은 규칙), 옮길 기준 홈도 없다.
+/// 네 `XDG_*` 중 비었거나 지금 `HOME` 밖을 가리키는 것이 있는가(`runner_home.xdgNeedsMove`). `HOME` 이 **없으면** 아니다 —
+/// 명시 환경으로 자기 자신을 다시 띄우는 fixture 자식들이고, 옮길 기준 홈도 없다. 빈 `HOME` 은 여기 오기 전에 「쓸 수 없는 홈」
+/// 으로 교체되지만, 이 함수만 따로 불려도 기준이 없으니 아니다로 답한다.
 fn xdgNeedsIsolation() bool {
     const home = std.mem.span(getenv("HOME") orelse return false);
     if (home.len == 0) return false;
@@ -210,7 +212,12 @@ fn homeUnusable() bool {
 }
 
 /// 지금 `HOME` 이 이 사용자의 실제 홈(OS 사용자 DB)인가. **없으면 아니다** — 명시 환경으로 자기 자신을 다시 띄우는
-/// fixture 자식들이 그렇고, 그때는 제품의 홈 유도가 null 이라 샐 곳이 없다. 사용자 DB 를 못 읽으면 「실제」로 본다.
+/// fixture 자식들이 그렇다. 사용자 DB 를 못 읽으면 「실제」로 본다.
+///
+/// ⚠️ `HOME` 이 없다고 **샐 곳이 없는 것은 아니다**(적대적 검증 2026-10-07). 제품의 캐시 유도 일부는 `XDG_CACHE_HOME` 을 먼저
+/// 본다(`app_host_abi.controlBaseDir`) — `HOME` 없이 실제 캐시를 가리키는 XDG 만 물려받은 실행(`env -u HOME` 으로 직접 띄운
+/// 경우)은 그 캐시에 쓸 수 있다. 러너는 그 경우를 건드리지 않는다: 「HOME 없음」을 일부러 시험하는 fixture 자식들이 있고,
+/// `zig build` 로 띄우는 실행은 늘 HOME 이 있다.
 fn homeIsRealUserHome() bool {
     const home = std.mem.span(getenv("HOME") orelse return false);
     const pw = std.c.getpwuid(std.c.getuid()) orelse return true;

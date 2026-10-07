@@ -1299,6 +1299,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationLocalRoute.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/OsrDatalistPopup.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -2446,6 +2447,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationLocalRoute.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/OsrDatalistPopup.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         // swiftc is the final linker; a Zig static archive does not absorb its dependent archive.

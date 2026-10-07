@@ -57,10 +57,11 @@ SEL = ("<!doctype html><title>sel</title><style>html,body{margin:0;height:100%;b
     "var a=document.getElementById('a');a.addEventListener('focus',function(){new Image().src='/ev?e=focus&id=a&t='+Date.now()});"
     "a.addEventListener('change',function(){new Image().src='/ev?e=change&v='+a.value+'&t='+Date.now()});"
     "</script>").encode()
-# W6m②: 제안 목록 — select 페이지와 같은 자리(본문 폭 50%·높이 40%)의 빨간 글 칸에 옵션 다섯. 페이지는 change·keydown 을 알린다.
+# W6m②: 제안 목록 — select 페이지와 같은 자리(본문 폭 50%·높이 40%)의 빨간 글 칸에 옵션 다섯(하나는 레이블). 페이지는
+# change·keydown 을 알린다.
 DL = ("<!doctype html><title>dl</title><style>html,body{margin:0;height:100%;background:#20a060}body{height:3000px}"
     "input{position:fixed;left:0;top:0;width:50%;height:40%;border:0;background:#ff0000;font:20px sans-serif}</style><body>"
-    "<input id=a list=l autocomplete=off><datalist id=l><option value=apple><option value=banana><option value=cherry><option value=date><option value=elder></datalist><script>"
+    "<input id=a list=l autocomplete=off><datalist id=l><option value=apple><option value=banana><option value=cherry label='red fruit'><option value=date><option value=elder></datalist><script>"
     "var a=document.getElementById('a');function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}"
     "a.addEventListener('change',function(){ping('e=change&v='+a.value)});a.addEventListener('keydown',function(e){ping('e=kd&k='+e.key)});"
     "a.addEventListener('keyup',function(e){ping('e=ku&k='+e.key)});document.addEventListener('mousedown',function(e){ping('e=md&b='+e.button)});"
@@ -1165,24 +1166,23 @@ sys.exit(0 if ok else 1)
 PY
 
 # ── W6m②: 제안 목록(datalist) ────────────────────────────────────────────────────────────────────────────
-# 칸을 누르면 sidecar 가 보낸 목록을 maru 가 칸 아래에 그린다(스크린샷 — 칸 아래 띠가 초록이 아니다). 처음에는 아무것도 강조하지
-# 않고(Chrome 154 실측), ↓↓↑ 로 옮긴 강조를 Enter 가 고르면 그 값이 페이지에 들어간다(change). 행 위로 hover 하면 강조, 누르면
-# 고른다(대본 `dlhover`·`dlclick` — 그린 상자의 행 가운데). Esc 는 목록만 닫고 페이지에 가지 않으며, 닫힌 뒤의 ↓ 는 페이지가 받아
-# 다시 연다. 열린 목록의 ↓ 는 페이지에 가지 않는다. 강조 없는 Enter 는 페이지로 간다(폼 제출). 대본 `datalist` 가 상태를 적는다.
-cat > "$root/dl-shot.txt" <<'SCRIPT'
-sleep 7000
-mouse 1 0.40 0.33 0 0 0
-mouse 3 0.40 0.33 0 0 0
-SCRIPT
-cat > "$root/dl-keys.txt" <<'SCRIPT'
+# 칸을 누르면 sidecar 가 보낸 목록을 maru 가 칸 바로 아래·왼쪽을 맞춘 macOS 네이티브 창(키 초점을 갖지 않는 자식 창 안의 표)으로
+# 띄운다. 처음에는 아무것도 강조하지 않고(Chrome 154 실측), ↓↓↑ 로 옮긴 강조를 Enter 가 고르면 그 값이 페이지에 들어간다(change).
+# 행 위의 움직임은 강조, 같은 행에서 누르고 떼면 고른다(대본 `dlmouse` — 창의 진짜 사건 처리기에 합성 사건). Esc 는 목록만 닫고
+# 페이지에 가지 않으며, 닫힌 뒤의 ↓ 는 페이지가 받아 다시 연다. 열린 목록의 ↓ 는 페이지에 가지 않는다. 강조 없는 Enter 는 페이지로
+# 간다(폼 제출). 대본 `datalist` 가 Zig 의 상태와 띄운 창(보임·행 수·강조·자리·첫 값)을 적는다 — 앱 스크린샷은 Metal 화면만 찍어
+# 네이티브 창이 담기지 않는다.
+cat > "$root/dl-keys.txt" <<SCRIPT
 sleep 7000
 mouse 1 0.40 0.33 0 0 0
 mouse 3 0.40 0.33 0 0 0
 sleep 1500
 datalist
+dlsnap $root/dl-popup.png
 key 125 U+F701
 sleep 200
 datalist
+dlsnap $root/dl-popup-selected.png
 key 125 U+F701
 key 126 U+F700
 sleep 200
@@ -1196,54 +1196,38 @@ sleep 7000
 mouse 1 0.40 0.33 0 0 0
 mouse 3 0.40 0.33 0 0 0
 sleep 1500
-dlhover 2
+dlmouse 2 move
 sleep 200
 datalist
-dlclick 3
+dlmouse 3 down
+dlmouse 3 up
 sleep 1000
 datalist
+dlmouse 1 down
 SCRIPT
-# 페이지 쪽에서 닫힌 뒤(문서 스크롤 — 대리 스크립트가 닫는다; 글자는 입력 소스에 따라 조합이 돼 쓰지 않는다) 상자가 있던 자리의 누름은 페이지로 간다(남은 자리가 입력을 먹지 않는다), 행 위의 오른쪽
-# 누름은 고르지 않는다(목록은 남는다) — 적대 검증.
-cat > "$root/dl-stale.txt" <<'SCRIPT'
-sleep 7000
-mouse 1 0.40 0.33 0 0 0
-mouse 3 0.40 0.33 0 0 0
-sleep 1500
-dlhover 2
-datalist
-dlremember 2
-dlmouse 2 1 2
-dlmouse 2 3 2
-sleep 300
-datalist
-wheel 0.80 0.80 0 0 -3
-sleep 1500
-datalist
-dlclicklast
-sleep 1000
-SCRIPT
-# 행 위에서 누르고 상자 밖에서 떼면 고르지 않는다(목록은 남는다). hover 로 생긴 강조는 상자를 벗어나면 지워지고, 그때 Enter 는
-# 페이지로 간다(지나가며 남은 강조를 고르지 않는다) — 적대 검증 2 차.
+# 행 위에서 누르고 창 밖에서 떼면 고르지 않는다(목록은 남는다). 움직임으로 생긴 강조는 창을 벗어나면 지워지고, 그때 Enter 는
+# 페이지로 간다(지나가며 남은 강조를 고르지 않는다). 페이지 쪽에서 닫히면(문서 스크롤 — 대리 스크립트가 닫는다; 글자는 입력 소스에
+# 따라 조합이 돼 쓰지 않는다) 창도 거둔다 — 적대 검증.
 cat > "$root/dl-press.txt" <<'SCRIPT'
 sleep 7000
 mouse 1 0.40 0.33 0 0 0
 mouse 3 0.40 0.33 0 0 0
 sleep 1500
-dlmouse 1 1 0
-sleep 200
-datalist
-mouse 3 0.80 0.80 0 0 0
+dlmouse 1 down
+dlmouse -1 up
 sleep 300
 datalist
-dlhover 2
+dlmouse 2 move
 sleep 200
 datalist
-hover 0.80 0.80 0 0
-sleep 300
+dlmouse -1 exit
+sleep 200
 datalist
 key 36 U+D
-sleep 1000
+sleep 500
+wheel 0.80 0.80 0 0 -3
+sleep 1500
+datalist
 SCRIPT
 cat > "$root/dl-esc.txt" <<'SCRIPT'
 sleep 7000
@@ -1266,26 +1250,14 @@ key 53 U+1B
 sleep 1000
 SCRIPT
 : > "$root/requests.log"
-run_app /dl-app 14000 "$root/dl-keys.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-keys.txt"
-grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-keys.report" || true
-cp "$root/requests.log" "$root/dl-keys.requests"
-: > "$root/requests.log"
-run_app /dl-app 14000 "$root/dl-mouse.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-mouse.txt"
-grep -ao 'osr-test datalist [a-z0-9= -]*\|osr-test dl-miss' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-mouse.report" || true
-cp "$root/requests.log" "$root/dl-mouse.requests"
-: > "$root/requests.log"
-run_app /dl-app 14000 "$root/dl-esc.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-esc.txt"
-grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-esc.report" || true
-cp "$root/requests.log" "$root/dl-esc.requests"
-: > "$root/requests.log"
-run_app /dl-app 14000 "$root/dl-press.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-press.txt"
-grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-press.report" || true
-cp "$root/requests.log" "$root/dl-press.requests"
-: > "$root/requests.log"
-run_app /dl-app 14000 "$root/dl-stale.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-stale.txt"
-grep -ao 'osr-test datalist [a-z0-9= -]*' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-stale.report" || true
-cp "$root/requests.log" "$root/dl-stale.requests"
-python3 - "$root" <<'PY' || fail "the datalist keys, mouse or Esc did not behave like Chrome"
+rm -f "$root/dl-popup.png" "$root/dl-popup-selected.png"
+for dl in keys mouse esc press; do
+  : > "$root/requests.log"
+  run_app /dl-app 14000 "$root/dl-$dl.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-$dl.txt"
+  grep -ao 'osr-test datalist [a-z0-9= -]*\|osr-test dl-miss\|osr-test dlsnap ok' "$root/app-dl-app.log" | sed 's/ *$//' > "$root/dl-$dl.report" || true
+  cp "$root/requests.log" "$root/dl-$dl.requests"
+done
+python3 - "$root" <<'PY' || fail "the datalist window, keys, mouse or Esc did not behave like Chrome"
 import sys, os
 root = sys.argv[1]
 def lines(name): return [l.strip() for l in open(os.path.join(root, name)) if l.strip()]
@@ -1295,61 +1267,27 @@ def check(c, m):
     global ok
     ok = ok and c
     print(('PASS ' if c else 'FAIL ') + m)
+def shown(sel): return f'osr-test datalist open=true count=5 selected={sel} win=shown rows=5 sel={sel} below=true left=true first=apple'
+closed = 'osr-test datalist open=false count=0 selected=-1 win=hidden'
 keys = lines('dl-keys.report'); kreq = ev('dl-keys.requests')
-check(keys == ['osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=0', 'osr-test datalist open=true count=5 selected=0', 'osr-test datalist open=false count=0 selected=-1'],
-      f'the list opens with nothing highlighted, ↓↓↑ moves the highlight and Enter picks it ({keys})')
+check(keys == [shown(-1), 'osr-test dlsnap ok', shown(0), 'osr-test dlsnap ok', shown(0), closed],
+      f'the list window opens right under the field with its left edge aligned and nothing highlighted, ↓↓↑ moves the highlight and Enter picks it ({keys})')
 check('/ev?e=change&v=apple' in kreq and not any('k=Arrow' in r for r in kreq) and not any('k=Enter' in r for r in kreq),
       f'the picked value reaches the page, and ↓·↑·Enter on the open list do not ({kreq})')
+pngs = [os.path.join(root, n) for n in ('dl-popup.png', 'dl-popup-selected.png')]
+check(all(os.path.exists(p) and os.path.getsize(p) > 1000 for p in pngs), 'the list window draws its rows (snapshots dl-popup.png · dl-popup-selected.png)')
 mouse = lines('dl-mouse.report'); mreq = ev('dl-mouse.requests')
-check(mouse == ['osr-test datalist open=true count=5 selected=2', 'osr-test datalist open=false count=0 selected=-1'] and '/ev?e=change&v=date' in mreq,
-      f'hovering a row highlights it and clicking a row picks it ({mouse} · {mreq})')
+check(mouse == [shown(2), closed, 'osr-test dl-miss'] and '/ev?e=change&v=date' in mreq,
+      f'moving over a row highlights it, a click on a row picks it and the window goes away ({mouse} · {mreq})')
+press = lines('dl-press.report'); preq = ev('dl-press.requests')
+check(press == [shown(-1), shown(2), shown(-1), closed]
+      and not any(r.startswith('/ev?e=change') for r in preq) and '/ev?e=kd&k=Enter' in preq,
+      f'a press on a row released outside the window picks nothing, a hover highlight clears when the pointer leaves so Enter reaches the page, and a page-side close hides the window ({press} · {preq})')
 esc = lines('dl-esc.report'); ereq = ev('dl-esc.requests')
 kd = [r for r in ereq if r.startswith('/ev?e=kd')]
-stale = lines('dl-stale.report'); sreq = ev('dl-stale.requests')
-md = [r for r in sreq if r.startswith('/ev?e=md')]
-check(stale[:2] == ['osr-test datalist open=true count=5 selected=2', 'osr-test datalist open=true count=5 selected=2'] and stale[2:] == ['osr-test datalist open=false count=0 selected=-1']
-      and not any(r.startswith('/ev?e=change') for r in sreq) and md[-1:] == ['/ev?e=md&b=0'] and len(md) == 2,
-      f'a right click on a row picks nothing and does not reach the page, and after the page closes the list a click where it was reaches the page ({stale} · {sreq})')
-press = lines('dl-press.report'); preq = ev('dl-press.requests')
-check(press == ['osr-test datalist open=true count=5 selected=1', 'osr-test datalist open=true count=5 selected=1', 'osr-test datalist open=true count=5 selected=2', 'osr-test datalist open=true count=5 selected=-1']
-      and not any(r.startswith('/ev?e=change') for r in preq) and '/ev?e=kd&k=Enter' in preq,
-      f'a press on a row released outside the list picks nothing, a hover highlight clears when the pointer leaves, and Enter then reaches the page ({press} · {preq})')
-check(esc == ['osr-test datalist open=false count=0 selected=-1', 'osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=-1', 'osr-test datalist open=true count=5 selected=0']
+check(esc == [closed, shown(-1), shown(-1), shown(0)]
       and kd == ['/ev?e=kd&k=ArrowDown', '/ev?e=kd&k=Enter'] and not any(r.startswith('/ev?e=change') for r in ereq),
       f'Esc closes only the list, ↓ on the closed field reaches the page and reopens it, Enter on the open list with nothing highlighted reaches the page and picks nothing ({esc} · {kd})')
-sys.exit(0 if ok else 1)
-PY
-# 스크린샷은 마지막에 — 빌드 직후 첫 실행은 느려 목록이 열리기 전에 찍히기도 했다(앞 실행들이 앱·sidecar 를 데운다).
-: > "$root/requests.log"
-run_app /dl-app 30000 "$root/dl-shot.summary" MARU_WEB_OSR_TEST_INPUT="$root/dl-shot.txt" MARU_SCREENSHOT="$root/dl-shot.ppm" MARU_SCREENSHOT_DELAY_MS=11000
-python3 - "$root/dl-shot.ppm" <<'PY' || fail "the datalist suggestions were not drawn under the field"
-import sys
-d = open(sys.argv[1], 'rb').read()
-_, dims, _, px = d.split(b'\n', 3)
-w, h = map(int, dims.split())
-red = bytes.fromhex('ff0000'); green = bytes.fromhex('20a060')
-xs, ys = [], []
-for y in range(0, h, 2):
-    row = px[y * w * 3:(y + 1) * w * 3]
-    i = row.find(red)
-    while i != -1:
-        if i % 3 == 0: xs.append(i // 3); ys.append(y)
-        i = row.find(red, i + 3)
-if not xs: print('FAIL no red field in the screenshot'); sys.exit(1)
-# 목록은 칸 왼쪽 끝 아래에 글 너비만큼 뜬다(칸보다 좁다 — Chrome 과 같다) — 칸 왼쪽 아래 작은 상자를 잰다. 칸 아래 멀리(목록
-# 밖)는 초록이어야 한다(목록이 칸 전체를 덮는 등 엉뚱한 자리에 그리지 않았다).
-x0, x1, y1 = min(xs) + 4, max(xs) - 4, max(ys)
-def ratio(ax, bx, ay, by):
-    total = other = 0
-    for y in range(ay, min(h, by)):
-        for x in range(ax, bx):
-            total += 1
-            if px[(y * w + x) * 3:(y * w + x) * 3 + 3] != green: other += 1
-    return other / max(total, 1)
-near = ratio(x0, x0 + 50, y1 + 16, y1 + 70)
-far = ratio(x1 - 60, x1, y1 + 16, y1 + 70)
-ok = near > 0.6 and far < 0.05
-print(('PASS ' if ok else 'FAIL ') + f'the suggestions are drawn under the left of the field (list box {near:.2f} drawn · beyond its width {far:.2f})')
 sys.exit(0 if ok else 1)
 PY
 

@@ -2138,12 +2138,19 @@ pub fn formatConfigDiagnostic(buf: []u8, d: config_mod.ConfigDiagnostic) []const
 
 /// 진단에 키를 **원문 그대로** 찍어도 되는가 — 키 모양일 때만이다(적대적 검증 2026-10-06). 로더는 `=` 왼쪽 전체를 키로 들고
 /// 오므로, 토큰을 잘못 붙여 넣은 줄(`c2VjcmV0dG9rZW4=` 처럼 끝이 `=` 인 base64)은 그 값이 app.log 에 그대로 남았다. 오타
-/// (`scrollbak.lines`)는 찍어야 고칠 수 있으므로, 키의 모양을 본다: 글자는 `[A-Za-z0-9._-]`, 점이 있거나 점 없는 유일한 키
-/// `keybind`, 점으로 나눈 조각마다 32 자 이하(JWT 처럼 점이 든 토큰은 조각이 길다). 아니면 키 없이 줄 번호만 찍는다.
+/// (`scrollbak.lines`)는 찍어야 고칠 수 있으므로, 키의 모양을 본다: 글자는 `[A-Za-z0-9._-]`, 점으로 나눈 조각마다 32 자
+/// 이하(JWT 처럼 점이 든 토큰은 조각이 길다). **점 없는 키는 소문자로 시작하고 소문자·`-`·`_` 만 쓰는 32 자 이하**여야
+/// 한다 — 실재 최상위 키(`keybind`·`term`·`term-program`)와 그 오타(`keybinds`·`trem`), Ghostty 식 키(`font-size`·`theme`)가
+/// 그 모양이고, 토큰은 대개 숫자·대문자가 섞인다. 예전에는 점 없는 키를 `keybind` 하나만 허용해 `term` 과 점 없는 오타가
+/// **전부 가려져** 무엇이 틀렸는지 안 보였다(적대적 검증 2026-10-07). 아니면 키 없이 줄 번호만 찍는다.
 fn looksLikeConfigKey(key: []const u8) bool {
     if (key.len == 0 or key.len > 96) return false;
     for (key) |c| if (!(std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_')) return false;
-    if (std.mem.indexOfScalar(u8, key, '.') == null and !std.mem.eql(u8, key, "keybind")) return false;
+    if (std.mem.indexOfScalar(u8, key, '.') == null) {
+        if (key.len > 32 or !std.ascii.isLower(key[0])) return false;
+        for (key) |c| if (!(std.ascii.isLower(c) or c == '-' or c == '_')) return false;
+        return true;
+    }
     var it = std.mem.splitScalar(u8, key, '.');
     while (it.next()) |seg| if (seg.len == 0 or seg.len > 32) return false;
     return true;

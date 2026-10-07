@@ -61661,14 +61661,16 @@ test "config 진단은 키 모양일 때만 키를 찍는다 — 잘못 붙여 �
     var buf: [512]u8 = undefined;
     const D = config_mod.ConfigDiagnostic;
     const msg = "알 수 없는 key — 무시";
-    // 가린다: 끝이 `=` 인 base64(로더는 `=` 왼쪽을 키로 든다), 점이 든 JWT, 공백·기호가 든 것.
-    for ([_][]const u8{ "c2VjcmV0dG9rZW4", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0", "sk live 123", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }) |k| {
+    // 가린다: 끝이 `=` 인 base64(로더는 `=` 왼쪽을 키로 든다), 점이 든 JWT, 공백·기호가 든 것, 점 없이 숫자·대문자가 섞인 토큰,
+    // 소문자뿐이어도 32 자를 넘는 것.
+    for ([_][]const u8{ "c2VjcmV0dG9rZW4", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0", "sk live 123", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "AKIAIOSFODNN7EXAMPLE", "sk-proj-abc123", "abcdefghijklmnopqrstuvwxyzabcdefg" }) |k| {
         const out = settings_ops.formatConfigDiagnostic(&buf, D{ .line = 3, .key = k, .message = msg });
         try std.testing.expect(std.mem.indexOf(u8, out, k) == null);
         try std.testing.expect(std.mem.startsWith(u8, out, "config line 3: "));
     }
-    // 찍는다: 오타 키(고치려면 보여야 한다), 점 없는 유일한 키, env 키.
-    for ([_][]const u8{ "scrollbak.lines", "keybind", "env.HTTP_PROXY", "font.family.macos" }) |k| {
+    // 찍는다: 오타 키(고치려면 보여야 한다), 점 없는 실재 키, env 키, **점 없는 오타**(예전에는 `keybind` 말고 전부 가려
+    // 무엇이 틀렸는지 안 보였다 — 적대적 검증 2026-10-07), Ghostty 식 키.
+    for ([_][]const u8{ "scrollbak.lines", "keybind", "env.HTTP_PROXY", "font.family.macos", "term", "term-program", "keybinds", "trem", "term_program", "font-size", "theme" }) |k| {
         const out = settings_ops.formatConfigDiagnostic(&buf, D{ .line = 3, .key = k, .message = msg });
         try std.testing.expect(std.mem.indexOf(u8, out, k) != null);
     }

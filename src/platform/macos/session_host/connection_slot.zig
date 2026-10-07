@@ -1152,16 +1152,58 @@ pub const Slot = struct {
     }
 
     pub fn partialExpired(self: *const Slot, direction: PartialDirection, now_ns: u64) bool {
+        return self.partialExpiry(direction, now_ns) != null;
+    }
+
+    /// 두 기한 중 **어느 쪽이** 넘었는가. 고칠 곳이 다르다.
+    ///
+    /// - `no_progress`: 상대가 10 초 동안 **한 바이트도** 안 빼갔다 — 상대 쪽이 멈췄다.
+    /// - `absolute`: 빼가기는 했지만 30 초 내내 다 못 빼갔다 — 보내는 쪽이 받는 속도보다 빨리 만든다.
+    ///
+    /// 2026-10-07 18:59 GUI 끊김(`site=tick_partial_write_stalled`)은 이 둘 중 무엇인지 로그로
+    /// 가를 수 없어 원인을 못 좁혔다. 같은 시각 host rss 가 144→232MB 로 뛰었는데, 그것이 「앱이
+    /// 멈춰서 쌓인 것」인지 「host 가 폭주해서 쌓인 것」인지가 정확히 이 구분이다.
+    pub const PartialExpiry = enum { no_progress, absolute };
+
+    pub fn partialExpiry(self: *const Slot, direction: PartialDirection, now_ns: u64) ?PartialExpiry {
         const last = switch (direction) {
             .read => self.read_partial_progress_ns,
             .write => self.write_partial_progress_ns,
-        } orelse return false;
+        } orelse return null;
         const started = (switch (direction) {
             .read => self.read_partial_started_ns,
             .write => self.write_partial_started_ns,
         }).?;
-        return (now_ns >= last and now_ns - last >= partial_deadline_ns) or
-            (now_ns >= started and now_ns - started >= partial_absolute_deadline_ns);
+        if (now_ns >= last and now_ns - last >= partial_deadline_ns) return .no_progress;
+        if (now_ns >= started and now_ns - started >= partial_absolute_deadline_ns) return .absolute;
+        return null;
+    }
+
+    /// 정체로 닫는 순간의 숫자들. 로그 한 줄로 「얼마나 오래·얼마나 쌓였나」를 남긴다.
+    pub const PartialStall = struct {
+        since_progress_ns: u64,
+        since_start_ns: u64,
+        pending_bytes: usize,
+        resident_bytes: usize,
+        chunks: usize,
+    };
+
+    pub fn partialStall(self: *const Slot, direction: PartialDirection, now_ns: u64) PartialStall {
+        const last = switch (direction) {
+            .read => self.read_partial_progress_ns,
+            .write => self.write_partial_progress_ns,
+        } orelse now_ns;
+        const started = (switch (direction) {
+            .read => self.read_partial_started_ns,
+            .write => self.write_partial_started_ns,
+        }) orelse now_ns;
+        return .{
+            .since_progress_ns = now_ns -| last,
+            .since_start_ns = now_ns -| started,
+            .pending_bytes = self.pending_bytes,
+            .resident_bytes = self.resident_bytes,
+            .chunks = self.chunk_len,
+        };
     }
 
     pub fn beginDispatch(self: *Slot) error{CounterExhausted}!void {
@@ -2686,6 +2728,38 @@ test "connection slot partial deadline advances only on progress" {
     slot.notePartial(.write, 100 + partial_deadline_ns, true);
     try std.testing.expect(slot.partialExpired(.read, 100 + partial_absolute_deadline_ns));
     try std.testing.expect(!slot.partialExpired(.write, 100 + partial_deadline_ns));
+}
+
+// 두 기한을 실제로 따로 넘겨 각각 제 이름이 나오는지 센다. 이름이 하나로 뭉치면 2026-10-07 끊김처럼
+// 「앱이 멈췄나 host 가 폭주했나」를 로그로 못 가른다.
+test "connection slot partial expiry names which deadline fired" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(std.testing.allocator, &global, .{ .monotonic_id = 1, .slot_generation = 1 });
+    defer slot.deinit();
+    try std.testing.expectEqual(@as(?Slot.PartialExpiry, null), slot.partialExpiry(.write, 100));
+
+    // 진행 없이 10 초 → no_progress.
+    slot.notePartial(.write, 100, true);
+    try std.testing.expectEqual(@as(?Slot.PartialExpiry, null), slot.partialExpiry(.write, 100 + partial_deadline_ns - 1));
+    try std.testing.expectEqual(@as(?Slot.PartialExpiry, .no_progress), slot.partialExpiry(.write, 100 + partial_deadline_ns));
+
+    // 9 초마다 진행했지만 30 초가 지남 → absolute. no_progress 는 아니다.
+    var now: u64 = 100;
+    while (now < 100 + partial_absolute_deadline_ns) {
+        now += partial_deadline_ns - 1;
+        slot.notePartial(.write, now, true);
+    }
+    try std.testing.expectEqual(@as(?Slot.PartialExpiry, .absolute), slot.partialExpiry(.write, now));
+
+    const stall = slot.partialStall(.write, now + 5);
+    try std.testing.expectEqual(@as(u64, 5), stall.since_progress_ns);
+    try std.testing.expectEqual(now + 5 - 100, stall.since_start_ns);
+
+    // 비어 있으면 0 — 닫는 자리 밖에서 불려도 넘치지 않는다.
+    slot.clearPartial(.write);
+    const idle = slot.partialStall(.write, 7);
+    try std.testing.expectEqual(@as(u64, 0), idle.since_progress_ns);
+    try std.testing.expectEqual(@as(u64, 0), idle.since_start_ns);
 }
 
 test "P5b2b3 partial pressure without a batch end remains fail close" {

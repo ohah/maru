@@ -10003,6 +10003,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 그때 그 경로에 무언가 있었는지(있었으면 저장 창이 「바꿀까요?」를 물어 사용자가 바꾸기를 골랐다), 취소, 치움(종료·창 닫힘 —
     // 보류로 되돌린다).
     private var downloadAskPanels: [UInt64: NSSavePanel] = [:]
+    /// 띄운 때 — 띄운 직후 sheet 가 아직 붙기 전을 「붙은 창이 사라졌다」로 보지 않게(8 회차 — 1 초 유예).
+    private var downloadAskShownAt: [UInt64: Date] = [:]
     /// 시험(대본 `dlanswer <경로|->`): 다음 저장 창의 답 — 창을 띄우지 않고 곧바로 답한다. `-` 는 취소.
     private var downloadTestAnswers: [String?] = []
 
@@ -10031,8 +10033,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 그 행이 묻는 중이 아니게 됐다(탭 닫힘·엔진 재시작·취소) — 띄운 창을 거둔다.
         for (key, panel) in downloadAskPanels {
             let asking = downloadRows.first(where: { $0.key == key })?.state == OsrDownloadsWindow.State.asking.rawValue
-            if !asking || (panel.sheetParent == nil && !panel.isVisible) {
+            let settled = Date().timeIntervalSince(downloadAskShownAt[key] ?? .distantPast) > 1.0
+            if !asking || (settled && panel.sheetParent == nil && !panel.isVisible) {
                 downloadAskPanels[key] = nil
+                downloadAskShownAt[key] = nil
                 if let parent = panel.sheetParent { parent.endSheet(panel, returnCode: .abort) } else if asking {
                     _ = maru_macos_downloads_answer_ask(key, 2, nil, 0, 0) // 붙은 창이 사라졌다 — 보류로
                 }
@@ -10069,11 +10073,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         panel.isExtensionHidden = false
         panel.canSelectHiddenExtension = false
         downloadAskPanels[key] = panel
+        downloadAskShownAt[key] = Date()
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
             // 표에서 이미 빠졌으면(행이 끝나 거뒀다) 답하지 않는다 — 그 행이 다시 보류·묻는 중이 되어 새 창이 떴을 수 있다(1 회차).
             guard self.downloadAskPanels[key] === panel else { return }
             self.downloadAskPanels[key] = nil
+            self.downloadAskShownAt[key] = nil
             switch response {
             case .OK:
                 self.answerDownloadAsk(key: key, path: panel.url?.path)

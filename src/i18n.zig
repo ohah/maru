@@ -1217,7 +1217,7 @@ const Table = struct {
     /// 실행될 수 있는 파일의 저장 창 안내 — `{0}` 확장자.
     dl_state_asking_risky: [:0]const u8,
     dl_button_choose: [:0]const u8,
-    /// 결정 전(보류·묻는 중)에 받아 둔 양이 상한(4 GB)을 넘어 멈췄다.
+    /// 결정을 기다리는(보류·맡지 않은 묻는 중) 다운로드가 받아 둔 양의 합이 상한(4 GB)을 넘어 이 행이 멈췄다.
     dl_state_stopped_waiting: [:0]const u8,
     /// 상태 줄 — `{0}` 크기(받은 양 / 크기, 끝나면 크기). 상태마다 따로 둔다(한국어 표의 모든 항목에 한글이 있어야 한다).
     dl_status_active: [:0]const u8,
@@ -1881,7 +1881,7 @@ const en: Table = .{
     .dl_state_asking_retry = "Can\u{2019}t save to that folder \u{2014} choose another place",
     .dl_state_asking_risky = "This file could run code when opened ({0}). Choose where to save it",
     .dl_button_choose = "Choose Location\u{2026}",
-    .dl_state_stopped_waiting = "Stopped \u{2014} it grew past 4 GB while waiting for you. Download it again",
+    .dl_state_stopped_waiting = "Stopped \u{2014} downloads waiting for you passed 4 GB in total. Download it again",
     .dl_status_active = "Downloading \u{2014} {0}",
     .dl_status_interrupted = "Interrupted \u{2014} {0}",
     .dl_status_done = "Done \u{2014} {0}",
@@ -2774,7 +2774,7 @@ const ko: Table = .{
     .dl_state_asking_retry = "그 폴더에는 저장할 수 없습니다 \u{2014} 다른 곳을 고르세요",
     .dl_state_asking_risky = "열면 실행될 수 있는 파일입니다({0}). 저장할 곳을 고르세요",
     .dl_button_choose = "저장할 곳 고르기\u{2026}",
-    .dl_state_stopped_waiting = "멈춤 \u{2014} 기다리는 동안 4 GB 를 넘었습니다. 다시 받으세요",
+    .dl_state_stopped_waiting = "멈춤 \u{2014} 결정을 기다리는 다운로드가 모두 합쳐 4 GB 를 넘었습니다. 다시 받으세요",
     .dl_status_active = "받는 중 \u{2014} {0}",
     .dl_status_interrupted = "중단됨 \u{2014} {0}",
     .dl_status_done = "완료 \u{2014} {0}",

@@ -1315,6 +1315,19 @@ pub fn commitRename(self: *AppSession) void {
 /// **인라인은 닫지 않는다.** 무관한 알림 하나가 사용자가 치던 이름을 통째로 버리면 그것이 더 나쁘다 —
 /// 그쪽은 겹치지도 않는다. 적대적 7회차에서 팝업이 세팅 화면 위에 남는 것을 잡았고, 그때 「전부 닫기」로
 /// 넓히면 인라인 rename 이 함께 죽는다는 것이 이 구분의 이유다.
+/// **입력 포커스가 이름 편집 밖으로 옮겨 갔다**(앱 안 마우스 down·파일 드롭) — 팝업 상자는 **취소**, 인라인 이름 편집은
+/// **확정**(포커스 상실 = 확정, docs/tabs-splits-layout.md). 팝업 상자 둘은 확정이 곧 바깥 효과다: 심볼(§8.2f)은 서버에
+/// rename 이 나가 여러 파일이 바뀌고 저장되며(VS Code 도 취소), 이름 없는 문서 저장(U2)은 **반쯤 친 이름으로 파일이
+/// 만들어진다**(적대적 16회차). 클릭과 드롭이 이 하나를 부른다 — 드롭은 예전에 모두 확정이라 같은 일이 났다(2026-10-08).
+/// 앱이 포커스를 잃는 것은 여기가 아니다(`AppSession.trySetFocused` — 팝업 상자는 그대로 둔다).
+pub fn renameFocusMoved(self: *AppSession) void {
+    const rt = self.rename orelse return;
+    switch (rt) {
+        .symbol, .untitled_save => closeRename(self),
+        .workspace, .pane, .term, .group, .file_tree => commitRename(self),
+    }
+}
+
 pub fn closePopupRename(self: *AppSession) void {
     const rt = self.rename orelse return;
     switch (rt) {

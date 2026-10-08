@@ -3961,9 +3961,14 @@ final class MaruFileTreeWatcher {
             if roots.insert(root).inserted { changed = true }
         }
         if changed {
+            maru_macos_app_session_project_search_watch_ready(session, 0)
             // 새 root의 최초 scan은 Zig recordOpened가 이미 예약했다. 기존 root의 stop/start 사이 event는 아래
             // lastEventID 재생이 회수하므로 synthetic content-change를 보내 dirty buffer를 오탐하지 않는다.
             rebuild()
+        }
+        if stream != nil {
+            let generation = maru_macos_app_session_project_search_watch_generation(session)
+            maru_macos_app_session_project_search_watch_ready(session, generation)
         }
     }
 
@@ -4002,6 +4007,7 @@ final class MaruFileTreeWatcher {
     }
 
     func stop() {
+        if let session = surface?.appSession { maru_macos_app_session_project_search_watch_ready(session, 0) }
         if let stream {
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)
@@ -4012,6 +4018,7 @@ final class MaruFileTreeWatcher {
     }
 
     private func rebuild() {
+        if let session = surface?.appSession { maru_macos_app_session_project_search_watch_ready(session, 0) }
         if lastEventID == FSEventStreamEventId(kFSEventStreamEventIdSinceNow) {
             // 최초 stream도 stop/start 경계 전에 global journal checkpoint를 잡아 SinceNow의 유실 창을 없앤다.
             lastEventID = FSEventsGetCurrentEventId()
@@ -4051,6 +4058,10 @@ final class MaruFileTreeWatcher {
             return
         }
         stream = created
+        if let session = surface?.appSession {
+            let generation = maru_macos_app_session_project_search_watch_generation(session)
+            maru_macos_app_session_project_search_watch_ready(session, generation)
+        }
     }
 }
 
@@ -5352,9 +5363,40 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 않으므로 여기서 가로채, 활성 창 세션에 "maru를 종료할까요?" 확인 모달을 띄우고 .terminateLater로 보류한다.
     // 모달 결정은 다음 tick FrameSummary.quit_decision으로 와 drainQuitDecision이 NSApp.reply로 종료를 진행/취소한다.
     // 창 닫기와 달리 실행 중 명령 유무와 무관하게 항상 묻는다(사용자 결정 2026-06). 단일 출처: docs/macos-app-host-boundary.md.
+    private var projectSearchQuitTimer: Timer?
+
+    /// 종료 승인이 끝난 뒤 main actor를 막지 않고 검색 worker의 최종 참조 해제를 기다린다.
+    private func finishProjectSearchBeforeTermination() -> NSApplication.TerminateReply {
+        for surface in windows + (quick.map { [$0] } ?? []) {
+            if let session = surface.appSession { maru_macos_app_session_project_search_cancel(session) }
+        }
+        if maru_macos_project_search_outstanding_workers() == 0 { return .terminateNow }
+        if projectSearchQuitTimer == nil {
+            let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] timer in
+                MainActor.assumeIsolated {
+                    guard let self else { timer.invalidate(); return }
+                    if maru_macos_project_search_outstanding_workers() == 0 {
+                        timer.invalidate()
+                        self.projectSearchQuitTimer = nil
+                        NSApp.reply(toApplicationShouldTerminate: true)
+                    }
+                }
+            }
+            projectSearchQuitTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+        return .terminateLater
+    }
+
+    private func replyAfterProjectSearchSettles() {
+        if finishProjectSearchBeforeTermination() == .terminateNow {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
-        if smokeMode || appLaunchFirstDrawableArmed { return .terminateNow } // 무인 계측은 모달에 막히면 hang
+        if smokeMode || appLaunchFirstDrawableArmed { return finishProjectSearchBeforeTermination() } // 무인 계측은 모달에 막히면 hang
         if workspaceFinalQuitPending {
             // 이미 수락돼 마지막 저장 중인 종료가 있다(인앱 확인 수락 등) — 새 확인을 띄우지 않고 그 종료에 합류한다.
             // 예전엔 아래 갈래가 pending 만 세우고 beginFinal 이 「이미 진행 중」으로 빠져, 저장이 끝나도 아무도 답하지
@@ -5369,7 +5411,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if bypassQuitConfirm {
             // 확인 생략 토큰은 checkpoint 생략 토큰이 아니다. 마지막 창/SessionEnded처럼 모달을 이미 통과했거나
             // 필요 없는 종료도 C4 final commit을 거친다. final success 뒤 재진입만 terminateNow다.
-            if workspaceFinalQuitApproved || !workspaceCheckpointArmed || windows.isEmpty { return .terminateNow }
+            if workspaceFinalQuitApproved || !workspaceCheckpointArmed || windows.isEmpty { return finishProjectSearchBeforeTermination() }
             quitConfirmPending = true
             quitConfirmSurface = nil // 모달 없는 보류 — 마지막 저장이 답한다
             beginFinalWorkspaceCheckpoint(surface: activeSurface, deferredAppKitQuit: true)
@@ -5384,20 +5426,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // frame-loop tick이 아직 안 도는 런치 초기 에러(tickTimer==nil)거나 세션이 없으면, 모달을 띄워도 결정이
         // 돌아올 수 없으므로 즉시 종료한다. 일반 창이 0개여도 hidden quick은 살아 있을 수 있으므로 activeSurface를
         // 요구하기 전에 전 세션 보호를 찾고, clean quick도 일반 종료 confirm 대상으로 삼는다.
-        guard tickTimer != nil else { return .terminateNow }
+        guard tickTimer != nil else { return finishProjectSearchBeforeTermination() }
         // 창 0 개로 Dock 에 남은 앱의 ⌘Q — 물을 창이 없으니 확인 없이 끝내되, 마지막 저장(「창 0 개」)은 거친다.
         // 창을 닫자마자 ⌘Q 하면 주기 체크포인트가 아직 안 돌아 닫은 창이 다음 실행에 되살아날 수 있다.
         // 숨은 quick 은 묻는 자리가 못 된다 — 화면 밖 패널에 모달이 떠 ⌘Q·로그아웃이 영영 매달린다(적대적 검증 C).
         // 보이는 quick·보호된 파일 패널이 있으면 아래 일반 확인으로 간다.
         if openWithoutWindows, windows.isEmpty, quick?.window?.isVisible != true, protectedFilePanelSurface() == nil {
-            guard workspaceCheckpointArmed, !workspaceFinalQuitApproved else { return .terminateNow }
+            guard workspaceCheckpointArmed, !workspaceFinalQuitApproved else { return finishProjectSearchBeforeTermination() }
             quitConfirmPending = true
             quitConfirmSurface = nil // 모달 없는 보류 — 마지막 저장이 답한다
             beginFinalWorkspaceCheckpoint(surface: nil, deferredAppKitQuit: true)
             return .terminateLater
         }
-        guard let target = protectedFilePanelSurface() ?? activeSurface ?? quick else { return .terminateNow }
-        guard let session = target.appSession else { return .terminateNow }
+        guard let target = protectedFilePanelSurface() ?? activeSurface ?? quick else { return finishProjectSearchBeforeTermination() }
+        guard let session = target.appSession else { return finishProjectSearchBeforeTermination() }
         quitConfirmPending = true
         quitConfirmSurface = target
         maru_macos_app_session_request_app_quit(session) // dirty 파일이면 즉시 취소+notice, 아니면 일반 종료 confirm
@@ -13583,7 +13625,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             bypassQuitConfirm = true
             if deferredAppKitQuit {
                 quitConfirmPending = false
-                NSApp.reply(toApplicationShouldTerminate: true)
+                replyAfterProjectSearchSettles()
             } else { NSApp.terminate(nil) }
             return
         }
@@ -13606,7 +13648,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             bypassQuitConfirm = true
             if deferredAppKitQuit {
                 quitConfirmPending = false
-                NSApp.reply(toApplicationShouldTerminate: true)
+                replyAfterProjectSearchSettles()
             } else { NSApp.terminate(nil) }
             return
         }
@@ -13663,7 +13705,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if workspaceFinalQuitWasDeferred {
             workspaceFinalQuitWasDeferred = false
             quitConfirmPending = false
-            NSApp.reply(toApplicationShouldTerminate: true)
+            replyAfterProjectSearchSettles()
         } else {
             NSApp.terminate(nil)
         }

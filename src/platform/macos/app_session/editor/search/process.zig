@@ -34,8 +34,14 @@ pub fn openRoot(a: std.mem.Allocator, io: std.Io, path: []const u8) !Root {
     return .{ .canonical = canonical, .directory = directory, .stat = try directory.stat(io), .device = native.dev };
 }
 
+/// 메타데이터 준비 동안 root가 교체되었다면 모델 행도 게시하지 않는다.
+pub fn validateRoot(io: std.Io, root: *Root) !void {
+    const current = std.Io.Dir.cwd().statFile(io, root.canonical, .{}) catch return error.RootChanged;
+    if (current.inode != root.stat.inode or current.kind != .directory or !sameDevice(root)) return error.RootChanged;
+}
+
 /// callback 오류·본문 상한·취소·시간 초과는 모두 helper를 거둔 뒤 반환한다.
-pub fn run(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, root: *const Root, control: *Control, timing: Timing, event_bytes: usize, context: anytype, callback: anytype, stats: *Stats) !Outcome {
+pub fn run(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, environment: *const std.process.Environ.Map, root: *const Root, control: *Control, timing: Timing, event_bytes: usize, context: anytype, callback: anytype, stats: *Stats) !Outcome {
     if (control.cancelled.load(.acquire)) return .cancelled;
     if (timing.execution_ms <= 0 or timing.reap_ms <= 0) return error.InvalidTiming;
     const canonical = root.canonical;
@@ -43,7 +49,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, root: *co
     const initial = root.stat;
     const before = try std.Io.Dir.cwd().statFile(io, canonical, .{});
     if (before.inode != initial.inode or before.kind != .directory or !sameDevice(root)) return error.RootChanged;
-    var child = try std.process.spawn(io, .{ .argv = argv, .cwd = .{ .dir = directory }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+    var child = try std.process.spawn(io, .{ .argv = argv, .environ_map = environment, .cwd = .{ .dir = directory }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
     const pid = child.id.?;
     stats.child_pid = pid;
     const fd = child.stdout.?.handle;
@@ -128,4 +134,24 @@ fn rejectVcsRoot(path: []const u8) !void {
     while (components.next()) |component| {
         for ([_][]const u8{ ".git", ".hg", ".svn", "CVS" }) |vcs| if (std.mem.eql(u8, component, vcs)) return error.VcsRoot;
     }
+}
+
+test "EDPSROOT1 메타데이터 뒤 root 교체는 열린 옛 handle과 새 경로를 구분한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    try fixture.dir.createDir(io, "root", .default_dir);
+    var child = try fixture.dir.openDir(io, "root", .{});
+    defer child.close(io);
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const name = path[0..try child.realPath(io, &path)];
+    var root = try openRoot(a, io, name);
+    defer root.deinit(a, io);
+    try validateRoot(io, &root);
+    try fixture.dir.rename("root", fixture.dir, "old", io);
+    try fixture.dir.createDir(io, "root", .default_dir);
+    try std.testing.expectError(error.RootChanged, validateRoot(io, &root));
+    try std.testing.expectEqual(root.stat.inode, (try root.directory.stat(io)).inode);
 }

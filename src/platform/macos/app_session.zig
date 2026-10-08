@@ -5826,6 +5826,16 @@ pub const AppSession = struct {
     /// 최근 활성화 순서도 창 이동에서 재사용하므로 앱 전역 발급기를 빌린다.
     editor_focus_order: *u64 = &app_runtime.editor_focus_order,
     /// 앱 수명 문서 owner. 창 teardown은 이 저장소 자체를 해제하지 않는다.
+    /// 준비 중에도 외부 변경을 잊지 않는다. 결과를 받기 전에 동일 세대를 확인한다.
+    editor_project_search_disk_generation: u64 = 1,
+    editor_project_search_watch_generation: u64 = 0,
+    editor_project_search_request: u64 = 1,
+    editor_project_search_live: ?@import("app_session/editor/search/owner.zig").Live = null,
+    editor_project_search_query: ?@import("app_session/editor/search/owner.zig").Query = null,
+    editor_project_search_failure: ?anyerror = null,
+    editor_project_search_failure_stamp: u64 = 0,
+    editor_project_search_failure_request: u64 = 0,
+    editor_project_search_prepared: ?@import("app_session/editor/search/owner.zig").Prepared = null,
     editor_documents: *maru.session.editor.document_registry.Registry = &app_runtime.editor_documents,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
     // maru는 자기 cwd를 안 바꾸므로 새 탭/분할마다 getcwd를 반복하지 않고, workspace.root 미설정 시 home 승격
@@ -11593,6 +11603,8 @@ pub const AppSession = struct {
     /// Swift FSEvents callback(메인 queue)이 넘긴 file-level 변경. tree refresh를 예약하고 clean 문서는 자동 reload,
     /// dirty 문서는 buffer를 보존한 채 conflict만 latch한다. 실제 디렉터리 scan은 다음 background worker가 맡는다.
     pub fn fileTreeChanged(self: *AppSession, changed_path: []const u8) void {
+        self.editor_project_search_disk_generation +%= 1;
+        if (self.editor_project_search_disk_generation == 0) self.editor_project_search_disk_generation = 1;
         if (!self.file_tree_initialized or changed_path.len == 0 or !std.fs.path.isAbsolute(changed_path) or
             !std.unicode.utf8ValidateSlice(changed_path)) return;
         // `.git` 내부 변경은 **git 상태 신호**다(stage·commit·checkout). 파일 트리 항목과는 무관하므로 목록만
@@ -20699,6 +20711,40 @@ pub const AppSession = struct {
         return find_current_span;
     }
 
+    pub fn requestProjectSearch(self: *AppSession, root_index: usize, text: []const u8, options: maru.session.editor.search.query.Options, limits: maru.session.editor.search.request.Limits, budget: @import("app_session/editor/search/backend.zig").Budget) !void {
+        const owner = @import("app_session/editor/search/owner.zig");
+        owner.cancel(self);
+        if (self.editor_project_search_query) |*previous| previous.deinit(self.allocator);
+        self.editor_project_search_query = null;
+        self.editor_project_search_request +%= 1;
+        if (self.editor_project_search_request == 0) self.editor_project_search_request = 1;
+        self.editor_project_search_failure = null;
+        self.editor_project_search_query = owner.Query.init(self.allocator, root_index, text, options, limits, budget) catch |err| {
+            self.editor_project_search_failure = err;
+            self.editor_project_search_failure_stamp = owner.fingerprint(self);
+            self.editor_project_search_failure_request = self.editor_project_search_request;
+            return err;
+        };
+    }
+
+    pub fn projectSearchCompletion(self: *AppSession) ?@import("app_session/editor/search/backend.zig").Completion {
+        if (self.ime_active or self.ime_editor_commit_pending) return null;
+        const live = if (self.editor_project_search_live) |*value| value else return null;
+        if (self.editor_project_search_query == null or live.identity.request != self.editor_project_search_request or live.stamp != @import("app_session/editor/search/owner.zig").fingerprint(self)) return null;
+        return live.job.completion();
+    }
+
+    pub fn takeProjectSearchBatch(self: *AppSession) ?@import("app_session/editor/search/backend.zig").Batch {
+        return @import("app_session/editor/search/owner.zig").take(self);
+    }
+
+    /// 검색 도크가 사용할 사본 준비 진입점. 예산은 제품 실측을 거친 호출자가 명시한다.
+    pub fn prepareProjectSearch(self: *AppSession, root_index: usize, request: u64, limits: maru.session.editor.search.request.Limits, snapshot_bytes: usize) !void {
+        if (self.editor_project_search_prepared) |*previous| previous.deinit(self.allocator);
+        self.editor_project_search_prepared = null;
+        self.editor_project_search_prepared = try @import("app_session/editor/search/owner.zig").Prepared.init(self, root_index, request, limits, snapshot_bytes);
+    }
+
     pub fn tick(self: *AppSession) !FrameSummary {
         advanceHostnameFrame(); // 이 프레임의 hostname 은 한 번만 조회한다(`localHostname` 의 근거)
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
@@ -20716,6 +20762,7 @@ pub const AppSession = struct {
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
+        if (is_macos) @import("app_session/editor/search/owner.zig").poll(self);
         workspace_ops.advancePendingWindowClose(self);
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
@@ -23946,6 +23993,10 @@ pub const AppSession = struct {
     /// **새 backend 를 세션에 달면 여기에 한 줄 더한다.** 빠뜨리면 빠른 기계에서는 아무 일도 안 일어나고
     /// 느린 CI 에서만, 그것도 **엉뚱한 판정자 이름으로** 터진다.
     fn quietDetachedWorkersForTest(self: *AppSession) void {
+        if (self.editor_project_search_live) |*live| {
+            live.job.cancel();
+            if (live.job.active) |job| detached_worker_wait.quietState(job, self.io);
+        }
         if (self.file_tree_initialized) {
             detached_worker_wait.quiet(&self.file_tree_backend, self.io);
             detached_worker_wait.quiet(&self.file_tree_mutation_backend, self.io);
@@ -23981,6 +24032,7 @@ pub const AppSession = struct {
         // 에서 기다리면 영원히 안 끝난다 — 실제로 상한까지 헛돌았다(적대적 검증 1 회차 실측). 그런
         // backend 는 자기 `deinit` 안에서, **취소한 뒤에** 거둔다. 이미지 스캔·디코드도 마찬가지다.
         if (builtin.is_test) quietDetachedWorkersForTest(self);
+        @import("app_session/editor/search/owner.zig").deinit(self);
         unregisterRecoveredSessionWindow(self);
         // 훅 이벤트 로그는 «기록» 이 아니라 «소비 즉시 비우는 큐» 다(docs/agent-hooks.md §4.2) — 그 안에는
         // 프롬프트 원문과 셸 명령이 평문으로 들어 있다. Term 을 놓기 **전에** 지운다(surfaceId 가 필요하다).

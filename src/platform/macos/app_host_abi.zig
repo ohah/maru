@@ -3472,6 +3472,29 @@ pub export fn maru_macos_app_session_fail_file_panel_close_unlock(session: ?*App
 }
 
 // FP7 FSEvents adapter: restore가 root set을 교체했으면 1회 reset. 새 root는 아래 take_root로 drain한다. (v123)
+/// 감시 시작 성공은 실제 host가 확인한다. root 변경 뒤의 옛 ack는 현재 세대를 갱신하지 않는다.
+pub export fn maru_macos_app_session_project_search_watch_generation(session: ?*AppSession) u64 {
+    const s = session orelse return 0;
+    return if (s.file_tree_initialized) s.file_tree.rootGeneration() else 0;
+}
+pub export fn maru_macos_app_session_project_search_watch_ready(session: ?*AppSession, generation: u64) void {
+    const s = session orelse return;
+    if (generation == 0) {
+        s.editor_project_search_watch_generation = 0;
+        return;
+    }
+    if (s.file_tree_initialized and generation == s.file_tree.rootGeneration() and s.peekFileTreeWatchRoot() == null and !s.file_tree_watch_reset_pending) s.editor_project_search_watch_generation = generation;
+}
+pub export fn maru_macos_app_session_project_search_cancel(session: ?*AppSession) void {
+    const s = session orelse return;
+    @import("app_session/editor/search/owner.zig").cancel(s);
+    if (s.editor_project_search_query) |*query| query.deinit(s.allocator);
+    s.editor_project_search_query = null;
+}
+pub export fn maru_macos_project_search_outstanding_workers() usize {
+    return @import("app_session/editor/search/backend.zig").outstandingWorkers();
+}
+
 pub export fn maru_macos_app_session_take_file_tree_watch_reset(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
     return if (app_session.takeFileTreeWatchReset()) 1 else 0;

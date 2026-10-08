@@ -41,6 +41,10 @@ test "AppSession suite runs as index shards and fresh process judges wait for ev
     // **fresh 프로세스 판정자 사슬의 머리는 샤드 스텝 뒤에 돈다.** 겹치면 CoreText 캐시·signal/seal/daemon 네임스페이스가 충돌한다.
     var graph = try build_graph.parse(allocator);
     defer graph.deinit();
+    // 실제 검색 판정자는 전체 스위트에서도 고정된 오프라인 helper를 준비해야 한다.
+    try std.testing.expect(graph.dependsOn("run_macos_app_host_abi_shards", "ripgrep_prepare"));
+    try std.testing.expect(graph.dependsOn("run_editor_tests", "ripgrep_prepare"));
+    try std.testing.expect(graph.dependsOn("run_search_owner_tests", "ripgrep_prepare"));
     // 매달기도 **구조로** 본다 — 문자열은 `.step` 이 붙었는지·줄바꿈이 들었는지에 흔들린다.
     try std.testing.expect(graph.dependsOn("run_macos_external_tty_fresh_tests", "run_macos_app_host_abi_shards"));
     // `test` 스텝(macOS)도 샤드 스텝에 의존한다.

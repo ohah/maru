@@ -354,7 +354,7 @@ CLI의 `--baseline-native`는 수정 전 바이너리와 파일·줄·byte·길�
 | S3 | 바꾸기 미리보기 | 선택한 파일/일치별 전후 diff. 표시 revision과 원본 bytes를 고정하고 미리보기 뒤 변경은 충돌로 표시 |
 | S4 | 선택 적용 | 열린 문서는 Undo와 IME, 디스크는 외부 변경·저장 실패·권한·원자 저장을 검증. 여러 파일 실패/부분 성공·재시도·되돌리기 정책을 별도 승인한 뒤 연결 |
 
-S1b 백엔드의 구현·실행 증거와 실제 앱 연결의 남은 gate는 [worker와 불변 문서](editor-project-search-worker.md)에 둔다. 백엔드 프로브의 통과를 S1b 전체 완료로 표시하지 않는다.
+S1b 백엔드의 구현·실행 증거와 실제 앱 연결의 남은 gate는 [worker와 불변 문서](editor-project-search-worker.md)에 둔다. [AppSession owner 연결](editor-project-search-owner.md)은 현재 창의 지정된 root에 대한 준비·무효화·감시 확인·worker 수명 API를 연결한다. 여러 root와 제품 화면/실측의 남은 gate를 유지하며, 프로브의 통과를 S1b 전체 완료로 표시하지 않는다.
 
 S1/S2는 바꾸기를 실행하지 않는다. S4도 여러 파일 전체의 원자적 성공이나 crash 이후 Undo 보존을 약속하지 않는다.
 최종 저장은 기존 파일 저장/복구 계약을 재사용하되, 이미 구현된 `WorkspaceEdit`의 존재만으로 이 gate를 닫지 않는다.

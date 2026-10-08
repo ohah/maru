@@ -144,6 +144,9 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 
 ## 빌드와 테스트
 
+- 프로젝트 검색 앱 owner: `zig build test-editor-project-search-owner`는 현재 창의 root·문서·논리 IME·무효화·감시 확인 후 실제 helper 실행을 검사한다. [owner 연결과 남은 제품 gate](plans/editor-project-search-owner.md)를 본다.
+- 프로젝트 검색 경로 점유 진단(opt-in): `python3 tools/editor-project-search/path-occupancy-audit.py --worker zig-out/bin/maru-project-search-worker --rg zig-out/ripgrep/rg --output zig-out/editor-project-search-path-occupancy`. 먼저 `zig build prepare-ripgrep editor-project-search-worker`로 고정 helper와 probe를 준비한다. `latest.json`/run별 `report.json`을 남기며 0=계약 충족, 1=결함, 2=검증 불완전이다. 저장된 철자·논리 경로·실행 오류를 구분하는 opt-in 진단이다. 미재현/미지원 파일시스템을 성공으로 취급하지 않는다. 폴더 별칭·glob/예산 제외·root 밖 링크·hardlink 교체를 대조하며 [경로 처리와 남은 검증](plans/editor-project-search-owner.md)를 본다.
+
 - 승인한 프로젝트 검색 기반: `zig build prepare-ripgrep`은 offline 공식 사본을 검증·universal helper를 준비한다(macOS). `zig build test-editor-project-search`는 argv/JSON/분할/OOM 경계를 검사한다. 실제 helper 검증은 `zig build test-macos-project-search-adapter -Doptimize=ReleaseFast`이며 macOS-only CI에도 연결된다. `zig-out/editor-project-search-adapter/latest.json`과 고유 `run-*/verification.json`을 남긴다. `macos-app-bundle`이 helper·notices·서명을 묶는다. 제품 worker/도크 완료의 증거가 아니며 [채택 구성과 단계](plans/editor-project-search.md)를 본다.
 
 

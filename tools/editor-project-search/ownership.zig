@@ -40,6 +40,60 @@ fn runFailures(a: std.mem.Allocator, captured: *const api.model.Captured, use_re
     try api.model.run(a, captured, "\xf0\x9f\x98\x80", .{ .match_case = true, .regex = use_regex }, &control, 1024, 3, &sink, Sink.accept);
     try std.testing.expectEqual(@as(usize, 1), sink.calls);
 }
+fn overlayFailures(a: std.mem.Allocator, file: *const editor.edit_doc.EditableFile, use_regex: bool) !void {
+    var state: search.request.State = .{ .identity = identity, .limits = .{ .result_bytes = 1024, .event_bytes = 1024 } };
+    defer state.deinit(a);
+    var captured = try api.model.capture(a, &state, "a.txt", document, 7, file);
+    defer captured.deinit(a);
+    try api.model.addOverlay(a, &captured, 4, 7, "\xf0\x9f\x98\x80");
+    var control: Control = .{};
+    var sink: Sink = .{};
+    try api.model.run(a, &captured, "\xf0\x9f\x98\x80", .{ .match_case = true, .regex = use_regex }, &control, 1024, 3, &sink, Sink.accept);
+    try std.testing.expectEqual(@as(usize, 2), sink.calls);
+}
+fn invalidOverlays(a: std.mem.Allocator, file: *const editor.edit_doc.EditableFile) !void {
+    for (0..2) |invalid| {
+        var state: search.request.State = .{ .identity = identity, .limits = .{ .result_bytes = 1024, .event_bytes = 1024 } };
+        defer state.deinit(a);
+        var captured = try api.model.capture(a, &state, "a.txt", document, 7, file);
+        defer captured.deinit(a);
+        try api.model.addOverlay(a, &captured, 4, 7, if (invalid == 0) "\x80" else "foo");
+        if (invalid == 1) try api.model.addOverlay(a, &captured, 5, 6, "bar");
+        var control: Control = .{};
+        var sink: Sink = .{};
+        try std.testing.expectError(error.InvalidOverlay, api.model.run(a, &captured, "foo", .{}, &control, 1024, 3, &sink, Sink.accept));
+        try std.testing.expectEqual(@as(usize, 0), sink.calls);
+    }
+    for ([_][2]usize{ .{ 1, 1 }, .{ 4, 8 }, .{ 7, 4 } }) |range| {
+        var state: search.request.State = .{ .identity = identity, .limits = .{ .result_bytes = 1024, .event_bytes = 1024 } };
+        defer state.deinit(a);
+        var captured = try api.model.capture(a, &state, "a.txt", document, 7, file);
+        defer captured.deinit(a);
+        try api.model.addOverlay(a, &captured, range[0], range[1], "foo");
+        var control: Control = .{};
+        var sink: Sink = .{};
+        try std.testing.expectError(error.InvalidOverlay, api.model.run(a, &captured, "foo", .{}, &control, 1024, 3, &sink, Sink.accept));
+        try std.testing.expectEqual(@as(usize, 0), sink.calls);
+    }
+}
+fn pathPrepareFailures(a: std.mem.Allocator, file: *const editor.edit_doc.EditableFile, root: []const u8) !void {
+    var state: search.request.State = .{ .identity = identity, .limits = .{ .result_bytes = 1024, .event_bytes = 1024 } };
+    defer state.deinit(a);
+    var models: std.ArrayList(api.model.Captured) = .empty;
+    defer {
+        for (models.items) |*item| item.deinit(a);
+        models.deinit(a);
+    }
+    var retained: usize = 0;
+    _ = try api.model.captureUnique(a, &state, &models, "A.TXT", document, 7, file, &retained, 1024);
+    try state.occupy(a, "missing.txt");
+    var control: Control = .{};
+    try api.path.prepare(a, root, &state, &models, &control);
+    try std.testing.expectEqual(@as(usize, 1), models.items.len);
+    try std.testing.expect(state.occupied.contains(models.items[0].path));
+    try std.testing.expect(state.occupied.contains("missing.txt"));
+    try std.testing.expectEqual(@as(usize, 7), models.items[0].snapshot.byteLen());
+}
 fn wait(backend: *api.Backend, io: std.Io) !void {
     const started = std.Io.Timestamp.now(io, .awake);
     while (!backend.done()) {
@@ -51,6 +105,10 @@ pub fn run(a: std.mem.Allocator, io: std.Io, helper: []const u8, root: []const u
     var file = try editor.edit_doc.EditableFile.init(a, "\xf0\x9f\x98\x80foo", false);
     defer file.deinit();
     try std.testing.checkAllAllocationFailures(a, captureFailures, .{&file});
+    try std.testing.checkAllAllocationFailures(a, pathPrepareFailures, .{ &file, root });
+    try std.testing.checkAllAllocationFailures(a, overlayFailures, .{ &file, false });
+    try std.testing.checkAllAllocationFailures(a, overlayFailures, .{ &file, true });
+    try invalidOverlays(a, &file);
     var state: search.request.State = .{ .identity = identity, .limits = .{ .result_bytes = 1024, .event_bytes = 1024 } };
     defer state.deinit(a);
     var captured = try api.model.capture(a, &state, "a.txt", document, 7, &file);

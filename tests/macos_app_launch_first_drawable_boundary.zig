@@ -31,7 +31,8 @@ test "L1 launch gate preserves product startup and isolates every ambient profil
     const terminate = std.mem.indexOfPos(u8, draw, submit, "DispatchQueue.main.async { NSApp.terminate(nil) }") orelse
         return error.MissingDrawOwner;
     try std.testing.expect(successful < frame and frame < submit and submit < terminate);
-    try std.testing.expectEqual(@as(usize, 1), count(swift, "if smokeMode || appLaunchFirstDrawableArmed { return .terminateNow }"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "if smokeMode || appLaunchFirstDrawableArmed { return finishProjectSearchBeforeTermination() }"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "if maru_macos_project_search_outstanding_workers() == 0 { return .terminateNow }"));
 
     inline for (.{
         "envPair(allocator, \"HOME\"",                   "envPair(allocator, \"CFFIXED_USER_HOME\"",

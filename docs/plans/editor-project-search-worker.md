@@ -81,6 +81,8 @@ CI는 `zig-out/editor-project-search-worker/latest.json`·실행별 `verificatio
 
 ## 실제 앱 연결의 남은 gate
 
+[AppSession owner 연결](editor-project-search-owner.md)은 요청·사본·감시 확인·수명 API를 연결한다. 아래 항목 전체의 제품 완료 증거를 대체하지 않는다.
+
 - 메인 owner의 문서 목록을 제한된 배치로 준비하고 생성·닫기·Save As·revision·IME 조합 변화로 무효화한다.
   `Captured.source.model.composition`은 신원 값이며 현재 실제 marked text/멀티커서 조합 사본 연결 증거가 아니다.
 - root·명시적 scope에 속한 열린 문서와 미지원 웹 문서를 점유하며 0건/실패/제외 안내를 실제 결과 상태에 연결한다.

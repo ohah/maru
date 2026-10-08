@@ -52095,3 +52095,404 @@ test "EDREG5 빈 정규식 대안 치환은 삽입하고 Undo로 본문을 복�
         try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
     }
 }
+
+fn projectSearchRootForTest(fx: *PaneFixture) !void {
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path[0..try fx.dir.dir.realPath(std.testing.io, &path)];
+    try fx.session.file_tree.replaceExplicitRoots(&.{root});
+    var native: std.posix.Stat = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.fstat(fx.dir.dir.handle, &native));
+    try testing.expect(fx.session.file_tree.pinRootIdentity(root, .{ .device = @intCast(native.dev), .inode = @intCast(native.ino), .kind = 2 }));
+}
+const ProjectSearchSink = struct {
+    count: usize = 0,
+    fn accept(self: *@This(), source: maru.session.editor.search.request.Source, match: maru.session.editor.search.event.Match) !bool {
+        try testing.expect(source.model.composition != 0);
+        try testing.expect(std.unicode.utf8ValidateSlice(match.text));
+        self.count += 1;
+        return false;
+    }
+};
+test "EDPS1 실제 owner 조합 사본은 여러 커서에 적용하고 정본을 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "left right");
+    try projectSearchRootForTest(&fx);
+    _ = try openSharedViewInActivePane(fx.session, term);
+    try testing.expect(fx.session.activateSurfaceById(term.surface.id));
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 4);
+    try setExtraSelections(fx.session, term, &.{editor_selection.Selection.fromPoints(5, 10)});
+    try testing.expect(@import("../editor_ime.zig").marked(fx.session, "\xed\x95\x9c\xea\xb8\x80", .{ .location = 2, .length = 0 }, .{ .location = 0, .length = 4 }));
+    try fx.session.prepareProjectSearch(0, 1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 4096);
+    const prepared = &fx.session.editor_project_search_prepared.?;
+    try testing.expect(!try prepared.advance(fx.session, 0));
+    while (!try prepared.advance(fx.session, 1)) {}
+    try testing.expectEqual(@as(usize, 2), prepared.models.items.len);
+    var selected: ?*@import("search/model.zig").Captured = null;
+    for (prepared.models.items) |*captured| if (std.mem.eql(u8, captured.path, "search.txt")) {
+        selected = captured;
+    };
+    const captured = selected orelse return error.MissingModel;
+    try testing.expectEqual(@as(usize, 2), captured.overlays.items.len);
+    var control: struct { cancelled: std.atomic.Value(bool) = .init(false) } = .{};
+    var sink: ProjectSearchSink = .{};
+    try @import("search/model.zig").run(testing.allocator, captured, "\xed\x95\x9c", .{}, &control, 4096, 256, &sink, ProjectSearchSink.accept);
+    try testing.expectEqual(@as(usize, 2), sink.count);
+    try testing.expectEqualStrings("left right", term.rt.editorDocument().opened.?.file.content);
+}
+test "EDPS2 편집 조합 저장 경로 외부 변경은 준비 신원을 무효화한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    const owner = @import("search/owner.zig");
+    for (0..4) |change| {
+        var prepared = try owner.Prepared.init(fx.session, 0, 1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 4096);
+        defer prepared.deinit(testing.allocator);
+        while (!try prepared.advance(fx.session, 1)) {}
+        switch (change) {
+            0 => term.rt.editorDocument().opened.?.file.revision += 1,
+            1 => {
+                term.rt.editor_preedit = try testing.allocator.dupe(u8, "foo");
+                term.rt.editor_preedit_at = 0;
+                term.rt.editor_preedit_end = 0;
+            },
+            2 => {
+                const previous = term.rt.editorDocument().path.?;
+                term.rt.editorDocument().path = try std.fmt.allocPrint(testing.allocator, "{s}.renamed", .{previous});
+                testing.allocator.free(previous);
+            },
+            else => fx.session.fileTreeChanged(term.rt.editorDocument().path.?),
+        }
+        try testing.expect(!prepared.fresh(fx.session));
+        try testing.expectError(error.StaleRequest, prepared.advance(fx.session, 1));
+    }
+}
+test "EDPS3 조합 transaction과 미검증 root는 검색 사본을 시작하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    fx.session.ime_active = true;
+    try testing.expectError(error.InputTransactionPending, fx.session.prepareProjectSearch(0, 1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 4096));
+    fx.session.ime_active = false;
+    try fx.session.file_tree.replaceExplicitRoots(&.{"/unverified"});
+    try testing.expectError(error.UnverifiedSearchRoot, fx.session.prepareProjectSearch(0, 1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 4096));
+    try testing.expect(fx.session.editor_project_search_prepared == null);
+}
+
+test "EDPS4 실제 worker는 감시 확인 뒤 실행하고 편집 뒤 다시 검색한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    var helper_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const helper = helper_buf[0..try std.Io.Dir.cwd().realPathFile(std.testing.io, "zig-out/ripgrep/rg", &helper_buf)];
+    try fx.session.requestProjectSearch(0, "foo", .{ .match_case = true }, .{ .result_bytes = 4096, .event_bytes = 4096 }, .{ .timing = .{ .execution_ms = 1000, .reap_ms = 1000 }, .snapshot_bytes = 4096, .preview_bytes = 256 });
+    fx.session.editor_project_search_query.?.helper_for_test = try testing.allocator.dupe(u8, helper);
+    const owner = @import("search/owner.zig");
+    owner.poll(fx.session);
+    try testing.expect(fx.session.editor_project_search_live == null);
+    try testing.expect(fx.session.editor_project_search_prepared.?.ready);
+    fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+    var found: usize = 0;
+    for (0..2000) |_| {
+        owner.poll(fx.session);
+        if (fx.session.takeProjectSearchBatch()) |value| {
+            var batch = value;
+            defer batch.deinit(testing.allocator);
+            for (batch.rows.items) |row| if (std.mem.eql(u8, row.match.path, "search.txt")) {
+                found += row.match.ranges.len;
+            };
+        }
+        if (fx.session.editor_project_search_live) |*live| if (live.job.done()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try testing.expectEqual(@as(usize, 1), found);
+    try testing.expect(fx.session.editor_project_search_live.?.job.stats().?.reaped);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "foo "));
+    try testing.expect(fx.session.takeProjectSearchBatch() == null);
+    owner.poll(fx.session);
+    for (0..2000) |_| {
+        owner.poll(fx.session);
+        if (fx.session.editor_project_search_live) |*live| if (live.job.done() and live.stamp == owner.fingerprint(fx.session)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    // 정본 갱신 전의 입력 transaction에서도 이전 결과를 소비하면 안 된다.
+    for (0..2) |pending| {
+        fx.session.ime_active = pending == 0;
+        fx.session.ime_editor_commit_pending = pending == 1;
+        try testing.expect(fx.session.projectSearchCompletion() == null);
+        try testing.expect(fx.session.takeProjectSearchBatch() == null);
+    }
+    fx.session.ime_active = false;
+    fx.session.ime_editor_commit_pending = false;
+    const value = fx.session.takeProjectSearchBatch() orelse return error.MissingBatch;
+    var batch = value;
+    defer batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), batch.matches);
+}
+
+fn projectSearchPrepareFailures(a: std.mem.Allocator, session: *AppSession) !void {
+    const original = session.allocator;
+    session.allocator = a;
+    defer session.allocator = original;
+    var prepared = try @import("search/owner.zig").Prepared.init(session, 0, 1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 4096);
+    defer prepared.deinit(a);
+    while (!try prepared.advance(session, 1)) {}
+    try testing.expectEqual(@as(usize, 2), prepared.models.items.len);
+}
+fn projectSearchQueryFailures(a: std.mem.Allocator) !void {
+    var query = try @import("search/owner.zig").Query.init(a, 0, "foo", .{ .includes = &.{ "*.zig", "*.txt" }, .excludes = &.{"private/**"} }, .{ .result_bytes = 4096, .event_bytes = 4096 }, .{ .timing = .{ .execution_ms = 1000, .reap_ms = 1000 }, .snapshot_bytes = 4096, .preview_bytes = 256 });
+    defer query.deinit(a);
+    try testing.expectEqualStrings("*.txt", query.options.includes[1]);
+    try testing.expectEqualStrings("private/**", query.options.excludes[0]);
+}
+test "EDPS5 조합 준비와 요청 옵션의 모든 할당 실패는 소유권을 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "left right");
+    try projectSearchRootForTest(&fx);
+    term.rt.editor_preedit = try testing.allocator.dupe(u8, "new");
+    term.rt.editor_preedit_at = 0;
+    term.rt.editor_preedit_end = 4;
+    try setExtraSelections(fx.session, term, &.{editor_selection.Selection.fromPoints(5, 10)});
+    try testing.checkAllAllocationFailures(testing.allocator, projectSearchPrepareFailures, .{fx.session});
+    try testing.checkAllAllocationFailures(testing.allocator, projectSearchQueryFailures, .{});
+    try testing.expectEqualStrings("left right", term.rt.editorDocument().opened.?.file.content);
+}
+test "EDPS6 surface 순서 변경과 공유 view 닫기는 준비 cursor를 무효화한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    const shared = try openSharedViewInActivePane(fx.session, term);
+    const owner = @import("search/owner.zig");
+    var prepared = try owner.Prepared.init(fx.session, 0, 1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 4096);
+    defer prepared.deinit(testing.allocator);
+    try testing.expect(!try prepared.advance(fx.session, 1));
+    const pane = pane_ops.activePane(fx.session);
+    std.mem.swap(*Term, &pane.terms.items[0], &pane.terms.items[1]);
+    try testing.expectError(error.StaleRequest, prepared.advance(fx.session, 1));
+    std.mem.swap(*Term, &pane.terms.items[0], &pane.terms.items[1]);
+    while (!try prepared.advance(fx.session, 1)) {}
+    for (pane.terms.items, 0..) |candidate, index| if (candidate == shared) {
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, index);
+        break;
+    };
+    try testing.expectError(error.StaleRequest, prepared.advance(fx.session, 1));
+    try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+}
+test "EDPS7 예산 제외된 공유 문서는 디스크 점유를 유지하고 중복 집계하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    _ = try openSharedViewInActivePane(fx.session, term);
+    var prepared = try @import("search/owner.zig").Prepared.init(fx.session, 0, 1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 0);
+    defer prepared.deinit(testing.allocator);
+    while (!try prepared.advance(fx.session, 1)) {}
+    try testing.expectEqual(@as(usize, 0), prepared.models.items.len);
+    try testing.expectEqual(@as(usize, 0), prepared.retained);
+    try testing.expectEqual(@as(usize, 2), prepared.state.excluded);
+    try testing.expect(prepared.state.occupied.contains("search.txt"));
+    try testing.expect(prepared.state.occupied.contains("doc.zig"));
+}
+
+test "EDPS8 요청 교체와 owner 종료는 옛 결과를 막고 detached worker를 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    const owner = @import("search/owner.zig");
+    const backend = @import("search/backend.zig");
+    var helper_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const helper = helper_buf[0..try std.Io.Dir.cwd().realPathFile(std.testing.io, "zig-out/ripgrep/rg", &helper_buf)];
+    const limits: maru.session.editor.search.request.Limits = .{ .result_bytes = 4096, .event_bytes = 4096 };
+    const budget: backend.Budget = .{ .timing = .{ .execution_ms = 1000, .reap_ms = 1000 }, .snapshot_bytes = 4096, .preview_bytes = 256 };
+    fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+    try fx.session.requestProjectSearch(0, "foo", .{}, limits, budget);
+    fx.session.editor_project_search_query.?.helper_for_test = try testing.allocator.dupe(u8, helper);
+    owner.poll(fx.session);
+    try testing.expect(fx.session.editor_project_search_live != null);
+    const old_request = fx.session.editor_project_search_request;
+    try fx.session.requestProjectSearch(0, "absent", .{}, limits, budget);
+    fx.session.editor_project_search_query.?.helper_for_test = try testing.allocator.dupe(u8, helper);
+    try testing.expect(fx.session.takeProjectSearchBatch() == null);
+    try testing.expect(fx.session.projectSearchCompletion() == null);
+    const started = std.Io.Timestamp.now(std.testing.io, .awake);
+    while (true) {
+        owner.poll(fx.session);
+        if (fx.session.projectSearchCompletion()) |completion| {
+            try testing.expect(completion.identity.request != old_request);
+            try testing.expectEqual(fx.session.editor_project_search_request, completion.identity.request);
+            try testing.expectEqual(maru.session.editor.search.request.Status.complete, completion.status);
+            break;
+        }
+        if (started.untilNow(std.testing.io, .awake).toMilliseconds() > 5000) return error.AuditDeadline;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    const result = fx.session.takeProjectSearchBatch() orelse return error.MissingBatch;
+    var batch = result;
+    defer batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), batch.matches);
+    try testing.expectError(error.InvalidQuery, fx.session.requestProjectSearch(0, "", .{}, limits, budget));
+    owner.poll(fx.session);
+    try testing.expect(fx.session.editor_project_search_query == null);
+    try testing.expect(fx.session.takeProjectSearchBatch() == null);
+    try fx.session.requestProjectSearch(0, "foo", .{}, limits, budget);
+    fx.session.editor_project_search_query.?.helper_for_test = try testing.allocator.dupe(u8, helper);
+    while (fx.session.editor_project_search_live == null or fx.session.editor_project_search_live.?.identity.request != fx.session.editor_project_search_request) {
+        owner.poll(fx.session);
+        if (started.untilNow(std.testing.io, .awake).toMilliseconds() > 5000) return error.AuditDeadline;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    owner.deinit(fx.session);
+    try testing.expect(fx.session.editor_project_search_live == null);
+    try testing.expect(fx.session.editor_project_search_query == null);
+    while (backend.outstandingWorkers() != 0) {
+        if (started.untilNow(std.testing.io, .awake).toMilliseconds() > 5000) return error.AuditDeadline;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+}
+
+fn projectSearchAuditRequest(session: *AppSession, text: []const u8) !void {
+    return projectSearchAuditRequestOptions(session, text, .{ .match_case = true });
+}
+fn projectSearchAuditRequestOptions(session: *AppSession, text: []const u8, options: maru.session.editor.search.query.Options) !void {
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const helper = path[0..try std.Io.Dir.cwd().realPathFile(testing.io, "zig-out/ripgrep/rg", &path)];
+    try session.requestProjectSearch(0, text, options, .{ .result_bytes = 4096, .event_bytes = 4096 }, .{ .timing = .{ .execution_ms = 1000, .reap_ms = 1000 }, .snapshot_bytes = 4096, .preview_bytes = 256 });
+    session.editor_project_search_query.?.helper_for_test = try testing.allocator.dupe(u8, helper);
+}
+fn projectSearchAuditAwait(session: *AppSession) !void {
+    const started = std.Io.Timestamp.now(testing.io, .awake);
+    while (true) {
+        @import("search/owner.zig").poll(session);
+        if (session.projectSearchCompletion()) |completion| {
+            try testing.expectEqual(maru.session.editor.search.request.Status.complete, completion.status);
+            try testing.expect(completion.failure == null);
+            return;
+        }
+        if (started.untilNow(testing.io, .awake).toMilliseconds() > 5000) return error.AuditDeadline;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+}
+test "EDPS9 실제 외부 쓰기는 이전 결과를 버리고 닫은 문서만 디스크로 전환한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, " dirty"));
+    fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+    try projectSearchAuditRequest(fx.session, "foo");
+    try projectSearchAuditAwait(fx.session);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "search.txt", .data = "disk-new" });
+    fx.session.fileTreeChanged(term.rt.editorDocument().path.?);
+    try testing.expect(fx.session.projectSearchCompletion() == null);
+    try testing.expect(fx.session.takeProjectSearchBatch() == null);
+    try projectSearchAuditAwait(fx.session);
+    var model_batch = fx.session.takeProjectSearchBatch() orelse return error.MissingBatch;
+    defer model_batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), model_batch.matches);
+    try testing.expectEqual(@as(usize, 1), model_batch.rows.items.len);
+    try testing.expect(model_batch.rows.items[0].source == .model);
+    try testing.expectEqualStrings("foo dirty", term.rt.editorDocument().opened.?.file.content);
+    // 수락된 닫기의 실제 teardown 경로다. 닫기 확인 UI나 FSEvents 전달을 합성하지 않는다.
+    const pane = pane_ops.activePane(fx.session);
+    for (pane.terms.items, 0..) |candidate, index| if (candidate == term) {
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, index);
+        break;
+    };
+    try testing.expect(fx.session.projectSearchCompletion() == null);
+    try projectSearchAuditRequest(fx.session, "disk-new");
+    try projectSearchAuditAwait(fx.session);
+    var disk_batch = fx.session.takeProjectSearchBatch() orelse return error.MissingBatch;
+    defer disk_batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), disk_batch.matches);
+    try testing.expectEqual(@as(usize, 1), disk_batch.rows.items.len);
+    try testing.expect(disk_batch.rows.items[0].source == .disk);
+    try testing.expectEqualStrings("./search.txt", disk_batch.rows.items[0].match.path);
+}
+test "EDPS10 root 교체 중 최신 요청은 새 감시 확인 전 실행되지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+    try projectSearchAuditRequest(fx.session, "foo");
+    try projectSearchAuditAwait(fx.session);
+    const old_watch = fx.session.editor_project_search_watch_generation;
+    try fx.dir.dir.createDir(testing.io, "nested", .default_dir);
+    var nested = try fx.dir.dir.openDir(testing.io, "nested", .{});
+    defer nested.close(testing.io);
+    try nested.writeFile(testing.io, .{ .sub_path = "only.txt", .data = "bar" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try nested.realPath(testing.io, &root_buf)];
+    try fx.session.file_tree.replaceExplicitRoots(&.{root});
+    var native: std.posix.Stat = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.fstat(nested.handle, &native));
+    try testing.expect(fx.session.file_tree.pinRootIdentity(root, .{ .device = @intCast(native.dev), .inode = @intCast(native.ino), .kind = 2 }));
+    try testing.expect(old_watch != fx.session.file_tree.rootGeneration());
+    try testing.expect(fx.session.takeProjectSearchBatch() == null);
+    try projectSearchAuditRequest(fx.session, "bar");
+    @import("search/owner.zig").poll(fx.session);
+    try testing.expect(fx.session.editor_project_search_live == null);
+    try testing.expect(fx.session.editor_project_search_prepared.?.ready);
+    try testing.expectEqual(old_watch, fx.session.editor_project_search_watch_generation);
+    fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+    try projectSearchAuditAwait(fx.session);
+    var batch = fx.session.takeProjectSearchBatch() orelse return error.MissingBatch;
+    defer batch.deinit(testing.allocator);
+    try testing.expectEqual(fx.session.editor_project_search_request, batch.identity.request);
+    try testing.expectEqual(fx.session.file_tree.rootGeneration(), batch.identity.root);
+    try testing.expectEqual(@as(usize, 1), batch.matches);
+    try testing.expectEqualStrings("./only.txt", batch.rows.items[0].match.path);
+}
+
+test "EDPS11 저장된 경로 철자로 필터링해도 열린 모델 신원과 원래 경로를 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try fx.dir.dir.createDir(testing.io, "Folder", .default_dir);
+    // 대소문자 구분 볼륨에서도 같은 계약을 검사한다. 별칭 대조 전체는 별도 filesystem 진단이 맡는다.
+    const alias_available = blk: {
+        var directory = fx.dir.dir.openDir(testing.io, "folder", .{}) catch break :blk false;
+        directory.close(testing.io);
+        break :blk true;
+    };
+    const term = try undoFixture(&fx, testing.allocator, if (alias_available) "folder/search.txt" else "Folder/search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    const original_path = try testing.allocator.dupe(u8, term.rt.editorDocument().path.?);
+    defer testing.allocator.free(original_path);
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
+    try testing.expect(insertText(fx.session, term, "editor-only"));
+    fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+    try projectSearchAuditRequestOptions(fx.session, "editor-only", .{ .match_case = true, .includes = &.{"Folder/**"} });
+    try projectSearchAuditAwait(fx.session);
+    var batch = fx.session.takeProjectSearchBatch() orelse return error.MissingBatch;
+    defer batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), batch.matches);
+    try testing.expect(batch.rows.items[0].source == .model);
+    try testing.expectEqualStrings("Folder/search.txt", batch.rows.items[0].match.path);
+    try testing.expectEqual(term.rt.editorDocument().opened.?.file.revision, batch.rows.items[0].source.model.revision);
+    try testing.expectEqualStrings(original_path, term.rt.editorDocument().path.?);
+    try projectSearchAuditRequest(fx.session, "foo");
+    try projectSearchAuditAwait(fx.session);
+    var old_disk = fx.session.takeProjectSearchBatch() orelse return error.MissingBatch;
+    defer old_disk.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), old_disk.matches);
+    try testing.expectEqualStrings("editor-only", term.rt.editorDocument().opened.?.file.content);
+}

@@ -96,11 +96,19 @@ test "불완전 복원 래치는 저장을 막되 종료는 막지 않는다" {
     const body_end = std.mem.indexOfPos(u8, begin, guard_at, "\n        }") orelse begin.len;
     const guard_body = begin[guard_at..body_end];
     const terminates = std.mem.indexOf(u8, guard_body, "NSApp.terminate") != null and
-        std.mem.indexOf(u8, guard_body, "toApplicationShouldTerminate: true") != null;
+        std.mem.indexOf(u8, guard_body, "replyAfterProjectSearchSettles()") != null;
     if (!terminates) {
         std.debug.print("건너뛰기 경로가 앱을 닫지 않는다 — 종료 요청이 허공에 뜬다: «{s}»\n", .{guard_body});
         return error.SkipPathDoesNotQuit;
     }
+
+    const reply = try funcBody(src, "func replyAfterProjectSearchSettles(");
+    try std.testing.expect(std.mem.indexOf(u8, reply, "finishProjectSearchBeforeTermination() == .terminateNow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "NSApp.reply(toApplicationShouldTerminate: true)") != null);
+    const finish = try funcBody(src, "func finishProjectSearchBeforeTermination(");
+    try std.testing.expect(std.mem.indexOf(u8, finish, "maru_macos_project_search_outstanding_workers() == 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, finish, "RunLoop.main.add(timer, forMode: .common)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, finish, "NSApp.reply(toApplicationShouldTerminate: true)") != null);
 
     //    그리고 **왜** 안 썼는지 남긴다. 조용히 건너뛰면 「저장이 왜 안 됐나」가 다시 안 보인다.
     try std.testing.expect(std.mem.indexOf(u8, guard_body, "final-quit save skipped") != null);

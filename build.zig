@@ -1751,6 +1751,8 @@ pub fn build(b: *std.Build) void {
     // `LSPB*` 가 여기(집계 스위트)서도 돈다 — 가짜 언어 서버가 먼저 설치돼 있어야 한다. `test-editor` 에만 걸었더니 CI 의 이 잡에서
     // `MARU_LSP_SERVER_OVERRIDE` 가 없는 파일을 가리켜 「없음」이 되고 프롬프트가 안 떴다(PR #3788 CI 실측).
     run_macos_app_host_abi_shards.step.dependOn(&install_fake_lsp.step);
+    // EDPS 실제 worker 판정자는 전용 타깃뿐 아니라 전체 AppSession에도 포함된다.
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_macos_app_host_abi_shards.step.dependOn(&ripgrep_prepare.step);
     run_macos_app_host_abi_shards.addFileArg(b.path("tools/run-test-shards.sh"));
     run_macos_app_host_abi_shards.addArg(b.fmt("{d}", .{macos_app_host_abi_shards}));
     run_macos_app_host_abi_shards.addArtifactArg(macos_app_host_abi_tests);
@@ -5301,9 +5303,19 @@ pub fn build(b: *std.Build) void {
     run_document_regex_product_tests.setCwd(b.path("."));
     run_document_regex_product_tests.step.dependOn(&install_fake_lsp.step);
     editor_document_regex_step.dependOn(&run_document_regex_product_tests.step);
+    const search_owner_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"EDPS"} });
+    const run_search_owner_tests = b.addRunArtifact(search_owner_tests);
+    run_search_owner_tests.addArg("--maru-expect-tests=17");
+    run_search_owner_tests.addArg("--maru-expect-passed=17");
+    run_search_owner_tests.setCwd(b.path("."));
+    run_search_owner_tests.step.dependOn(&install_fake_lsp.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_search_owner_tests.step.dependOn(&ripgrep_prepare.step);
+    b.step("test-editor-project-search-owner", "Run AppSession search snapshot and invalidation judges").dependOn(&run_search_owner_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_search_owner_tests.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_editor_tests.step.dependOn(&ripgrep_prepare.step);
     const editor_test_step = b.step("test-editor", "Run the native editor judges only (fast feedback; not a substitute for `test`)");
     editor_test_step.dependOn(&run_editor_tests.step);
     // caret 렌더(`CRT*`)와 왕복 불변식 ①은 chrome 쪽 모듈에 있다 — 15초라 함께 돌린다.

@@ -1421,6 +1421,10 @@ uint64_t maru_macos_app_session_take_file_panel_close_unlock_action(MaruAppHostS
 void maru_macos_app_session_fail_file_panel_close_unlock(MaruAppHostSession *session, uint64_t surface_id, uint64_t request_id);
 /* FP7 project tree: FSEvents root lifecycle/event + clean file reload/external open one-shots. v123.
    path outputs return required length without consuming when out==NULL or cap is short. */
+uint64_t maru_macos_app_session_project_search_watch_generation(MaruAppHostSession *session);
+void maru_macos_app_session_project_search_watch_ready(MaruAppHostSession *session, uint64_t generation);
+void maru_macos_app_session_project_search_cancel(MaruAppHostSession *session);
+size_t maru_macos_project_search_outstanding_workers(void);
 uint32_t maru_macos_app_session_take_file_tree_watch_reset(MaruAppHostSession *session);
 size_t maru_macos_app_session_take_file_tree_watch_root(MaruAppHostSession *session, uint8_t *out, size_t cap);
 /* ABI v173: 접근성 서술자. Zig 는 **뜻**만 싣고(role/state/집합 위치), NSAccessibility 어휘로의 번역과

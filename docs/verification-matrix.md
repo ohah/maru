@@ -4132,4 +4132,4 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 
 ## 프로젝트 검색 worker 백엔드
 
-`test-macos-project-search-worker`는 실제 API의 합성 native 모델·공유/독립 신원·0건 점유·glob/범위·취소·helper 수거·부분 결과를 검증한다. `test-editor-project-search`는 8개 L2 판정자를 실행한다. 제품 문서 열거·실제 IME·감시 등록/overflow·최종 앱 종료·앱 RSS·검색 UI는 아직 검증 범위 밖이며 [worker 계획](plans/editor-project-search-worker.md)의 완료 조건을 유지한다.
+`test-macos-project-search-worker`는 실제 API의 합성 native 모델·공유/독립 신원·0건 점유·glob/범위·취소·helper 수거·부분 결과를 검증한다. `test-editor-project-search`는 8개 L2 판정자를 실행한다. `test-editor-project-search-owner`는 실제 AppSession 사본·논리 IME callback·감시 확인 후 실행·편집 후 재검색을 검사한다. 실제 OS IME·FSEvents/overflow·최종 앱 종료·앱 RSS·검색 UI는 아직 제품 실행 증거 범위 밖이며 [worker 계획](plans/editor-project-search-worker.md)의 완료 조건을 유지한다.

@@ -5,6 +5,12 @@ const search = @import("maru").session.editor.search;
 const scope_module = @import("scope.zig");
 const process = @import("process.zig");
 pub const model = @import("model.zig");
+pub const path = @import("path.zig");
+// 창 owner를 놓은 뒤에도 마지막 앱 종료는 worker의 최종 참조 해제를 관측한다.
+var workers = std.atomic.Value(usize).init(0);
+pub fn outstandingWorkers() usize {
+    return workers.load(.acquire);
+}
 pub const Batch = struct {
     identity: search.request.Identity,
     status: search.request.Status,
@@ -22,7 +28,7 @@ pub const Completion = struct {
     excluded: usize,
     failure: ?anyerror,
 };
-pub const Budget = struct { timing: process.Timing, snapshot_bytes: usize, preview_bytes: usize };
+pub const Budget = struct { timing: process.Timing, snapshot_bytes: usize, preview_bytes: usize, expected_root: ?@import("maru").session.file_tree.Identity = null };
 const Job = struct {
     a: std.mem.Allocator,
     io: std.Io,
@@ -31,6 +37,7 @@ const Job = struct {
     done: std.atomic.Value(bool) = .init(false),
     control: process.Control = .{},
     args: search.query.Args,
+    environment: std.process.Environ.Map,
     root: []u8,
     query: []u8,
     opts: search.query.Options,
@@ -77,12 +84,21 @@ const Job = struct {
         }
     }
     fn execute(self: *@This()) void {
-        defer self.release();
+        defer {
+            self.release();
+            _ = workers.fetchSub(1, .acq_rel);
+        }
         defer self.done.store(true, .release);
+        // 앱의 global_single_threaded I/O는 프로세스 실행용 allocator가 없다.
+        // worker가 실행 I/O를 소유하고 최종 완료 게시 전에 정리한다.
+        var threaded = std.Io.Threaded.init(self.a, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+        defer threaded.deinit();
+        self.io = threaded.io();
         defer {
             for (self.models.items) |*captured| captured.deinit(self.a);
             self.models.deinit(self.a);
             self.args.deinit(self.a);
+            self.environment.deinit();
             self.a.free(self.root);
             self.a.free(self.query);
         }
@@ -92,6 +108,29 @@ const Job = struct {
             return;
         };
         defer root.deinit(self.a, self.io);
+        if (self.budget.expected_root) |expected| {
+            const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
+            if (root.stat.inode != expected.inode or @as(u64, device) != expected.device or expected.kind != 2) {
+                self.failure = error.RootChanged;
+                self.finish(.failed);
+                return;
+            }
+        }
+        // root 검증 후 worker에서만 이름을 해소한다. 점유와 glob을 디스크의 논리 경로 표기에 맞춘다.
+        path.prepare(self.a, root.canonical, &self.state, &self.models, &self.control) catch |err| {
+            if (err == error.Cancelled) {
+                self.finish(.cancelled);
+            } else {
+                self.failure = err;
+                self.finish(.failed);
+            }
+            return;
+        };
+        process.validateRoot(self.io, &root) catch |err| {
+            self.failure = err;
+            self.finish(.failed);
+            return;
+        };
         var scope = scope_module.Scope.fromArgs(self.a, self.args.items.items, self.opts.ignore_glob_case) catch |err| {
             self.failure = err;
             self.finish(.failed);
@@ -116,7 +155,7 @@ const Job = struct {
                 self.mutex.unlock();
             };
         }
-        const outcome = process.run(self.a, self.io, self.args.items.items, &root, &self.control, self.budget.timing, self.state.limits.event_bytes, self, acceptDisk, &self.stats) catch |err| {
+        const outcome = process.run(self.a, self.io, self.args.items.items, &self.environment, &root, &self.control, self.budget.timing, self.state.limits.event_bytes, self, acceptDisk, &self.stats) catch |err| {
             self.failure = err;
             self.finish(if (err == error.Cancelled) .cancelled else if (err == error.ResultBudget or err == error.EventTooLarge) .partial else .failed);
             return;
@@ -159,12 +198,20 @@ pub const Backend = struct {
         errdefer self.a.free(owned_root);
         const owned_query = try self.a.dupe(u8, query);
         errdefer self.a.free(owned_query);
+        // main actor에서 환경을 소유한 사본으로 잡는다. worker가 getenv 포인터를 오래 빌리지 않는다.
+        const inherited: std.process.Environ = .{ .block = .{ .slice = std.mem.sliceTo(std.c.environ, null) } };
+        var environment = try inherited.createMap(self.a);
+        errdefer environment.deinit();
         // glob 문자열은 argv가 소유한다. 모델 matcher는 boolean 값만 읽는다.
         var owned_opts = opts;
         owned_opts.includes = &.{};
         owned_opts.excludes = &.{};
-        job.* = .{ .a = self.a, .io = self.io, .args = args, .root = owned_root, .query = owned_query, .opts = owned_opts, .state = state.*, .models = models.*, .budget = budget };
-        const thread = try std.Thread.spawn(.{}, Job.execute, .{job});
+        job.* = .{ .a = self.a, .io = self.io, .args = args, .environment = environment, .root = owned_root, .query = owned_query, .opts = owned_opts, .state = state.*, .models = models.*, .budget = budget };
+        _ = workers.fetchAdd(1, .acq_rel);
+        const thread = std.Thread.spawn(.{}, Job.execute, .{job}) catch |err| {
+            _ = workers.fetchSub(1, .acq_rel);
+            return err;
+        };
         thread.detach();
         models.* = .empty;
         state.* = .{ .identity = state.identity, .limits = state.limits };

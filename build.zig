@@ -539,7 +539,7 @@ pub fn build(b: *std.Build) void {
     b.step("editor-project-search-adapter", "Build actual ripgrep protocol probe").dependOn(&project_search_adapter_install.step);
     const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
     const run_project_search_tests = b.addRunArtifact(project_search_tests);
-    run_project_search_tests.addArg("--maru-expect-tests=10");
+    run_project_search_tests.addArg("--maru-expect-tests=18");
     b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
     const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });
     ripgrep_prepare.setCwd(b.path("."));
@@ -5229,6 +5229,14 @@ pub fn build(b: *std.Build) void {
     const outline_step = b.step("test-editor-outline", "Run outline model, component and active editor lifetime judges");
     outline_step.dependOn(&run_outline_pure.step);
     outline_step.dependOn(&run_outline_host.step);
+    const search_dock_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/project_search_dock_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = &.{".test.project search dock"} });
+    const run_search_dock = b.addRunArtifact(search_dock_tests);
+    run_search_dock.addArg("--maru-expect-tests=13");
+    b.step("test-editor-project-search-dock", "Run project search grouping and dock geometry judges").dependOn(&run_search_dock.step);
     // 심볼 목록의 수명과 확정 대상을 실제 편집기에서 검사한다. 전체 test-editor에도 포함된다.
     const symbol_picker_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,

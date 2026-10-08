@@ -2,6 +2,8 @@
 pub const query = @import("query.zig");
 pub const event = @import("event.zig");
 pub const request = @import("request.zig");
+pub const presentation = @import("presentation.zig");
+pub const results = @import("results.zig");
 pub const stream = @import("stream.zig");
 comptime {
     if (@import("builtin").is_test) @import("std").testing.refAllDecls(@This());

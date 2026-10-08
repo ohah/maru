@@ -36,6 +36,7 @@ const scm_dock_view = @import("chrome/components/scm_dock/view.zig");
 // 기하·상태 밴드 회귀가 지나간다 — 탭 바·SCM 도크가 여기 온 이유와 같다.
 const file_tree = @import("chrome/components/file_tree.zig");
 const outline = @import("chrome/components/outline.zig");
+const project_search = @import("chrome/components/project_search.zig");
 const editor_frame = @import("chrome/components/editor_view/frame.zig");
 const editor_diff_frame = @import("chrome/components/editor_view/diff_frame.zig");
 const editor_content = @import("chrome/components/editor_view/content.zig");
@@ -68,6 +69,7 @@ test {
     testing.refAllDecls(scm_dock_build);
     testing.refAllDecls(scm_dock_view);
     testing.refAllDecls(outline);
+    testing.refAllDecls(project_search);
     testing.refAllDecls(file_tree.types);
     testing.refAllDecls(file_tree.ids);
     testing.refAllDecls(file_tree.build);

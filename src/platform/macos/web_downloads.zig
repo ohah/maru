@@ -175,8 +175,6 @@ fn entryOfDownload(sidecar_gen: u32, download: u32) ?*Entry {
 fn isTroublesome(cp: u21) bool {
     return switch (cp) {
         ':', '/', 0x061C, 0x200B...0x200F, 0x2028...0x202E, 0x2066...0x2069, 0xFEFF, 0xFFF9...0xFFFB => true,
-        // 보이지 않거나 빈칸처럼 보이는 글자 — 저장 창 이름 칸에서 `invoice.pdf⠀⠀….command` 의 확장자를 밀어내 가렸다(4 회차).
-        0x00A0, 0x00AD, 0x115F, 0x1160, 0x1680, 0x2000...0x200A, 0x202F, 0x205F...0x2064, 0x2800, 0x3000, 0x3164, 0xFFA0 => true,
         else => cp < 0x20 or cp == 0x7f,
     };
 }
@@ -191,7 +189,7 @@ pub fn sanitizeName(raw: []const u8, reserve: usize, out: []u8) []const u8 {
     var it = view.iterator();
     while (it.nextCodepointSlice()) |slice| {
         const cp = std.unicode.utf8Decode(slice) catch continue;
-        const piece: []const u8 = if (isTroublesome(cp)) "_" else slice;
+        const piece: []const u8 = if (isTroublesome(cp) or isBlankLookalike(cp)) "_" else slice;
         if (len + piece.len > work.len) break;
         @memcpy(work[len..][0..piece.len], piece);
         len += piece.len;
@@ -272,6 +270,16 @@ fn numberedFit(file_name: []const u8, n: u32, out: []u8) []const u8 {
     var suffix_buf: [16]u8 = undefined;
     const suffix = std.fmt.bufPrint(&suffix_buf, " ({d})", .{n}) catch return out[0..0];
     return fitName(file_name, suffix, out[0..@min(out.len, max_name_bytes)]);
+}
+
+/// 서버가 준 이름에서만 바꾸는 빈칸 흉내 글자(보이지 않는데 빈칸 폭을 차지한다) — 저장 창 이름 칸에서 `invoice.pdf⠀⠀….command`
+/// 의 확장자를 밀어냈다(4 회차). 흔한 빈칸(U+3000 일본어·U+00A0 프랑스어 ⌥Space)은 둔다 — 정상 이름이 망가졌다(5 회차). 사용자가 친
+/// 이름에는 쓰지 않는다(바꾸기 판정이 달라졌다).
+fn isBlankLookalike(cp: u21) bool {
+    return switch (cp) {
+        0x00AD, 0x115F, 0x1160, 0x2060...0x2064, 0x2800, 0x3164, 0xFFA0 => true,
+        else => false,
+    };
 }
 
 fn fallbackName(out: []u8) []const u8 {
@@ -642,16 +650,11 @@ pub fn onUpdate(v: message.DownloadUpdate) void {
     e.total = v.total;
     e.reason = v.reason;
     const unattended = e.state == .held or (e.state == .asking and !e.ask_claimed);
-    // 한 행이 아니라 아무도 보지 않는 행 전체로 잰다 — 행마다면 32 × 4 GB 까지 쌓였다(4 회차).
+    // 한 행이 아니라 아무도 보지 않는 행 전체로 잰다 — 행마다면 32 × 4 GB 까지 쌓였다(4 회차). 넘으면 가장 큰 보류 행부터 멈춘다
+    // (지금 알린 행을 멈추면 막 누른 0 바이트 행이 「4 GB 를 넘었다」로 멈췄다 — 5 회차).
     if (unattended and v.state == .in_progress and waitingTotal() > max_waiting_bytes) {
-        e.state = .canceled;
-        e.stopped_waiting = true;
-        queue(e.key, .decide_cancel);
-        // 멈춘 것을 알린다 — 목록 창을 낸다(2 회차: 아무 표시 없이 사라졌다).
-        show_request +%= 1;
-        show_surface = e.browser;
-        changed();
-        return;
+        enforceWaitingCap();
+        if (finished(e.state)) return;
     }
     switch (v.state) {
         // CEF 는 경로를 정하기 전에도 진행 갱신을 보낸다(실측) — 경로를 만드는 중·보류 중이면 상태를 두고 양만 적는다(여기서 받는 중으로
@@ -831,6 +834,29 @@ pub fn act(key: u64, action: Action) bool {
     return true;
 }
 
+/// 합이 상한 아래가 될 때까지 가장 큰 행을 멈춘다 — 보류 행부터, 사용자가 누른(맡지 않은 묻는 중) 행은 마지막에. 멈추면 목록 창으로
+/// 알린다(2 회차: 아무 표시 없이 사라졌다).
+fn enforceWaitingCap() void {
+    while (waitingTotal() > max_waiting_bytes) {
+        var victim: ?*Entry = null;
+        for ([_]State{ .held, .asking }) |pick| {
+            for (entries.items) |*x| {
+                const candidate = x.state == pick and (pick == .held or !x.ask_claimed);
+                if (!candidate) continue;
+                if (victim == null or x.received > victim.?.received) victim = x;
+            }
+            if (victim != null) break;
+        }
+        const v = victim orelse return;
+        v.state = .canceled;
+        v.stopped_waiting = true;
+        queue(v.key, .decide_cancel);
+        show_request +%= 1;
+        show_surface = v.browser;
+        changed();
+    }
+}
+
 /// 아무도 보지 않는 결정 전 행(보류·저장 창을 맡지 않은 묻는 중)이 받아 둔 양의 합.
 fn waitingTotal() i64 {
     var total: i64 = 0;
@@ -917,7 +943,12 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
             e.state = .canceled;
             queue(key, .decide_cancel);
         },
-        .dismissed => e.state = .held,
+        .dismissed => {
+            // 고르지 않았다 — 고른 곳·바꾸기 표시를 지운다(묻기를 끈 뒤 받기가 남은 바꾸기로 덮어쓰지 않게 — 5 회차).
+            e.state = .held;
+            e.chosen = false;
+            e.replace = false;
+        },
         .path => |p| {
             const slash = std.mem.lastIndexOfScalar(u8, p.path, '/') orelse return reask(e);
             // 루트 바로 아래(`/x.txt`)면 폴더는 `/`.
@@ -1231,8 +1262,11 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     try std.testing.expect(claimAsk(1) != null);
     try std.testing.expect(claimAsk(1) == null); // 한 행에 창 하나
     try std.testing.expect(claimAskFor(7) == null);
+    entryOfKey(1).?.replace = true;
+    entryOfKey(1).?.chosen = true;
     try std.testing.expect(answerAsk(1, .dismissed)); // 종료·창 닫힘 — 보류로(다시 받을 수 있게)
     try std.testing.expectEqual(State.held, entryOfKey(1).?.state);
+    try std.testing.expect(!entryOfKey(1).?.replace and !entryOfKey(1).?.chosen); // 고른 곳 표시를 지운다
     try std.testing.expect(!answerAsk(1, .cancel)); // 묻는 중이 아니면 받지 않는다
     entryOfKey(1).?.state = .asking;
     try std.testing.expect(claimAskFor(7) != null); // 탭 창이 맡는다
@@ -1251,6 +1285,11 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     try entries.append(allocator(), rowForTest(3, 3, .asking));
     try std.testing.expect(answerAsk(3, .{ .path = .{ .path = "/nonexistent-maru-w10b/same.txt", .existed = true } }));
     try std.testing.expect(entryOfKey(3).?.replace);
+    // 고른 이름의 앞 점은 답에서도 지킨다(`.env` — 바꾸기를 확인한 그 파일).
+    try entries.append(allocator(), rowForTest(9, 9, .asking));
+    try std.testing.expect(answerAsk(9, .{ .path = .{ .path = "/nonexistent-maru-w10b/.env", .existed = true } }));
+    try std.testing.expectEqualStrings(".env", entryOfKey(9).?.name());
+    try std.testing.expect(entryOfKey(9).?.replace);
     try entries.append(allocator(), rowForTest(4, 4, .asking));
     try std.testing.expect(answerAsk(4, .{ .path = .{ .path = "/nonexistent-maru-w10b/new.txt", .existed = false } }));
     try std.testing.expect(!entryOfKey(4).?.replace);
@@ -1267,13 +1306,13 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     var fit_buf: [max_name_bytes + 16]u8 = undefined;
     const numbered = numberedFit("n" ** 251 ++ ".txt", 12, &fit_buf); // 255 꽉 찬 이름에 번호 — 줄기를 줄인다
     try std.testing.expect(numbered.len <= max_name_bytes and std.mem.endsWith(u8, numbered, " (12).txt"));
-    // 띄운 준비 스레드 셋(행 2·3·4 — 없는 폴더라 곧 실패)이 끝나기를 기다렸다 비운다(다음 시험으로 새지 않게).
+    // 띄운 준비 스레드 넷(행 2·3·9·4 — 없는 폴더라 곧 실패)이 끝나기를 기다렸다 비운다(다음 시험으로 새지 않게).
     var waited: u32 = 0;
     while (waited < 200) : (waited += 1) {
         _ = std.c.pthread_mutex_lock(&prepared_mutex);
         const n = prepared.items.len;
         _ = std.c.pthread_mutex_unlock(&prepared_mutex);
-        if (n >= 3) break;
+        if (n >= 4) break;
         const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = std.c.nanosleep(&ts, null);
     }
@@ -1315,6 +1354,14 @@ test "a chosen location keeps the chosen name with a short hidden part file, num
     var long_prep: Prepared = .{ .key = 9, .ok = false };
     prepareChosen(dir, long, 9, false, &long_prep);
     try std.testing.expect(long_prep.ok and std.mem.endsWith(u8, long_prep.final_buf[0..long_prep.final_len], "/" ++ long));
+    // 255 꽉 찬 고른 이름이 이미 있으면 번호를 붙이되 255 안에(줄기를 줄인다 — 넘치면 엉뚱한 「저장할 수 없음」이 되풀이됐다).
+    const full = "f" ** 251 ++ ".txt";
+    try testWrite(dir, full, "old");
+    var full_prep: Prepared = .{ .key = 11, .ok = false };
+    prepareChosen(dir, full, 11, false, &full_prep);
+    try std.testing.expect(full_prep.ok);
+    const full_name = std.fs.path.basename(full_prep.final_buf[0..full_prep.final_len]);
+    try std.testing.expect(full_name.len <= max_name_bytes and std.mem.endsWith(u8, full_name, " (1).txt"));
     // 바꾸기 — 받은 임시 파일이 그 이름에 덮어쓴다.
     try testWrite(dir, ".maru-7.part", "new");
     var e: Entry = .{ .key = 7, .generation = 1, .download = 7, .browser = 1, .state = .active, .risky = false, .chosen = true, .replace = true };
@@ -1359,7 +1406,9 @@ test "waiting rows stop past the cap and unclaimed asking rows bring the list wi
     b.browser = 7;
     try entries.append(allocator(), b);
     onUpdate(.{ .browser = 7, .download = 8, .state = .in_progress, .received = 20, .total = -1, .reason = 0 });
-    try std.testing.expectEqual(State.canceled, entryOfKey(8).?.state);
+    // 가장 큰 보류 행(7)이 멈추고, 막 받기 시작한 작은 행(8)은 남는다(5 회차).
+    try std.testing.expectEqual(State.canceled, entryOfKey(7).?.state);
+    try std.testing.expectEqual(State.held, entryOfKey(8).?.state);
     var line: [256]u8 = undefined;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_stopped_waiting), statusText(one, &line));
     try entries.append(allocator(), rowForTest(2, 2, .asking));
@@ -1410,6 +1459,9 @@ test "status lines are Zig sentences with Finder-style sizes (W10a)" {
     try std.testing.expect(long_host.len <= e.origin_buf.len);
     var name_buf2: [max_name_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("a_b_c.command", sanitizeName("a\u{2800}b\u{3164}c.command", 0, &name_buf2)); // 보이지 않는 빈칸
+    try std.testing.expectEqualStrings("請求書\u{3000}10月.pdf", sanitizeName("請求書\u{3000}10月.pdf", 0, &name_buf2)); // 흔한 빈칸은 둔다
+    var chosen_buf2: [max_name_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("a\u{2800}b.txt", sanitizeChosenName("a\u{2800}b.txt", &chosen_buf2)); // 사용자가 친 이름은 그대로
     e.state = .asking;
     e.risky = true;
     e.name_len = 0;

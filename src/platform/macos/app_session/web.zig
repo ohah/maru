@@ -409,7 +409,10 @@ pub fn isOsrSurface(surface_id: u64) bool {
 /// W10b: 「매번 묻기」를 다운로드 목록(앱 전역 하나)에 알린다 — 설정을 읽을 때·다시 읽을 때·설정 화면에서 바꿀 때만(마지막으로 읽은
 /// 창이 이긴다). tick 마다 덮으면 창마다 설정이 다를 때(한 창만 다시 읽었다) 다운로드마다 묻기가 켜졌다 꺼졌다 했다(4 회차).
 pub fn applyDownloadAsk(self: *AppSession) void {
-    web_osr.downloads.setAsk(self.loaded_config.config.browser.download_ask);
+    const value = self.loaded_config.config.browser.download_ask;
+    if (self.download_ask_applied == value) return;
+    self.download_ask_applied = value;
+    web_osr.downloads.setAsk(value);
 }
 
 /// W10b: 이 창의 활성 pane 이 Chromium 탭이면 그 탭에서 저장할 곳을 물을 다운로드를 맡는다(초점과 상관없이 — Swift 는 창이 키일

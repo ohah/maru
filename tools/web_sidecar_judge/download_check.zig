@@ -21,6 +21,8 @@
 //!   dl-ask-wait    결정을 10 초 미뤄도(W10b 「매번 묻기」의 저장 창이 떠 있는 동안) 다운로드는 이어지고, 그동안 host 가 연 파일 중
 //!                  다운로드 임시 파일(`.crdownload`·`Unconfirmed`)이 없는지와 받아 둔 양을 보고 줄에 남긴다(W10b 설계 공격 M1 실측)
 //!   dl-staging-cleared host 가 프로필을 잡은 뒤 지난번이 결정 전에 받아 둔 것(`download-staging`)을 비운다(W10b)
+//!   (환경 `MARU_JUDGE_XVOL_DIR` 가 있으면) dl-cross-volume — 받을 자리가 다른 볼륨이어도 미리 만든 그 파일에 받고 취소 뒤 남는다
+//!                  (maru 가 dev·ino 로 지운다) — W10b 적대 리뷰 실측. 없으면 돌지 않는다(판정 수에 들지 않는다)
 //!   dl-late-decide 결정을 2 초 늦게 보내도(보류 뒤 받기·TCC 질문) 받기를 이어 가고, 받는 동안·취소 뒤의 그 경로 파일을 보고 줄에
 //!                  남긴다(늦은 결정이면 Chromium 이 자기 임시 파일에서 옮겨 와 inode 가 바뀌는지 — 3 회차 실측)
 const std = @import("std");
@@ -492,6 +494,45 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         // 결정 전에 받아 둔 것은 프로필 안에 있어야 한다(사용자의 ~/Downloads 가 아니라 — `preferences.zig`).
         report(finished.last == .complete and finished.received == http.huge_bytes and staged >= 1 and temp_files == 0 and sameContentPrefix(path, 's'), "dl-ask-wait", std.fmt.bufPrint(&detail_buf, "결정 전 10 초 받은 양 {d}/{d}(갱신 {d}) · 프로필 download-staging 항목 {d} · host 가 연 다운로드 임시 파일 {d}({s}) · 결정 뒤 {s} {d}", .{
             held.received,     http.huge_bytes, held.updates, staged, temp_files, temp_name,
+            if (finished.last) |st| @tagName(st) else "없음",
+            finished.received,
+        }) catch "");
+    }
+
+    // ── 다른 볼륨(환경으로만) ──
+    if (std.c.getenv("MARU_JUDGE_XVOL_DIR")) |xvol| check: {
+        var slow_buf: [1100]u8 = undefined;
+        const slow_path = try std.fmt.bufPrintZ(&slow_buf, "{s}/xvol-slow.bin.maru-part", .{std.mem.span(xvol)});
+        const slow_ino = precreate(slow_path) orelse {
+            report(false, "dl-cross-volume", "미리 만들지 못했다");
+            break :check;
+        };
+        try open(&host, 73, &u, port, "/dlp?a=slow");
+        const slow = waitBegin(&host, 73, 5000) orelse {
+            report(false, "dl-cross-volume", "download_begin 이 오지 않았다");
+            break :check;
+        };
+        os.sleepMs(1500); // 결정 전에 프로필(다른 볼륨)에 조금 받아 둔다
+        try host.send(.{ .download_decide = .{ .browser = 73, .download = slow.download, .path = slow_path } });
+        const started = watch(&host, 73, slow.download, 4000, false, 1_200_000);
+        const during = inodeOf(slow_path);
+        try host.send(.{ .download_control = .{ .browser = 73, .download = slow.download, .action = .cancel } });
+        _ = watch(&host, 73, slow.download, 3000, true, 0);
+        os.sleepMs(300);
+        const after_cancel = inodeOf(slow_path);
+        var done_buf: [1100]u8 = undefined;
+        const done_path = try std.fmt.bufPrintZ(&done_buf, "{s}/xvol-done.bin.maru-part", .{std.mem.span(xvol)});
+        _ = precreate(done_path);
+        try open(&host, 74, &u, port, "/dlp?a=slow");
+        const done = waitBegin(&host, 74, 5000) orelse {
+            report(false, "dl-cross-volume", "두 번째 download_begin 이 오지 않았다");
+            break :check;
+        };
+        os.sleepMs(1500);
+        try host.send(.{ .download_decide = .{ .browser = 74, .download = done.download, .path = done_path } });
+        const finished = watch(&host, 74, done.download, 15_000, true, 0);
+        report(started.received > 0 and during != null and during.? == slow_ino and finished.last == .complete and finished.received == http.slow_bytes and sameContentPrefix(done_path, 's'), "dl-cross-volume", std.fmt.bufPrint(&detail_buf, "받는 중({d}) 같은 파일 {} · 취소 뒤 남음 {}(같은 파일 {}) · 완료 {s} {d}", .{
+            started.received,  during != null and during.? == slow_ino, after_cancel != null, after_cancel != null and after_cancel.? == slow_ino,
             if (finished.last) |st| @tagName(st) else "없음",
             finished.received,
         }) catch "");

@@ -2961,3 +2961,84 @@ void maru_macos_coretext_smoke_run(
         CFRelease(primary_font);
     }
 }
+
+// 검색 입력의 위치와 포인터는 같은 face·축약 CTLine으로 측정한다.
+static CTLineRef maru_chrome_measure_line(
+    const uint8_t *utf8, size_t utf8_len, const char *family, size_t family_len,
+    const char *fallback, size_t fallback_len, double font_size_px, uint32_t weight,
+    double max_width_px, CFStringRef *out_string
+) {
+    *out_string = NULL;
+    if (!utf8 || !isfinite(font_size_px) || font_size_px <= 0 || !isfinite(max_width_px) || max_width_px <= 0) return NULL;
+    CFStringRef string = CFStringCreateWithBytes(kCFAllocatorDefault, utf8, (CFIndex)utf8_len, kCFStringEncodingUTF8, false);
+    if (!string) return NULL;
+    CFStringRef name = NULL;
+    uint32_t matched = 0;
+    CTFontRef font = maru_chrome_font_for(font_size_px, weight, family, family_len, fallback, fallback_len, &name, &matched);
+    if (!font) { CFRelease(string); return NULL; }
+    const void *keys[] = { kCTFontAttributeName };
+    const void *values[] = { font };
+    CFDictionaryRef attributes = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFAttributedStringRef attributed = attributes ? CFAttributedStringCreate(kCFAllocatorDefault, string, attributes) : NULL;
+    CTLineRef line = attributed ? CTLineCreateWithAttributedString(attributed) : NULL;
+    if (line && CTLineGetTypographicBounds(line, NULL, NULL, NULL) > max_width_px) {
+        CFAttributedStringRef token_text = CFAttributedStringCreate(kCFAllocatorDefault, CFSTR("…"), attributes);
+        CTLineRef token = token_text ? CTLineCreateWithAttributedString(token_text) : NULL;
+        CTLineRef truncated = token ? CTLineCreateTruncatedLine(line, max_width_px, kCTLineTruncationStart, token) : NULL;
+        if (truncated) { CFRelease(line); line = truncated; }
+        if (token) CFRelease(token);
+        if (token_text) CFRelease(token_text);
+    }
+    if (attributed) CFRelease(attributed);
+    if (attributes) CFRelease(attributes);
+    if (!line) { CFRelease(string); return NULL; }
+    *out_string = string;
+    return line;
+}
+
+int maru_macos_coretext_chrome_offsets(
+    const uint8_t *utf8, size_t utf8_len, const size_t *byte_offsets, double *positions,
+    const char *family, size_t family_len, const char *fallback, size_t fallback_len,
+    double font_size_px, uint32_t weight, double max_width_px
+) {
+    @autoreleasepool {
+        if (!byte_offsets || !positions) return 1;
+        CFStringRef string = NULL;
+        CTLineRef line = maru_chrome_measure_line(utf8, utf8_len, family, family_len, fallback, fallback_len, font_size_px, weight, max_width_px, &string);
+        if (!line) return 2;
+        int result = 0;
+        for (size_t i = 0; i < 3; i++) {
+            if (byte_offsets[i] > utf8_len) { result = 5; break; }
+            CFStringRef prefix = CFStringCreateWithBytes(kCFAllocatorDefault, utf8, (CFIndex)byte_offsets[i], kCFStringEncodingUTF8, false);
+            if (!prefix) { result = 6; break; }
+            CGFloat secondary = 0;
+            positions[i] = fmin(max_width_px, fmax(0, CTLineGetOffsetForStringIndex(line, CFStringGetLength(prefix), &secondary)));
+            CFRelease(prefix);
+        }
+        CFRelease(line);
+        CFRelease(string);
+        return result;
+    }
+}
+
+int maru_macos_coretext_chrome_index(
+    const uint8_t *utf8, size_t utf8_len, const char *family, size_t family_len,
+    const char *fallback, size_t fallback_len, double font_size_px, uint32_t weight,
+    double max_width_px, double x, size_t *out_byte
+) {
+    @autoreleasepool {
+        if (!out_byte || !isfinite(x)) return 1;
+        CFStringRef string = NULL;
+        CTLineRef line = maru_chrome_measure_line(utf8, utf8_len, family, family_len, fallback, fallback_len, font_size_px, weight, max_width_px, &string);
+        if (!line) return 2;
+        CFIndex index = CTLineGetStringIndexForPosition(line, CGPointMake(fmin(max_width_px, fmax(0, x)), 0));
+        if (index == kCFNotFound) index = x <= 0 ? 0 : CFStringGetLength(string);
+        index = MIN(MAX(index, 0), CFStringGetLength(string));
+        CFIndex bytes = 0;
+        CFStringGetBytes(string, CFRangeMake(0, index), kCFStringEncodingUTF8, 0, false, NULL, 0, &bytes);
+        *out_byte = (size_t)bytes;
+        CFRelease(line);
+        CFRelease(string);
+        return 0;
+    }
+}

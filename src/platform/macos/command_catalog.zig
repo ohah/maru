@@ -37,6 +37,7 @@ pub const entries = [_]Entry{
     // 활성 pane에 web(브라우저) Term 생성(4e-5 command 승격 — env 훅 MARU_WEB_PANEL 대체). 기본 키바인딩 ⌘⌥T(default_app_bindings 역스캔으로 메뉴·팔릿에 자동 표시).
     .{ .action = .new_web_tab, .key = "new_web_tab", .title = "New Browser Tab", .search_ko = "새 브라우저 탭" },
     .{ .action = .show_editor_outline, .key = "show_editor_outline", .title = "Editor: Show Outline", .search_ko = "편집기 아웃라인 함수 클래스 목록" },
+    .{ .action = .show_project_search, .key = "show_project_search", .title = "Search: Find in Workspace", .search_ko = "프로젝트 전체 검색" },
     .{ .action = .recover_editor_backups, .key = "recover_editor_backups", .title = "Editor: Recover Unsaved Edits", .search_ko = "편집기 미저장 편집 백업 복구" },
     // 언어 서버 신뢰 관리(계획 WT4 — workspace-trust.md). 목록·철회·잊기만 — 신뢰를 주는 명령은 없다(신뢰 시트의 답뿐).
     .{ .action = .lsp_trusted_repositories, .key = "lsp_trusted_repositories", .title = "Language Server: Repository Trust…", .search_ko = "언어 서버 저장소 신뢰 결정 목록" },

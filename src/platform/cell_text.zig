@@ -1013,6 +1013,7 @@ fn iconKindForDockView(view: dock_panel.View) file_tree_icon.IconKind {
         .agent_sessions => .code,
         .agent_activity => .image,
         .outline => .document,
+        .project_search => .document,
     };
 }
 
@@ -1038,7 +1039,7 @@ pub fn buildDockViewBarDrawList(
     const icon_offset: u16 = @intCast(grid.iconOffsetCols());
     // 셀 폭을 아직 못 받았으면 칸 수가 0이다. 그대로 두면 네 아이콘이 **같은 열에 겹쳐** 그려진다
     // (`index * 0 + offset` 이 전부 같은 값). 동작 쪽은 `actionStartCol` 이 이미 null 로 막는다.
-    for (0..if (slot_cols == 0) 0 else dock_view_bar.slot_count) |index| {
+    for (0..if (slot_cols == 0 or cols < slot_cols *| @as(u16, @intCast(dock_view_bar.slot_count))) 0 else dock_view_bar.slot_count) |index| {
         // **아이콘도 뷰가 정한다.** 예전에는 여기 `{ .folder, .git, .code }` 배열이 있었는데, 그것은
         // 슬롯 순서를 적어 둔 **세 번째 자리**였다(enum·`slot_count`에 이어). 배열은 뷰를 하나 더해도
         // 컴파일러가 아무 말을 안 하므로, 칸은 늘고 아이콘은 셋만 그려져 **마지막 칸이 빈다**.
@@ -1049,7 +1050,7 @@ pub fn buildDockViewBarDrawList(
         // 아이콘이 같은 이유로 이미 `width = 2`다. 슬롯이 화면 밖이면 그리지 않는다.
         const col: u16 = @as(u16, @intCast(index)) *| slot_cols +| icon_offset;
         if (col +| @as(u16, @intCast(dock_view_bar.icon_cols)) > cols) break;
-        const cp = file_tree_icon.codepointFromRaw(@intFromEnum(kind)) orelse continue;
+        const cp = if (dock_panel.View.forSlot(index) == .project_search) icons.codepoint(.search) else file_tree_icon.codepointFromRaw(@intFromEnum(kind)) orelse continue;
         try cells.append(allocator, .{
             // 밴드 가운데 행. 글리프는 행을 넘지 못하므로 세로 중앙은 홀수 행 밴드에서만 정확하다.
             .row = @max(rows, 1) / 2,

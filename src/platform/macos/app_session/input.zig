@@ -384,6 +384,7 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         // 커밋 상자 조합. **NFC 조합을 하지 않는다** — 주소창이 그것을 하는 이유는 codepoint당 셀
         // 하나로 그리기 때문이고(자모가 안 합쳐진다), 이 상자는 CoreText 셰이핑 경로라 NFD 자모도
         // 한 글자로 합쳐 그려진다(터미널·find와 같다).
+        .project_search => app_session_mod.project_search_ops.setPreedit(self, bytes),
         .scm_commit => scm_dock_ops.setCommitPreedit(self, bytes),
         .addr_edit => {
             // 조합 중 텍스트를 addr_field에. **NFC 조합**: macOS IME가 NFD conjoining 자모(ㄱ+ㅏ)를 주면 주소창은
@@ -423,6 +424,7 @@ pub fn imeComposingActive(self: *AppSession) bool {
         .recovery_picker => self.chrome_host.recovery_picker.input.preedit.items.len > 0,
         .trust_picker => self.chrome_host.trust_picker.input.preedit.items.len > 0,
         .addr_edit => self.addr_field.preedit.items.len > 0, // 주소창 조합 중이면 true
+        .project_search => if (app_session_mod.project_search_ops.focused(self)) |field| field.preedit.items.len > 0 else false,
         .scm_commit => self.scm_commit_field.preedit.items.len > 0,
         .terminal => blk: {
             const surface = self.app_window.active() orelse break :blk false;
@@ -619,7 +621,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
             const replay_event: ?terminal.KeyEvent = self.ime_editor_commit_replay orelse if (event) |ev|
                 // 팔레트의 Enter는 명령 실행이다. 한글 조합을 확정한 바로 그 Enter를 다시 보내면
                 // 검색어가 보일 틈도 없이 선택된 명령이 실행되고 팝업이 닫힌다.
-                if (composing and ev.key == .enter and self.inputFocus() == .palette)
+                if (composing and ev.key == .enter and (self.inputFocus() == .palette or self.inputFocus() == .project_search))
                     null
                 else if (shouldReplayAfterCommit(ev, self.ime_enter_newline))
                     ev
@@ -702,7 +704,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
             traceCandidateIME(event, "encode_key", false, false);
             // 입력기가 이 keyDown에서 콜백을 내지 않아도 기존 조합은 살아 있다.
             // 팔레트 Enter를 일반 키로 흘리면 조합 확정 전의 검색 결과를 실행한다.
-            if (composing and ev.key == .enter and self.inputFocus() == .palette) return;
+            if (composing and ev.key == .enter and (self.inputFocus() == .palette or self.inputFocus() == .project_search)) return;
             // A surviving pin can outlive a focus change between AppKit
             // callbacks. The ordinary key router has no pinned-target input.
             if (!imePinnedTargetIsActive(self)) return;
@@ -919,6 +921,7 @@ pub fn routeCommittedTextAccepted(self: *AppSession, bytes: []const u8) bool {
     find_ops.syncDiffFind(self);
     // 진행 중 terminal transaction의 insertText는 UI focus가 먼저 바뀌었어도 pin된 원 target으로 간다.
     const focus: InputFocus = if (self.ime_terminal_target_id != null) .terminal else self.inputFocus();
+    if (focus == .project_search) return app_session_mod.project_search_ops.commitText(self, bytes);
     if (focus == .file_tree) return true; // tree focus에서 평문/IME가 뒤 PTY로 새지 않는다.
     if (focus == .terminal) {
         if (self.find_nav) self.find_nav = false;
@@ -1384,6 +1387,7 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
         // (activeTermIsTerminal=false) 본문 origin 폴백은 caret과 어긋나므로 이 rect가 필요하다(리뷰 [4]).
         .addr_edit => web_ops.addrEditCaretRect(self),
         // 커밋 상자 caret — 후보창을 그 자리에 띄운다. null이면(상자가 아직 안 그려짐) 터미널 커서 폴백.
+        .project_search => app_session_mod.project_search_ops.caretRect(self),
         .scm_commit => scm_dock_ops.commitCaretRect(self),
         .terminal => null,
     };

@@ -35,6 +35,7 @@ const Term = app_session_mod.Term;
 const default_scrollbar_fade_ticks = app_session_mod.default_scrollbar_fade_ticks;
 const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payload;
 const dock_ops = @import("dock.zig");
+const project_search_ops = @import("editor/search/dock.zig");
 const outline_ops = @import("editor/outline.zig");
 const agent_activity_ops = @import("agent_activity.zig");
 const scm_dock_ops = @import("scm_dock.zig");
@@ -377,6 +378,19 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     // 탐색기도 자기 상태(file_tree_scroll)로 굴린다 — 다른 뷰에서 굴리면 안 보이는 목록이 움직인다.
     // **줄 환산(`wheelDeltaToLines`)보다 앞에 둔다**: 픽셀 상태라 공유 `wheel_accum`을 소비할 이유가
     // 없고, 소비하면 탐색기 위 제스처가 터미널 스크롤백의 잔여를 갉아먹는다.
+    const search_target = dock_ops.dockVisible(self) and self.dock.view == .project_search and layout_math.pointInRect(x_px, y_px, project_search_ops.resultRect(self));
+    if (!search_target) self.editor_search.scroll.dropWheelResidue();
+    if (search_target) {
+        const unit: f64 = if (precise) @as(f64, @floatFromInt(self.scale_milli)) / 1000.0 else @floatFromInt(project_search_ops.metrics(self).row);
+        if (self.editor_search.scroll.scrollByWheel(delta_y * @as(f64, self.appearance.scroll_multiplier), unit, project_search_ops.scrollExtent(self).max_offset_px)) {
+            project_search_ops.cancelPointer(self);
+            dock_ops.buildDockListScrollTree(self);
+            self.metal_dirty = true;
+        }
+        return;
+    }
+    // 고정된 검색 입력부의 휠도 도크가 소비한다. 뒤 pane으로 전달하지 않는다.
+    if (dock_ops.dockVisible(self) and self.dock.view == .project_search and layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content)) return;
     const outline_target = dock_ops.dockVisible(self) and self.dock.view == .outline and
         layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);
     if (!outline_target) self.editor_outline.scroll.dropWheelResidue();
@@ -807,9 +821,9 @@ fn updateDockScrollAreaFade(self: *AppSession, visible_ticks: u32, fade_done_tic
         // 갤러리는 아직 ScrollArea 스크롤바를 발행하지 않는다(격자를 직접 그린다) — 발행이 붙는 날
         // 이 갈래가 그냥 돌게 자리만 둔다.
         .agent_activity => self.agent_activity.scroll.offset_y_px,
-        .explorer, .outline => 0, // 두 목록의 스크롤바는 공통 dock_list 경로다.
+        .explorer, .outline, .project_search => 0, // 두 목록의 스크롤바는 공통 dock_list 경로다.
     };
-    if (!dock_ops.dockVisible(self) or self.dock.view == .explorer or self.dock.view == .outline) {
+    if (!dock_ops.dockVisible(self) or self.dock.view == .explorer or self.dock.view == .outline or self.dock.view == .project_search) {
         // 그릴 것이 없으면 다음 등장이 full 로 시작하게 타이머를 되돌린다(위 갈래와 같은 규율).
         self.dock_scroll_area_idle_ticks = fade_done_ticks;
         self.dock_scroll_area_last_offset = offset;

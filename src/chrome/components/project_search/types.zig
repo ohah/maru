@@ -7,6 +7,8 @@ pub const Props = struct {
     scale: u32,
     generation: u64,
     fields: [3][]const u8,
+    carets: [3]?f32 = .{ null, null, null },
+    selections: [3]?struct { left: f32, right: f32 } = .{ null, null, null },
     field_labels: [3][]const u8,
     focused: ?usize,
     options: [3]bool,
@@ -15,6 +17,7 @@ pub const Props = struct {
     scopes: []const u8,
     expanded: bool,
     running: bool,
+    can_search: bool,
     rows: []const Row,
     shift: u32,
 };

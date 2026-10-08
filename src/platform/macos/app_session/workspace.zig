@@ -412,6 +412,7 @@ pub fn takeWorkspaceRestoreDropped(self: *AppSession) u32 {
 }
 
 pub fn focusWorkspaceInput(self: *AppSession) void {
+    if (self.editor_search.focused != null) app_session_mod.project_search_ops.blur(self);
     dock_ops.cancelPendingDockFocus(self);
     // A terminal/body click takes the keyboard owner away from the archive list.  Without
     // releasing that ownership, Enter/PageUp/PageDown would keep driving an open dock while

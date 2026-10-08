@@ -3579,7 +3579,7 @@ pub export fn maru_macos_app_session_take_file_tree_watch_root(
 
 // 스냅숏은 현재 도크 뷰가 고른다. ABI 레코드와 Swift의 역할 번역은 그대로 공유한다.
 fn dockAccessibility(app_session: *AppSession) *session_mod.accessibility.Snapshot {
-    return if (app_session.dock.view == .outline) &app_session.editor_outline.accessibility else &app_session.file_tree_accessibility;
+    return if (app_session.dock.view == .project_search) &app_session.editor_search.accessibility else if (app_session.dock.view == .outline) &app_session.editor_outline.accessibility else &app_session.file_tree_accessibility;
 }
 
 /// 파일 탐색기 행의 접근성 줄 수. 스크린 리더가 자기 리듬으로 묻는 **읽기 전용** 창구다.
@@ -3588,7 +3588,7 @@ fn dockAccessibility(app_session: *AppSession) *session_mod.accessibility.Snapsh
 /// 해제된 메모리다(`app_session/accessibility.zig` 머리말).
 pub export fn maru_macos_app_session_accessibility_count(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
-    if (app_session.dock.view == .outline and (!app_session.dock.presented or app_session.dock.collapsed)) return 0;
+    if ((app_session.dock.view == .outline or app_session.dock.view == .project_search) and (!app_session.dock.presented or app_session.dock.collapsed)) return 0;
     return @intCast(dockAccessibility(app_session).*.elements.items.len);
 }
 

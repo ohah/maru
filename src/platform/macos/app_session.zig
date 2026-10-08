@@ -125,6 +125,7 @@ const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1
 const agent_body_search_backend = @import("agent_body_search_backend.zig"); // BS1: 본문 검색 워커
 pub const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
+pub const project_search_ops = @import("app_session/editor/search/dock.zig");
 pub const outline_ops = @import("app_session/editor/outline.zig");
 pub const accessibility = @import("app_session/accessibility.zig"); // 발행된 tree 의 접근성 서술자를 ABI 스냅숏으로 굳힌다 — docs/chrome-interaction-migration.md §3
 const file_panel_ops = @import("app_session/file_panel.zig");
@@ -7029,6 +7030,7 @@ pub const AppSession = struct {
     /// 행은 pane clip(ABI v147)이 자른다. 행 index 상태였을 때는 바닥 부분 행 자리에 배경이 남았다.
     file_tree_scroll: chrome.ui.scroll_area.State = .{},
     editor_outline: outline_ops.State = .{},
+    editor_search: project_search_ops.State = .{},
     /// ET-CWD: 마지막으로 따라간 활성 터미널 cwd(owned, ""=아직 없음). 관측은 폴링이라 매 tick 같은 값이
     /// 오므로 **변화 시에만** reveal을 건다(docs/file-explorer.md §1 정책 2).
     file_tree_followed_cwd: ?[]u8 = null,
@@ -8510,7 +8512,7 @@ pub const AppSession = struct {
             layout_math.ptToPx(space.dock_view_slot_width_pt, self.scale_milli)
         else
             0;
-        return chrome.components.dock_view_bar.Grid.init(self.cell_width_px, slot_width_px);
+        return chrome.components.dock_view_bar.Grid.init(self.cell_width_px, slot_width_px).fitWidth(dock_ops.dockGeometry(self).view_bar.w);
     }
 
     /// chrome 바(탭 바·파일 헤더 밴드·주소 밴드) 안에서 텍스트 한 줄이 시작하는 세로 오프셋(바 상단 기준).
@@ -10526,7 +10528,8 @@ pub const AppSession = struct {
     /// 모달을 열기 전 단일-오버레이 불변식(collectDraws·inputFocus가 한 번에 하나 가정)을 한 곳에서 강제한다. confirm/보류
     /// 닫기를 건드리지 않으므로, requestClose가 pending_close를 세운 뒤 showConfirm을 불러도 보류가 보존된다.
     pub fn dismissMessageOverlays(self: *AppSession) void {
-        outline_ops.cancelPointer(self); // 새 오버레이가 가져갈 입력에 이전 행 누름을 넘기지 않는다.
+        outline_ops.cancelPointer(self);
+        project_search_ops.cancelPointer(self); // 새 오버레이가 가져갈 입력에 이전 행 누름을 넘기지 않는다.
         self.chrome_host.notice.dismiss();
         self.chrome_host.find.hide();
         find_ops.clearAllFindMatches(self); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일. 목록은 둘이다)
@@ -11329,6 +11332,7 @@ pub const AppSession = struct {
             .lsp_show_server_info => editor_ops.lsp_client.showServerInfo(self),
             .lsp_show_environment_names => editor_ops.trust_ui.openEnvNames(self),
             .lsp_forget_trust => editor_ops.lsp_client.manageCurrent(self, .forget),
+            .show_project_search => if (!self.tabsBlocked()) project_search_ops.open(self),
             .show_editor_outline => if (!self.tabsBlocked()) dock_ops.openDockTo(self, .outline),
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),
             .toggle_file_panel_dock_side => file_panel_ops.toggleFilePanelDockSide(self),
@@ -13752,6 +13756,12 @@ pub const AppSession = struct {
         // `handleCommitKey`가 false를 주고 아래 keybinding 경로가 그대로 실행한다. 주소창처럼 편집을
         // **취소하지는 않는다**: 여기서 잃을 것은 URL 한 줄이 아니라 사용자가 쓴 커밋 메시지이고,
         // 단축키가 도크를 닫거나 뷰를 바꾸면 `scmCommitOwnsInput`이 스스로 거짓이 된다.
+        if (project_search_ops.ownsInput(self) and !self.anyModalOverlayOpen()) {
+            if (project_search_ops.handleRawKey(self, event)) {
+                self.resetCursorBlink();
+                return input_ops.keyConsumedByApp(self);
+            }
+        }
         if (self.scmCommitOwnsInput() and !self.anyModalOverlayOpen()) {
             if (scm_dock_ops.handleCommitKey(self, input_ops.chromeInputFromKeyEvent(event))) {
                 self.resetCursorBlink();
@@ -14450,7 +14460,7 @@ pub const AppSession = struct {
         if (settings_ops.fileContentMenuHoldsWebFocus(self)) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
             self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
-            agent_activity_ops.searchOwnsInput(self) or self.scmCommitOwnsInput() or
+            agent_activity_ops.searchOwnsInput(self) or project_search_ops.ownsInput(self) or self.scmCommitOwnsInput() or
             file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
     }
 
@@ -14475,6 +14485,7 @@ pub const AppSession = struct {
             // resize 에서 같은 이유로 capture 를 놓는다(app_session.zig 의 그 자리 주석).
             file_tree_dock_ops.releaseFileTreePointer(self);
             self.editor_outline.interaction = .{};
+            project_search_ops.cancelPointer(self);
         }
         // 포커스 변화는 PTY와 무관한 시각 변화다(cursor.unfocused가 window_focused로 커서 모드를 정한다) — frame 빌드가
         // metal_dirty 게이트(idle tick은 빌드 생략) 뒤에 있어 여기서 dirty를 안 세우면 출력 없는 셸에선 Cmd+Tab 후에도
@@ -14859,6 +14870,7 @@ pub const AppSession = struct {
         // 터미널을 닫는다(1차 리뷰가 닫은 결함이 버튼 축으로 되살아난다).
         // 모달이 up을 소비하거나 다른 곳에서 새 누름이 시작되면 아웃라인의 이전 클릭은 끝난다.
         if ((kind == 1 and button == 0) or self.anyModalOverlayOpen() or self.chrome_host.notice.open) outline_ops.cancelPointer(self);
+        if ((kind == 1 and button == 0) or self.anyModalOverlayOpen() or self.chrome_host.notice.open) project_search_ops.cancelPointer(self);
         var shown_tab_pane: ?*Pane = null;
         if (kind == 1) {
             if (self.pointerGestureIs(.terminal_tab)) shown_tab_pane = self.pointer_gesture_owner.terminal_tab.pane;
@@ -15075,6 +15087,14 @@ pub const AppSession = struct {
         {
             if (self.editor_outline.interaction.capture != null or layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).dock)) {
                 outline_ops.pointer(self, if (kind == 2) .move else .up, x_px, y_px);
+                return; // 누름이 시작된 도크가 이동 이벤트도 소비한다.
+            }
+        }
+        if (dock_ops.dockVisible(self) and self.dock.view == .project_search and button == 0 and (kind == 2 or kind == 3) and
+            self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
+        {
+            if (self.editor_search.interaction.capture != null or layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).dock)) {
+                project_search_ops.pointer(self, if (kind == 2) .move else .up, x_px, y_px);
                 return; // 누름이 시작된 도크가 이동 이벤트도 소비한다.
             }
         }
@@ -15313,6 +15333,13 @@ pub const AppSession = struct {
                     if (button == 0) {
                         if (dock_ops.beginDockListScrollbarGesture(self, x_px, y_px)) return;
                         outline_ops.pointer(self, .down, x_px, y_px);
+                    }
+                    return;
+                }
+                if (self.dock.view == .project_search and layout_math.pointInRect(x_px, y_px, dg.dock)) {
+                    if (button == 0) {
+                        if (dock_ops.beginDockListScrollbarGesture(self, x_px, y_px)) return;
+                        project_search_ops.pointer(self, .down, x_px, y_px);
                     }
                     return;
                 }
@@ -16059,7 +16086,7 @@ pub const AppSession = struct {
         // (도크 검색 caret이 정확히 그렇게 새 있었다). 게이트는 `scmCommitOwnsInput` 단일 출처를
         // 쓴다 — 그 함수의 계약이 "caret rect·inputFocus·terminalOwnsInput이 같은 판정을 쓴다"이고
         // blink도 그 caret의 일부다.
-        const scm_commit = self.scmCommitOwnsInput();
+        const scm_commit = self.scmCommitOwnsInput() or project_search_ops.ownsInput(self);
         // 편집기 caret 도 같은 부류다 — `caret_visible`(=`blink_visible`)로 **셀을 넣었다 뺐다** 하는
         // 하드 토글이라(rename·검색 caret 과 동형) 커서 suffix 페이드로는 못 숨기고 full rebuild 가
         // 필요하다. 게이트를 빠뜨리면 **일곱이 전부 거짓이라 early-return** 으로 위상이 아예 안 돌고
@@ -16152,7 +16179,7 @@ pub const AppSession = struct {
     /// notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, recovery_picker, trust_picker, addr_edit, scm_commit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, recovery_picker, trust_picker, addr_edit, scm_commit, project_search };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -16181,6 +16208,7 @@ pub const AppSession = struct {
         // 커밋 메시지 상자(P3c). 모달·rename·검색·주소창보다 **뒤**다 — 그것들이 열리면 도크는 뒤에
         // 남고, 상자에 키가 계속 가면 사용자는 자기가 무엇을 타이핑하는지 알 수 없다. 반대로 파일
         // 트리·터미널보다는 **앞**이다: 상자는 사용자가 방금 누른 자리이고, 그 둘은 배경이다.
+        if (project_search_ops.ownsInput(self)) return .project_search;
         if (self.scmCommitOwnsInput()) return .scm_commit;
         if (file_panel_ops.fileTreeFocused(self)) return .file_tree;
         if (dock_ops.pendingDockEntryOwnsInput(self)) return .dock_pending;
@@ -16249,6 +16277,7 @@ pub const AppSession = struct {
             .addr_edit => if (self.addr_field.commitPreedit(self.allocator)) {
                 self.metal_dirty = true; // 조합 글자를 편집 텍스트로 확정(포커스 상실 등 엣지 — find/palette와 동형)
             },
+            .project_search => project_search_ops.commitPreedit(self),
             .scm_commit => scm_dock_ops.commitCommitPreedit(self),
             .terminal => {
                 return self.commitTerminalComposition();
@@ -16493,6 +16522,10 @@ pub const AppSession = struct {
         }
         // 커밋 메시지 상자도 같은 규율이다(P3c). **개행을 지우지 않는다** — 주소창이 그것을 지우는
         // 이유는 URL이 한 줄이기 때문이고, 커밋 메시지는 여러 줄이 정상이다(제목 + 빈 줄 + 본문).
+        if (self.inputFocus() == .project_search) {
+            project_search_ops.paste(self, bytes);
+            return;
+        }
         if (self.scmCommitOwnsInput()) {
             scm_dock_ops.insertCommitText(self, bytes);
             return;
@@ -18432,6 +18465,7 @@ pub const AppSession = struct {
             if (self.dock.view == .agent_sessions) _ = agent_dock.agentSessionDockPointer(self, .move, x_px, y_px);
             if (self.dock.view == .source_control) _ = scm_dock_ops.scmDockPointer(self, .move, x_px, y_px);
             if (self.dock.view == .outline) outline_ops.pointer(self, .move, x_px, y_px);
+            if (self.dock.view == .project_search) project_search_ops.pointer(self, .move, x_px, y_px);
             if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
                 tab_ops.setHoveredTab(self, null);
                 self.clearHoverUrlAnchor();
@@ -18746,6 +18780,12 @@ pub const AppSession = struct {
         }
         // 커밋 상자 편집 중이면 그 선택이 클립보드 주체다(주소창과 동형). 선택이 없으면 **빈 값**이다 —
         // 터미널 선택으로 흘리면 상자에서 ⌘C를 눌렀는데 화면 뒤의 셸 출력이 복사된다.
+        if (self.inputFocus() == .project_search) {
+            const field = project_search_ops.focused(self) orelse return &.{};
+            const selected = field.selection orelse return &.{};
+            self.copy_buffer = self.allocator.dupe(u8, field.text.items[selected.lo()..selected.hi()]) catch return &.{};
+            return self.copy_buffer;
+        }
         if (self.scmCommitOwnsInput()) {
             const sel = self.scm_commit_field.selection orelse return &.{};
             const slice = self.scm_commit_field.text.items[sel.lo()..sel.hi()];
@@ -20612,6 +20652,7 @@ pub const AppSession = struct {
         // 축으로 따라간다. 여기서도 비교는 surface id 하나이고 스캔 자체는 worker 가 한다.
         agent_activity_ops.refreshForFocus(self);
         outline_ops.refreshForFocus(self);
+        project_search_ops.refreshForFocus(self);
         agent_dock.updateAgentSessionArchiveProjectScope(self); // scope root worker result만 적용; tick의 filesystem I/O는 0
         file_panel_ops.updateFileTree(self) catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
@@ -20902,7 +20943,10 @@ pub const AppSession = struct {
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
-        if (is_macos) @import("app_session/editor/search/owner.zig").poll(self);
+        if (is_macos) {
+            @import("app_session/editor/search/owner.zig").poll(self);
+            project_search_ops.pump(self);
+        }
         workspace_ops.advancePendingWindowClose(self);
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
@@ -22065,6 +22109,7 @@ pub const AppSession = struct {
                             // 활동 줄을 펼치면 **그때 받은 명령·결과 전문**이 같은 자리에 뜬다(AV3).
                             agent_activity_ops.collectOpenDetail(self, &collected, pane_frame_builder, tabbar_colors);
                         }
+                        if (self.dock.view == .project_search) project_search_ops.collect(self, &collected, pane_frame_builder, tabbar_colors);
                         if (self.dock.view == .outline) outline_ops.collect(self, &collected, pane_frame_builder, tabbar_colors);
                         if (self.dock.view == .explorer and draw_window.count > 0) {
                             // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
@@ -22746,6 +22791,7 @@ pub const AppSession = struct {
     /// 비워야 중앙 패널 '밖'(사이드바·탭 바·좌상단 ◧·우측 스크롤바)에 켜져 있던 강조가 얼어붙어 보이지 않는다(키보드로
     /// 닫으면 마우스 이동이 없어 영구 잔존하던 회귀 — code-review). 각 setter는 무변화면 no-op이라 중복 rebuild 없음.
     pub fn clearAllHover(self: *AppSession) void {
+        project_search_ops.clearHover(self);
         outline_ops.clearHover(self);
         self.setHoveredSlot(null);
         tab_ops.setHoveredTab(self, null);
@@ -24150,6 +24196,12 @@ pub const AppSession = struct {
     /// **새 backend 를 세션에 달면 여기에 한 줄 더한다.** 빠뜨리면 빠른 기계에서는 아무 일도 안 일어나고
     /// 느린 CI 에서만, 그것도 **엉뚱한 판정자 이름으로** 터진다.
     fn quietDetachedWorkersForTest(self: *AppSession) void {
+        // verify worker도 문서 snapshot 참조를 놓은 뒤에만 테스트 allocator를 결산한다.
+        if (self.editor_search.nav) |*nav| {
+            nav.cancel();
+            if (nav.job.active) |job| detached_worker_wait.quietState(job, self.io);
+            if (nav.loaded) |loaded| detached_worker_wait.quietState(loaded, self.io);
+        }
         if (self.editor_project_search_live) |*live| {
             live.job.cancel();
             if (live.job.active) |job| detached_worker_wait.quietState(job, self.io);
@@ -24394,6 +24446,7 @@ pub const AppSession = struct {
                 self.file_tree_entries.deinit(self.allocator);
                 self.file_tree_accessibility.deinit(self.allocator);
                 self.editor_outline.deinit(self.allocator);
+                self.editor_search.deinit(self.allocator);
                 self.file_tree_actions.deinit(self.allocator);
                 self.agent_session_dock_entries.deinit(self.allocator);
                 self.agent_session_dock_actions.deinit(self.allocator);
@@ -39976,7 +40029,7 @@ test "flagPrefixedLabel: running=●+이름, 아니면 이름만" {
 // (탭0=활성) 탭바(paneBarHeightPx>0)만으로도 true이고, 접힘+비활성으로 만들면 false가 되는 걸 고정한다.
 test "도크 뷰 스위처: 호버는 슬롯 위에서만 포인터가 바뀐다" {
     // 슬롯 위=클릭 가능(pointingHand), 바 안 여백=화살표. 렌더 강조와 커서가 같은 판정을 쓰는지 함께 본다.
-    const bar = chrome.components.dock_view_bar.Rect{ .x = 100, .y = 40, .w = 200, .h = 24 };
+    const bar = chrome.components.dock_view_bar.Rect{ .x = 100, .y = 40, .w = chrome.components.dock_view_bar.default_slot_cols * 10 * chrome.components.dock_view_bar.slot_count + 20, .h = 24 };
     const cw: u32 = 10;
     // 격자는 hit-test 와 렌더가 공유하는 자리에서 온다. 여기서는 셀 파생(토큰 없음)으로 잡아 옛 값을 지킨다.
     const cg = chrome.components.dock_view_bar.Grid.init(cw, 0);
@@ -79000,6 +79053,13 @@ test "도크 뷰는 전부 활성 pane 을 따라간다 — 새 뷰는 여기서
                 .call_mod = "agent_dock.",
                 .call_fn = "refreshAgentSessionArchiveProjectScopeForFocus(self);",
             },
+            .project_search => .{
+                .file = "src/platform/macos/app_session/editor/search/dock.zig",
+                .follow = "pub fn refreshForFocus(self: *AppSession) void {",
+                .call_file = "src/platform/macos/app_session.zig",
+                .call_mod = "project_search_ops.",
+                .call_fn = "refreshForFocus(self);",
+            },
             .outline => .{
                 .file = "src/platform/macos/app_session/editor/outline.zig",
                 .follow = "pub fn refreshForFocus(self: *AppSession) void {",
@@ -85307,6 +85367,7 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .trust_picker,
         .addr_edit,
         .scm_commit,
+        .project_search,
         .file_tree,
         .dock_pending,
         => true,
@@ -85329,6 +85390,11 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
         .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
         .sidebar_search => session.sidebar_search_active = true,
         .addr_edit => session.addr_edit = 1,
+        .project_search => {
+            session.dock_initialized = true;
+            session.chrome_minimal = false;
+            project_search_ops.open(session);
+        },
         .scm_commit => {
             session.dock.presented = true;
             session.dock.collapsed = false;

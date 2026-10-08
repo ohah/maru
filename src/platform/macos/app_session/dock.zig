@@ -46,6 +46,7 @@ const DockListScroll = AppSession.DockListScroll;
 const RestoredFileEntries = AppSession.RestoredFileEntries;
 const usizeOptEql = AppSession.usizeOptEql;
 const file_panel_ops = @import("file_panel.zig");
+const project_search_ops = @import("editor/search/dock.zig");
 const outline_ops = @import("editor/outline.zig");
 const pane_ops = @import("pane.zig");
 const agent_dock_ops = @import("agent_dock.zig");
@@ -490,6 +491,7 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     if (self.dock.view == .source_control and view != .source_control) scm_dock_ops.blurCommit(self);
     // 갤러리를 떠나면 도는 스캔을 취소한다 — 안 보는 화면 때문에 3.6 초를 끝까지 돌 이유가 없다.
     if (self.dock.view == .agent_activity and view != .agent_activity) agent_activity_ops.onLeaveView(self);
+    if (self.dock.view == .project_search and view != .project_search) project_search_ops.leave(self);
     self.dock.view = view;
     self.editor_outline.interaction = .{};
     // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
@@ -545,6 +547,7 @@ pub fn dockLauncherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeP
 /// `취소 → 재요청 → 취소`가 반복된다 — 취소 시 `agent_session_archive_completed_ns`가 갱신되지 않아
 /// TTL 가드도 걸리지 않기 때문이다.
 pub fn onDockViewPresented(self: *AppSession, view: dock_panel.View) void {
+    if (view == .project_search) project_search_ops.changed(self);
     if (view == .outline) {
         self.editor_outline.invalidate();
         if (self.editor_outline.status == .failed) self.editor_outline.key = null;
@@ -565,6 +568,7 @@ pub fn setDockListScrollOffsetPx(self: *AppSession, offset_px: i64) void {
         .explorer => file_panel_ops.setFileTreeScrollOffsetPx(self, offset_px),
         .source_control => setScmScrollOffsetPx(self, offset_px),
         .outline => outline_ops.setScroll(self, offset_px),
+        .project_search => project_search_ops.setScroll(self, offset_px),
         else => {},
     }
 }
@@ -574,6 +578,7 @@ pub fn dockListScroll(self: *AppSession) ?DockListScroll {
     const content = dockGeometry(self).tree_content;
     if (content.w == 0 or content.h == 0) return null;
     return switch (self.dock.view) {
+        .project_search => .{ .rect = project_search_ops.resultRect(self), .extent = project_search_ops.scrollExtent(self), .offset_px = self.editor_search.scroll.offset_y_px },
         .outline => .{ .rect = content, .extent = outline_ops.scrollExtent(self), .offset_px = @min(self.editor_outline.scroll.offset_y_px, outline_ops.scrollExtent(self).max_offset_px) },
         .explorer => .{
             .rect = content,

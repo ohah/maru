@@ -315,6 +315,7 @@ pub fn defaultRightPtForView(view: dock_panel.View) u32 {
         .agent_sessions => default_agent_sessions_right_pt,
         .agent_activity => default_agent_activity_right_pt,
         .explorer, .source_control, .outline => default_right_pt,
+        .project_search => 240,
     };
 }
 

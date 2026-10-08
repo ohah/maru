@@ -5347,8 +5347,8 @@ pub fn build(b: *std.Build) void {
     editor_document_regex_step.dependOn(&run_document_regex_product_tests.step);
     const search_owner_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"EDPS"} });
     const run_search_owner_tests = b.addRunArtifact(search_owner_tests);
-    run_search_owner_tests.addArg("--maru-expect-tests=22");
-    run_search_owner_tests.addArg("--maru-expect-passed=22");
+    run_search_owner_tests.addArg("--maru-expect-tests=28");
+    run_search_owner_tests.addArg("--maru-expect-passed=28");
     run_search_owner_tests.setCwd(b.path("."));
     run_search_owner_tests.step.dependOn(&install_fake_lsp.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_search_owner_tests.step.dependOn(&ripgrep_prepare.step);

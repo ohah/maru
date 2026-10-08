@@ -5582,6 +5582,11 @@ test "Mermaid codec ABI keeps header constants and opaque frame behavior aligned
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidDecodedFrame), @sizeOf(MermaidDecodedFrameAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidCoordinatorAction), @sizeOf(MermaidCoordinatorActionAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidCoordinatorSnapshot), @sizeOf(MermaidCoordinatorSnapshotAbi));
+    // W10a: 다운로드 행 — Swift 는 C 헤더로 읽는다(적대 리뷰 4 회차 — 크기·자리 대조가 빠져 있었다).
+    try std.testing.expectEqual(@sizeOf(c.MaruDownloadRow), @sizeOf(MaruDownloadRow));
+    inline for (.{ "key", "state", "risky", "received", "total", "reason", "name_len", "path_len", "status_len", "name", "path", "status" }) |field| {
+        try std.testing.expectEqual(@offsetOf(c.MaruDownloadRow, field), @offsetOf(MaruDownloadRow, field));
+    }
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidAcceptedResult), @sizeOf(MermaidAcceptedResultAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidTerminalResult), @sizeOf(MermaidTerminalResultAbi));
 

@@ -9928,6 +9928,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var downloadsSeenGeneration: UInt64 = 0
     private var downloadsSeenShow: UInt64 = 0
     private var downloadsShowPending = false
+    private var downloadsSeenTitle = ""
     /// 다운로드 목록 창이 키 창이다 — 메뉴의 터미널 동작(붙여넣기·복사·잘라내기·터미널 초기화)을 받지 않는다. 키 터미널 창이 없으면
     /// 활성 surface 가 첫 창으로 떨어져 ⌘V 가 그 셸에 붙여 넣었다(적대 리뷰 2 회차).
     private var downloadsWindowIsKey: Bool {
@@ -9970,7 +9971,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             ensureDownloadsWindow().showFront(makeKey: true)
         }
         let generation = maru_macos_downloads_generation()
-        if generation != downloadsSeenGeneration {
+        // 실행 중 UI 언어를 바꾸면 목록의 글(상태 줄·단추·제목)을 다시 받는다 — 목록 세대는 언어로 오르지 않는다(4 회차).
+        let title = String(cString: maru_macos_downloads_text(0))
+        let languageChanged = title != downloadsSeenTitle
+        downloadsSeenTitle = title
+        if generation != downloadsSeenGeneration || languageChanged {
             downloadsSeenGeneration = generation
             downloadRows = readDownloadRows()
             downloadsWindow?.update(generation: generation, rows: downloadRows)

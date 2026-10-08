@@ -15,6 +15,7 @@ const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const lsp_process = @import("../../lsp_process.zig");
+const tool_env = @import("../../tool_env.zig");
 const lsp = maru.session.editor.lsp;
 const diagnostic = maru.session.editor.diagnostic;
 const language = maru.session.editor.language;
@@ -41,8 +42,12 @@ const editor_smart_select = @import("smart_select.zig");
 const editor_code_action = @import("code_action.zig");
 
 pub const Phase = enum {
-    /// 실행 파일을 못 찾았다(PATH·통상 설치 위치) — 상태바 「설치」.
+    /// 실행 파일을 못 찾았다(PATH·통상 설치 위치) — 상태바 「설치」. 사용자 셸 환경을 못 읽었으면(`tool_env` 실패) 그렇다고 보이고
+    /// 누르면 다시 읽는다.
     missing,
+    /// 사용자 셸 환경을 담는 중(계획 workspace-trust WT3b) — 그동안은 「없음」을 판정하지 않는다(앱의 짧은 PATH 로 먼저 「없음」을 정해
+    /// 신뢰를 묻지도 않던 것). 담으면 다시 찾는다.
+    preparing,
     /// 신뢰를 묻는 중(모달이 떠 있다).
     asking,
     /// 사용자가 거부했다(기억됨) — 상태바 「거부됨 — 다시 묻기」.
@@ -234,6 +239,8 @@ pub const State = struct {
     asking_key: ?OwnedKey = null,
     /// 마지막으로 적용한 앱 전역 신뢰 표의 세대(`applyTrustChanges`).
     seen_trust_generation: u64 = 0,
+    /// 마지막으로 본 도구 환경의 바뀐 횟수(`tool_env.changeCount` — 읽기 시작·다 됨에 이 창의 상태바를 다시 그린다).
+    seen_env_change: u64 = 0,
     /// 신뢰 관리 확인 상자(계획 WT4)의 대상과 두 자리의 동작 — 상자가 떠 있는 동안만. 안내 줄은 상자가 빌려 그린다.
     manage_key: ?OwnedKey = null,
     manage_primary: ManageAction = .forget,
@@ -495,7 +502,10 @@ fn applyTrustChanges(self: *AppSession) void {
 fn forgetClient(self: *AppSession, c: *Client) void {
     switch (c.phase) {
         .missing, .home_root, .outside_repo, .unasked => return,
-        .asking, .starting, .ready, .restarting, .failed, .denied => {},
+        // 준비 중 — 다시 읽는 사이 죽은 서버는 문서·진단을 든 채 여기 있다(곧바로 묻지 않게 「결정 없음」으로 걷는다). 문서가 없어도
+        // 「결정 없음」으로 — 그대로 두면 다 담은 뒤 gate 가 결정 없는 표를 읽고 **곧바로 묻는다**(잊기는 다시 묻기가 아니다 — 8회차; 서버가
+        // 없던 클라이언트도 「결정 없음」이 되지만 누르면 root 부터 다시 봐 「없음」이 선다).
+        .asking, .starting, .ready, .restarting, .failed, .denied, .preparing => {},
     }
     dropProcess(self, c);
     clearClientDiagnostics(self, c);
@@ -513,14 +523,10 @@ fn applyDecision(self: *AppSession, c: *Client, decision: lsp.trust.Decision) vo
     switch (decision) {
         .deny => switch (c.phase) {
             .missing, .denied, .home_root, .outside_repo => {},
-            .asking, .starting, .ready, .restarting, .failed, .unasked => {
-                dropProcess(self, c);
-                clearClientDiagnostics(self, c);
-                for (c.docs.items) |d| d.release(self.allocator);
-                c.docs.clearRetainingCapacity();
-                c.trust_pending = false;
-                c.phase = .denied;
-            },
+            // 준비 중도 걷는다 — 다시 읽는 사이 죽은 서버의 클라이언트는 문서·진단을 든 채 여기 있다(거부 아래 옛 밑줄이 남지 않게). 걷을
+            // 것이 없으면 그대로 둔다 — 다 담은 뒤 gate 가 표를 직접 읽는다(서버가 없으면 「없음」이 거부보다 먼저다 — 7회차).
+            .preparing => if (c.docs.items.len > 0) denyClient(self, c),
+            .asking, .starting, .ready, .restarting, .failed, .unasked => denyClient(self, c),
         },
         .allow => if (c.phase == .denied or c.phase == .asking or c.phase == .unasked or (c.phase == .restarting and c.trust_pending)) {
             c.trust_pending = false;
@@ -529,6 +535,16 @@ fn applyDecision(self: *AppSession, c: *Client, decision: lsp.trust.Decision) vo
             c.restarts = 0;
         },
     }
+}
+
+/// 거부 — 떠 있는 서버를 내리고 진단·연 문서를 걷어 「거부됨」으로.
+fn denyClient(self: *AppSession, c: *Client) void {
+    dropProcess(self, c);
+    clearClientDiagnostics(self, c);
+    for (c.docs.items) |d| d.release(self.allocator);
+    c.docs.clearRetainingCapacity();
+    c.trust_pending = false;
+    c.phase = .denied;
 }
 
 /// 그 클라이언트의 문서에 선 서버 진단을 걷는다(낡은 밑줄이 남지 않게 — 서버를 내릴 때).
@@ -735,10 +751,21 @@ fn clientFor(self: *AppSession, root: []const u8, server: lsp.servers.Server) ?*
 /// 후보가 여럿인 언어(TS 계열)에서 찾아보지 않으면 없는 것을 띄우려 든다.
 pub fn serverFor(self: *AppSession, g: maru.session.editor.language.Grammar) ?lsp.servers.Server {
     if (self.editor_lsp.resolved.get(g)) |s| return s;
+    // 도구 환경을 담기 전에는 기억하지 않는다(짧은 PATH 로 고른 것이 세션 내내 굳지 않게). 처음 담는 중이면 찾아보지 않고 첫 후보를
+    // 내고, 다시 읽는 중이면 이미 담아 둔 환경으로 찾는다 — 첫 후보로 세우면 떠 있는 서버를 두고 새 클라이언트가 생겨 버려진다(7회차).
+    if (!tool_env.settled()) {
+        if (tool_env.path().len == 0) return lsp.servers.forGrammar(g);
+        return lsp.servers.resolve(g, {}, struct {
+            fn f(_: void, exe: []const u8) bool {
+                var buf: [std.fs.max_path_bytes]u8 = undefined;
+                return lsp_process.locate(exe, tool_env.path(), &buf) != null;
+            }
+        }.f);
+    }
     const picked = lsp.servers.resolve(g, {}, struct {
         fn f(_: void, exe: []const u8) bool {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
-            return lsp_process.locate(exe, &buf) != null;
+            return lsp_process.locate(exe, tool_env.path(), &buf) != null;
         }
     }.f) orelse return null;
     self.editor_lsp.resolved.set(g, picked);
@@ -752,12 +779,23 @@ fn repickIfMissing(self: *AppSession, c: *Client) bool {
     self.editor_lsp.resolved.set(g, null);
     const picked = serverFor(self, g) orelse return false;
     if (std.mem.eql(u8, picked.exe, c.server.exe)) return false;
+    // 그 서버의 클라이언트가 이 root 에 이미 있다(다른 문법의 문서가 세웠다 — TS·JS) — 이름을 바꾸면 같은 (root, 서버) 가 둘이 된다
+    // (설치하고 다시 읽는 흐름 — 8회차). 이것은 「없음」으로 남고 문서는 다음 sync 가 다시 고른 서버의 클라이언트로 보낸다.
+    if (clientFor(self, c.root, picked) != null) return false;
     c.server = picked;
     return true;
 }
 
 fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server, grammar: maru.session.editor.language.Grammar) ?*Client {
     if (clientFor(self, root, server)) |c| return c;
+    // 셸 환경을 담기 전에 첫 후보 이름으로 만든 「준비 중」 클라이언트(`serverFor` 는 담기 전에 찾아보지 않는다) — 담은 뒤 고른 서버로
+    // 이어 쓴다. 새로 만들면 그것이 gate 를 다시 안 지나 「준비 중」으로 버려진 채 남는다(TS 처럼 후보가 여럿인 언어 — 6회차 적대적 검증).
+    // 문법이 아니라 그 **첫 후보 이름**으로 찾는다 — TS·TSX·JS 는 서버를 나눠 써 다른 문법의 문서가 세운 클라이언트일 수 있다(7회차).
+    const tentative = lsp.servers.candidatesFor(grammar);
+    if (tentative.len > 0) for (self.editor_lsp.clients.items) |*c| if (c.phase == .preparing and c.proc == null and std.mem.eql(u8, c.root, root) and std.mem.eql(u8, c.server.exe, tentative[0].exe)) {
+        c.server = server;
+        return c;
+    };
     const owned = self.allocator.dupe(u8, root) catch return null;
     self.editor_lsp.clients.append(self.allocator, .{ .root = owned, .server = server, .phase = .restarting, .grammar = grammar }) catch {
         self.allocator.free(owned);
@@ -768,12 +806,17 @@ fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server,
 
 fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
     if (!trustKeyHolds(self, c)) return;
+    // 환경을 담기 전에는 띄우지 않는다(gate 가 먼저 막지만 문서 없이 재시작을 기다리던 클라이언트도 여기로 온다).
+    const env = tool_env.envp() orelse {
+        c.phase = .preparing;
+        return;
+    };
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = lsp_process.locate(c.server.exe, &pbuf) orelse {
+    const exe = lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) orelse {
         c.phase = .missing;
         return;
     };
-    const proc = lsp_process.spawn(self.allocator, exe, c.server.args, c.root) catch {
+    const proc = lsp_process.spawn(self.allocator, exe, c.server.args, c.root, env) catch {
         scheduleRestart(self, c, now_ms);
         return;
     };
@@ -901,6 +944,15 @@ pub fn pump(self: *AppSession) void {
         return;
     }
     const now_ms = self.awakeMs();
+    // 도구 환경(사용자 셸 환경 — 계획 WT3b)의 결과를 받기만 한다. **시작은 gate 가 한다** — 서버가 필요한 문서가 신뢰 범위 안에 생겼을
+    // 때만(편집기를 안 쓰는 실행·홈 루트·저장소 밖 문서에서 사용자 셸 설정을 돌리지 않는다 — 계획 「언제」). 따로 다시 판정시킬 것은
+    // 없다 — 「준비 중」·「없음」 클라이언트는 문서가 열려 있으면 gate 가 매 tick 다시 찾고(문서가 닫힌 것은 다시 열 때), 기억해 둔
+    // 서버가 새 환경에서 없어지면 `repickIfMissing` 이 그 기억을 비운다. 읽기 시작했거나 다 됐으면(어느 창이 시작했든·받았든) 이 창의 상태바를 다시 그린다.
+    tool_env.poll();
+    if (tool_env.changeCount() != self.editor_lsp.seen_env_change) {
+        self.editor_lsp.seen_env_change = tool_env.changeCount();
+        self.metal_dirty = true;
+    }
     applyTrustChanges(self);
     // 묻던 창이 포커스를 잃었다(다른 창으로 갔다·퀵 터미널이 숨었다) — 자리를 내놓는다(답이 아니다 — 기억하지 않는다). 그 저장소를 기다리는
     // key 창이 다음 pump 에 묻고, 이 창으로 돌아오면 이 창이 다시 묻는다.
@@ -913,11 +965,29 @@ pub fn pump(self: *AppSession) void {
     }
 }
 
+/// 스위치 `lsp.shell-environment` — 사용자의 명시 행동(세팅 토글·행 되돌리기·Reload Config(파일 감시 자동 reload 포함)·전체 리셋)만 부른다(앱 전역 — `tool_env.setEnabled`).
+pub fn setShellEnvironmentEnabled(value: bool) void {
+    tool_env.setEnabled(value);
+}
+
+/// 앱 전역 스위치의 지금 값 — 아직 아무도 정하지 않았으면 `null`. 세팅 화면이 창의 설정 미러를 되맞춘다(다른 창에서 바꾼 값).
+pub fn shellEnvironmentOverride() ?bool {
+    return tool_env.enabledOverride();
+}
+
+/// 팔레트 「Language Server: Reload Shell Environment」 — 사용자 셸 환경을 다시 읽는다(셸 설정을 고친 뒤). 떠 있는 서버는 다시 띄울 때
+/// 새 환경을 쓴다.
+pub fn reloadShellEnvironment(self: *AppSession) void {
+    if (!self.loaded_config.config.lsp.enabled) return self.showNoticeKey(.lsp_reload_env_disabled);
+    tool_env.reload(self.loaded_config.config.lsp.shell_environment);
+    self.metal_dirty = true;
+}
+
 fn pumpClient(self: *AppSession, c: *Client, now_ms: u64) void {
     switch (c.phase) {
         .restarting => if (!c.trust_pending and now_ms >= c.retry_at_ms) spawnClient(self, c, now_ms),
         .starting, .ready => {},
-        .missing, .asking, .denied, .failed, .home_root, .outside_repo, .unasked => return,
+        .missing, .preparing, .asking, .denied, .failed, .home_root, .outside_repo, .unasked => return,
     }
     const p = &(c.proc orelse return);
     // 밀린 쓰기가 상한을 넘었다 — 서버가 stdin 을 안 읽는다. 죽은 것으로 보고 재시작 경로로(§8.2a).
@@ -1230,7 +1300,7 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
 /// 신뢰 게이트(§8.2a): 결정이 없으면 묻고(모달 하나만 — 다른 root 는 기다린다), 거부면 `denied`, 허용이면 띄울 수 있게 둔다.
 fn gateTrust(self: *AppSession, c: *Client) void {
     switch (c.phase) {
-        .restarting, .missing => {},
+        .restarting, .missing, .preparing => {},
         else => return,
     }
     if (c.proc != null) return;
@@ -1253,15 +1323,26 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         }
         c.scope_checked = true;
     }
+    // 사용자 셸 환경을 담는 중이면 「없음」을 판정하지 않는다(계획 WT3b) — 담으면 다음 gate 가 그 환경으로 찾는다. 처음이면 여기서 시작한다
+    // (서버가 필요한 문서가 처음 생긴 순간 — 셸을 안 띄우는 경우는 그 자리에서 정해져 같은 gate 가 바로 이어 간다).
+    if (!tool_env.settled()) {
+        tool_env.tick(self.loaded_config.config.lsp.shell_environment);
+        if (!tool_env.settled()) {
+            c.phase = .preparing;
+            return;
+        }
+    }
     // 실행 파일이 없으면 신뢰를 묻지 않는다 — 「설치」가 먼저다. 없는 채면 다른 후보가 생겼는지 다시 고른다(TS 계열 — §8.2a 「서버 찾기」).
+    // 사용자 셸 환경의 PATH 로 찾는다. 찾기는 실행이 아니므로 저장소 아래 PATH 항목도 거르지 않는다 — 거르면 저장소 안에 설치한 서버가
+    // 늘 「없음」이라 신뢰를 묻지도 못한다(LSPB9 가 드러냈다). 신뢰 전에 실행하는 일(WT5 의 버전 조회)이 `shell_env.pathWithout` 을 쓴다.
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    if (lsp_process.locate(c.server.exe, &pbuf) == null) {
-        if (!repickIfMissing(self, c) or lsp_process.locate(c.server.exe, &pbuf) == null) {
+    if (lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) == null) {
+        if (!repickIfMissing(self, c) or lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) == null) {
             c.phase = .missing;
             return;
         }
     }
-    if (c.phase == .missing) c.phase = .restarting; // 설치된 것을 이제 봤다
+    if (c.phase == .missing or c.phase == .preparing) c.phase = .restarting; // 설치된 것을 이제 봤다
     const stored = if (c.reask) null else trustOf(self, key);
     const decision = stored orelse {
         if (builtin.is_test) if (self.editor_lsp.auto_trust_answer) |ans| {
@@ -1388,7 +1469,8 @@ pub fn noteEdited(term: *Term) void {
 /// 쓰면 컴파일되지 않아, 판정자(LSPB10)가 잰 크기가 곧 제품 크기다.
 pub fn statusText(view: StatusView, buf: *[status_text_cap]u8) []const u8 {
     const key: maru.i18n.Key = switch (view.phase) {
-        .missing => .lsp_status_missing,
+        .missing => if (!view.env_failed) .lsp_status_missing else if (view.env_retried) .lsp_status_missing_env_install else .lsp_status_missing_env,
+        .preparing => .lsp_status_preparing,
         .asking => .lsp_status_asking,
         .starting => .lsp_status_starting,
         .restarting => .lsp_status_restarting,
@@ -1404,7 +1486,15 @@ pub fn statusText(view: StatusView, buf: *[status_text_cap]u8) []const u8 {
 
 // ── 상태바·클릭 ───────────────────────────────────────────────────────────────
 
-pub const StatusView = struct { phase: Phase, exe: []const u8 };
+pub const StatusView = struct {
+    phase: Phase,
+    exe: []const u8,
+    /// 사용자 셸 환경을 못 읽어 앱 환경으로 대신했다(`tool_env.usingAppFallback` — 앞서 담은 셸 환경을 지킨 실패는 아니다). 「없음」이
+    /// 그 탓일 수 있어 문구가 그렇게 말하고 클릭이 다시 읽는다.
+    env_failed: bool = false,
+    /// 사용자가 다시 읽었는데도 못 읽었다 — 클릭은 다시 읽기 대신 설치로(문구는 셸 환경 실패를 그대로 말한다).
+    env_retried: bool = false,
+};
 
 /// 상태바 문구 버퍼 크기 — `statusText` 의 인자 타입이다(상태바·판정자가 같은 크기를 쓸 수밖에 없다).
 pub const status_text_cap = 128;
@@ -1415,10 +1505,14 @@ pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return null;
     const server = serverFor(self, term.rt.editor_grammar) orelse return null;
     const root = rootFor(self, term) orelse return null;
-    const c = clientFor(self, root, server) orelse return .{ .phase = .missing, .exe = server.exe };
+    // 다시 읽었는데도 못 읽었으면 다시 읽기를 더 권하지 않는다 — 클릭은 설치로 가되 문구는 셸 환경 실패를 그대로 말한다(설치 위치가
+    // 셸 설정에만 있으면 설치해도 못 찾는다 — 원인을 지우면 사용자가 짐작할 길이 없다, 9회차).
+    const env_failed = tool_env.usingAppFallback();
+    const env_retried = tool_env.failedAfterReload();
+    const c = clientFor(self, root, server) orelse return .{ .phase = if (tool_env.settled()) .missing else .preparing, .exe = server.exe, .env_failed = env_failed, .env_retried = env_retried };
     // 답을 기다리는 동안(모달이 다른 오버레이 뒤에서 순서를 기다리거나 떠 있는 동안)은 「허락 대기」다 — 「다시 시작 중」이 아니다.
     if (c.trust_pending and c.phase == .restarting) return .{ .phase = .asking, .exe = server.exe };
-    return .{ .phase = c.phase, .exe = server.exe };
+    return .{ .phase = c.phase, .exe = server.exe, .env_failed = env_failed, .env_retried = env_retried };
 }
 
 /// **요청 전에 문서를 먼저 맞춘다** — 위치를 싣는 요청(hover·definition·signatureHelp)이 그 프레임의 편집보다 먼저 서버에 닿으면
@@ -1889,6 +1983,8 @@ pub fn activateStatus(self: *AppSession) void {
     const server = serverFor(self, term.rt.editor_grammar) orelse return;
     switch (view.phase) {
         .missing => {
+            // 셸 환경을 못 읽어 대신한 환경에서 못 찾았다 — 설치를 권하기 전에 다시 읽는다(셸 설정을 고쳤을 수 있다).
+            if (view.env_failed and !view.env_retried) return reloadShellEnvironment(self);
             // §8.1a 흐름 4: **새 탭**에 입력만 — Enter 는 사용자.
             _ = tab_ops.newTab(self) catch return;
             input_ops.sendTextAsKeys(self, server.install);
@@ -1955,7 +2051,7 @@ pub fn activateStatus(self: *AppSession) void {
                 o.retry_at_ms = 0;
             }
         },
-        .asking, .starting, .ready, .restarting => {},
+        .asking, .starting, .ready, .restarting, .preparing => {},
     }
     self.metal_dirty = true;
 }

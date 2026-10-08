@@ -7,7 +7,7 @@
 //! 그 그룹에 들어가므로, 내릴 때 **그룹째**(`killpg`) 죽여야 손자가 고아로 남지 않는다(§8.2a 「수명·재시작」).
 //!
 //! **찾기는 우리가 한다**(`session.git_locate.candidates` 와 같은 순회 — PATH 다음 통상 설치 위치) — execve 는 절대 경로를 받는다. 못 찾으면 `null` 이고
-//! 그것이 곧 「없음 — 설치」다.
+//! 그것이 곧 「없음 — 설치」다. PATH 와 서버 환경은 호출자가 준다 — 사용자 셸 환경(`tool_env.zig`, 계획 workspace-trust WT3b)이다.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -36,9 +36,10 @@ pub const Process = struct {
     }
 };
 
-/// PATH, 그다음 통상 설치 위치(`git_locate.fallback_dirs`)에서 실행 파일을 찾는다(절대 경로 → `buf` 안). 없으면 `null`. `MARU_LSP_SERVER_OVERRIDE` 가 있으면 **그 경로를 이름과
+/// `path`(사용자 셸 환경의 PATH — `tool_env.path()`), 그다음 통상 설치 위치
+/// (`git_locate.fallback_dirs`)에서 실행 파일을 찾는다(절대 경로 → `buf` 안). 없으면 `null`. `MARU_LSP_SERVER_OVERRIDE` 가 있으면 **그 경로를 이름과
 /// 무관하게** 쓴다 — 판정자가 가짜 서버를 끼우는 자리(하니스 전용; 제품 사용자가 켤 이유가 없다).
-pub fn locate(exe: []const u8, buf: []u8) ?[]const u8 {
+pub fn locate(exe: []const u8, path: []const u8, buf: []u8) ?[]const u8 {
     if (comptime builtin.os.tag == .windows) return null;
     if (envValue("MARU_LSP_SERVER_OVERRIDE")) |over| {
         // override 도 **실행 가능한 파일**이어야 한다 — 없는 경로를 주면 「없음」이다(판정자가 그 상태를 만드는 길).
@@ -47,7 +48,7 @@ pub fn locate(exe: []const u8, buf: []u8) ?[]const u8 {
         return buf[0..over.len];
     }
     if (std.mem.indexOfScalar(u8, exe, '/') != null) return null; // 이름표는 이름이다 — 경로를 받지 않는다
-    var it = git_locate.candidates(pathEnv());
+    var it = git_locate.candidates(path);
     var cand: [std.fs.max_path_bytes]u8 = undefined;
     while (nextCandidate(&it, exe, &cand)) |candidate| {
         if (!isExecutableFile(candidate)) continue;
@@ -79,10 +80,6 @@ fn isExecutableFile(path: []const u8) bool {
     return std.c.access(dz.ptr, std.posix.F_OK) != 0;
 }
 
-fn pathEnv() []const u8 {
-    return envValue("PATH") orelse "";
-}
-
 fn envValue(name: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (std.c.environ[i]) |entry| : (i += 1) {
@@ -107,8 +104,9 @@ pub const SpawnError = error{ Pipe, Fork, OutOfMemory };
 pub const exit_setup_failed: u8 = 126;
 
 /// 서버를 띄운다. `exe_path` 는 절대 경로(`locate` 의 결과), `args` 는 나머지 인자, `cwd` 는 root(서버가 상대 경로를 root 기준으로 풀게).
-/// 환경은 상속한다(PATH 등 — 서버가 도구를 찾는다). 자식은 **새 프로세스 그룹**의 우두머리다(파일 머리 주석).
-pub fn spawn(allocator: std.mem.Allocator, exe_path: []const u8, args: []const []const u8, cwd: []const u8) SpawnError!Process {
+/// 환경은 `envp`(사용자 셸 환경을 거른 것 — `tool_env.envp()`, §8.1)이고 `null` 이면 앱 환경을 그대로 물려받는다(판정자). 자식은
+/// **새 프로세스 그룹**의 우두머리다(파일 머리 주석).
+pub fn spawn(allocator: std.mem.Allocator, exe_path: []const u8, args: []const []const u8, cwd: []const u8, envp: ?[*:null]const ?[*:0]const u8) SpawnError!Process {
     var in_fds: [2]c_int = undefined; // 부모 → 자식(자식 stdin)
     var out_fds: [2]c_int = undefined; // 자식 → 부모(자식 stdout)
     if (std.c.pipe(&in_fds) != 0) return error.Pipe;
@@ -157,7 +155,7 @@ pub fn spawn(allocator: std.mem.Allocator, exe_path: []const u8, args: []const [
         }
         for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1] }) |fd| _ = std.c.close(fd);
         if (cwd_z.len > 0 and std.c.chdir(cwd_z.ptr) != 0) std.c._exit(exit_setup_failed);
-        _ = std.c.execve(exe_z.ptr, @ptrCast(argv.items.ptr), @ptrCast(std.c.environ));
+        _ = std.c.execve(exe_z.ptr, @ptrCast(argv.items.ptr), if (envp) |e| @ptrCast(e) else @ptrCast(std.c.environ));
         std.c._exit(127);
     }
     // 자식이 아직 `setpgid` 에 닿기 전이어도 그룹이 서게 부모가 한 번 더 한다(경쟁을 닫는 관례). 자식이 이미 exec 했으면 EACCES,

@@ -1186,3 +1186,8 @@ wrapper에 귀속시킬 수 있다. 출력은 `~/.cache/...` 같은 보호 폴�
 - `mise run test-macos-project-search-worker`: 실제 backend API·helper·불변 모델·취소·부분 결과 fixture.
 - `zig build test-editor-project-search -Doptimize=ReleaseFast`: 요청 세대·점유·예산·argv/JSON/분할 판정자.
 - 실행 증거와 제품 연결의 남은 gate는 [worker 계획](plans/editor-project-search-worker.md)을 따른다.
+
+여러 root 프로젝트 검색: `mise exec -- zig build test-macos-project-search-roots test-editor-project-search-owner`.
+ReleaseFast는 `-Doptimize=ReleaseFast`를 추가한다. 후보 합집합·전체 상한·AppSession root 사본을 확인하며
+검색 도크/실제 OS IME를 대체하지 않는다. opt-in 측정은 `tools/editor-project-search/roots-measure.py`와
+[여러 root 계획](plans/editor-project-search-roots.md)을 따른다.

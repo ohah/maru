@@ -105,6 +105,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, helper: []const u8, root: []const u
     var file = try editor.edit_doc.EditableFile.init(a, "\xf0\x9f\x98\x80foo", false);
     defer file.deinit();
     try std.testing.checkAllAllocationFailures(a, captureFailures, .{&file});
+    try std.testing.checkAllAllocationFailures(a, rootCopies, .{root});
     try std.testing.checkAllAllocationFailures(a, pathPrepareFailures, .{ &file, root });
     try std.testing.checkAllAllocationFailures(a, overlayFailures, .{ &file, false });
     try std.testing.checkAllAllocationFailures(a, overlayFailures, .{ &file, true });
@@ -190,4 +191,9 @@ pub fn run(a: std.mem.Allocator, io: std.Io, helper: []const u8, root: []const u
     backend.deinit();
     try std.testing.expectError(error.Closed, backend.startBundled(root, "absent", .{}, &state, &models, budget));
     try std.testing.expectError(error.Closed, backend.start(helper, root, "absent", .{}, &state, &models, budget));
+}
+
+fn rootCopies(a: std.mem.Allocator, root: []const u8) !void {
+    const inputs = try api.coordinator.copyInputs(a, &.{ .{ .path = root, .identity = .{ .device = 1, .inode = 2, .kind = 2 } }, .{ .path = root, .identity = .{ .device = 1, .inode = 2, .kind = 2 } } });
+    defer api.coordinator.freeInputs(a, inputs);
 }

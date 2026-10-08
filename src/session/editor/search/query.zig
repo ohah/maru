@@ -26,7 +26,7 @@ pub const Args = struct {
         self.items.deinit(a);
         self.* = .{};
     }
-    fn add(self: *Args, a: std.mem.Allocator, value: []const u8) !void {
+    pub fn add(self: *Args, a: std.mem.Allocator, value: []const u8) !void {
         const copy = try a.dupe(u8, value);
         errdefer a.free(copy);
         try self.items.append(a, copy);
@@ -158,6 +158,36 @@ pub fn build(a: std.mem.Allocator, exe: []const u8, query: []const u8, opts: Opt
     return args;
 }
 
+/// 파일 후보에도 본문 검색과 같은 root 상대 glob·ignore argv를 쓴다.
+pub fn buildFiles(a: std.mem.Allocator, exe: []const u8, opts: Options) !Args {
+    var search_args = try build(a, exe, "candidate", opts);
+    defer search_args.deinit(a);
+    return filesFromSearch(a, &search_args);
+}
+
+/// 이미 소유한 glob argv에서 후보 열거 옵션만 분리한다.
+pub fn filesFromSearch(a: std.mem.Allocator, search_args: *const Args) !Args {
+    var args: Args = .{};
+    errdefer args.deinit(a);
+    var i: usize = 0;
+    while (i < search_args.items.items.len - 4) : (i += 1) {
+        const arg = search_args.items.items[i];
+        if (std.mem.eql(u8, arg, "--glob")) {
+            try args.add(a, arg);
+            i += 1;
+            try args.add(a, search_args.items.items[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "--fixed-strings") or std.mem.eql(u8, arg, "--engine=auto") or std.mem.eql(u8, arg, "--multiline") or std.mem.eql(u8, arg, "--crlf")) continue;
+        try args.add(a, arg);
+    }
+    try args.add(a, "--files");
+    try args.add(a, "--null");
+    try args.add(a, "--");
+    try args.add(a, ".");
+    return args;
+}
+
 test "PSQ1 argv owns query and does not execute query flags" {
     const a = std.testing.allocator;
     var args = try build(a, "/bundle/rg", "--", .{});
@@ -187,6 +217,24 @@ test "PSQ2 word patterns preserve disk search policy" {
         fn run(alloc: std.mem.Allocator) !void {
             var args = try build(alloc, "/bundle/rg", "foo.bar", .{ .whole_word = true, .includes = &.{"*.zig"}, .excludes = &.{"build/**"} });
             defer args.deinit(alloc);
+        }
+    }.run, .{});
+}
+
+test "PSQ3 후보 argv는 glob 값과 ignore 순서를 보존하고 패턴을 실행하지 않는다" {
+    const a = std.testing.allocator;
+    var args = try buildFiles(a, "/bundle/rg", .{ .regex = true, .includes = &.{"--regexp"}, .excludes = &.{"**/*.tmp"} });
+    defer args.deinit(a);
+    try std.testing.expectEqualStrings("--files", args.items.items[args.items.items.len - 4]);
+    try std.testing.expectEqualStrings("--null", args.items.items[args.items.items.len - 3]);
+    for (args.items.items, 0..) |arg, index| {
+        try std.testing.expect(!std.mem.eql(u8, arg, "--json") and !std.mem.eql(u8, arg, "--regexp"));
+        if (std.mem.eql(u8, arg, "--glob")) try std.testing.expect(index + 1 < args.items.items.len);
+    }
+    try std.testing.checkAllAllocationFailures(a, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var owned = try buildFiles(alloc, "/bundle/rg", .{ .includes = &.{"src/**"} });
+            defer owned.deinit(alloc);
         }
     }.run, .{});
 }

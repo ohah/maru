@@ -6,7 +6,7 @@ pub const Limits = struct { matches: usize = 20_000, result_bytes: usize, event_
 pub const Identity = struct { request: u64, root: u64, models: u64 };
 pub const DocumentIdentity = struct { owner: usize, slot: usize, generation: u64 };
 pub const Source = union(enum) { disk, model: struct { document: DocumentIdentity, revision: u64, composition: u64 } };
-pub const Row = struct { source: Source, match: event.Match };
+pub const Row = struct { source: Source, match: event.Match, root_index: usize = 0 };
 /// worker와 owner가 같은 root 상대 경로 축을 쓴다. 상위 이동·절대 경로는 받지 않는다.
 pub fn relativePath(input: []const u8) ![]const u8 {
     var path = input;
@@ -48,6 +48,12 @@ pub const State = struct {
         if (!self.accepts(identity)) return false;
         const path = try relativePath(match.path);
         if (source == .disk and self.occupied.contains(path)) return false;
+        return self.appendSelected(a, identity, source, match);
+    }
+    /// root별 선정과 전역 점유 판정을 끝낸 coordinator만 사용한다.
+    pub fn appendSelected(self: *State, a: std.mem.Allocator, identity: Identity, source: Source, match: event.Match) !bool {
+        if (!self.accepts(identity)) return false;
+        _ = try relativePath(match.path);
         const count = match.ranges.len;
         if (count == 0) return false;
         const bytes = std.math.add(usize, match.path.len, match.text.len) catch return error.ResultTooLarge;

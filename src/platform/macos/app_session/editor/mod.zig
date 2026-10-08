@@ -53742,3 +53742,153 @@ test "LATE5 늦게 온 응답의 알림 자리는 전부 showResponseNotice 다 
         }
     }
 }
+
+fn workspaceSearchRoots(fx: *PaneFixture, roots: []const []const u8) !void {
+    try fx.session.file_tree.replaceExplicitRoots(roots);
+    for (roots) |root| {
+        const z = try testing.allocator.dupeZ(u8, root);
+        defer testing.allocator.free(z);
+        var native: std.posix.Stat = undefined;
+        try testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, z, &native, 0));
+        try testing.expect(fx.session.file_tree.pinRootIdentity(root, .{ .device = @intCast(native.dev), .inode = @intCast(native.ino), .kind = 2 }));
+    }
+    fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+}
+fn workspaceSearchRequest(session: *AppSession, options: maru.session.editor.search.query.Options, matches: usize) !void {
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const helper = path[0..try std.Io.Dir.cwd().realPathFile(testing.io, "zig-out/ripgrep/rg", &path)];
+    try session.requestWorkspaceProjectSearch("foo", options, .{ .matches = matches, .result_bytes = 65536, .event_bytes = 4096 }, .{ .timing = .{ .execution_ms = 3000, .reap_ms = 1000 }, .snapshot_bytes = 4096, .preview_bytes = 256, .selection_bytes = 65536 });
+    session.editor_project_search_query.?.helper_for_test = try testing.allocator.dupe(u8, helper);
+}
+fn workspaceSearchAwait(session: *AppSession) !void {
+    const started = std.Io.Timestamp.now(testing.io, .awake);
+    while (session.projectSearchCompletion() == null) {
+        @import("search/owner.zig").poll(session);
+        if (session.editor_project_search_failure) |failure| return failure;
+        if (started.untilNow(testing.io, .awake).toMilliseconds() > 5000) return error.AuditDeadline;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+}
+
+const WorkspaceRootsFixture = struct {
+    paths: [2][]u8,
+    fn init(fx: *PaneFixture) !@This() {
+        try fx.dir.dir.createDir(testing.io, "left", .default_dir);
+        try fx.dir.dir.createDir(testing.io, "right", .default_dir);
+        var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const base = buffer[0..try fx.dir.dir.realPath(testing.io, &buffer)];
+        const left = try std.fmt.allocPrint(testing.allocator, "{s}/left", .{base});
+        errdefer testing.allocator.free(left);
+        const right = try std.fmt.allocPrint(testing.allocator, "{s}/right", .{base});
+        errdefer testing.allocator.free(right);
+        try workspaceSearchRoots(fx, &.{ left, right });
+        return .{ .paths = .{ left, right } };
+    }
+    fn deinit(self: @This()) void {
+        for (self.paths) |path| testing.allocator.free(path);
+    }
+};
+test "EDPS12 서로 다른 실제 탐색기 root의 결과를 순서와 신원에 맞춰 합친다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const roots = try WorkspaceRootsFixture.init(&fx);
+    defer roots.deinit();
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "left/top.txt", .data = "foo" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "right/child.txt", .data = "foo" });
+    try workspaceSearchRequest(fx.session, .{ .match_case = true }, 20_000);
+    try workspaceSearchAwait(fx.session);
+    try testing.expectEqual(maru.session.editor.search.request.Status.complete, fx.session.projectSearchCompletion().?.status);
+    var batch = fx.session.takeProjectSearchBatch().?;
+    defer batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), batch.matches);
+    try testing.expectEqualStrings("top.txt", batch.rows.items[0].match.path);
+    try testing.expectEqual(@as(usize, 0), batch.rows.items[0].root_index);
+    try testing.expectEqualStrings("child.txt", batch.rows.items[1].match.path);
+    try testing.expectEqual(@as(usize, 1), batch.rows.items[1].root_index);
+    fx.session.ime_editor_commit_pending = true;
+    try testing.expect(fx.session.takeProjectSearchBatch() == null);
+    try testing.expect(fx.session.projectSearchCompletion() == null);
+    fx.session.ime_editor_commit_pending = false;
+    fx.session.fileTreeChanged("right/child.txt");
+    try testing.expect(fx.session.takeProjectSearchBatch() == null);
+    try testing.expect(fx.session.projectSearchCompletion() == null);
+}
+test "EDPS13 여러 root의 결과 상한은 요청 전체에 한 번 적용한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const roots = try WorkspaceRootsFixture.init(&fx);
+    defer roots.deinit();
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "left/a.txt", .data = "foo" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "right/b.txt", .data = "foo" });
+    try workspaceSearchRequest(fx.session, .{ .match_case = true }, 1);
+    try workspaceSearchAwait(fx.session);
+    const completion = fx.session.projectSearchCompletion().?;
+    try testing.expectEqual(maru.session.editor.search.request.Status.partial, completion.status);
+    try testing.expect(completion.failure == null);
+    var batch = fx.session.takeProjectSearchBatch().?;
+    defer batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), batch.matches);
+    try testing.expectEqual(@as(usize, 1), batch.rows.items.len);
+}
+test "EDPS14 여러 root의 공유 문서 사본은 하나이며 예산 제외도 디스크를 되살리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const roots = try WorkspaceRootsFixture.init(&fx);
+    defer roots.deinit();
+    const term = try undoFixture(&fx, testing.allocator, "left/a.txt", "foo");
+    _ = try openSharedViewInActivePane(fx.session, term);
+    try fx.session.prepareWorkspaceProjectSearch(1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 4096);
+    try testing.expect(try fx.session.editor_project_search_prepared.?.advance(fx.session, 32));
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_project_search_prepared.?.models.items.len);
+    try workspaceSearchRequest(fx.session, .{ .match_case = true }, 20_000);
+    try workspaceSearchAwait(fx.session);
+    var batch = fx.session.takeProjectSearchBatch().?;
+    defer batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), batch.matches);
+    try testing.expect(batch.rows.items[0].source == .model);
+    try testing.expectEqual(@as(usize, 0), batch.rows.items[0].root_index);
+    try testing.expectEqualStrings("a.txt", batch.rows.items[0].match.path);
+    try workspaceSearchRequest(fx.session, .{ .match_case = true }, 20_000);
+    fx.session.editor_project_search_query.?.budget.snapshot_bytes = 0;
+    try workspaceSearchAwait(fx.session);
+    try testing.expectEqual(maru.session.editor.search.request.Status.partial, fx.session.projectSearchCompletion().?.status);
+    var excluded = fx.session.takeProjectSearchBatch().?;
+    defer excluded.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), excluded.matches);
+    try testing.expectEqual(@as(usize, 1), excluded.excluded);
+}
+test "EDPS15 여러 root 준비의 모든 할당 실패는 root 사본과 문서 pin을 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const roots = try WorkspaceRootsFixture.init(&fx);
+    defer roots.deinit();
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(a: std.mem.Allocator, session: *AppSession) !void {
+            const previous = session.allocator;
+            session.allocator = a;
+            defer session.allocator = previous;
+            var prepared = try @import("search/owner.zig").Prepared.initWorkspace(session, 1, .{ .result_bytes = 4096, .event_bytes = 4096 }, 4096);
+            defer prepared.deinit(a);
+        }
+    }.run, .{fx.session});
+}
+test "EDPS16 뒤 root 교체는 앞 root의 모델도 성공 결과로 게시하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const roots = try WorkspaceRootsFixture.init(&fx);
+    defer roots.deinit();
+    _ = try undoFixture(&fx, testing.allocator, "left/a.txt", "foo");
+    try fx.dir.dir.rename("right", fx.dir.dir, "old", testing.io);
+    try fx.dir.dir.createDir(testing.io, "right", .default_dir);
+    try workspaceSearchRequest(fx.session, .{ .match_case = true }, 20_000);
+    try workspaceSearchAwait(fx.session);
+    try testing.expectEqual(error.RootChanged, fx.session.projectSearchCompletion().?.failure.?);
+    var batch = fx.session.takeProjectSearchBatch().?;
+    defer batch.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), batch.matches);
+}

@@ -8,6 +8,7 @@ const selections = maru.session.editor.selection;
 pub const Prepared = struct {
     root: []u8,
     root_index: usize,
+    roots: ?[]backend.coordinator.Input = null,
     stamp: u64,
     cursor: usize = 0,
     ready: bool = false,
@@ -22,6 +23,7 @@ pub const Prepared = struct {
         self.seen.deinit(a);
         self.state.deinit(a);
         a.free(self.root);
+        if (self.roots) |roots| backend.coordinator.freeInputs(a, roots);
     }
     pub fn init(session: *app.AppSession, root_index: usize, request: u64, limits: search.request.Limits, snapshot_bytes: usize) !Prepared {
         if (!session.file_tree_initialized or session.tabs.items.len == 0) return error.NoSearchRoot;
@@ -33,6 +35,31 @@ pub const Prepared = struct {
         if (!std.mem.eql(u8, capability.path, root)) return error.UnverifiedSearchRoot;
         const stamp = fingerprint(session);
         return .{ .root = try session.allocator.dupe(u8, root), .root_index = root_index, .stamp = stamp, .snapshot_bytes = snapshot_bytes, .state = .{ .identity = .{ .request = request, .root = session.file_tree.rootGeneration(), .models = stamp }, .limits = limits } };
+    }
+    /// 워크스페이스 사본의 경로 축은 절대 논리 경로에서 첫 /를 뺀 값이다.
+    pub fn initWorkspace(session: *app.AppSession, request: u64, limits: search.request.Limits, snapshot_bytes: usize) !Prepared {
+        var prepared = try init(session, 0, request, limits, snapshot_bytes);
+        errdefer prepared.deinit(session.allocator);
+        var inputs: std.ArrayList(backend.coordinator.Input) = .empty;
+        defer inputs.deinit(session.allocator);
+        for (0..session.file_tree.rootCount()) |i| {
+            const root = session.file_tree.rootAt(i).?;
+            const capability = session.file_tree.rootCapabilityForPath(root) orelse return error.UnverifiedSearchRoot;
+            if (!std.mem.eql(u8, capability.path, root)) return error.UnverifiedSearchRoot;
+            try inputs.append(session.allocator, .{ .path = root, .identity = capability.identity });
+        }
+        prepared.roots = try backend.coordinator.copyInputs(session.allocator, inputs.items);
+        const global_root = try session.allocator.dupe(u8, "/");
+        session.allocator.free(prepared.root);
+        prepared.root = global_root;
+        return prepared;
+    }
+    fn relativePath(self: *const Prepared, input: []const u8) ?[]const u8 {
+        if (self.roots) |roots| {
+            for (roots) |root| if (relativeToRoot(root.path, input) != null) return relativeToRoot("/", input);
+            return null;
+        }
+        return relativeToRoot(self.root, input);
     }
     pub fn fresh(self: *const Prepared, session: *app.AppSession) bool {
         return session.file_tree_initialized and !session.ime_active and !session.ime_editor_commit_pending and
@@ -58,7 +85,7 @@ pub const Prepared = struct {
     fn capture(self: *Prepared, session: *app.AppSession, term: *app.Term) !void {
         if (term.kind != .editor) {
             if (term.file_entry) |entry| if (entry.usesEditorBridge() and entry.remote_origin_dest.len == 0) {
-                if (relativeToRoot(self.root, entry.path)) |relative| {
+                if (self.relativePath(entry.path)) |relative| {
                     try self.state.occupy(session.allocator, relative);
                     self.state.excluded += 1;
                 }
@@ -70,7 +97,7 @@ pub const Prepared = struct {
         const path = state.path orelse return;
         const normalized = try std.fs.path.resolve(session.allocator, &.{path});
         defer session.allocator.free(normalized);
-        const relative = relativeToRoot(self.root, normalized) orelse return;
+        const relative = self.relativePath(normalized) orelse return;
         try self.state.occupy(session.allocator, relative);
         const opened = state.opened orelse {
             self.state.excluded += 1;
@@ -205,6 +232,7 @@ pub const Query = struct {
     includes: std.ArrayList([]const u8) = .empty,
     excludes: std.ArrayList([]const u8) = .empty,
     root_index: usize,
+    all_roots: bool = false,
     limits: search.request.Limits,
     budget: backend.Budget,
     pub fn init(a: std.mem.Allocator, root_index: usize, text: []const u8, options: search.query.Options, limits: search.request.Limits, budget: backend.Budget) !Query {
@@ -255,7 +283,8 @@ pub fn poll(session: *app.AppSession) void {
         session.editor_project_search_prepared = null;
     };
     if (session.editor_project_search_prepared == null) {
-        session.prepareProjectSearch(query.root_index, session.editor_project_search_request, query.limits, query.budget.snapshot_bytes) catch |err| {
+        const preparing = if (query.all_roots) session.prepareWorkspaceProjectSearch(session.editor_project_search_request, query.limits, query.budget.snapshot_bytes) else session.prepareProjectSearch(query.root_index, session.editor_project_search_request, query.limits, query.budget.snapshot_bytes);
+        preparing catch |err| {
             fail(session, err);
             return;
         };
@@ -270,8 +299,11 @@ pub fn poll(session: *app.AppSession) void {
     if (!ready or session.editor_project_search_watch_generation != session.file_tree.rootGeneration()) return;
     var job: backend.Backend = .{ .a = session.allocator, .io = session.io };
     var budget = query.budget;
-    budget.expected_root = session.file_tree.rootCapabilityForPath(prepared.root).?.identity;
-    const started = if (@import("builtin").is_test and query.helper_for_test != null)
+    if (!query.all_roots) budget.expected_root = session.file_tree.rootCapabilityForPath(prepared.root).?.identity;
+    const started = if (query.all_roots) roots: {
+        if (@import("builtin").is_test and query.helper_for_test != null) break :roots job.startRoots(query.helper_for_test.?, prepared.roots.?, query.text, query.options, &prepared.state, &prepared.models, budget);
+        break :roots job.startBundledRoots(prepared.roots.?, query.text, query.options, &prepared.state, &prepared.models, budget);
+    } else if (@import("builtin").is_test and query.helper_for_test != null)
         job.start(query.helper_for_test.?, prepared.root, query.text, query.options, &prepared.state, &prepared.models, budget)
     else
         job.startBundled(prepared.root, query.text, query.options, &prepared.state, &prepared.models, budget);

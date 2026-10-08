@@ -4,6 +4,7 @@ const std = @import("std");
 const search = @import("maru").session.editor.search;
 const scope_module = @import("scope.zig");
 const process = @import("process.zig");
+pub const coordinator = @import("coordinator.zig");
 pub const model = @import("model.zig");
 pub const path = @import("path.zig");
 // 창 owner를 놓은 뒤에도 마지막 앱 종료는 worker의 최종 참조 해제를 관측한다.
@@ -28,7 +29,7 @@ pub const Completion = struct {
     excluded: usize,
     failure: ?anyerror,
 };
-pub const Budget = struct { timing: process.Timing, snapshot_bytes: usize, preview_bytes: usize, expected_root: ?@import("maru").session.file_tree.Identity = null };
+pub const Budget = struct { timing: process.Timing, snapshot_bytes: usize, preview_bytes: usize, expected_root: ?@import("maru").session.file_tree.Identity = null, selection_bytes: usize = 0 };
 const Job = struct {
     a: std.mem.Allocator,
     io: std.Io,
@@ -47,6 +48,11 @@ const Job = struct {
     stats: process.Stats = .{},
     failure: ?anyerror = null,
     summary_seen: bool = false,
+    roots: ?[]coordinator.Input = null,
+    root_index: usize = 0,
+    selected: ?*const std.StringHashMapUnmanaged(usize) = null,
+    logical_root: []const u8 = "",
+    batch_paths: ?[]const []const u8 = null,
     disk_matches: usize = 0,
     fn lock(self: *@This()) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -56,20 +62,26 @@ const Job = struct {
         self.state.deinit(self.a);
         self.a.destroy(self);
     }
-    fn finish(self: *@This(), status: search.request.Status) void {
+    pub fn finish(self: *@This(), status: search.request.Status) void {
         self.lock();
         defer self.mutex.unlock();
         self.state.finish(status);
     }
-    fn accept(self: *@This(), source: search.request.Source, match: search.event.Match) !bool {
+    pub fn accept(self: *@This(), source: search.request.Source, match: search.event.Match) !bool {
         if (self.control.cancelled.load(.acquire)) return error.Cancelled;
         self.lock();
         defer self.mutex.unlock();
-        const accepted = try self.state.append(self.a, self.state.identity, source, match);
+        const accepted = if (self.roots != null) try self.state.appendSelected(self.a, self.state.identity, source, match) else try self.state.append(self.a, self.state.identity, source, match);
+        if (accepted) self.state.rows.items[self.state.rows.items.len - 1].root_index = self.root_index;
         if (!accepted and self.state.status == .partial) return error.ResultBudget;
         return accepted;
     }
-    fn acceptDisk(self: *@This(), json: []const u8) !void {
+    pub fn exclude(self: *@This()) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.state.excluded += 1;
+    }
+    pub fn acceptDisk(self: *@This(), json: []const u8) !void {
         if (self.summary_seen) return error.EventAfterSummary;
         var event = try search.event.parse(self.a, json);
         if (event == .summary) {
@@ -79,6 +91,23 @@ const Job = struct {
         if (event == .match) {
             var transferred = false;
             defer if (!transferred) event.match.deinit(self.a);
+            if (self.selected) |selected| {
+                const name = try search.request.relativePath(event.match.path);
+                if (self.batch_paths) |paths| {
+                    var in_batch = false;
+                    for (paths) |candidate| if (std.mem.eql(u8, name, candidate)) {
+                        in_batch = true;
+                        break;
+                    };
+                    if (!in_batch) return error.UnselectedPath;
+                }
+
+                const full = try std.fmt.allocPrint(self.a, "{s}{s}{s}", .{ self.logical_root, if (self.logical_root.len == 0) "" else "/", name });
+                defer self.a.free(full);
+                const owner = selected.get(full) orelse return error.UnselectedPath;
+                if (owner != self.root_index) return error.UnselectedPath;
+            }
+
             self.disk_matches = try std.math.add(usize, self.disk_matches, event.match.ranges.len);
             transferred = try self.accept(.disk, event.match);
         }
@@ -101,6 +130,14 @@ const Job = struct {
             self.environment.deinit();
             self.a.free(self.root);
             self.a.free(self.query);
+            if (self.roots) |roots| coordinator.freeInputs(self.a, roots);
+        }
+        if (self.roots != null) {
+            coordinator.execute(self) catch |err| {
+                if (err != error.Cancelled and err != error.ResultBudget and err != error.SelectionBudget and err != error.ExecutionBudget) self.failure = err;
+                self.finish(if (err == error.Cancelled) .cancelled else if (err == error.ResultBudget or err == error.SelectionBudget or err == error.EventTooLarge or err == error.ExecutionBudget) .partial else .failed);
+            };
+            return;
         }
         var root = process.openRoot(self.a, self.io, self.root) catch |err| {
             self.failure = err;
@@ -188,8 +225,28 @@ pub const Backend = struct {
     }
     /// 성공 시 state와 models 소유권이 이동한다. 공유 allocator는 스레드 안전해야 한다.
     pub fn start(self: *Backend, helper: []const u8, root: []const u8, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
+        return self.startInternal(helper, root, query, opts, state, models, budget, null);
+    }
+    /// 요청 전체가 한 worker와 결과 예산을 소유한다. root 사본은 성공 전까지 caller 소유다.
+    pub fn startRoots(self: *Backend, helper: []const u8, roots: []const coordinator.Input, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
         if (self.closed) return error.Closed;
         if (self.active != null) return error.Busy;
+        if (budget.timing.execution_ms <= 0 or budget.timing.reap_ms <= 0) return error.InvalidTiming;
+        if (roots.len == 0 or budget.selection_bytes == 0) return error.InvalidSelectionBudget;
+        return self.startInternal(helper, "/", query, opts, state, models, budget, roots);
+    }
+    pub fn startBundledRoots(self: *Backend, roots: []const coordinator.Input, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
+        if (self.closed) return error.Closed;
+        if (self.active != null) return error.Busy;
+        const helper = try @import("helper.zig").locate(self.a, self.io);
+        defer self.a.free(helper);
+        return self.startRoots(helper, roots, query, opts, state, models, budget);
+    }
+    fn startInternal(self: *Backend, helper: []const u8, root: []const u8, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget, inputs: ?[]const coordinator.Input) !void {
+        if (self.closed) return error.Closed;
+        if (self.active != null) return error.Busy;
+        const roots = if (inputs) |items| try coordinator.copyInputs(self.a, items) else null;
+        errdefer if (roots) |items| coordinator.freeInputs(self.a, items);
         const job = try self.a.create(Job);
         errdefer self.a.destroy(job);
         var args = try search.query.build(self.a, helper, query, opts);
@@ -206,7 +263,7 @@ pub const Backend = struct {
         var owned_opts = opts;
         owned_opts.includes = &.{};
         owned_opts.excludes = &.{};
-        job.* = .{ .a = self.a, .io = self.io, .args = args, .environment = environment, .root = owned_root, .query = owned_query, .opts = owned_opts, .state = state.*, .models = models.*, .budget = budget };
+        job.* = .{ .a = self.a, .io = self.io, .args = args, .environment = environment, .root = owned_root, .query = owned_query, .opts = owned_opts, .state = state.*, .models = models.*, .budget = budget, .roots = roots };
         _ = workers.fetchAdd(1, .acq_rel);
         const thread = std.Thread.spawn(.{}, Job.execute, .{job}) catch |err| {
             _ = workers.fetchSub(1, .acq_rel);

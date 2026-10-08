@@ -4488,11 +4488,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var fileTreePathBuf = [UInt8](repeating: 0, count: Int(MARU_FILE_TREE_PATH_CAPACITY))
     // 세션별 forwarder의 대상. tick 중에는 explicitSurface, 그 외(입력/IME/hover)에는 key 창의 surface
     // (quick 패널이 key면 quick, 아니면 primary). 앱-전역으로 "메인 창"이 필요한 곳은 primary를 직접 쓴다.
+    /// sheet 사슬의 맨 아래 창(sheet 가 아니면 그 창) — 저장 창 위의 「바꿀까요?」처럼 sheet 가 두 겹이어도 부모 창을 찾는다.
+    static func sheetRoot(_ window: NSWindow) -> NSWindow {
+        var current = window
+        while let parent = current.sheetParent { current = parent }
+        return current
+    }
+
     private var activeSurface: TerminalSurface? {
         if let explicitSurface { return explicitSurface }
-        // sheet(W5a — Chromium 탭 대화상자)가 키면 그 **부모 창**이 대상이다 — 안 그러면 sheet 가 뜬 동안 메뉴 단축키(⌘W 등)가
-        // 첫 창에 작용했다(적대 검증).
-        func isKey(_ window: NSWindow?) -> Bool { window?.isKeyWindow == true || window?.attachedSheet?.isKeyWindow == true }
+        // sheet(W5a — Chromium 탭 대화상자, W10b 저장 창)가 키면 그 **부모 창**이 대상이다 — 안 그러면 sheet 가 뜬 동안 메뉴
+        // 단축키(⌘W 등)가 첫 창에 작용했다(적대 검증). 두 겹 sheet(저장 창 위의 확인)도 사슬 끝까지 본다(W10b 6 회차).
+        func isKey(_ window: NSWindow?) -> Bool {
+            guard let window else { return false }
+            if window.isKeyWindow { return true }
+            guard let key = NSApp.keyWindow else { return false }
+            return Self.sheetRoot(key) === window
+        }
         if let quick, isKey(quick.window) { return quick }
         // key인 일반 창을 고르고, 없으면 첫 창(primary). 단일 창에선 둘 다 그 창이라 동작 불변, 멀티 창에선
         // 입력/draw가 자연히 key 창으로 간다(이벤트는 key 창의 first responder로 오므로).
@@ -9948,8 +9960,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 활성 surface 가 첫 창으로 떨어져 ⌘V 가 그 셸에 붙여 넣었다(적대 리뷰 2 회차).
     private var downloadsWindowIsKey: Bool {
         guard let downloads = downloadsWindow, let key = NSApp.keyWindow else { return false }
-        // 목록 창에 붙은 저장 창(W10b)이 키여도 — 그때 ⌘W 가 첫 터미널 창의 탭을 닫았다(적대 리뷰 5 회차).
-        return key === downloads.window || key.sheetParent === downloads.window
+        // 목록 창에 붙은 저장 창(W10b)이 키여도, 그 위의 「바꿀까요?」 확인까지 — sheet 사슬 끝의 창으로 본다(5·6 회차).
+        return Self.sheetRoot(key) === downloads.window
     }
     private var downloadsAnnounced = Set<UInt64>()
     private var downloadRows: [OsrDownloadsWindow.Row] = []
@@ -9998,8 +10010,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 이미 탭 쪽 저장 창이 맡았다(창이 최소화·숨김이어서 안 보였다) — 그 창을 앞으로 낸다(5 회차: 아무 말 없이 안 먹었다).
         if let panel = downloadAskPanels[key], let parent = panel.sheetParent {
             NSApp.unhide(nil)
-            if parent.isMiniaturized { parent.deminiaturize(nil) }
-            parent.makeKeyAndOrderFront(nil)
+            if let quickWindow = quick?.window, parent === quickWindow {
+                // 숨긴 빠른 터미널은 화면 밖 자리에 있다 — 원래 길로 다시 띄운다(6 회차: 그대로 앞으로 내면 보이지 않는 채 키를 가졌다).
+                showQuickTerminalAnimated(quickWindow)
+            } else {
+                if parent.isMiniaturized { parent.deminiaturize(nil) }
+                parent.makeKeyAndOrderFront(nil)
+            }
             return
         }
         guard let downloads = downloadsWindow, downloads.window.attachedSheet == nil else { return }
@@ -12554,6 +12571,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// appSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
     @objc private func runCatalogAction(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
+        // 저장 창(sheet)이 키면 ⌘A 는 그 창에 먼저 — 아래 목록 창 막음보다 앞(6 회차: 목록 창의 저장 창에서 ⌘A 가 막혔다).
+        if key == "select_all", Self.forwardEditToSheet(#selector(NSText.selectAll(_:)), sender) { return }
         // W10a: 다운로드 목록 창이 키면 메뉴의 터미널 동작을 그 창에 보내지 않는다 — 활성 surface 는 키 터미널 창이 없으면 첫 창으로
         // 떨어져 ⌘W 가 첫 창의 탭(받는 중인 웹 탭일 수도)을 닫았다(설계 적대 검토). ⌘W 는 그 창을 닫는다.
         if let downloads = downloadsWindow, downloadsWindowIsKey, key != "show_downloads" {

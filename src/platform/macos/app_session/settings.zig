@@ -701,6 +701,7 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
         const f = cf.bools[sel];
         const new_value = !f.value;
         if (config_mod.schema.setBool(&self.loaded_config.config, f.key, new_value)) {
+            if (std.mem.eql(u8, f.key, "browser.download-ask")) web_ops.applyDownloadAsk(self, true); // W10b — 이 창에서 바꿨다
             // daemon-owned notification snapshot 갱신이 실패했는데 GUI 값만 저장하면 이후 GUI 0에서도 host가 이전
             // 정책으로 동작한다. 따라서 live runtime 전부가 새 generation을 확인하기 전에는 config commit을 열지 않고,
             // 실패 시 이전 값으로 보상 갱신한 뒤 UI/config도 되돌린다.
@@ -1164,7 +1165,7 @@ pub fn reapplyLoadedConfig(self: *AppSession) void {
 /// preserve_zoom이면 ⌘+/− 런타임 줌을 보존하고(applyAppearancePreservingZoom — 단 폰트 크기 자체가 바뀐 GUI
 /// 변경이면 그 값이 사용자 의도라 줌을 안 얹는다), false면(통합 리셋) 줌까지 config 기본 크기로 되돌린다.
 pub fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
-    web_ops.applyDownloadAsk(self); // W10b — 설정 화면에서 바꾼 묻기(appearance 와 상관없이 먼저)
+    web_ops.applyDownloadAsk(self, false); // W10b — 이 세션의 값이 바뀌었으면(appearance 와 상관없이 먼저)
     const new_appearance = config_mod.resolveAppearance(self.loaded_config.config) catch return;
     // 사이드바 폭(sidebar.width, pt)을 메모리 config에서 되읽는다 — 세팅 GUI number 위젯·통합 리셋이 바꿨을 수 있다.
     // 아래 applyAppearance→applyMetricsPipeline→refreshCellMetrics 전에 세워야 clamp·px 환산·grid 재배치가 새 폭을
@@ -2150,7 +2151,7 @@ pub fn reloadConfig(self: *AppSession) void {
     // 통째로 바꾼 뒤에 버려야 UAF가 없으므로 deinit만 마지막에 남긴다.
     var old_loaded = self.loaded_config;
     self.loaded_config = new_parsed;
-    web_ops.applyDownloadAsk(self); // W10b
+    web_ops.applyDownloadAsk(self, true); // W10b — 이 창이 파일을 다시 읽었다
     applyAppearancePreservingZoom(self, new_appearance);
     old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
     replaceAppKeepAlivePolicyFromReload(self.loaded_config);
@@ -2261,6 +2262,7 @@ pub fn resetAllSettings(self: *AppSession) void {
     const keep_alive = appKeepAliveSnapshot().value;
     self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
     self.loaded_config.config.session.keep_alive_after_quit = keep_alive; // 보존 — 아래 파일 write도 같은 값을 남긴다
+    web_ops.applyDownloadAsk(self, true); // W10b — 초기화는 이 창의 명시적 동작(묻기도 기본값으로)
     // 리터럴 false가 아니라 `Config{}` 기본값을 기준으로 "보존이 실제 override인지" 판정한다. 문서가 기능 완성
     // 뒤 기본값을 true로 전환한다고 예고했으므로(persistent-session-host.md), 그때 리터럴 비교로 두면 사용자가
     // 명시적으로 끈 false를 리셋이 도로 켜 버려 같은 사고가 반대 방향으로 난다.

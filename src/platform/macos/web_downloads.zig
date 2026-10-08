@@ -618,7 +618,9 @@ fn unlinkPart(e: *const Entry) void {
         const job = allocator().create(PartUnlink) catch break :chosen;
         job.* = .{ .path = undefined, .dev = e.part_dev, .ino = e.part_ino };
         @memcpy(job.path[0 .. part.len + 1], part[0 .. part.len + 1]);
+        _ = finalizing_threads.fetchAdd(1, .seq_cst); // 종료가 기다린다(2 회차)
         const thread = std.Thread.spawn(.{}, runUnlink, .{job}) catch {
+            _ = finalizing_threads.fetchSub(1, .seq_cst);
             allocator().destroy(job);
             break :chosen;
         };
@@ -858,7 +860,8 @@ fn startFinalize(e: *Entry) bool {
     return true;
 }
 
-/// 옮기는 작업 스레드 수 — 앱이 끝날 때 잠깐 기다린다(옮기기 전에 끝나면 받은 파일이 숨은 임시 이름으로 남았다 — W10d 리뷰 1 회차).
+/// 고른 폴더의 파일 작업(옮기기·지우기) 스레드 수 — 앱이 끝날 때 잠깐 기다린다(옮기기 전에 끝나면 받은 파일이 숨은 임시 이름으로
+/// 남았다 — W10d 리뷰 1 회차, 지우기도 — 2 회차).
 var finalizing_threads = std.atomic.Value(u32).init(0);
 /// 시험 전용 — 옮기는 작업 스레드를 붙잡는다(`finalizing` 동안의 보호를 시험이 본다).
 var test_hold_finalize = std.atomic.Value(bool).init(false);
@@ -891,19 +894,22 @@ const PartUnlink = struct { path: [max_path_bytes + 1]u8, dev: i64, ino: u64 };
 
 fn runUnlink(job: *PartUnlink) void {
     defer allocator().destroy(job);
+    defer _ = finalizing_threads.fetchSub(1, .seq_cst);
     unlinkMatching(std.mem.sliceTo(&job.path, 0)[0.. :0], job.dev, job.ino);
 }
 
 fn unlinkMatching(path: [:0]const u8, dev: i64, ino: u64) void {
-    _ = unlinkInDir(path, dev, ino, false);
+    _ = unlinkInDir(path, dev, ino);
 }
 
 const UnlinkResult = enum { removed, gone, other, failed };
 
-/// 그 경로의 파일이 그 dev·ino 이면 지운다 — 부모 폴더를 열어(마지막 요소는 링크를 따라가지 않는다) 그 안에서 보고 지운다(보고 지우는
-/// 사이 부모 경로를 링크로 바꿔치기해 다른 곳의 파일을 지우게 하지 못하게 — W10d 리뷰 1 회차). `siblings` 면 Chromium 이 ` (n)` 을 붙여
-/// 받던 형제(`이름 (1).maru-part`·`.maru-5 (1).part`)도 지운다 — 그 파일이 맞을 때만.
-fn unlinkInDir(path: []const u8, dev: i64, ino: u64, siblings: bool) UnlinkResult {
+/// 그 경로의 파일이 그 dev·ino 이면 지운다 — 부모 폴더를 열어 그 안에서 보고 지운다(보고 지우는 사이 부모 경로를 바꿔치기해 다른 곳의
+/// 파일을 지우게 하지 못하게 — W10d 리뷰 1 회차). 부모 폴더는 링크를 따라간다(`~/Downloads` 가 다른 디스크로의 링크인 사용자 — 따라가지
+/// 않으면 지우지 못했다, 2 회차). 지우는 것은 연 그 폴더 안의 그 dev·ino 뿐이다. Chromium 이 ` (1)` 을 붙여 받던 형제는 Chromium 이
+/// 다음 실행에 스스로 지운다(판정 `dl-crash-restart`) — maru 는 지우지 않는다(확장자 없는 이름은 maru 의 번호 꼴과 같아 남의 받는
+/// 파일을 지울 수 있었다, 2 회차).
+fn unlinkInDir(path: []const u8, dev: i64, ino: u64) UnlinkResult {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return .failed;
     const base = path[slash + 1 ..];
     if (base.len == 0) return .failed;
@@ -911,50 +917,14 @@ fn unlinkInDir(path: []const u8, dev: i64, ino: u64, siblings: bool) UnlinkResul
     const dir = std.fmt.bufPrintZ(&dir_z, "{s}", .{if (slash == 0) "/" else path[0..slash]}) catch return .failed;
     var base_z: [max_name_bytes + 32]u8 = undefined;
     const base0 = std.fmt.bufPrintZ(&base_z, "{s}", .{base}) catch return .failed;
-    const dfd = std.c.open(dir, .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    const dfd = std.c.open(dir, .{ .DIRECTORY = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
     if (dfd < 0) return if (std.c._errno().* == @intFromEnum(std.c.E.NOENT)) .gone else .failed;
     defer _ = std.c.close(dfd);
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(dfd, base0, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return if (std.c._errno().* == @intFromEnum(std.c.E.NOENT)) .gone else .failed;
     if (@as(i64, @intCast(st.dev)) != dev or @as(u64, @intCast(st.ino)) != ino) return .other;
     if (std.c.unlinkat(dfd, base0, 0) != 0) return .failed;
-    if (siblings) removeUniquified(dfd, base);
     return .removed;
-}
-
-extern "c" fn fdopendir(fd: c_int) ?*std.c.DIR;
-
-/// `이름 (n).확장자` — Chromium 이 이미 있는 이름에 붙이는 번호(확장자 앞, 점 하나 기준)인가.
-fn isUniquifiedOf(name: []const u8, base: []const u8) bool {
-    const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse base.len;
-    const stem = base[0..dot];
-    const ext = base[dot..];
-    if (!std.mem.startsWith(u8, name, stem) or !std.mem.endsWith(u8, name, ext)) return false;
-    if (name.len < stem.len + ext.len + 4) return false;
-    const mid = name[stem.len .. name.len - ext.len];
-    if (!std.mem.startsWith(u8, mid, " (") or !std.mem.endsWith(u8, mid, ")")) return false;
-    const digits = mid[2 .. mid.len - 1];
-    if (digits.len == 0 or digits.len > 3) return false;
-    for (digits) |ch| if (!std.ascii.isDigit(ch)) return false;
-    return true;
-}
-
-fn removeUniquified(dfd: c_int, base: []const u8) void {
-    const listing = std.c.dup(dfd);
-    if (listing < 0) return;
-    const d = fdopendir(listing) orelse {
-        _ = std.c.close(listing);
-        return;
-    };
-    defer _ = std.c.closedir(d);
-    while (std.c.readdir(d)) |ent| {
-        const nm = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.name)), 0);
-        if (!isUniquifiedOf(nm, base)) continue;
-        var st: std.c.Stat = undefined;
-        if (std.c.fstatat(dfd, @ptrCast(&ent.name), &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) continue;
-        if (!std.c.S.ISREG(st.mode)) continue;
-        _ = std.c.unlinkat(dfd, @ptrCast(&ent.name), 0);
-    }
 }
 
 // ── 남은 임시 파일 기록(W10d) ─────────────────────────────────────────────────────────────────────────────
@@ -978,10 +948,22 @@ fn journalPath() ?[:0]const u8 {
     return journal_buf[0..journal_len :0];
 }
 
+/// 기록 붙이기와 정리의 옮기기를 한 줄로 세운다(W10d 리뷰 2 회차 — 옮기기 직전에 연 기록에 늦게 쓴 줄이 정리에 들어가 받는 중인 임시
+/// 파일이 지워지거나, 그 줄을 잃을 수 있었다).
+var journal_mutex: std.c.pthread_mutex_t = .{};
+/// 붙어 있지 않은 볼륨의 줄을 다시 적는 상한(다시 꽂지 않는 디스크의 줄이 끝없이 남지 않게 — 2 회차).
+const journal_max_tries = 10;
+
 fn appendJournal(dev: i64, ino: u64, path: []const u8) void {
+    appendJournalTries(dev, ino, 0, path);
+}
+
+fn appendJournalTries(dev: i64, ino: u64, tries: u32, path: []const u8) void {
     const jp = journalPath() orelse return;
-    var line_buf: [max_path_bytes + 64]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buf, "{d} {d} {s}\n", .{ dev, ino, path }) catch return;
+    var line_buf: [max_path_bytes + 80]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "{d} {d} {d} {s}\n", .{ dev, ino, tries, path }) catch return;
+    _ = std.c.pthread_mutex_lock(&journal_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&journal_mutex);
     const fd = std.c.open(jp, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
     if (fd < 0) return;
     defer _ = std.c.close(fd);
@@ -1007,7 +989,11 @@ pub fn sweepPartJournal() usize {
     const old = std.fmt.bufPrintZ(&old_buf, "{s}.sweeping", .{jp}) catch return 0;
     var st: std.c.Stat = undefined;
     // 지난 정리가 중간에 끝났으면 그 남은 것부터(새로 옮기지 않는다 — 덮어쓰면 잃는다).
-    if (std.c.fstatat(at_fdcwd, old, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0 and std.c.rename(jp, old) != 0) return 0;
+    {
+        _ = std.c.pthread_mutex_lock(&journal_mutex);
+        defer _ = std.c.pthread_mutex_unlock(&journal_mutex);
+        if (std.c.fstatat(at_fdcwd, old, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0 and std.c.rename(jp, old) != 0) return 0;
+    }
     const fd = std.c.open(old, .{ .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
     if (fd < 0) return 0;
     var removed: usize = 0;
@@ -1015,9 +1001,14 @@ pub fn sweepPartJournal() usize {
     var line_buf: [max_path_bytes + 64]u8 = undefined;
     var line_len: usize = 0;
     var overflow = false;
+    var complete = false;
     while (true) {
         const n = std.c.read(fd, &chunk, chunk.len);
-        if (n <= 0) break;
+        if (n < 0 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+        if (n <= 0) {
+            complete = n == 0; // 끝까지 읽었을 때만 비운다(읽기 오류면 다음에 다시 — 2 회차)
+            break;
+        }
         for (chunk[0..@intCast(n)]) |ch| {
             if (ch == '\n') {
                 if (!overflow) removed += sweepLine(line_buf[0..line_len]);
@@ -1030,7 +1021,7 @@ pub fn sweepPartJournal() usize {
         }
     }
     _ = std.c.close(fd);
-    _ = std.c.unlink(old);
+    if (complete) _ = std.c.unlink(old);
     return removed;
 }
 
@@ -1038,15 +1029,16 @@ fn sweepLine(line: []const u8) usize {
     var fields = std.mem.splitScalar(u8, line, ' ');
     const dev = std.fmt.parseInt(i64, fields.next() orelse return 0, 10) catch return 0;
     const ino = std.fmt.parseInt(u64, fields.next() orelse return 0, 10) catch return 0;
+    const tries = std.fmt.parseInt(u32, fields.next() orelse return 0, 10) catch return 0;
     const path = fields.rest();
     if (path.len == 0 or path.len > max_path_bytes or path[0] != '/') return 0;
     if (!isPartName(std.fs.path.basename(path))) return 0;
-    return switch (unlinkInDir(path, dev, ino, true)) {
+    return switch (unlinkInDir(path, dev, ino)) {
         .removed => 1,
         .other => 0,
         .gone, .failed => blk: {
             // 볼륨이 붙어 있지 않다(`/Volumes/<이름>` 이 없다) — 다음에 다시 본다. 그 밖의 「없음」은 이미 지워졌다.
-            if (volumeMissing(path)) appendJournal(dev, ino, path);
+            if (volumeMissing(path) and tries < journal_max_tries) appendJournalTries(dev, ino, tries + 1, path);
             break :blk 0;
         },
     };
@@ -1356,7 +1348,8 @@ pub fn unfinishedFor(browser: u64) usize {
 pub fn quitWarningCount() usize {
     var n: usize = 0;
     for (entries.items) |e| {
-        if (finished(e.state) or e.state == .held) continue;
+        // 옮기는 중인 것은 받기가 끝났다 — 종료가 기다린다(2 회차).
+        if (finished(e.state) or e.state == .held or e.finalizing) continue;
         n += 1;
     }
     return n;
@@ -1800,9 +1793,6 @@ test "the part journal deletes only leftover part files it recorded, by name sha
     setPartJournal(jpath);
     defer journal_len = 0;
     const names = [_][]const u8{ "a.txt.maru-part", ".maru-12.part", ".maru-12-3.part", "b.maru-part", "c.txt", ".maru-x.part" };
-    // Chromium 이 ` (n)` 을 붙여 받던 형제 — 기록된 그 파일이 맞을 때만 함께 지운다(b 의 형제는 남는다).
-    const siblings = [_][]const u8{ "a.txt (1).maru-part", ".maru-12 (2).part", "b (1).maru-part", "a.txt (x).maru-part" };
-    for (siblings) |n| try testWrite(dir, n, "data");
     for (names) |n| try testWrite(dir, n, "x");
     var p_buf: [max_path_bytes + 1]u8 = undefined;
     for (names, 0..) |n, i| {
@@ -1818,14 +1808,28 @@ test "the part journal deletes only leftover part files it recorded, by name sha
     try std.testing.expect(exists(testPath(dir, "b.maru-part", &p_buf))); // 같은 파일이 아니다
     try std.testing.expect(exists(testPath(dir, "c.txt", &p_buf))); // 임시 파일 꼴이 아니다
     try std.testing.expect(exists(testPath(dir, ".maru-x.part", &p_buf)));
-    try std.testing.expect(!exists(testPath(dir, "a.txt (1).maru-part", &p_buf)));
-    try std.testing.expect(!exists(testPath(dir, ".maru-12 (2).part", &p_buf)));
-    try std.testing.expect(exists(testPath(dir, "b (1).maru-part", &p_buf))); // 그 임시 파일이 맞지 않았다
-    try std.testing.expect(exists(testPath(dir, "a.txt (x).maru-part", &p_buf))); // 번호 꼴이 아니다
     try std.testing.expectEqual(@as(usize, 0), sweepPartJournal()); // 비웠다
     try std.testing.expect(!exists(testPath(dir, "journal.sweeping", &p_buf)));
-    try std.testing.expect(isUniquifiedOf("x.zip (12).maru-part", "x.zip.maru-part"));
-    try std.testing.expect(!isUniquifiedOf("x.zip (1).maru-part.bak", "x.zip.maru-part"));
+    // 부모 폴더가 링크여도(`~/Downloads` → 다른 디스크) 지운다(2 회차).
+    var link_buf: [max_path_bytes + 1]u8 = undefined;
+    const linked = std.mem.span(testPath(dir, "linked", &link_buf));
+    var dir_z: [max_path_bytes + 1]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink((std.fmt.bufPrintZ(&dir_z, "{s}", .{dir}) catch unreachable).ptr, linked.ptr));
+    try testWrite(dir, "d.bin.maru-part", "x");
+    var st: std.c.Stat = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(at_fdcwd, testPath(dir, "d.bin.maru-part", &p_buf), &st, std.c.AT.SYMLINK_NOFOLLOW));
+    var via_buf: [max_path_bytes + 1]u8 = undefined;
+    const via = std.fmt.bufPrint(&via_buf, "{s}/d.bin.maru-part", .{linked}) catch unreachable;
+    appendJournal(@intCast(st.dev), @intCast(st.ino), via);
+    try std.testing.expectEqual(@as(usize, 1), sweepPartJournal());
+    try std.testing.expect(!exists(testPath(dir, "d.bin.maru-part", &p_buf)));
+    // 붙어 있지 않은 볼륨의 줄은 상한까지만 다시 적는다.
+    appendJournalTries(1, 2, journal_max_tries - 1, "/Volumes/maru-no-such-volume-w10d/x.maru-part");
+    _ = sweepPartJournal();
+    var jread: [256]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, try testRead(dir, "journal", &jread), " 10 /Volumes/") != null);
+    _ = sweepPartJournal();
+    try std.testing.expect(!exists(testPath(dir, "journal", &p_buf)) or (try testRead(dir, "journal", &jread)).len == 0);
 }
 
 test "a chosen location keeps the chosen name with a short hidden part file, numbers unless replacing, and replace overwrites (W10b)" {

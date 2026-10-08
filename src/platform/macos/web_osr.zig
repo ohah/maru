@@ -1975,6 +1975,7 @@ pub fn shutdownForExit() void {
     // 받던 다운로드는 sidecar 와 함께 멈췄다 — 덜 받은 임시 파일(격리 표지 없음)을 남기지 않는다(W10a 적대 리뷰 3 회차). 종료 확인이 받는 중인 수를 알렸다(W10c).
     web_downloads.sidecarLost();
     web_downloads.reapPrepared(); // 작업 스레드가 만들었지만 아직 반영하지 않은 임시 파일도(4 회차) — 아직 도는 스레드는 W10d
+    web_downloads.waitFinalizing(2000); // 위가 고른 폴더에 맡긴 지우기 스레드도(W10d 리뷰 2 회차)
     if (retiring) |*old| {
         // 앱이 끝난다 — 물러나던 sidecar 도 기한 안에 거둔다(앱 종료는 기다려도 된다).
         var waited: i64 = 0;

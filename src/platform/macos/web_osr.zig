@@ -1445,7 +1445,6 @@ pub fn shutdownForExit() void {
     // 받던 다운로드는 sidecar 와 함께 멈췄다 — 덜 받은 임시 파일(격리 표지 없음)을 남기지 않는다(W10a 적대 리뷰 3 회차). 종료 전에 묻기는 W10c.
     web_downloads.sidecarLost();
     web_downloads.reapPrepared(); // 작업 스레드가 만들었지만 아직 반영하지 않은 임시 파일도(4 회차) — 아직 도는 스레드는 W10c
-    clearDownloadStaging(); // W10b: 결정 전에 받아 둔 것(sidecar 는 이미 끝났다)
     if (retiring) |*old| {
         // 앱이 끝난다 — 물러나던 sidecar 도 기한 안에 거둔다(앱 종료는 기다려도 된다).
         var waited: i64 = 0;
@@ -1458,6 +1457,7 @@ pub fn shutdownForExit() void {
         retiring = null;
     }
     releaseRunCopy(&retiring_copy);
+    clearDownloadStaging(); // W10b: 결정 전에 받아 둔 것 — 물러나던 sidecar 까지 거둔 뒤(5 회차)
     var it = surfaces.iterator();
     while (it.next()) |entry| {
         for (entry.value_ptr.view.clear()) |ring| if (ring) |r| r.release();
@@ -2621,12 +2621,15 @@ fn fail(notice: Notice) void {
     for (surfaces.values()) |*s| s.stopped_notice_pending = true;
 }
 
-/// 죽은 sidecar 가 쥐던 것을 버린다. 대화상자 콜백은 사라졌다 — 기다리던 요청을 버린다(떠 있는 창은 그 창이 닫는다). 알림
-/// 번호도 새 sidecar 에서 다시 매겨지므로 아직 내보내지 않은 알림과 누를 수 있던 기록을 지운다(옛 번호가 새 알림을 누르지
-/// 않게 — 적대 검증).
+/// W10b: 이 인스턴스의 sidecar 가 프로필을 잡은 적이 있다(hello_ack — 잠금에 막힌 sidecar 는 handshake 전에 끝난다).
+var profile_held = false;
+
 /// W10b: 프로필의 `download-staging`(sidecar 가 결정 전 다운로드를 받아 두는 곳 — `web_sidecar/preferences.zig`)의 파일을 지운다.
 /// sidecar 가 없을 때만 부른다(죽었거나 끝났다 — 다시 뜨면 sidecar 도 비운다).
 fn clearDownloadStaging() void {
+    // 시험은 실제 홈의 프로필을 건드리지 않는다(5 회차). 이 인스턴스의 sidecar 가 프로필을 잡은 적이 없으면(잠금에 막혔다 — 같은
+    // 프로필의 다른 maru 가 받아 두는 중일 수 있다) 비우지 않는다.
+    if (builtin.is_test or !profile_held) return;
     var profile_buf: [std.fs.max_path_bytes]u8 = undefined;
     const profile = profileDir(&profile_buf) orelse return;
     var dir_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
@@ -2642,6 +2645,9 @@ fn clearDownloadStaging() void {
     }
 }
 
+/// 죽은 sidecar 가 쥐던 것을 버린다. 대화상자 콜백은 사라졌다 — 기다리던 요청을 버린다(떠 있는 창은 그 창이 닫는다). 알림
+/// 번호도 새 sidecar 에서 다시 매겨지므로 아직 내보내지 않은 알림과 누를 수 있던 기록을 지운다(옛 번호가 새 알림을 누르지
+/// 않게 — 적대 검증).
 fn forgetSidecar(gpa: std.mem.Allocator) void {
     for (surfaces.values()) |*s| {
         dropDialogs(gpa, s);
@@ -2809,6 +2815,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .hello_ack => |ack| {
             if (state != .starting or ack.nonce != hello_nonce) return protocolBroken(gpa, now_ms);
             state = .running;
+            profile_held = true; // W10b: 이 인스턴스의 sidecar 가 프로필을 잡았다(받아 둔 곳을 비워도 된다)
             // 받는 port 이름과 토큰은 제어 채널로만 건넨다(C3). 브라우저 생성보다 먼저 — 첫 그리기부터 링을 알린다.
             if (receiver) |*r| send(gpa, .{ .frame_channel = .{ .service = r.serviceName(), .token = r.token } });
             if (process) |*p| _ = lsp_process.write(p, gpa, outbox_pending.items) catch false;

@@ -539,7 +539,7 @@ pub fn build(b: *std.Build) void {
     b.step("editor-project-search-adapter", "Build actual ripgrep protocol probe").dependOn(&project_search_adapter_install.step);
     const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
     const run_project_search_tests = b.addRunArtifact(project_search_tests);
-    run_project_search_tests.addArg("--maru-expect-tests=18");
+    run_project_search_tests.addArg("--maru-expect-tests=25");
     b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
     const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });
     ripgrep_prepare.setCwd(b.path("."));
@@ -5235,7 +5235,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }), .filters = &.{".test.project search dock"} });
     const run_search_dock = b.addRunArtifact(search_dock_tests);
-    run_search_dock.addArg("--maru-expect-tests=13");
+    run_search_dock.addArg("--maru-expect-tests=25");
     b.step("test-editor-project-search-dock", "Run project search grouping and dock geometry judges").dependOn(&run_search_dock.step);
     // 심볼 목록의 수명과 확정 대상을 실제 편집기에서 검사한다. 전체 test-editor에도 포함된다.
     const symbol_picker_tests = addProjectTest(b, .{

@@ -16,10 +16,13 @@ pub fn rowId(index: usize) u64 {
 pub const Buffers = struct { nodes: []tree.UiNode, entries: []tree.RectEntry, items: []layout.Item, flex: []layout.FlexScratch, rects: []layout.UiRect, actions: []ids.Entry };
 pub const Frame = struct { tree: tree.UiRectTree, actions: []const ids.Entry, metrics: types.Metrics };
 pub fn size(rows: usize) usize {
-    return rows + 24;
+    return rows +| 24;
 }
 pub fn build(p: types.Props, b: Buffers) !Frame {
     const m = types.Metrics.resolve(p.scale, p.expanded);
+    if (p.shift >= m.row) return error.InvalidGeometry;
+    const count = std.math.cast(u32, p.rows.len) orelse return error.InvalidGeometry;
+    const content_height = std.math.mul(u32, m.row, count) catch return error.InvalidGeometry;
     if (b.nodes.len < size(p.rows.len)) return error.InsufficientBuffer;
     var table = ids.Table.init(b.actions);
     var n: usize = 0;
@@ -39,9 +42,9 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
     for (opts, 0..) |*node, index| node.* = tree.card(.{
         .id = optionId(index),
         .style = .{ .width = .{ .percent = 1.0 / 6.0 }, .height = .{ .percent = 1 }, .flex = .{ .shrink = 0 } },
-        .action = try table.append(p.generation, if (index < 4) .{ .option = index } else if (index == 4) .run else .cancel, if (index == 4) p.fields[0].len != 0 else if (index == 5) p.running else true),
+        .action = try table.append(p.generation, if (index < 4) .{ .option = index } else if (index == 4) .run else .cancel, commandEnabled(p, index)),
         .paint = .{ .background = if (selected(p, index)) .tab_active_bg else .surface_bg, .shadow = .none },
-        .semantics = .{ .role = .button, .label = p.option_labels[index], .selected = selected(p, index) },
+        .semantics = .{ .role = .button, .label = p.option_labels[index], .selected = selected(p, index), .enabled = commandEnabled(p, index) },
     }, &.{});
     header[0] = tree.container(.{ .id = 3, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, fields[0..1]);
     header[1] = tree.container(.{ .id = 4, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } }, .direction = .row }, opts);
@@ -62,12 +65,12 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
         .paint = .{ .background = if (row.file) .tab_active_bg else .surface_bg, .shadow = .none },
         .semantics = .{ .role = .list_item, .label = row.label, .enabled = row.enabled, .expanded = if (row.file) row.expanded else null },
     }, &.{});
-    b.nodes[n] = tree.container(.{ .id = 9, .direction = .column, .style = .{ .height = .{ .px = @floatFromInt(m.row * @as(u32, @intCast(rows.len))) }, .flex = .{ .shrink = 0 } } }, rows);
+    b.nodes[n] = tree.container(.{ .id = 9, .direction = .column, .style = .{ .height = .{ .px = @floatFromInt(content_height) }, .flex = .{ .shrink = 0 } } }, rows);
     const scroll_child = b.nodes[n .. n + 1];
     n += 1;
     b.nodes[n] = tree.container(.{ .id = 2, .direction = .column, .style = .{ .height = .{ .px = @floatFromInt(m.header) }, .flex = .{ .shrink = 0 } } }, header);
     n += 1;
-    b.nodes[n] = tree.scrollArea(.{ .id = 30, .style = .{ .height = .{ .px = @max(0, p.viewport.height - @as(f32, @floatFromInt(m.header))) }, .flex = .{ .shrink = 0 } }, .scroll = .{ .first_item_origin_y_px = -@as(i32, @intCast(p.shift)), .content_h_px = @intCast(rows.len * m.row) } }, scroll_child);
+    b.nodes[n] = tree.scrollArea(.{ .id = 30, .style = .{ .height = .{ .px = @max(0, p.viewport.height - @as(f32, @floatFromInt(m.header))) }, .flex = .{ .shrink = 0 } }, .scroll = .{ .first_item_origin_y_px = -@as(i32, @intCast(p.shift)), .content_h_px = content_height } }, scroll_child);
     const children = b.nodes[n - 1 .. n + 1];
     const root = tree.container(.{ .id = 1, .direction = .column, .overflow = .clip }, children);
     const built = try tree.build(root, .{ .root_size = p.viewport, .max_entries = b.entries.len, .max_depth = 5 }, .{ .entries = b.entries, .items = b.items, .flex_scratch = b.flex, .child_rects = b.rects });
@@ -76,4 +79,8 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
 
 fn selected(p: types.Props, index: usize) bool {
     return if (index < 3) p.options[index] else if (index == 3) p.expanded else false;
+}
+
+fn commandEnabled(p: types.Props, index: usize) bool {
+    return if (index == 4) p.fields[0].len != 0 else if (index == 5) p.running else true;
 }

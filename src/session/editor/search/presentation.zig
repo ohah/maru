@@ -43,10 +43,13 @@ pub const State = struct {
         if (input_transaction or self.phase != .waiting) return false;
         return if (self.due_ms) |due| now_ms >= due else false;
     }
-    pub fn begin(self: *State, a: std.mem.Allocator, identity: request.Identity) void {
+    pub fn begin(self: *State, a: std.mem.Allocator, identity: request.Identity, input_transaction: bool) bool {
+        // 명시적 검색도 조합 확정용 Enter를 작업 시작으로 바꾸지 않는다.
+        if (input_transaction or self.phase == .composing) return false;
         self.invalidate(a);
         self.identity = identity;
         self.phase = .running;
+        return true;
     }
     pub fn accepts(self: *const State, identity: request.Identity) bool {
         return self.phase == .running and self.identity != null and std.meta.eql(self.identity.?, identity);
@@ -105,7 +108,7 @@ test "project search dock debounce restarts on editing and respects IME transact
     state.changed(std.testing.allocator, 700, false);
     try std.testing.expect(!state.ready(1000, false));
 }
-test "project search dock preedit Enter cannot start a search before confirmed change" {
+test "project search dock preedit blocks scheduling until confirmed change" {
     var state: State = .{};
     defer state.deinit(std.testing.allocator);
     state.changed(std.testing.allocator, 100, true);
@@ -118,14 +121,14 @@ test "project search dock preedit Enter cannot start a search before confirmed c
 test "project search dock late completion cannot revive cancelled or edited results" {
     var state: State = .{};
     defer state.deinit(std.testing.allocator);
-    state.begin(std.testing.allocator, first);
+    _ = state.begin(std.testing.allocator, first, false);
     const generation = state.generation;
     state.changed(std.testing.allocator, 0, true);
     try std.testing.expect(state.generation != generation);
     try std.testing.expect(!state.finish(first, .complete, 0, null));
     var second = first;
     second.request = 2;
-    state.begin(std.testing.allocator, second);
+    _ = state.begin(std.testing.allocator, second, false);
     try std.testing.expect(!state.finish(first, .failed, 1, error.InvalidQuery));
     state.cancel(std.testing.allocator);
     try std.testing.expect(!state.finish(second, .complete, 0, null));
@@ -134,15 +137,15 @@ test "project search dock late completion cannot revive cancelled or edited resu
 test "project search dock failed partial and zero results remain distinguishable" {
     var state: State = .{};
     defer state.deinit(std.testing.allocator);
-    state.begin(std.testing.allocator, first);
+    _ = state.begin(std.testing.allocator, first, false);
     try std.testing.expect(state.finish(first, .partial, 2, null));
     try std.testing.expectEqual(Phase.partial, state.phase);
     try std.testing.expectEqual(@as(usize, 2), state.excluded);
-    state.begin(std.testing.allocator, first);
+    _ = state.begin(std.testing.allocator, first, false);
     try std.testing.expect(state.finish(first, .failed, 0, error.InvalidQuery));
     try std.testing.expectEqual(Phase.failed, state.phase);
     try std.testing.expect(state.failure.? == error.InvalidQuery);
-    state.begin(std.testing.allocator, first);
+    _ = state.begin(std.testing.allocator, first, false);
     try std.testing.expect(state.finish(first, .complete, 0, null));
     try std.testing.expectEqual(Phase.complete, state.phase);
     try std.testing.expectEqual(@as(usize, 0), state.model.visible.items.len);
@@ -158,7 +161,7 @@ test "project search dock stale batch leaves row ownership with its caller" {
     const a = std.testing.allocator;
     var state: State = .{};
     defer state.deinit(a);
-    state.begin(a, first);
+    _ = state.begin(a, first, false);
     state.changed(a, 100, true);
     var row = try ownedRow(a);
     defer row.match.deinit(a);
@@ -169,7 +172,7 @@ test "project search dock failed publication clears visible rows and request ide
     const a = std.testing.allocator;
     var state: State = .{};
     defer state.deinit(a);
-    state.begin(a, first);
+    _ = state.begin(a, first, false);
     var row = try ownedRow(a);
     if (!try state.append(a, first, row)) row.match.deinit(a);
     var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
@@ -179,4 +182,63 @@ test "project search dock failed publication clears visible rows and request ide
     try std.testing.expectEqual(@as(usize, 0), state.model.rows.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.model.visible.items.len);
     try std.testing.expect(!state.finish(first, .complete, 0, null));
+}
+
+test "project search dock explicit start is blocked during preedit and OS transaction" {
+    const a = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(a);
+    state.preedit(a);
+    const generation = state.generation;
+    try std.testing.expect(!state.begin(a, first, false));
+    try std.testing.expectEqual(generation, state.generation);
+    try std.testing.expect(state.identity == null);
+    state.changed(a, 100, true);
+    try std.testing.expect(!state.begin(a, first, true));
+    try std.testing.expectEqual(Phase.waiting, state.phase);
+    try std.testing.expect(state.begin(a, first, false));
+}
+test "project search dock request root and model mismatches reject batches and completions" {
+    const a = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(a);
+    try std.testing.expect(state.begin(a, first, false));
+    var wrong = first;
+    wrong.root += 1;
+    try std.testing.expect(!state.accepts(wrong));
+    try std.testing.expect(!state.finish(wrong, .complete, 0, null));
+    wrong = first;
+    wrong.models += 1;
+    try std.testing.expect(!state.accepts(wrong));
+    try std.testing.expect(!state.finish(wrong, .complete, 0, null));
+    try std.testing.expect(!state.finish(first, .running, 99, error.InvalidQuery));
+    try std.testing.expectEqual(Phase.running, state.phase);
+    try std.testing.expectEqual(@as(usize, 0), state.excluded);
+    try std.testing.expect(state.finish(first, .complete, 0, null));
+    try std.testing.expect(!state.accepts(first));
+    try std.testing.expect(!state.finish(first, .failed, 99, error.InvalidQuery));
+    try std.testing.expectEqual(Phase.complete, state.phase);
+}
+fn allocationFailures(a: std.mem.Allocator) !void {
+    var state: State = .{};
+    defer state.deinit(a);
+    try std.testing.expect(state.begin(a, first, false));
+    for (0..24) |_| {
+        var row = try ownedRow(a);
+        const accepted = state.append(a, first, row) catch |err| {
+            row.match.deinit(a);
+            try std.testing.expectEqual(Phase.failed, state.phase);
+            try std.testing.expect(state.identity == null);
+            try std.testing.expectEqual(@as(usize, 0), state.model.rows.items.len);
+            return err;
+        };
+        if (!accepted) row.match.deinit(a);
+    }
+    try state.publish(a);
+    try std.testing.expect(state.finish(first, .complete, 0, null));
+    state.changed(a, 100, true);
+    try std.testing.expectEqual(@as(usize, 0), state.model.rows.items.len);
+}
+test "project search dock every presentation allocation failure unwinds owned rows" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailures, .{});
 }

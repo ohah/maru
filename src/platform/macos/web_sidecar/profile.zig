@@ -7,19 +7,15 @@ const std = @import("std");
 
 pub const Error = error{ MkdirFailed, NotPrivate };
 
-const Dirent = extern struct { ino: u64, seekoff: u64, reclen: u16, namlen: u16, type: u8, name: [1024]u8 };
-extern "c" fn opendir(path: [*:0]const u8) ?*anyopaque;
-extern "c" fn closedir(dir: *anyopaque) c_int;
-extern "c" fn readdir(dir: *anyopaque) ?*Dirent;
-
 /// 그 폴더 안의 파일(폴더가 아닌 것)을 지운다 — 들어가지 않는다. W10b: 결정 전 다운로드를 받아 둔 곳(`download-staging`)에 지난번
 /// sidecar 가 남긴 것을 프로필을 잡은 뒤 비운다(죽거나 끝날 때 남은 Chromium 의 중간 파일 — 적대 리뷰 1 회차). 지운 수.
 pub fn clearFiles(path: [:0]const u8) usize {
-    const dir = opendir(path) orelse return 0;
-    defer _ = closedir(dir);
+    // 표준 라이브러리의 것을 쓴다 — x86_64 macOS 의 맨 `readdir` 는 옛 32 비트 inode 배치라 `readdir$INODE64` 여야 한다(적대 리뷰 2 회차).
+    const dir = std.c.opendir(path) orelse return 0;
+    defer _ = std.c.closedir(dir);
     var removed: usize = 0;
-    while (readdir(dir)) |entry| {
-        const name = entry.name[0..entry.namlen];
+    while (std.c.readdir(dir)) |entry| {
+        const name = entry.name[0..@min(entry.namlen, entry.name.len)];
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
         if (entry.type == 4) continue; // DT_DIR
         var buf: [2048]u8 = undefined;

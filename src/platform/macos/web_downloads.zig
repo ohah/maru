@@ -939,6 +939,12 @@ fn askingIn(browser: u64) bool {
     return false;
 }
 
+/// W10c: 그 탭에 아직 아무 창도 맡지 않은 묻는 행이 있는가(그 탭이 저장 창을 띄울 차례 — 빈 다운로드 탭을 그때까지 닫지 않는다).
+pub fn unclaimedAskFor(browser: u64) bool {
+    for (entries.items) |e| if (e.state == .asking and !e.ask_claimed and e.browser == browser) return true;
+    return false;
+}
+
 /// W10b: 그 탭에서 저장할 곳을 물을 행 — 아직 아무도 맡지 않은 첫 것을 맡는다(탭 창이 그 탭을 보일 때).
 pub fn claimAskFor(browser: u64) ?*const Entry {
     for (entries.items) |*e| if (e.state == .asking and e.browser == browser and !e.ask_claimed) {

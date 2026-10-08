@@ -5230,7 +5230,7 @@ pub export fn maru_macos_downloads_show_request(out_surface: ?*u64) u64 {
 
 /// 목록 창의 문장(현재 UI 언어 — Swift 는 문장을 만들지 않는다, docs/i18n.md §7.2). 정적 널종단 — 해제하지 않는다. 0 창 제목,
 /// 1~11 상태(1 준비 중·2 보류·3 받는 중·4 중단·5 완료·6 취소·7 실패·8 탭 닫힘·9 엔진 재시작·10 너무 많음·11 파일 없음),
-/// 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록. 모르는 종류는 빈 글.
+/// 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록, 19 저장할 곳 고르기(v215 — W10b). 모르는 종류는 빈 글.
 pub export fn maru_macos_downloads_text(kind: u32) [*:0]const u8 {
     const key: maru.i18n.Key = switch (kind) {
         0 => .dl_window_title,

@@ -1079,7 +1079,7 @@ int32_t maru_macos_downloads_claim_ask(uint64_t key, MaruDownloadAsk *out);
 /* 저장 창의 답: kind 0 고른 경로(existed — 그때 그 경로에 무언가 있었다), 1 취소, 2 치움(보류로). 묻는 중이면 1. */
 int32_t maru_macos_downloads_answer_ask(uint64_t key, uint32_t kind, const uint8_t *path, size_t path_len, uint32_t existed);
 /* 목록 창의 문장(현재 UI 언어 — 정적, 해제하지 않는다). 0 창 제목, 1~11 상태(준비 중·보류·받는 중·중단·완료·취소·실패·탭 닫힘·
-   엔진 재시작·너무 많음·파일 없음), 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록. */
+   엔진 재시작·너무 많음·파일 없음), 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록, 19 저장할 곳 고르기(v215). */
 const char *maru_macos_downloads_text(uint32_t kind);
 /* `show_downloads` 액션(⇧⌘J·메뉴·팔레트)이 목록 창을 청했으면 1(one-shot). */
 int32_t maru_macos_app_session_take_show_downloads_request(MaruAppHostSession *session);

@@ -73,6 +73,12 @@ pub fn askEnabled() bool {
     return ask_enabled;
 }
 
+/// 결정 전(보류·묻는 중)에 받아 두게 두는 양 — 넘으면 멈춘다(페이지가 사용자 모르게 큰 파일을 프로필에 쌓지 못하게 — W10b 적대
+/// 리뷰 1 회차). 받기를 다시 누르면 처음부터 받는다.
+const max_waiting_bytes: i64 = 256 * 1024 * 1024;
+/// 묻는 행을 아무 창도 맡지 않으면 목록 창을 내기까지.
+const ask_nudge_ms: i64 = 1000;
+
 /// 「사용자 동작으로 시작한 다운로드」로 보는 창(그 탭에 보낸 마지막 사용자 입력 뒤) — 서버가 첨부를 늦게 돌려줘도 들게 넉넉히.
 const user_gesture_window_ms: i64 = 3000;
 
@@ -107,6 +113,11 @@ pub const Entry = struct {
     ask_claimed: bool = false,
     /// W10b: 고른 폴더에 쓸 수 없었다 — 다시 고르게 한다(상태 줄이 그 까닭을 말한다).
     ask_retry: bool = false,
+    /// W10b: 묻기 시작한 때와, 아무 창도 맡지 않아 목록 창을 냈는가(그 탭이 활성이 아니면 저장 창이 뜰 곳이 없다 — 1 초 뒤 목록).
+    ask_since_ms: i64 = 0,
+    ask_nudged: bool = false,
+    /// 결정 전(보류·묻는 중)에 받아 둔 양이 상한을 넘어 멈췄다(Chromium 은 결정 전에도 끝까지 받아 둔다 — 실측 `dl-ask-wait`).
+    stopped_waiting: bool = false,
     /// 받으려 한 곳(주소의 호스트 — 보류 행에 보인다, Chrome 처럼; data: 처럼 호스트가 없으면 비었다).
     origin_buf: [128]u8 = undefined,
     origin_len: usize = 0,
@@ -212,6 +223,24 @@ fn trimAndCut(buf: []u8, reserve: usize) []u8 {
         len = cut;
     }
     return out[0..len];
+}
+
+/// 사용자가 저장 창에서 친 이름(W10b) — 경로 구분자·제어·양방향 문자만 바꾸고 앞 점·끝 공백은 둔다(`.env` 를 고르면 `.env` 다 —
+/// 서버가 준 이름의 규칙을 쓰면 다른 이름이 되어 바꾸기를 확인한 파일과 달라졌다, 1 회차). 비거나 `.`·`..` 면 `download`.
+pub fn sanitizeChosenName(raw: []const u8, out: []u8) []const u8 {
+    var len: usize = 0;
+    const view = std.unicode.Utf8View.init(raw) catch return fallbackName(out);
+    var it = view.iterator();
+    while (it.nextCodepointSlice()) |slice| {
+        const cp = std.unicode.utf8Decode(slice) catch continue;
+        const piece: []const u8 = if (isTroublesome(cp)) "_" else slice;
+        if (len + piece.len > out.len) break;
+        @memcpy(out[len..][0..piece.len], piece);
+        len += piece.len;
+    }
+    const name = out[0..len];
+    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return fallbackName(out);
+    return name;
 }
 
 fn fallbackName(out: []u8) []const u8 {
@@ -461,9 +490,7 @@ fn finalize(e: *Entry) bool {
             e.part_len = 0;
             return true;
         }
-        @memcpy(e.final_buf[0..e.part_len], e.partPath());
-        e.final_len = e.part_len;
-        return false;
+        // 바꾸지 못했다(그 이름이 폴더 등) — 받은 데이터가 숨은 임시 파일에 남지 않게 번호 붙은 보이는 이름으로 옮겨 본다(1 회차).
     }
     // 제안 이름(묻기면 고른 이름 — `answerAsk` 가 `name` 을 바꾼다)에서 센다.
     var n: u32 = 0;
@@ -553,6 +580,7 @@ pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
         // 상관없이 보류: 목록에서 「받기」를 누르면 묻는다). 한 탭에는 한 번에 하나만 묻는다(누를 때마다 창이 줄을 서지 않게 —
         // 설계 공격 H3).
         e.state = if (by_user and !askingIn(v.browser)) .asking else .held;
+        e.ask_since_ms = now_ms;
     } else if (e.risky and !by_user) {
         e.state = .held;
     } else if (!startPrepare(&e)) {
@@ -577,6 +605,14 @@ pub fn onUpdate(v: message.DownloadUpdate) void {
     e.received = v.received;
     e.total = v.total;
     e.reason = v.reason;
+    if ((e.state == .held or e.state == .asking) and v.state == .in_progress and v.received > max_waiting_bytes) {
+        e.state = .canceled;
+        e.stopped_waiting = true;
+        e.ask_claimed = false;
+        queue(e.key, .decide_cancel);
+        changed();
+        return;
+    }
     switch (v.state) {
         // CEF 는 경로를 정하기 전에도 진행 갱신을 보낸다(실측) — 경로를 만드는 중·보류 중이면 상태를 두고 양만 적는다(여기서 받는 중으로
         // 바꾸면 만든 경로가 「그 사이 끝났다」로 버려져 다운로드가 결정 없이 멈췄다 — 첫 실행에서 잡았다).
@@ -751,6 +787,18 @@ pub fn act(key: u64, action: Action) bool {
     return true;
 }
 
+/// W10b: 묻는 행을 1 초 동안 아무 창도 맡지 않았다(그 탭이 활성이 아니다 — 저장 창이 뜰 곳이 없다) — 목록 창을 내어 알린다(1 회차:
+/// 아무 표시 없이 묻는 상태로 멈췄다). `pump` 가 부른다.
+pub fn nudgeAsking(now_ms: i64) void {
+    for (entries.items) |*e| {
+        if (e.state != .asking or e.ask_claimed or e.ask_nudged) continue;
+        if (now_ms - e.ask_since_ms < ask_nudge_ms) continue;
+        e.ask_nudged = true;
+        show_request +%= 1;
+        show_surface = e.browser;
+    }
+}
+
 fn askingIn(browser: u64) bool {
     for (entries.items) |e| if (e.state == .asking and e.browser == browser) return true;
     return false;
@@ -809,7 +857,7 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
             const raw_name = p.path[slash + 1 ..];
             if (dir.len == 0 or dir.len > max_path_bytes or raw_name.len == 0) return false;
             var name_buf: [max_name_bytes]u8 = undefined;
-            const name = sanitizeName(raw_name, 0, &name_buf);
+            const name = sanitizeChosenName(raw_name, &name_buf);
             // 바꾸기는 저장 창이 그 이름으로 물었을 때만 — maru 가 이름을 다듬어 달라졌으면(`:`·끝 점·길이) 다른 파일을 묻지 않고
             // 덮어쓰지 않게 번호로(설계 공격 H2).
             const replace = p.existed and std.mem.eql(u8, name, raw_name);
@@ -886,7 +934,7 @@ pub fn statusText(e: *const Entry, buf: []u8) []const u8 {
         .active => i18n.format(buf, i18n.t(.dl_status_active), &.{.{ .s = sizes }}),
         .interrupted => i18n.format(buf, i18n.t(.dl_status_interrupted), &.{.{ .s = sizes }}),
         .done => i18n.format(buf, i18n.t(.dl_status_done), &.{.{ .s = formatBytes(@max(e.received, e.total), &total_buf) }}),
-        .canceled => copyText(buf, i18n.t(.dl_state_canceled)),
+        .canceled => copyText(buf, i18n.t(if (e.stopped_waiting) .dl_state_stopped_waiting else .dl_state_canceled)),
         .failed => copyText(buf, i18n.t(.dl_state_failed)),
         .tab_closed => copyText(buf, i18n.t(.dl_state_tab_closed)),
         .engine_restarted => copyText(buf, i18n.t(.dl_state_engine_restarted)),
@@ -1133,6 +1181,20 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     try entries.append(allocator(), rowForTest(4, 4, .asking));
     try std.testing.expect(answerAsk(4, .{ .path = .{ .path = "/nonexistent-maru-w10b/new.txt", .existed = false } }));
     try std.testing.expect(!entryOfKey(4).?.replace);
+    // 고른 이름의 앞 점은 지키고(`.env`), 경로 구분자는 바꾼다.
+    var chosen_buf: [max_name_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(".env", sanitizeChosenName(".env", &chosen_buf));
+    try std.testing.expectEqualStrings("download", sanitizeChosenName("..", &chosen_buf));
+    // 띄운 준비 스레드 셋(행 2·3·4 — 없는 폴더라 곧 실패)이 끝나기를 기다렸다 비운다(다음 시험으로 새지 않게).
+    var waited: u32 = 0;
+    while (waited < 200) : (waited += 1) {
+        _ = std.c.pthread_mutex_lock(&prepared_mutex);
+        const n = prepared.items.len;
+        _ = std.c.pthread_mutex_unlock(&prepared_mutex);
+        if (n >= 3) break;
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
     // 고른 폴더에 쓸 수 없었다 — 다시 묻는다(상태 줄이 까닭을 말한다).
     _ = std.c.pthread_mutex_lock(&prepared_mutex);
     prepared.clearRetainingCapacity();
@@ -1179,6 +1241,32 @@ test "a chosen location keeps the chosen name with a short hidden part file, num
     var nowhere: Prepared = .{ .key = 10, .ok = false };
     prepareChosen("/nonexistent-maru-w10b", "y.txt", 10, false, &nowhere);
     try std.testing.expect(!nowhere.ok);
+}
+
+test "waiting rows stop past the cap and unclaimed asking rows bring the list window after a second (W10b)" {
+    resetForTest();
+    defer resetForTest();
+    var row = rowForTest(1, 1, .held);
+    row.browser = 7;
+    try entries.append(allocator(), row);
+    onUpdate(.{ .browser = 7, .download = 1, .state = .in_progress, .received = max_waiting_bytes + 1, .total = -1, .reason = 0 });
+    const one = entryOfKey(1).?;
+    try std.testing.expectEqual(State.canceled, one.state);
+    try std.testing.expect(one.stopped_waiting);
+    var line: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_stopped_waiting), statusText(one, &line));
+    var asking = rowForTest(2, 2, .asking);
+    asking.ask_since_ms = 1000;
+    try entries.append(allocator(), asking);
+    var surface: u64 = 0;
+    const before = showRequest(&surface);
+    nudgeAsking(1500);
+    try std.testing.expectEqual(before, showRequest(&surface)); // 아직 1 초가 안 됐다
+    nudgeAsking(2000);
+    try std.testing.expect(showRequest(&surface) != before);
+    const after = showRequest(&surface);
+    nudgeAsking(9000);
+    try std.testing.expectEqual(after, showRequest(&surface)); // 한 번만
 }
 
 test "status lines are Zig sentences with Finder-style sizes (W10a)" {

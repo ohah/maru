@@ -5263,7 +5263,6 @@ pub export fn maru_macos_downloads_active() u32 {
     return @intCast(session_mod.web_downloads.activeTotal());
 }
 
-/// `show_downloads` 액션이 다운로드 목록 창을 청했으면 1(one-shot).
 /// v215(W10b): 저장할 곳을 물을 다운로드 — 이름(다듬은 제안 이름)·처음 열 폴더·저장 창 안내(Zig 문장).
 pub const MaruDownloadAsk = extern struct {
     key: u64,
@@ -5323,6 +5322,7 @@ pub export fn maru_macos_downloads_answer_ask(key: u64, kind: u32, path: ?[*]con
     return @intFromBool(wd.answerAsk(key, answer));
 }
 
+/// `show_downloads` 액션이 다운로드 목록 창을 청했으면 1(one-shot).
 pub export fn maru_macos_app_session_take_show_downloads_request(session: ?*AppSession) i32 {
     const app = session orelse return 0;
     return @intFromBool(app.takeShowDownloadsRequest());

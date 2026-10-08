@@ -24,6 +24,8 @@
 //!                  두 번째 host(잠금에 막혀 끝난다)는 첫 host 가 받아 두는 것을 비우지 않는다(7 회차)
 //!   (환경 `MARU_JUDGE_XVOL_DIR` 가 있으면) dl-cross-volume — 받을 자리가 다른 볼륨이어도 미리 만든 그 파일에 받고 취소 뒤 남는다
 //!                  (maru 가 dev·ino 로 지운다) — W10b 적대 리뷰 실측. 없으면 돌지 않는다(판정 수에 들지 않는다)
+//!   dl-upload-default 받아 둘 곳을 프로필 안으로 돌려도(`download.default_directory`) 업로드 파일 선택 창의 처음 경로가 그 숨은
+//!                  폴더가 아니다(W10b 적대 리뷰 10 회차 — 사용자에게 보이는 회귀인지 잰다)
 //!   dl-late-decide 결정을 2 초 늦게 보내도(보류 뒤 받기·TCC 질문) 받기를 이어 가고, 받는 동안·취소 뒤의 그 경로 파일을 보고 줄에
 //!                  남긴다(늦은 결정이면 Chromium 이 자기 임시 파일에서 옮겨 와 inode 가 바뀌는지 — 3 회차 실측)
 const std = @import("std");
@@ -516,6 +518,37 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         }) catch "");
     }
 
+    // ── 업로드 창의 처음 경로 ──
+    check: {
+        try host.send(.{ .create_browser = .{ .browser = 75, .size = size, .hidden = false, .url = browsers_check.url(&u, port, "/file") } });
+        if (!waitTitle(&host, 75, "file-ready")) {
+            report(false, "dl-upload-default", "업로드 페이지가 뜨지 않았다");
+            break :check;
+        }
+        try host.send(.{ .set_focus = .{ .browser = 75, .value = true } });
+        os.sleepMs(800);
+        try host.send(.{ .mouse = .{ .browser = 75, .kind = .down, .point = .{ .x = 20, .y = 20 }, .click_count = 1 } });
+        try host.send(.{ .mouse = .{ .browser = 75, .kind = .up, .point = .{ .x = 20, .y = 20 }, .click_count = 1 } });
+        var default_buf: [1100]u8 = undefined;
+        var default_len: usize = 0;
+        var asked = false;
+        const deadline = os.nowMs() + 8000;
+        while (os.nowMs() < deadline and !asked) {
+            const message = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+            countPageStart(message);
+            if (message == .file_dialog and message.file_dialog.browser == 75) {
+                const d = message.file_dialog;
+                default_len = @min(d.default_path.len, default_buf.len);
+                @memcpy(default_buf[0..default_len], d.default_path[0..default_len]);
+                asked = true;
+                try host.send(.{ .file_dialog_reply = .{ .browser = 75, .request = d.request, .accept = false } });
+            }
+        }
+        const default_path = default_buf[0..default_len];
+        const in_profile = std.mem.indexOf(u8, default_path, "download-staging") != null or std.mem.startsWith(u8, default_path, out_root);
+        report(asked and !in_profile, "dl-upload-default", std.fmt.bufPrint(&detail_buf, "파일 선택 물음 {} · 처음 경로 「{s}」 · 프로필 안 {}", .{ asked, default_path, in_profile }) catch "");
+        try host.send(.{ .destroy_browser = 75 });
+    }
     // ── 다른 볼륨(환경으로만) ──
     if (std.c.getenv("MARU_JUDGE_XVOL_DIR")) |xvol| check: {
         var slow_buf: [1100]u8 = undefined;

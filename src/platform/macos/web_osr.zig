@@ -125,6 +125,9 @@ const Surface = struct {
     /// 동작」이 아니다(누른 링크가 연 페이지가 3 초 안에 실행 파일을 받게 하면 보류를 비켜 갔다 — 적대 리뷰 1 회차). 주소 알림
     /// (`url_changed`)으로 세우면 32 KiB 를 넘는 주소는 알림이 없어 비켜 갔고(2 회차), pushState 도 이동으로 쳤다.
     last_nav_ms: i64 = std.math.minInt(i64) / 2,
+    /// 다운로드만의 사용자 동작(W10a) — 주소창 이동·연 탭에서 물려받은 누름. 페이지 입력(`last_user_input_ms`)과 따로 둔다: 그쪽은
+    /// 제안 목록 막음(W6m②)도 쓰는데, 주소창으로 연 페이지·팝업이 손대지 않은 채 목록을 띄울 수 있게 됐다(적대 리뷰 4 회차).
+    download_gesture_ms: i64 = std.math.minInt(i64) / 2,
     /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
     /// 브라우저가 닫히면 푼다 — 새 sidecar 는 그 끌기를 모른다.
     drag_entered: bool = false,
@@ -526,11 +529,16 @@ test "a click counts as the user starting a download only until the page moves o
     try std.testing.expect(!recentUserInput(7, 3000, monotonicNow()));
     surfaces.getPtr(7).?.last_user_input_ms = monotonicNow() + 1; // 새 페이지에서 다시 눌렀다
     try std.testing.expect(recentUserInput(7, 3000, monotonicNow() + 1));
-    // 주소창에 친 주소는 사용자 동작이다(문서를 열면 `page_started` 가 지운다).
-    apply(gpa, .{ .page_started = 7 }, 0);
-    surfaces.getPtr(7).?.last_nav_ms = monotonicNow() - 1;
+    // 주소창에 친 주소는 다운로드의 사용자 동작이다(문서를 열면 `page_started` 가 지운다) — 제안 목록 막음의 입력 시각은 그대로다.
+    // (시각은 정해 둔다 — 같은 밀리초 안의 순서에 기대지 않게.)
+    const s7 = surfaces.getPtr(7).?;
+    s7.last_user_input_ms = 100;
+    s7.last_nav_ms = 200;
     noteUserNavigation(7);
     try std.testing.expect(recentUserInput(7, 3000, monotonicNow()));
+    try std.testing.expectEqual(@as(i64, 100), s7.last_user_input_ms);
+    s7.last_nav_ms = monotonicNow() + 5; // 친 주소가 문서를 열었다(그 뒤)
+    try std.testing.expect(!recentUserInput(7, 3000, monotonicNow() + 5));
     try std.testing.expect(!recentUserInput(8, 3000, now)); // 모르는 탭
 }
 
@@ -1123,7 +1131,13 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
 /// 페이지가 연 새 탭의 이동은 부르지 않는다. 주소가 문서를 열면 `page_started` 가 지운다.
 pub fn noteUserNavigation(surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
-    s.last_user_input_ms = monotonicNow();
+    s.download_gesture_ms = monotonicNow();
+}
+
+/// 이 탭의 다운로드용 사용자 동작 시각 — 페이지 입력과 다운로드만의 것 중 나중 것, 그 뒤로 새 문서가 오지 않았을 때만.
+fn downloadGestureMs(s: *const Surface) i64 {
+    const t = @max(s.last_user_input_ms, s.download_gesture_ms);
+    return if (t > s.last_nav_ms) t else std.math.minInt(i64) / 2;
 }
 
 pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.NavActionKind) void {
@@ -1426,6 +1440,7 @@ pub fn shutdownForExit() void {
     stop(gpa);
     // 받던 다운로드는 sidecar 와 함께 멈췄다 — 덜 받은 임시 파일(격리 표지 없음)을 남기지 않는다(W10a 적대 리뷰 3 회차). 종료 전에 묻기는 W10c.
     web_downloads.sidecarLost();
+    web_downloads.reapPrepared(); // 작업 스레드가 만들었지만 아직 반영하지 않은 임시 파일도(4 회차) — 아직 도는 스레드는 W10c
     if (retiring) |*old| {
         // 앱이 끝난다 — 물러나던 sidecar 도 기한 안에 거둔다(앱 종료는 기다려도 된다).
         var waited: i64 = 0;
@@ -2174,7 +2189,8 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
     const size = surfaces.getPtr(v.opener).?.record.size;
     // 누른 `target=_blank` 링크가 첨부를 돌려주면 다운로드는 이 팝업 브라우저의 것이다 — 연 탭에서 누른 것을 물려받는다(W10a 적대
     // 리뷰 3 회차: 사용자가 누른 실행 파일이 보류됐다). 팝업이 문서를 열면 `page_started` 가 지운다.
-    const opener_input_ms = surfaces.getPtr(v.opener).?.last_user_input_ms;
+    // 연 탭이 그 뒤 다른 문서로 갔다면 그 누름은 이미 무효다 — 무효가 아닌 것만 물려준다(4 회차). 제안 목록 막음은 물려받지 않는다.
+    const opener_gesture_ms = downloadGestureMs(surfaces.getPtr(v.opener).?);
     const queued_url = gpa.dupe(u8, v.url) catch null;
     const last_url = gpa.dupe(u8, v.url) catch null;
     if (queued_url == null or last_url == null) {
@@ -2192,7 +2208,7 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
         .created = true,
         .last_url = last_url,
         .popup_opener = v.opener,
-        .last_user_input_ms = opener_input_ms,
+        .download_gesture_ms = opener_gesture_ms,
     }) catch {
         gpa.free(queued_url.?);
         gpa.free(last_url.?);
@@ -2704,7 +2720,7 @@ pub fn sendToSidecar(gpa: std.mem.Allocator, message: Message) void {
 /// 누름으로 시작한 다운로드는 가르지 못한다(문서마다의 사용자 활성화는 Chromium 안에 있다).
 pub fn recentUserInput(surface_id: u64, window_ms: i64, now_ms: i64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
-    return now_ms - s.last_user_input_ms <= window_ms and s.last_user_input_ms > s.last_nav_ms;
+    return now_ms - downloadGestureMs(s) <= window_ms;
 }
 
 fn send(gpa: std.mem.Allocator, message: Message) void {

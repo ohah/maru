@@ -1559,7 +1559,7 @@ cat > "$root/dlw-auto.txt" <<'SCRIPT'
 sleep 9000
 downloads
 dlact 0 2
-sleep 1500
+sleep 3500
 downloads
 SCRIPT
 dl_check() { # $1=이름 — 대본의 목록 보고와 `~/Downloads` 를 남긴다

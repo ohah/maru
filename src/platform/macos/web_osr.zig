@@ -2498,7 +2498,7 @@ fn mkdirs(path: []const u8) bool {
 
 fn start(gpa: std.mem.Allocator, now_ms: i64) void {
     const log = std.log.scoped(.web_osr);
-    profile_held = false; // 새 sidecar — hello_ack 가 세운다(W10b)
+    profile_held = false; // 새 sidecar — 첫 browser_created 가 세운다(W10b)
     const source = installDir() orelse return fail(.start_failed);
     // W7a2: brew 설치는 그 prefix 의 keg 이고 믿을 만할 때만 — 검사한 keg 를 fd 로 쥐고 그 fd 에서 복제한다. 개발용
     // `MARU_WEB_OSR_DIR` 은 빌드 디렉터리라 이 검사를 건너뛴다(릴리스 판에서는 그 환경변수 자체를 안 본다).
@@ -2617,7 +2617,10 @@ fn reapRetiring(gpa: std.mem.Allocator, now_ms: i64) void {
     }
     p.deinit(gpa);
     retiring = null;
-    retiring_profile_held = false; // 거뒀다 — 다음 sidecar 가 막혀 끝날 때 남의 것을 비우지 않게(7 회차)
+    // 거뒀다 — 지금 sidecar 가 없으면 그 sidecar 가 받아 둔 것을 비운다(8 회차: 마지막 탭을 닫아 내린 뒤 엔진을 WebKit 으로 돌리면 계속
+    // 남았다). 지금 sidecar 가 있으면 그것이 시작하며 이미 비웠다. 플래그는 내린다(다음 sidecar 가 막혀 끝날 때 남의 것을 비우지 않게 — 7 회차).
+    if (retiring_profile_held and process == null) clearDownloadStaging(true);
+    retiring_profile_held = false;
     releaseRunCopy(&retiring_copy);
 }
 

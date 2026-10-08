@@ -66,7 +66,28 @@ var last_dir_buf: [max_path_bytes]u8 = undefined;
 var last_dir_len: usize = 0;
 
 pub fn setAsk(value: bool) void {
+    const was = ask_enabled;
     ask_enabled = value;
+    if (was and !value) {
+        // 묻기를 껐다 — 아직 아무 창도 맡지 않은 묻는 행은 보류로 돌린다(끈 뒤에 그 탭으로 돌아가면 저장 창이 떴다 — 8 회차). 받기를
+        // 누르면 그때의 설정(꺼짐 — ~/Downloads)을 따른다. 저장 창이 떠 있는 행은 사용자가 고르는 중이라 둔다.
+        var any = false;
+        for (entries.items) |*e| if (e.state == .asking and !e.ask_claimed) {
+            e.state = .held;
+            e.chosen = false;
+            e.replace = false;
+            any = true;
+        };
+        if (any) changed();
+    }
+}
+
+fn rememberDir(final_path: []const u8) void {
+    const slash = std.mem.lastIndexOfScalar(u8, final_path, '/') orelse return;
+    const dir = if (slash == 0) "/" else final_path[0..slash];
+    const n = @min(dir.len, last_dir_buf.len);
+    @memcpy(last_dir_buf[0..n], dir[0..n]);
+    last_dir_len = n;
 }
 
 pub fn askEnabled() bool {
@@ -650,8 +671,8 @@ pub fn onUpdate(v: message.DownloadUpdate) void {
     e.total = v.total;
     e.reason = v.reason;
     const unattended = e.state == .held or (e.state == .asking and !e.ask_claimed);
-    // 한 행이 아니라 아무도 보지 않는 행 전체로 잰다 — 행마다면 32 × 4 GB 까지 쌓였다(4 회차). 넘으면 가장 큰 보류 행부터 멈춘다
-    // (지금 알린 행을 멈추면 막 누른 0 바이트 행이 「4 GB 를 넘었다」로 멈췄다 — 5 회차).
+    // 한 행이 아니라 아무도 보지 않는 행 전체로 잰다 — 행마다면 32 × 4 GB 까지 쌓였다(4 회차). 넘으면 가장 크게 받아 둔 행부터
+    // 멈춘다(지금 알린 행을 멈추면 막 누른 0 바이트 행이 멈췄다 — 5·6 회차).
     if (unattended and v.state == .in_progress and waitingTotal() > max_waiting_bytes) {
         enforceWaitingCap();
         if (finished(e.state)) return;
@@ -754,6 +775,8 @@ pub fn reapPrepared() void {
                 e.part_dev = p.part_dev;
                 e.part_ino = p.part_ino;
                 e.state = .active;
+                // 고른 폴더에 쓸 수 있었다 — 다음 저장 창이 여기서 연다(쓸 수 없던 폴더를 다시 열지 않게 — 8 회차).
+                if (e.chosen) rememberDir(e.finalPath());
                 queue(e.key, .decide_path);
             }
             changed();
@@ -834,8 +857,8 @@ pub fn act(key: u64, action: Action) bool {
     return true;
 }
 
-/// 합이 상한 아래가 될 때까지 가장 큰 행을 멈춘다 — 보류 행부터, 사용자가 누른(맡지 않은 묻는 중) 행은 마지막에. 멈추면 목록 창으로
-/// 알린다(2 회차: 아무 표시 없이 사라졌다).
+/// 합이 상한 아래가 될 때까지 가장 크게 받아 둔 행을 멈춘다(보류·맡지 않은 묻는 중 — 같으면 보류 행을). 멈추면 목록 창으로 알린다
+/// (2 회차: 아무 표시 없이 사라졌다).
 fn enforceWaitingCap() void {
     while (waitingTotal() > max_waiting_bytes) {
         // 가장 크게 받아 둔 행 — 같으면 보류 행을(사용자가 누른 맡지 않은 묻는 행보다 먼저). 보류 행만 고르면 0 바이트 보류 행을
@@ -970,9 +993,6 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
             e.chosen = true;
             e.replace = replace;
             e.ask_retry = false;
-            const n = @min(dir.len, last_dir_buf.len);
-            @memcpy(last_dir_buf[0..n], dir[0..n]);
-            last_dir_len = n;
             e.state = .preparing;
             if (!startPrepareIn(e, dir, true, replace)) {
                 e.state = .failed;
@@ -1284,7 +1304,8 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     try std.testing.expect(two.chosen and !two.replace);
     try std.testing.expectEqual(State.preparing, two.state);
     var dir_buf: [max_path_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("/nonexistent-maru-w10b", askDirectory(&dir_buf)); // 다음 창은 마지막으로 고른 곳에서
+    // 쓸 수 있는지 아직 모른다(준비 중) — 마지막 폴더로 삼지 않는다(8 회차: 쓸 수 없던 폴더를 다시 열었다).
+    try std.testing.expect(!std.mem.eql(u8, "/nonexistent-maru-w10b", askDirectory(&dir_buf)));
     try entries.append(allocator(), rowForTest(3, 3, .asking));
     try std.testing.expect(answerAsk(3, .{ .path = .{ .path = "/nonexistent-maru-w10b/same.txt", .existed = true } }));
     try std.testing.expect(entryOfKey(3).?.replace);
@@ -1381,6 +1402,19 @@ test "a chosen location keeps the chosen name with a short hidden part file, num
     try std.testing.expect(!nowhere.ok);
 }
 
+test "turning ask off puts unclaimed asking rows on hold and leaves a panel being answered alone (W10b)" {
+    resetForTest();
+    defer resetForTest();
+    setAsk(true);
+    try entries.append(allocator(), rowForTest(1, 1, .asking));
+    var claimed = rowForTest(2, 2, .asking);
+    claimed.ask_claimed = true;
+    try entries.append(allocator(), claimed);
+    setAsk(false);
+    try std.testing.expectEqual(State.held, entryOfKey(1).?.state);
+    try std.testing.expectEqual(State.asking, entryOfKey(2).?.state);
+}
+
 test "waiting rows stop past the cap and unclaimed asking rows bring the list window after a second (W10b)" {
     resetForTest();
     defer resetForTest();
@@ -1426,7 +1460,8 @@ test "waiting rows stop past the cap and unclaimed asking rows bring the list wi
     try std.testing.expectEqual(State.held, entryOfKey(9).?.state);
     try std.testing.expectEqual(State.asking, entryOfKey(5).?.state);
     var line: [256]u8 = undefined;
-    try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_stopped_waiting), statusText(one, &line));
+    // 행을 더 넣으면 배열이 다시 잡혀 옛 포인터(`one`)가 무효다 — 다시 찾는다.
+    try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_stopped_waiting), statusText(entryOfKey(1).?, &line));
     try entries.append(allocator(), rowForTest(2, 2, .asking));
     const before = showRequest(&surface);
     nudgeAsking(1000); // 묻기로 바뀐 때를 적는다

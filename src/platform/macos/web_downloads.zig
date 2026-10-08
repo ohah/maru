@@ -1063,6 +1063,18 @@ pub fn activeTotal() usize {
     return activeCount(null);
 }
 
+/// 탭을 닫는다(W10c 적대 리뷰 3 회차) — 그 탭의 보류 행(받기로 한 적이 없다)은 끝낸다. 남기면 그 브라우저를 주차한 채 앱 전체 상한
+/// (32)을 차지해, 보류가 쌓인 탭 몇 개를 닫으면 사용자가 누른 다운로드까지 「너무 많음」으로 거절됐다. 종료 확인의 셈과 같은 기준이다.
+pub fn closeHeldFor(browser: u64) void {
+    var any = false;
+    for (entries.items) |*e| if (e.browser == browser and e.state == .held and e.generation == sidecar_generation) {
+        e.state = .tab_closed;
+        queue(e.key, .decide_cancel);
+        any = true;
+    };
+    if (any) changed();
+}
+
 /// 그 탭(브라우저)의 끝나지 않은 다운로드 수(W10c) — 0 이 아니면 탭을 닫아도 브라우저를 남긴다(닫으면 Chromium 이 받기를 끊는다).
 /// 보류·묻는 중도 센다 — 받기를 누를 때까지 Chromium 이 그 브라우저로 받아 둔다.
 pub fn unfinishedFor(browser: u64) usize {
@@ -1279,6 +1291,19 @@ pub fn testAddActive(key: u64, browser: u64) !void {
     var e = rowForTest(key, @intCast(key), .active);
     e.browser = browser;
     try entries.append(allocator(), e);
+}
+
+/// 시험 전용(web_osr 의 시험) — 그 상태의 행 하나를 넣는다.
+pub fn testAddRow(key: u64, browser: u64, state: State) !void {
+    var e = rowForTest(key, @intCast(key), state);
+    e.browser = browser;
+    try entries.append(allocator(), e);
+}
+
+/// 시험 전용(web_osr 의 시험) — 그 행의 상태.
+pub fn testState(key: u64) ?State {
+    const e = entryOfKey(key) orelse return null;
+    return e.state;
 }
 
 /// 시험 전용(web_osr 의 시험) — 그 행을 끝낸다.

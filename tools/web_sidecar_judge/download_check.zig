@@ -13,6 +13,11 @@
 //!   dl-cancel      받는 중 취소하면 `canceled` 가 오고 덜 받은 파일이 지워진다
 //!   dl-closed      받는 중 브라우저를 닫으면 `browser_closed` 가 온다(CEF 는 알림 없이 멈춘다 — 실측)
 //!   dl-multiple    사용자 동작 없는 둘째 자동 다운로드는 「여러 파일 받기」 권한을 묻고, 허용하면 begin 이 온다
+//!   dl-page-started 새 문서 표지(`page_started`)는 페이지를 불러오거나 다른 문서로 갈 때 오고, pushState·다운로드가 된 이동에는
+//!                  오지 않는다(maru 가 「이 문서의 사용자 동작」을 가르는 표지 — 적대 리뷰 2 회차)
+//!   dl-same-file   maru 처럼 경로를 O_EXCL 로 미리 만들어 주면 Chromium 은 받는 동안 그 파일(같은 inode)에 쓴다 — maru 는 만든
+//!                  파일의 dev·ino 로만 지우므로 덜 받은 파일을 놓치지 않는다. 미리 만든 파일은 취소해도 Chromium 이 **남기고**(maru 가
+//!                  지운다), 완료 때는 **다른 inode** 로 바꿔 놓는다(maru 는 경로로 옮긴다) — 2 회차 실측, 보고 줄에 남긴다
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 const os = @import("os.zig");
@@ -28,6 +33,31 @@ const size: message_mod.ViewSize = .{ .width = 640, .height = 400, .scale = 2 };
 const wait_ms = 15_000;
 
 extern "c" fn getxattr(path: [*:0]const u8, name: [*:0]const u8, value: ?*anyopaque, size: usize, position: u32, options: c_int) isize;
+
+/// 브라우저마다 받은 `page_started` 수(판정의 번호는 128 아래).
+var page_starts = [_]u32{0} ** 128;
+
+fn countPageStart(message: protocol.message.Message) void {
+    if (message == .page_started and message.page_started < page_starts.len) page_starts[message.page_started] += 1;
+}
+
+extern "c" fn fstat(fd: c_int, buf: *std.c.Stat) c_int;
+
+/// maru 처럼 받을 자리를 O_EXCL 로 미리 만들고 그 inode 를 돌려준다.
+fn precreate(path: [:0]const u8) ?u64 {
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return null;
+    defer _ = std.c.close(fd);
+    var st: std.c.Stat = undefined;
+    if (fstat(fd, &st) != 0) return null;
+    return @intCast(st.ino);
+}
+
+fn inodeOf(path: [:0]const u8) ?u64 {
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(-2, path, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return null;
+    return @intCast(st.ino);
+}
 
 const Begin = struct {
     download: u32 = 0,
@@ -50,6 +80,7 @@ fn waitTitle(host: *Host, id: BrowserId, text: []const u8) bool {
     const deadline = os.nowMs() + wait_ms;
     while (os.nowMs() < deadline) {
         const message = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return false) orelse return false;
+        countPageStart(message);
         if (message == .title_changed and message.title_changed.browser == id and std.mem.eql(u8, message.title_changed.text, text)) return true;
     }
     return false;
@@ -60,6 +91,7 @@ fn waitBegin(host: *Host, id: BrowserId, ms: u32) ?Begin {
     const deadline = os.nowMs() + ms;
     while (os.nowMs() < deadline) {
         const message = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return null) orelse return null;
+        countPageStart(message);
         if (message == .download_begin and message.download_begin.browser == id) {
             const v = message.download_begin;
             var b: Begin = .{ .download = v.download, .total = v.total, .url_len = v.url.len };
@@ -91,6 +123,7 @@ fn watch(host: *Host, id: BrowserId, download: u32, ms: u32, stop: bool, min_rec
     const deadline = os.nowMs() + ms;
     while (os.nowMs() < deadline) {
         const message = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return seen) orelse return seen;
+        countPageStart(message);
         switch (message) {
             .download_update => |u| if (u.browser == id and u.download == download) {
                 const now = os.nowMs();
@@ -259,6 +292,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         const deadline = os.nowMs() + 6000;
         while (os.nowMs() < deadline and second == null) {
             const message = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+            countPageStart(message);
             switch (message) {
                 .permission_request => |p| if (p.browser == 66 and p.kinds & message_mod.PermissionKind.multiple_downloads.bit() != 0) {
                     asked = true;
@@ -272,5 +306,64 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         }
         if (second) |b| try host.send(.{ .download_decide = .{ .browser = 66, .download = b.download, .path = "" } });
         report(first != null and asked and second != null, "dl-multiple", std.fmt.bufPrint(&detail_buf, "첫 begin {} · 여러 파일 받기 질문 {} · 허용 뒤 둘째 begin {}", .{ first != null, asked, second != null }) catch "");
+    }
+
+    // ── 새 문서 표지 ──
+    check: {
+        try open(&host, 69, &u, port, "/dlp?a=push");
+        const at_ready = page_starts[69];
+        const begin = waitBegin(&host, 69, 5000) orelse {
+            report(false, "dl-page-started", "download_begin 이 오지 않았다");
+            break :check;
+        };
+        try host.send(.{ .download_decide = .{ .browser = 69, .download = begin.download, .path = "" } });
+        _ = watch(&host, 69, begin.download, 3000, true, 0);
+        const after_download = page_starts[69];
+        try host.send(.{ .navigate = .{ .browser = 69, .url = browsers_check.url(&u, port, "/title?t=dl-next") } });
+        const moved = waitTitle(&host, 69, "dl-next");
+        const after_nav = page_starts[69];
+        report(at_ready >= 1 and after_download == at_ready and moved and after_nav > after_download, "dl-page-started", std.fmt.bufPrint(&detail_buf, "불러옴 {d} · pushState·다운로드 뒤 {d} · 다른 문서로 간 뒤 {d}", .{ at_ready, after_download, after_nav }) catch "");
+        try host.send(.{ .destroy_browser = 69 });
+    }
+
+    // ── 미리 만든 파일에 그대로 받는가 ──
+    check: {
+        var slow_buf: [1100]u8 = undefined;
+        const slow_path = try std.fmt.bufPrintZ(&slow_buf, "{s}/same-slow.bin.maru-part", .{dir});
+        const slow_ino = precreate(slow_path) orelse {
+            report(false, "dl-same-file", "미리 만들지 못했다");
+            break :check;
+        };
+        try open(&host, 67, &u, port, "/dlp?a=slow");
+        const slow = waitBegin(&host, 67, 5000) orelse {
+            report(false, "dl-same-file", "느린 다운로드의 download_begin 이 오지 않았다");
+            break :check;
+        };
+        try host.send(.{ .download_decide = .{ .browser = 67, .download = slow.download, .path = slow_path } });
+        const started = watch(&host, 67, slow.download, 4000, false, 200_000);
+        const during = inodeOf(slow_path);
+        try host.send(.{ .download_control = .{ .browser = 67, .download = slow.download, .action = .cancel } });
+        _ = watch(&host, 67, slow.download, 3000, true, 0);
+        os.sleepMs(300);
+        const after_cancel = inodeOf(slow_path);
+
+        var done_buf: [1100]u8 = undefined;
+        const done_path = try std.fmt.bufPrintZ(&done_buf, "{s}/same-done.txt.maru-part", .{dir});
+        const done_ino = precreate(done_path) orelse {
+            report(false, "dl-same-file", "미리 만들지 못했다");
+            break :check;
+        };
+        try open(&host, 68, &u, port, "/dlp?a=attach");
+        const attach = waitBegin(&host, 68, 5000) orelse {
+            report(false, "dl-same-file", "첨부의 download_begin 이 오지 않았다");
+            break :check;
+        };
+        try host.send(.{ .download_decide = .{ .browser = 68, .download = attach.download, .path = done_path } });
+        const finished = watch(&host, 68, attach.download, 10_000, true, 0);
+        const after_done = inodeOf(done_path);
+        const content = sameContent(done_path, http.download_body);
+        report(started.received > 0 and during != null and during.? == slow_ino and finished.last == .complete and after_done != null and content, "dl-same-file", std.fmt.bufPrint(&detail_buf, "받는 중({d} 바이트) 같은 파일 {} · 취소 뒤 남음 {} · 완료 뒤 같은 파일 {} · 내용 같음 {}", .{
+            started.received, during != null and during.? == slow_ino, after_cancel != null, after_done != null and after_done.? == done_ino, content,
+        }) catch "");
     }
 }

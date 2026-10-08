@@ -121,8 +121,9 @@ const Surface = struct {
     /// 받는다 — 대리 스크립트도 사용자 사건에만 보이기를 보내지만, 페이지가 그 경로를 흉내 내도(알림용 `send` 가 남은 첫 문서·
     /// `execCommand` 의 `input`) 사용자가 손대지 않은 네이티브 창이 뜨지 않게(W6m② 적대 검증 4 차).
     last_user_input_ms: i64 = std.math.minInt(i64) / 2,
-    /// 주 프레임 주소가 마지막으로 바뀐 때(W10a) — 이동 전의 누름은 새 페이지가 시작한 다운로드의 「사용자 동작」이 아니다(누른 링크가
-    /// 연 페이지가 3 초 안에 실행 파일을 받게 하면 보류를 비켜 갔다 — 적대 리뷰 1 회차).
+    /// 주 프레임에 새 문서가 마지막으로 커밋된 때(W10a — `page_started`) — 그 전의 누름은 새 문서가 시작한 다운로드의 「사용자
+    /// 동작」이 아니다(누른 링크가 연 페이지가 3 초 안에 실행 파일을 받게 하면 보류를 비켜 갔다 — 적대 리뷰 1 회차). 주소 알림
+    /// (`url_changed`)으로 세우면 32 KiB 를 넘는 주소는 알림이 없어 비켜 갔고(2 회차), pushState 도 이동으로 쳤다.
     last_nav_ms: i64 = std.math.minInt(i64) / 2,
     /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
     /// 브라우저가 닫히면 푼다 — 새 sidecar 는 그 끌기를 모른다.
@@ -508,8 +509,11 @@ test "a click counts as the user starting a download only until the page moves o
     surfaces.getPtr(7).?.last_user_input_ms = now;
     try std.testing.expect(recentUserInput(7, 3000, now + 10));
     try std.testing.expect(!recentUserInput(7, 3000, now + 3001)); // 창 밖
-    // 누른 링크가 다른 페이지를 열었다 — 그 페이지가 시작한 다운로드는 사용자 동작이 아니다.
+    // 같은 문서 안의 주소 바꾸기(pushState)는 이동이 아니다 — 누른 뒤 라우터가 주소를 바꾸고 받는 흔한 길.
     apply(gpa, .{ .url_changed = .{ .browser = 7, .url = "https://example.test/next" } }, 0);
+    try std.testing.expect(recentUserInput(7, 3000, now + 10));
+    // 누른 링크가 다른 문서를 열었다 — 그 문서가 시작한 다운로드는 사용자 동작이 아니다.
+    apply(gpa, .{ .page_started = 7 }, 0);
     try std.testing.expect(!recentUserInput(7, 3000, monotonicNow()));
     surfaces.getPtr(7).?.last_user_input_ms = monotonicNow() + 1; // 새 페이지에서 다시 눌렀다
     try std.testing.expect(recentUserInput(7, 3000, monotonicNow() + 1));
@@ -1253,6 +1257,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
         // 2 차). 보낼 곳이 없으면 `destroy` 는 보내지 않고 지우기만 한다.
         expireNewTabs(gpa, now_ms);
         closeOrphanPopups(gpa);
+        web_downloads.reapPrepared(); // W10a: 내린 뒤 작업 스레드가 만든 임시 파일도 지운다(적대 리뷰 2 회차)
         return;
     };
     _ = lsp_process.flush(p, gpa) catch {};
@@ -2667,8 +2672,8 @@ pub fn sendToSidecar(gpa: std.mem.Allocator, message: Message) void {
     send(gpa, message);
 }
 
-/// 이 탭에 `window_ms` 안에 사용자 입력(누름·키·조합·편집 명령·메뉴 답·끌어 놓기)을 보냈고 그 뒤로 주 프레임이 다른 주소로 가지 않았는가
-/// (W10a — 사용자 동작으로 시작한 다운로드). 첨부 응답은 주소를 바꾸지 않아 「눌러서 받기」는 그대로다. 교차 출처 iframe 이 위 문서의
+/// 이 탭에 `window_ms` 안에 사용자 입력(누름·키·조합·편집 명령·메뉴 답·끌어 놓기)을 보냈고 그 뒤로 주 프레임에 새 문서가 오지 않았는가
+/// (W10a — 사용자 동작으로 시작한 다운로드). 첨부 응답은 문서를 커밋하지 않아 「눌러서 받기」는 그대로다. 교차 출처 iframe 이 위 문서의
 /// 누름으로 시작한 다운로드는 가르지 못한다(문서마다의 사용자 활성화는 Chromium 안에 있다).
 pub fn recentUserInput(surface_id: u64, window_ms: i64, now_ms: i64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
@@ -2803,11 +2808,13 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             if (s.url) |old| gpa.free(old);
             s.url = owned;
             s.nav_dirty = true;
-            s.last_nav_ms = monotonicNow();
             // 다른 사이트로 옮기면 Chromium 이 렌더러를 바꾸고 새 렌더러는 포커스를 모른다 — 키는 닿아도 페이지 `focus`
             // 가 안 오고 입력기 조합이 버려졌다(W4c 실측). 포커스를 줘야 하는 탭이면 다시 준다.
             if (s.focused and s.created) send(gpa, .{ .set_focus = .{ .browser = v.browser, .value = true } });
             s.composing = false; // 이동하면 페이지의 조합은 사라진다
+        },
+        .page_started => |id| if (surfaces.getPtr(id)) |s| {
+            s.last_nav_ms = monotonicNow();
         },
         .nav_state => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.can_go_back = v.can_go_back;

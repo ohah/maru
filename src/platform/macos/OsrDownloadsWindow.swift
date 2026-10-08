@@ -17,6 +17,8 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
         let total: Int64
         let name: String
         let path: String
+        /// 상태 줄 — Zig 가 만든 문장(받은 양·크기 포함).
+        let status: String
     }
 
     /// `web_downloads.State` 와 같은 값.
@@ -175,24 +177,8 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
         } else {
             cell.icon.image = NSWorkspace.shared.icon(for: .data)
         }
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        let received = formatter.string(fromByteCount: row.received)
-        let sizes = row.total > 0 ? "\(received) / \(formatter.string(fromByteCount: row.total))" : received
-        let status: String
-        switch state {
-        case .preparing: status = text(1)
-        case .held: status = text(2)
-        case .active: status = "\(text(3)) — \(sizes)"
-        case .interrupted: status = "\(text(4)) — \(sizes)"
-        case .done: status = missing ? text(11) : "\(text(5)) — \(formatter.string(fromByteCount: max(row.received, row.total)))"
-        case .canceled: status = text(6)
-        case .failed: status = text(7)
-        case .tabClosed: status = text(8)
-        case .engineRestarted: status = text(9)
-        case .tooMany: status = text(10)
-        }
-        cell.statusField.stringValue = status
+        // 문장은 Zig 가 만든다(docs/i18n.md §7.2) — 끝난 파일이 디스크에서 사라졌는지만 여기서 본다.
+        cell.statusField.stringValue = missing ? text(11) : row.status
         cell.statusField.textColor = state == .held ? .systemOrange : .secondaryLabelColor
         let showProgress = state == .active || state == .interrupted || state == .preparing
         cell.progress.isHidden = !showProgress
@@ -216,9 +202,12 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
         case .interrupted: buttons = [(.resumeDownload, text(13), nil), (.cancel, text(12), nil)]
         case .held: buttons = [(.accept, text(14), nil), (.discard, text(15), nil)]
         case .done: buttons = missing ? [] : [(nil, text(16), #selector(revealRow(_:)))]
+        // 받은 뒤 옮기지 못했다 — 받은 데이터는 행이 가리키는 임시 파일에 있다(적대 리뷰 2 회차).
+        case .failed: buttons = fileExists(row.path) ? [(nil, text(16), #selector(revealRow(_:)))] : []
         default: buttons = []
         }
-        cell.setButtons(buttons, target: self)
+        // 단추는 모양이 바뀔 때만 새로 만든다 — 진행 갱신(초당 4 번)마다 만들면 누르는 사이 단추가 빠져 취소가 버려졌다(2 회차).
+        cell.setButtons(buttons, target: self, signature: "\(row.key):\(row.state):\(missing):\(buttons.count):\(fileExists(row.path))")
     }
 
     // ── 누름 ──
@@ -239,7 +228,7 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
         let index = table.clickedRow
         guard index >= 0, index < rows.count else { return }
         let row = rows[index]
-        guard State(rawValue: row.state) == .done, fileExists(row.path) else { return }
+        guard State(rawValue: row.state) == .done, fileExists(row.path) else { return } // 실패 행(임시 파일)은 열지 않는다
         let url = URL(fileURLWithPath: row.path)
         if row.risky {
             NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -315,7 +304,11 @@ private final class DownloadCell: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("unused") }
 
-    func setButtons(_ buttons: [(OsrDownloadsWindow.Action?, String, Selector?)], target: OsrDownloadsWindow) {
+    private var buttonSignature = ""
+
+    func setButtons(_ buttons: [(OsrDownloadsWindow.Action?, String, Selector?)], target: OsrDownloadsWindow, signature: String) {
+        guard signature != buttonSignature else { return }
+        buttonSignature = signature
         for view in buttonStack.arrangedSubviews {
             buttonStack.removeArrangedSubview(view)
             view.removeFromSuperview()

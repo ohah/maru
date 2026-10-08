@@ -79,11 +79,11 @@ DLF = ("<!doctype html><title>dlf</title><style>html,body{margin:0;height:100%;b
     "document.getElementById('x').src='http://localhost:'+location.port+'/dlf-inner'</script>").encode()
 DLF_INNER = (b"<!doctype html><title>in</title><style>html,body{margin:0;height:100%;background:#20a060}input{width:100%;height:50%;border:0;padding:0;margin:0;display:block;background:#0000ff;font:20px sans-serif}</style>"
     b"<input list=l><datalist id=l><option value=blueberry><option value=banana></datalist>")
-# W10a: 다운로드 — 위에서부터 60pt 칸 셋: `download` 속성 링크(「hello world.txt」), 첨부(`report.txt`), 느린 3 MB 첨부(`big.zip`,
-# 0.3 초마다 100 KB — 받는 중에 취소한다). DLW_AUTO 는 사용자 동작 없이 1.5 초 뒤 실행될 수 있는 파일(`run me.command`)을 받는다.
+# W10a: 다운로드 — 위에서부터 60pt 칸 넷: `download` 속성 링크(「hello world.txt」), 첨부(`report.txt`), 느린 3 MB 첨부(`big.zip`,
+# 0.3 초마다 100 KB — 받는 중에 취소한다), 실행될 수 있는 파일의 `download` 링크(`tool.command` — 누른 것은 보류하지 않는다). DLW_AUTO 는 사용자 동작 없이 1.5 초 뒤 실행될 수 있는 파일(`run me.command`)을 받는다.
 DLW = (b"<!doctype html><title>dlw</title><style>a{position:fixed;left:0;width:300px;height:60px;display:block;background:#f00}</style><body>"
     b"<a href='/dlw-file' download='hello world.txt' style='top:0'>A</a><a href='/dlw-att' style='top:80px;background:#00f'>B</a>"
-    b"<a href='/dlw-big' style='top:160px;background:#0f0'>C</a>")
+    b"<a href='/dlw-big' style='top:160px;background:#0f0'>C</a><a href='/dlw-file' download='tool.command' style='top:240px;background:#ff0'>D</a>")
 DLW_AUTO = (b"<!doctype html><title>dlw auto</title><body><script>setTimeout(function(){var a=document.createElement('a');a.href='/dlw-file';"
     b"a.download='run me.command';document.body.appendChild(a);a.click()},1500)</script>")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
@@ -1527,7 +1527,8 @@ PY
 # ── W10a: 다운로드 ───────────────────────────────────────────────────────────────────────────────────────────
 # 누른 링크의 다운로드는 `~/Downloads` 에 받는다 — 같은 이름이면 「(1)」을 붙이고, 끝나면 Chromium 이 격리 표지를 붙이며 받는 동안의
 # 임시 파일(`.maru-part`)은 남지 않는다. 사용자가 시작했으니 목록 창이 뜬다. 받는 중 취소(목록의 취소 단추와 같은 길)하면 그 파일은
-# 지워진다. 페이지가 스스로 받으려는 실행될 수 있는 파일은 보류해(목록 창은 뜬다) 받기를 누르기 전에는 디스크에 없다.
+# 지워진다. 실행될 수 있는 파일도 사용자가 눌러 받으면 보류하지 않는다. 페이지가 스스로 받으려는 실행될 수 있는 파일은 보류해
+# (목록 창은 뜬다) 받기를 누르기 전에는 디스크에 없다.
 cat > "$root/dlw.txt" <<'SCRIPT'
 sleep 7000
 mouse 1 0 0 338 142 0
@@ -1539,11 +1540,14 @@ sleep 1500
 mouse 1 0 0 338 222 0
 mouse 3 0 0 338 222 0
 sleep 1500
+mouse 1 0 0 338 382 0
+mouse 3 0 0 338 382 0
+sleep 1500
 mouse 1 0 0 338 302 0
 mouse 3 0 0 338 302 0
 sleep 1500
 downloads
-dlact 3 0
+dlact 4 0
 sleep 1500
 downloads
 SCRIPT
@@ -1586,7 +1590,8 @@ check(all(by.get(n, [''] * 7)[2] == '4' and by.get(n, [''] * 7)[6] == n for n in
 check(by.get('report.txt', [''] * 7)[2] == '4', f'an attachment is done under its server name ({by.get("report.txt")})')
 big0 = [r for r in first if r[1] == 'big.zip']
 check(bool(big0) and big0[0][2] == '2' and by.get('big.zip', [''] * 7)[2] == '5', f'the slow download was active, then canceled ({big0} → {by.get("big.zip")})')
-check(files == ['hello world (1).txt', 'hello world.txt', 'report.txt'], f'~/Downloads holds exactly the finished files — no part file, no canceled file ({files})')
+check(by.get('tool.command', [''] * 7)[2] == '4' and by.get('tool.command', [''] * 7)[5] == '1', f'a runnable file the user clicked is downloaded, not held ({by.get("tool.command")})')
+check(files == ['hello world (1).txt', 'hello world.txt', 'report.txt', 'tool.command'], f'~/Downloads holds exactly the finished files — no part file, no canceled file ({files})')
 check(all(quarantine.get(f) == '0281' for f in files), f'every finished file carries the quarantine mark ({quarantine})')
 sys.exit(0 if ok else 1)
 PY

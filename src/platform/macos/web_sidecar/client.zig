@@ -324,6 +324,8 @@ fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, 
         if (entryOf(browser)) |entry| {
             tooltip.reset(entry.id);
             @import("datalist.zig").reset(entry.id); // W6m①: 옛 문서의 제안 목록
+            // W10a: 새 문서 — 그 전의 누름은 이 문서의 사용자 동작이 아니다(maru 가 다운로드의 「사용자가 시작함」을 가른다).
+            browsers.state.writer.send(.{ .page_started = entry.id }) catch {};
         }
     } else if (frame != null) {
         if (entryOf(browser)) |entry| @import("datalist.zig").closeFrame(entry.id, frame); // W6m③: iframe 의 옛 문서의 목록

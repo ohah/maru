@@ -382,7 +382,9 @@ fn finalize(e: *Entry) bool {
     return false;
 }
 
-/// 임시 파일을 지운다 — 만든 그 파일일 때만(경로가 같은 다른 다운로드의 임시 파일은 두고).
+/// 임시 파일을 지운다 — 만든 그 파일일 때만(경로가 같은 다른 다운로드의 임시 파일은 두고). 실측(판정 `dl-same-file`): Chromium 은
+/// 받는 동안 미리 만든 그 파일(같은 inode)에 쓰고, 취소해도 그 파일을 **지우지 않는다**(Chromium 이 만든 파일만 지운다) — 그래서
+/// maru 가 지운다. 완료 때는 다른 inode 로 바꿔 놓지만 완료는 경로로 옮기므로(`finalize`) 상관없다.
 fn unlinkPart(e: *const Entry) void {
     if (e.part_len == 0) return;
     var part_z: [max_path_bytes + 1]u8 = undefined;
@@ -513,6 +515,13 @@ fn endAll(end: State) void {
 
 /// `pump` 에서 — 작업 스레드가 만든 경로를 반영하고, 쌓인 것을 sidecar 로 보낸다.
 pub fn drain(gpa: std.mem.Allocator) void {
+    reapPrepared();
+    sendQueued(gpa);
+}
+
+/// 작업 스레드가 만든 경로를 반영한다 — 끝난 다운로드의 것은 지운다. sidecar 가 없을 때도 돈다(내린 뒤 만든 임시 파일이 다음
+/// Chromium 탭까지 남지 않게 — 적대 리뷰 2 회차).
+pub fn reapPrepared() void {
     {
         _ = std.c.pthread_mutex_lock(&prepared_mutex);
         defer _ = std.c.pthread_mutex_unlock(&prepared_mutex);
@@ -551,6 +560,9 @@ pub fn drain(gpa: std.mem.Allocator) void {
         }
         prepared.clearRetainingCapacity();
     }
+}
+
+fn sendQueued(gpa: std.mem.Allocator) void {
     for (outgoing.items) |o| {
         const e = entryOfKey(o.key) orelse continue;
         if (e.generation != sidecar_generation) continue;
@@ -641,6 +653,49 @@ pub fn at(index: usize) ?*const Entry {
 /// 받는 중(끝나지 않은) 수 — W10c 의 종료 확인.
 pub fn activeTotal() usize {
     return activeCount(null);
+}
+
+/// 목록 창의 상태 줄(현재 UI 언어 — Swift 는 문장을 만들지 않는다, docs/i18n.md §7.2). 크기는 Finder 처럼 십진 단위.
+pub fn statusText(e: *const Entry, buf: []u8) []const u8 {
+    const i18n = maru.i18n;
+    var received_buf: [32]u8 = undefined;
+    var total_buf: [32]u8 = undefined;
+    var sizes_buf: [96]u8 = undefined;
+    const received = formatBytes(@max(e.received, 0), &received_buf);
+    const sizes: []const u8 = if (e.total > 0)
+        i18n.format(&sizes_buf, i18n.t(.dl_sizes_of), &.{ .{ .s = received }, .{ .s = formatBytes(e.total, &total_buf) } })
+    else
+        received;
+    return switch (e.state) {
+        .preparing => copyText(buf, i18n.t(.dl_state_preparing)),
+        .held => copyText(buf, i18n.t(.dl_state_held)),
+        .active => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_active) }, .{ .s = sizes } }),
+        .interrupted => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_interrupted) }, .{ .s = sizes } }),
+        .done => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_done) }, .{ .s = formatBytes(@max(e.received, e.total), &total_buf) } }),
+        .canceled => copyText(buf, i18n.t(.dl_state_canceled)),
+        .failed => copyText(buf, i18n.t(.dl_state_failed)),
+        .tab_closed => copyText(buf, i18n.t(.dl_state_tab_closed)),
+        .engine_restarted => copyText(buf, i18n.t(.dl_state_engine_restarted)),
+        .too_many => copyText(buf, i18n.t(.dl_state_too_many)),
+    };
+}
+
+fn copyText(buf: []u8, text: []const u8) []const u8 {
+    const n = @min(text.len, buf.len);
+    @memcpy(buf[0..n], text[0..n]);
+    return buf[0..n];
+}
+
+/// 바이트 수를 Finder 처럼(1000 단위, 소수 한 자리) — `999 B`·`1.2 KB`·`3.1 MB`.
+pub fn formatBytes(bytes: i64, buf: []u8) []const u8 {
+    const n: u64 = @intCast(@max(bytes, 0));
+    if (n < 1000) return std.fmt.bufPrint(buf, "{d} B", .{n}) catch buf[0..0];
+    const units = [_][]const u8{ "KB", "MB", "GB", "TB", "PB" };
+    var unit: u64 = 1000;
+    var i: usize = 0;
+    while (i + 1 < units.len and n >= unit * 1000) : (i += 1) unit *= 1000;
+    const tenths: u64 = @intCast((@as(u128, n) * 10 + unit / 2) / unit);
+    return std.fmt.bufPrint(buf, "{d}.{d} {s}", .{ tenths / 10, tenths % 10, units[i] }) catch buf[0..0];
 }
 
 /// 새 「사용자 동작으로 시작한 다운로드」가 있었으면 그 번호(바뀌면 새 요청)와 탭.
@@ -805,6 +860,27 @@ test "rows follow the sidecar: progress before the path keeps preparing, interru
     try std.testing.expectEqual(State.tab_closed, entryOfKey(2).?.state);
     onUpdate(.{ .browser = 7, .download = 12, .state = .in_progress, .received = 3, .total = 10, .reason = 0 }); // 끝난 뒤는 받지 않는다
     try std.testing.expectEqual(State.tab_closed, entryOfKey(2).?.state);
+}
+
+test "status lines are Zig sentences with Finder-style sizes (W10a)" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("999 B", formatBytes(999, &buf));
+    try std.testing.expectEqualStrings("1.0 KB", formatBytes(1000, &buf));
+    try std.testing.expectEqualStrings("1.5 MB", formatBytes(1_450_000, &buf));
+    try std.testing.expectEqualStrings("3.3 MB", formatBytes(3_276_800, &buf));
+    try std.testing.expectEqualStrings("0 B", formatBytes(-5, &buf));
+    var e = rowForTest(1, 1, .active);
+    e.received = 1_500_000;
+    e.total = 3_000_000;
+    var line: [256]u8 = undefined;
+    const text = statusText(&e, &line);
+    try std.testing.expect(std.mem.indexOf(u8, text, "1.5 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "3.0 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, maru.i18n.t(.dl_state_active)) != null);
+    e.total = -1; // 크기를 모르면 받은 양만
+    try std.testing.expect(std.mem.indexOf(u8, statusText(&e, &line), "3.0 MB") == null);
+    e.state = .held;
+    try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_held), statusText(&e, &line));
 }
 
 test "a retired or lost sidecar ends unfinished rows, keeps finished ones and numbers afresh (W10a)" {

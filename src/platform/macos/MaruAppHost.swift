@@ -8875,6 +8875,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 for (index, row) in rows.enumerated() {
                     Self.testReport("download \(index)|\(row.name)|\(row.state)|\(row.received)|\(row.total)|\(row.risky ? 1 : 0)|\((row.path as NSString).lastPathComponent)")
                 }
+            case "dlanswer" where line.count >= 2:
+                // W10b: 다음 저장 창의 답(창을 띄우지 않는다) — 경로, `-` 는 취소. 저장 창 자신의 「바꿀까요?」는 거치지 않는다
+                // (그때 그 경로에 무언가 있었는지는 진짜 길과 같이 잰다).
+                downloadTestAnswers.append(line[1] == "-" ? nil : line.dropFirst().joined(separator: " "))
             case "dlact" where line.count >= 3:
                 // W10a: dlact 행 동작 — 목록 창의 그 행 단추(0 취소·1 다시 받기·2 받기·3 버리기·4 지우기)와 같은 길.
                 if let index = Int(line[1]), let raw = UInt32(line[2]), let action = OsrDownloadsWindow.Action(rawValue: raw),
@@ -9297,6 +9301,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // macOS 안내(마지막으로 띄운 것 — 다른 창의 것은 그 창이 닫힐 때 사라진다).
         if let alert = osrBlockedAlert, let parent = alert.window.sheetParent { parent.endSheet(alert.window, returnCode: .cancel) }
+        // W10b 저장 창 — 치움(.abort)이라 그 다운로드는 보류로 돌아간다(종료를 그만두면 목록에서 다시 받는다 — 설계 공격 M4).
+        for panel in Array(downloadAskPanels.values) { panel.sheetParent?.endSheet(panel, returnCode: .abort) }
     }
 
     /// 메뉴 「Quit maru」(⌘Q — W6k). 실측(2026-10-06, 앱이 맨 앞·접근성으로 메뉴를 누름): 페이지 대화상자 sheet 가 떠 있으면
@@ -9308,7 +9314,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 떠 있으면 아무것도 하지 않는다(두 번째 ⌘Q 를 줄에 남겼다가 취소 뒤 다시 묻지 않게 — 적대 검증).
     @objc func quitFromMenu(_ sender: Any?) {
         if quitConfirmPending { return }
-        guard !osrDialogSheets.isEmpty || osrBlockedAlert?.window.sheetParent != nil else {
+        guard !osrDialogSheets.isEmpty || osrBlockedAlert?.window.sheetParent != nil || !downloadAskPanels.isEmpty else {
             NSApp.terminate(sender)
             return
         }
@@ -9942,7 +9948,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func ensureDownloadsWindow() -> OsrDownloadsWindow {
         if let window = downloadsWindow { return window }
         let window = OsrDownloadsWindow(text: { String(cString: maru_macos_downloads_text($0)) })
-        window.onAct = { key, action in _ = maru_macos_downloads_act(key, action.rawValue) }
+        window.onAct = { [weak self] key, action in
+            // W10b: 「저장할 곳 고르기」는 이 창에 저장 창을, 보류 행의 「받기」는 묻기면 곧바로 저장 창을(누른 곳이 목록 창이다).
+            if action != .choose { _ = maru_macos_downloads_act(key, action.rawValue) }
+            if action == .choose || action == .accept { self?.showDownloadAskFromList(key: key) }
+        }
         window.onClearFinished = { maru_macos_downloads_clear_finished() }
         window.update(generation: downloadsSeenGeneration, rows: downloadRows)
         downloadsWindow = window
@@ -9963,6 +9973,86 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                               status: status))
         }
         return rows
+    }
+
+    // ── W10b: 다운로드 「매번 묻기」 저장 창 ──
+    // 물을 행은 Zig 가 쥔다(`web_downloads` 상태 asking). 탭 창은 그 창이 키일 때 활성 Chromium 탭의 것을 맡아 sheet 로 띄우고,
+    // 목록 창은 「저장할 곳 고르기」·보류 받기로 그 행을 맡아 목록 창에 띄운다(한 행에 창 하나). 답은 `downloads_answer_ask` — 고른 경로와
+    // 그때 그 경로에 무언가 있었는지(있었으면 저장 창이 「바꿀까요?」를 물어 사용자가 바꾸기를 골랐다), 취소, 치움(종료·창 닫힘 —
+    // 보류로 되돌린다).
+    private var downloadAskPanels: [UInt64: NSSavePanel] = [:]
+    /// 시험(대본 `dlanswer <경로|->`): 다음 저장 창의 답 — 창을 띄우지 않고 곧바로 답한다. `-` 는 취소.
+    private var downloadTestAnswers: [String?] = []
+
+    private func showDownloadAskFromList(key: UInt64) {
+        guard let downloads = downloadsWindow, downloads.window.attachedSheet == nil else { return }
+        var ask = MaruDownloadAsk()
+        guard maru_macos_downloads_claim_ask(key, &ask) != 0 else { return }
+        showDownloadAsk(window: downloads.window, ask: ask)
+    }
+
+    private func drainDownloadAsk() {
+        // 그 행이 묻는 중이 아니게 됐다(탭 닫힘·엔진 재시작·취소) — 띄운 창을 거둔다.
+        for (key, panel) in downloadAskPanels {
+            let asking = downloadRows.first(where: { $0.key == key })?.state == OsrDownloadsWindow.State.asking.rawValue
+            if !asking || (panel.sheetParent == nil && !panel.isVisible) {
+                downloadAskPanels[key] = nil
+                if let parent = panel.sheetParent { parent.endSheet(panel, returnCode: .abort) } else if asking {
+                    _ = maru_macos_downloads_answer_ask(key, 2, nil, 0, 0) // 붙은 창이 사라졌다 — 보류로
+                }
+            }
+        }
+        guard let session = appSession, let window, window.attachedSheet == nil else { return }
+        guard !quitConfirmPending, !osrDialogsHeldForExit, !osrQuitRequested else { return }
+        // 창이 키일 때만 — 터미널에 치던 키(비밀번호·Return)가 저장 창 이름 칸·저장 단추로 가지 않게(설계 공격).
+        guard Self.downloadsTestMode || (NSApp.isActive && window.isKeyWindow) else { return }
+        var ask = MaruDownloadAsk()
+        guard maru_macos_app_session_take_download_ask(session, &ask) != 0 else { return }
+        showDownloadAsk(window: window, ask: ask)
+    }
+
+    private func showDownloadAsk(window: NSWindow, ask: MaruDownloadAsk) {
+        let key = ask.key
+        let name = withUnsafeBytes(of: ask.name) { String(decoding: $0.prefix(Int(ask.name_len)), as: UTF8.self) }
+        let dir = withUnsafeBytes(of: ask.dir) { String(decoding: $0.prefix(Int(ask.dir_len)), as: UTF8.self) }
+        let message = withUnsafeBytes(of: ask.message) { String(decoding: $0.prefix(Int(ask.message_len)), as: UTF8.self) }
+        Self.testNote("download-ask \(name)")
+        if !downloadTestAnswers.isEmpty {
+            answerDownloadAsk(key: key, path: downloadTestAnswers.removeFirst())
+            return
+        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = name
+        if !dir.isEmpty { panel.directoryURL = URL(fileURLWithPath: dir, isDirectory: true) }
+        panel.message = message
+        panel.canCreateDirectories = true
+        downloadAskPanels[key] = panel
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            let mine = self.downloadAskPanels[key] === panel
+            self.downloadAskPanels[key] = nil
+            switch response {
+            case .OK:
+                self.answerDownloadAsk(key: key, path: panel.url?.path)
+            case .abort:
+                if mine { _ = maru_macos_downloads_answer_ask(key, 2, nil, 0, 0) } // 종료·창 닫힘 — 보류로
+            default:
+                _ = maru_macos_downloads_answer_ask(key, 1, nil, 0, 0)
+            }
+        }
+    }
+
+    /// 고른 경로(nil 이면 취소)를 Zig 에 — 그때 그 경로에 무언가 있었는지와 함께(링크는 따라가지 않는다).
+    private func answerDownloadAsk(key: UInt64, path: String?) {
+        guard let path, !path.isEmpty else {
+            _ = maru_macos_downloads_answer_ask(key, 1, nil, 0, 0)
+            return
+        }
+        let existed = (try? FileManager.default.attributesOfItem(atPath: path)) != nil
+        var bytes = Array(path.utf8)
+        _ = bytes.withUnsafeMutableBufferPointer { buf in
+            maru_macos_downloads_answer_ask(key, 0, buf.baseAddress, buf.count, existed ? 1 : 0)
+        }
     }
 
     private func drainDownloads() {
@@ -10003,6 +10093,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             downloadsShowPending = false
             ensureDownloadsWindow().showFront(makeKey: false)
         }
+        drainDownloadAsk()
     }
 
     // ── W6c②: Chromium 탭 우클릭 메뉴 ──

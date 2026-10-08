@@ -20,6 +20,8 @@ const iosurface = @import("web_sidecar/iosurface.zig");
 
 const ws = maru.session.web_sidecar;
 const web_downloads = @import("web_downloads.zig");
+/// W10b: 세션(app_session/web.zig)이 다운로드 「매번 묻기」를 다룬다.
+pub const downloads = web_downloads;
 const plan = maru.session.web_osr_plan;
 const mailbox = ws.mailbox;
 const osr_input = maru.session.web_osr_input;

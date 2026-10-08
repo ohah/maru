@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 214u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 215u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1061,6 +1061,23 @@ void maru_macos_downloads_clear_finished(void);
 /* 사용자 동작으로 시작한 새 다운로드의 요청 번호(바뀌면 새 요청)와 그 탭. */
 uint64_t maru_macos_downloads_show_request(uint64_t *out_surface);
 uint32_t maru_macos_downloads_active(void);
+/* v215(W10b): 저장할 곳을 물을 다운로드(상태 10 asking) — 이름·처음 열 폴더·저장 창 안내(Zig 문장, UTF-8 길이로). */
+typedef struct MaruDownloadAsk {
+    uint64_t key;
+    uint32_t name_len;
+    uint32_t dir_len;
+    uint32_t message_len;
+    uint32_t reserved;
+    uint8_t name[256];
+    uint8_t dir[1024];
+    uint8_t message[256];
+} MaruDownloadAsk;
+/* 이 창의 활성 Chromium 탭에서 물을 행을 맡는다(1 이면 맡았다 — 창이 키일 때만 부른다). */
+int32_t maru_macos_app_session_take_download_ask(MaruAppHostSession *session, MaruDownloadAsk *out);
+/* 목록 창이 그 행의 저장 창을 띄운다 — 묻는 중이고 아무도 맡지 않았으면 1. */
+int32_t maru_macos_downloads_claim_ask(uint64_t key, MaruDownloadAsk *out);
+/* 저장 창의 답: kind 0 고른 경로(existed — 그때 그 경로에 무언가 있었다), 1 취소, 2 치움(보류로). 묻는 중이면 1. */
+int32_t maru_macos_downloads_answer_ask(uint64_t key, uint32_t kind, const uint8_t *path, size_t path_len, uint32_t existed);
 /* 목록 창의 문장(현재 UI 언어 — 정적, 해제하지 않는다). 0 창 제목, 1~11 상태(준비 중·보류·받는 중·중단·완료·취소·실패·탭 닫힘·
    엔진 재시작·너무 많음·파일 없음), 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록. */
 const char *maru_macos_downloads_text(uint32_t kind);

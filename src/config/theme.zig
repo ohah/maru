@@ -1537,10 +1537,14 @@ pub const BrowserConfig = struct {
     /// Chromium 탭 우클릭 메뉴 「…에서 '…' 검색」의 주소 틀(W6h① — 사용자 결정 2026-10-05, 기본 Google). `%s` 자리에 선택한 글을
     /// 퍼센트 인코딩해 넣는다. http·https 이고 `%s` 가 꼭 하나여야 쓰고, 아니면 기본 틀을 쓴다(`web_search.validTemplate`).
     search_url: []const u8 = "https://www.google.com/search?q=%s",
+    /// Chromium 탭 다운로드마다 저장할 곳을 묻는다(W10b — 사용자 결정 2026-10-08: 저장 위치는 설정으로 고른다). 기본 false —
+    /// `~/Downloads` 에 묻지 않고 받는다(같은 이름이면 번호).
+    download_ask: bool = false,
 
     pub const schema = .{
         .engine = Meta{ .doc = .cfg_browser_engine, .widget = .dropdown, .section = .workspace },
         .search_url = Meta{ .doc = .cfg_browser_search_url, .widget = .text, .section = .workspace },
+        .download_ask = Meta{ .doc = .cfg_browser_download_ask, .widget = .toggle, .section = .workspace },
     };
 };
 

@@ -203,12 +203,15 @@ fn download(conn: c_int, kind: []const u8) void {
 /// `huge` 는 64 MiB 를 쉬지 않고(받는 쪽이 읽는 만큼) — 결정을 미루는 동안 Chromium 이 어디에 얼마나 쌓는지(W10b 설계 공격 M1).
 pub const huge_bytes: usize = 1024 * slow_chunk;
 
-/// 마지막 느린 다운로드가 보낸 양·받는 쪽이 끊었는지(W10c 실측 — 탭을 닫은 뒤에도 Chromium 이 받는지).
+/// 마지막 느린 다운로드가 보낸 양·받는 쪽이 끊었는지(W10c 실측 — 탭을 닫은 뒤에도 Chromium 이 받는지). 마지막 연결만 적는다 —
+/// 앞 판정의 연결이 늦게 끊겨도 섞이지 않게(적대 리뷰 2 회차).
 pub var slow_sent = std.atomic.Value(usize).init(0);
 pub var slow_cut = std.atomic.Value(bool).init(false);
+var slow_generation = std.atomic.Value(u32).init(0);
 
 fn slowDownload(conn: c_int, huge: bool) void {
     defer _ = std.c.close(conn);
+    const mine = slow_generation.fetchAdd(1, .seq_cst) + 1;
     slow_sent.store(0, .seq_cst);
     slow_cut.store(false, .seq_cst);
     var hb: [320]u8 = undefined;
@@ -218,11 +221,12 @@ fn slowDownload(conn: c_int, huge: bool) void {
     const chunk = [_]u8{'s'} ** slow_chunk;
     var sent: usize = 0;
     while (sent < total) : (sent += slow_chunk) {
+        const last = slow_generation.load(.seq_cst) == mine;
         if (std.c.write(conn, &chunk, chunk.len) != @as(isize, @intCast(chunk.len))) {
-            slow_cut.store(true, .seq_cst);
+            if (last) slow_cut.store(true, .seq_cst);
             return; // 받는 쪽이 끊었다
         }
-        _ = slow_sent.fetchAdd(slow_chunk, .seq_cst);
+        if (last) _ = slow_sent.fetchAdd(slow_chunk, .seq_cst);
         if (!huge) @import("os.zig").sleepMs(100);
     }
 }

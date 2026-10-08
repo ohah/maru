@@ -29,6 +29,8 @@ def prepare_lsp_root(root):
     # Git discovery overrides must not redirect this owned fixture to another repo.
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     subprocess.run(["git", "init", "--quiet", str(root)], env=env, check=True, timeout=15)
+    # Legacy location and format (next to MARU_CONFIG). The app migrates it on first read into
+    # $HOME/Library/Application Support/maru/lsp-trust keyed by real path — HOME is this fixture's own.
     (root / "lsp-trust").write_text(f"allow\t{root}\n")
 
 

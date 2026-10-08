@@ -1457,7 +1457,9 @@ pub fn shutdownForExit() void {
         retiring = null;
     }
     releaseRunCopy(&retiring_copy);
-    clearDownloadStaging(); // W10b: 결정 전에 받아 둔 것 — 물러나던 sidecar 까지 거둔 뒤(5 회차)
+    clearDownloadStaging(profile_held or retiring_profile_held); // W10b: 결정 전에 받아 둔 것 — 물러나던 sidecar 까지 거둔 뒤(5 회차)
+    profile_held = false;
+    retiring_profile_held = false;
     var it = surfaces.iterator();
     while (it.next()) |entry| {
         for (entry.value_ptr.view.clear()) |ring| if (ring) |r| r.release();
@@ -2460,6 +2462,7 @@ fn mkdirs(path: []const u8) bool {
 
 fn start(gpa: std.mem.Allocator, now_ms: i64) void {
     const log = std.log.scoped(.web_osr);
+    profile_held = false; // 새 sidecar — hello_ack 가 세운다(W10b)
     const source = installDir() orelse return fail(.start_failed);
     // W7a2: brew 설치는 그 prefix 의 keg 이고 믿을 만할 때만 — 검사한 keg 를 fd 로 쥐고 그 fd 에서 복제한다. 개발용
     // `MARU_WEB_OSR_DIR` 은 빌드 디렉터리라 이 검사를 건너뛴다(릴리스 판에서는 그 환경변수 자체를 안 본다).
@@ -2558,6 +2561,8 @@ fn retire(gpa: std.mem.Allocator, now_ms: i64) void {
         _ = lsp_process.write(&p, gpa, frame[0..len]) catch false;
     } else |_| {}
     retiring = p;
+    retiring_profile_held = profile_held;
+    profile_held = false;
     retiring_since_ms = now_ms;
     retiring_copy = run_copy;
     run_copy = null;
@@ -2621,15 +2626,17 @@ fn fail(notice: Notice) void {
     for (surfaces.values()) |*s| s.stopped_notice_pending = true;
 }
 
-/// W10b: 이 인스턴스의 sidecar 가 프로필을 잡은 적이 있다(hello_ack — 잠금에 막힌 sidecar 는 handshake 전에 끝난다).
+/// W10b: 지금 sidecar 가 프로필을 잡았다(hello_ack — 잠금에 막힌 sidecar 는 handshake 전에 끝난다). sidecar 마다 — 한 번 잡았다고
+/// 다음 sidecar(같은 프로필의 다른 maru 에 막힌)가 죽을 때 남의 받아 둔 것을 비우지 않게(6 회차). 물러나는 sidecar 는 따로.
 var profile_held = false;
+var retiring_profile_held = false;
 
 /// W10b: 프로필의 `download-staging`(sidecar 가 결정 전 다운로드를 받아 두는 곳 — `web_sidecar/preferences.zig`)의 파일을 지운다.
 /// sidecar 가 없을 때만 부른다(죽었거나 끝났다 — 다시 뜨면 sidecar 도 비운다).
-fn clearDownloadStaging() void {
-    // 시험은 실제 홈의 프로필을 건드리지 않는다(5 회차). 이 인스턴스의 sidecar 가 프로필을 잡은 적이 없으면(잠금에 막혔다 — 같은
-    // 프로필의 다른 maru 가 받아 두는 중일 수 있다) 비우지 않는다.
-    if (builtin.is_test or !profile_held) return;
+fn clearDownloadStaging(held: bool) void {
+    // 시험은 실제 홈의 프로필을 건드리지 않는다(5 회차). 끝난 sidecar 가 프로필을 잡지 않았으면(잠금에 막혔다 — 같은 프로필의 다른
+    // maru 가 받아 두는 중일 수 있다) 비우지 않는다.
+    if (builtin.is_test or !held) return;
     var profile_buf: [std.fs.max_path_bytes]u8 = undefined;
     const profile = profileDir(&profile_buf) orelse return;
     var dir_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
@@ -2664,7 +2671,8 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
     }
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②) — 붙은 팝업은 새 sidecar 에서 보통 탭으로 되살아난다
     web_downloads.sidecarLost(); // 받던 다운로드는 끝났다(W10a) — 임시 파일을 지우고 새 sidecar 의 번호와 섞이지 않게
-    clearDownloadStaging(); // W10b: 죽은 sidecar 가 결정 전에 받아 둔 것(다시 뜨지 않으면 다음 실행까지 남았다 — 4 회차)
+    clearDownloadStaging(profile_held); // W10b: 죽은 sidecar 가 결정 전에 받아 둔 것(다시 뜨지 않으면 다음 실행까지 남았다 — 4 회차)
+    profile_held = false;
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
 

@@ -838,14 +838,17 @@ pub fn act(key: u64, action: Action) bool {
 /// 알린다(2 회차: 아무 표시 없이 사라졌다).
 fn enforceWaitingCap() void {
     while (waitingTotal() > max_waiting_bytes) {
+        // 가장 크게 받아 둔 행 — 같으면 보류 행을(사용자가 누른 맡지 않은 묻는 행보다 먼저). 보류 행만 고르면 0 바이트 보류 행을
+        // 하나씩 멈추며 합은 줄지 않았다(6 회차).
         var victim: ?*Entry = null;
-        for ([_]State{ .held, .asking }) |pick| {
-            for (entries.items) |*x| {
-                const candidate = x.state == pick and (pick == .held or !x.ask_claimed);
-                if (!candidate) continue;
-                if (victim == null or x.received > victim.?.received) victim = x;
-            }
-            if (victim != null) break;
+        for (entries.items) |*x| {
+            const candidate = x.state == .held or (x.state == .asking and !x.ask_claimed);
+            if (!candidate) continue;
+            const better = if (victim) |cur|
+                x.received > cur.received or (x.received == cur.received and x.state == .held and cur.state == .asking)
+            else
+                true;
+            if (better) victim = x;
         }
         const v = victim orelse return;
         v.state = .canceled;
@@ -1397,18 +1400,29 @@ test "waiting rows stop past the cap and unclaimed asking rows bring the list wi
     try std.testing.expectEqual(State.canceled, one.state);
     try std.testing.expect(one.stopped_waiting);
     try std.testing.expect(showRequest(&surface) != before_stop); // 멈춘 것을 목록 창으로 알린다
-    // 상한은 아무도 보지 않는 행 전체로 — 행 하나하나는 작아도 합이 넘으면 멈춘다.
+    // 상한은 아무도 보지 않는 행 전체로 — 행 하나하나는 작아도 합이 넘으면 가장 크게 받아 둔 행부터 멈춘다.
+    var small = rowForTest(6, 6, .held); // 먼저 들어온 작은 보류 행 — 멈추지 않는다
+    small.browser = 7;
+    small.received = 100;
+    try entries.append(allocator(), small);
     var a = rowForTest(7, 7, .held);
     a.browser = 7;
     a.received = max_waiting_bytes - 10;
     try entries.append(allocator(), a);
-    var b = rowForTest(8, 8, .held);
+    var b = rowForTest(8, 8, .asking); // 사용자가 막 누른 맡지 않은 묻는 행
     b.browser = 7;
     try entries.append(allocator(), b);
     onUpdate(.{ .browser = 7, .download = 8, .state = .in_progress, .received = 20, .total = -1, .reason = 0 });
-    // 가장 큰 보류 행(7)이 멈추고, 막 받기 시작한 작은 행(8)은 남는다(5 회차).
     try std.testing.expectEqual(State.canceled, entryOfKey(7).?.state);
-    try std.testing.expectEqual(State.held, entryOfKey(8).?.state);
+    try std.testing.expectEqual(State.held, entryOfKey(6).?.state);
+    try std.testing.expectEqual(State.asking, entryOfKey(8).?.state);
+    // 0 바이트 보류 행보다 크게 받아 둔 맡지 않은 묻는 행을 멈춘다(합을 줄이는 행).
+    var zero = rowForTest(9, 9, .held);
+    zero.browser = 7;
+    try entries.append(allocator(), zero);
+    onUpdate(.{ .browser = 7, .download = 8, .state = .in_progress, .received = max_waiting_bytes, .total = -1, .reason = 0 });
+    try std.testing.expectEqual(State.canceled, entryOfKey(8).?.state);
+    try std.testing.expectEqual(State.held, entryOfKey(9).?.state);
     var line: [256]u8 = undefined;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_stopped_waiting), statusText(one, &line));
     try entries.append(allocator(), rowForTest(2, 2, .asking));

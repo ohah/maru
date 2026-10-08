@@ -11,7 +11,11 @@
 //!   dl-progress    느린 다운로드(초당 10 조각)의 진행 갱신은 초당 4 번을 넘지 않고 받은 양이 는다. 엉뚱한 브라우저의 취소는 버린다.
 //!                  Chromium 스스로도 갱신을 모아 보낸다(실측 1.5 초에 4 번) — sidecar 의 250 ms 간격은 그보다 잦은 갱신의 방어다
 //!   dl-cancel      받는 중 취소하면 `canceled` 가 오고 덜 받은 파일이 지워진다
-//!   dl-closed      받는 중 브라우저를 닫으면 `browser_closed` 가 온다(CEF 는 알림 없이 멈춘다 — 실측)
+//!   dl-closed      받는 중 브라우저를 닫으면 `browser_closed` 가 온다(CEF 는 알리지 않는다). Chromium 은 그 다운로드를 정말 끊는다 —
+//!                  서버 쪽 쓰기가 실패하고(연결을 끊었다) 받던 파일이 지워진다(W10c 착수 전 실측 — 그래서 탭을 닫아도 브라우저를 남긴다)
+//!   dl-park        받는 중(결정 뒤) 브라우저를 숨기고 about:blank 로 보내도 끝까지 받는다 — 새 문서 표지(`page_started`)도 온다(W10c:
+//!                  maru 는 받는 중인 탭을 닫으면 브라우저를 이렇게 남기고, 물은 닫기는 이 표지로 닫힌 것을 안다)
+//!   dl-park-held   결정 전(보류·묻는 중)에 그렇게 보낸 뒤 1.5 초 뒤 결정해도 끝까지 받는다(닫은 탭의 보류를 목록에서 받기)
 //!   dl-multiple    사용자 동작 없는 둘째 자동 다운로드는 「여러 파일 받기」 권한을 묻고, 허용하면 begin 이 온다
 //!   dl-page-started 새 문서 표지(`page_started`)는 페이지를 불러오거나 다른 문서로 갈 때 오고, pushState·다운로드가 된 이동에는
 //!                  오지 않는다(maru 가 「이 문서의 사용자 동작」을 가르는 표지 — 적대 리뷰 2 회차)
@@ -158,6 +162,12 @@ fn watch(host: *Host, id: BrowserId, download: u32, ms: u32, stop: bool, min_rec
 fn open(host: *Host, id: BrowserId, u: []u8, port: u16, path: []const u8) !void {
     try host.send(.{ .create_browser = .{ .browser = id, .size = size, .hidden = false, .url = browsers_check.url(u, port, path) } });
     if (!waitTitle(host, id, "dlp-ready")) return error.PageNotReady;
+}
+
+fn fileSize(path: [:0]const u8) i64 {
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(-2, path, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return -1;
+    return st.size;
 }
 
 fn exists(path: [:0]const u8) bool {
@@ -335,7 +345,59 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         const started = watch(&host, 65, begin.download, 3000, false, 1);
         try host.send(.{ .destroy_browser = 65 });
         const closed = watch(&host, 65, begin.download, 5000, true, 0);
-        report(started.received > 0 and closed.browser_closed, "dl-closed", std.fmt.bufPrint(&detail_buf, "닫기 전 받은 양 {d} · 닫은 뒤 {s}", .{ started.received, if (closed.last) |s| @tagName(s) else "갱신 없음" }) catch "");
+        // 서버는 0.1 초마다 쓴다 — 끊겼으면 다음 쓰기가 실패한다. 2 초면 넉넉하다(5 초짜리 다운로드의 앞쪽이다).
+        os.sleepMs(2000);
+        const cut = http.slow_cut.load(.seq_cst);
+        const sent = http.slow_sent.load(.seq_cst);
+        const left = exists(path);
+        report(started.received > 0 and closed.browser_closed and cut and sent < http.slow_bytes and !left, "dl-closed", std.fmt.bufPrint(&detail_buf, "닫기 전 받은 양 {d} · 닫은 뒤 {s} · 서버 연결 끊김 {}(보낸 양 {d}/{d}) · 받던 파일 남음 {}", .{
+            started.received,
+            if (closed.last) |s| @tagName(s) else "갱신 없음",
+            cut,
+            sent,
+            http.slow_bytes,
+            left,
+        }) catch "");
+    }
+
+    // ── 숨기고 about:blank 로 보낸 브라우저(W10c 주차) ──
+    for ([_]bool{ true, false }) |decided| {
+        const id: BrowserId = if (decided) 80 else 81;
+        const name = if (decided) "dl-park" else "dl-park-held";
+        var path_buf: [1100]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/park-{d}.bin", .{ dir, id });
+        try open(&host, id, &u, port, "/dlp?a=slow");
+        const begin = waitBegin(&host, id, 5000) orelse {
+            report(false, name, "download_begin 이 오지 않았다");
+            continue;
+        };
+        if (decided) {
+            try host.send(.{ .download_decide = .{ .browser = id, .download = begin.download, .path = path } });
+            _ = watch(&host, id, begin.download, 3000, false, 1);
+        }
+        const starts_before = page_starts[id];
+        try host.send(.{ .set_hidden = .{ .browser = id, .value = true } });
+        try host.send(.{ .navigate = .{ .browser = id, .url = "about:blank" } });
+        if (!decided) {
+            const waited = watch(&host, id, begin.download, 1500, true, 0); // 결정 전 — 끝 상태가 오면 안 된다
+            if (waited.last != null and waited.last.? != .in_progress) {
+                report(false, name, std.fmt.bufPrint(&detail_buf, "결정 전에 끝났다({s})", .{@tagName(waited.last.?)}) catch "");
+                try host.send(.{ .destroy_browser = id });
+                continue;
+            }
+            try host.send(.{ .download_decide = .{ .browser = id, .download = begin.download, .path = path } });
+        }
+        const end = watch(&host, id, begin.download, 12_000, true, 0);
+        const size_now = fileSize(path);
+        report(end.last == .complete and end.received == http.slow_bytes and size_now == http.slow_bytes and page_starts[id] > starts_before, name, std.fmt.bufPrint(&detail_buf, "끝 {s} · 받은 양 {d}/{d} · 파일 {d} · about:blank 의 새 문서 표지 {d} → {d}", .{
+            if (end.last) |st| @tagName(st) else "없음",
+            end.received,
+            http.slow_bytes,
+            size_now,
+            starts_before,
+            page_starts[id],
+        }) catch "");
+        try host.send(.{ .destroy_browser = id });
     }
 
     // ── 둘째 자동 다운로드 ──

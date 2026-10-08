@@ -2,7 +2,7 @@
 //! `download_decide` 로 답하고, 진행(`download_update`)을 목록 창(Swift — `OsrDownloadsWindow.swift`)에 보인다.
 //!
 //! 사용자 결정(2026-10-08): 묻지 않고 `~/Downloads` 에 저장(같은 이름은 `이름 (1).확장자` — 「매번 묻기」 설정은 W10b), 진행은
-//! 목록 창, 받는 중 종료·탭 닫기는 W10c. 페이지가 사용자 동작 없이 내려받게 한 「실행될 수 있는 파일」(`.command`·`.pkg`·`.dmg`·
+//! 목록 창. 받는 중 탭을 닫으면 그 브라우저를 숨겨 끝까지 받고, 종료 확인이 받는 중인 수를 알린다(W10c). 페이지가 사용자 동작 없이 내려받게 한 「실행될 수 있는 파일」(`.command`·`.pkg`·`.dmg`·
 //! `.webloc` 등 — Gatekeeper 를 피해 간 전례가 있는 종류)은 저장하지 않고 보류해 묻는다(사용자 결정).
 //!
 //! 파일은 이렇게 다룬다(W10a 설계 적대 검토):
@@ -34,7 +34,8 @@ pub const State = enum(u8) {
     canceled = 5,
     /// 경로를 못 만들었거나 완료 뒤 옮기지 못했다.
     failed = 6,
-    /// 탭이 닫혀 멈췄다(CEF 는 그 다운로드를 알림 없이 멈추고 파일을 지운다 — 실측).
+    /// 탭이 닫혀 멈췄다(CEF 는 그 다운로드를 알림 없이 멈추고 파일을 지운다 — 실측: 서버 연결도 끊는다). W10c 부터 받던 것이 있는 탭은
+    /// 닫아도 브라우저를 숨겨 남겨 두므로(`web_osr` 의 주차) 이 상태는 sidecar 를 내리거나 주차 없이 닫혔을 때만 온다.
     tab_closed = 7,
     /// sidecar 가 다시 시작됐다.
     engine_restarted = 8,
@@ -136,6 +137,8 @@ pub const Entry = struct {
     ask_claimed: bool = false,
     /// W10b: 고른 폴더에 쓸 수 없었다 — 다시 고르게 한다(상태 줄이 그 까닭을 말한다).
     ask_retry: bool = false,
+    /// W10c: 다시 묻는 까닭이 경로의 길이다(폴더가 아니다 — 「그 폴더에는 저장할 수 없습니다」로 말하면 사용자가 엉뚱한 것을 고쳤다).
+    ask_retry_long: bool = false,
     /// W10b: 묻기 시작한 때와, 아무 창도 맡지 않아 목록 창을 냈는가(그 탭이 활성이 아니면 저장 창이 뜰 곳이 없다 — 1 초 뒤 목록).
     ask_since_ms: i64 = 0,
     ask_nudged: bool = false,
@@ -383,6 +386,8 @@ pub fn isRisky(file_name: []const u8) bool {
 const Prepared = struct {
     key: u64,
     ok: bool,
+    /// W10c: 실패의 까닭이 경로의 길이다(maru 의 경로 상한·파일 시스템의 `ENAMETOOLONG`).
+    too_long: bool = false,
     final_buf: [max_path_bytes]u8 = undefined,
     final_len: usize = 0,
     part_buf: [max_path_bytes]u8 = undefined,
@@ -490,23 +495,34 @@ pub fn prepareChosen(dir: []const u8, file_name: []const u8, key: u64, replace: 
             const candidate = numberedFit(file_name, n, &final_name_buf);
             if (candidate.len == 0) return;
             var probe_buf: [max_path_bytes + 1]u8 = undefined;
-            const probe = std.fmt.bufPrintZ(&probe_buf, "{s}/{s}", .{ dir, candidate }) catch return;
+            const probe = std.fmt.bufPrintZ(&probe_buf, "{s}/{s}", .{ dir, candidate }) catch {
+                out.too_long = true;
+                return;
+            };
             if (!exists(probe)) {
                 final_name = candidate;
                 break;
             }
         } else return;
     }
-    const final = std.fmt.bufPrintZ(&out.final_buf, "{s}/{s}", .{ dir, final_name }) catch return;
+    const final = std.fmt.bufPrintZ(&out.final_buf, "{s}/{s}", .{ dir, final_name }) catch {
+        out.too_long = true;
+        return;
+    };
     var m: u32 = 0;
     while (m < 100) : (m += 1) {
         const part = (if (m == 0)
             std.fmt.bufPrintZ(&out.part_buf, "{s}/.maru-{d}.part", .{ dir, key })
         else
-            std.fmt.bufPrintZ(&out.part_buf, "{s}/.maru-{d}-{d}.part", .{ dir, key, m })) catch return;
+            std.fmt.bufPrintZ(&out.part_buf, "{s}/.maru-{d}-{d}.part", .{ dir, key, m })) catch {
+            out.too_long = true;
+            return;
+        };
         const fd = std.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
         if (fd < 0) {
-            if (std.c._errno().* == @intFromEnum(std.c.E.EXIST)) continue;
+            const err = std.c._errno().*;
+            if (err == @intFromEnum(std.c.E.EXIST)) continue;
+            out.too_long = err == @intFromEnum(std.c.E.NAMETOOLONG); // 폴더 경로가 파일 시스템의 상한을 넘었다
             return; // 쓸 수 없는 폴더(권한·읽기 전용·TCC 거절) — 다시 묻는다
         }
         _ = std.c.close(fd);
@@ -708,7 +724,7 @@ pub fn sidecarLost() void {
 
 /// 마지막 Chromium 탭을 닫아 sidecar 를 내렸다 — 그 다운로드는 CEF 가 알림 없이 멈추고(실측) 내리는 sidecar 의 알림은 읽지 않는다.
 /// 끝내지 않으면 행이 「받는 중」으로 남아 상한에 셈되고, 다음 sidecar 가 같은 번호를 쓰면 그 다운로드가 행도 없이 취소됐다
-/// (W10a 적대 리뷰 1 회차). 탭을 닫은 뒤 이어 받기는 W10c.
+/// (W10a 적대 리뷰 1 회차). W10c 부터 받는 중인 브라우저가 있으면 sidecar 를 내리지 않는다 — 여기 오는 것은 주차가 비었을 때뿐이다.
 pub fn sidecarRetired() void {
     endAll(.tab_closed);
 }
@@ -762,6 +778,7 @@ pub fn reapPrepared() void {
                 e.state = .asking;
                 e.ask_claimed = false;
                 e.ask_retry = true;
+                e.ask_retry_long = p.too_long;
                 e.ask_since_ms = 0;
                 e.ask_nudged = false;
             } else if (!p.ok) {
@@ -910,8 +927,9 @@ pub fn nudgeAsking(now_ms: i64) void {
     }
 }
 
-fn reask(e: *Entry) bool {
+fn reask(e: *Entry, too_long: bool) bool {
     e.ask_retry = true;
+    e.ask_retry_long = too_long;
     changed();
     return true;
 }
@@ -976,12 +994,13 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
             e.replace = false;
         },
         .path => |p| {
-            const slash = std.mem.lastIndexOfScalar(u8, p.path, '/') orelse return reask(e);
+            const slash = std.mem.lastIndexOfScalar(u8, p.path, '/') orelse return reask(e, false);
             // 루트 바로 아래(`/x.txt`)면 폴더는 `/`.
             const dir = if (slash == 0) "/" else p.path[0..slash];
             const raw_name = p.path[slash + 1 ..];
             // 쓸 수 없는 답이면 다시 묻는다(그대로 두면 맡은 이 없는 묻는 행이 옛 시각을 들고 남았다 — 3 회차).
-            if (p.path.len > max_path_bytes or raw_name.len == 0) return reask(e);
+            if (p.path.len > max_path_bytes) return reask(e, true);
+            if (raw_name.len == 0) return reask(e, false);
             var name_buf: [max_name_bytes]u8 = undefined;
             const name = sanitizeChosenName(raw_name, &name_buf);
             // 바꾸기는 저장 창이 그 이름으로 물었을 때만 — maru 가 이름을 다듬어 달라졌으면(`:`·끝 점·길이) 다른 파일을 묻지 않고
@@ -993,6 +1012,7 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
             e.chosen = true;
             e.replace = replace;
             e.ask_retry = false;
+            e.ask_retry_long = false;
             e.state = .preparing;
             if (!startPrepareIn(e, dir, true, replace)) {
                 e.state = .failed;
@@ -1032,9 +1052,25 @@ pub fn at(index: usize) ?*const Entry {
     return &entries.items[index];
 }
 
-/// 받는 중(끝나지 않은) 수 — W10c 의 종료 확인.
+/// 끝나지 않은 수(보류 포함 — 종료 확인은 `quitWarningCount`).
 pub fn activeTotal() usize {
     return activeCount(null);
+}
+
+/// 그 탭(브라우저)의 끝나지 않은 다운로드 수(W10c) — 0 이 아니면 탭을 닫아도 브라우저를 남긴다(닫으면 Chromium 이 받기를 끊는다).
+/// 보류·묻는 중도 센다 — 받기를 누를 때까지 Chromium 이 그 브라우저로 받아 둔다.
+pub fn unfinishedFor(browser: u64) usize {
+    return activeCount(browser);
+}
+
+/// 종료하면 멈출 다운로드 수(W10c — 종료 확인에 적는다). 보류는 뺀다 — 사용자가 받기로 한 적이 없다(목록에 「보류」로 보인다).
+pub fn quitWarningCount() usize {
+    var n: usize = 0;
+    for (entries.items) |e| {
+        if (finished(e.state) or e.state == .held) continue;
+        n += 1;
+    }
+    return n;
 }
 
 /// 목록 창의 상태 줄(현재 UI 언어 — Swift 는 문장을 만들지 않는다, docs/i18n.md §7.2). 크기는 Finder 처럼 십진 단위.
@@ -1064,7 +1100,7 @@ pub fn statusText(e: *const Entry, buf: []u8) []const u8 {
         .engine_restarted => copyText(buf, i18n.t(.dl_state_engine_restarted)),
         .too_many => copyText(buf, i18n.t(.dl_state_too_many)),
         .asking => if (e.ask_retry)
-            copyText(buf, i18n.t(.dl_state_asking_retry))
+            copyText(buf, i18n.t(if (e.ask_retry_long) .dl_state_asking_too_long else .dl_state_asking_retry))
         else if (e.risky)
             // 실행될 수 있는 파일이면 저장 창 안내가 그렇다고 말한다(확장자가 이름 칸에서 가려져도 — 4 회차).
             i18n.format(buf, i18n.t(.dl_state_asking_risky), &.{.{ .s = extensionOf(e.name()) }})
@@ -1239,6 +1275,12 @@ pub fn testAddActive(key: u64, browser: u64) !void {
     try entries.append(allocator(), e);
 }
 
+/// 시험 전용(web_osr 의 시험) — 그 행을 끝낸다.
+pub fn testFinish(key: u64) void {
+    if (entryOfKey(key)) |e| e.state = .done;
+    changed();
+}
+
 pub fn testReset() void {
     resetForTest();
 }
@@ -1346,6 +1388,8 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     _ = claimAsk(10);
     try std.testing.expect(answerAsk(10, .{ .path = .{ .path = "/" ++ "d" ** 1100 ++ "/x.txt", .existed = false } }));
     try std.testing.expect(entryOfKey(10).?.state == .asking and entryOfKey(10).?.ask_retry and !entryOfKey(10).?.ask_claimed);
+    var long_line: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_asking_too_long), statusText(entryOfKey(10).?, &long_line)); // 까닭은 길이(W10c)
     try entries.append(allocator(), rowForTest(6, 6, .asking));
     _ = claimAsk(6);
     try std.testing.expect(answerAsk(6, .{ .path = .{ .path = "/tmp/", .existed = false } }));
@@ -1362,6 +1406,37 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     try std.testing.expect(four.ask_retry and !four.ask_claimed);
     var line: [256]u8 = undefined;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_asking_retry), statusText(four, &line));
+    // 작업 스레드가 길이 때문에 실패했다 — 그렇게 말한다(W10c).
+    _ = claimAsk(4);
+    four.state = .preparing;
+    _ = std.c.pthread_mutex_lock(&prepared_mutex);
+    prepared.append(allocator(), .{ .key = 4, .ok = false, .too_long = true }) catch unreachable;
+    _ = std.c.pthread_mutex_unlock(&prepared_mutex);
+    reapPrepared();
+    try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_asking_too_long), statusText(entryOfKey(4).?, &line));
+}
+
+test "a chosen path past the length limits says so, a folder that can't be written says that (W10c)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    var out: Prepared = .{ .key = 1, .ok = false };
+    // maru 의 경로 상한(1024 바이트)을 넘는 폴더.
+    prepareChosen("/" ++ "d" ** 1100, "a.txt", 1, false, &out);
+    try std.testing.expect(!out.ok and out.too_long);
+    // 파일 시스템의 상한(이름 하나 255 바이트)을 넘는 폴더 이름 — 열기가 `ENAMETOOLONG`.
+    var long_buf: [max_path_bytes]u8 = undefined;
+    const long_dir = try std.fmt.bufPrint(&long_buf, "{s}/{s}", .{ root, "e" ** 300 });
+    out = .{ .key = 2, .ok = false };
+    prepareChosen(long_dir, "a.txt", 2, true, &out);
+    try std.testing.expect(!out.ok and out.too_long);
+    // 없는 폴더는 길이가 아니다.
+    var missing_buf: [max_path_bytes]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buf, "{s}/missing", .{root});
+    out = .{ .key = 3, .ok = false };
+    prepareChosen(missing, "a.txt", 3, true, &out);
+    try std.testing.expect(!out.ok and !out.too_long);
 }
 
 test "a chosen location keeps the chosen name with a short hidden part file, numbers unless replacing, and replace overwrites (W10b)" {
@@ -1426,6 +1501,23 @@ test "turning ask off puts unclaimed asking rows on hold and leaves a panel bein
     try std.testing.expectEqual(State.asking, entryOfKey(1).?.state);
     try std.testing.expectEqual(@as(i64, 0), entryOfKey(1).?.ask_since_ms);
     try std.testing.expect(!entryOfKey(1).?.ask_nudged);
+}
+
+test "quit warns about downloads the user started but not about held ones, and counts a tab's unfinished rows (W10c)" {
+    resetForTest();
+    defer resetForTest();
+    try entries.append(allocator(), rowForTest(1, 1, .active));
+    try entries.append(allocator(), rowForTest(2, 2, .held));
+    try entries.append(allocator(), rowForTest(3, 3, .asking));
+    try entries.append(allocator(), rowForTest(4, 4, .interrupted));
+    try entries.append(allocator(), rowForTest(5, 5, .done));
+    var other = rowForTest(6, 6, .preparing);
+    other.browser = 9;
+    try entries.append(allocator(), other);
+    try std.testing.expectEqual(@as(usize, 4), quitWarningCount()); // 받는 중·묻는 중·중단·준비 중(보류·끝남은 뺀다)
+    try std.testing.expectEqual(@as(usize, 4), unfinishedFor(7)); // 보류도 센다 — 받기를 누를 때까지 그 브라우저가 받아 둔다
+    try std.testing.expectEqual(@as(usize, 1), unfinishedFor(9));
+    try std.testing.expectEqual(@as(usize, 0), unfinishedFor(8));
 }
 
 test "waiting rows stop past the cap and unclaimed asking rows bring the list window after a second (W10b)" {

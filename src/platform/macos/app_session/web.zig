@@ -440,6 +440,8 @@ pub fn tickWebOsr(self: *AppSession) void {
     var new_tab_count: usize = 0;
     // W6f②: 페이지가 닫은 탭(`window.close` — 이어 받은 팝업 또는 스크립트가 닫을 수 있는 탭, tick 마다 하나).
     var page_closed: u64 = 0;
+    // W10c: 문서 없이 다운로드만 한 페이지가 연 탭(tick 마다 하나).
+    var download_blank: u64 = 0;
     // W6j: 페이지에 물은 닫기가 끝난 탭(tick 마다 하나).
     var asked_closed: u64 = 0;
     var asked_outcome: web_osr.CloseAskOutcome = .none;
@@ -450,6 +452,7 @@ pub fn tickWebOsr(self: *AppSession) void {
                 if (!isOsrTerm(term)) continue;
                 const sid = term.surfaceId();
                 if (page_closed == 0 and web_osr.takePageClosed(sid)) page_closed = sid;
+                if (download_blank == 0 and web_osr.takeDownloadBlank(sid)) download_blank = sid;
                 if (asked_closed == 0) switch (web_osr.takeCloseAsk(sid, now_ms)) {
                     .none, .waiting => {},
                     .stayed => if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test pageclose stayed\n", .{}),
@@ -476,6 +479,7 @@ pub fn tickWebOsr(self: *AppSession) void {
     // W6e: 페이지가 연 새 탭 — tick 마다 하나(탭 목록을 도는 동안 바꾸지 않게 돈 뒤에).
     for (new_tab_openers[0..new_tab_count]) |opener| if (osrOpenNewTab(self, opener)) break;
     if (page_closed != 0) osrClosePageClosedTab(self, page_closed);
+    if (download_blank != 0) osrCloseDownloadBlankTab(self, download_blank);
     if (asked_closed != 0) osrCloseAskedTab(self, asked_closed, asked_outcome);
     // W4c: 키 대상이 바뀌었으면(탭·pane 전환·오버레이·창 키) 포커스를 옮기고 조합을 확정한다. 트랜잭션 밖 unmark 뒤 확정
     // 글이 안 왔으면 조합을 그대로 확정한다.
@@ -1349,6 +1353,40 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
     }
 }
 
+/// 페이지가 연 탭이 문서 없이 다운로드만 했다(W10c) — 빈 탭으로 남기지 않고 닫는다(받던 것은 `web_osr.destroy` 가 브라우저를 숨겨
+/// 이어 받는다). 그 pane 의 유일한 탭이면 둔다 — 빈 pane·창 닫기로 번지지 않게(페이지가 닫은 탭과 같은 규칙, 되살리지는 않는다: 그
+/// 브라우저가 받는 중이다). 확인 모달·탭 끌기 중이면 다음 tick 에 다시.
+fn osrCloseDownloadBlankTab(self: *AppSession, surface_id: u64) void {
+    switch (self.pending_confirm) {
+        .close => |target| if (target != .window) return web_osr.markDownloadBlank(surface_id),
+        else => {},
+    }
+    for (self.tabs.items, 0..) |tab, tab_index| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items, 0..) |term, index| {
+                if (term.surfaceId() != surface_id) continue;
+                if (tab_ops.tabDragTransaction(self, pane) != null) return web_osr.markDownloadBlank(surface_id);
+                if (pane.terms.items.len == 1) return;
+                if (self.osr_key_target == surface_id and web_osr.composing(surface_id)) self.osr_discard_marked = true;
+                // 활성 탭이면 연 탭으로 돌아간다(페이지가 닫은 탭과 같다 — Chrome 처럼).
+                const opener = web_osr.popupOpener(surface_id);
+                const was_active = pane.active_term == index;
+                term_ops.closeTermAt(self, tab_index, pane, index);
+                if (was_active and opener != 0 and pane.terms.items.len > 0) {
+                    for (pane.terms.items, 0..) |t, i| if (t.surfaceId() == opener) {
+                        if (pane == pane_ops.activePane(self) and tab_index == self.app_window.active_tab) self.focusTerm(i) else pane.active_term = i;
+                        break;
+                    };
+                }
+                self.workspaceChanged(.topology);
+                self.metal_dirty = true;
+                if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab download-blank closed tabs={d}\n", .{pane.terms.items.len});
+                return;
+            }
+        }
+    }
+}
+
 fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: usize, request: web_osr.NewTab, visible: bool) !void {
     const opener = pane.terms.items[opener_index].surfaceId();
     const last_child: ?usize = blk: {
@@ -1366,6 +1404,7 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
         return err;
     };
     if (request.adopt != 0) self.allocator.free(request.url) else term.pending_url = request.url; // 주소는 이제 탭이 놓는다(`destroyTerm`·소비)
+    if (request.adopt == 0) web_osr.notePageOpened(term.surfaceId()); // W10c: 문서 없이 다운로드만 하면 닫을 탭(이어 받은 팝업은 web_osr 가 안다)
     if (plan.focus) {
         pane.active_term += @intFromBool(plan.at <= pane.active_term); // 끼운 자리만큼 민 뒤 옮긴다(focusTerm 은 같은 자리면 일찍 끝난다)
         self.focusTerm(plan.at);

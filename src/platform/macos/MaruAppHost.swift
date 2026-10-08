@@ -4070,6 +4070,9 @@ final class TerminalSurface {
     var window: NSWindow?
     var appSession: OpaquePointer?
     var metalRenderer: OpaquePointer?
+    // 세션에 마지막으로 보낸 포커스(`maru_macos_app_session_focus_changed`). Zig 세션의 기본값(`window_focused = true`)과 같게
+    // 시작한다 — 같은 값을 또 보내지 않으려고 든다(`reportSessionFocus`).
+    var focusReported = true
     // construction/restore가 성공해 app-global checkpoint inventory에 들어간 normal Window인가.
     var workspaceCheckpointPublished = false
 
@@ -5692,8 +5695,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func windowDidBecomeKey(_ notification: Notification) {
         // 창 포커스 획득 → 그 창 surface에 focus reporting(DECSET 1004 켜졌으면 CSI I). 멀티 창에서 그 창만(notification.object).
         guard let window = notification.object as? NSWindow,
-              let surface = surfaceForWindow(window), let session = surface.appSession else { return }
-        _ = maru_macos_app_session_focus_changed(session, 1)
+              let surface = surfaceForWindow(window), surface.appSession != nil else { return }
+        reportSessionFocus(surface, true)
         if workspaceCheckpointArmed && surface.workspaceCheckpointPublished {
             let identity = ObjectIdentifier(window)
             if workspaceCheckpointActiveWindow != identity {
@@ -5710,8 +5713,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 취소한다 — 활성 surface로 보내면 멀티 윈도우에서 이미 새 키 창(idle 머신)을 건드리고 떠나는 창 배지가 켜진 채
         // 남는다(리뷰 #1063 지적). 단일 윈도우는 resigning==활성이라 동작 불변.
         cancelKeyHintHold(for: resigning)
-        guard let surface = resigning, let session = surface.appSession else { return }
-        _ = maru_macos_app_session_focus_changed(session, 0)
+        guard let surface = resigning else { return }
+        reportSessionFocus(surface, false)
+    }
+
+    /// 세션의 포커스(`window_focused` — 「이 창이 key 창인가」)를 보낸다. 마지막으로 보낸 값과 같으면 보내지 않는다 — 같은 값을 또 보내면
+    /// focus reporting(DECSET 1004)을 켠 프로그램에 CSI I/O 가 한 번 더 간다.
+    private func reportSessionFocus(_ surface: TerminalSurface, _ focused: Bool) {
+        guard let session = surface.appSession, surface.focusReported != focused else { return }
+        surface.focusReported = focused
+        _ = maru_macos_app_session_focus_changed(session, focused ? 1 : 0)
+    }
+
+    /// 앱이 활성일 때 세션의 포커스를 그 창의 실제 key 상태와 맞춘다(tick 마다 — 바뀔 때만 보낸다). key 알림만으로는 둘이 빠진다:
+    /// 세션이 생기기 전에 지나간 key 알림(새 창·복원은 `makeKeyAndOrderFront` 가 세션 생성보다 먼저다 — 복원된 창 둘이 다 「key」로
+    /// 남아 `maru sessions list` 가 `focused` 를 둘 냈다, 실측)과, delegate 가 없는 quick 패널(숨어도 「key」로 남아 LSP 신뢰를 묻는
+    /// 자리를 붙잡았다 — 계획 WT2a). 앱이 활성이 아니면 맞추지 않는다 — key 창이 resign 알림으로 이미 내려갔고, 활성화된 적 없는
+    /// 실행(CI 스모크)의 포커스 기본값을 바꾸지 않는다.
+    private func reconcileSessionFocus(_ surface: TerminalSurface) {
+        guard NSApp.isActive else { return }
+        reportSessionFocus(surface, surface.window?.isKeyWindow == true)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -7203,6 +7224,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 maru_macos_app_session_set_last_window(s, windows.count <= 1 ? 1 : 0)
                 maru_macos_app_session_set_primary_window(s, surface === windows.first ? 1 : 0)
             }
+            reconcileSessionFocus(surface)
             let status = renderTick()
             explicitSurface = nil
             if status == Self.statusOK {
@@ -7241,6 +7263,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // quick(스크래치 오버레이)은 앱 종료 단위가 아니다 — 항상 비-마지막(0). quick의 마지막 탭을 닫으면 종료
             // 확인이 아니라 quick만 정리된다(tearDownQuickTerminal, 앱은 계속).
             if let s = quick.appSession { maru_macos_app_session_set_last_window(s, 0) }
+            reconcileSessionFocus(quick)
             let quickStatus = renderTick(presentMetalFrame: quick.window?.isVisible == true)
             explicitSurface = nil
             if quickStatus == Self.statusOK {
@@ -13307,6 +13330,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// config에서 자동 숨김을 끄면(quickAutoHide=false) 토글로만 숨기고 여기선 무동작. 애니메이션 중(특히
     /// 숨김 완료 orderOut의 resignKey)에는 재진입을 막고, 보이는 상태일 때만 숨긴다.
     @objc private func quickTerminalLostKey(_ note: Notification) {
+        // 숨기든 말든 그 세션은 이제 key 창이 아니다 — 일반 창처럼 포커스를 내린다(quick 은 delegate 가 없어 `windowDidResignKey` 가
+        // 안 온다). 다른 앱으로 가 앱이 비활성이 되면 tick 의 대조(`reconcileSessionFocus`)도 돌지 않는다.
+        if let quick { reportSessionFocus(quick, false) }
         guard quickAutoHide, !quickAnimating, let panel = quick?.window, panel.isVisible else { return }
         hideQuickTerminalAnimated(panel)
     }

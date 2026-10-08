@@ -268,6 +268,46 @@ test "app instance lease ABI rejects invalid paths without mutating the global s
     );
 }
 
+test "Swift keeps each session's window focus equal to its window's key state — reported only on change, reconciled every tick while active, quick panel included" {
+    // 세션의 `window_focused` 는 「이 창이 key 창인가」다(컨트롤 플레인 `focused`·LSP 신뢰를 묻는 창 — 계획 WT2a). key 알림만으로는 세션이
+    // 생기기 전에 지나간 알림(새 창·복원)과 delegate 가 없는 quick 패널이 빠져, 복원된 창 둘이 다 `focused` 였다(실측). 그래서 tick 이
+    // 창마다 대조하고, 보내는 자리는 바뀔 때만 보내는 함수 하나다(같은 값을 또 보내면 focus reporting 에 CSI I/O 가 한 번 더 간다).
+    // 「있다」가 아니라 **값·순서**를 묻는다(적대적 4회차 — 갱신 삭제·극성·가드 순서 변이가 「있다」만으로는 살았다).
+    const source = try swiftCodeWithoutComments(std.testing.allocator, @embedFile("MaruAppHost.swift"));
+    defer std.testing.allocator.free(source);
+    const before = struct {
+        fn f(body: []const u8, a: []const u8, b: []const u8) !void {
+            const ia = std.mem.indexOf(u8, body, a) orelse return error.MissingFocusLine;
+            const ib = std.mem.indexOf(u8, body, b) orelse return error.MissingFocusLine;
+            try std.testing.expect(ia < ib);
+        }
+    }.f;
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "maru_macos_app_session_focus_changed("));
+    // 바뀔 때만: 같으면 돌아가고, 보내기 **전에** 기억을 갱신한다(지우면 기억이 true 로 남아 key 아닌 창마다 매 tick 보낸다).
+    const report = try swiftFunctionBody(source, "private func reportSessionFocus(");
+    try before(report, "surface.focusReported != focused else { return }", "surface.focusReported = focused");
+    try before(report, "surface.focusReported = focused", "maru_macos_app_session_focus_changed(session, focused ? 1 : 0)");
+    // 대조: 활성일 때만(가드가 먼저), 그 창의 실제 key 상태를 보낸다.
+    const reconcile = try swiftFunctionBody(source, "private func reconcileSessionFocus(");
+    try before(reconcile, "guard NSApp.isActive else { return }", "reportSessionFocus(surface, surface.window?.isKeyWindow == true)");
+    // tick: 일반 창마다(그 창의 tick 전에), 그리고 quick.
+    const tick_at = std.mem.indexOf(u8, source, "private func tickAppSession() {") orelse return error.MissingTick;
+    const tick_end = std.mem.indexOfPos(u8, source, tick_at, "\n    private func drainControlServer()") orelse return error.MissingTick;
+    const tick = source[tick_at..tick_end];
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, tick, "reconcileSessionFocus(surface)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, tick, "reconcileSessionFocus(quick)"));
+    try before(tick, "for surface in snapshot", "reconcileSessionFocus(surface)");
+    const per_window = std.mem.indexOf(u8, tick, "reconcileSessionFocus(surface)").?;
+    _ = std.mem.indexOfPos(u8, tick, per_window, "renderTick()") orelse return error.MissingRender;
+    const quick_at = std.mem.indexOf(u8, tick, "reconcileSessionFocus(quick)").?;
+    _ = std.mem.indexOfPos(u8, tick, quick_at, "renderTick(presentMetalFrame:") orelse return error.MissingRender;
+    // key 알림 둘(극성)과 quick 패널의 resign(숨김 가드보다 **먼저** — 자동 숨김을 끈 설정·애니메이션 중에도 내린다).
+    try std.testing.expect(std.mem.indexOf(u8, try swiftFunctionBody(source, "func windowDidBecomeKey("), "reportSessionFocus(surface, true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try swiftFunctionBody(source, "func windowDidResignKey("), "reportSessionFocus(surface, false)") != null);
+    const lost = try swiftFunctionBody(source, "private func quickTerminalLostKey(");
+    try before(lost, "reportSessionFocus(quick, false)", "guard quickAutoHide");
+}
+
 test "Swift startup acquires the writer lease before AppKit and mutable app bootstrap" {
     const source = @embedFile("MaruAppHost.swift");
     const main_start = std.mem.indexOf(u8, source, "static func main()") orelse

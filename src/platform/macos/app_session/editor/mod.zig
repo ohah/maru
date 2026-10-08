@@ -83,6 +83,7 @@ pub fn contentHash(bytes: []const u8) u64 {
 pub const syntax_color = @import("syntax.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const lsp_client = @import("lsp.zig");
+const trust_store = @import("trust_store.zig");
 /// 호버 박스(tooling §8.2b) — 진단 메시지 + 언어 서버 hover.
 pub const hover_client = @import("hover.zig");
 /// 정의로 이동(tooling §8.2c) — `textDocument/definition` → §5.2 `navigateTo`.
@@ -14457,9 +14458,12 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
-    // 신뢰 파일은 이 픽스처의 임시 디렉터리에(`MARU_CONFIG` 가 그 안을 가리키게).
+    // 신뢰 파일은 이 픽스처의 임시 디렉터리에(`state/` 를 앱 전역 저장소 자리로 주입 — 계획 WT2).
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
     const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
@@ -14497,12 +14501,12 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     fx.session.dispatchChromeAction(.confirm_accept);
     try testing.expect(fx.session.pending_confirm == .none);
     {
-        const trust = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
+        const trust = try fx.dir.dir.readFileAlloc(testing.io, "state/lsp-trust", allocator, .limited(4096));
         defer allocator.free(trust);
         // root 는 파일 트리 규칙(가장 가까운 `.git`) — 이 픽스처는 저장소 안의 tmp 라 저장소 root 가 그것이다.
         const lsp_root = term.rt.editor_lsp_root orelse return error.NoRoot;
         try testing.expect(maru.session.repo_path.underRoot(path, lsp_root));
-        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), maru.session.editor.lsp.trust.lookup(trust, lsp_root));
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), trustFileDecision(trust, lsp_root));
     }
     const Ctx = struct { fx: *PaneFixture, term: *Term, cidx: usize };
     const ctx: Ctx = .{ .fx = &fx, .term = term, .cidx = cidx };
@@ -14739,6 +14743,9 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     defer fx.deinit(allocator);
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
     const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
@@ -14810,13 +14817,13 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     fx.session.dispatchChromeAction(.confirm_cancel);
     try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(fx.session, term).?.phase);
     {
-        const trust = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
+        const trust = try fx.dir.dir.readFileAlloc(testing.io, "state/lsp-trust", allocator, .limited(4096));
         defer allocator.free(trust);
-        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), maru.session.editor.lsp.trust.lookup(trust, term.rt.editor_lsp_root orelse return error.NoRoot));
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trustFileDecision(trust, term.rt.editor_lsp_root orelse return error.NoRoot));
     }
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .none); // 거부는 기억된다 — 다시 안 묻는다
-    // 새 세션도 같다 — **파일의 deny 가 클라이언트를 denied 로 세운다**(묻지도, 띄우지도 않는다). 위 단언은 취소가 직접 세운
+    // 새 세션(새 창)도 같다 — **앱 전역 표의 deny 가 클라이언트를 denied 로 세운다**(묻지도, 띄우지도 않는다). 위 단언은 취소가 직접 세운
     // denied 를 보는 것이라 gate 의 deny 갈래를 지나지 않았다(변이 B4 「거부 결정을 무시」가 살았다).
     fx.session.editor_lsp.deinit(allocator);
     fx.session.editor_lsp = .{};
@@ -14830,14 +14837,14 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     // ⑶ʹ **프로그램이 닫은 모달은 답이 아니다** — 알림 토스트가 모달을 덮으면(`showNotice` → `cancelPendingClose`) 파일에 줄이
     //     늘지 않고, 토스트가 사라지면 다음 pump 가 다시 묻는다(캡처 하니스가 잡은 결함 — 종료 경로가 「거부」를 적었다).
     const lines_before = blk: {
-        const t = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
+        const t = try fx.dir.dir.readFileAlloc(testing.io, "state/lsp-trust", allocator, .limited(4096));
         defer allocator.free(t);
         break :blk std.mem.count(u8, t, "\n");
     };
     fx.session.showNotice("x");
     try testing.expect(fx.session.pending_confirm == .none);
     {
-        const t = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
+        const t = try fx.dir.dir.readFileAlloc(testing.io, "state/lsp-trust", allocator, .limited(4096));
         defer allocator.free(t);
         try testing.expectEqual(lines_before, std.mem.count(u8, t, "\n"));
     }
@@ -15379,6 +15386,563 @@ test "LSPB18 내리기는 EOF 유예를 지키고 그동안 stdout 을 비우며
         try testing.expect(l.reaped);
         lsp_process.lowerAll((&l)[0..1], 0);
     }
+}
+
+/// 두 창을 함께 돌려 조건을 기다린다(서버는 다른 프로세스). 최대 `max_ms`.
+fn pumpTwoUntil(x: *PaneFixture, y: *PaneFixture, max_ms: u64, ctx: anytype, comptime pred: fn (@TypeOf(ctx)) bool) bool {
+    const start = x.session.awakeMs();
+    while (x.session.awakeMs() - start < max_ms) {
+        lsp_client.pump(x.session);
+        lsp_client.pump(y.session);
+        if (pred(ctx)) return true;
+        _ = usleep(2_000);
+    }
+    lsp_client.pump(x.session);
+    lsp_client.pump(y.session);
+    return pred(ctx);
+}
+
+fn allClients(session: *AppSession, comptime f: fn (lsp_client.Client) bool) bool {
+    if (session.editor_lsp.clients.items.len == 0) return false;
+    for (session.editor_lsp.clients.items) |c| if (!f(c)) return false;
+    return true;
+}
+
+fn isReady(c: lsp_client.Client) bool {
+    return c.phase == .ready;
+}
+
+fn isLoweredDenied(c: lsp_client.Client) bool {
+    return c.phase == .denied and c.proc == null and c.docs.items.len == 0;
+}
+
+fn notStarted(c: lsp_client.Client) bool {
+    return c.proc == null and c.phase != .ready and c.phase != .starting;
+}
+
+test "LSPB20 신뢰는 앱 전역이다 — 두 창이 같은 저장소를 열면 한 창만 묻고 그 답이 다른 창에 서며, 다른 데서 온 거부는 떠 있는 서버를 내리고 진단을 걷고, 거부된 창에서 다시 물어 허용하면 다른 창도 뜬다 (계획 WT2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var a = try PaneFixture.init(allocator);
+    defer a.deinit(allocator);
+    var b = try PaneFixture.init(allocator);
+    defer b.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    // 두 픽스처의 문서는 둘 다 이 저장소의 tmp 아래다 — 가장 가까운 `.git` 이 같아 **같은 저장소**다(임시 디렉터리는 서로 다르다).
+    focusOnly(&a, &.{&b}); // key 창은 하나다
+
+    // ⑴ A 가 묻는다. B 는 같은 저장소를 A 가 묻는 동안 **묻지 않고** 기다린다(「허락 대기」, 서버 없음).
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .lsp_trust);
+    lsp_client.pump(b.session);
+    try testing.expect(b.session.pending_confirm == .none);
+    try testing.expectEqual(lsp_client.Phase.asking, lsp_client.statusFor(b.session, b.term).?.phase);
+    try testing.expect(allClients(b.session, notStarted));
+
+    // ⑵ A 의 허용 → B 는 묻지 않고 뜬다(진단까지 선다).
+    a.session.chrome_host.confirm.dismiss();
+    a.session.dispatchChromeAction(.confirm_accept);
+    const Ctx = struct { a: *PaneFixture, b: *PaneFixture };
+    const ctx: Ctx = .{ .a = &a, .b = &b };
+    try testing.expect(pumpTwoUntil(&a, &b, 5000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return allClients(c.a.session, isReady) and allClients(c.b.session, isReady) and c.b.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    try testing.expect(b.session.pending_confirm == .none);
+
+    // ⑶ 다른 데서 온 거부(계획 WT4 의 관리 화면이 쓸 자리 — 앱 전역 표에 바로 둔다) → 두 창 다 다음 pump 에 서버를 내리고 진단을 걷어
+    //    「거부됨」으로 선다. 묻지 않는다.
+    const key = (b.session.editor_lsp.clients.items[0].trust_key orelse return error.NoKey).key();
+    trust_store.decide(testing.io, key, .deny);
+    lsp_client.pump(a.session);
+    lsp_client.pump(b.session);
+    try testing.expect(allClients(a.session, isLoweredDenied));
+    try testing.expect(allClients(b.session, isLoweredDenied));
+    try testing.expectEqual(@as(usize, 0), b.term.rt.editor_diagnostics.lsp.items.len);
+    try testing.expectEqual(@as(usize, 0), a.term.rt.editor_diagnostics.lsp.items.len);
+    try testing.expect(a.session.pending_confirm == .none and b.session.pending_confirm == .none);
+    lsp_client.pump(a.session); // 다음 tick 에도 다시 띄우지 않는다
+    try testing.expect(allClients(a.session, isLoweredDenied));
+
+    // ⑷ B 로 가서 「다시 묻기」 → **B 만** 묻는다(A 는 거부 그대로) → 허용 → 두 창 다 다시 뜬다.
+    focusOnly(&b, &.{&a});
+    lsp_client.activateStatus(b.session);
+    lsp_client.pump(b.session);
+    lsp_client.pump(a.session);
+    try testing.expect(b.session.pending_confirm == .lsp_trust);
+    try testing.expect(a.session.pending_confirm == .none);
+    b.session.chrome_host.confirm.dismiss();
+    b.session.dispatchChromeAction(.confirm_accept);
+    // ⑸ **뜨는 중**(initialize 를 기다린다)에 온 거부도 서버를 내린다 — 「떠 있는 서버」는 ready 만이 아니다.
+    lsp_client.pump(b.session);
+    lsp_client.pump(a.session);
+    try testing.expect(allClients(a.session, struct {
+        fn f(c: lsp_client.Client) bool {
+            return c.phase == .starting and c.proc != null;
+        }
+    }.f));
+    trust_store.decide(testing.io, key, .deny);
+    lsp_client.pump(a.session);
+    lsp_client.pump(b.session);
+    try testing.expect(allClients(a.session, isLoweredDenied));
+    try testing.expect(allClients(b.session, isLoweredDenied));
+    // ⑹ 다른 데서 온 허용 — 두 창의 거부된 클라이언트가 묻지 않고 다시 뜬다.
+    trust_store.decide(testing.io, key, .allow);
+    try testing.expect(pumpTwoUntil(&a, &b, 5000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return allClients(c.a.session, isReady) and allClients(c.b.session, isReady);
+        }
+    }.f));
+    try testing.expect(a.session.pending_confirm == .none and b.session.pending_confirm == .none);
+}
+
+/// 포커스를 그 창으로 옮긴다(실제 앱은 key 창이 하나뿐이다).
+fn focusOnly(target: *PaneFixture, others: []const *PaneFixture) void {
+    for (others) |o| o.session.window_focused = false;
+    target.session.window_focused = true;
+}
+
+test "LSPB21 한 저장소는 한 창만, 지금 보고 있는 창이 묻는다 — 토스트가 덮어도 그 창이 다시 묻고, 포커스가 옮겨 가면 질문도 따라가며, 묻던 창이 닫히면 자리를 놓는다; 두 창의 「다시 묻기」는 한쪽 답(허용이든 거부든)이 다른 쪽의 답이다 (계획 WT2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var a = try PaneFixture.init(allocator);
+    defer a.deinit(allocator);
+    var b = try PaneFixture.init(allocator);
+    var b_alive = true;
+    defer if (b_alive) b.deinit(allocator);
+    // 셋째 창은 ⑷ 에서야 움직인다 — 그래도 **지금** 만든다(픽스처는 만들 때 앱 전역 표를 비운다 — 앞 판정자의 결정이 새지 않게).
+    var c = try PaneFixture.init(allocator);
+    defer c.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    focusOnly(&a, &.{ &b, &c });
+
+    // ⑴ key 창 A 가 묻는다. 뒤쪽 B 는 묻지 않는다 — A 가 먼저 묻지 않았어도(B 를 먼저 돌려도) 그렇다.
+    lsp_client.pump(b.session);
+    try testing.expect(b.session.pending_confirm == .none);
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .lsp_trust);
+    // ⑵ A 의 모달을 알림이 덮었다(답이 아니다) → 질문은 뒤쪽 창으로 **넘어가지 않는다** — 알림이 내려가면 A 가 다시 묻는다.
+    a.session.showNotice("x");
+    try testing.expect(a.session.pending_confirm == .none);
+    lsp_client.pump(b.session);
+    try testing.expect(b.session.pending_confirm == .none);
+    a.session.chrome_host.notice.dismiss();
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .lsp_trust);
+    // ⑶ 포커스가 B 로 옮겨 간다 → A 는 자리를 내놓고(모달이 내려간다, 기억하지 않는다) B 가 묻는다.
+    focusOnly(&b, &.{ &a, &c });
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .none);
+    try testing.expectEqual(lsp_client.Phase.asking, lsp_client.statusFor(a.session, a.term).?.phase); // 「허락 대기」
+    lsp_client.pump(b.session);
+    try testing.expect(b.session.pending_confirm == .lsp_trust);
+    // ⑷ B 의 창이 닫힌다(답 없이) → 그 자리를 놓는다 → 포커스가 온 A 가 묻는다. 창 닫기는 세션 teardown 하나다 — 픽스처의 표 비우기 없이.
+    b.session.deinit();
+    allocator.destroy(b.session);
+    b.dir.cleanup();
+    b_alive = false;
+    focusOnly(&a, &.{&c});
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .lsp_trust);
+    // A 가 거부한다 — 기억된다(다시 안 묻는다).
+    a.session.chrome_host.confirm.dismiss();
+    a.session.dispatchChromeAction(.confirm_cancel);
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .none);
+    try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(a.session, a.term).?.phase);
+
+    // ⑸ **두 창이 다 「다시 묻기」** — A 에서 누르고, C 로 가서 누른다(A 는 자리를 내놓고 기다린다). C 의 **거부**가 A 의 물음에 대한
+    //    답이다: A 로 돌아와도 같은 질문을 또 하지 않는다(같은 결정이 다시 서도 「답이 섰다」가 남는다).
+    lsp_client.pump(c.session);
+    try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(c.session, c.term).?.phase);
+    const Two = struct { a: *PaneFixture, c: *PaneFixture };
+    lsp_client.activateStatus(a.session);
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .lsp_trust);
+    focusOnly(&c, &.{&a});
+    lsp_client.pump(a.session);
+    lsp_client.activateStatus(c.session);
+    lsp_client.pump(c.session);
+    try testing.expect(c.session.pending_confirm == .lsp_trust);
+    c.session.chrome_host.confirm.dismiss();
+    c.session.dispatchChromeAction(.confirm_cancel);
+    focusOnly(&a, &.{&c});
+    lsp_client.pump(a.session);
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .none);
+    try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(a.session, a.term).?.phase);
+    // ⑹ 같은 꼴로 C 가 **허용** — A 는 묻지 않고 뜬다.
+    lsp_client.activateStatus(a.session);
+    lsp_client.pump(a.session);
+    try testing.expect(a.session.pending_confirm == .lsp_trust);
+    focusOnly(&c, &.{&a});
+    lsp_client.pump(a.session);
+    lsp_client.activateStatus(c.session);
+    lsp_client.pump(c.session);
+    try testing.expect(c.session.pending_confirm == .lsp_trust);
+    c.session.chrome_host.confirm.dismiss();
+    c.session.dispatchChromeAction(.confirm_accept);
+    focusOnly(&a, &.{&c});
+    try testing.expect(pumpTwoUntil(&a, &c, 5000, Two{ .a = &a, .c = &c }, struct {
+        fn f(t: Two) bool {
+            return allClients(t.a.session, isReady) and allClients(t.c.session, isReady);
+        }
+    }.f));
+    try testing.expect(a.session.pending_confirm == .none);
+}
+
+test "LSPB22 신뢰 키는 실제 경로다 — 같은 저장소를 심링크 이름으로 열어도 한 번 묻고 한 줄로 기억하며, 작업 root 는 연 이름 그대로다; 묻는 사이 심링크가 다른 저장소로 바뀌면 그 이름은 띄우지 않고 새 저장소를 묻는다 (계획 WT2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    try fx.dir.dir.createDirPath(testing.io, "repo/.git");
+    try fx.dir.dir.createDirPath(testing.io, "other/.git");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other/b.c", .data = "int b;\n" });
+    try fx.dir.dir.symLink(testing.io, "repo", "alias", .{ .is_directory = true });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/a.c", .data = "int a;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/b.c", .data = "int b;\n" });
+    const real_path = try std.fs.path.join(allocator, &.{ root, "repo", "a.c" });
+    defer allocator.free(real_path);
+    const alias_path = try std.fs.path.join(allocator, &.{ root, "alias", "b.c" });
+    defer allocator.free(alias_path);
+    const t_real = try openPathInActivePane(fx.session, real_path);
+    const t_alias = try openPathInActivePane(fx.session, alias_path);
+
+    // 픽스처의 `doc.zig` 는 바깥 저장소다 — 그 모달은 거부로 넘긴다. 그다음 모달이 repo 의 것이고, **그 하나**가 두 이름의 답이다.
+    var asked_repo = false;
+    var rounds: usize = 0;
+    while (rounds < 4) : (rounds += 1) {
+        lsp_client.pump(fx.session);
+        if (fx.session.pending_confirm != .lsp_trust) continue;
+        const asking = fx.session.editor_lsp.asking_root.?;
+        fx.session.chrome_host.confirm.dismiss();
+        if (std.mem.endsWith(u8, asking, "/repo") or std.mem.endsWith(u8, asking, "/alias")) {
+            asked_repo = true;
+            // 모달이 떠 있는 사이 `alias` 가 다른 저장소를 가리키게 된다(`current → releases/…` 배포 꼴).
+            try fx.dir.dir.deleteFile(testing.io, "alias");
+            try fx.dir.dir.symLink(testing.io, "other", "alias", .{ .is_directory = true });
+            fx.session.dispatchChromeAction(.confirm_accept);
+            break;
+        }
+        fx.session.dispatchChromeAction(.confirm_cancel);
+    }
+    try testing.expect(asked_repo);
+    const r_real = t_real.rt.editor_lsp_root.?;
+    const r_alias = t_alias.rt.editor_lsp_root.?;
+    try testing.expect(std.mem.endsWith(u8, r_real, "/repo") and std.mem.endsWith(u8, r_alias, "/alias")); // 작업 root 는 연 이름 그대로
+    const Ctx = struct { fx: *PaneFixture, a: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .a = t_real }, struct {
+        fn f(c: Ctx) bool {
+            const sa = lsp_client.statusFor(c.fx.session, c.a) orelse return false;
+            return sa.phase == .ready;
+        }
+    }.f));
+    // `alias` 의 서버는 **띄우지 않았다** — 띄우기 직전에 키를 다시 풀어 다른 저장소(`other`)임을 보고, 그 저장소를 묻는다.
+    for (fx.session.editor_lsp.clients.items) |c| if (std.mem.endsWith(u8, c.root, "/alias")) {
+        try testing.expect(c.proc == null);
+        try testing.expect(std.mem.endsWith(u8, c.trust_key.?.path, "/other"));
+    };
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(std.mem.endsWith(u8, fx.session.editor_lsp.asking_root.?, "/alias"));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(fx.session, t_alias).?.phase);
+    try testing.expectEqual(lsp_client.Phase.ready, lsp_client.statusFor(fx.session, t_real).?.phase);
+    // 파일에는 그 저장소의 **실제 경로** 한 줄(심링크 이름이 아니다).
+    const text = try fx.dir.dir.readFileAlloc(testing.io, "state/lsp-trust", allocator, .limited(1 << 16));
+    defer allocator.free(text);
+    var repo_lines: usize = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |l| {
+        const e = maru.session.editor.lsp.trust.parseLine(l) orelse continue;
+        if (!std.mem.endsWith(u8, e.key.path, "/repo")) continue;
+        repo_lines += 1;
+        try testing.expectEqual(maru.session.editor.lsp.trust.Decision.allow, e.decision);
+    }
+    try testing.expectEqual(@as(usize, 1), repo_lines);
+    try testing.expect(std.mem.indexOf(u8, text, "/alias") == null);
+    var other_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const other_path = try std.fmt.bufPrint(&other_buf, "{s}/other", .{root});
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trustFileDecision(text, other_path));
+
+    // 다시 바꾼다 — `alias` → `third`(아직 묻지 않은 저장소). 「다시 묻기」는 **지금의 대상**을 묻는다: 처음 구한 키(other)로 물으면 답이
+    // other 에 기록돼, 사용자가 거부한 저장소가 허용으로 뒤집힌다(적대적 2회차).
+    try fx.dir.dir.createDirPath(testing.io, "third/.git");
+    try fx.dir.dir.deleteFile(testing.io, "alias");
+    try fx.dir.dir.symLink(testing.io, "third", "alias", .{ .is_directory = true });
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == t_alias);
+    lsp_client.activateStatus(fx.session);
+    var tries: usize = 0;
+    while (fx.session.pending_confirm != .lsp_trust and tries < 4) : (tries += 1) lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(std.mem.endsWith(u8, fx.session.editor_lsp.asking_key.?.path, "/third"));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    lsp_client.pump(fx.session);
+    const text2 = try fx.dir.dir.readFileAlloc(testing.io, "state/lsp-trust", allocator, .limited(1 << 16));
+    defer allocator.free(text2);
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trustFileDecision(text2, other_path)); // 뒤집히지 않았다
+    var third_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), trustFileDecision(text2, try std.fmt.bufPrint(&third_buf, "{s}/third", .{root})));
+}
+
+test "LSPB26 같은 root 를 다른 키로 다시 풀면(심링크 대상이 바뀌었다) 옛 키로 떠 있던 서버를 내리고 새 대상을 묻는다 — 거부하면 그 root 의 서버가 하나도 안 돈다 (계획 WT2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.createDirPath(testing.io, "repo/.git");
+    try fx.dir.dir.createDirPath(testing.io, "other/.git");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/a.c", .data = "int a;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other/x.zig", .data = "const x = 1;\n" });
+    try fx.dir.dir.symLink(testing.io, "repo", "alias", .{ .is_directory = true });
+    // 픽스처의 doc.zig(바깥 저장소)는 먼저 거부로 넘긴다.
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const t_a = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/a.c", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    const Ctx = struct { fx: *PaneFixture, t: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .t = t_a }, struct {
+        fn f(c: Ctx) bool {
+            return c.t.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    try testing.expect(clientByExe(fx.session, "clangd").?.proc != null);
+
+    // `alias` 가 다른 저장소를 가리키게 되고, 그 이름으로 새 파일을 연다 — 새 클라이언트가 root 의 키를 새로 풀면 옛 키로 떠 있던 clangd 를
+    // 내린다(그대로면 사용자가 아직 답하지 않은 저장소에서 옛 허용으로 돈다 — 적대적 2회차).
+    try fx.dir.dir.deleteFile(testing.io, "alias");
+    try fx.dir.dir.symLink(testing.io, "other", "alias", .{ .is_directory = true });
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/x.zig", .{root}));
+    lsp_client.pump(fx.session);
+    const clangd = clientByExe(fx.session, "clangd").?;
+    try testing.expect(clangd.proc == null);
+    try testing.expect(std.mem.endsWith(u8, clangd.trust_key.?.path, "/other"));
+    try testing.expectEqual(@as(usize, 0), t_a.rt.editor_diagnostics.lsp.items.len);
+    var tries: usize = 0;
+    while (fx.session.pending_confirm != .lsp_trust and tries < 4) : (tries += 1) lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(std.mem.endsWith(u8, fx.session.editor_lsp.asking_key.?.path, "/other"));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    lsp_client.pump(fx.session);
+    lsp_client.pump(fx.session);
+    for (fx.session.editor_lsp.clients.items) |c| if (std.mem.endsWith(u8, c.root, "/alias")) {
+        try testing.expect(c.proc == null and c.phase == .denied);
+    };
+}
+
+fn clientByExe(session: *AppSession, exe: []const u8) ?*lsp_client.Client {
+    for (session.editor_lsp.clients.items) |*c| if (std.mem.eql(u8, c.server.exe, exe)) return c;
+    return null;
+}
+
+test "LSPB24 「다시 묻기」는 문서가 닫힌 같은 저장소의 서버를 묻지 않고 띄우지 않는다 — 답은 그 클라이언트에도 서고, 허용이면 문서를 다시 열 때 묻지 않고 뜬다 (계획 WT2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    // 같은 저장소(이 tmp 의 가장 가까운 `.git`)에 서버가 둘 — 픽스처의 doc.zig(zls 이름표)와 a.c(clangd 이름표).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "a.c", .data = "int a;\n" });
+    var c_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const t_c = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&c_buf, "{s}/a.c", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    // a.c 를 닫는다 — clangd 클라이언트는 문서 없이 「거부됨」으로 남는다.
+    const pane = pane_ops.activePane(fx.session);
+    const idx = std.mem.indexOfScalar(*Term, pane.terms.items, t_c) orelse return error.NoTerm;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    lsp_client.pump(fx.session);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == fx.term);
+    try testing.expectEqual(lsp_client.Phase.denied, clientByExe(fx.session, "clangd").?.phase);
+
+    // ⑴ doc.zig 에서 「다시 묻기」 → 묻는 동안 문서 없는 clangd 는 **뜨지 않는다** → 거부 → 그대로 거부.
+    lsp_client.activateStatus(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(clientByExe(fx.session, "clangd").?.proc == null);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    lsp_client.pump(fx.session);
+    for (fx.session.editor_lsp.clients.items) |c| {
+        try testing.expect(c.proc == null and c.phase == .denied and !c.reask);
+    }
+    // ⑵ 다시 묻기 → 허용 → zls 는 뜨고, 문서 없는 clangd 는 **잠든 채**(띄우지 않는다, 다시 묻기도 내렸다).
+    lsp_client.activateStatus(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    const Ctx = struct { fx: *PaneFixture };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(c: Ctx) bool {
+            return (clientByExe(c.fx.session, "zls") orelse return false).phase == .ready;
+        }
+    }.f));
+    const clangd = clientByExe(fx.session, "clangd").?;
+    try testing.expect(clangd.proc == null and !clangd.reask and !clangd.trust_pending);
+    // ⑶ a.c 를 다시 열면 묻지 않고 뜬다.
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&c_buf, "{s}/a.c", .{root}));
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(c: Ctx) bool {
+            return (clientByExe(c.fx.session, "clangd") orelse return false).phase == .ready;
+        }
+    }.f));
+    try testing.expect(fx.session.pending_confirm == .none);
+}
+
+test "LSPB25 신뢰 키를 못 구하면(root 가 사라졌다) 묻지도 띄우지도 않고 「실패」로 선다 — tick 마다 다시 풀지 않고, 누르면 다시 시도한다 (계획 WT2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    // 이 문서의 root 를 없는 디렉터리로 굳힌다(열고 나서 저장소가 지워졌다·못 여는 볼륨).
+    if (fx.term.rt.editor_lsp_root) |old| allocator.free(old);
+    fx.term.rt.editor_lsp_root = try std.fmt.allocPrint(allocator, "{s}/gone", .{root});
+    fx.session.editor_lsp.auto_trust_answer = .allow; // 하니스 허용이 있어도 — 무엇을 허용하는지 모르면 띄우지 않는다
+    lsp_client.pump(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .none);
+    const c = clientByExe(fx.session, "zls").?;
+    try testing.expect(c.proc == null and c.trust_key == null);
+    try testing.expectEqual(lsp_client.Phase.failed, lsp_client.statusFor(fx.session, fx.term).?.phase);
+    // 누르면 다시 시도한다 — 이제 그 자리가 있으면 정상 경로로 간다.
+    try fx.dir.dir.createDirPath(testing.io, "gone");
+    lsp_client.activateStatus(fx.session);
+    const Ctx = struct { fx: *PaneFixture };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(x: Ctx) bool {
+            return (clientByExe(x.fx.session, "zls") orelse return false).phase == .ready;
+        }
+    }.f));
+}
+
+test "LSPB27 옛 키를 묻는 모달이 떠 있는 사이 그 root 의 새 키가 서면(심링크 대상이 바뀌었다) 모달을 답 없이 내리고 새 대상을 묻는다 — 답이 옛 대상에 기록되지 않는다 (계획 WT2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.createDirPath(testing.io, "repo/.git");
+    try fx.dir.dir.createDirPath(testing.io, "other/.git");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/a.c", .data = "int a;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other/x.zig", .data = "const x = 1;\n" });
+    try fx.dir.dir.symLink(testing.io, "repo", "alias", .{ .is_directory = true });
+    lsp_client.pump(fx.session); // 픽스처의 doc.zig(바깥 저장소)는 먼저 거부로 넘긴다
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/a.c", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(std.mem.endsWith(u8, fx.session.editor_lsp.asking_key.?.path, "/repo"));
+    var k_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var r_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_key = trust_store.keyFor(try std.fmt.bufPrint(&r_buf, "{s}/repo", .{root}), &k_buf).?;
+    // 모달이 떠 있는 사이 `alias` 가 바뀌고, 그 이름으로 다른 파일이 열린다(외부 `maru open` 등) — 그 클라이언트가 root 의 새 키를 푼다.
+    try fx.dir.dir.deleteFile(testing.io, "alias");
+    try fx.dir.dir.symLink(testing.io, "other", "alias", .{ .is_directory = true });
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/x.zig", .{root}));
+    lsp_client.pump(fx.session);
+    // 옛 대상(repo)을 묻던 모달은 내려갔고 기억하지 않았다 — 그대로 두면 「허용」이 사용자가 보지 않는 repo 에 기록된다.
+    try testing.expect(trust_store.get(repo_key) == null);
+    var tries: usize = 0;
+    while (fx.session.pending_confirm != .lsp_trust and tries < 4) : (tries += 1) lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(std.mem.endsWith(u8, fx.session.editor_lsp.asking_key.?.path, "/other"));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    try testing.expect(trust_store.get(repo_key) == null);
+}
+
+test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리는 recordTrust 하나(표는 그 파일 밖에서 못 고친다), 허용으로 답하는 자리는 confirm 수락 하나, 하니스 스위치는 테스트 빌드에서만 읽힌다 (계획 WT2)" {
+    // 컨트롤 플레인·CLI 는 조회·철회만 한다 — 에이전트가 신뢰를 부여하지 못하게(계획 WT2). 「금지된 모양 0건」이 아니라 **허용된 자리의 수**를
+    // 센다(갈아입은 우회도 수를 바꾼다). 표 자체(`trust_store.store`)는 비공개라 다른 파일은 `decide` 로만 쓸 수 있다.
+    const lsp_src = @embedFile("lsp.zig");
+    const store_src = @embedFile("trust_store.zig");
+    const app_src = @embedFile("../../app_session.zig");
+    const abi_src = @embedFile("../../app_host_abi.zig");
+    const ctl_src = @embedFile("../../control_server.zig");
+    try testing.expect(std.mem.indexOf(u8, store_src, "\nvar store: trust.Store") != null); // 비공개(`pub var` 가 아니다)
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, store_src, "pub var"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "trust_store.decide(")); // recordTrust 안
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "fn recordTrust("));
+    // recordTrust 를 부르는 자리: 사용자의 답(answerTrust)과 테스트 빌드 하니스(gateTrust) 둘.
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, lsp_src, "recordTrust")); // 정의 1 + 호출 2
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "if (builtin.is_test) if (self.editor_lsp.auto_trust_answer) |ans| {"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, lsp_src, "auto_trust_answer")); // 선언 1 + 그 게이트 1
+    // 허용으로 답하는 자리는 chrome 의 confirm 수락 하나, 거부는 취소 하나 — 컨트롤 플레인·ABI 는 신뢰를 건드리지 않는다.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, app_src, "answerTrust"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, app_src, "answerTrust(self, true)"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, app_src, "answerTrust(self, false)"));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, app_src, "trust_store"));
+    for ([_][]const u8{ abi_src, ctl_src }) |src| {
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, src, "answerTrust"));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, src, "trust_store"));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, src, "auto_trust_answer"));
+    }
+    const accept = std.mem.indexOf(u8, app_src, ".confirm_accept => {") orelse return error.NoAccept;
+    const cancel = std.mem.indexOfPos(u8, app_src, accept, ".confirm_cancel => {") orelse return error.NoCancel;
+    const grant = std.mem.indexOf(u8, app_src, "answerTrust(self, true)").?;
+    const refuse = std.mem.indexOf(u8, app_src, "answerTrust(self, false)").?;
+    try testing.expect(grant > accept and grant < cancel);
+    try testing.expect(refuse > cancel);
 }
 
 test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에서 경고 안내가 「…」 없이 끝까지 서고 버튼이 화면 안에 그려진다 (§8.1·계획 WT1)" {
@@ -21493,6 +22057,8 @@ const PaneFixture = struct {
 
     fn init(allocator: std.mem.Allocator) !PaneFixture {
         const io = std.testing.io;
+        // 신뢰 표는 앱 전역이다 — 앞 판정자의 결정이 이 픽스처로 새지 않게 비운다(계획 WT2).
+        trust_store.setDirForTest(null);
         var dir = testing.tmpDir(.{});
         errdefer dir.cleanup();
         try dir.dir.writeFile(io, .{ .sub_path = "doc.zig", .data = "const a = 1;\nconst b = 2;\nconst c = 3;\n" });
@@ -21525,8 +22091,22 @@ const PaneFixture = struct {
         self.session.deinit();
         allocator.destroy(self.session);
         self.dir.cleanup();
+        trust_store.setDirForTest(null);
     }
 };
+
+/// 신뢰 파일에서 그 root 의 결정(마지막 줄이 이긴다) — 키는 제품과 같은 `trust_store.keyFor`(실제 경로·볼륨)다.
+fn trustFileDecision(text: []const u8, root: []const u8) ?maru.session.editor.lsp.trust.Decision {
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(root, &kb) orelse return null;
+    var found: ?maru.session.editor.lsp.trust.Decision = null;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |l| {
+        const e = maru.session.editor.lsp.trust.parseLine(l) orelse continue;
+        if (e.key.eql(key)) found = e.decision;
+    }
+    return found;
+}
 
 test "랩 토글은 뷰 override를 세우고 config를 안 건드린다" {
     // **뷰별 상태다**(VSCode `⌥Z`와 같은 축) — 전역으로 두면 파일 하나를 랩해 보려다 열린 편집기가

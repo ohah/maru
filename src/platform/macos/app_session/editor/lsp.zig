@@ -4,8 +4,9 @@
 //! JSON-RPC 갈래 ④ 열린 편집기 Term 의 동기화(didOpen / 이 프레임에 바뀐 문서의 didChange 한 번)를 돈다. 스레드는 없다 — 원격
 //! 에이전트 스트리머와 같은 결이다.
 //!
-//! **신뢰가 먼저다.** 서버를 찾아도 그 root 의 결정이 없으면 confirm 모달로 묻고(`pending_confirm = .lsp_trust`), 답을
-//! `~/.config/maru/lsp-trust` 에 root 별로 적는다. 거부한 root 는 안 띄우고 안 묻는다 — 상태바 항목을 누르면 다시 묻는다.
+//! **신뢰가 먼저다.** 서버를 찾아도 그 저장소의 결정이 없으면 신뢰 시트(confirm 모달)로 묻고(`pending_confirm = .lsp_trust`), 답을
+//! 앱 전역 표에 둔다(`trust_store` — 키는 실제 경로·볼륨, 파일은 Application Support). 거부한 저장소는 안 띄우고 안 묻는다 — 상태바
+//! 항목을 누르면 다시 묻는다. 한 창의 결정은 다른 창에도 선다(`applyTrustChanges`), 한 저장소는 한 창만 묻는다.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -22,6 +23,7 @@ const tab_ops = @import("../tab.zig");
 const input_ops = @import("../input.zig");
 const term_ops = @import("../term.zig");
 const file_tree_backend = @import("../../file_tree_backend.zig");
+const trust_store = @import("trust_store.zig");
 const editor_hover = @import("hover.zig");
 const editor_ops = @import("mod.zig");
 const editor_definition = @import("definition.zig");
@@ -116,8 +118,16 @@ pub const Client = struct {
     shutdown_at_ms: u64 = 0,
     /// 이번 프로세스를 띄운 시각 — `.starting` 이 `initialize_timeout_ms` 를 넘기는지 잰다.
     started_at_ms: u64 = 0,
-    /// 신뢰 결정을 기다린다(이 root 의 모달이 떠 있거나, 다른 root 의 모달이 먼저다) — 띄우지 않는다.
+    /// 신뢰 결정을 기다린다(이 root 의 모달이 떠 있거나, 다른 root 의 모달이 먼저거나, 다른 창이 같은 저장소를 묻는다) — 띄우지 않는다.
     trust_pending: bool = false,
+    /// 이 root 의 신뢰 키(실제 경로·볼륨 — `trust_store.keyFor`). 처음 신뢰를 볼 때 구해 굳힌다.
+    trust_key: ?OwnedKey = null,
+    /// 기억된 결정을 두고 다시 묻는다(상태바 「거부됨 — 다시 묻기」). 이 창이 답하거나(`answerTrust` — 같은 저장소의 클라이언트 전부)
+    /// 다른 창의 답이 그 뒤에 서면(`applyTrustChanges` — `reask_gen` 보다 늦게 바뀐 결정) 내린다. 답 없이 닫힌 모달(다른 오버레이가
+    /// 덮었다)은 답이 아니라 그대로 두어 다음 gate 가 다시 묻는다.
+    reask: bool = false,
+    /// 「다시 묻기」를 누른 때의 앱 전역 표 세대.
+    reask_gen: u64 = 0,
     /// 마지막으로 보낸 hover 요청의 seq(§8.2b — 응답은 `editor_hover` 가 「지금 기다리는 seq」와 대조한다).
     hover_seq: u32 = 0,
     /// 마지막으로 보낸 definition 요청의 seq(§8.2c).
@@ -176,6 +186,7 @@ pub const Client = struct {
         for (self.docs.items) |d| d.release(allocator);
         self.docs.deinit(allocator);
         self.inbuf.deinit(allocator);
+        if (self.trust_key) |k| k.deinit(allocator);
         allocator.free(self.root);
     }
 
@@ -185,21 +196,39 @@ pub const Client = struct {
     }
 };
 
-pub const TrustEntry = struct { root: []u8, decision: lsp.trust.Decision };
+/// 신뢰 키의 소유본(`lsp.trust.Key` 는 경로를 빌린다).
+pub const OwnedKey = struct {
+    volume: u64,
+    path: []u8,
+
+    pub fn key(self: OwnedKey) lsp.trust.Key {
+        return .{ .volume = self.volume, .path = self.path };
+    }
+
+    fn dupe(allocator: std.mem.Allocator, k: lsp.trust.Key) !OwnedKey {
+        return .{ .volume = k.volume, .path = try allocator.dupe(u8, k.path) };
+    }
+
+    fn deinit(self: OwnedKey, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+    }
+};
 
 pub const State = struct {
     clients: std.ArrayList(Client) = .empty,
     /// 문법마다 고른 서버(§8.2a 「서버 찾기」 — 찾아지는 첫 후보). 세션 동안 기억하고, 「없음」이면 gate 가 다시 고른다.
     resolved: std.EnumArray(maru.session.editor.language.Grammar, ?lsp.servers.Server) = .initFill(null),
-    trust: std.ArrayList(TrustEntry) = .empty,
-    trust_loaded: bool = false,
-    /// 묻는 중인 root(모달의 주인). 답이 오면 그 root 의 클라이언트가 움직인다.
+    /// 묻는 중인 root(모달의 주인 — 시트의 경로 줄)와 그 신뢰 키. 답이 오면 그 키의 클라이언트가 움직인다.
     asking_root: ?[]u8 = null,
+    asking_key: ?OwnedKey = null,
+    /// 마지막으로 적용한 앱 전역 신뢰 표의 세대(`applyTrustChanges`).
+    seen_trust_generation: u64 = 0,
     /// 신뢰 시트의 안내 줄(`setTrustSheetNotes`) — 모달이 빌려 그리므로 모달이 떠 있는 동안 여기 산다. 경로 줄만 버퍼를 쓰고
     /// 나머지는 번역 표의 정적 문장이다.
     trust_root_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
     trust_notes: [5]maru.chrome.components.confirm.Note = undefined,
-    /// 판정자가 켜는 스위치 — 프롬프트 없이 이 답으로 간주한다(하니스 전용). `null` 이면 정상(모달).
+    /// 판정자가 켜는 스위치 — 프롬프트 없이 이 답으로 간주한다. **테스트 빌드에서만 읽는다**(`gateTrust`) — 제품에서는 이 값이
+    /// 무엇이든 신뢰는 사용자의 클릭으로만 선다(계획 WT2, LSPB23). `null` 이면 정상(모달).
     auto_trust_answer: ?lsp.trust.Decision = null,
     /// 판정자 관측: 보낸 didChange 수·받은 publishDiagnostics 수·거부한 서버 요청 수.
     sent_changes: u64 = 0,
@@ -244,9 +273,8 @@ pub const State = struct {
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
         self.clients.deinit(allocator);
-        for (self.trust.items) |t| allocator.free(t.root);
-        self.trust.deinit(allocator);
         if (self.asking_root) |r| allocator.free(r);
+        if (self.asking_key) |k| k.deinit(allocator);
         self.* = .{};
     }
 };
@@ -274,109 +302,178 @@ fn termPath(term: *const Term) ?[]const u8 {
 
 // ── 신뢰 ──────────────────────────────────────────────────────────────────────
 
-fn trustFilePath(self: *AppSession, buf: []u8) ?[]const u8 {
-    const cfg = self.configPath();
-    const dir = std.fs.path.dirname(cfg) orelse return null;
-    return std.fmt.bufPrint(buf, "{s}/lsp-trust", .{dir}) catch null;
+/// 앱 전역 표를 처음 한 번 읽는다 — 옛 자리(설정 파일 옆 `lsp-trust`)가 있으면 이관한다.
+fn ensureTrustLoaded(self: *AppSession) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.ensureLoaded(self.io, trust_store.legacyPathFor(self.configPath(), &buf));
 }
 
-fn loadTrust(self: *AppSession) void {
+/// 앱 전역 묻는 자리에서 이 창을 가리키는 값.
+fn trustOwner(self: *AppSession) usize {
+    return @intFromPtr(self);
+}
+
+/// 그 클라이언트의 신뢰 키 — 처음 한 번 구해 굳힌다(작업 root 는 그대로 — URI·표시가 흔들리지 않게). 실제 경로를 못 구하면(root 가
+/// 사라졌다·못 연다) `null`.
+fn trustKey(self: *AppSession, c: *Client) ?lsp.trust.Key {
+    if (c.trust_key) |k| return k.key();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const k = trust_store.keyFor(c.root, &buf) orelse return null;
+    rekeyRoot(self, c.root, k); // 같은 root 의 다른 클라이언트가 옛 키를 들고 있으면 함께 맞춘다
+    return (c.trust_key orelse return null).key();
+}
+
+/// root 의 신뢰 키가 `key` 다 — 그 root 의 이 창 클라이언트를 **모두** 그 키로 맞춘다(키는 root 의 것이지 클라이언트의 것이 아니다).
+/// 다른 키를 들고 있던 클라이언트(심링크 대상이 그사이 바뀌었다)는 새 대상의 신뢰를 아직 모르므로: 떠 있던 서버를 내리고(옛 저장소의
+/// 허용으로 새 저장소에서 돌면 안 된다) 신뢰를 다시 보게 두며(`trust_pending`), 「다시 묻기」도 내린다(옛 저장소에 대한 물음이었다).
+/// 이 창이 옛 키를 묻고 있었으면 그 모달도 내린다 — 답이 옛 대상에 기록되지 않게. 키가 처음 서는 클라이언트는 그냥 받는다.
+fn rekeyRoot(self: *AppSession, root: []const u8, key: lsp.trust.Key) void {
     const st = &self.editor_lsp;
-    if (st.trust_loaded) return;
-    st.trust_loaded = true;
-    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = trustFilePath(self, &pbuf) orelse return;
-    const contents = readSmallFile(self.allocator, path) orelse return;
-    defer self.allocator.free(contents);
-    // 파일의 결정을 표로 — root 마다 마지막 줄이 이긴다(`lookup` 이 그렇게 읽는다). 표는 root 별로 한 번씩 묻는 캐시다.
-    var it = std.mem.splitScalar(u8, contents, '\n');
-    while (it.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, "\r");
-        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-        const root = line[tab + 1 ..];
-        if (root.len == 0) continue;
-        const decision = lsp.trust.lookup(contents, root) orelse continue;
-        setTrustCached(self, root, decision);
-    }
-}
-
-fn setTrustCached(self: *AppSession, root: []const u8, decision: lsp.trust.Decision) void {
-    const st = &self.editor_lsp;
-    for (st.trust.items) |*t| {
-        if (std.mem.eql(u8, t.root, root)) {
-            t.decision = decision;
-            return;
-        }
-    }
-    const owned = self.allocator.dupe(u8, root) catch return;
-    st.trust.append(self.allocator, .{ .root = owned, .decision = decision }) catch {
-        self.allocator.free(owned);
-    };
-}
-
-fn trustOf(self: *AppSession, root: []const u8) ?lsp.trust.Decision {
-    loadTrust(self);
-    for (self.editor_lsp.trust.items) |t| if (std.mem.eql(u8, t.root, root)) return t.decision;
-    return null;
-}
-
-/// 결정을 파일에 **덧붙인다**(마지막 줄이 이긴다) — 캐시도 갱신.
-fn recordTrust(self: *AppSession, root: []const u8, decision: lsp.trust.Decision) void {
-    setTrustCached(self, root, decision);
-    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = trustFilePath(self, &pbuf) orelse return;
-    var lbuf: [std.fs.max_path_bytes + 16]u8 = undefined;
-    const line = lsp.trust.line(decision, root, &lbuf) orelse return;
-    appendSmallFile(path, line);
-}
-
-fn readSmallFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    var zbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return null;
-    const fd = std.c.open(z.ptr, .{ .ACCMODE = .RDONLY });
-    if (fd < 0) return null;
-    defer _ = std.c.close(fd);
-    var out: std.ArrayList(u8) = .empty;
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const n = std.c.read(fd, &chunk, chunk.len);
-        if (n <= 0) break;
-        out.appendSlice(allocator, chunk[0..@intCast(n)]) catch {
-            out.deinit(allocator);
-            return null;
+    for (st.clients.items) |*o| {
+        if (!std.mem.eql(u8, o.root, root)) continue;
+        const old = o.trust_key orelse {
+            o.trust_key = OwnedKey.dupe(self.allocator, key) catch continue;
+            continue;
         };
-        if (out.items.len > 1 << 20) break; // 신뢰 파일이 1 MB 를 넘을 이유가 없다
+        if (old.key().eql(key)) continue;
+        if (st.asking_key) |ak| if (ak.key().eql(old.key())) dropTrustPrompt(self);
+        const owned = OwnedKey.dupe(self.allocator, key) catch continue;
+        old.deinit(self.allocator);
+        o.trust_key = owned;
+        if (o.proc != null) {
+            dropProcess(self, o);
+            clearClientDiagnostics(self, o);
+            for (o.docs.items) |d| d.release(self.allocator);
+            o.docs.clearRetainingCapacity();
+        }
+        o.trust_pending = true;
+        o.reask = false;
+        o.phase = .restarting;
+        o.retry_at_ms = 0;
     }
-    return out.toOwnedSlice(allocator) catch null;
 }
 
-fn appendSmallFile(path: []const u8, line: []const u8) void {
-    var zbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return;
-    const fd = std.c.open(z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(std.c.mode_t, 0o600));
-    if (fd < 0) return;
-    defer _ = std.c.close(fd);
-    var off: usize = 0;
-    while (off < line.len) {
-        const n = std.c.write(fd, line[off..].ptr, line.len - off);
-        if (n <= 0) return;
-        off += @intCast(n);
+/// 묻던 모달을 답 없이 내린다 — 기억하지 않는다(다음에 다시 묻는다).
+fn dropTrustPrompt(self: *AppSession) void {
+    if (self.pending_confirm == .lsp_trust) {
+        self.chrome_host.confirm.dismiss();
+        self.pending_confirm = .none;
     }
+    dismissTrustPrompt(self);
+    self.metal_dirty = true;
+}
+
+/// 띄우기·묻기 직전에 신뢰 키를 다시 푼다 — root 가 심링크면 그 대상이 키를 구한 뒤에 바뀌었을 수 있다(`current → releases/…`). 그대로면
+/// `true`. 바뀌었으면 그 root 를 새 키로 맞추고(`rekeyRoot`) 신뢰를 다시 보게 한다 — 다음 gate 가 새 키의 결정을 읽거나 묻는다. 못 풀면 「실패」.
+fn trustKeyHolds(self: *AppSession, c: *Client) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const now = trust_store.keyFor(c.root, &buf) orelse {
+        c.trust_pending = true;
+        c.phase = .failed;
+        return false;
+    };
+    if (c.trust_key) |k| if (k.key().eql(now)) return true;
+    rekeyRoot(self, c.root, now); // 이 클라이언트도 — 새 키의 신뢰를 다시 본다
+    return false;
+}
+
+fn sameKey(c: *const Client, key: lsp.trust.Key) bool {
+    const k = c.trust_key orelse return false;
+    return k.key().eql(key);
+}
+
+fn trustOf(self: *AppSession, key: lsp.trust.Key) ?lsp.trust.Decision {
+    ensureTrustLoaded(self);
+    return trust_store.get(key);
+}
+
+/// 결정을 앱 전역 표에 둔다(파일에 한 줄 — 마지막 줄이 이긴다). 다른 창은 세대를 보고 따른다(`applyTrustChanges`).
+fn recordTrust(self: *AppSession, key: lsp.trust.Key, decision: lsp.trust.Decision) void {
+    ensureTrustLoaded(self);
+    trust_store.decide(self.io, key, decision);
+}
+
+/// 묻던 자리를 비운다 — 앱 전역 자리도 놓는다(그 키를 기다리던 다른 창이 다음 gate 에 묻는다).
+fn clearAsking(self: *AppSession) void {
+    const st = &self.editor_lsp;
+    if (st.asking_key) |k| {
+        trust_store.release(k.key(), trustOwner(self));
+        k.deinit(self.allocator);
+        st.asking_key = null;
+    }
+    if (st.asking_root) |r| {
+        self.allocator.free(r);
+        st.asking_root = null;
+    }
+}
+
+/// 다른 창의 결정(앱 전역 표의 세대가 바뀌었다)을 이 창의 클라이언트에 적용한다 — pump 첫머리(`applyDecision`). 이 창이 지금 묻는
+/// 저장소는 그 답이 정한다. 「다시 묻기」 중인 클라이언트는 누른 뒤에 그 저장소의 결정이 바뀌었을 때만 따른다(다른 창의 답이 이
+/// 창의 물음에 대한 답이다 — 같은 답을 또 묻지 않는다). 키를 아직 안 구한 클라이언트는 gate 가 표를 직접 읽는다.
+fn applyTrustChanges(self: *AppSession) void {
+    const st = &self.editor_lsp;
+    const gen = trust_store.generation();
+    if (st.seen_trust_generation == gen) return;
+    st.seen_trust_generation = gen;
+    for (st.clients.items) |*c| {
+        const k = c.trust_key orelse continue;
+        if (st.asking_key) |ak| if (ak.key().eql(k.key())) continue;
+        if (c.reask) {
+            if ((trust_store.changedAt(k.key()) orelse 0) <= c.reask_gen) continue;
+            c.reask = false;
+        }
+        const decision = trust_store.get(k.key()) orelse continue;
+        applyDecision(self, c, decision);
+    }
+    self.metal_dirty = true;
+}
+
+/// 한 클라이언트에 결정을 적용한다(이 창의 답·다른 창의 답이 같은 길). 거부면 떠 있는 서버를 내리고 그 진단을 걷어 「거부됨」으로,
+/// 허용이면 기다리던·묻던·거부됐던 클라이언트를 **잠든 채로** 둔다 — 열린 문서가 있으면 같은 pump 의 `syncDocuments` 가 깨워 띄우고,
+/// 문서가 없는 클라이언트(닫힌 탭의 서버)는 띄우지 않는다. 이미 떠 있거나 재시작을 기다리는 클라이언트는 그대로다.
+fn applyDecision(self: *AppSession, c: *Client, decision: lsp.trust.Decision) void {
+    switch (decision) {
+        .deny => switch (c.phase) {
+            .missing, .denied => {},
+            .asking, .starting, .ready, .restarting, .failed => {
+                dropProcess(self, c);
+                clearClientDiagnostics(self, c);
+                for (c.docs.items) |d| d.release(self.allocator);
+                c.docs.clearRetainingCapacity();
+                c.trust_pending = false;
+                c.phase = .denied;
+            },
+        },
+        .allow => if (c.phase == .denied or c.phase == .asking or (c.phase == .restarting and c.trust_pending)) {
+            c.trust_pending = false;
+            c.phase = .restarting;
+            c.retry_at_ms = std.math.maxInt(u64);
+            c.restarts = 0;
+        },
+    }
+}
+
+/// 그 클라이언트의 문서에 선 서버 진단을 걷는다(낡은 밑줄이 남지 않게 — 서버를 내릴 때).
+fn clearClientDiagnostics(self: *AppSession, c: *Client) void {
+    for (c.docs.items) |d| for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (!d.matches(term)) continue;
+        const diags = &term.rt.editor_diagnostics;
+        diags.lsp.clearRetainingCapacity();
+        diags.lsp_messages.clearRetainingCapacity();
+        diags.lsp_dirty = true;
+    };
 }
 
 /// 모달이 **답 없이** 닫혔다(다른 모달이 덮었다·앱이 끝난다) — 기억하지 않는다. 클라이언트는 다시 물을 수 있게 되돌린다.
 /// 캡처 하니스가 이것을 잡았다: 종료 경로의 `cancelPendingConfirm` 이 「거부」를 파일에 적어 다음 실행이 서버를 안 띄웠다.
 pub fn dismissTrustPrompt(self: *AppSession) void {
     const st = &self.editor_lsp;
-    const root = st.asking_root orelse return;
-    defer {
-        self.allocator.free(root);
-        st.asking_root = null;
-    }
+    const ak = st.asking_key orelse return;
+    defer clearAsking(self);
     for (st.clients.items) |*c| {
-        if (!std.mem.eql(u8, c.root, root) or c.phase != .asking) continue;
+        if (!sameKey(c, ak.key()) or c.phase != .asking) continue;
         c.phase = .restarting;
-        c.trust_pending = true; // 띄우지 않는다 — 다음 gate 가 다시 묻는다
+        c.trust_pending = true; // 띄우지 않는다 — 다음 gate 가 다시 묻는다(「다시 묻기」였으면 그것도 그대로 — 답이 아니다)
     }
 }
 
@@ -403,19 +500,15 @@ fn setTrustSheetNotes(self: *AppSession, root: []const u8) void {
 /// 신뢰 모달의 답(`confirm_accept` / 사용자의 취소) — `app_session` 의 pending_confirm 갈래가 부른다.
 pub fn answerTrust(self: *AppSession, allow: bool) void {
     const st = &self.editor_lsp;
-    const root = st.asking_root orelse return;
-    defer {
-        self.allocator.free(root);
-        st.asking_root = null;
-    }
-    recordTrust(self, root, if (allow) .allow else .deny);
+    const ak = st.asking_key orelse return;
+    defer clearAsking(self);
+    const decision: lsp.trust.Decision = if (allow) .allow else .deny;
+    recordTrust(self, ak.key(), decision);
+    // 같은 저장소의 이 창 클라이언트 **전부** — 묻던 것만이 아니라 「다시 묻기」로 기다리던 것(문서가 닫혀 gate 를 안 지나는 것까지).
     for (st.clients.items) |*c| {
-        if (!std.mem.eql(u8, c.root, root)) continue;
-        if (c.phase != .asking) continue;
-        c.trust_pending = false;
-        c.phase = if (allow) .restarting else .denied; // allow 면 다음 pump 가 띄운다
-        c.retry_at_ms = 0;
-        c.restarts = 0;
+        if (!sameKey(c, ak.key())) continue;
+        c.reask = false;
+        applyDecision(self, c, decision);
     }
     self.metal_dirty = true;
 }
@@ -465,6 +558,7 @@ fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server,
 }
 
 fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
+    if (!trustKeyHolds(self, c)) return;
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = lsp_process.locate(c.server.exe, &pbuf) orelse {
         c.phase = .missing;
@@ -598,6 +692,10 @@ pub fn pump(self: *AppSession) void {
         return;
     }
     const now_ms = self.awakeMs();
+    applyTrustChanges(self);
+    // 묻던 창이 포커스를 잃었다(다른 창으로 갔다·퀵 터미널이 숨었다) — 자리를 내놓는다(답이 아니다 — 기억하지 않는다). 그 저장소를 기다리는
+    // key 창이 다음 pump 에 묻고, 이 창으로 돌아오면 이 창이 다시 묻는다.
+    if (self.editor_lsp.asking_key != null and !self.window_focused) dropTrustPrompt(self);
     syncDocuments(self, now_ms);
     var i: usize = 0;
     while (i < self.editor_lsp.clients.items.len) : (i += 1) {
@@ -936,23 +1034,52 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         }
     }
     if (c.phase == .missing) c.phase = .restarting; // 설치된 것을 이제 봤다
-    const decision = trustOf(self, c.root) orelse {
-        if (self.editor_lsp.auto_trust_answer) |ans| {
-            recordTrust(self, c.root, ans);
+    const key = trustKey(self, c) orelse {
+        // 실제 경로를 못 구했다(root 가 사라졌다·못 연다) — 무엇을 신뢰하는지 모르므로 띄우지 않는다. 「실패 — 다시」로 세워 tick 마다
+        // 다시 풀지 않고, 누르면 다시 시도한다.
+        c.trust_pending = true;
+        c.phase = .failed;
+        return;
+    };
+    const stored = if (c.reask) null else trustOf(self, key);
+    const decision = stored orelse {
+        if (builtin.is_test) if (self.editor_lsp.auto_trust_answer) |ans| {
+            recordTrust(self, key, ans);
             c.trust_pending = false;
+            c.reask = false;
             if (ans == .deny) c.phase = .denied;
             return;
-        }
+        };
         c.trust_pending = true; // 답이 올 때까지 **띄우지 않는다** — 다른 root 의 모달이 먼저라도 같다
-        if (self.editor_lsp.asking_root) |asking| {
-            if (std.mem.eql(u8, asking, c.root)) c.phase = .asking; // 같은 root 의 다른 서버 — 그 모달이 답이다
+        if (self.editor_lsp.asking_key) |asking| {
+            if (asking.key().eql(key)) c.phase = .asking; // 같은 저장소의 다른 서버 — 그 모달이 답이다
             return; // 한 번에 하나
         }
+        // 묻는 것은 **지금 보고 있는 창(key 창)** 뿐이다 — 뒤쪽 창·숨은 퀵 터미널이 물으면 사용자는 모달을 못 찾고 모든 창이 「허락 대기」로
+        // 멈춘다. 다른 창은 그 답을 기다리고, 포커스가 오면 묻는다(묻던 창이 포커스를 잃으면 자리를 내놓는다 — `pump`).
+        if (!self.window_focused) return;
+        // 다른 창이 같은 저장소를 묻고 있으면 그 답을 기다린다(두 창이 같은 저장소를 동시에 묻지 않게 — 계획 WT2). 할당 전에 본다 —
+        // 기다리는 창이 tick 마다 복사했다 버리지 않게.
+        if (trust_store.claimant(key)) |o| if (o != trustOwner(self)) return;
         // 다른 오버레이(알림 토스트·팔레트·설정)가 떠 있으면 **기다린다** — 지금 띄우면 그쪽이 우리 모달을 닫고(`showNotice` →
         // `cancelPendingClose`) 다음 tick 에 또 띄워 깜빡인다(캡처 하니스에서 실측: 작업 공간 복원 알림과 겹쳤다).
         if (self.anyOverlayOpen()) return;
-        const owned = self.allocator.dupe(u8, c.root) catch return;
-        self.editor_lsp.asking_root = owned;
+        // 묻기 직전에 키를 다시 푼다 — 처음 구한 뒤 심링크 대상이 바뀌었으면 옛 대상을 묻게 되고, 답이 옛 대상에 기록된다(「다시 묻기」가
+        // 그렇게 사용자가 거부했던 저장소를 허용으로 뒤집었다).
+        if (!trustKeyHolds(self, c)) return;
+        const owned_root = self.allocator.dupe(u8, c.root) catch return;
+        const owned_key = OwnedKey.dupe(self.allocator, key) catch {
+            self.allocator.free(owned_root);
+            return;
+        };
+        // 답이 오면 표에 결정이 서고, 답 없이 닫히면 자리가 비어 다음 gate 가 여기서 묻는다.
+        if (!trust_store.claim(key, trustOwner(self))) {
+            self.allocator.free(owned_root);
+            owned_key.deinit(self.allocator);
+            return;
+        }
+        self.editor_lsp.asking_root = owned_root;
+        self.editor_lsp.asking_key = owned_key;
         c.phase = .asking;
         var msg_buf: [512]u8 = undefined;
         const text = maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = c.server.exe }});
@@ -1540,16 +1667,19 @@ pub fn activateStatus(self: *AppSession) void {
         .denied => {
             const root = rootFor(self, term) orelse return;
             const c = clientFor(self, root, server) orelse return;
-            // 캐시의 거부를 지워 다음 pump 가 다시 묻게 한다(파일에는 새 답이 덧붙는다).
-            for (self.editor_lsp.trust.items, 0..) |t, i| {
-                if (std.mem.eql(u8, t.root, root)) {
-                    self.allocator.free(t.root);
-                    _ = self.editor_lsp.trust.swapRemove(i);
-                    break;
-                }
+            // 기억된 거부는 그대로 두고 **이 창에서** 다시 묻는다 — 답하면 표가 바뀌어 다른 창도 따르고, 모달이 답 없이 닫히면(다른
+            // 오버레이가 덮었다) 다음 gate 가 또 묻는다. 같은 저장소의 이 창 클라이언트가 함께 기다린다(한 모달이 답이다). **띄우지
+            // 않는다**(`trust_pending`) — 문서가 닫힌 클라이언트는 gate 를 안 지나 그대로면 묻지도 않고 뜬다.
+            const key = (c.trust_key orelse return).key();
+            const gen = trust_store.generation();
+            for (self.editor_lsp.clients.items) |*o| {
+                if (!sameKey(o, key) or o.phase != .denied) continue;
+                o.reask = true;
+                o.reask_gen = gen;
+                o.trust_pending = true;
+                o.phase = .restarting;
+                o.retry_at_ms = 0;
             }
-            c.phase = .restarting;
-            c.retry_at_ms = 0;
         },
         .failed => {
             const root = rootFor(self, term) orelse return;
@@ -1574,6 +1704,7 @@ pub fn noteTermClosing(self: *AppSession, term: *Term) void {
 /// 보내지 않는다 — 응답을 기다리는 왕복이 종료 경로를 늘린다.
 pub fn deinit(self: *AppSession) void {
     lowerServers(self);
+    trust_store.release(null, trustOwner(self)); // 이 창이 잡은 묻는 자리 — 기다리던 다른 창이 묻게
     self.editor_lsp.deinit(self.allocator);
 }
 
@@ -1600,21 +1731,9 @@ fn stopAll(self: *AppSession) void {
     const st = &self.editor_lsp;
     lowerServers(self); // 세션 종료와 같은 길 — stdin 을 닫아 스스로 내려가게 하고 남은 것을 그룹째, 기다림을 놓는다
     for (st.clients.items) |*c| {
-        for (c.docs.items) |d| for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-            if (!d.matches(term)) continue;
-            const diags = &term.rt.editor_diagnostics;
-            diags.lsp.clearRetainingCapacity();
-            diags.lsp_messages.clearRetainingCapacity();
-            diags.lsp_dirty = true;
-        };
+        clearClientDiagnostics(self, c);
         c.deinit(self.allocator);
     }
     st.clients.clearRetainingCapacity();
-    if (self.pending_confirm == .lsp_trust) {
-        // 묻던 모달도 내린다 — 답할 서버가 없다. 기억하지 않는다(다시 켜면 다시 묻는다).
-        self.chrome_host.confirm.dismiss();
-        self.pending_confirm = .none;
-    }
-    dismissTrustPrompt(self);
-    self.metal_dirty = true;
+    dropTrustPrompt(self); // 묻던 모달도 내린다 — 답할 서버가 없다. 기억하지 않는다(다시 켜면 다시 묻는다)
 }

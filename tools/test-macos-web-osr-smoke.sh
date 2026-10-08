@@ -1926,8 +1926,8 @@ check(files == ['big (1).zip', 'big.zip'], f'both files are in ~/Downloads ({fil
 sys.exit(0 if ok else 1)
 PY
 # 받는 중에 앱과 sidecar 가 함께 죽으면(여기서는 이 시험이 띄운 그 앱과 그 자식만 SIGKILL) 미리 만든 빈 `.maru-part` 와 Chromium 이
-# 받던 ` (1)` 형제(데이터)가 남는다 — 다음 실행이 프로필을 잡을 때 그 기록(프로필의 `maru-download-parts`)에 있는 것과 그 형제만
-# 지운다(사용자 결정 2026-10-09). 같은 HOME 으로 두 번 띄운다(`run_app` 은 HOME 을 비운다).
+# 받던 ` (1)` 형제(데이터)가 남는다 — 다음 실행에서 maru 는 그 기록(프로필의 `maru-download-parts`)의 빈 파일을, Chromium 은 자기
+# 형제를 지운다(사용자 결정 2026-10-09 — 형제는 판정 `dl-crash-restart`). 같은 HOME 으로 두 번 띄운다(`run_app` 은 HOME 을 비운다).
 rm -rf "$root/home" && mkdir -p "$root/home"
 printf 'sleep 7000\nmouse 1 0 0 338 302 0\nmouse 3 0 0 338 302 0\nsleep 30000\n' > "$root/dlcrash.txt"
 : > "$root/requests.log"
@@ -1955,7 +1955,7 @@ case "$part_after_kill" in *"big.zip (1).maru-part"*) ;; *) echo "WARN the data 
 [ "${journal_lines:-0}" -ge 1 ] || fail "the part file was not recorded in the profile's part journal"
 case "$part_after_restart" in *maru-part*) fail "the next launch did not remove the leftover part file ([$part_after_restart])" ;; esac
 [ "$journal_after" = 0 ] || fail "the part journal was not emptied after cleaning ($journal_after bytes — 정리 뒤 기록은 없거나 비어 있어야 한다)"
-echo "PASS part files left by a killed app and sidecar (the empty placeholder and Chromium's data sibling) are removed by the next launch and the journal is emptied"
+echo "PASS part files left by a killed app and sidecar are gone after the next launch — maru removes its journaled placeholder, Chromium its data sibling — and the journal is emptied"
 
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
 # 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그

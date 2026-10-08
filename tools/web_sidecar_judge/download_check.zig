@@ -16,6 +16,8 @@
 //!   dl-park        받는 중(결정 뒤) 브라우저를 숨기고 about:blank 로 보내도 끝까지 받는다 — 새 문서 표지(`page_started`)도 온다(W10c:
 //!                  maru 는 받는 중인 탭을 닫으면 브라우저를 이렇게 남기고, 물은 닫기는 이 표지로 닫힌 것을 안다)
 //!   dl-park-held   결정 전(보류·묻는 중)에 그렇게 보낸 뒤 1.5 초 뒤 결정해도 끝까지 받는다(닫은 탭의 보류를 목록에서 받기)
+//!   dl-crash-restart 받는 도중 host 를 SIGKILL 하면 Chromium 이 받던 ` (1)` 형제와 미리 만든 빈 파일이 남고, 같은 프로필로 다시
+//!                  띄우면 Chromium 이 그 형제를 스스로 지운다(W10d — maru 는 자기 기록의 빈 파일만 지운다). 본 host 를 끈 뒤 맨 끝에서
 //!   dl-selfclose   다운로드를 시작한 페이지가 스스로 닫으면(`window.close`) sidecar 가 닫지 않고 `page_close_kept` 를 보내고(W10d —
 //!                  닫으면 끊긴다), maru 처럼 숨겨 about:blank 로 보내면 끝까지 받고, 그 뒤 maru 의 닫기(`destroy_browser`)는 그대로 닫힌다
 //!   dl-multiple    사용자 동작 없는 둘째 자동 다운로드는 「여러 파일 받기」 권한을 묻고, 허용하면 begin 이 온다
@@ -720,5 +722,48 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
             if (finished.last) |st| @tagName(st) else "없음",
             finished.received,
         }) catch "");
+    }
+    // 본 host 를 끈 뒤 같은 프로필로(다른 프로필의 host 를 함께 띄우면 CEF 초기화가 실패한다 — 실측).
+    host.send(.shutdown) catch {};
+    _ = host.wait(15_000);
+    // ── 받는 도중 host 를 SIGKILL 한 뒤 같은 프로필로 다시 띄우면 Chromium 이 자기 ` (1)` 형제를 지운다(W10d) ──
+    check: {
+        var path_buf: [1100]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/killed.bin.maru-part", .{dir});
+        _ = precreate(path) orelse {
+            report(false, "dl-crash-restart", "미리 만들지 못했다");
+            break :check;
+        };
+        var sib_buf: [1100]u8 = undefined;
+        const sib = try std.fmt.bufPrintZ(&sib_buf, "{s}/killed.bin (1).maru-part", .{dir});
+        var a = try Host.spawn(host_path, profile_arg);
+        try browsers_check.handshake(&a);
+        open(&a, 90, &u, port, "/dlp?a=slow") catch {
+            report(false, "dl-crash-restart", "페이지가 열리지 않았다");
+            _ = std.c.kill(a.pid, std.c.SIG.KILL);
+            _ = a.wait(5000);
+            break :check;
+        };
+        const begin = waitBegin(&a, 90, 5000) orelse {
+            report(false, "dl-crash-restart", "download_begin 이 오지 않았다");
+            _ = std.c.kill(a.pid, std.c.SIG.KILL);
+            _ = a.wait(5000);
+            break :check;
+        };
+        try a.send(.{ .download_decide = .{ .browser = 90, .download = begin.download, .path = path } });
+        _ = watch(&a, 90, begin.download, 3000, false, 300_000);
+        const sib_before = fileSize(sib);
+        _ = std.c.kill(a.pid, std.c.SIG.KILL);
+        _ = a.wait(5000);
+        os.sleepMs(2000);
+        const sib_after_kill = fileSize(sib);
+        var b = try Host.spawn(host_path, profile_arg);
+        try browsers_check.handshake(&b);
+        try b.send(.{ .create_browser = .{ .browser = 91, .size = size, .hidden = false, .url = "about:blank" } });
+        os.sleepMs(6000);
+        const sib_after_restart = fileSize(sib);
+        report(sib_before > 0 and sib_after_kill > 0 and sib_after_restart < 0 and fileSize(path) == 0, "dl-crash-restart", std.fmt.bufPrint(&detail_buf, "Chromium 이 받던 ` (1)` 형제 {d} 바이트 · SIGKILL 뒤 {d} · 같은 프로필로 다시 띄우고 6 초 뒤 {d}(-1 = 없음) · 미리 만든 빈 파일 {d} 바이트(남는다 — maru 의 기록이 지운다)", .{ sib_before, sib_after_kill, sib_after_restart, fileSize(path) }) catch "");
+        b.send(.shutdown) catch {};
+        _ = b.wait(8000);
     }
 }

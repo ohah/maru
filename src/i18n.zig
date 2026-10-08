@@ -1211,6 +1211,8 @@ const Table = struct {
     dl_empty: [:0]const u8,
     /// 상태 줄 — `{0}` 상태, `{1}` 크기(받은 양 / 크기).
     dl_status_with: [:0]const u8,
+    /// 보류 — `{0}` 받으려 한 곳(호스트).
+    dl_state_held_from: [:0]const u8,
     /// `{0}` 받은 양, `{1}` 크기.
     dl_sizes_of: [:0]const u8,
 
@@ -1860,6 +1862,7 @@ const en: Table = .{
     .dl_button_clear = "Clear Finished",
     .dl_empty = "No downloads",
     .dl_status_with = "{0} \u{2014} {1}",
+    .dl_state_held_from = "Held \u{2014} {0} wants to save a file that could run code. Download it?",
     .dl_sizes_of = "{0} of {1}",
     .scm_show_all_more = "Show all ({0} more)",
     .scm_load_more = "Load more commits",
@@ -2741,6 +2744,7 @@ const ko: Table = .{
     .dl_button_clear = "끝난 것 지우기",
     .dl_empty = "다운로드가 없습니다",
     .dl_status_with = "{0} \u{2014} {1}",
+    .dl_state_held_from = "보류됨 \u{2014} {0}에서 실행될 수 있는 파일을 저장하려 합니다. 받을까요?",
     .dl_sizes_of = "{1} 중 {0}",
     .scm_show_all_more = "모두 보기 ({0}개 더)",
     .scm_load_more = "커밋 더 보기",

@@ -8882,6 +8882,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 } else {
                     Self.testReport("dl-miss")
                 }
+            case "dlwinsnap" where line.count >= 2:
+                // W10a: 다운로드 목록 창 내용을 그 경로에 PNG 로(창이 없거나 안 보이면 dl-miss).
+                Self.testReport(downloadsWindow?.testSnapshot(to: line[1]) == true ? "dlwinsnap ok" : "dl-miss")
             case "dlsnap" where line.count >= 2:
                 // W6m②: 띄운 창 내용을 그 경로에 PNG 로(창이 없으면 dl-miss).
                 Self.testReport(activeSurface?.osrDatalistPopup?.testSnapshot(to: line[1]) == true ? "dlsnap ok" : "dl-miss")

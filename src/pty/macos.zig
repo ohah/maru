@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin"); // 이 파일은 macOS 전용이지만 테스트는 Linux CI에서도 컴파일된다 — skip 가드용
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
+const inherited_env = @import("../inherited_env.zig");
 // maru 자체 terminfo 로컬 캐시(경로·버전·컴파일 명령)의 단일 출처. `maru terminfo` 서브커맨드(cli)와 공유해,
 // 서브커맨드로 재컴파일한 캐시를 여기 spawn 자동 컴파일이 그대로 재사용한다(top-level 중립 모듈 — color.zig 결).
 const terminfo_cache = @import("../terminfo_cache.zig");
@@ -1654,18 +1655,12 @@ const EnvStorage = struct {
             }
         }
         for (inherited.items) |slice| {
-            if (std.mem.startsWith(u8, slice, "TERM=") or std.mem.startsWith(u8, slice, "COLORTERM=")) continue;
-            // 부모(런처/상위 터미널)의 TERMINFO도 떨군다 — 아래에서 maru 캐시를 가리키거나, 폴백이면 안 준다.
-            // 부모 TERMINFO를 그대로 두면 xterm-maru를 엉뚱한 DB에서 찾아 못 찾을 수 있다.
-            if (std.mem.startsWith(u8, slice, "TERMINFO=")) continue;
-            // 부모(런처/상위 터미널)가 남긴 TERM_PROGRAM(+VERSION)을 떨군다 — 아래에서 ghostty로 덮어쓴다(알림 식별용).
-            if (std.mem.startsWith(u8, slice, "TERM_PROGRAM=") or std.mem.startsWith(u8, slice, "TERM_PROGRAM_VERSION=")) continue;
-            // 런처(빌드 도구·부모 셸·CI)가 남긴 색-강제 override를 떨군다. supports-color(codex 등)는
-            // CLICOLOR_FORCE!=0 / FORCE_COLOR을 env_force_color로 먼저 평가해 색 레벨을 강제하는데, 흔히 1(basic
-            // 16색)이라 COLORTERM=truecolor를 무시하고 truecolor를 끈다(실측: `zig build`로 띄운 maru에서 상속된
-            // CLICOLOR_FORCE=1 때문에 codex가 입력창 회색 컴포저를 truecolor로 못 그림 — GUI 실행 시엔 없어 정상).
-            // maru가 터미널이므로 색 capability는 위 COLORTERM/TERM으로만 알린다 — 이 force 변수는 자식에 안 넘긴다.
-            if (std.mem.startsWith(u8, slice, "CLICOLOR_FORCE=") or std.mem.startsWith(u8, slice, "FORCE_COLOR=")) continue;
+            // 터미널 세션 변수(목록 하나 — `inherited_env.zig`)를 떨군다. TERM/COLORTERM/TERM_PROGRAM 은 아래에서 우리 값으로
+            // 넣고(중복 키는 첫 항목이 이긴다) TERMINFO 는 maru 캐시가 있을 때만 넣는다(폴백이면 안 준다 — 부모 것은 엉뚱한 DB), 색 강제(`CLICOLOR_FORCE`·`FORCE_COLOR` — 실측: `zig build` 로 띄운 maru 에서
+            // 상속된 CLICOLOR_FORCE=1 때문에 codex 가 truecolor 를 못 그렸다)는 안 넘긴다. 부모의 `MARU_PANE_ID`·`MARU_HOOK_*`
+            // (#1131 env-상속 오염)와 바깥 멀티플렉서의 `TMUX`·`TMUX_PANE`(셸 통합이 OSC 를 tmux passthrough 로 감싸 cwd 보고가
+            // 유실됐다)도 같은 부류다. 이유의 단일 출처는 그 모듈 머리 주석이다.
+            if (inherited_env.isTerminalSession(slice, false)) continue;
             if (zdotdir != null) {
                 if (std.mem.startsWith(u8, slice, "ZDOTDIR=")) {
                     old_zdotdir = slice["ZDOTDIR=".len..];
@@ -1676,18 +1671,6 @@ const EnvStorage = struct {
             // ssh 라우팅을 주입할 거면 부모가 남긴 동명 키를 떨군다(중복 키는 첫 항목이 이기므로).
             if (ssh_integration_bin != null and
                 (std.mem.startsWith(u8, slice, "MARU_BIN=") or std.mem.startsWith(u8, slice, "MARU_SSH_INTEGRATION="))) continue;
-            // 부모가 남긴 MARU_PANE_ID는 항상 떨군다. non-null이면 tail에서 현재 GUI surface id를 새로 넣고,
-            // persistent child처럼 null이면 selector 자체가 없어야 한다. maru를 maru 팬 안에서 띄웠을 때 바깥
-            // 팬 id를 상속하면 다른 surface를 self로 오인한다. 이게 #1131 env-상속 오염을 원천 차단하는 지점이다.
-            if (isPaneSelectorEntry(slice)) continue;
-            // 바깥 **터미널 멀티플렉서**의 신원도 같은 이유로 떨군다. maru가 spawn하는 셸은 tmux pane이
-            // **아닌데**, maru를 tmux 팬 안에서 띄우면(`zig build run`·`nohup ./Maru.app/...`) 그 셸이 바깥
-            // 서버의 `TMUX`/`TMUX_PANE`를 물려받아 "나는 tmux 안"이라고 착각한다. 그 거짓말을 믿는 도구가
-            // 오작동한다 — 실측: 셸 통합/프롬프트가 OSC를 **DCS passthrough**(`\ePtmux;…`)로 감싸 내보내는데
-            // 바깥 maru는 tmux가 아니라 그걸 못 풀어, cwd 보고(OSC 7)가 통째로 유실되고 사이드바의 경로·git
-            // 브랜치 줄이 사라졌다(OSC 133은 감싸지 않는 구현이라 도착해, 원인이 한참 가려졌다). `tmux` 명령이
-            // 엉뚱한 서버를 조작하는 것도 같은 뿌리다. `MARU_PANE_ID`를 떨구는 것과 **같은 부류**의 오염 차단이다.
-            if (isMultiplexerEntry(slice)) continue;
             // append 인자 안에서 dupe하면 OOM 시 새므로(errdefer는 entries.items만 해제) appendOwnedEnv로 묶는다.
             try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, slice));
         }
@@ -1781,12 +1764,6 @@ const EnvStorage = struct {
             else => {},
         };
         return true;
-    }
-
-    /// 바깥 터미널 멀티플렉서가 자기 pane 안 프로세스에만 세우는 신원 변수인가. maru가 그 안에서 실행됐어도
-    /// **maru가 spawn하는 셸은 그 pane이 아니므로** 상속하면 거짓이 된다(위 호출부 주석이 실측 증상의 단일 출처).
-    fn isMultiplexerEntry(entry: []const u8) bool {
-        return std.mem.startsWith(u8, entry, "TMUX=") or std.mem.startsWith(u8, entry, "TMUX_PANE=");
     }
 
     // 두 init 경로 모두 owned envp를 만든다(빈 env면 부모 복사 + TERM 덮어쓰기, 명시 env면 그대로).

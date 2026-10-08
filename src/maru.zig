@@ -45,6 +45,7 @@ pub const terminal = @import("terminal.zig");
 pub const terminfo_cache = @import("terminfo_cache.zig"); // maru 자체 terminfo 로컬 캐시 단일 출처(pty 자동 컴파일 + cli 서브커맨드 공용)
 pub const width = @import("width.zig"); // Unicode 셀 폭(EAW) — 레이어 무관 중립 유틸(terminal·chrome·platform 공용)
 pub const grapheme = @import("grapheme.zig"); // UAX#29 grapheme cluster 분절 — 레이어 무관 중립 유틸(terminal·chrome 공용, width.zig와 동격)
+pub const inherited_env = @import("inherited_env.zig"); // 자식(PTY 셸·언어 서버 환경 해석기)에게 물려주지 않는 터미널 세션 변수 — 목록 하나
 pub const path_shape = @import("path_shape.zig"); // 경로 모양(절대·루트·구분자) 판정 — L1 링크 감지와 L2 경로 가드가 공유하는 중립 유틸
 pub const scm_items = @import("scm_items.zig"); // 소스 컨트롤 행 모델 → 컴포넌트 항목. session 과 chrome 이 서로를 import 못 해 둘 다 밖에 산다
 pub const sidebar_glyph_rows = @import("sidebar_glyph_rows.zig"); // 사이드바 카드 글자의 세로 자리 — 인코더/디코더 한 쌍. chrome 과 renderer 를 다 봐서 둘 중 어느 쪽에도 못 산다

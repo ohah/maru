@@ -194,6 +194,8 @@ pub const editor = struct {
         pub const position = @import("session/lsp/position.zig");
         pub const servers = @import("session/lsp/servers.zig");
         pub const trust = @import("session/lsp/trust.zig");
+        /// 도구 환경 해석기의 순수 계산(계획 workspace-trust WT3a) — 셸별 인자·명령·결과 읽기·위생·PATH 정리.
+        pub const shell_env = @import("session/lsp/shell_env.zig");
         /// `TextEdit[]` → `Delta`(tooling §8.2e · document-model §3.6).
         pub const text_edits = @import("session/lsp/text_edits.zig");
         /// `WorkspaceEdit` → 파일별 `TextEdit[]`(tooling §8.2f).

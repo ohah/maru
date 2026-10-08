@@ -338,7 +338,7 @@ formatter/linter와 LSP는 모두 저장소의 config/plugin/binary를 실행할
 
 - **저장소(workspace) 단위 신뢰 하나** — LSP·포매터·린터·작업을 함께 덮는다. 서버·도구별로 묻지 않는다(2026-10-07 사용자 승인). 위험의 단위는 「저장소가 정한 코드가 사용자 권한으로 돈다」이고 도구별 허락은 묻는 횟수만 늘린다 — VS Code·JetBrains·Zed 와 같은 단위다
 - 해결된 executable 표시
-- 도구는 shell 없이 argv 로 실행한다(셸은 사용자 환경을 담는 데만 쓴다). canonical cwd=root. environment 는 **사용자 셸 환경에서 maru 내부·터미널 세션 변수를 뺀 것**이고 PATH 는 절대 경로 항목만이다(2026-10-07 사용자 승인). 사용자 셸 환경을 얻으려면 사용자의 셸 설정 파일을 실행한다 — 끄는 스위치는 [계획](plans/workspace-trust.md#결정-대기)이 정한다. 최소화하지 않는 이유: 서버는 사용자 권한으로 돌아 환경을 줄여도 `~` 아래 파일을 그대로 읽고, 허용 목록은 기본값을 바꾼 툴체인 설정을 깨뜨린다. 격리가 필요해지면 OS 샌드박스의 일이다
+- 도구는 shell 없이 argv 로 실행한다(셸은 사용자 환경을 담는 데만 쓴다). canonical cwd=root. environment 는 **사용자 셸 환경에서 maru 내부·터미널 세션 변수를 뺀 것**이고 PATH 는 절대 경로 항목만이다(2026-10-07 사용자 승인). 사용자 셸 환경을 얻으려면 사용자의 셸 설정 파일을 실행한다 — 끄는 스위치 `lsp.shell-environment`(기본 켬 — 끄면 앱 환경 + 통상 설치 위치)를 둔다([계획](plans/workspace-trust.md#결정-2026-10-07), 2026-10-08 사용자 결정). 최소화하지 않는 이유: 서버는 사용자 권한으로 돌아 환경을 줄여도 `~` 아래 파일을 그대로 읽고, 허용 목록은 기본값을 바꾼 툴체인 설정을 깨뜨린다. 격리가 필요해지면 OS 샌드박스의 일이다
 - timeout, stdout/stderr byte 상한, child/process-group 상한, cancellation/kill/reap
 - config discovery 결과와 실제 executable/version을 사용자 및 trace에 노출
 - 포맷 결과는 곧바로 저장하지 않고 현재 revision에 대한 text edits로 반환

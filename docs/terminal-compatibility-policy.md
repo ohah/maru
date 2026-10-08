@@ -83,6 +83,8 @@ terminfo DB에 병합돼 원격이 대체로 이미 갖고 있고 `ssh-env`/`ssh
 
 Maru는 자식 셸 env에서 부모 `TERM`/`COLORTERM`을 위 값으로 덮을 뿐 아니라, 런처(빌드 도구·CI·부모 셸)가 남긴 **색-강제 override**(`CLICOLOR_FORCE`, `FORCE_COLOR`)도 **제거**한다. Maru가 터미널이므로 색 capability는 `COLORTERM`/`TERM`으로만 알린다 — 이 force 변수는 그 신호를 덮어써 잘못된 색 레벨을 강제한다.
 
+부모 환경에서 떨구는 터미널 세션 변수(`TERM`·`COLORTERM`·`TERMINFO`·`TERM_PROGRAM(_VERSION)`·이 두 force 변수·`MARU_PANE_ID`·`MARU_HOOK_*`·`TMUX`·`TMUX_PANE`)는 **목록 하나**(`src/inherited_env.zig`)이고 macOS·Windows PTY 와 언어 서버 환경 해석기([워크스페이스 신뢰 계획](plans/workspace-trust.md) WT3)가 함께 쓴다 — 갈리면 같은 오염이 한쪽에서만 막힌다.
+
 근거(실측): `zig build`로 Maru를 띄우면 빌드 컨텍스트의 `CLICOLOR_FORCE=1`이 상속돼 자식 셸로 전파됐다. Rust `supports-color`(codex 등이 사용)는 `env_force_color`로 `CLICOLOR_FORCE!=0`·`FORCE_COLOR`을 **가장 먼저** 평가해 색 레벨을 강제(보통 basic 16색)하므로 `COLORTERM=truecolor`를 무시한다 → codex가 truecolor를 못 보고 입력창 회색 컴포저(pill 배경)를 끈다. GUI(Finder) 실행 시엔 이 변수가 없어 정상이라, 개발 중 `zig build`로 띄울 때만 나타나는 함정이었다. `NO_COLOR`/`CLICOLOR`는 사용자 의도(색 끄기 선호)일 수 있어 건드리지 않는다.
 
 ### 자기 신원 (`TERM_PROGRAM=maru`)

@@ -719,12 +719,15 @@ test "a click counts as the user starting a download only until the page moves o
     surfaces.getPtr(7).?.last_user_input_ms = monotonicNow() + 1; // 새 페이지에서 다시 눌렀다
     try std.testing.expect(recentUserInput(7, 3000, monotonicNow() + 1));
     // 주소창에 친 주소는 다운로드의 사용자 동작이다(문서를 열면 `page_started` 가 지운다) — 제안 목록 막음의 입력 시각은 그대로다.
+    // 페이지가 연 탭이어도 이제 사용자의 탭이다(W10c — 빈 다운로드 탭으로 닫지 않는다).
+    surfaces.getPtr(7).?.page_opened = true;
     // (시각은 정해 둔다 — 같은 밀리초 안의 순서에 기대지 않게.)
     const s7 = surfaces.getPtr(7).?;
     s7.last_user_input_ms = 100;
     s7.last_nav_ms = 200;
     noteUserNavigation(7);
     try std.testing.expect(recentUserInput(7, 3000, monotonicNow()));
+    try std.testing.expect(!surfaces.getPtr(7).?.page_opened);
     try std.testing.expectEqual(@as(i64, 100), s7.last_user_input_ms);
     s7.last_nav_ms = monotonicNow() + 5; // 친 주소가 문서를 열었다(그 뒤)
     try std.testing.expect(!recentUserInput(7, 3000, monotonicNow() + 5));
@@ -1329,6 +1332,9 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
 pub fn noteUserNavigation(surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.download_gesture_ms = monotonicNow();
+    // W10c: 사용자가 이 탭을 쓴다 — 페이지가 연 빈 탭이어도 이제 사용자의 탭이다(주소창에 친 파일 주소에 그 탭이 닫혔다 — 적대
+    // 리뷰 2 회차).
+    s.page_opened = false;
 }
 
 /// 이 탭의 다운로드용 사용자 동작 시각 — 페이지 입력과 다운로드만의 것 중 나중 것, 그 뒤로 새 문서가 오지 않았을 때만.
@@ -2540,6 +2546,7 @@ pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.page_closed = false;
     s.popup_opener = 0; // 이제 보통 탭이다 — 나중에 닫혀도 옛 연 탭으로 가지 않는다
+    s.page_opened = false; // W10c: 빈 다운로드 탭으로 닫지 않는다(사용자가 쓰는 보통 탭이다 — 적대 리뷰 2 회차)
     s.composing = false; // 닫힌 페이지의 조합은 끝났다(창이 입력기 쪽을 버린다 — `osr_discard_marked`)
     dropDialogs(gpa, s);
     dropNotes(gpa, s);

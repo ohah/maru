@@ -1289,7 +1289,8 @@ pub fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.Clo
                     if (self.is_last_window) {
                         // 브라우저가 닫혔으면 빈 탭으로 둔다(종료를 그만두면 남는 탭 — 죽은 번호로 입력을 보내지 않게). 받는 중이라
                         // about:blank 로 보낸 브라우저(W10c)는 살아 있다 — 되살리면 같은 번호를 sidecar 가 거절해 먹통 탭이 됐다(적대 리뷰
-                        // 1 회차). 그 탭은 이미 빈 페이지다 — 주소·뒤로 상태만 지운다.
+                        // 1 회차). 그 탭은 이미 빈 페이지다 — 보이는 주소·뒤로 상태를 지운다(뒤따르는 `url_changed`·`nav_state` 가 다시
+                        // 채울 수 있다 — Chromium 기록에는 앞 페이지가 남는다).
                         if (outcome == .closed and !web_osr.browserLive(surface_id)) {
                             web_osr.revivePageClosed(self.allocator, surface_id);
                             setWebNavState(self, surface_id, false, false, "");

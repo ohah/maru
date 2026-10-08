@@ -54827,3 +54827,34 @@ test "U2I 이름 없는 문서 저장 상자 안을 눌러도 취소되지 않�
     try testing.expectEqualStrings("named.txt", s.rename_input.text.items);
     try testing.expect(t.rt.editorDocument().path == null);
 }
+
+test "RNM9 팝업 이름 상자가 떠 있는데 메뉴바로 찾기·팔레트를 열면 — 상자는 취소되고(확정이 아니다) 그쪽만 남는다 (제품 경계, §8.2f)" {
+    // 2026-10-08 적대적 검증: 상자는 메뉴바 단축키를 막지 않는다(`runAction` 의 `anyOverlayOpen` 에 인라인 rename 이 없다). 설정은 열 때
+    // 상자를 내렸지만(`toggleSettings` — 적대적 7회차) 찾기·팔레트는 안 내려, 키는 그쪽이 받는데 상자는 그 위에 남아 입력 자리가 둘로 보였다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    const sent_before = s.editor_lsp.sent_renames;
+    const Case = struct { action: []const u8 };
+    const cases = [_]Case{ .{ .action = "toggle_find" }, .{ .action = "toggle_command_palette" }, .{ .action = "toggle_find_replace" } };
+    for (cases) |c| {
+        term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+        try pressKey(&h.fx, .{ .function = 2 }, .{});
+        try pressKey(&h.fx, .{ .char = 'Z' }, .{}); // 새 이름 — 확정이면 요청이 나가 취소와 갈린다
+        try testing.expect(s.rename != null and s.rename.? == .symbol);
+        try testing.expect(s.runAction(c.action)); // 막히지 않는다 — 그래서 여는 쪽이 상자를 내린다
+        try testing.expect(s.rename == null);
+        try testing.expect(!s.chrome_host.rename_box.open);
+        try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+        try testing.expect(s.chrome_host.find.open or s.chrome_host.palette.open);
+        s.dismissMessageOverlays();
+    }
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
+}

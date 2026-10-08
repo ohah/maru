@@ -11544,6 +11544,9 @@ pub const AppSession = struct {
         } else {
             self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
             self.chrome_host.find.hide(); // 배타적
+            // **팝업 이름 상자도 내린다**(설정과 같은 이유 — `toggleSettings`). 상자는 메뉴바 단축키를 막지 않아 이름을 치다
+            // `⌘⇧P` 를 누르면 팔레트가 키를 받는데 상자는 그 위에 남았다(2026-10-08). 취소다 — 확정은 서버 rename·파일 생성이다.
+            settings_ops.closePopupRename(self);
             find_ops.clearAllFindMatches(self); // 목록은 둘이다 — 한쪽만 비우면 편집기 강조가 남는다
             self.chrome_host.palette.show();
             self.recomputePalette(); // 초기 필터(전체) + setResultCount

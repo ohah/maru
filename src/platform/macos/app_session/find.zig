@@ -20,6 +20,7 @@ const Term = @import("../app_session.zig").Term;
 const term_ops = @import("term.zig");
 const editor_ops = @import("editor/mod.zig");
 const pane_ops = @import("pane.zig");
+const settings_ops = @import("settings.zig");
 const maru = @import("maru");
 const terminal = maru.terminal;
 
@@ -548,6 +549,9 @@ pub fn toggleFind(self: *AppSession) void {
         // 자체 검색이 없는 TUI(Claude/Codex)를 위해 연다. 베이스: Ghostty(alt에서 active area 검색).
         self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
         self.chrome_host.palette.hide();
+        // **팝업 이름 상자도 내린다**(설정·팔레트와 같다). 이름을 치다 습관처럼 메뉴바 `⌘F` 를 누르면 찾기가 키를 받는데
+        // 상자는 그 위에 남아 입력 자리가 둘로 보였다(2026-10-08). 취소다.
+        settings_ops.closePopupRename(self);
         self.chrome_host.find.show(); // show가 검색어/현재/카운트를 비운다(새 검색)
         // **여는 쪽도 목록을 비운다.** `show()`는 컴포넌트 상태(검색어·현재·카운트)만 비우고
         // 매치 목록은 세션 소유라 안 건드린다 — 그래서 ⌘G로 닫힘-네비를 하다 ⌘F를 다시 열면

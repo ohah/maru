@@ -58,13 +58,13 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
     // §3.6 revision 검증 — 요청 뒤 문서가 바뀌었으면 결과가 그 문서의 것이 아니다.
     if (term.rt.editorDocument().notifications.lsp_version != st.asked_version) {
         st.stale += 1;
-        self.showNoticeKey(.fmt_stale);
+        self.showResponseNotice(.fmt_stale, &.{}); // 늦게 온 응답 — 사용자가 그사이 연 오버레이를 닫지 않는다
         return;
     }
     var changes = lsp.text_edits.toChanges(self.allocator, result, doc.file.content, doc.file.lines, enc) catch |err| switch (err) {
         error.Overlap, error.Malformed => {
             st.rejected += 1;
-            self.showNoticeKey(.fmt_rejected);
+            self.showResponseNotice(.fmt_rejected, &.{});
             return;
         },
         error.OutOfMemory => return,

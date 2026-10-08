@@ -170,25 +170,25 @@ pub fn accept(self: *AppSession, index: usize) void {
     st.resolve_seq = seq;
 }
 
-/// resolve 응답 — `edit` 을 같은 길로.
+/// resolve 응답 — `edit` 을 같은 길로. 늦게 온 응답이라 알림은 `showResponseNotice` 로(사용자가 그사이 연 오버레이를 닫지 않는다).
 pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8, enc: lsp.rpc.PositionEncoding) void {
     const st = &self.editor_code_action;
     if (!st.resolve_waiting or seq != st.resolve_seq) return;
     st.resolve_waiting = false;
     if (is_error) {
         st.notified_error += 1;
-        self.showNoticeFmt(.ca_error, &.{.{ .s = error_message orelse "" }});
+        self.showResponseNotice(.ca_error, &.{.{ .s = error_message orelse "" }});
         return;
     }
     const r = result orelse {
         st.notified_none += 1;
-        self.showNoticeKey(.ca_none);
+        self.showResponseNotice(.ca_none, &.{});
         return;
     };
     if (r != .object) return;
     const edit = r.object.get("edit") orelse {
         st.notified_none += 1;
-        self.showNoticeKey(.ca_none);
+        self.showResponseNotice(.ca_none, &.{});
         return;
     };
     st.resolved += 1;
@@ -205,12 +205,14 @@ fn applyRaw(self: *AppSession, term: *Term, raw: []const u8) void {
     applyEdit(self, edit, c.encoding);
 }
 
+/// 편집 적용 + 결과 알림. 알림은 `showResponseNotice` — resolve 응답(늦게 온다)에서도 오고, 메뉴에서 고른 직후(메뉴는 이미 닫혔다)에는
+/// 판정이 거짓이라 `showNotice` 와 같다.
 fn applyEdit(self: *AppSession, edit: std.json.Value, enc: lsp.rpc.PositionEncoding) void {
     const st = &self.editor_code_action;
     var parsed = lsp.workspace_edit.parse(self.allocator, edit) catch |err| switch (err) {
         error.Unsupported, error.Malformed => {
             self.editor_workspace_edit.refused_rejected += 1;
-            self.showNoticeFmt(.rn_rejected, &.{.{ .s = if (err == error.Unsupported) "file operation" else "malformed" }});
+            self.showResponseNotice(.rn_rejected, &.{.{ .s = if (err == error.Unsupported) "file operation" else "malformed" }});
             return;
         },
         error.OutOfMemory => return,
@@ -219,12 +221,12 @@ fn applyEdit(self: *AppSession, edit: std.json.Value, enc: lsp.rpc.PositionEncod
     switch (editor_wse.apply(self, parsed, enc, st.snaps[0..st.snaps_len])) {
         .applied => |n| {
             st.applied += 1;
-            self.showNoticeFmt(.ca_applied, &.{.{ .d = @intCast(n) }});
+            self.showResponseNotice(.ca_applied, &.{.{ .d = @intCast(n) }});
         },
         .refused => |r| switch (r) {
-            .outside_root => |p| self.showNoticeFmt(.rn_outside_root, &.{.{ .s = p }}),
-            .stale => self.showNoticeKey(.rn_stale),
-            .rejected => |p| self.showNoticeFmt(.rn_rejected, &.{.{ .s = p }}),
+            .outside_root => |p| self.showResponseNotice(.rn_outside_root, &.{.{ .s = p }}),
+            .stale => self.showResponseNotice(.rn_stale, &.{}),
+            .rejected => |p| self.showResponseNotice(.rn_rejected, &.{.{ .s = p }}),
             .out_of_memory => {},
         },
     }

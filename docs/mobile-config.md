@@ -195,6 +195,7 @@
 | `scroll.multiplier` | 마우스 휠 축이다. 터치 스크롤의 느낌은 관성이 정하고 그건 host 몫이다([플랫폼 §3.1](mobile-platform.md)) |
 | `browser.engine` | **Chromium 사이드카(CEF) 는 데스크톱 전용이다.** 폰에서 웹 탭이 쓰는 엔진은 OS 가 정한다(iOS 는 WebKit 만 허용한다) — 고를 것이 없다([OSR 계획](plans/web-osr-backend.md)) |
 | `browser.search-url` | **Chromium 사이드카 우클릭 메뉴 전용이다**(「…에서 '…' 검색」). 폰의 웹 탭은 OS 엔진의 메뉴를 쓴다 — 가져올 자리가 없다([OSR 계획](plans/web-osr-backend.md)) |
+| `browser.download-ask` | **Chromium 사이드카 다운로드 전용이다**(W10b — 받는 파일마다 저장할 곳을 묻는 macOS 저장 창). 폰의 웹 탭 다운로드는 OS 엔진이 다룬다 — 가져올 자리가 없다([OSR 계획](plans/web-osr-backend.md)) |
 | `chrome.theme` | 색 축은 `theme` 계열 하나로 둔다. 두 이름이 같은 것을 정하면 어느 쪽이 이기는지 사용자가 모른다 |
 
 ### 4.5 기본값이 데스크톱과 다른 것

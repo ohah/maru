@@ -67,6 +67,15 @@ pub fn writeAllFd(fd: std.c.fd_t, bytes: []const u8) bool {
 /// `errdefer`로 닫는다(성공 반환 시엔 caller 소유). 순수 정책(경로·발견 판정)은 `sessions.zig`, 여긴 getenv/readdir/소켓
 /// syscall 접착만(§11 L4).
 pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer) !std.c.fd_t {
+    return connectSendAs(io, allocator, request_bytes, stderr, .pane);
+}
+
+/// 셀렉터를 댈 것인가. `.pane` 은 maru 패인 셸이면 `MARU_PANE_ID` 를 자기 surface 로 주장한다(§8.4 — 종전). `.none` 은 대지 않는다 —
+/// 앱 전역 상태(언어 서버 신뢰 표 — 계획 WT4b)를 다루는 명령은 자기 패인 하나로 좁힐 근거가 없고, 서버는 셀렉터를 댄 연결을 거절한다
+/// (2026-10-09 사용자 결정 — 같은 uid 의 그 사용자 자신).
+pub const Anchor = enum { pane, none };
+
+fn connectSendAs(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer, anchor: Anchor) !std.c.fd_t {
     // Windows에는 이 transport가 아직 없다(백로그 — 계약 §8 "컨트롤 플레인 transport"). **인스턴스 없음으로
     // 접는다**: 그것이 이미 있는 graceful 경로이고(소켓 디렉터리가 없을 때와 같은 결과), CLI가 crash 대신
     // exit 1로 끝난다. 이 early return은 comptime 참이라 아래 POSIX 본문이 **의미 분석조차 되지 않아**
@@ -139,7 +148,7 @@ pub fn connectSend(io: std.Io, allocator: std.mem.Allocator, request_bytes: []co
     // ── A2b auth 셀렉터 전송(§8.4 1단계): caller가 자기 surface를 주장한다. maru 팬 셸엔 MARU_PANE_ID=<surface.id>가
     // 주입돼 있으므로(pty/macos appendParentEnv) 그 값을 self 셀렉터로 보낸다. maru 밖 shell엔 없어 null. cap_nonce=null:
     // CLI는 상속 capability fd(§8.5)를 안 읽는다 — browser 요청은 세션 cap 없이 §9.2 Model B needs_grant→확인 모달로 인가받는다. ──
-    const selector: ?u64 = if (c.getenv("MARU_PANE_ID")) |pane|
+    const selector: ?u64 = if (anchor == .none) null else if (c.getenv("MARU_PANE_ID")) |pane|
         (std.fmt.parseInt(u64, std.mem.span(pane), 10) catch null)
     else
         null;
@@ -172,8 +181,13 @@ pub fn connectStream(io: std.Io, allocator: std.mem.Allocator, stderr: *std.Io.W
 /// **첫 응답 프레임**을 alloc 소유 슬라이스로 반환(caller free·자기 kind로 render). EOF는 `noInstance`(graceful).
 /// browser 요청은 grant 모달로 held될 수 있어 read가 오래 블록될 수 있다(짧은 타임아웃 금지 — §9.6).
 pub fn fetchResponse(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer) ![]u8 {
+    return fetchResponseAs(io, allocator, request_bytes, stderr, .pane);
+}
+
+/// `fetchResponse` 에 셀렉터 여부를 고르게 한 것(`Anchor`).
+pub fn fetchResponseAs(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer, anchor: Anchor) ![]u8 {
     const c = std.c;
-    const fd = try connectSend(io, allocator, request_bytes, stderr);
+    const fd = try connectSendAs(io, allocator, request_bytes, stderr, anchor);
     defer _ = c.close(fd);
 
     var framer: cp.Framer = .{};

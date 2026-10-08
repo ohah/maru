@@ -10,7 +10,7 @@
 
 ### 4.1 핸드셰이크·버전·네임스페이스
 - 연결 시 server가 `hello` notification으로 `{protocol: "maru.control.v1", server_version, capabilities}`를 보낸다. 외부 도구·CLI↔GUI 버전 skew를 감지하고, 지원 메서드를 capability로 광고한다. **5f-5c 기능 구현과 별개로 Track 5 성능 완료 gate까지 통과한 뒤** capabilities string array에 활성화된 논리 결과 상한 `browser.executeScript.max-result-bytes=16777216`을 추가한다. 5f-5c live 경로는 strict CSP·Promise·args와 16 MiB chunk를 전달하지만 현재 hello에는 이 capability가 아직 없다. 코드의 `execute_script_protocol_max_result_bytes=256 MiB`는 현재 parser나 capability에 연결되지 않은 reserved 상수다. 향후 실험도 넘지 않을 ceiling 후보일 뿐 현재 입력 방어선·지원 약속이 아니며, §4.4 재검토 뒤 실제 parser에 연결할 때 별도 테스트로 고정한다(§9.5.8).
-- 메서드 네임스페이스를 예약한다: 코어 = `sessions`/`session`/`panel`/`browser`, 확장 = `plugin.<id>.*`. 닫힌 하드코딩 테이블이 아니라 코어 표 + 등록 가능한 확장 핸들러로 디스패치해 plugin/MCP/skill을 막지 않는다. 발견 메서드(`methods.list`)는 후속.
+- 메서드 네임스페이스를 예약한다: 코어 = `sessions`/`session`/`panel`/`browser`/`lsp`(언어 서버 신뢰 조회·철회·잊기 — [§6](control-plane.md), 워크스페이스 신뢰 WT4b), 확장 = `plugin.<id>.*`. 닫힌 하드코딩 테이블이 아니라 코어 표 + 등록 가능한 확장 핸들러로 디스패치해 plugin/MCP/skill을 막지 않는다. 발견 메서드(`methods.list`)는 후속.
 - CR 단계에서 외부 control-plane에 `Retry`, `Take Control`, paused-paste resend/discard RPC를 노출하지 않는다. 이 action은
   fresh GUI gesture와 single-use authority가 필요한 제품 UI 전용이다. CR6에서 외부 API 요구가 생기면 capability·nonce·TTL을
   별도 설계한다. 상태 구독을 구현할 때는 기존 surface lifecycle event에 위 일시 상태를 typed 값으로 싣고 raw host error는

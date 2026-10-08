@@ -652,7 +652,7 @@ pub const Framer = struct {
 // ── method 네임스페이스 파싱(§4.1) ───────────────────────────────────────────────────────────────────────
 /// 예약된 코어 네임스페이스(§4.1). **분류만** 한다 — 값에 라우팅 의미를 넣지 않고, 여기에 없는 네임스페이스도
 /// 거부하지 않는다(§4.1 "닫힌 하드코딩 테이블이 아니라 코어 표 + 등록 가능한 확장 핸들러"). 실제 dispatch는 후속 slice.
-pub const CoreNamespace = enum { sessions, session, panel, browser };
+pub const CoreNamespace = enum { sessions, session, panel, browser, lsp };
 /// 확장 네임스페이스 접두사(§4.1 `plugin.<id>.*`).
 pub const plugin_namespace = "plugin";
 
@@ -1097,7 +1097,7 @@ test "auth.self cap_nonce 관대 파싱: 잘못된 길이·비-hex·비-string�
 }
 
 // ── 6) method 네임스페이스 파싱 ──
-test "네임스페이스: 코어 sessions/session/panel/browser 인식 + rest 분리" {
+test "네임스페이스: 코어 sessions/session/panel/browser/lsp 인식 + rest 분리" {
     {
         const m = parseMethod("sessions.list");
         try testing.expectEqualStrings("sessions", m.namespace);
@@ -1118,6 +1118,12 @@ test "네임스페이스: 코어 sessions/session/panel/browser 인식 + rest �
         const m = parseMethod("browser.navigate");
         try testing.expectEqual(CoreNamespace.browser, m.core.?);
         try testing.expectEqualStrings("navigate", m.rest);
+    }
+    {
+        // 워크스페이스 신뢰 WT4b — 언어 서버 신뢰 조회·철회·잊기(protocol §4.1 코어 예약).
+        const m = parseMethod("lsp.trust.list");
+        try testing.expectEqual(CoreNamespace.lsp, m.core.?);
+        try testing.expectEqualStrings("trust.list", m.rest);
     }
 }
 

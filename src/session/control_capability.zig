@@ -121,7 +121,7 @@ pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     const m = cp.parseMethod(method);
     const rest = m.rest;
     // metadata: sessions.list / session.get / events.subscribe(§7). "events"는 코어 예약 네임스페이스가 아니라
-    // (1a CoreNamespace={sessions,session,panel,browser}) namespace 문자열로 매칭한다.
+    // (1a CoreNamespace={sessions,session,panel,browser,lsp} — `lsp.trust.*` 는 scope 가 없어 여기 없다, control_dispatch 가 먼저 가른다) namespace 문자열로 매칭한다.
     if (m.core == .sessions and eq(rest, "list")) return .metadata;
     if (m.core == .session and eq(rest, "get")) return .metadata;
     if (eq(m.namespace, "events") and eq(rest, "subscribe")) return .metadata;

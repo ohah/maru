@@ -17462,9 +17462,21 @@ test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, store_src, "pub var"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "trust_store.decide(")); // recordTrust 안
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "fn recordTrust("));
-    // recordTrust 를 부르는 자리: 사용자의 답(answerTrust)·테스트 빌드 하니스(gateTrust)·관리 상자의 철회(WT4 — 거부만) 셋.
-    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, lsp_src, "recordTrust")); // 정의 1 + 호출 3
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, ".revoke => recordTrust(self, k.key(), .deny),")); // 철회는 거부만 적는다
+    // recordTrust 를 부르는 자리: 사용자의 답(answerTrust)·테스트 빌드 하니스(gateTrust)·관리 상자의 철회(WT4a — 거부만)·컨트롤 플레인의
+    // 철회(WT4b — 지금 허용인 것만 거부로) 넷.
+    try testing.expectEqual(@as(usize, 5), std.mem.count(u8, lsp_src, "recordTrust")); // 정의 1 + 호출 4
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, ".revoke => recordTrust(self.io, self.configPath(), k.key(), .deny),")); // 철회는 거부만 적는다
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, ".revoke => if (previous == .allow) recordTrust(self.io, self.config_path, key, .deny)")); // 컨트롤 철회도
+    // 컨트롤 플레인(WT4b)의 wire 는 조회·철회·잊기 셋뿐이고, ABI 는 표를 모른 채 편집기 LSP 모듈의 한 자리로 넘긴다(즉시 답 하나 — 확인
+    // 재구동 갈래는 닿지 않아 표를 안 고치고 unauthorized 로 닫는다).
+    try testing.expectEqual(@as(usize, 3), @typeInfo(maru.session.control_lsp_trust.Op).@"enum".fields.len);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi_src, "editor_lsp_ops.controlTrust("));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi_src, "editor_lsp_ops.")); // ABI 가 편집기 LSP 모듈에 닿는 자리는 그 하나뿐
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi_src, "@import(\"app_session/editor/lsp.zig\")"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "pub fn controlTrust("));
+    // 응답이 쓰는 맞은 키의 경로는 impl 의 버퍼에 산다(apply 의 지역 버퍼면 응답 때 이미 풀렸다 — 실측으로 잡혔다).
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "findTrustKey(target, &self.path_buf)"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "findTrustKey(target, ")); // 호출은 그 하나뿐
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "trust_store.forget(")); // 잊기는 결정을 지울 뿐이다
     // 신뢰 목록(WT4a)은 표를 **읽기만** 한다 — 표에 닿는 자리는 읽기 전용 반복자 하나, 고른 뒤는 관리 상자(철회·잊기)로 넘긴다.
     const ui_src = @embedFile("trust_ui.zig");
@@ -17492,6 +17504,297 @@ test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리
     const refuse = std.mem.indexOf(u8, app_src, "answerTrust(self, false)").?;
     try testing.expect(grant > accept and grant < cancel);
     try testing.expect(refuse > cancel);
+}
+
+/// 판정자 — `{"path":…,"volume"?:…}` params 를 JSON 이스케이프해 만든다(체크아웃 경로에 따옴표·역슬래시가 있어도 요청이 깨지지 않게).
+fn pathJson(buf: []u8, path: []const u8, volume_hex: ?[]const u8) ![]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    var s: std.json.Stringify = .{ .writer = &w, .options = .{} };
+    try s.beginObject();
+    try s.objectField("path");
+    try s.write(path);
+    if (volume_hex) |v| {
+        try s.objectField("volume");
+        try s.write(v);
+    }
+    try s.endObject();
+    return w.buffered();
+}
+
+/// 판정자 — 컨트롤 플레인 `lsp.trust.*` 요청을 앱 진입점(`controlTrust`)에 보내고 응답을 실제 디코더로 읽는다. 결과 객체가 없으면(오류) 오류
+/// 코드를 돌려준다.
+fn controlTrustCall(session: ?*AppSession, method: []const u8, params_json: ?[]const u8) !std.json.Parsed(std.json.Value) {
+    var req_buf: [std.fs.max_path_bytes * 2 + 256]u8 = undefined;
+    const req = if (params_json) |p|
+        try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"{s}\",\"params\":{s}}}", .{ method, p })
+    else
+        try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"{s}\"}}", .{method});
+    const resp = lsp_client.controlTrust(testing.allocator, testing.io, session, req) orelse return error.NoResponse;
+    defer testing.allocator.free(resp);
+    var pm = try maru.session.control_plane.parseMessage(testing.allocator, resp);
+    defer pm.deinit();
+    const r = pm.message.response;
+    if (r.err) |e| {
+        if (e.code == @intFromEnum(maru.session.control_plane.ErrorCode.invalid_params)) return error.InvalidParams;
+        return error.RpcError;
+    }
+    // 결과를 소유 사본으로 돌려준다(응답 arena 는 여기서 풀린다).
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(r.result.?, .{}, &out.writer);
+    return std.json.parseFromSlice(std.json.Value, testing.allocator, out.written(), .{});
+}
+
+test "LSPB38 컨트롤 플레인의 신뢰 조회·철회·잊기(계획 WT4b) — 목록에 서고, 철회는 떠 있는 서버를 내리고 파일에 남으며, 잊으면 「결정 없음」(곧바로 묻지 않음); 심링크 경로도 같은 저장소, 창 없이도 표를 읽는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", fake);
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    const Ctx = struct { fx: *PaneFixture };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(c: Ctx) bool {
+            const s = lsp_client.statusFor(c.fx.session, c.fx.term) orelse return false;
+            return s.phase == .ready;
+        }
+    }.f));
+    fx.session.editor_lsp.auto_trust_answer = null;
+    const c = &fx.session.editor_lsp.clients.items[0];
+    try testing.expect(c.proc != null);
+    const key = (c.trust_key orelse return error.NoKey).key();
+    var json_buf: [std.fs.max_path_bytes * 2 + 64]u8 = undefined;
+
+    // ⑴ 조회 — 그 저장소가 허용으로 선다(볼륨 16진·실제 경로).
+    {
+        const r = try controlTrustCall(fx.session, "lsp.trust.list", null);
+        defer r.deinit();
+        var found = false;
+        for (r.value.object.get("decisions").?.array.items) |e| {
+            if (!std.mem.eql(u8, e.object.get("path").?.string, key.path)) continue;
+            found = true;
+            try testing.expectEqualStrings("allow", e.object.get("decision").?.string);
+            try testing.expectEqual(key.volume, try std.fmt.parseInt(u64, e.object.get("volume").?.string, 16));
+        }
+        try testing.expect(found);
+    }
+    // ⑴b 저장소 안의 하위 폴더 — 결정은 root 단위라 「없음」이지만, 그 경로를 품은 저장소(허용)를 알려 준다. 바꾸지 않는다. 이 판정자가
+    //     만든 **실제로 있는** 폴더라 실제 경로·같은 볼륨 갈래를 탄다(`revoke .` 의 주된 장면 — 저장소 구조에 기대지 않는다).
+    try fx.dir.dir.createDirPath(testing.io, "sub/deeper");
+    var sub_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const subdir = try std.fmt.bufPrint(&sub_buf, "{s}/sub", .{root});
+    {
+        var probe: [std.fs.max_path_bytes]u8 = undefined;
+        try testing.expect(trust_store.keyFor(subdir, &probe) != null); // 있는 폴더다
+        const r = try controlTrustCall(fx.session, "lsp.trust.revoke", try pathJson(&json_buf, subdir, null));
+        defer r.deinit();
+        try testing.expect(r.value.object.get("previous").? == .null);
+        try testing.expect(!r.value.object.get("changed").?.bool);
+        const c2 = r.value.object.get("containing").?.object;
+        try testing.expectEqualStrings(key.path, c2.get("path").?.string);
+        try testing.expectEqualStrings("allow", c2.get("decision").?.string);
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), trust_store.get(key));
+        // 다른 볼륨의 더 가까운 결정은 힌트하지 않는다(같은 접두의 다른 디스크 — 실제 경로로 풀리면 같은 볼륨만).
+        const other: maru.session.editor.lsp.trust.Key = .{ .volume = key.volume ^ 1, .path = subdir };
+        _ = trust_store.decide(testing.io, other, .deny);
+        defer _ = trust_store.forget(testing.io, other);
+        var deeper_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const r2 = try controlTrustCall(fx.session, "lsp.trust.revoke", try pathJson(&json_buf, try std.fmt.bufPrint(&deeper_buf, "{s}/deeper", .{subdir}), null));
+        defer r2.deinit();
+        try testing.expectEqualStrings(key.path, r2.value.object.get("containing").?.object.get("path").?.string);
+    }
+    // 저장소를 가리키는 심링크 — **저장소 밖**(`$TMPDIR` 아래 이 판정자만의 디렉터리)에 둔다. 픽스처 폴더는 저장소 안이라 거기 두면 글자만으로도
+    // 저장소 아래로 보여 실제 경로로 푸는 갈래를 재지 못하고, 저장소로 되도는 순환도 생긴다.
+    const Tmp = struct {
+        extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+    };
+    var tmpl_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const tmpdir_env = std.mem.trimEnd(u8, if (std.c.getenv("TMPDIR")) |t| std.mem.span(t) else "/tmp", "/");
+    const tmpl = try std.fmt.bufPrintZ(&tmpl_buf, "{s}/maru-wt4b-XXXXXX", .{tmpdir_env});
+    const outside_dir = std.mem.span(Tmp.mkdtemp(tmpl.ptr) orelse return error.NoTmpDir);
+    defer _ = std.c.rmdir(outside_dir.ptr); // 아래 단언이 실패해도 남지 않게 만든 즉시 정리를 건다(링크가 먼저 풀린다 — defer 는 역순)
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link = try std.fmt.bufPrint(&link_buf, "{s}/repo", .{outside_dir});
+    var link_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const lz = try std.fmt.bufPrintZ(&link_z, "{s}", .{link});
+    {
+        var tz: [std.fs.max_path_bytes + 1]u8 = undefined;
+        try testing.expectEqual(@as(c_int, 0), std.c.symlink((try std.fmt.bufPrintZ(&tz, "{s}", .{key.path})).ptr, lz.ptr));
+    }
+    defer _ = std.c.unlink(lz.ptr);
+    {
+        // 심링크를 지나는 하위 폴더도 실제 경로로 풀어 같은 저장소를 알려 준다(`<링크>/<저장소 안 픽스처 경로>/sub`).
+        var via_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const via = try std.fmt.bufPrint(&via_buf, "{s}{s}", .{ link, subdir[key.path.len..] });
+        const r = try controlTrustCall(fx.session, "lsp.trust.forget", try pathJson(&json_buf, via, null));
+        defer r.deinit();
+        try testing.expect(!r.value.object.get("changed").?.bool);
+        try testing.expectEqualStrings(key.path, r.value.object.get("containing").?.object.get("path").?.string);
+    }
+    // ⑵ 철회 — 심링크로 가리켜도 같은 저장소다(사용자가 친 경로는 실제 경로로 푼다). 떠 있는 서버를 내리고 파일에 deny 가 남는다.
+    {
+        const r = try controlTrustCall(fx.session, "lsp.trust.revoke", try pathJson(&json_buf, link, null));
+        defer r.deinit();
+        try testing.expectEqualStrings("allow", r.value.object.get("previous").?.string);
+        try testing.expect(r.value.object.get("changed").?.bool);
+        try testing.expect(r.value.object.get("saved").?.bool);
+        // 맞은 저장소는 친 심링크가 아니라 실제 경로다(응답이 그것을 말한다).
+        try testing.expectEqualStrings(key.path, r.value.object.get("repository").?.object.get("path").?.string);
+    }
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.denied, c.phase);
+    try testing.expect(c.proc == null);
+    {
+        const trust = try fx.dir.dir.readFileAlloc(testing.io, "state/lsp-trust", allocator, .limited(1 << 20));
+        defer allocator.free(trust);
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trustFileDecision(trust, key.path));
+    }
+    // ⑶ 이미 거부 — 철회는 아무것도 안 바꾼다(거부를 새로 세우지도, 허용으로 돌리지도 않는다).
+    {
+        const r = try controlTrustCall(fx.session, "lsp.trust.revoke", try pathJson(&json_buf, key.path, null));
+        defer r.deinit();
+        try testing.expectEqualStrings("deny", r.value.object.get("previous").?.string);
+        try testing.expect(!r.value.object.get("changed").?.bool);
+    }
+    // 창 없이도 같은 표를 읽는다 — 거부로 선 그 저장소가 보인다(표를 안 읽고 빈 목록을 내는 길이 아니다).
+    {
+        const r = try controlTrustCall(null, "lsp.trust.list", null);
+        defer r.deinit();
+        var seen = false;
+        for (r.value.object.get("decisions").?.array.items) |e| if (std.mem.eql(u8, e.object.get("path").?.string, key.path)) {
+            seen = true;
+            try testing.expectEqualStrings("deny", e.object.get("decision").?.string);
+        };
+        try testing.expect(seen);
+    }
+    // ⑷ 잊기 — 「결정 없음」이 되고 곧바로 묻지 않는다.
+    {
+        var vbuf: [16]u8 = undefined;
+        const r = try controlTrustCall(fx.session, "lsp.trust.forget", try pathJson(&json_buf, key.path, try std.fmt.bufPrint(&vbuf, "{x}", .{key.volume})));
+        defer r.deinit();
+        try testing.expectEqualStrings("deny", r.value.object.get("previous").?.string);
+        try testing.expect(r.value.object.get("changed").?.bool);
+    }
+    for (0..5) |_| lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.unasked, c.phase);
+    try testing.expect(fx.session.pending_confirm == .none);
+    try testing.expect(fx.session.editor_lsp.asking_key == null);
+    // ⑸ 결정이 없는 저장소 — 철회·잊기 모두 아무것도 안 바꾼다(previous=null). 표에 거부가 새로 서지 않는다.
+    inline for (.{ "lsp.trust.revoke", "lsp.trust.forget" }) |m| {
+        const r = try controlTrustCall(fx.session, m, try pathJson(&json_buf, key.path, null));
+        defer r.deinit();
+        try testing.expect(r.value.object.get("previous").? == .null);
+        try testing.expect(!r.value.object.get("changed").?.bool);
+    }
+    // ⑹ 창 없이도 같은 표를 읽는다 — 결정이 하나도 없다.
+    {
+        const r = try controlTrustCall(null, "lsp.trust.list", null);
+        defer r.deinit();
+        for (r.value.object.get("decisions").?.array.items) |e| try testing.expect(!std.mem.eql(u8, e.object.get("path").?.string, key.path));
+    }
+}
+
+test "LSPB38b 같은 경로의 결정이 여러 볼륨에 있으면 볼륨 없는 철회·잊기는 모호하다고 거절하고, 볼륨을 주면 그것만 바꾼다; 볼륨이 틀리면 아무것도 안 바꾼다 (계획 WT4b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    trust_store.setDirForTest(null); // 메모리 표만
+    defer trust_store.setDirForTest(null);
+    const path = "/nonexistent-maru-wt4b/repo";
+    _ = trust_store.decide(testing.io, .{ .volume = 1, .path = path }, .allow);
+    _ = trust_store.decide(testing.io, .{ .volume = 2, .path = path }, .allow);
+    var json_buf: [512]u8 = undefined;
+    inline for (.{ "lsp.trust.revoke", "lsp.trust.forget" }) |m| {
+        try testing.expectError(error.InvalidParams, controlTrustCall(null, m, try pathJson(&json_buf, path, null)));
+    }
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), trust_store.get(.{ .volume = 1, .path = path }));
+    // 틀린 볼륨 — 아무것도 안 바꾼다. 그 경로 자신을 「품은 저장소」로 힌트하지 않는다(같은 경로를 넘기라는 말은 헷갈린다).
+    {
+        const r = try controlTrustCall(null, "lsp.trust.revoke", try pathJson(&json_buf, path, "3"));
+        defer r.deinit();
+        try testing.expect(r.value.object.get("previous").? == .null);
+        try testing.expect(!r.value.object.get("changed").?.bool);
+        try testing.expect(r.value.object.get("containing") == null);
+    }
+    // 볼륨 2 만 철회한다.
+    {
+        const r = try controlTrustCall(null, "lsp.trust.revoke", try pathJson(&json_buf, path, "2"));
+        defer r.deinit();
+        try testing.expectEqualStrings("allow", r.value.object.get("previous").?.string);
+        try testing.expect(r.value.object.get("changed").?.bool);
+        try testing.expect(!r.value.object.get("saved").?.bool); // 메모리 표 — 파일에 못 남았다고 말한다
+    }
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), trust_store.get(.{ .volume = 1, .path = path }));
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trust_store.get(.{ .volume = 2, .path = path }));
+    // 지워진 저장소(실제 경로로 못 푼다)도 목록이 준 경로 그대로 잊을 수 있다.
+    {
+        const r = try controlTrustCall(null, "lsp.trust.forget", try pathJson(&json_buf, path, "1"));
+        defer r.deinit();
+        try testing.expect(r.value.object.get("changed").?.bool);
+    }
+    try testing.expect(trust_store.get(.{ .volume = 1, .path = path }) == null);
+    // 품은 저장소는 가장 가까운 것 — 조상이 둘이면 안쪽(실제 경로로 못 푸는 경로라 볼륨은 안 본다).
+    _ = trust_store.decide(testing.io, .{ .volume = 1, .path = "/nonexistent-maru-wt4b" }, .allow);
+    _ = trust_store.decide(testing.io, .{ .volume = 1, .path = "/nonexistent-maru-wt4b/repo/inner" }, .deny);
+    {
+        const r = try controlTrustCall(null, "lsp.trust.revoke", "{\"path\":\"/nonexistent-maru-wt4b/repo/inner/src\"}");
+        defer r.deinit();
+        const c2 = r.value.object.get("containing").?.object;
+        try testing.expectEqualStrings("/nonexistent-maru-wt4b/repo/inner", c2.get("path").?.string);
+        try testing.expectEqualStrings("deny", c2.get("decision").?.string);
+    }
+}
+
+test "LSPB39 관리 상자를 띄운 뒤 다른 창·컨트롤 플레인이 결정을 바꿨으면 상자의 답은 지금 표를 다시 본다 — 잊힌 저장소에 거부를 새로 세우지 않고, 거부로 바뀐 것을 다시 적지 않는다 (계획 WT4a·WT4b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    trust_store.setDirForTest(null); // 메모리 표만 — 끝나면 비운다(앱 전역 표가 다음 판정자로 새지 않게)
+    defer trust_store.setDirForTest(null);
+    const key: maru.session.editor.lsp.trust.Key = .{ .volume = 7, .path = "/nonexistent-maru-wt4b/managed" };
+    // ⑴ 허용 → 상자(철회·잊기) → 그 사이 컨트롤 플레인이 잊었다 → 사용자가 「철회」를 누른다 → 결정이 없던 저장소에 거부가 서지 않는다.
+    _ = trust_store.decide(testing.io, key, .allow);
+    lsp_client.manageListed(fx.session, key);
+    try testing.expect(fx.session.editor_lsp.manage_key != null);
+    try testing.expectEqual(lsp_client.ManageAction.revoke, fx.session.editor_lsp.manage_primary);
+    {
+        const r = try controlTrustCall(null, "lsp.trust.forget", "{\"path\":\"/nonexistent-maru-wt4b/managed\",\"volume\":\"7\"}");
+        defer r.deinit();
+        try testing.expect(r.value.object.get("changed").?.bool);
+    }
+    lsp_client.answerManage(fx.session, .primary);
+    try testing.expect(trust_store.get(key) == null);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_current_none), fx.session.chrome_host.notice.message);
+    try testing.expect(fx.session.editor_lsp.manage_key == null);
+    fx.session.chrome_host.notice.dismiss();
+    // ⑵ 허용 → 상자 → 그 사이 거부로 바뀌었다(다른 창의 「다시 묻기」 거부) → 「철회」는 다시 적지 않는다.
+    _ = trust_store.decide(testing.io, key, .allow);
+    lsp_client.manageListed(fx.session, key);
+    _ = trust_store.decide(testing.io, key, .deny);
+    const gen_before = trust_store.generation();
+    lsp_client.answerManage(fx.session, .primary);
+    try testing.expectEqual(gen_before, trust_store.generation());
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_current_not_allowed), fx.session.chrome_host.notice.message);
+    fx.session.chrome_host.notice.dismiss();
+    // ⑶ 허용 그대로면 철회가 된다(가드가 정상 경로를 막지 않는다).
+    _ = trust_store.decide(testing.io, key, .allow);
+    lsp_client.manageListed(fx.session, key);
+    lsp_client.answerManage(fx.session, .primary);
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trust_store.get(key));
+    // ⑷ 허용 상자([철회][잊기]) → 그 사이 거부로 바뀌었다 → [잊기] 는 여전히 된다(가드는 철회만 막는다).
+    _ = trust_store.decide(testing.io, key, .allow);
+    lsp_client.manageListed(fx.session, key);
+    try testing.expectEqual(@as(?lsp_client.ManageAction, .forget), fx.session.editor_lsp.manage_alternate);
+    _ = trust_store.decide(testing.io, key, .deny);
+    lsp_client.answerManage(fx.session, .alternate);
+    try testing.expect(trust_store.get(key) == null);
 }
 
 test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에서 경고 안내가 「…」 없이 끝까지 서고 버튼이 화면 안에 그려진다 (§8.1·계획 WT1)" {

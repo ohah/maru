@@ -1932,6 +1932,11 @@ fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilitySto
                 const resp = cb.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
                 server.resolveRequest(pending, resp);
             },
+            // WT4b: lsp.trust.* — 이 전송 계층엔 언어 서버 신뢰 표가 없다(앱 ABI 가 답한다). 여기서는 없는 메서드로 답한다.
+            .lsp_trust => {
+                const resp = maru.session.control_lsp_trust.serializeUnavailable(server.cross_gpa, pending.request_bytes) catch null;
+                server.resolveRequest(pending, resp);
+            },
         }
         handled += 1;
     }

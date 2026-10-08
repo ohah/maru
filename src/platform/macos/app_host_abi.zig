@@ -4,6 +4,8 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
 const editor_ime_ops = @import("app_session/editor_ime.zig");
+/// 컨트롤 플레인 `lsp.trust.*`(계획 WT4b) — 언어 서버 신뢰 표는 편집기 LSP 모듈이 다룬다(ABI 는 표를 모른다 — LSPB23).
+const editor_lsp_ops = @import("app_session/editor/lsp.zig");
 const session_host = @import("session_host.zig");
 const ime_candidate_evidence = @import("session_host/ime_candidate_evidence.zig");
 const keycode = @import("keycode.zig");
@@ -6293,6 +6295,10 @@ const control_hello_caps = [_][]const u8{
     "browser.type",
     "browser.scroll",
     "browser.wait",
+    // WT4b: 언어 서버 신뢰 조회·철회·잊기(부여는 없다). 셀렉터 없이 붙은 연결만(§8.3·control_dispatch).
+    "lsp.trust.list",
+    "lsp.trust.revoke",
+    "lsp.trust.forget",
 };
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
@@ -6370,6 +6376,8 @@ fn handleControlRequest(
         // 1e-confirm-2a: 미grant valid 요청 — 확인 수단 있으면 **틱 넘어 붙잡고**(deferRequest) 결정 대기(GrantPrompt 큐),
         //     drainGrantPrompts가 결정 시 grant+재구동 or unauthorized(§9.2 Model B). 수단 없으면 즉시 unauthorized(1c-1).
         .needs_grant => |g| handleNeedsGrant(server, pending, g, now_ns),
+        // WT4b: lsp.trust.* — 앱 전역 신뢰 표로 즉시 답한다(창이 없어도 — 표는 창의 것이 아니다).
+        .lsp_trust => server.resolveRequest(pending, editor_lsp_ops.controlTrust(server.cross_gpa, appHostIo(), firstAppSession(refs), pending.request_bytes)),
     }
 }
 
@@ -6450,6 +6458,11 @@ fn resolveGrantPrompt(
         .subscribe => |s| resolveHeldSubscribe(server, e.async_id, pending, s),
         .needs_grant => {
             // 방어(grant 막 남겨 도달 안 함): grant 루프 방지로 unauthorized.
+            const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+            _ = server.completeInFlight(e.async_id, resp);
+        },
+        // 도달 안 함 — 확인을 거쳐 재구동되는 것은 browser.* 뿐이다. 표를 고치지 않고 균일 unauthorized 로 닫는다.
+        .lsp_trust => {
             const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
             _ = server.completeInFlight(e.async_id, resp);
         },
@@ -8001,6 +8014,22 @@ test "live hello capabilities advertise browser.wait and only parsed browser met
         if (std.mem.eql(u8, method, "browser.wait")) wait_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), wait_count);
+}
+
+test "WT4b live hello 는 lsp.trust.* 를 dispatch 가 아는 메서드 그대로 광고한다 — 조회·철회·잊기 셋, 부여 없음" {
+    const clt = maru.session.control_lsp_trust;
+    var seen: [3]bool = .{ false, false, false };
+    var lsp_count: usize = 0;
+    for (control_hello_caps) |method| {
+        const parsed = control_plane.parseMethod(method);
+        if (!std.mem.eql(u8, parsed.namespace, clt.namespace)) continue;
+        lsp_count += 1;
+        const op = clt.opFor(parsed.rest) orelse return error.UnknownLspMethodAdvertised;
+        try std.testing.expectEqualStrings(op.method(), method);
+        seen[@intFromEnum(op)] = true;
+    }
+    try std.testing.expectEqual(@as(usize, 3), lsp_count);
+    for (seen) |b| try std.testing.expect(b);
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

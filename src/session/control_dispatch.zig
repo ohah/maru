@@ -46,6 +46,7 @@ const wm = @import("window_membership.zig");
 const cap = @import("control_capability.zig");
 const cb = @import("control_browser.zig"); // 5e: browser.* op 산출(dispatchAuthenticated가 위임)
 const cpg = @import("control_pane_grant.zig"); // 1e-confirm-1b: pane-bound confirm-grant store(browser.* authz 가법)
+const clt = @import("control_lsp_trust.zig"); // WT4b: lsp.trust.* (언어 서버 신뢰 조회·철회·잊기 — 앱 전역 표는 L4 가 다룬다)
 
 /// read-only 조회 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot으로 처리해 **응답 한 줄 바이트**를 만든다.
 /// 성공/에러 모두 유효한 JSON-RPC 응답 바이트(개행 없음, 프레이밍은 L4가 붙임)를 돌려준다 — OOM만 error로 전파한다
@@ -160,6 +161,9 @@ pub const AuthDispatch = union(enum) {
     /// **1e-confirm-1c**: 미grant valid browser 요청(§9.2 Model B). L4가 §5-async로 붙잡고 확인 모달을 띄운다(1c-2) —
     /// 승인 시 grant 기록 후 재구동, 거부 시 unauthorized. 1c-1은 L4가 우선 unauthorized로 collapse(behavior-preserving).
     needs_grant: cb.GrantRequest,
+    /// **WT4b**: 인가·유효한 `lsp.trust.*` — L4 가 앱 전역 신뢰 표로 답한다(`control_lsp_trust.respond` — 요청 바이트에서 id·params 를
+    /// 다시 읽으므로 소유할 것이 없다). 부여 메서드는 없다(조회·철회·잊기).
+    lsp_trust: clt.Op,
 };
 
 pub fn dispatchAuthenticated(
@@ -175,7 +179,8 @@ pub fn dispatchAuthenticated(
     // **먼저 파싱**한다 — browser.* 라우팅은 nonce 유무와 무관하게 method로 판정해야 한다(리뷰 [2]: cap_nonce 없는
     // browser.*가 옛날엔 dispatchReadOnly로 새 method_not_found였고, nonce 있으면 unauthorized라 갈렸다 — §8.3 균일
     // unauthorized 위배 + browser.* 존재 oracle). parse 실패/비-request는 기존 관례(id=null 에러)로 접는다. 파싱한
-    // req를 아래 모든 경로가 재사용해 재파싱이 없다(리뷰 [10]).
+    // req를 아래 모든 경로가 재사용해 재파싱이 없다(리뷰 [10]) — 단 `lsp.trust.*` 는 L4 의 `control_lsp_trust.respond` 가 요청 바이트를
+    // 다시 읽는다(디스패치 결과가 소유할 것을 남기지 않으려고 — `AuthDispatch.lsp_trust`).
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .immediate = try errorResponse(gpa, .null, cp.parseFailureCode(e)) },
@@ -185,6 +190,23 @@ pub fn dispatchAuthenticated(
         .request => |r| r,
         else => return .{ .immediate = try errorResponse(gpa, .null, .invalid_request) },
     };
+
+    // ── WT4b: lsp.trust.* — 앱 전역 신뢰 표(언어 서버). **셀렉터 없이 붙은 연결만**(같은 uid 의 그 사용자 자신 — §8.4 「셀렉터 없음 →
+    //    전체」와 같은 근거; 2026-10-09 사용자 결정). 셀렉터를 댄 연결은 「나는 이 패인 하나」라고 주장한 것이라 앱 전역 표에 닿을 근거가
+    //    없어 균일 unauthorized(params 검사 이전). cap 은 보지 않는다 — 이 메서드들의 scope 는 없다(부여는 없다; 잊기는 거부를
+    //    「결정 없음」으로 되돌릴 수 있다 — 같은 uid 의 사용자 자신에게 연 결정, 보안 §8.3).
+    //    철회·잊기의 params 가 틀리면 여기서 invalid_params(L4 에 닿지 않는다). ──
+    {
+        const m = cp.parseMethod(req.method);
+        if (std.mem.eql(u8, m.namespace, clt.namespace)) {
+            if (clt.opFor(m.rest)) |op| {
+                if (selector != null) return .{ .immediate = try errorResponse(gpa, req.id, .unauthorized) };
+                const params_ok = if (op == .list) clt.checkListParams(req.params) else if (clt.parseTarget(req.params)) |_| {} else |e| e;
+                params_ok catch return .{ .immediate = try errorResponse(gpa, req.id, .invalid_params) };
+                return .{ .lsp_trust = op };
+            }
+        }
+    }
 
     // ── 5e: browser.*는 **cap 유무 무관** control_browser에 위임(anchor=target web surface, selector 무관). 세션 cap
     //       집합의 각 nonce를 lookup해 **Capability 집합**을 만들고(5f-4a 누적), browserOpFromRequest가 그중 하나라도
@@ -553,6 +575,7 @@ fn authDispatch(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *co
         },
         .subscribe => return error.ExpectedImmediateGotSubscribe, // 이 헬퍼는 subscribe 요청 안 씀
         .needs_grant => return error.ExpectedImmediateGotNeedsGrant, // 이 헬퍼 테스트는 grant 조회 안 태움(selector+미grant browser는 별도 헬퍼)
+        .lsp_trust => return error.ExpectedImmediateGotLspTrust,
     }
 }
 // .browser(op) 기대 — 호출자 op.arg free. .immediate면 free 후 실패.
@@ -566,6 +589,7 @@ fn authDispatchOp(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *
         },
         .subscribe => return error.ExpectedBrowserGotSubscribe,
         .needs_grant => return error.ExpectedBrowserGotNeedsGrant,
+        .lsp_trust => return error.ExpectedBrowserGotLspTrust,
     }
 }
 // 1e-confirm-1c: .needs_grant(미grant valid browser 요청) 기대 — GrantRequest 반환.
@@ -582,6 +606,7 @@ fn authDispatchNeedsGrant(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, 
             return error.ExpectedNeedsGrantGotBrowser;
         },
         .subscribe => return error.ExpectedNeedsGrantGotSubscribe,
+        .lsp_trust => return error.ExpectedNeedsGrantGotLspTrust,
     }
 }
 
@@ -791,6 +816,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
         },
         .subscribe => return error.ExpectedBrowser,
         .needs_grant => return error.ExpectedBrowser,
+        .lsp_trust => return error.ExpectedBrowser,
     }
     // 집합 [metadata only] → browser 인가 cap 없음 → 균일 unauthorized(.immediate 에러).
     switch (try dispatchAuthenticated(testing.allocator, nav, fx, null, &[_]cap.Nonce{n_all}, &store, &no_grants, 0)) {
@@ -804,6 +830,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
         },
         .subscribe => return error.ExpectedUnauthorized,
         .needs_grant => return error.ExpectedUnauthorized,
+        .lsp_trust => return error.ExpectedUnauthorized,
     }
     // metadata 경로도 누적: sessions.list는 metadata cap 필요. [browser, metadata:all(anchor 10)] + selector=10 → metadata 인가.
     const list = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"sessions.list\"}";
@@ -820,6 +847,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
         },
         .subscribe => return error.ExpectedImmediate,
         .needs_grant => return error.ExpectedImmediate,
+        .lsp_trust => return error.ExpectedImmediate,
     }
 }
 
@@ -868,4 +896,64 @@ test "dispatchAuthenticated: read_output cap + session.capture → method_not_fo
 
 test {
     testing.refAllDecls(@This());
+}
+
+// ══ WT4b: lsp.trust.* 라우팅 ══════════════════════════════════════════════════════════════════════════════════
+fn lspDispatch(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce) !AuthDispatch {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    // 실제로 풀리는 cap 하나(metadata:all) — 들고 와도 이 메서드들의 판정은 같다(cap 은 그 권한이 아니다).
+    try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
+    var buf: [1]cap.Nonce = undefined;
+    return dispatchAuthenticated(testing.allocator, bytes, fx, selector, noncesSlice(&buf, nonce), &store, &no_grants, 0);
+}
+
+/// `.lsp_trust` 기대 — 다른 태그면 그 바이트를 풀고 오류(활성 아닌 union 필드에 바로 닿지 않는다 — Debug 에선 패닉이 샤드를 통째로 멈춘다).
+fn expectLspOp(d: AuthDispatch, op: clt.Op) !void {
+    switch (d) {
+        .lsp_trust => |got| try testing.expectEqual(op, got),
+        .immediate => |b| {
+            testing.allocator.free(b);
+            return error.ExpectedLspTrustGotImmediate;
+        },
+        .browser => |b| {
+            testing.allocator.free(b.arg);
+            return error.ExpectedLspTrustGotBrowser;
+        },
+        .subscribe, .needs_grant => return error.ExpectedLspTrust,
+    }
+}
+
+fn expectImmediateCode(d: AuthDispatch, code: cp.ErrorCode) !void {
+    switch (d) {
+        .immediate => |b| {
+            defer testing.allocator.free(b);
+            try testing.expectEqual(@as(i64, @intFromEnum(code)), try errCode(b));
+        },
+        .browser => |b| {
+            testing.allocator.free(b.arg);
+            return error.ExpectedImmediate;
+        },
+        else => return error.ExpectedImmediate,
+    }
+}
+
+test "WT4b lsp.trust.*: 셀렉터 없는 연결은 L4 로 넘기고(params 검사 뒤), 셀렉터를 댄 연결은 params 와 무관하게 균일 unauthorized; 다른 lsp.* 는 method_not_found" {
+    const list = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"lsp.trust.list\"}";
+    const revoke = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"lsp.trust.revoke\",\"params\":{\"path\":\"/r\"}}";
+    const forget = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"lsp.trust.forget\",\"params\":{\"path\":\"/r\",\"volume\":\"01\"}}";
+    const bad = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"lsp.trust.revoke\",\"params\":{\"path\":\"rel\"}}";
+    const grant = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"lsp.trust.allow\",\"params\":{\"path\":\"/r\"}}";
+    try expectLspOp(try lspDispatch(list, null, null), .list);
+    try expectLspOp(try lspDispatch(revoke, null, null), .revoke);
+    try expectLspOp(try lspDispatch(forget, null, null), .forget);
+    try expectImmediateCode(try lspDispatch(bad, null, null), .invalid_params);
+    try expectImmediateCode(try lspDispatch("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"lsp.trust.list\",\"params\":{\"x\":1}}", null, null), .invalid_params);
+    // 셀렉터를 댄 연결 — 균일 unauthorized(틀린 params 도 같은 답: 셀렉터 판정이 먼저다).
+    for ([_][]const u8{ list, revoke, forget, bad }) |b| try expectImmediateCode(try lspDispatch(b, 10, null), .unauthorized);
+    // 실제로 풀리는 cap 을 들고 와도 같다 — 셀렉터 없으면 L4, 있으면 unauthorized(cap 이 셀렉터 거절을 넘지 못한다).
+    try expectLspOp(try lspDispatch(revoke, null, n_all), .revoke);
+    try expectImmediateCode(try lspDispatch(revoke, 10, n_all), .unauthorized);
+    // 부여 메서드는 없다 — 이름이 무엇이든 method_not_found.
+    try expectImmediateCode(try lspDispatch(grant, null, null), .method_not_found);
 }

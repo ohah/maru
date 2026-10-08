@@ -21,9 +21,10 @@
 //!   dl-multiple    사용자 동작 없는 둘째 자동 다운로드는 「여러 파일 받기」 권한을 묻고, 허용하면 begin 이 온다
 //!   dl-page-started 새 문서 표지(`page_started`)는 페이지를 불러오거나 다른 문서로 갈 때 오고, pushState·다운로드가 된 이동에는
 //!                  오지 않는다(maru 가 「이 문서의 사용자 동작」을 가르는 표지 — 적대 리뷰 2 회차)
-//!   dl-same-file   maru 처럼 경로를 O_EXCL 로 미리 만들어 주면 Chromium 은 받는 동안 그 파일(같은 inode)에 쓴다 — maru 는 만든
-//!                  파일의 dev·ino 로만 지우므로 덜 받은 파일을 놓치지 않는다. 미리 만든 파일은 취소해도 Chromium 이 **남기고**(maru 가
-//!                  지운다), 완료 때는 **다른 inode** 로 바꿔 놓는다(maru 는 경로로 옮긴다) — 2 회차 실측, 보고 줄에 남긴다
+//!   dl-same-file   maru 처럼 경로를 O_EXCL 로 미리 만들어 주면 Chromium 은 그 이름이 있다고 보고 **` (1)` 을 붙인 형제**
+//!                  (`이름 (1).maru-part`)에 받는다 — 받는 동안 미리 만든 파일은 0 바이트로 남는다(W10d 실측: W10a 는 미리 만든 경로의
+//!                  inode 만 보고 「그 파일에 쓴다」로 잘못 읽었다). 미리 만든 파일은 취소해도 Chromium 이 **남기고**(maru 가 지운다 — 형제는
+//!                  Chromium 이 지운다), 완료 때는 형제를 그 경로 위로 옮겨 **다른 inode** 가 된다(maru 는 경로로 옮긴다)
 //!   dl-ask-wait    결정을 10 초 미뤄도(W10b 「매번 묻기」의 저장 창이 떠 있는 동안) 다운로드는 이어지고, 그동안 host 가 연 파일 중
 //!                  다운로드 임시 파일(`.crdownload`·`Unconfirmed`)이 없는지와 받아 둔 양을 보고 줄에 남긴다(W10b 설계 공격 M1 실측)
 //!   dl-staging-cleared host 가 프로필을 잡은 뒤 지난번이 결정 전에 받아 둔 것(`download-staging`)을 비운다(W10b) — 같은 프로필의
@@ -457,11 +458,11 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
             if (message == .browser_closed and message.browser_closed == 82) gone = true;
         }
         report(close_kept and !closed_msg and last != null and last.? == .in_progress and page_starts[82] > before and end.last == .complete and size_now == http.slow_bytes and gone, "dl-selfclose", std.fmt.bufPrint(&detail_buf, "page_close_kept {} · 닫힘 알림 {} · 4 초 뒤 {s} · about:blank 표지 {d} → {d} · 끝 {s} · 파일 {d}/{d} · 닫기 뒤 닫힘 {}", .{
-            kept,     closed_msg,
+            close_kept, closed_msg,
             if (last) |st| @tagName(st) else "없음",
-            before,   page_starts[82],
+            before,     page_starts[82],
             if (end.last) |st| @tagName(st) else "없음",
-            size_now, http.slow_bytes,
+            size_now,   http.slow_bytes,
             gone,
         }) catch "");
     }
@@ -526,6 +527,11 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         try host.send(.{ .download_decide = .{ .browser = 67, .download = slow.download, .path = slow_path } });
         const started = watch(&host, 67, slow.download, 4000, false, 200_000);
         const during = inodeOf(slow_path);
+        // 받는 동안 그 폴더 — 미리 만든 파일의 크기와 Chromium 이 ` (1)` 을 붙여 받는 형제(W10d 실측: 데이터는 형제에 있다).
+        const placeholder_size = fileSize(slow_path);
+        var sibling_buf: [1100]u8 = undefined;
+        const sibling = try std.fmt.bufPrintZ(&sibling_buf, "{s}/same-slow.bin (1).maru-part", .{dir});
+        const sibling_size = fileSize(sibling);
         try host.send(.{ .download_control = .{ .browser = 67, .download = slow.download, .action = .cancel } });
         _ = watch(&host, 67, slow.download, 3000, true, 0);
         os.sleepMs(300);
@@ -546,8 +552,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         const finished = watch(&host, 68, attach.download, 10_000, true, 0);
         const after_done = inodeOf(done_path);
         const content = sameContent(done_path, http.download_body);
-        report(started.received > 0 and during != null and during.? == slow_ino and finished.last == .complete and after_done != null and content, "dl-same-file", std.fmt.bufPrint(&detail_buf, "받는 중({d} 바이트) 같은 파일 {} · 취소 뒤 남음 {} · 완료 뒤 같은 파일 {} · 내용 같음 {}", .{
-            started.received, during != null and during.? == slow_ino, after_cancel != null, after_done != null and after_done.? == done_ino, content,
+        report(started.received > 0 and during != null and during.? == slow_ino and placeholder_size == 0 and sibling_size > 0 and after_cancel != null and finished.last == .complete and after_done != null and content, "dl-same-file", std.fmt.bufPrint(&detail_buf, "받는 중({d} 바이트) 미리 만든 파일 {d} 바이트·같은 inode {} · ` (1)` 형제 {d} 바이트 · 취소 뒤 미리 만든 파일 남음 {} · 완료 뒤 같은 파일 {} · 내용 같음 {}", .{
+            started.received, placeholder_size, during != null and during.? == slow_ino, sibling_size, after_cancel != null, after_done != null and after_done.? == done_ino, content,
         }) catch "");
     }
 

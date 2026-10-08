@@ -59850,6 +59850,30 @@ test "W10c: 마지막 창의 유일한 탭이 받는 중이면 물은 닫기 뒤
     try std.testing.expectEqualStrings("maru를 종료할까요? 진행 중인 다운로드 1개가 취소됩니다.", session.chrome_host.confirm.message);
 }
 
+test "W10d: pane 의 유일한 탭이 받는 중 스스로 닫으면 새 빈 웹 탭으로 바뀌고 옛 브라우저는 주차된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    web_osr.downloads.testReset();
+    defer web_osr.downloads.testReset();
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    term_ops.closeTermAt(session, 0, pane, 0); // 웹 탭만 남는다
+    try web_osr.testHold(allocator, sid);
+    web_osr.testRunning(sid);
+    try web_osr.downloads.testAddActive(1, sid);
+    web_osr.testApply(allocator, .{ .page_close_kept = sid });
+    try std.testing.expect(web_osr.takePageClosed(sid));
+    web_ops.osrClosePageClosedTab(session, sid);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expect(pane.terms.items[0].surfaceId() != sid); // 같은 번호로 되살리지 않았다
+    try std.testing.expect(pane.terms.items[0].kind == .web);
+    try std.testing.expectEqual(@as(usize, 1), web_osr.parkedCount()); // 옛 브라우저는 받기를 잇는다
+}
+
 test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal이면 0 (4g-0 헤드리스)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

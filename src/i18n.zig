@@ -583,6 +583,7 @@ const Table = struct {
     rn_undone: [:0]const u8,
     rn_undo_changed: [:0]const u8,
     rn_nothing_to_undo: [:0]const u8,
+    rn_no_server: [:0]const u8,
     /// code action(§8.2h). `{0}` = 파일 수 / 서버 message.
     ca_none: [:0]const u8,
     ca_applied: [:0]const u8,
@@ -1835,6 +1836,7 @@ const en: Table = .{
     .rn_undone = "Rename undone in {0} file(s)",
     .rn_undo_changed = "Cannot undo rename — {0} has changed since",
     .rn_nothing_to_undo = "No rename to undo",
+    .rn_no_server = "Cannot rename — the language server is not ready",
     .ca_none = "No code actions available here",
     .ca_applied = "Code action applied in {0} file(s)",
     .ca_error = "Code action failed — {0}",
@@ -2639,6 +2641,7 @@ const ko: Table = .{
     .rn_undone = "{0}개 파일의 이름 바꾸기를 되돌렸습니다",
     .rn_undo_changed = "{0} 이 바뀌어 되돌릴 수 없습니다",
     .rn_nothing_to_undo = "되돌릴 이름 바꾸기가 없습니다",
+    .rn_no_server = "언어 서버가 준비되지 않아 이름을 바꿀 수 없습니다",
     .ca_none = "사용할 수 있는 코드 액션이 없습니다",
     .ca_applied = "{0}개 파일에 코드 액션을 적용했습니다",
     .ca_error = "코드 액션 실패 — {0}",

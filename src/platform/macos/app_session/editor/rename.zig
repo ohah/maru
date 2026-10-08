@@ -43,6 +43,10 @@ pub const State = struct {
     closed_doc_hidden: u64 = 0,
     /// 확정했지만 상자가 열린 동안 문서가 바뀌어 보내지 않고 알린 수(`commit`).
     refused_stale_at_commit: u64 = 0,
+    /// 확정했지만 서버가 준비되지 않아 보내지 못하고 알린 수(`commit`).
+    refused_no_server: u64 = 0,
+    /// 상자 안을 눌러 caret 을 옮긴 수(`placeCaretAt`).
+    caret_placed_by_click: u64 = 0,
 };
 
 /// `rename_symbol` 명령·`F2`. 상자를 열었으면 true.
@@ -86,7 +90,13 @@ pub fn commit(self: *AppSession, t: Target, new_name: []const u8) void {
     const old = seedFor(self, t) orelse return;
     if (std.mem.eql(u8, old, new_name)) return;
     if (doc.file.read_only) return;
-    const seq = editor_lsp.requestRename(self, term, t.start, new_name) orelse return;
+    const seq = editor_lsp.requestRename(self, term, t.start, new_name) orelse {
+        // **보내지 못했다** — 상자가 열린 동안 서버가 죽었거나 다시 뜨는 중이다(앱을 떠난 동안 상자가 남게 되면서 그사이 일이
+        // 생길 수 있다 — `AppSession.trySetFocused`). 예전에는 상자만 조용히 닫혀 이름이 바뀐 줄 알았다(2026-10-08).
+        st.refused_no_server += 1;
+        self.showNoticeKey(.rn_no_server);
+        return;
+    };
     st.waiting = true;
     st.waiting_seq = seq;
     st.sent_count += 1;
@@ -166,6 +176,20 @@ pub fn boxContains(self: *AppSession, x_px: f64, y_px: f64) bool {
     const x0: f64 = @floatFromInt(r.x);
     const y0: f64 = @floatFromInt(r.y);
     return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(r.w)) and y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(r.h));
+}
+
+/// **상자 안을 누른 자리로 caret 을 옮긴다**(누른 x 하나 — 상자는 한 줄이다). 위치는 그리는 쪽의 역함수
+/// (`rename_box.caretOffsetAt`)가 정한다 — 길어서 앞이 잘린 이름도 보이는 글자 그대로다. 선택은 지운다(상자는 선택을
+/// 그리지 않는다). **조합 중이면 옮기지 않는다** — 조합은 caret 자리에 끼워 그려지고 입력기는 그 자리를 들고 있어,
+/// 여기서 caret 만 옮기면 확정이 어디에 들어갈지 입력기와 갈린다.
+pub fn placeCaretAt(self: *AppSession, x_px: f64) void {
+    if (self.rename_input.preedit.items.len != 0) return;
+    const off = chrome.components.rename_box.caretOffsetAt(&self.chrome_host.rename_box, self.rename_input.text.items, x_px, self.buildChromeProps()) orelse return;
+    self.rename_input.selection = null;
+    self.rename_input.caret = @min(off, self.rename_input.text.items.len);
+    self.editor_rename.caret_placed_by_click += 1;
+    self.resetCursorBlink(); // 옮긴 caret 이 바로 보이게(키 입력과 같은 규율)
+    self.metal_dirty = true;
 }
 
 /// 상자 안 caret 칸 — caret 앞 글 + 조합 중 글자의 표시폭(상자는 코드포인트 폭 모델로 그린다 — `rename_box`).

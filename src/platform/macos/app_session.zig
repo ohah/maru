@@ -14894,8 +14894,11 @@ pub const AppSession = struct {
         // **팝업 상자는 클릭-어웨이가 취소다**(`renameFocusMoved` — 그 이유와 인라인 rename 의 확정을 그쪽이 든다).
         // **팝업 이름 상자 안의 포인터는 그 상자의 것이다** — 누름이 클릭-어웨이가 아니다(2026-10-08 재현: 상자 안을 눌러도 취소돼
         // 친 이름 「addZ」 를 잃었다 — 상자 안이 맞는지 묻는 자리가 없었다). 누름·끌기·뗌을 모두 소비해 아래 편집기가 받지 않는다.
-        // 눌린 자리로 caret 을 옮기는 것은 아직 안 한다 — 상자는 그대로 남고 caret 은 제자리다.
-        if (editor_ops.rename_client.boxContains(self, x_px, y_px)) return;
+        // 왼쪽 버튼 누름은 **그 자리로 상자의 caret 을 옮긴다**(`rename_client.placeCaretAt` — 그리는 쪽의 역함수).
+        if (editor_ops.rename_client.boxContains(self, x_px, y_px)) {
+            if (kind == 1 and button == 0) editor_ops.rename_client.placeCaretAt(self, x_px);
+            return;
+        }
         if (kind == 1) settings_ops.renameFocusMoved(self);
         // Phase 7e-2a: 주소창 편집 중 **자기 밴드 밖**(탭/pane/워크스페이스/터미널)을 down하면 편집을 취소한다 — rename의
         // mouse-down commit-away를 미러하되, 브라우저 관례상 클릭-어웨이 = **취소(현재 URL 복원)**로 한다(commit-navigate는

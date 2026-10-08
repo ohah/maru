@@ -54858,3 +54858,90 @@ test "RNM9 팝업 이름 상자가 떠 있는데 메뉴바로 찾기·팔레트�
     }
     try testing.expectEqualStrings(RenameFx.r_text, h.content());
 }
+
+test "RNM10 심볼 이름 상자 안을 누르면 그 자리로 상자 caret 이 간다 — 글자 가운데 기준, 끝 너머는 끝; 조합 중·오른쪽 버튼은 안 옮긴다; 편집기 caret 은 그대로 (제품 경계, §8.2f)" {
+    // #4237 은 상자 안 누름을 소비만 했다(caret 은 제자리). 이제 누른 자리로 옮긴다 — 그리는 쪽의 역함수(`rename_box.caretOffsetAt`).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    const leaf = activeLeafRectForTest(s) orelse return error.SkipZigTest;
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expectEqualStrings("add", s.rename_input.text.items);
+    try testing.expectEqual(@as(usize, 3), s.rename_input.caret); // 씨앗 끝
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    try testing.expect(rename_client.refreshAnchor(s, s.rename.?.symbol));
+    const r = chrome.components.rename_box.boxRect(&s.chrome_host.rename_box, s.rename_input.text.items, s.buildChromeProps()).?;
+    const cw: f64 = @floatFromInt(s.buildChromeProps().metrics.cell_width_px);
+    const tx: f64 = @as(f64, @floatFromInt(r.x)) + cw; // 글 시작(좌패딩 1칸)
+    const y: f64 = @as(f64, @floatFromInt(r.y)) + @as(f64, @floatFromInt(r.h)) / 2;
+    const click = struct {
+        fn f(ss: *AppSession, x: f64, yy: f64, button: i32) void {
+            ss.mouse(1, x, yy, button, 0);
+            ss.mouse(3, x, yy, button, 0);
+        }
+    }.f;
+    // ⑴ 「a」 와 「d」 사이(칸 1.2) → caret 1 → `X` 는 거기 들어간다.
+    click(s, tx + cw * 1.2, y, 0);
+    try testing.expectEqual(@as(usize, 1), s.rename_input.caret);
+    try pressKey(&h.fx, .{ .char = 'X' }, .{});
+    try testing.expectEqualStrings("aXdd", s.rename_input.text.items);
+    // ⑵ 끝 너머(상자 오른쪽 여백) → 끝.
+    click(s, @as(f64, @floatFromInt(r.x + @as(i32, @intCast(r.w)))) - cw / 2, y, 0);
+    try testing.expectEqual(@as(usize, 4), s.rename_input.caret);
+    try pressKey(&h.fx, .{ .char = 'Y' }, .{});
+    try testing.expectEqualStrings("aXddY", s.rename_input.text.items);
+    try testing.expectEqual(@as(u64, 2), s.editor_rename.caret_placed_by_click);
+    // ⑶ 오른쪽 버튼은 옮기지 않는다(소비만).
+    click(s, tx, y, 1);
+    try testing.expectEqual(@as(usize, 5), s.rename_input.caret);
+    // ⑷ 조합 중이면 옮기지 않는다 — 입력기가 든 자리와 갈린다.
+    try s.rename_input.setPreedit(allocator, "가");
+    click(s, tx, y, 0);
+    try testing.expectEqual(@as(usize, 5), s.rename_input.caret);
+    try testing.expectEqual(@as(u64, 2), s.editor_rename.caret_placed_by_click);
+    s.rename_input.preedit.clearRetainingCapacity();
+    // 상자는 그대로, 아래 편집기 caret 도 그대로.
+    try testing.expect(s.rename != null and s.chrome_host.rename_box.open);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+    try pressKey(&h.fx, .escape, .{});
+}
+
+test "RNM11 상자가 열린 동안 서버가 rename 을 못 하게 되면 — 확정은 조용히 닫히지 않고 「서버가 준비되지 않았다」고 알린다 (제품 경계, §8.2f)" {
+    // 예전에는 `requestRename` 이 null 이면 상자만 사라져 이름이 바뀐 줄 알았다. 앱을 떠난 동안 상자가 남게 되면서(RNM6) 그사이 서버가 죽거나
+    // 다시 뜰 수 있다. 판정자는 서버 쪽 능력을 내려 같은 갈래를 만든다(`rename_supported` — 다시 뜬 서버가 아직 initialize 를 안 마친 것과 같다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try pressKey(&h.fx, .{ .char = 'Z' }, .{});
+    const c = lsp_client.readyClientFor(s, term) orelse return error.NoClient;
+    c.rename_supported = false;
+    defer c.rename_supported = true;
+    const sent_before = s.editor_lsp.sent_renames;
+    try pressKey(&h.fx, .enter, .{});
+    try testing.expect(s.rename == null);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.refused_no_server);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqualStrings(maru.i18n.t(.rn_no_server), s.chrome_host.notice.message);
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
+}

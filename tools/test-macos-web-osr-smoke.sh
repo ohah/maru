@@ -88,6 +88,9 @@ DLW_AUTO = (b"<!doctype html><title>dlw auto</title><body><script>setTimeout(fun
     b"a.download='run me.command';document.body.appendChild(a);a.click()},1500)</script>")
 # W10b: 사용자 동작 없이 보통 파일(`plain.txt`)을 받는다 — 매번 묻기면 보류된다.
 DLW_AUTO_PLAIN = DLW_AUTO.replace(b"run me.command", b"plain.txt")
+# W10c: 새 탭으로 여는 첨부 링크(맨 위 칸) — 새 탭은 문서 없이 다운로드만 한다.
+DLW_BLANK = (b"<!doctype html><title>dlw blank</title><style>a{position:fixed;left:0;width:300px;height:60px;display:block;background:#f00}</style><body>"
+    b"<a href='/dlw-att' target=_blank style='top:0'>A</a>")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -172,6 +175,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = DLW_AUTO
         elif self.path == "/dlw-auto-plain":
             body = DLW_AUTO_PLAIN
+        elif self.path == "/dlw-blank":
+            body = DLW_BLANK
         elif self.path in ("/dlw-file", "/dlw-att"):
             att = self.path == "/dlw-att"
             body = b"attached\n" if att else b"hello\n"
@@ -1725,6 +1730,90 @@ rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download '
 panels = open(os.path.join(root, 'dlask-abort.panels')).read().split()
 check(len(rows) == 2 and rows[0][2] == '10' and panels[-1:] == ['1'], f'a clicked download shows a real save panel and waits (asking) ({rows[:1]} · panels {panels})')
 check(len(rows) == 2 and rows[1][2] == '1', f'dismissing the panel the way quit and window close do puts it back on hold ({rows[1:]})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W10c: 닫은 탭의 다운로드·빈 다운로드 탭 ──────────────────────────────────────────────────────────────────
+# 받는 중인 웹 탭을 닫아도(⌘W·maru 확인) 다운로드는 끝까지 받아진다 — maru 가 그 브라우저를 숨겨 about:blank 에 남긴다(닫으면
+# Chromium 이 서버 연결을 끊고 받던 파일을 지운다 — 판정 `dl-closed`). 다 받으면 그 브라우저를 닫는다(웹 탭이 없으면 sidecar 도 내린다).
+# 페이지가 새 탭으로 연 첨부(`target=_blank`)는 문서 없이 다운로드만 한 그 탭을 닫고 파일은 받는다.
+printf 'ui.language = ko\n' > "$root/park.conf"
+cat > "$root/dlpark.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0 0 338 302 0
+mouse 3 0 0 338 302 0
+sleep 1500
+downloads
+key 13 U+77 U+77 32
+sleep 700
+key 36 U+D
+sleep 2500
+downloads
+sleep 11000
+downloads
+SCRIPT
+: > "$root/requests.log"
+run_app /dlw-app 30000 "$root/dlpark.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlpark.txt" MARU_CONFIG="$root/park.conf"
+dl_check dlw-app
+cp "$root/dlw-app.report" "$root/dlpark.report"
+grep -ao 'osr-test download-park[ a-z]*=[0-9]*\( tabs=[0-9]*\)\{0,1\}' "$root/app-dlw-app.log" | sed 's/^osr-test //' > "$root/dlpark.park" || true
+cat "$root/dlpark.park"
+python3 - "$root" <<'PY' || fail "a closed tab's download did not keep going to the end"
+import sys, os
+root = sys.argv[1]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+lines = [l.strip() for l in open(os.path.join(root, 'dlpark.report')) if l.strip()]
+groups, cur = [], None
+for l in lines:
+    if l.startswith('downloads '):
+        cur = []; groups.append(cur)
+    elif l.startswith('download ') and cur is not None:
+        cur.append(l.split(' ', 1)[1].split('|'))
+park = [l.strip() for l in open(os.path.join(root, 'dlpark.park')) if l.strip()]
+big = lambda g: next((r for r in g if r[1] == 'big.zip'), [''] * 7)
+path = os.path.join(root, 'home', 'Downloads', 'big.zip')
+size = os.path.getsize(path) if os.path.exists(path) else -1
+q = os.popen(f"xattr -p com.apple.quarantine '{path}' 2>/dev/null").read()[:4]
+check(len(groups) == 3 and big(groups[0])[2] == '2', f'the slow download was going before the tab closed ({groups[:1]})')
+check('download-park parked=1' in park, f'closing the tab hid its browser instead of closing it ({park})')
+check(len(groups) == 3 and big(groups[1])[2] == '2', f'after the tab closed the download is still going, not stopped ({groups[1:2]})')
+check(len(groups) == 3 and big(groups[2])[2] == '4' and size == 30 * 104858 and q == '0281', f'it finished in full with the quarantine mark ({groups[2:]} · {size} bytes · {q!r})')
+check('download-park released parked=0 tabs=0' in park, f'once done the hidden browser was closed — no web tab is left, so the engine can go too ({park})')
+sys.exit(0 if ok else 1)
+PY
+cat > "$root/dlblank.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0 0 338 142 0
+mouse 3 0 0 338 142 0
+sleep 3500
+downloads
+SCRIPT
+: > "$root/requests.log"
+run_app /dlw-blank 16000 "$root/dlblank.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlblank.txt"
+dl_check dlw-blank
+grep -ao 'osr-test newtab \(download-blank closed tabs=[0-9]*\|at=[0-9]* tabs=[0-9]*\)' "$root/app-dlw-blank.log" > "$root/dlblank.tabs" || true
+cat "$root/dlblank.tabs"
+python3 - "$root" <<'PY' || fail "a new tab that only downloaded was left open"
+import sys, os
+root = sys.argv[1]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+lines = [l.strip() for l in open(os.path.join(root, 'dlw-blank.report')) if l.strip()]
+rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download ')]
+tabs = [l.strip() for l in open(os.path.join(root, 'dlblank.tabs')) if l.strip()]
+files = sorted(l.strip() for l in open(os.path.join(root, 'dlw-blank.files')) if l.strip())
+opened = [t for t in tabs if ' at=' in t]
+closed = [t for t in tabs if 'download-blank closed' in t]
+check(len(opened) == 1, f'the link opened one new tab ({tabs})')
+check(len(closed) == 1 and opened and closed[0].split('tabs=')[1] == str(int(opened[0].split('tabs=')[1]) - 1), f'the new tab that only downloaded was closed ({tabs})')
+check(len(rows) == 1 and rows[0][1] == 'report.txt' and rows[0][2] == '4' and files == ['report.txt'], f'the file was still downloaded ({rows} · {files})')
 sys.exit(0 if ok else 1)
 PY
 

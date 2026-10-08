@@ -8125,6 +8125,7 @@ pub const AppSession = struct {
         maru.i18n.applyPreference(self.loaded_config.config.ui_language);
         // W4d: 브라우저 탭 엔진은 첫 창의 설정으로 프로세스에 한 번 정한다(재시작 후 적용 — 사용자 결정 2026-09-25).
         if (!builtin.is_test) web_osr.decide(self.loaded_config.config.browser.engine == .chromium);
+        if (!builtin.is_test) web_osr.downloads.setAsk(self.loaded_config.config.browser.download_ask); // W10b(새 창의 설정)
         if (builtin.is_test and live_app_sessions == 0) {
             // 이전 test의 process-global 값만 리셋한다. 같은 test에서 이미 열린 Window가 있으면 아래 production
             // resolver를 그대로 타므로 Window A toggle → Window B 첫 Term remote 배선을 실제 통합 검증할 수 있다.

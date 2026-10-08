@@ -10035,6 +10035,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if !dir.isEmpty { panel.directoryURL = URL(fileURLWithPath: dir, isDirectory: true) }
         panel.message = message
         panel.canCreateDirectories = true
+        // 확장자를 숨기지 않는다 — 사용자가 마지막으로 고른 「확장자 숨기기」를 따르면 `.command` 가 가려졌다(4 회차).
+        panel.isExtensionHidden = false
+        panel.canSelectHiddenExtension = false
         downloadAskPanels[key] = panel
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }

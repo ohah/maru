@@ -88,9 +88,10 @@ DLW_AUTO = (b"<!doctype html><title>dlw auto</title><body><script>setTimeout(fun
     b"a.download='run me.command';document.body.appendChild(a);a.click()},1500)</script>")
 # W10b: 사용자 동작 없이 보통 파일(`plain.txt`)을 받는다 — 매번 묻기면 보류된다.
 DLW_AUTO_PLAIN = DLW_AUTO.replace(b"run me.command", b"plain.txt")
-# W10c: 새 탭으로 여는 첨부 링크(맨 위 칸) — 새 탭은 문서 없이 다운로드만 한다.
-DLW_BLANK = (b"<!doctype html><title>dlw blank</title><style>a{position:fixed;left:0;width:300px;height:60px;display:block;background:#f00}</style><body>"
-    b"<a href='/dlw-att' target=_blank style='top:0'>A</a>")
+# W10c: 첨부 링크 둘 — 위 절반은 `target=_blank`(팝업 브라우저를 이어 받은 새 탭), 아래 절반은 보통 링크(가운데 클릭 — 주소로 연
+# 새 탭). 새 탭은 문서 없이 다운로드만 한다.
+DLW_BLANK = (b"<!doctype html><title>dlw blank</title><style>html,body{margin:0;height:100%}a{position:fixed;left:0;width:100%;height:50%;display:block;background:#f00}</style><body>"
+    b"<a href='/dlw-att' target=_blank style='top:0'>A</a><a href='/dlw-att' style='top:50%;background:#00f'>B</a>")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -1749,11 +1750,12 @@ sleep 700
 key 36 U+D
 sleep 2500
 downloads
-sleep 11000
+sleep 15000
 downloads
 SCRIPT
 : > "$root/requests.log"
-run_app /dlw-app 30000 "$root/dlpark.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlpark.txt" MARU_CONFIG="$root/park.conf"
+# 받기는 누른 뒤 약 9 초(0.3 초마다 100 KB) — 마지막 보고는 누른 뒤 약 19 초. 대본이 약 27 초라 34 초.
+run_app /dlw-app 34000 "$root/dlpark.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlpark.txt" MARU_CONFIG="$root/park.conf"
 dl_check dlw-app
 cp "$root/dlw-app.report" "$root/dlpark.report"
 grep -ao 'osr-test download-park[ a-z]*=[0-9]*\( tabs=[0-9]*\)\{0,1\}' "$root/app-dlw-app.log" | sed 's/^osr-test //' > "$root/dlpark.park" || true
@@ -1787,15 +1789,20 @@ sys.exit(0 if ok else 1)
 PY
 cat > "$root/dlblank.txt" <<'SCRIPT'
 sleep 7000
-mouse 1 0 0 338 142 0
-mouse 3 0 0 338 142 0
+view down 0.5 0.25 0 0
+sleep 60
+view up 0.5 0.25 0 0
+sleep 3000
+view down 0.5 0.75 0 0 2
+sleep 60
+view up 0.5 0.75 0 0 2
 sleep 3500
 downloads
 SCRIPT
 : > "$root/requests.log"
 run_app /dlw-blank 16000 "$root/dlblank.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlblank.txt"
 dl_check dlw-blank
-grep -ao 'osr-test newtab \(download-blank closed tabs=[0-9]*\|at=[0-9]* tabs=[0-9]*\)' "$root/app-dlw-blank.log" > "$root/dlblank.tabs" || true
+grep -ao 'osr-test newtab \(download-blank closed tabs=[0-9]*\|at=[0-9]* tabs=[0-9]* opener=[0-9]* active=[0-9]* placement=[a-z_]* adopted=[a-z]*\)' "$root/app-dlw-blank.log" > "$root/dlblank.tabs" || true
 cat "$root/dlblank.tabs"
 python3 - "$root" <<'PY' || fail "a new tab that only downloaded was left open"
 import sys, os
@@ -1811,9 +1818,44 @@ tabs = [l.strip() for l in open(os.path.join(root, 'dlblank.tabs')) if l.strip()
 files = sorted(l.strip() for l in open(os.path.join(root, 'dlw-blank.files')) if l.strip())
 opened = [t for t in tabs if ' at=' in t]
 closed = [t for t in tabs if 'download-blank closed' in t]
-check(len(opened) == 1, f'the link opened one new tab ({tabs})')
-check(len(closed) == 1 and opened and closed[0].split('tabs=')[1] == str(int(opened[0].split('tabs=')[1]) - 1), f'the new tab that only downloaded was closed ({tabs})')
-check(len(rows) == 1 and rows[0][1] == 'report.txt' and rows[0][2] == '4' and files == ['report.txt'], f'the file was still downloaded ({rows} · {files})')
+check(len(opened) == 2 and 'adopted=true' in opened[0] and 'adopted=false' in opened[1], f'each link opened one new tab — the target=_blank popup, then the middle-clicked address ({tabs})')
+# 보고 차례: 연 탭 · 닫음 · 연 탭 · 닫음 — 닫을 때마다 탭 수가 연 뒤보다 하나 적다.
+pairs = list(zip(tabs[0::2], tabs[1::2]))
+check(len(pairs) == 2 and all(' at=' in a and 'download-blank closed' in b and int(b.split('tabs=')[1]) == int(a.split('tabs=')[1].split()[0]) - 1 for a, b in pairs), f'both new tabs that only downloaded were closed ({tabs})')
+check(len(rows) == 2 and all(r[2] == '4' for r in rows) and files == ['report (1).txt', 'report.txt'], f'both files were still downloaded ({rows} · {files})')
+sys.exit(0 if ok else 1)
+PY
+# 「매번 묻기」면 새 탭이 받는 다운로드의 저장 창이 그 새 탭에서 곧바로 뜬다 — 저장 창이 뜨기 전에 탭을 닫으면 목록 창으로 밀렸다
+# (W10c 적대 리뷰 1 회차). 고른 곳에 받고, 그 빈 탭은 닫힌다.
+rm -rf "$root/picked" && mkdir -p "$root/picked"
+printf 'browser.download-ask = true\n' > "$root/ask.conf"
+cat > "$root/dlblank-ask.txt" <<SCRIPT
+sleep 7000
+dlanswer $root/picked/blank.txt
+view down 0.5 0.25 0 0
+sleep 60
+view up 0.5 0.25 0 0
+sleep 3500
+downloads
+SCRIPT
+: > "$root/requests.log"
+run_app /dlw-blank 16000 "$root/dlblank-ask.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlblank-ask.txt" MARU_CONFIG="$root/ask.conf"
+dl_check dlw-blank
+grep -ao 'osr-test \(newtab download-blank closed tabs=[0-9]*\|download-ask via=[a-z]*\)' "$root/app-dlw-blank.log" > "$root/dlblank-ask.report" || true
+cat "$root/dlblank-ask.report"
+python3 - "$root" <<'PY' || fail "an ask-each-time download in a new tab did not ask in that tab"
+import sys, os
+root = sys.argv[1]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+seen = [l.strip() for l in open(os.path.join(root, 'dlblank-ask.report')) if l.strip()]
+rows = [l.split(' ', 1)[1].split('|') for l in open(os.path.join(root, 'dlw-blank.report')) if l.startswith('download ')]
+check('osr-test download-ask via=tab' in seen, f'the save panel came up from the new tab right away, not from the list window ({seen})')
+check(any('download-blank closed' in l for l in seen), f'the blank tab was closed after the panel came up ({seen})')
+check(len(rows) == 1 and rows[0][2] == '4' and os.path.exists(os.path.join(root, 'picked', 'blank.txt')), f'saved where the panel said ({rows})')
 sys.exit(0 if ok else 1)
 PY
 

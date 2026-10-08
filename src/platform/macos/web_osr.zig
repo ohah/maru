@@ -172,7 +172,8 @@ const Surface = struct {
     /// 물은 닫기를 닫기 대신 about:blank 이동으로 보냈다(W10c — 받던 다운로드가 있다. 닫으면 Chromium 이 받기를 끊는다). 떠나기
     /// 확인은 이동에도 같게 온다 — 새 문서(`page_started`)가 오면 닫힌 것으로 본다. 탭이 사라지면 브라우저는 숨겨 남긴다(`parked`).
     close_park: bool = false,
-    /// 페이지가 연 탭(W10c — 이어 받은 팝업·`open_tab` 의 새 탭). 문서 없이 다운로드만 하면 창이 그 탭을 닫는다(Chrome 처럼).
+    /// 페이지가 연 탭(W10c — 이어 받은 팝업·`open_tab` 의 새 탭). 문서 없이(주소가 없거나 about:blank) 다운로드만 하면 창이 그 탭을
+    /// 닫는다(Chrome 처럼).
     page_opened: bool = false,
     /// 문서도 사용자 입력도 없이 다운로드만 한 페이지가 연 탭(W10c) — 그 탭이 있는 창이 꺼내 가 닫는다(`takeDownloadBlank`).
     download_blank: bool = false,
@@ -523,6 +524,9 @@ test "closing the last Chromium tab ends its downloads instead of leaving them a
     try std.testing.expectEqual(@as(usize, 0), web_downloads.activeTotal());
 }
 
+/// 시험 전용 — 돌고 있는(`running`) 채 프로세스 없이 보낸 것을 outbox 에 쌓는다(`sentFrames` 로 본다).
+var test_record_sends = false;
+
 fn testSurfaces(gpa: std.mem.Allocator, ids: []const u64) !void {
     for (ids) |id| try surfaces.put(gpa, id, .{ .record = .{ .surface_id = id, .size = .{ .width = 300, .height = 200, .scale = 2 }, .hidden = false }, .created = true });
 }
@@ -535,6 +539,7 @@ fn testTeardown(gpa: std.mem.Allocator) void {
     parked = .empty;
     outbox_pending.clearAndFree(gpa);
     state = .off;
+    test_record_sends = false;
 }
 
 test "closing a tab that is still downloading hides it on about:blank and closes it once the downloads end (W10c)" {
@@ -575,13 +580,18 @@ test "a page-asked close of a downloading tab goes to about:blank and closes on 
     const gpa = std.testing.allocator;
     web_downloads.testReset();
     defer web_downloads.testReset();
-    state = .running; // 물을 수 있는 상태(보낼 프로세스는 없다 — 무엇을 보냈는지는 표지로 본다)
+    state = .running; // 물을 수 있는 상태(보낼 프로세스는 없다 — 보낸 것은 outbox 에 쌓는다)
+    test_record_sends = true;
     defer testTeardown(gpa);
     try testSurfaces(gpa, &.{7});
     try web_downloads.testAddActive(1, 7);
     // 처리기 없는 페이지 — 이동이 곧바로 새 문서를 연다.
     try std.testing.expect(askClose(gpa, 7, 0));
-    try std.testing.expect(surfaces.getPtr(7).?.close_park); // 닫기(`close_asking`) 대신 about:blank 로
+    try std.testing.expect(surfaces.getPtr(7).?.close_park);
+    var sent: [4]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent)); // 닫기(`close_asking`) 대신 about:blank 로
+    try std.testing.expect(sent[0].navigate.browser == 7 and std.mem.eql(u8, sent[0].navigate.url, "about:blank"));
+    outbox_pending.clearRetainingCapacity();
     try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, 10));
     apply(gpa, .{ .page_started = 7 }, 0);
     try std.testing.expectEqual(CloseAskOutcome.closed, takeCloseAsk(7, 10));
@@ -603,8 +613,11 @@ test "a page-asked close of a downloading tab goes to about:blank and closes on 
     try std.testing.expectEqual(CloseAskOutcome.closed, takeCloseAsk(7, 10));
     // 받는 것이 없으면 예전처럼 페이지에 닫기를 묻는다.
     web_downloads.testFinish(1);
+    outbox_pending.clearRetainingCapacity();
     try std.testing.expect(askClose(gpa, 7, 0));
     try std.testing.expect(!surfaces.getPtr(7).?.close_park);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expectEqual(@as(u64, 7), sent[0].close_asking);
     apply(gpa, .{ .page_started = 7 }, 0);
     try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, 10)); // 새 문서로는 닫지 않는다(`browser_closed` 를 기다린다)
 }
@@ -618,7 +631,9 @@ test "a page-opened tab that only downloaded is closed, one with a document or a
     try testSurfaces(gpa, &.{ 7, 8, 9, 10 });
     surfaces.getPtr(7).?.page_opened = true; // 페이지가 열고 곧바로 받았다
     surfaces.getPtr(8).?.page_opened = true;
-    surfaces.getPtr(8).?.last_nav_ms = 5; // 문서가 있었다
+    surfaces.getPtr(8).?.url = try gpa.dupe(u8, "https://a.example/landing"); // 문서가 있었다(「곧 받기가 시작됩니다」 쪽)
+    surfaces.getPtr(7).?.url = try gpa.dupe(u8, "about:blank"); // 처음 만들 때의 빈 문서(새 문서 표지도 왔다)
+    surfaces.getPtr(7).?.last_nav_ms = 5;
     surfaces.getPtr(9).?.page_opened = true;
     surfaces.getPtr(9).?.last_user_input_ms = 5; // 그 탭에서 눌렀다(document.write 로 쓴 팝업 등)
     // 10 — 사용자가 연 탭(주소창에 친 파일 주소)
@@ -626,6 +641,16 @@ test "a page-opened tab that only downloaded is closed, one with a document or a
     for ([_]u64{ 7, 8, 9, 10 }, 1..) |id, dl| apply(gpa, .{ .download_begin = .{ .browser = id, .download = @intCast(dl), .url = "https://a.example/f", .name = "f.txt", .mime = "text/plain", .total = 10 } }, 0);
     try std.testing.expect(takeDownloadBlank(7));
     try std.testing.expect(!takeDownloadBlank(7)); // 한 번
+    // 「매번 묻기」에서 누른 다운로드 — 저장 창이 뜰 때(맡을 때)까지 탭을 닫지 않는다(그 탭이 저장 창을 띄운다).
+    try testSurfaces(gpa, &.{11});
+    const s11 = surfaces.getPtr(11).?;
+    s11.page_opened = true;
+    s11.download_gesture_ms = monotonicNow(); // 연 탭의 누름을 물려받았다
+    apply(gpa, .{ .download_begin = .{ .browser = 11, .download = 9, .url = "https://a.example/f", .name = "g.txt", .mime = "text/plain", .total = 10 } }, 0);
+    try std.testing.expectEqual(web_downloads.State.asking, web_downloads.at(web_downloads.count() - 1).?.state);
+    try std.testing.expect(!takeDownloadBlank(11));
+    try std.testing.expect(web_downloads.claimAskFor(11) != null);
+    try std.testing.expect(takeDownloadBlank(11));
     try std.testing.expect(!takeDownloadBlank(8));
     try std.testing.expect(!takeDownloadBlank(9));
     try std.testing.expect(!takeDownloadBlank(10));
@@ -1236,10 +1261,18 @@ pub fn testRunning(surface_id: u64) void {
     if (surfaces.getPtr(surface_id)) |s| s.created = true;
 }
 
+/// 시험 전용(W10c): sidecar 의 메시지 하나를 적용한다.
+pub fn testApply(gpa: std.mem.Allocator, message: Message) void {
+    if (!builtin.is_test) @compileError("test only");
+    apply(gpa, message, 0);
+}
+
 pub fn testForget(gpa: std.mem.Allocator) void {
     if (!builtin.is_test) @compileError("test only");
     decided = null;
     state = .off;
+    parked.deinit(gpa); // W10c: 받는 중인 탭을 닫으면 주차한다
+    parked = .empty;
     if (surfaces.count() == 0) {
         surfaces.deinit(gpa);
         surfaces = .empty;
@@ -1494,6 +1527,12 @@ fn releaseParked(gpa: std.mem.Allocator, now_ms: i64) void {
     if (parked.count() == 0 and surfaces.count() == 0) retire(gpa, now_ms);
 }
 
+/// 그 탭의 브라우저가 sidecar 에 살아 있는가(W10c — 물은 닫기가 about:blank 로 끝나면 브라우저는 그대로다).
+pub fn browserLive(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.created;
+}
+
 /// 주차한 브라우저 수(W10c — 시험·판정).
 pub fn parkedCount() usize {
     return parked.count();
@@ -1522,6 +1561,9 @@ pub fn markDownloadBlank(surface_id: u64) void {
 pub fn takeDownloadBlank(surface_id: u64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     if (!s.download_blank) return false;
+    // 「매번 묻기」의 저장 창이 아직 어느 창에도 뜨지 않았다 — 이 탭(활성)이 띄울 차례다. 먼저 닫으면 저장 창이 뜰 탭이 없어 1 초 뒤
+    // 목록 창으로 밀렸다(W10c 적대 리뷰 1 회차). 저장 창이 뜨면(맡으면) 닫는다 — 답은 행 번호로 간다.
+    if (web_downloads.unclaimedAskFor(surface_id)) return false;
     s.download_blank = false;
     return true;
 }
@@ -1548,8 +1590,6 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     drainInbox(gpa, now_ms);
     web_downloads.drain(gpa); // W10a: 작업 스레드가 만든 경로·목록 창의 누름을 sidecar 로
     web_downloads.nudgeAsking(now_ms); // W10b: 저장 창이 뜰 곳이 없는 묻는 행은 목록 창으로
-    if (process == null or process_generation != generation) return; // 비우는 사이 sidecar 가 끝났다(아래와 같다)
-    releaseParked(gpa, now_ms); // W10c: 다운로드가 끝난 주차 브라우저를 닫는다(마지막이면 sidecar 도 내린다)
     expireContextMenus(gpa, now_ms);
     expireDragOuts(gpa, now_ms);
     expireNewTabs(gpa, now_ms);
@@ -1563,6 +1603,8 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
         lsp_process.kill(&process.?, .KILL);
         return crashed(gpa, now_ms);
     }
+    // W10c: 다운로드가 끝난 주차 브라우저를 닫는다(마지막이면 sidecar 도 내린다 — 내림이 `process` 를 비우므로 맨 끝에서).
+    releaseParked(gpa, now_ms);
 }
 
 /// sidecar 가 끝났다(EOF 또는 거둠). 읽기와 거두기 사이에 끝났을 수 있다 — 끝나기 직전에 쓴 frame(버전 불일치의 `hello_ack`
@@ -3030,7 +3072,7 @@ fn send(gpa: std.mem.Allocator, message: Message) void {
         .starting => outbox_pending.appendSlice(gpa, frame[0..len]) catch {},
         .running => if (process) |*p| {
             _ = lsp_process.write(p, gpa, frame[0..len]) catch false;
-        },
+        } else if (builtin.is_test and test_record_sends) outbox_pending.appendSlice(gpa, frame[0..len]) catch {},
         .off, .failed => {},
     }
 }
@@ -3252,8 +3294,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         } else if (surfaces.getPtr(v.browser)) |s| {
             // W10c: 페이지가 연 탭이 문서도 사용자 입력도 없이 다운로드만 했다(`target=_blank` 첨부·`window.open` 파일) — 빈 탭으로
             // 남기지 않는다(창이 닫고, 받던 것은 `destroy` 가 숨겨 이어 받는다). 사용자가 그 탭에서 누른 것이면 문서가 있던 탭이다.
+            // 문서는 주소로 가른다 — 다운로드가 된 이동은 주소를 바꾸지 않는다. 새 문서 표지(`page_started`)로 가르면 주소로 연 새 탭이
+            // 처음 만들어질 때의 about:blank 가 「문서」로 세어져 닫히지 않았다(스모크가 잡았다).
             const untouched = std.math.minInt(i64) / 2;
-            if (s.page_opened and s.last_nav_ms == untouched and s.last_user_input_ms == untouched) s.download_blank = true;
+            const no_document = if (s.url) |u| std.mem.eql(u8, u, "about:blank") else true;
+            if (s.page_opened and no_document and s.last_user_input_ms == untouched) s.download_blank = true;
         },
         .download_update => |v| web_downloads.onUpdate(v),
         .datalist_hide => |v| if (surfaces.getPtr(v.browser)) |s| if (s.datalist) |d| if (v.list == 0 or v.list == d.list) dropDatalist(gpa, s),

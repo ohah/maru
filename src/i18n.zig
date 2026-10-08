@@ -1223,6 +1223,9 @@ const Table = struct {
     dl_status_done: [:0]const u8,
     /// 보류 — `{0}` 받으려 한 곳(호스트).
     dl_state_held_from: [:0]const u8,
+    /// W10b 묻기 — 사용자 동작 없이 받으려는 보통 파일의 보류(`{0}` 받으려 한 곳).
+    dl_state_held_plain: [:0]const u8,
+    dl_state_held_plain_from: [:0]const u8,
     /// `{0}` 받은 양, `{1}` 크기.
     dl_sizes_of: [:0]const u8,
 
@@ -1880,6 +1883,8 @@ const en: Table = .{
     .dl_status_interrupted = "Interrupted \u{2014} {0}",
     .dl_status_done = "Done \u{2014} {0}",
     .dl_state_held_from = "Held \u{2014} {0} wants to save a file that could run code. Download it?",
+    .dl_state_held_plain = "Held \u{2014} download this file?",
+    .dl_state_held_plain_from = "Held \u{2014} {0} wants to save a file. Download it?",
     .dl_sizes_of = "{0} of {1}",
     .scm_show_all_more = "Show all ({0} more)",
     .scm_load_more = "Load more commits",
@@ -2770,6 +2775,8 @@ const ko: Table = .{
     .dl_status_interrupted = "중단됨 \u{2014} {0}",
     .dl_status_done = "완료 \u{2014} {0}",
     .dl_state_held_from = "보류됨 \u{2014} {0}에서 실행될 수 있는 파일을 저장하려 합니다. 받을까요?",
+    .dl_state_held_plain = "보류됨 \u{2014} 이 파일을 받을까요?",
+    .dl_state_held_plain_from = "보류됨 \u{2014} {0}에서 파일을 저장하려 합니다. 받을까요?",
     .dl_sizes_of = "{1} 중 {0}",
     .scm_show_all_more = "모두 보기 ({0}개 더)",
     .scm_load_more = "커밋 더 보기",

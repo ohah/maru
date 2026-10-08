@@ -5171,9 +5171,12 @@ pub const MaruDownloadRow = extern struct {
     reason: u32,
     name_len: u32,
     path_len: u32,
+    status_len: u32,
     name: [256]u8,
     /// 최종 경로(받는 중이면 받을 자리, 끝나면 옮긴 자리 — 경로를 정하기 전이면 비었다).
     path: [1024]u8,
+    /// 상태 줄(현재 UI 언어 — Zig 가 만든다, docs/i18n.md §7.2).
+    status: [256]u8,
 };
 
 /// 목록이 바뀔 때마다 오른다.
@@ -5201,6 +5204,8 @@ pub export fn maru_macos_downloads_row(index: u32, out: ?*MaruDownloadRow) i32 {
     const path = e.finalPath();
     row.path_len = @intCast(@min(path.len, row.path.len));
     @memcpy(row.path[0..row.path_len], path[0..row.path_len]);
+    const status = session_mod.web_downloads.statusText(e, &row.status);
+    row.status_len = @intCast(status.len);
     return 1;
 }
 

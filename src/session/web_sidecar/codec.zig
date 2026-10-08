@@ -82,7 +82,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeByte(@intFromBool(value.hidden));
             try writeUrl(&cursor, value.url);
         },
-        .destroy_browser, .close_asking, .browser_created, .browser_closed => |browser| try writeBrowser(&cursor, browser),
+        .destroy_browser, .close_asking, .browser_created, .browser_closed, .page_started => |browser| try writeBrowser(&cursor, browser),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -426,6 +426,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .close_asking => .{ .close_asking = try readBrowser(&cursor) },
         .browser_created => .{ .browser_created = try readBrowser(&cursor) },
         .browser_closed => .{ .browser_closed = try readBrowser(&cursor) },
+        .page_started => .{ .page_started = try readBrowser(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
         .set_hidden => .{ .set_hidden = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
@@ -875,6 +876,7 @@ test "every message round trips" {
     try std.testing.expectEqual(@as(u64, 3), (try roundTrip(.{ .hello_ack = .{ .instance = 3, .nonce = 4 } })).hello_ack.instance);
     try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .browser_created = 9 })).browser_created);
     try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .browser_closed = 9 })).browser_closed);
+    try std.testing.expectEqual(@as(u64, 11), (try roundTrip(.{ .page_started = 11 })).page_started);
     try std.testing.expectEqualStrings("", (try roundTrip(.{ .title_changed = .{ .browser = 9, .text = "" } })).title_changed.text);
     try std.testing.expectEqual(@as(i32, -1), (try roundTrip(.{ .load_finished = .{ .browser = 9, .http_status = -1 } })).load_finished.http_status);
     try std.testing.expectEqual(RendererGoneReason.out_of_memory, (try roundTrip(.{ .renderer_gone = .{ .browser = 9, .reason = .out_of_memory } })).renderer_gone.reason);
@@ -900,7 +902,7 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 62; // 정의되지 않은 tag(sidecar → maru 는 W10a 의 `download_update` 61 까지)
+    bad[10] = 63; // 정의되지 않은 tag(sidecar → maru 는 W10a 의 `page_started` 62 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     bad[10] = 131; // 둘째 구간(maru → sidecar)도 `download_control` 130 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
@@ -1432,6 +1434,7 @@ test "input closed fields fail closed both ways" {
 test "every single-byte corruption of input frames decodes to valid fields or errors" {
     // 입력·대화상자 tag 모두(방향 둘) — 새 tag 를 더하면 여기에도 넣는다.
     const samples = [_]Message{
+        .{ .page_started = 3 },
         .{ .mouse = .{ .browser = 3, .kind = .down, .button = .middle, .point = .{ .x = 5, .y = -6 }, .modifiers = .{ .command = true }, .click_count = 1 } },
         .{ .wheel = .{ .browser = 3, .point = .{ .x = 5, .y = 6 }, .delta_x = 7, .delta_y = -8 } },
         .{ .key = .{ .browser = 3, .kind = .char, .character = 'a', .unmodified_character = 'a' } },

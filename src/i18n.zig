@@ -1209,6 +1209,10 @@ const Table = struct {
     dl_button_reveal: [:0]const u8,
     dl_button_clear: [:0]const u8,
     dl_empty: [:0]const u8,
+    /// 상태 줄 — `{0}` 상태, `{1}` 크기(받은 양 / 크기).
+    dl_status_with: [:0]const u8,
+    /// `{0}` 받은 양, `{1}` 크기.
+    dl_sizes_of: [:0]const u8,
 
     // ── 언어 선택 (I4b) ──
     // `auto` 만 키로 둔다 — 아래 `preferenceLabel` 참고.
@@ -1855,6 +1859,8 @@ const en: Table = .{
     .dl_button_reveal = "Show in Finder",
     .dl_button_clear = "Clear Finished",
     .dl_empty = "No downloads",
+    .dl_status_with = "{0} \u{2014} {1}",
+    .dl_sizes_of = "{0} of {1}",
     .scm_show_all_more = "Show all ({0} more)",
     .scm_load_more = "Load more commits",
     .scm_commit_placeholder = "Commit message…",
@@ -2734,6 +2740,8 @@ const ko: Table = .{
     .dl_button_reveal = "Finder에서 보기",
     .dl_button_clear = "끝난 것 지우기",
     .dl_empty = "다운로드가 없습니다",
+    .dl_status_with = "{0} \u{2014} {1}",
+    .dl_sizes_of = "{1} 중 {0}",
     .scm_show_all_more = "모두 보기 ({0}개 더)",
     .scm_load_more = "커밋 더 보기",
     .scm_commit_placeholder = "커밋 메시지…",

@@ -671,6 +671,24 @@ test "parking answers what the page was waiting for, ends held rows, and a full 
     try std.testing.expectEqual(@as(u64, 7), sent[0].destroy_browser);
 }
 
+test "when the watch closes the last parked browser and no tab is left, the sidecar goes too (W10c)" {
+    const gpa = std.testing.allocator;
+    web_downloads.testReset();
+    defer web_downloads.testReset();
+    state = .starting;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{7});
+    try web_downloads.testAddActive(1, 7);
+    destroy(gpa, 7); // 마지막 탭 — 주차한다(sidecar 는 그대로)
+    try std.testing.expectEqual(State.starting, state);
+    apply(gpa, .{ .page_started = 7 }, 0);
+    apply(gpa, .{ .page_started = 7 }, 0); // 둘째 문서 — 감시가 닫는다(`apply` 안에서는 내리지 않는다)
+    try std.testing.expectEqual(@as(usize, 0), parkedCount());
+    try std.testing.expectEqual(State.starting, state);
+    releaseParked(gpa, monotonicNow()); // 다음 pump 끝 — 탭도 주차도 없다
+    try std.testing.expectEqual(State.off, state);
+}
+
 test "losing the sidecar forgets parked browsers with their downloads (W10c)" {
     const gpa = std.testing.allocator;
     web_downloads.testReset();

@@ -318,6 +318,11 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "lsp")) {
+        try runLspTrustCli(io, allocator, &args, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "host")) {
         try runPersistentReadCli(io, allocator, &args, stdout, stderr, .host);
         return;
@@ -15751,6 +15756,80 @@ fn runSessionCli(
     }
 }
 
+/// `maru lsp trust list|revoke|forget`(계획 WT4b) — 언어 서버 신뢰 결정을 조회·철회·잊는다(부여 없음). 셀렉터 없이 붙는다(앱 전역 표 —
+/// `control_client.Anchor`). 상대 경로는 현재 디렉터리 기준으로 편다(서버는 CLI 의 cwd 를 모른다). 오류 응답이면 exit 1.
+fn runLspTrustCli(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: anytype,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |s| allocator.free(s);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
+    const cli = maru.cli.lsp_trust;
+    const parsed = cli.parse(collected.items) catch |err| {
+        const reason = switch (err) {
+            error.MissingTopic => "a topic is required (trust)",
+            error.UnknownTopic => "unknown topic",
+            error.MissingSubcommand => "a subcommand is required",
+            error.UnknownSubcommand => "unknown subcommand",
+            error.MissingPath => "a repository path is required",
+            error.MissingVolumeValue => "--volume needs a value",
+            error.InvalidVolumeValue => "the --volume value must be hexadecimal",
+            error.UnknownOption => "unknown option",
+            error.UnexpectedArgument => "too many arguments",
+        };
+        try stderr.print("maru lsp: {s}\n\n", .{reason});
+        try stderr.writeAll(cli.help);
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    var req = switch (parsed) {
+        .help => {
+            try stdout.writeAll(cli.help);
+            try stdout.flush();
+            return;
+        },
+        .request => |r| r,
+    };
+    var abs_path: ?[]u8 = null;
+    defer if (abs_path) |p| allocator.free(p);
+    switch (req) {
+        .list => {},
+        .revoke, .forget => |*t| {
+            // 절대 경로도 정리한다(끝 `/`·`.`·`..` — 목록의 글자와 맞게). 현재 디렉터리는 상대 경로일 때만 구한다(`Dir.cwd().realPath` 는
+            // AT_FDCWD 핸들에서 실패한다 — 실측). 심링크는 서버가 푼다.
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd: []const u8 = if (std.fs.path.isAbsolute(t.path)) "/" else blk: {
+                _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse {
+                    try stderr.writeAll("maru lsp: cannot read the current directory — pass an absolute path\n");
+                    try stderr.flush();
+                    return error.UnknownCommand;
+                };
+                break :blk std.mem.sliceTo(&cwd_buf, 0);
+            };
+            abs_path = try cli.absolutize(allocator, cwd, t.path);
+            t.path = abs_path.?;
+        },
+    }
+    const request_bytes = try cli.buildRequestBytes(allocator, req, .{ .number = 1 });
+    defer allocator.free(request_bytes);
+    const resp = try maru.cli.control_client.fetchResponseAs(io, allocator, request_bytes, stderr, .none);
+    defer allocator.free(resp);
+    const shown = switch (req) {
+        .list => "",
+        .revoke, .forget => |t| t.path,
+    };
+    const ok = try cli.renderResponse(allocator, resp, cli.kindOf(req), shown, stdout);
+    try stdout.flush();
+    if (!ok) return error.UnknownCommand;
+}
+
 /// `sessions list`/`session get` 요청을 actual 컨트롤 소켓에 왕복한다(A2a). 소켓 흐름은 `cli.control_client`,
 /// 요청 조립·응답 렌더만 `cli.sessions`. 살아있는 인스턴스가 없거나 connect 실패면 crash 없이 graceful 종료(exit 1).
 fn runSessionRequest(
@@ -15837,6 +15916,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru terminfo [--status|--refresh|--clear|--path]
         \\  maru sessions list [--window <id>]
         \\  maru session get <id>
+        \\  maru lsp trust list | revoke <path> [--volume <hex>] | forget <path> [--volume <hex>]
         \\  maru host status [--json]
         \\  maru runtime list [--json]
         \\  maru runtime get <32-lower-hex-runtime-id> [--json]

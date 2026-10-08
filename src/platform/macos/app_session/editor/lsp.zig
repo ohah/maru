@@ -329,8 +329,13 @@ fn termPath(term: *const Term) ?[]const u8 {
 
 /// 앱 전역 표를 처음 한 번 읽는다 — 옛 자리(설정 파일 옆 `lsp-trust`)가 있으면 이관한다.
 fn ensureTrustLoaded(self: *AppSession) void {
+    loadTrust(self.io, self.configPath());
+}
+
+/// 창 없이도 읽을 수 있게(컨트롤 플레인 — 계획 WT4b) 설정 경로만 받는다. `null` 이면 옛 자리 이관을 건너뛴다.
+fn loadTrust(io: std.Io, config_path: ?[]const u8) void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    trust_store.ensureLoaded(self.io, trust_store.legacyPathFor(self.configPath(), &buf));
+    trust_store.ensureLoaded(io, if (config_path) |p| trust_store.legacyPathFor(p, &buf) else null);
 }
 
 /// 앱 전역 묻는 자리에서 이 창을 가리키는 값.
@@ -449,9 +454,9 @@ fn trustOf(self: *AppSession, key: lsp.trust.Key) ?lsp.trust.Decision {
 
 /// 결정을 앱 전역 표에 둔다(파일에 한 줄 — 마지막 줄이 이긴다). 다른 창은 세대를 보고 따른다(`applyTrustChanges`).
 /// 파일에 남지 못했으면 `false` — 이번 실행에만 먹는다(`trust_store.decide`).
-fn recordTrust(self: *AppSession, key: lsp.trust.Key, decision: lsp.trust.Decision) bool {
-    ensureTrustLoaded(self);
-    return trust_store.decide(self.io, key, decision);
+fn recordTrust(io: std.Io, config_path: ?[]const u8, key: lsp.trust.Key, decision: lsp.trust.Decision) bool {
+    loadTrust(io, config_path);
+    return trust_store.decide(io, key, decision);
 }
 
 /// 묻던 자리를 비운다 — 앱 전역 자리도 놓는다(그 키를 기다리던 다른 창이 다음 gate 에 묻는다).
@@ -598,7 +603,7 @@ pub fn answerTrust(self: *AppSession, allow: bool) void {
     defer clearAsking(self);
     const decision: lsp.trust.Decision = if (allow) .allow else .deny;
     // 파일에 못 남은 답은 말하지 않는다 — 다음 실행이 다시 묻는다(계획 WT4a 「한계」: 「다시 묻기」의 거부만 옛 허용으로 돌아간다).
-    _ = recordTrust(self, ak.key(), decision);
+    _ = recordTrust(self.io, self.configPath(), ak.key(), decision);
     // 같은 저장소의 이 창 클라이언트 **전부** — 묻던 것만이 아니라 「다시 묻기」로 기다리던 것(문서가 닫혀 gate 를 안 지나는 것까지).
     for (st.clients.items) |*c| {
         if (!sameKey(c, ak.key())) continue;
@@ -685,9 +690,13 @@ pub fn answerManage(self: *AppSession, slot: enum { primary, alternate }) void {
         .primary => st.manage_primary,
         .alternate => st.manage_alternate orelse return,
     };
+    // 상자를 띄운 뒤 다른 창·컨트롤 플레인(WT4b)이 결정을 바꿨을 수 있다 — **지금** 표로 다시 본다. 결정이 없어졌으면 아무것도 안 하고,
+    // 철회인데 허용이 아니면 적지 않는다(결정이 없던 저장소에 거부를 새로 세우지 않는다 — `manageCurrent`·컨트롤 철회와 같은 규칙).
+    const now_decision = trustOf(self, k.key()) orelse return self.showNoticeKey(.lsp_trust_current_none);
+    if (action == .revoke and now_decision != .allow) return self.showNoticeKey(.lsp_trust_current_not_allowed);
     const saved = switch (action) {
-        .revoke => recordTrust(self, k.key(), .deny),
-        .forget => forgetTrust(self, k.key()),
+        .revoke => recordTrust(self.io, self.configPath(), k.key(), .deny),
+        .forget => forgetTrust(self.io, self.configPath(), k.key()),
     };
     // 파일에 못 남았다 — 표에는 서서 서버는 내렸지만 다음 실행은 파일의 옛 결정을 읽는다(철회했는데 허용이 돌아온다). 말 없이 두면
     // 사용자는 거둔 줄 안다.
@@ -704,9 +713,9 @@ pub fn clearManage(self: *AppSession) void {
 
 /// 결정을 잊는다(관리 상자의 답) — 앱 전역 표에 「잊었다」를 남긴다. 각 창이 세대를 보고 제 서버를 내린다(`forgetClient`).
 /// 파일에 남지 못했으면 `false`.
-fn forgetTrust(self: *AppSession, key: lsp.trust.Key) bool {
-    ensureTrustLoaded(self);
-    return trust_store.forget(self.io, key);
+fn forgetTrust(io: std.Io, config_path: ?[]const u8, key: lsp.trust.Key) bool {
+    loadTrust(io, config_path);
+    return trust_store.forget(io, key);
 }
 
 /// 팔레트 「이 저장소 신뢰 철회·잊기」 — 지금 편집기 문서의 저장소. 할 것이 없으면(언어 서버를 쓰지 않는 문서·결정이 없다·이미 거부다)
@@ -736,6 +745,112 @@ pub fn manageListed(self: *AppSession, key: lsp.trust.Key) void {
 /// 신뢰 목록이 그릴 표를 읽어 둔다(앱을 띄운 뒤 아직 아무 문서도 신뢰를 보지 않았을 수 있다).
 pub fn loadTrustForList(self: *AppSession) void {
     ensureTrustLoaded(self);
+}
+
+// ── 컨트롤 플레인(계획 WT4b) ──────────────────────────────────────────────────
+
+const control_trust = maru.session.control_lsp_trust;
+
+/// 컨트롤 플레인 `lsp.trust.*` 에 답한다 — 앱 ABI 가 부른다(ABI 는 표를 모른다 — LSPB23). 창이 없어도 표를 읽는다(2026-10-09 사용자
+/// 결정 — 옛 자리 이관에 쓸 설정 경로는 첫 창의 것, 창이 없으면 기본 자리). 효과는 관리 상자(WT4a)와 같은 길이다 — 표의 세대가 오르면
+/// 각 창의 pump 가 `applyTrustChanges` 로 따른다(거부면 서버를 내리고, 잊으면 「결정 없음」 — 곧바로 묻지 않는다). **부여는 없다**:
+/// 철회는 지금 허용인 결정만 거부로 적고, 잊기는 결정을 지울 뿐이다. 응답을 못 만들면(메모리) `null` — 호출자가 응답 없이 닫는다.
+pub fn controlTrust(gpa: std.mem.Allocator, io: std.Io, session: ?*AppSession, request_bytes: []const u8) ?[]u8 {
+    var owned_path: ?[]const u8 = null;
+    defer if (owned_path) |p| gpa.free(p);
+    const config_path: ?[]const u8 = if (session) |sess| sess.configPath() else blk: {
+        owned_path = maru.config.loader.defaultConfigPath(gpa) catch null;
+        break :blk owned_path;
+    };
+    loadTrust(io, config_path);
+    var impl: ControlTrust = .{ .io = io, .config_path = config_path };
+    return control_trust.respond(gpa, request_bytes, &impl) catch null;
+}
+
+const ControlTrust = struct {
+    io: std.Io,
+    config_path: ?[]const u8,
+    /// 맞은 키의 경로 사본 — 응답(`repository`)을 다 쓸 때까지 산다(`apply` 의 지역 버퍼면 응답을 쓸 때 이미 풀렸다 — 판정자 LSPB38 이
+    /// 잡았다). 표를 고치는 동안 표가 빌려 준 경로를 쥐지 않으려고 복사한다.
+    path_buf: [std.fs.max_path_bytes]u8 = undefined,
+
+    /// 결정이 있는 항목 전부(표가 빌려 준 경로 — 응답을 쓰는 동안만 산다).
+    pub fn entries(_: *ControlTrust, gpa: std.mem.Allocator) ![]control_trust.Entry {
+        var list: std.ArrayList(control_trust.Entry) = .empty;
+        errdefer list.deinit(gpa);
+        var it = trust_store.decided();
+        while (it.next()) |e| try list.append(gpa, .{ .volume = e.key.volume, .path = e.key.path, .decision = wireDecision(e.decision) });
+        return list.toOwnedSlice(gpa);
+    }
+
+    pub fn apply(self: *ControlTrust, op: control_trust.Op, target: control_trust.Target) control_trust.Outcome {
+        const key = switch (findTrustKey(target, &self.path_buf)) {
+            .none => return .{ .none = .{ .containing = containingDecision(target.path) } },
+            .ambiguous => return .ambiguous,
+            .one => |k| k,
+        };
+        const previous = trust_store.get(key).?; // `findTrustKey` 는 결정이 있는 키만 낸다
+        const prev_wire = wireDecision(previous);
+        const matched: control_trust.Key = .{ .volume = key.volume, .path = key.path };
+        const saved = switch (op) {
+            .list => unreachable, // `respond` 가 목록은 `entries` 로 답한다
+            // 철회는 지금 허용인 결정만 거부로 — 이미 거부면 그대로(다시 적지 않는다; 결정이 없던 저장소는 위에서 「없음」이다 — 관리 상자
+            // `manageCurrent` 와 같은 규칙).
+            .revoke => if (previous == .allow) recordTrust(self.io, self.config_path, key, .deny) else return .{ .done = .{ .previous = prev_wire, .changed = false, .saved = true, .key = matched } },
+            .forget => forgetTrust(self.io, self.config_path, key),
+        };
+        return .{ .done = .{ .previous = prev_wire, .changed = true, .saved = saved, .key = matched } };
+    }
+};
+
+/// 그 경로를 품은(자신이 아닌 조상인) 저장소의 결정 — 가장 가까운 것. 결정은 저장소 root 단위라 하위 폴더를 준 사용자에게 알려 준다(바꾸지는
+/// 않는다). 경로는 실제 경로로 풀어 본다 — 풀리면 같은 볼륨의 것만(같은 접두의 다른 디스크를 알려 주지 않게), 못 풀면 글자 그대로. 표가
+/// 빌려 준 경로를 돌려준다 — 응답을 쓰는 동안만 산다(그 사이 표를 고치지 않는다).
+fn containingDecision(path: []const u8) ?control_trust.Entry {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = trust_store.keyFor(path, &buf);
+    const real = if (resolved) |k| k.path else path;
+    var best: ?control_trust.Entry = null;
+    var it = trust_store.decided();
+    while (it.next()) |e| {
+        if (resolved) |k| if (e.key.volume != k.volume) continue;
+        if (std.mem.eql(u8, e.key.path, real) or !selfOrAncestor(e.key.path, real)) continue;
+        if (best) |b| if (b.path.len >= e.key.path.len) continue;
+        best = .{ .volume = e.key.volume, .path = e.key.path, .decision = wireDecision(e.decision) };
+    }
+    return best;
+}
+
+fn wireDecision(d: lsp.trust.Decision) control_trust.Decision {
+    return switch (d) {
+        .allow => .allow,
+        .deny => .deny,
+    };
+}
+
+/// 요청이 가리키는 표의 키. 먼저 표에 **그 글자 그대로** 있는 결정(목록이 준 경로 — 지워진 저장소도 잊을 수 있게), 없으면 실제 경로로
+/// 풀어 본다(심링크·`/tmp`↔`/private/tmp`·대소문자만 다른 이름 — 사용자가 친 경로). 같은 경로가 여러 볼륨에 있으면 `volume` 이 고른다.
+/// 키의 경로는 `buf` 에 복사한다 — 표를 고치는 동안 빌린 경로를 쥐지 않는다.
+fn findTrustKey(target: control_trust.Target, buf: *[std.fs.max_path_bytes]u8) union(enum) { none, ambiguous, one: lsp.trust.Key } {
+    var found: ?lsp.trust.Key = null;
+    var n: usize = 0;
+    var it = trust_store.decided();
+    while (it.next()) |e| {
+        if (!std.mem.eql(u8, e.key.path, target.path)) continue;
+        if (target.volume) |v| if (e.key.volume != v) continue;
+        found = e.key;
+        n += 1;
+    }
+    if (n > 1) return .ambiguous;
+    if (found) |k| {
+        if (k.path.len > buf.len) return .none;
+        @memcpy(buf[0..k.path.len], k.path);
+        return .{ .one = .{ .volume = k.volume, .path = buf[0..k.path.len] } };
+    }
+    const k = trust_store.keyFor(target.path, buf) orelse return .none;
+    if (target.volume) |v| if (k.volume != v) return .none;
+    if (trust_store.get(k) == null) return .none;
+    return .{ .one = k };
 }
 
 // ── 클라이언트 찾기·띄우기 ───────────────────────────────────────────────────
@@ -1346,7 +1461,7 @@ fn gateTrust(self: *AppSession, c: *Client) void {
     const stored = if (c.reask) null else trustOf(self, key);
     const decision = stored orelse {
         if (builtin.is_test) if (self.editor_lsp.auto_trust_answer) |ans| {
-            _ = recordTrust(self, key, ans);
+            _ = recordTrust(self.io, self.configPath(), key, ans);
             c.trust_pending = false;
             c.reask = false;
             if (ans == .deny) c.phase = .denied;

@@ -521,8 +521,11 @@ OpenSSH 는 `exec` 을 사용자 셸에 물려 돌리므로, `maru` 가 없어�
 | `panel.bindSession` | `{panel_id, session_id}` | `{ok}` | 패널↔세션 cwd 연동. `bind` capability(§8.3) |
 | `events.subscribe` | `{filter?}` | 스트림 | §7 |
 | `browser.*` | (§9) | — | web surface 제어. trust·capability 검사 |
+| `lsp.trust.list` | 없음·`null`·`{}` | `{decisions:[{volume: string, path: string, decision: "allow"\|"deny"}]}` | 언어 서버 신뢰 결정 조회([워크스페이스 신뢰 계획](plans/workspace-trust.md) WT4b). `volume` 은 볼륨 UUID 를 접은 u64 의 패딩 없는 소문자 16진 문자열(신뢰 파일과 같은 표기). 모르는 params 키는 `invalid_params` |
+| `lsp.trust.revoke` | `{path: string, volume?: string}` | `{previous: "allow"\|"deny"\|null, changed: bool, saved: bool, repository?: {volume, path}, containing?: {volume, path, decision}}` | 지금 **허용**인 저장소를 거부로(아니면 그대로 — `changed=false`). 떠 있는 서버는 모든 창에서 내린다. `path` 는 절대 경로 — 표에 그 글자가 없으면 실제 경로(심링크·`/tmp`)로 풀어 찾는다. 같은 경로가 여러 볼륨에 있으면 `volume` 이 없을 때 `invalid_params`. `saved=false` 면 파일에 못 남아 이번 실행에만 먹는다. `repository` 는 맞은 표의 키(심링크를 풀었으면 요청 글자와 다르다 — 결정은 `previous`), `containing` 은 결정이 없을 때 그 경로를 품은 가장 가까운 저장소와 그 결정(결정은 root 단위 — 하위 폴더를 줬다; 실제 경로로 풀리면 같은 볼륨만; 바꾸지 않는다) |
+| `lsp.trust.forget` | `{path: string, volume?: string}` | 철회와 같다 | 결정을 지운다(다시 열면 묻는다 — 곧바로 묻지는 않는다). 결정이 없으면 그대로 |
 
-메서드별 필요 capability는 §8.3을 단일 출처로 따른다 — `list`/`get`/`subscribe`=`metadata:{self|window|all}`, `panel.bindSession`=`bind`, `capture`/`subscribeOutput`=`read-output`, `send*`=`write`, `resize`/`focus`/`close`/`spawn`/`panel.open`=`lifecycle`, `browser.getCookies`/`setCookie`/`deleteCookie`/`clearStorage`=`browser-storage`(§9.4 D4/D5 — 쿠키/스토리지 read+write·comprehensive 삭제=별도 민감 scope, 사용자 결정), 나머지 `browser.*`=`browser`(localStorage get/set/remove 포함 — eval 백엔드라 base browser, D5). 일반 login shell 기본 경로는 실측 gate를 통과한 `metadata:self`만 허용한다(§8.4).
+메서드별 필요 capability는 §8.3을 단일 출처로 따른다 — `list`/`get`/`subscribe`=`metadata:{self|window|all}`, `panel.bindSession`=`bind`, `capture`/`subscribeOutput`=`read-output`, `send*`=`write`, `resize`/`focus`/`close`/`spawn`/`panel.open`=`lifecycle`, `browser.getCookies`/`setCookie`/`deleteCookie`/`clearStorage`=`browser-storage`(§9.4 D4/D5 — 쿠키/스토리지 read+write·comprehensive 삭제=별도 민감 scope, 사용자 결정), 나머지 `browser.*`=`browser`(localStorage get/set/remove 포함 — eval 백엔드라 base browser, D5). 일반 login shell 기본 경로는 실측 gate를 통과한 `metadata:self`만 허용한다(§8.4). `lsp.trust.*` 는 capability 가 없다 — **셀렉터 없이 붙은 연결만**(같은 uid 의 그 사용자 자신, §8.4 「셀렉터 없음」)이 부르고, 셀렉터를 댄 연결은 균일 `unauthorized` 다(§8.3; 신뢰를 **주는** 메서드는 없다 — 조회·철회·잊기뿐).
 
 ## 7. 이벤트
 

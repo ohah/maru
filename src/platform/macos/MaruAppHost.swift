@@ -5676,6 +5676,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let closing = notification.object as? NSWindow, let open = osrDialogSheets.removeValue(forKey: ObjectIdentifier(closing)) {
             open.dismissed = true
         }
+        // W10b: 그 창에 붙은 저장 창 — 치움(.abort)이라 다운로드는 보류로 돌아간다(끝 처리기의 코드를 AppKit 에 맡기지 않는다 — 1 회차).
+        if let closing = notification.object as? NSWindow {
+            for panel in downloadAskPanels.values where panel.sheetParent === closing { closing.endSheet(panel, returnCode: .abort) }
+        }
         // 닫히는 창의 일반-창 surface(quick은 delegate를 안 써 여기 안 옴). 마지막 일반 창이면 앱 종료
         // (정리·요약은 applicationWillTerminate — primary가 살아 있어야 요약이 그 세션 기준. 원래 단일 창 동작
         // 보존). 마지막이 아니면 그 창 세션만 닫고 앱은 계속한다(window는 AppKit이 이미 닫는 중).
@@ -8875,6 +8879,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 for (index, row) in rows.enumerated() {
                     Self.testReport("download \(index)|\(row.name)|\(row.state)|\(row.received)|\(row.total)|\(row.risky ? 1 : 0)|\((row.path as NSString).lastPathComponent)")
                 }
+            case "dlpanels" where line.count >= 2:
+                // W10b: 띄운 진짜 저장 창을 치운다 — `abort` 는 종료·창 닫힘과 같은 길(.abort → 보류), `cancel` 은 취소 단추와 같은 코드.
+                let code: NSApplication.ModalResponse = line[1] == "abort" ? .abort : .cancel
+                Self.testReport("dlpanels \(downloadAskPanels.count)")
+                for panel in Array(downloadAskPanels.values) { panel.sheetParent?.endSheet(panel, returnCode: code) }
             case "dlanswer" where line.count >= 2:
                 // W10b: 다음 저장 창의 답(창을 띄우지 않는다) — 경로, `-` 는 취소. 저장 창 자신의 「바꿀까요?」는 거치지 않는다
                 // (그때 그 경로에 무언가 있었는지는 진짜 길과 같이 잰다).
@@ -10029,13 +10038,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         downloadAskPanels[key] = panel
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
-            let mine = self.downloadAskPanels[key] === panel
+            // 표에서 이미 빠졌으면(행이 끝나 거뒀다) 답하지 않는다 — 그 행이 다시 보류·묻는 중이 되어 새 창이 떴을 수 있다(1 회차).
+            guard self.downloadAskPanels[key] === panel else { return }
             self.downloadAskPanels[key] = nil
             switch response {
             case .OK:
                 self.answerDownloadAsk(key: key, path: panel.url?.path)
             case .abort:
-                if mine { _ = maru_macos_downloads_answer_ask(key, 2, nil, 0, 0) } // 종료·창 닫힘 — 보류로
+                _ = maru_macos_downloads_answer_ask(key, 2, nil, 0, 0) // 종료·창 닫힘 — 보류로
             default:
                 _ = maru_macos_downloads_answer_ask(key, 1, nil, 0, 0)
             }

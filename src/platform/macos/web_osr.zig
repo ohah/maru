@@ -1295,6 +1295,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
         expireNewTabs(gpa, now_ms);
         closeOrphanPopups(gpa);
         web_downloads.reapPrepared(); // W10a: 내린 뒤 작업 스레드가 만든 임시 파일도 지운다(적대 리뷰 2 회차)
+        web_downloads.nudgeAsking(now_ms);
         return;
     };
     _ = lsp_process.flush(p, gpa) catch {};
@@ -1304,6 +1305,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     const read = lsp_process.readInto(p, gpa, &inbox, budget) catch .eof;
     drainInbox(gpa, now_ms);
     web_downloads.drain(gpa); // W10a: 작업 스레드가 만든 경로·목록 창의 누름을 sidecar 로
+    web_downloads.nudgeAsking(now_ms); // W10b: 저장 창이 뜰 곳이 없는 묻는 행은 목록 창으로
     expireContextMenus(gpa, now_ms);
     expireDragOuts(gpa, now_ms);
     expireNewTabs(gpa, now_ms);

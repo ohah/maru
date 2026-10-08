@@ -68,7 +68,7 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     // input handle, runtime pointer, or action token that Swift could use to bypass NSEvent.
     try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 215;"));
     try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 215), abi_version)"));
-    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 214u"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 215u"));
     const probe_record = between(
         abi,
         "pub const SessionHostInputSmokeProbe = extern struct {",

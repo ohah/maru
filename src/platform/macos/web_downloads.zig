@@ -175,6 +175,8 @@ fn entryOfDownload(sidecar_gen: u32, download: u32) ?*Entry {
 fn isTroublesome(cp: u21) bool {
     return switch (cp) {
         ':', '/', 0x061C, 0x200B...0x200F, 0x2028...0x202E, 0x2066...0x2069, 0xFEFF, 0xFFF9...0xFFFB => true,
+        // 보이지 않거나 빈칸처럼 보이는 글자 — 저장 창 이름 칸에서 `invoice.pdf⠀⠀….command` 의 확장자를 밀어내 가렸다(4 회차).
+        0x00A0, 0x00AD, 0x115F, 0x1160, 0x1680, 0x2000...0x200A, 0x202F, 0x205F...0x2064, 0x2800, 0x3000, 0x3164, 0xFFA0 => true,
         else => cp < 0x20 or cp == 0x7f,
     };
 }
@@ -329,9 +331,15 @@ pub fn originOf(url: []const u8, out: []u8) []const u8 {
     var host = rest[scheme_end + 3 ..];
     if (std.mem.indexOfAny(u8, host, "/?#")) |end| host = host[0..end];
     if (std.mem.lastIndexOfScalar(u8, host, '@')) |user_end| host = host[user_end + 1 ..];
-    const n = @min(host.len, out.len);
-    for (host[0..n], 0..) |c, i| out[i] = if (c > 0x20 and c < 0x7f) c else '?';
-    return out[0..n];
+    // 길면 앞을 줄이고 끝(등록 도메인 쪽)을 남긴다 — 앞만 남기면 `accounts.google.com.….evil.example` 의 진짜 도메인이 잘렸다(4 회차).
+    var lead: []const u8 = "";
+    if (host.len > out.len) {
+        lead = "...";
+        host = host[host.len - (out.len - lead.len) ..];
+    }
+    @memcpy(out[0..lead.len], lead);
+    for (host, lead.len..) |c, i| out[i] = if (c > 0x20 and c < 0x7f) c else '?';
+    return out[0 .. lead.len + host.len];
 }
 
 pub fn isRisky(file_name: []const u8) bool {
@@ -634,7 +642,8 @@ pub fn onUpdate(v: message.DownloadUpdate) void {
     e.total = v.total;
     e.reason = v.reason;
     const unattended = e.state == .held or (e.state == .asking and !e.ask_claimed);
-    if (unattended and v.state == .in_progress and v.received > max_waiting_bytes) {
+    // 한 행이 아니라 아무도 보지 않는 행 전체로 잰다 — 행마다면 32 × 4 GB 까지 쌓였다(4 회차).
+    if (unattended and v.state == .in_progress and waitingTotal() > max_waiting_bytes) {
         e.state = .canceled;
         e.stopped_waiting = true;
         queue(e.key, .decide_cancel);
@@ -822,6 +831,16 @@ pub fn act(key: u64, action: Action) bool {
     return true;
 }
 
+/// 아무도 보지 않는 결정 전 행(보류·저장 창을 맡지 않은 묻는 중)이 받아 둔 양의 합.
+fn waitingTotal() i64 {
+    var total: i64 = 0;
+    for (entries.items) |e| {
+        const unattended = e.state == .held or (e.state == .asking and !e.ask_claimed);
+        if (unattended) total += @max(e.received, 0);
+    }
+    return total;
+}
+
 /// W10b: 묻는 행을 1 초 동안 아무 창도 맡지 않았다(그 탭이 활성이 아니다 — 저장 창이 뜰 곳이 없다) — 목록 창을 내어 알린다(1 회차:
 /// 아무 표시 없이 묻는 상태로 멈췄다). `pump` 가 부른다.
 pub fn nudgeAsking(now_ms: i64) void {
@@ -992,6 +1011,9 @@ pub fn statusText(e: *const Entry, buf: []u8) []const u8 {
         .too_many => copyText(buf, i18n.t(.dl_state_too_many)),
         .asking => if (e.ask_retry)
             copyText(buf, i18n.t(.dl_state_asking_retry))
+        else if (e.risky)
+            // 실행될 수 있는 파일이면 저장 창 안내가 그렇다고 말한다(확장자가 이름 칸에서 가려져도 — 4 회차).
+            i18n.format(buf, i18n.t(.dl_state_asking_risky), &.{.{ .s = extensionOf(e.name()) }})
         else if (e.origin_len > 0)
             i18n.format(buf, i18n.t(.dl_state_asking_from), &.{.{ .s = e.origin_buf[0..e.origin_len] }})
         else
@@ -1328,6 +1350,16 @@ test "waiting rows stop past the cap and unclaimed asking rows bring the list wi
     try std.testing.expectEqual(State.canceled, one.state);
     try std.testing.expect(one.stopped_waiting);
     try std.testing.expect(showRequest(&surface) != before_stop); // 멈춘 것을 목록 창으로 알린다
+    // 상한은 아무도 보지 않는 행 전체로 — 행 하나하나는 작아도 합이 넘으면 멈춘다.
+    var a = rowForTest(7, 7, .held);
+    a.browser = 7;
+    a.received = max_waiting_bytes - 10;
+    try entries.append(allocator(), a);
+    var b = rowForTest(8, 8, .held);
+    b.browser = 7;
+    try entries.append(allocator(), b);
+    onUpdate(.{ .browser = 7, .download = 8, .state = .in_progress, .received = 20, .total = -1, .reason = 0 });
+    try std.testing.expectEqual(State.canceled, entryOfKey(8).?.state);
     var line: [256]u8 = undefined;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_stopped_waiting), statusText(one, &line));
     try entries.append(allocator(), rowForTest(2, 2, .asking));
@@ -1368,10 +1400,22 @@ test "status lines are Zig sentences with Finder-style sizes (W10a)" {
     // 보류 행은 받으려 한 곳을 보인다.
     e.origin_len = originOf("blob:https://user@evil.example:8443/x?y", &e.origin_buf).len;
     try std.testing.expectEqualStrings("evil.example:8443", e.origin_buf[0..e.origin_len]);
-    try std.testing.expect(std.mem.indexOf(u8, statusText(&e, &line), "evil.example:8443") != null);
+    try std.testing.expect(std.mem.indexOf(u8, statusText(&e, &line), "evil.example:8443") != null); // 보류는 출처를 보인다
     var host_buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("", originOf("data:text/plain,x", &host_buf));
     try std.testing.expectEqualStrings("a?b", originOf("http://a\x01b/", &host_buf));
+    // 긴 호스트는 끝(등록 도메인)을 남긴다.
+    const long_host = originOf("https://accounts.google.com." ++ "x" ** 200 ++ ".evil.example/f.zip", &e.origin_buf);
+    try std.testing.expect(std.mem.startsWith(u8, long_host, "...") and std.mem.endsWith(u8, long_host, ".evil.example"));
+    try std.testing.expect(long_host.len <= e.origin_buf.len);
+    var name_buf2: [max_name_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("a_b_c.command", sanitizeName("a\u{2800}b\u{3164}c.command", 0, &name_buf2)); // 보이지 않는 빈칸
+    e.state = .asking;
+    e.risky = true;
+    e.name_len = 0;
+    @memcpy(e.name_buf[0.."x.command".len], "x.command");
+    e.name_len = "x.command".len;
+    try std.testing.expect(std.mem.indexOf(u8, statusText(&e, &line), ".command") != null);
     try std.testing.expect(isRisky("index.html") and isRisky("x.webarchive"));
 }
 

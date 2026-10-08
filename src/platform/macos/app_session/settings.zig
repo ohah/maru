@@ -1164,6 +1164,7 @@ pub fn reapplyLoadedConfig(self: *AppSession) void {
 /// preserve_zoom이면 ⌘+/− 런타임 줌을 보존하고(applyAppearancePreservingZoom — 단 폰트 크기 자체가 바뀐 GUI
 /// 변경이면 그 값이 사용자 의도라 줌을 안 얹는다), false면(통합 리셋) 줌까지 config 기본 크기로 되돌린다.
 pub fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
+    web_ops.applyDownloadAsk(self); // W10b — 설정 화면에서 바꾼 묻기(appearance 와 상관없이 먼저)
     const new_appearance = config_mod.resolveAppearance(self.loaded_config.config) catch return;
     // 사이드바 폭(sidebar.width, pt)을 메모리 config에서 되읽는다 — 세팅 GUI number 위젯·통합 리셋이 바꿨을 수 있다.
     // 아래 applyAppearance→applyMetricsPipeline→refreshCellMetrics 전에 세워야 clamp·px 환산·grid 재배치가 새 폭을
@@ -2149,6 +2150,7 @@ pub fn reloadConfig(self: *AppSession) void {
     // 통째로 바꾼 뒤에 버려야 UAF가 없으므로 deinit만 마지막에 남긴다.
     var old_loaded = self.loaded_config;
     self.loaded_config = new_parsed;
+    web_ops.applyDownloadAsk(self); // W10b
     applyAppearancePreservingZoom(self, new_appearance);
     old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
     replaceAppKeepAlivePolicyFromReload(self.loaded_config);

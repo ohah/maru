@@ -1047,8 +1047,10 @@ typedef struct MaruDownloadRow {
     uint32_t reason;
     uint32_t name_len;
     uint32_t path_len;
+    uint32_t status_len;
     uint8_t name[256];
     uint8_t path[1024];
+    uint8_t status[256]; /* 상태 줄(현재 UI 언어 — Zig 가 만든다) */
 } MaruDownloadRow;
 uint64_t maru_macos_downloads_generation(void);
 uint32_t maru_macos_downloads_count(void);

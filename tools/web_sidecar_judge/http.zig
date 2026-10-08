@@ -439,11 +439,13 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         return "<!doctype html><title>loading</title><script>for(var i=0;i<5;i++)alert('loop '+i);document.title='loop-done'</script>";
     }
     // W10a: 불러지면 제목을 `dlp-ready` 로 바꾸고 0.3 초 뒤 받는다(begin 이 제목 대기에 묻히지 않게 — 사용자 동작 없이 — 첫 자동 다운로드는 Chromium 이 묻지 않는다). `?a=attach|ctl|slow|data|two`.
-    // `data` 는 5000 바이트 data: 주소(주소 상한 2048 을 넘는다), `two` 는 0.6 초 간격으로 둘(둘째는 「여러 파일 받기」 권한을 묻는다).
+    // `data` 는 5000 바이트 data: 주소(주소 상한 2048 을 넘는다), `two` 는 0.6 초 간격으로 둘(둘째는 「여러 파일 받기」 권한을 묻는다),
+    // `push` 는 pushState 로 주소만 바꾼 뒤 첨부를 받는다(새 문서 표지가 오지 않아야 한다).
     if (std.mem.eql(u8, path, "/dlp")) return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><body><script>" ++
         "function go(h,n){{var a=document.createElement('a');a.href=h;if(n)a.download=n;document.body.appendChild(a);a.click()}}" ++
         "onload=function(){{document.title='dlp-ready';setTimeout(function(){{var k='{s}';if(k==='data')go('data:text/plain,'+'x'.repeat(5000),'big.txt');" ++
-        "else if(k==='two'){{go('/dl/f/attach');setTimeout(function(){{go('/dl/f/ctl')}},600)}}else go('/dl/f/'+k)}},300)}}</script>", .{query});
+        "else if(k==='two'){{go('/dl/f/attach');setTimeout(function(){{go('/dl/f/ctl')}},600)}}" ++
+        "else if(k==='push'){{history.pushState({{}},'','/dlp-pushed');go('/dl/f/attach')}}else go('/dl/f/'+k)}},300)}}</script>", .{query});
     if (std.mem.eql(u8, path, "/file")) return filePage("accept=\"image/*,.txt\"", buf);
     if (std.mem.eql(u8, path, "/files")) return filePage("multiple", buf);
     if (std.mem.eql(u8, path, "/folder")) return filePage("webkitdirectory", buf);

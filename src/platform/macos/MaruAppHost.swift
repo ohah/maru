@@ -9924,6 +9924,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var downloadsWindow: OsrDownloadsWindow?
     private var downloadsSeenGeneration: UInt64 = 0
     private var downloadsSeenShow: UInt64 = 0
+    private var downloadsShowPending = false
+    /// 다운로드 목록 창이 키 창이다 — 메뉴의 터미널 동작(붙여넣기·복사·잘라내기·터미널 초기화)을 받지 않는다. 키 터미널 창이 없으면
+    /// 활성 surface 가 첫 창으로 떨어져 ⌘V 가 그 셸에 붙여 넣었다(적대 리뷰 2 회차).
+    private var downloadsWindowIsKey: Bool {
+        guard let downloads = downloadsWindow else { return false }
+        return NSApp.keyWindow === downloads.window
+    }
     private var downloadsAnnounced = Set<UInt64>()
     private var downloadRows: [OsrDownloadsWindow.Row] = []
     private static let downloadsTestMode = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_INPUT"] != nil
@@ -9947,7 +9954,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard maru_macos_downloads_row(index, &raw) != 0 else { continue }
             let name = withUnsafeBytes(of: raw.name) { String(decoding: $0.prefix(Int(raw.name_len)), as: UTF8.self) }
             let path = withUnsafeBytes(of: raw.path) { String(decoding: $0.prefix(Int(raw.path_len)), as: UTF8.self) }
-            rows.append(.init(key: raw.key, state: raw.state, risky: raw.risky != 0, received: raw.received, total: raw.total, name: name, path: path))
+            let status = withUnsafeBytes(of: raw.status) { String(decoding: $0.prefix(Int(raw.status_len)), as: UTF8.self) }
+            rows.append(.init(key: raw.key, state: raw.state, risky: raw.risky != 0, received: raw.received, total: raw.total, name: name, path: path,
+                              status: status))
         }
         return rows
     }
@@ -9973,14 +9982,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 사용자 동작으로 시작했거나 보류한(실행될 수 있는 파일을 페이지가 스스로 받으려 한) 새 다운로드 — maru 가 앞에 있고 터미널
         // 창이 키일 때만 목록 창을 낸다(키는 빼앗지 않는다). 페이지가 스스로 시작한 보통 파일·다른 앱을 쓰는 동안에는 내지 않는다
         // (W10a 설계 적대 검토).
+        // 다른 앱을 쓰는 동안 온 요청은 버리지 않고 maru 로 돌아올 때 낸다 — 백그라운드에서 보류된 것을 모르고 지나가지 않게(2 회차).
         var surface: UInt64 = 0
         let request = maru_macos_downloads_show_request(&surface)
         if request != downloadsSeenShow {
             downloadsSeenShow = request
-            if NSApp.isActive || Self.downloadsTestMode, let key = NSApp.keyWindow ?? (Self.downloadsTestMode ? window : nil),
-               windows.contains(where: { $0.window === key }) || quick?.window === key {
-                ensureDownloadsWindow().showFront(makeKey: false)
-            }
+            downloadsShowPending = true
+        }
+        if downloadsShowPending, NSApp.isActive || Self.downloadsTestMode,
+           let key = NSApp.keyWindow ?? (Self.downloadsTestMode ? window : nil),
+           windows.contains(where: { $0.window === key }) || quick?.window === key {
+            downloadsShowPending = false
+            ensureDownloadsWindow().showFront(makeKey: false)
         }
     }
 
@@ -12576,6 +12589,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuCut(_ sender: Any?) {
+        if downloadsWindowIsKey { return }
         if Self.forwardEditToSheet(#selector(NSText.cut(_:)), sender) { return }
         // 웹 패널이 first responder면 WebKit이 자기 편집 영역에서 잘라낸다(표준 cut: — 편집기 자신의 되돌리기
         // 기록에 남는다). 터미널에는 잘라내기가 없다(읽기 전용 화면) — 복사만 하고 지우지 않는다.
@@ -12588,6 +12602,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuCopy(_ sender: Any?) {
+        if downloadsWindowIsKey { return }
         if Self.forwardEditToSheet(#selector(NSText.copy(_:)), sender) { return }
         if isSessionHostAutoReconnectSmokeMode {
             sessionHostAutoReconnectCopyMenuActions += 1
@@ -12603,6 +12618,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuPaste(_ sender: Any?) {
+        if downloadsWindowIsKey { return }
         if Self.forwardEditToSheet(#selector(NSText.paste(_:)), sender) { return }
         // 웹 포커스면 WebKit이 편집 영역(CM6 등)에 붙여넣도록 표준 paste:를 넘긴다(read·HTML은 삽입 대상이 없어
         // no-op). 아니면 터미널 PTY 붙여넣기.
@@ -12683,6 +12699,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// SIGKILL로 죽어 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상의 수동 회복. 화면은 보존(비파괴). Zig가 단일 출처.
     @objc private func menuResetTerminal(_ sender: Any?) {
         _ = sender
+        if downloadsWindowIsKey { return }
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reset_input_modes(session)
     }

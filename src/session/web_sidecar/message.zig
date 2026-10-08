@@ -141,6 +141,10 @@ pub const Tag = enum(u8) {
     /// 끝이 아니다(Chromium 이 스스로 다시 받기도 한다 — 실측 이유 38). `browser_closed` 는 탭이 닫혀 멈춘 것(CEF 는 알리지 않는다
     /// — 실측, sidecar 가 알린다).
     download_update = 61,
+    /// 주 프레임에 새 문서가 커밋됐다(W10a — CEF `on_load_start`). 주소 길이와 상관없이 오고, 같은 문서 안의 이동(pushState·해시)과
+    /// 다운로드가 된 이동에는 오지 않는다 — maru 는 이것으로 「이 탭에서 누른 것이 지금 문서의 사용자 동작인가」를 가른다(누른 링크가
+    /// 연 페이지가 곧바로 실행 파일을 받게 하는 것을 막는다, 적대 리뷰 1·2 회차).
+    page_started = 62,
 
     /// 사용자가 제안 목록의 한 항목을 골랐다(W6m①). `list` 는 마지막으로 받은 `datalist_show` 의 번호다 — sidecar 는 그 번호가
     /// 지금 목록이 아니면 버리고, 맞으면 그 문서의 대리 스크립트가 칸에 값을 넣고 `input`·`change` 를 보낸다. 둘째 구간의 첫 번호.
@@ -1074,6 +1078,7 @@ pub const Message = union(Tag) {
     datalist_hide: DatalistHide,
     download_begin: DownloadBegin,
     download_update: DownloadUpdate,
+    page_started: BrowserId,
 
     datalist_pick: DatalistPick,
     download_decide: DownloadDecide,

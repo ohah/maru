@@ -1331,7 +1331,8 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
                 // 검증: 해제된 surface 에 써서 죽었다). 페이지의 `window.close` 가 사용자 확인 없이 창을 닫게 두지 않는다. 탭은 빈 보통 탭으로
                 // 남는다(사용자가 닫는다).
                 if (pane.terms.items.len == 1) {
-                    web_osr.revivePageClosed(self.allocator, surface_id);
+                    // W10d: 받는 중이라 sidecar 가 브라우저를 남겼다 — 되살리지 않고 빈 페이지로(같은 번호를 다시 만들면 거절된다).
+                    if (web_osr.browserLive(surface_id)) web_osr.blankKeptPage(self.allocator, surface_id) else web_osr.revivePageClosed(self.allocator, surface_id);
                     setWebNavState(self, surface_id, false, false, ""); // 팝업의 주소·뒤로 상태를 지운다(새 빈 탭)
                     if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab page-closed revived\n", .{});
                     return;

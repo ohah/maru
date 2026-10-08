@@ -226,6 +226,14 @@ pub fn control(value: message.DownloadControl) void {
     }
 }
 
+/// 그 브라우저가 쥔 다운로드가 있는가(W10d — 페이지가 스스로 닫을 때 브라우저를 남길지).
+pub fn hasSlotsFor(id: BrowserId) bool {
+    for (&slots) |*slot| {
+        if (slot.*) |*s| if (s.browser == id) return true;
+    }
+    return false;
+}
+
 /// 브라우저가 닫혔다 — 그 다운로드는 CEF 가 알림 없이 멈추고 파일을 지운다(실측). maru 에 알리고 쥔 콜백을 놓는다.
 pub fn browserClosed(id: BrowserId) void {
     for (&slots) |*slot| {

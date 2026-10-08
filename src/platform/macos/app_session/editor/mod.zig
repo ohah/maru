@@ -54628,3 +54628,94 @@ test "RNM7 상자가 열린 동안 문서가 바뀐 뒤 확정하면 — 요청�
     s.chrome_host.notice.dismiss();
     s.editor_workspace_edit.deinit(allocator);
 }
+
+/// 팝업 이름 상자 안의 한 점 — **그려지는 상자 줄**(`rename_box.boxRect`)의 가운데. 앵커 바로 아래라고 셈하면 안 된다: 상자는
+/// 창의 내용 영역 안으로 당겨진다(`popup_box.place` — 판정자 틀의 앵커가 사이드바 자리면 x 가 200 으로 밀렸다, U2I 실측).
+fn renameBoxInnerPoint(s: *AppSession) !struct { x: f64, y: f64 } {
+    const r = chrome.components.rename_box.boxRect(&s.chrome_host.rename_box, s.rename_input.text.items, s.buildChromeProps()) orelse return error.RenameBoxNotPlaced;
+    return .{ .x = @as(f64, @floatFromInt(r.x)) + @as(f64, @floatFromInt(r.w)) / 2, .y = @as(f64, @floatFromInt(r.y)) + @as(f64, @floatFromInt(r.h)) / 2 };
+}
+
+test "RNM8 심볼 이름 상자 안을 누르면 — 클릭-어웨이가 아니라 상자가 그대로이고 친 이름도 남으며, 아래 편집기의 caret 도 안 움직인다; 밖을 누르면 예전대로 취소 (제품 경계, §8.2f)" {
+    // 2026-10-08 재현: 상자 안(앵커 아래 상자 줄)을 눌러도 `rename_alive=false` — 마우스 down 이 「상자 안인가」를 묻지 않아 클릭-어웨이로
+    // 읽었고, 친 「addZ」 를 잃었다. caret 을 옮기려고 상자를 누르는 것은 자연스러운 동작이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    const leaf = activeLeafRectForTest(s) orelse return error.SkipZigTest;
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try pressKey(&h.fx, .{ .char = 'Z' }, .{});
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    try testing.expect(rename_client.refreshAnchor(s, s.rename.?.symbol));
+    const pt = try renameBoxInnerPoint(s);
+    try testing.expect(rename_client.boxContains(s, pt.x, pt.y));
+    const sent_before = s.editor_lsp.sent_renames;
+    // ⑴ 상자 안을 누르고·끌고·뗀다 — 상자와 이름이 남고, 편집기 caret(5)은 그대로다(아래로 새지 않는다).
+    s.mouse(1, pt.x, pt.y, 0, 0);
+    s.mouse(2, pt.x + 4, pt.y, 0, 0);
+    s.mouse(3, pt.x + 4, pt.y, 0, 0);
+    try testing.expect(s.rename != null and s.rename.? == .symbol);
+    try testing.expectEqualStrings("addZ", s.rename_input.text.items);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    // 이어 칠 수 있다.
+    try pressKey(&h.fx, .{ .char = 'Y' }, .{});
+    try testing.expectEqualStrings("addZY", s.rename_input.text.items);
+    // ⑵ **보이는 테두리**(사방 `modal_padding_px`) 안도 상자다 — 상자 줄 바로 위 패딩 칸.
+    const pad: f64 = @floatFromInt(s.buildChromeProps().shape.modal_padding_px);
+    const ch: f64 = @floatFromInt(term.rt.editor_hit_geom.cell_h_px);
+    try testing.expect(rename_client.boxContains(s, pt.x, pt.y - ch / 2 - pad / 2));
+    // ⑶ 밖(창 왼쪽 위)은 예전대로 클릭-어웨이 = 취소다(요청 없음).
+    try testing.expect(!rename_client.boxContains(s, 5, 5));
+    s.mouse(1, 5, 5, 0, 0);
+    s.mouse(3, 5, 5, 0, 0);
+    try testing.expect(s.rename == null);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    try testing.expect(!rename_client.boxContains(s, pt.x, pt.y)); // 닫히면 상자도 없다
+}
+
+test "U2I 이름 없는 문서 저장 상자 안을 눌러도 취소되지 않는다 — 친 이름이 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    const s = fx.session;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(s, root);
+    s.surface_initialized = true;
+    s.backing_width_px = 1200; // 상자 자리는 창 안으로 당겨진다(`popup_box.place`) — 창 크기가 0 이면 상자가 설 자리가 없다
+    s.backing_height_px = 800;
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    const t = try openUntitledInActivePane(s);
+    try testing.expect(insertText(s, t, "one\n"));
+    try testing.expectError(error.AskName, saveDocument(s, t));
+    while (s.rename_input.text.items.len > 0) settings_ops.handleRenameKey(s, .{ .key = .{ .key = .backspace } });
+    for ("named.txt") |c| settings_ops.handleRenameKey(s, .{ .key = .{ .key = .char, .codepoint = c } });
+    for (0..2) |_| {
+        _ = rename_client.refreshCaretAnchor(s, t.surface.id);
+        var drawn = appendPaneFrame(s, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    try testing.expect(rename_client.refreshCaretAnchor(s, t.surface.id));
+    const pt = try renameBoxInnerPoint(s);
+    try testing.expect(rename_client.boxContains(s, pt.x, pt.y));
+    s.mouse(1, pt.x, pt.y, 0, 0);
+    s.mouse(3, pt.x, pt.y, 0, 0);
+    try testing.expect(s.rename != null and s.rename.? == .untitled_save);
+    try testing.expectEqualStrings("named.txt", s.rename_input.text.items);
+    try testing.expect(t.rt.editorDocument().path == null);
+}

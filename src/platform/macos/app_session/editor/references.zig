@@ -40,6 +40,8 @@ pub const State = struct {
     notified_none: u64 = 0,
     notified_outside: u64 = 0,
     dropped_stale: u64 = 0,
+    /// 기다리는 사이 사용자가 다른 오버레이를 열어 버린 응답 수(`AppSession.interactiveOverlayOpen`).
+    dropped_behind_overlay: u64 = 0,
 };
 
 /// `goto_references` 명령·`⇧F12` — 활성 편집기의 caret 자리에서. 보냈으면 true.
@@ -150,6 +152,13 @@ pub fn onLocationsResponse(self: *AppSession, kind: lsp.rpc.LocationKind, seq: u
     if (retryable and st.retries < max_retries) {
         st.retries += 1;
         st.retry_at_ms = self.awakeMs() + retry_ms;
+        return;
+    }
+    // **기다리는 사이 사용자가 다른 오버레이를 열었으면 버린다**(빠른 수정 메뉴와 같은 이유 — `AppSession.interactiveOverlayOpen`).
+    // 예전에는 아래 `dismissMessageOverlays` 가 사용자가 그사이 연 설정·팔레트를 닫고 피커를 띄웠고, 알림 패널은 그 목록에 없어
+    // 피커와 함께 열렸다.
+    if (self.interactiveOverlayOpen()) {
+        st.dropped_behind_overlay += 1;
         return;
     }
     const kind_none = noneKey(kind);

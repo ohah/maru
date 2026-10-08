@@ -17071,6 +17071,62 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     try testing.expect(s.chrome_host.notice.open);
 }
 
+// 참조 피커도 응답이 도착한 순간 열린다 — 예전에는 그때 `dismissMessageOverlays` 로 사용자가 그사이 연 설정·팔레트를 닫았고, 그 목록에
+// 없는 알림 패널은 피커와 함께 열렸다(`AppSession.interactiveOverlayOpen`).
+test "LATE2 참조 응답이 오기 전에 사용자가 오버레이를 열면 피커를 버린다 (제품 경계, §8.2l)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // `zz` 가 세 번(줄 0·2·2) — 같은 줄 둘, 그리고 `zzz` 는 낱말이 달라 안 걸린다. other.c 에도 둘.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "r.c", .data = "int zz;\nint zzz;\n  zz = zz + 1;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = "// other\nint q = zz;\nzz++;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "r.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const s = fx.session;
+
+    _ = leaf;
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&fx, .{ .function = 12 }, .{ .shift = true });
+    try testing.expect(s.editor_references.waiting);
+    @import("../notification.zig").openNotificationPanel(s);
+    try testing.expect(s.chrome_host.notifications.open);
+    try testing.expect(refSettled(&fx));
+    try testing.expect(!s.chrome_host.reference_picker.open);
+    try testing.expect(s.chrome_host.notifications.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_references.dropped_behind_overlay);
+}
+
 test "REF2 구현·타입 정의·선언 — 팔레트 명령이 같은 피커로 온다: 구현 둘 → 피커(프롬프트 「구현 2개」·LocationLink) · 타입 정의 하나 → 바로 이동 · 선언 provider 없음 → 요청 0·알림 「지원하지 않습니다」 · 종류가 다른 응답은 같은 seq 라도 버린다 (제품 경계, §8.2m)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -21506,6 +21562,95 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     code_action_client.onResolveResponse(s, 76, null, false, null, .utf8);
     try testing.expect(s.editor_code_action.resolve_waiting);
     s.editor_code_action.resolve_waiting = false;
+}
+
+// 빠른 수정 메뉴는 ⌘. 를 누른 순간이 아니라 **응답이 도착한 순간** 열린다 — 기다리는 사이 사용자가 알림 패널을 열면 메뉴가 그 패널과
+// 함께 열렸다(2026-10-08 재현, `AppSession.interactiveOverlayOpen`). 지나가는 토스트는 막지 않는다 — 「적용됨」 알림이 떠 있는 동안
+// 다시 ⌘. 를 눌러도 메뉴가 떠야 한다.
+test "LATE1 빠른 수정 응답이 오기 전에 사용자가 오버레이를 열면 메뉴를 버린다 — 토스트는 막지 않는다 (제품 경계, §8.2h)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // 가짜 서버는 첫 줄 0..3 에 error(code E1) 진단을 낸다 — 그 자리가 fix 의 문맥이다.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "q.c", .data = "int x;\nint y;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "q.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const s = fx.session;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const settled = struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_code_action.waiting and !c.fx.session.editor_code_action.resolve_waiting;
+        }
+    }.f;
+    const content = struct {
+        fn f(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.f;
+    const menuTitles = struct {
+        fn f(sess: *AppSession) []const []const u8 {
+            return settings_ops.contextMenuItems(sess);
+        }
+    }.f;
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    _ = content;
+    _ = menuTitles;
+    // ⑴ ⌘. → 응답 전에 알림 패널 → 응답: 메뉴도 알림도 안 뜨고, 알림 패널은 그대로다.
+    term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
+    try pressKey(&fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expect(s.editor_code_action.waiting);
+    @import("../notification.zig").openNotificationPanel(s);
+    try testing.expect(s.chrome_host.notifications.open);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(!s.chrome_host.context_menu.open and !s.code_action_menu);
+    try testing.expect(s.chrome_host.notifications.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.dropped_behind_overlay);
+    try testing.expectEqual(@as(u64, 0), s.editor_code_action.opened_count);
+    // ⑵ 알림 패널을 닫고, ⌘. → 응답 전에 **토스트**만 뜬다 → 응답: 메뉴가 뜬다(토스트는 입력을 막지 않는다).
+    s.chrome_host.notifications.hide();
+    try testing.expect(!s.chrome_host.notifications.open);
+    try pressKey(&fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expect(s.editor_code_action.waiting);
+    s.showNoticeKey(.ca_none);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.chrome_host.context_menu.open and s.code_action_menu);
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.dropped_behind_overlay);
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.opened_count);
+    try pressKey(&fx, .escape, .{});
 }
 
 test "CA2 code action — 서버가 codeActionProvider 를 안 내면 ⌘. 가 묻지 않는다 (제품 경계, §8.2h)" {

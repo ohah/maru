@@ -10384,12 +10384,37 @@ pub const AppSession = struct {
         // P4 §6 row 3: host-backed runtime(keep-alive)이 살아 있으면 "종료 및 세션 끝내기" alternate를 함께 띄운다 — 기본
         // "종료"는 detach(runtime 생존, e3-6), alternate는 terminate(다 끝냄). host-backed가 없으면(in-process뿐) alternate가
         // 무의미하니 기존 2버튼(종료/취소)을 쓴다.
-        if (is_macos and appKeepAlivePolicyValue() and app_remote_backend != null and app_remote_backend.?.runtimes.count() > 0) {
-            self.showConfirmChoiceKeys(.quit, .app_quit_confirm_keepalive, .{ .primary = .btn_quit, .alternate = .btn_quit_end_session });
+        const keepalive = is_macos and appKeepAlivePolicyValue() and app_remote_backend != null and app_remote_backend.?.runtimes.count() > 0;
+        const question: maru.i18n.Key = if (keepalive) .app_quit_confirm_keepalive else .app_quit_confirm;
+        // W10c: 받는 중인 Chromium 다운로드가 있으면 종료하면 멈춘다고 함께 적는다(종료는 늘 묻는다 — 그 질문에 붙인다).
+        var text_buf: [512]u8 = undefined;
+        const downloads = quitDownloadCount();
+        const text = if (downloads == 0) maru.i18n.t(question) else quitTextWithDownloads(&text_buf, question, downloads);
+        if (keepalive) {
+            self.showConfirmChoices(.quit, text, .{
+                .primary = maru.i18n.t(.btn_quit),
+                .alternate = maru.i18n.t(.btn_quit_end_session),
+                .cancel = maru.i18n.t(.common_cancel),
+            });
         } else {
-            self.showConfirmKeys(.quit, .app_quit_confirm, .{ .confirm = .btn_quit });
+            self.showConfirmText(.quit, text, .{ .confirm = .btn_quit });
         }
         self.quit_decision = .none;
+    }
+
+    fn quitDownloadCount() usize {
+        if (!is_macos) return 0;
+        return web_osr.downloads.quitWarningCount();
+    }
+
+    /// 종료 질문 뒤에 멈출 다운로드 수를 붙인다(W10c).
+    fn quitTextWithDownloads(buf: []u8, question: maru.i18n.Key, downloads: usize) []const u8 {
+        const head = maru.i18n.t(question);
+        if (head.len + 1 >= buf.len) return head;
+        @memcpy(buf[0..head.len], head);
+        buf[head.len] = ' ';
+        const tail = maru.i18n.format(buf[head.len + 1 ..], maru.i18n.t(.app_quit_downloads), &.{.{ .d = @intCast(downloads) }});
+        return buf[0 .. head.len + 1 + tail.len];
     }
 
     /// Provisioned Notification Center 시나리오가 exact notification cleanup을 확인한 뒤 쓰는
@@ -61688,6 +61713,39 @@ test "reset-confirm: 모달에서 Esc=취소(설정 유지)·Enter=확정(전체
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size); // 기본값으로
+}
+
+// W10c: 받는 중인 Chromium 다운로드가 있으면 종료 확인이 그 수를 함께 적는다(보류는 세지 않는다) — 없으면 그대로.
+test "quit-confirm: 받는 중인 다운로드 수를 종료 질문 뒤에 적는다(W10c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
+    web_osr.downloads.testReset();
+    defer web_osr.downloads.testReset();
+
+    session.requestAppQuit();
+    try std.testing.expectEqualStrings(maru.i18n.t(.app_quit_confirm), session.chrome_host.confirm.message);
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+
+    try web_osr.downloads.testAddActive(1, 7);
+    try web_osr.downloads.testAddActive(2, 8);
+    session.requestAppQuit();
+    try std.testing.expectEqualStrings("maru를 종료할까요? 받는 중인 다운로드 2개가 멈춥니다.", session.chrome_host.confirm.message);
+    try std.testing.expect(session.pending_confirm == .quit);
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
 }
 
 // 앱 전체 종료(Cmd+Q) 확인: 창 닫기(requestWindowClose, 실행 중 명령 게이트)와 달리 requestAppQuit은 **게이트 없이

@@ -121,6 +121,9 @@ const Surface = struct {
     /// 받는다 — 대리 스크립트도 사용자 사건에만 보이기를 보내지만, 페이지가 그 경로를 흉내 내도(알림용 `send` 가 남은 첫 문서·
     /// `execCommand` 의 `input`) 사용자가 손대지 않은 네이티브 창이 뜨지 않게(W6m② 적대 검증 4 차).
     last_user_input_ms: i64 = std.math.minInt(i64) / 2,
+    /// 주 프레임 주소가 마지막으로 바뀐 때(W10a) — 이동 전의 누름은 새 페이지가 시작한 다운로드의 「사용자 동작」이 아니다(누른 링크가
+    /// 연 페이지가 3 초 안에 실행 파일을 받게 하면 보류를 비켜 갔다 — 적대 리뷰 1 회차).
+    last_nav_ms: i64 = std.math.minInt(i64) / 2,
     /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
     /// 브라우저가 닫히면 푼다 — 새 sidecar 는 그 끌기를 모른다.
     drag_entered: bool = false,
@@ -489,6 +492,28 @@ pub fn decide(config_wants_chromium: bool) void {
         var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
         if (install.runCacheRoot(&cache_buf, install.hardenedRuntime())) |root| install.sweepRunCopies(root);
     }
+}
+
+test "a click counts as the user starting a download only until the page moves on (W10a)" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.clearAndFree(gpa);
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 300, .height = 200, .scale = 2 }, .hidden = false }, .created = true });
+    const now = monotonicNow();
+    try std.testing.expect(!recentUserInput(7, 3000, now)); // 손대지 않았다
+    surfaces.getPtr(7).?.last_user_input_ms = now;
+    try std.testing.expect(recentUserInput(7, 3000, now + 10));
+    try std.testing.expect(!recentUserInput(7, 3000, now + 3001)); // 창 밖
+    // 누른 링크가 다른 페이지를 열었다 — 그 페이지가 시작한 다운로드는 사용자 동작이 아니다.
+    apply(gpa, .{ .url_changed = .{ .browser = 7, .url = "https://example.test/next" } }, 0);
+    try std.testing.expect(!recentUserInput(7, 3000, monotonicNow()));
+    surfaces.getPtr(7).?.last_user_input_ms = monotonicNow() + 1; // 새 페이지에서 다시 눌렀다
+    try std.testing.expect(recentUserInput(7, 3000, monotonicNow() + 1));
+    try std.testing.expect(!recentUserInput(8, 3000, now)); // 모르는 탭
 }
 
 test "datalist is owned per surface, replaced by a newer list, closed only by its own list, picked once (W6m②)" {
@@ -2461,6 +2486,7 @@ fn monotonicNow() i64 {
 /// 마지막 브라우저가 사라졌다 — shutdown 을 보내고 기다리지 않는다(`reapRetiring` 이 거둔다). 이미 물러나는 옛
 /// sidecar 가 있으면 그것은 바로 죽인다(둘을 쌓지 않는다).
 fn retire(gpa: std.mem.Allocator, now_ms: i64) void {
+    web_downloads.sidecarRetired(); // 받던 다운로드는 멈춘다 — 내리는 sidecar 의 알림은 읽지 않는다(W10a 적대 리뷰 1 회차)
     // 내리는 sidecar 에 맡긴 번호(W6f②) — 다음 sidecar 에 다시 맡긴다(안 잊으면 남은 칸 때문에 다시 맡기지 않아, 첫 내림 뒤로 팝업
     // 이어 받기가 앱이 끝날 때까지 꺼졌다 — W6f② 적대 검증).
     forgetReserved();
@@ -2641,10 +2667,12 @@ pub fn sendToSidecar(gpa: std.mem.Allocator, message: Message) void {
     send(gpa, message);
 }
 
-/// 이 탭에 `window_ms` 안에 사용자 입력(누름·키·조합·편집 명령·메뉴 답·끌어 놓기)을 보냈는가(W10a — 사용자 동작으로 시작한 다운로드).
+/// 이 탭에 `window_ms` 안에 사용자 입력(누름·키·조합·편집 명령·메뉴 답·끌어 놓기)을 보냈고 그 뒤로 주 프레임이 다른 주소로 가지 않았는가
+/// (W10a — 사용자 동작으로 시작한 다운로드). 첨부 응답은 주소를 바꾸지 않아 「눌러서 받기」는 그대로다. 교차 출처 iframe 이 위 문서의
+/// 누름으로 시작한 다운로드는 가르지 못한다(문서마다의 사용자 활성화는 Chromium 안에 있다).
 pub fn recentUserInput(surface_id: u64, window_ms: i64, now_ms: i64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
-    return now_ms - s.last_user_input_ms <= window_ms;
+    return now_ms - s.last_user_input_ms <= window_ms and s.last_user_input_ms > s.last_nav_ms;
 }
 
 fn send(gpa: std.mem.Allocator, message: Message) void {
@@ -2775,6 +2803,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             if (s.url) |old| gpa.free(old);
             s.url = owned;
             s.nav_dirty = true;
+            s.last_nav_ms = monotonicNow();
             // 다른 사이트로 옮기면 Chromium 이 렌더러를 바꾸고 새 렌더러는 포커스를 모른다 — 키는 닿아도 페이지 `focus`
             // 가 안 오고 입력기 조합이 버려졌다(W4c 실측). 포커스를 줘야 하는 탭이면 다시 준다.
             if (s.focused and s.created) send(gpa, .{ .set_focus = .{ .browser = v.browser, .value = true } });

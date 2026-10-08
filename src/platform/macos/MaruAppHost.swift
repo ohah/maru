@@ -12333,6 +12333,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         view.addItem(catalogMenuItem("decrease_font_size", catalog))
         view.addItem(catalogMenuItem("reset_font_size", catalog))
         view.addItem(.separator())
+        view.addItem(catalogMenuItem("show_downloads", catalog)) // W10a: Chromium 탭 다운로드 목록(⇧⌘J)
+        view.addItem(.separator())
         view.addItem(nativeMenuItem("Toggle Full Screen", #selector(menuToggleFullScreen(_:)), key: "f", mods: [.control, .command], target: self))
         attachSubmenu(mainMenu, "View", view)
 
@@ -12421,7 +12423,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let key = sender.representedObject as? String else { return }
         // W10a: 다운로드 목록 창이 키면 메뉴의 터미널 동작을 그 창에 보내지 않는다 — 활성 surface 는 키 터미널 창이 없으면 첫 창으로
         // 떨어져 ⌘W 가 첫 창의 탭(받는 중인 웹 탭일 수도)을 닫았다(설계 적대 검토). ⌘W 는 그 창을 닫는다.
-        if let downloads = downloadsWindow, NSApp.keyWindow === downloads.window {
+        if let downloads = downloadsWindow, NSApp.keyWindow === downloads.window, key != "show_downloads" {
             if key == "close_focused" || key == "close_term" || key == "close_tab" {
                 downloads.window.performClose(nil)
             }

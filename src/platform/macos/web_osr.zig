@@ -576,6 +576,21 @@ test "closing a tab that is still downloading hides it on about:blank and closes
     try std.testing.expectEqual(State.off, state); // 마지막이었다 — sidecar 를 내렸다
 }
 
+test "losing the sidecar forgets parked browsers with their downloads (W10c)" {
+    const gpa = std.testing.allocator;
+    web_downloads.testReset();
+    defer web_downloads.testReset();
+    state = .starting;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{7});
+    try web_downloads.testAddActive(1, 7);
+    destroy(gpa, 7);
+    try std.testing.expectEqual(@as(usize, 1), parkedCount());
+    forgetSidecar(gpa); // 죽었다 — 그 브라우저도 다운로드도 사라졌다(새 sidecar 에 옛 번호의 닫기를 보내지 않게)
+    try std.testing.expectEqual(@as(usize, 0), parkedCount());
+    try std.testing.expectEqual(@as(usize, 0), web_downloads.activeTotal());
+}
+
 test "a page-asked close of a downloading tab goes to about:blank and closes on the new document unless the user stays (W10c)" {
     const gpa = std.testing.allocator;
     web_downloads.testReset();

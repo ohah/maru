@@ -22,6 +22,8 @@ pub const State = struct {
     navigated: u64 = 0,
     notified_none: u64 = 0,
     notified_outside: u64 = 0,
+    /// 기다리는 사이 사용자가 연 오버레이를 밀어낼 응답이라 버린 수(`AppSession.responseWouldDisplaceOverlay`).
+    dropped_behind_overlay: u64 = 0,
 };
 
 /// `goto_definition` 명령·`F12` — 활성 편집기의 caret 자리에서. 보냈으면 true.
@@ -56,6 +58,13 @@ pub fn onDefinitionResponse(self: *AppSession, seq: u32, target: ?lsp.rpc.Target
     const st = &self.editor_definition;
     if (!st.waiting or seq != st.waiting_seq) return;
     st.waiting = false;
+    // **기다리는 사이 사용자가 연 것을 밀어낼 응답이면 버린다** — 이동도 알림도(`AppSession.responseWouldDisplaceOverlay`).
+    // 「정의 없음」 알림이 사용자가 치던 찾기·팔레트를 닫아 남은 글자가 문서로 갔고, 이동은 팔레트 아래의 활성 문서를 바꾼다.
+    // 결과를 버려도 다시 누르면 된다(빠른 수정 메뉴·참조 피커와 같다). 알림 패널은 밀려나지 않으므로 그때는 그대로 간다.
+    if (self.responseWouldDisplaceOverlay()) {
+        st.dropped_behind_overlay += 1;
+        return;
+    }
     const t = target orelse {
         st.notified_none += 1;
         self.showNoticeKey(.nav_no_definition);

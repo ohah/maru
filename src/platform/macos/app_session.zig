@@ -2878,6 +2878,8 @@ const FocusOwner = union(enum) {
 };
 
 const ChromeHostField = std.meta.FieldEnum(chrome.ChromeHost);
+/// 미룬 응답 알림의 버퍼 — `showNoticeFmt` 의 것과 같은 크기(넘치면 `i18n.format` 이 글자 경계에서 「…」로 끝낸다).
+const deferred_response_notice_cap = 512;
 
 /// `chrome_host` 컴포넌트가 입력 소유 두 축에서 갖는 역할.
 const ModalInputRole = union(enum) {
@@ -6154,6 +6156,12 @@ pub const AppSession = struct {
     /// 컨텍스트 메뉴가 code action 목록이다(tooling §8.2h) — accept 가 이 갈래로 먼저 들어온다. `closeContextMenu` 가 내린다.
     code_action_menu: bool = false,
     editor_workspace_edit: editor_ops.workspace_edit_client.State = .{},
+    /// 늦게 온 LSP 응답의 알림 중 사용자가 그사이 연 오버레이 때문에 미룬 것(`showResponseNotice`) — 하나만 든다(새것이 이긴다).
+    deferred_response_notice_buf: [deferred_response_notice_cap]u8 = undefined,
+    deferred_response_notice_len: usize = 0,
+    /// 판정자 관측: 미룬 수 · 미뤘다가 띄운 수.
+    response_notices_deferred: u64 = 0,
+    response_notices_flushed: u64 = 0,
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
     window_close_pending: bool = false,
@@ -14265,7 +14273,13 @@ pub const AppSession = struct {
     /// 이제 역할만 등재하면 두 곳이 함께 따라오므로 누락 자체가 불가능하다. `transient_toast`(지나가는
     /// 토스트)는 입력을 막지 않으므로 제외한다 — 14차 리뷰 [3]의 결론을 역할로 표현한 것이다.
     pub fn anyModalOverlayOpen(self: *const AppSession) bool {
+        return self.modalOverlayOpenExcept(null);
+    }
+
+    /// `anyModalOverlayOpen` 에서 `except` 하나를 뺀 것(`null` 이면 같다). 집합은 같은 `modalInputRole` 에서 파생한다.
+    fn modalOverlayOpenExcept(self: *const AppSession, comptime except: ?ChromeHostField) bool {
         inline for (std.meta.fields(ChromeHostField)) |field| {
+            if (comptime except != null and @as(ChromeHostField, @enumFromInt(field.value)) == except.?) continue;
             switch (comptime modalInputRole(@as(ChromeHostField, @enumFromInt(field.value)))) {
                 .routes_text, .blocks_without_text => {
                     if (comptime std.mem.eql(u8, field.name, "find")) {
@@ -14287,6 +14301,35 @@ pub const AppSession = struct {
     /// 버린다 — 사용자가 그 뒤에 한 일을 늦은 응답이 덮지 않는다.
     pub fn interactiveOverlayOpen(self: *const AppSession) bool {
         return self.anyModalOverlayOpen() or self.rename != null;
+    }
+
+    /// 늦게 온 응답의 알림·이동이 **사용자가 그사이 연 것을 밀어내는가** — `showNotice` 가 닫는 것(찾기 입력·팔레트·설정·
+    /// 피커·메뉴·팝업 이름 바꾸기 상자)과 취소하는 것(확인창). `interactiveOverlayOpen` 에서 **알림 패널만 뺀다** — 알림은
+    /// 패널을 닫지 않고 함께 있는다(notifications §「다른 오버레이와의 관계」: 메시지가 먼저 입력을 받고, 닫히면 패널이 다시 보인다).
+    pub fn responseWouldDisplaceOverlay(self: *const AppSession) bool {
+        return self.modalOverlayOpenExcept(.notifications) or self.rename != null;
+    }
+
+    /// **늦게 온 LSP 응답이 띄우는 알림**(2026-10-08). `showNotice` 는 다른 오버레이를 닫고 확인창을 취소한다 — 기다리는
+    /// 사이 사용자가 찾기·팔레트·설정·확인창을 열었으면, 늦은 「정의 없음」·「N곳 바꿈」이 그것을 닫아 이어 치는 글자가
+    /// 문서로 들어갔다(재현: 넷 모두 닫히거나 취소됐다). 그때는 **미뤘다가 그것이 닫힌 뒤의 tick 에 띄운다**
+    /// (`flushDeferredResponseNotice`). 버리지 않는 이유: 이름 바꾸기·포맷·빠른 수정 적용은 사용자가 확정한 일이고, 그 **실패**
+    /// (서버 오류·문서가 바뀌어 버림·거부)는 편집이 안 보이는 것 말고는 알 길이 없다. 미룬 것은 하나만 들고 새것이 이긴다 —
+    /// 그사이 다른 알림이 뜨면 미룬 것은 버린다(`showNotice`). 편집 자체는 호출부가 이미 적용했다.
+    pub fn showResponseNotice(self: *AppSession, key: maru.i18n.Key, args: []const maru.i18n.Arg) void {
+        if (!self.responseWouldDisplaceOverlay()) return self.showNoticeFmt(key, args);
+        self.deferred_response_notice_len = maru.i18n.format(&self.deferred_response_notice_buf, maru.i18n.t(key), args).len;
+        self.response_notices_deferred += 1;
+    }
+
+    /// 미룬 응답 알림을 띄운다 — 밀어낼 것이 없어졌을 때만(tick 이 부른다).
+    fn flushDeferredResponseNotice(self: *AppSession) void {
+        if (self.deferred_response_notice_len == 0 or self.responseWouldDisplaceOverlay()) return;
+        var buf: [deferred_response_notice_cap]u8 = undefined;
+        const msg = buf[0..self.deferred_response_notice_len];
+        @memcpy(msg, self.deferred_response_notice_buf[0..msg.len]);
+        self.showNotice(msg); // 미룬 것을 비운다(아래 `showNotice` 첫 줄)
+        self.response_notices_flushed += 1;
     }
 
     /// 도크 검색이 키/IME를 받는 상태인가. `inputFocus`·`terminalOwnsInput`·caret rect가 **같은 게이트**를 쓰도록
@@ -20784,6 +20827,7 @@ pub const AppSession = struct {
         marker_view_ops.pollMarkerPreview(self);
         marker_view_ops.pumpMarkerPreviewOpen(self);
         editor_ops.lsp_client.pump(self); // §8.2a: 서버 읽기·문서 동기화 — 스레드 없이 tick 에서
+        self.flushDeferredResponseNotice(); // §8.2a: 사용자가 그사이 연 오버레이 뒤로 미룬 응답 알림
         editor_ops.hover_client.tick(self); // §8.2b: 포인터 정지 → 호버 요청/열기
         editor_ops.references_client.tick(self); // §8.2l: 「지금은 못 답한다」 뒤 되묻기
         editor_backup_ops.tick(self); // §3.10: 편집이 멎고 debounce 가 지났으면 미저장 내용을 백업한다
@@ -23912,6 +23956,7 @@ pub const AppSession = struct {
     /// 문자열 진입점 — **전환 중에만 남는다**(계약 §7.2). 호출부가 전부 키로 옮겨지고 ABI 경로가
     /// 정리되면 지운다. 그때까지는 2차 리터럴 검사가 이 자리를 지킨다.
     pub fn showNotice(self: *AppSession, message: []const u8) void {
+        self.deferred_response_notice_len = 0; // 새 알림이 미룬 응답 알림을 이긴다(`showResponseNotice`)
         self.dismissMessageOverlays();
         self.cancelPendingClose(); // confirm 모달 + 보류 닫기 취소(열려 있을 때만 의미; 닫혀 있으면 무해)
         self.chrome_host.notice.show(copyOverlayMessage(&self.notice_message_buf, message));

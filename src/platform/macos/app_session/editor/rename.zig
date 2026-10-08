@@ -89,13 +89,13 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, is_error
     st.waiting = false;
     if (is_error) {
         st.notified_error += 1;
-        self.showNoticeFmt(.rn_error, &.{.{ .s = error_message orelse "" }});
+        self.showResponseNotice(.rn_error, &.{.{ .s = error_message orelse "" }});
         return;
     }
     var parsed = lsp.workspace_edit.parse(self.allocator, result) catch |err| switch (err) {
         error.Unsupported, error.Malformed => {
             self.editor_workspace_edit.refused_rejected += 1;
-            self.showNoticeFmt(.rn_rejected, &.{.{ .s = if (err == error.Unsupported) "file operation" else "malformed" }});
+            self.showResponseNotice(.rn_rejected, &.{.{ .s = if (err == error.Unsupported) "file operation" else "malformed" }});
             return;
         },
         error.OutOfMemory => return,
@@ -104,7 +104,7 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, is_error
     switch (editor_wse.apply(self, parsed, enc, st.snaps[0..st.snaps_len])) {
         .applied => |n| {
             st.notified_done += 1;
-            self.showNoticeFmt(.rn_done, &.{.{ .d = @intCast(n) }});
+            self.showResponseNotice(.rn_done, &.{.{ .d = @intCast(n) }});
         },
         .refused => |r| notifyRefusal(self, r),
     }
@@ -121,11 +121,12 @@ pub fn undoLast(self: *AppSession) void {
     }
 }
 
+/// 이름 바꾸기 응답의 거부 알림 — 늦게 온 응답이라 `showResponseNotice` 로(사용자가 그사이 연 오버레이를 닫지 않는다).
 fn notifyRefusal(self: *AppSession, r: editor_wse.Refusal) void {
     switch (r) {
-        .outside_root => |p| self.showNoticeFmt(.rn_outside_root, &.{.{ .s = p }}),
-        .stale => self.showNoticeKey(.rn_stale),
-        .rejected => |p| self.showNoticeFmt(.rn_rejected, &.{.{ .s = p }}),
+        .outside_root => |p| self.showResponseNotice(.rn_outside_root, &.{.{ .s = p }}),
+        .stale => self.showResponseNotice(.rn_stale, &.{}),
+        .rejected => |p| self.showResponseNotice(.rn_rejected, &.{.{ .s = p }}),
         .out_of_memory => {},
     }
 }

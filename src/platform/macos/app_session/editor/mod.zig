@@ -53516,3 +53516,229 @@ test "EDPS11 저장된 경로 철자로 필터링해도 열린 모델 신원과 
     try testing.expectEqual(@as(usize, 0), old_disk.matches);
     try testing.expectEqualStrings("editor-only", term.rt.editorDocument().opened.?.file.content);
 }
+
+test "LATE3 정의·포맷·빠른 수정 적용의 늦은 응답이 사용자가 그사이 연 오버레이를 닫지 않는다 — 정의는 버리고, 적용의 알림은 닫힌 뒤로 미루며, 알림 패널은 밀려나지 않는다 (제품 경계, §8.2a·§8.2c·§8.2e·§8.2h)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const s = fx.session;
+    // 응답은 직접 넣는다 — 「기다리는 중에 사용자가 무엇을 열었나」만 바꾸고 나머지는 같다. 예전에는 넷 모두
+    // 「정의 없음」 알림(`showNotice` → `dismissMessageOverlays`·`cancelPendingClose`)이 닫거나 취소했다.
+    const Seq = struct {
+        var n: u32 = 100;
+        fn next() u32 {
+            n += 1;
+            return n;
+        }
+    };
+    const defResponse = struct {
+        fn f(ss: *AppSession) void {
+            const seq = Seq.next();
+            ss.editor_definition.waiting = true;
+            ss.editor_definition.waiting_seq = seq;
+            definition_client.onDefinitionResponse(ss, seq, null, .utf8);
+        }
+    }.f;
+    // ⑴ 팔레트 — 그대로 열려 있고 알림도 이동도 없다.
+    s.dispatchAppAction(.toggle_command_palette);
+    try testing.expect(s.chrome_host.palette.open);
+    defResponse(s);
+    try testing.expect(s.chrome_host.palette.open);
+    try testing.expect(!s.chrome_host.notice.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_definition.dropped_behind_overlay);
+    try testing.expectEqual(@as(u64, 0), s.editor_definition.notified_none);
+    s.dismissMessageOverlays();
+    // ⑵ 설정 화면.
+    s.dispatchAppAction(.toggle_settings);
+    try testing.expect(s.chrome_host.settings.open);
+    defResponse(s);
+    try testing.expect(s.chrome_host.settings.open);
+    try testing.expectEqual(@as(u64, 2), s.editor_definition.dropped_behind_overlay);
+    s.dismissMessageOverlays();
+    // ⑶ 찾기 입력(포커스) — 닫히면 이어 치는 글자가 문서로 간다.
+    s.dispatchAppAction(.toggle_find);
+    try testing.expect(s.chrome_host.find.open and s.chrome_host.find.input_focused);
+    defResponse(s);
+    try testing.expect(s.chrome_host.find.open and s.chrome_host.find.input_focused);
+    try testing.expectEqual(@as(u64, 3), s.editor_definition.dropped_behind_overlay);
+    s.dismissMessageOverlays();
+    // ⑷ 확인창(리셋) — 취소되지 않는다.
+    s.dispatchAppAction(.reset_settings);
+    try testing.expect(s.chrome_host.confirm.open and s.pending_confirm == .reset);
+    defResponse(s);
+    try testing.expect(s.chrome_host.confirm.open and s.pending_confirm == .reset);
+    try testing.expectEqual(@as(u64, 4), s.editor_definition.dropped_behind_overlay);
+    s.showNoticeKey(.nav_no_definition); // 정리 — 알림은 확인창을 취소한다(바로 그 동작이 위에서 일어나지 않았다)
+    try testing.expect(s.pending_confirm == .none);
+    s.chrome_host.notice.dismiss();
+    // ⑸ 열린 것이 없으면 예전 그대로 알린다 — 토스트는 막지 않는다(떠 있어도 새 알림이 덮는다).
+    defResponse(s);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_definition.notified_none);
+    defResponse(s);
+    try testing.expectEqual(@as(u64, 2), s.editor_definition.notified_none);
+    try testing.expectEqual(@as(u64, 4), s.editor_definition.dropped_behind_overlay);
+    s.chrome_host.notice.dismiss();
+    // ⑸' **알림 패널은 밀려나지 않는다** — 알림은 패널을 닫지 않고 함께 있으므로(notifications §「다른 오버레이와의 관계」) 버리지 않는다.
+    @import("../notification.zig").openNotificationPanel(s);
+    try testing.expect(s.chrome_host.notifications.open);
+    defResponse(s);
+    try testing.expect(s.chrome_host.notice.open and s.chrome_host.notifications.open);
+    try testing.expectEqual(@as(u64, 3), s.editor_definition.notified_none);
+    try testing.expectEqual(@as(u64, 4), s.editor_definition.dropped_behind_overlay);
+    s.chrome_host.notice.dismiss();
+    s.chrome_host.notifications.hide();
+
+    // ⑹ 포맷 — 문서가 바뀌어 버린 결과의 알림(`fmt_stale`). 버리는 것은 같고, 알림은 **팔레트가 닫힌 뒤의 tick** 에 뜬다 —
+    //    실패를 알 길이 이 알림뿐이다. 팔레트가 열린 동안의 tick 은 띄우지 않는다.
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "late.txt", .data = "a\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "late.txt" });
+    defer allocator.free(path);
+    const term = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+    const formatStale = struct {
+        fn f(ss: *AppSession, t: *Term) void {
+            const seq = Seq.next();
+            ss.editor_format.waiting = true;
+            ss.editor_format.waiting_seq = seq;
+            ss.editor_format.waiting_surface = t.surface.id;
+            ss.editor_format.asked_version = t.rt.editorDocument().notifications.lsp_version +% 1;
+            format_client.onResponse(ss, seq, null, .utf8);
+        }
+    }.f;
+    s.dispatchAppAction(.toggle_command_palette);
+    formatStale(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_format.stale);
+    try testing.expect(s.chrome_host.palette.open and !s.chrome_host.notice.open);
+    try testing.expectEqual(@as(u64, 1), s.response_notices_deferred);
+    _ = try s.tick();
+    try testing.expect(s.chrome_host.palette.open and !s.chrome_host.notice.open);
+    s.dismissMessageOverlays();
+    _ = try s.tick();
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqualStrings(maru.i18n.t(.fmt_stale), s.chrome_host.notice.message);
+    try testing.expectEqual(@as(u64, 1), s.response_notices_flushed);
+    s.chrome_host.notice.dismiss();
+    _ = try s.tick();
+    try testing.expect(!s.chrome_host.notice.open); // 한 번만 뜬다
+    // ⑹' 열린 것이 없으면 바로.
+    formatStale(s, term);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqual(@as(u64, 1), s.response_notices_deferred);
+    s.chrome_host.notice.dismiss();
+    // ⑹'' **그사이 다른 알림이 뜨면 미룬 것은 버린다** — 새 알림 뒤에 옛 결과가 덮어 뜨지 않는다.
+    s.dispatchAppAction(.toggle_command_palette);
+    formatStale(s, term);
+    try testing.expectEqual(@as(u64, 2), s.response_notices_deferred);
+    s.showNoticeKey(.nav_no_definition); // 팔레트를 닫고 뜨는 다른 알림
+    s.chrome_host.notice.dismiss();
+    _ = try s.tick();
+    try testing.expect(!s.chrome_host.notice.open);
+    try testing.expectEqual(@as(u64, 1), s.response_notices_flushed);
+
+    // ⑺ 빠른 수정 resolve — 「없습니다」 알림.
+    const resolveNone = struct {
+        fn f(ss: *AppSession) void {
+            const seq = Seq.next();
+            ss.editor_code_action.resolve_waiting = true;
+            ss.editor_code_action.resolve_seq = seq;
+            code_action_client.onResolveResponse(ss, seq, null, false, null, .utf8);
+        }
+    }.f;
+    s.dispatchAppAction(.toggle_settings);
+    resolveNone(s);
+    try testing.expect(s.chrome_host.settings.open and !s.chrome_host.notice.open);
+    try testing.expectEqual(@as(u64, 3), s.response_notices_deferred);
+    s.dismissMessageOverlays();
+    _ = try s.tick();
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqualStrings(maru.i18n.t(.ca_none), s.chrome_host.notice.message);
+    try testing.expectEqual(@as(u64, 2), s.response_notices_flushed);
+    s.chrome_host.notice.dismiss();
+    // ⑺' 알림 패널만 열려 있으면 미루지 않는다.
+    @import("../notification.zig").openNotificationPanel(s);
+    resolveNone(s);
+    try testing.expect(s.chrome_host.notice.open and s.chrome_host.notifications.open);
+    try testing.expectEqual(@as(u64, 3), s.response_notices_deferred);
+    s.chrome_host.notice.dismiss();
+    s.chrome_host.notifications.hide();
+}
+
+test "LATE4 이름 바꾸기 응답이 오기 전에 사용자가 팔레트를 열면 — 편집은 적용하고, 팔레트는 그대로, 「N곳 바꿈」은 팔레트가 닫힌 뒤에 뜬다 (제품 경계, §8.2a·§8.2f)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    // ⑴ 요청을 보낸 뒤 응답 전에 팔레트를 연다 → 응답: 두 파일이 바뀌고(사용자가 확정한 일), 팔레트는 열린 채, 「N곳 바꿈」은 아직 안 뜬다.
+    try h.renameTo(5, "add2");
+    try testing.expect(s.editor_rename.waiting);
+    s.dispatchAppAction(.toggle_command_palette);
+    try testing.expect(s.chrome_host.palette.open);
+    try testing.expect(h.settled());
+    try testing.expectEqualStrings("int add2(int a) { return add2(a); }\nint y = add2(1);\n", h.content());
+    {
+        const od = try h.otherOnDisk(allocator);
+        defer allocator.free(od);
+        try testing.expectEqualStrings("int z = add2(2);\nint add_x = 0;\n", od);
+    }
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.notified_done);
+    try testing.expect(s.chrome_host.palette.open);
+    try testing.expect(!s.chrome_host.notice.open);
+    try testing.expectEqual(@as(u64, 1), s.response_notices_deferred);
+    // 팔레트를 닫으면 다음 tick 에 뜬다 — 바뀐 곳 수가 그대로 남아 있다.
+    s.dismissMessageOverlays();
+    _ = try s.tick();
+    try testing.expect(s.chrome_host.notice.open);
+    {
+        var want_buf: [128]u8 = undefined;
+        const want = maru.i18n.format(&want_buf, maru.i18n.t(.rn_done), &.{.{ .d = 2 }}); // 바뀐 파일 수 — r.c · other.c
+        try testing.expectEqualStrings(want, s.chrome_host.notice.message);
+    }
+    try testing.expectEqual(@as(u64, 1), s.response_notices_flushed);
+    s.chrome_host.notice.dismiss();
+    // ⑵ 열린 것이 없으면 바로 알린다.
+    try h.renameTo(5, "add3");
+    try testing.expect(h.settled());
+    try testing.expectEqual(@as(u64, 2), s.editor_rename.notified_done);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqual(@as(u64, 1), s.response_notices_deferred);
+    s.chrome_host.notice.dismiss();
+    s.editor_workspace_edit.deinit(allocator);
+}
+
+test "LATE5 늦게 온 응답의 알림 자리는 전부 showResponseNotice 다 — 응답 함수 본문에 showNotice 직접 호출이 0 (소스 판정, §8.2a)" {
+    // LATE3·LATE4 는 자리 열여섯 중 셋만 태운다(이름 바꾸기 성공 · 포맷 「바뀌어 버림」 · 적용 「없습니다」). 나머지(서버 오류 · 거부 ·
+    // root 밖 · 적용 결과)를 하나라도 `showNotice` 로 되돌리면 그 늦은 알림이 사용자가 치던 찾기·팔레트를 다시 닫는데 판정자가 없었다.
+    // 그래서 **자리를 센다** — 함수 본문(이름부터 맨 앞 칸의 `}` 까지)에 `showNotice` 가 0, `showResponseNotice(` 가 정해진 수.
+    // 정의로 이동은 여기 없다 — 응답 첫머리에서 통째로 버리고(LATE3 ⑴~⑷), 그 뒤의 알림은 밀어낼 것이 없을 때만 닿는다.
+    const Site = struct { src: []const u8, file: []const u8, func: []const u8, want: usize };
+    const sites = [_]Site{
+        .{ .src = @embedFile("rename.zig"), .file = "rename.zig", .func = "pub fn onResponse(", .want = 3 },
+        .{ .src = @embedFile("rename.zig"), .file = "rename.zig", .func = "fn notifyRefusal(", .want = 3 },
+        .{ .src = @embedFile("format.zig"), .file = "format.zig", .func = "pub fn onResponse(", .want = 2 },
+        .{ .src = @embedFile("code_action.zig"), .file = "code_action.zig", .func = "pub fn onResolveResponse(", .want = 3 },
+        .{ .src = @embedFile("code_action.zig"), .file = "code_action.zig", .func = "fn applyEdit(", .want = 5 },
+    };
+    for (sites) |site| {
+        const at = std.mem.indexOf(u8, site.src, site.func) orelse {
+            std.debug.print("응답 함수를 못 찾았다 — 이름이 바뀌었으면 이 표를 고친다: {s} {s}\n", .{ site.file, site.func });
+            return error.ResponseFunctionMissing;
+        };
+        try testing.expectEqual(@as(?usize, null), std.mem.indexOfPos(u8, site.src, at + 1, site.func)); // 하나뿐이어야 본문이 그것이다
+        const end = std.mem.indexOfPos(u8, site.src, at, "\n}\n") orelse return error.ResponseFunctionUnterminated;
+        const body = site.src[at..end];
+        const direct = std.mem.count(u8, body, "showNotice");
+        const deferred = std.mem.count(u8, body, "showResponseNotice(");
+        if (direct != 0 or deferred != site.want) {
+            std.debug.print("{s} {s}: showNotice {d}개(0 이어야) · showResponseNotice {d}개({d} 이어야)\n", .{ site.file, site.func, direct, deferred, site.want });
+            return error.LateResponseNoticeSite;
+        }
+    }
+}

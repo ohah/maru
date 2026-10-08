@@ -95,12 +95,18 @@ pub fn lower(
 
     // 첫 rounded quad는 overlay의 배경·shadow이고, 그 뒤 rounded quad는 선택 행 위에 떠야 하는 widget이다.
     // 이 painter-order 규칙을 lowerer 한 곳에 둬 cell과 GPU pass의 z-order가 갈라지지 않게 한다.
+    //
+    // **「첫」은 draw(= 오버레이 하나)마다 센다**(2026-10-07). 예전에는 프레임 전체에서 한 번만 셌다 — 그래서 찾기 막대가
+    // 열린 채 편집기를 우클릭하면 먼저 모인 찾기 막대가 그 자리를 가져가, 우클릭 메뉴의 패널이 패딩·그림자 없는 widget 으로
+    // 내려가 첫 줄이 윗 테두리에 겹쳤다(실제 앱 1배율 캡처로 재현). 배치(`popup_box.visible_outset_px`)는 패딩이 있다고
+    // 가정하므로 둘이 갈렸다. host 의 수집 함수는 오버레이 하나당 draw 하나를 내므로(`ChromeHost.collect*Draws`) draw 가
+    // 곧 패널 단위다. `independent_panel` 은 이제 「모서리 0 인 첫 quad 도 GPU 패널로 친다」만 가른다(각 열의 찾기).
     var cursor: ?terminal.Cursor = null;
     var clip_rect: ?chrome.draw.Rect = null;
     var modal_bg_quad = false;
     for (draws) |d| {
         var panel_bg_quad = false;
-        const background_seen = if (d.independent_panel) &panel_bg_quad else &modal_bg_quad;
+        const background_seen = &panel_bg_quad;
         for (d.ops) |op| switch (op) {
             .fill => |f| {
                 if (f.role == .cursor) {
@@ -347,6 +353,43 @@ test "EF31 independent find panels each retain their background and shadow" {
         try std.testing.expectEqual(raster.gpu_quads.items[0].h, raster.gpu_quads.items[1].h);
         try std.testing.expectEqual(@as(usize, 0), raster.cells.items.len);
     }
+}
+
+// 찾기 막대가 열린 채 우클릭하면 메뉴가 패딩·그림자 없이 그려졌다(2026-10-07 실제 앱 재현) — 「첫 둥근 quad」를 프레임 전체에서
+// 한 번만 셌기 때문이다. 오버레이 둘이 한 프레임에 모여도 **각자** 패널(사방 패딩 + 그림자)을 갖는다. 한 draw 안의 둘째 둥근 quad 는
+// 여전히 widget 이다(선택 행 위 강조 등).
+test "ML4 오버레이 둘이 한 프레임에 모여도 각자 패널(패딩·그림자)을 갖고, 한 draw 안의 둘째 둥근 quad 는 widget 이다" {
+    var tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 9, .g = 9, .b = 9 }) };
+    tk.space.modal_padding_px = 12;
+    const r: u16 = 8;
+    // 먼저 모이는 찾기 막대(패널 하나) — 그 뒤 우클릭 메뉴(패널 + 그 안의 둥근 강조 하나).
+    const find_ops = [_]chrome.draw.Op{.{ .quad = .{ .rect = .{ .x = 400, .y = 40, .w = 200, .h = 32 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r } } }};
+    const menu_ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 100, .y = 200, .w = 160, .h = 64 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r } } },
+        .{ .quad = .{ .rect = .{ .x = 100, .y = 216, .w = 160, .h = 16 }, .fill_role = .tab_active_bg, .corner_radii = .{ r, r, r, r } } },
+    };
+    var raster = try lower(std.testing.allocator, &.{
+        .{ .layer = .modal, .ops = &find_ops },
+        .{ .layer = .modal, .ops = &menu_ops },
+    }, &tk, 8, 16, false);
+    defer {
+        raster.cells.deinit(std.testing.allocator);
+        raster.gpu_quads.deinit(std.testing.allocator);
+        raster.gpu_shadows.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 3), raster.gpu_quads.items.len);
+    try std.testing.expectEqual(@as(usize, 2), raster.gpu_shadows.items.len); // 패널마다 그림자 — 예전에는 하나
+    const find_panel = raster.gpu_quads.items[0];
+    const menu_panel = raster.gpu_quads.items[1];
+    const menu_row = raster.gpu_quads.items[2];
+    // 두 패널 모두 사방 12px 커지고 over 버킷(layer 1)이다 — 예전에는 메뉴 패널이 커지지 않은 widget(layer 3)이었다.
+    try std.testing.expectEqual([4]f32{ 400 - 12, 40 - 12, 200 + 24, 32 + 24 }, [4]f32{ find_panel.x, find_panel.y, find_panel.w, find_panel.h });
+    try std.testing.expectEqual([4]f32{ 100 - 12, 200 - 12, 160 + 24, 64 + 24 }, [4]f32{ menu_panel.x, menu_panel.y, menu_panel.w, menu_panel.h });
+    try std.testing.expectEqual(@as(u32, 1), find_panel.layer);
+    try std.testing.expectEqual(@as(u32, 1), menu_panel.layer);
+    // 메뉴 draw 안의 둘째 둥근 quad 는 widget 그대로 — 키우지 않고 layer 3.
+    try std.testing.expectEqual([4]f32{ 100, 216, 160, 16 }, [4]f32{ menu_row.x, menu_row.y, menu_row.w, menu_row.h });
+    try std.testing.expectEqual(@as(u32, 3), menu_row.layer);
 }
 
 // ML3b 경계: 알림 패널을 스크롤해 카드가 뷰포트 경계(위·아래)에 걸치면, 그 카드의 강조 배경(선택·호버)은 **헤더와

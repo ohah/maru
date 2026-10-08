@@ -24,11 +24,15 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
     /// `web_downloads.State` 와 같은 값.
     enum State: UInt32 {
         case preparing = 0, held, active, interrupted, done, canceled, failed, tabClosed, engineRestarted, tooMany
+        /// W10b 매번 묻기 — 저장할 곳을 고르기를 기다린다.
+        case asking
     }
 
     /// `maru_macos_downloads_act` 의 동작.
     enum Action: UInt32 {
         case cancel = 0, resumeDownload, accept, discard, remove
+        /// W10b: 저장할 곳 고르기 — Zig `act` 로 가지 않고 컨트롤러가 이 창에 저장 창을 띄운다.
+        case choose = 100
     }
 
     let window: NSWindow
@@ -149,7 +153,7 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
         guard let s = State(rawValue: state) else { return true }
         switch s {
         case .done, .canceled, .failed, .tabClosed, .engineRestarted, .tooMany: return true
-        case .preparing, .held, .active, .interrupted: return false
+        case .preparing, .held, .active, .interrupted, .asking: return false
         }
     }
 
@@ -208,6 +212,7 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
         case .preparing, .active: buttons = [(.cancel, text(12), nil)]
         case .interrupted: buttons = [(.resumeDownload, text(13), nil), (.cancel, text(12), nil)]
         case .held: buttons = [(.accept, text(14), nil), (.discard, text(15), nil)]
+        case .asking: buttons = [(.choose, text(19), nil), (.cancel, text(12), nil)]
         case .done: buttons = missing ? [] : [(nil, text(16), #selector(revealRow(_:)))]
         // 받은 뒤 옮기지 못했다 — 받은 데이터는 행이 가리키는 임시 파일에 있다(적대 리뷰 2 회차).
         case .failed: buttons = fileExists(row.path) ? [(nil, text(16), #selector(revealRow(_:)))] : []

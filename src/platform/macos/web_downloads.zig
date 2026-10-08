@@ -40,12 +40,14 @@ pub const State = enum(u8) {
     engine_restarted = 8,
     /// 동시 다운로드 상한을 넘었다.
     too_many = 9,
+    /// W10b 「매번 묻기」 — 저장할 곳을 고르기를 기다린다(sidecar 가 붙든다 — Chromium 은 그동안 프로필의 `download-staging` 에 받아 둔다).
+    asking = 10,
 };
 
 pub fn finished(state: State) bool {
     return switch (state) {
         .done, .canceled, .failed, .tab_closed, .engine_restarted, .too_many => true,
-        .preparing, .held, .active, .interrupted => false,
+        .preparing, .held, .active, .interrupted, .asking => false,
     };
 }
 
@@ -57,6 +59,20 @@ const max_entries = 500;
 /// 동시 진행 상한 — 앱 전체·탭 하나(넘으면 받지 않고 행에 남긴다 — 페이지가 다운로드를 쏟아내는 것을 막는다).
 const max_active_app = 32;
 const max_active_tab = 8;
+/// W10b: 「매번 묻기」(설정 `browser.download-ask`) — 앱 전역 하나, 창(AppSession)마다 설정을 읽거나 바꿀 때 세운다(마지막 값).
+var ask_enabled = false;
+/// 이번 실행에서 마지막으로 고른 폴더(저장 창이 처음 여는 곳 — 없으면 ~/Downloads).
+var last_dir_buf: [max_path_bytes]u8 = undefined;
+var last_dir_len: usize = 0;
+
+pub fn setAsk(value: bool) void {
+    ask_enabled = value;
+}
+
+pub fn askEnabled() bool {
+    return ask_enabled;
+}
+
 /// 「사용자 동작으로 시작한 다운로드」로 보는 창(그 탭에 보낸 마지막 사용자 입력 뒤) — 서버가 첨부를 늦게 돌려줘도 들게 넉넉히.
 const user_gesture_window_ms: i64 = 3000;
 
@@ -82,6 +98,15 @@ pub const Entry = struct {
     /// 다시 만들었으면 그것을 지우지 않게 — W10a 적대 리뷰 1 회차).
     part_dev: i64 = 0,
     part_ino: u64 = 0,
+    /// W10b: 사용자가 저장할 곳을 골라 받는다(묻기) — 임시 파일은 고른 폴더의 짧은 숨은 이름(`.maru-<key>.part`)이라 고른 이름을
+    /// 자르지 않는다.
+    chosen: bool = false,
+    /// W10b: 저장 창이 「바꿀까요?」를 물어 사용자가 바꾸기를 골랐다 — 완료 때 그 이름에 덮어쓴다(그 밖에는 번호).
+    replace: bool = false,
+    /// W10b: 저장 창을 띄운 쪽이 맡았다(탭 창이든 목록 창이든 한 곳만 — 한 행에 창 둘이 뜨지 않게).
+    ask_claimed: bool = false,
+    /// W10b: 고른 폴더에 쓸 수 없었다 — 다시 고르게 한다(상태 줄이 그 까닭을 말한다).
+    ask_retry: bool = false,
     /// 받으려 한 곳(주소의 호스트 — 보류 행에 보인다, Chrome 처럼; data: 처럼 호스트가 없으면 비었다).
     origin_buf: [128]u8 = undefined,
     origin_len: usize = 0,
@@ -281,19 +306,24 @@ const Job = struct {
     dir_len: usize,
     name_buf: [max_name_bytes]u8,
     name_len: usize,
+    /// W10b: 사용자가 고른 폴더·이름(`prepareChosen`) — 아니면 다운로드 폴더에 겹치지 않는 이름(`prepare`).
+    chosen: bool = false,
+    replace: bool = false,
 };
 
 fn startPrepare(e: *const Entry) bool {
     const home = std.c.getenv("HOME") orelse return false;
+    var dir_buf: [max_path_bytes]u8 = undefined;
+    const dir = std.fmt.bufPrint(&dir_buf, "{s}/Downloads", .{std.mem.span(home)}) catch return false;
+    return startPrepareIn(e, dir, false, false);
+}
+
+fn startPrepareIn(e: *const Entry, dir: []const u8, chosen: bool, replace: bool) bool {
+    if (dir.len > max_path_bytes) return false;
     const job = allocator().create(Job) catch return false;
-    const dir = std.fmt.bufPrint(&job.dir_buf, "{s}/Downloads", .{std.mem.span(home)}) catch {
-        allocator().destroy(job);
-        return false;
-    };
-    job.key = e.key;
-    job.dir_len = dir.len;
+    job.* = .{ .key = e.key, .dir_buf = undefined, .dir_len = dir.len, .name_buf = undefined, .name_len = e.name_len, .chosen = chosen, .replace = replace };
+    @memcpy(job.dir_buf[0..dir.len], dir);
     @memcpy(job.name_buf[0..e.name_len], e.name());
-    job.name_len = e.name_len;
     const thread = std.Thread.spawn(.{}, runPrepare, .{job}) catch {
         allocator().destroy(job);
         return false;
@@ -305,7 +335,10 @@ fn startPrepare(e: *const Entry) bool {
 fn runPrepare(job: *Job) void {
     defer allocator().destroy(job);
     var result: Prepared = .{ .key = job.key, .ok = false };
-    prepare(job.dir_buf[0..job.dir_len], job.name_buf[0..job.name_len], &result);
+    if (job.chosen)
+        prepareChosen(job.dir_buf[0..job.dir_len], job.name_buf[0..job.name_len], job.key, job.replace, &result)
+    else
+        prepare(job.dir_buf[0..job.dir_len], job.name_buf[0..job.name_len], &result);
     _ = std.c.pthread_mutex_lock(&prepared_mutex);
     defer _ = std.c.pthread_mutex_unlock(&prepared_mutex);
     prepared.append(allocator(), result) catch {};
@@ -351,6 +384,49 @@ pub fn prepare(dir: []const u8, file_name: []const u8, out: *Prepared) void {
     }
 }
 
+/// W10b: 사용자가 고른 폴더·이름. 최종 이름은 고른 그대로(바꾸기를 고르지 않았는데 그새 그 이름이 생겼으면 번호), 임시 파일은
+/// 그 폴더의 짧은 숨은 이름(`.maru-<key>.part` — 겹치면 `-n`)을 O_EXCL|O_NOFOLLOW 로 — 고른 이름이 길어도 자르지 않는다.
+pub fn prepareChosen(dir: []const u8, file_name: []const u8, key: u64, replace: bool, out: *Prepared) void {
+    var final_name_buf: [max_name_bytes + 16]u8 = undefined;
+    var final_name: []const u8 = file_name;
+    if (!replace) {
+        var n: u32 = 0;
+        while (n < 100) : (n += 1) {
+            const candidate = numberedName(file_name, n, &final_name_buf);
+            if (candidate.len == 0 or candidate.len > max_name_bytes) return;
+            var probe_buf: [max_path_bytes + 1]u8 = undefined;
+            const probe = std.fmt.bufPrintZ(&probe_buf, "{s}/{s}", .{ dir, candidate }) catch return;
+            if (!exists(probe)) {
+                final_name = candidate;
+                break;
+            }
+        } else return;
+    }
+    const final = std.fmt.bufPrintZ(&out.final_buf, "{s}/{s}", .{ dir, final_name }) catch return;
+    var m: u32 = 0;
+    while (m < 100) : (m += 1) {
+        const part = (if (m == 0)
+            std.fmt.bufPrintZ(&out.part_buf, "{s}/.maru-{d}.part", .{ dir, key })
+        else
+            std.fmt.bufPrintZ(&out.part_buf, "{s}/.maru-{d}-{d}.part", .{ dir, key, m })) catch return;
+        const fd = std.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
+        if (fd < 0) {
+            if (std.c._errno().* == @intFromEnum(std.c.E.EXIST)) continue;
+            return; // 쓸 수 없는 폴더(권한·읽기 전용·TCC 거절) — 다시 묻는다
+        }
+        _ = std.c.close(fd);
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(at_fdcwd, part, &st, std.c.AT.SYMLINK_NOFOLLOW) == 0) {
+            out.part_dev = @intCast(st.dev);
+            out.part_ino = @intCast(st.ino);
+        }
+        out.final_len = final.len;
+        out.part_len = part.len;
+        out.ok = true;
+        return;
+    }
+}
+
 extern "c" fn link(from: [*:0]const u8, to: [*:0]const u8) c_int;
 
 const Move = enum { moved, taken, failed };
@@ -377,6 +453,19 @@ fn finalize(e: *Entry) bool {
     const part = std.fmt.bufPrintZ(&part_z, "{s}", .{e.partPath()}) catch return false;
     const dir_end = std.mem.lastIndexOfScalar(u8, e.finalPath(), '/') orelse return false;
     const dir = e.finalPath()[0..dir_end];
+    if (e.replace) {
+        // 사용자가 저장 창에서 바꾸기를 골랐다(W10b) — 고른 그 이름에 덮어쓴다(번호를 붙이지 않는다).
+        var target_buf: [max_path_bytes + 1]u8 = undefined;
+        const target = std.fmt.bufPrintZ(&target_buf, "{s}", .{e.finalPath()}) catch return false;
+        if (std.c.rename(part, target) == 0) {
+            e.part_len = 0;
+            return true;
+        }
+        @memcpy(e.final_buf[0..e.part_len], e.partPath());
+        e.final_len = e.part_len;
+        return false;
+    }
+    // 제안 이름(묻기면 고른 이름 — `answerAsk` 가 `name` 을 바꾼다)에서 센다.
     var n: u32 = 0;
     while (n < 100) : (n += 1) {
         var name_buf: [max_name_bytes + 16]u8 = undefined;
@@ -459,7 +548,12 @@ pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
         changed();
         return true;
     }
-    if (e.risky and !by_user) {
+    if (ask_enabled) {
+        // W10b 매번 묻기 — 저장 창은 사용자가 누른 다운로드에만 곧바로 띄운다(페이지가 저장 창을 스스로 띄우지 못하게 — 그 밖은 종류와
+        // 상관없이 보류: 목록에서 「받기」를 누르면 묻는다). 한 탭에는 한 번에 하나만 묻는다(누를 때마다 창이 줄을 서지 않게 —
+        // 설계 공격 H3).
+        e.state = if (by_user and !askingIn(v.browser)) .asking else .held;
+    } else if (e.risky and !by_user) {
         e.state = .held;
     } else if (!startPrepare(&e)) {
         e.state = .failed;
@@ -467,8 +561,9 @@ pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
     }
     entries.append(allocator(), e) catch return false;
     // 사용자가 시작한 것과 보류한 것 — 보류는 목록에서 「받기」를 눌러야 받으니, 목록이 보이지 않으면 모르고 지나간다. 창을 낼지는
-    // Swift 가 정한다(maru 가 앞에 있고 터미널 창이 키일 때만, 키는 빼앗지 않는다).
-    if (by_user or e.state == .held) {
+    // Swift 가 정한다(maru 가 앞에 있고 터미널 창이 키일 때만, 키는 빼앗지 않는다). 묻는 행은 저장 창이 뜨므로 목록 창을 내지 않는다
+    // (고른 뒤 받기 시작하면 목록에 보인다 — 저장 창과 겹치지 않게).
+    if ((by_user and e.state != .asking) or e.state == .held) {
         show_request +%= 1;
         show_surface = v.browser;
     }
@@ -562,7 +657,12 @@ pub fn reapPrepared() void {
                 }
                 continue;
             }
-            if (!p.ok) {
+            if (!p.ok and e.chosen) {
+                // 고른 폴더에 쓸 수 없었다(권한·읽기 전용·TCC 거절) — 다시 고르게 한다(설계 공격 M3).
+                e.state = .asking;
+                e.ask_claimed = false;
+                e.ask_retry = true;
+            } else if (!p.ok) {
                 e.state = .failed;
                 queue(e.key, .decide_cancel);
             } else {
@@ -606,7 +706,7 @@ pub fn act(key: u64, action: Action) bool {
     switch (action) {
         .cancel => switch (e.state) {
             .active, .interrupted => queue(key, .cancel),
-            .preparing => {
+            .preparing, .asking => {
                 e.state = .canceled;
                 queue(key, .decide_cancel);
                 changed();
@@ -619,6 +719,13 @@ pub fn act(key: u64, action: Action) bool {
         },
         .accept => {
             if (e.state != .held) return false;
+            if (ask_enabled) {
+                // 묻기 — 받기를 누른 목록 창이 저장 창을 띄운다(Swift 가 곧바로 `claimAsk`).
+                e.state = .asking;
+                e.ask_claimed = false;
+                changed();
+                return true;
+            }
             e.state = .preparing;
             if (!startPrepare(e)) {
                 e.state = .failed;
@@ -641,6 +748,91 @@ pub fn act(key: u64, action: Action) bool {
             changed();
         },
     }
+    return true;
+}
+
+fn askingIn(browser: u64) bool {
+    for (entries.items) |e| if (e.state == .asking and e.browser == browser) return true;
+    return false;
+}
+
+/// W10b: 그 탭에서 저장할 곳을 물을 행 — 아직 아무도 맡지 않은 첫 것을 맡는다(탭 창이 그 탭을 보일 때).
+pub fn claimAskFor(browser: u64) ?*const Entry {
+    for (entries.items) |*e| if (e.state == .asking and e.browser == browser and !e.ask_claimed) {
+        e.ask_claimed = true;
+        return e;
+    };
+    return null;
+}
+
+/// W10b: 목록 창이 그 행의 저장 창을 띄운다(「저장할 곳 고르기」·보류 받기). 묻는 중이고 아무도 맡지 않았을 때만.
+pub fn claimAsk(key: u64) ?*const Entry {
+    const e = entryOfKey(key) orelse return null;
+    if (e.state != .asking or e.ask_claimed) return null;
+    e.ask_claimed = true;
+    return e;
+}
+
+/// 저장 창이 처음 열 폴더 — 이번 실행에서 마지막으로 고른 곳, 없으면 ~/Downloads.
+pub fn askDirectory(buf: []u8) []const u8 {
+    if (last_dir_len > 0 and last_dir_len <= buf.len) {
+        @memcpy(buf[0..last_dir_len], last_dir_buf[0..last_dir_len]);
+        return buf[0..last_dir_len];
+    }
+    const home = std.c.getenv("HOME") orelse return buf[0..0];
+    return std.fmt.bufPrint(buf, "{s}/Downloads", .{std.mem.span(home)}) catch buf[0..0];
+}
+
+pub const AskAnswer = union(enum) {
+    /// 고른 경로와 저장 창이 끝난 그때 그 경로에 무언가 있었는가(있었으면 저장 창이 「바꿀까요?」를 물어 사용자가 바꾸기를 골랐다).
+    path: struct { path: []const u8, existed: bool },
+    /// 사용자가 취소했다 — 받지 않는다.
+    cancel,
+    /// 종료·창 닫힘으로 치웠다 — 사용자가 고르지 않았다, 보류로 되돌린다(다시 받을 수 있게 — 설계 공격 M4).
+    dismissed,
+};
+
+/// W10b: 저장 창의 답. 묻는 중인 행이면 true.
+pub fn answerAsk(key: u64, answer: AskAnswer) bool {
+    const e = entryOfKey(key) orelse return false;
+    if (e.state != .asking) return false;
+    e.ask_claimed = false;
+    switch (answer) {
+        .cancel => {
+            e.state = .canceled;
+            queue(key, .decide_cancel);
+        },
+        .dismissed => e.state = .held,
+        .path => |p| {
+            const slash = std.mem.lastIndexOfScalar(u8, p.path, '/') orelse return false;
+            const dir = p.path[0..slash];
+            const raw_name = p.path[slash + 1 ..];
+            if (dir.len == 0 or dir.len > max_path_bytes or raw_name.len == 0) return false;
+            var name_buf: [max_name_bytes]u8 = undefined;
+            const name = sanitizeName(raw_name, 0, &name_buf);
+            // 바꾸기는 저장 창이 그 이름으로 물었을 때만 — maru 가 이름을 다듬어 달라졌으면(`:`·끝 점·길이) 다른 파일을 묻지 않고
+            // 덮어쓰지 않게 번호로(설계 공격 H2).
+            const replace = p.existed and std.mem.eql(u8, name, raw_name);
+            @memcpy(e.name_buf[0..name.len], name);
+            e.name_len = name.len;
+            e.risky = isRisky(name);
+            e.chosen = true;
+            e.replace = replace;
+            e.ask_retry = false;
+            const n = @min(dir.len, last_dir_buf.len);
+            @memcpy(last_dir_buf[0..n], dir[0..n]);
+            last_dir_len = n;
+            e.state = .preparing;
+            if (!startPrepareIn(e, dir, true, replace)) {
+                e.state = .failed;
+                queue(key, .decide_cancel);
+            }
+            // 고른 뒤 받기 시작한다 — 목록 창을 낸다(묻는 동안은 내지 않았다).
+            show_request +%= 1;
+            show_surface = e.browser;
+        },
+    }
+    changed();
     return true;
 }
 
@@ -699,6 +891,12 @@ pub fn statusText(e: *const Entry, buf: []u8) []const u8 {
         .tab_closed => copyText(buf, i18n.t(.dl_state_tab_closed)),
         .engine_restarted => copyText(buf, i18n.t(.dl_state_engine_restarted)),
         .too_many => copyText(buf, i18n.t(.dl_state_too_many)),
+        .asking => if (e.ask_retry)
+            copyText(buf, i18n.t(.dl_state_asking_retry))
+        else if (e.origin_len > 0)
+            i18n.format(buf, i18n.t(.dl_state_asking_from), &.{.{ .s = e.origin_buf[0..e.origin_len] }})
+        else
+            copyText(buf, i18n.t(.dl_state_asking)),
     };
 }
 
@@ -873,6 +1071,11 @@ pub fn testReset() void {
 fn resetForTest() void {
     entries.clearAndFree(allocator());
     outgoing.clearAndFree(allocator());
+    _ = std.c.pthread_mutex_lock(&prepared_mutex);
+    prepared.clearAndFree(allocator());
+    _ = std.c.pthread_mutex_unlock(&prepared_mutex);
+    ask_enabled = false;
+    last_dir_len = 0;
     changed();
 }
 
@@ -898,6 +1101,84 @@ test "rows follow the sidecar: progress before the path keeps preparing, interru
     try std.testing.expectEqual(State.tab_closed, entryOfKey(2).?.state);
     onUpdate(.{ .browser = 7, .download = 12, .state = .in_progress, .received = 3, .total = 10, .reason = 0 }); // 끝난 뒤는 받지 않는다
     try std.testing.expectEqual(State.tab_closed, entryOfKey(2).?.state);
+}
+
+test "asking rows: one claim, cancel, dismissal back to held, and replace only for the exact name the panel asked about (W10b)" {
+    resetForTest();
+    defer resetForTest();
+    try entries.append(allocator(), rowForTest(1, 1, .asking));
+    try std.testing.expect(claimAsk(1) != null);
+    try std.testing.expect(claimAsk(1) == null); // 한 행에 창 하나
+    try std.testing.expect(claimAskFor(7) == null);
+    try std.testing.expect(answerAsk(1, .dismissed)); // 종료·창 닫힘 — 보류로(다시 받을 수 있게)
+    try std.testing.expectEqual(State.held, entryOfKey(1).?.state);
+    try std.testing.expect(!answerAsk(1, .cancel)); // 묻는 중이 아니면 받지 않는다
+    entryOfKey(1).?.state = .asking;
+    try std.testing.expect(claimAskFor(7) != null); // 탭 창이 맡는다
+    try std.testing.expect(answerAsk(1, .cancel));
+    try std.testing.expectEqual(State.canceled, entryOfKey(1).?.state);
+    try std.testing.expectEqual(@as(usize, 1), outgoing.items.len);
+    // 고른 이름을 maru 가 다듬어 달라졌으면 저장 창이 물은 파일이 아니다 — 바꾸지 않는다(번호).
+    try entries.append(allocator(), rowForTest(2, 2, .asking));
+    try std.testing.expect(answerAsk(2, .{ .path = .{ .path = "/nonexistent-maru-w10b/a:b.txt", .existed = true } }));
+    const two = entryOfKey(2).?;
+    try std.testing.expectEqualStrings("a_b.txt", two.name());
+    try std.testing.expect(two.chosen and !two.replace);
+    try std.testing.expectEqual(State.preparing, two.state);
+    var dir_buf: [max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("/nonexistent-maru-w10b", askDirectory(&dir_buf)); // 다음 창은 마지막으로 고른 곳에서
+    try entries.append(allocator(), rowForTest(3, 3, .asking));
+    try std.testing.expect(answerAsk(3, .{ .path = .{ .path = "/nonexistent-maru-w10b/same.txt", .existed = true } }));
+    try std.testing.expect(entryOfKey(3).?.replace);
+    try entries.append(allocator(), rowForTest(4, 4, .asking));
+    try std.testing.expect(answerAsk(4, .{ .path = .{ .path = "/nonexistent-maru-w10b/new.txt", .existed = false } }));
+    try std.testing.expect(!entryOfKey(4).?.replace);
+    // 고른 폴더에 쓸 수 없었다 — 다시 묻는다(상태 줄이 까닭을 말한다).
+    _ = std.c.pthread_mutex_lock(&prepared_mutex);
+    prepared.clearRetainingCapacity();
+    prepared.append(allocator(), .{ .key = 4, .ok = false }) catch unreachable;
+    _ = std.c.pthread_mutex_unlock(&prepared_mutex);
+    reapPrepared();
+    const four = entryOfKey(4).?;
+    try std.testing.expectEqual(State.asking, four.state);
+    try std.testing.expect(four.ask_retry and !four.ask_claimed);
+    var line: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_asking_retry), statusText(four, &line));
+}
+
+test "a chosen location keeps the chosen name with a short hidden part file, numbers unless replacing, and replace overwrites (W10b)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    try testWrite(dir, "x.txt", "old");
+    var kept: Prepared = .{ .key = 7, .ok = false };
+    prepareChosen(dir, "x.txt", 7, true, &kept);
+    try std.testing.expect(kept.ok);
+    try std.testing.expect(std.mem.endsWith(u8, kept.final_buf[0..kept.final_len], "/x.txt"));
+    try std.testing.expect(std.mem.endsWith(u8, kept.part_buf[0..kept.part_len], "/.maru-7.part"));
+    var numbered: Prepared = .{ .key = 8, .ok = false };
+    prepareChosen(dir, "x.txt", 8, false, &numbered);
+    try std.testing.expect(std.mem.endsWith(u8, numbered.final_buf[0..numbered.final_len], "/x (1).txt"));
+    // 고른 이름이 길어도 임시 파일 이름 때문에 잘리지 않는다.
+    const long = "n" ** 250 ++ ".txt";
+    var long_prep: Prepared = .{ .key = 9, .ok = false };
+    prepareChosen(dir, long, 9, false, &long_prep);
+    try std.testing.expect(long_prep.ok and std.mem.endsWith(u8, long_prep.final_buf[0..long_prep.final_len], "/" ++ long));
+    // 바꾸기 — 받은 임시 파일이 그 이름에 덮어쓴다.
+    try testWrite(dir, ".maru-7.part", "new");
+    var e: Entry = .{ .key = 7, .generation = 1, .download = 7, .browser = 1, .state = .active, .risky = false, .chosen = true, .replace = true };
+    @memcpy(e.final_buf[0..kept.final_len], kept.final_buf[0..kept.final_len]);
+    e.final_len = kept.final_len;
+    @memcpy(e.part_buf[0..kept.part_len], kept.part_buf[0..kept.part_len]);
+    e.part_len = kept.part_len;
+    try std.testing.expect(finalize(&e));
+    var got: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("new", try testRead(dir, "x.txt", &got));
+    // 쓸 수 없는 폴더면 만들지 못한다(다시 묻게).
+    var nowhere: Prepared = .{ .key = 10, .ok = false };
+    prepareChosen("/nonexistent-maru-w10b", "y.txt", 10, false, &nowhere);
+    try std.testing.expect(!nowhere.ok);
 }
 
 test "status lines are Zig sentences with Finder-style sizes (W10a)" {

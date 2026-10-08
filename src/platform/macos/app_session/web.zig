@@ -406,11 +406,22 @@ pub fn isOsrSurface(surface_id: u64) bool {
     return web_osr.enabled() and web_osr.owns(surface_id);
 }
 
+/// W10b: 이 창의 활성 pane 이 Chromium 탭이면 그 탭에서 저장할 곳을 물을 다운로드를 맡는다(초점과 상관없이 — Swift 는 창이 키일
+/// 때만 부른다: 터미널에 치던 키가 저장 창 이름 칸으로 가지 않게).
+pub fn takeDownloadAsk(self: *AppSession) ?*const web_osr.downloads.Entry {
+    if (!web_osr.enabled() or !self.surface_initialized) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (!isOsrTerm(term)) return null;
+    return web_osr.downloads.claimAskFor(term.surfaceId());
+}
+
 /// 창 tick 마다(W3b): sidecar 파이프를 비우고, 이 창 OSR 탭의 새 주소·탐색 상태를 주소창에 넣고, 안내를 띄운다.
 pub fn tickWebOsr(self: *AppSession) void {
     // W4d: 설정은 chromium 을 청했는데 설치가 없다 — 한 번 안내(엔진은 WebKit).
     if (web_osr.takeInstallNotice()) self.showNoticeKey(.web_osr_not_installed);
     if (!web_osr.enabled()) return;
+    // W10b: 「매번 묻기」 — 다운로드 목록은 앱 전역 하나라 창마다 설정을 알린다(같은 설정 파일 — 설정 화면에서 바꾸면 다음 tick).
+    web_osr.downloads.setAsk(self.loaded_config.config.browser.download_ask);
     web_osr.pump(self.allocator, @intCast(app_session_mod.monotonicMs()));
     // W6f②: sidecar 에 팝업 번호를 맡겨 둔다(앱 전역 발급기 — 쓰이지 않으면 버려진다).
     var wanted = web_osr.popupIdsWanted();

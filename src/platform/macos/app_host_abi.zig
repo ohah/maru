@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 214), abi_version);
+    try std.testing.expectEqual(@as(u32, 215), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -5252,6 +5252,7 @@ pub export fn maru_macos_downloads_text(kind: u32) [*:0]const u8 {
         16 => .dl_button_reveal,
         17 => .dl_button_clear,
         18 => .dl_empty,
+        19 => .dl_button_choose,
         else => return "",
     };
     return maru.i18n.t(key).ptr;
@@ -5263,6 +5264,64 @@ pub export fn maru_macos_downloads_active() u32 {
 }
 
 /// `show_downloads` 액션이 다운로드 목록 창을 청했으면 1(one-shot).
+/// v215(W10b): 저장할 곳을 물을 다운로드 — 이름(다듬은 제안 이름)·처음 열 폴더·저장 창 안내(Zig 문장).
+pub const MaruDownloadAsk = extern struct {
+    key: u64,
+    name_len: u32,
+    dir_len: u32,
+    message_len: u32,
+    reserved: u32 = 0,
+    name: [256]u8,
+    dir: [1024]u8,
+    message: [256]u8,
+};
+
+fn fillDownloadAsk(e: *const session_mod.web_downloads.Entry, out: *MaruDownloadAsk) void {
+    out.key = e.key;
+    out.reserved = 0;
+    const name = e.name();
+    out.name_len = @intCast(@min(name.len, out.name.len));
+    @memcpy(out.name[0..out.name_len], name[0..out.name_len]);
+    const dir = session_mod.web_downloads.askDirectory(&out.dir);
+    out.dir_len = @intCast(dir.len);
+    const message = session_mod.web_downloads.statusText(e, &out.message);
+    out.message_len = @intCast(message.len);
+}
+
+/// v215(W10b): 이 창의 활성 Chromium 탭에서 저장할 곳을 물을 다운로드를 맡는다(맡으면 1 — 그 행은 다른 창이 다시 띄우지 않는다).
+pub export fn maru_macos_app_session_take_download_ask(session: ?*AppSession, out: ?*MaruDownloadAsk) i32 {
+    const app = session orelse return 0;
+    const ask = out orelse return 0;
+    const e = session_mod.web_ops.takeDownloadAsk(app) orelse return 0;
+    fillDownloadAsk(e, ask);
+    return 1;
+}
+
+/// v215(W10b): 목록 창이 그 행의 저장 창을 띄운다(「저장할 곳 고르기」·보류 받기) — 묻는 중이고 아무도 맡지 않았을 때 1.
+pub export fn maru_macos_downloads_claim_ask(key: u64, out: ?*MaruDownloadAsk) i32 {
+    const ask = out orelse return 0;
+    const e = session_mod.web_downloads.claimAsk(key) orelse return 0;
+    fillDownloadAsk(e, ask);
+    return 1;
+}
+
+/// v215(W10b): 저장 창의 답 — `kind` 0 고른 경로(`existed` 는 저장 창이 끝난 그때 그 경로에 무언가 있었는가 — 있었으면 저장 창이
+/// 「바꿀까요?」를 물었다), 1 취소(받지 않는다), 2 치움(종료·창 닫힘 — 보류로 되돌린다). 묻는 중인 행이면 1.
+pub export fn maru_macos_downloads_answer_ask(key: u64, kind: u32, path: ?[*]const u8, path_len: usize, existed: u32) i32 {
+    const wd = session_mod.web_downloads;
+    const answer: wd.AskAnswer = switch (kind) {
+        0 => blk: {
+            const p = path orelse return 0;
+            if (path_len == 0 or path_len > wd.max_path_bytes) return 0;
+            break :blk .{ .path = .{ .path = p[0..path_len], .existed = existed != 0 } };
+        },
+        1 => .cancel,
+        2 => .dismissed,
+        else => return 0,
+    };
+    return @intFromBool(wd.answerAsk(key, answer));
+}
+
 pub export fn maru_macos_app_session_take_show_downloads_request(session: ?*AppSession) i32 {
     const app = session orelse return 0;
     return @intFromBool(app.takeShowDownloadsRequest());
@@ -5584,6 +5643,10 @@ test "Mermaid codec ABI keeps header constants and opaque frame behavior aligned
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidCoordinatorSnapshot), @sizeOf(MermaidCoordinatorSnapshotAbi));
     // W10a: 다운로드 행 — Swift 는 C 헤더로 읽는다(적대 리뷰 4 회차 — 크기·자리 대조가 빠져 있었다).
     try std.testing.expectEqual(@sizeOf(c.MaruDownloadRow), @sizeOf(MaruDownloadRow));
+    try std.testing.expectEqual(@sizeOf(c.MaruDownloadAsk), @sizeOf(MaruDownloadAsk));
+    inline for (.{ "key", "name_len", "dir_len", "message_len", "name", "dir", "message" }) |field| {
+        try std.testing.expectEqual(@offsetOf(c.MaruDownloadAsk, field), @offsetOf(MaruDownloadAsk, field));
+    }
     inline for (.{ "key", "state", "risky", "received", "total", "reason", "name_len", "path_len", "status_len", "name", "path", "status" }) |field| {
         try std.testing.expectEqual(@offsetOf(c.MaruDownloadRow, field), @offsetOf(MaruDownloadRow, field));
     }

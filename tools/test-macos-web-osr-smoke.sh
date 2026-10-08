@@ -86,6 +86,8 @@ DLW = (b"<!doctype html><title>dlw</title><style>a{position:fixed;left:0;width:3
     b"<a href='/dlw-big' style='top:160px;background:#0f0'>C</a><a href='/dlw-file' download='tool.command' style='top:240px;background:#ff0'>D</a>")
 DLW_AUTO = (b"<!doctype html><title>dlw auto</title><body><script>setTimeout(function(){var a=document.createElement('a');a.href='/dlw-file';"
     b"a.download='run me.command';document.body.appendChild(a);a.click()},1500)</script>")
+# W10b: 사용자 동작 없이 보통 파일(`plain.txt`)을 받는다 — 매번 묻기면 보류된다.
+DLW_AUTO_PLAIN = DLW_AUTO.replace(b"run me.command", b"plain.txt")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -168,6 +170,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = DLW
         elif self.path == "/dlw-auto":
             body = DLW_AUTO
+        elif self.path == "/dlw-auto-plain":
+            body = DLW_AUTO_PLAIN
         elif self.path in ("/dlw-file", "/dlw-att"):
             att = self.path == "/dlw-att"
             body = b"attached\n" if att else b"hello\n"
@@ -1616,6 +1620,78 @@ check(len(rows) == 2 and rows[0][1] == 'run me.command' and rows[0][2] == '1' an
 check(len(heads) == 2 and 'window=true' in heads[0], f'a held download brings the list window forward ({heads})')
 check(len(rows) == 2 and rows[1][2] == '4' and rows[1][6] == 'run me.command', f'taking it downloads it ({rows[1:]})')
 check(files == ['run me.command'] and quarantine.get('run me.command') == '0281', f'saved with the quarantine mark ({files} · {quarantine})')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W10b: 다운로드 「매번 묻기」 ──────────────────────────────────────────────────────────────────────────────
+# `browser.download-ask = true` — 누른 다운로드는 저장 창(대본 `dlanswer` 가 경로로 답한다 — 창은 띄우지 않는다)이 고른 폴더·이름에
+# 받는다. 있던 이름을 고르면 덮어쓴다(그때 그 경로에 무언가 있었다 — 저장 창이 「바꿀까요?」를 물은 경우). 취소하면 받지 않는다.
+# `~/Downloads` 에는 아무것도 생기지 않는다. 사용자 동작 없이 받으려는 보통 파일도 보류하고, 목록의 받기가 저장 창을 띄운다.
+printf 'browser.download-ask = true\n' > "$root/ask.conf"
+rm -rf "$root/picked" && mkdir -p "$root/picked" && printf 'old\n' > "$root/picked/chosen.txt"
+cat > "$root/dlask.txt" <<SCRIPT
+sleep 7000
+dlanswer $root/picked/chosen.txt
+mouse 1 0 0 338 142 0
+mouse 3 0 0 338 142 0
+sleep 2000
+dlanswer -
+mouse 1 0 0 338 222 0
+mouse 3 0 0 338 222 0
+sleep 2000
+downloads
+SCRIPT
+: > "$root/requests.log"
+run_app /dlw-app 16000 "$root/dlask.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlask.txt" MARU_CONFIG="$root/ask.conf"
+dl_check dlw-app
+cp "$root/dlw-app.report" "$root/dlask.report"
+python3 - "$root" <<'PY' || fail "ask-each-time downloads did not land where the save panel said"
+import sys, os
+root = sys.argv[1]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+lines = [l.strip() for l in open(os.path.join(root, 'dlask.report')) if l.strip()]
+rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download ')]
+picked = sorted(os.listdir(os.path.join(root, 'picked')))
+content = open(os.path.join(root, 'picked', 'chosen.txt'), 'rb').read() if os.path.exists(os.path.join(root, 'picked', 'chosen.txt')) else b''
+downloads = os.path.join(root, 'home', 'Downloads')
+in_downloads = sorted(os.listdir(downloads)) if os.path.isdir(downloads) else []
+check(len(rows) == 2 and rows[0][1] == 'chosen.txt' and rows[0][2] == '4' and rows[0][6] == 'chosen.txt', f'the clicked download is saved under the chosen name ({rows[:1]})')
+check(picked == ['chosen.txt'] and content == b'hello\n', f'choosing an existing name replaces it — no numbered copy, no part file ({picked} · {content!r})')
+check(len(rows) == 2 and rows[1][1] == 'report.txt' and rows[1][2] == '5', f'canceling the save panel downloads nothing ({rows[1:]})')
+check(in_downloads == [], f'nothing lands in ~/Downloads when asking ({in_downloads})')
+q = os.popen(f"xattr -p com.apple.quarantine '{os.path.join(root, 'picked', 'chosen.txt')}' 2>/dev/null").read()[:4]
+check(q == '0281', f'the chosen file carries the quarantine mark ({q!r})')
+sys.exit(0 if ok else 1)
+PY
+cat > "$root/dlask-auto.txt" <<SCRIPT
+sleep 9000
+downloads
+dlanswer $root/picked/plain.txt
+dlact 0 2
+sleep 2000
+downloads
+SCRIPT
+: > "$root/requests.log"
+run_app /dlw-auto-plain 16000 "$root/dlask-auto.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlask-auto.txt" MARU_CONFIG="$root/ask.conf"
+dl_check dlw-auto-plain
+python3 - "$root" <<'PY' || fail "an ask-each-time download the page started was not held until the user chose a place"
+import sys, os
+root = sys.argv[1]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+lines = [l.strip() for l in open(os.path.join(root, 'dlw-auto-plain.report')) if l.strip()]
+heads = [l for l in lines if l.startswith('downloads ')]
+rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download ')]
+check(len(rows) == 2 and rows[0][1] == 'plain.txt' and rows[0][2] == '1' and rows[0][5] == '0', f'a plain file the page started is held when asking ({rows[:1]})')
+check(len(heads) == 2 and 'window=true' in heads[0], f'the held download brings the list window forward ({heads})')
+check(len(rows) == 2 and rows[1][2] == '4' and rows[1][6] == 'plain.txt' and os.path.exists(os.path.join(root, 'picked', 'plain.txt')), f'taking it from the list asks and saves to the chosen place ({rows[1:]})')
 sys.exit(0 if ok else 1)
 PY
 

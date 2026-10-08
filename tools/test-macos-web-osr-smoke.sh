@@ -1692,6 +1692,8 @@ rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download '
 check(len(rows) == 2 and rows[0][1] == 'plain.txt' and rows[0][2] == '1' and rows[0][5] == '0', f'a plain file the page started is held when asking ({rows[:1]})')
 check(len(heads) == 2 and 'window=true' in heads[0], f'the held download brings the list window forward ({heads})')
 check(len(rows) == 2 and rows[1][2] == '4' and rows[1][6] == 'plain.txt' and os.path.exists(os.path.join(root, 'picked', 'plain.txt')), f'taking it from the list asks and saves to the chosen place ({rows[1:]})')
+via = os.popen(f"grep -ao 'osr-test download-ask via=[a-z]*' '{os.path.join(root, 'app-dlw-auto-plain.log')}'").read().split()
+check(via[-1:] == ['via=list'], f'the list window shows the save panel for its own take, not the tab window ({via})')
 sys.exit(0 if ok else 1)
 PY
 

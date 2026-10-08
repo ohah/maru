@@ -1416,6 +1416,7 @@ test "waiting rows stop past the cap and unclaimed asking rows bring the list wi
     try std.testing.expectEqual(State.canceled, entryOfKey(7).?.state);
     try std.testing.expectEqual(State.held, entryOfKey(6).?.state);
     try std.testing.expectEqual(State.asking, entryOfKey(8).?.state);
+    try std.testing.expectEqual(State.asking, entryOfKey(5).?.state); // 저장 창이 맡은 행은 멈추지 않는다(7 회차 — 단계마다 본다)
     // 0 바이트 보류 행보다 크게 받아 둔 맡지 않은 묻는 행을 멈춘다(합을 줄이는 행).
     var zero = rowForTest(9, 9, .held);
     zero.browser = 7;
@@ -1423,6 +1424,7 @@ test "waiting rows stop past the cap and unclaimed asking rows bring the list wi
     onUpdate(.{ .browser = 7, .download = 8, .state = .in_progress, .received = max_waiting_bytes, .total = -1, .reason = 0 });
     try std.testing.expectEqual(State.canceled, entryOfKey(8).?.state);
     try std.testing.expectEqual(State.held, entryOfKey(9).?.state);
+    try std.testing.expectEqual(State.asking, entryOfKey(5).?.state);
     var line: [256]u8 = undefined;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_stopped_waiting), statusText(one, &line));
     try entries.append(allocator(), rowForTest(2, 2, .asking));

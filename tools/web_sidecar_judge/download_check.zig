@@ -20,7 +20,8 @@
 //!                  지운다), 완료 때는 **다른 inode** 로 바꿔 놓는다(maru 는 경로로 옮긴다) — 2 회차 실측, 보고 줄에 남긴다
 //!   dl-ask-wait    결정을 10 초 미뤄도(W10b 「매번 묻기」의 저장 창이 떠 있는 동안) 다운로드는 이어지고, 그동안 host 가 연 파일 중
 //!                  다운로드 임시 파일(`.crdownload`·`Unconfirmed`)이 없는지와 받아 둔 양을 보고 줄에 남긴다(W10b 설계 공격 M1 실측)
-//!   dl-staging-cleared host 가 프로필을 잡은 뒤 지난번이 결정 전에 받아 둔 것(`download-staging`)을 비운다(W10b)
+//!   dl-staging-cleared host 가 프로필을 잡은 뒤 지난번이 결정 전에 받아 둔 것(`download-staging`)을 비운다(W10b) — 같은 프로필의
+//!                  두 번째 host(잠금에 막혀 끝난다)는 첫 host 가 받아 두는 것을 비우지 않는다(7 회차)
 //!   (환경 `MARU_JUDGE_XVOL_DIR` 가 있으면) dl-cross-volume — 받을 자리가 다른 볼륨이어도 미리 만든 그 파일에 받고 취소 뒤 남는다
 //!                  (maru 가 dev·ino 로 지운다) — W10b 적대 리뷰 실측. 없으면 돌지 않는다(판정 수에 들지 않는다)
 //!   dl-late-decide 결정을 2 초 늦게 보내도(보류 뒤 받기·TCC 질문) 받기를 이어 가고, 받는 동안·취소 뒤의 그 경로 파일을 보고 줄에
@@ -215,7 +216,23 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // handshake 는 CEF 초기화 전에도 답한다 — 비우는 것은 초기화(프로필 잡기) 뒤라 잠시 지켜본다.
     var cleared_wait: u32 = 0;
     while (exists(leftover) and cleared_wait < 50) : (cleared_wait += 1) os.sleepMs(100);
-    report(planted and !exists(leftover), "dl-staging-cleared", if (!planted) "남은 파일을 심지 못했다" else if (exists(leftover)) "지난번 것이 남았다" else "지난번이 받아 둔 것을 비웠다");
+    const first_cleared = !exists(leftover);
+    // 같은 프로필의 두 번째 host — 잠금에 막혀 끝나야 하고, 첫 host 의 받아 둔 곳을 비우면 안 된다.
+    const second_planted = blk: {
+        const fd = std.c.open(leftover, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        if (fd < 0) break :blk false;
+        _ = std.c.close(fd);
+        break :blk true;
+    };
+    var blocked_code: ?u8 = null;
+    if (second_planted) {
+        var second = try Host.spawn(host_path, profile_arg);
+        browsers_check.handshake(&second) catch {};
+        blocked_code = second.wait(15_000);
+    }
+    const kept = exists(leftover);
+    if (kept) _ = std.c.unlink(leftover);
+    report(planted and first_cleared and second_planted and kept and blocked_code != null, "dl-staging-cleared", std.fmt.bufPrint(&detail_buf, "첫 host 가 지난번 것을 비움 {} · 두 번째 host 끝남(코드 {?d}) · 그때 받아 둔 것을 남김 {}", .{ first_cleared, blocked_code, kept }) catch "");
 
     // ── 첨부: 결정 → 완료 ──
     check: {

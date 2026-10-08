@@ -10012,7 +10012,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             NSApp.unhide(nil)
             if let quickWindow = quick?.window, parent === quickWindow {
                 // 숨긴 빠른 터미널은 화면 밖 자리에 있다 — 원래 길로 다시 띄운다(6 회차: 그대로 앞으로 내면 보이지 않는 채 키를 가졌다).
-                showQuickTerminalAnimated(quickWindow)
+                // 움직이는 중이면 건드리지 않고(끝 처리기가 다시 숨겼다), 이미 보이면 앞으로만(7 회차).
+                if quickAnimating { return }
+                if quickWindow.isVisible { quickWindow.makeKeyAndOrderFront(nil) } else { showQuickTerminalAnimated(quickWindow) }
             } else {
                 if parent.isMiniaturized { parent.deminiaturize(nil) }
                 parent.makeKeyAndOrderFront(nil)
@@ -10051,6 +10053,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let dir = withUnsafeBytes(of: ask.dir) { String(decoding: $0.prefix(Int(ask.dir_len)), as: UTF8.self) }
         let message = withUnsafeBytes(of: ask.message) { String(decoding: $0.prefix(Int(ask.message_len)), as: UTF8.self) }
         Self.testNote("download-ask \(name)")
+        if Self.downloadsTestMode {
+            Self.testReport("download-ask via=\(window === downloadsWindow?.window ? "list" : "tab")")
+        }
         if !downloadTestAnswers.isEmpty {
             answerDownloadAsk(key: key, path: downloadTestAnswers.removeFirst())
             return
@@ -12583,7 +12588,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
         guard let session = appSession else { return }
-        if key == "select_all", Self.forwardEditToSheet(#selector(NSText.selectAll(_:)), sender) { return }
         if isSessionHostAutoReconnectSmokeMode, key == "select_all" {
             sessionHostAutoReconnectSelectMenuActions += 1
         }

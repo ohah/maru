@@ -509,6 +509,42 @@ test "closing the last Chromium tab ends its downloads instead of leaving them a
     try std.testing.expectEqual(@as(usize, 0), web_downloads.activeTotal());
 }
 
+test "ask mode: a clicked download asks, one per tab, the rest are held, and the list's take asks again (W10b)" {
+    const gpa = std.testing.allocator;
+    web_downloads.testReset();
+    defer web_downloads.testReset();
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.clearAndFree(gpa);
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 300, .height = 200, .scale = 2 }, .hidden = false }, .created = true });
+    try surfaces.put(gpa, 8, .{ .record = .{ .surface_id = 8, .size = .{ .width = 300, .height = 200, .scale = 2 }, .hidden = false }, .created = true });
+    web_downloads.setAsk(true);
+    const now = monotonicNow();
+    surfaces.getPtr(7).?.last_user_input_ms = now; // 탭 7 에서 눌렀다, 탭 8 은 손대지 않았다
+    var surface: u64 = 0;
+    const show_before = web_downloads.showRequest(&surface);
+    apply(gpa, .{ .download_begin = .{ .browser = 7, .download = 1, .url = "https://a.example/x", .name = "a.txt", .mime = "text/plain", .total = 10 } }, now);
+    apply(gpa, .{ .download_begin = .{ .browser = 7, .download = 2, .url = "https://a.example/y", .name = "b.txt", .mime = "text/plain", .total = 10 } }, now);
+    apply(gpa, .{ .download_begin = .{ .browser = 8, .download = 3, .url = "https://b.example/z", .name = "c.txt", .mime = "text/plain", .total = 10 } }, now);
+    try std.testing.expectEqual(@as(usize, 3), web_downloads.count());
+    try std.testing.expectEqual(web_downloads.State.asking, web_downloads.at(0).?.state); // 누른 것 — 묻는다
+    try std.testing.expectEqual(web_downloads.State.held, web_downloads.at(1).?.state); // 그 탭에 이미 묻는 것이 있다 — 보류
+    try std.testing.expectEqual(web_downloads.State.held, web_downloads.at(2).?.state); // 사용자 동작 없음 — 보통 파일도 보류
+    // 묻는 행은 목록 창을 내지 않는다 — 보류 둘만큼만 올랐다.
+    try std.testing.expectEqual(show_before +% 2, web_downloads.showRequest(&surface));
+    // 목록의 받기는 묻기로(시각은 새로), 묻는 행의 취소는 받지 않음.
+    try std.testing.expect(web_downloads.act(web_downloads.at(2).?.key, .accept));
+    try std.testing.expectEqual(web_downloads.State.asking, web_downloads.at(2).?.state);
+    try std.testing.expectEqual(@as(i64, 0), web_downloads.at(2).?.ask_since_ms);
+    try std.testing.expect(web_downloads.act(web_downloads.at(0).?.key, .cancel));
+    try std.testing.expectEqual(web_downloads.State.canceled, web_downloads.at(0).?.state);
+}
+
 test "a click counts as the user starting a download only until the page moves on (W10a)" {
     const gpa = std.testing.allocator;
     defer {
@@ -2581,6 +2617,7 @@ fn reapRetiring(gpa: std.mem.Allocator, now_ms: i64) void {
     }
     p.deinit(gpa);
     retiring = null;
+    retiring_profile_held = false; // 거뒀다 — 다음 sidecar 가 막혀 끝날 때 남의 것을 비우지 않게(7 회차)
     releaseRunCopy(&retiring_copy);
 }
 
@@ -2626,7 +2663,7 @@ fn fail(notice: Notice) void {
     for (surfaces.values()) |*s| s.stopped_notice_pending = true;
 }
 
-/// W10b: 지금 sidecar 가 프로필을 잡았다(hello_ack — 잠금에 막힌 sidecar 는 handshake 전에 끝난다). sidecar 마다 — 한 번 잡았다고
+/// W10b: 지금 sidecar 가 프로필을 잡았다(첫 `browser_created` — 초기화·잠금 뒤에만 온다). sidecar 마다 — 한 번 잡았다고
 /// 다음 sidecar(같은 프로필의 다른 maru 에 막힌)가 죽을 때 남의 받아 둔 것을 비우지 않게(6 회차). 물러나는 sidecar 는 따로.
 var profile_held = false;
 var retiring_profile_held = false;
@@ -2823,13 +2860,17 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .hello_ack => |ack| {
             if (state != .starting or ack.nonce != hello_nonce) return protocolBroken(gpa, now_ms);
             state = .running;
-            profile_held = true; // W10b: 이 인스턴스의 sidecar 가 프로필을 잡았다(받아 둔 곳을 비워도 된다)
             // 받는 port 이름과 토큰은 제어 채널로만 건넨다(C3). 브라우저 생성보다 먼저 — 첫 그리기부터 링을 알린다.
             if (receiver) |*r| send(gpa, .{ .frame_channel = .{ .service = r.serviceName(), .token = r.token } });
             if (process) |*p| _ = lsp_process.write(p, gpa, outbox_pending.items) catch false;
             outbox_pending.clearRetainingCapacity();
         },
-        .browser_created => |id| if (surfaces.getPtr(id)) |s| {
+        .browser_created => |id| if (blk: {
+            // W10b: 브라우저가 만들어졌다 — CEF 초기화(프로필 잠금)가 끝났다는 뜻이라 이 sidecar 가 프로필을 잡았다. handshake 는
+            // 초기화 전에도 답한다 — hello_ack 로 세우면 잠금에 막힌 sidecar 가 같은 프로필의 다른 maru 가 받아 둔 것을 비웠다(7 회차).
+            profile_held = true;
+            break :blk surfaces.getPtr(id);
+        }) |s| {
             s.created = true;
             dropPopup(s);
             if (s.last_url) |u| send(gpa, .{ .navigate = .{ .browser = id, .url = u } });

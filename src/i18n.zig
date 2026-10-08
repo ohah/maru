@@ -534,6 +534,8 @@ const Table = struct {
     lsp_status_restarting: [:0]const u8,
     lsp_status_failed: [:0]const u8,
     lsp_status_denied: [:0]const u8,
+    lsp_status_home_root: [:0]const u8,
+    lsp_status_outside_repo: [:0]const u8,
     /// 정의로 이동(§8.2c) — 서버가 `null`/빈 결과를 냈다.
     nav_no_definition: [:0]const u8,
     /// `{0}` = 경로. root 밖이라 열지 않았다(§5.2 「표시와 접근을 가른다」).
@@ -1771,6 +1773,8 @@ const en: Table = .{
     .lsp_status_restarting = "{0}: restarting",
     .lsp_status_failed = "{0} failed — retry",
     .lsp_status_denied = "{0} not allowed — ask again",
+    .lsp_status_home_root = "{0} off — home folder isn't a workspace",
+    .lsp_status_outside_repo = "{0} off — not in a git repository",
     .nav_no_definition = "No definition found",
     .nav_outside_root = "Not opened — outside the workspace root: {0}",
     .ref_none = "No references found",
@@ -2554,6 +2558,8 @@ const ko: Table = .{
     .lsp_status_restarting = "{0}: 다시 시작 중",
     .lsp_status_failed = "{0} 실패 — 다시",
     .lsp_status_denied = "{0} 거부됨 — 다시 묻기",
+    .lsp_status_home_root = "{0} 꺼짐 — 홈 폴더는 저장소로 보지 않음",
+    .lsp_status_outside_repo = "{0} 꺼짐 — git 저장소 밖",
     .nav_no_definition = "정의를 찾지 못했습니다",
     .nav_outside_root = "루트 밖이라 열지 않습니다 — {0}",
     .ref_none = "참조를 찾지 못했습니다",

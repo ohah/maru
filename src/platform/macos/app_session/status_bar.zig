@@ -727,7 +727,7 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
                     var lsp_buf: [editor_ops.lsp_client.status_text_cap]u8 = undefined;
                     const text = editor_ops.lsp_client.statusText(view, &lsp_buf);
                     const icon: ?u21 = switch (view.phase) {
-                        .ready => null,
+                        .ready, .home_root, .outside_repo => null, // 꺼짐은 알림이 아니라 사실이다
                         .missing, .denied, .failed => icons.codepoint(.bell),
                         .asking, .starting, .restarting => icons.codepoint(.hourglass),
                     };
@@ -988,7 +988,7 @@ pub fn activateStatusBarItem(self: *AppSession, id: chrome.components.status_bar
         // 여기서 만들지 않는다 — 지금 붙이면 선행 gate 우회다(implementation-plan.md CR 절).
         // **언어도 표시 전용이다** — 문법을 사용자가 고르는 개념이 아직 없다(`grammarForPath`
         // 위에 override 층이 필요하고 그건 별도 조각이다). 열 대상이 없으므로 호버도 안 준다.
-        .editor_lsp => editor_ops.lsp_client.activateStatus(self), // 없음 → 설치 명령 입력 · 거부됨 → 다시 묻기 · 실패 → 재시작(§8.2a)
+        .editor_lsp => editor_ops.lsp_client.activateStatus(self), // 없음 → 설치 명령 입력 · 거부됨 → 다시 묻기 · 실패 → 재시작 · 꺼짐 → 다시 본다(§8.2a)
         .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .editor_language, .workspace_checkpoint_failure, .session_host_disconnected => {},
     }
     self.metal_dirty = true;

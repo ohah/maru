@@ -55,6 +55,12 @@ pub const Phase = enum {
     restarting,
     /// 세 번 죽었다 — 클릭으로 재시도.
     failed,
+    /// 묻지 않는 root(계획 WT2b): 홈이거나 그 위(`/` 포함) — 홈의 dotfiles `.git` 이 홈 아래 모든 파일의 root 가 된다. 홈 전체를 한 번의
+    /// 허락으로 열지 않는다. 클릭하면 다시 본다.
+    home_root,
+    /// 묻지 않는 root(계획 WT2b): git 저장소 밖 — 가장 가까운 `.git` 이 없어 파일의 부모 폴더가 root 가 됐다. 클릭하면 다시 본다
+    /// (그 사이 `git init` 했으면 묻는다).
+    outside_repo,
 };
 
 pub const max_restarts: u8 = 3;
@@ -122,6 +128,9 @@ pub const Client = struct {
     trust_pending: bool = false,
     /// 이 root 의 신뢰 키(실제 경로·볼륨 — `trust_store.keyFor`). 처음 신뢰를 볼 때 구해 굳힌다.
     trust_key: ?OwnedKey = null,
+    /// 묻는 root 임을 이미 봤다(`refusalFor` — root 는 클라이언트마다 고정이라 한 번이면 된다; 기다리는 클라이언트가 tick 마다
+    /// 파일 시스템을 다시 보지 않게). 거부된 클라이언트는 거짓으로 남아, 상태바를 누르면 다음 gate 가 다시 본다.
+    scope_checked: bool = false,
     /// 기억된 결정을 두고 다시 묻는다(상태바 「거부됨 — 다시 묻기」). 이 창이 답하거나(`answerTrust` — 같은 저장소의 클라이언트 전부)
     /// 다른 창의 답이 그 뒤에 서면(`applyTrustChanges` — `reask_gen` 보다 늦게 바뀐 결정) 내린다. 답 없이 닫힌 모달(다른 오버레이가
     /// 덮었다)은 답이 아니라 그대로 두어 다음 gate 가 다시 묻는다.
@@ -340,14 +349,15 @@ fn rekeyRoot(self: *AppSession, root: []const u8, key: lsp.trust.Key) void {
         const owned = OwnedKey.dupe(self.allocator, key) catch continue;
         old.deinit(self.allocator);
         o.trust_key = owned;
-        if (o.proc != null) {
-            dropProcess(self, o);
-            clearClientDiagnostics(self, o);
-            for (o.docs.items) |d| d.release(self.allocator);
-            o.docs.clearRetainingCapacity();
-        }
+        // 옛 대상의 서버·진단·연 문서를 걷는다 — 서버가 이미 죽어 있어도(재시작을 기다리며 문서를 들고 있다) 그 진단은 옛 저장소의 것이다.
+        // 새 대상의 결정이 거부이거나 묻지 않는 root 여도 옛 밑줄이 남지 않게.
+        dropProcess(self, o);
+        clearClientDiagnostics(self, o);
+        for (o.docs.items) |d| d.release(self.allocator);
+        o.docs.clearRetainingCapacity();
         o.trust_pending = true;
         o.reask = false;
+        o.scope_checked = false; // 새 대상이 홈이거나 저장소 밖일 수 있다 — 묻지 않는 root 판정부터 다시(계획 WT2b)
         o.phase = .restarting;
         o.retry_at_ms = 0;
     }
@@ -375,6 +385,40 @@ fn trustKeyHolds(self: *AppSession, c: *Client) bool {
     if (c.trust_key) |k| if (k.key().eql(now)) return true;
     rekeyRoot(self, c.root, now); // 이 클라이언트도 — 새 키의 신뢰를 다시 본다
     return false;
+}
+
+/// 묻지 않는 root(계획 WT2b) — `null` 이면 묻는다. `real` 은 root 의 실제 경로(신뢰 키).
+/// - root 에 `.git` 이 없다: 가장 가까운 `.git` 이 없어 파일의 부모 폴더가 root 가 됐다(`projectRootForFile` 의 폴백) — 저장소가 아니다.
+///   허락의 단위(저장소)가 없으니 묻지 않는다(예전에는 그 폴더를 root 로 묻고, 허용하면 서버가 떴다 — 동작 변경).
+/// - root 가 홈이거나 그 위(`/` 포함): 홈에 dotfiles `.git` 이 있으면 자기 `.git` 이 없는 홈 아래 모든 파일의 root 가 홈이다 — 홈 전체를
+///   한 번의 허락으로 열지 않는다.
+fn refusalFor(root: []const u8, real: []const u8) ?Phase {
+    var gbuf: [std.fs.max_path_bytes + 8]u8 = undefined;
+    const git_z = std.fmt.bufPrintZ(&gbuf, "{s}/.git", .{std.mem.trimEnd(u8, root, "/")}) catch return .outside_repo;
+    if (std.c.access(git_z.ptr, std.c.F_OK) != 0) return .outside_repo; // 디렉터리든 워크트리의 파일이든
+    // HOME 을 못 구하면(없다·없는 경로) 홈 판정은 건너뛰고 묻는다 — `.git` 은 이미 있어 저장소 단위의 보통 묻기로 돌아간다. GUI 앱은
+    // launchd 가 HOME 을 세운다.
+    const home_z = std.c.getenv("HOME") orelse return null;
+    var hbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = trust_store.keyFor(std.mem.span(home_z), &hbuf) orelse return null;
+    if (selfOrAncestor(real, home.path)) return .home_root;
+    return null;
+}
+
+/// `dir` 가 `path` 자신이거나 그 조상인가(경로 성분 경계에서 — `/Users/x` 는 `/Users/xyz` 의 조상이 아니다).
+fn selfOrAncestor(dir: []const u8, path: []const u8) bool {
+    if (std.mem.eql(u8, dir, path)) return true;
+    if (std.mem.eql(u8, dir, "/")) return path.len > 0 and path[0] == '/';
+    return path.len > dir.len and std.mem.startsWith(u8, path, dir) and path[dir.len] == '/';
+}
+
+test "LSPB28a 묻지 않는 root 의 조상 판정 — 자신·조상은 참, 접두만 같은 형제·자식은 거짓, `/` 는 모든 절대 경로의 조상 (계획 WT2b)" {
+    try std.testing.expect(selfOrAncestor("/Users/x", "/Users/x"));
+    try std.testing.expect(selfOrAncestor("/Users", "/Users/x"));
+    try std.testing.expect(selfOrAncestor("/", "/Users/x"));
+    try std.testing.expect(!selfOrAncestor("/Users/x", "/Users/xyz"));
+    try std.testing.expect(!selfOrAncestor("/Users/x/proj", "/Users/x"));
+    try std.testing.expect(!selfOrAncestor("/Users/xy", "/Users/x"));
 }
 
 fn sameKey(c: *const Client, key: lsp.trust.Key) bool {
@@ -417,6 +461,9 @@ fn applyTrustChanges(self: *AppSession) void {
     st.seen_trust_generation = gen;
     for (st.clients.items) |*c| {
         const k = c.trust_key orelse continue;
+        // 묻는 root 판정을 아직 안 거친 클라이언트(새로 생겼다·키가 바뀌었다·「꺼짐」을 눌렀다)는 gate 가 표를 직접 읽는다 — 여기서
+        // 결정을 적용하면 묻지 않는 root 가 옛 결정(WT2b 이전의 거부)으로 「거부됨」이 된다.
+        if (!c.scope_checked) continue;
         if (st.asking_key) |ak| if (ak.key().eql(k.key())) continue;
         if (c.reask) {
             if ((trust_store.changedAt(k.key()) orelse 0) <= c.reask_gen) continue;
@@ -434,7 +481,7 @@ fn applyTrustChanges(self: *AppSession) void {
 fn applyDecision(self: *AppSession, c: *Client, decision: lsp.trust.Decision) void {
     switch (decision) {
         .deny => switch (c.phase) {
-            .missing, .denied => {},
+            .missing, .denied, .home_root, .outside_repo => {},
             .asking, .starting, .ready, .restarting, .failed => {
                 dropProcess(self, c);
                 clearClientDiagnostics(self, c);
@@ -507,6 +554,9 @@ pub fn answerTrust(self: *AppSession, allow: bool) void {
     // 같은 저장소의 이 창 클라이언트 **전부** — 묻던 것만이 아니라 「다시 묻기」로 기다리던 것(문서가 닫혀 gate 를 안 지나는 것까지).
     for (st.clients.items) |*c| {
         if (!sameKey(c, ak.key())) continue;
+        // 묻는 root 판정을 아직 안 거친 클라이언트(키가 바뀌었다·「꺼짐」을 눌렀다)는 gate 가 표를 직접 읽는다 — 여기서 「거부됨」으로
+        // 세우면 다른 창의 허용이 와도 못 깨운다(`applyTrustChanges` 도 건너뛴다).
+        if (!c.scope_checked) continue;
         c.reask = false;
         applyDecision(self, c, decision);
     }
@@ -708,7 +758,7 @@ fn pumpClient(self: *AppSession, c: *Client, now_ms: u64) void {
     switch (c.phase) {
         .restarting => if (!c.trust_pending and now_ms >= c.retry_at_ms) spawnClient(self, c, now_ms),
         .starting, .ready => {},
-        .missing, .asking, .denied, .failed => return,
+        .missing, .asking, .denied, .failed, .home_root, .outside_repo => return,
     }
     const p = &(c.proc orelse return);
     // 밀린 쓰기가 상한을 넘었다 — 서버가 stdin 을 안 읽는다. 죽은 것으로 보고 재시작 경로로(§8.2a).
@@ -1025,6 +1075,25 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         else => return,
     }
     if (c.proc != null) return;
+    const key = trustKey(self, c) orelse {
+        // 실제 경로를 못 구했다(root 가 사라졌다·못 연다) — 무엇을 신뢰하는지 모르므로 띄우지 않는다. 「실패 — 다시」로 세워 tick 마다
+        // 다시 풀지 않고, 누르면 다시 시도한다.
+        c.trust_pending = true;
+        c.phase = .failed;
+        return;
+    };
+    // 묻지 않는 root(계획 WT2b) — 「설치」보다 먼저 이유를 보인다(서버가 있어도 어차피 안 띄운다).
+    if (!c.scope_checked) {
+        if (refusalFor(c.root, key.path)) |why| {
+            // 여기 닿는 클라이언트는 문서가 없다 — 판정 전 클라이언트는 아직 안 떴고, 판정을 다시 하게 된 클라이언트(`rekeyRoot`)는 그때
+            // 옛 진단·문서를 걷었다.
+            c.trust_pending = false;
+            c.reask = false;
+            c.phase = why;
+            return;
+        }
+        c.scope_checked = true;
+    }
     // 실행 파일이 없으면 신뢰를 묻지 않는다 — 「설치」가 먼저다. 없는 채면 다른 후보가 생겼는지 다시 고른다(TS 계열 — §8.2a 「서버 찾기」).
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
     if (lsp_process.locate(c.server.exe, &pbuf) == null) {
@@ -1034,13 +1103,6 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         }
     }
     if (c.phase == .missing) c.phase = .restarting; // 설치된 것을 이제 봤다
-    const key = trustKey(self, c) orelse {
-        // 실제 경로를 못 구했다(root 가 사라졌다·못 연다) — 무엇을 신뢰하는지 모르므로 띄우지 않는다. 「실패 — 다시」로 세워 tick 마다
-        // 다시 풀지 않고, 누르면 다시 시도한다.
-        c.trust_pending = true;
-        c.phase = .failed;
-        return;
-    };
     const stored = if (c.reask) null else trustOf(self, key);
     const decision = stored orelse {
         if (builtin.is_test) if (self.editor_lsp.auto_trust_answer) |ans| {
@@ -1169,6 +1231,8 @@ pub fn statusText(view: StatusView, buf: *[status_text_cap]u8) []const u8 {
         .restarting => .lsp_status_restarting,
         .failed => .lsp_status_failed,
         .denied => .lsp_status_denied,
+        .home_root => .lsp_status_home_root,
+        .outside_repo => .lsp_status_outside_repo,
         .ready => return maru.i18n.format(buf, "{0}", &.{.{ .s = view.exe }}),
     };
     return maru.i18n.format(buf, maru.i18n.t(key), &.{.{ .s = view.exe }});
@@ -1651,7 +1715,8 @@ pub fn requestHover(self: *AppSession, term: *Term, offset: usize) ?u32 {
     return c.hover_seq;
 }
 
-/// 상태바 항목 클릭(§8.2a): 없음 → 새 탭에 설치 명령 입력 · 거부됨 → 다시 묻기 · 실패 → 재시작. 나머지는 무동작.
+/// 상태바 항목 클릭(§8.2a): 없음 → 새 탭에 설치 명령 입력 · 거부됨 → 다시 묻기 · 실패 → 재시작 · 꺼짐(홈·저장소 밖) → root 부터 다시 본다.
+/// 나머지는 무동작.
 pub fn activateStatus(self: *AppSession) void {
     const pane = pane_ops.activePane(self);
     if (pane.terms.items.len == 0) return;
@@ -1687,6 +1752,29 @@ pub fn activateStatus(self: *AppSession) void {
             c.restarts = 0;
             c.phase = .restarting;
             c.retry_at_ms = 0;
+        },
+        .home_root, .outside_repo => {
+            // 다시 본다 — **root 부터** 다시 푼다: 그 사이 상위 폴더에서 `git init` 했으면 root 가 바뀐다(굳힌 root 의 `.git` 만 보면 영영
+            // 안 풀린다). 문서마다 굳힌 root 를 비우면 다음 pump 가 `projectRootForFile` 로 다시 정하고, 그 root 의 클라이언트가 판정·신뢰를
+            // 처음부터 거친다. 거부돼 있던 이 root 의 클라이언트는 **띄우지 않고**(`trust_pending`) 다시 판정을 기다린다 — 문서가 닫힌
+            // 것은 gate 를 안 지나 그대로면 다음 pump 가 신뢰 없이 띄운다(「다시 묻기」와 같은 함정).
+            const root = self.allocator.dupe(u8, rootFor(self, term) orelse return) catch return;
+            defer self.allocator.free(root);
+            for (self.tabs.items) |tab| for (tab.panes.items) |p| for (p.terms.items) |t| {
+                const r = t.rt.editor_lsp_root orelse continue;
+                if (!std.mem.eql(u8, r, root)) continue;
+                self.allocator.free(r);
+                t.rt.editor_lsp_root = null;
+            };
+            for (self.editor_lsp.clients.items) |*o| {
+                if (!std.mem.eql(u8, o.root, root) or (o.phase != .home_root and o.phase != .outside_repo)) continue;
+                // 굳힌 키도 버린다 — root 가 심링크면 그 대상이 바뀌었을 수 있다(홈이던 대상이 이제 저장소). 다음 gate 가 다시 푼다.
+                if (o.trust_key) |k| k.deinit(self.allocator);
+                o.trust_key = null;
+                o.trust_pending = true;
+                o.phase = .restarting;
+                o.retry_at_ms = 0;
+            }
         },
         .asking, .starting, .ready, .restarting => {},
     }

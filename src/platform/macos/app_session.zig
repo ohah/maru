@@ -6379,6 +6379,9 @@ pub const AppSession = struct {
     osr_cursor_pending: ?CursorKind = null,
     /// W4c: 지금 키 포커스를 준 Chromium 탭(0 = 없음). 바뀌면 `syncOsrKeyTarget` 이 포커스를 옮긴다.
     osr_key_target: u64 = 0,
+    /// W10b: 이 세션이 다운로드 목록(앱 전역)에 마지막으로 알린 「매번 묻기」 — 이 세션의 값이 바뀔 때만 다시 알린다(관계없는 재적용·
+    /// 외관 전환이 다른 창의 옛 값으로 되돌렸다 — 5 회차).
+    download_ask_applied: ?bool = null,
     /// W6m②: 이 창이 띄우는 제안 목록(키 대상 탭의 것) — 강조와 Swift 가 띄운 세대(Swift 가 네이티브 창으로 띄운다).
     osr_datalist: web_ops.OsrDatalist = .{},
     /// W4c: 트랜잭션 밖에서 조합이 비워졌다(unmarkText — Apple 의미는 「확정」). 곧 확정 글이 오면 그 글이 조합을 대신하고,
@@ -8125,7 +8128,10 @@ pub const AppSession = struct {
         maru.i18n.applyPreference(self.loaded_config.config.ui_language);
         // W4d: 브라우저 탭 엔진은 첫 창의 설정으로 프로세스에 한 번 정한다(재시작 후 적용 — 사용자 결정 2026-09-25).
         if (!builtin.is_test) web_osr.decide(self.loaded_config.config.browser.engine == .chromium);
-        if (!builtin.is_test) web_osr.downloads.setAsk(self.loaded_config.config.browser.download_ask); // W10b(새 창의 설정)
+        if (!builtin.is_test) {
+            web_osr.downloads.setAsk(self.loaded_config.config.browser.download_ask); // W10b(새 창의 설정)
+            self.download_ask_applied = self.loaded_config.config.browser.download_ask;
+        }
         if (builtin.is_test and live_app_sessions == 0) {
             // 이전 test의 process-global 값만 리셋한다. 같은 test에서 이미 열린 Window가 있으면 아래 production
             // resolver를 그대로 타므로 Window A toggle → Window B 첫 Term remote 배선을 실제 통합 검증할 수 있다.

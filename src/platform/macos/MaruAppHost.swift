@@ -9947,8 +9947,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 다운로드 목록 창이 키 창이다 — 메뉴의 터미널 동작(붙여넣기·복사·잘라내기·터미널 초기화)을 받지 않는다. 키 터미널 창이 없으면
     /// 활성 surface 가 첫 창으로 떨어져 ⌘V 가 그 셸에 붙여 넣었다(적대 리뷰 2 회차).
     private var downloadsWindowIsKey: Bool {
-        guard let downloads = downloadsWindow else { return false }
-        return NSApp.keyWindow === downloads.window
+        guard let downloads = downloadsWindow, let key = NSApp.keyWindow else { return false }
+        // 목록 창에 붙은 저장 창(W10b)이 키여도 — 그때 ⌘W 가 첫 터미널 창의 탭을 닫았다(적대 리뷰 5 회차).
+        return key === downloads.window || key.sheetParent === downloads.window
     }
     private var downloadsAnnounced = Set<UInt64>()
     private var downloadRows: [OsrDownloadsWindow.Row] = []
@@ -9994,6 +9995,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var downloadTestAnswers: [String?] = []
 
     private func showDownloadAskFromList(key: UInt64) {
+        // 이미 탭 쪽 저장 창이 맡았다(창이 최소화·숨김이어서 안 보였다) — 그 창을 앞으로 낸다(5 회차: 아무 말 없이 안 먹었다).
+        if let panel = downloadAskPanels[key], let parent = panel.sheetParent {
+            NSApp.unhide(nil)
+            if parent.isMiniaturized { parent.deminiaturize(nil) }
+            parent.makeKeyAndOrderFront(nil)
+            return
+        }
         guard let downloads = downloadsWindow, downloads.window.attachedSheet == nil else { return }
         var ask = MaruDownloadAsk()
         guard maru_macos_downloads_claim_ask(key, &ask) != 0 else { return }
@@ -12548,8 +12556,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let key = sender.representedObject as? String else { return }
         // W10a: 다운로드 목록 창이 키면 메뉴의 터미널 동작을 그 창에 보내지 않는다 — 활성 surface 는 키 터미널 창이 없으면 첫 창으로
         // 떨어져 ⌘W 가 첫 창의 탭(받는 중인 웹 탭일 수도)을 닫았다(설계 적대 검토). ⌘W 는 그 창을 닫는다.
-        if let downloads = downloadsWindow, NSApp.keyWindow === downloads.window, key != "show_downloads" {
-            if key == "close_focused" || key == "close_term" || key == "close_tab" {
+        if let downloads = downloadsWindow, downloadsWindowIsKey, key != "show_downloads" {
+            // 목록 창이면 ⌘W 는 그 창을 닫는다 — 저장 창이 붙어 있으면 아무것도 하지 않는다(저장 창은 저장·취소로 닫는다).
+            if (key == "close_focused" || key == "close_term" || key == "close_tab"), downloads.window.attachedSheet == nil {
                 downloads.window.performClose(nil)
             }
             return
@@ -12701,8 +12710,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuCut(_ sender: Any?) {
-        if downloadsWindowIsKey { return }
+        // 저장 창(sheet)이 키면 그 창에 먼저 — 목록 창에 붙은 저장 창의 이름 칸에서도 편집 키가 먹게(5 회차).
         if Self.forwardEditToSheet(#selector(NSText.cut(_:)), sender) { return }
+        if downloadsWindowIsKey { return }
         // 웹 패널이 first responder면 WebKit이 자기 편집 영역에서 잘라낸다(표준 cut: — 편집기 자신의 되돌리기
         // 기록에 남는다). 터미널에는 잘라내기가 없다(읽기 전용 화면) — 복사만 하고 지우지 않는다.
         if firstResponderWebPanel() != nil {
@@ -12714,8 +12724,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuCopy(_ sender: Any?) {
-        if downloadsWindowIsKey { return }
+        // 저장 창(sheet)이 키면 그 창에 먼저 — 목록 창에 붙은 저장 창의 이름 칸에서도 편집 키가 먹게(5 회차).
         if Self.forwardEditToSheet(#selector(NSText.copy(_:)), sender) { return }
+        if downloadsWindowIsKey { return }
         if isSessionHostAutoReconnectSmokeMode {
             sessionHostAutoReconnectCopyMenuActions += 1
         }
@@ -12730,8 +12741,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuPaste(_ sender: Any?) {
-        if downloadsWindowIsKey { return }
+        // 저장 창(sheet)이 키면 그 창에 먼저 — 목록 창에 붙은 저장 창의 이름 칸에서도 편집 키가 먹게(5 회차).
         if Self.forwardEditToSheet(#selector(NSText.paste(_:)), sender) { return }
+        if downloadsWindowIsKey { return }
         // 웹 포커스면 WebKit이 편집 영역(CM6 등)에 붙여넣도록 표준 paste:를 넘긴다(read·HTML은 삽입 대상이 없어
         // no-op). 아니면 터미널 PTY 붙여넣기.
         if firstResponderWebPanel() != nil {

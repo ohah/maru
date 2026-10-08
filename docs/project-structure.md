@@ -595,3 +595,8 @@ tools/
 같은 디렉터리의 `fixture.zig.inc`(IME), `find-fixture.zig.inc`(뷰별 찾기),
 `anchors-fixture.zig.inc`(수동 뷰 접힘·스크롤)가 시나리오 입력과 도메인 판정을 소유한다.
 캡처용 테스트는 제품 소스 사본에만 덧붙이고, 일반 빌드나 설치된 앱을 바꾸지 않는다.
+
+프로젝트 검색의 여러 root 후보 선정과 I/O 조정은
+`src/platform/macos/app_session/editor/search/coordinator.zig`에 둔다.
+L2 `session/editor/search/request.zig`는 요청 전체 예산과 행의 root 귀속을 소유한다.
+[여러 root 연결](plans/editor-project-search-roots.md)의 worker·제품 검증 경계를 따른다.

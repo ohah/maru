@@ -6,7 +6,7 @@ const c = std.c;
 const posix = std.posix;
 pub const Control = struct { cancelled: std.atomic.Value(bool) = .init(false) };
 pub const Outcome = enum { complete, cancelled, partial };
-pub const Stats = struct { child_pid: ?c.pid_t = null, reaped: bool = false, bytes: usize = 0, reads: usize = 0, first_output_ms: ?i64 = null, elapsed_ms: i64 = 0, exit: ?u8 = null };
+pub const Stats = struct { children_started: usize = 0, child_pid: ?c.pid_t = null, reaped: bool = false, bytes: usize = 0, reads: usize = 0, first_output_ms: ?i64 = null, elapsed_ms: i64 = 0, exit: ?u8 = null };
 pub const Timing = struct { execution_ms: i64, reap_ms: i64 };
 
 pub const Root = struct {
@@ -42,6 +42,11 @@ pub fn validateRoot(io: std.Io, root: *Root) !void {
 
 /// callback 오류·본문 상한·취소·시간 초과는 모두 helper를 거둔 뒤 반환한다.
 pub fn run(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, environment: *const std.process.Environ.Map, root: *const Root, control: *Control, timing: Timing, event_bytes: usize, context: anytype, callback: anytype, stats: *Stats) !Outcome {
+    return runDelimited(a, io, argv, environment, root, control, timing, event_bytes, context, callback, stats, '\n');
+}
+
+/// 후보 파일명은 개행을 포함할 수 있으므로 NUL로만 나눈다. 프로세스 수명은 JSON과 같다.
+pub fn runDelimited(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, environment: *const std.process.Environ.Map, root: *const Root, control: *Control, timing: Timing, event_bytes: usize, context: anytype, callback: anytype, stats: *Stats, delimiter: u8) !Outcome {
     if (control.cancelled.load(.acquire)) return .cancelled;
     if (timing.execution_ms <= 0 or timing.reap_ms <= 0) return error.InvalidTiming;
     const canonical = root.canonical;
@@ -52,6 +57,8 @@ pub fn run(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, environme
     var child = try std.process.spawn(io, .{ .argv = argv, .environ_map = environment, .cwd = .{ .dir = directory }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
     const pid = child.id.?;
     stats.child_pid = pid;
+    stats.children_started += 1;
+    stats.reaped = false;
     const fd = child.stdout.?.handle;
     defer child.stdout.?.close(io);
     var reaped = false;
@@ -71,7 +78,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, environme
     };
     const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
     if (flags < 0 or c.fcntl(fd, c.F.SETFL, flags | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true }))) < 0) return error.NonblockingFailed;
-    var stream: search.stream.Stream = .{ .max_event_bytes = event_bytes };
+    var stream: search.stream.Stream = .{ .max_event_bytes = event_bytes, .delimiter = delimiter };
     defer stream.deinit(a);
     var buffer: [16 * 1024]u8 = undefined;
     var eof = false;

@@ -545,6 +545,10 @@ jobs:
             zig-out/editor-project-search-worker/run-*/verification.json
             zig-out/editor-project-search-worker/run-*/*.stdout
             zig-out/editor-project-search-worker/run-*/*.stderr
+            zig-out/editor-project-search-roots/latest.json
+            zig-out/editor-project-search-roots/run-*/verification.json
+            zig-out/editor-project-search-roots/run-*/*.stdout
+            zig-out/editor-project-search-roots/run-*/*.stderr
           if-no-files-found: warn
       # **원격 SCM 을 실물 SSH 위에서 돈다.** 그 판정자들은 control socket 이 없으면 `SkipZigTest` 라,
       # 이 스텝이 없으면 RS1~RS4 는 CI 에서 **한 줄도 안 돈다** — 실제로 그 축의 결함 여섯이 사람이

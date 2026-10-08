@@ -1,6 +1,6 @@
 # 프로젝트 검색 AppSession owner 연결
 
-상태: 현재 창의 지정된 로컬 root에 대한 요청·문서 사본·IME·worker 수명 연결. 검색 도크, 여러 root 결과의 합치기·클릭 이동과 제품 기본 예산은 S2 및 남은 S1b gate다.
+상태: 현재 창의 지정된 로컬 root에 대한 요청·문서 사본·IME·worker 수명 연결. [여러 root 연결](editor-project-search-roots.md)은 요청 전체의 사본·후보 합집합·결과 예산을 추가한다. 검색 도크·클릭 이동과 제품 기본 예산은 S2 및 남은 S1b gate다.
 
 ## 요청과 사본
 
@@ -46,4 +46,4 @@ Swift `MaruFileTreeWatcher`가 실제 stream 시작에 성공한 후 ABI로 현�
 - `zig build test-macos-project-search-worker`: 기존 141개 helper/model 실패 경로와 소유권 검사. overlay 생성·literal/regex 실행의 모든 할당 실패와 UTF-8 중간 경계/역방향/범위 초과 거절도 포함한다.
 - `zig build macos-app-host-swift-check` 및 `macos-app-host-abi-lib`: 실제 Swift/ABI 빌드.
 
-전체 S1b 완료로 표시하지 않는다. 여러 root의 순서·중복 결과·전역 예산 합치기, 다른 파일시스템 및 절대 root 별칭/범위 입장의 전체 호환성, 실제 OS IME·FSEvents·종료 실행 증거, 앱 RSS/첫 결과/취소·준비 tick 비용 실측이 남아 있다. S2 검색 도크·IME Enter·클릭·시각 검증과 제품 기본 예산을 이 API의 합성 검증으로 대체하지 않는다.
+전체 S1b 완료로 표시하지 않는다. [여러 root의 순서·중복 결과·전역 예산](editor-project-search-roots.md)은 별도 연결했고, 다른 파일시스템 및 절대 root 별칭/범위 입장의 전체 호환성, 실제 OS IME·FSEvents·종료 실행 증거, 앱 RSS/첫 결과/취소·준비 tick 비용 실측이 남아 있다. S2 검색 도크·IME Enter·클릭·시각 검증과 제품 기본 예산을 이 API의 합성 검증으로 대체하지 않는다.

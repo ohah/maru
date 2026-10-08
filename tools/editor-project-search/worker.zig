@@ -24,6 +24,9 @@ pub fn main(init: std.process.Init) !void {
     }
     var snapshot_bytes: usize = 64 * 1024 * 1024;
     var execution_ms: i64 = 10_000;
+    var selection_bytes: usize = 8 * 1024 * 1024;
+    var roots: std.ArrayList(api.coordinator.Input) = .empty;
+    defer roots.deinit(a);
     var mutate = false;
     var stale = false;
     var includes: std.ArrayList([]const u8) = .empty;
@@ -35,6 +38,19 @@ pub fn main(init: std.process.Init) !void {
     var retained: usize = 0;
     var i: usize = 6;
     while (i < argv.len) : (i += 1) {
+        if (std.mem.eql(u8, argv[i], "--workspace-root")) {
+            i += 1;
+            if (i >= argv.len) return error.Arguments;
+            if (roots.items.len == 0) try roots.append(a, try rootInput(a, argv[2]));
+            try roots.append(a, try rootInput(a, argv[i]));
+            continue;
+        }
+        if (std.mem.eql(u8, argv[i], "--selection-bytes")) {
+            i += 1;
+            if (i >= argv.len) return error.Arguments;
+            selection_bytes = try std.fmt.parseInt(usize, argv[i], 10);
+            continue;
+        }
         if (std.mem.eql(u8, argv[i], "--include") or std.mem.eql(u8, argv[i], "--exclude")) {
             const include = std.mem.eql(u8, argv[i], "--include");
             i += 1;
@@ -97,8 +113,10 @@ pub fn main(init: std.process.Init) !void {
     var backend: api.Backend = .{ .a = a, .io = init.io };
     defer backend.deinit();
     const started = std.Io.Timestamp.now(init.io, .awake);
-    const budget: api.Budget = .{ .timing = .{ .execution_ms = execution_ms, .reap_ms = 1000 }, .snapshot_bytes = snapshot_bytes, .preview_bytes = 256 };
-    if (std.mem.eql(u8, argv[1], "@bundle")) {
+    const budget: api.Budget = .{ .timing = .{ .execution_ms = execution_ms, .reap_ms = 1000 }, .snapshot_bytes = snapshot_bytes, .preview_bytes = 256, .selection_bytes = selection_bytes };
+    if (roots.items.len != 0) {
+        try backend.startRoots(argv[1], roots.items, argv[3], opts, &state, &models, budget);
+    } else if (std.mem.eql(u8, argv[1], "@bundle")) {
         try backend.startBundled(argv[2], argv[3], opts, &state, &models, budget);
     } else try backend.start(argv[1], argv[2], argv[3], opts, &state, &models, budget);
     var buffer: [4096]u8 = undefined;
@@ -122,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
             matches = batch.matches;
             if (batch.rows.items.len > 0) batches += 1;
             for (batch.rows.items) |row| {
-                try std.json.Stringify.value(row.match, .{}, &out.interface);
+                try std.json.Stringify.value(.{ .path = row.match.path, .text = row.match.text, .ranges = row.match.ranges, .text_start = row.match.text_start, .text_truncated = row.match.text_truncated, .root_index = row.root_index, .source = row.source }, .{}, &out.interface);
                 try out.interface.writeAll("\n");
             }
             try out.interface.flush();
@@ -135,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
                 status = batch.status;
                 matches = batch.matches;
                 for (batch.rows.items) |row| {
-                    try std.json.Stringify.value(row.match, .{}, &out.interface);
+                    try std.json.Stringify.value(.{ .path = row.match.path, .text = row.match.text, .ranges = row.match.ranges, .text_start = row.match.text_start, .text_truncated = row.match.text_truncated, .root_index = row.root_index, .source = row.source }, .{}, &out.interface);
                     try out.interface.writeAll("\n");
                 }
             }
@@ -150,4 +168,13 @@ pub fn main(init: std.process.Init) !void {
     try std.json.Stringify.value(.{ .status = @tagName(status), .matches = matches, .excluded = completion.excluded, .batches = batches, .stats = backend.stats(), .cancel_latency_ms = if (cancellation_at) |time| elapsed - time else null, .failure = if (failure) |err| @errorName(err) else null }, .{}, &out.interface);
     try out.interface.writeAll("\n");
     try out.interface.flush();
+}
+
+// 프로브 전용 root 신원이다. 제품은 탐색기 capability 사본을 사용한다.
+fn rootInput(a: std.mem.Allocator, path: []const u8) !api.coordinator.Input {
+    const z = try a.dupeZ(u8, path);
+    defer a.free(z);
+    var native: std.posix.Stat = undefined;
+    if (std.c.fstatat(std.posix.AT.FDCWD, z, &native, 0) != 0) return error.StatFailed;
+    return .{ .path = path, .identity = .{ .device = @intCast(native.dev), .inode = @intCast(native.ino), .kind = 2 } };
 }

@@ -20813,6 +20813,18 @@ pub const AppSession = struct {
         };
     }
 
+    /// 확정된 로컬 root 모두를 하나의 요청으로 검색한다. 후보 기억역의 예산도 caller가 지정한다.
+    pub fn requestWorkspaceProjectSearch(self: *AppSession, text: []const u8, options: maru.session.editor.search.query.Options, limits: maru.session.editor.search.request.Limits, budget: @import("app_session/editor/search/backend.zig").Budget) !void {
+        try self.requestProjectSearch(0, text, options, limits, budget);
+        self.editor_project_search_query.?.all_roots = true;
+    }
+
+    pub fn prepareWorkspaceProjectSearch(self: *AppSession, request: u64, limits: maru.session.editor.search.request.Limits, snapshot_bytes: usize) !void {
+        if (self.editor_project_search_prepared) |*previous| previous.deinit(self.allocator);
+        self.editor_project_search_prepared = null;
+        self.editor_project_search_prepared = try @import("app_session/editor/search/owner.zig").Prepared.initWorkspace(self, request, limits, snapshot_bytes);
+    }
+
     pub fn projectSearchCompletion(self: *AppSession) ?@import("app_session/editor/search/backend.zig").Completion {
         if (self.ime_active or self.ime_editor_commit_pending) return null;
         const live = if (self.editor_project_search_live) |*value| value else return null;

@@ -539,7 +539,7 @@ pub fn build(b: *std.Build) void {
     b.step("editor-project-search-adapter", "Build actual ripgrep protocol probe").dependOn(&project_search_adapter_install.step);
     const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
     const run_project_search_tests = b.addRunArtifact(project_search_tests);
-    run_project_search_tests.addArg("--maru-expect-tests=8");
+    run_project_search_tests.addArg("--maru-expect-tests=10");
     b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
     const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });
     ripgrep_prepare.setCwd(b.path("."));
@@ -571,6 +571,18 @@ pub fn build(b: *std.Build) void {
         worker_cases.step.dependOn(&project_search_worker_install.step);
         b.step("test-macos-project-search-worker", "Run background search ownership and cancellation fixtures").dependOn(&worker_cases.step);
         macos_only_test_step.dependOn(&worker_cases.step);
+        const roots_cases = b.addSystemCommand(&.{
+            "python3",  "tools/editor-project-search/roots-verify.py",
+            "--worker", "zig-out/bin/maru-project-search-worker",
+            "--rg",     "zig-out/ripgrep/rg",
+            "--output", "zig-out/editor-project-search-roots",
+        });
+        roots_cases.setCwd(b.path("."));
+        roots_cases.has_side_effects = true;
+        roots_cases.step.dependOn(&ripgrep_prepare.step);
+        roots_cases.step.dependOn(&project_search_worker_install.step);
+        b.step("test-macos-project-search-roots", "Run multi-root union and global budget fixtures").dependOn(&roots_cases.step);
+        macos_only_test_step.dependOn(&roots_cases.step);
     }
     const session_host_product_options = b.addOptions();
     session_host_product_options.addOption(bool, "allow_validation_only_restore", false);
@@ -5305,8 +5317,8 @@ pub fn build(b: *std.Build) void {
     editor_document_regex_step.dependOn(&run_document_regex_product_tests.step);
     const search_owner_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"EDPS"} });
     const run_search_owner_tests = b.addRunArtifact(search_owner_tests);
-    run_search_owner_tests.addArg("--maru-expect-tests=17");
-    run_search_owner_tests.addArg("--maru-expect-passed=17");
+    run_search_owner_tests.addArg("--maru-expect-tests=22");
+    run_search_owner_tests.addArg("--maru-expect-passed=22");
     run_search_owner_tests.setCwd(b.path("."));
     run_search_owner_tests.step.dependOn(&install_fake_lsp.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_search_owner_tests.step.dependOn(&ripgrep_prepare.step);

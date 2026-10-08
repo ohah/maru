@@ -384,6 +384,10 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
 - **편집 UX(인라인)**: 별도 팝업이 아니라 기존 라벨 자리에서 바로 편집한다 — 주소창과 같은 입력 모델
   (`TextField`: caret·그래핌 경계·IME preedit-at-caret — [text-field-editor.md] §2.2)을 쓰고, 키 라우팅은 모달 가드 +
   `inputFocus()` IME 분기를 탄다. `Enter`=확정, `Esc`=취소, 포커스 상실=확정.
+  **이 규칙은 라벨 자리의 인라인 편집 것이다.** 같은 입력 모델을 쓰는 **팝업 상자 둘**(편집기의 심볼 이름 바꾸기 ·
+  이름 없는 문서의 저장 이름 — [editor-surface-tooling.md](editor-surface-tooling.md) §8.2f · §3.11)은 확정이 곧 바깥 효과(서버 rename·파일 생성)라
+  다르다: 앱 안 클릭·파일 드롭은 **취소**(`settings_ops.renameFocusMoved`), 앱이 포커스를 잃는 것(⌘Tab 등)은 **그대로 둔다**
+  (조합 중이던 글자만 입력에 접는다 — `AppSession.trySetFocused`). 2026-10-08 재현: ⌘Tab 한 번에 반쯤 친 이름으로 rename 이 나갔다.
 - **긴 이름 편집(scroll-to-caret)**: 편집 텍스트는 caret 자리에 `|` 를 끼운 한 줄이다(`inline_edit.composeLine` —
   ←/→·⌥←/→·⌘←/→·⌃A/⌃E 로 caret 을 옮기고 그 자리에 쓰고 지운다, 2026-09-29 — [text-field-editor.md] §2.2). 시작 caret 은
   끝이다. caret 을 앞으로 옮긴 채 줄이 넘치면 사이드바 카드·그룹 헤더·pane 라벨은 `inline_edit.composeLineFit` 이 caret

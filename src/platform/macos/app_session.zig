@@ -14885,16 +14885,8 @@ pub const AppSession = struct {
         }
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
-        if (kind == 1 and self.rename != null) {
-            // **팝업 상자는 클릭-어웨이가 취소다.** 심볼 rename(§8.2f)은 확정하면 서버에 rename 이 나가고
-            // (VS Code 도 취소), 이름 없는 문서 저장(U2)은 확정하면 **반쯤 친 이름으로 파일이 만들어진다** —
-            // 사용자가 의도하지 않은 이름의 파일이 디스크에 남는다(적대적 16회차). 인라인 rename 은
-            // 지금까지대로 확정이다(포커스 상실 = 확정, docs/tabs-splits-layout.md).
-            switch (self.rename.?) {
-                .symbol, .untitled_save => settings_ops.closeRename(self),
-                .workspace, .pane, .term, .group, .file_tree => settings_ops.commitRename(self),
-            }
-        }
+        // **팝업 상자는 클릭-어웨이가 취소다**(`renameFocusMoved` — 그 이유와 인라인 rename 의 확정을 그쪽이 든다).
+        if (kind == 1) settings_ops.renameFocusMoved(self);
         // Phase 7e-2a: 주소창 편집 중 **자기 밴드 밖**(탭/pane/워크스페이스/터미널)을 down하면 편집을 취소한다 — rename의
         // mouse-down commit-away를 미러하되, 브라우저 관례상 클릭-어웨이 = **취소(현재 URL 복원)**로 한다(commit-navigate는
         // 안 친 URL로 튀어 놀람). 단 편집 중인 그 밴드 재클릭(caret 재배치·nav 버튼)은 유지 — 아래 ①b 밴드 핸들러가 URL 존
@@ -16394,10 +16386,23 @@ pub const AppSession = struct {
         // 인라인 rename 중 포커스 상실 = 확정(docs/tabs-splits-layout.md "포커스 상실=확정"). 앱-내 클릭은 mouse()
         // down이 이미 commit하지만, 앱-간 전환(window resign)은 이 경로뿐이라 여기서 확정한다. commitRename이 조합
         // preedit도 먼저 query로 확정하므로 commitComposition을 따로 부를 필요 없다(rename은 find/palette와 배타적).
-        if (self.rename != null) {
-            settings_ops.commitRename(self);
-            return true;
-        }
+        //
+        // **팝업 상자(심볼·이름 없는 문서 저장)는 확정하지도 취소하지도 않는다**(2026-10-08 재현 뒤 결정). 확정은 바깥
+        // 효과다 — ⌘Tab·Spotlight 한 번에 반쯤 친 이름으로 서버에 rename 이 나가 파일이 바뀌고(재현: 「addZ」 요청 1·
+        // 문서가 바뀜), 이름 없는 문서는 그 이름으로 파일이 생겼다. 취소는 친 이름을 잃는다. 앱을 잠깐 떠났다 돌아온
+        // 사용자는 상자가 그대로이길 기대하므로 **그대로 두고**, 조합 중이던 글자만 입력에 접는다(창이 키를 잃으면
+        // 조합이 끝난다 — 남겨 두면 돌아왔을 때 떠 있는 조합이 어느 입력의 것인지 모른다).
+        if (self.rename) |rt| switch (rt) {
+            .symbol, .untitled_save => {
+                _ = self.rename_input.commitPreedit(self.allocator);
+                self.metal_dirty = true;
+                return true;
+            },
+            .workspace, .pane, .term, .group, .file_tree => {
+                settings_ops.commitRename(self);
+                return true;
+            },
+        };
         return self.tryCommitComposition();
     }
 
@@ -16651,7 +16656,7 @@ pub const AppSession = struct {
         // 안 하면 rename 편집기가 **옛 Term에 바인딩된 채 열려 있고** 포커스만 새 pane으로 가서, 사용자가 붙여넣은
         // 경로 뒤에 타이핑하면 그 키가 셸이 아니라 보이지 않는 편집기로 가고 Enter가 옛 탭 이름을 바꾼다(클릭
         // 경로에서 이미 고쳤던 "rename 하이재킹"과 같은 상태 — code-review). 주소창 편집도 같다.
-        if (self.rename != null) settings_ops.commitRename(self); // 포커스 상실 = 확정(docs/tabs-splits-layout.md)
+        settings_ops.renameFocusMoved(self); // 클릭과 같다 — 팝업 상자는 취소, 인라인 이름 편집은 확정(그 함수 doc)
         if (self.addr_edit != null) {
             web_ops.cancelAddrEdit(self, false); // 클릭-어웨이와 같은 취소(현재 URL 복원) — focus-restore 안 함
             self.metal_dirty = true;
@@ -20872,6 +20877,7 @@ pub const AppSession = struct {
         marker_view_ops.pumpMarkerPreviewOpen(self);
         editor_ops.lsp_client.pump(self); // §8.2a: 서버 읽기·문서 동기화 — 스레드 없이 tick 에서
         self.flushDeferredResponseNotice(); // §8.2a: 사용자가 그사이 연 오버레이 뒤로 미룬 응답 알림
+        editor_ops.rename_client.closeIfDocHidden(self); // §8.2f: 상자가 붙은 문서가 화면에서 사라졌으면 취소(오버레이를 짓기 전)
         editor_ops.hover_client.tick(self); // §8.2b: 포인터 정지 → 호버 요청/열기
         editor_ops.references_client.tick(self); // §8.2l: 「지금은 못 답한다」 뒤 되묻기
         editor_backup_ops.tick(self); // §3.10: 편집이 멎고 debounce 가 지났으면 미저장 내용을 백업한다

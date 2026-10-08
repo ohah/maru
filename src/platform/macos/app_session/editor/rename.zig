@@ -39,6 +39,10 @@ pub const State = struct {
     sent_count: u64 = 0,
     notified_error: u64 = 0,
     notified_done: u64 = 0,
+    /// 상자가 붙은 문서가 화면에서 사라져 취소한 수(`closeIfDocHidden`).
+    closed_doc_hidden: u64 = 0,
+    /// 확정했지만 상자가 열린 동안 문서가 바뀌어 보내지 않고 알린 수(`commit`).
+    refused_stale_at_commit: u64 = 0,
 };
 
 /// `rename_symbol` 명령·`F2`. 상자를 열었으면 true.
@@ -71,7 +75,14 @@ pub fn commit(self: *AppSession, t: Target, new_name: []const u8) void {
     if (new_name.len == 0) return;
     const term = termFor(self, t.surface_id) orelse return;
     const doc = term.rt.editorDocument().opened orelse return;
-    if (term.rt.editorDocument().notifications.lsp_version != t.version) return; // 모달 동안 바뀔 수 없지만, 바뀌었다면 이 자리는 그 낱말이 아니다
+    if (term.rt.editorDocument().notifications.lsp_version != t.version) {
+        // 상자가 열린 동안 문서가 바뀌었다 — 그 자리는 그 낱말이 아니라 보내지 않는다(B17). 길은 둘이다: 메뉴바 `⌘Z`(이 상자에 막히지
+        // 않는다)와, 앱이 포커스를 잃은 동안의 외부 편집(그때 상자는 **그대로 남는다** — `AppSession.trySetFocused`). **조용히 닫지 않는다** —
+        // 예전에는 Enter 뒤 상자만 사라져 사용자는 이름이 바뀐 줄 알았다(2026-10-08 적대적 검증).
+        st.refused_stale_at_commit += 1;
+        self.showNoticeKey(.rn_stale);
+        return;
+    }
     const old = seedFor(self, t) orelse return;
     if (std.mem.eql(u8, old, new_name)) return;
     if (doc.file.read_only) return;
@@ -144,12 +155,23 @@ pub fn boxCaretCols(self: *const AppSession) u32 {
     return chrome.components.overlay_input.displayCols(q[0..at]) + chrome.components.overlay_input.displayCols(self.rename_input.preedit.items);
 }
 
-/// 상자의 앵커(낱말 첫 글자 셀) — 프레임마다 다시 잰다(스크롤·랩이 바뀌면 자리가 바뀐다). 그 문서가 그려져 있지 않으면 null(상자는 그 프레임에 없다).
+/// 상자의 앵커(낱말 첫 글자 셀) — 프레임마다 다시 잰다(스크롤·랩이 바뀌면 자리가 바뀐다). 그 문서가 그려져 있지 않으면 false(상자는 그 프레임에 없다).
 pub fn refreshAnchor(self: *AppSession, t: Target) bool {
     const term = termFor(self, t.surface_id) orelse return false;
-    const a = anchorAt(term, t.start) orelse return false;
-    self.chrome_host.rename_box.show(a.x, a.y, a.h);
-    return true;
+    if (anchorAt(term, t.start)) |a| {
+        self.chrome_host.rename_box.show(a.x, a.y, a.h);
+        return true;
+    }
+    // ⚠️ **낱말이 화면 밖이면 상자만 사라지고 모달이 남는다** — 휠은 이 상자에 막히지 않아(인라인 rename 은 chrome 모달이
+    // 아니다) 낱말을 굴려 보내면 상자가 사라진 채 키는 계속 상자로 갔다(2026-10-08 재현: 화면 맨 위 줄 261, 친 글자가
+    // 보이지 않는 상자에 쌓였다). 이름 없는 문서 저장 상자(`refreshCaretAnchor`)와 같은 결함이고 같은 고침이다 —
+    // **낱말을 화면 안으로 되돌린다.** 「그 낱말을 보면서 새 이름을 정한다」가 이 상자의 뜻이다(사용자 결정 2026-10-08).
+    editor_ops.revealOffsetForRenameBox(self, term, t.start);
+    if (anchorAt(term, t.start)) |a| {
+        self.chrome_host.rename_box.show(a.x, a.y, a.h);
+        return true;
+    }
+    return false; // 되돌림은 스크롤을 바꾸고 앵커는 그려진 행에서 나온다 — 상자는 다음 프레임에 돌아온다
 }
 
 /// **caret 에 상자를 붙인다**(U2 — 이름 없는 문서 저장). 심볼 쪽은 낱말 첫 글자에 붙는데 이쪽은
@@ -215,6 +237,37 @@ fn snapshotVersions(self: *AppSession) void {
         st.snaps[st.snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editorDocument().notifications.lsp_version };
         st.snaps_len += 1;
     };
+}
+
+/// **상자가 붙은 문서가 화면에서 사라졌으면 상자를 취소한다**(tick 이 오버레이를 짓기 전에 부른다). 심볼·이름 없는 문서 저장
+/// 상자는 그 문서의 셀에 앵커를 두는데, 메뉴바 `⌘T`·`⌘⇧]` 는 이 상자에 막히지 않는다(`runAction` 의 `anyOverlayOpen` 에 인라인
+/// rename 이 없다 — 메뉴바 `⌘Z` 의 B17 과 같은 축). 탭을 옮기면 숨은 문서의 **지난 프레임 행**에서 앵커가 서서 상자가 **다른 탭
+/// 위**에 그려졌고, 친 글자는 보이지 않는 문서의 상자로 갔다 — Enter 면 그 문서에서 이름 바꾸기가 확정된다(2026-10-08 재현:
+/// `active_tab=1` · 상자 열림 · 「addQ」). 취소는 클릭-어웨이와 같다(확정이 아니다 — 사용자는 다른 것을 보고 있다).
+/// 탭·pane 안 Term 전환·닫기 어느 길이든 「보이는 자리에 있나」 하나로 묻는다(`visibleEditorTerm` 들과 같은 조건).
+pub fn closeIfDocHidden(self: *AppSession) void {
+    const rt = self.rename orelse return;
+    const surface_id = switch (rt) {
+        .symbol => |t| t.surface_id,
+        .untitled_save => |id| id,
+        .workspace, .pane, .term, .group, .file_tree => return,
+    };
+    if (visibleTerm(self, surface_id) != null) return;
+    self.editor_rename.closed_doc_hidden += 1;
+    settings_ops.closeRename(self);
+}
+
+/// 그 surface 의 편집기 Term — **보이는 자리에 있을 때만**(활성 탭·그 pane 의 앞 Term).
+fn visibleTerm(self: *AppSession, surface_id: u64) ?*Term {
+    const loc = term_ops.findTermWhere(self, surface_id, struct {
+        fn pred(want: u64, t: *Term) bool {
+            return t.kind == .editor and t.surface.id == want;
+        }
+    }.pred) orelse return null;
+    if (loc.tab_index != self.app_window.active_tab) return null;
+    const term = loc.pane.terms.items[loc.term_index];
+    if (loc.pane.activeTerm() != term) return null;
+    return term;
 }
 
 fn termFor(self: *AppSession, surface_id: u64) ?*Term {

@@ -502,6 +502,18 @@ pub fn revealCaretForRenameBox(self: *AppSession, term: *Term) void {
     self.metal_dirty = true;
 }
 
+/// **심볼 이름 상자가 붙은 낱말을 화면 안으로 되돌린다**(§8.2f) — 위의 심볼판. 앵커가 caret 이 아니라 **낱말 첫 글자**라
+/// (caret 은 F2 를 누른 낱말 안 어디든 있고, 메뉴바 `⌘Z` 가 옮겼을 수도 있다) 그 offset 을 드러낸다. 스크롤 규칙의 단일
+/// 출처(`revealPrimaryCaret`)를 그대로 쓰려고 그 자리에 primary caret 을 **잠깐** 두었다가 되돌린다 — 그 함수는 선택을
+/// 읽기만 하고(쓰는 것은 스크롤·펴기·복원 취소) 선택은 바뀌지 않는다.
+pub fn revealOffsetForRenameBox(self: *AppSession, term: *Term, offset: usize) void {
+    const saved = term.rt.editor_selection;
+    term.rt.editor_selection = editor_selection.Selection.at(offset);
+    revealPrimaryCaret(self, term);
+    term.rt.editor_selection = saved;
+    self.metal_dirty = true;
+}
+
 fn placeCaretAndReveal(self: *AppSession, term: *Term, offset: usize) void {
     clearExtraSelections(self, term);
     term.rt.editor_selection = editor_selection.Selection.at(offset);
@@ -20019,6 +20031,10 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     try pressKey(&h.fx, .enter, .{});
     try testing.expect(s.rename == null);
     try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    // 조용히 닫지 않는다 — 「문서가 바뀌었다」고 알린다(2026-10-08, RNM7).
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqualStrings(maru.i18n.t(.rn_stale), s.chrome_host.notice.message);
+    s.chrome_host.notice.dismiss();
     // 문서를 다시 저장 상태로.
     s.dispatchAppAction(.editor_redo);
     try testing.expectEqualStrings(RenameFx.r_text, h.content());
@@ -54312,4 +54328,303 @@ test "EDPS16 뒤 root 교체는 앞 root의 모델도 성공 결과로 게시하
     var batch = fx.session.takeProjectSearchBatch().?;
     defer batch.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), batch.matches);
+}
+
+test "RNM4 심볼 이름 상자가 떠 있는데 낱말이 화면 밖으로 굴러가면 — 낱말을 되돌려 상자가 보이고, 친 글자는 그 상자에 들어가며, 선택은 그대로다 (제품 경계, §8.2f)" {
+    // 2026-10-08 재현: 휠은 이 상자에 막히지 않는다(인라인 rename 은 chrome 모달이 아니다). 낱말을 굴려 보내면 `refreshAnchor` 가
+    // false 만 돌려 상자가 사라지고 `rename` 은 남아, 친 글자가 보이지 않는 상자에 쌓였다(화면 맨 위 줄 261 · anchor_ok=false ·
+    // rename=true · 「addQ」). 이름 없는 문서 저장 상자의 U2F 와 같은 결함·같은 고침이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    // 화면보다 긴 문서 — `add` 는 첫 줄(offset 4..7)에 그대로 둔다.
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    for (0..300) |i| {
+        var line: [24]u8 = undefined;
+        try body.appendSlice(allocator, try std.fmt.bufPrint(&line, "int v{d};\n", .{i}));
+    }
+    const end = h.content().len;
+    term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
+    try testing.expect(insertText(s, term, body.items));
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 200 }; // 낮은 pane — 몇 줄만 보인다
+    // F2 — caret 은 `add` 안(5). 화면을 맨 위로 되돌리는 것도 이 되돌림의 일이라, 두 프레임을 돌려 자리를 잡는다.
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename != null and s.rename.? == .symbol);
+    for (0..2) |_| {
+        _ = rename_client.refreshAnchor(s, s.rename.?.symbol);
+        var drawn = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    try testing.expect(rename_client.refreshAnchor(s, s.rename.?.symbol));
+    // **휠로 멀리 굴린다** — 낱말이 화면 밖이라 그 프레임에는 앵커가 없다(고치기 전에는 여기서 끝이었다 — 상자 없이 모달만).
+    _ = scrollLines(s, term, leaf, -150); // 음수 = 휠 아래 = 문서 뒤쪽으로(`scrollLines` 규약)
+    {
+        var drawn = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    try testing.expect(term.rt.editor_first_line > 100);
+    _ = rename_client.refreshAnchor(s, s.rename.?.symbol); // 되돌린다 — 앵커는 그려진 행에서 나오므로 다음 프레임에 선다
+    {
+        var drawn = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    // ★ 되돌아왔다 — 낱말의 줄이 화면에 있고 상자가 보인다.
+    try testing.expect(term.rt.editor_first_line == 0);
+    try testing.expect(rename_client.refreshAnchor(s, s.rename.?.symbol));
+    try testing.expect(s.chrome_host.rename_box.open);
+    // 되돌림은 선택을 바꾸지 않는다(그 자리에 caret 을 잠깐 두었다가 되돌린다).
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.anchor_start);
+    // ⑵ **앵커는 caret 이 아니라 낱말 첫 글자다** — caret 이 낱말 밖으로 옮겨졌어도(메뉴바 `⌘Z` 는 이 상자에 막히지 않는다 — B17)
+    //    되돌리는 것은 낱말이다. caret 을 문서 끝에 두고 다시 굴린다: caret 을 드러내면 낱말은 여전히 화면 밖이다.
+    const doc_end = h.content().len;
+    term.rt.editor_selection = .{ .anchor_start = doc_end, .anchor_end = doc_end, .focus = doc_end };
+    _ = scrollLines(s, term, leaf, -150);
+    {
+        var drawn = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    try testing.expect(term.rt.editor_first_line > 100);
+    _ = rename_client.refreshAnchor(s, s.rename.?.symbol);
+    {
+        var drawn = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    try testing.expect(term.rt.editor_first_line == 0);
+    try testing.expect(rename_client.refreshAnchor(s, s.rename.?.symbol));
+    try testing.expectEqual(doc_end, term.rt.editor_selection.?.focus);
+    // 친 글자는 그 상자에 들어가고 문서는 그대로다.
+    const before = try allocator.dupe(u8, h.content());
+    defer allocator.free(before);
+    try pressKey(&h.fx, .{ .char = 'Z' }, .{});
+    try testing.expectEqualStrings("addZ", s.rename_input.text.items);
+    try testing.expectEqualStrings(before, h.content());
+    try pressKey(&h.fx, .escape, .{});
+    try testing.expect(s.rename == null);
+}
+
+test "RNM5 심볼 이름 상자가 떠 있는데 메뉴바로 탭을 옮기면 — 상자는 취소되고(확정이 아니다) 다른 탭 위에 그려지지 않는다; 돌아와도 되살아나지 않는다 (제품 경계, §8.2f)" {
+    // 2026-10-08 재현: 메뉴바 `⌘T`·`⌘⇧]` 는 이 상자에 막히지 않는다(`runAction` 의 `anyOverlayOpen` 에 인라인 rename 이 없다). 옮긴 뒤에도
+    // `rename` 이 살아 숨은 문서의 지난 프레임 행에서 앵커가 서 상자가 다른 탭 위에 그려졌고(`active_tab=1` · 상자 열림), 친 `Q` 는
+    // 보이지 않는 문서의 상자로 갔다(「addQ」) — Enter 면 그 문서에서 이름 바꾸기가 확정된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    const home_tab = s.app_window.active_tab;
+    // ⑴ 탭이 그대로면 tick 이 상자를 건드리지 않는다.
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    {
+        var drawn = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    _ = try s.tick();
+    try testing.expect(s.rename != null and s.rename.? == .symbol);
+    try testing.expectEqual(@as(u64, 0), s.editor_rename.closed_doc_hidden);
+    // 새 이름을 쳐 둔다 — 그래야 「확정」이면 요청이 나가 취소와 갈린다(씨앗 그대로면 확정도 요청을 안 보낸다).
+    try pressKey(&h.fx, .{ .char = 'Z' }, .{});
+    try testing.expectEqualStrings("addZ", s.rename_input.text.items);
+    // ⑵ 새 탭(메뉴바 `⌘T` 와 같은 결과) → 다음 탭으로 돌아와 다시 다른 탭으로 — 메뉴바 경로(`runAction`)로 옮긴다.
+    _ = try tab_ops.newTab(s);
+    try testing.expect(s.runAction("next_tab")); // 막히지 않는다 — 그래서 이 판정자가 있다
+    try testing.expectEqual(home_tab, s.app_window.active_tab);
+    try testing.expect(s.runAction("next_tab"));
+    try testing.expect(s.app_window.active_tab != home_tab);
+    const sent_before = s.editor_lsp.sent_renames;
+    _ = try s.tick();
+    // ★ 취소됐다 — 상자도 rename 도 없고, 요청도 안 나갔다(확정이 아니다).
+    try testing.expect(s.rename == null);
+    try testing.expect(!s.chrome_host.rename_box.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.closed_doc_hidden);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
+    // ⑶ 돌아와도 되살아나지 않는다.
+    try testing.expect(tab_ops.switchTab(s, home_tab));
+    _ = try s.tick();
+    try testing.expect(s.rename == null);
+    // ⑷ **같은 탭·같은 pane 에서 앞 Term 만 바뀌어도** 숨은 것이다 — 다른 파일을 그 pane 에 연다.
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename != null and s.rename.? == .symbol);
+    try pressKey(&h.fx, .{ .char = 'Y' }, .{});
+    const other = (try pane_ops.openFileTermInActivePane(s, h.other, .text)).term;
+    try testing.expect(pane_ops.activePane(s).activeTerm() == other and other != term);
+    try testing.expectEqual(home_tab, s.app_window.active_tab);
+    _ = try s.tick();
+    try testing.expect(s.rename == null);
+    try testing.expectEqual(@as(u64, 2), s.editor_rename.closed_doc_hidden);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+}
+
+test "U2G 이름 없는 문서 저장 상자가 떠 있는데 탭을 옮기면 — 상자는 취소되고 문서는 이름 없는 채다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "one\n"));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
+    try testing.expect(fx.session.rename != null and fx.session.rename.? == .untitled_save);
+    // 이름을 쳐 둔다 — 그래야 「확정」이면 그 이름으로 파일이 생겨 취소와 갈린다.
+    while (fx.session.rename_input.text.items.len > 0) settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .backspace } });
+    for ("named.txt") |c| settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .char, .codepoint = c } });
+    try testing.expectEqualStrings("named.txt", fx.session.rename_input.text.items);
+    _ = try fx.session.tick();
+    try testing.expect(fx.session.rename != null); // 보이는 동안은 그대로
+    _ = try tab_ops.newTab(fx.session);
+    _ = try fx.session.tick();
+    try testing.expect(fx.session.rename == null);
+    try testing.expect(!fx.session.chrome_host.rename_box.open);
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_rename.closed_doc_hidden);
+    try testing.expect(t.rt.editorDocument().path == null); // 취소다 — 이름이 붙지 않았다
+    try testing.expectError(error.FileNotFound, dir.dir.access(std.testing.io, "named.txt", .{})); // 디스크에도 없다
+}
+
+test "RNM6 심볼 이름 상자가 떠 있는데 앱이 포커스를 잃으면 — 확정하지 않고(요청 없음) 상자를 그대로 두며, 조합 중이던 글자만 입력에 접는다 (제품 경계, §8.2f)" {
+    // 2026-10-08 재현: `trySetFocused(false)`(⌘Tab·Spotlight·다른 앱 창 클릭)가 인라인 rename 을 모두 **확정**했다 — 팝업 상자도.
+    // 반쯤 친 「addZ」 로 서버에 rename 이 나가 문서가 바뀌었다(요청 0 → 1). 클릭-어웨이는 이미 취소였다(적대적 16회차).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try pressKey(&h.fx, .{ .char = 'Z' }, .{});
+    try s.rename_input.setPreedit(allocator, "가"); // 조합 중
+    const sent_before = s.editor_lsp.sent_renames;
+    try testing.expect(s.trySetFocused(false));
+    // ★ 그대로다 — 요청도 문서 변화도 없고, 상자와 친 이름이 남는다. 조합은 입력에 접혔다.
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    try testing.expect(!s.editor_rename.waiting);
+    try testing.expect(s.rename != null and s.rename.? == .symbol);
+    try testing.expectEqualStrings("addZ가", s.rename_input.text.items);
+    try testing.expectEqual(@as(usize, 0), s.rename_input.preedit.items.len);
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
+    // 돌아와서 이어 칠 수 있고, Esc 는 여전히 취소다(요청 없음).
+    try pressKey(&h.fx, .{ .char = 'W' }, .{});
+    try testing.expectEqualStrings("addZ가W", s.rename_input.text.items);
+    try pressKey(&h.fx, .escape, .{});
+    try testing.expect(s.rename == null);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+}
+
+test "U2H 이름 없는 문서 저장 상자 — 앱이 포커스를 잃어도 파일을 만들지 않고 상자를 둔다; 터미널 탭에 파일을 떨어뜨리면 클릭-어웨이처럼 취소된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, false);
+    defer fx.deinit(allocator);
+    const s = fx.session;
+    s.backing_width_px = s.sidebar_width_px + 900;
+    s.backing_height_px = 600;
+    s.window_padding_px = .{};
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(s, root);
+    const pane = pane_ops.activePane(s);
+    const t = try openUntitledInActivePane(s);
+    try testing.expect(pane.terms.items.len >= 2 and pane.terms.items[0].kind == .terminal); // 같은 pane 에 터미널 Term 이 있다
+    try testing.expect(insertText(s, t, "one\n"));
+    try testing.expectError(error.AskName, saveDocument(s, t));
+    try testing.expect(s.rename != null and s.rename.? == .untitled_save);
+    while (s.rename_input.text.items.len > 0) settings_ops.handleRenameKey(s, .{ .key = .{ .key = .backspace } });
+    for ("named.txt") |c| settings_ops.handleRenameKey(s, .{ .key = .{ .key = .char, .codepoint = c } });
+    // ⑴ 앱 포커스 상실 — 예전에는 확정이라 `named.txt` 가 디스크에 생겼다.
+    try testing.expect(s.trySetFocused(false));
+    try testing.expect(s.rename != null and s.rename.? == .untitled_save);
+    try testing.expectEqualStrings("named.txt", s.rename_input.text.items);
+    try testing.expect(t.rt.editorDocument().path == null);
+    try testing.expectError(error.FileNotFound, dir.dir.access(std.testing.io, "named.txt", .{}));
+    // ⑵ 같은 pane 의 **터미널 탭**에 파일을 떨어뜨린다 — 포커스가 그 터미널로 간다. 예전에는 여기서도 확정이었다.
+    var leaf_rects: std.ArrayList(app_session_mod.PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(allocator);
+    try tab_ops.activeTabLeafRects(s, allocator, s.termRect(), &leaf_rects);
+    const rect = leaf_rects.items[0].rect;
+    const pb = pane_ops.paneBar(s, rect, pane) orelse return error.NoPaneBar;
+    const bar_y: f64 = @floatFromInt(pb.tabs.y + pb.tabs.h / 2);
+    var x0: ?f64 = null;
+    var px: u32 = pb.tabs.x;
+    while (px < pb.tabs.x + pb.tabs.w) : (px += 2) {
+        const fxp: f64 = @floatFromInt(px);
+        if (term_ops.dropTermIndexAt(s, pane, leaf_rects.items, fxp, bar_y) == 0) {
+            x0 = fxp;
+            break;
+        }
+    }
+    const tab0_x = x0 orelse return error.TerminalTabNotFound;
+    try testing.expectEqualStrings("routed", @tagName(s.routeDropAtPoint(tab0_x, bar_y))); // `DropRoute` 는 그 파일 안 타입이다
+    try testing.expectEqual(@as(usize, 0), pane.active_term);
+    // ★ 취소다 — 상자가 닫히고, 이름도 파일도 없다.
+    try testing.expect(s.rename == null);
+    try testing.expect(t.rt.editorDocument().path == null);
+    try testing.expectError(error.FileNotFound, dir.dir.access(std.testing.io, "named.txt", .{}));
+}
+
+test "RNM7 상자가 열린 동안 문서가 바뀐 뒤 확정하면 — 요청을 보내지 않고, 조용히 닫지 않고 「문서가 바뀌었다」고 알린다 (제품 경계, §8.2f)" {
+    // B17 은 요청을 막았지만 **아무것도 말하지 않았다** — Enter 뒤 상자만 사라져 사용자는 이름이 바뀐 줄 알았다. 앱이 포커스를 잃어도
+    // 상자를 그대로 두게 되면서(RNM6) 그사이 외부 편집으로 이 길에 닿기가 쉬워졌다(2026-10-08 적대적 검증).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try pressKey(&h.fx, .{ .char = 'Z' }, .{});
+    try testing.expect(s.trySetFocused(false)); // 앱을 떠난다 — 상자는 남는다(RNM6)
+    try testing.expect(s.rename != null);
+    // 그사이 문서가 바뀐다(외부 편집과 같은 결과 — revision 이 오른다). 문서 맨 앞에 글자가 끼어 offset 4 는 더는 `add` 의 첫 글자가 아니다.
+    const sel_box = term.rt.editor_selection;
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "Q"));
+    term.rt.editor_selection = sel_box;
+    const sent_before = s.editor_lsp.sent_renames;
+    try pressKey(&h.fx, .enter, .{});
+    try testing.expect(s.rename == null);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.refused_stale_at_commit);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqualStrings(maru.i18n.t(.rn_stale), s.chrome_host.notice.message);
+    s.chrome_host.notice.dismiss();
+    // 바뀌지 않았으면 그대로 보낸다(알림 없이 요청 하나).
+    try removeMarkerHover(s, term, "Q");
+    try h.renameTo(5, "add2");
+    try testing.expectEqual(sent_before + 1, s.editor_lsp.sent_renames);
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.refused_stale_at_commit);
+    try testing.expect(h.settled());
+    s.chrome_host.notice.dismiss();
+    s.editor_workspace_edit.deinit(allocator);
 }

@@ -888,7 +888,7 @@ fn waitingTotal() i64 {
     var total: i64 = 0;
     for (entries.items) |e| {
         const unattended = e.state == .held or (e.state == .asking and !e.ask_claimed);
-        if (unattended) total += @max(e.received, 0);
+        if (unattended) total +|= @max(e.received, 0); // 엉터리 크기에 넘치지 않게(9 회차)
     }
     return total;
 }
@@ -981,7 +981,7 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
             const dir = if (slash == 0) "/" else p.path[0..slash];
             const raw_name = p.path[slash + 1 ..];
             // 쓸 수 없는 답이면 다시 묻는다(그대로 두면 맡은 이 없는 묻는 행이 옛 시각을 들고 남았다 — 3 회차).
-            if (dir.len > max_path_bytes or raw_name.len == 0) return reask(e);
+            if (p.path.len > max_path_bytes or raw_name.len == 0) return reask(e);
             var name_buf: [max_name_bytes]u8 = undefined;
             const name = sanitizeChosenName(raw_name, &name_buf);
             // 바꾸기는 저장 창이 그 이름으로 물었을 때만 — maru 가 이름을 다듬어 달라졌으면(`:`·끝 점·길이) 다른 파일을 묻지 않고
@@ -1341,6 +1341,11 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
         _ = std.c.nanosleep(&ts, null);
     }
     // 쓸 수 없는 답(이름 없음)은 다시 묻는다 — 맡은 이 없이 묻는 상태로 다시 센다.
+    // 1024 바이트를 넘는 경로도 다시 묻는다(맡은 채 남지 않게 — 9 회차).
+    try entries.append(allocator(), rowForTest(10, 10, .asking));
+    _ = claimAsk(10);
+    try std.testing.expect(answerAsk(10, .{ .path = .{ .path = "/" ++ "d" ** 1100 ++ "/x.txt", .existed = false } }));
+    try std.testing.expect(entryOfKey(10).?.state == .asking and entryOfKey(10).?.ask_retry and !entryOfKey(10).?.ask_claimed);
     try entries.append(allocator(), rowForTest(6, 6, .asking));
     _ = claimAsk(6);
     try std.testing.expect(answerAsk(6, .{ .path = .{ .path = "/tmp/", .existed = false } }));
@@ -1413,6 +1418,14 @@ test "turning ask off puts unclaimed asking rows on hold and leaves a panel bein
     setAsk(false);
     try std.testing.expectEqual(State.held, entryOfKey(1).?.state);
     try std.testing.expectEqual(State.asking, entryOfKey(2).?.state);
+    // 다시 켜고 보류 행을 받으면 묻기 시각·알림을 새로 센다(옛 시각으로 곧바로 목록 창이 나가지 않게 — 변이 d9 가 살아남았다).
+    setAsk(true);
+    entryOfKey(1).?.ask_since_ms = 5;
+    entryOfKey(1).?.ask_nudged = true;
+    try std.testing.expect(act(1, .accept));
+    try std.testing.expectEqual(State.asking, entryOfKey(1).?.state);
+    try std.testing.expectEqual(@as(i64, 0), entryOfKey(1).?.ask_since_ms);
+    try std.testing.expect(!entryOfKey(1).?.ask_nudged);
 }
 
 test "waiting rows stop past the cap and unclaimed asking rows bring the list window after a second (W10b)" {

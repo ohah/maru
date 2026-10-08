@@ -10,6 +10,18 @@ pub const Error = error{ MkdirFailed, NotPrivate };
 /// 그 폴더 안의 파일(폴더가 아닌 것)을 지운다 — 들어가지 않는다. W10b: 결정 전 다운로드를 받아 둔 곳(`download-staging`)에 지난번
 /// sidecar 가 남긴 것을 프로필을 잡은 뒤 비운다(죽거나 끝날 때 남은 Chromium 의 중간 파일 — 적대 리뷰 1 회차). 지운 수.
 pub fn clearFiles(path: [:0]const u8) usize {
+    // 순회하며 지우면 항목을 건너뛸 수 있다(APFS·HFS+) — 지운 것이 있으면 몇 번 더 돈다(9 회차).
+    var total: usize = 0;
+    var pass: u8 = 0;
+    while (pass < 4) : (pass += 1) {
+        const removed = clearFilesOnce(path);
+        total += removed;
+        if (removed == 0) break;
+    }
+    return total;
+}
+
+fn clearFilesOnce(path: [:0]const u8) usize {
     // 표준 라이브러리의 것을 쓴다 — x86_64 macOS 의 맨 `readdir` 는 옛 32 비트 inode 배치라 `readdir$INODE64` 여야 한다(적대 리뷰 2 회차).
     const dir = std.c.opendir(path) orelse return 0;
     defer _ = std.c.closedir(dir);

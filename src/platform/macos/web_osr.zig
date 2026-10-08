@@ -2681,15 +2681,25 @@ fn clearDownloadStaging(held: bool) void {
     const profile = profileDir(&profile_buf) orelse return;
     var dir_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
     const dir = std.fmt.bufPrintZ(&dir_buf, "{s}/download-staging", .{profile}) catch return;
-    const handle = std.c.opendir(dir) orelse return;
+    // 순회하며 지우면 항목을 건너뛸 수 있다 — 지운 것이 있으면 몇 번 더 돈다(9 회차).
+    var pass: u8 = 0;
+    while (pass < 4) : (pass += 1) {
+        if (clearDirOnce(dir) == 0) break;
+    }
+}
+
+fn clearDirOnce(dir: [:0]const u8) usize {
+    var removed: usize = 0;
+    const handle = std.c.opendir(dir) orelse return 0;
     defer _ = std.c.closedir(handle);
     while (std.c.readdir(handle)) |entry| {
         const name = entry.name[0..@min(entry.namlen, entry.name.len)];
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or entry.type == 4) continue;
         var file_buf: [std.fs.max_path_bytes + 300]u8 = undefined;
         const file = std.fmt.bufPrintZ(&file_buf, "{s}/{s}", .{ dir, name }) catch continue;
-        _ = std.c.unlink(file);
+        if (std.c.unlink(file) == 0) removed += 1;
     }
+    return removed;
 }
 
 /// 죽은 sidecar 가 쥐던 것을 버린다. 대화상자 콜백은 사라졌다 — 기다리던 요청을 버린다(떠 있는 창은 그 창이 닫는다). 알림

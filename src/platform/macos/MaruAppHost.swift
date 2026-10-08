@@ -10099,9 +10099,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         let existed = (try? FileManager.default.attributesOfItem(atPath: path)) != nil
         var bytes = Array(path.utf8)
-        _ = bytes.withUnsafeMutableBufferPointer { buf in
+        let accepted = bytes.withUnsafeMutableBufferPointer { buf in
             maru_macos_downloads_answer_ask(key, 0, buf.baseAddress, buf.count, existed ? 1 : 0)
         }
+        // 받아들이지 않았다 — 맡음을 풀어(치움 — 보류로) 행이 맡은 채 아무 창도 없이 남지 않게(9 회차).
+        if accepted == 0 { _ = maru_macos_downloads_answer_ask(key, 2, nil, 0, 0) }
     }
 
     private func drainDownloads() {

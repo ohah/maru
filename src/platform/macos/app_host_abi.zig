@@ -5312,7 +5312,8 @@ pub export fn maru_macos_downloads_answer_ask(key: u64, kind: u32, path: ?[*]con
     const answer: wd.AskAnswer = switch (kind) {
         0 => blk: {
             const p = path orelse return 0;
-            if (path_len == 0 or path_len > wd.max_path_bytes) return 0;
+            if (path_len == 0) return 0;
+            // 긴 경로도 넘긴다 — `answerAsk` 가 다시 묻는다(여기서 0 을 돌려주면 그 행이 맡은 채 아무 창도 없이 남았다 — 9 회차).
             break :blk .{ .path = .{ .path = p[0..path_len], .existed = existed != 0 } };
         },
         1 => .cancel,

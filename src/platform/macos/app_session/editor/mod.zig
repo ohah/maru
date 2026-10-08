@@ -16617,6 +16617,80 @@ test "LSPB36 「결정 없음 — 묻기」를 누르면 묻지 않는 root 판�
     try testing.expect(c.proc == null);
 }
 
+test "LSPB37 신뢰 시트는 거부에 포커스를 두고 글자 단축키를 받지 않는다 — 치던 `y`·`n` 은 답이 아니고(시트가 남는다), Enter 는 거부로 기억하며, ← 로 고른 허용의 Enter 는 한 번 더 묻고 그다음 허용은 ⌘⏎ 뿐이다 (§8.2a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    const confirm = &fx.session.chrome_host.confirm;
+    try testing.expect(confirm.focused == .cancel);
+    try testing.expect(!confirm.letter_keys);
+    var key_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const asking = fx.session.editor_lsp.asking_key.?.key();
+    @memcpy(key_buf[0..asking.path.len], asking.path);
+    const key: maru.session.editor.lsp.trust.Key = .{ .volume = asking.volume, .path = key_buf[0..asking.path.len] };
+    // 편집기에 치던 글자가 시트가 뜬 순간 들어온다 — 어느 것도 답이 아니다(허용도, 기억되는 거부도).
+    for ("yYnN") |c| {
+        _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = c } });
+        try testing.expect(fx.session.pending_confirm == .lsp_trust and confirm.open);
+    }
+    try testing.expect(trust_store.get(key) == null);
+    // Enter 는 포커스된 「거부」 — 기억되고 서버는 안 뜬다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expect(fx.session.pending_confirm == .none);
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trust_store.get(key));
+    try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(fx.session, fx.term).?.phase);
+    // 상태바에서 다시 묻는다 — 다시 거부에 포커스. 편집기에 치던 「`foo(a` → `)` 를 →로 건너뛰고 Enter」가 두 줄 이어져도 허락이
+    // 아니다: → 는 거부에서 돌지 않고, 그 사이 글자는 포커스·다시 묻던 것을 처음으로 되돌린다.
+    lsp_client.activateStatus(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(confirm.focused == .cancel and !confirm.letter_keys);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left }); // 사용자가 「허용」으로 — Enter 는 한 번 더 묻는다
+    try testing.expect(confirm.focused == .confirm);
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expect(fx.session.pending_confirm == .lsp_trust and confirm.open and confirm.rechecking);
+    try testing.expect(confirm.focused == .cancel);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_recheck), confirm.recheck.?);
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trust_store.get(key)); // 그대로
+    for ("foo(a") |c| _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = c } });
+    try testing.expect(!confirm.rechecking and confirm.focused == .cancel);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expect(confirm.focused == .cancel); // 돌지 않는다
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter }); // 거부로 닫힌다
+    try testing.expect(fx.session.pending_confirm == .none);
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trust_store.get(key));
+    // 다시 묻는다 — 「← ⏎ ← ⏎」(줄을 두 번 나누는 편집)·「⌘← ⏎」도 허락이 아니다. 다시 묻는 문장에서 ⌘⏎ 라야 허용이다.
+    lsp_client.activateStatus(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expect(confirm.rechecking);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expect(fx.session.pending_confirm == .lsp_trust and confirm.rechecking);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .command = true } });
+    try testing.expect(!confirm.rechecking and confirm.focused == .cancel);
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trust_store.get(key));
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), trust_store.get(key));
+}
+
 test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리는 recordTrust 하나(표는 그 파일 밖에서 못 고친다), 허용으로 답하는 자리는 confirm 수락 하나, 하니스 스위치는 테스트 빌드에서만 읽힌다 (계획 WT2)" {
     // 컨트롤 플레인·CLI 는 조회·철회만 한다 — 에이전트가 신뢰를 부여하지 못하게(계획 WT2). 「금지된 모양 0건」이 아니라 **허용된 자리의 수**를
     // 센다(갈아입은 우회도 수를 바꾼다). 표 자체(`trust_store.store`)는 비공개라 다른 파일은 `decide` 로만 쓸 수 있다.
@@ -16685,6 +16759,7 @@ test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에�
         for ([_]u32{ 480, 320 }) |w| {
             var low: confirm.State = .{};
             low.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+            low.guardAsync(maru.i18n.t(.lsp_trust_recheck)); // 제품 `gateTrust` 와 같은 보호 — 거부에 포커스, 글자 단축키·표식 없음
             low.notes = &notes;
             const lp: ch.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = w, .backing_height_px = 260 } };
             var lout: std.ArrayList(ch.draw.Op) = .empty;
@@ -16697,9 +16772,41 @@ test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에�
             var it = std.mem.tokenizeScalar(u8, warnings[0], ' ');
             while (it.next()) |word| try testing.expect(std.mem.indexOf(u8, ljoined.items, word) != null);
         }
-        for ([_]u32{ 480, 320 }) |w| {
+        // 다시 묻는 중(← ⏎ 뒤)의 낮은 창 — 재확인 문장(어떤 키로 답하는지)이 안내 맨 앞에 끝까지 서고, 그 뒤 첫 경고(대가)도
+        // 남는다. 줄이는 순서가 안내를 메시지보다 먼저 줄이면 그 문장이 한 행으로 잘려 「⌘⏎」가 사라졌다(적대적 검증 5회차).
+        // 아주 낮은 창에서도 키는 보인다(문장 앞쪽에 키를 둔다 — 안내가 한 행까지 줄어도 그 행에 선다). 높이를 훑는다.
+        for ([_]u32{ 480, 320 }) |w| for ([_]u32{ 260, 240, 224, 208, 192, 176, 160, 144, 128, 112, 96 }) |h| {
+            var low: confirm.State = .{};
+            low.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+            low.guardAsync(maru.i18n.t(.lsp_trust_recheck));
+            low.notes = &notes;
+            _ = confirm.handle(.{ .key = .left }, &low);
+            _ = confirm.handle(.{ .key = .enter }, &low);
+            try testing.expect(low.rechecking);
+            const lp: ch.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = w, .backing_height_px = h } };
+            var lout: std.ArrayList(ch.draw.Op) = .empty;
+            try confirm.view(&low, lp, &tk, arena, &lout);
+            var ljoined: std.ArrayList(u8) = .empty;
+            for (lout.items) |op| if (op == .text and op.text.role == .surface_fg) {
+                try ljoined.appendSlice(arena, op.text.runs[0].text);
+                try ljoined.append(arena, ' ');
+            };
+            try testing.expect(std.mem.indexOf(u8, ljoined.items, "⌘⏎") != null);
+            if (h == 260) {
+                var it = std.mem.tokenizeScalar(u8, warnings[0], ' ');
+                while (it.next()) |word| try testing.expect(std.mem.indexOf(u8, ljoined.items, word) != null);
+            }
+        };
+        // 다시 묻는 중(키보드로 고른 허용의 Enter 뒤 — 재확인 문장이 안내 맨 앞에 더해진다)에도 같다.
+        for ([_]u32{ 480, 320, 480, 320 }, 0..) |w, variant| {
             var st: confirm.State = .{};
             st.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+            st.guardAsync(maru.i18n.t(.lsp_trust_recheck));
+            if (variant >= 2) {
+                _ = confirm.handle(.{ .key = .left }, &st);
+                _ = confirm.handle(.{ .key = .enter }, &st);
+                try testing.expect(st.rechecking);
+            }
             st.notes = &notes;
             const p: ch.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = w, .backing_height_px = 480 } };
             var out: std.ArrayList(ch.draw.Op) = .empty;
@@ -16709,11 +16816,12 @@ test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에�
             const root_prefix = root_line[0..std.mem.indexOfScalar(u8, root_line, ' ').?];
             for (out.items) |op| if (op == .text) {
                 const txt = op.text.runs[0].text;
-                if (std.mem.startsWith(u8, txt, "[Y]")) {
+                const is_button = std.mem.eql(u8, txt, maru.i18n.t(.lsp_trust_allow)) or std.mem.eql(u8, txt, maru.i18n.t(.lsp_trust_deny));
+                if (std.mem.eql(u8, txt, maru.i18n.t(.lsp_trust_allow))) {
                     saw_buttons = true;
                     try testing.expect(op.text.origin.y + 16 <= 480); // 버튼 행이 화면 안
                 }
-                if (op.text.role != .surface_fg or std.mem.startsWith(u8, txt, "[") or std.mem.startsWith(u8, txt, root_prefix)) continue;
+                if (op.text.role != .surface_fg or is_button or std.mem.startsWith(u8, txt, root_prefix)) continue;
                 try testing.expect(std.mem.indexOf(u8, txt, "…") == null); // 경고 안내는 잘리지 않는다
                 try joined.appendSlice(arena, txt);
                 try joined.append(arena, ' ');

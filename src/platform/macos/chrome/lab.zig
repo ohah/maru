@@ -1867,6 +1867,7 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
         var msg_buf: [512]u8 = undefined;
         const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = "rust-analyzer" }}));
         state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+        state.guardAsync(maru.i18n.t(.lsp_trust_recheck)); // 제품과 같은 보호 — 거부 포커스·표식 없음
         var root_buf: [256]u8 = undefined;
         const root_line = try arena.dupe(u8, maru.i18n.format(&root_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = "~/Documents/workspace/maru/.claude/worktrees/lsp-trust-sheet" }}));
         const notes = try arena.alloc(chrome.components.confirm.Note, 5);
@@ -1881,6 +1882,7 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
         var msg_buf: [512]u8 = undefined;
         const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.grant_prompt), &.{ .{ .s = maru.i18n.t(.grant_scope_storage) }, .{ .s = "https://accounts.example.com/signin/continue" } }));
         state.show(message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
+        state.guardAsync(maru.i18n.t(.grant_recheck)); // 제품 `showGrantConfirm` 과 같은 보호
     }
     const p: chrome.props.ChromeProps = .{ .metrics = .{
         .cell_width_px = scenario.cell_w_px,

@@ -1,6 +1,6 @@
 //! Confirm — 예/아니오 확인 다이얼로그(키보드 Enter/Esc·Y/N + 마우스 클릭 hit-test `buttonAtPoint`). **재사용 가능한 디자인 시스템 컴포넌트**:
 //! 메시지 + 두 버튼 라벨을 host가 주입하면(`show(message, .{ .confirm = "닫기", .cancel = "취소" })`) 경계선 패널 +
-//! 가운데 버튼 두 개(라벨에 TUI식 [Y]/[N] 단축키)를 그리고, ←/→로 포커스를 옮기면 accent 강조가 따라간다(Enter는
+//! 가운데 버튼 두 개(라벨에 TUI식 [Y]/[N] 단축키 — 비동기로 뜨는 상자는 끈다, `guardAsync`)를 그리고, ←/→로 포커스를 옮기면 accent 강조가 따라간다(Enter는
 //! 포커스된 버튼 실행). 닫기 확인뿐 아니라 삭제·저장 등 어떤 확인에도 쓴다 —
 //! 컴포넌트는 "무엇을 확인하는지"를 모르고(중립), handle은 의도(confirmed/cancelled)만 돌려준다. host가 confirmed면
 //! 보류한 동작을 실행, cancelled면 버린다. chrome 계약: State(순수 데이터+전이) + view(순수) + handle(intent 반환).
@@ -19,7 +19,8 @@ const text_layout = @import("../text_layout.zig"); // elidePathMiddle — 경로
 pub const layer = modal_box.layer;
 
 /// 버튼에 표시하는 단축키 마커 — TUI 관례의 Y/N(Enter/Esc도 handle이 받지만, 표시는 짧은 Y/N로 통일해 영어
-/// 단어를 안 섞는다). 버튼 라벨 앞에 "[Y] "/"[N] "로 붙여 어느 키가 어느 버튼인지 보인다(키는 handle이 고정).
+/// 단어를 안 섞는다). 버튼 라벨 앞에 "[Y] "/"[N] "로 붙여 어느 키가 어느 버튼인지 보인다(키는 handle이 고정). 글자 단축키를
+/// 끈 상자(`letter_keys == false`)는 표식을 붙이지 않는다.
 const key_confirm = "Y";
 const key_alternate = "D";
 /// 네 번째 자리(`extra`)의 마커. **이 글자들은 뜻이 아니라 «자리»다** — `D` 도 「종료 및 세션
@@ -96,6 +97,15 @@ pub const State = struct {
     body: []const []const u8 = &.{},
     // 메시지 아래에 그릴 **안내 줄들**(비면 없음 — 기존 동작). 슬라이스는 host 가 세션 소유 버퍼로 준다(body 와 같다).
     notes: []const Note = &.{},
+    /// 글자 단축키(Y/D/R/N)를 받는다. 끄면 글자는 소비만 하고(뒤로 안 샌다) 버튼의 `[키]` 표식도 그리지 않는다. `guardAsync` 가
+    /// 끄고 `show` 할 때마다 다시 켠다.
+    letter_keys: bool = true,
+    /// 키보드 Enter 가 `primary` 에 닿았을 때 바로 확정하지 않고 한 번 더 물을 문장(`guardAsync`). 그 동안 `rechecking` 이 서고
+    /// 이 문장이 **안내 줄 맨 앞**에 선다 — 메시지(무엇을 허용하는지)는 그대로 둔다: 메시지 자리를 바꾸면 길어진 문장이 줄 상한을
+    /// 넘어 질문 끝(권한 확인의 대상 호스트)이 「…」로 잘렸다(적대적 검증 4회차). 안내 줄은 끝부터 줄어 맨 앞인 이 문장은 남는다.
+    /// 클릭은 의도가 분명해 바로 확정한다.
+    recheck: ?[]const u8 = null,
+    rechecking: bool = false,
 
     pub fn show(self: *State, message: []const u8, buttons: Buttons) void {
         self.message = message;
@@ -108,6 +118,9 @@ pub const State = struct {
         self.focused = .confirm; // 열 때마다 기본 포커스 = 확정 버튼(Enter=확정, ←/→로 이동). 동작이 전부 파괴적인 상자는 호출자가 show 뒤 .cancel 로 둔다
         self.body = &.{}; // 이전 확인이 남긴 미리보기가 새 모달에 새지 않게 리셋(붙여넣기 경로가 show 뒤 다시 주입)
         self.notes = &.{}; // 안내 줄도 같다(신뢰 시트가 show 뒤 다시 주입)
+        self.letter_keys = true; // 앞 상자의 보호(`guardAsync`)가 새 상자에 새지 않게
+        self.recheck = null;
+        self.rechecking = false;
         self.open = true;
     }
 
@@ -122,11 +135,38 @@ pub const State = struct {
         self.focused = .confirm;
         self.body = &.{};
         self.notes = &.{};
+        self.letter_keys = true;
+        self.recheck = null;
+        self.rechecking = false;
         self.open = true;
     }
 
     pub fn dismiss(self: *State) void {
         self.open = false;
+    }
+
+    /// **비동기로 뜨는** 상자의 보호 — 사용자가 다른 곳에 치던 키가 그대로 답이 되지 않게(언어 서버 신뢰 시트·브라우저 권한 확인,
+    /// docs/chrome-strategy.md §5.4). `show` 뒤에 부른다:
+    ///   - 처음 포커스는 `cancel`(치던 Enter 는 거부·취소다),
+    ///   - 글자 단축키를 끈다(치던 `y` 는 답이 아니다),
+    ///   - ←/→ 는 돌지 않는다(→ 는 `cancel` 에 머문다 — `primary` 는 ← 로만 닿는다),
+    ///   - ← 로 `primary` 에 옮긴 뒤 ⏎ 를 쳐도 확정하지 않고 `recheck` 문장으로 한 번 더 묻는다(포커스는 다시 `cancel`). 다시 묻는
+    ///     중의 키보드 허용은 ⌘⏎ 하나다 — `recheck` 문장이 그 키를 말해야 한다,
+    ///   - 그 밖의 키(글자·⌫·수식 키 조합 등)는 포커스를 `cancel` 로, 다시 묻던 것도 처음으로 되돌린다(답하는 중이 아니다).
+    /// 클릭은 그대로 확정한다. **버튼 둘(`show`) 상자 전용**이다 — 다시 묻기는 `primary` 하나를 지킨다.
+    pub fn guardAsync(self: *State, recheck: []const u8) void {
+        std.debug.assert(!self.has_alternate and !self.has_extra);
+        self.focused = .cancel;
+        self.letter_keys = false;
+        self.recheck = recheck;
+        self.rechecking = false;
+    }
+
+    /// 다시 묻는 중이면 안내 줄 맨 앞에 설 문장(`recheck`), 아니면 빈 목록.
+    fn leadNotes(self: *const State, slot: *[1]Note) []const Note {
+        if (!self.rechecking) return &.{};
+        slot[0] = .{ .text = self.recheck orelse return &.{} };
+        return slot[0..1];
     }
 };
 
@@ -136,17 +176,43 @@ pub const Action = enum { confirmed, alternate, extra, cancelled };
 
 /// 키 이벤트 처리. 열려 있을 때만 동작:
 ///   ←/→ : 두 버튼 사이 포커스 이동(소비, intent 없음 → host가 재렌더). Enter : **포커스된** 버튼 실행
-///   (confirm/cancelled). Esc : 항상 cancelled(취소 관례). Y/N : 포커스와 무관하게 직접 실행(대소문자 무시 단축키).
+///   (confirm/cancelled). Esc : 항상 cancelled(취소 관례). Y/N : 포커스와 무관하게 직접 실행(대소문자 무시 단축키 —
+///   `letter_keys` 를 끈 상자에서는 소비만 한다).
 /// 그 외 키는 소비하되 Action 없음(모달이라 뒤(터미널)로 안 흘린다). 닫혀 있으면 null(라우팅 안 가로챔).
 /// host가 `.key`/`.pointer`를 가르므로(CS-4-0) 이 handle은 KeyEvent만 받는다 — 포인터는 host.handlePointer.
 pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
     if (!state.open) return null;
+    // 보호된 상자(`guardAsync`):
+    //   - 다시 묻는 중의 키보드 허용은 **⌘⏎ 하나** — 평소 타이핑에 안 나오는 조합이라 미리 친 키(「← ⏎ ← ⏎」로 줄을 나누는 편집 등)가
+    //     허락이 되지 않는다(적대적 검증 3회차, 사용자 결정 2026-10-08).
+    //   - 수식 키 없는 ←/→·⏎ 와 Esc 밖의 키(글자·⌫·↑↓·Tab, 그리고 ⌘←·⌥←·⇧← 같은 수식 키 조합)는 **답하는 중이 아니다** — 포커스를
+    //     `cancel` 로, 다시 묻던 것도 처음으로 되돌린다(「`)` 를 → 로 건너뛰고 ⏎」가 두 줄 이어지는 입력, 적대적 검증 2회차).
+    const guarded = state.recheck != null;
+    if (guarded) {
+        const m = k.mods;
+        const no_mods = !m.shift and !m.control and !m.option and !m.command;
+        if (state.rechecking and k.key == .enter and m.command and !m.shift and !m.control and !m.option) {
+            state.dismiss();
+            return .confirmed;
+        }
+        const answering = no_mods and switch (k.key) {
+            .left, .right, .enter => true,
+            else => false,
+        };
+        if (k.key != .escape and !answering) {
+            state.focused = .cancel;
+            state.rechecking = false;
+            return null;
+        }
+    }
     switch (k.key) {
         // **순회는 그려진 순서**(confirm → alternate → extra → cancel)를 따른다. 없는 자리는 건너뛴다 —
         // 안 건너뛰면 포커스가 보이지 않는 버튼에 얹혀 Enter 가 아무 일도 안 한다.
+        // 보호된 상자는 **돌지 않는다** — 맨 오른쪽 `cancel` 에서 → 는 그대로, 맨 왼쪽 `primary` 에서 ← 도 그대로. 돌면 치던
+        // → 한 번이 `cancel` 에서 `primary` 로 간다.
         .left => {
             state.focused = switch (state.focused) {
-                .confirm => .cancel,
+                .confirm => if (guarded) .confirm else .cancel,
                 .alternate => .confirm,
                 .extra => .alternate,
                 .cancel => if (state.has_extra) .extra else if (state.has_alternate) .alternate else .confirm,
@@ -158,11 +224,18 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
                 .confirm => if (state.has_alternate) .alternate else .cancel,
                 .alternate => if (state.has_extra) .extra else .cancel,
                 .extra => .cancel,
-                .cancel => .confirm,
+                .cancel => if (guarded) .cancel else .confirm,
             };
             return null;
         },
         .enter => {
+            // 보호된 상자(`guardAsync`) — 키보드로 고른 `primary` 의 ⏎ 는 확정하지 않는다: 처음이면 다시 묻기로, 다시 묻는 중이면
+            // 아무것도 안 한다(허용은 ⌘⏎ — 위). 어느 쪽이든 포커스는 `cancel` 로 돌아간다. `cancel` 의 ⏎ 는 그대로 취소다.
+            if (guarded and state.focused == .confirm) {
+                state.rechecking = true;
+                state.focused = .cancel;
+                return null;
+            }
             state.dismiss();
             return switch (state.focused) {
                 .confirm => .confirmed,
@@ -175,7 +248,7 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
             state.dismiss();
             return .cancelled;
         },
-        .char => switch (k.codepoint) {
+        .char => if (!state.letter_keys) return null else switch (k.codepoint) {
             'y', 'Y' => {
                 state.dismiss();
                 return .confirmed;
@@ -200,7 +273,7 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
 
 /// 확인 다이얼로그를 그린다 — 경계선 패널(modal_box.frame) 안에 (1) 메시지(중앙), (2) 가운데 버튼 행: **포커스된**
 /// 버튼이 accent 배경(focus_accent) + 대비색 라벨로 강조되고 나머지는 은은한 배경(tab_hover_bg)이다(←/→로 강조가
-/// 옮겨감). 두 버튼 다 라벨에 TUI식 단축키 마커([Y]/[N])를 단다(별도 영어 키 줄 없음). 안 열렸으면 무동작. 박스
+/// 옮겨감). 두 버튼 다 라벨에 TUI식 단축키 마커([Y]/[N])를 단다(별도 영어 키 줄 없음 — 단축키를 끈 상자는 안 단다). 안 열렸으면 무동작. 박스
 /// 기하/중앙배치/폭 clamp/soft-lock은 modal_box 단일 출처. 순수: state·props·tokens만 읽는다.
 pub fn view(
     state: *const State,
@@ -254,36 +327,36 @@ pub fn view(
     const confirm_focused = state.focused == .confirm;
     if (g.confirm_fit > 0) {
         try modal_box.fillCells(box, g.confirm_x, g.confirm_row, g.confirm_fit, if (confirm_focused) .focus_accent else .tab_hover_bg, arena, out);
-        const t = try buttonLabel(arena, key_confirm, state.confirm_label, g.confirm_fit);
+        const t = try buttonLabel(arena, state.letter_keys, key_confirm, state.confirm_label, g.confirm_fit);
         try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), g.confirm_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
     }
     if (state.has_alternate and g.alternate_fit > 0) {
         const focused = state.focused == .alternate;
         try modal_box.fillCells(box, g.alternate_x, g.alternate_row, g.alternate_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
-        const t = try buttonLabel(arena, key_alternate, state.alternate_label, g.alternate_fit);
+        const t = try buttonLabel(arena, state.letter_keys, key_alternate, state.alternate_label, g.alternate_fit);
         try modal_box.text(box, g.alternate_x + @as(i32, @intCast(btn_pad * box.cw)), g.alternate_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
     if (state.has_extra and g.extra_fit > 0) {
         const focused = state.focused == .extra;
         try modal_box.fillCells(box, g.extra_x, g.extra_row, g.extra_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
-        const t = try buttonLabel(arena, key_extra, state.extra_label, g.extra_fit);
+        const t = try buttonLabel(arena, state.letter_keys, key_extra, state.extra_label, g.extra_fit);
         try modal_box.text(box, g.extra_x + @as(i32, @intCast(btn_pad * box.cw)), g.extra_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
     if (g.cancel_fit > 0) {
         const focused = state.focused == .cancel;
         try modal_box.fillCells(box, g.cancel_x, g.cancel_row, g.cancel_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
-        const t = try buttonLabel(arena, key_cancel, state.cancel_label, g.cancel_fit);
+        const t = try buttonLabel(arena, state.letter_keys, key_cancel, state.cancel_label, g.cancel_fit);
         try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), g.cancel_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
 }
 
 const btn_pad: u32 = 1; // 버튼 라벨 좌우 패딩(배경이 라벨을 감싸 버튼처럼)
 
-/// 버튼 라벨 `[키] 라벨` — 배경이 잘린 폭(`fit` 칸)에서 좌우 패딩을 뺀 자리에 맞춰 끝을 「…」로 줄인다. 예전에는 배경만
+/// 버튼 라벨 `[키] 라벨`(단축키를 끈 상자는 `라벨`) — 배경이 잘린 폭(`fit` 칸)에서 좌우 패딩을 뺀 자리에 맞춰 끝을 「…」로 줄인다. 예전에는 배경만
 /// 상자 안으로 잘리고(`fitButtonCols`) 라벨은 그대로 그려 **글자가 패널 밖으로** 나갔다(적대적 검증 퍼징 5,000 회 중
 /// 1,293 건 — 좁은 창·큰 글꼴의 「[Y] 덮어쓰기」 등). 들어가면 그대로다.
-fn buttonLabel(arena: std.mem.Allocator, key: []const u8, label: []const u8, fit: u32) ![]const u8 {
-    const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key, label });
+fn buttonLabel(arena: std.mem.Allocator, marked: bool, key: []const u8, label: []const u8, fit: u32) ![]const u8 {
+    const t = if (marked) try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key, label }) else label;
     return overlay_input.truncateToCols(arena, t, fit -| 2 * btn_pad);
 }
 const btn_gap: u32 = 2; // 두 버튼 사이 간격(칸)
@@ -318,16 +391,17 @@ const ButtonGeom = struct {
     cancel_fit: u32,
 };
 
-/// 마커 "[" + key + "] "의 표시 폭(칸). key는 "Y"/"N"(1칸)이라 보통 4.
-fn markerCols(key: []const u8) u32 {
+/// 마커 "[" + key + "] "의 표시 폭(칸). key는 "Y"/"N"(1칸)이라 보통 4. 단축키를 끈 상자는 표식이 없다(0).
+fn markerCols(state: *const State, key: []const u8) u32 {
+    if (!state.letter_keys) return 0;
     return 3 + overlay_input.displayCols(key); // "[" + key + "] "
 }
 
 fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Tokens) ?ButtonGeom {
-    const confirm_cols = markerCols(key_confirm) + overlay_input.displayCols(state.confirm_label);
-    const alternate_cols = if (state.has_alternate) markerCols(key_alternate) + overlay_input.displayCols(state.alternate_label) else 0;
-    const extra_cols = if (state.has_extra) markerCols(key_extra) + overlay_input.displayCols(state.extra_label) else 0;
-    const cancel_cols = markerCols(key_cancel) + overlay_input.displayCols(state.cancel_label);
+    const confirm_cols = markerCols(state, key_confirm) + overlay_input.displayCols(state.confirm_label);
+    const alternate_cols = if (state.has_alternate) markerCols(state, key_alternate) + overlay_input.displayCols(state.alternate_label) else 0;
+    const extra_cols = if (state.has_extra) markerCols(state, key_extra) + overlay_input.displayCols(state.extra_label) else 0;
+    const cancel_cols = markerCols(state, key_cancel) + overlay_input.displayCols(state.cancel_label);
     const default_btn_cols = confirm_cols + 2 * btn_pad;
     const alternate_btn_cols = if (state.has_alternate) alternate_cols + 2 * btn_pad else 0;
     const extra_btn_cols = if (state.has_extra) extra_cols + 2 * btn_pad else 0;
@@ -338,10 +412,14 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     var content_cols = @max(modal_box.widestLineCols(state.message), btn_row_cols);
     for (state.body) |line| content_cols = @max(content_cols, overlay_input.displayCols(line)); // 미리보기 줄도 폭에 반영
     // 안내 줄도 폭에 반영 — 넓은 창에서는 한 줄씩 그대로 서게(좁으면 아래에서 줄바꿈한다).
-    for (state.notes) |note| content_cols = @max(content_cols, switch (note.fit) {
-        .wrap => modal_box.widestLineCols(note.text),
-        .path => overlay_input.displayCols(note.text),
-    });
+    var lead_slot: [1]Note = undefined;
+    const note_groups = [2][]const Note{ state.leadNotes(&lead_slot), state.notes };
+    for (note_groups) |group| for (group) |note| {
+        content_cols = @max(content_cols, switch (note.fit) {
+            .wrap => modal_box.widestLineCols(note.text),
+            .path => overlay_input.displayCols(note.text),
+        });
+    };
     // 폭은 행 수와 무관하다 — 먼저 한 행으로 재서 상자 안쪽 폭을 얻고, 그 폭으로 메시지를 나눈 뒤 실제 행 수로 다시 잰다.
     // 메시지가 안쪽 폭에 들어가면 한 줄 그대로다(짧은 확인은 예전 모양 그대로).
     const width_probe = modal_box.layout(content_cols, 1, p, tk) orelse return null;
@@ -353,28 +431,34 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     var note_lines: [max_note_rows]NoteLine = undefined;
     var notes_all: u32 = 0;
     var notes_overflow = false;
-    note_loop: for (state.notes) |note| switch (note.fit) {
-        .path => {
-            if (notes_all == max_note_rows) {
-                notes_overflow = true;
-                break :note_loop;
-            }
-            note_lines[notes_all] = .{ .text = note.text, .path = true };
-            notes_all += 1;
-        },
-        .wrap => {
-            var parts: [modal_box.max_wrap_rows][]const u8 = undefined;
-            const w = modal_box.wrapLine(note.text, width_probe.inner_cols, &parts);
-            for (parts[0..w.rows], 0..) |line, i| {
+    var lead_rows: u32 = 0; // 재확인 문장(`leadNotes`)이 차지한 행 수 — 줄일 때 끝까지 남긴다
+    note_loop: for (note_groups, 0..) |group, gi| {
+        defer if (gi == 0) {
+            lead_rows = notes_all;
+        };
+        for (group) |note| switch (note.fit) {
+            .path => {
                 if (notes_all == max_note_rows) {
                     notes_overflow = true;
                     break :note_loop;
                 }
-                note_lines[notes_all] = .{ .text = line, .cut = w.truncated and i + 1 == w.rows };
+                note_lines[notes_all] = .{ .text = note.text, .path = true };
                 notes_all += 1;
-            }
-        },
-    };
+            },
+            .wrap => {
+                var parts: [modal_box.max_wrap_rows][]const u8 = undefined;
+                const w = modal_box.wrapLine(note.text, width_probe.inner_cols, &parts);
+                for (parts[0..w.rows], 0..) |line, i| {
+                    if (notes_all == max_note_rows) {
+                        notes_overflow = true;
+                        break :note_loop;
+                    }
+                    note_lines[notes_all] = .{ .text = line, .cut = w.truncated and i + 1 == w.rows };
+                    notes_all += 1;
+                }
+            },
+        };
+    }
     if (notes_overflow and notes_all > 0) note_lines[notes_all - 1].cut = true;
     var k: u32 = notes_all;
     // 콘텐츠 행: 미리보기 없으면 m+2행([0..m)=메시지·m=빈줄·m+1=버튼); 있으면 [0..m)=메시지·m=빈줄·[m+1..m+1+n)=본문·
@@ -411,14 +495,19 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
             return msg + (if (notes == 0) 0 else notes + 1) + (if (body == 0) 0 else body + 1) + 1 + btns;
         }
     }.f;
-    // 줄이는 순서: 미리보기(내용을 다 안 봐도 결정할 수 있다) → 안내(끝부터, 한 행은 남긴다) → 메시지(한 행은 남긴다).
-    // 안내는 확인의 대가를 밝히는 문장이라 미리보기보다 늦게 줄인다.
+    // 줄이는 순서: 미리보기(내용을 다 안 봐도 결정할 수 있다) → 안내(끝부터 — 다시 묻는 중이고 그 뒤에 안내가 있으면 그 문장
+    // 전부와 그 뒤 한 행은 남긴다) → 메시지(한 행은 남긴다) → 그래도 넘치면 안내를 한 행까지. 안내는 확인의 대가를 밝히는 문장이라 미리보기보다 늦게
+    // 줄이고, 다시 묻는 문장은 어떤 키로 답하는지 말하므로 대가(그 뒤 첫 행)와 함께 메시지보다 늦게 줄인다(적대적 검증 5회차 — 예전
+    // 순서는 낮은 창에서 메시지 셋을 남기고 그 문장을 한 행으로 잘랐다). 다시 묻는 중이 아니면 예전 순서 그대로다.
+    // 뒤에 지킬 대가가 없으면(권한 확인) 그 문장의 꼬리를 지키려고 메시지(대상 호스트)를 먼저 줄이지 않는다 — 키는 첫 행에 있다.
+    const keep_notes: u32 = if (notes_all > lead_rows) lead_rows + 1 else @min(notes_all, 1);
     while (rowsFor(m, k, n, btn_rows) > fit_rows and n > 0) n -= 1;
-    while (rowsFor(m, k, n, btn_rows) > fit_rows and k > 1) k -= 1;
+    while (rowsFor(m, k, n, btn_rows) > fit_rows and k > keep_notes) k -= 1;
     while (rowsFor(m, k, n, btn_rows) > fit_rows and m > 1) {
         m -= 1;
         msg_truncated = true;
     }
+    while (rowsFor(m, k, n, btn_rows) > fit_rows and k > 1) k -= 1;
     if (k > 0 and k < notes_all) note_lines[k - 1].cut = true;
     const note_row: u32 = m + 1;
     const body_row: u32 = if (k == 0) m + 1 else m + 1 + k + 1;
@@ -557,6 +646,255 @@ test "confirm handle: Enter/Y=confirmed · Esc/N=cancelled · 닫힘이면 null 
     s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expect(handle(.{ .key = .char, .codepoint = 'a' }, &s) == null);
     try std.testing.expect(s.open);
+}
+
+test "confirm: 글자 단축키를 끈 상자는 Y/N/D/R 을 소비만 하고 닫히지 않는다 — Enter 는 포커스, Esc 는 취소; show 는 다시 켠다" {
+    var s: State = .{};
+    s.showChoices("x", .{ .primary = "ok", .alternate = "alt", .extra = "ext", .cancel = "no" });
+    s.letter_keys = false;
+    for ("yYnNdDrR") |c| {
+        try std.testing.expect(handle(.{ .key = .char, .codepoint = c }, &s) == null);
+        try std.testing.expect(s.open);
+    }
+    s.focused = .cancel;
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .enter }, &s).?);
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
+    try std.testing.expect(s.letter_keys); // 앞 상자의 설정이 새지 않는다
+    s.letter_keys = false;
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
+    s.showChoices("x", .{ .primary = "ok", .alternate = "alt", .cancel = "no" });
+    try std.testing.expect(s.letter_keys);
+}
+
+test "confirm: guardAsync — 처음 포커스는 취소, 글자는 답이 아니고, ← 로 고른 primary 의 ⏎ 는 한 번 더 묻고(메시지는 그대로, 그 문장은 안내 맨 앞에, 포커스는 다시 취소) 묻는 중의 허용은 ⌘⏎ 뿐; 다른 키·수식 키 조합은 처음으로; show 가 보호를 푼다" {
+    var s: State = .{};
+    s.show("allow?", .{ .confirm = "ok", .cancel = "no" });
+    s.guardAsync("really?");
+    try std.testing.expectEqual(Focus.cancel, s.focused);
+    try std.testing.expect(handle(.{ .key = .char, .codepoint = 'y' }, &s) == null);
+    // → 는 돌지 않는다(cancel 이 맨 오른쪽) — 치던 →·Enter 는 거부다. 여기서는 Enter 대신 ← 로 primary 에 닿는다.
+    try std.testing.expect(handle(.{ .key = .right }, &s) == null);
+    try std.testing.expectEqual(Focus.cancel, s.focused);
+    try std.testing.expect(handle(.{ .key = .left }, &s) == null);
+    try std.testing.expectEqual(Focus.confirm, s.focused);
+    try std.testing.expect(handle(.{ .key = .left }, &s) == null); // ← 도 돌지 않는다
+    try std.testing.expectEqual(Focus.confirm, s.focused);
+    // primary 에서 Enter — 확정하지 않고 한 번 더 묻는다.
+    try std.testing.expect(handle(.{ .key = .enter }, &s) == null);
+    try std.testing.expect(s.open and s.rechecking);
+    try std.testing.expectEqual(Focus.cancel, s.focused);
+    try std.testing.expectEqualStrings("really?", s.recheck.?);
+    try std.testing.expectEqualStrings("allow?", s.message); // 메시지는 그대로다
+    // 묻는 중 — 다시 고른 primary 의 ⏎ 도 확정이 아니다(「← ⏎ ← ⏎」로 줄을 나누는 편집). 허용은 ⌘⏎ 뿐이다.
+    _ = handle(.{ .key = .left }, &s);
+    try std.testing.expect(handle(.{ .key = .enter }, &s) == null);
+    try std.testing.expect(s.open and s.rechecking and s.focused == .cancel);
+    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .enter, .mods = .{ .command = true } }, &s).?);
+    // 처음 단계의 ⌘⏎ 는 허용이 아니다(처음으로 되돌린다) — 다시 묻는 문장을 본 뒤라야 한다.
+    s.show("allow?", .{ .confirm = "ok", .cancel = "no" });
+    s.guardAsync("really?");
+    _ = handle(.{ .key = .left }, &s);
+    try std.testing.expect(handle(.{ .key = .enter, .mods = .{ .command = true } }, &s) == null);
+    try std.testing.expect(s.open and !s.rechecking and s.focused == .cancel);
+    // 다른 키·수식 키 조합은 하나하나 처음으로 되돌린다(⌫·↑↓·Tab·그 밖, ⌘←·⌥←·⇧←·⌥⏎·⇧⌘⏎).
+    const others = [_]input.InputEvent.KeyEvent{
+        .{ .key = .backspace },                                           .{ .key = .up },                                  .{ .key = .down },
+        .{ .key = .tab },                                                 .{ .key = .other },                               .{ .key = .left, .mods = .{ .command = true } },
+        .{ .key = .left, .mods = .{ .option = true } },                   .{ .key = .left, .mods = .{ .shift = true } },    .{ .key = .enter, .mods = .{ .option = true } },
+        .{ .key = .enter, .mods = .{ .command = true, .shift = true } },  .{ .key = .enter, .mods = .{ .control = true } }, .{ .key = .enter, .mods = .{ .command = true, .control = true } },
+        .{ .key = .enter, .mods = .{ .command = true, .option = true } },
+    };
+    for (others) |ev| {
+        s.show("allow?", .{ .confirm = "ok", .cancel = "no" });
+        s.guardAsync("really?");
+        _ = handle(.{ .key = .left }, &s);
+        _ = handle(.{ .key = .enter }, &s);
+        _ = handle(.{ .key = .left }, &s);
+        try std.testing.expect(s.rechecking and s.focused == .confirm);
+        try std.testing.expect(handle(ev, &s) == null);
+        try std.testing.expect(s.open and !s.rechecking and s.focused == .cancel);
+    }
+    // 묻는 중의 Enter(취소 포커스)는 취소, Esc 도 취소.
+    s.show("allow?", .{ .confirm = "ok", .cancel = "no" });
+    s.guardAsync("really?");
+    _ = handle(.{ .key = .left }, &s);
+    _ = handle(.{ .key = .enter }, &s);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .enter }, &s).?);
+    s.show("allow?", .{ .confirm = "ok", .cancel = "no" });
+    s.guardAsync("really?");
+    _ = handle(.{ .key = .left }, &s);
+    _ = handle(.{ .key = .enter }, &s);
+    try std.testing.expect(s.rechecking);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
+    // 글자(답하는 중이 아니다)는 포커스와 다시 묻던 것을 처음으로 — 「← Enter abc ← Enter」 는 허락이 아니다.
+    s.show("allow?", .{ .confirm = "ok", .cancel = "no" });
+    s.guardAsync("really?");
+    _ = handle(.{ .key = .left }, &s);
+    _ = handle(.{ .key = .enter }, &s);
+    try std.testing.expect(s.rechecking);
+    for ("abc") |c| try std.testing.expect(handle(.{ .key = .char, .codepoint = c }, &s) == null);
+    try std.testing.expect(!s.rechecking and s.focused == .cancel and s.open);
+    _ = handle(.{ .key = .left }, &s);
+    try std.testing.expect(handle(.{ .key = .enter }, &s) == null); // 다시 처음 묻기 — 확정이 아니다
+    try std.testing.expect(s.open and s.rechecking);
+    // 묻는 중의 Esc 는 수식 키가 붙어도 취소다.
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape, .mods = .{ .command = true } }, &s).?);
+    // 글자는 primary 포커스도 cancel 로 되돌린다(「← abc Enter」 는 거부).
+    s.show("allow?", .{ .confirm = "ok", .cancel = "no" });
+    s.guardAsync("really?");
+    _ = handle(.{ .key = .left }, &s);
+    _ = handle(.{ .key = .char, .codepoint = 'x' }, &s);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .enter }, &s).?);
+    // 보호하지 않는 상자는 그대로 돈다(→ 로 cancel → confirm).
+    s.show("close?", .{ .confirm = "ok", .cancel = "no" });
+    s.focused = .cancel;
+    _ = handle(.{ .key = .right }, &s);
+    try std.testing.expectEqual(Focus.confirm, s.focused);
+    // 처음 Enter(취소 포커스)는 묻지 않고 바로 취소다.
+    s.show("allow?", .{ .confirm = "ok", .cancel = "no" });
+    s.guardAsync("really?");
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .enter }, &s).?);
+    // show 는 보호를 푼다 — 다음 상자(닫기 확인 등)는 Enter=확정 그대로.
+    s.show("close?", .{ .confirm = "ok", .cancel = "no" });
+    try std.testing.expect(s.recheck == null and !s.rechecking and s.letter_keys);
+    try std.testing.expectEqualStrings("close?", s.message);
+    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .enter }, &s).?);
+    s.showChoices("x", .{ .primary = "a", .alternate = "b", .cancel = "c" });
+    try std.testing.expect(s.recheck == null and s.letter_keys);
+}
+
+test "confirm: 다시 묻는 동안 메시지는 그대로 두고 그 문장을 안내 맨 앞에 그린다 — 좁은 창의 긴 질문(권한 확인)도 다시 묻는 단계에서 잘리지 않는다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, @import("../../color.zig").Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 960, .backing_height_px = 600 } };
+    var s: State = .{};
+    s.show("first question", .{ .confirm = "허용", .cancel = "거부" });
+    s.guardAsync("second question");
+    _ = handle(.{ .key = .left }, &s);
+    _ = handle(.{ .key = .enter }, &s);
+    try std.testing.expect(s.rechecking);
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, p, &tk, arena, &out);
+    var saw_first = false;
+    var saw_second = false;
+    for (out.items) |op| if (op == .text) {
+        if (std.mem.eql(u8, op.text.runs[0].text, "first question")) saw_first = true;
+        if (std.mem.eql(u8, op.text.runs[0].text, "second question")) saw_second = true;
+    };
+    try std.testing.expect(saw_second and saw_first);
+    // 좁은 창(안쪽 30~40칸)의 긴 권한 질문 — 처음에도, 다시 묻는 중에도 질문 끝까지 「…」 없이 선다. 예전에는 재확인 문장이 질문을
+    // 품고 메시지 자리를 대신해 줄 상한(6)을 넘어 대상 호스트 끝이 잘렸다(적대적 검증 4회차).
+    const long = "An agent wants to read and write this site's cookies and storage (including login tokens). Target: https://accounts.google.com.session-verify-portal.attacker.io/. Allow?";
+    for ([_]u32{ 320, 360, 400 }) |w| {
+        const np: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = w, .backing_height_px = 600 } };
+        for ([_]bool{ false, true }) |rech| {
+            var g: State = .{};
+            g.show(long, .{ .confirm = "Allow", .cancel = "Deny" });
+            g.guardAsync("Confirm once more — press ⌘⏎ to allow (⏎ alone won't).");
+            if (rech) {
+                _ = handle(.{ .key = .left }, &g);
+                _ = handle(.{ .key = .enter }, &g);
+                try std.testing.expect(g.rechecking);
+            }
+            var o: std.ArrayList(draw.Op) = .empty;
+            try view(&g, np, &tk, arena, &o);
+            var joined: std.ArrayList(u8) = .empty;
+            for (o.items) |op| if (op == .text) {
+                try std.testing.expect(std.mem.indexOf(u8, op.text.runs[0].text, "…") == null);
+                try joined.appendSlice(arena, op.text.runs[0].text);
+            };
+            try std.testing.expect(std.mem.indexOf(u8, joined.items, "Allow?") != null);
+            try std.testing.expect(std.mem.indexOf(u8, joined.items, "attacker.io") != null);
+            try std.testing.expectEqual(rech, std.mem.indexOf(u8, joined.items, "⌘⏎") != null);
+        }
+    }
+}
+
+test "confirm: 다시 묻는 중의 낮은 창 — 첫 안내 줄은 재확인 문장이고, 메시지가 두 줄 이상 남는 동안은 그 뒤 첫 안내(대가)도 남으며, 버튼 행은 화면 안이다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, @import("../../color.zig").Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const msg = "A long question that wraps over several rows in a narrow dialog box so that trimming has to choose. Allow?";
+    const recheck = "Confirm once more — ⌘⏎ allows it (⏎ alone won't).";
+    const notes = [_]Note{ .{ .text = "First warning: what saying yes costs." }, .{ .text = "Second warning line." }, .{ .text = "Third warning line." }, .{ .text = "~/work/repo", .fit = .path } };
+    const inside = struct {
+        fn f(part: []const u8, whole: []const u8) bool {
+            const a = @intFromPtr(part.ptr);
+            return a >= @intFromPtr(whole.ptr) and a < @intFromPtr(whole.ptr) + whole.len;
+        }
+    }.f;
+    var h: u32 = 480;
+    while (h >= 112) : (h -= 8) {
+        var s: State = .{};
+        s.show(msg, .{ .confirm = "Allow", .cancel = "Deny" });
+        s.guardAsync(recheck);
+        s.notes = &notes;
+        _ = handle(.{ .key = .left }, &s);
+        _ = handle(.{ .key = .enter }, &s);
+        const p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 320, .backing_height_px = h } };
+        const g = buttonGeom(&s, p, &tk) orelse continue;
+        try std.testing.expect(g.note_rows >= 1 and inside(g.note_lines[0].text, recheck));
+        if (g.msg_rows > 1) {
+            var saw_cost = false;
+            for (g.note_lines[0..g.note_rows]) |nl| if (inside(nl.text, notes[0].text)) {
+                saw_cost = true;
+            };
+            try std.testing.expect(saw_cost);
+        }
+        var out: std.ArrayList(draw.Op) = .empty;
+        try view(&s, p, &tk, arena, &out);
+        for (out.items) |op| if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "Deny")) {
+            try std.testing.expect(op.text.origin.y + 16 <= @as(i32, @intCast(h)));
+        };
+    }
+}
+
+test "confirm: 안내가 없는 보호 상자(권한 확인)를 다시 묻는 낮은 창 — 메시지(대상 호스트)는 재확인 문장이 한 행이 될 때까지 줄지 않는다" {
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, @import("../../color.zig").Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const long = "An agent wants to read and write this site's cookies and storage (including login tokens). Target: https://accounts.google.com.session-verify-portal.attacker.io/. Allow?";
+    var h: u32 = 480;
+    var saw_trim = false;
+    while (h >= 112) : (h -= 8) {
+        var s: State = .{};
+        s.show(long, .{ .confirm = "Allow", .cancel = "Deny" });
+        s.guardAsync("Confirm once more — ⌘⏎ allows it (⏎ alone won't).");
+        _ = handle(.{ .key = .left }, &s);
+        _ = handle(.{ .key = .enter }, &s);
+        const p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 320, .backing_height_px = h } };
+        const g = buttonGeom(&s, p, &tk) orelse continue;
+        if (g.msg_truncated) {
+            saw_trim = true;
+            try std.testing.expect(g.note_rows <= 1);
+        }
+    }
+    try std.testing.expect(saw_trim); // 훑은 높이 안에 줄이는 높이가 있다(헛돌지 않는다)
+}
+
+test "confirm: 글자 단축키를 끈 상자는 버튼에 `[키]` 표식을 그리지 않는다 — 켠 상자는 그린다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, @import("../../color.zig").Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 960, .backing_height_px = 600 } };
+    for ([_]bool{ true, false }) |keys| {
+        var s: State = .{};
+        s.show("x", .{ .confirm = "허용", .cancel = "거부" });
+        s.letter_keys = keys;
+        var out: std.ArrayList(draw.Op) = .empty;
+        try view(&s, p, &tk, arena, &out);
+        var saw_plain = false;
+        var saw_marked = false;
+        for (out.items) |op| if (op == .text) {
+            const t = op.text.runs[0].text;
+            if (std.mem.eql(u8, t, "거부")) saw_plain = true;
+            if (std.mem.eql(u8, t, "[N] 거부")) saw_marked = true;
+        };
+        try std.testing.expectEqual(keys, saw_marked);
+        try std.testing.expectEqual(!keys, saw_plain);
+    }
 }
 
 test "confirm handle: ←/→로 포커스 이동, Enter는 포커스된 버튼 실행 (Esc는 항상 취소)" {

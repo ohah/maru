@@ -10656,6 +10656,9 @@ pub const AppSession = struct {
         // 다른 모달/오버레이 점유(닫기·종료·리셋·붙여넣기 확인 or 세팅/find/palette 등) → 안 뜸(비파괴). 다음 tick 재시도.
         if (self.anyOverlayOpen() or self.pending_confirm != .none) return false;
         self.showConfirmButtons(.{ .grant = async_id }, message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
+        // 에이전트 요청이 tick 에 꺼내져 **비동기로 뜬다**(요청 시점을 에이전트가 고른다) — 사용자가 치던 키가 허용이 되지 않게
+        // (`guardAsync` — 거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더 묻는다, chrome-strategy §5.4).
+        self.chrome_host.confirm.guardAsync(maru.i18n.t(.grant_recheck));
         return true;
     }
 
@@ -96292,4 +96295,52 @@ test "MP: **비활성 pane** 의 프리뷰도 그려진다 — 클릭은 그 pan
     // **그리고 «왼쪽» pane 을 가리킨다** — 활성(오른쪽) leaf 를 쓰면 반대쪽에 뜬다.
     const full = pane_ops.paneTermRect(session, session.termRect());
     try std.testing.expect(bd.x < @as(f32, @floatFromInt(full.x + full.w / 2)));
+}
+
+test "브라우저 권한 확인은 비동기 보호(chrome-strategy §5.4) — 거부 포커스, 치던 `y`·→·Enter 는 거부, ← 로 고른 허용의 Enter 는 질문을 그대로 둔 채 한 번 더 묻고 그 사이 글자는 처음으로 되돌리며, 그다음 허용은 ⌘⏎ 뿐이다" {
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const question = "An agent wants to read storage. Target: accounts.example.com. Allow?";
+    try std.testing.expect(session.showGrantConfirm(question, 7));
+    const c = &session.chrome_host.confirm;
+    try std.testing.expect(c.focused == .cancel and !c.letter_keys);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'y' } });
+    try std.testing.expect(c.open and session.takeGrantDecision() == null);
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    const denied = session.takeGrantDecision().?;
+    try std.testing.expect(!denied.approved and denied.async_id == 7);
+    // 터미널에서 치던 「`git sta` → (제안 수락) ⏎」가 두 줄 이어져도 허락이 아니다 — → 는 거부에서 돌지 않고, 그 사이 글자는
+    // 다시 묻던 것을 처음으로 되돌린다.
+    try std.testing.expect(session.showGrantConfirm(question, 8));
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left }); // 「허용」으로 — Enter 는 한 번 더 묻는다
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(c.open and c.rechecking and session.takeGrantDecision() == null);
+    try std.testing.expectEqualStrings(question, c.message); // 다시 묻는 동안에도 질문(무엇을 허용하는지)은 그대로다
+    try std.testing.expectEqualStrings(maru.i18n.t(.grant_recheck), c.recheck.?);
+    for ("git pu") |ch| _ = try session.handleKeyEvent(.{ .key = .{ .char = ch } });
+    try std.testing.expect(!c.rechecking and c.focused == .cancel);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_right });
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    const denied2 = session.takeGrantDecision().?;
+    try std.testing.expect(!denied2.approved and denied2.async_id == 8);
+    // 다시 묻는 중의 Esc 는 거부다.
+    try std.testing.expect(session.showGrantConfirm(question, 9));
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(c.rechecking);
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    const denied3 = session.takeGrantDecision().?;
+    try std.testing.expect(!denied3.approved and denied3.async_id == 9);
+    // 다시 묻는 문장에서도 「← ⏎」는 허락이 아니다(TUI 의 예/아니오를 두 번 고르는 입력) — ⌘⏎ 라야 허용이다.
+    try std.testing.expect(session.showGrantConfirm(question, 10));
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(c.open and c.rechecking and session.takeGrantDecision() == null);
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    const approved = session.takeGrantDecision().?;
+    try std.testing.expect(approved.approved and approved.async_id == 10);
 }

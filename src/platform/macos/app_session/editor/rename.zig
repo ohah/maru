@@ -148,6 +148,26 @@ pub fn boxText(self: *AppSession, arena: std.mem.Allocator) ![]const u8 {
     return chrome.components.inline_edit.composeLine(arena, &self.rename_input, ""); // caret 은 상자가 따로 그린다
 }
 
+/// **포인터가 팝업 이름 상자 안인가**(보이는 테두리까지 — 상자는 사방 `modal_padding_px` 만큼 커져 그려진다, `boxRect` 의 주석).
+/// 심볼·이름 없는 문서 저장 상자가 열려 그려져 있을 때만 참이다. 마우스가 상자 안의 누름을 클릭-어웨이로 읽지 않게 묻는다.
+pub fn boxContains(self: *AppSession, x_px: f64, y_px: f64) bool {
+    const rt = self.rename orelse return false;
+    switch (rt) {
+        .symbol, .untitled_save => {},
+        .workspace, .pane, .term, .group, .file_tree => return false,
+    }
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const text = boxText(self, arena_state.allocator()) catch return false;
+    const p = self.buildChromeProps();
+    const box = chrome.components.rename_box.boxRect(&self.chrome_host.rename_box, text, p) orelse return false;
+    const pad = p.shape.modal_padding_px;
+    const r = box.outset(.{ .left = pad, .right = pad, .top = pad, .bottom = pad });
+    const x0: f64 = @floatFromInt(r.x);
+    const y0: f64 = @floatFromInt(r.y);
+    return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(r.w)) and y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(r.h));
+}
+
 /// 상자 안 caret 칸 — caret 앞 글 + 조합 중 글자의 표시폭(상자는 코드포인트 폭 모델로 그린다 — `rename_box`).
 pub fn boxCaretCols(self: *const AppSession) u32 {
     const q = self.rename_input.text.items;
